@@ -1,1 +1,0 @@
-@echo %GL_TOKEN%
