@@ -1,0 +1,7 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: whynot
+  labels:
+    app.kubernetes.io/name: whynot
+    app.kubernetes.io/part-of: whynot

@@ -1,0 +1,58 @@
+# The app's member of the customer's shared dev IngressGroup (D-24).
+#
+# The customer directory's own k8s/ingress.yaml.tmpl is NOT used for dev. That
+# template describes a load balancer it owns alone: it carries scheme,
+# subnets, load-balancer-name and load-balancer-attributes, and render.py adds
+# ssl-redirect to it. All of those are group-wide under PRD 5.9 / R-01, which
+# allows them on exactly one member - and on this ALB that member is GitLab,
+# the one that exists before and after the app. Two members carrying them is
+# both a check_ingress_group failure and a real conflict at the controller.
+#
+# So this file keeps only what a member may hold: the group name, its order, the
+# two uniform annotations, and its own target and health check settings.
+#
+# group.order 90 puts the app last. Its '/' path would otherwise shadow the
+# admin hosts, same reasoning as the shell Ingress in the modular platform.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: whynot
+  namespace: whynot
+  labels:
+    app.kubernetes.io/name: whynot
+    app.kubernetes.io/part-of: whynot
+  annotations:
+    alb.ingress.kubernetes.io/group.name: whynot-dev
+    alb.ingress.kubernetes.io/group.order: "90"
+    # uniform across the group
+    alb.ingress.kubernetes.io/listen-ports: '[{"HTTP":80},{"HTTPS":443}]'
+    alb.ingress.kubernetes.io/certificate-arn: arn:aws:acm:ap-northeast-2:089540175779:certificate/f7c4d11f-4144-4883-ad66-1eb5b6f3110b
+    # member-local
+    alb.ingress.kubernetes.io/target-type: ip
+    alb.ingress.kubernetes.io/healthcheck-path: /health
+    alb.ingress.kubernetes.io/healthcheck-interval-seconds: "15"
+    alb.ingress.kubernetes.io/healthy-threshold-count: "2"
+    alb.ingress.kubernetes.io/success-codes: "200"
+    alb.ingress.kubernetes.io/tags: Project=ai-poc,Customer=whynot,Environment=dev,ManagedBy=argocd
+spec:
+  ingressClassName: alb
+  rules:
+    # Unlike the admin hosts this one has no source-ip condition: the dev app is
+    # open (D-24).
+    - host: dev.whynot.meta-clouds.com
+      http:
+        paths:
+          - path: /api
+            pathType: Prefix
+            backend:
+              service:
+                name: whynot-app
+                port:
+                  number: 8000
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: whynot-frontend
+                port:
+                  number: 80
