@@ -1,0 +1,18 @@
+{
+    "addon": {
+        "addonName": "eks-pod-identity-agent",
+        "clusterName": "Dev-AI-POC-eks",
+        "status": "ACTIVE",
+        "addonVersion": "v1.3.10-eksbuild.3",
+        "health": {
+            "issues": []
+        },
+        "addonArn": "arn:aws:eks:ap-northeast-2:730335451955:addon/Dev-AI-POC-eks/eks-pod-identity-agent/0cd03f94-61cf-0ddd-f668-e5277c9f5408",
+        "createdAt": "2026-09-08T12:56:13.234000+09:00",
+        "modifiedAt": "2026-09-08T12:56:29.007000+09:00",
+        "tags": {},
+        "namespaceConfig": {
+            "namespace": "kube-system"
+        }
+    }
+}

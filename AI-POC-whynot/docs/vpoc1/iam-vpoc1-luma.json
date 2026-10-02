@@ -1,0 +1,18 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "VpocVideoList",
+      "Effect": "Allow",
+      "Action": "s3:ListBucket",
+      "Resource": "arn:aws:s3:::whynot-video-730335451955-us-west-2",
+      "Condition": {
+        "StringLike": {
+          "s3:prefix": [
+            "users/*"
+          ]
+        }
+      }
+    }
+  ]
+}

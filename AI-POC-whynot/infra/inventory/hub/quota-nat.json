@@ -1,0 +1,15 @@
+{
+    "Quota": {
+        "ServiceCode": "vpc",
+        "ServiceName": "Amazon Virtual Private Cloud (Amazon VPC)",
+        "QuotaArn": "arn:aws:servicequotas:ap-northeast-2:730335451955:vpc/L-FE5A380F",
+        "QuotaCode": "L-FE5A380F",
+        "QuotaName": "NAT gateways per Availability Zone",
+        "Value": 5.0,
+        "Unit": "None",
+        "Adjustable": true,
+        "GlobalQuota": false,
+        "QuotaAppliedAtLevel": "ACCOUNT",
+        "Description": "The maximum number of NAT gateways per Availability Zone. This includes NAT gateways in the pending, active, or deleting state."
+    }
+}

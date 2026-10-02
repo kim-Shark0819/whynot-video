@@ -1,0 +1,88 @@
+{
+    "NetworkAcls": [
+        {
+            "Associations": [
+                {
+                    "NetworkAclAssociationId": "aclassoc-07236a6dd283bc4b3",
+                    "NetworkAclId": "acl-0655dbb96428fa9dc",
+                    "SubnetId": "subnet-01e0e91f3c43b57f2"
+                },
+                {
+                    "NetworkAclAssociationId": "aclassoc-0c7b82e64dd1f205d",
+                    "NetworkAclId": "acl-0655dbb96428fa9dc",
+                    "SubnetId": "subnet-053f2f798359b197a"
+                },
+                {
+                    "NetworkAclAssociationId": "aclassoc-08b41bc62e08adc21",
+                    "NetworkAclId": "acl-0655dbb96428fa9dc",
+                    "SubnetId": "subnet-093122a3f02f9f381"
+                },
+                {
+                    "NetworkAclAssociationId": "aclassoc-092ab46d8655e53ce",
+                    "NetworkAclId": "acl-0655dbb96428fa9dc",
+                    "SubnetId": "subnet-071250e072cc06c64"
+                },
+                {
+                    "NetworkAclAssociationId": "aclassoc-009e4af8a1e180e33",
+                    "NetworkAclId": "acl-0655dbb96428fa9dc",
+                    "SubnetId": "subnet-0d290d58f65b8af9b"
+                },
+                {
+                    "NetworkAclAssociationId": "aclassoc-0c6c5afcc14369d08",
+                    "NetworkAclId": "acl-0655dbb96428fa9dc",
+                    "SubnetId": "subnet-088ee9cce28b857ec"
+                },
+                {
+                    "NetworkAclAssociationId": "aclassoc-0f699569a24ff6427",
+                    "NetworkAclId": "acl-0655dbb96428fa9dc",
+                    "SubnetId": "subnet-0b8b4832085705b56"
+                },
+                {
+                    "NetworkAclAssociationId": "aclassoc-03a58b466fa51e999",
+                    "NetworkAclId": "acl-0655dbb96428fa9dc",
+                    "SubnetId": "subnet-07db8faf09bcfcdbb"
+                },
+                {
+                    "NetworkAclAssociationId": "aclassoc-054a6017396116549",
+                    "NetworkAclId": "acl-0655dbb96428fa9dc",
+                    "SubnetId": "subnet-0ac1a0b3cf1fb3c1f"
+                }
+            ],
+            "Entries": [
+                {
+                    "CidrBlock": "0.0.0.0/0",
+                    "Egress": true,
+                    "Protocol": "-1",
+                    "RuleAction": "allow",
+                    "RuleNumber": 100
+                },
+                {
+                    "CidrBlock": "0.0.0.0/0",
+                    "Egress": true,
+                    "Protocol": "-1",
+                    "RuleAction": "deny",
+                    "RuleNumber": 32767
+                },
+                {
+                    "CidrBlock": "0.0.0.0/0",
+                    "Egress": false,
+                    "Protocol": "-1",
+                    "RuleAction": "allow",
+                    "RuleNumber": 100
+                },
+                {
+                    "CidrBlock": "0.0.0.0/0",
+                    "Egress": false,
+                    "Protocol": "-1",
+                    "RuleAction": "deny",
+                    "RuleNumber": 32767
+                }
+            ],
+            "IsDefault": true,
+            "NetworkAclId": "acl-0655dbb96428fa9dc",
+            "Tags": [],
+            "VpcId": "vpc-0de9ff1693bd56f38",
+            "OwnerId": "730335451955"
+        }
+    ]
+}

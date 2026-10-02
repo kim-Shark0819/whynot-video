@@ -1,0 +1,15 @@
+{
+    "associatedAccessPolicies": [
+        {
+            "policyArn": "arn:aws:eks::aws:cluster-access-policy/AmazonEKSClusterAdminPolicy",
+            "accessScope": {
+                "type": "cluster",
+                "namespaces": []
+            },
+            "associatedAt": "2026-09-08T13:39:12.780000+09:00",
+            "modifiedAt": "2026-09-08T13:39:12.780000+09:00"
+        }
+    ],
+    "clusterName": "Dev-AI-POC-eks",
+    "principalArn": "arn:aws:iam::730335451955:role/ArgoCD-Dev-Cluster-Access"
+}

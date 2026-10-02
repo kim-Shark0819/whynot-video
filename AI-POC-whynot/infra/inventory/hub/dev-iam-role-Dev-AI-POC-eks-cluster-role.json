@@ -1,0 +1,40 @@
+{
+    "Role": {
+        "Path": "/",
+        "RoleName": "Dev-AI-POC-eks-cluster-role",
+        "RoleId": "AROA2UC3CTMZVUIUR54UV",
+        "Arn": "arn:aws:iam::730335451955:role/Dev-AI-POC-eks-cluster-role",
+        "CreateDate": "2026-09-08T03:44:20+00:00",
+        "AssumeRolePolicyDocument": {
+            "Version": "2012-10-17",
+            "Statement": [
+                {
+                    "Effect": "Allow",
+                    "Principal": {
+                        "Service": "eks.amazonaws.com"
+                    },
+                    "Action": [
+                        "sts:AssumeRole",
+                        "sts:TagSession"
+                    ]
+                }
+            ]
+        },
+        "Description": "EKS cluster service role for Dev-AI-POC-eks",
+        "MaxSessionDuration": 3600,
+        "Tags": [
+            {
+                "Key": "Name",
+                "Value": "Dev-AI-POC-eks-cluster-role"
+            },
+            {
+                "Key": "Environment",
+                "Value": "dev"
+            }
+        ],
+        "RoleLastUsed": {
+            "LastUsedDate": "2026-09-08T10:13:32+00:00",
+            "Region": "ap-northeast-2"
+        }
+    }
+}

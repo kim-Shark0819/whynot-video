@@ -1,0 +1,233 @@
+{
+  "at": "2026-09-22T21:25:56Z",
+  "account": "730335451955",
+  "profile": "ai-poc-hub",
+  "videoBucket": "whynot-video-730335451955-us-west-2",
+  "mainBucket": "whynot-730335451955",
+  "roleArn": "arn:aws:iam::730335451955:role/whynot-app-role",
+  "gate0": "fail",
+  "p0Failures": [
+    "C10"
+  ],
+  "spentUsd": 3.83,
+  "checks": [
+    {
+      "id": "C1",
+      "grade": "P0",
+      "ok": true,
+      "detail": {
+        "modelId": "luma.ray-v2:0",
+        "status": "ACTIVE",
+        "inferenceTypes": [
+          "ON_DEMAND"
+        ],
+        "outputModalities": [
+          "VIDEO"
+        ]
+      },
+      "rawError": ""
+    },
+    {
+      "id": "C2",
+      "grade": "P0",
+      "ok": true,
+      "detail": {
+        "modelId": "stability.sd3-5-large-v1:0",
+        "status": "ACTIVE",
+        "inferenceTypes": [
+          "ON_DEMAND"
+        ],
+        "outputModalities": [
+          "IMAGE"
+        ]
+      },
+      "rawError": ""
+    },
+    {
+      "id": "C3",
+      "grade": "P0",
+      "ok": true,
+      "detail": {
+        "modelId": "global.anthropic.claude-sonnet-4-5-20250929-v1:0",
+        "region": "ap-northeast-2",
+        "ms": 1572,
+        "inputTokens": 8,
+        "outputTokens": 5
+      },
+      "rawError": ""
+    },
+    {
+      "id": "C4",
+      "grade": "P0",
+      "ok": true,
+      "detail": {
+        "roleArn": "arn:aws:iam::730335451955:role/whynot-app-role",
+        "webIdentityTrust": true,
+        "note": "kubectl 로 SA annotation 조회. EKS API 가 사설 엔드포인트라 워크스테이션에서 불가하면 IAM 에서 확인한 ARN 을 인자로 받는다."
+      },
+      "rawError": ""
+    },
+    {
+      "id": "C5",
+      "grade": "P0",
+      "ok": true,
+      "detail": [
+        {
+          "action": "bedrock:InvokeModel",
+          "resource": "arn:aws:bedrock:us-west-2::foundation-model/luma.ray-v2:0",
+          "decision": "allowed"
+        },
+        {
+          "action": "bedrock:InvokeModel",
+          "resource": "arn:aws:bedrock:us-west-2::foundation-model/stability.sd3-5-large-v1:0",
+          "decision": "allowed"
+        },
+        {
+          "action": "bedrock:InvokeModel",
+          "resource": "arn:aws:bedrock:ap-northeast-2::foundation-model/anthropic.claude-sonnet-4-5-20250929-v1:0",
+          "decision": "allowed"
+        },
+        {
+          "action": "bedrock:GetAsyncInvoke",
+          "resource": "*",
+          "decision": "allowed"
+        },
+        {
+          "action": "bedrock:ListAsyncInvokes",
+          "resource": "*",
+          "decision": "allowed"
+        },
+        {
+          "action": "s3:PutObject",
+          "resource": "arn:aws:s3:::whynot-video-730335451955-us-west-2/users/_vpoc1/x",
+          "decision": "allowed"
+        },
+        {
+          "action": "s3:GetObject",
+          "resource": "arn:aws:s3:::whynot-video-730335451955-us-west-2/users/_vpoc1/x",
+          "decision": "allowed"
+        },
+        {
+          "action": "s3:ListBucket",
+          "resource": "arn:aws:s3:::whynot-video-730335451955-us-west-2",
+          "decision": "allowed"
+        },
+        {
+          "action": "s3:PutObject",
+          "resource": "arn:aws:s3:::whynot-730335451955/users/_vpoc1/x",
+          "decision": "allowed"
+        },
+        {
+          "action": "s3:GetObject",
+          "resource": "arn:aws:s3:::whynot-730335451955/users/_vpoc1/x",
+          "decision": "allowed"
+        }
+      ],
+      "rawError": ""
+    },
+    {
+      "id": "C6",
+      "grade": "P0",
+      "ok": true,
+      "detail": {
+        "bucket": "whynot-video-730335451955-us-west-2",
+        "region": "us-west-2",
+        "required": "us-west-2"
+      },
+      "rawError": ""
+    },
+    {
+      "id": "C7",
+      "grade": "P0",
+      "ok": true,
+      "detail": {
+        "bucket": "whynot-730335451955",
+        "key": "users/_vpoc1/preflight.txt",
+        "bytes": 1061
+      },
+      "rawError": ""
+    },
+    {
+      "id": "C8",
+      "grade": "P1",
+      "ok": true,
+      "detail": {
+        "matched": [
+          {
+            "name": "(Data Automation) InvokeDataAutomationAsync - Audio - Max number of concurrent jobs",
+            "value": 20.0
+          },
+          {
+            "name": "On-demand model inference concurrent requests for Luma Ray V2",
+            "value": 1.0
+          },
+          {
+            "name": "(Data Automation) InvokeDataAutomationAsync - Document - Max number of concurrent jobs",
+            "value": 25.0
+          },
+          {
+            "name": "(Data Automation) InvokeBlueprintOptimizationAsync - Max number of blueprint optimization jobs per day",
+            "value": 30.0
+          },
+          {
+            "name": "(Data Automation) InvokeDataAutomationAsync - Max number of open jobs",
+            "value": 1800.0
+          },
+          {
+            "name": "(Data Automation) InvokeBlueprintOptimizationAsync - Max number of blueprint optimization concurrent jobs",
+            "value": 3.0
+          },
+          {
+            "name": "(Data Automation) InvokeDataAutomationAsync - Image - Max number of concurrent jobs",
+            "value": 20.0
+          },
+          {
+            "name": "Throttle rate limit for InvokeDataAutomationAsync",
+            "value": 10.0
+          },
+          {
+            "name": "(Data Automation) InvokeDataAutomationAsync - Video - Max number of concurrent jobs",
+            "value": 20.0
+          }
+        ],
+        "maxInflight": 1
+      },
+      "rawError": ""
+    },
+    {
+      "id": "C9",
+      "grade": "P0",
+      "ok": true,
+      "detail": {
+        "modelId": "stability.sd3-5-large-v1:0",
+        "ms": 7029,
+        "finishReasons": [
+          null
+        ],
+        "seeds": [
+          1837461
+        ],
+        "bytes": 279988,
+        "usd": 0.08
+      },
+      "rawError": ""
+    },
+    {
+      "id": "C10",
+      "grade": "P0",
+      "ok": false,
+      "detail": {
+        "arn": "arn:aws:bedrock:us-west-2:730335451955:async-invoke/r08qxkzwif7l",
+        "status": "Completed",
+        "elapsedS": 72,
+        "promptChars": 1108,
+        "outputKey": "users/_vpoc1/preflight/20260922T212442Z/r08qxkzwif7l/output.mp4",
+        "bytes": 1164649,
+        "presignHeadStatus": 0,
+        "contentType": "HTTPError: HTTP Error 403: Forbidden",
+        "usd": 3.75
+      },
+      "rawError": ""
+    }
+  ]
+}

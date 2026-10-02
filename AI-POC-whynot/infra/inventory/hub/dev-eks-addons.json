@@ -1,0 +1,8 @@
+{
+    "addons": [
+        "coredns",
+        "eks-pod-identity-agent",
+        "kube-proxy",
+        "vpc-cni"
+    ]
+}

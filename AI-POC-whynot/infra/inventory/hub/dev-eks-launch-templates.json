@@ -1,0 +1,78 @@
+{
+    "LaunchTemplates": [
+        {
+            "LaunchTemplateId": "lt-04dff014046c4542e",
+            "LaunchTemplateName": "eks-92d03f93-4b45-354f-c121-44b863e53c9d",
+            "CreateTime": "2026-09-08T03:54:04+00:00",
+            "CreatedBy": "arn:aws:sts::730335451955:assumed-role/AWSServiceRoleForAmazonEKSNodegroup/EKS",
+            "DefaultVersionNumber": 1,
+            "LatestVersionNumber": 1,
+            "Tags": [
+                {
+                    "Key": "eks:cluster-name",
+                    "Value": "Dev-AI-POC-eks"
+                },
+                {
+                    "Key": "eks:nodegroup-name",
+                    "Value": "Dev-AI-POC-eks-ng"
+                }
+            ],
+            "Operator": {
+                "Managed": false
+            }
+        },
+        {
+            "LaunchTemplateId": "lt-045d0045daf91da9f",
+            "LaunchTemplateName": "eks-10cd64ad-6fc3-acff-09ec-6804caf187c8",
+            "CreateTime": "2025-11-28T07:26:25+00:00",
+            "CreatedBy": "arn:aws:sts::730335451955:assumed-role/AWSServiceRoleForAmazonEKSNodegroup/EKS",
+            "DefaultVersionNumber": 1,
+            "LatestVersionNumber": 1,
+            "Tags": [
+                {
+                    "Key": "eks:cluster-name",
+                    "Value": "eks-metaclouds"
+                },
+                {
+                    "Key": "eks:nodegroup-name",
+                    "Value": "eks-metax-nodegroup"
+                }
+            ],
+            "Operator": {
+                "Managed": false
+            }
+        },
+        {
+            "LaunchTemplateId": "lt-074b43a572ecf38cb",
+            "LaunchTemplateName": "eks-7ed03fa2-37aa-5d31-03c1-d390f9ff3227",
+            "CreateTime": "2026-09-08T04:26:34+00:00",
+            "CreatedBy": "arn:aws:sts::730335451955:assumed-role/AWSServiceRoleForAmazonEKSNodegroup/EKS",
+            "DefaultVersionNumber": 1,
+            "LatestVersionNumber": 1,
+            "Tags": [
+                {
+                    "Key": "eks:cluster-name",
+                    "Value": "AI-POC-eks"
+                },
+                {
+                    "Key": "eks:nodegroup-name",
+                    "Value": "AI-POC-eks-ng"
+                }
+            ],
+            "Operator": {
+                "Managed": false
+            }
+        },
+        {
+            "LaunchTemplateId": "lt-01185e36536f0674b",
+            "LaunchTemplateName": "eksctl-eks-metaclouds-nodegroup-eks-metax-nodegroup",
+            "CreateTime": "2025-11-28T07:25:46+00:00",
+            "CreatedBy": "arn:aws:sts::730335451955:assumed-role/chatbot_role/i-0a0388905f71eb130",
+            "DefaultVersionNumber": 1,
+            "LatestVersionNumber": 1,
+            "Operator": {
+                "Managed": false
+            }
+        }
+    ]
+}

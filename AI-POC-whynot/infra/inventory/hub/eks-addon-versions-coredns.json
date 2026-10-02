@@ -1,0 +1,66 @@
+[
+    {
+        "v": "v1.14.3-eksbuild.16",
+        "default": false
+    },
+    {
+        "v": "v1.14.3-eksbuild.14",
+        "default": true
+    },
+    {
+        "v": "v1.14.3-eksbuild.9",
+        "default": false
+    },
+    {
+        "v": "v1.14.3-eksbuild.3",
+        "default": false
+    },
+    {
+        "v": "v1.14.3-eksbuild.2",
+        "default": false
+    },
+    {
+        "v": "v1.14.2-eksbuild.4",
+        "default": false
+    },
+    {
+        "v": "v1.13.2-eksbuild.24",
+        "default": false
+    },
+    {
+        "v": "v1.13.2-eksbuild.21",
+        "default": false
+    },
+    {
+        "v": "v1.13.2-eksbuild.17",
+        "default": false
+    },
+    {
+        "v": "v1.13.2-eksbuild.11",
+        "default": false
+    },
+    {
+        "v": "v1.13.2-eksbuild.10",
+        "default": false
+    },
+    {
+        "v": "v1.13.2-eksbuild.7",
+        "default": false
+    },
+    {
+        "v": "v1.13.2-eksbuild.4",
+        "default": false
+    },
+    {
+        "v": "v1.13.2-eksbuild.3",
+        "default": false
+    },
+    {
+        "v": "v1.13.2-eksbuild.1",
+        "default": false
+    },
+    {
+        "v": "v1.13.1-eksbuild.1",
+        "default": false
+    }
+]

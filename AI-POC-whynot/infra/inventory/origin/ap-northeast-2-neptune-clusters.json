@@ -1,0 +1,108 @@
+{
+  "DBClusters": [
+    {
+      "AllocatedStorage": 1,
+      "AvailabilityZones": [
+        "ap-northeast-2c",
+        "ap-northeast-2a",
+        "ap-northeast-2d"
+      ],
+      "BackupRetentionPeriod": 1,
+      "DatabaseName": "billing",
+      "DBClusterIdentifier": "quick-test-rds",
+      "DBClusterParameterGroup": "default.aurora-mysql8.0",
+      "DBSubnetGroup": "quick-test-rds-subnet-group",
+      "Status": "available",
+      "EarliestRestorableTime": "2026-09-08T00:07:13.804000+00:00",
+      "Endpoint": "quick-test-rds.cluster-cxweym04o0x0.ap-northeast-2.rds.amazonaws.com",
+      "ReaderEndpoint": "quick-test-rds.cluster-ro-cxweym04o0x0.ap-northeast-2.rds.amazonaws.com",
+      "MultiAZ": false,
+      "Engine": "aurora-mysql",
+      "EngineVersion": "8.0.mysql_aurora.3.08.0",
+      "LatestRestorableTime": "2026-09-09T04:10:43.840000+00:00",
+      "Port": 3306,
+      "MasterUsername": "admin",
+      "PreferredBackupWindow": "14:19-14:49",
+      "PreferredMaintenanceWindow": "sat:18:24-sat:18:54",
+      "ReadReplicaIdentifiers": [],
+      "DBClusterMembers": [
+        {
+          "DBInstanceIdentifier": "quick-test-rds-instance-1",
+          "IsClusterWriter": true,
+          "DBClusterParameterGroupStatus": "in-sync",
+          "PromotionTier": 0
+        }
+      ],
+      "VpcSecurityGroups": [
+        {
+          "VpcSecurityGroupId": "sg-0cf1da662c997c8f0",
+          "Status": "active"
+        }
+      ],
+      "HostedZoneId": "ZLA2NUCOLGUUR",
+      "StorageEncrypted": false,
+      "DbClusterResourceId": "cluster-PAK45VDBHNX2TNFLTTP56IL5VQ",
+      "DBClusterArn": "arn:aws:rds:ap-northeast-2:061051247564:cluster:quick-test-rds",
+      "AssociatedRoles": [],
+      "IAMDatabaseAuthenticationEnabled": false,
+      "ClusterCreateTime": "2026-08-04T08:24:49.835000+00:00",
+      "CopyTagsToSnapshot": false,
+      "DeletionProtection": false,
+      "CrossAccountClone": false,
+      "ServerlessV2ScalingConfiguration": {
+        "MinCapacity": 0.5,
+        "MaxCapacity": 2.0
+      }
+    },
+    {
+      "AllocatedStorage": 1,
+      "AvailabilityZones": [
+        "ap-northeast-2c",
+        "ap-northeast-2a",
+        "ap-northeast-2d"
+      ],
+      "BackupRetentionPeriod": 1,
+      "DBClusterIdentifier": "toon-change-ai-pj-graph",
+      "DBClusterParameterGroup": "default.neptune1.4",
+      "DBSubnetGroup": "toon-change-ai-pj-neptune-subnets",
+      "Status": "available",
+      "EarliestRestorableTime": "2026-09-08T00:11:44.458000+00:00",
+      "Endpoint": "toon-change-ai-pj-graph.cluster-cxweym04o0x0.ap-northeast-2.neptune.amazonaws.com",
+      "ReaderEndpoint": "toon-change-ai-pj-graph.cluster-ro-cxweym04o0x0.ap-northeast-2.neptune.amazonaws.com",
+      "MultiAZ": false,
+      "Engine": "neptune",
+      "EngineVersion": "1.4.7.0",
+      "LatestRestorableTime": "2026-09-09T04:10:35.052000+00:00",
+      "Port": 8182,
+      "MasterUsername": "admin",
+      "PreferredBackupWindow": "15:07-15:37",
+      "PreferredMaintenanceWindow": "thu:14:15-thu:14:45",
+      "ReadReplicaIdentifiers": [],
+      "DBClusterMembers": [
+        {
+          "DBInstanceIdentifier": "toon-change-ai-pj-graph-1",
+          "IsClusterWriter": true,
+          "DBClusterParameterGroupStatus": "in-sync",
+          "PromotionTier": 1
+        }
+      ],
+      "VpcSecurityGroups": [
+        {
+          "VpcSecurityGroupId": "sg-0e738777a6949397f",
+          "Status": "active"
+        }
+      ],
+      "HostedZoneId": "Z3W1VAZNJUN3JV",
+      "StorageEncrypted": true,
+      "KmsKeyId": "arn:aws:kms:ap-northeast-2:061051247564:key/0ddefbbe-9bee-4205-a88c-daf600b0742a",
+      "DbClusterResourceId": "cluster-IYGN4UMJ7XY5UOLXUDCOZIHL6Q",
+      "DBClusterArn": "arn:aws:rds:ap-northeast-2:061051247564:cluster:toon-change-ai-pj-graph",
+      "AssociatedRoles": [],
+      "IAMDatabaseAuthenticationEnabled": false,
+      "ClusterCreateTime": "2026-08-13T02:24:59.174000+00:00",
+      "CopyTagsToSnapshot": false,
+      "DeletionProtection": true,
+      "CrossAccountClone": false
+    }
+  ]
+}

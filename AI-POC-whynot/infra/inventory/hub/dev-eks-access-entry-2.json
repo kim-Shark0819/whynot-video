@@ -1,0 +1,13 @@
+{
+    "accessEntry": {
+        "clusterName": "Dev-AI-POC-eks",
+        "principalArn": "arn:aws:iam::730335451955:role/ArgoCD-Dev-Cluster-Access",
+        "kubernetesGroups": [],
+        "accessEntryArn": "arn:aws:eks:ap-northeast-2:730335451955:access-entry/Dev-AI-POC-eks/role/730335451955/ArgoCD-Dev-Cluster-Access/d4d03fa8-0c02-f5c2-d499-f66eb6380d5e",
+        "createdAt": "2026-09-08T13:39:10.743000+09:00",
+        "modifiedAt": "2026-09-08T13:39:10.743000+09:00",
+        "tags": {},
+        "username": "arn:aws:sts::730335451955:assumed-role/ArgoCD-Dev-Cluster-Access/{{SessionName}}",
+        "type": "STANDARD"
+    }
+}

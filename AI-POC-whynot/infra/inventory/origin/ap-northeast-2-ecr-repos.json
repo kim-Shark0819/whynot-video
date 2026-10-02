@@ -1,0 +1,88 @@
+{
+  "repositories": [
+    {
+      "repositoryArn": "arn:aws:ecr:ap-northeast-2:061051247564:repository/toon-change-ai-pj-video-gen",
+      "registryId": "061051247564",
+      "repositoryName": "toon-change-ai-pj-video-gen",
+      "repositoryUri": "061051247564.dkr.ecr.ap-northeast-2.amazonaws.com/toon-change-ai-pj-video-gen",
+      "createdAt": "2026-08-24T21:57:28.600000+09:00",
+      "imageTagMutability": "IMMUTABLE",
+      "imageScanningConfiguration": {
+        "scanOnPush": true
+      },
+      "encryptionConfiguration": {
+        "encryptionType": "AES256"
+      }
+    },
+    {
+      "repositoryArn": "arn:aws:ecr:ap-northeast-2:061051247564:repository/billing-collector",
+      "registryId": "061051247564",
+      "repositoryName": "billing-collector",
+      "repositoryUri": "061051247564.dkr.ecr.ap-northeast-2.amazonaws.com/billing-collector",
+      "createdAt": "2026-08-04T17:41:15.309000+09:00",
+      "imageTagMutability": "MUTABLE",
+      "imageScanningConfiguration": {
+        "scanOnPush": true
+      },
+      "encryptionConfiguration": {
+        "encryptionType": "AES256"
+      }
+    },
+    {
+      "repositoryArn": "arn:aws:ecr:ap-northeast-2:061051247564:repository/toon-change-ai-pj-app",
+      "registryId": "061051247564",
+      "repositoryName": "toon-change-ai-pj-app",
+      "repositoryUri": "061051247564.dkr.ecr.ap-northeast-2.amazonaws.com/toon-change-ai-pj-app",
+      "createdAt": "2026-08-12T14:08:16.962000+09:00",
+      "imageTagMutability": "IMMUTABLE",
+      "imageScanningConfiguration": {
+        "scanOnPush": true
+      },
+      "encryptionConfiguration": {
+        "encryptionType": "AES256"
+      }
+    },
+    {
+      "repositoryArn": "arn:aws:ecr:ap-northeast-2:061051247564:repository/billing-frontend",
+      "registryId": "061051247564",
+      "repositoryName": "billing-frontend",
+      "repositoryUri": "061051247564.dkr.ecr.ap-northeast-2.amazonaws.com/billing-frontend",
+      "createdAt": "2026-08-04T17:41:14.217000+09:00",
+      "imageTagMutability": "MUTABLE",
+      "imageScanningConfiguration": {
+        "scanOnPush": true
+      },
+      "encryptionConfiguration": {
+        "encryptionType": "AES256"
+      }
+    },
+    {
+      "repositoryArn": "arn:aws:ecr:ap-northeast-2:061051247564:repository/toon-change-ai-pj-frontend",
+      "registryId": "061051247564",
+      "repositoryName": "toon-change-ai-pj-frontend",
+      "repositoryUri": "061051247564.dkr.ecr.ap-northeast-2.amazonaws.com/toon-change-ai-pj-frontend",
+      "createdAt": "2026-08-12T14:08:12.262000+09:00",
+      "imageTagMutability": "IMMUTABLE",
+      "imageScanningConfiguration": {
+        "scanOnPush": true
+      },
+      "encryptionConfiguration": {
+        "encryptionType": "AES256"
+      }
+    },
+    {
+      "repositoryArn": "arn:aws:ecr:ap-northeast-2:061051247564:repository/billing-backend",
+      "registryId": "061051247564",
+      "repositoryName": "billing-backend",
+      "repositoryUri": "061051247564.dkr.ecr.ap-northeast-2.amazonaws.com/billing-backend",
+      "createdAt": "2026-08-04T17:41:13.049000+09:00",
+      "imageTagMutability": "MUTABLE",
+      "imageScanningConfiguration": {
+        "scanOnPush": true
+      },
+      "encryptionConfiguration": {
+        "encryptionType": "AES256"
+      }
+    }
+  ]
+}

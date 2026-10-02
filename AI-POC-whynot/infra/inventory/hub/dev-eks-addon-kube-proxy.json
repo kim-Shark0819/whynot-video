@@ -1,0 +1,18 @@
+{
+    "addon": {
+        "addonName": "kube-proxy",
+        "clusterName": "Dev-AI-POC-eks",
+        "status": "ACTIVE",
+        "addonVersion": "v1.36.0-eksbuild.17",
+        "health": {
+            "issues": []
+        },
+        "addonArn": "arn:aws:eks:ap-northeast-2:730335451955:addon/Dev-AI-POC-eks/kube-proxy/8ad03f93-1878-6b5b-151b-2a5953620d0f",
+        "createdAt": "2026-09-08T12:53:24.669000+09:00",
+        "modifiedAt": "2026-09-08T12:53:30.646000+09:00",
+        "tags": {},
+        "namespaceConfig": {
+            "namespace": "kube-system"
+        }
+    }
+}

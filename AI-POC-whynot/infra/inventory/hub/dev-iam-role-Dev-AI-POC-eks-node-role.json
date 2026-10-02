@@ -1,0 +1,37 @@
+{
+    "Role": {
+        "Path": "/",
+        "RoleName": "Dev-AI-POC-eks-node-role",
+        "RoleId": "AROA2UC3CTMZ46LGU5LMQ",
+        "Arn": "arn:aws:iam::730335451955:role/Dev-AI-POC-eks-node-role",
+        "CreateDate": "2026-09-08T03:44:22+00:00",
+        "AssumeRolePolicyDocument": {
+            "Version": "2012-10-17",
+            "Statement": [
+                {
+                    "Effect": "Allow",
+                    "Principal": {
+                        "Service": "ec2.amazonaws.com"
+                    },
+                    "Action": "sts:AssumeRole"
+                }
+            ]
+        },
+        "Description": "EKS managed node group role for Dev-AI-POC-eks",
+        "MaxSessionDuration": 3600,
+        "Tags": [
+            {
+                "Key": "Name",
+                "Value": "Dev-AI-POC-eks-node-role"
+            },
+            {
+                "Key": "Environment",
+                "Value": "dev"
+            }
+        ],
+        "RoleLastUsed": {
+            "LastUsedDate": "2026-09-08T10:24:56+00:00",
+            "Region": "ap-northeast-2"
+        }
+    }
+}

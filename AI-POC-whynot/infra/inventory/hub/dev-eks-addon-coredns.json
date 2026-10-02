@@ -1,0 +1,18 @@
+{
+    "addon": {
+        "addonName": "coredns",
+        "clusterName": "Dev-AI-POC-eks",
+        "status": "ACTIVE",
+        "addonVersion": "v1.14.3-eksbuild.14",
+        "health": {
+            "issues": []
+        },
+        "addonArn": "arn:aws:eks:ap-northeast-2:730335451955:addon/Dev-AI-POC-eks/coredns/92d03f94-5de2-3d76-f856-56d19b6508a1",
+        "createdAt": "2026-09-08T12:56:11.247000+09:00",
+        "modifiedAt": "2026-09-08T12:56:23.041000+09:00",
+        "tags": {},
+        "namespaceConfig": {
+            "namespace": "kube-system"
+        }
+    }
+}

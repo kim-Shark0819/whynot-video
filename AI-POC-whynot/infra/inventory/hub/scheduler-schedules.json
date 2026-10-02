@@ -1,0 +1,15 @@
+{
+    "Schedules": [
+        {
+            "Arn": "arn:aws:scheduler:ap-northeast-2:730335451955:schedule/default/grafana-event",
+            "CreationDate": "2025-02-28T16:58:19.912000+09:00",
+            "GroupName": "default",
+            "LastModificationDate": "2025-09-23T16:18:51.538000+09:00",
+            "Name": "grafana-event",
+            "State": "ENABLED",
+            "Target": {
+                "Arn": "arn:aws:lambda:ap-northeast-2:730335451955:function:securityhub-test"
+            }
+        }
+    ]
+}

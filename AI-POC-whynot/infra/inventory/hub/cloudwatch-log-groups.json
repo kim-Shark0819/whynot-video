@@ -1,0 +1,130 @@
+{
+    "logGroups": [
+        {
+            "logGroupName": "/aws/bedrock-agentcore/runtimes/harness_harness_l5p62-A97ErJ9ixI-DEFAULT",
+            "creationTime": 1784296417456,
+            "metricFilterCount": 0,
+            "arn": "arn:aws:logs:ap-northeast-2:730335451955:log-group:/aws/bedrock-agentcore/runtimes/harness_harness_l5p62-A97ErJ9ixI-DEFAULT:*",
+            "storedBytes": 47138,
+            "logGroupClass": "STANDARD",
+            "logGroupArn": "arn:aws:logs:ap-northeast-2:730335451955:log-group:/aws/bedrock-agentcore/runtimes/harness_harness_l5p62-A97ErJ9ixI-DEFAULT"
+        },
+        {
+            "logGroupName": "/aws/eks/eks-dkkim-test/cluster",
+            "creationTime": 1779022982171,
+            "metricFilterCount": 0,
+            "arn": "arn:aws:logs:ap-northeast-2:730335451955:log-group:/aws/eks/eks-dkkim-test/cluster:*",
+            "storedBytes": 256838713,
+            "logGroupClass": "STANDARD",
+            "logGroupArn": "arn:aws:logs:ap-northeast-2:730335451955:log-group:/aws/eks/eks-dkkim-test/cluster"
+        },
+        {
+            "logGroupName": "/aws/lambda/baseline-overrides-9379-bp8k7",
+            "creationTime": 1783901586666,
+            "metricFilterCount": 0,
+            "arn": "arn:aws:logs:ap-northeast-2:730335451955:log-group:/aws/lambda/baseline-overrides-9379-bp8k7:*",
+            "storedBytes": 6681,
+            "logGroupClass": "STANDARD",
+            "logGroupArn": "arn:aws:logs:ap-northeast-2:730335451955:log-group:/aws/lambda/baseline-overrides-9379-bp8k7"
+        },
+        {
+            "logGroupName": "/aws/lambda/baseline-overrides-960b-i8lke",
+            "creationTime": 1772730058648,
+            "metricFilterCount": 0,
+            "arn": "arn:aws:logs:ap-northeast-2:730335451955:log-group:/aws/lambda/baseline-overrides-960b-i8lke:*",
+            "storedBytes": 4538889,
+            "logGroupClass": "STANDARD",
+            "logGroupArn": "arn:aws:logs:ap-northeast-2:730335451955:log-group:/aws/lambda/baseline-overrides-960b-i8lke"
+        },
+        {
+            "logGroupName": "/aws/lambda/delete-name-tags-ap-northeast-2-9379-bp8k7",
+            "creationTime": 1783901615877,
+            "metricFilterCount": 0,
+            "arn": "arn:aws:logs:ap-northeast-2:730335451955:log-group:/aws/lambda/delete-name-tags-ap-northeast-2-9379-bp8k7:*",
+            "storedBytes": 6841,
+            "logGroupClass": "STANDARD",
+            "logGroupArn": "arn:aws:logs:ap-northeast-2:730335451955:log-group:/aws/lambda/delete-name-tags-ap-northeast-2-9379-bp8k7"
+        },
+        {
+            "logGroupName": "/aws/lambda/delete-name-tags-ap-northeast-2-960b-i8lke",
+            "creationTime": 1783901606665,
+            "metricFilterCount": 0,
+            "arn": "arn:aws:logs:ap-northeast-2:730335451955:log-group:/aws/lambda/delete-name-tags-ap-northeast-2-960b-i8lke:*",
+            "storedBytes": 5101,
+            "logGroupClass": "STANDARD",
+            "logGroupArn": "arn:aws:logs:ap-northeast-2:730335451955:log-group:/aws/lambda/delete-name-tags-ap-northeast-2-960b-i8lke"
+        },
+        {
+            "logGroupName": "/aws/lambda/lambda-goodrich-scheduler-login",
+            "creationTime": 1770205050005,
+            "metricFilterCount": 0,
+            "arn": "arn:aws:logs:ap-northeast-2:730335451955:log-group:/aws/lambda/lambda-goodrich-scheduler-login:*",
+            "storedBytes": 38325,
+            "logGroupClass": "STANDARD",
+            "logGroupArn": "arn:aws:logs:ap-northeast-2:730335451955:log-group:/aws/lambda/lambda-goodrich-scheduler-login"
+        },
+        {
+            "logGroupName": "/aws/lambda/lambda-goodrich-scheduler-login-test",
+            "creationTime": 1773231233780,
+            "metricFilterCount": 0,
+            "arn": "arn:aws:logs:ap-northeast-2:730335451955:log-group:/aws/lambda/lambda-goodrich-scheduler-login-test:*",
+            "storedBytes": 224146,
+            "logGroupClass": "STANDARD",
+            "logGroupArn": "arn:aws:logs:ap-northeast-2:730335451955:log-group:/aws/lambda/lambda-goodrich-scheduler-login-test"
+        },
+        {
+            "logGroupName": "/aws/lambda/lambda-goodrich-scheduler-status",
+            "creationTime": 1770205060840,
+            "metricFilterCount": 0,
+            "arn": "arn:aws:logs:ap-northeast-2:730335451955:log-group:/aws/lambda/lambda-goodrich-scheduler-status:*",
+            "storedBytes": 21827,
+            "logGroupClass": "STANDARD",
+            "logGroupArn": "arn:aws:logs:ap-northeast-2:730335451955:log-group:/aws/lambda/lambda-goodrich-scheduler-status"
+        },
+        {
+            "logGroupName": "/aws/lambda/lambda-goodrich-scheduler-status-test",
+            "creationTime": 1773231325571,
+            "metricFilterCount": 0,
+            "arn": "arn:aws:logs:ap-northeast-2:730335451955:log-group:/aws/lambda/lambda-goodrich-scheduler-status-test:*",
+            "storedBytes": 105063,
+            "logGroupClass": "STANDARD",
+            "logGroupArn": "arn:aws:logs:ap-northeast-2:730335451955:log-group:/aws/lambda/lambda-goodrich-scheduler-status-test"
+        },
+        {
+            "logGroupName": "/aws/lambda/lambda-startscheduler",
+            "creationTime": 1764547215359,
+            "metricFilterCount": 0,
+            "arn": "arn:aws:logs:ap-northeast-2:730335451955:log-group:/aws/lambda/lambda-startscheduler:*",
+            "storedBytes": 59108,
+            "logGroupClass": "STANDARD",
+            "logGroupArn": "arn:aws:logs:ap-northeast-2:730335451955:log-group:/aws/lambda/lambda-startscheduler"
+        },
+        {
+            "logGroupName": "/aws/lambda/lambda-stopscheduler",
+            "creationTime": 1764320419360,
+            "metricFilterCount": 0,
+            "arn": "arn:aws:logs:ap-northeast-2:730335451955:log-group:/aws/lambda/lambda-stopscheduler:*",
+            "storedBytes": 58671,
+            "logGroupClass": "STANDARD",
+            "logGroupArn": "arn:aws:logs:ap-northeast-2:730335451955:log-group:/aws/lambda/lambda-stopscheduler"
+        },
+        {
+            "logGroupName": "/aws/lambda/securityhub-test",
+            "creationTime": 1764308553497,
+            "metricFilterCount": 0,
+            "arn": "arn:aws:logs:ap-northeast-2:730335451955:log-group:/aws/lambda/securityhub-test:*",
+            "storedBytes": 259323778,
+            "logGroupClass": "STANDARD",
+            "logGroupArn": "arn:aws:logs:ap-northeast-2:730335451955:log-group:/aws/lambda/securityhub-test"
+        },
+        {
+            "logGroupName": "/aws/rds/instance/db-meta-clouds/error",
+            "creationTime": 1764310541621,
+            "metricFilterCount": 0,
+            "arn": "arn:aws:logs:ap-northeast-2:730335451955:log-group:/aws/rds/instance/db-meta-clouds/error:*",
+            "storedBytes": 1645,
+            "logGroupClass": "STANDARD",
+            "logGroupArn": "arn:aws:logs:ap-northeast-2:730335451955:log-group:/aws/rds/instance/db-meta-clouds/error"
+        }
+    ]
+}

@@ -1,0 +1,27 @@
+{
+    "DhcpOptions": [
+        {
+            "OwnerId": "730335451955",
+            "Tags": [],
+            "DhcpOptionsId": "dopt-03ff6feaac7cd42df",
+            "DhcpConfigurations": [
+                {
+                    "Key": "domain-name",
+                    "Values": [
+                        {
+                            "Value": "ap-northeast-2.compute.internal"
+                        }
+                    ]
+                },
+                {
+                    "Key": "domain-name-servers",
+                    "Values": [
+                        {
+                            "Value": "AmazonProvidedDNS"
+                        }
+                    ]
+                }
+            ]
+        }
+    ]
+}

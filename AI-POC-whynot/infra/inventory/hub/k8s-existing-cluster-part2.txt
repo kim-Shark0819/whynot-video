@@ -1,0 +1,50 @@
+# Phase 0.4.6 part 2 - remaining K8s inventory sections (read-only, via bastion)
+# collected: 2026-09-08 13:21:15 KST
+# SSM CommandId: 54e5b807-62c7-4afa-8e49-921a435a1938   status: Success
+
+### serviceaccounts + IRSA role annotation
+NS                NAME                                          IRSA
+-- (rows with IRSA only; total SA count below)
+45
+### pvc
+No resources found
+### storageclass
+NAME   PROVISIONER             RECLAIMPOLICY   VOLUMEBINDINGMODE      ALLOWVOLUMEEXPANSION   AGE
+gp2    kubernetes.io/aws-ebs   Delete          WaitForFirstConsumer   false                  2d18h
+### hpa / pdb / networkpolicy
+NAMESPACE     NAME                                 MIN AVAILABLE   MAX UNAVAILABLE   ALLOWED DISRUPTIONS   AGE
+kube-system   poddisruptionbudget.policy/coredns   N/A             1                 0                     2d18h
+### crds
+applicationnetworkpolicies.networking.k8s.aws
+clusternetworkpolicies.networking.k8s.aws
+clusterpolicyendpoints.networking.k8s.aws
+cninodes.vpcresources.k8s.aws
+eniconfigs.crd.k8s.amazonaws.com
+policyendpoints.networking.k8s.aws
+securitygrouppolicies.vpcresources.k8s.aws
+### helm releases
+NAME	NAMESPACE	REVISION	UPDATED	STATUS	CHART	APP VERSION
+### kube-system daemonsets/deployments detail
+NAME                        DESIRED   CURRENT   READY   UP-TO-DATE   AVAILABLE   NODE SELECTOR   AGE     CONTAINERS                   IMAGES                                                                                                                                                                                    SELECTOR
+daemonset.apps/aws-node     0         0         0       0            0           <none>          2d18h   aws-node,aws-eks-nodeagent   602401143452.dkr.ecr.ap-northeast-2.amazonaws.com/amazon-k8s-cni:v1.22.4-eksbuild.3,602401143452.dkr.ecr.ap-northeast-2.amazonaws.com/amazon/aws-network-policy-agent:v1.4.0-eksbuild.1   k8s-app=aws-node
+daemonset.apps/kube-proxy   0         0         0       0            0           <none>          2d18h   kube-proxy                   602401143452.dkr.ecr.ap-northeast-2.amazonaws.com/eks/kube-proxy:v1.36.0-eksbuild.17                                                                                                      k8s-app=kube-proxy
+
+NAME                      READY   UP-TO-DATE   AVAILABLE   AGE     CONTAINERS   IMAGES                                                                              SELECTOR
+deployment.apps/coredns   0/2     2            0           2d18h   coredns      602401143452.dkr.ecr.ap-northeast-2.amazonaws.com/eks/coredns:v1.14.3-eksbuild.14   eks.amazonaws.com/component=coredns,k8s-app=kube-dns
+### aws-auth configmap
+Error from server (NotFound): configmaps "aws-auth" not found
+### kube-system images (self-managed addon versions)
+aws-node  602401143452.dkr.ecr.ap-northeast-2.amazonaws.com/amazon-k8s-cni:v1.22.4-eksbuild.3 602401143452.dkr.ecr.ap-northeast-2.amazonaws.com/amazon/aws-network-policy-agent:v1.4.0-eksbuild.1
+kube-proxy  602401143452.dkr.ecr.ap-northeast-2.amazonaws.com/eks/kube-proxy:v1.36.0-eksbuild.17
+coredns  602401143452.dkr.ecr.ap-northeast-2.amazonaws.com/eks/coredns:v1.14.3-eksbuild.14
+### bastion tooling
+Docker version 25.0.14, build 0bab007
+git version 2.50.1
+### bastion disk
+Filesystem      Size  Used Avail Use% Mounted on
+/dev/nvme0n1p1   30G  2.7G   28G   9% /
+### done
+
+
+### STDERR
+

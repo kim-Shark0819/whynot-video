@@ -1,0 +1,74 @@
+{
+    "repositories": [
+        {
+            "repositoryArn": "arn:aws:ecr:ap-northeast-2:730335451955:repository/metaclouds-backend",
+            "registryId": "730335451955",
+            "repositoryName": "metaclouds-backend",
+            "repositoryUri": "730335451955.dkr.ecr.ap-northeast-2.amazonaws.com/metaclouds-backend",
+            "createdAt": "2025-11-19T13:45:19.677000+09:00",
+            "imageTagMutability": "MUTABLE",
+            "imageScanningConfiguration": {
+                "scanOnPush": false
+            },
+            "encryptionConfiguration": {
+                "encryptionType": "AES256"
+            }
+        },
+        {
+            "repositoryArn": "arn:aws:ecr:ap-northeast-2:730335451955:repository/ai-poc-frontend",
+            "registryId": "730335451955",
+            "repositoryName": "ai-poc-frontend",
+            "repositoryUri": "730335451955.dkr.ecr.ap-northeast-2.amazonaws.com/ai-poc-frontend",
+            "createdAt": "2026-09-05T11:45:17.605000+09:00",
+            "imageTagMutability": "IMMUTABLE",
+            "imageScanningConfiguration": {
+                "scanOnPush": true
+            },
+            "encryptionConfiguration": {
+                "encryptionType": "AES256"
+            }
+        },
+        {
+            "repositoryArn": "arn:aws:ecr:ap-northeast-2:730335451955:repository/metaclouds-frontend",
+            "registryId": "730335451955",
+            "repositoryName": "metaclouds-frontend",
+            "repositoryUri": "730335451955.dkr.ecr.ap-northeast-2.amazonaws.com/metaclouds-frontend",
+            "createdAt": "2025-11-19T13:45:13.381000+09:00",
+            "imageTagMutability": "MUTABLE",
+            "imageScanningConfiguration": {
+                "scanOnPush": false
+            },
+            "encryptionConfiguration": {
+                "encryptionType": "AES256"
+            }
+        },
+        {
+            "repositoryArn": "arn:aws:ecr:ap-northeast-2:730335451955:repository/metaclouds-collector",
+            "registryId": "730335451955",
+            "repositoryName": "metaclouds-collector",
+            "repositoryUri": "730335451955.dkr.ecr.ap-northeast-2.amazonaws.com/metaclouds-collector",
+            "createdAt": "2025-11-28T14:15:42.063000+09:00",
+            "imageTagMutability": "MUTABLE",
+            "imageScanningConfiguration": {
+                "scanOnPush": false
+            },
+            "encryptionConfiguration": {
+                "encryptionType": "AES256"
+            }
+        },
+        {
+            "repositoryArn": "arn:aws:ecr:ap-northeast-2:730335451955:repository/ai-poc-app",
+            "registryId": "730335451955",
+            "repositoryName": "ai-poc-app",
+            "repositoryUri": "730335451955.dkr.ecr.ap-northeast-2.amazonaws.com/ai-poc-app",
+            "createdAt": "2026-09-05T11:45:04.669000+09:00",
+            "imageTagMutability": "IMMUTABLE",
+            "imageScanningConfiguration": {
+                "scanOnPush": true
+            },
+            "encryptionConfiguration": {
+                "encryptionType": "AES256"
+            }
+        }
+    ]
+}

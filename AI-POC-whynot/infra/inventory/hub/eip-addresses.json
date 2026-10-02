@@ -1,0 +1,140 @@
+{
+    "Addresses": [
+        {
+            "AllocationId": "eipalloc-0d00ce1428b52c74a",
+            "AssociationId": "eipassoc-07d4b53978f373b24",
+            "Domain": "vpc",
+            "NetworkInterfaceId": "eni-093b2ebcf0ae6c4e1",
+            "NetworkInterfaceOwnerId": "730335451955",
+            "PrivateIpAddress": "100.10.0.13",
+            "Tags": [
+                {
+                    "Key": "Name",
+                    "Value": "AI-POC-eip-ap-northeast-2a"
+                }
+            ],
+            "PublicIpv4Pool": "amazon",
+            "NetworkBorderGroup": "ap-northeast-2",
+            "PublicIp": "13.125.117.242"
+        },
+        {
+            "AllocationId": "eipalloc-0d2bad6718c14420f",
+            "AssociationId": "eipassoc-02d6c4d1c34eae7cf",
+            "Domain": "vpc",
+            "NetworkInterfaceId": "eni-056343ab151e2c640",
+            "NetworkInterfaceOwnerId": "730335451955",
+            "PrivateIpAddress": "10.1.1.163",
+            "PublicIpv4Pool": "amazon",
+            "NetworkBorderGroup": "ap-northeast-2",
+            "ServiceManaged": "alb",
+            "PublicIp": "13.125.76.9"
+        },
+        {
+            "AllocationId": "eipalloc-01311a8db7c35c669",
+            "AssociationId": "eipassoc-04a1db22ba5b788b8",
+            "Domain": "vpc",
+            "NetworkInterfaceId": "eni-0df0f62ec38390cb1",
+            "NetworkInterfaceOwnerId": "730335451955",
+            "PrivateIpAddress": "100.10.3.84",
+            "PublicIpv4Pool": "amazon",
+            "NetworkBorderGroup": "ap-northeast-2",
+            "ServiceManaged": "alb",
+            "PublicIp": "13.209.171.221"
+        },
+        {
+            "AllocationId": "eipalloc-0790375427d73b9b8",
+            "AssociationId": "eipassoc-0a87be06e72f30ee0",
+            "Domain": "vpc",
+            "NetworkInterfaceId": "eni-01619a8f5230631ba",
+            "NetworkInterfaceOwnerId": "730335451955",
+            "PrivateIpAddress": "10.1.1.224",
+            "PublicIpv4Pool": "amazon",
+            "NetworkBorderGroup": "ap-northeast-2",
+            "ServiceManaged": "alb",
+            "PublicIp": "15.165.139.81"
+        },
+        {
+            "AllocationId": "eipalloc-000cc03776ec67720",
+            "AssociationId": "eipassoc-00f0cb3e62dce94c8",
+            "Domain": "vpc",
+            "NetworkInterfaceId": "eni-024f7b4cd39610bad",
+            "NetworkInterfaceOwnerId": "730335451955",
+            "PrivateIpAddress": "10.1.2.252",
+            "PublicIpv4Pool": "amazon",
+            "NetworkBorderGroup": "ap-northeast-2",
+            "ServiceManaged": "alb",
+            "PublicIp": "3.37.111.145"
+        },
+        {
+            "AllocationId": "eipalloc-04bc95be0f29b9d94",
+            "AssociationId": "eipassoc-041574bb51e057d8f",
+            "Domain": "vpc",
+            "NetworkInterfaceId": "eni-08a36a844283e0f84",
+            "NetworkInterfaceOwnerId": "730335451955",
+            "PrivateIpAddress": "100.10.0.216",
+            "PublicIpv4Pool": "amazon",
+            "NetworkBorderGroup": "ap-northeast-2",
+            "ServiceManaged": "alb",
+            "PublicIp": "3.37.120.58"
+        },
+        {
+            "AllocationId": "eipalloc-055ef53df0f010980",
+            "AssociationId": "eipassoc-0dfd64fe98d0232cf",
+            "Domain": "vpc",
+            "NetworkInterfaceId": "eni-07b676d21da818c7c",
+            "NetworkInterfaceOwnerId": "730335451955",
+            "PrivateIpAddress": "10.1.1.187",
+            "Tags": [
+                {
+                    "Key": "Name",
+                    "Value": "bastion ��"
+                }
+            ],
+            "PublicIpv4Pool": "amazon",
+            "NetworkBorderGroup": "ap-northeast-2",
+            "InstanceId": "i-0f5585532969b19ab",
+            "PublicIp": "3.38.88.0"
+        },
+        {
+            "AllocationId": "eipalloc-0ec3344f92ea397f9",
+            "AssociationId": "eipassoc-0317ec82c00a626e4",
+            "Domain": "vpc",
+            "NetworkInterfaceId": "eni-033fda05bed17f471",
+            "NetworkInterfaceOwnerId": "730335451955",
+            "PrivateIpAddress": "10.1.1.180",
+            "Tags": [
+                {
+                    "Key": "Name",
+                    "Value": "nat��"
+                }
+            ],
+            "PublicIpv4Pool": "amazon",
+            "NetworkBorderGroup": "ap-northeast-2",
+            "PublicIp": "43.202.211.241"
+        },
+        {
+            "AllocationId": "eipalloc-094e765d48471757e",
+            "AssociationId": "eipassoc-0464a2ab1b74e7182",
+            "Domain": "vpc",
+            "NetworkInterfaceId": "eni-0d2dd4761fc9afaca",
+            "NetworkInterfaceOwnerId": "730335451955",
+            "PrivateIpAddress": "10.1.2.39",
+            "PublicIpv4Pool": "amazon",
+            "NetworkBorderGroup": "ap-northeast-2",
+            "ServiceManaged": "alb",
+            "PublicIp": "52.79.122.87"
+        },
+        {
+            "AllocationId": "eipalloc-063a91858862a38b5",
+            "AssociationId": "eipassoc-0c33fd56ca4b688a1",
+            "Domain": "vpc",
+            "NetworkInterfaceId": "eni-03f4d431c5d1e5418",
+            "NetworkInterfaceOwnerId": "730335451955",
+            "PrivateIpAddress": "100.10.6.219",
+            "PublicIpv4Pool": "amazon",
+            "NetworkBorderGroup": "ap-northeast-2",
+            "ServiceManaged": "alb",
+            "PublicIp": "54.180.54.18"
+        }
+    ]
+}

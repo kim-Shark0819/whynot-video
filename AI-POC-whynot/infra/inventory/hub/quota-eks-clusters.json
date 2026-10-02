@@ -1,0 +1,15 @@
+{
+    "Quota": {
+        "ServiceCode": "eks",
+        "ServiceName": "Amazon Elastic Kubernetes Service (Amazon EKS)",
+        "QuotaArn": "arn:aws:servicequotas:ap-northeast-2:730335451955:eks/L-1194D53C",
+        "QuotaCode": "L-1194D53C",
+        "QuotaName": "Clusters",
+        "Value": 100.0,
+        "Unit": "None",
+        "Adjustable": true,
+        "GlobalQuota": false,
+        "QuotaAppliedAtLevel": "ACCOUNT",
+        "Description": "The maximum number of EKS clusters in this account in the current Region."
+    }
+}

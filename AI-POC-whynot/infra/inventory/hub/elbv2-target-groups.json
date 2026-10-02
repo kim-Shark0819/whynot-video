@@ -1,0 +1,148 @@
+{
+    "TargetGroups": [
+        {
+            "TargetGroupArn": "arn:aws:elasticloadbalancing:ap-northeast-2:730335451955:targetgroup/AI-poc-GitLab-TG/85752fb85649bbe3",
+            "TargetGroupName": "AI-poc-GitLab-TG",
+            "Protocol": "HTTP",
+            "Port": 80,
+            "VpcId": "vpc-0de9ff1693bd56f38",
+            "HealthCheckProtocol": "HTTP",
+            "HealthCheckPort": "traffic-port",
+            "HealthCheckEnabled": true,
+            "HealthCheckIntervalSeconds": 30,
+            "HealthCheckTimeoutSeconds": 5,
+            "HealthyThresholdCount": 2,
+            "UnhealthyThresholdCount": 5,
+            "HealthCheckPath": "/",
+            "Matcher": {
+                "HttpCode": "200-399"
+            },
+            "LoadBalancerArns": [
+                "arn:aws:elasticloadbalancing:ap-northeast-2:730335451955:loadbalancer/app/AI-poc-ALB/6af48b65095d9276"
+            ],
+            "TargetType": "instance",
+            "ProtocolVersion": "HTTP1",
+            "IpAddressType": "ipv4"
+        },
+        {
+            "TargetGroupArn": "arn:aws:elasticloadbalancing:ap-northeast-2:730335451955:targetgroup/PLS-METANETX-TG/76c0616b5eab1c8f",
+            "TargetGroupName": "PLS-METANETX-TG",
+            "Protocol": "HTTP",
+            "Port": 80,
+            "VpcId": "vpc-06a99f0ed6f4ba832",
+            "HealthCheckProtocol": "HTTP",
+            "HealthCheckPort": "traffic-port",
+            "HealthCheckEnabled": true,
+            "HealthCheckIntervalSeconds": 30,
+            "HealthCheckTimeoutSeconds": 5,
+            "HealthyThresholdCount": 5,
+            "UnhealthyThresholdCount": 2,
+            "HealthCheckPath": "/",
+            "Matcher": {
+                "HttpCode": "200"
+            },
+            "LoadBalancerArns": [
+                "arn:aws:elasticloadbalancing:ap-northeast-2:730335451955:loadbalancer/app/Main-ALB/e10197d0f03718e0"
+            ],
+            "TargetType": "instance",
+            "ProtocolVersion": "HTTP1",
+            "IpAddressType": "ipv4"
+        },
+        {
+            "TargetGroupArn": "arn:aws:elasticloadbalancing:ap-northeast-2:730335451955:targetgroup/k8s-default-backends-6df4c67c6b/679fb642937590b2",
+            "TargetGroupName": "k8s-default-backends-6df4c67c6b",
+            "Protocol": "HTTP",
+            "Port": 8000,
+            "VpcId": "vpc-06a99f0ed6f4ba832",
+            "HealthCheckProtocol": "HTTP",
+            "HealthCheckPort": "traffic-port",
+            "HealthCheckEnabled": true,
+            "HealthCheckIntervalSeconds": 15,
+            "HealthCheckTimeoutSeconds": 5,
+            "HealthyThresholdCount": 2,
+            "UnhealthyThresholdCount": 2,
+            "HealthCheckPath": "/api/health",
+            "Matcher": {
+                "HttpCode": "200"
+            },
+            "LoadBalancerArns": [
+                "arn:aws:elasticloadbalancing:ap-northeast-2:730335451955:loadbalancer/app/k8s-default-grafanaa-4005cdfda3/2952a21a08583e6e"
+            ],
+            "TargetType": "ip",
+            "ProtocolVersion": "HTTP1",
+            "IpAddressType": "ipv4"
+        },
+        {
+            "TargetGroupArn": "arn:aws:elasticloadbalancing:ap-northeast-2:730335451955:targetgroup/k8s-default-frontend-7ebc59b925/a80095e49a379e64",
+            "TargetGroupName": "k8s-default-frontend-7ebc59b925",
+            "Protocol": "HTTP",
+            "Port": 80,
+            "VpcId": "vpc-06a99f0ed6f4ba832",
+            "HealthCheckProtocol": "HTTP",
+            "HealthCheckPort": "traffic-port",
+            "HealthCheckEnabled": true,
+            "HealthCheckIntervalSeconds": 15,
+            "HealthCheckTimeoutSeconds": 5,
+            "HealthyThresholdCount": 2,
+            "UnhealthyThresholdCount": 2,
+            "HealthCheckPath": "/api/health",
+            "Matcher": {
+                "HttpCode": "200"
+            },
+            "LoadBalancerArns": [
+                "arn:aws:elasticloadbalancing:ap-northeast-2:730335451955:loadbalancer/app/k8s-default-grafanaa-4005cdfda3/2952a21a08583e6e"
+            ],
+            "TargetType": "ip",
+            "ProtocolVersion": "HTTP1",
+            "IpAddressType": "ipv4"
+        },
+        {
+            "TargetGroupArn": "arn:aws:elasticloadbalancing:ap-northeast-2:730335451955:targetgroup/main-web-site-tgg/1cb9c8d7de35a351",
+            "TargetGroupName": "main-web-site-tgg",
+            "Protocol": "HTTP",
+            "Port": 80,
+            "VpcId": "vpc-06a99f0ed6f4ba832",
+            "HealthCheckProtocol": "HTTP",
+            "HealthCheckPort": "traffic-port",
+            "HealthCheckEnabled": true,
+            "HealthCheckIntervalSeconds": 30,
+            "HealthCheckTimeoutSeconds": 5,
+            "HealthyThresholdCount": 5,
+            "UnhealthyThresholdCount": 2,
+            "HealthCheckPath": "/",
+            "Matcher": {
+                "HttpCode": "200"
+            },
+            "LoadBalancerArns": [
+                "arn:aws:elasticloadbalancing:ap-northeast-2:730335451955:loadbalancer/app/Main-ALB/e10197d0f03718e0"
+            ],
+            "TargetType": "instance",
+            "ProtocolVersion": "HTTP1",
+            "IpAddressType": "ipv4"
+        },
+        {
+            "TargetGroupArn": "arn:aws:elasticloadbalancing:ap-northeast-2:730335451955:targetgroup/pineapple-grafana/448c45d33f8fbfab",
+            "TargetGroupName": "pineapple-grafana",
+            "Protocol": "HTTP",
+            "Port": 3000,
+            "VpcId": "vpc-06a99f0ed6f4ba832",
+            "HealthCheckProtocol": "HTTP",
+            "HealthCheckPort": "traffic-port",
+            "HealthCheckEnabled": true,
+            "HealthCheckIntervalSeconds": 30,
+            "HealthCheckTimeoutSeconds": 5,
+            "HealthyThresholdCount": 5,
+            "UnhealthyThresholdCount": 2,
+            "HealthCheckPath": "/",
+            "Matcher": {
+                "HttpCode": "200,302"
+            },
+            "LoadBalancerArns": [
+                "arn:aws:elasticloadbalancing:ap-northeast-2:730335451955:loadbalancer/app/Main-ALB/e10197d0f03718e0"
+            ],
+            "TargetType": "instance",
+            "ProtocolVersion": "HTTP1",
+            "IpAddressType": "ipv4"
+        }
+    ]
+}

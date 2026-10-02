@@ -1,0 +1,33 @@
+{
+    "Role": {
+        "Path": "/",
+        "RoleName": "AI-POC-bastion-role",
+        "RoleId": "AROA2UC3CTMZTKHGIDPIN",
+        "Arn": "arn:aws:iam::730335451955:role/AI-POC-bastion-role",
+        "CreateDate": "2026-09-05T02:55:42+00:00",
+        "AssumeRolePolicyDocument": {
+            "Version": "2012-10-17",
+            "Statement": [
+                {
+                    "Effect": "Allow",
+                    "Principal": {
+                        "Service": "ec2.amazonaws.com"
+                    },
+                    "Action": "sts:AssumeRole"
+                }
+            ]
+        },
+        "Description": "AI-POC bastion: SSM + EKS/ECR access",
+        "MaxSessionDuration": 3600,
+        "Tags": [
+            {
+                "Key": "Project",
+                "Value": "ai-poc"
+            }
+        ],
+        "RoleLastUsed": {
+            "LastUsedDate": "2026-09-08T03:49:44+00:00",
+            "Region": "ap-northeast-2"
+        }
+    }
+}

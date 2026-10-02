@@ -1,0 +1,7 @@
+{
+    "clusters": [
+        "AI-POC-eks",
+        "Dev-AI-POC-eks",
+        "eks-metaclouds"
+    ]
+}

@@ -1,0 +1,364 @@
+{
+    "Subnets": [
+        {
+            "AvailabilityZoneId": "apne2-az1",
+            "MapCustomerOwnedIpOnLaunch": false,
+            "OwnerId": "730335451955",
+            "AssignIpv6AddressOnCreation": false,
+            "Ipv6CidrBlockAssociationSet": [],
+            "Tags": [
+                {
+                    "Key": "Project",
+                    "Value": "ai-poc"
+                },
+                {
+                    "Key": "kubernetes.io/role/internal-elb",
+                    "Value": "1"
+                },
+                {
+                    "Key": "Name",
+                    "Value": "AI-POC-subnet-private4-ap-northeast-2a"
+                }
+            ],
+            "SubnetArn": "arn:aws:ec2:ap-northeast-2:730335451955:subnet/subnet-0d290d58f65b8af9b",
+            "EnableDns64": false,
+            "Ipv6Native": false,
+            "PrivateDnsNameOptionsOnLaunch": {
+                "HostnameType": "ip-name",
+                "EnableResourceNameDnsARecord": false,
+                "EnableResourceNameDnsAAAARecord": false
+            },
+            "BlockPublicAccessStates": {
+                "InternetGatewayBlockMode": "off"
+            },
+            "SubnetId": "subnet-0d290d58f65b8af9b",
+            "State": "available",
+            "VpcId": "vpc-0de9ff1693bd56f38",
+            "CidrBlock": "100.10.2.0/24",
+            "AvailableIpAddressCount": 250,
+            "AvailabilityZone": "ap-northeast-2a",
+            "DefaultForAz": false,
+            "MapPublicIpOnLaunch": false
+        },
+        {
+            "AvailabilityZoneId": "apne2-az3",
+            "MapCustomerOwnedIpOnLaunch": false,
+            "OwnerId": "730335451955",
+            "AssignIpv6AddressOnCreation": false,
+            "Ipv6CidrBlockAssociationSet": [],
+            "Tags": [
+                {
+                    "Key": "kubernetes.io/role/elb",
+                    "Value": "1"
+                },
+                {
+                    "Key": "Project",
+                    "Value": "ai-poc"
+                },
+                {
+                    "Key": "Name",
+                    "Value": "AI-POC-subnet-public3-ap-northeast-2c"
+                }
+            ],
+            "SubnetArn": "arn:aws:ec2:ap-northeast-2:730335451955:subnet/subnet-053f2f798359b197a",
+            "EnableDns64": false,
+            "Ipv6Native": false,
+            "PrivateDnsNameOptionsOnLaunch": {
+                "HostnameType": "ip-name",
+                "EnableResourceNameDnsARecord": false,
+                "EnableResourceNameDnsAAAARecord": false
+            },
+            "BlockPublicAccessStates": {
+                "InternetGatewayBlockMode": "off"
+            },
+            "SubnetId": "subnet-053f2f798359b197a",
+            "State": "available",
+            "VpcId": "vpc-0de9ff1693bd56f38",
+            "CidrBlock": "100.10.6.0/24",
+            "AvailableIpAddressCount": 249,
+            "AvailabilityZone": "ap-northeast-2c",
+            "DefaultForAz": false,
+            "MapPublicIpOnLaunch": false
+        },
+        {
+            "AvailabilityZoneId": "apne2-az1",
+            "MapCustomerOwnedIpOnLaunch": false,
+            "OwnerId": "730335451955",
+            "AssignIpv6AddressOnCreation": false,
+            "Ipv6CidrBlockAssociationSet": [],
+            "Tags": [
+                {
+                    "Key": "Name",
+                    "Value": "AI-POC-subnet-private1-ap-northeast-2a"
+                },
+                {
+                    "Key": "kubernetes.io/role/internal-elb",
+                    "Value": "1"
+                },
+                {
+                    "Key": "Project",
+                    "Value": "ai-poc"
+                }
+            ],
+            "SubnetArn": "arn:aws:ec2:ap-northeast-2:730335451955:subnet/subnet-01e0e91f3c43b57f2",
+            "EnableDns64": false,
+            "Ipv6Native": false,
+            "PrivateDnsNameOptionsOnLaunch": {
+                "HostnameType": "ip-name",
+                "EnableResourceNameDnsARecord": false,
+                "EnableResourceNameDnsAAAARecord": false
+            },
+            "BlockPublicAccessStates": {
+                "InternetGatewayBlockMode": "off"
+            },
+            "SubnetId": "subnet-01e0e91f3c43b57f2",
+            "State": "available",
+            "VpcId": "vpc-0de9ff1693bd56f38",
+            "CidrBlock": "100.10.1.0/24",
+            "AvailableIpAddressCount": 250,
+            "AvailabilityZone": "ap-northeast-2a",
+            "DefaultForAz": false,
+            "MapPublicIpOnLaunch": false
+        },
+        {
+            "AvailabilityZoneId": "apne2-az2",
+            "MapCustomerOwnedIpOnLaunch": false,
+            "OwnerId": "730335451955",
+            "AssignIpv6AddressOnCreation": false,
+            "Ipv6CidrBlockAssociationSet": [],
+            "Tags": [
+                {
+                    "Key": "Project",
+                    "Value": "ai-poc"
+                },
+                {
+                    "Key": "kubernetes.io/role/internal-elb",
+                    "Value": "1"
+                },
+                {
+                    "Key": "Name",
+                    "Value": "AI-POC-subnet-private2-ap-northeast-2b"
+                }
+            ],
+            "SubnetArn": "arn:aws:ec2:ap-northeast-2:730335451955:subnet/subnet-071250e072cc06c64",
+            "EnableDns64": false,
+            "Ipv6Native": false,
+            "PrivateDnsNameOptionsOnLaunch": {
+                "HostnameType": "ip-name",
+                "EnableResourceNameDnsARecord": false,
+                "EnableResourceNameDnsAAAARecord": false
+            },
+            "BlockPublicAccessStates": {
+                "InternetGatewayBlockMode": "off"
+            },
+            "SubnetId": "subnet-071250e072cc06c64",
+            "State": "available",
+            "VpcId": "vpc-0de9ff1693bd56f38",
+            "CidrBlock": "100.10.4.0/24",
+            "AvailableIpAddressCount": 245,
+            "AvailabilityZone": "ap-northeast-2b",
+            "DefaultForAz": false,
+            "MapPublicIpOnLaunch": false
+        },
+        {
+            "AvailabilityZoneId": "apne2-az3",
+            "MapCustomerOwnedIpOnLaunch": false,
+            "OwnerId": "730335451955",
+            "AssignIpv6AddressOnCreation": false,
+            "Ipv6CidrBlockAssociationSet": [],
+            "Tags": [
+                {
+                    "Key": "Project",
+                    "Value": "ai-poc"
+                },
+                {
+                    "Key": "kubernetes.io/role/internal-elb",
+                    "Value": "1"
+                },
+                {
+                    "Key": "Name",
+                    "Value": "AI-POC-subnet-private3-ap-northeast-2c"
+                }
+            ],
+            "SubnetArn": "arn:aws:ec2:ap-northeast-2:730335451955:subnet/subnet-0ac1a0b3cf1fb3c1f",
+            "EnableDns64": false,
+            "Ipv6Native": false,
+            "PrivateDnsNameOptionsOnLaunch": {
+                "HostnameType": "ip-name",
+                "EnableResourceNameDnsARecord": false,
+                "EnableResourceNameDnsAAAARecord": false
+            },
+            "BlockPublicAccessStates": {
+                "InternetGatewayBlockMode": "off"
+            },
+            "SubnetId": "subnet-0ac1a0b3cf1fb3c1f",
+            "State": "available",
+            "VpcId": "vpc-0de9ff1693bd56f38",
+            "CidrBlock": "100.10.7.0/24",
+            "AvailableIpAddressCount": 239,
+            "AvailabilityZone": "ap-northeast-2c",
+            "DefaultForAz": false,
+            "MapPublicIpOnLaunch": false
+        },
+        {
+            "AvailabilityZoneId": "apne2-az1",
+            "MapCustomerOwnedIpOnLaunch": false,
+            "OwnerId": "730335451955",
+            "AssignIpv6AddressOnCreation": false,
+            "Ipv6CidrBlockAssociationSet": [],
+            "Tags": [
+                {
+                    "Key": "Name",
+                    "Value": "AI-POC-subnet-public1-ap-northeast-2a"
+                },
+                {
+                    "Key": "Project",
+                    "Value": "ai-poc"
+                },
+                {
+                    "Key": "kubernetes.io/role/elb",
+                    "Value": "1"
+                }
+            ],
+            "SubnetArn": "arn:aws:ec2:ap-northeast-2:730335451955:subnet/subnet-0b8b4832085705b56",
+            "EnableDns64": false,
+            "Ipv6Native": false,
+            "PrivateDnsNameOptionsOnLaunch": {
+                "HostnameType": "ip-name",
+                "EnableResourceNameDnsARecord": false,
+                "EnableResourceNameDnsAAAARecord": false
+            },
+            "BlockPublicAccessStates": {
+                "InternetGatewayBlockMode": "off"
+            },
+            "SubnetId": "subnet-0b8b4832085705b56",
+            "State": "available",
+            "VpcId": "vpc-0de9ff1693bd56f38",
+            "CidrBlock": "100.10.0.0/24",
+            "AvailableIpAddressCount": 247,
+            "AvailabilityZone": "ap-northeast-2a",
+            "DefaultForAz": false,
+            "MapPublicIpOnLaunch": false
+        },
+        {
+            "AvailabilityZoneId": "apne2-az3",
+            "MapCustomerOwnedIpOnLaunch": false,
+            "OwnerId": "730335451955",
+            "AssignIpv6AddressOnCreation": false,
+            "Ipv6CidrBlockAssociationSet": [],
+            "Tags": [
+                {
+                    "Key": "Project",
+                    "Value": "ai-poc"
+                },
+                {
+                    "Key": "kubernetes.io/role/internal-elb",
+                    "Value": "1"
+                },
+                {
+                    "Key": "Name",
+                    "Value": "AI-POC-subnet-private6-ap-northeast-2c"
+                }
+            ],
+            "SubnetArn": "arn:aws:ec2:ap-northeast-2:730335451955:subnet/subnet-093122a3f02f9f381",
+            "EnableDns64": false,
+            "Ipv6Native": false,
+            "PrivateDnsNameOptionsOnLaunch": {
+                "HostnameType": "ip-name",
+                "EnableResourceNameDnsARecord": false,
+                "EnableResourceNameDnsAAAARecord": false
+            },
+            "BlockPublicAccessStates": {
+                "InternetGatewayBlockMode": "off"
+            },
+            "SubnetId": "subnet-093122a3f02f9f381",
+            "State": "available",
+            "VpcId": "vpc-0de9ff1693bd56f38",
+            "CidrBlock": "100.10.8.0/24",
+            "AvailableIpAddressCount": 251,
+            "AvailabilityZone": "ap-northeast-2c",
+            "DefaultForAz": false,
+            "MapPublicIpOnLaunch": false
+        },
+        {
+            "AvailabilityZoneId": "apne2-az2",
+            "MapCustomerOwnedIpOnLaunch": false,
+            "OwnerId": "730335451955",
+            "AssignIpv6AddressOnCreation": false,
+            "Ipv6CidrBlockAssociationSet": [],
+            "Tags": [
+                {
+                    "Key": "Project",
+                    "Value": "ai-poc"
+                },
+                {
+                    "Key": "Name",
+                    "Value": "AI-POC-subnet-private5-ap-northeast-2b"
+                },
+                {
+                    "Key": "kubernetes.io/role/internal-elb",
+                    "Value": "1"
+                }
+            ],
+            "SubnetArn": "arn:aws:ec2:ap-northeast-2:730335451955:subnet/subnet-088ee9cce28b857ec",
+            "EnableDns64": false,
+            "Ipv6Native": false,
+            "PrivateDnsNameOptionsOnLaunch": {
+                "HostnameType": "ip-name",
+                "EnableResourceNameDnsARecord": false,
+                "EnableResourceNameDnsAAAARecord": false
+            },
+            "BlockPublicAccessStates": {
+                "InternetGatewayBlockMode": "off"
+            },
+            "SubnetId": "subnet-088ee9cce28b857ec",
+            "State": "available",
+            "VpcId": "vpc-0de9ff1693bd56f38",
+            "CidrBlock": "100.10.5.0/24",
+            "AvailableIpAddressCount": 251,
+            "AvailabilityZone": "ap-northeast-2b",
+            "DefaultForAz": false,
+            "MapPublicIpOnLaunch": false
+        },
+        {
+            "AvailabilityZoneId": "apne2-az2",
+            "MapCustomerOwnedIpOnLaunch": false,
+            "OwnerId": "730335451955",
+            "AssignIpv6AddressOnCreation": false,
+            "Ipv6CidrBlockAssociationSet": [],
+            "Tags": [
+                {
+                    "Key": "Name",
+                    "Value": "AI-POC-subnet-public2-ap-northeast-2b"
+                },
+                {
+                    "Key": "Project",
+                    "Value": "ai-poc"
+                },
+                {
+                    "Key": "kubernetes.io/role/elb",
+                    "Value": "1"
+                }
+            ],
+            "SubnetArn": "arn:aws:ec2:ap-northeast-2:730335451955:subnet/subnet-07db8faf09bcfcdbb",
+            "EnableDns64": false,
+            "Ipv6Native": false,
+            "PrivateDnsNameOptionsOnLaunch": {
+                "HostnameType": "ip-name",
+                "EnableResourceNameDnsARecord": false,
+                "EnableResourceNameDnsAAAARecord": false
+            },
+            "BlockPublicAccessStates": {
+                "InternetGatewayBlockMode": "off"
+            },
+            "SubnetId": "subnet-07db8faf09bcfcdbb",
+            "State": "available",
+            "VpcId": "vpc-0de9ff1693bd56f38",
+            "CidrBlock": "100.10.3.0/24",
+            "AvailableIpAddressCount": 249,
+            "AvailabilityZone": "ap-northeast-2b",
+            "DefaultForAz": false,
+            "MapPublicIpOnLaunch": false
+        }
+    ]
+}

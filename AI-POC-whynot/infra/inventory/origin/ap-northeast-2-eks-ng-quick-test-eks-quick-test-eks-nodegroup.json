@@ -1,0 +1,45 @@
+{
+  "nodegroup": {
+    "nodegroupName": "quick-test-eks-nodegroup",
+    "nodegroupArn": "arn:aws:eks:ap-northeast-2:061051247564:nodegroup/quick-test-eks/quick-test-eks-nodegroup/32cfe5a5-d089-0505-0684-0455526d36b0",
+    "clusterName": "quick-test-eks",
+    "version": "1.36",
+    "releaseVersion": "1.36.2-20260728",
+    "createdAt": "2026-08-04T14:42:41.461000+09:00",
+    "modifiedAt": "2026-09-09T13:03:21.550000+09:00",
+    "status": "ACTIVE",
+    "capacityType": "ON_DEMAND",
+    "scalingConfig": {
+      "minSize": 0,
+      "maxSize": 3,
+      "desiredSize": 0
+    },
+    "instanceTypes": [
+      "t3.medium"
+    ],
+    "subnets": [
+      "subnet-05da5fd501e045bff",
+      "subnet-07d8086390c8c7a95"
+    ],
+    "amiType": "AL2023_x86_64_STANDARD",
+    "nodeRole": "arn:aws:iam::061051247564:role/quick-test-eks-iam-nodegroup",
+    "labels": {},
+    "resources": {
+      "autoScalingGroups": [
+        {
+          "name": "eks-quick-test-eks-nodegroup-32cfe5a5-d089-0505-0684-0455526d36b0"
+        }
+      ]
+    },
+    "diskSize": 20,
+    "health": {
+      "issues": []
+    },
+    "updateConfig": {
+      "maxUnavailable": 1
+    },
+    "tags": {
+      "Name": "quick-test-eks-nodegroup"
+    }
+  }
+}

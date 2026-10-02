@@ -1,0 +1,6 @@
+{
+    "registryId": "730335451955",
+    "repositoryName": "ai-poc-app",
+    "lifecyclePolicyText": "{\"rules\":[{\"rulePriority\":1,\"description\":\"Remove untagged images after one day\",\"selection\":{\"tagStatus\":\"untagged\",\"countType\":\"sinceImagePushed\",\"countUnit\":\"days\",\"countNumber\":1},\"action\":{\"type\":\"expire\"}},{\"rulePriority\":2,\"description\":\"Keep the latest ten release images (date tags only, so backup-* is never pruned)\",\"selection\":{\"tagStatus\":\"tagged\",\"tagPatternList\":[\"20*\"],\"countType\":\"imageCountMoreThan\",\"countNumber\":10},\"action\":{\"type\":\"expire\"}}]}",
+    "lastEvaluatedAt": "2026-09-08T06:03:13.094000+09:00"
+}

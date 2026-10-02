@@ -1,0 +1,760 @@
+{
+    "NetworkInterfaces": [
+        {
+            "Association": {
+                "AllocationId": "eipalloc-01311a8db7c35c669",
+                "AssociationId": "eipassoc-04a1db22ba5b788b8",
+                "IpOwnerId": "730335451955",
+                "PublicDnsName": "ec2-13-209-171-221.ap-northeast-2.compute.amazonaws.com",
+                "PublicIp": "13.209.171.221"
+            },
+            "Attachment": {
+                "AttachTime": "2026-09-07T01:07:59+00:00",
+                "AttachmentId": "eni-attach-0a1472bbd16e255f3",
+                "DeleteOnTermination": false,
+                "DeviceIndex": 1,
+                "NetworkCardIndex": 0,
+                "InstanceOwnerId": "amazon-elb",
+                "Status": "attached"
+            },
+            "AvailabilityZone": "ap-northeast-2b",
+            "Description": "ELB app/AI-poc-ALB/6af48b65095d9276",
+            "Groups": [
+                {
+                    "GroupId": "sg-0a3e4ede5310ed2ed",
+                    "GroupName": "AI-poc-ALB-SG"
+                }
+            ],
+            "InterfaceType": "interface",
+            "Ipv6Addresses": [],
+            "MacAddress": "06:bd:c1:64:0f:d9",
+            "NetworkInterfaceId": "eni-0df0f62ec38390cb1",
+            "OwnerId": "730335451955",
+            "PrivateDnsName": "ip-100-10-3-84.ap-northeast-2.compute.internal",
+            "PublicDnsName": "ec2-13-209-171-221.ap-northeast-2.compute.amazonaws.com",
+            "PublicIpDnsNameOptions": {
+                "DnsHostnameType": "public-ipv4-dns-name",
+                "PublicIpv4DnsName": "ec2-13-209-171-221.ap-northeast-2.compute.amazonaws.com"
+            },
+            "PrivateIpAddress": "100.10.3.84",
+            "PrivateIpAddresses": [
+                {
+                    "Association": {
+                        "AllocationId": "eipalloc-01311a8db7c35c669",
+                        "AssociationId": "eipassoc-04a1db22ba5b788b8",
+                        "IpOwnerId": "730335451955",
+                        "PublicDnsName": "ec2-13-209-171-221.ap-northeast-2.compute.amazonaws.com",
+                        "PublicIp": "13.209.171.221"
+                    },
+                    "Primary": true,
+                    "PrivateDnsName": "ip-100-10-3-84.ap-northeast-2.compute.internal",
+                    "PrivateIpAddress": "100.10.3.84"
+                }
+            ],
+            "RequesterId": "amazon-elb",
+            "RequesterManaged": true,
+            "SourceDestCheck": true,
+            "Status": "in-use",
+            "SubnetId": "subnet-07db8faf09bcfcdbb",
+            "TagSet": [],
+            "VpcId": "vpc-0de9ff1693bd56f38",
+            "Operator": {
+                "Managed": false
+            }
+        },
+        {
+            "Attachment": {
+                "AttachTime": "2026-09-05T11:19:54+00:00",
+                "AttachmentId": "eni-attach-0522f47b83a6d9d3b",
+                "DeleteOnTermination": true,
+                "DeviceIndex": 1,
+                "NetworkCardIndex": 0,
+                "InstanceOwnerId": "478746564259",
+                "Status": "attached"
+            },
+            "AvailabilityZone": "ap-northeast-2b",
+            "Description": "Amazon EKS AI-POC-eks",
+            "Groups": [
+                {
+                    "GroupId": "sg-022e24e853dfdc241",
+                    "GroupName": "eks-cluster-sg-AI-POC-eks-1555708737"
+                }
+            ],
+            "InterfaceType": "interface",
+            "Ipv6Addresses": [],
+            "MacAddress": "06:aa:d1:c9:54:79",
+            "NetworkInterfaceId": "eni-0ea767573aa778ddd",
+            "OwnerId": "730335451955",
+            "PrivateDnsName": "ip-100-10-3-96.ap-northeast-2.compute.internal",
+            "PublicDnsName": "",
+            "PrivateIpAddress": "100.10.3.96",
+            "PrivateIpAddresses": [
+                {
+                    "Primary": true,
+                    "PrivateDnsName": "ip-100-10-3-96.ap-northeast-2.compute.internal",
+                    "PrivateIpAddress": "100.10.3.96"
+                }
+            ],
+            "RequesterId": "478746564259",
+            "RequesterManaged": true,
+            "SourceDestCheck": true,
+            "Status": "in-use",
+            "SubnetId": "subnet-07db8faf09bcfcdbb",
+            "TagSet": [],
+            "VpcId": "vpc-0de9ff1693bd56f38",
+            "Operator": {
+                "Managed": false
+            }
+        },
+        {
+            "Attachment": {
+                "AttachTime": "2026-09-08T03:54:41+00:00",
+                "AttachmentId": "eni-attach-02755f10b780fd305",
+                "DeleteOnTermination": true,
+                "DeviceIndex": 0,
+                "NetworkCardIndex": 0,
+                "InstanceId": "i-0a0e91300a4bfb61b",
+                "InstanceOwnerId": "730335451955",
+                "Status": "attached"
+            },
+            "AvailabilityZone": "ap-northeast-2b",
+            "Description": "",
+            "Groups": [
+                {
+                    "GroupId": "sg-09275dce10e4cfeff",
+                    "GroupName": "eks-cluster-sg-Dev-AI-POC-eks-1945536919"
+                }
+            ],
+            "InterfaceType": "interface",
+            "Ipv6Addresses": [],
+            "MacAddress": "06:e6:0b:f4:d2:47",
+            "NetworkInterfaceId": "eni-03c836c6f6461158a",
+            "OwnerId": "730335451955",
+            "PrivateDnsName": "ip-100-10-4-97.ap-northeast-2.compute.internal",
+            "PublicDnsName": "",
+            "PrivateIpAddress": "100.10.4.97",
+            "PrivateIpAddresses": [
+                {
+                    "Primary": true,
+                    "PrivateDnsName": "ip-100-10-4-97.ap-northeast-2.compute.internal",
+                    "PrivateIpAddress": "100.10.4.97"
+                },
+                {
+                    "Primary": false,
+                    "PrivateDnsName": "ip-100-10-4-185.ap-northeast-2.compute.internal",
+                    "PrivateIpAddress": "100.10.4.185"
+                },
+                {
+                    "Primary": false,
+                    "PrivateDnsName": "ip-100-10-4-252.ap-northeast-2.compute.internal",
+                    "PrivateIpAddress": "100.10.4.252"
+                },
+                {
+                    "Primary": false,
+                    "PrivateDnsName": "ip-100-10-4-237.ap-northeast-2.compute.internal",
+                    "PrivateIpAddress": "100.10.4.237"
+                },
+                {
+                    "Primary": false,
+                    "PrivateDnsName": "ip-100-10-4-50.ap-northeast-2.compute.internal",
+                    "PrivateIpAddress": "100.10.4.50"
+                },
+                {
+                    "Primary": false,
+                    "PrivateDnsName": "ip-100-10-4-99.ap-northeast-2.compute.internal",
+                    "PrivateIpAddress": "100.10.4.99"
+                }
+            ],
+            "RequesterManaged": false,
+            "SourceDestCheck": true,
+            "Status": "in-use",
+            "SubnetId": "subnet-071250e072cc06c64",
+            "TagSet": [
+                {
+                    "Key": "cluster.k8s.amazonaws.com/name",
+                    "Value": "Dev-AI-POC-eks"
+                },
+                {
+                    "Key": "node.k8s.amazonaws.com/instance_id",
+                    "Value": "i-0a0e91300a4bfb61b"
+                },
+                {
+                    "Key": "eks:eni:owner",
+                    "Value": "amazon-vpc-cni"
+                }
+            ],
+            "VpcId": "vpc-0de9ff1693bd56f38",
+            "Operator": {
+                "Managed": false
+            }
+        },
+        {
+            "Association": {
+                "AllocationId": "eipalloc-063a91858862a38b5",
+                "AssociationId": "eipassoc-0c33fd56ca4b688a1",
+                "IpOwnerId": "730335451955",
+                "PublicDnsName": "ec2-54-180-54-18.ap-northeast-2.compute.amazonaws.com",
+                "PublicIp": "54.180.54.18"
+            },
+            "Attachment": {
+                "AttachTime": "2026-09-07T01:07:40+00:00",
+                "AttachmentId": "eni-attach-0351b95f7443349a6",
+                "DeleteOnTermination": false,
+                "DeviceIndex": 1,
+                "NetworkCardIndex": 0,
+                "InstanceOwnerId": "amazon-elb",
+                "Status": "attached"
+            },
+            "AvailabilityZone": "ap-northeast-2c",
+            "Description": "ELB app/AI-poc-ALB/6af48b65095d9276",
+            "Groups": [
+                {
+                    "GroupId": "sg-0a3e4ede5310ed2ed",
+                    "GroupName": "AI-poc-ALB-SG"
+                }
+            ],
+            "InterfaceType": "interface",
+            "Ipv6Addresses": [],
+            "MacAddress": "0a:d3:a6:d2:8b:b1",
+            "NetworkInterfaceId": "eni-03f4d431c5d1e5418",
+            "OwnerId": "730335451955",
+            "PrivateDnsName": "ip-100-10-6-219.ap-northeast-2.compute.internal",
+            "PublicDnsName": "ec2-54-180-54-18.ap-northeast-2.compute.amazonaws.com",
+            "PublicIpDnsNameOptions": {
+                "DnsHostnameType": "public-ipv4-dns-name",
+                "PublicIpv4DnsName": "ec2-54-180-54-18.ap-northeast-2.compute.amazonaws.com"
+            },
+            "PrivateIpAddress": "100.10.6.219",
+            "PrivateIpAddresses": [
+                {
+                    "Association": {
+                        "AllocationId": "eipalloc-063a91858862a38b5",
+                        "AssociationId": "eipassoc-0c33fd56ca4b688a1",
+                        "IpOwnerId": "730335451955",
+                        "PublicDnsName": "ec2-54-180-54-18.ap-northeast-2.compute.amazonaws.com",
+                        "PublicIp": "54.180.54.18"
+                    },
+                    "Primary": true,
+                    "PrivateDnsName": "ip-100-10-6-219.ap-northeast-2.compute.internal",
+                    "PrivateIpAddress": "100.10.6.219"
+                }
+            ],
+            "RequesterId": "amazon-elb",
+            "RequesterManaged": true,
+            "SourceDestCheck": true,
+            "Status": "in-use",
+            "SubnetId": "subnet-053f2f798359b197a",
+            "TagSet": [],
+            "VpcId": "vpc-0de9ff1693bd56f38",
+            "Operator": {
+                "Managed": false
+            }
+        },
+        {
+            "Attachment": {
+                "AttachTime": "2026-09-08T03:55:14+00:00",
+                "AttachmentId": "eni-attach-0d89ef99a5441d6cf",
+                "DeleteOnTermination": true,
+                "DeviceIndex": 1,
+                "NetworkCardIndex": 0,
+                "InstanceId": "i-0ecf2300bc909a2ba",
+                "InstanceOwnerId": "730335451955",
+                "Status": "attached"
+            },
+            "AvailabilityZone": "ap-northeast-2c",
+            "Description": "aws-K8S-i-0ecf2300bc909a2ba",
+            "Groups": [
+                {
+                    "GroupId": "sg-09275dce10e4cfeff",
+                    "GroupName": "eks-cluster-sg-Dev-AI-POC-eks-1945536919"
+                }
+            ],
+            "InterfaceType": "interface",
+            "Ipv6Addresses": [],
+            "MacAddress": "0a:26:62:d5:17:e3",
+            "NetworkInterfaceId": "eni-0b441d04e69c59696",
+            "OwnerId": "730335451955",
+            "PrivateDnsName": "ip-100-10-7-218.ap-northeast-2.compute.internal",
+            "PublicDnsName": "",
+            "PrivateIpAddress": "100.10.7.218",
+            "PrivateIpAddresses": [
+                {
+                    "Primary": true,
+                    "PrivateDnsName": "ip-100-10-7-218.ap-northeast-2.compute.internal",
+                    "PrivateIpAddress": "100.10.7.218"
+                },
+                {
+                    "Primary": false,
+                    "PrivateDnsName": "ip-100-10-7-202.ap-northeast-2.compute.internal",
+                    "PrivateIpAddress": "100.10.7.202"
+                },
+                {
+                    "Primary": false,
+                    "PrivateDnsName": "ip-100-10-7-186.ap-northeast-2.compute.internal",
+                    "PrivateIpAddress": "100.10.7.186"
+                },
+                {
+                    "Primary": false,
+                    "PrivateDnsName": "ip-100-10-7-15.ap-northeast-2.compute.internal",
+                    "PrivateIpAddress": "100.10.7.15"
+                },
+                {
+                    "Primary": false,
+                    "PrivateDnsName": "ip-100-10-7-156.ap-northeast-2.compute.internal",
+                    "PrivateIpAddress": "100.10.7.156"
+                },
+                {
+                    "Primary": false,
+                    "PrivateDnsName": "ip-100-10-7-236.ap-northeast-2.compute.internal",
+                    "PrivateIpAddress": "100.10.7.236"
+                }
+            ],
+            "RequesterId": "AROA2UC3CTMZ46LGU5LMQ:i-0ecf2300bc909a2ba",
+            "RequesterManaged": false,
+            "SourceDestCheck": true,
+            "Status": "in-use",
+            "SubnetId": "subnet-0ac1a0b3cf1fb3c1f",
+            "TagSet": [
+                {
+                    "Key": "cluster.k8s.amazonaws.com/name",
+                    "Value": "Dev-AI-POC-eks"
+                },
+                {
+                    "Key": "eks:eni:owner",
+                    "Value": "amazon-vpc-cni"
+                },
+                {
+                    "Key": "node.k8s.amazonaws.com/instance_id",
+                    "Value": "i-0ecf2300bc909a2ba"
+                },
+                {
+                    "Key": "node.k8s.amazonaws.com/createdAt",
+                    "Value": "2026-09-08T03:55:13Z"
+                }
+            ],
+            "VpcId": "vpc-0de9ff1693bd56f38",
+            "Operator": {
+                "Managed": false
+            }
+        },
+        {
+            "Attachment": {
+                "AttachTime": "2026-09-08T03:53:42+00:00",
+                "AttachmentId": "eni-attach-0a0088d4ba5a422c7",
+                "DeleteOnTermination": true,
+                "DeviceIndex": 1,
+                "NetworkCardIndex": 0,
+                "InstanceOwnerId": "877343745528",
+                "Status": "attached"
+            },
+            "AvailabilityZone": "ap-northeast-2c",
+            "Description": "Amazon EKS Dev-AI-POC-eks",
+            "Groups": [
+                {
+                    "GroupId": "sg-09275dce10e4cfeff",
+                    "GroupName": "eks-cluster-sg-Dev-AI-POC-eks-1945536919"
+                }
+            ],
+            "InterfaceType": "interface",
+            "Ipv6Addresses": [],
+            "MacAddress": "0a:d6:90:79:fd:2b",
+            "NetworkInterfaceId": "eni-0e45cee8aae9a3522",
+            "OwnerId": "730335451955",
+            "PrivateDnsName": "ip-100-10-6-15.ap-northeast-2.compute.internal",
+            "PublicDnsName": "",
+            "PrivateIpAddress": "100.10.6.15",
+            "PrivateIpAddresses": [
+                {
+                    "Primary": true,
+                    "PrivateDnsName": "ip-100-10-6-15.ap-northeast-2.compute.internal",
+                    "PrivateIpAddress": "100.10.6.15"
+                }
+            ],
+            "RequesterId": "877343745528",
+            "RequesterManaged": true,
+            "SourceDestCheck": true,
+            "Status": "in-use",
+            "SubnetId": "subnet-053f2f798359b197a",
+            "TagSet": [],
+            "VpcId": "vpc-0de9ff1693bd56f38",
+            "Operator": {
+                "Managed": false
+            }
+        },
+        {
+            "Attachment": {
+                "AttachTime": "2026-09-08T03:54:41+00:00",
+                "AttachmentId": "eni-attach-0c8cc7c517ca755c8",
+                "DeleteOnTermination": true,
+                "DeviceIndex": 0,
+                "NetworkCardIndex": 0,
+                "InstanceId": "i-0ecf2300bc909a2ba",
+                "InstanceOwnerId": "730335451955",
+                "Status": "attached"
+            },
+            "AvailabilityZone": "ap-northeast-2c",
+            "Description": "",
+            "Groups": [
+                {
+                    "GroupId": "sg-09275dce10e4cfeff",
+                    "GroupName": "eks-cluster-sg-Dev-AI-POC-eks-1945536919"
+                }
+            ],
+            "InterfaceType": "interface",
+            "Ipv6Addresses": [],
+            "MacAddress": "0a:61:b2:0e:54:6f",
+            "NetworkInterfaceId": "eni-087ab826d6f9a44ec",
+            "OwnerId": "730335451955",
+            "PrivateDnsName": "ip-100-10-7-192.ap-northeast-2.compute.internal",
+            "PublicDnsName": "",
+            "PrivateIpAddress": "100.10.7.192",
+            "PrivateIpAddresses": [
+                {
+                    "Primary": true,
+                    "PrivateDnsName": "ip-100-10-7-192.ap-northeast-2.compute.internal",
+                    "PrivateIpAddress": "100.10.7.192"
+                },
+                {
+                    "Primary": false,
+                    "PrivateDnsName": "ip-100-10-7-127.ap-northeast-2.compute.internal",
+                    "PrivateIpAddress": "100.10.7.127"
+                },
+                {
+                    "Primary": false,
+                    "PrivateDnsName": "ip-100-10-7-77.ap-northeast-2.compute.internal",
+                    "PrivateIpAddress": "100.10.7.77"
+                },
+                {
+                    "Primary": false,
+                    "PrivateDnsName": "ip-100-10-7-221.ap-northeast-2.compute.internal",
+                    "PrivateIpAddress": "100.10.7.221"
+                },
+                {
+                    "Primary": false,
+                    "PrivateDnsName": "ip-100-10-7-231.ap-northeast-2.compute.internal",
+                    "PrivateIpAddress": "100.10.7.231"
+                },
+                {
+                    "Primary": false,
+                    "PrivateDnsName": "ip-100-10-7-116.ap-northeast-2.compute.internal",
+                    "PrivateIpAddress": "100.10.7.116"
+                }
+            ],
+            "RequesterManaged": false,
+            "SourceDestCheck": true,
+            "Status": "in-use",
+            "SubnetId": "subnet-0ac1a0b3cf1fb3c1f",
+            "TagSet": [
+                {
+                    "Key": "eks:eni:owner",
+                    "Value": "amazon-vpc-cni"
+                },
+                {
+                    "Key": "cluster.k8s.amazonaws.com/name",
+                    "Value": "Dev-AI-POC-eks"
+                },
+                {
+                    "Key": "node.k8s.amazonaws.com/instance_id",
+                    "Value": "i-0ecf2300bc909a2ba"
+                }
+            ],
+            "VpcId": "vpc-0de9ff1693bd56f38",
+            "Operator": {
+                "Managed": false
+            }
+        },
+        {
+            "Association": {
+                "AllocationId": "eipalloc-04bc95be0f29b9d94",
+                "AssociationId": "eipassoc-041574bb51e057d8f",
+                "IpOwnerId": "730335451955",
+                "PublicDnsName": "ec2-3-37-120-58.ap-northeast-2.compute.amazonaws.com",
+                "PublicIp": "3.37.120.58"
+            },
+            "Attachment": {
+                "AttachTime": "2026-09-07T01:07:20+00:00",
+                "AttachmentId": "eni-attach-031fe40ede3551c64",
+                "DeleteOnTermination": false,
+                "DeviceIndex": 1,
+                "NetworkCardIndex": 0,
+                "InstanceOwnerId": "amazon-elb",
+                "Status": "attached"
+            },
+            "AvailabilityZone": "ap-northeast-2a",
+            "Description": "ELB app/AI-poc-ALB/6af48b65095d9276",
+            "Groups": [
+                {
+                    "GroupId": "sg-0a3e4ede5310ed2ed",
+                    "GroupName": "AI-poc-ALB-SG"
+                }
+            ],
+            "InterfaceType": "interface",
+            "Ipv6Addresses": [],
+            "MacAddress": "02:7c:42:1a:36:35",
+            "NetworkInterfaceId": "eni-08a36a844283e0f84",
+            "OwnerId": "730335451955",
+            "PrivateDnsName": "ip-100-10-0-216.ap-northeast-2.compute.internal",
+            "PublicDnsName": "ec2-3-37-120-58.ap-northeast-2.compute.amazonaws.com",
+            "PublicIpDnsNameOptions": {
+                "DnsHostnameType": "public-ipv4-dns-name",
+                "PublicIpv4DnsName": "ec2-3-37-120-58.ap-northeast-2.compute.amazonaws.com"
+            },
+            "PrivateIpAddress": "100.10.0.216",
+            "PrivateIpAddresses": [
+                {
+                    "Association": {
+                        "AllocationId": "eipalloc-04bc95be0f29b9d94",
+                        "AssociationId": "eipassoc-041574bb51e057d8f",
+                        "IpOwnerId": "730335451955",
+                        "PublicDnsName": "ec2-3-37-120-58.ap-northeast-2.compute.amazonaws.com",
+                        "PublicIp": "3.37.120.58"
+                    },
+                    "Primary": true,
+                    "PrivateDnsName": "ip-100-10-0-216.ap-northeast-2.compute.internal",
+                    "PrivateIpAddress": "100.10.0.216"
+                }
+            ],
+            "RequesterId": "amazon-elb",
+            "RequesterManaged": true,
+            "SourceDestCheck": true,
+            "Status": "in-use",
+            "SubnetId": "subnet-0b8b4832085705b56",
+            "TagSet": [],
+            "VpcId": "vpc-0de9ff1693bd56f38",
+            "Operator": {
+                "Managed": false
+            }
+        },
+        {
+            "Association": {
+                "AllocationId": "eipalloc-0d00ce1428b52c74a",
+                "AssociationId": "eipassoc-07d4b53978f373b24",
+                "IpOwnerId": "730335451955",
+                "PublicDnsName": "ec2-13-125-117-242.ap-northeast-2.compute.amazonaws.com",
+                "PublicIp": "13.125.117.242"
+            },
+            "Attachment": {
+                "AttachmentId": "ela-attach-03d20d68e292103df",
+                "DeleteOnTermination": false,
+                "DeviceIndex": 1,
+                "InstanceOwnerId": "amazon-aws",
+                "Status": "attached"
+            },
+            "AvailabilityZone": "ap-northeast-2a",
+            "Description": "Interface for NAT Gateway nat-0720e9291b442e603",
+            "Groups": [],
+            "InterfaceType": "nat_gateway",
+            "Ipv6Addresses": [],
+            "MacAddress": "02:ed:40:6d:a4:75",
+            "NetworkInterfaceId": "eni-093b2ebcf0ae6c4e1",
+            "OwnerId": "730335451955",
+            "PrivateDnsName": "ip-100-10-0-13.ap-northeast-2.compute.internal",
+            "PublicDnsName": "ec2-13-125-117-242.ap-northeast-2.compute.amazonaws.com",
+            "PublicIpDnsNameOptions": {
+                "DnsHostnameType": "public-ipv4-dns-name",
+                "PublicIpv4DnsName": "ec2-13-125-117-242.ap-northeast-2.compute.amazonaws.com"
+            },
+            "PrivateIpAddress": "100.10.0.13",
+            "PrivateIpAddresses": [
+                {
+                    "Association": {
+                        "AllocationId": "eipalloc-0d00ce1428b52c74a",
+                        "AssociationId": "eipassoc-07d4b53978f373b24",
+                        "IpOwnerId": "730335451955",
+                        "PublicDnsName": "ec2-13-125-117-242.ap-northeast-2.compute.amazonaws.com",
+                        "PublicIp": "13.125.117.242"
+                    },
+                    "Primary": true,
+                    "PrivateDnsName": "ip-100-10-0-13.ap-northeast-2.compute.internal",
+                    "PrivateIpAddress": "100.10.0.13"
+                }
+            ],
+            "RequesterId": "300325803109",
+            "RequesterManaged": true,
+            "SourceDestCheck": false,
+            "Status": "in-use",
+            "SubnetId": "subnet-0b8b4832085705b56",
+            "TagSet": [],
+            "VpcId": "vpc-0de9ff1693bd56f38",
+            "Operator": {
+                "Managed": false
+            }
+        },
+        {
+            "Attachment": {
+                "AttachTime": "2026-09-08T03:48:44+00:00",
+                "AttachmentId": "eni-attach-09895d3e672849dbf",
+                "DeleteOnTermination": true,
+                "DeviceIndex": 1,
+                "NetworkCardIndex": 0,
+                "InstanceOwnerId": "877343745528",
+                "Status": "attached"
+            },
+            "AvailabilityZone": "ap-northeast-2a",
+            "Description": "Amazon EKS Dev-AI-POC-eks",
+            "Groups": [
+                {
+                    "GroupId": "sg-09275dce10e4cfeff",
+                    "GroupName": "eks-cluster-sg-Dev-AI-POC-eks-1945536919"
+                }
+            ],
+            "InterfaceType": "interface",
+            "Ipv6Addresses": [],
+            "MacAddress": "02:99:b2:84:13:55",
+            "NetworkInterfaceId": "eni-00945dd579ca31375",
+            "OwnerId": "730335451955",
+            "PrivateDnsName": "ip-100-10-0-130.ap-northeast-2.compute.internal",
+            "PublicDnsName": "",
+            "PrivateIpAddress": "100.10.0.130",
+            "PrivateIpAddresses": [
+                {
+                    "Primary": true,
+                    "PrivateDnsName": "ip-100-10-0-130.ap-northeast-2.compute.internal",
+                    "PrivateIpAddress": "100.10.0.130"
+                }
+            ],
+            "RequesterId": "877343745528",
+            "RequesterManaged": true,
+            "SourceDestCheck": true,
+            "Status": "in-use",
+            "SubnetId": "subnet-0b8b4832085705b56",
+            "TagSet": [],
+            "VpcId": "vpc-0de9ff1693bd56f38",
+            "Operator": {
+                "Managed": false
+            }
+        },
+        {
+            "Attachment": {
+                "AttachTime": "2026-09-07T01:05:28+00:00",
+                "AttachmentId": "eni-attach-097219e3cfab0f993",
+                "DeleteOnTermination": true,
+                "DeviceIndex": 0,
+                "NetworkCardIndex": 0,
+                "InstanceId": "i-0f80645166caaff36",
+                "InstanceOwnerId": "730335451955",
+                "Status": "attached"
+            },
+            "AvailabilityZone": "ap-northeast-2a",
+            "Description": "",
+            "Groups": [
+                {
+                    "GroupId": "sg-00fcb3e3dac49da71",
+                    "GroupName": "Metanet-GitLab-SG"
+                }
+            ],
+            "InterfaceType": "interface",
+            "Ipv6Addresses": [],
+            "MacAddress": "02:75:f8:38:a9:6d",
+            "NetworkInterfaceId": "eni-0d392dd533aa19c19",
+            "OwnerId": "730335451955",
+            "PrivateDnsName": "ip-100-10-2-115.ap-northeast-2.compute.internal",
+            "PublicDnsName": "",
+            "PrivateIpAddress": "100.10.2.115",
+            "PrivateIpAddresses": [
+                {
+                    "Primary": true,
+                    "PrivateDnsName": "ip-100-10-2-115.ap-northeast-2.compute.internal",
+                    "PrivateIpAddress": "100.10.2.115"
+                }
+            ],
+            "RequesterManaged": false,
+            "SourceDestCheck": true,
+            "Status": "in-use",
+            "SubnetId": "subnet-0d290d58f65b8af9b",
+            "TagSet": [],
+            "VpcId": "vpc-0de9ff1693bd56f38",
+            "Operator": {
+                "Managed": false
+            }
+        },
+        {
+            "Attachment": {
+                "AttachTime": "2026-09-05T05:30:59+00:00",
+                "AttachmentId": "eni-attach-0a7a97f0aca4f4a41",
+                "DeleteOnTermination": true,
+                "DeviceIndex": 0,
+                "NetworkCardIndex": 0,
+                "InstanceId": "i-0ca57a18e69b73a1f",
+                "InstanceOwnerId": "730335451955",
+                "Status": "attached"
+            },
+            "AvailabilityZone": "ap-northeast-2a",
+            "Description": "",
+            "Groups": [
+                {
+                    "GroupId": "sg-0b0fc86fc94232df3",
+                    "GroupName": "AI-POC-bastion-sg"
+                }
+            ],
+            "InterfaceType": "interface",
+            "Ipv6Addresses": [],
+            "MacAddress": "02:d8:6e:24:5f:e1",
+            "NetworkInterfaceId": "eni-0f537bed71c9624ff",
+            "OwnerId": "730335451955",
+            "PrivateDnsName": "ip-100-10-1-91.ap-northeast-2.compute.internal",
+            "PublicDnsName": "",
+            "PrivateIpAddress": "100.10.1.91",
+            "PrivateIpAddresses": [
+                {
+                    "Primary": true,
+                    "PrivateDnsName": "ip-100-10-1-91.ap-northeast-2.compute.internal",
+                    "PrivateIpAddress": "100.10.1.91"
+                }
+            ],
+            "RequesterManaged": false,
+            "SourceDestCheck": true,
+            "Status": "in-use",
+            "SubnetId": "subnet-01e0e91f3c43b57f2",
+            "TagSet": [],
+            "VpcId": "vpc-0de9ff1693bd56f38",
+            "Operator": {
+                "Managed": false
+            }
+        },
+        {
+            "Attachment": {
+                "AttachTime": "2026-09-05T11:25:53+00:00",
+                "AttachmentId": "eni-attach-0d6c2fa6b671a81e5",
+                "DeleteOnTermination": true,
+                "DeviceIndex": 1,
+                "NetworkCardIndex": 0,
+                "InstanceOwnerId": "478746564259",
+                "Status": "attached"
+            },
+            "AvailabilityZone": "ap-northeast-2a",
+            "Description": "Amazon EKS AI-POC-eks",
+            "Groups": [
+                {
+                    "GroupId": "sg-022e24e853dfdc241",
+                    "GroupName": "eks-cluster-sg-AI-POC-eks-1555708737"
+                }
+            ],
+            "InterfaceType": "interface",
+            "Ipv6Addresses": [],
+            "MacAddress": "02:a7:e0:60:ac:27",
+            "NetworkInterfaceId": "eni-04fb76a806bf721a3",
+            "OwnerId": "730335451955",
+            "PrivateDnsName": "ip-100-10-0-207.ap-northeast-2.compute.internal",
+            "PublicDnsName": "",
+            "PrivateIpAddress": "100.10.0.207",
+            "PrivateIpAddresses": [
+                {
+                    "Primary": true,
+                    "PrivateDnsName": "ip-100-10-0-207.ap-northeast-2.compute.internal",
+                    "PrivateIpAddress": "100.10.0.207"
+                }
+            ],
+            "RequesterId": "478746564259",
+            "RequesterManaged": true,
+            "SourceDestCheck": true,
+            "Status": "in-use",
+            "SubnetId": "subnet-0b8b4832085705b56",
+            "TagSet": [],
+            "VpcId": "vpc-0de9ff1693bd56f38",
+            "Operator": {
+                "Managed": false
+            }
+        }
+    ]
+}

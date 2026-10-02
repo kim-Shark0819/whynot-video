@@ -1,0 +1,15 @@
+{
+    "accessEntry": {
+        "clusterName": "Dev-AI-POC-eks",
+        "principalArn": "arn:aws:iam::730335451955:role/Dev-AI-POC-eks-node-role",
+        "kubernetesGroups": [
+            "system:nodes"
+        ],
+        "accessEntryArn": "arn:aws:eks:ap-northeast-2:730335451955:access-entry/Dev-AI-POC-eks/role/730335451955/Dev-AI-POC-eks-node-role/aad03f93-a762-1d67-ea9d-8c3b100e2165",
+        "createdAt": "2026-09-08T12:54:37.699000+09:00",
+        "modifiedAt": "2026-09-08T12:54:37.699000+09:00",
+        "tags": {},
+        "username": "system:node:{{EC2PrivateDNSName}}",
+        "type": "EC2_LINUX"
+    }
+}

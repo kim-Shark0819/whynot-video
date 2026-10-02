@@ -1,0 +1,8 @@
+{
+    "accessEntries": [
+        "arn:aws:iam::730335451955:role/AI-POC-bastion-role",
+        "arn:aws:iam::730335451955:role/aws-service-role/eks.amazonaws.com/AWSServiceRoleForAmazonEKS",
+        "arn:aws:iam::730335451955:user/kimdongkyu@metanetx.com",
+        "arn:aws:iam::730335451955:user/kiro-iam"
+    ]
+}

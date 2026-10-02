@@ -1,0 +1,67 @@
+{
+    "cluster": {
+        "name": "AI-POC-eks",
+        "arn": "arn:aws:eks:ap-northeast-2:730335451955:cluster/AI-POC-eks",
+        "createdAt": "2026-09-05T18:53:14.307000+09:00",
+        "version": "1.36",
+        "endpoint": "https://2A49105728911261AD4F240BFD9A8AB1.yl4.ap-northeast-2.eks.amazonaws.com",
+        "roleArn": "arn:aws:iam::730335451955:role/AI-POC-eks-cluster-role",
+        "resourcesVpcConfig": {
+            "subnetIds": [
+                "subnet-01e0e91f3c43b57f2",
+                "subnet-071250e072cc06c64",
+                "subnet-0ac1a0b3cf1fb3c1f",
+                "subnet-0b8b4832085705b56",
+                "subnet-07db8faf09bcfcdbb",
+                "subnet-053f2f798359b197a"
+            ],
+            "securityGroupIds": [],
+            "clusterSecurityGroupId": "sg-022e24e853dfdc241",
+            "vpcId": "vpc-0de9ff1693bd56f38",
+            "endpointPublicAccess": false,
+            "endpointPrivateAccess": true,
+            "publicAccessCidrs": []
+        },
+        "kubernetesNetworkConfig": {
+            "serviceIpv4Cidr": "10.100.0.0/16",
+            "ipFamily": "ipv4",
+            "elasticLoadBalancing": {
+                "enabled": false
+            }
+        },
+        "logging": {
+            "clusterLogging": [
+                {
+                    "types": [
+                        "api",
+                        "audit",
+                        "authenticator",
+                        "controllerManager",
+                        "scheduler"
+                    ],
+                    "enabled": false
+                }
+            ]
+        },
+        "identity": {
+            "oidc": {
+                "issuer": "https://oidc.eks.ap-northeast-2.amazonaws.com/id/2A49105728911261AD4F240BFD9A8AB1"
+            }
+        },
+        "status": "ACTIVE",
+        "certificateAuthority": {
+            "data": "LS0tLS1CRUdJTiBDRVJUSUZJQ0FURS0tLS0tCk1JSUREakNDQWZhZ0F3SUJBZ0lSQUlTdFRsRnRLVFY0M29sV0Z0by9CdkV3RFFZSktvWklodmNOQVFFTEJRQXcKRlRFVE1CRUdBMVVFQXhNS2EzVmlaWEp1WlhSbGN6QWVGdzB5TmpBNU1EVXdPVFV6TWpGYUZ3MHpNVEE1TURRdwpPVFV6TWpGYU1CVXhFekFSQmdOVkJBTVRDbXQxWW1WeWJtVjBaWE13Z2dFaU1BMEdDU3FHU0liM0RRRUJBUVVBCkE0SUJEd0F3Z2dFS0FvSUJBUURHdVJ3SUhhbTBnYjJTZnlkRHJUSTgzbHl6Y0x0Yk5OM1AxRjJKdjNaM0FWS2UKY2NBc3B0S3plMlFackZHZkRPQ1RBaU5VYXVid3RDMktRbis4WFZEbFpXSEExME5TdVk1M1YyNVU1RGNJTnI4agp6djI3aEpKRCtVMEZsMytuSHlWc0cwWG1CemZyRkxIU3podVBhRjVxTTFjejVRMi9nR3p6MHNTaXNBYVZJRUVaCmU1aktJUW5HeGY1MHc1VjVCUzBZd1YzaTY3S0ExdEFreEx0M2tETERCQTNjemw0VGRGZ240aHJkRHN2TlluR1gKZHo3cG96UlFONWxDUTNSQ1VJRXlETnNDUGxldC8yMlZlSWNsbEZpdG5sM3B1Y0w4NHhFZm5jN1dwMVV3Z3hSWAptanFaOC9nRFdTZm9HdzRWeW8zNnF0QnBKOVBPVEFUMllQaVJtaU9uQWdNQkFBR2pXVEJYTUE0R0ExVWREd0VCCi93UUVBd0lDcERBUEJnTlZIUk1CQWY4RUJUQURBUUgvTUIwR0ExVWREZ1FXQkJTQzMwYi9wL0ZUSUphUi9xRlQKVWRNNW00K2VWVEFWQmdOVkhSRUVEakFNZ2dwcmRXSmxjbTVsZEdWek1BMEdDU3FHU0liM0RRRUJDd1VBQTRJQgpBUUErVStWZ0c5ajg3cXRvdTkyYUdNZ1RKRDUyOS84MEhudnFPT2VyQ0ZCKzJ1TTBMVzFIbjk3NXVYakd2V0NYClhaZDA2Q0FmZnZKcE5xRWY2SmZaQVJZeVNiL1RFOFBvbkx3UjNnRGFEV1h1REdRM1RjYnI3VUxnTEFzYnRuT2QKMlBPYjYzdExwNzNYOW5sc3c5OFhRcFlhTzRkSFBuOE8raEpOUENYbmlWYnFINVpxZklLMzdFcHlGNFRKcWRxRAp0cmx3bmVLdlErb2lub1Nydy9yMForcHltbU5sVkpKTG9MRml4VlVCNkVmeVJYZ1Y5d0U0Rml3ZlIrckJ2UGwxCk01dHVUb1ovMjBwSThRZXdMbFJ6bURxVUVCYTg5bmZLdFQvMGRmUVJ6VnZEcUhPVUgzbGEwKzBzVmlKcTNzTzkKQkxyVitaWWV5Si9KNzdZaWhKU0RTV1BNCi0tLS0tRU5EIENFUlRJRklDQVRFLS0tLS0K"
+        },
+        "platformVersion": "eks.13",
+        "tags": {
+            "Project": "ai-poc"
+        },
+        "accessConfig": {
+            "authenticationMode": "API_AND_CONFIG_MAP"
+        },
+        "upgradePolicy": {
+            "supportType": "EXTENDED"
+        },
+        "deletionProtection": false
+    }
+}

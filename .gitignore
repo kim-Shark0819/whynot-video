@@ -1,0 +1,40 @@
+test.json
+
+# 배포 스크립트가 만드는 작업 디렉터리 (소스 아카이브, SSM 파라미터)
+.build/
+.ssm.json
+
+# 렌더링 산출물 (deploy/config.env + 템플릿에서 재생성 가능)
+AI-POC*/deploy/rendered/
+
+# GitLab 접속 정보와 개인 액세스 토큰
+gitlab_정보.md
+
+# 참고용으로 받은 제3자 저작물. 트리트먼트 형식을 파악하는 데만 썼다.
+# 실제 영화 기획안이라 저장소로 배포하지 않는다. 필요하면 별도 경로로 공유할 것.
+*.pdf
+
+# 환경 설정 실물. 내장 계정 비밀번호가 평문으로 들어 있어 공유 저장소에 올리지 않는다.
+# 팀원은 config.env.example 을 복사해 값을 채운다.
+AI-POC*/deploy/config.env
+
+# 파이썬 캐시
+__pycache__/
+*.py[cod]
+
+# 에디터 / 로컬 도구 설정
+.claude/
+.vscode/
+.idea/
+*.swp
+.DS_Store
+Thumbs.db
+
+.kiro/out/
+.worktrees/
+# terraform 로컬 설정. AI-POC/.gitignore 와 같은 원칙 — backend/tfvars/state 는 커밋하지 않는다.
+# .terraform.lock.hcl 은 커밋한다 (provider 버전 고정).
+platform/terraform/**/backend.hcl
+platform/terraform/**/*.tfvars
+platform/terraform/**/.terraform/
+platform/terraform/**/*.tfstate*

@@ -1,0 +1,73 @@
+# 플랫폼 파일 목록 — 모든 AI-POC* 디렉터리에 같은 내용으로 있어야 하는 파일.
+#
+# 여기 적힌 파일은 제품(스토리 개발, 영상, 콘티...)이 아니라 공통 기반이다:
+# 인증·계정 가드, 관리자·프로젝트 저장소(Neptune), LLM 게이트웨이, 모델 등록, 프롬프트 계층,
+# 컨테이너 빌드, IAM/S3 정책 템플릿, 네임스페이스/서비스어카운트 매니페스트.
+#
+# 규칙 (.kiro/steering/platform-files.md 와 같다):
+#   1. 공통 수정은 AI-POC/ 에서 먼저 하고 다른 디렉터리로 옮긴다.
+#   2. 고객 디렉터리에서 이 파일을 직접 고치지 않는다. 고객 요구가 이 파일을 건드리면
+#      AI-POC/ 에 반영 가능한지 먼저 판단한다.
+#   3. CI 의 platform-drift 잡이 디렉터리 간 SHA-256 을 비교해 다르면 경고한다(차단 아님).
+#
+# 경로는 각 고객 디렉터리 기준 상대 경로. 빈 줄과 # 은 무시된다.
+# 2026-09 기준: gateway.py, graph_store.py, prompt_layers.py, roles/_json.py, roles/validator.py,
+# frontend/Dockerfile, frontend/nginx.conf, infra/build-deploy.sh, deploy/render.py,
+# deploy/preflight.ps1 은 이매지너스가 AI-POC 보다 앞서 있어 첫 실행부터 경고가 난다(알려진 상태).
+
+# --- 앱: 계정·인증·저장소·LLM ---
+app/Dockerfile
+app/requirements.txt
+app/src/__init__.py
+app/src/account_guard.py
+app/src/gateway.py
+app/src/graph_store.py
+app/src/model_registry.py
+app/src/providers.py
+app/src/prompt_layers.py
+app/src/pdf_export.py
+app/src/styles.py
+app/src/roles/__init__.py
+app/src/roles/_json.py
+app/src/roles/validator.py
+app/src/roles/bible.py
+app/src/roles/vision.py
+app/src/roles/writer.py
+
+# --- 프론트엔드 컨테이너 ---
+.dockerignore
+frontend/Dockerfile
+frontend/.dockerignore
+frontend/nginx.conf
+
+# --- 인프라 정책 템플릿 ---
+infra/app-s3-policy.json.tmpl
+infra/irsa-trust-policy.json.tmpl
+infra/ecr-lifecycle.json
+infra/neptune-sg-ingress.json
+infra/s3-encryption.json
+infra/s3-lifecycle.json
+infra/s3-tls-policy.json.tmpl
+infra/build-deploy.sh
+
+# --- 매니페스트 / 배포 도구 ---
+k8s/namespace.yaml.tmpl
+k8s/service-account.yaml.tmpl
+k8s/model-catalog.yaml.tmpl
+deploy/render.py
+deploy/preflight.ps1
+deploy/source-stamp.ps1
+deploy/bastion.ps1
+
+# --- 공통 스토리·영상 모듈 (스토리 재설계 PRD 13.1) ---
+# 빌드 컨텍스트가 <고객>/app 이라 저장소 루트 공유 디렉터리는 이미지에 들어가지 않는다.
+# 그래서 기존 플랫폼 파일과 같은 사본 방식을 쓴다. check_story_module_parity.py 가 대조한다.
+# 고객별 진입점(AI-POC-whynot/app/src/story_host.py, AI-POC/app/src/story_contract.py)은
+# 플랫폼 파일이 아니다 — 고객마다 다르다.
+
+# story_video/ 는 여기 등록하지 않는다.
+# 이 목록은 **모든** AI-POC* 디렉터리에 같은 내용으로 있어야 하는 파일이고,
+# CI platform-drift 가 네 디렉터리를 대조한다. story_video 는 AI-POC 와
+# AI-POC-whynot 두 곳만 쓰는 모듈이라 등록하면 keyeast·이매지너스에서 영구히
+# MISSING 으로 잡힌다(실측 18건). 두 고객 사이 동일성은
+# AI-POC-whynot/tools/check_story_module_parity.py 가 SHA 로 직접 본다.

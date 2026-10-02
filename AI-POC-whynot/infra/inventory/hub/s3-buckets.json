@@ -1,0 +1,53 @@
+{
+    "Buckets": [
+        {
+            "Name": "ai-poc-730335451955",
+            "CreationDate": "2026-09-05T01:27:17+00:00",
+            "BucketArn": "arn:aws:s3:::ai-poc-730335451955"
+        },
+        {
+            "Name": "aws-cloudtrail-logs-730335451955-624a6bdf",
+            "CreationDate": "2026-04-22T15:55:56+00:00",
+            "BucketArn": "arn:aws:s3:::aws-cloudtrail-logs-730335451955-624a6bdf"
+        },
+        {
+            "Name": "aws-quicksetup-patchpolicy-access-log-730335451955-9379-bp8k7",
+            "CreationDate": "2026-07-13T00:15:24+00:00",
+            "BucketArn": "arn:aws:s3:::aws-quicksetup-patchpolicy-access-log-730335451955-9379-bp8k7"
+        },
+        {
+            "Name": "aws-quicksetup-patchpolicy-access-log-730335451955-960b-i8lke",
+            "CreationDate": "2026-07-13T00:13:19+00:00",
+            "BucketArn": "arn:aws:s3:::aws-quicksetup-patchpolicy-access-log-730335451955-960b-i8lke"
+        },
+        {
+            "Name": "castai-logo-public",
+            "CreationDate": "2026-04-22T17:27:01+00:00",
+            "BucketArn": "arn:aws:s3:::castai-logo-public"
+        },
+        {
+            "Name": "config-bucket-730335451955",
+            "CreationDate": "2026-04-22T16:30:24+00:00",
+            "BucketArn": "arn:aws:s3:::config-bucket-730335451955"
+        },
+        {
+            "Name": "grafana-data-mtp-01",
+            "CreationDate": "2026-04-22T18:19:30+00:00",
+            "BucketArn": "arn:aws:s3:::grafana-data-mtp-01"
+        },
+        {
+            "Name": "s3-goodrich-scheduler",
+            "CreationDate": "2026-04-22T15:59:05+00:00",
+            "BucketArn": "arn:aws:s3:::s3-goodrich-scheduler"
+        },
+        {
+            "Name": "s3-goodrich-scheduler-test",
+            "CreationDate": "2026-04-22T18:07:00+00:00",
+            "BucketArn": "arn:aws:s3:::s3-goodrich-scheduler-test"
+        }
+    ],
+    "Owner": {
+        "ID": "761be1f9a0c18f0f7c6a89cce689dec2f2c0b8dcfcbf18a9792fb34564614609"
+    },
+    "Prefix": null
+}

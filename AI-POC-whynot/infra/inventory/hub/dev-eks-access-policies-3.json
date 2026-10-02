@@ -1,0 +1,5 @@
+{
+    "associatedAccessPolicies": [],
+    "clusterName": "Dev-AI-POC-eks",
+    "principalArn": "arn:aws:iam::730335451955:role/Dev-AI-POC-eks-node-role"
+}

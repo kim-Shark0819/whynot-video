@@ -1,0 +1,31 @@
+{
+    "CertificateSummaryList": [
+        {
+            "CertificateArn": "arn:aws:acm:ap-northeast-2:730335451955:certificate/9fd7fdac-7ed2-45e4-a810-6399803da5e4",
+            "DomainName": "*.meta-clouds.com",
+            "SubjectAlternativeNameSummaries": [
+                "*.meta-clouds.com",
+                "meta-clouds.com"
+            ],
+            "HasAdditionalSubjectAlternativeNames": false,
+            "Status": "ISSUED",
+            "Type": "AMAZON_ISSUED",
+            "KeyAlgorithm": "RSA-2048",
+            "KeyUsages": [
+                "DIGITAL_SIGNATURE",
+                "KEY_ENCIPHERMENT"
+            ],
+            "ExtendedKeyUsages": [
+                "TLS_WEB_SERVER_AUTHENTICATION"
+            ],
+            "ExportOption": "DISABLED",
+            "InUse": true,
+            "Exported": false,
+            "RenewalEligibility": "ELIGIBLE",
+            "NotBefore": "2026-01-28T09:00:00+09:00",
+            "NotAfter": "2027-02-27T08:59:59+09:00",
+            "CreatedAt": "2025-02-26T09:42:56.071000+09:00",
+            "IssuedAt": "2026-01-28T09:29:23.666000+09:00"
+        }
+    ]
+}

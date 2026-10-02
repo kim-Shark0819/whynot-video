@@ -1,0 +1,106 @@
+[
+    {
+        "v": "v1.65.0-eksbuild.1",
+        "default": true
+    },
+    {
+        "v": "v1.64.0-eksbuild.1",
+        "default": false
+    },
+    {
+        "v": "v1.63.1-eksbuild.1",
+        "default": false
+    },
+    {
+        "v": "v1.63.0-eksbuild.1",
+        "default": false
+    },
+    {
+        "v": "v1.62.0-eksbuild.1",
+        "default": false
+    },
+    {
+        "v": "v1.61.1-eksbuild.1",
+        "default": false
+    },
+    {
+        "v": "v1.60.1-eksbuild.1",
+        "default": false
+    },
+    {
+        "v": "v1.60.0-eksbuild.1",
+        "default": false
+    },
+    {
+        "v": "v1.59.0-eksbuild.1",
+        "default": false
+    },
+    {
+        "v": "v1.58.0-eksbuild.1",
+        "default": false
+    },
+    {
+        "v": "v1.57.1-eksbuild.1",
+        "default": false
+    },
+    {
+        "v": "v1.56.0-eksbuild.1",
+        "default": false
+    },
+    {
+        "v": "v1.55.0-eksbuild.2",
+        "default": false
+    },
+    {
+        "v": "v1.54.0-eksbuild.1",
+        "default": false
+    },
+    {
+        "v": "v1.53.0-eksbuild.1",
+        "default": false
+    },
+    {
+        "v": "v1.52.1-eksbuild.1",
+        "default": false
+    },
+    {
+        "v": "v1.51.2-eksbuild.1",
+        "default": false
+    },
+    {
+        "v": "v1.50.3-eksbuild.1",
+        "default": false
+    },
+    {
+        "v": "v1.49.2-eksbuild.1",
+        "default": false
+    },
+    {
+        "v": "v1.48.0-eksbuild.2",
+        "default": false
+    },
+    {
+        "v": "v1.47.1-eksbuild.1",
+        "default": false
+    },
+    {
+        "v": "v1.46.0-eksbuild.1",
+        "default": false
+    },
+    {
+        "v": "v1.45.0-eksbuild.2",
+        "default": false
+    },
+    {
+        "v": "v1.44.0-eksbuild.1",
+        "default": false
+    },
+    {
+        "v": "v1.43.0-eksbuild.1",
+        "default": false
+    },
+    {
+        "v": "v1.42.0-eksbuild.1",
+        "default": false
+    }
+]

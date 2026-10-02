@@ -1,0 +1,100 @@
+{
+    "LoadBalancers": [
+        {
+            "LoadBalancerArn": "arn:aws:elasticloadbalancing:ap-northeast-2:730335451955:loadbalancer/app/Main-ALB/e10197d0f03718e0",
+            "DNSName": "Main-ALB-1745789876.ap-northeast-2.elb.amazonaws.com",
+            "CanonicalHostedZoneId": "ZWKZPGTI48KDX",
+            "CreatedTime": "2025-02-25T08:04:57.132000+00:00",
+            "LoadBalancerName": "Main-ALB",
+            "Scheme": "internet-facing",
+            "VpcId": "vpc-06a99f0ed6f4ba832",
+            "State": {
+                "Code": "active"
+            },
+            "Type": "application",
+            "AvailabilityZones": [
+                {
+                    "ZoneName": "ap-northeast-2a",
+                    "SubnetId": "subnet-058812f22ea6b33de",
+                    "LoadBalancerAddresses": []
+                },
+                {
+                    "ZoneName": "ap-northeast-2c",
+                    "SubnetId": "subnet-05e2d99a7f2df378e",
+                    "LoadBalancerAddresses": []
+                }
+            ],
+            "SecurityGroups": [
+                "sg-0145da44eee441cd4"
+            ],
+            "IpAddressType": "ipv4",
+            "EnablePrefixForIpv6SourceNat": "off"
+        },
+        {
+            "LoadBalancerArn": "arn:aws:elasticloadbalancing:ap-northeast-2:730335451955:loadbalancer/app/k8s-default-grafanaa-4005cdfda3/2952a21a08583e6e",
+            "DNSName": "k8s-default-grafanaa-4005cdfda3-1257900206.ap-northeast-2.elb.amazonaws.com",
+            "CanonicalHostedZoneId": "ZWKZPGTI48KDX",
+            "CreatedTime": "2025-11-28T07:43:45.060000+00:00",
+            "LoadBalancerName": "k8s-default-grafanaa-4005cdfda3",
+            "Scheme": "internet-facing",
+            "VpcId": "vpc-06a99f0ed6f4ba832",
+            "State": {
+                "Code": "active"
+            },
+            "Type": "application",
+            "AvailabilityZones": [
+                {
+                    "ZoneName": "ap-northeast-2a",
+                    "SubnetId": "subnet-058812f22ea6b33de",
+                    "LoadBalancerAddresses": []
+                },
+                {
+                    "ZoneName": "ap-northeast-2c",
+                    "SubnetId": "subnet-05e2d99a7f2df378e",
+                    "LoadBalancerAddresses": []
+                }
+            ],
+            "SecurityGroups": [
+                "sg-0b98fc3f8b28781c9",
+                "sg-0be1e6dc302593b30"
+            ],
+            "IpAddressType": "ipv4",
+            "EnablePrefixForIpv6SourceNat": "off"
+        },
+        {
+            "LoadBalancerArn": "arn:aws:elasticloadbalancing:ap-northeast-2:730335451955:loadbalancer/app/AI-poc-ALB/6af48b65095d9276",
+            "DNSName": "AI-poc-ALB-1326573182.ap-northeast-2.elb.amazonaws.com",
+            "CanonicalHostedZoneId": "ZWKZPGTI48KDX",
+            "CreatedTime": "2026-09-07T01:05:41.845000+00:00",
+            "LoadBalancerName": "AI-poc-ALB",
+            "Scheme": "internet-facing",
+            "VpcId": "vpc-0de9ff1693bd56f38",
+            "State": {
+                "Code": "active"
+            },
+            "Type": "application",
+            "AvailabilityZones": [
+                {
+                    "ZoneName": "ap-northeast-2c",
+                    "SubnetId": "subnet-053f2f798359b197a",
+                    "LoadBalancerAddresses": []
+                },
+                {
+                    "ZoneName": "ap-northeast-2b",
+                    "SubnetId": "subnet-07db8faf09bcfcdbb",
+                    "LoadBalancerAddresses": []
+                },
+                {
+                    "ZoneName": "ap-northeast-2a",
+                    "SubnetId": "subnet-0b8b4832085705b56",
+                    "LoadBalancerAddresses": []
+                }
+            ],
+            "SecurityGroups": [
+                "sg-0a3e4ede5310ed2ed"
+            ],
+            "IpAddressType": "ipv4",
+            "EnablePrefixForIpv6SourceNat": "off"
+        }
+    ]
+}

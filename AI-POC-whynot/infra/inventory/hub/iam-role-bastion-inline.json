@@ -1,0 +1,5 @@
+{
+    "PolicyNames": [
+        "bastion-eks-ecr-access"
+    ]
+}

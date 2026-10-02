@@ -1,0 +1,49 @@
+{
+    "nodegroup": {
+        "nodegroupName": "Dev-AI-POC-eks-ng",
+        "nodegroupArn": "arn:aws:eks:ap-northeast-2:730335451955:nodegroup/Dev-AI-POC-eks/Dev-AI-POC-eks-ng/92d03f93-4b45-354f-c121-44b863e53c9d",
+        "clusterName": "Dev-AI-POC-eks",
+        "version": "1.36",
+        "releaseVersion": "1.36.3-20260827",
+        "createdAt": "2026-09-08T12:53:52.838000+09:00",
+        "modifiedAt": "2026-09-08T19:24:27.413000+09:00",
+        "status": "ACTIVE",
+        "capacityType": "ON_DEMAND",
+        "scalingConfig": {
+            "minSize": 1,
+            "maxSize": 2,
+            "desiredSize": 1
+        },
+        "instanceTypes": [
+            "t3.medium"
+        ],
+        "subnets": [
+            "subnet-01e0e91f3c43b57f2",
+            "subnet-071250e072cc06c64",
+            "subnet-0ac1a0b3cf1fb3c1f"
+        ],
+        "amiType": "AL2023_x86_64_STANDARD",
+        "nodeRole": "arn:aws:iam::730335451955:role/Dev-AI-POC-eks-node-role",
+        "labels": {
+            "environment": "dev"
+        },
+        "resources": {
+            "autoScalingGroups": [
+                {
+                    "name": "eks-Dev-AI-POC-eks-ng-92d03f93-4b45-354f-c121-44b863e53c9d"
+                }
+            ]
+        },
+        "diskSize": 20,
+        "health": {
+            "issues": []
+        },
+        "updateConfig": {
+            "maxUnavailable": 1
+        },
+        "tags": {
+            "Environment": "dev",
+            "Name": "Dev-AI-POC-eks-ng"
+        }
+    }
+}

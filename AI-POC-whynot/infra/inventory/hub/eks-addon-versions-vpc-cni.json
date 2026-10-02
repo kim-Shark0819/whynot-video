@@ -1,0 +1,122 @@
+[
+    {
+        "v": "v1.23.0-eksbuild.1",
+        "default": false
+    },
+    {
+        "v": "v1.22.4-eksbuild.3",
+        "default": true
+    },
+    {
+        "v": "v1.22.3-eksbuild.1",
+        "default": false
+    },
+    {
+        "v": "v1.22.2-eksbuild.1",
+        "default": false
+    },
+    {
+        "v": "v1.22.1-eksbuild.2",
+        "default": false
+    },
+    {
+        "v": "v1.21.2-eksbuild.2",
+        "default": false
+    },
+    {
+        "v": "v1.21.1-eksbuild.8",
+        "default": false
+    },
+    {
+        "v": "v1.21.1-eksbuild.7",
+        "default": false
+    },
+    {
+        "v": "v1.21.1-eksbuild.5",
+        "default": false
+    },
+    {
+        "v": "v1.21.1-eksbuild.3",
+        "default": false
+    },
+    {
+        "v": "v1.21.1-eksbuild.1",
+        "default": false
+    },
+    {
+        "v": "v1.21.0-eksbuild.4",
+        "default": false
+    },
+    {
+        "v": "v1.20.5-eksbuild.1",
+        "default": false
+    },
+    {
+        "v": "v1.20.4-eksbuild.3",
+        "default": false
+    },
+    {
+        "v": "v1.20.4-eksbuild.2",
+        "default": false
+    },
+    {
+        "v": "v1.20.4-eksbuild.1",
+        "default": false
+    },
+    {
+        "v": "v1.20.3-eksbuild.1",
+        "default": false
+    },
+    {
+        "v": "v1.20.2-eksbuild.1",
+        "default": false
+    },
+    {
+        "v": "v1.20.1-eksbuild.3",
+        "default": false
+    },
+    {
+        "v": "v1.20.1-eksbuild.1",
+        "default": false
+    },
+    {
+        "v": "v1.20.0-eksbuild.1",
+        "default": false
+    },
+    {
+        "v": "v1.19.6-eksbuild.7",
+        "default": false
+    },
+    {
+        "v": "v1.19.6-eksbuild.1",
+        "default": false
+    },
+    {
+        "v": "v1.19.5-eksbuild.3",
+        "default": false
+    },
+    {
+        "v": "v1.19.5-eksbuild.1",
+        "default": false
+    },
+    {
+        "v": "v1.19.4-eksbuild.1",
+        "default": false
+    },
+    {
+        "v": "v1.19.3-eksbuild.1",
+        "default": false
+    },
+    {
+        "v": "v1.19.2-eksbuild.5",
+        "default": false
+    },
+    {
+        "v": "v1.19.2-eksbuild.1",
+        "default": false
+    },
+    {
+        "v": "v1.19.0-eksbuild.1",
+        "default": false
+    }
+]

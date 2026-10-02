@@ -1,0 +1,58 @@
+{
+  "Buckets": [
+    {
+      "Name": "aws-cloudtrail-logs-061051247564-3ecdddb7",
+      "CreationDate": "2026-04-22T18:04:44+00:00",
+      "BucketArn": "arn:aws:s3:::aws-cloudtrail-logs-061051247564-3ecdddb7"
+    },
+    {
+      "Name": "cf-templates-1f0g2cyjlew2v-ap-northeast-2",
+      "CreationDate": "2026-04-22T18:25:20+00:00",
+      "BucketArn": "arn:aws:s3:::cf-templates-1f0g2cyjlew2v-ap-northeast-2"
+    },
+    {
+      "Name": "config-bucket-061051247564",
+      "CreationDate": "2026-04-22T17:48:01+00:00",
+      "BucketArn": "arn:aws:s3:::config-bucket-061051247564"
+    },
+    {
+      "Name": "kcs-llm-gateway-kb-prod",
+      "CreationDate": "2026-05-26T12:29:21+00:00",
+      "BucketArn": "arn:aws:s3:::kcs-llm-gateway-kb-prod"
+    },
+    {
+      "Name": "kcs-llm-gateway-skills-prod",
+      "CreationDate": "2026-05-26T12:29:16+00:00",
+      "BucketArn": "arn:aws:s3:::kcs-llm-gateway-skills-prod"
+    },
+    {
+      "Name": "mtx-test-ai-change-toon",
+      "CreationDate": "2026-08-12T05:08:52+00:00",
+      "BucketArn": "arn:aws:s3:::mtx-test-ai-change-toon"
+    },
+    {
+      "Name": "mtx-test-ai-change-toon-usw2",
+      "CreationDate": "2026-08-13T02:27:23+00:00",
+      "BucketArn": "arn:aws:s3:::mtx-test-ai-change-toon-usw2"
+    },
+    {
+      "Name": "quick-test-billing-deploy-061051247564",
+      "CreationDate": "2026-08-07T03:35:21+00:00",
+      "BucketArn": "arn:aws:s3:::quick-test-billing-deploy-061051247564"
+    },
+    {
+      "Name": "sat2-prowlerfindingsbucket-8qgh2ltglepb",
+      "CreationDate": "2026-04-22T16:26:05+00:00",
+      "BucketArn": "arn:aws:s3:::sat2-prowlerfindingsbucket-8qgh2ltglepb"
+    },
+    {
+      "Name": "test2-prowlerfindingsbucket-bek9uopq9wxa",
+      "CreationDate": "2026-04-22T16:09:07+00:00",
+      "BucketArn": "arn:aws:s3:::test2-prowlerfindingsbucket-bek9uopq9wxa"
+    }
+  ],
+  "Owner": {
+    "ID": "7e62f5796f6f5930ef96a294aec3eb78c6f42e1e47f32d1fab25197f509f5520"
+  },
+  "Prefix": null
+}

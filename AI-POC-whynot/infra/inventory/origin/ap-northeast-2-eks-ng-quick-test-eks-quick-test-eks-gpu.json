@@ -1,0 +1,51 @@
+{
+  "nodegroup": {
+    "nodegroupName": "quick-test-eks-gpu",
+    "nodegroupArn": "arn:aws:eks:ap-northeast-2:061051247564:nodegroup/quick-test-eks/quick-test-eks-gpu/d0d01b81-3b7d-39cf-823e-8eb7b7fbe308",
+    "clusterName": "quick-test-eks",
+    "version": "1.36",
+    "releaseVersion": "1.36.2-20260818",
+    "createdAt": "2026-08-25T12:41:46.237000+09:00",
+    "modifiedAt": "2026-09-09T13:02:14.442000+09:00",
+    "status": "ACTIVE",
+    "capacityType": "ON_DEMAND",
+    "scalingConfig": {
+      "minSize": 0,
+      "maxSize": 1,
+      "desiredSize": 0
+    },
+    "instanceTypes": [
+      "g6e.4xlarge"
+    ],
+    "subnets": [
+      "subnet-03414b2c1baa86775"
+    ],
+    "amiType": "AL2023_x86_64_NVIDIA",
+    "nodeRole": "arn:aws:iam::061051247564:role/quick-test-eks-iam-nodegroup",
+    "labels": {
+      "workload": "video-gen"
+    },
+    "taints": [
+      {
+        "key": "gpu",
+        "value": "true",
+        "effect": "NO_SCHEDULE"
+      }
+    ],
+    "resources": {
+      "autoScalingGroups": [
+        {
+          "name": "eks-quick-test-eks-gpu-d0d01b81-3b7d-39cf-823e-8eb7b7fbe308"
+        }
+      ]
+    },
+    "diskSize": 100,
+    "health": {
+      "issues": []
+    },
+    "updateConfig": {
+      "maxUnavailable": 1
+    },
+    "tags": {}
+  }
+}

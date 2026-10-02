@@ -1,0 +1,29 @@
+# 기본값: 저장소에는 LF로 저장한다.
+* text=auto eol=lf
+
+# 배스천(Linux)에서 실행되는 스크립트는 반드시 LF여야 한다.
+# CRLF로 체크아웃되면 `bad interpreter: /bin/bash^M` 으로 죽는다.
+*.sh      text eol=lf
+*.sh.tmpl text eol=lf
+*.yaml    text eol=lf
+*.yml     text eol=lf
+*.tmpl    text eol=lf
+Dockerfile text eol=lf
+
+# PowerShell 스크립트는 Windows에서만 돌아간다. CRLF로 둔다.
+*.ps1 text eol=crlf
+
+# 한글이 든 .ps1 은 UTF-8 BOM 이 필요하다(BOM이 없으면 PS 5.1이 ANSI로 읽어 파서가 실패한다).
+# Git이 BOM을 건드리지 않도록 아래 파일들은 텍스트 변환 대상에서 제외한다.
+toon-change-ai-pj/deploy/*.ps1        -text
+toon-change-ai-pj/deploy/verify/*.ps1 -text
+toon-change-ai-pj/docs/**/*.ps1       -text
+
+# 바이너리
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.webp binary
+*.mp4 binary
+*.woff2 binary
+*.ttf binary

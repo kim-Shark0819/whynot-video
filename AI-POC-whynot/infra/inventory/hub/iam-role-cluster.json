@@ -1,0 +1,36 @@
+{
+    "Role": {
+        "Path": "/",
+        "RoleName": "AI-POC-eks-cluster-role",
+        "RoleId": "AROA2UC3CTMZQUXZPYUDV",
+        "Arn": "arn:aws:iam::730335451955:role/AI-POC-eks-cluster-role",
+        "CreateDate": "2026-09-05T09:52:45+00:00",
+        "AssumeRolePolicyDocument": {
+            "Version": "2012-10-17",
+            "Statement": [
+                {
+                    "Effect": "Allow",
+                    "Principal": {
+                        "Service": "eks.amazonaws.com"
+                    },
+                    "Action": [
+                        "sts:AssumeRole",
+                        "sts:TagSession"
+                    ]
+                }
+            ]
+        },
+        "Description": "AI-POC EKS control plane role",
+        "MaxSessionDuration": 3600,
+        "Tags": [
+            {
+                "Key": "Project",
+                "Value": "ai-poc"
+            }
+        ],
+        "RoleLastUsed": {
+            "LastUsedDate": "2026-09-08T03:34:31+00:00",
+            "Region": "ap-northeast-2"
+        }
+    }
+}

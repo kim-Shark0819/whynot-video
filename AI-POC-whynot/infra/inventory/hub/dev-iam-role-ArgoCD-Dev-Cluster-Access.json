@@ -1,0 +1,36 @@
+{
+    "Role": {
+        "Path": "/",
+        "RoleName": "ArgoCD-Dev-Cluster-Access",
+        "RoleId": "AROA2UC3CTMZ7VNWVENHD",
+        "Arn": "arn:aws:iam::730335451955:role/ArgoCD-Dev-Cluster-Access",
+        "CreateDate": "2026-09-08T04:38:49+00:00",
+        "AssumeRolePolicyDocument": {
+            "Version": "2012-10-17",
+            "Statement": [
+                {
+                    "Effect": "Allow",
+                    "Principal": {
+                        "Service": "pods.eks.amazonaws.com"
+                    },
+                    "Action": [
+                        "sts:AssumeRole",
+                        "sts:TagSession"
+                    ]
+                }
+            ]
+        },
+        "Description": "Pod Identity role letting ArgoCD on AI-POC-eks manage Dev-AI-POC-eks",
+        "MaxSessionDuration": 3600,
+        "Tags": [
+            {
+                "Key": "Name",
+                "Value": "ArgoCD-Dev-Cluster-Access"
+            }
+        ],
+        "RoleLastUsed": {
+            "LastUsedDate": "2026-09-08T10:12:05+00:00",
+            "Region": "ap-northeast-2"
+        }
+    }
+}

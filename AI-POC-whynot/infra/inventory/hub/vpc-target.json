@@ -1,0 +1,31 @@
+{
+    "Vpcs": [
+        {
+            "OwnerId": "730335451955",
+            "InstanceTenancy": "default",
+            "CidrBlockAssociationSet": [
+                {
+                    "AssociationId": "vpc-cidr-assoc-045d7e2c687e46353",
+                    "CidrBlock": "100.10.0.0/20",
+                    "CidrBlockState": {
+                        "State": "associated"
+                    }
+                }
+            ],
+            "IsDefault": false,
+            "Tags": [
+                {
+                    "Key": "Name",
+                    "Value": "AI-poc-vpc"
+                }
+            ],
+            "BlockPublicAccessStates": {
+                "InternetGatewayBlockMode": "off"
+            },
+            "VpcId": "vpc-0de9ff1693bd56f38",
+            "State": "available",
+            "CidrBlock": "100.10.0.0/20",
+            "DhcpOptionsId": "dopt-03ff6feaac7cd42df"
+        }
+    ]
+}

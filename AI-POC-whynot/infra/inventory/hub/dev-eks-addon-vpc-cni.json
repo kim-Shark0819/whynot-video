@@ -1,0 +1,18 @@
+{
+    "addon": {
+        "addonName": "vpc-cni",
+        "clusterName": "Dev-AI-POC-eks",
+        "status": "ACTIVE",
+        "addonVersion": "v1.22.4-eksbuild.3",
+        "health": {
+            "issues": []
+        },
+        "addonArn": "arn:aws:eks:ap-northeast-2:730335451955:addon/Dev-AI-POC-eks/vpc-cni/ded03f93-1415-dd6c-1561-7832c72afcc8",
+        "createdAt": "2026-09-08T12:53:22.456000+09:00",
+        "modifiedAt": "2026-09-08T12:53:28.993000+09:00",
+        "tags": {},
+        "namespaceConfig": {
+            "namespace": "kube-system"
+        }
+    }
+}

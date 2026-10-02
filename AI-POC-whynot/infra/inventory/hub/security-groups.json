@@ -1,0 +1,299 @@
+{
+    "SecurityGroups": [
+        {
+            "GroupId": "sg-0a3e4ede5310ed2ed",
+            "IpPermissionsEgress": [
+                {
+                    "IpProtocol": "-1",
+                    "UserIdGroupPairs": [],
+                    "IpRanges": [
+                        {
+                            "CidrIp": "0.0.0.0/0"
+                        }
+                    ],
+                    "Ipv6Ranges": [],
+                    "PrefixListIds": []
+                }
+            ],
+            "Tags": [
+                {
+                    "Key": "Name",
+                    "Value": "AI-poc-ALB-SG"
+                }
+            ],
+            "VpcId": "vpc-0de9ff1693bd56f38",
+            "SecurityGroupArn": "arn:aws:ec2:ap-northeast-2:730335451955:security-group/sg-0a3e4ede5310ed2ed",
+            "OwnerId": "730335451955",
+            "GroupName": "AI-poc-ALB-SG",
+            "Description": "SG for AI-poc-ALB - allows HTTP/HTTPS from internet",
+            "IpPermissions": [
+                {
+                    "IpProtocol": "tcp",
+                    "FromPort": 80,
+                    "ToPort": 80,
+                    "UserIdGroupPairs": [],
+                    "IpRanges": [
+                        {
+                            "Description": "HTTP from internet",
+                            "CidrIp": "0.0.0.0/0"
+                        }
+                    ],
+                    "Ipv6Ranges": [],
+                    "PrefixListIds": []
+                },
+                {
+                    "IpProtocol": "tcp",
+                    "FromPort": 443,
+                    "ToPort": 443,
+                    "UserIdGroupPairs": [],
+                    "IpRanges": [
+                        {
+                            "Description": "HTTPS from internet",
+                            "CidrIp": "0.0.0.0/0"
+                        }
+                    ],
+                    "Ipv6Ranges": [],
+                    "PrefixListIds": []
+                }
+            ]
+        },
+        {
+            "GroupId": "sg-022e24e853dfdc241",
+            "IpPermissionsEgress": [
+                {
+                    "IpProtocol": "-1",
+                    "UserIdGroupPairs": [
+                        {
+                            "Description": "Allows EFA traffic, which is not matched by CIDR rules.",
+                            "UserId": "730335451955",
+                            "GroupId": "sg-022e24e853dfdc241"
+                        }
+                    ],
+                    "IpRanges": [
+                        {
+                            "CidrIp": "0.0.0.0/0"
+                        }
+                    ],
+                    "Ipv6Ranges": [],
+                    "PrefixListIds": []
+                }
+            ],
+            "Tags": [
+                {
+                    "Key": "Name",
+                    "Value": "eks-cluster-sg-AI-POC-eks-1555708737"
+                },
+                {
+                    "Key": "aws:eks:cluster-name",
+                    "Value": "AI-POC-eks"
+                },
+                {
+                    "Key": "kubernetes.io/cluster/AI-POC-eks",
+                    "Value": "owned"
+                }
+            ],
+            "VpcId": "vpc-0de9ff1693bd56f38",
+            "SecurityGroupArn": "arn:aws:ec2:ap-northeast-2:730335451955:security-group/sg-022e24e853dfdc241",
+            "OwnerId": "730335451955",
+            "GroupName": "eks-cluster-sg-AI-POC-eks-1555708737",
+            "Description": "EKS created security group applied to ENI that is attached to EKS Control Plane master nodes, as well as any managed workloads.",
+            "IpPermissions": [
+                {
+                    "IpProtocol": "-1",
+                    "UserIdGroupPairs": [
+                        {
+                            "Description": "Allows EFA traffic, which is not matched by CIDR rules.",
+                            "UserId": "730335451955",
+                            "GroupId": "sg-022e24e853dfdc241"
+                        }
+                    ],
+                    "IpRanges": [],
+                    "Ipv6Ranges": [],
+                    "PrefixListIds": []
+                },
+                {
+                    "IpProtocol": "tcp",
+                    "FromPort": 443,
+                    "ToPort": 443,
+                    "UserIdGroupPairs": [
+                        {
+                            "Description": "AI-POC bastion to EKS API (private endpoint)",
+                            "UserId": "730335451955",
+                            "GroupId": "sg-0b0fc86fc94232df3"
+                        }
+                    ],
+                    "IpRanges": [],
+                    "Ipv6Ranges": [],
+                    "PrefixListIds": []
+                }
+            ]
+        },
+        {
+            "GroupId": "sg-00fcb3e3dac49da71",
+            "IpPermissionsEgress": [
+                {
+                    "IpProtocol": "-1",
+                    "UserIdGroupPairs": [],
+                    "IpRanges": [
+                        {
+                            "CidrIp": "0.0.0.0/0"
+                        }
+                    ],
+                    "Ipv6Ranges": [],
+                    "PrefixListIds": []
+                }
+            ],
+            "Tags": [
+                {
+                    "Key": "Name",
+                    "Value": "Metanet-GitLab-SG"
+                }
+            ],
+            "VpcId": "vpc-0de9ff1693bd56f38",
+            "SecurityGroupArn": "arn:aws:ec2:ap-northeast-2:730335451955:security-group/sg-00fcb3e3dac49da71",
+            "OwnerId": "730335451955",
+            "GroupName": "Metanet-GitLab-SG",
+            "Description": "SG for Metanet-GitLab server - HTTP from AI-poc-ALB only",
+            "IpPermissions": [
+                {
+                    "IpProtocol": "tcp",
+                    "FromPort": 80,
+                    "ToPort": 80,
+                    "UserIdGroupPairs": [
+                        {
+                            "Description": "HTTP from AI-poc-ALB-SG",
+                            "UserId": "730335451955",
+                            "GroupId": "sg-0a3e4ede5310ed2ed"
+                        }
+                    ],
+                    "IpRanges": [],
+                    "Ipv6Ranges": [],
+                    "PrefixListIds": []
+                }
+            ]
+        },
+        {
+            "GroupId": "sg-09275dce10e4cfeff",
+            "IpPermissionsEgress": [
+                {
+                    "IpProtocol": "-1",
+                    "UserIdGroupPairs": [
+                        {
+                            "Description": "Allows EFA traffic, which is not matched by CIDR rules.",
+                            "UserId": "730335451955",
+                            "GroupId": "sg-09275dce10e4cfeff"
+                        }
+                    ],
+                    "IpRanges": [
+                        {
+                            "CidrIp": "0.0.0.0/0"
+                        }
+                    ],
+                    "Ipv6Ranges": [],
+                    "PrefixListIds": []
+                }
+            ],
+            "Tags": [
+                {
+                    "Key": "kubernetes.io/cluster/Dev-AI-POC-eks",
+                    "Value": "owned"
+                },
+                {
+                    "Key": "Name",
+                    "Value": "eks-cluster-sg-Dev-AI-POC-eks-1945536919"
+                },
+                {
+                    "Key": "aws:eks:cluster-name",
+                    "Value": "Dev-AI-POC-eks"
+                }
+            ],
+            "VpcId": "vpc-0de9ff1693bd56f38",
+            "SecurityGroupArn": "arn:aws:ec2:ap-northeast-2:730335451955:security-group/sg-09275dce10e4cfeff",
+            "OwnerId": "730335451955",
+            "GroupName": "eks-cluster-sg-Dev-AI-POC-eks-1945536919",
+            "Description": "EKS created security group applied to ENI that is attached to EKS Control Plane master nodes, as well as any managed workloads.",
+            "IpPermissions": [
+                {
+                    "IpProtocol": "-1",
+                    "UserIdGroupPairs": [
+                        {
+                            "Description": "Allows EFA traffic, which is not matched by CIDR rules.",
+                            "UserId": "730335451955",
+                            "GroupId": "sg-09275dce10e4cfeff"
+                        }
+                    ],
+                    "IpRanges": [],
+                    "Ipv6Ranges": [],
+                    "PrefixListIds": []
+                }
+            ]
+        },
+        {
+            "GroupId": "sg-0b0fc86fc94232df3",
+            "IpPermissionsEgress": [
+                {
+                    "IpProtocol": "-1",
+                    "UserIdGroupPairs": [],
+                    "IpRanges": [
+                        {
+                            "CidrIp": "0.0.0.0/0"
+                        }
+                    ],
+                    "Ipv6Ranges": [],
+                    "PrefixListIds": []
+                }
+            ],
+            "Tags": [
+                {
+                    "Key": "Project",
+                    "Value": "ai-poc"
+                },
+                {
+                    "Key": "Name",
+                    "Value": "AI-POC-bastion-sg"
+                }
+            ],
+            "VpcId": "vpc-0de9ff1693bd56f38",
+            "SecurityGroupArn": "arn:aws:ec2:ap-northeast-2:730335451955:security-group/sg-0b0fc86fc94232df3",
+            "OwnerId": "730335451955",
+            "GroupName": "AI-POC-bastion-sg",
+            "Description": "AI-POC bastion, SSM only, no inbound",
+            "IpPermissions": []
+        },
+        {
+            "GroupId": "sg-095d1391509f6e4dc",
+            "IpPermissionsEgress": [
+                {
+                    "IpProtocol": "-1",
+                    "UserIdGroupPairs": [],
+                    "IpRanges": [
+                        {
+                            "CidrIp": "0.0.0.0/0"
+                        }
+                    ],
+                    "Ipv6Ranges": [],
+                    "PrefixListIds": []
+                }
+            ],
+            "VpcId": "vpc-0de9ff1693bd56f38",
+            "SecurityGroupArn": "arn:aws:ec2:ap-northeast-2:730335451955:security-group/sg-095d1391509f6e4dc",
+            "OwnerId": "730335451955",
+            "GroupName": "default",
+            "Description": "default VPC security group",
+            "IpPermissions": [
+                {
+                    "IpProtocol": "-1",
+                    "UserIdGroupPairs": [
+                        {
+                            "UserId": "730335451955",
+                            "GroupId": "sg-095d1391509f6e4dc"
+                        }
+                    ],
+                    "IpRanges": [],
+                    "Ipv6Ranges": [],
+                    "PrefixListIds": []
+                }
+            ]
+        }
+    ]
+}
