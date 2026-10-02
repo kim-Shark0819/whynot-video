@@ -1,0 +1,67 @@
+# CI for a customer's own GitLab (rendered to .gitlab-ci.yml by 08-import.ps1).
+#
+# Deliberately much smaller than the hub's .gitlab-ci.yml. That one builds and
+# deploys four customers out of one tree; this repository holds exactly one
+# customer (C-5), so there is nothing to select between.
+#
+# Scope: build the two images into THIS account's ECR. Rendering manifests and
+# pushing them to awstech/ai-deploy is not here yet - that needs a push token in
+# the customer's GitLab, which the designer supplies (D-25). Until then the
+# render and push are done from the workstation, and ArgoCD reads the result the
+# same way either way.
+#
+# Credentials: none. The runner's service account assumes
+# whynot-dev-runner-role through IRSA, and that role may only push to this
+# customer's two dev repositories.
+variables:
+  AWS_REGION: ap-northeast-2
+  ECR_REGISTRY: 089540175779.dkr.ecr.ap-northeast-2.amazonaws.com
+  APP_DIR: AI-POC-whynot
+  # ECR is immutable, so every build needs a new tag. Same scheme as the hub.
+  IMAGE_TAG: ci-$CI_COMMIT_SHORT_SHA
+
+stages: [build]
+
+.kaniko:
+  stage: build
+  image:
+    name: gcr.io/kaniko-project/executor:v1.23.2-debug
+    entrypoint: [""]
+  before_script:
+    # kaniko reads registry credentials from this file. The sts web identity
+    # token is mounted by EKS from the service account, so no keys are needed.
+    - mkdir -p /kaniko/.docker
+    - echo "{\"credsStore\":\"ecr-login\"}" > /kaniko/.docker/config.json
+  rules:
+    - if: $CI_COMMIT_BRANCH == "main"
+    - if: $CI_PIPELINE_SOURCE == "web"
+    - if: $CI_PIPELINE_SOURCE == "api"
+
+build:app:
+  extends: .kaniko
+  script:
+    - >-
+      /kaniko/executor
+      --context "$CI_PROJECT_DIR/$APP_DIR/app"
+      --dockerfile "$CI_PROJECT_DIR/$APP_DIR/app/Dockerfile"
+      --destination "$ECR_REGISTRY/whynot-dev-app:$IMAGE_TAG"
+      --build-arg "IMAGE_TAG=$IMAGE_TAG"
+      --build-arg "SOURCE_STAMP=$CI_COMMIT_SHA"
+      --build-arg "SOURCE_GIT=$CI_COMMIT_REF_NAME@$CI_COMMIT_SHORT_SHA"
+      --label "org.opencontainers.image.revision=$CI_COMMIT_SHA"
+      --label "org.opencontainers.image.version=$IMAGE_TAG"
+      --single-snapshot
+
+build:frontend:
+  extends: .kaniko
+  script:
+    - >-
+      /kaniko/executor
+      --context "$CI_PROJECT_DIR/$APP_DIR/frontend"
+      --dockerfile "$CI_PROJECT_DIR/$APP_DIR/frontend/Dockerfile"
+      --destination "$ECR_REGISTRY/whynot-dev-frontend:$IMAGE_TAG"
+      --build-arg "IMAGE_TAG=$IMAGE_TAG"
+      --build-arg "SOURCE_STAMP=$CI_COMMIT_SHA"
+      --label "org.opencontainers.image.revision=$CI_COMMIT_SHA"
+      --label "org.opencontainers.image.version=$IMAGE_TAG"
+      --single-snapshot
