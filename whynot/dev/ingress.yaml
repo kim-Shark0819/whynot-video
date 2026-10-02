@@ -33,7 +33,16 @@ metadata:
     alb.ingress.kubernetes.io/healthcheck-interval-seconds: "15"
     alb.ingress.kubernetes.io/healthy-threshold-count: "2"
     alb.ingress.kubernetes.io/success-codes: "200"
-    alb.ingress.kubernetes.io/tags: Project=ai-poc,Customer=whynot,Environment=dev,ManagedBy=argocd
+    # The tag set has to be identical on every member. The controller merges
+    # these into one set for the load balancer and refuses the whole group when
+    # two members disagree:
+    #   Failed build model due to conflicting tag ManagedBy: argocd | dev-migration
+    # That is how this member first failed to join - it said argocd while the
+    # GitLab member said dev-migration, and the result was an Ingress with no
+    # address and a 404 from the ALB's default action. 'tags' is not in
+    # GROUP_WIDE_ANNOTATIONS or GROUP_UNIFORM_ANNOTATIONS, so check_ingress_group
+    # does not catch this one; only the controller does.
+    alb.ingress.kubernetes.io/tags: Project=ai-poc,Customer=whynot,Environment=dev,ManagedBy=dev-migration
 spec:
   ingressClassName: alb
   rules:
