@@ -105,6 +105,39 @@ def selected(state: dict) -> str:
     return DEFAULT_MODEL
 
 
+def video_options(model: str) -> dict:
+    """③ 영상 설정에서 고를 수 있는 화질 · 샷 길이(초)."""
+    low, high = settings.VIDEO_DURATION_RANGE.get(model, (settings.DURATION_S, settings.DURATION_S))
+    return {
+        "model": model,
+        "resolutions": list(settings.VIDEO_RESOLUTIONS.get(model) or [settings.RESOLUTION]),
+        "defaultResolution": settings.default_resolution(model),
+        "minDurationS": low,
+        "maxDurationS": high,
+        "durationFixed": low == high,
+        # Seedance 는 샷의 캐릭터 이미지를 참고 이미지로 함께 보낸다(캐릭터 그대로 유지).
+        "referenceImages": is_ark(model),
+    }
+
+
+def reference_prompt(prompt: str, names: list[str]) -> str:
+    """캐릭터 참고 이미지가 있을 때 Seedance 에 보낼 최종 프롬프트.
+
+    설계자 2026-10-07: 사용자가 올린 이미지(있으면) 또는 ③에서 승인한 AI 이미지 속 캐릭터가
+    **그대로** 나와야 한다. 이미지 순서대로 "Image N" 이 누구인지 밝히고, 얼굴·머리·의상·체형을
+    바꾸지 말라고 앞에 못박는다. 장면 묘사(prompt)는 그 뒤에 그대로 붙인다.
+    """
+    if not names:
+        return prompt
+    who = "; ".join(f"Image {index} is {name}" for index, name in enumerate(names, start=1))
+    keep = (
+        "Keep every character exactly as shown in their reference image: the same face, hairstyle, "
+        "hair color, eye color, outfit, colors, accessories and body type, from the first frame to the "
+        "last. Do not redesign, restyle or swap any character."
+    )
+    return f"{who}. {keep} Scene: {prompt}"
+
+
 def _call(method: str, path: str, payload: dict | None = None) -> dict:
     request = urllib.request.Request(
         settings.ARK_BASE_URL + path,
@@ -138,8 +171,16 @@ def submit(
     prompt: str,
     keyframe_jpeg_b64: str = "",
     gen_id: str = "",
+    reference_jpegs_b64: list[str] | None = None,
+    resolution: str = "",
+    duration_s: int | None = None,
 ) -> dict:
-    """작업을 만들고 즉시 돌아온다. video.submit 과 같은 키를 돌려준다."""
+    """작업을 만들고 즉시 돌아온다. video.submit 과 같은 키를 돌려준다.
+
+    reference_jpegs_b64: 샷에 나오는 캐릭터 이미지(사용자 업로드 또는 ③에서 승인한 AI 이미지).
+    `prompt` 는 reference_prompt() 로 "Image N = 누구" 지시를 붙인 최종 문장이어야 한다 — 순서가
+    이미지 순서와 같아야 BytePlus 가 누가 누구인지 안다.
+    """
     reason = unavailable_reason(model)
     if reason:
         raise VpocError("ark.submit", "ModelUnavailable", f"{LABELS.get(model, model)}: {reason}", 400)
@@ -155,7 +196,16 @@ def submit(
         )
 
     content: list[dict] = [{"type": "text", "text": prompt}]
-    if keyframe_jpeg_b64:
+    # 캐릭터 참고 이미지. URL 이 아니라 본문 base64 로 보낸다(BytePlus 쪽에 이미지를 남기지 않는다).
+    for b64 in reference_jpegs_b64 or []:
+        content.append(
+            {
+                "type": "image_url",
+                "image_url": {"url": "data:image/jpeg;base64," + b64},
+                "role": "reference_image",
+            }
+        )
+    if keyframe_jpeg_b64 and not reference_jpegs_b64:
         content.append(
             {
                 "type": "image_url",
@@ -167,8 +217,8 @@ def submit(
         "model": model_id(model),
         "content": content,
         "ratio": settings.ASPECT,
-        "duration": settings.DURATION_S,
-        "resolution": settings.ARK_RESOLUTION,
+        "duration": int(duration_s or settings.DURATION_S),
+        "resolution": resolution or settings.ARK_RESOLUTION,
         "generate_audio": False,
         "watermark": False,
     }

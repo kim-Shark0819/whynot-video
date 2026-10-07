@@ -77,6 +77,20 @@ ARK_USD_PER_SEC = {
     "seedance-2-5": os.getenv("VPOC_ARK_USD_PER_SEC_2_5", ""),
 }
 
+# ③ 영상 설정 — 사용자가 화질과 샷 길이를 고른다(설계자 2026-10-07).
+# 샷 길이 상한: Seedance 2.0 30초 · 2.5 15초 · Luma Ray2 5초(설계자 지정). 하한은 4초로 둔다
+# (BytePlus 문서의 하한을 확인하지 못했다 — 거절되면 이 값을 고친다).
+VIDEO_RESOLUTIONS = {
+    "luma-ray2": ["540p", "720p"],
+    "seedance-2-0": ["480p", "720p", "1080p"],
+    "seedance-2-5": ["480p", "720p"],
+}
+VIDEO_DURATION_RANGE = {
+    "luma-ray2": (5, 5),
+    "seedance-2-0": (4, 30),
+    "seedance-2-5": (4, 15),
+}
+
 RESOLUTION = os.getenv("VPOC_RESOLUTION", "540p")
 DURATION = os.getenv("VPOC_DURATION", "5s")
 ASPECT = os.getenv("VPOC_ASPECT", "16:9")
@@ -106,20 +120,31 @@ TASK_STALL_S = _int("VPOC_TASK_STALL_S", 600)
 POLL_MIN_INTERVAL_S = 10
 
 
-def ark_usd_per_sec(model: str) -> float | None:
-    """현재 해상도(ARK_RESOLUTION)의 생성 1초 단가. 모르면 None("단가 미정")."""
+def ark_usd_per_sec(model: str, resolution: str = "") -> float | None:
+    """그 해상도(기본 ARK_RESOLUTION)의 생성 1초 단가. 모르면 None("단가 미정")."""
     raw = str(ARK_USD_PER_SEC.get(model) or "").strip()
     if raw:
         try:
             return float(raw)
         except ValueError:
             return None
-    return (ARK_USD_PER_SEC_TABLE.get(model) or {}).get(ARK_RESOLUTION.lower())
+    return (ARK_USD_PER_SEC_TABLE.get(model) or {}).get((resolution or ARK_RESOLUTION).lower())
 
 
-def shot_usd(model: str = "") -> float:
-    """샷 1개 금액. model 이 Seedance 이고 단가가 없으면 0(단가 미정)."""
+def default_resolution(model: str) -> str:
+    """고르기 전의 화질. 예전 계획(설정 없음)은 이 값으로 읽힌다."""
     if model in ARK_MODEL_IDS:
-        per_sec = ark_usd_per_sec(model)
-        return round((per_sec or 0.0) * DURATION_S, 4)
-    return round(VIDEO_USD_PER_SEC.get(RESOLUTION, 0.75) * DURATION_S, 4)
+        return ARK_RESOLUTION
+    return RESOLUTION
+
+
+def shot_usd(model: str = "", resolution: str = "", seconds: float | None = None) -> float:
+    """샷 1개 금액. model 이 Seedance 이고 단가가 없으면 0(단가 미정).
+
+    인자를 비우면 예전과 같은 값(Luma · VPOC_RESOLUTION · DURATION_S)이다.
+    """
+    secs = DURATION_S if seconds is None else float(seconds)
+    if model in ARK_MODEL_IDS:
+        per_sec = ark_usd_per_sec(model, resolution)
+        return round((per_sec or 0.0) * secs, 4)
+    return round(VIDEO_USD_PER_SEC.get(resolution or RESOLUTION, 0.75) * secs, 4)

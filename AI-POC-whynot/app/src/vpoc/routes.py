@@ -132,6 +132,46 @@ def create_blueprint(deps: VpocDependencies) -> Blueprint:
         image.setdefault("error", None)
         return {"id": step3_char.get("id") or step2_char.get("id"), "image": image}
 
+    # ------------------------------------------------ ③ 영상 설정 (설계자 2026-10-07)
+
+    def _plan_resolution(step3: dict, model: str) -> str:
+        """③에서 고른 화질. 고르지 않았거나 그 모델에 없는 값이면 모델 기본값."""
+        allowed = settings.VIDEO_RESOLUTIONS.get(model) or [settings.RESOLUTION]
+        chosen = str(step3.get("resolution") or "")
+        if chosen in allowed:
+            return chosen
+        default = settings.default_resolution(model)
+        return default if default in allowed else allowed[0]
+
+    def _shot_seconds(model: str, shot: dict) -> int:
+        """샷 길이(초). 고르지 않았으면 5초, 모델 범위를 벗어나면 범위 안으로 맞춘다."""
+        low, high = settings.VIDEO_DURATION_RANGE.get(model, (settings.DURATION_S, settings.DURATION_S))
+        try:
+            seconds = int(shot.get("durationS") or settings.DURATION_S)
+        except (TypeError, ValueError):
+            seconds = settings.DURATION_S
+        return max(low, min(high, seconds))
+
+    def _reference_characters(steps: dict, plan_shot: dict) -> list[tuple[str, str]]:
+        """샷에 나오는 캐릭터 중 이미지가 준비된 것 → [(handleEn, 이미지 키)] (샷의 캐릭터 순서).
+
+        이미지는 사용자가 올린 것(source=user)이 있으면 그것, 없으면 ③에서 만든 AI 이미지다
+        (do_prepare 가 이미 그렇게 고른다). 둘 다 "이 캐릭터 그대로"의 기준이다.
+        """
+        sheets = {item.get("id"): item for item in steps["2"].get("characters") or []}
+        images_by_id = {
+            item.get("id"): item.get("image") or {} for item in steps["3"].get("characters") or []
+        }
+        refs: list[tuple[str, str]] = []
+        for char_id in plan_shot.get("characters") or []:
+            image = images_by_id.get(char_id) or {}
+            if image.get("status") != "ready" or not image.get("key"):
+                continue
+            sheet = sheets.get(char_id) or {}
+            handle = str(sheet.get("handleEn") or sheet.get("nameEn") or "the character").strip()
+            refs.append((handle, image["key"]))
+        return refs
+
     def _shot4_view(
         shot: dict, plan_shot: dict | None = None, gen_id: str = ""
     ) -> dict:
@@ -177,10 +217,18 @@ def create_blueprint(deps: VpocDependencies) -> Blueprint:
             _character_view(step2_chars.get(item.get("id"), {}), item, owner, pid)
             for item in steps["3"].get("characters", [])
         ]
-        step3["shots"] = [
-            {
+        # ③ 영상 설정(화질 · 샷 길이)은 ② 에서 고른 모델 기준이다. 금액도 그 값으로 다시 계산한다
+        # (저장된 cost 는 고르기 이전 값일 수 있다). 금액은 화면에 보이지 않고 확인용으로만 간다.
+        model = ark.selected(state)
+        resolution = _plan_resolution(steps["3"], model)
+        step3["resolution"] = resolution
+        step3["shots"] = []
+        for shot in steps["3"].get("shots", []):
+            seconds = _shot_seconds(model, shot)
+            row = {
                 "id": shot.get("id"),
-                "durationS": settings.DURATION_S,
+                "durationS": seconds,
+                "usd": settings.shot_usd(model, resolution, seconds),
                 "summaryKo": shot.get("summaryKo", ""),
                 "cameraKo": shot.get("cameraKo", ""),
                 "characters": shot.get("characters", []),
@@ -189,18 +237,25 @@ def create_blueprint(deps: VpocDependencies) -> Blueprint:
                 "useKeyframe": bool(shot.get("useKeyframe")),
                 "reviewKo": shot.get("reviewKo"),
             }
-            for shot in steps["3"].get("shots", [])
-        ]
-        # ③ 금액은 ② 에서 고른 모델로 다시 계산한다(저장된 cost 는 고르기 이전 값일 수 있다).
-        model = ark.selected(state)
+            if ark.is_ark(model) and shot.get("promptEn"):
+                # API 를 부르기 전에 보낼 문장을 그대로 보여 준다(설계자 2026-10-07 1-3).
+                refs = _reference_characters(steps, shot)
+                row["sendPromptEn"] = ark.reference_prompt(
+                    shot.get("promptEn") or "", [name for name, _ in refs]
+                )
+                row["referenceCount"] = len(refs)
+            step3["shots"].append(row)
         if step3.get("cost"):
-            per_shot = settings.shot_usd(model)
+            total = sum(row["usd"] for row in step3["shots"])
             step3["cost"] = {
                 **step3["cost"],
                 "model": model,
-                "priceKnown": not ark.is_ark(model) or settings.ark_usd_per_sec(model) is not None,
-                "perShotUsd": per_shot,
-                "totalUsd": round(per_shot * len(step3["shots"]), 2),
+                "resolution": resolution,
+                "durationS": sum(row["durationS"] for row in step3["shots"]),
+                "priceKnown": not ark.is_ark(model)
+                or settings.ark_usd_per_sec(model, resolution) is not None,
+                "perShotUsd": step3["shots"][0]["usd"] if step3["shots"] else 0,
+                "totalUsd": round(total, 2),
             }
 
         plan_shots = {item.get("id"): item for item in steps["3"].get("shots", [])}
@@ -242,6 +297,8 @@ def create_blueprint(deps: VpocDependencies) -> Blueprint:
             "modelPicker": settings.MODEL_PICKER_ENABLED,
             "videoModels": ark.choices() if settings.MODEL_PICKER_ENABLED else [],
             "videoModel": model,
+            # ③ 영상 설정(화질 · 샷 길이 범위). 고르기가 꺼져 있으면 Luma 값 그대로다.
+            "videoOptions": ark.video_options(model),
             "steps": {
                 "1": _step1_view(steps["1"], owner, pid),
                 "2": steps["2"],
@@ -676,11 +733,26 @@ def create_blueprint(deps: VpocDependencies) -> Blueprint:
                     except Exception as exc:  # noqa: BLE001
                         log.warning("vpoc.keyframe.failed shot=%s err=%s", shot["id"], exc)
 
-        # 이 회차의 모델(generate 가 정한다). 옛 계획에는 없고, 그때는 Luma 다.
-        video_model = str(state["steps"]["4"].get("videoModel") or ark.DEFAULT_MODEL)
+        # 이 회차의 모델 · 화질 · 샷 길이(generate 가 정한다). 옛 계획에는 없고, 그때는 Luma 기본값이다.
+        step4 = state["steps"]["4"]
+        video_model = str(step4.get("videoModel") or ark.DEFAULT_MODEL)
         use_ark = ark.is_ark(video_model)
+        video_resolution = str(step4.get("resolution") or settings.default_resolution(video_model))
+        seconds = int(shot.get("durationS") or _shot_seconds(video_model, plan_shot))
         try:
             if use_ark:
+                # 설계자 2026-10-07: 샷의 캐릭터 이미지(사용자 업로드 또는 ③에서 승인한 AI 이미지)를
+                # 참고 이미지로 함께 보내고, 그 캐릭터 그대로 만들라는 지시를 프롬프트 앞에 붙인다.
+                references: list[str] = []
+                names: list[str] = []
+                for handle, key in _reference_characters(state["steps"], plan_shot):
+                    try:
+                        references.append(images.keyframe_base64(key))
+                        names.append(handle)
+                    except Exception as exc:  # noqa: BLE001
+                        log.warning("vpoc.reference.failed shot=%s err=%s", shot["id"], exc)
+                if references:
+                    mode = "reference"
                 job = ark.submit(
                     model=video_model,
                     owner=owner,
@@ -688,9 +760,12 @@ def create_blueprint(deps: VpocDependencies) -> Blueprint:
                     plan_id=plan_id,
                     shot_id=shot["id"],
                     attempt=attempt,
-                    prompt=prompt,
+                    prompt=ark.reference_prompt(prompt, names),
                     keyframe_jpeg_b64=keyframe,
                     gen_id=gen_id,
+                    reference_jpegs_b64=references,
+                    resolution=video_resolution,
+                    duration_s=seconds,
                 )
             else:
                 job = video.submit(
@@ -702,6 +777,7 @@ def create_blueprint(deps: VpocDependencies) -> Blueprint:
                     prompt=prompt,
                     keyframe_jpeg_b64=keyframe,
                     gen_id=gen_id,
+                    resolution=video_resolution,
                 )
         except video.Throttled as exc:
             # E4: 대기로 두고 다음 조회 때 재제출. 과금 없음.
@@ -725,7 +801,13 @@ def create_blueprint(deps: VpocDependencies) -> Blueprint:
             return
 
         ledger.charge_video(
-            job["clientRequestToken"], user=user, project_id=pid, plan_id=plan_id, model=video_model
+            job["clientRequestToken"],
+            user=user,
+            project_id=pid,
+            plan_id=plan_id,
+            model=video_model,
+            resolution=video_resolution,
+            seconds=seconds,
         )
         target.update(
             {
@@ -757,8 +839,12 @@ def create_blueprint(deps: VpocDependencies) -> Blueprint:
                 "status": "submitted",
                 "submittedAt": job["submittedAt"],
                 "outputPrefix": job["outputPrefix"],
-                "usd": settings.shot_usd(video_model),
+                "usd": settings.shot_usd(video_model, video_resolution, seconds),
                 "videoModel": video_model,
+                "resolution": video_resolution,
+                "durationS": seconds,
+                # Seedance 에 실제로 보낸 문장(참고 이미지 지시 포함). Luma 는 prompt 와 같다.
+                "sentPrompt": ark.reference_prompt(prompt, names) if use_ark else prompt,
             },
         )
 
@@ -936,14 +1022,23 @@ def create_blueprint(deps: VpocDependencies) -> Blueprint:
             ),
             "provider": step4.get("videoModel") or video.PROVIDER,
             "params": {
-                "resolution": settings.RESOLUTION,
-                "duration": settings.DURATION,
+                "resolution": step4.get("resolution")
+                or settings.default_resolution(step4.get("videoModel") or ""),
+                "durationsS": [int(item.get("durationS") or settings.DURATION_S) for item in step4.get("shots", [])],
                 "aspect": settings.ASPECT,
             },
             "style": (state["steps"]["2"].get("story") or {}).get("style"),
             "settingEn": (state["steps"]["2"].get("story") or {}).get("settingEn"),
             "costUsd": round(
-                settings.shot_usd(step4.get("videoModel") or "") * len(step4.get("shots", [])), 2
+                sum(
+                    settings.shot_usd(
+                        step4.get("videoModel") or "",
+                        step4.get("resolution") or "",
+                        item.get("durationS"),
+                    )
+                    for item in step4.get("shots", [])
+                ),
+                2,
             ),
             "shots": [
                 {
@@ -1331,7 +1426,7 @@ def create_blueprint(deps: VpocDependencies) -> Blueprint:
             require_idle(state)
             step = state["steps"][str(number)]
             before = _fingerprint(step, number)
-            _apply_step(step, number, body)
+            _apply_step(step, number, body, model=ark.selected(state))
             step["status"] = "saved" if number == 1 else step.get("status") or "saved"
             after = _fingerprint(step, number)
             if before != after:
@@ -1359,10 +1454,12 @@ def create_blueprint(deps: VpocDependencies) -> Blueprint:
                 sort_keys=True,
             )
         return _json.dumps(
-            [step.get("shots"), step.get("useKeyframes")], ensure_ascii=False, sort_keys=True
+            [step.get("shots"), step.get("useKeyframes"), step.get("resolution")],
+            ensure_ascii=False,
+            sort_keys=True,
         )
 
-    def _apply_step(step: dict, number: int, body: dict) -> None:
+    def _apply_step(step: dict, number: int, body: dict, *, model: str = "luma-ray2") -> None:
         if number == 1:
             step["text"] = str(body.get("text") or "")
             step["characters"] = [
@@ -1455,14 +1552,42 @@ def create_blueprint(deps: VpocDependencies) -> Blueprint:
                     if text and len(text) <= compose.MAX_PROMPT_CHARS
                     else f"검토 필요: 프롬프트가 비었거나 {compose.MAX_PROMPT_CHARS}자를 넘습니다"
                 )
+            # ③ 영상 설정: 샷 길이(초). 모델 범위를 벗어나면 저장하지 않고 알린다.
+            if incoming and "durationS" in incoming:
+                low, high = settings.VIDEO_DURATION_RANGE.get(model, (5, 5))
+                try:
+                    seconds = int(incoming["durationS"])
+                except (TypeError, ValueError):
+                    seconds = -1
+                if not low <= seconds <= high:
+                    raise VpocError(
+                        "routes.save_step",
+                        "BadDuration",
+                        f"샷 길이는 {low}~{high}초 사이로 정해 주세요 (받은 값 {incoming['durationS']}).",
+                        400,
+                    )
+                shot["durationS"] = seconds
+        if "resolution" in body:
+            wanted = str(body.get("resolution") or "")
+            allowed = settings.VIDEO_RESOLUTIONS.get(model) or [settings.RESOLUTION]
+            if wanted not in allowed:
+                raise VpocError(
+                    "routes.save_step",
+                    "BadResolution",
+                    f"이 모델에서 고를 수 있는 화질이 아닙니다: {wanted} (가능: {', '.join(allowed)})",
+                    400,
+                )
+            step["resolution"] = wanted
         step["shots"] = shots
         step["useKeyframes"] = bool(body.get("useKeyframes"))
+        resolution = _plan_resolution(step, model)
+        per_shot = [settings.shot_usd(model, resolution, _shot_seconds(model, shot)) for shot in shots]
         step["cost"] = {
             "shots": len(shots),
-            "durationS": settings.DURATION_S,
-            "resolution": settings.RESOLUTION,
-            "perShotUsd": settings.shot_usd(),
-            "totalUsd": round(settings.shot_usd() * len(shots), 2),
+            "durationS": sum(_shot_seconds(model, shot) for shot in shots),
+            "resolution": resolution,
+            "perShotUsd": per_shot[0] if per_shot else 0,
+            "totalUsd": round(sum(per_shot), 2),
         }
 
     @bp.post("/p/<pid>/plans/<plan_id>/back")
@@ -1564,7 +1689,16 @@ def create_blueprint(deps: VpocDependencies) -> Blueprint:
                     409,
                 )
             video_model = ark.selected(state)
-            expected = round(settings.shot_usd(video_model) * len(shots), 2)
+            # ③ 영상 설정(설계자 2026-10-07): 화질 하나, 샷마다 길이.
+            video_resolution = _plan_resolution(step3, video_model)
+            seconds_by_shot = {shot["id"]: _shot_seconds(video_model, shot) for shot in shots}
+            expected = round(
+                sum(
+                    settings.shot_usd(video_model, video_resolution, seconds_by_shot[shot["id"]])
+                    for shot in shots
+                ),
+                2,
+            )
             confirm = body.get("confirmUsd")
             if confirm is None or abs(float(confirm) - expected) > 0.005:
                 raise VpocError(
@@ -1582,11 +1716,13 @@ def create_blueprint(deps: VpocDependencies) -> Blueprint:
                     "genId": store.new_gen_id(),
                     # 이 회차가 쓰는 모델. 생성 중에 ② 를 바꿔도 진행 중인 샷은 이 값을 따른다.
                     "videoModel": video_model,
+                    "resolution": video_resolution,
                     "shots": [
                         {
                             "id": shot["id"],
                             "status": "queued",
                             "attempt": 1,
+                            "durationS": seconds_by_shot[shot["id"]],
                             "mode": "keyframe" if shot.get("useKeyframe") else "text",
                             "submittedAt": None,
                             "completedAt": None,

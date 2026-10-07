@@ -806,6 +806,51 @@
     });
     section.appendChild(cards);
 
+    /* 영상 설정 — 화질 · 샷 길이 (설계자 2026-10-07). 고를 수 있는 범위는 서버가 모델별로 준다. */
+    var options = plan.videoOptions || { resolutions: ["540p"], minDurationS: 5, maxDurationS: 5, durationFixed: true };
+    var chosenResolution = step.resolution || options.defaultResolution || options.resolutions[0];
+    var settingsBlock = el("div", "vpoc-field");
+    settingsBlock.appendChild(el("label", null, "영상 설정"));
+    var resRow = el("div", "vpoc-radios");
+    resRow.appendChild(el("span", "vpoc-hint", "화질"));
+    options.resolutions.forEach(function (value) {
+      var label = el("label", "vpoc-radio");
+      var radio = el("input");
+      radio.type = "radio";
+      radio.name = "vpoc-resolution";
+      radio.value = value;
+      radio.checked = chosenResolution === value;
+      radio.disabled = !editable;
+      radio.addEventListener("change", function () {
+        if (radio.checked) chosenResolution = value;
+      });
+      label.appendChild(radio);
+      label.appendChild(el("span", null, value));
+      resRow.appendChild(label);
+    });
+    settingsBlock.appendChild(resRow);
+    settingsBlock.appendChild(
+      el(
+        "p",
+        "vpoc-hint",
+        options.durationFixed
+          ? "샷 길이: " + options.maxDurationS + "초 고정 (이 모델의 최대)"
+          : "샷 길이: 샷마다 " + options.minDurationS + "~" + options.maxDurationS + "초 사이로 정할 수 있습니다."
+      )
+    );
+    if (options.referenceImages) {
+      settingsBlock.appendChild(
+        el(
+          "p",
+          "vpoc-hint",
+          "캐릭터 유지: 각 샷에 나오는 캐릭터 이미지(올린 이미지가 있으면 그것, 없으면 위에서 승인한 AI 이미지)를 " +
+            "참고 이미지로 함께 보내고, 그 캐릭터 그대로 만들도록 프롬프트에 지시합니다."
+        )
+      );
+    }
+    section.appendChild(settingsBlock);
+    var durationEdits = {};
+
     /* 샷 목록 */
     section.appendChild(el("h3", null, "샷 " + (step.shots || []).length + "개"));
     var list = el("div", "vpoc-shots");
@@ -820,7 +865,24 @@
       ((shot.characters || [])).forEach(function (id) {
         meta.appendChild(el("span", "vpoc-chip", (sheetById[id] || {}).nameKo || id));
       });
-      meta.appendChild(el("span", null, (shot.durationS || 5) + "초"));
+      if (editable && !options.durationFixed) {
+        var secWrap = el("label", "vpoc-shot-seconds");
+        var secInput = el("input", "vpoc-input");
+        secInput.type = "number";
+        secInput.min = String(options.minDurationS);
+        secInput.max = String(options.maxDurationS);
+        secInput.step = "1";
+        secInput.value = String(shot.durationS || 5);
+        secInput.style.width = "4.5em";
+        secInput.addEventListener("input", function () {
+          durationEdits[shot.id] = Number(secInput.value);
+        });
+        secWrap.appendChild(secInput);
+        secWrap.appendChild(el("span", null, "초"));
+        meta.appendChild(secWrap);
+      } else {
+        meta.appendChild(el("span", null, (shot.durationS || 5) + "초"));
+      }
       body.appendChild(meta);
       if (shot.reviewKo) body.appendChild(el("p", "vpoc-review", shot.reviewKo));
 
@@ -834,6 +896,17 @@
         promptEdits[shot.id] = area.value;
       });
       advanced.appendChild(area);
+      if (shot.sendPromptEn) {
+        // API 를 부르기 전에 실제로 보낼 문장(참고 이미지 지시 포함). 위 장면 문장을 고치면 저장 뒤 다시 만든다.
+        advanced.appendChild(
+          el("p", "vpoc-hint", "Seedance 로 보낼 최종 프롬프트 · 참고 이미지 " + (shot.referenceCount || 0) + "장")
+        );
+        var sent = el("textarea", "vpoc-input");
+        sent.rows = 5;
+        sent.value = shot.sendPromptEn;
+        sent.readOnly = true;
+        advanced.appendChild(sent);
+      }
       body.appendChild(advanced);
       row.appendChild(body);
 
@@ -874,10 +947,23 @@
         );
       }
       approve.addEventListener("click", function () {
-        var shotEdits = Object.keys(promptEdits).map(function (id) {
-          return { id: id, promptEn: promptEdits[id] };
+        var byId = {};
+        Object.keys(promptEdits).forEach(function (id) {
+          byId[id] = { id: id, promptEn: promptEdits[id] };
         });
-        saveStep(3, { keepShotIds: keep, shots: shotEdits, useKeyframes: Boolean(step.useKeyframes) })
+        Object.keys(durationEdits).forEach(function (id) {
+          byId[id] = byId[id] || { id: id };
+          byId[id].durationS = durationEdits[id];
+        });
+        var shotEdits = Object.keys(byId).map(function (id) {
+          return byId[id];
+        });
+        saveStep(3, {
+          keepShotIds: keep,
+          shots: shotEdits,
+          useKeyframes: Boolean(step.useKeyframes),
+          resolution: chosenResolution
+        })
           .then(function () {
             var current = state.plan.steps["3"].cost || {};
             confirmModal(
@@ -1261,7 +1347,11 @@
     panel.appendChild(advanced);
 
     var actions = el("div", "vpoc-regen-actions");
-    var amount = ((plan.steps["3"] || {}).cost || {}).perShotUsd;
+    // 서버 확인용 금액(화면에는 보이지 않는다). 샷마다 길이가 달라 그 샷의 값을 쓴다.
+    var planShot = ((plan.steps["3"] || {}).shots || []).filter(function (item) {
+      return item.id === shot.id;
+    })[0];
+    var amount = planShot && planShot.usd != null ? planShot.usd : ((plan.steps["3"] || {}).cost || {}).perShotUsd;
     var go = el(
       "button",
       "vpoc-btn vpoc-btn-primary vpoc-btn-small",

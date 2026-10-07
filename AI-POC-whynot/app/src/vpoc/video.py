@@ -101,12 +101,13 @@ def client_token(plan_id: str, shot_id: str, attempt: int, gen_id: str = "") -> 
     return token
 
 
-def model_input(prompt: str, *, keyframe_jpeg_b64: str = "") -> dict:
+def model_input(prompt: str, *, keyframe_jpeg_b64: str = "", resolution: str = "") -> dict:
+    # 화질은 ③에서 사용자가 고른다(540p · 720p). 길이는 Luma 상한 5초로 고정(설계자 2026-10-07).
     body: dict = {
         "prompt": prompt,
         "aspect_ratio": settings.ASPECT,
         "duration": settings.DURATION,
-        "resolution": settings.RESOLUTION,
+        "resolution": resolution or settings.RESOLUTION,
         "loop": False,
     }
     if keyframe_jpeg_b64:
@@ -129,6 +130,7 @@ def submit(
     prompt: str,
     keyframe_jpeg_b64: str = "",
     gen_id: str = "",
+    resolution: str = "",
 ) -> dict:
     """StartAsyncInvoke. 즉시 반환한다. 제출 성공 시점이 과금 시점이다."""
     limit = caps()["maxPromptChars"]
@@ -160,7 +162,7 @@ def submit(
         response = runtime().start_async_invoke(
             clientRequestToken=token,
             modelId=settings.VIDEO_MODEL,
-            modelInput=model_input(prompt, keyframe_jpeg_b64=keyframe_jpeg_b64),
+            modelInput=model_input(prompt, keyframe_jpeg_b64=keyframe_jpeg_b64, resolution=resolution),
             outputDataConfig={
                 "s3OutputDataConfig": {"s3Uri": f"s3://{settings.VIDEO_BUCKET}/{prefix}"}
             },

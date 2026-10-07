@@ -111,16 +111,23 @@ def charge(
 
 
 def charge_video(
-    token: str, *, user: str, project_id: str, plan_id: str, model: str = ""
+    token: str,
+    *,
+    user: str,
+    project_id: str,
+    plan_id: str,
+    model: str = "",
+    resolution: str = "",
+    seconds: float | None = None,
 ) -> dict:
-    # model 이 Seedance 면 그 모델 ID 와 단가(미정이면 0)로 남긴다. 비면 Luma.
+    # model 이 Seedance 면 그 모델 ID 와 단가로 남긴다. 비면 Luma. 화질·길이는 ③에서 고른 값.
     ark_id = settings.ARK_MODEL_IDS.get(model) if model else None
     return charge(
         token,
         kind="video",
         model=ark_id or settings.VIDEO_MODEL,
-        units=settings.DURATION_S,
-        usd=settings.shot_usd(model),
+        units=settings.DURATION_S if seconds is None else seconds,
+        usd=settings.shot_usd(model, resolution, seconds),
         user=user,
         project_id=project_id,
         plan_id=plan_id,
