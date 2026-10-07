@@ -28,6 +28,12 @@ def providers():
     return llm, images, video
 
 
+def _take_tokens(llm_mod) -> tuple[int, int] | None:
+    """llm 이 모아 둔 (입력, 출력) 토큰을 꺼낸다. 목 모드에는 없다(None)."""
+    take = getattr(llm_mod, "take_tokens", None)
+    return take() if take else None
+
+
 # --- 저장 --------------------------------------------------------------------
 
 def run_key(owner: str, run_id: str) -> str:
@@ -209,10 +215,12 @@ def run_interpret(owner: str, run_id: str) -> None:
             raise Vpoc2Error("PreconditionFailed", "명령을 먼저 입력한다", http=409)
 
     def work(snap: dict[str, Any]):
+        _take_tokens(llm)
         data, usd, violations = llm.interpret(snap["input"]["command"], snap["input"]["characters"])
+        tokens = _take_tokens(llm)
         if usd:
             ledger.charge(f"interpret-{run_id}-{secrets.token_hex(3)}", user=owner, run_id=run_id, kind="text",
-                          model=settings.TEXT_MODEL, units=1, usd=usd)
+                          model=settings.TEXT_MODEL, units=1, usd=usd, tokens=tokens)
 
         def apply(run: dict[str, Any]) -> None:
             # 새 해석이면 뒤 단계는 새로 시작한다 (이전 리뷰는 reviews.json 에 남아 있다)
@@ -284,11 +292,13 @@ def run_draw(owner: str, run_id: str, char_id: str | None, feedback: str = "") -
             if feedback and it["id"] == char_id:
                 # 한국어 의견을 SD3.5 프롬프트에 그대로 넣지 않는다 (모델이 한국어를 거의 못 읽는다).
                 # Claude 가 캐릭터의 영어 외형을 의견대로 고친다 → 영상 프롬프트에도 같이 반영된다.
+                _take_tokens(llm)
                 c, usd_text = llm.revise_character(c, feedback)
+                tokens = _take_tokens(llm)
                 revised[c["id"]] = c
                 if usd_text:
                     ledger.charge(f"revise-{run_id}-{it['id']}-{secrets.token_hex(3)}", user=owner, run_id=run_id,
-                                  kind="text", model=settings.TEXT_MODEL, units=1, usd=usd_text)
+                                  kind="text", model=settings.TEXT_MODEL, units=1, usd=usd_text, tokens=tokens)
             prompt, negative = compose.character_image_prompt(data.get("style", "live_action"), c,
                                                              data.get("settingEn", ""))
             jpeg, seed, calls = images.generate(prompt, negative)
@@ -368,6 +378,7 @@ def run_prepare(owner: str, run_id: str) -> None:
         issues: dict[str, list[str]] = {}
         total = 0.0
         s = store.get_store()
+        _take_tokens(llm)
         for it in snap["characters"]["items"]:
             if it.get("appearanceShortEn"):
                 appearances[it["id"]] = it["appearanceShortEn"]
@@ -380,9 +391,10 @@ def run_prepare(owner: str, run_id: str) -> None:
             appearances[it["id"]] = line
             if violations:
                 issues[it["id"]] = violations
+        tokens = _take_tokens(llm)
         if total:
             ledger.charge(f"appearance-{run_id}-{secrets.token_hex(3)}", user=owner, run_id=run_id, kind="text",
-                          model=settings.TEXT_MODEL, units=len(chars), usd=total)
+                          model=settings.TEXT_MODEL, units=len(chars), usd=total, tokens=tokens)
         char_list = list(chars.values())
         prompts = []
         for shot in data["shots"]:

@@ -828,10 +828,15 @@ def check_no_budget_cap() -> None:
         bad.append("vpoc.js 가 budget.capUsd 값을 읽어 씁니다 (상한을 표시하게 됩니다)")
     if "상한 " in js:
         bad.append("vpoc.js 에 '상한' 문구가 남아 있습니다")
-    if "누적 비용 " not in js:
-        bad.append("vpoc.js 상단 표시가 '누적 비용' 이 아닙니다")
-    if "현재 누적 " not in js:
-        bad.append("vpoc.js 확인 창이 '현재 누적' 이 아닙니다")
+    # 설계자 2026-10-07: 영상 만들기 화면에는 금액을 보이지 않는다(admin 모델 관리에서만 본다).
+    # 예전에는 "누적 비용"·"현재 누적" 문구가 있어야 했다 — 그 요구를 반대로 바꿨다.
+    for name in ("vpoc.js", "vpoc2.js"):
+        text = (ROOT / "frontend" / "public" / name).read_text(encoding="utf-8")
+        # 주석은 빼고 문자열 리터럴 안의 금액 표시만 본다.
+        code = re.sub(r"/\*.*?\*/|//[^\n]*", "", text, flags=re.S)
+        for needle in (" USD", "누적 비용", "현재 누적"):
+            if re.search(r"[\"'][^\"'\n]*" + re.escape(needle), code):
+                bad.append(f"{name} 가 영상 화면에 금액을 보입니다: {needle.strip()!r}")
 
     if bad:
         fail("비용 상한 없음 검사 실패\n" + "\n".join(f"  {item}" for item in bad))

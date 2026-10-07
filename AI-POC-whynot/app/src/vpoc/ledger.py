@@ -59,8 +59,13 @@ def charge(
     user: str = "",
     project_id: str = "",
     plan_id: str = "",
+    input_tokens: int | None = None,
+    output_tokens: int | None = None,
 ) -> dict:
-    """같은 key 는 한 번만 계상한다. 실패한 Luma 작업도 계상한다(보수적)."""
+    """같은 key 는 한 번만 계상한다. 실패한 Luma 작업도 계상한다(보수적).
+
+    토큰은 admin 모델 관리의 "영상 비용·토큰"이 읽는다(2026-10-07). 모르면 넣지 않는다.
+    """
     entry = {
         "key": key,
         "at": now_iso(),
@@ -72,6 +77,10 @@ def charge(
         "units": round(float(units), 4),
         "usd": round(float(usd), 6),
     }
+    if input_tokens is not None:
+        entry["inputTokens"] = int(input_tokens)
+    if output_tokens is not None:
+        entry["outputTokens"] = int(output_tokens)
     with _LOCK:
         for _ in range(4):
             data, etag = read()
@@ -155,6 +164,29 @@ def charge_text(
         user=user,
         project_id=project_id,
         plan_id=plan_id,
+        input_tokens=input_tokens,
+        output_tokens=output_tokens,
+    )
+
+
+def record_video_tokens(
+    key: str, *, model: str, usage: dict | None, user: str, project_id: str, plan_id: str
+) -> dict:
+    """Seedance 작업이 끝났을 때 BytePlus 가 알려 준 토큰을 남긴다. 금액은 제출 때 이미 계상했다(0)."""
+    usage = usage or {}
+    total = int(usage.get("total_tokens") or 0)
+    output = int(usage.get("completion_tokens") or total)
+    return charge(
+        key,
+        kind="video-tokens",
+        model=model,
+        units=0,
+        usd=0,
+        user=user,
+        project_id=project_id,
+        plan_id=plan_id,
+        input_tokens=max(total - output, 0),
+        output_tokens=output,
     )
 
 

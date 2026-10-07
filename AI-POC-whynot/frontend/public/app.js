@@ -4335,6 +4335,55 @@ async function loadUsage() {
   }
 }
 
+/* 영상 비용·토큰 (설계자 2026-10-07). 영상 만들기 화면에는 금액을 보이지 않고 여기서만 본다.
+   GET /api/admin/video-costs 는 vpoc1 · vpoc2 원장을 합친 누적값이다. */
+const VIDEO_COST_KIND = { video: "영상", image: "이미지", text: "텍스트", preflight: "사전 점검" };
+
+async function loadVideoCosts() {
+  if (!state.user?.isAdmin || !$("#videoCostTotals")) return;
+  try {
+    renderVideoCosts(await api("/api/admin/video-costs"));
+  } catch (error) {
+    showToast("영상 비용을 불러오지 못했습니다", error.message, "error");
+  }
+}
+
+function renderVideoCosts(payload) {
+  const totals = payload.totals || {};
+  const money = (value) => Number(value || 0).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  const kindUsd = (kind) => ((payload.byKind || []).find((row) => row.kind === kind) || {}).usd || 0;
+  $("#videoCostTotals").innerHTML = [
+    ["총 비용", money(totals.usd), "USD"],
+    ["영상", money(kindUsd("video")), "USD"],
+    ["이미지", money(kindUsd("image")), "USD"],
+    ["텍스트", money(kindUsd("text")), "USD"],
+    ["입력 토큰", (totals.inputTokens || 0).toLocaleString(), "tokens"],
+    ["출력 토큰", (totals.outputTokens || 0).toLocaleString(), "tokens"]
+  ].map(([label, value, unit]) =>
+    `<div class="usage-card"><span>${escapeHtml(label)}</span><strong>${escapeHtml(value)}</strong><small>${escapeHtml(unit)}</small></div>`
+  ).join("");
+
+  const body = $("#videoCostModelBody");
+  body.innerHTML = "";
+  (payload.byModel || []).forEach((row) => {
+    const tr = document.createElement("tr");
+    tr.innerHTML = `
+      <td><strong>${escapeHtml(row.model || "-")}</strong></td>
+      <td>${escapeHtml(VIDEO_COST_KIND[row.kind] || row.kind)}</td>
+      <td>${(row.calls || 0).toLocaleString()}</td>
+      <td>${(row.inputTokens || 0).toLocaleString()}</td>
+      <td>${(row.outputTokens || 0).toLocaleString()}</td>
+      <td>${money(row.usd)}</td>`;
+    body.appendChild(tr);
+  });
+  if (!(payload.byModel || []).length) {
+    body.innerHTML = '<tr><td colspan="6" class="usage-empty">기록이 없습니다.</td></tr>';
+  }
+  $("#videoCostNote").textContent =
+    `토큰은 ${payload.tokensSince || "2026-10-07"} 이후 호출부터 기록됩니다. 그 전 항목은 금액만 있습니다. ` +
+    "Seedance 금액은 콘솔 견적에서 계산한 추정 단가입니다.";
+}
+
 function usageCard(label, value, unit) {
   return `<div class="usage-card"><span>${escapeHtml(label)}</span><strong>${value.toLocaleString()}</strong><small>${escapeHtml(unit)}</small></div>`;
 }
@@ -6164,6 +6213,7 @@ function switchView(viewName) {
   // 사용량과 프롬프트 관리는 모델 관리 화면 안에 있다(지시서 5-1).
   if (viewName === "models" && state.user?.isAdmin) {
     loadUsage();
+    loadVideoCosts();
     loadPrompts();
   }
   // 내 사용량은 진입할 때마다 다시 읽는다. 잔여 횟수는 생성할 때마다 바뀌므로
@@ -6718,6 +6768,7 @@ $$("#usageRangeOptions button").forEach((button) => button.addEventListener("cli
   loadUsage();
 }));
 $("#refreshUsage").addEventListener("click", () => loadUsage());
+$("#refreshVideoCosts")?.addEventListener("click", () => loadVideoCosts());
 $("#refreshMyUsage")?.addEventListener("click", () => loadMyUsage());
 // 프롬프트 관리
 $("#refreshPrompts")?.addEventListener("click", () => loadPrompts());

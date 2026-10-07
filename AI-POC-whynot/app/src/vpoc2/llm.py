@@ -148,10 +148,25 @@ def _bedrock():
         return _client
 
 
+# 이 스레드에서 금액으로 바꾼 토큰을 모은다. 호출부(service)가 원장에 쓰기 직전에 take_tokens()
+# 로 꺼내 간다 — 함수들이 (값, usd, …) 만 돌려주는 모양을 바꾸지 않고 토큰을 남기기 위한 것이다
+# (admin 모델 관리 "영상 비용·토큰", 2026-10-07).
+_TOKENS = threading.local()
+
+
 def usd_for(usage: dict[str, Any]) -> float:
     tin = usage.get("inputTokens", 0)
     tout = usage.get("outputTokens", 0)
+    _TOKENS.inp = getattr(_TOKENS, "inp", 0) + int(tin or 0)
+    _TOKENS.out = getattr(_TOKENS, "out", 0) + int(tout or 0)
     return tin / 1e6 * settings.TEXT_USD_PER_MTOK_IN + tout / 1e6 * settings.TEXT_USD_PER_MTOK_OUT
+
+
+def take_tokens() -> tuple[int, int]:
+    """모은 (입력, 출력) 토큰을 꺼내고 비운다."""
+    inp, out = getattr(_TOKENS, "inp", 0), getattr(_TOKENS, "out", 0)
+    _TOKENS.inp = _TOKENS.out = 0
+    return inp, out
 
 
 def _converse(system: str, content: list[dict[str, Any]], tool: dict[str, Any], max_tokens: int,

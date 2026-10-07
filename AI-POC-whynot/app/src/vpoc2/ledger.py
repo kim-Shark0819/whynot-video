@@ -14,14 +14,19 @@ _DEFAULT = {"spentUsd": 0.0, "entries": []}
 
 
 def charge(key: str, *, user: str, run_id: str, kind: str, model: str, units: float,
-           usd: float, resolution: str | None = None) -> None:
+           usd: float, resolution: str | None = None,
+           tokens: tuple[int, int] | None = None) -> None:
+    """tokens = (입력, 출력). 텍스트 호출에서만 넘긴다(admin 모델 관리가 읽는다)."""
     def mutate(ledger: dict[str, Any]) -> None:
         if any(e.get("key") == key for e in ledger["entries"]):
             return
-        ledger["entries"].append({
+        entry = {
             "key": key, "at": now_iso(), "user": user, "runId": run_id, "kind": kind,
             "model": model, "units": units, "usd": round(usd, 4), "resolution": resolution,
-        })
+        }
+        if tokens is not None:
+            entry["inputTokens"], entry["outputTokens"] = int(tokens[0]), int(tokens[1])
+        ledger["entries"].append(entry)
         ledger["spentUsd"] = round(sum(e["usd"] for e in ledger["entries"]), 4)
 
     store.update_json(store.get_store(), store.LEDGER_KEY, _DEFAULT, mutate)

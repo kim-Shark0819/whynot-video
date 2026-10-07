@@ -1073,6 +1073,68 @@ def admin_usage():
     return jsonify(summary)
 
 
+@app.get("/api/admin/video-costs")
+@require_admin
+def admin_video_costs():
+    """영상 기능(vpoc1 · vpoc2)이 지금까지 쓴 비용과 API 토큰. 관리자 모델 관리에서만 본다.
+
+    설계자 2026-10-07: 영상 만들기 화면의 비용 표시를 모두 걷고 여기 한 곳에서만 보인다.
+    원장 두 개(users/_vpoc1/ledger.json · users/_vpoc2/ledger.json)를 그대로 합친다.
+    토큰은 2026-10-07 부터 기록한다 — 그 전 항목은 금액만 있다.
+    """
+    from .vpoc import ledger as vpoc_ledger  # noqa: PLC0415
+    from .vpoc2 import ledger as vpoc2_ledger  # noqa: PLC0415
+
+    sources = []
+    try:
+        sources.append(("vpoc1", vpoc_ledger.read()[0].get("entries") or []))
+    except Exception as exc:  # noqa: BLE001
+        app.logger.warning("video-costs: vpoc1 ledger unreadable: %s", exc)
+    try:
+        sources.append(("vpoc2", vpoc2_ledger.read().get("entries") or []))
+    except Exception as exc:  # noqa: BLE001
+        app.logger.warning("video-costs: vpoc2 ledger unreadable: %s", exc)
+
+    def blank() -> dict:
+        return {"calls": 0, "usd": 0.0, "units": 0.0, "inputTokens": 0, "outputTokens": 0}
+
+    totals = blank()
+    by_kind: dict[str, dict] = {}
+    by_model: dict[tuple[str, str], dict] = {}
+    for _source, entries in sources:
+        for entry in entries:
+            raw_kind = str(entry.get("kind") or "")
+            if raw_kind == "hq-slot":  # 720p 월 한도 자리. 비용이 아니다.
+                continue
+            # Seedance 완료 때 남긴 토큰 항목은 같은 모델의 영상 행에 합친다(호출 수에는 안 센다).
+            token_only = raw_kind == "video-tokens"
+            kind = "video" if token_only else raw_kind
+            model = str(entry.get("model") or "")
+            for bucket in (totals, by_kind.setdefault(kind, blank()),
+                           by_model.setdefault((kind, model), blank())):
+                if not token_only:
+                    bucket["calls"] += 1
+                    bucket["units"] += float(entry.get("units") or 0)
+                bucket["usd"] += float(entry.get("usd") or 0)
+                bucket["inputTokens"] += int(entry.get("inputTokens") or 0)
+                bucket["outputTokens"] += int(entry.get("outputTokens") or 0)
+
+    def rounded(row: dict) -> dict:
+        return {**row, "usd": round(row["usd"], 2), "units": round(row["units"], 2)}
+
+    return jsonify({
+        "ok": True,
+        "totals": rounded(totals),
+        "byKind": [{"kind": k, **rounded(v)} for k, v in sorted(by_kind.items(), key=lambda kv: -kv[1]["usd"])],
+        "byModel": [
+            {"kind": k, "model": m, **rounded(v)}
+            for (k, m), v in sorted(by_model.items(), key=lambda kv: -kv[1]["usd"])
+        ],
+        "sources": [name for name, _ in sources],
+        "tokensSince": "2026-10-07",
+    })
+
+
 @app.get("/api/usage/me")
 @require_auth
 def my_usage():

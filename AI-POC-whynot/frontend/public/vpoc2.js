@@ -48,7 +48,6 @@
     if (e.status === 401) state.error.message = "로그인이 필요합니다. 와이낫 메인 화면에서 로그인한 뒤 이 페이지를 다시 여세요.";
     render();
   }
-  function usd(n) { return (Math.round(n * 100) / 100).toFixed(2); }
   function mmss(s) { s = Math.max(0, s | 0); return Math.floor(s / 60) + ":" + ("0" + (s % 60)).slice(-2); }
   function clone(o) { return JSON.parse(JSON.stringify(o)); }
 
@@ -125,7 +124,7 @@
     var hq = m.hq || {};
     return '<div class="vpoc2-top"><div><h1><a class="vpoc2-list" href="#">와이낫 영상 v2</a></h1>' +
       '<div class="vpoc2-meta">15초 = 5초 × 3샷 · 테스트 540p · 720p 이번 달 남은 ' + esc(hq.remaining) + "/" + esc(hq.limit) +
-      "회 · 누적 비용 " + usd(m.spentUsd || 0) + " USD " + (m.mock ? '<span class="vpoc2-badge mock">목 모드 — 모델 호출 없음</span>' : "") +
+      "회 " + (m.mock ? '<span class="vpoc2-badge mock">목 모드 — 모델 호출 없음</span>' : "") +
       '</div></div><div class="vpoc2-row" style="margin:0"><button class="vpoc2-btn" data-act="reviews">리뷰 모음</button>' +
       '<button class="vpoc2-btn primary" data-act="new">새 영상 만들기</button></div></div>';
   }
@@ -343,11 +342,10 @@
       });
       var bad = v.prompts.some(function (p) { return p.reviewKo && p.reviewKo.length; });
       html += '</div><h3>해상도</h3><label><input type="radio" name="vpoc2-res" value="540p"' + (sel === "540p" ? " checked" : "") +
-        "> 540p 테스트 · " + usd(m.videoUsd["540p"]) + " USD</label><br><label><input type=\"radio\" name=\"vpoc2-res\" value=\"720p\"" +
-        (sel === "720p" ? " checked" : "") + (m.hq.remaining > 0 ? "" : " disabled") + "> 720p 최종 확인 · " + usd(m.videoUsd["720p"]) +
-        " USD · 이번 달 남은 " + m.hq.remaining + "회</label>" +
+        "> 540p 테스트</label><br><label><input type=\"radio\" name=\"vpoc2-res\" value=\"720p\"" +
+        (sel === "720p" ? " checked" : "") + (m.hq.remaining > 0 ? "" : " disabled") + "> 720p 최종 확인 · 이번 달 남은 " + m.hq.remaining + "회</label>" +
         '<div class="vpoc2-row"><button class="vpoc2-btn primary" data-act="generate"' + (bad || state.busy ? " disabled" : "") +
-        ">영상 만들기 시작 · " + usd(m.videoUsd[sel]) + " USD</button></div>";
+        ">영상 만들기 시작</button></div>";
     } else if (v.shots.length) {
       if (v.final.status === "ready") {
         html += '<h3>15초 완성본</h3><video class="vpoc2-v" controls src="' + esc(v.final.url) + '"></video>' +
@@ -357,7 +355,7 @@
         html += '<p class="vpoc2-status run">' + (stitchErr ? "합본 실패" : "샷 3개 완료 — 15초로 합치는 중") + "</p>" +
           (stitchErr ? '<button class="vpoc2-btn" data-act="stitch">다시 합치기</button>' : "");
       }
-      html += '<p class="vpoc2-muted">' + esc(v.resolution) + " · 사용 " + usd(v.costUsd || 0) + ' USD · 생성 중에 되돌아가도 이미 제출한 샷은 취소되지 않습니다.</p><div class="vpoc2-grid">';
+      html += '<p class="vpoc2-muted">' + esc(v.resolution) + ' · 생성 중에 되돌아가도 이미 제출한 샷은 취소되지 않습니다.</p><div class="vpoc2-grid">';
       v.shots.forEach(function (sh, i) {
         var st = SHOT_STATUS[sh.status] || [sh.status, ""];
         var slow = sh.status === "submitted" && sh.elapsedS > 600;
@@ -367,8 +365,7 @@
           (sh.status === "submitted" ? '<div class="vpoc2-muted">' + (slow ? "평소보다 오래 걸려요" : "보통 2~5분") + "</div>" : "") +
           (sh.note ? '<div class="vpoc2-muted">' + esc(sh.note) + "</div>" : "") +
           (sh.videoUrl ? '<video class="vpoc2-v" controls muted src="' + esc(sh.videoUrl) + '"></video>' : "") + errBox(sh.error) +
-          (sh.status === "failed" ? '<button class="vpoc2-btn" data-act="retry" data-shot="' + esc(sh.id) + '">다시 시도 · ' +
-            usd((state.meta.videoUsd[v.resolution] || 0) / 3) + " USD</button>" : "") + "</div>";
+          (sh.status === "failed" ? '<button class="vpoc2-btn" data-act="retry" data-shot="' + esc(sh.id) + '">다시 시도</button>' : "") + "</div>";
       });
       html += "</div>";
     } else {
@@ -477,8 +474,7 @@
     } else if (a === "generate") {
       var res = state.resolution || "540p";
       var cost = state.meta.videoUsd[res];
-      var msg = "샷 3개 × 5초 · " + res + " · " + usd(cost) + " USD를 사용합니다.\n현재 누적 " + usd(state.meta.spentUsd) +
-        " USD. 시작하면 취소할 수 없습니다." + (res === "720p" ? "\n이번 달 720p 최종 확인 1회를 사용합니다." : "");
+      var msg = "샷 3개 × 5초 · " + res + " 영상을 만듭니다.\n시작하면 취소할 수 없습니다." + (res === "720p" ? "\n이번 달 720p 최종 확인 1회를 사용합니다." : "");
       if (!window.confirm(msg)) return;
       act("POST", "/run/generate", { resolution: res, confirmUsd: cost }).then(function () {
         return api("GET", "/meta").then(function (j) { state.meta = j; render(); });

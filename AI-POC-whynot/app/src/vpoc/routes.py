@@ -794,6 +794,19 @@ def create_blueprint(deps: VpocDependencies) -> Blueprint:
             status = result["status"]
             # 오류 위치 표시. Seedance 실패가 luma.* 로 보여 원인을 헷갈리게 했다(2026-10-07).
             where = "ark" if ark.is_ark_job(target["invocationArn"]) else "luma"
+            if where == "ark" and result.get("usage") and status in ("Completed", "Failed"):
+                # BytePlus 가 알려 준 토큰. 작업 하나에 한 번만 남는다(키 = 작업 식별자).
+                try:
+                    ledger.record_video_tokens(
+                        target["invocationArn"] + "-usage",
+                        model=ark.model_id(str(state["steps"]["4"].get("videoModel") or "")),
+                        usage=result["usage"],
+                        user=user,
+                        project_id=pid,
+                        plan_id=plan_id,
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    log.warning("vpoc.ledger.tokens.failed shot=%s err=%s", shot_id, exc)
             if status == "Completed":
                 found = video.find_output_mp4(
                     target.get("outputPrefix") or "", target.get("invocationArn") or ""

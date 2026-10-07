@@ -3,8 +3,9 @@
    #vpoc-root 안의 DOM 을 전부 직접 만든다. 기존 마크업을 찾지 않고, 이벤트는 자기가 만든
    요소에만 단다. 어떤 요소가 없어도 예외로 멈추지 않는다. CSS 클래스는 vpoc- 접두사.
 
-   금액은 서버가 준 값(cost.totalUsd, budget)을 그대로 보인다. 화면에서 계산하지 않는다 —
-   틀린 화면 추정치가 작업을 멈춰 세운 적이 있다(PRD R5).
+   금액은 화면에 보이지 않는다(설계자 2026-10-07 — 비용·토큰은 admin 모델 관리에서만 본다).
+   서버의 금액 확인(confirmUsd)은 그대로라 서버가 준 cost.totalUsd 를 보이지 않게 실어 보낸다.
+   화면에서 계산하지 않는다 — 틀린 화면 추정치가 작업을 멈춰 세운 적이 있다(PRD R5).
 
    전역: window.vpoc = { mount(projectId), unmount() } */
 (function () {
@@ -85,21 +86,15 @@
     return minutes + ":" + (rest < 10 ? "0" : "") + rest;
   }
 
-  function usd(value) {
-    var number = Number(value);
-    return isFinite(number) ? number.toFixed(2) : "-";
-  }
 
-  /* ③ 비용 한 줄. 모델 고르기가 켜진 배포에서는 모델 이름을 앞에 붙이고, Seedance 단가가
-     아직 없으면 금액 대신 "단가 미정"을 보인다(금액은 여전히 서버 값 그대로다). */
+  /* ③ 만들 분량 한 줄(금액 없음). 모델 고르기가 켜진 배포에서는 모델 이름을 앞에 붙인다. */
   function costLabel(plan, cost) {
     var text = (cost.shots || 0) + "샷 × " + (cost.durationS || 5) + "초";
     var model = (plan.videoModels || []).filter(function (item) {
       return item.id === cost.model;
     })[0];
-    if (plan.modelPicker && model) text = model.label + " · " + text;
-    else text += " · " + (cost.resolution || "540p");
-    return text + " · " + (cost.priceKnown === false ? "단가 미정" : usd(cost.totalUsd) + " USD");
+    if (plan.modelPicker && model) return model.label + " · " + text;
+    return text + " · " + (cost.resolution || "540p");
   }
 
   function easyCamera(shot) {
@@ -175,13 +170,7 @@
     });
     right.appendChild(toggle);
 
-    var budget = (state.plan && state.plan.budget) || null;
-    if (budget) {
-      // 상한은 없다(2026-09-23 사용자 결정). capUsd 가 와도 보여 주지 않는다.
-      right.appendChild(
-        el("span", "vpoc-budget", "누적 비용 " + usd(budget.spentUsd) + " USD")
-      );
-    }
+    // 누적 비용 표시는 걷었다(설계자 2026-10-07). admin 모델 관리 "영상 비용 · 토큰"에서 본다.
     bar.appendChild(title);
     bar.appendChild(right);
     return bar;
@@ -576,8 +565,6 @@
         label.appendChild(radio);
         var text = item.label;
         if (!item.available) text += " (" + item.reason + ")";
-        else if (!item.priceKnown) text += " (단가 미정)";
-        else text += " (샷당 " + usd(item.perShotUsd) + " USD)";
         label.appendChild(el("span", null, text));
         modelRow.appendChild(label);
       });
@@ -866,16 +853,9 @@
     });
     section.appendChild(list);
 
-    /* 비용 — 서버 계산값만 보인다 */
+    /* 만들 분량 — 금액은 보이지 않는다(설계자 2026-10-07, admin 모델 관리에서만 본다) */
     var cost = step.cost || {};
-    section.appendChild(
-      el(
-        "p",
-        "vpoc-cost",
-        plan.modelPicker ? "샷 " + costLabel(plan, cost) : "샷 " + (cost.shots || 0) + "개\u00d7 " + (cost.durationS || 5) + "초 \u00b7 " +
-          (cost.resolution || "540p") + " \u00b7 " + usd(cost.totalUsd) + " USD"
-      )
-    );
+    section.appendChild(el("p", "vpoc-cost", costLabel(plan, cost)));
 
     if (editable) {
       var blocked = (step.shots || []).some(function (shot) {
@@ -884,8 +864,7 @@
       var approve = el(
         "button",
         "vpoc-btn vpoc-btn-primary vpoc-btn-run",
-        "승인하고 영상 만들기 \u00b7 " + (cost.shots || 0) + "샷 \u00b7 " +
-          (cost.priceKnown === false ? "단가 미정" : usd(cost.totalUsd) + " USD")
+        "승인하고 영상 만들기 · " + (cost.shots || 0) + "샷"
       );
       approve.type = "button";
       approve.disabled = state.busy || blocked;
@@ -904,11 +883,7 @@
             confirmModal(
               "영상을 만들까요?",
               [
-                state.plan.modelPicker
-                  ? costLabel(state.plan, current) + "."
-                  : (current.shots || 0) + "샷\u00d7 " + (current.durationS || 5) + "초 \u00b7 " +
-                  (current.resolution || "540p") + " \u00b7 " + usd(current.totalUsd) + " USD를 사용합니다.",
-                "현재 누적 " + usd(state.plan.budget.spentUsd) + " USD.",
+                costLabel(state.plan, current) + " 영상을 만듭니다.",
                 "시작하면 취소할 수 없습니다."
               ],
               "시작",
@@ -997,7 +972,7 @@
           retry.addEventListener("click", function () {
             confirmModal(
               "이 샷을 다시 만들까요?",
-              ["이 샷을 다시 만들면 3.75 USD가 듭니다."],
+              ["이 샷을 다시 만듭니다."],
               "다시 만들기",
               function () {
                 runAction("retry", { shotId: shot.id });
@@ -1290,7 +1265,7 @@
     var go = el(
       "button",
       "vpoc-btn vpoc-btn-primary vpoc-btn-small",
-      "이대로 다시 만들기 \u00b7 " + usd(amount) + " USD"
+      "이대로 다시 만들기"
     );
     go.type = "button";
     go.disabled = state.busy || Boolean(revision.reviewKo && ui.promptEdit === null);
@@ -1298,8 +1273,7 @@
       confirmModal(
         "이 샷만 다시 만들까요?",
         [
-          "이 샷만 다시 만듭니다. " + usd(amount) + " USD.",
-          "현재 누적 " + usd(plan.budget.spentUsd) + " USD.",
+          "이 샷만 다시 만듭니다.",
           "시작하면 취소할 수 없습니다. 기존 영상은 새 버전을 고르기 전까지 그대로 남습니다."
         ],
         "다시 만들기",
