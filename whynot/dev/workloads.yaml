@@ -9,7 +9,7 @@ metadata:
     app.kubernetes.io/part-of: whynot
 data:
   runtime-config.js: |
-    window.__WHYNOT_RUNTIME__ = Object.freeze({ videoGen: false, storyDev: true });
+    window.__WHYNOT_RUNTIME__ = Object.freeze({ videoGen: true, storyDev: true });
 ---
 apiVersion: apps/v1
 kind: Deployment
