@@ -51,7 +51,7 @@ spec:
               app.kubernetes.io/name: whynot-frontend
       containers:
         - name: frontend
-          image: 089540175779.dkr.ecr.ap-northeast-2.amazonaws.com/whynot-dev-frontend:ci-85007cc6
+          image: 089540175779.dkr.ecr.ap-northeast-2.amazonaws.com/whynot-dev-frontend:ci-9bffca53
           imagePullPolicy: Always
           ports:
             - name: http
@@ -155,7 +155,7 @@ spec:
               app.kubernetes.io/name: whynot-app
       containers:
         - name: app
-          image: 089540175779.dkr.ecr.ap-northeast-2.amazonaws.com/whynot-dev-app:ci-85007cc6
+          image: 089540175779.dkr.ecr.ap-northeast-2.amazonaws.com/whynot-dev-app:ci-9bffca53
           imagePullPolicy: Always
           env:
             - name: AWS_REGION
