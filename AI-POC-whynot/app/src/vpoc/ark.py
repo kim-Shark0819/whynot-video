@@ -29,8 +29,6 @@ MAX_PROMPT_CHARS = 2000
 # 화면 표시 순서. Luma 는 video.py 가 맡고 여기서는 이름만 같이 둔다.
 LABELS = {
     "seedance-2-0": "Seedance 2.0",
-    "seedance-2-0-mini": "Seedance 2.0 mini",
-    "seedance-2-0-fast": "Seedance 2.0 fast",
     "seedance-2-5": "Seedance 2.5",
 }
 

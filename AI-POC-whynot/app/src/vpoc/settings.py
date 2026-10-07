@@ -55,20 +55,27 @@ MODEL_PICKER_ENABLED = _flag("VPOC_MODEL_PICKER_ENABLED", "false")
 # BytePlus ModelArk(Seedance). 키는 Secret 에서만 온다. 모델 ID 가 비면 그 모델은 고를 수 없다.
 ARK_BASE_URL = os.getenv("ARK_BASE_URL", "https://ark.ap-southeast.bytepluses.com/api/v3").rstrip("/")
 ARK_API_KEY = os.getenv("ARK_API_KEY", "")
+# mini · fast 는 설계자 지시(2026-10-07)로 뺐다.
 ARK_MODEL_IDS = {
     "seedance-2-0": os.getenv("VPOC_ARK_MODEL_2_0", "dreamina-seedance-2-0-260128"),
-    "seedance-2-0-mini": os.getenv("VPOC_ARK_MODEL_2_0_MINI", ""),
-    "seedance-2-0-fast": os.getenv("VPOC_ARK_MODEL_2_0_FAST", "dreamina-seedance-2-0-fast-260128"),
     "seedance-2-5": os.getenv("VPOC_ARK_MODEL_2_5", "dreamina-seedance-2-5-260628"),
 }
-# 초당 USD. 비면 "단가 미정" — 금액 0 으로 기록하고 화면에 미정으로 보인다(설계자가 단가표를 줄 예정).
+ARK_RESOLUTION = os.getenv("VPOC_ARK_RESOLUTION", "720p")
+# 생성 영상 1초당 USD (참고 영상 없이 첫 프레임만 보내는 우리 경로 기준).
+#
+# 출처: 설계자가 준 BytePlus 콘솔 견적 화면 7장(2026-10-07). 견적은 "참고 영상 길이 + 생성 15초"
+# 합계다. 2.5·480P 에서 참고 5초 $1.54, 30초 $2.77 → 참고 1초 $0.0492, 생성 1초 $0.0863,
+# 참고/생성 비 0.57. 같은 비를 다른 칸에 적용해 생성 1초 = 견적 ÷ (15 + 5×0.57) = 견적 ÷ 17.85.
+# 추정값이다 — 실제 청구(usage 토큰)와 다르면 이 표를 고친다.
+ARK_USD_PER_SEC_TABLE = {
+    "seedance-2-0": {"480p": 0.0605, "720p": 0.1305, "1080p": 0.3221, "4k": 0.6532},
+    "seedance-2-5": {"480p": 0.0863, "720p": 0.1938},
+}
+# 표를 덮어쓸 때만 쓴다(현재 해상도의 1초 단가). 비면 표 값.
 ARK_USD_PER_SEC = {
     "seedance-2-0": os.getenv("VPOC_ARK_USD_PER_SEC_2_0", ""),
-    "seedance-2-0-mini": os.getenv("VPOC_ARK_USD_PER_SEC_2_0_MINI", ""),
-    "seedance-2-0-fast": os.getenv("VPOC_ARK_USD_PER_SEC_2_0_FAST", ""),
     "seedance-2-5": os.getenv("VPOC_ARK_USD_PER_SEC_2_5", ""),
 }
-ARK_RESOLUTION = os.getenv("VPOC_ARK_RESOLUTION", "720p")
 
 RESOLUTION = os.getenv("VPOC_RESOLUTION", "540p")
 DURATION = os.getenv("VPOC_DURATION", "5s")
@@ -100,11 +107,14 @@ POLL_MIN_INTERVAL_S = 10
 
 
 def ark_usd_per_sec(model: str) -> float | None:
+    """현재 해상도(ARK_RESOLUTION)의 생성 1초 단가. 모르면 None("단가 미정")."""
     raw = str(ARK_USD_PER_SEC.get(model) or "").strip()
-    try:
-        return float(raw) if raw else None
-    except ValueError:
-        return None
+    if raw:
+        try:
+            return float(raw)
+        except ValueError:
+            return None
+    return (ARK_USD_PER_SEC_TABLE.get(model) or {}).get(ARK_RESOLUTION.lower())
 
 
 def shot_usd(model: str = "") -> float:
