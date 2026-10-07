@@ -613,6 +613,32 @@
       });
     }
 
+    /* 샷 수 (설계자 2026-10-08). 0 = 자동(AI 가 장면에 맞춰 3~6개). 바꾸면 ③ 계획을 다시 만든다. */
+    var range = plan.shotCountRange || [3, 6];
+    var countBlock = el("div", "vpoc-question");
+    countBlock.appendChild(el("p", "vpoc-question-text", "몇 개의 샷으로 나눌까요?"));
+    countBlock.appendChild(el("p", "vpoc-hint", "샷 하나가 영상의 한 장면입니다. 자동이면 장면에 맞춰 AI 가 정합니다."));
+    var countRow = el("div", "vpoc-radios");
+    var currentCount = Number(step.shotCount || 0);
+    var countChoices = [[0, "자동"]];
+    for (var n = range[0]; n <= range[1]; n += 1) countChoices.push([n, n + "개"]);
+    countChoices.forEach(function (pair) {
+      var label = el("label", "vpoc-radio");
+      var radio = el("input");
+      radio.type = "radio";
+      radio.name = "vpoc-shot-count";
+      radio.checked = currentCount === pair[0];
+      radio.disabled = !editable;
+      radio.addEventListener("change", function () {
+        if (radio.checked) edits.shotCount = pair[0];
+      });
+      label.appendChild(radio);
+      label.appendChild(el("span", null, pair[1]));
+      countRow.appendChild(label);
+    });
+    countBlock.appendChild(countRow);
+    section.appendChild(countBlock);
+
     var extra = el("div", "vpoc-field");
     extra.appendChild(el("label", null, "추가 요청 (선택)"));
     var extraInput = el("textarea", "vpoc-input");
@@ -640,6 +666,7 @@
           extraKo: edits.extraKo
         };
         if (edits.videoModel) payload.videoModel = edits.videoModel;
+        if (edits.shotCount !== undefined) payload.shotCount = edits.shotCount;
         var later = plan.steps["3"];
         var dropCount =
           ((later.characters || []).length ? (later.characters || []).length : 0) +
@@ -848,7 +875,8 @@
         )
       );
     }
-    section.appendChild(settingsBlock);
+    // dev 전용(설계자 2026-10-07 "개발까지만"): 모델 고르기가 꺼진 배포(운영)에서는 보이지 않는다.
+    if (plan.modelPicker) section.appendChild(settingsBlock);
     var durationEdits = {};
 
     /* 샷 목록 */
@@ -865,7 +893,7 @@
       ((shot.characters || [])).forEach(function (id) {
         meta.appendChild(el("span", "vpoc-chip", (sheetById[id] || {}).nameKo || id));
       });
-      if (editable && !options.durationFixed) {
+      if (plan.modelPicker && editable && !options.durationFixed) {
         var secWrap = el("label", "vpoc-shot-seconds");
         var secInput = el("input", "vpoc-input");
         secInput.type = "number";
@@ -958,12 +986,9 @@
         var shotEdits = Object.keys(byId).map(function (id) {
           return byId[id];
         });
-        saveStep(3, {
-          keepShotIds: keep,
-          shots: shotEdits,
-          useKeyframes: Boolean(step.useKeyframes),
-          resolution: chosenResolution
-        })
+        var step3Body = { keepShotIds: keep, shots: shotEdits, useKeyframes: Boolean(step.useKeyframes) };
+        if (plan.modelPicker) step3Body.resolution = chosenResolution;
+        saveStep(3, step3Body)
           .then(function () {
             var current = state.plan.steps["3"].cost || {};
             confirmModal(
@@ -1004,7 +1029,7 @@
 
     if ((step.final || {}).url) {
       section.appendChild(el("h3", null, "합본"));
-      section.appendChild(videoTag((step.final || {}).url));
+      section.appendChild(videoTag((step.final || {}).url, false, "final"));
       var download = el("a", "vpoc-btn", "내려받기");
       download.href = (step.final || {}).url;
       download.setAttribute("download", "video.mp4");
@@ -1048,7 +1073,7 @@
       if (shot.mode === "keyframe") body.appendChild(el("span", "vpoc-badge", "키프레임"));
 
       if (shot.status === "completed" && shot.videoUrl) {
-        body.appendChild(videoTag(shot.videoUrl, true));
+        body.appendChild(videoTag(shot.videoUrl, true, "shot"));
       }
       if (shot.status === "failed" && shot.error) {
         body.appendChild(errorBox(shot.error, null));
@@ -1408,10 +1433,10 @@
     var compare = el("div", "vpoc-regen-compare");
     var oldCol = el("div", "vpoc-regen-col");
     oldCol.appendChild(el("h4", null, "이전 버전 (버전 " + shot.selectedAttempt + ")"));
-    if (shot.videoUrl) oldCol.appendChild(videoTag(shot.videoUrl, true));
+    if (shot.videoUrl) oldCol.appendChild(videoTag(shot.videoUrl, true, "regen-old"));
     var newCol = el("div", "vpoc-regen-col vpoc-regen-col-new");
     newCol.appendChild(el("h4", null, "새 버전 (버전 " + regen.attempt + ")"));
-    if (regen.videoUrl) newCol.appendChild(videoTag(regen.videoUrl, true));
+    if (regen.videoUrl) newCol.appendChild(videoTag(regen.videoUrl, true, "regen-new"));
     newCol.appendChild(el("p", "vpoc-hint", regen.summaryKo || ""));
     compare.appendChild(oldCol);
     compare.appendChild(newCol);
@@ -1466,7 +1491,7 @@
       row.appendChild(head);
       if (item.feedbackKo) row.appendChild(el("p", "vpoc-hint", "의견: " + item.feedbackKo));
       if (item.summaryKo) row.appendChild(el("p", "vpoc-hint", item.summaryKo));
-      if (item.videoUrl) row.appendChild(videoTag(item.videoUrl, true));
+      if (item.videoUrl) row.appendChild(videoTag(item.videoUrl, true, "version"));
       if (canPick && item.status === "completed" && item.attempt !== shot.selectedAttempt) {
         var pick = el("button", "vpoc-btn vpoc-btn-small", "이 버전 쓰기");
         pick.type = "button";
@@ -1481,38 +1506,77 @@
     return wrap;
   }
 
-  function videoTag(url, small) {
-    var node = el("video", small ? "vpoc-video vpoc-video-small" : "vpoc-video");
+  /* 완성된 영상 요소를 다시 쓴다(설계자 2026-10-08).
+     ④ 에서 다른 샷을 만드는 동안 몇 초마다 화면 전체를 다시 그리는데, 그때마다 <video> 를 새로
+     만들고 서버도 매번 새 서명 주소를 줘서 이미 만들어진 영상이 처음부터 다시 로드됐다.
+     파일 경로(서명 쿼리를 뺀 주소)가 같으면 같은 요소를 그대로 붙인다 — 같은 작업 안에서 떼었다
+     다시 붙이면 브라우저는 재생을 멈추지 않는다. 서명이 만료돼 재생이 실패하면 최신 주소로 바꾼다. */
+  var videoCache = {};
+
+  function videoTag(url, small, slot) {
+    // slot: 같은 영상이 한 화면 두 곳(샷 목록 · 다시 만들기 비교)에 나올 수 있어 자리마다 따로 둔다.
+    var path = String(url || "").split("?")[0] + "#" + (slot || (small ? "small" : "main"));
+    var node = videoCache[path];
+    if (node) {
+      node.dataset.latestSrc = url;
+      return node;
+    }
+    node = el("video", small ? "vpoc-video vpoc-video-small" : "vpoc-video");
     node.src = url;
+    node.dataset.latestSrc = url;
     node.controls = true;
     node.muted = true;
     node.setAttribute("playsinline", "");
+    node.addEventListener("error", function () {
+      if (node.dataset.latestSrc && node.src !== node.dataset.latestSrc) node.src = node.dataset.latestSrc;
+    });
+    videoCache[path] = node;
     return node;
   }
 
-  function sequencePlayer(shots) {
+  /* 완성된 샷을 순서대로 이어 보는 플레이어.
+     ④ 는 샷 하나만 끝나도 이 플레이어를 보여 주는데, 다른 샷을 만드는 동안 몇 초마다 화면을
+     다시 그리면서 플레이어도 새로 만들어 1번 영상이 계속 처음부터 다시 로드됐다(설계자 2026-10-08).
+     slot 마다 하나를 두고 다시 쓴다. 새 샷이 끝나면 재생 중인 영상은 건드리지 않고 목록만 늘린다. */
+  function sequencePlayer(shots, slot) {
+    var key = "seq#" + (slot || "step4");
+    var cached = videoCache[key];
+    if (cached) {
+      cached.update(shots);
+      return cached.wrap;
+    }
     var wrap = el("div", "vpoc-player");
+    var list = shots.slice();
     var current = 0;
     var node = el("video", "vpoc-video");
     node.controls = true;
     node.muted = true;
     node.setAttribute("playsinline", "");
-    node.src = shots[0].videoUrl;
-    var label = el("p", "vpoc-hint", "1 / " + shots.length);
+    node.src = list[0].videoUrl;
+    var label = el("p", "vpoc-hint", "1 / " + list.length);
     node.addEventListener("ended", function () {
       current += 1;
-      if (current >= shots.length) {
+      if (current >= list.length) {
         current = 0;
-        label.textContent = "1 / " + shots.length;
-        node.src = shots[0].videoUrl;
+        label.textContent = "1 / " + list.length;
+        node.src = list[0].videoUrl;
         return;
       }
-      label.textContent = current + 1 + " / " + shots.length;
-      node.src = shots[current].videoUrl;
+      label.textContent = current + 1 + " / " + list.length;
+      node.src = list[current].videoUrl;
       node.play().catch(function () {});
     });
     wrap.appendChild(node);
     wrap.appendChild(label);
+    videoCache[key] = {
+      wrap: wrap,
+      update: function (next) {
+        // 서명 주소만 바뀐 같은 목록이면 아무것도 하지 않는다. 다음 샷으로 넘어갈 때 새 주소를 쓴다.
+        list = next.slice();
+        if (current >= list.length) current = 0;
+        label.textContent = current + 1 + " / " + list.length;
+      }
+    };
     return wrap;
   }
 
@@ -1530,15 +1594,17 @@
     if (!(view.videos || []).length) {
       videos.appendChild(el("p", "vpoc-hint", "아직 만들어진 영상이 없습니다."));
     } else {
-      (view.videos || []).forEach(function (item) {
+      (view.videos || []).forEach(function (item, itemIndex) {
         videos.appendChild(el("h3", null, "완료 " + (item.completedAt || "")));
         if (item.finalUrl) {
-          videos.appendChild(videoTag(item.finalUrl));
+          videos.appendChild(videoTag(item.finalUrl, false, "project"));
         } else {
           var playable = (item.shots || []).filter(function (shot) {
             return shot.videoUrl;
           });
-          if (playable.length) videos.appendChild(sequencePlayer(playable));
+          if (playable.length) {
+            videos.appendChild(sequencePlayer(playable, "project-" + (item.planId || itemIndex)));
+          }
         }
         var list = el("ol", "vpoc-shotlist");
         (item.shots || []).forEach(function (shot) {
@@ -1865,6 +1931,7 @@
     state.project = null;
     state.planId = "";
     state.draft = { text: "", characters: [], sceneFiles: [], loaded: false };
+    videoCache = {}; // 다른 프로젝트로 가면 이전 영상 요소를 버린다.
     refresh();
 
     if (state.mock) {

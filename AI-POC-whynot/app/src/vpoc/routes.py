@@ -293,6 +293,8 @@ def create_blueprint(deps: VpocDependencies) -> Blueprint:
                 "shotId": task.get("shotId"),
             },
             "regenEnabled": regen.enabled(),
+            # ② "몇 개의 샷으로 나눌까요?" 선택지(0 = 자동).
+            "shotCountRange": [settings.MIN_SHOTS, settings.MAX_SHOTS],
             # ② 영상 모델 고르기(dev 만). 꺼져 있으면 화면에 목록이 없다.
             "modelPicker": settings.MODEL_PICKER_ENABLED,
             "videoModels": ark.choices() if settings.MODEL_PICKER_ENABLED else [],
@@ -1449,7 +1451,14 @@ def create_blueprint(deps: VpocDependencies) -> Blueprint:
             )
         if number == 2:
             return _json.dumps(
-                [step.get("story"), step.get("characters"), step.get("answers"), step.get("extraKo")],
+                [
+                    step.get("story"),
+                    step.get("characters"),
+                    step.get("answers"),
+                    step.get("extraKo"),
+                    # 샷 수를 바꾸면 ③ 계획을 다시 만들어야 한다.
+                    int(step.get("shotCount") or 0),
+                ],
                 ensure_ascii=False,
                 sort_keys=True,
             )
@@ -1518,6 +1527,20 @@ def create_blueprint(deps: VpocDependencies) -> Blueprint:
                 }
             step["answers"] = answers
             step["extraKo"] = str(body.get("extraKo") or step.get("extraKo") or "")
+            # "몇 개의 샷으로 나눌까요?" (설계자 2026-10-08). 0 = 자동, 아니면 MIN~MAX_SHOTS.
+            if "shotCount" in body:
+                try:
+                    count = int(body.get("shotCount") or 0)
+                except (TypeError, ValueError):
+                    count = -1
+                if count and not settings.MIN_SHOTS <= count <= settings.MAX_SHOTS:
+                    raise VpocError(
+                        "routes.save_step",
+                        "BadShotCount",
+                        f"샷 수는 {settings.MIN_SHOTS}~{settings.MAX_SHOTS}개 중에서 골라 주세요.",
+                        400,
+                    )
+                step["shotCount"] = count
             user_images = dict(step.get("userImages") or {})
             for key, value in (body.get("userImages") or {}).items():
                 if value and value.get("fileId"):
@@ -1553,7 +1576,8 @@ def create_blueprint(deps: VpocDependencies) -> Blueprint:
                     else f"검토 필요: 프롬프트가 비었거나 {compose.MAX_PROMPT_CHARS}자를 넘습니다"
                 )
             # ③ 영상 설정: 샷 길이(초). 모델 범위를 벗어나면 저장하지 않고 알린다.
-            if incoming and "durationS" in incoming:
+            # 영상 설정은 dev 전용이다(모델 고르기가 꺼진 운영은 Luma 540p · 5초 그대로).
+            if settings.MODEL_PICKER_ENABLED and incoming and "durationS" in incoming:
                 low, high = settings.VIDEO_DURATION_RANGE.get(model, (5, 5))
                 try:
                     seconds = int(incoming["durationS"])
@@ -1567,7 +1591,7 @@ def create_blueprint(deps: VpocDependencies) -> Blueprint:
                         400,
                     )
                 shot["durationS"] = seconds
-        if "resolution" in body:
+        if settings.MODEL_PICKER_ENABLED and "resolution" in body:
             wanted = str(body.get("resolution") or "")
             allowed = settings.VIDEO_RESOLUTIONS.get(model) or [settings.RESOLUTION]
             if wanted not in allowed:

@@ -468,11 +468,28 @@ def _plan_blocks(step2: dict) -> list[dict]:
     lines.append("[추가 요청]")
     lines.append(extra or "(없음)")
     lines.append("")
-    lines.append(
-        "위 내용으로 5초짜리 무음 샷 4개(3~6개 허용)의 계획을 쓰세요."
-        " 사용자가 고른 장면을 처음부터 끝까지 담습니다."
-    )
+    wanted = requested_shot_count(step2)
+    if wanted:
+        # ② "몇 개의 샷으로 나눌까요?"에서 사용자가 고른 수(설계자 2026-10-08). 정확히 지킨다.
+        lines.append(
+            f"위 내용으로 무음 샷 정확히 {wanted}개의 계획을 쓰세요(사용자가 샷 수를 직접 골랐습니다)."
+            " 사용자가 고른 장면을 처음부터 끝까지 담습니다."
+        )
+    else:
+        lines.append(
+            "위 내용으로 5초짜리 무음 샷 4개(3~6개 허용)의 계획을 쓰세요."
+            " 사용자가 고른 장면을 처음부터 끝까지 담습니다."
+        )
     return [{"text": "\n".join(lines)}]
+
+
+def requested_shot_count(step2: dict) -> int:
+    """② 에서 고른 샷 수. 0 이면 자동(AI 가 3~6개 중 정한다)."""
+    try:
+        count = int(step2.get("shotCount") or 0)
+    except (TypeError, ValueError):
+        return 0
+    return count if settings.MIN_SHOTS <= count <= settings.MAX_SHOTS else 0
 
 
 def plan(step2: dict) -> tuple[dict, dict]:
@@ -488,6 +505,12 @@ def plan(step2: dict) -> tuple[dict, dict]:
         where="claude.plan",
     )
     problems = check_shots(payload, characters, style)
+    wanted = requested_shot_count(step2)
+    if wanted and len(payload.get("shots") or []) != wanted:
+        problems.append(
+            f"사용자가 샷 {wanted}개를 골랐습니다. shots 를 정확히 {wanted}개로 다시 쓰세요"
+            f" (현재 {len(payload.get('shots') or [])}개)"
+        )
     if problems:
         payload, usage2 = _converse(
             system_text=PLAN_SYSTEM,
