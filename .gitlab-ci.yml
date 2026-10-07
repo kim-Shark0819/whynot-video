@@ -61,6 +61,7 @@ build:frontend:
       --dockerfile "$CI_PROJECT_DIR/$APP_DIR/frontend/Dockerfile"
       --destination "$ECR_REGISTRY/whynot-dev-frontend:$IMAGE_TAG"
       --build-arg "IMAGE_TAG=$IMAGE_TAG"
+      --build-arg "ASSET_VERSION=$IMAGE_TAG"
       --build-arg "SOURCE_STAMP=$CI_COMMIT_SHA"
       --label "org.opencontainers.image.revision=$CI_COMMIT_SHA"
       --label "org.opencontainers.image.version=$IMAGE_TAG"
