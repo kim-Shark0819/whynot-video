@@ -51,7 +51,7 @@ spec:
               app.kubernetes.io/name: whynot-frontend
       containers:
         - name: frontend
-          image: 089540175779.dkr.ecr.ap-northeast-2.amazonaws.com/whynot-dev-frontend:ci-953c99ca
+          image: 089540175779.dkr.ecr.ap-northeast-2.amazonaws.com/whynot-dev-frontend:ci-ff0a7a9c
           imagePullPolicy: Always
           ports:
             - name: http
@@ -155,7 +155,7 @@ spec:
               app.kubernetes.io/name: whynot-app
       containers:
         - name: app
-          image: 089540175779.dkr.ecr.ap-northeast-2.amazonaws.com/whynot-dev-app:ci-953c99ca
+          image: 089540175779.dkr.ecr.ap-northeast-2.amazonaws.com/whynot-dev-app:ci-ff0a7a9c
           imagePullPolicy: Always
           env:
             - name: AWS_REGION
@@ -256,6 +256,27 @@ spec:
             # ④단계 "이 샷만 의견 반영해 다시 만들기". false 면 새 액션 3개가 404 다.
             - name: VPOC_REGEN_ENABLED
               value: "true"
+            # ② 영상 모델 고르기 (dev 만, 설계자 2026-10-07)
+            - name: VPOC_MODEL_PICKER_ENABLED
+              value: "true"
+            - name: VPOC_ARK_MODEL_2_0
+              value: "dreamina-seedance-2-0-260128"
+            - name: VPOC_ARK_MODEL_2_0_MINI
+              value: ""
+            - name: VPOC_ARK_MODEL_2_0_FAST
+              value: "dreamina-seedance-2-0-fast-260128"
+            - name: VPOC_ARK_MODEL_2_5
+              value: "dreamina-seedance-2-5-260628"
+            - name: VPOC_ARK_USD_PER_SEC_2_0
+              value: ""
+            - name: VPOC_ARK_USD_PER_SEC_2_0_MINI
+              value: ""
+            - name: VPOC_ARK_USD_PER_SEC_2_0_FAST
+              value: ""
+            - name: VPOC_ARK_USD_PER_SEC_2_5
+              value: ""
+            - name: VPOC_ARK_RESOLUTION
+              value: "720p"
             # vpoc2 (명령 → 캐릭터 확정 → 15초 영상 → 리뷰). false 면 /api/vpoc2 가 없다.
             - name: VPOC2_ENABLED
               value: "true"
