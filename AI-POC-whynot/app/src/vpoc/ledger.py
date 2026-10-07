@@ -102,14 +102,16 @@ def charge(
 
 
 def charge_video(
-    token: str, *, user: str, project_id: str, plan_id: str
+    token: str, *, user: str, project_id: str, plan_id: str, model: str = ""
 ) -> dict:
+    # model 이 Seedance 면 그 모델 ID 와 단가(미정이면 0)로 남긴다. 비면 Luma.
+    ark_id = settings.ARK_MODEL_IDS.get(model) if model else None
     return charge(
         token,
         kind="video",
-        model=settings.VIDEO_MODEL,
+        model=ark_id or settings.VIDEO_MODEL,
         units=settings.DURATION_S,
-        usd=settings.shot_usd(),
+        usd=settings.shot_usd(model),
         user=user,
         project_id=project_id,
         plan_id=plan_id,

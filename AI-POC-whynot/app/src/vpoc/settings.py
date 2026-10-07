@@ -50,6 +50,26 @@ VIDEO_MODEL = os.getenv("VPOC_VIDEO_MODEL", "luma.ray-v2:0")
 VIDEO_REGION = os.getenv("VPOC_VIDEO_REGION", "us-west-2")
 VIDEO_BUCKET = os.getenv("VPOC_VIDEO_BUCKET", "")
 
+# ② 영상 모델 고르기(설계자 2026-10-07, dev 만). 꺼져 있으면 항상 Luma Ray2 다.
+MODEL_PICKER_ENABLED = _flag("VPOC_MODEL_PICKER_ENABLED", "false")
+# BytePlus ModelArk(Seedance). 키는 Secret 에서만 온다. 모델 ID 가 비면 그 모델은 고를 수 없다.
+ARK_BASE_URL = os.getenv("ARK_BASE_URL", "https://ark.ap-southeast.bytepluses.com/api/v3").rstrip("/")
+ARK_API_KEY = os.getenv("ARK_API_KEY", "")
+ARK_MODEL_IDS = {
+    "seedance-2-0": os.getenv("VPOC_ARK_MODEL_2_0", "dreamina-seedance-2-0-260128"),
+    "seedance-2-0-mini": os.getenv("VPOC_ARK_MODEL_2_0_MINI", ""),
+    "seedance-2-0-fast": os.getenv("VPOC_ARK_MODEL_2_0_FAST", "dreamina-seedance-2-0-fast-260128"),
+    "seedance-2-5": os.getenv("VPOC_ARK_MODEL_2_5", "dreamina-seedance-2-5-260628"),
+}
+# 초당 USD. 비면 "단가 미정" — 금액 0 으로 기록하고 화면에 미정으로 보인다(설계자가 단가표를 줄 예정).
+ARK_USD_PER_SEC = {
+    "seedance-2-0": os.getenv("VPOC_ARK_USD_PER_SEC_2_0", ""),
+    "seedance-2-0-mini": os.getenv("VPOC_ARK_USD_PER_SEC_2_0_MINI", ""),
+    "seedance-2-0-fast": os.getenv("VPOC_ARK_USD_PER_SEC_2_0_FAST", ""),
+    "seedance-2-5": os.getenv("VPOC_ARK_USD_PER_SEC_2_5", ""),
+}
+ARK_RESOLUTION = os.getenv("VPOC_ARK_RESOLUTION", "720p")
+
 RESOLUTION = os.getenv("VPOC_RESOLUTION", "540p")
 DURATION = os.getenv("VPOC_DURATION", "5s")
 ASPECT = os.getenv("VPOC_ASPECT", "16:9")
@@ -79,5 +99,17 @@ TASK_STALL_S = _int("VPOC_TASK_STALL_S", 600)
 POLL_MIN_INTERVAL_S = 10
 
 
-def shot_usd() -> float:
+def ark_usd_per_sec(model: str) -> float | None:
+    raw = str(ARK_USD_PER_SEC.get(model) or "").strip()
+    try:
+        return float(raw) if raw else None
+    except ValueError:
+        return None
+
+
+def shot_usd(model: str = "") -> float:
+    """샷 1개 금액. model 이 Seedance 이고 단가가 없으면 0(단가 미정)."""
+    if model in ARK_MODEL_IDS:
+        per_sec = ark_usd_per_sec(model)
+        return round((per_sec or 0.0) * DURATION_S, 4)
     return round(VIDEO_USD_PER_SEC.get(RESOLUTION, 0.75) * DURATION_S, 4)

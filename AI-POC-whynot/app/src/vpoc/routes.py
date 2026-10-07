@@ -17,7 +17,7 @@ from typing import Callable
 
 from flask import Blueprint, jsonify, request
 
-from . import compose, images, ledger, llm, regen, settings, store, video
+from . import ark, compose, images, ledger, llm, regen, settings, store, video
 from .errors import VpocError, envelope, now_iso, status_for
 
 log = logging.getLogger("vpoc")
@@ -191,6 +191,17 @@ def create_blueprint(deps: VpocDependencies) -> Blueprint:
             }
             for shot in steps["3"].get("shots", [])
         ]
+        # ③ 금액은 ② 에서 고른 모델로 다시 계산한다(저장된 cost 는 고르기 이전 값일 수 있다).
+        model = ark.selected(state)
+        if step3.get("cost"):
+            per_shot = settings.shot_usd(model)
+            step3["cost"] = {
+                **step3["cost"],
+                "model": model,
+                "priceKnown": not ark.is_ark(model) or settings.ark_usd_per_sec(model) is not None,
+                "perShotUsd": per_shot,
+                "totalUsd": round(per_shot * len(step3["shots"]), 2),
+            }
 
         plan_shots = {item.get("id"): item for item in steps["3"].get("shots", [])}
         step4 = dict(steps["4"])
@@ -227,6 +238,10 @@ def create_blueprint(deps: VpocDependencies) -> Blueprint:
                 "shotId": task.get("shotId"),
             },
             "regenEnabled": regen.enabled(),
+            # ② 영상 모델 고르기(dev 만). 꺼져 있으면 화면에 목록이 없다.
+            "modelPicker": settings.MODEL_PICKER_ENABLED,
+            "videoModels": ark.choices() if settings.MODEL_PICKER_ENABLED else [],
+            "videoModel": model,
             "steps": {
                 "1": _step1_view(steps["1"], owner, pid),
                 "2": steps["2"],
@@ -661,31 +676,56 @@ def create_blueprint(deps: VpocDependencies) -> Blueprint:
                     except Exception as exc:  # noqa: BLE001
                         log.warning("vpoc.keyframe.failed shot=%s err=%s", shot["id"], exc)
 
+        # 이 회차의 모델(generate 가 정한다). 옛 계획에는 없고, 그때는 Luma 다.
+        video_model = str(state["steps"]["4"].get("videoModel") or ark.DEFAULT_MODEL)
+        use_ark = ark.is_ark(video_model)
         try:
-            job = video.submit(
-                owner=owner,
-                project_id=pid,
-                plan_id=plan_id,
-                shot_id=shot["id"],
-                attempt=attempt,
-                prompt=prompt,
-                keyframe_jpeg_b64=keyframe,
-                gen_id=gen_id,
-            )
+            if use_ark:
+                job = ark.submit(
+                    model=video_model,
+                    owner=owner,
+                    project_id=pid,
+                    plan_id=plan_id,
+                    shot_id=shot["id"],
+                    attempt=attempt,
+                    prompt=prompt,
+                    keyframe_jpeg_b64=keyframe,
+                    gen_id=gen_id,
+                )
+            else:
+                job = video.submit(
+                    owner=owner,
+                    project_id=pid,
+                    plan_id=plan_id,
+                    shot_id=shot["id"],
+                    attempt=attempt,
+                    prompt=prompt,
+                    keyframe_jpeg_b64=keyframe,
+                    gen_id=gen_id,
+                )
         except video.Throttled as exc:
             # E4: 대기로 두고 다음 조회 때 재제출. 과금 없음.
             target["status"] = "queued"
             target["note"] = f"동시 제출 한도로 대기 중 ({exc.code})"
             return
+        except VpocError as exc:
+            if use_ark and exc.kind == "HTTP429":
+                target["status"] = "queued"
+                target["note"] = "동시 제출 한도로 대기 중 (HTTP429)"
+                return
+            target["status"] = "failed"
+            target["error"] = envelope("ark.submit" if use_ark else "luma.start_async_invoke", exc)
+            target["note"] = None
+            return
         except Exception as exc:  # noqa: BLE001
-            body = envelope("luma.start_async_invoke", exc)
+            body = envelope("ark.submit" if use_ark else "luma.start_async_invoke", exc)
             target["status"] = "failed"
             target["error"] = body
             target["note"] = None
             return
 
         ledger.charge_video(
-            job["clientRequestToken"], user=user, project_id=pid, plan_id=plan_id
+            job["clientRequestToken"], user=user, project_id=pid, plan_id=plan_id, model=video_model
         )
         target.update(
             {
@@ -717,7 +757,8 @@ def create_blueprint(deps: VpocDependencies) -> Blueprint:
                 "status": "submitted",
                 "submittedAt": job["submittedAt"],
                 "outputPrefix": job["outputPrefix"],
-                "usd": settings.shot_usd(),
+                "usd": settings.shot_usd(video_model),
+                "videoModel": video_model,
             },
         )
 
@@ -741,7 +782,11 @@ def create_blueprint(deps: VpocDependencies) -> Blueprint:
             if last and _elapsed_s(last) < settings.POLL_MIN_INTERVAL_S:
                 return False
             try:
-                result = video.poll(target["invocationArn"])
+                if ark.is_ark_job(target["invocationArn"]):
+                    # 완료면 결과를 우리 버킷으로 옮긴 뒤 Completed 를 준다 — 아래 출력 찾기가 그대로 동작한다.
+                    result = ark.poll(target["invocationArn"], target.get("outputPrefix") or "")
+                else:
+                    result = video.poll(target["invocationArn"])
             except Exception as exc:  # noqa: BLE001
                 log.warning("vpoc.poll.failed shot=%s err=%s", shot_id, exc)
                 return False
@@ -869,8 +914,12 @@ def create_blueprint(deps: VpocDependencies) -> Blueprint:
             "projectId": pid,
             "owner": owner,
             "completedAt": now_iso(),
-            "model": settings.VIDEO_MODEL,
-            "provider": video.PROVIDER,
+            "model": (
+                ark.model_id(step4.get("videoModel") or "")
+                if ark.is_ark(step4.get("videoModel") or "")
+                else settings.VIDEO_MODEL
+            ),
+            "provider": step4.get("videoModel") or video.PROVIDER,
             "params": {
                 "resolution": settings.RESOLUTION,
                 "duration": settings.DURATION,
@@ -878,7 +927,9 @@ def create_blueprint(deps: VpocDependencies) -> Blueprint:
             },
             "style": (state["steps"]["2"].get("story") or {}).get("style"),
             "settingEn": (state["steps"]["2"].get("story") or {}).get("settingEn"),
-            "costUsd": round(settings.shot_usd() * len(step4.get("shots", [])), 2),
+            "costUsd": round(
+                settings.shot_usd(step4.get("videoModel") or "") * len(step4.get("shots", [])), 2
+            ),
             "shots": [
                 {
                     "id": shot.get("id"),
@@ -1360,6 +1411,16 @@ def create_blueprint(deps: VpocDependencies) -> Blueprint:
                 if value and value.get("fileId"):
                     user_images[key] = {"fileId": value["fileId"]}
             step["userImages"] = user_images
+            # 영상 모델은 ③ 계획(샷·이미지)을 바꾸지 않으므로 _fingerprint 에 넣지 않는다 —
+            # 모델만 바꿨는데 ③ 을 다시 만들게(이미지 비용) 하지 않으려는 것이다.
+            if settings.MODEL_PICKER_ENABLED and "videoModel" in body:
+                wanted = str(body.get("videoModel") or "")
+                allowed = {item["id"] for item in ark.choices() if item["available"]}
+                if wanted not in allowed:
+                    raise VpocError(
+                        "routes.save_step", "ModelUnavailable", f"고를 수 없는 영상 모델입니다: {wanted}", 400
+                    )
+                step["videoModel"] = wanted
             return
 
         keep = {str(item) for item in (body.get("keepShotIds") or [])}
@@ -1487,7 +1548,8 @@ def create_blueprint(deps: VpocDependencies) -> Blueprint:
                     "'검토 필요' 샷이 있습니다. 고치거나 지운 뒤 승인해 주세요.",
                     409,
                 )
-            expected = round(settings.shot_usd() * len(shots), 2)
+            video_model = ark.selected(state)
+            expected = round(settings.shot_usd(video_model) * len(shots), 2)
             confirm = body.get("confirmUsd")
             if confirm is None or abs(float(confirm) - expected) > 0.005:
                 raise VpocError(
@@ -1503,6 +1565,8 @@ def create_blueprint(deps: VpocDependencies) -> Blueprint:
                 inner["steps"]["4"] = {
                     "status": "running",
                     "genId": store.new_gen_id(),
+                    # 이 회차가 쓰는 모델. 생성 중에 ② 를 바꿔도 진행 중인 샷은 이 값을 따른다.
+                    "videoModel": video_model,
                     "shots": [
                         {
                             "id": shot["id"],

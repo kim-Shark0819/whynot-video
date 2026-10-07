@@ -90,6 +90,18 @@
     return isFinite(number) ? number.toFixed(2) : "-";
   }
 
+  /* ③ 비용 한 줄. 모델 고르기가 켜진 배포에서는 모델 이름을 앞에 붙이고, Seedance 단가가
+     아직 없으면 금액 대신 "단가 미정"을 보인다(금액은 여전히 서버 값 그대로다). */
+  function costLabel(plan, cost) {
+    var text = (cost.shots || 0) + "샷 × " + (cost.durationS || 5) + "초";
+    var model = (plan.videoModels || []).filter(function (item) {
+      return item.id === cost.model;
+    })[0];
+    if (plan.modelPicker && model) text = model.label + " · " + text;
+    else text += " · " + (cost.resolution || "540p");
+    return text + " · " + (cost.priceKnown === false ? "단가 미정" : usd(cost.totalUsd) + " USD");
+  }
+
   function easyCamera(shot) {
     if (shot && shot.cameraKo) return shot.cameraKo;
     var source = String((shot && shot.promptEn) || "").toLowerCase();
@@ -544,6 +556,35 @@
     styleBlock.appendChild(styleRow);
     section.appendChild(styleBlock);
 
+    /* 영상 모델 (dev 만 — 서버가 modelPicker 를 켜 둔 배포에서만 보인다) */
+    if (plan.modelPicker && (plan.videoModels || []).length) {
+      var modelBlock = el("div", "vpoc-field");
+      modelBlock.appendChild(el("label", null, "영상 모델"));
+      var modelRow = el("div", "vpoc-radios");
+      var currentModel = step.videoModel || plan.videoModel || "luma-ray2";
+      plan.videoModels.forEach(function (item) {
+        var label = el("label", "vpoc-radio");
+        var radio = el("input");
+        radio.type = "radio";
+        radio.name = "vpoc-video-model";
+        radio.value = item.id;
+        radio.checked = currentModel === item.id;
+        radio.disabled = !editable || !item.available;
+        radio.addEventListener("change", function () {
+          if (radio.checked) edits.videoModel = item.id;
+        });
+        label.appendChild(radio);
+        var text = item.label;
+        if (!item.available) text += " (" + item.reason + ")";
+        else if (!item.priceKnown) text += " (단가 미정)";
+        else text += " (샷당 " + usd(item.perShotUsd) + " USD)";
+        label.appendChild(el("span", null, text));
+        modelRow.appendChild(label);
+      });
+      modelBlock.appendChild(modelRow);
+      section.appendChild(modelBlock);
+    }
+
     /* 캐릭터 시트 */
     section.appendChild(el("h3", null, "캐릭터"));
     (step.characters || []).forEach(function (character) {
@@ -611,6 +652,7 @@
           answers: edits.answers,
           extraKo: edits.extraKo
         };
+        if (edits.videoModel) payload.videoModel = edits.videoModel;
         var later = plan.steps["3"];
         var dropCount =
           ((later.characters || []).length ? (later.characters || []).length : 0) +
@@ -830,7 +872,7 @@
       el(
         "p",
         "vpoc-cost",
-        "샷 " + (cost.shots || 0) + "개 \u00d7 " + (cost.durationS || 5) + "초 \u00b7 " +
+        plan.modelPicker ? "샷 " + costLabel(plan, cost) : "샷 " + (cost.shots || 0) + "개\u00d7 " + (cost.durationS || 5) + "초 \u00b7 " +
           (cost.resolution || "540p") + " \u00b7 " + usd(cost.totalUsd) + " USD"
       )
     );
@@ -842,7 +884,8 @@
       var approve = el(
         "button",
         "vpoc-btn vpoc-btn-primary vpoc-btn-run",
-        "승인하고 영상 만들기 \u00b7 " + (cost.shots || 0) + "샷 \u00b7 " + usd(cost.totalUsd) + " USD"
+        "승인하고 영상 만들기 \u00b7 " + (cost.shots || 0) + "샷 \u00b7 " +
+          (cost.priceKnown === false ? "단가 미정" : usd(cost.totalUsd) + " USD")
       );
       approve.type = "button";
       approve.disabled = state.busy || blocked;
@@ -861,7 +904,9 @@
             confirmModal(
               "영상을 만들까요?",
               [
-                (current.shots || 0) + "샷 \u00d7 " + (current.durationS || 5) + "초 \u00b7 " +
+                state.plan.modelPicker
+                  ? costLabel(state.plan, current) + "."
+                  : (current.shots || 0) + "샷\u00d7 " + (current.durationS || 5) + "초 \u00b7 " +
                   (current.resolution || "540p") + " \u00b7 " + usd(current.totalUsd) + " USD를 사용합니다.",
                 "현재 누적 " + usd(state.plan.budget.spentUsd) + " USD.",
                 "시작하면 취소할 수 없습니다."

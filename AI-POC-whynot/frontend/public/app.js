@@ -13,6 +13,29 @@
 const APP_VERSION = "__ASSET_VERSION__";
 const VIDEO_GEN_ENABLED = window.__WHYNOT_RUNTIME__?.videoGen === true;
 const STORY_DEV_ENABLED = window.__WHYNOT_RUNTIME__?.storyDev !== false;
+// 로그인 유지(운영만 켠다). 토큰은 원래 탭마다 따로인 sessionStorage 에만 있어 새 창마다
+// 다시 로그인해야 했다. 켜져 있으면 localStorage 에도 두고, 새 탭이 열릴 때 sessionStorage 로
+// 옮겨 준다 — vpoc*.js 는 sessionStorage 만 읽으므로 그쪽은 고치지 않는다.
+const PERSIST_LOGIN = window.__WHYNOT_RUNTIME__?.persistLogin === true;
+const PERSISTED_TOKEN_KEY = "toon-change-ai-pj:persistedToken";
+(function restorePersistedLogin() {
+  try {
+    if (!PERSIST_LOGIN) {
+      localStorage.removeItem(PERSISTED_TOKEN_KEY);
+      return;
+    }
+    if (sessionStorage.getItem("toon-change-ai-pj:token")) return;
+    const saved = JSON.parse(localStorage.getItem(PERSISTED_TOKEN_KEY) || "null");
+    // 만료 판단은 서버가 최종이다. 여기서는 이미 지난 토큰을 들고 들어가지 않을 뿐이다.
+    if (saved?.token && Number(saved.expiresAt) * 1000 > Date.now()) {
+      sessionStorage.setItem("toon-change-ai-pj:token", saved.token);
+    } else {
+      localStorage.removeItem(PERSISTED_TOKEN_KEY);
+    }
+  } catch (error) {
+    // 저장소가 막힌 브라우저(사생활 보호 모드 등)는 탭마다 로그인하는 원래 동작으로 남는다.
+  }
+})();
 const PROJECT_TRACKS = {
   story: {
     label: "스토리",
@@ -723,6 +746,7 @@ function signOut(message = "") {
   state.currentProject = null;
   sessionStorage.removeItem(STORAGE_KEYS.token);
   sessionStorage.removeItem(WORKING_KEY);
+  try { localStorage.removeItem(PERSISTED_TOKEN_KEY); } catch (error) { /* 저장소 없음 */ }
   window.clearTimeout(state.runningTimer);
   // 로그아웃 후 뒤로가기로 앱 화면에 되돌아가지 않도록 현재 항목을 루트로 바꾼다.
   window.history.replaceState({ view: "home" }, "", "/");
@@ -763,6 +787,11 @@ async function handleLogin(event) {
     });
     state.token = payload.token;
     sessionStorage.setItem(STORAGE_KEYS.token, state.token);
+    if (PERSIST_LOGIN && payload.expiresAt) {
+      try {
+        localStorage.setItem(PERSISTED_TOKEN_KEY, JSON.stringify({ token: payload.token, expiresAt: payload.expiresAt }));
+      } catch (error) { /* 저장소 없음 — 탭마다 로그인 */ }
+    }
     applyUser(payload.user);
     await enterWorkspace();
     showToast("로그인 완료", `${payload.user.displayName}님, 환영합니다.`);

@@ -584,7 +584,8 @@ def start_regenerate(
             409,
         )
 
-    expected = settings.shot_usd()
+    # 재생성도 그 회차의 모델로 제출된다(routes.submit_shot). 금액도 같은 모델로 맞춘다.
+    expected = settings.shot_usd(str(state["steps"]["4"].get("videoModel") or ""))
     if confirm_usd is None or abs(float(confirm_usd) - expected) > 0.005:
         raise VpocError(
             "regen.regenerate",
