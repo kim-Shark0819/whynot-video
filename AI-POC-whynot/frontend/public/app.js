@@ -6612,6 +6612,16 @@ $("#handoffShort")?.addEventListener("click", () => sendProjectTo("short"));
 $("#handoffStoryboard")?.addEventListener("click", () => sendProjectTo("storyboard"));
 $("#handoffLong")?.addEventListener("click", () => sendProjectTo("long"));
 $("#handoffSceneVideo")?.addEventListener("click", () => sendProjectTo("videoGen"));
+/* 영상 프로젝트 상세의 "영상 개발 시작". 처리하던 video-folder.js 가 옛 영상 기능과 함께 지워져
+   (51ba039, 2026-09-23) 눌러도 아무 일이 없었다. 영상 화면(vpoc)으로 연결한다 — vpoc 는 그
+   프로젝트의 진행 중 계획(현재 단계) 또는 완성된 영상을 스스로 찾아 연다. */
+$("#videoFolderEnter")?.addEventListener("click", () => {
+  if (!state.currentProject?.id) {
+    showToast("프로젝트를 찾을 수 없습니다", "목록에서 프로젝트를 다시 열어 주세요.", "error");
+    return;
+  }
+  window.whynotOpenVideoGen(state.currentProject);
+});
 $("#detailCoverAi").addEventListener("click", async () => {
   const project = state.currentProject;
   if (!project) return;
