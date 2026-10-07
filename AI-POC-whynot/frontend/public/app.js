@@ -1043,6 +1043,13 @@ async function loadVideos() {
     renderVideos();
   } catch (error) {
     clearSkeleton("#videoGrid");
+    // GET /api/videos 는 옛 영상 기능과 함께 지워졌다(51ba039, 2026-09-23). 그 뒤로 로그인할 때마다
+    // 404 알림이 떴다. 없는 API 는 빈 목록으로 두고, 그 밖의 실패만 알린다.
+    if (error.status === 404) {
+      state.videos = [];
+      renderVideos();
+      return;
+    }
     showToast("영상 목록을 불러오지 못했습니다", error.message, "error");
   }
 }

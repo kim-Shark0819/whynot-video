@@ -792,6 +792,8 @@ def create_blueprint(deps: VpocDependencies) -> Blueprint:
                 return False
             target["lastPolledAt"] = now_iso()
             status = result["status"]
+            # 오류 위치 표시. Seedance 실패가 luma.* 로 보여 원인을 헷갈리게 했다(2026-10-07).
+            where = "ark" if ark.is_ark_job(target["invocationArn"]) else "luma"
             if status == "Completed":
                 found = video.find_output_mp4(
                     target.get("outputPrefix") or "", target.get("invocationArn") or ""
@@ -806,7 +808,7 @@ def create_blueprint(deps: VpocDependencies) -> Blueprint:
                     target["status"] = "failed"
                     target["completedAt"] = now_iso()
                     target["error"] = {
-                        "where": "luma.output",
+                        "where": f"{where}.output",
                         "type": "OutputMissing",
                         "message": f"출력 접두사에 .mp4 가 없습니다: {target.get('outputPrefix')}",
                         "requestId": "",
@@ -816,7 +818,7 @@ def create_blueprint(deps: VpocDependencies) -> Blueprint:
             elif status == "Failed":
                 target["completedAt"] = now_iso()
                 body = {
-                    "where": "luma.get_async_invoke",
+                    "where": "ark.poll" if where == "ark" else "luma.get_async_invoke",
                     "type": "AsyncInvokeFailed",
                     "message": result.get("failureMessage") or "실패 원문이 비어 있습니다.",
                     "requestId": "",
