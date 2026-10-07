@@ -51,7 +51,7 @@ spec:
               app.kubernetes.io/name: whynot-frontend
       containers:
         - name: frontend
-          image: 089540175779.dkr.ecr.ap-northeast-2.amazonaws.com/whynot-dev-frontend:ci-ff0a7a9c
+          image: 089540175779.dkr.ecr.ap-northeast-2.amazonaws.com/whynot-dev-frontend:ci-cac228f1
           imagePullPolicy: Always
           ports:
             - name: http
@@ -155,7 +155,7 @@ spec:
               app.kubernetes.io/name: whynot-app
       containers:
         - name: app
-          image: 089540175779.dkr.ecr.ap-northeast-2.amazonaws.com/whynot-dev-app:ci-ff0a7a9c
+          image: 089540175779.dkr.ecr.ap-northeast-2.amazonaws.com/whynot-dev-app:ci-cac228f1
           imagePullPolicy: Always
           env:
             - name: AWS_REGION
@@ -261,17 +261,9 @@ spec:
               value: "true"
             - name: VPOC_ARK_MODEL_2_0
               value: "dreamina-seedance-2-0-260128"
-            - name: VPOC_ARK_MODEL_2_0_MINI
-              value: ""
-            - name: VPOC_ARK_MODEL_2_0_FAST
-              value: "dreamina-seedance-2-0-fast-260128"
             - name: VPOC_ARK_MODEL_2_5
               value: "dreamina-seedance-2-5-260628"
             - name: VPOC_ARK_USD_PER_SEC_2_0
-              value: ""
-            - name: VPOC_ARK_USD_PER_SEC_2_0_MINI
-              value: ""
-            - name: VPOC_ARK_USD_PER_SEC_2_0_FAST
               value: ""
             - name: VPOC_ARK_USD_PER_SEC_2_5
               value: ""
