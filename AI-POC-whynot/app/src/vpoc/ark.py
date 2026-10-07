@@ -24,7 +24,9 @@ from .store import STORE, video_output_prefix
 log = logging.getLogger("vpoc")
 
 ARN_PREFIX = "ark/tasks/"
-MAX_PROMPT_CHARS = 2000
+# 한 번에 만들기(A안)는 샷 문장을 모두 합치므로 샷 하나보다 길다. BytePlus 상한은 확인하지 못했다 —
+# 거절되면 오류 원문이 ④ 에 보이고, 그때 이 값을 고친다.
+MAX_PROMPT_CHARS = 4000
 
 # 화면 표시 순서. Luma 는 video.py 가 맡고 여기서는 이름만 같이 둔다.
 LABELS = {
@@ -136,6 +138,38 @@ def reference_prompt(prompt: str, names: list[str]) -> str:
         "last. Do not redesign, restyle or swap any character."
     )
     return f"{who}. {keep} Scene: {prompt}"
+
+
+ONE_TAKE_ID = "take"
+
+
+def strip_style(prompt: str, style_sentence: str) -> str:
+    """샷 문장 맨 앞의 화풍 문장(모든 샷에 같은 문장)을 뗀다. 한 번에 만들기에서는 앞에 한 번만 둔다."""
+    text = (prompt or "").strip()
+    head = (style_sentence or "").strip().rstrip(".")
+    if head and text.startswith(head):
+        text = text[len(head):].lstrip(". ").strip()
+    return text
+
+
+def one_take_prompt(beats: list[tuple[int, str]], style_sentence: str = "") -> str:
+    """A안(설계자 2026-10-08): ③ 의 샷들을 시간대별 지시 하나로 합쳐 Seedance 한 번에 이어서 만든다.
+
+    beats = [(초, 샷 장면 문장)] (③ 순서). 캐릭터 유지 지시는 reference_prompt() 가 앞에 붙인다.
+    """
+    parts = []
+    if style_sentence:
+        parts.append(style_sentence.strip().rstrip(".") + ".")
+    parts.append(
+        "One continuous video in a single take. Move smoothly from each beat to the next with no jump "
+        "cuts, keeping the same location, lighting, time of day, wardrobe and characters throughout."
+    )
+    start = 0
+    for index, (seconds, text) in enumerate(beats, start=1):
+        end = start + int(seconds)
+        parts.append(f"Beat {index} ({start}-{end}s): {text.strip()}")
+        start = end
+    return " ".join(parts)
 
 
 def _call(method: str, path: str, payload: dict | None = None) -> dict:

@@ -875,6 +875,43 @@
         )
       );
     }
+    /* A안 "한 번에 이어서 만들기"(설계자 2026-10-08, Seedance 만). 샷들을 시간대별 지시 하나로 합쳐
+       영상 하나로 이어서 만든다. 샷 길이 합계가 모델 최대를 넘으면 샷별로 만든다. */
+    var oneTakeChoice = step.oneTake !== false;
+    if (step.oneTakeMaxS) {
+      var takeLabel = el("label", "vpoc-radio");
+      var takeBox = el("input");
+      takeBox.type = "checkbox";
+      takeBox.checked = oneTakeChoice;
+      takeBox.disabled = !editable;
+      takeBox.addEventListener("change", function () {
+        oneTakeChoice = takeBox.checked;
+      });
+      takeLabel.appendChild(takeBox);
+      takeLabel.appendChild(el("span", null, "한 번에 이어서 만들기 (샷 사이가 끊기지 않게, 권장)"));
+      settingsBlock.appendChild(takeLabel);
+      var over = step.oneTakeTotalS > step.oneTakeMaxS;
+      settingsBlock.appendChild(
+        el(
+          "p",
+          "vpoc-hint",
+          "샷 길이 합계 " + step.oneTakeTotalS + "초 / 한 번에 최대 " + step.oneTakeMaxS + "초" +
+            (over ? " — 최대를 넘어 샷별로 따로 만듭니다. 샷 길이를 줄이면 한 번에 만들 수 있습니다." : "")
+        )
+      );
+      if (step.oneTakeActive && step.oneTakePromptEn) {
+        var takeDetails = el("details", "vpoc-advanced");
+        takeDetails.appendChild(
+          el("summary", null, "한 번에 보낼 최종 프롬프트 · 참고 이미지 " + (step.oneTakeReferenceCount || 0) + "장")
+        );
+        var takeArea = el("textarea", "vpoc-input");
+        takeArea.rows = 8;
+        takeArea.readOnly = true;
+        takeArea.value = step.oneTakePromptEn;
+        takeDetails.appendChild(takeArea);
+        settingsBlock.appendChild(takeDetails);
+      }
+    }
     // dev 전용(설계자 2026-10-07 "개발까지만"): 모델 고르기가 꺼진 배포(운영)에서는 보이지 않는다.
     if (plan.modelPicker) section.appendChild(settingsBlock);
     var durationEdits = {};
@@ -988,6 +1025,7 @@
         });
         var step3Body = { keepShotIds: keep, shots: shotEdits, useKeyframes: Boolean(step.useKeyframes) };
         if (plan.modelPicker) step3Body.resolution = chosenResolution;
+        if (plan.modelPicker && step.oneTakeMaxS) step3Body.oneTake = oneTakeChoice;
         saveStep(3, step3Body)
           .then(function () {
             var current = state.plan.steps["3"].cost || {};
@@ -1052,7 +1090,19 @@
       var row = el("div", "vpoc-shot");
       row.appendChild(el("span", "vpoc-shot-no", String(index + 1)));
       var body = el("div", "vpoc-shot-body");
-      body.appendChild(el("p", "vpoc-shot-summary", summaryById[shot.id] || shot.id));
+      var isTake = Boolean(step.oneTake) && shot.id === "take";
+      body.appendChild(
+        el(
+          "p",
+          "vpoc-shot-summary",
+          isTake
+            ? "한 번에 이어서 만든 영상 · 샷 " + (step3.shots || []).length + "개 · " +
+              (step3.shots || []).reduce(function (sum, item) {
+                return sum + (item.durationS || 5);
+              }, 0) + "초"
+            : summaryById[shot.id] || shot.id
+        )
+      );
 
       var chip = el("span", "vpoc-status vpoc-status-" + shot.status);
       var text = {
@@ -1094,7 +1144,12 @@
         }
       }
       // vpoc-regen: "이 샷만 의견 반영해 다시 만들기". 위 요소는 건드리지 않고 아래에 덧붙인다.
-      vpocRegenAttach(body, shot, plan);
+      // 한 번에 만든 영상은 샷 하나만 고칠 수 없다 — ③ 을 고쳐 다시 승인한다.
+      if (isTake) {
+        body.appendChild(el("p", "vpoc-hint", "고치려면 ③ 계획 승인에서 샷 내용을 바꿔 다시 승인해 주세요."));
+      } else {
+        vpocRegenAttach(body, shot, plan);
+      }
       row.appendChild(body);
       list.appendChild(row);
     });

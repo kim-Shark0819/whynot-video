@@ -172,6 +172,41 @@ def create_blueprint(deps: VpocDependencies) -> Blueprint:
             refs.append((handle, image["key"]))
         return refs
 
+    def _one_take(steps: dict, model: str) -> dict | None:
+        """A안 "한 번에 이어서 만들기"(설계자 2026-10-08). 쓸 수 없으면 None(샷별로 만든다).
+
+        조건: Seedance · ③ 에서 끄지 않음 · 샷 길이 합계가 모델 최대 이하 · 모든 샷에 문장이 있음.
+        돌려주는 plan_shot 은 submit_shot 이 샷 하나처럼 쓴다(캐릭터 = 모든 샷의 합집합).
+        """
+        if not settings.MODEL_PICKER_ENABLED or not ark.is_ark(model):
+            return None
+        step3 = steps["3"]
+        if step3.get("oneTake") is False:
+            return None
+        shots = step3.get("shots") or []
+        if not shots or any(not shot.get("promptEn") for shot in shots):
+            return None
+        _low, high = settings.VIDEO_DURATION_RANGE.get(model, (5, 5))
+        beats = [(_shot_seconds(model, shot), shot.get("promptEn") or "") for shot in shots]
+        total = sum(seconds for seconds, _ in beats)
+        if total > high:
+            return None
+        style = compose.STYLE[compose.style_of((steps["2"].get("story") or {}).get("style") or "")]
+        characters: list[str] = []
+        for shot in shots:
+            for char_id in shot.get("characters") or []:
+                if char_id not in characters:
+                    characters.append(char_id)
+        prompt = ark.one_take_prompt(
+            [(seconds, ark.strip_style(text, style)) for seconds, text in beats], style
+        )
+        return {
+            "id": ark.ONE_TAKE_ID,
+            "characters": characters,
+            "promptEn": prompt,
+            "durationS": total,
+        }
+
     def _shot4_view(
         shot: dict, plan_shot: dict | None = None, gen_id: str = ""
     ) -> dict:
@@ -257,6 +292,19 @@ def create_blueprint(deps: VpocDependencies) -> Blueprint:
                 "perShotUsd": step3["shots"][0]["usd"] if step3["shots"] else 0,
                 "totalUsd": round(total, 2),
             }
+        # A안 한 번에 이어서 만들기 (Seedance 전용, dev).
+        if settings.MODEL_PICKER_ENABLED and ark.is_ark(model):
+            take = _one_take(steps, model)
+            step3["oneTake"] = steps["3"].get("oneTake") is not False
+            step3["oneTakeActive"] = bool(take)
+            step3["oneTakeTotalS"] = sum(row["durationS"] for row in step3["shots"])
+            step3["oneTakeMaxS"] = settings.VIDEO_DURATION_RANGE.get(model, (5, 5))[1]
+            if take:
+                refs = _reference_characters(steps, take)
+                step3["oneTakePromptEn"] = ark.reference_prompt(
+                    take["promptEn"], [name for name, _ in refs]
+                )
+                step3["oneTakeReferenceCount"] = len(refs)
 
         plan_shots = {item.get("id"): item for item in steps["3"].get("shots", [])}
         step4 = dict(steps["4"])
@@ -699,6 +747,11 @@ def create_blueprint(deps: VpocDependencies) -> Blueprint:
             (item for item in state["steps"]["3"].get("shots", []) if item["id"] == shot["id"]),
             None,
         )
+        if shot["id"] == ark.ONE_TAKE_ID and state["steps"]["4"].get("oneTake"):
+            # A안: ③ 의 샷 전체를 시간대별 지시 하나로 합친 영상 1개.
+            plan_shot = _one_take(
+                state["steps"], str(state["steps"]["4"].get("videoModel") or "")
+            )
         if not plan_shot:
             target["status"] = "failed"
             target["error"] = {
@@ -1463,7 +1516,7 @@ def create_blueprint(deps: VpocDependencies) -> Blueprint:
                 sort_keys=True,
             )
         return _json.dumps(
-            [step.get("shots"), step.get("useKeyframes"), step.get("resolution")],
+            [step.get("shots"), step.get("useKeyframes"), step.get("resolution"), step.get("oneTake")],
             ensure_ascii=False,
             sort_keys=True,
         )
@@ -1591,6 +1644,9 @@ def create_blueprint(deps: VpocDependencies) -> Blueprint:
                         400,
                     )
                 shot["durationS"] = seconds
+        if settings.MODEL_PICKER_ENABLED and "oneTake" in body:
+            # A안 "한 번에 이어서 만들기" 켜기/끄기(기본 켜짐).
+            step["oneTake"] = bool(body.get("oneTake"))
         if settings.MODEL_PICKER_ENABLED and "resolution" in body:
             wanted = str(body.get("resolution") or "")
             allowed = settings.VIDEO_RESOLUTIONS.get(model) or [settings.RESOLUTION]
@@ -1731,6 +1787,8 @@ def create_blueprint(deps: VpocDependencies) -> Blueprint:
                     f"화면 금액({confirm})과 서버 계산({expected:.2f} USD)이 다릅니다. 새로고침해 주세요.",
                     409,
                 )
+            # A안: 조건이 맞으면 샷들을 영상 하나로 이어서 만든다(금액은 같은 초 합계라 그대로다).
+            one_take = _one_take(state["steps"], video_model)
 
             def mutator(inner: dict):
                 # 생성 회차를 새로 만든다. 토큰·jobs 키·출력 접두사가 이 값으로 갈라지므로
@@ -1741,20 +1799,32 @@ def create_blueprint(deps: VpocDependencies) -> Blueprint:
                     # 이 회차가 쓰는 모델. 생성 중에 ② 를 바꿔도 진행 중인 샷은 이 값을 따른다.
                     "videoModel": video_model,
                     "resolution": video_resolution,
+                    "oneTake": bool(one_take),
                     "shots": [
                         {
                             "id": shot["id"],
                             "status": "queued",
                             "attempt": 1,
-                            "durationS": seconds_by_shot[shot["id"]],
-                            "mode": "keyframe" if shot.get("useKeyframe") else "text",
+                            "durationS": shot["durationS"],
+                            "mode": shot["mode"],
                             "submittedAt": None,
                             "completedAt": None,
                             "videoUrl": None,
                             "note": None,
                             "error": None,
                         }
-                        for shot in shots
+                        for shot in (
+                            [{"id": one_take["id"], "durationS": one_take["durationS"], "mode": "reference"}]
+                            if one_take
+                            else [
+                                {
+                                    "id": item["id"],
+                                    "durationS": seconds_by_shot[item["id"]],
+                                    "mode": "keyframe" if item.get("useKeyframe") else "text",
+                                }
+                                for item in shots
+                            ]
+                        )
                     ],
                     "final": {"status": "none", "url": None, "error": None},
                 }
