@@ -26,7 +26,7 @@ metadata:
     alb.ingress.kubernetes.io/group.order: "90"
     # uniform across the group
     alb.ingress.kubernetes.io/listen-ports: '[{"HTTP":80},{"HTTPS":443}]'
-    alb.ingress.kubernetes.io/certificate-arn: arn:aws:acm:ap-northeast-2:089540175779:certificate/f7c4d11f-4144-4883-ad66-1eb5b6f3110b
+    alb.ingress.kubernetes.io/certificate-arn: arn:aws:acm:ap-northeast-2:089540175779:certificate/2fddadd9-0fd7-414d-a223-9dcf8ac070c0
     # member-local
     alb.ingress.kubernetes.io/target-type: ip
     alb.ingress.kubernetes.io/healthcheck-path: /health
@@ -48,7 +48,7 @@ spec:
   rules:
     # Unlike the admin hosts this one has no source-ip condition: the dev app is
     # open (D-24).
-    - host: dev.whynot.meta-clouds.com
+    - host: dev-whynot.meta-clouds.com
       http:
         paths:
           - path: /api
