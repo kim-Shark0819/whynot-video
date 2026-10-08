@@ -6137,8 +6137,19 @@ function parseLocation() {
 }
 
 /** 화면을 바꾸고 history에 새 항목을 남긴다. 사용자 조작에서 호출한다. */
+/* 옛 "새 영상 만들기"(studio) 화면은 서버 API(/api/videos/generate · long-take · v2/video)가
+   옛 영상 기능과 함께 지워져(51ba039, 2026-09-23) 무엇을 해도 "요청한 API를 찾을 수 없습니다"였다
+   (운영 2026-10-08 실측). 숏폼·롱테이크 카드, 콘티 이미지 보내기, /studio 주소가 아직 이 화면으로
+   왔다. 영상 만들기는 새 영상 흐름(vpoc) 하나뿐이므로 거기로 보낸다. */
+function redirectStudio() {
+  showToast("영상 만들기로 이동", "영상은 프로젝트의 영상 만들기(①~④)에서 만듭니다. 이미지는 ① 입력에서 올려 주세요.");
+  const project = state.currentProject?.id ? state.currentProject : getWorkingProject();
+  return project && project.id ? "videoGen" : "home";
+}
+
 function navigate(viewName, options = {}) {
   let { projectId = null, replace = false } = options;
+  if (viewName === "studio") viewName = redirectStudio();
   // runtime flag가 꺼진 환경에서는 숨김 버튼·오래 열린 탭·콘솔 호출도 신규 화면을 열지 못한다.
   if (viewName === "videoGen" && !VIDEO_GEN_ENABLED) {
     showToast("영상 개발을 열 수 없습니다", PROJECT_TRACKS.video.disabledReason, "error");
@@ -6158,6 +6169,12 @@ function navigate(viewName, options = {}) {
 /** history 이동(뒤로/앞으로)으로 들어온 경우. 새 항목을 남기지 않는다. */
 async function applyRoute(route) {
   if (!state.token) return;
+  if (route.view === "studio") {
+    // 즐겨찾기·옛 링크로 /studio 에 들어온 경우. 주소도 바꿔 남긴다.
+    const target = redirectStudio();
+    route = { view: target, projectId: null };
+    window.history.replaceState(route, "", pathForView(target, null));
+  }
   if (route.view === "projectDetail" && route.projectId) {
     try {
       const payload = await api(`/api/projects/${encodeURIComponent(route.projectId)}`);
