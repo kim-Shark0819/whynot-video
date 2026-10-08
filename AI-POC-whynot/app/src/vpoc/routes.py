@@ -1351,6 +1351,8 @@ def create_blueprint(deps: VpocDependencies) -> Blueprint:
 
         inputs = []
         prompts = []
+        # 이 프로젝트의 영상 계획 전체(진행 중 포함). 프로젝트 상세 화면이 목록으로 보인다(설계자 2026-10-08).
+        plans: list[dict] = []
         for plan_id in sorted(plan_ids, reverse=True):
             state, _ = store.STORE.read_json(store.state_key(owner, pid, plan_id))
             if not state:
@@ -1376,6 +1378,7 @@ def create_blueprint(deps: VpocDependencies) -> Blueprint:
                     prompts.append(
                         {"planId": plan_id, "shotId": shot.get("id"), "promptEn": shot["promptEn"]}
                     )
+            plans.append(_plan_summary(state, plan_id))
 
         return jsonify(
             {
@@ -1389,8 +1392,57 @@ def create_blueprint(deps: VpocDependencies) -> Blueprint:
                 "characters": characters,
                 "inputs": inputs,
                 "prompts": prompts,
+                "plans": plans,
             }
         )
+
+    STEP_NAMES = {1: "① 입력", 2: "② 확인", 3: "③ 계획 승인", 4: "④ 영상"}
+
+    def _plan_summary(state: dict, plan_id: str) -> dict:
+        """프로젝트 화면의 계획 카드 한 장. 저장된 state 만 읽는다(모델 호출 · 상태 갱신 없음)."""
+        steps = state["steps"]
+        story = steps["2"].get("story") or {}
+        step4 = steps["4"]
+        by_id = {item.get("id"): item for item in step4.get("shots") or []}
+        model = str(step4.get("videoModel") or steps["2"].get("videoModel") or ark.DEFAULT_MODEL)
+        shots = []
+        take = by_id.get(ark.ONE_TAKE_ID) if step4.get("oneTake") else None
+        for shot in steps["3"].get("shots") or []:
+            # 한 번에 이어서 만든 계획은 샷들이 영상 하나를 같이 쓴다 — 그 영상의 상태를 따른다.
+            made = take or by_id.get(shot.get("id")) or {}
+            shots.append(
+                {
+                    "id": shot.get("id"),
+                    "summaryKo": shot.get("summaryKo", ""),
+                    "durationS": int(shot.get("durationS") or settings.DURATION_S),
+                    "status": made.get("status") or ("planned" if steps["3"].get("status") else "none"),
+                }
+            )
+        videos = []
+        for item in step4.get("shots") or []:
+            if item.get("status") == "completed" and item.get("outputKey"):
+                try:
+                    url = video.video_url(item["outputKey"])
+                except Exception:  # noqa: BLE001
+                    url = None
+                if url:
+                    label = "한 번에 이어서 만든 영상" if item.get("id") == ark.ONE_TAKE_ID else item.get("id")
+                    videos.append({"id": item.get("id"), "label": label, "videoUrl": url})
+        current = int(state.get("currentStep") or 1)
+        text = str((steps["1"] or {}).get("text") or "")
+        return {
+            "planId": plan_id,
+            "createdAt": state.get("createdAt"),
+            "title": story.get("titleKo") or (text[:40] + ("…" if len(text) > 40 else "")) or "제목 없음",
+            "currentStep": current,
+            "stepName": STEP_NAMES.get(current, ""),
+            "step4Status": step4.get("status") or "empty",
+            "videoModel": model,
+            "oneTake": bool(step4.get("oneTake")),
+            "shots": shots,
+            "totalSeconds": sum(item["durationS"] for item in shots),
+            "videos": videos,
+        }
 
     @bp.post("/p/<pid>/plans")
     @deps.require_auth

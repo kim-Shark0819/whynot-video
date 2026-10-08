@@ -1695,6 +1695,74 @@ function applyProjectTrackView(project) {
   $("#handoffSceneVideo")?.classList.toggle("is-hidden", !videoTrack || !VIDEO_GEN_ENABLED);
 }
 
+/* 영상 프로젝트 상세의 "영상" 칸 — 이 프로젝트의 영상 계획 목록(설계자 2026-10-08).
+   채우던 video-folder.js 가 옛 영상 기능과 함께 지워져(51ba039) 칸이 비어 있었다.
+   GET /api/vpoc/p/:id 의 plans 를 카드로 보이고, 카드에서 그 계획을 바로 연다. */
+const VIDEO_MODEL_LABEL = { "luma-ray2": "Luma Ray2", "seedance-2-0": "Seedance 2.0", "seedance-2-5": "Seedance 2.5" };
+const VIDEO_SHOT_STATUS = { planned: "계획", queued: "대기", submitted: "생성 중", completed: "완료", failed: "실패" };
+
+async function loadVideoFolderPlans(project) {
+  const list = $("#videoFolderList");
+  if (!list) return;
+  $("#videoFolderTitle").textContent = project.title || "프로젝트";
+  list.innerHTML = '<p class="field-hint">영상 계획을 불러오는 중...</p>';
+  let view;
+  try {
+    view = await api(`/api/vpoc/p/${encodeURIComponent(project.id)}`);
+  } catch (error) {
+    list.innerHTML = "";
+    $("#videoFolderError").textContent = `영상 계획을 불러오지 못했습니다: ${error.message}`;
+    return;
+  }
+  if (state.currentProject?.id !== project.id) return; // 그 사이 다른 프로젝트로 옮겼다
+  $("#videoFolderError").textContent = "";
+  const plans = view.plans || [];
+  const videoCount = plans.reduce((sum, plan) => sum + (plan.videos || []).length, 0);
+  $("#videoFolderCountBadge").textContent = `계획 ${plans.length} · 영상 ${videoCount}`;
+  $("#videoFolderEmpty").classList.toggle("is-hidden", plans.length > 0);
+  $("#videoFolderEmpty").textContent = "아직 영상 계획이 없습니다. 위의 \"영상 개발 시작\"으로 시작하세요.";
+  list.innerHTML = "";
+  plans.forEach((plan) => {
+    const card = document.createElement("div");
+    card.className = "folder-item video-plan-card";
+    card.style.cssText = "display:block;padding:12px;border:1px solid var(--line, #333);border-radius:10px;margin-bottom:10px";
+    const meta = [
+      plan.stepName,
+      `샷 ${(plan.shots || []).length}개`,
+      plan.totalSeconds ? `${plan.totalSeconds}초` : "",
+      VIDEO_MODEL_LABEL[plan.videoModel] || plan.videoModel,
+      plan.oneTake ? "한 번에 이어서" : "",
+      formatDate(plan.createdAt)
+    ].filter(Boolean).join(" · ");
+    card.innerHTML = `
+      <div style="display:flex;justify-content:space-between;gap:8px;align-items:center">
+        <strong>${escapeHtml(plan.title)}</strong>
+        <button class="outline-button" type="button" data-open-plan="${escapeHtml(plan.planId)}">이 계획 열기</button>
+      </div>
+      <p class="field-hint">${escapeHtml(meta)}</p>
+      <ol class="video-plan-shots" style="margin:6px 0 0 18px;padding:0">
+        ${(plan.shots || []).map((shot) => `<li>${escapeHtml(shot.summaryKo || shot.id)} <small class="field-hint">· ${shot.durationS}초${VIDEO_SHOT_STATUS[shot.status] ? ` · ${VIDEO_SHOT_STATUS[shot.status]}` : ""}</small></li>`).join("")}
+      </ol>`;
+    (plan.videos || []).forEach((item) => {
+      const label = document.createElement("p");
+      label.className = "field-hint";
+      label.textContent = item.label;
+      const tag = document.createElement("video");
+      tag.src = item.videoUrl;
+      tag.controls = true;
+      tag.muted = true;
+      tag.setAttribute("playsinline", "");
+      tag.style.cssText = "width:100%;max-width:520px;border-radius:8px;margin-top:6px";
+      card.appendChild(label);
+      card.appendChild(tag);
+    });
+    card.querySelector("[data-open-plan]").addEventListener("click", () => {
+      window.whynotOpenVideoGen(project, plan.planId);
+    });
+    list.appendChild(card);
+  });
+}
+
 function renderProjectDetail(project) {
   const editable = canEditProject(project);
   const isShared = project.visibility === "shared";
@@ -1729,6 +1797,7 @@ function renderProjectDetail(project) {
 
   renderCoverHistory(project, editable);
   applyProjectTrackView(project);
+  if (project.track === "video" && VIDEO_GEN_ENABLED) loadVideoFolderPlans(project);
   renderSourcePanel(project, editable);
   renderDirectionPanel(project, editable);
   renderDocumentsPanel();
@@ -6138,10 +6207,12 @@ async function applyRoute(route) {
   switchView(route.view);
 }
 
-window.whynotOpenVideoGen = (project) => {
+window.whynotOpenVideoGen = (project, planId = "") => {
   if (!project || !project.id) return;
   state.currentProject = project;
   setWorkingProject(project);
+  // 프로젝트 화면의 계획 카드에서 들어오면 그 계획을 연다. 비우면 vpoc 가 알아서 고른다.
+  state.vpocPlanId = planId || "";
   navigate("videoGen");
 };
 
@@ -6206,7 +6277,10 @@ function switchView(viewName) {
   }
   // vpoc1 영상 기능은 진입점이 하나다. 화면 전체를 vpoc.js 가 #vpoc-root 안에 만든다.
   // vpoc.js 가 없어도 여기서 조용히 넘어가야 app.js 가 깨지지 않는다.
-  if (viewName === "videoGen") window.vpoc?.mount(state.currentProject?.id);
+  if (viewName === "videoGen") {
+    window.vpoc?.mount(state.currentProject?.id, state.vpocPlanId || "");
+    state.vpocPlanId = "";
+  }
   else window.vpoc?.unmount?.();
   if (viewName === "home") loadProjects();
   if (viewName === "users" && state.user?.isAdmin) loadUsers();
@@ -6621,6 +6695,14 @@ $("#videoFolderEnter")?.addEventListener("click", () => {
     return;
   }
   window.whynotOpenVideoGen(state.currentProject);
+});
+// "영상 접기" — 이것도 video-folder.js 와 함께 처리기가 사라졌었다.
+$("#videoFolderToggle")?.addEventListener("click", () => {
+  const box = $("#videoFolderVideos");
+  const toggle = $("#videoFolderToggle");
+  const collapsed = box.classList.toggle("is-hidden");
+  toggle.setAttribute("aria-expanded", String(!collapsed));
+  toggle.textContent = collapsed ? "영상 펼치기 ▲" : "영상 접기 ▼";
 });
 $("#detailCoverAi").addEventListener("click", async () => {
   const project = state.currentProject;

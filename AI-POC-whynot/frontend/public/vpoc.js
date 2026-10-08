@@ -1979,8 +1979,10 @@
 
   /* ---------------------------------------------------------------- mount */
 
-  function start(projectId) {
+  function start(projectId, planId) {
     state.projectId = String(projectId || "");
+    // 프로젝트 화면의 계획 카드에서 "이 계획 열기"로 들어오면 그 계획을 바로 연다(설계자 2026-10-08).
+    var requestedPlanId = String(planId || "");
     state.lastError = null;
     state.plan = null;
     state.project = null;
@@ -2009,6 +2011,11 @@
 
     loadProject()
       .then(function (view) {
+        if (requestedPlanId) {
+          state.view = "flow";
+          state.planId = requestedPlanId;
+          return loadPlan();
+        }
         // PRD 8.1: 완료된 계획이 있으면 프로젝트 보기, 아니면 진행 중 계획의 현재 단계,
         // 계획이 없고 편집 권한이 있으면 새 계획을 만들어 ①을 연다.
         if ((view.videos || []).length) {
@@ -2041,7 +2048,7 @@
   }
 
   window.vpoc = {
-    mount: function (projectId) {
+    mount: function (projectId, planId) {
       var host = root();
       if (!host) return;
       state.mounted = true;
@@ -2050,7 +2057,7 @@
       } catch (error) {
         state.mock = false;
       }
-      start(projectId);
+      start(projectId, planId);
     },
     unmount: function () {
       state.mounted = false;
