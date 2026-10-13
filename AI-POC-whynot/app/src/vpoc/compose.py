@@ -85,6 +85,48 @@ def build_prompt(shot: dict, characters: list[dict], style: str) -> str:
     return ". ".join(piece for piece in pieces if piece) + "."
 
 
+# 이미지 안전 필터(Stability)가 다른 뜻으로 읽어 거절하는 평범한 표현 → 같은 뜻의 무난한 표현.
+# 실측 2026-10-13: "orange hair tied up in a bun" 이 매번 "Filter reason: prompt" 로 거절됐다
+# ("tied up" = 묶인). 목록은 1차 방어일 뿐이다 — 걸리면 Claude 가 문장을 다시 쓴다(routes._draw_character).
+SAFE_PHRASES = [
+    (r"\btied\s+up\b", "gathered up"),
+    (r"\btied\s+back\b", "pulled back"),
+    (r"\btied\b", "gathered"),
+    (r"\bbound\b", "wrapped"),
+    (r"\btight(?:ly)?\b", "fitted"),
+    (r"\bshirtless\b", "in a casual top"),
+    (r"\bbloody\b|\bblood(?:stained)?\b", ""),
+    (r"\bwounds?\b|\binjur(?:y|ies|ed)\b|\bscars?\b|\bbruis(?:e|es|ed)\b", ""),
+    (r"\bsexy\b|\bseductive\b|\bsensual\b", "elegant"),
+    (r"\bnaked\b|\bnude\b|\bbare\b", ""),
+    (r"\bcleavage\b", "neckline"),
+    (r"\bgun\b|\bknife\b|\bweapon\b|\bcigarette\b|\bsmoking\b", ""),
+]
+
+
+def safe_image_text(text: str) -> str:
+    """SAFE_PHRASES 를 적용하고 빈 쉼표 · 공백을 정리한다."""
+    out = text or ""
+    for pattern, replacement in SAFE_PHRASES:
+        out = re.sub(pattern, replacement, out, flags=re.IGNORECASE)
+    out = re.sub(r"\s+,", ",", out)
+    out = re.sub(r",\s*,+", ",", out)
+    out = re.sub(r"\s{2,}", " ", out)
+    return out.strip()
+
+
+def minimal_image_prompt(character: dict, style: str) -> tuple[str, str]:
+    """마지막 수단: 화풍 + 사람/생물 + 단순 배경만. 외모 세부를 빼서 필터에 걸릴 말이 없다."""
+    appearance = (character.get("appearanceEn") or "").strip()
+    who = "a person" if is_human(appearance) else "a friendly creature"
+    head = (STYLE_IMAGE.get(style_of(style)) or STYLE[style_of(style)]).strip().rstrip(".")
+    prompt = (
+        f"{head}. Waist-up portrait of {who}, neutral friendly expression, "
+        "plain light background, facing the camera, sharp focus on the face."
+    )
+    return prompt, "text, watermark, logo, extra people, blurry face"
+
+
 IMAGE_NEGATIVE_NONHUMAN = (
     "text, watermark, logo, people, humans, extra animals, extra legs, deformed paws, "
     "blurry, cropped body"

@@ -676,49 +676,27 @@ def create_blueprint(deps: VpocDependencies) -> Blueprint:
                         "error": None,
                     }
                 return
-            prompt, negative = compose.image_prompt(character, story, style)
-            seed = secrets.randbelow(4294967295)
-            for attempt in (1, 2):
-                try:
-                    made = images.generate_character_image(
-                        owner=owner,
-                        pid=pid,
-                        char_id=char_id,
-                        prompt=prompt,
-                        negative_prompt=negative,
-                        seed=seed,
-                    )
-                except Exception as exc:  # noqa: BLE001
-                    body = envelope("stability.invoke_model", exc)
-                    if attempt == 1 and body.get("type") == "ImageFiltered":
-                        # E8: 시드만 바꿔 1회 재시도.
-                        seed = secrets.randbelow(4294967295)
-                        continue
-                    with lock:
-                        image_results[char_id] = {
-                            "status": "error",
-                            "source": "ai",
-                            "imageId": None,
-                            "seed": seed,
-                            "error": body,
-                        }
-                    return
-                ledger.charge_image(
-                    f"img-{plan_id}-{char_id}-{made['imageId']}",
-                    user=user,
-                    project_id=pid,
-                    plan_id=plan_id,
-                )
+            try:
+                made = _draw_character(owner, pid, plan_id, user, character, story, style)
+            except Exception as exc:  # noqa: BLE001
                 with lock:
                     image_results[char_id] = {
-                        "status": "ready",
+                        "status": "error",
                         "source": "ai",
-                        "imageId": made["imageId"],
-                        "key": made["key"],
-                        "seed": made["seed"],
-                        "error": None,
+                        "imageId": None,
+                        "seed": None,
+                        "error": envelope("stability.invoke_model", exc),
                     }
                 return
+            with lock:
+                image_results[char_id] = {
+                    "status": "ready",
+                    "source": "ai",
+                    "imageId": made["imageId"],
+                    "key": made["key"],
+                    "seed": made["seed"],
+                    "error": None,
+                }
 
         plan_box: dict = {}
 
@@ -793,6 +771,78 @@ def create_blueprint(deps: VpocDependencies) -> Blueprint:
             },
         }
 
+    def _draw_character(
+        owner: str, pid: str, plan_id: str, user: str, character: dict, story: dict, style: str
+    ) -> dict:
+        """캐릭터 그림 1장. 안전 필터 오탐(ImageFiltered)에도 그림이 나오게 단계를 밟는다(설계자 2026-10-13).
+
+        1) 원래 문장 → 2) 오탐 표현 치환 + 새 시드 → 3) Claude 가 같은 외모를 무난한 말로 다시 쓴 문장
+        → 4) 다시 쓴 문장 + 새 시드 → 5) 화풍 + 사람 + 단순 배경만. 필터가 아닌 오류(혼잡 등)는 한 번 쉬고
+        같은 단계를 다시 한다. 모두 실패하면 마지막 오류를 올린다(보통 여기까지 오지 않는다).
+        """
+        char_id = character["id"]
+        prompt, negative = compose.image_prompt(character, story, style)
+        ladder: list[tuple[str, str]] = [(prompt, negative)]
+        safer = compose.safe_image_text(prompt)
+        ladder.append((safer, negative))
+        last: BaseException | None = None
+        step = 0
+        rewritten = False
+        transient_retry = True
+        while step < len(ladder):
+            text, neg = ladder[step]
+            try:
+                made = images.generate_character_image(
+                    owner=owner,
+                    pid=pid,
+                    char_id=char_id,
+                    prompt=text,
+                    negative_prompt=neg,
+                    seed=secrets.randbelow(4294967295),
+                )
+            except VpocError as exc:
+                last = exc
+                if exc.kind != "ImageFiltered":
+                    raise
+                log.warning("vpoc.image.filtered char=%s step=%d reason=%s", char_id, step + 1, exc.message)
+                if not rewritten and step == 1:
+                    rewritten = True
+                    try:
+                        better, usage = llm.safe_image_prompt(safer)
+                        ledger.charge_text(
+                            f"safeimg-{plan_id}-{char_id}-{secrets.token_hex(3)}",
+                            input_tokens=int(usage.get("inputTokens") or 0),
+                            output_tokens=int(usage.get("outputTokens") or 0),
+                            user=user,
+                            project_id=pid,
+                            plan_id=plan_id,
+                            model=str(usage.get("model") or ""),
+                        )
+                        better = compose.safe_image_text(better)
+                        ladder += [(better, negative), (better, negative)]
+                    except Exception as rewrite_exc:  # noqa: BLE001
+                        log.warning("vpoc.image.rewrite_failed char=%s err=%s", char_id, rewrite_exc)
+                    ladder.append(compose.minimal_image_prompt(character, style))
+                step += 1
+                continue
+            except Exception as exc:  # noqa: BLE001
+                last = exc
+                if transient_retry:
+                    transient_retry = False
+                    time.sleep(3)
+                    continue
+                raise
+            ledger.charge_image(
+                f"img-{plan_id}-{char_id}-{made['imageId']}",
+                user=user,
+                project_id=pid,
+                plan_id=plan_id,
+            )
+            if step:
+                log.info("vpoc.image.recovered char=%s step=%d", char_id, step + 1)
+            return made
+        raise last or VpocError("routes.draw", "ImageFiltered", "그림을 만들지 못했습니다.", 502)
+
     def do_redraw(owner: str, pid: str, plan_id: str, user: str, state: dict, char_id: str) -> dict:
         step2 = state["steps"]["2"]
         character = next(
@@ -801,21 +851,7 @@ def create_blueprint(deps: VpocDependencies) -> Blueprint:
         if not character:
             raise VpocError("routes.redraw", "NotFound", "캐릭터를 찾을 수 없습니다.", 404)
         style = compose.style_of((step2.get("story") or {}).get("style") or "live_action")
-        prompt, negative = compose.image_prompt(character, step2.get("story") or {}, style)
-        made = images.generate_character_image(
-            owner=owner,
-            pid=pid,
-            char_id=char_id,
-            prompt=prompt,
-            negative_prompt=negative,
-            seed=secrets.randbelow(4294967295),
-        )
-        ledger.charge_image(
-            f"img-{plan_id}-{char_id}-{made['imageId']}",
-            user=user,
-            project_id=pid,
-            plan_id=plan_id,
-        )
+        made = _draw_character(owner, pid, plan_id, user, character, step2.get("story") or {}, style)
         return {
             "characters": [
                 {

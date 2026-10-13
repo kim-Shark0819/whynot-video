@@ -112,9 +112,9 @@ DURATION_S = _int("VPOC_DURATION_S", 5)
 # 실측(2026-09-23 C8): "On-demand model inference concurrent requests for Luma Ray V2" = 1.
 # 쿼터가 1이라 동시 제출도 1이다. 2 이상을 넣으면 ThrottlingException 이 난다.
 MAX_INFLIGHT = max(1, _int("VPOC_MAX_INFLIGHT", 1))
-# Seedance(BytePlus)는 Luma 쿼터(동시 1)와 따로다. 한 샷에 5~6분이 걸려(실측 2026-10-13, 720p 5초 354초)
-# 샷 4개를 하나씩 만들면 25분이었다. 동시에 보내고, 한도에 걸리면(HTTP429) 대기열로 돌린다.
-ARK_MAX_INFLIGHT = max(1, _int("VPOC_ARK_MAX_INFLIGHT", 4))
+# Seedance(BytePlus) 동시 제출 수. 설계자 2026-10-13: 샷은 1번부터 **하나씩 순서대로** 만든다
+# (동시 생성 아님). 값을 올리면 동시에 보내고, 한도에 걸리면(HTTP429) 대기열로 돌린다.
+ARK_MAX_INFLIGHT = max(1, _int("VPOC_ARK_MAX_INFLIGHT", 1))
 MAX_SHOTS = _int("VPOC_MAX_SHOTS", 6)
 MIN_SHOTS = 3
 
@@ -137,7 +137,8 @@ TILE_HEIGHT = 1568
 READ_TIMEOUT_S = _int("VPOC_READ_TIMEOUT_S", 300)
 # 분석이 모델을 바꿔 가며 다시 부를 수 있어(최대 수 분) 10분은 짧다(2026-10-13).
 TASK_STALL_S = _int("VPOC_TASK_STALL_S", 1500)
-POLL_MIN_INTERVAL_S = 10
+# 완료를 빨리 알아채도록 5초(설계자 2026-10-13 "샷 1개 시간 줄이기"). 조회 자체는 무료다.
+POLL_MIN_INTERVAL_S = 5
 
 
 def ark_usd_per_sec(model: str, resolution: str = "") -> float | None:

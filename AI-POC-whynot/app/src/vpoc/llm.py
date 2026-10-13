@@ -382,6 +382,41 @@ def _converse(
     raise VpocError(where, "NoModel", "호출할 모델이 없습니다.", 500)
 
 
+EMIT_IMAGE_PROMPT = {
+    "name": "emit_prompt",
+    "description": "Return the rewritten image prompt.",
+    "inputSchema": {
+        "json": {
+            "type": "object",
+            "properties": {"prompt": {"type": "string"}},
+            "required": ["prompt"],
+        }
+    },
+}
+
+SAFE_PROMPT_SYSTEM = """You rewrite image-generation prompts that a strict automatic safety filter blocked by mistake.
+Keep the same art style sentence, the same character (age range, gender, hair color, hairstyle, clothing,
+colors, body type, expression) and the same setting. Replace every word or phrase that a filter could misread
+as sexual, bondage, violence, injury, blood, nudity, minors, drugs, smoking or weapons with plainly neutral
+wording (example: "hair tied up in a bun" -> "hair in a neat bun"; "slim" stays). No names of real people.
+English only, at most 600 characters. Answer only with the emit_prompt tool."""
+
+
+def safe_image_prompt(prompt: str) -> tuple[str, dict]:
+    """필터에 걸린 그림 문장을 같은 내용의 무난한 문장으로 다시 쓴다(설계자 2026-10-13)."""
+    payload, usage = _converse(
+        system_text=SAFE_PROMPT_SYSTEM,
+        blocks=[{"text": "Blocked prompt:\n" + prompt}],
+        tool=EMIT_IMAGE_PROMPT,
+        max_tokens=600,
+        where="claude.safe_image_prompt",
+    )
+    text = str((payload or {}).get("prompt") or "").strip()
+    if not text:
+        raise VpocError("claude.safe_image_prompt", "SchemaViolation", "빈 문장", 502)
+    return text[:900], usage
+
+
 def _add_usage(first: dict, second: dict) -> dict:
     return {
         "inputTokens": (first.get("inputTokens") or 0) + (second.get("inputTokens") or 0),
