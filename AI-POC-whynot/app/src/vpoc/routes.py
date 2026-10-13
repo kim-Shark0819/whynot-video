@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import logging
+import re
 import secrets
 import threading
 import time
@@ -152,8 +153,8 @@ def create_blueprint(deps: VpocDependencies) -> Blueprint:
             seconds = settings.DURATION_S
         return max(low, min(high, seconds))
 
-    def _reference_characters(steps: dict, plan_shot: dict) -> list[tuple[str, str]]:
-        """샷에 나오는 캐릭터 중 이미지가 준비된 것 → [(handleEn, 이미지 키)] (샷의 캐릭터 순서).
+    def _reference_characters(steps: dict, plan_shot: dict) -> list[tuple[str, str, str, str]]:
+        """샷에 나오는 캐릭터 중 이미지가 준비된 것 → [(id, handleEn, 이미지 키, source)] (샷의 캐릭터 순서).
 
         이미지는 사용자가 올린 것(source=user)이 있으면 그것, 없으면 ③에서 만든 AI 이미지다
         (do_prepare 가 이미 그렇게 고른다). 둘 다 "이 캐릭터 그대로"의 기준이다.
@@ -162,15 +163,102 @@ def create_blueprint(deps: VpocDependencies) -> Blueprint:
         images_by_id = {
             item.get("id"): item.get("image") or {} for item in steps["3"].get("characters") or []
         }
-        refs: list[tuple[str, str]] = []
+        refs: list[tuple[str, str, str, str]] = []
         for char_id in plan_shot.get("characters") or []:
             image = images_by_id.get(char_id) or {}
             if image.get("status") != "ready" or not image.get("key"):
                 continue
             sheet = sheets.get(char_id) or {}
             handle = str(sheet.get("handleEn") or sheet.get("nameEn") or "the character").strip()
-            refs.append((handle, image["key"]))
+            refs.append((char_id, handle, image["key"], str(image.get("source") or "")))
         return refs
+
+    def _style_references(steps: dict, owner: str, pid: str) -> tuple[list[str], bool]:
+        """화풍 그대로(설계자 2026-10-08): ([화풍 참고 이미지 키 최대 2장], 화풍 고정 여부).
+
+        사용자가 올린 장면 이미지가 있거나 캐릭터 이미지가 사용자 것이면 그 그림의 화풍을 따른다 —
+        고정 화풍 문장("실사 영화"/"애니") 대신 "참고 이미지와 같은 화풍" 지시를 보낸다.
+        """
+        keys = [
+            store.upload_key(owner, pid, item["fileId"])
+            for item in (steps["1"].get("sceneFiles") or [])
+            if item.get("fileId")
+        ][:2]
+        user_chars = any(
+            (item.get("image") or {}).get("source") == "user"
+            for item in steps["3"].get("characters") or []
+        )
+        return keys, bool(keys) or user_chars
+
+    # BytePlus Seedance 2.0 r2v 는 참고 이미지 9장까지 받는다(실측 2026-10-13: 10장이면 거절).
+    MAX_REFERENCE_IMAGES = 9
+    # 사용자가 한 인물에 여러 장(예: 외형 · 전신)을 올리면 2장까지 보낸다. 전신 한 장만 보내면 얼굴이
+    # 작아 얼굴 생김새가 흔한 얼굴로 바뀌었다(운영 2026-10-13 "사진 속 남성과 영상 속 남성이 다르다").
+    PER_CHARACTER_IMAGES = 2
+
+    def _card_keys(steps: dict, owner: str, pid: str, char_id: str) -> list[str]:
+        """② 인물과 이름이 같은 ① 카드의 이미지 키 전부(올린 순서)."""
+        character = next(
+            (item for item in steps["2"].get("characters") or [] if item.get("id") == char_id), {}
+        )
+        names = {
+            str(character.get(field) or "").strip().lower()
+            for field in ("nameKo", "nameEn")
+            if character.get(field)
+        }
+        for card in steps["1"].get("characters") or []:
+            if str(card.get("name") or "").strip().lower() in names:
+                return [
+                    store.upload_key(owner, pid, item["fileId"])
+                    for item in card.get("files") or []
+                    if (item or {}).get("fileId")
+                ]
+        return []
+
+    def _drop_appearances(steps: dict, prompt: str, char_ids: list[str]) -> str:
+        """참고 이미지가 사용자 그림인 인물의 글 외모 설명(appearanceEn)을 문장에서 뺀다.
+
+        글 설명("warm smile, strong jawline…")이 그림과 겨뤄 얼굴을 흔한 얼굴로 끌고 갔다(2026-10-13).
+        생김새는 그림이 정하고, 문장에는 장소 · 행동 · 카메라만 남긴다.
+        """
+        sheets = {item.get("id"): item for item in steps["2"].get("characters") or []}
+        for char_id in char_ids:
+            text = str((sheets.get(char_id) or {}).get("appearanceEn") or "").strip().rstrip(".")
+            if text:
+                prompt = prompt.replace(text, "")
+        prompt = re.sub(r"\s*;\s*(?=[;.]|$)", "", prompt)
+        prompt = re.sub(r"(?<=[.:])\s*;\s*", " ", prompt)
+        prompt = re.sub(r"\.(\s*\.)+", ".", prompt)
+        prompt = re.sub(r"\s{2,}", " ", prompt)
+        return prompt.strip()
+
+    def _reference_bundle(
+        steps: dict, owner: str, pid: str, plan_shot: dict, prompt: str, *, skip: frozenset = frozenset()
+    ) -> tuple[str, list[tuple[str | None, str]]]:
+        """Seedance 로 보낼 (최종 문장, [(인물 지칭 또는 None=화풍 참고, 이미지 키)]).
+
+        ③ 미리보기와 실제 제출이 같은 것을 쓴다. 이미지 순서 = 문장 속 "Image N" 순서.
+        skip: 읽지 못해 빼는 이미지 키(제출 때만).
+        """
+        entries: list[tuple[str | None, str]] = []
+        user_ids: list[str] = []
+        for char_id, handle, key, source in _reference_characters(steps, plan_shot):
+            keys = [key]
+            if source == "user":
+                user_ids.append(char_id)
+                keys += [extra for extra in _card_keys(steps, owner, pid, char_id) if extra != key]
+            for item in [k for k in keys if k not in skip][:PER_CHARACTER_IMAGES]:
+                if len(entries) < MAX_REFERENCE_IMAGES:
+                    entries.append((handle, item))
+        style_keys, lock = _style_references(steps, owner, pid)
+        for key in style_keys:
+            if key not in skip and len(entries) < MAX_REFERENCE_IMAGES:
+                entries.append((None, key))
+        if lock:
+            style = compose.STYLE[compose.style_of((steps["2"].get("story") or {}).get("style") or "")]
+            prompt = ark.strip_style(prompt, style)
+        prompt = _drop_appearances(steps, prompt, user_ids)
+        return ark.reference_prompt(prompt, [name for name, _ in entries], style_lock=lock), entries
 
     def _one_take(steps: dict, model: str) -> dict | None:
         """A안 "한 번에 이어서 만들기"(설계자 2026-10-08). 쓸 수 없으면 None(샷별로 만든다).
@@ -274,11 +362,10 @@ def create_blueprint(deps: VpocDependencies) -> Blueprint:
             }
             if ark.is_ark(model) and shot.get("promptEn"):
                 # API 를 부르기 전에 보낼 문장을 그대로 보여 준다(설계자 2026-10-07 1-3).
-                refs = _reference_characters(steps, shot)
-                row["sendPromptEn"] = ark.reference_prompt(
-                    shot.get("promptEn") or "", [name for name, _ in refs]
+                row["sendPromptEn"], entries = _reference_bundle(
+                    steps, owner, pid, shot, shot.get("promptEn") or ""
                 )
-                row["referenceCount"] = len(refs)
+                row["referenceCount"] = len(entries)
             step3["shots"].append(row)
         if step3.get("cost"):
             total = sum(row["usd"] for row in step3["shots"])
@@ -300,11 +387,10 @@ def create_blueprint(deps: VpocDependencies) -> Blueprint:
             step3["oneTakeTotalS"] = sum(row["durationS"] for row in step3["shots"])
             step3["oneTakeMaxS"] = settings.VIDEO_DURATION_RANGE.get(model, (5, 5))[1]
             if take:
-                refs = _reference_characters(steps, take)
-                step3["oneTakePromptEn"] = ark.reference_prompt(
-                    take["promptEn"], [name for name, _ in refs]
+                step3["oneTakePromptEn"], entries = _reference_bundle(
+                    steps, owner, pid, take, take["promptEn"]
                 )
-                step3["oneTakeReferenceCount"] = len(refs)
+                step3["oneTakeReferenceCount"] = len(entries)
 
         plan_shots = {item.get("id"): item for item in steps["3"].get("shots", [])}
         step4 = dict(steps["4"])
@@ -531,6 +617,7 @@ def create_blueprint(deps: VpocDependencies) -> Blueprint:
             user=user,
             project_id=pid,
             plan_id=plan_id,
+            model=str(usage.get("model") or ""),
         )
         if total > len(jpegs):
             result["story"]["notesKo"] = (
@@ -539,11 +626,36 @@ def create_blueprint(deps: VpocDependencies) -> Blueprint:
             ).strip()
         return result
 
-    def do_prepare(owner: str, pid: str, plan_id: str, user: str, step2: dict) -> dict:
+    def _card_image(step1: dict | None, character: dict) -> dict | None:
+        """① 캐릭터 카드 중 이름이 같은 카드의 첫 이미지(설계자 2026-10-08).
+
+        화면이 ② userImages 를 보내지 않아, 사용자가 캐릭터 이미지를 올려도 ③ 에서 AI 가 다른 화풍으로
+        다시 그렸다. 카드 이름이 ② 인물의 nameKo/nameEn 과 같으면 그 이미지를 캐릭터 이미지로 쓴다.
+        """
+        names = {
+            str(character.get(field) or "").strip().lower()
+            for field in ("nameKo", "nameEn")
+            if character.get(field)
+        }
+        for card in (step1 or {}).get("characters") or []:
+            if str(card.get("name") or "").strip().lower() in names and card.get("files"):
+                file_id = (card["files"][0] or {}).get("fileId")
+                if file_id:
+                    return {"fileId": file_id}
+        return None
+
+    def do_prepare(
+        owner: str, pid: str, plan_id: str, user: str, step2: dict, *, step1: dict | None = None
+    ) -> dict:
         style = compose.style_of((step2.get("story") or {}).get("style") or "live_action")
         characters = step2.get("characters") or []
         story = step2.get("story") or {}
-        user_images = step2.get("userImages") or {}
+        user_images = dict(step2.get("userImages") or {})
+        for character in characters:
+            if character.get("id") and character["id"] not in user_images:
+                found = _card_image(step1, character)
+                if found:
+                    user_images[character["id"]] = found
 
         # 캐릭터 이미지와 샷 계획을 함께 돌린다(동시 최대 3장).
         image_results: dict[str, dict] = {}
@@ -757,7 +869,13 @@ def create_blueprint(deps: VpocDependencies) -> Blueprint:
             target["error"] = {
                 "where": "routes.submit_shot",
                 "type": "ShotMissing",
-                "message": "계획에서 이 샷을 찾을 수 없습니다.",
+                "message": (
+                    # 한 번에 이어 만들기 조건(모델 최대 길이 등)이 바뀌어 더는 만들 수 없는 옛 회차.
+                    "한 번에 이어 만들 수 없는 길이입니다(모델 최대 길이 초과). "
+                    "③ 계획 승인에서 다시 승인해 주세요 — 샷별로 나눠 만듭니다."
+                    if shot["id"] == ark.ONE_TAKE_ID
+                    else "계획에서 이 샷을 찾을 수 없습니다."
+                ),
                 "requestId": "",
                 "httpStatus": 400,
                 "at": now_iso(),
@@ -796,16 +914,37 @@ def create_blueprint(deps: VpocDependencies) -> Blueprint:
         seconds = int(shot.get("durationS") or _shot_seconds(video_model, plan_shot))
         try:
             if use_ark:
+                low, high = settings.VIDEO_DURATION_RANGE.get(video_model, (seconds, seconds))
+                if not low <= seconds <= high:
+                    # 상한을 고치기 전에 승인된 계획(예: 20초 한 번에 이어 만들기)은 다시 보내도 거절된다.
+                    raise VpocError(
+                        "routes.submit_shot",
+                        "BadDuration",
+                        f"{ark.LABELS.get(video_model, video_model)}는 한 번에 {low}~{high}초만 만들 수 있습니다"
+                        f"(이 영상 {seconds}초). ③ 계획 승인에서 다시 승인해 주세요 — 길면 샷별로 나눠 만듭니다.",
+                        400,
+                    )
                 # 설계자 2026-10-07: 샷의 캐릭터 이미지(사용자 업로드 또는 ③에서 승인한 AI 이미지)를
                 # 참고 이미지로 함께 보내고, 그 캐릭터 그대로 만들라는 지시를 프롬프트 앞에 붙인다.
-                references: list[str] = []
-                names: list[str] = []
-                for handle, key in _reference_characters(state["steps"], plan_shot):
+                # 설계자 2026-10-08/13: 인물 그림(한 인물 최대 2장) + 화풍 참고 그림을 함께 보내고,
+                # 문장은 ③ 미리보기와 같은 _reference_bundle 규칙으로 만든다. 읽지 못한 그림은 빼고
+                # 문장도 실제로 보낸 그림 순서대로 다시 만든다.
+                failed: set[str] = set()
+                encoded: dict[str, str] = {}
+                for _, key in _reference_bundle(state["steps"], owner, pid, plan_shot, prompt)[1]:
                     try:
-                        references.append(images.keyframe_base64(key))
-                        names.append(handle)
+                        encoded[key] = images.keyframe_base64(key)
                     except Exception as exc:  # noqa: BLE001
-                        log.warning("vpoc.reference.failed shot=%s err=%s", shot["id"], exc)
+                        failed.add(key)
+                        log.warning("vpoc.reference.failed shot=%s key=%s err=%s", shot["id"], key, exc)
+                sent_prompt, entries = _reference_bundle(
+                    state["steps"], owner, pid, plan_shot, prompt, skip=frozenset(failed)
+                )
+                references = []
+                for _, key in entries:
+                    if key not in encoded:  # 앞 그림이 빠져 뒤 그림이 자리를 얻은 경우
+                        encoded[key] = images.keyframe_base64(key)
+                    references.append(encoded[key])
                 if references:
                     mode = "reference"
                 job = ark.submit(
@@ -815,7 +954,7 @@ def create_blueprint(deps: VpocDependencies) -> Blueprint:
                     plan_id=plan_id,
                     shot_id=shot["id"],
                     attempt=attempt,
-                    prompt=ark.reference_prompt(prompt, names),
+                    prompt=sent_prompt,
                     keyframe_jpeg_b64=keyframe,
                     gen_id=gen_id,
                     reference_jpegs_b64=references,
@@ -899,7 +1038,7 @@ def create_blueprint(deps: VpocDependencies) -> Blueprint:
                 "resolution": video_resolution,
                 "durationS": seconds,
                 # Seedance 에 실제로 보낸 문장(참고 이미지 지시 포함). Luma 는 prompt 와 같다.
-                "sentPrompt": ark.reference_prompt(prompt, names) if use_ark else prompt,
+                "sentPrompt": sent_prompt if use_ark else prompt,
             },
         )
 
@@ -1006,10 +1145,15 @@ def create_blueprint(deps: VpocDependencies) -> Blueprint:
             return pairs
 
         inflight = sum(1 for _, target in all_targets() if target.get("status") == "submitted")
+        limit = (
+            settings.ARK_MAX_INFLIGHT
+            if ark.is_ark(str(state["steps"]["4"].get("videoModel") or ""))
+            else settings.MAX_INFLIGHT
+        )
         for shot, target in all_targets():
             if target.get("status") != "queued":
                 continue
-            if inflight >= settings.MAX_INFLIGHT:
+            if inflight >= limit:
                 target["note"] = target.get("note") or "동시 제출 한도로 대기 중"
                 continue
             if target is shot:
@@ -1396,6 +1540,14 @@ def create_blueprint(deps: VpocDependencies) -> Blueprint:
             }
         )
 
+    def _submit_queued(owner: str, pid: str, plan_id: str, user: str) -> None:
+        try:
+            store.mutate_state(
+                owner, pid, plan_id, lambda inner: refresh_shots(inner, owner, pid, plan_id, user)
+            )
+        except Exception as exc:  # noqa: BLE001
+            log.warning("vpoc.submit_queued.failed plan=%s err=%s", plan_id, exc)
+
     STEP_NAMES = {1: "① 입력", 2: "② 확인", 3: "③ 계획 승인", 4: "④ 영상"}
 
     def _plan_summary(state: dict, plan_id: str) -> dict:
@@ -1781,12 +1933,13 @@ def create_blueprint(deps: VpocDependencies) -> Blueprint:
                     "routes.run", "PreconditionFailed", "②가 준비되지 않았습니다.", 409
                 )
             snapshot = dict(step2)
+            step1_snapshot = dict(state["steps"]["1"])
             run_task(
                 "prepare",
                 owner,
                 pid,
                 plan_id,
-                lambda: do_prepare(owner, pid, plan_id, user, snapshot),
+                lambda: do_prepare(owner, pid, plan_id, user, snapshot, step1=step1_snapshot),
             )
             return jsonify({"ok": True, "task": "prepare"}), 202
 
@@ -1883,10 +2036,14 @@ def create_blueprint(deps: VpocDependencies) -> Blueprint:
                 inner.pop("finalizedAt", None)
                 inner["currentStep"] = 4
                 inner["maxReachedStep"] = 4
-                refresh_shots(inner, owner, pid, plan_id, user)
 
             state, _ = store.mutate_state(owner, pid, plan_id, mutator)
             update_graph(pid, "generating", plan_id, "", "")
+            # 샷 제출(모델 호출)은 응답 뒤에 한다(설계자 2026-10-13). 요청 안에서 하면 모델 쪽이 느릴 때
+            # 화면이 HTTP 504 를 받았다 — 영상은 만들어지는데 ③ 에 오류가 남았다. ④ 조회도 대기 샷을 제출한다.
+            threading.Thread(
+                target=_submit_queued, args=(owner, pid, plan_id, user), daemon=True
+            ).start()
             shots4 = state["steps"]["4"]["shots"]
             return jsonify(
                 {

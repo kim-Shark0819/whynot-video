@@ -42,6 +42,18 @@ TEXT_MODEL = os.getenv(
     "VPOC_TEXT_MODEL", "global.anthropic.claude-sonnet-4-5-20250929-v1:0"
 )
 TEXT_REGION = os.getenv("VPOC_TEXT_REGION", AWS_REGION)
+# ② 분석(웹툰 이미지 읽기)은 이 계정에서 쓸 수 있는 가장 좋은 Claude 로 한다(설계자 2026-10-13).
+# 2026-10-13 실측: 이 계정은 Opus 4.6 · Sonnet 4.6 · Sonnet 4.5 만 호출 가능(Opus 4.7+/5.x 는 미허용).
+ANALYZE_MODEL = os.getenv("VPOC_ANALYZE_MODEL", "global.anthropic.claude-opus-4-6-v1")
+# 앞 모델이 실패(혼잡 · 시간 초과 · 미허용 · 도구 미사용)하면 차례로 바꿔 다시 부른다.
+TEXT_FALLBACK_MODELS = [
+    item.strip()
+    for item in os.getenv(
+        "VPOC_TEXT_FALLBACK_MODELS",
+        "global.anthropic.claude-sonnet-4-6,global.anthropic.claude-sonnet-4-5-20250929-v1:0",
+    ).split(",")
+    if item.strip()
+]
 
 IMAGE_MODEL = os.getenv("VPOC_IMAGE_MODEL", "stability.sd3-5-large-v1:0")
 IMAGE_REGION = os.getenv("VPOC_IMAGE_REGION", "us-west-2")
@@ -78,8 +90,9 @@ ARK_USD_PER_SEC = {
 }
 
 # ③ 영상 설정 — 사용자가 화질과 샷 길이를 고른다(설계자 2026-10-07).
-# 샷 길이 상한: Seedance 2.0 30초 · 2.5 15초 · Luma Ray2 5초(설계자 지정). 하한은 4초로 둔다
-# (BytePlus 문서의 하한을 확인하지 못했다 — 거절되면 이 값을 고친다).
+# 샷 길이 상한: Seedance 2.0 15초 · 2.5 15초 · Luma Ray2 5초. 하한은 4초.
+# 2.0 은 처음에 30초로 두었으나 BytePlus 가 16초 이상을 "duration not valid"(t2v · r2v 모두)로
+# 거절했다(운영 2026-10-13, 20초 한 번에 이어 만들기 실패 → 실측 4~15초 통과, 16·20·30초 거절).
 VIDEO_RESOLUTIONS = {
     "luma-ray2": ["540p", "720p"],
     "seedance-2-0": ["480p", "720p", "1080p"],
@@ -87,7 +100,7 @@ VIDEO_RESOLUTIONS = {
 }
 VIDEO_DURATION_RANGE = {
     "luma-ray2": (5, 5),
-    "seedance-2-0": (4, 30),
+    "seedance-2-0": (4, 15),
     "seedance-2-5": (4, 15),
 }
 
@@ -99,6 +112,9 @@ DURATION_S = _int("VPOC_DURATION_S", 5)
 # 실측(2026-09-23 C8): "On-demand model inference concurrent requests for Luma Ray V2" = 1.
 # 쿼터가 1이라 동시 제출도 1이다. 2 이상을 넣으면 ThrottlingException 이 난다.
 MAX_INFLIGHT = max(1, _int("VPOC_MAX_INFLIGHT", 1))
+# Seedance(BytePlus)는 Luma 쿼터(동시 1)와 따로다. 한 샷에 5~6분이 걸려(실측 2026-10-13, 720p 5초 354초)
+# 샷 4개를 하나씩 만들면 25분이었다. 동시에 보내고, 한도에 걸리면(HTTP429) 대기열로 돌린다.
+ARK_MAX_INFLIGHT = max(1, _int("VPOC_ARK_MAX_INFLIGHT", 4))
 MAX_SHOTS = _int("VPOC_MAX_SHOTS", 6)
 MIN_SHOTS = 3
 
@@ -108,6 +124,9 @@ VIDEO_USD_PER_SEC = {"540p": 0.75, "720p": 1.5}
 IMAGE_USD = _float("VPOC_IMAGE_USD", 0.08)
 TEXT_USD_PER_MTOK_IN = _float("VPOC_TEXT_USD_PER_MTOK_IN", 3.0)
 TEXT_USD_PER_MTOK_OUT = _float("VPOC_TEXT_USD_PER_MTOK_OUT", 15.0)
+# Opus 4.5 이후 단가(USD / 1M 토큰). 관리자 "모델 관리" 비용에 모델별로 계상한다.
+OPUS_USD_PER_MTOK_IN = _float("VPOC_OPUS_USD_PER_MTOK_IN", 5.0)
+OPUS_USD_PER_MTOK_OUT = _float("VPOC_OPUS_USD_PER_MTOK_OUT", 25.0)
 
 # 업로드
 MAX_UPLOAD_BYTES = _int("VPOC_MAX_UPLOAD_BYTES", 10 * 1024 * 1024)
@@ -116,7 +135,8 @@ TILE_HEIGHT = 1568
 
 # 모델 호출 시간 제한
 READ_TIMEOUT_S = _int("VPOC_READ_TIMEOUT_S", 300)
-TASK_STALL_S = _int("VPOC_TASK_STALL_S", 600)
+# 분석이 모델을 바꿔 가며 다시 부를 수 있어(최대 수 분) 10분은 짧다(2026-10-13).
+TASK_STALL_S = _int("VPOC_TASK_STALL_S", 1500)
 POLL_MIN_INTERVAL_S = 10
 
 

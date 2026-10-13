@@ -2022,7 +2022,11 @@
           state.view = "project";
           if (view.activePlanId) {
             state.planId = view.activePlanId;
-            return loadPlan().then(function () {
+            return loadPlan().then(function (plan) {
+              // 설계자 2026-10-13: 가장 최근 계획이 아직 끝나지 않았으면(중간에 멈춤) 결과 목록이 아니라
+              // 그 계획의 멈춘 단계를 연다. 끝난 영상은 단계 막대 위 "프로젝트 보기"로 볼 수 있다.
+              var step4 = plan && plan.steps ? plan.steps["4"] || {} : {};
+              if (plan && view.canEdit && step4.status !== "done") state.view = "flow";
               refresh();
             });
           }

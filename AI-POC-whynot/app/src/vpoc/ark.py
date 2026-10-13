@@ -122,22 +122,60 @@ def video_options(model: str) -> dict:
     }
 
 
-def reference_prompt(prompt: str, names: list[str]) -> str:
-    """캐릭터 참고 이미지가 있을 때 Seedance 에 보낼 최종 프롬프트.
+def reference_prompt(
+    prompt: str, names: list[str | None], *, style_refs: int = 0, style_lock: bool = False
+) -> str:
+    """참고 이미지가 있을 때 Seedance 에 보낼 최종 프롬프트.
 
     설계자 2026-10-07: 사용자가 올린 이미지(있으면) 또는 ③에서 승인한 AI 이미지 속 캐릭터가
     **그대로** 나와야 한다. 이미지 순서대로 "Image N" 이 누구인지 밝히고, 얼굴·머리·의상·체형을
     바꾸지 말라고 앞에 못박는다. 장면 묘사(prompt)는 그 뒤에 그대로 붙인다.
+
+    설계자 2026-10-08: 첨부 이미지의 **화풍**도 그대로. 캐릭터 이미지 뒤에 화풍 참고 이미지
+    style_refs 장이 붙는다(인물이 아니라 그림체 기준). style_lock 이면 고정 화풍 문장 대신
+    "참고 이미지와 같은 화풍"을 지시한다 — 호출부가 prompt 에서 고정 화풍 문장을 미리 뗀다.
+
+    설계자 2026-10-13: names 는 이미지 한 장마다 하나다. 같은 인물이 이어서 여러 장이면
+    "Images 1-2 are X" 로 묶고, None 은 화풍 참고 이미지다(style_refs 를 쓰지 않는 새 호출 방식).
     """
-    if not names:
+    names = list(names) + [None] * style_refs
+    if not names and not style_lock:
         return prompt
-    who = "; ".join(f"Image {index} is {name}" for index, name in enumerate(names, start=1))
-    keep = (
-        "Keep every character exactly as shown in their reference image: the same face, hairstyle, "
-        "hair color, eye color, outfit, colors, accessories and body type, from the first frame to the "
-        "last. Do not redesign, restyle or swap any character."
-    )
-    return f"{who}. {keep} Scene: {prompt}"
+    parts = []
+    labels = []
+    index = 1
+    while index <= len(names):
+        name = names[index - 1]
+        end = index
+        while end < len(names) and names[end] == name:
+            end += 1
+        span = f"Image {index}" if end == index else f"Images {index}-{end}"
+        verb = "is" if end == index else "are"
+        if name is None:
+            labels.append(f"{span} {verb} an art-style reference only (not a character)")
+        elif end == index:
+            labels.append(f"{span} is {name}")
+        else:
+            labels.append(f"{span} are all {name} (the same person from different views)")
+        index = end + 1
+    if labels:
+        parts.append("; ".join(labels) + ".")
+    if any(name is not None for name in names):
+        parts.append(
+            "Keep every character exactly as shown in their reference images: the same face shape, eyes "
+            "and eye shape, eyebrows, nose, mouth, skin tone, hairstyle, hair color, outfit, accessories "
+            "and body type, from the first frame to the last. Copy the faces from the close-up references. "
+            "Do not redesign, beautify, restyle or swap any character."
+        )
+    if style_lock:
+        parts.append(
+            "Render the whole video in exactly the same art style as the reference images: the same line "
+            "work, coloring, shading, color palette, rendering and level of detail, in every frame. Do not "
+            "switch to a different style (no photorealism if the references are drawn, no cartoon look if "
+            "they are photographs)."
+        )
+    parts.append(f"Scene: {prompt}")
+    return " ".join(parts)
 
 
 ONE_TAKE_ID = "take"
@@ -295,8 +333,10 @@ def poll(invocation_arn: str, output_prefix: str) -> dict:
         else:
             key = f"{output_prefix.rstrip('/')}/{task_id}/output.mp4"
             if not STORE.exists(key, bucket=settings.VIDEO_BUCKET):
+                started = time.time()
                 with urllib.request.urlopen(url, timeout=300) as response:
                     STORE.put_bytes(key, response.read(), "video/mp4", bucket=settings.VIDEO_BUCKET)
+                log.info("vpoc.call where=ark.copy task=%s ms=%d", task_id, int((time.time() - started) * 1000))
     elif status == "Failed":
         error = result.get("error") or {}
         message = str(error.get("message") or error.get("code") or raw_status)

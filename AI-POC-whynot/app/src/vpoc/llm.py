@@ -4,6 +4,11 @@
 목록을 붙여 **1회만** 다시 요청한다(E9). 자유 텍스트 JSON 은 쓰지 않는다.
 
 읽기 300초 · 재시도 0 (E10). 60초 기본 읽기 제한에서 긴 호출이 끊긴 사고가 있었다.
+
+설계자 2026-10-13 "분석이 안 되는 에러를 원천 차단": 운영에서 300초 동안 응답이 없어
+ReadTimeout 으로 분석이 실패했다. 이제 응답을 스트리밍으로 받고(토큰이 오는 동안 끊기지 않음),
+혼잡 · 시간 초과 · 연결 끊김은 같은 모델로 한 번 더, 그래도 안 되면 다음 모델로 바꿔 부른다.
+② 분석은 이 계정에서 가장 좋은 Claude(settings.ANALYZE_MODEL)로 한다.
 """
 
 from __future__ import annotations
@@ -14,6 +19,12 @@ import time
 
 import boto3
 from botocore.config import Config
+from botocore.exceptions import (
+    ClientError,
+    ConnectionClosedError,
+    EndpointConnectionError,
+    ReadTimeoutError,
+)
 
 from . import compose, settings
 from .errors import VpocError
@@ -213,17 +224,36 @@ PLAN_SYSTEM = """당신은 짧은 무음 영상의 샷 계획을 쓰는 연출�
 emit_shots 도구로만 답한다."""
 
 
-def _converse(
-    *,
-    system_text: str,
-    blocks: list[dict],
-    tool: dict,
-    max_tokens: int,
-    where: str,
-) -> tuple[dict, dict]:
-    started = time.time()
+# 같은 모델로 한 번 더 해 볼 오류(일시적). 그 밖의 오류는 바로 다음 모델로 넘어간다.
+_TRANSIENT_CODES = {
+    "ThrottlingException",
+    "ServiceUnavailableException",
+    "InternalServerException",
+    "ModelStreamErrorException",
+    "ModelNotReadyException",
+    "ModelTimeoutException",
+    "ModelErrorException",
+    "TooManyRequestsException",
+}
+
+
+def _model_chain(primary: str) -> list[str]:
+    chain: list[str] = []
+    for model in [primary, settings.TEXT_MODEL, *settings.TEXT_FALLBACK_MODELS]:
+        if model and model not in chain:
+            chain.append(model)
+    return chain
+
+
+# 스트리밍 권한(bedrock:InvokeModelWithResponseStream)이 없는 역할이 있다(운영 앱 역할, 2026-10-13).
+# 한 번 거부되면 이 프로세스에서는 보통 호출(converse)로 바꾼다.
+_STREAM = {"ok": True}
+
+
+def _converse_once(model: str, system_text: str, blocks: list[dict], tool: dict, max_tokens: int):
+    """보통 호출 한 번(스트리밍을 못 쓸 때). (도구 입력 dict 또는 None, 텍스트, usage)."""
     response = runtime().converse(
-        modelId=settings.TEXT_MODEL,
+        modelId=model,
         system=[{"text": system_text}],
         messages=[{"role": "user", "content": blocks}],
         inferenceConfig={"maxTokens": max_tokens, "temperature": 0.6},
@@ -232,32 +262,132 @@ def _converse(
             "toolChoice": {"tool": {"name": tool["name"]}},
         },
     )
-    elapsed = int((time.time() - started) * 1000)
-    usage = response.get("usage", {}) or {}
-    content = (response.get("output", {}).get("message", {}) or {}).get("content", []) or []
     payload = None
     text_dump = ""
-    for block in content:
+    for block in (response.get("output", {}).get("message", {}) or {}).get("content", []) or []:
         if "toolUse" in block:
             payload = block["toolUse"].get("input")
         elif "text" in block:
             text_dump += block["text"]
-    log.info(
-        "vpoc.call where=%s ms=%d ok=%s in=%s out=%s",
-        where,
-        elapsed,
-        payload is not None,
-        usage.get("inputTokens"),
-        usage.get("outputTokens"),
-    )
-    if payload is None:
-        raise VpocError(
-            where,
-            "SchemaViolation",
-            "모델이 도구를 쓰지 않았습니다. 출력 앞부분: " + text_dump[:2000],
-            502,
+    return payload, text_dump, response.get("usage", {}) or {}
+
+
+def _stream_once(model: str, system_text: str, blocks: list[dict], tool: dict, max_tokens: int):
+    """converse_stream 한 번. (도구 입력 dict 또는 None, 텍스트, usage)."""
+    if not _STREAM["ok"]:
+        return _converse_once(model, system_text, blocks, tool, max_tokens)
+    try:
+        response = runtime().converse_stream(
+            modelId=model,
+            system=[{"text": system_text}],
+            messages=[{"role": "user", "content": blocks}],
+            inferenceConfig={"maxTokens": max_tokens, "temperature": 0.6},
+            toolConfig={
+                "tools": [{"toolSpec": tool}],
+                "toolChoice": {"tool": {"name": tool["name"]}},
+            },
         )
-    return payload, usage
+    except ClientError as exc:
+        if "InvokeModelWithResponseStream" not in str(exc):
+            raise
+        log.warning("vpoc.call.no_stream_permission — 보통 호출로 바꾼다")
+        _STREAM["ok"] = False
+        return _converse_once(model, system_text, blocks, tool, max_tokens)
+    return _read_stream(response)
+
+
+def _read_stream(response):
+    """converse_stream 응답을 끝까지 읽는다. (도구 입력 dict 또는 None, 텍스트, usage)."""
+    tool_json = ""
+    text_dump = ""
+    usage: dict = {}
+    for event in response["stream"]:
+        delta = (event.get("contentBlockDelta") or {}).get("delta") or {}
+        if "toolUse" in delta:
+            tool_json += delta["toolUse"].get("input") or ""
+        elif "text" in delta:
+            text_dump += delta["text"]
+        elif "metadata" in event:
+            usage = event["metadata"].get("usage") or {}
+    payload = None
+    if tool_json:
+        try:
+            payload = json.loads(tool_json)
+        except ValueError:
+            text_dump = "(도구 입력 JSON 이 깨짐) " + tool_json[:1500]
+    return payload, text_dump, usage
+
+
+def _converse(
+    *,
+    system_text: str,
+    blocks: list[dict],
+    tool: dict,
+    max_tokens: int,
+    where: str,
+    model: str = "",
+) -> tuple[dict, dict]:
+    """도구 하나로 JSON 을 받는다. 실패하면 같은 모델로 1회 더, 그다음 모델로 바꿔 부른다."""
+    last: BaseException | None = None
+    for candidate in _model_chain(model or settings.TEXT_MODEL):
+        for attempt in (1, 2):
+            started = time.time()
+            try:
+                payload, text_dump, usage = _stream_once(
+                    candidate, system_text, blocks, tool, max_tokens
+                )
+            except ClientError as exc:
+                code = str((exc.response.get("Error") or {}).get("Code") or type(exc).__name__)
+                last = exc
+                log.warning(
+                    "vpoc.call.retry where=%s model=%s attempt=%d code=%s msg=%s",
+                    where, candidate, attempt, code, str(exc)[:300],
+                )
+                if code in _TRANSIENT_CODES and attempt == 1:
+                    time.sleep(3)
+                    continue
+                break  # 미허용 · 입력 오류 등은 다음 모델로
+            except (ReadTimeoutError, ConnectionClosedError, EndpointConnectionError) as exc:
+                last = exc
+                log.warning(
+                    "vpoc.call.retry where=%s model=%s attempt=%d err=%s",
+                    where, candidate, attempt, type(exc).__name__,
+                )
+                if attempt == 1:
+                    time.sleep(3)
+                    continue
+                break
+            log.info(
+                "vpoc.call where=%s model=%s ms=%d ok=%s in=%s out=%s",
+                where,
+                candidate,
+                int((time.time() - started) * 1000),
+                payload is not None,
+                usage.get("inputTokens"),
+                usage.get("outputTokens"),
+            )
+            if payload is None:
+                last = VpocError(
+                    where,
+                    "SchemaViolation",
+                    "모델이 도구를 쓰지 않았습니다. 출력 앞부분: " + text_dump[:2000],
+                    502,
+                )
+                break
+            return payload, {**usage, "model": candidate}
+    if isinstance(last, VpocError):
+        raise last
+    if last is not None:
+        raise last
+    raise VpocError(where, "NoModel", "호출할 모델이 없습니다.", 500)
+
+
+def _add_usage(first: dict, second: dict) -> dict:
+    return {
+        "inputTokens": (first.get("inputTokens") or 0) + (second.get("inputTokens") or 0),
+        "outputTokens": (first.get("outputTokens") or 0) + (second.get("outputTokens") or 0),
+        "model": second.get("model") or first.get("model") or "",
+    }
 
 
 def _retry_block(problems: list[str]) -> dict:
@@ -284,7 +414,9 @@ def _character_card_text(cards: list[dict]) -> str:
     return "\n".join(lines)
 
 
-def analyze(step1: dict, image_jpegs: list[bytes], *, total_images: int) -> tuple[dict, dict]:
+def analyze(
+    step1: dict, image_jpegs: list[bytes], *, total_images: int, _shrunk: int = 0
+) -> tuple[dict, dict]:
     blocks: list[dict] = [
         {
             "text": (
@@ -304,13 +436,26 @@ def analyze(step1: dict, image_jpegs: list[bytes], *, total_images: int) -> tupl
     for jpeg in image_jpegs:
         blocks.append({"image": {"format": "jpeg", "source": {"bytes": jpeg}}})
 
-    payload, usage = _converse(
-        system_text=ANALYZE_SYSTEM,
-        blocks=blocks,
-        tool=EMIT_STORY,
-        max_tokens=8000,
-        where="claude.analyze",
-    )
+    try:
+        payload, usage = _converse(
+            system_text=ANALYZE_SYSTEM,
+            blocks=blocks,
+            tool=EMIT_STORY,
+            max_tokens=8000,
+            where="claude.analyze",
+            model=settings.ANALYZE_MODEL,
+        )
+    except ClientError as exc:
+        # 이미지가 모델 제한(크기 · 개수)에 걸린 경우: 작게 줄이고 장수를 반으로 해 한 번 더.
+        if (
+            (exc.response.get("Error") or {}).get("Code") != "ValidationException"
+            or not image_jpegs
+            or _shrunk >= 2
+        ):
+            raise
+        log.warning("vpoc.analyze.shrink images=%d err=%s", len(image_jpegs), str(exc)[:300])
+        smaller = [_shrink(jpeg) for jpeg in image_jpegs[: max(1, len(image_jpegs) // 2)]]
+        return analyze(step1, smaller, total_images=total_images, _shrunk=_shrunk + 1)
     problems = check_story(payload)
     if problems:
         payload, usage2 = _converse(
@@ -319,11 +464,9 @@ def analyze(step1: dict, image_jpegs: list[bytes], *, total_images: int) -> tupl
             tool=EMIT_STORY,
             max_tokens=8000,
             where="claude.analyze.retry",
+            model=settings.ANALYZE_MODEL,
         )
-        usage = {
-            "inputTokens": (usage.get("inputTokens") or 0) + (usage2.get("inputTokens") or 0),
-            "outputTokens": (usage.get("outputTokens") or 0) + (usage2.get("outputTokens") or 0),
-        }
+        usage = _add_usage(usage, usage2)
         problems = check_story(payload)
         if problems:
             raise VpocError(
@@ -333,6 +476,20 @@ def analyze(step1: dict, image_jpegs: list[bytes], *, total_images: int) -> tupl
                 502,
             )
     return normalize_story(payload), usage
+
+
+def _shrink(jpeg: bytes) -> bytes:
+    """긴 변 1,568px · 품질 80 으로 줄인다(모델 제한에 걸린 이미지용)."""
+    import io  # noqa: PLC0415
+
+    from PIL import Image  # noqa: PLC0415
+
+    with Image.open(io.BytesIO(jpeg)) as image:
+        image = image.convert("RGB")
+        image.thumbnail((1568, 1568))
+        buffer = io.BytesIO()
+        image.save(buffer, format="JPEG", quality=80, optimize=True)
+        return buffer.getvalue()
 
 
 def check_story(payload: dict) -> list[str]:

@@ -32,6 +32,11 @@ class VpocError(Exception):
         self.status = status
 
 
+# 우리가 직접 만든 안내 문구라 운영에서도 그대로 보여 준다(원문 감추기 대상이 아니다).
+# 감추면 사용자가 "처리 중 오류(코드: BadDuration)"만 보고 무엇을 고칠지 모른다(2026-10-13).
+USER_FACING_KINDS = {"BadDuration"}
+
+
 def envelope(where: str, exc: BaseException) -> dict:
     """예외를 오류 봉투로 바꾼다."""
     if isinstance(exc, VpocError):
@@ -70,7 +75,9 @@ def envelope(where: str, exc: BaseException) -> dict:
         body["type"],
         body["message"][:800],
     )
-    if not settings.RAW_ERRORS:
+    if not settings.RAW_ERRORS and not (
+        isinstance(exc, VpocError) and exc.kind in USER_FACING_KINDS
+    ):
         log.error("vpoc.error.raw %s", traceback.format_exc()[:4000])
         body["message"] = f"처리 중 오류가 발생했습니다 (코드: {body['type']})"
         body["requestId"] = ""

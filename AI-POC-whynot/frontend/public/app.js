@@ -18,13 +18,49 @@ const STORY_DEV_ENABLED = window.__WHYNOT_RUNTIME__?.storyDev !== false;
 // 옮겨 준다 — vpoc*.js 는 sessionStorage 만 읽으므로 그쪽은 고치지 않는다.
 const PERSIST_LOGIN = window.__WHYNOT_RUNTIME__?.persistLogin === true;
 const PERSISTED_TOKEN_KEY = "toon-change-ai-pj:persistedToken";
+// 마지막으로 본 화면(설계자 2026-10-13). 사이트를 다시 열면(주소가 / 뿐이면) 이 화면으로 들어간다.
+// 작업 프로젝트는 원래 탭마다 따로인 sessionStorage 에만 있어 새 창의 /video 가 목록으로 튕겼다.
+const LAST_ROUTE_KEY = "toon-change-ai-pj:lastRoute";
+
+function rememberRoute() {
+  try {
+    if (!state.user?.username) return;
+    localStorage.setItem(LAST_ROUTE_KEY, JSON.stringify({
+      user: state.user.username,
+      path: window.location.pathname,
+      working: getWorkingProject()
+    }));
+  } catch (error) { /* 저장소 없음 */ }
+}
+
+function lastRoute() {
+  try {
+    const saved = JSON.parse(localStorage.getItem(LAST_ROUTE_KEY) || "null");
+    return saved && saved.user === state.user?.username ? saved : null;
+  } catch (error) {
+    return null;
+  }
+}
 (function restorePersistedLogin() {
   try {
     if (!PERSIST_LOGIN) {
       localStorage.removeItem(PERSISTED_TOKEN_KEY);
       return;
     }
-    if (sessionStorage.getItem("toon-change-ai-pj:token")) return;
+    const live = sessionStorage.getItem("toon-change-ai-pj:token");
+    if (live) {
+      // 이 탭은 이미 로그인돼 있다. 저장해 둔 것이 없으면 지금 토큰을 남긴다 — 로그인 유지를 켜기
+      // 전부터 열려 있던 탭은 로그인 버튼을 다시 누르지 않아 새 창마다 로그인해야 했다(2026-10-08).
+      // 만료 시각은 토큰 앞부분(base64url JSON 의 exp)에서 읽는다. 서버가 최종 판단한다.
+      if (!localStorage.getItem(PERSISTED_TOKEN_KEY)) {
+        const head = live.split(".")[0].replace(/-/g, "+").replace(/_/g, "/");
+        const claims = JSON.parse(atob(head + "===".slice((head.length + 3) % 4)));
+        if (claims?.exp && Number(claims.exp) * 1000 > Date.now()) {
+          localStorage.setItem(PERSISTED_TOKEN_KEY, JSON.stringify({ token: live, expiresAt: Number(claims.exp) }));
+        }
+      }
+      return;
+    }
     const saved = JSON.parse(localStorage.getItem(PERSISTED_TOKEN_KEY) || "null");
     // 만료 판단은 서버가 최종이다. 여기서는 이미 지난 토큰을 들고 들어가지 않을 뿐이다.
     if (saved?.token && Number(saved.expiresAt) * 1000 > Date.now()) {
@@ -766,8 +802,17 @@ async function enterWorkspace() {
   updatePromptCount();
   syncVideoOptions();
 
+  // 주소 없이(/) 다시 열었으면 마지막으로 본 화면으로, 작업 프로젝트가 없으면 마지막 것으로 되살린다.
+  // refreshAll 이 화면을 바꾸며 기록을 덮기 전에 읽어 둔다.
+  const saved = lastRoute();
   await refreshAll();
 
+  if (saved) {
+    if (!getWorkingProject() && saved.working?.id) setWorkingProject(saved.working);
+    if (window.location.pathname === "/" && saved.path && saved.path !== "/") {
+      window.history.replaceState(null, "", saved.path);
+    }
+  }
   // 로그인 전에 열려 있던 주소(딥링크)를 그대로 복원한다.
   const route = parseLocation();
   window.history.replaceState(route, "", pathForView(route.view, route.projectId));
@@ -783,7 +828,11 @@ async function handleLogin(event) {
   try {
     const payload = await api("/api/auth/login", {
       method: "POST",
-      body: JSON.stringify({ username: $("#username").value.trim(), password: $("#password").value })
+      body: JSON.stringify({
+        username: $("#username").value.trim(),
+        password: $("#password").value,
+        remember: PERSIST_LOGIN
+      })
     });
     state.token = payload.token;
     sessionStorage.setItem(STORAGE_KEYS.token, state.token);
@@ -832,10 +881,23 @@ async function validateSession() {
   try {
     const payload = await api("/api/auth/me");
     applyUser(payload.user);
+    await renewLogin();
     await enterWorkspace();
   } catch (_error) {
     signOut();
   }
+}
+
+/* 로그인 유지: 화면을 열 때마다 토큰을 새 만료 시각으로 바꿔 둔다. 실패해도 지금 토큰으로 계속한다. */
+async function renewLogin() {
+  if (!PERSIST_LOGIN) return;
+  try {
+    const payload = await api("/api/auth/renew", { method: "POST", body: JSON.stringify({ remember: true }) });
+    if (!payload.token) return;
+    state.token = payload.token;
+    sessionStorage.setItem(STORAGE_KEYS.token, payload.token);
+    localStorage.setItem(PERSISTED_TOKEN_KEY, JSON.stringify({ token: payload.token, expiresAt: payload.expiresAt }));
+  } catch (error) { /* 옛 서버 · 저장소 없음 — 그대로 둔다 */ }
 }
 
 /* --------------------------- 비밀번호 변경 ---------------------------
@@ -1681,9 +1743,13 @@ function renderProgress(project) {
 function applyProjectTrackView(project) {
   const storyTrack = project?.track === "story";
   const videoTrack = project?.track === "video";
-  ["#storyPanel", "#outputsPanel", "#legacySection", "#progressTrack"].forEach((selector) => {
+  ["#storyPanel", "#outputsPanel", "#progressTrack"].forEach((selector) => {
     $(selector)?.classList.toggle("is-hidden", !storyTrack || !STORY_DEV_ENABLED);
   });
+  // "이전 방식의 작업 구획"은 2026-10-08 설계자 지시로 감춘다(지우면 안의 요소를 읽는 코드가 깨진다).
+  $("#legacySection")?.classList.add("is-hidden");
+  // 결과물 만들기의 "영상" 카드 — 영상 기능이 켜진 배포에서만.
+  $("#makeVideo")?.classList.toggle("is-hidden", !storyTrack || !VIDEO_GEN_ENABLED);
   $("#projectFolderPanel")?.classList.toggle("is-hidden", !videoTrack);
   // 이전 방식 구획은 지우지 않고 접이식으로 남긴다. 감싼 details 도 트랙에 맞춰 감춘다.
   $("#projectFolderLegacySection")?.classList.toggle("is-hidden", !videoTrack);
@@ -1791,7 +1857,7 @@ function renderProjectDetail(project) {
   $("#detailReadonlyNote").classList.toggle("is-hidden", editable);
   // 제작으로 넘기는 것은 읽기 권한만 있어도 가능하다. 프로젝트를 바꾸지 않는다.
   // Overlay 는 이 두 줄을 지웠지만 handoffPanel 을 유지하므로 함께 되살린다(PRD H2).
-  $("#handoffPanel").classList.remove("is-hidden");
+  $("#handoffPanel")?.classList.remove("is-hidden"); // 패널은 2026-10-08 에 지웠다
   $("#detailVisibilityToggle").textContent = isShared ? "개인 프로젝트로 전환" : "공유 프로젝트로 전환";
   $("#detailSaveHint").textContent = "";
 
@@ -6263,6 +6329,7 @@ function switchView(viewName) {
   if (viewName === "videoGen" && !VIDEO_GEN_ENABLED) viewName = "home";
   trail("view", viewName);
   state.activeView = viewName;
+  rememberRoute();
   $$(".view").forEach((v) => v.classList.toggle("active", v.dataset.view === viewName));
   $$(".nav-item").forEach((b) => b.classList.toggle("active", b.dataset.viewTarget === viewName));
   const labels = {
@@ -7169,7 +7236,7 @@ function syncStoryActions(project) {
   const ready = hasType && hasText && editable;
 
   // #storyCutRun 은 콘티 옵션 안의 실행 버튼이라 카드와 같은 조건으로 막는다.
-  ["#makeLogline", "#makeStoryboard", "#makeScript", "#storyCutRun"].forEach((selector) => {
+  ["#makeLogline", "#makeStoryboard", "#makeScript", "#makeVideo", "#storyCutRun"].forEach((selector) => {
     const button = $(selector);
     if (button) button.disabled = !ready || state.story.busy;
   });
@@ -8252,6 +8319,43 @@ $("#makeStoryboard")?.addEventListener("click", () => {
 $("#makeScript")?.addEventListener("click", () => {
   setStoryCutPanel(false);
   openScriptModal();
+});
+/* 결과물 만들기 > 영상 (설계자 2026-10-08). 서버가 이 프로젝트의 스토리 · 첨부 이미지 · 바이블 캐릭터로
+   영상 계획을 만들고(① 입력이 채워짐) 그 계획을 바로 연다. 첨부 이미지는 복사만 되고 원본은 그대로다. */
+$("#makeVideo")?.addEventListener("click", async () => {
+  const project = state.currentProject;
+  if (!project?.id) return;
+  setStoryCutPanel(false);
+  const button = $("#makeVideo");
+  button.disabled = true;
+  try {
+    const url = `/api/projects/${encodeURIComponent(project.id)}/video-plan-from-story`;
+    let payload = await api(url, { method: "POST", body: JSON.stringify({}) });
+    // 중간에 멈춘 계획이 있으면 서버가 그 계획을 돌려준다(설계자 2026-10-13). 이어서 할지 묻는다.
+    if (payload.resumed) {
+      const stepNames = { 1: "① 입력", 2: "② 확인", 3: "③ 계획 승인", 4: "④ 영상" };
+      const resume = window.confirm(
+        `진행 중인 영상 계획이 있습니다(${stepNames[payload.currentStep] || "① 입력"} 단계).
+` +
+        "[확인] 이어서 진행  ·  [취소] 처음부터 새로 만들기"
+      );
+      if (resume) {
+        showToast("이어서 진행합니다", `${stepNames[payload.currentStep] || "① 입력"} 단계부터 계속합니다.`);
+        window.whynotOpenVideoGen(project, payload.planId);
+        return;
+      }
+      payload = await api(url, { method: "POST", body: JSON.stringify({ fresh: true }) });
+    }
+    showToast(
+      "영상 계획을 만들었습니다",
+      `캐릭터 ${payload.characters}명 · 이미지 ${payload.images}장을 ① 입력에 넣었습니다. 확인하고 분석을 시작하세요.`
+    );
+    window.whynotOpenVideoGen(project, payload.planId);
+  } catch (error) {
+    showToast("영상 계획을 만들지 못했습니다", error.message, "error");
+  } finally {
+    button.disabled = false;
+  }
 });
 $("#storyCutClose")?.addEventListener("click", () => setStoryCutPanel(false));
 $("#storyCutRun")?.addEventListener("click", () => makeStoryOutput("storyboard"));

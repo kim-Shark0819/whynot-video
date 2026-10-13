@@ -157,15 +157,19 @@ def charge_text(
     user: str,
     project_id: str,
     plan_id: str,
+    model: str = "",
 ) -> dict:
-    usd = (
-        input_tokens / 1_000_000 * settings.TEXT_USD_PER_MTOK_IN
-        + output_tokens / 1_000_000 * settings.TEXT_USD_PER_MTOK_OUT
+    model = model or settings.TEXT_MODEL
+    opus = "opus" in model
+    usd = input_tokens / 1_000_000 * (
+        settings.OPUS_USD_PER_MTOK_IN if opus else settings.TEXT_USD_PER_MTOK_IN
+    ) + output_tokens / 1_000_000 * (
+        settings.OPUS_USD_PER_MTOK_OUT if opus else settings.TEXT_USD_PER_MTOK_OUT
     )
     return charge(
         key,
         kind="text",
-        model=settings.TEXT_MODEL,
+        model=model,
         units=input_tokens + output_tokens,
         usd=usd,
         user=user,

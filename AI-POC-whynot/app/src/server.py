@@ -96,6 +96,10 @@ SEED_USERS = os.getenv("SEED_USERS", "")
 USER_QUOTAS = os.getenv("USER_QUOTAS", "")
 TOKEN_SECRET = os.getenv("TOKEN_SECRET", "local-development-secret-change-me")
 TOKEN_TTL_SECONDS = int(os.getenv("TOKEN_TTL_SECONDS", "28800"))
+# 로그인 유지(runtime persistLogin, 운영)일 때의 토큰 수명. 8시간이면 다음 날 사이트를 다시 열 때마다
+# 로그인 화면이 떴다(설계자 2026-10-13). 화면이 열릴 때마다 /api/auth/renew 로 새로 받으므로
+# 이 기간 동안 한 번도 열지 않은 경우에만 다시 로그인한다.
+REMEMBER_TOKEN_TTL_SECONDS = int(os.getenv("REMEMBER_TOKEN_TTL_SECONDS", "604800"))
 COVER_TEXT_MODEL = os.getenv("COVER_TEXT_MODEL", "global.anthropic.claude-haiku-4-5-20251001-v1:0")
 # 영상 프롬프트는 업로드 이미지를 읽어야 해서 비전이 되는 모델을 쓴다. Haiku보다 묘사가 정확하다.
 VIDEO_PROMPT_MODEL = os.getenv(
@@ -284,8 +288,8 @@ def seed_user_list() -> list[dict]:
     return entries
 
 
-def issue_token(username: str, role: str) -> tuple[str, int]:
-    expires_at = int(time.time()) + TOKEN_TTL_SECONDS
+def issue_token(username: str, role: str, *, remember: bool = False) -> tuple[str, int]:
+    expires_at = int(time.time()) + (REMEMBER_TOKEN_TTL_SECONDS if remember else TOKEN_TTL_SECONDS)
     payload = json.dumps(
         {"sub": username, "exp": expires_at}, separators=(",", ":"), sort_keys=True
     ).encode("utf-8")
@@ -912,7 +916,7 @@ def login():
         time.sleep(0.25)
         return response_error("아이디 또는 비밀번호가 올바르지 않습니다.", 401, "INVALID_CREDENTIALS")
 
-    token, expires_at = issue_token(user["username"], user["role"])
+    token, expires_at = issue_token(user["username"], user["role"], remember=payload.get("remember") is True)
     logger.info("Login ok user=%s role=%s", user["username"], user["role"])
     return jsonify(
         {
@@ -981,6 +985,19 @@ def current_user():
             "storagePrefix": f"users/{safe_user_prefix(g.username)}/",
         }
     )
+
+
+@app.post("/api/auth/renew")
+@require_auth
+def renew_token():
+    """유효한 토큰을 새 만료 시각의 토큰으로 바꿔 준다(로그인 유지, 설계자 2026-10-13).
+
+    화면이 열릴 때 부른다. 쓰는 동안은 만료가 계속 뒤로 밀리고, 오래 안 쓰면 그대로 만료된다.
+    require_auth 가 서명 · 만료 · 계정(역할)을 이미 확인했다.
+    """
+    payload = request.get_json(silent=True) or {}
+    token, expires_at = issue_token(g.username, g.role, remember=payload.get("remember") is True)
+    return jsonify({"ok": True, "token": token, "expiresAt": expires_at})
 
 
 @app.post("/api/auth/password")
@@ -5227,6 +5244,160 @@ def story_bible_get(project_id: str):
         return response_error("이 프로젝트에 접근할 권한이 없습니다.", 403, "PROJECT_FORBIDDEN")
     stored = graph_store.get_story_bible(project_id)
     return jsonify({"ok": True, "item": stored})
+
+
+def _seed_video_from_story(project: dict, bible: dict) -> tuple[str, list[dict]]:
+    """스토리 → 영상 ① 입력의 글과 캐릭터(설계자 2026-10-08 "결과물 만들기 > 영상").
+
+    글: 제목·로그라인·요약·톤/화풍·배경·주요 전개, 그리고 스토리 본문 앞부분.
+    캐릭터: 작품 바이블의 인물(이름 + 역할·외형·성격). 스토리 트랙에는 인물별 이미지가 없다.
+    """
+    lines: list[str] = []
+    title = str(bible.get("title") or project.get("title") or "").strip()
+    if title:
+        lines.append(f"[제목] {title}")
+    if bible.get("logline"):
+        lines.append(f"[로그라인] {bible['logline']}")
+    if project.get("summaryStory"):
+        lines.append(f"[요약] {project['summaryStory']}")
+    mood = " / ".join(str(bible.get(k) or "").strip() for k in ("genre", "tone", "visual_style") if bible.get(k))
+    if mood:
+        lines.append(f"[장르·톤·화풍] {mood}")
+    for item in (bible.get("settings") or [])[:3]:
+        if isinstance(item, dict) and item.get("name"):
+            lines.append(f"[배경] {item['name']}: {item.get('description') or ''}".strip())
+    beats = [b.get("beat") for b in (bible.get("plot_beats") or []) if isinstance(b, dict) and b.get("beat")]
+    if beats:
+        lines.append("[주요 전개]")
+        lines.extend(f"{index}. {beat}" for index, beat in enumerate(beats[:8], start=1))
+    body = story_text_of(project).strip()
+    if body:
+        lines.append("[스토리 본문 일부]")
+        lines.append(body[:2500] + ("…" if len(body) > 2500 else ""))
+    text = "\n".join(lines)[:6000]
+
+    characters: list[dict] = []
+    for item in (bible.get("characters") or [])[:6]:
+        if not isinstance(item, dict) or not item.get("name"):
+            continue
+        parts = [
+            str(item.get(k) or "").strip()
+            for k in ("role", "age", "occupation", "appearance", "personality")
+            if item.get(k)
+        ]
+        characters.append({"name": str(item["name"]).strip(), "description": " · ".join(parts)[:600], "files": []})
+    return text, characters
+
+
+def _resumable_story_plan(vpoc_store, owner: str, project_id: str) -> dict | None:
+    """이 프로젝트에서 스토리로 시작해 아직 영상이 끝나지 않은 가장 최근 계획(읽기만 한다)."""
+    prefixes = vpoc_store.STORE.list_prefixes(vpoc_store.plans_prefix(owner, project_id))
+    for plan_id in sorted((item.rstrip("/").rsplit("/", 1)[-1] for item in prefixes), reverse=True):
+        state, _ = vpoc_store.STORE.read_json(vpoc_store.state_key(owner, project_id, plan_id))
+        if not state or (state.get("source") or {}).get("kind") != "story":
+            continue
+        if (state["steps"]["4"] or {}).get("status") == "done":
+            return None  # 가장 최근 것이 끝났으면 새로 만든다.
+        current = int(state.get("currentStep") or 1)
+        return {"planId": plan_id, "currentStep": current}
+    return None
+
+
+@app.post("/api/projects/<project_id>/video-plan-from-story")
+@require_auth
+def video_plan_from_story(project_id: str):
+    """스토리 프로젝트의 내용 · 첨부 이미지 · 캐릭터로 영상 만들기 계획을 만든다(① 입력이 채워진 상태).
+
+    첨부 이미지는 영상 쪽 업로드로 **복사**만 한다 — 원본 키·분석·스토리 데이터는 바꾸지 않는다.
+    이미지 분석에서 바이블 인물 이름이 보인 캐릭터 시트는 그 인물의 이미지로, 나머지는 장면 이미지로 넣는다.
+    """
+    if not VIDEO_GEN_ENABLED:
+        return response_error("이 환경에서는 영상 기능이 꺼져 있습니다.", 404, "VIDEO_DISABLED")
+    project = graph_store.get_project(project_id)
+    if not project:
+        return response_error("프로젝트를 찾을 수 없습니다.", 404, "PROJECT_NOT_FOUND")
+    if not can_write_project(project):
+        return response_error("이 프로젝트를 바꿀 권한이 없습니다.", 403, "PROJECT_FORBIDDEN")
+
+    from .vpoc import images as vpoc_images  # noqa: PLC0415
+    from .vpoc import store as vpoc_store  # noqa: PLC0415
+
+    owner = str(project.get("owner") or "")
+    body = request.get_json(silent=True) or {}
+    if body.get("fresh") is not True:
+        # 설계자 2026-10-13: 중간에 멈춘 계획이 있으면 새로 만들지 않고 그 계획(멈춘 단계)을 연다.
+        # 매번 새 계획을 만들어 ① 부터 다시 해야 했다. 새로 만들려면 화면이 fresh=true 로 다시 부른다.
+        resumable = _resumable_story_plan(vpoc_store, owner, project_id)
+        if resumable:
+            return jsonify({"ok": True, "resumed": True, **resumable})
+
+    stored = graph_store.get_story_bible(project_id) or {}
+    bible = stored.get("bible") if isinstance(stored.get("bible"), dict) else {}
+    text, characters = _seed_video_from_story(project, bible)
+    if not text.strip():
+        return response_error(
+            "스토리 내용이 없습니다. 스토리를 먼저 넣은 뒤 영상을 만들어 주세요.", 409, "STORY_EMPTY"
+        )
+
+    by_name = {item["name"]: index for index, item in enumerate(characters)}
+    scene_files: list[dict] = []
+    copied = skipped = 0
+    assets = [a for a in (project.get("storyAssets") or [])[:10] if isinstance(a, dict)]
+    # 캐릭터 시트를 먼저 — 인물의 첫 이미지가 영상 참고 이미지가 된다.
+    assets.sort(key=lambda a: (a.get("analysis") or {}).get("image_kind") != "character_sheet")
+    for asset in assets:
+        key = str(asset.get("s3_key") or "")
+        if not key:
+            continue
+        name = str(asset.get("name") or key.rsplit("/", 1)[-1])
+        analysis = asset.get("analysis") or {}
+        seen = [
+            str(c.get("name_if_visible") or "").strip()
+            for c in (analysis.get("characters") or [])
+            if isinstance(c, dict)
+        ]
+        owner_index = next((by_name[n] for n in seen if n in by_name), None)
+        is_sheet = analysis.get("image_kind") == "character_sheet"
+        named = {by_name[n] for n in seen if n in by_name}
+        # 설계자 2026-10-13: 웹툰 컷만 올린 경우 캐릭터 시트가 없어 ③ 에서 AI 가 인물을 다른 그림으로
+        # 다시 그렸다. 바이블 인물 한 명만 보이는 컷은 그 인물에 이미지가 없을 때 인물 이미지로 쓴다.
+        solo = len(named) == 1 and owner_index is not None and not characters[owner_index]["files"]
+        try:
+            raw = vpoc_store.STORE.get_bytes(key)
+            kind = "character" if (owner_index is not None and (is_sheet or solo)) else "scene"
+            meta = vpoc_images.save_upload(
+                owner, project_id, raw, name=name, kind=kind,
+                char_index=owner_index if kind == "character" else -1,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("story→video image copy failed project=%s key=%s err=%s", project_id, key, exc)
+            skipped += 1
+            continue
+        copied += 1
+        entry = {"fileId": meta["fileId"], "name": name}
+        if kind == "character":
+            characters[owner_index]["files"].append({**entry, "kind": "character"})
+        else:
+            scene_files.append({**entry, "kind": "scene"})
+
+    plan_id = vpoc_store.new_id("pl")
+    state = vpoc_store.new_state(owner, project_id, plan_id)
+    state["steps"]["1"].update(
+        {"status": "saved", "text": text, "characters": characters, "sceneFiles": scene_files}
+    )
+    state["source"] = {"kind": "story", "at": datetime.now(timezone.utc).isoformat()}
+    vpoc_store.STORE.write_json(vpoc_store.state_key(owner, project_id, plan_id), state, create_only=True)
+    logger.info(
+        "story→video plan project=%s plan=%s chars=%d images=%d skipped=%d by=%s",
+        project_id, plan_id, len(characters), copied, skipped, g.username,
+    )
+    return jsonify({
+        "ok": True,
+        "planId": plan_id,
+        "characters": len(characters),
+        "images": copied,
+        "skippedImages": skipped,
+    })
 
 
 # --------------------------------------------------------------------------- #

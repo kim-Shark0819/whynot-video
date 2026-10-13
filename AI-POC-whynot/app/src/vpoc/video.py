@@ -63,10 +63,13 @@ def runtime():
             _RUNTIME["client"] = boto3.client(
                 "bedrock-runtime",
                 region_name=settings.VIDEO_REGION,
+                # start/get_async_invoke 는 1초 안팎의 짧은 호출이다. 300초를 기다리면 끊긴 연결 하나에
+                # "생성 시작" 요청이 5분 묶여 화면이 HTTP 504 를 받았다(운영 2026-10-13, ms=301352).
+                # 짧게 끊고 다시 보낸다 — clientRequestToken 이 같아 두 번 만들어지지 않는다.
                 config=Config(
-                    read_timeout=settings.READ_TIMEOUT_S,
-                    connect_timeout=15,
-                    retries={"max_attempts": 2},
+                    read_timeout=20,
+                    connect_timeout=10,
+                    retries={"max_attempts": 3, "mode": "standard"},
                 ),
             )
         return _RUNTIME["client"]
