@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import json
 import logging
+import threading
 import time
 
 import boto3
@@ -31,7 +32,54 @@ from .errors import VpocError
 
 log = logging.getLogger("vpoc")
 
-_RUNTIME = {"client": None}
+_RUNTIME = {"client": None, "broker": None}
+_RUNTIME_LOCK = threading.Lock()
+
+
+def _broker_client():
+    """와이랩 계정 역할을 빌린 bedrock-runtime(임시, settings.BROKER_*). 자격 증명은 자동 갱신된다."""
+    from botocore.credentials import RefreshableCredentials  # noqa: PLC0415
+    from botocore.session import get_session  # noqa: PLC0415
+
+    sts = boto3.client("sts", region_name=settings.AWS_REGION or settings.BROKER_REGION)
+
+    def refresh() -> dict:
+        creds = sts.assume_role(
+            RoleArn=settings.BROKER_ROLE_ARN,
+            RoleSessionName="whynot-vpoc",
+            ExternalId=settings.BROKER_EXTERNAL_ID,
+            DurationSeconds=3600,
+        )["Credentials"]
+        return {
+            "access_key": creds["AccessKeyId"],
+            "secret_key": creds["SecretAccessKey"],
+            "token": creds["SessionToken"],
+            "expiry_time": creds["Expiration"].isoformat(),
+        }
+
+    botocore_session = get_session()
+    botocore_session._credentials = RefreshableCredentials.create_from_metadata(  # noqa: SLF001
+        metadata=refresh(), refresh_using=refresh, method="sts-assume-role"
+    )
+    return boto3.Session(botocore_session=botocore_session).client(
+        "bedrock-runtime",
+        region_name=settings.BROKER_REGION,
+        config=Config(read_timeout=settings.READ_TIMEOUT_S, connect_timeout=15, retries={"max_attempts": 0}),
+    )
+
+
+def _uses_broker(model: str) -> bool:
+    return bool(settings.BROKER_ROLE_ARN) and any(mark in model for mark in settings.BROKER_MODEL_MARKERS)
+
+
+def client_for(model: str):
+    """이 모델을 부를 클라이언트. 와이낫 계정에서 아직 못 쓰는 모델만 와이랩 역할로 부른다."""
+    if not _uses_broker(model):
+        return runtime()
+    with _RUNTIME_LOCK:
+        if _RUNTIME["broker"] is None:
+            _RUNTIME["broker"] = _broker_client()
+        return _RUNTIME["broker"]
 
 
 def runtime():
@@ -254,21 +302,48 @@ def _model_chain(primary: str) -> list[str]:
 
 # 스트리밍 권한(bedrock:InvokeModelWithResponseStream)이 없는 역할이 있다(운영 앱 역할, 2026-10-13).
 # 한 번 거부되면 이 프로세스에서는 보통 호출(converse)로 바꾼다.
-_STREAM = {"ok": True}
+_STREAM = {"ok": True, "broker": True}
+
+
+# 모델마다 받지 않는 설정이 있다(2026-10-14 실측): Opus 5.5 · Fable 5.x 는 toolChoice tool/any 를,
+# GPT-6 Astra 는 temperature 를 거절한다. 거절되면 그 설정을 빼고 다시 부르고, 프로세스 동안 기억한다.
+_NO_FORCED_TOOL: set[str] = set()
+_NO_TEMPERATURE: set[str] = set()
+
+
+def _request(model: str, system_text: str, blocks: list[dict], tool: dict, max_tokens: int) -> dict:
+    inference: dict = {"maxTokens": max_tokens}
+    if model not in _NO_TEMPERATURE:
+        inference["temperature"] = 0.6
+    choice = {"auto": {}} if model in _NO_FORCED_TOOL else {"tool": {"name": tool["name"]}}
+    system = system_text
+    if model in _NO_FORCED_TOOL:
+        system += f"\n\nYou MUST answer by calling the {tool['name']} tool exactly once. No plain text."
+    return {
+        "modelId": model,
+        "system": [{"text": system}],
+        "messages": [{"role": "user", "content": blocks}],
+        "inferenceConfig": inference,
+        "toolConfig": {"tools": [{"toolSpec": tool}], "toolChoice": choice},
+    }
+
+
+def _adapt(model: str, exc: ClientError) -> bool:
+    """설정 거절이면 기억하고 True(같은 모델로 다시). 아니면 False."""
+    text = str(exc)
+    if "tool_choice" in text or "toolChoice" in text:
+        if model not in _NO_FORCED_TOOL:
+            _NO_FORCED_TOOL.add(model)
+            return True
+    if "temperature" in text and model not in _NO_TEMPERATURE:
+        _NO_TEMPERATURE.add(model)
+        return True
+    return False
 
 
 def _converse_once(model: str, system_text: str, blocks: list[dict], tool: dict, max_tokens: int):
     """보통 호출 한 번(스트리밍을 못 쓸 때). (도구 입력 dict 또는 None, 텍스트, usage)."""
-    response = runtime().converse(
-        modelId=model,
-        system=[{"text": system_text}],
-        messages=[{"role": "user", "content": blocks}],
-        inferenceConfig={"maxTokens": max_tokens, "temperature": 0.6},
-        toolConfig={
-            "tools": [{"toolSpec": tool}],
-            "toolChoice": {"tool": {"name": tool["name"]}},
-        },
-    )
+    response = client_for(model).converse(**_request(model, system_text, blocks, tool, max_tokens))
     payload = None
     text_dump = ""
     for block in (response.get("output", {}).get("message", {}) or {}).get("content", []) or []:
@@ -281,24 +356,16 @@ def _converse_once(model: str, system_text: str, blocks: list[dict], tool: dict,
 
 def _stream_once(model: str, system_text: str, blocks: list[dict], tool: dict, max_tokens: int):
     """converse_stream 한 번. (도구 입력 dict 또는 None, 텍스트, usage)."""
-    if not _STREAM["ok"]:
+    kind = "broker" if _uses_broker(model) else "ok"
+    if not _STREAM[kind]:
         return _converse_once(model, system_text, blocks, tool, max_tokens)
     try:
-        response = runtime().converse_stream(
-            modelId=model,
-            system=[{"text": system_text}],
-            messages=[{"role": "user", "content": blocks}],
-            inferenceConfig={"maxTokens": max_tokens, "temperature": 0.6},
-            toolConfig={
-                "tools": [{"toolSpec": tool}],
-                "toolChoice": {"tool": {"name": tool["name"]}},
-            },
-        )
+        response = client_for(model).converse_stream(**_request(model, system_text, blocks, tool, max_tokens))
     except ClientError as exc:
         if "InvokeModelWithResponseStream" not in str(exc):
             raise
         log.warning("vpoc.call.no_stream_permission — 보통 호출로 바꾼다")
-        _STREAM["ok"] = False
+        _STREAM[kind] = False
         return _converse_once(model, system_text, blocks, tool, max_tokens)
     return _read_stream(response)
 
@@ -334,10 +401,16 @@ def _converse(
     where: str,
     model: str = "",
 ) -> tuple[dict, dict]:
-    """도구 하나로 JSON 을 받는다. 실패하면 같은 모델로 1회 더, 그다음 모델로 바꿔 부른다."""
+    """도구 하나로 JSON 을 받는다.
+
+    모델마다: 설정 거절(toolChoice · temperature)은 그 설정을 빼고 바로 다시, 일시 오류(혼잡 · 시간 초과)는
+    한 번 쉬고 다시, 그 밖의 오류(미허용 · 입력 오류 · 도구 미사용)는 다음 모델로 넘어간다.
+    """
     last: BaseException | None = None
     for candidate in _model_chain(model or settings.TEXT_MODEL):
-        for attempt in (1, 2):
+        transient_left = 1
+        adapt_left = 2
+        while True:
             started = time.time()
             try:
                 payload, text_dump, usage = _stream_once(
@@ -346,25 +419,28 @@ def _converse(
             except ClientError as exc:
                 code = str((exc.response.get("Error") or {}).get("Code") or type(exc).__name__)
                 last = exc
+                if code == "ValidationException" and adapt_left and _adapt(candidate, exc):
+                    adapt_left -= 1
+                    log.info("vpoc.call.adapt where=%s model=%s msg=%s", where, candidate, str(exc)[:200])
+                    continue
                 log.warning(
-                    "vpoc.call.retry where=%s model=%s attempt=%d code=%s msg=%s",
-                    where, candidate, attempt, code, str(exc)[:300],
+                    "vpoc.call.retry where=%s model=%s code=%s msg=%s",
+                    where, candidate, code, str(exc)[:300],
                 )
-                if code in _TRANSIENT_CODES and attempt == 1:
+                if code in _TRANSIENT_CODES and transient_left:
+                    transient_left -= 1
                     time.sleep(3)
                     continue
                 if code in ("AccessDeniedException", "ResourceNotFoundException") and (
                     "InvokeModelWithResponseStream" not in str(exc)
                 ):
                     _DENIED[candidate] = time.time()
-                break  # 미허용 · 입력 오류 등은 다음 모델로
+                break  # 다음 모델로
             except (ReadTimeoutError, ConnectionClosedError, EndpointConnectionError) as exc:
                 last = exc
-                log.warning(
-                    "vpoc.call.retry where=%s model=%s attempt=%d err=%s",
-                    where, candidate, attempt, type(exc).__name__,
-                )
-                if attempt == 1:
+                log.warning("vpoc.call.retry where=%s model=%s err=%s", where, candidate, type(exc).__name__)
+                if transient_left:
+                    transient_left -= 1
                     time.sleep(3)
                     continue
                 break
@@ -386,8 +462,6 @@ def _converse(
                 )
                 break
             return payload, {**usage, "model": candidate}
-    if isinstance(last, VpocError):
-        raise last
     if last is not None:
         raise last
     raise VpocError(where, "NoModel", "호출할 모델이 없습니다.", 500)

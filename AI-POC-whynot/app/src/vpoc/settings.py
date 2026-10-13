@@ -44,12 +44,22 @@ TEXT_MODEL = os.getenv(
 TEXT_REGION = os.getenv("VPOC_TEXT_REGION", AWS_REGION)
 # ② 분석(웹툰 이미지 읽기)은 이 계정에서 쓸 수 있는 가장 좋은 Claude 로 한다(설계자 2026-10-13).
 # 2026-10-13 실측: 이 계정은 Opus 4.6 · Sonnet 4.6 · Sonnet 4.5 만 호출 가능(Opus 4.7+/5.x 는 미허용).
-# 설계자 2026-10-13: Opus 5.5 · GPT-6 Astra 약관 동의 완료. 1순위 Opus 5.5, 2순위 GPT-6 Astra,
-# 계정에서 아직 열리지 않았으면(AccessDenied) 아래 예비 모델로 자동으로 넘어간다.
-ANALYZE_MODEL = os.getenv("VPOC_ANALYZE_MODEL", "global.anthropic.claude-opus-5-5")
+# 설계자 2026-10-14: 가장 분석이 좋은 모델을 쓴다. 같은 웹툰 장면 비교(2026-10-14): Fable 5.1 ≥ Opus 5.5
+# >> GPT-6 Astra(이미지를 거의 읽지 못함). 와이낫 계정은 5.x 한도가 0이라 와이랩 계정에서 임시로 빌린다
+# (BROKER_*). 빌리기가 안 되면 아래 예비 모델(와이낫 계정)로 자동으로 넘어간다.
+ANALYZE_MODEL = os.getenv("VPOC_ANALYZE_MODEL", "global.anthropic.claude-fable-5-1")
 # 샷마다 맡은 웹툰 장면을 보고 분위기 · 배경 · 인물별 행동 · 상황을 적는 모델(설계자 2026-10-13).
 # Opus 5.5 는 이 계정에서 약관 동의 전이라(2026-10-13) 지금은 Opus 4.6. 동의 후 이 값만 바꾼다.
-BRIEF_MODEL = os.getenv("VPOC_BRIEF_MODEL", "global.anthropic.claude-opus-5-5")
+BRIEF_MODEL = os.getenv("VPOC_BRIEF_MODEL", "global.anthropic.claude-fable-5-1")
+# 임시(2026-10-14): 와이낫 계정에서 아직 못 쓰는 모델은 와이랩 계정 역할을 빌려 부른다. 비우면 끈다.
+# 와이낫 계정 한도가 열리면 VPOC_BEDROCK_BROKER_ROLE_ARN="" 로 끄고 와이랩 역할을 지운다.
+BROKER_ROLE_ARN = os.getenv(
+    # 임시로 와이랩 계정 역할을 빌린다(설계자 2026-10-14 승인). account-check: ignore
+    "VPOC_BEDROCK_BROKER_ROLE_ARN", "arn:aws:iam::892278727066:role/whynot-bedrock-broker"  # account-check: ignore
+).strip()
+BROKER_EXTERNAL_ID = os.getenv("VPOC_BEDROCK_BROKER_EXTERNAL_ID", "whynot-vpoc-broker")
+BROKER_REGION = os.getenv("VPOC_BEDROCK_BROKER_REGION", "ap-northeast-2")
+BROKER_MODEL_MARKERS = ("claude-fable-", "claude-opus-5", "claude-sonnet-5", "gpt-6")
 # 한 샷에 Seedance 로 보내는 웹툰 장면 이미지 수 / 설명을 쓸 때 Claude 에 보여 주는 장면 수.
 PANELS_PER_SHOT_REFS = _int("VPOC_PANELS_PER_SHOT_REFS", 3)
 PANELS_PER_SHOT_BRIEF = _int("VPOC_PANELS_PER_SHOT_BRIEF", 6)
@@ -58,7 +68,7 @@ TEXT_FALLBACK_MODELS = [
     item.strip()
     for item in os.getenv(
         "VPOC_TEXT_FALLBACK_MODELS",
-        "global.openai.gpt-6-astra,global.anthropic.claude-opus-4-6-v1,"
+        "global.anthropic.claude-opus-5-5,global.anthropic.claude-opus-4-6-v1,"
         "global.anthropic.claude-sonnet-4-6,global.anthropic.claude-sonnet-4-5-20250929-v1:0",
     ).split(",")
     if item.strip()
