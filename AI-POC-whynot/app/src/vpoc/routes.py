@@ -633,6 +633,27 @@ def create_blueprint(deps: VpocDependencies) -> Blueprint:
         elif name == "revise":
             regen.apply_revision(state, result)
 
+    def _repair_review_shots(state: dict) -> bool:
+        """이미 '검토 필요'로 저장된 ③ 샷 중 길이만 넘은 것을 고친다(모델 호출 없음, 설계자 2026-10-13)."""
+        step3 = state["steps"]["3"]
+        if not any(shot.get("reviewKo") for shot in step3.get("shots") or []):
+            return False
+        step2 = state["steps"]["2"]
+        characters = step2.get("characters") or []
+        style = compose.style_of((step2.get("story") or {}).get("style") or "live_action")
+        changed = False
+        for index, shot in enumerate(step3.get("shots") or []):
+            if not shot.get("reviewKo"):
+                continue
+            fixed = compose.fit_shot(shot)
+            if compose.check_shot(fixed, characters, style):
+                continue
+            fixed["promptEn"] = compose.build_prompt(fixed, characters, style)
+            fixed["reviewKo"] = None
+            step3["shots"][index] = fixed
+            changed = True
+        return changed
+
     def stall_check(state: dict) -> bool:
         """running 이 10분을 넘으면 조회 때 error 로 바꾼다(E11)."""
         task = state.get("task") or {}
@@ -788,6 +809,7 @@ def create_blueprint(deps: VpocDependencies) -> Blueprint:
 
         shots = []
         for shot in payload.get("shots") or []:
+            shot = compose.fit_shot(shot)
             problems = compose.check_shot(shot, characters, style)
             row = {
                 "id": shot.get("id"),
@@ -1819,6 +1841,8 @@ def create_blueprint(deps: VpocDependencies) -> Blueprint:
         state, etag = store.load_state(owner, pid, plan_id)
 
         changed = stall_check(state)
+        if can_edit:
+            changed = _repair_review_shots(state) or changed
         if can_edit and state["steps"]["4"].get("shots"):
             try:
                 changed = refresh_shots(state, owner, pid, plan_id, deps.current_username()) or changed

@@ -237,12 +237,19 @@ _TRANSIENT_CODES = {
 }
 
 
+# 이 계정에서 거부된 모델(AccessDenied · 미허용)은 10분 동안 건너뛴다 — 매 호출마다 실패를 겪지 않게.
+_DENIED: dict[str, float] = {}
+_DENY_TTL_S = 600
+
+
 def _model_chain(primary: str) -> list[str]:
     chain: list[str] = []
-    for model in [primary, settings.TEXT_MODEL, *settings.TEXT_FALLBACK_MODELS]:
+    for model in [primary, *settings.TEXT_FALLBACK_MODELS, settings.TEXT_MODEL]:
         if model and model not in chain:
             chain.append(model)
-    return chain
+    now = time.time()
+    usable = [model for model in chain if now - _DENIED.get(model, 0) > _DENY_TTL_S]
+    return usable or chain
 
 
 # 스트리밍 권한(bedrock:InvokeModelWithResponseStream)이 없는 역할이 있다(운영 앱 역할, 2026-10-13).
@@ -346,6 +353,10 @@ def _converse(
                 if code in _TRANSIENT_CODES and attempt == 1:
                     time.sleep(3)
                     continue
+                if code in ("AccessDeniedException", "ResourceNotFoundException") and (
+                    "InvokeModelWithResponseStream" not in str(exc)
+                ):
+                    _DENIED[candidate] = time.time()
                 break  # 미허용 · 입력 오류 등은 다음 모델로
             except (ReadTimeoutError, ConnectionClosedError, EndpointConnectionError) as exc:
                 last = exc
@@ -817,7 +828,22 @@ def plan(step2: dict) -> tuple[dict, dict]:
             "inputTokens": (usage.get("inputTokens") or 0) + (usage2.get("inputTokens") or 0),
             "outputTokens": (usage.get("outputTokens") or 0) + (usage2.get("outputTokens") or 0),
         }
-    # 2회 뒤에도 남은 위반은 샷별 '검토 필요'로 표시한다. 자동 삭제·절단은 하지 않는다.
+    # 설계자 2026-10-13: 몇 글자 초과로 승인이 막히지 않게 길이는 경계에서 줄인다(compose.fit_shot).
+    # 길이 외 위반이 남으면 한 번 더 고쳐 달라고 한다. 그래도 남은 것만 샷별 '검토 필요'가 된다.
+    payload["shots"] = [compose.fit_shot(shot) for shot in payload.get("shots") or []]
+    problems = check_shots(payload, characters, style)
+    if problems:
+        payload3, usage3 = _converse(
+            system_text=PLAN_SYSTEM,
+            blocks=blocks + [_retry_block(problems)],
+            tool=EMIT_SHOTS,
+            max_tokens=6000,
+            where="claude.plan.retry2",
+        )
+        payload3["shots"] = [compose.fit_shot(shot) for shot in payload3.get("shots") or []]
+        if len(check_shots(payload3, characters, style)) < len(problems):
+            payload = payload3
+        usage = _add_usage(usage, usage3)
     return payload, usage
 
 

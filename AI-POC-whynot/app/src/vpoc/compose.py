@@ -229,6 +229,43 @@ def check_shot(shot: dict, characters: list[dict], style: str) -> list[str]:
     return problems
 
 
+def _fit_text(text: str, limit: int) -> str:
+    """limit 자 안으로 줄인다. 문장 · 쉼표 · 단어 경계에서 자르고 끝의 접속어를 정리한다."""
+    value = " ".join(str(text or "").split())
+    if len(value) <= limit:
+        return value
+    head = value[:limit]
+    cut = -1
+    for mark in (". ", "; ", ", "):
+        position = head.rfind(mark)
+        if position >= int(limit * 0.55):
+            cut = position
+            break
+    if cut < 0:
+        cut = head.rfind(" ")
+    out = head[: cut if cut > 0 else limit].rstrip(" ,;:-")
+    out = re.sub(r"\s+(and|with|while|as|of|in|on|at|to|the|a|an)$", "", out, flags=re.IGNORECASE)
+    return out.rstrip(" ,;:-")
+
+
+def fit_shot(shot: dict) -> dict:
+    """길이 예산을 넘은 칸만 경계에서 줄인 사본(설계자 2026-10-13).
+
+    몇 글자 넘었다고 "검토 필요"로 막혀 승인이 안 됐다(예: locationEn 123자 > 120자).
+    길이 외 위반(한글 · 이름 · 부정어 · 인물 수)은 그대로 둔다 — check_shot 이 잡는다.
+    """
+    fitted = dict(shot)
+    for field, limit in (
+        ("locationEn", BUDGET["LOCATION"]),
+        ("actionEn", BUDGET["ACTION"]),
+        ("cameraEn", BUDGET["CAMERA"]),
+        ("summaryKo", 80),
+    ):
+        if fitted.get(field):
+            fitted[field] = _fit_text(fitted[field], limit)
+    return fitted
+
+
 def check_character(character: dict) -> list[str]:
     problems: list[str] = []
     for field, limit in (("appearanceEn", BUDGET["APPEARANCE"]), ("handleEn", 60), ("bodyEn", 80)):
