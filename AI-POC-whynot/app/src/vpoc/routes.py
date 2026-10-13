@@ -179,16 +179,14 @@ def create_blueprint(deps: VpocDependencies) -> Blueprint:
         사용자가 올린 장면 이미지가 있거나 캐릭터 이미지가 사용자 것이면 그 그림의 화풍을 따른다 —
         고정 화풍 문장("실사 영화"/"애니") 대신 "참고 이미지와 같은 화풍" 지시를 보낸다.
         """
-        keys = [
-            store.upload_key(owner, pid, item["fileId"])
-            for item in (steps["1"].get("sceneFiles") or [])
-            if item.get("fileId")
-        ][:2]
+        # 설계자 2026-10-13: 모든 샷에 앞쪽 장면 2장을 보내면 영상이 그 장면에만 머물렀다("특정 구간의
+        # 장면만 보인다"). 장면 그림은 이제 샷마다 맡은 구간만 보낸다(_shot_panels). 여기서는 화풍 고정만 정한다.
+        has_scenes = any(item.get("fileId") for item in steps["1"].get("sceneFiles") or [])
         user_chars = any(
             (item.get("image") or {}).get("source") == "user"
             for item in steps["3"].get("characters") or []
         )
-        return keys, bool(keys) or user_chars
+        return [], has_scenes or user_chars
 
     # BytePlus Seedance 2.0 r2v 는 참고 이미지 9장까지 받는다(실측 2026-10-13: 10장이면 거절).
     MAX_REFERENCE_IMAGES = 9
@@ -232,8 +230,51 @@ def create_blueprint(deps: VpocDependencies) -> Blueprint:
         prompt = re.sub(r"\s{2,}", " ", prompt)
         return prompt.strip()
 
+    def _story_panels(steps: dict, owner: str, pid: str) -> list[list]:
+        """① 장면 이미지를 올린 순서대로 펼친 장면 조각 목록 [[fileId, 조각 번호], ...].
+
+        세로로 긴 웹툰은 분석과 같은 규칙(1,568px)으로 여러 조각이 된다. 업로드 메타의 높이로 센다.
+        """
+        panels: list[list] = []
+        for item in steps["1"].get("sceneFiles") or []:
+            file_id = item.get("fileId")
+            if not file_id:
+                continue
+            meta, _ = store.STORE.read_json(store.upload_meta_key(owner, pid, file_id))
+            count = images.panel_count(int((meta or {}).get("height") or 0))
+            panels += [[file_id, index] for index in range(count)]
+        return panels
+
+    def _assign_panels(panels: list[list], shot_ids: list[str]) -> dict[str, list[list]]:
+        """장면 조각을 샷 순서대로 고르게 나눈다(1번 샷 = 처음, 마지막 샷 = 끝). 샷이 더 많으면 겹친다."""
+        out: dict[str, list[list]] = {}
+        total, count = len(panels), len(shot_ids)
+        if not total or not count:
+            return {shot_id: [] for shot_id in shot_ids}
+        for index, shot_id in enumerate(shot_ids):
+            start = index * total // count
+            end = max(start + 1, (index + 1) * total // count)
+            out[shot_id] = panels[start:end]
+        return out
+
+    def _spread(items: list, limit: int) -> list:
+        """처음 · 끝을 포함해 고르게 limit 개."""
+        if len(items) <= limit:
+            return list(items)
+        if limit == 1:
+            return [items[0]]
+        return [items[round(index * (len(items) - 1) / (limit - 1))] for index in range(limit)]
+
     def _reference_bundle(
-        steps: dict, owner: str, pid: str, plan_shot: dict, prompt: str, *, skip: frozenset = frozenset()
+        steps: dict,
+        owner: str,
+        pid: str,
+        plan_shot: dict,
+        prompt: str,
+        *,
+        skip: frozenset = frozenset(),
+        panels: list[list] | None = None,
+        brief: str = "",
     ) -> tuple[str, list[tuple[str | None, str]]]:
         """Seedance 로 보낼 (최종 문장, [(인물 지칭 또는 None=화풍 참고, 이미지 키)]).
 
@@ -254,11 +295,23 @@ def create_blueprint(deps: VpocDependencies) -> Blueprint:
         for key in style_keys:
             if key not in skip and len(entries) < MAX_REFERENCE_IMAGES:
                 entries.append((None, key))
+        for file_id, index in _spread(panels or [], settings.PANELS_PER_SHOT_REFS):
+            key = f"panel:{file_id}:{index}"
+            if key not in skip and len(entries) < MAX_REFERENCE_IMAGES:
+                entries.append((ark.PANEL_LABEL, key))
         if lock:
             style = compose.STYLE[compose.style_of((steps["2"].get("story") or {}).get("style") or "")]
             prompt = ark.strip_style(prompt, style)
         prompt = _drop_appearances(steps, prompt, user_ids)
+        if brief:
+            prompt = f"{prompt} {brief}".strip()
         return ark.reference_prompt(prompt, [name for name, _ in entries], style_lock=lock), entries
+
+    def _reference_b64(owner: str, pid: str, key: str, cache: dict) -> str:
+        if key.startswith("panel:"):
+            _, file_id, index = key.split(":", 2)
+            return images.jpeg_for_reference(images.panel_jpeg(owner, pid, file_id, int(index), cache))
+        return images.keyframe_base64(key)
 
     def _one_take(steps: dict, model: str) -> dict | None:
         """A안 "한 번에 이어서 만들기"(설계자 2026-10-08). 쓸 수 없으면 None(샷별로 만든다).
@@ -965,21 +1018,36 @@ def create_blueprint(deps: VpocDependencies) -> Blueprint:
                 # 설계자 2026-10-08/13: 인물 그림(한 인물 최대 2장) + 화풍 참고 그림을 함께 보내고,
                 # 문장은 ③ 미리보기와 같은 _reference_bundle 규칙으로 만든다. 읽지 못한 그림은 빼고
                 # 문장도 실제로 보낸 그림 순서대로 다시 만든다.
+                # 설계자 2026-10-13: 이 샷이 맡은 웹툰 장면(순서대로)과 그 장면을 Claude 가 읽은 설명
+                # (분위기 · 배경 · 인물별 행동 · 상황 · 움직임 순서)을 함께 보낸다 — generate 때 정해 둔다.
+                step4_now = state["steps"]["4"]
+                shot_panels = (step4_now.get("panels") or {}).get(shot["id"]) or []
+                shot_brief = (step4_now.get("briefs") or {}).get(shot["id"]) or ""
                 failed: set[str] = set()
                 encoded: dict[str, str] = {}
-                for _, key in _reference_bundle(state["steps"], owner, pid, plan_shot, prompt)[1]:
+                tile_cache: dict = {}
+                for _, key in _reference_bundle(
+                    state["steps"], owner, pid, plan_shot, prompt, panels=shot_panels, brief=shot_brief
+                )[1]:
                     try:
-                        encoded[key] = images.keyframe_base64(key)
+                        encoded[key] = _reference_b64(owner, pid, key, tile_cache)
                     except Exception as exc:  # noqa: BLE001
                         failed.add(key)
                         log.warning("vpoc.reference.failed shot=%s key=%s err=%s", shot["id"], key, exc)
                 sent_prompt, entries = _reference_bundle(
-                    state["steps"], owner, pid, plan_shot, prompt, skip=frozenset(failed)
+                    state["steps"],
+                    owner,
+                    pid,
+                    plan_shot,
+                    prompt,
+                    skip=frozenset(failed),
+                    panels=shot_panels,
+                    brief=shot_brief,
                 )
                 references = []
                 for _, key in entries:
                     if key not in encoded:  # 앞 그림이 빠져 뒤 그림이 자리를 얻은 경우
-                        encoded[key] = images.keyframe_base64(key)
+                        encoded[key] = _reference_b64(owner, pid, key, tile_cache)
                     references.append(encoded[key])
                 if references:
                     mode = "reference"
@@ -1186,6 +1254,13 @@ def create_blueprint(deps: VpocDependencies) -> Blueprint:
             if ark.is_ark(str(state["steps"]["4"].get("videoModel") or ""))
             else settings.MAX_INFLIGHT
         )
+        briefing = str(state["steps"]["4"].get("briefing") or "")
+        if briefing and _elapsed_s(briefing) < 300:
+            # 장면 설명을 쓰는 중(generate 직후 1분 안팎). 다 쓰면 그 스레드가 제출한다.
+            for _, target in all_targets():
+                if target.get("status") == "queued":
+                    target["note"] = "웹툰 장면 설명 준비 중"
+            limit = 0
         for shot, target in all_targets():
             if target.get("status") != "queued":
                 continue
@@ -1575,6 +1650,96 @@ def create_blueprint(deps: VpocDependencies) -> Blueprint:
                 "plans": plans,
             }
         )
+
+    def _prepare_briefs(owner: str, pid: str, plan_id: str, user: str) -> None:
+        """generate 직후: 샷마다 맡을 웹툰 장면을 나누고, Claude 가 장면 설명을 쓴 뒤 제출한다."""
+        panels_by_shot: dict = {}
+        briefs: dict = {}
+        try:
+            state, _ = store.load_state(owner, pid, plan_id)
+            steps = state["steps"]
+            step4 = steps["4"]
+            plan_shots = steps["3"].get("shots") or []
+            ids = [item["id"] for item in step4.get("shots") or []]
+            panels = _story_panels(steps, owner, pid)
+            if step4.get("oneTake"):
+                panels_by_shot = {ark.ONE_TAKE_ID: panels}
+            else:
+                panels_by_shot = _assign_panels(panels, ids)
+            story = steps["2"].get("story") or {}
+            story_text = " ".join(
+                str(story.get(field) or "") for field in ("titleKo", "loglineKo", "summaryKo", "synopsisKo")
+            ).strip() or str(steps["1"].get("text") or "")
+            by_id = {item.get("id"): item for item in plan_shots}
+            tile_cache: dict = {}
+
+            def one(shot4: dict) -> None:
+                shot_id = shot4["id"]
+                plan_shot = by_id.get(shot_id)
+                if shot_id == ark.ONE_TAKE_ID:
+                    plan_shot = _one_take(steps, str(step4.get("videoModel") or ""))
+                if not plan_shot:
+                    return
+                picked = _spread(panels_by_shot.get(shot_id) or [], settings.PANELS_PER_SHOT_BRIEF)
+                panel_bytes = [images.panel_jpeg(owner, pid, f, i, tile_cache) for f, i in picked]
+                chars = []
+                for _, handle, key, _ in _reference_characters(steps, plan_shot)[:4]:
+                    try:
+                        chars.append((handle, store.STORE.get_bytes(key)))
+                    except Exception:  # noqa: BLE001
+                        continue
+                if not panel_bytes and not chars:
+                    return
+                brief, usage = llm.scene_brief(
+                    panel_bytes,
+                    chars,
+                    shot_text=" ".join(
+                        str(plan_shot.get(field) or "")
+                        for field in ("summaryKo", "locationEn", "actionEn", "cameraEn", "promptEn")
+                    ),
+                    story_text=story_text,
+                    seconds=int(shot4.get("durationS") or settings.DURATION_S),
+                )
+                ledger.charge_text(
+                    f"brief-{plan_id}-{shot_id}-{secrets.token_hex(3)}",
+                    input_tokens=int(usage.get("inputTokens") or 0),
+                    output_tokens=int(usage.get("outputTokens") or 0),
+                    user=user,
+                    project_id=pid,
+                    plan_id=plan_id,
+                    model=str(usage.get("model") or ""),
+                )
+                briefs[shot_id] = llm.brief_text(brief)
+
+            workers = []
+            for shot4 in step4.get("shots") or []:
+                def run(item=shot4):
+                    try:
+                        one(item)
+                    except Exception as exc:  # noqa: BLE001 - 설명이 없어도 영상은 만든다
+                        log.warning("vpoc.brief.failed plan=%s shot=%s err=%s", plan_id, item.get("id"), exc)
+                worker = threading.Thread(target=run, daemon=True)
+                worker.start()
+                workers.append(worker)
+            for worker in workers:
+                worker.join(timeout=280)
+        except Exception as exc:  # noqa: BLE001
+            log.warning("vpoc.brief.prepare_failed plan=%s err=%s", plan_id, exc)
+
+        def mutator(inner: dict):
+            step4 = inner["steps"]["4"]
+            step4["panels"] = panels_by_shot
+            step4["briefs"] = dict(briefs)
+            step4.pop("briefing", None)
+            for item in step4.get("shots") or []:
+                if item.get("note") == "웹툰 장면 설명 준비 중":
+                    item["note"] = None
+            refresh_shots(inner, owner, pid, plan_id, user)
+
+        try:
+            store.mutate_state(owner, pid, plan_id, mutator)
+        except Exception as exc:  # noqa: BLE001
+            log.warning("vpoc.brief.save_failed plan=%s err=%s", plan_id, exc)
 
     def _submit_queued(owner: str, pid: str, plan_id: str, user: str) -> None:
         try:
@@ -2069,6 +2234,8 @@ def create_blueprint(deps: VpocDependencies) -> Blueprint:
                     ],
                     "final": {"status": "none", "url": None, "error": None},
                 }
+                if ark.is_ark(video_model):
+                    inner["steps"]["4"]["briefing"] = now_iso()
                 inner.pop("finalizedAt", None)
                 inner["currentStep"] = 4
                 inner["maxReachedStep"] = 4
@@ -2078,7 +2245,9 @@ def create_blueprint(deps: VpocDependencies) -> Blueprint:
             # 샷 제출(모델 호출)은 응답 뒤에 한다(설계자 2026-10-13). 요청 안에서 하면 모델 쪽이 느릴 때
             # 화면이 HTTP 504 를 받았다 — 영상은 만들어지는데 ③ 에 오류가 남았다. ④ 조회도 대기 샷을 제출한다.
             threading.Thread(
-                target=_submit_queued, args=(owner, pid, plan_id, user), daemon=True
+                target=_prepare_briefs if ark.is_ark(video_model) else _submit_queued,
+                args=(owner, pid, plan_id, user),
+                daemon=True,
             ).start()
             shots4 = state["steps"]["4"]["shots"]
             return jsonify(

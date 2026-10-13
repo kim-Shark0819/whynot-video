@@ -133,6 +133,40 @@ def tiles_for_analysis(jpeg: bytes) -> list[bytes]:
         return out
 
 
+def panel_count(height: int) -> int:
+    """tiles_for_analysis 가 이 높이의 이미지를 몇 장으로 자르는지(이미지를 읽지 않고 계산)."""
+    if height <= settings.TILE_HEIGHT * 1.5:
+        return 1
+    return -(-int(height) // settings.TILE_HEIGHT)
+
+
+def panel_jpeg(owner: str, pid: str, file_id: str, index: int, _cache: dict | None = None) -> bytes:
+    """업로드 이미지의 index 번째 장면 조각(JPEG). 세로 웹툰은 1,568px 단위로 자른 조각이다."""
+    cache = _cache if _cache is not None else {}
+    tiles = cache.get(file_id)
+    if tiles is None:
+        tiles = tiles_for_analysis(STORE.get_bytes(upload_key(owner, pid, file_id)))
+        cache[file_id] = tiles
+    return tiles[min(max(0, index), len(tiles) - 1)]
+
+
+def jpeg_for_reference(jpeg: bytes) -> str:
+    """참고 이미지용 base64 — 짧은 변 512px 이상, 긴 변 4096px 이하(keyframe_base64 와 같은 규칙)."""
+    with Image.open(io.BytesIO(jpeg)) as image:
+        image = image.convert("RGB")
+        if min(image.size) < 512:
+            ratio = 512 / min(image.size)
+            image = image.resize(
+                (int(image.width * ratio) + 1, int(image.height * ratio) + 1), Image.LANCZOS
+            )
+        if max(image.size) > 4096:
+            ratio = 4096 / max(image.size)
+            image = image.resize((int(image.width * ratio), int(image.height * ratio)), Image.LANCZOS)
+        buffer = io.BytesIO()
+        image.save(buffer, format="JPEG", quality=90)
+        return base64.b64encode(buffer.getvalue()).decode("ascii")
+
+
 def pick_for_analysis(items: list[bytes]) -> tuple[list[bytes], int]:
     """12장을 넘으면 균등하게 골라낸다. 몇 장 중 몇 장을 봤는지 함께 돌려준다."""
     total = len(items)

@@ -417,6 +417,108 @@ def safe_image_prompt(prompt: str) -> tuple[str, dict]:
     return text[:900], usage
 
 
+EMIT_BRIEF = {
+    "name": "emit_brief",
+    "description": "Return the scene notes for one video shot.",
+    "inputSchema": {
+        "json": {
+            "type": "object",
+            "properties": {
+                "mood": {"type": "string"},
+                "background": {"type": "string"},
+                "actions": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "character": {"type": "string"},
+                            "action": {"type": "string"},
+                        },
+                        "required": ["character", "action"],
+                    },
+                },
+                "situation": {"type": "string"},
+                "motion": {"type": "string"},
+            },
+            "required": ["mood", "background", "actions", "situation", "motion"],
+        }
+    },
+}
+
+BRIEF_SYSTEM = """You turn consecutive webtoon panels into scene notes for ONE short video shot.
+The panels are in story order. The video must play through what they show from the first panel to
+the last, as continuous motion — not a still image with blinking. Write English only.
+- mood: overall atmosphere and emotional tone (<= 200 chars)
+- background: where it happens — place, time of day, lighting, key props (<= 240 chars)
+- actions: for EACH listed character in the shot, what they physically do and how it changes across
+  the panels (<= 200 chars each). Use exactly the given character handles.
+- situation: what is going on in the story at this moment and why it matters (<= 240 chars)
+- motion: the shot as a timeline over the given seconds, e.g. "0-2s ..., 2-4s ..., 4-5s ...",
+  with clear body movement, gestures and camera movement that follow the panels in order (<= 400 chars)
+Never describe faces, hair, skin or clothing (reference images define how characters look).
+No dialogue text, no names other than the handles. Answer only with the emit_brief tool."""
+
+
+def scene_brief(
+    panel_jpegs: list[bytes],
+    character_jpegs: list[tuple[str, bytes]],
+    *,
+    shot_text: str,
+    story_text: str,
+    seconds: int,
+) -> tuple[dict, dict]:
+    """샷 하나가 맡은 웹툰 장면들을 보고 4가지(분위기 · 배경 · 인물별 행동 · 상황) + 움직임 순서를 쓴다."""
+    blocks: list[dict] = [
+        {
+            "text": (
+                f"Story so far: {story_text[:1500]}\n"
+                f"Planned shot ({seconds}s): {shot_text[:1200]}\n"
+                "Character handles in this shot: "
+                + (", ".join(handle for handle, _ in character_jpegs) or "(none)")
+                + f"\nThe next {len(panel_jpegs)} images are the webtoon panels for this shot, in order."
+            )
+        }
+    ]
+    for jpeg in panel_jpegs:
+        blocks.append({"image": {"format": "jpeg", "source": {"bytes": _shrink(jpeg)}}})
+    for handle, jpeg in character_jpegs:
+        blocks.append({"text": f"Reference image of {handle} (for recognizing who is who only):"})
+        blocks.append({"image": {"format": "jpeg", "source": {"bytes": _shrink(jpeg)}}})
+    payload, usage = _converse(
+        system_text=BRIEF_SYSTEM,
+        blocks=blocks,
+        tool=EMIT_BRIEF,
+        max_tokens=1500,
+        where="claude.scene_brief",
+        model=settings.BRIEF_MODEL,
+    )
+    return payload or {}, usage
+
+
+def brief_text(brief: dict) -> str:
+    """scene_brief 결과를 Seedance 문장 뒤에 붙일 한 단락으로."""
+    if not brief:
+        return ""
+    actions = "; ".join(
+        f"{str(item.get('character') or '').strip()}: {str(item.get('action') or '').strip()}"
+        for item in brief.get("actions") or []
+        if isinstance(item, dict) and item.get("action")
+    )
+    parts = [
+        ("Mood", brief.get("mood")),
+        ("Background", brief.get("background")),
+        ("Actions", actions),
+        ("Situation", brief.get("situation")),
+        ("Motion in order", brief.get("motion")),
+    ]
+    body = " ".join(f"{label}: {str(value).strip().rstrip('.')}." for label, value in parts if value)
+    return (
+        "Scene notes (from the webtoon panels; follow them over the plan text if they differ): "
+        + body
+        + " Keep everything moving continuously through the whole shot; do not hold a still frame."
+    )
+
+
 def _add_usage(first: dict, second: dict) -> dict:
     return {
         "inputTokens": (first.get("inputTokens") or 0) + (second.get("inputTokens") or 0),

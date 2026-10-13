@@ -45,6 +45,12 @@ TEXT_REGION = os.getenv("VPOC_TEXT_REGION", AWS_REGION)
 # ② 분석(웹툰 이미지 읽기)은 이 계정에서 쓸 수 있는 가장 좋은 Claude 로 한다(설계자 2026-10-13).
 # 2026-10-13 실측: 이 계정은 Opus 4.6 · Sonnet 4.6 · Sonnet 4.5 만 호출 가능(Opus 4.7+/5.x 는 미허용).
 ANALYZE_MODEL = os.getenv("VPOC_ANALYZE_MODEL", "global.anthropic.claude-opus-4-6-v1")
+# 샷마다 맡은 웹툰 장면을 보고 분위기 · 배경 · 인물별 행동 · 상황을 적는 모델(설계자 2026-10-13).
+# Opus 5.5 는 이 계정에서 약관 동의 전이라(2026-10-13) 지금은 Opus 4.6. 동의 후 이 값만 바꾼다.
+BRIEF_MODEL = os.getenv("VPOC_BRIEF_MODEL", "global.anthropic.claude-opus-4-6-v1")
+# 한 샷에 Seedance 로 보내는 웹툰 장면 이미지 수 / 설명을 쓸 때 Claude 에 보여 주는 장면 수.
+PANELS_PER_SHOT_REFS = _int("VPOC_PANELS_PER_SHOT_REFS", 3)
+PANELS_PER_SHOT_BRIEF = _int("VPOC_PANELS_PER_SHOT_BRIEF", 6)
 # 앞 모델이 실패(혼잡 · 시간 초과 · 미허용 · 도구 미사용)하면 차례로 바꿔 다시 부른다.
 TEXT_FALLBACK_MODELS = [
     item.strip()

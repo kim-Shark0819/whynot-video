@@ -151,7 +151,13 @@ def reference_prompt(
             end += 1
         span = f"Image {index}" if end == index else f"Images {index}-{end}"
         verb = "is" if end == index else "are"
-        if name is None:
+        if name == PANEL_LABEL:
+            what = "the webtoon panel" if end == index else "the webtoon panels"
+            labels.append(
+                f"{span} {verb} {what} this shot brings to life, in story order "
+                "(follow their setting, art style and events)"
+            )
+        elif name is None:
             labels.append(f"{span} {verb} an art-style reference only (not a character)")
         elif end == index:
             labels.append(f"{span} is {name}")
@@ -179,6 +185,8 @@ def reference_prompt(
 
 
 ONE_TAKE_ID = "take"
+# reference_prompt 의 names 에서 "이 샷이 맡은 웹툰 장면" 이미지를 뜻하는 표식.
+PANEL_LABEL = "#panel"
 
 
 def strip_style(prompt: str, style_sentence: str) -> str:
