@@ -163,7 +163,8 @@ TILE_HEIGHT = 1568
 # 모델 호출 시간 제한
 READ_TIMEOUT_S = _int("VPOC_READ_TIMEOUT_S", 300)
 # 분석이 모델을 바꿔 가며 다시 부를 수 있어(최대 수 분) 10분은 짧다(2026-10-13).
-TASK_STALL_S = _int("VPOC_TASK_STALL_S", 1500)
+# 끊긴 작업을 "다시 실행" 으로 돌리는 시간. 가장 긴 작업(분석 재시도 · 콘티+러프)도 10분 안쪽이다.
+TASK_STALL_S = _int("VPOC_TASK_STALL_S", 900)
 # 완료를 빨리 알아채도록 5초(설계자 2026-10-13 "샷 1개 시간 줄이기"). 조회 자체는 무료다.
 POLL_MIN_INTERVAL_S = 5
 

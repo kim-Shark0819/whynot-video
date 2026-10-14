@@ -575,7 +575,9 @@
       var modeBlock = el("div", "vpoc-field");
       modeBlock.appendChild(el("label", null, "제작 방식 (Seedance)"));
       var modeRow = el("div", "vpoc-radios");
-      var currentMode = step.makeMode || "shots";
+      // 설계자 2026-10-14: Seedance 면 키 장면(러프 콘티) 방식이 기본이다. 저장된 값이 있으면 그것.
+      var currentMode = step.makeMode || (String(currentModel).indexOf("seedance") === 0 ? "keyframes" : "shots");
+      edits.makeMode = edits.makeMode || currentMode;
       [["shots", "샷별로 만들기 (기존)"], ["keyframes", "키 장면(콘티)으로 만들기 — 5초마다 러프 → 완성 그림 → 이어서 영상"]].forEach(function (pair) {
         var label = el("label", "vpoc-radio");
         var radio = el("input");
@@ -594,6 +596,7 @@
       var totalRow = el("div", "vpoc-radios");
       totalRow.appendChild(el("span", "vpoc-hint", "키 장면 방식 영상 길이"));
       var currentTotal = Number(step.totalSeconds || 30);
+      edits.totalSeconds = edits.totalSeconds || currentTotal;
       [20, 30, 40, 60].forEach(function (value) {
         var label = el("label", "vpoc-radio");
         var radio = el("input");

@@ -787,9 +787,10 @@ def create_blueprint(deps: VpocDependencies) -> Blueprint:
 
         plan_box: dict = {}
 
-        keyframe_mode = step2.get("makeMode") == "keyframes" and ark.is_ark(
-            str(step2.get("videoModel") or "")
-        )
+        # 설계자 2026-10-14: Seedance 면 키 장면(러프 콘티) 방식이 기본이다. 샷별은 직접 고른 경우만.
+        keyframe_mode = ark.is_ark(str(step2.get("videoModel") or "")) and (
+            step2.get("makeMode") or "keyframes"
+        ) == "keyframes"
 
         def make_plan() -> None:
             try:
@@ -1053,7 +1054,7 @@ def create_blueprint(deps: VpocDependencies) -> Blueprint:
             f"kf-final-{plan_id}-{keyframe['id']}-{image_id}",
             model=settings.SEEDREAM_FINAL_MODEL, user=user, project_id=pid, plan_id=plan_id,
         )
-        return {"status": "ready", "key": key, "imageId": image_id, "error": None}
+        return {"status": "ready", "key": key, "imageId": image_id, "error": None, "fromRough": rough_key}
 
     def _finalize_keyframes(owner: str, pid: str, plan_id: str, user: str, state: dict) -> dict:
         """승인 직후: 키 장면 전부를 완성 그림으로(최대 3장 동시). {kf_id: final}."""
@@ -1071,7 +1072,15 @@ def create_blueprint(deps: VpocDependencies) -> Blueprint:
             with lock:
                 out[item["id"]] = result
 
-        pending = list(keyframes)
+        # ③ 으로 돌아갔다 다시 승인하면, 러프가 그대로인 장면은 이미 그린 완성 그림을 그대로 쓴다(설계자 2026-10-14).
+        pending = []
+        for item in keyframes:
+            final = item.get("final") or {}
+            rough_key = (item.get("rough") or {}).get("key")
+            if final.get("status") == "ready" and final.get("key") and final.get("fromRough") == rough_key:
+                out[item["id"]] = final
+            else:
+                pending.append(item)
         while pending:
             batch, pending = pending[:3], pending[3:]
             workers = [threading.Thread(target=one, args=(item,), daemon=True) for item in batch]
@@ -2197,11 +2206,15 @@ def create_blueprint(deps: VpocDependencies) -> Blueprint:
             _apply_step(step, number, body, model=ark.selected(state))
             step["status"] = "saved" if number == 1 else step.get("status") or "saved"
             after = _fingerprint(step, number)
+            state["currentStep"] = max(number, 1)
             if before != after:
                 store.bump_revision(state, number)
                 store.mark_stale(state, number)
-            state["currentStep"] = max(number, 1)
-            state["maxReachedStep"] = max(int(state.get("maxReachedStep") or 1), number)
+                # 뒤 단계는 다시 만들어야 하므로 거기로 건너뛰지 못하게 한다(설계자 2026-10-14 되돌리기 점검:
+                # ① 을 고친 뒤 단계 막대로 ④ 에 가면 빈 화면이 나왔다). 앞으로 진행하면 다시 늘어난다.
+                state["maxReachedStep"] = number
+            else:
+                state["maxReachedStep"] = max(int(state.get("maxReachedStep") or 1), number)
 
         state, _ = store.mutate_state(owner, pid, plan_id, mutator)
         return jsonify(plan_view(state, project, can_edit=True))
