@@ -792,6 +792,12 @@ def create_blueprint(deps: VpocDependencies) -> Blueprint:
         )
 
         def make_plan() -> None:
+            try:
+                _make_plan_inner()
+            except Exception as exc:  # noqa: BLE001 — 원인을 본 스레드로 넘긴다(PlanMissing 로 가려졌다)
+                plan_box["error"] = exc
+
+        def _make_plan_inner() -> None:
             if keyframe_mode:
                 plan_box["board"] = _make_storyboard(owner, pid, plan_id, user, step1 or {}, step2)
                 return
@@ -823,6 +829,8 @@ def create_blueprint(deps: VpocDependencies) -> Blueprint:
                 thread.join()
 
         plan_thread.join()
+        if plan_box.get("error") is not None:
+            raise plan_box["error"]
         if keyframe_mode:
             board = plan_box.get("board")
             if not board:

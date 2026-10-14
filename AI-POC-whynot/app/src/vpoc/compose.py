@@ -254,6 +254,8 @@ def fit_shot(shot: dict) -> dict:
     몇 글자 넘었다고 "검토 필요"로 막혀 승인이 안 됐다(예: locationEn 123자 > 120자).
     길이 외 위반(한글 · 이름 · 부정어 · 인물 수)은 그대로 둔다 — check_shot 이 잡는다.
     """
+    if not isinstance(shot, dict):
+        return shot
     fitted = dict(shot)
     for field, limit in (
         ("locationEn", BUDGET["LOCATION"]),

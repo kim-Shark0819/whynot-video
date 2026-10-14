@@ -392,6 +392,34 @@ def _read_stream(response):
     return payload, text_dump, usage
 
 
+def _coerce(value, schema: dict):
+    """도구 입력을 스키마 형태로 되살린다(설계자 2026-10-14 PlanMissing).
+
+    모델이 배열 · 객체를 JSON 문자열로 돌려줄 때가 있다(예: shots 의 원소가 문자열). 그대로 쓰면
+    shot.get(...) 에서 터졌다. 스키마가 array/object 인데 문자열이면 json 으로 풀고, 풀리지 않는 원소는 버린다.
+    """
+    kind = (schema or {}).get("type")
+    if kind in ("array", "object") and isinstance(value, str):
+        try:
+            value = json.loads(value)
+        except ValueError:
+            return [] if kind == "array" else {}
+    if kind == "array":
+        if not isinstance(value, list):
+            return []
+        item_schema = schema.get("items") or {}
+        out = [_coerce(item, item_schema) for item in value]
+        if item_schema.get("type") == "object":
+            out = [item for item in out if isinstance(item, dict) and item]
+        return out
+    if kind == "object":
+        if not isinstance(value, dict):
+            return {}
+        props = schema.get("properties") or {}
+        return {key: (_coerce(val, props[key]) if key in props else val) for key, val in value.items()}
+    return value
+
+
 def _converse(
     *,
     system_text: str,
@@ -461,6 +489,7 @@ def _converse(
                     502,
                 )
                 break
+            payload = _coerce(payload, (tool.get("inputSchema") or {}).get("json") or {})
             return payload, {**usage, "model": candidate}
     if last is not None:
         raise last
