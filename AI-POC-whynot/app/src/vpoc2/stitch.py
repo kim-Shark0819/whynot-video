@@ -36,7 +36,7 @@ def concat(video_keys: list[str]) -> bytes:
         base = [_ffmpeg(), "-y", "-loglevel", "error", "-f", "concat", "-safe", "0", "-i", listing]
         attempts = [
             base + ["-c", "copy", "-movflags", "+faststart", out],
-            base + ["-c:v", "libx264", "-preset", "veryfast", "-crf", "20", "-pix_fmt", "yuv420p", "-an",
+            base + ["-c:v", "libx264", "-preset", "veryfast", "-crf", "20", "-pix_fmt", "yuv420p", "-c:a", "aac",
                     "-movflags", "+faststart", out],
         ]
         last = ""

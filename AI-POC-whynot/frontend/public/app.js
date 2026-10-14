@@ -1816,7 +1816,6 @@ async function loadVideoFolderPlans(project) {
       const tag = document.createElement("video");
       tag.src = item.videoUrl;
       tag.controls = true;
-      tag.muted = true;
       tag.setAttribute("playsinline", "");
       tag.style.cssText = "width:100%;max-width:520px;border-radius:8px;margin-top:6px";
       card.appendChild(label);

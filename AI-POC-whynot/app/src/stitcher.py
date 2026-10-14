@@ -58,6 +58,50 @@ def _run(command: list[str]) -> subprocess.CompletedProcess:
     )
 
 
+def _audio_params(binary: str, path: str) -> tuple[int, str] | None:
+    """(샘플레이트, 채널 레이아웃) 또는 오디오 없음이면 None. ffprobe 가 없어 ffmpeg -i 출력을 읽는다."""
+    import re
+
+    result = _run([binary, "-hide_banner", "-i", path])
+    text = result.stderr.decode("utf-8", errors="replace")
+    for line in text.splitlines():
+        if "Stream #" in line and "Audio:" in line:
+            match = re.search(r"(\d+) Hz, ([a-z0-9.()]+)", line)
+            if match:
+                layout = match.group(2).split("(")[0]
+                return int(match.group(1)), ("stereo" if layout not in ("mono", "stereo") else layout)
+            return 44100, "stereo"
+    return None
+
+
+def _match_audio(binary: str, paths: list[str], workdir: str) -> list[str]:
+    """오디오가 있는 클립과 없는 클립이 섞이면 없는 쪽에 무음 트랙을 넣는다(설계자 2026-10-14).
+
+    concat 은 첫 클립의 트랙 구성을 따른다. 실측: 소리 있음→없음 이면 오디오가 앞 클립 길이에서 끝나고,
+    소리 없음→있음 이면 오디오 트랙이 통째로 사라졌다. 모두 있거나 모두 없으면 그대로 둔다.
+    """
+    params = [_audio_params(binary, path) for path in paths]
+    present = [item for item in params if item]
+    if not present or len(present) == len(paths):
+        return paths
+    rate, layout = present[0]
+    out: list[str] = []
+    for index, (path, param) in enumerate(zip(paths, params)):
+        if param:
+            out.append(path)
+            continue
+        padded = os.path.join(workdir, f"with-silence-{index:02d}.mp4")
+        result = _run([
+            binary, "-y", "-hide_banner", "-loglevel", "error", "-i", path,
+            "-f", "lavfi", "-i", f"anullsrc=r={rate}:cl={layout}",
+            "-map", "0:v:0", "-map", "1:a:0", "-c:v", "copy", "-c:a", "aac", "-shortest", padded,
+        ])
+        if result.returncode != 0:
+            raise StitchError("무음 트랙을 넣지 못했습니다: " + result.stderr.decode("utf-8", errors="replace")[:200])
+        out.append(padded)
+    return out
+
+
 def concat(clip_paths: list[str], output_path: str) -> str:
     """클립들을 순서대로 이어 붙여 output_path에 쓴다.
 
@@ -71,6 +115,8 @@ def concat(clip_paths: list[str], output_path: str) -> str:
         return output_path
 
     binary = ffmpeg_path()
+    padding_dir = tempfile.mkdtemp(prefix="stitch-audio-")
+    usable = _match_audio(binary, usable, padding_dir)
     with tempfile.NamedTemporaryFile("w", suffix=".txt", delete=False, encoding="utf-8") as listing:
         for path in usable:
             # concat demuxer 형식. 경로의 작은따옴표는 이스케이프해야 한다.
@@ -99,7 +145,7 @@ def concat(clip_paths: list[str], output_path: str) -> str:
             binary, "-y", "-hide_banner", "-loglevel", "error",
             "-f", "concat", "-safe", "0", "-i", list_path,
             "-c:v", "libx264", "-preset", "veryfast", "-crf", "23",
-            "-pix_fmt", "yuv420p", "-movflags", "+faststart", output_path,
+            "-pix_fmt", "yuv420p", "-c:a", "aac", "-movflags", "+faststart", output_path,
         ]
         result = _run(encode_command)
         if result.returncode != 0:
@@ -114,6 +160,7 @@ def concat(clip_paths: list[str], output_path: str) -> str:
             os.unlink(list_path)
         except OSError:
             pass
+        shutil.rmtree(padding_dir, ignore_errors=True)
 
 
 def trim(source_path: str, output_path: str, *, start_sec: float, end_sec: float) -> str:

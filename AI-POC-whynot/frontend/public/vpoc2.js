@@ -364,7 +364,7 @@
           "<div class=\"vpoc2-muted\">" + esc((data.shots[i] || {}).summaryKo) + "</div>" +
           (sh.status === "submitted" ? '<div class="vpoc2-muted">' + (slow ? "평소보다 오래 걸려요" : "보통 2~5분") + "</div>" : "") +
           (sh.note ? '<div class="vpoc2-muted">' + esc(sh.note) + "</div>" : "") +
-          (sh.videoUrl ? '<video class="vpoc2-v" controls muted src="' + esc(sh.videoUrl) + '"></video>' : "") + errBox(sh.error) +
+          (sh.videoUrl ? '<video class="vpoc2-v" controls src="' + esc(sh.videoUrl) + '"></video>' : "") + errBox(sh.error) +
           (sh.status === "failed" ? '<button class="vpoc2-btn" data-act="retry" data-shot="' + esc(sh.id) + '">다시 시도</button>' : "") + "</div>";
       });
       html += "</div>";

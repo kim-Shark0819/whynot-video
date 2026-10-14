@@ -60,6 +60,8 @@ BROKER_ROLE_ARN = os.getenv(
 BROKER_EXTERNAL_ID = os.getenv("VPOC_BEDROCK_BROKER_EXTERNAL_ID", "whynot-vpoc-broker")
 BROKER_REGION = os.getenv("VPOC_BEDROCK_BROKER_REGION", "ap-northeast-2")
 BROKER_MODEL_MARKERS = ("claude-fable-", "claude-opus-5", "claude-sonnet-5", "gpt-6")
+# Seedance 네이티브 오디오(설계자 2026-10-14 "영상에 소리를 넣는다"). 끄려면 VPOC_ARK_GENERATE_AUDIO=false.
+ARK_GENERATE_AUDIO = _flag("VPOC_ARK_GENERATE_AUDIO", "true")
 # 키 장면(콘티) 방식(설계자 2026-10-14): 5초마다 키 장면을 그리고 Seedance 시작 · 끝 장면으로 잇는다.
 # Seedance 2.0/2.5 의 시작 · 끝 장면 모드는 4초 이상이라 3초 간격은 불가(실측). 기본 30초 = 키 장면 7장.
 KEYFRAME_INTERVAL_S = _int("VPOC_KEYFRAME_INTERVAL_S", 5)

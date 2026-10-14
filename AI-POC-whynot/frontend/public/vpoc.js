@@ -1695,7 +1695,7 @@
     node.src = url;
     node.dataset.latestSrc = url;
     node.controls = true;
-    node.muted = true;
+    // 설계자 2026-10-14: 영상에 소리가 들어간다 — 기본 음소거를 뺐다(자동 재생은 하지 않는다).
     node.setAttribute("playsinline", "");
     node.addEventListener("error", function () {
       if (node.dataset.latestSrc && node.src !== node.dataset.latestSrc) node.src = node.dataset.latestSrc;
@@ -1720,7 +1720,6 @@
     var current = 0;
     var node = el("video", "vpoc-video");
     node.controls = true;
-    node.muted = true;
     node.setAttribute("playsinline", "");
     node.src = list[0].videoUrl;
     var label = el("p", "vpoc-hint", "1 / " + list.length);

@@ -309,7 +309,7 @@ def submit(
         "ratio": settings.ASPECT,
         "duration": int(duration_s or settings.DURATION_S),
         "resolution": resolution or settings.ARK_RESOLUTION,
-        "generate_audio": False,
+        "generate_audio": bool(settings.ARK_GENERATE_AUDIO),
         "watermark": False,
     }
     started = time.time()
