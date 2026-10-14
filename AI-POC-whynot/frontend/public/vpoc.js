@@ -527,7 +527,7 @@
     var styleBlock = el("div", "vpoc-field");
     styleBlock.appendChild(el("label", null, "화풍"));
     var styleRow = el("div", "vpoc-radios");
-    [["live_action", "실사"], ["anime", "애니"]].forEach(function (pair) {
+    [["live_action", "실사"], ["anime", "애니"], ["webtoon", "웹툰 원작 그대로 (올린 웹툰 속 인물·화풍)"]].forEach(function (pair) {
       var label = el("label", "vpoc-radio");
       var radio = el("input");
       radio.type = "radio";

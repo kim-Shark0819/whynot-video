@@ -15,11 +15,17 @@ STYLE = {
         "35mm lens, soft natural light"
     ),
     "anime": "2D anime-style animation, clean line art, cel shading, soft colors",
+    # 설계자 2026-10-14: 웹툰 원작 그대로 — 화풍 · 인물을 올린 웹툰 그림에서 가져온다.
+    "webtoon": (
+        "Korean webtoon art style exactly as in the uploaded webtoon images: the same line work, "
+        "coloring, shading and character designs"
+    ),
 }
 
 STYLE_IMAGE = {
     "live_action": "Cinematic photograph, photorealistic, 35mm lens, soft natural light",
     "anime": "2D anime-style character illustration, clean line art, cel shading",
+    "webtoon": "Korean webtoon character illustration in exactly the art style of the uploaded webtoon",
 }
 
 IMAGE_NEGATIVE = (

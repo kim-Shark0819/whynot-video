@@ -184,7 +184,7 @@ def create_blueprint(deps: VpocDependencies) -> Blueprint:
         # 장면만 보인다"). 장면 그림은 이제 샷마다 맡은 구간만 보낸다(_shot_panels). 여기서는 화풍 고정만 정한다.
         has_scenes = any(item.get("fileId") for item in steps["1"].get("sceneFiles") or [])
         user_chars = any(
-            (item.get("image") or {}).get("source") == "user"
+            (item.get("image") or {}).get("source") in ("user", "webtoon")
             for item in steps["3"].get("characters") or []
         )
         return [], has_scenes or user_chars
@@ -286,6 +286,8 @@ def create_blueprint(deps: VpocDependencies) -> Blueprint:
         user_ids: list[str] = []
         for char_id, handle, key, source in _reference_characters(steps, plan_shot):
             keys = [key]
+            if source == "webtoon":
+                user_ids.append(char_id)
             if source == "user":
                 user_ids.append(char_id)
                 keys += [extra for extra in _card_keys(steps, owner, pid, char_id) if extra != key]
@@ -763,6 +765,21 @@ def create_blueprint(deps: VpocDependencies) -> Blueprint:
                         "error": None,
                     }
                 return
+            if style == "webtoon":
+                try:
+                    made = _draw_from_webtoon(owner, pid, plan_id, user, step1 or {}, character)
+                    with lock:
+                        image_results[char_id] = {
+                            "status": "ready",
+                            "source": "webtoon",
+                            "imageId": made["imageId"],
+                            "key": made["key"],
+                            "seed": None,
+                            "error": None,
+                        }
+                    return
+                except Exception as exc:  # noqa: BLE001 — 안 되면 아래 일반 그림으로
+                    log.warning("vpoc.webtoon_char.failed char=%s err=%s", char_id, exc)
             try:
                 made = _draw_character(owner, pid, plan_id, user, character, story, style)
             except Exception as exc:  # noqa: BLE001
@@ -1180,6 +1197,40 @@ def create_blueprint(deps: VpocDependencies) -> Blueprint:
             return made
         raise last or VpocError("routes.draw", "ImageFiltered", "그림을 만들지 못했습니다.", 502)
 
+    def _draw_from_webtoon(owner: str, pid: str, plan_id: str, user: str, step1: dict, character: dict) -> dict:
+        """웹툰 원작 그대로(설계자 2026-10-14): 올린 웹툰 컷 속 그 인물을 그대로 옮겨 그린 인물 그림.
+
+        Seedream 에 웹툰 장면(최대 8장, 처음~끝 고르게)을 주고, 그 인물을 같은 얼굴 · 머리 · 옷 · 화풍으로
+        단순 배경에 전신으로 그리게 한다. ③ 인물 그림 = 이 그림이고, 영상 참고 이미지로 그대로 쓰인다.
+        """
+        steps_view = {"1": step1, "2": {}, "3": {}}
+        cache: dict = {}
+        panels = [
+            images.panel_jpeg(owner, pid, f, i, cache)
+            for f, i in _spread(_story_panels(steps_view, owner, pid), 8)
+        ]
+        if not panels:
+            raise VpocError("routes.webtoon_char", "NoPanels", "웹툰 장면 이미지가 없습니다.", 409)
+        handle = character.get("handleEn") or character.get("nameEn") or "the character"
+        look = (character.get("appearanceEn") or "").strip()
+        prompt = (
+            f"The reference images are panels from one webtoon. Find {handle}"
+            + (f" ({look})" if look else "")
+            + " in them and draw that SAME character once more, exactly as drawn in the webtoon: same face, "
+            "eyes, hairstyle, hair color, outfit, body type, line work and coloring. Upper body from the waist up, facing "
+            "the viewer, face large and clearly visible, neutral expression, plain light background, 16:9, only this one "
+            "character, no text, no speech bubbles."
+        )
+        jpeg = seedream.generate_safe(prompt, panels, model=settings.SEEDREAM_FINAL_MODEL, where="seedream.webtoon_char")
+        image_id = f"img_{character['id']}_{secrets.token_hex(3)}"
+        key = store.character_key(owner, pid, character["id"], image_id)
+        store.STORE.put_bytes(key, jpeg, "image/jpeg")
+        ledger.charge_seedream(
+            f"char-webtoon-{plan_id}-{character['id']}-{image_id}",
+            model=settings.SEEDREAM_FINAL_MODEL, user=user, project_id=pid, plan_id=plan_id,
+        )
+        return {"imageId": image_id, "key": key}
+
     def do_redraw(owner: str, pid: str, plan_id: str, user: str, state: dict, char_id: str) -> dict:
         step2 = state["steps"]["2"]
         character = next(
@@ -1188,6 +1239,26 @@ def create_blueprint(deps: VpocDependencies) -> Blueprint:
         if not character:
             raise VpocError("routes.redraw", "NotFound", "캐릭터를 찾을 수 없습니다.", 404)
         style = compose.style_of((step2.get("story") or {}).get("style") or "live_action")
+        if style == "webtoon":
+            try:
+                made = _draw_from_webtoon(owner, pid, plan_id, user, state["steps"]["1"], character)
+                return {
+                    "characters": [
+                        {
+                            "id": char_id,
+                            "image": {
+                                "status": "ready",
+                                "source": "webtoon",
+                                "imageId": made["imageId"],
+                                "key": made["key"],
+                                "seed": None,
+                                "error": None,
+                            },
+                        }
+                    ]
+                }
+            except Exception as exc:  # noqa: BLE001
+                log.warning("vpoc.webtoon_char.redraw_failed char=%s err=%s", char_id, exc)
         made = _draw_character(owner, pid, plan_id, user, character, step2.get("story") or {}, style)
         return {
             "characters": [
@@ -2056,6 +2127,53 @@ def create_blueprint(deps: VpocDependencies) -> Blueprint:
         except Exception as exc:  # noqa: BLE001
             log.warning("vpoc.brief.save_failed plan=%s err=%s", plan_id, exc)
 
+    _DRIVERS: set = set()
+    _DRIVERS_LOCK = threading.Lock()
+
+    def _ensure_driver(owner: str, pid: str, plan_id: str, user: str) -> None:
+        """④ 를 화면 없이도 끝까지 진행한다(설계자 2026-10-14 점검: 창을 닫으면 다음 샷이 안 나갔다).
+
+        20초마다 상태를 보고, 다른 곳(열린 화면)이 최근 15초 안에 확인했으면 건너뛴다(중복 제출 방지).
+        ④ 가 끝나거나 3시간이 지나면 멈춘다. 파드마다 계획당 1개.
+        """
+        marker = (owner, pid, plan_id)
+        with _DRIVERS_LOCK:
+            if marker in _DRIVERS:
+                return
+            _DRIVERS.add(marker)
+
+        def loop() -> None:
+            try:
+                deadline = time.time() + 3 * 3600
+                while time.time() < deadline:
+                    time.sleep(20)
+                    state, _ = store.load_state(owner, pid, plan_id)
+                    step4 = state["steps"]["4"]
+                    shots = step4.get("shots") or []
+                    busy = [t for item in shots for t in regen.poll_targets(item) if t.get("status") in ("queued", "submitted")]
+                    if step4.get("status") != "running" and not busy:
+                        return
+                    recent = any(
+                        t.get("lastPolledAt") and _elapsed_s(t["lastPolledAt"]) < 15
+                        for t in busy
+                        if t.get("status") == "submitted"
+                    )
+                    if recent:
+                        continue
+                    try:
+                        store.mutate_state(
+                            owner, pid, plan_id, lambda inner: refresh_shots(inner, owner, pid, plan_id, user)
+                        )
+                    except Exception as exc:  # noqa: BLE001
+                        log.warning("vpoc.driver.refresh_failed plan=%s err=%s", plan_id, exc)
+            except Exception as exc:  # noqa: BLE001
+                log.warning("vpoc.driver.stopped plan=%s err=%s", plan_id, exc)
+            finally:
+                with _DRIVERS_LOCK:
+                    _DRIVERS.discard(marker)
+
+        threading.Thread(target=loop, name=f"vpoc-driver-{plan_id}", daemon=True).start()
+
     def _submit_queued(owner: str, pid: str, plan_id: str, user: str) -> None:
         try:
             store.mutate_state(
@@ -2134,6 +2252,8 @@ def create_blueprint(deps: VpocDependencies) -> Blueprint:
         state, etag = store.load_state(owner, pid, plan_id)
 
         changed = stall_check(state)
+        if can_edit and state["steps"]["4"].get("status") == "running":
+            _ensure_driver(owner, pid, plan_id, deps.current_username())
         if can_edit:
             changed = _repair_review_shots(state) or changed
         if can_edit and state["steps"]["4"].get("shots"):
@@ -2612,6 +2732,7 @@ def create_blueprint(deps: VpocDependencies) -> Blueprint:
                 args=(owner, pid, plan_id, user),
                 daemon=True,
             ).start()
+            _ensure_driver(owner, pid, plan_id, user)
             shots4 = state["steps"]["4"]["shots"]
             return jsonify(
                 {
