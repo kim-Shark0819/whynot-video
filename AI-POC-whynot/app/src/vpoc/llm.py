@@ -604,6 +604,122 @@ def brief_text(brief: dict) -> str:
     )
 
 
+EMIT_BOARD = {
+    "name": "emit_board",
+    "description": "Return the keyframe storyboard for the whole video.",
+    "inputSchema": {
+        "json": {
+            "type": "object",
+            "properties": {
+                "keyframes": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "summaryKo": {"type": "string"},
+                            "sceneEn": {"type": "string"},
+                            "characters": {"type": "array", "items": {"type": "string"}},
+                        },
+                        "required": ["summaryKo", "sceneEn", "characters"],
+                    },
+                },
+                "segments": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "summaryKo": {"type": "string"},
+                            "motionEn": {"type": "string"},
+                        },
+                        "required": ["summaryKo", "motionEn"],
+                    },
+                },
+            },
+            "required": ["keyframes", "segments"],
+        }
+    },
+}
+
+BOARD_SYSTEM = """You are a storyboard artist turning a webtoon into a short animated video.
+Like a real animation team, first decide KEYFRAMES: one every {interval} seconds from 0s to {total}s
+({count} keyframes), then the motion BETWEEN each pair ({segments} segments of {interval}s).
+The webtoon panels are given in story order; the video must follow the story from the first panel to the
+last, spreading the story evenly across the keyframes.
+- keyframes[i].sceneEn (English, <= 420 chars): one frozen 16:9 frame — where each character stands, pose,
+  gesture, facing direction, facial expression, background/setting, lighting, camera framing and angle.
+  Refer to characters ONLY by their handles. Never describe faces, hair, skin or clothes.
+- keyframes[i].summaryKo (Korean, <= 60 chars): what this frame shows.
+- keyframes[i].characters: ids of characters visible in the frame.
+- segments[i].motionEn (English, <= 420 chars): how everything moves from keyframe i to keyframe i+1 in
+  {interval}s — body movement, gestures, camera move — as a short timeline. Continuous motion, no cuts.
+- segments[i].summaryKo (Korean, <= 60 chars).
+No dialogue text, no speech bubbles, no captions. Answer only with the emit_board tool."""
+
+
+def storyboard(
+    panel_jpegs: list[bytes],
+    characters: list[dict],
+    *,
+    story_text: str,
+    total_s: int,
+    interval_s: int,
+) -> tuple[dict, dict]:
+    """웹툰 전체를 보고 키 장면(interval 초마다)과 그 사이 움직임을 정한다(설계자 2026-10-14)."""
+    count = total_s // interval_s + 1
+    system = BOARD_SYSTEM.format(
+        interval=interval_s, total=total_s, count=count, segments=count - 1
+    )
+    cast = "\n".join(
+        f"- id={item.get('id')} handle=\"{item.get('handleEn')}\" ({item.get('nameKo') or ''})"
+        for item in characters
+    ) or "(none)"
+    blocks: list[dict] = [
+        {
+            "text": (
+                f"Story: {story_text[:2500]}\nCharacters:\n{cast}\n"
+                f"Video length {total_s}s, keyframe every {interval_s}s -> exactly {count} keyframes and "
+                f"{count - 1} segments.\nThe next {len(panel_jpegs)} images are the webtoon panels in order."
+            )
+        }
+    ]
+    for jpeg in panel_jpegs:
+        blocks.append({"image": {"format": "jpeg", "source": {"bytes": _shrink(jpeg)}}})
+    payload, usage = _converse(
+        system_text=system,
+        blocks=blocks,
+        tool=EMIT_BOARD,
+        max_tokens=8000,
+        where="claude.storyboard",
+        model=settings.ANALYZE_MODEL,
+    )
+    keyframes = list(payload.get("keyframes") or [])
+    segments = list(payload.get("segments") or [])
+    if len(keyframes) != count or len(segments) != count - 1:
+        fix = _retry_block([
+            f"keyframes 는 정확히 {count}개, segments 는 정확히 {count - 1}개여야 합니다 "
+            f"(받은 값 {len(keyframes)} / {len(segments)})."
+        ])
+        payload2, usage2 = _converse(
+            system_text=system,
+            blocks=blocks + [fix],
+            tool=EMIT_BOARD,
+            max_tokens=8000,
+            where="claude.storyboard.retry",
+            model=settings.ANALYZE_MODEL,
+        )
+        usage = _add_usage(usage, usage2)
+        keyframes = list(payload2.get("keyframes") or keyframes)
+        segments = list(payload2.get("segments") or segments)
+    # 개수가 그래도 어긋나면 맞춘다(모자라면 마지막을 반복, 넘치면 자른다).
+    while keyframes and len(keyframes) < count:
+        keyframes.append(dict(keyframes[-1]))
+    keyframes = keyframes[:count]
+    while len(segments) < count - 1:
+        segments.append({"summaryKo": "이어지는 움직임", "motionEn": "Smooth continuous motion to the next frame."})
+    segments = segments[: count - 1]
+    return {"keyframes": keyframes, "segments": segments}, usage
+
+
 def _add_usage(first: dict, second: dict) -> dict:
     return {
         "inputTokens": (first.get("inputTokens") or 0) + (second.get("inputTokens") or 0),

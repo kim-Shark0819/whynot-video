@@ -149,6 +149,19 @@ def charge_image(
     )
 
 
+def charge_seedream(key: str, *, model: str, user: str, project_id: str, plan_id: str) -> dict:
+    return charge(
+        key,
+        kind="image",
+        model=model,
+        units=1,
+        usd=settings.SEEDREAM_USD,
+        user=user,
+        project_id=project_id,
+        plan_id=plan_id,
+    )
+
+
 def charge_text(
     key: str,
     *,

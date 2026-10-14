@@ -18,6 +18,7 @@ from typing import Callable
 
 from flask import Blueprint, jsonify, request
 
+from . import seedream  # noqa: F401  (키 장면)
 from . import ark, compose, images, ledger, llm, regen, settings, store, video
 from .errors import VpocError, envelope, now_iso, status_for
 
@@ -322,7 +323,7 @@ def create_blueprint(deps: VpocDependencies) -> Blueprint:
         if not settings.MODEL_PICKER_ENABLED or not ark.is_ark(model):
             return None
         step3 = steps["3"]
-        if step3.get("oneTake") is False:
+        if step3.get("oneTake") is False or step3.get("makeMode") == "keyframes":
             return None
         shots = step3.get("shots") or []
         if not shots or any(not shot.get("promptEn") for shot in shots):
@@ -398,6 +399,7 @@ def create_blueprint(deps: VpocDependencies) -> Blueprint:
         model = ark.selected(state)
         resolution = _plan_resolution(steps["3"], model)
         step3["resolution"] = resolution
+        step3["keyframes"] = [_keyframe_view(item) for item in steps["3"].get("keyframes") or []]
         step3["shots"] = []
         for shot in steps["3"].get("shots", []):
             seconds = _shot_seconds(model, shot)
@@ -413,7 +415,9 @@ def create_blueprint(deps: VpocDependencies) -> Blueprint:
                 "useKeyframe": bool(shot.get("useKeyframe")),
                 "reviewKo": shot.get("reviewKo"),
             }
-            if ark.is_ark(model) and shot.get("promptEn"):
+            if shot.get("keyframes"):
+                row["keyframes"] = shot["keyframes"]
+            if ark.is_ark(model) and shot.get("promptEn") and not shot.get("keyframes"):
                 # API 를 부르기 전에 보낼 문장을 그대로 보여 준다(설계자 2026-10-07 1-3).
                 row["sendPromptEn"], entries = _reference_bundle(
                     steps, owner, pid, shot, shot.get("promptEn") or ""
@@ -621,6 +625,8 @@ def create_blueprint(deps: VpocDependencies) -> Blueprint:
                     "shots": result["shots"],
                     "cost": result["cost"],
                     "useKeyframes": bool(result.get("useKeyframes")),
+                    "makeMode": result.get("makeMode") or "shots",
+                    "keyframes": result.get("keyframes") or [],
                 }
             )
             state["currentStep"] = 3
@@ -630,6 +636,13 @@ def create_blueprint(deps: VpocDependencies) -> Blueprint:
             for item in result.get("characters", []):
                 by_id[item["id"]] = item
             state["steps"]["3"]["characters"] = list(by_id.values())
+            if result.get("keyframes"):
+                kf_by_id = {item["id"]: item for item in state["steps"]["3"].get("keyframes") or []}
+                for item in result["keyframes"]:
+                    kf_by_id[item["id"]] = item
+                state["steps"]["3"]["keyframes"] = [
+                    kf_by_id[item["id"]] for item in state["steps"]["3"].get("keyframes") or []
+                ]
         elif name == "revise":
             regen.apply_revision(state, result)
 
@@ -774,7 +787,14 @@ def create_blueprint(deps: VpocDependencies) -> Blueprint:
 
         plan_box: dict = {}
 
+        keyframe_mode = step2.get("makeMode") == "keyframes" and ark.is_ark(
+            str(step2.get("videoModel") or "")
+        )
+
         def make_plan() -> None:
+            if keyframe_mode:
+                plan_box["board"] = _make_storyboard(owner, pid, plan_id, user, step1 or {}, step2)
+                return
             payload, usage = llm.plan(step2)
             ledger.charge_text(
                 f"plan-{plan_id}-{secrets.token_hex(3)}",
@@ -803,6 +823,21 @@ def create_blueprint(deps: VpocDependencies) -> Blueprint:
                 thread.join()
 
         plan_thread.join()
+        if keyframe_mode:
+            board = plan_box.get("board")
+            if not board:
+                raise VpocError("claude.storyboard", "PlanMissing", "키 장면 콘티를 받지 못했습니다.", 502)
+            return {
+                "characters": [
+                    {"id": item["id"], "image": image_results.get(item["id"], {"status": "none"})}
+                    for item in characters
+                ],
+                "shots": board["shots"],
+                "keyframes": board["keyframes"],
+                "makeMode": "keyframes",
+                "useKeyframes": False,
+                "cost": {"shots": len(board["shots"])},
+            }
         payload = plan_box.get("payload")
         if payload is None:
             raise VpocError("claude.plan", "PlanMissing", "샷 계획을 받지 못했습니다.", 502)
@@ -845,6 +880,216 @@ def create_blueprint(deps: VpocDependencies) -> Blueprint:
                 "totalUsd": round(settings.shot_usd() * shot_count, 2),
             },
         }
+
+    # ---------------------------------------------------------------- 키 장면(콘티) 방식
+
+    def _keyframe_view(item: dict) -> dict:
+        view = {key: value for key, value in item.items() if key not in ("rough", "final")}
+        for kind in ("rough", "final"):
+            image = dict(item.get(kind) or {})
+            if image.get("key"):
+                try:
+                    image["url"] = store.STORE.presign(image["key"], content_type="image/jpeg")
+                except Exception:  # noqa: BLE001
+                    image["url"] = None
+            image.pop("key", None)
+            view[kind] = image
+        return view
+
+    def _draw_rough(owner: str, pid: str, plan_id: str, user: str, keyframe: dict, handles: dict) -> dict:
+        """러프 콘티 1장(Seedream Flash, 연필 스케치)."""
+        scene = keyframe.get("sceneEn") or ""
+        prompt = (
+            "Rough animation storyboard keyframe, loose black pencil sketch lines on white paper, simple shapes, "
+            "no color, no text, no speech bubbles, 16:9 frame. Characters: "
+            + (", ".join(handles.get(cid, cid) for cid in keyframe.get("characters") or []) or "none")
+            + ". Scene: "
+            + scene
+        )
+        try:
+            jpeg = seedream.generate_safe(prompt, None, model=settings.SEEDREAM_ROUGH_MODEL, where="seedream.rough")
+        except Exception as exc:  # noqa: BLE001
+            return {"status": "error", "error": envelope("seedream.rough", exc)}
+        image_id = secrets.token_hex(4)
+        key = store.keyframe_key(owner, pid, plan_id, keyframe["id"], "rough", image_id)
+        store.STORE.put_bytes(key, jpeg, "image/jpeg")
+        ledger.charge_seedream(
+            f"kf-rough-{plan_id}-{keyframe['id']}-{image_id}",
+            model=settings.SEEDREAM_ROUGH_MODEL, user=user, project_id=pid, plan_id=plan_id,
+        )
+        return {"status": "ready", "key": key, "imageId": image_id, "error": None}
+
+    def _make_storyboard(owner: str, pid: str, plan_id: str, user: str, step1: dict, step2: dict) -> dict:
+        """웹툰 전체 → 키 장면(5초 간격) + 구간 움직임 → 러프 콘티 그림."""
+        steps_view = {"1": step1, "2": step2, "3": {}}
+        total = int(step2.get("totalSeconds") or settings.KEYFRAME_TOTAL_DEFAULT)
+        interval = settings.KEYFRAME_INTERVAL_S
+        panels = _spread(_story_panels(steps_view, owner, pid), 12)
+        cache: dict = {}
+        panel_bytes = [images.panel_jpeg(owner, pid, f, i, cache) for f, i in panels]
+        characters = step2.get("characters") or []
+        story = step2.get("story") or {}
+        story_text = " ".join(
+            str(story.get(field) or "") for field in ("titleKo", "loglineKo", "settingKo")
+        ).strip() or str(step1.get("text") or "")
+        board, usage = llm.storyboard(
+            panel_bytes, characters, story_text=story_text, total_s=total, interval_s=interval
+        )
+        ledger.charge_text(
+            f"board-{plan_id}-{secrets.token_hex(3)}",
+            input_tokens=int(usage.get("inputTokens") or 0),
+            output_tokens=int(usage.get("outputTokens") or 0),
+            user=user, project_id=pid, plan_id=plan_id, model=str(usage.get("model") or ""),
+        )
+        known = {item.get("id") for item in characters}
+        handles = {item.get("id"): item.get("handleEn") or item.get("nameEn") or item.get("id") for item in characters}
+        keyframes = []
+        for index, item in enumerate(board["keyframes"]):
+            keyframes.append(
+                {
+                    "id": f"kf_{index:02d}",
+                    "t": index * interval,
+                    "summaryKo": str(item.get("summaryKo") or "")[:80],
+                    "sceneEn": str(item.get("sceneEn") or "")[:600],
+                    "characters": [cid for cid in item.get("characters") or [] if cid in known],
+                    "rough": {"status": "none"},
+                    "final": {"status": "none"},
+                }
+            )
+        results: dict = {}
+
+        def draw(item: dict) -> None:
+            results[item["id"]] = _draw_rough(owner, pid, plan_id, user, item, handles)
+
+        workers = [threading.Thread(target=draw, args=(item,), daemon=True) for item in keyframes]
+        for worker in workers:
+            worker.start()
+        for worker in workers:
+            worker.join(timeout=240)
+        for item in keyframes:
+            item["rough"] = results.get(item["id"]) or {"status": "error", "error": {"message": "시간 초과"}}
+        shots = []
+        for index, segment in enumerate(board["segments"]):
+            a, b = keyframes[index], keyframes[index + 1]
+            cast = []
+            for cid in a["characters"] + b["characters"]:
+                if cid not in cast:
+                    cast.append(cid)
+            shots.append(
+                {
+                    "id": f"seg_{index + 1:02d}",
+                    "summaryKo": f"{a['t']}~{b['t']}초 · " + str(segment.get("summaryKo") or "")[:70],
+                    "cameraKo": "",
+                    "cameraEn": "",
+                    "locationEn": "",
+                    "actionEn": "",
+                    "characters": cast[:4],
+                    "useKeyframe": False,
+                    "reviewKo": None,
+                    "promptEn": str(segment.get("motionEn") or "")[:900],
+                    "durationS": interval,
+                    "keyframes": [a["id"], b["id"]],
+                }
+            )
+        return {"keyframes": keyframes, "shots": shots}
+
+    def _draw_final(owner: str, pid: str, plan_id: str, user: str, steps: dict, keyframe: dict) -> dict:
+        """완성 키 장면(Seedream Pro): 러프 구도 + 인물 그림 + 웹툰 화풍."""
+        rough_key = (keyframe.get("rough") or {}).get("key")
+        refs: list[bytes] = []
+        labels: list[str] = []
+        if rough_key:
+            refs.append(store.STORE.get_bytes(rough_key))
+            labels.append(f"Image {len(refs)} is the rough storyboard sketch: copy its composition, poses and camera")
+        sheets = {item.get("id"): item for item in steps["2"].get("characters") or []}
+        for cid in keyframe.get("characters") or []:
+            handle = (sheets.get(cid) or {}).get("handleEn") or cid
+            keys = []
+            image = next(
+                ((item.get("image") or {}) for item in steps["3"].get("characters") or [] if item.get("id") == cid),
+                {},
+            )
+            if image.get("source") == "user":
+                keys = _card_keys(steps, owner, pid, cid)[:2]
+            if not keys and image.get("key"):
+                keys = [image["key"]]
+            for key in keys:
+                try:
+                    refs.append(store.STORE.get_bytes(key))
+                    labels.append(f"Image {len(refs)} is {handle}")
+                except Exception:  # noqa: BLE001
+                    continue
+        cache: dict = {}
+        all_panels = _story_panels(steps, owner, pid)
+        if all_panels:
+            count = len(steps["3"].get("keyframes") or []) or 1
+            index = min(len(all_panels) - 1, int(keyframe.get("t", 0) / max(1, (count - 1) * settings.KEYFRAME_INTERVAL_S) * (len(all_panels) - 1)))
+            for f, i in all_panels[index: index + 2]:
+                if len(refs) >= 10:
+                    break
+                refs.append(images.panel_jpeg(owner, pid, f, i, cache))
+                labels.append(f"Image {len(refs)} is a webtoon panel: match its art style, line work and coloring")
+        prompt = (
+            "; ".join(labels)
+            + ". Draw ONE finished 16:9 webtoon-style animation keyframe. Keep the composition, poses and camera "
+            "of the rough sketch exactly. Draw every character exactly like their reference images (same face, "
+            "hair, outfit, body) and use exactly the same art style as the webtoon panels. No text, no speech "
+            "bubbles, no captions, no panel borders. Scene: "
+            + (keyframe.get("sceneEn") or "")
+        )
+        jpeg = seedream.generate_safe(prompt, refs, model=settings.SEEDREAM_FINAL_MODEL, where="seedream.final")
+        image_id = secrets.token_hex(4)
+        key = store.keyframe_key(owner, pid, plan_id, keyframe["id"], "final", image_id)
+        store.STORE.put_bytes(key, jpeg, "image/jpeg")
+        ledger.charge_seedream(
+            f"kf-final-{plan_id}-{keyframe['id']}-{image_id}",
+            model=settings.SEEDREAM_FINAL_MODEL, user=user, project_id=pid, plan_id=plan_id,
+        )
+        return {"status": "ready", "key": key, "imageId": image_id, "error": None}
+
+    def _finalize_keyframes(owner: str, pid: str, plan_id: str, user: str, state: dict) -> dict:
+        """승인 직후: 키 장면 전부를 완성 그림으로(최대 3장 동시). {kf_id: final}."""
+        steps = state["steps"]
+        keyframes = steps["3"].get("keyframes") or []
+        out: dict = {}
+        lock = threading.Lock()
+
+        def one(item: dict) -> None:
+            try:
+                result = _draw_final(owner, pid, plan_id, user, steps, item)
+            except Exception as exc:  # noqa: BLE001
+                log.warning("vpoc.keyframe.final_failed kf=%s err=%s", item.get("id"), exc)
+                result = {"status": "error", "error": envelope("seedream.final", exc)}
+            with lock:
+                out[item["id"]] = result
+
+        pending = list(keyframes)
+        while pending:
+            batch, pending = pending[:3], pending[3:]
+            workers = [threading.Thread(target=one, args=(item,), daemon=True) for item in batch]
+            for worker in workers:
+                worker.start()
+            for worker in workers:
+                worker.join(timeout=320)
+        return out
+
+    def _keyframe_inputs(state: dict, plan_shot: dict, prompt: str) -> tuple[str, str, str]:
+        """구간(키 장면 a → b) 제출용: (문장, 시작 장면 b64, 끝 장면 b64)."""
+        by_id = {item["id"]: item for item in state["steps"]["3"].get("keyframes") or []}
+        first_id, last_id = (plan_shot.get("keyframes") or [None, None])[:2]
+        frames = []
+        for kf_id in (first_id, last_id):
+            item = by_id.get(kf_id) or {}
+            key = (item.get("final") or {}).get("key") or (item.get("rough") or {}).get("key")
+            if not key:
+                raise VpocError("routes.submit_shot", "KeyframeMissing", f"키 장면 그림이 없습니다: {kf_id}", 409)
+            frames.append(images.jpeg_for_reference(store.STORE.get_bytes(key)))
+        text = (
+            "Animate smoothly from the first frame to the last frame as one continuous shot. Keep every character "
+            "and the art style exactly as in the two frames; no new characters, no text. Motion: "
+            + (prompt or "")
+        )
+        return text, frames[0], frames[1]
 
     def _draw_character(
         owner: str, pid: str, plan_id: str, user: str, character: dict, story: dict, style: str
@@ -1042,6 +1287,7 @@ def create_blueprint(deps: VpocDependencies) -> Blueprint:
                 # 문장도 실제로 보낸 그림 순서대로 다시 만든다.
                 # 설계자 2026-10-13: 이 샷이 맡은 웹툰 장면(순서대로)과 그 장면을 Claude 가 읽은 설명
                 # (분위기 · 배경 · 인물별 행동 · 상황 · 움직임 순서)을 함께 보낸다 — generate 때 정해 둔다.
+                last_frame = ""
                 step4_now = state["steps"]["4"]
                 shot_panels = (step4_now.get("panels") or {}).get(shot["id"]) or []
                 shot_brief = (step4_now.get("briefs") or {}).get(shot["id"]) or ""
@@ -1071,6 +1317,11 @@ def create_blueprint(deps: VpocDependencies) -> Blueprint:
                     if key not in encoded:  # 앞 그림이 빠져 뒤 그림이 자리를 얻은 경우
                         encoded[key] = _reference_b64(owner, pid, key, tile_cache)
                     references.append(encoded[key])
+                if plan_shot.get("keyframes"):
+                    # 키 장면 방식: 완성 키 장면 a → b 를 시작 · 끝 장면으로(참고 이미지와 함께 못 쓴다).
+                    sent_prompt, keyframe, last_frame = _keyframe_inputs(state, plan_shot, prompt)
+                    references = []
+                    mode = "keyframe"
                 if references:
                     mode = "reference"
                 job = ark.submit(
@@ -1086,6 +1337,7 @@ def create_blueprint(deps: VpocDependencies) -> Blueprint:
                     reference_jpegs_b64=references,
                     resolution=video_resolution,
                     duration_s=seconds,
+                    last_frame_jpeg_b64=last_frame,
                 )
             else:
                 job = video.submit(
@@ -1277,7 +1529,8 @@ def create_blueprint(deps: VpocDependencies) -> Blueprint:
             else settings.MAX_INFLIGHT
         )
         briefing = str(state["steps"]["4"].get("briefing") or "")
-        if briefing and _elapsed_s(briefing) < 300:
+        wait_s = 1200 if state["steps"]["3"].get("makeMode") == "keyframes" else 300
+        if briefing and _elapsed_s(briefing) < wait_s:
             # 장면 설명을 쓰는 중(generate 직후 1분 안팎). 다 쓰면 그 스레드가 제출한다.
             for _, target in all_targets():
                 if target.get("status") == "queued":
@@ -1675,6 +1928,29 @@ def create_blueprint(deps: VpocDependencies) -> Blueprint:
 
     def _prepare_briefs(owner: str, pid: str, plan_id: str, user: str) -> None:
         """generate 직후: 샷마다 맡을 웹툰 장면을 나누고, Claude 가 장면 설명을 쓴 뒤 제출한다."""
+        try:
+            state0, _ = store.load_state(owner, pid, plan_id)
+        except Exception:  # noqa: BLE001
+            state0 = None
+        if state0 and state0["steps"]["3"].get("makeMode") == "keyframes":
+            finals = _finalize_keyframes(owner, pid, plan_id, user, state0)
+
+            def kf_mutator(inner: dict):
+                for item in inner["steps"]["3"].get("keyframes") or []:
+                    if item["id"] in finals:
+                        item["final"] = finals[item["id"]]
+                step4 = inner["steps"]["4"]
+                step4.pop("briefing", None)
+                for item in step4.get("shots") or []:
+                    if item.get("note") == "웹툰 장면 설명 준비 중":
+                        item["note"] = None
+                refresh_shots(inner, owner, pid, plan_id, user)
+
+            try:
+                store.mutate_state(owner, pid, plan_id, kf_mutator)
+            except Exception as exc:  # noqa: BLE001
+                log.warning("vpoc.keyframe.save_failed plan=%s err=%s", plan_id, exc)
+            return
         panels_by_shot: dict = {}
         briefs: dict = {}
         try:
@@ -1940,6 +2216,8 @@ def create_blueprint(deps: VpocDependencies) -> Blueprint:
                     step.get("extraKo"),
                     # 샷 수를 바꾸면 ③ 계획을 다시 만들어야 한다.
                     int(step.get("shotCount") or 0),
+                    step.get("makeMode") or "shots",
+                    int(step.get("totalSeconds") or 0),
                 ],
                 ensure_ascii=False,
                 sort_keys=True,
@@ -2023,6 +2301,23 @@ def create_blueprint(deps: VpocDependencies) -> Blueprint:
                         400,
                     )
                 step["shotCount"] = count
+            # 제작 방식(설계자 2026-10-14): shots = 샷별(기존) · keyframes = 키 장면(콘티) 5초 간격.
+            if "makeMode" in body:
+                mode = str(body.get("makeMode") or "shots")
+                step["makeMode"] = "keyframes" if mode == "keyframes" else "shots"
+            if "totalSeconds" in body:
+                try:
+                    total = int(body.get("totalSeconds") or settings.KEYFRAME_TOTAL_DEFAULT)
+                except (TypeError, ValueError):
+                    total = settings.KEYFRAME_TOTAL_DEFAULT
+                if total not in settings.KEYFRAME_TOTAL_CHOICES:
+                    raise VpocError(
+                        "routes.save_step",
+                        "BadTotalSeconds",
+                        f"영상 길이는 {', '.join(str(v) for v in settings.KEYFRAME_TOTAL_CHOICES)}초 중에서 골라 주세요.",
+                        400,
+                    )
+                step["totalSeconds"] = total
             user_images = dict(step.get("userImages") or {})
             for key, value in (body.get("userImages") or {}).items():
                 if value and value.get("fileId"):
@@ -2167,6 +2462,29 @@ def create_blueprint(deps: VpocDependencies) -> Blueprint:
                 lambda: do_prepare(owner, pid, plan_id, user, snapshot, step1=step1_snapshot),
             )
             return jsonify({"ok": True, "task": "prepare"}), 202
+
+        if action == "redraw" and body.get("keyframeId"):
+            kf_id = str(body.get("keyframeId") or "")
+            scene_edit = body.get("sceneEn")
+            target = next(
+                (item for item in state["steps"]["3"].get("keyframes") or [] if item.get("id") == kf_id), None
+            )
+            if not target:
+                raise VpocError("routes.run", "NotFound", "키 장면을 찾을 수 없습니다.", 404)
+            item = dict(target)
+            if scene_edit is not None and str(scene_edit).strip():
+                item["sceneEn"] = str(scene_edit).strip()[:600]
+            handles = {
+                c.get("id"): c.get("handleEn") or c.get("id") for c in state["steps"]["2"].get("characters") or []
+            }
+
+            def redraw_keyframe() -> dict:
+                item["rough"] = _draw_rough(owner, pid, plan_id, user, item, handles)
+                item["final"] = {"status": "none"}
+                return {"characters": [], "keyframes": [item]}
+
+            run_task("redraw", owner, pid, plan_id, redraw_keyframe)
+            return jsonify({"ok": True, "task": "redraw"}), 202
 
         if action == "redraw":
             char_id = str(body.get("charId") or "")

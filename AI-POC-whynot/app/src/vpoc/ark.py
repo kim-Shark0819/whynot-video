@@ -254,6 +254,7 @@ def submit(
     reference_jpegs_b64: list[str] | None = None,
     resolution: str = "",
     duration_s: int | None = None,
+    last_frame_jpeg_b64: str = "",
 ) -> dict:
     """작업을 만들고 즉시 돌아온다. video.submit 과 같은 키를 돌려준다.
 
@@ -293,6 +294,15 @@ def submit(
                 "role": "first_frame",
             }
         )
+        # 키 장면 방식: 끝 장면까지 주면 Seedance 가 그 사이를 움직임으로 채운다(참고 이미지와 함께 못 쓴다).
+        if last_frame_jpeg_b64:
+            content.append(
+                {
+                    "type": "image_url",
+                    "image_url": {"url": "data:image/jpeg;base64," + last_frame_jpeg_b64},
+                    "role": "last_frame",
+                }
+            )
     body = {
         "model": model_id(model),
         "content": content,

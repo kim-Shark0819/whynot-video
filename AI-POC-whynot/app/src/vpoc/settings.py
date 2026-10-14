@@ -60,6 +60,14 @@ BROKER_ROLE_ARN = os.getenv(
 BROKER_EXTERNAL_ID = os.getenv("VPOC_BEDROCK_BROKER_EXTERNAL_ID", "whynot-vpoc-broker")
 BROKER_REGION = os.getenv("VPOC_BEDROCK_BROKER_REGION", "ap-northeast-2")
 BROKER_MODEL_MARKERS = ("claude-fable-", "claude-opus-5", "claude-sonnet-5", "gpt-6")
+# 키 장면(콘티) 방식(설계자 2026-10-14): 5초마다 키 장면을 그리고 Seedance 시작 · 끝 장면으로 잇는다.
+# Seedance 2.0/2.5 의 시작 · 끝 장면 모드는 4초 이상이라 3초 간격은 불가(실측). 기본 30초 = 키 장면 7장.
+KEYFRAME_INTERVAL_S = _int("VPOC_KEYFRAME_INTERVAL_S", 5)
+KEYFRAME_TOTAL_CHOICES = (20, 30, 40, 60)
+KEYFRAME_TOTAL_DEFAULT = 30
+SEEDREAM_ROUGH_MODEL = os.getenv("VPOC_SEEDREAM_ROUGH_MODEL", "dola-seedream-5-0-flash-260915")
+SEEDREAM_FINAL_MODEL = os.getenv("VPOC_SEEDREAM_FINAL_MODEL", "dola-seedream-5-0-pro-260628")
+SEEDREAM_USD = _float("VPOC_SEEDREAM_USD", 0.035)
 # 한 샷에 Seedance 로 보내는 웹툰 장면 이미지 수 / 설명을 쓸 때 Claude 에 보여 주는 장면 수.
 PANELS_PER_SHOT_REFS = _int("VPOC_PANELS_PER_SHOT_REFS", 3)
 PANELS_PER_SHOT_BRIEF = _int("VPOC_PANELS_PER_SHOT_BRIEF", 6)

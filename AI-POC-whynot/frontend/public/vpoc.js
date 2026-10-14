@@ -570,6 +570,49 @@
       });
       modelBlock.appendChild(modelRow);
       section.appendChild(modelBlock);
+
+      /* 제작 방식(설계자 2026-10-14). 키 장면 = 5초마다 러프 콘티 → 완성 그림 → 그 사이를 Seedance 로 잇는다. */
+      var modeBlock = el("div", "vpoc-field");
+      modeBlock.appendChild(el("label", null, "제작 방식 (Seedance)"));
+      var modeRow = el("div", "vpoc-radios");
+      var currentMode = step.makeMode || "shots";
+      [["shots", "샷별로 만들기 (기존)"], ["keyframes", "키 장면(콘티)으로 만들기 — 5초마다 러프 → 완성 그림 → 이어서 영상"]].forEach(function (pair) {
+        var label = el("label", "vpoc-radio");
+        var radio = el("input");
+        radio.type = "radio";
+        radio.name = "vpoc-make-mode";
+        radio.checked = currentMode === pair[0];
+        radio.disabled = !editable;
+        radio.addEventListener("change", function () {
+          if (radio.checked) edits.makeMode = pair[0];
+        });
+        label.appendChild(radio);
+        label.appendChild(el("span", null, pair[1]));
+        modeRow.appendChild(label);
+      });
+      modeBlock.appendChild(modeRow);
+      var totalRow = el("div", "vpoc-radios");
+      totalRow.appendChild(el("span", "vpoc-hint", "키 장면 방식 영상 길이"));
+      var currentTotal = Number(step.totalSeconds || 30);
+      [20, 30, 40, 60].forEach(function (value) {
+        var label = el("label", "vpoc-radio");
+        var radio = el("input");
+        radio.type = "radio";
+        radio.name = "vpoc-total-seconds";
+        radio.checked = currentTotal === value;
+        radio.disabled = !editable;
+        radio.addEventListener("change", function () {
+          if (radio.checked) edits.totalSeconds = value;
+        });
+        label.appendChild(radio);
+        label.appendChild(el("span", null, value + "초 (키 장면 " + (value / 5 + 1) + "장)"));
+        totalRow.appendChild(label);
+      });
+      modeBlock.appendChild(totalRow);
+      modeBlock.appendChild(
+        el("p", "vpoc-hint", "키 장면 방식은 Seedance 모델에서만 쓰입니다. 키 장면 간격은 5초입니다(Seedance 최소 4초).")
+      );
+      section.appendChild(modeBlock);
     }
 
     /* 캐릭터 시트 */
@@ -667,6 +710,8 @@
         };
         if (edits.videoModel) payload.videoModel = edits.videoModel;
         if (edits.shotCount !== undefined) payload.shotCount = edits.shotCount;
+        if (edits.makeMode) payload.makeMode = edits.makeMode;
+        if (edits.totalSeconds) payload.totalSeconds = edits.totalSeconds;
         var later = plan.steps["3"];
         var dropCount =
           ((later.characters || []).length ? (later.characters || []).length : 0) +
@@ -833,6 +878,49 @@
     });
     section.appendChild(cards);
 
+    /* 키 장면 콘티(설계자 2026-10-14) — 5초마다 러프 스케치. 설명을 고쳐 다시 그릴 수 있다. */
+    var keyframeMode = step.makeMode === "keyframes";
+    if (keyframeMode) {
+      section.appendChild(el("h3", null, "키 장면 콘티 " + (step.keyframes || []).length + "장 (5초 간격)"));
+      section.appendChild(
+        el("p", "vpoc-hint", "러프 스케치입니다. 승인하면 인물 그림과 웹툰 화풍을 입혀 완성 그림으로 그린 뒤, 장면 사이를 영상으로 잇습니다.")
+      );
+      var board = el("div", "vpoc-cards");
+      (step.keyframes || []).forEach(function (kf) {
+        var card = el("div", "vpoc-imagecard");
+        var shown = (kf.final && kf.final.url) || (kf.rough && kf.rough.url);
+        if (shown) {
+          var img = el("img");
+          img.src = shown;
+          img.alt = kf.t + "초 키 장면";
+          card.appendChild(img);
+        } else {
+          card.appendChild(el("div", "vpoc-imageph", (kf.rough || {}).status === "error" ? "그림 없음" : "준비 중"));
+        }
+        card.appendChild(el("strong", null, kf.t + "초"));
+        card.appendChild(el("span", "vpoc-badge", kf.final && kf.final.url ? "완성" : "러프"));
+        card.appendChild(el("p", "vpoc-hint", kf.summaryKo || ""));
+        if ((kf.rough || {}).error) card.appendChild(errorBox(kf.rough.error, null));
+        if (editable) {
+          var more = el("details", "vpoc-advanced");
+          more.appendChild(el("summary", null, "장면 설명 고치기"));
+          var area = el("textarea", "vpoc-input");
+          area.rows = 4;
+          area.value = kf.sceneEn || "";
+          more.appendChild(area);
+          card.appendChild(more);
+          var again = el("button", "vpoc-btn vpoc-btn-small", "다시 그리기");
+          again.type = "button";
+          again.addEventListener("click", function () {
+            runAction("redraw", { keyframeId: kf.id, sceneEn: area.value });
+          });
+          card.appendChild(again);
+        }
+        board.appendChild(card);
+      });
+      section.appendChild(board);
+    }
+
     /* 영상 설정 — 화질 · 샷 길이 (설계자 2026-10-07). 고를 수 있는 범위는 서버가 모델별로 준다. */
     var options = plan.videoOptions || { resolutions: ["540p"], minDurationS: 5, maxDurationS: 5, durationFixed: true };
     var chosenResolution = step.resolution || options.defaultResolution || options.resolutions[0];
@@ -878,7 +966,7 @@
     /* A안 "한 번에 이어서 만들기"(설계자 2026-10-08, Seedance 만). 샷들을 시간대별 지시 하나로 합쳐
        영상 하나로 이어서 만든다. 샷 길이 합계가 모델 최대를 넘으면 샷별로 만든다. */
     var oneTakeChoice = step.oneTake !== false;
-    if (step.oneTakeMaxS) {
+    if (step.oneTakeMaxS && !keyframeMode) {
       var takeLabel = el("label", "vpoc-radio");
       var takeBox = el("input");
       takeBox.type = "checkbox";
@@ -930,7 +1018,7 @@
       ((shot.characters || [])).forEach(function (id) {
         meta.appendChild(el("span", "vpoc-chip", (sheetById[id] || {}).nameKo || id));
       });
-      if (plan.modelPicker && editable && !options.durationFixed) {
+      if (plan.modelPicker && editable && !options.durationFixed && !keyframeMode) {
         var secWrap = el("label", "vpoc-shot-seconds");
         var secInput = el("input", "vpoc-input");
         secInput.type = "number";
@@ -1025,7 +1113,7 @@
         });
         var step3Body = { keepShotIds: keep, shots: shotEdits, useKeyframes: Boolean(step.useKeyframes) };
         if (plan.modelPicker) step3Body.resolution = chosenResolution;
-        if (plan.modelPicker && step.oneTakeMaxS) step3Body.oneTake = oneTakeChoice;
+        if (plan.modelPicker && step.oneTakeMaxS && !keyframeMode) step3Body.oneTake = oneTakeChoice;
         saveStep(3, step3Body)
           .then(function () {
             var current = state.plan.steps["3"].cost || {};
@@ -1049,9 +1137,33 @@
 
   /* ---------------------------------------------------------------- ④ 영상 */
 
+  function keyframeStrip(plan) {
+    var frames = ((plan.steps["3"] || {}).keyframes || []).filter(function (kf) {
+      return (kf.final && kf.final.url) || (kf.rough && kf.rough.url);
+    });
+    if (!frames.length) return null;
+    var box = el("div", "vpoc-field");
+    box.appendChild(el("label", null, "키 장면 (완성 그림이 준비되면 바뀝니다)"));
+    var row = el("div", "vpoc-cards");
+    frames.forEach(function (kf) {
+      var card = el("div", "vpoc-imagecard");
+      var img = el("img");
+      img.src = (kf.final && kf.final.url) || kf.rough.url;
+      img.alt = kf.t + "초";
+      card.appendChild(img);
+      card.appendChild(el("strong", null, kf.t + "초"));
+      card.appendChild(el("span", "vpoc-badge", kf.final && kf.final.url ? "완성" : "러프"));
+      row.appendChild(card);
+    });
+    box.appendChild(row);
+    return box;
+  }
+
   function renderStep4(host) {
     var plan = state.plan;
     var step = plan.steps["4"];
+    var strip = keyframeStrip(plan);
+    if (strip) host.appendChild(strip);
     var step3 = plan.steps["3"];
     var summaryById = {};
     (step3.shots || []).forEach(function (shot) {

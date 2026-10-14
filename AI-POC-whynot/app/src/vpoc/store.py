@@ -124,6 +124,11 @@ def character_key(owner: str, pid: str, char_id: str, image_id: str) -> str:
     return f"{base_prefix(owner, pid)}/characters/{char_id}/{image_id}.jpg"
 
 
+def keyframe_key(owner: str, pid: str, plan_id: str, keyframe_id: str, kind: str, image_id: str) -> str:
+    """키 장면 그림(kind = rough | final)."""
+    return f"{base_prefix(owner, pid)}/plans/{plan_id}/keyframes/{keyframe_id}/{kind}-{image_id}.jpg"
+
+
 def plans_prefix(owner: str, pid: str) -> str:
     return f"{base_prefix(owner, pid)}/plans/"
 
