@@ -1,18 +1,30 @@
-# CI for a customer's own GitLab (rendered to .gitlab-ci.yml by 08-import.ps1).
+# CI for a customer's own GitLab (awstech/ai main), rendered to .gitlab-ci.yml
+# by 08-import.ps1.
 #
-# Deliberately much smaller than the hub's .gitlab-ci.yml. That one builds and
+# Deliberately smaller than the hub's .gitlab-ci.yml. That one builds and
 # deploys four customers out of one tree; this repository holds exactly one
 # customer (C-5), so there is nothing to select between.
 #
-# Scope: build the two images into THIS account's ECR. Rendering manifests and
-# pushing them to awstech/ai-deploy is not here yet - that needs a push token in
-# the customer's GitLab, which the designer supplies (D-25). Until then the
-# render and push are done from the workstation, and ArgoCD reads the result the
-# same way either way.
+# Production deploy now lives here (2026-10-19). The hub account was wound down,
+# taking the hub GitLab runner and hub ArgoCD with it, so the hub's
+# deploy:whynot:prod can no longer run. The whole production path moved into the
+# customer account:
+#   - build:app / build:frontend push to this account's dev ECR repos, and on
+#     main they additionally push the same tag to the prod repos
+#     (whynot-app / whynot-frontend, IMMUTABLE, prod-* retained).
+#   - deploy:whynot:prod (manual, main only) protects the images, renders the
+#     prod manifests and writes them to awstech/ai-deploy under whynot/prod/.
+#   - an in-cluster ArgoCD app (whynot-prod) self-heals from that path.
 #
-# Credentials: none. The runner's service account assumes
-# whynot-dev-runner-role through IRSA, and that role may only push to this
-# customer's two dev repositories.
+# Credentials:
+#   - AWS: none in the file. The runner's service account assumes
+#     whynot-dev-runner-role through IRSA; that role may push to BOTH this
+#     account's dev repos (whynot-dev-*) AND its prod repos (whynot-*).
+#   - ai-deploy write: AI_DEPLOY_TOKEN (masked + protected CI variable), a
+#     project access token with write access to awstech/ai-deploy. Never echoed.
+#
+# Dev-system deploy (whynot/dev) is out of scope here and is still done by hand
+# from the workstation, same as before.
 variables:
   AWS_REGION: ap-northeast-2
   ECR_REGISTRY: 089540175779.dkr.ecr.ap-northeast-2.amazonaws.com
@@ -20,13 +32,35 @@ variables:
   # ECR is immutable, so every build needs a new tag. Same scheme as the hub.
   IMAGE_TAG: ci-$CI_COMMIT_SHORT_SHA
 
-stages: [build]
+stages: [check, build, deploy]
 
+# --- Static checks -----------------------------------------------------------
+# Same intent as the hub's check:whynot. Build jobs need this, so a failing
+# check blocks the build (and therefore the deploy).
+check:whynot:
+  stage: check
+  image: python:3.12-slim
+  before_script:
+    - python -m pip install --no-cache-dir -r $APP_DIR/app/requirements.txt
+  script:
+    # The one remaining checker: compileall, import smoke, node --check, residue
+    # scan, assembler self-check. Passing static checks is not proof of done
+    # (PRD R3) - that is a video playing in a dev browser.
+    - python -X utf8 $APP_DIR/tools/check_vpoc.py
+  rules:
+    - if: $CI_COMMIT_BRANCH == "main"
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+    - if: $CI_PIPELINE_SOURCE == "web"
+    - if: $CI_PIPELINE_SOURCE == "api"
+
+# --- Build -------------------------------------------------------------------
 .kaniko:
   stage: build
   image:
     name: gcr.io/kaniko-project/executor:v1.23.2-debug
     entrypoint: [""]
+  # Build only after the static check passes.
+  needs: ["check:whynot"]
   before_script:
     # kaniko reads registry credentials from this file. The sts web identity
     # token is mounted by EKS from the service account, so no keys are needed.
@@ -40,29 +74,168 @@ stages: [build]
 build:app:
   extends: .kaniko
   script:
-    - >-
-      /kaniko/executor
-      --context "$CI_PROJECT_DIR/$APP_DIR/app"
-      --dockerfile "$CI_PROJECT_DIR/$APP_DIR/app/Dockerfile"
-      --destination "$ECR_REGISTRY/whynot-dev-app:$IMAGE_TAG"
-      --build-arg "IMAGE_TAG=$IMAGE_TAG"
-      --build-arg "SOURCE_STAMP=$CI_COMMIT_SHA"
-      --build-arg "SOURCE_GIT=$CI_COMMIT_REF_NAME@$CI_COMMIT_SHORT_SHA"
-      --label "org.opencontainers.image.revision=$CI_COMMIT_SHA"
-      --label "org.opencontainers.image.version=$IMAGE_TAG"
-      --single-snapshot
+    # Always push to the dev repo. On main, add a second --destination so the
+    # same $IMAGE_TAG also lands in the prod repo in one run; non-main manual
+    # runs push dev only. deploy:whynot:prod later verifies the prod image.
+    # Destination build and the executor call live in ONE block so "$@" is not
+    # carried across script items (no shared-shell assumption on the runner).
+    - |
+      set -- \
+        --destination "$ECR_REGISTRY/whynot-dev-app:$IMAGE_TAG"
+      if [ "$CI_COMMIT_BRANCH" = "main" ]; then
+        set -- "$@" --destination "$ECR_REGISTRY/whynot-app:$IMAGE_TAG"
+      fi
+      /kaniko/executor \
+        --context "$CI_PROJECT_DIR/$APP_DIR/app" \
+        --dockerfile "$CI_PROJECT_DIR/$APP_DIR/app/Dockerfile" \
+        "$@" \
+        --build-arg "IMAGE_TAG=$IMAGE_TAG" \
+        --build-arg "SOURCE_STAMP=$CI_COMMIT_SHA" \
+        --build-arg "SOURCE_GIT=$CI_COMMIT_REF_NAME@$CI_COMMIT_SHORT_SHA" \
+        --label "org.opencontainers.image.revision=$CI_COMMIT_SHA" \
+        --label "org.opencontainers.image.version=$IMAGE_TAG" \
+        --single-snapshot
 
 build:frontend:
   extends: .kaniko
   script:
-    - >-
-      /kaniko/executor
-      --context "$CI_PROJECT_DIR/$APP_DIR/frontend"
-      --dockerfile "$CI_PROJECT_DIR/$APP_DIR/frontend/Dockerfile"
-      --destination "$ECR_REGISTRY/whynot-dev-frontend:$IMAGE_TAG"
-      --build-arg "IMAGE_TAG=$IMAGE_TAG"
-      --build-arg "ASSET_VERSION=$IMAGE_TAG"
-      --build-arg "SOURCE_STAMP=$CI_COMMIT_SHA"
-      --label "org.opencontainers.image.revision=$CI_COMMIT_SHA"
-      --label "org.opencontainers.image.version=$IMAGE_TAG"
-      --single-snapshot
+    # Same dev-always / prod-on-main destination rule as build:app.
+    # One block so "$@" stays within a single shell invocation.
+    - |
+      set -- \
+        --destination "$ECR_REGISTRY/whynot-dev-frontend:$IMAGE_TAG"
+      if [ "$CI_COMMIT_BRANCH" = "main" ]; then
+        set -- "$@" --destination "$ECR_REGISTRY/whynot-frontend:$IMAGE_TAG"
+      fi
+      /kaniko/executor \
+        --context "$CI_PROJECT_DIR/$APP_DIR/frontend" \
+        --dockerfile "$CI_PROJECT_DIR/$APP_DIR/frontend/Dockerfile" \
+        "$@" \
+        --build-arg "IMAGE_TAG=$IMAGE_TAG" \
+        --build-arg "ASSET_VERSION=$IMAGE_TAG" \
+        --build-arg "SOURCE_STAMP=$CI_COMMIT_SHA" \
+        --label "org.opencontainers.image.revision=$CI_COMMIT_SHA" \
+        --label "org.opencontainers.image.version=$IMAGE_TAG" \
+        --single-snapshot
+
+# --- Production deploy --------------------------------------------------------
+# Manual button on main. Does not rebuild - it promotes the $IMAGE_TAG the build
+# jobs already pushed to the prod repos, renders the prod manifests and writes
+# them to awstech/ai-deploy. The in-cluster ArgoCD app (whynot-prod) syncs it.
+deploy:whynot:prod:
+  stage: deploy
+  when: manual
+  # python:3.12-alpine gives python (for render.py) in one small image; the apk
+  # line adds git (ai-deploy push) and aws-cli (ECR verify + prod tag).
+  image: python:3.12-alpine
+  needs: ["build:app", "build:frontend"]
+  # All deploys push to the same ai-deploy main. resource_group runs jobs that
+  # share this name one at a time across the whole project.
+  resource_group: ai-deploy
+  variables:
+    # Hub (unified dev) account. The prod-isolation check fails the deploy if any
+    # of the four rendered files references this account at all (image lines
+    # included) - zero hub-account dependency.
+    HUB_ACCOUNT_ID: "730335451955"
+  before_script:
+    - apk add --no-cache git aws-cli >/dev/null
+    - |
+      # Verify the prod images exist (build:app/build:frontend pushed them on
+      # main) and stamp a prod-<sha> protection tag on the same manifest. The
+      # ECR lifecycle's top rule keeps prod-*, so promoted images survive even
+      # as ci-* get cleaned up (regression guard for the 2026-09-30 incident
+      # where a prod image was evicted by dev builds).
+      for repo in whynot-app whynot-frontend; do
+        aws ecr describe-images --region "$AWS_REGION" --repository-name "$repo" --image-ids imageTag="$IMAGE_TAG" >/dev/null 2>&1 \
+          || { echo "ECR is missing $repo:$IMAGE_TAG. Run this commit's main build first."; exit 1; }
+        echo "found: $repo:$IMAGE_TAG"
+        manifest=$(aws ecr batch-get-image --region "$AWS_REGION" --repository-name "$repo" --image-ids imageTag="$IMAGE_TAG" --query 'images[0].imageManifest' --output text)
+        media=$(aws ecr batch-get-image --region "$AWS_REGION" --repository-name "$repo" --image-ids imageTag="$IMAGE_TAG" --query 'images[0].imageManifestMediaType' --output text)
+        prod_tag="prod-${IMAGE_TAG#ci-}"
+        if aws ecr describe-images --region "$AWS_REGION" --repository-name "$repo" --image-ids imageTag="$prod_tag" >/dev/null 2>&1; then
+          echo "protection tag already present: $repo:$prod_tag"
+        else
+          aws ecr put-image --region "$AWS_REGION" --repository-name "$repo" --image-tag "$prod_tag" \
+            --image-manifest "$manifest" --image-manifest-media-type "$media" >/dev/null \
+            || { echo "could not stamp protection tag $repo:$prod_tag - refusing to deploy."; exit 1; }
+          echo "protection tag: $repo:$prod_tag"
+        fi
+      done
+  script:
+    - |
+      # Render source: config.env.example (non-secret real values). Only
+      # IMAGE_TAG is swapped to this commit, then render.py --target prod.
+      sed "s/^IMAGE_TAG=.*/IMAGE_TAG=$IMAGE_TAG/" "$APP_DIR/deploy/config.env.example" > "$APP_DIR/deploy/config.env"
+      python "$APP_DIR/deploy/render.py" --target prod
+      out="$APP_DIR/deploy/rendered/k8s"
+      # namespace.yaml is not shipped - the Application's CreateNamespace makes
+      # it, and keeping it out avoids it being a prune target.
+      for f in service-account model-catalog workloads ingress; do
+        test -f "$out/$f.yaml" || { echo "render produced no $f.yaml"; exit 1; }
+      done
+      # Refuse to deploy if any unsubstituted value or example placeholder
+      # remains. Same per-file POSIX-class regex as the hub (prefix stripped by
+      # running grep per file).
+      bad=0
+      for f in service-account model-catalog workloads ingress; do
+        hits=$(grep -nE '\$\{[A-Z0-9_]+\}|<[^>]*>' "$out/$f.yaml" \
+          | grep -vE ':[[:space:]]*#' \
+          | grep -vE 'https?://|\.svc|width|<[a-z]+ ') || true
+        if [ -n "$hits" ]; then
+          echo "unsubstituted value left: $f.yaml"
+          echo "$hits"
+          bad=1
+        fi
+      done
+      if [ "$bad" -ne 0 ]; then
+        echo "render output has unsubstituted values. Check config.env.example."; exit 1
+      fi
+      echo "substitution check passed (4 files)"
+      grep -q "$IMAGE_TAG" "$out/workloads.yaml" || { echo "workloads.yaml has no $IMAGE_TAG"; exit 1; }
+      # Zero hub-account dependency: the four files must not reference the hub
+      # account at all - image lines included (the prod images live in THIS
+      # account now, so even the image address must not carry the hub id).
+      leak=0
+      for f in service-account model-catalog workloads ingress; do
+        hits=$(grep -n "$HUB_ACCOUNT_ID" "$out/$f.yaml") || true
+        if [ -n "$hits" ]; then echo "prod manifest references hub account ($HUB_ACCOUNT_ID): $f.yaml"; echo "$hits"; leak=1; fi
+      done
+      if [ "$leak" -ne 0 ]; then
+        echo "prod-isolation check failed. Override those values with prod resources in config.prod.env."; exit 1
+      fi
+      echo "prod-isolation check passed (no hub account reference)"
+    - |
+      # Write the rendered manifests to ai-deploy. set +x and never echoing the
+      # URL keep AI_DEPLOY_TOKEN out of the log.
+      set +x
+      git config --global user.email "ci@meta-clouds.com"
+      git config --global user.name "ai CI"
+      git clone --depth 1 "https://ci-whynot-prod-deploy:${AI_DEPLOY_TOKEN}@${CI_SERVER_HOST}/awstech/ai-deploy.git" /tmp/ai-deploy
+      mkdir -p /tmp/ai-deploy/whynot/prod
+      hdr='# Generated by CI (render.py). Do not edit by hand - the next pipeline overwrites it.'
+      for f in service-account model-catalog workloads ingress; do
+        { echo "$hdr"; echo "# source: $CI_PROJECT_PATH@$CI_COMMIT_SHORT_SHA $APP_DIR/k8s/$f.yaml.tmpl"; cat "$out/$f.yaml"; } > "/tmp/ai-deploy/whynot/prod/$f.yaml"
+      done
+      cd /tmp/ai-deploy
+      if git diff --quiet && git diff --cached --quiet && [ -z "$(git status --porcelain)" ]; then
+        echo "manifests unchanged - skipping commit"
+      else
+        git add -A
+        git commit -qm "deploy(whynot/prod): $CI_COMMIT_SHORT_SHA $CI_COMMIT_TITLE"
+        # resource_group blocks concurrent runs of this project, but another
+        # path (a person, another project) can push ai-deploy ahead of us.
+        # Finish with a rebase retry.
+        n=0
+        until git push origin main; do
+          n=$((n+1))
+          if [ "$n" -ge 5 ]; then echo "ai-deploy push failed 5 times"; exit 1; fi
+          echo "ai-deploy is ahead. rebasing and retrying ($n/5)"
+          git pull --rebase --quiet origin main
+        done
+      fi
+      echo "ai-deploy 갱신 완료. 운영 클러스터 ArgoCD(whynot-prod)가 3분 안에 동기화한다."
+  environment:
+    name: whynot-prod
+    url: https://whynot.meta-clouds.com
+  rules:
+    - if: $CI_COMMIT_BRANCH == "main"
