@@ -641,6 +641,11 @@ body.split-dragging { cursor: col-resize; user-select: none; }
 .confirm-row { display: flex; align-items: center; gap: 9px; margin-top: 16px; font-size: var(--fs-small); }
 .confirm-row input { width: 15px; height: 15px; accent-color: var(--danger); }
 
+/* 로그인 후 1회 안내 팝업(운영 노드 교체 안내). 기존 .modal-scrim / .modal 을 재사용하고
+   작은 중앙 카드로 줄인다. 어두운 반투명 배경은 .modal-scrim 이 이미 준다. */
+.notice-modal { width: min(100%, 420px); }
+.notice-body { margin: 0; color: var(--text-strong, #1c1c22); font-size: var(--fs-body-lg); line-height: var(--lh-body); }
+
 /* ===== 관리자: 회사 코드 ===== */
 .code-panel { margin-bottom: 20px; padding: 22px; }
 .code-form { display: grid; grid-template-columns: 1fr auto; gap: 11px; align-items: center; margin-top: 16px; }

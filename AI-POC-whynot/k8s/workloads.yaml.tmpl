@@ -9,7 +9,7 @@ metadata:
     app.kubernetes.io/part-of: ${PROJECT_NAME}
 data:
   runtime-config.js: |
-    window.__WHYNOT_RUNTIME__ = Object.freeze({ videoGen: ${VIDEO_GEN_ENABLED}, storyDev: ${STORY_DEV_ENABLED}, persistLogin: ${PERSIST_LOGIN} });
+    window.__WHYNOT_RUNTIME__ = Object.freeze({ videoGen: ${VIDEO_GEN_ENABLED}, storyDev: ${STORY_DEV_ENABLED}, persistLogin: ${PERSIST_LOGIN}, noticeSpecup: ${NOTICE_SPECUP_ENABLED} });
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -33,12 +33,15 @@ spec:
   template:
     metadata:
       annotations:
-        whynot.meta-clouds.com/runtime-track-flags: "video=${VIDEO_GEN_ENABLED};story=${STORY_DEV_ENABLED};persistLogin=${PERSIST_LOGIN}"
+        whynot.meta-clouds.com/runtime-track-flags: "video=${VIDEO_GEN_ENABLED};story=${STORY_DEV_ENABLED};persistLogin=${PERSIST_LOGIN};noticeSpecup=${NOTICE_SPECUP_ENABLED}"
       labels:
         app.kubernetes.io/name: ${FRONTEND_DEPLOYMENT_NAME}
         app.kubernetes.io/component: frontend
         app.kubernetes.io/part-of: ${PROJECT_NAME}
     spec:
+      # 롤링 중 ALB 대상 해제가 끝나기 전 파드가 닫혀 502 가 났다. preStop 대기 + 진행 중
+      # 요청 처리 시간을 포함해 종료 유예를 둔다(아래 preStop 과 짝).
+      terminationGracePeriodSeconds: ${TERMINATION_GRACE_S}
       securityContext:
         seccompProfile:
           type: RuntimeDefault
@@ -53,16 +56,22 @@ spec:
         - name: frontend
           image: ${FRONTEND_IMAGE}
           imagePullPolicy: Always
+          # 종료 직전 잠시 멈춰 ALB 가 이 파드를 대상 그룹에서 빼낼 시간을 준다.
+          # nginx-unprivileged 이미지에 sh 가 있고, sleep 만 하므로 readOnlyRootFilesystem 과 무관하다.
+          lifecycle:
+            preStop:
+              exec:
+                command: ["sh", "-c", "sleep ${PRESTOP_SLEEP_S}"]
           ports:
             - name: http
               containerPort: 8080
           resources:
             requests:
-              cpu: 50m
-              memory: 64Mi
+              cpu: "${FRONTEND_CPU_REQUEST}"
+              memory: ${FRONTEND_MEM_REQUEST}
             limits:
-              cpu: 200m
-              memory: 128Mi
+              cpu: "${FRONTEND_CPU_LIMIT}"
+              memory: ${FRONTEND_MEM_LIMIT}
           readinessProbe:
             httpGet:
               path: /health
@@ -143,6 +152,10 @@ spec:
         app.kubernetes.io/part-of: ${PROJECT_NAME}
     spec:
       serviceAccountName: ${APP_SERVICE_ACCOUNT}
+      # 롤링 중 ALB 대상 해제가 끝나기 전 파드가 닫혀 502 가 났다. preStop 대기 + 진행 중
+      # 요청 처리 시간을 포함해 종료 유예를 둔다(app 은 영상 이어 붙이기 등 진행 중 작업을
+      # 마칠 시간까지 고려해 frontend 와 같은 값으로 길게 둔다).
+      terminationGracePeriodSeconds: ${TERMINATION_GRACE_S}
       securityContext:
         seccompProfile:
           type: RuntimeDefault
@@ -157,6 +170,12 @@ spec:
         - name: app
           image: ${APP_IMAGE}
           imagePullPolicy: Always
+          # 종료 직전 잠시 멈춰 ALB 가 이 파드를 대상 그룹에서 빼낼 시간을 준다.
+          # python slim 이미지에 sh 가 있고, sleep 만 하므로 readOnlyRootFilesystem 과 무관하다.
+          lifecycle:
+            preStop:
+              exec:
+                command: ["sh", "-c", "sleep ${PRESTOP_SLEEP_S}"]
           env:
             - name: AWS_REGION
               value: ${AWS_REGION}
@@ -308,6 +327,15 @@ spec:
                   name: ${SEEDANCE_SECRET_NAME}
                   key: ark-api-key
                   optional: true
+            # fal.ai API 키(설계자 2026-10-18). ARK_API_KEY 와 같은 모양 — 아직 Secret 이 없으면
+            # optional 이라 파드는 그대로 뜨고, 그때는 ② 모델 고르기에서 fal 이 "fal API 키 미설정"
+            # 으로 보이고 카탈로그/등록 API 가 409 를 돌려준다.
+            - name: FAL_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: ${FAL_SECRET_NAME}
+                  key: fal-api-key
+                  optional: true
             # 요청 본문 스키마를 공식 문서로 확인했는가. 확인 전에는 live 제출을 막는다.
             - name: SEEDANCE_SCHEMA_VERIFIED
               value: "${SEEDANCE_SCHEMA_VERIFIED}"
@@ -365,11 +393,11 @@ spec:
               containerPort: 8000
           resources:
             requests:
-              cpu: 100m
-              memory: 128Mi
+              cpu: "${APP_CPU_REQUEST}"
+              memory: ${APP_MEM_REQUEST}
             limits:
-              cpu: 500m
-              memory: 512Mi
+              cpu: "${APP_CPU_LIMIT}"
+              memory: ${APP_MEM_LIMIT}
           readinessProbe:
             httpGet:
               path: /health

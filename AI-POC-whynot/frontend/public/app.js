@@ -17,6 +17,9 @@ const STORY_DEV_ENABLED = window.__WHYNOT_RUNTIME__?.storyDev !== false;
 // 다시 로그인해야 했다. 켜져 있으면 localStorage 에도 두고, 새 탭이 열릴 때 sessionStorage 로
 // 옮겨 준다 — vpoc*.js 는 sessionStorage 만 읽으므로 그쪽은 고치지 않는다.
 const PERSIST_LOGIN = window.__WHYNOT_RUNTIME__?.persistLogin === true;
+// 로그인 후 1회 안내 팝업(운영 노드 교체 안내, 설계자 2026-10-19). 운영에만 켠다.
+// 꺼져 있으면 아래 팝업 코드는 아무 일도 하지 않는다.
+const NOTICE_SPECUP_ENABLED = window.__WHYNOT_RUNTIME__?.noticeSpecup === true;
 const PERSISTED_TOKEN_KEY = "toon-change-ai-pj:persistedToken";
 // 마지막으로 본 화면(설계자 2026-10-13). 사이트를 다시 열면(주소가 / 뿐이면) 이 화면으로 들어간다.
 // 작업 프로젝트는 원래 탭마다 따로인 sessionStorage 에만 있어 새 창의 /video 가 목록으로 튕겼다.
@@ -818,6 +821,9 @@ async function enterWorkspace() {
   window.history.replaceState(route, "", pathForView(route.view, route.projectId));
   await applyRoute(route);
   renderWorkingProject();
+  // 메인 화면이 그려진 직후 운영 안내 팝업을 한 번 띄운다. 비동기로 띄워 초기화 흐름을
+  // 막지 않는다 — await 하지 않는다. 꺼져 있거나 이미 닫은 사용자면 아무 일도 하지 않는다.
+  maybeShowSpecupNotice();
 }
 
 async function handleLogin(event) {
@@ -7049,6 +7055,7 @@ document.addEventListener("keydown", (event) => {
     closeProjectTrackModal({ toList: true });
     closeDeleteUserModal();
     closePasswordModal();
+    closeSpecupNotice();
   }
 });
 
@@ -8513,3 +8520,102 @@ function applyFeatureFlags() {
 }
 
 applyFeatureFlags();
+
+
+
+/* =========================================================================
+   로그인 후 1회 안내 팝업 (운영 노드 교체 안내)
+
+   운영 노드 교체(성능 업그레이드) 중 약 10초 접속이 끊긴 일을 사용자에게 한 번만
+   알린다. NOTICE_SPECUP_ENABLED 가 켜진 환경(운영)에서만 동작한다.
+
+   다시 안 뜨게: 서버에 사용자별 설정 API 가 없어 localStorage 에 닫은 시각을 남긴다.
+   같은 브라우저를 여러 사용자가 쓸 수 있어 키에 로그인 아이디를 넣는다. localStorage
+   접근은 try/catch — 실패하면 그 세션에서만 한 번 띄우고 넘어간다.
+
+   모양: index.html 에 전용 마크업이 없어 DOM 을 직접 만든다(renderScriptJob 과 같은 방식).
+   기존 .modal-scrim / .modal 스타일을 재사용한다. 배경 클릭으로는 닫히지 않고,
+   확인 버튼이나 Esc 로만 닫힌다. */
+const NOTICE_SPECUP_KEY_PREFIX = "notice-specup-20261019:";
+const NOTICE_SPECUP_TEXT =
+  "세션이 잠깐 끊긴 것은 잠깐 CPU와 메모리 성능을 업그레이드 하여 끊기게 되었습니다. " +
+  "앞으로는 좀 더 쾌적한 환경에서 사용해보실 수 있습니다";
+let specupNoticeLastFocus = null;
+
+/* 이미 닫은 사용자인지 확인한다. 저장소가 없으면 "안 닫았다"로 보고 띄운다
+   (그 세션에서만 한 번 더 보일 뿐이다). */
+function specupNoticeSeen(username) {
+  try {
+    return !!localStorage.getItem(NOTICE_SPECUP_KEY_PREFIX + username);
+  } catch (error) {
+    return false;
+  }
+}
+
+function markSpecupNoticeSeen(username) {
+  try {
+    localStorage.setItem(NOTICE_SPECUP_KEY_PREFIX + username, new Date().toISOString());
+  } catch (error) { /* 저장소 없음 — 그 세션에서만 다시 뜬다 */ }
+}
+
+function closeSpecupNotice() {
+  const scrim = $("#specupNoticeModal");
+  if (!scrim) return;
+  const username = scrim.dataset.user || "";
+  if (username) markSpecupNoticeSeen(username);
+  document.body.classList.remove("modal-open");
+  scrim.remove();
+  if (specupNoticeLastFocus && document.contains(specupNoticeLastFocus)) specupNoticeLastFocus.focus();
+}
+
+function maybeShowSpecupNotice() {
+  if (!NOTICE_SPECUP_ENABLED) return;
+  const username = state.user?.username;
+  if (!username) return;
+  if (specupNoticeSeen(username)) return;
+  // 중복 생성 방지. enterWorkspace 가 두 번 불려도 하나만 뜬다.
+  if ($("#specupNoticeModal")) return;
+
+  specupNoticeLastFocus = document.activeElement;
+
+  const scrim = document.createElement("div");
+  scrim.id = "specupNoticeModal";
+  scrim.className = "modal-scrim";
+  scrim.dataset.user = username;
+
+  const modal = document.createElement("div");
+  modal.className = "modal notice-modal";
+  modal.setAttribute("role", "dialog");
+  modal.setAttribute("aria-modal", "true");
+  modal.setAttribute("aria-labelledby", "specupNoticeTitle");
+
+  const head = document.createElement("div");
+  head.className = "modal-head";
+  const heading = document.createElement("h2");
+  heading.id = "specupNoticeTitle";
+  heading.textContent = "안내";
+  head.appendChild(heading);
+
+  const body = document.createElement("p");
+  body.className = "notice-body";
+  body.textContent = NOTICE_SPECUP_TEXT;
+
+  const actions = document.createElement("div");
+  actions.className = "modal-actions";
+  const ok = document.createElement("button");
+  ok.type = "button";
+  ok.className = "primary-button";
+  ok.textContent = "확인";
+  ok.addEventListener("click", closeSpecupNotice);
+  actions.appendChild(ok);
+
+  modal.appendChild(head);
+  modal.appendChild(body);
+  modal.appendChild(actions);
+  scrim.appendChild(modal);
+  // 배경(scrim) 클릭으로는 닫히지 않는다. 확인/Esc 로만 닫는다.
+  document.body.appendChild(scrim);
+  document.body.classList.add("modal-open");
+  // 포커스를 확인 버튼으로 옮긴다. 키보드 사용자가 팝업이 열린 줄 알 수 있게 한다.
+  window.setTimeout(() => ok.focus(), 0);
+}
