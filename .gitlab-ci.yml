@@ -16,15 +16,26 @@
 #     prod manifests and writes them to awstech/ai-deploy under whynot/prod/.
 #   - an in-cluster ArgoCD app (whynot-prod) self-heals from that path.
 #
+# Dev-system deploy now lives here too (2026-10-19). The hub GitLab was wound
+# down, so whynot/dev can no longer be rendered and pushed by hand from a hub
+# checkout; the repository of record is this customer GitLab (awstech/ai main).
+#   - deploy:whynot:dev (automatic on main, no manual button) renders the dev
+#     manifests (render.py --target dev, this account's whynot-dev-* images and
+#     the customer dev buckets) and writes exactly three files
+#     (service-account, model-catalog, workloads) to awstech/ai-deploy under
+#     whynot/dev/. ingress.yaml and namespace.yaml are left untouched: the dev
+#     ALB is shared in one ALB group with gitlab-whynot / argocd-whynot and the
+#     group.name/order + host live only in the hand-managed ingress, which the
+#     template cannot reproduce.
+#   - a dev-cluster ArgoCD app (argocd-whynot, inside the dev EKS cluster) syncs
+#     whynot/dev automatically, the same self-heal pattern as whynot-prod.
+#
 # Credentials:
 #   - AWS: none in the file. The runner's service account assumes
 #     whynot-dev-runner-role through IRSA; that role may push to BOTH this
 #     account's dev repos (whynot-dev-*) AND its prod repos (whynot-*).
 #   - ai-deploy write: AI_DEPLOY_TOKEN (masked + protected CI variable), a
 #     project access token with write access to awstech/ai-deploy. Never echoed.
-#
-# Dev-system deploy (whynot/dev) is out of scope here and is still done by hand
-# from the workstation, same as before.
 variables:
   AWS_REGION: ap-northeast-2
   ECR_REGISTRY: 089540175779.dkr.ecr.ap-northeast-2.amazonaws.com
@@ -237,5 +248,128 @@ deploy:whynot:prod:
   environment:
     name: whynot-prod
     url: https://whynot.meta-clouds.com
+  rules:
+    - if: $CI_COMMIT_BRANCH == "main"
+
+# --- Development deploy ------------------------------------------------------
+# Automatic on main (no manual button). Does not rebuild - it takes the
+# $IMAGE_TAG the build jobs already pushed to this account's dev repos
+# (whynot-dev-app / whynot-dev-frontend), renders the dev manifests and writes
+# exactly three files to awstech/ai-deploy under whynot/dev/. The dev-cluster
+# ArgoCD app (argocd-whynot) syncs it.
+#
+# Deliberately simpler than deploy:whynot:prod: no prod-repo verification and no
+# prod-<sha> protection tag (those guard the IMMUTABLE prod repos). Dev only
+# confirms the dev images it is about to ship actually exist.
+#
+# ingress.yaml and namespace.yaml are intentionally NOT written. The dev ALB is
+# shared in one ALB group with gitlab-whynot / argocd-whynot; group.name/order
+# and host live only in the hand-managed whynot/dev/ingress.yaml and the
+# template cannot reproduce them, and namespace is made by ArgoCD. Writing them
+# here would clobber the hand-managed ingress or add a prune target.
+deploy:whynot:dev:
+  stage: deploy
+  # python:3.12-alpine gives python (for render.py) in one small image; the apk
+  # line adds git (ai-deploy push) and aws-cli (dev ECR existence check).
+  image: python:3.12-alpine
+  needs: ["build:app", "build:frontend"]
+  # All deploys push to the same ai-deploy main. resource_group runs jobs that
+  # share this name one at a time across the whole project (shared with prod).
+  resource_group: ai-deploy
+  variables:
+    # Hub (old unified) account. The isolation check below fails the deploy if
+    # any of the three rendered files references this account at all - the whole
+    # point of this change is zero live hub-account dependency in dev.
+    HUB_ACCOUNT_ID: "730335451955"
+  before_script:
+    - apk add --no-cache git aws-cli >/dev/null
+    - |
+      # Confirm the dev images exist (build:app/build:frontend push them on every
+      # pipeline). No prod-repo check and no prod-<sha> protection tag here - the
+      # dev repos are not IMMUTABLE and are not the protected promotion target.
+      for repo in whynot-dev-app whynot-dev-frontend; do
+        aws ecr describe-images --region "$AWS_REGION" --repository-name "$repo" --image-ids imageTag="$IMAGE_TAG" >/dev/null 2>&1 \
+          || { echo "ECR is missing $repo:$IMAGE_TAG. Run this commit's main build first."; exit 1; }
+        echo "found: $repo:$IMAGE_TAG"
+      done
+  script:
+    - |
+      # Render source: config.env.example (non-secret real values) + the dev
+      # overlay (config.dev.env). Only IMAGE_TAG is swapped to this commit, then
+      # render.py --target dev.
+      sed "s/^IMAGE_TAG=.*/IMAGE_TAG=$IMAGE_TAG/" "$APP_DIR/deploy/config.env.example" > "$APP_DIR/deploy/config.env"
+      python "$APP_DIR/deploy/render.py" --target dev
+      out="$APP_DIR/deploy/rendered/k8s"
+      # Only three files ship to whynot/dev/. ingress.yaml and namespace.yaml are
+      # hand-managed (see the header note) and are not touched.
+      for f in service-account model-catalog workloads; do
+        test -f "$out/$f.yaml" || { echo "render produced no $f.yaml"; exit 1; }
+      done
+      # Refuse to deploy if any unsubstituted value or example placeholder
+      # remains. Same per-file POSIX-class regex as prod (prefix stripped by
+      # running grep per file).
+      bad=0
+      for f in service-account model-catalog workloads; do
+        hits=$(grep -nE '\$\{[A-Z0-9_]+\}|<[^>]*>' "$out/$f.yaml" \
+          | grep -vE ':[[:space:]]*#' \
+          | grep -vE 'https?://|\.svc|width|<[a-z]+ ') || true
+        if [ -n "$hits" ]; then
+          echo "unsubstituted value left: $f.yaml"
+          echo "$hits"
+          bad=1
+        fi
+      done
+      if [ "$bad" -ne 0 ]; then
+        echo "render output has unsubstituted values. Check config.env.example / config.dev.env."; exit 1
+      fi
+      echo "substitution check passed (3 files)"
+      grep -q "$IMAGE_TAG" "$out/workloads.yaml" || { echo "workloads.yaml has no $IMAGE_TAG"; exit 1; }
+      # Zero live hub-account dependency: the three files must not reference the
+      # hub account at all - image lines included (the dev images live in THIS
+      # account's whynot-dev-* repos now).
+      leak=0
+      for f in service-account model-catalog workloads; do
+        hits=$(grep -n "$HUB_ACCOUNT_ID" "$out/$f.yaml") || true
+        if [ -n "$hits" ]; then echo "dev manifest references hub account ($HUB_ACCOUNT_ID): $f.yaml"; echo "$hits"; leak=1; fi
+      done
+      if [ "$leak" -ne 0 ]; then
+        echo "hub-isolation check failed. Override those values with dev resources in config.dev.env."; exit 1
+      fi
+      echo "hub-isolation check passed (no hub account reference)"
+    - |
+      # Write the rendered manifests to ai-deploy. set +x and never echoing the
+      # URL keep AI_DEPLOY_TOKEN out of the log.
+      set +x
+      git config --global user.email "ci@meta-clouds.com"
+      git config --global user.name "ai CI"
+      git clone --depth 1 "https://ci-whynot-dev-deploy:${AI_DEPLOY_TOKEN}@${CI_SERVER_HOST}/awstech/ai-deploy.git" /tmp/ai-deploy
+      mkdir -p /tmp/ai-deploy/whynot/dev
+      hdr='# Generated by CI (render.py). Do not edit by hand - the next pipeline overwrites it.'
+      # Only these three. ingress.yaml / namespace.yaml under whynot/dev/ are
+      # hand-managed and left as-is.
+      for f in service-account model-catalog workloads; do
+        { echo "$hdr"; echo "# source: $CI_PROJECT_PATH@$CI_COMMIT_SHORT_SHA $APP_DIR/k8s/$f.yaml.tmpl"; cat "$out/$f.yaml"; } > "/tmp/ai-deploy/whynot/dev/$f.yaml"
+      done
+      cd /tmp/ai-deploy
+      if git diff --quiet && git diff --cached --quiet && [ -z "$(git status --porcelain)" ]; then
+        echo "manifests unchanged - skipping commit"
+      else
+        git add -A
+        git commit -qm "deploy(whynot/dev): $CI_COMMIT_SHORT_SHA $CI_COMMIT_TITLE"
+        # resource_group blocks concurrent runs of this project, but another
+        # path (a person, another project) can push ai-deploy ahead of us.
+        # Finish with a rebase retry.
+        n=0
+        until git push origin main; do
+          n=$((n+1))
+          if [ "$n" -ge 5 ]; then echo "ai-deploy push failed 5 times"; exit 1; fi
+          echo "ai-deploy is ahead. rebasing and retrying ($n/5)"
+          git pull --rebase --quiet origin main
+        done
+      fi
+      echo "ai-deploy 갱신 완료. 개발 클러스터 ArgoCD(argocd-whynot)가 3분 안에 동기화한다."
+  environment:
+    name: whynot-dev
+    url: https://dev-whynot.meta-clouds.com
   rules:
     - if: $CI_COMMIT_BRANCH == "main"
