@@ -87,3 +87,371 @@
 .vnew-health.is-bad {
   color: var(--danger, #b91c1c);
 }
+
+/* ================================================================ 캐릭터 만들기
+   목록 ↔ 상세(업로드 → 만들기 → 실사·웹툰 3D·시트). styles.css 토큰을 쓰되 기본값을 함께 둔다. */
+
+.vnew-h1 {
+  margin: 0 0 6px;
+  font-size: 24px;
+  font-weight: 700;
+}
+
+.vnew-hint {
+  margin: 6px 0;
+  font-size: 13px;
+  color: var(--text-muted, #6b7280);
+}
+
+/* ---- 목록 ---- */
+
+.vnew-page-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  margin: 8px 0 20px;
+}
+
+.vnew-card-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+  gap: 16px;
+}
+
+.vnew-char-card {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 10px;
+  padding: 14px;
+  text-align: left;
+  border: 1px solid var(--line, #e5e7eb);
+  border-radius: var(--radius, 16px);
+  background: var(--surface, #ffffff);
+  cursor: pointer;
+  transition: border-color 0.15s, box-shadow 0.15s;
+}
+
+.vnew-char-card:hover {
+  border-color: var(--accent, #cb3208);
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.08);
+}
+
+.vnew-char-thumb {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  aspect-ratio: 1 / 1;
+  border-radius: 12px;
+  background: var(--surface-muted, #f3f4f6);
+  overflow: hidden;
+}
+
+.vnew-char-thumb img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.vnew-char-initial {
+  font-size: 40px;
+  font-weight: 700;
+  color: var(--text-muted, #9ca3af);
+}
+
+.vnew-char-body {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.vnew-char-name {
+  font-size: 15px;
+  font-weight: 600;
+}
+
+.vnew-badge-status {
+  align-self: flex-start;
+  padding: 2px 10px;
+  border-radius: 999px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-muted, #6b7280);
+  background: var(--surface-muted, #f3f4f6);
+}
+
+.vnew-badge-status.is-ready {
+  color: var(--success, #15803d);
+  background: rgba(21, 128, 61, 0.12);
+}
+
+.vnew-badge-status.is-building {
+  color: var(--accent-strong, #b45309);
+  background: var(--accent-soft, #fef3c7);
+}
+
+.vnew-badge-status.is-failed {
+  color: var(--danger, #b91c1c);
+  background: rgba(185, 28, 28, 0.1);
+}
+
+.vnew-empty {
+  margin-top: 8px;
+}
+
+/* ---- 상세 공통 ---- */
+
+.vnew-detail-head {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 12px;
+  margin: 8px 0 18px;
+}
+
+.vnew-detail-title {
+  margin: 0;
+}
+
+.vnew-upload {
+  margin-bottom: 18px;
+}
+
+.vnew-section-head {
+  margin-bottom: 4px;
+}
+
+.vnew-drop.is-drag {
+  border-color: var(--accent, #cb3208);
+  background: var(--accent-soft, #fff4ee);
+}
+
+.vnew-source-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin-top: 12px;
+}
+
+.vnew-source-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  border: 1px solid var(--line, #e5e7eb);
+  border-radius: 10px;
+  background: var(--surface-muted, #f9fafb);
+  font-size: 13px;
+}
+
+.vnew-source-dim {
+  color: var(--text-muted, #9ca3af);
+  font-size: 12px;
+}
+
+/* ---- 만들기 · 진행 ---- */
+
+.vnew-build {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 12px;
+  margin: 18px 0;
+}
+
+.vnew-build-btn {
+  flex: 0 0 auto;
+}
+
+.vnew-progress-board {
+  flex-basis: 100%;
+  display: grid;
+  gap: 10px;
+  margin-top: 6px;
+}
+
+.vnew-progress-line {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+.vnew-progress-variant {
+  min-width: 90px;
+  font-weight: 600;
+  font-size: 13px;
+}
+
+.vnew-progress-step {
+  padding: 4px 10px;
+  border-radius: 999px;
+  font-size: 12px;
+  color: var(--text-muted, #6b7280);
+  background: var(--surface-muted, #f3f4f6);
+}
+
+.vnew-progress-step.is-done {
+  color: var(--success, #15803d);
+  background: rgba(21, 128, 61, 0.12);
+}
+
+.vnew-progress-step.is-failed {
+  color: var(--danger, #b91c1c);
+  background: rgba(185, 28, 28, 0.1);
+}
+
+/* ---- 분석 ---- */
+
+.vnew-analysis {
+  margin: 10px 0 20px;
+  padding: 14px 16px;
+  border: 1px solid var(--line, #e5e7eb);
+  border-radius: 12px;
+  background: var(--surface-muted, #f9fafb);
+}
+
+.vnew-analysis-desc {
+  margin: 0 0 6px;
+}
+
+.vnew-analysis-model {
+  margin: 0;
+  font-size: 12px;
+  color: var(--text-muted, #9ca3af);
+}
+
+/* ---- 실사 vs 웹툰 ---- */
+
+.vnew-variant-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 20px;
+}
+
+@media (max-width: 768px) {
+  .vnew-variant-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
+.vnew-variant-col {
+  border: 1px solid var(--line, #e5e7eb);
+  border-radius: var(--radius, 16px);
+  background: var(--surface, #ffffff);
+  padding: 16px;
+}
+
+.vnew-variant-title {
+  margin: 0 0 12px;
+  font-size: 17px;
+  font-weight: 700;
+}
+
+/* ---- 3D 보기 ---- */
+
+.vnew-3d {
+  margin-bottom: 14px;
+}
+
+.vnew-model-viewer {
+  width: 100%;
+  height: 420px;
+  border-radius: 12px;
+  background: var(--surface-muted, #f3f4f6);
+  --poster-color: transparent;
+}
+
+.vnew-3d-controls {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 10px;
+}
+
+.vnew-3d-btn {
+  font-size: 13px;
+}
+
+.vnew-3d-btn.is-on {
+  border-color: var(--accent, #cb3208);
+  color: var(--accent, #cb3208);
+}
+
+.vnew-3d-state {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  height: 420px;
+  border-radius: 12px;
+  background: var(--surface-muted, #f3f4f6);
+  text-align: center;
+  padding: 16px;
+}
+
+.vnew-3d-state.is-failed {
+  background: rgba(185, 28, 28, 0.06);
+}
+
+/* ---- 시트 ---- */
+
+.vnew-sheets {
+  display: grid;
+  gap: 12px;
+}
+
+.vnew-sheet-img {
+  width: 100%;
+  border-radius: 10px;
+  border: 1px solid var(--line, #e5e7eb);
+  cursor: zoom-in;
+}
+
+.vnew-sheet-smalls {
+  display: flex;
+  gap: 12px;
+}
+
+.vnew-sheet-small {
+  margin: 0;
+  flex: 0 0 auto;
+  text-align: center;
+}
+
+.vnew-sheet-small img {
+  height: 120px;
+  width: auto;
+  border-radius: 8px;
+  border: 1px solid var(--line, #e5e7eb);
+  cursor: zoom-in;
+}
+
+.vnew-sheet-small figcaption {
+  margin-top: 4px;
+  font-size: 12px;
+  color: var(--text-muted, #6b7280);
+}
+
+/* ---- 이미지 확대 오버레이 ---- */
+
+.vnew-lightbox {
+  position: fixed;
+  inset: 0;
+  z-index: 1000;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  background: rgba(0, 0, 0, 0.8);
+  cursor: zoom-out;
+}
+
+.vnew-lightbox-img {
+  max-width: 100%;
+  max-height: 100%;
+  border-radius: 8px;
+  box-shadow: 0 8px 40px rgba(0, 0, 0, 0.5);
+}

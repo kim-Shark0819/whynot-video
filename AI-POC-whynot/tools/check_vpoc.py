@@ -1873,6 +1873,386 @@ def check_planview_keys() -> None:
         )
 
 
+# ---------------------------------------------------------------- 8. 캐릭터 만들기(vnew)
+
+
+class _FakeCharStore:
+    """vpoc.store.STORE 를 대신하는 메모리 저장소(캐릭터 만들기 검사 전용). 외부 S3 없이 돈다.
+
+    기존 _FakeStore(취소·dual 검사용)와 이름이 겹치지 않게 별도 클래스로 둔다.
+    read_json/write_json 은 etag 조건부 쓰기를 흉내 내되, 단일 스레드 검사라 경합은 없으므로
+    write 는 항상 성공하고 새 etag 를 돌려준다. put_bytes/get_bytes/presign 만 더 쓴다.
+    """
+
+    def __init__(self) -> None:
+        self.json: dict[str, dict] = {}
+        self.blobs: dict[str, bytes] = {}
+        self._seq = 0
+
+    def _etag(self) -> str:
+        self._seq += 1
+        return f"etag{self._seq}"
+
+    def read_json(self, key: str):
+        if key not in self.json:
+            return None, ""
+        data, etag = self.json[key]
+        import copy as _copy  # noqa: PLC0415
+
+        return _copy.deepcopy(data), etag
+
+    def write_json(self, key: str, data: dict, *, etag: str = "", create_only: bool = False) -> str:
+        import copy as _copy  # noqa: PLC0415
+
+        new_etag = self._etag()
+        self.json[key] = (_copy.deepcopy(data), new_etag)
+        return new_etag
+
+    def put_bytes(self, key: str, body: bytes, content_type: str, *, bucket: str = "") -> None:
+        self.blobs[key] = body
+
+    def get_bytes(self, key: str, *, bucket: str = "") -> bytes:
+        return self.blobs[key]
+
+    def exists(self, key: str, *, bucket: str = "") -> bool:
+        return key in self.blobs
+
+    def presign(self, key: str, *, bucket: str = "", content_type: str = "", expires: int = 3600) -> str:
+        return f"https://signed.example/{key}?e={expires}"
+
+
+def _tiny_jpeg(width: int = 100, height: int = 100) -> bytes:
+    """검사용 작은 JPEG 바이트(Pillow)."""
+    import io as _io  # noqa: PLC0415
+
+    from PIL import Image  # noqa: PLC0415
+
+    buffer = _io.BytesIO()
+    Image.new("RGB", (width, height), (200, 180, 160)).save(buffer, format="JPEG")
+    return buffer.getvalue()
+
+
+def check_vnew_characters() -> None:
+    """캐릭터 만들기 서버 — 외부 호출을 전부 가짜로 바꿔 파이프라인·API 를 돈다.
+
+    (a) 생성·업로드·목록·상세 (b) build → 분석(Astra 실패 → Claude)·시트·정면·후면·3D 제출
+    (face_count 120000·data URI)·복사·ready (c) 한 variant 실패해도 다른 variant ready
+    (d) 진행 중 build 409, 30분 초과 failed (e) GLB 스트리밍 200·Content-Type
+    (f) 다른 사용자 접근 403/404 (g) seedream.generate 기본 size 가 그대로 1920x1080.
+    """
+    sys.path.insert(0, str(ROOT / "app"))
+    bad: list[str] = []
+
+    import threading as _threading  # noqa: PLC0415
+    import time as _time  # noqa: PLC0415
+
+    from flask import Flask  # noqa: PLC0415
+
+    from src import vnew  # noqa: PLC0415
+    from src.vnew import characters  # noqa: PLC0415
+    from src.vpoc import seedream as _seedream_mod  # noqa: PLC0415
+
+    # --- (g) seedream.generate 기본 size 가 그대로 1920x1080 ---
+    # size 를 안 주면 기본값이 SIZE(1920x1080) 여야 기존 호출이 영향받지 않는다.
+    import inspect as _inspect  # noqa: PLC0415
+
+    sig = _inspect.signature(_seedream_mod.generate)
+    default_size = sig.parameters["size"].default if "size" in sig.parameters else None
+    if default_size != "1920x1080" or _seedream_mod.SIZE != "1920x1080":
+        bad.append(f"(g) seedream.generate 기본 size 가 1920x1080 이 아닙니다: {default_size} / {_seedream_mod.SIZE}")
+
+    # --- 가짜 외부 호출 ---
+    fake_store = _FakeCharStore()
+
+    # 분석: Astra(첫 모델)는 항상 실패, Claude(fallback)는 성공 → fallback 경로 검증.
+    analyze_calls: list[str] = []
+
+    def fake_analyze(blocks, *, model):
+        analyze_calls.append(model)
+        if model == characters.settings.ASTRA_MODEL:
+            raise RuntimeError("Astra 한도 0 (가짜)")
+        return (
+            {
+                "nameGuess": "김부장",
+                "descriptionKo": "중년 남성 캐릭터. 안경을 썼다. 정장 차림.",
+                "appearanceEn": "A middle-aged Korean man with glasses and short black hair.",
+                "outfitEn": "A dark business suit with dress shoes.",
+            },
+            {"model": model},
+        )
+
+    # Seedream: variant 별 크기 캡처. 'real' variant 의 front 호출만 실패시켜 (c) 를 검증.
+    seedream_sizes: dict[str, list[str]] = {}
+    fail_variant = {"name": ""}
+
+    def fake_seedream(prompt, references, *, size):
+        # 어떤 variant 인지 프롬프트로 가늠(real 은 'live-action'/'real Korean actor' 포함).
+        variant = "real" if ("live-action" in prompt or "real Korean actor" in prompt) else "webtoon"
+        seedream_sizes.setdefault(variant, []).append(size)
+        if fail_variant["name"] == variant and "Single full-body" in prompt:
+            raise characters.VpocError("vnew.seedream", "Filtered", "가짜 실패", 502)
+        # 시트는 가로로 긴(5칸), 정면은 세로로 긴 이미지로 돌려준다.
+        if "turnaround reference sheet" in prompt:
+            return _tiny_jpeg(2560, 1440)
+        return _tiny_jpeg(1440, 2560)
+
+    # fal: 제출 body 를 캡처(face_count·data URI 확인), 상태는 바로 COMPLETED.
+    fal_calls: list[tuple[str, str, dict]] = []
+
+    def fake_fal_request(method, url, payload=None):
+        fal_calls.append((method, url, payload or {}))
+        if method == "POST":
+            return {"request_id": "req_" + str(len(fal_calls))}
+        if url.endswith("/status"):
+            return {"status": "COMPLETED"}
+        # response
+        return {
+            "model_glb": {"url": "https://fal.media/files/x/model.glb"},
+            "thumbnail": {"url": "https://fal.media/files/x/thumb.png"},
+        }
+
+    def fake_fetch_url(url):
+        if url.endswith(".glb"):
+            return b"glTF\x02\x00\x00\x00fake-binary-glb"
+        return _tiny_jpeg(256, 256)
+
+    # 패치 적용
+    orig = {
+        "STORE": characters.STORE,
+        "_analyze": characters._analyze,
+        "_seedream": characters._seedream,
+        "_fal_request": characters._fal_request,
+        "_fetch_url": characters._fetch_url,
+        "sleep": _time.sleep,
+    }
+    characters.STORE = fake_store
+    characters._analyze = fake_analyze
+    characters._seedream = fake_seedream
+    characters._fal_request = fake_fal_request
+    characters._fetch_url = fake_fetch_url
+    characters.time.sleep = lambda *_a, **_k: None  # 폴링 대기 없이
+
+    # build 가 백그라운드 스레드를 join 할 수 있도록 start_build 를 감싼다(검사 전용).
+    started_threads: list = []
+    orig_thread = characters.threading.Thread
+
+    def _tracking_thread(*args, **kwargs):
+        t = orig_thread(*args, **kwargs)
+        started_threads.append(t)
+        return t
+
+    characters.threading.Thread = _tracking_thread
+
+    def _join_builds():
+        for t in started_threads:
+            t.join(timeout=30)
+        started_threads.clear()
+
+    try:
+        # 앱 두 개: tester 와 other(다른 사용자). owner 주입으로 격리.
+        owner_box = {"name": "tester"}
+
+        def make_app():
+            app = Flask(__name__)
+            bp = vnew.create_blueprint(
+                vnew.VnewDependencies(
+                    require_auth=lambda h: h,
+                    current_owner=lambda: owner_box["name"],
+                )
+            )
+            app.register_blueprint(bp)
+            return app.test_client()
+
+        client = make_app()
+
+        # (a) 생성
+        resp = client.post("/api/vnew/characters", json={"name": "김부장"})
+        if resp.status_code != 201:
+            bad.append(f"(a) 생성이 201 이 아닙니다: {resp.status_code} {resp.get_data(as_text=True)[:200]}")
+        char_id = (resp.get_json() or {}).get("id", "")
+        if not char_id:
+            bad.append("(a) 생성 응답에 id 가 없습니다")
+
+        # (a) 업로드 — multipart 2장
+        import io as _io  # noqa: PLC0415
+
+        data = {
+            "files": [
+                (_io.BytesIO(_tiny_jpeg()), "cut1.jpg"),
+                (_io.BytesIO(_tiny_jpeg()), "cut2.jpg"),
+            ]
+        }
+        resp = client.post(
+            f"/api/vnew/characters/{char_id}/uploads",
+            data=data,
+            content_type="multipart/form-data",
+        )
+        if resp.status_code != 201:
+            bad.append(f"(a) 업로드가 201 이 아닙니다: {resp.status_code} {resp.get_data(as_text=True)[:200]}")
+        sources = (resp.get_json() or {}).get("sources", [])
+        if len(sources) != 2:
+            bad.append(f"(a) 업로드 결과 sources 가 2개가 아닙니다: {len(sources)}")
+
+        # (a) 목록
+        resp = client.get("/api/vnew/characters")
+        rows = (resp.get_json() or {}).get("characters", [])
+        if resp.status_code != 200 or not any(r.get("id") == char_id for r in rows):
+            bad.append(f"(a) 목록에 생성한 캐릭터가 없습니다: {resp.status_code} {rows}")
+
+        # (a) 상세
+        resp = client.get(f"/api/vnew/characters/{char_id}")
+        detail = resp.get_json() or {}
+        if resp.status_code != 200 or detail.get("id") != char_id:
+            bad.append(f"(a) 상세 조회 실패: {resp.status_code}")
+        if len(detail.get("sources") or []) != 2:
+            bad.append("(a) 상세의 sources 가 2개가 아닙니다")
+
+        # (b) build → ready
+        resp = client.post(f"/api/vnew/characters/{char_id}/build")
+        if resp.status_code != 202:
+            bad.append(f"(b) build 가 202 가 아닙니다: {resp.status_code} {resp.get_data(as_text=True)[:200]}")
+        _join_builds()
+
+        char, _ = characters.load_char("tester", char_id)
+        if char.get("status") != "ready":
+            bad.append(f"(b) build 후 status 가 ready 가 아닙니다: {char.get('status')} / {char.get('buildError')}")
+        # 분석 fallback: Astra 먼저 호출되고 Claude 로 넘어감
+        if not analyze_calls or analyze_calls[0] != characters.settings.ASTRA_MODEL:
+            bad.append(f"(b) 분석이 Astra 를 먼저 부르지 않았습니다: {analyze_calls}")
+        if characters.settings.ANALYZE_FALLBACK_MODEL not in analyze_calls:
+            bad.append(f"(b) 분석이 Claude fallback 로 넘어가지 않았습니다: {analyze_calls}")
+        if char.get("analysis", {}).get("model") != characters.settings.ANALYZE_FALLBACK_MODEL:
+            bad.append(f"(b) analysis.model 이 실제 쓴 모델(Claude)이 아닙니다: {char.get('analysis', {}).get('model')}")
+
+        # (b) 시트/정면 크기
+        if seedream_sizes.get("webtoon", [])[:2] != [characters.settings.SHEET_SIZE, characters.settings.FRONT_SIZE]:
+            bad.append(f"(b) webtoon Seedream 크기 순서가 시트·정면이 아닙니다: {seedream_sizes.get('webtoon')}")
+
+        # (b) variant ready + 키·후면 자르기
+        for variant in characters.settings.VARIANTS:
+            v = char["variants"][variant]
+            if v.get("status") != "ready":
+                bad.append(f"(b) {variant} variant 가 ready 가 아닙니다: {v.get('status')} {v.get('error')}")
+            for key in ("sheetKey", "frontKey", "backKey"):
+                if not v.get(key) or v[key] not in fake_store.blobs:
+                    bad.append(f"(b) {variant}.{key} 가 저장되지 않았습니다")
+            m3d = v.get("model3d") or {}
+            if m3d.get("status") != "ready" or not m3d.get("glbKey"):
+                bad.append(f"(b) {variant} 3D 가 ready/glbKey 가 아닙니다: {m3d}")
+
+        # (b) 3D 제출 body: face_count 120000 · data URI
+        posts = [p for (m, u, p) in fal_calls if m == "POST"]
+        if not posts:
+            bad.append("(b) 3D 제출(POST)이 없습니다")
+        else:
+            for body in posts:
+                if body.get("face_count") != 120000:
+                    bad.append(f"(b) 3D face_count 가 120000 이 아닙니다: {body.get('face_count')}")
+                if not str(body.get("input_image_url", "")).startswith("data:image/"):
+                    bad.append("(b) 3D input_image_url 이 data URI 가 아닙니다")
+                if not str(body.get("back_image_url", "")).startswith("data:image/"):
+                    bad.append("(b) 3D back_image_url 이 data URI 가 아닙니다")
+                if body.get("enable_pbr") is not True:
+                    bad.append("(b) 3D enable_pbr 가 True 가 아닙니다")
+
+        # (b) 후면 = 시트 5번째 칸(가로 5등분) — 저장된 back 이미지 가로가 시트의 1/5 근처
+        import io as _io2  # noqa: PLC0415
+
+        from PIL import Image as _Img  # noqa: PLC0415
+
+        back_key = char["variants"]["webtoon"]["backKey"]
+        sheet_key = char["variants"]["webtoon"]["sheetKey"]
+        with _Img.open(_io2.BytesIO(fake_store.blobs[back_key])) as bimg, _Img.open(
+            _io2.BytesIO(fake_store.blobs[sheet_key])
+        ) as simg:
+            expected = simg.width - int(round(simg.width / 5.0 * 4))
+            if abs(bimg.width - expected) > 2:
+                bad.append(f"(b) 후면 자르기 폭이 시트 5번째 칸이 아닙니다: back={bimg.width} expected~{expected}")
+
+        # (e) GLB 스트리밍 200·Content-Type
+        resp = client.get(f"/api/vnew/characters/{char_id}/model/webtoon.glb")
+        if resp.status_code != 200:
+            bad.append(f"(e) GLB 스트리밍이 200 이 아닙니다: {resp.status_code}")
+        if resp.headers.get("Content-Type") != "model/gltf-binary":
+            bad.append(f"(e) GLB Content-Type 이 model/gltf-binary 가 아닙니다: {resp.headers.get('Content-Type')}")
+        if not resp.get_data():
+            bad.append("(e) GLB 응답 본문이 비었습니다")
+
+        # (c) 한 variant 실패해도 다른 variant ready — real 의 front 를 실패시켜 다시 build
+        fail_variant["name"] = "real"
+        resp = client.post(f"/api/vnew/characters/{char_id}/build")
+        if resp.status_code != 202:
+            bad.append(f"(c) 재-build 가 202 가 아닙니다: {resp.status_code}")
+        _join_builds()
+        char, _ = characters.load_char("tester", char_id)
+        if char["variants"]["real"]["status"] != "failed":
+            bad.append(f"(c) real variant 가 failed 가 아닙니다: {char['variants']['real']['status']}")
+        if char["variants"]["webtoon"]["status"] != "ready":
+            bad.append(f"(c) webtoon variant 가 ready 가 아닙니다: {char['variants']['webtoon']['status']}")
+        if char.get("status") != "ready":
+            bad.append(f"(c) 하나라도 ready 면 전체 ready 여야 합니다: {char.get('status')}")
+        fail_variant["name"] = ""
+
+        # (d) 진행 중 build 409 — status=building 으로 직접 세우고 호출
+        def _set_building(d):
+            d["status"] = "building"
+            d["buildStartedAt"] = characters.now_iso()
+
+        characters.mutate_char("tester", char_id, _set_building)
+        resp = client.post(f"/api/vnew/characters/{char_id}/build")
+        if resp.status_code != 409:
+            bad.append(f"(d) 진행 중 build 가 409 가 아닙니다: {resp.status_code}")
+
+        # (d) 30분 초과 → 조회 때 failed
+        from datetime import datetime as _dt, timedelta as _td, timezone as _tz  # noqa: PLC0415
+
+        stale_at = (_dt.now(_tz.utc) - _td(minutes=40)).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+        def _set_stale(d):
+            d["status"] = "building"
+            d["buildStartedAt"] = stale_at
+
+        characters.mutate_char("tester", char_id, _set_stale)
+        resp = client.get(f"/api/vnew/characters/{char_id}")
+        detail = resp.get_json() or {}
+        if detail.get("status") != "failed":
+            bad.append(f"(d) 30분 초과 building 이 조회 때 failed 가 되지 않습니다: {detail.get('status')}")
+
+        # (f) 다른 사용자 접근 — owner 를 other 로 바꾸면 같은 char_id 는 안 보인다(404).
+        owner_box["name"] = "other"
+        resp = client.get(f"/api/vnew/characters/{char_id}")
+        if resp.status_code != 404:
+            bad.append(f"(f) 다른 사용자가 상세를 보는데 404 가 아닙니다: {resp.status_code}")
+        resp = client.get(f"/api/vnew/characters/{char_id}/model/webtoon.glb")
+        if resp.status_code != 404:
+            bad.append(f"(f) 다른 사용자가 GLB 를 받는데 404 가 아닙니다: {resp.status_code}")
+        resp = client.post(f"/api/vnew/characters/{char_id}/build")
+        if resp.status_code not in (404, 409):
+            bad.append(f"(f) 다른 사용자가 build 하는데 404 가 아닙니다: {resp.status_code}")
+        owner_box["name"] = "tester"
+
+    except Exception as exc:  # noqa: BLE001
+        import traceback as _tb  # noqa: PLC0415
+
+        bad.append("검사 중 예외: " + repr(exc) + "\n" + _tb.format_exc()[:1200])
+    finally:
+        characters.STORE = orig["STORE"]
+        characters._analyze = orig["_analyze"]
+        characters._seedream = orig["_seedream"]
+        characters._fal_request = orig["_fal_request"]
+        characters._fetch_url = orig["_fetch_url"]
+        characters.time.sleep = orig["sleep"]
+        characters.threading.Thread = orig_thread
+
+    if bad:
+        fail("캐릭터 만들기(vnew) 검사 실패\n" + "\n".join(f"  {item}" for item in bad))
+    else:
+        ok(
+            "캐릭터 만들기(vnew) 검사 (a)CRUD·업로드 (b)분석 fallback·시트·정면·후면·3D"
+            "(120000·data URI)·ready (c)variant 격리 (d)409·stale failed (e)GLB 200 (f)격리 404 (g)size 기본"
+        )
+
+
 # ---------------------------------------------------------------- main
 
 
@@ -1891,6 +2271,7 @@ def main() -> int:
     check_cancel()
     check_dual()
     check_vnew()
+    check_vnew_characters()
     print()
     if warnings:
         print(f"경고 {len(warnings)}건")
