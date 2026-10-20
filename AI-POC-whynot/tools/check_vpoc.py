@@ -1731,6 +1731,125 @@ def check_dual() -> None:
         )
 
 
+def check_vnew() -> None:
+    """영상만들기_신규(vnew, 설계자 2026-10-20) — 틀만 확인한다.
+
+    (a) VNEW 꺼짐 → video_new 생성 거절(잘못된 트랙), 블루프린트 미등록(server.py 가 플래그로 가둠)
+    (b) VNEW 켜짐 → video_new 생성 허용, /api/vnew/health 200 {ok:true}
+    (c) node --check 대상에 vnew.js 가 있다(check_js 가 public/*.js 전부를 보므로 존재만 확인)
+    """
+    sys.path.insert(0, str(ROOT / "app"))
+    from src import project_tracks  # noqa: PLC0415
+    from src import vnew  # noqa: PLC0415
+
+    bad: list[str] = []
+
+    # --- 공통: 가짜 deps. 트랙 검증 분기만 쓰므로 나머지는 더미다. ---
+    class _Err(Exception):
+        pass
+
+    def make_deps(vnew_on: bool):
+        def response_error(message, status, code, **kwargs):
+            return (code, status)
+
+        return project_tracks.ProjectTrackDependencies(
+            require_auth=lambda h: h,
+            response_error=response_error,
+            current_username=lambda: "tester",
+            list_projects=lambda actor: {"shared": [], "private": []},
+            project_payload=lambda p: p,
+            can_read_project=lambda p: True,
+            can_write_project=lambda p: True,
+            command_store=object(),
+            repository=object(),
+            story_enabled=True,
+            video_enabled=True,
+            vnew_enabled=vnew_on,
+        )
+
+    deps_off = make_deps(False)
+    deps_on = make_deps(True)
+
+    # (a) 꺼짐: video_new 는 받는 트랙 집합에 없고, track_enabled 도 False,
+    #     _availability_error 도 거절한다.
+    if "video_new" in project_tracks._accepted_tracks(deps_off):
+        bad.append("(a) VNEW 꺼짐인데 video_new 가 받는 트랙에 있습니다")
+    if project_tracks.track_enabled(
+        "video_new", story_enabled=True, video_enabled=True, vnew_enabled=False
+    ):
+        bad.append("(a) VNEW 꺼짐인데 track_enabled(video_new) 가 True 입니다")
+    off_err = project_tracks._availability_error(deps_off, "video_new")
+    if not off_err or off_err[1] != 403:
+        bad.append(f"(a) VNEW 꺼짐인데 video_new 가용성 검사가 거절하지 않습니다: {off_err}")
+
+    # 블루프린트 미등록: server.py 가 'if VNEW_ENABLED:' 안에서만 등록한다.
+    server_src = (ROOT / "app" / "src" / "server.py").read_text(encoding="utf-8")
+    if "if VNEW_ENABLED:" not in server_src:
+        bad.append("(a) server.py 가 VNEW_ENABLED 플래그로 vnew 등록을 가두지 않습니다")
+    reg_at = server_src.find("vnew.create_blueprint")
+    gate_at = server_src.rfind("if VNEW_ENABLED:", 0, reg_at)
+    if reg_at < 0 or gate_at < 0:
+        bad.append("(a) vnew.create_blueprint 등록이 VNEW_ENABLED 블록 뒤에 있지 않습니다")
+    if "VNEW_ENABLED = os.getenv(\"VNEW_ENABLED\"" not in server_src:
+        bad.append("(a) server.py 가 VNEW_ENABLED env 를 읽지 않습니다")
+
+    # (b) 켜짐: video_new 가 받는 트랙에 있고, track_enabled True, 가용성 검사 통과(None).
+    if "video_new" not in project_tracks._accepted_tracks(deps_on):
+        bad.append("(b) VNEW 켜짐인데 video_new 가 받는 트랙에 없습니다")
+    if not project_tracks.track_enabled(
+        "video_new", story_enabled=True, video_enabled=True, vnew_enabled=True
+    ):
+        bad.append("(b) VNEW 켜짐인데 track_enabled(video_new) 가 False 입니다")
+    on_err = project_tracks._availability_error(deps_on, "video_new")
+    if on_err is not None:
+        bad.append(f"(b) VNEW 켜짐인데 video_new 가용성 검사가 거절합니다: {on_err}")
+    # 트랙 상수·라벨
+    if project_tracks.TRACK_VIDEO_NEW != "video_new" or "video_new" not in project_tracks.TRACKS:
+        bad.append("(b) TRACK_VIDEO_NEW/TRACKS 에 video_new 가 없습니다")
+    if "video_new" not in project_tracks.TRACK_LABELS:
+        bad.append("(b) TRACK_LABELS 에 video_new 라벨이 없습니다")
+
+    # (b) /api/vnew/health 200 {ok:true} — 인증은 주입된 require_auth 로 통과시킨다.
+    try:
+        from flask import Flask  # noqa: PLC0415
+
+        bp = vnew.create_blueprint(vnew.VnewDependencies(require_auth=lambda h: h))
+        app = Flask(__name__)
+        app.register_blueprint(bp)
+        client = app.test_client()
+        resp = client.get("/api/vnew/health")
+        body = resp.get_json()
+        if resp.status_code != 200:
+            bad.append(f"(b) /api/vnew/health 가 200 이 아닙니다: {resp.status_code}")
+        if not body or body.get("ok") is not True:
+            bad.append(f"(b) /api/vnew/health 응답이 {{ok:true}} 가 아닙니다: {body}")
+        rules = [str(r) for r in app.url_map.iter_rules()]
+        if not any(r.startswith("/api/vnew/health") for r in rules):
+            bad.append("(b) /api/vnew/health 라우트가 없습니다")
+    except Exception as exc:  # noqa: BLE001
+        import traceback as _tb  # noqa: PLC0415
+        bad.append("(b) health 검사 중 예외: " + repr(exc) + "\n" + _tb.format_exc()[:800])
+
+    # (c) node --check 대상에 vnew.js 가 있다(check_js 가 public/*.js 전부를 본다).
+    if not (PUBLIC / "vnew.js").exists():
+        bad.append("(c) frontend/public/vnew.js 가 없습니다")
+    if not (PUBLIC / "vnew.css").exists():
+        bad.append("(c) frontend/public/vnew.css 가 없습니다")
+    # index.html 이 vnew.js/vnew.css 를 defer·asset version 으로 싣는지.
+    index_src = (PUBLIC / "index.html").read_text(encoding="utf-8")
+    if "/vnew.js?v=__ASSET_VERSION__" not in index_src or "defer" not in index_src[
+        index_src.find("/vnew.js"): index_src.find("/vnew.js") + 60
+    ]:
+        bad.append("(c) index.html 이 vnew.js 를 defer·asset version 으로 싣지 않습니다")
+    if "/vnew.css?v=__ASSET_VERSION__" not in index_src:
+        bad.append("(c) index.html 이 vnew.css 를 asset version 으로 싣지 않습니다")
+
+    if bad:
+        fail("영상만들기_신규(vnew) 검사 실패\n" + "\n".join(f"  {item}" for item in bad))
+    else:
+        ok("영상만들기_신규(vnew) 검사 (a)꺼짐 거절·미등록 (b)켜짐 허용·health 200 (c)vnew.js/css·index 로드")
+
+
 def check_planview_keys() -> None:
     """PlanView ④ 샷의 기존 키가 그대로고 새 키만 더해졌는지 본다."""
     source = (ROOT / "app" / "src" / "vpoc" / "routes.py").read_text(encoding="utf-8")
@@ -1985,6 +2104,7 @@ def main() -> int:
     check_planview_keys()
     check_cancel()
     check_dual()
+    check_vnew()
     check_fal_audit()
     print()
     if warnings:
