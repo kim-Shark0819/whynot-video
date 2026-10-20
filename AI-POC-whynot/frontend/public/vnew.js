@@ -468,9 +468,33 @@
 
     // 분석 결과
     var analysis = detail.analysis || {};
-    if (analysis.descriptionKo || analysis.model) {
+    if (
+      analysis.descriptionKo ||
+      analysis.model ||
+      analysis.styleEn ||
+      analysis.outfitEn ||
+      (analysis.expressionsKo && analysis.expressionsKo.length)
+    ) {
       var card = el("div", "vnew-analysis");
       if (analysis.descriptionKo) card.appendChild(el("p", "vnew-analysis-desc", analysis.descriptionKo));
+      if (analysis.styleEn) {
+        var styleRow = el("p", "vnew-analysis-meta");
+        styleRow.appendChild(el("span", "vnew-analysis-label", "그림체"));
+        styleRow.appendChild(el("span", null, analysis.styleEn));
+        card.appendChild(styleRow);
+      }
+      if (analysis.outfitEn) {
+        var outfitRow = el("p", "vnew-analysis-meta");
+        outfitRow.appendChild(el("span", "vnew-analysis-label", "대표 옷차림"));
+        outfitRow.appendChild(el("span", null, analysis.outfitEn));
+        card.appendChild(outfitRow);
+      }
+      if (analysis.expressionsKo && analysis.expressionsKo.length) {
+        var exprRow = el("p", "vnew-analysis-meta");
+        exprRow.appendChild(el("span", "vnew-analysis-label", "표정"));
+        exprRow.appendChild(el("span", null, analysis.expressionsKo.join(", ")));
+        card.appendChild(exprRow);
+      }
       if (analysis.model) card.appendChild(el("p", "vnew-analysis-model", "분석 모델: " + analysis.model));
       host.appendChild(card);
     }
@@ -633,23 +657,43 @@
     btn.type = "button";
     btn.disabled = building || !hasSources;
 
-    btn.addEventListener("click", function () {
-      if (madeBefore) {
-        var okConfirm = false;
-        try {
-          okConfirm = window.confirm("다시 만들면 새 버전이 생기고 비용이 듭니다. 계속할까요?");
-        } catch (e) {
-          okConfirm = true;
-        }
-        if (!okConfirm) return;
-      }
+    // 추가 요청 창(다시 만들기 때만). 숨겨 두었다가 버튼을 누르면 펼친다.
+    var panel = el("div", "vnew-rebuild-panel");
+    panel.style.display = "none";
+    panel.appendChild(el("label", "vnew-rebuild-label", "추가 요청 (선택)"));
+    var textarea = el("textarea", "vnew-rebuild-text");
+    textarea.rows = 3;
+    textarea.maxLength = 500;
+    textarea.placeholder = "후드티 말고 베이지 셔츠로 / 연필 선 느낌을 더 살려서 / 표정은 무표정으로";
+    textarea.value = detail.extraPromptKo || "";
+    panel.appendChild(textarea);
+    panel.appendChild(
+      el("p", "vnew-rebuild-cost", "다시 만들면 새 버전이 생기고 비용이 듭니다.")
+    );
+    var panelBtns = el("div", "vnew-rebuild-btns");
+    var confirmBtn = el("button", "primary-button", "다시 만들기");
+    confirmBtn.type = "button";
+    var cancelBtn = el("button", "outline-button", "취소");
+    cancelBtn.type = "button";
+    panelBtns.appendChild(confirmBtn);
+    panelBtns.appendChild(cancelBtn);
+    panel.appendChild(panelBtns);
+
+    function doBuild(body) {
       btn.disabled = true;
-      api("/api/vnew/characters/" + encodeURIComponent(detail.id) + "/build", { method: "POST" })
+      confirmBtn.disabled = true;
+      error.style.display = "none";
+      api("/api/vnew/characters/" + encodeURIComponent(detail.id) + "/build", {
+        method: "POST",
+        body: body ? JSON.stringify(body) : undefined,
+        headers: body ? { "Content-Type": "application/json" } : undefined
+      })
         .then(function () {
           refreshDetail(host, false);
         })
         .catch(function (err) {
           btn.disabled = false;
+          confirmBtn.disabled = false;
           error.style.display = "";
           if (err && err.status === 409) {
             error.textContent = "이미 만들고 있습니다.";
@@ -657,9 +701,27 @@
             error.textContent = "만들기를 시작하지 못했습니다: " + errMessage(err);
           }
         });
+    }
+
+    btn.addEventListener("click", function () {
+      if (madeBefore) {
+        // 추가 요청 창을 펼친다(토글).
+        panel.style.display = panel.style.display === "none" ? "" : "none";
+        if (panel.style.display === "") textarea.focus();
+        return;
+      }
+      doBuild(null);
+    });
+
+    confirmBtn.addEventListener("click", function () {
+      doBuild({ extraPromptKo: textarea.value || "" });
+    });
+    cancelBtn.addEventListener("click", function () {
+      panel.style.display = "none";
     });
 
     section.appendChild(btn);
+    if (madeBefore) section.appendChild(panel);
     if (!hasSources) {
       section.appendChild(el("span", "vnew-hint", "이미지를 1장 이상 올리면 만들 수 있습니다."));
     }
@@ -716,6 +778,11 @@
     var model3d = v.model3d || {};
     var column = el("div", "vnew-variant-col");
     column.appendChild(el("h2", "vnew-variant-title", meta.title));
+
+    // 사람 수 경고(정면/후면에 여러 사람이 보일 수 있음)
+    if (v.warning) {
+      column.appendChild(el("p", "vnew-variant-warning", "⚠ " + v.warning));
+    }
 
     // (a) 3D 보기
     column.appendChild(viewer3d(host, detail, meta, v, model3d));

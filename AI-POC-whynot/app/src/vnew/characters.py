@@ -102,6 +102,7 @@ def _empty_variant() -> dict:
         "sheetKey": "",
         "frontKey": "",
         "backKey": "",
+        "warning": "",  # 정면/후면에 여러 사람이 보일 수 있을 때 안내(3D 는 진행)
         "model3d": {
             "status": "queued",  # queued|submitted|ready|failed
             "requestArn": "",
@@ -125,9 +126,14 @@ def new_char(name: str) -> dict:
             "nameGuess": "",
             "descriptionKo": "",
             "appearanceEn": "",
+            "styleEn": "",
             "outfitEn": "",
+            "altOutfitsEn": [],
+            "expressionsKo": [],
+            "extraEn": "",
             "model": "",
         },
+        "extraPromptKo": "",
         "variants": {v: _empty_variant() for v in settings.VARIANTS},
         "version": 0,
         "costumes": [],
@@ -323,16 +329,26 @@ def _fetch_url(url: str) -> bytes:
 # ================================================================ 분석(a)
 
 _ANALYZE_SYSTEM = (
-    "You analyze Korean webtoon character cut images and describe one character. "
+    "You analyze Korean webtoon character cut images and describe ONE single character. "
+    "All images show ONE single character. If several figures appear (even in one image), "
+    "they are the SAME person drawn with different expressions, poses, angles or outfits — "
+    "never different people. Ignore text and speech bubbles. "
     "Answer ONLY by calling the emit_character tool exactly once. "
     "descriptionKo must be 2-3 Korean sentences. "
     "appearanceEn is ONE English sentence about face, hair, body type, age range, glasses, etc. "
-    "outfitEn is ONE English sentence about clothing and shoes. Do not add text outside the tool."
+    "styleEn is 1-2 English sentences describing the EXACT drawing style of the reference art: "
+    "line weight and texture (e.g. thin sketchy pencil-like lines), coloring method "
+    "(flat / soft pastel / cel), palette, shading and blush, and how the eyes and hair are drawn. "
+    "outfitEn is ONE English sentence about the SINGLE representative outfit — pick the outfit of the "
+    "cut where the full body is drawn largest. altOutfitsEn lists other outfits seen (reference only). "
+    "expressionsKo lists the facial expressions you can see (Korean words). "
+    "If the user gives an extra request (extraPromptKo), turn it into a short English drawing "
+    "instruction in extraEn; otherwise leave extraEn empty. Do not add text outside the tool."
 )
 
 _ANALYZE_TOOL = {
     "name": "emit_character",
-    "description": "Describe the character seen in the reference images.",
+    "description": "Describe the single character seen in the reference images.",
     "inputSchema": {
         "json": {
             "type": "object",
@@ -340,7 +356,11 @@ _ANALYZE_TOOL = {
                 "nameGuess": {"type": "string"},
                 "descriptionKo": {"type": "string"},
                 "appearanceEn": {"type": "string"},
+                "styleEn": {"type": "string"},
                 "outfitEn": {"type": "string"},
+                "altOutfitsEn": {"type": "array", "items": {"type": "string"}},
+                "expressionsKo": {"type": "array", "items": {"type": "string"}},
+                "extraEn": {"type": "string"},
             },
             "required": ["descriptionKo", "appearanceEn", "outfitEn"],
         }
@@ -351,7 +371,9 @@ _ANALYZE_TOOL = {
 def analyze_sources(owner: str, char: dict) -> dict:
     """업로드 이미지를 Astra 에 먼저, 실패하면 Claude 분석 체인으로 보내 분석 JSON 을 받는다.
 
-    실제 쓴 모델을 analysis.model 에 남긴다. 반환: {nameGuess,descriptionKo,appearanceEn,outfitEn,model}.
+    실제 쓴 모델을 analysis.model 에 남긴다. 반환:
+    {nameGuess,descriptionKo,appearanceEn,styleEn,outfitEn,altOutfitsEn,expressionsKo,extraEn,model}.
+    extraPromptKo(사용자 추가 요청)가 있으면 Astra 에 함께 주고 extraEn 으로 돌려받는다.
     """
     sources = char.get("sources") or []
     if not sources:
@@ -361,9 +383,17 @@ def analyze_sources(owner: str, char: dict) -> dict:
     for src in sources[: settings.MAX_ANALYSIS_IMAGES]:
         jpegs.append(source_jpeg(owner, char["id"], src["fileId"]))
 
-    blocks: list[dict] = [
-        {"text": "다음 웹툰 컷들에 나오는 같은 캐릭터 한 명을 분석해 주세요."}
-    ]
+    extra_ko = str(char.get("extraPromptKo") or "").strip()
+
+    intro = (
+        "다음 웹툰 컷들에 나오는 같은 캐릭터 한 명을 분석해 주세요. "
+        "여러 인물이 보여도 모두 같은 사람의 다른 표정·자세·각도·옷차림입니다."
+    )
+    blocks: list[dict] = [{"text": intro}]
+    if extra_ko:
+        blocks.append(
+            {"text": "사용자 추가 요청(이 지시를 extraEn 영어 한 줄로 바꿔 주세요): " + extra_ko}
+        )
     for jpeg in jpegs:
         blocks.append({"image": {"format": "jpeg", "source": {"bytes": jpeg}}})
 
@@ -374,14 +404,66 @@ def analyze_sources(owner: str, char: dict) -> dict:
         except Exception as exc:  # noqa: BLE001
             log.warning("vnew.analyze.model_failed model=%s err=%s", model, str(exc)[:200])
             continue
+        alt = payload.get("altOutfitsEn")
+        expressions = payload.get("expressionsKo")
         return {
             "nameGuess": str(payload.get("nameGuess") or "").strip(),
             "descriptionKo": str(payload.get("descriptionKo") or "").strip(),
             "appearanceEn": str(payload.get("appearanceEn") or "").strip(),
+            "styleEn": str(payload.get("styleEn") or "").strip(),
             "outfitEn": str(payload.get("outfitEn") or "").strip(),
+            "altOutfitsEn": [str(x).strip() for x in alt if str(x).strip()] if isinstance(alt, list) else [],
+            "expressionsKo": [str(x).strip() for x in expressions if str(x).strip()]
+            if isinstance(expressions, list)
+            else [],
+            "extraEn": str(payload.get("extraEn") or "").strip(),
             "model": str(usage.get("model") or model),
         }
     raise VpocError("vnew.analyze", "AnalyzeFailed", "캐릭터 분석에 실패했습니다.", 502)
+
+
+# ---- 사람 수 검사(정면·후면) ----
+
+_PEOPLE_TOOL = {
+    "name": "emit_people_count",
+    "description": "Count how many distinct people are drawn in the image.",
+    "inputSchema": {
+        "json": {
+            "type": "object",
+            "properties": {"people": {"type": "integer"}},
+            "required": ["people"],
+        }
+    },
+}
+
+_PEOPLE_SYSTEM = (
+    "You count how many distinct people appear in ONE image. "
+    "Answer only by calling the emit_people_count tool exactly once with the integer count."
+)
+
+
+def _count_people(jpeg: bytes) -> int | None:
+    """이미지에 보이는 사람 수. 모델 오류면 None(검사 건너뜀)."""
+    blocks = [
+        {"text": "How many distinct people are drawn in this single image?"},
+        {"image": {"format": "jpeg", "source": {"bytes": jpeg}}},
+    ]
+    try:
+        payload, _usage = vpoc_llm._converse(  # noqa: SLF001
+            system_text=_PEOPLE_SYSTEM,
+            blocks=blocks,
+            tool=_PEOPLE_TOOL,
+            max_tokens=120,
+            where="vnew.count_people",
+            model=settings.PEOPLE_COUNT_MODEL,
+        )
+    except Exception as exc:  # noqa: BLE001
+        log.warning("vnew.count_people.failed err=%s", str(exc)[:200])
+        return None
+    try:
+        return int(payload.get("people"))
+    except (TypeError, ValueError):
+        return None
 
 
 # ================================================================ 프롬프트(b)
@@ -393,60 +475,118 @@ def _who(analysis: dict) -> str:
     return f"The character: {appearance} Wearing: {outfit}".strip()
 
 
+def _one_person_outfit(analysis: dict) -> str:
+    """모든 뷰에 '한 사람만 · 이 옷만' 을 강제하는 문장."""
+    outfit = (analysis.get("outfitEn") or "").strip() or "the outfit described above"
+    return (
+        "Draw exactly ONE person — only ONE single person in the image, no extra figures, "
+        "no duplicates, no background characters. "
+        f"Wear only this outfit in every view: {outfit}"
+    )
+
+
+def _style_clause(analysis: dict) -> str:
+    """웹툰 variant 그림체 지시: styleEn 을 그대로 넣고 '참고 그림체 그대로' 강제."""
+    style = (analysis.get("styleEn") or "").strip()
+    head = (style + " ") if style else ""
+    return (
+        head
+        + "Match the drawing style of the reference images exactly — same line quality, coloring "
+        "and shading. Do NOT redraw in a generic anime or glossy webtoon style."
+    )
+
+
+def _with_extra(prompt: str, analysis: dict) -> str:
+    """분석이 뽑은 extraEn(사용자 추가 요청) 을 프롬프트 끝에 붙인다."""
+    extra = (analysis.get("extraEn") or "").strip()
+    if extra:
+        return prompt + " " + extra
+    return prompt
+
+
 def _sheet_prompt(variant: str, analysis: dict) -> str:
     who = _who(analysis)
+    one = _one_person_outfit(analysis)
     if variant == "real":
-        return (
+        prompt = (
             "Photorealistic live-action character turnaround reference sheet of a real Korean actor "
             "playing the character from the reference images. "
             + who
             + " Five full-body views side by side on a plain white background: front, three-quarter "
             "front, side profile, three-quarter back, back. Same person, same outfit in every view. "
-            "Real photograph, natural skin texture, soft studio lighting. No text, no labels."
+            + one
+            + " Real photograph, natural skin texture, soft studio lighting. No text, no labels."
         )
-    return (
+        return _with_extra(prompt, analysis)
+    prompt = (
         "Character turnaround reference sheet. "
         + who
         + " Five full-body views side by side on a plain white background: front, three-quarter "
         "front, side profile, three-quarter back, back. Same person, same outfit in every view. "
-        "Keep the exact Korean webtoon art style of the references: clean ink line art, cel shading. "
-        "No text, no speech bubbles, no labels."
+        + one
+        + " "
+        + _style_clause(analysis)
+        + " No text, no speech bubbles, no labels."
     )
+    return _with_extra(prompt, analysis)
 
 
 def _front_prompt(variant: str, analysis: dict) -> str:
     who = _who(analysis)
+    one = _one_person_outfit(analysis)
     if variant == "real":
-        return (
+        prompt = (
             "Single full-body front view photograph of a real Korean actor playing the character. "
             + who
             + " Standing straight in a relaxed A-pose facing the camera, whole body from head to shoes "
-            "visible, centered, plain white background, no shadow. Real photograph, natural skin "
-            "texture, soft studio lighting. No text."
+            "visible, centered, plain white background, no shadow. "
+            + one
+            + " Real photograph, natural skin texture, soft studio lighting. No text."
         )
-    return (
+        return _with_extra(prompt, analysis)
+    prompt = (
         "Single full-body front view. "
         + who
         + " Standing straight in a relaxed A-pose facing the camera, whole body from head to shoes "
-        "visible, centered, plain white background, no shadow. Keep the exact Korean webtoon art "
-        "style of the references: clean ink line art, cel shading. No text."
+        "visible, centered, plain white background, no shadow. "
+        + one
+        + " "
+        + _style_clause(analysis)
+        + " No text."
     )
+    return _with_extra(prompt, analysis)
+
+
+def _back_prompt(variant: str, analysis: dict) -> str:
+    """후면 전신 — 정면 이미지 + 시트를 참고로 '같은 한 사람, 같은 옷, 뒷모습'."""
+    who = _who(analysis)
+    one = _one_person_outfit(analysis)
+    if variant == "real":
+        prompt = (
+            "Single full-body BACK view photograph of the same real Korean actor as in the reference "
+            "images, seen from directly behind. "
+            + who
+            + " Back view of the same single person, same outfit, standing straight in a relaxed "
+            "A-pose, whole body from head to shoes visible, centered, plain white background, no shadow. "
+            + one
+            + " Real photograph, natural skin texture, soft studio lighting. No text."
+        )
+        return _with_extra(prompt, analysis)
+    prompt = (
+        "Single full-body BACK view of the same single person as in the reference images, seen from "
+        "directly behind. "
+        + who
+        + " Back view of the same single person, same outfit, standing straight in a relaxed A-pose, "
+        "whole body from head to shoes visible, centered, plain white background, no shadow. "
+        + one
+        + " "
+        + _style_clause(analysis)
+        + " No text."
+    )
+    return _with_extra(prompt, analysis)
 
 
 # ================================================================ 이미지 자르기
-
-
-def _crop_fifth_panel(sheet_jpeg: bytes) -> bytes:
-    """시트를 가로 5등분해 5번째 칸(후면)을 떼어 낸다."""
-    with Image.open(io.BytesIO(sheet_jpeg)) as image:
-        image = image.convert("RGB")
-        width, height = image.size
-        panel_w = width / 5.0
-        left = int(round(panel_w * 4))
-        crop = image.crop((left, 0, width, height))
-        buffer = io.BytesIO()
-        crop.save(buffer, format="JPEG", quality=92)
-        return buffer.getvalue()
 
 
 def _square_pad(jpeg: bytes, side: int) -> bytes:
@@ -659,12 +799,33 @@ def _set_variant_3d(owner: str, char_id: str, variant: str, patch: dict) -> None
     mutate_char(owner, char_id, mutator)
 
 
+def _gen_checked(
+    prompt: str, references: list[bytes], *, size: str
+) -> tuple[bytes, bool]:
+    """그림 1장 생성 후 사람 수를 검사. n != 1 이면 '한 사람만' 지시를 붙여 1회만 다시 그린다.
+
+    반환: (jpeg, multi) — multi 는 재생성 뒤에도 사람 수가 1 이 아니면 True(warning 대상).
+    검사가 모델 오류로 건너뛰어진 경우(None)는 재생성하지 않고 multi=False.
+    """
+    image = _seedream(prompt, references, size=size)
+    count = _count_people(image)
+    if count is None or count == 1:
+        return image, False
+    # 한 번만 다시 그린다.
+    retry_prompt = prompt + " Only one person. Remove the extra figures."
+    image2 = _seedream(retry_prompt, references, size=size)
+    count2 = _count_people(image2)
+    if count2 is None or count2 == 1:
+        return image2, False
+    return image2, True
+
+
 def _build_variant(
     owner: str, char_id: str, variant: str, version: int, analysis: dict, refs: list[bytes]
 ) -> None:
     """한 variant 의 그림 + 3D. 실패하면 그 variant 만 failed 로 두고 예외를 올리지 않는다."""
     try:
-        _set_variant(owner, char_id, variant, {"status": "images"})
+        _set_variant(owner, char_id, variant, {"status": "images", "warning": ""})
 
         # 시트(2560x1440)
         sheet = _seedream(_sheet_prompt(variant, analysis), refs, size=settings.SHEET_SIZE)
@@ -672,23 +833,35 @@ def _build_variant(
         s_key = sheet_key(owner, char_id, variant, version)
         STORE.put_bytes(s_key, sheet, "image/jpeg")
 
-        # 정면 전신(1440x2560)
-        # 시트를 첫 참고로 넣어 정면이 시트(후면 칸)와 같은 인물·옷이 되게 한다 — 3D 정면·후면 일치.
-        front = _seedream(_front_prompt(variant, analysis), [sheet] + list(refs)[:3], size=settings.FRONT_SIZE)
+        # 정면 전신(1440x2560) — 시트를 첫 참고로 넣어 같은 인물·옷이 되게 한다.
+        # 사람 수 검사: 여러 명이면 1회 다시 그리고, 그래도면 warning.
+        front, front_multi = _gen_checked(
+            _front_prompt(variant, analysis), [sheet] + list(refs)[:3], size=settings.FRONT_SIZE
+        )
         _charge_seedream(owner, char_id, variant, "front")
         f_key = front_key(owner, char_id, variant, version)
         STORE.put_bytes(f_key, front, "image/jpeg")
 
-        # 후면 = 시트 5번째 칸
-        back = _crop_fifth_panel(sheet)
+        # 후면 전신(1440x2560) — 정면 + 시트를 참고로 따로 생성(이전엔 시트 5번째 칸을 잘랐음).
+        back, back_multi = _gen_checked(
+            _back_prompt(variant, analysis), [front, sheet] + list(refs)[:2], size=settings.BACK_SIZE
+        )
+        _charge_seedream(owner, char_id, variant, "back")
         b_key = back_key(owner, char_id, variant, version)
         STORE.put_bytes(b_key, back, "image/jpeg")
 
+        warning = "정면/후면에 여러 사람이 보일 수 있습니다" if (front_multi or back_multi) else ""
         _set_variant(
             owner,
             char_id,
             variant,
-            {"status": "model3d", "sheetKey": s_key, "frontKey": f_key, "backKey": b_key},
+            {
+                "status": "model3d",
+                "sheetKey": s_key,
+                "frontKey": f_key,
+                "backKey": b_key,
+                "warning": warning,
+            },
         )
 
         # 3D: front·back 정사각 패딩 → data URI 제출 → 완료까지 폴링 → 복사
@@ -801,12 +974,24 @@ def run_build(owner: str, char_id: str, version: int) -> None:
             pass
 
 
-def start_build(owner: str, char_id: str) -> int:
-    """build 요청: 진행 중이면 409, 아니면 version+1 로 variant 초기화하고 스레드 시작. 새 version 반환."""
+def start_build(owner: str, char_id: str, extra_prompt_ko: str | None = None) -> int:
+    """build 요청: 진행 중이면 409, 아니면 version+1 로 variant 초기화하고 스레드 시작. 새 version 반환.
+
+    extra_prompt_ko:
+      - None  → 이전 extraPromptKo 를 그대로 유지(다음 빌드에도 유지).
+      - ""    → extraPromptKo 를 지운다.
+      - 문자열 → extraPromptKo 로 저장(≤ MAX_EXTRA_PROMPT_LEN, 넘으면 자른다).
+    """
 
     def mutator(data: dict) -> int:
         if data.get("status") == "building" and not _is_stale(data):
             raise VpocError("vnew.build", "AlreadyBuilding", "이미 만들고 있습니다.", 409)
+        if extra_prompt_ko is not None:
+            cleaned = str(extra_prompt_ko or "").strip()[: settings.MAX_EXTRA_PROMPT_LEN]
+            if cleaned:
+                data["extraPromptKo"] = cleaned
+            else:
+                data.pop("extraPromptKo", None)
         version = int(data.get("version") or 0) + 1
         data["version"] = version
         data["status"] = "building"
@@ -998,6 +1183,7 @@ def detail_view(owner: str, char_id: str) -> dict:
         variants_out[variant] = {
             "status": v.get("status"),
             "error": v.get("error") or "",
+            "warning": v.get("warning") or "",
             "sheetUrl": _presign(v.get("sheetKey")),
             "frontUrl": _presign(v.get("frontKey")),
             "backUrl": _presign(v.get("backKey")),
@@ -1018,6 +1204,7 @@ def detail_view(owner: str, char_id: str) -> dict:
         "buildError": char.get("buildError") or "",
         "sources": char.get("sources") or [],
         "analysis": char.get("analysis") or {},
+        "extraPromptKo": char.get("extraPromptKo") or "",
         "variants": variants_out,
         "costumes": char.get("costumes") or [],
     }

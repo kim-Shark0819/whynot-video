@@ -1444,6 +1444,15 @@ def check_dual() -> None:
                 bad.append("(b) 변환 영상 바이트가 비었습니다")
             if "@Video1" not in call["prompt"]:
                 bad.append(f"(b) 프롬프트에 @Video1 이 없습니다: {call['prompt'][:60]}")
+            # 이 dual 회차는 ① sceneFiles·③ 캐릭터가 없어 참고 이미지가 0장 → 일반 문장(설계자 2026-10-20).
+            if call["references"]:
+                bad.append(f"(b) 참고 이미지가 없어야 하는데 {len(call['references'])}장 있습니다")
+            if "Korean webtoon style" not in call["prompt"]:
+                bad.append(f"(b) 참고 없음인데 일반 'Korean webtoon style' 문장이 없습니다: {call['prompt'][:80]}")
+            # 일반 화풍 지시 문구(설계자 2026-10-20 제거 대상)가 없어야 한다.
+            for banned in ("cel shading", "flat soft colors", "2D animation"):
+                if banned in call["prompt"]:
+                    bad.append(f"(b) 프롬프트에 제거 대상 문구 '{banned}' 가 남아 있습니다")
             if call["keep_audio"] is not True:
                 bad.append("(b) keep_audio 가 True 가 아닙니다")
             if call["endpoint"] != settings.VPOC_ANIME_MODEL:
@@ -1968,35 +1977,71 @@ def check_vnew_characters() -> None:
 
     # 분석: Astra(첫 모델)는 항상 실패, Claude(fallback)는 성공 → fallback 경로 검증.
     analyze_calls: list[str] = []
+    analyze_extra_seen: list[str] = []  # 분석 blocks 에 들어온 '사용자 추가 요청' 텍스트
 
     def fake_analyze(blocks, *, model):
         analyze_calls.append(model)
+        # 추가 요청 텍스트 블록이 왔는지 캡처(extraPromptKo 전달 검증).
+        for b in blocks:
+            t = b.get("text") if isinstance(b, dict) else ""
+            if t and "사용자 추가 요청" in t:
+                analyze_extra_seen.append(t)
         if model == characters.settings.ASTRA_MODEL:
             raise RuntimeError("Astra 한도 0 (가짜)")
+        # 추가 요청이 왔으면 extraEn 을 채워 반환(끝에 붙는지 검증용 고정 문구).
+        extra_en = "EXTRA_REQ_EN" if analyze_extra_seen else ""
         return (
             {
                 "nameGuess": "김부장",
                 "descriptionKo": "중년 남성 캐릭터. 안경을 썼다. 정장 차림.",
                 "appearanceEn": "A middle-aged Korean man with glasses and short black hair.",
-                "outfitEn": "A dark business suit with dress shoes.",
+                "styleEn": "Thin sketchy pencil-like lines with soft pastel flat coloring.",
+                "outfitEn": "A beige button-up shirt with dark trousers and loafers.",
+                "altOutfitsEn": ["a grey hoodie", "a white tee"],
+                "expressionsKo": ["무표정", "미소"],
+                "extraEn": extra_en,
             },
             {"model": model},
         )
 
     # Seedream: variant 별 크기 캡처. 'real' variant 의 front 호출만 실패시켜 (c) 를 검증.
+    # Seedream: variant 별 크기·프롬프트 캡처. 'real' variant 의 front 호출만 실패시켜 (c) 를 검증.
     seedream_sizes: dict[str, list[str]] = {}
+    seedream_prompts: dict[str, list[str]] = {}  # variant → [프롬프트...]
     fail_variant = {"name": ""}
+
+    def _kind_of(prompt):
+        if "turnaround reference sheet" in prompt:
+            return "sheet"
+        if "BACK view" in prompt:
+            return "back"
+        return "front"
 
     def fake_seedream(prompt, references, *, size):
         # 어떤 variant 인지 프롬프트로 가늠(real 은 'live-action'/'real Korean actor' 포함).
         variant = "real" if ("live-action" in prompt or "real Korean actor" in prompt) else "webtoon"
         seedream_sizes.setdefault(variant, []).append(size)
-        if fail_variant["name"] == variant and "Single full-body" in prompt:
+        seedream_prompts.setdefault(variant, []).append(prompt)
+        kind = _kind_of(prompt)
+        # real 의 정면(front) 호출만 실패시켜 (c) 검증(back·sheet 는 실패시키지 않는다).
+        if fail_variant["name"] == variant and kind == "front":
             raise characters.VpocError("vnew.seedream", "Filtered", "가짜 실패", 502)
-        # 시트는 가로로 긴(5칸), 정면은 세로로 긴 이미지로 돌려준다.
-        if "turnaround reference sheet" in prompt:
+        # 시트는 가로로 긴(5칸), 정면·후면은 세로로 긴 이미지로 돌려준다.
+        if kind == "sheet":
             return _tiny_jpeg(2560, 1440)
         return _tiny_jpeg(1440, 2560)
+
+    # 사람 수 검사(가짜): 기본은 1명. people_mode 로 (o) 시나리오를 만든다.
+    # people_mode["counts"] 가 리스트면 호출마다 하나씩 꺼내 쓴다(비면 1). None 이면 모델 오류(건너뜀).
+    people_mode = {"counts": None}
+
+    def fake_count_people(jpeg):
+        counts = people_mode["counts"]
+        if counts is None:
+            return 1
+        if isinstance(counts, list):
+            return counts.pop(0) if counts else 1
+        return counts
 
     # fal: 제출 body 를 캡처(face_count·data URI 확인). 기본은 바로 COMPLETED 이지만,
     # 아래 fal_mode 로 상태 조회의 반응을 (h)(i) 시나리오별로 바꾼다.
@@ -2033,6 +2078,7 @@ def check_vnew_characters() -> None:
         "_seedream": characters._seedream,
         "_fal_request": characters._fal_request,
         "_fetch_url": characters._fetch_url,
+        "_count_people": characters._count_people,
         "sleep": _time.sleep,
     }
     characters.STORE = fake_store
@@ -2040,6 +2086,7 @@ def check_vnew_characters() -> None:
     characters._seedream = fake_seedream
     characters._fal_request = fake_fal_request
     characters._fetch_url = fake_fetch_url
+    characters._count_people = fake_count_people
     characters.time.sleep = lambda *_a, **_k: None  # 폴링 대기 없이
 
     # build 가 백그라운드 스레드를 join 할 수 있도록 start_build 를 감싼다(검사 전용).
@@ -2134,11 +2181,15 @@ def check_vnew_characters() -> None:
         if char.get("analysis", {}).get("model") != characters.settings.ANALYZE_FALLBACK_MODEL:
             bad.append(f"(b) analysis.model 이 실제 쓴 모델(Claude)이 아닙니다: {char.get('analysis', {}).get('model')}")
 
-        # (b) 시트/정면 크기
-        if seedream_sizes.get("webtoon", [])[:2] != [characters.settings.SHEET_SIZE, characters.settings.FRONT_SIZE]:
-            bad.append(f"(b) webtoon Seedream 크기 순서가 시트·정면이 아닙니다: {seedream_sizes.get('webtoon')}")
+        # (b) 시트/정면/후면 크기(이제 후면도 따로 생성)
+        if seedream_sizes.get("webtoon", [])[:3] != [
+            characters.settings.SHEET_SIZE,
+            characters.settings.FRONT_SIZE,
+            characters.settings.BACK_SIZE,
+        ]:
+            bad.append(f"(b) webtoon Seedream 크기 순서가 시트·정면·후면이 아닙니다: {seedream_sizes.get('webtoon')}")
 
-        # (b) variant ready + 키·후면 자르기
+        # (b) variant ready + 키
         for variant in characters.settings.VARIANTS:
             v = char["variants"][variant]
             if v.get("status") != "ready":
@@ -2165,19 +2216,64 @@ def check_vnew_characters() -> None:
                 if body.get("enable_pbr") is not False:
                     bad.append("(b) 3D enable_pbr 가 False 가 아닙니다")
 
-        # (b) 후면 = 시트 5번째 칸(가로 5등분) — 저장된 back 이미지 가로가 시트의 1/5 근처
+        # --- (l) 분석 지침 문장에 "SAME person" 포함 ---
+        if "SAME person" not in characters._ANALYZE_SYSTEM:
+            bad.append("(l) 분석 시스템 문장에 'SAME person' 지침이 없습니다")
+        # 분석 JSON 에 styleEn/altOutfitsEn/expressionsKo/extraEn 필드가 들어왔는지(옛 데이터도 동작)
+        an = char.get("analysis") or {}
+        for f in ("styleEn", "outfitEn"):
+            if not an.get(f):
+                bad.append(f"(l) 분석 결과에 {f} 가 없습니다: {an}")
+        if not isinstance(an.get("expressionsKo"), list) or not an.get("expressionsKo"):
+            bad.append(f"(l) 분석 결과 expressionsKo 가 리스트가 아닙니다: {an.get('expressionsKo')}")
+        if not isinstance(an.get("altOutfitsEn"), list):
+            bad.append(f"(l) 분석 결과 altOutfitsEn 가 리스트가 아닙니다: {an.get('altOutfitsEn')}")
+
+        # --- (m) 웹툰 프롬프트: styleEn · "exactly one person"(ONE person) · outfitEn · generic 없음 ---
+        wprompts = seedream_prompts.get("webtoon", [])
+        if not wprompts:
+            bad.append("(m) 웹툰 프롬프트가 캡처되지 않았습니다")
+        style_en = an.get("styleEn") or ""
+        outfit_en = an.get("outfitEn") or ""
+        for wp in wprompts:
+            if style_en and style_en not in wp:
+                bad.append("(m) 웹툰 프롬프트에 styleEn 이 그대로 들어가지 않았습니다")
+                break
+        for wp in wprompts:
+            if "ONE person" not in wp and "one person" not in wp:
+                bad.append("(m) 웹툰 프롬프트에 'one person'(한 사람만) 문장이 없습니다")
+                break
+        for wp in wprompts:
+            if outfit_en and outfit_en not in wp:
+                bad.append("(m) 웹툰 프롬프트에 outfitEn 이 들어가지 않았습니다")
+                break
+        # generic 문장을 쓰지 않는다
+        for wp in wprompts:
+            if "Keep the exact Korean webtoon art style" in wp or "clean ink line art, cel shading" in wp:
+                bad.append("(m) 웹툰 프롬프트에 generic 그림체 문장이 남아 있습니다")
+                break
+
+        # --- (n) 후면을 따로 생성 ---
+        # 웹툰 프롬프트 3건(시트·정면·후면)이 있고, 후면 프롬프트에 'BACK view'·'same single person' 이 있다.
+        kinds = [_kind_of(p) for p in wprompts]
+        if kinds[:3] != ["sheet", "front", "back"]:
+            bad.append(f"(n) 웹툰 그림 호출 순서가 시트·정면·후면이 아닙니다: {kinds}")
+        back_prompts = [p for p in wprompts if _kind_of(p) == "back"]
+        if not back_prompts:
+            bad.append("(n) 후면 프롬프트가 따로 생성되지 않았습니다")
+        else:
+            bp = back_prompts[0]
+            if "BACK view" not in bp or "same single person" not in bp:
+                bad.append("(n) 후면 프롬프트에 'BACK view/same single person' 이 없습니다")
+        # 후면 이미지가 세로(1440x2560) — 시트 5등분 조각(가로가 좁은)이 아니다.
         import io as _io2  # noqa: PLC0415
 
         from PIL import Image as _Img  # noqa: PLC0415
 
         back_key = char["variants"]["webtoon"]["backKey"]
-        sheet_key = char["variants"]["webtoon"]["sheetKey"]
-        with _Img.open(_io2.BytesIO(fake_store.blobs[back_key])) as bimg, _Img.open(
-            _io2.BytesIO(fake_store.blobs[sheet_key])
-        ) as simg:
-            expected = simg.width - int(round(simg.width / 5.0 * 4))
-            if abs(bimg.width - expected) > 2:
-                bad.append(f"(b) 후면 자르기 폭이 시트 5번째 칸이 아닙니다: back={bimg.width} expected~{expected}")
+        with _Img.open(_io2.BytesIO(fake_store.blobs[back_key])) as bimg:
+            if bimg.width != 1440 or bimg.height != 2560:
+                bad.append(f"(n) 후면이 따로 생성된 세로 전신이 아닙니다(시트 조각 의심): {bimg.width}x{bimg.height}")
 
         # (e) GLB 스트리밍 200·Content-Type
         resp = client.get(f"/api/vnew/characters/{char_id}/model/webtoon.glb")
@@ -2368,6 +2464,72 @@ def check_vnew_characters() -> None:
         if resp.status_code != 400:
             bad.append(f"(j) front/back 없는 retry3d 가 400 이 아닙니다: {resp.status_code}")
 
+        # --- (o) 사람 수 2 → 1회 재생성, 계속 2 → warning ---
+        # (o-1) front 가 처음 2명, 재생성에서 1명 → warning 없음, seedream 재호출 1회 늘어남.
+        oid = _make_char_with_source("o-캐릭터")
+        # counts 순서: sheet 는 검사 안 함(front·back 만 _count_people 호출).
+        # webtoon: front=2 → retry=1(정상), back=1. real: front=2 → retry=1, back=1.
+        people_mode["counts"] = [2, 1, 1, 2, 1, 1]
+        before_sd = len(seedream_prompts.get("webtoon", []))
+        resp = client.post(f"/api/vnew/characters/{oid}/build")
+        _join_builds()
+        people_mode["counts"] = None
+        ochar, _ = characters.load_char("tester", oid)
+        ov = (ochar.get("variants") or {}).get("webtoon", {})
+        if ov.get("warning"):
+            bad.append(f"(o) 재생성으로 1명이 됐는데 warning 이 남았습니다: {ov.get('warning')}")
+        after_sd = len(seedream_prompts.get("webtoon", []))
+        # webtoon front 가 2명이라 1회 더 그렸으니 호출 수가 최소 4(시트·정면·정면재·후면).
+        if after_sd - before_sd < 4:
+            bad.append(f"(o) 사람 수 2 → 재생성이 일어나지 않았습니다(호출 수 {after_sd - before_sd})")
+
+        # (o-2) 계속 2명 → warning 남고 3D 는 진행(ready)
+        o2id = _make_char_with_source("o2-캐릭터")
+        people_mode["counts"] = 2  # 항상 2명
+        resp = client.post(f"/api/vnew/characters/{o2id}/build")
+        _join_builds()
+        people_mode["counts"] = None
+        o2char, _ = characters.load_char("tester", o2id)
+        o2v = (o2char.get("variants") or {}).get("webtoon", {})
+        if not o2v.get("warning"):
+            bad.append("(o) 재생성 후에도 2명인데 warning 이 없습니다")
+        if (o2v.get("model3d") or {}).get("status") != "ready":
+            bad.append(f"(o) warning 이어도 3D 는 진행(ready)해야 합니다: {(o2v.get('model3d') or {}).get('status')}")
+
+        # --- (p) build 의 extraPromptKo 저장·유지·빈 문자열 삭제 ---
+        pid_c = _make_char_with_source("p-캐릭터")
+        # (p-1) extraPromptKo 저장 + 분석 blocks 로 전달 + 프롬프트 끝에 extraEn 삽입
+        analyze_extra_seen.clear()
+        resp = client.post(
+            f"/api/vnew/characters/{pid_c}/build", json={"extraPromptKo": "표정은 무표정으로"}
+        )
+        if resp.status_code != 202:
+            bad.append(f"(p) extraPromptKo build 가 202 가 아닙니다: {resp.status_code}")
+        _join_builds()
+        pchar, _ = characters.load_char("tester", pid_c)
+        if pchar.get("extraPromptKo") != "표정은 무표정으로":
+            bad.append(f"(p) extraPromptKo 가 저장되지 않았습니다: {pchar.get('extraPromptKo')}")
+        if not analyze_extra_seen:
+            bad.append("(p) 추가 요청이 분석 blocks 로 전달되지 않았습니다")
+        # extraEn(EXTRA_REQ_EN) 이 그림 프롬프트 끝에 붙었는지
+        pw = seedream_prompts.get("webtoon", [])
+        if not pw or not pw[-1].rstrip().endswith("EXTRA_REQ_EN"):
+            bad.append(f"(p) 그림 프롬프트 끝에 extraEn 이 붙지 않았습니다: {pw[-1][-60:] if pw else None}")
+
+        # (p-2) body 에 extraPromptKo 없이 다시 build → 이전 값 유지
+        resp = client.post(f"/api/vnew/characters/{pid_c}/build")
+        _join_builds()
+        pchar, _ = characters.load_char("tester", pid_c)
+        if pchar.get("extraPromptKo") != "표정은 무표정으로":
+            bad.append(f"(p) body 없는 build 에서 extraPromptKo 유지가 안 됐습니다: {pchar.get('extraPromptKo')}")
+
+        # (p-3) 빈 문자열 → 삭제
+        resp = client.post(f"/api/vnew/characters/{pid_c}/build", json={"extraPromptKo": ""})
+        _join_builds()
+        pchar, _ = characters.load_char("tester", pid_c)
+        if pchar.get("extraPromptKo"):
+            bad.append(f"(p) 빈 문자열 extraPromptKo 가 삭제되지 않았습니다: {pchar.get('extraPromptKo')}")
+
     except Exception as exc:  # noqa: BLE001
         import traceback as _tb  # noqa: PLC0415
 
@@ -2378,6 +2540,7 @@ def check_vnew_characters() -> None:
         characters._seedream = orig["_seedream"]
         characters._fal_request = orig["_fal_request"]
         characters._fetch_url = orig["_fetch_url"]
+        characters._count_people = orig["_count_people"]
         characters.time.sleep = orig["sleep"]
         characters.threading.Thread = orig_thread
 
@@ -2387,7 +2550,9 @@ def check_vnew_characters() -> None:
         ok(
             "캐릭터 만들기(vnew) 검사 (a)CRUD·업로드 (b)분석 fallback·시트·정면·후면·3D"
             "(60000·PBR false·data URI)·ready (c)variant 격리 (d)409·stale failed (e)GLB 200 (f)격리 404 "
-            "(g)size 기본 (h)일시오류 재조회 ready (i)FAILED 동기화 (j)retry3d 재사용·새제출 (k)기본값"
+            "(g)size 기본 (h)일시오류 재조회 ready (i)FAILED 동기화 (j)retry3d 재사용·새제출 (k)기본값 "
+            "(l)SAME person 지침·분석 필드 (m)웹툰 styleEn·one person·outfitEn·generic 없음 "
+            "(n)후면 따로 생성 (o)사람 수 2→재생성→warning·3D 진행 (p)extraPromptKo 저장·유지·삭제"
         )
 
 
@@ -3730,6 +3895,144 @@ def check_vnew_real_start() -> None:
         )
 
 
+# ---------------------------------------------------------------- 13. 원작 그림체 변환 프롬프트·참고
+
+
+def check_anime_style() -> None:
+    """실사→웹툰 변환 프롬프트가 원작 그림체를 베끼게 바뀌었는지(설계자 2026-10-20).
+
+    (a) 두 프롬프트(vnew·vpoc) 모두: 참고 있을 때 "Do NOT use a generic anime" 포함·
+        "cel shading"/"flat soft colors"/"2D anime" 없음
+    (b) 참고 없음 → 일반 "Korean webtoon style" 문장(두 프롬프트)
+    (c) vnew 참고 순서: 원작 웹툰 패널 먼저, 그 뒤 캐릭터 웹툰 시트
+    (d) vnew: 등장 캐릭터 styleEn 이 있으면 "Style notes: {styleEn}" 포함
+    """
+    sys.path.insert(0, str(ROOT / "app"))
+    bad: list[str] = []
+
+    BANNED = ("cel shading", "flat soft colors", "2D anime", "2D animation")
+
+    from src.vnew import generate as genmod  # noqa: PLC0415
+
+    # --- (a)(b)(d) vnew _anime_prompt 는 모듈 수준 함수라 바로 부른다 ---
+    # 참고 있음 + styleEn 있음: characters.load_char 를 가짜로.
+    real_load = genmod.characters.load_char
+
+    def fake_load_with_style(owner, char_id):
+        return ({"analysis": {"styleEn": "Thin sketchy pencil lines with soft pastel flats."}}, "e")
+
+    plan_with_char = {"input": {"characters": [{"charId": "ch1", "roleName": "김부장"}]}}
+    try:
+        genmod.characters.load_char = fake_load_with_style
+        p_refs = genmod._anime_prompt("tester", plan_with_char, 3)
+    finally:
+        genmod.characters.load_char = real_load
+
+    if "Do NOT use a generic anime" not in p_refs:
+        bad.append("(a) vnew 참고 프롬프트에 'Do NOT use a generic anime' 가 없습니다")
+    for banned in BANNED:
+        if banned in p_refs:
+            bad.append(f"(a) vnew 참고 프롬프트에 제거 대상 '{banned}' 가 남아 있습니다")
+    if "@Image1, @Image2, @Image3" not in p_refs:
+        bad.append(f"(a) vnew 참고 프롬프트의 @Image 나열이 틀립니다: {p_refs[:120]}")
+    # (d) styleEn 포함
+    if "Style notes: Thin sketchy pencil lines with soft pastel flats." not in p_refs:
+        bad.append(f"(d) vnew 프롬프트에 styleEn(Style notes) 이 없습니다: {p_refs[-120:]}")
+
+    # 참고 없음(styleEn 조회도 하지 않는 경로) → 일반 문장
+    p_none = genmod._anime_prompt("tester", {"input": {"characters": []}}, 0)
+    if "Korean webtoon style" not in p_none:
+        bad.append(f"(b) vnew 참고 없음 프롬프트에 일반 문장이 없습니다: {p_none[:120]}")
+    for banned in BANNED:
+        if banned in p_none:
+            bad.append(f"(b) vnew 참고 없음 프롬프트에 '{banned}' 가 있습니다")
+    if "@Video1" not in p_none or "No text" not in p_none:
+        bad.append(f"(b) vnew 참고 없음 프롬프트 형식이 틀립니다: {p_none[:120]}")
+
+    # styleEn 이 없으면 Style notes 를 붙이지 않는다(참고는 있음).
+    try:
+        genmod.characters.load_char = lambda o, c: ({"analysis": {}}, "e")
+        p_nostyle = genmod._anime_prompt("tester", plan_with_char, 2)
+    finally:
+        genmod.characters.load_char = real_load
+    if "Style notes:" in p_nostyle:
+        bad.append("(d) styleEn 이 없는데 Style notes 가 붙었습니다")
+
+    # --- (c) vnew _anime_reference_b64 순서: 패널 먼저, 그 뒤 캐릭터 시트 ---
+    fake_store = _FakeCharStore()
+    from src.vnew import plan as planmod  # noqa: PLC0415
+
+    owner, pid = "tester", "prj_style"
+    panel_key = planmod.upload_key(owner, pid, "f1")
+    fake_store.blobs[panel_key] = b"PANEL-BYTES"
+    fake_store.blobs["ws.jpg"] = b"CHAR-SHEET-BYTES"
+
+    def fake_load_char_sheet(o, c):
+        return ({"variants": {"webtoon": {"sheetKey": "ws.jpg"}}, "analysis": {}}, "e")
+
+    plan = {
+        "input": {"order": ["f1"], "characters": [{"charId": "ch1", "roleName": "김부장"}]},
+        "conti": {"segments": [{"id": "seg1", "cutIds": ["c1"], "seconds": 10}]},
+    }
+    seg = {"id": "seg1", "cutIds": ["c1"]}
+    import base64 as _b64  # noqa: PLC0415
+
+    orig_store = genmod.STORE
+    orig_load2 = genmod.characters.load_char
+    try:
+        genmod.STORE = fake_store
+        genmod.characters.load_char = fake_load_char_sheet
+        refs = genmod._anime_reference_b64(owner, pid, plan, seg)
+    finally:
+        genmod.STORE = orig_store
+        genmod.characters.load_char = orig_load2
+
+    decoded = [_b64.b64decode(r) for r in refs]
+    if not decoded:
+        bad.append("(c) vnew 참고 이미지가 비었습니다")
+    else:
+        if decoded[0] != b"PANEL-BYTES":
+            bad.append(f"(c) vnew 참고 첫 장이 원작 웹툰 패널이 아닙니다: {decoded[0][:20]!r}")
+        if b"CHAR-SHEET-BYTES" not in decoded:
+            bad.append("(c) vnew 참고에 캐릭터 웹툰 시트가 없습니다")
+        elif decoded.index(b"CHAR-SHEET-BYTES") == 0:
+            bad.append("(c) vnew 참고에서 캐릭터 시트가 패널보다 먼저 왔습니다")
+        if len(decoded) > 4:
+            bad.append(f"(c) vnew 참고가 4장을 넘습니다: {len(decoded)}")
+
+    # --- (a)(b) vpoc routes._anime_prompt 는 create_blueprint 안 중첩 함수라 소스로 확인한다 ---
+    rsource = (ROOT / "app" / "src" / "vpoc" / "routes.py").read_text(encoding="utf-8")
+    # _anime_prompt 는 모듈 함수라 실제 결과 문장으로 본다(docstring 의 설명 글자는 보지 않는다).
+    from src.vpoc import routes as _vroutes  # noqa: PLC0415
+    body = _vroutes._anime_prompt(3) + " " + _vroutes._anime_prompt(0)
+    if "Do NOT use a generic anime" not in body:
+        bad.append("(a) vpoc _anime_prompt 에 'Do NOT use a generic anime' 가 없습니다")
+    if "Korean webtoon style" not in body:
+        bad.append("(b) vpoc _anime_prompt 에 참고 없음용 'Korean webtoon style' 문장이 없습니다")
+    for banned in BANNED:
+        if banned in body:
+            bad.append(f"(a) vpoc _anime_prompt 에 제거 대상 '{banned}' 가 남아 있습니다")
+
+    # vpoc 참고 순서: sceneFiles 패널(최대 3)이 캐릭터 그림보다 먼저. 소스로 확인(_spread(panels, 3) 가
+    # 캐릭터 루프보다 앞에 있고 캐릭터는 1장만).
+    rb_start = rsource.index("def _anime_reference_b64(state: dict, owner: str, pid: str)")
+    rb_body = rsource[rb_start : rsource.index("def _run_anime_job(")]
+    if "_spread(panels, 3)" not in rb_body:
+        bad.append("(c) vpoc 참고가 패널 최대 3장(_spread(panels, 3))이 아닙니다")
+    if "break  # 캐릭터 그림은 1장만." not in rb_body:
+        bad.append("(c) vpoc 참고에서 캐릭터 그림을 1장만으로 제한하지 않습니다")
+    if rb_body.index("panels = _story_panels") > rb_body.index('steps["3"].get("characters")'):
+        bad.append("(c) vpoc 참고에서 패널이 캐릭터보다 먼저 오지 않습니다")
+
+    if bad:
+        fail("원작 그림체 변환 프롬프트·참고 검사 실패\n" + "\n".join(f"  {item}" for item in bad))
+    else:
+        ok(
+            "원작 그림체 변환 프롬프트·참고 검사 (a)두 프롬프트 'Do NOT use a generic anime'·금지 문구 없음"
+            " (b)참고 없음 일반 문장 (c)vnew·vpoc 패널 먼저 (d)styleEn 포함"
+        )
+
+
 # ---------------------------------------------------------------- main
 
 
@@ -3753,6 +4056,7 @@ def main() -> int:
     check_vnew_generate()
     check_fal_pricing()
     check_vnew_real_start()
+    check_anime_style()
     print()
     if warnings:
         print(f"경고 {len(warnings)}건")
