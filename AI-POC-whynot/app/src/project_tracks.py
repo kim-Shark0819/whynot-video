@@ -23,10 +23,14 @@ from . import graph_store
 
 TRACK_STORY = "story"
 TRACK_VIDEO = "video"
-TRACKS = (TRACK_STORY, TRACK_VIDEO)
+# 영상만들기_신규(vnew, 설계자 2026-10-20). 틀만: 트랙 하나와 빈 화면.
+# VNEW_ENABLED 가 꺼진 배포에서는 이 트랙이 TRACKS 에 없어 생성 요청이 잘못된 트랙으로 거절된다.
+TRACK_VIDEO_NEW = "video_new"
+TRACKS = (TRACK_STORY, TRACK_VIDEO, TRACK_VIDEO_NEW)
 TRACK_LABELS = {
     TRACK_STORY: "스토리 개발로 진행",
     TRACK_VIDEO: "영상 개발로 진행",
+    TRACK_VIDEO_NEW: "영상만들기_신규로 진행",
 }
 WORK_TITLE_MAX_CHARS = 120
 logger = logging.getLogger("toon-change-ai-pj-app.project-tracks")
@@ -74,8 +78,12 @@ def normalize_work_title(value) -> str:
     return title
 
 
-def track_enabled(track: str, *, story_enabled: bool, video_enabled: bool) -> bool:
-    return (track == TRACK_STORY and story_enabled) or (track == TRACK_VIDEO and video_enabled)
+def track_enabled(track: str, *, story_enabled: bool, video_enabled: bool, vnew_enabled: bool = False) -> bool:
+    return (
+        (track == TRACK_STORY and story_enabled)
+        or (track == TRACK_VIDEO and video_enabled)
+        or (track == TRACK_VIDEO_NEW and vnew_enabled)
+    )
 
 
 def track_command(project: dict, *, actor: str) -> dict:
@@ -376,6 +384,7 @@ class ProjectTrackDependencies:
     repository: object
     story_enabled: bool = True
     video_enabled: bool = False
+    vnew_enabled: bool = False
 
 
 def _story_project_rule(rule: str) -> bool:
@@ -386,15 +395,37 @@ def _story_project_rule(rule: str) -> bool:
     return first_segment in _STORY_PROJECT_ROUTE_ROOTS
 
 
+def _accepted_tracks(deps: "ProjectTrackDependencies") -> tuple[str, ...]:
+    """요청 검증에 쓰는 트랙 집합. video_new 는 VNEW 가 켜진 배포에서만 받는다.
+
+    꺼진 배포에서는 video_new 가 이 집합에 없어 생성·선택 요청이 '잘못된 트랙'(400)으로 거절된다.
+    저장된 값 읽기는 normalize_track/TRACKS 를 그대로 쓴다(개발계에서 만든 프로젝트를 운영이 읽을 일은 없다).
+    """
+    tracks = [TRACK_STORY, TRACK_VIDEO]
+    if deps.vnew_enabled:
+        tracks.append(TRACK_VIDEO_NEW)
+    return tuple(tracks)
+
+
 def _availability_error(deps: ProjectTrackDependencies, track: str):
-    if not deps.story_enabled and not deps.video_enabled:
+    if not deps.story_enabled and not deps.video_enabled and not deps.vnew_enabled:
         return deps.response_error(
             "스토리 개발과 영상 개발이 모두 꺼져 있어 프로젝트를 만들 수 없습니다.",
             503,
             "PROJECT_TRACKS_DISABLED",
         )
-    if not track_enabled(track, story_enabled=deps.story_enabled, video_enabled=deps.video_enabled):
-        label = "스토리 개발" if track == TRACK_STORY else "영상 개발"
+    if not track_enabled(
+        track,
+        story_enabled=deps.story_enabled,
+        video_enabled=deps.video_enabled,
+        vnew_enabled=deps.vnew_enabled,
+    ):
+        if track == TRACK_STORY:
+            label = "스토리 개발"
+        elif track == TRACK_VIDEO_NEW:
+            label = "영상만들기_신규"
+        else:
+            label = "영상 개발"
         return deps.response_error(
             f"이 환경에서는 {label} 기능이 꺼져 있습니다.",
             403,
@@ -452,12 +483,12 @@ def install(app, deps: ProjectTrackDependencies) -> None:
             })
 
         payload = request.get_json(silent=True) or {}
-        if not deps.story_enabled and not deps.video_enabled:
+        if not deps.story_enabled and not deps.video_enabled and not deps.vnew_enabled:
             return _availability_error(deps, "")
         raw_track = str(payload.get("track") or "").strip()
         if not raw_track:
             return deps.response_error("프로젝트 개발 트랙을 선택해 주세요.", 400, "PROJECT_TRACK_REQUIRED")
-        if raw_track not in TRACKS:
+        if raw_track not in _accepted_tracks(deps):
             return deps.response_error("프로젝트 트랙은 story 또는 video여야 합니다.", 400, "INVALID_PROJECT_TRACK")
         unavailable = _availability_error(deps, raw_track)
         if unavailable:
@@ -603,7 +634,7 @@ def install(app, deps: ProjectTrackDependencies) -> None:
         raw_track = str(payload.get("track") or "").strip()
         if not raw_track:
             return deps.response_error("프로젝트 개발 트랙을 선택해 주세요.", 400, "PROJECT_TRACK_REQUIRED")
-        if raw_track not in TRACKS:
+        if raw_track not in _accepted_tracks(deps):
             return deps.response_error("프로젝트 트랙은 story 또는 video여야 합니다.", 400, "INVALID_PROJECT_TRACK")
         unavailable = _availability_error(deps, raw_track)
         if unavailable:
