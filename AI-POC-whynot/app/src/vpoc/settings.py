@@ -245,13 +245,69 @@ def default_resolution(model: str) -> str:
     return RESOLUTION
 
 
+# fal 토큰 단가에 쓰는 해상도 → 픽셀(가로×세로). 모르면 720p.
+FAL_RESOLUTION_PX = {
+    "480p": (854, 480),
+    "540p": (960, 540),
+    "720p": (1280, 720),
+    "1080p": (1920, 1080),
+}
+# Seedance 토큰 공식의 초당 프레임(fal/BytePlus 기준 24fps).
+FAL_TOKEN_FPS = 24
+# 토큰 공식: tokens = (가로 × 세로 × fps × 초) / 1024.
+FAL_TOKEN_DIVISOR = 1024
+# unit 에 "tokens" 가 붙으면 그 단위 수(1000·1M·1)로 금액을 환산한다.
+FAL_TOKEN_UNIT_MULTIPLIERS = {"1m tokens": 1_000_000, "1000 tokens": 1000, "tokens": 1}
+# fal 단가 unit 이 "영상 1건"(초·토큰이 아닌 1회 가격)으로 볼 단위들.
+FAL_PER_ITEM_UNITS = {
+    "videos",
+    "video",
+    "generations",
+    "generation",
+    "units",
+    "requests",
+    "images",
+}
+
+
+def _fal_resolution_px(resolution: str) -> tuple[int, int]:
+    """fal 토큰 단가용 해상도 → (가로, 세로). 모르면 720p(1280×720)."""
+    return FAL_RESOLUTION_PX.get((resolution or "").lower(), FAL_RESOLUTION_PX["720p"])
+
+
+def _fal_token_multiplier(unit: str) -> int | None:
+    """unit 이 "tokens" 를 (한 토막으로) 포함하면 단위 수(1000·1000000·1)를, 아니면 None.
+
+    예: "1000 tokens"→1000, "1M tokens"→1000000, "tokens"→1. "credits" 등은 None.
+    """
+    low = (unit or "").lower().strip()
+    if "tokens" not in low.split():
+        return None
+    if low in FAL_TOKEN_UNIT_MULTIPLIERS:
+        return FAL_TOKEN_UNIT_MULTIPLIERS[low]
+    # "1000 tokens"·"1M tokens" 외 형태라도 앞 수를 읽어 본다.
+    head = low.replace("tokens", "").strip()
+    if not head:
+        return 1
+    if head in ("1m", "1 m"):
+        return 1_000_000
+    try:
+        return int(float(head))
+    except ValueError:
+        return None
+
+
 def shot_usd(model: str = "", resolution: str = "", seconds: float | None = None) -> float:
     """샷 1개 금액.
 
-    - fal 모델("fal:<endpoint>")은 fal 단가(pricing)로 — unit 이 "seconds" 면 unit_price×seconds,
-      그 밖(영상 1건 단위: videos·generations·units·images …)이면 unit_price(1회). 단가를 모르면
-      0(단가 미정) — Luma 표로 떨어지지 않게 한다(설계자 2026-10-20). 순환 import 를 피하려고
-      fal 을 함수 안에서 늦게 import 한다.
+    - fal 모델("fal:<endpoint>")은 fal 단가(pricing)로 —
+      · unit 이 "seconds" 면 unit_price×seconds,
+      · unit 이 "tokens" 를 포함하면("1000 tokens"·"1M tokens"·"tokens") 단위 수(1000·1000000·1)를
+        읽어 토큰 공식으로 계산한다. tokens = (가로 × 세로 × fps(24) × 초) / 1024,
+        금액 = unit_price × tokens / 단위 수. 해상도는 FAL_RESOLUTION_PX(모르면 720p).
+      · unit 이 영상 1건 단위(videos·video·generations·generation·units·requests·images)면 unit_price(1회).
+      · 그 밖(모르는 단위)은 0(단가 미정) — 모르는 단위를 1건 가격으로 보지 않는다(설계자 2026-10-20).
+      단가 자체를 모르면 0. Luma 표로 떨어지지 않게 한다. 순환 import 를 피하려고 fal 을 함수 안에서 늦게 import 한다.
     - Seedance(ARK_MODEL_IDS)는 그 해상도의 생성 1초 단가 × 초. 단가가 없으면 0(단가 미정).
     - 그 밖(Luma)은 VIDEO_USD_PER_SEC 표.
 
@@ -265,9 +321,17 @@ def shot_usd(model: str = "", resolution: str = "", seconds: float | None = None
         if not price:
             return 0.0
         unit_price = float(price.get("unitPrice") or 0.0)
-        if str(price.get("unit") or "").lower() == "seconds":
+        unit = str(price.get("unit") or "").lower().strip()
+        if unit == "seconds":
             return round(unit_price * secs, 4)
-        return round(unit_price, 4)
+        multiplier = _fal_token_multiplier(unit)
+        if multiplier is not None:
+            w, h = _fal_resolution_px(resolution)
+            tokens = (w * h * FAL_TOKEN_FPS * secs) / FAL_TOKEN_DIVISOR
+            return round(unit_price * tokens / multiplier, 4)
+        if unit in FAL_PER_ITEM_UNITS:
+            return round(unit_price, 4)
+        return 0.0
     if model in ARK_MODEL_IDS:
         per_sec = ark_usd_per_sec(model, resolution)
         return round((per_sec or 0.0) * secs, 4)
