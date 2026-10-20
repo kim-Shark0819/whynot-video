@@ -13,6 +13,9 @@
 const APP_VERSION = "__ASSET_VERSION__";
 const VIDEO_GEN_ENABLED = window.__WHYNOT_RUNTIME__?.videoGen === true;
 const STORY_DEV_ENABLED = window.__WHYNOT_RUNTIME__?.storyDev !== false;
+// 영상만들기_신규(vnew, 설계자 2026-10-20). 개발계에서만 켠다(운영은 꺼져 지금 화면 그대로).
+// 켜지면 만들기 창에 "영상만들기_기존/신규" 두 버튼, 메뉴 "캐릭터 만들기", 빈 화면이 보인다.
+const VNEW_ENABLED = window.__WHYNOT_RUNTIME__?.vnewEnabled === true;
 // 로그인 유지(운영만 켠다). 토큰은 원래 탭마다 따로인 sessionStorage 에만 있어 새 창마다
 // 다시 로그인해야 했다. 켜져 있으면 localStorage 에도 두고, 새 탭이 열릴 때 sessionStorage 로
 // 옮겨 준다 — vpoc*.js 는 sessionStorage 만 읽으므로 그쪽은 고치지 않는다.
@@ -83,10 +86,18 @@ const PROJECT_TRACKS = {
     disabledReason: "이 환경에서는 스토리 개발 기능이 꺼져 있습니다."
   },
   video: {
-    label: "영상",
-    actionLabel: "영상 개발로 진행",
+    // vnew 가 켜지면 기존 영상 기능은 "영상만들기_기존" 으로 부른다(설계자 2026-10-20).
+    // 꺼진 운영에서는 지금 그대로 "영상" 이다.
+    label: VNEW_ENABLED ? "영상만들기_기존" : "영상",
+    actionLabel: VNEW_ENABLED ? "영상만들기_기존으로 진행" : "영상 개발로 진행",
     enabled: () => VIDEO_GEN_ENABLED,
     disabledReason: "이 환경에서는 영상 개발 기능이 꺼져 있습니다."
+  },
+  video_new: {
+    label: "영상만들기_신규",
+    actionLabel: "영상만들기_신규로 진행",
+    enabled: () => VNEW_ENABLED,
+    disabledReason: "이 환경에서는 영상만들기_신규 기능이 꺼져 있습니다."
   }
 };
 
@@ -1344,7 +1355,7 @@ function projectTrackInfo(track) {
 }
 
 function configureTrackChoices(containerSelector, { clear = true, editable = true } = {}) {
-  const bothDisabled = !STORY_DEV_ENABLED && !VIDEO_GEN_ENABLED;
+  const bothDisabled = !STORY_DEV_ENABLED && !VIDEO_GEN_ENABLED && !VNEW_ENABLED;
   $$(`${containerSelector} [data-track]`).forEach((button) => {
     const info = projectTrackInfo(button.dataset.track);
     const enabled = editable && info.enabled();
@@ -1492,7 +1503,7 @@ async function createProject(event) {
   const visibility = $("#visibilityOptions .active")?.dataset.value || "private";
   const inputType = $("#inputTypeOptions .active")?.dataset.value || "webtoon";
   const track = $("#projectTrackOptions [data-track].active")?.dataset.track || "";
-  if (!STORY_DEV_ENABLED && !VIDEO_GEN_ENABLED) {
+  if (!STORY_DEV_ENABLED && !VIDEO_GEN_ENABLED && !VNEW_ENABLED) {
     $("#projectError").textContent = "스토리 개발과 영상 개발이 모두 꺼져 있습니다. 관리자 설정을 확인해 주세요.";
     syncProjectCreateState();
     return;
@@ -1688,6 +1699,13 @@ async function dispatchProject(project, { replace = false, entry = "open" } = {}
     resetDocuments(project.id);
     renderProjectDetail(project);
     navigate("projectDetail", { projectId: project.id, replace });
+    return;
+  }
+  // 영상만들기_신규(vnew): 만들거나 열면 새 화면 vnewView 로 간다. 화면은 vnew.js 가 그린다.
+  if (project.track === "video_new") {
+    state.currentProject = project;
+    setWorkingProject(project);
+    navigate("vnew", { replace });
     return;
   }
   state.currentProject = project;
@@ -6332,6 +6350,7 @@ window.addEventListener("unhandledrejection", (event) => {
 
 function switchView(viewName) {
   if (viewName === "videoGen" && !VIDEO_GEN_ENABLED) viewName = "home";
+  if ((viewName === "vnew" || viewName === "characters") && !VNEW_ENABLED) viewName = "home";
   trail("view", viewName);
   state.activeView = viewName;
   rememberRoute();
@@ -6343,6 +6362,8 @@ function switchView(viewName) {
     studio: "새 영상 만들기",
     imageStudio: "콘티 · 이미지",
     videoGen: "영상 만들기",
+    vnew: "영상만들기_신규",
+    characters: "캐릭터 만들기",
     library: "영상 라이브러리",
     myUsage: "내 사용량",
     users: "사용자 관리",
@@ -6371,6 +6392,11 @@ function switchView(viewName) {
     state.vpocPlanId = "";
   }
   else window.vpoc?.unmount?.();
+  // 영상만들기_신규(vnew). 화면 전체를 vnew.js 가 #vnew-root·#characters-root 안에 만든다.
+  // vnew.js 가 없어도 여기서 조용히 넘어가야 app.js 가 깨지지 않는다.
+  if (viewName === "vnew") window.vnew?.mount?.(state.currentProject?.id);
+  else if (viewName === "characters") window.vnew?.mountCharacters?.();
+  else window.vnew?.unmount?.();
   if (viewName === "home") loadProjects();
   if (viewName === "users" && state.user?.isAdmin) loadUsers();
   // 사용량과 프롬프트 관리는 모델 관리 화면 안에 있다(지시서 5-1).
@@ -7060,6 +7086,29 @@ document.addEventListener("keydown", (event) => {
 });
 
 window.addEventListener("DOMContentLoaded", validateSession, { once: true });
+
+/* 영상만들기_신규(vnew, 설계자 2026-10-20) 화면 요소 토글. VNEW_ENABLED 가 꺼져 있으면
+   아무것도 하지 않는다 — vnew 버튼·메뉴는 index.html 에서 is-hidden 으로 시작해 운영은 지금 그대로다.
+   켜져 있으면: 만들기 창·트랙 고르기 창에서 story 버튼을 숨기고 video_new 버튼을 보이며,
+   기존 video 버튼 제목을 "영상만들기_기존"으로 바꾸고, 메뉴 "캐릭터 만들기"를 보인다. */
+function applyVnewToggles() {
+  if (!VNEW_ENABLED) return;
+  // vnew 전용 버튼(만들기 창·트랙 고르기 창)을 보인다.
+  $$('[data-vnew-only="1"]').forEach((button) => button.classList.remove("is-hidden"));
+  // story 버튼은 숨긴다(데이터에는 영향 없음 — 기존 story 프로젝트는 목록·열기 그대로).
+  $$('.project-track-options [data-track="story"]').forEach((button) => button.classList.add("is-hidden"));
+  // 기존 video 버튼 제목을 "영상만들기_기존"으로, 부제를 "지금 쓰는 영상 기능"으로 바꾼다.
+  $$('.project-track-options [data-track="video"]').forEach((button) => {
+    const strong = button.querySelector("strong");
+    if (strong) strong.textContent = "영상만들기_기존";
+    const subs = button.querySelectorAll("small");
+    if (subs[0] && !subs[0].classList.contains("track-disabled-reason")) subs[0].textContent = "지금 쓰는 영상 기능";
+  });
+  // 메뉴 "캐릭터 만들기"를 보인다.
+  $("#navCharacters")?.classList.remove("is-hidden");
+}
+
+window.addEventListener("DOMContentLoaded", applyVnewToggles, { once: true });
 
 
 /* =========================================================================

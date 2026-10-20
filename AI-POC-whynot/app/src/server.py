@@ -43,6 +43,7 @@ from . import (
     story_router,
     styles,
     toon_convert,
+    vnew,
     vpoc,
     vpoc2,
     video_prompt,
@@ -335,6 +336,9 @@ def verify_token(token: str) -> dict | None:
 
 VIDEO_GEN_ENABLED = os.getenv("VIDEO_GEN_ENABLED", "false").strip().lower() in ("1", "true", "yes", "on")
 STORY_DEV_ENABLED = os.getenv("STORY_DEV_ENABLED", "true").strip().lower() in ("1", "true", "yes", "on")
+# 영상만들기_신규(vnew, 설계자 2026-10-20). 기본 꺼짐 — 개발계에서만 켠다.
+# 켜지면 /api/vnew 블루프린트가 등록되고 video_new 트랙 생성이 허용된다. 운영은 꺼져 지금 화면 그대로다.
+VNEW_ENABLED = os.getenv("VNEW_ENABLED", "false").strip().lower() in ("1", "true", "yes", "on")
 def require_auth(handler):
     @wraps(handler)
     def wrapped(*args, **kwargs):
@@ -6986,6 +6990,14 @@ if VIDEO_GEN_ENABLED and vpoc2.settings.ENABLED:
         )
     )
 
+# vnew(영상만들기_신규, 설계자 2026-10-20): 웹툰 이미지 → 콘티·영상. 지금은 틀만(health 하나).
+# 등록은 이 한 곳뿐이다. VNEW_ENABLED 가 꺼진 배포에서는 /api/vnew 가 없고 video_new 트랙도 거절된다.
+# vpoc2 와 파일·라우트·저장 경로가 따로다. 이름이 겹치지 않게 vnew 로 둔다.
+if VNEW_ENABLED:
+    app.register_blueprint(
+        vnew.create_blueprint(vnew.VnewDependencies(require_auth=require_auth))
+    )
+
 
 # Install after every shared route has been declared so project-scoped story guards cover deep links
 # and late story endpoints without changing graph_store.py or each shared route body.
@@ -7001,6 +7013,7 @@ project_tracks.install(app, project_tracks.ProjectTrackDependencies(
     repository=_project_track_repository,
     story_enabled=STORY_DEV_ENABLED,
     video_enabled=VIDEO_GEN_ENABLED,
+    vnew_enabled=VNEW_ENABLED,
 ))
 
 if __name__ == "__main__":
