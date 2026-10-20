@@ -6995,7 +6995,13 @@ if VIDEO_GEN_ENABLED and vpoc2.settings.ENABLED:
 # vpoc2 와 파일·라우트·저장 경로가 따로다. 이름이 겹치지 않게 vnew 로 둔다.
 if VNEW_ENABLED:
     app.register_blueprint(
-        vnew.create_blueprint(vnew.VnewDependencies(require_auth=require_auth))
+        vnew.create_blueprint(
+            vnew.VnewDependencies(
+                require_auth=require_auth,
+                # S3 키 소유자 접두사. users/{owner}/... 아래로 쓰기·조회를 가둔다.
+                current_owner=lambda: safe_user_prefix(g.username),
+            )
+        )
     )
 
 

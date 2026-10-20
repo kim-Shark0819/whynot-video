@@ -36,14 +36,26 @@ def _data_url(jpeg: bytes, longest: int = 1536) -> str:
     return "data:image/jpeg;base64," + base64.b64encode(buffer.getvalue()).decode("ascii")
 
 
-def generate(prompt: str, references: list[bytes] | None = None, *, model: str, where: str = "seedream") -> bytes:
-    """그림 1장(JPEG bytes). references 는 순서대로 "Image 1, 2, …" 가 된다(최대 10장)."""
+def generate(
+    prompt: str,
+    references: list[bytes] | None = None,
+    *,
+    model: str,
+    where: str = "seedream",
+    size: str = SIZE,
+) -> bytes:
+    """그림 1장(JPEG bytes). references 는 순서대로 "Image 1, 2, …" 가 된다(최대 10장).
+
+    size 는 "WxH"(예: "2560x1440"). 기본은 SIZE(1920x1080) 라 기존 호출은 그대로다.
+    캐릭터 만들기(vnew)가 시트 2560x1440 · 정면 1440x2560 처럼 다른 크기를 쓰려고 넣었다
+    (설계자 2026-10-20).
+    """
     if not settings.ARK_API_KEY:
         raise VpocError(where, "NoApiKey", "Seedream 키(ARK_API_KEY)가 설정되지 않았습니다.", 400)
     body: dict = {
         "model": model,
         "prompt": prompt[:3000],
-        "size": SIZE,
+        "size": size or SIZE,
         "response_format": "b64_json",
         "watermark": False,
     }
@@ -89,7 +101,14 @@ def _filtered(exc: Exception) -> bool:
     return "sensitive" in text or "safety" in text or "content" in text and "policy" in text
 
 
-def generate_safe(prompt: str, references: list[bytes] | None = None, *, model: str, where: str = "seedream") -> bytes:
+def generate_safe(
+    prompt: str,
+    references: list[bytes] | None = None,
+    *,
+    model: str,
+    where: str = "seedream",
+    size: str = SIZE,
+) -> bytes:
     """generate + 안전 필터 오탐 대응(설계자 2026-10-14 "에러가 다시는 나지 않도록").
 
     1) 그대로 2) 한 번 더(결과가 매번 달라 통과하기도 한다) 3) Claude 가 같은 장면을 무난한 말로 다시 쓴 문장
@@ -103,7 +122,7 @@ def generate_safe(prompt: str, references: list[bytes] | None = None, *, model: 
     rewritten = False
     while index < len(attempts):
         try:
-            return generate(attempts[index], references, model=model, where=where)
+            return generate(attempts[index], references, model=model, where=where, size=size)
         except VpocError as exc:
             if not _filtered(exc):
                 raise

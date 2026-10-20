@@ -1,0 +1,1 @@
+@google/model-viewer 3.5.0 (npm, integrity sha512 verified 2026-10-20). Apache-2.0.
