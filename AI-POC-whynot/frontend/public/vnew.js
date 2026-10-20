@@ -1464,7 +1464,25 @@
         select.appendChild(option);
       });
     }
+    // 실사 시작 이미지를 받지 않는 모델(Seedance 등) 경고.
+    var realWarn = el(
+      "p",
+      "vnew-field-warn",
+      "이 모델은 실사 인물 시작 이미지를 받지 않아 신규 영상 기능에서 실패할 수 있습니다. Kling 등 fal 모델을 권장합니다."
+    );
+    function updateRealWarn(modelId) {
+      var chosen = null;
+      for (var i = 0; i < models.length; i++) {
+        if (models[i] && models[i].id === modelId) {
+          chosen = models[i];
+          break;
+        }
+      }
+      var unsupported = chosen && chosen.realStartImage === false;
+      realWarn.style.display = unsupported ? "" : "none";
+    }
     select.addEventListener("change", function () {
+      updateRealWarn(select.value);
       putInput({ videoModel: select.value })
         .then(function () {
           renderPlan(); // 최대 길이 안내가 바뀌니 다시 그린다
@@ -1474,6 +1492,8 @@
         });
     });
     modelField.appendChild(select);
+    modelField.appendChild(realWarn);
+    updateRealWarn(select.value);
     grid.appendChild(modelField);
 
     section.appendChild(grid);

@@ -42,6 +42,13 @@ _CACHE_TTL_S = 30
 _cache: dict = {"at": 0.0, "models": None}
 _cache_lock = threading.Lock()
 
+# 단가(pricing) 메모리 캐시. endpoint_id → {"at": epoch, "price": {...}|None}. 1시간(단가는 자주 안 바뀐다).
+_PRICING_TTL_S = 3600
+_pricing_cache: dict = {}
+_pricing_lock = threading.Lock()
+# OpenAPI prompt maxLength 를 못 찾을 때 쓰는 기본 상한(실측: Kling 2500).
+DEFAULT_PROMPT_MAX = 2500
+
 # HTTP 시간 제한. 큐 제출·조회는 짧고, 결과 영상 다운로드만 길다(ark 와 같은 값).
 _CALL_TIMEOUT_S = 60
 _DOWNLOAD_TIMEOUT_S = 300
@@ -224,6 +231,9 @@ def register(endpoint: str, *, added_by: str = "") -> dict:
     if caps is None:
         raise VpocError("fal.register", "SchemaUnreadable", reason or "스키마를 읽지 못했습니다.", 400)
 
+    # 단가(설계자 2026-10-20). 등록 때 함께 받아 레지스트리에 저장한다. 실패하면 None(단가 미정).
+    price = pricing(endpoint)
+
     item = {
         "id": settings.FAL_ID_PREFIX + endpoint,
         "endpointId": endpoint,
@@ -232,6 +242,7 @@ def register(endpoint: str, *, added_by: str = "") -> dict:
         "description": str(meta.get("description") or oa_meta.get("about") or ""),
         "thumbnailUrl": str(meta.get("thumbnailUrl") or oa_meta.get("thumbnailUrl") or ""),
         "caps": caps,
+        "pricing": price,
         "addedBy": added_by,
         "addedAt": now_iso(),
     }
@@ -378,6 +389,101 @@ def catalog(category: str, *, q: str = "", cursor: str = "") -> dict:
     return parse_catalog(result, category)
 
 
+# ---------------------------------------------------------------- 단가(pricing)
+
+
+def _parse_pricing(result: object, endpoint: str) -> dict | None:
+    """pricing 응답에서 unitPrice·unit 을 뽑는다(네트워크 없이 검증 가능하게 분리).
+
+    응답: {"prices":[{"endpoint_id":..,"unit_price":0.14,"unit":"seconds","currency":"USD"}, ...]}.
+    endpoint 와 맞는 항목을 고르고(하나뿐이면 그것), 없으면 None.
+    """
+    prices = result.get("prices") if isinstance(result, dict) else None
+    if not isinstance(prices, list) or not prices:
+        return None
+    chosen = None
+    for item in prices:
+        if isinstance(item, dict) and str(item.get("endpoint_id") or "") == endpoint:
+            chosen = item
+            break
+    if chosen is None and len(prices) == 1 and isinstance(prices[0], dict):
+        chosen = prices[0]
+    if not isinstance(chosen, dict):
+        return None
+    try:
+        unit_price = float(chosen.get("unit_price"))
+    except (TypeError, ValueError):
+        return None
+    return {"unitPrice": unit_price, "unit": str(chosen.get("unit") or "")}
+
+
+def pricing(endpoint: str) -> dict | None:
+    """endpoint_id 의 단가. {"unitPrice": float, "unit": str} 또는 None(실패).
+
+    `GET {FAL_API_URL}/models/pricing?endpoint_id=<id>` (헤더 Authorization Key — _request 가 붙이고
+    키 값은 로그로 남기지 않는다). 성공 결과는 1시간 메모리 캐시한다. 키가 없거나 호출이 실패하면
+    None(호출부가 "단가 미정" 으로 다룬다).
+    """
+    endpoint = str(endpoint or "").strip()
+    if not endpoint or not settings.FAL_KEY:
+        return None
+    now = time.time()
+    with _pricing_lock:
+        hit = _pricing_cache.get(endpoint)
+        if hit and now - hit["at"] < _PRICING_TTL_S:
+            return dict(hit["price"]) if hit["price"] else None
+    query = urllib.parse.urlencode({"endpoint_id": endpoint})
+    try:
+        result = _request("GET", f"{settings.FAL_API_URL}/models/pricing?{query}", where="fal.pricing")
+    except VpocError as exc:
+        log.warning("vpoc.fal.pricing.failed endpoint=%s kind=%s", endpoint, exc.kind)
+        return None
+    price = _parse_pricing(result, endpoint)
+    with _pricing_lock:
+        _pricing_cache[endpoint] = {"at": now, "price": price}
+    return dict(price) if price else None
+
+
+def pricing_for(model: str) -> dict | None:
+    """등록 모델("fal:<endpoint>")의 단가. 레지스트리에 저장된 pricing 을 먼저 쓰고, 없으면 받아
+    레지스트리를 갱신한다(지연 획득). 실패하면 None.
+    """
+    item = find(model)
+    if not item:
+        return None
+    stored = item.get("pricing")
+    if isinstance(stored, dict) and "unitPrice" in stored:
+        return dict(stored)
+    endpoint = str(item.get("endpointId") or "")
+    price = pricing(endpoint)
+    if price:
+        _update_registry_pricing(endpoint, price)
+    return dict(price) if price else None
+
+
+def _update_registry_pricing(endpoint: str, price: dict) -> None:
+    """옛 레지스트리 항목에 pricing 을 채운다(처음 쓸 때 지연 획득). 조건부 쓰기·캐시 무효화."""
+    try:
+        data, etag = STORE.read_json(REGISTRY_KEY)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("vpoc.fal.pricing.registry_read_failed err=%s", exc)
+        return
+    models = (data or {}).get("models") if isinstance(data, dict) else None
+    models = models if isinstance(models, list) else []
+    changed = False
+    for entry in models:
+        if isinstance(entry, dict) and entry.get("endpointId") == endpoint and not entry.get("pricing"):
+            entry["pricing"] = dict(price)
+            changed = True
+    if not changed:
+        return
+    try:
+        STORE.write_json(REGISTRY_KEY, {"models": models}, etag=etag)
+        _invalidate_cache()
+    except Exception as exc:  # noqa: BLE001
+        log.warning("vpoc.fal.pricing.registry_write_failed err=%s", exc)
+
+
 # ---------------------------------------------------------------- 스키마 → caps
 
 
@@ -484,6 +590,43 @@ def _first_present(props: dict, candidates) -> str:
     return ""
 
 
+def _prompt_max_length(props: dict, prompt_field: str) -> int:
+    """prompt 필드의 maxLength(OpenAPI). 없으면 DEFAULT_PROMPT_MAX(2500).
+
+    nullable 로 감싼 경우(anyOf)도 _unwrap 으로 꺼내 본다. 양의 정수가 아니면 기본값.
+    """
+    if not prompt_field:
+        return DEFAULT_PROMPT_MAX
+    spec = _unwrap(props.get(prompt_field))
+    value = spec.get("maxLength")
+    if isinstance(value, int) and not isinstance(value, bool) and value > 0:
+        return value
+    return DEFAULT_PROMPT_MAX
+
+
+def _trim_prompt(prompt: str, max_length: int) -> str:
+    """prompt 가 max_length 를 넘으면 문장 경계에서 자른다(넘지 않으면 그대로).
+
+    max_length 이내에서 마지막 문장부호(. ! ? 개행) 뒤까지만 남긴다. 한 문장도 안 들어가면
+    그냥 max_length 에서 끊는다(공백 경계 우선).
+    """
+    text = prompt or ""
+    if max_length <= 0 or len(text) <= max_length:
+        return text
+    window = text[:max_length]
+    cut = max(window.rfind(". "), window.rfind("! "), window.rfind("? "), window.rfind("\n"))
+    if cut >= 0:
+        # 문장부호를 포함해 그 뒤 공백 전까지 남긴다(.! ? 는 한 글자, 개행은 그 자리).
+        end = cut + 1
+        trimmed = window[:end].rstrip()
+        if trimmed:
+            return trimmed
+    space = window.rfind(" ")
+    if space > 0:
+        return window[:space].rstrip()
+    return window.rstrip()
+
+
 def _enum_of(props: dict, field: str) -> list:
     """field 의 enum(anyOf 로 감싼 경우도 꺼낸다). 없으면 빈 목록."""
     spec = _unwrap(props.get(field))
@@ -554,6 +697,7 @@ def extract_caps(openapi: dict, endpoint: str = "") -> tuple[dict | None, str]:
         return None, "입력 스키마(properties)를 찾지 못했습니다."
 
     prompt_field = "prompt" if "prompt" in props else ""
+    prompt_max = _prompt_max_length(props, prompt_field)
     start_field = _first_present(props, _START_IMAGE_FIELDS)
     end_field = _first_present(props, _END_IMAGE_FIELDS)
     reference_field = _first_present(props, _REFERENCE_FIELDS)
@@ -585,6 +729,7 @@ def extract_caps(openapi: dict, endpoint: str = "") -> tuple[dict | None, str]:
 
     caps = {
         "promptField": prompt_field,
+        "promptMaxLength": prompt_max,
         "startImageField": start_field,
         "endImageField": end_field,
         "referenceImagesField": reference_field,
@@ -662,7 +807,17 @@ def build_payload(
     """
     body: dict = {}
     if caps.get("promptField"):
-        body[caps["promptField"]] = prompt
+        max_length = int(caps.get("promptMaxLength") or DEFAULT_PROMPT_MAX)
+        sent = _trim_prompt(prompt, max_length)
+        if len(sent) != len(prompt):
+            log.info(
+                "vpoc.fal.prompt_trimmed field=%s max=%d from=%d to=%d",
+                caps["promptField"],
+                max_length,
+                len(prompt),
+                len(sent),
+            )
+        body[caps["promptField"]] = sent
 
     references = list(reference_jpegs_b64 or [])
     start_field = caps.get("startImageField") or ""
