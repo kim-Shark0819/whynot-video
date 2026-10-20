@@ -3162,10 +3162,24 @@ def create_blueprint(deps: VpocDependencies) -> Blueprint:
             if "makeMode" in body:
                 mode = str(body.get("makeMode") or "")
                 step["makeMode"] = mode if mode in ("single", "keyframes", "shots") else "shots"
+            # 영상 모델은 ③ 계획(샷·이미지)을 바꾸지 않으므로 _fingerprint 에 넣지 않는다 —
+            # 모델만 바꿨는데 ③ 을 다시 만들게(이미지 비용) 하지 않으려는 것이다.
+            # totalSeconds 검사보다 먼저 본다: 모델과 길이를 같이 바꾸면 이전 모델 범위로 검사되던 버그(설계자 2026-10-20).
+            check_model = model
+            if settings.MODEL_PICKER_ENABLED and "videoModel" in body:
+                wanted = str(body.get("videoModel") or "")
+                allowed = {item["id"] for item in ark.choices() if item["available"]}
+                if wanted not in allowed:
+                    raise VpocError(
+                        "routes.save_step", "ModelUnavailable", f"고를 수 없는 영상 모델입니다: {wanted}", 400
+                    )
+                step["videoModel"] = wanted
+                check_model = wanted
             if "totalSeconds" in body:
                 # single 은 고른 모델이 한 번에 만들 수 있는 범위(VIDEO_DURATION_RANGE · fal caps)로 검증한다.
                 # 옛 계획(keyframes/shots)은 20·30·40·60 선택지 그대로 둔다(데이터 영향 금지).
-                options = ark.video_options(model)
+                # 이번 요청에서 받아들인 모델로 검사한다(위 videoModel 블록이 먼저 돈다).
+                options = ark.video_options(check_model)
                 low = int(options.get("minDurationS") or settings.DURATION_S)
                 high = int(options.get("maxDurationS") or settings.DURATION_S)
                 legacy_mode = str(step.get("makeMode") or "") in ("keyframes", "shots")
@@ -3185,7 +3199,7 @@ def create_blueprint(deps: VpocDependencies) -> Blueprint:
                     raise VpocError(
                         "routes.save_step",
                         "BadDuration",
-                        f"{ark.label(model)}는 한 번에 {low}~{high}초만 만들 수 있습니다 (받은 값 {total}).",
+                        f"{ark.label(check_model)}는 한 번에 {low}~{high}초만 만들 수 있습니다 (받은 값 {total}).",
                         400,
                     )
                 step["totalSeconds"] = total
@@ -3194,16 +3208,6 @@ def create_blueprint(deps: VpocDependencies) -> Blueprint:
                 if value and value.get("fileId"):
                     user_images[key] = {"fileId": value["fileId"]}
             step["userImages"] = user_images
-            # 영상 모델은 ③ 계획(샷·이미지)을 바꾸지 않으므로 _fingerprint 에 넣지 않는다 —
-            # 모델만 바꿨는데 ③ 을 다시 만들게(이미지 비용) 하지 않으려는 것이다.
-            if settings.MODEL_PICKER_ENABLED and "videoModel" in body:
-                wanted = str(body.get("videoModel") or "")
-                allowed = {item["id"] for item in ark.choices() if item["available"]}
-                if wanted not in allowed:
-                    raise VpocError(
-                        "routes.save_step", "ModelUnavailable", f"고를 수 없는 영상 모델입니다: {wanted}", 400
-                    )
-                step["videoModel"] = wanted
             return
 
         # 영상 1개(single, 설계자 2026-10-19): 마스터 프롬프트 수정. 그림이 아니라 프롬프트가 기준이다.
