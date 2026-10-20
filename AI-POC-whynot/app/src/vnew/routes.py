@@ -222,6 +222,13 @@ def create_blueprint(deps: VnewDependencies) -> Blueprint:
         try:
             owner = _project_for(pid, write=False)
             data, _ = plan_mod.load_or_create(owner, pid)
+            # gen 이 진행 중이면 드라이버가 살아 있게 한다(파드 재시작 대비).
+            try:
+                from . import generate  # noqa: PLC0415
+
+                generate.ensure_driver(owner, pid)
+            except Exception:  # noqa: BLE001
+                pass
             return jsonify(plan_mod.plan_view(owner, pid, data))
         except Exception as exc:  # noqa: BLE001
             return _fail(exc)
@@ -341,8 +348,69 @@ def create_blueprint(deps: VnewDependencies) -> Blueprint:
     def plan_cancel(pid: str):
         try:
             owner = _project_for(pid, write=True)
+            # gen 이 진행 중이면 gen 을 취소하고, 아니면 (대본·콘티) task 를 취소한다.
+            data, _ = plan_mod.load_plan(owner, pid)
+            gen = data.get("gen") or {}
+            if gen.get("status") in ("running", "partial"):
+                from . import generate  # noqa: PLC0415
+
+                gen_out = generate.cancel_gen(owner, pid)
+                return jsonify({"ok": True, "gen": gen_out})
             task = plan_mod.cancel_task(owner, pid)
             return jsonify({"ok": True, "task": task})
+        except Exception as exc:  # noqa: BLE001
+            return _fail(exc)
+
+    # ------------------------------------------------------------ ④ 영상 생성
+
+    @bp.post("/p/<pid>/generate")
+    @deps.require_auth
+    def plan_generate(pid: str):
+        try:
+            from . import generate  # noqa: PLC0415
+
+            owner = _project_for(pid, write=True)
+            plan_mod.load_or_create(owner, pid)
+            payload = request.get_json(silent=True) or {}
+            confirm = payload.get("confirmUsd")
+            if confirm is None:
+                raise VpocError("vnew.generate", "NoConfirmUsd", "확인 금액(confirmUsd)이 필요합니다.", 400)
+            gen_id = generate.start_generate(owner, pid, float(confirm))
+            data, _ = plan_mod.load_plan(owner, pid)
+            return jsonify({"ok": True, "genId": gen_id, "plan": plan_mod.plan_view(owner, pid, data)}), 202
+        except Exception as exc:  # noqa: BLE001
+            return _fail(exc)
+
+    @bp.post("/p/<pid>/generate/retry")
+    @deps.require_auth
+    def plan_generate_retry(pid: str):
+        try:
+            from . import generate  # noqa: PLC0415
+
+            owner = _project_for(pid, write=True)
+            payload = request.get_json(silent=True) or {}
+            seg_id = str(payload.get("segId") or "")
+            if not seg_id:
+                raise VpocError("vnew.generate", "NoSegId", "구간 id(segId)가 필요합니다.", 400)
+            variant = str(payload.get("variant") or "real")
+            generate.retry_segment(owner, pid, seg_id, variant)
+            data, _ = plan_mod.load_plan(owner, pid)
+            return jsonify({"ok": True, "plan": plan_mod.plan_view(owner, pid, data)}), 202
+        except Exception as exc:  # noqa: BLE001
+            return _fail(exc)
+
+    @bp.post("/p/<pid>/select")
+    @deps.require_auth
+    def plan_select(pid: str):
+        try:
+            from . import generate  # noqa: PLC0415
+
+            owner = _project_for(pid, write=True)
+            payload = request.get_json(silent=True) or {}
+            variant = str(payload.get("variant") or "")
+            generate.select_variant(owner, pid, variant)
+            data, _ = plan_mod.load_plan(owner, pid)
+            return jsonify({"ok": True, "plan": plan_mod.plan_view(owner, pid, data)})
         except Exception as exc:  # noqa: BLE001
             return _fail(exc)
 

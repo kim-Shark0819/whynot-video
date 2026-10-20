@@ -869,6 +869,8 @@
     ["⑤", "사운드"]
   ];
   var PLAN_POLL_MS = 3000; // ②③ 진행 중 다시 불러오는 간격
+  var GEN_POLL_FAST_MS = 3000; // ④ 이미지·제출 단계
+  var GEN_POLL_SLOW_MS = 5000; // ④ 그 밖(제출 후 조회 대기)
   var ORDER_SAVE_MS = 600; // ① 순서 바꾼 뒤 저장까지 기다리는 디바운스
   var MIN_SECONDS = 1;
   var MAX_SECONDS = 60;
@@ -922,8 +924,21 @@
 
   /* ---------------------------------------------------------------- 단계 막대 */
 
+  /* 어느 단계까지 갈 수 있는가. ①②③은 콘티 ready 까지의 규칙을 따르고(기존),
+     ④는 gen 이 있으면, ⑤는 gen.selected 가 있으면 열린다(설계자 2026-10-20). */
+  function maxReachableStep() {
+    var plan = state.plan || {};
+    var gen = plan.gen || {};
+    var hasGen = gen && gen.status && gen.status !== "none";
+    var hasSelected = !!gen.selected;
+    if (hasSelected) return 5;
+    if (hasGen) return 4;
+    return 3;
+  }
+
   function planStepBar() {
     var bar = el("nav", "vnew-plan-steps");
+    var maxStep = maxReachableStep();
     PLAN_STEPS.forEach(function (step, index) {
       var stepNo = index + 1;
       var item = el("button", "vnew-plan-step");
@@ -932,15 +947,12 @@
       if (stepNo < state.planStep) item.classList.add("is-done");
       item.appendChild(el("span", "vnew-plan-step-mark", step[0]));
       item.appendChild(el("span", "vnew-plan-step-text", step[1]));
-      // 이전 단계(또는 지금까지 연 단계)로는 돌아갈 수 있다. ④⑤는 아직 안내만.
-      var canGo = stepNo <= 3;
+      // 갈 수 있는 단계까지만 활성화. 그 뒤 단계는 아직 안내만(is-soon).
+      var canGo = stepNo <= maxStep;
       if (!canGo) item.classList.add("is-soon");
       item.addEventListener("click", function () {
         if (stepNo === state.planStep) return;
-        if (stepNo <= 3) {
-          state.planStep = stepNo;
-          renderPlan();
-        } else {
+        if (stepNo <= maxStep) {
           state.planStep = stepNo;
           renderPlan();
         }
@@ -998,24 +1010,62 @@
   function decidePlanStep() {
     var plan = state.plan || {};
     var task = plan.task || {};
+    var gen = plan.gen || {};
+    // 영상 생성이 진행 중(running)이면 ④를 보여 준다.
+    if (gen.status === "running" || gen.status === "partial") {
+      state.planStep = 4;
+      return;
+    }
     if (task.status === "running") {
       state.planStep = task.name === "conti" ? 3 : 2;
       return;
     }
-    // 사용자가 이미 단계를 골랐으면(1~3) 그대로 둔다.
-    if (state.planStep >= 1 && state.planStep <= 5) return;
+    // 사용자가 이미 단계를 골랐으면(1~5) 그대로 둔다(단, 갈 수 없는 단계면 되돌린다).
+    if (state.planStep >= 1 && state.planStep <= 5) {
+      var maxStep = maxReachableStep();
+      if (state.planStep > maxStep) state.planStep = maxStep;
+      return;
+    }
+    // 처음 열 때: gen 이 있으면 ④, 아니면 ①.
+    if (gen.status && gen.status !== "none") {
+      state.planStep = gen.selected ? 5 : 4;
+      return;
+    }
     state.planStep = 1;
   }
 
-  /* 진행 중(task.running)이면 PLAN_POLL_MS 마다 다시 불러온다. */
+  /* 진행 중(task.running 또는 gen.running)이면 다시 불러온다. 영상 생성은 이미지·제출 단계에서
+     3초, 그 밖에는 5초 간격(설계자 2026-10-20). */
   function schedulePlanPoll() {
     stopPlanPolling();
-    var task = (state.plan || {}).task || {};
-    if (task.status !== "running") return;
+    var plan = state.plan || {};
+    var task = plan.task || {};
+    var gen = plan.gen || {};
+    var genRunning = gen.status === "running";
+    if (task.status !== "running" && !genRunning) return;
+    var interval = PLAN_POLL_MS;
+    if (genRunning) {
+      // 이미지(opening)·제출 단계면 더 자주(3초), 그 밖에는 5초.
+      interval = genBusyFast(gen) ? GEN_POLL_FAST_MS : GEN_POLL_SLOW_MS;
+    }
     state.planPollTimer = window.setTimeout(function () {
       if (!state.mounted) return;
       loadPlan(false);
-    }, PLAN_POLL_MS);
+    }, interval);
+  }
+
+  /* opening 이 아직이거나 어떤 구간이 preparing/queued/waiting(제출 직전)이면 빠른 폴링. */
+  function genBusyFast(gen) {
+    var opening = gen.opening || {};
+    if (opening.status && opening.status !== "done" && opening.status !== "failed") return true;
+    var segments = gen.segments || [];
+    for (var i = 0; i < segments.length; i++) {
+      var r = (segments[i].real || {}).status;
+      var w = (segments[i].webtoon || {}).status;
+      if (r === "preparing" || r === "queued" || r === "waiting") return true;
+      if (w === "preparing" || w === "queued" || w === "waiting") return true;
+    }
+    return false;
   }
 
   /* input 일부를 저장(PUT /input). 성공하면 plan 을 갱신한다(다시 그리기는 호출자 선택). */
@@ -1056,26 +1106,10 @@
     } else if (state.planStep === 3) {
       renderContiStep(body);
     } else if (state.planStep === 4) {
-      renderSoonStep(body, "④ 영상(실사·웹툰풍)", "콘티를 바탕으로 영상을 만드는 단계입니다.");
+      renderGenStep(body);
     } else {
-      renderSoonStep(body, "⑤ 사운드 (베타)", "영상에 어울리는 소리·음악을 붙이는 단계입니다.");
+      renderSoundStep(body);
     }
-  }
-
-  function renderSoonStep(host, title, lead) {
-    var card = el("div", "vnew-card");
-    card.appendChild(el("span", "vnew-badge", "다음 업데이트"));
-    card.appendChild(el("h2", "vnew-title", title));
-    card.appendChild(el("p", "vnew-lead", lead));
-    card.appendChild(el("p", "vnew-hint", "지금은 ③ 콘티까지 쓸 수 있습니다. 곧 열립니다."));
-    var back = el("button", "outline-button", "← 콘티로 돌아가기");
-    back.type = "button";
-    back.addEventListener("click", function () {
-      state.planStep = 3;
-      renderPlan();
-    });
-    card.appendChild(back);
-    host.appendChild(card);
   }
 
   /* ================================================================ ① 입력 */
@@ -2045,7 +2079,7 @@
     });
     host.appendChild(addBtn);
 
-    // 저장 · 영상 만들기(비활성)
+    // 저장 · 영상 만들기
     var footer = el("div", "vnew-plan-footer");
     var saveBtn = el("button", "outline-button", "저장");
     saveBtn.type = "button";
@@ -2066,13 +2100,113 @@
     });
     footer.appendChild(saveBtn);
 
+    // 영상 만들기: 합계가 목표와 맞아야(콘티가 서버 초 맞춤을 거친 상태) 누를 수 있다.
     var makeBtn = el("button", "primary-button", "영상 만들기");
     makeBtn.type = "button";
-    makeBtn.disabled = true;
-    makeBtn.title = "다음 업데이트에서 열립니다";
+    var lengthMismatch = totalSeconds !== sumSeconds;
+    makeBtn.disabled = lengthMismatch;
+    if (lengthMismatch) {
+      makeBtn.title = "먼저 길이를 맞춰 주세요";
+    }
+    makeBtn.addEventListener("click", function () {
+      openGenerateConfirm(showError);
+    });
     footer.appendChild(makeBtn);
-    footer.appendChild(el("span", "vnew-hint", "영상 만들기는 다음 업데이트에서 열립니다."));
+    if (lengthMismatch) {
+      footer.appendChild(el("span", "vnew-hint", "합계를 목표에 맞춘 뒤 영상을 만들 수 있습니다."));
+    }
     host.appendChild(footer);
+  }
+
+  /* ③ → ④ : 영상 만들기 확인창. 구간 수·'예상 비용이 듭니다'·설명을 보이고,
+     확인하면 POST /generate {confirmUsd: estimate.totalUsd} → ④로. 409 메시지는 그대로 보인다
+     (CharacterRealMissing 이면 캐릭터 만들기 링크를 함께 보인다). */
+  function openGenerateConfirm(showError) {
+    var plan = state.plan || {};
+    var gen = plan.gen || {};
+    var est = gen.estimate || {};
+    var segCount = (est.segments || []).length || ((plan.conti || {}).segments || []).length;
+
+    var scrim = el("div", "vnew-modal-scrim");
+    var modal = el("div", "vnew-modal vnew-gen-confirm");
+    var head = el("div", "vnew-modal-head");
+    head.appendChild(el("h3", null, "영상 만들기"));
+    var close = el("button", "icon-button", "×");
+    close.type = "button";
+    close.addEventListener("click", closeModal);
+    head.appendChild(close);
+    modal.appendChild(head);
+
+    var bodyWrap = el("div", "vnew-modal-body");
+    bodyWrap.appendChild(
+      el("p", null, "실사 영상을 구간별로 이어 만든 뒤 웹툰 그림체로도 변환합니다.")
+    );
+    bodyWrap.appendChild(el("p", "vnew-hint", "구간 " + segCount + "개를 순서대로 만듭니다."));
+    // 금액 숫자는 보이지 않는다(설계자 2026-10-20) — 문구만.
+    bodyWrap.appendChild(el("p", "vnew-gen-cost", "예상 비용이 듭니다."));
+
+    var error = planError("");
+    bodyWrap.appendChild(error);
+    function showModalError(message, isMissing) {
+      error.style.display = "";
+      error.textContent = message;
+      if (isMissing) {
+        var link = el("button", "text-action", "캐릭터 만들기로 가기");
+        link.type = "button";
+        link.addEventListener("click", function () {
+          closeModal();
+          goToCharacters();
+        });
+        error.appendChild(document.createElement("br"));
+        error.appendChild(link);
+      }
+    }
+
+    var actions = el("div", "vnew-modal-actions");
+    var cancelBtn = el("button", "outline-button", "취소");
+    cancelBtn.type = "button";
+    cancelBtn.addEventListener("click", closeModal);
+    var okBtn = el("button", "primary-button", "만들기 시작");
+    okBtn.type = "button";
+    okBtn.addEventListener("click", function () {
+      okBtn.disabled = true;
+      cancelBtn.disabled = true;
+      var confirmUsd = Number((gen.estimate || {}).totalUsd) || 0;
+      api("/api/vnew/p/" + encodeURIComponent(state.projectId) + "/generate", {
+        method: "POST",
+        body: JSON.stringify({ confirmUsd: confirmUsd })
+      })
+        .then(function (payload) {
+          state.plan = payload.plan || state.plan;
+          closeModal();
+          state.planStep = 4;
+          loadPlan(false);
+        })
+        .catch(function (err) {
+          okBtn.disabled = false;
+          cancelBtn.disabled = false;
+          var isMissing = err && err.type === "CharacterRealMissing";
+          var msg = errMessage(err);
+          if (isMissing) {
+            msg = msg + " 캐릭터 만들기에서 실사 버전을 완성해 주세요.";
+          }
+          showModalError(msg, isMissing);
+        });
+    });
+    actions.appendChild(cancelBtn);
+    actions.appendChild(okBtn);
+    bodyWrap.appendChild(actions);
+
+    modal.appendChild(bodyWrap);
+    scrim.appendChild(modal);
+    scrim.addEventListener("click", function (event) {
+      if (event.target === scrim) closeModal();
+    });
+    document.body.appendChild(scrim);
+
+    function closeModal() {
+      if (scrim.parentNode) scrim.parentNode.removeChild(scrim);
+    }
   }
 
   function contiSummary(totalSeconds, sumSeconds, showError) {
@@ -2248,6 +2382,393 @@
     cuts[a] = cuts[b];
     cuts[b] = tmp;
     renderPlan();
+  }
+
+  /* ================================================================ ④ 영상 생성
+
+     서버 gen_view(generate.py) 모양을 그대로 쓴다: opening·segments[real/webtoon]·finalReal·
+     finalWebtoon·selected·status. 진행 중이면 schedulePlanPoll 이 3~5초마다 다시 부른다. */
+
+  // 구간 상태 배지 문구(설계자 2026-10-20).
+  var GEN_STATUS_LABEL = {
+    waiting: "앞 구간 대기",
+    queued: "대기",
+    preparing: "준비 중",
+    submitted: "만드는 중",
+    completed: "완료",
+    failed: "실패",
+    cancelled: "취소됨"
+  };
+
+  function genStatusLabel(value) {
+    return GEN_STATUS_LABEL[value] || value || "";
+  }
+
+  /* 영상 내려받기 링크(presigned URL). 서버가 video/mp4 content-type 으로 서명한다. */
+  function downloadLink(url, label) {
+    var a = el("a", "outline-button vnew-download", label || "영상 내려받기");
+    a.href = url;
+    a.setAttribute("download", "");
+    a.setAttribute("target", "_blank");
+    a.setAttribute("rel", "noopener");
+    return a;
+  }
+
+  function renderGenStep(host) {
+    var plan = state.plan || {};
+    var gen = plan.gen || {};
+    var error = planError("");
+    host.appendChild(error);
+    function showError(message) {
+      error.style.display = "";
+      error.textContent = message;
+    }
+
+    if (!gen.status || gen.status === "none") {
+      host.appendChild(el("p", "vnew-hint", "아직 영상 생성을 시작하지 않았습니다. ③ 콘티에서 [영상 만들기] 를 눌러 주세요."));
+      var backBtn = el("button", "outline-button", "← 콘티로");
+      backBtn.type = "button";
+      backBtn.addEventListener("click", function () {
+        state.planStep = 3;
+        renderPlan();
+      });
+      host.appendChild(backBtn);
+      return;
+    }
+
+    var running = gen.status === "running";
+
+    // --- 진행 상태 띠 + 취소 ---
+    var statusBar = el("section", "panel vnew-gen-statusbar");
+    var statusText = {
+      running: "영상을 만들고 있습니다…",
+      done: "두 영상이 모두 준비됐습니다. 아래에서 하나를 골라 사운드로 넘어가세요.",
+      partial: "일부 구간이 실패했습니다. 실패한 칸에서 다시 시도할 수 있습니다.",
+      failed: "영상 생성에 실패했습니다.",
+      cancelled: "영상 생성을 취소했습니다."
+    };
+    statusBar.appendChild(el("p", "vnew-gen-status-text", statusText[gen.status] || gen.status));
+    if (running) {
+      var track = el("div", "vnew-progress-track");
+      track.appendChild(el("div", "vnew-progress-fill"));
+      statusBar.appendChild(track);
+      var cancelBtn = el("button", "outline-button danger", "생성 취소");
+      cancelBtn.type = "button";
+      cancelBtn.addEventListener("click", function () {
+        var okConfirm = false;
+        try {
+          okConfirm = window.confirm("정말 취소할까요? 지금까지 만든 구간은 남지만, 진행 중인 작업은 멈춥니다.");
+        } catch (e) {
+          okConfirm = true;
+        }
+        if (!okConfirm) return;
+        cancelBtn.disabled = true;
+        api("/api/vnew/p/" + encodeURIComponent(state.projectId) + "/cancel", { method: "POST" })
+          .then(function () {
+            loadPlan(false);
+          })
+          .catch(function (err) {
+            cancelBtn.disabled = false;
+            showError("취소하지 못했습니다: " + errMessage(err));
+          });
+      });
+      statusBar.appendChild(cancelBtn);
+    }
+    host.appendChild(statusBar);
+
+    // --- 맨 위 결과: 실사 / 웹툰 두 열 ---
+    host.appendChild(finalResults(gen, showError));
+
+    // --- 시작 장면(opening) ---
+    host.appendChild(openingCard(gen.opening || {}));
+
+    // --- 구간 타임라인 ---
+    host.appendChild(segmentTimeline(gen.segments || [], showError));
+  }
+
+  /* 맨 위 결과 두 열: finalReal · finalWebtoon. 둘 다 done 이면 각 열 아래 [이 영상으로 사운드 편집]. */
+  function finalResults(gen, showError) {
+    var section = el("section", "vnew-final-grid");
+    var bothReady =
+      (gen.finalReal || {}).status === "done" && (gen.finalWebtoon || {}).status === "done";
+
+    VARIANTS.forEach(function (meta) {
+      var final = (meta.key === "real" ? gen.finalReal : gen.finalWebtoon) || {};
+      var col = el("div", "vnew-final-col");
+      col.appendChild(el("h2", "vnew-variant-title", meta.title));
+
+      if (final.status === "done" && final.videoUrl) {
+        var video = el("video", "vnew-final-player");
+        video.src = final.videoUrl;
+        video.controls = true;
+        video.setAttribute("playsinline", "");
+        col.appendChild(video);
+        var tools = el("div", "vnew-final-tools");
+        tools.appendChild(downloadLink(final.videoUrl, "내려받기"));
+        col.appendChild(tools);
+        if (bothReady) {
+          var pick = el("button", "primary-button vnew-pick-btn", "이 영상으로 사운드 편집");
+          pick.type = "button";
+          pick.addEventListener("click", function () {
+            pick.disabled = true;
+            api("/api/vnew/p/" + encodeURIComponent(state.projectId) + "/select", {
+              method: "POST",
+              body: JSON.stringify({ variant: meta.key })
+            })
+              .then(function (payload) {
+                state.plan = payload.plan || state.plan;
+                state.planStep = 5;
+                loadPlan(false);
+              })
+              .catch(function (err) {
+                pick.disabled = false;
+                if (showError) showError("고르지 못했습니다: " + errMessage(err));
+              });
+          });
+          col.appendChild(pick);
+        }
+      } else if (final.status === "failed") {
+        col.appendChild(el("p", "login-error", final.error || "이어 붙이기에 실패했습니다."));
+      } else {
+        var place = el("div", "vnew-final-pending");
+        place.appendChild(el("p", "vnew-hint", "모든 구간이 끝나면 자동으로 이어 붙입니다."));
+        col.appendChild(place);
+      }
+      section.appendChild(col);
+    });
+    return section;
+  }
+
+  /* 시작 장면 카드: 상태 + 이미지(opening). */
+  function openingCard(opening) {
+    var card = el("section", "panel vnew-opening-card");
+    var head = el("div", "vnew-sec-head");
+    head.appendChild(el("h2", "vnew-sec-title", "시작 장면"));
+    head.appendChild(
+      el("span", "vnew-badge-gen is-" + (opening.status || "waiting"), genStatusLabel(opening.status || "waiting"))
+    );
+    card.appendChild(head);
+    if (opening.status === "done" && opening.imageUrl) {
+      var img = el("img", "vnew-opening-img");
+      img.src = opening.imageUrl;
+      img.alt = "시작 장면";
+      img.loading = "lazy";
+      img.addEventListener("click", function () {
+        openLightbox(opening.imageUrl, "시작 장면");
+      });
+      card.appendChild(img);
+    } else if (opening.status === "failed") {
+      card.appendChild(el("p", "login-error", opening.error || "시작 장면을 그리지 못했습니다."));
+    } else {
+      card.appendChild(el("p", "vnew-hint", "시작 장면을 그리고 있습니다…"));
+    }
+    return card;
+  }
+
+  /* 구간 타임라인: 구간마다 한 줄 — 번호·초·컷, 실사 칸·웹툰 칸(배지+영상+실패 시 재시도). */
+  function segmentTimeline(segments, showError) {
+    var section = el("section", "panel vnew-seg-timeline");
+    section.appendChild(el("h2", "vnew-sec-title", "구간별 진행"));
+    if (!segments.length) {
+      section.appendChild(el("p", "vnew-hint", "구간이 없습니다."));
+      return section;
+    }
+    var list = el("div", "vnew-seg-rows");
+    segments.forEach(function (seg, index) {
+      list.appendChild(segmentRow(seg, index, showError));
+    });
+    section.appendChild(list);
+    return section;
+  }
+
+  function segmentRow(seg, index, showError) {
+    var row = el("div", "vnew-seg-row");
+
+    var meta = el("div", "vnew-seg-meta");
+    meta.appendChild(el("span", "vnew-seg-no", "구간 " + (index + 1)));
+    meta.appendChild(el("span", "vnew-seg-seconds", (seg.seconds || 0) + "초"));
+    meta.appendChild(el("span", "vnew-seg-cuts", "컷 " + ((seg.cutIds || []).join(", ") || "-")));
+    row.appendChild(meta);
+
+    var cells = el("div", "vnew-seg-cells");
+    VARIANTS.forEach(function (variant) {
+      cells.appendChild(segmentCell(seg, variant, showError));
+    });
+    row.appendChild(cells);
+    return row;
+  }
+
+  function segmentCell(seg, variant, showError) {
+    var v = (seg[variant.key] || {});
+    var cell = el("div", "vnew-seg-cell");
+    var head = el("div", "vnew-seg-cell-head");
+    head.appendChild(el("span", "vnew-seg-cell-title", variant.title));
+    head.appendChild(
+      el("span", "vnew-badge-gen is-" + (v.status || "waiting"), genStatusLabel(v.status || "waiting"))
+    );
+    cell.appendChild(head);
+
+    if (v.status === "completed" && v.videoUrl) {
+      var video = el("video", "vnew-seg-video");
+      video.src = v.videoUrl;
+      video.controls = true;
+      video.setAttribute("playsinline", "");
+      cell.appendChild(video);
+    } else if (v.status === "failed") {
+      cell.appendChild(el("p", "login-error vnew-seg-error", v.error || "실패했습니다."));
+      var retryLabel = variant.key === "real" ? "이 구간부터 다시" : "변환 다시";
+      var retry = el("button", "outline-button vnew-seg-retry", retryLabel);
+      retry.type = "button";
+      retry.addEventListener("click", function () {
+        retry.disabled = true;
+        api("/api/vnew/p/" + encodeURIComponent(state.projectId) + "/generate/retry", {
+          method: "POST",
+          body: JSON.stringify({ segId: seg.id, variant: variant.key })
+        })
+          .then(function () {
+            loadPlan(false);
+          })
+          .catch(function (err) {
+            retry.disabled = false;
+            if (showError) showError("다시 시도하지 못했습니다: " + errMessage(err));
+          });
+      });
+      cell.appendChild(retry);
+    }
+    return cell;
+  }
+
+  /* ================================================================ ⑤ 사운드 (베타)
+
+     고른 영상(gen.selected) 플레이어는 고정. 대사 목록은 읽기 전용. 소리 토글은 화면 안에서만
+     muted 를 바꾼다(저장 안 함). [다른 영상 고르기] → ④. */
+
+  function renderSoundStep(host) {
+    var plan = state.plan || {};
+    var gen = plan.gen || {};
+    var error = planError("");
+    host.appendChild(error);
+
+    if (!gen.selected) {
+      host.appendChild(el("p", "vnew-hint", "먼저 ④ 영상에서 결과 하나를 골라 주세요."));
+      var goBtn = el("button", "outline-button", "← 영상으로");
+      goBtn.type = "button";
+      goBtn.addEventListener("click", function () {
+        state.planStep = 4;
+        renderPlan();
+      });
+      host.appendChild(goBtn);
+      return;
+    }
+
+    var selected = gen.selected; // "real" | "webtoon"
+    var meta = selected === "real" ? VARIANTS[0] : VARIANTS[1];
+    var final = (selected === "real" ? gen.finalReal : gen.finalWebtoon) || {};
+
+    // --- 머리글 + BETA 배지 ---
+    var head = el("section", "vnew-sound-head");
+    var titleWrap = el("div");
+    var title = el("h2", "vnew-sec-title", "사운드");
+    title.appendChild(el("span", "vnew-badge vnew-beta-badge", "BETA"));
+    titleWrap.appendChild(title);
+    titleWrap.appendChild(el("p", "vnew-hint", "고른 영상(" + meta.title + ")에 소리를 입히는 단계입니다."));
+    head.appendChild(titleWrap);
+    host.appendChild(head);
+
+    // --- 고른 영상 플레이어(고정) + [다른 영상 고르기] ---
+    var playerSec = el("section", "panel vnew-sound-player-sec");
+    var player = null;
+    if (final.status === "done" && final.videoUrl) {
+      player = el("video", "vnew-final-player vnew-sound-player");
+      player.src = final.videoUrl;
+      player.controls = true;
+      player.setAttribute("playsinline", "");
+      playerSec.appendChild(player);
+    } else {
+      playerSec.appendChild(el("p", "vnew-hint", "고른 영상을 불러오지 못했습니다."));
+    }
+
+    var playerTools = el("div", "vnew-sound-tools");
+    var reselect = el("button", "outline-button", "다른 영상 고르기");
+    reselect.type = "button";
+    reselect.addEventListener("click", function () {
+      state.planStep = 4;
+      renderPlan();
+    });
+    playerTools.appendChild(reselect);
+    if (final.status === "done" && final.videoUrl) {
+      playerTools.appendChild(downloadLink(final.videoUrl, "영상 내려받기"));
+    }
+    playerSec.appendChild(playerTools);
+    host.appendChild(playerSec);
+
+    // --- 소리 설정(muted 토글, 저장 안 함) ---
+    var soundSec = el("section", "panel vnew-sound-settings");
+    soundSec.appendChild(el("h2", "vnew-sec-title", "소리 설정"));
+    soundSec.appendChild(
+      el("p", "vnew-hint", "지금은 이 화면에서만 바뀝니다(저장하지 않습니다).")
+    );
+    var toggle = el("div", "vnew-sound-toggle");
+    var onBtn = el("button", "outline-button is-on", "모델 원음 유지");
+    var muteBtn = el("button", "outline-button", "무음");
+    onBtn.type = "button";
+    muteBtn.type = "button";
+    function setMuted(muted) {
+      if (player) player.muted = muted;
+      if (muted) {
+        muteBtn.classList.add("is-on");
+        onBtn.classList.remove("is-on");
+      } else {
+        onBtn.classList.add("is-on");
+        muteBtn.classList.remove("is-on");
+      }
+    }
+    onBtn.addEventListener("click", function () {
+      setMuted(false);
+    });
+    muteBtn.addEventListener("click", function () {
+      setMuted(true);
+    });
+    toggle.appendChild(onBtn);
+    toggle.appendChild(muteBtn);
+    soundSec.appendChild(toggle);
+    host.appendChild(soundSec);
+
+    // --- 대사 목록(읽기 전용) ---
+    host.appendChild(dialogueList());
+  }
+
+  /* 대본 entries 의 화자·대사·컷 시간대를 읽기 전용으로. */
+  function dialogueList() {
+    var plan = state.plan || {};
+    var script = plan.script || {};
+    var entries = script.entries || [];
+    var section = el("section", "panel vnew-dialogue-sec");
+    section.appendChild(el("h2", "vnew-sec-title", "대사 (" + entries.length + "줄)"));
+    section.appendChild(
+      el("p", "vnew-hint", "다음 업데이트에서 목소리·효과음·배경음을 넣을 수 있습니다.")
+    );
+    if (!entries.length) {
+      section.appendChild(el("p", "vnew-hint", "대사가 없습니다."));
+      return section;
+    }
+    var list = el("div", "vnew-dialogue-list");
+    entries.forEach(function (entry, index) {
+      var item = el("div", "vnew-dialogue-item");
+      item.appendChild(el("span", "vnew-dialogue-no", String(index + 1)));
+      var body = el("div", "vnew-dialogue-body");
+      var speaker = el("span", "vnew-dialogue-speaker", entry.speaker || "(지문)");
+      body.appendChild(speaker);
+      body.appendChild(el("span", "vnew-dialogue-line", entry.lineKo || entry.situationKo || "-"));
+      var panels = (entry.panels || []).join(", ");
+      if (panels) {
+        body.appendChild(el("span", "vnew-dialogue-panels", "컷 " + panels));
+      }
+      item.appendChild(body);
+      list.appendChild(item);
+    });
+    section.appendChild(list);
+    return section;
   }
 
   /* ---------------------------------------------------------------- 전역 */

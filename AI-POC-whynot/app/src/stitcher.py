@@ -202,6 +202,40 @@ def trim(source_path: str, output_path: str, *, start_sec: float, end_sec: float
     return output_path
 
 
+def last_frame_jpeg(path: str) -> bytes:
+    """영상의 마지막 프레임을 JPEG 바이트로 뽑는다(설계자 2026-10-20).
+
+    구간을 이어 만들 때 다음 구간의 첫 프레임(이미지→영상)으로 쓴다 — 앞 구간 실사 영상의
+    마지막 프레임을 첫 프레임으로 넣으면 "배경·캐릭터·위치가 이어지는" 다음 영상을 만든다.
+
+    `-sseof -0.1` 로 끝에서 0.1초 뒤로 이동해 마지막 프레임 1장(`-frames:v 1`)만 뽑는다. 재인코딩
+    없이 프레임만 JPEG 로 쓰므로 빠르다. 실패하면 StitchError.
+    """
+    if not path or not os.path.exists(path):
+        raise StitchError("마지막 프레임을 뽑을 영상이 없습니다.")
+    binary = ffmpeg_path()
+    with tempfile.TemporaryDirectory(prefix="last-frame-") as workdir:
+        out_path = os.path.join(workdir, "last.jpg")
+        command = [
+            binary, "-y", "-hide_banner", "-loglevel", "error",
+            "-sseof", "-0.1", "-i", path,
+            "-frames:v", "1", "-q:v", "2", out_path,
+        ]
+        result = _run(command)
+        if result.returncode != 0 or not os.path.exists(out_path) or not os.path.getsize(out_path):
+            # 짧은 영상에서 -sseof 가 빗나갈 수 있다. 처음부터 읽어 마지막 프레임을 고른다.
+            fallback = [
+                binary, "-y", "-hide_banner", "-loglevel", "error",
+                "-i", path, "-vf", "select=eof", "-frames:v", "1", "-q:v", "2", out_path,
+            ]
+            result = _run(fallback)
+            if result.returncode != 0 or not os.path.exists(out_path) or not os.path.getsize(out_path):
+                detail = result.stderr.decode("utf-8", errors="replace")[:300]
+                raise StitchError(f"마지막 프레임을 뽑지 못했습니다: {detail}")
+        with open(out_path, "rb") as handle:
+            return handle.read()
+
+
 def probe_duration(path: str) -> float:
     """영상 길이(초). 실패하면 0을 돌려준다. 표시용이라 실패가 치명적이지 않다."""
     try:
