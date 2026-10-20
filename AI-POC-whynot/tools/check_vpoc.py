@@ -2853,6 +2853,218 @@ def check_vnew_characters() -> None:
         finally:
             characters._charge_3d = real_charge3d
 
+        # ============================================================ 033: 시작 전 선점·heartbeat
+        # retry3d·rebuild·build 가 '시작 전에' claim·heartbeat 를 잡아, 직후 조회 자동 재개가
+        # 끊긴 작업으로 오인해 두 번째 실행(이중 3D 제출)을 띄우지 못하게 한다.
+        from datetime import datetime as _dt3, timedelta as _td3, timezone as _tz3  # noqa: PLC0415
+
+        def _old_iso3(minutes):
+            return (_dt3.now(_tz3.utc) - _td3(minutes=minutes)).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+        # --- (y) retry3d 시작 직후 detail_view → 자동 재개 0회·3D 제출 1회 ---
+        # 재현: 이전 실패 실행 때의 '오래된 heartbeat'(10분 초과)가 남은 variant 를 retry3d 로 다시
+        # 시작. 시작 전 claim·heartbeat 를 잡으므로, 직후 조회가 자동 재개를 띄우지 않는다.
+        yid = _make_char_with_source("y-캐릭터")
+        yfk = characters.front_key("tester", yid, "real", 1)
+        ybk = characters.back_key("tester", yid, "real", 1)
+        fake_store.put_bytes(yfk, _tiny_jpeg(1440, 2560), "image/jpeg")
+        fake_store.put_bytes(ybk, _tiny_jpeg(512, 2560), "image/jpeg")
+
+        def _seed_y(d):
+            d["version"] = 1
+            d["status"] = "failed"
+            vv = d.setdefault("variants", {}).setdefault("real", characters._empty_variant())
+            vv["status"] = "failed"
+            vv["frontKey"] = yfk
+            vv["backKey"] = ybk
+            vv["heartbeatAt"] = _old_iso3(15)  # 이전 실패 실행의 오래된 heartbeat
+            # 다른 그림체(webtoon)는 완료 상태로 둔다 — 끊긴 채 두면 그쪽 자동 재개가 정상적으로 3D 를 하나 더 낸다.
+            d["variants"].setdefault("webtoon", characters._empty_variant()).update({"status": "ready", "model3d": {"status": "ready", "glbKey": "k", "thumbKey": "", "error": ""}})
+            vv["claim"] = ""
+            vv["claimedAt"] = ""
+            # 이전 실패 실행의 old requestArn(없다고 두면 retry3d 가 새로 제출 1회).
+            vv["model3d"] = {"status": "failed", "requestArn": "", "glbKey": "", "thumbKey": "", "error": "이전 실패", "resubmits": 0}
+
+        characters.mutate_char("tester", yid, _seed_y)
+        fal_mode["fail_status"] = False
+        fal_mode["transient_left"] = 0
+        y_before = _post_count2()
+        resp = client.post(f"/api/vnew/characters/{yid}/variants/real/retry3d")
+        if resp.status_code != 202:
+            bad.append(f"(y) retry3d 가 202 가 아닙니다: {resp.status_code} {resp.get_data(as_text=True)[:200]}")
+        # 스레드 합류 전에 바로 상세 조회를 여러 번 — 자동 재개가 끼어들면 두 번째 제출이 생긴다.
+        for _ in range(3):
+            client.get(f"/api/vnew/characters/{yid}")
+        _join_builds()
+        # 조회가 또 스레드를 띄웠을 수 있으니 한 번 더 합류.
+        client.get(f"/api/vnew/characters/{yid}")
+        _join_builds()
+        y_submits = _post_count2() - y_before
+        ychar, _ = characters.load_char("tester", yid)
+        yv = (ychar.get("variants") or {}).get("real", {})
+        if y_submits != 1:
+            bad.append(f"(y) retry3d 직후 조회로 3D 제출이 1회가 아닙니다(이중 제출 의심): {y_submits}")
+        if int(yv.get("resumeCount") or 0) != 0:
+            bad.append(f"(y) retry3d 직후 자동 재개가 일어났습니다(resumeCount {yv.get('resumeCount')})")
+        if yv.get("status") != "ready" or (yv.get("model3d") or {}).get("status") != "ready":
+            bad.append(f"(y) retry3d 후 real 이 ready 가 아닙니다: {yv.get('status')} / {(yv.get('model3d') or {}).get('status')}")
+
+        # --- (z) 오래된 heartbeat + claim 없음 → 자동 재개 1회 ---
+        # (y) 와 대조: claim 이 비어 있고 heartbeat 가 오래됐으면 조회가 그 variant 를 이어 만든다.
+        zid = _make_char_with_source("z-캐릭터")
+        zsheet = characters.sheet_key("tester", zid, "webtoon", 1)
+        zfront = characters.front_key("tester", zid, "webtoon", 1)
+        zback = characters.back_key("tester", zid, "webtoon", 1)
+        fake_store.put_bytes(zsheet, _tiny_jpeg(2560, 1440), "image/jpeg")
+        fake_store.put_bytes(zfront, _tiny_jpeg(1440, 2560), "image/jpeg")
+        fake_store.put_bytes(zback, _tiny_jpeg(512, 2560), "image/jpeg")
+        z_arn = characters.ARN_PREFIX + characters.settings.HUNYUAN_ENDPOINT + "/req_z"
+
+        def _seed_z(d):
+            d["version"] = 1
+            d["status"] = "building"
+            d["buildStartedAt"] = _old_iso3(20)
+            w = d["variants"]["webtoon"]
+            w["status"] = "model3d"
+            w["sheetKey"] = zsheet
+            w["frontKey"] = zfront
+            w["backKey"] = zback
+            w["heartbeatAt"] = _old_iso3(15)  # 오래된 heartbeat
+            w["claim"] = ""  # 선점 없음
+            w["claimedAt"] = ""
+            w["resumeCount"] = 0
+            w["model3d"] = {"status": "submitted", "requestArn": z_arn, "glbKey": "", "thumbKey": "", "error": "", "resubmits": 0}
+            r = d["variants"]["real"]
+            r["status"] = "ready"
+            r["model3d"] = {
+                "status": "ready", "requestArn": "",
+                "glbKey": "users/tester/characters/" + zid + "/real/v1/model.glb",
+                "thumbKey": "", "error": "",
+            }
+            fake_store.put_bytes(r["model3d"]["glbKey"], b"glTF-real", "model/gltf-binary")
+
+        characters.mutate_char("tester", zid, _seed_z)
+        fal_mode["fail_status"] = False
+        fal_mode["transient_left"] = 0
+        resp = client.get(f"/api/vnew/characters/{zid}")
+        _join_builds()
+        zchar, _ = characters.load_char("tester", zid)
+        zw = zchar["variants"]["webtoon"]
+        if int(zw.get("resumeCount") or 0) != 1:
+            bad.append(f"(z) claim 없고 heartbeat 오래됨 → 자동 재개 1회가 아닙니다(resumeCount {zw.get('resumeCount')})")
+        if zw.get("status") != "ready" or (zw.get("model3d") or {}).get("status") != "ready":
+            bad.append(f"(z) 자동 재개 후 webtoon 이 ready 가 아닙니다: {zw.get('status')} / {(zw.get('model3d') or {}).get('status')}")
+
+        # --- (aa) 순차 빌드 중 앞 variant 가 오래 걸려도(가짜 시계 15분) 대기 variant 자동 재개 0회 ---
+        # (aa-1) 단위: keepalive 에 대기 variant(real)를 등록하고 real 을 15분 전으로 늙힌 뒤,
+        #        앞 variant(webtoon)의 heartbeat 를 찍으면 real 의 claim·heartbeat 도 함께 갱신돼
+        #        _variant_stale(real) 가 False 가 된다.
+        aid = _make_char_with_source("aa-캐릭터")
+        aa_tok = "keepalivetok"
+
+        def _seed_aa(d):
+            d["version"] = 1
+            d["status"] = "building"
+            w = d["variants"]["webtoon"]
+            w["status"] = "model3d"
+            w["heartbeatAt"] = characters.now_iso()
+            r = d["variants"]["real"]
+            r["status"] = "queued"
+            r["claim"] = aa_tok
+            r["claimedAt"] = _old_iso3(15)      # 15분 전(가짜 시계) — 그냥 두면 stale
+            r["heartbeatAt"] = _old_iso3(15)
+
+        characters.mutate_char("tester", aid, _seed_aa)
+        aa_char, _ = characters.load_char("tester", aid)
+        if not characters._variant_stale(aa_char, "real"):
+            bad.append("(aa) 전제: 15분 전 claim·heartbeat 인 대기 variant 는 갱신 전 stale 이어야 합니다")
+        # keepalive 로 real 등록 → webtoon heartbeat 찍기 → real 도 갱신.
+        characters._set_keepalive("tester", aid, {"real": aa_tok})
+        try:
+            characters._touch_heartbeat("tester", aid, "webtoon")
+        finally:
+            characters._set_keepalive("tester", aid, {})
+        aa_char, _ = characters.load_char("tester", aid)
+        aa_real = aa_char["variants"]["real"]
+        if characters._variant_stale(aa_char, "real"):
+            bad.append("(aa) keepalive 로 대기 variant 를 갱신했는데도 아직 stale 입니다")
+        if not characters._claim_fresh(aa_real):
+            bad.append("(aa) keepalive 갱신 후 대기 variant 의 claim 이 살아 있지 않습니다")
+
+        # (aa-2) 통합: 순차 build 에서 webtoon 3D 폴링이 여러 번 도는 동안 가짜 시계로 시간을
+        #        흘려(폴링마다 +8분, 2회면 16분 경과) 대기 variant(real)가 자동 재개로 중복 실행되지
+        #        않는지 본다 — keepalive 가 폴링마다 real 을 '가짜 지금'으로 다시 찍어 10분 stall 을
+        #        넘지 않게 한다. real 은 run_build 가 한 번만 만든다.
+        from datetime import datetime as _RealDT  # noqa: PLC0415
+
+        class _Clock:
+            def __init__(self):
+                self.t = _RealDT.now(_tz3.utc)
+
+            def advance(self, minutes):
+                self.t = self.t + _td3(minutes=minutes)
+
+            def iso(self):
+                return self.t.strftime("%Y-%m-%dT%H:%M:%SZ")
+
+        aa_clock = _Clock()
+
+        class _FakeDT(_RealDT):
+            @classmethod
+            def now(cls, tz=None):
+                return aa_clock.t if tz is not None else aa_clock.t.replace(tzinfo=None)
+
+        aa2id = _make_char_with_source("aa2-캐릭터")
+        aa2_state = {"polls": 0, "resumed_seen": 0}
+        orig_fake_fal = characters._fal_request
+        orig_now_iso = characters.now_iso
+        orig_dt = characters.datetime
+        # 가짜 시계 적용: now_iso 와 datetime.now 둘 다 같은 시계를 본다.
+        characters.now_iso = aa_clock.iso
+        characters.datetime = _FakeDT
+
+        def _aa2_fal(method, url, payload=None):
+            # webtoon 3D 상태 조회 때마다: 가짜 시계 +8분 흘리고(누적 16분) 상세 조회.
+            if method == "GET" and url.endswith("/status"):
+                aa2_state["polls"] += 1
+                if aa2_state["polls"] <= 2:
+                    aa_clock.advance(8)  # 가짜 시계 전진(앞 variant 가 오래 걸리는 것)
+                    # 상세 조회(reconcile) — 대기 variant 가 자동 재개되면 안 된다(keepalive 덕).
+                    client.get(f"/api/vnew/characters/{aa2id}")
+                    rc, _ = characters.load_char("tester", aa2id)
+                    if int(rc["variants"]["real"].get("resumeCount") or 0) > 0:
+                        aa2_state["resumed_seen"] += 1
+                # webtoon 3D 를 최초 2회는 폴링만, 그 뒤 완료시켜 build 가 끝나게.
+                return {"status": "COMPLETED"} if aa2_state["polls"] > 2 else {"status": "IN_PROGRESS"}
+            return orig_fake_fal(method, url, payload)
+
+        characters._fal_request = _aa2_fal
+        try:
+            fal_mode["fail_status"] = False
+            fal_mode["transient_left"] = 0
+            resp = client.post(f"/api/vnew/characters/{aa2id}/build")
+            if resp.status_code != 202:
+                bad.append(f"(aa) build 가 202 가 아닙니다: {resp.status_code}")
+            _join_builds()
+            client.get(f"/api/vnew/characters/{aa2id}")
+            _join_builds()
+        finally:
+            characters._fal_request = orig_fake_fal
+            characters.now_iso = orig_now_iso
+            characters.datetime = orig_dt
+        aa2char, _ = characters.load_char("tester", aa2id)
+        aa2_real = aa2char["variants"]["real"]
+        if aa2_state["polls"] < 3:
+            bad.append(f"(aa) webtoon 3D 폴링이 충분히 돌지 않아 시간 경과를 시뮬레이션하지 못했습니다: polls={aa2_state['polls']}")
+        if aa2_state["resumed_seen"] != 0:
+            bad.append(f"(aa) 앞 variant 가 오래 걸리는 동안 대기 variant 가 자동 재개됐습니다(resumeCount>0 {aa2_state['resumed_seen']}회)")
+        if int(aa2_real.get("resumeCount") or 0) != 0:
+            bad.append(f"(aa) 최종 대기 variant resumeCount 가 0 이 아닙니다: {aa2_real.get('resumeCount')}")
+        if aa2_real.get("status") != "ready" or (aa2_real.get("model3d") or {}).get("status") != "ready":
+            bad.append(f"(aa) 순차 build 후 대기 variant(real)가 ready 가 아닙니다: {aa2_real.get('status')} / {(aa2_real.get('model3d') or {}).get('status')}")
+        if aa2char.get("status") != "ready":
+            bad.append(f"(aa) 순차 build 후 캐릭터가 ready 가 아닙니다: {aa2char.get('status')}")
+
     except Exception as exc:  # noqa: BLE001
         import traceback as _tb  # noqa: PLC0415
 
@@ -2879,7 +3091,10 @@ def check_vnew_characters() -> None:
             "(q)heartbeat 10분 초과 자동재개 3D만 (r)resumeCount 초과 variant failed·캐릭터 ready "
             "(s)롤업 규칙 (t)중복 선점 1회 (u)variant rebuild 409·성공·분석 재사용 "
             "(v)unavailable 8회→재제출→ready(제출2·원장2) (w)재제출 한도 초과→failed "
-            "(x)retry3d 이전요청 unavailable→재제출"
+            "(x)retry3d 이전요청 unavailable→재제출 "
+            "(y)retry3d 직후 조회 자동재개 0회·3D 제출 1회(이중 제출 방지) "
+            "(z)오래된 heartbeat+claim 없음→자동재개 1회 "
+            "(aa)순차 build 중 앞 variant 가 15분 걸려도 대기 variant 자동재개 0회(keepalive)"
         )
 
 
