@@ -19,7 +19,7 @@ from typing import Callable
 from flask import Blueprint, jsonify, request
 
 from . import seedream  # noqa: F401  (키 장면)
-from . import ark, compose, fal, images, ledger, llm, regen, settings, store, video
+from . import ark, compose, fal, fal_audit, images, ledger, llm, regen, settings, store, video
 from .errors import VpocError, envelope, now_iso, status_for
 
 log = logging.getLogger("vpoc")
@@ -4610,27 +4610,97 @@ def create_blueprint(deps: VpocDependencies) -> Blueprint:
             )
         return jsonify({"ok": True, "configured": bool(settings.FAL_KEY), "models": models})
 
+    def _audit_user() -> str:
+        """기록용 사용자 이름. 사용자 확인이 실패해도 기록은 막지 않는다(빈 문자열)."""
+        try:
+            return deps.current_username() or ""
+        except Exception:  # noqa: BLE001
+            return ""
+
     @bp.post("/fal/models")
     @deps.require_auth
     @enveloped("routes.fal_register")
     def fal_register():
-        """fal 모델 등록. body {endpointId}. 스키마를 받아 caps 를 만들고 목록에 더한다."""
-        _require_picker("routes.fal_register")
-        _require_fal_key("routes.fal_register")
-        payload = request.get_json(silent=True) or {}
-        endpoint = str(payload.get("endpointId") or "").strip()
-        if not endpoint:
-            raise VpocError("routes.fal_register", "BadEndpoint", "endpointId 가 필요합니다.", 400)
-        item = fal.register(endpoint, added_by=deps.current_username())
+        """fal 모델 등록(화면 문구: 활성화/추가). body {endpointId}.
+
+        진입부터 끝까지 **모든 결과**(성공·실패)를 fal_audit 에 남긴다 — 파드 재시작으로 stdout
+        로그가 사라져도 원인을 영구 저장소에서 확인할 수 있게(2026-10-20). 기록 뒤 원래 예외를
+        그대로 다시 던져 기존 응답(오류 봉투·상태 코드)은 바뀌지 않는다.
+        """
+        user = _audit_user()
+        endpoint = ""
+        try:
+            _require_picker("routes.fal_register")
+            _require_fal_key("routes.fal_register")
+            payload = request.get_json(silent=True) or {}
+            endpoint = str(payload.get("endpointId") or "").strip()
+            if not endpoint:
+                raise VpocError("routes.fal_register", "BadEndpoint", "endpointId 가 필요합니다.", 400)
+            item = fal.register(endpoint, added_by=user)
+        except VpocError as exc:
+            fal_audit.record(
+                "register", endpoint, user=user, ok=False,
+                code=exc.kind, message=exc.message, status=exc.status,
+            )
+            raise
+        except Exception as exc:  # noqa: BLE001  (예상 못 한 예외도 기록한다)
+            fal_audit.record(
+                "register", endpoint, user=user, ok=False,
+                code="Unexpected", message=str(exc), status=500,
+            )
+            raise
+        fal_audit.record(
+            "register", endpoint, user=user, ok=True,
+            code="", message=str(item.get("label") or ""), status=201,
+        )
         return jsonify({"ok": True, "model": item}), 201
 
     @bp.delete("/fal/models/<path:endpoint_id>")
     @deps.require_auth
     @enveloped("routes.fal_unregister")
     def fal_unregister(endpoint_id: str):
-        """등록 해제. 이미 그 모델을 고른 계획은 selected() 가 Luma 로 되돌린다(기존 동작)."""
-        _require_picker("routes.fal_unregister")
-        removed = fal.unregister(endpoint_id)
+        """등록 해제. 이미 그 모델을 고른 계획은 selected() 가 Luma 로 되돌린다(기존 동작).
+
+        fal_register 와 같은 방식으로 모든 결과를 fal_audit 에 남긴다. 성공 시 removed 가 False 면
+        message 에 `not registered` 를 적는다.
+        """
+        user = _audit_user()
+        try:
+            _require_picker("routes.fal_unregister")
+            removed = fal.unregister(endpoint_id)
+        except VpocError as exc:
+            fal_audit.record(
+                "unregister", endpoint_id, user=user, ok=False,
+                code=exc.kind, message=exc.message, status=exc.status,
+            )
+            raise
+        except Exception as exc:  # noqa: BLE001  (예상 못 한 예외도 기록한다)
+            fal_audit.record(
+                "unregister", endpoint_id, user=user, ok=False,
+                code="Unexpected", message=str(exc), status=500,
+            )
+            raise
+        fal_audit.record(
+            "unregister", endpoint_id, user=user, ok=True,
+            code="", message="" if removed else "not registered", status=200,
+        )
         return jsonify({"ok": True, "removed": removed})
+
+    @bp.get("/fal/logs")
+    @deps.require_auth
+    @enveloped("routes.fal_logs")
+    def fal_logs():
+        """날짜별 fal 추가·해제 기록 조회. ?date=YYYY-MM-DD (없으면 오늘 KST)."""
+        _require_picker("routes.fal_logs")
+        date_str = str(request.args.get("date") or "").strip() or fal_audit.today()
+        try:
+            text = fal_audit.read(date_str)
+        except ValueError as exc:
+            raise VpocError(
+                "routes.fal_logs", "BadDate", "날짜 형식이 올바르지 않습니다(YYYY-MM-DD).", 400
+            ) from exc
+        return jsonify(
+            {"ok": True, "date": date_str, "key": fal_audit.log_key(date_str), "text": text}
+        )
 
     return bp

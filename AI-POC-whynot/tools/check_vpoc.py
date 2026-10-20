@@ -1731,125 +1731,6 @@ def check_dual() -> None:
         )
 
 
-def check_vnew() -> None:
-    """영상만들기_신규(vnew, 설계자 2026-10-20) — 틀만 확인한다.
-
-    (a) VNEW 꺼짐 → video_new 생성 거절(잘못된 트랙), 블루프린트 미등록(server.py 가 플래그로 가둠)
-    (b) VNEW 켜짐 → video_new 생성 허용, /api/vnew/health 200 {ok:true}
-    (c) node --check 대상에 vnew.js 가 있다(check_js 가 public/*.js 전부를 보므로 존재만 확인)
-    """
-    sys.path.insert(0, str(ROOT / "app"))
-    from src import project_tracks  # noqa: PLC0415
-    from src import vnew  # noqa: PLC0415
-
-    bad: list[str] = []
-
-    # --- 공통: 가짜 deps. 트랙 검증 분기만 쓰므로 나머지는 더미다. ---
-    class _Err(Exception):
-        pass
-
-    def make_deps(vnew_on: bool):
-        def response_error(message, status, code, **kwargs):
-            return (code, status)
-
-        return project_tracks.ProjectTrackDependencies(
-            require_auth=lambda h: h,
-            response_error=response_error,
-            current_username=lambda: "tester",
-            list_projects=lambda actor: {"shared": [], "private": []},
-            project_payload=lambda p: p,
-            can_read_project=lambda p: True,
-            can_write_project=lambda p: True,
-            command_store=object(),
-            repository=object(),
-            story_enabled=True,
-            video_enabled=True,
-            vnew_enabled=vnew_on,
-        )
-
-    deps_off = make_deps(False)
-    deps_on = make_deps(True)
-
-    # (a) 꺼짐: video_new 는 받는 트랙 집합에 없고, track_enabled 도 False,
-    #     _availability_error 도 거절한다.
-    if "video_new" in project_tracks._accepted_tracks(deps_off):
-        bad.append("(a) VNEW 꺼짐인데 video_new 가 받는 트랙에 있습니다")
-    if project_tracks.track_enabled(
-        "video_new", story_enabled=True, video_enabled=True, vnew_enabled=False
-    ):
-        bad.append("(a) VNEW 꺼짐인데 track_enabled(video_new) 가 True 입니다")
-    off_err = project_tracks._availability_error(deps_off, "video_new")
-    if not off_err or off_err[1] != 403:
-        bad.append(f"(a) VNEW 꺼짐인데 video_new 가용성 검사가 거절하지 않습니다: {off_err}")
-
-    # 블루프린트 미등록: server.py 가 'if VNEW_ENABLED:' 안에서만 등록한다.
-    server_src = (ROOT / "app" / "src" / "server.py").read_text(encoding="utf-8")
-    if "if VNEW_ENABLED:" not in server_src:
-        bad.append("(a) server.py 가 VNEW_ENABLED 플래그로 vnew 등록을 가두지 않습니다")
-    reg_at = server_src.find("vnew.create_blueprint")
-    gate_at = server_src.rfind("if VNEW_ENABLED:", 0, reg_at)
-    if reg_at < 0 or gate_at < 0:
-        bad.append("(a) vnew.create_blueprint 등록이 VNEW_ENABLED 블록 뒤에 있지 않습니다")
-    if "VNEW_ENABLED = os.getenv(\"VNEW_ENABLED\"" not in server_src:
-        bad.append("(a) server.py 가 VNEW_ENABLED env 를 읽지 않습니다")
-
-    # (b) 켜짐: video_new 가 받는 트랙에 있고, track_enabled True, 가용성 검사 통과(None).
-    if "video_new" not in project_tracks._accepted_tracks(deps_on):
-        bad.append("(b) VNEW 켜짐인데 video_new 가 받는 트랙에 없습니다")
-    if not project_tracks.track_enabled(
-        "video_new", story_enabled=True, video_enabled=True, vnew_enabled=True
-    ):
-        bad.append("(b) VNEW 켜짐인데 track_enabled(video_new) 가 False 입니다")
-    on_err = project_tracks._availability_error(deps_on, "video_new")
-    if on_err is not None:
-        bad.append(f"(b) VNEW 켜짐인데 video_new 가용성 검사가 거절합니다: {on_err}")
-    # 트랙 상수·라벨
-    if project_tracks.TRACK_VIDEO_NEW != "video_new" or "video_new" not in project_tracks.TRACKS:
-        bad.append("(b) TRACK_VIDEO_NEW/TRACKS 에 video_new 가 없습니다")
-    if "video_new" not in project_tracks.TRACK_LABELS:
-        bad.append("(b) TRACK_LABELS 에 video_new 라벨이 없습니다")
-
-    # (b) /api/vnew/health 200 {ok:true} — 인증은 주입된 require_auth 로 통과시킨다.
-    try:
-        from flask import Flask  # noqa: PLC0415
-
-        bp = vnew.create_blueprint(vnew.VnewDependencies(require_auth=lambda h: h))
-        app = Flask(__name__)
-        app.register_blueprint(bp)
-        client = app.test_client()
-        resp = client.get("/api/vnew/health")
-        body = resp.get_json()
-        if resp.status_code != 200:
-            bad.append(f"(b) /api/vnew/health 가 200 이 아닙니다: {resp.status_code}")
-        if not body or body.get("ok") is not True:
-            bad.append(f"(b) /api/vnew/health 응답이 {{ok:true}} 가 아닙니다: {body}")
-        rules = [str(r) for r in app.url_map.iter_rules()]
-        if not any(r.startswith("/api/vnew/health") for r in rules):
-            bad.append("(b) /api/vnew/health 라우트가 없습니다")
-    except Exception as exc:  # noqa: BLE001
-        import traceback as _tb  # noqa: PLC0415
-        bad.append("(b) health 검사 중 예외: " + repr(exc) + "\n" + _tb.format_exc()[:800])
-
-    # (c) node --check 대상에 vnew.js 가 있다(check_js 가 public/*.js 전부를 본다).
-    if not (PUBLIC / "vnew.js").exists():
-        bad.append("(c) frontend/public/vnew.js 가 없습니다")
-    if not (PUBLIC / "vnew.css").exists():
-        bad.append("(c) frontend/public/vnew.css 가 없습니다")
-    # index.html 이 vnew.js/vnew.css 를 defer·asset version 으로 싣는지.
-    index_src = (PUBLIC / "index.html").read_text(encoding="utf-8")
-    if "/vnew.js?v=__ASSET_VERSION__" not in index_src or "defer" not in index_src[
-        index_src.find("/vnew.js"): index_src.find("/vnew.js") + 60
-    ]:
-        bad.append("(c) index.html 이 vnew.js 를 defer·asset version 으로 싣지 않습니다")
-    if "/vnew.css?v=__ASSET_VERSION__" not in index_src:
-        bad.append("(c) index.html 이 vnew.css 를 asset version 으로 싣지 않습니다")
-
-    if bad:
-        fail("영상만들기_신규(vnew) 검사 실패\n" + "\n".join(f"  {item}" for item in bad))
-    else:
-        ok("영상만들기_신규(vnew) 검사 (a)꺼짐 거절·미등록 (b)켜짐 허용·health 200 (c)vnew.js/css·index 로드")
-
-
 def check_planview_keys() -> None:
     """PlanView ④ 샷의 기존 키가 그대로고 새 키만 더해졌는지 본다."""
     source = (ROOT / "app" / "src" / "vpoc" / "routes.py").read_text(encoding="utf-8")
@@ -1873,6 +1754,220 @@ def check_planview_keys() -> None:
         )
 
 
+# ---------------------------------------------------------------- fal 감사 로그
+
+
+class _FakeS3:
+    """메모리 S3. fal_audit 의 raw get_object/put_object 만 쓴다(실제 외부 호출 금지).
+
+    조건부 쓰기(IfMatch · IfNoneMatch)를 흉내 내 동시 쓰기 충돌을 재현할 수 있게 한다.
+    `fail_next` 가 양수면 그 횟수만큼 put_object 가 S3 예외를 던진다(기록 실패 검사용).
+    """
+
+    def __init__(self) -> None:
+        import threading as _threading  # noqa: PLC0415
+
+        self.objects: dict[tuple, dict] = {}  # (bucket, key) -> {"body", "etag"}
+        self._seq = 0
+        self._lock = _threading.Lock()
+        self.fail_next = 0
+
+    def _client_error(self, code: str, op: str):
+        from botocore.exceptions import ClientError  # noqa: PLC0415
+
+        return ClientError({"Error": {"Code": code, "Message": code}}, op)
+
+    def get_object(self, *, Bucket, Key):  # noqa: N803
+        obj = self.objects.get((Bucket, Key))
+        if obj is None:
+            raise self._client_error("NoSuchKey", "GetObject")
+        return {"Body": _FakeBody(obj["body"]), "ETag": '"%s"' % obj["etag"]}
+
+    def put_object(self, *, Bucket, Key, Body, **kwargs):  # noqa: N803
+        if self.fail_next > 0:
+            self.fail_next -= 1
+            raise self._client_error("InternalError", "PutObject")
+        with self._lock:
+            existing = self.objects.get((Bucket, Key))
+            if "IfNoneMatch" in kwargs and existing is not None:
+                raise self._client_error("PreconditionFailed", "PutObject")
+            if "IfMatch" in kwargs:
+                want = str(kwargs["IfMatch"]).strip('"')
+                if existing is None or existing["etag"] != want:
+                    raise self._client_error("PreconditionFailed", "PutObject")
+            self._seq += 1
+            etag = str(self._seq)
+            self.objects[(Bucket, Key)] = {"body": bytes(Body), "etag": etag}
+            return {"ETag": '"%s"' % etag}
+
+
+class _FakeBody:
+    def __init__(self, data: bytes) -> None:
+        self._data = data
+
+    def read(self) -> bytes:
+        return self._data
+
+
+def check_fal_audit() -> None:
+    """fal 모델 추가(활성화)·해제 기록 — 설계자 2026-10-20. 실제 외부 호출 금지(가짜 S3·가짜 fal).
+
+    (a) 등록 성공·NotVideoModel 실패·해제 각 1건 → 같은 KST 날짜 파일에 3줄, 순서·필드 확인
+    (b) 기록 실패(S3 예외)여도 등록 API 응답이 기존과 같다(201 · model)
+    (c) KST 날짜 경계: UTC 2026-10-20T15:30Z → 파일명 2026-10-21-error.log
+    (d) /fal/logs 잘못된 date → 400 BadDate
+    """
+    sys.path.insert(0, str(ROOT / "app"))
+    from src.vpoc import fal, fal_audit, routes, settings, store  # noqa: PLC0415
+    from src.vpoc.errors import VpocError  # noqa: PLC0415
+
+    bad: list[str] = []
+
+    fake_s3 = _FakeS3()
+    bucket = store.STORE.main_bucket
+    saved = {
+        "s3_client": store.s3_client,
+        "fal_register": fal.register,
+        "fal_unregister": fal.unregister,
+        "picker": settings.MODEL_PICKER_ENABLED,
+        "fal_key": settings.FAL_KEY,
+        "audit_cond": dict(fal_audit._CONDITIONAL_WRITES),
+    }
+    store.s3_client = lambda region: fake_s3
+    settings.MODEL_PICKER_ENABLED = True
+    settings.FAL_KEY = "dummy-fal-key"  # _require_fal_key 를 통과(실제 호출은 가짜)
+
+    # fal.register / unregister 는 네트워크를 쓴다 — 결정적인 가짜로 바꾼다.
+    def fake_register(endpoint, *, added_by=""):
+        if endpoint == "fal-ai/kling-video/o3/pro/video-to-video/edit":
+            raise VpocError(
+                "fal.register",
+                "NotVideoModel",
+                "영상 단계에서 쓸 수 없는 모델입니다(카테고리: video-to-video).",
+                400,
+            )
+        return {"id": "fal:" + endpoint, "endpointId": endpoint, "label": "Kling 2.1"}
+
+    def fake_unregister(endpoint):
+        return True
+
+    fal.register = fake_register
+    fal.unregister = fake_unregister
+
+    deps = routes.VpocDependencies(
+        require_auth=lambda h: h,
+        current_username=lambda: "admin",
+        get_project=lambda p: {"id": p, "owner": "admin"},
+        can_read_project=lambda proj: True,
+        can_write_project=lambda proj: True,
+        graph_run=lambda *a, **k: [],
+    )
+
+    try:
+        from flask import Flask  # noqa: PLC0415
+
+        bp = routes.create_blueprint(deps)
+        app = Flask(__name__)
+        app.register_blueprint(bp)
+        client = app.test_client()
+
+        today = fal_audit.today()
+        key = fal_audit.log_key(today)
+
+        # (a) 등록 성공 → NotVideoModel 실패 → 해제. 같은 날짜 파일에 3줄, 순서대로.
+        ok_ep = "fal-ai/wan/v2.7/reference-to-video"
+        bad_ep = "fal-ai/kling-video/o3/pro/video-to-video/edit"
+        r1 = client.post("/api/vpoc/fal/models", json={"endpointId": ok_ep})
+        if r1.status_code != 201:
+            bad.append(f"(a) 등록 성공이 201 이 아닙니다: {r1.status_code} {r1.get_json()}")
+        r2 = client.post("/api/vpoc/fal/models", json={"endpointId": bad_ep})
+        if r2.status_code != 400 or (r2.get_json().get("error") or {}).get("type") != "NotVideoModel":
+            bad.append(f"(a) NotVideoModel 이 400 으로 나지 않습니다: {r2.status_code} {r2.get_json()}")
+        r3 = client.delete("/api/vpoc/fal/models/" + ok_ep)
+        if r3.status_code != 200 or r3.get_json().get("removed") is not True:
+            bad.append(f"(a) 해제가 200/removed=True 가 아닙니다: {r3.status_code} {r3.get_json()}")
+
+        text = fal_audit.read(today)
+        lines = [ln for ln in text.splitlines() if ln.strip()]
+        if len(lines) != 3:
+            bad.append(f"(a) 같은 날짜 파일에 3줄이 아닙니다: {len(lines)}\n{text}")
+        else:
+            # 1줄: register OK, 2줄: register FAIL NotVideoModel, 3줄: unregister OK
+            f1 = [p.strip() for p in lines[0].split("|")]
+            f2 = [p.strip() for p in lines[1].split("|")]
+            f3 = [p.strip() for p in lines[2].split("|")]
+            # 필드: [시각, action, 판정, user, endpoint, code, status, message]
+            if not (f1[1] == "register" and f1[2] == "OK" and f1[3] == "admin"
+                    and f1[4] == ok_ep and f1[6] == "201"):
+                bad.append(f"(a) 1줄(등록 성공) 필드가 틀립니다: {lines[0]}")
+            if not f1[0].endswith("KST"):
+                bad.append(f"(a) 시각이 KST 로 끝나지 않습니다: {f1[0]}")
+            if not (f2[1] == "register" and f2[2] == "FAIL" and f2[4] == bad_ep
+                    and f2[5] == "NotVideoModel" and f2[6] == "400"):
+                bad.append(f"(a) 2줄(NotVideoModel 실패) 필드가 틀립니다: {lines[1]}")
+            if not (f3[1] == "unregister" and f3[2] == "OK" and f3[4] == ok_ep and f3[6] == "200"):
+                bad.append(f"(a) 3줄(해제) 필드가 틀립니다: {lines[2]}")
+
+        # (b) 기록 실패(S3 예외)여도 등록 API 응답이 기존과 같다(201 · model).
+        fake_s3.fail_next = 10  # append 의 모든 put 시도를 실패시킨다(재시도 포함)
+        rb = client.post("/api/vpoc/fal/models", json={"endpointId": "fal-ai/minimax/hailuo-02"})
+        fake_s3.fail_next = 0
+        if rb.status_code != 201 or not (rb.get_json().get("model") or {}).get("endpointId"):
+            bad.append(f"(b) 기록 실패인데 등록 응답이 다릅니다: {rb.status_code} {rb.get_json()}")
+
+        # (c) KST 날짜 경계: UTC 2026-10-20T15:30Z → KST 2026-10-21 → 파일명 2026-10-21-error.log
+        import datetime as _dt  # noqa: PLC0415
+
+        class _FixedNow(_dt.datetime):
+            """now() 만 고정한 datetime. strptime 등 나머지는 그대로(read 가 strptime 을 쓴다)."""
+
+            @classmethod
+            def now(cls, tz=None):
+                base = _dt.datetime(2026, 10, 20, 15, 30, 0, tzinfo=_dt.timezone.utc)
+                return base.astimezone(tz) if tz is not None else base
+
+        saved_dt = fal_audit.datetime
+        fal_audit.datetime = _FixedNow  # type: ignore[assignment]
+        try:
+            boundary_key = fal_audit.log_key(fal_audit.today())
+            if not boundary_key.endswith("2026-10-21-error.log"):
+                bad.append(f"(c) KST 날짜 경계 파일명이 틀립니다: {boundary_key}")
+            # record 도 KST 2026-10-21 파일에 쓴다.
+            fal_audit.record("register", "fal-ai/x", user="admin", ok=True, status=201)
+            crossed = fal_audit.read("2026-10-21")
+            if "register" not in crossed or "admin" not in crossed:
+                bad.append(f"(c) 날짜 경계 파일에 기록이 없습니다: {crossed!r}")
+        finally:
+            fal_audit.datetime = saved_dt  # type: ignore[assignment]
+
+        # (d) /fal/logs 잘못된 date → 400 BadDate
+        rd = client.get("/api/vpoc/fal/logs?date=2026/10/21")
+        if rd.status_code != 400 or (rd.get_json().get("error") or {}).get("type") != "BadDate":
+            bad.append(f"(d) 잘못된 date 가 400 BadDate 가 아닙니다: {rd.status_code} {rd.get_json()}")
+        # 올바른 date 는 200 + key·text.
+        rd2 = client.get("/api/vpoc/fal/logs?date=" + today)
+        jd2 = rd2.get_json()
+        if rd2.status_code != 200 or jd2.get("key") != key or "text" not in jd2:
+            bad.append(f"(d) 올바른 date 조회가 틀립니다: {rd2.status_code} {jd2}")
+
+    except Exception as exc:  # noqa: BLE001
+        import traceback as _tb  # noqa: PLC0415
+        bad.append("fal 감사 로그 검사 실행 중 예외: " + repr(exc) + "\n" + _tb.format_exc()[:1500])
+    finally:
+        store.s3_client = saved["s3_client"]
+        fal.register = saved["fal_register"]
+        fal.unregister = saved["fal_unregister"]
+        settings.MODEL_PICKER_ENABLED = saved["picker"]
+        settings.FAL_KEY = saved["fal_key"]
+        fal_audit._CONDITIONAL_WRITES.clear()
+        fal_audit._CONDITIONAL_WRITES.update(saved["audit_cond"])
+
+    if bad:
+        fail("fal 감사 로그 검사 실패\n" + "\n".join(f"  {item}" for item in bad))
+    else:
+        ok("fal 감사 로그 검사 (a)3줄 순서·필드 (b)기록실패에도 응답유지 (c)KST 날짜경계 (d)BadDate")
+
+
 # ---------------------------------------------------------------- main
 
 
@@ -1890,7 +1985,7 @@ def main() -> int:
     check_planview_keys()
     check_cancel()
     check_dual()
-    check_vnew()
+    check_fal_audit()
     print()
     if warnings:
         print(f"경고 {len(warnings)}건")
