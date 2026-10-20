@@ -3436,10 +3436,14 @@ def check_fal_pricing() -> None:
     """fal 단가(pricing)·shot_usd·프롬프트 길이(설계자 2026-10-20). 실제 유료 호출 금지(가짜).
 
     (a) _parse_pricing: seconds·per-video(videos)·없음(None) 을 바르게 읽는다
-    (b) shot_usd(fal): seconds 면 unit_price×초, 그 밖(영상 1건)이면 unit_price, 단가 모르면 0
+    (b) shot_usd(fal): seconds 면 unit_price×초, 영상 1건 단위면 unit_price, 단가 모르면 0
         — fal 모델이 Luma 표(VIDEO_USD_PER_SEC)로 떨어지지 않는다
     (c) build_payload: prompt 3000자 → promptMaxLength(2500) 이하로 문장 경계에서 잘림
     (d) promptMaxLength 가 없으면 기본 2500, caps 추출(extract_caps)에 promptMaxLength 가 있다
+    (e) "1000 tokens" 720p 10초 → 토큰 공식으로 4.6224 근처(1건 가격 아님)
+    (f) "1M tokens" → 단위 수 1000000 으로 환산
+    (g) 모르는 단위 "credits" → 0(단가 미정, 1건 가격으로 보지 않는다)
+    (h) "videos" → 1건 가격(초 무시)
     """
     sys.path.insert(0, str(ROOT / "app"))
     from src.vpoc import fal, settings  # noqa: PLC0415
@@ -3494,6 +3498,30 @@ def check_fal_pricing() -> None:
         v3 = settings.shot_usd(fal_model, "720p", 20)
         if abs(v3) > 1e-9:
             bad.append(f"(b) 단가 미정 fal shot_usd 가 0 이 아닙니다: {v3}")
+        # (e) "1000 tokens" 720p 10초 → 토큰 공식.
+        #     tokens = 1280×720×24×10/1024 = 216000, 금액 = 0.0214 × 216000 / 1000 = 4.6224
+        fal.pricing_for = lambda m: {"unitPrice": 0.0214, "unit": "1000 tokens"}
+        v_e = settings.shot_usd(fal_model, "720p", 10)
+        if abs(v_e - 4.6224) > 1e-3:
+            bad.append(f"(e) '1000 tokens' 720p 10초 금액이 틀립니다: {v_e} != 4.6224")
+        if abs(v_e - 0.0214) < 1e-6:
+            bad.append("(e) '1000 tokens' 를 영상 1건 가격으로 봤습니다(토큰 공식 미적용)")
+        # (f) "1M tokens" — 같은 토큰 수(216000)에 단위 수 1000000.
+        #     단가 2140(1M당 2140)이면 2140 × 216000 / 1000000 = 462.24
+        fal.pricing_for = lambda m: {"unitPrice": 2140.0, "unit": "1M tokens"}
+        v_f = settings.shot_usd(fal_model, "720p", 10)
+        if abs(v_f - 462.24) > 1e-2:
+            bad.append(f"(f) '1M tokens' 720p 10초 금액이 틀립니다: {v_f} != 462.24")
+        # (g) 모르는 단위 "credits" → 0(단가 미정), 1건 가격으로 보지 않는다.
+        fal.pricing_for = lambda m: {"unitPrice": 5.0, "unit": "credits"}
+        v_g = settings.shot_usd(fal_model, "720p", 10)
+        if abs(v_g) > 1e-9:
+            bad.append(f"(g) 모르는 단위 'credits' 가 0 이 아닙니다: {v_g}")
+        # (h) "videos" 는 1건 가격(초 무시).
+        fal.pricing_for = lambda m: {"unitPrice": 3.5, "unit": "videos"}
+        v_h = settings.shot_usd(fal_model, "720p", 10)
+        if abs(v_h - 3.5) > 1e-6:
+            bad.append(f"(h) 'videos' 1건 가격이 틀립니다: {v_h} != 3.5")
     finally:
         fal.pricing_for = real_pricing_for
 
