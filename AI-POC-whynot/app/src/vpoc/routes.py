@@ -613,6 +613,8 @@ def create_blueprint(deps: VpocDependencies) -> Blueprint:
                 "error": task.get("error"),
                 # vpoc-regen 추가: revise 가 어느 샷에 대한 작업인지. 다른 작업에서는 null.
                 "shotId": task.get("shotId"),
+                # 진행 중 작업 취소(설계자 2026-10-20): 작업 고유 id. 취소하면 null.
+                "id": task.get("id"),
             },
             "regenEnabled": regen.enabled(),
             # ② "몇 개의 샷으로 나눌까요?" 선택지(0 = 자동).
@@ -681,6 +683,11 @@ def create_blueprint(deps: VpocDependencies) -> Blueprint:
         # revise 는 ③을 고치지 않는다. ③ revision 을 지켜보면 되돌리기 때 결과를 버린다.
         watch_step = {"analyze": 1, "prepare": 2, "redraw": 3, "revise": 3}.get(name, 1)
 
+        # 이 작업 고유 id(설계자 2026-10-20). 취소하면 state["task"].id 가 바뀌므로, 스레드가 끝날 때
+        # id 가 다르면 결과를 버린다 — 스레드 안 모델 호출은 멈출 수 없어(이미 보낸 요청은 끝까지 돈다)
+        # 결과만 버리는 방식이다. revision 비교(되돌리기)는 그대로 유지한다.
+        task_id = secrets.token_hex(6)
+
         def _mark_start(state: dict):
             state["task"] = {
                 "name": name,
@@ -689,6 +696,7 @@ def create_blueprint(deps: VpocDependencies) -> Blueprint:
                 "finishedAt": None,
                 "error": None,
                 "shotId": shot_id or None,
+                "id": task_id,
             }
             return store.revision_of(state, watch_step)
 
@@ -703,8 +711,17 @@ def create_blueprint(deps: VpocDependencies) -> Blueprint:
                 error = envelope(f"task.{name}", exc)
 
             def _finish(state: dict):
-                if store.revision_of(state, watch_step) != revision:
+                # 되돌리기(revision 변경) 또는 취소(task id 변경, 취소는 id 를 None 으로 바꾼다) 중
+                # 하나라도 맞으면 결과를 버린다. 우리가 시작한 작업의 task_id 는 항상 non-None 이므로,
+                # 현재 task.id 가 None(취소·리셋)이거나 다른 id(다른 작업)면 불일치로 버린다.
+                current_id = (state.get("task") or {}).get("id")
+                discard = store.revision_of(state, watch_step) != revision or current_id != task_id
+                if discard:
                     log.info("vpoc.task.discarded name=%s plan=%s", name, plan_id)
+                    # 취소·다른 작업이 현재 task 를 들고 있으면(현재 id 가 내 id 가 아님) 그 기록을
+                    # 지우지 않는다(취소 상태를 보존). 되돌리기로 버린 경우(현재 id 가 아직 내 것)만 idle 로.
+                    if current_id != task_id:
+                        return
                     state["task"] = {
                         "name": None,
                         "status": "idle",
@@ -712,6 +729,7 @@ def create_blueprint(deps: VpocDependencies) -> Blueprint:
                         "finishedAt": now_iso(),
                         "error": None,
                         "shotId": None,
+                        "id": None,
                     }
                     return
                 state["task"] = {
@@ -721,6 +739,7 @@ def create_blueprint(deps: VpocDependencies) -> Blueprint:
                     "finishedAt": now_iso(),
                     "error": error,
                     "shotId": shot_id or None,
+                    "id": task_id,
                 }
                 if not error:
                     apply_result(state, name, result)
@@ -2334,12 +2353,17 @@ def create_blueprint(deps: VpocDependencies) -> Blueprint:
         statuses = {shot.get("status") for shot in shots}
         if statuses & {"queued", "submitted"}:
             step4["status"] = "running"
+        elif "cancelled" in statuses:
+            # 취소된 샷이 있고 진행 중(queued/submitted)이 없으면 ④ 는 취소 상태로 둔다(설계자 2026-10-20).
+            # done 으로 덮어 완료 처리(finish_plan)로 넘어가지 않게 한다. final 은 그대로.
+            step4["status"] = "cancelled"
         elif "failed" in statuses:
             step4["status"] = "partial"
         else:
             step4["status"] = "done"
 
-        if not (statuses & {"queued", "submitted"}):
+        # 취소된 샷이 있으면 완료 처리를 하지 않는다 — 취소한 회차를 확정본으로 남기지 않는다.
+        if not (statuses & {"queued", "submitted", "cancelled"}):
             changed = finish_plan(state, owner, pid, plan_id) or changed
         return changed
 
@@ -3346,6 +3370,94 @@ def create_blueprint(deps: VpocDependencies) -> Blueprint:
             state["currentStep"] = target
 
         state, _ = store.mutate_state(owner, pid, plan_id, mutator)
+        return jsonify(plan_view(state, project, can_edit=True))
+
+    def _cancel_video(state: dict, owner: str, pid: str, plan_id: str) -> bool:
+        """영상 생성(④) 취소(설계자 2026-10-20). 취소한 것이 있으면 True.
+
+        steps["4"].status == "running" 이거나 샷/regen 중 queued·submitted 가 있으면 취소한다.
+        - queued 대상 → status "cancelled", note "사용자가 취소했습니다".
+        - submitted 대상 → 공급자 취소를 시도(실패해도 진행)하고 status "cancelled", note 동일,
+          cancelledAt 기록, cancelRemote 에 결과("ok"|"rejected"|"unsupported")를 남긴다.
+            · ark/tasks · fal/requests → ark.cancel(대기 중일 때만 실제 취소). 예외는 "rejected".
+            · Luma(Bedrock async) → 취소 API 가 없다. 호출하지 않고 "unsupported".
+        취소 뒤 나중에 도착한 결과는 무시된다(refresh_shots 가 submitted/queued 만 다루므로
+        cancelled 는 다시 조회·제출되지 않는다). 원장은 되돌리지 않는다(이미 계상된 것은 그대로).
+        """
+        step4 = state["steps"]["4"]
+        shots = step4.get("shots") or []
+        # 샷 본체와 진행 중 regen 모두 본다(regen.poll_targets 와 같은 대상 집합).
+        targets: list[dict] = []
+        for shot in shots:
+            for target in regen.poll_targets(shot):
+                targets.append(target)
+        active = [t for t in targets if t.get("status") in ("queued", "submitted")]
+        if not active and step4.get("status") != "running":
+            return False
+
+        for target in active:
+            if target.get("status") == "submitted" and target.get("invocationArn"):
+                arn = str(target.get("invocationArn") or "")
+                if ark.is_ark_job(arn):
+                    try:
+                        ark.cancel(arn)
+                        target["cancelRemote"] = "ok"
+                    except Exception as exc:  # noqa: BLE001 — 거절·오류여도 우리 쪽은 cancelled
+                        log.warning("vpoc.cancel.remote_failed arn=%s err=%s", arn, exc)
+                        target["cancelRemote"] = "rejected"
+                else:
+                    # Luma(Bedrock async)는 취소 API 가 없다 — 호출하지 않는다.
+                    target["cancelRemote"] = "unsupported"
+                target["cancelledAt"] = now_iso()
+            target["status"] = "cancelled"
+            target["note"] = "사용자가 취소했습니다"
+
+        # ④ 전체 상태를 cancelled 로 둔다. final 은 그대로(이미 완료된 샷·합본은 유지).
+        step4["status"] = "cancelled"
+        return True
+
+    @bp.post("/p/<pid>/plans/<plan_id>/cancel")
+    @deps.require_auth
+    @enveloped("routes.cancel")
+    def cancel(pid: str, plan_id: str):
+        """진행 중 작업 취소(설계자 2026-10-20).
+
+        단계 작업(task.status == "running")과 영상 생성(steps["4"] 진행 중)이 함께 있으면 둘 다
+        취소한다. 취소할 것이 없으면 409 NothingToCancel.
+        """
+        project = project_for(pid, write=True)
+        owner = owner_of(project)
+
+        def mutator(state: dict):
+            cancelled_any = False
+
+            # 1) 단계 작업 취소. 스레드 안 모델 호출은 멈출 수 없다(이미 보낸 요청은 끝까지 돈다) —
+            #    task.id 를 바꿔(여기서 None 으로) 스레드가 끝날 때 _finish 가 결과를 버리게 한다.
+            task = state.get("task") or {}
+            if task.get("status") == "running":
+                state["task"] = {
+                    "name": task.get("name"),
+                    "status": "cancelled",
+                    "startedAt": task.get("startedAt"),
+                    "finishedAt": now_iso(),
+                    "error": None,
+                    "shotId": task.get("shotId"),
+                    "id": None,
+                }
+                cancelled_any = True
+
+            # 2) 영상 생성 취소(큐/제출 대상 + 공급자 취소 시도).
+            if _cancel_video(state, owner, pid, plan_id):
+                cancelled_any = True
+
+            if not cancelled_any:
+                raise VpocError(
+                    "routes.cancel", "NothingToCancel", "취소할 진행 중 작업이 없습니다.", 409
+                )
+
+        state, _ = store.mutate_state(owner, pid, plan_id, mutator)
+        # update_graph: generate 가 "generating" 을 쓴다. 취소에 맞는 상태 값이 따로 없으므로
+        # 건드리지 않는다(추측으로 새 값을 만들지 않는다 — 설계자 2026-10-20).
         return jsonify(plan_view(state, project, can_edit=True))
 
     @bp.post("/p/<pid>/plans/<plan_id>/run/<action>")

@@ -859,3 +859,15 @@ def poll(invocation_arn: str, output_prefix: str) -> dict:
         log.info("vpoc.call where=fal.copy request=%s ms=%d", request_id, int((time.time() - started) * 1000))
 
     return {"status": "Completed", "failureMessage": "", "usage": None}
+
+
+def cancel(invocation_arn: str) -> None:
+    """진행 중 작업 취소(설계자 2026-10-20). PUT {queue}/{app}/requests/{request_id}/cancel.
+
+    fal 은 **대기열에 있을 때만** 취소한다 — 이미 생성 중이면 거절한다(그래도 우리 쪽은 cancelled 로
+    둔다). 거절·오류면 VpocError 를 올리고(호출부가 cancelRemote="rejected" 로 적는다), 성공이면
+    조용히 돌아온다. 큐 조회와 같은 앱 경로(_queue_app)를 쓴다.
+    """
+    endpoint, request_id = _parse_arn(invocation_arn)
+    url = f"{settings.FAL_QUEUE_URL}/{_queue_app(endpoint)}/requests/{request_id}/cancel"
+    _request("PUT", url, where="fal.cancel")

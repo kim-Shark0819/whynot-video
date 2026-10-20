@@ -498,3 +498,17 @@ def poll(invocation_arn: str, output_prefix: str) -> dict:
         "failureMessage": message,
         "usage": result.get("usage"),
     }
+
+
+def cancel(invocation_arn: str) -> None:
+    """진행 중 작업 취소(설계자 2026-10-20). DELETE /contents/generations/tasks/{task_id}.
+
+    Seedance 는 **대기 중일 때만** 취소한다 — 이미 생성 중이면 거절할 수 있다(그래도 우리 쪽은
+    cancelled 로 둔다). fal 작업이면 fal.cancel 로 넘긴다. 거절·오류면 VpocError 를 올리고
+    (호출부가 cancelRemote="rejected" 로 적는다), 성공이면 조용히 돌아온다.
+    """
+    if fal.is_fal_job(invocation_arn):
+        fal.cancel(invocation_arn)
+        return
+    task_id = invocation_arn[len(ARN_PREFIX):]
+    _call("DELETE", f"/contents/generations/tasks/{task_id}")

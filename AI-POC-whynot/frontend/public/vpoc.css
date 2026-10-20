@@ -170,6 +170,20 @@
   font-size: 14px;
 }
 
+/* 진행 중 작업 취소(설계자 2026-10-20). 진행 띠/생성 취소 버튼을 담는 가로 줄,
+   그리고 취소 뒤 안내(회색) 줄에 함께 쓴다. */
+.vpoc-cancel-band {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  padding: 10px 14px;
+  border-radius: 10px;
+  background: var(--surface-2, #f3f4f6);
+  color: var(--text-muted, #4b5563);
+  font-size: 14px;
+}
+
 .vpoc-done {
   color: #047857;
   font-weight: 600;
@@ -594,6 +608,11 @@
 .vpoc-status-failed {
   background: #fee2e2;
   color: #b91c1c;
+}
+
+.vpoc-status-cancelled {
+  background: #f3f4f6;
+  color: #6b7280;
 }
 
 /* --- 재생 --- */
