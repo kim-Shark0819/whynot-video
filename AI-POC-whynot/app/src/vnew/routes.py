@@ -173,6 +173,25 @@ def create_blueprint(deps: VnewDependencies) -> Blueprint:
         except Exception as exc:  # noqa: BLE001
             return _fail(exc)
 
+    # ------------------------------------------------------------ 그림체만 다시(variant rebuild)
+
+    @bp.post("/characters/<char_id>/variants/<variant>/rebuild")
+    @deps.require_auth
+    def rebuild_variant(char_id: str, variant: str):
+        try:
+            owner = _owner()
+            characters.load_char(owner, char_id)  # 존재·소유 확인
+            payload = request.get_json(silent=True) or {}
+            # extraPromptKo 가 body 에 있으면(없으면 None=이전 값 유지) ≤최대 길이로 자른다.
+            extra = None
+            if "extraPromptKo" in payload:
+                raw = payload.get("extraPromptKo")
+                extra = str(raw or "")[: characters.settings.MAX_EXTRA_PROMPT_LEN]
+            version = characters.start_rebuild_variant(owner, char_id, variant, extra)
+            return jsonify({"ok": True, "version": version, "status": "building"}), 202
+        except Exception as exc:  # noqa: BLE001
+            return _fail(exc)
+
     # ------------------------------------------------------------ GLB 스트리밍
 
     @bp.get("/characters/<char_id>/model/<variant>.glb")

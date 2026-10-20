@@ -68,6 +68,12 @@ POLL_MAX_S = _int("VNEW_3D_POLL_MAX_S", 900)
 # 연속 일시 오류가 이 횟수를 넘으면 그때 실패. 재조회 사이 대기(초).
 POLL_TRANSIENT_MAX = _int("VNEW_3D_TRANSIENT_MAX", 10)
 POLL_TRANSIENT_WAIT_S = _int("VNEW_3D_TRANSIENT_WAIT_S", 15)
+# 같은 요청에서 unavailable 류 일시 오류가 연속 이 횟수(기본 8) 나오면 fal 이 "요청을 잃은"
+# 것으로 보고 같은 front/back 으로 새로 제출한다(새 requestArn 으로 계속 조회). 실측(2026-10-20)
+# 으로 503 이 10번 연속이면 그 요청은 끝내 못 받으므로, 전체 실패(TRANSIENT_MAX) 전에 재제출한다.
+LOST_AFTER = _int("VNEW_3D_LOST_AFTER", 8)
+# "잃은 요청" 자동 재제출은 variant 당 최대 이 횟수(model3d.resubmits). 넘으면 그때 failed.
+MAX_RESUBMITS = _int("VNEW_3D_MAX_RESUBMITS", 2)
 
 # --- 단가(원장) ---
 SEEDREAM_USD = _float("VNEW_SEEDREAM_USD", 0.04)  # Seedream 장당
@@ -79,6 +85,13 @@ MAX_ANALYSIS_IMAGES = _int("VNEW_MAX_ANALYSIS_IMAGES", 6)  # 분석에 보낼 �
 MAX_REFERENCE_IMAGES = _int("VNEW_MAX_REFERENCE_IMAGES", 4)  # Seedream 참고 이미지 수
 # building 이 이 시간을 넘게 그대로면 조회 때 failed 로 본다(파드 재시작 대비).
 BUILD_STALL_S = _int("VNEW_BUILD_STALL_S", 1800)  # 30분
+# variant 의 heartbeatAt 이 이 시간을 넘게 갱신되지 않고 이 파드에서 실행 중이 아니면
+# 끊긴 것으로 보고 그 variant 만 이어서 만든다(조회 때 자동 재개).
+VARIANT_STALL_S = _int("VNEW_VARIANT_STALL_S", 600)  # 10분
+# 자동 이어 만들기(재개)는 variant 당 최대 이 횟수. 넘으면 그 variant 만 failed.
+MAX_RESUME = _int("VNEW_MAX_RESUME", 2)
+# variant claim(선점 token) 이 이 시간을 넘게 그대로면(파드 재시작 등) 다른 파드가 다시 잡을 수 있다.
+CLAIM_STALL_S = _int("VNEW_CLAIM_STALL_S", 600)  # 10분
 
 # 만들 variant(그림체). 웹툰 그대로 + 실사.
 VARIANTS = ("webtoon", "real")
