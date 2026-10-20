@@ -149,7 +149,13 @@ def create_blueprint(deps: VnewDependencies) -> Blueprint:
     def build_character(char_id: str):
         try:
             owner = _owner()
-            version = characters.start_build(owner, char_id)
+            payload = request.get_json(silent=True) or {}
+            # extraPromptKo 가 body 에 있으면(없으면 None=이전 값 유지) ≤500 로 자른다.
+            extra = None
+            if "extraPromptKo" in payload:
+                raw = payload.get("extraPromptKo")
+                extra = str(raw or "")[: characters.settings.MAX_EXTRA_PROMPT_LEN]
+            version = characters.start_build(owner, char_id, extra)
             return jsonify({"ok": True, "version": version, "status": "building"}), 202
         except Exception as exc:  # noqa: BLE001
             return _fail(exc)

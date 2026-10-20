@@ -825,8 +825,8 @@ def _do_submit_webtoon(owner: str, pid: str, gen_id: str, index: int, claim: str
         src_mp4 = _fetch_bytes(source_key, bucket=vpoc_settings.VIDEO_BUCKET)
         prepared = _prepare_anime(src_mp4)
 
-        refs_b64 = _anime_reference_b64(owner, plan)
-        prompt = _anime_prompt(plan)
+        refs_b64 = _anime_reference_b64(owner, pid, plan, seg)
+        prompt = _anime_prompt(owner, plan, len(refs_b64))
         prefix = _seg_output_prefix(owner, pid, gen_id, seg["id"] + "-webtoon", attempt)
         result = _submit_anime(
             video_mp4=prepared["bytes"],
@@ -1229,34 +1229,107 @@ def _segment_prompt(plan: dict, seg: dict, *, first_segment: bool, model: str = 
     return body
 
 
-def _anime_prompt(plan: dict) -> str:
-    """실사 → 웹툰 변환 프롬프트(016 과 같은 방식). @Video1 을 참고 이미지의 한국 웹툰 그림체로."""
-    return (
-        "Convert @Video1 into the exact Korean webtoon art style shown in the reference images "
-        "(@Image1 and the following): clean ink line art, cel shading, the same color palette and "
-        "rendering. Keep the same motion, composition, characters, positions and timing as @Video1. "
+def _anime_ref_labels(count: int) -> str:
+    """참고 이미지 개수에 맞춘 "@Image1, @Image2, ..." 나열(프롬프트 {refs})."""
+    return ", ".join(f"@Image{index}" for index in range(1, count + 1))
+
+
+def _anime_prompt(owner: str, plan: dict, reference_count: int = 0) -> str:
+    """실사 → 웹툰 변환 프롬프트(설계자 2026-10-20).
+
+    일반 화풍(clean line art·cel shading·flat soft colors·2D anime)을 지시하지 않는다. 대신 참고
+    웹툰 이미지의 선·채색·명암·색·얼굴/눈/머리 그리는 방식을 그대로 베끼라고 한다. 참고 이미지가
+    있으면 그 이미지들을 가리키고, 분석된 등장 캐릭터 styleEn(지시서 029)이 있으면 "Style notes" 로
+    덧붙인다. 참고 이미지가 없으면(웹툰을 안 올린 경우) 일반 "Korean webtoon style" 문장을 쓴다.
+    """
+    if reference_count <= 0:
+        return (
+            "Redraw @Video1 in a hand-drawn Korean webtoon style. Keep every character, the camera "
+            "movement, composition, timing and action exactly the same as @Video1. "
+            "No text, no speech bubbles."
+        )
+    refs = _anime_ref_labels(reference_count)
+    prompt = (
+        f"Redraw @Video1 in exactly the same drawing style as the reference webtoon images ({refs}): "
+        "copy their line quality and thickness, coloring and shading, color palette and the way faces, "
+        "eyes and hair are drawn. Do NOT use a generic anime, cartoon or glossy style. Keep every "
+        "character, the camera movement, composition, timing and action exactly the same as @Video1. "
         "No text, no speech bubbles."
     )
+    style_en = _first_style_en(owner, plan)
+    if style_en:
+        prompt += " Style notes: " + style_en
+    return prompt
 
 
-def _anime_reference_b64(owner: str, plan: dict) -> list[str]:
-    """웹툰 변환 참고 이미지(최대 4장): 등장 캐릭터 웹툰 시트.
+def _first_style_en(owner: str, plan: dict) -> str:
+    """등장 캐릭터 중 첫 번째의 분석 styleEn(지시서 029). 300자 이내. 없으면 빈 문자열."""
+    for item in (plan.get("input") or {}).get("characters") or []:
+        char_id = str(item.get("charId") or "")
+        if not char_id:
+            continue
+        try:
+            char, _ = characters.load_char(owner, char_id)
+        except Exception:  # noqa: BLE001
+            continue
+        style_en = str(((char or {}).get("analysis") or {}).get("styleEn") or "").strip()
+        if style_en:
+            return style_en[:300]
+    return ""
 
-    그 구간 웹툰 패널도 참고에 넣을 수 있으나 panels→업로드 파일 매핑이 근사치라, 여기서는
-    캐릭터 웹툰 시트를 우선으로 쓴다(그림체·인물 기준). 최대 MAX_ANIME_REFS 장.
+
+def _segment_panel_jpegs(owner: str, pid: str, plan: dict, seg: dict, limit: int) -> list[bytes]:
+    """그 구간이 맡은 웹툰 패널 이미지(업로드 원본) 최대 limit 장(설계자 2026-10-20).
+
+    panels→업로드 파일 매핑이 정확하지 않아(타일 인덱스), 구간 순서에 맞춰 업로드 원본을 고르게
+    나눠 그 구간 몫을 돌려준다(판단 어려우면 순서대로). 말풍선이 많은 장/인물이 큰 장을 가릴 수
+    없으므로 순서대로 쓴다. 읽기 실패는 건너뛴다.
+    """
+    inp = plan.get("input") or {}
+    order = list(inp.get("order") or [])
+    if not order or limit <= 0:
+        return []
+    segments = (plan.get("conti") or {}).get("segments") or []
+    seg_ids = [s.get("id") for s in segments]
+    try:
+        index = seg_ids.index(seg.get("id"))
+    except ValueError:
+        index = 0
+    count = len(segments) or 1
+    start = index * len(order) // count
+    end = max(start + 1, (index + 1) * len(order) // count)
+    file_ids = order[start:end][:limit]
+    out: list[bytes] = []
+    for file_id in file_ids:
+        try:
+            out.append(STORE.get_bytes(plan_mod.upload_key(owner, pid, file_id)))
+        except Exception:  # noqa: BLE001
+            continue
+    return out
+
+
+def _anime_reference_b64(owner: str, pid: str, plan: dict, seg: dict) -> list[str]:
+    """웹툰 변환 참고 이미지(최대 4장, 설계자 2026-10-20): 원작 웹툰 패널을 먼저.
+
+    ① 그 구간 컷들의 웹툰 이미지(업로드 원본) 최대 3장 — 순서대로.
+    ② 등장 캐릭터 웹툰 시트 1장.
+    원작 그림체가 기준이므로 패널을 앞에 둔다(프롬프트의 @Image1.. 순서와 같다).
     """
     refs: list[bytes] = []
+    # ① 원작 웹툰 패널 먼저(최대 3장).
+    refs.extend(_segment_panel_jpegs(owner, pid, plan, seg, 3))
+    # ② 등장 캐릭터 웹툰 시트 1장(남는 자리 안에서).
     inp = plan.get("input") or {}
-    chars = _char_entries(owner, inp)
-    for c in chars:
+    for c in _char_entries(owner, inp):
+        if len(refs) >= MAX_ANIME_REFS:
+            break
         sheet_key = c.get("webtoonSheetKey") or ""
         if sheet_key:
             try:
                 refs.append(STORE.get_bytes(sheet_key))
             except Exception:  # noqa: BLE001
                 pass
-        if len(refs) >= MAX_ANIME_REFS:
-            break
+            break  # 캐릭터 시트는 1장만.
     refs = [r for r in refs if r][:MAX_ANIME_REFS]
     return [base64.b64encode(r).decode("ascii") for r in refs]
 

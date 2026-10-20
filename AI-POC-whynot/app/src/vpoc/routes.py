@@ -116,18 +116,25 @@ def _anime_endpoint() -> str:
 def _anime_prompt(reference_count: int) -> str:
     """fal video-to-video 변환 프롬프트(영어, 설계자 2026-10-20).
 
-    @Video1 을 2D 한국 웹툰/애니 그림체로 다시 그리되 인물·카메라·구도·타이밍·동작은 그대로.
-    참고 이미지가 있으면 "art style of @Image1..." 를 덧붙인다.
+    일반 화풍(clean line art·cel shading·flat soft colors·2D anime)을 지시하지 않는다. 참고 웹툰
+    이미지가 있으면 그 선·채색·명암·색·얼굴/눈/머리 그리는 방식을 그대로 베끼라고 한다(원작 그림체).
+    참고 이미지가 없으면(웹툰을 안 올린 경우) 일반 "Korean webtoon style" 문장을 쓴다. 어느 쪽이든
+    인물·카메라·구도·타이밍·동작은 @Video1 그대로다.
     """
-    text = (
-        "Redraw @Video1 in a 2D Korean webtoon / anime art style: clean line art, cel shading, "
-        "flat soft colors. Keep every character, the camera movement, composition, timing and action "
-        "exactly the same as in @Video1 — only change the rendering style to 2D animation."
+    if reference_count <= 0:
+        return (
+            "Redraw @Video1 in a hand-drawn Korean webtoon style. Keep every character, the camera "
+            "movement, composition, timing and action exactly the same as @Video1. "
+            "No text, no speech bubbles."
+        )
+    refs = ", ".join(f"@Image{index}" for index in range(1, reference_count + 1))
+    return (
+        f"Redraw @Video1 in exactly the same drawing style as the reference webtoon images ({refs}): "
+        "copy their line quality and thickness, coloring and shading, color palette and the way faces, "
+        "eyes and hair are drawn. Do NOT use a generic anime, cartoon or glossy style. Keep every "
+        "character, the camera movement, composition, timing and action exactly the same as @Video1. "
+        "No text, no speech bubbles."
     )
-    if reference_count > 0:
-        refs = ", ".join(f"@Image{index}" for index in range(1, reference_count + 1))
-        text += f" Match the art style of {refs}."
-    return text
 
 
 def _anime_output_prefix(shot_output_key: str) -> str:
@@ -2343,25 +2350,26 @@ def create_blueprint(deps: VpocDependencies) -> Blueprint:
     # ---------------------------------------------------------------- 실사 → 애니 변환(dual)
 
     def _anime_reference_b64(state: dict, owner: str, pid: str) -> list[str]:
-        """변환 참고 이미지(화풍) 최대 4장(data URI b64). 이 계획 ① 의 웹툰 장면 + 캐릭터 그림.
+        """변환 참고 이미지(원작 그림체) 최대 4장(data URI b64). 원작 웹툰 패널을 먼저.
 
-        설계자 2026-10-20: ① sceneFiles(웹툰 장면 조각)와 ③ 캐릭터 이미지에서 최대 4장. 없으면 생략.
+        설계자 2026-10-20: ① sceneFiles(웹툰 장면 조각) 최대 3장을 먼저, ② ③ 캐릭터 그림 1장.
+        원작 그림체가 기준이므로 패널을 앞에 둔다(프롬프트의 @Image1.. 순서와 같다). 없으면 생략.
         기존 이미지 로더(images.panel_jpeg·images.jpeg_for_reference·images.keyframe_base64)를 재사용한다.
         읽기 실패는 조용히 건너뛴다.
         """
         steps = state["steps"]
         out: list[str] = []
         cache: dict = {}
-        # ① 웹툰 장면 조각(앞에서부터 고르게 2장 — 화풍 참고용).
+        # ① 웹툰 장면 조각(앞에서부터 고르게 최대 3장 — 원작 그림체 참고, 먼저).
         panels = _story_panels(steps, owner, pid)
-        for file_id, index in _spread(panels, 2):
+        for file_id, index in _spread(panels, 3):
             if len(out) >= 4:
                 break
             try:
                 out.append(images.jpeg_for_reference(images.panel_jpeg(owner, pid, file_id, index, cache)))
             except Exception as exc:  # noqa: BLE001
                 log.warning("vpoc.anime.panel_ref_failed file=%s err=%s", file_id, exc)
-        # ③ 캐릭터 그림(준비된 것만).
+        # ② ③ 캐릭터 그림 1장(준비된 것 중 첫 번째).
         for item in steps["3"].get("characters") or []:
             if len(out) >= 4:
                 break
@@ -2373,6 +2381,7 @@ def create_blueprint(deps: VpocDependencies) -> Blueprint:
                 out.append(images.keyframe_base64(key))
             except Exception as exc:  # noqa: BLE001
                 log.warning("vpoc.anime.char_ref_failed key=%s err=%s", key, exc)
+            break  # 캐릭터 그림은 1장만.
         return out[:4]
 
     def _run_anime_job(owner: str, pid: str, plan_id: str, shot_id: str, claim: str, user: str) -> None:

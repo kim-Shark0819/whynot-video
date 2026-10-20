@@ -40,10 +40,16 @@ SEEDREAM_MODEL = vpoc_settings.SEEDREAM_FINAL_MODEL
 # 분석은 GPT-6 Astra 를 먼저 쓰고(와이랩 broker 경로), 실패하면 Claude 분석 체인으로.
 ASTRA_MODEL = os.getenv("VNEW_ASTRA_MODEL", "global.openai.gpt-6-astra")
 ANALYZE_FALLBACK_MODEL = vpoc_settings.ANALYZE_MODEL
+# 정면·후면 사람 수 검사(빠른 모델). vpoc.settings.BRIEF_MODEL 을 기본으로 쓴다.
+PEOPLE_COUNT_MODEL = os.getenv("VNEW_PEOPLE_COUNT_MODEL", vpoc_settings.BRIEF_MODEL)
 
 # --- Seedream 시트/전신 크기(설계자 실측 2026-10-20) ---
 SHEET_SIZE = os.getenv("VNEW_SHEET_SIZE", "2560x1440")  # 가로 5면 턴어라운드 시트
 FRONT_SIZE = os.getenv("VNEW_FRONT_SIZE", "1440x2560")  # 세로 정면 전신
+BACK_SIZE = os.getenv("VNEW_BACK_SIZE", "1440x2560")  # 세로 후면 전신(따로 생성)
+
+# 추가 요청(사용자가 '다시 만들기' 때 넣는 한국어 지시)의 최대 길이.
+MAX_EXTRA_PROMPT_LEN = _int("VNEW_MAX_EXTRA_PROMPT_LEN", 500)
 
 # --- 3D(Hunyuan3D v3, fal 큐) ---
 # fal endpoint_id. ARN 접두사·큐 경로는 vpoc.fal 과 같다.
