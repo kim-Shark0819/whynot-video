@@ -773,11 +773,110 @@
 
   /* ---- variant 열(3D + 시트·정면·후면) ---- */
 
+  // variant 상태 한 줄: 배지 + (진행 중) 단계 / (실패·중단) [이 그림체만 다시 만들기].
+  // 추가 요청 입력 창을 재사용(펼침). rebuild 는 그 그림체만 처음부터 다시 만든다.
+  function variantStatusRow(host, detail, meta, v) {
+    var row = el("div", "vnew-variant-status");
+    var status = v.status || "queued";
+    var label = STATUS_LABEL[status] || status;
+    var badge = el("span", "vnew-variant-badge is-" + status, label);
+    row.appendChild(badge);
+
+    var building = status === "queued" || status === "images" || status === "model3d";
+    if (building) {
+      // 진행 중이면 단계만 보인다(버튼 없음).
+      var stepText =
+        status === "images" ? "그림 그리는 중…" : status === "model3d" ? "3D 만드는 중…" : "준비 중…";
+      row.appendChild(el("span", "vnew-variant-step", stepText));
+      return row;
+    }
+
+    if (status !== "failed") {
+      // ready — 별도 액션 없음(3D 재시도는 viewer3d 가 처리).
+      return row;
+    }
+
+    // 실패·중단: [이 그림체만 다시 만들기] + 추가 요청 창(재사용).
+    var error = el("p", "login-error vnew-variant-rebuild-error");
+    error.setAttribute("role", "alert");
+    error.style.display = "none";
+
+    var btn = el("button", "outline-action vnew-variant-rebuild-btn", "이 그림체만 다시 만들기");
+    btn.type = "button";
+
+    var panel = el("div", "vnew-rebuild-panel");
+    panel.style.display = "none";
+    panel.appendChild(el("label", "vnew-rebuild-label", "추가 요청 (선택)"));
+    var textarea = el("textarea", "vnew-rebuild-text");
+    textarea.rows = 3;
+    textarea.maxLength = 500;
+    textarea.placeholder = "후드티 말고 베이지 셔츠로 / 연필 선 느낌을 더 살려서 / 표정은 무표정으로";
+    textarea.value = detail.extraPromptKo || "";
+    panel.appendChild(textarea);
+    panel.appendChild(el("p", "vnew-rebuild-cost", "이 그림체만 새로 그립니다. 비용이 듭니다."));
+    var panelBtns = el("div", "vnew-rebuild-btns");
+    var confirmBtn = el("button", "primary-button", "다시 만들기");
+    confirmBtn.type = "button";
+    var cancelBtn = el("button", "outline-button", "취소");
+    cancelBtn.type = "button";
+    panelBtns.appendChild(confirmBtn);
+    panelBtns.appendChild(cancelBtn);
+    panel.appendChild(panelBtns);
+
+    function doRebuild() {
+      btn.disabled = true;
+      confirmBtn.disabled = true;
+      error.style.display = "none";
+      api(
+        "/api/vnew/characters/" +
+          encodeURIComponent(detail.id) +
+          "/variants/" +
+          encodeURIComponent(meta.key) +
+          "/rebuild",
+        {
+          method: "POST",
+          body: JSON.stringify({ extraPromptKo: textarea.value || "" }),
+          headers: { "Content-Type": "application/json" }
+        }
+      )
+        .then(function () {
+          refreshDetail(host, false);
+        })
+        .catch(function (err) {
+          btn.disabled = false;
+          confirmBtn.disabled = false;
+          error.style.display = "";
+          if (err && err.status === 409) {
+            error.textContent = "이 그림체를 이미 만들고 있습니다.";
+          } else {
+            error.textContent = "다시 만들기를 시작하지 못했습니다: " + errMessage(err);
+          }
+        });
+    }
+
+    btn.addEventListener("click", function () {
+      panel.style.display = panel.style.display === "none" ? "" : "none";
+      if (panel.style.display === "") textarea.focus();
+    });
+    confirmBtn.addEventListener("click", doRebuild);
+    cancelBtn.addEventListener("click", function () {
+      panel.style.display = "none";
+    });
+
+    row.appendChild(btn);
+    row.appendChild(panel);
+    row.appendChild(error);
+    return row;
+  }
+
   function variantColumn(host, detail, meta) {
     var v = (detail.variants || {})[meta.key] || {};
     var model3d = v.model3d || {};
     var column = el("div", "vnew-variant-col");
     column.appendChild(el("h2", "vnew-variant-title", meta.title));
+
+    // variant 상태 배지 + 진행/실패 안내 + [이 그림체만 다시 만들기]
+    column.appendChild(variantStatusRow(host, detail, meta, v));
 
     // 사람 수 경고(정면/후면에 여러 사람이 보일 수 있음)
     if (v.warning) {

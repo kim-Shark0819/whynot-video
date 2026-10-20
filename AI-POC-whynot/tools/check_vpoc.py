@@ -1946,7 +1946,7 @@ def check_vnew_characters() -> None:
 
     (a) 생성·업로드·목록·상세 (b) build → 분석(Astra 실패 → Claude)·시트·정면·후면·3D 제출
     (face_count 60000·enable_pbr false·data URI)·복사·ready (c) 한 variant 실패해도 다른 variant ready
-    (d) 진행 중 build 409, 30분 초과 failed (e) GLB 스트리밍 200·Content-Type
+    (d) 진행 중 build 409, stale 여도 variant ready 면 캐릭터 ready 유지 (e) GLB 스트리밍 200·Content-Type
     (f) 다른 사용자 접근 403/404 (g) seedream.generate 기본 size 가 그대로 1920x1080
     (h) 조회 중 503 두 번 뒤 완료 → ready (i) FAILED → variant·model3d 둘 다 failed
     (j) retry3d: 이전 요청 COMPLETED 면 제출 0회·복사 1회, 없으면 제출 1회 (k) 기본 60000·PBR false.
@@ -2309,7 +2309,8 @@ def check_vnew_characters() -> None:
         if resp.status_code != 409:
             bad.append(f"(d) 진행 중 build 가 409 가 아닙니다: {resp.status_code}")
 
-        # (d) 30분 초과 → 조회 때 failed
+        # (d) char 레벨이 building·stale 이어도 variant 가 모두 ready 면 조회 때 failed 로 떨어지지 않는다
+        # (이전 '30분 전체 실패' 규칙을 variant 단위로 바꿈 — 끊긴 variant 만 이어 만든다).
         from datetime import datetime as _dt, timedelta as _td, timezone as _tz  # noqa: PLC0415
 
         stale_at = (_dt.now(_tz.utc) - _td(minutes=40)).strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -2321,8 +2322,9 @@ def check_vnew_characters() -> None:
         characters.mutate_char("tester", char_id, _set_stale)
         resp = client.get(f"/api/vnew/characters/{char_id}")
         detail = resp.get_json() or {}
-        if detail.get("status") != "failed":
-            bad.append(f"(d) 30분 초과 building 이 조회 때 failed 가 되지 않습니다: {detail.get('status')}")
+        _join_builds()
+        if detail.get("status") == "failed":
+            bad.append(f"(d) variant 가 모두 ready 인데 조회 때 캐릭터가 failed 가 됐습니다: {detail.get('status')}")
 
         # (f) 다른 사용자 접근 — owner 를 other 로 바꾸면 같은 char_id 는 안 보인다(404).
         owner_box["name"] = "other"
@@ -2530,6 +2532,327 @@ def check_vnew_characters() -> None:
         if pchar.get("extraPromptKo"):
             bad.append(f"(p) 빈 문자열 extraPromptKo 가 삭제되지 않았습니다: {pchar.get('extraPromptKo')}")
 
+        # ============================================================ 자동 이어 만들기 · 그림체만 다시
+        from datetime import datetime as _dt2, timedelta as _td2, timezone as _tz2  # noqa: PLC0415
+
+        def _old_iso(minutes):
+            return (_dt2.now(_tz2.utc) - _td2(minutes=minutes)).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+        def _post_count2():
+            return len([1 for (m, u, p) in fal_calls if m == "POST"])
+
+        # --- (q) heartbeat 10분 초과 variant 자동 재개 — 그림 있으면 3D 만 ---
+        # model3d 단계에서 끊긴(heartbeat 오래된) variant: 그림 3장 + 이전 requestArn(COMPLETED).
+        # 조회(reconcile)하면 그 variant 만 이어서 만들고, 그림은 다시 안 그리고 3D 만(제출 0회).
+        qid = _make_char_with_source("q-캐릭터")
+        qsheet = characters.sheet_key("tester", qid, "webtoon", 1)
+        qfront = characters.front_key("tester", qid, "webtoon", 1)
+        qback = characters.back_key("tester", qid, "webtoon", 1)
+        fake_store.put_bytes(qsheet, _tiny_jpeg(2560, 1440), "image/jpeg")
+        fake_store.put_bytes(qfront, _tiny_jpeg(1440, 2560), "image/jpeg")
+        fake_store.put_bytes(qback, _tiny_jpeg(512, 2560), "image/jpeg")
+        q_arn = characters.ARN_PREFIX + characters.settings.HUNYUAN_ENDPOINT + "/req_q"
+
+        def _seed_q(d):
+            d["version"] = 1
+            d["status"] = "building"
+            d["buildStartedAt"] = _old_iso(20)
+            # webtoon: model3d 에서 끊김(그림 다 있음, 이전 requestArn 있음)
+            w = d["variants"]["webtoon"]
+            w["status"] = "model3d"
+            w["sheetKey"] = qsheet
+            w["frontKey"] = qfront
+            w["backKey"] = qback
+            w["heartbeatAt"] = _old_iso(20)
+            w["resumeCount"] = 0
+            w["model3d"] = {
+                "status": "submitted", "requestArn": q_arn,
+                "glbKey": "", "thumbKey": "", "error": "",
+            }
+            # real 은 이미 ready(건드리지 않는다)
+            r = d["variants"]["real"]
+            r["status"] = "ready"
+            r["sheetKey"] = qsheet
+            r["frontKey"] = qfront
+            r["backKey"] = qback
+            r["heartbeatAt"] = characters.now_iso()
+            r["model3d"] = {
+                "status": "ready", "requestArn": "",
+                "glbKey": "users/tester/characters/" + qid + "/real/v1/model.glb",
+                "thumbKey": "", "error": "",
+            }
+            fake_store.put_bytes(r["model3d"]["glbKey"], b"glTF-real", "model/gltf-binary")
+
+        characters.mutate_char("tester", qid, _seed_q)
+        q_before = _post_count2()
+        fal_mode["fail_status"] = False
+        fal_mode["transient_left"] = 0
+        resp = client.get(f"/api/vnew/characters/{qid}")
+        _join_builds()
+        q_submits = _post_count2() - q_before
+        qchar, _ = characters.load_char("tester", qid)
+        qw = qchar["variants"]["webtoon"]
+        if q_submits != 0:
+            bad.append(f"(q) 그림이 있고 이전 요청이 COMPLETED 인데 새 3D 제출이 0회가 아닙니다: {q_submits}")
+        if qw.get("status") != "ready" or (qw.get("model3d") or {}).get("status") != "ready":
+            bad.append(f"(q) 자동 재개 후 webtoon 이 ready(3D 만)가 아닙니다: {qw.get('status')} / {(qw.get('model3d') or {}).get('status')}")
+        if int(qw.get("resumeCount") or 0) != 1:
+            bad.append(f"(q) 자동 재개로 resumeCount 가 1 이 되지 않았습니다: {qw.get('resumeCount')}")
+        # 그림은 다시 그리지 않았다(sheetKey 그대로)
+        if qw.get("sheetKey") != qsheet:
+            bad.append("(q) 자동 재개에서 그림(sheet)을 다시 그렸습니다")
+
+        # --- (r) resumeCount 2 초과 → 그 variant 만 failed, 캐릭터 ready 유지 ---
+        rid = _make_char_with_source("r-캐릭터")
+
+        def _seed_r(d):
+            d["version"] = 1
+            d["status"] = "building"
+            d["buildStartedAt"] = _old_iso(30)
+            w = d["variants"]["webtoon"]
+            w["status"] = "model3d"
+            w["heartbeatAt"] = _old_iso(30)
+            w["resumeCount"] = characters.settings.MAX_RESUME  # 이미 한도
+            w["model3d"] = {"status": "submitted", "requestArn": "", "glbKey": "", "thumbKey": "", "error": ""}
+            r = d["variants"]["real"]
+            r["status"] = "ready"
+            r["model3d"] = {
+                "status": "ready", "requestArn": "",
+                "glbKey": "users/tester/characters/" + rid + "/real/v1/model.glb",
+                "thumbKey": "", "error": "",
+            }
+            fake_store.put_bytes(r["model3d"]["glbKey"], b"glTF-real", "model/gltf-binary")
+
+        characters.mutate_char("tester", rid, _seed_r)
+        resp = client.get(f"/api/vnew/characters/{rid}")
+        _join_builds()
+        rdetail = resp.get_json() or {}
+        rchar, _ = characters.load_char("tester", rid)
+        if rchar["variants"]["webtoon"].get("status") != "failed":
+            bad.append(f"(r) resumeCount 한도 초과 variant 가 failed 가 아닙니다: {rchar['variants']['webtoon'].get('status')}")
+        if "중단되었습니다" not in (rchar["variants"]["webtoon"].get("error") or ""):
+            bad.append(f"(r) 한도 초과 오류 문구가 다릅니다: {rchar['variants']['webtoon'].get('error')}")
+        if rchar.get("status") != "ready":
+            bad.append(f"(r) 한 variant failed 여도 다른 variant ready 면 캐릭터 ready 여야 합니다: {rchar.get('status')}")
+
+        # --- (s) 다른 variant ready 면 캐릭터 ready(롤업 규칙) ---
+        schar = {"variants": {"webtoon": {"status": "failed"}, "real": {"status": "ready"}}}
+        if characters._rollup_status(schar) != "ready":
+            bad.append(f"(s) 하나 ready·하나 failed 면 ready 여야 합니다: {characters._rollup_status(schar)}")
+        schar2 = {"variants": {"webtoon": {"status": "failed"}, "real": {"status": "failed"}}}
+        if characters._rollup_status(schar2) != "failed":
+            bad.append(f"(s) 전부 failed 면 failed 여야 합니다: {characters._rollup_status(schar2)}")
+        schar3 = {"variants": {"webtoon": {"status": "ready"}, "real": {"status": "model3d"}}}
+        if characters._rollup_status(schar3) != "building":
+            bad.append(f"(s) 하나 진행 중이면 building 이어야 합니다: {characters._rollup_status(schar3)}")
+
+        # --- (t) 중복 선점 1회만 실행 ---
+        tid = _make_char_with_source("t-캐릭터")
+
+        def _seed_t(d):
+            d["version"] = 1
+            w = d["variants"]["webtoon"]
+            w["status"] = "model3d"
+            w["claim"] = ""
+            w["claimedAt"] = ""
+
+        characters.mutate_char("tester", tid, _seed_t)
+        tok1 = characters._claim_variant("tester", tid, "webtoon")
+        tok2 = characters._claim_variant("tester", tid, "webtoon")
+        if not tok1:
+            bad.append("(t) 첫 선점이 token 을 얻지 못했습니다")
+        if tok2:
+            bad.append(f"(t) 두 번째 선점이 이미 잡힌 claim 을 또 잡았습니다: {tok2}")
+        if not characters._holds_claim("tester", tid, "webtoon", tok1):
+            bad.append("(t) 첫 선점 token 이 claim 으로 남아 있지 않습니다")
+        # 다른 token 의 재개 스레드는 아무것도 하지 않는다(그림/3D 제출 없음).
+        t_before = _post_count2()
+        characters.run_resume_variant("tester", tid, "webtoon", 1, "WRONG-TOKEN")
+        if _post_count2() != t_before:
+            bad.append("(t) 다른 claim 의 재개가 제출을 일으켰습니다")
+
+        # --- (u) variant rebuild 409·성공 ---
+        # (u-1) 진행 중(싱싱한 heartbeat)이면 409
+        uid = _make_char_with_source("u-캐릭터")
+
+        def _seed_u_running(d):
+            d["version"] = 1
+            d["status"] = "building"
+            w = d["variants"]["webtoon"]
+            w["status"] = "model3d"
+            w["heartbeatAt"] = characters.now_iso()  # 지금 — 진행 중
+
+        characters.mutate_char("tester", uid, _seed_u_running)
+        resp = client.post(f"/api/vnew/characters/{uid}/variants/webtoon/rebuild", json={})
+        if resp.status_code != 409:
+            bad.append(f"(u) 진행 중 variant rebuild 가 409 가 아닙니다: {resp.status_code}")
+
+        # (u-2) 실패한 variant rebuild → 202, 처음부터 다시 그려 ready, 분석 재사용
+        def _seed_u_failed(d):
+            w = d["variants"]["webtoon"]
+            w["status"] = "failed"
+            w["heartbeatAt"] = ""
+            w["error"] = "이전 실패"
+            w["model3d"] = {"status": "failed", "requestArn": "", "glbKey": "", "thumbKey": "", "error": "x"}
+            # 분석을 미리 채워 둬서 rebuild 가 재사용하는지 본다(분석 호출 수로 확인)
+            d["analysis"] = {
+                "appearanceEn": "A man.", "styleEn": "S.", "outfitEn": "O.",
+                "altOutfitsEn": [], "expressionsKo": ["무표정"], "extraEn": "", "model": "x",
+            }
+
+        characters.mutate_char("tester", uid, _seed_u_failed)
+        analyze_before = len(analyze_calls)
+        fal_mode["fail_status"] = False
+        fal_mode["transient_left"] = 0
+        resp = client.post(f"/api/vnew/characters/{uid}/variants/webtoon/rebuild", json={})
+        if resp.status_code != 202:
+            bad.append(f"(u) 실패한 variant rebuild 가 202 가 아닙니다: {resp.status_code} {resp.get_data(as_text=True)[:200]}")
+        _join_builds()
+        uchar, _ = characters.load_char("tester", uid)
+        uw = uchar["variants"]["webtoon"]
+        if uw.get("status") != "ready":
+            bad.append(f"(u) variant rebuild 후 webtoon 이 ready 가 아닙니다: {uw.get('status')} / {uw.get('error')}")
+        for key in ("sheetKey", "frontKey", "backKey"):
+            if not uw.get(key) or uw[key] not in fake_store.blobs:
+                bad.append(f"(u) rebuild 후 {key} 가 저장되지 않았습니다")
+        if (uw.get("model3d") or {}).get("status") != "ready":
+            bad.append(f"(u) rebuild 후 3D 가 ready 가 아닙니다: {(uw.get('model3d') or {}).get('status')}")
+        # 분석을 재사용(새 분석 호출 0회)
+        if len(analyze_calls) != analyze_before:
+            bad.append(f"(u) rebuild 가 기존 분석을 재사용하지 않았습니다(분석 호출 {len(analyze_calls) - analyze_before}회)")
+
+        # ============================================================ 잃은 요청(unavailable) 자동 재제출
+        # fal 이 'Downstream service unavailable' 만 연속으로 돌려주면(요청을 잃음) 같은 front/back 으로
+        # 새로 제출한다(variant 당 최대 MAX_RESUBMITS 회, 원장은 새 제출마다 1회). 한도 넘으면 failed.
+        # 원장 호출 수는 _charge_3d 를 세는 래퍼로 확인한다(검사 동안만 교체).
+        charge3d_calls = {"n": 0}
+        real_charge3d = characters._charge_3d
+
+        def _counting_charge3d(owner_, cid_, variant_):
+            charge3d_calls["n"] += 1
+            return real_charge3d(owner_, cid_, variant_)
+
+        characters._charge_3d = _counting_charge3d
+        try:
+            # (v) unavailable 8회 → 새 제출 → 완료 ready. 제출 2회(최초+재제출 1회)·원장 2회.
+            # retry3d(이전 요청 없음)로 한 variant 만 돌려 제출/원장 수를 깔끔히 센다.
+            vid = _make_char_with_source("v-캐릭터")
+            vfk = characters.front_key("tester", vid, "webtoon", 1)
+            vbk = characters.back_key("tester", vid, "webtoon", 1)
+            fake_store.put_bytes(vfk, _tiny_jpeg(1440, 2560), "image/jpeg")
+            fake_store.put_bytes(vbk, _tiny_jpeg(512, 2560), "image/jpeg")
+
+            def _seed_v(d):
+                d["version"] = 1
+                d["status"] = "failed"
+                vv = d.setdefault("variants", {}).setdefault("webtoon", characters._empty_variant())
+                vv["status"] = "failed"
+                vv["frontKey"] = vfk
+                vv["backKey"] = vbk
+                vv["model3d"] = {"status": "failed", "requestArn": "", "glbKey": "", "thumbKey": "", "error": "x", "resubmits": 0}
+
+            characters.mutate_char("tester", vid, _seed_v)
+            # LOST_AFTER(8) 만큼 unavailable 뒤 새 arn 은 바로 완료되게 한다.
+            fal_mode["transient_left"] = characters.settings.LOST_AFTER
+            fal_mode["fail_status"] = False
+            v_before_post = _post_count()
+            charge3d_calls["n"] = 0
+            resp = client.post(f"/api/vnew/characters/{vid}/variants/webtoon/retry3d")
+            if resp.status_code != 202:
+                bad.append(f"(v) retry3d 가 202 가 아닙니다: {resp.status_code}")
+            _join_builds()
+            fal_mode["transient_left"] = 0
+            v_submits = _post_count() - v_before_post
+            vchar, _ = characters.load_char("tester", vid)
+            vm3d = (vchar.get("variants") or {}).get("webtoon", {}).get("model3d") or {}
+            if v_submits != 2:
+                bad.append(f"(v) unavailable 8회 → 제출이 2회(최초+재제출)가 아닙니다: {v_submits}")
+            if charge3d_calls["n"] != 2:
+                bad.append(f"(v) 원장(3D) 호출이 2회가 아닙니다: {charge3d_calls['n']}")
+            if vm3d.get("status") != "ready" or not vm3d.get("glbKey"):
+                bad.append(f"(v) 재제출 후 3D 가 ready/glbKey 가 아닙니다: {vm3d}")
+            if int(vm3d.get("resubmits") or 0) != 1:
+                bad.append(f"(v) model3d.resubmits 가 1 이 아닙니다: {vm3d.get('resubmits')}")
+
+            # (w) 재제출 2회(MAX_RESUBMITS)를 넘기면 failed(기존 문구 유지).
+            # 계속 unavailable 이면: 최초+재제출2회=제출 3회 뒤 그래도 unavailable → failed.
+            wid = _make_char_with_source("w-캐릭터")
+            wfk = characters.front_key("tester", wid, "webtoon", 1)
+            wbk = characters.back_key("tester", wid, "webtoon", 1)
+            fake_store.put_bytes(wfk, _tiny_jpeg(1440, 2560), "image/jpeg")
+            fake_store.put_bytes(wbk, _tiny_jpeg(512, 2560), "image/jpeg")
+
+            def _seed_w(d):
+                d["version"] = 1
+                d["status"] = "failed"
+                vv = d.setdefault("variants", {}).setdefault("webtoon", characters._empty_variant())
+                vv["status"] = "failed"
+                vv["frontKey"] = wfk
+                vv["backKey"] = wbk
+                vv["model3d"] = {"status": "failed", "requestArn": "", "glbKey": "", "thumbKey": "", "error": "x", "resubmits": 0}
+
+            characters.mutate_char("tester", wid, _seed_w)
+            # 최초 + 재제출 2회 + 그 뒤에도 unavailable 이 되도록 넉넉히 준다(LOST_AFTER*(MAX_RESUBMITS+1)).
+            fal_mode["transient_left"] = characters.settings.LOST_AFTER * (characters.settings.MAX_RESUBMITS + 1)
+            fal_mode["fail_status"] = False
+            w_before_post = _post_count()
+            charge3d_calls["n"] = 0
+            resp = client.post(f"/api/vnew/characters/{wid}/variants/webtoon/retry3d")
+            _join_builds()
+            fal_mode["transient_left"] = 0
+            w_submits = _post_count() - w_before_post
+            wchar, _ = characters.load_char("tester", wid)
+            wv = (wchar.get("variants") or {}).get("webtoon", {})
+            wm3d = wv.get("model3d") or {}
+            if w_submits != 1 + characters.settings.MAX_RESUBMITS:
+                bad.append(f"(w) 제출이 최초+재제출 {characters.settings.MAX_RESUBMITS}회가 아닙니다: {w_submits}")
+            if wv.get("status") != "failed" or wm3d.get("status") != "failed":
+                bad.append(f"(w) 재제출 한도 초과인데 failed 가 아닙니다: {wv.get('status')} / {wm3d.get('status')}")
+            if "fal 일시 오류가 계속됩니다" not in (wm3d.get("error") or ""):
+                bad.append(f"(w) 한도 초과 오류 문구(기존)가 다릅니다: {wm3d.get('error')}")
+            if int(wm3d.get("resubmits") or 0) != characters.settings.MAX_RESUBMITS:
+                bad.append(f"(w) model3d.resubmits 가 {characters.settings.MAX_RESUBMITS} 가 아닙니다: {wm3d.get('resubmits')}")
+
+            # (x) retry3d 의 '이전 요청 먼저 조회'도 같은 규칙: 이전 arn 이 unavailable 8회면
+            # 기다리지 말고 바로 새로 제출(제출 1회)해 완료 → ready.
+            xid = _make_char_with_source("x-캐릭터")
+            xfk = characters.front_key("tester", xid, "webtoon", 1)
+            xbk = characters.back_key("tester", xid, "webtoon", 1)
+            fake_store.put_bytes(xfk, _tiny_jpeg(1440, 2560), "image/jpeg")
+            fake_store.put_bytes(xbk, _tiny_jpeg(512, 2560), "image/jpeg")
+            x_prior = characters.ARN_PREFIX + characters.settings.HUNYUAN_ENDPOINT + "/req_x_prior"
+
+            def _seed_x(d):
+                d["version"] = 1
+                d["status"] = "failed"
+                vv = d.setdefault("variants", {}).setdefault("webtoon", characters._empty_variant())
+                vv["status"] = "failed"
+                vv["frontKey"] = xfk
+                vv["backKey"] = xbk
+                vv["model3d"] = {"status": "failed", "requestArn": x_prior, "glbKey": "", "thumbKey": "", "error": "이전 unavailable", "resubmits": 0}
+
+            characters.mutate_char("tester", xid, _seed_x)
+            # 이전 요청(prior)이 LOST_AFTER 회 unavailable → 바로 새 제출, 새 arn 은 완료.
+            fal_mode["transient_left"] = characters.settings.LOST_AFTER
+            fal_mode["fail_status"] = False
+            x_before_post = _post_count()
+            resp = client.post(f"/api/vnew/characters/{xid}/variants/webtoon/retry3d")
+            if resp.status_code != 202:
+                bad.append(f"(x) retry3d 가 202 가 아닙니다: {resp.status_code}")
+            _join_builds()
+            fal_mode["transient_left"] = 0
+            x_submits = _post_count() - x_before_post
+            xchar, _ = characters.load_char("tester", xid)
+            xm3d = (xchar.get("variants") or {}).get("webtoon", {}).get("model3d") or {}
+            if x_submits != 1:
+                bad.append(f"(x) 이전 요청 unavailable → 새 제출이 1회가 아닙니다: {x_submits}")
+            if xm3d.get("status") != "ready" or not xm3d.get("glbKey"):
+                bad.append(f"(x) retry3d 이전요청 unavailable 재제출 후 ready/glbKey 가 아닙니다: {xm3d}")
+            if int(xm3d.get("resubmits") or 0) != 1:
+                bad.append(f"(x) retry3d 재제출 resubmits 가 1 이 아닙니다: {xm3d.get('resubmits')}")
+        finally:
+            characters._charge_3d = real_charge3d
+
     except Exception as exc:  # noqa: BLE001
         import traceback as _tb  # noqa: PLC0415
 
@@ -2549,10 +2872,14 @@ def check_vnew_characters() -> None:
     else:
         ok(
             "캐릭터 만들기(vnew) 검사 (a)CRUD·업로드 (b)분석 fallback·시트·정면·후면·3D"
-            "(60000·PBR false·data URI)·ready (c)variant 격리 (d)409·stale failed (e)GLB 200 (f)격리 404 "
+            "(60000·PBR false·data URI)·ready (c)variant 격리 (d)409·variant ready 유지 (e)GLB 200 (f)격리 404 "
             "(g)size 기본 (h)일시오류 재조회 ready (i)FAILED 동기화 (j)retry3d 재사용·새제출 (k)기본값 "
             "(l)SAME person 지침·분석 필드 (m)웹툰 styleEn·one person·outfitEn·generic 없음 "
-            "(n)후면 따로 생성 (o)사람 수 2→재생성→warning·3D 진행 (p)extraPromptKo 저장·유지·삭제"
+            "(n)후면 따로 생성 (o)사람 수 2→재생성→warning·3D 진행 (p)extraPromptKo 저장·유지·삭제 "
+            "(q)heartbeat 10분 초과 자동재개 3D만 (r)resumeCount 초과 variant failed·캐릭터 ready "
+            "(s)롤업 규칙 (t)중복 선점 1회 (u)variant rebuild 409·성공·분석 재사용 "
+            "(v)unavailable 8회→재제출→ready(제출2·원장2) (w)재제출 한도 초과→failed "
+            "(x)retry3d 이전요청 unavailable→재제출"
         )
 
 

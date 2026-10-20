@@ -43,6 +43,41 @@ log = logging.getLogger("vpoc")
 ARN_PREFIX = vpoc_fal.ARN_PREFIX
 
 
+# ================================================================ 파드 안 실행 중 표시 · 선점
+#
+# (owner,charId,variant) 가 이 파드에서 빌드/재개 스레드로 돌고 있으면 _RUNNING 에 담는다.
+# 조회 때 자동 이어 만들기가 같은 variant 를 또 띄우지 않게 한다(같은 파드 중복 방지).
+# 여러 파드 사이 중복은 char.json 의 variant claim(token+claimedAt, 조건부 쓰기)으로 막는다.
+
+_RUNNING: set[tuple[str, str, str]] = set()
+_RUNNING_LOCK = threading.Lock()
+
+
+def _running_key(owner: str, char_id: str, variant: str) -> tuple[str, str, str]:
+    return (owner, char_id, variant)
+
+
+def _is_running(owner: str, char_id: str, variant: str) -> bool:
+    with _RUNNING_LOCK:
+        return _running_key(owner, char_id, variant) in _RUNNING
+
+
+def _mark_running(owner: str, char_id: str, variant: str) -> bool:
+    """이 파드에서 실행 중으로 표시. 이미 실행 중이면 False(띄우지 않는다)."""
+    key = _running_key(owner, char_id, variant)
+    with _RUNNING_LOCK:
+        if key in _RUNNING:
+            return False
+        _RUNNING.add(key)
+        return True
+
+
+def _clear_running(owner: str, char_id: str, variant: str) -> None:
+    key = _running_key(owner, char_id, variant)
+    with _RUNNING_LOCK:
+        _RUNNING.discard(key)
+
+
 # ================================================================ 키 규칙
 #
 # IRSA 가 users/* 만 허용하므로 전부 그 아래에 둔다. owner 는 safe_user_prefix(username).
@@ -109,8 +144,17 @@ def _empty_variant() -> dict:
             "glbKey": "",
             "thumbKey": "",
             "error": "",
+            # '잃은 요청' 자동 재제출 횟수(variant 당 최대 MAX_RESUBMITS).
+            "resubmits": 0,
         },
         "error": "",
+        # 단계 진입·진행 때 갱신. 비어 있으면(옛 데이터) stale 판단에서 buildStartedAt 로 넘어간다.
+        "heartbeatAt": "",
+        # 자동 이어 만들기(재개) 횟수. MAX_RESUME 넘으면 그 variant 만 failed.
+        "resumeCount": 0,
+        # 여러 파드 중복 방지 선점(016-fix2 방식). claim=token, claimedAt=시각.
+        "claim": "",
+        "claimedAt": "",
     }
 
 
@@ -682,6 +726,25 @@ def _is_transient_3d_error(exc: BaseException) -> bool:
     return False
 
 
+def _is_lost_3d_error(exc: BaseException) -> bool:
+    """이 일시 오류가 'fal 이 요청을 잃은' 신호(unavailable 류)인지.
+
+    실측(2026-10-20): 요청 조회가 'Downstream service unavailable'(503) 만 계속 돌려주면 그
+    요청은 끝내 못 받는다. 그래서 unavailable 또는 503 이 연속으로 쌓이면 '잃은 요청'으로 보고
+    같은 front/back 으로 새로 제출한다(그 밖의 일시 오류는 기존대로 다시 조회만).
+    """
+    message = str(getattr(exc, "message", "") or exc)
+    if "unavailable" in message.lower():
+        return True
+    if isinstance(exc, VpocError):
+        kind = exc.kind or ""
+        if kind.startswith("HTTP"):
+            digits = "".join(ch for ch in kind if ch.isdigit())
+            if digits and int(digits) == 503:
+                return True
+    return False
+
+
 def poll_3d(request_arn: str) -> dict:
     """3D 작업 상태 한 번 조회. 완료면 {status:'Completed', glbUrl, thumbUrl}."""
     endpoint, request_id = _parse_arn(request_arn)
@@ -708,15 +771,21 @@ def poll_3d(request_arn: str) -> dict:
     return {"status": "Completed", "glbUrl": glb_url, "thumbUrl": thumb_url}
 
 
-def _wait_3d(request_arn: str) -> dict:
+def _wait_3d(request_arn: str, resubmit=None) -> dict:
     """완료까지 폴링(5초 간격, 최대 15분).
 
     조회 중 fal 일시 오류(5xx·429·연결·시간초과·'unavailable')는 실패로 보지 않고 다시 조회한다
     (연속 최대 POLL_TRANSIENT_MAX 회, 사이 POLL_TRANSIENT_WAIT_S 초). 그 밖의 오류나 fal 의
     FAILED 만 실패로 돌려준다.
+
+    "잃은 요청" 재제출: resubmit 콜백이 주어지고, 같은 요청에서 unavailable 류 일시 오류가 연속
+    LOST_AFTER 회 쌓이면 그 요청은 fal 이 잃은 것으로 보고 resubmit() 을 불러 같은 front/back 으로
+    새로 제출한다. resubmit() 은 새 requestArn(문자열)을 돌려주며, 그때부터 그 arn 으로 계속
+    조회한다(일시 오류 카운트 초기화). 재제출 한도를 넘어 resubmit() 이 None 을 돌려주면 실패한다.
     """
     deadline = time.time() + settings.POLL_MAX_S
     transient = 0
+    lost = 0  # 같은 요청에서 연속으로 쌓인 unavailable 류(잃은 요청 신호) 횟수
     while True:
         try:
             state = poll_3d(request_arn)
@@ -725,8 +794,31 @@ def _wait_3d(request_arn: str) -> dict:
                 message = exc.message if isinstance(exc, VpocError) else str(exc)[:300]
                 return {"status": "Failed", "error": message or "3D 조회 중 오류"}
             transient += 1
+            message = exc.message if isinstance(exc, VpocError) else str(exc)[:300]
+            # 잃은 요청 재제출: unavailable 류가 연속 LOST_AFTER 회면 새로 제출한다.
+            if resubmit is not None and _is_lost_3d_error(exc):
+                lost += 1
+                if lost >= settings.LOST_AFTER:
+                    new_arn = resubmit()
+                    if not new_arn:
+                        return {
+                            "status": "Failed",
+                            "error": f"fal 일시 오류가 계속됩니다: {message}",
+                        }
+                    log.warning(
+                        "vnew.poll_3d.resubmit old=%s new=%s after_unavailable=%d",
+                        request_arn, new_arn, lost,
+                    )
+                    request_arn = new_arn
+                    transient = 0
+                    lost = 0
+                    if time.time() >= deadline:
+                        return {"status": "Failed", "error": "3D 생성이 시간 안에 끝나지 않았습니다."}
+                    time.sleep(settings.POLL_TRANSIENT_WAIT_S)
+                    continue
+            else:
+                lost = 0  # unavailable 이 아닌 일시 오류면 '잃은 요청' 연속 카운트 초기화
             if transient > settings.POLL_TRANSIENT_MAX:
-                message = exc.message if isinstance(exc, VpocError) else str(exc)[:300]
                 return {"status": "Failed", "error": f"fal 일시 오류가 계속됩니다: {message}"}
             log.warning(
                 "vnew.poll_3d.transient arn=%s n=%d err=%s", request_arn, transient, str(exc)[:200]
@@ -736,6 +828,7 @@ def _wait_3d(request_arn: str) -> dict:
             time.sleep(settings.POLL_TRANSIENT_WAIT_S)
             continue
         transient = 0  # 성공 조회면 연속 일시 오류 카운트 초기화
+        lost = 0
         if state["status"] in ("Completed", "Failed"):
             return state
         if time.time() >= deadline:
@@ -799,6 +892,78 @@ def _set_variant_3d(owner: str, char_id: str, variant: str, patch: dict) -> None
     mutate_char(owner, char_id, mutator)
 
 
+def _touch_heartbeat(owner: str, char_id: str, variant: str) -> None:
+    """단계 진입·진행 때 variant 의 heartbeatAt 을 지금으로 갱신한다(끊김 판단 기준)."""
+    try:
+
+        def mutator(data: dict) -> None:
+            v = data.setdefault("variants", {}).setdefault(variant, _empty_variant())
+            v["heartbeatAt"] = now_iso()
+
+        mutate_char(owner, char_id, mutator)
+    except Exception as exc:  # noqa: BLE001 — 하트비트 실패가 빌드를 막지 않게
+        log.warning("vnew.heartbeat_failed char=%s variant=%s err=%s", char_id, variant, str(exc)[:200])
+
+
+def _claim_variant(owner: str, char_id: str, variant: str) -> str:
+    """variant 를 이 파드가 선점한다(016-fix2 방식). 성공하면 token, 못 잡으면 ""(빈 문자열).
+
+    선점 조건: claim 이 비어 있거나(놓임), CLAIM_STALL_S 넘게 오래된 것일 때만 새 token 으로
+    조건부 쓰기. 경합(PreconditionFailed)이면 다른 파드가 먼저 잡은 것이라 포기한다.
+    """
+    token = secrets.token_hex(6)
+    got = {"ok": False}
+
+    def mutator(data: dict) -> None:
+        v = data.setdefault("variants", {}).setdefault(variant, _empty_variant())
+        existing = v.get("claim") or ""
+        claimed_at = _parse_iso(v.get("claimedAt") or "")
+        fresh = bool(existing) and bool(claimed_at) and (
+            (datetime.now(timezone.utc) - claimed_at).total_seconds() <= settings.CLAIM_STALL_S
+        )
+        if fresh:
+            got["ok"] = False
+            return
+        v["claim"] = token
+        v["claimedAt"] = now_iso()
+        got["ok"] = True
+
+    try:
+        mutate_char(owner, char_id, mutator)
+    except VpocError as exc:
+        if exc.kind == "PreconditionFailed":
+            return ""
+        raise
+    return token if got["ok"] else ""
+
+
+def _holds_claim(owner: str, char_id: str, variant: str, token: str) -> bool:
+    """char.json 을 다시 읽어 이 token 이 아직 이 variant 의 claim 인지 확인한다."""
+    if not token:
+        return False
+    try:
+        char, _ = load_char(owner, char_id)
+    except VpocError:
+        return False
+    v = (char.get("variants") or {}).get(variant) or {}
+    return (v.get("claim") or "") == token
+
+
+def _release_claim(owner: str, char_id: str, variant: str, token: str) -> None:
+    """내 claim 이면 비운다(선점 해제). 다른 token 이면 건드리지 않는다."""
+
+    def mutator(data: dict) -> None:
+        v = data.setdefault("variants", {}).setdefault(variant, _empty_variant())
+        if (v.get("claim") or "") == token:
+            v["claim"] = ""
+            v["claimedAt"] = ""
+
+    try:
+        mutate_char(owner, char_id, mutator)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("vnew.release_claim_failed char=%s variant=%s err=%s", char_id, variant, str(exc)[:200])
+
+
 def _gen_checked(
     prompt: str, references: list[bytes], *, size: str
 ) -> tuple[bytes, bool]:
@@ -825,13 +990,14 @@ def _build_variant(
 ) -> None:
     """한 variant 의 그림 + 3D. 실패하면 그 variant 만 failed 로 두고 예외를 올리지 않는다."""
     try:
-        _set_variant(owner, char_id, variant, {"status": "images", "warning": ""})
+        _set_variant(owner, char_id, variant, {"status": "images", "warning": "", "heartbeatAt": now_iso()})
 
         # 시트(2560x1440)
         sheet = _seedream(_sheet_prompt(variant, analysis), refs, size=settings.SHEET_SIZE)
         _charge_seedream(owner, char_id, variant, "sheet")
         s_key = sheet_key(owner, char_id, variant, version)
         STORE.put_bytes(s_key, sheet, "image/jpeg")
+        _touch_heartbeat(owner, char_id, variant)
 
         # 정면 전신(1440x2560) — 시트를 첫 참고로 넣어 같은 인물·옷이 되게 한다.
         # 사람 수 검사: 여러 명이면 1회 다시 그리고, 그래도면 warning.
@@ -841,6 +1007,7 @@ def _build_variant(
         _charge_seedream(owner, char_id, variant, "front")
         f_key = front_key(owner, char_id, variant, version)
         STORE.put_bytes(f_key, front, "image/jpeg")
+        _touch_heartbeat(owner, char_id, variant)
 
         # 후면 전신(1440x2560) — 정면 + 시트를 참고로 따로 생성(이전엔 시트 5번째 칸을 잘랐음).
         back, back_multi = _gen_checked(
@@ -861,24 +1028,12 @@ def _build_variant(
                 "frontKey": f_key,
                 "backKey": b_key,
                 "warning": warning,
+                "heartbeatAt": now_iso(),
             },
         )
 
         # 3D: front·back 정사각 패딩 → data URI 제출 → 완료까지 폴링 → 복사
-        side = settings.MODEL_INPUT_SQUARE
-        front_sq = _square_pad(front, side)
-        back_sq = _square_pad(back, side)
-        request_arn = submit_3d(front_sq, back_sq)
-        _charge_3d(owner, char_id, variant)
-        _set_variant_3d(owner, char_id, variant, {"status": "submitted", "requestArn": request_arn})
-
-        state = _wait_3d(request_arn)
-        if state["status"] != "Completed":
-            _set_variant_3d(owner, char_id, variant, {"status": "failed", "error": state.get("error", "")})
-            _set_variant(owner, char_id, variant, {"status": "failed", "error": state.get("error", "3D 실패")})
-            return
-
-        _copy_3d_result(owner, char_id, variant, version, state)
+        _build_3d_from_images(owner, char_id, variant, version, front, back)
     except Exception as exc:  # noqa: BLE001
         log.warning("vnew.build_variant_failed char=%s variant=%s err=%s", char_id, variant, str(exc)[:300])
         message = exc.message if isinstance(exc, VpocError) else str(exc)[:300]
@@ -886,6 +1041,62 @@ def _build_variant(
         # 함께 failed 로 맞춘다 — ready 는 건드리지 않는다.
         _fail_pending_3d(owner, char_id, variant, message)
         _set_variant(owner, char_id, variant, {"status": "failed", "error": message})
+
+
+def _make_3d_resubmit(owner: str, char_id: str, variant: str, front_sq: bytes, back_sq: bytes):
+    """'잃은 요청' 재제출 콜백을 만든다(_wait_3d 에 넘긴다).
+
+    같은 front/back 정사각으로 새로 제출하고, 원장을 1회 더 달고, model3d.requestArn·resubmits 를
+    갱신한 뒤 새 requestArn 을 돌려준다. 재제출 한도(MAX_RESUBMITS)를 넘으면 None(그러면 실패).
+    """
+    done = {"n": 0}
+
+    def resubmit() -> str:
+        if done["n"] >= settings.MAX_RESUBMITS:
+            return ""
+        done["n"] += 1
+        request_arn = submit_3d(front_sq, back_sq)
+        _charge_3d(owner, char_id, variant)
+
+        def mutator(data: dict) -> None:
+            v = data.setdefault("variants", {}).setdefault(variant, _empty_variant())
+            m3d = v.setdefault("model3d", {})
+            m3d["status"] = "submitted"
+            m3d["requestArn"] = request_arn
+            m3d["resubmits"] = int(m3d.get("resubmits") or 0) + 1
+            m3d["error"] = ""
+
+        mutate_char(owner, char_id, mutator)
+        _touch_heartbeat(owner, char_id, variant)
+        return request_arn
+
+    return resubmit
+
+
+def _build_3d_from_images(
+    owner: str, char_id: str, variant: str, version: int, front: bytes, back: bytes
+) -> None:
+    """front/back 바이트로 3D 를 새로 제출하고 완료까지 폴링해 복사한다(예외는 올린다).
+
+    조회가 'Downstream service unavailable' 만 연속으로 돌려주면(fal 이 요청을 잃음) 같은
+    front/back 으로 새로 제출한다(variant 당 최대 MAX_RESUBMITS 회).
+    """
+    side = settings.MODEL_INPUT_SQUARE
+    front_sq = _square_pad(front, side)
+    back_sq = _square_pad(back, side)
+    request_arn = submit_3d(front_sq, back_sq)
+    _charge_3d(owner, char_id, variant)
+    _set_variant_3d(owner, char_id, variant, {"status": "submitted", "requestArn": request_arn})
+    _touch_heartbeat(owner, char_id, variant)
+
+    resubmit = _make_3d_resubmit(owner, char_id, variant, front_sq, back_sq)
+    state = _wait_3d(request_arn, resubmit=resubmit)
+    if state["status"] != "Completed":
+        _set_variant_3d(owner, char_id, variant, {"status": "failed", "error": state.get("error", "")})
+        _set_variant(owner, char_id, variant, {"status": "failed", "error": state.get("error", "3D 실패")})
+        return
+
+    _copy_3d_result(owner, char_id, variant, version, state)
 
 
 def _fail_pending_3d(owner: str, char_id: str, variant: str, message: str) -> None:
@@ -944,20 +1155,16 @@ def run_build(owner: str, char_id: str, version: int) -> None:
         for src in (char.get("sources") or [])[: settings.MAX_REFERENCE_IMAGES]:
             refs.append(source_jpeg(owner, char_id, src["fileId"]))
 
-        # b~d. variant 별(순차. 실패해도 다음 variant 진행)
+        # b~d. variant 별(순차. 실패해도 다음 variant 진행). 파드 안 실행 중 표시.
         for variant in settings.VARIANTS:
-            _build_variant(owner, char_id, variant, version, analysis, refs)
+            _mark_running(owner, char_id, variant)
+            try:
+                _build_variant(owner, char_id, variant, version, analysis, refs)
+            finally:
+                _clear_running(owner, char_id, variant)
 
-        # e. 최종 상태: 하나라도 ready 면 ready, 전부 실패면 failed
-        char, _ = load_char(owner, char_id)
-        statuses = [(char.get("variants") or {}).get(v, {}).get("status") for v in settings.VARIANTS]
-        final = "ready" if any(s == "ready" for s in statuses) else "failed"
-
-        def set_status(data: dict) -> None:
-            data["status"] = final
-
-        updated, _ = mutate_char(owner, char_id, set_status)
-        upsert_index(owner, updated)
+        # e. 최종 상태 롤업(하나라도 ready 면 ready, 진행 중이면 building, 전부 failed 면 failed)
+        _refresh_char_status(owner, char_id)
     except Exception as exc:  # noqa: BLE001
         log.error("vnew.run_build_failed char=%s err=%s", char_id, str(exc)[:300])
         message = exc.message if isinstance(exc, VpocError) else str(exc)[:300]
@@ -1063,7 +1270,11 @@ def start_retry3d(owner: str, char_id: str, variant: str) -> int:
 
 
 def run_retry3d(owner: str, char_id: str, variant: str, version: int) -> None:
-    """3D만 다시(백그라운드). 이전 requestArn 이 완료면 재사용(제출 0회), 아니면 새로 제출한다."""
+    """3D만 다시(백그라운드). 이전 requestArn 이 완료면 재사용(제출 0회), 아니면 새로 제출한다.
+
+    이전 요청 조회가 'Downstream service unavailable' 만 연속으로 돌려주면(fal 이 요청을 잃음)
+    기다리지 않고 같은 front/back 으로 바로 새로 제출한다(variant 당 최대 MAX_RESUBMITS 회).
+    """
     try:
         char, _ = load_char(owner, char_id)
         v = (char.get("variants") or {}).get(variant) or {}
@@ -1073,26 +1284,30 @@ def run_retry3d(owner: str, char_id: str, variant: str, version: int) -> None:
             raise VpocError("vnew.retry3d", "NoImages", "정면·후면 이미지가 없습니다.", 400)
         prior_arn = (v.get("model3d") or {}).get("requestArn") or ""
 
+        # front/back 정사각을 미리 만들어 둔다('잃은 요청' 재제출에 쓴다).
+        front = STORE.get_bytes(front_key)
+        back = STORE.get_bytes(back_key)
+        side = settings.MODEL_INPUT_SQUARE
+        front_sq = _square_pad(front, side)
+        back_sq = _square_pad(back, side)
+        resubmit = _make_3d_resubmit(owner, char_id, variant, front_sq, back_sq)
+
         state = None
-        # 1) 이전 요청이 있으면 먼저 조회 — 완료면 그 결과를 쓴다(새로 제출하지 않는다).
+        # 1) 이전 요청이 있으면 먼저 조회 — 완료면 그 결과를 쓴다. unavailable 이 연속 LOST_AFTER 회면
+        #    기다리지 않고 바로 새로 제출한다(resubmit 콜백). 그래도 못 받으면 아래 2) 로 넘어간다.
         if prior_arn:
-            state = _wait_3d(prior_arn)
+            state = _wait_3d(prior_arn, resubmit=resubmit)
             if state["status"] != "Completed":
                 state = None  # 실패·시간초과면 새로 제출한다.
 
         # 2) 이전 결과를 못 쓰면 front/back 으로 새로 제출한다.
         if state is None:
-            front = STORE.get_bytes(front_key)
-            back = STORE.get_bytes(back_key)
-            side = settings.MODEL_INPUT_SQUARE
-            front_sq = _square_pad(front, side)
-            back_sq = _square_pad(back, side)
             request_arn = submit_3d(front_sq, back_sq)
             _charge_3d(owner, char_id, variant)
             _set_variant_3d(
                 owner, char_id, variant, {"status": "submitted", "requestArn": request_arn, "error": ""}
             )
-            state = _wait_3d(request_arn)
+            state = _wait_3d(request_arn, resubmit=resubmit)
             if state["status"] != "Completed":
                 _set_variant_3d(owner, char_id, variant, {"status": "failed", "error": state.get("error", "")})
                 _set_variant(owner, char_id, variant, {"status": "failed", "error": state.get("error", "3D 실패")})
@@ -1109,12 +1324,221 @@ def run_retry3d(owner: str, char_id: str, variant: str, version: int) -> None:
         _refresh_char_status(owner, char_id)
 
 
-def _refresh_char_status(owner: str, char_id: str) -> None:
-    """variant 상태를 모아 캐릭터 전체 status 를 다시 매긴다(하나라도 ready 면 ready)."""
+# ================================================================ 자동 이어 만들기(resume)
+#
+# 상세 조회·reconcile 때 끊긴 variant 를 발견하면 그 variant 만 이어서 만든다.
+# - 끊김 판단: status 가 queued/images/model3d 인데 heartbeatAt 이 VARIANT_STALL_S 넘게
+#   갱신 안 됐고(없으면 buildStartedAt 기준) 이 파드에서 실행 중이 아님.
+# - 선점: char.json 의 variant claim 을 조건부 쓰기로 잡은 쪽만 실행(여러 파드 중복 방지).
+# - resumeCount 가 MAX_RESUME 를 넘으면 그 variant 만 failed(캐릭터는 다른 variant 에 따른다).
+
+
+def _variant_stale(char: dict, variant: str) -> bool:
+    """이 variant 가 진행 중 상태인데 heartbeatAt 이 오래됐는가(끊긴 것으로 본다)."""
+    v = (char.get("variants") or {}).get(variant) or {}
+    if v.get("status") not in ("queued", "images", "model3d"):
+        return False
+    last = _parse_iso(v.get("heartbeatAt") or "") or _parse_iso(char.get("buildStartedAt") or "")
+    if not last:
+        # heartbeatAt·buildStartedAt 둘 다 없으면(옛 데이터) 끊긴 것으로 본다.
+        return True
+    return (datetime.now(timezone.utc) - last).total_seconds() > settings.VARIANT_STALL_S
+
+
+def _resume_variants(owner: str, char_id: str, char: dict) -> None:
+    """조회 때 호출: 끊긴 variant 를 variant 단위로 이어 만든다(스레드 시작) 또는 cap 넘으면 failed."""
+    for variant in settings.VARIANTS:
+        if _is_running(owner, char_id, variant):
+            continue
+        if not _variant_stale(char, variant):
+            continue
+        v = (char.get("variants") or {}).get(variant) or {}
+        resume_count = int(v.get("resumeCount") or 0)
+        if resume_count >= settings.MAX_RESUME:
+            # 재개 한도 초과 — 이 variant 만 failed(다른 variant 는 그대로).
+            _fail_pending_3d(owner, char_id, variant, "중단되었습니다. 이 그림체만 다시 만들어 주세요")
+            _set_variant(
+                owner,
+                char_id,
+                variant,
+                {"status": "failed", "error": "중단되었습니다. 이 그림체만 다시 만들어 주세요"},
+            )
+            _refresh_char_status(owner, char_id)
+            continue
+        # 선점(조건부 쓰기). 못 잡으면 다른 파드가 이어 만드는 중이라 넘어간다.
+        token = _claim_variant(owner, char_id, variant)
+        if not token:
+            continue
+        if not _mark_running(owner, char_id, variant):
+            _release_claim(owner, char_id, variant, token)
+            continue
+        version = int(char.get("version") or 0)
+
+        def set_resuming(data: dict, _variant=variant) -> None:
+            vv = data.setdefault("variants", {}).setdefault(_variant, _empty_variant())
+            vv["resumeCount"] = int(vv.get("resumeCount") or 0) + 1
+            vv["heartbeatAt"] = now_iso()
+            vv["error"] = ""
+
+        try:
+            mutate_char(owner, char_id, set_resuming)
+        except Exception:  # noqa: BLE001
+            _clear_running(owner, char_id, variant)
+            _release_claim(owner, char_id, variant, token)
+            continue
+
+        thread = threading.Thread(
+            target=run_resume_variant,
+            args=(owner, char_id, variant, version, token),
+            daemon=True,
+            name=f"vnew-resume-{char_id}-{variant}",
+        )
+        thread.start()
+
+
+def run_resume_variant(owner: str, char_id: str, variant: str, version: int, token: str) -> None:
+    """끊긴 variant 를 이어서 만든다(백그라운드).
+
+    - sheet/front/back 이 다 있으면 그림은 다시 그리지 않고 3D 만(run_retry3d 처럼 이전 requestArn
+      이 있으면 조회부터).
+    - 그림이 덜 됐으면 분석 결과를 재사용해 그 variant 를 처음부터 다시 그린다.
+    선점 token 이 더는 내 것이 아니면(다른 파드가 가져감) 아무것도 하지 않는다.
+    """
+    try:
+        if not _holds_claim(owner, char_id, variant, token):
+            return
+        char, _ = load_char(owner, char_id)
+        v = (char.get("variants") or {}).get(variant) or {}
+        has_images = bool(v.get("sheetKey") and v.get("frontKey") and v.get("backKey"))
+        if has_images:
+            # 그림은 그대로 두고 3D 만 이어서(이전 requestArn 재사용 포함).
+            run_retry3d(owner, char_id, variant, version)
+            return
+        # 그림이 덜 됐으면 분석 결과를 재사용해 처음부터 다시 그린다.
+        analysis = char.get("analysis") or {}
+        if not analysis.get("appearanceEn"):
+            analysis = analyze_sources(owner, char)
+
+            def set_analysis(data: dict) -> None:
+                data["analysis"] = analysis
+
+            mutate_char(owner, char_id, set_analysis)
+        refs: list[bytes] = []
+        for src in (char.get("sources") or [])[: settings.MAX_REFERENCE_IMAGES]:
+            refs.append(source_jpeg(owner, char_id, src["fileId"]))
+        _build_variant(owner, char_id, variant, version, analysis, refs)
+        _refresh_char_status(owner, char_id)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("vnew.resume_failed char=%s variant=%s err=%s", char_id, variant, str(exc)[:300])
+        message = exc.message if isinstance(exc, VpocError) else str(exc)[:300]
+        _fail_pending_3d(owner, char_id, variant, message)
+        _set_variant(owner, char_id, variant, {"status": "failed", "error": message})
+        _refresh_char_status(owner, char_id)
+    finally:
+        _clear_running(owner, char_id, variant)
+        _release_claim(owner, char_id, variant, token)
+
+
+# ================================================================ 그림체만 다시(variant rebuild)
+#
+# 그 variant 만 처음부터(분석 결과 재사용, 없으면 분석부터). 진행 중이면 409.
+
+
+def start_rebuild_variant(owner: str, char_id: str, variant: str, extra_prompt_ko: str | None = None) -> int:
+    """그 그림체만 처음부터 다시 만들기. 진행 중이면 409. version 반환(스레드 시작).
+
+    extra_prompt_ko: None 이면 이전 extraPromptKo 유지, "" 면 삭제, 문자열이면 저장(≤ 최대 길이).
+    """
+    if variant not in settings.VARIANTS:
+        raise VpocError("vnew.rebuild", "BadVariant", "알 수 없는 그림체입니다.", 404)
+    if _is_running(owner, char_id, variant):
+        raise VpocError("vnew.rebuild", "AlreadyBuilding", "이 그림체를 이미 만들고 있습니다.", 409)
+
+    def mutator(data: dict) -> int:
+        v = data.setdefault("variants", {}).setdefault(variant, _empty_variant())
+        # 진행 중(끊기지 않은)이면 409.
+        if v.get("status") in ("queued", "images", "model3d") and not _variant_stale(data, variant):
+            raise VpocError("vnew.rebuild", "AlreadyBuilding", "이 그림체를 이미 만들고 있습니다.", 409)
+        if extra_prompt_ko is not None:
+            cleaned = str(extra_prompt_ko or "").strip()[: settings.MAX_EXTRA_PROMPT_LEN]
+            if cleaned:
+                data["extraPromptKo"] = cleaned
+            else:
+                data.pop("extraPromptKo", None)
+        version = int(data.get("version") or 0)
+        # 이 variant 만 초기화(queued). 다른 variant 는 건드리지 않는다.
+        fresh = _empty_variant()
+        fresh["status"] = "queued"
+        fresh["heartbeatAt"] = now_iso()
+        data["variants"][variant] = fresh
+        return version
+
+    updated, version = mutate_char(owner, char_id, mutator)
+    # 캐릭터 전체 status 롤업(다시 building 이 될 수 있다).
+    _refresh_char_status(owner, char_id)
+
+    thread = threading.Thread(
+        target=run_rebuild_variant,
+        args=(owner, char_id, variant, version),
+        daemon=True,
+        name=f"vnew-rebuild-{char_id}-{variant}",
+    )
+    thread.start()
+    return version
+
+
+def run_rebuild_variant(owner: str, char_id: str, variant: str, version: int) -> None:
+    """그림체 하나를 처음부터(백그라운드). 분석 결과가 없으면 분석부터 하고 재사용한다."""
+    if not _mark_running(owner, char_id, variant):
+        return
     try:
         char, _ = load_char(owner, char_id)
-        statuses = [(char.get("variants") or {}).get(v, {}).get("status") for v in settings.VARIANTS]
-        final = "ready" if any(s == "ready" for s in statuses) else "failed"
+        analysis = char.get("analysis") or {}
+        if not analysis.get("appearanceEn"):
+            analysis = analyze_sources(owner, char)
+
+            def set_analysis(data: dict) -> None:
+                data["analysis"] = analysis
+
+            mutate_char(owner, char_id, set_analysis)
+        refs: list[bytes] = []
+        for src in (char.get("sources") or [])[: settings.MAX_REFERENCE_IMAGES]:
+            refs.append(source_jpeg(owner, char_id, src["fileId"]))
+        _build_variant(owner, char_id, variant, version, analysis, refs)
+        _refresh_char_status(owner, char_id)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("vnew.rebuild_variant_failed char=%s variant=%s err=%s", char_id, variant, str(exc)[:300])
+        message = exc.message if isinstance(exc, VpocError) else str(exc)[:300]
+        _fail_pending_3d(owner, char_id, variant, message)
+        _set_variant(owner, char_id, variant, {"status": "failed", "error": message})
+        _refresh_char_status(owner, char_id)
+    finally:
+        _clear_running(owner, char_id, variant)
+
+
+def _rollup_status(char: dict) -> str:
+    """variant 상태를 모아 캐릭터 전체 status 를 매긴다.
+
+    - 하나라도 ready → "ready" (다만 다른 variant 가 아직 진행 중이면 "building")
+    - ready 가 없고 진행 중(queued/images/model3d)이 있으면 → "building"
+    - 전부 failed → "failed"
+    한 variant 가 끊겨도(failed) 다른 variant 가 ready 면 캐릭터는 failed 가 아니다.
+    """
+    statuses = [(char.get("variants") or {}).get(v, {}).get("status") for v in settings.VARIANTS]
+    in_progress = any(s in ("queued", "images", "model3d") for s in statuses)
+    any_ready = any(s == "ready" for s in statuses)
+    if in_progress:
+        return "building"
+    if any_ready:
+        return "ready"
+    return "failed"
+
+
+def _refresh_char_status(owner: str, char_id: str) -> None:
+    """variant 상태를 모아 캐릭터 전체 status 를 다시 매긴다(_rollup_status 규칙)."""
+    try:
+        char, _ = load_char(owner, char_id)
+        final = _rollup_status(char)
 
         def set_status(data: dict) -> None:
             data["status"] = final
@@ -1136,7 +1560,7 @@ def _parse_iso(value: str):
 
 
 def _is_stale(char: dict) -> bool:
-    """building 이 BUILD_STALL_S 넘게 그대로면 중단된 것으로 본다."""
+    """building 이 BUILD_STALL_S 넘게 그대로면 중단된 것으로 본다(옛 호환용)."""
     if char.get("status") != "building":
         return False
     started = _parse_iso(char.get("buildStartedAt") or "")
@@ -1146,18 +1570,29 @@ def _is_stale(char: dict) -> bool:
 
 
 def reconcile_stale(owner: str, char_id: str) -> dict:
-    """조회 때 호출: building 이 30분 넘게 멈춰 있으면 failed 로 바꾼다. 최신 char 반환."""
+    """조회 때 호출: 끊긴 variant 가 있으면 그 variant 만 이어서 만든다(variant 단위 자동 재개).
+
+    한 variant 가 끊겨도 캐릭터 전체를 failed 로 만들지 않는다(이전 30분 전체 실패 규칙을 대체).
+    _resume_variants 가 끊긴 variant 를 이어 만들거나(스레드) 재개 한도 초과면 그 variant 만
+    failed 로 바꾼다. 그 뒤 캐릭터 전체 status 를 다시 롤업한 최신 char 를 돌려준다.
+
+    아직 한 번도 만든 적 없는 draft(version 0)는 건드리지 않는다 — queued variant 는 '끊긴 것'이
+    아니라 '아직 시작 안 한 것'이므로 자동 재개도, 상태 롤업도 하지 않는다.
+    """
     char, _ = load_char(owner, char_id)
-    if not _is_stale(char):
+    if int(char.get("version") or 0) < 1 or char.get("status") == "draft":
         return char
+    _resume_variants(owner, char_id, char)
+    char, _ = load_char(owner, char_id)
+    rolled = _rollup_status(char)
+    if rolled != char.get("status"):
+        def mutator(data: dict) -> None:
+            data["status"] = rolled
 
-    def mutator(data: dict) -> None:
-        data["status"] = "failed"
-        data["buildError"] = "생성이 중단되었습니다. 다시 만들어 주세요."
-
-    updated, _ = mutate_char(owner, char_id, mutator)
-    upsert_index(owner, updated)
-    return updated
+        updated, _ = mutate_char(owner, char_id, mutator)
+        upsert_index(owner, updated)
+        return updated
+    return char
 
 
 # ================================================================ 상세 뷰(presigned)
@@ -1184,6 +1619,7 @@ def detail_view(owner: str, char_id: str) -> dict:
             "status": v.get("status"),
             "error": v.get("error") or "",
             "warning": v.get("warning") or "",
+            "resumeCount": int(v.get("resumeCount") or 0),
             "sheetUrl": _presign(v.get("sheetKey")),
             "frontUrl": _presign(v.get("frontKey")),
             "backUrl": _presign(v.get("backKey")),
