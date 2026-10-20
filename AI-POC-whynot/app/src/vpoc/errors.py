@@ -44,6 +44,7 @@ USER_FACING_KINDS = {
     "AlreadyRegistered",
     "SchemaUnreadable",
     "ModelUnavailable",
+    "CharacterRealMissing",
 }
 
 

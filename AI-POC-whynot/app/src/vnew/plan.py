@@ -1143,8 +1143,16 @@ def plan_view(owner: str, pid: str, plan: dict) -> dict:
         "models": available_models(),
         "script": plan.get("script") or {},
         "conti": plan.get("conti") or {},
+        "gen": _gen_view(owner, pid, plan),
         "task": plan.get("task") or _empty_task(),
     }
+
+
+def _gen_view(owner: str, pid: str, plan: dict) -> dict | None:
+    """④ 영상 생성 보기(estimate 포함). generate 를 늦게 import 해 순환 참조를 피한다."""
+    from . import generate  # noqa: PLC0415
+
+    return generate.gen_view(owner, pid, plan)
 
 
 # ================================================================ 작은 도우미

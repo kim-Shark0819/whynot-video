@@ -1173,3 +1173,349 @@ textarea.vnew-field-input {
     width: 100%;
   }
 }
+
+
+/* ================================================================ ④ 영상 생성 · ⑤ 사운드(베타)
+
+   #vnew-root 의 ④⑤ 화면. 기존 .vnew-* 클래스를 재사용하고, 새 클래스도 .vnew-* 로만 쓴다.
+   styles.css 토큰을 쓰되 기본값을 함께 둔다. 좁은 화면(≤768px)에서 열을 1열로 접는다. */
+
+/* ---- ④ 진행 상태 띠 ---- */
+
+.vnew-gen-statusbar {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.vnew-gen-status-text {
+  margin: 0;
+  font-weight: 600;
+}
+
+/* ---- ④ 공통 상태 배지(구간·시작 장면) ---- */
+
+.vnew-badge-gen {
+  display: inline-block;
+  padding: 2px 10px;
+  border-radius: 999px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-muted, #6b7280);
+  background: var(--surface-muted, #f3f4f6);
+  white-space: nowrap;
+}
+
+.vnew-badge-gen.is-completed {
+  color: var(--success, #15803d);
+  background: rgba(21, 128, 61, 0.12);
+}
+
+.vnew-badge-gen.is-submitted,
+.vnew-badge-gen.is-preparing {
+  color: var(--accent-strong, #b45309);
+  background: var(--accent-soft, #fef3c7);
+}
+
+.vnew-badge-gen.is-failed {
+  color: var(--danger, #b91c1c);
+  background: rgba(185, 28, 28, 0.1);
+}
+
+.vnew-badge-gen.is-cancelled {
+  color: var(--text-muted, #6b7280);
+  background: var(--surface-muted, #f3f4f6);
+}
+
+/* ---- ④ 맨 위 결과(실사/웹툰 두 열) ---- */
+
+.vnew-final-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 20px;
+}
+
+.vnew-final-col {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 16px;
+  border: 1px solid var(--line, #e5e7eb);
+  border-radius: var(--radius, 16px);
+  background: var(--surface, #ffffff);
+}
+
+.vnew-final-player {
+  width: 100%;
+  max-height: 420px;
+  border-radius: 12px;
+  background: #000;
+}
+
+.vnew-final-tools {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  align-items: center;
+}
+
+.vnew-final-pending {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 180px;
+  border-radius: 12px;
+  border: 1px dashed var(--line, #e5e7eb);
+  background: var(--surface-muted, #f9fafb);
+  text-align: center;
+  padding: 16px;
+}
+
+.vnew-pick-btn {
+  align-self: flex-start;
+}
+
+.vnew-download {
+  text-decoration: none;
+  display: inline-flex;
+  align-items: center;
+}
+
+/* ---- ④ 시작 장면 카드 ---- */
+
+.vnew-opening-card .vnew-sec-head {
+  align-items: center;
+}
+
+.vnew-opening-img {
+  width: 100%;
+  max-height: 360px;
+  object-fit: contain;
+  border-radius: 12px;
+  border: 1px solid var(--line, #e5e7eb);
+  background: var(--surface-muted, #f3f4f6);
+  cursor: zoom-in;
+}
+
+/* ---- ④ 구간 타임라인 ---- */
+
+.vnew-seg-rows {
+  display: grid;
+  gap: 14px;
+}
+
+.vnew-seg-row {
+  padding: 14px;
+  border: 1px solid var(--line, #e5e7eb);
+  border-radius: 12px;
+  background: var(--surface, #ffffff);
+}
+
+.vnew-seg-meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 12px;
+}
+
+.vnew-seg-no {
+  font-size: 14px;
+  font-weight: 700;
+}
+
+.vnew-seg-row .vnew-seg-seconds {
+  font-size: 13px;
+  color: var(--text, #1b1d21);
+}
+
+.vnew-seg-row .vnew-seg-cuts {
+  font-size: 12px;
+  color: var(--text-muted, #9ca3af);
+}
+
+.vnew-seg-cells {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 14px;
+}
+
+.vnew-seg-cell {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px;
+  border-radius: 10px;
+  background: var(--surface-muted, #f9fafb);
+}
+
+.vnew-seg-cell-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.vnew-seg-cell-title {
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.vnew-seg-video {
+  width: 100%;
+  max-height: 220px;
+  border-radius: 8px;
+  background: #000;
+}
+
+.vnew-seg-error {
+  margin: 0;
+  font-size: 13px;
+}
+
+.vnew-seg-retry {
+  align-self: flex-start;
+  font-size: 13px;
+}
+
+/* ---- ⑤ 사운드(베타) ---- */
+
+.vnew-sound-head {
+  margin-bottom: 4px;
+}
+
+.vnew-beta-badge {
+  margin-left: 10px;
+  vertical-align: middle;
+}
+
+.vnew-sound-player-sec {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.vnew-sound-player {
+  max-height: 480px;
+}
+
+.vnew-sound-tools {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  align-items: center;
+}
+
+.vnew-sound-settings {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.vnew-sound-toggle {
+  display: flex;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.vnew-sound-toggle .outline-button.is-on {
+  border-color: var(--accent, #cb3208);
+  color: var(--accent, #cb3208);
+  background: var(--accent-soft, #fff4ee);
+}
+
+/* ---- ⑤ 대사 목록(읽기 전용) ---- */
+
+.vnew-dialogue-sec {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.vnew-dialogue-list {
+  display: grid;
+  gap: 8px;
+}
+
+.vnew-dialogue-item {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  padding: 10px 12px;
+  border: 1px solid var(--line, #e5e7eb);
+  border-radius: 10px;
+  background: var(--surface-muted, #f9fafb);
+}
+
+.vnew-dialogue-no {
+  min-width: 24px;
+  height: 24px;
+  padding: 0 7px;
+  border-radius: 999px;
+  background: var(--surface, #ffffff);
+  border: 1px solid var(--line, #e5e7eb);
+  font-size: 12px;
+  font-weight: 700;
+  line-height: 24px;
+  text-align: center;
+}
+
+.vnew-dialogue-body {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 8px;
+}
+
+.vnew-dialogue-speaker {
+  font-weight: 700;
+  font-size: 13px;
+}
+
+.vnew-dialogue-line {
+  font-size: 14px;
+}
+
+.vnew-dialogue-panels {
+  font-size: 12px;
+  color: var(--text-muted, #9ca3af);
+}
+
+/* ---- ④⑤ 확인창(영상 만들기) ---- */
+
+.vnew-gen-confirm .vnew-modal-body {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.vnew-gen-cost {
+  margin: 0;
+  font-weight: 600;
+  color: var(--accent-strong, #b45309);
+}
+
+.vnew-modal-actions {
+  display: flex;
+  gap: 12px;
+  justify-content: flex-end;
+  margin-top: 6px;
+}
+
+/* ---- ④⑤ 좁은 화면(≤768px) ---- */
+
+@media (max-width: 768px) {
+  .vnew-final-grid,
+  .vnew-seg-cells {
+    grid-template-columns: 1fr;
+  }
+
+  .vnew-modal-actions {
+    flex-direction: column;
+  }
+
+  .vnew-modal-actions .primary-button,
+  .vnew-modal-actions .outline-button {
+    width: 100%;
+  }
+}
