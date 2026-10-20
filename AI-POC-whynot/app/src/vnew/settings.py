@@ -42,6 +42,8 @@ ASTRA_MODEL = os.getenv("VNEW_ASTRA_MODEL", "global.openai.gpt-6-astra")
 ANALYZE_FALLBACK_MODEL = vpoc_settings.ANALYZE_MODEL
 # 정면·후면 사람 수 검사(빠른 모델). vpoc.settings.BRIEF_MODEL 을 기본으로 쓴다.
 PEOPLE_COUNT_MODEL = os.getenv("VNEW_PEOPLE_COUNT_MODEL", vpoc_settings.BRIEF_MODEL)
+# 복장 일관성 검사(시트가 baseOutfitEn 과 맞는지). 사람 수 검사와 같은 Claude 분석 체인을 쓴다.
+OUTFIT_CHECK_MODEL = os.getenv("VNEW_OUTFIT_CHECK_MODEL", vpoc_settings.BRIEF_MODEL)
 
 # --- Seedream 시트/전신 크기(설계자 실측 2026-10-20) ---
 SHEET_SIZE = os.getenv("VNEW_SHEET_SIZE", "2560x1440")  # 가로 5면 턴어라운드 시트
@@ -95,3 +97,12 @@ CLAIM_STALL_S = _int("VNEW_CLAIM_STALL_S", 600)  # 10분
 
 # 만들 variant(그림체). 웹툰 그대로 + 실사.
 VARIANTS = ("webtoon", "real")
+
+# --- 추가 복장(outfits) ---
+# 한 캐릭터에 둘 수 있는 추가 복장(auto 후보 + 사용자 추가) 최대 개수.
+MAX_OUTFITS = _int("VNEW_MAX_OUTFITS", 12)
+# 추가 복장 이름·설명(한국어)의 최대 길이.
+MAX_OUTFIT_LABEL_LEN = _int("VNEW_MAX_OUTFIT_LABEL_LEN", 60)
+MAX_OUTFIT_PROMPT_LEN = _int("VNEW_MAX_OUTFIT_PROMPT_LEN", 300)
+# 복장 일관성 검사에서 시트를 다시 그리는 최대 횟수(1회). 넘으면 warning.
+OUTFIT_SHEET_RETRY = _int("VNEW_OUTFIT_SHEET_RETRY", 1)

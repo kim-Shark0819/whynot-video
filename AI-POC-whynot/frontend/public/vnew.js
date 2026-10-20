@@ -489,6 +489,12 @@
         outfitRow.appendChild(el("span", null, analysis.outfitEn));
         card.appendChild(outfitRow);
       }
+      if (detail.baseOutfitEn || analysis.baseOutfitEn) {
+        var baseRow = el("p", "vnew-analysis-meta");
+        baseRow.appendChild(el("span", "vnew-analysis-label", "기본 복장"));
+        baseRow.appendChild(el("span", null, detail.baseOutfitEn || analysis.baseOutfitEn));
+        card.appendChild(baseRow);
+      }
       if (analysis.expressionsKo && analysis.expressionsKo.length) {
         var exprRow = el("p", "vnew-analysis-meta");
         exprRow.appendChild(el("span", "vnew-analysis-label", "표정"));
@@ -505,6 +511,9 @@
       columns.appendChild(variantColumn(host, detail, meta));
     });
     host.appendChild(columns);
+
+    // 추가 복장 섹션(기본 복장 위에 더 입히는 옷차림)
+    host.appendChild(outfitsSection(host, detail));
   }
 
   /* ---- 업로드 영역 ---- */
@@ -924,6 +933,238 @@
     return column;
   }
 
+  /* ---- 추가 복장 섹션 ---- */
+
+  // 추가 복장: 기본 복장 위에 더 입히는 옷차림. auto 후보(분석)·사용자 추가 카드를 보여 주고,
+  // [이미지 만들기]/[다시 만들기]/삭제, 결과는 두 그림체 정면·후면을 나란히. 3D 는 만들지 않는다.
+  function outfitsSection(host, detail) {
+    var section = el("section", "panel vnew-outfits");
+    var headRow = el("div", "vnew-section-head");
+    headRow.appendChild(el("h2", null, "추가 복장"));
+    section.appendChild(headRow);
+    section.appendChild(
+      el(
+        "p",
+        "vnew-hint",
+        "기본 복장 위에 더 입히는 옷차림(예: 정장 자켓)을 따로 만듭니다. 3D 는 기본 복장 하나만 만듭니다."
+      )
+    );
+
+    var madeBefore = (detail.version || 0) > 0;
+    var outfits = detail.outfits || [];
+
+    var list = el("div", "vnew-outfit-list");
+    if (!outfits.length) {
+      list.appendChild(el("p", "vnew-hint", "아직 추가 복장이 없습니다. 아래에서 넣어 보세요."));
+    }
+    outfits.forEach(function (outfit) {
+      list.appendChild(outfitCard(host, detail, outfit, madeBefore));
+    });
+    section.appendChild(list);
+
+    // [추가 복장 넣기] → 이름·설명 입력 창
+    section.appendChild(addOutfitForm(host, detail));
+    return section;
+  }
+
+  function outfitCard(host, detail, outfit, madeBefore) {
+    var card = el("div", "vnew-outfit-card");
+    var top = el("div", "vnew-outfit-top");
+    var title = el("span", "vnew-outfit-name", outfit.labelKo || outfit.promptEn || "추가 복장");
+    top.appendChild(title);
+    if (outfit.source === "auto") {
+      top.appendChild(el("span", "vnew-outfit-badge", "후보"));
+    }
+    card.appendChild(top);
+    if (outfit.promptEn) {
+      card.appendChild(el("p", "vnew-outfit-prompt", outfit.promptEn));
+    }
+
+    var variants = outfit.variants || {};
+    // 상태: 하나라도 images 면 만드는 중, 하나라도 ready 면 결과 있음.
+    var anyBuilding = false;
+    var anyReady = false;
+    VARIANTS.forEach(function (meta) {
+      var ov = variants[meta.key] || {};
+      if (ov.status === "images" || ov.status === "queued") anyBuilding = true;
+      if (ov.status === "ready") anyReady = true;
+    });
+
+    var error = el("p", "login-error vnew-outfit-error");
+    error.setAttribute("role", "alert");
+    error.style.display = "none";
+
+    // 결과: 두 그림체 정면·후면 나란히
+    if (anyReady) {
+      var grid = el("div", "vnew-outfit-grid");
+      VARIANTS.forEach(function (meta) {
+        var ov = variants[meta.key] || {};
+        var col = el("div", "vnew-outfit-col");
+        col.appendChild(el("h3", "vnew-outfit-col-title", meta.title));
+        if (ov.status === "ready") {
+          [["frontUrl", "정면"], ["backUrl", "후면"]].forEach(function (pair) {
+            var url = ov[pair[0]];
+            if (!url) return;
+            var fig = el("figure", "vnew-outfit-fig");
+            var img = el("img");
+            img.src = url;
+            img.alt = meta.title + " " + pair[1];
+            img.addEventListener("click", function () {
+              openLightbox(url, (outfit.labelKo || "추가 복장") + " " + meta.title + " " + pair[1]);
+            });
+            fig.appendChild(img);
+            fig.appendChild(el("figcaption", null, pair[1]));
+            col.appendChild(fig);
+          });
+        } else if (ov.status === "failed") {
+          col.appendChild(el("p", "login-error", ov.error || "만들기에 실패했습니다."));
+        } else if (ov.status === "images" || ov.status === "queued") {
+          col.appendChild(el("p", "vnew-hint", "만드는 중…"));
+        }
+        grid.appendChild(col);
+      });
+      card.appendChild(grid);
+    }
+
+    // 버튼 줄: [이미지 만들기]/[다시 만들기] + 삭제
+    var btnRow = el("div", "vnew-outfit-btns");
+    var makeBtn = el("button", "primary-button vnew-outfit-make", anyReady ? "다시 만들기" : "이미지 만들기");
+    makeBtn.type = "button";
+    makeBtn.disabled = anyBuilding || !madeBefore;
+    if (!madeBefore) {
+      makeBtn.title = "먼저 캐릭터(기본 복장)를 만들어 주세요.";
+    }
+    makeBtn.addEventListener("click", function () {
+      var okConfirm = true;
+      try {
+        okConfirm = window.confirm("추가 복장 이미지를 만듭니다(두 그림체 정면·후면). 비용이 듭니다. 계속할까요?");
+      } catch (e) {
+        okConfirm = true;
+      }
+      if (!okConfirm) return;
+      makeBtn.disabled = true;
+      error.style.display = "none";
+      api(
+        "/api/vnew/characters/" +
+          encodeURIComponent(detail.id) +
+          "/outfits/" +
+          encodeURIComponent(outfit.id) +
+          "/build",
+        { method: "POST" }
+      )
+        .then(function () {
+          refreshDetail(host, false);
+        })
+        .catch(function (err) {
+          makeBtn.disabled = false;
+          error.style.display = "";
+          error.textContent = "만들기를 시작하지 못했습니다: " + errMessage(err);
+        });
+    });
+    btnRow.appendChild(makeBtn);
+
+    var delBtn = el("button", "text-action danger vnew-outfit-del", "삭제");
+    delBtn.type = "button";
+    delBtn.disabled = anyBuilding;
+    delBtn.addEventListener("click", function () {
+      var okConfirm = true;
+      try {
+        okConfirm = window.confirm("이 추가 복장을 삭제할까요?");
+      } catch (e) {
+        okConfirm = true;
+      }
+      if (!okConfirm) return;
+      delBtn.disabled = true;
+      api(
+        "/api/vnew/characters/" +
+          encodeURIComponent(detail.id) +
+          "/outfits/" +
+          encodeURIComponent(outfit.id),
+        { method: "DELETE" }
+      )
+        .then(function () {
+          refreshDetail(host, false);
+        })
+        .catch(function (err) {
+          delBtn.disabled = false;
+          error.style.display = "";
+          error.textContent = "삭제하지 못했습니다: " + errMessage(err);
+        });
+    });
+    btnRow.appendChild(delBtn);
+    card.appendChild(btnRow);
+    card.appendChild(error);
+    return card;
+  }
+
+  function addOutfitForm(host, detail) {
+    var wrap = el("div", "vnew-outfit-add");
+    var toggle = el("button", "outline-button vnew-outfit-add-toggle", "추가 복장 넣기");
+    toggle.type = "button";
+    wrap.appendChild(toggle);
+
+    var panel = el("div", "vnew-outfit-add-panel");
+    panel.style.display = "none";
+    panel.appendChild(el("label", "vnew-rebuild-label", "이름"));
+    var nameInput = el("input", "vnew-outfit-name-input");
+    nameInput.type = "text";
+    nameInput.maxLength = 60;
+    nameInput.placeholder = "예: 정장 자켓";
+    panel.appendChild(nameInput);
+    panel.appendChild(el("label", "vnew-rebuild-label", "설명 (선택)"));
+    var descInput = el("textarea", "vnew-rebuild-text");
+    descInput.rows = 2;
+    descInput.maxLength = 300;
+    descInput.placeholder = "예: 셔츠 위에 검은 정장 자켓을 걸친다";
+    panel.appendChild(descInput);
+
+    var error = el("p", "login-error vnew-outfit-add-error");
+    error.setAttribute("role", "alert");
+    error.style.display = "none";
+    panel.appendChild(error);
+
+    var btns = el("div", "vnew-rebuild-btns");
+    var saveBtn = el("button", "primary-button", "넣기");
+    saveBtn.type = "button";
+    var cancelBtn = el("button", "outline-button", "취소");
+    cancelBtn.type = "button";
+    btns.appendChild(saveBtn);
+    btns.appendChild(cancelBtn);
+    panel.appendChild(btns);
+    wrap.appendChild(panel);
+
+    toggle.addEventListener("click", function () {
+      panel.style.display = panel.style.display === "none" ? "" : "none";
+      if (panel.style.display === "") nameInput.focus();
+    });
+    cancelBtn.addEventListener("click", function () {
+      panel.style.display = "none";
+    });
+    saveBtn.addEventListener("click", function () {
+      if (!nameInput.value && !descInput.value) {
+        error.style.display = "";
+        error.textContent = "이름이나 설명을 넣어 주세요.";
+        return;
+      }
+      saveBtn.disabled = true;
+      error.style.display = "none";
+      api("/api/vnew/characters/" + encodeURIComponent(detail.id) + "/outfits", {
+        method: "POST",
+        body: JSON.stringify({ labelKo: nameInput.value || "", promptKo: descInput.value || "" }),
+        headers: { "Content-Type": "application/json" }
+      })
+        .then(function () {
+          refreshDetail(host, false);
+        })
+        .catch(function (err) {
+          saveBtn.disabled = false;
+          error.style.display = "";
+          error.textContent = "넣지 못했습니다: " + errMessage(err);
+        });
+    });
+    return wrap;
+  }
+
   function viewer3d(host, detail, meta, v, model3d) {
     var wrap = el("div", "vnew-3d");
     var status = model3d.status || "queued";
@@ -1208,7 +1449,8 @@
     var task = plan.task || {};
     var gen = plan.gen || {};
     var genRunning = gen.status === "running";
-    if (task.status !== "running" && !genRunning) return;
+    var locBuilding = locationsBuilding(plan);
+    if (task.status !== "running" && !genRunning && !locBuilding) return;
     var interval = PLAN_POLL_MS;
     if (genRunning) {
       // 이미지(opening)·제출 단계면 더 자주(3초), 그 밖에는 5초.
@@ -1218,6 +1460,16 @@
       if (!state.mounted) return;
       loadPlan(false);
     }, interval);
+  }
+
+  /* 공간 시트를 만드는 중인 장소가 하나라도 있으면 true(③ 콘티 화면 폴링용). */
+  function locationsBuilding(plan) {
+    var locations = (plan || {}).locations || [];
+    for (var i = 0; i < locations.length; i++) {
+      var t = (locations[i].task || {}).status;
+      if (t === "running" || locations[i].status === "building") return true;
+    }
+    return false;
   }
 
   /* opening 이 아직이거나 어떤 구간이 preparing/queued/waiting(제출 직전)이면 빠른 폴링. */
@@ -2233,6 +2485,9 @@
     // 합계 · 자동 맞춤
     host.appendChild(contiSummary(totalSeconds, sumSeconds, showError));
 
+    // 공간 디테일 시트(③ 콘티 위) — 콘티의 장소마다 4면 입면도 시트.
+    host.appendChild(locationsCard(showError));
+
     // segments 안내
     if (segments.length) {
       host.appendChild(segmentsPanel(segments, cuts));
@@ -2302,6 +2557,219 @@
       footer.appendChild(el("span", "vnew-hint", "합계를 목표에 맞춘 뒤 영상을 만들 수 있습니다."));
     }
     host.appendChild(footer);
+  }
+
+  /* ================================================================ ③ 공간 디테일 시트 */
+
+  /* 공간 카드: 콘티의 장소마다 4면(N/E/S/W) 입면도 시트(실사·웹툰 탭), 벽 설명·빛 편집,
+     [공간 시트 만들기]/[다시 만들기]. 콘티를 만들면 목록만 생기고 자동으로 그리지 않는다. */
+  function locationsCard(showError) {
+    var plan = state.plan || {};
+    var locations = plan.locations || [];
+    var card = el("section", "panel vnew-loc-card");
+    var head = el("div", "vnew-loc-head");
+    head.appendChild(el("h2", "vnew-sec-title", "공간"));
+    head.appendChild(
+      el("p", "vnew-hint", "콘티에 나오는 장소마다 4면이 보이는 고정 공간 이미지를 만듭니다. 프리비즈의 벽·바닥 텍스처로 씁니다.")
+    );
+    card.appendChild(head);
+
+    if (!locations.length) {
+      card.appendChild(el("p", "vnew-hint", "아직 장소가 없습니다. 콘티를 만들면 장소가 정리됩니다."));
+      return card;
+    }
+
+    // [공간 시트 모두 만들기] — 아직 안 만든 장소를 한꺼번에.
+    var allBtn = el("button", "outline-button", "공간 시트 모두 만들기");
+    allBtn.type = "button";
+    allBtn.addEventListener("click", function () {
+      allBtn.disabled = true;
+      api("/api/vnew/p/" + encodeURIComponent(state.projectId) + "/locations/build-all", {
+        method: "POST"
+      })
+        .then(function () {
+          loadPlan(false);
+        })
+        .catch(function (err) {
+          allBtn.disabled = false;
+          if (showError) showError("만들지 못했습니다: " + errMessage(err));
+        });
+    });
+    card.appendChild(allBtn);
+
+    var listWrap = el("div", "vnew-loc-list");
+    locations.forEach(function (loc) {
+      listWrap.appendChild(locationItem(loc, showError));
+    });
+    card.appendChild(listWrap);
+    return card;
+  }
+
+  /* 한 장소 항목. 상태·4면 시트(탭)·벽 설명·빛 편집·만들기 버튼. */
+  function locationItem(loc, showError) {
+    var item = el("div", "vnew-loc-item");
+    var header = el("div", "vnew-loc-item-head");
+    var title = el("span", "vnew-loc-name", loc.nameKo || loc.nameEn || "(이름 없음)");
+    header.appendChild(title);
+    header.appendChild(el("span", "vnew-loc-status vnew-loc-status-" + (loc.status || "none"), locStatusLabel(loc.status)));
+    item.appendChild(header);
+
+    if (loc.status === "building" || (loc.task || {}).status === "running") {
+      item.appendChild(el("p", "vnew-loc-building", "공간 시트를 만들고 있습니다…"));
+    }
+    if (loc.status === "failed" && loc.error) {
+      item.appendChild(el("p", "vnew-plan-error", loc.error));
+    }
+
+    // 4면 시트(실사·웹툰 탭). ready 인 그림체만 이미지를 보인다.
+    item.appendChild(locationSheet(loc));
+
+    // 벽 설명·빛 편집.
+    item.appendChild(locationDesignEditor(loc, showError));
+
+    // 만들기 / 다시 만들기(추가 요청).
+    item.appendChild(locationActions(loc, showError));
+    return item;
+  }
+
+  function locStatusLabel(status) {
+    if (status === "ready") return "완료";
+    if (status === "building") return "만드는 중";
+    if (status === "failed") return "실패";
+    return "아직 안 만듦";
+  }
+
+  /* 4면 한 장 시트(실사·웹툰 탭). 각 탭은 그 그림체의 sheetUrl(2x2) 한 장을 보인다. */
+  function locationSheet(loc) {
+    var wrap = el("div", "vnew-loc-sheet");
+    var variants = loc.variants || {};
+    var tabs = el("div", "vnew-loc-tabs");
+    var views = el("div", "vnew-loc-sheet-views");
+    var order = ["real", "webtoon"];
+    var labels = { real: "실사", webtoon: "웹툰" };
+    var active = loc._activeVariant || "real";
+
+    order.forEach(function (variant) {
+      var tab = el("button", "vnew-loc-tab" + (variant === active ? " is-active" : ""), labels[variant]);
+      tab.type = "button";
+      tab.addEventListener("click", function () {
+        loc._activeVariant = variant;
+        renderPlan();
+      });
+      tabs.appendChild(tab);
+    });
+    wrap.appendChild(tabs);
+
+    var v = variants[active] || {};
+    if (v.sheetUrl) {
+      var img = el("img", "vnew-loc-sheet-img");
+      img.src = v.sheetUrl;
+      img.alt = (loc.nameEn || "") + " " + active + " 4-wall sheet";
+      views.appendChild(img);
+    } else {
+      views.appendChild(el("p", "vnew-hint", "아직 이 그림체의 공간 시트가 없습니다."));
+    }
+    wrap.appendChild(views);
+    return wrap;
+  }
+
+  /* 벽 설명·빛 편집. 저장은 PUT /locations/<lid>. 저장 뒤 [다시 만들기] 로 반영. */
+  function locationDesignEditor(loc, showError) {
+    var design = loc.design || {};
+    var walls = design.walls || {};
+    var editor = el("details", "vnew-loc-design");
+    var summary = el("summary", "vnew-loc-design-summary", "벽 설명·빛 편집");
+    editor.appendChild(summary);
+
+    var patch = { walls: {} };
+    var sides = ["north", "east", "south", "west"];
+    var sideLabels = { north: "정면(N)", east: "오른쪽(E)", south: "뒤(S)", west: "왼쪽(W)" };
+
+    sides.forEach(function (side) {
+      var wall = walls[side] || {};
+      patch.walls[side] = {};
+      var field = el("label", "vnew-field");
+      field.appendChild(el("span", "vnew-field-label", sideLabels[side] + " 벽 설명"));
+      var input = el("textarea", "vnew-field-input");
+      input.rows = 2;
+      input.value = wall.descEn || "";
+      input.addEventListener("input", function () {
+        patch.walls[side].descEn = input.value;
+      });
+      field.appendChild(input);
+      editor.appendChild(field);
+    });
+
+    var lightField = el("label", "vnew-field");
+    lightField.appendChild(el("span", "vnew-field-label", "빛(어디서 오는지)"));
+    var lightInput = el("textarea", "vnew-field-input");
+    lightInput.rows = 2;
+    lightInput.value = design.lightEn || "";
+    lightInput.addEventListener("input", function () {
+      patch.lightEn = lightInput.value;
+    });
+    lightField.appendChild(lightInput);
+    editor.appendChild(lightField);
+
+    var saveBtn = el("button", "outline-button", "설계 저장");
+    saveBtn.type = "button";
+    saveBtn.addEventListener("click", function () {
+      saveBtn.disabled = true;
+      api("/api/vnew/p/" + encodeURIComponent(state.projectId) + "/locations/" + encodeURIComponent(loc.id), {
+        method: "PUT",
+        body: JSON.stringify(patch)
+      })
+        .then(function (plan) {
+          state.plan = plan;
+          renderPlan();
+        })
+        .catch(function (err) {
+          saveBtn.disabled = false;
+          if (showError) showError("저장하지 못했습니다: " + errMessage(err));
+        });
+    });
+    editor.appendChild(saveBtn);
+    return editor;
+  }
+
+  /* 만들기 / 다시 만들기(추가 요청). building 중이면 비활성. */
+  function locationActions(loc, showError) {
+    var wrap = el("div", "vnew-loc-actions");
+    var busy = loc.status === "building" || (loc.task || {}).status === "running";
+    var hasSheet = ((loc.variants || {}).real || {}).sheetUrl || ((loc.variants || {}).webtoon || {}).sheetUrl;
+
+    var extraInput = el("input", "vnew-field-input vnew-loc-extra");
+    extraInput.type = "text";
+    extraInput.placeholder = "다시 만들 때 추가 요청(선택)";
+
+    function build() {
+      var body = {};
+      var extra = (extraInput.value || "").trim();
+      if (extra) body.extraPromptKo = extra;
+      api("/api/vnew/p/" + encodeURIComponent(state.projectId) + "/locations/" + encodeURIComponent(loc.id) + "/build", {
+        method: "POST",
+        body: JSON.stringify(body)
+      })
+        .then(function () {
+          loadPlan(false);
+        })
+        .catch(function (err) {
+          if (showError) showError("만들지 못했습니다: " + errMessage(err));
+          loadPlan(false);
+        });
+    }
+
+    var buildBtn = el("button", "primary-button", hasSheet ? "다시 만들기" : "공간 시트 만들기");
+    buildBtn.type = "button";
+    buildBtn.disabled = busy;
+    buildBtn.addEventListener("click", function () {
+      buildBtn.disabled = true;
+      build();
+    });
+
+    if (hasSheet) wrap.appendChild(extraInput);
+    wrap.appendChild(buildBtn);
+    return wrap;
   }
 
   /* ③ → ④ : 영상 만들기 확인창. 구간 수·'예상 비용이 듭니다'·설명을 보이고,

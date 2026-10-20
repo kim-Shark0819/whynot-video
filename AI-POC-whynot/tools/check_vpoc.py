@@ -1996,7 +1996,12 @@ def check_vnew_characters() -> None:
                 "descriptionKo": "중년 남성 캐릭터. 안경을 썼다. 정장 차림.",
                 "appearanceEn": "A middle-aged Korean man with glasses and short black hair.",
                 "styleEn": "Thin sketchy pencil-like lines with soft pastel flat coloring.",
+                "baseOutfitEn": "A beige button-up shirt with dark trousers and loafers.",
                 "outfitEn": "A beige button-up shirt with dark trousers and loafers.",
+                "outfitLayersEn": [
+                    {"labelKo": "정장 자켓", "promptEn": "a black suit jacket over the shirt"},
+                    {"labelKo": "후드티", "promptEn": "a light blue hoodie"},
+                ],
                 "altOutfitsEn": ["a grey hoodie", "a white tee"],
                 "expressionsKo": ["무표정", "미소"],
                 "extraEn": extra_en,
@@ -2009,10 +2014,15 @@ def check_vnew_characters() -> None:
     seedream_sizes: dict[str, list[str]] = {}
     seedream_prompts: dict[str, list[str]] = {}  # variant → [프롬프트...]
     fail_variant = {"name": ""}
+    # seedream 호출마다 (variant, kind, references) 를 담는다((ac)(af) 참고 이미지 검증용).
+    seedream_calls: list[dict] = []
 
     def _kind_of(prompt):
         if "turnaround reference sheet" in prompt:
             return "sheet"
+        # 추가 복장 프롬프트는 'plus ' 가 들어간다(기본 복장 + 추가 겹옷).
+        if "plus " in prompt and ("same base outfit" in prompt):
+            return "outfit-back" if "BACK view" in prompt else "outfit-front"
         if "BACK view" in prompt:
             return "back"
         return "front"
@@ -2023,6 +2033,9 @@ def check_vnew_characters() -> None:
         seedream_sizes.setdefault(variant, []).append(size)
         seedream_prompts.setdefault(variant, []).append(prompt)
         kind = _kind_of(prompt)
+        seedream_calls.append(
+            {"variant": variant, "kind": kind, "prompt": prompt, "refs": list(references or [])}
+        )
         # real 의 정면(front) 호출만 실패시켜 (c) 검증(back·sheet 는 실패시키지 않는다).
         if fail_variant["name"] == variant and kind == "front":
             raise characters.VpocError("vnew.seedream", "Filtered", "가짜 실패", 502)
@@ -2030,6 +2043,23 @@ def check_vnew_characters() -> None:
         if kind == "sheet":
             return _tiny_jpeg(2560, 1440)
         return _tiny_jpeg(1440, 2560)
+
+    # 복장 일관성 검사(가짜): 기본은 일관됨. outfit_mode["results"] 가 리스트면 호출마다 하나씩
+    # 꺼내 {"consistent":bool,"problems":[..]} 로 돌려준다(비면 일관됨). None 이면 모델 오류(건너뜀).
+    outfit_mode = {"results": None}
+    outfit_check_calls = {"n": 0}
+
+    def fake_outfit_check(sheet, base_outfit):
+        outfit_check_calls["n"] += 1
+        results = outfit_mode["results"]
+        if results is None:
+            return {"consistent": True, "problems": []}
+        if isinstance(results, list):
+            return results.pop(0) if results else {"consistent": True, "problems": []}
+        return results
+
+    # 추가 복장 promptKo→promptEn 번역(가짜): _converse 를 쓰므로 llm 을 패치한다(아래).
+    translate_calls: list[str] = []
 
     # 사람 수 검사(가짜): 기본은 1명. people_mode 로 (o) 시나리오를 만든다.
     # people_mode["counts"] 가 리스트면 호출마다 하나씩 꺼내 쓴다(비면 1). None 이면 모델 오류(건너뜀).
@@ -2072,6 +2102,8 @@ def check_vnew_characters() -> None:
         return _tiny_jpeg(256, 256)
 
     # 패치 적용
+    from src.vpoc import llm as _vpoc_llm_mod  # noqa: PLC0415
+
     orig = {
         "STORE": characters.STORE,
         "_analyze": characters._analyze,
@@ -2079,6 +2111,8 @@ def check_vnew_characters() -> None:
         "_fal_request": characters._fal_request,
         "_fetch_url": characters._fetch_url,
         "_count_people": characters._count_people,
+        "_check_outfit_consistency": characters._check_outfit_consistency,
+        "_converse": _vpoc_llm_mod._converse,
         "sleep": _time.sleep,
     }
     characters.STORE = fake_store
@@ -2087,6 +2121,21 @@ def check_vnew_characters() -> None:
     characters._fal_request = fake_fal_request
     characters._fetch_url = fake_fetch_url
     characters._count_people = fake_count_people
+    characters._check_outfit_consistency = fake_outfit_check
+
+    # 추가 복장 번역은 vpoc.llm._converse(tool=emit_outfit_prompt)를 쓴다 — 가짜로 바꿔 끼운다.
+    def fake_converse(*, system_text, blocks, tool, max_tokens, where, model):
+        if tool and tool.get("name") == "emit_outfit_prompt":
+            ko = ""
+            for b in blocks:
+                t = b.get("text") if isinstance(b, dict) else ""
+                if t and "Korean:" in t:
+                    ko = t.split("Korean:", 1)[1].strip()
+            translate_calls.append(ko)
+            return {"promptEn": "EN(" + ko + ")"}, {"model": model}
+        raise RuntimeError("예상치 못한 _converse 호출(가짜): " + str(tool))
+
+    _vpoc_llm_mod._converse = fake_converse
     characters.time.sleep = lambda *_a, **_k: None  # 폴링 대기 없이
 
     # build 가 백그라운드 스레드를 join 할 수 있도록 start_build 를 감싼다(검사 전용).
@@ -3065,6 +3114,172 @@ def check_vnew_characters() -> None:
         if aa2char.get("status") != "ready":
             bad.append(f"(aa) 순차 build 후 캐릭터가 ready 가 아닙니다: {aa2char.get('status')}")
 
+        # ============================================================ 034: 기본 복장 고정 + 추가 복장
+        base_outfit = "A beige button-up shirt with dark trousers and loafers."
+
+        # --- (ab) 시트 프롬프트에 baseOutfitEn·"nothing else" 가 들어간다 ---
+        # 앞서 돈 build 들의 시트 프롬프트(webtoon·real)를 확인한다.
+        sheet_calls_all = [c for c in seedream_calls if c["kind"] == "sheet"]
+        if not sheet_calls_all:
+            bad.append("(ab) 시트 프롬프트가 캡처되지 않았습니다")
+        # 다른 소검사가 일부러 다른 분석값(예: "A man"/"O")으로 만든 시트도 섞여 있다 — 그 시트는 자기
+        # 분석값의 옷을 쓴다. 그래서 기본 분석값으로 만든 시트(appearance 가 기본 fake 값)만 baseOutfitEn 을 본다.
+        base_calls = [c for c in sheet_calls_all if "Wearing: O." not in c["prompt"]]
+        if not base_calls or any(base_outfit not in c["prompt"] for c in base_calls):
+            bad.append("(ab) 시트 프롬프트에 baseOutfitEn 이 들어가지 않았습니다")
+        for c in sheet_calls_all:
+            if "nothing else" not in c["prompt"]:
+                bad.append("(ab) 시트 프롬프트에 'nothing else' 가 없습니다")
+                break
+
+        # --- (ac) 일관성 false → 시트 1회 재생성 → 정면·후면 참고에 재생성 시트가 들어간다 ---
+        abid = _make_char_with_source("ab-캐릭터")
+        seedream_calls.clear()
+        outfit_check_calls["n"] = 0
+        # webtoon 시트 첫 장은 불일치, 재생성은 일치. real 은 일치. (호출 순서: webtoon 먼저)
+        outfit_mode["results"] = [
+            {"consistent": False, "problems": ["back view adds a black jacket"]},
+            {"consistent": True, "problems": []},
+            {"consistent": True, "problems": []},  # real 시트
+        ]
+        fal_mode["fail_status"] = False
+        fal_mode["transient_left"] = 0
+        resp = client.post(f"/api/vnew/characters/{abid}/build")
+        _join_builds()
+        outfit_mode["results"] = None
+        # webtoon 시트가 2번 그려졌는지(최초 불일치 + 재생성).
+        w_sheets = [c for c in seedream_calls if c["variant"] == "webtoon" and c["kind"] == "sheet"]
+        if len(w_sheets) != 2:
+            bad.append(f"(ac) 불일치 시트가 1회 재생성되지 않았습니다(webtoon 시트 {len(w_sheets)}회)")
+        # 재생성 시트 프롬프트에 problems 를 고치라는 지시가 붙었는지.
+        if len(w_sheets) >= 2 and "black jacket" not in w_sheets[1]["prompt"]:
+            bad.append("(ac) 재생성 시트 프롬프트에 problems(고칠 점)가 붙지 않았습니다")
+        # 정면·후면이 '재생성(통과)한 시트'를 참고로 그렸는지 — 재생성 시트 바이트가 refs 에 있다.
+        abchar, _ = characters.load_char("tester", abid)
+        regen_sheet_key = abchar["variants"]["webtoon"]["sheetKey"]
+        regen_sheet = fake_store.blobs.get(regen_sheet_key)
+        w_front = next((c for c in seedream_calls if c["variant"] == "webtoon" and c["kind"] == "front"), None)
+        if w_front is None:
+            bad.append("(ac) webtoon 정면 호출이 없습니다")
+        elif regen_sheet is not None and regen_sheet not in w_front["refs"]:
+            bad.append("(ac) 정면 참고에 (재생성 통과) 시트가 들어가지 않았습니다")
+        w_back = next((c for c in seedream_calls if c["variant"] == "webtoon" and c["kind"] == "back"), None)
+        if w_back is None:
+            bad.append("(ac) webtoon 후면 호출이 없습니다")
+        elif regen_sheet is not None and regen_sheet not in w_back["refs"]:
+            bad.append("(ac) 후면 참고에 (재생성 통과) 시트가 들어가지 않았습니다")
+
+        # --- (ad) 계속 false → warning("복장이 면마다 다를 수 있습니다") ---
+        adid = _make_char_with_source("ad-캐릭터")
+        seedream_calls.clear()
+        outfit_mode["results"] = None
+        # 항상 불일치가 되도록 dict(리스트 아님) 로 둔다.
+        outfit_mode["results"] = {"consistent": False, "problems": ["mismatch"]}
+        fal_mode["fail_status"] = False
+        fal_mode["transient_left"] = 0
+        resp = client.post(f"/api/vnew/characters/{adid}/build")
+        _join_builds()
+        outfit_mode["results"] = None
+        adchar, _ = characters.load_char("tester", adid)
+        adw = adchar["variants"]["webtoon"]
+        if "복장이 면마다 다를 수 있습니다" not in (adw.get("warning") or ""):
+            bad.append(f"(ad) 계속 불일치인데 복장 warning 이 없습니다: {adw.get('warning')}")
+        # 재생성은 OUTFIT_SHEET_RETRY(1)회만 — webtoon 시트가 2회(최초+재생성 1회)만 그려진다.
+        ad_w_sheets = [c for c in seedream_calls if c["variant"] == "webtoon" and c["kind"] == "sheet"]
+        if len(ad_w_sheets) != 1 + characters.settings.OUTFIT_SHEET_RETRY:
+            bad.append(f"(ad) 시트 재생성이 {characters.settings.OUTFIT_SHEET_RETRY}회를 넘거나 모자랍니다: {len(ad_w_sheets)}회")
+        # 3D 는 그래도 진행(ready)
+        if (adw.get("model3d") or {}).get("status") != "ready":
+            bad.append(f"(ad) 복장 warning 이어도 3D 는 진행(ready)해야 합니다: {(adw.get('model3d') or {}).get('status')}")
+
+        # --- (ae) outfitLayersEn → source:auto 추가 복장 후보, 그림 0장 ---
+        # ab 캐릭터(build 완료)의 outfits 가 auto 후보 2개(정장 자켓·후드티)로 채워졌는지.
+        resp = client.get(f"/api/vnew/characters/{abid}")
+        ab_detail = resp.get_json() or {}
+        outfits = ab_detail.get("outfits") or []
+        autos = [o for o in outfits if o.get("source") == "auto"]
+        if len(autos) < 2:
+            bad.append(f"(ae) outfitLayersEn 가 auto 후보로 채워지지 않았습니다: {outfits}")
+        auto_prompts = {o.get("promptEn") for o in autos}
+        if "a black suit jacket over the shirt" not in auto_prompts:
+            bad.append(f"(ae) auto 후보 promptEn 이 분석 그대로가 아닙니다: {auto_prompts}")
+        # auto 후보는 그림이 0장(variants 가 전부 queued, frontUrl/backUrl 빈값).
+        for o in autos:
+            for meta in characters.settings.VARIANTS:
+                ov = (o.get("variants") or {}).get(meta) or {}
+                if ov.get("status") not in ("queued", None, ""):
+                    bad.append(f"(ae) auto 후보가 자동으로 그려졌습니다(status={ov.get('status')})")
+                if ov.get("frontUrl") or ov.get("backUrl"):
+                    bad.append("(ae) auto 후보에 이미지가 생겼습니다(그려선 안 됨)")
+
+        # --- (af) outfit build → 두 그림체 정면·후면 4장, 참고에 기본 정면 포함 ---
+        af_outfit_id = autos[0]["id"]
+        seedream_calls.clear()
+        before_outfit_calls = len(seedream_calls)
+        resp = client.post(
+            f"/api/vnew/characters/{abid}/outfits/{af_outfit_id}/build"
+        )
+        if resp.status_code != 202:
+            bad.append(f"(af) outfit build 가 202 가 아닙니다: {resp.status_code} {resp.get_data(as_text=True)[:200]}")
+        _join_builds()
+        outfit_imgs = [c for c in seedream_calls if c["kind"] in ("outfit-front", "outfit-back")]
+        if len(outfit_imgs) != 4:
+            bad.append(f"(af) 추가 복장 이미지가 4장(두 그림체 정면·후면)이 아닙니다: {len(outfit_imgs)}")
+        # 두 그림체 각각 정면·후면 1장씩.
+        for meta in characters.settings.VARIANTS:
+            fr = [c for c in outfit_imgs if c["variant"] == meta and c["kind"] == "outfit-front"]
+            bk = [c for c in outfit_imgs if c["variant"] == meta and c["kind"] == "outfit-back"]
+            if len(fr) != 1 or len(bk) != 1:
+                bad.append(f"(af) {meta} 추가 복장 정면·후면이 각각 1장이 아닙니다: front={len(fr)} back={len(bk)}")
+        # 참고에 '기본 정면' 이 들어갔는지 — webtoon 추가복장 정면의 refs 에 기본 정면 바이트가 있다.
+        base_front_key = abchar["variants"]["webtoon"]["frontKey"]
+        base_front_bytes = fake_store.blobs.get(base_front_key)
+        w_outfit_front = next(
+            (c for c in outfit_imgs if c["variant"] == "webtoon" and c["kind"] == "outfit-front"), None
+        )
+        if w_outfit_front is None:
+            bad.append("(af) webtoon 추가복장 정면 호출이 없습니다")
+        elif base_front_bytes is not None and base_front_bytes not in w_outfit_front["refs"]:
+            bad.append("(af) 추가 복장 정면 참고에 기본 정면 이미지가 들어가지 않았습니다")
+        # 추가 복장 프롬프트에 promptEn 이 들어갔는지('plus ...').
+        if w_outfit_front is not None and "a black suit jacket over the shirt" not in w_outfit_front["prompt"]:
+            bad.append("(af) 추가 복장 프롬프트에 promptEn 이 들어가지 않았습니다")
+        # 3D 는 추가로 만들지 않는다 — outfit build 동안 fal POST 가 늘지 않는다(이미 확인된 build 외).
+        # 결과가 ready 로 저장됐는지.
+        resp = client.get(f"/api/vnew/characters/{abid}")
+        af_detail = resp.get_json() or {}
+        af_outfit = next((o for o in (af_detail.get("outfits") or []) if o.get("id") == af_outfit_id), {})
+        for meta in characters.settings.VARIANTS:
+            ov = (af_outfit.get("variants") or {}).get(meta) or {}
+            if ov.get("status") != "ready" or not ov.get("frontUrl") or not ov.get("backUrl"):
+                bad.append(f"(af) 추가 복장 {meta} 결과가 ready/정면·후면 URL 이 아닙니다: {ov}")
+
+        # --- (ag) 사용자 추가 promptKo → promptEn(Astra 번역) ---
+        translate_calls.clear()
+        resp = client.post(
+            f"/api/vnew/characters/{abid}/outfits",
+            json={"labelKo": "빨간 코트", "promptKo": "빨간 긴 코트를 걸친다"},
+        )
+        if resp.status_code != 201:
+            bad.append(f"(ag) 사용자 추가 복장이 201 이 아닙니다: {resp.status_code} {resp.get_data(as_text=True)[:200]}")
+        ag_outfit = (resp.get_json() or {}).get("outfit") or {}
+        if ag_outfit.get("source") != "user":
+            bad.append(f"(ag) 사용자 추가 복장 source 가 user 가 아닙니다: {ag_outfit.get('source')}")
+        if not translate_calls:
+            bad.append("(ag) promptKo 가 번역(_converse)으로 전달되지 않았습니다")
+        if ag_outfit.get("promptEn") != "EN(빨간 긴 코트를 걸친다)":
+            bad.append(f"(ag) promptKo 가 promptEn 으로 바뀌지 않았습니다: {ag_outfit.get('promptEn')}")
+        if ag_outfit.get("labelKo") != "빨간 코트":
+            bad.append(f"(ag) 사용자 추가 복장 labelKo 가 저장되지 않았습니다: {ag_outfit.get('labelKo')}")
+        # 삭제도 동작하는지.
+        resp = client.delete(f"/api/vnew/characters/{abid}/outfits/{ag_outfit.get('id')}")
+        if resp.status_code != 200:
+            bad.append(f"(ag) 추가 복장 삭제가 200 이 아닙니다: {resp.status_code}")
+        resp = client.get(f"/api/vnew/characters/{abid}")
+        remain = [o.get("id") for o in ((resp.get_json() or {}).get("outfits") or [])]
+        if ag_outfit.get("id") in remain:
+            bad.append("(ag) 삭제한 추가 복장이 아직 남아 있습니다")
+
     except Exception as exc:  # noqa: BLE001
         import traceback as _tb  # noqa: PLC0415
 
@@ -3076,6 +3291,8 @@ def check_vnew_characters() -> None:
         characters._fal_request = orig["_fal_request"]
         characters._fetch_url = orig["_fetch_url"]
         characters._count_people = orig["_count_people"]
+        characters._check_outfit_consistency = orig["_check_outfit_consistency"]
+        _vpoc_llm_mod._converse = orig["_converse"]
         characters.time.sleep = orig["sleep"]
         characters.threading.Thread = orig_thread
 
@@ -3094,7 +3311,13 @@ def check_vnew_characters() -> None:
             "(x)retry3d 이전요청 unavailable→재제출 "
             "(y)retry3d 직후 조회 자동재개 0회·3D 제출 1회(이중 제출 방지) "
             "(z)오래된 heartbeat+claim 없음→자동재개 1회 "
-            "(aa)순차 build 중 앞 variant 가 15분 걸려도 대기 variant 자동재개 0회(keepalive)"
+            "(aa)순차 build 중 앞 variant 가 15분 걸려도 대기 variant 자동재개 0회(keepalive) "
+            "(ab)시트 프롬프트에 baseOutfitEn·nothing else "
+            "(ac)복장 불일치→시트 1회 재생성·정면/후면 참고는 재생성 시트 "
+            "(ad)계속 불일치→복장 warning·3D 진행 "
+            "(ae)outfitLayersEn→auto 후보(그림 0장) "
+            "(af)outfit build 두 그림체 정면·후면 4장·참고에 기본 정면 "
+            "(ag)사용자 추가 promptKo→promptEn·삭제"
         )
 
 
@@ -3628,6 +3851,401 @@ def check_vnew_plan() -> None:
             " (c)script 순서·상한 (d)conti ≥5컷·초합·세그먼트 (e)긴 컷 분할 (f)취소 버림 (g)권한·트랙"
             " (h)setting JSON 문자열 (i)setting 최상위·별칭 (j)setting 없음→첫 entry 장소 (k)entries 문자열"
         )
+
+
+# ---------------------------------------------------------------- 9b. 영상만들기_신규 공간 디테일 시트
+
+
+def check_vnew_locations() -> None:
+    """영상만들기_신규 ③ 공간 디테일 시트 — 설계 LLM·Seedream 은 가짜(설계자 2026-10-21).
+
+    (a) 장소 정규화·중복 제거(대소문자·공백 다른 같은 이름은 하나)
+    (b) 설계 JSON 정리(없는 필드 기본값·벽 4면 보장)
+    (c) 벽 4장 + 바닥 1장 × 2그림체 = Seedream 10장, 프롬프트에 "Orthographic"·"no people"
+    (d) 2x2 한 장 시트 생성(sheetUrl)
+    (e) 콘티 재생성 후 같은 장소 유지·자동 그림 0장
+    (f) 진행 중 build 409
+    """
+    sys.path.insert(0, str(ROOT / "app"))
+    bad: list[str] = []
+
+    from flask import Flask  # noqa: PLC0415
+
+    from src import vnew  # noqa: PLC0415
+    from src.vnew import locations as locmod  # noqa: PLC0415
+    from src.vnew import plan as planmod  # noqa: PLC0415
+    from src.vpoc import images as _images  # noqa: PLC0415
+
+    fake_store = _FakeCharStore()
+
+    # --- (b) 설계 JSON 정리: _normalize_design 단위(네트워크 불필요) ---
+    thin = locmod._normalize_design(
+        {
+            # walls 에 north 만 있고 descEn 도 없음 → 4면이 다 생기고 기본값으로 채워진다.
+            "walls": {"north": {}},
+            "widthM": "nope",  # 숫자 아님 → 기본값
+        }
+    )
+    if sorted((thin.get("walls") or {}).keys()) != sorted(locmod.SIDES):
+        bad.append(f"(b) 설계 정리가 벽 4면을 보장하지 않습니다: {sorted((thin.get('walls') or {}).keys())}")
+    for side in locmod.SIDES:
+        w = (thin["walls"] or {}).get(side) or {}
+        if "descEn" not in w or "hasWindow" not in w or "hasDoor" not in w or "featuresEn" not in w:
+            bad.append(f"(b) {side} 벽에 기본 필드가 없습니다: {w}")
+    if not isinstance(thin.get("widthM"), float):
+        bad.append(f"(b) widthM 기본값이 숫자가 아닙니다: {thin.get('widthM')!r}")
+    if not isinstance(thin.get("enclosed"), bool):
+        bad.append(f"(b) enclosed 기본값이 bool 이 아닙니다: {thin.get('enclosed')!r}")
+
+    # --- (a) 장소 정규화·중복 제거: sync_locations 단위 ---
+    plan_a = {
+        "locations": [],
+        "script": {
+            "entries": [
+                {"id": "e1", "panels": [0, 1], "locationKo": "교장실", "locationEn": "A closed Principal's Office"},
+                # 같은 장소(대소문자·공백만 다름) → 하나로 합쳐야 한다.
+                {"id": "e2", "panels": [2], "locationKo": "교장실", "locationEn": "a closed principal's   office"},
+                {"id": "e3", "panels": [3], "locationKo": "노을 진 거리", "locationEn": "A city street at sunset"},
+            ]
+        },
+    }
+    locmod.sync_locations(plan_a)
+    locs_a = plan_a.get("locations") or []
+    if len(locs_a) != 2:
+        bad.append(f"(a) 정규화·중복 제거 후 장소가 2개가 아닙니다: {len(locs_a)} {[l.get('nameEn') for l in locs_a]}")
+    office = next((l for l in locs_a if "principal" in (l.get("key") or "")), None)
+    if not office:
+        bad.append("(a) 교장실 장소를 찾지 못했습니다")
+    elif sorted(office.get("panels") or []) != [0, 1, 2]:
+        bad.append(f"(a) 합쳐진 장소의 panels 가 [0,1,2] 가 아닙니다: {office.get('panels')}")
+
+    # --- 가짜 외부 호출(설계 LLM·Seedream·사람 수·원장·스레드) ---
+    design_calls: list[str] = []
+
+    def fake_design(blocks, *, model):
+        design_calls.append(model)
+        payload = {
+            "widthM": 6.0,
+            "depthM": 5.0,
+            "heightM": 2.8,
+            "enclosed": True,
+            "floorEn": "polished wooden floor",
+            "ceilingEn": "white ceiling",
+            "walls": {
+                "north": {"descEn": "a wall with two large windows", "hasWindow": True, "hasDoor": False, "featuresEn": "windows"},
+                "east": {"descEn": "a bookshelf wall", "hasWindow": False, "hasDoor": False, "featuresEn": "bookshelf"},
+                "south": {"descEn": "a wall with the entrance door", "hasWindow": False, "hasDoor": True, "featuresEn": "door"},
+                "west": {"descEn": "a plain painted wall", "hasWindow": False, "hasDoor": False, "featuresEn": ""},
+            },
+            "lightEn": "main light comes from the north-wall windows, soft daylight",
+            "propsEn": [{"labelEn": "a wooden desk", "wall": "center", "sizeM": 1.6}],
+        }
+        return payload, {"model": model, "inputTokens": 8, "outputTokens": 16}
+
+    seedream_calls: list[dict] = []
+
+    def fake_seedream(prompt, references, *, size):
+        variant = "real" if "Photoreal" in prompt else "webtoon"
+        kind = "floor" if "floor texture" in prompt else "wall"
+        seedream_calls.append({"variant": variant, "kind": kind, "prompt": prompt, "size": size})
+        # 벽은 16:9, 바닥은 정사각. montage_2x2 가 열 수 있어야 한다.
+        if kind == "floor":
+            return _tiny_jpeg(256, 256)
+        return _tiny_jpeg(320, 180)
+
+    def fake_count_people(jpeg):
+        return 1  # 배경 조각 선호 정렬이 안정적으로 돌게(인물 적음).
+
+    ledger_calls: list[dict] = []
+
+    def fake_charge(key, **kwargs):
+        ledger_calls.append({"key": key, **kwargs})
+        return {"spentUsd": 0.0, "capUsd": None}
+
+    def fake_charge_text(key, **kwargs):
+        ledger_calls.append({"key": key, "text": True, **kwargs})
+        return {"spentUsd": 0.0, "capUsd": None}
+
+    tiles_per_file = {"n": 4}
+
+    def fake_tiles_for_analysis(jpeg):
+        return [f"loc-tile{index}".encode("ascii") for index in range(tiles_per_file["n"])]
+
+    def fake_load_char(owner, char_id):
+        return {"name": "김부장역", "status": "ready", "analysis": {"styleEn": "thin sketchy pencil lines, soft pastel"}}, "e1"
+
+    # 대본·콘티 LLM(계획 쪽)도 가짜로 둔다(장소 sync 를 콘티 재생성으로 검증 (e)).
+    def fake_analyze_conti(blocks, *, model):
+        cuts = [
+            {"id": "c1", "no": 1, "seconds": 10, "panels": [0], "shotKo": "컷1", "cameraEn": "static camera",
+             "locationEn": "A closed principal's office", "characters": [], "dialogueKo": "", "situationKo": "", "promptEn": "x"},
+            {"id": "c2", "no": 2, "seconds": 10, "panels": [1], "shotKo": "컷2", "cameraEn": "static camera",
+             "locationEn": "A closed principal's office", "characters": [], "dialogueKo": "", "situationKo": "", "promptEn": "x"},
+            {"id": "c3", "no": 3, "seconds": 10, "panels": [2], "shotKo": "컷3", "cameraEn": "static camera",
+             "locationEn": "A closed principal's office", "characters": [], "dialogueKo": "", "situationKo": "", "promptEn": "x"},
+            {"id": "c4", "no": 4, "seconds": 10, "panels": [3], "shotKo": "컷4", "cameraEn": "static camera",
+             "locationEn": "A city street at sunset", "characters": [], "dialogueKo": "", "situationKo": "", "promptEn": "x"},
+            {"id": "c5", "no": 5, "seconds": 10, "panels": [3], "shotKo": "컷5", "cameraEn": "static camera",
+             "locationEn": "A city street at sunset", "characters": [], "dialogueKo": "", "situationKo": "", "promptEn": "x"},
+        ]
+        return {"cuts": cuts}, {"model": model, "inputTokens": 3, "outputTokens": 6}
+
+    orig = {
+        "loc_STORE": locmod.STORE,
+        "plan_STORE": planmod.STORE,
+        "_design": locmod._design,
+        "_seedream": locmod._seedream,
+        "charge": locmod.vpoc_ledger.charge,
+        "charge_text": locmod.vpoc_ledger.charge_text,
+        "count_people": locmod.characters._count_people,
+        "load_char": locmod.characters.load_char,
+        "tiles": _images.tiles_for_analysis,
+        "plan_analyze_conti": planmod._analyze_conti,
+        "plan_charge_text": planmod.vpoc_ledger.charge_text,
+        "loc_Thread": locmod.threading.Thread,
+    }
+    locmod.STORE = fake_store
+    planmod.STORE = fake_store
+    locmod._design = fake_design
+    locmod._seedream = fake_seedream
+    locmod.vpoc_ledger.charge = fake_charge
+    locmod.vpoc_ledger.charge_text = fake_charge_text
+    locmod.characters._count_people = fake_count_people
+    locmod.characters.load_char = fake_load_char
+    _images.tiles_for_analysis = fake_tiles_for_analysis
+    planmod._analyze_conti = fake_analyze_conti
+    planmod.vpoc_ledger.charge_text = fake_charge_text
+
+    # 빌드 스레드를 추적해 join(동기 검증).
+    started_threads: list = []
+    orig_thread = locmod.threading.Thread
+
+    def _tracking_thread(*args, **kwargs):
+        t = orig_thread(*args, **kwargs)
+        started_threads.append(t)
+        return t
+
+    locmod.threading.Thread = _tracking_thread
+
+    def _join():
+        for t in list(started_threads):
+            t.join(timeout=30)
+        started_threads.clear()
+
+    def _real_image(label: int) -> bytes:
+        import io as _io  # noqa: PLC0415
+
+        from PIL import Image as _Img  # noqa: PLC0415
+
+        buffer = _io.BytesIO()
+        _Img.new("RGB", (600, 900), (label, 180, 160)).save(buffer, format="PNG")
+        return buffer.getvalue()
+
+    try:
+        import io as _io  # noqa: PLC0415
+
+        owner = "tester"
+        pid = "prj_loc_1"
+
+        def make_client():
+            app = Flask(__name__)
+            bp = vnew.create_blueprint(
+                vnew.VnewDependencies(
+                    require_auth=lambda h: h,
+                    current_owner=lambda: owner,
+                    get_project=lambda p: {"id": p, "owner": owner, "track": "video_new"},
+                    can_read_project=lambda proj: True,
+                    can_write_project=lambda proj: True,
+                    project_owner_prefix=lambda name: name,
+                )
+            )
+            app.register_blueprint(bp)
+            return app.test_client()
+
+        client = make_client()
+
+        # 계획 생성 + 업로드 4장(패널 번호 0~15 범위를 만든다: 4파일 × 4타일).
+        client.get(f"/api/vnew/p/{pid}/plan")
+        data = {"files": [(_io.BytesIO(_real_image(10 + i * 20)), f"{i}.png") for i in range(4)]}
+        resp = client.post(f"/api/vnew/p/{pid}/uploads", data=data, content_type="multipart/form-data")
+        if resp.status_code != 201:
+            bad.append(f"업로드가 201 이 아닙니다: {resp.status_code}")
+        client.post(f"/api/vnew/p/{pid}/input/sort")
+
+        # script 를 직접 심는다(대본 LLM 대신): 교장실·노을 진 거리 두 장소.
+        planmod.update_script(
+            owner,
+            pid,
+            {
+                "setting": {"locationKo": "교장실", "locationEn": "A closed principal's office", "enclosed": True},
+                "entries": [
+                    {"id": "e1", "panels": [0, 1], "speaker": "", "lineKo": "", "situationKo": "",
+                     "locationKo": "교장실", "locationEn": "A closed principal's office", "characters": []},
+                    {"id": "e2", "panels": [2], "speaker": "", "lineKo": "", "situationKo": "",
+                     "locationKo": "교장실", "locationEn": "A CLOSED Principal's Office ", "characters": []},
+                    {"id": "e3", "panels": [3], "speaker": "", "lineKo": "", "situationKo": "",
+                     "locationKo": "노을 진 거리", "locationEn": "A city street at sunset", "characters": []},
+                ],
+            },
+        )
+
+        def _set_ready_script(d):
+            d["script"]["status"] = "ready"
+
+        planmod.mutate_plan(owner, pid, _set_ready_script)
+
+        # 콘티 생성 → run_conti 끝에서 장소 sync. 자동 그림 0장이어야 한다.
+        resp = client.post(f"/api/vnew/p/{pid}/conti")
+        if resp.status_code != 202:
+            bad.append(f"POST /conti 가 202 가 아닙니다: {resp.status_code} {resp.get_json()}")
+        _join()
+        plan_after, _ = planmod.load_plan(owner, pid)
+        locs = plan_after.get("locations") or []
+        if len(locs) != 2:
+            bad.append(f"(a) 콘티 뒤 장소가 2개가 아닙니다: {len(locs)} {[l.get('nameEn') for l in locs]}")
+        # (e) 자동 그림 0장: 콘티만으로는 Seedream·design 이 전혀 불리지 않는다.
+        if seedream_calls:
+            bad.append(f"(e) 콘티만으로 자동 그림이 그려졌습니다(Seedream {len(seedream_calls)}장)")
+        if design_calls:
+            bad.append(f"(e) 콘티만으로 설계 LLM 이 불렸습니다: {len(design_calls)}")
+
+        office_loc = next((l for l in locs if "principal" in (l.get("key") or "")), None)
+        if not office_loc:
+            bad.append("(a) 콘티 뒤 교장실 장소가 없습니다")
+            raise RuntimeError("교장실 장소 없음 — 이후 검사 생략")
+        lid = office_loc["id"]
+
+        # (c)(d) 공간 시트 만들기 → 설계 1회, Seedream 10장(벽4+바닥1 ×2), 2x2 시트.
+        seedream_calls.clear()
+        design_calls.clear()
+        resp = client.post(f"/api/vnew/p/{pid}/locations/{lid}/build", json={})
+        if resp.status_code != 202:
+            bad.append(f"(c) POST build 가 202 가 아닙니다: {resp.status_code} {resp.get_json()}")
+        _join()
+
+        if len(design_calls) != 1:
+            bad.append(f"(c) 설계 LLM 호출이 1회가 아닙니다: {len(design_calls)}")
+        # Astra 먼저 쓰는지(첫 설계 모델이 ASTRA_MODEL).
+        if design_calls and design_calls[0] != locmod.ASTRA_MODEL:
+            bad.append(f"(c) 설계가 Astra 를 먼저 쓰지 않습니다: {design_calls[0]}")
+        if len(seedream_calls) != 10:
+            bad.append(f"(c) Seedream 호출이 10장이 아닙니다: {len(seedream_calls)}")
+        walls = [c for c in seedream_calls if c["kind"] == "wall"]
+        floors = [c for c in seedream_calls if c["kind"] == "floor"]
+        if len(walls) != 8 or len(floors) != 2:
+            bad.append(f"(c) 벽 8·바닥 2 가 아닙니다: 벽={len(walls)} 바닥={len(floors)}")
+        # 그림체별 크기: 벽 2048x1152, 바닥 1536x1536.
+        if any(c["size"] != locmod.WALL_SIZE for c in walls):
+            bad.append(f"(c) 벽 크기가 {locmod.WALL_SIZE} 가 아닙니다: {[c['size'] for c in walls]}")
+        if any(c["size"] != locmod.FLOOR_SIZE for c in floors):
+            bad.append(f"(c) 바닥 크기가 {locmod.FLOOR_SIZE} 가 아닙니다: {[c['size'] for c in floors]}")
+        # 프롬프트에 "Orthographic"·"no people" 이 들어가야 한다(벽 입면도).
+        for c in walls:
+            if "Orthographic" not in c["prompt"]:
+                bad.append(f"(c) 벽 프롬프트에 'Orthographic' 이 없습니다: {c['prompt'][:80]}")
+                break
+        for c in walls:
+            if "no people" not in c["prompt"]:
+                bad.append(f"(c) 벽 프롬프트에 'no people' 이 없습니다: {c['prompt'][:80]}")
+                break
+        # 두 그림체 모두 그려졌는지.
+        if {c["variant"] for c in seedream_calls} != {"real", "webtoon"}:
+            bad.append(f"(c) real·webtoon 둘 다 그리지 않았습니다: {sorted({c['variant'] for c in seedream_calls})}")
+        # 원장: Seedream 장당(10장) 계상.
+        img_charges = [c for c in ledger_calls if c.get("kind") == "image" and not c.get("text")]
+        if len(img_charges) < 10:
+            bad.append(f"(c) Seedream 원장 계상이 10건 미만입니다: {len(img_charges)}")
+
+        # (d) 2x2 시트(sheetUrl) + plan_view 상태 ready.
+        view = client.get(f"/api/vnew/p/{pid}/plan").get_json() or {}
+        vlocs = view.get("locations") or []
+        vloc = next((l for l in vlocs if l.get("id") == lid), None)
+        if not vloc:
+            bad.append("(d) plan_view 에 장소가 없습니다")
+        else:
+            if vloc.get("status") != "ready":
+                bad.append(f"(d) 장소 상태가 ready 가 아닙니다: {vloc.get('status')} / {vloc.get('error')}")
+            for variant in ("real", "webtoon"):
+                vv = (vloc.get("variants") or {}).get(variant) or {}
+                if not vv.get("sheetUrl"):
+                    bad.append(f"(d) {variant} 4면 시트(sheetUrl) 가 없습니다")
+                wall_urls = vv.get("wallUrls") or {}
+                if sorted(wall_urls.keys()) != sorted(locmod.SIDES) or any(not wall_urls[s] for s in locmod.SIDES):
+                    bad.append(f"(d) {variant} 벽 4장 URL 이 다 없습니다: {wall_urls}")
+                if not vv.get("floorUrl"):
+                    bad.append(f"(d) {variant} 바닥 URL 이 없습니다")
+
+        # (d) montage_2x2 단위: 벽 4장을 붙여 열 수 있는 JPEG 가 나온다.
+        walls_bytes = {s: _tiny_jpeg(320, 180) for s in locmod.SIDES}
+        sheet = locmod.montage_2x2(walls_bytes)
+        import io as _io2  # noqa: PLC0415
+
+        from PIL import Image as _Img  # noqa: PLC0415
+
+        with _Img.open(_io2.BytesIO(sheet)) as sheet_img:
+            w, h = sheet_img.size
+        cell_w, cell_h = locmod._size_wh(locmod.WALL_SIZE)
+        if (w, h) != (cell_w * 2, cell_h * 2):
+            bad.append(f"(d) 2x2 시트 크기가 2배가 아닙니다: {(w, h)} vs {(cell_w * 2, cell_h * 2)}")
+
+        # (e) 콘티 재생성 후 같은 장소(id) 유지·이미지 보존·자동 그림 0장.
+        seedream_calls.clear()
+        design_calls.clear()
+
+        def _reset_conti(d):
+            d["conti"]["status"] = "none"
+            d["conti"]["cuts"] = []
+
+        planmod.mutate_plan(owner, pid, _reset_conti)
+        resp = client.post(f"/api/vnew/p/{pid}/conti")
+        _join()
+        plan_re, _ = planmod.load_plan(owner, pid)
+        locs_re = plan_re.get("locations") or []
+        office_re = next((l for l in locs_re if "principal" in (l.get("key") or "")), None)
+        if not office_re or office_re.get("id") != lid:
+            bad.append(f"(e) 콘티 재생성 후 교장실 장소 id 가 유지되지 않았습니다: {office_re and office_re.get('id')} vs {lid}")
+        elif office_re.get("status") != "ready" or not ((office_re.get("variants") or {}).get("real") or {}).get("sheetKey"):
+            bad.append("(e) 콘티 재생성 후 장소의 이미지·ready 상태가 보존되지 않았습니다")
+        if seedream_calls or design_calls:
+            bad.append(f"(e) 콘티 재생성이 자동으로 그림을 그렸습니다: seedream={len(seedream_calls)} design={len(design_calls)}")
+
+        # (f) 진행 중 build 409 — task.status 를 running 으로 막아 둔다.
+        def _set_running(d):
+            loc = locmod._find_location(d, lid)
+            loc["task"] = {"status": "running", "startedAt": locmod.now_iso(), "id": "busy"}
+
+        planmod.mutate_plan(owner, pid, _set_running)
+        resp = client.post(f"/api/vnew/p/{pid}/locations/{lid}/build", json={})
+        if resp.status_code != 409 or (resp.get_json().get("error") or {}).get("type") != "Building":
+            bad.append(f"(f) 진행 중 build 가 409 Building 으로 거절되지 않습니다: {resp.status_code} {resp.get_json()}")
+        _join()
+
+    except Exception as exc:  # noqa: BLE001
+        import traceback as _tb  # noqa: PLC0415
+
+        bad.append("vnew 공간 디테일 시트 검사 중 예외: " + repr(exc) + "\n" + _tb.format_exc()[:1500])
+    finally:
+        locmod.STORE = orig["loc_STORE"]
+        planmod.STORE = orig["plan_STORE"]
+        locmod._design = orig["_design"]
+        locmod._seedream = orig["_seedream"]
+        locmod.vpoc_ledger.charge = orig["charge"]
+        locmod.vpoc_ledger.charge_text = orig["charge_text"]
+        locmod.characters._count_people = orig["count_people"]
+        locmod.characters.load_char = orig["load_char"]
+        _images.tiles_for_analysis = orig["tiles"]
+        planmod._analyze_conti = orig["plan_analyze_conti"]
+        planmod.vpoc_ledger.charge_text = orig["plan_charge_text"]
+        locmod.threading.Thread = orig["loc_Thread"]
+
+    if bad:
+        fail("영상만들기_신규 공간 디테일 시트(vnew locations) 검사 실패\n" + "\n".join(f"  {item}" for item in bad))
+    else:
+        ok(
+            "영상만들기_신규 공간 디테일 시트(vnew locations) 검사 (a)정규화·중복 제거 (b)설계 JSON 정리"
+            " (c)벽4+바닥1×2그림체=Seedream 10장·Orthographic·no people (d)2x2 시트 (e)콘티 재생성 유지·자동 0장 (f)409"
+        )
+
 
 
 # ---------------------------------------------------------------- 10. 영상만들기_신규 생성(vnew generate)
@@ -4595,6 +5213,7 @@ def main() -> int:
     check_vnew()
     check_vnew_characters()
     check_vnew_plan()
+    check_vnew_locations()
     check_vnew_generate()
     check_fal_pricing()
     check_vnew_real_start()
