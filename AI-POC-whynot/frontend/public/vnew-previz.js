@@ -11,9 +11,14 @@
      무릎 꿇기를 '몸통 + 떨어진 상자'로 만들면 그 상자가 결과에 남는다 → 관절로 굽힌다.
    - 사물은 디테일 없이 무엇인지 알아볼 정도(box/cylinder). 화질은 낮아도 됨.
 
-   전역: window.vnewPreviz.create(host, {scenes, textures, width, height}) → controller.
+   전역: window.vnewPreviz.create(host, {scenes, textureFetch, width, height}) → Promise<controller>.
+   textureFetch(apiUrl) → Promise<objectURL|null>: 벽·바닥 텍스처를 vnew 의 Authorization 헤더로
+   받아(fetch) blob → URL.createObjectURL 로 바꿔 돌려준다. 같은 출처 blob 이라 캔버스가 오염되지
+   않아 captureStream 녹화가 된다(버킷에 CORS 가 없어 S3 직통은 쓰지 않는다). create 는 텍스처를
+   받아 첫 프레임을 그린 뒤 controller 를 resolve 한다.
    controller = { play(), pause(), seek(t), setScene(i), duration, onTime(cb),
-                  record(fromT, toT) → Promise<Blob>, destroy() }.
+                  record(fromT, toT) → Promise<Blob>,
+                  renderFrames(fromT, toT, fps=24, onProgress) → Promise<Blob[]>, destroy() }.
 
    좌표: x 오른쪽, y 위, z 카메라 쪽(+). north 벽은 z = -depth/2. 단위 m·초.
 
@@ -265,8 +270,9 @@ class Mannequin {
    방·빛·소품·인물 메시를 만들고, 시각(초)에 맞춰 카메라·인물을 갱신한다.
    오버레이(빛 출처·소품·인물 라벨)는 별도 레이어(여기서는 데이터만 노출)로 둔다. */
 class PrevizScene {
-  constructor(sceneData, textures, loader) {
+  constructor(sceneData, resolveTexture, loader) {
     this.data = sceneData || {};
+    this.resolveTexture = typeof resolveTexture === "function" ? resolveTexture : function () { return null; };
     this.loader = loader;
     this.root = new THREE.Group();
     this.actors = {}; // id → {mannequin, data}
@@ -296,12 +302,15 @@ class PrevizScene {
   }
 
   _texturedMaterial(url, fallbackColor, side) {
-    // 텍스처 URL 이 있으면 이미지를 입히고, 없으면 색. 로드 실패해도 색으로 보인다.
+    // url 은 서버 텍스처 API 경로(또는 빈 값). resolveTexture 가 미리 받아 둔 같은 출처 blob
+    // 오브젝트 URL 로 바꾼다 — S3 직통(crossOrigin)로 불러오면 버킷에 CORS 가 없어 실패하거나
+    // 캔버스가 오염돼 녹화(captureStream)가 막히기 때문. 없거나 실패하면 색으로 둔다.
     const mat = new THREE.MeshStandardMaterial({ color: colorOf(fallbackColor), roughness: 0.95, side });
     this._track(mat);
-    if (url && this.loader) {
+    const blobUrl = url ? this.resolveTexture(url) : null;
+    if (blobUrl && this.loader) {
       this.loader.load(
-        url,
+        blobUrl,
         (tex) => {
           tex.colorSpace = THREE.SRGBColorSpace;
           mat.map = tex;
@@ -311,9 +320,12 @@ class PrevizScene {
         },
         undefined,
         () => {
-          /* 실패 시 색 유지 */
+          // 같은 출처 blob 이므로 거의 실패하지 않지만, 혹시 디코드 실패하면 색 유지 + 경고.
+          console.warn("[previz] 텍스처 디코드에 실패해 색으로 대체합니다:", url);
         }
       );
+    } else if (url && !blobUrl) {
+      // 텍스처를 못 받았다(아래 preloadTextures 에서 경고 1회). 색으로 보이게 둔다.
     }
     return mat;
   }
@@ -566,8 +578,67 @@ function createController(host, options) {
   host.appendChild(stage);
 
   const camera = new THREE.PerspectiveCamera(50, width / height, 0.1, 200);
+  // 같은 출처 blob URL 에서만 읽는다 — crossOrigin 을 켜지 않는다(S3 직통 금지).
   const loader = new THREE.TextureLoader();
-  loader.crossOrigin = "anonymous";
+
+  // 텍스처는 vnew 쪽 textureFetch(Authorization 헤더 → blob → objectURL)로 미리 받아 둔다.
+  // apiUrl(서버 텍스처 경로) → objectURL. 실패하면 null(색으로 대체). dispose 때 revoke 한다.
+  const textureFetch = typeof opts.textureFetch === "function" ? opts.textureFetch : null;
+  const textureObjectUrls = {}; // apiUrl → objectURL(blob) | null
+
+  function collectTextureUrls() {
+    const urls = {};
+    scenesData.forEach((sd) => {
+      const room = (sd && sd.room) || {};
+      const walls = room.walls || {};
+      SIDES.forEach((side) => {
+        const u = (walls[side] || {}).textureUrl;
+        if (u) urls[u] = true;
+      });
+      if (room.floorTextureUrl) urls[room.floorTextureUrl] = true;
+    });
+    return Object.keys(urls);
+  }
+
+  function preloadTextures() {
+    const urls = collectTextureUrls();
+    if (!urls.length || !textureFetch) return Promise.resolve();
+    return Promise.all(
+      urls.map((apiUrl) =>
+        Promise.resolve()
+          .then(() => textureFetch(apiUrl))
+          .then((objectUrl) => {
+            textureObjectUrls[apiUrl] = objectUrl || null;
+            if (!objectUrl) console.warn("[previz] 텍스처를 불러오지 못해 색으로 대체합니다:", apiUrl);
+          })
+          .catch((error) => {
+            textureObjectUrls[apiUrl] = null;
+            console.warn("[previz] 텍스처를 불러오지 못해 색으로 대체합니다:", apiUrl, error);
+          })
+      )
+    );
+  }
+
+  function resolveTexture(apiUrl) {
+    // 미리 받아 둔 같은 출처 blob objectURL. 없으면 null(색 유지).
+    return Object.prototype.hasOwnProperty.call(textureObjectUrls, apiUrl)
+      ? textureObjectUrls[apiUrl]
+      : null;
+  }
+
+  function revokeTextures() {
+    Object.keys(textureObjectUrls).forEach((apiUrl) => {
+      const objectUrl = textureObjectUrls[apiUrl];
+      if (objectUrl) {
+        try {
+          URL.revokeObjectURL(objectUrl);
+        } catch (error) {
+          /* 무시 */
+        }
+      }
+      delete textureObjectUrls[apiUrl];
+    });
+  }
 
   const threeScene = new THREE.Scene();
   threeScene.background = new THREE.Color(0x1b1d21);
@@ -596,7 +667,7 @@ function createController(host, options) {
     }
     const sd = scenesData[index];
     if (!sd) return;
-    const scene = new PrevizScene(sd, opts.textures || {}, loader);
+    const scene = new PrevizScene(sd, resolveTexture, loader);
     threeScene.add(scene.root);
     current = { index, scene };
   }
@@ -622,9 +693,8 @@ function createController(host, options) {
     if (!recording) drawOverlay();
   }
 
-  // 초기 장면.
-  buildScene(0);
-  renderAt(0);
+  // 초기 장면·첫 프레임은 텍스처를 받은 뒤(create 의 Promise) 그린다 — 텍스처 없이 먼저 그리면
+  // 한 프레임 동안 색만 보이다 바뀌는 깜빡임이 생긴다.
 
   function emitTime(t) {
     listeners.forEach((cb) => {
@@ -756,7 +826,11 @@ function createController(host, options) {
       } catch (error) {
         recording = false;
         overlay.style.display = "";
-        reject(error);
+        // 캔버스가 오염되면(텍스처를 교차 출처로 불러온 경우) captureStream 이 SecurityError 를 던진다.
+        // 이 구현은 텍스처를 같은 출처 blob 으로만 입히므로 정상 경로에선 일어나지 않지만, 혹시
+        // 오염됐으면 사용자에게 원인을 알린다.
+        const tainted = error && (error.name === "SecurityError" || /secur|taint/i.test(String(error.message || "")));
+        reject(tainted ? new Error("텍스처를 불러오지 못해 녹화할 수 없습니다.") : error);
         return;
       }
 
@@ -823,6 +897,91 @@ function createController(host, options) {
     });
   }
 
+  /* 프레임 단위 오프라인 렌더: fromT~toT 를 fps 로 쪼개, 각 시각 t = fromT + i/fps 에 장면을 그 시각으로
+     '설정해 한 번 그리고' canvas.toBlob('image/jpeg', 0.85) 로 프레임을 모은다. 실시간·rAF·captureStream
+     과 무관하므로 창이 가려지거나 느린 PC 여도 프레임이 빠지지 않는다. 오버레이는 숨긴다(결과에 안 나오게).
+     프레임 수 = round((toT-fromT)*fps). onProgress(done, total) 를 프레임마다 부른다(선택).
+     반환: Promise<Blob[]>(jpeg blob 배열, 순서대로). */
+  function renderFrames(fromT, toT, fps, onProgress) {
+    var rate = Number(fps) || RECORD_FPS;
+    if (rate < 1) rate = 1;
+    var from = Math.max(0, Number(fromT) || 0);
+    var to = Math.min(totalDuration, Number(toT) || totalDuration);
+    var count = Math.round((to - from) * rate);
+    var progress = typeof onProgress === "function" ? onProgress : function () {};
+    if (!(count > 0)) {
+      return Promise.reject(new Error("렌더할 프레임이 없습니다."));
+    }
+
+    // 재생 중이면 멈추고, 오버레이를 숨긴다(renderAt 가 recording 일 때 오버레이를 안 그린다).
+    pause();
+    var wasRecording = recording;
+    recording = true;
+    overlay.style.display = "none";
+
+    var frames = [];
+    var index = 0;
+
+    function toBlobAsync() {
+      return new Promise(function (resolve, reject) {
+        try {
+          // canvas.toBlob 가 없는 환경은 dataURL 로 대체한다.
+          if (canvas.toBlob) {
+            canvas.toBlob(
+              function (blob) {
+                if (blob) resolve(blob);
+                else reject(new Error("프레임을 만들지 못했습니다."));
+              },
+              "image/jpeg",
+              0.85
+            );
+          } else {
+            var dataUrl = canvas.toDataURL("image/jpeg", 0.85);
+            var binary = atob(dataUrl.split(",")[1]);
+            var bytes = new Uint8Array(binary.length);
+            for (var i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+            resolve(new Blob([bytes], { type: "image/jpeg" }));
+          }
+        } catch (error) {
+          reject(error);
+        }
+      });
+    }
+
+    function step() {
+      if (index >= count) {
+        return Promise.resolve(frames);
+      }
+      var t = from + index / rate;
+      // 마지막 프레임이 경계를 살짝 넘지 않게 한다.
+      if (t > to) t = to;
+      renderAt(t);
+      return toBlobAsync().then(function (blob) {
+        frames.push(blob);
+        index += 1;
+        progress(index, count);
+        // 다음 프레임은 매크로태스크로 넘겨 UI 가 멈추지 않게 한다(실시간 재생이 아님).
+        return new Promise(function (resolve) {
+          window.setTimeout(resolve, 0);
+        }).then(step);
+      });
+    }
+
+    return step()
+      .then(function (result) {
+        recording = wasRecording;
+        overlay.style.display = "";
+        renderAt(clockT);
+        return result;
+      })
+      .catch(function (error) {
+        recording = wasRecording;
+        overlay.style.display = "";
+        renderAt(clockT);
+        throw error;
+      });
+  }
+
   function onVisibility() {
     // 탭이 숨겨지면 재생을 멈춘다(브라우저가 rAF 를 멈춰 시각이 어긋나는 것 방지).
     if (document.visibilityState === "hidden" && playing) pause();
@@ -843,6 +1002,7 @@ function createController(host, options) {
     } catch (error) {
       /* 무시 */
     }
+    revokeTextures();
     if (stage.parentNode) stage.parentNode.removeChild(stage);
     listeners.length = 0;
   }
@@ -854,11 +1014,28 @@ function createController(host, options) {
     get currentTime() {
       return clockT;
     },
+    // 텍스처를 받은 뒤 첫 장면·첫 프레임을 그린다. create() 가 이 Promise 를 기다린 뒤 controller 를
+    // 돌려주므로, 호출자는 텍스처가 입혀진 상태의 뷰포트를 받는다.
+    ready() {
+      return Promise.resolve()
+        .then(preloadTextures)
+        .then(() => {
+          buildScene(0);
+          renderAt(0);
+        })
+        .catch((error) => {
+          // 텍스처 준비가 통째로 실패해도 색으로라도 그린다.
+          console.warn("[previz] 텍스처 준비 중 오류 — 색으로 그립니다:", error);
+          buildScene(0);
+          renderAt(0);
+        });
+    },
     play,
     pause,
     seek,
     setScene,
     record,
+    renderFrames,
     onTime(cb) {
       if (typeof cb === "function") listeners.push(cb);
     },
@@ -873,8 +1050,13 @@ function createController(host, options) {
 }
 
 window.vnewPreviz = {
+  /* host 요소에 프리비즈 뷰포트를 만든다. 텍스처(벽·바닥)를 opts.textureFetch 로 미리 받아 입힌
+     뒤 첫 프레임을 그리므로, controller 를 담은 Promise 를 돌려준다.
+     opts.textureFetch(apiUrl) → Promise<objectURL|null>: Authorization 헤더로 받아 blob →
+     URL.createObjectURL. 같은 출처 blob 이라 캔버스가 오염되지 않아 captureStream 녹화가 된다. */
   create(host, options) {
     if (!host) throw new Error("프리비즈를 그릴 host 요소가 없습니다.");
-    return createController(host, options || {});
+    const controller = createController(host, options || {});
+    return controller.ready().then(() => controller);
   },
 };

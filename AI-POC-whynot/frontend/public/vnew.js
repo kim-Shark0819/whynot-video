@@ -237,6 +237,26 @@
       });
   }
 
+  /* 프리비즈 텍스처(벽·바닥)를 Authorization 헤더로 받아 blob → objectURL 로 바꾼다.
+     같은 출처 blob 이라 three.js 가 캔버스를 오염시키지 않아 captureStream 녹화가 된다.
+     (버킷에 CORS 설정이 없어 S3 presigned URL 직통은 쓰지 않는다.)
+     apiUrl 은 서버가 준 /api/vnew/p/<pid>/previz/texture?key=... 경로. 실패하면 null(색 대체).
+     objectURL 의 revoke 는 previz 컨트롤러(dispose)가 맡는다. */
+  function previzTextureFetch(apiUrl) {
+    if (!apiUrl) return Promise.resolve(null);
+    return fetch(apiUrl, { headers: { Authorization: "Bearer " + token() } })
+      .then(function (response) {
+        if (!response.ok) throw new Error("texture " + response.status);
+        return response.blob();
+      })
+      .then(function (blob) {
+        return URL.createObjectURL(blob);
+      })
+      .catch(function () {
+        return null;
+      });
+  }
+
   /* ---------------------------------------------------------------- 이미지 확대 오버레이 */
 
   function openLightbox(url, alt) {
@@ -2815,9 +2835,9 @@
 
     var bodyWrap = el("div", "vnew-modal-body");
     bodyWrap.appendChild(
-      el("p", null, "실사 영상을 구간별로 이어 만든 뒤 웹툰 그림체로도 변환합니다.")
+      el("p", null, "승인한 프리비즈 녹화에 실사·웹툰 그림체를 각각 입혀 영상을 만듭니다.")
     );
-    bodyWrap.appendChild(el("p", "vnew-hint", "구간 " + segCount + "개를 순서대로 만듭니다."));
+    bodyWrap.appendChild(el("p", "vnew-hint", "구간 " + segCount + "개를 실사·웹툰 두 벌로 만듭니다."));
     // 금액 숫자는 보이지 않는다(설계자 2026-10-20) — 문구만.
     bodyWrap.appendChild(el("p", "vnew-gen-cost", "예상 비용이 듭니다."));
 
@@ -3065,8 +3085,9 @@
      서버 previz_view(previz.py) 모양을 쓴다: status·scenes(장면 JSON + 텍스처 URL)·segments·
      recordings·recordedAll·approved·task. 설계 전이면 [3D 장면 설계하기](POST /previz/design),
      설계 후이면 three.js 뷰포트(window.vnewPreviz)로 재생·탐색·장면 전환하고, 우측에서 현재 컷의
-     카메라·인물을 편집(PUT /previz/scene)한다. [승인하고 녹화]→approve→구간마다 record→
-     POST recordings. 녹화 중 탭 전환·창 최소화(document.visibilityState hidden)면 그 구간 실패 처리. */
+     카메라·인물을 편집(PUT /previz/scene)한다. [승인하고 녹화]→approve→구간마다 renderFrames(프레임
+     오프라인 렌더)→50장 묶음 업로드(POST frames)→finish 로 서버가 ffmpeg mp4 를 만든다. 실시간이
+     아니므로 창을 가려도 계속된다. */
 
   // 프리비즈 뷰포트 컨트롤러(window.vnewPreviz.create 결과)와 녹화 상태를 화면 단위로 둔다.
   var previzCtl = null; // 현재 화면의 controller
@@ -3214,11 +3235,15 @@
     host.appendChild(recSection);
 
     // --- 컨트롤러 생성 ---
-    var textures = {}; // scene.room 안에 textureUrl 이 이미 들어 있어 별도 전달 불필요
+    // 텍스처(벽·바닥)는 scene.room 안 textureUrl(= 서버 텍스처 API 경로)로 들어 있다. three.js 가
+    // S3 를 직접 부르면(버킷 CORS 없음) 텍스처가 안 불러지거나 캔버스가 오염돼 녹화가 막히므로,
+    // previzTextureFetch(Authorization 헤더 → blob → objectURL)로 같은 출처에서 받아 넘긴다.
+    var duration = 0;
+    var createPromise;
     try {
-      previzCtl = window.vnewPreviz.create(viewport, {
+      createPromise = window.vnewPreviz.create(viewport, {
         scenes: scenes,
-        textures: textures,
+        textureFetch: previzTextureFetch,
         width: 1280,
         height: 720
       });
@@ -3227,10 +3252,28 @@
       return;
     }
 
-    var duration = previzCtl.duration || 0;
+    // create 는 텍스처를 받아 첫 프레임을 그린 뒤 controller 를 resolve 한다. 비동기 사이에 화면을
+    // 떠났으면(뷰포트가 DOM 에서 빠졌으면) 결과를 버리고 그 controller 를 정리한다.
+    createPromise
+      .then(function (ctl) {
+        if (!viewport.isConnected) {
+          try {
+            ctl.destroy();
+          } catch (error) {
+            /* 무시 */
+          }
+          return;
+        }
+        previzCtl = ctl;
+        duration = previzCtl.duration || 0;
+        buildTimeline();
+      })
+      .catch(function (err) {
+        showError("3D 뷰어를 열지 못했습니다: " + errMessage(err));
+      });
 
     // 타임라인 눈금: 컷마다 한 칸(길이 비례). 번호·대사 말풍선.
-    (function buildTimeline() {
+    function buildTimeline() {
       timeline.style.position = "relative";
       flat.forEach(function (item, idx) {
         var cut = item.cut;
@@ -3277,7 +3320,7 @@
           renderCutPanel();
         }
       });
-    })();
+    }
 
     playBtn.addEventListener("click", function () {
       if (!previzCtl) return;
@@ -3485,8 +3528,8 @@
       el(
         "p",
         "vnew-hint",
-        "장면을 확인했으면 승인하고 구간별로 영상을 녹화합니다. 녹화 중에는 이 화면을 닫거나 다른 탭으로 " +
-          "넘어가지 마세요 — 브라우저가 렌더를 멈춰 녹화가 실패할 수 있습니다."
+        "장면을 확인했으면 승인하고 구간별로 영상을 만듭니다. 이제 실시간 녹화가 아니라 프레임을 한 장씩 " +
+          "그려 모으므로, 창을 가리거나 다른 탭으로 넘어가도 계속 진행됩니다(시간은 조금 걸립니다)."
       )
     );
 
@@ -3495,8 +3538,7 @@
     host.appendChild(progress);
 
     if (previzRecording && !previzRecording.aborted && previzRecording.done < previzRecording.total) {
-      progress.textContent =
-        "구간 " + (previzRecording.current + 1) + "/" + previzRecording.total + " 녹화 중… 화면을 닫지 마세요";
+      progress.textContent = recProgressText();
     }
 
     // 구간별 상태·미리보기
@@ -3513,8 +3555,8 @@
         video.setAttribute("playsinline", "");
         row.appendChild(video);
       } else {
-        row.appendChild(el("span", "vnew-previz-rec-state", "아직 녹화 전"));
-        var redo = el("button", "outline-button vnew-previz-rec-redo", "다시 녹화");
+        row.appendChild(el("span", "vnew-previz-rec-state", "아직 영상 전"));
+        var redo = el("button", "outline-button vnew-previz-rec-redo", "다시 만들기");
         redo.type = "button";
         redo.addEventListener("click", function () {
           recordSegments([seg], showError);
@@ -3560,19 +3602,79 @@
     }
   }
 
-  /* 구간들을 순서대로 실시간 녹화해 업로드한다. 녹화 중 탭 숨김이면 그 구간을 실패로 처리하고 멈춘다. */
+  // 프레임 묶음 크기(요구사항: 50장씩)·fps·묶음 실패 재시도 횟수.
+  var FRAME_CHUNK = 50;
+  var FRAME_FPS = 24;
+  var CHUNK_RETRIES = 2;
+
+  /* 구간들을 순서대로 '프레임 단위 오프라인 렌더'한다: renderFrames 로 jpeg 프레임을 모아 50장씩 묶어
+     올리고(POST frames?start), 마지막에 finish({frames,fps}) 로 서버가 ffmpeg 로 mp4 를 만든다.
+     실시간·captureStream 이 아니라 rAF 와 무관하므로 창을 가려도 계속된다(프레임 안 빠짐).
+     실패한 묶음만 2회까지 재시도한다. */
   function recordSegments(segments, showError) {
-    if (!previzCtl) {
+    if (!previzCtl || !previzCtl.renderFrames) {
       if (showError) showError("3D 뷰어가 준비되지 않았습니다.");
       return Promise.resolve();
     }
     if (!segments || !segments.length) return Promise.resolve();
-    previzRecording = { total: segments.length, done: 0, failed: [], current: 0, aborted: false };
+    previzRecording = {
+      total: segments.length,
+      done: 0,
+      failed: [],
+      current: 0,
+      aborted: false,
+      phase: "render", // render | upload
+      frameDone: 0,
+      frameTotal: 0
+    };
 
     var pid = state.projectId;
 
-    function visibilityAborted() {
-      return document.visibilityState === "hidden";
+    function uploadChunk(segId, start, chunk) {
+      // 묶음 하나(jpeg Blob 배열)를 multipart 로 올린다. 실패하면 CHUNK_RETRIES 회까지 재시도.
+      function attempt(tries) {
+        var form = new FormData();
+        for (var i = 0; i < chunk.length; i++) {
+          form.append("f", chunk[i], String(start + i).padStart(5, "0") + ".jpg");
+        }
+        return fetch(
+          "/api/vnew/p/" + encodeURIComponent(pid) + "/previz/recordings/" +
+            encodeURIComponent(segId) + "/frames?start=" + encodeURIComponent(start),
+          { method: "POST", headers: { Authorization: "Bearer " + token() }, body: form }
+        )
+          .then(function (response) {
+            if (!response.ok) throw new Error("frames " + response.status);
+            return true;
+          })
+          .catch(function (err) {
+            if (tries < CHUNK_RETRIES) return attempt(tries + 1);
+            throw err;
+          });
+      }
+      return attempt(0);
+    }
+
+    function uploadFinish(segId, frameCount) {
+      return fetch(
+        "/api/vnew/p/" + encodeURIComponent(pid) + "/previz/recordings/" +
+          encodeURIComponent(segId) + "/finish",
+        {
+          method: "POST",
+          headers: { Authorization: "Bearer " + token(), "Content-Type": "application/json" },
+          body: JSON.stringify({ frames: frameCount, fps: FRAME_FPS })
+        }
+      ).then(function (response) {
+        if (response.ok) return true;
+        return response
+          .json()
+          .catch(function () {
+            return null;
+          })
+          .then(function (payload) {
+            var msg = (payload && payload.error && payload.error.message) || "마무리(finish) 실패";
+            throw new Error(msg);
+          });
+      });
     }
 
     function recordOne(i) {
@@ -3582,7 +3684,11 @@
         return Promise.resolve();
       }
       previzRecording.current = i;
+      previzRecording.phase = "render";
+      previzRecording.frameDone = 0;
+      previzRecording.frameTotal = 0;
       refreshRecProgress();
+
       var seg = segments[i];
       var from = Number(seg.start) || 0;
       var to = Number(seg.end) || from;
@@ -3592,37 +3698,38 @@
         from = bounds.from;
         to = bounds.to;
       }
-      if (visibilityAborted()) {
-        previzRecording.failed.push(seg.id);
-        previzRecording.aborted = true;
-        if (showError) showError("화면이 가려져 녹화를 멈췄습니다. 화면을 켠 뒤 [다시 녹화] 를 눌러 주세요.");
-        loadPlan(false);
-        return Promise.resolve();
-      }
+
+      // 1) 프레임을 모은다(오프라인 렌더). 2) 50장씩 올린다. 3) finish.
       return previzCtl
-        .record(from, to)
-        .then(function (blob) {
-          if (visibilityAborted()) {
-            throw new Error("녹화 중 화면이 가려졌습니다.");
-          }
-          return fetch("/api/vnew/p/" + encodeURIComponent(pid) + "/previz/recordings/" + encodeURIComponent(seg.id), {
-            method: "POST",
-            headers: { Authorization: "Bearer " + token(), "Content-Type": "video/webm" },
-            body: blob
-          });
+        .renderFrames(from, to, FRAME_FPS, function (done, total) {
+          previzRecording.phase = "render";
+          previzRecording.frameDone = done;
+          previzRecording.frameTotal = total;
+          refreshRecProgress();
         })
-        .then(function (response) {
-          if (!response.ok) {
-            return response
-              .json()
-              .catch(function () {
-                return null;
-              })
-              .then(function (payload) {
-                var msg = (payload && payload.error && payload.error.message) || "녹화 업로드 실패";
-                throw new Error(msg);
-              });
+        .then(function (frames) {
+          previzRecording.phase = "upload";
+          previzRecording.frameTotal = frames.length;
+          previzRecording.frameDone = 0;
+          refreshRecProgress();
+
+          var start = 0;
+          function nextChunk() {
+            if (start >= frames.length) {
+              return uploadFinish(seg.id, frames.length);
+            }
+            var chunk = frames.slice(start, start + FRAME_CHUNK);
+            var chunkStart = start;
+            return uploadChunk(seg.id, chunkStart, chunk).then(function () {
+              start += chunk.length;
+              previzRecording.frameDone = start;
+              refreshRecProgress();
+              return nextChunk();
+            });
           }
+          return nextChunk();
+        })
+        .then(function () {
           previzRecording.done += 1;
           refreshRecProgress();
           return recordOne(i + 1);
@@ -3630,7 +3737,7 @@
         .catch(function (err) {
           previzRecording.failed.push(seg.id);
           previzRecording.aborted = true;
-          if (showError) showError("구간 " + (i + 1) + " 녹화에 실패했습니다: " + errMessage(err));
+          if (showError) showError("구간 " + (i + 1) + " 영상 만들기에 실패했습니다: " + errMessage(err));
           loadPlan(false);
         });
     }
@@ -3657,6 +3764,19 @@
     return { from: from, to: to };
   }
 
+  /* 진행 문구를 만든다: "구간 n/N · 프레임 x/total 그리는 중 / 올리는 중". */
+  function recProgressText() {
+    if (!previzRecording) return "";
+    var seg = "구간 " + (previzRecording.current + 1) + "/" + previzRecording.total;
+    var phase = previzRecording.phase === "upload" ? "올리는 중" : "그리는 중";
+    var total = previzRecording.frameTotal || 0;
+    var done = previzRecording.frameDone || 0;
+    if (total > 0) {
+      return seg + " · 프레임 " + done + "/" + total + " " + phase + " (창을 가려도 계속됩니다)";
+    }
+    return seg + " · 준비 중 (창을 가려도 계속됩니다)";
+  }
+
   /* 녹화 진행 문구만 갱신한다(전체 다시 그리지 않음). */
   function refreshRecProgress() {
     var node = planHost() && planHost().querySelector(".vnew-previz-rec-progress");
@@ -3665,8 +3785,7 @@
       node.textContent = "";
       return;
     }
-    node.textContent =
-      "구간 " + (previzRecording.current + 1) + "/" + previzRecording.total + " 녹화 중… 화면을 닫지 마세요";
+    node.textContent = recProgressText();
   }
 
   /* ================================================================ ⑤ 영상 생성
@@ -3776,14 +3895,23 @@
     }
     host.appendChild(statusBar);
 
+    // --- 안내: 프리비즈 기반(설계자 2026-10-21) ---
+    if (gen.mode === "previz") {
+      host.appendChild(
+        el("p", "vnew-hint", "프리비즈를 바탕으로 실사와 웹툰 그림체를 각각 만듭니다. 구간마다 프리비즈 미리보기 옆에 실사·웹툰 결과가 나옵니다.")
+      );
+    }
+
     // --- 맨 위 결과: 실사 / 웹툰 두 열 ---
     host.appendChild(finalResults(gen, showError));
 
-    // --- 시작 장면(opening) ---
-    host.appendChild(openingCard(gen.opening || {}));
+    // --- 시작 장면(opening) — 옛 모드만(프리비즈 모드는 시작 장면이 없다) ---
+    if (gen.mode !== "previz") {
+      host.appendChild(openingCard(gen.opening || {}));
+    }
 
     // --- 구간 타임라인 ---
-    host.appendChild(segmentTimeline(gen.segments || [], showError));
+    host.appendChild(segmentTimeline(gen.segments || [], showError, gen.mode || ""));
   }
 
   /* 맨 위 결과 두 열: finalReal · finalWebtoon. 둘 다 done 이면 각 열 아래 [이 영상으로 사운드 편집]. */
@@ -3865,8 +3993,8 @@
     return card;
   }
 
-  /* 구간 타임라인: 구간마다 한 줄 — 번호·초·컷, 실사 칸·웹툰 칸(배지+영상+실패 시 재시도). */
-  function segmentTimeline(segments, showError) {
+  /* 구간 타임라인: 구간마다 한 줄 — 번호·초·컷, (프리비즈 미리보기)·실사 칸·웹툰 칸. */
+  function segmentTimeline(segments, showError, mode) {
     var section = el("section", "panel vnew-seg-timeline");
     section.appendChild(el("h2", "vnew-sec-title", "구간별 진행"));
     if (!segments.length) {
@@ -3875,13 +4003,13 @@
     }
     var list = el("div", "vnew-seg-rows");
     segments.forEach(function (seg, index) {
-      list.appendChild(segmentRow(seg, index, showError));
+      list.appendChild(segmentRow(seg, index, showError, mode));
     });
     section.appendChild(list);
     return section;
   }
 
-  function segmentRow(seg, index, showError) {
+  function segmentRow(seg, index, showError, mode) {
     var row = el("div", "vnew-seg-row");
 
     var meta = el("div", "vnew-seg-meta");
@@ -3890,15 +4018,38 @@
     meta.appendChild(el("span", "vnew-seg-cuts", "컷 " + ((seg.cutIds || []).join(", ") || "-")));
     row.appendChild(meta);
 
-    var cells = el("div", "vnew-seg-cells");
+    var cells = el("div", "vnew-seg-cells" + (mode === "previz" ? " has-previz" : ""));
+    // 프리비즈 모드: 맨 왼쪽에 프리비즈 녹화 미리보기(작게).
+    if (mode === "previz") {
+      cells.appendChild(previzPreviewCell(seg));
+    }
     VARIANTS.forEach(function (variant) {
-      cells.appendChild(segmentCell(seg, variant, showError));
+      cells.appendChild(segmentCell(seg, variant, showError, mode));
     });
     row.appendChild(cells);
     return row;
   }
 
-  function segmentCell(seg, variant, showError) {
+  /* 프리비즈 미리보기 칸(작은 영상). 녹화가 있으면 재생, 없으면 안내. */
+  function previzPreviewCell(seg) {
+    var cell = el("div", "vnew-seg-cell vnew-seg-previz");
+    var head = el("div", "vnew-seg-cell-head");
+    head.appendChild(el("span", "vnew-seg-cell-title", "프리비즈"));
+    cell.appendChild(head);
+    if (seg.previzUrl) {
+      var video = el("video", "vnew-seg-video vnew-seg-previz-video");
+      video.src = seg.previzUrl;
+      video.controls = true;
+      video.muted = true;
+      video.setAttribute("playsinline", "");
+      cell.appendChild(video);
+    } else {
+      cell.appendChild(el("p", "vnew-hint", "녹화 없음"));
+    }
+    return cell;
+  }
+
+  function segmentCell(seg, variant, showError, mode) {
     var v = (seg[variant.key] || {});
     var cell = el("div", "vnew-seg-cell");
     var head = el("div", "vnew-seg-cell-head");
@@ -3916,7 +4067,12 @@
       cell.appendChild(video);
     } else if (v.status === "failed") {
       cell.appendChild(el("p", "login-error vnew-seg-error", v.error || "실패했습니다."));
-      var retryLabel = variant.key === "real" ? "이 구간부터 다시" : "변환 다시";
+      var retryLabel;
+      if (mode === "previz") {
+        retryLabel = variant.key === "real" ? "실사 다시" : "웹툰 다시";
+      } else {
+        retryLabel = variant.key === "real" ? "이 구간부터 다시" : "변환 다시";
+      }
       var retry = el("button", "outline-button vnew-seg-retry", retryLabel);
       retry.type = "button";
       retry.addEventListener("click", function () {

@@ -1964,6 +1964,9 @@ class _FakeCharStore:
     def get_bytes(self, key: str, *, bucket: str = "") -> bytes:
         return self.blobs[key]
 
+    def delete_bytes(self, key: str, *, bucket: str = "") -> None:
+        self.blobs.pop(key, None)
+
     def exists(self, key: str, *, bucket: str = "") -> bool:
         return key in self.blobs
 
@@ -3941,6 +3944,7 @@ def check_vnew_locations() -> None:
     (h) 벽 프롬프트에 "No text"·"Korean setting"
     (i) 병렬 실행에서도 원장·저장 10장(벽8+바닥2) 정확
     (j) 설계 결과에 'assumed'/'provisional' 이 있으면 1회 재요청
+    (l) 공간 '다시 만들기' 는 설계 재요청 1회, designEditedAt 있으면 0회(수정본 유지)
     """
     sys.path.insert(0, str(ROOT / "app"))
     bad: list[str] = []
@@ -4365,6 +4369,57 @@ def check_vnew_locations() -> None:
         if not locmod._has_provisional({"walls": {"east": {"descEn": "assumed wall"}}}):
             bad.append("(j) _has_provisional 이 'assumed' 를 잡지 못합니다")
 
+        # --- (l) 공간 '다시 만들기' 는 설계를 새로 한다(designEditedAt 있으면 유지) ---
+        # 증상: [다시 만들기] 가 예전 설계(벽 4면 "흰 벽 가정")를 재사용 → 창문 없는 방. 그래서 재설계한다.
+        # 먼저 (f) 에서 running 으로 막아 둔 task 를 풀고, 설계가 있는 상태(앞 build 로 저장됨)로 맞춘다.
+        def _reset_task_and_design(d):
+            loc = locmod._find_location(d, lid)
+            loc["task"] = {"status": "idle", "startedAt": None, "id": None}
+            loc["status"] = "ready"
+            # 앞 build 가 저장한 설계가 있고 designEditedAt 는 없어야 한다(사용자가 안 고침).
+            design = loc.get("design") or {}
+            design.pop("designEditedAt", None)
+            if not design.get("walls"):
+                # 혹시 설계가 비었으면 (l) 전제를 위해 심는다.
+                design["walls"] = {s: {"descEn": "a plain wall", "hasWindow": False, "hasDoor": False, "featuresEn": ""} for s in locmod.SIDES}
+            loc["design"] = design
+
+        planmod.mutate_plan(owner, pid, _reset_task_and_design)
+
+        # (l-1) designEditedAt 없음 → [다시 만들기] 는 설계 재요청 1회.
+        design_calls.clear()
+        resp = client.post(f"/api/vnew/p/{pid}/locations/{lid}/build", json={})
+        if resp.status_code != 202:
+            bad.append(f"(l) 다시 만들기 build 가 202 가 아닙니다: {resp.status_code} {resp.get_json()}")
+        _join()
+        if len(design_calls) != 1:
+            bad.append(f"(l) designEditedAt 없이 다시 만들기인데 설계 재요청이 1회가 아닙니다: {len(design_calls)}")
+
+        # (l-2) 사용자가 설계를 직접 고치면(update_location) designEditedAt 이 찍히고, 그 뒤 [다시 만들기]
+        #       는 설계를 새로 받지 않는다(0회) — 수정본 유지.
+        edited_loc = locmod.update_location(owner, pid, lid, {"lightEn": "lamp light from the ceiling"})
+        if not (edited_loc.get("design") or {}).get("designEditedAt"):
+            bad.append("(l) update_location 이 designEditedAt 을 기록하지 않았습니다")
+        # task 를 다시 idle 로(앞 build 가 done 으로 끝났을 테지만 안전하게).
+        def _idle_task(d):
+            loc = locmod._find_location(d, lid)
+            loc["task"] = {"status": "idle", "startedAt": None, "id": None}
+            loc["status"] = "ready"
+
+        planmod.mutate_plan(owner, pid, _idle_task)
+        design_calls.clear()
+        resp = client.post(f"/api/vnew/p/{pid}/locations/{lid}/build", json={})
+        if resp.status_code != 202:
+            bad.append(f"(l) 수정본 유지 build 가 202 가 아닙니다: {resp.status_code} {resp.get_json()}")
+        _join()
+        if len(design_calls) != 0:
+            bad.append(f"(l) designEditedAt 이 있는데 다시 만들기가 설계를 새로 받았습니다(재요청 {len(design_calls)}회)")
+        # 수정한 lightEn 이 유지되는지.
+        plan_l, _ = planmod.load_plan(owner, pid)
+        loc_l = locmod._find_location(plan_l, lid) or {}
+        if (loc_l.get("design") or {}).get("lightEn") != "lamp light from the ceiling":
+            bad.append(f"(l) 다시 만들기 뒤 사용자가 고친 lightEn 이 유지되지 않았습니다: {(loc_l.get('design') or {}).get('lightEn')}")
+
     except Exception as exc:  # noqa: BLE001
         import traceback as _tb  # noqa: PLC0415
 
@@ -4390,7 +4445,7 @@ def check_vnew_locations() -> None:
             "영상만들기_신규 공간 디테일 시트(vnew locations) 검사 (a)정규화·중복 제거 (b)설계 JSON 정리"
             " (c)벽4+바닥1×2그림체=Seedream 10장·Orthographic·no people (d)2x2 시트 (e)콘티 재생성 유지·자동 0장 (f)409"
             " (g)설계 모델 Claude→Astra (h)벽 프롬프트 'No text'·Korean setting (i)병렬에서도 원장·저장 10장 정확"
-            " (j)'assumed'/'provisional' 1회 재요청"
+            " (j)'assumed'/'provisional' 1회 재요청 (l)다시 만들기 설계 재요청 1회·designEditedAt 있으면 0회"
         )
 
 
@@ -4399,17 +4454,18 @@ def check_vnew_locations() -> None:
 
 
 def check_vnew_generate() -> None:
-    """영상만들기_신규 ④ 영상 생성 — 외부 호출 전부 가짜(설계자 2026-10-20).
+    """영상만들기_신규 ⑤ 영상 생성 — 승인된 프리비즈에 실사·웹툰을 입힌다(설계자 2026-10-21, 038).
 
-    (a) estimate·CostMismatch
-    (b) 캐릭터 실사 front 없음 409
-    (c) 순서: opening → seg1 제출(첫 프레임=opening) → 완료 → seg2 첫 프레임=seg1 마지막 프레임
-    (d) 실사 완료마다 webtoon 변환 제출, 참고 이미지 ≤4
-    (e) 모두 완료 → finalReal·finalWebtoon concat 호출·done
-    (f) 가짜 경합에도 구간 제출 1회
-    (g) 실사 실패 → partial, retry 로 그 구간부터
-    (h) 취소
-    (i) select
+    외부 호출(fal 제출·조회·concat·원장·캐릭터 로드)은 전부 가짜. 유료 호출 없음.
+
+    (j) 프리비즈 미승인/미녹화 → 409 PrevizRequired
+    (k) 구간×2(실사+웹툰) 제출, 실사 payload 에 image_urls 없음·elements 정면=기본 복장 정면(시트 키 아님)
+    (l) 웹툰 payload elements≤3 + image_urls 1, 총 ≤4
+    (m) 참고 이미지(정면·후면·웹툰 컷) 비율 0.4~2.5
+    (n) prompt 에 "@Element1"·색 매핑·"Do not add or remove anyone"
+    (o) 모두 완료 → finalReal·finalWebtoon concat 2회·done·estimate(초합×단가×2)
+    (p) 실패 구간만 재시도({segId,variant}) — 그 칸만 다시, 다른 칸 유지
+    (q) 옛 모드(gen.mode 없음) 계획 보기(gen_view) OK
     """
     sys.path.insert(0, str(ROOT / "app"))
     bad: list[str] = []
@@ -4512,6 +4568,16 @@ def check_vnew_generate() -> None:
             return {"status": "Completed", "failureMessage": "", "usage": None}
         return {"status": anime_poll["status"], "failureMessage": "", "usage": None}
 
+    # 프리비즈 edit 제출(generate._previz_request → vpoc_fal._request 직접). 본문(payload)을 잡아 두고
+    # 가짜 request_id 를 돌려준다. 유료 호출 없음.
+    previz_request_calls: list[dict] = []
+
+    def fake_previz_request(method, url, payload):
+        import secrets as _s  # noqa: PLC0415
+
+        previz_request_calls.append({"method": method, "url": url, "payload": payload})
+        return {"request_id": "previz-" + _s.token_hex(4)}
+
     # ledger 는 메모리(네트워크 금지).
     from src.vpoc import ledger as _ledger_mod  # noqa: PLC0415
 
@@ -4525,12 +4591,26 @@ def check_vnew_generate() -> None:
     char_has_real = {"value": True}
 
     def fake_load_char(owner, char_id):
-        real = {"frontKey": "", "sheetKey": ""}
-        webtoon = {"frontKey": "wf.jpg", "sheetKey": "ws.jpg"}
+        # 기본 복장 정면(frontKey)·후면(backKey)·시트(sheetKey). 정면은 가로로 긴(괜찮은) 이미지,
+        # 후면은 세로로 아주 긴(비율 0.25 — 범위 밖) 이미지로 둬서 (m) 비율 맞춤을 검증한다.
+        real = {"frontKey": "", "backKey": "", "sheetKey": ""}
+        webtoon = {"frontKey": "", "backKey": "", "sheetKey": ""}
         if char_has_real["value"]:
-            real = {"frontKey": "rf-" + char_id + ".jpg", "sheetKey": "rs-" + char_id + ".jpg"}
-            fake_store.blobs.setdefault(real["frontKey"], b"REAL-FRONT")
-            fake_store.blobs.setdefault(webtoon["sheetKey"], b"WEBTOON-SHEET")
+            real = {
+                "frontKey": "rf-" + char_id + ".jpg",
+                "backKey": "rb-" + char_id + ".jpg",
+                "sheetKey": "rs-" + char_id + ".jpg",
+            }
+            webtoon = {
+                "frontKey": "wf-" + char_id + ".jpg",
+                "backKey": "wb-" + char_id + ".jpg",
+                "sheetKey": "ws-" + char_id + ".jpg",
+            }
+            # 정면: 400x600(세로비 0.67, 범위 안). 후면: 100x400(0.25, 범위 밖 → 여백 맞춤).
+            fake_store.blobs.setdefault(real["frontKey"], _tiny_jpeg(400, 600))
+            fake_store.blobs.setdefault(real["backKey"], _tiny_jpeg(100, 400))
+            fake_store.blobs.setdefault(webtoon["frontKey"], _tiny_jpeg(400, 600))
+            fake_store.blobs.setdefault(webtoon["backKey"], _tiny_jpeg(100, 400))
         char = {
             "id": char_id,
             "name": "김부장역",
@@ -4561,6 +4641,7 @@ def check_vnew_generate() -> None:
         "_fetch_bytes": genmod._fetch_bytes,
         "gen_load_char": genmod.characters.load_char,
         "fal_poll": _fal_mod.poll,
+        "previz_request": genmod._previz_request,
         "charge": _ledger_mod.charge,
         "Thread": genmod.threading.Thread,
     }
@@ -4578,6 +4659,7 @@ def check_vnew_generate() -> None:
     genmod._fetch_bytes = fake_fetch_bytes
     genmod.characters.load_char = fake_load_char
     _fal_mod.poll = fake_fal_poll
+    genmod._previz_request = fake_previz_request
     _ledger_mod.charge = fake_charge
 
     started_threads: list = []
@@ -4596,8 +4678,13 @@ def check_vnew_generate() -> None:
             t.join(timeout=max(0.0, deadline - _time.time()))
         started_threads.clear()
 
-    def _make_plan(owner, pid, *, segments, total=30, with_char=True):
-        """fake store 에 ①②③ 까지 된 계획을 직접 써 둔다(생성 직전 상태)."""
+    def _make_plan(owner, pid, *, segments, total=30, with_char=True, previz=True, approved=True, record=True, extra_actors=None):
+        """fake store 에 ①②③(+프리비즈) 까지 된 계획을 직접 써 둔다(생성 직전 상태).
+
+        previz=True 면 scenes(actors=charId ch1 + 추가 마네킹)·timeline(컷마다 등장)·recordings 를 채운다.
+        approved/record 로 (j) 미승인·미녹화 분기를 만든다. extra_actors 는 charId 없는 마네킹 목록
+        [{id,name,color,appearanceEn}] — 색 문장 검증용.
+        """
         plan = planmod.new_plan()
         plan["input"]["totalSeconds"] = total
         plan["input"]["videoModel"] = "luma-ray2"
@@ -4605,7 +4692,7 @@ def check_vnew_generate() -> None:
         plan["input"]["images"] = [{"fileId": "f1", "name": "1.png", "width": 600, "height": 900}]
         if with_char:
             plan["input"]["characters"] = [{"charId": "ch1", "roleName": "김부장"}]
-        fake_store.blobs[planmod.upload_key(owner, pid, "f1")] = b"WEBTOON-PANEL"
+        fake_store.blobs[planmod.upload_key(owner, pid, "f1")] = _tiny_jpeg(600, 900)
         # 컷: segments 의 cutIds 에 맞춰 만든다.
         cuts = []
         for seg in segments:
@@ -4636,6 +4723,41 @@ def check_vnew_generate() -> None:
             "segments": segments,
             "setting": {"locationEn": "A closed principal's office", "layoutEn": "at the desk"},
         }
+
+        if previz:
+            scene_actors = [{"id": "a1", "name": "김부장", "color": "#4363d8", "heightM": 1.75, "charId": "ch1"}]
+            for ea in (extra_actors or []):
+                scene_actors.append(dict(ea))
+            cut_ids = [c["id"] for c in cuts]
+            timeline = []
+            for cut_id in cut_ids:
+                timeline.append(
+                    {
+                        "cutId": cut_id,
+                        "start": 0,
+                        "end": 3,
+                        "camera": {"pos": [0, 1.5, 4], "target": [0, 1, 0], "fov": 50},
+                        "actors": [{"id": act["id"], "speaking": True} for act in scene_actors],
+                    }
+                )
+            scenes = [{"locationId": "loc:office", "room": {"width": 6, "depth": 6}, "actors": scene_actors, "timeline": timeline}]
+            recordings = {}
+            rev = 0
+            if record:
+                for seg in segments:
+                    rec_key = f"rec/{pid}/{seg['id']}.mp4"
+                    fake_store.blobs[rec_key] = b"PREVIZ-REC-MP4"
+                    recordings[seg["id"]] = {"status": "ready", "key": rec_key, "seconds": float(seg["seconds"])}
+            plan["previz"] = {
+                "status": "ready",
+                "error": "",
+                "model": "astra",
+                "revision": rev,
+                "scenes": scenes,
+                "approved": bool(approved),
+                "recordings": recordings,
+                "task": {"status": "done", "startedAt": None, "id": None},
+            }
         planmod.save_plan(owner, pid, plan)
         return plan
 
@@ -4659,215 +4781,243 @@ def check_vnew_generate() -> None:
 
         client = make_client()
 
-        two_segs = [
-            {"id": "seg1", "cutIds": ["c1"], "seconds": 15},
-            {"id": "seg2", "cutIds": ["c2"], "seconds": 15},
-        ]
-
-        # (a) estimate·CostMismatch
-        pid = "prj_gen_a"
-        char_has_real["value"] = True
-        _make_plan(owner, pid, segments=two_segs, total=30)
-        plan, _ = planmod.load_plan(owner, pid)
-        est = genmod.estimate(plan)
-        # 실사 = 2구간 shot_usd(luma,540p,15) 합, opening = SEEDREAM_USD, 웹툰 = anime_usd(15)*2
+        # fal 키가 있어야 _submit_previz_edit 가 FalKeyMissing 으로 빠지지 않는다(실제 호출은 가짜).
         from src.vpoc import settings as _settings  # noqa: PLC0415
 
-        exp_real = round(_settings.shot_usd("luma-ray2", est["resolution"], 15) * 2, 4)
-        exp_open = round(float(genmod.SEEDREAM_USD), 4)
-        exp_web = round(_settings.anime_usd(15) * 2, 4)
-        exp_total = round(exp_real + exp_open + exp_web, 2)
-        if abs(est["totalUsd"] - exp_total) > 0.001:
-            bad.append(f"(a) estimate 합이 틀립니다: {est['totalUsd']} != {exp_total}")
-        if abs(est["realUsd"] - exp_real) > 0.001 or abs(est["webtoonUsd"] - exp_web) > 0.001:
-            bad.append(f"(a) estimate 실사/웹툰 합이 틀립니다: {est['realUsd']}/{est['webtoonUsd']}")
-        # 틀린 금액 → CostMismatch 409
-        resp = client.post(f"/api/vnew/p/{pid}/generate", json={"confirmUsd": round(exp_total + 1.0, 2)})
-        if resp.status_code != 409 or (resp.get_json().get("error") or {}).get("type") != "CostMismatch":
-            bad.append(f"(a) 틀린 금액이 CostMismatch 409 가 아닙니다: {resp.status_code} {resp.get_json()}")
+        saved_fal_key = _settings.FAL_KEY
+        _settings.FAL_KEY = "dummy-fal-key"
 
-        # (b) 캐릭터 실사 front 없음 → 409 CharacterRealMissing(메시지에 이름)
-        pid_b = "prj_gen_b"
-        char_has_real["value"] = False
-        _make_plan(owner, pid_b, segments=two_segs, total=30)
-        planb, _ = planmod.load_plan(owner, pid_b)
-        estb = genmod.estimate(planb)
-        resp = client.post(f"/api/vnew/p/{pid_b}/generate", json={"confirmUsd": estb["totalUsd"]})
-        body = resp.get_json() or {}
-        if resp.status_code != 409 or (body.get("error") or {}).get("type") != "CharacterRealMissing":
-            bad.append(f"(b) 실사 front 없음이 409 CharacterRealMissing 이 아닙니다: {resp.status_code} {body}")
-        elif "김부장" not in str((body.get("error") or {}).get("message") or ""):
-            bad.append(f"(b) 거절 메시지에 캐릭터 이름이 없습니다: {body}")
+        import base64 as _b64  # noqa: PLC0415
+        import io as _io  # noqa: PLC0415
+
+        from PIL import Image as _PILImage  # noqa: PLC0415
+
+        def _ratio_of_data_uri(uri):
+            """data:image/jpeg;base64,... → 가로/세로 비율(못 읽으면 0)."""
+            try:
+                b64 = str(uri).split(",", 1)[1]
+                with _PILImage.open(_io.BytesIO(_b64.b64decode(b64))) as im:
+                    return im.width / max(1, im.height)
+            except Exception:  # noqa: BLE001
+                return 0.0
+
+        two_segs = [
+            {"id": "seg1", "cutIds": ["c1"], "seconds": 6},
+            {"id": "seg2", "cutIds": ["c2"], "seconds": 6},
+        ]
+
+        # (j) 프리비즈 미승인/미녹화 → 409 PrevizRequired
+        pid_j = "prj_gen_j"
         char_has_real["value"] = True
+        # 승인 안 됨.
+        _make_plan(owner, pid_j, segments=two_segs, total=12, approved=False, record=True)
+        planj, _ = planmod.load_plan(owner, pid_j)
+        estj = genmod.estimate(planj)
+        resp = client.post(f"/api/vnew/p/{pid_j}/generate", json={"confirmUsd": estj["totalUsd"]})
+        bodyj = resp.get_json() or {}
+        if resp.status_code != 409 or (bodyj.get("error") or {}).get("type") != "PrevizRequired":
+            bad.append(f"(j) 미승인이 409 PrevizRequired 가 아닙니다: {resp.status_code} {bodyj}")
+        # 승인됐지만 미녹화.
+        _make_plan(owner, pid_j, segments=two_segs, total=12, approved=True, record=False)
+        planj2, _ = planmod.load_plan(owner, pid_j)
+        estj2 = genmod.estimate(planj2)
+        resp = client.post(f"/api/vnew/p/{pid_j}/generate", json={"confirmUsd": estj2["totalUsd"]})
+        bodyj2 = resp.get_json() or {}
+        if resp.status_code != 409 or (bodyj2.get("error") or {}).get("type") != "PrevizRequired":
+            bad.append(f"(j) 미녹화가 409 PrevizRequired 가 아닙니다: {resp.status_code} {bodyj2}")
 
-        # (c)(d)(e) 정상 진행: opening → seg1(첫프레임=opening) → 완료 → seg2(첫프레임=seg1 last) →
-        #           실사 완료마다 webtoon 제출(참고 ≤4) → 모두 완료 → finalReal·finalWebtoon concat·done
-        pid_c = "prj_gen_c"
-        _make_plan(owner, pid_c, segments=two_segs, total=30)
-        seedream_calls.clear(); submit_video_calls.clear(); submit_anime_calls.clear()
-        concat_calls.clear(); ledger_calls.clear()
-        video_poll["status"] = "Completed"
-        anime_poll["status"] = "Completed"
-        fail_real_seg["id"] = ""
-        planc, _ = planmod.load_plan(owner, pid_c)
-        estc = genmod.estimate(planc)
-        resp = client.post(f"/api/vnew/p/{pid_c}/generate", json={"confirmUsd": estc["totalUsd"]})
+        # (k)(l)(m)(n)(o) 정상 진행: 구간×2 제출 → 완료 → concat 2 → done, payload 검증.
+        pid_k = "prj_gen_k"
+        extra = [{"id": "a2", "name": "비서", "color": "#e6194b", "appearanceEn": "a young woman in a grey suit"}]
+        _make_plan(owner, pid_k, segments=two_segs, total=12, extra_actors=extra)
+        previz_request_calls.clear(); concat_calls.clear(); ledger_calls.clear()
+        anime_poll["status"] = "Completed"  # fal.poll 완료
+        plank, _ = planmod.load_plan(owner, pid_k)
+        estk = genmod.estimate(plank)
+        # estimate: 구간 초합(6+6) × 단가 × 2.
+        exp_unit = genmod.vnew_settings.previz_edit_usd(6)
+        exp_total = round(exp_unit * 2 * 2, 2)
+        if abs(estk["totalUsd"] - exp_total) > 0.001:
+            bad.append(f"(o) estimate 가 (초합×단가×2) 가 아닙니다: {estk['totalUsd']} != {exp_total}")
+        if estk.get("mode") != "previz":
+            bad.append(f"(o) estimate.mode 가 previz 가 아닙니다: {estk.get('mode')}")
+        resp = client.post(f"/api/vnew/p/{pid_k}/generate", json={"confirmUsd": estk["totalUsd"]})
         if resp.status_code != 202:
-            bad.append(f"(c) generate 가 202 가 아닙니다: {resp.status_code} {resp.get_json()}")
+            bad.append(f"(k) generate 가 202 가 아닙니다: {resp.status_code} {resp.get_json()}")
         _join_drivers()
 
-        final_plan, _ = planmod.load_plan(owner, pid_c)
-        gen = final_plan.get("gen") or {}
-        if gen.get("status") != "done":
-            bad.append(f"(e) gen.status 가 done 이 아닙니다: {gen.get('status')} opening={gen.get('opening')}")
-        # opening 1회(Seedream)
-        if len(seedream_calls) != 1:
-            bad.append(f"(c) opening Seedream 호출이 1회가 아닙니다: {len(seedream_calls)}")
-        # 실사 제출 2회(seg1,seg2)
-        real_submits = [c for c in submit_video_calls]
-        if len(real_submits) != 2:
-            bad.append(f"(c) 실사 제출이 2회가 아닙니다: {len(real_submits)}")
-        else:
-            # seg1 첫 프레임 = opening 바이트(b64), seg2 첫 프레임 = seg1 last frame
-            import base64 as _b64  # noqa: PLC0415
+        kplan, _ = planmod.load_plan(owner, pid_k)
+        kgen = kplan.get("gen") or {}
+        if kgen.get("mode") != "previz":
+            bad.append(f"(k) gen.mode 가 previz 가 아닙니다: {kgen.get('mode')}")
+        # 제출: 구간 2 × 그림체 2 = 4회.
+        if len(previz_request_calls) != 4:
+            bad.append(f"(k) 제출이 4회(구간2×그림체2)가 아닙니다: {len(previz_request_calls)}")
+        # payload 를 그림체별로 나눈다(prompt 로 실사/웹툰 구분).
+        reals = [c["payload"] for c in previz_request_calls if "live-action" in str(c["payload"].get("prompt"))]
+        webs = [c["payload"] for c in previz_request_calls if "webtoon" in str(c["payload"].get("prompt"))]
+        if len(reals) != 2:
+            bad.append(f"(k) 실사 제출이 2회가 아닙니다: {len(reals)}")
+        if len(webs) != 2:
+            bad.append(f"(l) 웹툰 제출이 2회가 아닙니다: {len(webs)}")
 
-            s1 = next((c for c in real_submits if c["shot_id"] == "seg1"), None)
-            s2 = next((c for c in real_submits if c["shot_id"] == "seg2"), None)
-            if not s1 or _b64.b64decode(s1["keyframe_b64"]) != b"OPENING-JPEG-BYTES":
-                bad.append("(c) seg1 첫 프레임이 opening 이미지가 아닙니다")
-            if not s2 or _b64.b64decode(s2["keyframe_b64"]) != b"LAST-FRAME-JPEG":
-                bad.append("(c) seg2 첫 프레임이 seg1 마지막 프레임이 아닙니다")
-        # (d) 웹툰 변환 2회(실사 완료마다), 참고 이미지 ≤4
-        if len(submit_anime_calls) != 2:
-            bad.append(f"(d) 웹툰 변환 제출이 2회가 아닙니다: {len(submit_anime_calls)}")
-        if any(c["refs"] > 4 for c in submit_anime_calls):
-            bad.append(f"(d) 웹툰 변환 참고 이미지가 4장을 넘습니다: {[c['refs'] for c in submit_anime_calls]}")
-        # (e) 병합: 실사·웹툰 각각 concat 호출(각 2클립), finalReal·finalWebtoon done
+        for pay in reals:
+            # (k) 실사: image_urls 없음, video_url 있음, keep_audio False.
+            if "image_urls" in pay:
+                bad.append("(k) 실사 payload 에 image_urls 가 있습니다(실사는 장소 이미지 금지)")
+            if not str(pay.get("video_url") or "").startswith("data:video/mp4;base64,"):
+                bad.append("(k) 실사 payload 의 video_url 이 data URI 가 아닙니다")
+            if pay.get("keep_audio") is not False:
+                bad.append(f"(k) 실사 keep_audio 가 False 가 아닙니다: {pay.get('keep_audio')}")
+            els = pay.get("elements") or []
+            if not els:
+                bad.append("(k) 실사 payload 에 elements 가 없습니다")
+            # 정면 = 기본 복장 정면(rf-ch1.jpg 바이트: 400x600) — 시트 키(rs-)가 아니다.
+            # 시트는 가로로 긴 2560x1440 이라 비율로는 구분이 어려우므로, store 원본 바이트로 대조한다.
+            front_uri = (els[0] or {}).get("frontal_image_url") if els else ""
+            expect_front = _b64.b64encode(fake_store.blobs["rf-ch1.jpg"]).decode("ascii")
+            # fit_ratio 는 범위 안(0.67)이면 원본 그대로 → data URI 안 base64 가 원본과 같다.
+            if expect_front not in str(front_uri):
+                bad.append("(k) 실사 정면이 기본 복장 정면(frontKey) 이 아닙니다(시트 키 의심)")
+            # (m) 참고 이미지(정면·후면) 비율 0.4~2.5.
+            for el in els:
+                for uri in ([el.get("frontal_image_url")] + list(el.get("reference_image_urls") or [])):
+                    r = _ratio_of_data_uri(uri)
+                    if r and not (0.4 - 1e-6 <= r <= 2.5 + 1e-6):
+                        bad.append(f"(m) 참고 이미지 비율이 0.4~2.5 밖입니다: {round(r, 3)}")
+            # (n) prompt 에 @Element1·색 매핑·금지 문구.
+            prompt = str(pay.get("prompt") or "")
+            if "@Element1" not in prompt:
+                bad.append("(n) 실사 prompt 에 @Element1 이 없습니다")
+            if "mannequin is @Element1" not in prompt:
+                bad.append("(n) 실사 prompt 에 색 마네킹 ↔ @Element 매핑 문장이 없습니다")
+            if "Do not add or remove anyone" not in prompt:
+                bad.append("(n) 실사 prompt 에 'Do not add or remove anyone' 이 없습니다")
+            # charId 없는 마네킹(비서=빨강)은 색 문장으로.
+            if "red mannequin" not in prompt:
+                bad.append(f"(n) charId 없는 마네킹의 색 문장이 없습니다: {prompt[:120]}")
+
+        for pay in webs:
+            # (l) 웹툰: elements ≤3 + image_urls 1, 합 ≤4.
+            els = pay.get("elements") or []
+            imgs = pay.get("image_urls") or []
+            if len(els) > 3:
+                bad.append(f"(l) 웹툰 elements 가 3 을 넘습니다: {len(els)}")
+            if len(imgs) > 1:
+                bad.append(f"(l) 웹툰 image_urls 가 1 을 넘습니다: {len(imgs)}")
+            if len(els) + len(imgs) > 4:
+                bad.append(f"(l) 웹툰 elements+image_urls 합이 4 를 넘습니다: {len(els)}+{len(imgs)}")
+            if len(imgs) != 1:
+                bad.append(f"(l) 웹툰 image_urls 가 1장이 아닙니다(그림체 참고 원작 컷): {len(imgs)}")
+            # (m) 웹툰 image_urls·elements 참고 이미지도 비율 0.4~2.5.
+            for uri in imgs:
+                r = _ratio_of_data_uri(uri)
+                if r and not (0.4 - 1e-6 <= r <= 2.5 + 1e-6):
+                    bad.append(f"(m) 웹툰 참고 컷 비율이 0.4~2.5 밖입니다: {round(r, 3)}")
+            for el in els:
+                for uri in ([el.get("frontal_image_url")] + list(el.get("reference_image_urls") or [])):
+                    r = _ratio_of_data_uri(uri)
+                    if r and not (0.4 - 1e-6 <= r <= 2.5 + 1e-6):
+                        bad.append(f"(m) 웹툰 element 참고 비율이 0.4~2.5 밖입니다: {round(r, 3)}")
+            if "@Image1" not in str(pay.get("prompt")):
+                bad.append("(l) 웹툰 prompt 에 @Image1(그림체 참고) 이 없습니다")
+
+        # (o) 완료 → concat 2(실사·웹툰), done.
+        if kgen.get("status") != "done":
+            bad.append(f"(o) gen.status 가 done 이 아닙니다: {kgen.get('status')}")
         if len(concat_calls) != 2:
-            bad.append(f"(e) concat 호출이 2회(실사·웹툰)가 아닙니다: {concat_calls}")
-        if (gen.get("finalReal") or {}).get("status") != "done" or not (gen.get("finalReal") or {}).get("key"):
-            bad.append(f"(e) finalReal 이 done/key 가 아닙니다: {gen.get('finalReal')}")
-        if (gen.get("finalWebtoon") or {}).get("status") != "done" or not (gen.get("finalWebtoon") or {}).get("key"):
-            bad.append(f"(e) finalWebtoon 이 done/key 가 아닙니다: {gen.get('finalWebtoon')}")
-        # 원장: 영상 제출 2 + 웹툰 2 + opening 1 = 토큰 중복 없이 계상
-        video_charges = [e for e in ledger_calls if e.get("kind") == "video"]
-        if len(video_charges) < 4:
-            bad.append(f"(e) 영상·웹툰 원장 계상이 4건 미만입니다: {len(video_charges)}")
+            bad.append(f"(o) concat 호출이 2회(실사·웹툰)가 아닙니다: {concat_calls}")
+        if (kgen.get("finalReal") or {}).get("status") != "done" or not (kgen.get("finalReal") or {}).get("key"):
+            bad.append(f"(o) finalReal 이 done/key 가 아닙니다: {kgen.get('finalReal')}")
+        if (kgen.get("finalWebtoon") or {}).get("status") != "done" or not (kgen.get("finalWebtoon") or {}).get("key"):
+            bad.append(f"(o) finalWebtoon 이 done/key 가 아닙니다: {kgen.get('finalWebtoon')}")
+        # 원장: edit 제출 4회(구간2×그림체2), 모델 = VNEW_PREVIZ_EDIT_MODEL.
+        previz_charges = [e for e in ledger_calls if e.get("model") == genmod.vnew_settings.VNEW_PREVIZ_EDIT_MODEL]
+        if len(previz_charges) != 4:
+            bad.append(f"(o) 프리비즈 edit 원장 계상이 4건이 아닙니다: {len(previz_charges)}")
 
-        # (f) 가짜 경합에도 구간 제출 1회 — save_plan 첫 저장을 한 번 경합시켜도 seg1 제출이 1회.
-        pid_f = "prj_gen_f"
-        _make_plan(owner, pid_f, segments=[{"id": "seg1", "cutIds": ["c1"], "seconds": 15}], total=15)
-        submit_video_calls.clear(); ledger_calls.clear()
-        video_poll["status"] = "Completed"; anime_poll["status"] = "Completed"; fail_real_seg["id"] = ""
-        real_save = planmod.save_plan
-        race = {"left": 1}
+        # (p) 실패 구간만 재시도 — fal.poll 를 한 번 Failed 로 만들어 한 칸 실패시킨 뒤 그 칸만 retry.
+        pid_p = "prj_gen_p"
+        _make_plan(owner, pid_p, segments=two_segs, total=12)
+        previz_request_calls.clear(); concat_calls.clear()
+        # seg1 webtoon 만 실패시킨다: arn 에 seg1-webtoon prefix 가 들어가므로 그걸로 가른다.
+        fail_once = {"webtoon_seg1": True}
 
-        def flaky_save(o, p, data, etag=""):
-            if race["left"] > 0:
-                race["left"] -= 1
-                raise planmod.VpocError("plan.save", "PreconditionFailed", "가짜 경합", 409)
-            return real_save(o, p, data, etag)
+        def fail_fal_poll(invocation_arn, output_prefix):
+            if fail_once["webtoon_seg1"] and "seg1-webtoon" in str(output_prefix):
+                fail_once["webtoon_seg1"] = False
+                return {"status": "Failed", "failureMessage": "가짜 웹툰 실패", "usage": None}
+            return {"status": "Completed", "failureMessage": "", "usage": None}
 
-        planmod.save_plan = flaky_save
+        _fal_mod.poll = fail_fal_poll
         try:
-            planf, _ = planmod.load_plan(owner, pid_f)
-            estf = genmod.estimate(planf)
-            resp = client.post(f"/api/vnew/p/{pid_f}/generate", json={"confirmUsd": estf["totalUsd"]})
+            planp, _ = planmod.load_plan(owner, pid_p)
+            estp = genmod.estimate(planp)
+            resp = client.post(f"/api/vnew/p/{pid_p}/generate", json={"confirmUsd": estp["totalUsd"]})
             _join_drivers()
+            pplan, _ = planmod.load_plan(owner, pid_p)
+            pgen = pplan.get("gen") or {}
+            if pgen.get("status") != "partial":
+                bad.append(f"(p) 한 칸 실패인데 partial 이 아닙니다: {pgen.get('status')}")
+            seg1 = next((s for s in pgen.get("segments") or [] if s.get("id") == "seg1"), {})
+            if (seg1.get("webtoon") or {}).get("status") != "failed":
+                bad.append(f"(p) seg1 웹툰이 failed 가 아닙니다: {(seg1.get('webtoon') or {}).get('status')}")
+            if (seg1.get("real") or {}).get("status") != "completed":
+                bad.append(f"(p) seg1 실사가 completed 가 아닙니다(실패가 번졌습니다): {(seg1.get('real') or {}).get('status')}")
+            # 실패 칸만 재시도.
+            previz_request_calls.clear()
+            resp = client.post(f"/api/vnew/p/{pid_p}/generate/retry", json={"segId": "seg1", "variant": "webtoon"})
+            if resp.status_code != 202:
+                bad.append(f"(p) retry 가 202 가 아닙니다: {resp.status_code} {resp.get_json()}")
+            _join_drivers()
+            pplan2, _ = planmod.load_plan(owner, pid_p)
+            pgen2 = pplan2.get("gen") or {}
+            seg1b = next((s for s in pgen2.get("segments") or [] if s.get("id") == "seg1"), {})
+            if (seg1b.get("webtoon") or {}).get("status") != "completed":
+                bad.append(f"(p) retry 뒤 seg1 웹툰이 completed 가 아닙니다: {(seg1b.get('webtoon') or {}).get('status')}")
+            # retry 는 그 칸(seg1 webtoon)만 다시 제출 → 1회.
+            if len(previz_request_calls) != 1:
+                bad.append(f"(p) retry 가 그 칸만 1회 제출하지 않았습니다: {len(previz_request_calls)}")
+            if pgen2.get("status") != "done":
+                bad.append(f"(p) retry 뒤 done 이 아닙니다: {pgen2.get('status')}")
         finally:
-            planmod.save_plan = real_save
-        seg1_submits = [c for c in submit_video_calls if c["shot_id"] == "seg1"]
-        if len(seg1_submits) != 1:
-            bad.append(f"(f) 가짜 경합인데 seg1 제출이 1회가 아닙니다: {len(seg1_submits)}")
-        f_video_charges = [e for e in ledger_calls if e.get("kind") == "video" and "seg1" in str(e.get("key"))]
-        if len(f_video_charges) != 1:
-            bad.append(f"(f) 가짜 경합인데 seg1 영상 원장이 1회가 아닙니다: {len(f_video_charges)}")
+            _fal_mod.poll = fake_fal_poll
 
-        # (g) 실사 실패 → partial, retry 로 그 구간부터
-        pid_g = "prj_gen_g"
-        _make_plan(owner, pid_g, segments=two_segs, total=30)
-        submit_video_calls.clear()
-        video_poll["status"] = "Completed"; anime_poll["status"] = "Completed"
-        fail_real_seg["id"] = "seg1"  # seg1 실사 실패
-        plang, _ = planmod.load_plan(owner, pid_g)
-        estg = genmod.estimate(plang)
-        resp = client.post(f"/api/vnew/p/{pid_g}/generate", json={"confirmUsd": estg["totalUsd"]})
-        _join_drivers()
-        gplan, _ = planmod.load_plan(owner, pid_g)
-        ggen = gplan.get("gen") or {}
-        if ggen.get("status") != "partial":
-            bad.append(f"(g) 실사 실패인데 partial 이 아닙니다: {ggen.get('status')}")
-        seg1_state = (ggen.get("segments") or [{}])[0].get("real") or {}
-        if seg1_state.get("status") != "failed":
-            bad.append(f"(g) seg1 실사가 failed 가 아닙니다: {seg1_state.get('status')}")
-        seg2_state = (ggen.get("segments") or [{}, {}])[1].get("real") or {}
-        if seg2_state.get("status") not in ("waiting", "queued"):
-            bad.append(f"(g) 실패 뒤 seg2 가 진행됐습니다(순서 보장 깨짐): {seg2_state.get('status')}")
-        # retry: 이제 실패를 풀고 seg1 부터 다시.
-        fail_real_seg["id"] = ""
-        submit_video_calls.clear()
-        resp = client.post(f"/api/vnew/p/{pid_g}/generate/retry", json={"segId": "seg1"})
-        if resp.status_code != 202:
-            bad.append(f"(g) retry 가 202 가 아닙니다: {resp.status_code} {resp.get_json()}")
-        _join_drivers()
-        gplan2, _ = planmod.load_plan(owner, pid_g)
-        ggen2 = gplan2.get("gen") or {}
-        if ggen2.get("status") != "done":
-            bad.append(f"(g) retry 뒤 done 이 아닙니다: {ggen2.get('status')}")
-        seg1_after = (ggen2.get("segments") or [{}])[0].get("real") or {}
-        if seg1_after.get("status") != "completed":
-            bad.append(f"(g) retry 뒤 seg1 이 completed 가 아닙니다: {seg1_after.get('status')}")
-
-        # (h) 취소 — 제출됐지만 아직 완료 안 된 상태에서 취소.
-        pid_h = "prj_gen_h"
-        _make_plan(owner, pid_h, segments=two_segs, total=30)
-        cancel_calls.clear(); submit_video_calls.clear()
-        video_poll["status"] = "InProgress"  # 제출 뒤 완료되지 않게(취소 대상 만들기)
-        anime_poll["status"] = "InProgress"
-        fail_real_seg["id"] = ""
-        planh, _ = planmod.load_plan(owner, pid_h)
-        esth = genmod.estimate(planh)
-        resp = client.post(f"/api/vnew/p/{pid_h}/generate", json={"confirmUsd": esth["totalUsd"]})
-        # 드라이버가 opening·seg1 제출까지 하고 seg1 poll 에서 InProgress 로 쉰다. 잠깐 기다린다.
-        _time.sleep(0.5)
-        resp = client.post(f"/api/vnew/p/{pid_h}/cancel")
+        # (q) 옛 모드(gen.mode 없음) 계획 보기(gen_view) OK — 저장된 옛 gen 을 열어도 터지지 않는다.
+        pid_q = "prj_gen_q"
+        _make_plan(owner, pid_q, segments=two_segs, total=12)
+        qplan, _ = planmod.load_plan(owner, pid_q)
+        # 옛 모드 gen(mode 키 없음, opening·finalReal 등 옛 구조)을 직접 써 둔다.
+        qplan["gen"] = {
+            "genId": "g_old_1",
+            "status": "done",
+            "videoModel": "luma-ray2",
+            "resolution": "540p",
+            "createdAt": "2026-10-20T08:00:00Z",
+            "opening": {"status": "done", "imageKey": "op.jpg", "error": ""},
+            "segments": [
+                {"id": "seg1", "cutIds": ["c1"], "seconds": 6,
+                 "real": {"status": "completed", "attempt": 1, "outputKey": "r1.mp4", "error": ""},
+                 "webtoon": {"status": "completed", "attempt": 1, "outputKey": "w1.mp4", "error": ""}},
+            ],
+            "finalReal": {"status": "done", "key": "fr.mp4", "error": ""},
+            "finalWebtoon": {"status": "done", "key": "fw.mp4", "error": ""},
+            "selected": None,
+            "costUsd": 0.0,
+        }
+        planmod.save_plan(owner, pid_q, qplan)
+        view = genmod.gen_view(owner, pid_q, qplan)
+        if not view or view.get("status") != "done":
+            bad.append(f"(q) 옛 모드 gen_view 가 done 을 못 돌려줍니다: {view and view.get('status')}")
+        if view and view.get("mode") not in ("", None):
+            bad.append(f"(q) 옛 모드인데 mode 가 비어 있지 않습니다: {view.get('mode')}")
+        # 옛 모드도 선택(select) 이 그대로 된다.
+        resp = client.post(f"/api/vnew/p/{pid_q}/select", json={"variant": "real"})
         if resp.status_code != 200:
-            bad.append(f"(h) 취소가 200 이 아닙니다: {resp.status_code} {resp.get_json()}")
-        video_poll["status"] = "Completed"; anime_poll["status"] = "Completed"
-        _join_drivers()
-        hplan, _ = planmod.load_plan(owner, pid_h)
-        hgen = hplan.get("gen") or {}
-        if hgen.get("status") != "cancelled":
-            bad.append(f"(h) 취소 뒤 gen.status 가 cancelled 가 아닙니다: {hgen.get('status')}")
-        # 제출됐던 seg1 실사는 cancelled, 공급자 취소가 시도됐다(ok).
-        hseg1 = (hgen.get("segments") or [{}])[0].get("real") or {}
-        if hseg1.get("status") != "cancelled":
-            bad.append(f"(h) 취소 뒤 seg1 실사가 cancelled 가 아닙니다: {hseg1.get('status')}")
-        if hseg1.get("invocationArn") and not cancel_calls:
-            bad.append("(h) 제출된 구간인데 공급자 취소가 시도되지 않았습니다")
+            bad.append(f"(q) 옛 모드 select 가 200 이 아닙니다: {resp.status_code} {resp.get_json()}")
 
-        # (i) select — done 일 때만, 고른 그림체가 selected 에 남는다.
-        pid_i = "prj_gen_i"
-        _make_plan(owner, pid_i, segments=two_segs, total=30)
-        video_poll["status"] = "Completed"; anime_poll["status"] = "Completed"; fail_real_seg["id"] = ""
-        plani, _ = planmod.load_plan(owner, pid_i)
-        esti = genmod.estimate(plani)
-        resp = client.post(f"/api/vnew/p/{pid_i}/generate", json={"confirmUsd": esti["totalUsd"]})
-        _join_drivers()
-        # done 전 select 는 거절돼야 하지만 여기선 이미 done. 먼저 done 확인.
-        iplan, _ = planmod.load_plan(owner, pid_i)
-        if (iplan.get("gen") or {}).get("status") != "done":
-            bad.append(f"(i) select 전 gen 이 done 이 아닙니다: {(iplan.get('gen') or {}).get('status')}")
-        resp = client.post(f"/api/vnew/p/{pid_i}/select", json={"variant": "webtoon"})
-        if resp.status_code != 200:
-            bad.append(f"(i) select 가 200 이 아닙니다: {resp.status_code} {resp.get_json()}")
-        iplan2, _ = planmod.load_plan(owner, pid_i)
-        if (iplan2.get("gen") or {}).get("selected") != "webtoon":
-            bad.append(f"(i) selected 가 webtoon 이 아닙니다: {(iplan2.get('gen') or {}).get('selected')}")
-        # 잘못된 variant 거절
-        resp = client.post(f"/api/vnew/p/{pid_i}/select", json={"variant": "nope"})
-        if resp.status_code != 400:
-            bad.append(f"(i) 잘못된 variant select 가 400 이 아닙니다: {resp.status_code}")
+        _settings.FAL_KEY = saved_fal_key
+
 
     except Exception as exc:  # noqa: BLE001
         import traceback as _tb  # noqa: PLC0415
@@ -4888,6 +5038,7 @@ def check_vnew_generate() -> None:
         genmod._fetch_bytes = orig["_fetch_bytes"]
         genmod.characters.load_char = orig["gen_load_char"]
         _fal_mod.poll = orig["fal_poll"]
+        genmod._previz_request = orig["previz_request"]
         _ledger_mod.charge = orig["charge"]
         genmod.threading.Thread = orig["Thread"]
 
@@ -4895,9 +5046,10 @@ def check_vnew_generate() -> None:
         fail("영상만들기_신규 생성(vnew generate) 검사 실패\n" + "\n".join(f"  {item}" for item in bad))
     else:
         ok(
-            "영상만들기_신규 생성(vnew generate) 검사 (a)estimate·CostMismatch (b)실사 front 없음 409"
-            " (c)순서 opening→seg1(opening)→seg2(last frame) (d)webtoon 변환·참고≤4 (e)concat·done"
-            " (f)가짜 경합 1회 (g)실사 실패 partial·retry (h)취소 (i)select"
+            "영상만들기_신규 생성(vnew generate, 프리비즈) 검사 (j)미승인·미녹화 409 PrevizRequired"
+            " (k)구간×2 제출·실사 image_urls 없음·정면=기본복장 (l)웹툰 elements≤3+image_urls1 총≤4"
+            " (m)참고 비율 0.4~2.5 (n)@Element1·색 매핑·Do not add or remove anyone (o)concat2·done·estimate×2"
+            " (p)실패 칸만 재시도 (q)옛 모드 보기·select"
         )
 
 
@@ -5088,8 +5240,8 @@ def check_vnew_real_start() -> None:
 
     (a) plan.available_models 의 realStartImage: byteplus(Seedance) false, 나머지(Luma·fal) true
     (b) plan.default_video_model 은 realStartImage=true 중 첫 번째
-    (c) generate.check_preconditions 가 realStartImage=false 모델(Seedance)을 409
-        RealStartImageUnsupported 로 거절, true 모델은 그 검사를 통과
+    (c) 038 이후 생성은 프리비즈 기반 — check_preconditions 가 프리비즈 미승인/미녹화를 409
+        PrevizRequired 로 막는다(모델 무관). _model_accepts_real_start 함수는 그대로.
     (d) errors.USER_FACING_KINDS 에 RealStartImageUnsupported 가 있다
     (e) _user_facing_error 가 'may contain real person' 을 한국어 문구로 바꾼다
     """
@@ -5143,33 +5295,30 @@ def check_vnew_real_start() -> None:
     finally:
         planmod.vpoc_ark.choices = real_choices
 
-    # (c) check_preconditions — realStartImage=false(Seedance) 거절, true(Luma) 통과.
+    # (c) check_preconditions — 038 이후 생성은 프리비즈 기반이다. 비디오 모델의 실사 시작 이미지
+    # 거절(RealStartImageUnsupported)은 더 이상 선행 조건이 아니다. 프리비즈 미승인/미녹화면
+    # PrevizRequired 로 막는다(모델과 무관). _model_accepts_real_start 함수 자체는 그대로 둔다.
     def _plan(model: str) -> dict:
         return {
             "input": {"videoModel": model, "characters": []},
             "conti": {"status": "ready", "segments": [{"id": "seg1", "cutIds": ["c1"], "seconds": 10}]},
+            "previz": {"approved": False, "recordings": {}},
             "gen": {},
         }
 
     seedance_model = next(iter(vpoc_settings.ARK_MODEL_IDS.keys()))
-    try:
-        genmod.check_preconditions(_plan(seedance_model), "tester")
-        bad.append("(c) Seedance 모델이 거절되지 않았습니다")
-    except Exception as exc:  # noqa: BLE001
-        if getattr(exc, "kind", "") != "RealStartImageUnsupported":
-            bad.append(f"(c) Seedance 거절 kind 가 RealStartImageUnsupported 가 아닙니다: {getattr(exc, 'kind', '?')}")
-        if getattr(exc, "status", 0) != 409:
-            bad.append(f"(c) Seedance 거절이 409 가 아닙니다: {getattr(exc, 'status', '?')}")
+    # 모델과 무관하게 프리비즈 미승인이면 PrevizRequired(409).
+    for model in (seedance_model, "luma-ray2"):
+        try:
+            genmod.check_preconditions(_plan(model), "tester")
+            bad.append(f"(c) 프리비즈 미승인인데 거절되지 않았습니다(model={model})")
+        except Exception as exc:  # noqa: BLE001
+            if getattr(exc, "kind", "") != "PrevizRequired":
+                bad.append(f"(c) 미승인 거절 kind 가 PrevizRequired 가 아닙니다(model={model}): {getattr(exc, 'kind', '?')}")
+            if getattr(exc, "status", 0) != 409:
+                bad.append(f"(c) 미승인 거절이 409 가 아닙니다(model={model}): {getattr(exc, 'status', '?')}")
 
-    # Luma(실사 시작 이미지 받음)는 그 검사를 통과하고, 캐릭터 없음(실사 front)으로 CharacterRealMissing
-    # 까지 진행하거나(캐릭터 있으면) 통과한다 — 어느 쪽이든 RealStartImageUnsupported 는 아니어야 한다.
-    try:
-        genmod.check_preconditions(_plan("luma-ray2"), "tester")
-    except Exception as exc:  # noqa: BLE001
-        if getattr(exc, "kind", "") == "RealStartImageUnsupported":
-            bad.append("(c) Luma 가 RealStartImageUnsupported 로 거절됐습니다(실사 시작 이미지를 받는데)")
-
-    # _model_accepts_real_start 직접
+    # _model_accepts_real_start 직접(함수는 그대로 남아 있다)
     if genmod._model_accepts_real_start(seedance_model):
         bad.append("(c) _model_accepts_real_start(Seedance) 가 True 입니다")
     if not genmod._model_accepts_real_start("luma-ray2"):
@@ -5197,7 +5346,7 @@ def check_vnew_real_start() -> None:
     else:
         ok(
             "vnew 실사 시작 이미지 거절 검사 (a)realStartImage byteplus false·나머지 true"
-            " (b)기본 모델 true 첫 번째 (c)Seedance 409 RealStartImageUnsupported·Luma/fal 통과"
+            " (b)기본 모델 true 첫 번째 (c)생성은 프리비즈 기반 — 미승인 409 PrevizRequired"
             " (d)USER_FACING_KINDS (e)'may contain real person'→한국어"
         )
 
@@ -5353,6 +5502,8 @@ def check_vnew_previz() -> None:
     (e) PUT 정리·승인 해제
     (f) 녹화 업로드 변환(합성 webm → mp4) · 길이 벗어나면 400
     (g) recordedAll
+    (j) 프레임 묶음 업로드(3 묶음) + finish → mp4 길이 = frames/fps, 프레임 정리
+    (k) 중간 묶음 누락이면 finish 400(MissingFrame)
     """
     sys.path.insert(0, str(ROOT / "app"))
     bad: list[str] = []
@@ -5585,18 +5736,27 @@ def check_vnew_previz() -> None:
         _join()
 
         # (d) 장소에 실사 variant 텍스처 키를 심는다(공간 시트가 만들어졌다고 가정).
+        # 키는 반드시 이 프로젝트의 locations 접두사 아래여야 텍스처 API 가 돌려준다. 바이트도 심는다.
+        loc_prefix = pvmod._locations_prefix(owner, pid)
+        tex_bytes = _tiny_jpeg(64, 64)
+
         def _seed_textures(d):
             from src.vnew import locations as _loc  # noqa: PLC0415
 
             office = next((l for l in d.get("locations") or [] if "principal" in (l.get("key") or "")), None)
             if office:
+                lid = office.get("id") or "loc1"
+                wall_keys = {s: f"{loc_prefix}{lid}/real/wall_{s}_v1.jpg" for s in _loc.SIDES}
+                floor_k = f"{loc_prefix}{lid}/real/floor_v1.jpg"
                 office["variants"]["real"] = {
                     "status": "ready",
-                    "wallKeys": {s: f"users/{owner}/.../wall_{s}.jpg" for s in _loc.SIDES},
-                    "floorKey": f"users/{owner}/.../floor.jpg",
-                    "sheetKey": f"users/{owner}/.../sheet.jpg",
+                    "wallKeys": wall_keys,
+                    "floorKey": floor_k,
+                    "sheetKey": f"{loc_prefix}{lid}/real/sheet_v1.jpg",
                     "error": "",
                 }
+                for k in list(wall_keys.values()) + [floor_k]:
+                    fake_store.blobs[k] = tex_bytes
 
         planmod.mutate_plan(owner, pid, _seed_textures)
 
@@ -5690,16 +5850,59 @@ def check_vnew_previz() -> None:
         if len(acolors) == 2 and acolors[0].lower() == acolors[1].lower():
             bad.append(f"(b) 설계 결과 인물 색 중복이 재배정되지 않았습니다: {acolors}")
 
-        # (d) 텍스처 키 채움 + presigned URL.
+        # (d) 텍스처 키 채움 + textureUrl(같은 출처 API 경로).
         room = office_scene.get("room") or {}
         walls = room.get("walls") or {}
         north = walls.get("north") or {}
         if not north.get("textureKey"):
             bad.append("(d) 벽 textureKey 가 채워지지 않았습니다")
         if not north.get("textureUrl"):
-            bad.append("(d) 벽 textureUrl(presigned) 이 없습니다")
+            bad.append("(d) 벽 textureUrl 이 없습니다")
         if not room.get("floorTextureKey"):
             bad.append("(d) 바닥 floorTextureKey 가 채워지지 않았습니다")
+
+        # (i) plan_view 의 textureUrl 은 서명 URL(S3 직통)이 아니라 같은 출처 텍스처 API 경로여야 한다.
+        import urllib.parse as _urlparse  # noqa: PLC0415
+
+        tex_api_prefix = f"/api/vnew/p/{pid}/previz/texture?"
+        wall_url = str(north.get("textureUrl") or "")
+        floor_url = str(room.get("floorTextureUrl") or "")
+        if not wall_url.startswith(tex_api_prefix):
+            bad.append(f"(i) 벽 textureUrl 이 텍스처 API 경로가 아닙니다: {wall_url}")
+        if wall_url.startswith("http"):
+            bad.append(f"(i) 벽 textureUrl 이 서명 URL(S3 직통)로 보입니다: {wall_url}")
+        if not floor_url.startswith(tex_api_prefix):
+            bad.append(f"(i) 바닥 textureUrl 이 텍스처 API 경로가 아닙니다: {floor_url}")
+        # textureUrl 의 key 가 textureKey 와 일치하는지.
+        if wall_url.startswith(tex_api_prefix):
+            qs = _urlparse.parse_qs(_urlparse.urlsplit(wall_url).query)
+            key_in_url = (qs.get("key") or [""])[0]
+            if key_in_url != str(north.get("textureKey") or ""):
+                bad.append(f"(i) textureUrl 의 key 가 textureKey 와 다릅니다: {key_in_url} vs {north.get('textureKey')}")
+
+        # (h) 텍스처 API: 올바른 key 는 200·이미지 바이트, 접두사 밖 key 는 404, 다른 사용자 프로젝트는 404.
+        if wall_url.startswith(tex_api_prefix):
+            resp = client.get(wall_url)
+            if resp.status_code != 200:
+                bad.append(f"(h) 텍스처 API 가 200 이 아닙니다: {resp.status_code}")
+            elif resp.data != tex_bytes:
+                bad.append("(h) 텍스처 API 가 저장된 이미지 바이트를 그대로 돌려주지 않습니다")
+            elif not str(resp.headers.get("Content-Type") or "").startswith("image/"):
+                bad.append(f"(h) 텍스처 API Content-Type 이 이미지가 아닙니다: {resp.headers.get('Content-Type')}")
+            elif "max-age=3600" not in str(resp.headers.get("Cache-Control") or ""):
+                bad.append(f"(h) 텍스처 API Cache-Control 이 private max-age=3600 이 아닙니다: {resp.headers.get('Cache-Control')}")
+
+        # (h) locations 접두사 밖 key → 404(다른 프로젝트·경로 접근 차단).
+        outside_key = f"users/{owner}/video/{pid}/vnew/uploads/not_a_texture.jpg"
+        resp = client.get(tex_api_prefix + _urlparse.urlencode({"key": outside_key}))
+        if resp.status_code != 404:
+            bad.append(f"(h) 접두사 밖 텍스처 key 가 404 가 아닙니다: {resp.status_code}")
+
+        # (h) 다른 사용자 프로젝트의 텍스처 key → 404(소유자 접두사가 달라 접두사 밖).
+        other_key = f"users/other_user/video/{pid}/vnew/locations/locX/real/wall_north_v1.jpg"
+        resp = client.get(tex_api_prefix + _urlparse.urlencode({"key": other_key}))
+        if resp.status_code != 404:
+            bad.append(f"(h) 다른 사용자 텍스처 key 가 404 가 아닙니다: {resp.status_code}")
 
         # 원장: 장소 2개 → 설계 LLM 2회 → charge_text 최소 2건.
         text_charges = [c for c in ledger_calls if "previz" in str(c.get("key") or "")]
@@ -5820,6 +6023,96 @@ def check_vnew_previz() -> None:
                 if any((r or {}).get("status") != "ready" for r in recs.values()):
                     bad.append(f"(g) 일부 구간 녹화 상태가 ready 가 아닙니다: {recs}")
 
+        # --- (j)(k) 프레임 단위 오프라인 렌더(frames 묶음 업로드 + finish) ---
+        # 실시간 녹화 대신 프레임 jpeg 를 올려 서버가 ffmpeg -framerate 로 mp4 를 만든다. 길이=frames/fps.
+        plan_now2 = client.get(f"/api/vnew/p/{pid}/plan").get_json() or {}
+        segments2 = (plan_now2.get("conti") or {}).get("segments") or []
+        rev_now = int(((plan_now2.get("previz") or {}).get("revision")) or 0)
+        if segments2 and _ffmpeg_bin:
+            segj = segments2[0]
+            segj_id = segj.get("id")
+            segj_s = float(segj.get("seconds") or 0)
+            fps_j = 24
+            frames_j = int(round(segj_s * fps_j))  # 길이 = frames/fps ≈ 구간 seconds
+            frame_jpg = _tiny_jpeg(1280, 720)
+
+            def _post_frames(seg_id, start, count):
+                import io as _io2  # noqa: PLC0415
+
+                data = {"f": [(_io2.BytesIO(frame_jpg), f"{start + k:05d}.jpg") for k in range(count)]}
+                return client.post(
+                    f"/api/vnew/p/{pid}/previz/recordings/{seg_id}/frames?start={start}",
+                    data=data,
+                    content_type="multipart/form-data",
+                )
+
+            # (j) 3 묶음으로 나눠 올린다(합 = frames_j).
+            import math as _math  # noqa: PLC0415
+
+            chunk = max(1, _math.ceil(frames_j / 3))
+            uploaded = 0
+            chunk_count = 0
+            while uploaded < frames_j:
+                this = min(chunk, frames_j - uploaded)
+                resp = _post_frames(segj_id, uploaded, this)
+                if resp.status_code != 201:
+                    bad.append(f"(j) 프레임 묶음 업로드가 201 이 아닙니다(start={uploaded}): {resp.status_code} {resp.get_json()}")
+                    break
+                uploaded += this
+                chunk_count += 1
+            if chunk_count != 3:
+                bad.append(f"(j) 프레임을 3 묶음으로 올리지 못했습니다: {chunk_count} 묶음(frames={frames_j})")
+
+            # 업로드된 프레임이 메인 버킷(fake_store)에 있는지(정리 전).
+            fprefix = pvmod.frames_prefix(owner, pid, rev_now, segj_id)
+            before = [k for k in fake_store.blobs if k.startswith(fprefix)]
+            if len(before) != frames_j:
+                bad.append(f"(j) 업로드된 프레임 수가 frames 와 다릅니다: {len(before)} vs {frames_j}")
+
+            # finish → mp4 길이 = frames/fps(= 구간 seconds ±0.5), recordedAll.
+            resp = client.post(
+                f"/api/vnew/p/{pid}/previz/recordings/{segj_id}/finish",
+                json={"frames": frames_j, "fps": fps_j},
+            )
+            if resp.status_code != 201:
+                bad.append(f"(j) finish 가 201 이 아닙니다: {resp.status_code} {resp.get_json()}")
+            else:
+                recj = (resp.get_json() or {}).get("recording") or {}
+                expect_len = frames_j / float(fps_j)
+                if abs(float(recj.get("seconds") or 0) - expect_len) > pvmod.REC_TOLERANCE_S:
+                    bad.append(f"(j) mp4 길이가 frames/fps 와 다릅니다: {recj.get('seconds')} vs {expect_len}")
+                if recj.get("status") != "ready" or not recj.get("url"):
+                    bad.append(f"(j) finish 결과가 ready·url 이 아닙니다: {recj}")
+                rkey = str(recj.get("key") or "")
+                if "/vnew/previz/" not in rkey or not rkey.endswith(f"/{segj_id}.mp4"):
+                    bad.append(f"(j) finish mp4 저장 키 경로가 예상과 다릅니다: {rkey}")
+
+            # (j) 프레임 정리: finish 뒤 프레임 파일이 모두 지워져야 한다.
+            after = [k for k in fake_store.blobs if k.startswith(fprefix)]
+            if after:
+                bad.append(f"(j) finish 후 임시 프레임이 지워지지 않았습니다: {len(after)}개 남음")
+
+            # (k) 중간 묶음 누락이면 finish 400. 다른 구간(또는 같은 구간 재업로드)에서 0 과 2 만 올리고 1 을 뺀다.
+            segk = segments2[-1]
+            segk_id = segk.get("id")
+            segk_s = float(segk.get("seconds") or 0)
+            frames_k = int(round(segk_s * fps_j))
+            if frames_k >= 3:
+                # 0 번과 마지막(frames_k-1) 만 올리고 가운데는 비운다.
+                _post_frames(segk_id, 0, 1)
+                _post_frames(segk_id, frames_k - 1, 1)
+                resp = client.post(
+                    f"/api/vnew/p/{pid}/previz/recordings/{segk_id}/finish",
+                    json={"frames": frames_k, "fps": fps_j},
+                )
+                if resp.status_code != 400 or (resp.get_json().get("error") or {}).get("type") != "MissingFrame":
+                    bad.append(f"(k) 중간 묶음 누락 finish 가 400 MissingFrame 으로 거절되지 않습니다: {resp.status_code} {resp.get_json()}")
+                # (k) 실패해도 프레임은 정리된다(finally).
+                kprefix = pvmod.frames_prefix(owner, pid, rev_now, segk_id)
+                leftover = [kk for kk in fake_store.blobs if kk.startswith(kprefix)]
+                if leftover:
+                    bad.append(f"(k) finish 실패 후 임시 프레임이 지워지지 않았습니다: {len(leftover)}개 남음")
+
     except Exception as exc:  # noqa: BLE001
         import traceback as _tb  # noqa: PLC0415
 
@@ -5839,6 +6132,8 @@ def check_vnew_previz() -> None:
         ok(
             "영상만들기_신규 프리비즈(vnew previz) 검사 (a)design 202·컷 1:1·시간 합계 (b)좌표·색·fov 보정"
             " (c)장소 2개 scene (d)텍스처 키·URL (e)PUT 정리·승인 해제 (f)녹화 변환·길이 400 (g)recordedAll"
+            " (h)텍스처 API 200·접두사 밖 404·다른 사용자 404 (i)textureUrl 은 API 경로"
+            " (j)frames 3묶음+finish mp4 길이=frames/fps·프레임 정리 (k)중간 묶음 누락 finish 400"
         )
 
 

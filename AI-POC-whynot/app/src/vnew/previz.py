@@ -37,6 +37,7 @@ from ..vpoc import llm as vpoc_llm
 from ..vpoc import settings as vpoc_settings
 from ..vpoc.errors import VpocError, now_iso
 from ..vpoc.store import STORE
+from ..vpoc import store as vpoc_store
 
 from . import previz_schema
 from . import settings as vnew_settings
@@ -60,11 +61,26 @@ REC_MIN_S = 3.0
 REC_MAX_S = 15.0
 # 업로드 바이트 상한(200MB).
 MAX_RECORDING_BYTES = 200 * 1024 * 1024
+# 프레임(오프라인 렌더) 한 장의 바이트 상한(2MB). jpeg 0.85 1280x720 은 보통 수백 KB.
+MAX_FRAME_BYTES = 2 * 1024 * 1024
+# 한 구간에 허용하는 최대 프레임 수(15초 × 60fps 여유). 터무니없는 요청을 막는다.
+MAX_FRAMES = 15 * 60
+# 프레임 fps 허용 범위(설계자: 기본 24).
+FRAME_FPS_MIN = 1
+FRAME_FPS_MAX = 60
 # design task 가 이 시간을 넘게 running 이면 멈춘 것으로 본다(조회 때 failed).
 TASK_STALL_S = 1800
 
 # 받을 수 있는 녹화 Content-Type.
 RECORDING_CONTENT_TYPES = ("video/webm", "video/mp4")
+
+# 텍스처 확장자 → Content-Type(서버가 같은 출처로 이미지 바이트를 돌려줄 때 쓴다). 모르면 jpeg.
+TEXTURE_CONTENT_TYPES = {
+    ".jpg": "image/jpeg",
+    ".jpeg": "image/jpeg",
+    ".png": "image/png",
+    ".webp": "image/webp",
+}
 
 
 # ================================================================ 키 규칙
@@ -79,6 +95,62 @@ def _root(owner: str, pid: str) -> str:
 def recording_key(owner: str, pid: str, rev: int, seg_id: str) -> str:
     """녹화 mp4 는 VIDEO_BUCKET 아래 .../vnew/previz/{rev}/{segId}.mp4."""
     return f"{_root(owner, pid)}/previz/{int(rev)}/{seg_id}.mp4"
+
+
+def frames_prefix(owner: str, pid: str, rev: int, seg_id: str) -> str:
+    """오프라인 렌더 프레임(jpeg) 임시 접두사 — 메인 버킷 .../vnew/previz/{rev}/frames/{segId}/.
+
+    파드가 여럿이라 로컬 임시 폴더 대신 S3(메인 버킷)에 둔다. finish 때 내려받아 ffmpeg 로 묶고
+    그 자리에서 지운다(임시). mp4 는 recording_key 로 VIDEO_BUCKET 에 따로 저장한다.
+    """
+    return f"{_root(owner, pid)}/previz/{int(rev)}/frames/{seg_id}/"
+
+
+def frame_key(owner: str, pid: str, rev: int, seg_id: str, index: int) -> str:
+    """프레임 한 장 키: .../frames/{segId}/{index:05d}.jpg(ffmpeg %05d 입력 순서)."""
+    return f"{frames_prefix(owner, pid, rev, seg_id)}{int(index):05d}.jpg"
+
+
+def _locations_prefix(owner: str, pid: str) -> str:
+    """이 프로젝트의 공간 시트(텍스처) 접두사. 텍스처 키는 반드시 이 아래여야 한다."""
+    return f"{_root(owner, pid)}/locations/"
+
+
+def texture_api_path(pid: str, key: str) -> str:
+    """같은 출처 텍스처 API 경로. 서명 URL 대신 이 경로를 textureUrl 로 준다(S3 CORS 회피)."""
+    if not key:
+        return ""
+    from urllib.parse import quote, urlencode  # noqa: PLC0415
+
+    return f"/api/vnew/p/{quote(str(pid), safe='')}/previz/texture?" + urlencode({"key": key})
+
+
+def texture_content_type(key: str) -> str:
+    """텍스처 키 확장자로 Content-Type 을 고른다. 모르는 확장자는 image/jpeg."""
+    _, ext = os.path.splitext(str(key or "").lower())
+    return TEXTURE_CONTENT_TYPES.get(ext, "image/jpeg")
+
+
+def texture_bytes(owner: str, pid: str, key: str) -> tuple[bytes, str]:
+    """프리비즈 벽·바닥 텍스처를 메인 버킷에서 읽어 (바이트, Content-Type)로 돌려준다.
+
+    key 가 이 프로젝트의 locations 접두사(users/{owner}/video/{pid}/vnew/locations/) 안인지
+    확인한다 — 아니면 404(다른 프로젝트·다른 사용자 데이터에 닿지 못하게). 못 읽어도 404.
+    브라우저는 이걸 Authorization 헤더로 받아 blob 으로 three.js 에 넘긴다(같은 출처 → 캔버스
+    오염 없음 → captureStream 녹화 가능).
+    """
+    key = str(key or "").strip()
+    prefix = _locations_prefix(owner, pid)
+    if not key or not key.startswith(prefix):
+        raise VpocError("vnew.previz.texture", "NotFound", "텍스처를 찾을 수 없습니다.", 404)
+    try:
+        body = STORE.get_bytes(key)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("vnew.previz.texture.missing key=%s err=%s", key, str(exc)[:150])
+        raise VpocError("vnew.previz.texture", "NotFound", "텍스처를 찾을 수 없습니다.", 404) from exc
+    if not body:
+        raise VpocError("vnew.previz.texture", "NotFound", "텍스처를 찾을 수 없습니다.", 404)
+    return body, texture_content_type(key)
 
 
 # ================================================================ 저장 틀
@@ -131,7 +203,9 @@ _DESIGN_SYSTEM = (
     "room.walls has north/east/south/west. light.from/to are 3D points, light.kind is 'sun' or 'lamp', "
     "and labelKo names it in Korean (e.g. '북쪽 창문 햇빛'). props are {id, labelKo, labelEn, shape "
     "('box'|'cylinder'), size:[w,h,d], pos:[x,y,z], rotY, color}. actors are {id, name (the role name), "
-    "color (a unique bright colour, clearly different from every other actor), heightM, charId?}. "
+    "color (a unique bright colour, clearly different from every other actor), heightM, charId?, "
+    "appearanceEn (a short English look: age, build, hair, clothing — ALWAYS write this, it labels the "
+    "mannequin when the character has no reference image)}. "
     "timeline has one entry per conti cut (keep the given cutId values): {cutId, start, end, camera:{pos, "
     "target, fov, moveTo?}, actors:[{id, pos:[x,0,z], facingDeg, pose ('stand'|'sit'|'kneel'|'walk'|'lie'), "
     "moveTo?, gesture?, speaking}]}. Within a cut the camera may move linearly via moveTo. When a cut "
@@ -245,6 +319,7 @@ _DESIGN_TOOL = {
                             "color": {"type": "string"},
                             "heightM": {"type": "number"},
                             "charId": {"type": "string"},
+                            "appearanceEn": {"type": "string"},
                         },
                     },
                 },
@@ -686,6 +761,170 @@ def save_recording(owner: str, pid: str, seg_id: str, body: bytes, content_type:
     return {"status": "ready", "key": key, "seconds": round(seconds, 3), "url": _presign_video(key)}
 
 
+# ================================================================ 프레임 단위 오프라인 렌더(frames · finish)
+#
+# 실시간 MediaRecorder 녹화는 브라우저가 rAF 를 줄이면(창 가려짐·백그라운드·느린 PC) 프레임이 빠진다
+# (13초 구간이 10프레임으로). 그래서 브라우저가 장면을 '그 시각으로 설정해 한 장씩' 그려 jpeg 로 모아
+# 올리면(frames), 서버가 ffmpeg -framerate 로 묶어 정확히 frames/fps 길이의 mp4 를 만든다(finish).
+# 실시간·rAF 와 무관해 창을 가려도 프레임이 안 빠진다. 기존 webm 업로드 API(save_recording)는 그대로 둔다.
+
+
+def save_frames(owner: str, pid: str, seg_id: str, start_index: int, frames: list[bytes]) -> dict:
+    """오프라인 렌더 프레임(jpeg) 한 묶음을 메인 버킷 임시 접두사에 저장한다.
+
+    - frames 는 순서대로. 키는 .../frames/{segId}/{(start_index+i):05d}.jpg.
+    - segId 는 conti.segments 의 id 여야 한다(없으면 404).
+    - 각 프레임 2MB·인덱스 범위 제한. revision 은 현재 previz.revision 을 쓴다.
+    반환: {ok, start, count, saved:[index...]}.
+    """
+    from . import plan as plan_mod  # noqa: PLC0415
+
+    if not frames:
+        raise VpocError("vnew.previz.frames", "Empty", "프레임이 비어 있습니다.", 400)
+    try:
+        start = int(start_index)
+    except (TypeError, ValueError) as exc:
+        raise VpocError("vnew.previz.frames", "BadStart", "start 값이 올바르지 않습니다.", 400) from exc
+    if start < 0 or start + len(frames) > MAX_FRAMES:
+        raise VpocError("vnew.previz.frames", "BadStart", "프레임 인덱스 범위를 벗어났습니다.", 400)
+
+    plan, _ = plan_mod.load_plan(owner, pid)
+    rev = int((plan.get("previz") or {}).get("revision") or 0)
+    if _find_segment(plan, seg_id) is None:
+        raise VpocError("vnew.previz.frames", "NoSegment", "구간을 찾을 수 없습니다.", 404)
+
+    saved: list[int] = []
+    for offset, body in enumerate(frames):
+        if not body:
+            raise VpocError("vnew.previz.frames", "EmptyFrame", "빈 프레임이 있습니다.", 400)
+        if len(body) > MAX_FRAME_BYTES:
+            raise VpocError("vnew.previz.frames", "FrameTooLarge", "프레임이 너무 큽니다(최대 2MB).", 400)
+        index = start + offset
+        STORE.put_bytes(frame_key(owner, pid, rev, seg_id, index), body, "image/jpeg")
+        saved.append(index)
+    return {"ok": True, "start": start, "count": len(saved), "saved": saved}
+
+
+def finish_recording(owner: str, pid: str, seg_id: str, frames: int, fps: int) -> dict:
+    """올라온 프레임들을 ffmpeg 로 묶어 mp4(h264 1280x720)를 만들고 저장·검증한 뒤 프레임을 지운다.
+
+    - frames 는 전체 프레임 수(0..frames-1 이 모두 있어야 한다 — 중간 묶음이 빠지면 400).
+    - 길이 = frames/fps. 구간 seconds ±0.5초, 절대 3~15초(벗어나면 400).
+    - mp4 는 기존과 같은 키(recording_key)·recordings 갱신. 성공·실패와 무관하게 프레임을 지운다.
+    반환: {status, key, seconds, url}.
+    """
+    from . import plan as plan_mod  # noqa: PLC0415
+
+    try:
+        total = int(frames)
+        rate = int(fps)
+    except (TypeError, ValueError) as exc:
+        raise VpocError("vnew.previz.finish", "BadArgs", "frames·fps 값이 올바르지 않습니다.", 400) from exc
+    if total <= 0 or total > MAX_FRAMES:
+        raise VpocError("vnew.previz.finish", "BadFrames", "프레임 수가 올바르지 않습니다.", 400)
+    if rate < FRAME_FPS_MIN or rate > FRAME_FPS_MAX:
+        raise VpocError("vnew.previz.finish", "BadFps", "fps 가 올바르지 않습니다.", 400)
+
+    plan, _ = plan_mod.load_plan(owner, pid)
+    previz = plan.get("previz") or {}
+    rev = int(previz.get("revision") or 0)
+    segment = _find_segment(plan, seg_id)
+    if segment is None:
+        raise VpocError("vnew.previz.finish", "NoSegment", "구간을 찾을 수 없습니다.", 404)
+    target_seconds = float(segment.get("seconds") or 0)
+
+    try:
+        mp4, seconds = _frames_to_mp4(owner, pid, rev, seg_id, total, rate)
+
+        # 길이 확인: 구간 seconds ±0.5초, 절대 3~15초. frames/fps 가 곧 길이다.
+        if seconds < REC_MIN_S or seconds > REC_MAX_S:
+            raise VpocError(
+                "vnew.previz.finish", "BadDuration",
+                f"녹화 길이가 {REC_MIN_S:.0f}~{REC_MAX_S:.0f}초 범위를 벗어났습니다(측정 {seconds:.2f}초).", 400,
+            )
+        if target_seconds > 0 and abs(seconds - target_seconds) > REC_TOLERANCE_S:
+            raise VpocError(
+                "vnew.previz.finish", "BadDuration",
+                f"녹화 길이가 구간 {target_seconds:.2f}초와 ±{REC_TOLERANCE_S}초 넘게 차이납니다(측정 {seconds:.2f}초).", 400,
+            )
+
+        key = recording_key(owner, pid, rev, seg_id)
+        STORE.put_bytes(key, mp4, "video/mp4", bucket=vpoc_settings.VIDEO_BUCKET)
+
+        def mutator(data: dict) -> None:
+            pv = data.setdefault("previz", new_previz())
+            pv.setdefault("recordings", {})[seg_id] = {"status": "ready", "key": key, "seconds": round(seconds, 3)}
+
+        plan_mod.mutate_plan(owner, pid, mutator)
+        return {"status": "ready", "key": key, "seconds": round(seconds, 3), "url": _presign_video(key)}
+    finally:
+        # 성공이든 실패든 임시 프레임은 지운다(파드가 여럿이라 S3 에 쌓이지 않게).
+        _delete_frames(owner, pid, rev, seg_id, total)
+
+
+def _frames_to_mp4(owner: str, pid: str, rev: int, seg_id: str, total: int, fps: int) -> tuple[bytes, float]:
+    """프레임 jpeg 들을 내려받아 ffmpeg -framerate 로 mp4(h264 1280x720)로 묶는다. (mp4, 길이초).
+
+    0..total-1 이 모두 있어야 한다 — 하나라도 없으면 400(중간 묶음 누락). 길이 = total/fps.
+    """
+    binary = stitcher.ffmpeg_path()
+    with tempfile.TemporaryDirectory(prefix="previz-frames-") as workdir:
+        for index in range(total):
+            key = frame_key(owner, pid, rev, seg_id, index)
+            try:
+                body = STORE.get_bytes(key)
+            except Exception as exc:  # noqa: BLE001
+                raise VpocError(
+                    "vnew.previz.finish", "MissingFrame",
+                    f"프레임 {index} 가 없습니다. 모든 묶음을 올린 뒤 finish 해 주세요.", 400,
+                ) from exc
+            if not body:
+                raise VpocError(
+                    "vnew.previz.finish", "MissingFrame", f"프레임 {index} 가 비어 있습니다.", 400,
+                )
+            with open(os.path.join(workdir, f"{index:05d}.jpg"), "wb") as handle:
+                handle.write(body)
+        out = os.path.join(workdir, "out.mp4")
+        command = [
+            binary, "-y", "-hide_banner", "-loglevel", "error",
+            "-framerate", str(int(fps)),
+            "-i", os.path.join(workdir, "%05d.jpg"),
+            # 1280x720 안에 맞추고(비율 유지) 홀수 폭을 피하려 pad 로 정확히 채운다.
+            "-vf", f"scale={REC_WIDTH}:{REC_HEIGHT}:force_original_aspect_ratio=decrease,"
+                   f"pad={REC_WIDTH}:{REC_HEIGHT}:(ow-iw)/2:(oh-ih)/2",
+            "-c:v", "libx264", "-preset", "veryfast", "-crf", "23",
+            "-pix_fmt", "yuv420p", "-an", "-movflags", "+faststart",
+            "-r", str(int(fps)), out,
+        ]
+        result = subprocess.run(
+            command, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            timeout=stitcher.STITCH_TIMEOUT_SECONDS, check=False,
+        )
+        if result.returncode != 0 or not os.path.exists(out) or not os.path.getsize(out):
+            detail = result.stderr.decode("utf-8", errors="replace")[:300]
+            raise VpocError("vnew.previz.finish", "ConvertFailed", f"프레임 묶기에 실패했습니다: {detail}", 502)
+        seconds = stitcher.probe_duration(out)
+        with open(out, "rb") as handle:
+            mp4 = handle.read()
+    return mp4, float(seconds or 0.0)
+
+
+def _delete_frames(owner: str, pid: str, rev: int, seg_id: str, total: int) -> None:
+    """임시 프레임(0..total-1)을 지운다. STORE.delete_bytes 가 있으면 그걸, 없으면 S3 직접."""
+    deleter = getattr(STORE, "delete_bytes", None)
+    for index in range(max(0, int(total))):
+        key = frame_key(owner, pid, rev, seg_id, index)
+        try:
+            if callable(deleter):
+                deleter(key)
+            else:
+                vpoc_store.s3_client(vpoc_settings.AWS_REGION).delete_object(
+                    Bucket=vpoc_settings.MAIN_BUCKET, Key=key
+                )
+        except Exception as exc:  # noqa: BLE001
+            log.warning("vnew.previz.frames.delete_failed key=%s err=%s", key, str(exc)[:150])
+
+
 def _find_segment(plan: dict, seg_id: str) -> dict | None:
     for seg in (plan.get("conti") or {}).get("segments") or []:
         if str(seg.get("id") or "") == seg_id:
@@ -756,7 +995,7 @@ def previz_view(owner: str, pid: str, plan: dict) -> dict:
 
     scenes_out = []
     for scene in previz.get("scenes") or []:
-        scenes_out.append(_scene_view(scene))
+        scenes_out.append(_scene_view(pid, scene))
 
     segments = (plan.get("conti") or {}).get("segments") or []
     recordings_in = previz.get("recordings") or {}
@@ -790,17 +1029,22 @@ def previz_view(owner: str, pid: str, plan: dict) -> dict:
     }
 
 
-def _scene_view(scene: dict) -> dict:
-    """scene JSON 에 텍스처 presigned URL 을 더해 돌려준다(키는 그대로 남긴다)."""
+def _scene_view(pid: str, scene: dict) -> dict:
+    """scene JSON 에 텍스처 API 경로(textureUrl)를 더해 돌려준다(키는 그대로 남긴다).
+
+    서명 URL(S3 직통) 대신 같은 출처 API 경로를 준다 — 버킷에 CORS 설정이 없어 three.js 가 S3 를
+    직접 부르면 텍스처가 안 불러지거나 캔버스가 오염돼 녹화가 막히기 때문. 브라우저는 이 경로를
+    Authorization 헤더로 받아 blob 으로 넘긴다(previz.texture_bytes).
+    """
     out = copy.deepcopy(scene)
     room = out.get("room") or {}
     walls = room.get("walls") or {}
     for side in previz_schema.SIDES:
         wall = walls.get(side)
         if isinstance(wall, dict) and wall.get("textureKey"):
-            wall["textureUrl"] = _presign_image(str(wall.get("textureKey")))
+            wall["textureUrl"] = texture_api_path(pid, str(wall.get("textureKey")))
     if room.get("floorTextureKey"):
-        room["floorTextureUrl"] = _presign_image(str(room.get("floorTextureKey")))
+        room["floorTextureUrl"] = texture_api_path(pid, str(room.get("floorTextureKey")))
     return out
 
 
@@ -835,16 +1079,6 @@ def _charge(owner: str, pid: str, plan_id: str, usage: dict, model: str) -> None
         )
     except Exception as exc:  # noqa: BLE001
         log.warning("vnew.previz.charge.failed pid=%s err=%s", pid, str(exc)[:200])
-
-
-def _presign_image(key: str) -> str:
-    if not key:
-        return ""
-    try:
-        return STORE.presign(key, content_type="image/jpeg", expires=3600)
-    except Exception as exc:  # noqa: BLE001
-        log.warning("vnew.previz.presign_image.failed key=%s err=%s", key, str(exc)[:150])
-        return ""
 
 
 def _presign_video(key: str) -> str:

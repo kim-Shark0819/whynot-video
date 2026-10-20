@@ -693,9 +693,12 @@ def run_build(owner: str, pid: str, lid: str, task_id: str) -> None:
         loc["styleEn"] = _project_style(owner, data)
         loc["extraEn"] = _extra_en(loc)
 
-        # a. 설계(Claude → Astra). 이미 설계가 있으면(수정본) 그대로 쓰고, 없으면 새로 받는다.
+        # a. 설계(Claude → Astra). [다시 만들기] 는 설계를 새로 한다 — 예전 설계(벽 4면 "흰 벽 가정")를
+        #    재사용하면 창문 없는 방이 그대로 남기 때문. 다만 사용자가 설계를 직접 고친 적이 있으면
+        #    (designEditedAt) 그 수정본을 유지한다. 설계가 아직 없으면(walls 없음) 당연히 새로 받는다.
         design = loc.get("design") or {}
-        if not (design.get("walls")):
+        user_edited = bool(design.get("designEditedAt"))
+        if not design.get("walls") or not user_edited:
             design = design_location(owner, pid, loc)
             _store_design(owner, pid, lid, design)
             loc["design"] = design
@@ -934,6 +937,10 @@ def update_location(owner: str, pid: str, lid: str, patch: dict) -> dict:
             design["floorEn"] = str(patch.get("floorEn") or "").strip()
         if "ceilingEn" in patch:
             design["ceilingEn"] = str(patch.get("ceilingEn") or "").strip()
+        # 사용자가 설계를 직접 고쳤음을 표시한다. 이후 [다시 만들기] 는 설계를 새로 받지 않고 이 수정본을
+        # 유지한다(run_build 가 designEditedAt 을 본다). 설계 관련 필드를 고쳤을 때만 찍는다.
+        if any(k in patch for k in ("lightEn", "walls", "floorEn", "ceilingEn")):
+            design["designEditedAt"] = now_iso()
         data["revision"] = int(data.get("revision") or 0) + 1
         return loc
 
