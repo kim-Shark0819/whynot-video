@@ -2253,6 +2253,451 @@ def check_vnew_characters() -> None:
         )
 
 
+# ---------------------------------------------------------------- 9. 영상만들기_신규 계획(vnew plan)
+
+
+def check_vnew_plan() -> None:
+    """영상만들기_신규 ①입력 ②대본 ③콘티 서버 — LLM 은 가짜(설계자 2026-10-20).
+
+    (a) 계획 생성·업로드·자연 정렬(1,2,10,a 순)
+    (b) input 검증(61초 거절·모르는 모델 거절·잘못된 order 거절)
+    (c) script 202 → ready, 이미지 순서 유지·타일 상한(40)
+    (d) conti 최소 5컷 보정(모델이 3컷 → 결과 ≥5), seconds 합 = totalSeconds,
+        segments: 60초·최대 15초 → 4구간 이상·구간 ≤15초
+    (e) 컷 하나가 최대 길이보다 길면 나눔(compute_segments 함수 단위)
+    (f) 취소 시 늦게 온 결과가 버려짐
+    (g) 다른 사용자 403/404, video 트랙 프로젝트 거절
+    """
+    sys.path.insert(0, str(ROOT / "app"))
+    bad: list[str] = []
+
+    import io as _io  # noqa: PLC0415
+    import time as _time  # noqa: PLC0415
+
+    from flask import Flask  # noqa: PLC0415
+
+    from src import vnew  # noqa: PLC0415
+    from src.vnew import plan as planmod  # noqa: PLC0415
+    from src.vpoc import images as _images  # noqa: PLC0415
+
+    fake_store = _FakeCharStore()
+
+    # --- 가짜 LLM: 대본·콘티. 블록(타일)을 캡처해 순서·상한을 검증한다. ---
+    script_blocks: list[list[dict]] = []
+    conti_calls = {"n": 0}
+
+    def fake_analyze_script(blocks, *, model):
+        # 모델에 보낸 타일 블록을 기록(이미지 블록만).
+        script_blocks.append([b for b in blocks if "image" in b])
+        payload = {
+            "setting": {
+                "locationKo": "교장실",
+                "locationEn": "A closed principal's office",
+                "enclosed": True,
+                "timeKo": "낮",
+                "moodKo": "긴장",
+                "layoutKo": "김부장이 책상 앞에 앉아 있다",
+                "layoutEn": "Kim stays seated at the desk",
+            },
+            # 웹툰이 중간에 장소를 바꾼다: 앞 항목(panels 0,1)은 교장실, 뒤 항목(panels 2,3)은 노을 진 거리.
+            "entries": [
+                {
+                    "id": "e1",
+                    "panels": [0, 1],
+                    "speaker": "김부장",
+                    "lineKo": "자네 지금 뭐 하는 건가?",
+                    "situationKo": "김부장이 호통친다",
+                    "emotionKo": "분노",
+                    "locationKo": "교장실",
+                    "locationEn": "A closed principal's office",
+                    "characters": [
+                        {"name": "김부장", "positionKo": "같은 자리", "positionEn": "at the desk", "actionKo": "호통친다"}
+                    ],
+                },
+                {
+                    "id": "e2",
+                    "panels": [2, 3],
+                    "speaker": "김부장",
+                    "lineKo": "오늘은 그만하지.",
+                    "situationKo": "김부장이 밖으로 나와 걷는다",
+                    "emotionKo": "피곤",
+                    "locationKo": "노을 진 거리",
+                    "locationEn": "A city street at sunset",
+                    "characters": [
+                        {"name": "김부장", "positionKo": "길 가운데", "positionEn": "in the middle of the street", "actionKo": "걷는다"}
+                    ],
+                },
+            ],
+        }
+        return payload, {"model": model, "inputTokens": 10, "outputTokens": 20}
+
+    def fake_analyze_conti(blocks, *, model):
+        # 첫 호출은 3컷(부족), 재요청(두 번째)에도 3컷으로 둬 서버의 '쪼개 채우기'를 검증한다.
+        # cut1·cut2 는 교장실 항목(panels 0·1)을 맡지만 모델이 WRONG place 를 줬다 → 웹툰 장소로 보정.
+        # cut3 은 노을 진 거리 항목(panels 3)을 맡고 모델이 올바른 장소를 줬다 → 그대로 유지.
+        conti_calls["n"] += 1
+        specs = [
+            (0, "WRONG place that server must override"),
+            (1, "WRONG place that server must override"),
+            (3, "A city street at sunset"),
+        ]
+        cuts = []
+        for index, (panel, location) in enumerate(specs):
+            cuts.append(
+                {
+                    "id": f"c{index + 1}",
+                    "no": index + 1,
+                    "seconds": 20,  # 합 60, 각 컷이 최대 15초보다 길다(쪼개기도 검증).
+                    "panels": [panel],
+                    "shotKo": f"컷{index + 1}",
+                    "cameraEn": "static camera",
+                    "locationEn": location,
+                    "characters": [{"name": "김부장", "positionEn": "at the desk", "actionEn": "speaks"}],
+                    "dialogueKo": "자네 지금 뭐 하는 건가?",
+                    "situationKo": "호통",
+                    "promptEn": "Kim in the scene, static camera.",
+                }
+            )
+        return {"cuts": cuts}, {"model": model, "inputTokens": 5, "outputTokens": 10}
+
+    # --- 가짜 타일 자르기: 파일마다 여러 타일을 돌려줘 순서·상한을 검증한다. ---
+    # 업로드는 진짜 이미지라 normalize_upload 가 다시 JPEG 로 인코딩한다. 파일을 구별하려고
+    # 각 업로드를 '고유한 빨강값(label)'의 단색으로 만들고, 여기서 그 픽셀을 읽어 라벨을 복원한다.
+    tiles_per_file = {"n": 3}
+
+    def _file_label(jpeg: bytes) -> int:
+        # JPEG 재인코딩으로 빨강값이 몇 단위 흔들릴 수 있다. 라벨 간격(20)의 격자에 맞춰 스냅한다
+        # (라벨 = 10 + 20*k). 가장 가까운 격자값으로 되돌려 파일을 안정적으로 구별한다.
+        import io as _io2  # noqa: PLC0415
+
+        from PIL import Image as _Img  # noqa: PLC0415
+
+        with _Img.open(_io2.BytesIO(jpeg)) as image:
+            r, _g, _b = image.convert("RGB").getpixel((0, 0))
+        k = round((int(r) - 10) / 20)
+        return 10 + 20 * max(0, k)
+
+    def fake_tiles_for_analysis(jpeg):
+        # 파일 라벨(빨강값)을 타일 바이트에 심어 둔다(순서·상한 검증용).
+        label = _file_label(jpeg)
+        return [f"label{label}-tile{index}".encode("ascii") for index in range(tiles_per_file["n"])]
+
+    # --- 가짜 캐릭터 로드(roster 용). 없으면 조용히 건너뛰므로 패치 불필요하지만 안전하게. ---
+    def fake_load_char(owner, char_id):
+        return {"name": "김부장역", "status": "ready", "analysis": {"appearanceEn": "a middle-aged man"}, "variants": {}}, "e1"
+
+    orig = {
+        "STORE": planmod.STORE,
+        "_analyze_script": planmod._analyze_script,
+        "_analyze_conti": planmod._analyze_conti,
+        "tiles": _images.tiles_for_analysis,
+        "load_char": planmod.characters.load_char,
+        "Thread": planmod.threading.Thread,
+        "charge_text": planmod.vpoc_ledger.charge_text,
+    }
+    planmod.STORE = fake_store
+    planmod._analyze_script = fake_analyze_script
+    planmod._analyze_conti = fake_analyze_conti
+    _images.tiles_for_analysis = fake_tiles_for_analysis
+    planmod.characters.load_char = fake_load_char
+
+    # 원장은 가짜(네트워크 금지). 호출을 기록만 한다.
+    ledger_calls: list[dict] = []
+
+    def fake_charge_text(key, **kwargs):
+        ledger_calls.append({"key": key, **kwargs})
+        return {"spentUsd": 0.0, "capUsd": None}
+
+    planmod.vpoc_ledger.charge_text = fake_charge_text
+
+    started_threads: list = []
+    orig_thread = planmod.threading.Thread
+
+    def _tracking_thread(*args, **kwargs):
+        t = orig_thread(*args, **kwargs)
+        started_threads.append(t)
+        return t
+
+    planmod.threading.Thread = _tracking_thread
+
+    def _join_tasks():
+        for t in list(started_threads):
+            t.join(timeout=30)
+        started_threads.clear()
+
+    def _real_image(label: int, *, height: int = 900) -> bytes:
+        # 진짜 세로 긴 PNG(빨강값=label 로 파일 구별). normalize_upload 가 열 수 있어야 한다.
+        import io as _io3  # noqa: PLC0415
+
+        from PIL import Image as _Img  # noqa: PLC0415
+
+        buffer = _io3.BytesIO()
+        _Img.new("RGB", (600, height), (label, 180, 160)).save(buffer, format="PNG")
+        return buffer.getvalue()
+
+    try:
+        owner_box = {"name": "tester"}
+        project_box = {"track": "video_new", "owner": "tester"}
+
+        def make_client():
+            app = Flask(__name__)
+            bp = vnew.create_blueprint(
+                vnew.VnewDependencies(
+                    require_auth=lambda h: h,
+                    current_owner=lambda: owner_box["name"],
+                    get_project=lambda pid: {"id": pid, "owner": project_box["owner"], "track": project_box["track"]},
+                    can_read_project=lambda proj: True,
+                    can_write_project=lambda proj: True,
+                    project_owner_prefix=lambda name: name,  # 항등(검사용)
+                )
+            )
+            app.register_blueprint(bp)
+            return app.test_client()
+
+        client = make_client()
+        pid = "prj_vnew_1"
+
+        # (a) 계획 생성(없으면 빈 계획)
+        resp = client.get(f"/api/vnew/p/{pid}/plan")
+        if resp.status_code != 200:
+            bad.append(f"(a) GET /plan 이 200 이 아닙니다: {resp.status_code} {resp.get_data(as_text=True)[:200]}")
+        body = resp.get_json() or {}
+        if not body.get("planId"):
+            bad.append("(a) 빈 계획에 planId 가 없습니다")
+
+        # (a) 업로드 — 이름이 뒤섞인 5장(자연 정렬 검증용): 10.png,2.png,a.png,1.png,ab.png
+        # 각 파일은 빨강값이 다른 진짜 세로 PNG(라벨 = 10 + i*20).
+        names = ["10.png", "2.png", "a.png", "1.png", "ab.png"]
+        labels = [10 + i * 20 for i in range(len(names))]
+        data = {"files": [(_io.BytesIO(_real_image(labels[i])), name) for i, name in enumerate(names)]}
+        resp = client.post(f"/api/vnew/p/{pid}/uploads", data=data, content_type="multipart/form-data")
+        if resp.status_code != 201:
+            bad.append(f"(a) 업로드가 201 이 아닙니다: {resp.status_code} {resp.get_data(as_text=True)[:200]}")
+        added = (resp.get_json() or {}).get("added") or []
+        if len(added) != 5:
+            bad.append(f"(a) 업로드 결과가 5장이 아닙니다: {len(added)}")
+
+        # (a) 자연 정렬: 1.png, 2.png, 10.png, a.png, ab.png 순 → fileId 를 그 순서로.
+        resp = client.post(f"/api/vnew/p/{pid}/input/sort")
+        order = (resp.get_json() or {}).get("order") or []
+        # 올린 순서(names) 와 fileId 를 짝지어 기대 순서를 만든다.
+        by_name = {item["name"]: item["fileId"] for item in added}
+        expect_order = [by_name[n] for n in ["1.png", "2.png", "10.png", "a.png", "ab.png"]]
+        if order != expect_order:
+            # 실제 이름→fileId 로 순서 라벨을 풀어 보기 쉽게.
+            got_names = {v: k for k, v in by_name.items()}
+            bad.append(f"(a) 자연 정렬 순서가 1,2,10,a,ab 가 아닙니다: {[got_names.get(x) for x in order]}")
+
+        # (b) input 검증: 61초 거절
+        resp = client.put(f"/api/vnew/p/{pid}/input", json={"totalSeconds": 61})
+        if resp.status_code != 400 or (resp.get_json().get("error") or {}).get("type") != "BadTotalSeconds":
+            bad.append(f"(b) 61초가 BadTotalSeconds 로 거절되지 않습니다: {resp.status_code} {resp.get_json()}")
+        # 0초도 거절
+        resp = client.put(f"/api/vnew/p/{pid}/input", json={"totalSeconds": 0})
+        if resp.status_code != 400:
+            bad.append(f"(b) 0초가 거절되지 않습니다: {resp.status_code}")
+
+        # (b) 모르는 모델 거절
+        resp = client.put(f"/api/vnew/p/{pid}/input", json={"videoModel": "no-such-model-xyz"})
+        if resp.status_code != 400 or (resp.get_json().get("error") or {}).get("type") != "BadVideoModel":
+            bad.append(f"(b) 모르는 모델이 BadVideoModel 로 거절되지 않습니다: {resp.status_code} {resp.get_json()}")
+
+        # (b) 잘못된 order 거절(모르는 fileId)
+        resp = client.put(f"/api/vnew/p/{pid}/input", json={"order": ["nope1", "nope2"]})
+        if resp.status_code != 400 or (resp.get_json().get("error") or {}).get("type") != "BadOrder":
+            bad.append(f"(b) 잘못된 order 가 BadOrder 로 거절되지 않습니다: {resp.status_code} {resp.get_json()}")
+
+        # (b) 올바른 input(60초·기본 모델) 저장 → 콘티 세그먼트 검증에 쓴다.
+        resp = client.put(f"/api/vnew/p/{pid}/input", json={"totalSeconds": 60, "characters": [{"charId": "ch1", "roleName": "김부장"}]})
+        if resp.status_code != 200:
+            bad.append(f"(b) 올바른 input 저장이 200 이 아닙니다: {resp.status_code} {resp.get_json()}")
+
+        # (c) script 202 → ready, 타일 순서·상한
+        # 먼저 상한 검증용으로 파일당 타일을 많게(5장×... = 25) 두고, order 를 그대로 둔다.
+        tiles_per_file["n"] = 3  # 5파일 × 3 = 15 타일(상한 40 이하) — 순서 유지 검증
+        script_blocks.clear()
+        resp = client.post(f"/api/vnew/p/{pid}/script")
+        if resp.status_code != 202:
+            bad.append(f"(c) POST /script 가 202 가 아닙니다: {resp.status_code} {resp.get_json()}")
+        _join_tasks()
+        plan_after, _ = planmod.load_plan("tester", pid)
+        if plan_after["script"]["status"] != "ready":
+            bad.append(f"(c) script 가 ready 가 아닙니다: {plan_after['script'].get('status')} / {plan_after['script'].get('error')}")
+        if plan_after["script"]["setting"].get("enclosed") is not True:
+            bad.append("(c) script setting.enclosed 가 유지되지 않았습니다(배경 보존)")
+        # 타일 순서: order 순으로 모든 타일이 그 순서대로 들어갔는지(첫 블록 라벨이 order[0] 라벨).
+        if not script_blocks:
+            bad.append("(c) script 분석에 블록이 전달되지 않았습니다")
+        else:
+            sent = script_blocks[-1]
+            total_expected = 5 * tiles_per_file["n"]
+            if len(sent) != total_expected:
+                bad.append(f"(c) 보낸 타일 수가 {total_expected} 가 아닙니다: {len(sent)}")
+            # order 는 sort 로 1,2,10,a,ab 순. 그 첫 fileId 의 라벨(빨강값)이 보낸 첫 타일에 있어야 한다.
+            order_now = plan_after["input"]["order"]
+            first_fid = order_now[0]
+            idx = [a["fileId"] for a in added].index(first_fid)
+            first_label = f"label{labels[idx]}-".encode("ascii")
+            if sent and not sent[0]["image"]["source"]["bytes"].startswith(first_label):
+                bad.append("(c) 타일 순서가 order 를 따르지 않습니다(첫 타일 라벨 불일치)")
+
+        # (c) 타일 상한: 파일당 타일을 크게 해 전체가 40 을 넘게 → 균등 선택·순서 유지로 <=40
+        tiles_per_file["n"] = 20  # 5 × 20 = 100 → 40 으로 균등 선택
+        tiles, total, picked = planmod.ordered_tiles("tester", pid, plan_after["input"]["order"])
+        if total != 100:
+            bad.append(f"(c) 전체 타일 수가 100 이 아닙니다: {total}")
+        if picked > planmod.MAX_SCRIPT_TILES or len(tiles) > planmod.MAX_SCRIPT_TILES:
+            bad.append(f"(c) 타일 상한(40)을 넘겼습니다: picked={picked} len={len(tiles)}")
+        if picked != planmod.MAX_SCRIPT_TILES:
+            bad.append(f"(c) 상한 초과 시 정확히 40 장을 고르지 않았습니다: {picked}")
+        tiles_per_file["n"] = 3
+
+        # (d) conti 202 → ready, ≥5컷·초 합=60·세그먼트
+        conti_calls["n"] = 0
+        resp = client.post(f"/api/vnew/p/{pid}/conti")
+        if resp.status_code != 202:
+            bad.append(f"(d) POST /conti 가 202 가 아닙니다: {resp.status_code} {resp.get_json()}")
+        _join_tasks()
+        plan_after, _ = planmod.load_plan("tester", pid)
+        conti = plan_after["conti"]
+        if conti["status"] != "ready":
+            bad.append(f"(d) conti 가 ready 가 아닙니다: {conti.get('status')} / {conti.get('error')}")
+        cuts = conti.get("cuts") or []
+        if len(cuts) < planmod.MIN_CUTS:
+            bad.append(f"(d) 컷이 5개 미만입니다: {len(cuts)}")
+        summed = sum(int(c.get("seconds") or 0) for c in cuts)
+        if summed != 60:
+            bad.append(f"(d) 컷 seconds 합이 60 이 아닙니다: {summed}")
+        # (d1) 모델이 지어낸 WRONG place 는 그 컷 panels 의 대본 장소로 보정된다.
+        #      panels 0 또는 1(교장실 항목)을 맡은 컷은 교장실이어야 한다.
+        office = "A closed principal's office"
+        sunset = "A city street at sunset"
+        office_cuts = [c for c in cuts if set(c.get("panels") or []) & {0, 1}]
+        if not office_cuts:
+            bad.append("(d1) 교장실 panels 를 맡은 컷이 없습니다(테스트 구성 오류)")
+        if any(c.get("locationEn") != office for c in office_cuts):
+            bad.append(f"(d1) WRONG place 가 교장실로 보정되지 않았습니다: {[c.get('locationEn') for c in office_cuts]}")
+        if any(c.get("locationEn") == "WRONG place that server must override" for c in cuts):
+            bad.append("(d1) 지어낸 장소(WRONG place)가 그대로 남았습니다")
+        # (d2) 웹툰이 바뀐 장소(노을 진 거리, panels 3)를 맡은 컷은 그 장소를 유지한다.
+        sunset_cuts = [c for c in cuts if 3 in set(c.get("panels") or [])]
+        if not sunset_cuts:
+            bad.append("(d2) 노을 진 거리 panels 를 맡은 컷이 없습니다(테스트 구성 오류)")
+        if any(c.get("locationEn") != sunset for c in sunset_cuts):
+            bad.append(f"(d2) 바뀐 장소(노을 진 거리)가 유지되지 않았습니다: {[c.get('locationEn') for c in sunset_cuts]}")
+        segments = conti.get("segments") or []
+        if len(segments) < 4:
+            bad.append(f"(d) 60초·최대 15초인데 구간이 4개 미만입니다: {len(segments)}")
+        if any(int(s.get("seconds") or 0) > 15 for s in segments):
+            bad.append(f"(d) 15초를 넘는 구간이 있습니다: {[s.get('seconds') for s in segments]}")
+        # 세그먼트 cutIds 합집합이 cuts 전체를 덮는지.
+        seg_ids = [cid for s in segments for cid in (s.get("cutIds") or [])]
+        if sorted(seg_ids) != sorted(c["id"] for c in cuts):
+            bad.append("(d) 세그먼트가 모든 컷을 덮지 않습니다")
+
+        # (e) 컷 하나가 최대 길이보다 길면 나눔 — compute_segments 함수 단위.
+        long_cuts = [
+            {"id": "x1", "no": 1, "seconds": 20},  # 최대 15 보다 길다 → 15+5 로 나뉜다
+            {"id": "x2", "no": 2, "seconds": 10},
+        ]
+        expanded, segs = planmod.compute_segments([dict(c) for c in long_cuts], 15)
+        if not any(c["id"].startswith("x1-") for c in expanded):
+            bad.append(f"(e) 20초 컷이 쪼개지지 않았습니다: {[c['id'] for c in expanded]}")
+        if any(int(c["seconds"]) > 15 for c in expanded):
+            bad.append(f"(e) 쪼갠 뒤에도 15초 초과 컷이 있습니다: {[(c['id'], c['seconds']) for c in expanded]}")
+        if any(int(s["seconds"]) > 15 for s in segs):
+            bad.append(f"(e) 쪼갠 뒤 구간이 15초를 넘습니다: {[s['seconds'] for s in segs]}")
+
+        # (f) 취소 시 늦게 온 결과가 버려진다 — _commit_step 이 task.id 불일치면 저장하지 않는다.
+        # script 를 다시 시작해 task_id 를 얻고, 취소(task.id→None)한 뒤 그 task_id 로 _commit_step 을 호출.
+        task_id = planmod.start_task("tester", pid, "script")
+        planmod.cancel_task("tester", pid)  # task.id 를 None 으로
+        before, _ = planmod.load_plan("tester", pid)
+        before_entries = len((before.get("script") or {}).get("entries") or [])
+        planmod._commit_step("tester", pid, "script", task_id, {"status": "ready", "entries": [{"id": "ZZZ"}], "setting": {}})
+        after, _ = planmod.load_plan("tester", pid)
+        after_entries = len((after.get("script") or {}).get("entries") or [])
+        if after_entries != before_entries:
+            bad.append("(f) 취소된 뒤 늦게 온 결과가 버려지지 않고 저장됐습니다")
+        if (after.get("task") or {}).get("status") == "done":
+            bad.append("(f) 취소된 task 가 늦은 결과로 done 이 됐습니다")
+
+        # (g) 다른 사용자: owner 는 주입된 current_owner 가 아니라 프로젝트 owner 를 쓴다.
+        #     프로젝트 owner 를 other 로 바꾸면 저장 경로가 달라 tester 의 계획이 안 보인다 →
+        #     하지만 권한은 can_read/can_write 가 결정한다. 권한 거부를 흉내 내려면 can_read False.
+        deny_app = Flask(__name__)
+        deny_bp = vnew.create_blueprint(
+            vnew.VnewDependencies(
+                require_auth=lambda h: h,
+                current_owner=lambda: "tester",
+                get_project=lambda p: {"id": p, "owner": "tester", "track": "video_new"},
+                can_read_project=lambda proj: False,  # 읽기 거부
+                can_write_project=lambda proj: False,
+                project_owner_prefix=lambda name: name,
+            )
+        )
+        deny_app.register_blueprint(deny_bp)
+        deny_client = deny_app.test_client()
+        resp = deny_client.get(f"/api/vnew/p/{pid}/plan")
+        if resp.status_code != 403:
+            bad.append(f"(g) 권한 없는 사용자가 403 을 받지 않습니다: {resp.status_code}")
+
+        # (g) 없는 프로젝트 → 404
+        nf_app = Flask(__name__)
+        nf_bp = vnew.create_blueprint(
+            vnew.VnewDependencies(
+                require_auth=lambda h: h,
+                current_owner=lambda: "tester",
+                get_project=lambda p: None,  # 없음
+                can_read_project=lambda proj: True,
+                can_write_project=lambda proj: True,
+                project_owner_prefix=lambda name: name,
+            )
+        )
+        nf_app.register_blueprint(nf_bp)
+        resp = nf_app.test_client().get(f"/api/vnew/p/{pid}/plan")
+        if resp.status_code != 404:
+            bad.append(f"(g) 없는 프로젝트가 404 가 아닙니다: {resp.status_code}")
+
+        # (g) video 트랙 프로젝트 거절 → TrackMismatch 403
+        vt_app = Flask(__name__)
+        vt_bp = vnew.create_blueprint(
+            vnew.VnewDependencies(
+                require_auth=lambda h: h,
+                current_owner=lambda: "tester",
+                get_project=lambda p: {"id": p, "owner": "tester", "track": "video"},  # 다른 트랙
+                can_read_project=lambda proj: True,
+                can_write_project=lambda proj: True,
+                project_owner_prefix=lambda name: name,
+            )
+        )
+        vt_app.register_blueprint(vt_bp)
+        resp = vt_app.test_client().get(f"/api/vnew/p/{pid}/plan")
+        if resp.status_code != 403 or (resp.get_json().get("error") or {}).get("type") != "TrackMismatch":
+            bad.append(f"(g) video 트랙 프로젝트가 TrackMismatch 403 으로 거절되지 않습니다: {resp.status_code} {resp.get_json()}")
+
+    except Exception as exc:  # noqa: BLE001
+        import traceback as _tb  # noqa: PLC0415
+
+        bad.append("vnew 계획 검사 중 예외: " + repr(exc) + "\n" + _tb.format_exc()[:1500])
+    finally:
+        planmod.STORE = orig["STORE"]
+        planmod._analyze_script = orig["_analyze_script"]
+        planmod._analyze_conti = orig["_analyze_conti"]
+        _images.tiles_for_analysis = orig["tiles"]
+        planmod.characters.load_char = orig["load_char"]
+        planmod.threading.Thread = orig_thread
+        planmod.vpoc_ledger.charge_text = orig["charge_text"]
+
+    if bad:
+        fail("영상만들기_신규 계획(vnew plan) 검사 실패\n" + "\n".join(f"  {item}" for item in bad))
+    else:
+        ok(
+            "영상만들기_신규 계획(vnew plan) 검사 (a)생성·업로드·자연정렬 (b)input 검증"
+            " (c)script 순서·상한 (d)conti ≥5컷·초합·세그먼트 (e)긴 컷 분할 (f)취소 버림 (g)권한·트랙"
+        )
+
+
 # ---------------------------------------------------------------- main
 
 
@@ -2272,6 +2717,7 @@ def main() -> int:
     check_dual()
     check_vnew()
     check_vnew_characters()
+    check_vnew_plan()
     print()
     if warnings:
         print(f"경고 {len(warnings)}건")

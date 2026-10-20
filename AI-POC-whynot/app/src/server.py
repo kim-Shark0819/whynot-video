@@ -7000,6 +7000,11 @@ if VNEW_ENABLED:
                 require_auth=require_auth,
                 # S3 키 소유자 접두사. users/{owner}/... 아래로 쓰기·조회를 가둔다.
                 current_owner=lambda: safe_user_prefix(g.username),
+                # 계획 API(/api/vnew/p/<pid>/...) 프로젝트 권한. vpoc 와 같은 방식.
+                get_project=_project_track_repository.get_project,
+                can_read_project=can_read_project,
+                can_write_project=can_write_project,
+                project_owner_prefix=safe_user_prefix,
             )
         )
     )

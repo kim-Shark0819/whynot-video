@@ -12,7 +12,9 @@ from flask import Blueprint, Response, jsonify, request
 
 from ..vpoc.errors import VpocError, envelope, status_for
 
+from .. import project_tracks
 from . import characters
+from . import plan as plan_mod
 
 
 @dataclass
@@ -25,6 +27,14 @@ class VnewDependencies:
 
     require_auth: Callable[[Callable], Callable]
     current_owner: Callable[[], str] | None = None
+    # 아래 셋은 계획 API(/api/vnew/p/<pid>/...) 가 쓴다. 틀만 쓰던 옛 등록(health · 캐릭터)과
+    # 호환되게 선택값으로 둔다 — 주입되지 않으면 계획 API 가 500(권한 확인 불가)을 낸다.
+    get_project: Callable[[str], dict | None] | None = None
+    can_read_project: Callable[[dict], bool] | None = None
+    can_write_project: Callable[[dict], bool] | None = None
+    # 프로젝트 소유자 username → S3 키 소유자 접두사(safe_user_prefix). 주입되지 않으면 그대로 쓴다
+    # (검사에서는 이미 안전한 값을 넣으므로 항등이면 된다).
+    project_owner_prefix: Callable[[str], str] | None = None
 
 
 def create_blueprint(deps: VnewDependencies) -> Blueprint:
@@ -42,6 +52,12 @@ def create_blueprint(deps: VnewDependencies) -> Blueprint:
     def _fail(exc: BaseException):
         body = envelope("vnew", exc)
         return jsonify({"error": body}), status_for(body)
+
+    def _safe_prefix(owner: str) -> str:
+        """프로젝트 소유자 username 을 S3 키 소유자 접두사로. 주입이 없으면 그대로 쓴다."""
+        if deps.project_owner_prefix is None:
+            return owner
+        return deps.project_owner_prefix(owner)
 
     @bp.get("/health")
     @deps.require_auth
@@ -156,6 +172,164 @@ def create_blueprint(deps: VnewDependencies) -> Blueprint:
                     "Cache-Control": "private, max-age=3600",
                 },
             )
+        except Exception as exc:  # noqa: BLE001
+            return _fail(exc)
+
+    # ============================================================ 계획 API (①입력 ②대본 ③콘티)
+    #
+    # /api/vnew/p/<pid>/... 프로젝트 권한은 vpoc 와 같은 방식(get_project → read/write 확인).
+    # 트랙이 video_new 인 프로젝트만 받는다. 저장 경로의 주인은 프로젝트 소유자다.
+
+    def _project_for(pid: str, *, write: bool) -> str:
+        """프로젝트를 확인하고 저장 경로 소유자(owner 접두사)를 돌려준다.
+
+        - 주입 deps 가 없으면 500(권한 확인 불가).
+        - 없으면 404, 읽기 불가 403, 쓰기 요청인데 쓰기 불가 403.
+        - 트랙이 video_new 가 아니면 403(영상만들기_신규 프로젝트만).
+        """
+        if deps.get_project is None or deps.can_read_project is None or deps.can_write_project is None:
+            raise VpocError("vnew.plan", "NoDeps", "프로젝트 권한을 확인할 수 없습니다.", 500)
+        project = deps.get_project(pid)
+        if not project:
+            raise VpocError("vnew.plan", "NotFound", "프로젝트를 찾을 수 없습니다.", 404)
+        if not deps.can_read_project(project):
+            raise VpocError("vnew.plan", "Forbidden", "이 프로젝트를 볼 수 없습니다.", 403)
+        if write and not deps.can_write_project(project):
+            raise VpocError("vnew.plan", "Forbidden", "이 프로젝트를 바꿀 수 있는 사람은 소유자뿐입니다.", 403)
+        if str(project.get("track") or "") != project_tracks.TRACK_VIDEO_NEW:
+            raise VpocError("vnew.plan", "TrackMismatch", "영상만들기_신규 프로젝트가 아닙니다.", 403)
+        owner = str(project.get("owner") or "")
+        if not owner:
+            raise VpocError("vnew.plan", "NoOwner", "프로젝트 소유자를 알 수 없습니다.", 500)
+        return _safe_prefix(owner)
+
+    @bp.get("/p/<pid>/plan")
+    @deps.require_auth
+    def get_plan(pid: str):
+        try:
+            owner = _project_for(pid, write=False)
+            data, _ = plan_mod.load_or_create(owner, pid)
+            return jsonify(plan_mod.plan_view(owner, pid, data))
+        except Exception as exc:  # noqa: BLE001
+            return _fail(exc)
+
+    @bp.post("/p/<pid>/uploads")
+    @deps.require_auth
+    def plan_uploads(pid: str):
+        try:
+            owner = _project_for(pid, write=True)
+            plan_mod.load_or_create(owner, pid)
+            storages = request.files.getlist("files") or request.files.getlist("file")
+            if not storages:
+                raise VpocError("vnew.plan.uploads", "NoFiles", "업로드할 이미지가 없습니다.", 400)
+            files = [(storage.read(), storage.filename or "") for storage in storages]
+            added = plan_mod.add_uploads(owner, pid, files)
+            data, _ = plan_mod.load_plan(owner, pid)
+            return jsonify({"added": added, "plan": plan_mod.plan_view(owner, pid, data)}), 201
+        except Exception as exc:  # noqa: BLE001
+            return _fail(exc)
+
+    @bp.delete("/p/<pid>/uploads/<file_id>")
+    @deps.require_auth
+    def plan_delete_upload(pid: str, file_id: str):
+        try:
+            owner = _project_for(pid, write=True)
+            plan_mod.delete_upload(owner, pid, file_id)
+            data, _ = plan_mod.load_plan(owner, pid)
+            return jsonify(plan_mod.plan_view(owner, pid, data))
+        except Exception as exc:  # noqa: BLE001
+            return _fail(exc)
+
+    @bp.put("/p/<pid>/input")
+    @deps.require_auth
+    def plan_input(pid: str):
+        try:
+            owner = _project_for(pid, write=True)
+            plan_mod.load_or_create(owner, pid)
+            payload = request.get_json(silent=True) or {}
+            plan_mod.update_input(owner, pid, payload)
+            data, _ = plan_mod.load_plan(owner, pid)
+            return jsonify(plan_mod.plan_view(owner, pid, data))
+        except Exception as exc:  # noqa: BLE001
+            return _fail(exc)
+
+    @bp.post("/p/<pid>/input/sort")
+    @deps.require_auth
+    def plan_input_sort(pid: str):
+        try:
+            owner = _project_for(pid, write=True)
+            plan_mod.load_or_create(owner, pid)
+            order = plan_mod.sort_natural(owner, pid)
+            data, _ = plan_mod.load_plan(owner, pid)
+            return jsonify({"order": order, "plan": plan_mod.plan_view(owner, pid, data)})
+        except Exception as exc:  # noqa: BLE001
+            return _fail(exc)
+
+    @bp.post("/p/<pid>/script")
+    @deps.require_auth
+    def plan_script_run(pid: str):
+        try:
+            owner = _project_for(pid, write=True)
+            plan_mod.load_or_create(owner, pid)
+            task_id = plan_mod.start_script(owner, pid)
+            return jsonify({"ok": True, "taskId": task_id}), 202
+        except Exception as exc:  # noqa: BLE001
+            return _fail(exc)
+
+    @bp.put("/p/<pid>/script")
+    @deps.require_auth
+    def plan_script_edit(pid: str):
+        try:
+            owner = _project_for(pid, write=True)
+            payload = request.get_json(silent=True) or {}
+            plan_mod.update_script(owner, pid, payload)
+            data, _ = plan_mod.load_plan(owner, pid)
+            return jsonify(plan_mod.plan_view(owner, pid, data))
+        except Exception as exc:  # noqa: BLE001
+            return _fail(exc)
+
+    @bp.post("/p/<pid>/conti")
+    @deps.require_auth
+    def plan_conti_run(pid: str):
+        try:
+            owner = _project_for(pid, write=True)
+            plan_mod.load_or_create(owner, pid)
+            task_id = plan_mod.start_conti(owner, pid)
+            return jsonify({"ok": True, "taskId": task_id}), 202
+        except Exception as exc:  # noqa: BLE001
+            return _fail(exc)
+
+    @bp.put("/p/<pid>/conti")
+    @deps.require_auth
+    def plan_conti_edit(pid: str):
+        try:
+            owner = _project_for(pid, write=True)
+            payload = request.get_json(silent=True) or {}
+            updated = plan_mod.update_conti(owner, pid, payload)
+            view = plan_mod.plan_view(owner, pid, updated)
+            view["fit"] = updated.get("_fit") or {}
+            return jsonify(view)
+        except Exception as exc:  # noqa: BLE001
+            return _fail(exc)
+
+    @bp.post("/p/<pid>/conti/fit")
+    @deps.require_auth
+    def plan_conti_fit(pid: str):
+        try:
+            owner = _project_for(pid, write=True)
+            plan_mod.fit_conti(owner, pid)
+            data, _ = plan_mod.load_plan(owner, pid)
+            return jsonify(plan_mod.plan_view(owner, pid, data))
+        except Exception as exc:  # noqa: BLE001
+            return _fail(exc)
+
+    @bp.post("/p/<pid>/cancel")
+    @deps.require_auth
+    def plan_cancel(pid: str):
+        try:
+            owner = _project_for(pid, write=True)
+            task = plan_mod.cancel_task(owner, pid)
+            return jsonify({"ok": True, "task": task})
         except Exception as exc:  # noqa: BLE001
             return _fail(exc)
 
