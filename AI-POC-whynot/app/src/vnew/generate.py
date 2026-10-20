@@ -522,6 +522,30 @@ def start_generate(owner: str, pid: str, confirm_usd: float) -> str:
 _drivers: dict[str, threading.Thread] = {}
 _drivers_lock = threading.Lock()
 
+# 프리비즈 모드는 한 순회에서 여러 칸을 **동시에** 제출/조회하므로, 같은 계획(plan)에 대한
+# 읽기-수정-조건부쓰기(mutate_plan)가 스레드끼리 겹친다. 실제 S3 는 etag 조건부쓰기로 경합을
+# 재시도하지만, 그 창(window) 안에서도 안전하도록 **같은 계획(owner,pid)별 프로세스 락**으로
+# mutate 를 직렬화한다(이중 제출은 claim 확인이 막고, 락은 갱신 유실을 막는다).
+_plan_locks: dict[str, threading.Lock] = {}
+_plan_locks_guard = threading.Lock()
+
+
+def _plan_lock(owner: str, pid: str) -> threading.Lock:
+    key = f"{owner}/{pid}"
+    with _plan_locks_guard:
+        lock = _plan_locks.get(key)
+        if lock is None:
+            lock = threading.Lock()
+            _plan_locks[key] = lock
+        return lock
+
+
+def _mutate_locked(owner: str, pid: str, mutator):
+    """mutate_plan 을 계획별 락 안에서 수행(프리비즈 동시 제출의 갱신 유실 방지)."""
+    with _plan_lock(owner, pid):
+        return plan_mod.mutate_plan(owner, pid, mutator)
+
+
 
 def _driver_name(owner: str, pid: str) -> str:
     return f"vnew-gen-{owner}-{pid}"
@@ -570,9 +594,17 @@ def _drive(owner: str, pid: str, gen_id: str) -> None:
             return
 
         if gen.get("mode") == "previz":
-            action = _next_action_previz(owner, pid, gen_id)
-        else:
-            action = _next_action(owner, pid, gen_id)
+            # 프리비즈 모드: 한 순회에서 submitted 전부 조회 + queued 를 상한까지 동시 제출(병렬).
+            progressed = _drive_previz_pass(owner, pid, gen_id)
+            if progressed is None:
+                return  # 더 할 일 없음(병합·상태 확정까지 끝).
+            if progressed == "poll_only":
+                # 새로 제출한 칸이 없고 submitted 만 남았다 → 잠깐 쉬고 다시 조회(각 칸 POLL 간격).
+                if _still_in_progress(owner, pid, gen_id):
+                    time.sleep(vnew_settings.POLL_INTERVAL_S)
+            continue
+
+        action = _next_action(owner, pid, gen_id)
         if action is None:
             return  # 더 할 일 없음(완료·partial — poll 로 조회할 submitted 도 없음).
         if action in ("poll_real", "poll_webtoon"):
@@ -752,61 +784,95 @@ def _first_frame_for(gen: dict, index: int) -> str:
 # 구간 순서대로 concat → finalReal/finalWebtoon.
 
 
-def _next_action_previz(owner: str, pid: str, gen_id: str):
-    """프리비즈 모드에서 할 일 하나를 선점(claim)하고 수행한다. 수행했으면 action 이름, 없으면 None.
+def _drive_previz_pass(owner: str, pid: str, gen_id: str):
+    """프리비즈 모드 한 순회(설계자 2026-10-21, 지시서 041). 반환:
 
-    우선 submitted(조회 대기)를 먼저 조회하고, 없으면 queued/waiting 하나를 제출한다. 구간·그림체
-    순서는 중요하지 않다(병렬). 더 할 일이 없으면 병합을 시도하고 None.
+    - None: 더 할 일이 없다(병합·상태 확정까지 끝냈다 → 드라이버 종료).
+    - "work": 새로 제출한 칸이 있다(바로 다음 순회로).
+    - "poll_only": 새 제출은 없고 submitted(조회 대기)만 있었다(쉬고 다시 조회).
+
+    한 순회에서:
+      1) preparing stale 선점 해제.
+      2) submitted(조회 대기) 칸을 **전부** 모은다(각 칸 스레드로 조회 — 각 칸 POLL 간격 준수).
+      3) queued/waiting 칸을 **동시 실행 상한(VNEW_GEN_PARALLEL) 안에서 선점해 동시에 제출**한다.
+         상한은 "진행 중(preparing+submitted)" 합이 넘지 않게 한다 → 이미 submitted 가 많으면
+         이번 순회엔 적게(또는 0) 제출한다. 제출·조회는 칸별 스레드로 병렬 수행하고 모두 끝날 때까지
+         기다린다(이 순회가 동기적으로 끝나야 다음 순회가 상태를 다시 본다).
+      선점·claim 확인·원장은 기존 규칙 그대로(이중 제출 금지).
     """
-    claim = secrets.token_hex(8)
-    picked: dict = {"kind": None}
+    cap = max(1, int(vnew_settings.VNEW_GEN_PARALLEL or 1))
+    polls: list[dict] = []    # [{index, variant, claim}]
+    submits: list[dict] = []  # [{index, variant, claim}]
 
     def mutator(data: dict) -> None:
         gen = data.get("gen") or {}
         if str(gen.get("genId") or "") != gen_id or gen.get("status") != "running":
-            picked["kind"] = None
             return
         _reconcile_prepare_stale_previz(gen)
         segments = gen.get("segments") or []
 
-        # 1) submitted(조회 대기)를 먼저 조회한다.
+        # 2) submitted 전부 조회 대상으로.
+        active = 0  # 진행 중(preparing+submitted) — 상한 계산용.
         for index, seg in enumerate(segments):
             for variant in ("real", "webtoon"):
                 state = seg.get(variant) or {}
-                if state.get("status") == "submitted":
-                    picked["kind"] = "poll_" + variant
-                    picked["segIndex"] = index
-                    picked["variant"] = variant
-                    picked["claim"] = state.get("claim") or ""
-                    return
-        # 2) queued/waiting 하나를 제출한다(병렬 — 순서 무관).
+                status = state.get("status")
+                if status == "submitted":
+                    active += 1
+                    polls.append({"index": index, "variant": variant, "claim": state.get("claim") or ""})
+                elif status == "preparing":
+                    active += 1
+
+        # 3) 상한 안에서 queued/waiting 선점(칸마다 새 claim).
+        budget = max(0, cap - active)
         for index, seg in enumerate(segments):
+            if budget <= 0:
+                break
             for variant in ("real", "webtoon"):
+                if budget <= 0:
+                    break
                 state = seg.get(variant) or {}
                 if state.get("status") in ("waiting", "queued"):
+                    claim = secrets.token_hex(8)
                     state["status"] = "preparing"
                     state["claim"] = claim
                     state["claimedAt"] = now_iso()
                     state["attempt"] = int(state.get("attempt") or 0) + 1
-                    picked["kind"] = "submit_" + variant
-                    picked["segIndex"] = index
-                    picked["variant"] = variant
-                    return
-        picked["kind"] = None
+                    submits.append({"index": index, "variant": variant, "claim": claim})
+                    budget -= 1
 
-    plan_mod.mutate_plan(owner, pid, mutator)
-    kind = picked.get("kind")
-    if kind is None:
+    _mutate_locked(owner, pid, mutator)
+
+    if not polls and not submits:
         _maybe_finalize_previz(owner, pid, gen_id)
         return None
 
-    index = picked["segIndex"]
-    variant = picked["variant"]
-    if kind.startswith("submit_"):
-        _do_submit_previz(owner, pid, gen_id, index, variant, claim)
-    else:
-        _do_poll_previz(owner, pid, gen_id, index, variant, picked.get("claim") or "")
-    return kind
+    # 칸별 스레드로 병렬 수행하고 모두 끝날 때까지 기다린다.
+    workers: list[threading.Thread] = []
+    for job in polls:
+        workers.append(
+            threading.Thread(
+                target=_do_poll_previz,
+                args=(owner, pid, gen_id, job["index"], job["variant"], job["claim"]),
+                daemon=True,
+                name=f"vnew-gen-poll-{pid}-{job['index']}-{job['variant']}",
+            )
+        )
+    for job in submits:
+        workers.append(
+            threading.Thread(
+                target=_do_submit_previz,
+                args=(owner, pid, gen_id, job["index"], job["variant"], job["claim"]),
+                daemon=True,
+                name=f"vnew-gen-submit-{pid}-{job['index']}-{job['variant']}",
+            )
+        )
+    for worker in workers:
+        worker.start()
+    for worker in workers:
+        worker.join()
+
+    return "work" if submits else "poll_only"
 
 
 def _reconcile_prepare_stale_previz(gen: dict) -> bool:
@@ -966,7 +1032,7 @@ def _maybe_finalize_previz(owner: str, pid: str, gen_id: str) -> None:
             g["status"] = "done"
 
     try:
-        plan_mod.mutate_plan(owner, pid, mutator)
+        _mutate_locked(owner, pid, mutator)
     except _Discard:
         return
 
@@ -1164,8 +1230,24 @@ def _location_name_en(plan: dict, seg: dict) -> str:
 
 
 def _previz_timeline_text(plan: dict, seg: dict) -> str:
-    """구간 타임라인(간결): "0-4s {action}, {camera}; {speaker} speaks (Korean): "...";"."""
+    """구간 타임라인(간결): 시간 범위 + 말하는 사람(색 마네킹)·대사 + 짧은 감정.
+
+    화면 구성(구도·카메라·컷)은 @Video1 만 따른다 → 컷의 promptEn·cameraEn 은 넣지 않는다.
+    남기는 것:
+    - 시간 범위("0-4s").
+    - 그 시간에 말하는 사람: 색 마네킹 기준 "the {color} mannequin ({roleName})". 대사(dialogueKo
+      40자 이내)를 함께.
+    - 짧은 감정 1~3단어: conti/script 의 emotion(emotionKo) 이 있으면 그것, 없으면 생략. situationKo
+      에서 고르지 않는다.
+    """
     cuts = {str(c.get("id")): c for c in (plan.get("conti") or {}).get("cuts") or []}
+    # 이 구간 배우: 이름 → 색(colorName). 말하는 사람을 색 마네킹으로 가리키려고 쓴다.
+    color_by_name: dict[str, str] = {}
+    for actor in _segment_actors(plan, seg):
+        name = str(actor.get("name") or "").strip()
+        color = str(actor.get("colorName") or "").strip()
+        if name and color:
+            color_by_name.setdefault(name, color)
     lines = []
     start = 0.0
     for cut_id in seg.get("cutIds") or []:
@@ -1174,20 +1256,25 @@ def _previz_timeline_text(plan: dict, seg: dict) -> str:
             continue
         seconds = float(cut.get("seconds") or 0)
         end = start + seconds
-        body = str(cut.get("promptEn") or "").strip()
-        camera = str(cut.get("cameraEn") or "").strip()
         dialogue = str(cut.get("dialogueKo") or "").strip()
-        speaker = ""
+        emotion = str(cut.get("emotionKo") or cut.get("emotionEn") or "").strip()
+        speaker_name = ""
         for ch in cut.get("characters") or []:
             if ch.get("name"):
-                speaker = str(ch.get("name"))
+                speaker_name = str(ch.get("name"))
                 break
-        part = f"{int(start)}-{int(end)}s {body}"
-        if camera:
-            part += f", {camera}"
+        part = f"{int(start)}-{int(end)}s"
         if dialogue:
-            spk = (speaker + " ") if speaker else ""
-            part += f'; {spk}speaks (Korean): "{dialogue[:40]}"'
+            color = color_by_name.get(speaker_name)
+            if color:
+                who = f"the {color} mannequin ({speaker_name})"
+            elif speaker_name:
+                who = speaker_name
+            else:
+                who = "the speaker"
+            part += f' {who} speaks (Korean): "{dialogue[:40]}"'
+        if emotion:
+            part += f" ({emotion})"
         lines.append(part + ".")
         start = end
     return " ".join(lines)
@@ -1201,9 +1288,7 @@ def _previz_prompt(plan: dict, seg: dict, variant: str, *, element_lines: list[s
     """
     is_real = variant == "real"
     location = _location_name_en(plan, seg)
-    setting = (plan.get("conti") or {}).get("setting") or {}
-    layout = str(setting.get("layoutEn") or "").strip()
-    place = location + ((" — " + layout) if layout else "")
+    place = _previz_place_sentence(plan, seg, location)
 
     if is_real:
         style = "photorealistic live-action film"
@@ -1223,8 +1308,9 @@ def _previz_prompt(plan: dict, seg: dict, variant: str, *, element_lines: list[s
     timeline = _previz_timeline_text(plan, seg)
     timeline_text = (" Timeline: " + timeline) if timeline else ""
     tail = (
-        " Keep exactly the same room, positions, number of people, camera movement, timing and "
-        "light direction as @Video1. Do not add or remove anyone. No text, no speech bubbles."
+        " Camera angles, framing, cuts, positions and movements come ONLY from @Video1 — do not invent "
+        "new shots. Keep exactly the same room, number of people, timing and light direction as @Video1. "
+        "Do not add or remove anyone. No text, no speech bubbles."
     )
     prompt = head + mapping + timeline_text + tail
     budget = _previz_prompt_budget()
@@ -1237,6 +1323,36 @@ def _previz_prompt(plan: dict, seg: dict, variant: str, *, element_lines: list[s
         if len(prompt) > budget:
             prompt = vpoc_fal._trim_prompt(prompt, budget)
     return prompt
+
+
+def _previz_place_sentence(plan: dict, seg: dict, location: str) -> str:
+    """장소를 한 문장으로: 이름 + 실내/실외 + 빛 방향.
+
+    - 이름: location(콘티 cut.locationEn).
+    - 실내/실외: 대본 setting.enclosed(닫힌 방=indoor, 열린 공간=outdoor).
+    - 빛 방향: 그 장소 설계(design.lightEn) 한 문장(있으면).
+    """
+    script_setting = (plan.get("script") or {}).get("setting") or {}
+    indoor = "indoor" if script_setting.get("enclosed") else "outdoor"
+    light = ""
+    loc = _location_by_name(plan, location)
+    if loc:
+        light = str((loc.get("design") or {}).get("lightEn") or "").strip()
+    sentence = f"{location} ({indoor})"
+    if light:
+        sentence += f", {light.rstrip('.')}"
+    return sentence
+
+
+def _location_by_name(plan: dict, name_en: str) -> dict | None:
+    """콘티 locationEn 에 맞는 plan["locations"] 항목(key 정규화 매칭). 없으면 None."""
+    from . import locations as loc_mod  # noqa: PLC0415
+
+    key = loc_mod.normalize_name(name_en)
+    for loc in plan.get("locations") or []:
+        if str(loc.get("key") or loc_mod.normalize_name(loc.get("nameEn") or "")) == key:
+            return loc
+    return None
 
 
 def _previz_prompt_budget() -> int:
@@ -2342,7 +2458,9 @@ def _presign(key: str, *, bucket: str = "", content_type: str = "") -> str:
 
 
 def _commit(owner: str, pid: str, mutator) -> None:
-    plan_mod.mutate_plan(owner, pid, mutator)
+    # 계획별 락 안에서 수행한다(프리비즈 동시 제출의 갱신 유실 방지). 옛 모드는 단일 스레드라
+    # 락이 비어 있어 영향이 없다.
+    _mutate_locked(owner, pid, mutator)
 
 
 def _fail_opening(owner: str, pid: str, gen_id: str, claim: str, message: str) -> None:
