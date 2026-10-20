@@ -455,3 +455,721 @@
   border-radius: 8px;
   box-shadow: 0 8px 40px rgba(0, 0, 0, 0.5);
 }
+
+/* ================================================================ 영상만들기_신규 계획(①입력 ②대본 ③콘티)
+
+   #vnew-root 의 단계 화면. styles.css 토큰을 쓰되 기본값을 함께 둔다. 좁은 화면(≤768px)에서도
+   쓸 수 있게 그리드를 1~2열로 접는다. 선택자는 .vnew-* 로만 쓴다. */
+
+.vnew-plan-head {
+  margin: 8px 0 14px;
+}
+
+/* ---- 단계 막대 ---- */
+
+.vnew-plan-steps {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: 0 0 20px;
+}
+
+.vnew-plan-step {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 14px;
+  border: 1px solid var(--line, #e5e7eb);
+  border-radius: 999px;
+  background: var(--surface, #ffffff);
+  color: var(--text-muted, #6b7280);
+  font-size: 14px;
+  cursor: pointer;
+  transition: border-color 0.15s, color 0.15s, background 0.15s;
+}
+
+.vnew-plan-step:hover {
+  border-color: var(--accent, #cb3208);
+}
+
+.vnew-plan-step.is-current {
+  border-color: var(--accent, #cb3208);
+  color: var(--accent, #cb3208);
+  background: var(--accent-soft, #fff4ee);
+  font-weight: 600;
+}
+
+.vnew-plan-step.is-done {
+  color: var(--success, #15803d);
+  border-color: rgba(21, 128, 61, 0.3);
+}
+
+.vnew-plan-step.is-soon {
+  opacity: 0.7;
+}
+
+.vnew-plan-step-mark {
+  font-weight: 700;
+}
+
+/* ---- 공통 ---- */
+
+.vnew-plan-body {
+  display: grid;
+  gap: 18px;
+}
+
+.vnew-plan-error {
+  margin: 0;
+}
+
+.vnew-sec-title {
+  margin: 0 0 6px;
+  font-size: 17px;
+  font-weight: 700;
+}
+
+.vnew-sec-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin-bottom: 6px;
+}
+
+.vnew-plan-footer {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 12px;
+  margin-top: 6px;
+}
+
+.vnew-saved-mark {
+  margin-left: 8px;
+  font-size: 12px;
+  color: var(--success, #15803d);
+}
+
+/* ---- 공통 필드 ---- */
+
+.vnew-field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.vnew-field-label {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-muted, #6b7280);
+}
+
+.vnew-field-input {
+  width: 100%;
+  padding: 8px 10px;
+  border: 1px solid var(--line, #e5e7eb);
+  border-radius: 8px;
+  background: var(--surface, #ffffff);
+  color: var(--text, #1b1d21);
+  font: inherit;
+  box-sizing: border-box;
+}
+
+.vnew-field-input:focus {
+  outline: none;
+  border-color: var(--accent, #cb3208);
+}
+
+textarea.vnew-field-input {
+  resize: vertical;
+}
+
+.vnew-check-field {
+  flex-direction: row;
+  align-items: center;
+  gap: 8px;
+}
+
+.vnew-field-hint {
+  margin: 2px 0 0;
+  font-size: 12px;
+  color: var(--text-muted, #9ca3af);
+}
+
+/* ---- ① 드롭존 ---- */
+
+.vnew-input-drop-sec .vnew-drop {
+  width: 100%;
+}
+
+.vnew-drop.is-drag {
+  border-color: var(--accent, #cb3208);
+  background: var(--accent-soft, #fff4ee);
+}
+
+/* ---- ① 썸네일 그리드 ---- */
+
+.vnew-thumb-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
+  gap: 14px;
+}
+
+.vnew-thumb-card {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 8px;
+  border: 1px solid var(--line, #e5e7eb);
+  border-radius: 12px;
+  background: var(--surface, #ffffff);
+}
+
+.vnew-thumb-card.is-dragging {
+  opacity: 0.5;
+}
+
+.vnew-thumb-card.is-over {
+  border-color: var(--accent, #cb3208);
+  box-shadow: 0 0 0 2px var(--accent-soft, #fff4ee);
+}
+
+.vnew-thumb-no {
+  position: absolute;
+  top: 10px;
+  left: 10px;
+  z-index: 1;
+  min-width: 22px;
+  height: 22px;
+  padding: 0 6px;
+  border-radius: 999px;
+  background: var(--accent, #cb3208);
+  color: #fff;
+  font-size: 12px;
+  font-weight: 700;
+  line-height: 22px;
+  text-align: center;
+}
+
+.vnew-thumb-figure {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  max-height: 220px;
+  overflow: hidden;
+  border-radius: 8px;
+  background: var(--surface-muted, #f3f4f6);
+}
+
+.vnew-thumb-figure img {
+  width: 100%;
+  height: auto;
+  max-height: 220px;
+  object-fit: contain;
+  cursor: zoom-in;
+}
+
+.vnew-thumb-missing {
+  padding: 30px 0;
+  font-size: 12px;
+  color: var(--text-muted, #9ca3af);
+}
+
+.vnew-thumb-name {
+  font-size: 12px;
+  color: var(--text-muted, #6b7280);
+  word-break: break-all;
+}
+
+.vnew-thumb-controls {
+  display: flex;
+  gap: 6px;
+}
+
+/* 아이콘 버튼(styles.css 에 없으면 기본값) */
+.icon-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 30px;
+  height: 30px;
+  padding: 0 8px;
+  border: 1px solid var(--line, #e5e7eb);
+  border-radius: 8px;
+  background: var(--surface, #ffffff);
+  color: var(--text, #1b1d21);
+  font: inherit;
+  cursor: pointer;
+}
+
+.icon-button:hover:not(:disabled) {
+  border-color: var(--accent, #cb3208);
+}
+
+.icon-button:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+.icon-button.danger {
+  color: var(--danger, #b91c1c);
+}
+
+.vnew-thumb-del {
+  margin-left: auto;
+}
+
+/* ---- ① 설정 ---- */
+
+.vnew-settings-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+  gap: 16px;
+}
+
+/* ---- ① 캐릭터 ---- */
+
+.vnew-char-empty {
+  margin-top: 4px;
+}
+
+.vnew-char-chosen {
+  display: grid;
+  gap: 12px;
+}
+
+.vnew-char-chosen-item {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  padding: 12px;
+  border: 1px solid var(--line, #e5e7eb);
+  border-radius: 12px;
+  background: var(--surface-muted, #f9fafb);
+}
+
+.vnew-char-chosen-thumb {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 56px;
+  height: 56px;
+  border-radius: 10px;
+  overflow: hidden;
+  background: var(--surface-muted, #f3f4f6);
+}
+
+.vnew-char-chosen-thumb img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.vnew-char-chosen-body {
+  flex: 1 1 auto;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.vnew-char-chosen-name {
+  font-size: 15px;
+  font-weight: 600;
+}
+
+.vnew-role-field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  max-width: 320px;
+}
+
+/* ---- 캐릭터 고르기 오버레이 ---- */
+
+.vnew-modal-scrim {
+  position: fixed;
+  inset: 0;
+  z-index: 1000;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  background: rgba(0, 0, 0, 0.5);
+}
+
+.vnew-modal {
+  width: 100%;
+  max-width: 640px;
+  max-height: 80vh;
+  display: flex;
+  flex-direction: column;
+  border-radius: var(--radius, 16px);
+  background: var(--surface, #ffffff);
+  overflow: hidden;
+}
+
+.vnew-modal-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 16px 20px;
+  border-bottom: 1px solid var(--line, #e5e7eb);
+}
+
+.vnew-modal-head h3 {
+  margin: 0;
+  font-size: 17px;
+}
+
+.vnew-modal-body {
+  padding: 20px;
+  overflow-y: auto;
+}
+
+.vnew-picker-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(120px, 1fr));
+  gap: 14px;
+}
+
+.vnew-picker-card {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  padding: 12px;
+  border: 1px solid var(--line, #e5e7eb);
+  border-radius: 12px;
+  background: var(--surface, #ffffff);
+  cursor: pointer;
+}
+
+.vnew-picker-card:hover:not(:disabled) {
+  border-color: var(--accent, #cb3208);
+}
+
+.vnew-picker-card.is-chosen {
+  opacity: 0.55;
+  cursor: default;
+}
+
+.vnew-picker-card .vnew-char-chosen-thumb {
+  width: 80px;
+  height: 80px;
+}
+
+.vnew-picker-name {
+  font-size: 13px;
+  font-weight: 600;
+  text-align: center;
+}
+
+/* ---- 진행 띠(②③) ---- */
+
+.vnew-progress-wrap {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 24px;
+  border: 1px solid var(--line, #e5e7eb);
+  border-radius: var(--radius, 16px);
+  background: var(--surface, #ffffff);
+}
+
+.vnew-progress-label {
+  margin: 0;
+  font-weight: 600;
+}
+
+.vnew-progress-track {
+  height: 8px;
+  border-radius: 999px;
+  background: var(--surface-muted, #f3f4f6);
+  overflow: hidden;
+}
+
+.vnew-progress-fill {
+  height: 100%;
+  width: 40%;
+  border-radius: 999px;
+  background: var(--accent, #cb3208);
+  animation: vnew-progress-slide 1.2s ease-in-out infinite;
+}
+
+@keyframes vnew-progress-slide {
+  0% {
+    margin-left: -40%;
+  }
+  100% {
+    margin-left: 100%;
+  }
+}
+
+/* ---- ② setting · entries ---- */
+
+.vnew-setting-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 14px;
+  margin-bottom: 14px;
+}
+
+.vnew-entry-list,
+.vnew-cut-list {
+  display: grid;
+  gap: 14px;
+  margin-bottom: 12px;
+}
+
+.vnew-entry-card,
+.vnew-cut-card {
+  padding: 14px;
+  border: 1px solid var(--line, #e5e7eb);
+  border-radius: 12px;
+  background: var(--surface, #ffffff);
+}
+
+.vnew-entry-head,
+.vnew-cut-head {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin-bottom: 10px;
+}
+
+.vnew-entry-no,
+.vnew-cut-no {
+  min-width: 26px;
+  height: 26px;
+  padding: 0 8px;
+  border-radius: 999px;
+  background: var(--surface-muted, #f3f4f6);
+  font-size: 13px;
+  font-weight: 700;
+  line-height: 26px;
+  text-align: center;
+}
+
+.vnew-entry-thumb,
+.vnew-cut-thumb {
+  width: 44px;
+  height: 44px;
+  object-fit: cover;
+  border-radius: 8px;
+  border: 1px solid var(--line, #e5e7eb);
+  cursor: zoom-in;
+}
+
+.vnew-entry-panels {
+  font-size: 12px;
+  color: var(--text-muted, #9ca3af);
+}
+
+.vnew-entry-controls {
+  display: flex;
+  gap: 6px;
+  margin-left: auto;
+}
+
+.vnew-entry-grid,
+.vnew-cut-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 12px;
+}
+
+.vnew-entry-who {
+  display: grid;
+  gap: 10px;
+  margin-top: 12px;
+  padding-top: 12px;
+  border-top: 1px dashed var(--line, #e5e7eb);
+}
+
+.vnew-entry-person {
+  display: grid;
+  grid-template-columns: minmax(80px, 120px) 1fr 1fr;
+  align-items: end;
+  gap: 10px;
+}
+
+.vnew-entry-person-name {
+  font-size: 13px;
+  font-weight: 600;
+  padding-bottom: 8px;
+}
+
+.vnew-add-row {
+  justify-self: start;
+}
+
+.vnew-cut-sec {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  width: 70px;
+}
+
+.vnew-cut-sec .vnew-field-input {
+  padding: 6px 8px;
+}
+
+/* ---- ③ 합계 · 세그먼트 ---- */
+
+.vnew-conti-summary {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.vnew-conti-summary.is-warn {
+  border-color: var(--accent-strong, #b45309);
+  background: var(--accent-soft, #fef3c7);
+}
+
+.vnew-conti-summary-line {
+  display: flex;
+  gap: 20px;
+  font-weight: 600;
+}
+
+.vnew-segments {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.vnew-seg-bars {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+.vnew-seg-bar {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 8px 12px;
+  border-radius: 10px;
+  border-left: 4px solid var(--accent, #cb3208);
+  background: var(--surface-muted, #f9fafb);
+  font-size: 12px;
+}
+
+.vnew-seg-label {
+  font-weight: 700;
+}
+
+.vnew-seg-seconds {
+  color: var(--text, #1b1d21);
+}
+
+.vnew-seg-cuts {
+  color: var(--text-muted, #9ca3af);
+}
+
+/* 구간 색(6종 순환) — 세그먼트 바와 컷 카드 왼쪽 띠에 같이 쓴다 */
+.vnew-seg-c0 {
+  border-left-color: #cb3208;
+}
+.vnew-seg-c1 {
+  border-left-color: #2563eb;
+}
+.vnew-seg-c2 {
+  border-left-color: #15803d;
+}
+.vnew-seg-c3 {
+  border-left-color: #9333ea;
+}
+.vnew-seg-c4 {
+  border-left-color: #d97706;
+}
+.vnew-seg-c5 {
+  border-left-color: #0891b2;
+}
+
+.vnew-seg-edge-c0 {
+  border-left: 4px solid #cb3208;
+}
+.vnew-seg-edge-c1 {
+  border-left: 4px solid #2563eb;
+}
+.vnew-seg-edge-c2 {
+  border-left: 4px solid #15803d;
+}
+.vnew-seg-edge-c3 {
+  border-left: 4px solid #9333ea;
+}
+.vnew-seg-edge-c4 {
+  border-left: 4px solid #d97706;
+}
+.vnew-seg-edge-c5 {
+  border-left: 4px solid #0891b2;
+}
+
+/* ---- ③ 영상 프롬프트 접기 ---- */
+
+.vnew-cut-prompt {
+  margin-top: 12px;
+  padding-top: 10px;
+  border-top: 1px dashed var(--line, #e5e7eb);
+}
+
+.vnew-cut-prompt summary {
+  cursor: pointer;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-muted, #6b7280);
+}
+
+.vnew-cut-prompt .vnew-field-input {
+  margin-top: 8px;
+}
+
+/* ---- 좁은 화면(≤768px) ---- */
+
+@media (max-width: 768px) {
+  .vnew-plan-step {
+    padding: 6px 10px;
+    font-size: 13px;
+  }
+
+  .vnew-thumb-grid {
+    grid-template-columns: repeat(2, 1fr);
+  }
+
+  .vnew-settings-grid,
+  .vnew-setting-grid,
+  .vnew-entry-grid,
+  .vnew-cut-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .vnew-entry-person {
+    grid-template-columns: 1fr;
+    align-items: stretch;
+  }
+
+  .vnew-entry-person-name {
+    padding-bottom: 0;
+  }
+
+  .vnew-picker-grid {
+    grid-template-columns: repeat(2, 1fr);
+  }
+
+  .vnew-plan-footer {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .vnew-plan-footer .primary-button,
+  .vnew-plan-footer .outline-button {
+    width: 100%;
+  }
+}
