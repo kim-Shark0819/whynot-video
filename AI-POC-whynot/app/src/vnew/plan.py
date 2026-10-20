@@ -120,7 +120,7 @@ def new_plan() -> dict:
             "images": [],  # [{fileId,name,width,height}]
             "order": [],  # [fileId...]
             "totalSeconds": 15,
-            "videoModel": vpoc_ark.DEFAULT_MODEL,
+            "videoModel": default_video_model(),
             "notes": "",
             "characters": [],  # [{charId, roleName}]
         },
@@ -257,8 +257,35 @@ def sort_natural(owner: str, pid: str) -> list[str]:
 
 
 def available_models() -> list[dict]:
-    """고를 수 있는 영상 모델 목록(ark.choices 중 available)."""
-    return [item for item in vpoc_ark.choices() if item.get("available")]
+    """고를 수 있는 영상 모델 목록(ark.choices 중 available).
+
+    각 모델에 realStartImage 를 붙인다(설계자 2026-10-20): Seedance(byteplus)는 실존 인물 필터로
+    실사 시작 이미지를 거절하므로 false, 그 밖(Luma=bedrock · fal)은 true. 화면이 false 모델을
+    고르면 경고하고, generate 선행 조건이 false 모델을 거절한다.
+    """
+    models = []
+    for item in vpoc_ark.choices():
+        if not item.get("available"):
+            continue
+        row = dict(item)
+        row["realStartImage"] = _real_start_image(item)
+        models.append(row)
+    return models
+
+
+def _real_start_image(model_item: dict) -> bool:
+    """이 모델이 실사 인물 시작 이미지를 받는지. byteplus(Seedance)만 false."""
+    return str(model_item.get("provider") or "") != "byteplus"
+
+
+def default_video_model() -> str:
+    """새 계획·되돌림의 기본 영상 모델. realStartImage=true 인 available 모델 중 첫 번째,
+    없으면 ark.DEFAULT_MODEL(설계자 2026-10-20).
+    """
+    for item in available_models():
+        if item.get("realStartImage"):
+            return str(item.get("id"))
+    return vpoc_ark.DEFAULT_MODEL
 
 
 def _model_ids() -> list[str]:
@@ -302,7 +329,7 @@ def update_input(owner: str, pid: str, patch: dict) -> dict:
                     "고를 수 없는 영상 모델입니다.",
                     400,
                 )
-            inp["videoModel"] = model or vpoc_ark.DEFAULT_MODEL
+            inp["videoModel"] = model or default_video_model()
 
         if "notes" in patch:
             inp["notes"] = str(patch.get("notes") or "")

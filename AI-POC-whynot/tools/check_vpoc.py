@@ -3429,6 +3429,279 @@ def check_vnew_generate() -> None:
         )
 
 
+# ---------------------------------------------------------------- 11. fal 단가·프롬프트 길이
+
+
+def check_fal_pricing() -> None:
+    """fal 단가(pricing)·shot_usd·프롬프트 길이(설계자 2026-10-20). 실제 유료 호출 금지(가짜).
+
+    (a) _parse_pricing: seconds·per-video(videos)·없음(None) 을 바르게 읽는다
+    (b) shot_usd(fal): seconds 면 unit_price×초, 그 밖(영상 1건)이면 unit_price, 단가 모르면 0
+        — fal 모델이 Luma 표(VIDEO_USD_PER_SEC)로 떨어지지 않는다
+    (c) build_payload: prompt 3000자 → promptMaxLength(2500) 이하로 문장 경계에서 잘림
+    (d) promptMaxLength 가 없으면 기본 2500, caps 추출(extract_caps)에 promptMaxLength 가 있다
+    """
+    sys.path.insert(0, str(ROOT / "app"))
+    from src.vpoc import fal, settings  # noqa: PLC0415
+
+    bad: list[str] = []
+
+    eid = "fal-ai/kling-video/v3/pro/image-to-video"
+
+    # (a) _parse_pricing — seconds
+    secs = fal._parse_pricing(
+        {"prices": [{"endpoint_id": eid, "unit_price": 0.14, "unit": "seconds", "currency": "USD"}]}, eid
+    )
+    if not secs or abs(secs["unitPrice"] - 0.14) > 1e-9 or secs["unit"] != "seconds":
+        bad.append(f"(a) seconds 단가 파싱이 틀립니다: {secs}")
+    # per-video(videos)
+    per_video = fal._parse_pricing(
+        {"prices": [{"endpoint_id": eid, "unit_price": 1.2, "unit": "videos"}]}, eid
+    )
+    if not per_video or abs(per_video["unitPrice"] - 1.2) > 1e-9 or per_video["unit"] != "videos":
+        bad.append(f"(a) per-video 단가 파싱이 틀립니다: {per_video}")
+    # 없음 → None
+    if fal._parse_pricing({"prices": []}, eid) is not None:
+        bad.append("(a) 빈 prices 가 None 이 아닙니다")
+    if fal._parse_pricing({}, eid) is not None:
+        bad.append("(a) prices 없음이 None 이 아닙니다")
+    # 다른 endpoint 만 있고 하나뿐이면 그 하나를 쓴다(단일 응답).
+    single = fal._parse_pricing(
+        {"prices": [{"endpoint_id": "other/model", "unit_price": 0.0325, "unit": "seconds"}]}, eid
+    )
+    if not single or abs(single["unitPrice"] - 0.0325) > 1e-9:
+        bad.append(f"(a) 단일 응답 단가 파싱이 틀립니다: {single}")
+
+    # (b) shot_usd(fal) — pricing_for 를 가짜로 바꿔 네트워크 없이 계산 경로만 본다.
+    real_pricing_for = fal.pricing_for
+    fal_model = settings.FAL_ID_PREFIX + eid
+    try:
+        # seconds → unit_price × 초
+        fal.pricing_for = lambda m: {"unitPrice": 0.14, "unit": "seconds"}
+        v = settings.shot_usd(fal_model, "720p", 20)
+        if abs(v - round(0.14 * 20, 4)) > 1e-6:
+            bad.append(f"(b) seconds fal shot_usd 가 틀립니다: {v} != 2.8")
+        # Luma 표(720p=1.5)로 떨어지지 않았는지 — 20초×1.5=30 이 아니어야 한다.
+        if abs(v - 30.0) < 1e-6:
+            bad.append("(b) fal 모델이 Luma 표(720p 30USD)로 떨어졌습니다")
+        # 영상 1건 단위(videos) → unit_price(초 무시)
+        fal.pricing_for = lambda m: {"unitPrice": 1.2, "unit": "videos"}
+        v2 = settings.shot_usd(fal_model, "720p", 20)
+        if abs(v2 - 1.2) > 1e-6:
+            bad.append(f"(b) per-video fal shot_usd 가 틀립니다: {v2} != 1.2")
+        # 단가 모르면 0(단가 미정) — Luma 표로 안 감
+        fal.pricing_for = lambda m: None
+        v3 = settings.shot_usd(fal_model, "720p", 20)
+        if abs(v3) > 1e-9:
+            bad.append(f"(b) 단가 미정 fal shot_usd 가 0 이 아닙니다: {v3}")
+    finally:
+        fal.pricing_for = real_pricing_for
+
+    # (c) build_payload: 3000자 → promptMaxLength(2500) 이하로 문장 경계에서 잘림
+    long_prompt = ("This is a scene sentence. " * 200).strip()  # 200문장, ~5000자
+    if len(long_prompt) <= 2500:
+        bad.append("(c) 테스트 프롬프트가 3000자 미만입니다(구성 오류)")
+    caps = {"promptField": "prompt", "promptMaxLength": 2500, "durations": [5], "sendDuration": False}
+    body = fal.build_payload(caps, prompt=long_prompt)
+    sent = body.get("prompt", "")
+    if len(sent) > 2500:
+        bad.append(f"(c) 잘린 프롬프트가 2500자를 넘습니다: {len(sent)}")
+    if not sent.endswith("."):
+        bad.append(f"(c) 문장 경계에서 자르지 않았습니다(끝 문자): {sent[-20:]!r}")
+    if len(sent) == len(long_prompt):
+        bad.append("(c) 프롬프트가 잘리지 않았습니다")
+
+    # _trim_prompt 자체: 상한 이내면 그대로
+    short = "A short prompt."
+    if fal._trim_prompt(short, 2500) != short:
+        bad.append("(c) 상한 이내 프롬프트가 바뀌었습니다")
+
+    # (d) promptMaxLength 기본값(없으면 2500)
+    if fal.DEFAULT_PROMPT_MAX != 2500:
+        bad.append(f"(d) DEFAULT_PROMPT_MAX 가 2500 이 아닙니다: {fal.DEFAULT_PROMPT_MAX}")
+    caps_nomax = {"promptField": "prompt", "sendDuration": False}
+    body2 = fal.build_payload(caps_nomax, prompt=long_prompt)
+    if len(body2.get("prompt", "")) > 2500:
+        bad.append(f"(d) promptMaxLength 없을 때 기본 2500 으로 안 잘렸습니다: {len(body2.get('prompt',''))}")
+
+    # extract_caps 가 OpenAPI 의 prompt maxLength 를 뽑고, 없으면 2500 을 넣는다.
+    oa_with_max = {
+        "paths": {
+            "/" + eid: {
+                "post": {
+                    "requestBody": {
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "properties": {
+                                        "prompt": {"type": "string", "maxLength": 1800},
+                                        "image_url": {"type": "string"},
+                                    },
+                                    "required": ["prompt"],
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    caps_x, reason = fal.extract_caps(oa_with_max, eid)
+    if not caps_x or caps_x.get("promptMaxLength") != 1800:
+        bad.append(f"(d) extract_caps 가 promptMaxLength(1800) 를 뽑지 못했습니다: {caps_x and caps_x.get('promptMaxLength')} / {reason}")
+    oa_no_max = {
+        "paths": {
+            "/" + eid: {
+                "post": {
+                    "requestBody": {
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "properties": {"prompt": {"type": "string"}},
+                                    "required": ["prompt"],
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    caps_y, _ = fal.extract_caps(oa_no_max, eid)
+    if not caps_y or caps_y.get("promptMaxLength") != 2500:
+        bad.append(f"(d) maxLength 없을 때 promptMaxLength 가 2500 이 아닙니다: {caps_y and caps_y.get('promptMaxLength')}")
+
+    if bad:
+        fail("fal 단가·프롬프트 길이 검사 실패\n" + "\n".join(f"  {item}" for item in bad))
+    else:
+        ok(
+            "fal 단가·프롬프트 길이 검사 (a)pricing seconds·per-video·없음 (b)shot_usd fal 은 Luma 표로 안 감"
+            " (c)3000자→2500 문장 경계 (d)promptMaxLength 기본 2500·extract_caps"
+        )
+
+
+# ---------------------------------------------------------------- 12. vnew 실사 시작 이미지 거절
+
+
+def check_vnew_real_start() -> None:
+    """vnew Seedance 실사 시작 이미지 거절(설계자 2026-10-20). 실제 호출 금지.
+
+    (a) plan.available_models 의 realStartImage: byteplus(Seedance) false, 나머지(Luma·fal) true
+    (b) plan.default_video_model 은 realStartImage=true 중 첫 번째
+    (c) generate.check_preconditions 가 realStartImage=false 모델(Seedance)을 409
+        RealStartImageUnsupported 로 거절, true 모델은 그 검사를 통과
+    (d) errors.USER_FACING_KINDS 에 RealStartImageUnsupported 가 있다
+    (e) _user_facing_error 가 'may contain real person' 을 한국어 문구로 바꾼다
+    """
+    sys.path.insert(0, str(ROOT / "app"))
+    from src.vnew import generate as genmod  # noqa: PLC0415
+    from src.vnew import plan as planmod  # noqa: PLC0415
+    from src.vpoc import errors as vpoc_errors  # noqa: PLC0415
+    from src.vpoc import settings as vpoc_settings  # noqa: PLC0415
+
+    bad: list[str] = []
+
+    # (a)(b) available_models/default_video_model — ark.choices 를 가짜로(네트워크 없이).
+    real_choices = planmod.vpoc_ark.choices
+    fake_choices = [
+        {"id": "luma-ray2", "label": "Luma Ray2", "available": True, "provider": "bedrock"},
+        {"id": "seedance-2-0", "label": "Seedance 2.0", "available": True, "provider": "byteplus"},
+        {"id": "seedance-2-5", "label": "Seedance 2.5", "available": True, "provider": "byteplus"},
+        {"id": "fal:fal-ai/kling-video/v3/pro/image-to-video", "label": "fal · Kling", "available": True, "provider": "fal"},
+        {"id": "unavailable-x", "label": "X", "available": False, "provider": "byteplus"},
+    ]
+    try:
+        planmod.vpoc_ark.choices = lambda: [dict(item) for item in fake_choices]
+        models = planmod.available_models()
+        by_id = {m["id"]: m for m in models}
+        if "unavailable-x" in by_id:
+            bad.append("(a) available=False 모델이 목록에 들어갔습니다")
+        if by_id.get("luma-ray2", {}).get("realStartImage") is not True:
+            bad.append(f"(a) Luma realStartImage 가 true 가 아닙니다: {by_id.get('luma-ray2', {}).get('realStartImage')}")
+        if by_id.get("seedance-2-0", {}).get("realStartImage") is not False:
+            bad.append(f"(a) Seedance realStartImage 가 false 가 아닙니다: {by_id.get('seedance-2-0', {}).get('realStartImage')}")
+        fal_row = by_id.get("fal:fal-ai/kling-video/v3/pro/image-to-video", {})
+        if fal_row.get("realStartImage") is not True:
+            bad.append(f"(a) fal realStartImage 가 true 가 아닙니다: {fal_row.get('realStartImage')}")
+
+        # (b) 기본 모델 = realStartImage true 중 첫 번째(여기선 luma-ray2)
+        if planmod.default_video_model() != "luma-ray2":
+            bad.append(f"(b) default_video_model 이 luma-ray2 가 아닙니다: {planmod.default_video_model()}")
+        # Seedance 가 먼저 와도 true 중 첫 번째(fal)를 고른다
+        planmod.vpoc_ark.choices = lambda: [
+            {"id": "seedance-2-0", "label": "S", "available": True, "provider": "byteplus"},
+            {"id": "fal:x", "label": "F", "available": True, "provider": "fal"},
+        ]
+        if planmod.default_video_model() != "fal:x":
+            bad.append(f"(b) Seedance 뒤 true 첫 번째(fal:x)를 안 골랐습니다: {planmod.default_video_model()}")
+        # realStartImage true 가 없으면 ark.DEFAULT_MODEL
+        planmod.vpoc_ark.choices = lambda: [
+            {"id": "seedance-2-0", "label": "S", "available": True, "provider": "byteplus"},
+        ]
+        if planmod.default_video_model() != planmod.vpoc_ark.DEFAULT_MODEL:
+            bad.append(f"(b) true 모델 없을 때 DEFAULT_MODEL 로 안 떨어졌습니다: {planmod.default_video_model()}")
+    finally:
+        planmod.vpoc_ark.choices = real_choices
+
+    # (c) check_preconditions — realStartImage=false(Seedance) 거절, true(Luma) 통과.
+    def _plan(model: str) -> dict:
+        return {
+            "input": {"videoModel": model, "characters": []},
+            "conti": {"status": "ready", "segments": [{"id": "seg1", "cutIds": ["c1"], "seconds": 10}]},
+            "gen": {},
+        }
+
+    seedance_model = next(iter(vpoc_settings.ARK_MODEL_IDS.keys()))
+    try:
+        genmod.check_preconditions(_plan(seedance_model), "tester")
+        bad.append("(c) Seedance 모델이 거절되지 않았습니다")
+    except Exception as exc:  # noqa: BLE001
+        if getattr(exc, "kind", "") != "RealStartImageUnsupported":
+            bad.append(f"(c) Seedance 거절 kind 가 RealStartImageUnsupported 가 아닙니다: {getattr(exc, 'kind', '?')}")
+        if getattr(exc, "status", 0) != 409:
+            bad.append(f"(c) Seedance 거절이 409 가 아닙니다: {getattr(exc, 'status', '?')}")
+
+    # Luma(실사 시작 이미지 받음)는 그 검사를 통과하고, 캐릭터 없음(실사 front)으로 CharacterRealMissing
+    # 까지 진행하거나(캐릭터 있으면) 통과한다 — 어느 쪽이든 RealStartImageUnsupported 는 아니어야 한다.
+    try:
+        genmod.check_preconditions(_plan("luma-ray2"), "tester")
+    except Exception as exc:  # noqa: BLE001
+        if getattr(exc, "kind", "") == "RealStartImageUnsupported":
+            bad.append("(c) Luma 가 RealStartImageUnsupported 로 거절됐습니다(실사 시작 이미지를 받는데)")
+
+    # _model_accepts_real_start 직접
+    if genmod._model_accepts_real_start(seedance_model):
+        bad.append("(c) _model_accepts_real_start(Seedance) 가 True 입니다")
+    if not genmod._model_accepts_real_start("luma-ray2"):
+        bad.append("(c) _model_accepts_real_start(Luma) 가 False 입니다")
+    if not genmod._model_accepts_real_start("fal:fal-ai/kling-video/v3/pro/image-to-video"):
+        bad.append("(c) _model_accepts_real_start(fal) 가 False 입니다")
+
+    # (d) USER_FACING_KINDS
+    if "RealStartImageUnsupported" not in vpoc_errors.USER_FACING_KINDS:
+        bad.append("(d) USER_FACING_KINDS 에 RealStartImageUnsupported 가 없습니다")
+
+    # (e) _user_facing_error 가 'may contain real person' 을 한국어로 바꾼다
+    mapped = genmod._user_facing_error(
+        "The request failed because the input image 'content[1]' may contain real person"
+    )
+    if "모델을 바꿔" not in mapped or "may contain real person" in mapped:
+        bad.append(f"(e) 'may contain real person' 이 한국어 문구로 안 바뀌었습니다: {mapped}")
+    # 다른 오류는 원문 그대로
+    other = genmod._user_facing_error("some other failure")
+    if other != "some other failure":
+        bad.append(f"(e) 관계없는 오류가 바뀌었습니다: {other}")
+
+    if bad:
+        fail("vnew 실사 시작 이미지 거절 검사 실패\n" + "\n".join(f"  {item}" for item in bad))
+    else:
+        ok(
+            "vnew 실사 시작 이미지 거절 검사 (a)realStartImage byteplus false·나머지 true"
+            " (b)기본 모델 true 첫 번째 (c)Seedance 409 RealStartImageUnsupported·Luma/fal 통과"
+            " (d)USER_FACING_KINDS (e)'may contain real person'→한국어"
+        )
+
+
 # ---------------------------------------------------------------- main
 
 
@@ -3450,6 +3723,8 @@ def main() -> int:
     check_vnew_characters()
     check_vnew_plan()
     check_vnew_generate()
+    check_fal_pricing()
+    check_vnew_real_start()
     print()
     if warnings:
         print(f"경고 {len(warnings)}건")

@@ -246,11 +246,28 @@ def default_resolution(model: str) -> str:
 
 
 def shot_usd(model: str = "", resolution: str = "", seconds: float | None = None) -> float:
-    """샷 1개 금액. model 이 Seedance 이고 단가가 없으면 0(단가 미정).
+    """샷 1개 금액.
+
+    - fal 모델("fal:<endpoint>")은 fal 단가(pricing)로 — unit 이 "seconds" 면 unit_price×seconds,
+      그 밖(영상 1건 단위: videos·generations·units·images …)이면 unit_price(1회). 단가를 모르면
+      0(단가 미정) — Luma 표로 떨어지지 않게 한다(설계자 2026-10-20). 순환 import 를 피하려고
+      fal 을 함수 안에서 늦게 import 한다.
+    - Seedance(ARK_MODEL_IDS)는 그 해상도의 생성 1초 단가 × 초. 단가가 없으면 0(단가 미정).
+    - 그 밖(Luma)은 VIDEO_USD_PER_SEC 표.
 
     인자를 비우면 예전과 같은 값(Luma · VPOC_RESOLUTION · DURATION_S)이다.
     """
     secs = DURATION_S if seconds is None else float(seconds)
+    if is_fal(model):
+        from . import fal  # noqa: PLC0415 — 순환 import 를 피하려 늦게 부른다.
+
+        price = fal.pricing_for(model)
+        if not price:
+            return 0.0
+        unit_price = float(price.get("unitPrice") or 0.0)
+        if str(price.get("unit") or "").lower() == "seconds":
+            return round(unit_price * secs, 4)
+        return round(unit_price, 4)
     if model in ARK_MODEL_IDS:
         per_sec = ark_usd_per_sec(model, resolution)
         return round((per_sec or 0.0) * secs, 4)

@@ -55,6 +55,8 @@ PREPARE_STALE_S = 900
 GEN_STALL_S = 1800
 # 웹툰 변환 참고 이미지 최대 장수(그 구간 웹툰 패널 + 캐릭터 웹툰 시트).
 MAX_ANIME_REFS = 4
+# 구간 영상 프롬프트 목표 상한(설계자 2026-10-20). 모델 maxLength 가 더 작으면 그 안으로.
+SEGMENT_PROMPT_TARGET = 1800
 # 시작 장면 Seedream 단가 설정 키(설계자: VNEW_SEEDREAM_USD 재사용).
 SEEDREAM_USD = vnew_settings.SEEDREAM_USD
 
@@ -355,6 +357,16 @@ def _char_entries(owner: str, inp: dict) -> list[dict]:
         )
     return out
 
+def _model_accepts_real_start(model: str) -> bool:
+    """이 모델이 실사 인물 시작 이미지를 받는지(설계자 2026-10-20).
+
+    Seedance(byteplus, ARK_MODEL_IDS)만 실존 인물 필터로 거절한다 → false. Luma·fal 은 true.
+    모델이 비거나 모르면 막지 않는다(true) — 기존 흐름을 깨지 않기 위해서다.
+    """
+    return str(model or "") not in vpoc_settings.ARK_MODEL_IDS
+
+
+
 
 def check_preconditions(plan: dict, owner: str) -> list[dict]:
     """generate 선행 조건. 어기면 VpocError(409). 통과하면 캐릭터 목록을 돌려준다.
@@ -370,6 +382,18 @@ def check_preconditions(plan: dict, owner: str) -> list[dict]:
     gen = plan.get("gen") or {}
     if gen.get("status") == "running" and not _gen_stale(gen):
         raise VpocError("vnew.generate", "GenRunning", "이미 영상 생성이 진행 중입니다.", 409)
+
+    # 모델이 실사 인물 시작 이미지를 받지 않으면(Seedance/byteplus) 거절(설계자 2026-10-20). 신규 기능은
+    # 첫 프레임이 실사 인물이라, 그런 모델은 'may contain real person' 으로 실패한다.
+    video_model = str((plan.get("input") or {}).get("videoModel") or "")
+    if not _model_accepts_real_start(video_model):
+        raise VpocError(
+            "vnew.generate",
+            "RealStartImageUnsupported",
+            "이 모델은 실사 인물 시작 이미지를 받지 않아 신규 영상 기능에서 실패합니다. "
+            "Kling 등 fal 모델로 바꿔 주세요.",
+            409,
+        )
 
     chars = _char_entries(owner, plan.get("input") or {})
     missing_names = [
@@ -700,7 +724,7 @@ def _do_submit_real(owner: str, pid: str, gen_id: str, index: int, claim: str) -
         first_jpeg = _fetch_bytes(first_key)
         b64 = base64.b64encode(first_jpeg).decode("ascii")
 
-        prompt = _segment_prompt(plan, seg, first_segment=(index == 0))
+        prompt = _segment_prompt(plan, seg, first_segment=(index == 0), model=str(gen.get("videoModel") or ""))
         model = str(gen.get("videoModel") or vpoc_ark.DEFAULT_MODEL)
         resolution = str(gen.get("resolution") or "")
         prefix = _seg_output_prefix(owner, pid, gen_id, seg["id"], attempt)
@@ -1102,31 +1126,47 @@ def _panel_jpeg_for_cut(owner: str, pid: str, plan: dict, cut: dict) -> bytes | 
 
 
 def _cut_timeline(plan: dict, seg: dict) -> str:
-    """구간의 컷들을 시간표로("0-5s: …, 5-11s: …"). 컷 promptEn·cameraEn·인물·대사 상황."""
+    """구간의 컷들을 시간표로("0-5s: …"). 컷당 1~2문장으로 간결히(설계자 2026-10-20).
+
+    컷마다 움직임(promptEn)·카메라·인물 행동을 짧게 한 줄. 카메라·장소가 앞 컷과 같으면 되풀이하지
+    않는다(프롬프트 길이 절감). 캐릭터 외형은 여기 넣지 않는다 — 첫 프레임 이미지가 책임진다.
+    """
     conti = plan.get("conti") or {}
     by_id = {c["id"]: c for c in (conti.get("cuts") or [])}
     lines = []
     start = 0
+    prev_camera = ""
+    prev_location = ""
     for cut_id in seg.get("cutIds") or []:
         cut = by_id.get(cut_id)
         if not cut:
             continue
         seconds = int(cut.get("seconds") or 0)
         end = start + seconds
-        chars = ", ".join(
-            f"{ch.get('name', '')} ({ch.get('positionEn', '')}; {ch.get('actionEn', '')})".strip()
+        # 인물: 이름 + 행동만(위치·외형은 첫 프레임 이미지가 책임진다).
+        actors = ", ".join(
+            f"{ch.get('name', '')} {ch.get('actionEn', '')}".strip()
             for ch in (cut.get("characters") or [])
+            if (ch.get("name") or ch.get("actionEn"))
         )
         dialogue = str(cut.get("dialogueKo") or "").strip()
-        dialogue_note = " Character speaks (Korean dialogue), lip movement only." if dialogue else ""
         body = str(cut.get("promptEn") or "").strip()
         camera = str(cut.get("cameraEn") or "").strip()
         location = str(cut.get("locationEn") or "").strip()
-        lines.append(
-            f"{start}-{end}s: {body} Camera: {camera}. Location: {location}."
-            + (f" Characters: {chars}." if chars else "")
-            + dialogue_note
-        )
+
+        parts = [f"{start}-{end}s: {body}"]
+        if actors:
+            parts.append(actors + ".")
+        # 카메라·장소는 바뀔 때만 적는다.
+        if camera and camera != prev_camera:
+            parts.append("Camera: " + camera + ".")
+            prev_camera = camera
+        if location and location != prev_location:
+            parts.append("Location: " + location + ".")
+            prev_location = location
+        if dialogue:
+            parts.append("Speaks Korean, lip movement only.")
+        lines.append(" ".join(parts))
         start = end
     return "\n".join(lines)
 
@@ -1142,8 +1182,24 @@ def _appearance_text(plan: dict, owner: str) -> str:
     return " ".join(parts)
 
 
-def _segment_prompt(plan: dict, seg: dict, *, first_segment: bool) -> str:
-    """구간 영상 프롬프트. 첫 구간이 아니면 '앞 프레임에서 이어진다' 첫 줄을 붙인다."""
+def _prompt_budget(model: str) -> int:
+    """이 모델에 보낼 프롬프트 글자 상한. 목표는 1,800자 이하이되, fal 모델 maxLength 가 더 작으면
+    그 안으로 맞춘다(설계자 2026-10-20). fal 이 아닌 모델(Luma·Seedance)은 목표 1,800 만 쓴다.
+    """
+    budget = SEGMENT_PROMPT_TARGET
+    if model and vpoc_settings.is_fal(model):
+        item = vpoc_fal.find(model) or {}
+        caps = item.get("caps") or {}
+        model_max = int(caps.get("promptMaxLength") or vpoc_fal.DEFAULT_PROMPT_MAX)
+        budget = min(budget, model_max)
+    return budget
+
+
+def _segment_prompt(plan: dict, seg: dict, *, first_segment: bool, model: str = "") -> str:
+    """구간 영상 프롬프트(간결, 설계자 2026-10-20). 목표 1,800자 이하 — 넘으면 시간표 뒤쪽을
+    문장 경계에서 자른다(모델 maxLength 가 더 작으면 그 안으로). 첫 구간이 아니면 '앞 프레임에서
+    이어진다' 첫 줄을 붙인다. 캐릭터 외형은 첫 프레임 이미지가 책임지므로 넣지 않는다.
+    """
     conti = plan.get("conti") or {}
     setting = conti.get("setting") or {}
     timeline = _cut_timeline(plan, seg)
@@ -1152,18 +1208,24 @@ def _segment_prompt(plan: dict, seg: dict, *, first_segment: bool) -> str:
     head = []
     if not first_segment:
         head.append(
-            "Continue seamlessly from the first frame: same room, same lighting, same characters in the "
-            "same positions and outfits."
+            "Continue seamlessly from the first frame: same room, lighting, characters, positions and outfits."
         )
     else:
         head.append(
-            "Start from the first frame (a live-action still). Continue the action smoothly, keeping the "
+            "Start from the first frame (a live-action still) and continue the action smoothly, keeping the "
             "same place, lighting, characters, positions and outfits."
         )
     head.append("Photorealistic live-action film. No text, no speech bubbles.")
     if layout:
         head.append("Layout: " + layout + ".")
-    body = "\n".join(head) + "\n" + timeline
+    head_text = "\n".join(head)
+
+    budget = _prompt_budget(model)
+    body = head_text + "\n" + timeline
+    if len(body) > budget:
+        # 머리(연속성·화풍 지시)는 반드시 남기고 시간표만 줄인다.
+        room = max(0, budget - len(head_text) - 1)
+        body = head_text + "\n" + vpoc_fal._trim_prompt(timeline, room)
     return body
 
 
@@ -1515,7 +1577,21 @@ def _fail_opening(owner: str, pid: str, gen_id: str, claim: str, message: str) -
         return
 
 
+def _user_facing_error(message: str) -> str:
+    """구간 실패 메시지를 사용자용으로 바꾼다(설계자 2026-10-20).
+
+    Seedance(BytePlus) 실존 인물 필터의 'may contain real person' 오류는 무엇을 고칠지 모를
+    영어 원문이라, 모델을 바꾸라는 한국어 문구로 바꿔 저장한다. 그 밖은 원문 그대로.
+    """
+    low = str(message or "").lower()
+    if "may contain real person" in low or "real person" in low:
+        return "실사 인물 시작 이미지를 이 모델이 받지 않습니다. 모델을 바꿔 다시 만들어 주세요."
+    return message
+
+
 def _fail_variant(owner: str, pid: str, gen_id: str, index: int, variant: str, claim: str, message: str) -> None:
+    message = _user_facing_error(message)
+
     def mutator(data: dict) -> None:
         g = data.get("gen") or {}
         if not _claim_ok_variant(g, index, variant, claim):

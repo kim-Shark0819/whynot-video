@@ -45,6 +45,7 @@ USER_FACING_KINDS = {
     "SchemaUnreadable",
     "ModelUnavailable",
     "CharacterRealMissing",
+    "RealStartImageUnsupported",
 }
 
 
