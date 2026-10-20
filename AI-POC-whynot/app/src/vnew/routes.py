@@ -192,6 +192,47 @@ def create_blueprint(deps: VnewDependencies) -> Blueprint:
         except Exception as exc:  # noqa: BLE001
             return _fail(exc)
 
+    # ------------------------------------------------------------ 추가 복장(outfits)
+
+    @bp.post("/characters/<char_id>/outfits")
+    @deps.require_auth
+    def add_outfit(char_id: str):
+        try:
+            owner = _owner()
+            characters.load_char(owner, char_id)  # 존재·소유 확인
+            payload = request.get_json(silent=True) or {}
+            outfit = characters.add_outfit(
+                owner,
+                char_id,
+                str(payload.get("labelKo") or ""),
+                str(payload.get("promptKo") or ""),
+            )
+            return jsonify({"ok": True, "outfit": outfit}), 201
+        except Exception as exc:  # noqa: BLE001
+            return _fail(exc)
+
+    @bp.post("/characters/<char_id>/outfits/<outfit_id>/build")
+    @deps.require_auth
+    def build_outfit(char_id: str, outfit_id: str):
+        try:
+            owner = _owner()
+            characters.load_char(owner, char_id)  # 존재·소유 확인
+            characters.start_build_outfit(owner, char_id, outfit_id)
+            return jsonify({"ok": True, "status": "building"}), 202
+        except Exception as exc:  # noqa: BLE001
+            return _fail(exc)
+
+    @bp.delete("/characters/<char_id>/outfits/<outfit_id>")
+    @deps.require_auth
+    def delete_outfit(char_id: str, outfit_id: str):
+        try:
+            owner = _owner()
+            characters.load_char(owner, char_id)  # 존재·소유 확인
+            characters.delete_outfit(owner, char_id, outfit_id)
+            return jsonify({"ok": True})
+        except Exception as exc:  # noqa: BLE001
+            return _fail(exc)
+
     # ------------------------------------------------------------ GLB 스트리밍
 
     @bp.get("/characters/<char_id>/model/<variant>.glb")
@@ -383,6 +424,56 @@ def create_blueprint(deps: VnewDependencies) -> Blueprint:
                 return jsonify({"ok": True, "gen": gen_out})
             task = plan_mod.cancel_task(owner, pid)
             return jsonify({"ok": True, "task": task})
+        except Exception as exc:  # noqa: BLE001
+            return _fail(exc)
+
+    # ------------------------------------------------------------ ③ 공간 디테일 시트(locations)
+    #
+    # 콘티의 장소마다 4면 입면도 시트(실사·웹툰)를 만든다. 콘티를 만들면 목록만 갱신하고 자동으로
+    # 그리지는 않는다(비용) — 화면에서 [공간 시트 만들기]. locations.py 가 파이프라인을 맡는다.
+
+    @bp.post("/p/<pid>/locations/<lid>/build")
+    @deps.require_auth
+    def location_build(pid: str, lid: str):
+        try:
+            from . import locations  # noqa: PLC0415
+
+            owner = _project_for(pid, write=True)
+            plan_mod.load_or_create(owner, pid)
+            payload = request.get_json(silent=True) or {}
+            extra = None
+            if "extraPromptKo" in payload:
+                extra = str(payload.get("extraPromptKo") or "")[: locations.MAX_EXTRA_PROMPT_LEN]
+            task_id = locations.start_build(owner, pid, lid, extra)
+            return jsonify({"ok": True, "taskId": task_id, "status": "building"}), 202
+        except Exception as exc:  # noqa: BLE001
+            return _fail(exc)
+
+    @bp.post("/p/<pid>/locations/build-all")
+    @deps.require_auth
+    def location_build_all(pid: str):
+        try:
+            from . import locations  # noqa: PLC0415
+
+            owner = _project_for(pid, write=True)
+            plan_mod.load_or_create(owner, pid)
+            started = locations.start_build_all(owner, pid)
+            data, _ = plan_mod.load_plan(owner, pid)
+            return jsonify({"ok": True, "started": started, "plan": plan_mod.plan_view(owner, pid, data)}), 202
+        except Exception as exc:  # noqa: BLE001
+            return _fail(exc)
+
+    @bp.put("/p/<pid>/locations/<lid>")
+    @deps.require_auth
+    def location_update(pid: str, lid: str):
+        try:
+            from . import locations  # noqa: PLC0415
+
+            owner = _project_for(pid, write=True)
+            payload = request.get_json(silent=True) or {}
+            locations.update_location(owner, pid, lid, payload)
+            data, _ = plan_mod.load_plan(owner, pid)
+            return jsonify(plan_mod.plan_view(owner, pid, data))
         except Exception as exc:  # noqa: BLE001
             return _fail(exc)
 

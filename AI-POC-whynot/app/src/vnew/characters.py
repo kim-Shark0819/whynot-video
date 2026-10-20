@@ -152,6 +152,16 @@ def model_thumb_key(owner: str, char_id: str, variant: str, version: int) -> str
     return f"{_variant_dir(owner, char_id, variant, version)}/thumb.png"
 
 
+def outfit_front_key(owner: str, char_id: str, outfit_id: str, variant: str) -> str:
+    """추가 복장 이미지(정면). 그림체(variant)별로 둔다. 3D 는 만들지 않는다."""
+    return f"{_root(owner)}/{char_id}/outfits/{outfit_id}/{variant}/front.jpg"
+
+
+def outfit_back_key(owner: str, char_id: str, outfit_id: str, variant: str) -> str:
+    """추가 복장 이미지(후면)."""
+    return f"{_root(owner)}/{char_id}/outfits/{outfit_id}/{variant}/back.jpg"
+
+
 # ================================================================ 저장 레이어
 
 
@@ -187,6 +197,31 @@ def _empty_variant() -> dict:
     }
 
 
+def _empty_outfit_variant() -> dict:
+    """추가 복장 한 그림체(정면·후면). 3D 는 만들지 않는다."""
+    return {
+        "status": "queued",  # queued|images|ready|failed
+        "frontKey": "",
+        "backKey": "",
+        "error": "",
+    }
+
+
+def _new_outfit_id() -> str:
+    return f"o_{secrets.token_hex(4)}"
+
+
+def _empty_outfit(label_ko: str, prompt_en: str, source: str) -> dict:
+    """추가 복장 한 벌. source 는 'auto'(분석 후보) 또는 'user'(사용자 추가)."""
+    return {
+        "id": _new_outfit_id(),
+        "labelKo": (label_ko or "").strip() or (prompt_en or "").strip(),
+        "promptEn": (prompt_en or "").strip(),
+        "source": source if source in ("auto", "user") else "user",
+        "variants": {v: _empty_outfit_variant() for v in settings.VARIANTS},
+    }
+
+
 def new_char(name: str) -> dict:
     return {
         "id": _new_char_id(),
@@ -201,6 +236,8 @@ def new_char(name: str) -> dict:
             "appearanceEn": "",
             "styleEn": "",
             "outfitEn": "",
+            "baseOutfitEn": "",
+            "outfitLayersEn": [],
             "altOutfitsEn": [],
             "expressionsKo": [],
             "extraEn": "",
@@ -210,6 +247,9 @@ def new_char(name: str) -> dict:
         "variants": {v: _empty_variant() for v in settings.VARIANTS},
         "version": 0,
         "costumes": [],
+        # 추가 복장(기본 복장 위에 더 입히는 옷차림). analysis.outfitLayersEn 에서 auto 후보를
+        # 채우고, 사용자가 추가할 수 있다. 각 항목은 _empty_outfit() 모양.
+        "outfits": [],
     }
 
 
@@ -412,8 +452,16 @@ _ANALYZE_SYSTEM = (
     "styleEn is 1-2 English sentences describing the EXACT drawing style of the reference art: "
     "line weight and texture (e.g. thin sketchy pencil-like lines), coloring method "
     "(flat / soft pastel / cel), palette, shading and blush, and how the eyes and hair are drawn. "
-    "outfitEn is ONE English sentence about the SINGLE representative outfit — pick the outfit of the "
-    "cut where the full body is drawn largest. altOutfitsEn lists other outfits seen (reference only). "
+    "baseOutfitEn is the MOST BASIC single outfit seen on the character with every extra layer "
+    "(jacket, coat, cardigan, hoodie) removed — describe it very concretely: top garment type, "
+    "colour and sleeve length, bottoms, shoes and any accessory. This is the outfit the 3D model "
+    "is built from, so it must be one consistent set, not a mix. "
+    "outfitLayersEn lists the EXTRA layers or OTHER outfits seen over or instead of the base outfit "
+    "(e.g. a black suit jacket over the shirt, a light blue hoodie) — each item is an object "
+    "{labelKo, promptEn} where labelKo is a short Korean name and promptEn is a short English "
+    "phrase describing only the extra garment to add on top of the base outfit. "
+    "outfitEn is the SAME as baseOutfitEn (kept for compatibility). "
+    "altOutfitsEn lists other outfits seen (reference only). "
     "expressionsKo lists the facial expressions you can see (Korean words). "
     "If the user gives an extra request (extraPromptKo), turn it into a short English drawing "
     "instruction in extraEn; otherwise leave extraEn empty. Do not add text outside the tool."
@@ -430,12 +478,23 @@ _ANALYZE_TOOL = {
                 "descriptionKo": {"type": "string"},
                 "appearanceEn": {"type": "string"},
                 "styleEn": {"type": "string"},
+                "baseOutfitEn": {"type": "string"},
                 "outfitEn": {"type": "string"},
+                "outfitLayersEn": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "labelKo": {"type": "string"},
+                            "promptEn": {"type": "string"},
+                        },
+                    },
+                },
                 "altOutfitsEn": {"type": "array", "items": {"type": "string"}},
                 "expressionsKo": {"type": "array", "items": {"type": "string"}},
                 "extraEn": {"type": "string"},
             },
-            "required": ["descriptionKo", "appearanceEn", "outfitEn"],
+            "required": ["descriptionKo", "appearanceEn", "baseOutfitEn"],
         }
     },
 }
@@ -479,12 +538,18 @@ def analyze_sources(owner: str, char: dict) -> dict:
             continue
         alt = payload.get("altOutfitsEn")
         expressions = payload.get("expressionsKo")
+        # baseOutfitEn 이 가장 기본 한 벌. 옛 응답(baseOutfitEn 없음)은 outfitEn 으로 대신한다.
+        base_outfit = str(payload.get("baseOutfitEn") or payload.get("outfitEn") or "").strip()
+        layers = _parse_outfit_layers(payload.get("outfitLayersEn"))
         return {
             "nameGuess": str(payload.get("nameGuess") or "").strip(),
             "descriptionKo": str(payload.get("descriptionKo") or "").strip(),
             "appearanceEn": str(payload.get("appearanceEn") or "").strip(),
             "styleEn": str(payload.get("styleEn") or "").strip(),
-            "outfitEn": str(payload.get("outfitEn") or "").strip(),
+            "baseOutfitEn": base_outfit,
+            # 호환: outfitEn 은 baseOutfitEn 과 같게 둔다(기존 프롬프트·화면이 outfitEn 을 읽음).
+            "outfitEn": base_outfit,
+            "outfitLayersEn": layers,
             "altOutfitsEn": [str(x).strip() for x in alt if str(x).strip()] if isinstance(alt, list) else [],
             "expressionsKo": [str(x).strip() for x in expressions if str(x).strip()]
             if isinstance(expressions, list)
@@ -493,6 +558,30 @@ def analyze_sources(owner: str, char: dict) -> dict:
             "model": str(usage.get("model") or model),
         }
     raise VpocError("vnew.analyze", "AnalyzeFailed", "캐릭터 분석에 실패했습니다.", 502)
+
+
+def _parse_outfit_layers(raw) -> list[dict]:
+    """분석이 준 outfitLayersEn 을 [{labelKo, promptEn}] 로 정규화한다.
+
+    각 항목이 문자열이면 promptEn 으로 보고 labelKo 는 비운다(옛/느슨한 응답 호환).
+    promptEn 이 비면 버린다.
+    """
+    out: list[dict] = []
+    if not isinstance(raw, list):
+        return out
+    for item in raw:
+        if isinstance(item, str):
+            prompt_en = item.strip()
+            label_ko = ""
+        elif isinstance(item, dict):
+            prompt_en = str(item.get("promptEn") or "").strip()
+            label_ko = str(item.get("labelKo") or "").strip()
+        else:
+            continue
+        if not prompt_en:
+            continue
+        out.append({"labelKo": label_ko or prompt_en, "promptEn": prompt_en})
+    return out
 
 
 # ---- 사람 수 검사(정면·후면) ----
@@ -539,22 +628,104 @@ def _count_people(jpeg: bytes) -> int | None:
         return None
 
 
+# ---- 복장 일관성 검사(시트가 기본 복장과 맞는지) ----
+#
+# 029 의 사람 수 검사와 같은 방식(vpoc.llm._converse + 도구 1개). 시트와 baseOutfitEn 을 주고
+# 모든 면이 같은 기본 복장을 입었는지 {consistent, problems} 로 받는다.
+
+_OUTFIT_TOOL = {
+    "name": "emit_outfit_consistency",
+    "description": "Judge whether every view in a turnaround sheet wears the same base outfit.",
+    "inputSchema": {
+        "json": {
+            "type": "object",
+            "properties": {
+                "consistent": {"type": "boolean"},
+                "problems": {"type": "array", "items": {"type": "string"}},
+            },
+            "required": ["consistent"],
+        }
+    },
+}
+
+_OUTFIT_SYSTEM = (
+    "You check a character turnaround reference sheet. The character must wear ONE single base "
+    "outfit in EVERY view (front, side, back). Compare what you see against the required base "
+    "outfit given by the user. Set consistent=false if any view adds or swaps a garment (an extra "
+    "jacket, coat, cardigan or hoodie, a different colour, a different top or bottom) so the views "
+    "do not all match the base outfit; otherwise consistent=true. In problems, list each mismatch "
+    "as a short English phrase (e.g. 'back view adds a black jacket'). "
+    "Answer only by calling the emit_outfit_consistency tool exactly once."
+)
+
+
+def _check_outfit_consistency(sheet: bytes, base_outfit: str) -> dict | None:
+    """시트가 baseOutfitEn 과 맞는지 Claude 분석 체인에 물어본다.
+
+    반환: {"consistent": bool, "problems": [..]}. 모델 오류면 None(검사 건너뜀).
+    base_outfit 이 비어 있으면 검사하지 않는다(None).
+    """
+    base = (base_outfit or "").strip()
+    if not base:
+        return None
+    blocks = [
+        {
+            "text": (
+                "The required base outfit is: "
+                + base
+                + " Does every view in this turnaround sheet wear exactly this base outfit "
+                "and nothing else (no extra jacket/coat/layer, no swapped garment)?"
+            )
+        },
+        {"image": {"format": "jpeg", "source": {"bytes": sheet}}},
+    ]
+    try:
+        payload, _usage = vpoc_llm._converse(  # noqa: SLF001
+            system_text=_OUTFIT_SYSTEM,
+            blocks=blocks,
+            tool=_OUTFIT_TOOL,
+            max_tokens=300,
+            where="vnew.outfit_check",
+            model=settings.OUTFIT_CHECK_MODEL,
+        )
+    except Exception as exc:  # noqa: BLE001
+        log.warning("vnew.outfit_check.failed err=%s", str(exc)[:200])
+        return None
+    problems = payload.get("problems")
+    return {
+        "consistent": bool(payload.get("consistent")),
+        "problems": [str(x).strip() for x in problems if str(x).strip()]
+        if isinstance(problems, list)
+        else [],
+    }
+
+
 # ================================================================ 프롬프트(b)
+
+
+def _base_outfit(analysis: dict) -> str:
+    """기본 복장(겹옷을 뺀 한 벌). baseOutfitEn 을 쓰고, 없으면 outfitEn(옛 데이터)로 대신한다."""
+    return (analysis.get("baseOutfitEn") or analysis.get("outfitEn") or "").strip()
 
 
 def _who(analysis: dict) -> str:
     appearance = analysis.get("appearanceEn") or ""
-    outfit = analysis.get("outfitEn") or ""
+    outfit = _base_outfit(analysis)
     return f"The character: {appearance} Wearing: {outfit}".strip()
 
 
 def _one_person_outfit(analysis: dict) -> str:
-    """모든 뷰에 '한 사람만 · 이 옷만' 을 강제하는 문장."""
-    outfit = (analysis.get("outfitEn") or "").strip() or "the outfit described above"
+    """모든 뷰에 '한 사람만 · 기본 복장만(겹옷 금지)' 을 강제하는 문장.
+
+    시트·정면·후면이 전부 똑같은 기본 복장을 입게 해, 그 아래서 만드는 3D 가 면마다 다른 옷으로
+    흔들리지 않게 한다. 추가 겹옷(자켓·코트 등)은 '추가 복장' 이미지에서만 입힌다.
+    """
+    outfit = _base_outfit(analysis) or "the outfit described above"
     return (
         "Draw exactly ONE person — only ONE single person in the image, no extra figures, "
         "no duplicates, no background characters. "
-        f"Wear only this outfit in every view: {outfit}"
+        f"Every view wears exactly this outfit and nothing else: {outfit}. "
+        "No jacket, coat or extra layer unless listed."
     )
 
 
@@ -1089,6 +1260,40 @@ def _gen_checked(
     return image2, True
 
 
+def _gen_sheet_checked(
+    variant: str, analysis: dict, references: list[bytes], *, size: str
+) -> tuple[bytes, bool]:
+    """시트 1장 생성 후 복장 일관성을 검사. 면마다 옷이 다르면 problems 를 고칠 지시를 붙여
+    시트를 OUTFIT_SHEET_RETRY(기본 1)회만 다시 그린다.
+
+    반환: (sheet_jpeg, outfit_warn) — outfit_warn 은 재생성 뒤에도 일관되지 않으면 True
+    (warning 대상). 검사가 모델 오류로 건너뛰어지면(None) 재생성하지 않고 False.
+    """
+    base_outfit = _base_outfit(analysis)
+    prompt = _sheet_prompt(variant, analysis)
+    sheet = _seedream(prompt, references, size=size)
+    result = _check_outfit_consistency(sheet, base_outfit)
+    if result is None or result.get("consistent"):
+        return sheet, False
+    # 일관되지 않다 — problems 를 고칠 지시를 붙여 시트를 1회만 다시 그린다.
+    for _ in range(max(0, settings.OUTFIT_SHEET_RETRY)):
+        problems = result.get("problems") or []
+        fix = ""
+        if problems:
+            fix = " Fix these so every view wears the base outfit only: " + "; ".join(problems) + "."
+        retry_prompt = (
+            prompt
+            + fix
+            + f" Make EVERY view wear exactly this same base outfit and nothing else: {base_outfit}."
+        )
+        sheet = _seedream(retry_prompt, references, size=size)
+        result = _check_outfit_consistency(sheet, base_outfit)
+        if result is None or result.get("consistent"):
+            return sheet, False
+    # 재생성 뒤에도 일관되지 않다 — 그대로 쓰고 warning.
+    return sheet, True
+
+
 def _build_variant(
     owner: str, char_id: str, variant: str, version: int, analysis: dict, refs: list[bytes], token: str = ""
 ) -> None:
@@ -1100,9 +1305,10 @@ def _build_variant(
     try:
         _set_variant(owner, char_id, variant, {"status": "images", "warning": "", "heartbeatAt": now_iso()})
 
-        # 시트(2560x1440)
+        # 시트(2560x1440) — 복장 일관성 검사: 면마다 옷이 다르면 1회 다시 그리고, 그래도면 warning.
+        # front/back 은 '일관성 검사를 통과한(또는 재생성한) 시트' 를 참고로 그린다.
         _guard_submit_claim(owner, char_id, variant, token)
-        sheet = _seedream(_sheet_prompt(variant, analysis), refs, size=settings.SHEET_SIZE)
+        sheet, outfit_warn = _gen_sheet_checked(variant, analysis, refs, size=settings.SHEET_SIZE)
         _charge_seedream(owner, char_id, variant, "sheet")
         s_key = sheet_key(owner, char_id, variant, version)
         STORE.put_bytes(s_key, sheet, "image/jpeg")
@@ -1128,7 +1334,12 @@ def _build_variant(
         b_key = back_key(owner, char_id, variant, version)
         STORE.put_bytes(b_key, back, "image/jpeg")
 
-        warning = "정면/후면에 여러 사람이 보일 수 있습니다" if (front_multi or back_multi) else ""
+        warnings = []
+        if outfit_warn:
+            warnings.append("복장이 면마다 다를 수 있습니다")
+        if front_multi or back_multi:
+            warnings.append("정면/후면에 여러 사람이 보일 수 있습니다")
+        warning = " / ".join(warnings)
         _set_variant(
             owner,
             char_id,
@@ -1311,6 +1522,8 @@ def run_build(owner: str, char_id: str, version: int, tokens: dict | None = None
 
         # e. 최종 상태 롤업(하나라도 ready 면 ready, 진행 중이면 building, 전부 failed 면 failed)
         _refresh_char_status(owner, char_id)
+        # f. outfitLayersEn 를 'auto' 추가 복장 후보로 넣는다(그림은 그리지 않는다 — 비용).
+        sync_auto_outfits(owner, char_id, analysis)
     except Exception as exc:  # noqa: BLE001
         log.error("vnew.run_build_failed char=%s err=%s", char_id, str(exc)[:300])
         message = exc.message if isinstance(exc, VpocError) else str(exc)[:300]
@@ -1820,6 +2033,269 @@ def reconcile_stale(owner: str, char_id: str) -> dict:
     return char
 
 
+# ================================================================ 추가 복장(outfits)
+#
+# 기본 복장 위에 더 입히는 옷차림. analysis.outfitLayersEn 를 auto 후보로 넣되 그리지는 않는다
+# (비용). 사용자가 추가할 수 있고, build 때만 두 그림체 각각 정면·후면을 그린다(3D 없음).
+
+
+def _find_outfit(char: dict, outfit_id: str) -> dict | None:
+    for o in char.get("outfits") or []:
+        if o.get("id") == outfit_id:
+            return o
+    return None
+
+
+def sync_auto_outfits(owner: str, char_id: str, analysis: dict) -> None:
+    """outfitLayersEn 를 source:'auto' 추가 복장 후보로 넣는다(그림은 그리지 않는다).
+
+    이미 같은 promptEn 의 auto 후보가 있으면 다시 넣지 않는다(빌드 때마다 중복 누적 방지).
+    사용자 추가(user)·auto 가 합쳐 MAX_OUTFITS 를 넘으면 더 넣지 않는다.
+    """
+    layers = _parse_outfit_layers(analysis.get("outfitLayersEn"))
+    if not layers:
+        return
+
+    def mutator(data: dict) -> None:
+        outfits = data.setdefault("outfits", [])
+        existing = {str(o.get("promptEn") or "").strip().lower() for o in outfits}
+        for layer in layers:
+            prompt_en = layer["promptEn"]
+            if prompt_en.strip().lower() in existing:
+                continue
+            if len(outfits) >= settings.MAX_OUTFITS:
+                break
+            outfits.append(_empty_outfit(layer["labelKo"], prompt_en, "auto"))
+            existing.add(prompt_en.strip().lower())
+
+    try:
+        mutate_char(owner, char_id, mutator)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("vnew.sync_auto_outfits_failed char=%s err=%s", char_id, str(exc)[:200])
+
+
+def _translate_outfit_prompt(owner: str, char: dict, prompt_ko: str) -> str:
+    """사용자가 넣은 한국어 복장 설명을 Astra(실패 시 Claude)로 영어 한 줄로 바꾼다.
+
+    실패하면 입력을 그대로 돌려준다(빈 결과보다 원문이 낫다).
+    """
+    prompt_ko = (prompt_ko or "").strip()
+    if not prompt_ko:
+        return ""
+    blocks = [
+        {
+            "text": (
+                "Translate this Korean clothing description into ONE short English phrase that "
+                "names only the garment(s) to add on top of a base outfit. Answer by calling "
+                "emit_outfit_prompt once. Korean: " + prompt_ko
+            )
+        }
+    ]
+    tool = {
+        "name": "emit_outfit_prompt",
+        "description": "Return the English clothing phrase.",
+        "inputSchema": {
+            "json": {
+                "type": "object",
+                "properties": {"promptEn": {"type": "string"}},
+                "required": ["promptEn"],
+            }
+        },
+    }
+    for model in (settings.ASTRA_MODEL, settings.ANALYZE_FALLBACK_MODEL):
+        try:
+            payload, _usage = vpoc_llm._converse(  # noqa: SLF001
+                system_text="You translate Korean clothing descriptions into short English phrases.",
+                blocks=blocks,
+                tool=tool,
+                max_tokens=200,
+                where="vnew.outfit_translate",
+                model=model,
+            )
+        except Exception as exc:  # noqa: BLE001
+            log.warning("vnew.outfit_translate.model_failed model=%s err=%s", model, str(exc)[:200])
+            continue
+        prompt_en = str(payload.get("promptEn") or "").strip()
+        if prompt_en:
+            return prompt_en
+    return prompt_ko
+
+
+def add_outfit(owner: str, char_id: str, label_ko: str, prompt_ko: str) -> dict:
+    """사용자 추가 복장 1벌 등록. promptKo 는 Astra 가 promptEn 으로 바꾼다(그림은 안 그린다).
+
+    반환: 새로 넣은 outfit dict.
+    """
+    char, _ = load_char(owner, char_id)
+    label_ko = (label_ko or "").strip()[: settings.MAX_OUTFIT_LABEL_LEN]
+    prompt_ko = (prompt_ko or "").strip()[: settings.MAX_OUTFIT_PROMPT_LEN]
+    if not label_ko and not prompt_ko:
+        raise VpocError("vnew.add_outfit", "NoOutfit", "복장 이름이나 설명을 넣어 주세요.", 400)
+    if len(char.get("outfits") or []) >= settings.MAX_OUTFITS:
+        raise VpocError(
+            "vnew.add_outfit", "TooManyOutfits",
+            f"추가 복장은 최대 {settings.MAX_OUTFITS}개까지 만들 수 있습니다.", 400,
+        )
+    prompt_en = _translate_outfit_prompt(owner, char, prompt_ko) if prompt_ko else ""
+    outfit = _empty_outfit(label_ko, prompt_en, "user")
+
+    def mutator(data: dict) -> None:
+        data.setdefault("outfits", []).append(outfit)
+
+    mutate_char(owner, char_id, mutator)
+    return outfit
+
+
+def delete_outfit(owner: str, char_id: str, outfit_id: str) -> None:
+    """추가 복장 1벌 삭제(char.json 에서만 뺀다 — 이미지 파일은 지우지 않는다)."""
+
+    def mutator(data: dict) -> None:
+        data["outfits"] = [o for o in (data.get("outfits") or []) if o.get("id") != outfit_id]
+
+    mutate_char(owner, char_id, mutator)
+
+
+def start_build_outfit(owner: str, char_id: str, outfit_id: str) -> None:
+    """추가 복장 이미지 만들기(백그라운드 스레드 시작). 두 그림체 각각 정면·후면.
+
+    기본 정면·후면이 없으면(아직 안 만듦) 400. 진행 중이면 409.
+    """
+    char, _ = load_char(owner, char_id)
+    outfit = _find_outfit(char, outfit_id)
+    if outfit is None:
+        raise VpocError("vnew.build_outfit", "NotFound", "추가 복장을 찾을 수 없습니다.", 404)
+    # 기본 정면·후면이 하나라도 있어야 참고로 쓸 수 있다.
+    have_base = any(
+        (char.get("variants") or {}).get(v, {}).get("frontKey")
+        for v in settings.VARIANTS
+    )
+    if not have_base:
+        raise VpocError(
+            "vnew.build_outfit", "NoBase",
+            "먼저 캐릭터(기본 복장)를 만들어야 추가 복장을 그릴 수 있습니다.", 400,
+        )
+
+    def mutator(data: dict) -> None:
+        o = _find_outfit(data, outfit_id)
+        if o is None:
+            return
+        for v in settings.VARIANTS:
+            ov = o.setdefault("variants", {}).setdefault(v, _empty_outfit_variant())
+            if ov.get("status") == "images":
+                raise VpocError("vnew.build_outfit", "AlreadyBuilding", "이미 만들고 있습니다.", 409)
+            ov["status"] = "images"
+            ov["error"] = ""
+
+    mutate_char(owner, char_id, mutator)
+
+    thread = threading.Thread(
+        target=run_build_outfit,
+        args=(owner, char_id, outfit_id),
+        daemon=True,
+        name=f"vnew-outfit-{char_id}-{outfit_id}",
+    )
+    thread.start()
+
+
+def run_build_outfit(owner: str, char_id: str, outfit_id: str) -> None:
+    """추가 복장 이미지(두 그림체 각각 정면·후면)를 그린다(백그라운드).
+
+    각 그림체의 기본 정면·후면을 참고로 'same person, same base outfit, plus {promptEn}' 정면·후면을
+    그린다. 3D 는 만들지 않는다(기본 복장 3D 하나만). 원장은 Seedream 장당.
+    """
+    try:
+        char, _ = load_char(owner, char_id)
+        outfit = _find_outfit(char, outfit_id)
+        if outfit is None:
+            return
+        analysis = char.get("analysis") or {}
+        prompt_en = str(outfit.get("promptEn") or "").strip()
+        for variant in settings.VARIANTS:
+            try:
+                base_v = (char.get("variants") or {}).get(variant) or {}
+                base_front_key = base_v.get("frontKey") or ""
+                base_back_key = base_v.get("backKey") or ""
+                if not base_front_key:
+                    _set_outfit_variant(owner, char_id, outfit_id, variant,
+                                        {"status": "failed", "error": "기본 정면 이미지가 없습니다."})
+                    continue
+                base_front = STORE.get_bytes(base_front_key)
+                base_back = STORE.get_bytes(base_back_key) if base_back_key else None
+
+                # 정면 — 기본 정면을 첫 참고로.
+                front = _seedream(
+                    _outfit_prompt(variant, analysis, prompt_en, "front"),
+                    [base_front], size=settings.FRONT_SIZE,
+                )
+                _charge_seedream(owner, char_id, variant, "outfit-front")
+                fk = outfit_front_key(owner, char_id, outfit_id, variant)
+                STORE.put_bytes(fk, front, "image/jpeg")
+
+                # 후면 — 방금 만든 정면 + 기본 후면을 참고로.
+                back_refs = [front]
+                if base_back is not None:
+                    back_refs.append(base_back)
+                back = _seedream(
+                    _outfit_prompt(variant, analysis, prompt_en, "back"),
+                    back_refs, size=settings.BACK_SIZE,
+                )
+                _charge_seedream(owner, char_id, variant, "outfit-back")
+                bk = outfit_back_key(owner, char_id, outfit_id, variant)
+                STORE.put_bytes(bk, back, "image/jpeg")
+
+                _set_outfit_variant(owner, char_id, outfit_id, variant,
+                                    {"status": "ready", "frontKey": fk, "backKey": bk, "error": ""})
+            except Exception as exc:  # noqa: BLE001
+                message = exc.message if isinstance(exc, VpocError) else str(exc)[:300]
+                log.warning("vnew.build_outfit_variant_failed char=%s outfit=%s variant=%s err=%s",
+                            char_id, outfit_id, variant, message)
+                _set_outfit_variant(owner, char_id, outfit_id, variant,
+                                    {"status": "failed", "error": message})
+    except Exception as exc:  # noqa: BLE001
+        log.warning("vnew.build_outfit_failed char=%s outfit=%s err=%s", char_id, outfit_id, str(exc)[:300])
+
+
+def _set_outfit_variant(owner: str, char_id: str, outfit_id: str, variant: str, patch: dict) -> None:
+    def mutator(data: dict) -> None:
+        o = _find_outfit(data, outfit_id)
+        if o is None:
+            return
+        ov = o.setdefault("variants", {}).setdefault(variant, _empty_outfit_variant())
+        ov.update(patch)
+
+    mutate_char(owner, char_id, mutator)
+
+
+def _outfit_prompt(variant: str, analysis: dict, prompt_en: str, view: str) -> str:
+    """추가 복장 정면/후면 프롬프트. '같은 사람·같은 기본 복장 + {promptEn}'."""
+    who = _who(analysis)
+    base = _base_outfit(analysis) or "the base outfit"
+    extra = (prompt_en or "").strip() or "the extra garment described"
+    side = "BACK view" if view == "back" else "front view"
+    person = (
+        "the same real Korean actor as in the reference image"
+        if variant == "real"
+        else "the same single person as in the reference image"
+    )
+    head = (
+        "Single full-body " + side + " photograph of " + person + ". "
+        if variant == "real"
+        else "Single full-body " + side + " of " + person + ". "
+    )
+    prompt = (
+        head
+        + who
+        + f" Same person, same base outfit ({base}), plus {extra}. "
+        + "Standing straight in a relaxed A-pose, whole body from head to shoes visible, centered, "
+        "plain white background, no shadow. Draw exactly ONE person, no extra figures. "
+    )
+    if variant == "real":
+        prompt += "Real photograph, natural skin texture, soft studio lighting. No text."
+    else:
+        prompt += _style_clause(analysis) + " No text."
+    return prompt
+
+
 # ================================================================ 상세 뷰(presigned)
 
 
@@ -1855,6 +2331,7 @@ def detail_view(owner: str, char_id: str) -> dict:
                 "thumbUrl": _presign(model3d.get("thumbKey")),
             },
         }
+    analysis = char.get("analysis") or {}
     return {
         "id": char["id"],
         "name": char.get("name") or "",
@@ -1864,11 +2341,37 @@ def detail_view(owner: str, char_id: str) -> dict:
         "updatedAt": char.get("updatedAt"),
         "buildError": char.get("buildError") or "",
         "sources": char.get("sources") or [],
-        "analysis": char.get("analysis") or {},
+        "analysis": analysis,
+        # 영상 쪽·화면에서 바로 쓰도록 기본 복장을 꺼내 준다(outfitEn 과 같다).
+        "baseOutfitEn": _base_outfit(analysis),
         "extraPromptKo": char.get("extraPromptKo") or "",
         "variants": variants_out,
         "costumes": char.get("costumes") or [],
+        "outfits": _outfits_view(owner, char),
     }
+
+
+def _outfits_view(owner: str, char: dict) -> list[dict]:
+    """추가 복장 목록을 화면·영상용으로 presigned URL 과 함께 담는다."""
+    out: list[dict] = []
+    for o in char.get("outfits") or []:
+        variants_out: dict = {}
+        for variant in settings.VARIANTS:
+            ov = (o.get("variants") or {}).get(variant) or _empty_outfit_variant()
+            variants_out[variant] = {
+                "status": ov.get("status") or "queued",
+                "error": ov.get("error") or "",
+                "frontUrl": _presign(ov.get("frontKey")),
+                "backUrl": _presign(ov.get("backKey")),
+            }
+        out.append({
+            "id": o.get("id"),
+            "labelKo": o.get("labelKo") or "",
+            "promptEn": o.get("promptEn") or "",
+            "source": o.get("source") or "user",
+            "variants": variants_out,
+        })
+    return out
 
 
 # ================================================================ GLB 스트리밍

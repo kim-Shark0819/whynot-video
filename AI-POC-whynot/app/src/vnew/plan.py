@@ -138,6 +138,9 @@ def new_plan() -> dict:
             "cuts": [],
             "segments": [],
         },
+        # ③ 콘티의 장소마다 만드는 공간 디테일 시트(설계자 2026-10-21). 콘티를 만들면 목록만
+        # 갱신하고 자동으로 그리지는 않는다(비용). locations.py 가 이 목록을 다룬다.
+        "locations": [],
         "task": _empty_task(),
     }
 
@@ -618,10 +621,23 @@ def run_conti(owner: str, pid: str, task_id: str) -> None:
 
         conti = {"status": "ready", "error": "", "model": model, "cuts": cuts, "segments": segments}
         _commit_step(owner, pid, "conti", task_id, conti)
+        # 콘티가 정해지면 장소 목록만 갱신한다(자동으로 그리지는 않는다 — 비용). 같은 이름이면 유지.
+        _sync_locations_after_conti(owner, pid)
     except Exception as exc:  # noqa: BLE001
         log.warning("vnew.run_conti.failed pid=%s err=%s", pid, str(exc)[:300])
         message = exc.message if isinstance(exc, VpocError) else str(exc)[:300]
         _fail_step(owner, pid, "conti", task_id, message)
+
+
+def _sync_locations_after_conti(owner: str, pid: str) -> None:
+    """콘티가 정해진 뒤 장소 목록을 갱신한다(그림은 그리지 않는다). 실패해도 콘티는 이미 저장됐다."""
+    from . import locations  # noqa: PLC0415 — 순환 import 피하기
+
+    try:
+        mutate_plan(owner, pid, locations.sync_locations)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("vnew.conti.sync_locations_failed pid=%s err=%s", pid, str(exc)[:200])
+
 
 
 def _conti_prompt(script: dict, total_seconds: int, notes: str, roster: str) -> str:
@@ -1170,6 +1186,7 @@ def plan_view(owner: str, pid: str, plan: dict) -> dict:
         "models": available_models(),
         "script": plan.get("script") or {},
         "conti": plan.get("conti") or {},
+        "locations": _locations_view(owner, pid, plan),
         "gen": _gen_view(owner, pid, plan),
         "task": plan.get("task") or _empty_task(),
     }
@@ -1180,6 +1197,17 @@ def _gen_view(owner: str, pid: str, plan: dict) -> dict | None:
     from . import generate  # noqa: PLC0415
 
     return generate.gen_view(owner, pid, plan)
+
+
+def _locations_view(owner: str, pid: str, plan: dict) -> list[dict]:
+    """③ 공간 디테일 시트 보기. locations 를 늦게 import 해 순환 참조를 피한다."""
+    from . import locations  # noqa: PLC0415
+
+    try:
+        return locations.locations_view(owner, pid, plan)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("vnew.plan.locations_view_failed pid=%s err=%s", pid, str(exc)[:200])
+        return []
 
 
 # ================================================================ 작은 도우미

@@ -1643,3 +1643,249 @@ textarea.vnew-field-input {
     width: 100%;
   }
 }
+
+
+
+/* ---- 추가 복장(outfits) ---- */
+
+.vnew-outfits {
+  margin-top: 20px;
+}
+
+.vnew-outfit-list {
+  display: grid;
+  gap: 14px;
+  margin: 12px 0;
+}
+
+.vnew-outfit-card {
+  border: 1px solid var(--line, #e5e7eb);
+  border-radius: 12px;
+  padding: 14px;
+  background: var(--surface, #ffffff);
+}
+
+.vnew-outfit-top {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.vnew-outfit-name {
+  font-weight: 600;
+  color: var(--text, #1b1d21);
+}
+
+.vnew-outfit-badge {
+  display: inline-flex;
+  align-items: center;
+  height: 20px;
+  padding: 0 8px;
+  border-radius: 999px;
+  background: var(--accent-soft, #eef2ff);
+  color: var(--accent, #4f46e5);
+  font-size: 11px;
+}
+
+.vnew-outfit-prompt {
+  margin: 6px 0;
+  font-size: 12px;
+  color: var(--text-muted, #6b7280);
+}
+
+.vnew-outfit-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+  gap: 14px;
+  margin: 10px 0;
+}
+
+.vnew-outfit-col-title {
+  margin: 0 0 6px;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text, #1b1d21);
+}
+
+.vnew-outfit-fig {
+  margin: 0 0 8px;
+}
+
+.vnew-outfit-fig img {
+  width: 100%;
+  height: auto;
+  border-radius: 8px;
+  cursor: zoom-in;
+  object-fit: contain;
+}
+
+.vnew-outfit-fig figcaption {
+  font-size: 11px;
+  color: var(--text-muted, #9ca3af);
+  text-align: center;
+}
+
+.vnew-outfit-btns {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-top: 8px;
+}
+
+.vnew-outfit-del {
+  margin-left: auto;
+}
+
+.vnew-outfit-error,
+.vnew-outfit-add-error {
+  margin-top: 8px;
+}
+
+.vnew-outfit-add {
+  margin-top: 8px;
+}
+
+.vnew-outfit-add-panel {
+  display: grid;
+  gap: 6px;
+  margin-top: 10px;
+  padding: 12px;
+  border: 1px solid var(--line, #e5e7eb);
+  border-radius: 10px;
+  background: var(--surface-soft, #f9fafb);
+}
+
+.vnew-outfit-name-input {
+  padding: 8px 10px;
+  border: 1px solid var(--line, #e5e7eb);
+  border-radius: 8px;
+  font: inherit;
+}
+
+
+/* ================================================================ ③ 공간 디테일 시트 */
+
+.vnew-loc-card {
+  margin-top: 16px;
+}
+
+.vnew-loc-head {
+  margin-bottom: 8px;
+}
+
+.vnew-loc-list {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  margin-top: 12px;
+}
+
+.vnew-loc-item {
+  border: 1px solid var(--line, #e5e7eb);
+  border-radius: var(--radius, 12px);
+  padding: 14px 16px;
+  background: var(--surface, #ffffff);
+}
+
+.vnew-loc-item-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 8px;
+}
+
+.vnew-loc-name {
+  font-weight: 600;
+  font-size: 16px;
+}
+
+.vnew-loc-status {
+  display: inline-block;
+  padding: 2px 10px;
+  border-radius: 999px;
+  font-size: 12px;
+  background: var(--surface-muted, #f3f4f6);
+  color: var(--text-muted, #6b7280);
+}
+
+.vnew-loc-status-ready {
+  background: #e7f6ec;
+  color: #1b7f3b;
+}
+
+.vnew-loc-status-building {
+  background: #fff4e0;
+  color: #9a6400;
+}
+
+.vnew-loc-status-failed {
+  background: #fdecec;
+  color: #b42318;
+}
+
+.vnew-loc-building {
+  color: var(--text-muted, #6b7280);
+  font-size: 14px;
+}
+
+.vnew-loc-sheet {
+  margin: 10px 0;
+}
+
+.vnew-loc-tabs {
+  display: flex;
+  gap: 6px;
+  margin-bottom: 8px;
+}
+
+.vnew-loc-tab {
+  padding: 4px 14px;
+  border: 1px solid var(--line, #e5e7eb);
+  border-radius: 999px;
+  background: var(--surface, #ffffff);
+  color: var(--text-muted, #6b7280);
+  cursor: pointer;
+  font-size: 13px;
+}
+
+.vnew-loc-tab.is-active {
+  background: var(--accent, #2f6bff);
+  border-color: var(--accent, #2f6bff);
+  color: #ffffff;
+}
+
+.vnew-loc-sheet-views {
+  min-height: 40px;
+}
+
+.vnew-loc-sheet-img {
+  display: block;
+  width: 100%;
+  max-width: 520px;
+  border: 1px solid var(--line, #e5e7eb);
+  border-radius: 8px;
+}
+
+.vnew-loc-design {
+  margin: 10px 0;
+}
+
+.vnew-loc-design-summary {
+  cursor: pointer;
+  font-size: 14px;
+  color: var(--text, #1b1d21);
+  margin-bottom: 8px;
+}
+
+.vnew-loc-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 10px;
+  flex-wrap: wrap;
+}
+
+.vnew-loc-extra {
+  flex: 1 1 220px;
+  min-width: 180px;
+}
