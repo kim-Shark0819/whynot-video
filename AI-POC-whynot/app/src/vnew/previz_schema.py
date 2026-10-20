@@ -279,6 +279,9 @@ def _normalize_actors(raw_actors) -> list[dict]:
         char_id = _str(item.get("charId"))
         if char_id:
             actor["charId"] = char_id
+        appearance_en = _str(item.get("appearanceEn"))
+        if appearance_en:
+            actor["appearanceEn"] = appearance_en
         actors.append(actor)
     return actors
 

@@ -106,3 +106,48 @@ MAX_OUTFIT_LABEL_LEN = _int("VNEW_MAX_OUTFIT_LABEL_LEN", 60)
 MAX_OUTFIT_PROMPT_LEN = _int("VNEW_MAX_OUTFIT_PROMPT_LEN", 300)
 # 복장 일관성 검사에서 시트를 다시 그리는 최대 횟수(1회). 넘으면 warning.
 OUTFIT_SHEET_RETRY = _int("VNEW_OUTFIT_SHEET_RETRY", 1)
+
+# --- ⑤ 영상 생성: 프리비즈 → 실사·웹툰(설계자 2026-10-21, 지시서 038) ---
+# 승인된 프리비즈(3D 마네킹) 영상에 실사·웹툰 그림체를 각각 입히는 fal video-to-video/edit 모델.
+# Claude 실측(2026-10-21): kling o3 standard 는 video_url(프리비즈)·elements(마네킹 색 ↔ 캐릭터
+# 정면/후면)·image_urls(웹툰 그림체 참고) 를 받아 배치·카메라·인원·타이밍을 정확히 유지한다.
+VNEW_PREVIZ_EDIT_MODEL = os.getenv(
+    "VNEW_PREVIZ_EDIT_MODEL", "fal-ai/kling-video/o3/standard/video-to-video/edit"
+)
+# 단가(초당 USD). fal pricing(endpoint) 을 먼저 쓰고, 못 받으면 이 기본값(standard $0.14/초, 실측).
+VNEW_PREVIZ_EDIT_USD_PER_S = _float("VNEW_PREVIZ_EDIT_USD_PER_S", 0.14)
+# edit 작업 1건의 참고 입력(elements + image_urls) 합계 최대 개수(실측 2026-10-21: 4).
+PREVIZ_MAX_INPUTS = _int("VNEW_PREVIZ_MAX_INPUTS", 4)
+# 실사: elements 최대 개수(인물). image_urls(장소 사진)은 넣지 않는다 → elements 로 4까지.
+PREVIZ_REAL_MAX_ELEMENTS = _int("VNEW_PREVIZ_REAL_MAX_ELEMENTS", 4)
+# 웹툰: elements 최대 3 + image_urls 1(그림체 참고 원작 컷) = 합 4.
+PREVIZ_WEBTOON_MAX_ELEMENTS = _int("VNEW_PREVIZ_WEBTOON_MAX_ELEMENTS", 3)
+PREVIZ_WEBTOON_MAX_IMAGE_URLS = _int("VNEW_PREVIZ_WEBTOON_MAX_IMAGE_URLS", 1)
+# 구간 프롬프트 목표 상한(모델 maxLength 가 더 작으면 그 안으로). 설계자: 2,500자 이내.
+PREVIZ_PROMPT_TARGET = _int("VNEW_PREVIZ_PROMPT_TARGET", 2500)
+
+
+def previz_edit_usd(seconds: float | None = None) -> float:
+    """프리비즈 edit 1건(한 그림체·한 구간) 금액 = 초 × 단가.
+
+    단가는 fal pricing(VNEW_PREVIZ_EDIT_MODEL) 의 초당 가격을 먼저 쓰고, 못 받으면
+    VNEW_PREVIZ_EDIT_USD_PER_S 기본값. 초를 비우면 vpoc 기본 영상 길이로 계산한다.
+    """
+    secs = float(vpoc_settings.DURATION_S if seconds is None else seconds)
+    per_s = _previz_edit_unit_price()
+    return round(per_s * secs, 4)
+
+
+def _previz_edit_unit_price() -> float:
+    """프리비즈 edit 초당 단가(USD). fal pricing 우선, 실패 시 기본값. 순환 import 피해 늦게 import."""
+    try:
+        from ..vpoc import fal as vpoc_fal  # noqa: PLC0415
+
+        price = vpoc_fal.pricing(VNEW_PREVIZ_EDIT_MODEL)
+        if price and str(price.get("unit") or "").lower() == "seconds":
+            unit_price = float(price.get("unitPrice") or 0.0)
+            if unit_price > 0:
+                return unit_price
+    except Exception:  # noqa: BLE001 — pricing 실패는 기본값으로 대체.
+        pass
+    return float(VNEW_PREVIZ_EDIT_USD_PER_S)

@@ -1464,6 +1464,25 @@ textarea.vnew-field-input {
   gap: 14px;
 }
 
+/* 프리비즈 모드: 프리비즈 미리보기(좁게) + 실사 + 웹툰 3칸. */
+.vnew-seg-cells.has-previz {
+  grid-template-columns: 0.8fr 1fr 1fr;
+}
+
+.vnew-seg-previz {
+  background: var(--surface-muted, #f1f5f9);
+}
+
+.vnew-seg-previz-video {
+  max-height: 160px;
+}
+
+@media (max-width: 720px) {
+  .vnew-seg-cells.has-previz {
+    grid-template-columns: 1fr;
+  }
+}
+
 .vnew-seg-cell {
   display: flex;
   flex-direction: column;

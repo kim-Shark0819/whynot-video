@@ -536,6 +536,66 @@ def create_blueprint(deps: VnewDependencies) -> Blueprint:
         except Exception as exc:  # noqa: BLE001
             return _fail(exc)
 
+    @bp.post("/p/<pid>/previz/recordings/<seg_id>/frames")
+    @deps.require_auth
+    def previz_frames(pid: str, seg_id: str):
+        # 오프라인 렌더 프레임(jpeg) 한 묶음 업로드(multipart, 필드 f 여러 개, 순서대로). ?start=<index>.
+        try:
+            from . import previz  # noqa: PLC0415
+
+            owner = _project_for(pid, write=True)
+            plan_mod.load_or_create(owner, pid)
+            try:
+                start = int(request.args.get("start") or 0)
+            except (TypeError, ValueError):
+                raise VpocError("vnew.previz.frames", "BadStart", "start 값이 올바르지 않습니다.", 400)
+            files = request.files.getlist("f")
+            frames = [f.read() for f in files]
+            result = previz.save_frames(owner, pid, seg_id, start, frames)
+            return jsonify({"ok": True, "frames": result}), 201
+        except Exception as exc:  # noqa: BLE001
+            return _fail(exc)
+
+    @bp.post("/p/<pid>/previz/recordings/<seg_id>/finish")
+    @deps.require_auth
+    def previz_finish(pid: str, seg_id: str):
+        # 올라온 프레임을 ffmpeg -framerate 로 묶어 mp4 를 만든다. body {frames, fps}.
+        try:
+            from . import previz  # noqa: PLC0415
+
+            owner = _project_for(pid, write=True)
+            plan_mod.load_or_create(owner, pid)
+            payload = request.get_json(silent=True) or {}
+            frames = payload.get("frames")
+            fps = payload.get("fps", previz.REC_FPS)
+            result = previz.finish_recording(owner, pid, seg_id, frames, fps)
+            return jsonify({"ok": True, "recording": result}), 201
+        except Exception as exc:  # noqa: BLE001
+            return _fail(exc)
+
+    @bp.get("/p/<pid>/previz/texture")
+    @deps.require_auth
+    def previz_texture(pid: str):
+        # 프리비즈 벽·바닥 텍스처를 같은 출처로 돌려준다(S3 직통·CORS 회피). 읽기 권한이면 된다.
+        # key 가 이 프로젝트의 locations 접두사 밖이면 texture_bytes 가 404 를 낸다.
+        try:
+            from . import previz  # noqa: PLC0415
+
+            owner = _project_for(pid, write=False)
+            key = str(request.args.get("key") or "")
+            body, content_type = previz.texture_bytes(owner, pid, key)
+            return Response(
+                body,
+                mimetype=content_type,
+                headers={
+                    "Content-Type": content_type,
+                    "Content-Length": str(len(body)),
+                    "Cache-Control": "private, max-age=3600",
+                },
+            )
+        except Exception as exc:  # noqa: BLE001
+            return _fail(exc)
+
     # ------------------------------------------------------------ ④ 영상 생성
 
     @bp.post("/p/<pid>/generate")
