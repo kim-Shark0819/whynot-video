@@ -477,6 +477,65 @@ def create_blueprint(deps: VnewDependencies) -> Blueprint:
         except Exception as exc:  # noqa: BLE001
             return _fail(exc)
 
+    # ------------------------------------------------------------ ③→④ 프리비즈(previz)
+    #
+    # 3D 장면 설계 JSON(Astra). 브라우저 three.js 가 그려 재생·녹화한다(설계자 2026-10-21).
+    # design(202 백그라운드) · PUT scene(사용자 수정) · approve · 녹화 업로드(변환·VIDEO_BUCKET).
+
+    @bp.post("/p/<pid>/previz/design")
+    @deps.require_auth
+    def previz_design(pid: str):
+        try:
+            from . import previz  # noqa: PLC0415
+
+            owner = _project_for(pid, write=True)
+            plan_mod.load_or_create(owner, pid)
+            task_id = previz.start_design(owner, pid)
+            return jsonify({"ok": True, "taskId": task_id, "status": "designing"}), 202
+        except Exception as exc:  # noqa: BLE001
+            return _fail(exc)
+
+    @bp.put("/p/<pid>/previz/scene")
+    @deps.require_auth
+    def previz_scene_edit(pid: str):
+        try:
+            from . import previz  # noqa: PLC0415
+
+            owner = _project_for(pid, write=True)
+            payload = request.get_json(silent=True) or {}
+            previz.update_scenes(owner, pid, payload)
+            data, _ = plan_mod.load_plan(owner, pid)
+            return jsonify(plan_mod.plan_view(owner, pid, data))
+        except Exception as exc:  # noqa: BLE001
+            return _fail(exc)
+
+    @bp.post("/p/<pid>/previz/approve")
+    @deps.require_auth
+    def previz_approve(pid: str):
+        try:
+            from . import previz  # noqa: PLC0415
+
+            owner = _project_for(pid, write=True)
+            previz.approve(owner, pid)
+            data, _ = plan_mod.load_plan(owner, pid)
+            return jsonify(plan_mod.plan_view(owner, pid, data))
+        except Exception as exc:  # noqa: BLE001
+            return _fail(exc)
+
+    @bp.post("/p/<pid>/previz/recordings/<seg_id>")
+    @deps.require_auth
+    def previz_recording(pid: str, seg_id: str):
+        try:
+            from . import previz  # noqa: PLC0415
+
+            owner = _project_for(pid, write=True)
+            plan_mod.load_or_create(owner, pid)
+            body = request.get_data(cache=False) or b""
+            result = previz.save_recording(owner, pid, seg_id, body, request.content_type or "")
+            return jsonify({"ok": True, "recording": result}), 201
+        except Exception as exc:  # noqa: BLE001
+            return _fail(exc)
+
     # ------------------------------------------------------------ ④ 영상 생성
 
     @bp.post("/p/<pid>/generate")

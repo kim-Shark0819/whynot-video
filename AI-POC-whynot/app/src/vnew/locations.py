@@ -24,6 +24,7 @@ import logging
 import re
 import secrets
 import threading
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 
 from PIL import Image, ImageDraw
@@ -42,8 +43,8 @@ log = logging.getLogger("vpoc")
 
 # ================================================================ 상수
 
-# 설계에 보여 줄 웹툰 패널 최대 장수(그 장소가 나오는 패널).
-MAX_DESIGN_PANELS = 4
+# 설계에 보여 줄 웹툰 패널 최대 장수(그 장소가 나오는 패널). 배경이 큰 조각 우선.
+MAX_DESIGN_PANELS = 6
 # Seedream 참고 이미지 최대 장수(그 장소 패널).
 MAX_REF_PANELS = 4
 # 벽 입면도 크기(16:9). 4벽 모두 같은 크기.
@@ -54,6 +55,10 @@ FLOOR_SIZE = "1536x1536"
 SIDES = ("north", "east", "south", "west")
 # 그림체.
 VARIANTS = ("real", "webtoon")
+# 한 장소의 그림(벽4+바닥1 × 그림체 2 = 10장)을 동시에 그리는 최대 스레드 수.
+IMAGE_WORKERS = 4
+# 실패한 그림을 다시 그리는 횟수(1회).
+IMAGE_RETRY = 1
 # 추가 요청(한국어) 최대 길이.
 MAX_EXTRA_PROMPT_LEN = 500
 # build task 가 이 시간을 넘게 running 이면 멈춘 것으로 본다(조회 때 failed).
@@ -62,9 +67,11 @@ BUILD_STALL_S = 1800
 # 단가(원장). Seedream 장당.
 SEEDREAM_USD = settings.SEEDREAM_USD
 SEEDREAM_MODEL = settings.SEEDREAM_MODEL
-# 설계 LLM 체인: Astra 먼저, 실패하면 Claude 분석 체인.
-ASTRA_MODEL = settings.ASTRA_MODEL
-DESIGN_FALLBACK_MODEL = settings.ANALYZE_FALLBACK_MODEL
+# 설계 LLM 체인: Claude 분석 체인(Fable 5.1) 먼저, 실패하면 Astra.
+# (실측 2026-10-21: Astra 가 패널 그림을 거의 못 읽어 빈 벽·'assumed'/'provisional' 설계가 나왔다.
+#  Claude 가 이미지 읽기가 강해 먼저 쓴다. Astra 는 지시서 036 장면 설계에 그대로 쓴다.)
+DESIGN_MODEL = settings.ANALYZE_FALLBACK_MODEL  # = vpoc.settings.ANALYZE_MODEL (Claude Fable 5.1)
+DESIGN_FALLBACK_MODEL = settings.ASTRA_MODEL
 
 
 # ================================================================ 파드 안 실행 중 표시
@@ -224,7 +231,7 @@ def _seedream(prompt: str, references: list[bytes], *, size: str) -> bytes:
     )
 
 
-# ================================================================ 설계(Astra → Claude)
+# ================================================================ 설계(Claude → Astra)
 
 _DESIGN_SYSTEM = (
     "You are a set designer. You are given a few webtoon panels that all show the SAME place. "
@@ -232,14 +239,21 @@ _DESIGN_SYSTEM = (
     "a flat frontal elevation (orthographic, no perspective). Answer ONLY by calling the emit_location "
     "tool exactly once. "
     "Choose 'north' as the wall the webtoon camera faces most often (the main front wall seen in the "
-    "panels); east/south/west follow clockwise. For each wall write descEn: one English sentence about "
-    "what is on that wall (its surface, colour, and attached features), hasWindow / hasDoor booleans, and "
-    "featuresEn listing attached items (shelves, framed pictures, a blackboard, a mirror). "
-    "widthM/depthM/heightM are rough room dimensions in metres. enclosed is true for a closed room. "
-    "floorEn and ceilingEn describe the floor and ceiling surfaces. lightEn is one English sentence about "
-    "where the main light comes from (e.g. 'main light comes from the north-wall windows, soft daylight'). "
-    "propsEn lists free-standing props as objects {labelEn, wall, sizeM} where wall is one of "
-    "north/east/south/west/center. Ignore people and speech bubbles — describe only the room itself. "
+    "panels); east/south/west follow clockwise. "
+    "Describe ONLY what is actually drawn in the panels. For every wall, list concrete visible features: "
+    "windows and their rough size and position, bookshelves, cabinets, desks standing against the wall, "
+    "notice boards, blackboards, framed pictures, doors. Put these in featuresEn (a short English list) "
+    "and summarise the wall in one English sentence in descEn. "
+    "If a wall is never shown in any panel, infer a plausible wall that is consistent with the walls you "
+    "DID see — same materials, same era, same country — and describe it with concrete features too. "
+    "Never leave a wall blank, and never write the words 'assumed', 'provisional', 'not visible', or "
+    "'unknown' anywhere in your answer. "
+    "hasWindow / hasDoor are booleans. widthM/depthM/heightM are rough room dimensions in metres. "
+    "enclosed is true for a closed room. floorEn and ceilingEn describe the floor and ceiling surfaces "
+    "with concrete materials and colour. lightEn is one English sentence about where the main light comes "
+    "from (e.g. 'main light comes from the north-wall windows, soft daylight'). propsEn lists free-standing "
+    "props as objects {labelEn, wall, sizeM} where wall is one of north/east/south/west/center. "
+    "Ignore people and speech bubbles — describe only the room itself. "
     "Write plain English for every *En field. Do not add text outside the tool."
 )
 
@@ -295,33 +309,100 @@ _DESIGN_TOOL = {
 
 
 def design_location(owner: str, pid: str, loc: dict) -> dict:
-    """그 장소 패널(최대 4장)을 Astra 에 먼저, 실패하면 Claude 로 보내 설계 JSON 을 받는다.
+    """그 장소 패널(최대 6장)을 Claude 분석 체인에 먼저, 실패하면 Astra 로 보내 설계 JSON 을 받는다.
 
     세로 긴 패널은 tiles_for_analysis 로 잘려 있으므로, 인물이 적고 배경이 큰 조각을 먼저 고른다.
+    setting 의 locationKo·layoutEn·enclosed 와 패널 설명을 함께 준다. 결과에 'assumed'/'provisional'
+    같은 말이 있으면(벽을 못 읽었다는 뜻) 1회만 더 강하게 재요청한다.
     반환: 정리된 설계 JSON(아래 _normalize_design) + model.
     """
     panels = _design_panels(owner, pid, loc)
     name_en = str(loc.get("nameEn") or "").strip() or "the place"
-    intro = (
+    setting = _setting_for(owner, pid)
+    location_ko = str(setting.get("locationKo") or "").strip()
+    layout_en = str(setting.get("layoutEn") or "").strip()
+    enclosed = _as_bool(setting.get("enclosed"))
+
+    intro_lines = [
         f"다음 웹툰 패널들은 모두 같은 장소('{name_en}')를 보여 줍니다. 이 장소를 사각형 방으로 보고 "
         "네 벽을 각각 정면 입면도로 그릴 수 있게 설계해 주세요. 카메라가 가장 자주 보는 정면 벽을 "
-        "north 로 두세요. 인물·말풍선은 무시하고 방 자체만 묘사하세요."
+        "north 로 두세요. 인물·말풍선은 무시하고 방 자체만 묘사하세요.",
+    ]
+    if location_ko:
+        intro_lines.append(f"장소(한국어): {location_ko}")
+    if layout_en:
+        intro_lines.append(f"Scene layout: {layout_en}")
+    intro_lines.append(
+        "This is a Korean setting (closed room)." if enclosed else "This is a Korean setting."
     )
-    blocks: list[dict] = [{"text": intro}]
+    intro_lines.append(
+        "Each panel below shows this place from a different angle — read the drawn walls, windows, "
+        "shelves, desks and doors in the panels and base every wall on them."
+    )
+    blocks: list[dict] = [{"text": "\n".join(intro_lines)}]
     for jpeg in panels:
         blocks.append({"image": {"format": "jpeg", "source": {"bytes": jpeg}}})
 
-    for model in (ASTRA_MODEL, DESIGN_FALLBACK_MODEL):
+    for model in (DESIGN_MODEL, DESIGN_FALLBACK_MODEL):
         try:
             payload, usage = _design(blocks, model=model)
         except Exception as exc:  # noqa: BLE001
             log.warning("vnew.location.design.model_failed model=%s err=%s", model, str(exc)[:200])
             continue
         design = _normalize_design(payload)
+        # 벽을 못 읽어 'assumed'/'provisional' 로 얼버무렸으면 같은 모델에 1회 더 강하게 요청한다.
+        if _has_provisional(design):
+            retry_blocks = blocks + [
+                {
+                    "text": (
+                        "Your previous answer used words like 'assumed' or 'provisional' or left a wall "
+                        "blank. Look again at the panels and give concrete visible features for every "
+                        "wall (windows with size/position, bookshelves, cabinets, desks, notice boards, "
+                        "doors). For any wall not shown, infer a plausible wall consistent with the ones "
+                        "you can see. Never write 'assumed' or 'provisional'."
+                    )
+                }
+            ]
+            try:
+                payload2, usage2 = _design(retry_blocks, model=model)
+                design2 = _normalize_design(payload2)
+                if not _has_provisional(design2):
+                    payload, usage, design = payload2, usage2, design2
+            except Exception as exc:  # noqa: BLE001
+                log.warning("vnew.location.design.retry_failed model=%s err=%s", model, str(exc)[:200])
         design["model"] = str(usage.get("model") or model)
         _charge_text(owner, pid, loc.get("id") or "", usage, design["model"])
         return design
     raise VpocError("vnew.location.design", "DesignFailed", "공간 설계에 실패했습니다.", 502)
+
+
+_PROVISIONAL_RE = re.compile(r"\b(assumed|provisional|not visible|unknown)\b", re.IGNORECASE)
+
+
+def _has_provisional(design: dict) -> bool:
+    """설계 텍스트에 '못 읽었다'는 얼버무림(assumed/provisional 등)이 있으면 True."""
+    parts: list[str] = [
+        str((design or {}).get("floorEn") or ""),
+        str((design or {}).get("ceilingEn") or ""),
+        str((design or {}).get("lightEn") or ""),
+    ]
+    for side in SIDES:
+        wall = ((design or {}).get("walls") or {}).get(side) or {}
+        parts.append(str(wall.get("descEn") or ""))
+        parts.append(str(wall.get("featuresEn") or ""))
+    return bool(_PROVISIONAL_RE.search(" ".join(parts)))
+
+
+def _setting_for(owner: str, pid: str) -> dict:
+    """plan.script.setting(장소 한국어·배치·밀폐 여부). 못 읽으면 빈 dict."""
+    from . import plan as plan_mod  # noqa: PLC0415
+
+    try:
+        data, _ = plan_mod.load_plan(owner, pid)
+    except Exception:  # noqa: BLE001
+        return {}
+    setting = ((data.get("script") or {}).get("setting")) or {}
+    return setting if isinstance(setting, dict) else {}
 
 
 def _design_panels(owner: str, pid: str, loc: dict) -> list[bytes]:
@@ -433,6 +514,9 @@ _ORTHO = (
     "attached to it."
 )
 
+# 벽·바닥 프롬프트 끝에 붙이는 지시(검사가 확인): 글자·표지판 금지 + 한국 배경.
+_NO_TEXT = "No text, letters, signs or labels anywhere. Korean setting."
+
 
 def _style_clause(variant: str, loc: dict) -> str:
     """그림체 지시. real=실사, webtoon=프로젝트 원작 그림체(캐릭터 analysis.styleEn 있으면 그것)."""
@@ -448,15 +532,15 @@ def _wall_prompt(variant: str, side: str, loc: dict) -> str:
     name_en = str(loc.get("nameEn") or "").strip() or "the room"
     wall = ((loc.get("design") or {}).get("walls") or {}).get(side) or {}
     desc = str(wall.get("descEn") or "").strip() or f"a plain wall of {name_en}"
+    features = str(wall.get("featuresEn") or "").strip()
     light = str((loc.get("design") or {}).get("lightEn") or "").strip()
-    prompt = (
-        f"Flat frontal elevation of the {side} wall of {name_en}: {desc}. "
-        + _ORTHO
-        + " "
-        + _style_clause(variant, loc)
-    )
+    prompt = f"Flat frontal elevation of the {side} wall of {name_en}: {desc}."
+    if features:
+        prompt += f" Concrete features on this wall: {features}."
+    prompt += " " + _ORTHO + " " + _style_clause(variant, loc)
     if light:
         prompt += " " + light
+    prompt += " " + _NO_TEXT
     return _with_extra(prompt, loc)
 
 
@@ -467,6 +551,8 @@ def _floor_prompt(variant: str, loc: dict) -> str:
         f"Top-down orthographic floor texture of {name_en}: {floor}. "
         "Seamless flat floor seen straight from above, no perspective, no people, no furniture. "
         + _style_clause(variant, loc)
+        + " "
+        + _NO_TEXT
     )
     return _with_extra(prompt, loc)
 
@@ -607,17 +693,18 @@ def run_build(owner: str, pid: str, lid: str, task_id: str) -> None:
         loc["styleEn"] = _project_style(owner, data)
         loc["extraEn"] = _extra_en(loc)
 
-        # a. 설계(Astra → Claude). 이미 설계가 있으면(수정본) 그대로 쓰고, 없으면 새로 받는다.
+        # a. 설계(Claude → Astra). 이미 설계가 있으면(수정본) 그대로 쓰고, 없으면 새로 받는다.
         design = loc.get("design") or {}
         if not (design.get("walls")):
             design = design_location(owner, pid, loc)
             _store_design(owner, pid, lid, design)
             loc["design"] = design
 
-        # b~d. 그림체별 벽 4장 + 바닥 1장, 2x2 시트.
+        # b~d. 그림체별 벽 4장 + 바닥 1장을 병렬로 그리고(최대 IMAGE_WORKERS), 2x2 시트.
         refs = _design_panels(owner, pid, loc)[:MAX_REF_PANELS]
+        images = _generate_images(owner, pid, lid, version, loc, refs)
         for variant in VARIANTS:
-            _build_variant(owner, pid, lid, variant, version, loc, refs, task_id)
+            _assemble_variant(owner, pid, lid, variant, version, images, task_id)
 
         _commit(owner, pid, lid, task_id, status="ready")
     except Exception as exc:  # noqa: BLE001
@@ -628,24 +715,108 @@ def run_build(owner: str, pid: str, lid: str, task_id: str) -> None:
         _clear_running(owner, pid, lid)
 
 
-def _build_variant(
-    owner: str, pid: str, lid: str, variant: str, version: int, loc: dict, refs: list[bytes], task_id: str
+def _image_jobs(loc: dict) -> list[dict]:
+    """그릴 그림 목록(벽4+바닥1 × 그림체 2 = 10). 각 job 은 variant·kind·side·prompt·size."""
+    jobs: list[dict] = []
+    for variant in VARIANTS:
+        for side in SIDES:
+            jobs.append(
+                {
+                    "variant": variant,
+                    "kind": "wall",
+                    "side": side,
+                    "prompt": _wall_prompt(variant, side, loc),
+                    "size": WALL_SIZE,
+                }
+            )
+        jobs.append(
+            {
+                "variant": variant,
+                "kind": "floor",
+                "side": "",
+                "prompt": _floor_prompt(variant, loc),
+                "size": FLOOR_SIZE,
+            }
+        )
+    return jobs
+
+
+def _generate_images(
+    owner: str, pid: str, lid: str, version: int, loc: dict, refs: list[bytes]
+) -> dict[tuple[str, str], tuple[bytes, str]]:
+    """벽4+바닥1 × 그림체 2 = 10장을 ThreadPoolExecutor 로 동시에 그린다(최대 IMAGE_WORKERS).
+
+    실패한 장만 1회 재시도한다. 그래도 실패하면 예외를 올려(전체 실패) run_build 가 failed 로 적는다.
+    반환: {(variant, side_or_'floor'): (jpeg_bytes, key)}. 저장(put_bytes)·원장은 여기서 한다(그림당 1회).
+    """
+    jobs = _image_jobs(loc)
+    results: dict[tuple[str, str], tuple[bytes, str]] = {}
+
+    def _slot(job: dict) -> tuple[str, str]:
+        return (job["variant"], job["side"] if job["kind"] == "wall" else "floor")
+
+    def _one(job: dict) -> None:
+        variant = job["variant"]
+        kind = job["kind"]
+        side = job["side"]
+        image = _seedream(job["prompt"], refs, size=job["size"])
+        if kind == "wall":
+            key = wall_key(owner, pid, lid, variant, side, version)
+            charge_kind = f"{variant}-wall-{side}"
+        else:
+            key = floor_key(owner, pid, lid, variant, version)
+            charge_kind = f"{variant}-floor"
+        STORE.put_bytes(key, image, "image/jpeg")
+        _charge_seedream(owner, pid, lid, charge_kind)
+        results[_slot(job)] = (image, key)
+
+    pending = list(jobs)
+    last_error: Exception | None = None
+    for attempt in range(IMAGE_RETRY + 1):
+        if not pending:
+            break
+        failed: list[dict] = []
+        workers = max(1, min(IMAGE_WORKERS, len(pending)))
+        with ThreadPoolExecutor(max_workers=workers, thread_name_prefix=f"vnew-loc-img-{lid}") as pool:
+            future_to_job = {pool.submit(_one, job): job for job in pending}
+            for future in future_to_job:
+                job = future_to_job[future]
+                try:
+                    future.result()
+                except Exception as exc:  # noqa: BLE001
+                    last_error = exc
+                    failed.append(job)
+        if failed:
+            log.warning(
+                "vnew.location.image.retry pid=%s lid=%s attempt=%s failed=%s",
+                pid,
+                lid,
+                attempt,
+                [(j["variant"], j["kind"], j["side"]) for j in failed],
+            )
+        pending = failed
+    if pending:
+        raise last_error or VpocError("vnew.location.seedream", "SeedreamFailed", "공간 그림 생성에 실패했습니다.", 502)
+    return results
+
+
+def _assemble_variant(
+    owner: str,
+    pid: str,
+    lid: str,
+    variant: str,
+    version: int,
+    images: dict[tuple[str, str], tuple[bytes, str]],
+    task_id: str,
 ) -> None:
-    """한 그림체(real·webtoon)의 벽 4장 + 바닥 1장 + 2x2 시트. 그 variant 만 저장한다."""
+    """이미 그려 둔(그리고 저장한) 벽 4장 + 바닥 1장으로 2x2 시트를 붙여 그 variant 만 저장한다."""
     wall_keys: dict[str, str] = {}
     walls_bytes: dict[str, bytes] = {}
     for side in SIDES:
-        image = _seedream(_wall_prompt(variant, side, loc), refs, size=WALL_SIZE)
-        _charge_seedream(owner, pid, lid, f"{variant}-wall-{side}")
-        key = wall_key(owner, pid, lid, variant, side, version)
-        STORE.put_bytes(key, image, "image/jpeg")
+        image, key = images[(variant, side)]
         wall_keys[side] = key
         walls_bytes[side] = image
-
-    floor = _seedream(_floor_prompt(variant, loc), refs, size=FLOOR_SIZE)
-    _charge_seedream(owner, pid, lid, f"{variant}-floor")
-    fkey = floor_key(owner, pid, lid, variant, version)
-    STORE.put_bytes(fkey, floor, "image/jpeg")
+    _, fkey = images[(variant, "floor")]
 
     sheet = montage_2x2(walls_bytes)
     skey = sheet_key(owner, pid, lid, variant, version)
