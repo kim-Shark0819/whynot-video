@@ -1936,9 +1936,11 @@ def check_vnew_characters() -> None:
     """캐릭터 만들기 서버 — 외부 호출을 전부 가짜로 바꿔 파이프라인·API 를 돈다.
 
     (a) 생성·업로드·목록·상세 (b) build → 분석(Astra 실패 → Claude)·시트·정면·후면·3D 제출
-    (face_count 120000·data URI)·복사·ready (c) 한 variant 실패해도 다른 variant ready
+    (face_count 60000·enable_pbr false·data URI)·복사·ready (c) 한 variant 실패해도 다른 variant ready
     (d) 진행 중 build 409, 30분 초과 failed (e) GLB 스트리밍 200·Content-Type
-    (f) 다른 사용자 접근 403/404 (g) seedream.generate 기본 size 가 그대로 1920x1080.
+    (f) 다른 사용자 접근 403/404 (g) seedream.generate 기본 size 가 그대로 1920x1080
+    (h) 조회 중 503 두 번 뒤 완료 → ready (i) FAILED → variant·model3d 둘 다 failed
+    (j) retry3d: 이전 요청 COMPLETED 면 제출 0회·복사 1회, 없으면 제출 1회 (k) 기본 60000·PBR false.
     """
     sys.path.insert(0, str(ROOT / "app"))
     bad: list[str] = []
@@ -1996,14 +1998,22 @@ def check_vnew_characters() -> None:
             return _tiny_jpeg(2560, 1440)
         return _tiny_jpeg(1440, 2560)
 
-    # fal: 제출 body 를 캡처(face_count·data URI 확인), 상태는 바로 COMPLETED.
+    # fal: 제출 body 를 캡처(face_count·data URI 확인). 기본은 바로 COMPLETED 이지만,
+    # 아래 fal_mode 로 상태 조회의 반응을 (h)(i) 시나리오별로 바꾼다.
     fal_calls: list[tuple[str, str, dict]] = []
+    # transient_left: 상태 조회가 앞으로 몇 번 503(일시 오류)을 낼지. fail_status: True 면 FAILED.
+    fal_mode = {"transient_left": 0, "fail_status": False}
 
     def fake_fal_request(method, url, payload=None):
         fal_calls.append((method, url, payload or {}))
         if method == "POST":
             return {"request_id": "req_" + str(len(fal_calls))}
         if url.endswith("/status"):
+            if fal_mode["transient_left"] > 0:
+                fal_mode["transient_left"] -= 1
+                raise characters.VpocError("vnew.fal", "HTTP503", "Downstream service unavailable", 502)
+            if fal_mode["fail_status"]:
+                return {"status": "FAILED", "error": "가짜 fal 실패"}
             return {"status": "COMPLETED"}
         # response
         return {
@@ -2140,20 +2150,20 @@ def check_vnew_characters() -> None:
             if m3d.get("status") != "ready" or not m3d.get("glbKey"):
                 bad.append(f"(b) {variant} 3D 가 ready/glbKey 가 아닙니다: {m3d}")
 
-        # (b) 3D 제출 body: face_count 120000 · data URI
+        # (b) 3D 제출 body: face_count 60000 · enable_pbr false · data URI
         posts = [p for (m, u, p) in fal_calls if m == "POST"]
         if not posts:
             bad.append("(b) 3D 제출(POST)이 없습니다")
         else:
             for body in posts:
-                if body.get("face_count") != 120000:
-                    bad.append(f"(b) 3D face_count 가 120000 이 아닙니다: {body.get('face_count')}")
+                if body.get("face_count") != 60000:
+                    bad.append(f"(b) 3D face_count 가 60000 이 아닙니다: {body.get('face_count')}")
                 if not str(body.get("input_image_url", "")).startswith("data:image/"):
                     bad.append("(b) 3D input_image_url 이 data URI 가 아닙니다")
                 if not str(body.get("back_image_url", "")).startswith("data:image/"):
                     bad.append("(b) 3D back_image_url 이 data URI 가 아닙니다")
-                if body.get("enable_pbr") is not True:
-                    bad.append("(b) 3D enable_pbr 가 True 가 아닙니다")
+                if body.get("enable_pbr") is not False:
+                    bad.append("(b) 3D enable_pbr 가 False 가 아닙니다")
 
         # (b) 후면 = 시트 5번째 칸(가로 5등분) — 저장된 back 이미지 가로가 시트의 1/5 근처
         import io as _io2  # noqa: PLC0415
@@ -2231,6 +2241,133 @@ def check_vnew_characters() -> None:
             bad.append(f"(f) 다른 사용자가 build 하는데 404 가 아닙니다: {resp.status_code}")
         owner_box["name"] = "tester"
 
+        # (k) 기본값: face_count 60000 · enable_pbr false
+        if characters.settings.HUNYUAN_FACE_COUNT != 60000:
+            bad.append(f"(k) HUNYUAN_FACE_COUNT 기본이 60000 이 아닙니다: {characters.settings.HUNYUAN_FACE_COUNT}")
+        if characters.settings.HUNYUAN_ENABLE_PBR is not False:
+            bad.append(f"(k) HUNYUAN_ENABLE_PBR 기본이 False 가 아닙니다: {characters.settings.HUNYUAN_ENABLE_PBR}")
+
+        # --- (h)(i) 용 새 캐릭터(업로드 1장) ---
+        def _make_char_with_source(name):
+            r = client.post("/api/vnew/characters", json={"name": name})
+            cid = (r.get_json() or {}).get("id", "")
+            d = {"files": [(_io.BytesIO(_tiny_jpeg()), "c.jpg")]}
+            client.post(
+                f"/api/vnew/characters/{cid}/uploads", data=d, content_type="multipart/form-data"
+            )
+            return cid
+
+        # (h) 조회 중 503 두 번 뒤 완료 → ready (일시 오류는 실패로 보지 않고 다시 조회)
+        hid = _make_char_with_source("h-캐릭터")
+        fal_mode["transient_left"] = 2
+        fal_mode["fail_status"] = False
+        resp = client.post(f"/api/vnew/characters/{hid}/build")
+        _join_builds()
+        fal_mode["transient_left"] = 0
+        hchar, _ = characters.load_char("tester", hid)
+        if hchar.get("status") != "ready":
+            bad.append(f"(h) 503 두 번 뒤 완료인데 ready 가 아닙니다: {hchar.get('status')}")
+        for variant in characters.settings.VARIANTS:
+            m3d = (hchar.get("variants") or {}).get(variant, {}).get("model3d") or {}
+            if m3d.get("status") != "ready":
+                bad.append(f"(h) {variant} 3D 가 일시오류 후 ready 가 아닙니다: {m3d.get('status')}")
+
+        # (i) FAILED → variant·model3d 둘 다 failed
+        iid = _make_char_with_source("i-캐릭터")
+        fal_mode["fail_status"] = True
+        resp = client.post(f"/api/vnew/characters/{iid}/build")
+        _join_builds()
+        fal_mode["fail_status"] = False
+        ichar, _ = characters.load_char("tester", iid)
+        for variant in characters.settings.VARIANTS:
+            v = (ichar.get("variants") or {}).get(variant, {})
+            if v.get("status") != "failed":
+                bad.append(f"(i) {variant} variant 가 failed 가 아닙니다: {v.get('status')}")
+            if (v.get("model3d") or {}).get("status") != "failed":
+                bad.append(f"(i) {variant} model3d 가 failed 가 아닙니다(submitted 로 남음): {(v.get('model3d') or {}).get('status')}")
+
+        # (j) retry3d: 이전 요청이 COMPLETED 면 제출 0회·복사 1회, 없으면 제출 1회
+        def _post_count():
+            return len([1 for (m, u, p) in fal_calls if m == "POST"])
+
+        # (j-1) 이전 requestArn 이 있고 그 조회가 COMPLETED → 새 제출 0회
+        jid = _make_char_with_source("j-캐릭터")
+        # front/back 이미지와 실패한 3D·이전 requestArn 을 직접 세운다.
+        fk = characters.front_key("tester", jid, "webtoon", 1)
+        bk = characters.back_key("tester", jid, "webtoon", 1)
+        fake_store.put_bytes(fk, _tiny_jpeg(1440, 2560), "image/jpeg")
+        fake_store.put_bytes(bk, _tiny_jpeg(512, 2560), "image/jpeg")
+        prior_arn = characters.ARN_PREFIX + characters.settings.HUNYUAN_ENDPOINT + "/req_prior"
+
+        def _seed_failed_3d(d):
+            d["version"] = 1
+            d["status"] = "failed"
+            v = d.setdefault("variants", {}).setdefault("webtoon", characters._empty_variant())
+            v["status"] = "failed"
+            v["frontKey"] = fk
+            v["backKey"] = bk
+            v["model3d"] = {
+                "status": "failed",
+                "requestArn": prior_arn,
+                "glbKey": "",
+                "thumbKey": "",
+                "error": "이전 실패",
+            }
+
+        characters.mutate_char("tester", jid, _seed_failed_3d)
+        fal_mode["fail_status"] = False
+        fal_mode["transient_left"] = 0
+        before = _post_count()
+        resp = client.post(f"/api/vnew/characters/{jid}/variants/webtoon/retry3d")
+        if resp.status_code != 202:
+            bad.append(f"(j) retry3d 가 202 가 아닙니다: {resp.status_code} {resp.get_data(as_text=True)[:200]}")
+        _join_builds()
+        submits_1 = _post_count() - before
+        jchar, _ = characters.load_char("tester", jid)
+        jm3d = (jchar.get("variants") or {}).get("webtoon", {}).get("model3d") or {}
+        if submits_1 != 0:
+            bad.append(f"(j) 이전 요청이 COMPLETED 인데 새 제출이 0회가 아닙니다: {submits_1}")
+        if jm3d.get("status") != "ready" or not jm3d.get("glbKey"):
+            bad.append(f"(j) retry3d(재사용) 후 3D 가 ready/glbKey 가 아닙니다: {jm3d}")
+        if jm3d.get("glbKey") not in fake_store.blobs:
+            bad.append("(j) retry3d(재사용) GLB 복사본이 저장되지 않았습니다")
+
+        # (j-2) 이전 requestArn 이 없으면 새 제출 1회
+        jid2 = _make_char_with_source("j2-캐릭터")
+        fk2 = characters.front_key("tester", jid2, "webtoon", 1)
+        bk2 = characters.back_key("tester", jid2, "webtoon", 1)
+        fake_store.put_bytes(fk2, _tiny_jpeg(1440, 2560), "image/jpeg")
+        fake_store.put_bytes(bk2, _tiny_jpeg(512, 2560), "image/jpeg")
+
+        def _seed_failed_3d_noarn(d):
+            d["version"] = 1
+            d["status"] = "failed"
+            v = d.setdefault("variants", {}).setdefault("webtoon", characters._empty_variant())
+            v["status"] = "failed"
+            v["frontKey"] = fk2
+            v["backKey"] = bk2
+            v["model3d"] = {"status": "failed", "requestArn": "", "glbKey": "", "thumbKey": "", "error": "이전 실패"}
+
+        characters.mutate_char("tester", jid2, _seed_failed_3d_noarn)
+        before = _post_count()
+        resp = client.post(f"/api/vnew/characters/{jid2}/variants/webtoon/retry3d")
+        if resp.status_code != 202:
+            bad.append(f"(j) retry3d(새 제출) 가 202 가 아닙니다: {resp.status_code}")
+        _join_builds()
+        submits_2 = _post_count() - before
+        if submits_2 != 1:
+            bad.append(f"(j) 이전 요청이 없으면 새 제출이 1회여야 합니다: {submits_2}")
+        j2char, _ = characters.load_char("tester", jid2)
+        j2m3d = (j2char.get("variants") or {}).get("webtoon", {}).get("model3d") or {}
+        if j2m3d.get("status") != "ready" or not j2m3d.get("glbKey"):
+            bad.append(f"(j) retry3d(새 제출) 후 3D 가 ready/glbKey 가 아닙니다: {j2m3d}")
+
+        # (j-3) front/back 없으면 400
+        jid3 = _make_char_with_source("j3-캐릭터")
+        resp = client.post(f"/api/vnew/characters/{jid3}/variants/webtoon/retry3d")
+        if resp.status_code != 400:
+            bad.append(f"(j) front/back 없는 retry3d 가 400 이 아닙니다: {resp.status_code}")
+
     except Exception as exc:  # noqa: BLE001
         import traceback as _tb  # noqa: PLC0415
 
@@ -2249,7 +2386,8 @@ def check_vnew_characters() -> None:
     else:
         ok(
             "캐릭터 만들기(vnew) 검사 (a)CRUD·업로드 (b)분석 fallback·시트·정면·후면·3D"
-            "(120000·data URI)·ready (c)variant 격리 (d)409·stale failed (e)GLB 200 (f)격리 404 (g)size 기본"
+            "(60000·PBR false·data URI)·ready (c)variant 격리 (d)409·stale failed (e)GLB 200 (f)격리 404 "
+            "(g)size 기본 (h)일시오류 재조회 ready (i)FAILED 동기화 (j)retry3d 재사용·새제출 (k)기본값"
         )
 
 
@@ -2676,6 +2814,92 @@ def check_vnew_plan() -> None:
         if resp.status_code != 403 or (resp.get_json().get("error") or {}).get("type") != "TrackMismatch":
             bad.append(f"(g) video 트랙 프로젝트가 TrackMismatch 403 으로 거절되지 않습니다: {resp.status_code} {resp.get_json()}")
 
+        # (h) setting 이 JSON 문자열(Fable 계열) → 풀어서 채운다. enclosed 는 "true" 문자열도 True.
+        import json as _json  # noqa: PLC0415
+
+        setting_obj = {
+            "locationKo": "교장실",
+            "locationEn": "A closed principal's office",
+            "enclosed": "true",
+            "timeKo": "낮",
+            "moodKo": "긴장",
+            "layoutKo": "책상 앞",
+            "layoutEn": "at the desk",
+        }
+        h_script = planmod._normalize_script(
+            {
+                "setting": _json.dumps(setting_obj, ensure_ascii=False),
+                "entries": [{"id": "e1", "panels": [0], "locationEn": "A city street"}],
+            }
+        )
+        h_set = h_script.get("setting") or {}
+        if h_set.get("locationKo") != "교장실" or h_set.get("locationEn") != "A closed principal's office":
+            bad.append(f"(h) JSON 문자열 setting 이 풀려 채워지지 않았습니다: {h_set.get('locationKo')!r} {h_set.get('locationEn')!r}")
+        if h_set.get("enclosed") is not True:
+            bad.append(f"(h) enclosed 문자열 'true' 가 bool True 로 바뀌지 않았습니다: {h_set.get('enclosed')!r}")
+        if h_set.get("timeKo") != "낮" or h_set.get("moodKo") != "긴장":
+            bad.append(f"(h) JSON 문자열 setting 의 시간·분위기가 유지되지 않았습니다: {h_set!r}")
+
+        # (i) setting 이 없고 필드가 최상위(별칭 포함) → 최상위에서 끌어온다.
+        i_script = planmod._normalize_script(
+            {
+                "location": "교장실",  # 한글 → locationKo
+                "locationEn": "A closed principal's office",
+                "time": "밤",
+                "mood": "불안",
+                "layout": "창가",
+                "enclosed": "yes",
+                "entries": [{"id": "e1", "panels": [0], "locationEn": "A city street"}],
+            }
+        )
+        i_set = i_script.get("setting") or {}
+        if i_set.get("locationKo") != "교장실":
+            bad.append(f"(i) 최상위 별칭 location(한글) 이 locationKo 로 안 들어갔습니다: {i_set.get('locationKo')!r}")
+        if i_set.get("locationEn") != "A closed principal's office":
+            bad.append(f"(i) 최상위 locationEn 이 안 들어갔습니다: {i_set.get('locationEn')!r}")
+        if i_set.get("timeKo") != "밤" or i_set.get("moodKo") != "불안" or i_set.get("layoutKo") != "창가":
+            bad.append(f"(i) 최상위 별칭(time/mood/layout) 이 채워지지 않았습니다: {i_set!r}")
+        if i_set.get("enclosed") is not True:
+            bad.append(f"(i) enclosed 'yes' 가 True 로 안 바뀌었습니다: {i_set.get('enclosed')!r}")
+
+        # (j) setting 이 아예 없고 최상위에도 장소가 없음 → 첫 entry 의 장소로 채운다.
+        j_script = planmod._normalize_script(
+            {
+                "entries": [
+                    {"id": "e1", "panels": [0], "locationKo": "노을 진 거리", "locationEn": "A city street at sunset"},
+                    {"id": "e2", "panels": [1], "locationKo": "딴 곳", "locationEn": "elsewhere"},
+                ],
+            }
+        )
+        j_set = j_script.get("setting") or {}
+        if j_set.get("locationKo") != "노을 진 거리" or j_set.get("locationEn") != "A city street at sunset":
+            bad.append(f"(j) setting 없음일 때 첫 entry 장소로 안 채워졌습니다: {j_set.get('locationKo')!r} {j_set.get('locationEn')!r}")
+
+        # (k) entries 가 문자열(JSON) 이고, 그 안의 characters 도 문자열 → 둘 다 풀린다.
+        k_entries = [
+            {
+                "id": "e1",
+                "panels": [0],
+                "speaker": "김부장",
+                "lineKo": "자네 지금 뭐 하나?",
+                "locationEn": "A closed principal's office",
+                "characters": _json.dumps(
+                    [{"name": "김부장", "positionKo": "책상 앞", "actionKo": "호통친다"}], ensure_ascii=False
+                ),
+            }
+        ]
+        k_script = planmod._normalize_script(
+            {
+                "setting": {"locationKo": "교장실", "locationEn": "A closed principal's office"},
+                "entries": _json.dumps(k_entries, ensure_ascii=False),
+            }
+        )
+        k_out = k_script.get("entries") or []
+        if len(k_out) != 1:
+            bad.append(f"(k) 문자열 entries 가 풀려 1개로 안 나왔습니다: {len(k_out)}")
+        elif not k_out[0].get("characters") or k_out[0]["characters"][0].get("name") != "김부장":
+            bad.append(f"(k) 문자열 characters 가 풀리지 않았습니다: {k_out[0].get('characters')!r}")
+
     except Exception as exc:  # noqa: BLE001
         import traceback as _tb  # noqa: PLC0415
 
@@ -2695,6 +2919,7 @@ def check_vnew_plan() -> None:
         ok(
             "영상만들기_신규 계획(vnew plan) 검사 (a)생성·업로드·자연정렬 (b)input 검증"
             " (c)script 순서·상한 (d)conti ≥5컷·초합·세그먼트 (e)긴 컷 분할 (f)취소 버림 (g)권한·트랙"
+            " (h)setting JSON 문자열 (i)setting 최상위·별칭 (j)setting 없음→첫 entry 장소 (k)entries 문자열"
         )
 
 

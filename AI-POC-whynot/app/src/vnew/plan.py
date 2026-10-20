@@ -13,6 +13,7 @@ STORE 는 vpoc.store.STORE 를 쓴다(검사가 모듈 변수로 바꿔 끼운�
 
 from __future__ import annotations
 
+import json
 import logging
 import re
 import secrets
@@ -459,8 +460,20 @@ def run_script(owner: str, pid: str, task_id: str) -> None:
 
 
 def _normalize_script(payload: dict) -> dict:
-    """모델 출력을 script 모양으로 정리한다(빈 필드 채우기 · panels 정수화)."""
-    setting = dict(payload.get("setting") or {})
+    """모델 출력을 script 모양으로 정리한다(빈 필드 채우기 · panels 정수화).
+
+    Fable 계열은 중첩 객체(setting)를 JSON 문자열로 주거나, 그 필드를 최상위로 올리거나,
+    entries·characters 를 문자열로 주기도 한다. 그런 변형을 받아 정상 모양으로 되돌린다.
+    """
+    # setting 이 JSON 문자열이면 풀고, dict 가 아니면 {}.
+    setting = _loads_if_str(payload.get("setting"))
+    if not isinstance(setting, dict):
+        setting = {}
+    setting = dict(setting)
+
+    # setting 에 없는 키는 payload 최상위의 같은 이름·별칭에서 끌어온다.
+    _fill_setting_from_top(setting, payload)
+
     setting.setdefault("locationKo", "")
     setting.setdefault("locationEn", "")
     setting.setdefault("enclosed", False)
@@ -468,13 +481,28 @@ def _normalize_script(payload: dict) -> dict:
     setting.setdefault("moodKo", "")
     setting.setdefault("layoutKo", "")
     setting.setdefault("layoutEn", "")
+    setting["enclosed"] = _as_bool(setting.get("enclosed"))
+
+    # entries 가 문자열이면 푼다.
+    raw_entries = _loads_if_str(payload.get("entries"))
+    if not isinstance(raw_entries, list):
+        raw_entries = []
+
+    # 그래도 setting.locationKo/En 이 비면 entries 첫 항목의 장소로 채운다.
+    _fill_setting_location_from_entries(setting, raw_entries)
 
     entries = []
-    for index, item in enumerate(payload.get("entries") or []):
+    for index, item in enumerate(raw_entries):
+        item = _loads_if_str(item)
         if not isinstance(item, dict):
             continue
+        # 각 entry 의 characters 가 문자열이면 푼다.
+        raw_chars = _loads_if_str(item.get("characters"))
+        if not isinstance(raw_chars, list):
+            raw_chars = []
         chars = []
-        for char in item.get("characters") or []:
+        for char in raw_chars:
+            char = _loads_if_str(char)
             if not isinstance(char, dict):
                 continue
             chars.append(
@@ -502,6 +530,14 @@ def _normalize_script(payload: dict) -> dict:
                 "characters": chars,
             }
         )
+    # 정리 뒤에도 setting 이 비면(모든 값 빈/거짓) 모델이 준 모양을 남긴다(값은 남기지 않음).
+    if not _setting_has_content(setting):
+        log.warning(
+            "vnew.script.setting_empty top_keys=%s setting_type=%s",
+            sorted(payload.keys()) if isinstance(payload, dict) else type(payload).__name__,
+            type(payload.get("setting")).__name__ if isinstance(payload, dict) else "n/a",
+        )
+
     return {"setting": setting, "entries": entries}
 
 
@@ -639,11 +675,19 @@ def _cut_location(model_location: str, cut_panels: list[int], script: dict) -> s
 def _normalize_cuts(payload: dict, script: dict) -> list[dict]:
     """모델 출력 cuts 를 정리한다. locationEn 은 그 컷이 맡은 웹툰 컷의 장소로 보정, seconds 는 양수."""
     cuts = []
-    for index, item in enumerate(payload.get("cuts") or []):
+    raw_cuts = _loads_if_str(payload.get("cuts"))
+    if not isinstance(raw_cuts, list):
+        raw_cuts = []
+    for index, item in enumerate(raw_cuts):
+        item = _loads_if_str(item)
         if not isinstance(item, dict):
             continue
         chars = []
-        for char in item.get("characters") or []:
+        raw_chars = _loads_if_str(item.get("characters"))
+        if not isinstance(raw_chars, list):
+            raw_chars = []
+        for char in raw_chars:
+            char = _loads_if_str(char)
             if not isinstance(char, dict):
                 continue
             chars.append(
@@ -1108,6 +1152,107 @@ def plan_view(owner: str, pid: str, plan: dict) -> dict:
 
 def _is_int(value) -> bool:
     return isinstance(value, int) and not isinstance(value, bool)
+
+
+def _loads_if_str(value):
+    """값이 JSON 문자열이면 풀어서 돌려준다. 문자열이 아니거나 풀 수 없으면 그대로 돌려준다.
+
+    Fable 계열이 중첩 객체(setting·entries·characters)를 JSON 문자열로 주는 경우를 받는다.
+    """
+    if not isinstance(value, str):
+        return value
+    text = value.strip()
+    if not text:
+        return value
+    try:
+        return json.loads(text)
+    except (ValueError, TypeError):
+        return value
+
+
+def _as_bool(value) -> bool:
+    """enclosed 등 bool 필드를 받는다. "true"/"yes"/"닫힌" 같은 문자열도 True 로 본다."""
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value)
+    if isinstance(value, str):
+        token = value.strip().lower()
+        return token in {"true", "t", "1", "yes", "y", "닫힘", "닫힌", "폐쇄", "실내"}
+    return False
+
+
+def _has_korean(text: str) -> bool:
+    """한글 음절이 하나라도 있으면 True(한글/영문 장소 구분용)."""
+    return any("\uac00" <= ch <= "\ud7a3" for ch in str(text or ""))
+
+
+# setting 키 → payload 최상위에서 끌어올 때 받는 별칭들.
+_SETTING_ALIASES: dict[str, tuple[str, ...]] = {
+    "timeKo": ("timeKo", "time"),
+    "moodKo": ("moodKo", "mood"),
+    "layoutKo": ("layoutKo", "layout"),
+    "layoutEn": ("layoutEn",),
+    "locationKo": ("locationKo",),
+    "locationEn": ("locationEn",),
+    "enclosed": ("enclosed",),
+}
+
+
+def _fill_setting_from_top(setting: dict, payload: dict) -> None:
+    """setting 에 없는 키를 payload 최상위의 같은 이름·별칭에서 채운다(값이 있을 때만).
+
+    location/place 는 한글이면 locationKo, 영문이면 locationEn 으로 넣는다.
+    """
+    if not isinstance(payload, dict):
+        return
+
+    for key, aliases in _SETTING_ALIASES.items():
+        if setting.get(key):
+            continue
+        for alias in aliases:
+            if alias in payload and payload.get(alias) not in (None, ""):
+                setting[key] = payload[alias]
+                break
+
+    # location/place: 한글이면 locationKo, 영문이면 locationEn.
+    for alias in ("location", "place"):
+        value = payload.get(alias)
+        if not value or not isinstance(value, str):
+            continue
+        target = "locationKo" if _has_korean(value) else "locationEn"
+        if not setting.get(target):
+            setting[target] = value
+
+
+def _fill_setting_location_from_entries(setting: dict, raw_entries: list) -> None:
+    """setting.locationKo/En 이 비면 entries 첫 항목의 locationKo/En 으로 채운다."""
+    if not isinstance(raw_entries, list):
+        return
+    for item in raw_entries:
+        item = _loads_if_str(item)
+        if not isinstance(item, dict):
+            continue
+        if not setting.get("locationKo"):
+            loc_ko = str(item.get("locationKo") or "").strip()
+            if loc_ko:
+                setting["locationKo"] = loc_ko
+        if not setting.get("locationEn"):
+            loc_en = str(item.get("locationEn") or "").strip()
+            if loc_en:
+                setting["locationEn"] = loc_en
+        if setting.get("locationKo") and setting.get("locationEn"):
+            break
+
+
+def _setting_has_content(setting: dict) -> bool:
+    """setting 에 의미 있는 값이 하나라도 있으면 True(enclosed=True 포함)."""
+    if not isinstance(setting, dict):
+        return False
+    for key in ("locationKo", "locationEn", "timeKo", "moodKo", "layoutKo", "layoutEn"):
+        if str(setting.get(key) or "").strip():
+            return True
+    return bool(setting.get("enclosed"))
 
 
 def _parse_iso(value: str):
