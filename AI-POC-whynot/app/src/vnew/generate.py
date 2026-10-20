@@ -1310,7 +1310,8 @@ def _previz_prompt(plan: dict, seg: dict, variant: str, *, element_lines: list[s
     tail = (
         " Camera angles, framing, cuts, positions and movements come ONLY from @Video1 — do not invent "
         "new shots. Keep exactly the same room, number of people, timing and light direction as @Video1. "
-        "Do not add or remove anyone. No text, no speech bubbles."
+        "Do not add or remove anyone. Every colored mannequin must become a person; no mannequins, "
+        "boxes or flat colored figures may remain. No text, no speech bubbles."
     )
     prompt = head + mapping + timeline_text + tail
     budget = _previz_prompt_budget()
