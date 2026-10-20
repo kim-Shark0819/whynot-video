@@ -34,9 +34,13 @@ log = logging.getLogger("vpoc")
 
 # ================================================================ 상수
 
-# 영상 길이(초) 범위. 모델별 상한과 별개로 UI 상한은 60.
-MIN_TOTAL_SECONDS = 1
+# 영상 길이(초) 범위. 모델별 상한과 별개로 UI 상한은 60. 최소 3초 — 최종 생성 모델
+# (Kling O3 video-to-video edit)이 입력 영상 3~15초만 받으므로 그보다 짧으면 구간을 못 만든다.
+MIN_TOTAL_SECONDS = 3
 MAX_TOTAL_SECONDS = 60
+# 녹화·생성 구간 최소 길이(초). 최종 모델이 3초 미만 입력을 거절한다. compute_segments 는 모든
+# 구간을 이 값 이상, 최대 길이 이하로 만든다.
+MIN_SEGMENT_SECONDS = 3
 # 업로드 웹툰 이미지 최대 장수.
 MAX_IMAGES = 40
 # 대본 분석에 모델로 보낼 타일 상한. 넘으면 균등 선택하되 순서 유지.
@@ -141,6 +145,17 @@ def new_plan() -> dict:
         # ③ 콘티의 장소마다 만드는 공간 디테일 시트(설계자 2026-10-21). 콘티를 만들면 목록만
         # 갱신하고 자동으로 그리지는 않는다(비용). locations.py 가 이 목록을 다룬다.
         "locations": [],
+        # ③→④ 사이 프리비즈(3D 장면 설계 JSON, 설계자 2026-10-21). previz.py 가 다룬다.
+        "previz": {
+            "status": "none",
+            "error": "",
+            "model": "",
+            "revision": 0,
+            "scenes": [],
+            "approved": False,
+            "recordings": {},
+            "task": _empty_task(),
+        },
         "task": _empty_task(),
     }
 
@@ -583,6 +598,7 @@ def update_script(owner: str, pid: str, patch: dict) -> dict:
         if script.get("status") in ("none", "failed"):
             script["status"] = "ready"
         data["revision"] = int(data.get("revision") or 0) + 1
+        _unapprove_previz(data)
 
     updated, _ = mutate_plan(owner, pid, mutator)
     return updated
@@ -601,6 +617,12 @@ def run_conti(owner: str, pid: str, task_id: str) -> None:
             return
         inp = plan.get("input") or {}
         total_seconds = int(inp.get("totalSeconds") or 15)
+        if total_seconds < MIN_TOTAL_SECONDS:
+            _fail_step(
+                owner, pid, "conti", task_id,
+                f"영상 길이는 {MIN_TOTAL_SECONDS}초 이상이어야 합니다(최종 생성 모델이 3초 미만 입력을 받지 못합니다).",
+            )
+            return
         notes = str(inp.get("notes") or "").strip()
         roster = _roster_text(owner, inp.get("characters") or [])
 
@@ -621,6 +643,8 @@ def run_conti(owner: str, pid: str, task_id: str) -> None:
 
         conti = {"status": "ready", "error": "", "model": model, "cuts": cuts, "segments": segments}
         _commit_step(owner, pid, "conti", task_id, conti)
+        # 콘티가 바뀌면 프리비즈 승인을 해제한다(콘티·장면이 바뀌면 다시 확인·승인).
+        _unapprove_previz_after_conti(owner, pid)
         # 콘티가 정해지면 장소 목록만 갱신한다(자동으로 그리지는 않는다 — 비용). 같은 이름이면 유지.
         _sync_locations_after_conti(owner, pid)
     except Exception as exc:  # noqa: BLE001
@@ -637,6 +661,24 @@ def _sync_locations_after_conti(owner: str, pid: str) -> None:
         mutate_plan(owner, pid, locations.sync_locations)
     except Exception as exc:  # noqa: BLE001
         log.warning("vnew.conti.sync_locations_failed pid=%s err=%s", pid, str(exc)[:200])
+
+
+def _unapprove_previz(data: dict) -> None:
+    """콘티·대본·장면을 고치면 프리비즈 승인을 해제한다. previz 를 늦게 import 해 순환 참조를 피한다."""
+    from . import previz  # noqa: PLC0415
+
+    try:
+        previz.unapprove(data)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("vnew.unapprove_previz_failed err=%s", str(exc)[:200])
+
+
+def _unapprove_previz_after_conti(owner: str, pid: str) -> None:
+    """콘티 재생성 뒤 프리비즈 승인 해제(저장까지). 실패해도 콘티는 이미 저장됐다."""
+    try:
+        mutate_plan(owner, pid, _unapprove_previz)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("vnew.conti.unapprove_previz_failed pid=%s err=%s", pid, str(exc)[:200])
 
 
 
@@ -874,40 +916,139 @@ def _split_cut_to_max(cut: dict, max_seconds: int) -> list[dict]:
 
 
 def compute_segments(cuts: list[dict], max_seconds: int) -> tuple[list[dict], list[dict]]:
-    """totalSeconds 를 최대 길이 단위 구간으로 나누되 컷 경계에서 자른다.
+    """컷을 구간으로 나눈다. **모든 구간은 MIN_SEGMENT_SECONDS 이상·max_seconds 이하**(설계자 2026-10-21).
 
-    - 한 구간의 seconds 합 <= max_seconds.
-    - 한 컷이 max_seconds 보다 길면 그 컷을 먼저 나눈다(그 조각이 새 컷이 된다).
+    최종 생성 모델(Kling O3 video-to-video edit)이 입력 영상 3~15초만 받으므로, 2초짜리 구간을
+    만들면 안 된다. 규칙:
+    - **컷 경계를 우선**한다(한 컷은 한 구간 안에 통째로 들어가려 한다 — 가능하면 쪼개지 않는다).
+    - 짧은 구간(<MIN)은 앞(없으면 뒤) 구간과 합친다.
+    - 합쳐서 max 를 넘으면 그 범위를 둘로 다시 나누되 **둘 다 MIN 이상**이 되게 한다. 컷 경계로 안 되면
+      컷을 쪼갠다.
     반환: (조각 반영된 cuts, segments[{id,cutIds,seconds}]).
+
+    totalSeconds 가 MIN 미만이면 콘티에서 거절되므로(run_conti) 여기서는 total>=MIN 을 가정한다.
     """
-    max_seconds = max(1, int(max_seconds))
+    max_seconds = max(MIN_SEGMENT_SECONDS, int(max_seconds))
 
     # 1) 최대 길이보다 긴 컷을 먼저 쪼갠다.
     expanded: list[dict] = []
     for cut in cuts:
         expanded.extend(_split_cut_to_max(cut, max_seconds))
-    for no, cut in enumerate(expanded, start=1):
-        cut["no"] = no
+    total = sum(int(c["seconds"]) for c in expanded)
+    if total <= 0:
+        return expanded, []
 
-    # 2) 컷 경계에서 구간을 모은다.
-    segments: list[dict] = []
-    current_ids: list[str] = []
-    current_seconds = 0
+    # 2) 컷 경계에서 구간을 모은다(<=max). 구간은 그 안의 컷 조각 목록으로 들고 있는다.
+    groups: list[list[dict]] = []  # 각 구간 = 컷 조각 리스트
+    current: list[dict] = []
+    current_s = 0
     for cut in expanded:
-        seconds = int(cut["seconds"])
-        if current_ids and current_seconds + seconds > max_seconds:
-            segments.append(
-                {"id": f"seg{len(segments) + 1}", "cutIds": current_ids, "seconds": current_seconds}
-            )
-            current_ids = []
-            current_seconds = 0
-        current_ids.append(cut["id"])
-        current_seconds += seconds
-    if current_ids:
-        segments.append(
-            {"id": f"seg{len(segments) + 1}", "cutIds": current_ids, "seconds": current_seconds}
-        )
-    return expanded, segments
+        s = int(cut["seconds"])
+        if current and current_s + s > max_seconds:
+            groups.append(current)
+            current = []
+            current_s = 0
+        current.append(cut)
+        current_s += s
+    if current:
+        groups.append(current)
+
+    # 3) 짧은 구간(<MIN)을 이웃과 합치고, 합쳐서 max 를 넘으면 둘로 다시 나눈다(둘 다 MIN 이상).
+    groups = _repair_short_segments(groups, max_seconds)
+
+    # 4) 구간·컷 조각을 평탄화해 반환.
+    rebalanced: list[dict] = []
+    segments: list[dict] = []
+    for index, group in enumerate(groups):
+        ids: list[str] = []
+        secs = 0
+        for cut in group:
+            rebalanced.append(cut)
+            ids.append(cut["id"])
+            secs += int(cut["seconds"])
+        segments.append({"id": f"seg{index + 1}", "cutIds": ids, "seconds": secs})
+    for no, cut in enumerate(rebalanced, start=1):
+        cut["no"] = no
+    return rebalanced, segments
+
+
+def _group_seconds(group: list[dict]) -> int:
+    return sum(int(c["seconds"]) for c in group)
+
+
+def _repair_short_segments(groups: list[list[dict]], max_seconds: int) -> list[list[dict]]:
+    """MIN 미만 구간을 이웃과 합쳐 없앤다. 합쳐서 max 초과면 둘로 다시 나눈다(둘 다 MIN 이상)."""
+    lo = MIN_SEGMENT_SECONDS
+    hi = max(lo, int(max_seconds))
+
+    # 반복: 가장 짧은 <MIN 구간을 이웃과 합친다. 구간이 하나뿐이면(= 전체) 그대로 둔다.
+    guard = 0
+    while len(groups) > 1 and guard < 10000:
+        guard += 1
+        short_idx = next((i for i, g in enumerate(groups) if _group_seconds(g) < lo), -1)
+        if short_idx < 0:
+            break
+        # 합칠 이웃: 앞 구간 우선(마지막 짧은 구간은 앞과 합친다), 없으면 뒤.
+        if short_idx > 0:
+            left, right = short_idx - 1, short_idx
+        else:
+            left, right = short_idx, short_idx + 1
+        merged = groups[left] + groups[right]
+        merged_s = _group_seconds(merged)
+        if merged_s <= hi:
+            groups[left:right + 1] = [merged]
+        else:
+            # 합치면 max 초과 → 둘로 다시 나눈다. 둘 다 [MIN,max] 가 되게, 가능한 한 고르게(절반).
+            # first_target 은 [max(MIN, merged_s-max), min(max, merged_s-MIN)] 안에서 절반에 가깝게.
+            low_bound = max(lo, merged_s - hi)
+            high_bound = min(hi, merged_s - lo)
+            half = (merged_s + 1) // 2
+            first_target = min(max(half, low_bound), high_bound)
+            if first_target < lo:
+                first_target = lo
+            a, b = _split_group_at(merged, first_target)
+            groups[left:right + 1] = [a, b]
+    return groups
+
+
+def _split_group_at(group: list[dict], first_seconds: int) -> tuple[list[dict], list[dict]]:
+    """컷 조각 묶음을 앞 구간(합 = first_seconds)과 나머지로 나눈다. 경계가 어긋나면 컷을 쪼갠다."""
+    first: list[dict] = []
+    rest: list[dict] = []
+    acc = 0
+    queue = [dict(c) for c in group]
+    i = 0
+    while i < len(queue):
+        cut = queue[i]
+        s = int(cut["seconds"])
+        if acc >= first_seconds:
+            rest.append(cut)
+            i += 1
+            continue
+        need = first_seconds - acc
+        if s <= need:
+            first.append(cut)
+            acc += s
+            i += 1
+        else:
+            part_no = _next_split_part(cut)
+            head = dict(cut, seconds=need, id=f"{cut['id']}-{part_no}")
+            tail = dict(cut, seconds=s - need, id=f"{cut['id']}-{part_no + 1}")
+            first.append(head)
+            acc += need
+            rest.append(tail)
+            i += 1
+    return first, rest
+
+
+def _next_split_part(piece: dict) -> int:
+    """컷 조각 id 끝의 '-N' 다음 번호. 조각이 아니면 1 부터."""
+    pid = str(piece.get("id") or "")
+    if "-" in pid:
+        tail = pid.rsplit("-", 1)[-1]
+        if tail.isdigit():
+            return int(tail)
+    return 1
 
 
 def update_conti(owner: str, pid: str, patch: dict) -> dict:
@@ -935,6 +1076,7 @@ def update_conti(owner: str, pid: str, patch: dict) -> dict:
         total = int((data.get("input") or {}).get("totalSeconds") or 0)
         summed = sum(int(cut.get("seconds") or 0) for cut in conti.get("cuts") or [])
         data["revision"] = int(data.get("revision") or 0) + 1
+        _unapprove_previz(data)
         return {"fitNeeded": total != summed, "totalSeconds": total, "sumSeconds": summed}
 
     updated, info = mutate_plan(owner, pid, mutator)
@@ -1187,6 +1329,7 @@ def plan_view(owner: str, pid: str, plan: dict) -> dict:
         "script": plan.get("script") or {},
         "conti": plan.get("conti") or {},
         "locations": _locations_view(owner, pid, plan),
+        "previz": _previz_view(owner, pid, plan),
         "gen": _gen_view(owner, pid, plan),
         "task": plan.get("task") or _empty_task(),
     }
@@ -1208,6 +1351,17 @@ def _locations_view(owner: str, pid: str, plan: dict) -> list[dict]:
     except Exception as exc:  # noqa: BLE001
         log.warning("vnew.plan.locations_view_failed pid=%s err=%s", pid, str(exc)[:200])
         return []
+
+
+def _previz_view(owner: str, pid: str, plan: dict) -> dict:
+    """프리비즈(3D 장면 설계) 보기. previz 를 늦게 import 해 순환 참조를 피한다."""
+    from . import previz  # noqa: PLC0415
+
+    try:
+        return previz.previz_view(owner, pid, plan)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("vnew.plan.previz_view_failed pid=%s err=%s", pid, str(exc)[:200])
+        return previz.new_previz()
 
 
 # ================================================================ 작은 도우미

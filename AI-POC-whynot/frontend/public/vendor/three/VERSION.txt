@@ -1,0 +1,1 @@
+three 0.169.0 (npm, integrity sha512 verified 2026-10-21). MIT.

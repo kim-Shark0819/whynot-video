@@ -20,6 +20,7 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]      # AI-POC-whynot
@@ -102,20 +103,60 @@ def check_import() -> None:
 # ---------------------------------------------------------------- 3. node --check
 
 
+# ES module 문법(최상위 import/export). 이런 파일은 CommonJS 로 읽으면 node --check 가
+# "Cannot use import statement outside a module" 로 죽는다 → --input-type=module 로 검사한다.
+_ESM_PATTERN = re.compile(
+    r"^\s*(?:import\s[^;]*?from\s|import\s*['\"]|import\s*\(|export\s+(?:default|const|let|var|function|class|\{|\*))",
+    re.M,
+)
+
+
+def _is_es_module(text: str) -> bool:
+    return bool(_ESM_PATTERN.search(text))
+
+
 def check_js() -> None:
     node = shutil.which("node")
     if not node:
         warn("node 가 없어 JS 구문 검사를 건너뜁니다 (E16)")
         return
     bad = []
-    for path in sorted(PUBLIC.glob("*.js")):
-        result = subprocess.run([node, "--check", str(path)], capture_output=True, text=True)
+    files = sorted(PUBLIC.glob("*.js"))
+    for path in files:
+        try:
+            text = path.read_text(encoding="utf-8")
+        except (UnicodeDecodeError, OSError) as exc:
+            bad.append(f"{path.name}: 읽기 실패 {exc}")
+            continue
+        if _is_es_module(text):
+            # ES module: 파일 경로(.js)로는 node 가 CommonJS 로 파싱해 import 에서 죽는다.
+            # 임시 .mjs 파일로 복사해 검사한다 — .mjs 확장자가 module 파싱을 보장하므로
+            # node 버전에 상관없이 안전하다(--input-type/stdin 지원 여부에 의존하지 않는다).
+            result = _check_as_module(node, text)
+        else:
+            result = subprocess.run([node, "--check", str(path)], capture_output=True, text=True)
         if result.returncode != 0:
             bad.append(f"{path.name}: {(result.stderr or '').strip()[:400]}")
     if bad:
         fail("node --check 실패\n" + "\n".join(bad))
     else:
-        ok(f"node --check ({len(list(PUBLIC.glob('*.js')))} files)")
+        ok(f"node --check ({len(files)} files)")
+
+
+def _check_as_module(node: str, text: str) -> subprocess.CompletedProcess:
+    """ES module 소스를 임시 .mjs 파일에 써서 node --check 로 검사한다."""
+    tmp = tempfile.NamedTemporaryFile(
+        mode="w", suffix=".mjs", encoding="utf-8", delete=False
+    )
+    try:
+        tmp.write(text)
+        tmp.close()
+        return subprocess.run([node, "--check", tmp.name], capture_output=True, text=True)
+    finally:
+        try:
+            os.unlink(tmp.name)
+        except OSError:
+            pass
 
 
 # ---------------------------------------------------------------- 4. 잔존 검사
@@ -3676,6 +3717,36 @@ def check_vnew_plan() -> None:
         if any(int(s["seconds"]) > 15 for s in segs):
             bad.append(f"(e) 쪼갠 뒤 구간이 15초를 넘습니다: {[s['seconds'] for s in segs]}")
 
+        # (l) 모든 구간은 MIN_SEGMENT_SECONDS(3) 이상·max 이하 — 16초 컷·최대 15초 → 둘 다 ≥3.
+        #     최종 생성 모델(Kling O3 edit)이 3~15초만 받으므로 2초 구간을 만들면 안 된다.
+        exp_h, seg_h = planmod.compute_segments([{"id": "h1", "no": 1, "seconds": 16}], 15)
+        if len(seg_h) != 2:
+            bad.append(f"(l) 16초·max15 가 2구간이 아닙니다: {[s['seconds'] for s in seg_h]}")
+        if any(int(s["seconds"]) < planmod.MIN_SEGMENT_SECONDS for s in seg_h):
+            bad.append(f"(l) 3초 미만 구간이 있습니다: {[s['seconds'] for s in seg_h]}")
+        if any(int(s["seconds"]) > 15 for s in seg_h):
+            bad.append(f"(l) 15초 초과 구간이 있습니다: {[s['seconds'] for s in seg_h]}")
+        if sum(int(s["seconds"]) for s in seg_h) != 16:
+            bad.append(f"(l) 구간 합이 16초가 아닙니다: {[s['seconds'] for s in seg_h]}")
+        # 고르게 나눠 [8,8] 이 되는지(둘 다 ≥3 의 대표 예).
+        if sorted(int(s["seconds"]) for s in seg_h) != [8, 8]:
+            bad.append(f"(l) 16초·max15 가 [8,8] 로 고르게 나뉘지 않았습니다: {sorted(int(s['seconds']) for s in seg_h)}")
+
+        # (m) 마지막 컷 2초 → 앞과 합쳐 2초짜리 구간이 사라진다(모든 구간 ≥3).
+        #     max5 에서 4,4,2 는 그대로면 [4,4,2] — 2초 구간을 앞과 합쳐 다시 나눈다.
+        tail_cuts = [
+            {"id": "t1", "no": 1, "seconds": 4},
+            {"id": "t2", "no": 2, "seconds": 4},
+            {"id": "t3", "no": 3, "seconds": 2},
+        ]
+        exp_i, seg_i = planmod.compute_segments([dict(c) for c in tail_cuts], 5)
+        if any(int(s["seconds"]) < planmod.MIN_SEGMENT_SECONDS for s in seg_i):
+            bad.append(f"(m) 마지막 2초가 앞과 합쳐지지 않아 3초 미만 구간이 남았습니다: {[s['seconds'] for s in seg_i]}")
+        if any(int(s["seconds"]) > 5 for s in seg_i):
+            bad.append(f"(m) 합친 뒤 max(5)를 넘는 구간이 있습니다: {[s['seconds'] for s in seg_i]}")
+        if sum(int(s["seconds"]) for s in seg_i) != 10:
+            bad.append(f"(m) 구간 합이 총초(10)와 다릅니다: {[s['seconds'] for s in seg_i]}")
+
         # (f) 취소 시 늦게 온 결과가 버려진다 — _commit_step 이 task.id 불일치면 저장하지 않는다.
         # script 를 다시 시작해 task_id 를 얻고, 취소(task.id→None)한 뒤 그 task_id 로 _commit_step 을 호출.
         task_id = planmod.start_task("tester", pid, "script")
@@ -3850,6 +3921,7 @@ def check_vnew_plan() -> None:
             "영상만들기_신규 계획(vnew plan) 검사 (a)생성·업로드·자연정렬 (b)input 검증"
             " (c)script 순서·상한 (d)conti ≥5컷·초합·세그먼트 (e)긴 컷 분할 (f)취소 버림 (g)권한·트랙"
             " (h)setting JSON 문자열 (i)setting 최상위·별칭 (j)setting 없음→첫 entry 장소 (k)entries 문자열"
+            " (l)구간 3~max·16초→[8,8] (m)마지막 2초 앞과 합침"
         )
 
 
@@ -3865,6 +3937,10 @@ def check_vnew_locations() -> None:
     (d) 2x2 한 장 시트 생성(sheetUrl)
     (e) 콘티 재생성 후 같은 장소 유지·자동 그림 0장
     (f) 진행 중 build 409
+    (g) 설계 모델 호출 순서 Claude(DESIGN_MODEL) → Astra(fallback)
+    (h) 벽 프롬프트에 "No text"·"Korean setting"
+    (i) 병렬 실행에서도 원장·저장 10장(벽8+바닥2) 정확
+    (j) 설계 결과에 'assumed'/'provisional' 이 있으면 1회 재요청
     """
     sys.path.insert(0, str(ROOT / "app"))
     bad: list[str] = []
@@ -4125,9 +4201,11 @@ def check_vnew_locations() -> None:
 
         if len(design_calls) != 1:
             bad.append(f"(c) 설계 LLM 호출이 1회가 아닙니다: {len(design_calls)}")
-        # Astra 먼저 쓰는지(첫 설계 모델이 ASTRA_MODEL).
-        if design_calls and design_calls[0] != locmod.ASTRA_MODEL:
-            bad.append(f"(c) 설계가 Astra 를 먼저 쓰지 않습니다: {design_calls[0]}")
+        # (g) 설계 모델 순서: Claude 분석 체인(DESIGN_MODEL) 먼저, Astra 는 fallback.
+        if design_calls and design_calls[0] != locmod.DESIGN_MODEL:
+            bad.append(f"(g) 설계가 Claude(DESIGN_MODEL) 를 먼저 쓰지 않습니다: {design_calls[0]}")
+        if locmod.DESIGN_MODEL == locmod.DESIGN_FALLBACK_MODEL:
+            bad.append("(g) DESIGN_MODEL 과 DESIGN_FALLBACK_MODEL 이 같습니다(Claude→Astra 순서가 무의미)")
         if len(seedream_calls) != 10:
             bad.append(f"(c) Seedream 호출이 10장이 아닙니다: {len(seedream_calls)}")
         walls = [c for c in seedream_calls if c["kind"] == "wall"]
@@ -4148,6 +4226,15 @@ def check_vnew_locations() -> None:
             if "no people" not in c["prompt"]:
                 bad.append(f"(c) 벽 프롬프트에 'no people' 이 없습니다: {c['prompt'][:80]}")
                 break
+        # (h) 벽 프롬프트 끝에 글자 금지 지시("No text") + 한국 배경.
+        for c in walls:
+            if "No text" not in c["prompt"]:
+                bad.append(f"(h) 벽 프롬프트에 'No text' 지시가 없습니다: {c['prompt'][-120:]}")
+                break
+        for c in walls:
+            if "Korean setting" not in c["prompt"]:
+                bad.append(f"(h) 벽 프롬프트에 'Korean setting' 이 없습니다: {c['prompt'][-120:]}")
+                break
         # 두 그림체 모두 그려졌는지.
         if {c["variant"] for c in seedream_calls} != {"real", "webtoon"}:
             bad.append(f"(c) real·webtoon 둘 다 그리지 않았습니다: {sorted({c['variant'] for c in seedream_calls})}")
@@ -4155,6 +4242,19 @@ def check_vnew_locations() -> None:
         img_charges = [c for c in ledger_calls if c.get("kind") == "image" and not c.get("text")]
         if len(img_charges) < 10:
             bad.append(f"(c) Seedream 원장 계상이 10건 미만입니다: {len(img_charges)}")
+
+        # (i) 병렬 실행에서도 원장·저장이 정확히 10장(벽8+바닥2) 이어야 한다(동시성 중복·누락 없음).
+        if len(img_charges) != 10:
+            bad.append(f"(i) 병렬 생성인데 Seedream 원장 계상이 정확히 10건이 아닙니다: {len(img_charges)}")
+        saved_walls = [k for k in fake_store.blobs if f"/locations/{lid}/" in k and "/wall_" in k]
+        saved_floors = [k for k in fake_store.blobs if f"/locations/{lid}/" in k and "/floor_" in k]
+        if len(saved_walls) != 8 or len(saved_floors) != 2:
+            bad.append(
+                f"(i) 병렬 생성 저장이 벽8·바닥2(=10) 가 아닙니다: 벽={len(saved_walls)} 바닥={len(saved_floors)}"
+            )
+        # 저장 키가 모두 서로 다른지(동시 쓰기로 덮어쓰지 않았는지).
+        if len(set(saved_walls)) != len(saved_walls) or len(set(saved_floors)) != len(saved_floors):
+            bad.append("(i) 병렬 생성에서 같은 키로 덮어썼습니다(저장 키 중복)")
 
         # (d) 2x2 시트(sheetUrl) + plan_view 상태 ready.
         view = client.get(f"/api/vnew/p/{pid}/plan").get_json() or {}
@@ -4220,6 +4320,51 @@ def check_vnew_locations() -> None:
             bad.append(f"(f) 진행 중 build 가 409 Building 으로 거절되지 않습니다: {resp.status_code} {resp.get_json()}")
         _join()
 
+        # (j) 설계 결과에 'assumed'/'provisional' 이 있으면 같은 모델에 1회 재요청해 깨끗한 설계로 바꾼다.
+        jcalls: list[str] = []
+
+        def fake_design_provisional(blocks, *, model):
+            jcalls.append(model)
+            # 첫 호출은 '얼버무린' 설계(provisional/assumed), 두 번째(재요청)는 깨끗한 설계.
+            if len(jcalls) == 1:
+                payload = {
+                    "walls": {
+                        "north": {"descEn": "a wall with two windows", "hasWindow": True, "hasDoor": False, "featuresEn": "windows"},
+                        "east": {"descEn": "Use a plain off-white plaster wall as the assumed main wall", "hasWindow": False, "hasDoor": False, "featuresEn": "provisional"},
+                        "south": {"descEn": "the floor is not visible; use a simple wall", "hasWindow": False, "hasDoor": True, "featuresEn": "door"},
+                        "west": {"descEn": "a plain wall", "hasWindow": False, "hasDoor": False, "featuresEn": ""},
+                    },
+                    "floorEn": "provisional light gray floor",
+                    "lightEn": "soft daylight",
+                }
+            else:
+                payload = {
+                    "walls": {
+                        "north": {"descEn": "a wall with two large windows", "hasWindow": True, "hasDoor": False, "featuresEn": "two tall windows"},
+                        "east": {"descEn": "a bookshelf wall", "hasWindow": False, "hasDoor": False, "featuresEn": "full-height bookshelves"},
+                        "south": {"descEn": "a wall with the entrance door", "hasWindow": False, "hasDoor": True, "featuresEn": "wooden door, notice board"},
+                        "west": {"descEn": "a wall with filing cabinets", "hasWindow": False, "hasDoor": False, "featuresEn": "metal filing cabinets"},
+                    },
+                    "floorEn": "polished wooden floor",
+                    "lightEn": "main light comes from the north-wall windows, soft daylight",
+                }
+            return payload, {"model": model, "inputTokens": 5, "outputTokens": 9}
+
+        saved_design = locmod._design
+        locmod._design = fake_design_provisional
+        try:
+            jdesign = locmod.design_location(owner, pid, {"id": lid, "nameEn": "A closed principal's office", "panels": [0, 1]})
+        finally:
+            locmod._design = saved_design
+        if len(jcalls) != 2:
+            bad.append(f"(j) 'assumed'/'provisional' 설계인데 1회 재요청하지 않았습니다(설계 호출 {len(jcalls)}회)")
+        if jcalls and len(set(jcalls)) != 1:
+            bad.append(f"(j) 재요청이 같은 모델이 아닙니다: {jcalls}")
+        if locmod._has_provisional(jdesign):
+            bad.append("(j) 재요청 뒤에도 설계에 'assumed'/'provisional' 이 남아 있습니다")
+        if not locmod._has_provisional({"walls": {"east": {"descEn": "assumed wall"}}}):
+            bad.append("(j) _has_provisional 이 'assumed' 를 잡지 못합니다")
+
     except Exception as exc:  # noqa: BLE001
         import traceback as _tb  # noqa: PLC0415
 
@@ -4244,6 +4389,8 @@ def check_vnew_locations() -> None:
         ok(
             "영상만들기_신규 공간 디테일 시트(vnew locations) 검사 (a)정규화·중복 제거 (b)설계 JSON 정리"
             " (c)벽4+바닥1×2그림체=Seedream 10장·Orthographic·no people (d)2x2 시트 (e)콘티 재생성 유지·자동 0장 (f)409"
+            " (g)설계 모델 Claude→Astra (h)벽 프롬프트 'No text'·Korean setting (i)병렬에서도 원장·저장 10장 정확"
+            " (j)'assumed'/'provisional' 1회 재요청"
         )
 
 
@@ -5193,6 +5340,508 @@ def check_anime_style() -> None:
         )
 
 
+# ---------------------------------------------------------------- 11. 영상만들기_신규 프리비즈(vnew previz)
+
+
+def check_vnew_previz() -> None:
+    """영상만들기_신규 ③→④ 프리비즈(3D 장면 설계) — 설계 LLM 은 가짜(설계자 2026-10-21).
+
+    (a) design 202 → scenes, 컷 1:1, 시간 합계
+    (b) 정리: 방 밖 인물 좌표 보정, 색 중복 재배정, fov 범위
+    (c) 장소 바뀌면 scene 2개
+    (d) 텍스처 키 채움(location 실사 variant 벽·바닥)
+    (e) PUT 정리·승인 해제
+    (f) 녹화 업로드 변환(합성 webm → mp4) · 길이 벗어나면 400
+    (g) recordedAll
+    """
+    sys.path.insert(0, str(ROOT / "app"))
+    bad: list[str] = []
+
+    from flask import Flask  # noqa: PLC0415
+
+    from src import vnew  # noqa: PLC0415
+    from src.vnew import plan as planmod  # noqa: PLC0415
+    from src.vnew import previz as pvmod  # noqa: PLC0415
+    from src.vnew import previz_schema as pvschema  # noqa: PLC0415
+
+    fake_store = _FakeCharStore()
+
+    # ffmpeg 바이너리를 어떤 패치보다 먼저 구해 둔다(imageio_ffmpeg 를 threading.Thread 패치 전에 import).
+    _ffmpeg_bin = ""
+    try:
+        import imageio_ffmpeg as _iioff  # noqa: PLC0415
+
+        _ffmpeg_bin = _iioff.get_ffmpeg_exe()
+    except Exception:  # noqa: BLE001
+        import shutil as _shutil  # noqa: PLC0415
+
+        _ffmpeg_bin = _shutil.which("ffmpeg") or ""
+
+    # --- (b) 정리 단위: 방 밖 좌표 보정·색 중복 재배정·fov 범위 ---
+    scene_raw = {
+        "room": {"width": 100.0, "depth": 2.0, "height": 2.8},  # width 큼→30, depth 작음→3
+        "actors": [
+            {"id": "a1", "name": "김", "color": "#ff0000", "heightM": 1.7},
+            {"id": "a2", "name": "이", "color": "#ff0000", "heightM": 1.7},  # 색 중복
+        ],
+        "timeline": [
+            {
+                "cutId": "c1",
+                "camera": {"pos": [0, 1.5, 5], "target": [0, 1, 0], "fov": 200},  # fov 범위 밖→90
+                "actors": [
+                    {"id": "a1", "pos": [999, 0, 999], "pose": "stand"},  # 방 밖→보정
+                    {"id": "a2", "pos": [-999, 0, -999], "pose": "sit"},
+                ],
+            }
+        ],
+    }
+    scene = pvschema.normalize_scene(
+        scene_raw, location_id="loc1", cut_specs=[{"cutId": "c1", "seconds": 4}]
+    )
+    room = scene["room"]
+    if not (pvschema.ROOM_MIN_M <= room["width"] <= pvschema.ROOM_MAX_M):
+        bad.append(f"(b) 방 width 범위 보정 실패: {room['width']}")
+    if not (pvschema.ROOM_MIN_M <= room["depth"] <= pvschema.ROOM_MAX_M):
+        bad.append(f"(b) 방 depth 범위 보정 실패: {room['depth']}")
+    colors = [a["color"] for a in scene["actors"]]
+    if len(set(c.lower() for c in colors)) != 2:
+        bad.append(f"(b) 인물 색 중복이 재배정되지 않았습니다: {colors}")
+    fov = scene["timeline"][0]["camera"]["fov"]
+    if not (pvschema.FOV_MIN <= fov <= pvschema.FOV_MAX):
+        bad.append(f"(b) fov 범위 보정 실패: {fov}")
+    # 방 밖 인물 좌표가 방 안으로 들어왔는지(|x|<=width/2, |z|<=depth/2).
+    half_w = room["width"] / 2.0
+    half_d = room["depth"] / 2.0
+    for ca in scene["timeline"][0]["actors"]:
+        x, _, z = ca["pos"]
+        if abs(x) > half_w or abs(z) > half_d:
+            bad.append(f"(b) 인물 좌표가 방 밖입니다: {ca['pos']} (방 {room['width']}x{room['depth']})")
+            break
+    # 시간 연속·합계: c1 seconds=4 → start 0, end 4.
+    if scene["timeline"][0]["start"] != 0 or scene["timeline"][0]["end"] != 4:
+        bad.append(f"(b) 시간 누적이 틀립니다: {scene['timeline'][0]['start']}~{scene['timeline'][0]['end']}")
+
+    # --- 가짜 설계 LLM(장소 1개=컷 3개 timeline, cutId 그대로) ---
+    design_calls: list[str] = []
+
+    def fake_design(blocks, *, model):
+        design_calls.append(model)
+        # 모델이 timeline 을 2개만 주고(c3 누락), 색도 하나만 준다 → 정리가 1:1·색 보정.
+        payload = {
+            "room": {"width": 6.0, "depth": 5.0, "height": 2.8, "walls": {"north": {"color": "#ccc"}}},
+            "light": {"kind": "sun", "from": [0, 2.8, -2.5], "to": [0, 0, 0], "labelKo": "북쪽 창문 햇빛"},
+            "props": [{"id": "p1", "labelKo": "책상", "shape": "box", "size": [1.5, 0.8, 0.8], "pos": [0, 0.4, 0]}],
+            "actors": [
+                {"id": "a1", "name": "교장", "color": "#e6194b", "heightM": 1.72},
+                {"id": "a2", "name": "학생", "color": "#e6194b", "heightM": 1.6},  # 중복색
+            ],
+            "timeline": [
+                {"cutId": "c1", "camera": {"pos": [0, 1.5, 4], "target": [0, 1, 0], "fov": 50},
+                 "actors": [{"id": "a1", "pos": [1, 0, 0], "pose": "sit", "speaking": True},
+                            {"id": "a2", "pos": [-1, 0, 1], "pose": "stand"}]},
+                {"cutId": "c2", "camera": {"pos": [2, 1.5, 3], "target": [0, 1, 0], "fov": 40},
+                 "actors": [{"id": "a1", "pos": [1, 0, 0], "pose": "sit"},
+                            {"id": "a2", "pos": [-1, 0, 1], "pose": "stand"}]},
+            ],
+            "notesKo": "교장실 대화",
+        }
+        return payload, {"model": model, "inputTokens": 10, "outputTokens": 20}
+
+    ledger_calls: list[dict] = []
+
+    def fake_charge_text(key, **kwargs):
+        ledger_calls.append({"key": key, **kwargs})
+        return {"spentUsd": 0.0, "capUsd": None}
+
+    def fake_analyze_conti(blocks, *, model):
+        # 교장실 컷 3개(c1,c2,c3) + 거리 컷 1개(c4) → 장소 2개.
+        cuts = [
+            {"id": "c1", "no": 1, "seconds": 4, "panels": [0], "shotKo": "", "cameraEn": "",
+             "locationEn": "A closed principal's office", "characters": [], "dialogueKo": "", "situationKo": "", "promptEn": "x"},
+            {"id": "c2", "no": 2, "seconds": 4, "panels": [1], "shotKo": "", "cameraEn": "",
+             "locationEn": "A closed principal's office", "characters": [], "dialogueKo": "", "situationKo": "", "promptEn": "x"},
+            {"id": "c3", "no": 3, "seconds": 4, "panels": [2], "shotKo": "", "cameraEn": "",
+             "locationEn": "A closed principal's office", "characters": [], "dialogueKo": "", "situationKo": "", "promptEn": "x"},
+            {"id": "c4", "no": 4, "seconds": 5, "panels": [3], "shotKo": "", "cameraEn": "",
+             "locationEn": "A city street at sunset", "characters": [], "dialogueKo": "", "situationKo": "", "promptEn": "x"},
+        ]
+        return {"cuts": cuts}, {"model": model, "inputTokens": 3, "outputTokens": 6}
+
+    orig = {
+        "pv_STORE": pvmod.STORE,
+        "plan_STORE": planmod.STORE,
+        "_design": pvmod._design,
+        "pv_charge_text": pvmod.vpoc_ledger.charge_text,
+        "plan_analyze_conti": planmod._analyze_conti,
+        "plan_charge_text": planmod.vpoc_ledger.charge_text,
+        "pv_Thread": pvmod.threading.Thread,
+    }
+    pvmod.STORE = fake_store
+    planmod.STORE = fake_store
+    pvmod._design = fake_design
+    pvmod.vpoc_ledger.charge_text = fake_charge_text
+    planmod._analyze_conti = fake_analyze_conti
+    planmod.vpoc_ledger.charge_text = fake_charge_text
+
+    started_threads: list = []
+    orig_thread = pvmod.threading.Thread
+
+    def _tracking_thread(*args, **kwargs):
+        t = orig_thread(*args, **kwargs)
+        started_threads.append(t)
+        return t
+
+    pvmod.threading.Thread = _tracking_thread
+
+    def _join():
+        for t in list(started_threads):
+            t.join(timeout=60)
+        started_threads.clear()
+
+    def _make_webm(seconds: float) -> bytes:
+        """imageio_ffmpeg 바이너리로 testsrc 를 libvpx(vp8)로 인코딩한 합성 webm 바이트.
+
+        ffmpeg 경로(_ffmpeg_bin)는 threading.Thread 를 바꿔 끼우기 전에 미리 구해 둔다 —
+        get_ffmpeg_exe 를 패치 중에 처음 부르면 imageio_ffmpeg 가 threading.Thread 를 상속하다
+        깨질 수 있다("function() argument 'code' must be code, not str").
+        """
+        import subprocess as _sub  # noqa: PLC0415
+        import tempfile as _tmp  # noqa: PLC0415
+        import os as _os  # noqa: PLC0415
+
+        if not _ffmpeg_bin:
+            raise RuntimeError("ffmpeg 바이너리를 찾지 못했습니다(imageio_ffmpeg)")
+        with _tmp.TemporaryDirectory(prefix="previz-webm-") as workdir:
+            out = _os.path.join(workdir, "rec.webm")
+            cmd = [
+                _ffmpeg_bin, "-y", "-hide_banner", "-loglevel", "error",
+                "-f", "lavfi", "-i", f"testsrc=size=640x360:rate=24:duration={seconds}",
+                "-c:v", "libvpx", "-b:v", "500k", "-an", out,
+            ]
+            result = _sub.run(cmd, stdout=_sub.PIPE, stderr=_sub.PIPE, timeout=120, check=False)
+            if result.returncode != 0 or not _os.path.exists(out) or not _os.path.getsize(out):
+                detail = result.stderr.decode("utf-8", errors="replace")[:200]
+                raise RuntimeError(f"합성 webm 인코딩 실패: {detail}")
+            with open(out, "rb") as handle:
+                return handle.read()
+
+    try:
+        import io as _io  # noqa: PLC0415
+
+        from PIL import Image as _Img  # noqa: PLC0415
+
+        owner = "tester"
+        pid = "prj_previz_1"
+
+        def _real_image(label: int) -> bytes:
+            buffer = _io.BytesIO()
+            _Img.new("RGB", (600, 900), (label % 255, 180, 160)).save(buffer, format="PNG")
+            return buffer.getvalue()
+
+        def make_client():
+            app = Flask(__name__)
+            bp = vnew.create_blueprint(
+                vnew.VnewDependencies(
+                    require_auth=lambda h: h,
+                    current_owner=lambda: owner,
+                    get_project=lambda p: {"id": p, "owner": owner, "track": "video_new"},
+                    can_read_project=lambda proj: True,
+                    can_write_project=lambda proj: True,
+                    project_owner_prefix=lambda name: name,
+                )
+            )
+            app.register_blueprint(bp)
+            return app.test_client()
+
+        client = make_client()
+        client.get(f"/api/vnew/p/{pid}/plan")
+
+        # 대본(장소 2개)·콘티를 심는다. 장소에 실사 텍스처 키를 넣어 (d) 를 확인한다.
+        planmod.update_script(
+            owner,
+            pid,
+            {
+                "setting": {"locationKo": "교장실", "locationEn": "A closed principal's office", "enclosed": True},
+                "entries": [
+                    {"id": "e1", "panels": [0, 1], "speaker": "", "lineKo": "", "situationKo": "",
+                     "locationKo": "교장실", "locationEn": "A closed principal's office",
+                     "characters": [{"name": "교장", "positionEn": "behind the desk"}]},
+                    {"id": "e2", "panels": [2], "speaker": "", "lineKo": "", "situationKo": "",
+                     "locationKo": "교장실", "locationEn": "A closed principal's office", "characters": []},
+                    {"id": "e3", "panels": [3], "speaker": "", "lineKo": "", "situationKo": "",
+                     "locationKo": "노을 진 거리", "locationEn": "A city street at sunset", "characters": []},
+                ],
+            },
+        )
+
+        def _set_ready_script(d):
+            d["script"]["status"] = "ready"
+
+        planmod.mutate_plan(owner, pid, _set_ready_script)
+
+        resp = client.post(f"/api/vnew/p/{pid}/conti")
+        if resp.status_code != 202:
+            bad.append(f"POST /conti 가 202 가 아닙니다: {resp.status_code}")
+        _join()
+
+        # (d) 장소에 실사 variant 텍스처 키를 심는다(공간 시트가 만들어졌다고 가정).
+        def _seed_textures(d):
+            from src.vnew import locations as _loc  # noqa: PLC0415
+
+            office = next((l for l in d.get("locations") or [] if "principal" in (l.get("key") or "")), None)
+            if office:
+                office["variants"]["real"] = {
+                    "status": "ready",
+                    "wallKeys": {s: f"users/{owner}/.../wall_{s}.jpg" for s in _loc.SIDES},
+                    "floorKey": f"users/{owner}/.../floor.jpg",
+                    "sheetKey": f"users/{owner}/.../sheet.jpg",
+                    "error": "",
+                }
+
+        planmod.mutate_plan(owner, pid, _seed_textures)
+
+        # --- (a) design 202 → scenes, 컷 1:1, 시간 합계 ---
+        resp = client.post(f"/api/vnew/p/{pid}/previz/design")
+        if resp.status_code != 202:
+            bad.append(f"(a) POST /previz/design 가 202 가 아닙니다: {resp.status_code} {resp.get_json()}")
+        _join()
+
+        if not design_calls:
+            bad.append("(a) 설계 LLM 이 불리지 않았습니다")
+        elif design_calls[0] != pvmod.ASTRA_MODEL:
+            bad.append(f"(a) 설계가 Astra 를 먼저 쓰지 않습니다: {design_calls[0]}")
+
+        view = client.get(f"/api/vnew/p/{pid}/plan").get_json() or {}
+        pv = view.get("previz") or {}
+        if pv.get("status") != "ready":
+            bad.append(f"(a) previz 상태가 ready 가 아닙니다: {pv.get('status')} / {pv.get('error')}")
+        scenes = pv.get("scenes") or []
+
+        # 콘티 컷(정리·fit 후)에서 기대 timeline 을 계산한다 — normalize 는 콘티 seconds 를 강제해야
+        # 하므로, 하드코딩이 아니라 콘티 seconds 를 그대로 따라야 한다.
+        conti = view.get("conti") or {}
+        conti_cuts = conti.get("cuts") or []
+        conti_total = sum(float(c.get("seconds") or 0) for c in conti_cuts)
+
+        # 장소(연속 컷)별 그룹 = scene. cutId→(locationEn, seconds).
+        def _groups(cuts):
+            groups = []
+            for c in cuts:
+                loc = str(c.get("locationEn") or "").strip()
+                if groups and groups[-1][0] == loc:
+                    groups[-1][1].append(c)
+                else:
+                    groups.append([loc, [c]])
+            return groups
+
+        groups = _groups(conti_cuts)
+
+        # (c) 장소가 바뀌면 scene 2개(교장실·거리).
+        if len(scenes) != len(groups):
+            bad.append(f"(c) scene 수가 콘티 장소 그룹과 다릅니다: scenes={len(scenes)} groups={len(groups)}")
+        if len(groups) != 2:
+            bad.append(f"(c) 장소가 바뀌었는데 콘티 그룹이 2개가 아닙니다: {len(groups)}")
+
+        office_scene = scenes[0] if scenes else {}
+
+        # (a) 컷 1:1: 교장실 scene 의 timeline cutId 가 그 그룹 컷과 1:1(모델이 c3 를 빼도 복사로 채움).
+        expect_office_ids = [str(c.get("id") or "") for c in (groups[0][1] if groups else [])]
+        cut_ids = [str(t.get("cutId") or "") for t in office_scene.get("timeline") or []]
+        if cut_ids != expect_office_ids:
+            bad.append(f"(a) 컷 1:1 이 아닙니다(빠진 컷 복사 포함): {cut_ids} vs 콘티 {expect_office_ids}")
+
+        # (a) 시간 합계 = 콘티 totalSeconds(= 모든 장면 합).
+        total = pv.get("totalSeconds")
+        if abs(float(total or 0) - float(conti_total)) > 0.01:
+            bad.append(f"(a) 시간 합계가 콘티 합({conti_total})과 다릅니다: {total}")
+
+        # (a) timeline 은 콘티 전체 기준 누적(장면이 바뀌어도 0 으로 안 돌아감). 각 컷 길이=콘티 seconds.
+        clock = 0.0
+        all_tl: list = []
+        for scene, (_loc, cuts) in zip(scenes, groups):
+            tl = scene.get("timeline") or []
+            if len(tl) != len(cuts):
+                bad.append(f"(a) scene 컷 수가 콘티 그룹과 다릅니다: {len(tl)} vs {len(cuts)}")
+                break
+            for t, c in zip(tl, cuts):
+                exp_start = round(clock, 3)
+                exp_end = round(clock + float(c.get("seconds") or 0), 3)
+                if abs(float(t.get("start") or 0) - exp_start) > 0.01 or abs(float(t.get("end") or 0) - exp_end) > 0.01:
+                    bad.append(
+                        f"(a) timeline 누적 시간이 콘티와 다릅니다 cut={t.get('cutId')}: "
+                        f"{(t.get('start'), t.get('end'))} 기대 {(exp_start, exp_end)}"
+                    )
+                clock = exp_end
+                all_tl.append((t.get("cutId"), t.get("start"), t.get("end")))
+        # 두 번째 장면(거리)이 0 에서 다시 시작하지 않고 교장실 끝에서 이어지는지 확인.
+        if len(scenes) >= 2:
+            street_tl = scenes[1].get("timeline") or []
+            office_tl = scenes[0].get("timeline") or []
+            if street_tl and office_tl:
+                office_end = float(office_tl[-1].get("end") or 0)
+                street_start = float(street_tl[0].get("start") or 0)
+                if abs(street_start - office_end) > 0.01:
+                    bad.append(f"(a) 장면이 바뀔 때 시간이 이어지지 않습니다(거리 start={street_start} vs 교장실 end={office_end})")
+                if street_start == 0.0 and office_end != 0.0:
+                    bad.append("(a) 두 번째 장면 timeline 이 0 으로 되돌아갔습니다(누적이어야 함)")
+
+        # (b) 색 중복 재배정(모델이 두 인물에 같은 색을 줬다).
+        acolors = [a.get("color") for a in office_scene.get("actors") or []]
+        if len(acolors) == 2 and acolors[0].lower() == acolors[1].lower():
+            bad.append(f"(b) 설계 결과 인물 색 중복이 재배정되지 않았습니다: {acolors}")
+
+        # (d) 텍스처 키 채움 + presigned URL.
+        room = office_scene.get("room") or {}
+        walls = room.get("walls") or {}
+        north = walls.get("north") or {}
+        if not north.get("textureKey"):
+            bad.append("(d) 벽 textureKey 가 채워지지 않았습니다")
+        if not north.get("textureUrl"):
+            bad.append("(d) 벽 textureUrl(presigned) 이 없습니다")
+        if not room.get("floorTextureKey"):
+            bad.append("(d) 바닥 floorTextureKey 가 채워지지 않았습니다")
+
+        # 원장: 장소 2개 → 설계 LLM 2회 → charge_text 최소 2건.
+        text_charges = [c for c in ledger_calls if "previz" in str(c.get("key") or "")]
+        if len(text_charges) < 2:
+            bad.append(f"(원장) 프리비즈 설계 원장이 2건 미만입니다: {len(text_charges)}")
+
+        # --- (e) PUT 정리·승인 해제 ---
+        # 먼저 승인(scenes 있음) → approved True.
+        resp = client.post(f"/api/vnew/p/{pid}/previz/approve")
+        pv2 = (resp.get_json() or {}).get("previz") or {}
+        if resp.status_code != 200 or not pv2.get("approved"):
+            bad.append(f"(e) 승인이 되지 않았습니다: {resp.status_code} approved={pv2.get('approved')}")
+
+        # PUT scene(사용자 수정) → 정리 통과(방 밖 좌표 보정) + 승인 해제.
+        edited = [dict(s) for s in scenes]
+        # 교장실 c1 의 인물을 방 밖으로 보낸다(정리가 방 안으로 되돌려야 한다).
+        edited[0] = dict(edited[0])
+        edited[0]["timeline"] = [dict(t) for t in edited[0]["timeline"]]
+        edited[0]["timeline"][0] = dict(edited[0]["timeline"][0])
+        edited[0]["timeline"][0]["actors"] = [{"id": "a1", "pos": [500, 0, 500], "pose": "stand"}]
+        resp = client.put(f"/api/vnew/p/{pid}/previz/scene", json={"scenes": edited})
+        pv3 = (resp.get_json() or {}).get("previz") or {}
+        if resp.status_code != 200:
+            bad.append(f"(e) PUT /previz/scene 가 200 이 아닙니다: {resp.status_code} {resp.get_json()}")
+        if pv3.get("approved"):
+            bad.append("(e) 장면을 고쳤는데 승인이 해제되지 않았습니다")
+        # 정리: 방 밖 좌표가 방 안으로.
+        put_scene = (pv3.get("scenes") or [{}])[0]
+        put_room = put_scene.get("room") or {}
+        pw = (put_room.get("width") or 6) / 2.0
+        pd = (put_room.get("depth") or 6) / 2.0
+        put_actors = ((put_scene.get("timeline") or [{}])[0]).get("actors") or []
+        if put_actors:
+            x, _, z = put_actors[0]["pos"]
+            if abs(x) > pw or abs(z) > pd:
+                bad.append(f"(e) PUT 정리가 방 밖 좌표를 보정하지 않았습니다: {put_actors[0]['pos']}")
+
+        # 승인 해제 훅: 콘티를 고치면 승인 해제. 먼저 다시 승인한 뒤 콘티 PUT.
+        client.post(f"/api/vnew/p/{pid}/previz/approve")
+        conti_view = client.get(f"/api/vnew/p/{pid}/plan").get_json() or {}
+        conti_cuts = (conti_view.get("conti") or {}).get("cuts") or []
+        if conti_cuts:
+            client.put(f"/api/vnew/p/{pid}/conti", json={"cuts": conti_cuts})
+            pv_after = (client.get(f"/api/vnew/p/{pid}/plan").get_json() or {}).get("previz") or {}
+            if pv_after.get("approved"):
+                bad.append("(e) 콘티를 고쳤는데 프리비즈 승인이 해제되지 않았습니다")
+
+        # --- (f)(g) 녹화 업로드 변환 · 길이 검사 · recordedAll ---
+        # 현재 segments 를 다시 설계해 맞춘다(콘티 PUT 으로 revision 이 바뀌었을 수 있다).
+        resp = client.post(f"/api/vnew/p/{pid}/previz/design")
+        _join()
+        plan_now = client.get(f"/api/vnew/p/{pid}/plan").get_json() or {}
+        segments = (plan_now.get("conti") or {}).get("segments") or []
+        if not segments:
+            bad.append("(f) 구간(segments) 이 없습니다")
+        else:
+            # (f) 길이 벗어남 → 400: 첫 구간 seconds 와 많이 다른 webm(예: 1초, 3초 하한 미만).
+            seg0 = segments[0]
+            seg0_id = seg0.get("id")
+            try:
+                short_webm = _make_webm(1.0)
+            except Exception as exc:  # noqa: BLE001
+                short_webm = b""
+                bad.append(f"(f) 합성 webm(1초) 생성 실패: {exc}")
+            if short_webm:
+                resp = client.post(
+                    f"/api/vnew/p/{pid}/previz/recordings/{seg0_id}",
+                    data=short_webm,
+                    content_type="video/webm",
+                )
+                if resp.status_code != 400 or (resp.get_json().get("error") or {}).get("type") != "BadDuration":
+                    bad.append(f"(f) 길이 벗어난 녹화가 400 BadDuration 으로 거절되지 않습니다: {resp.status_code} {resp.get_json()}")
+
+            # Content-Type 틀리면 400.
+            resp = client.post(
+                f"/api/vnew/p/{pid}/previz/recordings/{seg0_id}",
+                data=b"xx",
+                content_type="application/octet-stream",
+            )
+            if resp.status_code != 400 or (resp.get_json().get("error") or {}).get("type") != "BadContentType":
+                bad.append(f"(f) 잘못된 Content-Type 이 400 BadContentType 으로 거절되지 않습니다: {resp.status_code}")
+
+            # (f)(g) 모든 구간에 맞는 길이 webm 을 올려 변환·저장 → recordedAll.
+            all_ok = True
+            for seg in segments:
+                seg_id = seg.get("id")
+                seg_s = float(seg.get("seconds") or 0)
+                try:
+                    good_webm = _make_webm(seg_s)
+                except Exception as exc:  # noqa: BLE001
+                    bad.append(f"(f) 합성 webm({seg_s}초) 생성 실패: {exc}")
+                    all_ok = False
+                    break
+                resp = client.post(
+                    f"/api/vnew/p/{pid}/previz/recordings/{seg_id}",
+                    data=good_webm,
+                    content_type="video/webm",
+                )
+                if resp.status_code != 201:
+                    bad.append(f"(f) 올바른 녹화 업로드가 201 이 아닙니다(seg={seg_id}, {seg_s}초): {resp.status_code} {resp.get_json()}")
+                    all_ok = False
+                    break
+                rec = (resp.get_json() or {}).get("recording") or {}
+                if rec.get("status") != "ready" or not rec.get("url"):
+                    bad.append(f"(f) 녹화 변환 결과가 ready·url 이 아닙니다: {rec}")
+                    all_ok = False
+                    break
+                # 저장 키가 VIDEO_BUCKET .../vnew/previz/{rev}/{segId}.mp4 모양인지.
+                rec_key = str(rec.get("key") or "")
+                if "/vnew/previz/" not in rec_key or not rec_key.endswith(f"/{seg_id}.mp4"):
+                    bad.append(f"(f) 녹화 저장 키 경로가 예상과 다릅니다: {rec_key}")
+
+            if all_ok:
+                final = (client.get(f"/api/vnew/p/{pid}/plan").get_json() or {}).get("previz") or {}
+                if not final.get("recordedAll"):
+                    bad.append(f"(g) 모든 구간 녹화 후 recordedAll 이 True 가 아닙니다: {final.get('recordings')}")
+                recs = final.get("recordings") or {}
+                if any((r or {}).get("status") != "ready" for r in recs.values()):
+                    bad.append(f"(g) 일부 구간 녹화 상태가 ready 가 아닙니다: {recs}")
+
+    except Exception as exc:  # noqa: BLE001
+        import traceback as _tb  # noqa: PLC0415
+
+        bad.append("vnew 프리비즈 검사 중 예외: " + repr(exc) + "\n" + _tb.format_exc()[:1500])
+    finally:
+        pvmod.STORE = orig["pv_STORE"]
+        planmod.STORE = orig["plan_STORE"]
+        pvmod._design = orig["_design"]
+        pvmod.vpoc_ledger.charge_text = orig["pv_charge_text"]
+        planmod._analyze_conti = orig["plan_analyze_conti"]
+        planmod.vpoc_ledger.charge_text = orig["plan_charge_text"]
+        pvmod.threading.Thread = orig["pv_Thread"]
+
+    if bad:
+        fail("영상만들기_신규 프리비즈(vnew previz) 검사 실패\n" + "\n".join(f"  {item}" for item in bad))
+    else:
+        ok(
+            "영상만들기_신규 프리비즈(vnew previz) 검사 (a)design 202·컷 1:1·시간 합계 (b)좌표·색·fov 보정"
+            " (c)장소 2개 scene (d)텍스처 키·URL (e)PUT 정리·승인 해제 (f)녹화 변환·길이 400 (g)recordedAll"
+        )
+
+
 # ---------------------------------------------------------------- main
 
 
@@ -5215,6 +5864,7 @@ def main() -> int:
     check_vnew_plan()
     check_vnew_locations()
     check_vnew_generate()
+    check_vnew_previz()
     check_fal_pricing()
     check_vnew_real_start()
     check_anime_style()

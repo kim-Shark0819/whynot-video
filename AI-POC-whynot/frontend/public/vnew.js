@@ -1272,8 +1272,9 @@
     ["①", "웹툰 이미지"],
     ["②", "대본·상황"],
     ["③", "콘티"],
-    ["④", "영상"],
-    ["⑤", "사운드"]
+    ["④", "프리비즈(3D)"],
+    ["⑤", "영상"],
+    ["⑥", "사운드"]
   ];
   var PLAN_POLL_MS = 3000; // ②③ 진행 중 다시 불러오는 간격
   var GEN_POLL_FAST_MS = 3000; // ④ 이미지·제출 단계
@@ -1332,14 +1333,16 @@
   /* ---------------------------------------------------------------- 단계 막대 */
 
   /* 어느 단계까지 갈 수 있는가. ①②③은 콘티 ready 까지의 규칙을 따르고(기존),
-     ④는 gen 이 있으면, ⑤는 gen.selected 가 있으면 열린다(설계자 2026-10-20). */
+     ④ 프리비즈는 콘티가 ready 면, ⑤ 영상은 프리비즈 녹화가 모두 끝나면(previz.recordedAll),
+     ⑥ 사운드는 gen.selected 가 있으면 열린다(설계자 2026-10-21). */
   function maxReachableStep() {
     var plan = state.plan || {};
+    var conti = plan.conti || {};
+    var previz = plan.previz || {};
     var gen = plan.gen || {};
-    var hasGen = gen && gen.status && gen.status !== "none";
-    var hasSelected = !!gen.selected;
-    if (hasSelected) return 5;
-    if (hasGen) return 4;
+    if (gen.selected) return 6;
+    if (previz.recordedAll) return 5;
+    if (conti.status === "ready" && (conti.cuts || []).length) return 4;
     return 3;
   }
 
@@ -1417,9 +1420,15 @@
   function decidePlanStep() {
     var plan = state.plan || {};
     var task = plan.task || {};
+    var previz = plan.previz || {};
     var gen = plan.gen || {};
-    // 영상 생성이 진행 중(running)이면 ④를 보여 준다.
+    // 영상 생성이 진행 중(running)이면 ⑤를 보여 준다.
     if (gen.status === "running" || gen.status === "partial") {
+      state.planStep = 5;
+      return;
+    }
+    // 프리비즈 설계가 진행 중이면 ④를 보여 준다.
+    if (previz.status === "designing") {
       state.planStep = 4;
       return;
     }
@@ -1427,15 +1436,23 @@
       state.planStep = task.name === "conti" ? 3 : 2;
       return;
     }
-    // 사용자가 이미 단계를 골랐으면(1~5) 그대로 둔다(단, 갈 수 없는 단계면 되돌린다).
-    if (state.planStep >= 1 && state.planStep <= 5) {
+    // 사용자가 이미 단계를 골랐으면(1~6) 그대로 둔다(단, 갈 수 없는 단계면 되돌린다).
+    if (state.planStep >= 1 && state.planStep <= 6) {
       var maxStep = maxReachableStep();
       if (state.planStep > maxStep) state.planStep = maxStep;
       return;
     }
-    // 처음 열 때: gen 이 있으면 ④, 아니면 ①.
+    // 처음 열 때: gen.selected 면 ⑥, gen 이 있으면 ⑤, 프리비즈가 있으면 ④, 아니면 ①.
+    if (gen.selected) {
+      state.planStep = 6;
+      return;
+    }
     if (gen.status && gen.status !== "none") {
-      state.planStep = gen.selected ? 5 : 4;
+      state.planStep = 5;
+      return;
+    }
+    if (previz.status && previz.status !== "none") {
+      state.planStep = 4;
       return;
     }
     state.planStep = 1;
@@ -1447,10 +1464,12 @@
     stopPlanPolling();
     var plan = state.plan || {};
     var task = plan.task || {};
+    var previz = plan.previz || {};
     var gen = plan.gen || {};
     var genRunning = gen.status === "running";
+    var previzDesigning = previz.status === "designing";
     var locBuilding = locationsBuilding(plan);
-    if (task.status !== "running" && !genRunning && !locBuilding) return;
+    if (task.status !== "running" && !genRunning && !previzDesigning && !locBuilding) return;
     var interval = PLAN_POLL_MS;
     if (genRunning) {
       // 이미지(opening)·제출 단계면 더 자주(3초), 그 밖에는 5초.
@@ -1524,6 +1543,8 @@
     } else if (state.planStep === 3) {
       renderContiStep(body);
     } else if (state.planStep === 4) {
+      renderPrevizStep(body);
+    } else if (state.planStep === 5) {
       renderGenStep(body);
     } else {
       renderSoundStep(body);
@@ -2541,8 +2562,8 @@
     });
     footer.appendChild(saveBtn);
 
-    // 영상 만들기: 합계가 목표와 맞아야(콘티가 서버 초 맞춤을 거친 상태) 누를 수 있다.
-    var makeBtn = el("button", "primary-button", "영상 만들기");
+    // 프리비즈(3D)로: 합계가 목표와 맞아야(콘티가 서버 초 맞춤을 거친 상태) 다음으로 갈 수 있다.
+    var makeBtn = el("button", "primary-button", "프리비즈(3D) 만들기");
     makeBtn.type = "button";
     var lengthMismatch = totalSeconds !== sumSeconds;
     makeBtn.disabled = lengthMismatch;
@@ -2550,11 +2571,12 @@
       makeBtn.title = "먼저 길이를 맞춰 주세요";
     }
     makeBtn.addEventListener("click", function () {
-      openGenerateConfirm(showError);
+      state.planStep = 4;
+      renderPlan();
     });
     footer.appendChild(makeBtn);
     if (lengthMismatch) {
-      footer.appendChild(el("span", "vnew-hint", "합계를 목표에 맞춘 뒤 영상을 만들 수 있습니다."));
+      footer.appendChild(el("span", "vnew-hint", "합계를 목표에 맞춘 뒤 프리비즈로 넘어갈 수 있습니다."));
     }
     host.appendChild(footer);
   }
@@ -2833,7 +2855,7 @@
         .then(function (payload) {
           state.plan = payload.plan || state.plan;
           closeModal();
-          state.planStep = 4;
+          state.planStep = 5;
           loadPlan(false);
         })
         .catch(function (err) {
@@ -3038,7 +3060,616 @@
     renderPlan();
   }
 
-  /* ================================================================ ④ 영상 생성
+  /* ================================================================ ④ 프리비즈(3D)
+
+     서버 previz_view(previz.py) 모양을 쓴다: status·scenes(장면 JSON + 텍스처 URL)·segments·
+     recordings·recordedAll·approved·task. 설계 전이면 [3D 장면 설계하기](POST /previz/design),
+     설계 후이면 three.js 뷰포트(window.vnewPreviz)로 재생·탐색·장면 전환하고, 우측에서 현재 컷의
+     카메라·인물을 편집(PUT /previz/scene)한다. [승인하고 녹화]→approve→구간마다 record→
+     POST recordings. 녹화 중 탭 전환·창 최소화(document.visibilityState hidden)면 그 구간 실패 처리. */
+
+  // 프리비즈 뷰포트 컨트롤러(window.vnewPreviz.create 결과)와 녹화 상태를 화면 단위로 둔다.
+  var previzCtl = null; // 현재 화면의 controller
+  var previzCutIndex = 0; // 우측 패널이 보여 주는 timeline 컷 인덱스(평탄화)
+  var previzRecording = null; // 녹화 진행 상태 {total, done, failed:[], current, aborted}
+
+  function destroyPreviz() {
+    if (previzCtl) {
+      try {
+        previzCtl.destroy();
+      } catch (error) {
+        /* 무시 */
+      }
+      previzCtl = null;
+    }
+  }
+
+  var POSE_LABELS = [
+    ["stand", "서기"],
+    ["sit", "앉기"],
+    ["kneel", "무릎 꿇기"],
+    ["walk", "걷기"],
+    ["lie", "눕기"]
+  ];
+  var GESTURE_LABELS = [
+    ["", "없음"],
+    ["point", "가리키기"],
+    ["bow", "숙이기"],
+    ["hands_on_knees", "무릎에 손"],
+    ["cover_face", "얼굴 가리기"]
+  ];
+
+  /* 모든 장면 timeline 을 평탄화해 [{sceneIndex, cutIndex, cut, scene}] 로. 타임라인 눈금·패널에 쓴다. */
+  function flattenCuts(scenes) {
+    var flat = [];
+    (scenes || []).forEach(function (scene, si) {
+      (scene.timeline || []).forEach(function (cut, ci) {
+        flat.push({ sceneIndex: si, cutIndex: ci, cut: cut, scene: scene });
+      });
+    });
+    return flat;
+  }
+
+  function renderPrevizStep(host) {
+    var plan = state.plan || {};
+    var previz = plan.previz || {};
+    var error = planError("");
+    host.appendChild(error);
+    function showError(message) {
+      error.style.display = "";
+      error.textContent = message;
+    }
+
+    // 뷰포트를 다시 그리므로 이전 컨트롤러는 정리한다.
+    destroyPreviz();
+
+    var status = previz.status || "none";
+    var scenes = previz.scenes || [];
+
+    // --- 설계 전 / 진행 중 ---
+    if (status === "designing") {
+      host.appendChild(previzProgressBar("3D 장면을 설계하고 있습니다…", showError));
+      return;
+    }
+    if (status === "none" || !scenes.length) {
+      if (status === "failed") {
+        host.appendChild(planError(previz.error || "장면 설계에 실패했습니다."));
+      }
+      var intro = el("section", "panel vnew-previz-intro");
+      intro.appendChild(el("h2", "vnew-sec-title", "프리비즈(3D)"));
+      intro.appendChild(
+        el(
+          "p",
+          "vnew-hint",
+          "콘티를 바탕으로 간단한 3D 장면(방·빛·소품·마네킹)을 설계합니다. 이 마네킹 영상을 녹화해 " +
+            "다음 단계에서 실사·웹툰으로 바꿉니다. 배치·카메라·인원이 그대로 유지됩니다."
+        )
+      );
+      var designBtn = el("button", "primary-button", "3D 장면 설계하기");
+      designBtn.type = "button";
+      designBtn.addEventListener("click", function () {
+        designBtn.disabled = true;
+        api("/api/vnew/p/" + encodeURIComponent(state.projectId) + "/previz/design", { method: "POST" })
+          .then(function () {
+            loadPlan(false);
+          })
+          .catch(function (err) {
+            designBtn.disabled = false;
+            showError("장면 설계를 시작하지 못했습니다: " + errMessage(err));
+          });
+      });
+      intro.appendChild(designBtn);
+      host.appendChild(intro);
+      return;
+    }
+
+    // --- 설계 후: 뷰포트 + 타임라인 + 장면 탭 + 우측 편집 패널 ---
+    var layout = el("div", "vnew-previz-layout");
+
+    // (좌) 뷰포트·타임라인·장면 탭
+    var left = el("div", "vnew-previz-left");
+
+    // 장면(장소) 전환 탭
+    if (scenes.length > 1) {
+      var tabs = el("div", "vnew-previz-scene-tabs");
+      scenes.forEach(function (scene, si) {
+        var tab = el("button", "vnew-previz-scene-tab", "장면 " + (si + 1));
+        tab.type = "button";
+        tab.addEventListener("click", function () {
+          if (previzCtl) previzCtl.setScene(si);
+        });
+        tabs.appendChild(tab);
+      });
+      left.appendChild(tabs);
+    }
+
+    // 16:9 뷰포트
+    var viewport = el("div", "vnew-previz-viewport");
+    left.appendChild(viewport);
+
+    // 재생/일시정지 + 타임라인 바
+    var transport = el("div", "vnew-previz-transport");
+    var playBtn = el("button", "outline-button vnew-previz-play", "▶ 재생");
+    playBtn.type = "button";
+    transport.appendChild(playBtn);
+    var timeLabel = el("span", "vnew-previz-time", "0.0s");
+    transport.appendChild(timeLabel);
+    left.appendChild(transport);
+
+    // 타임라인(컷 경계 눈금·컷 번호·대사 말풍선)
+    var flat = flattenCuts(scenes);
+    var timeline = el("div", "vnew-previz-timeline");
+    left.appendChild(timeline);
+
+    layout.appendChild(left);
+
+    // (우) 편집 패널
+    var right = el("aside", "vnew-previz-panel");
+    layout.appendChild(right);
+
+    host.appendChild(layout);
+
+    // 승인·녹화 영역
+    var recSection = el("section", "panel vnew-previz-record");
+    host.appendChild(recSection);
+
+    // --- 컨트롤러 생성 ---
+    var textures = {}; // scene.room 안에 textureUrl 이 이미 들어 있어 별도 전달 불필요
+    try {
+      previzCtl = window.vnewPreviz.create(viewport, {
+        scenes: scenes,
+        textures: textures,
+        width: 1280,
+        height: 720
+      });
+    } catch (err) {
+      showError("3D 뷰어를 열지 못했습니다: " + errMessage(err));
+      return;
+    }
+
+    var duration = previzCtl.duration || 0;
+
+    // 타임라인 눈금: 컷마다 한 칸(길이 비례). 번호·대사 말풍선.
+    (function buildTimeline() {
+      timeline.style.position = "relative";
+      flat.forEach(function (item, idx) {
+        var cut = item.cut;
+        var start = Number(cut.start) || 0;
+        var end = Number(cut.end) || start;
+        var leftPct = duration > 0 ? (start / duration) * 100 : 0;
+        var widthPct = duration > 0 ? ((end - start) / duration) * 100 : 0;
+        var tick = el("button", "vnew-previz-tick");
+        tick.type = "button";
+        tick.style.left = leftPct.toFixed(2) + "%";
+        tick.style.width = Math.max(1, widthPct).toFixed(2) + "%";
+        tick.title = "컷 " + (idx + 1);
+        tick.appendChild(el("span", "vnew-previz-tick-no", String(idx + 1)));
+        // 대사 말풍선(이 컷의 cutId 로 콘티에서 찾는다)
+        var line = contiDialogueFor(cut.cutId);
+        if (line) {
+          var bubble = el("span", "vnew-previz-tick-line", line);
+          tick.appendChild(bubble);
+        }
+        tick.addEventListener("click", function () {
+          if (previzCtl) {
+            previzCtl.pause();
+            previzCtl.seek(start);
+          }
+          previzCutIndex = idx;
+          renderCutPanel();
+        });
+        timeline.appendChild(tick);
+      });
+      // 재생 위치 바늘
+      var playhead = el("div", "vnew-previz-playhead");
+      timeline.appendChild(playhead);
+      previzCtl.onTime(function (t) {
+        timeLabel.textContent = (Number(t) || 0).toFixed(1) + "s";
+        var pct = duration > 0 ? (t / duration) * 100 : 0;
+        playhead.style.left = pct.toFixed(2) + "%";
+        playBtn.textContent = previzCtl.isPlaying ? "⏸ 일시정지" : "▶ 재생";
+        // 현재 컷을 우측 패널과 맞춘다(재생 중 따라감).
+        var activeIdx = flat.findIndex(function (it) {
+          return t >= Number(it.cut.start) && t < Number(it.cut.end);
+        });
+        if (activeIdx >= 0 && activeIdx !== previzCutIndex && !isEditingPanel) {
+          previzCutIndex = activeIdx;
+          renderCutPanel();
+        }
+      });
+    })();
+
+    playBtn.addEventListener("click", function () {
+      if (!previzCtl) return;
+      if (previzCtl.isPlaying) {
+        previzCtl.pause();
+        playBtn.textContent = "▶ 재생";
+      } else {
+        previzCtl.play();
+        playBtn.textContent = "⏸ 일시정지";
+      }
+    });
+
+    // --- 우측 편집 패널: 현재 컷의 카메라·인물 ---
+    var isEditingPanel = false;
+
+    function renderCutPanel() {
+      clear(right);
+      var item = flat[previzCutIndex];
+      if (!item) {
+        right.appendChild(el("p", "vnew-hint", "컷을 고르세요."));
+        return;
+      }
+      var scene = item.scene;
+      var cut = item.cut;
+      right.appendChild(el("h3", "vnew-previz-panel-title", "컷 " + (previzCutIndex + 1) + " 편집"));
+
+      // 카메라
+      var camCard = el("div", "vnew-previz-edit-card");
+      camCard.appendChild(el("strong", "vnew-previz-edit-head", "카메라"));
+      var cam = cut.camera || (cut.camera = { pos: [0, 1.5, 4], target: [0, 1.2, 0], fov: 50 });
+      camCard.appendChild(vec3Field("위치 (x,y,z)", cam, "pos", scene, cut));
+      camCard.appendChild(vec3Field("바라보는 곳 (x,y,z)", cam, "target", scene, cut));
+      camCard.appendChild(numField("화각(fov)", cam, "fov", 20, 90, scene, cut));
+      right.appendChild(camCard);
+
+      // 인물 목록(색 칩·이름·pose·위치)
+      var actorsById = {};
+      (scene.actors || []).forEach(function (a) {
+        actorsById[a.id] = a;
+      });
+      (cut.actors || []).forEach(function (ca) {
+        var meta = actorsById[ca.id] || {};
+        var card = el("div", "vnew-previz-edit-card");
+        var headRow = el("div", "vnew-previz-actor-head");
+        var chip = el("i", "vnew-previz-dot");
+        chip.style.background = meta.color || "#ffffff";
+        headRow.appendChild(chip);
+        headRow.appendChild(el("strong", "vnew-previz-edit-head", meta.name || ca.id));
+        card.appendChild(headRow);
+        card.appendChild(selectField("자세", ca, "pose", POSE_LABELS, scene, cut));
+        card.appendChild(selectField("동작", ca, "gesture", GESTURE_LABELS, scene, cut));
+        card.appendChild(numField("방향(도)", ca, "facingDeg", -360, 360, scene, cut));
+        card.appendChild(vec3Field("위치 (x,y,z)", ca, "pos", scene, cut));
+        var speakWrap = el("label", "vnew-previz-check");
+        var speak = el("input");
+        speak.type = "checkbox";
+        speak.checked = !!ca.speaking;
+        speak.addEventListener("change", function () {
+          ca.speaking = speak.checked;
+          applyEdit(scene, cut);
+        });
+        speakWrap.appendChild(speak);
+        speakWrap.appendChild(el("span", null, "말하는 중(머리 끄덕임)"));
+        card.appendChild(speakWrap);
+        right.appendChild(card);
+      });
+
+      // 저장 버튼
+      var saveBtn = el("button", "primary-button vnew-previz-save", "저장");
+      saveBtn.type = "button";
+      saveBtn.addEventListener("click", function () {
+        saveBtn.disabled = true;
+        api("/api/vnew/p/" + encodeURIComponent(state.projectId) + "/previz/scene", {
+          method: "PUT",
+          body: JSON.stringify({ scenes: scenes })
+        })
+          .then(function (plan) {
+            state.plan = plan;
+            loadPlan(false);
+          })
+          .catch(function (err) {
+            saveBtn.disabled = false;
+            showError("저장하지 못했습니다: " + errMessage(err));
+          });
+      });
+      right.appendChild(saveBtn);
+    }
+
+    // 편집값을 즉시 뷰포트에 반영: 컨트롤러를 그 컷 시작 시각으로 다시 그린다.
+    function applyEdit(scene, cut) {
+      isEditingPanel = true;
+      if (previzCtl) {
+        previzCtl.pause();
+        previzCtl.seek(Number(cut.start) || 0);
+      }
+      window.setTimeout(function () {
+        isEditingPanel = false;
+      }, 50);
+    }
+
+    // 숫자 벡터 3칸 입력
+    function vec3Field(label, obj, key, scene, cut) {
+      var wrap = el("label", "vnew-field vnew-previz-vec");
+      wrap.appendChild(el("span", "vnew-field-label", label));
+      var row = el("div", "vnew-previz-vec-row");
+      var arr = Array.isArray(obj[key]) ? obj[key] : (obj[key] = [0, 0, 0]);
+      [0, 1, 2].forEach(function (i) {
+        var input = el("input", "vnew-field-input");
+        input.type = "number";
+        input.step = "0.1";
+        input.value = String(Number(arr[i]) || 0);
+        input.addEventListener("input", function () {
+          arr[i] = Number(input.value) || 0;
+          applyEdit(scene, cut);
+        });
+        row.appendChild(input);
+      });
+      wrap.appendChild(row);
+      return wrap;
+    }
+
+    function numField(label, obj, key, min, max, scene, cut) {
+      var wrap = el("label", "vnew-field");
+      wrap.appendChild(el("span", "vnew-field-label", label));
+      var input = el("input", "vnew-field-input");
+      input.type = "number";
+      if (min !== undefined) input.min = String(min);
+      if (max !== undefined) input.max = String(max);
+      input.value = String(Number(obj[key]) || 0);
+      input.addEventListener("input", function () {
+        obj[key] = Number(input.value) || 0;
+        applyEdit(scene, cut);
+      });
+      wrap.appendChild(input);
+      return wrap;
+    }
+
+    function selectField(label, obj, key, options, scene, cut) {
+      var wrap = el("label", "vnew-field");
+      wrap.appendChild(el("span", "vnew-field-label", label));
+      var sel = el("select", "vnew-field-input");
+      options.forEach(function (pair) {
+        var opt = el("option", null, pair[1]);
+        opt.value = pair[0];
+        if ((obj[key] || "") === pair[0]) opt.selected = true;
+        sel.appendChild(opt);
+      });
+      sel.addEventListener("change", function () {
+        obj[key] = sel.value || null;
+        applyEdit(scene, cut);
+      });
+      wrap.appendChild(sel);
+      return wrap;
+    }
+
+    renderCutPanel();
+
+    // --- 승인하고 녹화 ---
+    renderRecordSection(recSection, previz, showError);
+  }
+
+  /* 현재 콘티에서 cutId 의 대사(dialogueKo)를 찾는다(타임라인 말풍선용). */
+  function contiDialogueFor(cutId) {
+    var cuts = ((state.plan || {}).conti || {}).cuts || [];
+    for (var i = 0; i < cuts.length; i++) {
+      if (cuts[i].id === cutId) return cuts[i].dialogueKo || "";
+    }
+    return "";
+  }
+
+  /* 진행 띠 + [취소] (프리비즈 설계용). */
+  function previzProgressBar(label, showError) {
+    var wrap = el("div", "vnew-progress-wrap");
+    wrap.appendChild(el("p", "vnew-progress-label", label));
+    var track = el("div", "vnew-progress-track");
+    track.appendChild(el("div", "vnew-progress-fill"));
+    wrap.appendChild(track);
+    var cancel = el("button", "outline-button danger", "취소");
+    cancel.type = "button";
+    cancel.addEventListener("click", function () {
+      cancel.disabled = true;
+      api("/api/vnew/p/" + encodeURIComponent(state.projectId) + "/cancel", { method: "POST" })
+        .then(function () {
+          loadPlan(false);
+        })
+        .catch(function (err) {
+          cancel.disabled = false;
+          if (showError) showError("취소하지 못했습니다: " + errMessage(err));
+        });
+    });
+    wrap.appendChild(cancel);
+    return wrap;
+  }
+
+  /* [승인하고 녹화] → approve → conti.segments 마다 record(seg 시작~끝) → POST recordings/<segId>.
+     진행 표시 "구간 n/N 녹화 중… 화면을 닫지 마세요". 끝나면 각 구간 mp4 미리보기. 실패 구간 [다시 녹화]. */
+  function renderRecordSection(host, previz, showError) {
+    clear(host);
+    host.appendChild(el("h2", "vnew-sec-title", "승인하고 녹화"));
+
+    var segments = previz.segments || [];
+    var recordings = previz.recordings || {};
+
+    host.appendChild(
+      el(
+        "p",
+        "vnew-hint",
+        "장면을 확인했으면 승인하고 구간별로 영상을 녹화합니다. 녹화 중에는 이 화면을 닫거나 다른 탭으로 " +
+          "넘어가지 마세요 — 브라우저가 렌더를 멈춰 녹화가 실패할 수 있습니다."
+      )
+    );
+
+    // 진행 상태(녹화 중)
+    var progress = el("div", "vnew-previz-rec-progress");
+    host.appendChild(progress);
+
+    if (previzRecording && !previzRecording.aborted && previzRecording.done < previzRecording.total) {
+      progress.textContent =
+        "구간 " + (previzRecording.current + 1) + "/" + previzRecording.total + " 녹화 중… 화면을 닫지 마세요";
+    }
+
+    // 구간별 상태·미리보기
+    var list = el("div", "vnew-previz-rec-list");
+    segments.forEach(function (seg, idx) {
+      var row = el("div", "vnew-previz-rec-row");
+      row.appendChild(el("span", "vnew-previz-rec-no", "구간 " + (idx + 1)));
+      row.appendChild(el("span", "vnew-previz-rec-sec", (seg.seconds || 0) + "초"));
+      var rec = recordings[seg.id] || {};
+      if (rec.status === "ready" && rec.url) {
+        var video = el("video", "vnew-previz-rec-video");
+        video.src = rec.url;
+        video.controls = true;
+        video.setAttribute("playsinline", "");
+        row.appendChild(video);
+      } else {
+        row.appendChild(el("span", "vnew-previz-rec-state", "아직 녹화 전"));
+        var redo = el("button", "outline-button vnew-previz-rec-redo", "다시 녹화");
+        redo.type = "button";
+        redo.addEventListener("click", function () {
+          recordSegments([seg], showError);
+        });
+        row.appendChild(redo);
+      }
+      list.appendChild(row);
+    });
+    host.appendChild(list);
+
+    // 승인하고 녹화 버튼
+    var btn = el("button", "primary-button vnew-previz-approve", previz.approved ? "모두 녹화" : "승인하고 녹화");
+    btn.type = "button";
+    var busy = !!(previzRecording && !previzRecording.aborted && previzRecording.done < previzRecording.total);
+    btn.disabled = busy;
+    btn.addEventListener("click", function () {
+      btn.disabled = true;
+      // 먼저 승인(이미 승인돼 있어도 안전).
+      api("/api/vnew/p/" + encodeURIComponent(state.projectId) + "/previz/approve", { method: "POST" })
+        .then(function (plan) {
+          state.plan = plan;
+          var segs = (((state.plan || {}).previz || {}).segments) || segments;
+          return recordSegments(segs, showError);
+        })
+        .catch(function (err) {
+          btn.disabled = false;
+          showError("승인하지 못했습니다: " + errMessage(err));
+        });
+    });
+    host.appendChild(btn);
+
+    // 모두 녹화 완료 안내 + 다음 단계로
+    if (previz.recordedAll) {
+      var done = el("p", "vnew-previz-rec-done", "녹화 완료 — ⑤ 영상으로 넘어갈 수 있습니다.");
+      host.appendChild(done);
+      var next = el("button", "outline-button", "⑤ 영상으로");
+      next.type = "button";
+      next.addEventListener("click", function () {
+        state.planStep = 5;
+        renderPlan();
+      });
+      host.appendChild(next);
+    }
+  }
+
+  /* 구간들을 순서대로 실시간 녹화해 업로드한다. 녹화 중 탭 숨김이면 그 구간을 실패로 처리하고 멈춘다. */
+  function recordSegments(segments, showError) {
+    if (!previzCtl) {
+      if (showError) showError("3D 뷰어가 준비되지 않았습니다.");
+      return Promise.resolve();
+    }
+    if (!segments || !segments.length) return Promise.resolve();
+    previzRecording = { total: segments.length, done: 0, failed: [], current: 0, aborted: false };
+
+    var pid = state.projectId;
+
+    function visibilityAborted() {
+      return document.visibilityState === "hidden";
+    }
+
+    function recordOne(i) {
+      if (i >= segments.length) {
+        previzRecording.aborted = true; // 끝
+        loadPlan(false);
+        return Promise.resolve();
+      }
+      previzRecording.current = i;
+      refreshRecProgress();
+      var seg = segments[i];
+      var from = Number(seg.start) || 0;
+      var to = Number(seg.end) || from;
+      // seg.start/end 가 없으면 cutIds 로 구간 시각을 찾는다.
+      if (!(to > from)) {
+        var bounds = segmentBounds(seg);
+        from = bounds.from;
+        to = bounds.to;
+      }
+      if (visibilityAborted()) {
+        previzRecording.failed.push(seg.id);
+        previzRecording.aborted = true;
+        if (showError) showError("화면이 가려져 녹화를 멈췄습니다. 화면을 켠 뒤 [다시 녹화] 를 눌러 주세요.");
+        loadPlan(false);
+        return Promise.resolve();
+      }
+      return previzCtl
+        .record(from, to)
+        .then(function (blob) {
+          if (visibilityAborted()) {
+            throw new Error("녹화 중 화면이 가려졌습니다.");
+          }
+          return fetch("/api/vnew/p/" + encodeURIComponent(pid) + "/previz/recordings/" + encodeURIComponent(seg.id), {
+            method: "POST",
+            headers: { Authorization: "Bearer " + token(), "Content-Type": "video/webm" },
+            body: blob
+          });
+        })
+        .then(function (response) {
+          if (!response.ok) {
+            return response
+              .json()
+              .catch(function () {
+                return null;
+              })
+              .then(function (payload) {
+                var msg = (payload && payload.error && payload.error.message) || "녹화 업로드 실패";
+                throw new Error(msg);
+              });
+          }
+          previzRecording.done += 1;
+          refreshRecProgress();
+          return recordOne(i + 1);
+        })
+        .catch(function (err) {
+          previzRecording.failed.push(seg.id);
+          previzRecording.aborted = true;
+          if (showError) showError("구간 " + (i + 1) + " 녹화에 실패했습니다: " + errMessage(err));
+          loadPlan(false);
+        });
+    }
+
+    return recordOne(0);
+  }
+
+  /* segments 항목에 start/end 가 없으면 콘티 컷에서 cutIds 로 구간 시각을 구한다. */
+  function segmentBounds(seg) {
+    var previz = (state.plan || {}).previz || {};
+    var scenes = previz.scenes || [];
+    var cutIds = seg.cutIds || [];
+    var from = Infinity;
+    var to = 0;
+    scenes.forEach(function (scene) {
+      (scene.timeline || []).forEach(function (cut) {
+        if (cutIds.indexOf(cut.cutId) >= 0) {
+          from = Math.min(from, Number(cut.start) || 0);
+          to = Math.max(to, Number(cut.end) || 0);
+        }
+      });
+    });
+    if (!isFinite(from)) from = 0;
+    return { from: from, to: to };
+  }
+
+  /* 녹화 진행 문구만 갱신한다(전체 다시 그리지 않음). */
+  function refreshRecProgress() {
+    var node = planHost() && planHost().querySelector(".vnew-previz-rec-progress");
+    if (!node || !previzRecording) return;
+    if (previzRecording.aborted || previzRecording.done >= previzRecording.total) {
+      node.textContent = "";
+      return;
+    }
+    node.textContent =
+      "구간 " + (previzRecording.current + 1) + "/" + previzRecording.total + " 녹화 중… 화면을 닫지 마세요";
+  }
+
+  /* ================================================================ ⑤ 영상 생성
 
      서버 gen_view(generate.py) 모양을 그대로 쓴다: opening·segments[real/webtoon]·finalReal·
      finalWebtoon·selected·status. 진행 중이면 schedulePlanPoll 이 3~5초마다 다시 부른다. */
@@ -3079,11 +3710,26 @@
     }
 
     if (!gen.status || gen.status === "none") {
-      host.appendChild(el("p", "vnew-hint", "아직 영상 생성을 시작하지 않았습니다. ③ 콘티에서 [영상 만들기] 를 눌러 주세요."));
-      var backBtn = el("button", "outline-button", "← 콘티로");
+      var previz = plan.previz || {};
+      if (previz.recordedAll) {
+        host.appendChild(
+          el("p", "vnew-hint", "프리비즈 녹화가 끝났습니다. 이 녹화를 바탕으로 실사·웹툰 영상을 만듭니다.")
+        );
+        var startBtn = el("button", "primary-button", "영상 만들기");
+        startBtn.type = "button";
+        startBtn.addEventListener("click", function () {
+          openGenerateConfirm(showError);
+        });
+        host.appendChild(startBtn);
+      } else {
+        host.appendChild(
+          el("p", "vnew-hint", "아직 프리비즈 녹화가 끝나지 않았습니다. ④ 프리비즈(3D)에서 녹화를 마쳐 주세요.")
+        );
+      }
+      var backBtn = el("button", "outline-button", "← 프리비즈로");
       backBtn.type = "button";
       backBtn.addEventListener("click", function () {
-        state.planStep = 3;
+        state.planStep = 4;
         renderPlan();
       });
       host.appendChild(backBtn);
@@ -3171,7 +3817,7 @@
             })
               .then(function (payload) {
                 state.plan = payload.plan || state.plan;
-                state.planStep = 5;
+                state.planStep = 6;
                 loadPlan(false);
               })
               .catch(function (err) {
@@ -3304,11 +3950,11 @@
     host.appendChild(error);
 
     if (!gen.selected) {
-      host.appendChild(el("p", "vnew-hint", "먼저 ④ 영상에서 결과 하나를 골라 주세요."));
+      host.appendChild(el("p", "vnew-hint", "먼저 ⑤ 영상에서 결과 하나를 골라 주세요."));
       var goBtn = el("button", "outline-button", "← 영상으로");
       goBtn.type = "button";
       goBtn.addEventListener("click", function () {
-        state.planStep = 4;
+        state.planStep = 5;
         renderPlan();
       });
       host.appendChild(goBtn);
@@ -3346,7 +3992,7 @@
     var reselect = el("button", "outline-button", "다른 영상 고르기");
     reselect.type = "button";
     reselect.addEventListener("click", function () {
-      state.planStep = 4;
+      state.planStep = 5;
       renderPlan();
     });
     playerTools.appendChild(reselect);
@@ -3454,6 +4100,8 @@
         state.orderSaveTimer = 0;
       }
       revokeAllGlb();
+      destroyPreviz();
+      previzRecording = null;
       state.view = "list";
       state.charId = "";
       state.detail = null;
