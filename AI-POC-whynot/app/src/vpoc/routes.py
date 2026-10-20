@@ -26,6 +26,35 @@ log = logging.getLogger("vpoc")
 
 STEP_NAMES = {1: "입력", 2: "확인", 3: "계획 승인", 4: "영상"}
 
+# dual(실사+애니, 016 수정 2026-10-20): mutator 안에서는 외부 호출을 하지 않는다. queued anime 를
+# 보면 mutator 안에서는 "선점"(status=preparing, claim, claimedAt)만 하고, 그 선점을 아래 thread-local
+# 목록에 모은다. mutate_state 가 **저장에 성공한 뒤** 호출부가 _claims_take() 로 목록을 꺼내
+# _start_anime_jobs 로 실제 제출(다운로드·ffmpeg·fal.submit_edit)을 백그라운드에서 돌린다.
+# mutate_state 는 저장 경합이면 mutator 를 다시 실행하므로 refresh_shots 는 매 시도 시작에서
+# _claims_reset() 을 호출해 이전 시도의 선점 목록을 버린다 — 성공한 마지막 시도의 선점만 남는다.
+# preparing 이 15분 넘게 그대로면(파드 재시작 등) 선점이 버려진 것으로 보고 다시 queued 로 되돌린다.
+_ANIME_PREPARE_STALE_S = 15 * 60
+_anime_claims = threading.local()
+
+
+def _claims_reset() -> None:
+    _anime_claims.items = []
+
+
+def _claims_add(entry: dict) -> None:
+    items = getattr(_anime_claims, "items", None)
+    if items is None:
+        items = []
+        _anime_claims.items = items
+    items.append(entry)
+
+
+def _claims_take() -> list[dict]:
+    """모은 선점 목록을 꺼내고 비운다(두 번 돌리지 않게)."""
+    items = getattr(_anime_claims, "items", None) or []
+    _anime_claims.items = []
+    return list(items)
+
 
 @dataclass
 class VpocDependencies:
@@ -54,6 +83,61 @@ def _elapsed_s(started: str, finished: str = "") -> int:
         return 0
     end = _parse_iso(finished) or datetime.now(timezone.utc)
     return max(0, int((end - begin).total_seconds()))
+
+
+# ---------------------------------------------------------------- dual-style(실사+애니)
+#
+# 설계자 2026-10-20: 화풍을 고르지 않는다. 항상 실사 영상을 먼저 만들고 그 실사 영상을
+# 애니(웹툰풍)로 변환해 두 결과를 함께 본다. 아래 helper 가 "생성 경로의 화풍"을 한 곳에서 정한다.
+
+
+def _dual_enabled() -> bool:
+    """이 배포가 dual-style 을 켰는가(설계자 2026-10-20)."""
+    return bool(settings.VPOC_DUAL_STYLE_ENABLED)
+
+
+def _gen_style(story_style: str) -> str:
+    """생성 경로(③ 계획·그림, 영상 제출)에서 쓸 화풍.
+
+    dual 이 켜져 있으면 ② 저장값(story.style)이 무엇이든 항상 실사(live_action)다. 꺼져 있으면
+    기존대로 compose.style_of(story.style). 옛 계획(이미 ③/④ 가 있는 것)의 저장 데이터는
+    바꾸지 않는다 — 이 함수는 새로 만들 때(③ 그림·영상 제출 프롬프트)만 쓰인다.
+    """
+    if _dual_enabled():
+        return "live_action"
+    return compose.style_of(story_style or "live_action")
+
+
+def _anime_endpoint() -> str:
+    """실사 → 애니 변환 모델 endpoint_id(settings.VPOC_ANIME_MODEL)."""
+    return str(settings.VPOC_ANIME_MODEL or "").strip()
+
+
+def _anime_prompt(reference_count: int) -> str:
+    """fal video-to-video 변환 프롬프트(영어, 설계자 2026-10-20).
+
+    @Video1 을 2D 한국 웹툰/애니 그림체로 다시 그리되 인물·카메라·구도·타이밍·동작은 그대로.
+    참고 이미지가 있으면 "art style of @Image1..." 를 덧붙인다.
+    """
+    text = (
+        "Redraw @Video1 in a 2D Korean webtoon / anime art style: clean line art, cel shading, "
+        "flat soft colors. Keep every character, the camera movement, composition, timing and action "
+        "exactly the same as in @Video1 — only change the rendering style to 2D animation."
+    )
+    if reference_count > 0:
+        refs = ", ".join(f"@Image{index}" for index in range(1, reference_count + 1))
+        text += f" Match the art style of {refs}."
+    return text
+
+
+def _anime_output_prefix(shot_output_key: str) -> str:
+    """그 샷 실사 출력(outputKey) 옆 `anime/` 접두사. fal.poll 이 여기에 결과를 복사한다.
+
+    예) users/.../shots/g../s1-1/<id>/output.mp4 → users/.../shots/g../s1-1/<id>/anime
+    """
+    key = str(shot_output_key or "").rstrip("/")
+    base = key.rsplit("/", 1)[0] if "/" in key else key
+    return f"{base}/anime"
 
 
 def create_blueprint(deps: VpocDependencies) -> Blueprint:
@@ -341,7 +425,7 @@ def create_blueprint(deps: VpocDependencies) -> Blueprint:
             if key not in skip and len(entries) < MAX_REFERENCE_IMAGES:
                 entries.append((ark.PANEL_LABEL, key))
         if lock:
-            style = compose.STYLE[compose.style_of((steps["2"].get("story") or {}).get("style") or "")]
+            style = compose.STYLE[_gen_style((steps["2"].get("story") or {}).get("style") or "")]
             prompt = ark.strip_style(prompt, style)
         prompt = _drop_appearances(steps, prompt, user_ids)
         if brief:
@@ -374,7 +458,7 @@ def create_blueprint(deps: VpocDependencies) -> Blueprint:
         total = sum(seconds for seconds, _ in beats)
         if total > high:
             return None
-        style = compose.STYLE[compose.style_of((steps["2"].get("story") or {}).get("style") or "")]
+        style = compose.STYLE[_gen_style((steps["2"].get("story") or {}).get("style") or "")]
         characters: list[str] = []
         for shot in shots:
             for char_id in shot.get("characters") or []:
@@ -418,7 +502,7 @@ def create_blueprint(deps: VpocDependencies) -> Blueprint:
             beats.append((start, end, shot.get("promptEn") or ""))
         if not beats:
             return None
-        style = compose.STYLE[compose.style_of((steps["2"].get("story") or {}).get("style") or "")]
+        style = compose.STYLE[_gen_style((steps["2"].get("story") or {}).get("style") or "")]
         prompt = ark.single_take_prompt(
             [(start, end, ark.strip_style(text, style)) for start, end, text in beats], style
         )
@@ -436,6 +520,28 @@ def create_blueprint(deps: VpocDependencies) -> Blueprint:
             # 완성 키 장면(시간 순서). submit_shot 이 모델별 이미지 입력으로 고른다.
             "keyframes": [item.get("id") for item in keyframes],
             "keyframeTimes": [float(item.get("t") or 0) for item in keyframes],
+        }
+
+    def _anime_view(shot: dict) -> dict | None:
+        """④ 샷의 애니(변환) 보기(설계자 2026-10-20). 옛 회차(anime 없음)는 null.
+
+        {status, videoUrl(서명 URL), error, note}. status 는 queued/submitted/completed/failed/cancelled.
+        """
+        anime = shot.get("anime")
+        if not isinstance(anime, dict):
+            return None
+        key = anime.get("outputKey") or ""
+        url = None
+        if key:
+            try:
+                url = video.video_url(key)
+            except Exception as exc:  # noqa: BLE001
+                log.warning("vpoc.presign.anime.failed key=%s err=%s", key, exc)
+        return {
+            "status": anime.get("status") or "queued",
+            "videoUrl": url,
+            "error": anime.get("error"),
+            "note": anime.get("note"),
         }
 
     def _shot4_view(
@@ -471,6 +577,8 @@ def create_blueprint(deps: VpocDependencies) -> Blueprint:
             "revision": regen.revision_view(shot),
             "sentPromptEn": shot.get("sentPromptEn"),  # single: 승인한 마스터 프롬프트 그대로 보낸 문장(설계자 2026-10-19)
             "regen": regen.regen_view(shot),
+            # dual(실사+애니, 설계자 2026-10-20): 변환 결과. 옛 회차는 null.
+            "anime": _anime_view(shot),
         }
 
     def plan_view(state: dict, project: dict, *, can_edit: bool) -> dict:
@@ -528,8 +636,12 @@ def create_blueprint(deps: VpocDependencies) -> Blueprint:
             step3["singleMinS"] = int(options.get("minDurationS") or settings.DURATION_S)
             step3["singleMaxS"] = int(options.get("maxDurationS") or settings.DURATION_S)
         if step3.get("cost"):
+            # dual(실사+애니, 설계자 2026-10-20): 변환 비용 = 영상 초 × 단가. anime_usd 는 초에 선형이라
+            # 샷별 합 = 영상 1개(합계 초) 변환 비용과 같다. generate 의 confirmUsd 서버 계산과 같은 식이다.
+            dual = _dual_enabled()
             if single_mode:
                 single_usd = settings.shot_usd(model, resolution, single_total)
+                anime_usd = round(settings.anime_usd(single_total), 2) if dual else 0.0
                 step3["cost"] = {
                     **step3["cost"],
                     "model": model,
@@ -538,10 +650,16 @@ def create_blueprint(deps: VpocDependencies) -> Blueprint:
                     "priceKnown": not ark.is_ark(model)
                     or settings.ark_usd_per_sec(model, resolution) is not None,
                     "perShotUsd": single_usd,
-                    "totalUsd": round(single_usd, 2),
+                    "animeUsd": anime_usd,
+                    "totalUsd": round(single_usd + anime_usd, 2),
                 }
             else:
                 total = sum(row["usd"] for row in step3["shots"])
+                anime_usd = (
+                    round(sum(settings.anime_usd(row["durationS"]) for row in step3["shots"]), 2)
+                    if dual
+                    else 0.0
+                )
                 step3["cost"] = {
                     **step3["cost"],
                     "model": model,
@@ -550,7 +668,8 @@ def create_blueprint(deps: VpocDependencies) -> Blueprint:
                     "priceKnown": not ark.is_ark(model)
                     or settings.ark_usd_per_sec(model, resolution) is not None,
                     "perShotUsd": step3["shots"][0]["usd"] if step3["shots"] else 0,
-                    "totalUsd": round(total, 2),
+                    "animeUsd": anime_usd,
+                    "totalUsd": round(total + anime_usd, 2),
                 }
         if single_mode:
             # 영상 1개(설계자 2026-10-19): 마스터 프롬프트 1개 + 고정 인물 + 고정 배경.
@@ -596,6 +715,20 @@ def create_blueprint(deps: VpocDependencies) -> Blueprint:
         final.pop("key", None)
         step4["final"] = final
 
+        # dual(실사+애니, 설계자 2026-10-20): 애니 합본 보기. 옛 회차는 none/null.
+        final_anime = dict(
+            steps["4"].get("finalAnime") or {"status": "none", "url": None, "error": None}
+        )
+        if final_anime.get("status") == "ready" and final_anime.get("key"):
+            try:
+                final_anime["url"] = store.STORE.presign(
+                    final_anime["key"], content_type="video/mp4"
+                )
+            except Exception:  # noqa: BLE001
+                final_anime["url"] = None
+        final_anime.pop("key", None)
+        step4["finalAnime"] = final_anime
+
         task = dict(state.get("task") or {})
         return {
             "ok": True,
@@ -617,6 +750,8 @@ def create_blueprint(deps: VpocDependencies) -> Blueprint:
                 "id": task.get("id"),
             },
             "regenEnabled": regen.enabled(),
+            # dual(실사+애니, 설계자 2026-10-20): 켜져 있으면 프런트가 화풍 선택을 숨긴다.
+            "dualStyle": _dual_enabled(),
             # ② "몇 개의 샷으로 나눌까요?" 선택지(0 = 자동).
             "shotCountRange": [settings.MIN_SHOTS, settings.MAX_SHOTS],
             # ② 영상 모델 고르기(dev 만). 꺼져 있으면 화면에 목록이 없다.
@@ -823,7 +958,7 @@ def create_blueprint(deps: VpocDependencies) -> Blueprint:
             return False
         step2 = state["steps"]["2"]
         characters = step2.get("characters") or []
-        style = compose.style_of((step2.get("story") or {}).get("style") or "live_action")
+        style = _gen_style((step2.get("story") or {}).get("style") or "live_action")
         changed = False
         for index, shot in enumerate(step3.get("shots") or []):
             if not shot.get("reviewKo"):
@@ -904,7 +1039,7 @@ def create_blueprint(deps: VpocDependencies) -> Blueprint:
     def do_prepare(
         owner: str, pid: str, plan_id: str, user: str, step2: dict, *, step1: dict | None = None
     ) -> dict:
-        style = compose.style_of((step2.get("story") or {}).get("style") or "live_action")
+        style = _gen_style((step2.get("story") or {}).get("style") or "live_action")
         characters = step2.get("characters") or []
         story = step2.get("story") or {}
         user_images = dict(step2.get("userImages") or {})
@@ -1516,7 +1651,7 @@ def create_blueprint(deps: VpocDependencies) -> Blueprint:
         )
         if not character:
             raise VpocError("routes.redraw", "NotFound", "캐릭터를 찾을 수 없습니다.", 404)
-        style = compose.style_of((step2.get("story") or {}).get("style") or "live_action")
+        style = _gen_style((step2.get("story") or {}).get("style") or "live_action")
         if style == "webtoon":
             try:
                 made = _draw_from_webtoon(owner, pid, plan_id, user, state["steps"]["1"], character)
@@ -1679,7 +1814,7 @@ def create_blueprint(deps: VpocDependencies) -> Blueprint:
         """
         model = str(step2.get("videoModel") or "")
         total = _single_total(step2, model)
-        style_en = compose.STYLE[compose.style_of((step2.get("story") or {}).get("style") or "")]
+        style_en = compose.STYLE[_gen_style((step2.get("story") or {}).get("style") or "")]
         characters = step2.get("characters") or []
         story = step2.get("story") or {}
         story_text = " ".join(
@@ -2205,8 +2340,253 @@ def create_blueprint(deps: VpocDependencies) -> Blueprint:
             },
         )
 
+    # ---------------------------------------------------------------- 실사 → 애니 변환(dual)
+
+    def _anime_reference_b64(state: dict, owner: str, pid: str) -> list[str]:
+        """변환 참고 이미지(화풍) 최대 4장(data URI b64). 이 계획 ① 의 웹툰 장면 + 캐릭터 그림.
+
+        설계자 2026-10-20: ① sceneFiles(웹툰 장면 조각)와 ③ 캐릭터 이미지에서 최대 4장. 없으면 생략.
+        기존 이미지 로더(images.panel_jpeg·images.jpeg_for_reference·images.keyframe_base64)를 재사용한다.
+        읽기 실패는 조용히 건너뛴다.
+        """
+        steps = state["steps"]
+        out: list[str] = []
+        cache: dict = {}
+        # ① 웹툰 장면 조각(앞에서부터 고르게 2장 — 화풍 참고용).
+        panels = _story_panels(steps, owner, pid)
+        for file_id, index in _spread(panels, 2):
+            if len(out) >= 4:
+                break
+            try:
+                out.append(images.jpeg_for_reference(images.panel_jpeg(owner, pid, file_id, index, cache)))
+            except Exception as exc:  # noqa: BLE001
+                log.warning("vpoc.anime.panel_ref_failed file=%s err=%s", file_id, exc)
+        # ③ 캐릭터 그림(준비된 것만).
+        for item in steps["3"].get("characters") or []:
+            if len(out) >= 4:
+                break
+            image = item.get("image") or {}
+            key = image.get("key") if image.get("status") == "ready" else ""
+            if not key:
+                continue
+            try:
+                out.append(images.keyframe_base64(key))
+            except Exception as exc:  # noqa: BLE001
+                log.warning("vpoc.anime.char_ref_failed key=%s err=%s", key, exc)
+        return out[:4]
+
+    def _run_anime_job(owner: str, pid: str, plan_id: str, shot_id: str, claim: str, user: str) -> None:
+        """선점(preparing+claim)된 anime 하나를 **mutator 밖에서** 실제 제출한다(016 수정 2026-10-20).
+
+        mutate_state 가 저장에 성공한 뒤 _start_anime_jobs 가 스레드로 부른다. 가짜 경합으로 mutator 가
+        여러 번 돌아도 선점은 성공한 마지막 시도의 것 하나뿐이고, 그 선점에 대해서만 이 함수가 뜬다.
+        순서:
+          1) state 를 다시 읽어 그 샷의 anime.claim 이 내 claim 이고 status 가 preparing 일 때만 진행한다.
+             아니면(경합으로 버려진 선점·취소·재생성) 아무것도 하지 않는다.
+          2) 다운로드·ffmpeg·fal.submit_edit 를 여기(mutator 밖)서 한다.
+          3) 제출 성공 직후 원장을 1회 계상한다(키 = clientRequestToken — 중복 키는 원장이 한 번만 계상).
+          4) 결과 기록은 짧은 mutate_state 로: 다시 claim 확인 → submitted(작업 정보) 또는 failed.
+             claim 이 더는 내 것이 아니면(취소·재생성·stale) 결과를 버린다.
+        """
+        import os
+        import tempfile
+
+        from .. import stitcher
+
+        def _find_anime(state: dict) -> dict | None:
+            for shot in state["steps"]["4"].get("shots") or []:
+                if str(shot.get("id") or "") == shot_id:
+                    anime = shot.get("anime")
+                    return anime if isinstance(anime, dict) else None
+            return None
+
+        try:
+            state, _ = store.load_state(owner, pid, plan_id)
+        except Exception as exc:  # noqa: BLE001
+            log.warning("vpoc.anime.load_failed plan=%s shot=%s err=%s", plan_id, shot_id, exc)
+            return
+        anime0 = _find_anime(state)
+        if not anime0 or anime0.get("claim") != claim or anime0.get("status") != "preparing":
+            # 경합으로 버려진 선점(다른 claim 이 이겼거나 취소·재생성으로 사라짐) — 아무것도 하지 않는다.
+            return
+
+        source_key = str(anime0.get("sourceOutputKey") or "")
+        if not source_key:
+            # 선점 시 sourceOutputKey 를 함께 넣는다 — 없으면 실사 출력이 사라진 것.
+            shot0 = next(
+                (s for s in state["steps"]["4"].get("shots") or [] if str(s.get("id") or "") == shot_id),
+                {},
+            )
+            source_key = str(shot0.get("outputKey") or "")
+
+        def _fail(body: dict) -> None:
+            def mutator(inner: dict):
+                anime = _find_anime(inner)
+                if not anime or anime.get("claim") != claim or anime.get("status") != "preparing":
+                    return
+                anime["status"] = "failed"
+                anime["sourceOutputKey"] = source_key
+                anime["error"] = body
+                anime["note"] = None
+            try:
+                store.mutate_state(owner, pid, plan_id, mutator)
+            except Exception as exc:  # noqa: BLE001
+                log.warning("vpoc.anime.fail_save plan=%s shot=%s err=%s", plan_id, shot_id, exc)
+
+        if not source_key:
+            _fail({
+                "where": "routes.anime", "type": "NoSource",
+                "message": "변환할 실사 영상이 없습니다.", "requestId": "", "httpStatus": 409, "at": now_iso(),
+            })
+            return
+
+        try:
+            raw = store.STORE.get_bytes(source_key, bucket=settings.VIDEO_BUCKET)
+        except Exception as exc:  # noqa: BLE001
+            _fail(envelope("routes.anime", exc))
+            return
+
+        try:
+            with tempfile.TemporaryDirectory(prefix="vpoc-anime-") as workdir:
+                src = os.path.join(workdir, "src.mp4")
+                with open(src, "wb") as handle:
+                    handle.write(raw)
+                prepared_path = os.path.join(workdir, "prepared.mp4")
+                try:
+                    prepared = stitcher.prepare_for_anime(src, prepared_path, workdir)
+                except stitcher.AnimeTooShort:
+                    _fail({
+                        "where": "routes.anime", "type": "AnimeTooShort",
+                        "message": "3초보다 짧아 변환할 수 없습니다",
+                        "requestId": "", "httpStatus": 400, "at": now_iso(),
+                    })
+                    return
+                with open(prepared["path"], "rb") as handle:
+                    video_mp4 = handle.read()
+                seconds = float(prepared.get("seconds") or 0) or float(
+                    anime0.get("durationS") or settings.DURATION_S
+                )
+
+                references = _anime_reference_b64(state, owner, pid)
+                prompt = _anime_prompt(len(references))
+                output_prefix = _anime_output_prefix(source_key)
+                job = fal.submit_edit(
+                    endpoint=_anime_endpoint(),
+                    video_mp4=video_mp4,
+                    prompt=prompt,
+                    output_prefix=output_prefix,
+                    reference_jpegs_b64=references,
+                    keep_audio=True,
+                )
+        except VpocError as exc:
+            _fail(envelope("fal.submit_edit", exc))
+            return
+        except Exception as exc:  # noqa: BLE001
+            _fail(envelope("fal.submit_edit", exc))
+            return
+
+        # 제출 성공: 초 × 단가를 1회 계상(키 = 작업 토큰). 키가 clientRequestToken 이라 어떤 이유로든
+        # 같은 토큰이 두 번 와도 원장은 한 번만 계상한다.
+        ledger.charge(
+            job["clientRequestToken"],
+            kind="video",
+            model=settings.VPOC_ANIME_MODEL,
+            units=seconds,
+            usd=settings.anime_usd(seconds),
+            user=user,
+            project_id=pid,
+            plan_id=plan_id,
+        )
+
+        def record(inner: dict):
+            anime = _find_anime(inner)
+            if not anime or anime.get("claim") != claim or anime.get("status") != "preparing":
+                # 그 사이 취소·재생성·stale 로 선점이 사라졌다 — 결과를 버린다(원장은 그대로 둔다).
+                return
+            anime.update(
+                {
+                    "status": "submitted",
+                    "mode": "anime",
+                    "provider": job["provider"],
+                    "invocationArn": job["invocationArn"],
+                    "outputPrefix": job["outputPrefix"],
+                    "submittedAt": job["submittedAt"],
+                    "sourceOutputKey": source_key,
+                    "seconds": round(seconds, 2),
+                    "note": None,
+                    "error": None,
+                    "lastPolledAt": "",
+                    "outputKey": "",
+                }
+            )
+
+        try:
+            store.mutate_state(owner, pid, plan_id, record)
+        except Exception as exc:  # noqa: BLE001
+            log.warning("vpoc.anime.record_save plan=%s shot=%s err=%s", plan_id, shot_id, exc)
+
+    def _start_anime_jobs(claims: list[dict]) -> None:
+        """mutate_state 가 성공한 뒤 선점 목록을 백그라운드 스레드로 실제 제출한다(016 수정 2026-10-20).
+
+        mutator 안에서 스레드를 띄우면 재시도 때 두 번 뜨므로, 반드시 저장 성공 뒤에만 부른다.
+        """
+        for claim in claims or []:
+            threading.Thread(
+                target=_run_anime_job,
+                args=(
+                    claim["owner"],
+                    claim["pid"],
+                    claim["planId"],
+                    claim["shotId"],
+                    claim["claim"],
+                    claim["user"],
+                ),
+                name=f"vpoc-anime-{claim.get('shotId')}",
+                daemon=True,
+            ).start()
+
+    def _sync_anime_targets(state: dict) -> None:
+        """dual 회차에서 완료된 실사 샷마다 anime 를 queued 로 준비하고, 실사가 바뀌면 다시 queued.
+
+        - 실사 샷이 completed 이고 anime 가 없으면 anime = {status:"queued", sourceOutputKey}.
+        - 실사 outputKey 가 anime.sourceOutputKey 와 다르면(재생성·선택으로 바뀜) 옛 결과를 버리고
+          다시 queued. 실사가 completed 가 아니면 anime 를 두지 않는다(실사 실패면 anime 없음).
+        - preparing(선점)이 15분 넘게 그대로면(파드 재시작 등으로 제출 스레드가 사라진 것) 선점을
+          해제하고 다시 queued 로 되돌린다(016 수정 2026-10-20). claim 을 지워 옛 제출 스레드가
+          뒤늦게 깨어나도 claim 확인에서 버려지게 한다.
+        """
+        if not state["steps"]["4"].get("dual"):
+            return
+        for shot in state["steps"]["4"].get("shots") or []:
+            if shot.get("status") != "completed" or not shot.get("outputKey"):
+                # 실사가 완료가 아니면 anime 를 만들지 않는다(실패·취소면 버린다).
+                if shot.get("anime") and shot["anime"].get("status") in ("queued",):
+                    shot.pop("anime", None)
+                continue
+            anime = shot.get("anime")
+            source = str(shot.get("outputKey") or "")
+            if not isinstance(anime, dict):
+                shot["anime"] = {"status": "queued", "sourceOutputKey": source, "note": None, "error": None}
+                continue
+            # 선점(preparing)이 15분 넘게 그대로면 제출 스레드가 사라진 것 — 선점 해제 후 다시 queued.
+            if anime.get("status") == "preparing":
+                claimed = str(anime.get("claimedAt") or "")
+                if claimed and _elapsed_s(claimed) >= _ANIME_PREPARE_STALE_S:
+                    shot["anime"] = {"status": "queued", "sourceOutputKey": source, "note": None, "error": None}
+                    continue
+            # 실사가 바뀌면(재생성·선택) 옛 anime 를 버리고 다시 queued.
+            if anime.get("sourceOutputKey") and anime.get("sourceOutputKey") != source:
+                shot["anime"] = {"status": "queued", "sourceOutputKey": source, "note": None, "error": None}
+
     def refresh_shots(state: dict, owner: str, pid: str, plan_id: str, user: str) -> bool:
-        """진행 중 샷 상태를 갱신하고, 대기 샷을 제출한다. 바뀐 것이 있으면 True."""
+        """진행 중 샷 상태를 갱신하고, 대기 샷을 제출한다. 바뀐 것이 있으면 True.
+
+        016 수정 2026-10-20: queued anime 는 여기(mutator 안)서 **선점만** 한다(preparing+claim).
+        실제 제출(다운로드·ffmpeg·fal.submit_edit·원장)은 mutate_state 가 저장에 성공한 뒤 호출부가
+        _claims_take()·_start_anime_jobs 로 백그라운드에서 한다. 저장 경합으로 mutator 가 다시 돌면
+        이전 시도의 선점 목록은 버려야 하므로 매 호출 시작에서 _claims_reset() 한다.
+        """
+        _claims_reset()
         step4 = state["steps"]["4"]
         shots = step4.get("shots") or []
         if not shots:
@@ -2299,6 +2679,16 @@ def create_blueprint(deps: VpocDependencies) -> Blueprint:
             for target in regen.poll_targets(shot):
                 changed = poll_target(target, shot.get("id") or "") or changed
 
+        # dual(실사+애니, 설계자 2026-10-20): 실사가 끝난 샷마다 anime 를 준비(queued)하고,
+        # 제출된 anime 는 실사 샷과 같은 규칙(poll_target)으로 조회한다. 실사가 재생성·선택으로
+        # 바뀌면 _sync_anime_targets 가 anime 를 다시 queued 로 되돌린다(옛 결과는 버린다).
+        if step4.get("dual"):
+            _sync_anime_targets(state)
+            for shot in shots:
+                anime = shot.get("anime")
+                if isinstance(anime, dict) and anime.get("status") == "submitted":
+                    changed = poll_target(anime, (shot.get("id") or "") + ":anime") or changed
+
         # 동시 한도는 샷 본체와 재생성이 함께 쓴다.
         def all_targets() -> list[tuple[dict, dict]]:
             pairs: list[tuple[dict, dict]] = []
@@ -2345,11 +2735,51 @@ def create_blueprint(deps: VpocDependencies) -> Blueprint:
             if target.get("status") == "submitted":
                 inflight += 1
 
+        # dual: 준비된(queued) anime 를 **선점만** 한다(016 수정 2026-10-20). mutator 안에서는
+        # 외부 호출을 하지 않는다 — status=preparing, claim, claimedAt 로 바꾸고 선점 목록에 담는다.
+        # 저장 성공 뒤 호출부가 _start_anime_jobs 로 실제 제출(다운로드·ffmpeg·fal.submit_edit)을 한다.
+        # 변환 키가 없으면 선점하지 않고 즉시 실패로 둔다(실사는 막지 않는다 — 설계자 2026-10-20).
+        if step4.get("dual"):
+            for shot in shots:
+                anime = shot.get("anime")
+                if not (isinstance(anime, dict) and anime.get("status") == "queued"):
+                    continue
+                if not settings.FAL_KEY:
+                    anime["status"] = "failed"
+                    anime["error"] = {
+                        "where": "routes.anime", "type": "FalKeyMissing",
+                        "message": "변환 키 없음: 관리자에게 FAL_KEY 설정을 요청해 주세요.",
+                        "requestId": "", "httpStatus": 409, "at": now_iso(),
+                    }
+                    anime["sourceOutputKey"] = str(shot.get("outputKey") or "")
+                    anime["note"] = None
+                    changed = True
+                    continue
+                claim = secrets.token_hex(6)
+                anime["status"] = "preparing"
+                anime["claim"] = claim
+                anime["claimedAt"] = now_iso()
+                anime["sourceOutputKey"] = str(shot.get("outputKey") or "")
+                anime["note"] = None
+                anime["error"] = None
+                _claims_add(
+                    {
+                        "owner": owner,
+                        "pid": pid,
+                        "planId": plan_id,
+                        "shotId": str(shot.get("id") or ""),
+                        "claim": claim,
+                        "user": user,
+                    }
+                )
+                changed = True
+
         gen_id_now = str(step4.get("genId") or "")
         for shot in shots:
             changed = regen.sync_versions(shot, gen_id_now) or changed
 
         # ④ 전체 상태는 **샷 본체만** 본다. 재생성이 진행 중이어도 ④ 상태가 바뀌지 않는다(G2).
+        # anime(변환)는 실사 완료를 막지 않도록 ④ 상태·완료 판정에 넣지 않는다(설계자 2026-10-20).
         statuses = {shot.get("status") for shot in shots}
         if statuses & {"queued", "submitted"}:
             step4["status"] = "running"
@@ -2363,6 +2793,7 @@ def create_blueprint(deps: VpocDependencies) -> Blueprint:
             step4["status"] = "done"
 
         # 취소된 샷이 있으면 완료 처리를 하지 않는다 — 취소한 회차를 확정본으로 남기지 않는다.
+        # (완료 판정은 실사 기준이다 — anime 는 실사 완료 처리에 영향을 주지 않는다.)
         if not (statuses & {"queued", "submitted", "cancelled"}):
             changed = finish_plan(state, owner, pid, plan_id) or changed
         return changed
@@ -2747,6 +3178,7 @@ def create_blueprint(deps: VpocDependencies) -> Blueprint:
 
             try:
                 store.mutate_state(owner, pid, plan_id, single_mutator)
+                _start_anime_jobs(_claims_take())
             except Exception as exc:  # noqa: BLE001
                 log.warning("vpoc.single.save_failed plan=%s err=%s", plan_id, exc)
             return
@@ -2767,6 +3199,7 @@ def create_blueprint(deps: VpocDependencies) -> Blueprint:
 
             try:
                 store.mutate_state(owner, pid, plan_id, kf_mutator)
+                _start_anime_jobs(_claims_take())
             except Exception as exc:  # noqa: BLE001
                 log.warning("vpoc.keyframe.save_failed plan=%s err=%s", plan_id, exc)
             return
@@ -2855,6 +3288,7 @@ def create_blueprint(deps: VpocDependencies) -> Blueprint:
 
         try:
             store.mutate_state(owner, pid, plan_id, mutator)
+            _start_anime_jobs(_claims_take())
         except Exception as exc:  # noqa: BLE001
             log.warning("vpoc.brief.save_failed plan=%s err=%s", plan_id, exc)
 
@@ -2882,6 +3316,13 @@ def create_blueprint(deps: VpocDependencies) -> Blueprint:
                     step4 = state["steps"]["4"]
                     shots = step4.get("shots") or []
                     busy = [t for item in shots for t in regen.poll_targets(item) if t.get("status") in ("queued", "submitted")]
+                    # dual: 변환(anime)도 진행 중이면 드라이버가 계속 돈다(설계자 2026-10-20).
+                    # preparing(선점)도 진행 중으로 본다(016 수정 2026-10-20).
+                    if step4.get("dual"):
+                        for item in shots:
+                            anime = item.get("anime")
+                            if isinstance(anime, dict) and anime.get("status") in ("queued", "preparing", "submitted"):
+                                busy.append(anime)
                     if step4.get("status") != "running" and not busy:
                         return
                     recent = any(
@@ -2895,6 +3336,7 @@ def create_blueprint(deps: VpocDependencies) -> Blueprint:
                         store.mutate_state(
                             owner, pid, plan_id, lambda inner: refresh_shots(inner, owner, pid, plan_id, user)
                         )
+                        _start_anime_jobs(_claims_take())
                     except Exception as exc:  # noqa: BLE001
                         log.warning("vpoc.driver.refresh_failed plan=%s err=%s", plan_id, exc)
             except Exception as exc:  # noqa: BLE001
@@ -2910,6 +3352,7 @@ def create_blueprint(deps: VpocDependencies) -> Blueprint:
             store.mutate_state(
                 owner, pid, plan_id, lambda inner: refresh_shots(inner, owner, pid, plan_id, user)
             )
+            _start_anime_jobs(_claims_take())
         except Exception as exc:  # noqa: BLE001
             log.warning("vpoc.submit_queued.failed plan=%s err=%s", plan_id, exc)
 
@@ -2996,10 +3439,16 @@ def create_blueprint(deps: VpocDependencies) -> Blueprint:
         if changed:
             try:
                 store.save_state(owner, pid, plan_id, state, etag)
+                # 저장 성공 뒤에만 선점 제출을 띄운다(016 수정 2026-10-20). 경합(PreconditionFailed)이면
+                # 이 시도의 선점은 저장되지 않았으므로 버린다 — 다음 조회·드라이버가 다시 선점한다.
+                _start_anime_jobs(_claims_take())
             except VpocError as exc:
                 if exc.kind != "PreconditionFailed":
                     raise
+                _claims_take()  # 저장 실패 → 이 시도의 선점 목록은 버린다.
                 state, _ = store.load_state(owner, pid, plan_id)
+        else:
+            _claims_take()  # 바뀐 것이 없으면 선점도 없다(방어적으로 비운다).
         return jsonify(plan_view(state, project, can_edit=can_edit))
 
     @bp.post("/p/<pid>/uploads")
@@ -3391,7 +3840,13 @@ def create_blueprint(deps: VpocDependencies) -> Blueprint:
         for shot in shots:
             for target in regen.poll_targets(shot):
                 targets.append(target)
-        active = [t for t in targets if t.get("status") in ("queued", "submitted")]
+            # dual(실사+애니): 진행 중 anime(queued/preparing/submitted)도 취소 대상.
+            # preparing(선점)을 cancelled 로 바꾸면 제출 스레드가 claim 확인에서 status 가 preparing 이
+            # 아니므로 fal.submit_edit 를 하지 않는다(016 수정 2026-10-20).
+            anime = shot.get("anime")
+            if isinstance(anime, dict) and anime.get("status") in ("queued", "preparing", "submitted"):
+                targets.append(anime)
+        active = [t for t in targets if t.get("status") in ("queued", "preparing", "submitted")]
         if not active and step4.get("status") != "running":
             return False
 
@@ -3613,9 +4068,18 @@ def create_blueprint(deps: VpocDependencies) -> Blueprint:
                 else None
             )
             seconds_by_shot = {shot["id"]: _shot_seconds(video_model, shot) for shot in shots}
+            # dual(실사+애니, 설계자 2026-10-20): 변환 비용 = 만들 영상 초 합 × 단가. single·oneTake 는
+            # 영상 1개라 그 길이 1건, 샷별은 샷마다 1건. 화면 금액과 같은 함수로 계산해 CostMismatch 방지.
+            dual = _dual_enabled()
+            one_take_for_cost = None if single_master else _one_take(state["steps"], video_model)
             if single_master:
                 single_total = int(single_master.get("totalS") or _single_total(state["steps"]["2"], video_model))
                 expected = round(settings.shot_usd(video_model, video_resolution, single_total), 2)
+                anime_seconds = [single_total] if dual else []
+            elif one_take_for_cost:
+                take_total = int(one_take_for_cost.get("durationS") or 0)
+                expected = round(settings.shot_usd(video_model, video_resolution, take_total), 2)
+                anime_seconds = [take_total] if dual else []
             else:
                 expected = round(
                     sum(
@@ -3624,6 +4088,9 @@ def create_blueprint(deps: VpocDependencies) -> Blueprint:
                     ),
                     2,
                 )
+                anime_seconds = [seconds_by_shot[shot["id"]] for shot in shots] if dual else []
+            anime_expected = round(sum(settings.anime_usd(sec) for sec in anime_seconds), 2)
+            expected = round(expected + anime_expected, 2)
             confirm = body.get("confirmUsd")
             if confirm is None or abs(float(confirm) - expected) > 0.005:
                 raise VpocError(
@@ -3651,6 +4118,9 @@ def create_blueprint(deps: VpocDependencies) -> Blueprint:
                     "oneTake": bool(one_take) and not single_master,
                     # 영상 1개(single) 회차 표시. submit_shot 이 이 값으로 마스터 프롬프트 · 참고 이미지를 고른다.
                     "single": bool(single_master),
+                    # dual(실사+애니, 설계자 2026-10-20) 회차 표시. refresh_shots 가 실사 완료 샷마다
+                    # anime 변환을 준비·제출한다. 옛 회차에는 이 키가 없다(= 변환 없음).
+                    "dual": dual,
                     "shots": [
                         {
                             "id": shot["id"],
@@ -3734,10 +4204,12 @@ def create_blueprint(deps: VpocDependencies) -> Blueprint:
                 refresh_shots(inner, owner, pid, plan_id, user)
 
             state, _ = store.mutate_state(owner, pid, plan_id, mutator)
+            _start_anime_jobs(_claims_take())
             return jsonify(plan_view(state, project, can_edit=True))
 
         if action == "stitch":
-            return jsonify(stitch(owner, pid, plan_id))
+            variant = "anime" if str(body.get("variant") or "") == "anime" else "final"
+            return jsonify(stitch(owner, pid, plan_id, variant=variant))
 
         # --- vpoc-regen: "이 샷만 의견 반영해 다시 만들기" 액션 3개. 위 액션은 건드리지 않았다(G1). ---
 
@@ -3791,6 +4263,7 @@ def create_blueprint(deps: VpocDependencies) -> Blueprint:
                 )
 
             store.mutate_state(owner, pid, plan_id, mutator)
+            _start_anime_jobs(_claims_take())
             return jsonify({"ok": True, **box})
 
         if action == "select":
@@ -3830,40 +4303,67 @@ def create_blueprint(deps: VpocDependencies) -> Blueprint:
 
         raise VpocError("routes.run", "BadAction", f"알 수 없는 동작입니다: {action}", 400)
 
-    def stitch(owner: str, pid: str, plan_id: str) -> dict:
-        """샷을 하나로 이어 붙인다(P1). 실패하면 합본 없이 순차 재생으로 간다(E15)."""
+    def stitch(owner: str, pid: str, plan_id: str, *, variant: str = "final") -> dict:
+        """샷을 하나로 이어 붙인다(P1). 실패하면 합본 없이 순차 재생으로 간다(E15).
+
+        variant="final"(실사, 기본): 샷 본체 outputKey 를 이어 `final.mp4`·steps[4].final 에.
+        variant="anime"(실사+애니, 설계자 2026-10-20): 완료된 anime outputKey 를 이어
+        `final-anime.mp4`·steps[4].finalAnime 에. single(샷 1개)은 클립 1개라 그대로 복사된다.
+        """
         import os
         import tempfile
 
         from .. import stitcher
 
+        is_anime = variant == "anime"
         state, etag = store.load_state(owner, pid, plan_id)
-        done = [
-            shot
-            for shot in state["steps"]["4"].get("shots", [])
-            if shot.get("status") == "completed" and shot.get("outputKey")
-        ]
+        if is_anime:
+            done = [
+                shot
+                for shot in state["steps"]["4"].get("shots", [])
+                if (shot.get("anime") or {}).get("status") == "completed"
+                and (shot.get("anime") or {}).get("outputKey")
+            ]
+        else:
+            done = [
+                shot
+                for shot in state["steps"]["4"].get("shots", [])
+                if shot.get("status") == "completed" and shot.get("outputKey")
+            ]
         if not done:
-            raise VpocError("routes.stitch", "PreconditionFailed", "이어 붙일 샷이 없습니다.", 409)
+            raise VpocError(
+                "routes.stitch",
+                "PreconditionFailed",
+                "이어 붙일 애니 샷이 없습니다." if is_anime else "이어 붙일 샷이 없습니다.",
+                409,
+            )
 
         with tempfile.TemporaryDirectory(prefix="vpoc-stitch-") as workdir:
             paths = []
             for index, shot in enumerate(done, 1):
-                raw = store.STORE.get_bytes(shot["outputKey"], bucket=settings.VIDEO_BUCKET)
+                source_key = (shot.get("anime") or {}).get("outputKey") if is_anime else shot["outputKey"]
+                raw = store.STORE.get_bytes(source_key, bucket=settings.VIDEO_BUCKET)
                 path = os.path.join(workdir, f"{index:02d}.mp4")
                 with open(path, "wb") as handle:
                     handle.write(raw)
                 paths.append(path)
-            output = os.path.join(workdir, "final.mp4")
+            output = os.path.join(workdir, "final-anime.mp4" if is_anime else "final.mp4")
             stitcher.concat(paths, output)
             with open(output, "rb") as handle:
                 body = handle.read()
 
-        key = store.final_mp4_key(owner, pid, plan_id)
+        if is_anime:
+            # final.mp4 옆 final-anime.mp4 (store 에 전용 키 함수를 더하지 않고 접두사 재사용).
+            key = store.plan_prefix(owner, pid, plan_id) + "/final-anime.mp4"
+        else:
+            key = store.final_mp4_key(owner, pid, plan_id)
         store.STORE.put_bytes(key, body, "video/mp4")
 
         def mutator(inner: dict):
-            inner["steps"]["4"]["final"] = {"status": "ready", "key": key, "error": None}
+            if is_anime:
+                inner["steps"]["4"]["finalAnime"] = {"status": "ready", "key": key, "error": None}
+            else:
+                inner["steps"]["4"]["final"] = {"status": "ready", "key": key, "error": None}
 
         store.mutate_state(owner, pid, plan_id, mutator)
         return {"ok": True, "url": store.STORE.presign(key, content_type="video/mp4")}

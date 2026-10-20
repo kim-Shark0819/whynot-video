@@ -1178,3 +1178,67 @@
   font-weight: 600;
   color: var(--text, #1b1d21);
 }
+
+
+
+/* --- vpoc-dual: ④ 실사+애니 두 결과를 한 화면에 (설계자 2026-10-20) --- */
+/* 결과 두 열(왼쪽 실사 · 오른쪽 애니). 좁은 화면(≤768px)에서는 위아래로 바뀐다. */
+.vpoc-dual-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 16px;
+  margin: 10px 0;
+}
+
+.vpoc-dual-col {
+  display: grid;
+  gap: 8px;
+  align-content: start;
+  padding: 12px;
+  border: 1px solid var(--line, #e5e7eb);
+  border-radius: 11px;
+  background: #fcfcfd;
+  min-width: 0;
+}
+
+.vpoc-dual-col-title {
+  margin: 0;
+  font-size: 14px;
+  font-weight: 700;
+}
+
+.vpoc-dual-col .vpoc-video {
+  max-width: 100%;
+}
+
+/* 샷 목록에서 샷마다 실사/애니 작은 플레이어(또는 상태 배지)를 나란히. */
+.vpoc-dual-shot {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px;
+  margin: 2px 0;
+}
+
+.vpoc-dual-cell {
+  display: grid;
+  gap: 5px;
+  align-content: start;
+  min-width: 0;
+}
+
+.vpoc-dual-cell-label {
+  color: var(--text-muted, #6b7280);
+  font-size: 12.5px;
+  font-weight: 600;
+}
+
+.vpoc-dual-cell .vpoc-video {
+  max-width: 100%;
+}
+
+@media (max-width: 768px) {
+  .vpoc-dual-grid,
+  .vpoc-dual-shot {
+    grid-template-columns: 1fr;
+  }
+}

@@ -766,6 +766,79 @@ def submit(
     }
 
 
+def _video_data_uri(mp4: bytes) -> str:
+    """mp4 바이트 → data URI. 우리 파일을 외부 저장소에 올리지 않는다(설계자 2026-10-20).
+
+    fal video-to-video 는 data:video/mp4;base64,... 를 받는다(실측: 1.2MB 성공).
+    """
+    import base64
+
+    return "data:video/mp4;base64," + base64.b64encode(mp4).decode("ascii")
+
+
+def submit_edit(
+    *,
+    endpoint: str,
+    video_mp4: bytes,
+    prompt: str,
+    output_prefix: str,
+    reference_jpegs_b64: list[str] | None = None,
+    keep_audio: bool = True,
+) -> dict:
+    """실사 영상 → 애니(웹툰풍) 변환을 fal 큐에 넣고 즉시 돌아온다(설계자 2026-10-20).
+
+    등록 모델(registry)이 아니라 settings.VPOC_ANIME_MODEL 로 고정된 video-to-video edit
+    endpoint 를 직접 부른다. submit/poll/_request/_queue_app/is_fal_job 과 같은 경로·반환 모양을
+    쓴다(ARN 접두사 fal/requests/ 동일 → routes·ark 가 같은 조회·취소 경로를 탄다).
+
+    - prompt 는 영상 @Video1, 참고 이미지 @Image1.. 로 지칭하는 영어 문장이어야 한다.
+    - video_url: 우리 mp4 를 data URI 로 보낸다(외부 저장소에 올리지 않는다). 3~15초·높이 ≥720 은
+      호출부(routes)가 stitcher 로 맞춰서 넘긴다.
+    - image_urls: 화풍 참고 이미지(웹툰 장면·캐릭터) data URI 최대 4장. 없으면 생략.
+    - keep_audio: 원본 소리 유지.
+    returns: submit 과 같은 키(provider·invocationArn·clientRequestToken·outputPrefix·submittedAt·promptChars).
+    """
+    if not settings.FAL_KEY:
+        raise VpocError("fal.submit_edit", "FalKeyMissing", "fal API 키가 설정되지 않았습니다.", 409)
+    endpoint = str(endpoint or "").strip()
+    if not endpoint:
+        raise VpocError("fal.submit_edit", "BadEndpoint", "변환 모델 endpoint 가 비어 있습니다.", 400)
+    if not prompt.strip():
+        raise VpocError("fal.submit_edit", "EmptyPrompt", "프롬프트가 비어 있습니다.", 400)
+    if not video_mp4:
+        raise VpocError("fal.submit_edit", "EmptyVideo", "변환할 영상이 비어 있습니다.", 400)
+
+    body: dict = {
+        "prompt": prompt,
+        "video_url": _video_data_uri(video_mp4),
+        "keep_audio": bool(keep_audio),
+    }
+    references = list(reference_jpegs_b64 or [])
+    if references:
+        body["image_urls"] = [_data_uri(b64) for b64 in references]
+
+    started = time.time()
+    result = _request("POST", f"{settings.FAL_QUEUE_URL}/{endpoint}", body, where="fal.submit_edit")
+    request_id = str(result.get("request_id") or "")
+    log.info(
+        "vpoc.call where=fal.submit_edit endpoint=%s ms=%d ok=%s",
+        endpoint,
+        int((time.time() - started) * 1000),
+        bool(request_id),
+    )
+    if not request_id:
+        raise VpocError("fal.submit_edit", "NoRequestId", f"요청 ID 가 없습니다: {str(result)[:300]}", 502)
+
+    return {
+        "provider": settings.FAL_ID_PREFIX + endpoint,
+        "invocationArn": f"{ARN_PREFIX}{endpoint}/{request_id}",
+        "clientRequestToken": "fal-anime-" + request_id,
+        "outputPrefix": output_prefix,
+        "submittedAt": now_iso(),
+        "promptChars": len(prompt),
+    }
+
+
 def _parse_arn(invocation_arn: str) -> tuple[str, str]:
     """"fal/requests/<endpoint_id>/<request_id>" → (endpoint_id, request_id).
 

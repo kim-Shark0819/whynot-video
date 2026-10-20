@@ -93,8 +93,12 @@
     var model = (plan.videoModels || []).filter(function (item) {
       return item.id === cost.model;
     })[0];
-    if (plan.modelPicker && model) return model.label + " · " + text;
-    return text + " · " + (cost.resolution || "540p");
+    if (plan.modelPicker && model) text = model.label + " · " + text;
+    else text = text + " · " + (cost.resolution || "540p");
+    // dual(실사+애니): 애니 변환이 금액에 포함됨을 알린다. 금액은 화면에 보이지 않는다
+    // (설계자 2026-10-07) — 확인창 금액은 서버가 준 totalUsd(애니 포함) 그대로 쓴다.
+    if (cost.animeUsd) text += " · 애니 변환 포함";
+    return text;
   }
 
   function easyCamera(shot) {
@@ -562,27 +566,34 @@
       section.appendChild(el("p", "vpoc-hint", "장르: " + story.genre.join(", ")));
     }
 
-    /* 화풍 */
-    var styleBlock = el("div", "vpoc-field");
-    styleBlock.appendChild(el("label", null, "화풍"));
-    var styleRow = el("div", "vpoc-radios");
-    [["live_action", "실사"], ["anime", "애니"], ["webtoon", "웹툰 원작 그대로 (올린 웹툰 속 인물·화풍)"]].forEach(function (pair) {
-      var label = el("label", "vpoc-radio");
-      var radio = el("input");
-      radio.type = "radio";
-      radio.name = "vpoc-style";
-      radio.value = pair[0];
-      radio.checked = (story.style || story.styleSuggestion || "live_action") === pair[0];
-      radio.disabled = !editable;
-      radio.addEventListener("change", function () {
-        if (radio.checked) edits.story.style = pair[0];
+    /* 화풍 — dual(실사+애니) 회차에서는 화풍을 고르지 않는다(서버가 둘 다 만든다). */
+    if (plan.dualStyle) {
+      // 라디오 대신 한 줄 안내만 보인다. style payload 는 건드리지 않는다(서버가 무시).
+      section.appendChild(
+        el("p", "vpoc-hint", "실사 영상과 애니(웹툰풍) 영상을 함께 만듭니다.")
+      );
+    } else {
+      var styleBlock = el("div", "vpoc-field");
+      styleBlock.appendChild(el("label", null, "화풍"));
+      var styleRow = el("div", "vpoc-radios");
+      [["live_action", "실사"], ["anime", "애니"], ["webtoon", "웹툰 원작 그대로 (올린 웹툰 속 인물·화풍)"]].forEach(function (pair) {
+        var label = el("label", "vpoc-radio");
+        var radio = el("input");
+        radio.type = "radio";
+        radio.name = "vpoc-style";
+        radio.value = pair[0];
+        radio.checked = (story.style || story.styleSuggestion || "live_action") === pair[0];
+        radio.disabled = !editable;
+        radio.addEventListener("change", function () {
+          if (radio.checked) edits.story.style = pair[0];
+        });
+        label.appendChild(radio);
+        label.appendChild(el("span", null, pair[1]));
+        styleRow.appendChild(label);
       });
-      label.appendChild(radio);
-      label.appendChild(el("span", null, pair[1]));
-      styleRow.appendChild(label);
-    });
-    styleBlock.appendChild(styleRow);
-    section.appendChild(styleBlock);
+      styleBlock.appendChild(styleRow);
+      section.appendChild(styleBlock);
+    }
 
     /* 영상 모델 (dev 만 — 서버가 modelPicker 를 켜 둔 배포에서만 보인다) */
     if (plan.modelPicker && (plan.videoModels || []).length) {
@@ -1986,7 +1997,8 @@
     var shotRunning = (step.shots || []).some(function (shot) {
       return shot.status === "queued" || shot.status === "submitted";
     });
-    var generating = step.status === "running" || shotRunning || vpocRegenBusy(plan);
+    // dual: 애니 변환이 도는 동안에도 [생성 취소] 가 보이게 한다.
+    var generating = step.status === "running" || shotRunning || vpocRegenBusy(plan) || vpocAnimeBusy(step);
     if (plan.canEdit && generating) {
       var cancelBand = el("div", "vpoc-cancel-band");
       cancelBand.appendChild(el("span", null, "영상을 만들고 있습니다."));
@@ -2012,8 +2024,13 @@
     var done = (step.shots || []).filter(function (shot) {
       return shot.status === "completed" && shot.videoUrl;
     });
+    // dual(실사+애니): 샷에 anime 가 있거나 finalAnime 이 있으면 두 열(실사·애니)로 보인다.
+    // single(영상 1개) 회차도 dual 이면 두 열로 본다(설계자 017 — 기존 영상 기능 전체가 두 결과).
+    var isDual = vpocIsDual(step);
 
-    if ((step.final || {}).url) {
+    if (isDual) {
+      renderStep4Dual(section, plan, step, done, singleMode);
+    } else if ((step.final || {}).url) {
       // single 은 영상이 곧 최종본이다("합본"이 아니라 "최종 영상").
       section.appendChild(el("h3", null, singleMode ? "최종 영상" : "합본"));
       section.appendChild(videoTag((step.final || {}).url, false, "final"));
@@ -2084,7 +2101,40 @@
       if (shot.note) body.appendChild(el("p", "vpoc-hint", shot.note));
       if (shot.mode === "keyframe") body.appendChild(el("span", "vpoc-badge", "키프레임"));
 
-      if (shot.status === "completed" && shot.videoUrl) {
+      if (isDual) {
+        // dual: 샷(또는 single 의 take)마다 실사/애니 작은 플레이어(또는 상태 배지)를 나란히 둔다.
+        var pair = el("div", "vpoc-dual-shot");
+
+        var liveCell = el("div", "vpoc-dual-cell");
+        liveCell.appendChild(el("span", "vpoc-dual-cell-label", "실사"));
+        if (shot.status === "completed" && shot.videoUrl) {
+          liveCell.appendChild(videoTag(shot.videoUrl, true, "shot-live-" + shot.id));
+        } else {
+          var liveBadge = el("span", "vpoc-status vpoc-status-" + shot.status);
+          liveBadge.textContent = {
+            queued: "대기", submitted: "생성 중", completed: "완료", failed: "실패", cancelled: "취소됨"
+          }[shot.status] || shot.status;
+          liveCell.appendChild(liveBadge);
+        }
+        pair.appendChild(liveCell);
+
+        var animeCell = el("div", "vpoc-dual-cell");
+        animeCell.appendChild(el("span", "vpoc-dual-cell-label", "애니(웹툰풍)"));
+        var anime = shot.anime || {};
+        if (anime.status === "completed" && anime.videoUrl) {
+          animeCell.appendChild(videoTag(anime.videoUrl, true, "shot-anime-" + shot.id));
+        } else if (anime.status === "failed" && anime.error) {
+          animeCell.appendChild(errorBox(anime.error, null));
+        } else {
+          var animeBadge = el("span", "vpoc-status vpoc-status-" + (anime.status || "queued"));
+          animeBadge.textContent = vpocAnimeStatusText(anime.status);
+          animeCell.appendChild(animeBadge);
+          if (anime.note) animeCell.appendChild(el("p", "vpoc-hint", anime.note));
+        }
+        pair.appendChild(animeCell);
+
+        body.appendChild(pair);
+      } else if (shot.status === "completed" && shot.videoUrl) {
         body.appendChild(videoTag(shot.videoUrl, true, "shot"));
       }
       if (shot.status === "failed" && shot.error) {
@@ -2149,7 +2199,7 @@
     });
     section.appendChild(list);
 
-    if ((step.final || {}).status === "stale") {
+    if (!isDual && (step.final || {}).status === "stale") {
       var staleBand = el("div", "vpoc-regen-stale");
       staleBand.appendChild(el("span", null, singleMode ? "최종 영상이 이전 버전입니다." : "합본이 이전 버전입니다."));
       if (plan.canEdit) {
@@ -2177,7 +2227,138 @@
     host.appendChild(section);
   }
 
-  /* ------------------------------------------- vpoc-regen: 이 샷만 다시 만들기 */
+  /* dual(실사+애니) 결과 — 두 열(왼쪽 실사 · 오른쪽 애니). 각 열은 합친 결과 플레이어 +
+     내려받기 + 상태 문구. 애니는 모든 샷 변환이 끝나면 자동으로 한 번 합치고, 수동 버튼도 둔다.
+     좁은 화면(≤768px)에서는 CSS 가 두 열을 위아래로 바꾼다. */
+  function renderStep4Dual(section, plan, step, done, singleMode) {
+    section.appendChild(el("h3", null, "결과"));
+    var grid = el("div", "vpoc-dual-grid");
+
+    // --- 왼쪽: 실사 ---
+    var liveCol = el("div", "vpoc-dual-col");
+    liveCol.appendChild(el("h4", "vpoc-dual-col-title", "실사"));
+    var final = step.final || {};
+    if (final.url) {
+      // single 은 영상이 곧 최종본이다("합본"이 아니라 "최종 영상").
+      if (singleMode) liveCol.appendChild(el("p", "vpoc-hint", "최종 영상"));
+      liveCol.appendChild(videoTag(final.url, false, "final-live"));
+      var liveDown = el("a", "vpoc-btn", "내려받기");
+      liveDown.href = final.url;
+      liveDown.setAttribute("download", "video.mp4");
+      liveCol.appendChild(liveDown);
+    } else if (done.length) {
+      liveCol.appendChild(sequencePlayer(done, "live"));
+      // single 은 클립이 하나뿐이라 끝나면 그 영상 1개를 그대로 최종 영상으로 만든다.
+      liveCol.appendChild(
+        el("p", "vpoc-hint", singleMode ? "완성되면 최종 영상으로 저장합니다." : "샷이 모두 끝나면 하나로 이어 붙입니다.")
+      );
+    } else {
+      liveCol.appendChild(el("p", "vpoc-hint", "실사 영상을 만들고 있습니다."));
+    }
+    if (final.status === "stale") {
+      var liveStale = el("div", "vpoc-regen-stale");
+      liveStale.appendChild(el("span", null, singleMode ? "최종 영상이 이전 버전입니다." : "실사 합본이 이전 버전입니다."));
+      if (plan.canEdit) {
+        var liveAgain = el("button", "vpoc-btn vpoc-btn-small", singleMode ? "최종 영상 다시 만들기" : "다시 이어 붙이기");
+        liveAgain.type = "button";
+        liveAgain.addEventListener("click", function () {
+          runAction("stitch", {});
+        });
+        liveStale.appendChild(liveAgain);
+      }
+      liveCol.appendChild(liveStale);
+    }
+    // 수동 [하나로 이어 붙이기] / single [최종 영상으로 저장] — 실사가 모두 끝났고 아직 합본이 없을 때.
+    if (plan.canEdit && step.status === "done" && !final.url && done.length) {
+      var liveStitch = el("button", "vpoc-btn", singleMode ? "최종 영상으로 저장" : "하나로 이어 붙이기");
+      liveStitch.type = "button";
+      liveStitch.addEventListener("click", function () {
+        runAction("stitch", {});
+      });
+      liveCol.appendChild(liveStitch);
+    }
+    grid.appendChild(liveCol);
+
+    // --- 오른쪽: 애니(웹툰풍) ---
+    var animeCol = el("div", "vpoc-dual-col");
+    animeCol.appendChild(el("h4", "vpoc-dual-col-title", "애니(웹툰풍)"));
+    var finalAnime = step.finalAnime || {};
+    var animeShots = (step.shots || []).map(function (shot) {
+      return shot.anime || {};
+    });
+    var animeDone = (step.shots || []).filter(function (shot) {
+      return (shot.anime || {}).status === "completed" && (shot.anime || {}).videoUrl;
+    }).map(function (shot) {
+      return { videoUrl: shot.anime.videoUrl };
+    });
+
+    if (finalAnime.url) {
+      animeCol.appendChild(videoTag(finalAnime.url, false, "final-anime"));
+      var animeDown = el("a", "vpoc-btn", "내려받기");
+      animeDown.href = finalAnime.url;
+      animeDown.setAttribute("download", "video-anime.mp4");
+      animeCol.appendChild(animeDown);
+    } else if (finalAnime.status === "failed" && finalAnime.error) {
+      animeCol.appendChild(errorBox(finalAnime.error, null));
+    } else if (animeDone.length) {
+      animeCol.appendChild(sequencePlayer(animeDone, "anime"));
+    }
+
+    // 애니 변환 진행 상태 문구(샷 단위 진행을 한 줄로 요약).
+    var animeBusy = vpocAnimeBusy(step);
+    if (!finalAnime.url) {
+      if (finalAnime.status === "cancelled") {
+        animeCol.appendChild(el("p", "vpoc-hint", "취소됨"));
+      } else if (animeBusy) {
+        var allSubmitted = animeShots.length && animeShots.every(function (anime) {
+          return anime.status === "submitted" || anime.status === "completed";
+        });
+        animeCol.appendChild(
+          el("p", "vpoc-hint", allSubmitted ? "애니로 변환 중 (몇 분 걸립니다)" : "변환 대기")
+        );
+      }
+    }
+    if (finalAnime.status === "stale") {
+      var animeStale = el("div", "vpoc-regen-stale");
+      animeStale.appendChild(el("span", null, "애니 합본이 이전 버전입니다."));
+      if (plan.canEdit) {
+        var animeAgain = el("button", "vpoc-btn vpoc-btn-small", "애니 다시 합치기");
+        animeAgain.type = "button";
+        animeAgain.addEventListener("click", function () {
+          runAction("stitch", { variant: "anime" });
+        });
+        animeStale.appendChild(animeAgain);
+      }
+      animeCol.appendChild(animeStale);
+    }
+
+    // 모든 샷의 애니 변환이 끝났고 합본이 아직 없으면(none/null) 자동으로 한 번 합친다.
+    var animeAllDone = animeShots.length > 0 && animeShots.every(function (anime) {
+      return anime.status === "completed";
+    });
+    var finalAnimeMissing = !finalAnime.status || finalAnime.status === "none";
+    if (plan.canEdit && animeAllDone && finalAnimeMissing) {
+      // 중복 방지: 한 회차(planId + genId)당 한 번만 보낸다.
+      var key = String(plan.planId || state.planId) + "#" + (step.genId || "");
+      if (!animeStitchRequested[key]) {
+        animeStitchRequested[key] = true;
+        runAction("stitch", { variant: "anime" });
+      }
+    }
+
+    // 수동 [애니 다시 합치기] — 실사 [하나로 이어 붙이기] 옆에. 변환이 모두 끝났을 때.
+    if (plan.canEdit && animeAllDone && !finalAnime.url) {
+      var animeStitch = el("button", "vpoc-btn", "애니 다시 합치기");
+      animeStitch.type = "button";
+      animeStitch.addEventListener("click", function () {
+        runAction("stitch", { variant: "anime" });
+      });
+      animeCol.appendChild(animeStitch);
+    }
+    grid.appendChild(animeCol);
+
+    section.appendChild(grid);
+  }
 
   /* 계획 문서 2·6장. 기존 샷 카드 요소·이벤트는 건드리지 않고 아래에 덧붙인다.
      함수는 vpocRegen 접두사, CSS 클래스는 vpoc-regen- 접두사. */
@@ -2194,6 +2375,10 @@
 
   // 샷별로 펼침 상태와 입력값을 기억한다. 조회로 화면을 다시 그려도 입력이 사라지지 않는다.
   var regenUi = {};
+
+  // 애니 자동 합치기 중복 방지. 한 회차(planId+genId)당 한 번만 stitch(anime) 를 부른다.
+  // 조회로 화면을 여러 번 그려도 같은 회차에 두 번 보내지 않는다.
+  var animeStitchRequested = {};
 
   // ② "fal 에서 모델 가져오기" 패널 상태. 모듈 전역이라 ② 블록을 다시 그려도 유지된다.
   // configured 는 GET /fal/models 로 처음 한 번 확인한다(null = 아직 모름).
@@ -2992,6 +3177,40 @@
     return false;
   }
 
+  /* dual(실사+애니) 회차인지 — 샷에 anime 필드가 있거나 finalAnime 이 있으면 dual 결과다.
+     옛 회차(anime·finalAnime 없음)는 false 라 지금 화면 그대로 그려진다. */
+  function vpocIsDual(step) {
+    if (!step) return false;
+    if (step.finalAnime) return true;
+    return (step.shots || []).some(function (shot) {
+      return Boolean(shot.anime);
+    });
+  }
+
+  /* 애니 변환이 진행 중인지 — queued/preparing/submitted 중 하나라도 있으면 true.
+     폴링·취소 버튼 판정에 쓴다. */
+  function vpocAnimeBusy(step) {
+    if (!step) return false;
+    var running = (step.shots || []).some(function (shot) {
+      var anime = shot.anime;
+      return anime && (anime.status === "queued" || anime.status === "preparing" || anime.status === "submitted");
+    });
+    if (running) return true;
+    var fa = step.finalAnime || {};
+    return fa.status === "queued" || fa.status === "preparing" || fa.status === "submitted";
+  }
+
+  /* 애니 상태 한 줄 문구. failed 는 호출부에서 errorBox 로 따로 그린다. */
+  function vpocAnimeStatusText(status) {
+    return {
+      queued: "변환 대기",
+      preparing: "변환 대기",
+      submitted: "애니로 변환 중 (몇 분 걸립니다)",
+      completed: "완료",
+      cancelled: "취소됨"
+    }[status] || status || "";
+  }
+
   function schedule() {
     if (state.timer) {
       clearTimeout(state.timer);
@@ -3003,7 +3222,12 @@
     var delay = 0;
     if ((plan.task || {}).status === "running") delay = POLL_TASK_MS;
     // vpoc-regen: 재생성은 ④ 전체 상태를 바꾸지 않으므로(G2) 따로 봐야 한다.
-    else if ((plan.steps["4"] || {}).status === "running" || vpocRegenBusy(plan)) {
+    // dual: 애니 변환(queued/preparing/submitted)이 도는 동안에도 ④ 진행 중처럼 계속 조회한다.
+    else if (
+      (plan.steps["4"] || {}).status === "running" ||
+      vpocRegenBusy(plan) ||
+      vpocAnimeBusy(plan.steps["4"] || {})
+    ) {
       delay = POLL_VIDEO_MS;
     }
     if (!delay) return;
