@@ -844,6 +844,333 @@ def check_no_budget_cap() -> None:
         ok("비용 상한 없음 검사 (a)누계 100,000 에도 제출 가능 (b)원장 1건 정확히 기록")
 
 
+# ---------------------------------------------------------------- 8. 진행 중 작업 취소
+
+
+class _FakeStore:
+    """메모리 S3. 취소 검사만 쓰는 최소 인터페이스(실제 외부 호출 금지, 설계자 2026-10-20)."""
+
+    def __init__(self) -> None:
+        self.data: dict[str, dict] = {}
+        self.etags: dict[str, int] = {}
+
+    def read_json(self, key: str):
+        if key not in self.data:
+            return None, ""
+        return json.loads(json.dumps(self.data[key])), str(self.etags.get(key, 0))
+
+    def write_json(self, key: str, data: dict, *, etag: str = "", create_only: bool = False) -> str:
+        self.etags[key] = self.etags.get(key, 0) + 1
+        self.data[key] = json.loads(json.dumps(data))
+        return str(self.etags[key])
+
+    def presign(self, key: str, **kwargs) -> str:
+        return "https://example/" + key
+
+    def exists(self, key: str, **kwargs) -> bool:
+        return key in self.data
+
+
+def check_cancel() -> None:
+    """진행 중 작업 취소 — 서버 API(설계자 2026-10-20). 실제 외부 호출 금지(공급자 취소는 monkeypatch).
+
+    (a) running task 취소 → cancelled, 늦게 끝난 스레드 결과가 버려진다
+    (b) ④ queued/submitted 샷 취소 → cancelled, 공급자 취소 결과 ok/rejected/unsupported
+    (c) 취소할 것이 없으면 409 NothingToCancel
+    (d) 취소 후 generate 가 다시 가능하다
+    """
+    import time as _time  # noqa: PLC0415
+
+    sys.path.insert(0, str(ROOT / "app"))
+    from src.vpoc import ark, fal, ledger, routes, store, video  # noqa: PLC0415
+
+    bad: list[str] = []
+
+    owner, pid, plan_id = "tester", "prj_c", "pl_cancel_01"
+
+    # --- 메모리 저장소로 바꾼다(실제 S3 금지) ---
+    fake = _FakeStore()
+    saved = {
+        "store_STORE": store.STORE,
+        "ledger_STORE": ledger.STORE,
+        "video_STORE": video.STORE,
+        "fal_STORE": fal.STORE,
+        "ark_cancel": ark.cancel,
+    }
+    store.STORE = fake
+    ledger.STORE = fake
+    video.STORE = fake
+    fal.STORE = fake
+
+    # 공급자 취소는 가짜다. ark 작업(ark/tasks/)은 성공 → ok, fal 작업(fal/requests/)은 거절 → rejected.
+    # Luma(Bedrock async)는 _cancel_video 가 ark.cancel 을 호출하지 않는다 → unsupported.
+    cancel_calls: list[str] = []
+
+    def fake_ark_cancel(arn: str) -> None:
+        cancel_calls.append(arn)
+        if fal.is_fal_job(arn):
+            raise RuntimeError("fal 이 거절했습니다(이미 생성 중)")
+        # ark/tasks/ 는 성공(조용히 반환)
+
+    ark.cancel = fake_ark_cancel
+
+    def _state_with(task=None, step4=None) -> dict:
+        state = store.new_state(owner, pid, plan_id)
+        state["currentStep"] = 4
+        state["maxReachedStep"] = 4
+        state["steps"]["3"] = {
+            "status": "ready",
+            "useKeyframes": False,
+            "characters": [],
+            "shots": [
+                {
+                    "id": "s1",
+                    "summaryKo": "샷1",
+                    "cameraKo": "",
+                    "cameraEn": "",
+                    "locationEn": "A pit lane",
+                    "actionEn": "stands",
+                    "characters": [],
+                    "promptEn": "Cinematic. A pit lane.",
+                    "useKeyframe": False,
+                    "reviewKo": None,
+                    "durationS": 5,
+                }
+            ],
+            "cost": {"shots": 1, "totalUsd": 3.75},
+        }
+        if task is not None:
+            state["task"] = task
+        if step4 is not None:
+            state["steps"]["4"] = step4
+        return state
+
+    # --- Flask 블루프린트를 가짜 deps 로 만든다 ---
+    def _passthrough(handler):
+        return handler
+
+    deps = routes.VpocDependencies(
+        require_auth=_passthrough,
+        current_username=lambda: owner,
+        get_project=lambda p: {"id": pid, "owner": owner},
+        can_read_project=lambda proj: True,
+        can_write_project=lambda proj: True,
+        graph_run=lambda *a, **k: [],
+    )
+
+    try:
+        from flask import Flask  # noqa: PLC0415
+
+        bp = routes.create_blueprint(deps)
+        app = Flask(__name__)
+        app.register_blueprint(bp)
+        client = app.test_client()
+        url = f"/api/vpoc/p/{pid}/plans/{plan_id}/cancel"
+
+        # (c) 취소할 것이 없으면 409 NothingToCancel
+        fake.data.clear()
+        fake.etags.clear()
+        idle = _state_with()
+        store.save_state(owner, pid, plan_id, idle)
+        resp = client.post(url)
+        body = resp.get_json()
+        if resp.status_code != 409:
+            bad.append(f"(c) 취소할 것 없음이 409 가 아닙니다: {resp.status_code}")
+        elif (body.get("error") or {}).get("type") != "NothingToCancel":
+            bad.append(f"(c) kind 가 NothingToCancel 이 아닙니다: {body}")
+
+        # (a) running task 취소 → cancelled, 늦게 끝난 스레드 결과가 버려진다
+        fake.data.clear()
+        fake.etags.clear()
+        task_id = "abc123def456"
+        running = _state_with(
+            task={
+                "name": "prepare",
+                "status": "running",
+                "startedAt": "2026-10-20T04:00:00Z",
+                "finishedAt": None,
+                "error": None,
+                "shotId": None,
+                "id": task_id,
+            }
+        )
+        store.save_state(owner, pid, plan_id, running)
+        resp = client.post(url)
+        body = resp.get_json()
+        if resp.status_code != 200:
+            bad.append(f"(a) 취소가 200 이 아닙니다: {resp.status_code} {body}")
+        task_view = (body or {}).get("task") or {}
+        if task_view.get("status") != "cancelled":
+            bad.append(f"(a) task 상태가 cancelled 가 아닙니다: {task_view}")
+        if task_view.get("id") is not None:
+            bad.append(f"(a) 취소 뒤 task.id 가 None 이 아닙니다: {task_view.get('id')}")
+
+        # require_idle 은 running 만 막으므로 취소 직후 바로 다시 실행할 수 있어야 한다.
+        state_now, _ = store.load_state(owner, pid, plan_id)
+        try:
+            # require_idle 은 클로저라 직접 못 부른다 — cancelled 는 running 이 아니므로 통과해야 한다.
+            if (state_now.get("task") or {}).get("status") == "running":
+                bad.append("(a) 취소 뒤에도 running 이라 재실행이 막힙니다")
+        except Exception as exc:  # noqa: BLE001
+            bad.append(f"(a) 상태 확인 실패: {exc}")
+
+        # 늦게 끝난 스레드: _finish 가 현재 task.id(None) != 자기 id(task_id) 이므로 결과를 버린다.
+        # run_task 를 직접 흉내 내기보다, 취소가 task.id 를 바꿨는지로 '버려짐'을 확인한다
+        # (_finish 의 discard 조건: current_id is not None and current_id != task_id, 또는 current_id != task_id).
+        # 여기서는 취소가 남긴 상태가 그대로 유지되는지(스레드가 덮어쓰지 못하게 id 를 바꿨는지)를 본다.
+        rsource = (ROOT / "app" / "src" / "vpoc" / "routes.py").read_text(encoding="utf-8")
+        rt = rsource[rsource.index("def run_task("):]
+        rt = rt[: rt.index("def apply_result(")]
+        if "current_id != task_id" not in rt:
+            bad.append("(a) _finish 가 task id 불일치로 결과를 버리지 않습니다")
+        if "store.revision_of(state, watch_step) != revision" not in rt:
+            bad.append("(a) 기존 revision 비교(되돌리기)가 사라졌습니다")
+        if 'task_id = secrets.token_hex' not in rt:
+            bad.append("(a) run_task 가 task 에 고유 id 를 넣지 않습니다")
+
+        # (b) ④ queued/submitted 샷 취소 → cancelled + 공급자 취소 ok/rejected/unsupported
+        fake.data.clear()
+        fake.etags.clear()
+        cancel_calls.clear()
+        step4 = {
+            "status": "running",
+            "genId": "g20261020040000",
+            "videoModel": "luma-ray2",
+            "resolution": "540p",
+            "oneTake": False,
+            "single": False,
+            "final": {"status": "none", "url": None, "error": None},
+            "shots": [
+                # 큐 대기 — 공급자 호출 없이 cancelled
+                {"id": "s_q", "status": "queued", "attempt": 1, "mode": "text",
+                 "submittedAt": None, "completedAt": None, "videoUrl": None, "note": None, "error": None},
+                # 제출됨 — ark 작업(성공 → ok)
+                {"id": "s_ark", "status": "submitted", "attempt": 1, "mode": "text",
+                 "invocationArn": "ark/tasks/task-xyz", "outputPrefix": "p/ark",
+                 "submittedAt": "2026-10-20T04:00:01Z", "completedAt": None, "videoUrl": None,
+                 "note": None, "error": None},
+                # 제출됨 — fal 작업(거절 → rejected)
+                {"id": "s_fal", "status": "submitted", "attempt": 1, "mode": "text",
+                 "invocationArn": "fal/requests/fal-ai/kling-video/req-123", "outputPrefix": "p/fal",
+                 "submittedAt": "2026-10-20T04:00:02Z", "completedAt": None, "videoUrl": None,
+                 "note": None, "error": None},
+                # 제출됨 — Luma(Bedrock async, 취소 API 없음 → unsupported)
+                {"id": "s_luma", "status": "submitted", "attempt": 1, "mode": "text",
+                 "invocationArn": "arn:aws:bedrock:ap-northeast-2:1:async-invoke/abcd",
+                 "outputPrefix": "p/luma",
+                 "submittedAt": "2026-10-20T04:00:03Z", "completedAt": None, "videoUrl": None,
+                 "note": None, "error": None},
+                # 이미 완료된 샷 — 취소가 건드리지 않는다
+                {"id": "s_done", "status": "completed", "attempt": 1, "mode": "text",
+                 "invocationArn": "ark/tasks/task-done", "outputKey": "users/tester/done.mp4",
+                 "submittedAt": "2026-10-20T03:50:00Z", "completedAt": "2026-10-20T03:55:00Z",
+                 "videoUrl": None, "note": None, "error": None},
+            ],
+        }
+        gen = _state_with(step4=step4)
+        store.save_state(owner, pid, plan_id, gen)
+        resp = client.post(url)
+        body = resp.get_json()
+        if resp.status_code != 200:
+            bad.append(f"(b) 영상 취소가 200 이 아닙니다: {resp.status_code} {body}")
+        after, _ = store.load_state(owner, pid, plan_id)
+        s4 = after["steps"]["4"]
+        if s4.get("status") != "cancelled":
+            bad.append(f"(b) ④ 상태가 cancelled 가 아닙니다: {s4.get('status')}")
+        by_id = {item["id"]: item for item in s4.get("shots") or []}
+        expect = {
+            "s_q": (None, "cancelled"),
+            "s_ark": ("ok", "cancelled"),
+            "s_fal": ("rejected", "cancelled"),
+            "s_luma": ("unsupported", "cancelled"),
+        }
+        for sid, (want_remote, want_status) in expect.items():
+            shot = by_id.get(sid) or {}
+            if shot.get("status") != want_status:
+                bad.append(f"(b) {sid} 상태가 {want_status} 가 아닙니다: {shot.get('status')}")
+            if shot.get("cancelRemote") != want_remote:
+                bad.append(f"(b) {sid} cancelRemote 가 {want_remote} 가 아닙니다: {shot.get('cancelRemote')}")
+            if want_status == "cancelled" and shot.get("note") != "사용자가 취소했습니다":
+                bad.append(f"(b) {sid} note 가 다릅니다: {shot.get('note')}")
+            if sid != "s_q" and not shot.get("cancelledAt"):
+                bad.append(f"(b) {sid} cancelledAt 이 없습니다")
+        # 완료 샷은 그대로
+        if (by_id.get("s_done") or {}).get("status") != "completed":
+            bad.append("(b) 완료 샷이 취소됐습니다")
+        # 공급자 취소는 제출된 ark · fal 두 건에만 시도됐다(큐·luma·완료는 호출 안 함).
+        if sorted(cancel_calls) != sorted(["ark/tasks/task-xyz", "fal/requests/fal-ai/kling-video/req-123"]):
+            bad.append(f"(b) 공급자 취소 호출 대상이 틀립니다: {cancel_calls}")
+
+        # 취소 뒤 다시 조회(GET)해도 cancelled 가 done 으로 덮이지 않는다(refresh_shots 처리 확인).
+        getresp = client.get(f"/api/vpoc/p/{pid}/plans/{plan_id}")
+        gbody = getresp.get_json()
+        if (gbody.get("steps") or {}).get("4", {}).get("status") != "cancelled":
+            bad.append(f"(b) 재조회 때 ④ 상태가 cancelled 로 유지되지 않습니다: {(gbody.get('steps') or {}).get('4', {}).get('status')}")
+
+        # (d) 취소 후 generate 가 다시 가능 — generate 는 새 genId 로 ④ 를 새로 만든다.
+        # 실제 제출(모델 호출)은 응답 뒤 스레드라 외부 호출이 없다. 여기서는 generate 가 선행 조건을
+        # 통과하고 ④ 가 새 회차로 running 이 되는지만 본다(MODEL_PICKER 가 꺼져 Luma 기본).
+        after2, _ = store.load_state(owner, pid, plan_id)
+        # ③ 은 그대로 ready 여야 한다(취소가 ③ 을 건드리지 않았다).
+        if after2["steps"]["3"].get("status") != "ready":
+            bad.append(f"(d) 취소 뒤 ③ 상태가 ready 가 아닙니다: {after2['steps']['3'].get('status')}")
+        # generate 호출. confirmUsd 는 서버 계산값과 맞춰야 한다(Luma 5초 1샷).
+        from src.vpoc import settings as _settings  # noqa: PLC0415
+        expected_usd = round(_settings.shot_usd("luma-ray2", "540p", 5), 2)
+        # 제출 스레드가 외부(Bedrock)를 부르지 않도록 video.submit 을 가짜 작업으로 바꾼다
+        # (실제 유료 호출 금지). 가짜는 모든 저장을 메모리 fake store 로 하므로 네트워크가 없다.
+        saved_video_submit = video.submit
+
+        def fake_video_submit(**k):
+            return {
+                "provider": "luma-ray2",
+                "invocationArn": "arn:aws:bedrock:test:async-invoke/" + (k.get("shot_id") or "s"),
+                "clientRequestToken": "luma-test-" + (k.get("shot_id") or "s"),
+                "outputPrefix": "p/test",
+                "submittedAt": "2026-10-20T04:10:00Z",
+                "promptChars": len(str(k.get("prompt") or "")),
+            }
+
+        video.submit = fake_video_submit
+        try:
+            gresp = client.post(
+                f"/api/vpoc/p/{pid}/plans/{plan_id}/run/generate",
+                json={"confirmUsd": expected_usd},
+            )
+            _time.sleep(0.2)  # 응답 뒤 제출 스레드가 메모리 안에서 돌 틈(외부 호출 없음)
+        finally:
+            video.submit = saved_video_submit
+        if gresp.status_code != 200:
+            bad.append(f"(d) 취소 후 generate 가 200 이 아닙니다: {gresp.status_code} {gresp.get_json()}")
+        after3, _ = store.load_state(owner, pid, plan_id)
+        new4 = after3["steps"]["4"]
+        if new4.get("genId") in ("", None) or new4.get("genId") == "g20261020040000":
+            bad.append(f"(d) generate 가 새 genId 로 ④ 를 만들지 않았습니다: {new4.get('genId')}")
+        # 제출 스레드가 video.submit 을 막혀 실패시킬 수 있어 running/partial 둘 다 허용한다
+        # (핵심은 '새 회차로 다시 시작됐다' — genId · 새 샷 · 선행 조건 통과).
+        if new4.get("status") not in ("running", "partial"):
+            bad.append(f"(d) generate 뒤 ④ 가 새로 시작되지 않았습니다: {new4.get('status')}")
+        # 새 ④ 에는 취소된 옛 샷이 남지 않는다.
+        new_ids = {item.get("id") for item in new4.get("shots") or []}
+        if {"s_q", "s_ark", "s_fal", "s_luma"} & new_ids:
+            bad.append(f"(d) 새 ④ 에 취소된 옛 샷이 남아 있습니다: {new_ids}")
+
+    except Exception as exc:  # noqa: BLE001
+        import traceback as _tb  # noqa: PLC0415
+        bad.append("취소 검사 실행 중 예외: " + repr(exc) + "\n" + _tb.format_exc()[:1500])
+    finally:
+        store.STORE = saved["store_STORE"]
+        ledger.STORE = saved["ledger_STORE"]
+        video.STORE = saved["video_STORE"]
+        fal.STORE = saved["fal_STORE"]
+        ark.cancel = saved["ark_cancel"]
+
+    if bad:
+        fail("진행 중 작업 취소 검사 실패\n" + "\n".join(f"  {item}" for item in bad))
+    else:
+        ok("진행 중 작업 취소 검사 (a)task (b)④ ok/rejected/unsupported (c)409 (d)재생성")
+
+
 def check_planview_keys() -> None:
     """PlanView ④ 샷의 기존 키가 그대로고 새 키만 더해졌는지 본다."""
     source = (ROOT / "app" / "src" / "vpoc" / "routes.py").read_text(encoding="utf-8")
@@ -882,6 +1209,7 @@ def main() -> int:
     check_gen_id()
     check_no_budget_cap()
     check_planview_keys()
+    check_cancel()
     print()
     if warnings:
         print(f"경고 {len(warnings)}건")

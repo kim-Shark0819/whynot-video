@@ -207,7 +207,26 @@
       var band = el("div", "vpoc-progress");
       band.appendChild(el("span", "vpoc-spinner"));
       band.appendChild(el("span", null, labels[0] + " \u00b7 " + mmss(seconds) + " \u00b7 " + labels[1]));
+      // 진행 중 작업 취소(설계자 2026-10-20). 단계 작업 띠에 [취소] 버튼.
+      if (plan.canEdit) band.appendChild(cancelButton("취소"));
       wrap.appendChild(band);
+    }
+    // 취소 뒤 안내(설계자 2026-10-20) — 진행 띠 대신 짧은 안내 + 다시 실행 버튼.
+    // 오류 때 [다시] 와 같은 규칙: prepare 면 prepare, analyze 면 analyze, 나머지는 안내만.
+    if (task.status === "cancelled") {
+      var cband = el("div", "vpoc-cancel-band");
+      cband.appendChild(el("span", null, "작업을 취소했습니다."));
+      if (plan.canEdit && (task.name === "prepare" || task.name === "analyze")) {
+        var name = task.name;
+        var rerun = el("button", "vpoc-btn vpoc-btn-small", "다시 실행");
+        rerun.type = "button";
+        rerun.disabled = state.busy;
+        rerun.addEventListener("click", function () {
+          runAction(name, {});
+        });
+        cband.appendChild(rerun);
+      }
+      wrap.appendChild(cband);
     }
     if (task.status === "error" && task.error) {
       // revise 는 샷별 의견이 있어야 다시 부를 수 있다. 샷 카드에서 [의견 고쳐서 다시]로 한다.
@@ -285,6 +304,26 @@
       if (event.target === scrim && scrim.parentNode) scrim.parentNode.removeChild(scrim);
     });
     document.body.appendChild(scrim);
+  }
+
+  /* 진행 중 작업 취소(설계자 2026-10-20). 확인창 → cancel API POST.
+     누르는 동안 "취소 중…" 으로 비활성. 다른 액션처럼 응답 plan view 로 화면을 갱신한다.
+     label 로 버튼 문구만 바꾼다([취소] / [생성 취소]). */
+  var CANCEL_CONFIRM_LINE =
+    "진행 중인 작업을 취소할까요? 이미 모델에 보낸 요청은 멈추지 못할 수 있고, 그 경우 비용이 청구될 수 있습니다.";
+
+  function cancelButton(label) {
+    var button = el("button", "vpoc-btn vpoc-btn-small", label);
+    button.type = "button";
+    button.disabled = state.busy;
+    button.addEventListener("click", function () {
+      confirmModal("작업을 취소할까요?", [CANCEL_CONFIRM_LINE], "취소하기", function () {
+        button.disabled = true;
+        button.textContent = "취소 중\u2026";
+        cancelAction();
+      });
+    });
+    return button;
   }
 
   /* ---------------------------------------------------------------- ① 입력 */
@@ -1942,6 +1981,34 @@
     var section = el("section", "vpoc-card");
     section.appendChild(el("h2", null, "\u2463 영상"));
 
+    // 진행 중 작업 취소(설계자 2026-10-20). ④가 진행 중(steps["4"].status === "running")이거나
+    // 진행 중 샷(queued·submitted)·regen 이 있으면 잘 보이는 곳에 [생성 취소] 버튼.
+    var shotRunning = (step.shots || []).some(function (shot) {
+      return shot.status === "queued" || shot.status === "submitted";
+    });
+    var generating = step.status === "running" || shotRunning || vpocRegenBusy(plan);
+    if (plan.canEdit && generating) {
+      var cancelBand = el("div", "vpoc-cancel-band");
+      cancelBand.appendChild(el("span", null, "영상을 만들고 있습니다."));
+      cancelBand.appendChild(cancelButton("생성 취소"));
+      section.appendChild(cancelBand);
+    }
+    // 취소 뒤 안내 — ③으로 돌아가 다시 만들 수 있게 한다(기존 단계 막대/뒤로 가기).
+    if (step.status === "cancelled") {
+      var cancelled = el("div", "vpoc-cancel-band");
+      cancelled.appendChild(el("span", null, "영상 생성을 취소했습니다."));
+      if (plan.canEdit) {
+        var back = el("button", "vpoc-btn vpoc-btn-small", "\u2462 계획으로 돌아가기");
+        back.type = "button";
+        back.disabled = state.busy;
+        back.addEventListener("click", function () {
+          goBackTo(3);
+        });
+        cancelled.appendChild(back);
+      }
+      section.appendChild(cancelled);
+    }
+
     var done = (step.shots || []).filter(function (shot) {
       return shot.status === "completed" && shot.videoUrl;
     });
@@ -2002,7 +2069,8 @@
         queued: "대기",
         submitted: "생성 중",
         completed: "완료",
-        failed: "실패"
+        failed: "실패",
+        cancelled: "취소됨"
       }[shot.status] || shot.status;
       if (shot.status === "submitted") {
         // 길이에 따라 더 걸릴 수 있다는 일반 문구(설계자 2026-10-19). 긴 영상일수록 오래 걸린다.
@@ -2770,6 +2838,36 @@
       })
       .catch(function (error) {
         state.busy = false;
+        state.lastError = error;
+        refresh();
+      });
+  }
+
+  /* 진행 중 작업 취소(설계자 2026-10-20). cancel API 를 POST 하고 응답 plan view 로 화면을 갱신한다
+     (다른 액션이 응답을 반영하는 방식 그대로). 409 NothingToCancel 이면 조용히 다시 불러온다. */
+  function cancelAction() {
+    if (state.mock) return Promise.resolve();
+    state.busy = true;
+    state.lastError = null;
+    refresh();
+    return api(
+      "/api/vpoc/p/" + encodeURIComponent(state.projectId) +
+        "/plans/" + encodeURIComponent(state.planId) + "/cancel",
+      { method: "POST", body: JSON.stringify({}) }
+    )
+      .then(function (payload) {
+        state.busy = false;
+        state.plan = payload;
+        refresh();
+        return payload;
+      })
+      .catch(function (error) {
+        state.busy = false;
+        // 취소할 것이 없으면(이미 끝났거나 다른 창에서 취소됨) 조용히 최신 상태로 다시 그린다.
+        if (error && error.type === "NothingToCancel") {
+          state.plan = null;
+          return loadPlan();
+        }
         state.lastError = error;
         refresh();
       });
