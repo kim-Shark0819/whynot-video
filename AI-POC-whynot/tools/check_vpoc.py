@@ -4466,6 +4466,7 @@ def check_vnew_generate() -> None:
     (o) 모두 완료 → finalReal·finalWebtoon concat 2회·done·estimate(초합×단가×2)
     (p) 실패 구간만 재시도({segId,variant}) — 그 칸만 다시, 다른 칸 유지
     (q) 옛 모드(gen.mode 없음) 계획 보기(gen_view) OK
+    (u) prompt 에 컷 promptEn·cameraEn 문자열 없음·"come ONLY from @Video1" 포함·대사 포함(화면 구성은 @Video1 만)
     """
     sys.path.insert(0, str(ROOT / "app"))
     bad: list[str] = []
@@ -4922,6 +4923,22 @@ def check_vnew_generate() -> None:
             if "@Image1" not in str(pay.get("prompt")):
                 bad.append("(l) 웹툰 prompt 에 @Image1(그림체 참고) 이 없습니다")
 
+        # (u) 프롬프트는 화면 구성을 @Video1 만 따른다: 컷의 promptEn·cameraEn 문자열이 없고
+        #     "come ONLY from @Video1" 를 포함하며, 대사(dialogueKo)는 타임라인에 들어간다.
+        cut_prompt_en = "Kim speaks, static camera."
+        cut_camera_en = "static camera"
+        cut_dialogue = "자네 뭐 하나?"
+        for pay in (reals + webs):
+            prompt = str(pay.get("prompt") or "")
+            if cut_prompt_en in prompt:
+                bad.append("(u) 프롬프트에 컷 promptEn 이 들어 있습니다(화면 구성은 @Video1 만 따라야 합니다)")
+            if cut_camera_en in prompt:
+                bad.append("(u) 프롬프트에 컷 cameraEn 이 들어 있습니다(카메라는 @Video1 만 따라야 합니다)")
+            if "come ONLY from @Video1" not in prompt:
+                bad.append("(u) 프롬프트에 'come ONLY from @Video1' 지시가 없습니다")
+            if cut_dialogue[:40] not in prompt:
+                bad.append(f"(u) 프롬프트 타임라인에 대사가 없습니다: {prompt[:160]}")
+
         # (o) 완료 → concat 2(실사·웹툰), done.
         if kgen.get("status") != "done":
             bad.append(f"(o) gen.status 가 done 이 아닙니다: {kgen.get('status')}")
@@ -5016,6 +5033,118 @@ def check_vnew_generate() -> None:
         if resp.status_code != 200:
             bad.append(f"(q) 옛 모드 select 가 200 이 아닙니다: {resp.status_code} {resp.get_json()}")
 
+        # ---- (r)(s)(t) 동시 제출(설계자 2026-10-21, 지시서 041) ----
+        # 드라이버 전체를 돌리지 않고 한 순회(_drive_previz_pass)만 직접 불러 "한 순회에서 몇 칸을
+        # 제출하는지"를 결정적으로 본다. poll 을 InProgress 로 두면 submitted 칸이 그대로 남는다.
+        char_has_real["value"] = True
+        saved_parallel = genmod.vnew_settings.VNEW_GEN_PARALLEL
+
+        def _fresh_previz_gen(owner_, pid_):
+            """드라이버 없이 새 previz gen 을 계획에 심는다(모든 칸 queued). genId 반환."""
+            pl, _ = planmod.load_plan(owner_, pid_)
+            g = genmod._new_previz_gen(pl)
+            pl["gen"] = g
+            planmod.save_plan(owner_, pid_, pl)
+            return g["genId"]
+
+        def _statuses(owner_, pid_):
+            pl, _ = planmod.load_plan(owner_, pid_)
+            g = pl.get("gen") or {}
+            out = []
+            for s in g.get("segments") or []:
+                out.append((s["id"], "real", (s.get("real") or {}).get("status")))
+                out.append((s["id"], "webtoon", (s.get("webtoon") or {}).get("status")))
+            return out
+
+        # poll 을 InProgress 로(submitted 가 안 완료되고 그대로 남게).
+        def inprogress_fal_poll(invocation_arn, output_prefix):
+            return {"status": "InProgress", "failureMessage": "", "usage": None}
+
+        try:
+            # (r) 상한 4, 2구간 → 첫 순회에서 4칸 모두 submitted, 제출 4회·원장 4회.
+            genmod.vnew_settings.VNEW_GEN_PARALLEL = 4
+            _fal_mod.poll = inprogress_fal_poll
+            pid_r = "prj_gen_r"
+            _make_plan(owner, pid_r, segments=two_segs, total=12)
+            gid_r = _fresh_previz_gen(owner, pid_r)
+            previz_request_calls.clear(); ledger_calls.clear()
+            res_r = genmod._drive_previz_pass(owner, pid_r, gid_r)
+            if res_r != "work":
+                bad.append(f"(r) 첫 순회가 제출(work)로 끝나지 않았습니다: {res_r}")
+            st_r = _statuses(owner, pid_r)
+            submitted_r = [x for x in st_r if x[2] == "submitted"]
+            if len(submitted_r) != 4:
+                bad.append(f"(r) 첫 순회에서 4칸 모두 submitted 가 아닙니다: {st_r}")
+            if len(previz_request_calls) != 4:
+                bad.append(f"(r) 첫 순회 제출이 4회가 아닙니다: {len(previz_request_calls)}")
+            previz_charges_r = [e for e in ledger_calls if e.get("model") == genmod.vnew_settings.VNEW_PREVIZ_EDIT_MODEL]
+            if len(previz_charges_r) != 4:
+                bad.append(f"(r) 첫 순회 원장 계상이 4건이 아닙니다: {len(previz_charges_r)}")
+
+            # (s) 상한 2, 2구간 → 첫 순회 2칸만 submitted(나머지 queued), 다음 순회에 나머지.
+            genmod.vnew_settings.VNEW_GEN_PARALLEL = 2
+            _fal_mod.poll = inprogress_fal_poll
+            pid_s = "prj_gen_s"
+            _make_plan(owner, pid_s, segments=two_segs, total=12)
+            gid_s = _fresh_previz_gen(owner, pid_s)
+            previz_request_calls.clear()
+            genmod._drive_previz_pass(owner, pid_s, gid_s)
+            st_s1 = _statuses(owner, pid_s)
+            sub1 = [x for x in st_s1 if x[2] == "submitted"]
+            queued1 = [x for x in st_s1 if x[2] == "queued"]
+            if len(sub1) != 2:
+                bad.append(f"(s) 상한 2 인데 첫 순회에 2칸만 submitted 가 아닙니다: {st_s1}")
+            if len(queued1) != 2:
+                bad.append(f"(s) 상한 2 인데 나머지 2칸이 queued 가 아닙니다: {st_s1}")
+            if len(previz_request_calls) != 2:
+                bad.append(f"(s) 상한 2 첫 순회 제출이 2회가 아닙니다: {len(previz_request_calls)}")
+            # 둘째 순회: submitted 2칸은 아직 InProgress(상한 다 참) → 새 제출 0.
+            previz_request_calls.clear()
+            res_s2 = genmod._drive_previz_pass(owner, pid_s, gid_s)
+            if res_s2 != "poll_only":
+                bad.append(f"(s) 상한 가득 찬 둘째 순회가 poll_only 가 아닙니다: {res_s2}")
+            if len(previz_request_calls) != 0:
+                bad.append(f"(s) 상한 가득 찼는데 둘째 순회가 또 제출했습니다: {len(previz_request_calls)}")
+            # 앞 2칸을 완료시키면(상한이 비면) 셋째 순회에 나머지 2칸이 제출된다.
+            _fal_mod.poll = fake_fal_poll  # Completed
+            genmod._drive_previz_pass(owner, pid_s, gid_s)  # 앞 2칸 poll → completed(상한 비움)
+            _fal_mod.poll = inprogress_fal_poll
+            previz_request_calls.clear()
+            genmod._drive_previz_pass(owner, pid_s, gid_s)  # 나머지 2칸 제출
+            st_s3 = _statuses(owner, pid_s)
+            sub3 = [x for x in st_s3 if x[2] == "submitted"]
+            comp3 = [x for x in st_s3 if x[2] == "completed"]
+            if len(previz_request_calls) != 2:
+                bad.append(f"(s) 나머지 2칸이 다음 순회에 제출되지 않았습니다: {len(previz_request_calls)}")
+            if len(sub3) != 2 or len(comp3) != 2:
+                bad.append(f"(s) 나머지 2칸 제출 뒤 상태가 틀립니다(완료2·제출2 기대): {st_s3}")
+
+            # (t) 가짜 경합: 같은 gen 에 순회 2개를 동시에 돌려도 칸별 제출은 1회.
+            genmod.vnew_settings.VNEW_GEN_PARALLEL = 4
+            _fal_mod.poll = inprogress_fal_poll
+            pid_t = "prj_gen_t"
+            _make_plan(owner, pid_t, segments=two_segs, total=12)
+            gid_t = _fresh_previz_gen(owner, pid_t)
+            previz_request_calls.clear()
+            racers = [
+                orig_thread(target=genmod._drive_previz_pass, args=(owner, pid_t, gid_t))
+                for _ in range(2)
+            ]
+            for rt in racers:
+                rt.start()
+            for rt in racers:
+                rt.join(timeout=20.0)
+            st_t = _statuses(owner, pid_t)
+            sub_t = [x for x in st_t if x[2] == "submitted"]
+            if len(sub_t) != 4:
+                bad.append(f"(t) 경합 뒤 4칸 모두 submitted 가 아닙니다: {st_t}")
+            # 칸(4개)마다 제출 1회 → 총 4회(경합이어도 중복 제출 없음).
+            if len(previz_request_calls) != 4:
+                bad.append(f"(t) 경합에서 칸별 제출이 1회(총 4회)가 아닙니다: {len(previz_request_calls)}")
+        finally:
+            genmod.vnew_settings.VNEW_GEN_PARALLEL = saved_parallel
+            _fal_mod.poll = fake_fal_poll
+
         _settings.FAL_KEY = saved_fal_key
 
 
@@ -5050,6 +5179,8 @@ def check_vnew_generate() -> None:
             " (k)구간×2 제출·실사 image_urls 없음·정면=기본복장 (l)웹툰 elements≤3+image_urls1 총≤4"
             " (m)참고 비율 0.4~2.5 (n)@Element1·색 매핑·Do not add or remove anyone (o)concat2·done·estimate×2"
             " (p)실패 칸만 재시도 (q)옛 모드 보기·select"
+            " (r)상한4 첫 순회 4칸 동시 submitted·제출4·원장4 (s)상한2 첫 순회 2칸·다음 순회 나머지"
+            " (t)경합에서도 칸별 제출 1회"
         )
 
 

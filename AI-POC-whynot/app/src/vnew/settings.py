@@ -125,6 +125,9 @@ PREVIZ_WEBTOON_MAX_ELEMENTS = _int("VNEW_PREVIZ_WEBTOON_MAX_ELEMENTS", 3)
 PREVIZ_WEBTOON_MAX_IMAGE_URLS = _int("VNEW_PREVIZ_WEBTOON_MAX_IMAGE_URLS", 1)
 # 구간 프롬프트 목표 상한(모델 maxLength 가 더 작으면 그 안으로). 설계자: 2,500자 이내.
 PREVIZ_PROMPT_TARGET = _int("VNEW_PREVIZ_PROMPT_TARGET", 2500)
+# 프리비즈 모드 동시 제출 상한(설계자 2026-10-21, 지시서 041). 한 순회에서 선점·제출할 수 있는
+# 칸(구간×그림체) 수. preparing+submitted(진행 중) 합이 이 수를 넘지 않게 한다. 기본 4.
+VNEW_GEN_PARALLEL = _int("VNEW_GEN_PARALLEL", 4)
 
 
 def previz_edit_usd(seconds: float | None = None) -> float:

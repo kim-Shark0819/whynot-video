@@ -611,9 +611,11 @@ def _trim_prompt(prompt: str, max_length: int) -> str:
     그냥 max_length 에서 끊는다(공백 경계 우선).
     """
     text = prompt or ""
-    if max_length <= 0 or len(text) <= max_length:
+    # fal(Kling 등)은 길이를 UTF-8 바이트로 센다 — 한글 대사가 섞이면 글자 수로 2,500 이하여도 거절된다
+    # (2026-10-21 실측 "prompt: size must be between 0 and 2500"). 그래서 바이트 기준으로 자른다.
+    if max_length <= 0 or len(text.encode("utf-8")) <= max_length:
         return text
-    window = text[:max_length]
+    window = text.encode("utf-8")[:max_length].decode("utf-8", errors="ignore")
     cut = max(window.rfind(". "), window.rfind("! "), window.rfind("? "), window.rfind("\n"))
     if cut >= 0:
         # 문장부호를 포함해 그 뒤 공백 전까지 남긴다(.! ? 는 한 글자, 개행은 그 자리).
