@@ -152,6 +152,19 @@ FAL_BROWSE_CATEGORIES = (
 )
 
 
+# dual-style(실사+애니) — 화풍을 고르지 않고 항상 실사 영상을 먼저 만든 뒤 그 실사 영상을
+# 애니(웹툰풍)로 변환해 두 결과를 함께 본다(설계자 2026-10-20). 기본 false(운영 config 는 true).
+# FAL_KEY 가 없으면 변환은 건너뛰고 실사만 진행한다(애니 결과에 "변환 키 없음").
+VPOC_DUAL_STYLE_ENABLED = _flag("VPOC_DUAL_STYLE_ENABLED", "false")
+# 실사 → 애니(웹툰풍) 변환 모델(실측 2026-10-20). fal video-to-video edit.
+# 입력: prompt(@Video1 · @Image1..) · video_url(mp4, 3~15초, 높이 ≥720) · image_urls · keep_audio.
+VPOC_ANIME_MODEL = os.getenv(
+    "VPOC_ANIME_MODEL", "fal-ai/kling-video/o3/standard/video-to-video/edit"
+)
+# 변환 1초당 USD(실측 2026-10-20: $0.14/초).
+VPOC_ANIME_USD_PER_S = _float("VPOC_ANIME_USD_PER_S", 0.14)
+
+
 def is_fal(model: str) -> bool:
     """fal 모델 ID("fal:<endpoint_id>") 인지."""
     return str(model or "").startswith(FAL_ID_PREFIX)
@@ -242,6 +255,15 @@ def shot_usd(model: str = "", resolution: str = "", seconds: float | None = None
         per_sec = ark_usd_per_sec(model, resolution)
         return round((per_sec or 0.0) * secs, 4)
     return round(VIDEO_USD_PER_SEC.get(resolution or RESOLUTION, 0.75) * secs, 4)
+
+
+def anime_usd(seconds: float | None = None) -> float:
+    """실사 → 애니 변환 1건 금액 = 초 × VPOC_ANIME_USD_PER_S(설계자 2026-10-20).
+
+    초를 비우면 기본 영상 길이(DURATION_S)로 계산한다.
+    """
+    secs = DURATION_S if seconds is None else float(seconds)
+    return round(VPOC_ANIME_USD_PER_S * secs, 4)
 
 
 def single_keyframe_count(total_s: int) -> int:

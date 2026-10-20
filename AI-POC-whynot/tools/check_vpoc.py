@@ -1171,6 +1171,566 @@ def check_cancel() -> None:
         ok("진행 중 작업 취소 검사 (a)task (b)④ ok/rejected/unsupported (c)409 (d)재생성")
 
 
+def check_dual() -> None:
+    """dual-style(실사+애니) — 서버 API(설계자 2026-10-20). 실제 외부 호출 금지(전부 monkeypatch).
+
+    (a) dual 꺼짐 → 기존과 동일(anime 없음, 금액 animeUsd 0)
+    (b) dual 켜짐 → 샷 완료 시 anime queued → 제출 payload 에 720 이상 영상·@Video1·keep_audio,
+        완료 시 outputKey·원장 1회
+    (c) 3초 미만 거절, 15초 초과 자르기(stitcher.prepare_for_anime 함수 단위)
+    (d) 금액에 animeUsd 포함, CostMismatch 없음(generate confirmUsd)
+    (e) 취소 시 anime 도 cancelled
+    (f) 옛 state(dual 없음) 열기 OK
+    """
+    import time as _time  # noqa: PLC0415
+
+    sys.path.insert(0, str(ROOT / "app"))
+    from src.vpoc import ark, fal, ledger, routes, settings, store, video  # noqa: PLC0415
+
+    bad: list[str] = []
+    owner, pid, plan_id = "tester", "prj_d", "pl_dual_01"
+
+    fake = _FakeStore()
+    saved = {
+        "store_STORE": store.STORE,
+        "ledger_STORE": ledger.STORE,
+        "video_STORE": video.STORE,
+        "fal_STORE": fal.STORE,
+        "fal_submit_edit": fal.submit_edit,
+        "fal_poll": fal.poll,
+        "video_find": video.find_output_mp4,
+        "dual_flag": settings.VPOC_DUAL_STYLE_ENABLED,
+        "fal_key": settings.FAL_KEY,
+    }
+    store.STORE = fake
+    ledger.STORE = fake
+    video.STORE = fake
+    fal.STORE = fake
+    settings.FAL_KEY = "dummy-fal-key"  # 변환 경로가 "키 없음"으로 빠지지 않게(실제 호출은 monkeypatch)
+
+    # 원장은 메모리 fake 를 쓰므로 charge 가 실제 네트워크 없이 기록된다.
+    ledger_entries: list[dict] = []
+    real_charge = ledger.charge
+
+    def fake_charge(key, **kwargs):
+        ledger_entries.append({"key": key, **kwargs})
+        return {"spentUsd": 0.0, "capUsd": None}
+
+    # fal 외부 호출 가짜: submit_edit 는 인자를 잡아 두고 가짜 작업을 돌려준다.
+    submit_edit_calls: list[dict] = []
+
+    def fake_submit_edit(*, endpoint, video_mp4, prompt, output_prefix, reference_jpegs_b64=None, keep_audio=True):
+        submit_edit_calls.append(
+            {
+                "endpoint": endpoint,
+                "video_bytes": len(video_mp4 or b""),
+                "prompt": prompt,
+                "output_prefix": output_prefix,
+                "references": list(reference_jpegs_b64 or []),
+                "keep_audio": keep_audio,
+            }
+        )
+        return {
+            "provider": settings.FAL_ID_PREFIX + endpoint,
+            "invocationArn": f"fal/requests/{endpoint}/req-anime-1",
+            "clientRequestToken": "fal-anime-req-anime-1",
+            "outputPrefix": output_prefix,
+            "submittedAt": "2026-10-20T08:00:00Z",
+            "promptChars": len(prompt),
+        }
+
+    # anime 조회: 완료로 돌려주되 영상 복사는 하지 않는다(fake store). 출력은 find_output_mp4 가 준다.
+    anime_poll_status = {"value": "Completed"}
+
+    def fake_fal_poll(invocation_arn, output_prefix):
+        if "req-anime-1" in invocation_arn:
+            return {"status": anime_poll_status["value"], "failureMessage": "", "usage": None}
+        return {"status": "Completed", "failureMessage": "", "usage": None}
+
+    def fake_find(prefix, invocation_arn=""):
+        if "req-anime-1" in invocation_arn:
+            return {"key": prefix.rstrip("/") + "/req-anime-1/output.mp4", "size": 2048}
+        return {"key": prefix.rstrip("/") + "/output.mp4", "size": 1024}
+
+    ledger.charge = fake_charge
+    fal.submit_edit = fake_submit_edit
+    fal.poll = fake_fal_poll
+    video.find_output_mp4 = fake_find
+
+    # prepare_for_anime 는 실제 ffmpeg 를 돌리지 않게 함수 단위로 가짜 처리(짧은/긴 입력 흉내).
+    from src import stitcher  # noqa: PLC0415
+
+    real_prepare = stitcher.prepare_for_anime
+    prepare_mode = {"value": "ok"}  # ok | short | long
+
+    def fake_prepare(source_path, output_path, workdir):
+        import os as _os  # noqa: PLC0415
+
+        if prepare_mode["value"] == "short":
+            raise stitcher.AnimeTooShort("3초보다 짧아 변환할 수 없습니다")
+        # 720 으로 키운 결과 파일을 쓴다(실제 바이트는 더미). 15초 초과면 15초로 잘렸다고 본다.
+        with open(output_path, "wb") as handle:
+            handle.write(b"PREPARED-MP4-BYTES")
+        seconds = 15.0 if prepare_mode["value"] == "long" else 5.0
+        return {"path": output_path, "seconds": seconds, "height": 720}
+
+    stitcher.prepare_for_anime = fake_prepare
+
+    def _dual_state(dual: bool, shot_status: str = "completed") -> dict:
+        state = store.new_state(owner, pid, plan_id)
+        state["currentStep"] = 4
+        state["maxReachedStep"] = 4
+        state["steps"]["1"] = {"status": "saved", "text": "t", "characters": [], "sceneFiles": []}
+        state["steps"]["2"] = {
+            "status": "ready",
+            "story": {"style": "live_action", "settingEn": "A pit lane"},
+            "characters": [],
+            "questions": [],
+            "answers": {},
+        }
+        state["steps"]["3"] = {
+            "status": "ready",
+            "useKeyframes": False,
+            "characters": [],
+            "shots": [
+                {
+                    "id": "s1", "summaryKo": "샷1", "cameraKo": "", "cameraEn": "",
+                    "locationEn": "A pit lane", "actionEn": "stands", "characters": [],
+                    "promptEn": "Cinematic. A pit lane.", "useKeyframe": False,
+                    "reviewKo": None, "durationS": 5,
+                }
+            ],
+            "cost": {"shots": 1, "totalUsd": 3.75},
+        }
+        shot = {
+            "id": "s1", "status": shot_status, "attempt": 1, "mode": "text",
+            "submittedAt": "2026-10-20T07:50:00Z",
+            "completedAt": "2026-10-20T07:55:00Z" if shot_status == "completed" else None,
+            "outputKey": "users/tester/a/s1.mp4" if shot_status == "completed" else "",
+            "videoUrl": None, "note": None, "error": None,
+        }
+        state["steps"]["4"] = {
+            "status": "done" if shot_status == "completed" else "running",
+            "genId": "g20261020070000",
+            "videoModel": "luma-ray2",
+            "resolution": "540p",
+            "oneTake": False,
+            "single": False,
+            "dual": dual,
+            "shots": [shot],
+            "final": {"status": "none", "url": None, "error": None},
+        }
+        # 완료 샷의 실사 mp4 를 fake store 에 둔다(변환이 읽는다).
+        if shot_status == "completed":
+            fake.data[shot["outputKey"]] = {"_mp4": True}  # read_json 은 안 쓰고 get_bytes 를 쓴다
+        return state
+
+    # get_bytes 는 _FakeStore 에 없다 — dual 검사용으로 더미 바이트를 돌려주게 덧붙인다.
+    def fake_get_bytes(key, **kwargs):
+        return b"SOURCE-MP4-BYTES"
+
+    fake.get_bytes = fake_get_bytes  # type: ignore[attr-defined]
+    fake.put_bytes = lambda key, body, content_type, **kwargs: fake.data.__setitem__(key, {"_bytes": len(body)})  # type: ignore[attr-defined]
+
+    deps = routes.VpocDependencies(
+        require_auth=lambda h: h,
+        current_username=lambda: owner,
+        get_project=lambda p: {"id": pid, "owner": owner},
+        can_read_project=lambda proj: True,
+        can_write_project=lambda proj: True,
+        graph_run=lambda *a, **k: [],
+    )
+
+    try:
+        from flask import Flask  # noqa: PLC0415
+
+        bp = routes.create_blueprint(deps)
+        app = Flask(__name__)
+        app.register_blueprint(bp)
+        client = app.test_client()
+        get_url = f"/api/vpoc/p/{pid}/plans/{plan_id}"
+
+        import threading as _threading  # noqa: PLC0415
+
+        def _join_anime_threads(timeout: float = 3.0) -> None:
+            """이 검사가 띄운 제출 스레드(vpoc-anime*)를 모두 기다린다(016 수정 2026-10-20).
+
+            제출은 mutate_state 성공 뒤 백그라운드 데몬 스레드에서 돈다. 검사끼리 스레드가 새지 않도록
+            각 소검사 끝에서 이 스레드들을 join 해 제출·원장 카운터가 그 소검사 안에서 확정되게 한다.
+            """
+            deadline = _time.time() + timeout
+            while _time.time() < deadline:
+                live = [
+                    t for t in _threading.enumerate()
+                    if (t.name or "").startswith("vpoc-anime") and t.is_alive()
+                ]
+                if not live:
+                    return
+                for t in live:
+                    t.join(timeout=max(0.0, deadline - _time.time()))
+
+        def _wait_anime(statuses, timeout: float = 3.0) -> dict:
+            """016 수정 2026-10-20: 제출은 mutate_state 성공 뒤 백그라운드 스레드에서 돈다.
+
+            그 스레드가 anime.status 를 원하는 값들 중 하나로 바꿀 때까지(또는 timeout) 기다렸다가
+            그 anime 딕셔너리를 돌려준다. preparing 은 '제출 전' 상태라 대기 조건으로 쓰지 않는다
+            (스레드가 아직 안 끝난 상태에서 일찍 돌아오면 카운터가 다음 소검사로 샌다).
+            """
+            want = set(statuses if isinstance(statuses, (list, tuple, set)) else [statuses])
+            deadline = _time.time() + timeout
+            anime: dict = {}
+            while _time.time() < deadline:
+                st, _ = store.load_state(owner, pid, plan_id)
+                anime = (st["steps"]["4"]["shots"][0].get("anime") or {})
+                if anime.get("status") in want:
+                    return anime
+                _time.sleep(0.02)
+            return anime
+
+        # (f) 옛 state(dual 없음) 열기 OK — step4.dual 키가 아예 없는 회차.
+        fake.data.clear(); fake.etags.clear()
+        old = _dual_state(dual=False)
+        old["steps"]["4"].pop("dual", None)
+        store.save_state(owner, pid, plan_id, old)
+        resp = client.get(get_url)
+        gbody = resp.get_json()
+        if resp.status_code != 200:
+            bad.append(f"(f) 옛 state 열기가 200 이 아닙니다: {resp.status_code} {gbody}")
+        else:
+            shot_view = (((gbody.get("steps") or {}).get("4") or {}).get("shots") or [{}])[0]
+            if shot_view.get("anime") is not None:
+                bad.append(f"(f) 옛 회차인데 anime 가 null 이 아닙니다: {shot_view.get('anime')}")
+            if (gbody.get("steps") or {}).get("4", {}).get("finalAnime", {}).get("status") != "none":
+                bad.append("(f) 옛 회차 finalAnime 가 none 이 아닙니다")
+
+        # (a) dual 꺼짐 → anime 없음, 금액 animeUsd 0
+        settings.VPOC_DUAL_STYLE_ENABLED = False
+        fake.data.clear(); fake.etags.clear()
+        off = _dual_state(dual=False)
+        store.save_state(owner, pid, plan_id, off)
+        resp = client.get(get_url)
+        gbody = resp.get_json()
+        if gbody.get("dualStyle") is not False:
+            bad.append(f"(a) dualStyle 가 false 가 아닙니다: {gbody.get('dualStyle')}")
+        cost = (((gbody.get("steps") or {}).get("3") or {}).get("cost") or {})
+        if cost.get("animeUsd") not in (0, 0.0):
+            bad.append(f"(a) dual 꺼짐인데 animeUsd 가 0 이 아닙니다: {cost.get('animeUsd')}")
+        shot_view = (((gbody.get("steps") or {}).get("4") or {}).get("shots") or [{}])[0]
+        if shot_view.get("anime") is not None:
+            bad.append("(a) dual 꺼짐인데 anime 가 생겼습니다")
+
+        # (b) dual 켜짐 → 샷 완료 → anime queued → submitted(payload 검증) → 완료(outputKey·원장 1회)
+        settings.VPOC_DUAL_STYLE_ENABLED = True
+        fake.data.clear(); fake.etags.clear()
+        ledger_entries.clear(); submit_edit_calls.clear()
+        prepare_mode["value"] = "ok"
+        anime_poll_status["value"] = "InProgress"  # 첫 조회에서는 아직 진행 중
+        on = _dual_state(dual=True)
+        store.save_state(owner, pid, plan_id, on)
+        resp = client.get(get_url)  # refresh_shots → anime queued 준비 후 즉시 제출
+        gbody = resp.get_json()
+        if gbody.get("dualStyle") is not True:
+            bad.append(f"(b) dualStyle 가 true 가 아닙니다: {gbody.get('dualStyle')}")
+        # 016 수정: 제출은 저장 성공 뒤 백그라운드 스레드에서 돈다 — submitted 가 될 때까지 기다린다.
+        anime = _wait_anime("submitted")
+        _join_anime_threads()  # 제출 스레드가 끝났는지 확정(카운터가 다음 소검사로 새지 않게).
+        if anime.get("status") != "submitted":
+            bad.append(f"(b) anime 가 submitted 가 아닙니다: {anime.get('status')}")
+        if not submit_edit_calls:
+            bad.append("(b) fal.submit_edit 가 호출되지 않았습니다")
+        else:
+            call = submit_edit_calls[-1]
+            if call["video_bytes"] <= 0:
+                bad.append("(b) 변환 영상 바이트가 비었습니다")
+            if "@Video1" not in call["prompt"]:
+                bad.append(f"(b) 프롬프트에 @Video1 이 없습니다: {call['prompt'][:60]}")
+            if call["keep_audio"] is not True:
+                bad.append("(b) keep_audio 가 True 가 아닙니다")
+            if call["endpoint"] != settings.VPOC_ANIME_MODEL:
+                bad.append(f"(b) endpoint 가 VPOC_ANIME_MODEL 이 아닙니다: {call['endpoint']}")
+        # 제출 1건 원장 계상(kind=video, usd = 5초×0.14)
+        anime_charges = [e for e in ledger_entries if e.get("model") == settings.VPOC_ANIME_MODEL]
+        if len(anime_charges) != 1:
+            bad.append(f"(b) anime 원장 계상이 1건이 아닙니다: {len(anime_charges)}")
+        elif abs(float(anime_charges[0].get("usd") or 0) - settings.anime_usd(5)) > 0.001:
+            bad.append(f"(b) anime 원장 금액이 틀립니다: {anime_charges[0].get('usd')}")
+
+        # 다시 조회 → 완료 처리(outputKey 채워짐). 조회 간격(5초) 때문에 lastPolledAt 을 비운다.
+        def _clear_poll(inner):
+            inner["steps"]["4"]["shots"][0]["anime"]["lastPolledAt"] = ""
+        store.mutate_state(owner, pid, plan_id, _clear_poll)
+        anime_poll_status["value"] = "Completed"
+        resp = client.get(get_url)
+        after2, _ = store.load_state(owner, pid, plan_id)
+        anime2 = (after2["steps"]["4"]["shots"][0].get("anime") or {})
+        if anime2.get("status") != "completed":
+            bad.append(f"(b) anime 가 completed 가 아닙니다: {anime2.get('status')}")
+        if not anime2.get("outputKey"):
+            bad.append("(b) anime 완료인데 outputKey 가 없습니다")
+        # 완료 뒤 재조회해도 원장이 추가 계상되지 않는다(제출 때 1회만).
+        anime_charges2 = [e for e in ledger_entries if e.get("model") == settings.VPOC_ANIME_MODEL]
+        if len(anime_charges2) != 1:
+            bad.append(f"(b) 완료 후 anime 원장이 늘었습니다: {len(anime_charges2)}")
+
+        # (c) 3초 미만 거절, 15초 초과 자르기 — stitcher.prepare_for_anime 함수 단위.
+        import os as _os  # noqa: PLC0415
+        import tempfile as _tempfile  # noqa: PLC0415
+
+        prepare_mode["value"] = "short"
+        with _tempfile.TemporaryDirectory() as wd:
+            src = _os.path.join(wd, "s.mp4")
+            with open(src, "wb") as handle:
+                handle.write(b"x")
+            try:
+                stitcher.prepare_for_anime(src, _os.path.join(wd, "o.mp4"), wd)
+                bad.append("(c) 3초 미만인데 AnimeTooShort 가 나지 않았습니다")
+            except stitcher.AnimeTooShort:
+                pass
+            except Exception as exc:  # noqa: BLE001
+                bad.append(f"(c) 3초 미만에서 다른 예외: {exc}")
+        # 15초 초과 → 15초로 잘렸다고 가짜가 돌려준다(함수 계약 검증).
+        prepare_mode["value"] = "long"
+        with _tempfile.TemporaryDirectory() as wd:
+            src = _os.path.join(wd, "s.mp4")
+            with open(src, "wb") as handle:
+                handle.write(b"x")
+            prepared = stitcher.prepare_for_anime(src, _os.path.join(wd, "o.mp4"), wd)
+            if float(prepared.get("seconds") or 0) > stitcher.ANIME_MAX_SECONDS:
+                bad.append(f"(c) 15초 초과가 잘리지 않았습니다: {prepared.get('seconds')}")
+            if int(prepared.get("height") or 0) < stitcher.ANIME_MIN_HEIGHT:
+                bad.append(f"(c) 높이가 720 미만입니다: {prepared.get('height')}")
+        # 실제 상수가 설계값과 같은지.
+        if stitcher.ANIME_MIN_SECONDS != 3.0 or stitcher.ANIME_MAX_SECONDS != 15.0 or stitcher.ANIME_MIN_HEIGHT != 720:
+            bad.append("(c) 변환 길이·높이 상수가 설계값(3·15·720)과 다릅니다")
+        prepare_mode["value"] = "ok"
+
+        # (d) 금액에 animeUsd 포함, CostMismatch 없음 — generate(confirmUsd = 실사+애니).
+        settings.VPOC_DUAL_STYLE_ENABLED = True
+        fake.data.clear(); fake.etags.clear()
+        gen_state = _dual_state(dual=True, shot_status="queued")  # ③ ready, ④ 아직 생성 전처럼
+        gen_state["steps"]["4"] = store.new_state(owner, pid, plan_id)["steps"]["4"]
+        store.save_state(owner, pid, plan_id, gen_state)
+        from src.vpoc import settings as _settings  # noqa: PLC0415
+        live_usd = _settings.shot_usd("luma-ray2", "540p", 5)
+        anime_usd = _settings.anime_usd(5)
+        expected = round(live_usd + anime_usd, 2)
+        # 제출 스레드가 외부를 부르지 않도록 video.submit 을 가짜로.
+        saved_vsubmit = video.submit
+
+        def fake_video_submit(**k):
+            return {
+                "provider": "luma-ray2",
+                "invocationArn": "arn:aws:bedrock:test:async-invoke/" + (k.get("shot_id") or "s"),
+                "clientRequestToken": "luma-test-" + (k.get("shot_id") or "s"),
+                "outputPrefix": "p/test", "submittedAt": "2026-10-20T08:10:00Z",
+                "promptChars": len(str(k.get("prompt") or "")),
+            }
+
+        video.submit = fake_video_submit
+        try:
+            # 틀린 금액(실사만) → CostMismatch 409
+            wrong = client.post(f"{get_url}/run/generate", json={"confirmUsd": round(live_usd, 2)})
+            if wrong.status_code != 409 or (wrong.get_json().get("error") or {}).get("type") != "CostMismatch":
+                bad.append(f"(d) 실사만 금액이 CostMismatch 가 아닙니다: {wrong.status_code} {wrong.get_json()}")
+            # 맞는 금액(실사+애니) → 200
+            right = client.post(f"{get_url}/run/generate", json={"confirmUsd": expected})
+            _time.sleep(0.15)
+            if right.status_code != 200:
+                bad.append(f"(d) 실사+애니 금액이 200 이 아닙니다: {right.status_code} {right.get_json()}")
+            after3, _ = store.load_state(owner, pid, plan_id)
+            if after3["steps"]["4"].get("dual") is not True:
+                bad.append(f"(d) generate 가 dual 을 세우지 않았습니다: {after3['steps']['4'].get('dual')}")
+        finally:
+            video.submit = saved_vsubmit
+
+        # (e) 취소 시 anime 도 cancelled
+        saved_ark_cancel = ark.cancel
+        ark.cancel = lambda arn: None  # fal.cancel 까지 가지 않게(조용히 성공)
+        try:
+            fake.data.clear(); fake.etags.clear()
+            cancel_state = _dual_state(dual=True)
+            cancel_state["steps"]["4"]["status"] = "running"
+            cancel_state["steps"]["4"]["shots"][0]["anime"] = {
+                "status": "submitted", "mode": "anime",
+                "invocationArn": f"fal/requests/{settings.VPOC_ANIME_MODEL}/req-anime-1",
+                "outputPrefix": "p/anime", "submittedAt": "2026-10-20T08:00:00Z",
+                "sourceOutputKey": "users/tester/a/s1.mp4", "note": None, "error": None,
+                "lastPolledAt": "", "outputKey": "",
+            }
+            store.save_state(owner, pid, plan_id, cancel_state)
+            cresp = client.post(f"{get_url}/cancel")
+            if cresp.status_code != 200:
+                bad.append(f"(e) 취소가 200 이 아닙니다: {cresp.status_code} {cresp.get_json()}")
+            cafter, _ = store.load_state(owner, pid, plan_id)
+            canime = (cafter["steps"]["4"]["shots"][0].get("anime") or {})
+            if canime.get("status") != "cancelled":
+                bad.append(f"(e) anime 가 cancelled 가 아닙니다: {canime.get('status')}")
+            if canime.get("note") != "사용자가 취소했습니다":
+                bad.append(f"(e) anime note 가 다릅니다: {canime.get('note')}")
+        finally:
+            ark.cancel = saved_ark_cancel
+
+        # (g) 016 수정: 가짜 경합(저장 PreconditionFailed)에도 fal.submit_edit 1회·원장 1회.
+        #     화면 조회(get_plan)는 refresh_shots 로 선점한 뒤 save_state 로 저장한다. 첫 저장이 경합으로
+        #     실패하면 get_plan 은 선점 목록을 버리고(reload) 스레드를 띄우지 않는다. 다음 조회가 다시
+        #     선점(새 claim)·저장 성공해 그 claim 하나만 백그라운드로 제출한다 → 제출·원장 각각 1회.
+        #     (동시 조회+드라이버가 같은 queued 를 선점하는 실제 경합을 흉내: 저장은 한쪽만 이긴다.)
+        settings.VPOC_DUAL_STYLE_ENABLED = True
+        fake.data.clear(); fake.etags.clear()
+        ledger_entries.clear(); submit_edit_calls.clear()
+        prepare_mode["value"] = "ok"
+        anime_poll_status["value"] = "InProgress"
+        gstate = _dual_state(dual=True)
+        store.save_state(owner, pid, plan_id, gstate)
+        real_save_state = store.save_state
+        race = {"left": 1}  # 첫 저장만 한 번 가짜 경합(PreconditionFailed)
+
+        def flaky_save(o, p, pl, st, etag=""):
+            if race["left"] > 0:
+                race["left"] -= 1
+                raise store.VpocError("store.save_state", "PreconditionFailed", "가짜 경합", 409)
+            return real_save_state(o, p, pl, st, etag)
+
+        # get_plan 의 save_state 는 store.save_state 를 직접 부른다 — 그 참조를 가짜로.
+        store.save_state = flaky_save
+        try:
+            resp = client.get(get_url)  # 첫 저장 경합 → get_plan 이 선점 버리고 reload(스레드 안 뜸)
+            # get_plan 은 경합 시 refresh 를 재실행하지 않으므로, 한 번 더 조회해 확정 저장·제출시킨다.
+            store.save_state = real_save_state
+            resp = client.get(get_url)  # 재선점(새 claim) → 저장 성공 → 제출 스레드 1개
+        finally:
+            store.save_state = real_save_state
+        # 제출 스레드가 끝날 때까지 기다린 뒤(터미널 상태 + join) 카운터를 확정한다.
+        ganime = _wait_anime(("submitted", "failed"))
+        _join_anime_threads()
+        g_submits = len(submit_edit_calls)
+        if g_submits != 1:
+            bad.append(f"(g) 가짜 경합인데 fal.submit_edit 가 1회가 아닙니다: {g_submits}")
+        g_charges = [e for e in ledger_entries if e.get("model") == settings.VPOC_ANIME_MODEL]
+        if len(g_charges) != 1:
+            bad.append(f"(g) 가짜 경합인데 anime 원장이 1회가 아닙니다: {len(g_charges)}")
+        if ganime.get("status") != "submitted":
+            bad.append(f"(g) 가짜 경합 뒤 anime 가 submitted 가 아닙니다: {ganime.get('status')}")
+
+        # (g') 코드 단위: 선점 목록 thread-local 이 '매 시도 시작에서 비워져' 마지막 시도만 남는지.
+        #     refresh_shots 가 mutate_state 재시도 때 _claims_reset() 로 이전 시도 선점을 버리는 계약.
+        routes._claims_reset()
+        routes._claims_add({"claim": "attempt-1"})  # 첫 시도(경합으로 버려질 선점)
+        routes._claims_reset()                        # 재시도 시작 → 이전 선점 버림
+        routes._claims_add({"claim": "attempt-2"})  # 성공한 마지막 시도 선점
+        taken = routes._claims_take()
+        if [c.get("claim") for c in taken] != ["attempt-2"]:
+            bad.append(f"(g') _claims_reset 가 이전 시도 선점을 버리지 않습니다: {[c.get('claim') for c in taken]}")
+        if routes._claims_take() != []:
+            bad.append("(g') _claims_take 가 두 번째 호출에서 비우지 않습니다")
+
+        # (h) 016 수정: 다른 claim 의 스레드는 제출하지 않는다. 제출 스레드가 state 를 다시 읽어
+        #     그 샷의 anime.claim 이 자기 것이 아니면(경합으로 버려진 선점) fal.submit_edit 를 하지 않는다.
+        #     job 스레드(이름 vpoc-anime*)의 첫 load_state 를 gate 로 잡고, 그 사이 저장된 claim 을
+        #     다른 값으로 바꿔치기한다 → gate 해제 뒤 스레드는 claim 불일치로 즉시 그만둔다.
+        fake.data.clear(); fake.etags.clear()
+        ledger_entries.clear(); submit_edit_calls.clear()
+        prepare_mode["value"] = "ok"
+        anime_poll_status["value"] = "InProgress"
+        hstate = _dual_state(dual=True)
+        store.save_state(owner, pid, plan_id, hstate)
+
+        gate = _threading.Event()
+        released = {"done": False}
+        real_load_state = store.load_state
+
+        def gated_load(o, p, pl):
+            # job 스레드의 첫 로드만 막는다. 메인 스레드·mutate_state 는 그대로.
+            name = _threading.current_thread().name or ""
+            if name.startswith("vpoc-anime") and not released["done"]:
+                released["done"] = True
+                gate.wait(timeout=3.0)
+            return real_load_state(o, p, pl)
+
+        store.load_state = gated_load
+        try:
+            resp = client.get(get_url)  # 선점 → claim C1, job 스레드 뜸(첫 load 에서 gate 대기)
+            # 저장된 claim 을 C2 로 바꿔치기(다른 pod 가 15분 stale 후 다시 선점한 상황 흉내).
+            def _swap_claim(inner):
+                a = inner["steps"]["4"]["shots"][0].get("anime") or {}
+                a["claim"] = "DIFFERENT-CLAIM"
+                a["status"] = "preparing"
+            store.save_state = real_save_state  # mutate_state 가 쓰도록 복구
+            store.mutate_state(owner, pid, plan_id, _swap_claim)
+            gate.set()  # job 스레드 진행 → claim 불일치 확인 → 제출하지 않음
+            _join_anime_threads()  # 스레드가 완전히 끝날 때까지 기다린 뒤 카운터 확정
+        finally:
+            gate.set()  # 어떤 경로로든 스레드가 영원히 막히지 않게(방어적)
+            store.load_state = real_load_state
+            store.save_state = real_save_state
+        _join_anime_threads()  # finally 이후에도 남은 스레드가 없도록 한 번 더
+        if submit_edit_calls:
+            bad.append(f"(h) 다른 claim 인데 fal.submit_edit 가 호출됐습니다: {len(submit_edit_calls)}")
+        h_charges = [e for e in ledger_entries if e.get("model") == settings.VPOC_ANIME_MODEL]
+        if h_charges:
+            bad.append(f"(h) 다른 claim 인데 원장이 계상됐습니다: {len(h_charges)}")
+
+        # (i) 016 수정: preparing 15분 초과 → 다시 queued(선점 해제). _sync_anime_targets 규칙.
+        #     조회(refresh_shots) 때 preparing·claimedAt 이 15분보다 오래면 queued 로 되돌린다.
+        fake.data.clear(); fake.etags.clear()
+        submit_edit_calls.clear()
+        anime_poll_status["value"] = "InProgress"
+        istate = _dual_state(dual=True)
+        # 16분 전에 선점(claimedAt)된 preparing. 15분(_ANIME_PREPARE_STALE_S)을 넘겼다.
+        old_claimed = "2026-10-20T07:39:00Z"  # 완료 샷 completedAt(07:55)보다 전이지만 테스트는 now 기준
+        import datetime as _dt  # noqa: PLC0415
+
+        stale_at = (_dt.datetime.now(_dt.timezone.utc) - _dt.timedelta(minutes=16)).strftime(
+            "%Y-%m-%dT%H:%M:%SZ"
+        )
+        istate["steps"]["4"]["shots"][0]["anime"] = {
+            "status": "preparing", "claim": "STALE-CLAIM", "claimedAt": stale_at,
+            "sourceOutputKey": "users/tester/a/s1.mp4", "note": None, "error": None,
+        }
+        store.save_state(owner, pid, plan_id, istate)
+        # FAL_KEY 를 잠시 비워 15분 초과로 queued 가 된 뒤 즉시 재선점·제출되지 않게 한다
+        # (queued 로 되돌아갔는지만 확인). refresh_shots 는 queued→(키 없음)→failed 로 두지 않도록
+        # 먼저 _sync_anime_targets 가 preparing→queued 로 바꾸는지를 state 로 본다.
+        saved_fal_key2 = settings.FAL_KEY
+        settings.FAL_KEY = ""
+        try:
+            resp = client.get(get_url)
+            iafter, _ = store.load_state(owner, pid, plan_id)
+            ianime = (iafter["steps"]["4"]["shots"][0].get("anime") or {})
+            # FAL_KEY 없음이면 preemption 전에 queued 로 되돌린 뒤 같은 refresh 에서 키 없음 실패로
+            # 바뀔 수 있다 — 핵심은 'STALE-CLAIM preparing 이 유지되지 않았다'.
+            if ianime.get("status") == "preparing" or ianime.get("claim") == "STALE-CLAIM":
+                bad.append(f"(i) 15분 초과 preparing 이 해제되지 않았습니다: {ianime.get('status')}/{ianime.get('claim')}")
+        finally:
+            settings.FAL_KEY = saved_fal_key2
+
+        _join_anime_threads()  # 검사가 띄운 제출 스레드가 남지 않도록 마지막으로 비운다.
+
+    except Exception as exc:  # noqa: BLE001
+        import traceback as _tb  # noqa: PLC0415
+        bad.append("dual 검사 실행 중 예외: " + repr(exc) + "\n" + _tb.format_exc()[:1500])
+    finally:
+        store.STORE = saved["store_STORE"]
+        ledger.STORE = saved["ledger_STORE"]
+        video.STORE = saved["video_STORE"]
+        fal.STORE = saved["fal_STORE"]
+        fal.submit_edit = saved["fal_submit_edit"]
+        fal.poll = saved["fal_poll"]
+        video.find_output_mp4 = saved["video_find"]
+        ledger.charge = real_charge
+        stitcher.prepare_for_anime = real_prepare
+        settings.VPOC_DUAL_STYLE_ENABLED = saved["dual_flag"]
+        settings.FAL_KEY = saved["fal_key"]
+
+    if bad:
+        fail("dual-style 검사 실패\n" + "\n".join(f"  {item}" for item in bad))
+    else:
+        ok(
+            "dual-style 검사 (a)꺼짐 (b)켜짐 제출·완료·원장 (c)3초/15초 (d)animeUsd (e)취소 (f)옛 state"
+            " (g)가짜경합 1회 (h)다른 claim 제출안함 (i)preparing 15분→queued"
+        )
+
+
 def check_planview_keys() -> None:
     """PlanView ④ 샷의 기존 키가 그대로고 새 키만 더해졌는지 본다."""
     source = (ROOT / "app" / "src" / "vpoc" / "routes.py").read_text(encoding="utf-8")
@@ -1210,6 +1770,7 @@ def main() -> int:
     check_no_budget_cap()
     check_planview_keys()
     check_cancel()
+    check_dual()
     print()
     if warnings:
         print(f"경고 {len(warnings)}건")

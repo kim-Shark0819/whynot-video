@@ -219,3 +219,97 @@ def probe_duration(path: str) -> float:
         return int(hours) * 3600 + int(minutes) * 60 + float(seconds)
     except (ValueError, IndexError):
         return 0.0
+
+
+def probe_height(path: str) -> int:
+    """영상 세로 픽셀(높이). 실패하면 0. fal video-to-video 는 높이 ≥720px 를 요구한다(설계자 2026-10-20).
+
+    ffprobe 없이 ffmpeg -i 의 비디오 스트림 줄("… 1264x724 …")에서 WxH 를 읽는다.
+    """
+    import re
+
+    try:
+        binary = ffmpeg_path()
+    except StitchError:
+        return 0
+    result = _run([binary, "-hide_banner", "-i", path])
+    text = result.stderr.decode("utf-8", errors="replace")
+    for line in text.splitlines():
+        if "Stream #" in line and "Video:" in line:
+            # 해상도는 "WxH" 로 나온다(SAR/DAR 의 괄호 표기는 제외하려 공백/쉼표 경계를 쓴다).
+            match = re.search(r"(?<![\d])(\d{2,5})x(\d{2,5})(?![\d])", line)
+            if match:
+                return int(match.group(2))
+    return 0
+
+
+def scale_to_min_height(source_path: str, output_path: str, *, min_height: int = 720) -> str:
+    """영상 높이를 min_height 이상으로 키운다(설계자 2026-10-20).
+
+    실측: 480p(864x496)는 fal video-to-video 가 422 video_too_small 로 거절한다.
+    scale=-2:720:flags=lanczos 로 키우면 성공(출력 1264x724). -2 는 가로를 2의 배수로
+    자동 맞춰 홀수 폭 인코딩 오류를 막는다. 이미 충분히 크면 그대로 복사한다.
+    """
+    if not source_path or not os.path.exists(source_path):
+        raise StitchError("키울 영상이 없습니다.")
+    binary = ffmpeg_path()
+    command = [
+        binary, "-y", "-hide_banner", "-loglevel", "error",
+        "-i", source_path,
+        "-vf", f"scale=-2:{int(min_height)}:flags=lanczos",
+        "-c:v", "libx264", "-preset", "veryfast", "-crf", "20",
+        "-pix_fmt", "yuv420p", "-c:a", "copy", "-movflags", "+faststart", output_path,
+    ]
+    result = _run(command)
+    if result.returncode != 0 or not os.path.exists(output_path) or not os.path.getsize(output_path):
+        detail = result.stderr.decode("utf-8", errors="replace")[:300]
+        raise StitchError(f"영상 높이를 키우지 못했습니다(→{min_height}p): {detail}")
+    logger.info("Scale to %dp bytes=%s", min_height, os.path.getsize(output_path))
+    return output_path
+
+
+# 실사 → 애니 변환(fal video-to-video)에 보낼 수 있는 길이·높이(설계자 2026-10-20 실측).
+ANIME_MIN_SECONDS = 3.0
+ANIME_MAX_SECONDS = 15.0
+ANIME_MIN_HEIGHT = 720
+
+
+class AnimeTooShort(StitchError):
+    """3초보다 짧아 변환할 수 없는 실사 영상."""
+
+
+def prepare_for_anime(source_path: str, output_path: str, workdir: str) -> dict:
+    """실사 mp4 를 fal video-to-video 가 받는 형태로 맞춘다(설계자 2026-10-20).
+
+    규칙:
+      - 길이 < 3초  → AnimeTooShort (변환하지 않는다 — anime 오류 "3초보다 짧아 변환할 수 없습니다")
+      - 길이 > 15초 → 앞 15초만 자른다
+      - 높이 < 720  → scale=-2:720 로 키운다
+
+    돌려주는 dict: {"path": 준비된 파일 경로, "seconds": 준비된 길이(초), "height": 준비된 높이}.
+    준비 과정에서 자르기/키우기가 없으면 원본 경로를 그대로 쓴다(복사하지 않는다).
+    """
+    if not source_path or not os.path.exists(source_path):
+        raise StitchError("변환할 영상이 없습니다.")
+    seconds = probe_duration(source_path)
+    if seconds and seconds < ANIME_MIN_SECONDS:
+        raise AnimeTooShort("3초보다 짧아 변환할 수 없습니다")
+
+    current = source_path
+    # 15초 초과면 앞 15초만. trim 은 재인코딩(프레임 정확)이라 높이 유지.
+    if seconds and seconds > ANIME_MAX_SECONDS:
+        trimmed = os.path.join(workdir, "anime-trim.mp4")
+        trim(current, trimmed, start_sec=0.0, end_sec=ANIME_MAX_SECONDS)
+        current = trimmed
+        seconds = ANIME_MAX_SECONDS
+
+    height = probe_height(current)
+    if height and height < ANIME_MIN_HEIGHT:
+        scaled = output_path
+        scale_to_min_height(current, scaled, min_height=ANIME_MIN_HEIGHT)
+        current = scaled
+        height = ANIME_MIN_HEIGHT
+
+    final_seconds = probe_duration(current) or seconds
+    final_height = probe_height(current) or height
+    return {"path": current, "seconds": final_seconds, "height": final_height}
