@@ -17,6 +17,7 @@ import io
 import json
 import logging
 import secrets
+import socket
 import threading
 import time
 import urllib.request
@@ -470,12 +471,15 @@ def _data_uri(jpeg: bytes) -> str:
 
 
 def submit_3d(front_square: bytes, back_square: bytes) -> str:
-    """Hunyuan3D v3 에 제출하고 requestArn 을 돌려준다(data URI 입력, face_count 120000)."""
+    """Hunyuan3D v3 에 제출하고 requestArn 을 돌려준다(data URI 입력).
+
+    face_count·enable_pbr 은 설정값을 쓴다(기본 60000·PBR off → GLB 약 10MB, 실측 2026-10-20).
+    """
     eid = settings.HUNYUAN_ENDPOINT
     body = {
         "input_image_url": _data_uri(front_square),
         "back_image_url": _data_uri(back_square),
-        "enable_pbr": True,
+        "enable_pbr": bool(settings.HUNYUAN_ENABLE_PBR),
         "face_count": settings.HUNYUAN_FACE_COUNT,
     }
     result = _fal_request("POST", f"{vpoc_settings.FAL_QUEUE_URL}/{eid}", body)
@@ -513,6 +517,31 @@ def _find_url(node, needle: str) -> str:
     return found[0] if found else ""
 
 
+def _is_transient_3d_error(exc: BaseException) -> bool:
+    """3D 조회 중 난 오류가 '일시 오류'(다시 조회하면 되는 것)인지.
+
+    일시로 보는 것: HTTP 5xx·429, 연결 실패(FalUnreachable), 시간 초과(socket/Timeout),
+    그리고 메시지에 'unavailable' 이 든 것. 그 밖(4xx·잔액 소진 등)은 영구 실패로 본다.
+    """
+    message = str(getattr(exc, "message", "") or exc)
+    if "unavailable" in message.lower():
+        return True
+    if isinstance(exc, VpocError):
+        kind = exc.kind or ""
+        if kind == "FalUnreachable":
+            return True
+        if kind.startswith("HTTP"):
+            digits = "".join(ch for ch in kind if ch.isdigit())
+            if digits:
+                code = int(digits)
+                return code == 429 or 500 <= code <= 599
+        return False
+    # _request 밖으로 샌 연결·시간초과(urllib 가 감싸지 못한 경우).
+    if isinstance(exc, (socket.timeout, TimeoutError, ConnectionError)):
+        return True
+    return False
+
+
 def poll_3d(request_arn: str) -> dict:
     """3D 작업 상태 한 번 조회. 완료면 {status:'Completed', glbUrl, thumbUrl}."""
     endpoint, request_id = _parse_arn(request_arn)
@@ -540,10 +569,33 @@ def poll_3d(request_arn: str) -> dict:
 
 
 def _wait_3d(request_arn: str) -> dict:
-    """완료까지 폴링(5초 간격, 최대 15분)."""
+    """완료까지 폴링(5초 간격, 최대 15분).
+
+    조회 중 fal 일시 오류(5xx·429·연결·시간초과·'unavailable')는 실패로 보지 않고 다시 조회한다
+    (연속 최대 POLL_TRANSIENT_MAX 회, 사이 POLL_TRANSIENT_WAIT_S 초). 그 밖의 오류나 fal 의
+    FAILED 만 실패로 돌려준다.
+    """
     deadline = time.time() + settings.POLL_MAX_S
+    transient = 0
     while True:
-        state = poll_3d(request_arn)
+        try:
+            state = poll_3d(request_arn)
+        except Exception as exc:  # noqa: BLE001
+            if not _is_transient_3d_error(exc):
+                message = exc.message if isinstance(exc, VpocError) else str(exc)[:300]
+                return {"status": "Failed", "error": message or "3D 조회 중 오류"}
+            transient += 1
+            if transient > settings.POLL_TRANSIENT_MAX:
+                message = exc.message if isinstance(exc, VpocError) else str(exc)[:300]
+                return {"status": "Failed", "error": f"fal 일시 오류가 계속됩니다: {message}"}
+            log.warning(
+                "vnew.poll_3d.transient arn=%s n=%d err=%s", request_arn, transient, str(exc)[:200]
+            )
+            if time.time() >= deadline:
+                return {"status": "Failed", "error": "3D 생성이 시간 안에 끝나지 않았습니다."}
+            time.sleep(settings.POLL_TRANSIENT_WAIT_S)
+            continue
+        transient = 0  # 성공 조회면 연속 일시 오류 카운트 초기화
         if state["status"] in ("Completed", "Failed"):
             return state
         if time.time() >= deadline:
@@ -653,30 +705,52 @@ def _build_variant(
             _set_variant(owner, char_id, variant, {"status": "failed", "error": state.get("error", "3D 실패")})
             return
 
-        glb_bytes_data = _fetch_url(state["glbUrl"])
-        glb_key = model_glb_key(owner, char_id, variant, version)
-        STORE.put_bytes(glb_key, glb_bytes_data, "model/gltf-binary")
-
-        thumb_key = ""
-        if state.get("thumbUrl"):
-            try:
-                thumb_data = _fetch_url(state["thumbUrl"])
-                thumb_key = model_thumb_key(owner, char_id, variant, version)
-                STORE.put_bytes(thumb_key, thumb_data, "image/png")
-            except Exception as exc:  # noqa: BLE001
-                log.warning("vnew.thumb_copy_failed char=%s err=%s", char_id, str(exc)[:200])
-
-        _set_variant_3d(
-            owner,
-            char_id,
-            variant,
-            {"status": "ready", "glbKey": glb_key, "thumbKey": thumb_key, "error": ""},
-        )
-        _set_variant(owner, char_id, variant, {"status": "ready", "error": ""})
+        _copy_3d_result(owner, char_id, variant, version, state)
     except Exception as exc:  # noqa: BLE001
         log.warning("vnew.build_variant_failed char=%s variant=%s err=%s", char_id, variant, str(exc)[:300])
         message = exc.message if isinstance(exc, VpocError) else str(exc)[:300]
+        # 3D 가 제출만 되고 끝난 경우(조회·복사 중 예외 등) model3d.status 가 submitted 로 남지 않게
+        # 함께 failed 로 맞춘다 — ready 는 건드리지 않는다.
+        _fail_pending_3d(owner, char_id, variant, message)
         _set_variant(owner, char_id, variant, {"status": "failed", "error": message})
+
+
+def _fail_pending_3d(owner: str, char_id: str, variant: str, message: str) -> None:
+    """model3d.status 가 ready 가 아니면 failed + error 로 맞춘다(submitted 로 남지 않게)."""
+
+    def mutator(data: dict) -> None:
+        v = data.setdefault("variants", {}).setdefault(variant, _empty_variant())
+        m3d = v.setdefault("model3d", {})
+        if m3d.get("status") != "ready":
+            m3d["status"] = "failed"
+            if not m3d.get("error"):
+                m3d["error"] = message
+
+    mutate_char(owner, char_id, mutator)
+
+
+def _copy_3d_result(owner: str, char_id: str, variant: str, version: int, state: dict) -> None:
+    """완료된 3D 결과(GLB·썸네일)를 우리 버킷으로 옮기고 variant 를 ready 로 맞춘다."""
+    glb_bytes_data = _fetch_url(state["glbUrl"])
+    glb_key = model_glb_key(owner, char_id, variant, version)
+    STORE.put_bytes(glb_key, glb_bytes_data, "model/gltf-binary")
+
+    thumb_key = ""
+    if state.get("thumbUrl"):
+        try:
+            thumb_data = _fetch_url(state["thumbUrl"])
+            thumb_key = model_thumb_key(owner, char_id, variant, version)
+            STORE.put_bytes(thumb_key, thumb_data, "image/png")
+        except Exception as exc:  # noqa: BLE001
+            log.warning("vnew.thumb_copy_failed char=%s err=%s", char_id, str(exc)[:200])
+
+    _set_variant_3d(
+        owner,
+        char_id,
+        variant,
+        {"status": "ready", "glbKey": glb_key, "thumbKey": thumb_key, "error": ""},
+    )
+    _set_variant(owner, char_id, variant, {"status": "ready", "error": ""})
 
 
 def run_build(owner: str, char_id: str, version: int) -> None:
@@ -751,7 +825,122 @@ def start_build(owner: str, char_id: str) -> int:
     return version
 
 
-# ================================================================ stale(파드 재시작 대비)
+# ================================================================ 3D만 다시(retry3d)
+#
+# 시트·정면은 다시 그리지 않고(비용 절약) 그 variant 의 front/back 으로 3D 만 다시 만든다.
+# 이전 requestArn 이 있고 fal 에서 아직 완료 결과를 받을 수 있으면 새로 제출하지 않고 가져온다.
+
+
+def _retry3d_running(v: dict) -> bool:
+    """이 variant 의 3D 재시도가 진행 중인가(submitted + 최근 시작, stall 안 넘음)."""
+    m3d = v.get("model3d") or {}
+    if m3d.get("status") != "submitted":
+        return False
+    started = _parse_iso(m3d.get("retryStartedAt") or "")
+    if not started:
+        # 시작 시각이 없으면(과거 build 잔여) 진행 중으로 보지 않는다 — 다시 시도할 수 있게.
+        return False
+    return (datetime.now(timezone.utc) - started).total_seconds() <= settings.BUILD_STALL_S
+
+
+def start_retry3d(owner: str, char_id: str, variant: str) -> int:
+    """3D만 다시 만들기 요청. front/back 없으면 400, 진행 중이면 409. version 반환(스레드 시작)."""
+    if variant not in settings.VARIANTS:
+        raise VpocError("vnew.retry3d", "BadVariant", "알 수 없는 그림체입니다.", 404)
+
+    def mutator(data: dict) -> int:
+        v = data.setdefault("variants", {}).setdefault(variant, _empty_variant())
+        if not v.get("frontKey") or not v.get("backKey"):
+            raise VpocError(
+                "vnew.retry3d", "NoImages", "정면·후면 이미지가 없어 3D 만 다시 만들 수 없습니다.", 400
+            )
+        if _retry3d_running(v):
+            raise VpocError("vnew.retry3d", "AlreadyBuilding", "3D 를 이미 다시 만들고 있습니다.", 409)
+        v["status"] = "model3d"
+        v["error"] = ""
+        m3d = v.setdefault("model3d", {})
+        m3d["status"] = "submitted"
+        m3d["error"] = ""
+        m3d["retryStartedAt"] = now_iso()
+        return int(data.get("version") or 0)
+
+    updated, version = mutate_char(owner, char_id, mutator)
+    upsert_index(owner, updated)
+
+    thread = threading.Thread(
+        target=run_retry3d,
+        args=(owner, char_id, variant, version),
+        daemon=True,
+        name=f"vnew-retry3d-{char_id}-{variant}",
+    )
+    thread.start()
+    return version
+
+
+def run_retry3d(owner: str, char_id: str, variant: str, version: int) -> None:
+    """3D만 다시(백그라운드). 이전 requestArn 이 완료면 재사용(제출 0회), 아니면 새로 제출한다."""
+    try:
+        char, _ = load_char(owner, char_id)
+        v = (char.get("variants") or {}).get(variant) or {}
+        front_key = v.get("frontKey") or ""
+        back_key = v.get("backKey") or ""
+        if not front_key or not back_key:
+            raise VpocError("vnew.retry3d", "NoImages", "정면·후면 이미지가 없습니다.", 400)
+        prior_arn = (v.get("model3d") or {}).get("requestArn") or ""
+
+        state = None
+        # 1) 이전 요청이 있으면 먼저 조회 — 완료면 그 결과를 쓴다(새로 제출하지 않는다).
+        if prior_arn:
+            state = _wait_3d(prior_arn)
+            if state["status"] != "Completed":
+                state = None  # 실패·시간초과면 새로 제출한다.
+
+        # 2) 이전 결과를 못 쓰면 front/back 으로 새로 제출한다.
+        if state is None:
+            front = STORE.get_bytes(front_key)
+            back = STORE.get_bytes(back_key)
+            side = settings.MODEL_INPUT_SQUARE
+            front_sq = _square_pad(front, side)
+            back_sq = _square_pad(back, side)
+            request_arn = submit_3d(front_sq, back_sq)
+            _charge_3d(owner, char_id, variant)
+            _set_variant_3d(
+                owner, char_id, variant, {"status": "submitted", "requestArn": request_arn, "error": ""}
+            )
+            state = _wait_3d(request_arn)
+            if state["status"] != "Completed":
+                _set_variant_3d(owner, char_id, variant, {"status": "failed", "error": state.get("error", "")})
+                _set_variant(owner, char_id, variant, {"status": "failed", "error": state.get("error", "3D 실패")})
+                _refresh_char_status(owner, char_id)
+                return
+
+        _copy_3d_result(owner, char_id, variant, version, state)
+        _refresh_char_status(owner, char_id)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("vnew.retry3d_failed char=%s variant=%s err=%s", char_id, variant, str(exc)[:300])
+        message = exc.message if isinstance(exc, VpocError) else str(exc)[:300]
+        _fail_pending_3d(owner, char_id, variant, message)
+        _set_variant(owner, char_id, variant, {"status": "failed", "error": message})
+        _refresh_char_status(owner, char_id)
+
+
+def _refresh_char_status(owner: str, char_id: str) -> None:
+    """variant 상태를 모아 캐릭터 전체 status 를 다시 매긴다(하나라도 ready 면 ready)."""
+    try:
+        char, _ = load_char(owner, char_id)
+        statuses = [(char.get("variants") or {}).get(v, {}).get("status") for v in settings.VARIANTS]
+        final = "ready" if any(s == "ready" for s in statuses) else "failed"
+
+        def set_status(data: dict) -> None:
+            data["status"] = final
+
+        updated, _ = mutate_char(owner, char_id, set_status)
+        upsert_index(owner, updated)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("vnew.refresh_status_failed char=%s err=%s", char_id, str(exc)[:200])
+
+
+
 
 
 def _parse_iso(value: str):

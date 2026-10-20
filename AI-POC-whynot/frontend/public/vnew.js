@@ -815,18 +815,26 @@
     } else if (status === "failed") {
       var err = el("div", "vnew-3d-state is-failed");
       err.appendChild(el("p", "login-error", model3d.error || v.error || "3D 만들기에 실패했습니다."));
-      var retry = el("button", "outline-action", "다시 만들기");
+      // 정면 이미지가 있으면 시트·정면은 다시 그리지 않고 3D 만 다시 만든다(비용 절약).
+      var canRetry3d = !!v.frontUrl;
+      var retry = el("button", "outline-action", canRetry3d ? "3D만 다시 만들기" : "다시 만들기");
       retry.type = "button";
       retry.addEventListener("click", function () {
         var okConfirm = false;
+        var msg = canRetry3d
+          ? "3D 만 다시 만듭니다(시트·정면은 그대로). 비용이 듭니다. 계속할까요?"
+          : "다시 만들면 새 버전이 생기고 비용이 듭니다. 계속할까요?";
         try {
-          okConfirm = window.confirm("다시 만들면 새 버전이 생기고 비용이 듭니다. 계속할까요?");
+          okConfirm = window.confirm(msg);
         } catch (e) {
           okConfirm = true;
         }
         if (!okConfirm) return;
         retry.disabled = true;
-        api("/api/vnew/characters/" + encodeURIComponent(detail.id) + "/build", { method: "POST" })
+        var url = canRetry3d
+          ? "/api/vnew/characters/" + encodeURIComponent(detail.id) + "/variants/" + encodeURIComponent(meta.key) + "/retry3d"
+          : "/api/vnew/characters/" + encodeURIComponent(detail.id) + "/build";
+        api(url, { method: "POST" })
           .then(function () {
             refreshDetail(host, false);
           })

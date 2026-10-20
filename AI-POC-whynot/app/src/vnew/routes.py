@@ -154,6 +154,19 @@ def create_blueprint(deps: VnewDependencies) -> Blueprint:
         except Exception as exc:  # noqa: BLE001
             return _fail(exc)
 
+    # ------------------------------------------------------------ 3D만 다시(retry3d)
+
+    @bp.post("/characters/<char_id>/variants/<variant>/retry3d")
+    @deps.require_auth
+    def retry3d_character(char_id: str, variant: str):
+        try:
+            owner = _owner()
+            characters.load_char(owner, char_id)  # 존재·소유 확인
+            version = characters.start_retry3d(owner, char_id, variant)
+            return jsonify({"ok": True, "version": version, "status": "building"}), 202
+        except Exception as exc:  # noqa: BLE001
+            return _fail(exc)
+
     # ------------------------------------------------------------ GLB 스트리밍
 
     @bp.get("/characters/<char_id>/model/<variant>.glb")

@@ -25,6 +25,13 @@ def _int(name: str, default: int) -> int:
         return default
 
 
+def _bool(name: str, default: bool) -> bool:
+    raw = os.getenv(name, "").strip().lower()
+    if not raw:
+        return default
+    return raw in ("1", "true", "yes", "on")
+
+
 # --- 재사용(vpoc.settings 를 그대로 본다) ---
 MAIN_BUCKET = vpoc_settings.MAIN_BUCKET
 AWS_REGION = vpoc_settings.AWS_REGION
@@ -41,13 +48,20 @@ FRONT_SIZE = os.getenv("VNEW_FRONT_SIZE", "1440x2560")  # 세로 정면 전신
 # --- 3D(Hunyuan3D v3, fal 큐) ---
 # fal endpoint_id. ARN 접두사·큐 경로는 vpoc.fal 과 같다.
 HUNYUAN_ENDPOINT = os.getenv("VNEW_3D_ENDPOINT", "fal-ai/hunyuan3d-v3/image-to-3d")
-# 기본 500000 이면 GLB 40MB → 120000 으로 줄인다(실측 2026-10-20).
-HUNYUAN_FACE_COUNT = _int("VNEW_3D_FACE_COUNT", 120000)
+# 기본 500000 이면 GLB 40MB, 120000+PBR 이면 29MB → 실측(2026-10-20) enable_pbr false·60000 이면
+# 10.6MB·85초로 웹에서 쓸 만하다. env 로 바꿀 수 있게 둔다.
+HUNYUAN_FACE_COUNT = _int("VNEW_3D_FACE_COUNT", 60000)
+# PBR 재질을 끄면 GLB 가 크게 작아진다(기본 false). env 로 켤 수 있다.
+HUNYUAN_ENABLE_PBR = _bool("VNEW_3D_ENABLE_PBR", False)
 # 3D 입력 정사각 한 변(흰 배경 패딩).
 MODEL_INPUT_SQUARE = _int("VNEW_3D_INPUT_SQUARE", 1024)
 # 3D 완료 폴링: 5초 간격, 최대 15분.
 POLL_INTERVAL_S = _int("VNEW_3D_POLL_INTERVAL_S", 5)
 POLL_MAX_S = _int("VNEW_3D_POLL_MAX_S", 900)
+# 3D 조회 중 fal 일시 오류(5xx·429·연결·시간초과·"unavailable")는 실패로 보지 않고 다시 조회한다.
+# 연속 일시 오류가 이 횟수를 넘으면 그때 실패. 재조회 사이 대기(초).
+POLL_TRANSIENT_MAX = _int("VNEW_3D_TRANSIENT_MAX", 10)
+POLL_TRANSIENT_WAIT_S = _int("VNEW_3D_TRANSIENT_WAIT_S", 15)
 
 # --- 단가(원장) ---
 SEEDREAM_USD = _float("VNEW_SEEDREAM_USD", 0.04)  # Seedream 장당
