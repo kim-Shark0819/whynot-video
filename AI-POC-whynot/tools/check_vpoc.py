@@ -7348,7 +7348,7 @@ def check_vnew_previz_camera() -> None:
     pk_actors = [
         {"id": "aY", "name": Y, "heightM": 1.76, "foot": [0.0, 0.0, 0.0], "pose": "stand"},
         # 상대를 카메라와 주인공 사이(가리는 자리)에 둔다 → 옮겨야 한다.
-        {"id": "aB", "name": B, "heightM": 1.90, "foot": [-0.1, 0.0, 1.0], "pose": "stand"},
+        {"id": "aB", "name": B, "heightM": 1.90, "foot": [0.1, 0.0, 1.0], "pose": "stand"},
     ]
     pk_res = cam.place_cut(pk_g, pk_actors, room, 1)
     pk_cam = pk_res["camera"]
@@ -7363,6 +7363,84 @@ def check_vnew_previz_camera() -> None:
         sp = _pvf.project_point(pk_cam, [pk_b["foot"][0], eye_y, pk_b["foot"][2]])
         if sp is None or sp["screenX"] < 0.7:
             bad.append(f"(pc-k) hands_only screenX 0.85 상대 투영 x 가 0.7 이상(오른쪽)이 아닙니다: {sp and round(sp['screenX'], 3)}")
+
+    # ---------------- (pc-l) probe_yj 2차 cut-01 재현: 클린 싱글 상대가 화면에 걸리면 안 됨 ----------------
+    # dev 실측(2026-10-21 probe_yj 2차, 051 이후): cut-01(범건우 클린 싱글)에서 others 가 비어 있는데
+    # 상대(여의준)의 머리가 화면 안에 크게 보였다. place_cut 결과에서 여의준이 화면과 겹치지 않거나 hide.
+    pl_g = grammar.normalize_grammar(
+        {
+            "mainSubject": B, "frameBottomCut": "chest", "shotType": "clean_single",
+            "vantage": "front3q", "faceTurn": "screen_right", "cameraHeight": "eye",
+            "headTopY": 0.1, "subjectX": 0.5, "offscreenPartnerSide": "none", "others": [],
+        }
+    )
+    pl_actors = [
+        {"id": "aY", "name": Y, "heightM": 1.76, "foot": [-0.05, 0.0, -1.1], "pose": "sit", "facingDeg": 35},
+        {"id": "aB", "name": B, "heightM": 1.90, "foot": [0.65, 0.0, -1.1], "pose": "sit"},
+    ]
+    pl_res = cam.place_cut(pl_g, pl_actors, room, 1)
+    pl_hide = {c["actor"] for c in pl_res["cheats"] if c.get("type") == "hide"}
+    pl_out = {a.get("id"): a for a in pl_res["actors"]}
+    if "aY" not in pl_hide:
+        # 숨기지 않았으면 결과 자리에서 화면과 겹치지 않아야 한다.
+        pl_cam = pl_res["camera"]
+        pl_y = pl_out.get("aY")
+        if pl_y is None:
+            bad.append("(pc-l) 여의준이 hide 도 아니고 actors 목록에도 없습니다")
+        else:
+            info = cam._actor_points({"heightM": 1.76}, pl_y["foot"], "sit")
+            box = cam._person_screen_box(pl_cam, info)
+            if cam._overlaps_frame(box):
+                bad.append(f"(pc-l) 클린 싱글 cut-01 에서 여의준이 화면과 겹칩니다(hide 도 아님): {box}")
+
+    # ---------------- (pc-m) 인서트(headTopY -0.7, belly) + hands_only 상대 몸통 앞 ----------------
+    # cut-08 류: 주인공 얼굴이 화면 위로 잘리고 몸통(belly 까지)만 보인다. hands_only 상대가 몸통 앞을
+    # 덮으면 안 된다 → 결과에서 보이는 주인공 영역 가림 < 15%, 상대 머리는 화면 밖.
+    pm_g = grammar.normalize_grammar(
+        {
+            "mainSubject": B, "frameBottomCut": "belly", "shotType": "insert",
+            "vantage": "front", "faceTurn": "down", "cameraHeight": "low",
+            "headTopY": -0.7, "subjectX": 0.5, "offscreenPartnerSide": "left",
+            "others": [{"name": Y, "how": "hands_only", "side": "left", "screenX": 0.3}],
+        }
+    )
+    # 상대(Y)를 주인공(B) 몸통 앞(카메라와 주인공 사이)에 둬 몸통을 덮게 한다.
+    pm_actors = [
+        {"id": "aB", "name": B, "heightM": 1.90, "foot": [0.0, 0.0, -1.0], "pose": "sit"},
+        {"id": "aY", "name": Y, "heightM": 1.76, "foot": [-0.1, 0.0, -0.3], "pose": "sit"},
+    ]
+    pm_res = cam.place_cut(pm_g, pm_actors, room, 1)
+    pm_cam = pm_res["camera"]
+    pm_subject = cam._actor_points({"heightM": 1.90}, [0.0, 0.0, -1.0], "sit")
+    pm_out = {a.get("id"): a for a in pm_res["actors"]}
+    pm_y = pm_out.get("aY")
+    if pm_y is None:
+        bad.append("(pc-m) hands_only 상대가 hide 됐습니다(인서트에서 숨기면 안 됨)")
+    else:
+        pm_yinfo = cam._actor_points({"heightM": 1.76}, pm_y["foot"], "sit")
+        # 보이는 주인공 영역 가림 < 15%(= _occludes False, grammar 의 _bottom=belly 기준).
+        if cam._occludes(pm_cam, pm_yinfo, pm_subject, pm_g):
+            bad.append("(pc-m) 인서트에서 hands_only 상대가 주인공 보이는 영역을 15% 이상 가립니다")
+        # 상대 머리는 화면 밖.
+        if cam._head_onscreen(pm_cam, pm_yinfo):
+            bad.append("(pc-m) 인서트에서 hands_only 상대 머리가 화면 안에 보입니다")
+        if pm_res["fit"].get("occluded"):
+            bad.append(f"(pc-m) 인서트에서 occluded True 입니다: {pm_res['cheats']}")
+
+    # ---------------- (pc-n) 8컷 재현: extraVisible 비어 있음·occluded False·match ≥ 0.9 ----------------
+    for cid in ORDER:
+        g = cuts_grammar[cid]
+        g["_crossed"] = cid in crossed_set
+        this_side = -line["side"] if cid in crossed_set else line["side"]
+        actors_in_cut = [dict(actors_base[Y]), dict(actors_base[B])]
+        result = cam.place_cut(g, actors_in_cut, room, this_side)
+        fit = result["fit"]
+        if fit.get("extraVisible"):
+            bad.append(f"(pc-n) {cid} extraVisible 가 비어 있지 않습니다: {fit.get('extraVisible')}")
+        if fit.get("occluded"):
+            bad.append(f"(pc-n) {cid} occluded True 입니다")
+        if fit["match"] < 0.9:
+            bad.append(f"(pc-n) {cid} match 가 0.9 미만입니다: {fit['match']}")
 
     # ---------------- (pc-h) read_cut: 가짜 _read ----------------
     read_seen: list[dict] = []
@@ -7423,6 +7501,8 @@ def check_vnew_previz_camera() -> None:
             " (pc-f)몸 축 0.35m 밖 (pc-g)numpy 없음 (pc-h)read_cut 블록·normalize·charge 1회"
             " (pc-i)cut-07 재현 여의준 범건우 안 가림 (pc-j)8컷 발간격≥0.45·occluded False"
             " (pc-k)hands_only screenX0.85 상대 오른쪽 가장자리(투영 x≥0.7)"
+            " (pc-l)클린 싱글 cut-01 상대 화면 밖·hide (pc-m)인서트 belly hands_only 가림<15%·머리 밖"
+            " (pc-n)8컷 extraVisible 비움·occluded False·match≥0.9"
         )
 
 
