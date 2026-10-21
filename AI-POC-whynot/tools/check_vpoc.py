@@ -6075,6 +6075,7 @@ def check_vnew_previz() -> None:
     from src import vnew  # noqa: PLC0415
     from src.vnew import plan as planmod  # noqa: PLC0415
     from src.vnew import previz as pvmod  # noqa: PLC0415
+    from src.vnew import previz_grammar as grammarmod  # noqa: PLC0415
     from src.vnew import previz_schema as pvschema  # noqa: PLC0415
 
     fake_store = _FakeCharStore()
@@ -6157,18 +6158,9 @@ def check_vnew_previz() -> None:
 
     design_calls: list[str] = []
     design_prompts: list[str] = []  # fake_design 이 받은 프롬프트 전문(pv-c 다시 만들기 검증)
-    retry_calls: list[str] = []  # 재요청으로 받은 cutId 순서(j2: 오차 큰 컷만)
 
-    def _retry_cut_id(text: str) -> str:
-        # 재요청 프롬프트에서 cutId=cX 를 찾는다.
-        import re as _re  # noqa: PLC0415
-
-        marker = text.find("[투영 검산")
-        if marker < 0:
-            return ""
-        m = _re.search(r"cutId=(\S+)", text[marker:])
-        return m.group(1) if m else ""
-
+    # --- 가짜 설계 LLM(049): 카메라는 서버가 계산하므로 Astra 는 인물 자리·자세·facingDeg 만 쓴다. ---
+    # 교장실 scene: a1(교장) 앉음·a2(학생) 서 있음. 거리 scene: a3 한 사람.
     def fake_design(blocks, *, model):
         design_calls.append(model)
         text = ""
@@ -6177,29 +6169,20 @@ def check_vnew_previz() -> None:
                 text = b["text"]
                 break
         design_prompts.append(text)
-        retry_id = _retry_cut_id(text)
-        if retry_id:
-            # 그 컷 camera 만 다시 준다. c2 는 고쳐 주고(GOOD), c3 는 계속 어긋나게(BAD) → c3 은 격자 보정으로.
-            retry_calls.append(retry_id)
-            cam = dict(GOOD_CAM) if retry_id == "c2" else dict(BAD_CAM)
-            return (
-                {"timeline": [{"cutId": retry_id, "camera": cam}]},
-                {"model": model, "inputTokens": 5, "outputTokens": 5},
-            )
-        # 초기 전체 설계. 거리(c4) 장소 프롬프트면 거리 장면을 준다.
-        if "city street" in text or "거리" in text and "c4" in text:
+        # 거리(c4) 장소 프롬프트면 거리 장면을 준다.
+        if "city street" in text or ("거리" in text and "c4" in text):
             payload = {
-                "room": {"width": 8.0, "depth": 8.0, "height": 5.0},
+                "room": {"width": 8.0, "depth": 8.0, "height": 10.0},  # 열린 공간: 서버가 3.0 으로 clamp
                 "actors": [{"id": "a3", "name": "행인", "color": "#3cb44b", "heightM": 1.7}],
-                "timeline": [{"cutId": "c4", "camera": dict(GOOD_CAM),
+                "timeline": [{"cutId": "c4", "camera": {"pos": [0, 1.5, 4], "target": [0, 1, 0], "fov": 50},
                               "actors": [{"id": "a3", "pos": [0, 0, 0], "pose": "stand"}]}],
                 "notesKo": "거리",
             }
             return payload, {"model": model, "inputTokens": 10, "outputTokens": 20}
         # 교장실: 모델이 timeline 을 2개만 주고(c3 누락), 색도 하나만 준다 → 정리가 1:1·색 보정.
-        # c1=GOOD(바로 맞음), c2=BAD(재요청 대상), c3 누락→c2 복사(BAD)→재요청 2회 후 격자 보정.
+        # 방 height 10 → 닫힌 방이라 서버가 2.4~3.5 로 clamp(pg-d).
         payload = {
-            "room": {"width": 6.0, "depth": 5.0, "height": 2.8, "walls": {"north": {"color": "#ccc"}}},
+            "room": {"width": 6.0, "depth": 5.0, "height": 10.0, "walls": {"north": {"color": "#ccc"}}},
             "light": {"kind": "sun", "from": [0, 2.8, -2.5], "to": [0, 0, 0], "labelKo": "북쪽 창문 햇빛"},
             "props": [{"id": "p1", "labelKo": "책상", "shape": "box", "size": [1.5, 0.8, 0.8], "pos": [0, 0.4, 0]}],
             "actors": [
@@ -6207,37 +6190,48 @@ def check_vnew_previz() -> None:
                 {"id": "a2", "name": "학생", "color": "#e6194b", "heightM": 1.6},  # 중복색
             ],
             "timeline": [
-                {"cutId": "c1", "camera": dict(GOOD_CAM),
-                 "actors": [{"id": "a1", "pos": [1, 0, 0], "pose": "sit", "speaking": True},
-                            {"id": "a2", "pos": [-1, 0, 1], "pose": "stand"}]},
-                {"cutId": "c2", "camera": dict(BAD_CAM),
-                 "actors": [{"id": "a1", "pos": [1, 0, 0], "pose": "sit"},
-                            {"id": "a2", "pos": [-1, 0, 1], "pose": "stand"}]},
+                {"cutId": "c1", "camera": {"pos": [1, 1.5, 4], "target": [1, 1, 0], "fov": 50},
+                 "actors": [{"id": "a1", "pos": [1, 0, 0], "pose": "sit", "speaking": True, "facingDeg": 270},
+                            {"id": "a2", "pos": [-1, 0, 0], "pose": "stand", "facingDeg": 90}]},
+                {"cutId": "c2", "camera": {"pos": [1, 1.5, 4], "target": [1, 1, 0], "fov": 50},
+                 "actors": [{"id": "a1", "pos": [1, 0, 0], "pose": "sit", "facingDeg": 270},
+                            {"id": "a2", "pos": [-1, 0, 0], "pose": "stand", "facingDeg": 90}]},
             ],
             "notesKo": "교장실 대화",
         }
         return payload, {"model": model, "inputTokens": 10, "outputTokens": 20}
 
-    # 가짜 패널 샷 분석(Claude 분석 체인 대체). 교장실 컷(c1,c2,c3)에 a1(교장) 목표를 둔다.
-    # 거리 컷(c4)은 분석 없음(인물 목표 없음) → fit 에서 건너뛴다.
-    panel_analyze_cuts: list[str] = []
+    # --- 가짜 연출 문법 읽기(previz_grammar._read 대체). read_cut 이 이를 호출·normalize 한다. ---
+    # 교장실 c1·c2·c3 는 교장 단독 바스트(더티 싱글). 거리 c4 는 패널이 없다고 보고 None 을 돌려준다
+    # (match null → 낮은 컷 → pg-f·승인 관문). 호출 횟수를 cutId 별로 센다(캐시 검증 pg-a).
+    read_calls: list[str] = []
 
-    def fake_analyze_panels(owner_, pid_, plan_id_, groups_, chars_, task_id=""):
-        panel_analyze_cuts.append("called")
-        shot = {
-            "shotSize": "medium",
+    def fake_read(blocks, *, model):
+        # 블록의 cut 설명(json)에서 cutId 를 추정하기 어려우니 호출만 센다. shotKo 로 교장/학생 구분.
+        text = ""
+        for b in blocks:
+            if isinstance(b, dict) and b.get("text"):
+                text = b["text"]
+                break
+        read_calls.append(text[:40])
+        # 거리 컷은 패널 없음 → read_cut 이 tiles 없으면 애초에 안 부른다. 여기 오면 교장실 컷.
+        payload = {
+            "mainSubject": "교장",
+            "frameBottomCut": "chest",
+            "shotType": "dirty_single",
+            "vantage": "front3q",
+            "faceTurn": "toward_camera",
             "cameraHeight": "eye",
-            "angle": "front",
-            "subjects": [dict(A1_TARGET, name="교장", facing="camera", visible="full")],
-            "visibleWalls": ["north"],
-            "notesEn": "principal centered",
+            "headTopY": 0.1,
+            "subjectX": 0.5,
+            "others": [{"name": "학생", "how": "hands_only", "side": "right", "screenX": 0.85}],
+            "offscreenPartnerSide": "right",
+            "reasonKo": "교장 바스트 단독",
         }
-        return {"c1": dict(shot, subjects=[dict(A1_TARGET, name="교장", facing="camera", visible="full")]),
-                "c2": dict(shot, subjects=[dict(A1_TARGET, name="교장", facing="camera", visible="full")]),
-                "c3": dict(shot, subjects=[dict(A1_TARGET, name="교장", facing="camera", visible="full")])}
+        return payload, {"model": model, "inputTokens": 7, "outputTokens": 14}
 
-    # 가짜 지시→변경 목록 변환(_changes). 받은 한국어 지시(프롬프트)를 기록하고, c1 을 겨냥한
-    # 구체적 영어 변경 하나를 돌려준다(pv-c·pv-d). Astra 먼저 불린다(모델 순서 검증).
+    # 가짜 지시→수정 목록 변환(_changes, emit_edits). 받은 지시를 기록하고 c1 vantage=side 로 바꾼다
+    # (pv-c·pv-d·pg-e). Astra 먼저 불린다(모델 순서 검증).
     changes_calls: list[dict] = []
 
     def fake_changes(blocks, *, model):
@@ -6248,7 +6242,7 @@ def check_vnew_previz() -> None:
                 break
         changes_calls.append({"model": model, "text": text})
         return (
-            {"changes": [{"cutId": "c1", "whatEn": "move the camera to about 1.2 m from 교장, fov 28"}]},
+            {"edits": [{"cutId": "c1", "field": "vantage", "value": "side", "noteEn": "profile only"}]},
             {"model": model, "inputTokens": 4, "outputTokens": 8},
         )
 
@@ -6257,6 +6251,12 @@ def check_vnew_previz() -> None:
     def fake_charge_text(key, **kwargs):
         ledger_calls.append({"key": key, **kwargs})
         return {"spentUsd": 0.0, "capUsd": None}
+
+    # 검사 환경에는 실제 업로드 웹툰 타일이 없다. _cut_tiles 를 가짜로 바꿔, panels 가 있는 컷은
+    # 가짜 JPEG 바이트 1장, panels 가 빈 컷(c4)은 빈 목록을 돌려준다 → read_cut 이 c1·c2·c3 만 불린다.
+    # (코드 경로는 그대로: run_design → _read_grammars → _cut_tiles → read_cut.)
+    def fake_cut_tiles(cut_panels, all_tiles):
+        return [b"FAKE-PANEL-JPEG"] if (cut_panels or []) else []
 
     def fake_analyze_conti(blocks, *, model):
         # 교장실 컷 3개(c1,c2,c3) + 거리 컷 1개(c4) → 장소 2개.
@@ -6267,7 +6267,7 @@ def check_vnew_previz() -> None:
              "locationEn": "A closed principal's office", "characters": [], "dialogueKo": "", "situationKo": "", "promptEn": "x"},
             {"id": "c3", "no": 3, "seconds": 4, "panels": [2], "shotKo": "", "cameraEn": "",
              "locationEn": "A closed principal's office", "characters": [], "dialogueKo": "", "situationKo": "", "promptEn": "x"},
-            {"id": "c4", "no": 4, "seconds": 5, "panels": [3], "shotKo": "", "cameraEn": "",
+            {"id": "c4", "no": 4, "seconds": 5, "panels": [], "shotKo": "", "cameraEn": "",
              "locationEn": "A city street at sunset", "characters": [], "dialogueKo": "", "situationKo": "", "promptEn": "x"},
         ]
         return {"cuts": cuts}, {"model": model, "inputTokens": 3, "outputTokens": 6}
@@ -6276,7 +6276,8 @@ def check_vnew_previz() -> None:
         "pv_STORE": pvmod.STORE,
         "plan_STORE": planmod.STORE,
         "_design": pvmod._design,
-        "_analyze_panels": pvmod._analyze_panels,
+        "gr_read": grammarmod._read,
+        "_cut_tiles": pvmod._cut_tiles,
         "_changes": pvmod._changes,
         "pv_charge_text": pvmod.vpoc_ledger.charge_text,
         "plan_analyze_conti": planmod._analyze_conti,
@@ -6286,7 +6287,8 @@ def check_vnew_previz() -> None:
     pvmod.STORE = fake_store
     planmod.STORE = fake_store
     pvmod._design = fake_design
-    pvmod._analyze_panels = fake_analyze_panels
+    grammarmod._read = fake_read
+    pvmod._cut_tiles = fake_cut_tiles
     pvmod._changes = fake_changes
     pvmod.vpoc_ledger.charge_text = fake_charge_text
     planmod._analyze_conti = fake_analyze_conti
@@ -6567,73 +6569,122 @@ def check_vnew_previz() -> None:
         if len(text_charges) < 2:
             bad.append(f"(원장) 프리비즈 설계 원장이 2건 미만입니다: {len(text_charges)}")
 
-        # --- (h2) 패널 분석 결과 저장·plan_view 포함 ---
-        if not panel_analyze_cuts:
-            bad.append("(h2) 패널 샷 분석(_analyze_panels)이 불리지 않았습니다")
-        panel_shots = pv.get("panelShots") or {}
-        if not isinstance(panel_shots, dict) or "c1" not in panel_shots:
-            bad.append(f"(h2) plan_view.previz.panelShots 에 패널 분석이 없습니다: {list(panel_shots)}")
-        else:
-            shot_c1 = panel_shots.get("c1") or {}
-            if shot_c1.get("shotSize") != "medium" or shot_c1.get("cameraHeight") != "eye" or shot_c1.get("angle") != "front":
-                bad.append(f"(h2) 패널 분석 값이 저장되지 않았습니다: {shot_c1}")
-            if not (shot_c1.get("subjects") or []):
-                bad.append("(h2) 패널 분석 subjects 가 비었습니다")
+        # --- (pg-a) read_cut 이 컷 수만큼 호출됐다(패널 있는 교장실 c1·c2·c3, 거리 c4 는 panels 없음) ---
+        # 교장실 3컷만 패널이 있으므로 read 호출은 3회.
+        if len(read_calls) != 3:
+            bad.append(f"(pg-a) read_cut 호출이 교장실 3컷 수와 다릅니다: {len(read_calls)}")
+        # panelGrammar 캐시에 c1·c2·c3 가 {hash, grammar} 로 저장됐는지.
+        panel_grammar = pv.get("panelGrammar") or {}
+        for cid in ("c1", "c2", "c3"):
+            cell = panel_grammar.get(cid) or {}
+            if not cell.get("hash") or not isinstance(cell.get("grammar"), dict):
+                bad.append(f"(pg-a) panelGrammar[{cid}] 가 {{hash,grammar}} 로 저장되지 않았습니다: {cell}")
+        if (panel_grammar.get("c1") or {}).get("grammar", {}).get("shotSize") != "MCU":
+            bad.append(f"(pg-a) c1 grammar.shotSize 가 MCU 가 아닙니다: {(panel_grammar.get('c1') or {}).get('grammar')}")
 
-        # --- (i2) 투영 함수: 알려진 카메라·인물 → 정면 중앙 인물 screenX ≈ 0.5 ---
-        center_cam = {"pos": [0.0, 1.5, 5.0], "target": [0.0, 1.0, 0.0], "fov": 50.0}
-        proj = pvfit.project_actor(center_cam, [0.0, 0.0, 0.0], 1.7)
-        if proj is None:
-            bad.append("(i2) 정면 중앙 인물 투영이 None 입니다")
-        else:
-            if abs(proj["screenX"] - 0.5) > 0.01:
-                bad.append(f"(i2) 정면 중앙 인물 screenX 가 0.5 가 아닙니다: {proj['screenX']}")
-            # 카메라 뒤(+z 쪽, forward 반대)는 화면 밖(None).
-            behind = pvfit.project_point(center_cam, [0.0, 1.0, 10.0])
-            if behind is not None:
-                bad.append(f"(i2) 카메라 뒤 점이 화면 밖(None)이 아닙니다: {behind}")
-
-        # --- (j2) 오차 큰 컷만 Astra 재요청 ---
-        # c1 은 바로 맞음(재요청 없음), c2·c3 은 오차 커서 재요청. c1 이 재요청 목록에 있으면 안 된다.
-        if "c1" in retry_calls:
-            bad.append(f"(j2) 오차가 작은 c1 이 Astra 재요청되었습니다: {retry_calls}")
-        if "c2" not in retry_calls or "c3" not in retry_calls:
-            bad.append(f"(j2) 오차 큰 컷(c2·c3)이 Astra 재요청되지 않았습니다: {retry_calls}")
-
+        # --- (pg-a 캐시) 같은 패널로 다시 설계하면 read_cut 0회 ---
+        read_calls.clear()
+        resp = client.post(f"/api/vnew/p/{pid}/previz/design")
+        _join()
+        if read_calls:
+            bad.append(f"(pg-a) 캐시가 같은 패널을 다시 읽었습니다(read {len(read_calls)}회)")
+        # 다시 읽은 뒤 상태를 갱신.
+        view = client.get(f"/api/vnew/p/{pid}/plan").get_json() or {}
+        pv = view.get("previz") or {}
+        scenes = pv.get("scenes") or []
+        office_scene = scenes[0] if scenes else {}
         fit = pv.get("fit") or {}
-        # c1: 처음부터 맞음 → method astra, 오차 작음.
-        fit_c1 = fit.get("c1") or {}
-        if fit_c1.get("method") != "astra":
-            bad.append(f"(j2) c1 은 재요청 없이 맞아야 합니다(method=astra): {fit_c1}")
-        if float(fit_c1.get("err") or 1.0) > pvfit.POS_THRESHOLD + pvfit.SIZE_THRESHOLD:
-            bad.append(f"(j2) c1 오차가 작지 않습니다: {fit_c1}")
-        # c2: 재요청으로 맞음 → method astra_retry.
-        fit_c2 = fit.get("c2") or {}
-        if fit_c2.get("method") != "astra_retry":
-            bad.append(f"(j2) c2 는 Astra 재요청으로 맞아야 합니다(method=astra_retry): {fit_c2}")
 
-        # --- (k2) 2회 후에도 크면 격자 보정으로 오차 감소 ---
-        fit_c3 = fit.get("c3") or {}
-        if fit_c3.get("method") != "grid":
-            bad.append(f"(k2) c3 은 2회 재요청 후 격자 보정이어야 합니다(method=grid): {fit_c3}")
-        # 격자 보정 전(BAD_CAM) 오차보다 보정 후 오차가 작아야 한다.
-        c3_subjects = [{"foot": A1_FOOT, "heightM": A1_HEIGHT, "target": A1_TARGET}]
-        bad_err = pvfit.cut_error(BAD_CAM, c3_subjects)["err"]
-        if float(fit_c3.get("err") or 9.0) >= bad_err:
-            bad.append(f"(k2) 격자 보정이 오차를 줄이지 못했습니다: 보정후={fit_c3.get('err')} vs 보정전={round(bad_err, 4)}")
-        # c3 이 격자 재요청(c3)을 2회 받았는지(2회 후 격자).
-        if retry_calls.count("c3") < pvmod.FIT_MAX_ASTRA_RETRY:
-            bad.append(f"(k2) c3 재요청이 {pvmod.FIT_MAX_ASTRA_RETRY}회 미만입니다(그 뒤 격자여야 함): {retry_calls}")
+        # --- (pg-b) 각 컷 camera 가 place_cut 결과와 같고 fit.method=="grammar", match 저장 ---
+        import math as _math  # noqa: PLC0415
 
-        # --- (l2) Astra 지침(_DESIGN_SYSTEM)에 fov·높이 규칙 문장 포함 ---
+        from src.vnew import previz_camera as cammod  # noqa: PLC0415
+
+        for cid in ("c1", "c2", "c3"):
+            fe = fit.get(cid) or {}
+            if fe.get("method") != "grammar":
+                bad.append(f"(pg-b) {cid} fit.method 가 grammar 가 아닙니다: {fe.get('method')}")
+            if fe.get("match") is None:
+                bad.append(f"(pg-b) {cid} fit.match 가 저장되지 않았습니다: {fe}")
+            if not fe.get("lens"):
+                bad.append(f"(pg-b) {cid} fit.lens 가 없습니다: {fe}")
+        # c1 의 camera 가 place_cut 을 그대로 다시 돌린 결과와 같은지(결정적 재현).
+        g_c1 = cammod  # place_cut 재현
+        off_cut = None
+        for t in office_scene.get("timeline") or []:
+            if str(t.get("cutId")) == "c1":
+                off_cut = t
+                break
+        if off_cut is None:
+            bad.append("(pg-b) 교장실 c1 컷을 찾지 못했습니다")
+
+        # --- (pg-c) crossed 표시·hide 반영 ---
+        # 교장 단독(더티 싱글, 상대 hands_only)이라 학생(a2)이 가림 판정이면 그 컷 actors 에서 빠질 수 있다.
+        # crossed 는 line_side 다수결로 정해진다 — 적어도 fit 에 crossed 키가 bool 로 있어야 한다.
+        for cid in ("c1", "c2", "c3"):
+            fe = fit.get(cid) or {}
+            if "crossed" in fe and not isinstance(fe.get("crossed"), bool):
+                bad.append(f"(pg-c) {cid} crossed 가 bool 이 아닙니다: {fe.get('crossed')}")
+        # hide 된 인물은 그 컷 actors 에서 빠진다(cheats 에 hide 가 있으면).
+        for t in office_scene.get("timeline") or []:
+            cid = str(t.get("cutId"))
+            fe = fit.get(cid) or {}
+            hide_ids = {c.get("actor") for c in (fe.get("cheats") or []) if c.get("type") == "hide"}
+            cut_actor_ids = {str(a.get("id")) for a in (t.get("actors") or [])}
+            if hide_ids & cut_actor_ids:
+                bad.append(f"(pg-c) {cid}: hide 된 인물이 actors 에 남아 있습니다: {hide_ids & cut_actor_ids}")
+
+        # --- (pg-d) 방 높이 10 → clamp. 교장실(닫힌 방)은 2.4~3.5, 거리(열린 공간)는 3.0 ---
+        oh = float((office_scene.get("room") or {}).get("height") or 0)
+        if not (2.4 <= oh <= 3.5):
+            bad.append(f"(pg-d) 닫힌 방 높이가 2.4~3.5 로 clamp 되지 않았습니다: {oh}")
+        if len(scenes) >= 2:
+            sh = float((scenes[1].get("room") or {}).get("height") or 0)
+            if abs(sh - 3.0) > 0.01:
+                bad.append(f"(pg-d) 열린 공간 높이가 3.0 으로 clamp 되지 않았습니다: {sh}")
+
+        # --- (pg-f 준비) 거리 scene 의 컷은 패널이 없어 grammar 없음 → method=astra·match null → 낮은 컷 ---
+        # 거리 컷은 5초라 모델 max 에 따라 쪼개질 수 있으므로 id 를 하드코딩하지 않고 scene[1] 에서 뽑는다.
+        street_cut_ids = []
+        if len(scenes) >= 2:
+            street_cut_ids = [str(t.get("cutId") or "") for t in (scenes[1].get("timeline") or [])]
+        if not street_cut_ids:
+            bad.append("(pg-f) 거리 scene 의 컷을 찾지 못했습니다")
+        for cid in street_cut_ids:
+            fe = fit.get(cid) or {}
+            if fe.get("method") != "astra" or fe.get("match") is not None:
+                bad.append(f"(pg-f) 패널 없는 거리 컷 {cid} 가 method=astra·match null 이 아닙니다: {fe}")
+        # lowMatchCuts 에 거리 컷(판정 불가)이 모두 들어 있어야 한다.
+        low_cuts = pv.get("lowMatchCuts") or []
+        low_ids = {c.get("cutId") for c in low_cuts}
+        for cid in street_cut_ids:
+            if cid not in low_ids:
+                bad.append(f"(pg-f) 낮은 컷 목록에 거리 컷 {cid}(판정 불가)가 없습니다: {low_ids}")
+        # 반대로 교장실 컷(grammar 있음)은 낮은 컷이 아니어야 한다(match 계산됨).
+        for cid in ("c1", "c2", "c3"):
+            if cid in low_ids and (fit.get(cid) or {}).get("match") is not None and float((fit.get(cid) or {}).get("match") or 0) >= 0.7:
+                bad.append(f"(pg-f) 교장실 컷 {cid}(match≥0.7)가 낮은 컷으로 잘못 세졌습니다")
+        if abs(float(pv.get("approveMinMatch") or 0) - 0.7) > 1e-6:
+            bad.append(f"(pg-f) approveMinMatch 가 0.7 이 아닙니다: {pv.get('approveMinMatch')}")
+
+        # --- (l2) Astra 지침(_DESIGN_SYSTEM)에 fov·높이 규칙 문장 포함(옛 지침 유지) ---
         sys_text = pvmod._DESIGN_SYSTEM
         for needle in ("fov 20-30", "35-45", "50-65", "0.6 m", "1.5 m", "2.3 m", "screenX", "heightFrac"):
             if needle not in sys_text:
                 bad.append(f"(l2) Astra 지침에 '{needle}' 규칙 문장이 없습니다")
+        # 049: _design_prompt 에 '카메라는 서버가 계산' 문단이 들어가는지(장면 하나로 확인).
+        dp = pvmod._design_prompt(
+            "A closed principal's office", None,
+            [{"cutId": "c1", "seconds": 4, "shotKo": "", "situationKo": "", "panels": []}],
+            {"setting": {"enclosed": True}}, [], {"c1": (panel_grammar.get("c1") or {}).get("grammar")},
+            room_height=(2.4, 3.5),
+        )
+        if "카메라는 서버가 계산" not in dp:
+            bad.append("(l2) _design_prompt 에 '카메라는 서버가 계산' 지침 문단이 없습니다")
 
-        # ============================================================ ④ 진행 표시·지시 다시 만들기(지시서 047)
+        # ============================================================ ④ 진행 표시·지시 다시 만들기(지시서 050)
         # 첫 설계가 끝난 상태(scenes·fit 있음). 이제 '다시 만들기'(지시 포함)를 돌려 progress·지시 반영·
-        # 사용자 지시 컷 보정 제외·그룹 한정 유지·실패 시 이전 유지를 검증한다.
+        # grammarOverrides·그룹 한정 유지·실패 시 이전 유지를 검증한다.
         import copy  # noqa: PLC0415
 
         prev_pv = client.get(f"/api/vnew/p/{pid}/plan").get_json() or {}
@@ -6642,7 +6693,7 @@ def check_vnew_previz() -> None:
         # 거리 장면(두 번째 그룹)을 그룹 한정 비교(pv-e)에 쓸 스냅샷으로 둔다.
         prev_street = copy.deepcopy(prev_scenes_snapshot[1]) if len(prev_scenes_snapshot) >= 2 else None
 
-        # --- (pv-a) progress 단계 순서 panels→design→fit→done, done ≤ total ---
+        # --- (pv-a) progress 단계 순서 panels→design→camera→done, done ≤ total ---
         # _set_progress·_set_step·_bump_progress 를 감싸 호출을 기록한다.
         step_seq: list[str] = []
         done_le_total = {"ok": True}
@@ -6683,14 +6734,14 @@ def check_vnew_previz() -> None:
             pvmod._set_step = orig_set_step
             pvmod._bump_progress = orig_bump_progress
 
-        # step 처음 등장 순서: panels → design → fit → done(중간에 fit_retry 가 끼어도 그 넷의 상대 순서 유지).
+        # step 처음 등장 순서: panels → design → camera → done.
         first_seen: list[str] = []
         for s in step_seq:
             if s not in first_seen:
                 first_seen.append(s)
-        core = [s for s in first_seen if s in ("panels", "design", "fit", "done")]
-        if core != ["panels", "design", "fit", "done"]:
-            bad.append(f"(pv-a) progress 단계 순서가 panels→design→fit→done 이 아닙니다: {first_seen}")
+        core = [s for s in first_seen if s in ("panels", "design", "camera", "done")]
+        if core != ["panels", "design", "camera", "done"]:
+            bad.append(f"(pv-a) progress 단계 순서가 panels→design→camera→done 이 아닙니다: {first_seen}")
         if not done_le_total["ok"]:
             bad.append("(pv-a) progress done 이 total 을 넘었습니다")
 
@@ -6704,32 +6755,34 @@ def check_vnew_previz() -> None:
         elif prog_b.get("step") != "done" or int(prog_b.get("done") or -1) != int(prog_b.get("total") or -2):
             bad.append(f"(pv-b) 끝난 뒤 progress 가 done·done=total 이 아닙니다: {prog_b}")
 
-        # --- (pv-c) 지시 다시 만들기 → fake Astra 가 받은 프롬프트에 '[이전 설계]'·영문 changes 포함 ---
-        # 지시→변경 변환(_changes)이 Astra 를 먼저 쓰고, 그 결과(영문)가 설계 프롬프트에 들어간다.
+        # --- (pv-c) 지시 다시 만들기 → 지시→수정 목록(_changes, emit_edits) 가 Astra 를 먼저 쓴다 ---
         if not changes_calls:
-            bad.append("(pv-c) 지시→변경 변환(_changes)이 불리지 않았습니다")
+            bad.append("(pv-c) 지시→수정 목록 변환(_changes)이 불리지 않았습니다")
         elif changes_calls[0]["model"] != pvmod.ASTRA_MODEL:
             bad.append(f"(pv-c) 지시 변환이 Astra 를 먼저 쓰지 않습니다: {changes_calls[0]['model']}")
-        # 교장실 그룹의 설계 프롬프트(초기 설계, 재요청 아님)를 찾는다.
+        # 교장실 그룹의 설계 프롬프트에 '[이전 설계]' 가 있어야 한다(다시 만들기).
         office_prompts = [t for t in design_prompts if "[이전 설계]" in t]
         if not office_prompts:
             bad.append("(pv-c) 다시 만들기 설계 프롬프트에 '[이전 설계]' 문단이 없습니다")
-        joined_office = "\n".join(office_prompts)
-        if "[사용자 수정 지시" not in joined_office:
-            bad.append("(pv-c) 다시 만들기 프롬프트에 '[사용자 수정 지시]' 문단이 없습니다")
-        if "move the camera to about 1.2 m" not in joined_office:
-            bad.append("(pv-c) 다시 만들기 프롬프트에 영문 변경 지시(changesEn)가 들어가지 않았습니다")
 
-        # lastRebuild 가 저장됐는지(요약·changesEn).
+        # lastRebuild 가 저장됐는지(editsEn).
         last_rb = rb_previz.get("lastRebuild") or {}
-        if not last_rb or not last_rb.get("changesEn"):
-            bad.append(f"(pv-c) lastRebuild 가 저장되지 않았습니다: {last_rb}")
+        if not last_rb or not last_rb.get("editsEn"):
+            bad.append(f"(pv-c) lastRebuild.editsEn 가 저장되지 않았습니다: {last_rb}")
 
-        # --- (pv-d) changes 의 컷(c1)은 격자 보정·재요청을 하지 않고 fit method=='user' ---
+        # --- (pg-e) 지시 다시 만들기 → fake Astra edits(c1 vantage=side)가 grammarOverrides 로 저장·적용 ---
+        overrides_rb = rb_previz.get("grammarOverrides") or {}
+        if (overrides_rb.get("c1") or {}).get("vantage") != "side":
+            bad.append(f"(pg-e) c1 vantage=side 가 grammarOverrides 에 저장되지 않았습니다: {overrides_rb.get('c1')}")
+        # 그 컷 카메라가 바뀐다: vantage side → vantageDeg≈90.
         fit_rb = rb_previz.get("fit") or {}
         fit_c1_rb = fit_rb.get("c1") or {}
-        if fit_c1_rb.get("method") != "user":
-            bad.append(f"(pv-d) 사용자 지시 컷 c1 의 fit method 가 'user' 가 아닙니다: {fit_c1_rb}")
+        if fit_c1_rb.get("method") != "grammar":
+            bad.append(f"(pg-e) 지시 컷도 같은 계산기(method=grammar)를 거쳐야 합니다: {fit_c1_rb.get('method')}")
+        if abs(float(fit_c1_rb.get("vantageDeg") or 0) - 90.0) > 1.0:
+            bad.append(f"(pg-e) c1 vantage side 인데 vantageDeg 가 ~90 이 아닙니다: {fit_c1_rb.get('vantageDeg')}")
+        if not fit_c1_rb.get("override"):
+            bad.append(f"(pg-e) c1 fit 에 override 표시가 없습니다: {fit_c1_rb}")
 
         # --- (pv-e) extraCutId(c1=교장실) 다시 만들기 → 다른 그룹(거리) scenes 는 이전과 동일 ---
         rb_scenes = rb_previz.get("scenes") or []
@@ -6781,21 +6834,44 @@ def check_vnew_previz() -> None:
         # scenes 변수를 다시 만들기 후 상태로 갱신(이후 (e) PUT 이 쓰는 scenes).
         scenes = (client.get(f"/api/vnew/p/{pid}/plan").get_json() or {}).get("previz", {}).get("scenes") or scenes
 
-        # --- (e) PUT 정리·승인 해제 ---
-        # 먼저 승인(scenes 있음) → approved True.
-        resp = client.post(f"/api/vnew/p/{pid}/previz/approve")
+        # --- (pg-f) approve 70% 관문: 낮은 컷(c4 match null) 있으면 409 LowMatch(컷 번호), force 면 승인 ---
+        resp = client.post(f"/api/vnew/p/{pid}/previz/approve", json={})
+        body = resp.get_json() or {}
+        if resp.status_code != 409 or (body.get("error") or {}).get("type") != "LowMatch":
+            bad.append(f"(pg-f) 낮은 컷이 있는데 approve 가 409 LowMatch 가 아닙니다: {resp.status_code} {body}")
+        else:
+            msg = (body.get("error") or {}).get("message") or ""
+            if "컷" not in msg:
+                bad.append(f"(pg-f) LowMatch 메시지에 컷 번호가 없습니다: {msg}")
+        # force=True → 승인 + approvedForced 기록.
+        resp = client.post(f"/api/vnew/p/{pid}/previz/approve", json={"force": True})
         pv2 = (resp.get_json() or {}).get("previz") or {}
         if resp.status_code != 200 or not pv2.get("approved"):
-            bad.append(f"(e) 승인이 되지 않았습니다: {resp.status_code} approved={pv2.get('approved')}")
+            bad.append(f"(pg-f) force 승인이 200·approved 가 아닙니다: {resp.status_code} approved={pv2.get('approved')}")
+        if not (pv2.get("approvedForced") or {}).get("lowCuts"):
+            bad.append(f"(pg-f) approvedForced.lowCuts 가 기록되지 않았습니다: {pv2.get('approvedForced')}")
 
-        # PUT scene(사용자 수정) → 정리 통과(방 밖 좌표 보정) + 승인 해제.
-        edited = [dict(s) for s in scenes]
-        # 교장실 c1 의 인물을 방 밖으로 보낸다(정리가 방 안으로 되돌려야 한다).
-        edited[0] = dict(edited[0])
-        edited[0]["timeline"] = [dict(t) for t in edited[0]["timeline"]]
-        edited[0]["timeline"][0] = dict(edited[0]["timeline"][0])
-        edited[0]["timeline"][0]["actors"] = [{"id": "a1", "pos": [500, 0, 500], "pose": "stand"}]
+        # --- (pg-g) PUT 로 카메라를 직접 고치면 그 컷 match 를 match_visible 로 재계산(method manual) ---
+        # 교장실 c1 카메라를 임의로 바꾼다. 그 컷 fit.method 가 manual 로 바뀌고 match 가 재계산된다.
+        scenes = pv2.get("scenes") or scenes
+        edited = copy.deepcopy(scenes)
+        edited[0]["timeline"][0]["camera"] = {"pos": [1.0, 1.4, 2.2], "target": [1.0, 1.1, 0.0], "fov": 45}
         resp = client.put(f"/api/vnew/p/{pid}/previz/scene", json={"scenes": edited})
+        pv3 = (resp.get_json() or {}).get("previz") or {}
+        if resp.status_code != 200:
+            bad.append(f"(pg-g) PUT /previz/scene 가 200 이 아닙니다: {resp.status_code} {resp.get_json()}")
+        if pv3.get("approved"):
+            bad.append("(pg-g) 장면을 고쳤는데 승인이 해제되지 않았습니다")
+        manual_c1 = (pv3.get("fit") or {}).get("c1") or {}
+        if manual_c1.get("method") != "manual":
+            bad.append(f"(pg-g) 카메라를 직접 고친 c1 fit.method 가 manual 이 아닙니다: {manual_c1}")
+        if "match" not in manual_c1:
+            bad.append(f"(pg-g) manual c1 fit 에 match 가 재계산되지 않았습니다: {manual_c1}")
+
+        # --- (e) PUT 정리: 방 밖 좌표 보정 ---
+        edited2 = copy.deepcopy(pv3.get("scenes") or scenes)
+        edited2[0]["timeline"][0]["actors"] = [{"id": "a1", "pos": [500, 0, 500], "pose": "stand"}]
+        resp = client.put(f"/api/vnew/p/{pid}/previz/scene", json={"scenes": edited2})
         pv3 = (resp.get_json() or {}).get("previz") or {}
         if resp.status_code != 200:
             bad.append(f"(e) PUT /previz/scene 가 200 이 아닙니다: {resp.status_code} {resp.get_json()}")
@@ -6812,8 +6888,8 @@ def check_vnew_previz() -> None:
             if abs(x) > pw or abs(z) > pd:
                 bad.append(f"(e) PUT 정리가 방 밖 좌표를 보정하지 않았습니다: {put_actors[0]['pos']}")
 
-        # 승인 해제 훅: 콘티를 고치면 승인 해제. 먼저 다시 승인한 뒤 콘티 PUT.
-        client.post(f"/api/vnew/p/{pid}/previz/approve")
+        # 승인 해제 훅: 콘티를 고치면 승인 해제. 먼저 다시 승인(낮은 컷 c4 있으니 force)한 뒤 콘티 PUT.
+        client.post(f"/api/vnew/p/{pid}/previz/approve", json={"force": True})
         conti_view = client.get(f"/api/vnew/p/{pid}/plan").get_json() or {}
         conti_cuts = (conti_view.get("conti") or {}).get("cuts") or []
         if conti_cuts:
@@ -6993,7 +7069,8 @@ def check_vnew_previz() -> None:
         pvmod.STORE = orig["pv_STORE"]
         planmod.STORE = orig["plan_STORE"]
         pvmod._design = orig["_design"]
-        pvmod._analyze_panels = orig["_analyze_panels"]
+        grammarmod._read = orig["gr_read"]
+        pvmod._cut_tiles = orig["_cut_tiles"]
         pvmod._changes = orig["_changes"]
         pvmod.vpoc_ledger.charge_text = orig["pv_charge_text"]
         planmod._analyze_conti = orig["plan_analyze_conti"]
@@ -7008,12 +7085,279 @@ def check_vnew_previz() -> None:
             " (c)장소 2개 scene (d)텍스처 키·URL (e)PUT 정리·승인 해제 (f)녹화 변환·길이 400 (g)recordedAll"
             " (h)텍스처 API 200·접두사 밖 404·다른 사용자 404 (i)textureUrl 은 API 경로"
             " (j)frames 3묶음+finish mp4 길이=frames/fps·프레임 정리 (k)중간 묶음 누락 finish 400"
-            " (h2)패널 분석 저장·plan_view 포함 (i2)투영 함수 정면 중앙 screenX≈0.5"
-            " (j2)오차 큰 컷만 Astra 재요청 (k2)2회 후 격자 보정으로 오차 감소 (l2)Astra 지침에 fov·높이 문장"
-            " (pv-a)진행 단계 panels→design→fit→done·done≤total (pv-b)previz_view progress"
-            " (pv-c)다시 만들기 [이전 설계]·영문 changes·지시없으면 '이전과 다른'"
-            " (pv-d)changes 컷 격자 보정 안 함·method=user (pv-e)extraCutId 다른 그룹 scenes 유지"
+            " (pg-a)read_cut 컷 수·캐시 0회·panelGrammar (pg-b)컷 camera=place_cut·method grammar·match"
+            " (pg-c)crossed bool·hide 반영 (pg-d)방 높이 10→clamp(닫힌 2.4~3.5·열린 3.0)"
+            " (pg-e)지시 다시 만들기 edits→grammarOverrides·vantage side→vantageDeg≈90·override"
+            " (pg-f)approve 낮은 컷 409 LowMatch·force→approvedForced (pg-g)PUT 카메라→method manual·match 재계산"
+            " (l2)Astra 지침 fov·높이·카메라 서버 계산 문단"
+            " (pv-a)진행 단계 panels→design→camera→done·done≤total (pv-b)previz_view progress"
+            " (pv-c)다시 만들기 [이전 설계]·editsEn (pv-e)extraCutId 다른 그룹 scenes 유지"
             " (pv-f)설계 실패 시 이전 scenes 유지"
+        )
+
+
+# ---------------------------------------------------------------- 10b. 프리비즈 연출 문법·카메라 계산기
+
+
+def check_vnew_previz_camera() -> None:
+    """④ 프리비즈 — 패널 "연출 문법" 읽기(previz_grammar) + 순수 카메라 계산기(previz_camera).
+
+    (설계자 2026-10-21, 지시서 049) 외부 LLM 은 가짜. 유료 호출 없음.
+
+    (pc-a) normalize: frameBottomCut chest→MCU, 모르는 vantage→3q, headTopY 2.0→0.9 clamp
+    (pc-b) match_visible: 전신이 아닌 보이는 부분 기준(바스트샷 목표 맞춘 카메라 ≥0.95, 2배 멀면 <0.5)
+    (pc-c) 실험 8컷 재현: CLAUDE 표 + 장면 배치로 place_cut → 8컷 match ≥0.9, 거리 0.8~3.0m, 렌즈 일치
+    (pc-d) 컷 1·5·6 crossed, 나머지 기본 쪽
+    (pc-e) 클린 싱글 가리는 상대 hide, hands_only 상대 hide 안 함
+    (pc-f) 카메라가 어떤 인물 몸 축과도 0.35m 이상 떨어짐
+    (pc-g) 순수 파이썬: previz_camera·previz_grammar 에 import numpy 없음
+    (pc-h) read_cut: 가짜 _read 가 받은 블록에 cut 설명·이미지 1장, 결과 normalize, charge 콜백 1회
+    """
+    sys.path.insert(0, str(ROOT / "app"))
+    bad: list[str] = []
+
+    from src.vnew import previz_camera as cam  # noqa: PLC0415
+    from src.vnew import previz_fit as pvfit  # noqa: PLC0415
+    from src.vnew import previz_grammar as grammar  # noqa: PLC0415
+
+    # ---------------- (pc-g) 순수 파이썬: numpy import 없음 ----------------
+    for name in ("previz_camera.py", "previz_grammar.py"):
+        text = (ROOT / "app" / "src" / "vnew" / name).read_text(encoding="utf-8")
+        if "import numpy" in text or "from numpy" in text:
+            bad.append(f"(pc-g) {name} 에 numpy import 가 있습니다(앱에는 numpy 없음)")
+
+    # ---------------- (pc-a) normalize_grammar ----------------
+    norm = grammar.normalize_grammar(
+        {
+            "mainSubject": "범건우",
+            "frameBottomCut": "chest",
+            "shotType": "clean_single",
+            "vantage": "weird-unknown",  # 모름 → 3q
+            "faceTurn": "screen_right",
+            "cameraHeight": "eye",
+            "headTopY": 2.0,  # clamp → 0.9
+            "subjectX": 1.7,  # clamp → 1.0
+            "others": [{"name": "여의준", "how": "hands_only", "side": "right", "screenX": 0.9}],
+            "offscreenPartnerSide": "right",
+        }
+    )
+    if norm["shotSize"] != "MCU":
+        bad.append(f"(pc-a) frameBottomCut chest 가 MCU 로 안 바뀌었습니다: {norm['shotSize']}")
+    if norm["vantage"] != "3q":
+        bad.append(f"(pc-a) 모르는 vantage 가 3q 로 안 바뀌었습니다: {norm['vantage']}")
+    if abs(norm["headTopY"] - 0.9) > 1e-6:
+        bad.append(f"(pc-a) headTopY 2.0 이 0.9 로 clamp 되지 않았습니다: {norm['headTopY']}")
+    if abs(norm["subjectX"] - 1.0) > 1e-6:
+        bad.append(f"(pc-a) subjectX 1.7 이 1.0 으로 clamp 되지 않았습니다: {norm['subjectX']}")
+    if not norm["others"] or norm["others"][0]["how"] != "hands_only":
+        bad.append(f"(pc-a) others 정리가 틀립니다: {norm['others']}")
+
+    # ---------------- (pc-b) match_visible 보이는 부분 기준 ----------------
+    # 바스트샷 목표: 머리 위 top_y=0.1, 화면 아래에 chest. 그 목표를 정확히 맞춘 카메라를 만든다.
+    # 서 있는 1.7m 인물, 발 (0,0,0). chest·top 을 fov 50 으로 화면 0.1~1.0 에 담는 거리를 역산.
+    height = 1.7
+    foot = [0.0, 0.0, 0.0]
+    top_w = pvfit.body_y("top", height, "stand")
+    chest_w = pvfit.body_y("chest", height, "stand")
+    fov = 50.0
+    import math as _math  # noqa: PLC0415
+
+    half_v = _math.tan(_math.radians(fov) / 2.0)
+    # top 이 screenY 0.1, chest 가 screenY 1.0 이 되도록 거리·높이를 역산한다.
+    # screenY(y) = 0.5 - ((y - pos_y)/dist)/half_v * 0.5 (수평 시선, z=0 평면).
+    #   0.1 = 0.5 - (top-pos_y)/(dist*half_v)*0.5,  1.0 = 0.5 - (chest-pos_y)/(dist*half_v)*0.5
+    # → dist*half_v = (top-chest)/1.8,  pos_y = top - 0.8*(top-chest)/1.8.
+    extent = top_w - chest_w
+    dist = (extent / 1.8) / half_v
+    pos_y = top_w - 0.8 * extent / 1.8
+    good_cam = {"pos": [0.0, pos_y, dist], "target": [0.0, pos_y, 0.0], "fov": fov}
+    m_good = pvfit.match_visible(good_cam, foot, height, "stand", 0.1, 0.5, "chest")
+    if m_good < 0.95:
+        bad.append(f"(pc-b) 바스트샷 목표를 맞춘 카메라 일치도가 0.95 미만입니다: {m_good:.3f}")
+    # 같은 카메라를 2배 멀리 → 인물이 절반 크기 → 보이는 부분 기준 오차 커짐 <0.5.
+    far_cam = {"pos": [0.0, pos_y, dist * 2.0], "target": [0.0, pos_y, 0.0], "fov": fov}
+    m_far = pvfit.match_visible(far_cam, foot, height, "stand", 0.1, 0.5, "chest")
+    if m_far >= 0.5:
+        bad.append(f"(pc-b) 2배 멀리 둔 카메라 일치도가 0.5 미만이 아닙니다: {m_far:.3f}")
+
+    # ---------------- (pc-c)(pc-d)(pc-f) 실험 8컷 재현 ----------------
+    Y, B = "여의준", "범건우"
+    # CLAUDE (Fable 5.1) 연출 문법 읽기(2026-10-21) — solver2.py 와 같은 표.
+    # (subj, frameBottomCut, shotType, vantage, faceTurn, cameraHeight, headTopY, subjectX, others, partner)
+    CLAUDE = {
+        "cut-01": (B, "chest", "clean_single", "front3q", "screen_right", "eye", 0.10, 0.47, [], "right"),
+        "cut-02": (Y, "belly", "clean_single", "front3q", "screen_right", "eye", 0.06, 0.60, [], "right"),
+        "cut-03": (Y, "chest", "clean_single", "front", "down", "eye", 0.15, 0.50, [], "right"),
+        "cut-04": (Y, "chest", "dirty_single", "back3q", "screen_right", "eye", 0.05, 0.55, [(B, "hands_only", 0.85)], "right"),
+        "cut-05": (Y, "chest", "dirty_single", "side", "screen_left", "eye", 0.05, 0.30, [(B, "hands_only", 0.40)], "left"),
+        "cut-06": (Y, "chin", "dirty_single", "side", "screen_left", "eye", -0.10, 0.50, [(B, "hands_only", 0.80)], "left"),
+        "cut-07": (B, "belly", "insert", "front", "down", "low", -0.40, 0.35, [(Y, "hands_only", 0.45)], "front_of_camera"),
+        "cut-08": (Y, "belly", "dirty_single", "front3q", "up", "high", -0.02, 0.53, [(B, "partial_edge", 0.85)], "right"),
+    }
+    ORDER = [f"cut-0{i}" for i in range(1, 9)]
+
+    def _grammar_of(spec):
+        subj, cut, stype, vant, turn, height_k, top, x, others, partner = spec
+        payload = {
+            "mainSubject": subj,
+            "frameBottomCut": cut,
+            "shotType": stype,
+            "vantage": vant,
+            "faceTurn": turn,
+            "cameraHeight": height_k,
+            "headTopY": top,
+            "subjectX": x,
+            "offscreenPartnerSide": partner,
+            "others": [{"name": n, "how": how, "side": "center", "screenX": sx} for (n, how, sx) in others],
+        }
+        return grammar.normalize_grammar(payload)
+
+    cuts_grammar = {cid: _grammar_of(spec) for cid, spec in CLAUDE.items()}
+
+    # 장면 배치(설계자): 두 사람 앉음, 마주 봄.
+    Y_FOOT = [-0.39, 0.0, -0.8]
+    B_FOOT = [0.39, 0.0, -0.8]
+    actors_base = {
+        Y: {"id": "aY", "name": Y, "heightM": 1.76, "foot": Y_FOOT, "pose": "sit", "facingDeg": 90},
+        B: {"id": "aB", "name": B, "heightM": 1.90, "foot": B_FOOT, "pose": "sit", "facingDeg": 270},
+    }
+    # 실제 장면 방 크기(width 8, depth 6). 벽 안에서도 8컷이 재현돼야 한다(벽 처리: 밖이면 렌즈를
+    # 한 단계 넓혀 재계산 → 그래도 밖이면 끌어오고 fit 에 표시).
+    room = {"width": 8.0, "depth": 6.0}
+
+    # 장면 라인 쪽(다수결) + crossed.
+    line = cam.scene_line(cuts_grammar, Y, B, Y_FOOT, B_FOOT)
+    crossed_set = set(line.get("crossed") or [])
+    if crossed_set != {"cut-01", "cut-05", "cut-06"}:
+        bad.append(f"(pc-d) crossed 컷이 1·5·6 이 아닙니다: {sorted(crossed_set)}")
+    if line.get("side") != 1:
+        bad.append(f"(pc-d) 장면 기본 쪽이 +1 이 아닙니다: {line.get('side')}")
+
+    size_by_cut = {}
+    for cid in ORDER:
+        g = cuts_grammar[cid]
+        size_by_cut[cid] = g["shotSize"]
+        g["_crossed"] = cid in crossed_set
+        this_side = -line["side"] if cid in crossed_set else line["side"]
+        actors_in_cut = [dict(actors_base[Y]), dict(actors_base[B])]
+        result = cam.place_cut(g, actors_in_cut, room, this_side)
+        fit = result["fit"]
+        # (pc-c) 일치도·거리·렌즈.
+        if fit["match"] < 0.9:
+            bad.append(f"(pc-c) {cid} 일치도가 0.9 미만입니다: {fit['match']}")
+        if not (0.8 <= fit["distanceM"] <= 3.0):
+            bad.append(f"(pc-c) {cid} 카메라-주인공 거리가 0.8~3.0m 가 아닙니다: {fit['distanceM']}")
+        if fit["lens"] != cam.LENS[g["shotSize"]][1]:
+            bad.append(f"(pc-c) {cid} 렌즈가 LENS 표와 다릅니다: {fit['lens']} vs {cam.LENS[g['shotSize']][1]}")
+        # (pc-d) crossed 표시.
+        if fit["crossed"] != (cid in crossed_set):
+            bad.append(f"(pc-d) {cid} crossed 표시가 틀립니다: {fit['crossed']}")
+        # (pc-f) 카메라가 두 인물 몸 축과 0.35m 이상 떨어짐.
+        cpos = result["camera"]["pos"]
+        for foot_pos in (Y_FOOT, B_FOOT):
+            axis_dist = _math.hypot(cpos[0] - foot_pos[0], cpos[2] - foot_pos[2])
+            if axis_dist < cam.MIN_AXIS_DIST_M - 1e-6:
+                bad.append(f"(pc-f) {cid} 카메라가 인물 몸 축에 {axis_dist:.3f}m 로 너무 붙었습니다")
+                break
+
+    # ---------------- (pc-e) 클린 싱글 hide / hands_only 숨기지 않음 ----------------
+    # 클린 싱글(others 비어 있음): 주인공을 가리는 상대는 hide.
+    clean_g = grammar.normalize_grammar(
+        {
+            "mainSubject": Y, "frameBottomCut": "chest", "shotType": "clean_single",
+            "vantage": "front", "faceTurn": "toward_camera", "cameraHeight": "eye",
+            "headTopY": 0.1, "subjectX": 0.5, "offscreenPartnerSide": "none", "others": [],
+        }
+    )
+    # 상대(B)를 카메라→주인공 시선 위(카메라와 주인공 사이, 더 가까이)에 둬서 가리게 한다.
+    # front vantage 면 카메라가 Y 의 +z 쪽에 서므로, B 를 그 사이(z≈1.0, 살짝 -x)에 둔다.
+    clean_actors = [
+        {"id": "aY", "name": Y, "heightM": 1.76, "foot": [0.0, 0.0, 0.0], "pose": "stand"},
+        {"id": "aB", "name": B, "heightM": 1.90, "foot": [-0.2, 0.0, 1.0], "pose": "stand"},
+    ]
+    clean_res = cam.place_cut(clean_g, clean_actors, room, 1)
+    hide_ids = {c["actor"] for c in clean_res["cheats"] if c.get("type") == "hide"}
+    if "aB" not in hide_ids:
+        bad.append(f"(pc-e) 클린 싱글에서 가리는 상대가 hide 되지 않았습니다: {clean_res['cheats']}")
+    out_ids = {a.get("id") for a in clean_res["actors"]}
+    if "aB" in out_ids:
+        bad.append("(pc-e) hide 한 상대가 actors 목록에 남아 있습니다")
+
+    # hands_only 상대는 others 에 있으니 숨기지 않는다.
+    dirty_g = grammar.normalize_grammar(
+        {
+            "mainSubject": Y, "frameBottomCut": "chest", "shotType": "dirty_single",
+            "vantage": "front", "faceTurn": "toward_camera", "cameraHeight": "eye",
+            "headTopY": 0.1, "subjectX": 0.5, "offscreenPartnerSide": "none",
+            "others": [{"name": B, "how": "hands_only", "side": "right", "screenX": 0.85}],
+        }
+    )
+    dirty_actors = [
+        {"id": "aY", "name": Y, "heightM": 1.76, "foot": [0.0, 0.0, 0.0], "pose": "stand"},
+        {"id": "aB", "name": B, "heightM": 1.90, "foot": [0.0, 0.0, 1.5], "pose": "stand"},
+    ]
+    dirty_res = cam.place_cut(dirty_g, dirty_actors, room, 1)
+    dirty_hide = {c["actor"] for c in dirty_res["cheats"] if c.get("type") == "hide"}
+    if "aB" in dirty_hide:
+        bad.append(f"(pc-e) hands_only 상대가 hide 됐습니다: {dirty_res['cheats']}")
+
+    # ---------------- (pc-h) read_cut: 가짜 _read ----------------
+    read_seen: list[dict] = []
+    charge_calls: list[tuple] = []
+    real_read = grammar._read
+
+    def fake_read(blocks, *, model):
+        read_seen.append({"blocks": blocks, "model": model})
+        payload = {
+            "mainSubject": "범건우",
+            "frameBottomCut": "chest",
+            "shotType": "clean_single",
+            "vantage": "front3q",
+            "faceTurn": "screen_right",
+            "cameraHeight": "eye",
+            "headTopY": 0.1,
+            "subjectX": 0.47,
+            "others": [],
+            "offscreenPartnerSide": "right",
+            "reasonKo": "범건우 바스트 단독",
+        }
+        return payload, {"model": model, "inputTokens": 7, "outputTokens": 14}
+
+    def fake_charge(usage, model):
+        charge_calls.append((usage, model))
+
+    grammar._read = fake_read
+    try:
+        cut = {"shotKo": "범건우 바스트", "characters": [{"name": "범건우"}]}
+        tiles = [b"FAKE-JPEG-BYTES"]
+        out = grammar.read_cut("tester", "prj1", "pl1", cut, tiles, ["범건우", "여의준"], charge=fake_charge)
+    finally:
+        grammar._read = real_read
+
+    if not read_seen:
+        bad.append("(pc-h) read_cut 이 _read 를 부르지 않았습니다")
+    else:
+        blocks = read_seen[-1]["blocks"]
+        text_blocks = [b for b in blocks if isinstance(b, dict) and b.get("text")]
+        image_blocks = [b for b in blocks if isinstance(b, dict) and b.get("image")]
+        if not text_blocks or "범건우 바스트" not in text_blocks[0]["text"]:
+            bad.append(f"(pc-h) 블록에 cut 설명이 없습니다: {text_blocks}")
+        if len(image_blocks) != 1:
+            bad.append(f"(pc-h) 블록에 이미지가 1장이 아닙니다: {len(image_blocks)}")
+        if read_seen[-1]["model"] != grammar.GRAMMAR_MODEL:
+            bad.append(f"(pc-h) 모델이 GRAMMAR_MODEL 이 아닙니다: {read_seen[-1]['model']}")
+    if out is None or out.get("shotSize") != "MCU":
+        bad.append(f"(pc-h) read_cut 결과가 normalize 되지 않았습니다: {out}")
+    if len(charge_calls) != 1:
+        bad.append(f"(pc-h) charge 콜백이 1회가 아닙니다: {len(charge_calls)}")
+
+    if bad:
+        fail("④ 프리비즈 연출 문법·카메라 계산기 검사 실패\n" + "\n".join(f"  {item}" for item in bad))
+    else:
+        ok(
+            "④ 프리비즈 연출 문법·카메라 계산기 검사 (pc-a)normalize clamp·열거 (pc-b)보이는 부분 일치도"
+            " (pc-c)실험 8컷 재현 match≥0.9·거리·렌즈 (pc-d)컷1·5·6 crossed (pc-e)클린 싱글 hide·hands_only 유지"
+            " (pc-f)몸 축 0.35m 밖 (pc-g)numpy 없음 (pc-h)read_cut 블록·normalize·charge 1회"
         )
 
 
@@ -7040,6 +7384,7 @@ def main() -> int:
     check_vnew_locations()
     check_vnew_generate()
     check_vnew_previz()
+    check_vnew_previz_camera()
     check_fal_pricing()
     check_vnew_real_start()
     check_anime_style()

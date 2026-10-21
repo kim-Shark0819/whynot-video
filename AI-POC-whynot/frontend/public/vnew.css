@@ -2472,6 +2472,71 @@ textarea.vnew-field-input {
   border-color: #c4b5fd;
 }
 
+/* 049 연출 문법 배지(라인 넘음·배우 조정·사용자 수정) */
+.vnew-previz-panel-badges {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 4px;
+}
+
+.vnew-previz-panel-tag {
+  padding: 2px 8px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 600;
+  border: 1px solid transparent;
+  background: var(--surface-muted, #f3f4f6);
+  color: var(--text-muted, #6b7280);
+}
+
+.vnew-previz-tag-crossed {
+  background: #fff7ed;
+  color: #9a3412;
+  border-color: #fdba74;
+}
+
+.vnew-previz-tag-cheat {
+  background: #eff6ff;
+  color: #1e40af;
+  border-color: #93c5fd;
+}
+
+.vnew-previz-tag-override {
+  background: #ede9fe;
+  color: #5b21b6;
+  border-color: #c4b5fd;
+}
+
+/* 70% 승인 관문: 낮은 컷 안내 + [그래도 승인] */
+.vnew-previz-lowmatch {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 10px 12px;
+  margin-bottom: 8px;
+  border: 1px solid #fca5a5;
+  border-radius: 8px;
+  background: #fef2f2;
+}
+
+.vnew-previz-lowmatch-msg {
+  margin: 0;
+  font-size: 13px;
+  color: #991b1b;
+}
+
+.vnew-previz-force {
+  align-self: flex-start;
+  background: none;
+  border: none;
+  padding: 0;
+  font-size: 12px;
+  color: #991b1b;
+  text-decoration: underline;
+  cursor: pointer;
+}
+
 /* 결과 위 '다시 만들기' 영역(펼침형 지시 입력·최근 지시 요약) */
 .vnew-previz-rebuild {
   display: flex;

@@ -129,6 +129,10 @@ PREVIZ_PROMPT_TARGET = _int("VNEW_PREVIZ_PROMPT_TARGET", 2500)
 # 칸(구간×그림체) 수. preparing+submitted(진행 중) 합이 이 수를 넘지 않게 한다. 기본 4.
 VNEW_GEN_PARALLEL = _int("VNEW_GEN_PARALLEL", 4)
 
+# 프리비즈 승인 관문(설계자 2026-10-21, 지시서 049·④). 모든 컷의 시점 일치도(fit.match)가 이 값
+# 이상이어야 승인된다(force 로 넘길 수 있다). match 가 null(판정 불가)인 컷도 낮은 컷으로 센다.
+VNEW_PREVIZ_APPROVE_MIN = _float("VNEW_PREVIZ_APPROVE_MIN", 0.7)
+
 
 def previz_edit_usd(seconds: float | None = None) -> float:
     """프리비즈 edit 1건(한 그림체·한 구간) 금액 = 초 × 단가.

@@ -1342,10 +1342,9 @@
   /* 프리비즈 설계 단계 문구. step → 문구(함수면 done/total 을 받는다). */
   function previzProgressLabel(step, done, total) {
     var tail = total > 0 ? " " + (done || 0) + "/" + (total || 0) : "";
-    if (step === "panels") return "웹툰 컷 시점 읽는 중" + tail;
-    if (step === "design") return "장면 배치 설계 중" + tail;
-    if (step === "fit") return "카메라 시점 맞추는 중" + tail;
-    if (step === "fit_retry") return "어긋난 컷 다시 맞추는 중" + tail;
+    if (step === "panels") return "웹툰 컷 연출 읽는 중" + tail;
+    if (step === "design") return "인물·소품 배치 중" + tail;
+    if (step === "camera") return "카메라 자리 계산 중" + tail;
     if (step === "done") return "마무리 중";
     return "준비 중";
   }
@@ -3524,20 +3523,62 @@
     over_shoulder: "오버숄더"
   };
 
-  /* 투영 오차(fit.err)를 '시점 일치도' 배지로. 오차가 작을수록 좋음.
-     err 는 위치(screenX/Y) + 크기(heightFrac) 오차 합(대략 0~1 이상). %는 (1-err) 로 표시. */
-  function fidelityBadge(fitEntry) {
+  /* 049 연출 문법 열거값 → 한국어 라벨(읽기 전용 표시용). previz_grammar 의 LABELS_KO 와 같은 뜻. */
+  var GRAMMAR_SIZE_LABELS = {
+    ECU: "익스트림 클로즈업", CU: "클로즈업", MCU: "바스트샷", MS: "웨이스트샷",
+    MLS: "니샷", FS: "풀샷", LS: "롱샷"
+  };
+  var GRAMMAR_TYPE_LABELS = {
+    clean_single: "클린 싱글", dirty_single: "더티 싱글", over_shoulder: "오버더숄더",
+    two_shot: "투샷", profile_two_shot: "프로필 투샷", pov: "주관샷",
+    insert: "인서트", establishing: "설정샷"
+  };
+  var GRAMMAR_VANTAGE_LABELS = {
+    front: "정면", front3q: "살짝 돌린 정면", "3q": "3/4", side: "옆(프로필)",
+    back3q: "뒤 3/4", back: "뒤"
+  };
+  var GRAMMAR_HEIGHT_LABELS = { low: "앙각", eye: "아이레벨", high: "부감", overhead: "버즈아이" };
+  /* 샷 크기 → 렌즈(표시용, previz_camera.LENS 와 같은 뜻). */
+  var GRAMMAR_LENS = {
+    ECU: "85mm", CU: "70mm", MCU: "50mm", MS: "35mm", MLS: "24mm", FS: "24mm", LS: "18mm"
+  };
+
+  /* 시점 일치도(fit.match 0~1)를 배지로. match 가 작을수록 어긋남. 70%(approveMinMatch) 미만은 빨강.
+     옛 데이터(fit.err 형식, match 없음)는 err 로 환산해 보여 준다(호환). */
+  function fidelityBadge(fitEntry, minMatch) {
+    var threshold = Number(minMatch);
+    if (!(threshold > 0)) threshold = 0.7;
     var badge = el("span", "vnew-previz-fit-badge");
     if (!fitEntry) {
       badge.classList.add("vnew-previz-fit-none");
       badge.textContent = "일치도 —";
       return badge;
     }
+    // 049: match 기준(grammar·manual·astra). match null 이면 판정 불가(낮은 컷으로 센다).
+    if (Object.prototype.hasOwnProperty.call(fitEntry, "match")) {
+      var m = fitEntry.match;
+      if (m === null || m === undefined) {
+        badge.classList.add("vnew-previz-fit-bad");
+        badge.textContent = "일치도 판정 불가";
+        badge.title = "이 컷은 웹툰 연출을 읽지 못해(패널 없음 등) 카메라를 자동 계산하지 못했습니다.";
+        return badge;
+      }
+      var pctM = Math.max(0, Math.min(100, Math.round(Number(m) * 100)));
+      var good = Number(m) >= threshold;
+      badge.classList.add(good ? "vnew-previz-fit-good" : "vnew-previz-fit-bad");
+      var methodKo = "연출 계산";
+      if (fitEntry.method === "manual") methodKo = "사용자 조정";
+      else if (fitEntry.method === "astra") methodKo = "자동";
+      badge.textContent = "시점 일치도 " + pctM + "%" + (good ? "" : " · 낮음");
+      badge.title = "카메라를 웹툰 연출 문법으로 계산했습니다(" + methodKo + "). 기준 " +
+        Math.round(threshold * 100) + "% 이상이면 승인할 수 있습니다.";
+      return badge;
+    }
+    // --- 옛 데이터(err 형식) 호환 ---
     var err = Number(fitEntry.err) || 0;
     var pct = Math.max(0, Math.min(100, Math.round((1 - err) * 100)));
     var label;
     if (fitEntry.method === "user") {
-      // 사용자 지시로 바뀐 컷: 격자 보정·재요청을 하지 않았다(지시 유지). 별도 배지로.
       badge.classList.add("vnew-previz-fit-user");
       badge.textContent = "사용자 지시 · 일치도 " + pct + "%";
       badge.title =
@@ -3561,17 +3602,22 @@
     return badge;
   }
 
-  /* 컷 편집 패널 상단: 웹툰 패널 썸네일 + 시점 일치도 배지 + 패널 분석(읽기 전용). */
+  /* 컷 편집 패널 상단: 웹툰 패널 썸네일 + 시점 일치도 배지 + 연출 문법(한국어, 읽기 전용) + 배지. */
   function previzPanelMatchCard(cut, previz) {
     var card = el("div", "vnew-previz-edit-card vnew-previz-panel-match");
     var cutId = cut && cut.cutId;
-    var panelShots = (previz && previz.panelShots) || {};
     var fit = (previz && previz.fit) || {};
-    var shot = panelShots[cutId];
+    var fitEntry = fit[cutId];
+    var panelGrammar = (previz && previz.panelGrammar) || {};
+    var overrides = (previz && previz.grammarOverrides) || {};
+    var cached = panelGrammar[cutId];
+    var grammar = cached && cached.grammar;
+    var panelShots = (previz && previz.panelShots) || {};
+    var shot = panelShots[cutId]; // 옛 데이터(045) 호환
 
     var head = el("div", "vnew-previz-actor-head");
     head.appendChild(el("strong", "vnew-previz-edit-head", "웹툰 패널"));
-    head.appendChild(fidelityBadge(fit[cutId]));
+    head.appendChild(fidelityBadge(fitEntry, previz && previz.approveMinMatch));
     card.appendChild(head);
 
     // 썸네일(같은 출처 패널 API). 없으면 조용히 생략.
@@ -3594,17 +3640,60 @@
       card.appendChild(thumb);
     }
 
-    // 패널 분석(읽기 전용)
-    if (shot) {
+    if (grammar) {
+      // 049: 연출 문법 한 줄 + 렌즈·거리(fit). 샷: 바스트샷 · 더티 싱글 · 각도: 3/4 · 높이: 아이레벨 …
+      var size = grammar.shotSize || "MCU";
+      var parts = [
+        "샷: " + (GRAMMAR_SIZE_LABELS[size] || size),
+        GRAMMAR_TYPE_LABELS[grammar.shotType] || grammar.shotType || "",
+        "각도: " + (GRAMMAR_VANTAGE_LABELS[grammar.vantage] || grammar.vantage || "—"),
+        "높이: " + (GRAMMAR_HEIGHT_LABELS[grammar.cameraHeight] || grammar.cameraHeight || "—")
+      ];
+      var lens = (fitEntry && fitEntry.lens) || GRAMMAR_LENS[size];
+      if (lens) parts.push("렌즈 " + lens);
+      if (fitEntry && fitEntry.distanceM != null) {
+        parts.push("거리 " + (Number(fitEntry.distanceM)).toFixed(1) + "m");
+      }
       var dl = el("div", "vnew-previz-panel-analysis");
-      dl.appendChild(
+      dl.appendChild(el("p", "vnew-previz-panel-line", parts.filter(Boolean).join(" · ")));
+      if (grammar.mainSubject) {
+        dl.appendChild(el("p", "vnew-previz-panel-subj", "· 주인공: " + grammar.mainSubject));
+      }
+      card.appendChild(dl);
+
+      // 배지: 라인 넘음(crossed) · 배우 조정(cheats) · 사용자 수정(override)
+      var badges = el("div", "vnew-previz-panel-badges");
+      if (fitEntry && fitEntry.crossed) {
+        badges.appendChild(grammarTag("라인 넘음", "vnew-previz-tag-crossed",
+          "웹툰 감정 장면이라 액션 라인을 넘었습니다(의도된 연출)."));
+      }
+      (((fitEntry && fitEntry.cheats) || [])).forEach(function (c) {
+        var name = cheatActorName(c, cut);
+        if (c.type === "hide") {
+          badges.appendChild(grammarTag("배우 조정: " + name + " 화면 밖", "vnew-previz-tag-cheat",
+            "이 컷 구도에 맞춰 " + name + " 을(를) 화면에서 뺐습니다."));
+        } else if (c.type === "move") {
+          var dist = (Number(c.dist) || 0).toFixed(1);
+          badges.appendChild(grammarTag("배우 조정: " + name + " " + dist + "m 이동", "vnew-previz-tag-cheat",
+            "구도에 맞춰 " + name + " 을(를) 살짝 옮겼습니다."));
+        }
+      });
+      if (fitEntry && (fitEntry.override || (overrides && overrides[cutId]))) {
+        badges.appendChild(grammarTag("사용자 수정", "vnew-previz-tag-override",
+          "사용자 '다시 만들기' 지시로 이 컷 연출을 바꿨습니다."));
+      }
+      if (badges.childNodes.length) card.appendChild(badges);
+    } else if (shot) {
+      // 옛 데이터(panelShots) — 기존 표시 그대로.
+      var dl2 = el("div", "vnew-previz-panel-analysis");
+      dl2.appendChild(
         el("p", "vnew-previz-panel-line",
           "샷: " + (SHOT_SIZE_LABELS[shot.shotSize] || shot.shotSize || "—") +
           " · 높이: " + (CAMERA_HEIGHT_LABELS[shot.cameraHeight] || shot.cameraHeight || "—") +
           " · 각도: " + (SHOT_ANGLE_LABELS[shot.angle] || shot.angle || "—"))
       );
       (shot.subjects || []).forEach(function (s) {
-        dl.appendChild(
+        dl2.appendChild(
           el("p", "vnew-previz-panel-subj",
             "· " + (s.name || "인물") +
             " (화면 " + Math.round((Number(s.screenX) || 0) * 100) + "%, " +
@@ -3612,11 +3701,31 @@
             Math.round((Number(s.heightFrac) || 0) * 100) + "%)")
         );
       });
-      card.appendChild(dl);
+      card.appendChild(dl2);
     } else {
-      card.appendChild(el("p", "vnew-hint", "이 컷의 웹툰 패널 분석이 없습니다."));
+      card.appendChild(el("p", "vnew-hint", "이 컷의 웹툰 연출을 읽지 못했습니다(패널 없음)."));
     }
     return card;
+  }
+
+  /* 연출 문법 배지 한 조각(라인 넘음·배우 조정·사용자 수정). */
+  function grammarTag(text, cls, title) {
+    var tag = el("span", "vnew-previz-panel-tag " + (cls || ""), text);
+    if (title) tag.title = title;
+    return tag;
+  }
+
+  /* cheat 의 actor(id)를 그 컷 scene.actors 이름으로 바꾼다(없으면 id). */
+  function cheatActorName(cheat, cut) {
+    var id = cheat && cheat.actor;
+    var scenes = ((state.plan || {}).previz || {}).scenes || [];
+    for (var si = 0; si < scenes.length; si++) {
+      var actors = scenes[si].actors || [];
+      for (var ai = 0; ai < actors.length; ai++) {
+        if (actors[ai].id === id) return actors[ai].name || id;
+      }
+    }
+    return id || "인물";
   }
 
   /* 결과 위 '다시 만들기' 영역: 최근 지시 요약(lastRebuild) + 펼침형 지시 입력(textarea·대상 select).
@@ -3625,19 +3734,28 @@
   function previzRebuildSection(previz, scenes, showError) {
     var section = el("section", "panel vnew-previz-rebuild");
 
-    // 최근 지시(lastRebuild) 요약 한 줄 + 바뀐 내용(changesEn).
+    // 최근 지시(lastRebuild) 요약 한 줄 + 바뀐 연출(editsEn).
     var last = previz.lastRebuild;
-    if (last && (last.extraPromptKo || (last.changesEn && last.changesEn.length))) {
+    var lastEdits = (last && (last.editsEn || last.changesEn)) || [];
+    if (last && (last.extraPromptKo || lastEdits.length)) {
       var summary = el("div", "vnew-previz-rebuild-last");
       if (last.extraPromptKo) {
         summary.appendChild(el("p", "vnew-previz-rebuild-last-line", "최근 지시: " + last.extraPromptKo));
       }
-      var changes = last.changesEn || [];
-      if (changes.length) {
+      if (lastEdits.length) {
         var ul = el("ul", "vnew-previz-rebuild-changes");
-        changes.forEach(function (c) {
+        lastEdits.forEach(function (c) {
           var label = (c.cutId && c.cutId !== "all") ? ("[" + c.cutId + "] ") : "[전체] ";
-          ul.appendChild(el("li", null, label + (c.whatEn || "")));
+          var detail;
+          if (c.fields) {
+            // 049 editsEn: {cutId, fields:{field:value}}
+            detail = Object.keys(c.fields).map(function (k) {
+              return k + "=" + c.fields[k];
+            }).join(", ");
+          } else {
+            detail = c.whatEn || ""; // 옛 047 형식
+          }
+          ul.appendChild(el("li", null, label + detail));
         });
         summary.appendChild(ul);
       }
@@ -3656,7 +3774,8 @@
     var textarea = el("textarea", "vnew-rebuild-text");
     textarea.rows = 3;
     textarea.maxLength = 1000;
-    textarea.placeholder = "예) 컷2 카메라를 김부장 얼굴 가까이, 범건우는 문 앞에 서 있게";
+    textarea.placeholder =
+      "예) 컷1은 범건우 옆모습 클로즈업, 컷3은 위에서 내려다보게(부감), 두 사람은 난간에 나란히 앉아 있게";
     textarea.value = previz.extraPromptKo || "";
     panel.appendChild(textarea);
 
@@ -3747,7 +3866,7 @@
       // 공통 진행 표시(단계·막대·경과 시간) + 취소. progress 가 없으면 옛 한 줄 띠로 대체.
       var progWrap = el("div", "vnew-progress-wrap");
       var ind = progressIndicator(previz.progress, previzProgressLabel, {
-        determinateSteps: ["panels", "design", "fit", "fit_retry"]
+        determinateSteps: ["panels", "design", "camera"]
       });
       if (ind) {
         progWrap.appendChild(ind);
@@ -4196,11 +4315,20 @@
     var btn = el("button", "primary-button vnew-previz-approve", previz.approved ? "모두 녹화" : "승인하고 녹화");
     btn.type = "button";
     var busy = !!(previzRecording && !previzRecording.aborted && previzRecording.done < previzRecording.total);
-    btn.disabled = busy;
-    btn.addEventListener("click", function () {
+
+    // --- 70% 승인 관문: 낮은 컷이 있으면 승인 비활성 + 안내 + [그래도 승인] ---
+    var lowCuts = (previz.lowMatchCuts) || [];
+    var alreadyApproved = !!previz.approved;
+
+    // approve → (옵션 force) → 녹화. force 면 confirm 창(비용 포함) 후 진행.
+    function doApprove(force) {
       btn.disabled = true;
-      // 먼저 승인(이미 승인돼 있어도 안전).
-      api("/api/vnew/p/" + encodeURIComponent(state.projectId) + "/previz/approve", { method: "POST" })
+      var body = force ? JSON.stringify({ force: true }) : JSON.stringify({});
+      api("/api/vnew/p/" + encodeURIComponent(state.projectId) + "/previz/approve", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: body
+      })
         .then(function (plan) {
           state.plan = plan;
           var segs = (((state.plan || {}).previz || {}).segments) || segments;
@@ -4208,8 +4336,45 @@
         })
         .catch(function (err) {
           btn.disabled = false;
-          showError("승인하지 못했습니다: " + errMessage(err));
+          if (err && err.status === 409) {
+            showError(errMessage(err) || "시점 일치도가 낮은 컷이 있습니다.");
+          } else {
+            showError("승인하지 못했습니다: " + errMessage(err));
+          }
         });
+    }
+
+    if (lowCuts.length && !alreadyApproved) {
+      // 낮은 컷 안내 + 번호 나열(70% 미만). 승인 버튼은 비활성.
+      btn.disabled = true;
+      var minPct = Math.round((Number(previz.approveMinMatch) || 0.7) * 100);
+      var nums = lowCuts.map(function (c) { return "컷 " + c.no; }).join(", ");
+      var warn = el("div", "vnew-previz-lowmatch");
+      warn.appendChild(
+        el("p", "vnew-previz-lowmatch-msg",
+          "시점 일치도 " + minPct + "% 미만 컷: " + nums +
+          " — 다시 만들기 지시 또는 카메라를 직접 조정하세요")
+      );
+      // 작은 [그래도 승인] 링크 버튼.
+      var forceLink = el("button", "link-button vnew-previz-force", "그래도 승인");
+      forceLink.type = "button";
+      forceLink.addEventListener("click", function () {
+        var est = ((state.plan || {}).gen || {}).estimate || {};
+        var usd = Number(est.totalUsd) || 0;
+        var costMsg = usd > 0 ? (" 예상 영상 비용 $" + usd.toFixed(2) + "(⑤ 견적)를 쓰게 됩니다.") : "";
+        var ok = window.confirm(
+          "일치도가 낮은 컷이 있어 결과 영상이 웹툰과 다를 수 있습니다." + costMsg + " 승인할까요?"
+        );
+        if (ok) doApprove(true);
+      });
+      warn.appendChild(forceLink);
+      host.appendChild(warn);
+    } else {
+      btn.disabled = busy;
+    }
+
+    btn.addEventListener("click", function () {
+      doApprove(false);
     });
     host.appendChild(btn);
 

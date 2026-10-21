@@ -520,7 +520,9 @@ def create_blueprint(deps: VnewDependencies) -> Blueprint:
             from . import previz  # noqa: PLC0415
 
             owner = _project_for(pid, write=True)
-            previz.approve(owner, pid)
+            payload = request.get_json(silent=True) or {}
+            force = bool(payload.get("force"))
+            previz.approve(owner, pid, force=force)
             data, _ = plan_mod.load_plan(owner, pid)
             return jsonify(plan_mod.plan_view(owner, pid, data))
         except Exception as exc:  # noqa: BLE001
