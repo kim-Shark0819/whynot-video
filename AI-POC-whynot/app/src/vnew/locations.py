@@ -57,6 +57,8 @@ SIDES = ("north", "east", "south", "west")
 VARIANTS = ("real", "webtoon")
 # 한 장소의 그림(벽4+바닥1 × 그림체 2 = 10장)을 동시에 그리는 최대 스레드 수.
 IMAGE_WORKERS = 4
+# 그릴 그림 총 장수(벽4+바닥1 × 그림체 2 = 10). 진행 막대 total.
+TOTAL_IMAGES = len(VARIANTS) * (len(SIDES) + 1)
 # 실패한 그림을 다시 그리는 횟수(1회).
 IMAGE_RETRY = 1
 # 추가 요청(한국어) 최대 길이.
@@ -97,6 +99,77 @@ def _clear_running(owner: str, pid: str, lid: str) -> None:
         _RUNNING.discard((owner, pid, lid))
 
 
+# ================================================================ 진행 표시(progress)
+#
+# 빌드 중 location["progress"] 에 {step, done, total, startedAt, updatedAt} 를 기록한다. 화면이
+# 스피너·진행 막대·경과 시간을 보이는 데 쓴다. step 순서: design → images → sheet → done.
+# 그림은 병렬로 그려지므로(완료마다 +1), done 증가는 mutate_plan(경합 재시도)로 안전하게 올린다.
+
+
+def _empty_progress() -> dict:
+    return {"step": "", "done": 0, "total": 0, "startedAt": None, "updatedAt": None}
+
+
+def _set_progress(owner: str, pid: str, lid: str, task_id: str, *, step: str, done: int, total: int) -> None:
+    """location["progress"] 를 통째로 새로 쓴다(step 전환 시). task_id 가 어긋나면 건너뛴다.
+
+    startedAt 는 처음(design) 한 번만 잡고 이후 유지한다. updatedAt 는 매번 now 로 갱신한다.
+    """
+    from . import plan as plan_mod  # noqa: PLC0415
+
+    def mutator(data: dict) -> None:
+        loc = _find_location(data, lid)
+        if loc is None:
+            return
+        if (loc.get("task") or {}).get("id") != task_id:
+            return
+        prior = loc.get("progress") or {}
+        started = prior.get("startedAt") or now_iso()
+        loc["progress"] = {
+            "step": step,
+            "done": int(done),
+            "total": int(total),
+            "startedAt": started,
+            "updatedAt": now_iso(),
+        }
+
+    try:
+        plan_mod.mutate_plan(owner, pid, mutator)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("vnew.location.progress.set_failed pid=%s lid=%s err=%s", pid, lid, str(exc)[:150])
+
+
+def _bump_progress(owner: str, pid: str, lid: str, task_id: str) -> None:
+    """그림 한 장이 끝날 때마다 done 을 +1 한다(병렬이어도 완료마다). 경합은 mutate_plan 이 재시도한다.
+
+    step 이 아직 images 가 아니면 images 로 바꾼다. updatedAt 을 갱신해 화면 '지연' 판정 기준을 민다.
+    """
+    from . import plan as plan_mod  # noqa: PLC0415
+
+    def mutator(data: dict) -> None:
+        loc = _find_location(data, lid)
+        if loc is None:
+            return
+        if (loc.get("task") or {}).get("id") != task_id:
+            return
+        prior = loc.get("progress") or _empty_progress()
+        started = prior.get("startedAt") or now_iso()
+        total = int(prior.get("total") or TOTAL_IMAGES)
+        done = min(total, int(prior.get("done") or 0) + 1)
+        loc["progress"] = {
+            "step": "images",
+            "done": done,
+            "total": total,
+            "startedAt": started,
+            "updatedAt": now_iso(),
+        }
+
+    try:
+        plan_mod.mutate_plan(owner, pid, mutator)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("vnew.location.progress.bump_failed pid=%s lid=%s err=%s", pid, lid, str(exc)[:150])
+
+
 # ================================================================ 정규화 · 목록
 
 
@@ -130,6 +203,7 @@ def _new_location(name_ko: str, name_en: str, panels: list[int]) -> dict:
         "design": {},  # 설계 JSON(아래 _normalize_design)
         "variants": {v: _empty_variant() for v in VARIANTS},
         "task": _empty_task(),
+        "progress": _empty_progress(),
     }
 
 
@@ -187,6 +261,7 @@ def sync_locations(plan: dict) -> dict:
             prior.setdefault("variants", {v: _empty_variant() for v in VARIANTS})
             prior.setdefault("design", {})
             prior.setdefault("task", _empty_task())
+            prior.setdefault("progress", _empty_progress())
             prior.setdefault("status", "none")
             result.append(prior)
         else:
@@ -644,6 +719,13 @@ def start_build(owner: str, pid: str, lid: str, extra_prompt_ko: str | None = No
         loc["status"] = "building"
         loc["error"] = ""
         loc["task"] = {"status": "running", "startedAt": now_iso(), "id": new_id}
+        loc["progress"] = {
+            "step": "design",
+            "done": 0,
+            "total": TOTAL_IMAGES,
+            "startedAt": now_iso(),
+            "updatedAt": now_iso(),
+        }
         return new_id
 
     plan_mod.mutate_plan(owner, pid, mutator)
@@ -696,6 +778,7 @@ def run_build(owner: str, pid: str, lid: str, task_id: str) -> None:
         # a. 설계(Claude → Astra). [다시 만들기] 는 설계를 새로 한다 — 예전 설계(벽 4면 "흰 벽 가정")를
         #    재사용하면 창문 없는 방이 그대로 남기 때문. 다만 사용자가 설계를 직접 고친 적이 있으면
         #    (designEditedAt) 그 수정본을 유지한다. 설계가 아직 없으면(walls 없음) 당연히 새로 받는다.
+        _set_progress(owner, pid, lid, task_id, step="design", done=0, total=TOTAL_IMAGES)
         design = loc.get("design") or {}
         user_edited = bool(design.get("designEditedAt"))
         if not design.get("walls") or not user_edited:
@@ -704,11 +787,16 @@ def run_build(owner: str, pid: str, lid: str, task_id: str) -> None:
             loc["design"] = design
 
         # b~d. 그림체별 벽 4장 + 바닥 1장을 병렬로 그리고(최대 IMAGE_WORKERS), 2x2 시트.
+        #    설계가 끝나면 그림 단계(images)로 넘어간다. 그림 한 장이 끝날 때마다 done +1(병렬 안전).
+        _set_progress(owner, pid, lid, task_id, step="images", done=0, total=TOTAL_IMAGES)
         refs = _design_panels(owner, pid, loc)[:MAX_REF_PANELS]
-        images = _generate_images(owner, pid, lid, version, loc, refs)
+        images = _generate_images(owner, pid, lid, version, loc, refs, task_id)
+        # c. 4면 시트 합치기.
+        _set_progress(owner, pid, lid, task_id, step="sheet", done=TOTAL_IMAGES, total=TOTAL_IMAGES)
         for variant in VARIANTS:
             _assemble_variant(owner, pid, lid, variant, version, images, task_id)
 
+        _set_progress(owner, pid, lid, task_id, step="done", done=TOTAL_IMAGES, total=TOTAL_IMAGES)
         _commit(owner, pid, lid, task_id, status="ready")
     except Exception as exc:  # noqa: BLE001
         log.warning("vnew.location.build.failed pid=%s lid=%s err=%s", pid, lid, str(exc)[:300])
@@ -745,12 +833,13 @@ def _image_jobs(loc: dict) -> list[dict]:
 
 
 def _generate_images(
-    owner: str, pid: str, lid: str, version: int, loc: dict, refs: list[bytes]
+    owner: str, pid: str, lid: str, version: int, loc: dict, refs: list[bytes], task_id: str
 ) -> dict[tuple[str, str], tuple[bytes, str]]:
     """벽4+바닥1 × 그림체 2 = 10장을 ThreadPoolExecutor 로 동시에 그린다(최대 IMAGE_WORKERS).
 
     실패한 장만 1회 재시도한다. 그래도 실패하면 예외를 올려(전체 실패) run_build 가 failed 로 적는다.
     반환: {(variant, side_or_'floor'): (jpeg_bytes, key)}. 저장(put_bytes)·원장은 여기서 한다(그림당 1회).
+    그림 한 장이 끝날 때마다 progress.done 을 +1 한다(병렬이어도 완료마다, 경합은 mutate 재시도).
     """
     jobs = _image_jobs(loc)
     results: dict[tuple[str, str], tuple[bytes, str]] = {}
@@ -772,6 +861,8 @@ def _generate_images(
         STORE.put_bytes(key, image, "image/jpeg")
         _charge_seedream(owner, pid, lid, charge_kind)
         results[_slot(job)] = (image, key)
+        # 이 장이 끝났다 — 진행 막대 +1(병렬 완료마다, 경합 재시도).
+        _bump_progress(owner, pid, lid, task_id)
 
     pending = list(jobs)
     last_error: Exception | None = None
@@ -978,6 +1069,7 @@ def locations_view(owner: str, pid: str, plan: dict) -> list[dict]:
                 "design": loc.get("design") or {},
                 "variants": variants_out,
                 "task": loc.get("task") or _empty_task(),
+                "progress": loc.get("progress") or _empty_progress(),
             }
         )
     return out

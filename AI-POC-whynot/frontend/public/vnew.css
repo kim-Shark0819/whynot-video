@@ -1847,6 +1847,96 @@ textarea.vnew-field-input {
   font-size: 14px;
 }
 
+/* ---- 진행 표시(재사용 컴포넌트): 스피너 + 단계 문구 + 막대 + 경과 시간 ---- */
+
+.vnew-prog {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin: 10px 0;
+  padding: 12px 14px;
+  border: 1px solid var(--line, #e5e7eb);
+  border-radius: var(--radius, 12px);
+  background: var(--surface-muted, #f9fafb);
+}
+
+.vnew-prog-top {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.vnew-prog-spinner {
+  flex: none;
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  border: 2px solid var(--line, #e5e7eb);
+  border-top-color: var(--accent, #cb3208);
+  animation: vnew-prog-spin 0.8s linear infinite;
+}
+
+@keyframes vnew-prog-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+.vnew-prog-step {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text, #111827);
+}
+
+.vnew-prog-bar {
+  position: relative;
+  height: 8px;
+  border-radius: 999px;
+  background: var(--surface-muted, #eceef1);
+  overflow: hidden;
+}
+
+.vnew-prog-fill {
+  height: 100%;
+  width: 0;
+  border-radius: 999px;
+  background: var(--accent, #cb3208);
+  transition: width 0.4s ease;
+}
+
+/* 설계 단계: done/total 을 모르니 좌우로 움직이는 막대. */
+.vnew-prog-bar.is-indeterminate .vnew-prog-fill {
+  width: 40%;
+  transition: none;
+  animation: vnew-prog-slide 1.2s ease-in-out infinite;
+}
+
+@keyframes vnew-prog-slide {
+  0% {
+    margin-left: -40%;
+  }
+  100% {
+    margin-left: 100%;
+  }
+}
+
+.vnew-prog-elapsed {
+  font-size: 12px;
+  color: var(--text-muted, #6b7280);
+}
+
+.vnew-prog-elapsed.is-stale {
+  color: #b42318;
+}
+
+/* 움직임을 줄이는 설정이면 스피너·막대 애니메이션을 멈춘다. */
+@media (prefers-reduced-motion: reduce) {
+  .vnew-prog-spinner,
+  .vnew-prog-bar.is-indeterminate .vnew-prog-fill {
+    animation: none;
+  }
+}
+
 .vnew-loc-sheet {
   margin: 10px 0;
 }

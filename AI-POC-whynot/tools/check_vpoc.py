@@ -3945,6 +3945,7 @@ def check_vnew_locations() -> None:
     (i) 병렬 실행에서도 원장·저장 10장(벽8+바닥2) 정확
     (j) 설계 결과에 'assumed'/'provisional' 이 있으면 1회 재요청
     (l) 공간 '다시 만들기' 는 설계 재요청 1회, designEditedAt 있으면 0회(수정본 유지)
+    (m) 빌드 중 progress.done 이 그림마다 +1 해 total 도달, step 순서 design→images→sheet→done
     """
     sys.path.insert(0, str(ROOT / "app"))
     bad: list[str] = []
@@ -4420,6 +4421,66 @@ def check_vnew_locations() -> None:
         if (loc_l.get("design") or {}).get("lightEn") != "lamp light from the ceiling":
             bad.append(f"(l) 다시 만들기 뒤 사용자가 고친 lightEn 이 유지되지 않았습니다: {(loc_l.get('design') or {}).get('lightEn')}")
 
+        # --- (m) 진행 표시(progress): 빌드 중 done 이 그림마다 +1 해 total 도달, step 순서 design→images→sheet→done ---
+        # _set_progress(단계 전환)·_bump_progress(그림 완료마다 +1)를 감싸 호출을 기록하고 실제 함수로 넘긴다.
+        step_seq: list[str] = []
+        bump_count = {"n": 0}
+        orig_set_progress = locmod._set_progress
+        orig_bump_progress = locmod._bump_progress
+
+        def rec_set_progress(owner_, pid_, lid_, task_id_, *, step, done, total):
+            step_seq.append(step)
+            return orig_set_progress(owner_, pid_, lid_, task_id_, step=step, done=done, total=total)
+
+        def rec_bump_progress(owner_, pid_, lid_, task_id_):
+            bump_count["n"] += 1
+            return orig_bump_progress(owner_, pid_, lid_, task_id_)
+
+        locmod._set_progress = rec_set_progress
+        locmod._bump_progress = rec_bump_progress
+
+        def _idle_task_m(d):
+            loc = locmod._find_location(d, lid)
+            loc["task"] = {"status": "idle", "startedAt": None, "id": None}
+            loc["status"] = "ready"
+
+        planmod.mutate_plan(owner, pid, _idle_task_m)
+        try:
+            resp = client.post(f"/api/vnew/p/{pid}/locations/{lid}/build", json={})
+            if resp.status_code != 202:
+                bad.append(f"(m) 진행 표시 build 가 202 가 아닙니다: {resp.status_code} {resp.get_json()}")
+            _join()
+        finally:
+            locmod._set_progress = orig_set_progress
+            locmod._bump_progress = orig_bump_progress
+
+        # start_build 가 design 으로 seed → run_build 가 design→images→sheet→done. 첫 등장 순서를 확인한다.
+        first_seen: list[str] = []
+        for s in step_seq:
+            if s not in first_seen:
+                first_seen.append(s)
+        expected_order = ["design", "images", "sheet", "done"]
+        if first_seen != expected_order:
+            bad.append(f"(m) progress step 순서가 design→images→sheet→done 이 아닙니다: {first_seen}")
+        # 그림 10장 완료마다 +1 — bump 가 정확히 10회(벽8+바닥2).
+        if bump_count["n"] != locmod.TOTAL_IMAGES:
+            bad.append(f"(m) 그림 완료 progress +1 이 {locmod.TOTAL_IMAGES}회가 아닙니다: {bump_count['n']}")
+        # 끝난 뒤 progress: step=done, done==total==TOTAL_IMAGES.
+        plan_m, _ = planmod.load_plan(owner, pid)
+        loc_m = locmod._find_location(plan_m, lid) or {}
+        prog_m = loc_m.get("progress") or {}
+        if prog_m.get("step") != "done":
+            bad.append(f"(m) 끝난 뒤 progress.step 이 done 이 아닙니다: {prog_m.get('step')}")
+        if int(prog_m.get("done") or 0) != locmod.TOTAL_IMAGES or int(prog_m.get("total") or 0) != locmod.TOTAL_IMAGES:
+            bad.append(f"(m) 끝난 뒤 progress.done/total 이 {locmod.TOTAL_IMAGES} 이 아닙니다: {prog_m.get('done')}/{prog_m.get('total')}")
+        if not prog_m.get("startedAt") or not prog_m.get("updatedAt"):
+            bad.append(f"(m) progress 에 startedAt·updatedAt 이 없습니다: {prog_m}")
+        # plan_view(locations_view) 에도 progress 가 담겨야 한다(화면이 읽는다).
+        view_m = client.get(f"/api/vnew/p/{pid}/plan").get_json() or {}
+        vloc_m = next((l for l in (view_m.get("locations") or []) if l.get("id") == lid), None)
+        if not vloc_m or "progress" not in vloc_m:
+            bad.append("(m) plan_view locations 에 progress 가 없습니다")
+
     except Exception as exc:  # noqa: BLE001
         import traceback as _tb  # noqa: PLC0415
 
@@ -4437,6 +4498,11 @@ def check_vnew_locations() -> None:
         planmod._analyze_conti = orig["plan_analyze_conti"]
         planmod.vpoc_ledger.charge_text = orig["plan_charge_text"]
         locmod.threading.Thread = orig["loc_Thread"]
+        # (m) progress 래퍼가 걸린 채로 예외가 났을 수 있으니 원본으로 되돌린다(아직 안 걸렸으면 no-op).
+        if "orig_set_progress" in locals():
+            locmod._set_progress = orig_set_progress
+        if "orig_bump_progress" in locals():
+            locmod._bump_progress = orig_bump_progress
 
     if bad:
         fail("영상만들기_신규 공간 디테일 시트(vnew locations) 검사 실패\n" + "\n".join(f"  {item}" for item in bad))
@@ -4446,6 +4512,7 @@ def check_vnew_locations() -> None:
             " (c)벽4+바닥1×2그림체=Seedream 10장·Orthographic·no people (d)2x2 시트 (e)콘티 재생성 유지·자동 0장 (f)409"
             " (g)설계 모델 Claude→Astra (h)벽 프롬프트 'No text'·Korean setting (i)병렬에서도 원장·저장 10장 정확"
             " (j)'assumed'/'provisional' 1회 재요청 (l)다시 만들기 설계 재요청 1회·designEditedAt 있으면 0회"
+            " (m)빌드 중 progress.done 그림마다 +1·total 도달·step 순서 design→images→sheet→done"
         )
 
 
