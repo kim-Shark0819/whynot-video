@@ -40,7 +40,9 @@ from ..vpoc.errors import VpocError, now_iso
 from ..vpoc.store import STORE
 from ..vpoc import store as vpoc_store
 
+from . import previz_camera
 from . import previz_fit
+from . import previz_grammar
 from . import previz_schema
 from . import settings as vnew_settings
 
@@ -92,6 +94,13 @@ SHOT_ANGLES = (
 
 # 받을 수 있는 녹화 Content-Type.
 RECORDING_CONTENT_TYPES = ("video/webm", "video/mp4")
+
+# 승인 관문 최소 일치도(설계자 2026-10-21, 지시서 049). settings env 로 바꿀 수 있다(기본 0.7).
+APPROVE_MIN_MATCH = vnew_settings.VNEW_PREVIZ_APPROVE_MIN
+# 방 높이 clamp(설계자 049): 닫힌 방 2.4~3.5m, 열린 공간 3.0m. 모델이 10m 를 주는 사례 보정.
+ROOM_HEIGHT_ENCLOSED_MIN = 2.4
+ROOM_HEIGHT_ENCLOSED_MAX = 3.5
+ROOM_HEIGHT_OPEN = 3.0
 
 # 텍스처 확장자 → Content-Type(서버가 같은 출처로 이미지 바이트를 돌려줄 때 쓴다). 모르면 jpeg.
 TEXTURE_CONTENT_TYPES = {
@@ -220,8 +229,11 @@ def new_previz() -> dict:
         "revision": 0,  # 콘티·장면이 바뀔 때마다 올린다(녹화 키 경로·승인 해제 기준).
         "scenes": [],  # previz_schema.normalize_scenes 결과
         "panelShots": {},  # cutId -> 웹툰 패널 샷 분석(Claude) {shotSize, cameraHeight, angle, subjects, ...}
+        "panelGrammar": {},  # cutId -> {hash, grammar} 연출 문법 읽기 캐시(049, tiles_hash 로 재호출 방지)
+        "grammarOverrides": {},  # cutId -> {field: value} 사용자 지시 수정(읽은 grammar 위에 덮어씀)
         "fit": {},  # cutId -> {err, posErr, sizeErr, method} 투영 검산 결과
         "approved": False,
+        "approvedForced": None,  # {at, lowCuts} 일치도 낮은 채 강제 승인했을 때 기록(없으면 None)
         "recordings": {},  # segId -> {status, key, seconds}
         "task": _empty_task(),
         "progress": _empty_progress(),  # {step, done, total, startedAt, updatedAt} — 설계 진행 표시
@@ -372,64 +384,109 @@ def _analyze_panel(blocks: list[dict], *, model: str) -> tuple[dict, dict]:
 
 
 def _changes(blocks: list[dict], *, model: str) -> tuple[dict, dict]:
-    """사용자의 한국어 '다시 만들기' 지시를 구체적인 영어 변경 목록으로 바꾼다. (payload, usage).
+    """사용자의 한국어 '다시 만들기' 지시를 '연출 문법 수정 목록'(edits)으로 바꾼다. (payload, usage).
 
-    Astra 먼저, 실패하면 Claude(호출부 _rebuild_changes 가 체인한다). 이미지·Astra 는 모호한 말을
-    못 따르므로(설계자) 수치·대상·방향을 명시하게 하는 지침을 시스템 프롬프트에 넣었다. 검사가
-    이 함수를 가짜로 바꿔 끼운다.
+    Astra 먼저, 실패하면 Claude(호출부 _rebuild_edits 가 체인한다). 카메라 숫자는 서버가 계산하므로,
+    모델은 숫자가 아니라 연출 문법(샷 크기·종류·정면성·높이·주인공·상대 쪽·blocking)만 고친다.
+    검사가 이 함수를 가짜로 바꿔 끼운다(이름은 호환을 위해 _changes 유지).
     """
     return vpoc_llm._converse(  # noqa: SLF001 — 공개 래퍼가 없어 내부 함수를 쓴다
         system_text=_CHANGES_SYSTEM,
         blocks=blocks,
         tool=_CHANGES_TOOL,
         max_tokens=1500,
-        where="vnew.previz.changes",
+        where="vnew.previz.edits",
         model=model,
     )
 
 
-# ================================================================ 지시→변경 목록 스키마(Astra/Claude)
+# ================================================================ 지시→연출 문법 수정 목록 스키마(Astra/Claude)
+
+# edits 에서 받을 수 있는 grammar 필드(허용 열거값은 previz_grammar).
+_GRAMMAR_EDIT_FIELDS = (
+    "shotSize", "shotType", "vantage", "cameraHeight", "mainSubject",
+    "offscreenPartnerSide", "headTopY", "subjectX",
+)
 
 _CHANGES_SYSTEM = (
     "You turn a Korean user's free-text request to change a 3D previz scene into a SHORT list of "
-    "concrete English edit instructions a layout engine can follow. The scene is a blocky 3D layout "
-    "(a room, props, coloured mannequin actors, and per-cut cameras). Image and layout models cannot "
-    "follow vague words, so every change MUST be specific: name the target (an actor by role name, a "
-    "prop, or the camera), the direction, and NUMBERS where possible. Examples: '더 가까이' → "
-    "'move the camera to about 1.2 m from 김부장, fov 28'; '왼쪽으로' → 'move 범건우 to x = -1.5 m'; "
-    "'위에서' → 'raise camera to 2.3 m height looking down'. Answer ONLY by calling emit_changes once. "
-    "Return changes:[{cutId (the cut this applies to, or \"all\" for every cut), whatEn (one concrete "
-    "English instruction with numbers)}]. Use the cutId values the user is given; if the request is "
-    "general, use \"all\". Keep the list short (1-6 items). Do not invent people or props that are not "
-    "in the scene."
+    "DIRECTING edits. The camera NUMBERS are computed by a server from film grammar, so you do NOT give "
+    "camera coordinates. Instead you change the film grammar of specific cuts. Answer ONLY by calling "
+    "emit_edits once. Return edits:[{cutId (the cut this applies to, or \"all\" for every cut), field, "
+    "value, noteEn}]. Allowed field/value: shotSize (ECU|CU|MCU|MS|MLS|FS|LS); shotType "
+    "(clean_single|dirty_single|over_shoulder|two_shot|profile_two_shot|pov|insert|establishing); "
+    "vantage (front|front3q|3q|side|back3q|back); cameraHeight (low|eye|high|overhead); mainSubject "
+    "(a person's role name); offscreenPartnerSide (left|right|front_of_camera|none); headTopY (0..0.9); "
+    "subjectX (0..1); blocking (value is an English sentence placing actors: who sits/stands where, who "
+    "faces whom). If the request is vague for a cut (e.g. 'the viewpoint is wrong'), emit that cut with "
+    "reread:true (no field) to re-read its grammar. Example: '범건우 옆모습만' → {cutId:'cut-01', "
+    "field:'vantage', value:'side'}. Use the cutId values the user is given; use \"all\" for a general "
+    "request. Keep the list short (1-6 items)."
 )
 
 _CHANGES_TOOL = {
-    "name": "emit_changes",
-    "description": "Emit a short list of concrete English edit instructions for the previz scene.",
+    "name": "emit_edits",
+    "description": "Emit a short list of directing edits (film grammar changes) for the previz scene.",
     "inputSchema": {
         "json": {
             "type": "object",
             "properties": {
-                "changes": {
+                "edits": {
                     "type": "array",
                     "items": {
                         "type": "object",
                         "properties": {
                             "cutId": {"type": "string"},
-                            "whatEn": {"type": "string"},
+                            "field": {"type": "string"},
+                            "value": {},
+                            "noteEn": {"type": "string"},
+                            "reread": {"type": "boolean"},
                         },
                     },
                 },
             },
-            "required": ["changes"],
+            "required": ["edits"],
         }
     },
 }
 
 
+def _normalize_edits(payload: dict) -> list[dict]:
+    """지시→수정 목록 출력을 정리한다. [{cutId|"all", field?, value?, noteEn?, reread?}].
+
+    - field 가 _GRAMMAR_EDIT_FIELDS·"blocking" 이 아니면 버린다(reread 만 있는 항목은 남긴다).
+    - headTopY·subjectX 숫자는 그대로, 열거값은 소문자/원형 유지(적용 때 normalize_grammar 가 보정).
+    """
+    payload = payload if isinstance(payload, dict) else {}
+    items = payload.get("edits")
+    if not isinstance(items, list):
+        items = payload.get("changes") if isinstance(payload.get("changes"), list) else []
+    out: list[dict] = []
+    for item in items or []:
+        if not isinstance(item, dict):
+            continue
+        cut_id = str(item.get("cutId") or "all").strip() or "all"
+        entry: dict = {"cutId": cut_id}
+        if item.get("reread"):
+            entry["reread"] = True
+        field = str(item.get("field") or "").strip()
+        if field in _GRAMMAR_EDIT_FIELDS or field == "blocking":
+            entry["field"] = field
+            entry["value"] = item.get("value")
+            note = str(item.get("noteEn") or "").strip()
+            if note:
+                entry["noteEn"] = note
+        # 옛 whatEn(047) 형식도 blocking 으로 받아 둔다(호환).
+        elif item.get("whatEn"):
+            entry["field"] = "blocking"
+            entry["value"] = str(item.get("whatEn") or "").strip()
+        if entry.get("reread") or entry.get("field"):
+            out.append(entry)
+    return out
+
+
 def _normalize_changes(payload: dict) -> list[dict]:
-    """지시→변경 목록 출력을 정리한다. [{cutId|"all", whatEn}] 만 남긴다(빈 지시는 버린다)."""
+    """옛 047 호환: [{cutId|"all", whatEn}]. (새 흐름은 _normalize_edits 를 쓴다.)"""
     payload = payload if isinstance(payload, dict) else {}
     out: list[dict] = []
     for item in payload.get("changes") or []:
@@ -825,19 +882,24 @@ def start_design(owner: str, pid: str, *, extra_prompt_ko: str = "", cut_id: str
 
 
 def run_design(owner: str, pid: str, task_id: str) -> None:
-    """프리비즈 설계(백그라운드). 흐름(설계자 2026-10-21, 지시서 045·④):
+    """프리비즈 설계(백그라운드). 흐름(설계자 2026-10-21, 지시서 049·④):
 
-    1) 컷마다 웹툰 패널을 Claude 분석 체인에 보내 샷(크기·높이·각도·인물 화면 좌표)을 읽는다.
-    2) 그 panelShots 를 넣어 Astra 에 장소별 장면 JSON 을 받는다(좌표화 지침 포함).
-    3) previz_fit 로 컷별 투영 오차를 재서, 임계를 넘는 컷만 '현재 vs 목표'를 주고 그 컷 camera 만
-       다시 받는다(최대 2회). 그래도 크면 격자 보정(결정적)으로 카메라 pos 를 옮긴다.
-    4) panelShots·fit 를 저장한다.
+    1) panels: 컷마다 previz_grammar.read_cut 로 웹툰 패널의 '연출 문법'(샷 크기·종류·정면성·시선·
+       상대 쪽·높이)을 읽는다. tiles_hash 로 캐시(previz["panelGrammar"][cutId]={hash,grammar}) —
+       같은 패널이면 Claude 를 다시 부르지 않는다(다시 만들기 때 재호출 없음). 진행 total=컷 수.
+    2) design: Astra 가 장면(방·소품·인물 자리·자세·facingDeg)을 쓴다. 카메라는 서버가 계산하므로
+       Astra 카메라는 대충 둬도 된다(프롬프트에 그렇게 지시). 컷마다 패널 연출 문법 요약을 함께 준다.
+       방 높이는 닫힌 방 2.4~3.5m / 열린 공간 3.0m 로 clamp.
+    3) camera: 장소(scene)마다 핵심 두 인물로 previz_camera.scene_line → 기본 쪽·crossed. 컷마다
+       place_cut(grammar, actors_in_cut, room, side) 로 카메라·actors(hide·move·facingDeg 반영)를
+       바꾸고 fit 에 {match, method:"grammar", lens, distanceM, vantageDeg, side, crossed, cheats,
+       wallClamped} 저장. grammar 없는 컷은 Astra 카메라를 두고 method "astra", match null.
 
-    다시 만들기(이전 scenes 가 있으면): 사용자 한국어 지시(extraPromptKo)를 구체적인 영어 변경
-    목록(changesEn)으로 바꿔 _design_prompt 에 이전 설계·변경 지시를 넣는다. extraCutId 가 있으면
-    그 컷이 속한 장소 그룹만 다시 설계하고 나머지 장면은 이전 것을 그대로 둔다. 사용자 지시로 바뀐
-    컷은 투영 검산에서 격자 보정·자동 재요청을 하지 않고 method="user" 로만 오차를 잰다.
-    진행 표시: panels → design → fit(→fit_retry) → done 을 previz["progress"] 에 기록한다.
+    다시 만들기(이전 scenes 가 있으면): 사용자 한국어 지시(extraPromptKo)를 '연출 문법 수정 목록'
+    (edits)으로 바꿔 previz["grammarOverrides"][cutId]={field:value} 로 저장하고, 읽은 grammar 위에
+    덮어쓴다(읽기 캐시는 그대로). reread:true 인 컷은 그 컷 grammar 를 강제로 다시 읽는다. blocking 은
+    Astra 배치 프롬프트에 넣는다. 지시도 같은 계산기를 거친다(method user 경로 없음).
+    진행 표시: panels → design → camera → done 을 previz["progress"] 에 기록한다.
     """
     from . import plan as plan_mod  # noqa: PLC0415
 
@@ -853,39 +915,42 @@ def run_design(owner: str, pid: str, task_id: str) -> None:
         script = plan.get("script") or {}
         chars = (plan.get("input") or {}).get("characters") or []
 
-        # 다시 만들기 판정: 이전 scenes·지시를 읽는다.
+        # 다시 만들기 판정: 이전 scenes·지시·캐시·override 를 읽는다.
         previz_in = plan.get("previz") or {}
         prev_scenes = previz_in.get("scenes") or []
         is_rebuild = bool(prev_scenes)
         extra_prompt_ko = str(previz_in.get("extraPromptKo") or "").strip()
         extra_cut_id = str(previz_in.get("extraCutId") or "").strip()
+        grammar_cache = dict(previz_in.get("panelGrammar") or {})
+        overrides = dict(previz_in.get("grammarOverrides") or {})
 
-        # 다시 만들기 지시 → 구체적 영어 변경 목록(changesEn). 지시가 없으면 빈 목록.
-        changes_en: list[dict] = []
+        # 다시 만들기 지시 → 연출 문법 수정 목록(edits). reread 컷·blocking 문장도 뽑는다.
+        reread_cuts: set[str] = set()
+        blocking_notes: list[dict] = []
         if is_rebuild and extra_prompt_ko:
-            changes_en = _rebuild_changes(owner, pid, plan_id, extra_prompt_ko, groups, prev_scenes)
+            edits = _rebuild_edits(owner, pid, plan_id, extra_prompt_ko, groups, prev_scenes)
+            overrides, reread_cuts, blocking_notes = _apply_edits(edits, groups, overrides)
 
-        # extraCutId 가 가리키는 장소 그룹 인덱스(없으면 None = 전부 다시).
+        total_cuts = sum(len(g["cuts"]) for g in groups)
+
+        # 1) panels: 컷마다 연출 문법 읽기(캐시). reread 컷은 캐시 무시하고 다시 읽는다.
+        _set_progress(owner, pid, task_id, step="panels", done=0, total=total_cuts)
+        grammar_by_cut, grammar_cache = _read_grammars(
+            owner, pid, plan_id, groups, chars, grammar_cache, reread_cuts, task_id=task_id,
+        )
+
+        # 2) design: Astra 설계. (progress: design, total=그룹 수)
+        _set_progress(owner, pid, task_id, step="design", done=0, total=len(groups))
+        prev_by_location = {str(s.get("locationId") or ""): s for s in prev_scenes}
+        setting = script.get("setting") or {}
+
         target_group_index = None
         if is_rebuild and extra_cut_id:
             target_group_index = _group_index_for_cut(groups, extra_cut_id)
 
-        # 사용자 지시로 바뀐 컷(fit 에서 격자 보정·자동 재요청 제외). "all" 이면 대상 그룹 전체.
-        user_changed_cuts = _user_changed_cut_ids(changes_en, groups, target_group_index)
-
-        # 1) 패널 샷 분석(Claude). cutId → shot. (progress: panels, total=컷 수, 컷마다 +1)
-        total_cuts = sum(len(g["cuts"]) for g in groups)
-        _set_progress(owner, pid, task_id, step="panels", done=0, total=total_cuts)
-        panel_shots = _analyze_panels(owner, pid, plan_id, groups, chars, task_id=task_id)
-
-        # 2) Astra 설계(panelShots 포함). (progress: design, total=그룹 수, 그룹마다 +1)
-        _set_progress(owner, pid, task_id, step="design", done=0, total=len(groups))
-        prev_by_location = {str(s.get("locationId") or ""): s for s in prev_scenes}
-
-        raw_scenes: list[dict] = []
+        raw_scenes: list = []
         scene_specs: list[dict] = []
         used_model = ""
-        # 다시 만들기이고 그룹 한정이면, 대상 아닌 그룹은 이전 scene 을 그대로 쓴다.
         reuse_scene_by_index: dict[int, dict] = {}
 
         for group_index, group in enumerate(groups):
@@ -897,34 +962,35 @@ def run_design(owner: str, pid: str, task_id: str) -> None:
             scene_specs.append({"locationId": location_id, "cuts": cut_specs, "textures": textures})
 
             prev_scene = prev_by_location.get(location_id)
-            # 그룹 한정 다시 만들기: 대상 그룹이 아니고 이전 scene 이 있으면 재설계하지 않고 유지.
             if target_group_index is not None and group_index != target_group_index and prev_scene is not None:
                 reuse_scene_by_index[group_index] = copy.deepcopy(prev_scene)
-                raw_scenes.append(None)  # 자리만 둔다(normalize 전에 치환).
+                raw_scenes.append(None)
                 _bump_progress(owner, pid, task_id, step="design")
                 continue
 
-            # _design_prompt 에 넘길 이전 설계 요약·변경 지시.
             prev_summary = _scene_summary(prev_scene) if (is_rebuild and prev_scene) else None
-            group_changes = _changes_for_group(changes_en, group) if is_rebuild else []
+            group_blocking = _blocking_for_group(blocking_notes, group)
+            # 방 높이 clamp 범위: 이 장소가 대본 주 장소면 setting.enclosed, 아니면 열린 공간(3.0).
+            room_h_clamp = _room_height_bounds(setting, name_en)
             blocks = [{"text": _design_prompt(
-                name_en, loc, group["cuts"], script, chars, panel_shots,
-                previous_scene=prev_summary, changes=group_changes, is_rebuild=is_rebuild,
+                name_en, loc, group["cuts"], script, chars, grammar_by_cut,
+                previous_scene=prev_summary, is_rebuild=is_rebuild, blocking=group_blocking,
+                room_height=room_h_clamp,
             )}]
             payload, model = _design_scene(owner, pid, plan_id, blocks)
             used_model = model or used_model
             payload = payload if isinstance(payload, dict) else {}
             payload["locationId"] = location_id
+            # 방 높이 clamp(모델이 10m 를 주는 사례).
+            _clamp_room_height(payload, room_h_clamp)
             raw_scenes.append(payload)
             _bump_progress(owner, pid, task_id, step="design")
 
-        # 재사용 그룹은 정리에서 빼고 뒤에 다시 꽂는다(normalize 는 재설계 scene 만 통과).
         design_indices = [i for i in range(len(groups)) if i not in reuse_scene_by_index]
         design_raw = [raw_scenes[i] for i in design_indices]
         design_specs = [scene_specs[i] for i in design_indices]
         designed = previz_schema.normalize_scenes(design_raw, scene_specs=design_specs)
 
-        # scenes 를 그룹 순서대로 합친다(재설계 scene + 재사용 scene).
         scenes: list[dict] = []
         designed_iter = iter(designed)
         for group_index in range(len(groups)):
@@ -933,12 +999,9 @@ def run_design(owner: str, pid: str, task_id: str) -> None:
             else:
                 scenes.append(next(designed_iter))
 
-        # 3) 투영 검산 → 재요청/격자 보정. (progress: fit, total=컷 수, 컷마다 +1)
-        _set_progress(owner, pid, task_id, step="fit", done=0, total=total_cuts)
-        fit = _fit_scenes(
-            owner, pid, plan_id, scenes, groups, scene_specs, panel_shots, script, chars, plan,
-            user_changed_cuts=user_changed_cuts, task_id=task_id,
-        )
+        # 3) camera: 장소마다 scene_line → 컷마다 place_cut. (progress: camera, total=컷 수)
+        _set_progress(owner, pid, task_id, step="camera", done=0, total=total_cuts)
+        fit = _place_cameras(owner, pid, scenes, groups, grammar_by_cut, overrides, task_id=task_id)
 
         # 4) 저장(done). lastRebuild 요약을 남긴다(다시 만들기였으면).
         _set_step(owner, pid, task_id, step="done")
@@ -947,14 +1010,378 @@ def run_design(owner: str, pid: str, task_id: str) -> None:
             last_rebuild = {
                 "extraPromptKo": extra_prompt_ko,
                 "cutId": extra_cut_id,
-                "changesEn": changes_en,
+                "editsEn": [{"cutId": c, "fields": v} for c, v in overrides.items()],
                 "at": now_iso(),
             }
-        _commit_scenes(owner, pid, task_id, scenes, used_model, panel_shots=panel_shots, fit=fit, last_rebuild=last_rebuild)
+        _commit_scenes(
+            owner, pid, task_id, scenes, used_model, fit=fit,
+            panel_grammar=grammar_cache, grammar_overrides=overrides, last_rebuild=last_rebuild,
+        )
     except Exception as exc:  # noqa: BLE001
         log.warning("vnew.previz.run_design.failed pid=%s err=%s", pid, str(exc)[:300])
         message = exc.message if isinstance(exc, VpocError) else str(exc)[:300]
         _fail(owner, pid, task_id, message)
+
+
+def _room_height_bounds(setting: dict, name_en: str | None = None) -> tuple[float, float]:
+    """방 높이 clamp 범위. 닫힌 방이면 (2.4, 3.5), 열린 공간이면 (3.0, 3.0).
+
+    name_en 을 주면 그 장소가 대본 setting 의 주 장소(locationEn)와 같을 때만 setting.enclosed 를
+    쓰고, 다른 장소(예: 거리)는 열린 공간(3.0)으로 본다. 대본 setting 은 주 장소를 설명하므로,
+    다른 장소에까지 그 enclosed 를 적용하면 안 된다(설계자 049).
+    """
+    enclosed = bool((setting or {}).get("enclosed"))
+    if name_en is not None:
+        from . import locations as loc_mod  # noqa: PLC0415
+
+        setting_loc = str((setting or {}).get("locationEn") or "").strip()
+        if setting_loc:
+            same = loc_mod.normalize_name(name_en) == loc_mod.normalize_name(setting_loc)
+            enclosed = enclosed and same
+    if enclosed:
+        return (ROOM_HEIGHT_ENCLOSED_MIN, ROOM_HEIGHT_ENCLOSED_MAX)
+    return (ROOM_HEIGHT_OPEN, ROOM_HEIGHT_OPEN)
+
+
+def _clamp_room_height(payload: dict, bounds: tuple[float, float]) -> None:
+    """Astra payload 의 room.height 를 clamp 범위로 자른다(모델이 10m 를 주는 사례 보정)."""
+    if not isinstance(payload, dict):
+        return
+    room = payload.get("room")
+    if not isinstance(room, dict):
+        return
+    low, high = bounds
+    try:
+        h = float(room.get("height"))
+    except (TypeError, ValueError):
+        h = None
+    if h is None:
+        room["height"] = round((low + high) / 2.0, 3)
+    else:
+        room["height"] = round(max(low, min(high, h)), 3)
+
+
+# ================================================================ panels: 연출 문법 읽기(캐시)
+
+
+def _grammar_charge(owner: str, pid: str, plan_id: str):
+    """previz_grammar.read_cut 에 넘길 charge(usage, model) 콜백(기존 _charge 로 원장 계상)."""
+
+    def _cb(usage: dict, model: str) -> None:
+        _charge(owner, pid, plan_id, usage or {}, model)
+
+    return _cb
+
+
+def _read_grammars(owner, pid, plan_id, groups, chars, grammar_cache, reread_cuts, *, task_id=""):
+    """컷마다 연출 문법을 읽는다(캐시). 반환 (grammar_by_cut, 갱신된 grammar_cache).
+
+    - 캐시 previz["panelGrammar"][cutId] = {hash, grammar}. 그 컷 조각 tiles_hash 가 같고 reread 대상이
+      아니면 read_cut 을 부르지 않는다(다시 만들기 때 Claude 재호출 없음).
+    - 읽기 실패(이미지 없음·None)면 grammar_by_cut 에 넣지 않는다(camera 가 Astra 카메라를 둔다).
+    - charge 는 _grammar_charge 콜백으로 원장에.
+    """
+    all_tiles = _all_tiles(owner, pid)
+    role_names = _role_names(chars)
+    charge = _grammar_charge(owner, pid, plan_id)
+    grammar_by_cut: dict[str, dict] = {}
+    cache: dict[str, dict] = dict(grammar_cache or {})
+    for group in groups:
+        for cut in group["cuts"]:
+            cut_id = str(cut["cutId"])
+            tiles = _cut_tiles(cut.get("panels") or [], all_tiles)
+            hashed = previz_grammar.tiles_hash(tiles)
+            cached = cache.get(cut_id)
+            if (
+                cut_id not in reread_cuts
+                and isinstance(cached, dict)
+                and cached.get("hash") == hashed
+                and isinstance(cached.get("grammar"), dict)
+            ):
+                grammar_by_cut[cut_id] = cached["grammar"]
+                if task_id:
+                    _bump_progress(owner, pid, task_id, step="panels")
+                continue
+            try:
+                grammar = previz_grammar.read_cut(
+                    owner, pid, plan_id, cut, tiles, role_names, charge=charge
+                )
+            except Exception as exc:  # noqa: BLE001
+                log.warning("vnew.previz.grammar.failed cut=%s err=%s", cut_id, str(exc)[:200])
+                grammar = None
+            if isinstance(grammar, dict):
+                grammar_by_cut[cut_id] = grammar
+                cache[cut_id] = {"hash": hashed, "grammar": grammar}
+            if task_id:
+                _bump_progress(owner, pid, task_id, step="panels")
+    return grammar_by_cut, cache
+
+
+# ================================================================ camera: 자리 계산(scene_line·place_cut)
+
+
+def _scene_key_pair(grammar_by_cut: dict, cut_ids: list[str], scene: dict) -> tuple[str, str]:
+    """장면의 핵심 두 인물(가장 많이 등장하는 둘) 이름. 연출 문법 mainSubject·others 를 센다."""
+    counts: dict[str, int] = {}
+    for cid in cut_ids:
+        g = grammar_by_cut.get(cid)
+        if not isinstance(g, dict):
+            continue
+        subj = str(g.get("mainSubject") or "").strip()
+        if subj:
+            counts[subj] = counts.get(subj, 0) + 2  # 주인공은 가중
+        for other in g.get("others") or []:
+            nm = str((other or {}).get("name") or "").strip()
+            if nm:
+                counts[nm] = counts.get(nm, 0) + 1
+    # 장면 actors 이름으로 보강(문법에 아무도 없을 때).
+    for a in scene.get("actors") or []:
+        nm = str(a.get("name") or "").strip()
+        if nm and nm not in counts:
+            counts[nm] = 0
+    ranked = sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))
+    names = [n for n, _ in ranked]
+    a_name = names[0] if names else ""
+    b_name = names[1] if len(names) >= 2 else ""
+    return a_name, b_name
+
+
+def _actor_foot(scene: dict, cut: dict, actor_id: str) -> list[float]:
+    """그 컷에서 인물의 발 위치(바닥 y=0). timeline actors[].pos."""
+    for ca in cut.get("actors") or []:
+        if str(ca.get("id")) == str(actor_id):
+            pos = ca.get("pos") or [0, 0, 0]
+            return [float(pos[0]) if len(pos) > 0 else 0.0, 0.0, float(pos[2]) if len(pos) > 2 else 0.0]
+    return [0.0, 0.0, 0.0]
+
+
+def _name_foot(scene: dict, cut: dict, name: str) -> list[float]:
+    """이름으로 그 컷 인물 발 위치를 찾는다(scene.actors 이름 → id → cut pos)."""
+    for a in scene.get("actors") or []:
+        if str(a.get("name") or "").strip() == str(name).strip():
+            return _actor_foot(scene, cut, a.get("id"))
+    return [0.0, 0.0, 0.0]
+
+
+def _actors_in_cut(scene: dict, cut: dict) -> list[dict]:
+    """place_cut 입력 actors = [{id, name, heightM, foot, pose, facingDeg}] (그 컷 timeline 기준)."""
+    meta_by_id = {str(a.get("id")): a for a in scene.get("actors") or []}
+    out: list[dict] = []
+    for ca in cut.get("actors") or []:
+        aid = str(ca.get("id"))
+        meta = meta_by_id.get(aid) or {}
+        pos = ca.get("pos") or [0, 0, 0]
+        out.append({
+            "id": aid,
+            "name": str(meta.get("name") or aid),
+            "heightM": float(meta.get("heightM") or 1.7),
+            "foot": [float(pos[0]) if len(pos) > 0 else 0.0, 0.0, float(pos[2]) if len(pos) > 2 else 0.0],
+            "pose": str(ca.get("pose") or "stand"),
+            "facingDeg": ca.get("facingDeg"),
+        })
+    return out
+
+
+def _merge_override(grammar: dict, override: dict | None) -> dict:
+    """읽은 grammar 위에 사용자 지시 수정(override)을 덮어쓴다(읽기 캐시는 그대로)."""
+    if not override:
+        return grammar
+    merged = copy.deepcopy(grammar)
+    for field, value in (override or {}).items():
+        if field in ("blocking",):  # blocking 은 Astra 배치용이라 grammar 에 안 쓴다.
+            continue
+        merged[field] = value
+    return previz_grammar.normalize_grammar(merged)
+
+
+def _apply_cut_result(scene: dict, cut: dict, result: dict) -> None:
+    """place_cut 결과로 그 컷 camera·actors 를 바꾼다. actors 는 hide 빠짐·move·facingDeg 반영 목록."""
+    cut["camera"] = result.get("camera") or cut.get("camera")
+    out_actors = result.get("actors") or []
+    # place_cut 의 out_actors 는 {id, foot, facingDeg, ...} — timeline actor 모양으로 되돌린다.
+    orig_by_id = {str(a.get("id")): a for a in cut.get("actors") or []}
+    new_actors: list[dict] = []
+    for a in out_actors:
+        aid = str(a.get("id"))
+        base = dict(orig_by_id.get(aid) or {"id": aid})
+        foot = a.get("foot")
+        if isinstance(foot, (list, tuple)) and len(foot) >= 3:
+            base["pos"] = [round(float(foot[0]), 4), 0.0, round(float(foot[2]), 4)]
+        if a.get("facingDeg") is not None:
+            base["facingDeg"] = round(float(a.get("facingDeg")), 2)
+        new_actors.append(base)
+    cut["actors"] = new_actors
+
+
+def _place_cameras(owner, pid, scenes, groups, grammar_by_cut, overrides, *, task_id="") -> dict:
+    """장소마다 scene_line → 컷마다 place_cut. scenes 를 제자리에서 고치고 fit dict 를 돌려준다.
+
+    fit[cutId] = {match, method, lens, distanceM, vantageDeg, side, crossed, cheats, wallClamped}.
+    grammar 없는 컷은 Astra 카메라를 그대로 두고 method "astra", match null.
+    """
+    fit: dict[str, dict] = {}
+    for scene_index, scene in enumerate(scenes):
+        group = groups[scene_index] if scene_index < len(groups) else {"cuts": []}
+        timeline = scene.get("timeline") or []
+        cut_ids = [str(c.get("cutId") or "") for c in timeline]
+        room = scene.get("room") or {}
+
+        # 핵심 두 인물·라인 쪽. override 적용된 grammar 로 센다.
+        merged_by_cut: dict[str, dict] = {}
+        for cid in cut_ids:
+            g = grammar_by_cut.get(cid)
+            if isinstance(g, dict):
+                merged_by_cut[cid] = _merge_override(g, overrides.get(cid))
+        a_name, b_name = _scene_key_pair(merged_by_cut, cut_ids, scene)
+        # 두 핵심 인물의 기본 자리(첫 유효 컷에서).
+        a_pos = b_pos = [0.0, 0.0, 0.0]
+        for cut in timeline:
+            if a_name:
+                a_pos = _name_foot(scene, cut, a_name)
+            if b_name:
+                b_pos = _name_foot(scene, cut, b_name)
+            if a_name and b_name:
+                break
+        line = previz_camera.scene_line(merged_by_cut, a_name, b_name, a_pos, b_pos)
+        base_side = int(line.get("side") or 1)
+        crossed_set = set(line.get("crossed") or [])
+
+        for cut in timeline:
+            cut_id = str(cut.get("cutId") or "")
+            g = merged_by_cut.get(cut_id)
+            if not isinstance(g, dict):
+                # 읽기 실패 컷: Astra 카메라 유지, method astra, match null(판정 불가).
+                fit[cut_id] = {"match": None, "method": "astra"}
+                if task_id:
+                    _bump_progress(owner, pid, task_id, step="camera")
+                continue
+            crossed = cut_id in crossed_set
+            g_local = dict(g)
+            g_local["_crossed"] = crossed
+            side = -base_side if crossed else base_side
+            try:
+                result = previz_camera.place_cut(g_local, _actors_in_cut(scene, cut), room, side)
+            except Exception as exc:  # noqa: BLE001
+                log.warning("vnew.previz.place_cut.failed cut=%s err=%s", cut_id, str(exc)[:200])
+                fit[cut_id] = {"match": None, "method": "astra"}
+                if task_id:
+                    _bump_progress(owner, pid, task_id, step="camera")
+                continue
+            _apply_cut_result(scene, cut, result)
+            rfit = result.get("fit") or {}
+            fit[cut_id] = {
+                "match": rfit.get("match"),
+                "method": "grammar",
+                "lens": rfit.get("lens"),
+                "distanceM": rfit.get("distanceM"),
+                "vantageDeg": rfit.get("vantageDeg"),
+                "side": rfit.get("side"),
+                "crossed": bool(crossed),
+                "cheats": result.get("cheats") or [],
+                "wallClamped": bool(rfit.get("wallClamped")),
+            }
+            if cut_id in overrides:
+                fit[cut_id]["override"] = True
+            if task_id:
+                _bump_progress(owner, pid, task_id, step="camera")
+    return fit
+
+
+# ================================================================ 다시 만들기: 연출 문법 수정 목록(edits)
+
+
+def _apply_edits(edits: list[dict], groups: list[dict], overrides: dict) -> tuple[dict, set, list]:
+    """edits 를 grammarOverrides(dict)로 쌓고, reread 컷 집합·blocking 문장 목록을 뽑는다.
+
+    edits: [{cutId|"all", field, value, noteEn, reread?, blocking?}]. "all" 은 모든 컷에 적용.
+    반환 (overrides, reread_cuts, blocking_notes). blocking_notes = [{cutId, text}].
+    """
+    overrides = dict(overrides or {})
+    reread: set[str] = set()
+    blocking: list[dict] = []
+    all_cut_ids = [str(c.get("cutId") or "") for g in groups for c in g.get("cuts") or []]
+    for edit in edits or []:
+        if not isinstance(edit, dict):
+            continue
+        cid = str(edit.get("cutId") or "all").strip() or "all"
+        targets = all_cut_ids if cid == "all" else ([cid] if cid in all_cut_ids else [])
+        if edit.get("reread"):
+            reread.update(targets)
+        field = str(edit.get("field") or "").strip()
+        value = edit.get("value")
+        if field == "blocking":
+            text = str(value or edit.get("noteEn") or "").strip()
+            if text:
+                for t in targets:
+                    blocking.append({"cutId": t, "text": text})
+            continue
+        if field and value is not None and field in _GRAMMAR_EDIT_FIELDS:
+            for t in targets:
+                overrides.setdefault(t, {})[field] = value
+    return overrides, reread, blocking
+
+
+def _blocking_for_group(blocking_notes: list[dict], group: dict) -> list[str]:
+    """이 장소 그룹 컷에 해당하는 blocking 문장(Astra 배치 프롬프트용)."""
+    group_cut_ids = {str(c.get("cutId") or "") for c in group.get("cuts") or []}
+    out: list[str] = []
+    for note in blocking_notes or []:
+        if str(note.get("cutId") or "") in group_cut_ids:
+            text = str(note.get("text") or "").strip()
+            if text:
+                out.append(text)
+    return out
+
+
+def _rebuild_edits(owner, pid, plan_id, extra_prompt_ko, groups, prev_scenes) -> list[dict]:
+    """사용자 한국어 지시를 '연출 문법 수정 목록'(edits)으로 바꾼다. Astra 먼저, 실패하면 Claude.
+
+    컷 라벨·연출 문법 열거값을 함께 줘서 모델이 올바른 cutId·field·value 를 쓰게 한다.
+    실패하면 "all" 대상 reread 하나(그 컷들 grammar 를 다시 읽기)로 돌려준다.
+    """
+    lines = [
+        "사용자가 3D 프리비즈의 '연출'을 이렇게 바꿔 달라고 했습니다(한국어). 카메라 숫자는 서버가 "
+        "연출 문법으로 계산하므로, 이 지시를 '연출 문법 수정 목록'(edits)으로 바꿔 emit_edits 로 주세요.",
+        "",
+        f"[사용자 지시] {extra_prompt_ko}",
+        "",
+        "[edits 규칙] 각 항목 {cutId(또는 \"all\"), field, value, noteEn}. field·value 허용값:",
+        "- shotSize: ECU|CU|MCU|MS|MLS|FS|LS",
+        "- shotType: clean_single|dirty_single|over_shoulder|two_shot|profile_two_shot|pov|insert|establishing",
+        "- vantage: front|front3q|3q|side|back3q|back",
+        "- cameraHeight: low|eye|high|overhead",
+        "- mainSubject: 인물 이름(역할명)",
+        "- offscreenPartnerSide: left|right|front_of_camera|none",
+        "- headTopY: 0~0.9 숫자(머리 위 화면 위치), subjectX: 0~1 숫자(주인공 좌우)",
+        "- blocking: 인물 자리 지시 문장(value 에 영어 문장). 자리·앉고 서기·마주봄 등.",
+        "컷 전체가 '시점이 안 맞음' 같은 모호한 지시면 field 없이 reread:true 로 그 컷 grammar 를 다시 읽게 하세요.",
+        "예: '범건우 옆모습만' → {cutId:\"cut-01\", field:\"vantage\", value:\"side\"}.",
+        "",
+        "[컷 목록(cutId 를 그대로 쓰세요)]",
+    ]
+    cut_index = 0
+    for group in groups:
+        for cut in group["cuts"]:
+            cut_index += 1
+            lines.append(f"- cutId={cut['cutId']} (컷{cut_index}, 장소={group['locationEn']})")
+    summaries = [s for s in (_scene_summary(ps) for ps in prev_scenes) if s]
+    if summaries:
+        lines += ["", "[이전 설계 요약]"] + summaries
+    blocks = [{"text": "\n".join(lines)}]
+    for model in (ASTRA_MODEL, DESIGN_FALLBACK_MODEL):
+        try:
+            payload, usage = _changes(blocks, model=model)
+        except Exception as exc:  # noqa: BLE001
+            log.warning("vnew.previz.edits.model_failed model=%s err=%s", model, str(exc)[:200])
+            continue
+        used = str(usage.get("model") or model)
+        _charge(owner, pid, plan_id, usage, used)
+        edits = _normalize_edits(payload)
+        if edits:
+            return edits
+    # 변환 실패 → 전체 컷 grammar 를 다시 읽기(reread)로 처리.
+    log.warning("vnew.previz.edits.fallback pid=%s", pid)
+    return [{"cutId": "all", "reread": True}]
 
 
 def _rebuild_changes(owner: str, pid: str, plan_id: str, extra_prompt_ko: str, groups: list[dict], prev_scenes: list[dict]) -> list[dict]:
@@ -1273,39 +1700,45 @@ def _design_prompt(
     cuts: list[dict],
     script: dict,
     chars: list[dict],
-    panel_shots: dict | None = None,
-    retry_cuts: list[dict] | None = None,
+    grammar_by_cut: dict | None = None,
     *,
     previous_scene: str | None = None,
-    changes: list[dict] | None = None,
     is_rebuild: bool = False,
+    blocking: list[str] | None = None,
+    room_height: tuple[float, float] | None = None,
 ) -> str:
-    """한 장소(연속 컷)의 설계 요청 문단. 콘티 컷·대본 위치·location 설계·인물 목록·패널 샷을 담는다.
+    """한 장소(연속 컷)의 설계 요청 문단(049). 카메라는 서버가 계산하므로 Astra 는 인물 자리·자세·
+    서로 보는 방향·소품만 정확히 쓴다. 컷마다 패널 연출 문법 요약(주인공·샷 종류·상대 쪽)을 함께 준다.
 
-    panel_shots = {cutId: shot} — Claude 가 읽은 웹툰 패널 샷(크기·높이·각도·인물 화면 좌표).
-    retry_cuts = [{cutId, current, target}] — 투영 검산 뒤 오차 큰 컷만 '현재 vs 목표'를 주고
-    그 컷 camera 만 다시 받을 때 쓴다(있으면 재요청 문단을 덧붙인다).
-    previous_scene = 이전 설계 요약(문자열) — 다시 만들기일 때 '[이전 설계]' 문단으로 넣는다.
-    changes = [{cutId|"all", whatEn}] — 사용자 수정 지시(영어). '[사용자 수정 지시 — 반드시 반영]'로.
-    is_rebuild = 다시 만들기이면 True — 지시가 없어도 '이전과 다른 배치·카메라 대안'을 요구하는 문장을 넣는다.
+    grammar_by_cut = {cutId: grammar} — Claude 가 읽은 연출 문법(previz_grammar.normalize_grammar).
+    previous_scene = 이전 설계 요약(다시 만들기 '[이전 설계]' 문단).
+    is_rebuild = 다시 만들기이면 '이전과 다른 대안' 요구 문장을 넣는다.
+    blocking = [영어 문장] — 사용자 지시의 인물 자리(배치) 문장(Astra 배치 프롬프트에 넣는다).
+    room_height = (low, high) — 방 높이 clamp 범위(프롬프트에 알려 둔다).
     """
-    panel_shots = panel_shots or {}
+    grammar_by_cut = grammar_by_cut or {}
     setting = script.get("setting") or {}
     entries = script.get("entries") or []
     room_w = room_d = room_h = "?"
     if loc:
         _d = loc.get("design") or {}
         room_w, room_d, room_h = _d.get("widthM", "?"), _d.get("depthM", "?"), _d.get("heightM", "?")
+    height_lo, height_hi = (room_height or (ROOM_HEIGHT_ENCLOSED_MIN, ROOM_HEIGHT_ENCLOSED_MAX))
     lines = [
         f"[장소] {name_en or '(이름 없음)'}",
         "이 장소에서 이어지는 콘티 컷들을 하나의 3D 장면으로 설계하세요. timeline 은 아래 컷과 1:1 로,"
-        " 주어진 cutId 를 그대로 쓰세요. 컷이 바뀌어도 방·소품·인물 자리는 이어지고 카메라만 바뀝니다.",
+        " 주어진 cutId 를 그대로 쓰세요. 컷이 바뀌어도 방·소품·인물 자리는 이어집니다.",
+        "",
+        "[카메라는 서버가 계산합니다] 이 장면의 카메라 숫자(pos·target·fov)는 서버가 영화 연출 문법으로 "
+        "정합니다. 그러니 각 컷의 camera 는 대충(장면 중앙을 보는 기본값) 둬도 됩니다. 대신 인물 자리(pos)·"
+        "자세(pose: sit/stand/kneel/lie)·서로 보는 방향(facingDeg, 0=+z 시계방향)·소품을 웹툰 상황에 맞게 "
+        "정확히 쓰세요(누가 누구 옆/맞은편에 앉고 서는지). 컷마다 actors 에는 그 장면 인물 전원을 기본 "
+        "자리로 넣으세요(카메라는 서버가 필요한 사람만 보이게 합니다).",
         "",
         "[좌표계·치수] x 오른쪽(+), y 위(+), z 카메라 쪽(+). north 벽은 z = -depth/2. 단위 m."
-        f" 방 크기 width≈{room_w} depth≈{room_d} height≈{room_h}."
-        " 카메라 높이(바닥 기준): low≈0.6m, eye≈1.5m, high≈2.3m. fov(세로 화각): close 20-30,"
-        " medium 35-45, wide 50-65. 화면은 16:9, screenX 0=왼쪽·1=오른쪽, screenY 0=위·1=아래,"
-        " heightFrac=화면 높이 대비 인물 키.",
+        f" 방 크기 width≈{room_w} depth≈{room_d}."
+        f" 방 높이(height)는 {'닫힌 방' if setting.get('enclosed') else '열린 공간'}이라 {height_lo}~{height_hi}m 사이로"
+        " 두세요(천장을 10m 처럼 터무니없이 높게 두지 마세요).",
         "",
         "[공간 배치(대본)]",
         f"장소 분위기: {setting.get('moodKo', '')} / 시간: {setting.get('timeKo', '')}",
@@ -1343,71 +1776,53 @@ def _design_prompt(
         char_pos = _entry_positions(cut.get("panels") or [], entries)
         lines.append(
             f"{index}. cutId={cut['cutId']} seconds={cut['seconds']}"
-            f" / 샷={cut.get('shotKo', '')} / 카메라={cut.get('cameraEn', '')}"
-            f" / 상황={cut.get('situationKo', '')}"
+            f" / 샷={cut.get('shotKo', '')} / 상황={cut.get('situationKo', '')}"
             + (f" / 인물위치={char_pos}" if char_pos else "")
         )
-        shot = panel_shots.get(str(cut["cutId"]))
-        if shot:
-            lines.append(
-                f"   [웹툰 패널 샷] shotSize={shot.get('shotSize')} cameraHeight={shot.get('cameraHeight')}"
-                f" angle={shot.get('angle')}"
-                + (f" visibleWalls={','.join(shot.get('visibleWalls') or [])}" if shot.get("visibleWalls") else "")
+        grammar = grammar_by_cut.get(str(cut["cutId"]))
+        if isinstance(grammar, dict):
+            others = ", ".join(
+                f"{o.get('name')}({o.get('how')})" for o in (grammar.get("others") or []) if o.get("name")
             )
-            for subj in shot.get("subjects") or []:
-                lines.append(
-                    f"     · {subj.get('name') or '(인물)'}: screenX={subj.get('screenX')}"
-                    f" screenY={subj.get('screenY')} heightFrac={subj.get('heightFrac')}"
-                    f" facing={subj.get('facing')} visible={subj.get('visible')}"
-                )
             lines.append(
-                "   이 컷의 카메라를 위 패널 샷에 맞추세요(각 인물이 그 screenX·screenY·heightFrac 로 보이게,"
-                " shotSize 에 맞는 fov, cameraHeight 에 맞는 높이, angle 에 맞는 방향)."
+                f"   [패널 연출 문법] 주인공={grammar.get('mainSubject') or '(인물)'}"
+                f" / 샷={grammar.get('shotSize')} {grammar.get('shotType')}"
+                f" / 각도={grammar.get('vantage')} / 높이={grammar.get('cameraHeight')}"
+                f" / 상대쪽={grammar.get('offscreenPartnerSide')}"
+                + (f" / 함께={others}" if others else "")
+            )
+            lines.append(
+                "   위 문법은 '이 컷에서 누가 주인공이고 누구를 보는지'의 근거입니다. 그 주인공과 상대가"
+                " 서로 옆/맞은편에 오도록 인물 자리·facingDeg 를 두세요(카메라는 서버가 계산합니다)."
             )
     lines += [
         "",
         "인물은 고유의 밝은 색(서로 확실히 다르게)으로, 배경은 하나의 덩어리(회색조), 빛은 어디서 오는지"
-        " light 로 표기하세요. 컷 안에서 카메라가 움직이면 camera.moveTo, 인물이 걸으면 actor.moveTo 로.",
+        " light 로 표기하세요. 컷 안에서 인물이 걸으면 actor.moveTo 로.",
     ]
-    # --- 다시 만들기: 이전 설계·사용자 지시·대안 요구 ---
+    # --- 사용자 blocking(인물 자리 지시) ---
+    blocking = blocking or []
+    if blocking:
+        lines += [
+            "",
+            "[사용자 배치 지시 — 반드시 반영] 아래 인물 자리 지시를 정확히 반영하세요.",
+        ]
+        for note in blocking:
+            lines.append(f"- {note}")
+    # --- 다시 만들기: 이전 설계·대안 요구 ---
     if is_rebuild and previous_scene:
         lines += [
             "",
-            "[이전 설계] 아래는 방금 만든 이 장소의 장면입니다(참고). 사용자가 아래 수정 지시를 줬으면 "
-            "그 부분을 반드시 바꾸고, 지시가 없더라도 이전과 똑같이 수렴하지 말고 다른 대안을 내세요.",
+            "[이전 설계] 아래는 방금 만든 이 장소의 장면입니다(참고). 사용자 지시가 겨냥한 부분은 반드시 "
+            "바꾸고, 지시가 없더라도 이전과 똑같이 수렴하지 말고 다른 배치 대안을 내세요.",
             previous_scene,
         ]
-    changes = changes or []
-    if changes:
-        lines += [
-            "",
-            "[사용자 수정 지시 — 반드시 반영] 아래 변경을 이번 설계에 정확히 반영하세요. 수치·대상·방향을 "
-            "그대로 따르고, 지시가 겨냥하지 않은 컷·인물·소품은 가능하면 이전 설계 그대로 두세요.",
-        ]
-        for change in changes:
-            lines.append(f"- cutId={change.get('cutId')}: {change.get('whatEn')}")
     elif is_rebuild:
         lines += [
             "",
-            "[다시 만들기] 사용자가 이전 결과가 마음에 들지 않아 다시 요청했습니다. 웹툰 패널 시점(각 인물의 "
-            "screenX·screenY·heightFrac)은 유지하되, 이전과 다른 배치·카메라 대안을 내세요(같은 결과로 "
-            "수렴하지 마세요).",
+            "[다시 만들기] 사용자가 이전 결과가 마음에 들지 않아 다시 요청했습니다. 패널 연출 문법(주인공·"
+            "샷 종류·상대 쪽)은 유지하되, 이전과 다른 인물 배치 대안을 내세요(같은 결과로 수렴하지 마세요).",
         ]
-    if retry_cuts:
-        lines += [
-            "",
-            "[투영 검산 — 아래 컷은 카메라가 패널과 많이 어긋났습니다. 그 컷 camera 만 고쳐 주세요]",
-            "'현재'는 지금 카메라로 투영한 인물 화면 좌표, '목표'는 웹툰 패널 값입니다. 목표에 맞게 "
-            "camera.pos·target·fov 를 조정하세요(방·소품·인물 자리는 그대로).",
-        ]
-        for rc in retry_cuts:
-            lines.append(f"- cutId={rc.get('cutId')}")
-            for pair in rc.get("subjects") or []:
-                lines.append(
-                    f"    {pair.get('name') or '(인물)'}: 현재 screenX={pair.get('curX')} screenY={pair.get('curY')}"
-                    f" heightFrac={pair.get('curH')} → 목표 screenX={pair.get('tgtX')} screenY={pair.get('tgtY')}"
-                    f" heightFrac={pair.get('tgtH')}"
-                )
     return "\n".join(lines)
 
 
@@ -1532,7 +1947,7 @@ def _analyze_panels(owner: str, pid: str, plan_id: str, groups: list[dict], char
 # ================================================================ 저장(task.id 확인)
 
 
-def _commit_scenes(owner: str, pid: str, task_id: str, scenes: list[dict], model: str, *, panel_shots: dict | None = None, fit: dict | None = None, last_rebuild: dict | None = None) -> None:
+def _commit_scenes(owner: str, pid: str, task_id: str, scenes: list[dict], model: str, *, fit: dict | None = None, panel_grammar: dict | None = None, grammar_overrides: dict | None = None, last_rebuild: dict | None = None) -> None:
     from . import plan as plan_mod  # noqa: PLC0415
 
     def mutator(data: dict) -> None:
@@ -1540,12 +1955,15 @@ def _commit_scenes(owner: str, pid: str, task_id: str, scenes: list[dict], model
         if (previz.get("task") or {}).get("id") != task_id:
             raise _Discard()
         previz["scenes"] = scenes
-        previz["panelShots"] = panel_shots or {}
+        previz["panelShots"] = {}  # 049: 패널 샷(옛) 대신 panelGrammar 를 쓴다.
+        previz["panelGrammar"] = panel_grammar or {}
+        previz["grammarOverrides"] = grammar_overrides or {}
         previz["fit"] = fit or {}
         previz["status"] = "ready"
         previz["error"] = ""
         previz["model"] = model
         previz["approved"] = False  # 새로 설계하면 승인 해제.
+        previz["approvedForced"] = None  # 강제 승인 기록도 지운다(새 설계는 새 판정).
         previz["revision"] = int(previz.get("revision") or 0) + 1
         previz["recordings"] = {}  # revision 이 바뀌면 녹화 키 경로가 달라진다.
         previz["lastRebuild"] = last_rebuild  # 다시 만들기 요약(첫 설계면 None).
@@ -1611,6 +2029,8 @@ def update_scenes(owner: str, pid: str, patch: dict) -> dict:
             # 아직 설계 전이면 콘티에서 그룹을 만든다(저장본이 없어도 PUT 을 허용).
             scene_specs = _specs_from_conti(owner, pid, data)
         scenes = previz_schema.normalize_scenes(raw_scenes, scene_specs=scene_specs)
+        # 사용자가 직접 고친 카메라 컷은 match 를 match_visible 로 다시 계산한다(method "manual").
+        _recompute_manual_fit(previz, current, scenes)
         previz["scenes"] = scenes
         if previz.get("status") in ("none", "failed"):
             previz["status"] = "ready"
@@ -1620,6 +2040,67 @@ def update_scenes(owner: str, pid: str, patch: dict) -> dict:
 
     _, previz = plan_mod.mutate_plan(owner, pid, mutator)
     return previz
+
+
+def _recompute_manual_fit(previz: dict, old_scenes: list[dict], new_scenes: list[dict]) -> None:
+    """PUT 으로 카메라가 바뀐 컷의 match 를 match_visible 로 다시 계산해 previz["fit"] 에 저장(manual).
+
+    바뀌지 않은 컷의 fit 은 그대로 둔다. grammar(패널 읽기+override)로 주인공·샷 크기·머리 위치를 안다.
+    grammar 가 없는 컷은 match null·method manual 로만 둔다(판정 불가).
+    """
+    fit = previz.get("fit")
+    if not isinstance(fit, dict):
+        return
+    grammar_cache = previz.get("panelGrammar") or {}
+    overrides = previz.get("grammarOverrides") or {}
+
+    def _cam_of(scenes, cut_id):
+        for scene in scenes or []:
+            for t in scene.get("timeline") or []:
+                if str(t.get("cutId") or "") == cut_id:
+                    return scene, t
+        return None, None
+
+    for scene in new_scenes or []:
+        for cut in scene.get("timeline") or []:
+            cut_id = str(cut.get("cutId") or "")
+            _, old_cut = _cam_of(old_scenes, cut_id)
+            old_cam = (old_cut or {}).get("camera") or {}
+            new_cam = cut.get("camera") or {}
+            if old_cam == new_cam:
+                continue  # 카메라가 안 바뀐 컷은 그대로.
+            cached = (grammar_cache.get(cut_id) or {}).get("grammar")
+            grammar = _merge_override(cached, overrides.get(cut_id)) if isinstance(cached, dict) else None
+            match = None
+            if isinstance(grammar, dict):
+                subject_name = str(grammar.get("mainSubject") or "")
+                meta = None
+                for a in scene.get("actors") or []:
+                    if str(a.get("name") or "") == subject_name:
+                        meta = a
+                        break
+                if meta is None and scene.get("actors"):
+                    meta = (scene.get("actors") or [None])[0]
+                foot = _actor_foot(scene, cut, (meta or {}).get("id")) if meta else [0, 0, 0]
+                height = float((meta or {}).get("heightM") or 1.7)
+                pose = "stand"
+                for ca in cut.get("actors") or []:
+                    if str(ca.get("id")) == str((meta or {}).get("id")):
+                        pose = str(ca.get("pose") or "stand")
+                        break
+                shot_size = str(grammar.get("shotSize") or "MCU")
+                bottom = previz_camera.LENS.get(shot_size, previz_camera.LENS["MCU"])[2]
+                top_y = float(grammar.get("headTopY") or 0.1)
+                subject_x = float(grammar.get("subjectX") or 0.5)
+                try:
+                    match = round(previz_fit.match_visible(
+                        new_cam, foot, height, pose, top_y, subject_x, bottom
+                    ), 4)
+                except Exception as exc:  # noqa: BLE001
+                    log.warning("vnew.previz.manual_fit.failed cut=%s err=%s", cut_id, str(exc)[:150])
+                    match = None
+            prev = fit.get(cut_id) if isinstance(fit.get(cut_id), dict) else {}
+            fit[cut_id] = dict(prev, match=match, method="manual")
 
 
 def _specs_from_scenes(scenes: list[dict]) -> list[dict]:
@@ -1656,8 +2137,45 @@ def _specs_from_conti(owner: str, pid: str, data: dict) -> list[dict]:
     return specs
 
 
-def approve(owner: str, pid: str) -> dict:
-    """프리비즈 승인. scenes 가 있어야 한다."""
+def _low_match_cuts(previz: dict) -> list[dict]:
+    """fit.match < APPROVE_MIN_MATCH 또는 match null(판정 불가)인 컷 목록(순서대로).
+
+    반환 [{cutId, match, no}]. no 는 컷 번호(scenes timeline 순서, 1 부터).
+    """
+    fit = previz.get("fit") or {}
+    # cutId → 컷 번호(모든 scene timeline 을 순서대로).
+    order: list[str] = []
+    for scene in previz.get("scenes") or []:
+        for t in scene.get("timeline") or []:
+            order.append(str(t.get("cutId") or ""))
+    low: list[dict] = []
+    for index, cut_id in enumerate(order, start=1):
+        info = fit.get(cut_id) or {}
+        match = info.get("match")
+        # match null(판정 불가)·숫자 < 하한 이면 낮은 컷. 옛 err 형식(match 없음)은 세지 않는다.
+        if "match" not in info:
+            continue
+        if match is None or float(match) < APPROVE_MIN_MATCH:
+            low.append({"cutId": cut_id, "match": match, "no": index})
+    return low
+
+
+def _low_cut_message(low: list[dict]) -> str:
+    parts = []
+    for item in low:
+        m = item.get("match")
+        pct = "판정 불가" if m is None else f"{round(float(m) * 100)}%"
+        parts.append(f"컷 {item['no']}({pct})")
+    return "시점 일치도 " + str(round(APPROVE_MIN_MATCH * 100)) + "% 미만 컷이 있습니다: " + ", ".join(parts)
+
+
+def approve(owner: str, pid: str, *, force: bool = False) -> dict:
+    """프리비즈 승인. scenes 가 있어야 한다.
+
+    모든 컷의 fit.match ≥ APPROVE_MIN_MATCH(기본 0.7)가 아니면 409 LowMatch. match null(판정 불가)
+    컷도 낮은 컷으로 센다. force=True 면 낮은 컷이 있어도 승인하고 previz["approvedForced"]={at,lowCuts}
+    를 기록한다.
+    """
     from . import plan as plan_mod  # noqa: PLC0415
 
     def mutator(data: dict) -> dict:
@@ -1666,7 +2184,17 @@ def approve(owner: str, pid: str) -> dict:
             raise VpocError("vnew.previz.approve", "NoScenes", "먼저 장면을 설계해 주세요.", 409)
         if previz.get("status") != "ready":
             raise VpocError("vnew.previz.approve", "NotReady", "장면이 준비되지 않았습니다.", 409)
+        low = _low_match_cuts(previz)
+        if low and not force:
+            raise VpocError("vnew.previz.approve", "LowMatch", _low_cut_message(low), 409)
         previz["approved"] = True
+        if low:
+            previz["approvedForced"] = {
+                "at": now_iso(),
+                "lowCuts": [{"cutId": c["cutId"], "no": c["no"], "match": c["match"]} for c in low],
+            }
+        else:
+            previz["approvedForced"] = None
         return previz
 
     _, previz = plan_mod.mutate_plan(owner, pid, mutator)
@@ -2005,7 +2533,12 @@ def previz_view(owner: str, pid: str, plan: dict) -> dict:
         "approved": bool(previz.get("approved")),
         "scenes": scenes_out,
         "panelShots": previz.get("panelShots") or {},
+        "panelGrammar": previz.get("panelGrammar") or {},
+        "grammarOverrides": previz.get("grammarOverrides") or {},
         "fit": previz.get("fit") or {},
+        "approveMinMatch": APPROVE_MIN_MATCH,
+        "lowMatchCuts": _low_match_cuts(previz),
+        "approvedForced": previz.get("approvedForced"),
         "totalSeconds": previz_schema.scenes_total_seconds(previz.get("scenes") or []),
         "segments": segments,
         "recordings": recordings_out,

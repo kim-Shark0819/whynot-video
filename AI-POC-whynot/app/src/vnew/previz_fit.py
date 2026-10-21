@@ -269,3 +269,79 @@ def _clamp_bounds(pos: tuple, bounds: dict | None) -> tuple:
     y = min(max(pos[1], _num(bounds.get("ymin"), -1e9)), _num(bounds.get("ymax"), 1e9))
     z = min(max(pos[2], _num(bounds.get("zmin"), -1e9)), _num(bounds.get("zmax"), 1e9))
     return (x, y, z)
+
+
+
+# ================================================================ 보이는 부분 기준 일치도(설계자 2026-10-21)
+#
+# 지시서 049. 옛 project_actor 는 "전신 키"를 화면에 투영해 heightFrac 를 쟀다. 하지만 패널의
+# 샷은 보통 인물을 자른다(클로즈업은 가슴 위, ECU 는 얼굴만). 그래서 "전신 키"로 비교하면
+# 클로즈업은 절대 맞지 않는다(10/21 실험 버그). 여기서는 **보이는 부분**(머리 위 ~ 화면 아래가
+# 자르는 몸 지점)만 투영해 일치도를 잰다.
+#
+# body_y 는 experiment solver.py 의 같은 이름 함수와 같은 규칙이다(서 있음/앉음 sit). 마네킹 키를
+# 비율로 나눠 각 몸 지점의 높이(m)를 돌려준다. 앉으면 상체는 엉덩이(SEAT_Y) 위로 길이를 유지한다.
+
+# 몸 지점의 키 대비 비율(서 있을 때). solver.py BODY 와 같다.
+BODY_FRACTION = {
+    "top": 1.0,
+    "eye": 0.94,
+    "chin": 0.87,
+    "shoulder": 0.82,
+    "chest": 0.72,
+    "waist": 0.60,
+    "belly": 0.55,
+    "hips": 0.52,
+    "knee": 0.28,
+    "foot": 0.0,
+}
+# 앉은 자세의 엉덩이 높이(m). solver.py SEAT_Y 와 같다.
+SEAT_Y = 0.45
+
+
+def body_y(point: str, height_m: float, pose: str) -> float:
+    """몸 지점(top·eye·chin·shoulder·chest·waist·knee·foot 등)의 세계 y(높이 m).
+
+    pose 가 sit/seated/sitting 이면 상체는 엉덩이(SEAT_Y+0.05) 위로 길이를 유지하고, 하체는
+    바닥~엉덩이로 눌린다(solver.py body_y 와 같은 규칙). 모르는 지점은 chest 로 본다.
+    """
+    frac = BODY_FRACTION.get(point, BODY_FRACTION["chest"])
+    height = float(height_m or 1.7)
+    if str(pose or "").lower() in ("sit", "seated", "sitting"):
+        hip = SEAT_Y + 0.05
+        if frac >= 0.5:  # 상체는 엉덩이 위로 제 길이를 유지한다.
+            return hip + (frac - 0.5) * height
+        return frac / 0.5 * hip
+    return frac * height
+
+
+def match_visible(
+    camera: dict,
+    foot: tuple,
+    height_m: float,
+    pose: str,
+    top_y: float,
+    subject_x: float,
+    bottom_key: str,
+) -> float:
+    """보이는 부분 기준 일치도(0..1). 전신 키가 아니라 "머리 위~자르는 지점"을 화면에 맞춘다.
+
+    - 머리 위(body_y top) 투영 y 가 목표 top_y 와 얼마나 가까운지.
+    - 화면 아래 몸 지점(bottom_key, 예: chest) 투영 y 가 화면 아래(1.0)에 얼마나 가까운지.
+    - 머리 x 투영이 목표 subject_x 와 얼마나 가까운지.
+    세 오차 중 가장 큰 것(worst)을 보고 max(0, 1 - worst/0.25) 로 환산한다(0.25 벗어나면 0).
+    카메라 뒤로 가려 투영이 안 되면 0.
+    """
+    foot = _vec3(foot)
+    height = float(height_m or 1.7)
+    top_world = (foot[0], body_y("top", height, pose), foot[2])
+    bottom_world = (foot[0], body_y(bottom_key or "chest", height, pose), foot[2])
+    top_sp = project_point(camera, top_world)
+    bottom_sp = project_point(camera, bottom_world)
+    if top_sp is None or bottom_sp is None:
+        return 0.0
+    err_top_y = abs(top_sp["screenY"] - float(top_y))
+    err_bottom_y = abs(bottom_sp["screenY"] - 1.0)
+    err_x = abs(top_sp["screenX"] - float(subject_x))
+    worst = max(err_top_y, err_bottom_y, err_x)
+    return max(0.0, 1.0 - worst / 0.25)
