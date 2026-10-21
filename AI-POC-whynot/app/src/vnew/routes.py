@@ -490,7 +490,11 @@ def create_blueprint(deps: VnewDependencies) -> Blueprint:
 
             owner = _project_for(pid, write=True)
             plan_mod.load_or_create(owner, pid)
-            task_id = previz.start_design(owner, pid)
+            # 본문(선택): 다시 만들기 지시 {extraPromptKo, cutId}. 첫 설계는 본문 없이.
+            payload = request.get_json(silent=True) or {}
+            extra_prompt_ko = str(payload.get("extraPromptKo") or "")
+            cut_id = str(payload.get("cutId") or "")
+            task_id = previz.start_design(owner, pid, extra_prompt_ko=extra_prompt_ko, cut_id=cut_id)
             return jsonify({"ok": True, "taskId": task_id, "status": "designing"}), 202
         except Exception as exc:  # noqa: BLE001
             return _fail(exc)

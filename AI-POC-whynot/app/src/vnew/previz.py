@@ -224,11 +224,120 @@ def new_previz() -> dict:
         "approved": False,
         "recordings": {},  # segId -> {status, key, seconds}
         "task": _empty_task(),
+        "progress": _empty_progress(),  # {step, done, total, startedAt, updatedAt} — 설계 진행 표시
+        "extraPromptKo": "",  # 마지막 '다시 만들기' 때 사용자가 넣은 한국어 지시(없으면 빈 문자열)
+        "extraCutId": "",  # 지시가 특정 컷을 겨냥하면 그 cutId(없으면 빈 문자열)
+        "lastRebuild": None,  # {extraPromptKo, cutId, changesEn, at} — 마지막 다시 만들기 요약
     }
 
 
 def _empty_task() -> dict:
     return {"status": "idle", "startedAt": None, "id": None}
+
+
+# ================================================================ 진행 표시(progress)
+#
+# 설계 중 previz["progress"] 에 {step, done, total, startedAt, updatedAt} 를 기록한다(locations 와
+# 같은 모양·같은 규칙이되 import 하지 않고 여기 둔다). 화면이 스피너·진행 막대·경과 시간을 보이는
+# 데 쓴다. step 순서: panels → design → fit(→fit_retry) → done. 패널 분석·fit 은 컷마다 +1,
+# design 은 그룹마다 +1. task.id 가 어긋나면 건너뛰고, 경합은 mutate_plan 재시도, 실패해도 빌드는
+# 계속된다(progress 는 보조 정보라 예외를 삼킨다).
+
+
+def _empty_progress() -> dict:
+    return {"step": "", "done": 0, "total": 0, "startedAt": None, "updatedAt": None}
+
+
+def _set_progress(owner: str, pid: str, task_id: str, *, step: str, done: int, total: int) -> None:
+    """previz["progress"] 를 통째로 새로 쓴다(step 전환 시). task_id 가 어긋나면 건너뛴다.
+
+    startedAt 는 처음(panels) 한 번만 잡고 이후 유지한다. updatedAt 은 매번 now 로 갱신한다.
+    """
+    from . import plan as plan_mod  # noqa: PLC0415
+
+    def mutator(data: dict) -> None:
+        previz = data.get("previz")
+        if not isinstance(previz, dict):
+            return
+        if (previz.get("task") or {}).get("id") != task_id:
+            return
+        prior = previz.get("progress") or {}
+        started = prior.get("startedAt") or now_iso()
+        previz["progress"] = {
+            "step": step,
+            "done": int(done),
+            "total": int(total),
+            "startedAt": started,
+            "updatedAt": now_iso(),
+        }
+
+    try:
+        plan_mod.mutate_plan(owner, pid, mutator)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("vnew.previz.progress.set_failed pid=%s err=%s", pid, str(exc)[:150])
+
+
+def _set_step(owner: str, pid: str, task_id: str, *, step: str) -> None:
+    """progress 의 step 만 바꾸고 done·total 은 그대로 둔다(단계 전환, 누적한 total 을 잃지 않게)."""
+    from . import plan as plan_mod  # noqa: PLC0415
+
+    def mutator(data: dict) -> None:
+        previz = data.get("previz")
+        if not isinstance(previz, dict):
+            return
+        if (previz.get("task") or {}).get("id") != task_id:
+            return
+        prior = previz.get("progress") or _empty_progress()
+        started = prior.get("startedAt") or now_iso()
+        total = int(prior.get("total") or 0)
+        done = int(prior.get("done") or 0)
+        if step == "done":
+            done = total  # 끝이면 막대를 가득 채운다.
+        previz["progress"] = {
+            "step": step,
+            "done": done,
+            "total": total,
+            "startedAt": started,
+            "updatedAt": now_iso(),
+        }
+
+    try:
+        plan_mod.mutate_plan(owner, pid, mutator)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("vnew.previz.progress.set_step_failed pid=%s err=%s", pid, str(exc)[:150])
+
+
+def _bump_progress(owner: str, pid: str, task_id: str, *, step: str | None = None) -> None:
+    """done 을 +1 한다(컷·그룹 하나가 끝날 때마다). 경합은 mutate_plan 이 재시도한다.
+
+    step 을 주면 그 step 으로 바꾼다(없으면 현재 step 유지). updatedAt 을 갱신해 '지연' 판정을 민다.
+    """
+    from . import plan as plan_mod  # noqa: PLC0415
+
+    def mutator(data: dict) -> None:
+        previz = data.get("previz")
+        if not isinstance(previz, dict):
+            return
+        if (previz.get("task") or {}).get("id") != task_id:
+            return
+        prior = previz.get("progress") or _empty_progress()
+        started = prior.get("startedAt") or now_iso()
+        total = int(prior.get("total") or 0)
+        done = int(prior.get("done") or 0) + 1
+        if total > 0:
+            done = min(total, done)
+        previz["progress"] = {
+            "step": step or prior.get("step") or "",
+            "done": done,
+            "total": total,
+            "startedAt": started,
+            "updatedAt": now_iso(),
+        }
+
+    try:
+        plan_mod.mutate_plan(owner, pid, mutator)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("vnew.previz.progress.bump_failed pid=%s err=%s", pid, str(exc)[:150])
 
 
 # ================================================================ 외부 호출 래퍼(검사가 가짜로)
@@ -260,6 +369,78 @@ def _analyze_panel(blocks: list[dict], *, model: str) -> tuple[dict, dict]:
         where="vnew.previz.panel",
         model=model,
     )
+
+
+def _changes(blocks: list[dict], *, model: str) -> tuple[dict, dict]:
+    """사용자의 한국어 '다시 만들기' 지시를 구체적인 영어 변경 목록으로 바꾼다. (payload, usage).
+
+    Astra 먼저, 실패하면 Claude(호출부 _rebuild_changes 가 체인한다). 이미지·Astra 는 모호한 말을
+    못 따르므로(설계자) 수치·대상·방향을 명시하게 하는 지침을 시스템 프롬프트에 넣었다. 검사가
+    이 함수를 가짜로 바꿔 끼운다.
+    """
+    return vpoc_llm._converse(  # noqa: SLF001 — 공개 래퍼가 없어 내부 함수를 쓴다
+        system_text=_CHANGES_SYSTEM,
+        blocks=blocks,
+        tool=_CHANGES_TOOL,
+        max_tokens=1500,
+        where="vnew.previz.changes",
+        model=model,
+    )
+
+
+# ================================================================ 지시→변경 목록 스키마(Astra/Claude)
+
+_CHANGES_SYSTEM = (
+    "You turn a Korean user's free-text request to change a 3D previz scene into a SHORT list of "
+    "concrete English edit instructions a layout engine can follow. The scene is a blocky 3D layout "
+    "(a room, props, coloured mannequin actors, and per-cut cameras). Image and layout models cannot "
+    "follow vague words, so every change MUST be specific: name the target (an actor by role name, a "
+    "prop, or the camera), the direction, and NUMBERS where possible. Examples: '더 가까이' → "
+    "'move the camera to about 1.2 m from 김부장, fov 28'; '왼쪽으로' → 'move 범건우 to x = -1.5 m'; "
+    "'위에서' → 'raise camera to 2.3 m height looking down'. Answer ONLY by calling emit_changes once. "
+    "Return changes:[{cutId (the cut this applies to, or \"all\" for every cut), whatEn (one concrete "
+    "English instruction with numbers)}]. Use the cutId values the user is given; if the request is "
+    "general, use \"all\". Keep the list short (1-6 items). Do not invent people or props that are not "
+    "in the scene."
+)
+
+_CHANGES_TOOL = {
+    "name": "emit_changes",
+    "description": "Emit a short list of concrete English edit instructions for the previz scene.",
+    "inputSchema": {
+        "json": {
+            "type": "object",
+            "properties": {
+                "changes": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "cutId": {"type": "string"},
+                            "whatEn": {"type": "string"},
+                        },
+                    },
+                },
+            },
+            "required": ["changes"],
+        }
+    },
+}
+
+
+def _normalize_changes(payload: dict) -> list[dict]:
+    """지시→변경 목록 출력을 정리한다. [{cutId|"all", whatEn}] 만 남긴다(빈 지시는 버린다)."""
+    payload = payload if isinstance(payload, dict) else {}
+    out: list[dict] = []
+    for item in payload.get("changes") or []:
+        if not isinstance(item, dict):
+            continue
+        what = str(item.get("whatEn") or "").strip()
+        if not what:
+            continue
+        cut_id = str(item.get("cutId") or "all").strip() or "all"
+        out.append({"cutId": cut_id, "whatEn": what})
+    return out
 
 
 # ================================================================ 패널 샷 분석 스키마(Claude)
@@ -595,11 +776,18 @@ def _location_id_for(loc: dict | None, name_en: str) -> str:
 # ================================================================ design(백그라운드)
 
 
-def start_design(owner: str, pid: str) -> str:
-    """프리비즈 설계 시작. 진행 중이면 409. 콘티가 준비돼 있어야 한다. 새 task.id 를 돌려준다."""
+def start_design(owner: str, pid: str, *, extra_prompt_ko: str = "", cut_id: str = "") -> str:
+    """프리비즈 설계 시작. 진행 중이면 409. 콘티가 준비돼 있어야 한다. 새 task.id 를 돌려준다.
+
+    extra_prompt_ko/cut_id 는 '다시 만들기' 지시(선택). 첫 설계는 둘 다 비어 있다. 이전 결과
+    previz["scenes"] 는 지우지 않는다 — 새 설계가 끝날 때(_commit_scenes) 교체되고, 실패하면
+    이전 결과가 그대로 남는다(_fail 은 scenes 를 건드리지 않는다).
+    """
     from . import plan as plan_mod  # noqa: PLC0415
 
     new_id = secrets.token_hex(8)
+    extra_prompt_ko = str(extra_prompt_ko or "").strip()[:1000]
+    cut_id = str(cut_id or "").strip()
 
     def mutator(data: dict) -> str:
         conti = data.get("conti") or {}
@@ -611,7 +799,25 @@ def start_design(owner: str, pid: str) -> str:
             raise VpocError("vnew.previz.design", "Designing", "이미 장면을 설계하고 있습니다.", 409)
         previz["status"] = "designing"
         previz["error"] = ""
+        previz["approved"] = False  # 다시 설계하면 승인·녹화는 무효(설계 시작 시 해제).
         previz["task"] = {"status": "running", "startedAt": now_iso(), "id": new_id}
+        # 다시 만들기 지시를 저장한다(없으면 지운다 — 이전 지시가 남지 않게).
+        if extra_prompt_ko:
+            previz["extraPromptKo"] = extra_prompt_ko
+        else:
+            previz["extraPromptKo"] = ""
+        if cut_id:
+            previz["extraCutId"] = cut_id
+        else:
+            previz["extraCutId"] = ""
+        # progress 초기화: panels 단계, done/total 0.
+        previz["progress"] = {
+            "step": "panels",
+            "done": 0,
+            "total": 0,
+            "startedAt": now_iso(),
+            "updatedAt": now_iso(),
+        }
 
     plan_mod.mutate_plan(owner, pid, mutator)
     _spawn(run_design, owner, pid, new_id, name=f"vnew-previz-{pid}")
@@ -619,13 +825,19 @@ def start_design(owner: str, pid: str) -> str:
 
 
 def run_design(owner: str, pid: str, task_id: str) -> None:
-    """프리비즈 설계(백그라운드). 흐름(설계자 2026-10-21, 지시서 045):
+    """프리비즈 설계(백그라운드). 흐름(설계자 2026-10-21, 지시서 045·④):
 
     1) 컷마다 웹툰 패널을 Claude 분석 체인에 보내 샷(크기·높이·각도·인물 화면 좌표)을 읽는다.
     2) 그 panelShots 를 넣어 Astra 에 장소별 장면 JSON 을 받는다(좌표화 지침 포함).
     3) previz_fit 로 컷별 투영 오차를 재서, 임계를 넘는 컷만 '현재 vs 목표'를 주고 그 컷 camera 만
        다시 받는다(최대 2회). 그래도 크면 격자 보정(결정적)으로 카메라 pos 를 옮긴다.
     4) panelShots·fit 를 저장한다.
+
+    다시 만들기(이전 scenes 가 있으면): 사용자 한국어 지시(extraPromptKo)를 구체적인 영어 변경
+    목록(changesEn)으로 바꿔 _design_prompt 에 이전 설계·변경 지시를 넣는다. extraCutId 가 있으면
+    그 컷이 속한 장소 그룹만 다시 설계하고 나머지 장면은 이전 것을 그대로 둔다. 사용자 지시로 바뀐
+    컷은 투영 검산에서 격자 보정·자동 재요청을 하지 않고 method="user" 로만 오차를 잰다.
+    진행 표시: panels → design → fit(→fit_retry) → done 을 previz["progress"] 에 기록한다.
     """
     from . import plan as plan_mod  # noqa: PLC0415
 
@@ -641,14 +853,42 @@ def run_design(owner: str, pid: str, task_id: str) -> None:
         script = plan.get("script") or {}
         chars = (plan.get("input") or {}).get("characters") or []
 
-        # 1) 패널 샷 분석(Claude). cutId → shot.
-        panel_shots = _analyze_panels(owner, pid, plan_id, groups, chars)
+        # 다시 만들기 판정: 이전 scenes·지시를 읽는다.
+        previz_in = plan.get("previz") or {}
+        prev_scenes = previz_in.get("scenes") or []
+        is_rebuild = bool(prev_scenes)
+        extra_prompt_ko = str(previz_in.get("extraPromptKo") or "").strip()
+        extra_cut_id = str(previz_in.get("extraCutId") or "").strip()
+
+        # 다시 만들기 지시 → 구체적 영어 변경 목록(changesEn). 지시가 없으면 빈 목록.
+        changes_en: list[dict] = []
+        if is_rebuild and extra_prompt_ko:
+            changes_en = _rebuild_changes(owner, pid, plan_id, extra_prompt_ko, groups, prev_scenes)
+
+        # extraCutId 가 가리키는 장소 그룹 인덱스(없으면 None = 전부 다시).
+        target_group_index = None
+        if is_rebuild and extra_cut_id:
+            target_group_index = _group_index_for_cut(groups, extra_cut_id)
+
+        # 사용자 지시로 바뀐 컷(fit 에서 격자 보정·자동 재요청 제외). "all" 이면 대상 그룹 전체.
+        user_changed_cuts = _user_changed_cut_ids(changes_en, groups, target_group_index)
+
+        # 1) 패널 샷 분석(Claude). cutId → shot. (progress: panels, total=컷 수, 컷마다 +1)
+        total_cuts = sum(len(g["cuts"]) for g in groups)
+        _set_progress(owner, pid, task_id, step="panels", done=0, total=total_cuts)
+        panel_shots = _analyze_panels(owner, pid, plan_id, groups, chars, task_id=task_id)
+
+        # 2) Astra 설계(panelShots 포함). (progress: design, total=그룹 수, 그룹마다 +1)
+        _set_progress(owner, pid, task_id, step="design", done=0, total=len(groups))
+        prev_by_location = {str(s.get("locationId") or ""): s for s in prev_scenes}
 
         raw_scenes: list[dict] = []
         scene_specs: list[dict] = []
         used_model = ""
+        # 다시 만들기이고 그룹 한정이면, 대상 아닌 그룹은 이전 scene 을 그대로 쓴다.
+        reuse_scene_by_index: dict[int, dict] = {}
 
-        for group in groups:
+        for group_index, group in enumerate(groups):
             name_en = group["locationEn"]
             loc = _location_for(plan, name_en)
             location_id = _location_id_for(loc, name_en)
@@ -656,26 +896,170 @@ def run_design(owner: str, pid: str, task_id: str) -> None:
             cut_specs = [{"cutId": c["cutId"], "seconds": c["seconds"]} for c in group["cuts"]]
             scene_specs.append({"locationId": location_id, "cuts": cut_specs, "textures": textures})
 
-            # 2) Astra 설계(panelShots 포함).
-            blocks = [{"text": _design_prompt(name_en, loc, group["cuts"], script, chars, panel_shots)}]
+            prev_scene = prev_by_location.get(location_id)
+            # 그룹 한정 다시 만들기: 대상 그룹이 아니고 이전 scene 이 있으면 재설계하지 않고 유지.
+            if target_group_index is not None and group_index != target_group_index and prev_scene is not None:
+                reuse_scene_by_index[group_index] = copy.deepcopy(prev_scene)
+                raw_scenes.append(None)  # 자리만 둔다(normalize 전에 치환).
+                _bump_progress(owner, pid, task_id, step="design")
+                continue
+
+            # _design_prompt 에 넘길 이전 설계 요약·변경 지시.
+            prev_summary = _scene_summary(prev_scene) if (is_rebuild and prev_scene) else None
+            group_changes = _changes_for_group(changes_en, group) if is_rebuild else []
+            blocks = [{"text": _design_prompt(
+                name_en, loc, group["cuts"], script, chars, panel_shots,
+                previous_scene=prev_summary, changes=group_changes, is_rebuild=is_rebuild,
+            )}]
             payload, model = _design_scene(owner, pid, plan_id, blocks)
             used_model = model or used_model
             payload = payload if isinstance(payload, dict) else {}
             payload["locationId"] = location_id
             raw_scenes.append(payload)
+            _bump_progress(owner, pid, task_id, step="design")
 
-        scenes = previz_schema.normalize_scenes(raw_scenes, scene_specs=scene_specs)
+        # 재사용 그룹은 정리에서 빼고 뒤에 다시 꽂는다(normalize 는 재설계 scene 만 통과).
+        design_indices = [i for i in range(len(groups)) if i not in reuse_scene_by_index]
+        design_raw = [raw_scenes[i] for i in design_indices]
+        design_specs = [scene_specs[i] for i in design_indices]
+        designed = previz_schema.normalize_scenes(design_raw, scene_specs=design_specs)
 
-        # 3) 투영 검산 → 재요청/격자 보정. scenes 를 그 자리에서 고치고 fit 를 만든다.
+        # scenes 를 그룹 순서대로 합친다(재설계 scene + 재사용 scene).
+        scenes: list[dict] = []
+        designed_iter = iter(designed)
+        for group_index in range(len(groups)):
+            if group_index in reuse_scene_by_index:
+                scenes.append(reuse_scene_by_index[group_index])
+            else:
+                scenes.append(next(designed_iter))
+
+        # 3) 투영 검산 → 재요청/격자 보정. (progress: fit, total=컷 수, 컷마다 +1)
+        _set_progress(owner, pid, task_id, step="fit", done=0, total=total_cuts)
         fit = _fit_scenes(
-            owner, pid, plan_id, scenes, groups, scene_specs, panel_shots, script, chars, plan
+            owner, pid, plan_id, scenes, groups, scene_specs, panel_shots, script, chars, plan,
+            user_changed_cuts=user_changed_cuts, task_id=task_id,
         )
 
-        _commit_scenes(owner, pid, task_id, scenes, used_model, panel_shots=panel_shots, fit=fit)
+        # 4) 저장(done). lastRebuild 요약을 남긴다(다시 만들기였으면).
+        _set_step(owner, pid, task_id, step="done")
+        last_rebuild = None
+        if is_rebuild:
+            last_rebuild = {
+                "extraPromptKo": extra_prompt_ko,
+                "cutId": extra_cut_id,
+                "changesEn": changes_en,
+                "at": now_iso(),
+            }
+        _commit_scenes(owner, pid, task_id, scenes, used_model, panel_shots=panel_shots, fit=fit, last_rebuild=last_rebuild)
     except Exception as exc:  # noqa: BLE001
         log.warning("vnew.previz.run_design.failed pid=%s err=%s", pid, str(exc)[:300])
         message = exc.message if isinstance(exc, VpocError) else str(exc)[:300]
         _fail(owner, pid, task_id, message)
+
+
+def _rebuild_changes(owner: str, pid: str, plan_id: str, extra_prompt_ko: str, groups: list[dict], prev_scenes: list[dict]) -> list[dict]:
+    """사용자 한국어 지시를 구체적 영어 변경 목록으로 바꾼다. Astra 먼저, 실패하면 Claude.
+
+    컷 라벨(cutId·장소·순서)과 이전 설계 요약을 함께 줘서 모델이 올바른 cutId 를 쓰게 한다.
+    실패하면 "all" 대상 하나로 원문 지시를 그대로 담아 돌려준다(설계 프롬프트에 지시가 들어가게).
+    """
+    lines = [
+        "사용자가 3D 프리비즈 장면을 이렇게 바꿔 달라고 했습니다(한국어). 이를 레이아웃 엔진이 따를 수 "
+        "있는 구체적인 영어 변경 목록으로 바꿔 emit_changes 로 주세요. 모호한 말은 수치·대상·방향으로.",
+        "",
+        f"[사용자 지시] {extra_prompt_ko}",
+        "",
+        "[컷 목록(cutId 를 그대로 쓰세요)]",
+    ]
+    cut_index = 0
+    for group in groups:
+        for cut in group["cuts"]:
+            cut_index += 1
+            lines.append(f"- cutId={cut['cutId']} (컷{cut_index}, 장소={group['locationEn']})")
+    summaries = [s for s in (_scene_summary(ps) for ps in prev_scenes) if s]
+    if summaries:
+        lines += ["", "[이전 설계 요약]"] + summaries
+    blocks = [{"text": "\n".join(lines)}]
+    for model in (ASTRA_MODEL, DESIGN_FALLBACK_MODEL):
+        try:
+            payload, usage = _changes(blocks, model=model)
+        except Exception as exc:  # noqa: BLE001
+            log.warning("vnew.previz.changes.model_failed model=%s err=%s", model, str(exc)[:200])
+            continue
+        used = str(usage.get("model") or model)
+        _charge(owner, pid, plan_id, usage, used)
+        changes = _normalize_changes(payload)
+        if changes:
+            return changes
+    # 변환 실패(둘 다) → 원문 지시를 'all' 대상 하나로 담아 설계 프롬프트에 그대로 전달.
+    log.warning("vnew.previz.changes.fallback pid=%s", pid)
+    return [{"cutId": "all", "whatEn": extra_prompt_ko}]
+
+
+def _group_index_for_cut(groups: list[dict], cut_id: str) -> int | None:
+    """cut_id 가 속한 장소 그룹 인덱스(없으면 None)."""
+    for index, group in enumerate(groups):
+        for cut in group.get("cuts") or []:
+            if str(cut.get("cutId") or "") == cut_id:
+                return index
+    return None
+
+
+def _user_changed_cut_ids(changes_en: list[dict], groups: list[dict], target_group_index: int | None) -> set[str]:
+    """사용자 지시로 바뀐 컷 cutId 집합. "all" 이면 대상 그룹(없으면 전체) 모든 컷."""
+    changed: set[str] = set()
+    if not changes_en:
+        return changed
+    all_cut_ids = [str(c.get("cutId") or "") for g in groups for c in g.get("cuts") or []]
+    target_cut_ids = all_cut_ids
+    if target_group_index is not None and 0 <= target_group_index < len(groups):
+        target_cut_ids = [str(c.get("cutId") or "") for c in groups[target_group_index].get("cuts") or []]
+    for change in changes_en:
+        cid = str(change.get("cutId") or "all")
+        if cid == "all":
+            changed.update(target_cut_ids)
+        elif cid in all_cut_ids:
+            changed.add(cid)
+    return changed
+
+
+def _changes_for_group(changes_en: list[dict], group: dict) -> list[dict]:
+    """이 장소 그룹에 해당하는 변경만 추린다(그 그룹 컷 cutId 또는 "all")."""
+    group_cut_ids = {str(c.get("cutId") or "") for c in group.get("cuts") or []}
+    out: list[dict] = []
+    for change in changes_en:
+        cid = str(change.get("cutId") or "all")
+        if cid == "all" or cid in group_cut_ids:
+            out.append(change)
+    return out
+
+
+def _scene_summary(scene: dict | None) -> str:
+    """이전 scene JSON 을 짧은 문단으로 요약한다(room·props·actors 자리·컷별 camera). 없으면 빈 문자열."""
+    if not isinstance(scene, dict):
+        return ""
+    lines: list[str] = []
+    room = scene.get("room") or {}
+    lines.append(
+        f"room width={room.get('width')} depth={room.get('depth')} height={room.get('height')}"
+    )
+    props = scene.get("props") or []
+    if props:
+        lines.append("props: " + ", ".join(
+            f"{p.get('labelEn') or p.get('id')}@{p.get('pos')}" for p in props[:8]
+        ))
+    actors = scene.get("actors") or []
+    if actors:
+        lines.append("actors: " + ", ".join(
+            f"{a.get('name') or a.get('id')}({a.get('color')})" for a in actors
+        ))
+    for cut in scene.get("timeline") or []:
+        cam = cut.get("camera") or {}
+        lines.append(
+            f"cut {cut.get('cutId')}: camera pos={cam.get('pos')} target={cam.get('target')}"
+            f" fov={cam.get('fov')}"
+        )
+    return "\n".join(lines)
 
 
 def _design_scene(owner: str, pid: str, plan_id: str, blocks: list[dict]) -> tuple[dict, str]:
@@ -779,12 +1163,15 @@ def _retry_table(subjects: list[dict], camera: dict) -> dict:
     return {"subjects": rows}
 
 
-def _fit_scenes(owner, pid, plan_id, scenes, groups, scene_specs, panel_shots, script, chars, plan) -> dict:
+def _fit_scenes(owner, pid, plan_id, scenes, groups, scene_specs, panel_shots, script, chars, plan, *, user_changed_cuts=None, task_id="") -> dict:
     """컷별 투영 오차를 재서 임계 넘는 컷만 Astra 재요청(최대 2회)→그래도 크면 격자 보정.
 
     scenes 를 제자리에서 고치고 fit = {cutId: {err, method}} 를 돌려준다.
-    method: "astra"(처음부터 맞음)·"astra_retry"(재요청으로 맞음)·"grid"(격자 보정).
+    method: "astra"(처음부터 맞음)·"astra_retry"(재요청으로 맞음)·"grid"(격자 보정)·"user"(사용자
+    지시로 바뀐 컷 — 되돌리지 않게 재요청·보정을 하지 않고 오차만 잰다).
+    user_changed_cuts: 사용자 지시로 바뀐 cutId 집합(격자 보정·자동 재요청 제외). task_id: progress 용.
     """
+    user_changed_cuts = user_changed_cuts or set()
     fit: dict[str, dict] = {}
     # cutId → (sceneIndex, timelineIndex) 로 빨리 찾게.
     for scene_index, scene in enumerate(scenes):
@@ -797,17 +1184,35 @@ def _fit_scenes(owner, pid, plan_id, scenes, groups, scene_specs, panel_shots, s
             shot = panel_shots.get(cut_id)
             if not shot or not (shot.get("subjects") or []):
                 fit[cut_id] = {"err": 0.0, "method": "astra"}
+                if task_id:
+                    _bump_progress(owner, pid, task_id, step="fit")
                 continue
             subjects = _cut_subjects(scene, cut, shot)
             if not subjects:
                 fit[cut_id] = {"err": 0.0, "method": "astra"}
+                if task_id:
+                    _bump_progress(owner, pid, task_id, step="fit")
                 continue
             err = previz_fit.cut_error(cut.get("camera") or {}, subjects)
+            # 사용자 지시로 바뀐 컷: 격자 보정·자동 재요청을 하지 않는다(지시를 되돌리지 않게).
+            # method="user" 로 표시하고 오차만 잰다.
+            if cut_id in user_changed_cuts:
+                fit[cut_id] = {
+                    "err": round(float(err.get("err") or 0.0), 4),
+                    "posErr": round(float(err.get("posErr") or 0.0), 4),
+                    "sizeErr": round(float(err.get("sizeErr") or 0.0), 4),
+                    "method": "user",
+                }
+                if task_id:
+                    _bump_progress(owner, pid, task_id, step="fit")
+                continue
             method = "astra"
             # --- Astra 재요청(그 컷 camera 만) 최대 FIT_MAX_ASTRA_RETRY 회 ---
             retries = 0
             while previz_fit.exceeds_threshold(err) and retries < FIT_MAX_ASTRA_RETRY:
                 retries += 1
+                if task_id:
+                    _set_step(owner, pid, task_id, step="fit_retry")
                 retry_cut = dict(_retry_table(subjects, cut.get("camera") or {}))
                 retry_cut["cutId"] = cut_id
                 group_cut_specs = [{"cutId": str(c["cutId"]), "seconds": c["seconds"]} for c in group.get("cuts") or []]
@@ -838,6 +1243,8 @@ def _fit_scenes(owner, pid, plan_id, scenes, groups, scene_specs, panel_shots, s
                 "sizeErr": round(float(err.get("sizeErr") or 0.0), 4),
                 "method": method,
             }
+            if task_id:
+                _bump_progress(owner, pid, task_id, step="fit")
     return fit
 
 
@@ -868,12 +1275,19 @@ def _design_prompt(
     chars: list[dict],
     panel_shots: dict | None = None,
     retry_cuts: list[dict] | None = None,
+    *,
+    previous_scene: str | None = None,
+    changes: list[dict] | None = None,
+    is_rebuild: bool = False,
 ) -> str:
     """한 장소(연속 컷)의 설계 요청 문단. 콘티 컷·대본 위치·location 설계·인물 목록·패널 샷을 담는다.
 
     panel_shots = {cutId: shot} — Claude 가 읽은 웹툰 패널 샷(크기·높이·각도·인물 화면 좌표).
     retry_cuts = [{cutId, current, target}] — 투영 검산 뒤 오차 큰 컷만 '현재 vs 목표'를 주고
     그 컷 camera 만 다시 받을 때 쓴다(있으면 재요청 문단을 덧붙인다).
+    previous_scene = 이전 설계 요약(문자열) — 다시 만들기일 때 '[이전 설계]' 문단으로 넣는다.
+    changes = [{cutId|"all", whatEn}] — 사용자 수정 지시(영어). '[사용자 수정 지시 — 반드시 반영]'로.
+    is_rebuild = 다시 만들기이면 True — 지시가 없어도 '이전과 다른 배치·카메라 대안'을 요구하는 문장을 넣는다.
     """
     panel_shots = panel_shots or {}
     setting = script.get("setting") or {}
@@ -955,6 +1369,30 @@ def _design_prompt(
         "인물은 고유의 밝은 색(서로 확실히 다르게)으로, 배경은 하나의 덩어리(회색조), 빛은 어디서 오는지"
         " light 로 표기하세요. 컷 안에서 카메라가 움직이면 camera.moveTo, 인물이 걸으면 actor.moveTo 로.",
     ]
+    # --- 다시 만들기: 이전 설계·사용자 지시·대안 요구 ---
+    if is_rebuild and previous_scene:
+        lines += [
+            "",
+            "[이전 설계] 아래는 방금 만든 이 장소의 장면입니다(참고). 사용자가 아래 수정 지시를 줬으면 "
+            "그 부분을 반드시 바꾸고, 지시가 없더라도 이전과 똑같이 수렴하지 말고 다른 대안을 내세요.",
+            previous_scene,
+        ]
+    changes = changes or []
+    if changes:
+        lines += [
+            "",
+            "[사용자 수정 지시 — 반드시 반영] 아래 변경을 이번 설계에 정확히 반영하세요. 수치·대상·방향을 "
+            "그대로 따르고, 지시가 겨냥하지 않은 컷·인물·소품은 가능하면 이전 설계 그대로 두세요.",
+        ]
+        for change in changes:
+            lines.append(f"- cutId={change.get('cutId')}: {change.get('whatEn')}")
+    elif is_rebuild:
+        lines += [
+            "",
+            "[다시 만들기] 사용자가 이전 결과가 마음에 들지 않아 다시 요청했습니다. 웹툰 패널 시점(각 인물의 "
+            "screenX·screenY·heightFrac)은 유지하되, 이전과 다른 배치·카메라 대안을 내세요(같은 결과로 "
+            "수렴하지 마세요).",
+        ]
     if retry_cuts:
         lines += [
             "",
@@ -1073,8 +1511,11 @@ def _analyze_cut_panel(owner: str, pid: str, plan_id: str, cut: dict, all_tiles:
     return _normalize_shot(payload)
 
 
-def _analyze_panels(owner: str, pid: str, plan_id: str, groups: list[dict], chars: list[dict]) -> dict:
-    """모든 컷의 패널 샷을 분석해 {cutId: shot} 로. 이미지가 없는 컷은 뺀다."""
+def _analyze_panels(owner: str, pid: str, plan_id: str, groups: list[dict], chars: list[dict], *, task_id: str = "") -> dict:
+    """모든 컷의 패널 샷을 분석해 {cutId: shot} 로. 이미지가 없는 컷은 뺀다.
+
+    task_id 를 주면 컷 하나 분석이 끝날 때마다 progress(panels) 를 +1 한다.
+    """
     all_tiles = _all_tiles(owner, pid)
     role_names = _role_names(chars)
     shots: dict[str, dict] = {}
@@ -1083,13 +1524,15 @@ def _analyze_panels(owner: str, pid: str, plan_id: str, groups: list[dict], char
             shot = _analyze_cut_panel(owner, pid, plan_id, cut, all_tiles, role_names)
             if shot is not None:
                 shots[str(cut["cutId"])] = shot
+            if task_id:
+                _bump_progress(owner, pid, task_id, step="panels")
     return shots
 
 
 # ================================================================ 저장(task.id 확인)
 
 
-def _commit_scenes(owner: str, pid: str, task_id: str, scenes: list[dict], model: str, *, panel_shots: dict | None = None, fit: dict | None = None) -> None:
+def _commit_scenes(owner: str, pid: str, task_id: str, scenes: list[dict], model: str, *, panel_shots: dict | None = None, fit: dict | None = None, last_rebuild: dict | None = None) -> None:
     from . import plan as plan_mod  # noqa: PLC0415
 
     def mutator(data: dict) -> None:
@@ -1105,6 +1548,17 @@ def _commit_scenes(owner: str, pid: str, task_id: str, scenes: list[dict], model
         previz["approved"] = False  # 새로 설계하면 승인 해제.
         previz["revision"] = int(previz.get("revision") or 0) + 1
         previz["recordings"] = {}  # revision 이 바뀌면 녹화 키 경로가 달라진다.
+        previz["lastRebuild"] = last_rebuild  # 다시 만들기 요약(첫 설계면 None).
+        # progress 를 done 으로 마무리(막대 가득).
+        prog = previz.get("progress") or _empty_progress()
+        total = int(prog.get("total") or 0)
+        previz["progress"] = {
+            "step": "done",
+            "done": total,
+            "total": total,
+            "startedAt": prog.get("startedAt"),
+            "updatedAt": now_iso(),
+        }
         previz["task"] = {"status": "done", "startedAt": (previz.get("task") or {}).get("startedAt"), "id": None}
 
     try:
@@ -1557,6 +2011,10 @@ def previz_view(owner: str, pid: str, plan: dict) -> dict:
         "recordings": recordings_out,
         "recordedAll": recorded_all,
         "task": previz.get("task") or _empty_task(),
+        "progress": previz.get("progress") or _empty_progress(),
+        "extraPromptKo": previz.get("extraPromptKo") or "",
+        "extraCutId": previz.get("extraCutId") or "",
+        "lastRebuild": previz.get("lastRebuild"),
     }
 
 
