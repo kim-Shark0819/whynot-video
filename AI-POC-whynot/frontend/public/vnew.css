@@ -2059,6 +2059,75 @@ textarea.vnew-field-input {
   border-radius: 8px;
 }
 
+/* 048 컷어웨이 뷰: 뷰 A/B 큰 그림 + 펴진 벽·바닥 텍스처 줄. */
+.vnew-loc-viewblock {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.vnew-loc-views-big {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+}
+
+.vnew-loc-view-cell {
+  margin: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.vnew-loc-view-img {
+  display: block;
+  width: 100%;
+  border: 1px solid var(--line, #e5e7eb);
+  border-radius: 8px;
+  cursor: zoom-in;
+}
+
+.vnew-loc-view-cap {
+  font-size: 12px;
+  color: var(--text-muted, #6b7280);
+}
+
+.vnew-loc-views-tex {
+  display: grid;
+  grid-template-columns: repeat(5, 1fr);
+  gap: 6px;
+}
+
+.vnew-loc-tex-cell {
+  margin: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  align-items: center;
+}
+
+.vnew-loc-tex-img {
+  display: block;
+  width: 100%;
+  border: 1px solid var(--line, #e5e7eb);
+  border-radius: 6px;
+}
+
+.vnew-loc-tex-cap {
+  font-size: 11px;
+  color: var(--text-muted, #6b7280);
+  text-align: center;
+}
+
+@media (max-width: 768px) {
+  .vnew-loc-views-big {
+    grid-template-columns: 1fr;
+  }
+  .vnew-loc-views-tex {
+    grid-template-columns: repeat(2, 1fr);
+  }
+}
+
 .vnew-loc-design {
   margin: 10px 0;
 }
@@ -2395,6 +2464,38 @@ textarea.vnew-field-input {
   background: var(--surface-muted, #f3f4f6);
   color: var(--text-muted, #6b7280);
   border-color: var(--line, #e5e7eb);
+}
+
+.vnew-previz-fit-user {
+  background: #ede9fe;
+  color: #5b21b6;
+  border-color: #c4b5fd;
+}
+
+/* 결과 위 '다시 만들기' 영역(펼침형 지시 입력·최근 지시 요약) */
+.vnew-previz-rebuild {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.vnew-previz-rebuild-last {
+  font-size: 13px;
+  color: var(--text-muted, #6b7280);
+}
+
+.vnew-previz-rebuild-last-line {
+  margin: 0 0 4px;
+}
+
+.vnew-previz-rebuild-changes {
+  margin: 0;
+  padding-left: 18px;
+  font-size: 12px;
+}
+
+.vnew-previz-rebuild-target {
+  max-width: 220px;
 }
 
 /* 벡터 3칸 입력 */

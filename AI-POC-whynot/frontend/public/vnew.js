@@ -1333,14 +1333,25 @@
     if (step === "prompts") return "상세 프롬프트 작성 중";
     if (step === "images") return "벽·바닥 그림 그리는 중 " + (done || 0) + "/" + (total || 0);
     if (step === "verify") return "웹툰과 비교·보정 중";
+    if (step === "cut") return "벽 잘라 펴는 중";
     if (step === "sheet") return "4면 시트 합치는 중";
     if (step === "done") return "마무리 중";
     return "준비 중";
   }
 
+  /* 프리비즈 설계 단계 문구. step → 문구(함수면 done/total 을 받는다). */
+  function previzProgressLabel(step, done, total) {
+    var tail = total > 0 ? " " + (done || 0) + "/" + (total || 0) : "";
+    if (step === "panels") return "웹툰 컷 시점 읽는 중" + tail;
+    if (step === "design") return "장면 배치 설계 중" + tail;
+    if (step === "fit") return "카메라 시점 맞추는 중" + tail;
+    if (step === "fit_retry") return "어긋난 컷 다시 맞추는 중" + tail;
+    if (step === "done") return "마무리 중";
+    return "준비 중";
+  }
+
   /* 경과 초 → "2분 14초 경과" / "14초 경과". */
-  function formatElapsed(totalSeconds) {
-    var s = Math.max(0, Math.floor(totalSeconds));
+  function formatElapsed(totalSeconds) {    var s = Math.max(0, Math.floor(totalSeconds));
     var mins = Math.floor(s / 60);
     var secs = s % 60;
     if (mins > 0) return mins + "분 " + secs + "초 경과";
@@ -1355,15 +1366,20 @@
 
   /* 진행 표시 한 조각. progress 가 없거나 step 이 비면 null(그릴 것 없음).
      labelFn(step, done, total) 로 단계 문구를 바꿀 수 있다(기본 공간 시트용). */
-  function progressIndicator(progress, labelFn) {
+  function progressIndicator(progress, labelFn, opts) {
     progress = progress || {};
     var step = progress.step || "";
     if (!step || step === "done") return null; // done 이면 곧 ready — 굳이 안 보인다.
     var label = labelFn || locProgressLabel;
     var done = Number(progress.done) || 0;
     var total = Number(progress.total) || 0;
-    // 그림 단계(images)만 done/total 막대. 설계·사실·프롬프트·비교는 움직이는 막대.
-    var indeterminate = step !== "images" || total <= 0;
+    // 기본: 그림 단계(images)만 done/total 막대. 설계·사실·프롬프트·비교는 움직이는 막대.
+    // determinateSteps 를 주면 그 step 들을 done/total 막대로 본다(프리비즈 panels·design·fit).
+    var determinateSteps = opts && opts.determinateSteps;
+    var isDeterminateStep = determinateSteps
+      ? determinateSteps.indexOf(step) !== -1
+      : step === "images";
+    var indeterminate = !isDeterminateStep || total <= 0;
 
     var wrap = el("div", "vnew-prog");
     wrap.setAttribute("data-progress-live", "1");
@@ -2814,7 +2830,8 @@
     return "아직 안 만듦";
   }
 
-  /* 4면 한 장 시트(실사·웹툰 탭). 각 탭은 그 그림체의 sheetUrl(2x2) 한 장을 보인다. */
+  /* 공간 시트(실사·웹툰 탭). 새 방식(hasViews)이면 뷰 A/B 크게 + 펴진 벽 4장·바닥을 한국어 라벨과 함께
+     보인다. 옛 데이터(views 없음)면 기존 2x2 sheetUrl 한 장을 그대로 보인다. */
   function locationSheet(loc) {
     var wrap = el("div", "vnew-loc-sheet");
     var variants = loc.variants || {};
@@ -2836,16 +2853,74 @@
     wrap.appendChild(tabs);
 
     var v = variants[active] || {};
-    if (v.sheetUrl) {
+    if (loc.hasViews) {
+      views.appendChild(locationViewBlock(loc, v));
+    } else if (v.sheetUrl) {
       var img = el("img", "vnew-loc-sheet-img");
       img.src = v.sheetUrl;
-      img.alt = (loc.nameEn || "") + " " + active + " 4-wall sheet";
+      img.alt = (loc.nameEn || "") + " " + active + " sheet";
       views.appendChild(img);
     } else {
       views.appendChild(el("p", "vnew-hint", "아직 이 그림체의 공간 시트가 없습니다."));
     }
     wrap.appendChild(views);
     return wrap;
+  }
+
+  /* 새 방식(048): 뷰 A(메인배경 뒤 보기)·뷰 B(앞 보기)를 크게, 그 아래 펴진 벽 4장 + 바닥을 한국어
+     라벨과 함께 보인다. 라벨은 서버가 내려 준 loc.viewLabels 를 쓴다(없으면 기본 한국어). */
+  function locationViewBlock(loc, v) {
+    var box = el("div", "vnew-loc-viewblock");
+    var vl = loc.viewLabels || {};
+    var viewUrls = v.viewUrls || {};
+
+    // 뷰 A / 뷰 B 큰 그림.
+    var bigRow = el("div", "vnew-loc-views-big");
+    [
+      { key: "back", label: vl.back || "메인배경(뒤) 보기 — 왼쪽·뒤·오른쪽이 이어진 모습" },
+      { key: "front", label: vl.front || "앞(맞은편) 보기" }
+    ].forEach(function (row) {
+      var cell = el("figure", "vnew-loc-view-cell");
+      if (viewUrls[row.key]) {
+        var img = el("img", "vnew-loc-view-img");
+        img.src = viewUrls[row.key];
+        img.alt = (loc.nameEn || "") + " " + row.key + " view";
+        img.addEventListener("click", function () {
+          openLightbox(viewUrls[row.key], (loc.nameKo || loc.nameEn || "") + " " + row.label);
+        });
+        cell.appendChild(img);
+      } else {
+        cell.appendChild(el("p", "vnew-hint", "아직 없습니다."));
+      }
+      cell.appendChild(el("figcaption", "vnew-loc-view-cap", row.label));
+      bigRow.appendChild(cell);
+    });
+    box.appendChild(bigRow);
+
+    // 펴진 벽 4장 + 바닥.
+    var wallUrls = v.wallUrls || {};
+    var tex = el("div", "vnew-loc-views-tex");
+    [
+      { url: wallUrls.west, label: vl.left || "왼쪽" },
+      { url: wallUrls.north, label: vl.north || "메인배경(뒤)" },
+      { url: wallUrls.east, label: vl.right || "오른쪽" },
+      { url: wallUrls.south, label: vl.south || "앞(맞은편)" },
+      { url: v.floorUrl, label: vl.floor || "바닥" }
+    ].forEach(function (row) {
+      var cell = el("figure", "vnew-loc-tex-cell");
+      if (row.url) {
+        var img = el("img", "vnew-loc-tex-img");
+        img.src = row.url;
+        img.alt = row.label;
+        cell.appendChild(img);
+      } else {
+        cell.appendChild(el("span", "vnew-hint", "—"));
+      }
+      cell.appendChild(el("figcaption", "vnew-loc-tex-cap", row.label));
+      tex.appendChild(cell);
+    });
+    box.appendChild(tex);
+    return box;
   }
 
   /* 벽별 "웹툰과 일치/보정함" 배지. 활성 그림체(또는 real)의 checks[side] 를 읽는다.
@@ -2856,7 +2931,7 @@
     var v = variants[active] || {};
     var checks = v.checks || {};
     var sides = ["north", "east", "south", "west"];
-    var sideLabels = { north: "정면(N)", east: "오른쪽(E)", south: "뒤(S)", west: "왼쪽(W)" };
+    var sideLabels = { north: "메인배경(뒤)", east: "오른쪽", south: "앞", west: "왼쪽" };
     var any = sides.some(function (s) {
       return checks[s];
     });
@@ -2886,7 +2961,7 @@
     editor.appendChild(el("summary", "vnew-loc-facts-summary", "추출된 사실(벽별 물건) 보기·수정"));
 
     var sides = ["north", "east", "south", "west"];
-    var sideLabels = { north: "정면(N)", east: "오른쪽(E)", south: "뒤(S)", west: "왼쪽(W)" };
+    var sideLabels = { north: "메인배경(뒤)", east: "오른쪽", south: "앞", west: "왼쪽" };
     var hasAny = sides.some(function (s) {
       var w = walls[s] || {};
       return (w.objects || []).length || w.wallMaterialEn || w.wallColorEn;
@@ -3017,7 +3092,13 @@
 
     var patch = { walls: {} };
     var sides = ["north", "east", "south", "west"];
-    var sideLabels = { north: "정면(N)", east: "오른쪽(E)", south: "뒤(S)", west: "왼쪽(W)" };
+    // 048: north=메인배경(뒤), east=오른쪽, south=앞(맞은편), west=왼쪽. 영문 벽 이름 옆에 한국어 표기.
+    var sideLabels = {
+      north: "north (메인배경/뒤)",
+      east: "east (오른쪽)",
+      south: "south (앞/맞은편)",
+      west: "west (왼쪽)"
+    };
 
     sides.forEach(function (side) {
       var wall = walls[side] || {};
@@ -3455,6 +3536,14 @@
     var err = Number(fitEntry.err) || 0;
     var pct = Math.max(0, Math.min(100, Math.round((1 - err) * 100)));
     var label;
+    if (fitEntry.method === "user") {
+      // 사용자 지시로 바뀐 컷: 격자 보정·재요청을 하지 않았다(지시 유지). 별도 배지로.
+      badge.classList.add("vnew-previz-fit-user");
+      badge.textContent = "사용자 지시 · 일치도 " + pct + "%";
+      badge.title =
+        "사용자 지시로 바뀐 컷이라 자동 보정을 하지 않았습니다. 웹툰 패널과의 오차 " + err.toFixed(3);
+      return badge;
+    }
     if (err <= 0.12) {
       badge.classList.add("vnew-previz-fit-good");
       label = "좋음";
@@ -3530,6 +3619,113 @@
     return card;
   }
 
+  /* 결과 위 '다시 만들기' 영역: 최근 지시 요약(lastRebuild) + 펼침형 지시 입력(textarea·대상 select).
+     캐릭터 [다시 만들기]처럼 버튼을 누르면 입력창이 펼쳐지고, 지시·대상을 넣어 다시 설계한다.
+     대상 select 는 전체 / 컷1…컷N(화면의 컷 번호). 제출은 POST /previz/design {extraPromptKo, cutId}. */
+  function previzRebuildSection(previz, scenes, showError) {
+    var section = el("section", "panel vnew-previz-rebuild");
+
+    // 최근 지시(lastRebuild) 요약 한 줄 + 바뀐 내용(changesEn).
+    var last = previz.lastRebuild;
+    if (last && (last.extraPromptKo || (last.changesEn && last.changesEn.length))) {
+      var summary = el("div", "vnew-previz-rebuild-last");
+      if (last.extraPromptKo) {
+        summary.appendChild(el("p", "vnew-previz-rebuild-last-line", "최근 지시: " + last.extraPromptKo));
+      }
+      var changes = last.changesEn || [];
+      if (changes.length) {
+        var ul = el("ul", "vnew-previz-rebuild-changes");
+        changes.forEach(function (c) {
+          var label = (c.cutId && c.cutId !== "all") ? ("[" + c.cutId + "] ") : "[전체] ";
+          ul.appendChild(el("li", null, label + (c.whatEn || "")));
+        });
+        summary.appendChild(ul);
+      }
+      section.appendChild(summary);
+    }
+
+    // 펼침형 버튼.
+    var btn = el("button", "outline-button vnew-previz-rebuild-btn", "다시 만들기");
+    btn.type = "button";
+    section.appendChild(btn);
+
+    var panel = el("div", "vnew-rebuild-panel");
+    panel.style.display = "none";
+
+    panel.appendChild(el("label", "vnew-rebuild-label", "어떻게 다시 만들지 (선택)"));
+    var textarea = el("textarea", "vnew-rebuild-text");
+    textarea.rows = 3;
+    textarea.maxLength = 1000;
+    textarea.placeholder = "예) 컷2 카메라를 김부장 얼굴 가까이, 범건우는 문 앞에 서 있게";
+    textarea.value = previz.extraPromptKo || "";
+    panel.appendChild(textarea);
+
+    // 대상 select: 전체 / 컷1…컷N(평탄화한 화면 컷 번호).
+    var targetWrap = el("label", "vnew-field");
+    targetWrap.appendChild(el("span", "vnew-field-label", "대상"));
+    var sel = el("select", "vnew-field-input vnew-previz-rebuild-target");
+    var allOpt = el("option", null, "전체");
+    allOpt.value = "";
+    sel.appendChild(allOpt);
+    var flat = flattenCuts(scenes);
+    flat.forEach(function (item, idx) {
+      var cutId = item.cut && item.cut.cutId;
+      if (!cutId) return;
+      var opt = el("option", null, "컷 " + (idx + 1));
+      opt.value = cutId;
+      if ((previz.extraCutId || "") === cutId) opt.selected = true;
+      sel.appendChild(opt);
+    });
+    targetWrap.appendChild(sel);
+    panel.appendChild(targetWrap);
+
+    panel.appendChild(
+      el("p", "vnew-rebuild-cost", "다시 만들면 승인·녹화가 무효가 되고 비용이 듭니다.")
+    );
+
+    var panelBtns = el("div", "vnew-rebuild-btns");
+    var confirmBtn = el("button", "primary-button", "이 지시로 다시 만들기");
+    confirmBtn.type = "button";
+    var cancelBtn = el("button", "outline-button", "취소");
+    cancelBtn.type = "button";
+    panelBtns.appendChild(confirmBtn);
+    panelBtns.appendChild(cancelBtn);
+    panel.appendChild(panelBtns);
+    section.appendChild(panel);
+
+    btn.addEventListener("click", function () {
+      panel.style.display = panel.style.display === "none" ? "" : "none";
+      if (panel.style.display === "") textarea.focus();
+    });
+    cancelBtn.addEventListener("click", function () {
+      panel.style.display = "none";
+    });
+    confirmBtn.addEventListener("click", function () {
+      confirmBtn.disabled = true;
+      var body = { extraPromptKo: textarea.value || "", cutId: sel.value || "" };
+      api("/api/vnew/p/" + encodeURIComponent(state.projectId) + "/previz/design", {
+        method: "POST",
+        body: JSON.stringify(body),
+        headers: { "Content-Type": "application/json" }
+      })
+        .then(function () {
+          loadPlan(false);
+        })
+        .catch(function (err) {
+          confirmBtn.disabled = false;
+          if (showError) {
+            if (err && err.status === 409) {
+              showError("이미 장면을 설계하고 있습니다.");
+            } else {
+              showError("다시 만들기를 시작하지 못했습니다: " + errMessage(err));
+            }
+          }
+        });
+    });
+
+    return section;
+  }
+
   function renderPrevizStep(host) {
     var plan = state.plan || {};
     var previz = plan.previz || {};
@@ -3548,7 +3744,31 @@
 
     // --- 설계 전 / 진행 중 ---
     if (status === "designing") {
-      host.appendChild(previzProgressBar("3D 장면을 설계하고 있습니다…", showError));
+      // 공통 진행 표시(단계·막대·경과 시간) + 취소. progress 가 없으면 옛 한 줄 띠로 대체.
+      var progWrap = el("div", "vnew-progress-wrap");
+      var ind = progressIndicator(previz.progress, previzProgressLabel, {
+        determinateSteps: ["panels", "design", "fit", "fit_retry"]
+      });
+      if (ind) {
+        progWrap.appendChild(ind);
+      } else {
+        progWrap.appendChild(el("p", "vnew-progress-label", "3D 장면을 설계하고 있습니다…"));
+      }
+      var cancelBtn = el("button", "outline-button danger", "취소");
+      cancelBtn.type = "button";
+      cancelBtn.addEventListener("click", function () {
+        cancelBtn.disabled = true;
+        api("/api/vnew/p/" + encodeURIComponent(state.projectId) + "/cancel", { method: "POST" })
+          .then(function () {
+            loadPlan(false);
+          })
+          .catch(function (err) {
+            cancelBtn.disabled = false;
+            showError("취소하지 못했습니다: " + errMessage(err));
+          });
+      });
+      progWrap.appendChild(cancelBtn);
+      host.appendChild(progWrap);
       return;
     }
     if (status === "none" || !scenes.length) {
@@ -3584,6 +3804,9 @@
     }
 
     // --- 설계 후: 뷰포트 + 타임라인 + 장면 탭 + 우측 편집 패널 ---
+    // 결과 위: 최근 지시(lastRebuild) 요약 + 지시를 넣는 [다시 만들기](펼침형).
+    host.appendChild(previzRebuildSection(previz, scenes, showError));
+
     var layout = el("div", "vnew-previz-layout");
 
     // (좌) 뷰포트·타임라인·장면 탭

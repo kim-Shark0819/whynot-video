@@ -1,17 +1,23 @@
-"""vnew 영상만들기_신규 — 공간 디테일 시트(설계자 2026-10-21).
+"""vnew 영상만들기_신규 — 공간 디테일 시트(설계자 2026-10-21, 048 컷어웨이 뷰).
 
-콘티 단계에서 쓰이는 배경(장소)마다 '4면이 다 보이는' 고정 공간 이미지를 만든다. 다음 단계
-프리비즈(three.js)의 벽·바닥에 입힐 텍스처로 쓰려고, 각 벽을 정면에서 본 평평한 입면도(원근 없음)
-로 그린다. 그림체별(real·webtoon)로 벽 4장 + 바닥 1장을 Seedream 으로 그리고, 벽 4장을 서버에서
-2x2 로 붙여 '한 장 시트'를 만든다.
+콘티 단계에서 쓰이는 배경(장소)마다 공간 이미지를 만든다. 다음 단계 프리비즈(three.js)의 벽·바닥에
+입힐 텍스처로 쓴다. 벽을 4장 따로 그리면 모서리·바닥선·재질·빛이 이어지지 않으므로(046 문제),
+앞 벽을 떼어 낸 상자를 정면 바깥에서 본 1점 투시 '컷어웨이 뷰' 두 장으로 공간을 만든다(048):
+
+- 뷰 A(back, 뒤 보기): 가운데=뒤 벽(north), 좌=왼쪽 벽(west), 우=오른쪽 벽(east), 아래=바닥.
+- 뷰 B(front, 앞 보기): 같은 방을 반대편에서(south 가 가운데).
+
+서버가 방 치수(design)로 PIL 가이드 이미지를 그려 Seedream 에 참고 1번으로 주고(그림체 real→webtoon),
+생성 뷰에서 각 면 사다리꼴을 원근 보정(location_views.rectify)해 기존 wall_key/floor_key 로 저장한다
+→ previz 텍스처(_textures_for)는 수정 없이 그대로 동작한다. 바닥은 뷰 A 의 floor 사다리꼴을 편다.
 
 장소 목록은 plan["locations"] 에 둔다(콘티를 다시 만들어도 같은 이름이면 유지). script.entries 의
 locationEn 을 정규화(소문자·공백 정리)해 고유 장소를 뽑는다.
 
 재사용(수정 금지): vpoc.seedream(generate_safe · size) · vpoc.llm(_converse) · vpoc.images
-(panel_jpeg · jpeg_for_reference) · vpoc.store(S3) · vpoc.ledger(원장) · vnew.characters(styleEn).
-plan.py 가 sync_locations 를 콘티 끝에서 부르고, plan_view 가 locations_view 를 담는다. routes.py
-는 build · build-all · update 를 HTTP 로 감싼다.
+(panel_jpeg · jpeg_for_reference) · vpoc.store(S3) · vpoc.ledger(원장) · vnew.characters(styleEn) ·
+vnew.location_views(가이드·투영·원근 보정 순수 함수). plan.py 가 sync_locations 를 콘티 끝에서 부르고,
+plan_view 가 locations_view 를 담는다. routes.py 는 build · build-all · update 를 HTTP 로 감싼다.
 
 외부 호출(LLM · Seedream)은 아래 래퍼로 감싼다(검사가 가짜로 바꿔 끼운다): _design · _facts · _author ·
 _verify · _seedream. STORE 는 vpoc.store.STORE 를 쓴다(검사가 모듈 변수로 바꿔 끼운다).
@@ -38,6 +44,7 @@ from ..vpoc.store import STORE
 
 from . import characters
 from . import settings
+from . import location_views
 
 log = logging.getLogger("vpoc")
 
@@ -47,9 +54,9 @@ log = logging.getLogger("vpoc")
 MAX_DESIGN_PANELS = 6
 # Seedream 참고 이미지 최대 장수(그 장소 패널).
 MAX_REF_PANELS = 4
-# 벽 입면도 크기(16:9). 4벽 모두 같은 크기.
+# 벽 입면도 크기(16:9). 4벽 모두 같은 크기. (옛 데이터·montage_2x2 용으로 남겨 둔다.)
 WALL_SIZE = "2048x1152"
-# 바닥 텍스처 크기(정사각, top-down).
+# 바닥 텍스처 크기(정사각, top-down). (옛 데이터용.)
 FLOOR_SIZE = "1536x1536"
 # 벽 방향(north=웹툰에서 가장 많이 보이는 정면 벽).
 SIDES = ("north", "east", "south", "west")
@@ -57,8 +64,46 @@ SIDES = ("north", "east", "south", "west")
 VARIANTS = ("real", "webtoon")
 # 한 장소의 그림(벽4+바닥1 × 그림체 2 = 10장)을 동시에 그리는 최대 스레드 수.
 IMAGE_WORKERS = 4
-# 그릴 그림 총 장수(벽4+바닥1 × 그림체 2 = 10). 진행 막대 total.
+# 그릴 그림 총 장수(벽4+바닥1 × 그림체 2 = 10). 진행 막대 total. (옛 데이터용 상수.)
 TOTAL_IMAGES = len(VARIANTS) * (len(SIDES) + 1)
+
+# ---------------------------------------------------------------- 048 컷어웨이 뷰(box set)
+#
+# 새 방식(설계자 2026-10-21, 048): 벽을 4장 따로 그리지 않고 앞 벽을 뗀 상자를 정면 바깥에서 본 1점
+# 투시 컷어웨이 뷰 두 장(back=뒤 보기, front=앞 보기)을 그린다. 뷰에서 각 면(사다리꼴)을 원근 보정해
+# (rectify) 벽·바닥 텍스처로 쓴다. 저장 키는 기존 wall_key/floor_key 그대로 → previz 는 수정 없이 동작.
+
+# 컷어웨이 뷰 크기(설계자 048).
+VIEW_SIZE = "2560x1440"
+# 가이드 크기(뷰와 같게).
+GUIDE_SIZE = "2560x1440"
+# 뷰 종류. back=뒤 보기(north·west·east·floor), front=앞 보기(south).
+VIEWS = ("back", "front")
+# 그릴 뷰 총 장수(뷰2 × 그림체2 = 4). 진행 막대 total.
+TOTAL_VIEWS = len(VARIANTS) * len(VIEWS)
+# 뷰를 동시에 그리는 최대 스레드 수(real A 후 real B·webtoon A 병렬).
+VIEW_WORKERS = 2
+# verify 꼭짓점 차이가 화면 가로·세로의 이 비율을 넘으면 Claude 꼭짓점을 쓴다(설계자 048).
+VERTEX_TOLERANCE = 0.04
+
+# 뷰 A(back)/뷰 B(front) 와 면별 한국어 라벨(화면). 설계 벽 이름(north/east/south/west) 한국어 표기도 겸한다.
+VIEW_FACE_LABELS = {
+    "back": "메인배경(뒤) 보기 — 왼쪽·뒤·오른쪽이 이어진 모습",
+    "front": "앞(맞은편) 보기",
+    "left": "왼쪽",
+    "north": "메인배경(뒤)",
+    "right": "오른쪽",
+    "south": "앞(맞은편)",
+    "floor": "바닥",
+    # 설계 편집 화면: north=뒤, east=오른쪽, south=앞, west=왼쪽.
+    "wall_north": "(뒤)",
+    "wall_east": "(오른쪽)",
+    "wall_south": "(앞)",
+    "wall_west": "(왼쪽)",
+}
+
+# 뷰 종류·면 → 렌더러 벽 매핑은 location_views.VIEW_FACE_TO_WALL 를 쓴다(단일 출처).
+VIEW_FACE_TO_WALL = location_views.VIEW_FACE_TO_WALL
 # 실패한 그림을 다시 그리는 횟수(1회).
 IMAGE_RETRY = 1
 # 추가 요청(한국어) 최대 길이.
@@ -125,8 +170,9 @@ def _clear_running(owner: str, pid: str, lid: str) -> None:
 # ================================================================ 진행 표시(progress)
 #
 # 빌드 중 location["progress"] 에 {step, done, total, startedAt, updatedAt} 를 기록한다. 화면이
-# 스피너·진행 막대·경과 시간을 보이는 데 쓴다. step 순서: design → images → sheet → done.
-# 그림은 병렬로 그려지므로(완료마다 +1), done 증가는 mutate_plan(경합 재시도)로 안전하게 올린다.
+# 스피너·진행 막대·경과 시간을 보이는 데 쓴다. step 순서(048): design → facts → prompts → images(뷰 4장)
+# → verify → cut(잘라 펴기) → sheet → done. 뷰는 일부 병렬로 그려지므로(완료마다 +1), done 증가는
+# mutate_plan(경합 재시도)로 안전하게 올린다.
 
 
 def _empty_progress() -> dict:
@@ -177,7 +223,7 @@ def _set_step(owner: str, pid: str, lid: str, task_id: str, *, step: str) -> Non
             return
         prior = loc.get("progress") or _empty_progress()
         started = prior.get("startedAt") or now_iso()
-        total = int(prior.get("total") or TOTAL_IMAGES)
+        total = int(prior.get("total") or TOTAL_VIEWS)
         done = int(prior.get("done") or 0)
         if step == "done":
             done = total  # 끝이면 막대를 가득 채운다.
@@ -210,7 +256,7 @@ def _bump_progress(owner: str, pid: str, lid: str, task_id: str) -> None:
             return
         prior = loc.get("progress") or _empty_progress()
         started = prior.get("startedAt") or now_iso()
-        total = int(prior.get("total") or TOTAL_IMAGES)
+        total = int(prior.get("total") or TOTAL_VIEWS)
         done = min(total, int(prior.get("done") or 0) + 1)
         loc["progress"] = {
             "step": "images",
@@ -265,7 +311,15 @@ def _new_location(name_ko: str, name_en: str, panels: list[int]) -> dict:
 
 
 def _empty_variant() -> dict:
-    return {"status": "none", "wallKeys": {}, "floorKey": "", "sheetKey": "", "checks": {}, "error": ""}
+    return {
+        "status": "none",
+        "viewKeys": {},  # {back, front} 컷어웨이 뷰 원본 키(048)
+        "wallKeys": {},  # {north,east,south,west} 펴진 벽 텍스처 키(previz 가 읽음)
+        "floorKey": "",
+        "sheetKey": "",
+        "checks": {},
+        "error": "",
+    }
 
 
 def sync_locations(plan: dict) -> dict:
@@ -892,8 +946,37 @@ def _facts_has_wall_detail(facts: dict) -> bool:
 
 
 # ================================================================ 프롬프트
+#
+# 048 컷어웨이 뷰: 벽을 4장 따로 그리지 않고, 가이드 위에 뷰(back·front) 한 장을 그린다. 프롬프트는
+# 면별 위치를 화면 기준으로 아주 구체적으로 쓴다(이미지 모델은 지능이 없으므로).
 
-# 프롬프트 안에 반드시 들어가야 하는 지시(검사가 확인): 원근 없음 · 인물 없음.
+# 뷰 프롬프트 앞부분: 가이드를 지키라는 지시(검사가 "layout guide"·"do not move walls" 확인).
+_GUIDE_CLAUSE = (
+    "Image 1 is a layout guide: keep the exact box geometry, the corner lines and the positions of the "
+    "white window and dark door rectangles. Draw over it; do not move walls."
+)
+
+# 이음새 지시(뷰 A — 검사가 "continuous" 확인).
+_CONTINUOUS_CLAUSE = (
+    "The left wall, back wall and right wall are one continuous room: the floor line, ceiling line, "
+    "skirting, wall material and lighting continue across both corners without a break."
+)
+
+# 뷰 B 는 이음새 대신 '반대편에서 본 같은 방'(검사가 "opposite side" 확인).
+_OPPOSITE_CLAUSE = (
+    "Same room as Image 2 seen from the opposite side; its side walls are the same walls as in Image 2 "
+    "seen from their other end."
+)
+
+# 대충 그려도 된다는 지시(공간·빛이 장식보다 중요).
+_BLOCKIN_CLAUSE = (
+    "Simple, low-detail block-in is fine; clear shapes, readable space and light matter more than decoration."
+)
+
+# 인물·글자 금지(검사가 "No people" 확인).
+_NO_PEOPLE = "No people, no text, no letters, no signs with writing."
+
+# (옛 데이터·fallback 호환) 원근 없음 지시.
 _ORTHO = (
     "Orthographic straight-on view, the wall fills the frame edge to edge, floor line at the bottom, "
     "ceiling line at the top, no perspective, no people, no furniture in front of the wall except items "
@@ -903,17 +986,18 @@ _ORTHO = (
 # 벽·바닥 프롬프트 끝에 붙이는 지시(검사가 확인): 글자·표지판 금지 + 한국 배경.
 _NO_TEXT = "No text, letters, signs or labels anywhere. Korean setting."
 
-# Astra 지침(설계자 2026-10-21, 046). 이 문장이 그대로 Astra system 에 들어간다(검사가 확인).
+# Astra 지침(설계자 2026-10-21, 048). 이 문장이 그대로 Astra system 에 들어간다(검사가 확인).
 ASTRA_PROMPT_INSTRUCTION = (
-    "Write a prompt for a non-intelligent image model. Be explicit and literal: state every object, "
-    "its exact count, color, material, size and position on the wall (left third / center / right third, "
-    "floor level / waist / eye / ceiling height). State the wall color and material, the floor line at "
-    "the bottom, ceiling line at the top, orthographic straight-on view, no perspective, no people, no "
-    "text or signs. Do not use vague words (nice, typical, some)."
+    "Write a prompt for a non-intelligent image model that draws a box-set cutaway view of a room over a "
+    "layout guide. Be explicit and literal: describe each screen area separately — CENTER BACK WALL (main "
+    "background), LEFT WALL, RIGHT WALL, FLOOR, CEILING/SKY — and for each state every object, its exact "
+    "count, color, material, size and position. State where the main light comes from, its direction and "
+    "which side the shadows fall. Keep the box geometry and corner lines of the guide. No people, no text. "
+    "Do not use vague words (nice, typical, some)."
 )
 
-# 프롬프트에 반드시 들어가야 하는 보증 문구(Astra 가 빠뜨렸으면 뒤에 덧붙인다 — 검사가 확인).
-_GUARD_CLAUSES = ("Orthographic", "no people", "No text", "Korean setting")
+# 뷰 프롬프트에 반드시 들어가야 하는 보증 문구(Astra 가 빠뜨렸으면 뒤에 덧붙인다 — 검사가 확인).
+_GUARD_CLAUSES = ("CENTER BACK WALL", "LEFT WALL", "RIGHT WALL", "continuous", "No people")
 
 
 def _style_clause(variant: str, loc: dict) -> str:
@@ -1011,29 +1095,59 @@ def _author(system_text: str, user_text: str, *, model: str) -> tuple[dict, dict
     )
 
 
-def _author_prompt(owner: str, pid: str, loc: dict, *, variant: str, side: str, kind: str) -> str:
-    """사실 + 그림체로 Seedream 프롬프트를 Astra 가 쓴다(실패 시 Claude, 둘 다 실패 시 결정적 템플릿).
+def _view_face_facts(loc: dict, view: str) -> dict[str, str]:
+    """뷰(back·front)의 화면 면별 사실 문단을 돌려준다.
 
-    길이 1,500~2,500자로 맞추고, 보증 문구(Orthographic·no people·No text·Korean setting)를 보장한다.
+    반환 키: 'back'(CENTER BACK WALL), 'left'(LEFT WALL), 'right'(RIGHT WALL), 'floor', 'ceiling'.
+    각 값은 그 면에 그릴 벽의 사실(물건·재질·창문·문)을 사람이 읽는 영어 문단.
+    """
+    out: dict[str, str] = {}
+    for face in ("back", "left", "right"):
+        # 그 화면 면에 해당하는 설계 벽(north/east/south/west)을 찾는다.
+        side = None
+        for s in SIDES:
+            if _wall_to_face(view, s) == face:
+                side = s
+                break
+        out[face] = _wall_facts_text(side, loc) if side else ""
+    facts = loc.get("facts") or {}
+    out["floor"] = str(facts.get("floorEn") or "").strip()
+    out["ceiling"] = str(facts.get("ceilingEn") or "").strip()
+    return out
+
+
+def _author_prompt(owner: str, pid: str, loc: dict, *, variant: str, view: str) -> str:
+    """컷어웨이 뷰(back·front) 한 장의 Seedream 프롬프트를 Astra 가 쓴다(실패 시 Claude, 둘 다 실패 시 템플릿).
+
+    면별 위치를 화면 기준으로 구체적으로 쓰게 하고, 보증 문구(CENTER BACK WALL/LEFT WALL/RIGHT WALL/
+    continuous(또는 opposite side)/No people)를 보장한다. webtoon 은 real 뷰를 '그대로 다시 그려라'.
     """
     name_en = str(loc.get("nameEn") or "").strip() or "the room"
     style = _style_clause(variant, loc)
-    if kind == "wall":
-        facts_text = _facts_context(side, loc)
+    faces = _view_face_facts(loc, view)
+    light = str((loc.get("facts") or {}).get("lightEn") or (loc.get("design") or {}).get("lightEn") or "").strip()
+
+    if variant == "webtoon":
         user_text = (
-            f"Place: {name_en}. Draw the {side} wall as a flat frontal elevation.\n"
-            f"Drawing style: {style}\n"
-            f"Facts you must reproduce exactly:\n{facts_text}\n"
+            f"Place: {name_en}. Image 1 is the photoreal {view}-view of this room.\n"
+            f"Redraw Image 1 exactly (same composition, every corner and object in the same place) in this "
+            f"webtoon drawing style: {style}\n"
+            f"Keep the box geometry and the positions of every wall, window, door and the floor/ceiling lines.\n"
             f"Write ONE image prompt of {PROMPT_MIN_CHARS} to {PROMPT_MAX_CHARS} characters. "
             "Call emit_image_prompt once with promptEn."
         )
     else:
-        facts = loc.get("facts") or {}
-        floor = str(facts.get("floorEn") or "").strip() or "a plain floor"
+        seam = "continuous room" if view == "back" else "same room seen from the opposite side"
         user_text = (
-            f"Place: {name_en}. Draw a seamless top-down floor texture seen straight from above.\n"
+            f"Place: {name_en}. Draw a box-set cutaway {view}-view over the layout guide (Image 1).\n"
             f"Drawing style: {style}\n"
-            f"Floor facts: {floor}\n"
+            f"CENTER BACK WALL (main background): {faces['back']}\n"
+            f"LEFT WALL: {faces['left']}\n"
+            f"RIGHT WALL: {faces['right']}\n"
+            f"FLOOR: {faces['floor']}\n"
+            f"CEILING/SKY: {faces['ceiling']}\n"
+            f"Light: {light}\n"
+            f"This is one {seam}; corners, floor line and lighting continue without a break.\n"
             f"Write ONE image prompt of {PROMPT_MIN_CHARS} to {PROMPT_MAX_CHARS} characters. "
             "Call emit_image_prompt once with promptEn."
         )
@@ -1048,33 +1162,47 @@ def _author_prompt(owner: str, pid: str, loc: dict, *, variant: str, side: str, 
         if not text:
             continue
         _charge_text(owner, pid, loc.get("id") or "", usage, str(usage.get("model") or model))
-        return _finalize_prompt(text, variant, side, loc, kind=kind)
+        return _finalize_prompt(text, variant, view, loc)
     # 둘 다 실패 — 결정적 템플릿(사실을 그대로 편 것)으로 떨어진다.
-    base = _wall_prompt(variant, side, loc) if kind == "wall" else _floor_prompt(variant, loc)
-    return _finalize_prompt(base, variant, side, loc, kind=kind)
+    return _finalize_prompt(_view_prompt(variant, view, loc), variant, view, loc)
 
 
-def _finalize_prompt(text: str, variant: str, side: str, loc: dict, *, kind: str) -> str:
-    """Astra 가 쓴 프롬프트에 보증 문구·그림체를 보장하고, 사용자 추가 요청을 붙이고, 길이를 맞춘다.
+def _finalize_prompt(text: str, variant: str, view: str, loc: dict) -> str:
+    """Astra 가 쓴 프롬프트에 보증 문구·그림체·가이드 지시를 보장하고, 사용자 추가 요청을 붙이고, 길이를 맞춘다.
 
-    - 보증 문구(Orthographic·no people·No text·Korean setting)가 빠졌으면 뒤에 덧붙인다.
-    - 그림체 문구가 없으면 붙인다(실사/웹툰 보장).
+    - 가이드 지시(_GUIDE_CLAUSE)·면별 라벨(_GUARD_CLAUSES)·인물 금지(_NO_PEOPLE)가 빠졌으면 뒤에 덧붙인다.
+    - 뷰 A 는 "continuous", 뷰 B 는 "opposite side" 문장을 보장한다.
     - PROMPT_MIN_CHARS 미만이면 사실 설명을 덧대 늘린다. PROMPT_HARD_CAP 초과면 자른다.
     """
     text = (text or "").strip()
+    if "layout guide" not in text:
+        text += " " + _GUIDE_CLAUSE
     style = _style_clause(variant, loc)
     if style.split(".")[0] not in text:
         text += " " + style
-    missing = [clause for clause in _GUARD_CLAUSES if clause not in text]
-    if "Orthographic" in missing or "no people" in missing:
-        text += " " + (_ORTHO if kind == "wall"
-                        else "Seamless flat floor seen straight from above, no perspective, no people, no furniture.")
-    if "No text" in missing or "Korean setting" in missing:
-        text += " " + _NO_TEXT
+    faces = _view_face_facts(loc, view)
+    if "CENTER BACK WALL" not in text:
+        text += (
+            f" CENTER BACK WALL (main background): {faces['back']}"
+            f" LEFT WALL: {faces['left']} RIGHT WALL: {faces['right']} FLOOR: {faces['floor']}"
+            f" CEILING/SKY: {faces['ceiling']}"
+        )
+    # 이음새/반대편 보장.
+    if view == "front":
+        if "opposite side" not in text:
+            text += " " + _OPPOSITE_CLAUSE
+    else:
+        if "continuous" not in text:
+            text += " " + _CONTINUOUS_CLAUSE
+    if "block-in" not in text:
+        text += " " + _BLOCKIN_CLAUSE
+    if "No people" not in text:
+        text += " " + _NO_PEOPLE
+    text += " " + _NO_TEXT
     text = _with_extra(text, loc)
     # 너무 짧으면 사실 설명으로 늘린다(1,500자 미만 방지).
     if len(text) < PROMPT_MIN_CHARS:
-        filler = _facts_context(side, loc) if kind == "wall" else str((loc.get("facts") or {}).get("floorEn") or "")
+        filler = _facts_context("north", loc)
         while len(text) < PROMPT_MIN_CHARS and filler:
             text += " " + filler
     if len(text) > PROMPT_HARD_CAP:
@@ -1082,44 +1210,19 @@ def _finalize_prompt(text: str, variant: str, side: str, loc: dict, *, kind: str
     return text
 
 
-def _wall_prompt(variant: str, side: str, loc: dict) -> str:
-    """결정적(Astra 없이) 벽 프롬프트. 사실(facts)이 있으면 그대로 펴서 쓰고, 없으면 설계(design)로.
-
-    Astra 작성 실패 시의 fallback. 보증 문구(Orthographic·no people·No text·Korean setting)를 꼭 넣는다.
-    """
+def _view_prompt(variant: str, view: str, loc: dict) -> str:
+    """결정적(Astra 없이) 뷰 프롬프트. 사실(facts)을 면별로 펴서 쓴다. _finalize_prompt 가 보증 문구를 채운다."""
     name_en = str(loc.get("nameEn") or "").strip() or "the room"
-    facts_text = _facts_context(side, loc)
-    if facts_text:
-        prompt = f"Flat frontal elevation of the {side} wall of {name_en}. {facts_text}"
-    else:
-        wall = ((loc.get("design") or {}).get("walls") or {}).get(side) or {}
-        desc = str(wall.get("descEn") or "").strip() or f"a plain wall of {name_en}"
-        features = str(wall.get("featuresEn") or "").strip()
-        light = str((loc.get("design") or {}).get("lightEn") or "").strip()
-        prompt = f"Flat frontal elevation of the {side} wall of {name_en}: {desc}."
-        if features:
-            prompt += f" Concrete features on this wall: {features}."
-        if light:
-            prompt += " " + light
-    prompt += " " + _ORTHO + " " + _style_clause(variant, loc) + " " + _NO_TEXT
-    return _with_extra(prompt, loc)
-
-
-def _floor_prompt(variant: str, loc: dict) -> str:
-    name_en = str(loc.get("nameEn") or "").strip() or "the room"
-    floor = (
-        str((loc.get("facts") or {}).get("floorEn") or "").strip()
-        or str((loc.get("design") or {}).get("floorEn") or "").strip()
-        or "a plain floor"
-    )
+    faces = _view_face_facts(loc, view)
+    seam = _CONTINUOUS_CLAUSE if view == "back" else _OPPOSITE_CLAUSE
     prompt = (
-        f"Top-down orthographic floor texture of {name_en}: {floor}. "
-        "Seamless flat floor seen straight from above, no perspective, no people, no furniture. "
-        + _style_clause(variant, loc)
-        + " "
-        + _NO_TEXT
+        f"{_GUIDE_CLAUSE} Box-set cutaway {view}-view of {name_en}. "
+        f"CENTER BACK WALL (main background): {faces['back']} "
+        f"LEFT WALL: {faces['left']} RIGHT WALL: {faces['right']} "
+        f"FLOOR: {faces['floor']} CEILING/SKY: {faces['ceiling']} "
+        f"{seam} {_BLOCKIN_CLAUSE} {_NO_PEOPLE}"
     )
-    return _with_extra(prompt, loc)
+    return prompt
 
 
 def _with_extra(prompt: str, loc: dict) -> str:
@@ -1129,7 +1232,7 @@ def _with_extra(prompt: str, loc: dict) -> str:
     return prompt
 
 
-# ================================================================ 2x2 시트 붙이기
+# ================================================================ 2x2 시트 붙이기(옛 데이터용)
 
 
 def montage_2x2(walls: dict[str, bytes]) -> bytes:
@@ -1162,6 +1265,53 @@ def montage_2x2(walls: dict[str, bytes]) -> bytes:
     return buffer.getvalue()
 
 
+# ================================================================ 뷰 시트(048)
+
+
+def montage_views(back_view: bytes, walls: dict[str, bytes], floor: bytes) -> bytes:
+    """컷어웨이 뷰 시트(JPEG): 위 줄 = 뷰 A 크게, 아래 줄 = 펴진 텍스처 LEFT|BACK|RIGHT|FRONT|FLOOR.
+
+    각 아래 칸 위에 영어 라벨(PIL 기본 폰트). 048 새 시트. 기존 montage_2x2 는 옛 데이터용으로 둔다.
+    """
+    sheet_w = 2560
+    top_h = 1000
+    cell_h = 440
+    label_h = 34
+    bottom_h = cell_h + label_h
+    sheet = Image.new("RGB", (sheet_w, top_h + bottom_h + 24), (24, 24, 24))
+    draw = ImageDraw.Draw(sheet)
+
+    # 위 줄: 뷰 A(back) 크게(가로 꽉 채움).
+    if back_view:
+        with Image.open(io.BytesIO(back_view)) as top:
+            ratio = min(sheet_w / top.width, top_h / top.height)
+            size = (max(1, int(top.width * ratio)), max(1, int(top.height * ratio)))
+            top = top.convert("RGB").resize(size)
+            sheet.paste(top, ((sheet_w - size[0]) // 2, (top_h - size[1]) // 2))
+
+    # 아래 줄: 펴진 텍스처 5칸(LEFT | BACK (main) | RIGHT | FRONT (opposite) | FLOOR).
+    cells = [
+        ("LEFT", walls.get("west")),
+        ("BACK (main)", walls.get("north")),
+        ("RIGHT", walls.get("east")),
+        ("FRONT (opposite)", walls.get("south")),
+        ("FLOOR", floor),
+    ]
+    cell_w = sheet_w // len(cells)
+    y0 = top_h + 24
+    for index, (label, jpeg) in enumerate(cells):
+        x0 = index * cell_w
+        draw.text((x0 + 8, y0), label, fill=(230, 230, 230))
+        if jpeg:
+            with Image.open(io.BytesIO(jpeg)) as tile:
+                tile = tile.convert("RGB").resize((cell_w - 8, cell_h))
+                sheet.paste(tile, (x0 + 4, y0 + label_h))
+
+    buffer = io.BytesIO()
+    sheet.save(buffer, format="JPEG", quality=88)
+    return buffer.getvalue()
+
+
 # ================================================================ 키 규칙
 
 
@@ -1173,6 +1323,11 @@ def _var_dir(owner: str, pid: str, lid: str, variant: str) -> str:
 
 def wall_key(owner: str, pid: str, lid: str, variant: str, side: str, version: int) -> str:
     return f"{_var_dir(owner, pid, lid, variant)}/wall_{side}_v{version}.jpg"
+
+
+def view_key(owner: str, pid: str, lid: str, variant: str, view: str, version: int) -> str:
+    """컷어웨이 뷰 원본 키(048). view 는 'back'|'front'. .../{variant}/v{version}/view-{view}.jpg."""
+    return f"{_var_dir(owner, pid, lid, variant)}/v{version}/view-{view}.jpg"
 
 
 def floor_key(owner: str, pid: str, lid: str, variant: str, version: int) -> str:
@@ -1212,7 +1367,7 @@ def start_build(owner: str, pid: str, lid: str, extra_prompt_ko: str | None = No
         loc["progress"] = {
             "step": "design",
             "done": 0,
-            "total": TOTAL_IMAGES,
+            "total": TOTAL_VIEWS,
             "startedAt": now_iso(),
             "updatedAt": now_iso(),
         }
@@ -1245,8 +1400,10 @@ def start_build_all(owner: str, pid: str) -> list[str]:
 
 
 def run_build(owner: str, pid: str, lid: str, task_id: str) -> None:
-    """공간 시트 만들기(백그라운드 스레드). 설계 → 그림체별 벽 4장 + 바닥 1장 → 2x2 시트.
+    """공간 시트 만들기(백그라운드 스레드, 048 컷어웨이 뷰).
 
+    설계 → 사실 → 프롬프트 → 뷰 4장(그림체별 back·front) → verify(꼭짓점) → cut(잘라 펴기) → sheet → done.
+    뷰에서 각 면을 원근 보정해 기존 wall_key/floor_key 로 저장한다(previz 수정 없이 동작).
     task_id 가 현재 task.id 와 다르면(취소·재실행) 결과를 버린다.
     """
     from . import plan as plan_mod  # noqa: PLC0415
@@ -1268,7 +1425,7 @@ def run_build(owner: str, pid: str, lid: str, task_id: str) -> None:
         # a. 설계(Claude → Astra). [다시 만들기] 는 설계를 새로 한다 — 예전 설계(벽 4면 "흰 벽 가정")를
         #    재사용하면 창문 없는 방이 그대로 남기 때문. 다만 사용자가 설계를 직접 고친 적이 있으면
         #    (designEditedAt) 그 수정본을 유지한다. 설계가 아직 없으면(walls 없음) 당연히 새로 받는다.
-        _set_progress(owner, pid, lid, task_id, step="design", done=0, total=TOTAL_IMAGES)
+        _set_progress(owner, pid, lid, task_id, step="design", done=0, total=TOTAL_VIEWS)
         design = loc.get("design") or {}
         user_edited = bool(design.get("designEditedAt"))
         if not design.get("walls") or not user_edited:
@@ -1278,7 +1435,7 @@ def run_build(owner: str, pid: str, lid: str, task_id: str) -> None:
 
         # a2. 사실 추출(Claude → Astra). 벽별 물건·창문·문·재질·빛·시대·나라를 읽어 loc["facts"] 에 둔다.
         #     사용자가 사실을 직접 고친 적이 있으면(factsEditedAt) 그 수정본을 유지한다.
-        _set_progress(owner, pid, lid, task_id, step="facts", done=0, total=TOTAL_IMAGES)
+        _set_progress(owner, pid, lid, task_id, step="facts", done=0, total=TOTAL_VIEWS)
         facts = loc.get("facts") or {}
         facts_user_edited = bool(facts.get("factsEditedAt"))
         if not _facts_has_wall_detail(facts) or not facts_user_edited:
@@ -1287,26 +1444,32 @@ def run_build(owner: str, pid: str, lid: str, task_id: str) -> None:
                 _store_facts(owner, pid, lid, facts)
         loc["facts"] = facts
 
-        # a3. 프롬프트 작성(Astra → Claude). 사실 + 그림체로 벽4·바닥1 × 그림체2 Seedream 프롬프트를 쓴다.
-        _set_progress(owner, pid, lid, task_id, step="prompts", done=0, total=TOTAL_IMAGES)
+        # a3. 가이드·프롬프트. 방 치수로 컷어웨이 뷰 가이드(PIL)를 그리고, 뷰별 Seedream 프롬프트(Astra→Claude)를 쓴다.
+        _set_progress(owner, pid, lid, task_id, step="prompts", done=0, total=TOTAL_VIEWS)
+        geometries = _build_geometries(loc)
+        guides = _build_guides(loc, geometries)
         prompts = _author_all_prompts(owner, pid, loc)
         loc["prompts"] = prompts
 
-        # b~d. 그림체별 벽 4장 + 바닥 1장을 병렬로 그리고(최대 IMAGE_WORKERS), 2x2 시트.
-        #    설계가 끝나면 그림 단계(images)로 넘어간다. 그림 한 장이 끝날 때마다 done +1(병렬 안전).
-        _set_progress(owner, pid, lid, task_id, step="images", done=0, total=TOTAL_IMAGES)
+        # b. 뷰 4장(그림체별 back·front)을 그린다. real A → (real B·webtoon A 병렬) → webtoon B.
+        #    뷰 한 장이 끝날 때마다 done +1. 참고 첫 장은 가이드(real)·real 뷰(webtoon).
+        _set_progress(owner, pid, lid, task_id, step="images", done=0, total=TOTAL_VIEWS)
         refs = _design_panels(owner, pid, loc)[:MAX_REF_PANELS]
-        images = _generate_images(owner, pid, lid, version, loc, refs, task_id)
+        views = _generate_views(owner, pid, lid, version, loc, guides, refs, task_id)
 
-        # b2. 비교·보정(Claude). 벽 그림마다 (패널·생성 그림·사실)로 일치 여부를 보고, 불일치면 그 벽만
-        #     1회 다시 그린다. total 은 보정 장수만큼 늘린다. checks 는 그림체별로 저장한다.
-        _set_progress(owner, pid, lid, task_id, step="verify", done=TOTAL_IMAGES, total=TOTAL_IMAGES)
-        checks = _verify_and_fix(owner, pid, lid, version, loc, refs, images, task_id)
+        # b2. verify(Claude). 뷰마다 패널 일치·가이드 구도(꼭짓점)를 보고, 꼭짓점 차이가 크면 Claude 꼭짓점을
+        #     쓴다. (a)(c) 불일치면 그 뷰만 1회 다시 그린다. 반환: {variant:{view:{...quads,...}}}.
+        _set_progress(owner, pid, lid, task_id, step="verify", done=TOTAL_VIEWS, total=TOTAL_VIEWS)
+        checks = _verify_views(owner, pid, lid, version, loc, guides, refs, views, geometries, task_id)
 
-        # c. 4면 시트 합치기.
+        # c. cut — 뷰에서 각 면을 원근 보정해 벽·바닥 텍스처(기존 wall_key/floor_key)로 저장한다.
+        _set_step(owner, pid, lid, task_id, step="cut")
+        cut = _cut_textures(owner, pid, lid, version, views, geometries, checks)
+
+        # d. 시트 합치기(뷰 A 크게 + 펴진 텍스처 줄).
         _set_step(owner, pid, lid, task_id, step="sheet")
         for variant in VARIANTS:
-            _assemble_variant(owner, pid, lid, variant, version, images, checks, task_id)
+            _assemble_variant(owner, pid, lid, variant, version, views, cut, checks, task_id)
 
         _set_step(owner, pid, lid, task_id, step="done")
         _commit(owner, pid, lid, task_id, status="ready")
@@ -1318,258 +1481,382 @@ def run_build(owner: str, pid: str, lid: str, task_id: str) -> None:
         _clear_running(owner, pid, lid)
 
 
-def _author_all_prompts(owner: str, pid: str, loc: dict) -> dict[tuple[str, str], str]:
-    """벽4·바닥1 × 그림체2 의 Seedream 프롬프트를 Astra(실패 시 Claude)로 쓴다.
+def _build_geometries(loc: dict) -> dict[str, dict]:
+    """뷰별 box_view_geometry 를 계산한다(back·front). 실외(enclosed False)면 천장을 하늘로 표시.
 
-    반환: {(variant, side_or_'floor'): promptEn}. 설계자: 이미지 모델은 지능이 없으므로 아주 구체적으로.
+    반환: {view: geometry}. geometry 는 location_views.box_view_geometry 결과(면별 꼭짓점 + _size 등).
+    """
+    design = loc.get("design") or {}
+    width = _as_float(design.get("widthM"), 4.0)
+    depth = _as_float(design.get("depthM"), 4.0)
+    height = _as_float(design.get("heightM"), 2.7)
+    enclosed = _as_bool(design.get("enclosed"))
+    size = _size_wh(VIEW_SIZE)
+    out: dict[str, dict] = {}
+    for view in VIEWS:
+        geom = location_views.box_view_geometry(width, depth, height, view=view, size=size)
+        geom["_sky"] = not enclosed  # 실외면 천장 사다리꼴을 하늘색으로.
+        out[view] = geom
+    return out
+
+
+def _build_guides(loc: dict, geometries: dict[str, dict]) -> dict[str, bytes]:
+    """뷰별 가이드 이미지(PIL)를 그린다. 사실(facts)의 창문·문·계단을 화면 면 위에 투영해 표시한다."""
+    size = _size_wh(GUIDE_SIZE)
+    out: dict[str, bytes] = {}
+    for view in VIEWS:
+        openings = _openings_for_view(loc, view)
+        light = _light_for_view(loc, view)
+        out[view] = location_views.draw_guide(geometries[view], openings, light, size=size)
+    return out
+
+
+def _wall_to_face(view: str, wall: str) -> str:
+    """사실의 벽(north/east/south/west)이 그 뷰의 어느 화면 면(center/left/right)에 그려지는지.
+
+    뷰 back: north=center(back), west=left, east=right. 뷰 front: south=center(back), east=left, west=right.
+    바닥·천장은 floor/ceiling 면으로. 못 맞으면 "".
+    """
+    wall = str(wall or "").strip().lower()
+    if view == "back":
+        return {"north": "back", "west": "left", "east": "right"}.get(wall, "")
+    return {"south": "back", "east": "left", "west": "right"}.get(wall, "")
+
+
+def _openings_for_view(loc: dict, view: str) -> dict:
+    """사실의 창문·문을 그 뷰의 화면 면(back/left/right) + 위치로 바꾼 가이드 openings."""
+    facts = loc.get("facts") or {}
+    windows: list[dict] = []
+    doors: list[dict] = []
+    for win in facts.get("windows") or []:
+        face = _wall_to_face(view, win.get("wall"))
+        if face:
+            windows.append({"wall": face, "position": win.get("position")})
+    for door in facts.get("doors") or []:
+        face = _wall_to_face(view, door.get("wall"))
+        if face:
+            doors.append({"wall": face, "position": door.get("position")})
+    # 계단: 사실의 물건 kind 에 'stair' 가 있으면 그 벽 면에 표시.
+    stairs: list[dict] = []
+    for side in SIDES:
+        wall = (facts.get("walls") or {}).get(side) or {}
+        for obj in wall.get("objects") or []:
+            if "stair" in str(obj.get("kind") or "").lower():
+                face = _wall_to_face(view, side)
+                if face:
+                    stairs.append({"wall": face})
+    return {"windows": windows, "doors": doors, "stairs": stairs}
+
+
+def _light_for_view(loc: dict, view: str) -> dict:
+    """주 광원이 어느 화면 면에서 오는지(가이드 명암용). 창이 있는 벽을 광원으로 본다."""
+    facts = loc.get("facts") or {}
+    for win in facts.get("windows") or []:
+        face = _wall_to_face(view, win.get("wall"))
+        if face:
+            return {"wall": face}
+    # 창이 없으면 center(뒤 벽)를 약하게 밝힌다.
+    return {"wall": "center"}
+
+
+def _author_all_prompts(owner: str, pid: str, loc: dict) -> dict[tuple[str, str], str]:
+    """뷰2 × 그림체2 의 Seedream 프롬프트를 Astra(실패 시 Claude)로 쓴다(048).
+
+    반환: {(variant, view): promptEn}. view 는 'back'|'front'. 설계자: 이미지 모델은 지능이 없으므로
+    면별 위치를 화면 기준으로 아주 구체적으로 쓴다(CENTER BACK WALL/LEFT WALL/RIGHT WALL/FLOOR).
     """
     prompts: dict[tuple[str, str], str] = {}
     for variant in VARIANTS:
-        for side in SIDES:
-            prompts[(variant, side)] = _author_prompt(owner, pid, loc, variant=variant, side=side, kind="wall")
-        prompts[(variant, "floor")] = _author_prompt(owner, pid, loc, variant=variant, side="", kind="floor")
+        for view in VIEWS:
+            prompts[(variant, view)] = _author_prompt(owner, pid, loc, variant=variant, view=view)
     return prompts
 
 
-def _prompt_for(loc: dict, variant: str, kind: str, side: str) -> str:
-    """미리 작성한 프롬프트(loc['prompts'])가 있으면 그것, 없으면 결정적 템플릿."""
-    slot = (variant, side if kind == "wall" else "floor")
-    pre = (loc.get("prompts") or {}).get(slot)
+def _prompt_for(loc: dict, variant: str, view: str) -> str:
+    """미리 작성한 뷰 프롬프트(loc['prompts'])가 있으면 그것, 없으면 결정적 템플릿."""
+    pre = (loc.get("prompts") or {}).get((variant, view))
     if pre:
         return pre
-    return _wall_prompt(variant, side, loc) if kind == "wall" else _floor_prompt(variant, loc)
+    return _finalize_prompt(_view_prompt(variant, view, loc), variant, view, loc)
 
 
-def _image_jobs(loc: dict) -> list[dict]:
-    """그릴 그림 목록(벽4+바닥1 × 그림체 2 = 10). 각 job 은 variant·kind·side·prompt·size.
-
-    프롬프트는 미리 Astra 가 쓴 loc['prompts'] 를 쓴다(없으면 결정적 템플릿).
-    """
-    jobs: list[dict] = []
-    for variant in VARIANTS:
-        for side in SIDES:
-            jobs.append(
-                {
-                    "variant": variant,
-                    "kind": "wall",
-                    "side": side,
-                    "prompt": _prompt_for(loc, variant, "wall", side),
-                    "size": WALL_SIZE,
-                }
-            )
-        jobs.append(
-            {
-                "variant": variant,
-                "kind": "floor",
-                "side": "",
-                "prompt": _prompt_for(loc, variant, "floor", ""),
-                "size": FLOOR_SIZE,
-            }
-        )
-    return jobs
-
-
-def _generate_images(
-    owner: str, pid: str, lid: str, version: int, loc: dict, refs: list[bytes], task_id: str
+def _generate_views(
+    owner: str,
+    pid: str,
+    lid: str,
+    version: int,
+    loc: dict,
+    guides: dict[str, bytes],
+    refs: list[bytes],
+    task_id: str,
 ) -> dict[tuple[str, str], tuple[bytes, str]]:
-    """벽4+바닥1 × 그림체 2 = 10장을 ThreadPoolExecutor 로 동시에 그린다(최대 IMAGE_WORKERS).
+    """컷어웨이 뷰 4장(그림체별 back·front)을 그린다(설계자 048).
 
-    실패한 장만 1회 재시도한다. 그래도 실패하면 예외를 올려(전체 실패) run_build 가 failed 로 적는다.
-    반환: {(variant, side_or_'floor'): (jpeg_bytes, key)}. 저장(put_bytes)·원장은 여기서 한다(그림당 1회).
-    그림 한 장이 끝날 때마다 progress.done 을 +1 한다(병렬이어도 완료마다, 경합은 mutate 재시도).
+    순서: real 뷰 A(back) → real 뷰 B(front, 뷰 A 참고)·webtoon 뷰 A(real A 참고) 병렬 → webtoon 뷰 B
+    (real B + webtoon A 참고). Seedream 참고 첫 장은 가이드(real)·real 뷰(webtoon), 이어서 패널(≤3).
+    반환: {(variant, view): (jpeg, key)}. 저장·원장은 여기서 그림당 1회. 완료마다 progress.done +1.
     """
-    jobs = _image_jobs(loc)
     results: dict[tuple[str, str], tuple[bytes, str]] = {}
+    panels = list(refs)[:3]
 
-    def _slot(job: dict) -> tuple[str, str]:
-        return (job["variant"], job["side"] if job["kind"] == "wall" else "floor")
-
-    def _one(job: dict) -> None:
-        variant = job["variant"]
-        kind = job["kind"]
-        side = job["side"]
-        image = _seedream(job["prompt"], refs, size=job["size"])
-        if kind == "wall":
-            key = wall_key(owner, pid, lid, variant, side, version)
-            charge_kind = f"{variant}-wall-{side}"
-        else:
-            key = floor_key(owner, pid, lid, variant, version)
-            charge_kind = f"{variant}-floor"
+    def _draw(variant: str, view: str, references: list[bytes]) -> None:
+        prompt = _prompt_for(loc, variant, view)
+        image = _seedream(prompt, references, size=VIEW_SIZE)
+        key = view_key(owner, pid, lid, variant, view, version)
         STORE.put_bytes(key, image, "image/jpeg")
-        _charge_seedream(owner, pid, lid, charge_kind)
-        results[_slot(job)] = (image, key)
-        # 이 장이 끝났다 — 진행 막대 +1(병렬 완료마다, 경합 재시도).
+        _charge_seedream(owner, pid, lid, f"{variant}-view-{view}")
+        results[(variant, view)] = (image, key)
         _bump_progress(owner, pid, lid, task_id)
 
-    pending = list(jobs)
+    # 1) real 뷰 A(back): 참고 첫 장 = 가이드 back, 이어서 패널.
+    _draw("real", "back", [guides["back"], *panels])
+
+    # 2) real 뷰 B(front)·webtoon 뷰 A(back) 병렬.
+    #    real B 참고 = [가이드 front, real A, 패널]. webtoon A 참고 = [real A, 패널].
+    real_a = results[("real", "back")][0]
+    parallel_jobs = [
+        ("real", "front", [guides["front"], real_a, *panels[:2]]),
+        ("webtoon", "back", [real_a, *panels[:2]]),
+    ]
     last_error: Exception | None = None
-    for attempt in range(IMAGE_RETRY + 1):
-        if not pending:
-            break
-        failed: list[dict] = []
-        workers = max(1, min(IMAGE_WORKERS, len(pending)))
-        with ThreadPoolExecutor(max_workers=workers, thread_name_prefix=f"vnew-loc-img-{lid}") as pool:
-            future_to_job = {pool.submit(_one, job): job for job in pending}
-            for future in future_to_job:
-                job = future_to_job[future]
-                try:
-                    future.result()
-                except Exception as exc:  # noqa: BLE001
-                    last_error = exc
-                    failed.append(job)
-        if failed:
-            log.warning(
-                "vnew.location.image.retry pid=%s lid=%s attempt=%s failed=%s",
-                pid,
-                lid,
-                attempt,
-                [(j["variant"], j["kind"], j["side"]) for j in failed],
-            )
-        pending = failed
-    if pending:
-        raise last_error or VpocError("vnew.location.seedream", "SeedreamFailed", "공간 그림 생성에 실패했습니다.", 502)
+    with ThreadPoolExecutor(max_workers=VIEW_WORKERS, thread_name_prefix=f"vnew-loc-view-{lid}") as pool:
+        futures = {pool.submit(_draw, v, w, r): (v, w) for (v, w, r) in parallel_jobs}
+        for future in futures:
+            try:
+                future.result()
+            except Exception as exc:  # noqa: BLE001
+                last_error = exc
+    if last_error is not None:
+        raise last_error
+
+    # 3) webtoon 뷰 B(front): 참고 = [real B, webtoon A, 패널].
+    real_b = results[("real", "front")][0]
+    webtoon_a = results[("webtoon", "back")][0]
+    _draw("webtoon", "front", [real_b, webtoon_a, *panels[:1]])
     return results
 
 
-# ================================================================ 비교·보정(Claude)
+# ================================================================ verify(Claude, 꼭짓점)
 #
-# 설계자 2026-10-21(046): 벽 그림마다 (그 벽이 보이는 패널·생성 그림·사실 목록)을 Claude 에 주고
-# {matches, fixesEn} 를 받는다. matches=false 면 fixesEn 을 프롬프트 끝에 붙여 그 그림만 1회 다시
-# 그린다. 결과는 그림체별 checks[side]={matches, fixedEn, fixesEn} 로 저장한다(화면 배지).
+# 설계자 2026-10-21(048): 뷰마다 (패널·가이드·생성 뷰)를 Claude 에 주고 {matchesPlace, matchesSides,
+# backQuad, frontQuad, fixesEn} 를 받는다. backQuad/frontQuad 는 생성 그림에서 다시 찾은 뒤 벽·앞 열린
+# 면 4 꼭짓점의 정규화 좌표(0..1). 가이드 꼭짓점과 4% 넘게 다르면 Claude 꼭짓점으로 잘라 편다(이상하면
+# 가이드 좌표). matchesPlace/matchesSides 불일치면 그 뷰만 1회 다시 그린다(fixesEn 덧붙임).
 
 _VERIFY_SYSTEM = (
-    "You compare a generated flat wall elevation against reference webtoon panels and a list of facts. "
-    "Decide whether the generated image faithfully shows the SAME wall: same objects, counts, colours, "
-    "materials and positions. Answer ONLY by calling emit_verify exactly once. Set matches=true only if "
-    "the image already matches the facts and panels well. If it does not match, set matches=false and give "
-    "fixesEn: a short list of concrete English corrections an image model can follow (e.g. 'add two tall "
-    "windows on the left', 'change the wall colour to pale green', 'remove the extra door')."
+    "You check a generated box-set cutaway view of a room against a layout guide and reference webtoon "
+    "panels. Answer ONLY by calling emit_verify exactly once. "
+    "matchesPlace = true if the generated view shows the same place as the panels (structure, main "
+    "objects, light). backQuad = the four corner points of the CENTER BACK WALL rectangle in the "
+    "generated image, frontQuad = the four corners of the front open face (the whole room opening), each "
+    "as normalized [x,y] in 0..1, ordered top-left, top-right, bottom-right, bottom-left. "
+    "matchesSides = true only for the front view, when its side walls show the same material and objects "
+    "as the side walls of the back view (pass true for the back view). "
+    "If matchesPlace or matchesSides is false, give fixesEn: a short list of concrete English corrections "
+    "an image model can follow."
 )
 
 _VERIFY_TOOL = {
     "name": "emit_verify",
-    "description": "Report whether the generated wall image matches the facts, with concrete fixes if not.",
+    "description": "Report place/side match and the back-wall and front-face corner points of the view.",
     "inputSchema": {
         "json": {
             "type": "object",
             "properties": {
-                "matches": {"type": "boolean"},
+                "matchesPlace": {"type": "boolean"},
+                "matchesSides": {"type": "boolean"},
+                "backQuad": {"type": "array", "items": {"type": "array", "items": {"type": "number"}}},
+                "frontQuad": {"type": "array", "items": {"type": "array", "items": {"type": "number"}}},
                 "fixesEn": {"type": "array", "items": {"type": "string"}},
             },
-            "required": ["matches"],
+            "required": ["matchesPlace"],
         }
     },
 }
 
 
 def _verify(blocks: list[dict], *, model: str) -> tuple[dict, dict]:
-    """llm._converse 로 일치 여부 {matches, fixesEn} 를 받는다. 검사가 바꿔 끼운다."""
+    """llm._converse 로 뷰 검증 {matchesPlace, matchesSides, backQuad, frontQuad, fixesEn} 를 받는다.
+
+    검사가 바꿔 끼운다.
+    """
     return vpoc_llm._converse(  # noqa: SLF001
         system_text=_VERIFY_SYSTEM,
         blocks=blocks,
         tool=_VERIFY_TOOL,
-        max_tokens=600,
+        max_tokens=700,
         where="vnew.location.verify",
         model=VERIFY_MODEL,
     )
 
 
-def _verify_and_fix(
+def _verify_views(
     owner: str,
     pid: str,
     lid: str,
     version: int,
     loc: dict,
+    guides: dict[str, bytes],
     refs: list[bytes],
-    images: dict[tuple[str, str], tuple[bytes, str]],
+    views: dict[tuple[str, str], tuple[bytes, str]],
+    geometries: dict[str, dict],
     task_id: str,
 ) -> dict[str, dict[str, dict]]:
-    """벽 그림마다 사실과 비교하고, 불일치면 그 벽만 1회 다시 그린다(그림당 보정 1회).
+    """뷰마다 패널 일치·가이드 구도(꼭짓점)를 보고, 불일치면 그 뷰만 1회 다시 그린다.
 
-    - 비교는 Claude(VERIFY_MODEL). 사실 목록 + 그 벽 패널 + 생성 그림을 준다.
-    - 불일치(matches=false)면 fixesEn 을 프롬프트 끝에 붙여 그 그림만 1회 다시 그리고(FIX_RETRY),
-      새 그림을 같은 키에 덮어쓴다(원장 +1, progress.total +1·done +1).
-    - 반환: {variant: {side: {matches, fixedEn, fixesEn}}}. 바닥은 비교하지 않는다(벽만, 설계자).
+    - 비교는 Claude(VERIFY_MODEL). 가이드 + 패널 + 생성 뷰를 준다.
+    - backQuad/frontQuad 가 가이드와 4% 넘게 다르면 Claude 꼭짓점을 쓴다(볼록·화면 안일 때). 이상하면 가이드.
+    - matchesPlace/matchesSides 불일치면 fixesEn 을 붙여 1회 다시 그리고 같은 키에 덮어쓴다(total·done +1).
+    - 반환: {variant: {view: {matchesPlace, matchesSides, fixedEn, fixesEn, backQuad, frontQuad, method}}}.
+      backQuad/frontQuad 는 cut 이 쓸 '최종' 꼭짓점(정규화). method 는 'guide' | 'claude'.
     """
     checks: dict[str, dict[str, dict]] = {v: {} for v in VARIANTS}
     for variant in VARIANTS:
-        for side in SIDES:
-            image, key = images[(variant, side)]
+        for view in VIEWS:
+            image, key = views[(variant, view)]
+            geom = geometries[view]
+            size = geom.get("_size") or _size_wh(VIEW_SIZE)
+            guide_back = _normalize_quad(geom.get("back"), size)
+            guide_front = _normalize_quad(geom.get("_front"), size)
             try:
-                matches, fixes = _verify_wall(owner, pid, lid, loc, variant, side, image, refs)
+                payload, usage = _verify_view(owner, pid, lid, loc, variant, view, image, guides[view], refs)
             except Exception as exc:  # noqa: BLE001
-                log.warning("vnew.location.verify.failed pid=%s lid=%s side=%s err=%s", pid, lid, side, str(exc)[:200])
-                checks[variant][side] = {"matches": True, "fixedEn": False, "fixesEn": []}
+                log.warning("vnew.location.verify.failed pid=%s lid=%s view=%s err=%s", pid, lid, view, str(exc)[:200])
+                checks[variant][view] = {
+                    "matchesPlace": True, "matchesSides": True, "fixedEn": False, "fixesEn": [],
+                    "backQuad": guide_back, "frontQuad": guide_front, "method": "guide",
+                }
                 continue
-            if matches:
-                checks[variant][side] = {"matches": True, "fixedEn": False, "fixesEn": []}
-                continue
-            # 불일치 — 그 벽만 1회 다시 그린다(보정 장수만큼 total 을 늘린다).
-            fixed_image = _redraw_wall(owner, pid, lid, version, loc, variant, side, key, refs, fixes, task_id)
-            if fixed_image is not None:
-                images[(variant, side)] = (fixed_image, key)
-            checks[variant][side] = {"matches": False, "fixedEn": fixed_image is not None, "fixesEn": fixes}
+            matches_place = _as_bool(payload.get("matchesPlace"))
+            matches_sides = _as_bool(payload.get("matchesSides")) if view == "front" else True
+            raw_fixes = payload.get("fixesEn")
+            fixes = [str(f).strip() for f in raw_fixes if str(f).strip()] if isinstance(raw_fixes, list) else []
+
+            # 꼭짓점: Claude 가 준 값이 가이드와 4% 넘게 다르고 볼록·화면 안이면 Claude 좌표, 아니면 가이드.
+            back_quad, back_method = _pick_quad(payload.get("backQuad"), guide_back, size)
+            front_quad, front_method = _pick_quad(payload.get("frontQuad"), guide_front, size)
+            method = "claude" if (back_method == "claude" or front_method == "claude") else "guide"
+
+            fixed = False
+            if not matches_place or not matches_sides:
+                fixed_image = _redraw_view(owner, pid, lid, version, loc, variant, view, key, guides[view], refs, fixes, task_id)
+                if fixed_image is not None:
+                    views[(variant, view)] = (fixed_image, key)
+                    fixed = True
+            checks[variant][view] = {
+                "matchesPlace": matches_place,
+                "matchesSides": matches_sides,
+                "fixedEn": fixed,
+                "fixesEn": fixes,
+                "backQuad": back_quad,
+                "frontQuad": front_quad,
+                "method": method,
+            }
     return checks
 
 
-def _verify_wall(
-    owner: str, pid: str, lid: str, loc: dict, variant: str, side: str, image: bytes, refs: list[bytes]
-) -> tuple[bool, list[str]]:
-    """그 벽 한 장을 사실·패널과 비교한다. (matches, fixesEn)."""
-    facts_text = _facts_context(side, loc) or f"the {side} wall"
+def _verify_view(
+    owner: str, pid: str, lid: str, loc: dict, variant: str, view: str, image: bytes, guide: bytes, refs: list[bytes]
+) -> tuple[dict, dict]:
+    """뷰 한 장을 가이드·패널과 비교한다. (payload, usage). payload 는 _VERIFY_TOOL 모양."""
+    side_text = (
+        "This is the back view (its side walls are left=west, right=east)."
+        if view == "back"
+        else "This is the front view (same room from the opposite side; left=east, right=west)."
+    )
     blocks: list[dict] = [
         {
             "text": (
-                f"Facts for the {side} wall that the generated image MUST show:\n{facts_text}\n\n"
-                "Below are the reference webtoon panels, then the generated flat elevation. Does the "
-                "generated image match the facts and panels? Call emit_verify."
+                f"Image 1 is the layout guide for the {view} cutaway view. {side_text} "
+                "Then the reference webtoon panels, then the generated view. Does the generated view show "
+                "the same place, and where are the back-wall and front-face corners? Call emit_verify."
             )
-        }
+        },
+        {"image": {"format": "jpeg", "source": {"bytes": guide}}},
     ]
     for jpeg in refs:
         blocks.append({"image": {"format": "jpeg", "source": {"bytes": jpeg}}})
     blocks.append({"image": {"format": "jpeg", "source": {"bytes": image}}})
     payload, usage = _verify(blocks, model=VERIFY_MODEL)
     _charge_text(owner, pid, lid, usage, str(usage.get("model") or VERIFY_MODEL))
-    matches = _as_bool((payload or {}).get("matches"))
-    raw_fixes = (payload or {}).get("fixesEn")
-    fixes = [str(f).strip() for f in raw_fixes if str(f).strip()] if isinstance(raw_fixes, list) else []
-    return matches, fixes
+    return payload or {}, usage
 
 
-def _redraw_wall(
+def _normalize_quad(quad, size) -> list[list[float]]:
+    """픽셀 꼭짓점 [(x,y)×4] 를 정규화([x,y] 0..1)로. 없으면 빈 리스트."""
+    if not quad or len(quad) != 4:
+        return []
+    w, h = float(size[0]), float(size[1])
+    return [[float(x) / w, float(y) / h] for (x, y) in quad]
+
+
+def _quad_delta(a, b) -> float:
+    """두 정규화 사각형의 꼭짓점 최대 차이(가로·세로 중 큰 쪽). 비교 불가면 큰 값."""
+    if not a or not b or len(a) != 4 or len(b) != 4:
+        return 1.0
+    worst = 0.0
+    for (ax, ay), (bx, by) in zip(a, b):
+        worst = max(worst, abs(ax - bx), abs(ay - by))
+    return worst
+
+
+def _pick_quad(claude_quad, guide_quad, size) -> tuple[list[list[float]], str]:
+    """Claude 꼭짓점이 가이드와 4% 넘게 다르고 볼록·화면 안이면 그걸(정규화), 아니면 가이드.
+
+    반환: (정규화 quad, method). method 는 'claude' 또는 'guide'.
+    """
+    if not isinstance(claude_quad, list) or len(claude_quad) != 4:
+        return guide_quad, "guide"
+    norm = []
+    for p in claude_quad:
+        if not isinstance(p, (list, tuple)) or len(p) < 2:
+            return guide_quad, "guide"
+        norm.append([float(p[0]), float(p[1])])
+    # 4% 이내면 가이드 유지(굳이 바꾸지 않는다).
+    if _quad_delta(norm, guide_quad) <= VERTEX_TOLERANCE:
+        return guide_quad, "guide"
+    # 값이 이상하면(볼록 아님·화면 밖) 가이드.
+    if not location_views.is_sane_quad(norm, size):
+        return guide_quad, "guide"
+    return norm, "claude"
+
+
+def _redraw_view(
     owner: str,
     pid: str,
     lid: str,
     version: int,
     loc: dict,
     variant: str,
-    side: str,
+    view: str,
     key: str,
+    guide: bytes,
     refs: list[bytes],
     fixes: list[str],
     task_id: str,
 ) -> bytes | None:
-    """불일치 벽을 fixesEn 을 붙여 1회 다시 그린다. 같은 키에 덮어쓰고 원장·진행을 +1 한다.
+    """불일치 뷰를 fixesEn 을 붙여 1회 다시 그린다. 같은 키에 덮어쓰고 원장·진행을 +1 한다.
 
-    실패하면(None) 원래 그림을 그대로 둔다(보정 없이 통과).
+    실패하면(None) 원래 그림을 그대로 둔다.
     """
-    base_prompt = _prompt_for(loc, variant, "wall", side)
+    base_prompt = _prompt_for(loc, variant, view)
     fix_text = " Corrections: " + " ".join(fixes) if fixes else ""
     prompt = (base_prompt + fix_text)[:PROMPT_HARD_CAP]
+    panels = list(refs)[:2]
+    references = [guide, *panels] if variant == "real" else [*panels]
     last_error: Exception | None = None
     for _ in range(FIX_RETRY):
         try:
-            image = _seedream(prompt, refs, size=WALL_SIZE)
+            image = _seedream(prompt, references, size=VIEW_SIZE)
         except Exception as exc:  # noqa: BLE001
             last_error = exc
             continue
         STORE.put_bytes(key, image, "image/jpeg")
-        _charge_seedream(owner, pid, lid, f"{variant}-wall-{side}-fix")
+        _charge_seedream(owner, pid, lid, f"{variant}-view-{view}-fix")
         _bump_total(owner, pid, lid, task_id)  # 보정 장수만큼 total 을 늘리고 done 도 +1.
         return image
     if last_error is not None:
-        log.warning("vnew.location.redraw.failed pid=%s lid=%s side=%s err=%s", pid, lid, side, str(last_error)[:200])
+        log.warning("vnew.location.redraw.failed pid=%s lid=%s view=%s err=%s", pid, lid, view, str(last_error)[:200])
     return None
 
 
@@ -1585,7 +1872,7 @@ def _bump_total(owner: str, pid: str, lid: str, task_id: str) -> None:
             return
         prior = loc.get("progress") or _empty_progress()
         started = prior.get("startedAt") or now_iso()
-        total = int(prior.get("total") or TOTAL_IMAGES) + 1
+        total = int(prior.get("total") or TOTAL_VIEWS) + 1
         done = min(total, int(prior.get("done") or 0) + 1)
         loc["progress"] = {
             "step": prior.get("step") or "verify",
@@ -1601,26 +1888,117 @@ def _bump_total(owner: str, pid: str, lid: str, task_id: str) -> None:
         log.warning("vnew.location.progress.bump_total_failed pid=%s lid=%s err=%s", pid, lid, str(exc)[:150])
 
 
+def _faces_from_corners(back_quad_px, front_quad_px, view: str) -> dict[str, list]:
+    """뒤 벽 4꼭짓점(TL,TR,BR,BL)과 앞 열린 면 4꼭짓점으로 면별 사다리꼴(픽셀)을 다시 만든다.
+
+    box_view_geometry 와 같은 규칙으로 left/right/floor/back 사다리꼴을 조립한다(모서리 공유). cut 이
+    가이드 좌표 또는 Claude 가 교정한 좌표로 각 면을 펼 때 쓴다. 각 면은 (좌상·우상·우하·좌하).
+    """
+    btl, btr, bbr, bbl = back_quad_px
+    ftl, ftr, fbr, fbl = front_quad_px
+    return {
+        "back": [btl, btr, bbr, bbl],
+        # west(왼쪽): 바깥(앞)쪽 가장자리가 왼쪽, 뒤 벽 모서리가 오른쪽.
+        "left": [ftl, btl, bbl, fbl],
+        # east(오른쪽): 뒤 벽 모서리가 왼쪽, 바깥쪽 가장자리가 오른쪽.
+        "right": [btr, ftr, fbr, bbr],
+        # floor(바닥): 좌상=뒤벽 왼쪽 아래, 우상=뒤벽 오른쪽 아래, 우하=앞 오른쪽 아래, 좌하=앞 왼쪽 아래.
+        "floor": [bbl, bbr, fbr, fbl],
+    }
+
+
+def _denorm_quad(norm_quad, size) -> list:
+    """정규화 꼭짓점([x,y] 0..1)을 픽셀 (x,y) 로. 비면 None."""
+    if not norm_quad or len(norm_quad) != 4:
+        return None
+    w, h = float(size[0]), float(size[1])
+    return [(float(x) * w, float(y) * h) for (x, y) in norm_quad]
+
+
+def _cut_textures(
+    owner: str,
+    pid: str,
+    lid: str,
+    version: int,
+    views: dict[tuple[str, str], tuple[bytes, str]],
+    geometries: dict[str, dict],
+    checks: dict[str, dict[str, dict]],
+) -> dict[str, dict]:
+    """뷰에서 각 면을 원근 보정(location_views.rectify)해 벽·바닥 텍스처(기존 키)로 저장한다(048).
+
+    뷰 A(back) → north(back)·west(left)·east(right)·floor. 뷰 B(front) → south(back).
+    꼭짓점은 verify 가 고른 최종 좌표(가이드 또는 Claude). 반환: {variant: {wallKeys, floorKey, wallsBytes, floorBytes}}.
+    저장 키는 기존 wall_key/floor_key → previz 가 수정 없이 읽는다.
+    """
+    out: dict[str, dict] = {}
+    wall_w, wall_h = _size_wh(WALL_SIZE)
+    floor_w, floor_h = _size_wh(FLOOR_SIZE)
+    for variant in VARIANTS:
+        wall_keys: dict[str, str] = {}
+        walls_bytes: dict[str, bytes] = {}
+        floor_bytes = b""
+        floor_k = ""
+        # 뷰 A(back): north·west·east·floor.
+        back_img, _ = views[(variant, "back")]
+        geom_a = geometries["back"]
+        size_a = geom_a.get("_size") or (wall_w, wall_h)
+        chk_a = (checks.get(variant) or {}).get("back") or {}
+        back_px = _denorm_quad(chk_a.get("backQuad"), size_a) or geom_a.get("back")
+        front_px = _denorm_quad(chk_a.get("frontQuad"), size_a) or geom_a.get("_front")
+        faces_a = _faces_from_corners(back_px, front_px, "back")
+        for face, wall in (("back", "north"), ("left", "west"), ("right", "east")):
+            key = wall_key(owner, pid, lid, variant, wall, version)
+            texture = location_views.rectify(back_img, faces_a[face], (wall_w, wall_h))
+            STORE.put_bytes(key, texture, "image/jpeg")
+            wall_keys[wall] = key
+            walls_bytes[wall] = texture
+        # 바닥(뷰 A 의 floor 사다리꼴을 편다 — 따로 그리지 않는다).
+        floor_k = floor_key(owner, pid, lid, variant, version)
+        floor_bytes = location_views.rectify(back_img, faces_a["floor"], (floor_w, floor_h))
+        STORE.put_bytes(floor_k, floor_bytes, "image/jpeg")
+
+        # 뷰 B(front): south(back 면).
+        front_view_img, _ = views[(variant, "front")]
+        geom_b = geometries["front"]
+        size_b = geom_b.get("_size") or (wall_w, wall_h)
+        chk_b = (checks.get(variant) or {}).get("front") or {}
+        back_px_b = _denorm_quad(chk_b.get("backQuad"), size_b) or geom_b.get("back")
+        south_key = wall_key(owner, pid, lid, variant, "south", version)
+        south_texture = location_views.rectify(front_view_img, back_px_b, (wall_w, wall_h))
+        STORE.put_bytes(south_key, south_texture, "image/jpeg")
+        wall_keys["south"] = south_key
+        walls_bytes["south"] = south_texture
+
+        out[variant] = {
+            "wallKeys": wall_keys,
+            "floorKey": floor_k,
+            "wallsBytes": walls_bytes,
+            "floorBytes": floor_bytes,
+        }
+    return out
+
+
 def _assemble_variant(
     owner: str,
     pid: str,
     lid: str,
     variant: str,
     version: int,
-    images: dict[tuple[str, str], tuple[bytes, str]],
+    views: dict[tuple[str, str], tuple[bytes, str]],
+    cut: dict[str, dict],
     checks: dict[str, dict[str, dict]],
     task_id: str,
 ) -> None:
-    """이미 그려 둔(그리고 저장한) 벽 4장 + 바닥 1장으로 2x2 시트를 붙여 그 variant 만 저장한다."""
-    wall_keys: dict[str, str] = {}
-    walls_bytes: dict[str, bytes] = {}
-    for side in SIDES:
-        image, key = images[(variant, side)]
-        wall_keys[side] = key
-        walls_bytes[side] = image
-    _, fkey = images[(variant, "floor")]
+    """뷰·펴진 텍스처로 시트를 붙이고(montage_views), 그 variant 의 viewKeys·wallKeys·floorKey·sheetKey 를 저장한다."""
+    back_img, back_key = views[(variant, "back")]
+    front_img, front_key = views[(variant, "front")]
+    cut_v = cut.get(variant) or {}
+    wall_keys = cut_v.get("wallKeys") or {}
+    floor_k = cut_v.get("floorKey") or ""
+    walls_bytes = cut_v.get("wallsBytes") or {}
+    floor_bytes = cut_v.get("floorBytes") or b""
 
-    sheet = montage_2x2(walls_bytes)
+    sheet = montage_views(back_img, walls_bytes, floor_bytes)
     skey = sheet_key(owner, pid, lid, variant, version)
     STORE.put_bytes(skey, sheet, "image/jpeg")
 
@@ -1631,8 +2009,9 @@ def _assemble_variant(
         variant,
         {
             "status": "ready",
+            "viewKeys": {"back": back_key, "front": front_key},
             "wallKeys": wall_keys,
-            "floorKey": fkey,
+            "floorKey": floor_k,
             "sheetKey": skey,
             "checks": (checks or {}).get(variant) or {},
             "error": "",
@@ -1821,17 +2200,25 @@ def locations_view(owner: str, pid: str, plan: dict) -> list[dict]:
     for loc in plan.get("locations") or []:
         loc = _reconcile_stale(loc)
         variants_out = {}
+        has_views = False
         for variant in VARIANTS:
             v = (loc.get("variants") or {}).get(variant) or {}
             wall_urls = {side: _presign(v.get("wallKeys", {}).get(side) or "") for side in SIDES}
+            view_keys = v.get("viewKeys") or {}
+            view_urls = {view: _presign(view_keys.get(view) or "") for view in VIEWS}
+            if any(view_urls.values()):
+                has_views = True
             variants_out[variant] = {
                 "status": v.get("status") or "none",
                 "error": v.get("error") or "",
                 "wallUrls": wall_urls,
                 "floorUrl": _presign(v.get("floorKey") or ""),
                 "sheetUrl": _presign(v.get("sheetKey") or ""),
+                "viewUrls": view_urls,  # {back, front} 컷어웨이 뷰 원본(048)
                 "checks": v.get("checks") or {},
             }
+        # 화면이 쓸 뷰 URL 묶음(048). 옛 데이터(viewKeys 없음)면 빈 값만 담긴다.
+        views_out = {variant: variants_out[variant]["viewUrls"] for variant in VARIANTS}
         out.append(
             {
                 "id": loc.get("id"),
@@ -1843,6 +2230,9 @@ def locations_view(owner: str, pid: str, plan: dict) -> list[dict]:
                 "design": loc.get("design") or {},
                 "facts": loc.get("facts") or {},
                 "variants": variants_out,
+                "views": views_out,  # {real:{back,front}, webtoon:{back,front}} (048)
+                "hasViews": has_views,  # 새 방식 데이터인지(화면이 뷰 UI 를 쓸지 판단)
+                "viewLabels": VIEW_FACE_LABELS,  # 면별 한국어 라벨(화면)
                 "task": loc.get("task") or _empty_task(),
                 "progress": loc.get("progress") or _empty_progress(),
             }
