@@ -596,6 +596,28 @@ def create_blueprint(deps: VnewDependencies) -> Blueprint:
         except Exception as exc:  # noqa: BLE001
             return _fail(exc)
 
+    @bp.get("/p/<pid>/previz/panel")
+    @deps.require_auth
+    def previz_panel(pid: str):
+        # 한 컷의 웹툰 패널 조각(분석에 쓴 그림 큰 조각)을 같은 출처 썸네일로 돌려준다. 읽기 권한이면 된다.
+        try:
+            from . import previz  # noqa: PLC0415
+
+            owner = _project_for(pid, write=False)
+            cut_id = str(request.args.get("cutId") or "")
+            body, content_type = previz.panel_thumb_bytes(owner, pid, cut_id)
+            return Response(
+                body,
+                mimetype=content_type,
+                headers={
+                    "Content-Type": content_type,
+                    "Content-Length": str(len(body)),
+                    "Cache-Control": "private, max-age=3600",
+                },
+            )
+        except Exception as exc:  # noqa: BLE001
+            return _fail(exc)
+
     # ------------------------------------------------------------ ④ 영상 생성
 
     @bp.post("/p/<pid>/generate")

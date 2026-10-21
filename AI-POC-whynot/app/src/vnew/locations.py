@@ -13,8 +13,8 @@ locationEn 을 정규화(소문자·공백 정리)해 고유 장소를 뽑는다
 plan.py 가 sync_locations 를 콘티 끝에서 부르고, plan_view 가 locations_view 를 담는다. routes.py
 는 build · build-all · update 를 HTTP 로 감싼다.
 
-외부 호출(LLM · Seedream)은 아래 두 래퍼로 감싼다(검사가 가짜로 바꿔 끼운다): _design · _seedream.
-STORE 는 vpoc.store.STORE 를 쓴다(검사가 모듈 변수로 바꿔 끼운다).
+외부 호출(LLM · Seedream)은 아래 래퍼로 감싼다(검사가 가짜로 바꿔 끼운다): _design · _facts · _author ·
+_verify · _seedream. STORE 는 vpoc.store.STORE 를 쓴다(검사가 모듈 변수로 바꿔 끼운다).
 """
 
 from __future__ import annotations
@@ -74,6 +74,29 @@ SEEDREAM_MODEL = settings.SEEDREAM_MODEL
 #  Claude 가 이미지 읽기가 강해 먼저 쓴다. Astra 는 지시서 036 장면 설계에 그대로 쓴다.)
 DESIGN_MODEL = settings.ANALYZE_FALLBACK_MODEL  # = vpoc.settings.ANALYZE_MODEL (Claude Fable 5.1)
 DESIGN_FALLBACK_MODEL = settings.ASTRA_MODEL
+
+# 사실 추출(설계자 2026-10-21, 046): 그 장소 패널에서 벽별 물건·창문·문·재질·시대·나라를 읽는다.
+# 이미지 읽기가 강한 Claude 분석 체인을 먼저, 실패하면 Astra.
+FACTS_MODEL = settings.ANALYZE_FALLBACK_MODEL  # Claude Fable 5.1
+FACTS_FALLBACK_MODEL = settings.ASTRA_MODEL
+
+# Astra 프롬프트 작성(설계자 2026-10-21, 046): 사실 + 그림체로 Seedream 프롬프트를 '지능 없는 이미지
+# 모델용'으로 아주 구체적으로 쓴다. Astra 먼저, 실패하면 Claude.
+PROMPT_AUTHOR_MODEL = settings.ASTRA_MODEL
+PROMPT_AUTHOR_FALLBACK_MODEL = settings.ANALYZE_FALLBACK_MODEL
+
+# 비교·보정(설계자 2026-10-21, 046): 벽 그림마다 (패널·생성 그림·사실)로 일치 여부를 보고, 불일치면
+# 그 벽만 1회 다시 그린다. 이미지 읽기가 강한 Claude 를 쓴다.
+VERIFY_MODEL = settings.ANALYZE_FALLBACK_MODEL  # Claude Fable 5.1
+
+# Seedream 프롬프트 길이(글자 수). 설계자: 1,500~2,500자(Seedream 3,000자 이내).
+PROMPT_MIN_CHARS = 1500
+PROMPT_MAX_CHARS = 2500
+# Seedream 하드 리밋(이 길이를 넘으면 자른다).
+PROMPT_HARD_CAP = 3000
+
+# 불일치 벽을 다시 그리는 횟수(1회).
+FIX_RETRY = 1
 
 
 # ================================================================ 파드 안 실행 중 표시
@@ -139,6 +162,39 @@ def _set_progress(owner: str, pid: str, lid: str, task_id: str, *, step: str, do
         log.warning("vnew.location.progress.set_failed pid=%s lid=%s err=%s", pid, lid, str(exc)[:150])
 
 
+def _set_step(owner: str, pid: str, lid: str, task_id: str, *, step: str) -> None:
+    """progress 의 step 만 바꾸고 done·total 은 그대로 둔다(비교·보정이 늘린 total 을 잃지 않게).
+
+    verify 단계에서 보정 장수만큼 total 이 커진 뒤, sheet·done 으로 넘어갈 때 total 을 되돌리지 않는다.
+    """
+    from . import plan as plan_mod  # noqa: PLC0415
+
+    def mutator(data: dict) -> None:
+        loc = _find_location(data, lid)
+        if loc is None:
+            return
+        if (loc.get("task") or {}).get("id") != task_id:
+            return
+        prior = loc.get("progress") or _empty_progress()
+        started = prior.get("startedAt") or now_iso()
+        total = int(prior.get("total") or TOTAL_IMAGES)
+        done = int(prior.get("done") or 0)
+        if step == "done":
+            done = total  # 끝이면 막대를 가득 채운다.
+        loc["progress"] = {
+            "step": step,
+            "done": done,
+            "total": total,
+            "startedAt": started,
+            "updatedAt": now_iso(),
+        }
+
+    try:
+        plan_mod.mutate_plan(owner, pid, mutator)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("vnew.location.progress.set_step_failed pid=%s lid=%s err=%s", pid, lid, str(exc)[:150])
+
+
 def _bump_progress(owner: str, pid: str, lid: str, task_id: str) -> None:
     """그림 한 장이 끝날 때마다 done 을 +1 한다(병렬이어도 완료마다). 경합은 mutate_plan 이 재시도한다.
 
@@ -201,6 +257,7 @@ def _new_location(name_ko: str, name_en: str, panels: list[int]) -> dict:
         "status": "none",  # none|building|ready|failed
         "error": "",
         "design": {},  # 설계 JSON(아래 _normalize_design)
+        "facts": {},  # 사실 추출 JSON(아래 _normalize_facts)
         "variants": {v: _empty_variant() for v in VARIANTS},
         "task": _empty_task(),
         "progress": _empty_progress(),
@@ -208,7 +265,7 @@ def _new_location(name_ko: str, name_en: str, panels: list[int]) -> dict:
 
 
 def _empty_variant() -> dict:
-    return {"status": "none", "wallKeys": {}, "floorKey": "", "sheetKey": "", "error": ""}
+    return {"status": "none", "wallKeys": {}, "floorKey": "", "sheetKey": "", "checks": {}, "error": ""}
 
 
 def sync_locations(plan: dict) -> dict:
@@ -260,6 +317,7 @@ def sync_locations(plan: dict) -> dict:
                 prior["nameKo"] = slot["nameKo"]
             prior.setdefault("variants", {v: _empty_variant() for v in VARIANTS})
             prior.setdefault("design", {})
+            prior.setdefault("facts", {})
             prior.setdefault("task", _empty_task())
             prior.setdefault("progress", _empty_progress())
             prior.setdefault("status", "none")
@@ -580,6 +638,259 @@ def _normalize_design(payload: dict) -> dict:
     }
 
 
+# ================================================================ 사실 추출(Claude → Astra)
+#
+# 설계자 2026-10-21(046): 설계 JSON(벽 한두 문장)만으로는 Seedream 이 웹툰 배경과 어긋난다. 그래서
+# 그 장소 패널에서 '벽별 물건(종류·수·색·재질·위치·크기)·창문·문·벽 재질·바닥·천장·빛·시대·나라'를
+# 구체적으로 읽어 loc["facts"] 에 저장한다. 이 사실을 Astra 에 주어 Seedream 프롬프트를 세밀하게 쓴다.
+
+_FACTS_SYSTEM = (
+    "You are a forensic set analyst. You are given a few webtoon panels that all show the SAME place. "
+    "Read the DRAWN pixels and report concrete facts about the room so an artist can rebuild each wall "
+    "exactly. Answer ONLY by calling the emit_facts tool exactly once. "
+    "Treat the room as a rectangle. 'north' is the wall the webtoon camera faces most often (the main "
+    "front wall seen in the panels); east/south/west follow clockwise. "
+    "For EVERY wall list its objects: each object is {kind, count, colorEn, materialEn, position, sizeEn, "
+    "attachedTo}. kind is a concrete noun (window, bookshelf, cabinet, desk, framed picture, clock, door, "
+    "radiator, poster frame). count is the exact integer you can see. position is two words joined by a "
+    "space: one of 'left'/'center'/'right' then one of 'low'/'mid'/'high' (e.g. 'left high'). sizeEn is a "
+    "short literal size ('about one metre wide', 'floor to ceiling'). attachedTo is 'wall' or 'floor'. "
+    "Also give wallColorEn and wallMaterialEn for every wall. Give floorEn (colour, material and pattern), "
+    "ceilingEn, and a windows list [{wall, position, sizeEn, frameEn, curtainEn, outsideEn}] and a doors "
+    "list [{wall, position, sizeEn, materialEn, colorEn}]. lightEn is one English sentence about the main "
+    "light (direction, colour temperature, strength). eraEn and countryEn describe the time period and "
+    "country the room looks like. "
+    "If a wall is never shown in any panel, INFER it from the walls you did see — same wall material and "
+    "colour, same era, same country — and set that wall's estimated=true. Never leave a wall with no "
+    "objects and no material: fill it with a plausible estimate rather than leaving it blank. "
+    "Describe only the room; ignore people and speech bubbles. Write plain English for every *En field."
+)
+
+_FACTS_OBJECT = {
+    "type": "object",
+    "properties": {
+        "kind": {"type": "string"},
+        "count": {"type": "number"},
+        "colorEn": {"type": "string"},
+        "materialEn": {"type": "string"},
+        "position": {"type": "string"},
+        "sizeEn": {"type": "string"},
+        "attachedTo": {"type": "string"},
+    },
+}
+
+_FACTS_WALL = {
+    "type": "object",
+    "properties": {
+        "wallColorEn": {"type": "string"},
+        "wallMaterialEn": {"type": "string"},
+        "estimated": {"type": "boolean"},
+        "objects": {"type": "array", "items": _FACTS_OBJECT},
+    },
+}
+
+_FACTS_TOOL = {
+    "name": "emit_facts",
+    "description": "Report concrete, literal facts about the single place shown in the reference panels.",
+    "inputSchema": {
+        "json": {
+            "type": "object",
+            "properties": {
+                "walls": {
+                    "type": "object",
+                    "properties": {
+                        "north": _FACTS_WALL,
+                        "east": _FACTS_WALL,
+                        "south": _FACTS_WALL,
+                        "west": _FACTS_WALL,
+                    },
+                },
+                "floorEn": {"type": "string"},
+                "ceilingEn": {"type": "string"},
+                "windows": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "wall": {"type": "string"},
+                            "position": {"type": "string"},
+                            "sizeEn": {"type": "string"},
+                            "frameEn": {"type": "string"},
+                            "curtainEn": {"type": "string"},
+                            "outsideEn": {"type": "string"},
+                        },
+                    },
+                },
+                "doors": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "wall": {"type": "string"},
+                            "position": {"type": "string"},
+                            "sizeEn": {"type": "string"},
+                            "materialEn": {"type": "string"},
+                            "colorEn": {"type": "string"},
+                        },
+                    },
+                },
+                "lightEn": {"type": "string"},
+                "eraEn": {"type": "string"},
+                "countryEn": {"type": "string"},
+            },
+            "required": ["walls"],
+        }
+    },
+}
+
+
+def _facts(blocks: list[dict], *, model: str) -> tuple[dict, dict]:
+    """llm._converse 로 사실 추출 JSON 을 받는다. (payload, usage{..model}). 검사가 바꿔 끼운다."""
+    return vpoc_llm._converse(  # noqa: SLF001 — 공개 래퍼가 없어 내부 함수를 쓴다
+        system_text=_FACTS_SYSTEM,
+        blocks=blocks,
+        tool=_FACTS_TOOL,
+        max_tokens=2400,
+        where="vnew.location.facts",
+        model=model,
+    )
+
+
+def extract_facts(owner: str, pid: str, loc: dict) -> dict:
+    """그 장소 패널(배경 큰 조각 우선, 최대 6장)에서 벽별 물건·창문·문·재질·빛·시대·나라를 읽는다.
+
+    Claude 분석 체인 먼저, 실패하면 Astra. 보이지 않는 벽은 보이는 벽에서 '추정'(estimated=true)해 채운다.
+    반환: 정리된 사실 JSON(_normalize_facts) + model.
+    """
+    panels = _design_panels(owner, pid, loc)
+    name_en = str(loc.get("nameEn") or "").strip() or "the place"
+    setting = _setting_for(owner, pid)
+    location_ko = str(setting.get("locationKo") or "").strip()
+    enclosed = _as_bool(setting.get("enclosed"))
+
+    intro_lines = [
+        f"These webtoon panels all show the SAME place ('{name_en}'). Read the drawn pixels and report "
+        "concrete facts about each of the four walls (objects with kind/count/colour/material/position/"
+        "size), the floor, the ceiling, windows, doors, the light, the era and the country. For any wall "
+        "not shown, infer it from the walls you can see and mark it estimated.",
+    ]
+    if location_ko:
+        intro_lines.append(f"Place (Korean): {location_ko}")
+    intro_lines.append(
+        "This is a Korean setting (closed room)." if enclosed else "This is a Korean setting."
+    )
+    blocks: list[dict] = [{"text": "\n".join(intro_lines)}]
+    for jpeg in panels:
+        blocks.append({"image": {"format": "jpeg", "source": {"bytes": jpeg}}})
+
+    for model in (FACTS_MODEL, FACTS_FALLBACK_MODEL):
+        try:
+            payload, usage = _facts(blocks, model=model)
+        except Exception as exc:  # noqa: BLE001
+            log.warning("vnew.location.facts.model_failed model=%s err=%s", model, str(exc)[:200])
+            continue
+        facts = _normalize_facts(payload)
+        facts["model"] = str(usage.get("model") or model)
+        _charge_text(owner, pid, loc.get("id") or "", usage, facts["model"])
+        return facts
+    raise VpocError("vnew.location.facts", "FactsFailed", "공간 사실 추출에 실패했습니다.", 502)
+
+
+def _normalize_facts(payload: dict) -> dict:
+    """사실 출력을 정리한다(벽 4면 보장·물건 리스트 정리·창문·문·빈 벽은 '추정'으로 표시).
+
+    보이지 않아 비어 있는 벽(물건·재질이 모두 비면)은 estimated=true 로 둬 '비워 두지 않는다'는 요구를
+    만족시킨다(실제 추정 문장은 Astra 프롬프트 작성에서 보이는 벽을 참고해 채운다).
+    """
+    payload = payload if isinstance(payload, dict) else {}
+    walls_in = payload.get("walls")
+    walls_in = walls_in if isinstance(walls_in, dict) else {}
+    walls: dict[str, dict] = {}
+    for side in SIDES:
+        raw = walls_in.get(side)
+        raw = raw if isinstance(raw, dict) else {}
+        objects: list[dict] = []
+        raw_objects = raw.get("objects")
+        if isinstance(raw_objects, list):
+            for item in raw_objects:
+                if not isinstance(item, dict):
+                    continue
+                kind = str(item.get("kind") or "").strip()
+                if not kind:
+                    continue
+                objects.append(
+                    {
+                        "kind": kind,
+                        "count": _as_int(item.get("count"), 1),
+                        "colorEn": str(item.get("colorEn") or "").strip(),
+                        "materialEn": str(item.get("materialEn") or "").strip(),
+                        "position": _norm_position(item.get("position")),
+                        "sizeEn": str(item.get("sizeEn") or "").strip(),
+                        "attachedTo": "floor" if str(item.get("attachedTo") or "").strip().lower() == "floor" else "wall",
+                    }
+                )
+        wall_color = str(raw.get("wallColorEn") or "").strip()
+        wall_material = str(raw.get("wallMaterialEn") or "").strip()
+        estimated = _as_bool(raw.get("estimated")) or (not objects and not wall_material and not wall_color)
+        walls[side] = {
+            "wallColorEn": wall_color,
+            "wallMaterialEn": wall_material,
+            "estimated": estimated,
+            "objects": objects,
+        }
+    windows = _norm_openings(payload.get("windows"), ("position", "sizeEn", "frameEn", "curtainEn", "outsideEn"))
+    doors = _norm_openings(payload.get("doors"), ("position", "sizeEn", "materialEn", "colorEn"))
+    return {
+        "walls": walls,
+        "floorEn": str(payload.get("floorEn") or "").strip(),
+        "ceilingEn": str(payload.get("ceilingEn") or "").strip(),
+        "windows": windows,
+        "doors": doors,
+        "lightEn": str(payload.get("lightEn") or "").strip(),
+        "eraEn": str(payload.get("eraEn") or "").strip(),
+        "countryEn": str(payload.get("countryEn") or "").strip(),
+    }
+
+
+_POS_HORIZ = ("left", "center", "right")
+_POS_VERT = ("low", "mid", "high")
+
+
+def _norm_position(value) -> str:
+    """위치를 'left|center|right' + ' ' + 'low|mid|high' 로 정리한다. 못 읽으면 'center mid'."""
+    text = str(value or "").strip().lower()
+    horiz = next((h for h in _POS_HORIZ if h in text), "center")
+    vert = next((v for v in _POS_VERT if v in text), "mid")
+    return f"{horiz} {vert}"
+
+
+def _norm_openings(raw, keys: tuple[str, ...]) -> list[dict]:
+    """창문·문 리스트 정리(벽 소문자·필드 문자열). 항목이 dict 가 아니면 건너뛴다."""
+    out: list[dict] = []
+    if not isinstance(raw, list):
+        return out
+    for item in raw:
+        if not isinstance(item, dict):
+            continue
+        entry = {"wall": str(item.get("wall") or "").strip().lower()}
+        for key in keys:
+            if key == "position":
+                entry[key] = _norm_position(item.get(key))
+            else:
+                entry[key] = str(item.get(key) or "").strip()
+        out.append(entry)
+    return out
+
+
+def _facts_has_wall_detail(facts: dict) -> bool:
+    """사실에 벽 물건·재질이 하나라도 있으면 True(추출이 의미 있게 됐는지)."""
+    for side in SIDES:
+        wall = ((facts or {}).get("walls") or {}).get(side) or {}
+        if wall.get("objects") or wall.get("wallMaterialEn") or wall.get("wallColorEn"):
+            return True
+    return False
+
+
 # ================================================================ 프롬프트
 
 # 프롬프트 안에 반드시 들어가야 하는 지시(검사가 확인): 원근 없음 · 인물 없음.
@@ -592,6 +903,18 @@ _ORTHO = (
 # 벽·바닥 프롬프트 끝에 붙이는 지시(검사가 확인): 글자·표지판 금지 + 한국 배경.
 _NO_TEXT = "No text, letters, signs or labels anywhere. Korean setting."
 
+# Astra 지침(설계자 2026-10-21, 046). 이 문장이 그대로 Astra system 에 들어간다(검사가 확인).
+ASTRA_PROMPT_INSTRUCTION = (
+    "Write a prompt for a non-intelligent image model. Be explicit and literal: state every object, "
+    "its exact count, color, material, size and position on the wall (left third / center / right third, "
+    "floor level / waist / eye / ceiling height). State the wall color and material, the floor line at "
+    "the bottom, ceiling line at the top, orthographic straight-on view, no perspective, no people, no "
+    "text or signs. Do not use vague words (nice, typical, some)."
+)
+
+# 프롬프트에 반드시 들어가야 하는 보증 문구(Astra 가 빠뜨렸으면 뒤에 덧붙인다 — 검사가 확인).
+_GUARD_CLAUSES = ("Orthographic", "no people", "No text", "Korean setting")
+
 
 def _style_clause(variant: str, loc: dict) -> str:
     """그림체 지시. real=실사, webtoon=프로젝트 원작 그림체(캐릭터 analysis.styleEn 있으면 그것)."""
@@ -603,25 +926,192 @@ def _style_clause(variant: str, loc: dict) -> str:
     return "same drawing style as the reference panels."
 
 
-def _wall_prompt(variant: str, side: str, loc: dict) -> str:
-    name_en = str(loc.get("nameEn") or "").strip() or "the room"
-    wall = ((loc.get("design") or {}).get("walls") or {}).get(side) or {}
-    desc = str(wall.get("descEn") or "").strip() or f"a plain wall of {name_en}"
-    features = str(wall.get("featuresEn") or "").strip()
-    light = str((loc.get("design") or {}).get("lightEn") or "").strip()
-    prompt = f"Flat frontal elevation of the {side} wall of {name_en}: {desc}."
-    if features:
-        prompt += f" Concrete features on this wall: {features}."
-    prompt += " " + _ORTHO + " " + _style_clause(variant, loc)
+# ---------------------------------------------------------------- 사실 → 사람이 읽는 설명
+
+
+def _wall_facts_text(side: str, loc: dict) -> str:
+    """사실(facts)에서 그 벽의 물건·재질·창문·문을 사람이 읽는 영어 문단으로 편다.
+
+    Astra 가 없을 때의 결정적 프롬프트와, 비교·보정 때 Claude 에 주는 '사실 목록'에 함께 쓴다.
+    """
+    facts = loc.get("facts") or {}
+    wall = (facts.get("walls") or {}).get(side) or {}
+    lines: list[str] = []
+    color = str(wall.get("wallColorEn") or "").strip()
+    material = str(wall.get("wallMaterialEn") or "").strip()
+    if material or color:
+        lines.append(f"Wall surface: {color} {material}".strip() + ".")
+    if wall.get("estimated"):
+        lines.append("(This wall is not directly visible; it is inferred from the visible walls.)")
+    for obj in wall.get("objects") or []:
+        count = _as_int(obj.get("count"), 1)
+        kind = str(obj.get("kind") or "").strip()
+        if not kind:
+            continue
+        color = str(obj.get("colorEn") or "").strip()
+        material = str(obj.get("materialEn") or "").strip()
+        size = str(obj.get("sizeEn") or "").strip()
+        position = str(obj.get("position") or "center mid").strip()
+        attached = str(obj.get("attachedTo") or "wall").strip()
+        piece = f"{count} {color} {material} {kind}".replace("  ", " ").strip()
+        detail = [p for p in (size, f"at the {position}", f"on the {attached}") if p]
+        lines.append(f"{piece} ({', '.join(detail)}).")
+    for opening, label in ((facts.get("windows") or [], "window"), (facts.get("doors") or [], "door")):
+        for item in opening:
+            if str(item.get("wall") or "").strip().lower() != side:
+                continue
+            bits = [str(item.get(k) or "").strip() for k in ("sizeEn", "frameEn", "curtainEn", "outsideEn", "materialEn", "colorEn")]
+            bits = [b for b in bits if b]
+            pos = str(item.get("position") or "").strip()
+            lines.append(f"A {label} at the {pos}: {', '.join(bits)}." if bits else f"A {label} at the {pos}.")
+    return " ".join(lines).strip()
+
+
+def _facts_context(side: str, loc: dict) -> str:
+    """사실 전체 맥락(빛·시대·나라·바닥·천장) + 그 벽 사실. Astra·결정적 프롬프트·비교에 공통으로 쓴다."""
+    facts = loc.get("facts") or {}
+    parts = [_wall_facts_text(side, loc)]
+    era = str(facts.get("eraEn") or "").strip()
+    country = str(facts.get("countryEn") or "").strip()
+    light = str(facts.get("lightEn") or "").strip()
+    ceiling = str(facts.get("ceilingEn") or "").strip()
+    if era or country:
+        parts.append(f"Era/country: {era} {country}".strip() + ".")
     if light:
-        prompt += " " + light
-    prompt += " " + _NO_TEXT
+        parts.append(f"Light: {light}.")
+    if ceiling:
+        parts.append(f"Ceiling: {ceiling}.")
+    return " ".join(p for p in parts if p).strip()
+
+
+# ---------------------------------------------------------------- Astra 프롬프트 작성
+
+_PROMPT_TOOL = {
+    "name": "emit_image_prompt",
+    "description": "Return one literal image-generation prompt for a non-intelligent image model.",
+    "inputSchema": {
+        "json": {
+            "type": "object",
+            "properties": {"promptEn": {"type": "string"}},
+            "required": ["promptEn"],
+        }
+    },
+}
+
+
+def _author(system_text: str, user_text: str, *, model: str) -> tuple[dict, dict]:
+    """llm._converse 로 프롬프트 한 문장을 받는다. (payload, usage). 검사가 바꿔 끼운다."""
+    return vpoc_llm._converse(  # noqa: SLF001
+        system_text=system_text,
+        blocks=[{"text": user_text}],
+        tool=_PROMPT_TOOL,
+        max_tokens=1400,
+        where="vnew.location.prompt",
+        model=model,
+    )
+
+
+def _author_prompt(owner: str, pid: str, loc: dict, *, variant: str, side: str, kind: str) -> str:
+    """사실 + 그림체로 Seedream 프롬프트를 Astra 가 쓴다(실패 시 Claude, 둘 다 실패 시 결정적 템플릿).
+
+    길이 1,500~2,500자로 맞추고, 보증 문구(Orthographic·no people·No text·Korean setting)를 보장한다.
+    """
+    name_en = str(loc.get("nameEn") or "").strip() or "the room"
+    style = _style_clause(variant, loc)
+    if kind == "wall":
+        facts_text = _facts_context(side, loc)
+        user_text = (
+            f"Place: {name_en}. Draw the {side} wall as a flat frontal elevation.\n"
+            f"Drawing style: {style}\n"
+            f"Facts you must reproduce exactly:\n{facts_text}\n"
+            f"Write ONE image prompt of {PROMPT_MIN_CHARS} to {PROMPT_MAX_CHARS} characters. "
+            "Call emit_image_prompt once with promptEn."
+        )
+    else:
+        facts = loc.get("facts") or {}
+        floor = str(facts.get("floorEn") or "").strip() or "a plain floor"
+        user_text = (
+            f"Place: {name_en}. Draw a seamless top-down floor texture seen straight from above.\n"
+            f"Drawing style: {style}\n"
+            f"Floor facts: {floor}\n"
+            f"Write ONE image prompt of {PROMPT_MIN_CHARS} to {PROMPT_MAX_CHARS} characters. "
+            "Call emit_image_prompt once with promptEn."
+        )
+    system_text = ASTRA_PROMPT_INSTRUCTION
+    for model in (PROMPT_AUTHOR_MODEL, PROMPT_AUTHOR_FALLBACK_MODEL):
+        try:
+            payload, usage = _author(system_text, user_text, model=model)
+        except Exception as exc:  # noqa: BLE001
+            log.warning("vnew.location.prompt.model_failed model=%s err=%s", model, str(exc)[:200])
+            continue
+        text = str((payload or {}).get("promptEn") or "").strip()
+        if not text:
+            continue
+        _charge_text(owner, pid, loc.get("id") or "", usage, str(usage.get("model") or model))
+        return _finalize_prompt(text, variant, side, loc, kind=kind)
+    # 둘 다 실패 — 결정적 템플릿(사실을 그대로 편 것)으로 떨어진다.
+    base = _wall_prompt(variant, side, loc) if kind == "wall" else _floor_prompt(variant, loc)
+    return _finalize_prompt(base, variant, side, loc, kind=kind)
+
+
+def _finalize_prompt(text: str, variant: str, side: str, loc: dict, *, kind: str) -> str:
+    """Astra 가 쓴 프롬프트에 보증 문구·그림체를 보장하고, 사용자 추가 요청을 붙이고, 길이를 맞춘다.
+
+    - 보증 문구(Orthographic·no people·No text·Korean setting)가 빠졌으면 뒤에 덧붙인다.
+    - 그림체 문구가 없으면 붙인다(실사/웹툰 보장).
+    - PROMPT_MIN_CHARS 미만이면 사실 설명을 덧대 늘린다. PROMPT_HARD_CAP 초과면 자른다.
+    """
+    text = (text or "").strip()
+    style = _style_clause(variant, loc)
+    if style.split(".")[0] not in text:
+        text += " " + style
+    missing = [clause for clause in _GUARD_CLAUSES if clause not in text]
+    if "Orthographic" in missing or "no people" in missing:
+        text += " " + (_ORTHO if kind == "wall"
+                        else "Seamless flat floor seen straight from above, no perspective, no people, no furniture.")
+    if "No text" in missing or "Korean setting" in missing:
+        text += " " + _NO_TEXT
+    text = _with_extra(text, loc)
+    # 너무 짧으면 사실 설명으로 늘린다(1,500자 미만 방지).
+    if len(text) < PROMPT_MIN_CHARS:
+        filler = _facts_context(side, loc) if kind == "wall" else str((loc.get("facts") or {}).get("floorEn") or "")
+        while len(text) < PROMPT_MIN_CHARS and filler:
+            text += " " + filler
+    if len(text) > PROMPT_HARD_CAP:
+        text = text[:PROMPT_HARD_CAP].rstrip()
+    return text
+
+
+def _wall_prompt(variant: str, side: str, loc: dict) -> str:
+    """결정적(Astra 없이) 벽 프롬프트. 사실(facts)이 있으면 그대로 펴서 쓰고, 없으면 설계(design)로.
+
+    Astra 작성 실패 시의 fallback. 보증 문구(Orthographic·no people·No text·Korean setting)를 꼭 넣는다.
+    """
+    name_en = str(loc.get("nameEn") or "").strip() or "the room"
+    facts_text = _facts_context(side, loc)
+    if facts_text:
+        prompt = f"Flat frontal elevation of the {side} wall of {name_en}. {facts_text}"
+    else:
+        wall = ((loc.get("design") or {}).get("walls") or {}).get(side) or {}
+        desc = str(wall.get("descEn") or "").strip() or f"a plain wall of {name_en}"
+        features = str(wall.get("featuresEn") or "").strip()
+        light = str((loc.get("design") or {}).get("lightEn") or "").strip()
+        prompt = f"Flat frontal elevation of the {side} wall of {name_en}: {desc}."
+        if features:
+            prompt += f" Concrete features on this wall: {features}."
+        if light:
+            prompt += " " + light
+    prompt += " " + _ORTHO + " " + _style_clause(variant, loc) + " " + _NO_TEXT
     return _with_extra(prompt, loc)
 
 
 def _floor_prompt(variant: str, loc: dict) -> str:
     name_en = str(loc.get("nameEn") or "").strip() or "the room"
-    floor = str((loc.get("design") or {}).get("floorEn") or "").strip() or "a plain floor"
+    floor = (
+        str((loc.get("facts") or {}).get("floorEn") or "").strip()
+        or str((loc.get("design") or {}).get("floorEn") or "").strip()
+        or "a plain floor"
+    )
     prompt = (
         f"Top-down orthographic floor texture of {name_en}: {floor}. "
         "Seamless flat floor seen straight from above, no perspective, no people, no furniture. "
@@ -786,17 +1276,39 @@ def run_build(owner: str, pid: str, lid: str, task_id: str) -> None:
             _store_design(owner, pid, lid, design)
             loc["design"] = design
 
+        # a2. 사실 추출(Claude → Astra). 벽별 물건·창문·문·재질·빛·시대·나라를 읽어 loc["facts"] 에 둔다.
+        #     사용자가 사실을 직접 고친 적이 있으면(factsEditedAt) 그 수정본을 유지한다.
+        _set_progress(owner, pid, lid, task_id, step="facts", done=0, total=TOTAL_IMAGES)
+        facts = loc.get("facts") or {}
+        facts_user_edited = bool(facts.get("factsEditedAt"))
+        if not _facts_has_wall_detail(facts) or not facts_user_edited:
+            if not facts_user_edited:
+                facts = extract_facts(owner, pid, loc)
+                _store_facts(owner, pid, lid, facts)
+        loc["facts"] = facts
+
+        # a3. 프롬프트 작성(Astra → Claude). 사실 + 그림체로 벽4·바닥1 × 그림체2 Seedream 프롬프트를 쓴다.
+        _set_progress(owner, pid, lid, task_id, step="prompts", done=0, total=TOTAL_IMAGES)
+        prompts = _author_all_prompts(owner, pid, loc)
+        loc["prompts"] = prompts
+
         # b~d. 그림체별 벽 4장 + 바닥 1장을 병렬로 그리고(최대 IMAGE_WORKERS), 2x2 시트.
         #    설계가 끝나면 그림 단계(images)로 넘어간다. 그림 한 장이 끝날 때마다 done +1(병렬 안전).
         _set_progress(owner, pid, lid, task_id, step="images", done=0, total=TOTAL_IMAGES)
         refs = _design_panels(owner, pid, loc)[:MAX_REF_PANELS]
         images = _generate_images(owner, pid, lid, version, loc, refs, task_id)
-        # c. 4면 시트 합치기.
-        _set_progress(owner, pid, lid, task_id, step="sheet", done=TOTAL_IMAGES, total=TOTAL_IMAGES)
-        for variant in VARIANTS:
-            _assemble_variant(owner, pid, lid, variant, version, images, task_id)
 
-        _set_progress(owner, pid, lid, task_id, step="done", done=TOTAL_IMAGES, total=TOTAL_IMAGES)
+        # b2. 비교·보정(Claude). 벽 그림마다 (패널·생성 그림·사실)로 일치 여부를 보고, 불일치면 그 벽만
+        #     1회 다시 그린다. total 은 보정 장수만큼 늘린다. checks 는 그림체별로 저장한다.
+        _set_progress(owner, pid, lid, task_id, step="verify", done=TOTAL_IMAGES, total=TOTAL_IMAGES)
+        checks = _verify_and_fix(owner, pid, lid, version, loc, refs, images, task_id)
+
+        # c. 4면 시트 합치기.
+        _set_step(owner, pid, lid, task_id, step="sheet")
+        for variant in VARIANTS:
+            _assemble_variant(owner, pid, lid, variant, version, images, checks, task_id)
+
+        _set_step(owner, pid, lid, task_id, step="done")
         _commit(owner, pid, lid, task_id, status="ready")
     except Exception as exc:  # noqa: BLE001
         log.warning("vnew.location.build.failed pid=%s lid=%s err=%s", pid, lid, str(exc)[:300])
@@ -806,8 +1318,33 @@ def run_build(owner: str, pid: str, lid: str, task_id: str) -> None:
         _clear_running(owner, pid, lid)
 
 
+def _author_all_prompts(owner: str, pid: str, loc: dict) -> dict[tuple[str, str], str]:
+    """벽4·바닥1 × 그림체2 의 Seedream 프롬프트를 Astra(실패 시 Claude)로 쓴다.
+
+    반환: {(variant, side_or_'floor'): promptEn}. 설계자: 이미지 모델은 지능이 없으므로 아주 구체적으로.
+    """
+    prompts: dict[tuple[str, str], str] = {}
+    for variant in VARIANTS:
+        for side in SIDES:
+            prompts[(variant, side)] = _author_prompt(owner, pid, loc, variant=variant, side=side, kind="wall")
+        prompts[(variant, "floor")] = _author_prompt(owner, pid, loc, variant=variant, side="", kind="floor")
+    return prompts
+
+
+def _prompt_for(loc: dict, variant: str, kind: str, side: str) -> str:
+    """미리 작성한 프롬프트(loc['prompts'])가 있으면 그것, 없으면 결정적 템플릿."""
+    slot = (variant, side if kind == "wall" else "floor")
+    pre = (loc.get("prompts") or {}).get(slot)
+    if pre:
+        return pre
+    return _wall_prompt(variant, side, loc) if kind == "wall" else _floor_prompt(variant, loc)
+
+
 def _image_jobs(loc: dict) -> list[dict]:
-    """그릴 그림 목록(벽4+바닥1 × 그림체 2 = 10). 각 job 은 variant·kind·side·prompt·size."""
+    """그릴 그림 목록(벽4+바닥1 × 그림체 2 = 10). 각 job 은 variant·kind·side·prompt·size.
+
+    프롬프트는 미리 Astra 가 쓴 loc['prompts'] 를 쓴다(없으면 결정적 템플릿).
+    """
     jobs: list[dict] = []
     for variant in VARIANTS:
         for side in SIDES:
@@ -816,7 +1353,7 @@ def _image_jobs(loc: dict) -> list[dict]:
                     "variant": variant,
                     "kind": "wall",
                     "side": side,
-                    "prompt": _wall_prompt(variant, side, loc),
+                    "prompt": _prompt_for(loc, variant, "wall", side),
                     "size": WALL_SIZE,
                 }
             )
@@ -825,7 +1362,7 @@ def _image_jobs(loc: dict) -> list[dict]:
                 "variant": variant,
                 "kind": "floor",
                 "side": "",
-                "prompt": _floor_prompt(variant, loc),
+                "prompt": _prompt_for(loc, variant, "floor", ""),
                 "size": FLOOR_SIZE,
             }
         )
@@ -894,6 +1431,176 @@ def _generate_images(
     return results
 
 
+# ================================================================ 비교·보정(Claude)
+#
+# 설계자 2026-10-21(046): 벽 그림마다 (그 벽이 보이는 패널·생성 그림·사실 목록)을 Claude 에 주고
+# {matches, fixesEn} 를 받는다. matches=false 면 fixesEn 을 프롬프트 끝에 붙여 그 그림만 1회 다시
+# 그린다. 결과는 그림체별 checks[side]={matches, fixedEn, fixesEn} 로 저장한다(화면 배지).
+
+_VERIFY_SYSTEM = (
+    "You compare a generated flat wall elevation against reference webtoon panels and a list of facts. "
+    "Decide whether the generated image faithfully shows the SAME wall: same objects, counts, colours, "
+    "materials and positions. Answer ONLY by calling emit_verify exactly once. Set matches=true only if "
+    "the image already matches the facts and panels well. If it does not match, set matches=false and give "
+    "fixesEn: a short list of concrete English corrections an image model can follow (e.g. 'add two tall "
+    "windows on the left', 'change the wall colour to pale green', 'remove the extra door')."
+)
+
+_VERIFY_TOOL = {
+    "name": "emit_verify",
+    "description": "Report whether the generated wall image matches the facts, with concrete fixes if not.",
+    "inputSchema": {
+        "json": {
+            "type": "object",
+            "properties": {
+                "matches": {"type": "boolean"},
+                "fixesEn": {"type": "array", "items": {"type": "string"}},
+            },
+            "required": ["matches"],
+        }
+    },
+}
+
+
+def _verify(blocks: list[dict], *, model: str) -> tuple[dict, dict]:
+    """llm._converse 로 일치 여부 {matches, fixesEn} 를 받는다. 검사가 바꿔 끼운다."""
+    return vpoc_llm._converse(  # noqa: SLF001
+        system_text=_VERIFY_SYSTEM,
+        blocks=blocks,
+        tool=_VERIFY_TOOL,
+        max_tokens=600,
+        where="vnew.location.verify",
+        model=VERIFY_MODEL,
+    )
+
+
+def _verify_and_fix(
+    owner: str,
+    pid: str,
+    lid: str,
+    version: int,
+    loc: dict,
+    refs: list[bytes],
+    images: dict[tuple[str, str], tuple[bytes, str]],
+    task_id: str,
+) -> dict[str, dict[str, dict]]:
+    """벽 그림마다 사실과 비교하고, 불일치면 그 벽만 1회 다시 그린다(그림당 보정 1회).
+
+    - 비교는 Claude(VERIFY_MODEL). 사실 목록 + 그 벽 패널 + 생성 그림을 준다.
+    - 불일치(matches=false)면 fixesEn 을 프롬프트 끝에 붙여 그 그림만 1회 다시 그리고(FIX_RETRY),
+      새 그림을 같은 키에 덮어쓴다(원장 +1, progress.total +1·done +1).
+    - 반환: {variant: {side: {matches, fixedEn, fixesEn}}}. 바닥은 비교하지 않는다(벽만, 설계자).
+    """
+    checks: dict[str, dict[str, dict]] = {v: {} for v in VARIANTS}
+    for variant in VARIANTS:
+        for side in SIDES:
+            image, key = images[(variant, side)]
+            try:
+                matches, fixes = _verify_wall(owner, pid, lid, loc, variant, side, image, refs)
+            except Exception as exc:  # noqa: BLE001
+                log.warning("vnew.location.verify.failed pid=%s lid=%s side=%s err=%s", pid, lid, side, str(exc)[:200])
+                checks[variant][side] = {"matches": True, "fixedEn": False, "fixesEn": []}
+                continue
+            if matches:
+                checks[variant][side] = {"matches": True, "fixedEn": False, "fixesEn": []}
+                continue
+            # 불일치 — 그 벽만 1회 다시 그린다(보정 장수만큼 total 을 늘린다).
+            fixed_image = _redraw_wall(owner, pid, lid, version, loc, variant, side, key, refs, fixes, task_id)
+            if fixed_image is not None:
+                images[(variant, side)] = (fixed_image, key)
+            checks[variant][side] = {"matches": False, "fixedEn": fixed_image is not None, "fixesEn": fixes}
+    return checks
+
+
+def _verify_wall(
+    owner: str, pid: str, lid: str, loc: dict, variant: str, side: str, image: bytes, refs: list[bytes]
+) -> tuple[bool, list[str]]:
+    """그 벽 한 장을 사실·패널과 비교한다. (matches, fixesEn)."""
+    facts_text = _facts_context(side, loc) or f"the {side} wall"
+    blocks: list[dict] = [
+        {
+            "text": (
+                f"Facts for the {side} wall that the generated image MUST show:\n{facts_text}\n\n"
+                "Below are the reference webtoon panels, then the generated flat elevation. Does the "
+                "generated image match the facts and panels? Call emit_verify."
+            )
+        }
+    ]
+    for jpeg in refs:
+        blocks.append({"image": {"format": "jpeg", "source": {"bytes": jpeg}}})
+    blocks.append({"image": {"format": "jpeg", "source": {"bytes": image}}})
+    payload, usage = _verify(blocks, model=VERIFY_MODEL)
+    _charge_text(owner, pid, lid, usage, str(usage.get("model") or VERIFY_MODEL))
+    matches = _as_bool((payload or {}).get("matches"))
+    raw_fixes = (payload or {}).get("fixesEn")
+    fixes = [str(f).strip() for f in raw_fixes if str(f).strip()] if isinstance(raw_fixes, list) else []
+    return matches, fixes
+
+
+def _redraw_wall(
+    owner: str,
+    pid: str,
+    lid: str,
+    version: int,
+    loc: dict,
+    variant: str,
+    side: str,
+    key: str,
+    refs: list[bytes],
+    fixes: list[str],
+    task_id: str,
+) -> bytes | None:
+    """불일치 벽을 fixesEn 을 붙여 1회 다시 그린다. 같은 키에 덮어쓰고 원장·진행을 +1 한다.
+
+    실패하면(None) 원래 그림을 그대로 둔다(보정 없이 통과).
+    """
+    base_prompt = _prompt_for(loc, variant, "wall", side)
+    fix_text = " Corrections: " + " ".join(fixes) if fixes else ""
+    prompt = (base_prompt + fix_text)[:PROMPT_HARD_CAP]
+    last_error: Exception | None = None
+    for _ in range(FIX_RETRY):
+        try:
+            image = _seedream(prompt, refs, size=WALL_SIZE)
+        except Exception as exc:  # noqa: BLE001
+            last_error = exc
+            continue
+        STORE.put_bytes(key, image, "image/jpeg")
+        _charge_seedream(owner, pid, lid, f"{variant}-wall-{side}-fix")
+        _bump_total(owner, pid, lid, task_id)  # 보정 장수만큼 total 을 늘리고 done 도 +1.
+        return image
+    if last_error is not None:
+        log.warning("vnew.location.redraw.failed pid=%s lid=%s side=%s err=%s", pid, lid, side, str(last_error)[:200])
+    return None
+
+
+def _bump_total(owner: str, pid: str, lid: str, task_id: str) -> None:
+    """보정 그림 한 장 — total 과 done 을 함께 +1 한다(진행 막대가 100%를 넘지 않게)."""
+    from . import plan as plan_mod  # noqa: PLC0415
+
+    def mutator(data: dict) -> None:
+        loc = _find_location(data, lid)
+        if loc is None:
+            return
+        if (loc.get("task") or {}).get("id") != task_id:
+            return
+        prior = loc.get("progress") or _empty_progress()
+        started = prior.get("startedAt") or now_iso()
+        total = int(prior.get("total") or TOTAL_IMAGES) + 1
+        done = min(total, int(prior.get("done") or 0) + 1)
+        loc["progress"] = {
+            "step": prior.get("step") or "verify",
+            "done": done,
+            "total": total,
+            "startedAt": started,
+            "updatedAt": now_iso(),
+        }
+
+    try:
+        plan_mod.mutate_plan(owner, pid, mutator)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("vnew.location.progress.bump_total_failed pid=%s lid=%s err=%s", pid, lid, str(exc)[:150])
+
+
 def _assemble_variant(
     owner: str,
     pid: str,
@@ -901,6 +1608,7 @@ def _assemble_variant(
     variant: str,
     version: int,
     images: dict[tuple[str, str], tuple[bytes, str]],
+    checks: dict[str, dict[str, dict]],
     task_id: str,
 ) -> None:
     """이미 그려 둔(그리고 저장한) 벽 4장 + 바닥 1장으로 2x2 시트를 붙여 그 variant 만 저장한다."""
@@ -921,7 +1629,14 @@ def _assemble_variant(
         pid,
         lid,
         variant,
-        {"status": "ready", "wallKeys": wall_keys, "floorKey": fkey, "sheetKey": skey, "error": ""},
+        {
+            "status": "ready",
+            "wallKeys": wall_keys,
+            "floorKey": fkey,
+            "sheetKey": skey,
+            "checks": (checks or {}).get(variant) or {},
+            "error": "",
+        },
         task_id,
     )
 
@@ -936,6 +1651,17 @@ def _store_design(owner: str, pid: str, lid: str, design: dict) -> None:
         loc = _find_location(data, lid)
         if loc is not None:
             loc["design"] = design
+
+    plan_mod.mutate_plan(owner, pid, mutator)
+
+
+def _store_facts(owner: str, pid: str, lid: str, facts: dict) -> None:
+    from . import plan as plan_mod  # noqa: PLC0415
+
+    def mutator(data: dict) -> None:
+        loc = _find_location(data, lid)
+        if loc is not None:
+            loc["facts"] = facts
 
     plan_mod.mutate_plan(owner, pid, mutator)
 
@@ -1032,11 +1758,58 @@ def update_location(owner: str, pid: str, lid: str, patch: dict) -> dict:
         # 유지한다(run_build 가 designEditedAt 을 본다). 설계 관련 필드를 고쳤을 때만 찍는다.
         if any(k in patch for k in ("lightEn", "walls", "floorEn", "ceilingEn")):
             design["designEditedAt"] = now_iso()
+        # 사실(facts) 수정: 벽별 재질·물건, 바닥·천장·빛·시대·나라. 고치면 그 사실로 프롬프트를 다시 쓴다
+        # (factsEditedAt 이 있으면 run_build 가 사실 추출을 건너뛰고 수정본을 쓴다).
+        if isinstance(patch.get("facts"), dict):
+            facts = loc.setdefault("facts", {})
+            if not facts.get("walls"):
+                facts.update(_normalize_facts(facts))
+            _apply_facts_patch(facts, patch["facts"])
+            facts["factsEditedAt"] = now_iso()
         data["revision"] = int(data.get("revision") or 0) + 1
         return loc
 
     _, loc = plan_mod.mutate_plan(owner, pid, mutator)
     return loc
+
+
+def _apply_facts_patch(facts: dict, patch: dict) -> None:
+    """사실 수정 패치를 제자리에서 적용한다(벽별 재질·물건 목록·바닥·천장·빛·시대·나라)."""
+    for scalar in ("floorEn", "ceilingEn", "lightEn", "eraEn", "countryEn"):
+        if scalar in patch:
+            facts[scalar] = str(patch.get(scalar) or "").strip()
+    walls_patch = patch.get("walls")
+    if isinstance(walls_patch, dict):
+        walls = facts.setdefault("walls", {})
+        for side in SIDES:
+            wall_patch = walls_patch.get(side)
+            if not isinstance(wall_patch, dict):
+                continue
+            wall = walls.setdefault(side, {"wallColorEn": "", "wallMaterialEn": "", "estimated": False, "objects": []})
+            if "wallColorEn" in wall_patch:
+                wall["wallColorEn"] = str(wall_patch.get("wallColorEn") or "").strip()
+            if "wallMaterialEn" in wall_patch:
+                wall["wallMaterialEn"] = str(wall_patch.get("wallMaterialEn") or "").strip()
+            if isinstance(wall_patch.get("objects"), list):
+                objects: list[dict] = []
+                for item in wall_patch["objects"]:
+                    if not isinstance(item, dict):
+                        continue
+                    kind = str(item.get("kind") or "").strip()
+                    if not kind:
+                        continue
+                    objects.append(
+                        {
+                            "kind": kind,
+                            "count": _as_int(item.get("count"), 1),
+                            "colorEn": str(item.get("colorEn") or "").strip(),
+                            "materialEn": str(item.get("materialEn") or "").strip(),
+                            "position": _norm_position(item.get("position")),
+                            "sizeEn": str(item.get("sizeEn") or "").strip(),
+                            "attachedTo": "floor" if str(item.get("attachedTo") or "").strip().lower() == "floor" else "wall",
+                        }
+                    )
+                wall["objects"] = objects
 
 
 # ================================================================ 보기(presigned)
@@ -1057,6 +1830,7 @@ def locations_view(owner: str, pid: str, plan: dict) -> list[dict]:
                 "wallUrls": wall_urls,
                 "floorUrl": _presign(v.get("floorKey") or ""),
                 "sheetUrl": _presign(v.get("sheetKey") or ""),
+                "checks": v.get("checks") or {},
             }
         out.append(
             {
@@ -1067,6 +1841,7 @@ def locations_view(owner: str, pid: str, plan: dict) -> list[dict]:
                 "status": loc.get("status") or "none",
                 "error": loc.get("error") or "",
                 "design": loc.get("design") or {},
+                "facts": loc.get("facts") or {},
                 "variants": variants_out,
                 "task": loc.get("task") or _empty_task(),
                 "progress": loc.get("progress") or _empty_progress(),
@@ -1199,6 +1974,15 @@ def _as_float(value, default: float) -> float:
         if value is None or isinstance(value, bool):
             return default
         return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _as_int(value, default: int) -> int:
+    try:
+        if value is None or isinstance(value, bool):
+            return default
+        return int(round(float(value)))
     except (TypeError, ValueError):
         return default
 

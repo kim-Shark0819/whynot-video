@@ -3936,16 +3936,20 @@ def check_vnew_locations() -> None:
 
     (a) 장소 정규화·중복 제거(대소문자·공백 다른 같은 이름은 하나)
     (b) 설계 JSON 정리(없는 필드 기본값·벽 4면 보장)
-    (c) 벽 4장 + 바닥 1장 × 2그림체 = Seedream 10장, 프롬프트에 "Orthographic"·"no people"
+    (c) 벽 4장 + 바닥 1장 × 2그림체 = Seedream 초기 10장, 프롬프트에 "Orthographic"·"no people"
     (d) 2x2 한 장 시트 생성(sheetUrl)
-    (e) 콘티 재생성 후 같은 장소 유지·자동 그림 0장
+    (e) 콘티 재생성 후 같은 장소 유지·자동 그림 0장(설계·사실·프롬프트·비교도 안 함)
     (f) 진행 중 build 409
     (g) 설계 모델 호출 순서 Claude(DESIGN_MODEL) → Astra(fallback)
     (h) 벽 프롬프트에 "No text"·"Korean setting"
-    (i) 병렬 실행에서도 원장·저장 10장(벽8+바닥2) 정확
+    (i) 병렬 실행에서도 원장·저장 정확(초기 10장 + 보정분)
     (j) 설계 결과에 'assumed'/'provisional' 이 있으면 1회 재요청
     (l) 공간 '다시 만들기' 는 설계 재요청 1회, designEditedAt 있으면 0회(수정본 유지)
-    (m) 빌드 중 progress.done 이 그림마다 +1 해 total 도달, step 순서 design→images→sheet→done
+    (m) 빌드 중 progress.done 이 그림마다 +1
+    (n) 사실 추출 결과 저장(벽 물건·재질, 보이지 않는 벽 estimated, 창문·문·시대·나라), plan_view 에 facts
+    (o) Astra 프롬프트 지침 문장·사실 단어 포함, Astra→Claude 순서, 완성 프롬프트 길이 1,500~2,500자
+    (p) 불일치 벽만 1회 재생성(장수·원장·checks 배지 정확, 바닥은 보정 안 함)
+    (q) 진행 단계 순서 design→facts→prompts→images→verify→sheet→done, 보정 장수만큼 total 증가
     """
     sys.path.insert(0, str(ROOT / "app"))
     bad: list[str] = []
@@ -4028,7 +4032,8 @@ def check_vnew_locations() -> None:
     def fake_seedream(prompt, references, *, size):
         variant = "real" if "Photoreal" in prompt else "webtoon"
         kind = "floor" if "floor texture" in prompt else "wall"
-        seedream_calls.append({"variant": variant, "kind": kind, "prompt": prompt, "size": size})
+        is_fix = "Corrections:" in prompt  # _redraw_wall 이 보정 프롬프트 끝에 붙인다.
+        seedream_calls.append({"variant": variant, "kind": kind, "prompt": prompt, "size": size, "fix": is_fix})
         # 벽은 16:9, 바닥은 정사각. montage_2x2 가 열 수 있어야 한다.
         if kind == "floor":
             return _tiny_jpeg(256, 256)
@@ -4071,10 +4076,97 @@ def check_vnew_locations() -> None:
         ]
         return {"cuts": cuts}, {"model": model, "inputTokens": 3, "outputTokens": 6}
 
+    # (n) 사실 추출(Claude → Astra). 벽별 물건·창문·문·재질·빛·시대·나라.
+    facts_calls: list[str] = []
+
+    def fake_facts(blocks, *, model):
+        facts_calls.append(model)
+        payload = {
+            "walls": {
+                "north": {
+                    "wallColorEn": "pale green",
+                    "wallMaterialEn": "painted plaster",
+                    "estimated": False,
+                    "objects": [
+                        {"kind": "window", "count": 2, "colorEn": "white", "materialEn": "wood",
+                         "position": "left high", "sizeEn": "floor to ceiling", "attachedTo": "wall"},
+                    ],
+                },
+                "east": {
+                    "wallColorEn": "pale green", "wallMaterialEn": "painted plaster", "estimated": False,
+                    "objects": [
+                        {"kind": "bookshelf", "count": 1, "colorEn": "brown", "materialEn": "wood",
+                         "position": "center mid", "sizeEn": "full-height", "attachedTo": "wall"},
+                    ],
+                },
+                "south": {
+                    "wallColorEn": "pale green", "wallMaterialEn": "painted plaster", "estimated": False,
+                    "objects": [
+                        {"kind": "door", "count": 1, "colorEn": "dark brown", "materialEn": "wood",
+                         "position": "right mid", "sizeEn": "about one metre wide", "attachedTo": "wall"},
+                    ],
+                },
+                # west 는 보이지 않는 벽 — estimated.
+                "west": {"wallColorEn": "", "wallMaterialEn": "", "estimated": True, "objects": []},
+            },
+            "floorEn": "polished warm-brown wooden floor with straight planks",
+            "ceilingEn": "flat white ceiling",
+            "windows": [
+                {"wall": "north", "position": "left high", "sizeEn": "floor to ceiling",
+                 "frameEn": "white wood", "curtainEn": "none", "outsideEn": "schoolyard trees"},
+            ],
+            "doors": [
+                {"wall": "south", "position": "right mid", "sizeEn": "standard", "materialEn": "wood", "colorEn": "dark brown"},
+            ],
+            "lightEn": "soft daylight from the north windows, warm white, medium strength",
+            "eraEn": "modern 2010s",
+            "countryEn": "South Korea",
+        }
+        return payload, {"model": model, "inputTokens": 7, "outputTokens": 14}
+
+    # (o) Astra 프롬프트 작성. system_text 에 설계자 지침이 들어왔는지 기록하고, kind 를 알 수 있게 쓴다.
+    author_calls: list[dict] = []
+
+    def fake_author(system_text, user_text, *, model):
+        kind = "floor" if "floor texture" in user_text or "top-down floor" in user_text else "wall"
+        author_calls.append({"model": model, "system": system_text, "user": user_text, "kind": kind})
+        # 지능 없는 이미지 모델용의 아주 구체적인(사실 단어가 든) 프롬프트를 흉내 낸다.
+        # fake_seedream 이 variant·kind 를 알 수 있게 'Photoreal'·'floor texture' 표식을 넣는다.
+        body = (
+            "Literal image prompt. pale green painted plaster wall, 2 white wood windows at the left high, "
+            "a brown wood bookshelf at the center, polished warm-brown wooden floor. "
+        )
+        if kind == "floor":
+            body = "Top-down floor texture: polished warm-brown wooden floor with straight planks. "
+        return {"promptEn": body}, {"model": model, "inputTokens": 5, "outputTokens": 40}
+
+    # (p) 비교·보정. north 벽만 불일치(matches=False)로 두어 그 벽만 1회 다시 그리게 한다.
+    verify_calls: list[dict] = []
+
+    def fake_verify(blocks, *, model):
+        # 사실 맥락 문단에서 어느 벽인지 읽는다(_verify_wall 이 'the {side} wall' 을 넣는다).
+        text = ""
+        for b in blocks:
+            if isinstance(b, dict) and b.get("text"):
+                text = b["text"]
+                break
+        side = "unknown"
+        for s in ("north", "east", "south", "west"):
+            if f"{s} wall" in text:
+                side = s
+                break
+        verify_calls.append({"model": model, "side": side})
+        if side == "north":
+            return {"matches": False, "fixesEn": ["add two tall windows on the left"]}, {"model": model, "inputTokens": 4, "outputTokens": 8}
+        return {"matches": True, "fixesEn": []}, {"model": model, "inputTokens": 4, "outputTokens": 4}
+
     orig = {
         "loc_STORE": locmod.STORE,
         "plan_STORE": planmod.STORE,
         "_design": locmod._design,
+        "_facts": locmod._facts,
+        "_author": locmod._author,
+        "_verify": locmod._verify,
         "_seedream": locmod._seedream,
         "charge": locmod.vpoc_ledger.charge,
         "charge_text": locmod.vpoc_ledger.charge_text,
@@ -4088,6 +4180,9 @@ def check_vnew_locations() -> None:
     locmod.STORE = fake_store
     planmod.STORE = fake_store
     locmod._design = fake_design
+    locmod._facts = fake_facts
+    locmod._author = fake_author
+    locmod._verify = fake_verify
     locmod._seedream = fake_seedream
     locmod.vpoc_ledger.charge = fake_charge
     locmod.vpoc_ledger.charge_text = fake_charge_text
@@ -4211,10 +4306,12 @@ def check_vnew_locations() -> None:
             bad.append(f"(g) 설계가 Claude(DESIGN_MODEL) 를 먼저 쓰지 않습니다: {design_calls[0]}")
         if locmod.DESIGN_MODEL == locmod.DESIGN_FALLBACK_MODEL:
             bad.append("(g) DESIGN_MODEL 과 DESIGN_FALLBACK_MODEL 이 같습니다(Claude→Astra 순서가 무의미)")
-        if len(seedream_calls) != 10:
-            bad.append(f"(c) Seedream 호출이 10장이 아닙니다: {len(seedream_calls)}")
-        walls = [c for c in seedream_calls if c["kind"] == "wall"]
-        floors = [c for c in seedream_calls if c["kind"] == "floor"]
+        # 초기 생성(보정 아님)은 정확히 10장(벽8+바닥2). 보정(fix)은 (p) 에서 센다.
+        initial_calls = [c for c in seedream_calls if not c.get("fix")]
+        if len(initial_calls) != 10:
+            bad.append(f"(c) 초기 Seedream 호출이 10장이 아닙니다: {len(initial_calls)}")
+        walls = [c for c in initial_calls if c["kind"] == "wall"]
+        floors = [c for c in initial_calls if c["kind"] == "floor"]
         if len(walls) != 8 or len(floors) != 2:
             bad.append(f"(c) 벽 8·바닥 2 가 아닙니다: 벽={len(walls)} 바닥={len(floors)}")
         # 그림체별 크기: 벽 2048x1152, 바닥 1536x1536.
@@ -4243,16 +4340,19 @@ def check_vnew_locations() -> None:
         # 두 그림체 모두 그려졌는지.
         if {c["variant"] for c in seedream_calls} != {"real", "webtoon"}:
             bad.append(f"(c) real·webtoon 둘 다 그리지 않았습니다: {sorted({c['variant'] for c in seedream_calls})}")
-        # 원장: Seedream 장당(10장) 계상.
+        # 원장: Seedream 장당. 초기 10장 + 보정분(fix). 초기 10건은 반드시 계상돼야 한다.
         img_charges = [c for c in ledger_calls if c.get("kind") == "image" and not c.get("text")]
+        fix_calls = [c for c in seedream_calls if c.get("fix")]
+        expected_img = 10 + len(fix_calls)
         if len(img_charges) < 10:
             bad.append(f"(c) Seedream 원장 계상이 10건 미만입니다: {len(img_charges)}")
 
-        # (i) 병렬 실행에서도 원장·저장이 정확히 10장(벽8+바닥2) 이어야 한다(동시성 중복·누락 없음).
-        if len(img_charges) != 10:
-            bad.append(f"(i) 병렬 생성인데 Seedream 원장 계상이 정확히 10건이 아닙니다: {len(img_charges)}")
+        # (i) 병렬 실행에서도 원장·저장이 정확해야 한다(동시성 중복·누락 없음): 초기 10 + 보정분.
+        if len(img_charges) != expected_img:
+            bad.append(f"(i) 병렬 생성 Seedream 원장 계상이 초기10+보정({expected_img})건이 아닙니다: {len(img_charges)}")
         saved_walls = [k for k in fake_store.blobs if f"/locations/{lid}/" in k and "/wall_" in k]
         saved_floors = [k for k in fake_store.blobs if f"/locations/{lid}/" in k and "/floor_" in k]
+        # 보정은 같은 키에 덮어쓰므로 저장 키는 여전히 벽8·바닥2(=10) 이어야 한다.
         if len(saved_walls) != 8 or len(saved_floors) != 2:
             bad.append(
                 f"(i) 병렬 생성 저장이 벽8·바닥2(=10) 가 아닙니다: 벽={len(saved_walls)} 바닥={len(saved_floors)}"
@@ -4293,9 +4393,91 @@ def check_vnew_locations() -> None:
         if (w, h) != (cell_w * 2, cell_h * 2):
             bad.append(f"(d) 2x2 시트 크기가 2배가 아닙니다: {(w, h)} vs {(cell_w * 2, cell_h * 2)}")
 
+        # --- (n) 사실 추출 결과가 loc["facts"] 에 저장됐는지 ---
+        if len(facts_calls) < 1:
+            bad.append(f"(n) 사실 추출 LLM 이 불리지 않았습니다: {len(facts_calls)}")
+        # (n-2) 사실 추출 모델 순서: Claude(FACTS_MODEL) 먼저.
+        if facts_calls and facts_calls[0] != locmod.FACTS_MODEL:
+            bad.append(f"(n) 사실 추출이 Claude(FACTS_MODEL) 를 먼저 쓰지 않습니다: {facts_calls[0]}")
+        plan_n, _ = planmod.load_plan(owner, pid)
+        loc_n = locmod._find_location(plan_n, lid) or {}
+        facts_n = loc_n.get("facts") or {}
+        if not locmod._facts_has_wall_detail(facts_n):
+            bad.append(f"(n) loc['facts'] 에 벽 물건·재질이 저장되지 않았습니다: {facts_n.get('walls')}")
+        # 보이지 않는 벽(west)도 비어 있지 않고 estimated 로 표시돼야 한다(비워 두지 않는다).
+        west_n = (facts_n.get("walls") or {}).get("west") or {}
+        if not west_n.get("estimated"):
+            bad.append(f"(n) 보이지 않는 west 벽이 'estimated' 로 표시되지 않았습니다: {west_n}")
+        # 창문·문·시대·나라도 저장됐는지.
+        if not facts_n.get("windows") or not facts_n.get("doors"):
+            bad.append(f"(n) 창문·문 사실이 저장되지 않았습니다: windows={facts_n.get('windows')} doors={facts_n.get('doors')}")
+        if not facts_n.get("eraEn") or not facts_n.get("countryEn"):
+            bad.append(f"(n) 시대·나라 사실이 저장되지 않았습니다: era={facts_n.get('eraEn')!r} country={facts_n.get('countryEn')!r}")
+        # plan_view(locations_view) 에도 facts 가 담겨야 한다(화면이 읽는다).
+        vloc_n = next((l for l in (view.get("locations") or []) if l.get("id") == lid), None)
+        if not vloc_n or "facts" not in vloc_n:
+            bad.append("(n) plan_view locations 에 facts 가 없습니다")
+
+        # --- (o) Astra 프롬프트 작성: 설계자 지침 문장 + 사실 단어 포함 ---
+        if len(author_calls) < 10:
+            bad.append(f"(o) 프롬프트 작성 호출이 10회(벽8+바닥2) 미만입니다: {len(author_calls)}")
+        # (o-2) Astra system 에 설계자 지침(ASTRA_PROMPT_INSTRUCTION)이 그대로 들어가야 한다.
+        if author_calls and locmod.ASTRA_PROMPT_INSTRUCTION not in author_calls[0]["system"]:
+            bad.append("(o) Astra system 에 설계자 프롬프트 지침 문장이 들어가지 않았습니다")
+        # (o-3) Astra 가 먼저(PROMPT_AUTHOR_MODEL), Claude 가 fallback.
+        if author_calls and author_calls[0]["model"] != locmod.PROMPT_AUTHOR_MODEL:
+            bad.append(f"(o) 프롬프트 작성이 Astra(PROMPT_AUTHOR_MODEL) 를 먼저 쓰지 않습니다: {author_calls[0]['model']}")
+        if locmod.PROMPT_AUTHOR_MODEL == locmod.PROMPT_AUTHOR_FALLBACK_MODEL:
+            bad.append("(o) PROMPT_AUTHOR_MODEL 과 fallback 이 같습니다(Astra→Claude 순서가 무의미)")
+        # (o-4) 작성에 쓴 user_text 에 사실 단어(예: bookshelf·window·wooden)가 들어가야 한다(사실 기반).
+        joined_user = " ".join(c["user"] for c in author_calls)
+        if not any(word in joined_user for word in ("bookshelf", "window", "wooden", "plaster")):
+            bad.append("(o) 프롬프트 작성 입력에 사실 단어(bookshelf/window/...)가 들어가지 않았습니다")
+        # (o-5) 완성된 벽 프롬프트 길이 1,500~2,500자(설계자) 안이고, 사실 단어가 들어간다.
+        for c in walls:
+            if not (locmod.PROMPT_MIN_CHARS <= len(c["prompt"]) <= locmod.PROMPT_HARD_CAP):
+                bad.append(f"(o) 벽 프롬프트 길이가 범위를 벗어납니다: {len(c['prompt'])}자")
+                break
+
+        # --- (p) 불일치 벽만 1회 재생성(장수·원장 정확) ---
+        # fake_verify 가 north 벽만 불일치로 둔다 → real·webtoon 각 1장, 총 2장만 보정(fix)한다.
+        if len(verify_calls) != 8:
+            bad.append(f"(p) 비교(verify)가 벽 8장(그림체2×4면)이 아닙니다: {len(verify_calls)}")
+        if len(fix_calls) != 2:
+            bad.append(f"(p) 불일치 재생성(fix)이 2장(north×그림체2)이 아닙니다: {len(fix_calls)}")
+        if any(c["kind"] != "wall" for c in fix_calls):
+            bad.append(f"(p) 바닥이 재생성됐습니다(벽만 보정해야 함): {[c['kind'] for c in fix_calls]}")
+        # 보정 프롬프트에 fixesEn 이 붙었는지.
+        if fix_calls and not all("add two tall windows" in c["prompt"] for c in fix_calls):
+            bad.append("(p) 보정 프롬프트에 fixesEn(수정 지시)이 붙지 않았습니다")
+        # 보정 원장: f"{variant}-wall-north-fix" 키로 2건.
+        fix_charges = [c for c in ledger_calls if c.get("kind") == "image" and "-fix-" in str(c.get("key") or "")]
+        if len(fix_charges) != 2:
+            bad.append(f"(p) 보정 원장이 2건이 아닙니다: {len(fix_charges)}")
+        # checks 가 그림체별로 저장되고, north=보정함(matches False), 나머지=일치.
+        for variant in ("real", "webtoon"):
+            vv = (vloc.get("variants") or {}).get(variant) or {}
+            chk = vv.get("checks") or {}
+            if (chk.get("north") or {}).get("matches") is not False:
+                bad.append(f"(p) {variant} north 가 '보정함'(matches False)으로 저장되지 않았습니다: {chk.get('north')}")
+            if not (chk.get("north") or {}).get("fixedEn"):
+                bad.append(f"(p) {variant} north 가 실제 보정(fixedEn)되지 않았습니다: {chk.get('north')}")
+            for s in ("east", "south", "west"):
+                if (chk.get(s) or {}).get("matches") is not True:
+                    bad.append(f"(p) {variant} {s} 가 '일치'(matches True)로 저장되지 않았습니다: {chk.get(s)}")
+
+        # --- (q) 진행 단계 순서: design→facts→prompts→images→verify→sheet→done ---
+        # (아래 (m) 에서 step_seq 를 기록하므로 여기서는 verify 재생성으로 total 이 보정 장수만큼 늘었는지만 본다.)
+        prog_q = loc_n.get("progress") or {}
+        if int(prog_q.get("total") or 0) != locmod.TOTAL_IMAGES + len(fix_calls):
+            bad.append(f"(q) 보정 뒤 progress.total 이 {locmod.TOTAL_IMAGES}+{len(fix_calls)} 가 아닙니다: {prog_q.get('total')}")
+
         # (e) 콘티 재생성 후 같은 장소(id) 유지·이미지 보존·자동 그림 0장.
         seedream_calls.clear()
         design_calls.clear()
+        facts_calls.clear()
+        author_calls.clear()
+        verify_calls.clear()
 
         def _reset_conti(d):
             d["conti"]["status"] = "none"
@@ -4311,8 +4493,11 @@ def check_vnew_locations() -> None:
             bad.append(f"(e) 콘티 재생성 후 교장실 장소 id 가 유지되지 않았습니다: {office_re and office_re.get('id')} vs {lid}")
         elif office_re.get("status") != "ready" or not ((office_re.get("variants") or {}).get("real") or {}).get("sheetKey"):
             bad.append("(e) 콘티 재생성 후 장소의 이미지·ready 상태가 보존되지 않았습니다")
-        if seedream_calls or design_calls:
-            bad.append(f"(e) 콘티 재생성이 자동으로 그림을 그렸습니다: seedream={len(seedream_calls)} design={len(design_calls)}")
+        if seedream_calls or design_calls or facts_calls or author_calls or verify_calls:
+            bad.append(
+                f"(e) 콘티 재생성이 자동으로 작업을 했습니다: seedream={len(seedream_calls)} "
+                f"design={len(design_calls)} facts={len(facts_calls)} author={len(author_calls)} verify={len(verify_calls)}"
+            )
 
         # (f) 진행 중 build 409 — task.status 를 running 으로 막아 둔다.
         def _set_running(d):
@@ -4421,22 +4606,28 @@ def check_vnew_locations() -> None:
         if (loc_l.get("design") or {}).get("lightEn") != "lamp light from the ceiling":
             bad.append(f"(l) 다시 만들기 뒤 사용자가 고친 lightEn 이 유지되지 않았습니다: {(loc_l.get('design') or {}).get('lightEn')}")
 
-        # --- (m) 진행 표시(progress): 빌드 중 done 이 그림마다 +1 해 total 도달, step 순서 design→images→sheet→done ---
-        # _set_progress(단계 전환)·_bump_progress(그림 완료마다 +1)를 감싸 호출을 기록하고 실제 함수로 넘긴다.
+        # --- (m)(q) 진행 표시(progress): 빌드 중 done 이 그림마다 +1, step 순서 design→facts→prompts→images→verify→sheet→done ---
+        # _set_progress·_set_step(단계 전환)·_bump_progress(그림 완료마다 +1)를 감싸 호출을 기록하고 실제 함수로 넘긴다.
         step_seq: list[str] = []
         bump_count = {"n": 0}
         orig_set_progress = locmod._set_progress
+        orig_set_step = locmod._set_step
         orig_bump_progress = locmod._bump_progress
 
         def rec_set_progress(owner_, pid_, lid_, task_id_, *, step, done, total):
             step_seq.append(step)
             return orig_set_progress(owner_, pid_, lid_, task_id_, step=step, done=done, total=total)
 
+        def rec_set_step(owner_, pid_, lid_, task_id_, *, step):
+            step_seq.append(step)
+            return orig_set_step(owner_, pid_, lid_, task_id_, step=step)
+
         def rec_bump_progress(owner_, pid_, lid_, task_id_):
             bump_count["n"] += 1
             return orig_bump_progress(owner_, pid_, lid_, task_id_)
 
         locmod._set_progress = rec_set_progress
+        locmod._set_step = rec_set_step
         locmod._bump_progress = rec_bump_progress
 
         def _idle_task_m(d):
@@ -4452,27 +4643,30 @@ def check_vnew_locations() -> None:
             _join()
         finally:
             locmod._set_progress = orig_set_progress
+            locmod._set_step = orig_set_step
             locmod._bump_progress = orig_bump_progress
 
-        # start_build 가 design 으로 seed → run_build 가 design→images→sheet→done. 첫 등장 순서를 확인한다.
+        # start_build 가 design 으로 seed → run_build 가 design→facts→prompts→images→verify→sheet→done.
         first_seen: list[str] = []
         for s in step_seq:
             if s not in first_seen:
                 first_seen.append(s)
-        expected_order = ["design", "images", "sheet", "done"]
+        # (q) 진행 단계 순서: 사실 추출·프롬프트 작성·비교·보정이 올바른 자리에 들어가야 한다.
+        expected_order = ["design", "facts", "prompts", "images", "verify", "sheet", "done"]
         if first_seen != expected_order:
-            bad.append(f"(m) progress step 순서가 design→images→sheet→done 이 아닙니다: {first_seen}")
-        # 그림 10장 완료마다 +1 — bump 가 정확히 10회(벽8+바닥2).
+            bad.append(f"(m)(q) progress step 순서가 {expected_order} 가 아닙니다: {first_seen}")
+        # 그림 10장 완료마다 +1 — _bump_progress 가 정확히 10회(벽8+바닥2). 보정은 _bump_total 이 따로 민다.
         if bump_count["n"] != locmod.TOTAL_IMAGES:
             bad.append(f"(m) 그림 완료 progress +1 이 {locmod.TOTAL_IMAGES}회가 아닙니다: {bump_count['n']}")
-        # 끝난 뒤 progress: step=done, done==total==TOTAL_IMAGES.
+        # 끝난 뒤 progress: step=done. 보정 2장(north×그림체2) 만큼 total·done 이 늘어 TOTAL_IMAGES+2.
         plan_m, _ = planmod.load_plan(owner, pid)
         loc_m = locmod._find_location(plan_m, lid) or {}
         prog_m = loc_m.get("progress") or {}
+        expected_total_m = locmod.TOTAL_IMAGES + 2
         if prog_m.get("step") != "done":
             bad.append(f"(m) 끝난 뒤 progress.step 이 done 이 아닙니다: {prog_m.get('step')}")
-        if int(prog_m.get("done") or 0) != locmod.TOTAL_IMAGES or int(prog_m.get("total") or 0) != locmod.TOTAL_IMAGES:
-            bad.append(f"(m) 끝난 뒤 progress.done/total 이 {locmod.TOTAL_IMAGES} 이 아닙니다: {prog_m.get('done')}/{prog_m.get('total')}")
+        if int(prog_m.get("done") or 0) != expected_total_m or int(prog_m.get("total") or 0) != expected_total_m:
+            bad.append(f"(m)(q) 끝난 뒤 progress.done/total 이 {expected_total_m}(=보정 2장 포함) 가 아닙니다: {prog_m.get('done')}/{prog_m.get('total')}")
         if not prog_m.get("startedAt") or not prog_m.get("updatedAt"):
             bad.append(f"(m) progress 에 startedAt·updatedAt 이 없습니다: {prog_m}")
         # plan_view(locations_view) 에도 progress 가 담겨야 한다(화면이 읽는다).
@@ -4489,6 +4683,9 @@ def check_vnew_locations() -> None:
         locmod.STORE = orig["loc_STORE"]
         planmod.STORE = orig["plan_STORE"]
         locmod._design = orig["_design"]
+        locmod._facts = orig["_facts"]
+        locmod._author = orig["_author"]
+        locmod._verify = orig["_verify"]
         locmod._seedream = orig["_seedream"]
         locmod.vpoc_ledger.charge = orig["charge"]
         locmod.vpoc_ledger.charge_text = orig["charge_text"]
@@ -4501,6 +4698,8 @@ def check_vnew_locations() -> None:
         # (m) progress 래퍼가 걸린 채로 예외가 났을 수 있으니 원본으로 되돌린다(아직 안 걸렸으면 no-op).
         if "orig_set_progress" in locals():
             locmod._set_progress = orig_set_progress
+        if "orig_set_step" in locals():
+            locmod._set_step = orig_set_step
         if "orig_bump_progress" in locals():
             locmod._bump_progress = orig_bump_progress
 
@@ -4509,10 +4708,12 @@ def check_vnew_locations() -> None:
     else:
         ok(
             "영상만들기_신규 공간 디테일 시트(vnew locations) 검사 (a)정규화·중복 제거 (b)설계 JSON 정리"
-            " (c)벽4+바닥1×2그림체=Seedream 10장·Orthographic·no people (d)2x2 시트 (e)콘티 재생성 유지·자동 0장 (f)409"
-            " (g)설계 모델 Claude→Astra (h)벽 프롬프트 'No text'·Korean setting (i)병렬에서도 원장·저장 10장 정확"
+            " (c)벽4+바닥1×2그림체=Seedream 초기10장·Orthographic·no people (d)2x2 시트 (e)콘티 재생성 유지·자동 0장 (f)409"
+            " (g)설계 모델 Claude→Astra (h)벽 프롬프트 'No text'·Korean setting (i)병렬에서도 원장·저장 정확(초기10+보정)"
             " (j)'assumed'/'provisional' 1회 재요청 (l)다시 만들기 설계 재요청 1회·designEditedAt 있으면 0회"
-            " (m)빌드 중 progress.done 그림마다 +1·total 도달·step 순서 design→images→sheet→done"
+            " (m)빌드 중 progress.done 그림마다 +1 (n)사실 추출 저장·보이지 않는 벽 estimated·창문/문/시대/나라"
+            " (o)Astra 프롬프트 지침 문장·사실 단어·길이 1500~2500 (p)불일치 벽만 1회 재생성(장수·원장·checks 배지 정확)"
+            " (q)진행 단계 순서 design→facts→prompts→images→verify→sheet→done·보정분 total 반영"
         )
 
 
@@ -5771,30 +5972,104 @@ def check_vnew_previz() -> None:
         bad.append(f"(b) 시간 누적이 틀립니다: {scene['timeline'][0]['start']}~{scene['timeline'][0]['end']}")
 
     # --- 가짜 설계 LLM(장소 1개=컷 3개 timeline, cutId 그대로) ---
+    # 투영 검산(fit)·재요청·격자 보정을 함께 확인하려고, 인물 a1(교장)을 패널 샷 목표에 맞추는
+    # '좋은' 카메라와 많이 어긋난 '나쁜' 카메라를 둔다. a1 발 위치는 (1,0,0)(c1·c2, c3 은 복사).
+    # 나쁜 카메라는 '먼 거리'(설계자 예시)로 둔다 — a1 을 같은 방향(target)으로 보되 5m 더 멀리서
+    # 보면 heightFrac(화면 높이 대비 인물 키)이 목표보다 훨씬 작아져 크기 오차가 임계를 넘는다.
+    # target(바라보는 점)은 a1 쪽을 그대로 두므로 screenX 는 유지되고, 격자 탐색이 forward(거리)
+    # 축으로 카메라를 끌어당겨 오차를 줄일 수 있다(결정적).
+    from src.vnew import previz_fit as pvfit  # noqa: PLC0415
+
+    A1_FOOT = [1.0, 0.0, 0.0]
+    A1_HEIGHT = 1.72
+    GOOD_CAM = {"pos": [1.0, 1.5, 4.0], "target": [1.0, 1.0, 0.0], "fov": 50.0}  # a1 이 화면에 알맞게
+    BAD_CAM = {"pos": [1.0, 1.5, 9.0], "target": [1.0, 1.0, 0.0], "fov": 50.0}  # 5m 더 멀리 → a1 이 너무 작게
+    # a1 을 GOOD_CAM 으로 투영한 값을 패널 샷 목표로 쓴다(=GOOD_CAM 이면 오차 ~0).
+    _a1_proj = pvfit.project_actor(GOOD_CAM, A1_FOOT, A1_HEIGHT)
+    A1_TARGET = {
+        "screenX": round(_a1_proj["screenX"], 3),
+        "screenY": round(_a1_proj["headY"], 3),
+        "heightFrac": round(_a1_proj["heightFrac"], 3),
+    }
+
     design_calls: list[str] = []
+    retry_calls: list[str] = []  # 재요청으로 받은 cutId 순서(j2: 오차 큰 컷만)
+
+    def _retry_cut_id(text: str) -> str:
+        # 재요청 프롬프트에서 cutId=cX 를 찾는다.
+        import re as _re  # noqa: PLC0415
+
+        marker = text.find("[투영 검산")
+        if marker < 0:
+            return ""
+        m = _re.search(r"cutId=(\S+)", text[marker:])
+        return m.group(1) if m else ""
 
     def fake_design(blocks, *, model):
         design_calls.append(model)
-        # 모델이 timeline 을 2개만 주고(c3 누락), 색도 하나만 준다 → 정리가 1:1·색 보정.
+        text = ""
+        for b in blocks:
+            if isinstance(b, dict) and b.get("text"):
+                text = b["text"]
+                break
+        retry_id = _retry_cut_id(text)
+        if retry_id:
+            # 그 컷 camera 만 다시 준다. c2 는 고쳐 주고(GOOD), c3 는 계속 어긋나게(BAD) → c3 은 격자 보정으로.
+            retry_calls.append(retry_id)
+            cam = dict(GOOD_CAM) if retry_id == "c2" else dict(BAD_CAM)
+            return (
+                {"timeline": [{"cutId": retry_id, "camera": cam}]},
+                {"model": model, "inputTokens": 5, "outputTokens": 5},
+            )
+        # 초기 전체 설계. 거리(c4) 장소 프롬프트면 거리 장면을 준다.
+        if "city street" in text or "거리" in text and "c4" in text:
+            payload = {
+                "room": {"width": 8.0, "depth": 8.0, "height": 5.0},
+                "actors": [{"id": "a3", "name": "행인", "color": "#3cb44b", "heightM": 1.7}],
+                "timeline": [{"cutId": "c4", "camera": dict(GOOD_CAM),
+                              "actors": [{"id": "a3", "pos": [0, 0, 0], "pose": "stand"}]}],
+                "notesKo": "거리",
+            }
+            return payload, {"model": model, "inputTokens": 10, "outputTokens": 20}
+        # 교장실: 모델이 timeline 을 2개만 주고(c3 누락), 색도 하나만 준다 → 정리가 1:1·색 보정.
+        # c1=GOOD(바로 맞음), c2=BAD(재요청 대상), c3 누락→c2 복사(BAD)→재요청 2회 후 격자 보정.
         payload = {
             "room": {"width": 6.0, "depth": 5.0, "height": 2.8, "walls": {"north": {"color": "#ccc"}}},
             "light": {"kind": "sun", "from": [0, 2.8, -2.5], "to": [0, 0, 0], "labelKo": "북쪽 창문 햇빛"},
             "props": [{"id": "p1", "labelKo": "책상", "shape": "box", "size": [1.5, 0.8, 0.8], "pos": [0, 0.4, 0]}],
             "actors": [
-                {"id": "a1", "name": "교장", "color": "#e6194b", "heightM": 1.72},
+                {"id": "a1", "name": "교장", "color": "#e6194b", "heightM": A1_HEIGHT},
                 {"id": "a2", "name": "학생", "color": "#e6194b", "heightM": 1.6},  # 중복색
             ],
             "timeline": [
-                {"cutId": "c1", "camera": {"pos": [0, 1.5, 4], "target": [0, 1, 0], "fov": 50},
+                {"cutId": "c1", "camera": dict(GOOD_CAM),
                  "actors": [{"id": "a1", "pos": [1, 0, 0], "pose": "sit", "speaking": True},
                             {"id": "a2", "pos": [-1, 0, 1], "pose": "stand"}]},
-                {"cutId": "c2", "camera": {"pos": [2, 1.5, 3], "target": [0, 1, 0], "fov": 40},
+                {"cutId": "c2", "camera": dict(BAD_CAM),
                  "actors": [{"id": "a1", "pos": [1, 0, 0], "pose": "sit"},
                             {"id": "a2", "pos": [-1, 0, 1], "pose": "stand"}]},
             ],
             "notesKo": "교장실 대화",
         }
         return payload, {"model": model, "inputTokens": 10, "outputTokens": 20}
+
+    # 가짜 패널 샷 분석(Claude 분석 체인 대체). 교장실 컷(c1,c2,c3)에 a1(교장) 목표를 둔다.
+    # 거리 컷(c4)은 분석 없음(인물 목표 없음) → fit 에서 건너뛴다.
+    panel_analyze_cuts: list[str] = []
+
+    def fake_analyze_panels(owner_, pid_, plan_id_, groups_, chars_):
+        panel_analyze_cuts.append("called")
+        shot = {
+            "shotSize": "medium",
+            "cameraHeight": "eye",
+            "angle": "front",
+            "subjects": [dict(A1_TARGET, name="교장", facing="camera", visible="full")],
+            "visibleWalls": ["north"],
+            "notesEn": "principal centered",
+        }
+        return {"c1": dict(shot, subjects=[dict(A1_TARGET, name="교장", facing="camera", visible="full")]),
+                "c2": dict(shot, subjects=[dict(A1_TARGET, name="교장", facing="camera", visible="full")]),
+                "c3": dict(shot, subjects=[dict(A1_TARGET, name="교장", facing="camera", visible="full")])}
 
     ledger_calls: list[dict] = []
 
@@ -5820,6 +6095,7 @@ def check_vnew_previz() -> None:
         "pv_STORE": pvmod.STORE,
         "plan_STORE": planmod.STORE,
         "_design": pvmod._design,
+        "_analyze_panels": pvmod._analyze_panels,
         "pv_charge_text": pvmod.vpoc_ledger.charge_text,
         "plan_analyze_conti": planmod._analyze_conti,
         "plan_charge_text": planmod.vpoc_ledger.charge_text,
@@ -5828,6 +6104,7 @@ def check_vnew_previz() -> None:
     pvmod.STORE = fake_store
     planmod.STORE = fake_store
     pvmod._design = fake_design
+    pvmod._analyze_panels = fake_analyze_panels
     pvmod.vpoc_ledger.charge_text = fake_charge_text
     planmod._analyze_conti = fake_analyze_conti
     planmod.vpoc_ledger.charge_text = fake_charge_text
@@ -6107,6 +6384,70 @@ def check_vnew_previz() -> None:
         if len(text_charges) < 2:
             bad.append(f"(원장) 프리비즈 설계 원장이 2건 미만입니다: {len(text_charges)}")
 
+        # --- (h2) 패널 분석 결과 저장·plan_view 포함 ---
+        if not panel_analyze_cuts:
+            bad.append("(h2) 패널 샷 분석(_analyze_panels)이 불리지 않았습니다")
+        panel_shots = pv.get("panelShots") or {}
+        if not isinstance(panel_shots, dict) or "c1" not in panel_shots:
+            bad.append(f"(h2) plan_view.previz.panelShots 에 패널 분석이 없습니다: {list(panel_shots)}")
+        else:
+            shot_c1 = panel_shots.get("c1") or {}
+            if shot_c1.get("shotSize") != "medium" or shot_c1.get("cameraHeight") != "eye" or shot_c1.get("angle") != "front":
+                bad.append(f"(h2) 패널 분석 값이 저장되지 않았습니다: {shot_c1}")
+            if not (shot_c1.get("subjects") or []):
+                bad.append("(h2) 패널 분석 subjects 가 비었습니다")
+
+        # --- (i2) 투영 함수: 알려진 카메라·인물 → 정면 중앙 인물 screenX ≈ 0.5 ---
+        center_cam = {"pos": [0.0, 1.5, 5.0], "target": [0.0, 1.0, 0.0], "fov": 50.0}
+        proj = pvfit.project_actor(center_cam, [0.0, 0.0, 0.0], 1.7)
+        if proj is None:
+            bad.append("(i2) 정면 중앙 인물 투영이 None 입니다")
+        else:
+            if abs(proj["screenX"] - 0.5) > 0.01:
+                bad.append(f"(i2) 정면 중앙 인물 screenX 가 0.5 가 아닙니다: {proj['screenX']}")
+            # 카메라 뒤(+z 쪽, forward 반대)는 화면 밖(None).
+            behind = pvfit.project_point(center_cam, [0.0, 1.0, 10.0])
+            if behind is not None:
+                bad.append(f"(i2) 카메라 뒤 점이 화면 밖(None)이 아닙니다: {behind}")
+
+        # --- (j2) 오차 큰 컷만 Astra 재요청 ---
+        # c1 은 바로 맞음(재요청 없음), c2·c3 은 오차 커서 재요청. c1 이 재요청 목록에 있으면 안 된다.
+        if "c1" in retry_calls:
+            bad.append(f"(j2) 오차가 작은 c1 이 Astra 재요청되었습니다: {retry_calls}")
+        if "c2" not in retry_calls or "c3" not in retry_calls:
+            bad.append(f"(j2) 오차 큰 컷(c2·c3)이 Astra 재요청되지 않았습니다: {retry_calls}")
+
+        fit = pv.get("fit") or {}
+        # c1: 처음부터 맞음 → method astra, 오차 작음.
+        fit_c1 = fit.get("c1") or {}
+        if fit_c1.get("method") != "astra":
+            bad.append(f"(j2) c1 은 재요청 없이 맞아야 합니다(method=astra): {fit_c1}")
+        if float(fit_c1.get("err") or 1.0) > pvfit.POS_THRESHOLD + pvfit.SIZE_THRESHOLD:
+            bad.append(f"(j2) c1 오차가 작지 않습니다: {fit_c1}")
+        # c2: 재요청으로 맞음 → method astra_retry.
+        fit_c2 = fit.get("c2") or {}
+        if fit_c2.get("method") != "astra_retry":
+            bad.append(f"(j2) c2 는 Astra 재요청으로 맞아야 합니다(method=astra_retry): {fit_c2}")
+
+        # --- (k2) 2회 후에도 크면 격자 보정으로 오차 감소 ---
+        fit_c3 = fit.get("c3") or {}
+        if fit_c3.get("method") != "grid":
+            bad.append(f"(k2) c3 은 2회 재요청 후 격자 보정이어야 합니다(method=grid): {fit_c3}")
+        # 격자 보정 전(BAD_CAM) 오차보다 보정 후 오차가 작아야 한다.
+        c3_subjects = [{"foot": A1_FOOT, "heightM": A1_HEIGHT, "target": A1_TARGET}]
+        bad_err = pvfit.cut_error(BAD_CAM, c3_subjects)["err"]
+        if float(fit_c3.get("err") or 9.0) >= bad_err:
+            bad.append(f"(k2) 격자 보정이 오차를 줄이지 못했습니다: 보정후={fit_c3.get('err')} vs 보정전={round(bad_err, 4)}")
+        # c3 이 격자 재요청(c3)을 2회 받았는지(2회 후 격자).
+        if retry_calls.count("c3") < pvmod.FIT_MAX_ASTRA_RETRY:
+            bad.append(f"(k2) c3 재요청이 {pvmod.FIT_MAX_ASTRA_RETRY}회 미만입니다(그 뒤 격자여야 함): {retry_calls}")
+
+        # --- (l2) Astra 지침(_DESIGN_SYSTEM)에 fov·높이 규칙 문장 포함 ---
+        sys_text = pvmod._DESIGN_SYSTEM
+        for needle in ("fov 20-30", "35-45", "50-65", "0.6 m", "1.5 m", "2.3 m", "screenX", "heightFrac"):
+            if needle not in sys_text:
+                bad.append(f"(l2) Astra 지침에 '{needle}' 규칙 문장이 없습니다")
+
         # --- (e) PUT 정리·승인 해제 ---
         # 먼저 승인(scenes 있음) → approved True.
         resp = client.post(f"/api/vnew/p/{pid}/previz/approve")
@@ -6319,6 +6660,7 @@ def check_vnew_previz() -> None:
         pvmod.STORE = orig["pv_STORE"]
         planmod.STORE = orig["plan_STORE"]
         pvmod._design = orig["_design"]
+        pvmod._analyze_panels = orig["_analyze_panels"]
         pvmod.vpoc_ledger.charge_text = orig["pv_charge_text"]
         planmod._analyze_conti = orig["plan_analyze_conti"]
         planmod.vpoc_ledger.charge_text = orig["plan_charge_text"]
@@ -6332,6 +6674,8 @@ def check_vnew_previz() -> None:
             " (c)장소 2개 scene (d)텍스처 키·URL (e)PUT 정리·승인 해제 (f)녹화 변환·길이 400 (g)recordedAll"
             " (h)텍스처 API 200·접두사 밖 404·다른 사용자 404 (i)textureUrl 은 API 경로"
             " (j)frames 3묶음+finish mp4 길이=frames/fps·프레임 정리 (k)중간 묶음 누락 finish 400"
+            " (h2)패널 분석 저장·plan_view 포함 (i2)투영 함수 정면 중앙 screenX≈0.5"
+            " (j2)오차 큰 컷만 Astra 재요청 (k2)2회 후 격자 보정으로 오차 감소 (l2)Astra 지침에 fov·높이 문장"
         )
 
 
