@@ -1279,6 +1279,10 @@ def _place_cameras(owner, pid, scenes, groups, grammar_by_cut, overrides, *, tas
                 "crossed": bool(crossed),
                 "cheats": result.get("cheats") or [],
                 "wallClamped": bool(rfit.get("wallClamped")),
+                "occluded": bool(rfit.get("occluded")),
+                "extraVisible": list(rfit.get("extraVisible") or []),
+                "minBodyGapM": rfit.get("minBodyGapM"),
+                "needsLean": bool(rfit.get("needsLean")),
             }
             if cut_id in overrides:
                 fit[cut_id]["override"] = True
