@@ -64,6 +64,13 @@ MAX_CHEAT_M = 0.6
 HIDE_NEAR_M = 0.4
 # 얼굴이 붙는 샷(키스 등)에서 두 머리 최소 간격(m).
 KISS_HEAD_GAP_M = 0.22
+# 두 배우의 발 위치 평면 거리를 이보다 가깝게 만드는 배우 조정(move)은 금지한다(m).
+# 얼굴이 붙는 샷(키스 KISS_HEAD_GAP)도 발은 이 간격을 지키고, 남는 차이는 그대로 둔다
+# (몸을 기울이는 자세로 얼굴만 붙이는 것은 나중 과제 — fit 에 needsLean:true 로 표시).
+MIN_BODY_GAP_M = 0.45
+# 가림 판정에 쓰는 머리 원 반지름(m)·몸통 폭(m).
+HEAD_RADIUS_M = 0.12
+BODY_WIDTH_M = 0.45
 # 벽 안쪽 여유(m).
 WALL_MARGIN_M = 0.1
 
@@ -394,6 +401,128 @@ def _subject_residual(cam, point_info, top_t, x_t, bottom_key):
     return [top_sp["screenX"] - x_t, top_sp["screenY"] - top_t, bottom_sp["screenY"] - 1.0]
 
 
+# ================================================================ 가림(occlusion) 판정
+
+
+def _screen_span(cam_dict, foot, y_low, y_high, half_width):
+    """blocker 의 (어깨~엉덩이 또는 머리) 투영이 화면에서 차지하는 x 범위·y 범위·깊이.
+
+    몸통은 좌우로 half_width(m) 만큼 퍼져 있으니 중심·좌·우 세 점을 투영해 x 범위를 구한다.
+    카메라 뒤면 None. 반환 {x0,x1,y0,y1,depth}.
+    """
+    # 카메라에서 본 가로 방향(right) 단위 벡터(바닥면).
+    cpos = _vec3(cam_dict.get("pos"))
+    ctgt = _vec3(cam_dict.get("target"))
+    fwd = _norm((ctgt[0] - cpos[0], 0.0, ctgt[2] - cpos[2]))
+    if fwd == (0.0, 0.0, 0.0):
+        fwd = (0.0, 0.0, -1.0)
+    right = _norm((-fwd[2], 0.0, fwd[0]))
+    xs: list[float] = []
+    ys: list[float] = []
+    depths: list[float] = []
+    for s in (-half_width, 0.0, half_width):
+        base = (foot[0] + right[0] * s, 0.0, foot[2] + right[2] * s)
+        for y in (y_low, y_high):
+            sp = project_point(cam_dict, (base[0], y, base[2]))
+            if sp is None:
+                return None
+            xs.append(sp["screenX"])
+            ys.append(sp["screenY"])
+            depths.append(sp["depth"])
+    return {"x0": min(xs), "x1": max(xs), "y0": min(ys), "y1": max(ys), "depth": min(depths)}
+
+
+def _occludes(cam, blocker, subject) -> bool:
+    """카메라에서 볼 때 blocker 가 주인공(subject) 얼굴을 가리는지.
+
+    blocker 의 머리(반지름 HEAD_RADIUS_M)·몸통(폭 BODY_WIDTH_M, 어깨~엉덩이) 투영이 주인공
+    얼굴(머리 원) 투영과 화면에서 겹치고, blocker 가 카메라에 더 가까우면 True.
+
+    cam 은 내부 (pos,yaw,pitch,fov) 또는 {"pos","target","fov"} 둘 다 받는다.
+    blocker·subject 는 _actor_points 가 만든 point_info(또는 foot·y·eyeY 를 가진 딕셔너리).
+    """
+    cam_dict = cam if isinstance(cam, dict) and "target" in cam else _to_camera_dict(cam)
+
+    subj_foot = _world(subject, 0.0)
+    # 주인공 얼굴(머리 원): 눈~정수리 투영 + 반지름.
+    subj_top = project_point(cam_dict, (subj_foot[0], subject["y"]("top"), subj_foot[2]))
+    subj_eye = project_point(cam_dict, (subj_foot[0], subject["eyeY"], subj_foot[2]))
+    if subj_top is None or subj_eye is None:
+        return False
+    subj_depth = min(subj_top["depth"], subj_eye["depth"])
+    sx = (subj_top["screenX"] + subj_eye["screenX"]) / 2.0
+    sy = (subj_top["screenY"] + subj_eye["screenY"]) / 2.0
+    # 머리 원 화면 반지름: 정수리~눈 세로 거리에 HEAD_RADIUS_M 여유를 더해 대략 잡는다.
+    face_r = max(abs(subj_top["screenY"] - subj_eye["screenY"]), 0.02) + 0.03
+
+    blk_foot = _world(blocker, 0.0)
+    # 몸통: 어깨~엉덩이. 머리: 정수리~턱.
+    body = _screen_span(cam_dict, blk_foot, blocker["y"]("hips"), blocker["y"]("shoulder"), BODY_WIDTH_M / 2.0)
+    head = _screen_span(cam_dict, blk_foot, blocker["y"]("chin"), blocker["y"]("top"), HEAD_RADIUS_M)
+    for span in (body, head):
+        if span is None:
+            continue
+        # blocker 가 주인공보다 카메라에 더 가까워야 가린다.
+        if span["depth"] >= subj_depth:
+            continue
+        # 얼굴 원(중심 sx,sy, 반지름 face_r)과 blocker 사각형이 화면에서 겹치는가.
+        nearest_x = min(max(sx, span["x0"]), span["x1"])
+        nearest_y = min(max(sy, span["y0"]), span["y1"])
+        if _hypot2(nearest_x - sx, nearest_y - sy) <= face_r * face_r:
+            return True
+    return False
+
+
+def _hypot2(a, b):
+    return a * a + b * b
+
+
+def _move_to_edge(cam_dict, subject, info, target_screen_x, side_dir):
+    """info(상대)를 카메라 시선 수직 방향으로 옮겨 "가림이 없는" 자리 중 투영 x 가 target_screen_x
+    에 가장 가까운 자리를 고른다.
+
+    우선순위(지시서 051): (1) 0~MAX_CHEAT_M 범위에서 가림이 없고 MIN_BODY_GAP_M 을 지키는 후보들
+    중에서 (2) 투영 x 가 target_screen_x 에 가장 가까운 것. 양쪽 방향 모두 탐색하되 side_dir(그 사람
+    others.side) 쪽을 먼저 본다(동점이면 먼저 찾은 쪽 유지). 가림 없는 후보가 하나도 없으면 None.
+    side_dir: +1/-1. 반환 (best_off_xz, best_x) 또는 None.
+    """
+    subj_foot = _world(subject, 0.0)
+    base_foot = (info["foot"][0], 0.0, info["foot"][2])
+    # 카메라 시선(바닥면)에 수직인 좌우 이동 축.
+    cpos = _vec3(cam_dict.get("pos"))
+    ctgt = _vec3(cam_dict.get("target"))
+    fwd = _norm((ctgt[0] - cpos[0], 0.0, ctgt[2] - cpos[2]))
+    if fwd == (0.0, 0.0, 0.0):
+        fwd = (0.0, 0.0, -1.0)
+    right = _norm((-fwd[2], 0.0, fwd[0]))
+    saved_off = info["off"]
+    best = None
+    best_err = None
+    steps = 24
+    try:
+        for order_dir in (side_dir, -side_dir):
+            for i in range(steps + 1):
+                move = MAX_CHEAT_M * i / steps
+                off = (right[0] * move * order_dir, 0.0, right[2] * move * order_dir)
+                cand_foot = (base_foot[0] + off[0], 0.0, base_foot[2] + off[2])
+                if _planar_dist(cand_foot, subj_foot) < MIN_BODY_GAP_M - 1e-6:
+                    continue
+                sp = project_point(cam_dict, (cand_foot[0], info["eyeY"], cand_foot[2]))
+                if sp is None:
+                    continue
+                # 가림이 없는 후보만 받는다.
+                info["off"] = off
+                if _occludes(cam_dict, info, subject):
+                    continue
+                err = abs(sp["screenX"] - target_screen_x)
+                if best_err is None or err < best_err - 1e-9:
+                    best_err = err
+                    best = (off, sp["screenX"])
+    finally:
+        info["off"] = saved_off
+    return best
+
+
 # ================================================================ place_cut
 
 
@@ -523,20 +652,51 @@ def place_cut(grammar: dict, actors_in_cut: list[dict], room: dict | None, side:
         match = 0.0
         dist = 0.0
 
+    # --- 옮긴 뒤 남은 가림 검사(숨기지 않은 비주인공 전원)·발 간격·기울임 필요 ---
+    hidden_now = {c["actor"] for c in cheats if c.get("type") == "hide"}
+    occluded = False
+    min_gap = None
+    if subject is not None:
+        subj_foot = _world(subject, 0.0)
+        for name, info in people.items():
+            if info is subject:
+                continue
+            if info.get("id") in hidden_now:
+                continue  # 숨긴 사람은 화면에 없으니 가림·간격 대상이 아니다.
+            gap = _planar_dist(_world(info, 0.0), subj_foot)
+            min_gap = gap if min_gap is None else min(min_gap, gap)
+            if _occludes(cam_dict, info, subject):
+                occluded = True
+
+    # 남은 가림이 있으면 match 에 0.5 를 곱해 낮은 컷으로 잡히게 한다.
+    if occluded:
+        match *= 0.5
+
+    # 기울임 필요: 얼굴 붙는 샷(ECU/CU two_shot)에서 발 간격을 지키느라 머리가 KISS_HEAD_GAP 보다
+    # 멀리 남았으면 fit 에 표시(기울이기 자세는 나중 과제).
+    needs_lean = bool(grammar.get("_needsLean"))
+
+    fit = {
+        "match": round(match, 4),
+        "lens": LENS[size][1],
+        "shotSize": size,
+        "distanceM": round(dist, 3),
+        "vantageDeg": VANTAGE_DEG.get(str(grammar.get("vantage") or "3q"), VANTAGE_DEG["3q"]),
+        "side": int(side) if side in (1, -1) else 0,
+        "crossed": crossed,
+        "wallClamped": wall_clamped,
+        "occluded": occluded,
+    }
+    if min_gap is not None:
+        fit["minBodyGapM"] = round(min_gap, 3)
+    if needs_lean:
+        fit["needsLean"] = True
+
     return {
         "camera": cam_dict,
         "actors": out_actors,
         "cheats": cheats,
-        "fit": {
-            "match": round(match, 4),
-            "lens": LENS[size][1],
-            "shotSize": size,
-            "distanceM": round(dist, 3),
-            "vantageDeg": VANTAGE_DEG.get(str(grammar.get("vantage") or "3q"), VANTAGE_DEG["3q"]),
-            "side": int(side) if side in (1, -1) else 0,
-            "crossed": crossed,
-            "wallClamped": wall_clamped,
-        },
+        "fit": fit,
     }
 
 
@@ -557,33 +717,46 @@ def _place_single(grammar, people, subject, partner, side_normal, side, shot_siz
 
     cam = _refine(cam0, fov, residual, _scale(direction, -1.0))
 
-    # 가짜 상대 숨기기/끌어오기.
+    # 가짜 상대 숨기기/끌어오기(비주인공 전원 가림 검사).
     cam_dict = _to_camera_dict(cam)
-    subj_depth = _planar_dist(cam[0], _world(subject, 0.0))
     for name, info in list(people.items()):
         if info is subject:
             continue
         other_spec = others_grammar.get(name)
         how = str((other_spec or {}).get("how") or "")
         actor_id = info.get("id")
-        part_foot = _world(info, 0.0)
-        dcam = _planar_dist(cam[0], part_foot)
-        # 상대의 몸(눈높이)이 화면 가로 안에 들어오고, 카메라에 주인공보다 가까우면(앞에서 가림)
-        # '가린다'로 본다. 세로는 보지 않는다 — 카메라에 가까운 사람은 화면 세로를 다 채운다
-        # (solver2 와 같은 판정: screenX 범위 + 깊이 더 가까움).
-        proj = project_point(cam_dict, (part_foot[0], info["eyeY"], part_foot[2]))
-        in_frame_x = proj is not None and -0.1 < proj["screenX"] < 1.1
-        occludes = in_frame_x and dcam < subj_depth
+        if actor_id is None:
+            continue
         if other_spec is None or how not in EDGE_HOWS:
-            # others 에 없거나 edge 방식이 아니면: 카메라와 0.4m 안이거나 주인공을 가리면 숨긴다.
-            if actor_id is not None and (dcam < HIDE_NEAR_M or occludes):
+            # others 에 없는 사람(화면에 안 나와야 함): 카메라에 너무 가깝거나 주인공을 가리면 숨긴다.
+            dcam = _planar_dist(cam[0], _world(info, 0.0))
+            if dcam < HIDE_NEAR_M or _occludes(cam_dict, info, subject):
                 cheats.append({"type": "hide", "actor": actor_id})
-        elif actor_id is not None and not in_frame_x:
-            # 가장자리에 걸려야 할 상대인데 화면 밖이면 주인공 쪽으로 최대 0.6m 끌어온다.
-            toward = _norm((subject["foot"][0] - info["foot"][0], 0.0, subject["foot"][2] - info["foot"][2]))
-            move = MAX_CHEAT_M
-            info["off"] = _scale(toward, move)
-            cheats.append({"type": "move", "actor": actor_id, "dist": round(move, 3)})
+            continue
+        # others 에 있는 사람(hands_only/partial_edge/shoulder_or_back/lips_or_face_part):
+        # 가리면 카메라 시선 수직 방향으로 가리지 않는 가장 가까운 자리로 옮긴다.
+        side_str = str((other_spec or {}).get("side") or "").strip().lower()
+        screen_x = other_spec.get("screenX")
+        # 화면 가장자리 목표: screenX 0.8 이상이면 오른쪽 가장자리(≈0.85), 0.2 이하면 왼쪽(≈0.15).
+        if isinstance(screen_x, (int, float)) and not isinstance(screen_x, bool):
+            target_x = 0.85 if float(screen_x) >= 0.8 else (0.15 if float(screen_x) <= 0.2 else float(screen_x))
+        else:
+            target_x = 0.85 if side_str == "right" else (0.15 if side_str == "left" else 0.85)
+        # 우선 탐색 방향: others.side 쪽(right=+화면오른쪽). 투영 x 가 큰 쪽으로 가려면 right 축 +.
+        side_dir = 1.0 if target_x >= 0.5 else -1.0
+        # 지금 자리에서 가리지 않으면 옮기지 않는다(있는 그대로 둔다).
+        if not _occludes(cam_dict, info, subject):
+            continue
+        # 가린다면: 0~MAX_CHEAT_M 에서 가림 없고 간격 지키는 후보 중 투영 x 가 target 에 가장 가까운 자리로.
+        moved = _move_to_edge(cam_dict, subject, info, target_x, side_dir)
+        if moved is not None:
+            info["off"] = moved[0]
+            dist_moved = _planar_dist((info["foot"][0] + moved[0][0], 0.0, info["foot"][2] + moved[0][2]), info["foot"])
+            cheats.append({"type": "move", "actor": actor_id, "dist": round(dist_moved, 3)})
+        else:
+            # 가림 없는 후보가 하나도 없으면 숨긴다.
+            info["off"] = (0.0, 0.0, 0.0)
+            cheats.append({"type": "hide", "actor": actor_id, "reason": "occlusion"})
     return cam, [subject["name"]]
 
 
@@ -595,14 +768,20 @@ def _place_two_shot(grammar, people, subject, partner, side_normal, side, shot_s
             return _place_single(grammar, people, subject, partner, side_normal, side, shot_size, bottom, top_y, subject_x, {}, [])
         return _look((0.0, 1.5, 3.0), (0.0, 1.0, 0.0), fov), []
 
-    # 얼굴이 붙는 샷(ECU/CU)은 머리 간격 0.22m 까지 서로 붙인다(closeapex).
+    # 얼굴이 붙는 샷(ECU/CU)은 서로 당기되 발 간격은 MIN_BODY_GAP_M 밑으로 내려가지 않는다
+    # (closeapex). 그 아래로는 못 붙이므로 남는 차이는 그대로 두고 fit 에 needsLean 으로 표시한다.
     if shot_size in ("ECU", "CU"):
         gap = _planar_dist(_world(subject, 0.0), _world(partner, 0.0))
-        move = max(0.0, (gap - KISS_HEAD_GAP_M) / 2.0)
+        target_gap = max(KISS_HEAD_GAP_M, MIN_BODY_GAP_M)
+        move = max(0.0, (gap - target_gap) / 2.0)
         if move > 0:
             dirv = _norm(_sub(_world(partner, 0.0), _world(subject, 0.0)))
             subject["off"] = _scale(dirv, move)
             partner["off"] = _scale(dirv, -move)
+        # 발 간격을 MIN_BODY_GAP 까지밖에 못 좁혀 머리가 KISS_HEAD_GAP 보다 멀면 기울임이 필요하다.
+        final_gap = _planar_dist(_world(subject, 0.0), _world(partner, 0.0))
+        if final_gap > KISS_HEAD_GAP_M + 1e-6:
+            grammar["_needsLean"] = True
 
     sa = _world(subject, 0.0)
     pb = _world(partner, 0.0)

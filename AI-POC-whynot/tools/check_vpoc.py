@@ -7259,6 +7259,16 @@ def check_vnew_previz_camera() -> None:
             if axis_dist < cam.MIN_AXIS_DIST_M - 1e-6:
                 bad.append(f"(pc-f) {cid} 카메라가 인물 몸 축에 {axis_dist:.3f}m 로 너무 붙었습니다")
                 break
+        # (pc-j) 8컷 재현에서 화면에 남은 두 사람 발 간격 ≥ 0.45m, occluded False.
+        feet = [a.get("foot") or [0, 0, 0] for a in result["actors"]]
+        if len(feet) >= 2:
+            gap = _math.hypot(feet[0][0] - feet[1][0], feet[0][2] - feet[1][2])
+            if gap < cam.MIN_BODY_GAP_M - 1e-6:
+                bad.append(f"(pc-j) {cid} 두 사람 발 간격이 0.45m 미만입니다: {gap:.3f}")
+        if fit.get("occluded"):
+            bad.append(f"(pc-j) {cid} 에 가림이 남았습니다(occluded True)")
+        if "minBodyGapM" not in fit and len(result["actors"]) >= 2:
+            bad.append(f"(pc-j) {cid} fit 에 minBodyGapM 이 없습니다")
 
     # ---------------- (pc-e) 클린 싱글 hide / hands_only 숨기지 않음 ----------------
     # 클린 싱글(others 비어 있음): 주인공을 가리는 상대는 hide.
@@ -7300,6 +7310,59 @@ def check_vnew_previz_camera() -> None:
     dirty_hide = {c["actor"] for c in dirty_res["cheats"] if c.get("type") == "hide"}
     if "aB" in dirty_hide:
         bad.append(f"(pc-e) hands_only 상대가 hide 됐습니다: {dirty_res['cheats']}")
+
+    # ---------------- (pc-i) 실측 cut-07 재현: 여의준이 범건우 얼굴을 가리면 안 됨 ----------------
+    # dev 실측(2026-10-21): 범건우(인서트, 주인공)와 여의준(hands_only)이 앉아 마주 본다.
+    # 측정 카메라가 여의준 바로 뒤에서 범건우를 봐, 조정 전에는 여의준이 범건우 얼굴을 가렸다.
+    cut07_cam = {"pos": [-0.9592, 1.1902, -0.9841], "target": [-0.0032, 1.1321, -0.6965], "fov": 15.9}
+    beom_actor = {"id": "aB", "name": B, "heightM": 1.90, "foot": [0.38, 0.0, -0.7], "pose": "sit"}
+    yeo_actor = {"id": "aY", "name": Y, "heightM": 1.76, "foot": [-0.38, 0.0, -0.7], "pose": "sit"}
+    beom_info = cam._actor_points(beom_actor, beom_actor["foot"], "sit")
+    yeo_info = cam._actor_points(yeo_actor, yeo_actor["foot"], "sit")
+    # 측정 카메라에서는 여의준이 범건우를 가린다(버그 재현 — 조정이 필요한 상황이었다).
+    if not cam._occludes(cut07_cam, yeo_info, beom_info):
+        bad.append("(pc-i) 측정 카메라에서 여의준이 범건우를 가리는 상황이 재현되지 않습니다(테스트 전제)")
+    # place_cut 을 돌리면(계산기 카메라·조정) 여의준이 범건우 얼굴을 가리지 않거나(_occludes False) hide 된다.
+    cut07_g = grammar.normalize_grammar(
+        {
+            "mainSubject": B, "frameBottomCut": "belly", "shotType": "insert",
+            "vantage": "front", "faceTurn": "down", "cameraHeight": "low",
+            "headTopY": -0.40, "subjectX": 0.35, "offscreenPartnerSide": "left",
+            "others": [{"name": Y, "how": "hands_only", "side": "left", "screenX": 0.45}],
+        }
+    )
+    cut07_res = cam.place_cut(cut07_g, [dict(beom_actor), dict(yeo_actor)], room, 1)
+    if cut07_res["fit"].get("occluded"):
+        bad.append(f"(pc-i) cut-07 재현에서 여의준이 범건우를 가립니다(occluded True): {cut07_res['cheats']}")
+
+    # ---------------- (pc-k) hands_only screenX 0.85 상대는 오른쪽 가장자리(투영 x ≥ 0.7)로 ----------------
+    # 상대가 주인공을 가리는 자리에 있어도, hands_only·screenX 0.85 면 화면 오른쪽 가장자리로 옮긴다.
+    pk_g = grammar.normalize_grammar(
+        {
+            "mainSubject": Y, "frameBottomCut": "chest", "shotType": "dirty_single",
+            "vantage": "front", "faceTurn": "toward_camera", "cameraHeight": "eye",
+            "headTopY": 0.1, "subjectX": 0.35, "offscreenPartnerSide": "right",
+            "others": [{"name": B, "how": "hands_only", "side": "right", "screenX": 0.85}],
+        }
+    )
+    pk_actors = [
+        {"id": "aY", "name": Y, "heightM": 1.76, "foot": [0.0, 0.0, 0.0], "pose": "stand"},
+        # 상대를 카메라와 주인공 사이(가리는 자리)에 둔다 → 옮겨야 한다.
+        {"id": "aB", "name": B, "heightM": 1.90, "foot": [-0.1, 0.0, 1.0], "pose": "stand"},
+    ]
+    pk_res = cam.place_cut(pk_g, pk_actors, room, 1)
+    pk_cam = pk_res["camera"]
+    pk_b = next((a for a in pk_res["actors"] if a.get("id") == "aB"), None)
+    if pk_b is None:
+        # 가려서 hide 됐다면 pc-k 의 '오른쪽 가장자리로 이동' 요구를 못 지킨 것.
+        bad.append("(pc-k) hands_only screenX 0.85 상대가 이동 대신 hide 됐습니다")
+    else:
+        from src.vnew import previz_fit as _pvf  # noqa: PLC0415
+
+        eye_y = cam.body_y("eye", 1.90, "stand")
+        sp = _pvf.project_point(pk_cam, [pk_b["foot"][0], eye_y, pk_b["foot"][2]])
+        if sp is None or sp["screenX"] < 0.7:
+            bad.append(f"(pc-k) hands_only screenX 0.85 상대 투영 x 가 0.7 이상(오른쪽)이 아닙니다: {sp and round(sp['screenX'], 3)}")
 
     # ---------------- (pc-h) read_cut: 가짜 _read ----------------
     read_seen: list[dict] = []
@@ -7358,6 +7421,8 @@ def check_vnew_previz_camera() -> None:
             "④ 프리비즈 연출 문법·카메라 계산기 검사 (pc-a)normalize clamp·열거 (pc-b)보이는 부분 일치도"
             " (pc-c)실험 8컷 재현 match≥0.9·거리·렌즈 (pc-d)컷1·5·6 crossed (pc-e)클린 싱글 hide·hands_only 유지"
             " (pc-f)몸 축 0.35m 밖 (pc-g)numpy 없음 (pc-h)read_cut 블록·normalize·charge 1회"
+            " (pc-i)cut-07 재현 여의준 범건우 안 가림 (pc-j)8컷 발간격≥0.45·occluded False"
+            " (pc-k)hands_only screenX0.85 상대 오른쪽 가장자리(투영 x≥0.7)"
         )
 
 
