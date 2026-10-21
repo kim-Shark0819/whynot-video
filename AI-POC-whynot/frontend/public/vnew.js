@@ -58,6 +58,7 @@
     plan: null, // 마지막으로 받은 /plan 응답
     planStep: 1, // 지금 보고 있는 단계(1 입력 · 2 대본 · 3 콘티 · 4 영상 · 5 사운드)
     planPollTimer: 0, // ②③ 진행 중 다시 불러오기 타이머
+    progressTicker: 0, // 진행 표시 경과 시간 1초 갱신 타이머
     orderSaveTimer: 0 // ① 순서 저장 디바운스
   };
 
@@ -1311,6 +1312,122 @@
     if (state.planPollTimer) {
       window.clearTimeout(state.planPollTimer);
       state.planPollTimer = 0;
+    }
+  }
+
+  /* ================================================================ 진행 표시(재사용 컴포넌트)
+
+     긴 작업의 진행을 공통으로 보여 주는 조각. 서버 progress({step,done,total,startedAt,updatedAt})를
+     받아 회전 스피너 + 단계 문구 + 진행 막대 + 경과 시간을 그린다. 경과 시간은 1초마다 갱신하고
+     (startProgressTicker), 마지막 갱신(updatedAt)이 3분 넘게 없으면 '응답이 늦어지고 있습니다'를 덧붙인다.
+     공간 카드만이 아니라 다른 긴 작업에도 그대로 쓸 수 있다.
+
+     options(선택): { stepLabels, designSteps } 로 단계 문구를 바꿀 수 있다. 기본은 공간 시트용. */
+
+  var PROGRESS_STALE_MS = 3 * 60 * 1000; // 마지막 갱신이 이보다 오래면 '응답이 늦어지고 있습니다'.
+
+  /* 공간 시트 기본 단계 문구. step → 문구(함수면 done/total 을 받는다). */
+  function locProgressLabel(step, done, total) {
+    if (step === "design") return "공간 설계 중";
+    if (step === "images") return "벽·바닥 그림 그리는 중 " + (done || 0) + "/" + (total || 0);
+    if (step === "sheet") return "4면 시트 합치는 중";
+    if (step === "done") return "마무리 중";
+    return "준비 중";
+  }
+
+  /* 경과 초 → "2분 14초 경과" / "14초 경과". */
+  function formatElapsed(totalSeconds) {
+    var s = Math.max(0, Math.floor(totalSeconds));
+    var mins = Math.floor(s / 60);
+    var secs = s % 60;
+    if (mins > 0) return mins + "분 " + secs + "초 경과";
+    return secs + "초 경과";
+  }
+
+  function parseTime(iso) {
+    if (!iso) return 0;
+    var ms = Date.parse(iso);
+    return isNaN(ms) ? 0 : ms;
+  }
+
+  /* 진행 표시 한 조각. progress 가 없거나 step 이 비면 null(그릴 것 없음).
+     labelFn(step, done, total) 로 단계 문구를 바꿀 수 있다(기본 공간 시트용). */
+  function progressIndicator(progress, labelFn) {
+    progress = progress || {};
+    var step = progress.step || "";
+    if (!step || step === "done") return null; // done 이면 곧 ready — 굳이 안 보인다.
+    var label = labelFn || locProgressLabel;
+    var done = Number(progress.done) || 0;
+    var total = Number(progress.total) || 0;
+    var indeterminate = step === "design" || total <= 0; // 설계 단계는 움직이는 막대.
+
+    var wrap = el("div", "vnew-prog");
+    wrap.setAttribute("data-progress-live", "1");
+    wrap.setAttribute("data-started", progress.startedAt || "");
+    wrap.setAttribute("data-updated", progress.updatedAt || "");
+
+    var top = el("div", "vnew-prog-top");
+    top.appendChild(el("span", "vnew-prog-spinner", ""));
+    top.appendChild(el("span", "vnew-prog-step", label(step, done, total)));
+    wrap.appendChild(top);
+
+    var bar = el("div", "vnew-prog-bar" + (indeterminate ? " is-indeterminate" : ""));
+    var fill = el("div", "vnew-prog-fill");
+    if (!indeterminate) {
+      var pct = total > 0 ? Math.round((done / total) * 100) : 0;
+      fill.style.width = Math.max(0, Math.min(100, pct)) + "%";
+    }
+    bar.appendChild(fill);
+    wrap.appendChild(bar);
+
+    var elapsed = el("div", "vnew-prog-elapsed", "");
+    wrap.appendChild(elapsed);
+
+    // 즉시 한 번 경과 시간을 채우고, 1초 ticker 를 켠다.
+    updateProgressElapsed(wrap);
+    startProgressTicker();
+    return wrap;
+  }
+
+  /* 한 진행 조각의 경과 시간·지연 안내를 지금 시각 기준으로 갱신한다. */
+  function updateProgressElapsed(node) {
+    if (!node) return;
+    var started = parseTime(node.getAttribute("data-started"));
+    var updated = parseTime(node.getAttribute("data-updated"));
+    var now = Date.now();
+    var elapsed = node.querySelector(".vnew-prog-elapsed");
+    if (!elapsed) return;
+    var text = started ? formatElapsed((now - started) / 1000) : "";
+    if (updated && now - updated > PROGRESS_STALE_MS) {
+      elapsed.textContent = text + " · 응답이 늦어지고 있습니다";
+      elapsed.classList.add("is-stale");
+    } else {
+      elapsed.textContent = text;
+      elapsed.classList.remove("is-stale");
+    }
+  }
+
+  /* 1초마다 화면의 모든 진행 조각 경과 시간을 갱신한다. 조각이 하나도 없으면 스스로 멈춘다. */
+  function startProgressTicker() {
+    if (state.progressTicker) return;
+    state.progressTicker = window.setInterval(function () {
+      if (!state.mounted) {
+        stopProgressTicker();
+        return;
+      }
+      var nodes = document.querySelectorAll("[data-progress-live]");
+      if (!nodes.length) {
+        stopProgressTicker();
+        return;
+      }
+      for (var i = 0; i < nodes.length; i++) updateProgressElapsed(nodes[i]);
+    }, 1000);
+  }
+
+  function stopProgressTicker() {
+    if (state.progressTicker) {
+      window.clearInterval(state.progressTicker);
+      state.progressTicker = 0;
     }
   }
 
@@ -2657,7 +2774,12 @@
     item.appendChild(header);
 
     if (loc.status === "building" || (loc.task || {}).status === "running") {
-      item.appendChild(el("p", "vnew-loc-building", "공간 시트를 만들고 있습니다…"));
+      var prog = progressIndicator(loc.progress);
+      if (prog) {
+        item.appendChild(prog);
+      } else {
+        item.appendChild(el("p", "vnew-loc-building", "공간 시트를 만들고 있습니다…"));
+      }
     }
     if (loc.status === "failed" && loc.error) {
       item.appendChild(el("p", "vnew-plan-error", loc.error));
@@ -4251,6 +4373,7 @@
       state.mounted = false;
       stopPolling();
       stopPlanPolling();
+      stopProgressTicker();
       if (state.orderSaveTimer) {
         window.clearTimeout(state.orderSaveTimer);
         state.orderSaveTimer = 0;
