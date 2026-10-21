@@ -1329,7 +1329,10 @@
   /* 공간 시트 기본 단계 문구. step → 문구(함수면 done/total 을 받는다). */
   function locProgressLabel(step, done, total) {
     if (step === "design") return "공간 설계 중";
+    if (step === "facts") return "웹툰에서 사실 읽는 중";
+    if (step === "prompts") return "상세 프롬프트 작성 중";
     if (step === "images") return "벽·바닥 그림 그리는 중 " + (done || 0) + "/" + (total || 0);
+    if (step === "verify") return "웹툰과 비교·보정 중";
     if (step === "sheet") return "4면 시트 합치는 중";
     if (step === "done") return "마무리 중";
     return "준비 중";
@@ -1359,7 +1362,8 @@
     var label = labelFn || locProgressLabel;
     var done = Number(progress.done) || 0;
     var total = Number(progress.total) || 0;
-    var indeterminate = step === "design" || total <= 0; // 설계 단계는 움직이는 막대.
+    // 그림 단계(images)만 done/total 막대. 설계·사실·프롬프트·비교는 움직이는 막대.
+    var indeterminate = step !== "images" || total <= 0;
 
     var wrap = el("div", "vnew-prog");
     wrap.setAttribute("data-progress-live", "1");
@@ -2788,6 +2792,13 @@
     // 4면 시트(실사·웹툰 탭). ready 인 그림체만 이미지를 보인다.
     item.appendChild(locationSheet(loc));
 
+    // 벽별 "웹툰과 일치/보정함" 배지(비교·보정 결과).
+    var badges = locationCheckBadges(loc);
+    if (badges) item.appendChild(badges);
+
+    // 추출된 사실(벽별 물건) 접어서 보기·수정. 수정하면 그 사실로 프롬프트를 다시 쓴다.
+    item.appendChild(locationFactsEditor(loc, showError));
+
     // 벽 설명·빛 편집.
     item.appendChild(locationDesignEditor(loc, showError));
 
@@ -2835,6 +2846,165 @@
     }
     wrap.appendChild(views);
     return wrap;
+  }
+
+  /* 벽별 "웹툰과 일치/보정함" 배지. 활성 그림체(또는 real)의 checks[side] 를 읽는다.
+     checks[side] = {matches, fixedEn, fixesEn}. 비교 결과가 하나도 없으면 null. */
+  function locationCheckBadges(loc) {
+    var variants = loc.variants || {};
+    var active = loc._activeVariant || "real";
+    var v = variants[active] || {};
+    var checks = v.checks || {};
+    var sides = ["north", "east", "south", "west"];
+    var sideLabels = { north: "정면(N)", east: "오른쪽(E)", south: "뒤(S)", west: "왼쪽(W)" };
+    var any = sides.some(function (s) {
+      return checks[s];
+    });
+    if (!any) return null;
+    var wrap = el("div", "vnew-loc-badges");
+    wrap.appendChild(el("span", "vnew-loc-badges-label", "웹툰 비교:"));
+    sides.forEach(function (side) {
+      var chk = checks[side];
+      if (!chk) return;
+      var corrected = chk.matches === false;
+      var text = sideLabels[side] + " " + (corrected ? "보정함" : "일치");
+      var badge = el("span", "vnew-loc-badge " + (corrected ? "is-corrected" : "is-match"), text);
+      if (corrected && (chk.fixesEn || []).length) {
+        badge.title = (chk.fixesEn || []).join("\n");
+      }
+      wrap.appendChild(badge);
+    });
+    return wrap;
+  }
+
+  /* 추출된 사실(벽별 물건) 접어서 보기·수정. 수정하면 PUT /locations/<lid> {facts:{...}} 로 저장하고
+     다음 [다시 만들기] 때 그 사실로 프롬프트를 다시 쓴다(factsEditedAt). */
+  function locationFactsEditor(loc, showError) {
+    var facts = loc.facts || {};
+    var walls = facts.walls || {};
+    var editor = el("details", "vnew-loc-facts");
+    editor.appendChild(el("summary", "vnew-loc-facts-summary", "추출된 사실(벽별 물건) 보기·수정"));
+
+    var sides = ["north", "east", "south", "west"];
+    var sideLabels = { north: "정면(N)", east: "오른쪽(E)", south: "뒤(S)", west: "왼쪽(W)" };
+    var hasAny = sides.some(function (s) {
+      var w = walls[s] || {};
+      return (w.objects || []).length || w.wallMaterialEn || w.wallColorEn;
+    });
+    if (!hasAny) {
+      editor.appendChild(el("p", "vnew-hint", "아직 사실이 없습니다. 공간 시트를 만들면 웹툰에서 벽별 물건을 읽어 정리합니다."));
+      return editor;
+    }
+
+    // 편집 패치를 쌓는다. 각 벽의 재질·물건(종류·수·색·재질·위치·크기)을 한 줄 입력으로 편집한다.
+    var patch = { facts: { walls: {} } };
+
+    sides.forEach(function (side) {
+      var wall = walls[side] || {};
+      var block = el("div", "vnew-loc-facts-wall");
+      var head = el("div", "vnew-loc-facts-wall-head");
+      head.appendChild(el("span", "vnew-loc-facts-wall-name", sideLabels[side]));
+      if (wall.estimated) head.appendChild(el("span", "vnew-loc-facts-est", "추정"));
+      block.appendChild(head);
+
+      patch.facts.walls[side] = {};
+
+      // 벽 재질·색.
+      var matField = el("label", "vnew-field");
+      matField.appendChild(el("span", "vnew-field-label", "벽 재질·색"));
+      var matInput = el("input", "vnew-field-input");
+      matInput.type = "text";
+      matInput.value = [(wall.wallColorEn || ""), (wall.wallMaterialEn || "")].filter(Boolean).join(" ");
+      matInput.addEventListener("input", function () {
+        var parts = (matInput.value || "").trim().split(/\s+/);
+        patch.facts.walls[side].wallColorEn = parts.length > 1 ? parts.shift() : "";
+        patch.facts.walls[side].wallMaterialEn = parts.join(" ");
+      });
+      matField.appendChild(matInput);
+      block.appendChild(matField);
+
+      // 물건 목록(한 줄에 하나: "종류 | 수 | 색 | 재질 | 위치 | 크기").
+      var objField = el("label", "vnew-field");
+      objField.appendChild(el("span", "vnew-field-label", "물건(한 줄에 하나: 종류 | 수 | 색 | 재질 | 위치 | 크기)"));
+      var objArea = el("textarea", "vnew-field-input vnew-loc-facts-objects");
+      objArea.rows = Math.max(2, (wall.objects || []).length + 1);
+      objArea.value = (wall.objects || [])
+        .map(function (o) {
+          return [o.kind, o.count, o.colorEn, o.materialEn, o.position, o.sizeEn].join(" | ");
+        })
+        .join("\n");
+      objArea.addEventListener("input", function () {
+        patch.facts.walls[side].objects = parseFactsObjects(objArea.value);
+      });
+      objField.appendChild(objArea);
+      block.appendChild(objField);
+
+      editor.appendChild(block);
+    });
+
+    // 바닥·천장·빛·시대·나라.
+    var extra = el("div", "vnew-loc-facts-extra");
+    [
+      { key: "floorEn", label: "바닥(색·재질·패턴)" },
+      { key: "ceilingEn", label: "천장" },
+      { key: "lightEn", label: "빛(방향·색온도·세기)" },
+      { key: "eraEn", label: "시대" },
+      { key: "countryEn", label: "나라" }
+    ].forEach(function (row) {
+      var field = el("label", "vnew-field");
+      field.appendChild(el("span", "vnew-field-label", row.label));
+      var input = el("input", "vnew-field-input");
+      input.type = "text";
+      input.value = facts[row.key] || "";
+      input.addEventListener("input", function () {
+        patch.facts[row.key] = input.value;
+      });
+      field.appendChild(input);
+      extra.appendChild(field);
+    });
+    editor.appendChild(extra);
+
+    var saveBtn = el("button", "outline-button", "사실 저장(다시 만들 때 반영)");
+    saveBtn.type = "button";
+    saveBtn.addEventListener("click", function () {
+      saveBtn.disabled = true;
+      api("/api/vnew/p/" + encodeURIComponent(state.projectId) + "/locations/" + encodeURIComponent(loc.id), {
+        method: "PUT",
+        body: JSON.stringify(patch)
+      })
+        .then(function (plan) {
+          state.plan = plan;
+          renderPlan();
+        })
+        .catch(function (err) {
+          saveBtn.disabled = false;
+          if (showError) showError("저장하지 못했습니다: " + errMessage(err));
+        });
+    });
+    editor.appendChild(saveBtn);
+    return editor;
+  }
+
+  /* "종류 | 수 | 색 | 재질 | 위치 | 크기" 한 줄씩을 물건 객체 배열로 바꾼다. 빈 줄·종류 없는 줄은 뺀다. */
+  function parseFactsObjects(text) {
+    var out = [];
+    (text || "").split("\n").forEach(function (line) {
+      var parts = line.split("|").map(function (p) {
+        return (p || "").trim();
+      });
+      var kind = parts[0] || "";
+      if (!kind) return;
+      out.push({
+        kind: kind,
+        count: Number(parts[1]) || 1,
+        colorEn: parts[2] || "",
+        materialEn: parts[3] || "",
+        position: parts[4] || "center mid",
+        sizeEn: parts[5] || "",
+        attachedTo: "wall"
+      });
+    });
+    return out;
   }
 
   /* 벽 설명·빛 편집. 저장은 PUT /locations/<lid>. 저장 뒤 [다시 만들기] 로 반영. */
@@ -3253,6 +3423,113 @@
     return flat;
   }
 
+  /* 패널 분석 열거값 → 한국어 라벨(읽기 전용 표시용). */
+  var SHOT_SIZE_LABELS = {
+    extreme_close: "익스트림 클로즈업",
+    close: "클로즈업",
+    medium_close: "미디엄 클로즈업",
+    medium: "미디엄",
+    full: "풀샷",
+    wide: "와이드"
+  };
+  var CAMERA_HEIGHT_LABELS = { low: "로우(아래에서)", eye: "눈높이", high: "하이(위에서)", top: "탑(수직)" };
+  var SHOT_ANGLE_LABELS = {
+    front: "정면",
+    three_quarter_left: "좌 3/4",
+    three_quarter_right: "우 3/4",
+    side_left: "좌측면",
+    side_right: "우측면",
+    back: "뒷면",
+    over_shoulder: "오버숄더"
+  };
+
+  /* 투영 오차(fit.err)를 '시점 일치도' 배지로. 오차가 작을수록 좋음.
+     err 는 위치(screenX/Y) + 크기(heightFrac) 오차 합(대략 0~1 이상). %는 (1-err) 로 표시. */
+  function fidelityBadge(fitEntry) {
+    var badge = el("span", "vnew-previz-fit-badge");
+    if (!fitEntry) {
+      badge.classList.add("vnew-previz-fit-none");
+      badge.textContent = "일치도 —";
+      return badge;
+    }
+    var err = Number(fitEntry.err) || 0;
+    var pct = Math.max(0, Math.min(100, Math.round((1 - err) * 100)));
+    var label;
+    if (err <= 0.12) {
+      badge.classList.add("vnew-previz-fit-good");
+      label = "좋음";
+    } else if (err <= 0.3) {
+      badge.classList.add("vnew-previz-fit-ok");
+      label = "보통";
+    } else {
+      badge.classList.add("vnew-previz-fit-bad");
+      label = "다름";
+    }
+    badge.textContent = "시점 일치도 " + pct + "% · " + label;
+    badge.title =
+      "웹툰 패널과 카메라 투영의 오차 " + err.toFixed(3) +
+      " (보정 방법: " + (fitEntry.method || "astra") + ")";
+    return badge;
+  }
+
+  /* 컷 편집 패널 상단: 웹툰 패널 썸네일 + 시점 일치도 배지 + 패널 분석(읽기 전용). */
+  function previzPanelMatchCard(cut, previz) {
+    var card = el("div", "vnew-previz-edit-card vnew-previz-panel-match");
+    var cutId = cut && cut.cutId;
+    var panelShots = (previz && previz.panelShots) || {};
+    var fit = (previz && previz.fit) || {};
+    var shot = panelShots[cutId];
+
+    var head = el("div", "vnew-previz-actor-head");
+    head.appendChild(el("strong", "vnew-previz-edit-head", "웹툰 패널"));
+    head.appendChild(fidelityBadge(fit[cutId]));
+    card.appendChild(head);
+
+    // 썸네일(같은 출처 패널 API). 없으면 조용히 생략.
+    if (cutId) {
+      var thumb = el("img", "vnew-previz-panel-thumb");
+      thumb.alt = "웹툰 패널";
+      thumb.style.display = "none";
+      var apiUrl =
+        "/api/vnew/p/" + encodeURIComponent(state.projectId) +
+        "/previz/panel?cutId=" + encodeURIComponent(cutId);
+      previzTextureFetch(apiUrl).then(function (objectUrl) {
+        if (objectUrl) {
+          thumb.src = objectUrl;
+          thumb.style.display = "";
+          thumb.addEventListener("click", function () {
+            openLightbox(objectUrl, "웹툰 패널");
+          });
+        }
+      });
+      card.appendChild(thumb);
+    }
+
+    // 패널 분석(읽기 전용)
+    if (shot) {
+      var dl = el("div", "vnew-previz-panel-analysis");
+      dl.appendChild(
+        el("p", "vnew-previz-panel-line",
+          "샷: " + (SHOT_SIZE_LABELS[shot.shotSize] || shot.shotSize || "—") +
+          " · 높이: " + (CAMERA_HEIGHT_LABELS[shot.cameraHeight] || shot.cameraHeight || "—") +
+          " · 각도: " + (SHOT_ANGLE_LABELS[shot.angle] || shot.angle || "—"))
+      );
+      (shot.subjects || []).forEach(function (s) {
+        dl.appendChild(
+          el("p", "vnew-previz-panel-subj",
+            "· " + (s.name || "인물") +
+            " (화면 " + Math.round((Number(s.screenX) || 0) * 100) + "%, " +
+            Math.round((Number(s.screenY) || 0) * 100) + "%, 크기 " +
+            Math.round((Number(s.heightFrac) || 0) * 100) + "%)")
+        );
+      });
+      card.appendChild(dl);
+    } else {
+      card.appendChild(el("p", "vnew-hint", "이 컷의 웹툰 패널 분석이 없습니다."));
+    }
+    return card;
+  }
+
   function renderPrevizStep(host) {
     var plan = state.plan || {};
     var previz = plan.previz || {};
@@ -3468,6 +3745,9 @@
       var scene = item.scene;
       var cut = item.cut;
       right.appendChild(el("h3", "vnew-previz-panel-title", "컷 " + (previzCutIndex + 1) + " 편집"));
+
+      // 웹툰 패널 썸네일 + 시점 일치도 배지 + 패널 분석(읽기 전용)
+      right.appendChild(previzPanelMatchCard(cut, previz));
 
       // 카메라
       var camCard = el("div", "vnew-previz-edit-card");

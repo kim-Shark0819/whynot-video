@@ -32,6 +32,7 @@ import threading
 from datetime import datetime, timezone
 
 from .. import stitcher
+from ..vpoc import images as vpoc_images
 from ..vpoc import ledger as vpoc_ledger
 from ..vpoc import llm as vpoc_llm
 from ..vpoc import settings as vpoc_settings
@@ -39,6 +40,7 @@ from ..vpoc.errors import VpocError, now_iso
 from ..vpoc.store import STORE
 from ..vpoc import store as vpoc_store
 
+from . import previz_fit
 from . import previz_schema
 from . import settings as vnew_settings
 
@@ -70,6 +72,23 @@ FRAME_FPS_MIN = 1
 FRAME_FPS_MAX = 60
 # design task 가 이 시간을 넘게 running 이면 멈춘 것으로 본다(조회 때 failed).
 TASK_STALL_S = 1800
+
+# --- 패널 샷 분석(Claude 분석 체인) · 투영 검산(설계자 2026-10-21, 지시서 045) ---
+# 컷마다 그 컷 panels 웹툰 조각을 Claude(분석 모델)에 보내 샷(크기·높이·각도·인물 화면 좌표)을
+# 읽는다. Astra 는 이미지 읽기가 약하므로(과거 실측) 이미지 분석은 Claude 가 맡고, Astra 는
+# 그 분석을 좌표화만 한다.
+PANEL_ANALYZE_MODEL = vnew_settings.ANALYZE_FALLBACK_MODEL
+# 한 컷 분석에 보낼 웹툰 조각 최대 장수(말풍선 많은 조각보다 그림 큰 조각 우선).
+MAX_PANEL_TILES = 2
+# 투영 오차가 임계를 넘는 컷은 그 컷 camera 만 Astra 에 다시 받는다. 최대 재요청 횟수.
+FIT_MAX_ASTRA_RETRY = 2
+# 샷 크기 → 권장 fov(도) 범위·인물 키 화면 비율(heightFrac) 대략치. 지침·기본값에 쓴다.
+SHOT_SIZES = ("extreme_close", "close", "medium_close", "medium", "full", "wide")
+CAMERA_HEIGHTS = ("low", "eye", "high", "top")
+SHOT_ANGLES = (
+    "front", "three_quarter_left", "three_quarter_right",
+    "side_left", "side_right", "back", "over_shoulder",
+)
 
 # 받을 수 있는 녹화 Content-Type.
 RECORDING_CONTENT_TYPES = ("video/webm", "video/mp4")
@@ -153,6 +172,42 @@ def texture_bytes(owner: str, pid: str, key: str) -> tuple[bytes, str]:
     return body, texture_content_type(key)
 
 
+def panel_api_path(pid: str, cut_id: str) -> str:
+    """같은 출처 패널 썸네일 API 경로(컷의 웹툰 조각). 프론트가 이 경로로 받는다."""
+    if not cut_id:
+        return ""
+    from urllib.parse import quote, urlencode  # noqa: PLC0415
+
+    return f"/api/vnew/p/{quote(str(pid), safe='')}/previz/panel?" + urlencode({"cutId": cut_id})
+
+
+def panel_thumb_bytes(owner: str, pid: str, cut_id: str) -> tuple[bytes, str]:
+    """한 컷의 웹툰 패널 조각(분석에 쓴 그림 큰 조각 첫 장)을 (바이트, Content-Type)로 돌려준다.
+
+    콘티에서 그 컷 panels(타일 번호)를 찾아 _cut_tiles 로 그림이 큰 조각을 고른다. 없으면 404.
+    """
+    from . import plan as plan_mod  # noqa: PLC0415
+
+    cut_id = str(cut_id or "").strip()
+    if not cut_id:
+        raise VpocError("vnew.previz.panel", "NotFound", "패널을 찾을 수 없습니다.", 404)
+    try:
+        data, _ = plan_mod.load_plan(owner, pid)
+    except Exception as exc:  # noqa: BLE001
+        raise VpocError("vnew.previz.panel", "NotFound", "패널을 찾을 수 없습니다.", 404) from exc
+    cut = None
+    for c in (data.get("conti") or {}).get("cuts") or []:
+        if str(c.get("id") or "") == cut_id:
+            cut = c
+            break
+    if cut is None:
+        raise VpocError("vnew.previz.panel", "NotFound", "패널을 찾을 수 없습니다.", 404)
+    tiles = _cut_tiles(cut.get("panels") or [], _all_tiles(owner, pid))
+    if not tiles:
+        raise VpocError("vnew.previz.panel", "NotFound", "패널을 찾을 수 없습니다.", 404)
+    return tiles[0], "image/jpeg"
+
+
 # ================================================================ 저장 틀
 
 
@@ -164,6 +219,8 @@ def new_previz() -> dict:
         "model": "",
         "revision": 0,  # 콘티·장면이 바뀔 때마다 올린다(녹화 키 경로·승인 해제 기준).
         "scenes": [],  # previz_schema.normalize_scenes 결과
+        "panelShots": {},  # cutId -> 웹툰 패널 샷 분석(Claude) {shotSize, cameraHeight, angle, subjects, ...}
+        "fit": {},  # cutId -> {err, posErr, sizeErr, method} 투영 검산 결과
         "approved": False,
         "recordings": {},  # segId -> {status, key, seconds}
         "task": _empty_task(),
@@ -189,6 +246,124 @@ def _design(blocks: list[dict], *, model: str) -> tuple[dict, dict]:
     )
 
 
+def _analyze_panel(blocks: list[dict], *, model: str) -> tuple[dict, dict]:
+    """Claude 분석 체인으로 웹툰 패널 샷 JSON 을 받는다. (payload, usage{..model}).
+
+    Astra 는 이미지 읽기가 약하므로(과거 실측) 패널(이미지)에서 샷 크기·카메라 높이·각도·인물
+    화면 좌표를 읽는 일은 Claude(분석 모델)가 맡는다. 검사가 이 함수를 가짜로 바꿔 끼운다.
+    """
+    return vpoc_llm._converse(  # noqa: SLF001 — 공개 래퍼가 없어 내부 함수를 쓴다
+        system_text=_PANEL_SYSTEM,
+        blocks=blocks,
+        tool=_PANEL_TOOL,
+        max_tokens=1200,
+        where="vnew.previz.panel",
+        model=model,
+    )
+
+
+# ================================================================ 패널 샷 분석 스키마(Claude)
+
+_PANEL_SYSTEM = (
+    "You read ONE webtoon cut (one or two drawn panels of the same moment) and report the camera shot "
+    "so a 3D layout artist can place a matching camera. Answer ONLY by calling emit_shot exactly once. "
+    "shotSize is how close the camera is: extreme_close (eyes/mouth), close (head and shoulders), "
+    "medium_close (head to chest), medium (waist up), full (whole body), wide (body small in a large "
+    "space). cameraHeight is where the camera is relative to the subject: low (below, looking up), eye "
+    "(level), high (above, looking down), top (straight down). angle is which side of the subject faces "
+    "the camera: front, three_quarter_left, three_quarter_right, side_left, side_right, back, "
+    "over_shoulder. For every visible person give subjects:[{name, screenX 0..1 (0=left,1=right), "
+    "screenY 0..1 for the TOP OF THE HEAD (0=top of frame,1=bottom), heightFrac 0..1 (the person's "
+    "on-screen height divided by the full frame height), facing (camera|left|right|away), visible "
+    "(full|waist_up|head)}]. Use the names the user gives (the role names) when you can match a person; "
+    "otherwise use a short label. visibleWalls lists which room walls are seen (north/east/south/west). "
+    "notesEn is one short English sentence. Report only what is drawn; do not invent people."
+)
+
+_PANEL_SUBJECT = {
+    "type": "object",
+    "properties": {
+        "name": {"type": "string"},
+        "screenX": {"type": "number"},
+        "screenY": {"type": "number"},
+        "heightFrac": {"type": "number"},
+        "facing": {"type": "string"},
+        "visible": {"type": "string"},
+    },
+}
+
+_PANEL_TOOL = {
+    "name": "emit_shot",
+    "description": "Report the camera shot (size, height, angle) and each person's on-screen position for one webtoon cut.",
+    "inputSchema": {
+        "json": {
+            "type": "object",
+            "properties": {
+                "shotSize": {"type": "string"},
+                "cameraHeight": {"type": "string"},
+                "angle": {"type": "string"},
+                "subjects": {"type": "array", "items": _PANEL_SUBJECT},
+                "visibleWalls": {"type": "array", "items": {"type": "string"}},
+                "notesEn": {"type": "string"},
+            },
+            "required": ["shotSize", "cameraHeight", "angle"],
+        }
+    },
+}
+
+
+def _normalize_shot(payload: dict) -> dict:
+    """패널 샷 분석 출력을 정리한다(열거값 보정·숫자 0..1 클램프·subjects 정리)."""
+    payload = payload if isinstance(payload, dict) else {}
+
+    def _clamp01(value, default):
+        try:
+            v = float(value)
+        except (TypeError, ValueError):
+            return float(default)
+        return max(0.0, min(1.0, v))
+
+    shot_size = str(payload.get("shotSize") or "").strip().lower()
+    if shot_size not in SHOT_SIZES:
+        shot_size = "medium"
+    camera_height = str(payload.get("cameraHeight") or "").strip().lower()
+    if camera_height not in CAMERA_HEIGHTS:
+        camera_height = "eye"
+    angle = str(payload.get("angle") or "").strip().lower()
+    if angle not in SHOT_ANGLES:
+        angle = "front"
+
+    subjects: list[dict] = []
+    for item in payload.get("subjects") or []:
+        if not isinstance(item, dict):
+            continue
+        facing = str(item.get("facing") or "").strip().lower()
+        if facing not in ("camera", "left", "right", "away"):
+            facing = "camera"
+        visible = str(item.get("visible") or "").strip().lower()
+        if visible not in ("full", "waist_up", "head"):
+            visible = "full"
+        subjects.append(
+            {
+                "name": str(item.get("name") or "").strip(),
+                "screenX": round(_clamp01(item.get("screenX"), 0.5), 3),
+                "screenY": round(_clamp01(item.get("screenY"), 0.3), 3),
+                "heightFrac": round(_clamp01(item.get("heightFrac"), 0.5), 3),
+                "facing": facing,
+                "visible": visible,
+            }
+        )
+    walls = [str(w).strip().lower() for w in (payload.get("visibleWalls") or []) if str(w).strip().lower() in previz_schema.SIDES]
+    return {
+        "shotSize": shot_size,
+        "cameraHeight": camera_height,
+        "angle": angle,
+        "subjects": subjects,
+        "visibleWalls": walls,
+        "notesEn": str(payload.get("notesEn") or "").strip(),
+    }
+
+
 # ================================================================ 도구 스키마(Astra)
 
 _DESIGN_SYSTEM = (
@@ -211,6 +386,17 @@ _DESIGN_SYSTEM = (
     "moveTo?, gesture?, speaking}]}. Within a cut the camera may move linearly via moveTo. When a cut "
     "changes, ONLY the camera changes — the room, props, and actor positions carry over (actors move only "
     "via moveTo/walk). Place actors to match the webtoon panels and the script positions. "
+    "CAMERA FITTING (very important — the mannequin video must match the webtoon panel composition): for "
+    "each cut you are given a PANEL SHOT read from the webtoon (shot size, camera height, angle and, for "
+    "each subject, the on-screen position screenX 0..1 left-to-right, screenY 0..1 top-to-bottom for the "
+    "top of the head, and heightFrac 0..1 = the person's on-screen height as a fraction of the frame). "
+    "Place the camera so that each listed subject appears at that (screenX, screenY) with that heightFrac "
+    "of the 16:9 frame. Use fov 20-30 for extreme_close/close shots, 35-45 for medium shots, 50-65 for "
+    "full/wide shots. Camera height above the floor is about 0.6 m for 'low', 1.5 m for 'eye', 2.3 m for "
+    "'high', and near the ceiling looking down for 'top'. The angle tells you from which side of the "
+    "subject the camera looks (front = the subject faces the camera; three_quarter/side/back/over_shoulder "
+    "turn the camera around the subject). Keep the room, props and actor positions consistent across cuts — "
+    "only the camera changes unless the script says someone moves. "
     "Write Korean for notesKo. Do not add text outside the tool."
 )
 
@@ -433,7 +619,14 @@ def start_design(owner: str, pid: str) -> str:
 
 
 def run_design(owner: str, pid: str, task_id: str) -> None:
-    """프리비즈 설계(백그라운드). 장소별(연속 컷)로 Astra 에 장면 JSON 을 받아 정리·저장한다."""
+    """프리비즈 설계(백그라운드). 흐름(설계자 2026-10-21, 지시서 045):
+
+    1) 컷마다 웹툰 패널을 Claude 분석 체인에 보내 샷(크기·높이·각도·인물 화면 좌표)을 읽는다.
+    2) 그 panelShots 를 넣어 Astra 에 장소별 장면 JSON 을 받는다(좌표화 지침 포함).
+    3) previz_fit 로 컷별 투영 오차를 재서, 임계를 넘는 컷만 '현재 vs 목표'를 주고 그 컷 camera 만
+       다시 받는다(최대 2회). 그래도 크면 격자 보정(결정적)으로 카메라 pos 를 옮긴다.
+    4) panelShots·fit 를 저장한다.
+    """
     from . import plan as plan_mod  # noqa: PLC0415
 
     try:
@@ -447,6 +640,10 @@ def run_design(owner: str, pid: str, task_id: str) -> None:
         plan_id = str(plan.get("planId") or "")
         script = plan.get("script") or {}
         chars = (plan.get("input") or {}).get("characters") or []
+
+        # 1) 패널 샷 분석(Claude). cutId → shot.
+        panel_shots = _analyze_panels(owner, pid, plan_id, groups, chars)
+
         raw_scenes: list[dict] = []
         scene_specs: list[dict] = []
         used_model = ""
@@ -459,7 +656,8 @@ def run_design(owner: str, pid: str, task_id: str) -> None:
             cut_specs = [{"cutId": c["cutId"], "seconds": c["seconds"]} for c in group["cuts"]]
             scene_specs.append({"locationId": location_id, "cuts": cut_specs, "textures": textures})
 
-            blocks = [{"text": _design_prompt(name_en, loc, group["cuts"], script, chars)}]
+            # 2) Astra 설계(panelShots 포함).
+            blocks = [{"text": _design_prompt(name_en, loc, group["cuts"], script, chars, panel_shots)}]
             payload, model = _design_scene(owner, pid, plan_id, blocks)
             used_model = model or used_model
             payload = payload if isinstance(payload, dict) else {}
@@ -467,7 +665,13 @@ def run_design(owner: str, pid: str, task_id: str) -> None:
             raw_scenes.append(payload)
 
         scenes = previz_schema.normalize_scenes(raw_scenes, scene_specs=scene_specs)
-        _commit_scenes(owner, pid, task_id, scenes, used_model)
+
+        # 3) 투영 검산 → 재요청/격자 보정. scenes 를 그 자리에서 고치고 fit 를 만든다.
+        fit = _fit_scenes(
+            owner, pid, plan_id, scenes, groups, scene_specs, panel_shots, script, chars, plan
+        )
+
+        _commit_scenes(owner, pid, task_id, scenes, used_model, panel_shots=panel_shots, fit=fit)
     except Exception as exc:  # noqa: BLE001
         log.warning("vnew.previz.run_design.failed pid=%s err=%s", pid, str(exc)[:300])
         message = exc.message if isinstance(exc, VpocError) else str(exc)[:300]
@@ -488,14 +692,206 @@ def _design_scene(owner: str, pid: str, plan_id: str, blocks: list[dict]) -> tup
     raise VpocError("vnew.previz.design", "DesignFailed", "장면 설계에 실패했습니다.", 502)
 
 
-def _design_prompt(name_en: str, loc: dict | None, cuts: list[dict], script: dict, chars: list[dict]) -> str:
-    """한 장소(연속 컷)의 설계 요청 문단. 콘티 컷·대본 위치·location 설계·인물 목록을 담는다."""
+# ================================================================ 투영 검산·보정(previz_fit)
+
+
+def _cut_subjects(scene: dict, cut: dict, shot: dict) -> list[dict]:
+    """한 컷의 투영 검산 subjects = [{name, actorId, foot, heightM, target}].
+
+    패널 샷 subjects 를 scene actors(이름 우선, 없으면 순서)와 맞춘다. actor 의 발 위치는 그 컷
+    timeline actors[].pos(바닥 y=0), 키는 scene.actors[].heightM.
+    """
+    scene_actors = {str(a.get("id")): a for a in scene.get("actors") or []}
+    cut_actors = cut.get("actors") or []
+    cut_actor_by_id = {str(ca.get("id")): ca for ca in cut_actors}
+    # 이름(소문자) → actorId.
+    name_to_id: dict[str, str] = {}
+    for a in scene.get("actors") or []:
+        nm = str(a.get("name") or "").strip().lower()
+        if nm:
+            name_to_id.setdefault(nm, str(a.get("id")))
+
+    subjects: list[dict] = []
+    shot_subjects = shot.get("subjects") or []
+    for index, subj in enumerate(shot_subjects):
+        subj_name = str(subj.get("name") or "").strip().lower()
+        actor_id = name_to_id.get(subj_name, "")
+        if not actor_id and index < len(cut_actors):
+            actor_id = str(cut_actors[index].get("id"))
+        cut_actor = cut_actor_by_id.get(actor_id)
+        if cut_actor is None:
+            continue
+        meta = scene_actors.get(actor_id) or {}
+        subjects.append(
+            {
+                "name": str(subj.get("name") or meta.get("name") or actor_id),
+                "actorId": actor_id,
+                "foot": list(cut_actor.get("pos") or [0, 0, 0]),
+                "heightM": float(meta.get("heightM") or 1.7),
+                "target": {
+                    "screenX": subj.get("screenX"),
+                    "screenY": subj.get("screenY"),
+                    "heightFrac": subj.get("heightFrac"),
+                },
+            }
+        )
+    return subjects
+
+
+def _room_bounds_for(room: dict) -> dict:
+    """카메라 격자 탐색 범위. 카메라는 방 밖에서 들여다볼 수 있으므로 방 크기에 넉넉한 여유를 둔다.
+
+    (인물·소품은 방 안으로 제한하지만, 카메라는 벽 밖·방보다 멀리 설 수 있다.) y 는 바닥 아래로
+    내려가지 않게 0.3m 하한만 둔다(천장보다 높이 들 수도 있어 위로는 넉넉히).
+    """
+    width = float(room.get("width") or 6.0)
+    depth = float(room.get("depth") or 6.0)
+    height = float(room.get("height") or 2.8)
+    margin = 10.0  # 방 밖으로 카메라가 설 수 있는 여유(m).
+    half_w = width / 2.0 + margin
+    half_d = depth / 2.0 + margin
+    return {
+        "xmin": -half_w, "xmax": half_w,
+        "zmin": -half_d, "zmax": half_d,
+        "ymin": 0.3, "ymax": max(0.3, height) + margin,
+    }
+
+
+def _retry_table(subjects: list[dict], camera: dict) -> dict:
+    """오차 큰 컷의 '현재 투영값 vs 목표값' 표(Astra 재요청용)."""
+    rows: list[dict] = []
+    for subj in subjects:
+        projected = previz_fit.project_actor(camera, subj.get("foot") or [0, 0, 0], float(subj.get("heightM") or 1.7))
+        tgt = subj.get("target") or {}
+        if projected is None:
+            cur_x = cur_y = cur_h = "화면밖"
+        else:
+            cur_x = round(projected["screenX"], 3)
+            cur_y = round(projected["headY"], 3)
+            cur_h = round(projected["heightFrac"], 3)
+        rows.append(
+            {
+                "name": subj.get("name"),
+                "curX": cur_x, "curY": cur_y, "curH": cur_h,
+                "tgtX": tgt.get("screenX"), "tgtY": tgt.get("screenY"), "tgtH": tgt.get("heightFrac"),
+            }
+        )
+    return {"subjects": rows}
+
+
+def _fit_scenes(owner, pid, plan_id, scenes, groups, scene_specs, panel_shots, script, chars, plan) -> dict:
+    """컷별 투영 오차를 재서 임계 넘는 컷만 Astra 재요청(최대 2회)→그래도 크면 격자 보정.
+
+    scenes 를 제자리에서 고치고 fit = {cutId: {err, method}} 를 돌려준다.
+    method: "astra"(처음부터 맞음)·"astra_retry"(재요청으로 맞음)·"grid"(격자 보정).
+    """
+    fit: dict[str, dict] = {}
+    # cutId → (sceneIndex, timelineIndex) 로 빨리 찾게.
+    for scene_index, scene in enumerate(scenes):
+        group = groups[scene_index] if scene_index < len(groups) else {"cuts": []}
+        loc = _location_for(plan, group.get("locationEn") or "")
+        name_en = group.get("locationEn") or ""
+        bounds = _room_bounds_for(scene.get("room") or {})
+        for tl_index, cut in enumerate(scene.get("timeline") or []):
+            cut_id = str(cut.get("cutId") or "")
+            shot = panel_shots.get(cut_id)
+            if not shot or not (shot.get("subjects") or []):
+                fit[cut_id] = {"err": 0.0, "method": "astra"}
+                continue
+            subjects = _cut_subjects(scene, cut, shot)
+            if not subjects:
+                fit[cut_id] = {"err": 0.0, "method": "astra"}
+                continue
+            err = previz_fit.cut_error(cut.get("camera") or {}, subjects)
+            method = "astra"
+            # --- Astra 재요청(그 컷 camera 만) 최대 FIT_MAX_ASTRA_RETRY 회 ---
+            retries = 0
+            while previz_fit.exceeds_threshold(err) and retries < FIT_MAX_ASTRA_RETRY:
+                retries += 1
+                retry_cut = dict(_retry_table(subjects, cut.get("camera") or {}))
+                retry_cut["cutId"] = cut_id
+                group_cut_specs = [{"cutId": str(c["cutId"]), "seconds": c["seconds"]} for c in group.get("cuts") or []]
+                blocks = [{"text": _design_prompt(name_en, loc, group.get("cuts") or [], script, chars, panel_shots, retry_cuts=[retry_cut])}]
+                try:
+                    payload, _m = _design_scene(owner, pid, plan_id, blocks)
+                except VpocError:
+                    break
+                new_cam = _camera_for_cut(payload, cut_id, scene.get("room") or {})
+                if new_cam is None:
+                    continue
+                new_err = previz_fit.cut_error(new_cam, subjects)
+                if new_err["err"] < err["err"] - 1e-9:
+                    cut["camera"] = new_cam
+                    err = new_err
+                    method = "astra_retry"
+            # --- 그래도 크면 격자 보정(결정적) ---
+            if previz_fit.exceeds_threshold(err):
+                refined = previz_fit.grid_refine_camera(cut.get("camera") or {}, subjects, bounds=bounds)
+                refined_err = previz_fit.cut_error(refined, subjects)
+                if refined_err["err"] < err["err"] - 1e-9:
+                    cut["camera"] = _clamp_camera(refined, scene.get("room") or {})
+                    err = refined_err
+                    method = "grid"
+            fit[cut_id] = {
+                "err": round(float(err.get("err") or 0.0), 4),
+                "posErr": round(float(err.get("posErr") or 0.0), 4),
+                "sizeErr": round(float(err.get("sizeErr") or 0.0), 4),
+                "method": method,
+            }
+    return fit
+
+
+def _camera_for_cut(payload: dict, cut_id: str, room: dict) -> dict | None:
+    """Astra 재요청 payload 의 timeline 에서 cut_id 카메라를 꺼내 정리한다. 없으면 None."""
+    if not isinstance(payload, dict):
+        return None
+    for item in payload.get("timeline") or []:
+        if isinstance(item, dict) and str(item.get("cutId") or "") == cut_id:
+            return _clamp_camera(previz_schema._normalize_camera(item.get("camera") or {}, room), room)  # noqa: SLF001
+    # cutId 없이 camera 만 돌려줬으면 그걸 쓴다.
+    cam = payload.get("camera")
+    if isinstance(cam, dict):
+        return _clamp_camera(previz_schema._normalize_camera(cam, room), room)  # noqa: SLF001
+    return None
+
+
+def _clamp_camera(camera: dict, room: dict) -> dict:
+    """카메라 fov 를 schema 범위로 자르고 pos/target 숫자를 반올림한다(저장 모양 유지)."""
+    return previz_schema._normalize_camera(camera, room)  # noqa: SLF001
+
+
+def _design_prompt(
+    name_en: str,
+    loc: dict | None,
+    cuts: list[dict],
+    script: dict,
+    chars: list[dict],
+    panel_shots: dict | None = None,
+    retry_cuts: list[dict] | None = None,
+) -> str:
+    """한 장소(연속 컷)의 설계 요청 문단. 콘티 컷·대본 위치·location 설계·인물 목록·패널 샷을 담는다.
+
+    panel_shots = {cutId: shot} — Claude 가 읽은 웹툰 패널 샷(크기·높이·각도·인물 화면 좌표).
+    retry_cuts = [{cutId, current, target}] — 투영 검산 뒤 오차 큰 컷만 '현재 vs 목표'를 주고
+    그 컷 camera 만 다시 받을 때 쓴다(있으면 재요청 문단을 덧붙인다).
+    """
+    panel_shots = panel_shots or {}
     setting = script.get("setting") or {}
     entries = script.get("entries") or []
+    room_w = room_d = room_h = "?"
+    if loc:
+        _d = loc.get("design") or {}
+        room_w, room_d, room_h = _d.get("widthM", "?"), _d.get("depthM", "?"), _d.get("heightM", "?")
     lines = [
         f"[장소] {name_en or '(이름 없음)'}",
         "이 장소에서 이어지는 콘티 컷들을 하나의 3D 장면으로 설계하세요. timeline 은 아래 컷과 1:1 로,"
         " 주어진 cutId 를 그대로 쓰세요. 컷이 바뀌어도 방·소품·인물 자리는 이어지고 카메라만 바뀝니다.",
+        "",
+        "[좌표계·치수] x 오른쪽(+), y 위(+), z 카메라 쪽(+). north 벽은 z = -depth/2. 단위 m."
+        f" 방 크기 width≈{room_w} depth≈{room_d} height≈{room_h}."
+        " 카메라 높이(바닥 기준): low≈0.6m, eye≈1.5m, high≈2.3m. fov(세로 화각): close 20-30,"
+        " medium 35-45, wide 50-65. 화면은 16:9, screenX 0=왼쪽·1=오른쪽, screenY 0=위·1=아래,"
+        " heightFrac=화면 높이 대비 인물 키.",
         "",
         "[공간 배치(대본)]",
         f"장소 분위기: {setting.get('moodKo', '')} / 시간: {setting.get('timeKo', '')}",
@@ -537,11 +933,43 @@ def _design_prompt(name_en: str, loc: dict | None, cuts: list[dict], script: dic
             f" / 상황={cut.get('situationKo', '')}"
             + (f" / 인물위치={char_pos}" if char_pos else "")
         )
+        shot = panel_shots.get(str(cut["cutId"]))
+        if shot:
+            lines.append(
+                f"   [웹툰 패널 샷] shotSize={shot.get('shotSize')} cameraHeight={shot.get('cameraHeight')}"
+                f" angle={shot.get('angle')}"
+                + (f" visibleWalls={','.join(shot.get('visibleWalls') or [])}" if shot.get("visibleWalls") else "")
+            )
+            for subj in shot.get("subjects") or []:
+                lines.append(
+                    f"     · {subj.get('name') or '(인물)'}: screenX={subj.get('screenX')}"
+                    f" screenY={subj.get('screenY')} heightFrac={subj.get('heightFrac')}"
+                    f" facing={subj.get('facing')} visible={subj.get('visible')}"
+                )
+            lines.append(
+                "   이 컷의 카메라를 위 패널 샷에 맞추세요(각 인물이 그 screenX·screenY·heightFrac 로 보이게,"
+                " shotSize 에 맞는 fov, cameraHeight 에 맞는 높이, angle 에 맞는 방향)."
+            )
     lines += [
         "",
         "인물은 고유의 밝은 색(서로 확실히 다르게)으로, 배경은 하나의 덩어리(회색조), 빛은 어디서 오는지"
         " light 로 표기하세요. 컷 안에서 카메라가 움직이면 camera.moveTo, 인물이 걸으면 actor.moveTo 로.",
     ]
+    if retry_cuts:
+        lines += [
+            "",
+            "[투영 검산 — 아래 컷은 카메라가 패널과 많이 어긋났습니다. 그 컷 camera 만 고쳐 주세요]",
+            "'현재'는 지금 카메라로 투영한 인물 화면 좌표, '목표'는 웹툰 패널 값입니다. 목표에 맞게 "
+            "camera.pos·target·fov 를 조정하세요(방·소품·인물 자리는 그대로).",
+        ]
+        for rc in retry_cuts:
+            lines.append(f"- cutId={rc.get('cutId')}")
+            for pair in rc.get("subjects") or []:
+                lines.append(
+                    f"    {pair.get('name') or '(인물)'}: 현재 screenX={pair.get('curX')} screenY={pair.get('curY')}"
+                    f" heightFrac={pair.get('curH')} → 목표 screenX={pair.get('tgtX')} screenY={pair.get('tgtY')}"
+                    f" heightFrac={pair.get('tgtH')}"
+                )
     return "\n".join(lines)
 
 
@@ -559,10 +987,109 @@ def _entry_positions(cut_panels: list[int], entries: list[dict]) -> str:
     return "; ".join(parts)
 
 
+# ================================================================ 패널 샷 분석(컷마다 Claude)
+
+
+def _all_tiles(owner: str, pid: str) -> list[bytes]:
+    """업로드 웹툰을 통째로 분석 타일(세로 1,568px 조각)로 자른다. panels 번호가 가리키는 조각.
+
+    locations._all_tiles 와 같은 규칙(order 순서대로 tiles_for_analysis). 못 읽은 파일은 건너뛴다.
+    """
+    from . import plan as plan_mod  # noqa: PLC0415
+
+    try:
+        data, _ = plan_mod.load_plan(owner, pid)
+    except Exception:  # noqa: BLE001
+        return []
+    order = list(((data.get("input") or {}).get("order")) or [])
+    tiles: list[bytes] = []
+    for file_id in order:
+        try:
+            jpeg = STORE.get_bytes(plan_mod.upload_key(owner, pid, file_id))
+        except Exception as exc:  # noqa: BLE001
+            log.warning("vnew.previz.tiles.missing file=%s err=%s", file_id, str(exc)[:150])
+            continue
+        tiles.extend(vpoc_images.tiles_for_analysis(jpeg))
+    return tiles
+
+
+def _cut_tiles(cut_panels: list[int], all_tiles: list[bytes]) -> list[bytes]:
+    """이 컷 panels 가 가리키는 조각들 중 그림이 큰(인물 적은) 조각 우선 최대 MAX_PANEL_TILES 장.
+
+    panels 는 '분석 타일 번호'다. 번호가 범위를 벗어나면 건너뛴다. 말풍선·인물이 많은 조각보다
+    배경(그림)이 큰 조각을 먼저 고른다 — characters._count_people 로 사람 수가 적은 쪽 우선.
+    """
+    from . import characters as char_mod  # noqa: PLC0415
+
+    picked: list[bytes] = []
+    for index in [int(p) for p in (cut_panels or []) if isinstance(p, int) or (isinstance(p, str) and p.isdigit())]:
+        if 0 <= index < len(all_tiles):
+            picked.append(all_tiles[index])
+    if not picked:
+        return []
+    scored: list[tuple[int, int, bytes]] = []
+    for order_index, jpeg in enumerate(picked):
+        try:
+            count = char_mod._count_people(jpeg)  # noqa: SLF001
+        except Exception:  # noqa: BLE001
+            count = None
+        rank = 99 if count is None else int(count)
+        scored.append((rank, order_index, jpeg))
+    scored.sort(key=lambda item: (item[0], item[1]))
+    return [item[2] for item in scored][:MAX_PANEL_TILES]
+
+
+def _role_names(chars: list[dict]) -> list[str]:
+    return [str(c.get("roleName") or "").strip() for c in (chars or []) if str(c.get("roleName") or "").strip()]
+
+
+def _analyze_cut_panel(owner: str, pid: str, plan_id: str, cut: dict, all_tiles: list[bytes], role_names: list[str]) -> dict | None:
+    """한 컷의 웹툰 조각(최대 2장)을 Claude 분석 체인에 보내 샷 JSON 을 받는다. 없으면 None.
+
+    사용량은 원장에 남긴다. 이미지가 없으면(panels 범위 밖) 분석을 건너뛴다(None).
+    """
+    tiles = _cut_tiles(cut.get("panels") or [], all_tiles)
+    if not tiles:
+        return None
+    intro = [
+        "아래는 웹툰 한 컷(같은 순간의 조각 1~2장)입니다. 이 컷의 카메라 샷(크기·높이·각도)과 "
+        "보이는 인물들의 화면 위치(screenX·머리 screenY·heightFrac)를 읽어 emit_shot 으로 주세요.",
+    ]
+    if role_names:
+        intro.append("등장할 수 있는 인물(역할명): " + ", ".join(role_names))
+    situation = str(cut.get("situationKo") or "").strip()
+    if situation:
+        intro.append(f"상황(참고): {situation}")
+    blocks: list[dict] = [{"text": "\n".join(intro)}]
+    for jpeg in tiles:
+        blocks.append({"image": {"format": "jpeg", "source": {"bytes": jpeg}}})
+    try:
+        payload, usage = _analyze_panel(blocks, model=PANEL_ANALYZE_MODEL)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("vnew.previz.panel.failed cut=%s err=%s", cut.get("cutId"), str(exc)[:200])
+        return None
+    used = str(usage.get("model") or PANEL_ANALYZE_MODEL)
+    _charge(owner, pid, plan_id, usage, used)
+    return _normalize_shot(payload)
+
+
+def _analyze_panels(owner: str, pid: str, plan_id: str, groups: list[dict], chars: list[dict]) -> dict:
+    """모든 컷의 패널 샷을 분석해 {cutId: shot} 로. 이미지가 없는 컷은 뺀다."""
+    all_tiles = _all_tiles(owner, pid)
+    role_names = _role_names(chars)
+    shots: dict[str, dict] = {}
+    for group in groups:
+        for cut in group["cuts"]:
+            shot = _analyze_cut_panel(owner, pid, plan_id, cut, all_tiles, role_names)
+            if shot is not None:
+                shots[str(cut["cutId"])] = shot
+    return shots
+
+
 # ================================================================ 저장(task.id 확인)
 
 
-def _commit_scenes(owner: str, pid: str, task_id: str, scenes: list[dict], model: str) -> None:
+def _commit_scenes(owner: str, pid: str, task_id: str, scenes: list[dict], model: str, *, panel_shots: dict | None = None, fit: dict | None = None) -> None:
     from . import plan as plan_mod  # noqa: PLC0415
 
     def mutator(data: dict) -> None:
@@ -570,6 +1097,8 @@ def _commit_scenes(owner: str, pid: str, task_id: str, scenes: list[dict], model
         if (previz.get("task") or {}).get("id") != task_id:
             raise _Discard()
         previz["scenes"] = scenes
+        previz["panelShots"] = panel_shots or {}
+        previz["fit"] = fit or {}
         previz["status"] = "ready"
         previz["error"] = ""
         previz["model"] = model
@@ -1021,6 +1550,8 @@ def previz_view(owner: str, pid: str, plan: dict) -> dict:
         "revision": rev,
         "approved": bool(previz.get("approved")),
         "scenes": scenes_out,
+        "panelShots": previz.get("panelShots") or {},
+        "fit": previz.get("fit") or {},
         "totalSeconds": previz_schema.scenes_total_seconds(previz.get("scenes") or []),
         "segments": segments,
         "recordings": recordings_out,
