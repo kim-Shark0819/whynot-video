@@ -3134,16 +3134,28 @@ def gen_view(owner: str, pid: str, plan: dict) -> dict | None:
             "padded": bool(state.get("padded")),
         }
 
+    # 콘티 cut.no(콘티 컷 번호) 를 cutId 로 찾는다(행 머리 "컷 {no}" 표시용).
+    cut_no_by_id = {str(c.get("id")): c.get("no") for c in (plan.get("conti") or {}).get("cuts") or []}
+
     units_out = []
     for unit in gen.get("units") or []:
         rec = previz_recordings.get(str(unit.get("recSegId") or "")) or {}
-        previz_url = _presign_video(str(rec.get("key") or "")) if mode == "previz" else ""
+        # 이미 그 컷만 잘라 둔 클립(clipKey)이 있으면 그것을, 없으면 녹화 구간 전체 mp4(#t 로 구간만 재생).
+        clip_key = str(unit.get("clipKey") or "")
+        source_key = clip_key or str(rec.get("key") or "")
+        previz_url = _presign_video(source_key) if mode == "previz" else ""
         units_out.append(
             {
                 "id": unit.get("id"),
                 "cutId": unit.get("cutId"),
+                "cutNo": cut_no_by_id.get(str(unit.get("cutId") or "")),
                 "recSegId": unit.get("recSegId"),
                 "seconds": unit.get("seconds"),
+                "startSec": float(unit.get("startSec") or 0.0),
+                "endSec": float(unit.get("endSec") or 0.0),
+                "clipKey": clip_key,
+                # clipKey 가 있으면 이미 그 컷만 담긴 클립이라 화면이 #t 로 되감을 필요가 없다.
+                "clipped": bool(clip_key),
                 "previzUrl": previz_url,
                 "real": _variant_out(unit.get("real") or {}),
                 "webtoon": _variant_out(unit.get("webtoon") or {}),

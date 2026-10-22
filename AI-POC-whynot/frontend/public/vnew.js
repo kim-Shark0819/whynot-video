@@ -5359,6 +5359,21 @@
       section.appendChild(el("p", "vnew-hint", "컷이 없습니다."));
       return section;
     }
+    // 안내 한 줄: 녹화 구간 n 개를 컷 m 개로 나눠 컷마다 만들고 이어 붙인다.
+    var segIds = {};
+    units.forEach(function (u) {
+      var sid = u.recSegId;
+      if (sid) segIds[sid] = true;
+    });
+    var n = Object.keys(segIds).length;
+    var m = units.length;
+    section.appendChild(
+      el(
+        "p",
+        "vnew-hint",
+        "프리비즈 녹화 " + n + "개 구간을 컷 " + m + "개로 나눠 컷마다 영상을 만들고, 끝나면 순서대로 이어 붙입니다."
+      )
+    );
     var list = el("div", "vnew-seg-rows");
     units.forEach(function (unit, index) {
       list.appendChild(cutRow(unit, index, showError));
@@ -5370,9 +5385,18 @@
   function cutRow(unit, index, showError) {
     var row = el("div", "vnew-seg-row");
     var meta = el("div", "vnew-seg-meta");
-    meta.appendChild(el("span", "vnew-seg-no", "컷 " + (index + 1)));
-    meta.appendChild(el("span", "vnew-seg-seconds", (Math.round((unit.seconds || 0) * 10) / 10) + "초"));
-    meta.appendChild(el("span", "vnew-seg-cuts", unit.cutId || "-"));
+    // 콘티 컷 번호(cutNo)가 있으면 그것, 없으면 표 순서(index+1).
+    var cutNo = (unit.cutNo != null) ? unit.cutNo : (index + 1);
+    var start = Math.round((Number(unit.startSec) || 0) * 10) / 10;
+    var end = Math.round((Number(unit.endSec) || 0) * 10) / 10;
+    var seconds = Math.round((Number(unit.seconds) || 0) * 10) / 10;
+    meta.appendChild(el("span", "vnew-seg-no", "컷 " + cutNo));
+    meta.appendChild(el("span", "vnew-seg-range", start + "–" + end + "초"));
+    meta.appendChild(el("span", "vnew-seg-seconds", "(" + seconds + "초)"));
+    // 3초 미만 컷은 영상 모델 최소 길이(3초)로 채워 만든다는 작은 안내.
+    if (seconds > 0 && seconds < 3) {
+      meta.appendChild(el("span", "vnew-seg-fill-hint", "3초로 채워 생성"));
+    }
     row.appendChild(meta);
 
     var cells = el("div", "vnew-seg-cells has-previz");
@@ -5549,18 +5573,40 @@
     return row;
   }
 
-  /* 프리비즈 미리보기 칸(작은 영상). 녹화가 있으면 재생, 없으면 안내. */
+  /* 프리비즈 미리보기 칸(작은 영상). 녹화가 있으면 재생, 없으면 안내.
+     컷 단위(unit): startSec/endSec 가 있고 아직 그 컷만 잘라 둔 클립(clipped)이 아니면,
+     녹화 전체에서 그 컷 구간만 보이게 한다 — src 에 #t={start},{end} 를 붙이고, timeupdate 에서
+     endSec 에 닿으면 startSec 로 되감아 멈춘다(재생 버튼으로 다시). 복제처럼 보이던 문제 수정. */
   function previzPreviewCell(seg) {
     var cell = el("div", "vnew-seg-cell vnew-seg-previz");
     var head = el("div", "vnew-seg-cell-head");
     head.appendChild(el("span", "vnew-seg-cell-title", "프리비즈"));
     cell.appendChild(head);
     if (seg.previzUrl) {
+      var start = Number(seg.startSec) || 0;
+      var end = Number(seg.endSec) || 0;
+      var clipByTime = !seg.clipped && end > start;
       var video = el("video", "vnew-seg-video vnew-seg-previz-video");
-      video.src = seg.previzUrl;
+      // #t={start},{end} 로 그 컷 구간만 가리킨다(클립이 따로 없을 때만).
+      video.src = clipByTime ? (seg.previzUrl + "#t=" + start + "," + end) : seg.previzUrl;
       video.controls = true;
       video.muted = true;
       video.setAttribute("playsinline", "");
+      if (clipByTime) {
+        // end 에 닿으면 start 로 되감아 멈춘다(그 컷 구간만 반복 없이 보이게).
+        video.addEventListener("timeupdate", function () {
+          if (video.currentTime >= end) {
+            video.pause();
+            video.currentTime = start;
+          }
+        });
+        // 재생 버튼을 다시 누르면 구간 처음부터.
+        video.addEventListener("play", function () {
+          if (video.currentTime >= end || video.currentTime < start) {
+            video.currentTime = start;
+          }
+        });
+      }
       cell.appendChild(video);
     } else {
       cell.appendChild(el("p", "vnew-hint", "녹화 없음"));

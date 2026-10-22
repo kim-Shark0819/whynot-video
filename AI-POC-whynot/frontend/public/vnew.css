@@ -1641,6 +1641,21 @@ textarea.vnew-field-input {
   color: var(--text-muted, #9ca3af);
 }
 
+/* 컷 구간(녹화 안 시간 범위) 표시. */
+.vnew-seg-range {
+  font-size: 13px;
+  color: var(--text-muted, #6b7280);
+}
+
+/* 3초 미만 컷: 3초로 채워 생성한다는 작은 안내. */
+.vnew-seg-fill-hint {
+  font-size: 11px;
+  color: var(--text-muted, #9ca3af);
+  padding: 2px 8px;
+  border: 1px dashed var(--border, #d1d5db);
+  border-radius: 10px;
+}
+
 .vnew-seg-cells {
   display: grid;
   grid-template-columns: 1fr 1fr;
