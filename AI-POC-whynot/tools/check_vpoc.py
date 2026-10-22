@@ -4091,9 +4091,11 @@ def check_vnew_locations() -> None:
 
     # --- 가짜 외부 호출(설계 LLM·Seedream·사람 수·원장·스레드) ---
     design_calls: list[str] = []
+    design_blocks: list[list[dict]] = []
 
     def fake_design(blocks, *, model):
         design_calls.append(model)
+        design_blocks.append(list(blocks or []))
         payload = {
             "widthM": 6.0,
             "depthM": 5.0,
@@ -4122,7 +4124,7 @@ def check_vnew_locations() -> None:
         is_fix = "Corrections:" in prompt
         seedream_calls.append(
             {"variant": variant, "view": view, "prompt": prompt, "size": size, "fix": is_fix,
-             "ref_count": len(references or [])}
+             "ref_count": len(references or []), "refs": list(references or [])}
         )
         # 뷰는 16:9(2560x1440). rectify 가 열 수 있는 실제 픽셀 JPEG 를 돌려준다.
         return _tiny_jpeg(640, 360)
@@ -4166,9 +4168,11 @@ def check_vnew_locations() -> None:
 
     # (n) 사실 추출(Claude → Astra). 벽별 물건·창문·문·재질·빛·시대·나라.
     facts_calls: list[str] = []
+    facts_blocks: list[list[dict]] = []
 
     def fake_facts(blocks, *, model):
         facts_calls.append(model)
+        facts_blocks.append(list(blocks or []))
         payload = {
             "walls": {
                 "north": {
@@ -4836,6 +4840,279 @@ def check_vnew_locations() -> None:
         if not vloc_m or "progress" not in vloc_m:
             bad.append("(m) plan_view locations 에 progress 가 없습니다")
 
+        # ============================================================ 참고 사진(설계자 2026-10-22, 지시서 056)
+        # 장소마다 사용자 참고 사진을 붙여 설계·사실·그림·확인에 웹툰 패널보다 '먼저' 쓴다.
+        # (lp-a) 업로드 201·정규화 JPEG·7장째 400·GET 200·다른 사용자 404·DELETE 후 파일 삭제
+        # (lp-b) PUT side·noteKo·잘못된 side 400·빌드 중 409
+        # (lp-c) 사진 있음 → 설계·사실 블록에서 사진이 패널보다 먼저·라벨 문구
+        # (lp-d) 뷰 A 참고 = [가이드, back, left, any, 패널…]·≤6·뷰 B 에 back 사진 없음
+        # (lp-e) 프롬프트 "real reference photo of the CENTER BACK WALL" 이미지 번호가 참고 순서와 일치
+        # (lp-f) 사진 없음 → 참고·프롬프트가 지금과 같다
+
+        def _photo_png(label):
+            import io as _iop  # noqa: PLC0415
+
+            from PIL import Image as _ImgP  # noqa: PLC0415
+
+            buf = _iop.BytesIO()
+            _ImgP.new("RGB", (400, 300), (label, 120, 60)).save(buf, format="PNG")
+            return buf.getvalue()
+
+        def _idle(d):
+            loc = locmod._find_location(d, lid)
+            loc["task"] = {"status": "idle", "startedAt": None, "id": None}
+            loc["status"] = "ready"
+            loc["photos"] = []
+            (loc.get("design") or {}).pop("designEditedAt", None)
+            (loc.get("facts") or {}).pop("factsEditedAt", None)
+
+        planmod.mutate_plan(owner, pid, _idle)
+        base_url = f"/api/vnew/p/{pid}/locations/{lid}/photos"
+
+        # (lp-a) 업로드 201 · 정규화 JPEG 저장.
+        up = client.post(
+            base_url,
+            data={"files": (_io.BytesIO(_photo_png(200)), "room.png")},
+            content_type="multipart/form-data",
+        )
+        if up.status_code != 201:
+            bad.append(f"(lp-a) 사진 업로드가 201 이 아닙니다: {up.status_code} {up.get_data(as_text=True)[:200]}")
+        up_loc = (up.get_json() or {}).get("location") or {}
+        up_photos = up_loc.get("photos") or []
+        if len(up_photos) != 1:
+            bad.append(f"(lp-a) 업로드 후 photos 가 1장이 아닙니다: {len(up_photos)}")
+        first_pid = up_photos[0].get("photoId") if up_photos else ""
+        # 정규화 JPEG 로 저장됐는지(키 존재·JPEG 로 열림).
+        if first_pid:
+            pkey = locmod.photo_key(owner, pid, lid, first_pid)
+            if pkey not in fake_store.blobs:
+                bad.append("(lp-a) 정규화 사진이 photos/ 키로 저장되지 않았습니다")
+            else:
+                import io as _iojpg  # noqa: PLC0415
+
+                from PIL import Image as _ImgJ  # noqa: PLC0415
+
+                try:
+                    with _ImgJ.open(_iojpg.BytesIO(fake_store.blobs[pkey])) as pim:
+                        if (pim.format or "").upper() != "JPEG":
+                            bad.append(f"(lp-a) 저장된 사진이 JPEG 가 아닙니다: {pim.format}")
+                except Exception as exc:  # noqa: BLE001
+                    bad.append(f"(lp-a) 저장된 사진을 JPEG 로 열 수 없습니다: {exc!r}")
+
+        # (lp-a) GET 미리보기 200.
+        if first_pid:
+            g = client.get(base_url + "/" + first_pid)
+            if g.status_code != 200 or g.headers.get("Content-Type") != "image/jpeg":
+                bad.append(f"(lp-a) 사진 미리보기 GET 이 200/jpeg 가 아닙니다: {g.status_code} {g.headers.get('Content-Type')}")
+            if not g.get_data():
+                bad.append("(lp-a) 사진 미리보기 본문이 비었습니다")
+
+        # (lp-a) 6장 채우고 7장째 400.
+        for _ in range(5):
+            client.post(base_url, data={"files": (_io.BytesIO(_photo_png(200)), "x.png")}, content_type="multipart/form-data")
+        over = client.post(base_url, data={"files": (_io.BytesIO(_photo_png(200)), "over.png")}, content_type="multipart/form-data")
+        if over.status_code != 400 or (over.get_json().get("error") or {}).get("type") != "TooManyPhotos":
+            bad.append(f"(lp-a) 7장째가 TooManyPhotos 400 이 아닙니다: {over.status_code} {over.get_json()}")
+
+        # (lp-a) 다른 사용자는 404(다른 owner·project 로 같은 photoId 접근).
+        other_app = Flask(__name__)
+        other_bp = vnew.create_blueprint(
+            vnew.VnewDependencies(
+                require_auth=lambda h: h,
+                current_owner=lambda: "intruder",
+                get_project=lambda p: {"id": p, "owner": "intruder", "track": "video_new"},
+                can_read_project=lambda proj: True,
+                can_write_project=lambda proj: True,
+                project_owner_prefix=lambda name: name,
+            )
+        )
+        other_app.register_blueprint(other_bp)
+        if first_pid:
+            og = other_app.test_client().get(base_url + "/" + first_pid)
+            if og.status_code != 404:
+                bad.append(f"(lp-a) 다른 사용자가 사진을 보는데 404 가 아닙니다: {og.status_code}")
+
+        # (lp-a) DELETE 후 파일 삭제.
+        if first_pid:
+            dkey = locmod.photo_key(owner, pid, lid, first_pid)
+            dresp = client.delete(base_url + "/" + first_pid)
+            if dresp.status_code != 200:
+                bad.append(f"(lp-a) 사진 삭제가 200 이 아닙니다: {dresp.status_code}")
+            if dkey in fake_store.blobs:
+                bad.append("(lp-a) DELETE 후 저장 파일이 지워지지 않았습니다")
+            del_loc = (dresp.get_json() or {}).get("location") or {}
+            if any(p.get("photoId") == first_pid for p in (del_loc.get("photos") or [])):
+                bad.append("(lp-a) DELETE 후 목록에 사진이 남아 있습니다")
+
+        # (lp-b) PUT side·noteKo·잘못된 side 400·빌드 중 409.
+        # 지금 photos 가 몇 장 남았는지 보고 한 장을 고른다.
+        cur = client.get(f"/api/vnew/p/{pid}/plan").get_json() or {}
+        cur_loc = next((l for l in (cur.get("locations") or []) if l.get("id") == lid), None)
+        cur_photos = (cur_loc or {}).get("photos") or []
+        bpid = cur_photos[0].get("photoId") if cur_photos else ""
+        if bpid:
+            putr = client.put(base_url + "/" + bpid, json={"side": "back", "noteKo": "창문 쪽 벽"})
+            pv = (putr.get_json() or {}).get("location") or {}
+            pp = next((p for p in (pv.get("photos") or []) if p.get("photoId") == bpid), {})
+            if putr.status_code != 200 or pp.get("side") != "back":
+                bad.append(f"(lp-b) PUT side 가 반영되지 않았습니다: {putr.status_code} {pp.get('side')}")
+            if pp.get("noteKo") != "창문 쪽 벽":
+                bad.append(f"(lp-b) PUT noteKo 가 반영되지 않았습니다: {pp.get('noteKo')}")
+            badput = client.put(base_url + "/" + bpid, json={"side": "nope"})
+            if badput.status_code != 400 or (badput.get_json().get("error") or {}).get("type") != "BadSide":
+                bad.append(f"(lp-b) 잘못된 side 가 BadSide 400 이 아닙니다: {badput.status_code} {badput.get_json()}")
+
+        # (lp-b) 빌드 중(running)이면 변경 409.
+        def _set_running_b(d):
+            loc = locmod._find_location(d, lid)
+            loc["task"] = {"status": "running", "startedAt": locmod.now_iso(), "id": "busy-photo"}
+
+        planmod.mutate_plan(owner, pid, _set_running_b)
+        if bpid:
+            r409 = client.put(base_url + "/" + bpid, json={"side": "left"})
+            if r409.status_code != 409 or (r409.get_json().get("error") or {}).get("type") != "Building":
+                bad.append(f"(lp-b) 빌드 중 PUT 이 Building 409 가 아닙니다: {r409.status_code} {r409.get_json()}")
+            d409 = client.delete(base_url + "/" + bpid)
+            if d409.status_code != 409:
+                bad.append(f"(lp-b) 빌드 중 DELETE 가 409 가 아닙니다: {d409.status_code}")
+        a409 = client.post(base_url, data={"files": (_io.BytesIO(_photo_png(200)), "y.png")}, content_type="multipart/form-data")
+        if a409.status_code != 409:
+            bad.append(f"(lp-b) 빌드 중 업로드가 409 가 아닙니다: {a409.status_code}")
+
+        # 사진을 깔끔히 정리하고(back·left·any 3장) 빌드해 (lp-c)(lp-d)(lp-e) 를 본다.
+        def _reset_photos(d):
+            loc = locmod._find_location(d, lid)
+            loc["task"] = {"status": "idle", "startedAt": None, "id": None}
+            loc["status"] = "ready"
+            loc["photos"] = []
+            (loc.get("design") or {}).pop("designEditedAt", None)
+            (loc.get("facts") or {}).pop("factsEditedAt", None)
+
+        planmod.mutate_plan(owner, pid, _reset_photos)
+        # back 사진, left 사진, any(전체 분위기) 사진 — 각 1장. 색을 달리해 참고 순서를 구별한다.
+        side_label = {"back": 40, "left": 110, "right": 150, "front": 180, "any": 220}
+
+        def _add_photo(side):
+            rr = client.post(base_url, data={"files": (_io.BytesIO(_photo_png(side_label.get(side, 200))), f"{side}.png")}, content_type="multipart/form-data")
+            ph = ((rr.get_json() or {}).get("location") or {}).get("photos") or []
+            pid_new = ph[-1].get("photoId") if ph else ""
+            if pid_new and side != "any":
+                client.put(base_url + "/" + pid_new, json={"side": side})
+            return pid_new
+
+        back_pid = _add_photo("back")
+        left_pid = _add_photo("left")
+        any_pid = _add_photo("any")  # 'any' 로 둔다(기본값).
+        back_key = locmod.photo_key(owner, pid, lid, back_pid)
+        left_key = locmod.photo_key(owner, pid, lid, left_pid)
+        any_key = locmod.photo_key(owner, pid, lid, any_pid)
+
+        design_blocks.clear()
+        facts_blocks.clear()
+        seedream_calls.clear()
+        author_calls.clear()
+        verify_calls.clear()
+
+        resp = client.post(f"/api/vnew/p/{pid}/locations/{lid}/build", json={})
+        if resp.status_code != 202:
+            bad.append(f"(lp-c) 사진 있는 build 가 202 가 아닙니다: {resp.status_code} {resp.get_json()}")
+        _join()
+
+        # (lp-c) 설계·사실 블록에서 사진이 패널보다 먼저·라벨 문구.
+        def _first_image_is_photo(blocks):
+            # 라벨 텍스트("사용자가 첨부한 실제 참고 사진입니다(최우선)") 다음 이미지가 패널보다 앞에 온다.
+            label_idx = None
+            first_img_idx = None
+            for i, b in enumerate(blocks):
+                if isinstance(b, dict) and b.get("text") and "사용자가 첨부한 실제 참고 사진입니다(최우선)" in b["text"]:
+                    if label_idx is None:
+                        label_idx = i
+                if isinstance(b, dict) and "image" in b and first_img_idx is None:
+                    first_img_idx = i
+            return label_idx is not None and first_img_idx is not None and label_idx < first_img_idx
+
+        if not design_blocks or not _first_image_is_photo(design_blocks[-1]):
+            bad.append("(lp-c) 설계 블록에 사진 라벨·사진이 패널보다 먼저 오지 않았습니다")
+        if not facts_blocks or not _first_image_is_photo(facts_blocks[-1]):
+            bad.append("(lp-c) 사실 블록에 사진 라벨·사진이 패널보다 먼저 오지 않았습니다")
+        # 라벨에 면 한국어·메모가 들어가는지(back 사진).
+        label_texts = " ".join(
+            b.get("text", "") for b in (design_blocks[-1] if design_blocks else []) if isinstance(b, dict) and b.get("text")
+        )
+        if "메인배경(뒤)" not in label_texts:
+            bad.append("(lp-c) 설계 사진 라벨에 면 한국어(메인배경(뒤))가 없습니다")
+
+        # (lp-d) 뷰 A(real back) 초기 참고 = [가이드, back 사진, left 사진, any 사진, 패널…]·≤6.
+        real_back = next((c for c in seedream_calls if c["variant"] == "real" and c["view"] == "back" and not c.get("fix")), None)
+        if real_back is None:
+            bad.append("(lp-d) real back 생성 호출을 찾지 못했습니다")
+        else:
+            refs = real_back["refs"]
+            if len(refs) > 6:
+                bad.append(f"(lp-d) 참고가 6장을 넘습니다: {len(refs)}")
+            # refs[0] 은 가이드(사진 아님), refs[1..3] 은 back·left·any 사진.
+            photo_keys_in_order = [back_key, left_key, any_key]
+            got_photos = [r for r in refs if r in (fake_store.blobs.get(back_key), fake_store.blobs.get(left_key), fake_store.blobs.get(any_key))]
+            expect_photos = [fake_store.blobs[k] for k in photo_keys_in_order]
+            if refs[:1] and refs[0] in expect_photos:
+                bad.append("(lp-d) 첫 참고가 가이드가 아니라 사진입니다")
+            if got_photos != expect_photos:
+                bad.append("(lp-d) 뷰 A 참고 사진 순서가 [back, left, any] 가 아닙니다")
+            # 사진 바로 뒤에 패널(loc-tile)이 온다(사진이 패널보다 먼저).
+            tile_refs = [r for r in refs if isinstance(r, bytes) and r.startswith(b"loc-tile")]
+            if refs and tile_refs:
+                last_photo_idx = max(refs.index(p) for p in expect_photos if p in refs)
+                first_tile_idx = min(refs.index(t) for t in tile_refs)
+                if first_tile_idx < last_photo_idx:
+                    bad.append("(lp-d) 패널이 사진보다 앞에 왔습니다")
+
+        # (lp-d) 뷰 B(front)에는 back 사진이 없다.
+        real_front = next((c for c in seedream_calls if c["variant"] == "real" and c["view"] == "front" and not c.get("fix")), None)
+        if real_front is not None:
+            if fake_store.blobs.get(back_key) in real_front["refs"]:
+                bad.append("(lp-d) 뷰 B(front) 참고에 back 사진이 들어갔습니다")
+
+        # (lp-e) 프롬프트에 "real reference photo of the CENTER BACK WALL" 와 이미지 번호가 참고 순서와 일치.
+        if real_back is not None:
+            prompt = real_back["prompt"]
+            if "real reference photo of the CENTER BACK WALL" not in prompt:
+                bad.append("(lp-e) 프롬프트에 CENTER BACK WALL 참고 사진 지시가 없습니다")
+            else:
+                # back 사진은 가이드(이미지1) 다음 첫 사진 → 이미지 2.
+                refs = real_back["refs"]
+                back_bytes = fake_store.blobs.get(back_key)
+                if back_bytes in refs:
+                    img_no = refs.index(back_bytes) + 1  # 1-based
+                    if f"Image {img_no} is a real reference photo of the CENTER BACK WALL" not in prompt:
+                        bad.append(f"(lp-e) CENTER BACK WALL 이미지 번호가 참고 순서(Image {img_no})와 일치하지 않습니다")
+                # 'any' 사진은 "real look of this place" 지시.
+                if "real look of this place" not in prompt:
+                    bad.append("(lp-e) 'any' 사진의 'real look of this place' 지시가 없습니다")
+
+        # (lp-f) 사진 없음 → 참고·프롬프트가 지금과 같다(사진 지시 없음·참고에 사진 없음).
+        def _clear_all_photos(d):
+            loc = locmod._find_location(d, lid)
+            loc["task"] = {"status": "idle", "startedAt": None, "id": None}
+            loc["status"] = "ready"
+            loc["photos"] = []
+
+        planmod.mutate_plan(owner, pid, _clear_all_photos)
+        seedream_calls.clear()
+        resp = client.post(f"/api/vnew/p/{pid}/locations/{lid}/build", json={})
+        _join()
+        no_photo_initial = [c for c in seedream_calls if not c.get("fix")]
+        for c in no_photo_initial:
+            if "real reference photo" in c["prompt"] or "real look of this place" in c["prompt"]:
+                bad.append("(lp-f) 사진 없음인데 프롬프트에 사진 지시가 남아 있습니다")
+                break
+        # 참고에 사진 바이트가 없다(patterns: photos/ 키 바이트). 가이드·real 뷰·패널(loc-tile)만.
+        nb = next((c for c in no_photo_initial if c["variant"] == "real" and c["view"] == "back"), None)
+        if nb is not None:
+            # real back 참고는 [가이드, 패널…] — 가이드 1 + 패널 ≤3.
+            tiles = [r for r in nb["refs"] if isinstance(r, bytes) and r.startswith(b"loc-tile")]
+            if len(nb["refs"]) != 1 + len(tiles):
+                bad.append(f"(lp-f) 사진 없음 real back 참고가 [가이드,패널]만이 아닙니다: {len(nb['refs'])}장")
+
     except Exception as exc:  # noqa: BLE001
         import traceback as _tb  # noqa: PLC0415
 
@@ -4877,6 +5154,10 @@ def check_vnew_locations() -> None:
             " (lv-d)프롬프트 CENTER BACK WALL/LEFT/RIGHT/continuous/No people·뷰B opposite side"
             " (lv-e)verify 꼭짓점 4% 초과→Claude·이상→가이드 (lv-f)옛 데이터(views 없음)·montage_2x2 보존"
             " (m)(q)단계 design→facts→prompts→images→verify→cut→sheet→done·뷰마다 +1·보정분 total 반영"
+            " (lp-a)업로드 201·정규화 JPEG·7장째 400·GET 200·다른 사용자 404·DELETE 파일 삭제"
+            " (lp-b)PUT side/noteKo·잘못된 side 400·빌드 중 409 (lp-c)사진이 설계·사실 블록에서 패널보다 먼저·라벨"
+            " (lp-d)뷰 A 참고 [가이드,back,left,any,패널]·≤6·뷰 B back 없음 (lp-e)프롬프트 CENTER BACK WALL 이미지 번호 일치"
+            " (lp-f)사진 없음→참고·프롬프트 회귀 없음"
         )
 
 

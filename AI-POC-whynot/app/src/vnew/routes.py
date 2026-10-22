@@ -477,6 +477,76 @@ def create_blueprint(deps: VnewDependencies) -> Blueprint:
         except Exception as exc:  # noqa: BLE001
             return _fail(exc)
 
+    # ------------------------------------------------------------ ③ 공간 참고 사진(photos)
+    #
+    # 장소마다 사용자가 실제 참고 사진을 붙인다(설계자 2026-10-22). 설계·사실·그림·확인에서 웹툰
+    # 패널보다 먼저 쓴다. 이미지는 vpoc.images.normalize_upload 로 JPEG 로만 저장(외부 금지). 미리보기는
+    # 같은 출처 API(아래 GET)로 받는다(버킷 CORS 없음). 빌드 중에는 변경이 409 다.
+
+    @bp.post("/p/<pid>/locations/<lid>/photos")
+    @deps.require_auth
+    def location_add_photos(pid: str, lid: str):
+        try:
+            from . import locations  # noqa: PLC0415
+
+            owner = _project_for(pid, write=True)
+            plan_mod.load_or_create(owner, pid)
+            storages = request.files.getlist("files") or request.files.getlist("file")
+            if not storages:
+                raise VpocError("vnew.location.photos", "NoFiles", "올릴 사진이 없습니다.", 400)
+            files = [(storage.read(), storage.filename or "") for storage in storages]
+            side = request.form.get("side")
+            view = locations.add_photos(owner, pid, lid, files, side)
+            return jsonify({"ok": True, "location": view}), 201
+        except Exception as exc:  # noqa: BLE001
+            return _fail(exc)
+
+    @bp.put("/p/<pid>/locations/<lid>/photos/<photo_id>")
+    @deps.require_auth
+    def location_update_photo(pid: str, lid: str, photo_id: str):
+        try:
+            from . import locations  # noqa: PLC0415
+
+            owner = _project_for(pid, write=True)
+            payload = request.get_json(silent=True) or {}
+            view = locations.update_photo(owner, pid, lid, photo_id, payload)
+            return jsonify({"ok": True, "location": view})
+        except Exception as exc:  # noqa: BLE001
+            return _fail(exc)
+
+    @bp.delete("/p/<pid>/locations/<lid>/photos/<photo_id>")
+    @deps.require_auth
+    def location_delete_photo(pid: str, lid: str, photo_id: str):
+        try:
+            from . import locations  # noqa: PLC0415
+
+            owner = _project_for(pid, write=True)
+            view = locations.delete_photo(owner, pid, lid, photo_id)
+            return jsonify({"ok": True, "location": view})
+        except Exception as exc:  # noqa: BLE001
+            return _fail(exc)
+
+    @bp.get("/p/<pid>/locations/<lid>/photos/<photo_id>")
+    @deps.require_auth
+    def location_photo_bytes(pid: str, lid: str, photo_id: str):
+        # 참고 사진 미리보기(같은 출처). 읽기 권한이면 된다. 다른 사용자·다른 프로젝트 사진은 404.
+        try:
+            from . import locations  # noqa: PLC0415
+
+            owner = _project_for(pid, write=False)
+            body, content_type = locations.photo_bytes(owner, pid, lid, photo_id)
+            return Response(
+                body,
+                mimetype=content_type,
+                headers={
+                    "Content-Type": content_type,
+                    "Content-Length": str(len(body)),
+                    "Cache-Control": "private, max-age=3600",
+                },
+            )
+        except Exception as exc:  # noqa: BLE001
+            return _fail(exc)
+
     # ------------------------------------------------------------ ③→④ 프리비즈(previz)
     #
     # 3D 장면 설계 JSON(Astra). 브라우저 three.js 가 그려 재생·녹화한다(설계자 2026-10-21).

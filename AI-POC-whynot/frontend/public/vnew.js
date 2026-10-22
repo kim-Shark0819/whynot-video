@@ -2807,6 +2807,9 @@
     // 4면 시트(실사·웹툰 탭). ready 인 그림체만 이미지를 보인다.
     item.appendChild(locationSheet(loc));
 
+    // 참고 사진(사용자 실제 사진이 배경 생성을 이끈다, 설계자 2026-10-22).
+    item.appendChild(locationPhotos(loc, showError));
+
     // 벽별 "웹툰과 일치/보정함" 배지(비교·보정 결과).
     var badges = locationCheckBadges(loc);
     if (badges) item.appendChild(badges);
@@ -2827,6 +2830,220 @@
     if (status === "building") return "만드는 중";
     if (status === "failed") return "실패";
     return "아직 안 만듦";
+  }
+
+  /* 참고 사진 미리보기를 Authorization 헤더로 받아 blob → objectURL 로 img.src 에 꽂는다.
+     버킷에 CORS 가 없어 presigned 직통 대신 같은 출처 API(GET .../photos/<photoId>)를 쓴다.
+     objectURL 은 이미지가 교체·제거될 때 브라우저가 회수한다(짧게 살다 간다). 실패하면 조용히 둔다. */
+  function photoThumbFetch(img, apiUrl) {
+    if (!img || !apiUrl) return;
+    fetch(apiUrl, { headers: { Authorization: "Bearer " + token() } })
+      .then(function (response) {
+        if (!response.ok) throw new Error("photo " + response.status);
+        return response.blob();
+      })
+      .then(function (blob) {
+        img.src = URL.createObjectURL(blob);
+      })
+      .catch(function () {
+        /* 썸네일만 비운다(목록·면 선택은 그대로 동작). */
+      });
+  }
+
+  /* 참고 사진 영역(설계자 2026-10-22): 사용자 실제 사진을 붙여 배경 생성을 '사진대로' 끌고 간다.
+     [사진 첨부](여러 장·드래그&드롭), 썸네일 목록(같은 출처 API·blob URL), 각 사진에 면 선택·메모·삭제.
+     6장 꽉 차면 첨부 비활성. 빌드 중에는 첨부·삭제·변경 비활성. */
+  function locationPhotos(loc, showError) {
+    var wrap = el("section", "vnew-loc-photos");
+    wrap.appendChild(el("h3", "vnew-loc-photos-title", "참고 사진"));
+    wrap.appendChild(
+      el(
+        "p",
+        "vnew-hint vnew-loc-photos-hint",
+        "실제 장소 사진을 넣으면 배경을 사진대로 만듭니다. 사진마다 어느 면인지 고르면 더 정확합니다. 사진을 바꾼 뒤 [다시 만들기]를 눌러 주세요."
+      )
+    );
+
+    var photos = loc.photos || [];
+    var maxPhotos = loc.maxPhotos || 6;
+    var sideLabels = loc.photoSideLabels || {
+      any: "전체 분위기",
+      back: "메인배경(뒤)",
+      left: "왼쪽",
+      right: "오른쪽",
+      front: "앞(맞은편)",
+      floor: "바닥"
+    };
+    // 화면 select 순서(전체 분위기/메인배경(뒤)/왼쪽/오른쪽/앞(맞은편)/바닥).
+    var sideOrder = ["any", "back", "left", "right", "front", "floor"];
+    var busy = loc.status === "building" || (loc.task || {}).status === "running";
+    var full = photos.length >= maxPhotos;
+    var base = "/api/vnew/p/" + encodeURIComponent(state.projectId) + "/locations/" + encodeURIComponent(loc.id);
+
+    function reloadWith(plan) {
+      if (plan) {
+        state.plan = plan;
+        renderPlan();
+      } else {
+        loadPlan(false);
+      }
+    }
+
+    function uploadFiles(fileList, side) {
+      var files = [];
+      var i;
+      for (i = 0; i < (fileList ? fileList.length : 0); i += 1) files.push(fileList[i]);
+      if (!files.length) return;
+      var form = new FormData();
+      files.forEach(function (f) {
+        form.append("files", f);
+      });
+      if (side) form.append("side", side);
+      api(base + "/photos", { method: "POST", body: form })
+        .then(function (res) {
+          reloadWith(res && res.location ? patchedPlanWithLoc(res.location) : null);
+        })
+        .catch(function (err) {
+          if (showError) showError("사진을 올리지 못했습니다: " + errMessage(err));
+          loadPlan(false);
+        });
+    }
+
+    // 한 장소만 바뀐 location_view 를 현재 plan 에 끼워 넣는다(없으면 null → 전체 새로고침).
+    function patchedPlanWithLoc(locView) {
+      var plan = state.plan;
+      if (!plan || !plan.locations) return null;
+      var next = [];
+      plan.locations.forEach(function (l) {
+        next.push(l.id === locView.id ? locView : l);
+      });
+      var copy = {};
+      Object.keys(plan).forEach(function (k) {
+        copy[k] = plan[k];
+      });
+      copy.locations = next;
+      return copy;
+    }
+
+    // 첨부 버튼 + 드래그&드롭 영역.
+    var drop = el("div", "vnew-loc-photos-drop" + (full ? " is-full" : "") + (busy ? " is-busy" : ""));
+    var addBtn = el("button", "outline-button vnew-loc-photos-add", full ? "사진 가득 참 (" + maxPhotos + "장)" : "사진 첨부");
+    addBtn.type = "button";
+    addBtn.disabled = busy || full;
+    var fileInput = el("input", "vnew-loc-photos-file");
+    fileInput.type = "file";
+    fileInput.accept = "image/*";
+    fileInput.multiple = true;
+    fileInput.style.display = "none";
+    fileInput.addEventListener("change", function () {
+      uploadFiles(fileInput.files, "");
+      fileInput.value = "";
+    });
+    addBtn.addEventListener("click", function () {
+      if (!addBtn.disabled) fileInput.click();
+    });
+    drop.appendChild(addBtn);
+    drop.appendChild(fileInput);
+    drop.appendChild(el("span", "vnew-loc-photos-droptip", busy ? "만드는 중에는 바꿀 수 없습니다." : "여기로 끌어다 놓아도 됩니다."));
+
+    if (!busy && !full) {
+      drop.addEventListener("dragover", function (e) {
+        e.preventDefault();
+        drop.classList.add("is-drag");
+      });
+      drop.addEventListener("dragleave", function () {
+        drop.classList.remove("is-drag");
+      });
+      drop.addEventListener("drop", function (e) {
+        e.preventDefault();
+        drop.classList.remove("is-drag");
+        if (e.dataTransfer && e.dataTransfer.files) uploadFiles(e.dataTransfer.files, "");
+      });
+    }
+    wrap.appendChild(drop);
+
+    // 썸네일 목록.
+    if (!photos.length) {
+      wrap.appendChild(el("p", "vnew-hint", "아직 참고 사진이 없습니다."));
+      return wrap;
+    }
+
+    var grid = el("div", "vnew-loc-photos-grid");
+    photos.forEach(function (photo) {
+      var cell = el("div", "vnew-loc-photo-cell");
+      var img = el("img", "vnew-loc-photo-thumb");
+      img.alt = photo.name || "참고 사진";
+      photoThumbFetch(img, base + "/photos/" + encodeURIComponent(photo.photoId));
+      cell.appendChild(img);
+
+      // 면 선택.
+      var sideSel = el("select", "vnew-loc-photo-side");
+      sideSel.disabled = busy;
+      sideOrder.forEach(function (s) {
+        var opt = el("option", null, sideLabels[s] || s);
+        opt.value = s;
+        if ((photo.side || "any") === s) opt.selected = true;
+        sideSel.appendChild(opt);
+      });
+      sideSel.addEventListener("change", function () {
+        api(base + "/photos/" + encodeURIComponent(photo.photoId), {
+          method: "PUT",
+          body: JSON.stringify({ side: sideSel.value })
+        })
+          .then(function (res) {
+            reloadWith(res && res.location ? patchedPlanWithLoc(res.location) : null);
+          })
+          .catch(function (err) {
+            if (showError) showError("면을 바꾸지 못했습니다: " + errMessage(err));
+            loadPlan(false);
+          });
+      });
+      cell.appendChild(sideSel);
+
+      // 메모.
+      var note = el("input", "vnew-loc-photo-note");
+      note.type = "text";
+      note.maxLength = 200;
+      note.placeholder = "메모(선택)";
+      note.value = photo.noteKo || "";
+      note.disabled = busy;
+      note.addEventListener("change", function () {
+        api(base + "/photos/" + encodeURIComponent(photo.photoId), {
+          method: "PUT",
+          body: JSON.stringify({ noteKo: note.value || "" })
+        })
+          .then(function (res) {
+            reloadWith(res && res.location ? patchedPlanWithLoc(res.location) : null);
+          })
+          .catch(function (err) {
+            if (showError) showError("메모를 저장하지 못했습니다: " + errMessage(err));
+            loadPlan(false);
+          });
+      });
+      cell.appendChild(note);
+
+      // 삭제.
+      var del = el("button", "text-action vnew-loc-photo-del", "삭제");
+      del.type = "button";
+      del.disabled = busy;
+      del.addEventListener("click", function () {
+        del.disabled = true;
+        api(base + "/photos/" + encodeURIComponent(photo.photoId), { method: "DELETE" })
+          .then(function (res) {
+            reloadWith(res && res.location ? patchedPlanWithLoc(res.location) : null);
+          })
+          .catch(function (err) {
+            del.disabled = false;
+            if (showError) showError("사진을 지우지 못했습니다: " + errMessage(err));
+            loadPlan(false);
+          });
+      });
+      cell.appendChild(del);
+
+      grid.appendChild(cell);
+    });
+    wrap.appendChild(grid);
+    return wrap;
   }
 
   /* 공간 시트(실사·웹툰 탭). 새 방식(hasViews)이면 뷰 A/B 크게 + 펴진 벽 4장·바닥을 한국어 라벨과 함께

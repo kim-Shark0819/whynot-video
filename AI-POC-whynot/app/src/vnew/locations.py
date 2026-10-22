@@ -143,6 +143,47 @@ PROMPT_HARD_CAP = 3000
 # 불일치 벽을 다시 그리는 횟수(1회).
 FIX_RETRY = 1
 
+# ---------------------------------------------------------------- 참고 사진(설계자 2026-10-22)
+#
+# "배경 만드는 것이 말을 잘 안 듣는다" → 장소마다 사용자가 실제 참고 사진을 첨부하고, 그 사진을
+# 설계·사실·그림·확인에 웹툰 패널보다 '먼저' 쓴다. 사진마다 어느 면인지(메인배경(뒤)/왼쪽/오른쪽/
+# 앞(맞은편)/바닥/전체 분위기) 지정할 수 있다. 이미지는 vpoc.images.normalize_upload 로 JPEG 로
+# 정규화해(크기 제한 동일) 그 프로젝트 locations 접두사 아래 photos/{photoId}.jpg 로만 저장한다
+# (외부 서비스에 올리지 않는다). 사진을 바꿔도 이미 만든 시트는 그대로 두고 [다시 만들기] 때 반영한다.
+
+# 한 장소에 붙일 수 있는 참고 사진 최대 장수.
+MAX_LOCATION_PHOTOS = 6
+# 사진에 지정할 수 있는 면. back=메인배경(뒤), front=앞(맞은편), any=전체 분위기.
+PHOTO_SIDES = ("back", "left", "right", "front", "floor", "any")
+# 사진 메모(한국어) 최대 길이.
+MAX_PHOTO_NOTE_LEN = 200
+
+# 면(side) → 사진 블록 라벨 한국어(설계·사실 Claude 블록·화면 안내에 쓴다).
+PHOTO_SIDE_LABELS_KO = {
+    "back": "메인배경(뒤)",
+    "left": "왼쪽",
+    "right": "오른쪽",
+    "front": "앞(맞은편)",
+    "floor": "바닥",
+    "any": "전체 분위기",
+}
+
+# 면(side) → Seedream 프롬프트에서 그 사진이 어느 화면 벽인지(영문 라벨). 'any' 는 벽이 아니다.
+PHOTO_SIDE_WALL_EN = {
+    "back": "CENTER BACK WALL",
+    "left": "LEFT WALL",
+    "right": "RIGHT WALL",
+    "front": "CENTER BACK WALL",  # 뷰 B(front)에서는 앞 벽이 화면 가운데 벽이 된다.
+    "floor": "FLOOR",
+}
+
+# 각 컷어웨이 뷰에 넣을 사진 면(설계자 2026-10-22). 뷰 A=back·left·right·floor, 뷰 B=front·left·right.
+# 이어서 'any'(전체 분위기) 사진, 남는 자리에 웹툰 패널.
+VIEW_PHOTO_SIDES = {
+    "back": ("back", "left", "right", "floor"),
+    "front": ("front", "left", "right"),
+}
+
 
 # ================================================================ 파드 안 실행 중 표시
 #
@@ -304,6 +345,7 @@ def _new_location(name_ko: str, name_en: str, panels: list[int]) -> dict:
         "error": "",
         "design": {},  # 설계 JSON(아래 _normalize_design)
         "facts": {},  # 사실 추출 JSON(아래 _normalize_facts)
+        "photos": [],  # 사용자 참고 사진(설계자 2026-10-22, 아래 _normalize_photo)
         "variants": {v: _empty_variant() for v in VARIANTS},
         "task": _empty_task(),
         "progress": _empty_progress(),
@@ -526,7 +568,13 @@ def design_location(owner: str, pid: str, loc: dict) -> dict:
         "Each panel below shows this place from a different angle — read the drawn walls, windows, "
         "shelves, desks and doors in the panels and base every wall on them."
     )
+    photo_blocks = _photo_blocks(owner, pid, loc)
+    if photo_blocks:
+        intro_lines.append(
+            "아래에 사용자가 첨부한 실제 참고 사진이 먼저 옵니다(최우선). " + _PHOTO_PRIORITY_KO
+        )
     blocks: list[dict] = [{"text": "\n".join(intro_lines)}]
+    blocks.extend(photo_blocks)  # 사진을 패널보다 먼저.
     for jpeg in panels:
         blocks.append({"image": {"format": "jpeg", "source": {"bytes": jpeg}}})
 
@@ -646,6 +694,113 @@ def _prefer_background(tiles: list[bytes]) -> list[bytes]:
         scored.append((rank, index, jpeg))
     scored.sort(key=lambda item: (item[0], item[1]))
     return [item[2] for item in scored]
+
+
+# ---------------------------------------------------------------- 참고 사진(빌드 반영, 설계자 2026-10-22)
+#
+# 사진이 있으면 설계·사실·그림·확인에 웹툰 패널보다 '먼저' 쓴다. 블록·참고 이미지의 '이미지 번호'가
+# 프롬프트 지시와 정확히 맞아야 하므로(이미지 모델은 지능이 없다), 참고 순서를 한 곳(_view_photo_plan)
+# 에서 정하고 프롬프트·생성·확인이 그 순서를 똑같이 쓴다.
+
+
+def _photo_jpeg(owner: str, pid: str, lid: str, photo: dict) -> bytes | None:
+    """참고 사진 1장의 JPEG 바이트. 못 읽으면 None(그 사진만 건너뛴다)."""
+    key = str((photo or {}).get("key") or "").strip()
+    if not key:
+        pid_ = str((photo or {}).get("photoId") or "")
+        key = photo_key(owner, pid, lid, pid_) if pid_ else ""
+    if not key:
+        return None
+    try:
+        return STORE.get_bytes(key)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("vnew.location.photo.missing key=%s err=%s", key, str(exc)[:150])
+        return None
+
+
+def _ordered_photos_for_view(loc: dict, view: str) -> list[dict]:
+    """그 뷰에 넣을 참고 사진을 순서대로(면 지정 사진 먼저, 그다음 'any').
+
+    뷰 A(back): back·left·right·floor 순. 뷰 B(front): front·left·right 순. 이어서 'any'(전체 분위기).
+    같은 사진이 두 번 들어가지 않게 한다.
+    """
+    photos = _loc_photos(loc)
+    if not photos:
+        return []
+    out: list[dict] = []
+    seen: set[str] = set()
+    for side in VIEW_PHOTO_SIDES.get(view, ()):  # 면 지정 사진.
+        for p in _photos_by_side(photos, side):
+            pid_ = p.get("photoId") or ""
+            if pid_ not in seen:
+                out.append(p)
+                seen.add(pid_)
+    for p in _photos_by_side(photos, "any"):  # 전체 분위기.
+        pid_ = p.get("photoId") or ""
+        if pid_ not in seen:
+            out.append(p)
+            seen.add(pid_)
+    return out
+
+
+def _view_photo_plan(loc: dict, view: str, *, lead: int) -> list[dict]:
+    """프롬프트·생성·확인이 공유하는 '사진 참고 계획'. lead = 사진 앞에 오는 이미지 수(가이드·앞 뷰).
+
+    남는 참고 자리(최대 MAX_REF_PANELS 뷰 = 6 - lead - 패널은 뒤)만큼 사진을 담되, 각 사진에 최종
+    '이미지 번호'(imageNo = lead + 1부터)를 매긴다. 반환: [{photo, imageNo, side}], 1-based 이미지 번호.
+    """
+    photos = _ordered_photos_for_view(loc, view)
+    # 참고 전체 상한(6장) 안에서 가이드/앞 뷰 다음에 사진을 넣는다. 패널 자리를 최소 0 으로.
+    slots = max(0, 6 - lead)
+    plan: list[dict] = []
+    for index, photo in enumerate(photos[:slots]):
+        plan.append({"photo": photo, "imageNo": lead + 1 + index, "side": photo.get("side") or "any"})
+    return plan
+
+
+def _view_lead(variant: str, view: str) -> int:
+    """그 (그림체, 뷰) 참고의 '사진 앞에 오는 이미지 수'(가이드/앞 뷰). _generate_views 와 같아야 한다.
+
+    real back=[가이드] → 1, real front=[가이드, real A] → 2,
+    webtoon back=[real A] → 1, webtoon front=[real B, webtoon A] → 2.
+    """
+    return 2 if view == "front" else 1
+
+
+# 설계·사실 Claude 블록 앞에 붙이는 사진 지침(설계자 2026-10-22). 사진이 패널보다 먼저 오게 한다.
+_PHOTO_PRIORITY_KO = (
+    "사진과 웹툰 패널이 다르면 사진을 따르세요. 면이 지정된 사진은 그 벽의 물건·재질·색·창문·문 "
+    "위치를 그대로 읽으세요."
+)
+
+
+def _photo_label_ko(photo: dict) -> str:
+    """사진 한 장의 한국어 라벨: '{면 한국어}' 또는 '{면 한국어}, {메모}'."""
+    side_ko = PHOTO_SIDE_LABELS_KO.get(photo.get("side") or "any", "전체 분위기")
+    note = str(photo.get("noteKo") or "").strip()
+    return f"{side_ko}, {note}" if note else side_ko
+
+
+def _photo_blocks(owner: str, pid: str, loc: dict) -> list[dict]:
+    """설계·사실 Claude 블록에 '먼저' 넣을 사진 블록들(라벨 텍스트 + 이미지). 사진이 없으면 빈 리스트.
+
+    형식: "사용자가 첨부한 실제 참고 사진입니다(최우선). 사진 {n}: {면 한국어}{, 메모}" + 이미지.
+    """
+    photos = _loc_photos(loc)
+    if not photos:
+        return []
+    blocks: list[dict] = []
+    number = 0
+    for photo in photos:
+        jpeg = _photo_jpeg(owner, pid, loc.get("id") or "", photo)
+        if jpeg is None:
+            continue
+        number += 1
+        blocks.append(
+            {"text": f"사용자가 첨부한 실제 참고 사진입니다(최우선). 사진 {number}: {_photo_label_ko(photo)}"}
+        )
+        blocks.append({"image": {"format": "jpeg", "source": {"bytes": jpeg}}})
+    return blocks
 
 
 def _normalize_design(payload: dict) -> dict:
@@ -833,7 +988,13 @@ def extract_facts(owner: str, pid: str, loc: dict) -> dict:
     intro_lines.append(
         "This is a Korean setting (closed room)." if enclosed else "This is a Korean setting."
     )
+    photo_blocks = _photo_blocks(owner, pid, loc)
+    if photo_blocks:
+        intro_lines.append(
+            "아래에 사용자가 첨부한 실제 참고 사진이 먼저 옵니다(최우선). " + _PHOTO_PRIORITY_KO
+        )
     blocks: list[dict] = [{"text": "\n".join(intro_lines)}]
+    blocks.extend(photo_blocks)  # 사진을 패널보다 먼저.
     for jpeg in panels:
         blocks.append({"image": {"format": "jpeg", "source": {"bytes": jpeg}}})
 
@@ -1167,6 +1328,34 @@ def _author_prompt(owner: str, pid: str, loc: dict, *, variant: str, view: str) 
     return _finalize_prompt(_view_prompt(variant, view, loc), variant, view, loc)
 
 
+def _photo_prompt_clause(loc: dict, variant: str, view: str) -> str:
+    """사진이 들어간 뷰의 프롬프트 지시(이미지 번호를 실제 참고 순서와 맞춘다). 사진 없으면 빈 문자열.
+
+    면 지정 사진: "Image N is a real reference photo of the {WALL}: copy its objects, materials, colors,
+    openings and light exactly, but keep Image 1's box geometry and corner positions."
+    'any' 사진: "Image N shows the real look of this place (materials, colors, objects, light) — follow it."
+    """
+    lead = _view_lead(variant, view)
+    plan = _view_photo_plan(loc, view, lead=lead)
+    if not plan:
+        return ""
+    parts: list[str] = []
+    for item in plan:
+        n = item["imageNo"]
+        side = item["side"]
+        wall = PHOTO_SIDE_WALL_EN.get(side)
+        if side == "any" or not wall:
+            parts.append(
+                f"Image {n} shows the real look of this place (materials, colors, objects, light) — follow it."
+            )
+        else:
+            parts.append(
+                f"Image {n} is a real reference photo of the {wall}: copy its objects, materials, colors, "
+                "openings and light exactly, but keep Image 1's box geometry and corner positions."
+            )
+    return " ".join(parts)
+
+
 def _finalize_prompt(text: str, variant: str, view: str, loc: dict) -> str:
     """Astra 가 쓴 프롬프트에 보증 문구·그림체·가이드 지시를 보장하고, 사용자 추가 요청을 붙이고, 길이를 맞춘다.
 
@@ -1198,6 +1387,10 @@ def _finalize_prompt(text: str, variant: str, view: str, loc: dict) -> str:
         text += " " + _BLOCKIN_CLAUSE
     if "No people" not in text:
         text += " " + _NO_PEOPLE
+    # 참고 사진이 있으면 이미지 번호 지시를 넣는다(이미지 모델이 사진을 따르게). 사진 없으면 빈 문자열.
+    photo_clause = _photo_prompt_clause(loc, variant, view)
+    if photo_clause and "real reference photo" not in text and "real look of this place" not in text:
+        text += " " + photo_clause
     text += " " + _NO_TEXT
     text = _with_extra(text, loc)
     # 너무 짧으면 사실 설명으로 늘린다(1,500자 미만 방지).
@@ -1336,6 +1529,18 @@ def floor_key(owner: str, pid: str, lid: str, variant: str, version: int) -> str
 
 def sheet_key(owner: str, pid: str, lid: str, variant: str, version: int) -> str:
     return f"{_var_dir(owner, pid, lid, variant)}/sheet_v{version}.jpg"
+
+
+def photos_prefix(owner: str, pid: str, lid: str) -> str:
+    """그 장소 참고 사진이 들어가는 S3 접두사. locations/{lid}/photos/ 아래에만 둔다(같은 출처 검증용)."""
+    from . import plan as plan_mod  # noqa: PLC0415
+
+    return f"{plan_mod._root(owner, pid)}/locations/{lid}/photos/"  # noqa: SLF001
+
+
+def photo_key(owner: str, pid: str, lid: str, photo_id: str) -> str:
+    """참고 사진 1장의 S3 키. photos/{photoId}.jpg(정규화 JPEG)."""
+    return f"{photos_prefix(owner, pid, lid)}{photo_id}.jpg"
 
 
 # ================================================================ 빌드
@@ -1599,6 +1804,21 @@ def _generate_views(
     results: dict[tuple[str, str], tuple[bytes, str]] = {}
     panels = list(refs)[:3]
 
+    def _refs(variant: str, view: str, lead_images: list[bytes], job_panels: list[bytes]) -> list[bytes]:
+        """참고 이미지(≤6): 가이드/앞 뷰(lead) → 뷰 면 사진·'any' 사진 → 남는 자리에 웹툰 패널.
+
+        사진이 없으면 lead + job_panels 로 기존과 완전히 같다(회귀 없음). 사진이 있으면 lead 다음에
+        사진을 넣고, 전체 6장 안에서 패널을 뒤로 민다.
+        """
+        lead = [b for b in lead_images if b]
+        plan = _view_photo_plan(loc, view, lead=len(lead))
+        photo_bytes: list[bytes] = []
+        for item in plan:
+            jpeg = _photo_jpeg(owner, pid, lid, item["photo"])
+            if jpeg is not None:
+                photo_bytes.append(jpeg)
+        return (lead + photo_bytes + list(job_panels))[:6]
+
     def _draw(variant: str, view: str, references: list[bytes]) -> None:
         prompt = _prompt_for(loc, variant, view)
         image = _seedream(prompt, references, size=VIEW_SIZE)
@@ -1608,15 +1828,15 @@ def _generate_views(
         results[(variant, view)] = (image, key)
         _bump_progress(owner, pid, lid, task_id)
 
-    # 1) real 뷰 A(back): 참고 첫 장 = 가이드 back, 이어서 패널.
-    _draw("real", "back", [guides["back"], *panels])
+    # 1) real 뷰 A(back): lead = [가이드 back], 패널 ≤3. 사진은 _refs 가 lead 뒤에 붙인다.
+    _draw("real", "back", _refs("real", "back", [guides["back"]], panels))
 
     # 2) real 뷰 B(front)·webtoon 뷰 A(back) 병렬.
-    #    real B 참고 = [가이드 front, real A, 패널]. webtoon A 참고 = [real A, 패널].
+    #    real B lead = [가이드 front, real A], 패널 ≤2. webtoon A lead = [real A], 패널 ≤2.
     real_a = results[("real", "back")][0]
     parallel_jobs = [
-        ("real", "front", [guides["front"], real_a, *panels[:2]]),
-        ("webtoon", "back", [real_a, *panels[:2]]),
+        ("real", "front", _refs("real", "front", [guides["front"], real_a], panels[:2])),
+        ("webtoon", "back", _refs("webtoon", "back", [real_a], panels[:2])),
     ]
     last_error: Exception | None = None
     with ThreadPoolExecutor(max_workers=VIEW_WORKERS, thread_name_prefix=f"vnew-loc-view-{lid}") as pool:
@@ -1629,10 +1849,10 @@ def _generate_views(
     if last_error is not None:
         raise last_error
 
-    # 3) webtoon 뷰 B(front): 참고 = [real B, webtoon A, 패널].
+    # 3) webtoon 뷰 B(front): lead = [real B, webtoon A], 패널 ≤1. 사진은 _refs 가 붙인다.
     real_b = results[("real", "front")][0]
     webtoon_a = results[("webtoon", "back")][0]
-    _draw("webtoon", "front", [real_b, webtoon_a, *panels[:1]])
+    _draw("webtoon", "front", _refs("webtoon", "front", [real_b, webtoon_a], panels[:1]))
     return results
 
 
@@ -1764,16 +1984,36 @@ def _verify_view(
         if view == "back"
         else "This is the front view (same room from the opposite side; left=east, right=west)."
     )
+    # 이 뷰에 넣은 사진(면 지정·'any')을 함께 보여 주고, 사진과 맞는지 묻는다(설계자 2026-10-22).
+    photo_plan = _view_photo_plan(loc, view, lead=1)  # 가이드 1장 뒤에 사진.
+    photo_items: list[dict] = []
+    for item in photo_plan:
+        jpeg = _photo_jpeg(owner, pid, lid, item["photo"])
+        if jpeg is not None:
+            photo_items.append({"side": item["side"], "jpeg": jpeg})
+    photo_question = ""
+    if photo_items:
+        sides_ko = ", ".join(
+            PHOTO_SIDE_LABELS_KO.get(p["side"], p["side"]) for p in photo_items if p["side"] != "any"
+        )
+        photo_question = (
+            " Real reference photos of this place follow the guide. For any wall that has a reference "
+            f"photo ({sides_ko or 'overall look'}), matchesPlace is true only if the generated wall "
+            "matches that photo's objects, materials, colors and openings."
+        )
     blocks: list[dict] = [
         {
             "text": (
-                f"Image 1 is the layout guide for the {view} cutaway view. {side_text} "
-                "Then the reference webtoon panels, then the generated view. Does the generated view show "
+                f"Image 1 is the layout guide for the {view} cutaway view. {side_text}"
+                + photo_question
+                + " Then the reference webtoon panels, then the generated view. Does the generated view show "
                 "the same place, and where are the back-wall and front-face corners? Call emit_verify."
             )
         },
         {"image": {"format": "jpeg", "source": {"bytes": guide}}},
     ]
+    for item in photo_items:  # 사진을 패널보다 먼저(가이드 다음).
+        blocks.append({"image": {"format": "jpeg", "source": {"bytes": item["jpeg"]}}})
     for jpeg in refs:
         blocks.append({"image": {"format": "jpeg", "source": {"bytes": jpeg}}})
     blocks.append({"image": {"format": "jpeg", "source": {"bytes": image}}})
@@ -1843,7 +2083,14 @@ def _redraw_view(
     fix_text = " Corrections: " + " ".join(fixes) if fixes else ""
     prompt = (base_prompt + fix_text)[:PROMPT_HARD_CAP]
     panels = list(refs)[:2]
-    references = [guide, *panels] if variant == "real" else [*panels]
+    lead = [guide] if variant == "real" else []
+    # 사진을 lead 다음에(프롬프트가 사진을 따르게). 번호는 생성 때 계획을 그대로 쓴다.
+    photo_bytes: list[bytes] = []
+    for item in _view_photo_plan(loc, view, lead=_view_lead(variant, view)):
+        jpeg = _photo_jpeg(owner, pid, lid, item["photo"])
+        if jpeg is not None:
+            photo_bytes.append(jpeg)
+    references = (lead + photo_bytes + panels)[:6]
     last_error: Exception | None = None
     for _ in range(FIX_RETRY):
         try:
@@ -2191,7 +2438,261 @@ def _apply_facts_patch(facts: dict, patch: dict) -> None:
                 wall["objects"] = objects
 
 
+# ================================================================ 참고 사진(CRUD)
+#
+# 설계자 2026-10-22: 장소마다 사용자 참고 사진을 붙이고 면(side)·메모를 지정한다. 이미지는
+# vpoc.images.normalize_upload 로 JPEG 로 정규화해 photos/{photoId}.jpg 로만 저장한다(외부 금지).
+# 빌드 중(running)에는 변경을 409 로 막고, 사진을 바꿔도 이미 만든 시트는 그대로 둔다.
+
+
+def _photo_id() -> str:
+    return f"ph_{secrets.token_hex(4)}"
+
+
+def _norm_photo_side(value) -> str:
+    """사진 면 정규화. 모르는 값이면 'any'(전체 분위기)."""
+    side = str(value or "").strip().lower()
+    return side if side in PHOTO_SIDES else "any"
+
+
+def _normalize_photo(raw: dict) -> dict:
+    """저장된 사진 메타를 화면·빌드용 모양으로 정리한다(없는 필드 기본값)."""
+    raw = raw if isinstance(raw, dict) else {}
+    return {
+        "photoId": str(raw.get("photoId") or "").strip(),
+        "key": str(raw.get("key") or "").strip(),
+        "name": str(raw.get("name") or "").strip(),
+        "width": _as_int(raw.get("width"), 0),
+        "height": _as_int(raw.get("height"), 0),
+        "side": _norm_photo_side(raw.get("side")),
+        "noteKo": str(raw.get("noteKo") or "").strip()[:MAX_PHOTO_NOTE_LEN],
+        "addedAt": str(raw.get("addedAt") or "").strip(),
+    }
+
+
+def _loc_photos(loc: dict) -> list[dict]:
+    """장소의 참고 사진 목록(정리된). 없으면 빈 리스트."""
+    photos = (loc or {}).get("photos")
+    if not isinstance(photos, list):
+        return []
+    return [_normalize_photo(p) for p in photos if isinstance(p, dict) and p.get("photoId")]
+
+
+def _photos_by_side(photos: list[dict], side: str) -> list[dict]:
+    """그 면(side)으로 지정된 사진만(추가 순서 유지)."""
+    return [p for p in photos if p.get("side") == side]
+
+
+def _guard_photos_not_running(loc: dict) -> None:
+    """빌드 중(running, stale 아님)이면 사진 변경을 409 로 막는다."""
+    task = loc.get("task") or {}
+    if task.get("status") == "running" and not _task_stale(task):
+        raise VpocError(
+            "vnew.location.photos",
+            "Building",
+            "공간 시트를 만드는 중에는 사진을 바꿀 수 없습니다.",
+            409,
+        )
+
+
+def add_photos(owner: str, pid: str, lid: str, files: list[tuple[bytes, str]], side: str | None = None) -> dict:
+    """참고 사진 여러 장을 올린다. 각 장을 JPEG 로 정규화(크기 제한 동일)해 photos/ 아래 저장한다.
+
+    - 빌드 중(running)이면 409. 이미 6장이거나 이번에 6장을 넘기면 400.
+    - side 가 주어지면 올린 사진 모두 그 면으로(없으면 'any').
+    반환: 정리된 location_view(한 장소).
+    """
+    from . import plan as plan_mod  # noqa: PLC0415
+
+    cleaned_side = _norm_photo_side(side) if side is not None else "any"
+    pending = [(raw, name) for (raw, name) in files if raw]
+    if not pending:
+        raise VpocError("vnew.location.photos", "NoFiles", "올릴 사진이 없습니다.", 400)
+
+    # 먼저 6장 상한을 본다(정규화·저장 전에). 초과면 400.
+    data0, _ = plan_mod.load_plan(owner, pid)
+    loc0 = _find_location(data0, lid)
+    if loc0 is None:
+        raise VpocError("vnew.location.photos", "NotFound", "장소를 찾을 수 없습니다.", 404)
+    _guard_photos_not_running(loc0)
+    existing = len(_loc_photos(loc0))
+    if existing + len(pending) > MAX_LOCATION_PHOTOS:
+        raise VpocError(
+            "vnew.location.photos",
+            "TooManyPhotos",
+            f"참고 사진은 최대 {MAX_LOCATION_PHOTOS}장까지 넣을 수 있습니다.",
+            400,
+        )
+
+    # 정규화·저장(외부 금지 — vpoc.images.normalize_upload 재사용, S3 는 STORE).
+    new_metas: list[dict] = []
+    for raw, name in pending:
+        jpeg, width, height = vpoc_images.normalize_upload(raw, name)
+        photo_id = _photo_id()
+        key = photo_key(owner, pid, lid, photo_id)
+        STORE.put_bytes(key, jpeg, "image/jpeg")
+        new_metas.append(
+            {
+                "photoId": photo_id,
+                "key": key,
+                "name": str(name or "").strip(),
+                "width": width,
+                "height": height,
+                "side": cleaned_side,
+                "noteKo": "",
+                "addedAt": now_iso(),
+            }
+        )
+
+    def mutator(data: dict) -> dict:
+        loc = _find_location(data, lid)
+        if loc is None:
+            raise VpocError("vnew.location.photos", "NotFound", "장소를 찾을 수 없습니다.", 404)
+        _guard_photos_not_running(loc)
+        photos = _loc_photos(loc)
+        if len(photos) + len(new_metas) > MAX_LOCATION_PHOTOS:
+            raise VpocError(
+                "vnew.location.photos",
+                "TooManyPhotos",
+                f"참고 사진은 최대 {MAX_LOCATION_PHOTOS}장까지 넣을 수 있습니다.",
+                400,
+            )
+        loc["photos"] = photos + new_metas
+        return loc
+
+    _, loc = plan_mod.mutate_plan(owner, pid, mutator)
+    return _location_view_one(owner, pid, loc)
+
+
+def update_photo(owner: str, pid: str, lid: str, photo_id: str, patch: dict) -> dict:
+    """사진의 면(side)·메모(noteKo)를 바꾼다. 빌드 중이면 409. 반환: 그 장소 location_view."""
+    from . import plan as plan_mod  # noqa: PLC0415
+
+    def mutator(data: dict) -> dict:
+        loc = _find_location(data, lid)
+        if loc is None:
+            raise VpocError("vnew.location.photos", "NotFound", "장소를 찾을 수 없습니다.", 404)
+        _guard_photos_not_running(loc)
+        photos = _loc_photos(loc)
+        target = next((p for p in photos if p.get("photoId") == photo_id), None)
+        if target is None:
+            raise VpocError("vnew.location.photos", "NotFound", "사진을 찾을 수 없습니다.", 404)
+        if "side" in patch:
+            raw_side = str(patch.get("side") or "").strip().lower()
+            if raw_side and raw_side not in PHOTO_SIDES:
+                raise VpocError("vnew.location.photos", "BadSide", "알 수 없는 면입니다.", 400)
+            target["side"] = _norm_photo_side(raw_side)
+        if "noteKo" in patch:
+            target["noteKo"] = str(patch.get("noteKo") or "").strip()[:MAX_PHOTO_NOTE_LEN]
+        loc["photos"] = photos
+        return loc
+
+    _, loc = plan_mod.mutate_plan(owner, pid, mutator)
+    return _location_view_one(owner, pid, loc)
+
+
+def delete_photo(owner: str, pid: str, lid: str, photo_id: str) -> dict:
+    """사진을 지운다(저장된 파일도 지운다). 빌드 중이면 409. 반환: 그 장소 location_view."""
+    from . import plan as plan_mod  # noqa: PLC0415
+
+    removed_key = {"value": ""}
+
+    def mutator(data: dict) -> dict:
+        loc = _find_location(data, lid)
+        if loc is None:
+            raise VpocError("vnew.location.photos", "NotFound", "장소를 찾을 수 없습니다.", 404)
+        _guard_photos_not_running(loc)
+        photos = _loc_photos(loc)
+        target = next((p for p in photos if p.get("photoId") == photo_id), None)
+        if target is None:
+            raise VpocError("vnew.location.photos", "NotFound", "사진을 찾을 수 없습니다.", 404)
+        removed_key["value"] = target.get("key") or photo_key(owner, pid, lid, photo_id)
+        loc["photos"] = [p for p in photos if p.get("photoId") != photo_id]
+        return loc
+
+    _, loc = plan_mod.mutate_plan(owner, pid, mutator)
+    # 상태를 먼저 고친 뒤 파일을 지운다(지우기가 실패해도 목록에서는 사라진다).
+    key = removed_key["value"]
+    if key:
+        try:
+            _delete_stored(key)
+        except Exception as exc:  # noqa: BLE001
+            log.warning("vnew.location.photos.delete_file_failed key=%s err=%s", key, str(exc)[:150])
+    return _location_view_one(owner, pid, loc)
+
+
+def _delete_stored(key: str) -> None:
+    """저장된 객체 1개를 지운다. STORE 에 delete_bytes 가 있으면 그것(검사 가짜), 없으면 vpoc store
+    의 S3 클라이언트로 직접 지운다(vpoc 재사용 — 수정 아님)."""
+    deleter = getattr(STORE, "delete_bytes", None)
+    if callable(deleter):
+        deleter(key)
+        return
+    from ..vpoc import store as vpoc_store  # noqa: PLC0415
+
+    vpoc_store.s3_client(STORE.main_region).delete_object(Bucket=STORE.main_bucket, Key=key)
+
+
+def photo_bytes(owner: str, pid: str, lid: str, photo_id: str) -> tuple[bytes, str]:
+    """참고 사진 미리보기 바이트(같은 출처 API). 그 프로젝트 사진이 아니면 404.
+
+    키가 이 (owner,pid,lid) 의 photos 접두사 안인지 확인한다 — 다른 사용자·다른 프로젝트 데이터에
+    닿지 못하게. 못 읽어도 404. 화면은 이 경로로 받는다(버킷 CORS 없음).
+    """
+    from . import plan as plan_mod  # noqa: PLC0415
+
+    photo_id = str(photo_id or "").strip()
+    if not photo_id:
+        raise VpocError("vnew.location.photos", "NotFound", "사진을 찾을 수 없습니다.", 404)
+    try:
+        data, _ = plan_mod.load_plan(owner, pid)
+    except Exception as exc:  # noqa: BLE001
+        raise VpocError("vnew.location.photos", "NotFound", "사진을 찾을 수 없습니다.", 404) from exc
+    loc = _find_location(data, lid)
+    if loc is None:
+        raise VpocError("vnew.location.photos", "NotFound", "사진을 찾을 수 없습니다.", 404)
+    meta = next((p for p in _loc_photos(loc) if p.get("photoId") == photo_id), None)
+    if meta is None:
+        raise VpocError("vnew.location.photos", "NotFound", "사진을 찾을 수 없습니다.", 404)
+    key = meta.get("key") or photo_key(owner, pid, lid, photo_id)
+    prefix = photos_prefix(owner, pid, lid)
+    if not key.startswith(prefix):
+        raise VpocError("vnew.location.photos", "NotFound", "사진을 찾을 수 없습니다.", 404)
+    try:
+        body = STORE.get_bytes(key)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("vnew.location.photos.missing key=%s err=%s", key, str(exc)[:150])
+        raise VpocError("vnew.location.photos", "NotFound", "사진을 찾을 수 없습니다.", 404) from exc
+    if not body:
+        raise VpocError("vnew.location.photos", "NotFound", "사진을 찾을 수 없습니다.", 404)
+    return body, "image/jpeg"
+
+
 # ================================================================ 보기(presigned)
+
+
+def _location_view_one(owner: str, pid: str, loc: dict) -> dict:
+    """장소 하나의 location_view(사진 CRUD 응답용). locations_view 와 같은 모양 한 개."""
+    return locations_view(owner, pid, {"locations": [loc]})[0]
+
+
+def _photos_view(photos: list[dict]) -> list[dict]:
+    """참고 사진 목록을 화면용으로. presigned URL 을 담지 않는다 — 화면이 같은 출처 API 로 받는다
+    (버킷 CORS 없음). 키는 내보내지 않는다(photoId 로만 받는다)."""
+    out: list[dict] = []
+    for p in photos:
+        out.append(
+            {
+                "photoId": p.get("photoId") or "",
+                "name": p.get("name") or "",
+                "side": p.get("side") or "any",
+                "noteKo": p.get("noteKo") or "",
+                "width": p.get("width") or 0,
+                "height": p.get("height") or 0,
+                "addedAt": p.get("addedAt") or "",
+            }
+        )
+    return out
 
 
 def locations_view(owner: str, pid: str, plan: dict) -> list[dict]:
@@ -2229,6 +2730,9 @@ def locations_view(owner: str, pid: str, plan: dict) -> list[dict]:
                 "error": loc.get("error") or "",
                 "design": loc.get("design") or {},
                 "facts": loc.get("facts") or {},
+                "photos": _photos_view(_loc_photos(loc)),  # 참고 사진(같은 출처 API 로 미리보기)
+                "photoSideLabels": PHOTO_SIDE_LABELS_KO,  # 면 한국어 라벨(화면 select)
+                "maxPhotos": MAX_LOCATION_PHOTOS,
                 "variants": variants_out,
                 "views": views_out,  # {real:{back,front}, webtoon:{back,front}} (048)
                 "hasViews": has_views,  # 새 방식 데이터인지(화면이 뷰 UI 를 쓸지 판단)
