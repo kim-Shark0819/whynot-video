@@ -3725,7 +3725,8 @@
   /* ③ → ④ : 영상 만들기 확인창. 구간 수·'예상 비용이 듭니다'·설명을 보이고,
      확인하면 POST /generate {confirmUsd: estimate.totalUsd} → ④로. 409 메시지는 그대로 보인다
      (CharacterRealMissing 이면 캐릭터 만들기 링크를 함께 보인다). */
-  function openGenerateConfirm(showError) {
+  function openGenerateConfirm(showError, opts) {
+    opts = opts || {};
     var plan = state.plan || {};
     var gen = plan.gen || {};
     var est = gen.estimate || {};
@@ -3746,6 +3747,12 @@
       el("p", null, "승인한 프리비즈 녹화에 실사·웹툰 그림체를 각각 입혀 영상을 만듭니다.")
     );
     bodyWrap.appendChild(el("p", "vnew-hint", "구간 " + segCount + "개를 실사·웹툰 두 벌로 만듭니다."));
+    // 이미 결과(done/partial)가 있거나 stale 이면 지금 결과가 '이전 영상'으로만 남는다고 알린다.
+    if (opts.hadResult) {
+      bodyWrap.appendChild(
+        el("p", "vnew-hint vnew-remake-note", "지금 결과는 '이전 영상'으로만 남고 새로 만듭니다.")
+      );
+    }
     // 금액 숫자는 보이지 않는다(설계자 2026-10-20) — 문구만.
     bodyWrap.appendChild(el("p", "vnew-gen-cost", "예상 비용이 듭니다."));
 
@@ -5144,6 +5151,77 @@
     return a;
   }
 
+  /* ⑤ 시작 화면(촬영 지시서 카드 + [영상 만들기])을 그린다(설계자 2026-10-22, ⑤).
+     staleGen 이 주어지면(프리비즈가 바뀐 옛 gen) 위에 안내를 붙이고, 이전 결과(최종 영상)는
+     접이식 "이전 영상 보기" 로만 보인다. staleGen 이 null 이면 평범한 시작 화면. */
+  function renderGenStart(host, showError, staleGen) {
+    var plan = state.plan || {};
+    var previz = plan.previz || {};
+
+    if (staleGen) {
+      host.appendChild(
+        el(
+          "p",
+          "vnew-hint vnew-stale-note",
+          "프리비즈가 바뀌어 이전 영상 계획(취소/완료)은 새 녹화와 맞지 않습니다. 새로 만들어 주세요."
+        )
+      );
+      host.appendChild(prevGenFold(staleGen));
+    }
+
+    // 촬영 지시서 카드(승인 후). 진행 표시 → 완료되면 컷별 접이식.
+    host.appendChild(shotBriefCard(previz, showError));
+    if (previz.recordedAll) {
+      host.appendChild(
+        el("p", "vnew-hint", "프리비즈 녹화가 끝났습니다. 이 녹화를 바탕으로 실사·웹툰 영상을 만듭니다.")
+      );
+      var startBtn = el("button", "primary-button", "영상 만들기");
+      startBtn.type = "button";
+      startBtn.addEventListener("click", function () {
+        openGenerateConfirm(showError, staleGen ? { hadResult: true } : null);
+      });
+      host.appendChild(startBtn);
+    } else {
+      host.appendChild(
+        el("p", "vnew-hint", "아직 프리비즈 녹화가 끝나지 않았습니다. ④ 프리비즈(3D)에서 녹화를 마쳐 주세요.")
+      );
+    }
+    var backBtn = el("button", "outline-button", "← 프리비즈로");
+    backBtn.type = "button";
+    backBtn.addEventListener("click", function () {
+      state.planStep = 4;
+      renderPlan();
+    });
+    host.appendChild(backBtn);
+  }
+
+  /* 접이식 "이전 영상 보기" — 이전 gen 의 최종 영상(있으면)만 보인다(설계자 2026-10-22, ⑤). */
+  function prevGenFold(gen) {
+    var details = el("details", "vnew-prev-gen");
+    details.appendChild(el("summary", "vnew-prev-gen-summary", "이전 영상 보기"));
+    var body = el("div", "vnew-prev-gen-body");
+    var shown = false;
+    VARIANTS.forEach(function (meta) {
+      var final = (meta.key === "real" ? gen.finalReal : gen.finalWebtoon) || {};
+      if (final.status === "done" && final.videoUrl) {
+        shown = true;
+        var col = el("div", "vnew-prev-gen-col");
+        col.appendChild(el("h3", "vnew-variant-title", meta.title));
+        var video = el("video", "vnew-final-player");
+        video.src = final.videoUrl;
+        video.controls = true;
+        video.setAttribute("playsinline", "");
+        col.appendChild(video);
+        body.appendChild(col);
+      }
+    });
+    if (!shown) {
+      body.appendChild(el("p", "vnew-hint", "이전에 완성된 영상이 없습니다."));
+    }
+    details.appendChild(body);
+    return details;
+  }
+
   function renderGenStep(host) {
     var plan = state.plan || {};
     var gen = plan.gen || {};
@@ -5155,42 +5233,27 @@
     }
 
     if (!gen.status || gen.status === "none") {
-      var previz = plan.previz || {};
-      // 촬영 지시서 카드(승인 후). 진행 표시 → 완료되면 컷별 접이식.
-      host.appendChild(shotBriefCard(previz, showError));
-      if (previz.recordedAll) {
-        host.appendChild(
-          el("p", "vnew-hint", "프리비즈 녹화가 끝났습니다. 이 녹화를 바탕으로 실사·웹툰 영상을 만듭니다.")
-        );
-        var startBtn = el("button", "primary-button", "영상 만들기");
-        startBtn.type = "button";
-        startBtn.addEventListener("click", function () {
-          openGenerateConfirm(showError);
-        });
-        host.appendChild(startBtn);
-      } else {
-        host.appendChild(
-          el("p", "vnew-hint", "아직 프리비즈 녹화가 끝나지 않았습니다. ④ 프리비즈(3D)에서 녹화를 마쳐 주세요.")
-        );
-      }
-      var backBtn = el("button", "outline-button", "← 프리비즈로");
-      backBtn.type = "button";
-      backBtn.addEventListener("click", function () {
-        state.planStep = 4;
-        renderPlan();
-      });
-      host.appendChild(backBtn);
+      renderGenStart(host, showError, null);
+      return;
+    }
+
+    // 프리비즈가 바뀌어 이 gen(취소·완료 등)이 새 녹화와 맞지 않으면 → 시작 화면으로 유도하고
+    // 이전 결과는 접이식으로만 보인다(설계자 2026-10-22, ⑤).
+    if (gen.stale) {
+      renderGenStart(host, showError, gen);
       return;
     }
 
     var running = gen.status === "running";
+    // 진행 중이 아니면(취소·실패·일부·완료) 언제든 새 gen 을 시작할 수 있다(설계자 2026-10-22, ⑤).
+    var canRemake = !running && gen.status && gen.status !== "none";
 
     // --- 진행 상태 띠 + 취소 ---
     var statusBar = el("section", "panel vnew-gen-statusbar");
     var statusText = {
       running: "영상을 만들고 있습니다…",
       done: "두 영상이 모두 준비됐습니다. 아래에서 하나를 골라 사운드로 넘어가세요.",
-      partial: "일부 구간이 실패했습니다. 실패한 칸에서 다시 시도할 수 있습니다.",
+      partial: "일부 구간이 실패했습니다. 실패한 칸에서 다시 시도하거나, 새로 만들 수 있습니다.",
       failed: "영상 생성에 실패했습니다.",
       cancelled: "영상 생성을 취소했습니다."
     };
@@ -5220,6 +5283,15 @@
           });
       });
       statusBar.appendChild(cancelBtn);
+    }
+    if (canRemake) {
+      // done/partial 이면 지금 결과는 '이전 영상'으로만 남는다는 안내를 확인창에서 보인다.
+      var remakeBtn = el("button", "outline-button", "새로 영상 만들기");
+      remakeBtn.type = "button";
+      remakeBtn.addEventListener("click", function () {
+        openGenerateConfirm(showError, { hadResult: gen.status === "done" || gen.status === "partial" });
+      });
+      statusBar.appendChild(remakeBtn);
     }
     host.appendChild(statusBar);
 
@@ -5424,8 +5496,13 @@
       video.controls = true;
       video.setAttribute("playsinline", "");
       cell.appendChild(video);
-    } else if (v.status === "failed") {
-      cell.appendChild(el("p", "login-error vnew-seg-error", v.error || "실패했습니다."));
+    } else if (v.status === "failed" || v.status === "cancelled") {
+      // 실패·취소된 컷은 [다시 시도]로 그 컷만 다시 만든다(설계자 2026-10-22, ⑤).
+      if (v.status === "failed") {
+        cell.appendChild(el("p", "login-error vnew-seg-error", v.error || "실패했습니다."));
+      } else {
+        cell.appendChild(el("p", "vnew-hint vnew-seg-error", "취소됨"));
+      }
       var retry = el("button", "outline-button vnew-seg-retry", variant.key === "real" ? "실사 다시" : "웹툰 다시");
       retry.type = "button";
       retry.addEventListener("click", function () {
@@ -5630,8 +5707,12 @@
       video.controls = true;
       video.setAttribute("playsinline", "");
       cell.appendChild(video);
-    } else if (v.status === "failed") {
-      cell.appendChild(el("p", "login-error vnew-seg-error", v.error || "실패했습니다."));
+    } else if (v.status === "failed" || v.status === "cancelled") {
+      if (v.status === "failed") {
+        cell.appendChild(el("p", "login-error vnew-seg-error", v.error || "실패했습니다."));
+      } else {
+        cell.appendChild(el("p", "vnew-hint vnew-seg-error", "취소됨"));
+      }
       var retryLabel;
       if (mode === "previz") {
         retryLabel = variant.key === "real" ? "실사 다시" : "웹툰 다시";

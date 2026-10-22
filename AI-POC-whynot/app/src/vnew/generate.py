@@ -350,12 +350,18 @@ def _new_previz_gen(plan: dict) -> dict:
         item["real"]["status"] = "queued"
         item["webtoon"]["status"] = "queued"
         units.append(item)
+    previz = plan.get("previz") or {}
+    brief = previz.get("shotBrief") or {}
     return {
         "genId": _gen_id(),
         "mode": "previz",
         "status": "running",  # running|done|partial|failed|cancelled
         "videoModel": _previz_model_endpoint(plan),
         "createdAt": now_iso(),
+        # 이 gen 이 어느 프리비즈 녹화·지시서를 바탕으로 만들어졌는지(설계자 2026-10-22, ⑤).
+        # 나중에 previz.revision 이 바뀌거나(다시 설계·녹화) 지시서가 새로 만들어지면 stale 판정에 쓴다.
+        "previzRevision": int(previz.get("revision") or 0),
+        "briefUpdatedAt": str(brief.get("updatedAt") or ""),
         "units": units,
         "segments": [],  # 옛 데이터 보기용(새 gen 은 units 를 쓴다).
         "finalReal": {"status": "waiting", "key": "", "error": ""},
@@ -612,6 +618,13 @@ def check_preconditions(plan: dict, owner: str) -> list[dict]:
 
     gen = plan.get("gen") or {}
     if gen.get("status") == "running" and not _gen_stale(gen):
+        if _gen_previz_stale(gen, plan):
+            raise VpocError(
+                "vnew.generate",
+                "GenRunning",
+                "이전 영상 생성이 아직 진행 중입니다. 취소한 뒤 새로 만들어 주세요.",
+                409,
+            )
         raise VpocError("vnew.generate", "GenRunning", "이미 영상 생성이 진행 중입니다.", 409)
 
     chars = _char_entries(owner, plan.get("input") or {})
@@ -666,7 +679,30 @@ def start_generate(owner: str, pid: str, confirm_usd: float) -> str:
     def mutator(data: dict) -> None:
         current = data.get("gen") or {}
         if current.get("status") == "running" and not _gen_stale(current):
+            # 진행 중인 gen 은 교체하지 않는다. 프리비즈가 바뀐(previz-stale) 진행 중이면
+            # 취소 먼저 하라고 안내한다(설계자 2026-10-22, ⑤).
+            if _gen_previz_stale(current, data):
+                raise VpocError(
+                    "vnew.generate",
+                    "GenRunning",
+                    "이전 영상 생성이 아직 진행 중입니다. 취소한 뒤 새로 만들어 주세요.",
+                    409,
+                )
             raise VpocError("vnew.generate", "GenRunning", "이미 영상 생성이 진행 중입니다.", 409)
+        # 이전 gen(취소·실패·완료·시간초과)은 genHistory 에 요약만 남기고 새 gen 으로 교체한다.
+        # 이전 gen 의 원장·파일은 건드리지 않는다(최근 3개만 보관).
+        if current and current.get("genId"):
+            history = list(data.get("genHistory") or [])
+            history.append(
+                {
+                    "genId": current.get("genId"),
+                    "status": current.get("status"),
+                    "createdAt": current.get("createdAt"),
+                    "finalReal": (current.get("finalReal") or {}).get("key") or "",
+                    "finalWebtoon": (current.get("finalWebtoon") or {}).get("key") or "",
+                }
+            )
+            data["genHistory"] = history[-3:]
         data["gen"] = new
 
     plan_mod.mutate_plan(owner, pid, mutator)
@@ -3191,6 +3227,9 @@ def gen_view(owner: str, pid: str, plan: dict) -> dict | None:
         "selected": gen.get("selected"),
         "costUsd": gen.get("costUsd", 0.0),
         "estimate": est,
+        # 프리비즈가 바뀌어 이 gen 의 계획(녹화·지시서)이 지금과 맞지 않으면 True(설계자 2026-10-22, ⑤).
+        # 화면은 stale 이면 '새로 만들기'로 유도하고 이전 결과는 접이식으로만 보인다.
+        "stale": _gen_previz_stale(gen, plan),
     }
 
 
@@ -3209,6 +3248,46 @@ def _gen_stale(gen: dict) -> bool:
     if not created:
         return False
     return (datetime.now(timezone.utc) - created).total_seconds() > GEN_STALL_S
+
+
+def _gen_previz_stale(gen: dict, plan: dict) -> bool:
+    """이 previz 모드 gen 이 **지금 프리비즈와 맞지 않는지**(설계자 2026-10-22, ⑤).
+
+    사용자가 영상을 만들다 취소/완료한 뒤 프리비즈를 다시 설계·녹화하면, 옛 gen 의 계획(컷·녹화)은
+    새 녹화와 어긋난다. 그때 화면이 '새로 만들기'로 유도하도록 True 를 돌려준다. 판정 순서:
+      1) previz 모드가 아니면 stale 아님(옛 i2v 모드는 해당 없음).
+      2) gen 에 previzRevision 이 있으면 현재 previz.revision 과 비교 — 다르면 stale.
+      3) gen 에 briefUpdatedAt 이 있으면 현재 shotBrief.updatedAt 과 비교 — 다르면 stale.
+      4) previzRevision 이 아예 없는 옛 gen 은 녹화 키로 본다 — 각 컷(unit)의 recordingKey 가
+         현재 previz.recordings 의 그 구간 키와 하나라도 다르면 stale(혹은 지금 녹화가 비었으면 stale).
+    """
+    if gen.get("mode") != "previz":
+        return False
+    previz = plan.get("previz") or {}
+    cur_rev = int(previz.get("revision") or 0)
+    cur_brief = str((previz.get("shotBrief") or {}).get("updatedAt") or "")
+
+    if "previzRevision" in gen:
+        if int(gen.get("previzRevision") or 0) != cur_rev:
+            return True
+        # 지시서가 새로 만들어졌으면(값이 있을 때만 비교) stale.
+        gen_brief = str(gen.get("briefUpdatedAt") or "")
+        if gen_brief and cur_brief and gen_brief != cur_brief:
+            return True
+        return False
+
+    # 옛 gen(previzRevision 없음): 녹화 키 비교.
+    recordings = previz.get("recordings") or {}
+    cells = _previz_cells(gen)
+    for cell in cells:
+        seg_id = str(cell.get("recSegId") or cell.get("id") or "")
+        stored_key = str(cell.get("recordingKey") or "")
+        cur_key = str((recordings.get(seg_id) or {}).get("key") or "")
+        if stored_key and cur_key and stored_key != cur_key:
+            return True
+        if stored_key and not cur_key:
+            return True
+    return False
 
 
 # ================================================================ 원장 · presign · 저장
