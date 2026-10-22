@@ -5188,6 +5188,8 @@ def check_vnew_generate() -> None:
     (o) 모두 완료 → finalReal·finalWebtoon concat 2회·done·estimate(초합×단가×2)
     (p) 실패 구간만 재시도({segId,variant}) — 그 칸만 다시, 다른 칸 유지
     (q) 옛 모드(gen.mode 없음) 계획 보기(gen_view) OK
+    (ur-a) gen_view units 에 startSec·endSec·cutNo, clipKey 없으면 녹화 키·있으면 클립 키 기반 previzUrl
+    (ur-b) vnew.js 가 컷 구간만 재생(#t= · timeupdate 되감기)
     (u) prompt 에 컷 promptEn·cameraEn 문자열 없음·"come ONLY from @Video1" 포함·대사 포함(화면 구성은 @Video1 만)
     """
     sys.path.insert(0, str(ROOT / "app"))
@@ -5788,6 +5790,71 @@ def check_vnew_generate() -> None:
         previz_charges = [e for e in ledger_calls if e.get("model") == genmod.vnew_settings.VNEW_PREVIZ_EDIT_MODEL]
         if len(previz_charges) != 4:
             bad.append(f"(o) 프리비즈 edit 원장 계상이 4건이 아닙니다: {len(previz_charges)}")
+
+        # (ur-a) gen_view units 에 startSec·endSec·cutNo 가 있고, previzUrl 은 녹화(또는 클립) 키 기반이다
+        #        (설계자 2026-10-22, ⑤ — 컷마다 그 구간만 보이게 하려면 화면이 시간 범위를 알아야 한다).
+        #        · clipKey 없음 → previzUrl 은 녹화 구간 mp4(rec/...) 키 기반, clipped False.
+        #        · clipKey 있음 → previzUrl 은 그 클립 키 기반, clipped True.
+        presigned_keys = {"value": []}
+        _saved_presign = genmod._presign
+
+        def _spy_presign(key, *, bucket="", content_type=""):
+            # 어떤 키를 presign 했는지 기록하고, 키를 그대로 URL 처럼 돌려준다(검증용).
+            presigned_keys["value"].append(str(key or ""))
+            return ("url://" + str(key)) if key else ""
+
+        try:
+            genmod._presign = _spy_presign
+            # 완료된 previz gen(kplan) 에 units 가 있어야 한다(⑤ 컷 단위).
+            kplan2, _ = planmod.load_plan(owner, pid_k)
+            kgen2 = kplan2.get("gen") or {}
+            if not (kgen2.get("units") or []):
+                bad.append("(ur-a) 완료된 previz gen 에 units 가 없습니다(컷 단위가 아닙니다)")
+            # cut.no 를 cutId 로 알아 둔다(기대값).
+            cut_no_by_id = {str(c.get("id")): c.get("no") for c in (kplan2.get("conti") or {}).get("cuts") or []}
+
+            # 분기 ①: clipKey 없음 — previzUrl 이 녹화 키 기반.
+            view_a = genmod.gen_view(owner, pid_k, kplan2)
+            units_a = (view_a or {}).get("units") or []
+            if len(units_a) != 2:
+                bad.append(f"(ur-a) gen_view units 가 2개가 아닙니다: {len(units_a)}")
+            for u in units_a:
+                for field in ("startSec", "endSec", "cutNo"):
+                    if field not in u:
+                        bad.append(f"(ur-a) units 항목에 {field} 가 없습니다: {sorted(u.keys())}")
+                if u.get("cutNo") != cut_no_by_id.get(str(u.get("cutId"))):
+                    bad.append(f"(ur-a) cutNo 가 콘티 cut.no 와 다릅니다: {u.get('cutNo')} != {cut_no_by_id.get(str(u.get('cutId')))}")
+                # endSec 가 startSec 보다 커야(그 컷에 실제 길이가 있다).
+                if not (float(u.get("endSec") or 0) > float(u.get("startSec") or 0)):
+                    bad.append(f"(ur-a) endSec 가 startSec 보다 크지 않습니다: {u.get('startSec')}~{u.get('endSec')}")
+                if u.get("clipped"):
+                    bad.append("(ur-a) clipKey 가 없는데 clipped 가 True 입니다")
+                # previzUrl 이 녹화 구간 mp4(rec/...) 키 기반인지(spy presign 이 key 를 URL 에 담았다).
+                if "rec/" not in str(u.get("previzUrl") or ""):
+                    bad.append(f"(ur-a) clipKey 없음인데 previzUrl 이 녹화 키 기반이 아닙니다: {u.get('previzUrl')}")
+
+            # 분기 ②: clipKey 있음 — previzUrl 이 그 클립 키 기반, clipped True.
+            kplan3, _ = planmod.load_plan(owner, pid_k)
+            for u in kplan3["gen"]["units"]:
+                u["clipKey"] = "clip/" + str(u.get("cutId")) + ".mp4"
+            view_b = genmod.gen_view(owner, pid_k, kplan3)
+            for u in (view_b or {}).get("units") or []:
+                if not u.get("clipped"):
+                    bad.append("(ur-a) clipKey 가 있는데 clipped 가 True 가 아닙니다")
+                purl = str(u.get("previzUrl") or "")
+                if "clip/" not in purl:
+                    bad.append(f"(ur-a) clipKey 있음인데 previzUrl 이 클립 키 기반이 아닙니다: {purl}")
+                if "rec/" in purl:
+                    bad.append(f"(ur-a) clipKey 있음인데 previzUrl 이 여전히 녹화 키 기반입니다: {purl}")
+        finally:
+            genmod._presign = _saved_presign
+
+        # (ur-b) 프런트(vnew.js)가 컷 구간만 재생하려고 #t= 를 쓰고 timeupdate 로 되감는 코드가 있다.
+        vnew_js_text = (PUBLIC / "vnew.js").read_text(encoding="utf-8")
+        if "#t=" not in vnew_js_text:
+            bad.append("(ur-b) vnew.js 에 '#t=' (컷 구간 재생) 코드가 없습니다")
+        if "timeupdate" not in vnew_js_text:
+            bad.append("(ur-b) vnew.js 에 timeupdate(구간 끝 되감기) 코드가 없습니다")
 
         # (p) 실패 컷만 재시도 — fal.poll 를 한 번 Failed 로 만들어 한 칸 실패시킨 뒤 그 칸만 retry.
         #     컷 단위(⑤): unit id = cutId. two_segs 는 각 구간 1컷이라 unit 은 c1·c2.
