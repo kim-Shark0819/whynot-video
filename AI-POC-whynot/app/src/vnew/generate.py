@@ -499,6 +499,7 @@ def _char_entries(owner: str, inp: dict) -> list[dict]:
                 "name": char.get("name") or role,
                 "appearanceEn": str(analysis.get("appearanceEn") or ""),
                 "outfitEn": str(analysis.get("outfitEn") or ""),
+                "styleEn": str(analysis.get("styleEn") or ""),
                 "realFrontKey": str(real.get("frontKey") or ""),
                 "realSheetKey": str(real.get("sheetKey") or ""),
                 "realBackKey": str(real.get("backKey") or ""),
@@ -1563,13 +1564,74 @@ def _trim_utf8(text: str, max_bytes: int) -> str:
     return cut.decode("utf-8", errors="ignore")
 
 
+def _split_sentences(text: str) -> list[str]:
+    """영어 문장을 마침표·물음표·느낌표 뒤 공백 기준으로 나눈다(간단 규칙, 설계자 2026-10-22).
+
+    각 조각은 끝 구두점을 포함한다. 소수점·약어를 완벽히 가르지는 않지만, 촬영 지시서 문장 단위
+    줄이기에는 충분하다. 빈 조각은 버린다.
+    """
+    import re as _re  # noqa: PLC0415
+
+    body = str(text or "").strip()
+    if not body:
+        return []
+    parts = _re.split(r"(?<=[.!?])\s+", body)
+    return [p.strip() for p in parts if p.strip()]
+
+
+def _drop_tail_sentences(text: str, over_bytes: int, *, keep_first: bool = False) -> str:
+    """UTF-8 바이트가 over_bytes 만큼 넘칠 때, 뒤 문장부터 하나씩 지워 그만큼(이상)만 줄인다.
+
+    설계자 2026-10-22: 각 단계는 '넘친 만큼만' 문장 단위로 줄이고, 한도 안에 들어오면 즉시 멈춘다.
+    keep_first=True 면 첫 문장은 절대 지우지 않는다(ACTION 첫 문장 보호). 더 지울 게 없으면 남은
+    것을 그대로 돌려준다(상위에서 다른 단계로 넘어간다).
+    """
+    if over_bytes <= 0:
+        return text
+    sentences = _split_sentences(text)
+    if not sentences:
+        return text
+    floor = 1 if keep_first else 0
+    removed = 0
+    while len(sentences) > floor and removed < over_bytes:
+        dropped = sentences.pop()
+        removed += len((" " + dropped).encode("utf-8"))
+    return " ".join(sentences)
+
+
+def _scene_summary(scene_en: str, max_chars: int = 350) -> str:
+    """장소 문단(sceneEn)의 앞 2~3문장을 뽑아 장소 요약을 만든다(최대 max_chars 자, 설계자 2026-10-22).
+
+    장소 문단 전체를 컷 프롬프트에 넣지 않고, 공간 요약만 넣어 ACTION 이 밀리지 않게 한다.
+    """
+    body = str(scene_en or "").strip()
+    if not body:
+        return ""
+    sentences = _split_sentences(body)
+    picked: list[str] = []
+    for sentence in sentences[:3]:
+        candidate = (" ".join(picked + [sentence])).strip()
+        if len(candidate) > max_chars:
+            break
+        picked.append(sentence)
+    summary = " ".join(picked).strip()
+    if not summary:
+        # 첫 문장이 이미 max_chars 를 넘으면 글자 단위로 자른다.
+        summary = body[:max_chars].strip()
+    return summary[:max_chars].strip()
+
+
 def _cut_prompt(plan: dict, seg: dict, variant: str, *, cast: list[dict], has_image_ref: bool) -> str:
     """컷 프롬프트(영상 모델 전달문, 설계자 2026-10-22, ⑤). 영어, UTF-8 2,500바이트 이내.
 
     순서 고정: @Video1 안내 → CAST → SHOT → BLOCKING → ACTION → MOOD → SETTING → DIALOGUE → CONTINUITY.
+    SETTING = 컷별 backgroundEn + 장소 요약(sceneEn 앞 2~3문장, 최대 350자). 장소 문단 전체는 넣지 않는다.
     촬영 지시서(shotBrief)를 쓰되, 없으면 그 자리는 비운다(CAST·SHOT·CONTINUITY 는 반드시 유지).
-    바이트 초과 시 뒤에서부터 줄인다: backgroundEn → moodEn → deliveryEn → actionEn 꼬리.
-    "Do not add or remove anyone"·"movements come ONLY from @Video1" 문장은 쓰지 않는다(연기는 ACTION).
+
+    바이트 초과 시 줄이는 순서(각 단계는 **넘친 만큼만** 문장 단위로 줄이고, 한도 안에 들어오면 즉시
+    멈춘다): ① SETTING 의 장소 요약 → ② SETTING 의 backgroundEn → ③ MOOD → ④ BLOCKING 뒤쪽 문장
+    → ⑤ DIALOGUE 의 deliveryEn → ⑥ SHOT 뒤쪽 문장 → ⑦ 마지막에만 ACTION 뒤쪽 문장.
+    CAST·CONTINUITY·ACTION 첫 문장은 절대 지우지 않는다. **한도 안이면 아무 것도 지우지 않는다.**
     """
     is_real = variant == "real"
     cut_ids = _seg_cut_ids(seg)
@@ -1593,20 +1655,35 @@ def _cut_prompt(plan: dict, seg: dict, variant: str, *, cast: list[dict], has_im
         "Re-render this single shot as " + style + "."
     )
 
-    # CAST — 그 컷에 보이는 인물만.
+    # CAST — 그 컷에 보이는 인물만. 마네킹 색은 "The {color} mannequin is @ElementN, {name}" 에만
+    # 쓰고, 외형은 캐릭터 데이터(appearance = appearanceEn + outfitEn)로 쓴다. "mannequin" 이 든
+    # 외형 문장은 지우고, 문장 끝 마침표 중복("..")은 없앤다(설계자 2026-10-22).
+    def _clean_appearance(text: str) -> str:
+        cleaned = []
+        for sentence in _split_sentences(text):
+            if "mannequin" in sentence.lower():
+                continue
+            cleaned.append(sentence)
+        body = " ".join(cleaned).strip()
+        # 끝 마침표 중복 제거.
+        while body.endswith(".."):
+            body = body[:-1]
+        return body.strip()
+
     cast_sentences = []
     for member in cast:
         color = member.get("colorName") or "grey"
         name = member.get("name") or "a character"
         ref = member.get("elementRef") or ""
-        appearance = (member.get("appearance") or "").strip()
+        appearance = _clean_appearance(member.get("appearance") or "")
         if ref:
             sentence = f"The {color} mannequin is {ref}, {name}"
         else:
             sentence = f"The {color} mannequin is {name}"
         if appearance:
             sentence += f": {appearance}"
-        sentence += "."
+        # 끝 마침표 하나만.
+        sentence = sentence.rstrip(".").rstrip() + "."
         cast_sentences.append(sentence)
     cast_line = "CAST — only these people are in this shot: " + (" ".join(cast_sentences) if cast_sentences else "no one is visible.")
 
@@ -1650,76 +1727,96 @@ def _cut_prompt(plan: dict, seg: dict, variant: str, *, cast: list[dict], has_im
         "CONTINUITY: Match @Video1 exactly for framing, lens, camera position and movement, and where "
         "each person is in the frame; mannequin stiffness is NOT acting — perform the ACTION naturally. "
         "No other people. Every colored mannequin becomes the person named above; no mannequins remain. "
+        "The mannequin colors are only placeholders — dress each person exactly as their reference image, "
+        "not in the mannequin color. "
         "No text, no subtitles, no speech bubbles."
     )
 
-    def _setting_line(bg: str, sc: str) -> str:
-        parts = [p for p in (sc, bg) if p]
+    # SETTING = 컷별 backgroundEn + 장소 요약(sceneEn 앞 2~3문장, 최대 350자). 장소 문단 전체는 X.
+    scene_summary_full = _scene_summary(scene_en, 350)
+
+    def _setting_line(bg: str, scene_summary: str) -> str:
+        parts = [p for p in (scene_summary, bg) if p]
         body = " ".join(parts).strip()
         return ("SETTING: " + body) if body else ""
 
-    def _build(action_tail_bytes, mood: str, background: str, with_delivery: bool,
-               include_blocking: bool = True, include_setting: bool = True,
-               shot_bytes=None, blocking_bytes=None) -> str:
-        shot_text = shot_en if shot_bytes is None else _trim_utf8(shot_en, shot_bytes)
-        shot_line = "SHOT: " + shot_text
-        if include_blocking and blocking_en:
-            bl = blocking_en if blocking_bytes is None else _trim_utf8(blocking_en, blocking_bytes)
-            blocking_line = ("BLOCKING: " + bl) if bl else ""
-        else:
-            blocking_line = ""
-        act = action_en if action_tail_bytes is None else _trim_utf8(action_en, action_tail_bytes)
-        action_line = ("ACTION: " + act) if act else ""
+    def _build(*, scene_summary: str, background: str, mood: str, blocking: str,
+               with_delivery: bool, shot: str, action: str) -> str:
+        shot_line = ("SHOT: " + shot) if shot else "SHOT: Match the framing, lens, camera height and angle exactly as shown in @Video1."
+        blocking_line = ("BLOCKING: " + blocking) if blocking else ""
+        action_line = ("ACTION: " + action) if action else ""
         mood_line = ("MOOD: " + mood) if mood else ""
-        setting_line = _setting_line(background, scene_en) if include_setting else ""
+        setting_line = _setting_line(background, scene_summary)
         dlg = _dialogue_line(with_delivery)
         blocks = [head, cast_line, shot_line, blocking_line, action_line, mood_line, setting_line, dlg, continuity]
         return "\n".join(b for b in blocks if b)
 
     budget = vnew_settings.PREVIZ_PROMPT_TARGET  # 바이트 상한(2500).
 
-    # 1) 전체.
-    prompt = _build(None, mood_en, background_en, with_delivery=True)
+    # 현재 값(줄이기 단계마다 하나씩 바꾼다). ACTION 첫 문장은 절대 지우지 않는다.
+    state = {
+        "scene_summary": scene_summary_full,
+        "background": background_en,
+        "mood": mood_en,
+        "blocking": blocking_en,
+        "with_delivery": True,
+        "shot": shot_en,
+        "action": action_en,
+    }
+
+    def _current() -> str:
+        return _build(
+            scene_summary=state["scene_summary"],
+            background=state["background"],
+            mood=state["mood"],
+            blocking=state["blocking"],
+            with_delivery=state["with_delivery"],
+            shot=state["shot"],
+            action=state["action"],
+        )
+
+    # 1) 한도 안이면 아무 것도 지우지 않는다(설계자 2026-10-22, 지금 버그 수정).
+    prompt = _current()
     if _utf8_len(prompt) <= budget:
         return prompt
-    # 2) backgroundEn 제거.
-    prompt = _build(None, mood_en, "", with_delivery=True)
-    if _utf8_len(prompt) <= budget:
-        return prompt
-    # 3) moodEn 제거.
-    prompt = _build(None, "", "", with_delivery=True)
-    if _utf8_len(prompt) <= budget:
-        return prompt
-    # 4) deliveryEn(대사 연기 설명) 제거.
-    prompt = _build(None, "", "", with_delivery=False)
-    if _utf8_len(prompt) <= budget:
-        return prompt
-    # 5) actionEn 꼬리를 바이트 맞춰 자른다(CAST·SHOT·CONTINUITY·DIALOGUE 유지).
-    base = _build(0, "", "", with_delivery=False)  # action 없이
-    room = budget - _utf8_len(base)
-    if room > len("ACTION: ".encode("utf-8")) + 1:
-        tail_bytes = room - len("ACTION: ".encode("utf-8")) - 1
-        prompt = _build(max(0, tail_bytes), "", "", with_delivery=False)
-        if _utf8_len(prompt) <= budget:
-            return prompt
-    # 6) SETTING 제거(scene·background 가 아주 길 때).
-    prompt = _build(0, "", "", with_delivery=False, include_setting=False)
-    if _utf8_len(prompt) <= budget:
-        return prompt
-    # 7) BLOCKING 제거(CAST·SHOT·DIALOGUE·CONTINUITY 만 남긴다).
-    prompt = _build(0, "", "", with_delivery=False, include_blocking=False, include_setting=False)
-    if _utf8_len(prompt) <= budget:
-        return prompt
-    # 8) SHOT 본문을 남은 바이트에 맞춰 자른다(머리말·CAST·DIALOGUE·CONTINUITY 는 반드시 유지).
-    skeleton = _build(0, "", "", with_delivery=False, include_blocking=False, include_setting=False, shot_bytes=0)
-    room = budget - _utf8_len(skeleton)
-    if room > 0:
-        prompt = _build(0, "", "", with_delivery=False, include_blocking=False, include_setting=False,
-                        shot_bytes=room)
-        if _utf8_len(prompt) <= budget:
-            return prompt
-    # 9) 최후: 전체를 바이트로 자른다.
-    return _trim_utf8(skeleton, budget)
+
+    # 줄이는 순서. 각 단계는 '넘친 만큼만' 문장 단위로 줄이고, 한도 안이면 즉시 멈춘다.
+    # ① SETTING 의 장소 요약 → ② SETTING 의 backgroundEn → ③ MOOD → ④ BLOCKING 뒤쪽 문장 →
+    # ⑤ DIALOGUE 의 deliveryEn → ⑥ SHOT 뒤쪽 문장. (⑦ ACTION 은 마지막에만.)
+    def _reduce_field(field: str, *, keep_first: bool = False) -> bool:
+        """그 필드를 넘친 만큼 문장 단위로 줄인다. 한도 안에 들면 True."""
+        over = _utf8_len(_current()) - budget
+        if over <= 0:
+            return True
+        state[field] = _drop_tail_sentences(state[field], over, keep_first=keep_first)
+        return _utf8_len(_current()) <= budget
+
+    # ① SETTING 장소 요약.
+    if _reduce_field("scene_summary"):
+        return _current()
+    # ② SETTING backgroundEn.
+    if _reduce_field("background"):
+        return _current()
+    # ③ MOOD.
+    if _reduce_field("mood"):
+        return _current()
+    # ④ BLOCKING 뒤쪽 문장.
+    if _reduce_field("blocking"):
+        return _current()
+    # ⑤ DIALOGUE deliveryEn(대사 연기 설명) 제거.
+    over = _utf8_len(_current()) - budget
+    if over > 0:
+        state["with_delivery"] = False
+        if _utf8_len(_current()) <= budget:
+            return _current()
+    # ⑥ SHOT 뒤쪽 문장.
+    if _reduce_field("shot"):
+        return _current()
+    # ⑦ 마지막에만 ACTION 뒤쪽 문장(첫 문장은 절대 지우지 않는다).
+    if _reduce_field("action", keep_first=True):
+        return _current()
+    # 그래도 넘치면 전체를 바이트로 자른다(최후). CAST·CONTINUITY 가 이미 들어간 뼈대 기준.
+    return _trim_utf8(_current(), budget)
 
 
 def _previz_timeline_text(plan: dict, seg: dict) -> str:

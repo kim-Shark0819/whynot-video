@@ -8076,6 +8076,172 @@ def check_vnew_shot_brief() -> None:
             bad.append(f"(sb-h) 옛 gen_view 가 done 을 못 돌려줍니다: {view_h and view_h.get('status')}")
         if view_h and len(view_h.get("segments") or []) != 1:
             bad.append(f"(sb-h) 옛 gen_view 의 segments 가 보이지 않습니다: {view_h and view_h.get('segments')}")
+
+        # ---------------- (sb-i) 짧은 지시서 → 아무것도 안 지움(ACTION·MOOD·SETTING 모두) ----------------
+        # 합계가 넉넉히 1,500바이트 안인 짧은 지시서. 섹션이 전부 그대로 들어가야 한다.
+        plan_i = _plan_cuts(1, 6)
+        plan_i["previz"]["shotBrief"] = {
+            "status": "ready",
+            "scene": {"loc:office": "A principal's office with pale green walls. Warm daylight from the left window."},
+            "cuts": {"c1": {
+                "shotEn": "MCU, 50mm lens, eye-level, clean single.",
+                "blockingEn": "He stands at frame center facing the camera.",
+                "actionEn": "He leans forward and narrows his eyes.",
+                "moodEn": "tense and controlled.",
+                "backgroundEn": "wood-panelled wall behind, bookshelf soft in shallow focus.",
+                "dialogue": [{"speaker": "범건우", "lineKo": "자네 뭐 하나?", "deliveryEn": "sharp, low voice"}],
+            }},
+        }
+        prompt_i = genmod._cut_prompt(plan_i, {"cutId": "c1"}, "real", cast=cast, has_image_ref=False)
+        if len(prompt_i.encode("utf-8")) > 1500:
+            bad.append(f"(sb-i) 전제: 짧은 지시서 프롬프트가 1500바이트를 넘습니다: {len(prompt_i.encode('utf-8'))}")
+        for must in ("\nACTION:", "\nMOOD:", "\nSETTING:"):
+            if must not in ("\n" + prompt_i):
+                bad.append(f"(sb-i) 짧은 지시서인데 섹션 {must.strip()} 이 지워졌습니다")
+        # 본문이 그대로 들어갔는지(줄이기가 전혀 일어나지 않았다).
+        if "He leans forward and narrows his eyes." not in prompt_i:
+            bad.append("(sb-i) 짧은 지시서인데 ACTION 본문이 줄여졌습니다")
+        if "tense and controlled" not in prompt_i:
+            bad.append("(sb-i) 짧은 지시서인데 MOOD 본문이 줄여졌습니다")
+
+        # ---------------- (sb-j) 긴 지시서 → ≤2500, ACTION 전체 유지, 장소 요약·배경 먼저 줆, CAST·CONTINUITY 유지 ----------------
+        plan_j = _plan_cuts(1, 6)
+        scene_j = "This is a long location paragraph. " * 40  # ≈ 1,200자 이상.
+        action_j = "He slams the desk. He rises slowly. He points at the door. He lowers his voice. " * 7  # ≈ 500자 이상.
+        action_j = action_j[:500]
+        plan_j["previz"]["shotBrief"] = {
+            "status": "ready",
+            "scene": {"loc:office": scene_j},
+            "cuts": {"c1": {
+                "shotEn": "MCU, 50mm lens, eye-level, clean single.",
+                "blockingEn": "He stands at frame center facing the camera, others off frame.",
+                "actionEn": action_j,
+                "moodEn": "tense, authoritative, controlled anger throughout the shot.",
+                "backgroundEn": "a very detailed office background. " * 20,
+                "dialogue": [
+                    {"speaker": "범건우", "lineKo": "자네 지금 뭐 하는 건가?", "deliveryEn": "sharp, clipped"},
+                    {"speaker": "여의준", "lineKo": "죄송합니다, 부장님.", "deliveryEn": "quiet, shaking"},
+                    {"speaker": "범건우", "lineKo": "당장 나가.", "deliveryEn": "cold, final"},
+                ],
+            }},
+        }
+        prompt_j = genmod._cut_prompt(plan_j, {"cutId": "c1"}, "real", cast=cast, has_image_ref=False)
+        if len(prompt_j.encode("utf-8")) > 2500:
+            bad.append(f"(sb-j) 긴 지시서 프롬프트가 2500바이트를 넘습니다: {len(prompt_j.encode('utf-8'))}")
+        # ACTION 전체 문장 유지: actionEn 첫 문장과 마지막 문장이 모두 남아 있어야 한다(장소 요약·배경이 먼저 줆).
+        if "ACTION: He slams the desk." not in prompt_j:
+            bad.append("(sb-j) ACTION 이 유지되지 않았습니다(먼저 줄여선 안 됨)")
+        # action_j 의 마지막 온전한 문장이 남아 있는지(꼬리가 잘리지 않음).
+        if "He lowers his voice." not in prompt_j:
+            bad.append("(sb-j) ACTION 뒤쪽 문장이 잘렸습니다(장소 요약·배경이 먼저 줄어야 함)")
+        for must in ("CAST —", "CONTINUITY:"):
+            if must not in prompt_j:
+                bad.append(f"(sb-j) 긴 지시서에서 {must} 가 사라졌습니다")
+        # 장소 요약·배경이 먼저 줄어들었는지: 긴 scene 문단 전체가 그대로 들어가지 않았다.
+        if prompt_j.count("This is a long location paragraph.") >= 30:
+            bad.append("(sb-j) 장소 문단이 통째로 들어갔습니다(앞 2~3문장 요약이어야 함)")
+
+        # ---------------- (sb-k) CAST: 'mannequin.' 문장·'..' 없음, 외형은 캐릭터 데이터 ----------------
+        plan_k = _plan_cuts(1, 6)
+        plan_k["previz"]["shotBrief"] = {
+            "status": "ready", "scene": {"loc:office": "office."},
+            "cuts": {"c1": {"shotEn": "MCU.", "blockingEn": "", "actionEn": "", "moodEn": "",
+                            "backgroundEn": "", "dialogue": []}},
+        }
+        cast_k = [
+            {"colorName": "cyan", "name": "범건우", "elementRef": "@Element1",
+             "appearance": "a tall man in a dark suit. plain cyan mannequin."},
+            {"colorName": "orange", "name": "여의준", "elementRef": "",
+             "appearance": "a young man in a hoodie. plain orange mannequin"},
+        ]
+        prompt_k = genmod._cut_prompt(plan_k, {"cutId": "c1"}, "real", cast=cast_k, has_image_ref=False)
+        cast_segment = prompt_k.split("\n")[1] if "\n" in prompt_k else prompt_k
+        # 외형 설명에 'plain cyan mannequin'·'plain orange mannequin' 문장이 남으면 안 된다.
+        if "plain cyan mannequin" in prompt_k or "plain orange mannequin" in prompt_k:
+            bad.append(f"(sb-k) CAST 외형에 'mannequin' 문장이 남아 있습니다: {cast_segment}")
+        if ".." in prompt_k:
+            bad.append(f"(sb-k) 프롬프트에 중복 마침표 '..' 가 있습니다: {cast_segment}")
+        # 외형이 캐릭터 데이터 문구(앞 문장)로 남아 있어야 한다.
+        if "a tall man in a dark suit" not in prompt_k or "a young man in a hoodie" not in prompt_k:
+            bad.append(f"(sb-k) CAST 외형이 캐릭터 데이터 문구로 남지 않았습니다: {cast_segment}")
+        # 색은 마네킹 참조 문장에만("The cyan mannequin is @Element1, 범건우").
+        if "The cyan mannequin is @Element1, 범건우" not in prompt_k:
+            bad.append(f"(sb-k) 마네킹 색 참조 문장이 없습니다: {cast_segment}")
+
+        # ---------------- (sb-l) 가짜 Astra 가 'side -1'·'wears blue' → 저장된 지시서·프롬프트에 없음 ----------------
+        pid_l = "prj_sb_l"
+        _seed_plan(pid_l, brief_status="none")
+
+        def fake_brief_dirty(blocks, *, model):
+            text = ""
+            for b in blocks:
+                if isinstance(b, dict) and b.get("text"):
+                    text += b["text"] + "\n"
+            import re as _re  # noqa: PLC0415
+            cut_ids = _re.findall(r"CUT (\S+):", text)
+            cuts_out = []
+            for cid in cut_ids:
+                cuts_out.append({
+                    "cutId": cid,
+                    "shotEn": "MCU, 50mm. Cuts 01, 05 and 06 use the crossed side across the established line.",
+                    "blockingEn": "범건우 is on side +1 at frame center. He stands relaxed.",
+                    "actionEn": "He leans forward. The camera is on side -1 for this beat.",
+                    "moodEn": "tense.",
+                    "backgroundEn": "wood wall behind.",
+                    "dialogue": [{"speaker": "범건우", "lineKo": "자네?", "deliveryEn": "sharp, staying on the line side"}],
+                })
+            return (
+                {"sceneEn": "A principal's office. 범건우 wears blue; 여의준 wears orange. Warm daylight from the left.",
+                 "cuts": cuts_out},
+                {"model": model, "inputTokens": 5, "outputTokens": 10},
+            )
+
+        l_orig_brief = briefmod._brief
+        l_orig_charge = briefmod.vpoc_ledger.charge_text
+        l_orig_load = briefmod.gen_mod.characters.load_char
+        briefmod._brief = fake_brief_dirty
+        briefmod.vpoc_ledger.charge_text = lambda *a, **k: {"spentUsd": 0.0}
+        briefmod.gen_mod.characters.load_char = lambda owner_, cid: (
+            {"id": cid, "name": "범건우역", "status": "ready",
+             "analysis": {"appearanceEn": "a man", "outfitEn": "a suit"},
+             "variants": {"real": {"frontKey": "", "backKey": ""}, "webtoon": {"frontKey": "", "backKey": ""}}}, "e"
+        )
+        try:
+            # start_brief 는 백그라운드 스레드를 띄우므로(경합·스레드 누수) 여기선 task 를 직접 세우고
+            # run_brief 를 동기로 부른다(_commit 의 task.id 일치 조건을 맞춘다).
+            l_task = "sbltaskid01"
+
+            def _seed_brief_task(data):
+                previz = data.get("previz") or {}
+                previz["shotBrief"] = {
+                    "status": "running", "model": "", "scene": {}, "cuts": {}, "error": "",
+                    "task": {"status": "running", "startedAt": "2026-10-22T00:00:00Z", "id": l_task},
+                    "updatedAt": "",
+                }
+                data["previz"] = previz
+
+            planmod.mutate_plan(owner, pid_l, _seed_brief_task)
+            briefmod.run_brief(owner, pid_l, l_task)
+        finally:
+            briefmod._brief = l_orig_brief
+            briefmod.vpoc_ledger.charge_text = l_orig_charge
+            briefmod.gen_mod.characters.load_char = l_orig_load
+
+        lplan, _ = planmod.load_plan(owner, pid_l)
+        lbrief = (lplan.get("previz") or {}).get("shotBrief") or {}
+        banned = ["side +1", "side -1", "side+1", "side-1", "crossed side", "line side", "wears blue", "wears orange"]
+        # 저장된 sceneEn·cut 필드에 금지 문구가 없어야 한다.
+        import json as _json  # noqa: PLC0415
+        saved_text = _json.dumps({"scene": lbrief.get("scene"), "cuts": lbrief.get("cuts")}, ensure_ascii=False)
+        for needle in banned:
+            if needle in saved_text:
+                bad.append(f"(sb-l) 저장된 지시서에 금지 문구 '{needle}' 가 남아 있습니다")
+        # 그 지시서로 만든 프롬프트에도 금지 문구가 없어야 한다.
+        prompt_l = genmod._cut_prompt(lplan, {"cutId": "c1"}, "real", cast=cast, has_image_ref=False)
+        for needle in banned:
+            if needle in prompt_l:
+                bad.append(f"(sb-l) 컷 프롬프트에 금지 문구 '{needle}' 가 남아 있습니다")
+
     except Exception as exc:  # noqa: BLE001
         import traceback as _tb  # noqa: PLC0415
         bad.append("sb 하니스 예외: " + repr(exc) + "\n" + _tb.format_exc()[:1500])
@@ -8102,6 +8268,8 @@ def check_vnew_shot_brief() -> None:
             " (sb-c)_cut_lines 화자 귀속·silent (sb-d)장소당 1회·lens/shotSize/mood/time/facts 포함"
             " (sb-e)지시서 없음 409 BriefNotReady (sb-f)CAST→CONTINUITY 순서·only these people·'#' 없음·Do not add 없음·UTF-8≤2500"
             " (sb-g)컷 순서 concat·채운 컷 원래 길이로 잘림 (sb-h)옛 segments gen_view"
+            " (sb-i)짧은 지시서 아무것도 안 지움(ACTION·MOOD·SETTING) (sb-j)긴 지시서 ≤2500·ACTION 유지·CAST/CONTINUITY 유지"
+            " (sb-k)CAST 'mannequin.'·'..' 없음·캐릭터 데이터 외형 (sb-l)side±1·wears blue 저장/프롬프트에 없음"
         )
 
 
