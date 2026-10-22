@@ -4992,6 +4992,17 @@ def check_vnew_generate() -> None:
     def fake_fetch_bytes(key, *, bucket=""):
         return fake_store.blobs.get(key, b"SOME-BYTES")
 
+    # 컷 클립 자르기(ffmpeg)는 가짜 — 녹화 바이트가 진짜 mp4 가 아니므로 trim/pad 을 돌리지 않는다.
+    # 2초 컷은 3초로 채운 것처럼(padded True, sentSeconds 3), 3초 이상은 그대로.
+    cut_clip_calls: list[dict] = []
+
+    def fake_cut_clip(video_mp4, unit):
+        orig = float(unit.get("endSec") or 0) - float(unit.get("startSec") or 0)
+        padded = orig < genmod.PREVIZ_MIN_CLIP_S - 0.01
+        sent = genmod.PREVIZ_MIN_CLIP_S if padded else orig
+        cut_clip_calls.append({"cutId": unit.get("cutId"), "origSeconds": round(orig, 3), "sentSeconds": round(sent, 3), "padded": padded})
+        return {"bytes": b"CUT-CLIP-MP4", "origSeconds": round(orig, 3), "sentSeconds": round(sent, 3), "padded": padded}
+
     # fal.poll(웹툰 조회)도 가짜로.
     from src.vpoc import fal as _fal_mod  # noqa: PLC0415
 
@@ -5071,6 +5082,8 @@ def check_vnew_generate() -> None:
         "_prepare_anime": genmod._prepare_anime,
         "_concat": genmod._concat,
         "_fetch_bytes": genmod._fetch_bytes,
+        "_cut_clip": genmod._cut_clip,
+        "_trim_clip": genmod._trim_clip,
         "gen_load_char": genmod.characters.load_char,
         "fal_poll": _fal_mod.poll,
         "previz_request": genmod._previz_request,
@@ -5089,6 +5102,8 @@ def check_vnew_generate() -> None:
     genmod._prepare_anime = fake_prepare_anime
     genmod._concat = fake_concat
     genmod._fetch_bytes = fake_fetch_bytes
+    genmod._cut_clip = fake_cut_clip
+    genmod._trim_clip = lambda mp4, seconds: b"TRIMMED-CUT-MP4"
     genmod.characters.load_char = fake_load_char
     _fal_mod.poll = fake_fal_poll
     genmod._previz_request = fake_previz_request
@@ -5110,12 +5125,13 @@ def check_vnew_generate() -> None:
             t.join(timeout=max(0.0, deadline - _time.time()))
         started_threads.clear()
 
-    def _make_plan(owner, pid, *, segments, total=30, with_char=True, previz=True, approved=True, record=True, extra_actors=None):
-        """fake store 에 ①②③(+프리비즈) 까지 된 계획을 직접 써 둔다(생성 직전 상태).
+    def _make_plan(owner, pid, *, segments, total=30, with_char=True, previz=True, approved=True, record=True, extra_actors=None, brief=True):
+        """fake store 에 ①②③(+프리비즈·촬영 지시서) 까지 된 계획을 직접 써 둔다(생성 직전 상태).
 
         previz=True 면 scenes(actors=charId ch1 + 추가 마네킹)·timeline(컷마다 등장)·recordings 를 채운다.
         approved/record 로 (j) 미승인·미녹화 분기를 만든다. extra_actors 는 charId 없는 마네킹 목록
-        [{id,name,color,appearanceEn}] — 색 문장 검증용.
+        [{id,name,color,appearanceEn}] — 색 문장 검증용. brief=True 면 촬영 지시서(shotBrief ready)도 넣는다
+        (⑤ 컷 단위: 지시서가 없으면 /generate 가 409 BriefNotReady 로 막힌다).
         """
         plan = planmod.new_plan()
         plan["input"]["totalSeconds"] = total
@@ -5190,6 +5206,27 @@ def check_vnew_generate() -> None:
                 "recordings": recordings,
                 "task": {"status": "done", "startedAt": None, "id": None},
             }
+            # 촬영 지시서(⑤). 컷마다 brief 를 넣어 두면 /generate 가 BriefNotReady 로 막히지 않는다.
+            if brief:
+                brief_cuts = {}
+                for c in cuts:
+                    brief_cuts[c["id"]] = {
+                        "shotEn": "MCU, 50mm lens, eye-level, three-quarter, clean single.",
+                        "blockingEn": "Kim at frame center, facing camera.",
+                        "actionEn": "Kim leans forward, eyes narrowing, right hand on the desk.",
+                        "moodEn": "tense, authoritative.",
+                        "backgroundEn": "wood-panelled office wall behind, shallow focus.",
+                        "dialogue": [{"speaker": "김부장", "lineKo": "자네 뭐 하나?", "deliveryEn": "sharp, clipped"}],
+                    }
+                plan["previz"]["shotBrief"] = {
+                    "status": "ready",
+                    "error": "",
+                    "model": "astra",
+                    "scene": {"loc:office": "A closed principal's office, wood panelling, warm afternoon light from the left window."},
+                    "cuts": brief_cuts,
+                    "updatedAt": "2026-10-22T00:00:00Z",
+                    "task": {"status": "done", "startedAt": None, "id": None},
+                }
         planmod.save_plan(owner, pid, plan)
         return plan
 
@@ -5317,17 +5354,19 @@ def check_vnew_generate() -> None:
                     r = _ratio_of_data_uri(uri)
                     if r and not (0.4 - 1e-6 <= r <= 2.5 + 1e-6):
                         bad.append(f"(m) 참고 이미지 비율이 0.4~2.5 밖입니다: {round(r, 3)}")
-            # (n) prompt 에 @Element1·색 매핑·금지 문구.
+            # (n) prompt 에 @Element1·색 매핑·CAST 안내. 컷 단위 CAST/SHOT 형식(설계자 2026-10-22).
             prompt = str(pay.get("prompt") or "")
             if "@Element1" not in prompt:
                 bad.append("(n) 실사 prompt 에 @Element1 이 없습니다")
             if "mannequin is @Element1" not in prompt:
                 bad.append("(n) 실사 prompt 에 색 마네킹 ↔ @Element 매핑 문장이 없습니다")
-            if "Do not add or remove anyone" not in prompt:
-                bad.append("(n) 실사 prompt 에 'Do not add or remove anyone' 이 없습니다")
+            if "only these people" not in prompt:
+                bad.append("(n) 실사 prompt 에 CAST 'only these people' 안내가 없습니다")
+            if "Do not add or remove anyone" in prompt:
+                bad.append("(n) 실사 prompt 에 'Do not add or remove anyone' 이 남아 있습니다(연기는 ACTION 을 따름)")
             # charId 없는 마네킹(비서=빨강)은 색 문장으로.
             if "red mannequin" not in prompt:
-                bad.append(f"(n) charId 없는 마네킹의 색 문장이 없습니다: {prompt[:120]}")
+                bad.append(f"(n) charId 없는 마네킹의 색 문장이 없습니다: {prompt[:160]}")
 
         for pay in webs:
             # (l) 웹툰: elements ≤3 + image_urls 1, 합 ≤4.
@@ -5354,21 +5393,40 @@ def check_vnew_generate() -> None:
             if "@Image1" not in str(pay.get("prompt")):
                 bad.append("(l) 웹툰 prompt 에 @Image1(그림체 참고) 이 없습니다")
 
-        # (u) 프롬프트는 화면 구성을 @Video1 만 따른다: 컷의 promptEn·cameraEn 문자열이 없고
-        #     "come ONLY from @Video1" 를 포함하며, 대사(dialogueKo)는 타임라인에 들어간다.
+        # (u) 프롬프트는 화면 구성을 @Video1 만 따른다(컷 단위, 설계자 2026-10-22): 컷의 promptEn·cameraEn
+        #     문자열이 없고, 'Do not add or remove anyone'·'come ONLY from @Video1' 문장은 쓰지 않으며,
+        #     CAST/SHOT/.../CONTINUITY 순서를 지키고, 대사(dialogueKo)는 DIALOGUE 에 들어간다. UTF-8 ≤ 2500바이트.
         cut_prompt_en = "Kim speaks, static camera."
         cut_camera_en = "static camera"
         cut_dialogue = "자네 뭐 하나?"
+        order_labels = ["CAST", "SHOT", "BLOCKING", "ACTION", "MOOD", "SETTING", "DIALOGUE", "CONTINUITY"]
         for pay in (reals + webs):
             prompt = str(pay.get("prompt") or "")
             if cut_prompt_en in prompt:
                 bad.append("(u) 프롬프트에 컷 promptEn 이 들어 있습니다(화면 구성은 @Video1 만 따라야 합니다)")
             if cut_camera_en in prompt:
                 bad.append("(u) 프롬프트에 컷 cameraEn 이 들어 있습니다(카메라는 @Video1 만 따라야 합니다)")
-            if "come ONLY from @Video1" not in prompt:
-                bad.append("(u) 프롬프트에 'come ONLY from @Video1' 지시가 없습니다")
+            if "Do not add or remove anyone" in prompt:
+                bad.append("(u) 프롬프트에 'Do not add or remove anyone' 이 남아 있습니다")
+            if "come ONLY from @Video1" in prompt:
+                bad.append("(u) 프롬프트에 옛 'come ONLY from @Video1' 문장이 남아 있습니다")
+            # CAST/SHOT/.../CONTINUITY 순서(섹션 머리말 토큰으로 — 본문 속 단어와 혼동 방지).
+            header_tokens = {
+                "CAST": "CAST —", "SHOT": "\nSHOT:", "BLOCKING": "\nBLOCKING:", "ACTION": "\nACTION:",
+                "MOOD": "\nMOOD:", "SETTING": "\nSETTING:", "DIALOGUE": "\nDIALOGUE:", "CONTINUITY": "\nCONTINUITY:",
+            }
+            positions = [("\n" + prompt).find(header_tokens[lbl]) for lbl in order_labels]
+            present = [(order_labels[i], positions[i]) for i in range(len(order_labels)) if positions[i] >= 0]
+            pos_only = [p for _lbl, p in present]
+            if pos_only != sorted(pos_only):
+                bad.append(f"(u) 섹션 순서가 CAST→…→CONTINUITY 가 아닙니다: {present}")
+            for must, tok in (("CAST", "CAST —"), ("SHOT", "SHOT:"), ("CONTINUITY", "CONTINUITY:")):
+                if tok not in prompt:
+                    bad.append(f"(u) 프롬프트에 필수 섹션 {must} 이 없습니다")
             if cut_dialogue[:40] not in prompt:
-                bad.append(f"(u) 프롬프트 타임라인에 대사가 없습니다: {prompt[:160]}")
+                bad.append(f"(u) 프롬프트 DIALOGUE 에 대사가 없습니다: {prompt[:200]}")
+            if len(prompt.encode("utf-8")) > 2500:
+                bad.append(f"(u) 프롬프트가 2500바이트를 넘습니다: {len(prompt.encode('utf-8'))}")
 
         # (o) 완료 → concat 2(실사·웹툰), done.
         if kgen.get("status") != "done":
@@ -5384,16 +5442,17 @@ def check_vnew_generate() -> None:
         if len(previz_charges) != 4:
             bad.append(f"(o) 프리비즈 edit 원장 계상이 4건이 아닙니다: {len(previz_charges)}")
 
-        # (p) 실패 구간만 재시도 — fal.poll 를 한 번 Failed 로 만들어 한 칸 실패시킨 뒤 그 칸만 retry.
+        # (p) 실패 컷만 재시도 — fal.poll 를 한 번 Failed 로 만들어 한 칸 실패시킨 뒤 그 칸만 retry.
+        #     컷 단위(⑤): unit id = cutId. two_segs 는 각 구간 1컷이라 unit 은 c1·c2.
         pid_p = "prj_gen_p"
         _make_plan(owner, pid_p, segments=two_segs, total=12)
         previz_request_calls.clear(); concat_calls.clear()
-        # seg1 webtoon 만 실패시킨다: arn 에 seg1-webtoon prefix 가 들어가므로 그걸로 가른다.
-        fail_once = {"webtoon_seg1": True}
+        # c1 webtoon 만 실패시킨다: outputPrefix 에 c1-webtoon prefix 가 들어가므로 그걸로 가른다.
+        fail_once = {"webtoon_c1": True}
 
         def fail_fal_poll(invocation_arn, output_prefix):
-            if fail_once["webtoon_seg1"] and "seg1-webtoon" in str(output_prefix):
-                fail_once["webtoon_seg1"] = False
+            if fail_once["webtoon_c1"] and "c1-webtoon" in str(output_prefix):
+                fail_once["webtoon_c1"] = False
                 return {"status": "Failed", "failureMessage": "가짜 웹툰 실패", "usage": None}
             return {"status": "Completed", "failureMessage": "", "usage": None}
 
@@ -5407,23 +5466,23 @@ def check_vnew_generate() -> None:
             pgen = pplan.get("gen") or {}
             if pgen.get("status") != "partial":
                 bad.append(f"(p) 한 칸 실패인데 partial 이 아닙니다: {pgen.get('status')}")
-            seg1 = next((s for s in pgen.get("segments") or [] if s.get("id") == "seg1"), {})
-            if (seg1.get("webtoon") or {}).get("status") != "failed":
-                bad.append(f"(p) seg1 웹툰이 failed 가 아닙니다: {(seg1.get('webtoon') or {}).get('status')}")
-            if (seg1.get("real") or {}).get("status") != "completed":
-                bad.append(f"(p) seg1 실사가 completed 가 아닙니다(실패가 번졌습니다): {(seg1.get('real') or {}).get('status')}")
-            # 실패 칸만 재시도.
+            unit_c1 = next((s for s in pgen.get("units") or [] if s.get("id") == "c1"), {})
+            if (unit_c1.get("webtoon") or {}).get("status") != "failed":
+                bad.append(f"(p) c1 웹툰이 failed 가 아닙니다: {(unit_c1.get('webtoon') or {}).get('status')}")
+            if (unit_c1.get("real") or {}).get("status") != "completed":
+                bad.append(f"(p) c1 실사가 completed 가 아닙니다(실패가 번졌습니다): {(unit_c1.get('real') or {}).get('status')}")
+            # 실패 칸만 재시도(unit id = c1).
             previz_request_calls.clear()
-            resp = client.post(f"/api/vnew/p/{pid_p}/generate/retry", json={"segId": "seg1", "variant": "webtoon"})
+            resp = client.post(f"/api/vnew/p/{pid_p}/generate/retry", json={"segId": "c1", "variant": "webtoon"})
             if resp.status_code != 202:
                 bad.append(f"(p) retry 가 202 가 아닙니다: {resp.status_code} {resp.get_json()}")
             _join_drivers()
             pplan2, _ = planmod.load_plan(owner, pid_p)
             pgen2 = pplan2.get("gen") or {}
-            seg1b = next((s for s in pgen2.get("segments") or [] if s.get("id") == "seg1"), {})
-            if (seg1b.get("webtoon") or {}).get("status") != "completed":
-                bad.append(f"(p) retry 뒤 seg1 웹툰이 completed 가 아닙니다: {(seg1b.get('webtoon') or {}).get('status')}")
-            # retry 는 그 칸(seg1 webtoon)만 다시 제출 → 1회.
+            unit_c1b = next((s for s in pgen2.get("units") or [] if s.get("id") == "c1"), {})
+            if (unit_c1b.get("webtoon") or {}).get("status") != "completed":
+                bad.append(f"(p) retry 뒤 c1 웹툰이 completed 가 아닙니다: {(unit_c1b.get('webtoon') or {}).get('status')}")
+            # retry 는 그 칸(c1 webtoon)만 다시 제출 → 1회.
             if len(previz_request_calls) != 1:
                 bad.append(f"(p) retry 가 그 칸만 1회 제출하지 않았습니다: {len(previz_request_calls)}")
             if pgen2.get("status") != "done":
@@ -5481,8 +5540,9 @@ def check_vnew_generate() -> None:
         def _statuses(owner_, pid_):
             pl, _ = planmod.load_plan(owner_, pid_)
             g = pl.get("gen") or {}
+            cells = (g.get("units") or []) if (g.get("units")) else (g.get("segments") or [])
             out = []
-            for s in g.get("segments") or []:
+            for s in cells:
                 out.append((s["id"], "real", (s.get("real") or {}).get("status")))
                 out.append((s["id"], "webtoon", (s.get("webtoon") or {}).get("status")))
             return out
@@ -5596,6 +5656,8 @@ def check_vnew_generate() -> None:
         genmod._prepare_anime = orig["_prepare_anime"]
         genmod._concat = orig["_concat"]
         genmod._fetch_bytes = orig["_fetch_bytes"]
+        genmod._cut_clip = orig["_cut_clip"]
+        genmod._trim_clip = orig["_trim_clip"]
         genmod.characters.load_char = orig["gen_load_char"]
         _fal_mod.poll = orig["fal_poll"]
         genmod._previz_request = orig["previz_request"]
@@ -6076,6 +6138,9 @@ def check_vnew_previz() -> None:
     from src.vnew import plan as planmod  # noqa: PLC0415
     from src.vnew import previz as pvmod  # noqa: PLC0415
     from src.vnew import previz_grammar as grammarmod  # noqa: PLC0415
+    from src.vnew import shot_brief as _sbmod  # noqa: PLC0415
+    _orig_brief_safe = _sbmod.start_brief_safe
+    _sbmod.start_brief_safe = lambda *_a, **_k: None  # 승인 후 지시서 스레드가 (e) 와 경합하지 않게(지시서는 sb-d 검사)
     from src.vnew import previz_schema as pvschema  # noqa: PLC0415
 
     fake_store = _FakeCharStore()
@@ -6293,6 +6358,42 @@ def check_vnew_previz() -> None:
     pvmod.vpoc_ledger.charge_text = fake_charge_text
     planmod._analyze_conti = fake_analyze_conti
     planmod.vpoc_ledger.charge_text = fake_charge_text
+
+    # 승인 → 촬영 지시서 작성(shot_brief)이 자동 시작한다(⑤). _brief 를 가짜로 바꿔 실제 LLM 호출을 막고,
+    # (sb-d)에서 쓸 입력 텍스트를 잡아 둔다. _brief 는 (payload, usage) 를 돌려준다.
+    from src.vnew import shot_brief as briefmod  # noqa: PLC0415
+
+    brief_inputs: list[str] = []
+
+    def fake_brief(blocks, *, model):
+        text = ""
+        for b in blocks:
+            if isinstance(b, dict) and b.get("text"):
+                text += b["text"] + "\n"
+        brief_inputs.append(text)
+        # 그 입력에 든 컷 id 를 읽어 각 컷 brief 를 돌려준다(장소당 1회 호출).
+        import re as _re  # noqa: PLC0415
+
+        cut_ids = _re.findall(r"CUT (\S+):", text)
+        payload = {
+            "sceneEn": "A principal's office with pale green plaster walls and warm daylight.",
+            "cuts": [
+                {
+                    "cutId": cid,
+                    "shotEn": "MCU, 50mm, eye-level, three-quarter, clean single.",
+                    "blockingEn": "Kim at frame center.",
+                    "actionEn": "Kim leans forward.",
+                    "moodEn": "tense.",
+                    "backgroundEn": "wood wall behind, shallow focus.",
+                    "dialogue": [],
+                }
+                for cid in cut_ids
+            ],
+        }
+        return payload, {"model": model, "inputTokens": 6, "outputTokens": 30}
+
+    orig["brief"] = briefmod._brief
+    briefmod._brief = fake_brief
 
     started_threads: list = []
     orig_thread = pvmod.threading.Thread
@@ -7066,6 +7167,7 @@ def check_vnew_previz() -> None:
 
         bad.append("vnew 프리비즈 검사 중 예외: " + repr(exc) + "\n" + _tb.format_exc()[:1500])
     finally:
+        _sbmod.start_brief_safe = _orig_brief_safe
         pvmod.STORE = orig["pv_STORE"]
         planmod.STORE = orig["plan_STORE"]
         pvmod._design = orig["_design"]
@@ -7075,6 +7177,7 @@ def check_vnew_previz() -> None:
         pvmod.vpoc_ledger.charge_text = orig["pv_charge_text"]
         planmod._analyze_conti = orig["plan_analyze_conti"]
         planmod.vpoc_ledger.charge_text = orig["plan_charge_text"]
+        briefmod._brief = orig["brief"]
         pvmod.threading.Thread = orig["pv_Thread"]
 
     if bad:
@@ -7506,6 +7609,689 @@ def check_vnew_previz_camera() -> None:
         )
 
 
+# ---------------------------------------------------------------- 10c. ⑤ 촬영 지시서·컷 단위·색 이름
+
+
+def check_vnew_shot_brief() -> None:
+    """⑤ 영상 생성 개선(설계자 2026-10-22, 지시서 053) — 색 이름·컷 단위·대사 귀속·촬영 지시서.
+
+    외부 LLM·fal·ffmpeg 는 전부 가짜(유료 호출·실제 인코딩 없음).
+
+    (sb-a) 팔레트: Astra 색 #00E5FF 를 줘도 배우 색은 팔레트 값·이름 있음. _color_name 근사·'#' 없음
+    (sb-b) 컷 단위: 4컷 → units 4개, 각 unit elements=그 컷 보이는 인물만(숨긴 인물 제외), 2초 컷 3초로 채움
+    (sb-c) _cut_lines: '여의준: "…아저씨?" / 범건우: "넌…"' → 두 줄·화자 정확, 빈 대사 silent
+    (sb-d) approve → 지시서 작업 시작(장소당 1회), 입력에 lens·shotSize·moodKo·timeKo·facts 벽 물건 포함
+    (sb-e) 지시서 없음 → /generate 409 BriefNotReady
+    (sb-f) 컷 프롬프트: CAST·SHOT·…·CONTINUITY 순서, 'only these people', '#' 없음, 'Do not add' 없음, UTF-8 ≤ 2500
+    (sb-g) 완료 → 컷 순서 concat, 3초로 채운 컷은 원래 길이로 잘림
+    (sb-h) 옛 gen(segments 형식) 보기 정상
+    """
+    sys.path.insert(0, str(ROOT / "app"))
+    bad: list[str] = []
+
+    from src.vnew import generate as genmod  # noqa: PLC0415
+    from src.vnew import previz_schema as pvschema  # noqa: PLC0415
+    from src.vnew import shot_brief as briefmod  # noqa: PLC0415
+
+    # ---------------- (sb-a) 팔레트·색 이름 ----------------
+    scene = pvschema.normalize_scene(
+        {
+            "actors": [
+                {"id": "a1", "name": "범건우", "color": "#00E5FF", "charId": "ch1"},
+                {"id": "a2", "name": "여의준", "color": "#FF8A00", "charId": "ch2"},
+            ],
+            "room": {"width": 6, "depth": 6},
+            "timeline": [],
+        },
+        location_id="loc1",
+        cut_specs=[],
+    )
+    acolors = [a.get("color") for a in scene.get("actors") or []]
+    # 배우 색은 Astra 값(#00E5FF/#FF8A00)이 아니라 팔레트에서 등장 순서대로.
+    if acolors and acolors[0].lower() == "#00e5ff":
+        bad.append("(sb-a) 배우 색이 Astra 값(#00E5FF)을 그대로 썼습니다(팔레트 배정이어야 함)")
+    palette_hex = {h.lower() for h in pvschema.ACTOR_PALETTE}
+    for c in acolors:
+        if str(c).lower() not in palette_hex:
+            bad.append(f"(sb-a) 배우 색이 팔레트 값이 아닙니다: {c}")
+    if len(acolors) == 2 and acolors[0].lower() == acolors[1].lower():
+        bad.append(f"(sb-a) 두 배우 색이 겹칩니다: {acolors}")
+    # _color_name: 팔레트 밖 hex 근사. #00e5ff→cyan, #ff8a00→orange, 결과에 '#' 없음.
+    if genmod._color_name("#00e5ff") != "cyan":
+        bad.append(f"(sb-a) _color_name('#00e5ff') 가 cyan 이 아닙니다: {genmod._color_name('#00e5ff')}")
+    if genmod._color_name("#ff8a00") != "orange":
+        bad.append(f"(sb-a) _color_name('#ff8a00') 가 orange 가 아닙니다: {genmod._color_name('#ff8a00')}")
+    for probe in ("#00e5ff", "#ff8a00", "#4363d8", "#zzzzzz", ""):
+        name = genmod._color_name(probe)
+        if "#" in name:
+            bad.append(f"(sb-a) _color_name 이 hex 를 돌려줬습니다: {probe} → {name}")
+
+    # ---------------- (sb-c) _cut_lines 대사 귀속 ----------------
+    plan_lines = {"script": {"entries": []}}
+    cut_two = {"id": "c1", "panels": [0], "dialogueKo": '여의준: "…아저씨?" / 범건우: "넌…"'}
+    lines = genmod._cut_lines(plan_lines, cut_two)
+    if len(lines) != 2:
+        bad.append(f"(sb-c) 두 대사로 나뉘지 않았습니다: {lines}")
+    else:
+        if lines[0].get("speaker") != "여의준" or "아저씨" not in (lines[0].get("lineKo") or ""):
+            bad.append(f"(sb-c) 첫 화자·대사가 틀립니다: {lines[0]}")
+        if lines[1].get("speaker") != "범건우" or "넌" not in (lines[1].get("lineKo") or ""):
+            bad.append(f"(sb-c) 둘째 화자·대사가 틀립니다: {lines[1]}")
+    # 빈 대사 → silent.
+    silent_lines = genmod._cut_lines({"script": {"entries": []}}, {"id": "c1", "panels": [0], "dialogueKo": "… …."})
+    if not silent_lines or not silent_lines[0].get("silent"):
+        bad.append(f"(sb-c) 빈 대사가 silent 로 표시되지 않았습니다: {silent_lines}")
+    # script.entries 우선(panels 겹침) + speaker/lineKo.
+    plan_entries = {"script": {"entries": [{"id": "e1", "panels": [2], "speaker": "범건우", "lineKo": "안녕"}]}}
+    el = genmod._cut_lines(plan_entries, {"id": "c3", "panels": [2], "dialogueKo": "여의준: \"딴 거\""})
+    if not el or el[0].get("speaker") != "범건우" or el[0].get("lineKo") != "안녕":
+        bad.append(f"(sb-c) script.entries(panels 겹침) 우선 귀속이 틀립니다: {el}")
+
+    # ---------------- 컷 단위·프롬프트용 plan ----------------
+    def _plan_cuts(n_cuts, seconds_each):
+        cuts = []
+        segs = []
+        actors = [
+            {"id": "a1", "name": "범건우", "color": "#00E5FF", "charId": "ch1"},
+            {"id": "a2", "name": "여의준", "color": "#FF8A00", "charId": "ch2"},
+        ]
+        timeline = []
+        for i in range(n_cuts):
+            cid = "c" + str(i + 1)
+            cuts.append({
+                "id": cid, "no": i + 1, "seconds": seconds_each, "panels": [i],
+                "locationEn": "A closed principal's office",
+                "characters": [{"name": "범건우", "actionEn": "speaks"}],
+                "dialogueKo": '범건우: "자네 뭐 하나?"', "situationKo": "호통", "cameraEn": "static camera",
+                "promptEn": "do-not-leak-promptEn",
+            })
+            segs.append({"id": "seg" + str(i + 1), "cutIds": [cid], "seconds": seconds_each})
+            # c1 은 두 명 보임, 나머지는 범건우만(a1) 보임 — 숨긴 인물 제외 검증.
+            vis = [{"id": "a1", "speaking": True}]
+            if i == 0:
+                vis.append({"id": "a2", "speaking": False})
+            timeline.append({"cutId": cid, "start": 0, "end": seconds_each,
+                             "camera": {"pos": [0, 1.5, 4], "target": [0, 1, 0], "fov": 50}, "actors": vis})
+        # normalize_scene 로 색을 팔레트로 배정한다.
+        sc = pvschema.normalize_scene(
+            {"actors": actors, "room": {"width": 6, "depth": 6},
+             "timeline": timeline},
+            location_id="loc:office",
+            cut_specs=[{"cutId": c["id"], "seconds": c["seconds"]} for c in cuts],
+        )
+        plan = {
+            "input": {"characters": [{"charId": "ch1", "roleName": "범건우"}, {"charId": "ch2", "roleName": "여의준"}]},
+            "script": {"setting": {"moodKo": "긴장", "timeKo": "오후", "layoutKo": "책상 앞", "layoutEn": "at the desk", "enclosed": True},
+                       "entries": []},
+            "conti": {"status": "ready", "cuts": cuts, "segments": segs,
+                      "setting": {"locationEn": "A closed principal's office"}},
+            "locations": [{
+                "key": "a closed principal's office", "nameEn": "A closed principal's office",
+                "design": {"floorEn": "wooden floor", "lightEn": "soft daylight from the north windows",
+                           "walls": {"north": {"descEn": "two windows", "featuresEn": "windows"}}},
+                "facts": {"walls": {"east": {"objects": [{"kind": "bookshelf"}]}}},
+            }],
+            "previz": {
+                "approved": True, "scenes": [sc],
+                "panelGrammar": {"c1": {"grammar": {"shotSize": "MCU", "shotType": "clean_single", "vantage": "front3q",
+                                                    "faceTurn": "screen_right", "cameraHeight": "eye", "others": []}}},
+                "fit": {"c1": {"method": "grammar", "lens": 50, "distanceM": 2.0, "side": 1, "crossed": False}},
+            },
+        }
+        return plan
+
+    # ---------------- (sb-b) 컷 단위·보이는 인물·3초 채움 ----------------
+    plan4 = _plan_cuts(4, 2)  # 4컷, 각 2초(3초 미만).
+    units = genmod._previz_units(plan4)
+    if len(units) != 4:
+        bad.append(f"(sb-b) units 가 4개가 아닙니다: {len(units)}")
+    if units and [u["cutId"] for u in units] != ["c1", "c2", "c3", "c4"]:
+        bad.append(f"(sb-b) units cutId 순서가 틀립니다: {[u.get('cutId') for u in units]}")
+    # 각 unit 의 보이는 인물(= 그 컷 timeline actors). c1 은 2명, 나머지는 1명.
+    vis_c1 = genmod._segment_actors(plan4, {"cutIds": ["c1"]})
+    vis_c2 = genmod._segment_actors(plan4, {"cutIds": ["c2"]})
+    if len(vis_c1) != 2:
+        bad.append(f"(sb-b) c1 보이는 인물이 2명이 아닙니다: {[a.get('name') for a in vis_c1]}")
+    if len(vis_c2) != 1 or (vis_c2 and vis_c2[0].get("name") != "범건우"):
+        bad.append(f"(sb-b) c2 보이는 인물이 범건우 1명이 아닙니다(숨긴 인물 제외 실패): {[a.get('name') for a in vis_c2]}")
+    # _cut_clip 가짜 없이, fake ffmpeg 가 없으므로 _cut_clip 은 직접 부르지 않는다. 대신 billed 시간 확인:
+    # 2초 컷 → estimate 는 max(3,2)=3 로 청구.
+    est = genmod.estimate(plan4)
+    if est.get("mode") != "previz":
+        bad.append(f"(sb-b) estimate.mode 가 previz 가 아닙니다: {est.get('mode')}")
+    exp_cost = round(genmod.vnew_settings.previz_edit_usd(3) * 4 * 2, 2)
+    if abs(est.get("totalUsd", 0) - exp_cost) > 0.001:
+        bad.append(f"(sb-b) estimate 가 컷별 max(3,2)×단가×2 가 아닙니다: {est.get('totalUsd')} != {exp_cost}")
+
+    # ---------------- (sb-f) 컷 프롬프트 형식·순서·바이트 ----------------
+    # shotBrief 를 넣어 CAST/SHOT/.../CONTINUITY 가 다 나오게 한다.
+    plan_f = _plan_cuts(1, 6)
+    plan_f["previz"]["shotBrief"] = {
+        "status": "ready",
+        "scene": {"loc:office": "A principal's office with pale green walls and warm daylight from the left."},
+        "cuts": {"c1": {
+            "shotEn": "MCU, 50mm lens, eye-level, three-quarter, clean single, line stays on the right.",
+            "blockingEn": "범건우 at frame center facing camera, 여의준 just off frame right.",
+            "actionEn": "범건우 leans forward, eyes narrowing, right hand flat on the desk.",
+            "moodEn": "tense, authoritative, controlled anger.",
+            "backgroundEn": "wood-panelled office wall behind, bookshelf soft in shallow focus.",
+            "dialogue": [{"speaker": "범건우", "lineKo": "자네 뭐 하나?", "deliveryEn": "sharp, clipped, low voice"}],
+        }},
+    }
+    # charId 가 있는 cast(정면 로드는 없음 → elementRef 없이 색 문장). 색 문장·Element 둘 다 검증하려면
+    # 정면 이미지를 주입해야 하는데 여기선 store 가 없다 → cast 에 elementRef 없는 경로로 'only these people'·'#' 없음 검증.
+    cast = [
+        {"colorName": genmod._color_name(scene["actors"][0]["color"]), "name": "범건우", "elementRef": "@Element1", "appearance": "a tall man in a suit"},
+        {"colorName": "orange", "name": "여의준", "elementRef": "", "appearance": "a young man"},
+    ]
+    prompt = genmod._cut_prompt(plan_f, {"cutId": "c1"}, "real", cast=cast, has_image_ref=False)
+    order_labels = ["CAST", "SHOT", "BLOCKING", "ACTION", "MOOD", "SETTING", "DIALOGUE", "CONTINUITY"]
+    header_tokens = {
+        "CAST": "CAST —", "SHOT": "\nSHOT:", "BLOCKING": "\nBLOCKING:", "ACTION": "\nACTION:",
+        "MOOD": "\nMOOD:", "SETTING": "\nSETTING:", "DIALOGUE": "\nDIALOGUE:", "CONTINUITY": "\nCONTINUITY:",
+    }
+    positions = [("\n" + prompt).find(header_tokens[lbl]) for lbl in order_labels]
+    present = [p for p in positions if p >= 0]
+    if present != sorted(present):
+        bad.append(f"(sb-f) 섹션 순서가 틀립니다: {[(order_labels[i], positions[i]) for i in range(len(order_labels))]}")
+    for must, tok in (("CAST", "CAST —"), ("SHOT", "SHOT:"), ("CONTINUITY", "CONTINUITY:")):
+        if tok not in prompt:
+            bad.append(f"(sb-f) 필수 섹션 {must} 이 없습니다")
+    if "only these people" not in prompt:
+        bad.append("(sb-f) CAST 'only these people' 안내가 없습니다")
+    if "Do not add or remove anyone" in prompt:
+        bad.append("(sb-f) 'Do not add or remove anyone' 문장이 남아 있습니다")
+    if "#" in prompt:
+        bad.append(f"(sb-f) 프롬프트에 '#'(hex) 가 있습니다: {prompt[:200]}")
+    if "do-not-leak-promptEn" in prompt or "static camera" in prompt:
+        bad.append("(sb-f) 컷 promptEn·cameraEn 이 프롬프트에 샜습니다")
+    if len(prompt.encode("utf-8")) > 2500:
+        bad.append(f"(sb-f) 프롬프트가 2500바이트를 넘습니다: {len(prompt.encode('utf-8'))}")
+    # 긴 입력에서도 2500바이트 이내(backgroundEn·actionEn 을 아주 길게).
+    plan_big = _plan_cuts(1, 6)
+    long_text = "a very detailed description. " * 400
+    plan_big["previz"]["shotBrief"] = {
+        "status": "ready",
+        "scene": {"loc:office": long_text},
+        "cuts": {"c1": {
+            "shotEn": "MCU, 50mm lens, eye-level.", "blockingEn": long_text,
+            "actionEn": long_text, "moodEn": long_text, "backgroundEn": long_text,
+            "dialogue": [{"speaker": "범건우", "lineKo": "자네 뭐 하나?", "deliveryEn": long_text}],
+        }},
+    }
+    prompt_big = genmod._cut_prompt(plan_big, {"cutId": "c1"}, "real", cast=cast, has_image_ref=False)
+    if len(prompt_big.encode("utf-8")) > 2500:
+        bad.append(f"(sb-f) 긴 입력에서 프롬프트가 2500바이트를 넘습니다: {len(prompt_big.encode('utf-8'))}")
+    for must in ("CAST", "SHOT", "CONTINUITY"):
+        if must not in prompt_big:
+            bad.append(f"(sb-f) 긴 입력에서 필수 섹션 {must} 이 줄여졌습니다")
+
+    # ---------------- (sb-d) 촬영 지시서 입력 텍스트(장소당 1회, 필수 항목 포함) ----------------
+    brief_inputs = []
+
+    def fake_brief(blocks, *, model):
+        text = ""
+        for b in blocks:
+            if isinstance(b, dict) and b.get("text"):
+                text += b["text"] + "\n"
+        brief_inputs.append(text)
+        import re as _re  # noqa: PLC0415
+        cut_ids = _re.findall(r"CUT (\S+):", text)
+        return (
+            {"sceneEn": "scene desc", "cuts": [{"cutId": cid, "shotEn": "MCU", "dialogue": []} for cid in cut_ids]},
+            {"model": model, "inputTokens": 5, "outputTokens": 10},
+        )
+
+    orig_brief = briefmod._brief
+    orig_charge = briefmod.vpoc_ledger.charge_text
+    orig_load = briefmod.gen_mod.characters.load_char
+    briefmod._brief = fake_brief
+    briefmod.vpoc_ledger.charge_text = lambda *a, **k: {"spentUsd": 0.0}
+    briefmod.gen_mod.characters.load_char = lambda owner, cid: (
+        {"id": cid, "name": "범건우역", "status": "ready",
+         "analysis": {"appearanceEn": "a man", "outfitEn": "a suit"},
+         "variants": {"real": {"frontKey": "", "backKey": ""}, "webtoon": {"frontKey": "", "backKey": ""}}}, "e"
+    )
+    try:
+        # 한 장소(교장실) 4컷을 직접 _location_prompt 로 만든다(장소당 1회 호출을 흉내).
+        from src.vnew import previz as pvmod  # noqa: PLC0415
+        groups = pvmod._scene_groups(plan4["conti"])
+        if len(groups) != 1:
+            bad.append(f"(sb-d) 교장실 1개 그룹이 아닙니다: {len(groups)}")
+        else:
+            loc = pvmod._location_for(plan4, groups[0]["locationEn"])
+            text = briefmod._location_prompt(plan4, "tester", groups[0]["locationEn"], loc, groups[0]["cuts"])
+            # 장소당 1회: 이 텍스트 하나에 모든 컷(CUT c1..c4)이 들어 있어야 한다.
+            for cid in ("c1", "c2", "c3", "c4"):
+                if ("CUT " + cid) not in text:
+                    bad.append(f"(sb-d) 장소 입력에 {cid} 가 없습니다(장소당 1회 호출)")
+            needles = [("lens", "lens"), ("shotSize", "MCU"), ("moodKo", "긴장"), ("timeKo", "오후")]
+            for label, needle in needles:
+                if needle not in text:
+                    bad.append(f"(sb-d) 지시서 입력에 {label}({needle}) 가 없습니다")
+            if "bookshelf" not in text:
+                bad.append("(sb-d) 지시서 입력에 facts 벽 물건(bookshelf) 이 없습니다")
+    finally:
+        briefmod._brief = orig_brief
+        briefmod.vpoc_ledger.charge_text = orig_charge
+        briefmod.gen_mod.characters.load_char = orig_load
+
+    # ---------------- (sb-e)(sb-g)(sb-h) 하니스 ----------------
+    import threading as _threading  # noqa: PLC0415
+    import time as _time  # noqa: PLC0415
+
+    from flask import Flask  # noqa: PLC0415
+    from src import vnew  # noqa: PLC0415
+    from src.vnew import plan as planmod  # noqa: PLC0415
+    from src.vpoc import fal as _fal_mod  # noqa: PLC0415
+    from src.vpoc import ledger as _ledger_mod  # noqa: PLC0415
+    from src.vpoc import settings as _settings  # noqa: PLC0415
+
+    fake_store = _FakeCharStore()
+    concat_order = []
+    trim_calls = []
+
+    def fake_previz_request(method, url, payload):
+        import secrets as _s  # noqa: PLC0415
+        return {"request_id": "previz-" + _s.token_hex(4)}
+
+    def fake_fal_poll(invocation_arn, output_prefix):
+        return {"status": "Completed", "failureMessage": "", "usage": None}
+
+    def fake_fetch_bytes(key, *, bucket=""):
+        return fake_store.blobs.get(key, b"CLIP-" + key.encode("ascii", "ignore"))
+
+    def fake_cut_clip(video_mp4, unit):
+        orig = float(unit.get("endSec") or 0) - float(unit.get("startSec") or 0)
+        padded = orig < genmod.PREVIZ_MIN_CLIP_S - 0.01
+        return {"bytes": b"CUT-MP4", "origSeconds": round(orig, 3),
+                "sentSeconds": genmod.PREVIZ_MIN_CLIP_S if padded else round(orig, 3), "padded": padded}
+
+    def fake_trim_clip(mp4, seconds):
+        trim_calls.append(round(float(seconds), 3))
+        return b"TRIMMED"
+
+    def fake_concat(clips):
+        concat_order.append(len(clips))
+        return b"FINAL-MP4"
+
+    def fake_load_char(owner, char_id):
+        # 기본 복장 정면·후면 키(실사·웹툰). check_preconditions 가 front 를 요구한다.
+        rf, rb = "rf-" + char_id + ".jpg", "rb-" + char_id + ".jpg"
+        wf, wb = "wf-" + char_id + ".jpg", "wb-" + char_id + ".jpg"
+        for k in (rf, rb, wf, wb):
+            fake_store.blobs.setdefault(k, _tiny_jpeg(400, 600))
+        return {"id": char_id, "name": "범건우역", "status": "ready",
+                "analysis": {"appearanceEn": "a man", "outfitEn": "a suit"},
+                "variants": {"real": {"frontKey": rf, "backKey": rb, "sheetKey": ""},
+                             "webtoon": {"frontKey": wf, "backKey": wb, "sheetKey": ""}}}, "e"
+
+    def fake_charge(key, **kwargs):
+        return {"spentUsd": 0.0, "capUsd": None}
+
+    sb_orig = {
+        "gen_STORE": genmod.STORE, "plan_STORE": planmod.STORE, "ledger_STORE": _ledger_mod.STORE,
+        "_concat": genmod._concat, "_fetch_bytes": genmod._fetch_bytes, "_cut_clip": genmod._cut_clip,
+        "_trim_clip": genmod._trim_clip, "load_char": genmod.characters.load_char,
+        "fal_poll": _fal_mod.poll, "previz_request": genmod._previz_request, "charge": _ledger_mod.charge,
+        "Thread": genmod.threading.Thread, "fal_key": _settings.FAL_KEY,
+    }
+    genmod.STORE = fake_store
+    planmod.STORE = fake_store
+    _ledger_mod.STORE = fake_store
+    genmod._concat = fake_concat
+    genmod._fetch_bytes = fake_fetch_bytes
+    genmod._cut_clip = fake_cut_clip
+    genmod._trim_clip = fake_trim_clip
+    genmod.characters.load_char = fake_load_char
+    _fal_mod.poll = fake_fal_poll
+    genmod._previz_request = fake_previz_request
+    _ledger_mod.charge = fake_charge
+    _settings.FAL_KEY = "dummy-fal-key"
+
+    started = []
+    base_thread = genmod.threading.Thread
+
+    def _trk(*a, **k):
+        t = base_thread(*a, **k)
+        started.append(t)
+        return t
+
+    genmod.threading.Thread = _trk
+
+    def _join(timeout=20.0):
+        deadline = _time.time() + timeout
+        for t in list(started):
+            t.join(timeout=max(0.0, deadline - _time.time()))
+        started.clear()
+
+    owner = "tester"
+
+    def make_client():
+        app = Flask(__name__)
+        bp = vnew.create_blueprint(
+            vnew.VnewDependencies(
+                require_auth=lambda h: h, current_owner=lambda: owner,
+                get_project=lambda p: {"id": p, "owner": owner, "track": "video_new"},
+                can_read_project=lambda proj: True, can_write_project=lambda proj: True,
+                project_owner_prefix=lambda name: name,
+            )
+        )
+        app.register_blueprint(bp)
+        return app.test_client()
+
+    def _seed_plan(pid, *, brief_status):
+        """컷 2개(2초·6초)·녹화·승인된 plan 을 심는다. brief_status='ready'면 shotBrief 를 넣는다."""
+        plan = planmod.new_plan()
+        plan["input"]["characters"] = [{"charId": "ch1", "roleName": "범건우"}]
+        cuts = [
+            {"id": "c1", "no": 1, "seconds": 2, "panels": [0], "locationEn": "A closed principal's office",
+             "characters": [{"name": "범건우", "actionEn": "speaks"}], "dialogueKo": '범건우: "자네?"', "cameraEn": "x", "promptEn": "x"},
+            {"id": "c2", "no": 2, "seconds": 6, "panels": [1], "locationEn": "A closed principal's office",
+             "characters": [{"name": "범건우", "actionEn": "speaks"}], "dialogueKo": '범건우: "뭐 하나?"', "cameraEn": "x", "promptEn": "x"},
+        ]
+        segs = [{"id": "seg1", "cutIds": ["c1"], "seconds": 2}, {"id": "seg2", "cutIds": ["c2"], "seconds": 6}]
+        plan["script"] = {"status": "ready", "setting": {"locationEn": "A closed principal's office"}, "entries": []}
+        plan["conti"] = {"status": "ready", "cuts": cuts, "segments": segs, "setting": {"locationEn": "A closed principal's office"}}
+        actors = [{"id": "a1", "name": "범건우", "color": "#00E5FF", "charId": "ch1"}]
+        timeline = [{"cutId": c["id"], "start": 0, "end": c["seconds"],
+                     "camera": {"pos": [0, 1.5, 4], "target": [0, 1, 0], "fov": 50},
+                     "actors": [{"id": "a1", "speaking": True}]} for c in cuts]
+        sc = pvschema.normalize_scene({"actors": actors, "room": {"width": 6, "depth": 6}, "timeline": timeline},
+                                      location_id="loc:office",
+                                      cut_specs=[{"cutId": c["id"], "seconds": c["seconds"]} for c in cuts])
+        recordings = {}
+        for seg in segs:
+            rkey = f"rec/{pid}/{seg['id']}.mp4"
+            fake_store.blobs[rkey] = b"PREVIZ-REC"
+            recordings[seg["id"]] = {"status": "ready", "key": rkey, "seconds": float(seg["seconds"])}
+        previz = {"status": "ready", "revision": 0, "scenes": [sc], "approved": True, "recordings": recordings,
+                  "task": {"status": "done", "startedAt": None, "id": None}}
+        if brief_status == "ready":
+            previz["shotBrief"] = {
+                "status": "ready", "model": "astra",
+                "scene": {"loc:office": "office scene"},
+                "cuts": {c["id"]: {"shotEn": "MCU", "blockingEn": "", "actionEn": "", "moodEn": "",
+                                   "backgroundEn": "", "dialogue": []} for c in cuts},
+                "updatedAt": "2026-10-22T00:00:00Z",
+                "task": {"status": "done", "startedAt": None, "id": None},
+            }
+        plan["previz"] = previz
+        planmod.save_plan(owner, pid, plan)
+        return plan
+
+    try:
+        client = make_client()
+
+        # (sb-e) 지시서 없음 → /generate 409 BriefNotReady.
+        pid_e = "prj_sb_e"
+        _seed_plan(pid_e, brief_status="none")
+        plan_e, _ = planmod.load_plan(owner, pid_e)
+        est_e = genmod.estimate(plan_e)
+        resp = client.post(f"/api/vnew/p/{pid_e}/generate", json={"confirmUsd": est_e["totalUsd"]})
+        body_e = resp.get_json() or {}
+        if resp.status_code != 409 or (body_e.get("error") or {}).get("type") != "BriefNotReady":
+            bad.append(f"(sb-e) 지시서 없음이 409 BriefNotReady 가 아닙니다: {resp.status_code} {body_e}")
+
+        # (sb-g) 지시서 ready → 생성 완료 → concat, 3초로 채운 c1(2초) 은 원래 2초로 잘림.
+        pid_g = "prj_sb_g"
+        _seed_plan(pid_g, brief_status="ready")
+        concat_order.clear(); trim_calls.clear()
+        plan_g, _ = planmod.load_plan(owner, pid_g)
+        est_g = genmod.estimate(plan_g)
+        resp = client.post(f"/api/vnew/p/{pid_g}/generate", json={"confirmUsd": est_g["totalUsd"]})
+        if resp.status_code != 202:
+            bad.append(f"(sb-g) generate 가 202 가 아닙니다: {resp.status_code} {resp.get_json()}")
+        _join()
+        gplan, _ = planmod.load_plan(owner, pid_g)
+        ggen = gplan.get("gen") or {}
+        if ggen.get("status") != "done":
+            bad.append(f"(sb-g) gen.status 가 done 이 아닙니다: {ggen.get('status')}")
+        if len(concat_order) != 2:
+            bad.append(f"(sb-g) concat 이 2회(실사·웹툰)가 아닙니다: {concat_order}")
+        if concat_order and any(n != 2 for n in concat_order):
+            bad.append(f"(sb-g) concat 에 넘긴 컷 수가 2가 아닙니다: {concat_order}")
+        # 채운 컷(c1, 2초)은 그림체별로 1번씩(실사·웹툰) 원래 길이로 잘린다 → trim 이 2회, 모두 ~2초.
+        padded_trims = [t for t in trim_calls if abs(t - 2.0) < 0.5]
+        if len(padded_trims) < 2:
+            bad.append(f"(sb-g) 채운 컷이 원래 길이(2초)로 잘리지 않았습니다: {trim_calls}")
+
+        # (sb-h) 옛 gen(segments 형식) 보기 정상.
+        pid_h = "prj_sb_h"
+        _seed_plan(pid_h, brief_status="ready")
+        hplan, _ = planmod.load_plan(owner, pid_h)
+        hplan["gen"] = {
+            "genId": "g_old", "status": "done", "videoModel": "luma-ray2", "createdAt": "2026-10-20T08:00:00Z",
+            "opening": {"status": "done", "imageKey": "op.jpg", "error": ""},
+            "segments": [{"id": "seg1", "cutIds": ["c1"], "seconds": 6,
+                          "real": {"status": "completed", "outputKey": "r1.mp4", "error": ""},
+                          "webtoon": {"status": "completed", "outputKey": "w1.mp4", "error": ""}}],
+            "finalReal": {"status": "done", "key": "fr.mp4", "error": ""},
+            "finalWebtoon": {"status": "done", "key": "fw.mp4", "error": ""},
+            "selected": None, "costUsd": 0.0,
+        }
+        planmod.save_plan(owner, pid_h, hplan)
+        view_h = genmod.gen_view(owner, pid_h, hplan)
+        if not view_h or view_h.get("status") != "done":
+            bad.append(f"(sb-h) 옛 gen_view 가 done 을 못 돌려줍니다: {view_h and view_h.get('status')}")
+        if view_h and len(view_h.get("segments") or []) != 1:
+            bad.append(f"(sb-h) 옛 gen_view 의 segments 가 보이지 않습니다: {view_h and view_h.get('segments')}")
+    except Exception as exc:  # noqa: BLE001
+        import traceback as _tb  # noqa: PLC0415
+        bad.append("sb 하니스 예외: " + repr(exc) + "\n" + _tb.format_exc()[:1500])
+    finally:
+        genmod.STORE = sb_orig["gen_STORE"]
+        planmod.STORE = sb_orig["plan_STORE"]
+        _ledger_mod.STORE = sb_orig["ledger_STORE"]
+        genmod._concat = sb_orig["_concat"]
+        genmod._fetch_bytes = sb_orig["_fetch_bytes"]
+        genmod._cut_clip = sb_orig["_cut_clip"]
+        genmod._trim_clip = sb_orig["_trim_clip"]
+        genmod.characters.load_char = sb_orig["load_char"]
+        _fal_mod.poll = sb_orig["fal_poll"]
+        genmod._previz_request = sb_orig["previz_request"]
+        _ledger_mod.charge = sb_orig["charge"]
+        genmod.threading.Thread = sb_orig["Thread"]
+        _settings.FAL_KEY = sb_orig["fal_key"]
+
+    if bad:
+        fail("⑤ 촬영 지시서·컷 단위·색 이름 검사 실패\n" + "\n".join(f"  {item}" for item in bad))
+    else:
+        ok(
+            "⑤ 촬영 지시서·컷 단위·색 이름 검사 (sb-a)팔레트·_color_name·'#' 없음 (sb-b)컷 단위 units·보이는 인물·3초 청구"
+            " (sb-c)_cut_lines 화자 귀속·silent (sb-d)장소당 1회·lens/shotSize/mood/time/facts 포함"
+            " (sb-e)지시서 없음 409 BriefNotReady (sb-f)CAST→CONTINUITY 순서·only these people·'#' 없음·Do not add 없음·UTF-8≤2500"
+            " (sb-g)컷 순서 concat·채운 컷 원래 길이로 잘림 (sb-h)옛 segments gen_view"
+        )
+
+
+# ---------------------------------------------------------------- 10d. 마네킹 얼굴·머리카락·연기 동작(054)
+
+
+def check_vnew_mannequin() -> None:
+    """④ 프리비즈 마네킹 — 얼굴 방향 표식·머리카락 색·연기 동작 + ECU 하한(설계자 2026-10-22, 지시서 054).
+
+    (mf-a) vnew-previz.js 에 얼굴 표식(eye·nose)·hair 캡 생성 코드가 있고, GESTURES 목록이 schema 와
+           렌더러에서 문자열로 같다(node --check 는 check_js 가 본다).
+    (mf-b) schema: hairColor 정리(잘못된 값→기본), 새 gesture 통과·모르는 gesture→None,
+           gestureTarget 은 존재하는 actor id 만.
+    (mf-c) previz.hair_color_for: "short blond hair"→#e8cf7a, "black hair"→#1a1a1a.
+    (mf-d) grammar actions(가짜) → 그 컷 인물 gesture·gestureTarget 반영. actions 없는 옛 캐시는
+           conti actionEn 키워드로 배정.
+    (mf-e) ECU 컷 → 카메라 CU 렌즈(70mm)·fit.pushInTo == "ECU".
+    """
+    sys.path.insert(0, str(ROOT / "app"))
+    bad: list[str] = []
+
+    import re as _re  # noqa: PLC0415
+
+    from src.vnew import previz as pvmod  # noqa: PLC0415
+    from src.vnew import previz_grammar as grammarmod  # noqa: PLC0415
+    from src.vnew import previz_schema as pvschema  # noqa: PLC0415
+
+    # ---------------- (mf-a) 렌더러 얼굴 표식·머리카락·GESTURES 목록 ----------------
+    js = (PUBLIC / "vnew-previz.js").read_text(encoding="utf-8")
+    # 얼굴 표식: 흰 눈(faceMat)·코(nose)·머리카락 캡(hairGeo/hairMat) 생성 코드가 있어야 한다.
+    for needle in ("faceMat", "eyeGeo", "nose", "hairTop", "hairMat"):
+        if needle not in js:
+            bad.append(f"(mf-a) vnew-previz.js 에 '{needle}' 생성 코드가 없습니다")
+    # 렌더러 GESTURES 배열을 뽑아 schema.GESTURES 와 문자열로 비교.
+    match = _re.search(r"const GESTURES = \[(.*?)\];", js, _re.S)
+    if not match:
+        bad.append("(mf-a) vnew-previz.js 에 const GESTURES 배열이 없습니다")
+    else:
+        js_gestures = _re.findall(r'"([^"]+)"', match.group(1))
+        if list(js_gestures) != list(pvschema.GESTURES):
+            bad.append(
+                f"(mf-a) 렌더러 GESTURES 가 schema 와 다릅니다:\n  js={js_gestures}\n  schema={list(pvschema.GESTURES)}"
+            )
+
+    # ---------------- (mf-b) schema: hairColor·gesture·gestureTarget 정리 ----------------
+    scene = pvschema.normalize_scene(
+        {
+            "actors": [
+                {"id": "a1", "name": "범건우", "color": "#111", "hairColor": "#E8CF7A"},
+                {"id": "a2", "name": "여의준", "color": "#222", "hairColor": "not-a-color"},
+            ],
+            "room": {"width": 6, "depth": 6},
+            "timeline": [
+                {
+                    "cutId": "c1",
+                    "camera": {"pos": [0, 1.5, 4], "target": [0, 1, 0], "fov": 50},
+                    "actors": [
+                        {"id": "a1", "pos": [0, 0, 0], "gesture": "both_hands_other_cheeks", "gestureTarget": "a2"},
+                        {"id": "a2", "pos": [1, 0, 0], "gesture": "no_such_gesture", "gestureTarget": "ghost"},
+                    ],
+                }
+            ],
+        },
+        location_id="loc1",
+        cut_specs=[{"cutId": "c1", "seconds": 4}],
+    )
+    sa = {a["id"]: a for a in scene.get("actors") or []}
+    if sa.get("a1", {}).get("hairColor") != "#e8cf7a":
+        bad.append(f"(mf-b) 올바른 hairColor 가 정리되지 않았습니다: {sa.get('a1', {}).get('hairColor')}")
+    if sa.get("a2", {}).get("hairColor") != pvschema.DEFAULT_HAIR_COLOR:
+        bad.append(f"(mf-b) 잘못된 hairColor 가 기본값으로 안 바뀌었습니다: {sa.get('a2', {}).get('hairColor')}")
+    ca = {a["id"]: a for a in (scene.get("timeline") or [{}])[0].get("actors") or []}
+    if ca.get("a1", {}).get("gesture") != "both_hands_other_cheeks":
+        bad.append(f"(mf-b) 새 gesture 가 통과되지 않았습니다: {ca.get('a1', {}).get('gesture')}")
+    if ca.get("a1", {}).get("gestureTarget") != "a2":
+        bad.append(f"(mf-b) 존재하는 gestureTarget 이 유지되지 않았습니다: {ca.get('a1', {}).get('gestureTarget')}")
+    if ca.get("a2", {}).get("gesture") is not None:
+        bad.append(f"(mf-b) 모르는 gesture 가 None 이 아닙니다: {ca.get('a2', {}).get('gesture')}")
+    if "gestureTarget" in ca.get("a2", {}):
+        bad.append(f"(mf-b) 존재하지 않는 gestureTarget 이 남았습니다: {ca.get('a2', {}).get('gestureTarget')}")
+
+    # ---------------- (mf-c) previz.hair_color_for ----------------
+    if pvmod.hair_color_for("short blond hair") != "#e8cf7a":
+        bad.append(f"(mf-c) 'short blond hair' 가 #e8cf7a 가 아닙니다: {pvmod.hair_color_for('short blond hair')}")
+    if pvmod.hair_color_for("black hair") != "#1a1a1a":
+        bad.append(f"(mf-c) 'black hair' 가 #1a1a1a 가 아닙니다: {pvmod.hair_color_for('black hair')}")
+    if pvmod.hair_color_for("no hair words here") != pvmod.HAIR_COLOR_DEFAULT:
+        bad.append(f"(mf-c) 색 단어 없음이 기본값이 아닙니다: {pvmod.hair_color_for('no hair words here')}")
+
+    # ---------------- (mf-d) 제스처 배정: grammar actions · 옛 캐시 keyword ----------------
+    # 장면 2인(범건우 a1, 여의준 a2). 컷 c1 에 grammar actions 로 범건우가 여의준 뺨 감싸기.
+    def _scene_two():
+        return {
+            "actors": [
+                {"id": "a1", "name": "범건우"},
+                {"id": "a2", "name": "여의준"},
+            ],
+            "timeline": [
+                {"cutId": "c1", "actors": [{"id": "a1"}, {"id": "a2"}]},
+            ],
+        }
+
+    groups = [{
+        "locationEn": "office",
+        "cuts": [{"cutId": "c1", "characters": [{"name": "범건우", "actionEn": "stands still"}]}],
+    }]
+    # grammar actions(가짜): "범건우 cups 여의준's cheeks with both hands".
+    grammar_by_cut = {
+        "c1": grammarmod.normalize_grammar({
+            "mainSubject": "범건우",
+            "frameBottomCut": "chest",
+            "shotType": "two_shot",
+            "vantage": "front",
+            "actions": [
+                {"name": "범건우", "actionEn": "cups 여의준's cheeks with both hands",
+                 "gesture": "both_hands_other_cheeks", "target": "여의준"},
+            ],
+        }),
+    }
+    sc_d = _scene_two()
+    pvmod._apply_gestures([sc_d], groups, grammar_by_cut)
+    cut_actors = {a["id"]: a for a in sc_d["timeline"][0]["actors"]}
+    if cut_actors.get("a1", {}).get("gesture") != "both_hands_other_cheeks":
+        bad.append(f"(mf-d) grammar actions gesture 가 반영되지 않았습니다: {cut_actors.get('a1')}")
+    if cut_actors.get("a1", {}).get("gestureTarget") != "a2":
+        bad.append(f"(mf-d) grammar actions target(여의준→a2)이 반영되지 않았습니다: {cut_actors.get('a1')}")
+    # grammar.actions 가 normalize 로 들어갔는지(열거·target 정리).
+    acts = grammar_by_cut["c1"].get("actions")
+    if not acts or acts[0].get("gesture") != "both_hands_other_cheeks" or acts[0].get("target") != "여의준":
+        bad.append(f"(mf-d) normalize_grammar 가 actions 를 정리하지 않았습니다: {acts}")
+
+    # 옛 캐시(grammar.actions 없음) → 콘티 actionEn 키워드로 배정.
+    sc_old = _scene_two()
+    old_groups = [{
+        "locationEn": "office",
+        "cuts": [{"cutId": "c1", "characters": [
+            {"name": "범건우", "actionEn": "wipes tears from his eyes with the back of his hand"},
+            {"name": "여의준", "actionEn": "stands still"},
+        ]}],
+    }]
+    # grammar 에 actions 가 없는 옛 캐시(다른 필드만).
+    old_grammar = {"c1": grammarmod.normalize_grammar({"mainSubject": "범건우", "frameBottomCut": "chest", "shotType": "two_shot", "vantage": "front"})}
+    old_grammar["c1"].pop("actions", None)  # 옛 캐시 흉내(actions 키 없음)
+    pvmod._apply_gestures([sc_old], old_groups, old_grammar)
+    old_actors = {a["id"]: a for a in sc_old["timeline"][0]["actors"]}
+    if old_actors.get("a1", {}).get("gesture") != "wipe_tears":
+        bad.append(f"(mf-d) 옛 캐시 conti actionEn(tears) → wipe_tears 가 배정되지 않았습니다: {old_actors.get('a1')}")
+
+    # ---------------- (mf-e) ECU 컷 → CU 렌즈(70mm)·pushInTo "ECU" ----------------
+    ecu_scene = {
+        "room": {"width": 8.0, "depth": 6.0},
+        "actors": [{"id": "a1", "name": "범건우", "heightM": 1.75}],
+        "timeline": [
+            {
+                "cutId": "c1",
+                "camera": {"pos": [0, 1.5, 2], "target": [0, 1, 0], "fov": 50},
+                "actors": [{"id": "a1", "pos": [0, 0, 0], "pose": "stand"}],
+            }
+        ],
+    }
+    ecu_groups = [{"locationEn": "office", "cuts": [{"cutId": "c1", "seconds": 4, "characters": []}]}]
+    ecu_grammar = {
+        "c1": grammarmod.normalize_grammar({
+            "mainSubject": "범건우",
+            "frameBottomCut": "eyes",  # → shotSize ECU
+            "shotType": "clean_single",
+            "vantage": "front",
+            "faceTurn": "toward_camera",
+            "cameraHeight": "eye",
+        }),
+    }
+    if ecu_grammar["c1"].get("shotSize") != "ECU":
+        bad.append(f"(mf-e) frameBottomCut eyes 가 ECU 가 아닙니다(테스트 전제): {ecu_grammar['c1'].get('shotSize')}")
+    fit = pvmod._place_cameras("tester", "prj_mf", [ecu_scene], ecu_groups, ecu_grammar, {})
+    fe = fit.get("c1") or {}
+    if fe.get("pushInTo") != "ECU":
+        bad.append(f"(mf-e) ECU 컷 fit.pushInTo 가 'ECU' 가 아닙니다: {fe.get('pushInTo')}")
+    if fe.get("lens") != "70mm":
+        bad.append(f"(mf-e) ECU 컷 카메라 렌즈가 CU(70mm)가 아닙니다: {fe.get('lens')}")
+
+    if bad:
+        fail("④ 마네킹 얼굴·머리카락·연기 동작 검사 실패\n" + "\n".join(f"  {item}" for item in bad))
+    else:
+        ok(
+            "④ 마네킹 얼굴·머리카락·연기 동작 검사 (mf-a)렌더러 얼굴 표식·머리카락·GESTURES 동일"
+            " (mf-b)schema hairColor·gesture·gestureTarget 정리 (mf-c)hair_color_for blond/black"
+            " (mf-d)grammar actions·옛 캐시 conti 키워드 배정 (mf-e)ECU→CU 70mm·pushInTo ECU"
+        )
+
+
 # ---------------------------------------------------------------- main
 
 
@@ -7530,6 +8316,8 @@ def main() -> int:
     check_vnew_generate()
     check_vnew_previz()
     check_vnew_previz_camera()
+    check_vnew_shot_brief()
+    check_vnew_mannequin()
     check_fal_pricing()
     check_vnew_real_start()
     check_anime_style()

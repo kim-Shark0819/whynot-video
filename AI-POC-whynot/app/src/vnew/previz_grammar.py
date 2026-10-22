@@ -36,6 +36,8 @@ SYSTEM = (
     "- cameraHeight: low (looking up at the subject) | eye | high (looking down) | overhead.\n"
     "- others: every other person visible, with how they appear: full | partial_edge | shoulder_or_back | hands_only | lips_or_face_part, their side of the frame (left|right|center|bottom), and their screenX.\n"
     "- offscreenPartnerSide: if the subject is talking to / looking at someone not in frame, on which side that person must be: left | right | front_of_camera | none.\n"
+    "- actions: what each visible person is physically DOING with hands/head/body (acting beats). For each, give {name (the person), actionEn (one sentence on the hand/head/body action), gesture (ONE of: none | point | bow | hands_on_knees | cover_face | hand_to_own_face | wipe_tears | hand_on_other_cheek | both_hands_other_cheeks | hand_on_chest | press_hand_to_other_chest | lean_in | laugh | look_down | look_up | nod | turn_head_to_other), target (the other person the action is directed at, or none)}. Pick the gesture that best matches the drawn action; use none if the person just stands/sits still.\n"
+    "- expressionEn: the MAIN subject's facial expression in one short phrase (e.g. 'teary-eyed, trembling lips').\n"
     "Identify people by name using the cut description given. Ignore speech bubbles and sound effects. Be precise; do not guess beyond what is drawn."
 )
 
@@ -68,6 +70,19 @@ TOOL = {
                     },
                 },
                 "offscreenPartnerSide": {"type": "string"},
+                "actions": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "name": {"type": "string"},
+                            "actionEn": {"type": "string"},
+                            "gesture": {"type": "string"},
+                            "target": {"type": "string"},
+                        },
+                    },
+                },
+                "expressionEn": {"type": "string"},
                 "reasonKo": {"type": "string"},
             },
             "required": ["mainSubject", "frameBottomCut", "shotType", "vantage"],
@@ -100,6 +115,11 @@ CAMERA_HEIGHTS = ("low", "eye", "high", "overhead")
 OTHER_HOWS = ("full", "partial_edge", "shoulder_or_back", "hands_only", "lips_or_face_part")
 OTHER_SIDES = ("left", "right", "center", "bottom")
 PARTNER_SIDES = ("left", "right", "front_of_camera", "none")
+
+# actions[].gesture 열거값 = previz_schema.GESTURES + "none". 모르는 값은 "none".
+from .previz_schema import GESTURES as _SCHEMA_GESTURES  # noqa: E402
+
+ACTION_GESTURES = ("none",) + tuple(_SCHEMA_GESTURES)
 
 # headTopY 범위(머리 위가 화면 위로 잘릴 수 있으니 음수 허용), subjectX 0~1.
 HEAD_TOP_MIN, HEAD_TOP_MAX = -0.8, 0.9
@@ -193,6 +213,22 @@ def normalize_grammar(payload: dict) -> dict:
             "screenX": round(_clamp(_num(item.get("screenX"), 0.5), 0.0, 1.0), 4),
         })
 
+    # actions: 보이는 인물의 연기 동작. gesture 는 ACTION_GESTURES 열거값(모르면 "none"),
+    # target 은 상대 이름(없으면 "none"). name 이 비면 버린다.
+    actions = []
+    for item in payload.get("actions") or []:
+        if not isinstance(item, dict):
+            continue
+        name = str(item.get("name") or "").strip()
+        if not name:
+            continue
+        actions.append({
+            "name": name,
+            "actionEn": str(item.get("actionEn") or "").strip(),
+            "gesture": _enum(item.get("gesture"), ACTION_GESTURES, "none"),
+            "target": str(item.get("target") or "none").strip() or "none",
+        })
+
     return {
         "mainSubject": str(payload.get("mainSubject") or "").strip(),
         "frameBottomCut": bottom_cut,
@@ -205,6 +241,8 @@ def normalize_grammar(payload: dict) -> dict:
         "subjectX": round(_clamp(_num(payload.get("subjectX"), 0.5), SUBJECT_X_MIN, SUBJECT_X_MAX), 4),
         "others": others,
         "offscreenPartnerSide": _enum(payload.get("offscreenPartnerSide"), PARTNER_SIDES, "none"),
+        "actions": actions,
+        "expressionEn": str(payload.get("expressionEn") or "").strip(),
         "reasonKo": str(payload.get("reasonKo") or "").strip(),
     }
 

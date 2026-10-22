@@ -2671,3 +2671,71 @@ textarea.vnew-field-input {
     margin-left: 0;
   }
 }
+
+
+
+/* ⑤ 촬영 지시서(shot brief) · 보낸 지시서 보기(설계자 2026-10-22) */
+.vnew-brief-card {
+  margin-bottom: 16px;
+}
+.vnew-brief-scene {
+  margin: 10px 0;
+  padding: 10px 12px;
+  background: #f7f7f9;
+  border-radius: 8px;
+}
+.vnew-brief-label {
+  display: block;
+  font-size: 12px;
+  font-weight: 600;
+  color: #6b6b76;
+  margin-bottom: 4px;
+}
+.vnew-brief-text {
+  margin: 0 0 6px;
+  font-size: 13px;
+  line-height: 1.5;
+  color: #22222a;
+  white-space: pre-wrap;
+}
+.vnew-brief-cut {
+  margin: 6px 0;
+  border: 1px solid #e4e4ea;
+  border-radius: 8px;
+  padding: 6px 10px;
+}
+.vnew-brief-cut-summary {
+  cursor: pointer;
+  font-weight: 600;
+  font-size: 13px;
+  color: #33333c;
+}
+.vnew-brief-cut-body {
+  margin-top: 8px;
+}
+.vnew-brief-field {
+  margin-bottom: 8px;
+}
+.vnew-prompt-details {
+  margin-top: 8px;
+  border-top: 1px dashed #d8d8e0;
+  padding-top: 6px;
+}
+.vnew-prompt-summary {
+  cursor: pointer;
+  font-size: 12px;
+  color: #5a5a66;
+}
+.vnew-prompt-pre {
+  margin: 6px 0 0;
+  padding: 8px 10px;
+  background: #1e1e26;
+  color: #e8e8ef;
+  border-radius: 6px;
+  font-size: 11.5px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 320px;
+  overflow: auto;
+}

@@ -1647,14 +1647,14 @@
     return false;
   }
 
-  /* opening 이 아직이거나 어떤 구간이 preparing/queued/waiting(제출 직전)이면 빠른 폴링. */
+  /* opening 이 아직이거나 어떤 칸이 preparing/queued/waiting(제출 직전)이면 빠른 폴링. */
   function genBusyFast(gen) {
     var opening = gen.opening || {};
     if (opening.status && opening.status !== "done" && opening.status !== "failed") return true;
-    var segments = gen.segments || [];
-    for (var i = 0; i < segments.length; i++) {
-      var r = (segments[i].real || {}).status;
-      var w = (segments[i].webtoon || {}).status;
+    var cells = (gen.units && gen.units.length) ? gen.units : (gen.segments || []);
+    for (var i = 0; i < cells.length; i++) {
+      var r = (cells[i].real || {}).status;
+      var w = (cells[i].webtoon || {}).status;
       if (r === "preparing" || r === "queued" || r === "waiting") return true;
       if (w === "preparing" || w === "queued" || w === "waiting") return true;
     }
@@ -4620,6 +4620,8 @@
 
     if (!gen.status || gen.status === "none") {
       var previz = plan.previz || {};
+      // 촬영 지시서 카드(승인 후). 진행 표시 → 완료되면 컷별 접이식.
+      host.appendChild(shotBriefCard(previz, showError));
       if (previz.recordedAll) {
         host.appendChild(
           el("p", "vnew-hint", "프리비즈 녹화가 끝났습니다. 이 녹화를 바탕으로 실사·웹툰 영상을 만듭니다.")
@@ -4685,10 +4687,10 @@
     }
     host.appendChild(statusBar);
 
-    // --- 안내: 프리비즈 기반(설계자 2026-10-21) ---
+    // --- 안내: 프리비즈 기반(설계자 2026-10-21 · 컷 단위 2026-10-22) ---
     if (gen.mode === "previz") {
       host.appendChild(
-        el("p", "vnew-hint", "프리비즈를 바탕으로 실사와 웹툰 그림체를 각각 만듭니다. 구간마다 프리비즈 미리보기 옆에 실사·웹툰 결과가 나옵니다.")
+        el("p", "vnew-hint", "프리비즈를 바탕으로 실사와 웹툰 그림체를 각각 만듭니다. 컷마다 프리비즈 미리보기 옆에 실사·웹툰 결과가 나옵니다.")
       );
     }
 
@@ -4700,8 +4702,199 @@
       host.appendChild(openingCard(gen.opening || {}));
     }
 
-    // --- 구간 타임라인 ---
-    host.appendChild(segmentTimeline(gen.segments || [], showError, gen.mode || ""));
+    // --- 컷/구간 타임라인 ---
+    if (gen.units && gen.units.length) {
+      host.appendChild(cutTimeline(gen.units, showError));
+    } else {
+      host.appendChild(segmentTimeline(gen.segments || [], showError, gen.mode || ""));
+    }
+  }
+
+  /* 촬영 지시서 카드(설계자 2026-10-22, ⑤). 진행 표시 → 완료되면 장소 SETTING 1회 + 컷마다 접이식.
+     [촬영 지시서 다시 만들기](POST /previz/brief). */
+  function shotBriefCard(previz, showError) {
+    var brief = (previz || {}).shotBrief || {};
+    var card = el("section", "panel vnew-brief-card");
+    var head = el("div", "vnew-sec-head");
+    head.appendChild(el("h2", "vnew-sec-title", "촬영 지시서"));
+    head.appendChild(
+      el("span", "vnew-badge-gen is-" + briefBadge(brief.status), briefStatusLabel(brief.status))
+    );
+    card.appendChild(head);
+    card.appendChild(
+      el("p", "vnew-hint", "영상 모델에게 보낼 촬영 전문 언어(샷·블로킹·연기·배경·대사)입니다. 프리비즈를 다시 승인하면 다시 만듭니다.")
+    );
+
+    if (brief.status === "running") {
+      var track = el("div", "vnew-progress-track");
+      track.appendChild(el("div", "vnew-progress-fill"));
+      card.appendChild(track);
+      card.appendChild(el("p", "vnew-hint", "촬영 지시서를 만드는 중입니다…"));
+    } else if (brief.status === "failed") {
+      card.appendChild(el("p", "login-error", brief.error || "촬영 지시서 작성에 실패했습니다."));
+    } else if (brief.status === "ready") {
+      var sceneMap = brief.scene || {};
+      Object.keys(sceneMap).forEach(function (locId) {
+        var sc = el("div", "vnew-brief-scene");
+        sc.appendChild(el("div", "vnew-brief-label", "SETTING (장소)"));
+        sc.appendChild(el("p", "vnew-brief-text", sceneMap[locId] || ""));
+        card.appendChild(sc);
+      });
+      var cuts = brief.cuts || {};
+      var cutIds = Object.keys(cuts);
+      cutIds.forEach(function (cutId, idx) {
+        card.appendChild(briefCutRow(cutId, idx, cuts[cutId]));
+      });
+    } else {
+      card.appendChild(el("p", "vnew-hint", "아직 촬영 지시서가 없습니다."));
+    }
+
+    var regen = el("button", "outline-button", "촬영 지시서 다시 만들기");
+    regen.type = "button";
+    if (brief.status === "running") regen.disabled = true;
+    regen.addEventListener("click", function () {
+      regen.disabled = true;
+      api("/api/vnew/p/" + encodeURIComponent(state.projectId) + "/previz/brief", { method: "POST" })
+        .then(function (payload) {
+          state.plan = (payload && payload.plan) || state.plan;
+          loadPlan(false);
+        })
+        .catch(function (err) {
+          regen.disabled = false;
+          if (showError) showError("다시 만들지 못했습니다: " + errMessage(err));
+        });
+    });
+    card.appendChild(regen);
+    return card;
+  }
+
+  function briefBadge(status) {
+    if (status === "ready") return "completed";
+    if (status === "running") return "preparing";
+    if (status === "failed") return "failed";
+    return "waiting";
+  }
+
+  function briefStatusLabel(status) {
+    var map = { ready: "완료", running: "만드는 중", failed: "실패", none: "없음" };
+    return map[status] || "없음";
+  }
+
+  /* 컷 하나의 촬영 지시서(접이식): SHOT·BLOCKING·ACTION·MOOD·BACKGROUND·대사(영어 그대로 + 한국어 라벨). */
+  function briefCutRow(cutId, idx, brief) {
+    brief = brief || {};
+    var details = el("details", "vnew-brief-cut");
+    var summary = el("summary", "vnew-brief-cut-summary", "컷 " + (idx + 1) + " (" + cutId + ")");
+    details.appendChild(summary);
+    var body = el("div", "vnew-brief-cut-body");
+    var fields = [
+      ["SHOT (카메라)", brief.shotEn],
+      ["BLOCKING (배치)", brief.blockingEn],
+      ["ACTION (연기)", brief.actionEn],
+      ["MOOD (분위기)", brief.moodEn],
+      ["BACKGROUND (배경)", brief.backgroundEn]
+    ];
+    fields.forEach(function (f) {
+      if (!f[1]) return;
+      var row = el("div", "vnew-brief-field");
+      row.appendChild(el("span", "vnew-brief-label", f[0]));
+      row.appendChild(el("p", "vnew-brief-text", f[1]));
+      body.appendChild(row);
+    });
+    var dlg = brief.dialogue || [];
+    if (dlg.length) {
+      var drow = el("div", "vnew-brief-field");
+      drow.appendChild(el("span", "vnew-brief-label", "DIALOGUE (대사)"));
+      dlg.forEach(function (d) {
+        var line = (d.speaker || "") + ': "' + (d.lineKo || "") + '"' + (d.deliveryEn ? " — " + d.deliveryEn : "");
+        drow.appendChild(el("p", "vnew-brief-text", line));
+      });
+      body.appendChild(drow);
+    }
+    details.appendChild(body);
+    return details;
+  }
+
+  /* 컷 단위 타임라인(설계자 2026-10-22, ⑤): 컷마다 한 줄 — 번호·초, 프리비즈 미리보기·실사·웹툰. */
+  function cutTimeline(units, showError) {
+    var section = el("section", "panel vnew-seg-timeline");
+    section.appendChild(el("h2", "vnew-sec-title", "컷별 진행"));
+    if (!units.length) {
+      section.appendChild(el("p", "vnew-hint", "컷이 없습니다."));
+      return section;
+    }
+    var list = el("div", "vnew-seg-rows");
+    units.forEach(function (unit, index) {
+      list.appendChild(cutRow(unit, index, showError));
+    });
+    section.appendChild(list);
+    return section;
+  }
+
+  function cutRow(unit, index, showError) {
+    var row = el("div", "vnew-seg-row");
+    var meta = el("div", "vnew-seg-meta");
+    meta.appendChild(el("span", "vnew-seg-no", "컷 " + (index + 1)));
+    meta.appendChild(el("span", "vnew-seg-seconds", (Math.round((unit.seconds || 0) * 10) / 10) + "초"));
+    meta.appendChild(el("span", "vnew-seg-cuts", unit.cutId || "-"));
+    row.appendChild(meta);
+
+    var cells = el("div", "vnew-seg-cells has-previz");
+    cells.appendChild(previzPreviewCell(unit));
+    VARIANTS.forEach(function (variant) {
+      cells.appendChild(cutCell(unit, variant, showError));
+    });
+    row.appendChild(cells);
+    return row;
+  }
+
+  function cutCell(unit, variant, showError) {
+    var v = (unit[variant.key] || {});
+    var cell = el("div", "vnew-seg-cell");
+    var head = el("div", "vnew-seg-cell-head");
+    head.appendChild(el("span", "vnew-seg-cell-title", variant.title));
+    head.appendChild(
+      el("span", "vnew-badge-gen is-" + (v.status || "waiting"), genStatusLabel(v.status || "waiting"))
+    );
+    cell.appendChild(head);
+
+    if (v.status === "completed" && v.videoUrl) {
+      var video = el("video", "vnew-seg-video");
+      video.src = v.videoUrl;
+      video.controls = true;
+      video.setAttribute("playsinline", "");
+      cell.appendChild(video);
+    } else if (v.status === "failed") {
+      cell.appendChild(el("p", "login-error vnew-seg-error", v.error || "실패했습니다."));
+      var retry = el("button", "outline-button vnew-seg-retry", variant.key === "real" ? "실사 다시" : "웹툰 다시");
+      retry.type = "button";
+      retry.addEventListener("click", function () {
+        retry.disabled = true;
+        api("/api/vnew/p/" + encodeURIComponent(state.projectId) + "/generate/retry", {
+          method: "POST",
+          body: JSON.stringify({ segId: unit.id, variant: variant.key })
+        })
+          .then(function () {
+            loadPlan(false);
+          })
+          .catch(function (err) {
+            retry.disabled = false;
+            if (showError) showError("다시 시도하지 못했습니다: " + errMessage(err));
+          });
+      });
+      cell.appendChild(retry);
+    }
+
+    // 보낸 지시서 보기(접이식) — promptEn 이 있으면.
+    if (v.promptEn) {
+      var details = el("details", "vnew-prompt-details");
+      var summary = el("summary", "vnew-prompt-summary", "보낸 지시서 보기" + (v.promptBytes ? " (" + v.promptBytes + " bytes)" : ""));
+      details.appendChild(summary);
+      var pre = el("pre", "vnew-prompt-pre", v.promptEn);
+      details.appendChild(pre);
+      cell.appendChild(details);
+    }
+    return cell;
   }
 
   /* 맨 위 결과 두 열: finalReal · finalWebtoon. 둘 다 done 이면 각 열 아래 [이 영상으로 사운드 편집]. */

@@ -133,6 +133,14 @@ VNEW_GEN_PARALLEL = _int("VNEW_GEN_PARALLEL", 4)
 # 이상이어야 승인된다(force 로 넘길 수 있다). match 가 null(판정 불가)인 컷도 낮은 컷으로 센다.
 VNEW_PREVIZ_APPROVE_MIN = _float("VNEW_PREVIZ_APPROVE_MIN", 0.7)
 
+# --- ⑤ 촬영 지시서(shot brief) (설계자 2026-10-22) ---
+# 프리비즈 승인 직후, 장소마다 1회 호출해 그 장소 컷들의 "촬영 전문 언어" 지시서를 쓴다. 작성 모델은
+# 설계와 같은 체인(Astra 먼저, 실패 시 Claude 분석 체인). 장면·배경·연기·대사 연기를 영어로 섬세히.
+BRIEF_MODEL = os.getenv("VNEW_BRIEF_MODEL", ASTRA_MODEL)
+BRIEF_FALLBACK_MODEL = os.getenv("VNEW_BRIEF_FALLBACK_MODEL", ANALYZE_FALLBACK_MODEL)
+# 촬영 지시서 작성 task 가 이 시간을 넘게 running 이면 멈춘 것으로 본다(조회 때 failed).
+BRIEF_STALL_S = _int("VNEW_BRIEF_STALL_S", 1800)
+
 
 def previz_edit_usd(seconds: float | None = None) -> float:
     """프리비즈 edit 1건(한 그림체·한 구간) 금액 = 초 × 단가.
