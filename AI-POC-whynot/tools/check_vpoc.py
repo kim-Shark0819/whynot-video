@@ -6050,6 +6050,144 @@ def check_vnew_generate() -> None:
             genmod.vnew_settings.VNEW_GEN_PARALLEL = saved_parallel
             _fal_mod.poll = fake_fal_poll
 
+        # ---- (gr-a)~(gr-d) 취소·실패·프리비즈 변경 후 재생성(설계자 2026-10-22, 지시서 060) ----
+        # 제품: 한 번 gen 이 생기면(cancelled/failed/partial/done) 새로 시작할 길이 없던 버그를 고쳤다.
+        #   · _new_previz_gen 이 previzRevision·briefUpdatedAt 을 저장
+        #   · gen_view.stale(프리비즈 revision/녹화 키가 바뀜)
+        #   · start_generate 가 진행 중이 아닌 이전 gen 을 genHistory 로 밀고 교체
+        #   · retry_segment 가 cancelled 칸도 다시 queued
+        # 외부 호출은 위 (k)~(t) 와 같은 가짜를 그대로 쓴다(유료 호출 없음).
+
+        # (gr-a) cancelled gen 이 있는 상태에서 POST /generate → 202·새 genId·genHistory 에 이전 gen.
+        #        이전 gen 은 '취소된 상태'를 직접 심어 둔다(드라이버 없이 결정적 — InProgress 로 돌리면
+        #        데몬 드라이버가 폴링을 멈추지 않아 검사가 느려지고 스레드가 샌다). poll 은 Completed 라
+        #        새 gen 은 바로 끝난다.
+        pid_a = "prj_gen_gra"
+        _make_plan(owner, pid_a, segments=two_segs, total=12)
+        first_gen_id = "g_cancelled_prior"
+
+        def _seed_cancelled(d):
+            g = genmod._new_previz_gen(d)
+            g["genId"] = first_gen_id
+            g["status"] = "cancelled"
+            for u in g.get("units") or []:
+                u["real"]["status"] = "cancelled"
+                u["webtoon"]["status"] = "cancelled"
+            d["gen"] = g
+
+        planmod.mutate_plan(owner, pid_a, _seed_cancelled)
+        aplan_c, _ = planmod.load_plan(owner, pid_a)
+        if (aplan_c.get("gen") or {}).get("status") != "cancelled":
+            bad.append(f"(gr-a) 전제: 심은 gen.status 가 cancelled 가 아닙니다: {(aplan_c.get('gen') or {}).get('status')}")
+        # cancelled 인데 POST /generate 가 다시 된다(202·새 genId).
+        aplan2, _ = planmod.load_plan(owner, pid_a)
+        esta2 = genmod.estimate(aplan2)
+        resp = client.post(f"/api/vnew/p/{pid_a}/generate", json={"confirmUsd": esta2["totalUsd"]})
+        if resp.status_code != 202:
+            bad.append(f"(gr-a) cancelled 뒤 재생성이 202 가 아닙니다: {resp.status_code} {resp.get_json()}")
+        _join_drivers()
+        aplan3, _ = planmod.load_plan(owner, pid_a)
+        new_gen = aplan3.get("gen") or {}
+        if not new_gen.get("genId") or new_gen.get("genId") == first_gen_id:
+            bad.append(f"(gr-a) 재생성이 새 genId 를 만들지 않았습니다: {new_gen.get('genId')} vs {first_gen_id}")
+        history = aplan3.get("genHistory") or []
+        if not any(h.get("genId") == first_gen_id for h in history):
+            bad.append(f"(gr-a) genHistory 에 이전 gen({first_gen_id})이 없습니다: {[h.get('genId') for h in history]}")
+        # genHistory 항목은 요약 키만(genId·status·createdAt·finalReal/finalWebtoon).
+        prior = next((h for h in history if h.get("genId") == first_gen_id), {})
+        for key in ("genId", "status", "createdAt", "finalReal", "finalWebtoon"):
+            if key not in prior:
+                bad.append(f"(gr-a) genHistory 항목에 {key} 가 없습니다: {sorted(prior.keys())}")
+        if prior.get("status") != "cancelled":
+            bad.append(f"(gr-a) genHistory 의 이전 gen status 가 cancelled 가 아닙니다: {prior.get('status')}")
+        if len(history) > 3:
+            bad.append(f"(gr-a) genHistory 가 최근 3개를 넘습니다: {len(history)}")
+        # 이전 gen 의 원장·파일은 건드리지 않는다 — genHistory 는 요약(키 문자열)만 담는다(units·segments 없음).
+        if "units" in prior or "segments" in prior:
+            bad.append("(gr-a) genHistory 항목이 요약이 아니라 전체 gen 을 담았습니다")
+
+        # (gr-b) gen 생성 뒤 previz.revision 변경 → gen_view.stale True. 같은 revision 이면 False.
+        pid_b = "prj_gen_grb"
+        _make_plan(owner, pid_b, segments=two_segs, total=12)
+        gid_b = _fresh_previz_gen(owner, pid_b)
+        bplan, _ = planmod.load_plan(owner, pid_b)
+        view_b0 = genmod.gen_view(owner, pid_b, bplan)
+        if (view_b0 or {}).get("stale") is not False:
+            bad.append(f"(gr-b) 같은 revision 인데 stale 이 False 가 아닙니다: {(view_b0 or {}).get('stale')}")
+        # previz.revision 을 올린다(다시 설계·녹화한 상황).
+
+        def _bump_rev(d):
+            d.setdefault("previz", {})["revision"] = int((d.get("previz") or {}).get("revision") or 0) + 1
+
+        planmod.mutate_plan(owner, pid_b, _bump_rev)
+        bplan2, _ = planmod.load_plan(owner, pid_b)
+        view_b1 = genmod.gen_view(owner, pid_b, bplan2)
+        if (view_b1 or {}).get("stale") is not True:
+            bad.append(f"(gr-b) revision 이 바뀌었는데 stale 이 True 가 아닙니다: {(view_b1 or {}).get('stale')}")
+        # gen 에 저장된 previzRevision 이 생성 시점 값(0)인지도 확인(교체 전).
+        if (bplan2.get("gen") or {}).get("previzRevision") != 0:
+            bad.append(f"(gr-b) gen.previzRevision 이 생성 시점 값(0)이 아닙니다: {(bplan2.get('gen') or {}).get('previzRevision')}")
+        # 옛 gen(previzRevision 없음)은 녹화 키 비교로 stale 을 본다.
+        pid_b2 = "prj_gen_grb2"
+        _make_plan(owner, pid_b2, segments=two_segs, total=12)
+        b2plan, _ = planmod.load_plan(owner, pid_b2)
+        b2plan["gen"] = {
+            "genId": "g_old_stale",
+            "mode": "previz",
+            "status": "cancelled",
+            "units": [
+                {"id": "c1", "cutId": "c1", "recSegId": "seg1", "recordingKey": "rec/old/seg1.mp4",
+                 "real": {"status": "cancelled"}, "webtoon": {"status": "cancelled"}},
+            ],
+            "segments": [],
+            "finalReal": {"status": "none", "key": "", "error": ""},
+            "finalWebtoon": {"status": "none", "key": "", "error": ""},
+            "selected": None,
+        }
+        planmod.save_plan(owner, pid_b2, b2plan)
+        b2plan2, _ = planmod.load_plan(owner, pid_b2)
+        view_b2 = genmod.gen_view(owner, pid_b2, b2plan2)
+        # 현재 녹화 키(rec/prj_gen_grb2/seg1.mp4)와 옛 recordingKey(rec/old/seg1.mp4)가 달라 stale True.
+        if (view_b2 or {}).get("stale") is not True:
+            bad.append(f"(gr-b) 옛 gen 녹화 키가 바뀌었는데 stale 이 True 가 아닙니다: {(view_b2 or {}).get('stale')}")
+
+        # (gr-c) cancelled 칸 retry → queued, gen.status running.
+        #        취소된 gen 을 직접 심고, retry_segment 를 직접 불러 '뮤테이트 직후'(드라이버가 상태를
+        #        바꾸기 전) 결과를 본다 — queued·running 이 결정적이다. poll 은 Completed 라 그 뒤 드라이버는
+        #        바로 끝난다(InProgress 로 돌려 데몬이 폴링을 멈추지 않는 문제를 피한다).
+        pid_c = "prj_gen_grc"
+        _make_plan(owner, pid_c, segments=two_segs, total=12)
+
+        def _seed_cancelled_c(d):
+            g = genmod._new_previz_gen(d)
+            g["genId"] = "g_cancelled_c"
+            g["status"] = "cancelled"
+            for u in g.get("units") or []:
+                u["real"]["status"] = "cancelled"
+                u["webtoon"]["status"] = "cancelled"
+            d["gen"] = g
+
+        planmod.mutate_plan(owner, pid_c, _seed_cancelled_c)
+        cplan, _ = planmod.load_plan(owner, pid_c)
+        cgen = cplan.get("gen") or {}
+        unit_c1 = next((u for u in cgen.get("units") or [] if u.get("id") == "c1"), {})
+        if (unit_c1.get("real") or {}).get("status") != "cancelled":
+            bad.append(f"(gr-c) 전제: c1 실사가 cancelled 가 아닙니다: {(unit_c1.get('real') or {}).get('status')}")
+        # retry_segment 직접 호출 → 반환된 gen(뮤테이트 직후)이 queued·running 이어야 한다.
+        retried = genmod.retry_segment(owner, pid_c, "c1", "real")
+        if (retried or {}).get("status") != "running":
+            bad.append(f"(gr-c) retry 직후 gen.status 가 running 이 아닙니다: {(retried or {}).get('status')}")
+        unit_c1r = next((u for u in (retried or {}).get("units") or [] if u.get("id") == "c1"), {})
+        if (unit_c1r.get("real") or {}).get("status") != "queued":
+            bad.append(f"(gr-c) retry 직후 c1 실사가 queued 가 아닙니다: {(unit_c1r.get('real') or {}).get('status')}")
+        # retry_segment 는 드라이버를 깨운다 — poll Completed 라 바로 끝난다. 스레드를 비운다.
+        _join_drivers()
+
+        # (gr-d) node --check 대상(check_js)에 vnew.js 가 있고, "새로 영상 만들기" 버튼 라벨이 있다.
+        vnew_js = (PUBLIC / "vnew.js").read_text(encoding="utf-8")
+        if "새로 영상 만들기" not in vnew_js:
+            bad.append("(gr-d) vnew.js 에 '새로 영상 만들기' 버튼 라벨이 없습니다")
+
         _settings.FAL_KEY = saved_fal_key
 
 
@@ -6089,6 +6227,8 @@ def check_vnew_generate() -> None:
             " (r)상한4 첫 순회 4칸 동시 submitted·제출4·원장4 (s)상한2 첫 순회 2칸·다음 순회 나머지"
             " (t)경합에서도 칸별 제출 1회"
             " (np-a)ASSETS 첫 줄·@Video1·@Element1/@Image·CONTINUITY 보강(Do not add any action·identical to the reference·skin texture)·긴 입력에서도 유지·≤2500바이트"
+            " (gr-a)cancelled 뒤 재생성 202·새 genId·genHistory (gr-b)revision 변경→stale·옛 gen 녹화 키 비교"
+            " (gr-c)cancelled 칸 retry→running·재진행 (gr-d)새로 영상 만들기 라벨"
         )
 
 
