@@ -695,6 +695,12 @@ _DESIGN_SYSTEM = (
     "subject the camera looks (front = the subject faces the camera; three_quarter/side/back/over_shoulder "
     "turn the camera around the subject). Keep the room, props and actor positions consistent across cuts — "
     "only the camera changes unless the script says someone moves. "
+    "When one actor speaks to another, keep the speaker's head and eyes turned toward the listener for "
+    "the whole line unless the panel shows otherwise (use facingDeg and gesture='turn_head_to_other' "
+    "with gestureTarget set to the listener). Do not invent architecture (stairs, mezzanines, walls or "
+    "ceilings) that the location references do not show; distinguish indoor/outdoor, terrace/balcony, "
+    "doors, railings and whether there is a ceiling. Avoid meaningless camera shake or excessive "
+    "rotation; keep each cut's camera steady as the previz cut. "
     "Write Korean for notesKo. Do not add text outside the tool."
 )
 
@@ -1062,7 +1068,7 @@ def run_design(owner: str, pid: str, task_id: str) -> None:
 
         # 2.5) 외형(머리카락 색)·연기(gesture·gestureTarget)를 장면 인물·timeline 에 채운다.
         _apply_appearance(owner, scenes, chars)
-        _apply_gestures(scenes, groups, grammar_by_cut)
+        _apply_gestures(scenes, groups, grammar_by_cut, plan)
 
         # 3) camera: 장소마다 scene_line → 컷마다 place_cut. (progress: camera, total=컷 수)
         _set_progress(owner, pid, task_id, step="camera", done=0, total=total_cuts)
@@ -1316,17 +1322,26 @@ def _apply_appearance(owner: str, scenes: list[dict], chars: list[dict]) -> None
                 actor["hairColor"] = HAIR_COLOR_DEFAULT
 
 
-def _apply_gestures(scenes: list[dict], groups: list[dict], grammar_by_cut: dict) -> None:
+def _apply_gestures(scenes: list[dict], groups: list[dict], grammar_by_cut: dict, plan: dict | None = None) -> None:
     """컷마다 보이는 인물의 timeline actor gesture·gestureTarget 을 채운다.
 
     - grammar.actions 가 있으면 그 컷 action(name→actor)으로 gesture·target 을 쓴다. target 은 상대
       actor id(이름 일치). 말하는 컷(speaking)은 그대로 둔다.
     - grammar.actions 가 없으면(옛 캐시) 콘티 cut.characters[].actionEn 키워드 규칙으로 배정한다.
+    - 대사가 있는 컷에서 말하는 인물의 timeline actor 에 다른 제스처가 없으면(위에서 none 이면)
+      gesture='turn_head_to_other', gestureTarget=그 컷의 상대(듣는 사람)로 채운다(설계자 2026-10-22,
+      054 제스처 재사용). 말하는 인물은 _cut_lines 의 speaker 로 찾고, 상대는 그 컷 timeline 의 다른
+      인물로 본다(여럿이면 첫 번째).
     """
     cut_meta: dict[str, dict] = {}
     for group in groups or []:
         for cut in group.get("cuts") or []:
             cut_meta[str(cut.get("cutId") or "")] = cut
+
+    conti_cut_by_id: dict[str, dict] = {}
+    if isinstance(plan, dict):
+        for c in (plan.get("conti") or {}).get("cuts") or []:
+            conti_cut_by_id[str(c.get("id") or "")] = c
 
     for scene in scenes or []:
         # 이 장면의 이름→actor id(제스처 target 해석용).
@@ -1373,6 +1388,35 @@ def _apply_gestures(scenes: list[dict], groups: list[dict], grammar_by_cut: dict
                     target_id = id_by_name.get(target_name.strip()) if target_name and target_name != "none" else None
                     if target_id and target_id != aid:
                         ca["gestureTarget"] = target_id
+
+            # 서버 규칙(설계자 2026-10-22): 대사가 있는 컷에서 말하는 인물에 다른 제스처가 없으면
+            # 상대(듣는 사람)를 바라보게 한다. 말하는 인물 = _cut_lines 의 speaker, 상대 = 그 컷
+            # timeline 의 다른 actor(첫 번째).
+            conti_cut = conti_cut_by_id.get(cut_id)
+            if not conti_cut:
+                continue
+            from . import generate as gen_mod  # noqa: PLC0415 — 순환 import 피하려고 함수 안에서
+            speaker_names = {
+                str(line.get("speaker") or "").strip()
+                for line in gen_mod._cut_lines(plan, conti_cut)
+                if not line.get("silent") and str(line.get("speaker") or "").strip()
+            }
+            if not speaker_names:
+                continue
+            cut_actor_ids = [str(ca.get("id") or "") for ca in (cut.get("actors") or [])]
+            for ca in cut.get("actors") or []:
+                aid = str(ca.get("id") or "")
+                nm = name_by_id.get(aid, "")
+                if nm not in speaker_names:
+                    continue
+                # 이미 다른 제스처가 붙었으면 두지 않는다.
+                if str(ca.get("gesture") or "none") not in ("", "none"):
+                    continue
+                listener_id = next((other for other in cut_actor_ids if other and other != aid), "")
+                if not listener_id:
+                    continue
+                ca["gesture"] = "turn_head_to_other"
+                ca["gestureTarget"] = listener_id
 
 
 def _place_cameras(owner, pid, scenes, groups, grammar_by_cut, overrides, *, task_id="") -> dict:

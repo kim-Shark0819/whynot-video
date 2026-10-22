@@ -78,6 +78,26 @@ _REFERENCE_FIELDS = (
     "ref_image_urls",
 )
 _AUDIO_FIELDS = ("generate_audio", "enable_audio")
+# video-to-video 입력 영상 필드 후보(설계자 2026-10-22, 프리비즈 방식).
+_VIDEO_FIELDS = ("video_url", "reference_video_url", "input_video_url", "video")
+# 인물별 참고(마네킹 색 ↔ 캐릭터)를 담는 elements 배열(각 항목에 정면 이미지 필드가 있다).
+_ELEMENTS_FIELDS = ("elements",)
+_ELEMENT_ITEM_IMAGE_FIELDS = (
+    "frontal_image_url",
+    "image_url",
+    "reference_image_url",
+    "front_image_url",
+)
+# 참고 이미지 목록(배열) 필드 후보. _REFERENCE_FIELDS 와 같은 후보를 쓰되 imageListField 로 따로 뽑는다.
+_IMAGE_LIST_FIELDS = (
+    "image_urls",
+    "reference_image_urls",
+    "reference_images",
+    "ref_image_urls",
+)
+_KEEP_AUDIO_FIELDS = ("keep_audio",)
+# imageListField 의 maxItems 를 못 찾을 때 기본 상한.
+DEFAULT_IMAGE_LIST_MAX = 4
 
 
 # ---------------------------------------------------------------- 모델 ID / 헬퍼
@@ -211,6 +231,13 @@ def register(endpoint: str, *, added_by: str = "") -> dict:
     endpoint = str(endpoint or "").strip()
     if not endpoint:
         raise VpocError("fal.register", "BadEndpoint", "endpoint_id 가 비어 있습니다.", 400)
+    if settings.is_denied_endpoint(endpoint):
+        raise VpocError(
+            "fal.register",
+            "Denied",
+            "설계자 지시로 사용이 금지된 모델입니다.",
+            400,
+        )
 
     meta = model_meta(endpoint)
     # OpenAPI 를 먼저 받는다 — 여기 info.x-fal-metadata 가 category·thumbnail 을 확실히 담는다.
@@ -687,6 +714,61 @@ def _audio_field(props: dict) -> str:
     return ""
 
 
+def _keep_audio_field(props: dict) -> str:
+    """keep_audio 류 boolean 필드(video-to-video). 없으면 빈 문자열."""
+    for name in _KEEP_AUDIO_FIELDS:
+        spec = _unwrap(props.get(name))
+        if spec.get("type") == "boolean":
+            return name
+    return ""
+
+
+def _array_item_props(spec: dict, root: dict) -> dict:
+    """배열 필드의 items 스키마 properties(ref 풀어서). 배열이 아니면 빈 dict."""
+    spec = _unwrap(spec)
+    if spec.get("type") != "array":
+        return {}
+    items = _deref(spec.get("items") or {}, root)
+    props = items.get("properties") if isinstance(items, dict) else None
+    return props if isinstance(props, dict) else {}
+
+
+def _elements_field(props: dict, root: dict) -> str:
+    """elements 배열 필드(각 항목에 정면 이미지 필드가 있는 배열). 없으면 빈 문자열.
+
+    설계자 2026-10-22: Kling O3 처럼 인물별 참고를 elements[{frontal_image_url, ...}] 로 받는
+    모델을 가린다. 후보 이름(_ELEMENTS_FIELDS) 중 배열이고 item properties 에 정면 이미지 필드가
+    있는 것을 고른다.
+    """
+    for name in _ELEMENTS_FIELDS:
+        if name not in props:
+            continue
+        item_props = _array_item_props(props.get(name), root)
+        if any(field in item_props for field in _ELEMENT_ITEM_IMAGE_FIELDS):
+            return name
+    return ""
+
+
+def _image_list_field(props: dict) -> str:
+    """참고 이미지 목록(문자열 배열) 필드. 없으면 빈 문자열."""
+    for name in _IMAGE_LIST_FIELDS:
+        spec = _unwrap(props.get(name))
+        if spec.get("type") == "array":
+            return name
+    return ""
+
+
+def _image_list_max(props: dict, field: str) -> int:
+    """imageListField 의 maxItems(없으면 DEFAULT_IMAGE_LIST_MAX)."""
+    if not field:
+        return DEFAULT_IMAGE_LIST_MAX
+    spec = _unwrap(props.get(field))
+    value = spec.get("maxItems")
+    if isinstance(value, int) and not isinstance(value, bool) and value > 0:
+        return value
+    return DEFAULT_IMAGE_LIST_MAX
+
+
 def extract_caps(openapi: dict, endpoint: str = "") -> tuple[dict | None, str]:
     """OpenAPI 입력 스키마에서 우리가 쓰는 필드를 뽑아 caps 로 만든다.
 
@@ -713,11 +795,34 @@ def extract_caps(openapi: dict, endpoint: str = "") -> tuple[dict | None, str]:
     aspect_ratios = [str(item) for item in _enum_of(props, "aspect_ratio")]
     audio_field = _audio_field(props)
 
+    # video-to-video(프리비즈 방식, 설계자 2026-10-22) 필드.
+    video_field = _first_present(props, _VIDEO_FIELDS)
+    elements_field = _elements_field(props, openapi)
+    image_list_field = _image_list_field(props)
+    image_list_max = _image_list_max(props, image_list_field)
+    keep_audio_field = _keep_audio_field(props)
+    # 프리비즈(영상 입력 → 그림체)로 쓸 수 있는 모델: 영상 입력 필드 + 프롬프트가 둘 다 있어야 한다.
+    previz_capable = bool(video_field and prompt_field)
+
     required = input_schema.get("required")
     required = [str(name) for name in required] if isinstance(required, list) else []
 
     # 우리가 채울 수 있는 필드 집합. required 가 이 밖이면 등록은 되지만 available=False.
-    fillable = {name for name in (prompt_field, start_field, end_field, reference_field, audio_field) if name}
+    fillable = {
+        name
+        for name in (
+            prompt_field,
+            start_field,
+            end_field,
+            reference_field,
+            audio_field,
+            video_field,
+            elements_field,
+            image_list_field,
+            keep_audio_field,
+        )
+        if name
+    }
     fillable |= {"duration", "resolution", "aspect_ratio"}
     # 스키마에 default 가 있는 required 는 우리가 안 보내도 fal 이 기본값을 쓰므로 충족으로 본다
     # (예: MiniMax 의 prompt_expansion_mode 는 required 이지만 default "balanced").
@@ -746,6 +851,13 @@ def extract_caps(openapi: dict, endpoint: str = "") -> tuple[dict | None, str]:
         "resolutionValues": resolution_values,
         "aspectRatios": aspect_ratios,
         "audioField": audio_field,
+        # video-to-video(프리비즈 방식) 필드(설계자 2026-10-22).
+        "videoField": video_field,
+        "elementsField": elements_field,
+        "imageListField": image_list_field,
+        "imageListMax": image_list_max,
+        "keepAudioField": keep_audio_field,
+        "previzCapable": previz_capable,
         "requiredFields": required,
         "available": not unmet,
         "reason": ("채울 수 없는 필수 입력: " + ", ".join(unmet)) if unmet else "",

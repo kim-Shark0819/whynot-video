@@ -483,6 +483,9 @@ _DESIGN_SYSTEM = (
     "from (e.g. 'main light comes from the north-wall windows, soft daylight'). propsEn lists free-standing "
     "props as objects {labelEn, wall, sizeM} where wall is one of north/east/south/west/center. "
     "Ignore people and speech bubbles — describe only the room itself. "
+    "Do not add stairs, mezzanines, walls or ceilings that the references do not show; distinguish "
+    "indoor/outdoor, terrace/balcony, doors, railings and whether there is a ceiling; estimate size "
+    "from people and doors. "
     "Write plain English for every *En field. Do not add text outside the tool."
 )
 
@@ -872,6 +875,9 @@ _FACTS_SYSTEM = (
     "If a wall is never shown in any panel, INFER it from the walls you did see — same wall material and "
     "colour, same era, same country — and set that wall's estimated=true. Never leave a wall with no "
     "objects and no material: fill it with a plausible estimate rather than leaving it blank. "
+    "Do not add stairs, mezzanines, walls or ceilings that the references do not show; distinguish "
+    "indoor/outdoor, terrace/balcony, doors, railings and whether there is a ceiling; estimate size "
+    "from people and doors. "
     "Describe only the room; ignore people and speech bubbles. Write plain English for every *En field."
 )
 

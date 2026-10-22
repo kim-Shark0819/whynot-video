@@ -124,7 +124,7 @@ def new_plan() -> dict:
             "images": [],  # [{fileId,name,width,height}]
             "order": [],  # [fileId...]
             "totalSeconds": 15,
-            "videoModel": default_video_model(),
+            "videoModel": default_previz_model(),
             "notes": "",
             "characters": [],  # [{charId, roleName}]
         },
@@ -278,8 +278,7 @@ def available_models() -> list[dict]:
     """고를 수 있는 영상 모델 목록(ark.choices 중 available).
 
     각 모델에 realStartImage 를 붙인다(설계자 2026-10-20): Seedance(byteplus)는 실존 인물 필터로
-    실사 시작 이미지를 거절하므로 false, 그 밖(Luma=bedrock · fal)은 true. 화면이 false 모델을
-    고르면 경고하고, generate 선행 조건이 false 모델을 거절한다.
+    실사 시작 이미지를 거절하므로 false, 그 밖(Luma=bedrock · fal)은 true. (옛 흐름 호환 — 회귀 방지.)
     """
     models = []
     for item in vpoc_ark.choices():
@@ -297,7 +296,7 @@ def _real_start_image(model_item: dict) -> bool:
 
 
 def default_video_model() -> str:
-    """새 계획·되돌림의 기본 영상 모델. realStartImage=true 인 available 모델 중 첫 번째,
+    """ark.choices 기준 기본 영상 모델(옛 흐름 호환). realStartImage=true 인 available 중 첫 번째,
     없으면 ark.DEFAULT_MODEL(설계자 2026-10-20).
     """
     for item in available_models():
@@ -310,15 +309,125 @@ def _model_ids() -> list[str]:
     return [str(item.get("id")) for item in available_models()]
 
 
+# ---------------------------------------------------------------- ① 프리비즈 영상 모델(설계자 2026-10-22)
+#
+# 영상만들기_신규 ①의 영상 모델은 프리비즈 방식 전용이다(영상 입력을 받는 모델만). 목록 = 기본
+# (Kling O3 edit, 첫 번째·추천) + 등록된 previzCapable fal 모델. 옛 available_models(ark.choices 기반)
+# 는 회귀를 위해 그대로 두고, 아래 함수들을 ① 화면·검증·생성에서 쓴다.
+
+
+def vnew_settings_module():
+    """vnew.settings 를 늦게 import(순환 참조 피하기)."""
+    from . import settings as vnew_settings  # noqa: PLC0415
+
+    return vnew_settings
+
+
+def default_previz_model() -> str:
+    """새 계획·되돌림의 기본 프리비즈 영상 모델 id = "fal:<VNEW_PREVIZ_EDIT_MODEL>"."""
+    from ..vpoc import settings as vpoc_settings  # noqa: PLC0415
+
+    return vpoc_settings.FAL_ID_PREFIX + str(vnew_settings_module().VNEW_PREVIZ_EDIT_MODEL or "")
+
+
+def _previz_price_row(model_id: str) -> dict:
+    """프리비즈 모델 한 행의 단가·참고 방식 정보(화면 표시용)."""
+    from ..vpoc import fal as vpoc_fal  # noqa: PLC0415
+
+    vnew_settings = vnew_settings_module()
+    endpoint = str(model_id).split(":", 1)[-1]
+    # 단가: 등록 모델이면 pricing_for, 아니면 fal pricing(endpoint). 초당 USD 만 표시한다.
+    unit_price = 0.0
+    price_known = False
+    price = vpoc_fal.pricing_for(model_id) if vpoc_fal.find(model_id) else vpoc_fal.pricing(endpoint)
+    if price and str(price.get("unit") or "").lower() == "seconds":
+        unit_price = float(price.get("unitPrice") or 0.0)
+        price_known = unit_price > 0
+    if not price_known and model_id == default_previz_model():
+        # 기본 모델은 설정 기본 단가(초당)를 쓴다.
+        unit_price = float(vnew_settings.VNEW_PREVIZ_EDIT_USD_PER_S)
+        price_known = True
+    return {"usdPerSecond": round(unit_price, 4), "priceKnown": price_known}
+
+
+def _ref_mode(caps: dict) -> str:
+    """참고 이미지 방식: elements / imageList / none(화면 표시용)."""
+    if caps.get("elementsField"):
+        return "elements"
+    if caps.get("imageListField"):
+        return "imageList"
+    return "none"
+
+
+def previz_models() -> list[dict]:
+    """① 프리비즈 영상 모델 목록(설계자 2026-10-22).
+
+    목록 = 기본(Kling O3 edit, 항상 첫 번째, recommended) + fal 등록 모델 중 previzCapable 인 것.
+    각 행: id·label·recommended·previzCapable·refMode(elements/imageList)·usdPerSecond·priceKnown·available·reason.
+    """
+    from ..vpoc import fal as vpoc_fal  # noqa: PLC0415
+
+    default_id = default_previz_model()
+    models: list[dict] = []
+    # 1. 기본 모델(항상 첫 번째). caps 는 등록돼 있으면 쓰고, 아니면 elements 방식으로 가정.
+    default_item = vpoc_fal.find(default_id)
+    default_caps = (default_item or {}).get("caps") or {}
+    default_ref = _ref_mode(default_caps) if default_caps else "elements"
+    row = {
+        "id": default_id,
+        "label": "Kling O3 (추천)",
+        "recommended": True,
+        "previzCapable": True,
+        "refMode": default_ref,
+        "available": True,
+        "reason": "",
+    }
+    row.update(_previz_price_row(default_id))
+    models.append(row)
+
+    # 2. 등록된 fal 모델(기본과 중복 제외). previzCapable 가 아니면 '프리비즈 미지원' 으로 회색 표시.
+    for item in vpoc_fal.registered():
+        model_id = str(item.get("id") or "")
+        if not model_id or model_id == default_id:
+            continue
+        caps = item.get("caps") or {}
+        capable = bool(caps.get("previzCapable"))
+        reason = "프리비즈 미지원(영상 입력을 받지 않는 모델)"
+        if capable:
+            reason = vpoc_fal.unavailable_reason(model_id)
+        row = {
+            "id": model_id,
+            "label": "fal · " + str(item.get("label") or item.get("endpointId") or model_id),
+            "recommended": False,
+            "previzCapable": capable,
+            "refMode": _ref_mode(caps),
+            "available": capable and not reason,
+            "reason": reason,
+        }
+        row.update(_previz_price_row(model_id))
+        models.append(row)
+    return models
+
+
+def _previz_model_ids() -> set[str]:
+    """고를 수 있는(검증 통과) 프리비즈 모델 id 집합: 기본 + available previzCapable fal."""
+    ids = {default_previz_model()}
+    for item in previz_models():
+        if item.get("available") and item.get("previzCapable"):
+            ids.add(str(item.get("id")))
+    return ids
+
+
 def update_input(owner: str, pid: str, patch: dict) -> dict:
     """① 입력 저장. order·totalSeconds·videoModel·notes·characters 를 검증해 반영한다.
 
-    - totalSeconds: 1~60 정수
-    - videoModel: ark.choices() 의 available 중 하나(없으면 기본으로 되돌림)
+    - totalSeconds: 3~60 정수
+    - videoModel: 기본 프리비즈 모델 또는 등록된 previzCapable fal 모델만 허용. 모르는 모델을 보내면
+      400 BadVideoModel, 빈 값은 기본으로 되돌린다(설계자 2026-10-22).
     - order: images 의 fileId 순열(빠지거나 모르는 fileId 가 있으면 거절)
     - characters: [{charId, roleName}] — charId 는 캐릭터 만들기에서 만든 것
     """
-    model_ids = set(_model_ids())
+    model_ids = _previz_model_ids()
 
     def mutator(data: dict) -> None:
         inp = data.setdefault("input", {})
@@ -340,14 +449,14 @@ def update_input(owner: str, pid: str, patch: dict) -> dict:
 
         if "videoModel" in patch:
             model = str(patch.get("videoModel") or "")
-            if model and model_ids and model not in model_ids:
+            if model and model not in model_ids:
                 raise VpocError(
                     "vnew.plan.input",
                     "BadVideoModel",
-                    "고를 수 없는 영상 모델입니다.",
+                    "고를 수 없는 영상 모델입니다. 기본 모델 또는 프리비즈를 지원하는 fal 모델만 쓸 수 있습니다.",
                     400,
                 )
-            inp["videoModel"] = model or default_video_model()
+            inp["videoModel"] = model or default_previz_model()
 
         if "notes" in patch:
             inp["notes"] = str(patch.get("notes") or "")
@@ -1325,7 +1434,7 @@ def plan_view(owner: str, pid: str, plan: dict) -> dict:
             "notes": inp.get("notes") or "",
             "characters": characters_out,
         },
-        "models": available_models(),
+        "models": previz_models(),
         "script": plan.get("script") or {},
         "conti": plan.get("conti") or {},
         "locations": _locations_view(owner, pid, plan),
