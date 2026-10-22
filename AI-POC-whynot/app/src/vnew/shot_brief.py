@@ -55,6 +55,10 @@ _BRIEF_SYSTEM = (
     "Never use internal labels such as 'side +1', 'side -1', 'crossed side', 'line side'; instead state "
     "screen positions explicitly (e.g. 'Ui-jun is frame right facing screen left'). sceneEn must "
     "describe only the place, weather, time and light — no people, no clothing, no camera rules. "
+    "When a person speaks to someone, keep their eyes on the listener's face for the whole line unless "
+    "the panel shows otherwise. Do not invent architecture (stairs, mezzanines, walls, ceilings) that "
+    "is not in the location references. No meaningless camera shake or excessive rotation; keep each "
+    "cut's camera as the previz cut. "
     "Answer ONLY by calling emit_brief exactly once, writing every cut given to you."
 )
 

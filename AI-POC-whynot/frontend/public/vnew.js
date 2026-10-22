@@ -2042,9 +2042,19 @@
     });
     grid.appendChild(lenField);
 
-    // 모델
-    var modelField = el("div", "vnew-field");
-    modelField.appendChild(el("label", "vnew-field-label", "영상 모델"));
+    // 모델(설계자 2026-10-22): 기본(Kling O3 edit, 첫 번째·추천) + 등록된 previzCapable fal 모델.
+    // 각 항목에 이름·초당 단가·참고 방식(elements/이미지 목록). 프리비즈 미지원 모델은 회색·선택 불가.
+    var modelField = el("div", "vnew-field vnew-model-field");
+    var modelHead = el("div", "vnew-model-head");
+    modelHead.appendChild(el("label", "vnew-field-label", "영상 모델"));
+    var catalogBtn = el("button", "outline-button vnew-catalog-btn", "fal 카탈로그 열기");
+    catalogBtn.type = "button";
+    catalogBtn.addEventListener("click", function () {
+      openFalCatalog(showError);
+    });
+    modelHead.appendChild(catalogBtn);
+    modelField.appendChild(modelHead);
+
     var select = el("select", "vnew-field-input");
     if (!models.length) {
       var opt = el("option", null, inp.videoModel || "기본 모델");
@@ -2053,19 +2063,39 @@
       select.disabled = true;
     } else {
       models.forEach(function (model) {
-        var option = el("option", null, model.label || model.id);
+        var refText =
+          model.refMode === "elements"
+            ? "참고: 인물 요소(elements)"
+            : model.refMode === "imageList"
+            ? "참고: 이미지 목록"
+            : "참고: 없음";
+        var priceText = model.priceKnown
+          ? "$" + (Number(model.usdPerSecond) || 0).toFixed(3) + "/초"
+          : "단가 미정";
+        var label =
+          (model.label || model.id) +
+          (model.recommended ? " · 추천" : "") +
+          " · " +
+          priceText +
+          " · " +
+          refText;
+        var option = el("option", null, label);
         option.value = model.id;
+        // 프리비즈 미지원 모델은 선택 불가(회색 표시).
+        if (model.previzCapable === false || model.available === false) {
+          option.disabled = true;
+          option.textContent =
+            (model.label || model.id) +
+            " · " +
+            (model.previzCapable === false ? "프리비즈 미지원" : model.reason || "사용 불가");
+        }
         if (model.id === inp.videoModel) option.selected = true;
         select.appendChild(option);
       });
     }
-    // 실사 시작 이미지를 받지 않는 모델(Seedance 등) 경고.
-    var realWarn = el(
-      "p",
-      "vnew-field-warn",
-      "이 모델은 실사 인물 시작 이미지를 받지 않아 신규 영상 기능에서 실패할 수 있습니다. Kling 등 fal 모델을 권장합니다."
-    );
-    function updateRealWarn(modelId) {
+    // 고른 모델 정보 줄(단가·참고 방식).
+    var modelInfo = el("p", "vnew-field-hint vnew-model-info", "");
+    function updateModelInfo(modelId) {
       var chosen = null;
       for (var i = 0; i < models.length; i++) {
         if (models[i] && models[i].id === modelId) {
@@ -2073,26 +2103,315 @@
           break;
         }
       }
-      var unsupported = chosen && chosen.realStartImage === false;
-      realWarn.style.display = unsupported ? "" : "none";
+      if (!chosen) {
+        modelInfo.textContent = "";
+        return;
+      }
+      var refText =
+        chosen.refMode === "elements"
+          ? "참고 이미지: 인물 요소(elements)"
+          : chosen.refMode === "imageList"
+          ? "참고 이미지: 이미지 목록"
+          : "참고 이미지: 없음";
+      var priceText = chosen.priceKnown
+        ? "초당 $" + (Number(chosen.usdPerSecond) || 0).toFixed(3)
+        : "단가 미정";
+      modelInfo.textContent = priceText + " · " + refText;
     }
     select.addEventListener("change", function () {
-      updateRealWarn(select.value);
+      updateModelInfo(select.value);
       putInput({ videoModel: select.value })
         .then(function () {
-          renderPlan(); // 최대 길이 안내가 바뀌니 다시 그린다
+          renderPlan(); // 최대 길이·단가 안내가 바뀌니 다시 그린다
         })
         .catch(function (err) {
           showError("모델을 저장하지 못했습니다: " + errMessage(err));
         });
     });
     modelField.appendChild(select);
-    modelField.appendChild(realWarn);
-    updateRealWarn(select.value);
+    modelField.appendChild(modelInfo);
+    updateModelInfo(select.value);
     grid.appendChild(modelField);
 
     section.appendChild(grid);
     return section;
+  }
+
+  /* ① fal 카탈로그 열기 모달(설계자 2026-10-22). 카테고리 탭(영상→영상 기본·이미지→영상·텍스트→영상),
+     검색, 결과 카드(썸네일·이름·설명·카테고리·단가), 더 보기(cursor). [활성화] → POST /fal/models
+     → 목록 갱신·"활성화됨". 이미 등록된 건 [활성화됨]. 게이트(404/409)면 버튼 숨기고 안내 한 줄.
+     기존 vpoc 카탈로그 API 를 그대로 쓴다(수정 금지). */
+  var FAL_CAT_TABS = [
+    ["video-to-video", "영상→영상"],
+    ["image-to-video", "이미지→영상"],
+    ["text-to-video", "텍스트→영상"]
+  ];
+
+  function openFalCatalog(showError) {
+    var scrim = el("div", "vnew-modal-scrim");
+    var modal = el("div", "vnew-modal vnew-fal-modal");
+    var head = el("div", "vnew-modal-head");
+    head.appendChild(el("h3", null, "fal 카탈로그"));
+    var close = el("button", "icon-button", "×");
+    close.type = "button";
+    close.addEventListener("click", closeModal);
+    head.appendChild(close);
+    modal.appendChild(head);
+
+    // 상태.
+    var ctx = {
+      category: "video-to-video",
+      q: "",
+      cursor: "",
+      models: [],
+      hasMore: false,
+      registered: {} // endpointId -> true
+    };
+
+    // 탭.
+    var tabs = el("div", "vnew-fal-tabs");
+    var tabBtns = {};
+    FAL_CAT_TABS.forEach(function (pair) {
+      var btn = el("button", "vnew-fal-tab", pair[1]);
+      btn.type = "button";
+      btn.addEventListener("click", function () {
+        if (ctx.category === pair[0]) return;
+        ctx.category = pair[0];
+        ctx.q = "";
+        ctx.cursor = "";
+        searchInput.value = "";
+        setActiveTab();
+        reload();
+      });
+      tabBtns[pair[0]] = btn;
+      tabs.appendChild(btn);
+    });
+    modal.appendChild(tabs);
+    function setActiveTab() {
+      FAL_CAT_TABS.forEach(function (pair) {
+        tabBtns[pair[0]].classList.toggle("is-active", pair[0] === ctx.category);
+      });
+    }
+    setActiveTab();
+
+    // 검색.
+    var searchRow = el("div", "vnew-fal-search");
+    var searchInput = el("input", "vnew-field-input");
+    searchInput.type = "search";
+    searchInput.placeholder = "모델 이름 검색";
+    var searchBtn = el("button", "outline-button", "검색");
+    searchBtn.type = "button";
+    searchBtn.addEventListener("click", function () {
+      ctx.q = searchInput.value.trim();
+      ctx.cursor = "";
+      reload();
+    });
+    searchInput.addEventListener("keydown", function (event) {
+      if (event.key === "Enter") {
+        event.preventDefault();
+        searchBtn.click();
+      }
+    });
+    searchRow.appendChild(searchInput);
+    searchRow.appendChild(searchBtn);
+    modal.appendChild(searchRow);
+
+    // 안내 한 줄(게이트·오류).
+    var notice = el("p", "vnew-fal-notice", "");
+    notice.style.display = "none";
+    modal.appendChild(notice);
+    function showNotice(message) {
+      notice.textContent = message;
+      notice.style.display = "";
+    }
+
+    // 결과 영역.
+    var bodyWrap = el("div", "vnew-modal-body vnew-fal-body");
+    modal.appendChild(bodyWrap);
+
+    var moreBtn = el("button", "outline-button vnew-fal-more", "더 보기");
+    moreBtn.type = "button";
+    moreBtn.style.display = "none";
+    moreBtn.addEventListener("click", function () {
+      loadPage(true);
+    });
+    modal.appendChild(moreBtn);
+
+    scrim.appendChild(modal);
+    scrim.addEventListener("click", function (event) {
+      if (event.target === scrim) closeModal();
+    });
+    document.body.appendChild(scrim);
+
+    function closeModal() {
+      if (scrim.parentNode) scrim.parentNode.removeChild(scrim);
+      // 닫을 때 ① 을 다시 그려 등록 모델이 목록에 반영되게 한다.
+      renderPlan();
+    }
+
+    // 등록된 fal 모델 endpoint 집합(활성화됨 표시용).
+    function loadRegistered() {
+      return api("/api/vpoc/fal/models")
+        .then(function (payload) {
+          ctx.registered = {};
+          (payload.models || []).forEach(function (m) {
+            if (m && m.endpointId) ctx.registered[m.endpointId] = true;
+          });
+        })
+        .catch(function () {
+          // 게이트(404)·오류면 등록 목록을 비워 둔다(활성화 버튼은 catalog 결과로만 판단).
+          ctx.registered = {};
+        });
+    }
+
+    function reload() {
+      ctx.cursor = "";
+      ctx.models = [];
+      clear(bodyWrap);
+      bodyWrap.appendChild(el("p", "vnew-boot", "불러오는 중…"));
+      loadRegistered().then(function () {
+        loadPage(false);
+      });
+    }
+
+    function loadPage(append) {
+      var url =
+        "/api/vpoc/fal/catalog?category=" +
+        encodeURIComponent(ctx.category) +
+        "&q=" +
+        encodeURIComponent(ctx.q) +
+        "&cursor=" +
+        encodeURIComponent(ctx.cursor);
+      moreBtn.disabled = true;
+      api(url)
+        .then(function (payload) {
+          if (!append) {
+            clear(bodyWrap);
+            ctx.models = [];
+          }
+          notice.style.display = "none";
+          var rows = payload.models || [];
+          ctx.models = ctx.models.concat(rows);
+          ctx.cursor = payload.nextCursor || "";
+          ctx.hasMore = !!payload.hasMore;
+          drawCards(rows, append);
+          moreBtn.disabled = false;
+          moreBtn.style.display = ctx.hasMore ? "" : "none";
+          if (!ctx.models.length) {
+            var empty = el("p", "vnew-hint", "결과가 없습니다.");
+            bodyWrap.appendChild(empty);
+          }
+        })
+        .catch(function (err) {
+          moreBtn.disabled = false;
+          moreBtn.style.display = "none";
+          clear(bodyWrap);
+          var status = err && err.status;
+          if (status === 404 || status === 409) {
+            // 게이트(모델 고르기 꺼짐 · fal 키 없음): 안내 한 줄만.
+            showNotice(
+              "fal 카탈로그를 쓸 수 없습니다: " + errMessage(err) + " (관리자 설정이 필요합니다.)"
+            );
+          } else {
+            showNotice("불러오지 못했습니다: " + errMessage(err));
+          }
+        });
+    }
+
+    function drawCards(rows, append) {
+      if (!append) clear(bodyWrap);
+      var grid = bodyWrap.querySelector(".vnew-fal-grid");
+      if (!grid) {
+        grid = el("div", "vnew-fal-grid");
+        bodyWrap.appendChild(grid);
+      }
+      rows.forEach(function (model) {
+        grid.appendChild(catalogCard(model));
+      });
+    }
+
+    function catalogCard(model) {
+      var card = el("div", "vnew-fal-card");
+      var thumb = el("div", "vnew-fal-thumb");
+      if (model.thumbnailUrl) {
+        var img = el("img");
+        img.src = model.thumbnailUrl;
+        img.alt = model.label || "";
+        thumb.appendChild(img);
+      } else {
+        thumb.appendChild(el("span", "vnew-fal-thumb-empty", (model.label || "?").slice(0, 1)));
+      }
+      card.appendChild(thumb);
+
+      var info = el("div", "vnew-fal-info");
+      info.appendChild(el("strong", "vnew-fal-name", model.label || model.endpointId));
+      info.appendChild(el("span", "vnew-fal-cat", model.category || ctx.category));
+      if (model.description) {
+        info.appendChild(el("p", "vnew-fal-desc", model.description));
+      }
+      // 금지 모델은 활성화 비활성(설계자 2026-10-22).
+      var denied = isDeniedEndpoint(model.endpointId);
+      var registered = !!ctx.registered[model.endpointId];
+      var actionRow = el("div", "vnew-fal-actions");
+      if (registered) {
+        actionRow.appendChild(el("span", "vnew-fal-badge is-on", "활성화됨"));
+      } else if (denied) {
+        var deniedBtn = el("button", "outline-button", "사용 금지");
+        deniedBtn.type = "button";
+        deniedBtn.disabled = true;
+        actionRow.appendChild(deniedBtn);
+      } else {
+        var actBtn = el("button", "primary-button vnew-fal-activate", "활성화");
+        actBtn.type = "button";
+        actBtn.addEventListener("click", function () {
+          actBtn.disabled = true;
+          actBtn.textContent = "활성화 중…";
+          api("/api/vpoc/fal/models", {
+            method: "POST",
+            body: JSON.stringify({ endpointId: model.endpointId })
+          })
+            .then(function (payload) {
+              ctx.registered[model.endpointId] = true;
+              var caps = ((payload && payload.model) || {}).caps || {};
+              clear(actionRow);
+              actionRow.appendChild(el("span", "vnew-fal-badge is-on", "활성화됨"));
+              actionRow.appendChild(
+                el(
+                  "span",
+                  "vnew-fal-badge " + (caps.previzCapable ? "is-previz" : "is-noprev"),
+                  caps.previzCapable ? "프리비즈 지원" : "프리비즈 미지원"
+                )
+              );
+            })
+            .catch(function (err) {
+              actBtn.disabled = false;
+              actBtn.textContent = "활성화";
+              var status = err && err.status;
+              if (status === 404 || status === 409) {
+                showNotice("활성화할 수 없습니다: " + errMessage(err));
+              } else {
+                showError && showError("활성화하지 못했습니다: " + errMessage(err));
+                actBtn.textContent = "활성화 실패";
+              }
+            });
+        });
+        actionRow.appendChild(actBtn);
+      }
+      info.appendChild(actionRow);
+      card.appendChild(info);
+      return card;
+    }
+
+    reload();
+  }
+
+  /* 금지 endpoint 패턴(설계자 2026-10-22, 서버 FAL_DENY_ENDPOINTS 와 같은 기본 규칙).
+     서버가 최종 거절하지만, 화면도 미리 [활성화] 를 비활성해 혼란을 줄인다. */
+  function isDeniedEndpoint(endpoint) {
+    var eid = String(endpoint || "").toLowerCase();
+    if (!eid) return false;
+    // 기본 규칙: seedance 2.x fast 계열.
+    return /seedance.*2.*fast/.test(eid);
   }
 
   /* 캐릭터 연결 영역. [캐릭터 정보 불러오기] → 고르기 창 → 역할명 입력. */

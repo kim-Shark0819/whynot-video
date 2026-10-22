@@ -3967,6 +3967,15 @@ def check_vnew_locations() -> None:
 
     fake_store = _FakeCharStore()
 
+    # --- (np-d) 설계·사실 지침에 건축 임의 추가 금지(설계자 2026-10-22) ---
+    if "Do not add stairs" not in locmod._DESIGN_SYSTEM:
+        bad.append("(np-d) locations 설계 지침에 'Do not add stairs' 가 없습니다")
+    if "Do not add stairs" not in locmod._FACTS_SYSTEM:
+        bad.append("(np-d) locations 사실 지침에 'Do not add stairs' 가 없습니다")
+    for need in ("mezzanines", "terrace/balcony", "estimate size from people and doors"):
+        if need not in locmod._DESIGN_SYSTEM:
+            bad.append(f"(np-d) locations 설계 지침에 '{need}' 가 없습니다")
+
     # --- (b) 설계 JSON 정리: _normalize_design 단위(네트워크 불필요) ---
     thin = locmod._normalize_design(
         {
@@ -5158,6 +5167,7 @@ def check_vnew_locations() -> None:
             " (lp-b)PUT side/noteKo·잘못된 side 400·빌드 중 409 (lp-c)사진이 설계·사실 블록에서 패널보다 먼저·라벨"
             " (lp-d)뷰 A 참고 [가이드,back,left,any,패널]·≤6·뷰 B back 없음 (lp-e)프롬프트 CENTER BACK WALL 이미지 번호 일치"
             " (lp-f)사진 없음→참고·프롬프트 회귀 없음"
+            " (np-d)설계·사실 지침에 Do not add stairs·mezzanines·terrace/balcony·estimate size from people and doors"
         )
 
 
@@ -5709,6 +5719,62 @@ def check_vnew_generate() -> None:
             if len(prompt.encode("utf-8")) > 2500:
                 bad.append(f"(u) 프롬프트가 2500바이트를 넘습니다: {len(prompt.encode('utf-8'))}")
 
+        # (np-a) ASSETS 줄 + CONTINUITY 보강(설계자 2026-10-22, 뉴테이크 실전 프롬프트).
+        #   - 모든 컷 프롬프트 첫 줄이 "ASSETS:" 로 시작.
+        #   - 실사는 @Video1·@Element1, 웹툰은 @Video1·@Image 포함.
+        #   - CONTINUITY 에 "Do not add any action"·"identical to the reference"·"skin texture".
+        for pay in reals:
+            prompt = str(pay.get("prompt") or "")
+            first_line = prompt.split("\n", 1)[0]
+            if not first_line.startswith("ASSETS:"):
+                bad.append(f"(np-a) 실사 프롬프트 첫 줄이 ASSETS 가 아닙니다: {first_line[:80]}")
+            if "@Video1 = rough 3D previz" not in prompt:
+                bad.append("(np-a) ASSETS 줄에 @Video1 자료 설명이 없습니다")
+            if "@Element1 =" not in prompt:
+                bad.append(f"(np-a) 실사 ASSETS 줄에 @Element1 참고 시트가 없습니다: {first_line[:120]}")
+            for need in ("Do not add any action", "identical to the reference", "skin texture"):
+                if need not in prompt:
+                    bad.append(f"(np-a) 실사 CONTINUITY 에 '{need}' 가 없습니다")
+            if "high-end live-action shot" not in prompt:
+                bad.append("(np-a) 실사 CONTINUITY 에 고퀄 실사 마감 문장이 없습니다")
+            if len(prompt.encode("utf-8")) > 2500:
+                bad.append(f"(np-a) 실사 프롬프트가 2500바이트를 넘습니다: {len(prompt.encode('utf-8'))}")
+        for pay in webs:
+            prompt = str(pay.get("prompt") or "")
+            first_line = prompt.split("\n", 1)[0]
+            if not first_line.startswith("ASSETS:"):
+                bad.append(f"(np-a) 웹툰 프롬프트 첫 줄이 ASSETS 가 아닙니다: {first_line[:80]}")
+            if "@Image" not in first_line:
+                bad.append(f"(np-a) 웹툰 ASSETS 줄에 @Image 참고가 없습니다: {first_line[:120]}")
+            for need in ("Do not add any action", "identical to the reference", "skin texture"):
+                if need not in prompt:
+                    bad.append(f"(np-a) 웹툰 CONTINUITY 에 '{need}' 가 없습니다")
+            if "original webtoon's drawing style" not in prompt:
+                bad.append("(np-a) 웹툰 CONTINUITY 에 '원작 웹툰 그림체' 마감 문장이 없습니다")
+            if len(prompt.encode("utf-8")) > 2500:
+                bad.append(f"(np-a) 웹툰 프롬프트가 2500바이트를 넘습니다: {len(prompt.encode('utf-8'))}")
+
+        # (np-a2) 긴 입력에서도 ASSETS·CONTINUITY 문장이 살아남고 ≤2500바이트 — _cut_prompt 함수 단위.
+        #   아주 긴 촬영 지시서(brief)로 2500바이트 초과를 유도해도, 보호 문장은 그대로 남아야 한다.
+        long_plan, _ = planmod.load_plan(owner, pid_k)
+        long_brief = long_plan["previz"]["shotBrief"]["cuts"]
+        for cid, b in long_brief.items():
+            b["actionEn"] = "Kim leans forward and speaks. " + ("He gestures slowly and deliberately. " * 60)
+            b["blockingEn"] = "Kim at frame center facing camera. " * 40
+            b["moodEn"] = "tense and heavy. " * 40
+        long_plan["previz"]["shotBrief"]["scene"] = {
+            "loc:office": "A closed principal's office with wood panelling. " * 40
+        }
+        cast_demo = [{"colorName": "blue", "name": "Kim", "elementRef": "@Element1", "appearance": "a middle-aged man in a dark suit"}]
+        long_real = genmod._cut_prompt(long_plan, {"cutId": "c1"}, "real", cast=cast_demo, has_image_ref=False)
+        if not long_real.startswith("ASSETS:"):
+            bad.append("(np-a2) 긴 입력 실사 프롬프트 첫 줄이 ASSETS 가 아닙니다")
+        for need in ("@Element1 =", "Do not add any action", "identical to the reference", "skin texture"):
+            if need not in long_real:
+                bad.append(f"(np-a2) 긴 입력 실사 프롬프트에서 보호 문장 '{need}' 가 사라졌습니다")
+        if len(long_real.encode("utf-8")) > 2500:
+            bad.append(f"(np-a2) 긴 입력 실사 프롬프트가 2500바이트를 넘습니다: {len(long_real.encode('utf-8'))}")
+
         # (o) 완료 → concat 2(실사·웹툰), done.
         if kgen.get("status") != "done":
             bad.append(f"(o) gen.status 가 done 이 아닙니다: {kgen.get('status')}")
@@ -5955,6 +6021,7 @@ def check_vnew_generate() -> None:
             " (p)실패 칸만 재시도 (q)옛 모드 보기·select"
             " (r)상한4 첫 순회 4칸 동시 submitted·제출4·원장4 (s)상한2 첫 순회 2칸·다음 순회 나머지"
             " (t)경합에서도 칸별 제출 1회"
+            " (np-a)ASSETS 첫 줄·@Video1·@Element1/@Image·CONTINUITY 보강(Do not add any action·identical to the reference·skin texture)·긴 입력에서도 유지·≤2500바이트"
         )
 
 
@@ -6425,6 +6492,49 @@ def check_vnew_previz() -> None:
     from src.vnew import previz_schema as pvschema  # noqa: PLC0415
 
     fake_store = _FakeCharStore()
+
+    # --- (np-c) 대사 있는 컷의 말하는 인물(제스처 없음) → turn_head_to_other + 상대 id ---
+    from src.vnew import generate as _genmod_npc  # noqa: PLC0415
+
+    # 컷 c1: 범건우가 말하고(대사), 여의준은 듣는다. grammar.actions 없음 → 말하는 인물에 다른 제스처 없음.
+    npc_scene = {
+        "actors": [{"id": "a1", "name": "범건우"}, {"id": "a2", "name": "여의준"}],
+        "timeline": [
+            {
+                "cutId": "c1",
+                "actors": [{"id": "a1", "speaking": True}, {"id": "a2", "speaking": False}],
+            }
+        ],
+    }
+    npc_groups = [{"locationEn": "office", "cuts": [{"cutId": "c1", "characters": [{"name": "범건우", "actionEn": ""}]}]}]
+    npc_plan = {
+        "script": {"entries": []},
+        "conti": {"cuts": [{"id": "c1", "panels": [0], "dialogueKo": '범건우: "자네 뭐 하나?"'}]},
+    }
+    pvmod._apply_gestures([npc_scene], npc_groups, {}, npc_plan)
+    speaker_actor = next((ca for ca in npc_scene["timeline"][0]["actors"] if ca["id"] == "a1"), {})
+    listener_actor = next((ca for ca in npc_scene["timeline"][0]["actors"] if ca["id"] == "a2"), {})
+    if speaker_actor.get("gesture") != "turn_head_to_other":
+        bad.append(f"(np-c) 말하는 인물 제스처가 turn_head_to_other 가 아닙니다: {speaker_actor.get('gesture')}")
+    if speaker_actor.get("gestureTarget") != "a2":
+        bad.append(f"(np-c) 말하는 인물 gestureTarget 이 상대(a2)가 아닙니다: {speaker_actor.get('gestureTarget')}")
+    # 듣는 사람은 turn_head 강제가 없다(말하지 않으므로).
+    if listener_actor.get("gesture") == "turn_head_to_other":
+        bad.append("(np-c) 듣는 사람에게 turn_head_to_other 가 잘못 붙었습니다")
+    # 이미 다른 제스처가 있으면 덮어쓰지 않는다.
+    npc_scene2 = {
+        "actors": [{"id": "a1", "name": "범건우"}, {"id": "a2", "name": "여의준"}],
+        "timeline": [
+            {
+                "cutId": "c1",
+                "actors": [{"id": "a1", "speaking": True, "gesture": "wipe_tears"}, {"id": "a2"}],
+            }
+        ],
+    }
+    pvmod._apply_gestures([npc_scene2], npc_groups, {}, npc_plan)
+    keep_actor = next((ca for ca in npc_scene2["timeline"][0]["actors"] if ca["id"] == "a1"), {})
+    if keep_actor.get("gesture") != "wipe_tears":
+        bad.append(f"(np-c) 이미 있던 제스처가 turn_head_to_other 로 덮였습니다: {keep_actor.get('gesture')}")
 
     # ffmpeg 바이너리를 어떤 패치보다 먼저 구해 둔다(imageio_ffmpeg 를 threading.Thread 패치 전에 import).
     _ffmpeg_bin = ""
@@ -7477,6 +7587,7 @@ def check_vnew_previz() -> None:
             " (pv-a)진행 단계 panels→design→camera→done·done≤total (pv-b)previz_view progress"
             " (pv-c)다시 만들기 [이전 설계]·editsEn (pv-e)extraCutId 다른 그룹 scenes 유지"
             " (pv-f)설계 실패 시 이전 scenes 유지"
+            " (np-c)대사 있는 컷 말하는 인물 제스처 없음→turn_head_to_other+상대 id·기존 제스처 유지"
         )
 
 
@@ -7913,6 +8024,13 @@ def check_vnew_shot_brief() -> None:
     from src.vnew import generate as genmod  # noqa: PLC0415
     from src.vnew import previz_schema as pvschema  # noqa: PLC0415
     from src.vnew import shot_brief as briefmod  # noqa: PLC0415
+
+    # ---------------- (np-b) 촬영 지시서 시스템 지침: 말하는 사람 시선·건축 임의 추가 금지·카메라 흔들림 금지 ----------------
+    if "keep their eyes on the listener" not in briefmod._BRIEF_SYSTEM:
+        bad.append("(np-b) 촬영 지시서 시스템 지침에 'keep their eyes on the listener' 가 없습니다")
+    for need in ("Do not invent architecture", "No meaningless camera shake"):
+        if need not in briefmod._BRIEF_SYSTEM:
+            bad.append(f"(np-b) 촬영 지시서 시스템 지침에 '{need}' 가 없습니다")
 
     # ---------------- (sb-a) 팔레트·색 이름 ----------------
     scene = pvschema.normalize_scene(
@@ -8374,8 +8492,8 @@ def check_vnew_shot_brief() -> None:
             }},
         }
         prompt_i = genmod._cut_prompt(plan_i, {"cutId": "c1"}, "real", cast=cast, has_image_ref=False)
-        if len(prompt_i.encode("utf-8")) > 1500:
-            bad.append(f"(sb-i) 전제: 짧은 지시서 프롬프트가 1500바이트를 넘습니다: {len(prompt_i.encode('utf-8'))}")
+        if len(prompt_i.encode("utf-8")) > 2300:  # 058 ASSETS·CONTINUITY 보강으로 기본 길이 증가 — 한도(2500) 안이면 충분
+            bad.append(f"(sb-i) 전제: 짧은 지시서 프롬프트가 2300바이트를 넘습니다: {len(prompt_i.encode('utf-8'))}")
         for must in ("\nACTION:", "\nMOOD:", "\nSETTING:"):
             if must not in ("\n" + prompt_i):
                 bad.append(f"(sb-i) 짧은 지시서인데 섹션 {must.strip()} 이 지워졌습니다")
@@ -8551,6 +8669,7 @@ def check_vnew_shot_brief() -> None:
             " (sb-g)컷 순서 concat·채운 컷 원래 길이로 잘림 (sb-h)옛 segments gen_view"
             " (sb-i)짧은 지시서 아무것도 안 지움(ACTION·MOOD·SETTING) (sb-j)긴 지시서 ≤2500·ACTION 유지·CAST/CONTINUITY 유지"
             " (sb-k)CAST 'mannequin.'·'..' 없음·캐릭터 데이터 외형 (sb-l)side±1·wears blue 저장/프롬프트에 없음"
+            " (np-b)촬영 지시서 시스템 지침에 keep their eyes on the listener·건축 임의 추가 금지·카메라 흔들림 금지"
         )
 
 
@@ -8741,6 +8860,438 @@ def check_vnew_mannequin() -> None:
         )
 
 
+# ---------------------------------------------------------------- 10. fal 영상 모델 caps(fm)
+
+
+def check_fal_model_caps() -> None:
+    """① 단계 영상 모델 — fal video-to-video caps·등록·plan 검증·생성 payload·vpoc 회귀(설계자 2026-10-22).
+
+    외부 호출(모델 메타·스키마·단가)은 전부 가짜. 유료 호출 없음.
+
+    (fm-a) extract_caps: (video_url+prompt+elements) → previzCapable True·elementsField;
+           (video_url+image_urls maxItems 3) → imageListField·imageListMax 3; (image_url 만) →
+           previzCapable False. 기존 caps 키(promptField·startImageField 등) 그대로.
+    (fm-b) 등록: video-to-video 카테고리 허용, deny 패턴(*seedance*2*fast*) 400 Denied.
+    (fm-c) plan·generate: 빈 videoModel → 기본으로 저장, 등록 안 된/previz 미지원 모델 → 생성 때 기본으로 되돌림.
+    (fm-d) 생성 payload: elements 모델 → 기존과 동일(@Element); image_urls 모델 → elements 없음·
+           image_urls = 보이는 인물 정면 순서·프롬프트 "Image 1 is …" 번호 일치·maxItems 준수; video_url = 컷 클립.
+    (fm-e) vpoc 기존 피커 목록(ark.choices)에 video-to-video/previzCapable 모델이 나오지 않음(회귀 없음).
+    """
+    sys.path.insert(0, str(ROOT / "app"))
+    bad: list[str] = []
+
+    from src.vpoc import ark, fal, settings  # noqa: PLC0415
+
+    def _input_schema(props: dict, required: list | None = None) -> dict:
+        """endpoint "/ep" 의 POST requestBody 가 가리키는 Input 스키마를 가진 가짜 OpenAPI."""
+        schema = {"type": "object", "properties": props}
+        if required is not None:
+            schema["required"] = required
+        return {
+            "paths": {
+                "/ep": {
+                    "post": {
+                        "requestBody": {
+                            "content": {
+                                "application/json": {
+                                    "schema": {"$ref": "#/components/schemas/EpInput"}
+                                }
+                            }
+                        }
+                    }
+                }
+            },
+            "components": {"schemas": {"EpInput": schema}},
+        }
+
+    # ---------------- (fm-a) extract_caps ----------------
+
+    # (1) video_url + prompt + elements[{frontal_image_url}] → previzCapable True, elementsField.
+    oa_elements = _input_schema(
+        {
+            "prompt": {"type": "string", "maxLength": 2500},
+            "video_url": {"type": "string"},
+            "elements": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "frontal_image_url": {"type": "string"},
+                        "reference_image_urls": {"type": "array", "items": {"type": "string"}},
+                    },
+                },
+            },
+            "keep_audio": {"type": "boolean"},
+        }
+    )
+    caps_e, reason_e = fal.extract_caps(oa_elements, "ep")
+    if caps_e is None:
+        bad.append(f"(fm-a) elements 스키마에서 caps 를 못 만들었습니다: {reason_e}")
+    else:
+        if caps_e.get("videoField") != "video_url":
+            bad.append(f"(fm-a) videoField 가 video_url 이 아닙니다: {caps_e.get('videoField')}")
+        if caps_e.get("elementsField") != "elements":
+            bad.append(f"(fm-a) elementsField 가 elements 가 아닙니다: {caps_e.get('elementsField')}")
+        if caps_e.get("previzCapable") is not True:
+            bad.append(f"(fm-a) previzCapable 가 True 가 아닙니다: {caps_e.get('previzCapable')}")
+        if caps_e.get("keepAudioField") != "keep_audio":
+            bad.append(f"(fm-a) keepAudioField 가 keep_audio 가 아닙니다: {caps_e.get('keepAudioField')}")
+        # 기존 caps 키(회귀) — promptField·startImageField·durations 등이 그대로 있어야 한다.
+        for key in ("promptField", "promptMaxLength", "startImageField", "endImageField",
+                    "referenceImagesField", "durations", "resolutions", "aspectRatios",
+                    "audioField", "requiredFields", "available", "reason"):
+            if key not in caps_e:
+                bad.append(f"(fm-a) 기존 caps 키 '{key}' 가 사라졌습니다")
+
+    # (2) video_url + image_urls(maxItems 3) → imageListField, imageListMax 3.
+    oa_imagelist = _input_schema(
+        {
+            "prompt": {"type": "string", "maxLength": 1500},
+            "video_url": {"type": "string"},
+            "image_urls": {"type": "array", "items": {"type": "string"}, "maxItems": 3},
+        }
+    )
+    caps_i, reason_i = fal.extract_caps(oa_imagelist, "ep")
+    if caps_i is None:
+        bad.append(f"(fm-a) image_urls 스키마에서 caps 를 못 만들었습니다: {reason_i}")
+    else:
+        if caps_i.get("imageListField") != "image_urls":
+            bad.append(f"(fm-a) imageListField 가 image_urls 가 아닙니다: {caps_i.get('imageListField')}")
+        if caps_i.get("imageListMax") != 3:
+            bad.append(f"(fm-a) imageListMax 가 3 이 아닙니다: {caps_i.get('imageListMax')}")
+        if caps_i.get("elementsField"):
+            bad.append(f"(fm-a) image_urls 전용인데 elementsField 가 잡혔습니다: {caps_i.get('elementsField')}")
+        if caps_i.get("previzCapable") is not True:
+            bad.append(f"(fm-a) video_url+prompt 인데 previzCapable 가 True 가 아닙니다: {caps_i.get('previzCapable')}")
+
+    # (3) image_url 만(영상 입력 없음) → previzCapable False.
+    oa_noprev = _input_schema(
+        {
+            "prompt": {"type": "string"},
+            "image_url": {"type": "string"},
+        }
+    )
+    caps_n, _ = fal.extract_caps(oa_noprev, "ep")
+    if caps_n is None:
+        bad.append("(fm-a) image_url 전용 스키마에서 caps 를 못 만들었습니다")
+    else:
+        if caps_n.get("previzCapable") is not False:
+            bad.append(f"(fm-a) 영상 입력이 없는데 previzCapable 가 False 가 아닙니다: {caps_n.get('previzCapable')}")
+        if caps_n.get("videoField"):
+            bad.append(f"(fm-a) 영상 입력이 없는데 videoField 가 잡혔습니다: {caps_n.get('videoField')}")
+
+    # ---------------- (fm-b) 등록: 카테고리·deny ----------------
+
+    # deny 판정 함수.
+    if not settings.is_denied_endpoint("fal-ai/seedance-2-0-fast/video-to-video"):
+        bad.append("(fm-b) seedance 2 fast 계열이 deny 로 판정되지 않습니다")
+    if settings.is_denied_endpoint("fal-ai/kling-video/o3/standard/video-to-video/edit"):
+        bad.append("(fm-b) Kling 모델이 잘못 deny 로 판정됩니다")
+    if "video-to-video" not in settings.FAL_VIDEO_CATEGORIES:
+        bad.append("(fm-b) FAL_VIDEO_CATEGORIES 에 video-to-video 가 없습니다")
+
+    saved = {
+        "STORE": fal.STORE,
+        "model_meta": fal.model_meta,
+        "openapi_schema": fal.openapi_schema,
+        "pricing": fal.pricing,
+        "fal_key": settings.FAL_KEY,
+        "ark_fal_registered": ark.fal.registered,
+    }
+    fake_store = _FakeCharStore()
+    fal.STORE = fake_store
+    settings.FAL_KEY = "dummy-fal-key"
+    fal._invalidate_cache()
+
+    def fake_meta(endpoint):
+        return {"category": "video-to-video", "displayName": "Fake V2V", "openapi": {}}
+
+    def fake_schema(endpoint, expand_result=None):
+        return oa_elements  # video-to-video previzCapable 스키마
+
+    fal.model_meta = fake_meta
+    fal.openapi_schema = fake_schema
+    fal.pricing = lambda endpoint: None  # 단가 미정(네트워크 없음)
+
+    try:
+        # deny 패턴 endpoint 는 400 Denied(스키마·메타 조회 전에 막힌다).
+        try:
+            fal.register("fal-ai/seedance-2-0-fast/video-to-video", added_by="tester")
+            bad.append("(fm-b) deny endpoint 가 400 Denied 로 거절되지 않았습니다")
+        except Exception as exc:  # noqa: BLE001
+            if getattr(exc, "kind", "") != "Denied" or getattr(exc, "status", 0) != 400:
+                bad.append(f"(fm-b) deny endpoint 가 400 Denied 가 아닙니다: kind={getattr(exc, 'kind', '?')} status={getattr(exc, 'status', '?')}")
+
+        # video-to-video 카테고리 허용: 정상 등록된다.
+        item = fal.register("fal-ai/kling-video/o3/standard/video-to-video/edit", added_by="tester")
+        if item.get("category") != "video-to-video":
+            bad.append(f"(fm-b) 등록 category 가 video-to-video 가 아닙니다: {item.get('category')}")
+        if not (item.get("caps") or {}).get("previzCapable"):
+            bad.append("(fm-b) 등록 caps 의 previzCapable 가 True 가 아닙니다")
+
+        # ---------------- (fm-e) vpoc 피커(ark.choices) 회귀 ----------------
+        # 등록 목록을 가짜로: video-to-video previz 1 + image-to-video non-previz 1 + text-to-video 일반 1.
+        def fake_registered():
+            return [
+                {
+                    "id": "fal:v2v-previz",
+                    "endpointId": "v2v-previz",
+                    "label": "V2V previz",
+                    "category": "video-to-video",
+                    "caps": {"previzCapable": True, "available": True},
+                },
+                {
+                    "id": "fal:i2v-plain",
+                    "endpointId": "i2v-plain",
+                    "label": "I2V plain",
+                    "category": "image-to-video",
+                    "caps": {"previzCapable": False, "available": True, "startImageField": "image_url"},
+                },
+            ]
+
+        ark.fal.registered = fake_registered
+        choice_ids = [str(c.get("id")) for c in ark.choices()]
+        if "fal:v2v-previz" in choice_ids:
+            bad.append(f"(fm-e) vpoc 피커에 video-to-video previz 모델이 나타났습니다(회귀): {choice_ids}")
+        # image-to-video non-previz 는 기존처럼 보여야 한다(회귀 없음).
+        if "fal:i2v-plain" not in choice_ids:
+            bad.append(f"(fm-e) vpoc 피커에서 기존 image-to-video 모델이 사라졌습니다: {choice_ids}")
+    except Exception as exc:  # noqa: BLE001
+        import traceback as _tb  # noqa: PLC0415
+        bad.append("(fm-b/e) 등록·피커 검사 중 예외: " + repr(exc) + "\n" + _tb.format_exc()[:1000])
+    finally:
+        fal.STORE = saved["STORE"]
+        fal.model_meta = saved["model_meta"]
+        fal.openapi_schema = saved["openapi_schema"]
+        fal.pricing = saved["pricing"]
+        settings.FAL_KEY = saved["fal_key"]
+        ark.fal.registered = saved["ark_fal_registered"]
+        fal._invalidate_cache()
+
+    # ---------------- (fm-c) plan 저장·생성 모델 되돌림 ----------------
+
+    from src.vnew import generate as genmod  # noqa: PLC0415
+    from src.vnew import plan as planmod  # noqa: PLC0415
+    from src.vnew import settings as vnew_settings  # noqa: PLC0415
+
+    default_id = planmod.default_previz_model()
+    default_endpoint = str(vnew_settings.VNEW_PREVIZ_EDIT_MODEL)
+    if default_id != fal.settings.FAL_ID_PREFIX + default_endpoint:
+        bad.append(f"(fm-c) 기본 프리비즈 모델 id 가 fal:<VNEW_PREVIZ_EDIT_MODEL> 이 아닙니다: {default_id}")
+
+    # 빈 videoModel → 기본 모델 id 로 저장(plan.update_input 의 model or default).
+    # (update_input 은 저장 레이어를 쓰므로 함수 단위로 mutator 로직을 직접 확인한다.)
+    model_ids = planmod._previz_model_ids()
+    if default_id not in model_ids:
+        bad.append(f"(fm-c) 기본 모델이 고를 수 있는 모델 집합에 없습니다: {sorted(model_ids)}")
+
+    # 생성 때 되돌림: 등록 안 된/previz 미지원 모델 → 기본 endpoint.
+    gen_saved_find = genmod.vpoc_fal.find
+    try:
+        genmod.vpoc_fal.find = lambda model: None  # 아무 모델도 등록 안 됨
+        # 등록 안 된 fal 모델 → 기본 endpoint.
+        ep1 = genmod._previz_model_endpoint({"input": {"videoModel": "fal:not-registered-xyz"}})
+        if ep1 != default_endpoint:
+            bad.append(f"(fm-c) 등록 안 된 모델이 기본 endpoint 로 되돌려지지 않았습니다: {ep1}")
+        # 빈 값 → 기본 endpoint.
+        ep2 = genmod._previz_model_endpoint({"input": {}})
+        if ep2 != default_endpoint:
+            bad.append(f"(fm-c) 빈 videoModel 이 기본 endpoint 가 아닙니다: {ep2}")
+        # previz 미지원(등록됐지만 caps.previzCapable False) → 기본 endpoint.
+        genmod.vpoc_fal.find = lambda model: {"caps": {"previzCapable": False}} if model.endswith("i2v-plain") else None
+        ep3 = genmod._previz_model_endpoint({"input": {"videoModel": "fal:i2v-plain"}})
+        if ep3 != default_endpoint:
+            bad.append(f"(fm-c) previz 미지원 모델이 기본 endpoint 로 되돌려지지 않았습니다: {ep3}")
+        # 등록된 previzCapable → 그 endpoint 유지.
+        genmod.vpoc_fal.find = lambda model: {"caps": {"previzCapable": True}} if model.endswith("good-v2v") else None
+        ep4 = genmod._previz_model_endpoint({"input": {"videoModel": "fal:good-v2v"}})
+        if ep4 != "good-v2v":
+            bad.append(f"(fm-c) 등록된 previzCapable 모델 endpoint 가 유지되지 않았습니다: {ep4}")
+    except Exception as exc:  # noqa: BLE001
+        import traceback as _tb  # noqa: PLC0415
+        bad.append("(fm-c) 생성 모델 되돌림 검사 중 예외: " + repr(exc) + "\n" + _tb.format_exc()[:800])
+    finally:
+        genmod.vpoc_fal.find = gen_saved_find
+
+    # ---------------- (fm-d) 생성 payload: elements vs image_urls ----------------
+
+    # 공통 plan·seg·actors. 캐릭터 2명(둘 다 charId 있음, 색 마네킹).
+    def _gen_plan():
+        return {
+            "input": {"characters": [{"charId": "ch1", "roleName": "A"}, {"charId": "ch2", "roleName": "B"}]},
+            "conti": {
+                "cuts": [
+                    {"id": "c1", "panels": [0], "seconds": 4, "locationEn": "A room",
+                     "dialogueKo": "", "characters": [{"name": "에이", "actionEn": "stands"}]},
+                ],
+            },
+            "script": {"entries": [{"id": "e1", "panels": [0], "speaker": "에이", "lineKo": "안녕"}]},
+            "previz": {
+                "scenes": [
+                    {
+                        "locationId": "loc1",
+                        "actors": [
+                            {"id": "a1", "name": "에이", "color": "#4363d8", "charId": "ch1", "appearanceEn": "a man"},
+                            {"id": "a2", "name": "비", "color": "#e6194b", "charId": "ch2", "appearanceEn": "a woman"},
+                        ],
+                        "timeline": [
+                            {"cutId": "c1", "actors": [{"id": "a1"}, {"id": "a2"}]},
+                        ],
+                    }
+                ],
+                "shotBrief": {},
+            },
+        }
+
+    unit = {"id": "c1", "cutId": "c1", "recSegId": "seg1", "recordingKey": "rec/k.mp4",
+            "startSec": 0.0, "endSec": 4.0, "seconds": 4.0}
+
+    # 가짜: 캐릭터 로드(정면·후면 키), 이미지 로드, 비율 맞춤, 원작 패널.
+    gsaved = {
+        "load_char": genmod.characters.load_char,
+        "load_jpeg": genmod._load_jpeg,
+        "fit_ratio": genmod.imaging.fit_ratio,
+        "panel": genmod._segment_panel_jpeg,
+    }
+    fake_blobs = {
+        "rf-ch1": b"RF1", "rb-ch1": b"RB1", "wf-ch1": b"WF1", "wb-ch1": b"WB1",
+        "rf-ch2": b"RF2", "rb-ch2": b"RB2", "wf-ch2": b"WF2", "wb-ch2": b"WB2",
+    }
+
+    def fake_load_char(owner, char_id):
+        n = char_id[-1]
+        return (
+            {
+                "id": char_id, "name": "에이" if n == "1" else "비", "status": "ready",
+                "analysis": {"appearanceEn": "a person", "outfitEn": "an outfit"},
+                "variants": {
+                    "real": {"frontKey": "rf-" + char_id, "backKey": "rb-" + char_id, "sheetKey": ""},
+                    "webtoon": {"frontKey": "wf-" + char_id, "backKey": "wb-" + char_id, "sheetKey": ""},
+                },
+            },
+            "etag",
+        )
+
+    try:
+        genmod.characters.load_char = fake_load_char
+        genmod._load_jpeg = lambda key: fake_blobs.get(str(key or ""))
+        genmod.imaging.fit_ratio = lambda jpeg: jpeg  # 그대로(비율 맞춤 생략)
+        genmod._segment_panel_jpeg = lambda owner, pid, plan, seg: b"PANEL-JPEG"
+
+        plan = _gen_plan()
+
+        # (fm-d-1) elements 모델(caps.elementsField) → 기존과 동일(@Element, image_urls 없음(실사)).
+        caps_elements = {"elementsField": "elements", "videoField": "video_url",
+                         "keepAudioField": "keep_audio", "previzCapable": True}
+        built_real = genmod._previz_payload("o", "p", plan, unit, "real", caps=caps_elements)
+        if not built_real["elements"]:
+            bad.append("(fm-d) elements 모델 실사 payload 에 elements 가 없습니다")
+        if built_real["imageUrls"]:
+            bad.append("(fm-d) elements 모델 실사 payload 에 imageUrls 가 있습니다(실사는 없어야)")
+        if "@Element1" not in built_real["prompt"]:
+            bad.append("(fm-d) elements 모델 프롬프트에 @Element1 이 없습니다")
+
+        # (fm-d-2) image_urls 모델(caps.imageListField, max 2) → elements 없음·image_urls = 정면 순서·
+        #          프롬프트 "Image 1 is …" 번호 일치·maxItems 준수.
+        caps_imagelist = {"imageListField": "image_urls", "imageListMax": 2, "videoField": "video_url",
+                          "keepAudioField": "keep_audio", "previzCapable": True}
+        built_il = genmod._previz_payload("o", "p", plan, unit, "real", caps=caps_imagelist)
+        if built_il["elements"]:
+            bad.append(f"(fm-d) image_urls 모델에 elements 가 있습니다: {len(built_il['elements'])}")
+        imgs = built_il["imageUrls"]
+        # 실사 image_urls 는 보이는 인물 정면(순서는 _segment_actors 가 정한다). maxItems 2 준수.
+        if len(imgs) > 2:
+            bad.append(f"(fm-d) image_urls 가 maxItems(2) 를 넘습니다: {len(imgs)}")
+        if len(imgs) < 1:
+            bad.append("(fm-d) image_urls 모델에 참고 이미지가 없습니다")
+        # 프롬프트 번호: "Image 1 is" · 마네킹 색 매핑 "becomes the person in Image 1".
+        if "Image 1 is" not in built_il["prompt"]:
+            bad.append(f"(fm-d) image_urls 프롬프트에 'Image 1 is' 가 없습니다: {built_il['prompt'][:200]}")
+        if "becomes the person in Image 1" not in built_il["prompt"]:
+            bad.append("(fm-d) image_urls 프롬프트에 색 마네킹 ↔ Image 번호 매핑 문장이 없습니다")
+        # 핵심 불변식(설계자 지시서 057): CAST 의 "Image {n} is {name}" 번호가 실제 image_urls 순서와
+        # 반드시 같다. 이름 → 실사 정면 바이트 매핑(에이=RF1·비=RF2)으로, 프롬프트가 가리킨 n 번째
+        # 인물의 정면이 image_urls[n-1] 과 같은지 본다.
+        import re as _re_fmd  # noqa: PLC0415
+
+        name_to_front = {"에이": b"RF1", "비": b"RF2"}
+        for match in _re_fmd.finditer(r"Image (\d+) is ([^;:]+)", built_il["prompt"]):
+            n = int(match.group(1))
+            name = match.group(2).strip()
+            expect = name_to_front.get(name)
+            if expect is None:
+                continue  # charId 없는 인물(번호 없음)은 여기 안 걸린다
+            if n < 1 or n > len(imgs):
+                bad.append(f"(fm-d) CAST Image 번호 {n} 가 image_urls 범위를 벗어납니다(개수 {len(imgs)})")
+            elif imgs[n - 1] != expect:
+                bad.append(
+                    f"(fm-d) CAST 'Image {n} is {name}' 가 image_urls[{n - 1}] 와 다릅니다: "
+                    f"{imgs[n - 1]} != {expect}"
+                )
+
+        # (fm-d-3) 웹툰 image_urls: 인물 정면 + 그림체 참고 1장(원작 웹툰 컷), max 이내.
+        built_il_web = genmod._previz_payload("o", "p", plan, unit, "webtoon", caps=caps_imagelist)
+        web_imgs = built_il_web["imageUrls"]
+        if len(web_imgs) > 2:
+            bad.append(f"(fm-d) 웹툰 image_urls 가 maxItems(2) 를 넘습니다: {len(web_imgs)}")
+        if b"PANEL-JPEG" not in web_imgs:
+            bad.append("(fm-d) 웹툰 image_urls 에 그림체 참고 원작 컷(PANEL)이 없습니다")
+
+        # (fm-d-4) _submit_previz_edit 가 caps 필드 이름으로 본문을 만든다(video_url=컷 클립, image_urls).
+        prev_calls = []
+
+        def fake_previz_request(method, url, payload):
+            prev_calls.append({"method": method, "url": url, "payload": payload})
+            return {"request_id": "req-fm-d"}
+
+        gsaved_req = genmod._previz_request
+        gsaved_key = settings.FAL_KEY
+        try:
+            genmod._previz_request = fake_previz_request
+            settings.FAL_KEY = "dummy-fal-key"
+            genmod._submit_previz_edit(
+                endpoint="v2v-model",
+                caps=caps_imagelist,
+                video_mp4=b"CUT-CLIP",
+                prompt="hello",
+                output_prefix="pfx",
+                elements=[],
+                image_urls=[b"RF1", b"RF2"],
+            )
+            if not prev_calls:
+                bad.append("(fm-d) _submit_previz_edit 가 요청을 보내지 않았습니다")
+            else:
+                body = prev_calls[-1]["payload"]
+                if not str(body.get("video_url") or "").startswith("data:video/mp4;base64,"):
+                    bad.append("(fm-d) image_urls 모델 본문의 video_url(컷 클립) 이 data URI 가 아닙니다")
+                if "elements" in body:
+                    bad.append("(fm-d) image_urls 모델 본문에 elements 가 있습니다")
+                if not body.get("image_urls"):
+                    bad.append("(fm-d) image_urls 모델 본문에 image_urls 가 없습니다")
+                if body.get("keep_audio") is not False:
+                    bad.append(f"(fm-d) keep_audio 가 False 가 아닙니다: {body.get('keep_audio')}")
+        finally:
+            genmod._previz_request = gsaved_req
+            settings.FAL_KEY = gsaved_key
+    except Exception as exc:  # noqa: BLE001
+        import traceback as _tb  # noqa: PLC0415
+        bad.append("(fm-d) 생성 payload 검사 중 예외: " + repr(exc) + "\n" + _tb.format_exc()[:1000])
+    finally:
+        genmod.characters.load_char = gsaved["load_char"]
+        genmod._load_jpeg = gsaved["load_jpeg"]
+        genmod.imaging.fit_ratio = gsaved["fit_ratio"]
+        genmod._segment_panel_jpeg = gsaved["panel"]
+
+    if bad:
+        fail("fal 영상 모델 caps(fm) 검사 실패\n" + "\n".join(f"  {item}" for item in bad))
+    else:
+        ok(
+            "fal 영상 모델 caps(fm) 검사 (fm-a)extract_caps elements·imageList·previzCapable·기존 키 "
+            "(fm-b)등록 video-to-video 허용·deny 400 (fm-c)기본 모델·생성 되돌림 "
+            "(fm-d)payload elements vs image_urls·Image 번호·video_url 컷 (fm-e)vpoc 피커 회귀 없음"
+        )
+
+
 # ---------------------------------------------------------------- main
 
 
@@ -8770,6 +9321,7 @@ def main() -> int:
     check_fal_pricing()
     check_vnew_real_start()
     check_anime_style()
+    check_fal_model_caps()
     print()
     if warnings:
         print(f"경고 {len(warnings)}건")

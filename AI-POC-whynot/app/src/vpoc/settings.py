@@ -141,15 +141,36 @@ FAL_OPENAPI_URL = os.getenv("FAL_OPENAPI_URL", "https://fal.ai/api/openapi/queue
 # ARK 모델 ID("seedance-2-0" 등)와 겹치지 않게 접두사로 가른다.
 FAL_ID_PREFIX = "fal:"
 # 영상 단계에서 실제로 쓸 수 있는 fal 카테고리. 나머지는 카탈로그 목록에만 보이고 등록은 거절된다.
-FAL_VIDEO_CATEGORIES = ("text-to-video", "image-to-video")
+# video-to-video 추가(설계자 2026-10-22): 영상만들기_신규 ①의 프리비즈 방식은 영상 입력을 받는
+# 모델만 쓸 수 있으므로 등록을 허용한다. vpoc(옛 ②) 피커는 video-to-video/previzCapable 를 걸러
+# 기존 화면에 나타나지 않게 한다(ark.choices).
+FAL_VIDEO_CATEGORIES = ("text-to-video", "image-to-video", "video-to-video")
 # 카탈로그 조회에서 함께 보여 주는(목록만, 영상 단계 사용 불가) 카테고리.
 FAL_BROWSE_CATEGORIES = (
-    "text-to-video",
-    "image-to-video",
     "video-to-video",
+    "image-to-video",
+    "text-to-video",
     "image-to-3d",
     "text-to-3d",
 )
+# 등록 금지 endpoint 패턴(설계자 2026-10-22 지시: 사용 금지). fnmatch 글롭. 카탈로그 응답에는
+# 표시하되(화면이 [활성화] 를 비활성으로), 등록 요청이 오면 400 Denied. 기본에 seedance 2.0
+# fast 계열(`*seedance*2*fast*`)을 둔다. env(VPOC_FAL_DENY_ENDPOINTS, 쉼표 구분)로 덮어쓸 수 있다.
+FAL_DENY_ENDPOINTS = tuple(
+    item.strip()
+    for item in os.getenv("VPOC_FAL_DENY_ENDPOINTS", "*seedance*2*fast*").split(",")
+    if item.strip()
+)
+
+
+def is_denied_endpoint(endpoint: str) -> bool:
+    """endpoint 가 FAL_DENY_ENDPOINTS 글롭 중 하나에 맞으면 True(소문자 비교)."""
+    import fnmatch
+
+    eid = str(endpoint or "").strip().lower()
+    if not eid:
+        return False
+    return any(fnmatch.fnmatch(eid, pattern.lower()) for pattern in FAL_DENY_ENDPOINTS)
 
 
 # dual-style(실사+애니) — 화풍을 고르지 않고 항상 실사 영상을 먼저 만든 뒤 그 실사 영상을

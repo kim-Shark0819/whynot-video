@@ -354,7 +354,7 @@ def _new_previz_gen(plan: dict) -> dict:
         "genId": _gen_id(),
         "mode": "previz",
         "status": "running",  # running|done|partial|failed|cancelled
-        "videoModel": vnew_settings.VNEW_PREVIZ_EDIT_MODEL,
+        "videoModel": _previz_model_endpoint(plan),
         "createdAt": now_iso(),
         "units": units,
         "segments": [],  # 옛 데이터 보기용(새 gen 은 units 를 쓴다).
@@ -363,6 +363,41 @@ def _new_previz_gen(plan: dict) -> dict:
         "selected": None,  # None|"real"|"webtoon"
         "costUsd": 0.0,
     }
+
+
+# ---------------------------------------------------------------- 영상 모델 선택(설계자 2026-10-22)
+#
+# 프리비즈 방식은 ①의 input.videoModel(검증됨)로 고른 모델로 만든다. 모델은 "fal:<endpoint>" id 로
+# 저장되며, 못 고른/옛 값은 기본(VNEW_PREVIZ_EDIT_MODEL)으로 되돌린다. fal 큐·caps 조회는 endpoint
+# (fal: 접두사 없는) 문자열을 쓴다.
+
+
+def _previz_model_endpoint(plan: dict) -> str:
+    """이 계획이 쓸 프리비즈 영상 모델 endpoint(설계자 2026-10-22).
+
+    input.videoModel 이 기본 모델 또는 등록된 previzCapable fal 모델이면 그 endpoint, 아니면 기본.
+    """
+    default_endpoint = str(vnew_settings.VNEW_PREVIZ_EDIT_MODEL or "")
+    raw = str((plan.get("input") or {}).get("videoModel") or "")
+    if not raw:
+        return default_endpoint
+    endpoint = raw.split(":", 1)[-1] if raw.startswith(vpoc_settings.FAL_ID_PREFIX) else raw
+    if endpoint == default_endpoint:
+        return default_endpoint
+    # 등록된 previzCapable fal 모델만 허용. 그 밖은 기본으로 되돌린다.
+    item = vpoc_fal.find(vpoc_settings.FAL_ID_PREFIX + endpoint)
+    if item and (item.get("caps") or {}).get("previzCapable"):
+        return endpoint
+    return default_endpoint
+
+
+def _previz_caps(endpoint: str) -> dict:
+    """그 endpoint 의 caps(등록돼 있으면 레지스트리 caps). 기본 모델처럼 미등록이면 빈 dict.
+
+    빈 dict 는 '기본 Kling 방식(elements)'으로 다룬다(아래 _previz_payload).
+    """
+    item = vpoc_fal.find(vpoc_settings.FAL_ID_PREFIX + str(endpoint or ""))
+    return (item or {}).get("caps") or {}
 
 
 # ================================================================ 금액(estimate)
@@ -437,20 +472,41 @@ def _previz_units(plan: dict) -> list[dict]:
     return out
 
 
+def _previz_model_unit_price(endpoint: str) -> float:
+    """그 프리비즈 모델의 초당 단가(USD, 설계자 2026-10-22).
+
+    기본 모델은 vnew_settings.previz_edit_usd(1초) 로 계산(fal pricing 우선, 실패 시 기본값).
+    등록된 fal 모델은 fal pricing(초당)을, 못 받으면 기본 단가를 쓴다.
+    """
+    default_endpoint = str(vnew_settings.VNEW_PREVIZ_EDIT_MODEL or "")
+    if not endpoint or endpoint == default_endpoint:
+        return float(vnew_settings.previz_edit_usd(1))
+    price = vpoc_fal.pricing_for(vpoc_settings.FAL_ID_PREFIX + endpoint)
+    if not price:
+        price = vpoc_fal.pricing(endpoint)
+    if price and str(price.get("unit") or "").lower() == "seconds":
+        unit_price = float(price.get("unitPrice") or 0.0)
+        if unit_price > 0:
+            return unit_price
+    return float(vnew_settings.VNEW_PREVIZ_EDIT_USD_PER_S)
+
+
 def estimate(plan: dict) -> dict:
     """금액 미리보기(설계자 2026-10-22, ⑤ — 컷 단위).
 
-    컷마다 max(3, seconds) × 프리비즈 edit 단가 × 2(실사+웹툰). 반환:
+    컷마다 max(3, seconds) × 고른 모델의 초당 단가 × 2(실사+웹툰). 반환:
     {mode:"previz", videoModel, realUsd, webtoonUsd, totalUsd, units:[{id,cutId,seconds,realUsd,webtoonUsd}],
      segments:[...]}(segments 는 옛 화면 호환). 녹화가 없으면 totalUsd 0.
     """
+    endpoint = _previz_model_endpoint(plan)
+    per_sec = _previz_model_unit_price(endpoint)
     rows = []
     real_usd = 0.0
     webtoon_usd = 0.0
     for unit in _previz_units(plan):
         seconds = float(unit.get("seconds") or 0)
         billed = max(PREVIZ_MIN_CLIP_S, seconds)
-        cost = round(vnew_settings.previz_edit_usd(billed), 4)
+        cost = round(per_sec * billed, 4)
         real_usd += cost
         webtoon_usd += cost
         rows.append(
@@ -465,13 +521,14 @@ def estimate(plan: dict) -> dict:
     total = round(real_usd + webtoon_usd, 2)
     return {
         "mode": "previz",
-        "videoModel": vnew_settings.VNEW_PREVIZ_EDIT_MODEL,
+        "videoModel": endpoint,
         "realUsd": round(real_usd, 4),
         "webtoonUsd": round(webtoon_usd, 4),
         "totalUsd": total,
         "units": rows,
         "segments": rows,  # 옛 화면 호환(구간 합계 자리에 컷 합계를 보여 준다).
     }
+
 
 
 # ================================================================ 선행 조건 · 시작
@@ -1081,7 +1138,11 @@ def _do_submit_previz(owner: str, pid: str, gen_id: str, index: int, variant: st
         video_mp4 = _fetch_bytes(rec_key, bucket=vpoc_settings.VIDEO_BUCKET)
         clip = _cut_clip(video_mp4, unit)
 
-        built = _previz_payload(owner, pid, plan, unit, variant)
+        # 이 gen 이 쓸 모델 endpoint 와 그 caps(모델별 payload 어댑터, 설계자 2026-10-22).
+        endpoint = str(gen.get("videoModel") or vnew_settings.VNEW_PREVIZ_EDIT_MODEL)
+        caps = _previz_caps(endpoint)
+
+        built = _previz_payload(owner, pid, plan, unit, variant, caps=caps)
         prompt = built["prompt"]
         elements = built["elements"]
         image_urls = built["imageUrls"]
@@ -1089,6 +1150,8 @@ def _do_submit_previz(owner: str, pid: str, gen_id: str, index: int, variant: st
         unit_id = str(unit.get("id") or unit.get("cutId") or index)
         prefix = _seg_output_prefix(owner, pid, gen_id, unit_id + "-" + variant, attempt)
         result = _submit_previz_edit(
+            endpoint=endpoint,
+            caps=caps,
             video_mp4=clip["bytes"],
             prompt=prompt,
             output_prefix=prefix,
@@ -1439,15 +1502,28 @@ def _seg_cut_ids(seg: dict) -> list[str]:
     return [str(cid)] if cid else []
 
 
-def _previz_payload(owner: str, pid: str, plan: dict, seg: dict, variant: str) -> dict:
-    """한 컷·한 그림체의 제출 payload(elements · imageUrls · prompt)를 만든다(설계자 2026-10-22, ⑤).
+def _previz_payload(owner: str, pid: str, plan: dict, seg: dict, variant: str, *, caps: dict | None = None) -> dict:
+    """한 컷·한 그림체의 제출 payload(elements · imageUrls · prompt)를 만든다(설계자 2026-10-22).
 
-    - elements: charId 가 있는 **그 컷에 보이는** 인물 → {frontal_image_url: 기본 복장 정면,
-      reference_image_urls: [후면(비율 맞춤)]}. 실사 최대 4, 웹툰 최대 3. 5면 시트는 넣지 않는다.
-    - imageUrls: 웹툰만 — 그 장소 원작 웹툰 컷 1장(그림체 참고, 비율 맞춤). 실사는 넣지 않는다.
-    - prompt: _cut_prompt(CAST/SHOT/BLOCKING/ACTION/MOOD/SETTING/DIALOGUE/CONTINUITY). UTF-8 2,500바이트.
+    모델별 어댑터(caps):
+    - elementsField 가 있으면(또는 caps 가 비어 기본 Kling): 지금 방식 — elements[{frontal_image_url,
+      reference_image_urls:[후면]}] + CAST 의 @Element 매핑. 웹툰은 imageUrls 1장(원작 웹툰 컷).
+    - elements 가 없고 imageListField 가 있으면: 참고 이미지 = 그 컷에 보이는 인물의 기본 복장 정면
+      (실사/웹툰) 순서대로 + (웹툰) 그림체 참고 1장, imageListMax 이내. CAST 는 "Image {n} is {name}"
+      형식(이미지 번호 = 실제 순서), 마네킹 색 매핑 "The {color} mannequin becomes the person in Image {n}".
     elements+imageUrls 합계는 PREVIZ_MAX_INPUTS(4) 이내. charId 없는 인물은 CAST 색 문장에만.
     """
+    caps = caps or {}
+    # elementsField 가 명시돼 있으면 elements 모드. imageListField 만 있으면 imageList 모드.
+    # caps 가 비면(기본 Kling 미등록) elements 모드로 본다(기존 동작 유지).
+    use_image_list = bool(caps.get("imageListField")) and not caps.get("elementsField")
+    if use_image_list:
+        return _previz_payload_image_list(owner, pid, plan, seg, variant, caps)
+    return _previz_payload_elements(owner, pid, plan, seg, variant)
+
+
+def _previz_payload_elements(owner: str, pid: str, plan: dict, seg: dict, variant: str) -> dict:
+    """elements 방식(기존 Kling O3, 설계자 2026-10-22). @Element 매핑."""
     is_real = variant == "real"
     max_elements = vnew_settings.PREVIZ_REAL_MAX_ELEMENTS if is_real else vnew_settings.PREVIZ_WEBTOON_MAX_ELEMENTS
     max_image_urls = 0 if is_real else vnew_settings.PREVIZ_WEBTOON_MAX_IMAGE_URLS
@@ -1499,6 +1575,59 @@ def _previz_payload(owner: str, pid: str, plan: dict, seg: dict, variant: str) -
         image_urls = image_urls[: max(0, total_allowed - len(elements))]
 
     return {"elements": elements, "imageUrls": image_urls, "prompt": prompt}
+
+
+def _previz_payload_image_list(owner: str, pid: str, plan: dict, seg: dict, variant: str, caps: dict) -> dict:
+    """imageList 방식(설계자 2026-10-22). 참고 이미지 = 보이는 인물 정면 순서 + (웹툰) 그림체 참고 1장.
+
+    elements 는 비우고, image_urls(imageListField) 에 참고 이미지를 담는다. CAST 는 "Image {n} is
+    {name}" 번호와 "The {color} mannequin becomes the person in Image {n}" 매핑을 쓴다. 번호는 실제
+    image_urls 순서와 일치시킨다(이미지 1부터). imageListMax 이내.
+    """
+    is_real = variant == "real"
+    max_images = int(caps.get("imageListMax") or vpoc_fal.DEFAULT_IMAGE_LIST_MAX)
+
+    actors = _segment_actors(plan, seg)
+    char_by_id = _char_by_id(owner, plan)
+
+    image_urls: list[bytes] = []
+    cast: list[dict] = []
+    # (웹툰) 그림체 참고 1장 자리를 남겨 둔다.
+    style_slots = 1 if not is_real else 0
+    image_budget = max(0, max_images - style_slots)
+
+    for actor in actors:
+        color_name = actor.get("colorName") or "grey"
+        name = actor.get("name") or "a character"
+        char_id = actor.get("charId") or ""
+        char = char_by_id.get(char_id) if char_id else None
+        placed = False
+        if char and len(image_urls) < image_budget:
+            front_key = char.get("realFrontKey") if is_real else char.get("webtoonFrontKey")
+            front = _load_jpeg(str(front_key or ""))
+            if front:
+                image_urls.append(imaging.fit_ratio(front))
+                image_no = len(image_urls)  # 1부터, 실제 순서와 일치
+                appearance = ((char.get("appearanceEn") or "") + " " + (char.get("outfitEn") or "")).strip()
+                cast.append({"colorName": color_name, "name": name, "imageNo": image_no, "appearance": appearance})
+                placed = True
+        if not placed:
+            cast.append({"colorName": color_name, "name": name, "imageNo": None, "appearance": actor.get("appearanceEn") or ""})
+
+    # (웹툰) 그림체 참고 1장(원작 웹툰 컷). 인물 이미지 뒤에 둔다(번호는 인물에만 쓴다).
+    has_style_ref = False
+    if style_slots and len(image_urls) < max_images:
+        panel = _segment_panel_jpeg(owner, pid, plan, seg)
+        if panel is not None:
+            image_urls.append(imaging.fit_ratio(panel))
+            has_style_ref = True
+
+    prompt = _cut_prompt(plan, seg, variant, cast=cast, has_image_ref=has_style_ref)
+    # imageListMax 이내로 자른다(안전).
+    if len(image_urls) > max_images:
+        image_urls = image_urls[:max_images]
+
+    return {"elements": [], "imageUrls": image_urls, "prompt": prompt}
 
 
 def _location_name_en(plan: dict, seg: dict) -> str:
@@ -1624,14 +1753,14 @@ def _scene_summary(scene_en: str, max_chars: int = 350) -> str:
 def _cut_prompt(plan: dict, seg: dict, variant: str, *, cast: list[dict], has_image_ref: bool) -> str:
     """컷 프롬프트(영상 모델 전달문, 설계자 2026-10-22, ⑤). 영어, UTF-8 2,500바이트 이내.
 
-    순서 고정: @Video1 안내 → CAST → SHOT → BLOCKING → ACTION → MOOD → SETTING → DIALOGUE → CONTINUITY.
+    순서 고정: ASSETS(자료 번호 목록) → @Video1 안내 → CAST → SHOT → BLOCKING → ACTION → MOOD → SETTING → DIALOGUE → CONTINUITY.
     SETTING = 컷별 backgroundEn + 장소 요약(sceneEn 앞 2~3문장, 최대 350자). 장소 문단 전체는 넣지 않는다.
-    촬영 지시서(shotBrief)를 쓰되, 없으면 그 자리는 비운다(CAST·SHOT·CONTINUITY 는 반드시 유지).
+    촬영 지시서(shotBrief)를 쓰되, 없으면 그 자리는 비운다(ASSETS·CAST·SHOT·CONTINUITY 는 반드시 유지).
 
     바이트 초과 시 줄이는 순서(각 단계는 **넘친 만큼만** 문장 단위로 줄이고, 한도 안에 들어오면 즉시
     멈춘다): ① SETTING 의 장소 요약 → ② SETTING 의 backgroundEn → ③ MOOD → ④ BLOCKING 뒤쪽 문장
     → ⑤ DIALOGUE 의 deliveryEn → ⑥ SHOT 뒤쪽 문장 → ⑦ 마지막에만 ACTION 뒤쪽 문장.
-    CAST·CONTINUITY·ACTION 첫 문장은 절대 지우지 않는다. **한도 안이면 아무 것도 지우지 않는다.**
+    ASSETS·CAST·CONTINUITY·ACTION 첫 문장은 절대 지우지 않는다. **한도 안이면 아무 것도 지우지 않는다.**
     """
     is_real = variant == "real"
     cut_ids = _seg_cut_ids(seg)
@@ -1671,13 +1800,25 @@ def _cut_prompt(plan: dict, seg: dict, variant: str, *, cast: list[dict], has_im
         return body.strip()
 
     cast_sentences = []
+    # ASSETS 줄 재료(설계자 2026-10-22): 번호로 매긴 입력 자료 목록. elements 모델은 @Element{n},
+    # 이미지 목록 모델은 Image {n}, 웹툰 그림체 참고는 @Image{k}. 모델이 자료를 번호로 읽게 한다.
+    asset_refs: list[str] = []
     for member in cast:
         color = member.get("colorName") or "grey"
         name = member.get("name") or "a character"
         ref = member.get("elementRef") or ""
+        image_no = member.get("imageNo")
         appearance = _clean_appearance(member.get("appearance") or "")
-        if ref:
+        if image_no:
+            # imageList 모델(설계자 2026-10-22): "Image {n} is {name}" + 마네킹 색 매핑.
+            # "The {color} mannequin becomes the person in Image {n}".
+            sentence = (
+                f"Image {image_no} is {name}; the {color} mannequin becomes the person in Image {image_no}"
+            )
+            asset_refs.append(f"Image {image_no} = {name} reference sheet")
+        elif ref:
             sentence = f"The {color} mannequin is {ref}, {name}"
+            asset_refs.append(f"{ref} = {name} reference sheet")
         else:
             sentence = f"The {color} mannequin is {name}"
         if appearance:
@@ -1686,6 +1827,17 @@ def _cut_prompt(plan: dict, seg: dict, variant: str, *, cast: list[dict], has_im
         sentence = sentence.rstrip(".").rstrip() + "."
         cast_sentences.append(sentence)
     cast_line = "CAST — only these people are in this shot: " + (" ".join(cast_sentences) if cast_sentences else "no one is visible.")
+
+    # ASSETS — 맨 앞 줄(설계자 2026-10-22, 뉴테이크 프롬프트 규칙). 자료를 번호로 나열한다.
+    # @Video1 = 이 샷의 러프 3D 프리비즈, @Element{n}/Image{n} = 각 인물 참고 시트,
+    # @Image{k} = 원작 웹툰 컷(그림체 참고, 웹툰만).
+    asset_parts = ["@Video1 = rough 3D previz of this shot (blocking and camera only)"]
+    asset_parts.extend(asset_refs)
+    if has_image_ref and not is_real:
+        # 웹툰: 그림체 참고 원작 컷은 인물 참고 다음 번호(@Image{k}).
+        style_no = len([m for m in cast if m.get("imageNo")]) + 1
+        asset_parts.append(f"@Image{style_no} = original webtoon panel for drawing style")
+    assets_line = "ASSETS: " + "; ".join(asset_parts) + "."
 
     # SHOT — 촬영 지시서 카메라 문장. 없으면 최소 안내(@Video1 따름)만.
     shot_en = str(brief.get("shotEn") or "").strip()
@@ -1723,12 +1875,27 @@ def _cut_prompt(plan: dict, seg: dict, variant: str, *, cast: list[dict], has_im
             parts.append(piece)
         return "DIALOGUE: " + " ".join(parts)
 
+    # CONTINUITY — @Video1 재현 + 인물 교체 + 임의 추가 금지 + 고퀄 실사/웹툰 마감(설계자 2026-10-22,
+    # 뉴테이크 실전 프롬프트). 웹툰판은 live-action 대신 원작 웹툰 그림체로 마감한다.
+    if is_real:
+        finish_clause = (
+            "Turn the rough 3D frame into a high-end live-action shot: natural skin texture, detailed "
+            "fabric, realistic lighting and shadows, and a richly detailed real location."
+        )
+    else:
+        finish_clause = (
+            "Turn the rough 3D frame into the original webtoon's drawing style: natural skin texture, "
+            "detailed fabric, realistic lighting and shadows, and a richly detailed location, all drawn "
+            "in that webtoon style."
+        )
     continuity = (
-        "CONTINUITY: Match @Video1 exactly for framing, lens, camera position and movement, and where "
-        "each person is in the frame; mannequin stiffness is NOT acting — perform the ACTION naturally. "
-        "No other people. Every colored mannequin becomes the person named above; no mannequins remain. "
+        "CONTINUITY: Reproduce @Video1's composition, camera angle, camera movement, positions, blocking, "
+        "actions, timing and background structure as exactly as possible; mannequin stiffness is NOT "
+        "acting — perform the ACTION naturally. Replace each mannequin with the referenced person, keeping "
+        "face, hairstyle, body type, costume and accessories identical to the reference in every shot. "
         "The mannequin colors are only placeholders — dress each person exactly as their reference image, "
-        "not in the mannequin color. "
+        "not in the mannequin color; no mannequins remain. Do not add any action, person or scene that is "
+        "not in @Video1. " + finish_clause + " "
         "No text, no subtitles, no speech bubbles."
     )
 
@@ -1748,7 +1915,7 @@ def _cut_prompt(plan: dict, seg: dict, variant: str, *, cast: list[dict], has_im
         mood_line = ("MOOD: " + mood) if mood else ""
         setting_line = _setting_line(background, scene_summary)
         dlg = _dialogue_line(with_delivery)
-        blocks = [head, cast_line, shot_line, blocking_line, action_line, mood_line, setting_line, dlg, continuity]
+        blocks = [assets_line, head, cast_line, shot_line, blocking_line, action_line, mood_line, setting_line, dlg, continuity]
         return "\n".join(b for b in blocks if b)
 
     budget = vnew_settings.PREVIZ_PROMPT_TARGET  # 바이트 상한(2500).
@@ -1970,7 +2137,7 @@ def _segment_panel_jpeg(owner: str, pid: str, plan: dict, seg: dict) -> bytes | 
     return jpegs[0] if jpegs else None
 
 
-def _submit_previz_edit(*, video_mp4: bytes, prompt: str, output_prefix: str, elements: list[dict], image_urls: list[bytes] | None = None) -> dict:
+def _submit_previz_edit(*, endpoint: str = "", caps: dict | None = None, video_mp4: bytes, prompt: str, output_prefix: str, elements: list[dict], image_urls: list[bytes] | None = None) -> dict:
     """프리비즈 영상 → 그림체 변환 제출(fal video-to-video/edit, elements 지원).
 
     vpoc.fal.submit_edit 는 image_urls 만 받고 elements 는 못 보내므로(수정 금지), vpoc.fal._request
@@ -1979,7 +2146,8 @@ def _submit_previz_edit(*, video_mp4: bytes, prompt: str, output_prefix: str, el
 
     이미지·영상은 모두 data URI 로 보낸다(외부 저장소에 올리지 않는다, 설계자 보안 규칙).
     """
-    endpoint = str(vnew_settings.VNEW_PREVIZ_EDIT_MODEL or "").strip()
+    endpoint = str(endpoint or vnew_settings.VNEW_PREVIZ_EDIT_MODEL or "").strip()
+    caps = caps or {}
     if not vpoc_settings.FAL_KEY:
         raise VpocError("vnew.generate", "FalKeyMissing", "fal API 키가 설정되지 않았습니다.", 409)
     if not endpoint:
@@ -1992,11 +2160,18 @@ def _submit_previz_edit(*, video_mp4: bytes, prompt: str, output_prefix: str, el
     def _img_uri(jpeg: bytes) -> str:
         return "data:image/jpeg;base64," + base64.b64encode(jpeg).decode("ascii")
 
+    # caps 로 필드 이름을 고른다(모델별). caps 가 비면(기본 Kling 미등록) 기존 고정 이름을 쓴다.
+    video_field = str(caps.get("videoField") or "video_url")
+    elements_field = str(caps.get("elementsField") or ("elements" if not caps else ""))
+    image_list_field = str(caps.get("imageListField") or ("image_urls" if not caps else ""))
+    keep_audio_field = str(caps.get("keepAudioField") or ("keep_audio" if not caps else ""))
+
     body: dict = {
         "prompt": prompt,
-        "video_url": vpoc_fal._video_data_uri(video_mp4),
-        "keep_audio": False,
+        video_field: vpoc_fal._video_data_uri(video_mp4),
     }
+    if keep_audio_field:
+        body[keep_audio_field] = False
     payload_elements = []
     for element in elements or []:
         front = element.get("frontal_image_url")
@@ -2007,10 +2182,10 @@ def _submit_previz_edit(*, video_mp4: bytes, prompt: str, output_prefix: str, el
         if refs:
             item["reference_image_urls"] = refs
         payload_elements.append(item)
-    if payload_elements:
-        body["elements"] = payload_elements
-    if image_urls:
-        body["image_urls"] = [_img_uri(bytes(j)) for j in image_urls if isinstance(j, (bytes, bytearray))]
+    if payload_elements and elements_field:
+        body[elements_field] = payload_elements
+    if image_urls and image_list_field:
+        body[image_list_field] = [_img_uri(bytes(j)) for j in image_urls if isinstance(j, (bytes, bytearray))]
 
     url = f"{vpoc_settings.FAL_QUEUE_URL}/{endpoint}"
     result = _previz_request("POST", url, body)
@@ -2033,17 +2208,24 @@ def _previz_request(method: str, url: str, payload: dict) -> dict:
 
 
 def _charge_previz(owner: str, pid: str, gen_id: str, result: dict, seconds: float) -> None:
-    """프리비즈 edit 제출 1회 계상(제출 성공 시점). 키 = 작업 토큰(중복 방지)."""
+    """프리비즈 edit 제출 1회 계상(제출 성공 시점). 키 = 작업 토큰(중복 방지).
+
+    모델은 result.provider("fal:<endpoint>")의 endpoint, 단가는 그 모델의 초당 단가(설계자 2026-10-22).
+    """
     token = str(result.get("clientRequestToken") or "")
     if not token:
         return
+    provider = str(result.get("provider") or "")
+    endpoint = provider.split(":", 1)[-1] if provider else str(vnew_settings.VNEW_PREVIZ_EDIT_MODEL)
+    per_sec = _previz_model_unit_price(endpoint)
+    secs = float(seconds or vpoc_settings.DURATION_S)
     try:
         vpoc_ledger.charge(
             token,
             kind="video",
-            model=vnew_settings.VNEW_PREVIZ_EDIT_MODEL,
-            units=seconds or vpoc_settings.DURATION_S,
-            usd=vnew_settings.previz_edit_usd(seconds or None),
+            model=endpoint or vnew_settings.VNEW_PREVIZ_EDIT_MODEL,
+            units=secs,
+            usd=round(per_sec * secs, 4),
             user=owner,
             project_id=pid,
             plan_id=gen_id,
