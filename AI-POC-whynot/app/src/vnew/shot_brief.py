@@ -49,7 +49,13 @@ _BRIEF_SYSTEM = (
     "expression, and timing within the shot. Describe the background that is actually visible in this "
     "framing (materials, colors, objects, depth, focus/bokeh) and the light (source, direction, quality, "
     "color temperature, time of day, weather). No metaphors, no story recap, no names of people who are "
-    "not in the shot. Answer ONLY by calling emit_brief exactly once, writing every cut given to you."
+    "not in the shot. "
+    "Mannequin colors (blue, orange, …) are only identification placeholders in the previz; never "
+    "describe clothing, skin or hair by mannequin color — use the character descriptions given. "
+    "Never use internal labels such as 'side +1', 'side -1', 'crossed side', 'line side'; instead state "
+    "screen positions explicitly (e.g. 'Ui-jun is frame right facing screen left'). sceneEn must "
+    "describe only the place, weather, time and light — no people, no clothing, no camera rules. "
+    "Answer ONLY by calling emit_brief exactly once, writing every cut given to you."
 )
 
 _BRIEF_TOOL = {
@@ -232,14 +238,18 @@ def run_brief(owner: str, pid: str, task_id: str) -> None:
             used_model = model or used_model
             scene_en = str(payload.get("sceneEn") or "").strip()
             if scene_en:
-                scene_map[location_id] = scene_en
+                # 저장 전 정리: sceneEn 은 장소만 — 인물 이름·"wears" 문장과 내부 라벨 문장을 지운다.
+                scene_en = _strip_internal_labels(scene_en, where=f"scene {location_id}")
+                scene_en = _strip_scene_people(scene_en, _person_names(plan), where=f"scene {location_id}")
+                if scene_en:
+                    scene_map[location_id] = scene_en
             for item in payload.get("cuts") or []:
                 if not isinstance(item, dict):
                     continue
                 cut_id = str(item.get("cutId") or "").strip()
                 if not cut_id:
                     continue
-                cuts_map[cut_id] = _normalize_cut_brief(item)
+                cuts_map[cut_id] = _sanitize_cut_brief(_normalize_cut_brief(item), cut_id=cut_id)
 
         _commit(owner, pid, task_id, scene_map, cuts_map, used_model)
     except Exception as exc:  # noqa: BLE001
@@ -268,6 +278,93 @@ def _normalize_cut_brief(item: dict) -> dict:
         "backgroundEn": str(item.get("backgroundEn") or "").strip(),
         "dialogue": dialogue,
     }
+
+
+# 저장 전 정리(sanitize) — 내부 용어·장소 문단 규칙 위반을 지운다(설계자 2026-10-22).
+# 내부 라벨("side +1"/"side -1"/"crossed side"/"line side")이 든 문장은 어느 필드든 지운다.
+# sceneEn 은 장소만 묘사해야 하므로 인물 이름·"wears" 가 든 문장도 지운다.
+_INTERNAL_LABEL_RE_SRC = r"side\s*[+-]?1|crossed side|line side"
+
+
+def _split_sentences_sb(text: str) -> list[str]:
+    import re as _re  # noqa: PLC0415
+
+    body = str(text or "").strip()
+    if not body:
+        return []
+    parts = _re.split(r"(?<=[.!?])\s+", body)
+    return [p.strip() for p in parts if p.strip()]
+
+
+def _strip_internal_labels(text: str, *, where: str = "") -> str:
+    """내부 라벨이 든 문장을 지운다. 지운 게 있으면 로그로 남긴다."""
+    import re as _re  # noqa: PLC0415
+
+    body = str(text or "").strip()
+    if not body:
+        return ""
+    pattern = _re.compile(_INTERNAL_LABEL_RE_SRC, _re.IGNORECASE)
+    kept, dropped = [], []
+    for sentence in _split_sentences_sb(body):
+        if pattern.search(sentence):
+            dropped.append(sentence)
+        else:
+            kept.append(sentence)
+    if dropped:
+        log.info("vnew.shot_brief.sanitize_label where=%s dropped=%s", where, " | ".join(dropped)[:300])
+    return " ".join(kept).strip()
+
+
+def _strip_scene_people(text: str, names: list[str], *, where: str = "scene") -> str:
+    """sceneEn 에서 인물 이름·'wears' 가 든 문장을 지운다(장소만 묘사). 로그로 남긴다."""
+    import re as _re  # noqa: PLC0415
+
+    body = str(text or "").strip()
+    if not body:
+        return ""
+    name_patterns = []
+    for name in names:
+        n = str(name or "").strip()
+        if n:
+            name_patterns.append(_re.compile(r"\b" + _re.escape(n) + r"\b", _re.IGNORECASE))
+    wears = _re.compile(r"\bwears?\b", _re.IGNORECASE)
+    kept, dropped = [], []
+    for sentence in _split_sentences_sb(body):
+        has_name = any(p.search(sentence) for p in name_patterns)
+        if has_name or wears.search(sentence):
+            dropped.append(sentence)
+        else:
+            kept.append(sentence)
+    if dropped:
+        log.info("vnew.shot_brief.sanitize_scene where=%s dropped=%s", where, " | ".join(dropped)[:300])
+    return " ".join(kept).strip()
+
+
+def _sanitize_cut_brief(brief: dict, *, cut_id: str = "") -> dict:
+    """컷 brief 의 각 텍스트 필드에서 내부 라벨 문장을 지운다(dialogue.deliveryEn 포함)."""
+    out = dict(brief)
+    for field in ("shotEn", "blockingEn", "actionEn", "moodEn", "backgroundEn"):
+        out[field] = _strip_internal_labels(out.get(field) or "", where=f"cut {cut_id} {field}")
+    dialogue = []
+    for d in out.get("dialogue") or []:
+        if not isinstance(d, dict):
+            continue
+        dd = dict(d)
+        dd["deliveryEn"] = _strip_internal_labels(dd.get("deliveryEn") or "", where=f"cut {cut_id} deliveryEn")
+        dialogue.append(dd)
+    out["dialogue"] = dialogue
+    return out
+
+
+def _person_names(plan: dict) -> list[str]:
+    """프리비즈 scene.actors 의 인물 이름 목록(sceneEn 정리용)."""
+    names: set[str] = set()
+    for scene in (plan.get("previz") or {}).get("scenes") or []:
+        for actor in scene.get("actors") or []:
+            n = str(actor.get("name") or "").strip()
+            if n:
+                names.add(n)
+    return sorted(names, key=len, reverse=True)
 
 
 def _commit(owner: str, pid: str, task_id: str, scene_map: dict, cuts_map: dict, model: str) -> None:
@@ -395,26 +492,40 @@ def _location_prompt(plan: dict, owner: str, name_en: str, loc: dict | None, cut
             )
         fit = fit_by_cut.get(cut_id) or {}
         if fit:
-            lines.append(
-                "  camera fit — "
-                f"lens: {fit.get('lens') or ''}mm; distanceM: {fit.get('distanceM') or ''}; "
-                f"side: {fit.get('side') or ''}; crossed: {bool(fit.get('crossed'))}."
-            )
-        # 보이는 인물(그 컷 timeline actors) → 색·이름·캐릭터 외형.
+            # 내부 라벨(side +1/-1, crossed)은 영상 모델에게 의미가 없다 → 화면 위치로 풀어서 준다.
+            lens = fit.get("lens") or ""
+            distance = fit.get("distanceM") or ""
+            crossed = bool(fit.get("crossed"))
+            if crossed:
+                screen_note = (
+                    "the camera is on the opposite side of the line for this cut, so the people appear on "
+                    "the opposite side of the frame from the other cuts"
+                )
+            else:
+                screen_note = "the camera stays on the usual side of the line"
+            lines.append(f"  camera fit — lens: {lens}mm; distanceM: {distance}; {screen_note}.")
+        # 보이는 인물(그 컷 timeline actors) → 이름 + 캐릭터 데이터(외형·옷·그림체). 마네킹 색·Astra
+        # 배우 외형이 아니라 characters analysis 의 appearanceEn·outfitEn·styleEn 을 쓴다.
         visible = gen_mod._segment_actors(plan, {"cutIds": [cut_id]})
         who = []
         for actor in visible:
             name = actor.get("name") or ""
-            color = actor.get("colorName") or ""
             char = char_by_id.get(actor.get("charId") or "")
             appearance = ""
             outfit = ""
+            style = ""
             if char:
                 appearance = str(char.get("appearanceEn") or "")
                 outfit = str(char.get("outfitEn") or "")
-            who.append(f"{name} ({color}; {appearance} {outfit})".strip())
+                style = str(char.get("styleEn") or "")
+            desc_parts = [p for p in (appearance, outfit) if p]
+            desc = " ".join(desc_parts).strip()
+            entry = f"{name}: {desc}".strip().rstrip(":").strip() if desc else name
+            if style:
+                entry += f" (drawing style: {style})"
+            who.append(entry.strip())
         if who:
-            lines.append("  visible people: " + "; ".join(who))
+            lines.append("  visible people (describe them from this character data, not by mannequin color): " + "; ".join(who))
         # conti cut characters 의 행동·상황·샷·카메라·감정.
         conti_cut = cuts_by_id.get(cut_id) or {}
         char_notes = []
