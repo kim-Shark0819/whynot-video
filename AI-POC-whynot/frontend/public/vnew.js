@@ -1625,7 +1625,8 @@
     var genRunning = gen.status === "running";
     var previzDesigning = previz.status === "designing";
     var locBuilding = locationsBuilding(plan);
-    if (task.status !== "running" && !genRunning && !previzDesigning && !locBuilding) return;
+    var briefRunning = (previz.shotBrief || {}).status === "running"; // 촬영 지시서 만드는 중(약 1분)도 다시 불러온다
+    if (task.status !== "running" && !genRunning && !previzDesigning && !locBuilding && !briefRunning) return;
     var interval = PLAN_POLL_MS;
     if (genRunning) {
       // 이미지(opening)·제출 단계면 더 자주(3초), 그 밖에는 5초.
