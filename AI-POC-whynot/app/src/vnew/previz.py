@@ -110,6 +110,66 @@ TEXTURE_CONTENT_TYPES = {
     ".webp": "image/webp",
 }
 
+# 머리카락 색 키워드 → hex(설계자 2026-10-22). 캐릭터 외형(analysis 의 hairEn/appearanceEn)에서
+# 색 단어를 찾아 마네킹 머리카락 색을 정한다. 못 찾으면 기본(어두운 회색).
+HAIR_COLOR_BY_KEYWORD = (
+    ("blond", "#e8cf7a"),
+    ("blonde", "#e8cf7a"),
+    ("black", "#1a1a1a"),
+    ("brown", "#5b3a1e"),
+    ("brunette", "#5b3a1e"),
+    ("gray", "#a9a9a9"),
+    ("grey", "#a9a9a9"),
+    ("silver", "#a9a9a9"),
+    ("white", "#efefef"),
+    ("red", "#9b2d20"),
+    ("ginger", "#9b2d20"),
+)
+HAIR_COLOR_DEFAULT = "#2b2b2b"
+
+
+def hair_color_for(*texts: str) -> str:
+    """외형 문구(hairEn·appearanceEn 등)에서 머리카락 색 키워드를 찾아 hex 를 돌려준다.
+
+    여러 문구를 합쳐 소문자로 보고, HAIR_COLOR_BY_KEYWORD 순서대로 처음 맞는 색을 쓴다. 없으면 기본값.
+    예: "short blond hair" → #e8cf7a, "black hair" → #1a1a1a.
+    """
+    joined = " ".join(str(t or "") for t in texts).lower()
+    for keyword, hex_color in HAIR_COLOR_BY_KEYWORD:
+        if keyword in joined:
+            return hex_color
+    return HAIR_COLOR_DEFAULT
+
+
+# 콘티 actionEn 키워드 → gesture(옛 캐시로 grammar.actions 가 없을 때의 대비책, 설계자 2026-10-22).
+# 순서대로 처음 맞는 규칙을 쓴다. (키워드 튜플, gesture).
+_GESTURE_KEYWORD_RULES = (
+    (("tears", "wipe", "crying", "cry"), "wipe_tears"),
+    (("kiss", "lean in", "lean toward", "leans in"), "lean_in"),
+    (("both cheeks", "cups", "cup her face", "cup his face", "holds her face", "holds his face"), "both_hands_other_cheeks"),
+    (("cheek", "her face", "his face", "touches the face"), "hand_on_other_cheek"),
+    (("own face", "hand to face", "hand to mouth", "covers mouth", "cheek with hand"), "hand_to_own_face"),
+    (("other's chest", "on the chest of", "against the chest", "pushes the chest", "hand to his chest", "hand to her chest"), "press_hand_to_other_chest"),
+    (("chest", "heart", "clutches"), "hand_on_chest"),
+    (("laugh", "laughing", "chuckle"), "laugh"),
+    (("looks down", "lowers head", "head down", "bows head"), "look_down"),
+    (("looks up", "raises head", "head up"), "look_up"),
+    (("nods", "nodding", "nod"), "nod"),
+    (("turns to", "turns head", "looks at"), "turn_head_to_other"),
+)
+
+
+def gesture_from_action(action_en: str) -> str:
+    """콘티 actionEn 한 문장에서 제스처 하나를 고른다(옛 캐시 대비책). 못 찾으면 "none"."""
+    text = str(action_en or "").lower()
+    if not text:
+        return "none"
+    for keywords, gesture in _GESTURE_KEYWORD_RULES:
+        if any(k in text for k in keywords):
+            return gesture
+    return "none"
+
+
 
 # ================================================================ 키 규칙
 
@@ -666,6 +726,7 @@ _DESIGN_CUT_ACTOR = {
         "pose": {"type": "string"},
         "moveTo": {"type": "array", "items": {"type": "number"}},
         "gesture": {"type": "string"},
+        "gestureTarget": {"type": "string"},
         "speaking": {"type": "boolean"},
     },
 }
@@ -999,6 +1060,10 @@ def run_design(owner: str, pid: str, task_id: str) -> None:
             else:
                 scenes.append(next(designed_iter))
 
+        # 2.5) 외형(머리카락 색)·연기(gesture·gestureTarget)를 장면 인물·timeline 에 채운다.
+        _apply_appearance(owner, scenes, chars)
+        _apply_gestures(scenes, groups, grammar_by_cut)
+
         # 3) camera: 장소마다 scene_line → 컷마다 place_cut. (progress: camera, total=컷 수)
         _set_progress(owner, pid, task_id, step="camera", done=0, total=total_cuts)
         fit = _place_cameras(owner, pid, scenes, groups, grammar_by_cut, overrides, task_id=task_id)
@@ -1213,6 +1278,103 @@ def _apply_cut_result(scene: dict, cut: dict, result: dict) -> None:
     cut["actors"] = new_actors
 
 
+# ================================================================ 외형·연기 적용(머리카락·제스처)
+
+
+def _char_appearance_text(owner: str, char_id: str) -> str:
+    """캐릭터 analysis 의 hairEn·appearanceEn 문구를 합쳐 돌려준다(없으면 빈 문자열)."""
+    if not char_id:
+        return ""
+    try:
+        from . import characters as char_mod  # noqa: PLC0415
+
+        char, _ = char_mod.load_char(owner, char_id)
+    except Exception:  # noqa: BLE001
+        return ""
+    analysis = (char or {}).get("analysis") or {}
+    parts = [str(analysis.get("hairEn") or ""), str(analysis.get("appearanceEn") or "")]
+    return " ".join(p for p in parts if p)
+
+
+def _apply_appearance(owner: str, scenes: list[dict], chars: list[dict]) -> None:
+    """각 장면 인물의 hairColor 를 캐릭터 외형(hairEn/appearanceEn)으로 정한다.
+
+    charId 가 있으면 그 캐릭터 analysis 문구에서, 없으면 scene actor 의 appearanceEn 에서 키워드를 찾는다.
+    schema 가 이미 기본값을 넣어 뒀으므로, 외형에서 색을 찾았을 때만 덮어쓴다.
+    """
+    text_by_charid: dict[str, str] = {}
+    for scene in scenes or []:
+        for actor in scene.get("actors") or []:
+            char_id = str(actor.get("charId") or "")
+            if char_id and char_id not in text_by_charid:
+                text_by_charid[char_id] = _char_appearance_text(owner, char_id)
+            appearance = str(actor.get("appearanceEn") or "")
+            hair = hair_color_for(text_by_charid.get(char_id, ""), appearance)
+            if hair != HAIR_COLOR_DEFAULT:
+                actor["hairColor"] = hair
+            elif not actor.get("hairColor"):
+                actor["hairColor"] = HAIR_COLOR_DEFAULT
+
+
+def _apply_gestures(scenes: list[dict], groups: list[dict], grammar_by_cut: dict) -> None:
+    """컷마다 보이는 인물의 timeline actor gesture·gestureTarget 을 채운다.
+
+    - grammar.actions 가 있으면 그 컷 action(name→actor)으로 gesture·target 을 쓴다. target 은 상대
+      actor id(이름 일치). 말하는 컷(speaking)은 그대로 둔다.
+    - grammar.actions 가 없으면(옛 캐시) 콘티 cut.characters[].actionEn 키워드 규칙으로 배정한다.
+    """
+    cut_meta: dict[str, dict] = {}
+    for group in groups or []:
+        for cut in group.get("cuts") or []:
+            cut_meta[str(cut.get("cutId") or "")] = cut
+
+    for scene in scenes or []:
+        # 이 장면의 이름→actor id(제스처 target 해석용).
+        id_by_name: dict[str, str] = {}
+        for actor in scene.get("actors") or []:
+            name = str(actor.get("name") or "").strip()
+            if name:
+                id_by_name[name] = str(actor.get("id") or "")
+        for cut in scene.get("timeline") or []:
+            cut_id = str(cut.get("cutId") or "")
+            grammar = grammar_by_cut.get(cut_id) if isinstance(grammar_by_cut, dict) else None
+            actions = (grammar or {}).get("actions") if isinstance(grammar, dict) else None
+            # name → (gesture, target_name) 맵.
+            gesture_by_name: dict[str, tuple[str, str]] = {}
+            if actions:
+                for act in actions:
+                    nm = str((act or {}).get("name") or "").strip()
+                    if not nm:
+                        continue
+                    gesture_by_name[nm] = (
+                        str((act or {}).get("gesture") or "none"),
+                        str((act or {}).get("target") or "none"),
+                    )
+            else:
+                # 옛 캐시 대비책: 콘티 actionEn 키워드.
+                meta = cut_meta.get(cut_id) or {}
+                for ch in meta.get("characters") or []:
+                    nm = str((ch or {}).get("name") or "").strip()
+                    if not nm:
+                        continue
+                    g = gesture_from_action(str((ch or {}).get("actionEn") or ""))
+                    gesture_by_name[nm] = (g, "none")
+
+            name_by_id = {v: k for k, v in id_by_name.items()}
+            for ca in cut.get("actors") or []:
+                aid = str(ca.get("id") or "")
+                nm = name_by_id.get(aid, "")
+                entry = gesture_by_name.get(nm)
+                if not entry:
+                    continue
+                gesture, target_name = entry
+                if gesture and gesture != "none":
+                    ca["gesture"] = gesture
+                    target_id = id_by_name.get(target_name.strip()) if target_name and target_name != "none" else None
+                    if target_id and target_id != aid:
+                        ca["gestureTarget"] = target_id
+
+
 def _place_cameras(owner, pid, scenes, groups, grammar_by_cut, overrides, *, task_id="") -> dict:
     """장소마다 scene_line → 컷마다 place_cut. scenes 를 제자리에서 고치고 fit dict 를 돌려준다.
 
@@ -1259,6 +1421,13 @@ def _place_cameras(owner, pid, scenes, groups, grammar_by_cut, overrides, *, tas
             g_local = dict(g)
             g_local["_crossed"] = crossed
             side = -base_side if crossed else base_side
+            # 익스트림 클로즈업 하한(설계자 2026-10-22): 마네킹은 ECU 로는 정보가 없다(하늘색 공 하나).
+            # place_cut 결과가 ECU 면 프리비즈는 한 단계 넓은 CU 로 렌더하고, fit 에 pushInTo:"ECU" 를
+            # 남긴다(⑤ shot_brief 가 읽어 프롬프트가 "push in to an extreme close-up" 으로 쓴다).
+            push_in_to = ""
+            if str(g_local.get("shotSize") or "") == "ECU":
+                g_local["shotSize"] = "CU"
+                push_in_to = "ECU"
             try:
                 result = previz_camera.place_cut(g_local, _actors_in_cut(scene, cut), room, side)
             except Exception as exc:  # noqa: BLE001
@@ -1284,6 +1453,8 @@ def _place_cameras(owner, pid, scenes, groups, grammar_by_cut, overrides, *, tas
                 "minBodyGapM": rfit.get("minBodyGapM"),
                 "needsLean": bool(rfit.get("needsLean")),
             }
+            if push_in_to:
+                fit[cut_id]["pushInTo"] = push_in_to
             if cut_id in overrides:
                 fit[cut_id]["override"] = True
             if task_id:
@@ -2202,6 +2373,13 @@ def approve(owner: str, pid: str, *, force: bool = False) -> dict:
         return previz
 
     _, previz = plan_mod.mutate_plan(owner, pid, mutator)
+    # 승인 성공 → 촬영 지시서 작성을 자동으로 시작한다(⑤, 설계자 2026-10-22). 진행 중/실패는 조용히 무시.
+    try:
+        from . import shot_brief as brief_mod  # noqa: PLC0415
+
+        brief_mod.start_brief_safe(owner, pid)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("vnew.previz.approve.brief_start_failed pid=%s err=%s", pid, str(exc)[:200])
     return previz
 
 
@@ -2502,6 +2680,17 @@ def _probe_bytes_seconds(body: bytes, ctype: str) -> float:
 # ================================================================ 보기(previz_view)
 
 
+def _shot_brief_view(plan: dict) -> dict:
+    """촬영 지시서(shotBrief) 보기. shot_brief 모듈에 위임(순환 import 피해 늦게 import)."""
+    try:
+        from . import shot_brief as brief_mod  # noqa: PLC0415
+
+        return brief_mod.brief_view(plan)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("vnew.previz.shot_brief_view_failed err=%s", str(exc)[:200])
+        return {"status": "none", "error": "", "model": "", "scene": {}, "cuts": {}, "updatedAt": "", "task": {}}
+
+
 def previz_view(owner: str, pid: str, plan: dict) -> dict:
     """plan_view 의 previz — status, scenes(JSON), 텍스처 presigned URL, 승인·녹화 상태."""
     previz = plan.get("previz") or new_previz()
@@ -2552,6 +2741,7 @@ def previz_view(owner: str, pid: str, plan: dict) -> dict:
         "extraPromptKo": previz.get("extraPromptKo") or "",
         "extraCutId": previz.get("extraCutId") or "",
         "lastRebuild": previz.get("lastRebuild"),
+        "shotBrief": _shot_brief_view(plan),
     }
 
 

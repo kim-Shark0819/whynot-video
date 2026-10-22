@@ -347,3 +347,38 @@ def prepare_for_anime(source_path: str, output_path: str, workdir: str) -> dict:
     final_seconds = probe_duration(current) or seconds
     final_height = probe_height(current) or height
     return {"path": current, "seconds": final_seconds, "height": final_height}
+
+
+
+def pad_to_seconds(source_path: str, output_path: str, *, target_sec: float) -> str:
+    """영상을 마지막 프레임 복제(freeze)로 `target_sec` 까지 늘린다(설계자 2026-10-22, ⑤ 컷 단위).
+
+    ## 왜 필요한가
+
+    컷 단위 생성에서 3초보다 짧은 컷은 영상 모델(fal video-to-video)이 거절한다(3~15초만 받음).
+    그래서 짧은 컷을 마지막 프레임으로 3초까지 채워 제출하고, 결과는 합칠 때 원래 길이로 자른다.
+
+    tpad=stop_mode=clone 으로 마지막 프레임을 복제해 늘린다(무음, 재인코딩). 원본이 이미 target
+    이상이면 그대로 복사한다.
+    """
+    if not source_path or not os.path.exists(source_path):
+        raise StitchError("길이를 채울 영상이 없습니다.")
+    target = float(target_sec or 0.0)
+    current = probe_duration(source_path)
+    if target <= 0 or (current and current >= target - 0.05):
+        shutil.copyfile(source_path, output_path)
+        return output_path
+    binary = ffmpeg_path()
+    command = [
+        binary, "-y", "-hide_banner", "-loglevel", "error",
+        "-i", source_path,
+        "-vf", f"tpad=stop_mode=clone:stop_duration={max(0.0, target - (current or 0.0)):.3f}",
+        "-c:v", "libx264", "-preset", "veryfast", "-crf", "20",
+        "-pix_fmt", "yuv420p", "-an", "-movflags", "+faststart", output_path,
+    ]
+    result = _run(command)
+    if result.returncode != 0 or not os.path.exists(output_path) or not os.path.getsize(output_path):
+        detail = result.stderr.decode("utf-8", errors="replace")[:300]
+        raise StitchError(f"영상 길이를 채우지 못했습니다(→{target:.2f}s): {detail}")
+    logger.info("Pad to %.2fs bytes=%s", target, os.path.getsize(output_path))
+    return output_path

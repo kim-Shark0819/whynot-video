@@ -36,27 +36,61 @@ SIDES = ("north", "east", "south", "west")
 LIGHT_KINDS = ("sun", "lamp")
 PROP_SHAPES = ("box", "cylinder")
 POSES = ("stand", "sit", "kneel", "walk", "lie")
-GESTURES = ("point", "bow", "hands_on_knees", "cover_face")
+# 제스처(연기 동작). 렌더러 vnew-previz.js 의 _applyGesture 와 **문자열이 같아야** 한다(검사 mf-a).
+# 앞 4개는 옛 동작(point·bow·hands_on_knees·cover_face), 나머지는 2026-10-22 추가한 연기 동작.
+# 상대가 필요한 동작(hand_on_other_cheek·both_hands_other_cheeks·press_hand_to_other_chest·
+# lean_in·turn_head_to_other)은 timeline actor 의 gestureTarget(상대 actor id)으로 방향을 잡는다.
+GESTURES = (
+    "point",
+    "bow",
+    "hands_on_knees",
+    "cover_face",
+    "hand_to_own_face",
+    "wipe_tears",
+    "hand_on_other_cheek",
+    "both_hands_other_cheeks",
+    "hand_on_chest",
+    "press_hand_to_other_chest",
+    "lean_in",
+    "laugh",
+    "look_down",
+    "look_up",
+    "nod",
+    "turn_head_to_other",
+)
+# 기본 머리카락 색(hairColor 가 비거나 잘못된 값이면). 몸 색보다 어두운 회색.
+DEFAULT_HAIR_COLOR = "#2b2b2b"
 
 # 인물 고유 원색 팔레트(서로 확실히 다르게 — 설계자 "등장 인물은 고유의 색으로"). 색이 겹치면
 # 이 순서대로 아직 안 쓴 색을 배정한다. 밝은 원색 위주로 배경(회색조)과 구분되게.
-ACTOR_PALETTE = (
-    "#e6194b",  # 빨강
-    "#3cb44b",  # 초록
-    "#4363d8",  # 파랑
-    "#f58231",  # 주황
-    "#911eb4",  # 보라
-    "#42d4f4",  # 하늘
-    "#f032e6",  # 자홍
-    "#bfef45",  # 연두
-    "#fabed4",  # 분홍
-    "#469990",  # 청록
-    "#dcbeff",  # 라벤더
-    "#9a6324",  # 갈색
-    "#800000",  # 적갈
-    "#000075",  # 남색
-    "#a9a9a9",  # 회색
+#
+# 설계자 2026-10-22(⑤ 색 이름 고정): 영상 모델이 "The #00e5ff mannequin" 같은 hex 를 못 읽어
+# 인물이 뒤바뀌는 문제가 있었다. 그래서 팔레트를 **이름 있는 색 목록** [(hex, name)] 으로 두고,
+# 배우 색은 Astra 가 준 값을 쓰지 않고 **등장 순서대로** 이 팔레트에서 중복 없이 배정한다.
+# 이름은 영상 모델이 확실히 아는 평범한 색 단어(blue·orange·green…)만 쓴다.
+ACTOR_PALETTE_NAMED = (
+    ("#4363d8", "blue"),
+    ("#f58231", "orange"),
+    ("#3cb44b", "green"),
+    ("#e6194b", "red"),
+    ("#911eb4", "purple"),
+    ("#ffe119", "yellow"),
+    ("#f032e6", "magenta"),
+    ("#469990", "teal"),
+    ("#42d4f4", "cyan"),
+    ("#9a6324", "brown"),
+    ("#fabed4", "pink"),
+    ("#bfef45", "lime"),
+    ("#dcbeff", "lavender"),
+    ("#000075", "navy"),
+    ("#808000", "olive"),
 )
+
+# 옛 코드 호환: 색 hex 만 쓰는 곳(있다면)을 위해 hex 튜플도 둔다(이름 순서와 같다).
+ACTOR_PALETTE = tuple(hex_color for hex_color, _name in ACTOR_PALETTE_NAMED)
+
+# hex(소문자) → 팔레트 이름. generate._color_name 이 먼저 본다.
+PALETTE_NAME_BY_HEX = {hex_color.lower(): name for hex_color, name in ACTOR_PALETTE_NAMED}
 
 # 기본 색(벽·바닥·소품). 배경은 '하나의 덩어리'로 보이게 무채색 계열.
 DEFAULT_FLOOR_COLOR = "#8a8a8a"
@@ -111,6 +145,16 @@ def _color(value, default: str) -> str:
     """색 문자열을 받는다(#rrggbb · 색 이름). 비면 기본값."""
     text = _str(value)
     return text or default
+
+
+def _hex_color(value, default: str) -> str:
+    """#rrggbb(또는 #rgb) hex 만 받는다. 아니면 default. hairColor 정리에 쓴다(mf-b)."""
+    text = _str(value).lower()
+    if len(text) in (4, 7) and text.startswith("#"):
+        hexpart = text[1:]
+        if all(c in "0123456789abcdef" for c in hexpart):
+            return text
+    return default
 
 
 def _vec3(value, default: tuple[float, float, float]) -> list[float]:
@@ -247,33 +291,36 @@ def _normalize_props(raw_props, room: dict) -> list[dict]:
 
 
 def _normalize_actors(raw_actors) -> list[dict]:
-    """장면 인물 목록. 색이 겹치면 팔레트에서 다시 배정(서로 확실히 다르게)."""
+    """장면 인물 목록. 색은 **Astra 가 준 값을 버리고** 등장 순서대로 팔레트에서 배정한다.
+
+    설계자 2026-10-22(⑤): 영상 모델이 임의 hex(예: #00e5ff)를 못 읽어 인물이 뒤바뀌므로, 배우 색은
+    모델이 뭘 주든 무시하고 ACTOR_PALETTE_NAMED 에서 **순서대로 중복 없이** 배정한다. 팔레트를 다
+    쓰면(인물이 아주 많으면) 회색으로 둔다.
+    """
     actors: list[dict] = []
     if not isinstance(raw_actors, list):
         raw_actors = []
-    used_colors: set[str] = set()
-    palette_iter = iter(ACTOR_PALETTE)
+
+    palette_index = 0
 
     def _next_palette() -> str:
-        for color in palette_iter:
-            if color.lower() not in used_colors:
-                return color
+        nonlocal palette_index
+        if palette_index < len(ACTOR_PALETTE):
+            color = ACTOR_PALETTE[palette_index]
+            palette_index += 1
+            return color
         # 팔레트를 다 썼으면(인물이 많으면) 회색으로.
         return "#a9a9a9"
 
     for index, item in enumerate(raw_actors):
         if not isinstance(item, dict):
             continue
-        color = _color(item.get("color"), "")
-        key = color.lower()
-        if not color or key in used_colors:
-            color = _next_palette()
-            key = color.lower()
-        used_colors.add(key)
+        color = _next_palette()
         actor = {
             "id": _str(item.get("id")) or f"a{index + 1}",
             "name": _str(item.get("name")),
             "color": color,
+            "hairColor": _hex_color(item.get("hairColor"), DEFAULT_HAIR_COLOR),
             "heightM": _round(_clamp(_num(item.get("heightM"), 1.7), ACTOR_HEIGHT_MIN_M, ACTOR_HEIGHT_MAX_M)),
         }
         char_id = _str(item.get("charId"))
@@ -338,6 +385,10 @@ def _normalize_cut_actors(raw_actors, actor_ids: list[str], room: dict) -> list[
             "gesture": gesture,
             "speaking": _as_bool(item.get("speaking")),
         }
+        # gestureTarget: 상대 actor id(존재하는 id 만, 자기 자신 제외). 그 외엔 넣지 않는다(mf-b).
+        target = _str(item.get("gestureTarget"))
+        if target and target in (actor_ids or []) and target != actor_id:
+            cut_actor["gestureTarget"] = target
         move = item.get("moveTo")
         if isinstance(move, (list, tuple)):
             mv = _vec3(move, (pos[0], 0.0, pos[2]))

@@ -528,6 +528,21 @@ def create_blueprint(deps: VnewDependencies) -> Blueprint:
         except Exception as exc:  # noqa: BLE001
             return _fail(exc)
 
+    @bp.post("/p/<pid>/previz/brief")
+    @deps.require_auth
+    def previz_brief(pid: str):
+        """촬영 지시서 (다시) 만들기(⑤, 설계자 2026-10-22). 진행 중이면 409 Briefing."""
+        try:
+            from . import shot_brief  # noqa: PLC0415
+
+            owner = _project_for(pid, write=True)
+            plan_mod.load_or_create(owner, pid)
+            task_id = shot_brief.start_brief(owner, pid)
+            data, _ = plan_mod.load_plan(owner, pid)
+            return jsonify({"ok": True, "taskId": task_id, "plan": plan_mod.plan_view(owner, pid, data)}), 202
+        except Exception as exc:  # noqa: BLE001
+            return _fail(exc)
+
     @bp.post("/p/<pid>/previz/recordings/<seg_id>")
     @deps.require_auth
     def previz_recording(pid: str, seg_id: str):

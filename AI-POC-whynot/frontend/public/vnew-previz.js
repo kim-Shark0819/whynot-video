@@ -31,6 +31,29 @@ const DEFAULT_WIDTH = 1280;
 const DEFAULT_HEIGHT = 720;
 const RECORD_FPS = 24;
 
+/* 제스처(연기 동작) 목록 — previz_schema.GESTURES 와 **문자열이 같아야** 한다(검사 mf-a).
+   앞 4개는 옛 동작, 나머지는 2026-10-22 추가한 연기 동작. 상대가 필요한 동작은 cut actor 의
+   gestureTarget(상대 id)으로 팔·기울기·목 방향을 그 사람 쪽으로 계산한다. */
+const GESTURES = [
+  "point",
+  "bow",
+  "hands_on_knees",
+  "cover_face",
+  "hand_to_own_face",
+  "wipe_tears",
+  "hand_on_other_cheek",
+  "both_hands_other_cheeks",
+  "hand_on_chest",
+  "press_hand_to_other_chest",
+  "lean_in",
+  "laugh",
+  "look_down",
+  "look_up",
+  "nod",
+  "turn_head_to_other",
+];
+const DEFAULT_HAIR_COLOR = "#2b2b2b";
+
 /* 벽 한 면의 위치·회전. north 는 z=-depth/2 를 바라보는 안쪽 면.
    (x, z, rotationY) 를 돌려준다. 평면(PlaneGeometry)은 +z 를 향하므로 방 안쪽을 보게 돌린다. */
 function wallTransform(side, width, depth) {
@@ -80,10 +103,14 @@ function clamp01(t) {
    관절이 이어진 사람 모양. 각 부위는 Group(피벗)에 Mesh 를 매달아, 피벗을 돌리면
    무릎·팔꿈치가 자연스럽게 굽는다. 떨어진 상자를 쓰지 않는다. heightM 로 전체를 스케일. */
 class Mannequin {
-  constructor(color, heightM) {
+  constructor(color, heightM, hairColor) {
     this.group = new THREE.Group();
     const mat = new THREE.MeshStandardMaterial({ color: colorOf(color), roughness: 0.6, metalness: 0.0 });
     this.mat = mat;
+    // 얼굴 표식·머리카락은 몸 색과 대비되는 재질. 머리카락은 actor.hairColor(없으면 기본 어두운 회색).
+    this.faceMat = new THREE.MeshStandardMaterial({ color: 0xffffff, roughness: 0.5 });
+    this.darkMat = new THREE.MeshStandardMaterial({ color: 0x222222, roughness: 0.5 });
+    this.hairMat = new THREE.MeshStandardMaterial({ color: colorOf(hairColor, DEFAULT_HAIR_COLOR), roughness: 0.85 });
 
     // 기준 키 1.7m 에 맞춘 치수. heightM 로 전체 group 을 비례 조정한다.
     const scale = (Number(heightM) || 1.7) / 1.7;
@@ -110,6 +137,39 @@ class Mannequin {
     head.position.y = 0.13;
     head.castShadow = true;
     this.neck.add(head);
+
+    // --- 얼굴 표식(정면 +z): 머리의 앞·뒤를 영상 모델이 구분하게 한다(설계자 2026-10-22) ---
+    // 머리 반지름 r=0.13. 눈·코·입을 머리 앞면(+z)에 붙인다. 머리 중심(head.position)을 기준으로.
+    const r = 0.13;
+    // 흰 눈 2개: 지름 0.035(반지름 0.0175), 좌우 간격 0.07(±0.035), 머리 중심 높이 +0.02, 앞으로 r 近처.
+    const eyeGeo = new THREE.SphereGeometry(0.0175, 10, 8);
+    const eyeL = new THREE.Mesh(eyeGeo, this.faceMat);
+    eyeL.position.set(0.035, 0.02, r * 0.93);
+    head.add(eyeL);
+    const eyeR = new THREE.Mesh(eyeGeo, this.faceMat);
+    eyeR.position.set(-0.035, 0.02, r * 0.93);
+    head.add(eyeR);
+    // 어두운 코: 작은 원뿔이 앞으로 0.03 돌출(눈 아래).
+    const nose = new THREE.Mesh(new THREE.ConeGeometry(0.022, 0.05, 10), this.darkMat);
+    nose.rotation.x = Math.PI / 2; // 끝이 +z 를 향하게
+    nose.position.set(0, -0.005, r + 0.03);
+    head.add(nose);
+    // 입 선: 얇은 어두운 막대(가로로 긴 상자), 코 아래.
+    const mouth = new THREE.Mesh(new THREE.BoxGeometry(0.055, 0.012, 0.01), this.darkMat);
+    mouth.position.set(0, -0.055, r * 0.95);
+    head.add(mouth);
+    // --- 머리카락 캡: 머리 위·뒤쪽 반구를 hairColor 로 덮는다(앞머리 선은 이마까지) ---
+    // 위 반구(phi 0~절반)를 덮고, 뒤로 더 내려 뒤통수·목덜미까지 가린다. 앞은 눈 위(이마)까지만.
+    // thetaStart=0(위), thetaLength≈3/4π 로 위·뒤를 덮고 앞면 아래(얼굴)는 비운다. phi 는 뒤쪽으로 치우침.
+    // 정수리 전체 캡(이마 위까지) + 뒤쪽 반(phi π~2π = -z 쪽)만 목덜미까지 내린 조각. 앞 얼굴은 비운다.
+    const hairTop = new THREE.Mesh(new THREE.SphereGeometry(r * 1.04, 16, 8, 0, Math.PI * 2, 0, Math.PI * 0.4), this.hairMat);
+    const hairBack = new THREE.Mesh(new THREE.SphereGeometry(r * 1.04, 16, 12, Math.PI, Math.PI, 0, Math.PI * 0.72), this.hairMat);
+    [hairTop, hairBack].forEach((hair) => {
+      hair.position.set(0, 0.01, 0);
+      hair.castShadow = true;
+      head.add(hair);
+    });
+    this.head = head;
 
     // 팔(어깨 피벗 → 위팔 → 팔꿈치 → 아래팔). 좌우.
     this.shoulderL = this._makeArm(mat, 0.22);
@@ -158,8 +218,10 @@ class Mannequin {
     return { pivot, elbow: knee };
   }
 
-  /* 포즈·제스처·발화를 매 프레임 적용한다. t 는 장면 시각(초) — 걷기·끄덕임 위상에 쓴다. */
-  apply(pose, gesture, speaking, t) {
+  /* 포즈·제스처·발화를 매 프레임 적용한다. t 는 장면 시각(초) — 걷기·끄덕임·반복 동작 위상에 쓴다.
+     targetYaw 는 gestureTarget(상대) 쪽으로 돌릴 마네킹 로컬 yaw(rad, 없으면 null) — 상대가 필요한
+     동작(뺨 감싸기·가슴에 손·기울이기·목 돌리기)의 팔·기울기·목 방향을 그 사람 쪽으로 잡는다. */
+  apply(pose, gesture, speaking, t, targetYaw) {
     // 기본 자세로 되돌린 뒤 포즈별로 굽힌다.
     this.hips.position.y = 0.9;
     this.hips.rotation.set(0, 0, 0);
@@ -203,7 +265,7 @@ class Mannequin {
     }
     if (pose !== "lie") this.group.rotation.x = 0;
 
-    this._applyGesture(gesture);
+    this._applyGesture(gesture, t, targetYaw);
 
     if (speaking) {
       // 머리를 살짝 끄덕임.
@@ -226,7 +288,10 @@ class Mannequin {
     leg.elbow.rotation.x = kneeX;
   }
 
-  _applyGesture(gesture) {
+  _applyGesture(gesture, t, targetYaw) {
+    const time = Number(t) || 0;
+    // 상대 쪽으로 돌릴 각도(로컬 yaw). 없으면 정면(0). 오른팔 뻗기를 그 각도로 흔든다.
+    const aim = typeof targetYaw === "number" ? targetYaw : 0;
     switch (gesture) {
       case "point":
         // 오른팔을 앞으로 뻗는다.
@@ -250,6 +315,72 @@ class Mannequin {
         this.shoulderL.elbow.rotation.x = 1.2;
         this.shoulderR.elbow.rotation.x = 1.2;
         break;
+      case "hand_to_own_face":
+        // 오른손을 자기 뺨/입 쪽으로.
+        this.shoulderR.pivot.rotation.set(-Math.PI * 0.7, 0, -0.35);
+        this.shoulderR.elbow.rotation.x = 1.5;
+        break;
+      case "wipe_tears": {
+        // 손등으로 눈가, 짧게 왕복(주기 ~0.7초).
+        const wob = Math.sin(time * 9) * 0.15;
+        this.shoulderR.pivot.rotation.set(-Math.PI * 0.75 + wob, 0, -0.3);
+        this.shoulderR.elbow.rotation.x = 1.7;
+        break;
+      }
+      case "hand_on_other_cheek":
+        // 오른팔을 앞·옆(상대 쪽)으로 뻗어 상대 얼굴 높이로.
+        this.shoulderR.pivot.rotation.set(-Math.PI / 2, aim, -0.1);
+        this.shoulderR.elbow.rotation.x = 0.3;
+        break;
+      case "both_hands_other_cheeks":
+        // 두 팔을 앞으로 뻗어 상대 얼굴을 감싼다.
+        this.shoulderL.pivot.rotation.set(-Math.PI / 2, aim, 0.15);
+        this.shoulderR.pivot.rotation.set(-Math.PI / 2, aim, -0.15);
+        this.shoulderL.elbow.rotation.x = 0.3;
+        this.shoulderR.elbow.rotation.x = 0.3;
+        break;
+      case "hand_on_chest":
+        // 오른손을 자기 가슴에.
+        this.shoulderR.pivot.rotation.set(-Math.PI * 0.5, 0, -0.5);
+        this.shoulderR.elbow.rotation.x = 1.3;
+        break;
+      case "press_hand_to_other_chest":
+        // 한 손을 앞 상대 가슴 높이로 뻗는다.
+        this.shoulderR.pivot.rotation.set(-Math.PI / 2, aim, -0.1);
+        this.shoulderR.elbow.rotation.x = 0.1;
+        break;
+      case "lean_in":
+        // 상체를 상대 쪽으로 0.35rad 기울이고 머리 약간 숙임.
+        this.spine.rotation.x = 0.35;
+        this.spine.rotation.y = aim * 0.5;
+        this.neck.rotation.x = 0.2;
+        break;
+      case "laugh": {
+        // 머리 뒤로 젖혔다 오기 + 어깨 들썩(반복, 주기 ~0.8초).
+        const ph = Math.sin(time * 8);
+        this.neck.rotation.x = -0.35 - ph * 0.15;
+        this.spine.rotation.x = -0.1;
+        this.shoulderL.pivot.rotation.x = ph * 0.15;
+        this.shoulderR.pivot.rotation.x = ph * 0.15;
+        break;
+      }
+      case "look_down":
+        // 머리 숙임.
+        this.neck.rotation.x = 0.4;
+        break;
+      case "look_up":
+        // 머리 듦.
+        this.neck.rotation.x = -0.4;
+        break;
+      case "nod": {
+        // 끄덕임(반복, 주기 ~0.7초).
+        this.neck.rotation.x = 0.15 + Math.sin(time * 9) * 0.2;
+        break;
+      }
+      case "turn_head_to_other":
+        // 목을 상대 쪽으로 돌린다.
+        this.neck.rotation.y = aim;
+        break;
       default:
         break;
     }
@@ -262,6 +393,9 @@ class Mannequin {
       }
     });
     if (this.mat) this.mat.dispose();
+    [this.faceMat, this.darkMat, this.hairMat].forEach((m) => {
+      if (m && typeof m.dispose === "function") m.dispose();
+    });
   }
 }
 
@@ -436,7 +570,7 @@ class PrevizScene {
 
   _buildActors() {
     (this.data.actors || []).forEach((actor) => {
-      const mannequin = new Mannequin(actor.color, actor.heightM);
+      const mannequin = new Mannequin(actor.color, actor.heightM, actor.hairColor);
       this.root.add(mannequin.group);
       this.actors[actor.id] = { mannequin, data: actor };
       this.disposables.push({ dispose: () => mannequin.dispose() });
@@ -485,21 +619,39 @@ class PrevizScene {
     // 인물: 위치(moveTo 선형 이동)·방향·포즈·제스처·발화.
     const cutActors = cut.actors || [];
     const seen = {};
+    // 먼저 각 인물의 이번 프레임 발 위치(이동 보간 포함)를 모은다 — gestureTarget 방향 계산에 쓴다.
+    const posById = {};
+    cutActors.forEach((ca) => {
+      if (!this.actors[ca.id]) return;
+      const base = vec3(ca.pos, 0, 0, 0);
+      let x = base.x;
+      let z = base.z;
+      if (Array.isArray(ca.moveTo)) {
+        const to = vec3(ca.moveTo, base.x, 0, base.z);
+        x = lerp(base.x, to.x, frac);
+        z = lerp(base.z, to.z, frac);
+      }
+      posById[ca.id] = { x, z };
+    });
     cutActors.forEach((ca) => {
       const entry = this.actors[ca.id];
       if (!entry) return;
       seen[ca.id] = true;
-      const basePos = vec3(ca.pos, 0, 0, 0);
-      let px = basePos.x;
-      let pz = basePos.z;
-      if (Array.isArray(ca.moveTo)) {
-        const to = vec3(ca.moveTo, basePos.x, 0, basePos.z);
-        px = lerp(basePos.x, to.x, frac);
-        pz = lerp(basePos.z, to.z, frac);
-      }
+      const self = posById[ca.id] || { x: 0, z: 0 };
+      const px = self.x;
+      const pz = self.z;
+      const facing = (Number(ca.facingDeg) || 0) * Math.PI / 180;
       entry.mannequin.group.position.set(px, 0, pz);
-      entry.mannequin.group.rotation.y = ((Number(ca.facingDeg) || 0) * Math.PI) / 180;
-      entry.mannequin.apply(ca.pose || "stand", ca.gesture || null, !!ca.speaking, t);
+      entry.mannequin.group.rotation.y = facing;
+      // gestureTarget 이 있으면 그 상대 쪽으로 돌릴 마네킹 로컬 yaw 를 구한다(세계 방위 - 내 facing).
+      let targetYaw = null;
+      const tgt = ca.gestureTarget ? posById[ca.gestureTarget] : null;
+      if (tgt) {
+        // three 의 +z 를 '앞'으로 쓰므로 atan2(dx, dz) 가 세계 yaw. 내 facing 을 빼 로컬로.
+        const worldYaw = Math.atan2(tgt.x - px, tgt.z - pz);
+        targetYaw = worldYaw - facing;
+      }
+      entry.mannequin.apply(ca.pose || "stand", ca.gesture || null, !!ca.speaking, t, targetYaw);
 
       // 인물 라벨 오버레이 위치(머리 위).
       entry._overlayPos = new THREE.Vector3(px, (Number(entry.data.heightM) || 1.7) + 0.2, pz);
