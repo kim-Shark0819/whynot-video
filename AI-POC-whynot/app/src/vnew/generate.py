@@ -29,6 +29,7 @@ import os
 import secrets
 import tempfile
 import threading
+import time
 from datetime import datetime, timezone
 
 from .. import stitcher
@@ -48,6 +49,35 @@ from . import previz_schema
 from . import settings as vnew_settings
 
 log = logging.getLogger("vpoc")
+
+# ⑤ OOM 완화(설계자 2026-10-23). 준비 단계(녹화 받기→클립 자르기→payload→본문 직렬화·제출)를
+# 프로세스 전역에서 직렬화한다. 동시 4칸이 각자 큰 바이트(video·clip·built·body)를 메모리에 쌓아
+# 512Mi 파드가 OOMKilled 됐다. 세마포어로 한 번에 VNEW_GEN_PREPARE_CONCURRENCY(기본 1)칸만 준비한다.
+# 조회(poll)는 세마포어 밖(가볍다). 설정값을 모듈 로드 시점 1회만 읽어 상한을 고정한다.
+_PREPARE_SEM = threading.BoundedSemaphore(max(1, int(vnew_settings.VNEW_GEN_PREPARE_CONCURRENCY or 1)))
+
+
+def _rss_mb() -> float:
+    """현재 프로세스 RSS(MB). 못 구하면 -1(관측 로그용, 설계자 2026-10-23).
+
+    리눅스는 /proc/self/status VmRSS(kB)를 읽는다. 없으면 resource.getrusage(ru_maxrss)로.
+    ru_maxrss 단위는 리눅스 kB·맥 바이트라 리눅스(kB) 기준으로 환산한다. 둘 다 실패하면 -1.
+    """
+    try:
+        with open("/proc/self/status", "r", encoding="ascii", errors="ignore") as handle:
+            for line in handle:
+                if line.startswith("VmRSS:"):
+                    kb = float(line.split()[1])
+                    return round(kb / 1024.0, 1)
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        import resource  # noqa: PLC0415
+
+        maxrss = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+        return round(float(maxrss) / 1024.0, 1)
+    except Exception:  # noqa: BLE001
+        return -1.0
 
 # ================================================================ 상수
 
@@ -1086,15 +1116,20 @@ def _drive_previz_pass(owner: str, pid: str, gen_id: str):
 
 
 def _reconcile_prepare_stale_previz(gen: dict) -> bool:
-    """preparing 이 15분 초과면 queued 로 되돌린다(선점 해제, 프리비즈 모드)."""
+    """preparing 이 stale 기준을 넘으면 queued 로 되돌린다(선점 해제, 프리비즈 모드).
+
+    기준은 VNEW_PREPARE_STALE_S(기본 300초, 설계자 2026-10-23 ⑤ OOM 완화). 파드가 OOMKilled 되어
+    드라이버 스레드가 사라져도 이 시간 뒤 다른(또는 재시작된) 드라이버가 다시 선점해 재시도한다.
+    """
     changed = False
     now = datetime.now(timezone.utc)
+    stale_s = max(1, int(vnew_settings.VNEW_PREPARE_STALE_S or PREPARE_STALE_S))
     for seg in _previz_cells(gen):
         for variant in ("real", "webtoon"):
             state = seg.get(variant) or {}
             if state.get("status") == "preparing":
                 claimed = plan_mod._parse_iso(state.get("claimedAt") or "")
-                if not claimed or (now - claimed).total_seconds() > PREPARE_STALE_S:
+                if not claimed or (now - claimed).total_seconds() > stale_s:
                     state["status"] = "queued"
                     state["claim"] = ""
                     state["claimedAt"] = ""
@@ -1124,7 +1159,7 @@ def _cut_clip(video_mp4: bytes, unit: dict) -> dict:
         if clip_end <= start:
             clip_end = start + orig_seconds if orig_seconds > 0 else start + PREVIZ_MIN_CLIP_S
         cut_path = os.path.join(workdir, "cut.mp4")
-        stitcher.trim(src, cut_path, start_sec=start, end_sec=clip_end)
+        stitcher.trim(src, cut_path, start_sec=start, end_sec=clip_end, threads=1)
         current = cut_path
         cut_dur = stitcher.probe_duration(current) or orig_seconds
 
@@ -1132,7 +1167,7 @@ def _cut_clip(video_mp4: bytes, unit: dict) -> dict:
         sent_seconds = cut_dur
         if cut_dur < PREVIZ_MIN_CLIP_S - 0.01:
             padded_path = os.path.join(workdir, "padded.mp4")
-            stitcher.pad_to_seconds(current, padded_path, target_sec=PREVIZ_MIN_CLIP_S)
+            stitcher.pad_to_seconds(current, padded_path, target_sec=PREVIZ_MIN_CLIP_S, threads=1)
             current = padded_path
             sent_seconds = stitcher.probe_duration(current) or PREVIZ_MIN_CLIP_S
             padded = True
@@ -1140,7 +1175,7 @@ def _cut_clip(video_mp4: bytes, unit: dict) -> dict:
         height = stitcher.probe_height(current)
         if height and height < stitcher.ANIME_MIN_HEIGHT:
             scaled_path = os.path.join(workdir, "scaled.mp4")
-            stitcher.scale_to_min_height(current, scaled_path, min_height=stitcher.ANIME_MIN_HEIGHT)
+            stitcher.scale_to_min_height(current, scaled_path, min_height=stitcher.ANIME_MIN_HEIGHT, threads=1)
             current = scaled_path
 
         with open(current, "rb") as handle:
@@ -1159,32 +1194,65 @@ def _do_submit_previz(owner: str, pid: str, gen_id: str, index: int, variant: st
     elements = 그 컷에 보이는 인물만(숨긴 인물 제외)의 그림체별 기본 복장 정면 + 후면(비율 맞춤).
     웹툰은 image_urls 1장(원작 웹툰 컷) 추가. prompt 는 CAST/SHOT/.../CONTINUITY(촬영 지시서 사용).
     실제 보낸 프롬프트는 promptEn 으로 기록한다(바이트 수 포함).
+
+    ⑤ OOM 완화(설계자 2026-10-23): "녹화 받기 → 클립 자르기 → payload → 본문 직렬화·제출(HTTP 요청
+    보내기까지)" 구간을 프로세스 전역 세마포어(_PREPARE_SEM, 기본 1칸) 안에서 한다. 제출이 끝나면
+    즉시 큰 변수(video_mp4·clip·built·result 입력)를 del 로 참조를 끊어 GC 가 봉우리 메모리를
+    바로 회수하게 한다. 조회(poll)는 이 세마포어 밖(가볍다). 단계별 실패는 log.warning 에 단계
+    이름(fetch/clip/payload/submit)으로 남긴다.
     """
+    stage = "start"
+    started = time.monotonic()
+    bytes_video = 0
+    prompt_bytes = 0
+    result = None
+    prefix = ""
+    prompt = ""
+    unit_seconds = 0.0
+    clip_meta: dict = {}
+    prepared = False  # 세마포어 안에서 제출까지 성공했는가.
+    _PREPARE_SEM.acquire()
     try:
         plan, _ = plan_mod.load_plan(owner, pid)
         gen = plan.get("gen") or {}
         if not _claim_ok_variant(gen, index, variant, claim):
-            return
+            return  # finally 에서 세마포어 해제.
         unit = _previz_cells(gen)[index]
         state = unit[variant]
         attempt = int(state.get("attempt") or 1)
+        unit_id = str(unit.get("id") or unit.get("cutId") or index)
         rec_key = str(unit.get("recordingKey") or "")
         if not rec_key:
             raise VpocError("vnew.generate", "NoRecording", "컷 녹화가 없습니다.", 409)
-        video_mp4 = _fetch_bytes(rec_key, bucket=vpoc_settings.VIDEO_BUCKET)
-        clip = _cut_clip(video_mp4, unit)
 
-        # 이 gen 이 쓸 모델 endpoint 와 그 caps(모델별 payload 어댑터, 설계자 2026-10-22).
+        # fetch — 녹화 mp4 바이트.
+        stage = "fetch"
+        video_mp4 = _fetch_bytes(rec_key, bucket=vpoc_settings.VIDEO_BUCKET)
+        bytes_video = len(video_mp4 or b"")
+
+        # clip — 컷 구간만 잘라(3초 미만은 채워) 준비. 원본 녹화 바이트는 바로 끊는다.
+        stage = "clip"
+        clip = _cut_clip(video_mp4, unit)
+        del video_mp4
+        clip_meta = {
+            "origSeconds": clip.get("origSeconds"),
+            "sentSeconds": clip.get("sentSeconds"),
+            "padded": bool(clip.get("padded")),
+        }
+
+        # payload — 참고 이미지·프롬프트.
+        stage = "payload"
         endpoint = str(gen.get("videoModel") or vnew_settings.VNEW_PREVIZ_EDIT_MODEL)
         caps = _previz_caps(endpoint)
-
         built = _previz_payload(owner, pid, plan, unit, variant, caps=caps)
         prompt = built["prompt"]
         elements = built["elements"]
         image_urls = built["imageUrls"]
         prompt_bytes = len(prompt.encode("utf-8"))
-        unit_id = str(unit.get("id") or unit.get("cutId") or index)
         prefix = _seg_output_prefix(owner, pid, gen_id, unit_id + "-" + variant, attempt)
+
+        # submit — 본문 직렬화·HTTP 제출(여기까지가 봉우리 메모리). 끝나면 큰 변수 참조를 끊는다.
+        stage = "submit"
         result = _submit_previz_edit(
             endpoint=endpoint,
             caps=caps,
@@ -1194,24 +1262,52 @@ def _do_submit_previz(owner: str, pid: str, gen_id: str, index: int, variant: st
             elements=elements,
             image_urls=image_urls,
         )
-        _charge_previz(owner, pid, gen_id, result, max(PREVIZ_MIN_CLIP_S, float(unit.get("seconds") or 0)))
+        # 큰 바이트(클립·참고 이미지·payload)만 끊는다. prompt(문자열)는 작아 기록용으로 남긴다.
+        del clip, built, elements, image_urls
+        unit_seconds = float(unit.get("seconds") or 0)
+        prepared = True
 
-        def mutator(data: dict) -> None:
-            g = data.get("gen") or {}
-            if not _claim_ok_variant(g, index, variant, claim):
-                raise _Discard()
-            s = _previz_cells(g)[index][variant]
-            s["status"] = "submitted"
-            s["invocationArn"] = result.get("invocationArn") or ""
-            s["outputPrefix"] = result.get("outputPrefix") or prefix
-            s["error"] = ""
-            s["promptEn"] = prompt
-            s["promptBytes"] = prompt_bytes
-            s["origSeconds"] = clip.get("origSeconds")
-            s["sentSeconds"] = clip.get("sentSeconds")
-            s["padded"] = bool(clip.get("padded"))
-            # claim 은 submitted 조회 때도 쓰므로 유지한다.
+        rss = _rss_mb()
+        elapsed_ms = int((time.monotonic() - started) * 1000)
+        log.info(
+            "vnew.gen.submit pid=%s cut=%s variant=%s bytes_video=%d bytes_body=%d rss_mb=%.0f ms=%d",
+            pid, unit_id, variant, bytes_video, prompt_bytes, rss, elapsed_ms,
+        )
+    except _Discard:
+        return
+    except Exception as exc:  # noqa: BLE001
+        log.warning(
+            "vnew.gen.submit_failed pid=%s cut=%s variant=%s stage=%s rss_mb=%.0f err=%s",
+            pid, index, variant, stage, _rss_mb(), _msg(exc),
+        )
+        _fail_variant(owner, pid, gen_id, index, variant, claim, _msg(exc))
+        return
+    finally:
+        _PREPARE_SEM.release()
 
+    if not prepared:
+        return
+
+    # 제출 성공 → 금액 계상·결과 기록(세마포어 밖, 가볍다).
+    _charge_previz(owner, pid, gen_id, result, max(PREVIZ_MIN_CLIP_S, unit_seconds))
+
+    def mutator(data: dict) -> None:
+        g = data.get("gen") or {}
+        if not _claim_ok_variant(g, index, variant, claim):
+            raise _Discard()
+        s = _previz_cells(g)[index][variant]
+        s["status"] = "submitted"
+        s["invocationArn"] = result.get("invocationArn") or ""
+        s["outputPrefix"] = result.get("outputPrefix") or prefix
+        s["error"] = ""
+        s["promptEn"] = prompt
+        s["promptBytes"] = prompt_bytes
+        s["origSeconds"] = clip_meta.get("origSeconds")
+        s["sentSeconds"] = clip_meta.get("sentSeconds")
+        s["padded"] = bool(clip_meta.get("padded"))
+        # claim 은 submitted 조회 때도 쓰므로 유지한다.
+
+    try:
         _commit(owner, pid, mutator)
     except _Discard:
         return
@@ -1515,9 +1611,19 @@ def _char_by_id(owner: str, plan: dict) -> dict:
     return out
 
 
+def _fit_ref(jpeg: bytes) -> bytes:
+    """참고 이미지 비율 맞춤 + 긴 변 축소(⑤ OOM 완화, 설계자 2026-10-23).
+
+    payload 에 넣는 모든 참고 이미지(캐릭터 정면·후면·원작 웹툰 컷)는 이 함수를 지난다. fit_ratio
+    로 비율을 kling 허용 범위(0.4~2.5)에 맞춘 뒤 긴 변을 VNEW_REF_MAX_PX(기본 1024) 이하로 줄여
+    JPEG q=85 로 다시 인코딩한다. base64·PIL 봉우리 메모리를 줄인다.
+    """
+    return imaging.fit_and_downscale(jpeg, max_px=int(vnew_settings.VNEW_REF_MAX_PX or 0))
+
+
 def _fit_b64(jpeg: bytes) -> str:
-    """참고 이미지 비율(0.4~2.5)을 맞추고 base64 로."""
-    return base64.b64encode(imaging.fit_ratio(jpeg)).decode("ascii")
+    """참고 이미지 비율(0.4~2.5)을 맞추고 긴 변을 줄인 뒤 base64 로(⑤ OOM 완화, 설계자 2026-10-23)."""
+    return base64.b64encode(_fit_ref(jpeg)).decode("ascii")
 
 
 def _load_jpeg(key: str) -> bytes | None:
@@ -1583,10 +1689,10 @@ def _previz_payload_elements(owner: str, pid: str, plan: dict, seg: dict, varian
             front = _load_jpeg(str(front_key or ""))
             if front:
                 element_index += 1
-                element = {"frontal_image_url": imaging.fit_ratio(front)}
+                element = {"frontal_image_url": _fit_ref(front)}
                 back = _load_jpeg(str(back_key or ""))
                 if back:
-                    element["reference_image_urls"] = [imaging.fit_ratio(back)]
+                    element["reference_image_urls"] = [_fit_ref(back)]
                 else:
                     element["reference_image_urls"] = []
                 elements.append(element)
@@ -1600,7 +1706,7 @@ def _previz_payload_elements(owner: str, pid: str, plan: dict, seg: dict, varian
     if max_image_urls > 0 and len(elements) + max_image_urls <= vnew_settings.PREVIZ_MAX_INPUTS:
         panel = _segment_panel_jpeg(owner, pid, plan, seg)
         if panel is not None:
-            image_urls.append(imaging.fit_ratio(panel))
+            image_urls.append(_fit_ref(panel))
 
     prompt = _cut_prompt(plan, seg, variant, cast=cast, has_image_ref=bool(image_urls))
     # 합계 4 넘지 않게(안전) 자른다.
@@ -1642,7 +1748,7 @@ def _previz_payload_image_list(owner: str, pid: str, plan: dict, seg: dict, vari
             front_key = char.get("realFrontKey") if is_real else char.get("webtoonFrontKey")
             front = _load_jpeg(str(front_key or ""))
             if front:
-                image_urls.append(imaging.fit_ratio(front))
+                image_urls.append(_fit_ref(front))
                 image_no = len(image_urls)  # 1부터, 실제 순서와 일치
                 appearance = ((char.get("appearanceEn") or "") + " " + (char.get("outfitEn") or "")).strip()
                 cast.append({"colorName": color_name, "name": name, "imageNo": image_no, "appearance": appearance})
@@ -1655,7 +1761,7 @@ def _previz_payload_image_list(owner: str, pid: str, plan: dict, seg: dict, vari
     if style_slots and len(image_urls) < max_images:
         panel = _segment_panel_jpeg(owner, pid, plan, seg)
         if panel is not None:
-            image_urls.append(imaging.fit_ratio(panel))
+            image_urls.append(_fit_ref(panel))
             has_style_ref = True
 
     prompt = _cut_prompt(plan, seg, variant, cast=cast, has_image_ref=has_style_ref)

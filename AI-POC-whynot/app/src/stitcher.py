@@ -58,6 +58,18 @@ def _run(command: list[str]) -> subprocess.CompletedProcess:
     )
 
 
+def _threads_args(threads: int | None) -> list[str]:
+    """ffmpeg 입력 앞에 둘 `-threads N` 인자(설계자 2026-10-23, ⑤ OOM 완화).
+
+    threads 가 None(기본)이면 빈 리스트 → 기존과 완전히 동일(ffmpeg 가 스스로 스레드 수를 고른다).
+    vnew 컷 자르기처럼 호출자가 1 을 주면 `-threads 1` 로 ffmpeg 가 디코드·인코드에서 워커 스레드를
+    덜 띄워 봉우리 메모리가 준다. 0 이하면 무시(기본과 같다).
+    """
+    if threads is None or int(threads) <= 0:
+        return []
+    return ["-threads", str(int(threads))]
+
+
 def _audio_params(binary: str, path: str) -> tuple[int, str] | None:
     """(샘플레이트, 채널 레이아웃) 또는 오디오 없음이면 None. ffprobe 가 없어 ffmpeg -i 출력을 읽는다."""
     import re
@@ -163,7 +175,7 @@ def concat(clip_paths: list[str], output_path: str) -> str:
         shutil.rmtree(padding_dir, ignore_errors=True)
 
 
-def trim(source_path: str, output_path: str, *, start_sec: float, end_sec: float) -> str:
+def trim(source_path: str, output_path: str, *, start_sec: float, end_sec: float, threads: int | None = None) -> str:
     """`[start_sec, end_sec)` 구간만 잘라 `output_path` 에 쓴다.
 
     ## 왜 필요한가
@@ -189,6 +201,7 @@ def trim(source_path: str, output_path: str, *, start_sec: float, end_sec: float
     binary = ffmpeg_path()
     command = [
         binary, "-y", "-hide_banner", "-loglevel", "error",
+        *_threads_args(threads),
         # `-ss` 를 `-i` **앞**에 두면 빠르지만 키프레임으로 스냅한다. 정확도가 목적이라 뒤에 둔다.
         "-i", source_path, "-ss", f"{start:.3f}", "-to", f"{end:.3f}",
         "-c:v", "libx264", "-preset", "veryfast", "-crf", "20",
@@ -277,7 +290,7 @@ def probe_height(path: str) -> int:
     return 0
 
 
-def scale_to_min_height(source_path: str, output_path: str, *, min_height: int = 720) -> str:
+def scale_to_min_height(source_path: str, output_path: str, *, min_height: int = 720, threads: int | None = None) -> str:
     """영상 높이를 min_height 이상으로 키운다(설계자 2026-10-20).
 
     실측: 480p(864x496)는 fal video-to-video 가 422 video_too_small 로 거절한다.
@@ -289,6 +302,7 @@ def scale_to_min_height(source_path: str, output_path: str, *, min_height: int =
     binary = ffmpeg_path()
     command = [
         binary, "-y", "-hide_banner", "-loglevel", "error",
+        *_threads_args(threads),
         "-i", source_path,
         "-vf", f"scale=-2:{int(min_height)}:flags=lanczos",
         "-c:v", "libx264", "-preset", "veryfast", "-crf", "20",
@@ -350,7 +364,7 @@ def prepare_for_anime(source_path: str, output_path: str, workdir: str) -> dict:
 
 
 
-def pad_to_seconds(source_path: str, output_path: str, *, target_sec: float) -> str:
+def pad_to_seconds(source_path: str, output_path: str, *, target_sec: float, threads: int | None = None) -> str:
     """영상을 마지막 프레임 복제(freeze)로 `target_sec` 까지 늘린다(설계자 2026-10-22, ⑤ 컷 단위).
 
     ## 왜 필요한가
@@ -371,6 +385,7 @@ def pad_to_seconds(source_path: str, output_path: str, *, target_sec: float) -> 
     binary = ffmpeg_path()
     command = [
         binary, "-y", "-hide_banner", "-loglevel", "error",
+        *_threads_args(threads),
         "-i", source_path,
         "-vf", f"tpad=stop_mode=clone:stop_duration={max(0.0, target - (current or 0.0)):.3f}",
         "-c:v", "libx264", "-preset", "veryfast", "-crf", "20",

@@ -22,6 +22,11 @@ MAX_RATIO = 2.5
 # JPEG 품질(characters._square_pad 와 같게).
 JPEG_QUALITY = 92
 
+# ⑤ OOM 완화(설계자 2026-10-23). 참고 이미지를 payload 에 넣기 전 긴 변 최대 px·JPEG 품질.
+# 캐릭터 정면·후면·원작 웹툰 컷이 2000~3000px 로 커서 PIL·base64 가 메모리를 많이 썼다.
+DOWNSCALE_MAX_PX = 1024
+DOWNSCALE_QUALITY = 85
+
 
 def aspect_ratio(width: int, height: int) -> float:
     """가로/세로 비율. 세로가 0 이면 0(이상치)."""
@@ -77,3 +82,51 @@ def fit_ratio(jpeg: bytes, *, min_ratio: float = MIN_RATIO, max_ratio: float = M
             return buffer.getvalue()
     except Exception:  # noqa: BLE001 — Pillow 예외 종류가 다양하다. 못 열면 원본 그대로.
         return jpeg
+
+
+def downscale(jpeg: bytes, *, max_px: int = DOWNSCALE_MAX_PX, quality: int = DOWNSCALE_QUALITY) -> bytes:
+    """참고 이미지의 긴 변을 max_px 이하로 줄이고 JPEG q=quality 로 다시 인코딩한다(설계자 2026-10-23).
+
+    ## 왜 필요한가
+
+    ⑤ 영상 생성에서 캐릭터 정면·후면·원작 웹툰 컷(2000~3000px)을 PIL 로 열어 base64 data URI 로
+    만들면 한 칸만 해도 수십 MB 가 메모리에 쌓인다. 동시 4칸이면 512Mi 파드가 OOMKilled 됐다.
+    긴 변을 1024px 로 줄이면 품질은 충분하면서 바이트가 크게 준다.
+
+    이미 긴 변이 max_px 이하면 **원본 바이트를 그대로** 돌려준다(불필요한 재인코딩 방지).
+    열지 못하면 원본을 그대로 돌려준다(막지 않는다). PIL 이미지는 with 로 즉시 해제한다.
+    """
+    if max_px <= 0:
+        return jpeg
+    try:
+        with Image.open(io.BytesIO(jpeg)) as image:
+            width, height = image.width, image.height
+            longest = max(width, height)
+            if longest <= max_px:
+                return jpeg
+            scale = max_px / float(longest)
+            new_w = max(1, int(round(width * scale)))
+            new_h = max(1, int(round(height * scale)))
+            resized = image.convert("RGB").resize((new_w, new_h), Image.LANCZOS)
+            try:
+                buffer = io.BytesIO()
+                resized.save(buffer, format="JPEG", quality=int(quality))
+                return buffer.getvalue()
+            finally:
+                resized.close()
+    except Exception:  # noqa: BLE001 — Pillow 예외 종류가 다양하다. 못 열면 원본 그대로.
+        return jpeg
+
+
+def fit_and_downscale(jpeg: bytes, *, max_px: int = DOWNSCALE_MAX_PX, quality: int = DOWNSCALE_QUALITY,
+                      min_ratio: float = MIN_RATIO, max_ratio: float = MAX_RATIO) -> bytes:
+    """비율 맞춤(fit_ratio) 후 긴 변 축소(downscale)를 한 번에 한다(설계자 2026-10-23).
+
+    generate.py 참고 이미지 경로에서 쓴다. 먼저 비율을 [min_ratio, max_ratio] 안으로 맞춘 뒤
+    긴 변을 max_px 이하로 줄인다. 둘 다 필요 없으면 원본 그대로.
+    """
+    return downscale(
+        fit_ratio(jpeg, min_ratio=min_ratio, max_ratio=max_ratio),
+        max_px=max_px,
+        quality=quality,
+    )

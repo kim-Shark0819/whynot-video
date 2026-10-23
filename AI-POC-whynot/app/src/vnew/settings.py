@@ -125,9 +125,24 @@ PREVIZ_WEBTOON_MAX_ELEMENTS = _int("VNEW_PREVIZ_WEBTOON_MAX_ELEMENTS", 3)
 PREVIZ_WEBTOON_MAX_IMAGE_URLS = _int("VNEW_PREVIZ_WEBTOON_MAX_IMAGE_URLS", 1)
 # 구간 프롬프트 목표 상한(모델 maxLength 가 더 작으면 그 안으로). 설계자: 2,500자 이내.
 PREVIZ_PROMPT_TARGET = _int("VNEW_PREVIZ_PROMPT_TARGET", 2500)
-# 프리비즈 모드 동시 제출 상한(설계자 2026-10-21, 지시서 041). 한 순회에서 선점·제출할 수 있는
-# 칸(구간×그림체) 수. preparing+submitted(진행 중) 합이 이 수를 넘지 않게 한다. 기본 4.
-VNEW_GEN_PARALLEL = _int("VNEW_GEN_PARALLEL", 4)
+# 프리비즈 모드 동시 제출 상한(설계자 2026-10-21, 지시서 041 · 2026-10-23 ⑤ OOM 완화). 한 순회에서
+# 선점·제출할 수 있는 칸(구간×그림체) 수. preparing+submitted(진행 중) 합이 이 수를 넘지 않게 한다.
+# 기본 2(옛 4에서 낮춤 — 512Mi 파드가 동시 4칸 준비에서 OOMKilled). env 로 바꿀 수 있다.
+VNEW_GEN_PARALLEL = _int("VNEW_GEN_PARALLEL", 2)
+
+# ⑤ OOM 완화(설계자 2026-10-23). 영상 생성 때 녹화 mp4 받기·ffmpeg·참고 이미지·base64·본문
+# 직렬화가 동시에 메모리에 쌓여 512Mi 파드가 OOMKilled 됐다. 아래 값으로 준비 단계를 직렬화하고,
+# 참고 이미지를 줄이고, 끊긴 파드가 더 빨리 복구되게 한다.
+#
+# 준비(녹화 받기→클립 자르기→payload→본문 직렬화·제출) 를 프로세스 전역에서 동시에 몇 칸까지
+# 할지. 기본 1(한 번에 한 칸씩만 큰 바이트를 메모리에 둔다). 조회(poll)는 이 상한 밖(가볍다).
+VNEW_GEN_PREPARE_CONCURRENCY = _int("VNEW_GEN_PREPARE_CONCURRENCY", 1)
+# 참고 이미지(캐릭터 정면·후면·원작 웹툰 컷)를 data URI 로 만들기 전 긴 변 최대 px. 넘으면 줄여
+# JPEG q=85 로 다시 인코딩한다(이미 작으면 그대로). 기본 1024.
+VNEW_REF_MAX_PX = _int("VNEW_REF_MAX_PX", 1024)
+# 프리비즈 모드 preparing(선점) 이 이 시간을 넘게 그대로면 queued 로 되돌린다(선점 해제). 파드가
+# 죽어 드라이버가 사라져도 이 시간 뒤 다시 시도한다. 기본 300초(옛 15분보다 짧게 — 빠른 복구).
+VNEW_PREPARE_STALE_S = _int("VNEW_PREPARE_STALE_S", 300)
 
 # 프리비즈 승인 관문(설계자 2026-10-21, 지시서 049·④). 모든 컷의 시점 일치도(fit.match)가 이 값
 # 이상이어야 승인된다(force 로 넘길 수 있다). match 가 null(판정 불가)인 컷도 낮은 컷으로 센다.
