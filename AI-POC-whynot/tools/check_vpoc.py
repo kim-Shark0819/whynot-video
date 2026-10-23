@@ -6188,6 +6188,126 @@ def check_vnew_generate() -> None:
         if "새로 영상 만들기" not in vnew_js:
             bad.append("(gr-d) vnew.js 에 '새로 영상 만들기' 버튼 라벨이 없습니다")
 
+        # ============================================================ ⑤ OOM 완화(설계자 2026-10-23)
+        # (mem-a) 준비 단계 직렬화: 4칸을 동시에 돌려도 _PREPARE_SEM(기본 1) 안의 준비 구간은 한 번에
+        #         최대 1칸만 실행된다. 제출 호출(_previz_request, 세마포어 안)에 짧은 지연·동시 카운터를
+        #         두고 봉우리 동시 수를 본다. (세마포어가 없으면 4칸이 겹쳐 2 이상이 관측된다.)
+        mem_lock = _threading.Lock()
+        mem_state = {"cur": 0, "peak": 0}
+        saved_previz_req = genmod._previz_request
+
+        def _counting_previz_request(method, url, payload):
+            import secrets as _s  # noqa: PLC0415
+
+            with mem_lock:
+                mem_state["cur"] += 1
+                mem_state["peak"] = max(mem_state["peak"], mem_state["cur"])
+            try:
+                _time.sleep(0.05)  # 겹침을 관측할 틈(세마포어가 막으면 겹치지 않는다).
+                return {"request_id": "mem-" + _s.token_hex(4)}
+            finally:
+                with mem_lock:
+                    mem_state["cur"] -= 1
+
+        pid_mem = "prj_gen_mem_a"
+        _make_plan(owner, pid_mem, segments=two_segs, total=12)
+        gid_mem = _fresh_previz_gen(owner, pid_mem)
+        saved_parallel_mem = genmod.vnew_settings.VNEW_GEN_PARALLEL
+        genmod._previz_request = _counting_previz_request
+        try:
+            # 상한 4 로 4칸(구간2×그림체2)을 한 순회에서 동시에 선점·제출하게 한다. 준비 구간은
+            # _PREPARE_SEM(1) 이 직렬화하므로 _previz_request 봉우리 동시 수는 1 이어야 한다.
+            genmod.vnew_settings.VNEW_GEN_PARALLEL = 4
+            genmod._drive_previz_pass(owner, pid_mem, gid_mem)
+        finally:
+            genmod.vnew_settings.VNEW_GEN_PARALLEL = saved_parallel_mem
+            genmod._previz_request = saved_previz_req
+        if mem_state["peak"] != 1:
+            bad.append(f"(mem-a) 준비 구간 봉우리 동시 수가 1 이 아닙니다(세마포어 미동작): {mem_state['peak']}")
+        # 세마포어 상한이 설정값과 같은지(기본 1).
+        if genmod._PREPARE_SEM._initial_value != max(1, int(genmod.vnew_settings.VNEW_GEN_PREPARE_CONCURRENCY or 1)):
+            bad.append(f"(mem-a) _PREPARE_SEM 상한이 VNEW_GEN_PREPARE_CONCURRENCY 와 다릅니다: {genmod._PREPARE_SEM._initial_value}")
+
+        # (mem-b) 참고 이미지 2000x3000 → data URI 로 넣을 이미지의 긴 변 ≤ VNEW_REF_MAX_PX(1024)·JPEG.
+        big_jpeg = _tiny_jpeg(2000, 3000)
+        fitted = genmod._fit_ref(big_jpeg)
+        try:
+            with _PILImage.open(_io.BytesIO(fitted)) as fim:
+                long_side = max(fim.width, fim.height)
+                fmt = (fim.format or "").upper()
+            if long_side > genmod.vnew_settings.VNEW_REF_MAX_PX:
+                bad.append(f"(mem-b) 축소된 참고 이미지 긴 변이 {genmod.vnew_settings.VNEW_REF_MAX_PX} 를 넘습니다: {long_side}")
+            if fmt != "JPEG":
+                bad.append(f"(mem-b) 축소된 참고 이미지가 JPEG 이 아닙니다: {fmt}")
+        except Exception as exc:  # noqa: BLE001
+            bad.append(f"(mem-b) 축소된 참고 이미지를 열지 못했습니다: {exc!r}")
+        # 이미 작은 이미지(긴 변 ≤ 1024)는 그대로(재인코딩 안 함) — downscale 단위 계약.
+        small_jpeg = _tiny_jpeg(400, 600)
+        if genmod.imaging.downscale(small_jpeg, max_px=1024) != small_jpeg:
+            bad.append("(mem-b) 이미 작은 이미지를 불필요하게 재인코딩했습니다")
+
+        # (mem-c) VNEW_GEN_PARALLEL 기본 2: 6컷 계획 첫 순회에 2칸만 제출(나머지 queued).
+        if genmod.vnew_settings.VNEW_GEN_PARALLEL != 2:
+            bad.append(f"(mem-c) VNEW_GEN_PARALLEL 기본값이 2 가 아닙니다: {genmod.vnew_settings.VNEW_GEN_PARALLEL}")
+        six_segs = [{"id": f"seg{i}", "cutIds": [f"mc{i}"], "seconds": 5} for i in range(1, 7)]
+        pid_mc = "prj_gen_mem_c"
+        _make_plan(owner, pid_mc, segments=six_segs, total=30)
+        gid_mc = _fresh_previz_gen(owner, pid_mc)
+        saved_poll_mc = _fal_mod.poll
+
+        def inprogress_poll_mc(invocation_arn, output_prefix):
+            return {"status": "InProgress", "failureMessage": "", "usage": None}
+
+        _fal_mod.poll = inprogress_poll_mc
+        previz_request_calls.clear()
+        try:
+            # 기본값(2)을 그대로 쓴다 — 설정을 건드리지 않고 '기본 2' 를 검증한다.
+            genmod._drive_previz_pass(owner, pid_mc, gid_mc)
+        finally:
+            _fal_mod.poll = saved_poll_mc
+        mc_plan, _ = planmod.load_plan(owner, pid_mc)
+        mc_gen = mc_plan.get("gen") or {}
+        mc_cells = (mc_gen.get("units") or []) if mc_gen.get("units") else (mc_gen.get("segments") or [])
+        mc_submitted = 0
+        for s in mc_cells:
+            for v in ("real", "webtoon"):
+                if (s.get(v) or {}).get("status") == "submitted":
+                    mc_submitted += 1
+        if mc_submitted != 2:
+            bad.append(f"(mem-c) 기본 상한 2 인데 첫 순회 제출이 2칸이 아닙니다: {mc_submitted}")
+        if len(previz_request_calls) != 2:
+            bad.append(f"(mem-c) 기본 상한 2 첫 순회 제출 호출이 2회가 아닙니다: {len(previz_request_calls)}")
+
+        # (mem-d) 프리비즈 모드 preparing 6분 지난 칸 → queued 로 되돌림(VNEW_PREPARE_STALE_S=300초 기준).
+        if genmod.vnew_settings.VNEW_PREPARE_STALE_S != 300:
+            bad.append(f"(mem-d) VNEW_PREPARE_STALE_S 기본값이 300 이 아닙니다: {genmod.vnew_settings.VNEW_PREPARE_STALE_S}")
+        import datetime as _dt_mem  # noqa: PLC0415
+
+        stale_at_mem = (_dt_mem.datetime.now(_dt_mem.timezone.utc) - _dt_mem.timedelta(minutes=6)).strftime(
+            "%Y-%m-%dT%H:%M:%SZ"
+        )
+        fresh_at_mem = (_dt_mem.datetime.now(_dt_mem.timezone.utc) - _dt_mem.timedelta(seconds=30)).strftime(
+            "%Y-%m-%dT%H:%M:%SZ"
+        )
+        mem_gen = {
+            "mode": "previz",
+            "units": [
+                {"id": "md1", "cutId": "md1",
+                 "real": {"status": "preparing", "claim": "C1", "claimedAt": stale_at_mem},
+                 "webtoon": {"status": "preparing", "claim": "C2", "claimedAt": fresh_at_mem}},
+            ],
+            "segments": [],
+        }
+        changed_md = genmod._reconcile_prepare_stale_previz(mem_gen)
+        md_real = mem_gen["units"][0]["real"]
+        md_web = mem_gen["units"][0]["webtoon"]
+        if not changed_md:
+            bad.append("(mem-d) 6분 지난 preparing 을 해제하지 않았습니다(changed False)")
+        if md_real.get("status") != "queued" or md_real.get("claim") != "":
+            bad.append(f"(mem-d) 6분 지난 preparing 이 queued 로 돌아가지 않았습니다: {md_real.get('status')}/{md_real.get('claim')}")
+        if md_web.get("status") != "preparing":
+            bad.append(f"(mem-d) 30초 전 preparing(신선)을 건드렸습니다: {md_web.get('status')}")
+
         _settings.FAL_KEY = saved_fal_key
 
 
@@ -6229,6 +6349,8 @@ def check_vnew_generate() -> None:
             " (np-a)ASSETS 첫 줄·@Video1·@Element1/@Image·CONTINUITY 보강(Do not add any action·identical to the reference·skin texture)·긴 입력에서도 유지·≤2500바이트"
             " (gr-a)cancelled 뒤 재생성 202·새 genId·genHistory (gr-b)revision 변경→stale·옛 gen 녹화 키 비교"
             " (gr-c)cancelled 칸 retry→running·재진행 (gr-d)새로 영상 만들기 라벨"
+            " (mem-a)준비 단계 세마포어 직렬화(4칸 동시→봉우리 1) (mem-b)참고 이미지 2000x3000→긴 변≤1024·JPEG"
+            " (mem-c)VNEW_GEN_PARALLEL 기본 2(6컷 첫 순회 2칸) (mem-d)프리비즈 preparing 6분→queued(300초)"
         )
 
 
@@ -9382,7 +9504,7 @@ def check_fal_model_caps() -> None:
     try:
         genmod.characters.load_char = fake_load_char
         genmod._load_jpeg = lambda key: fake_blobs.get(str(key or ""))
-        genmod.imaging.fit_ratio = lambda jpeg: jpeg  # 그대로(비율 맞춤 생략)
+        genmod.imaging.fit_ratio = lambda jpeg, *a, **k: jpeg  # 그대로(비율 맞춤 생략)
         genmod._segment_panel_jpeg = lambda owner, pid, plan, seg: b"PANEL-JPEG"
 
         plan = _gen_plan()
