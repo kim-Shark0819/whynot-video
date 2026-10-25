@@ -126,13 +126,14 @@ def choices() -> list[dict]:
         )
     # 등록된 fal 영상 모델(text-to-video · image-to-video)을 Seedance 뒤에 더한다(설계자 2026-10-18).
     # fal 은 단가를 모르므로 금액 0 · priceKnown False.
-    # 회귀 방지(설계자 2026-10-22): video-to-video/previzCapable(프리비즈 방식 전용) 모델은 옛 vpoc
-    # 피커에 나타나지 않게 거른다 — 이 화면은 시작 이미지(i2v) 방식이라 영상 입력 모델을 못 쓴다.
+    # 회귀 방지(설계자 2026-10-22, Claude 조사 2026-10-25): video-to-video·reference-to-video·
+    # previzCapable(프리비즈 방식 전용) 모델은 옛 vpoc 피커에 나타나지 않게 거른다 — 이 화면은
+    # 시작 이미지(i2v) 방식이라 영상 입력 모델을 못 쓴다.
     for item in fal.registered():
         category = str(item.get("category") or "")
         if category not in settings.FAL_VIDEO_CATEGORIES:
             continue
-        if category == "video-to-video":
+        if category in ("video-to-video", "reference-to-video"):
             continue
         if (item.get("caps") or {}).get("previzCapable"):
             continue

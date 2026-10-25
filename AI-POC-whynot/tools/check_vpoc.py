@@ -9621,6 +9621,218 @@ def check_fal_model_caps() -> None:
         )
 
 
+# ---------------------------------------------------------------- 13b. reference-to-video caps/등록
+
+
+def check_vnew_reference_video() -> None:
+    """reference-to-video 카테고리·참조 영상(caps) 인식 — Seedance 2.5 대비(Claude 조사 2026-10-25).
+
+    외부 호출(모델 메타·스키마·단가)은 전부 가짜. 유료 호출 없음.
+
+    (rv-a) 가짜 OpenAPI(prompt+image_urls maxItems 없음+video_urls+task enum+draft) → category
+           reference-to-video 등록 허용, caps: videoListField="video_urls"·videoListMax 10·
+           imageListMax 10·taskField 값 목록·draftField·previzCapable True.
+    (rv-b) 기존 vpoc 피커 목록(ark.choices)에 reference-to-video 모델이 나오지 않음.
+    (rv-c) 기존 caps 회귀 없음(elements 모델·i2v 모델 기존 기대값 유지).
+    """
+    sys.path.insert(0, str(ROOT / "app"))
+    bad: list[str] = []
+
+    from src.vpoc import ark, fal, settings  # noqa: PLC0415
+
+    def _input_schema(props: dict, required: list | None = None) -> dict:
+        schema = {"type": "object", "properties": props}
+        if required is not None:
+            schema["required"] = required
+        return {
+            "paths": {
+                "/ep": {
+                    "post": {
+                        "requestBody": {
+                            "content": {
+                                "application/json": {
+                                    "schema": {"$ref": "#/components/schemas/EpInput"}
+                                }
+                            }
+                        }
+                    }
+                }
+            },
+            "components": {"schemas": {"EpInput": schema}},
+        }
+
+    # ---------------- (rv-a) extract_caps: Seedance 2.5 reference-to-video 모양 ----------------
+    oa_ref = _input_schema(
+        {
+            "prompt": {"type": "string", "maxLength": 2500},
+            # 참조 이미지 배열 — maxItems 없음(실측: Seedance 는 maxItems 를 안 적는다) → 10.
+            "image_urls": {"type": "array", "items": {"type": "string"}},
+            # 참조 영상 배열 — maxItems 없음 → 10.
+            "video_urls": {"type": "array", "items": {"type": "string"}},
+            "audio_urls": {"type": "array", "items": {"type": "string"}},
+            "task": {
+                "anyOf": [
+                    {"type": "string", "enum": ["auto", "reference", "editing", "extension"]},
+                    {"type": "null"},
+                ]
+            },
+            "duration": {"type": "string", "enum": ["4", "8", "12", "30"]},
+            "resolution": {"type": "string", "enum": ["480p", "720p", "1080p"]},
+            "aspect_ratio": {"type": "string", "enum": ["16:9", "9:16"]},
+            "generate_audio": {"type": "boolean"},
+            "draft": {"type": "boolean"},
+            "seed": {"type": "integer"},
+        },
+        required=["prompt"],
+    )
+    caps_r, reason_r = fal.extract_caps(oa_ref, "ep")
+    if caps_r is None:
+        bad.append(f"(rv-a) reference 스키마에서 caps 를 못 만들었습니다: {reason_r}")
+    else:
+        if caps_r.get("videoListField") != "video_urls":
+            bad.append(f"(rv-a) videoListField 가 video_urls 가 아닙니다: {caps_r.get('videoListField')}")
+        if caps_r.get("videoListMax") != 10:
+            bad.append(f"(rv-a) videoListMax 가 10 이 아닙니다: {caps_r.get('videoListMax')}")
+        if caps_r.get("imageListField") != "image_urls":
+            bad.append(f"(rv-a) imageListField 가 image_urls 가 아닙니다: {caps_r.get('imageListField')}")
+        if caps_r.get("imageListMax") != 10:
+            bad.append(f"(rv-a) maxItems 없는 image_urls 의 imageListMax 가 10 이 아닙니다: {caps_r.get('imageListMax')}")
+        if caps_r.get("taskField") != "task":
+            bad.append(f"(rv-a) taskField 가 task 가 아닙니다: {caps_r.get('taskField')}")
+        if caps_r.get("taskValues") != ["auto", "reference", "editing", "extension"]:
+            bad.append(f"(rv-a) taskValues 목록이 틀립니다: {caps_r.get('taskValues')}")
+        if caps_r.get("draftField") != "draft":
+            bad.append(f"(rv-a) draftField 가 draft 가 아닙니다: {caps_r.get('draftField')}")
+        if caps_r.get("generateAudioField") != "generate_audio":
+            bad.append(f"(rv-a) generateAudioField 가 generate_audio 가 아닙니다: {caps_r.get('generateAudioField')}")
+        if caps_r.get("seedField") != "seed":
+            bad.append(f"(rv-a) seedField 가 seed 가 아닙니다: {caps_r.get('seedField')}")
+        if caps_r.get("previzCapable") is not True:
+            bad.append(f"(rv-a) video_urls+prompt 인데 previzCapable 가 True 가 아닙니다: {caps_r.get('previzCapable')}")
+        # 문자열 duration 이미 지원(durationAsString True).
+        if caps_r.get("durationAsString") is not True:
+            bad.append(f"(rv-a) 문자열 duration 인데 durationAsString 가 True 가 아닙니다: {caps_r.get('durationAsString')}")
+        if sorted(int(x) for x in (caps_r.get("durations") or [])) != [4, 8, 12, 30]:
+            bad.append(f"(rv-a) durations 가 [4,8,12,30] 이 아닙니다: {caps_r.get('durations')}")
+        if caps_r.get("available") is not True:
+            bad.append(f"(rv-a) prompt 만 required 인데 available 가 True 가 아닙니다: {caps_r.get('reason')}")
+
+    # 등록(가짜 메타·스키마·단가) — category reference-to-video 허용.
+    saved = {
+        "STORE": fal.STORE,
+        "model_meta": fal.model_meta,
+        "openapi_schema": fal.openapi_schema,
+        "pricing": fal.pricing,
+        "fal_key": settings.FAL_KEY,
+        "ark_fal_registered": ark.fal.registered,
+    }
+    fake_store = _FakeCharStore()
+    fal.STORE = fake_store
+    settings.FAL_KEY = "dummy-fal-key"
+    fal._invalidate_cache()
+    fal.model_meta = lambda endpoint: {"category": "reference-to-video", "displayName": "Seedance 2.5 r2v", "openapi": {}}
+    fal.openapi_schema = lambda endpoint, expand_result=None: oa_ref
+    fal.pricing = lambda endpoint: None
+
+    try:
+        if "reference-to-video" not in settings.FAL_VIDEO_CATEGORIES:
+            bad.append("(rv-a) FAL_VIDEO_CATEGORIES 에 reference-to-video 가 없습니다")
+        item = fal.register("bytedance/seedance-2.5/reference-to-video", added_by="tester")
+        if item.get("category") != "reference-to-video":
+            bad.append(f"(rv-a) 등록 category 가 reference-to-video 가 아닙니다: {item.get('category')}")
+        if not (item.get("caps") or {}).get("previzCapable"):
+            bad.append("(rv-a) 등록 caps 의 previzCapable 가 True 가 아닙니다")
+        if (item.get("caps") or {}).get("videoListField") != "video_urls":
+            bad.append("(rv-a) 등록 caps 의 videoListField 가 video_urls 가 아닙니다")
+
+        # Seedance 2.5 는 deny 아님(설계자 Notion 워크플로 권장 모델).
+        if settings.is_denied_endpoint("bytedance/seedance-2.5/reference-to-video"):
+            bad.append("(rv-a) Seedance 2.5 가 잘못 deny 로 판정됩니다")
+        # seedance 2.0 fast 는 여전히 deny.
+        if not settings.is_denied_endpoint("fal-ai/seedance-2-0-fast/reference-to-video"):
+            bad.append("(rv-a) seedance 2.0 fast 가 deny 로 판정되지 않습니다")
+
+        # ---------------- (rv-b) vpoc 피커(ark.choices)에 reference-to-video 안 보임 ----------------
+        def fake_registered():
+            return [
+                {
+                    "id": "fal:r2v-seedance",
+                    "endpointId": "r2v-seedance",
+                    "label": "Seedance r2v",
+                    "category": "reference-to-video",
+                    "caps": {"previzCapable": True, "available": True, "videoListField": "video_urls"},
+                },
+                {
+                    "id": "fal:i2v-plain",
+                    "endpointId": "i2v-plain",
+                    "label": "I2V plain",
+                    "category": "image-to-video",
+                    "caps": {"previzCapable": False, "available": True, "startImageField": "image_url"},
+                },
+            ]
+
+        ark.fal.registered = fake_registered
+        choice_ids = [str(c.get("id")) for c in ark.choices()]
+        if "fal:r2v-seedance" in choice_ids:
+            bad.append(f"(rv-b) vpoc 피커에 reference-to-video 모델이 나타났습니다(회귀): {choice_ids}")
+        if "fal:i2v-plain" not in choice_ids:
+            bad.append(f"(rv-b) vpoc 피커에서 기존 image-to-video 모델이 사라졌습니다: {choice_ids}")
+    except Exception as exc:  # noqa: BLE001
+        import traceback as _tb  # noqa: PLC0415
+        bad.append("(rv-a/b) 등록·피커 검사 중 예외: " + repr(exc) + "\n" + _tb.format_exc()[:1000])
+    finally:
+        fal.STORE = saved["STORE"]
+        fal.model_meta = saved["model_meta"]
+        fal.openapi_schema = saved["openapi_schema"]
+        fal.pricing = saved["pricing"]
+        settings.FAL_KEY = saved["fal_key"]
+        ark.fal.registered = saved["ark_fal_registered"]
+        fal._invalidate_cache()
+
+    # ---------------- (rv-c) 기존 caps 회귀 없음 ----------------
+    # elements 모델: previzCapable True·elementsField·videoListField 빈값.
+    oa_elements = _input_schema(
+        {
+            "prompt": {"type": "string", "maxLength": 2500},
+            "video_url": {"type": "string"},
+            "elements": {
+                "type": "array",
+                "items": {"type": "object", "properties": {"frontal_image_url": {"type": "string"}}},
+            },
+            "keep_audio": {"type": "boolean"},
+        }
+    )
+    caps_e, _ = fal.extract_caps(oa_elements, "ep")
+    if caps_e is None or caps_e.get("elementsField") != "elements" or caps_e.get("previzCapable") is not True:
+        bad.append(f"(rv-c) elements 모델 기존 기대값이 깨졌습니다: {caps_e and {k: caps_e.get(k) for k in ('elementsField', 'previzCapable')}}")
+    if caps_e and caps_e.get("videoListField"):
+        bad.append(f"(rv-c) elements 모델에 videoListField 가 잘못 잡혔습니다: {caps_e.get('videoListField')}")
+    if caps_e and caps_e.get("videoField") != "video_url":
+        bad.append(f"(rv-c) elements 모델 videoField 회귀: {caps_e and caps_e.get('videoField')}")
+
+    # i2v 모델(image_url 만): previzCapable False·videoField/videoListField 빈값·imageListField 빈값.
+    oa_i2v = _input_schema({"prompt": {"type": "string"}, "image_url": {"type": "string"}})
+    caps_i2v, _ = fal.extract_caps(oa_i2v, "ep")
+    if caps_i2v is None or caps_i2v.get("previzCapable") is not False:
+        bad.append(f"(rv-c) i2v 모델 previzCapable 가 False 가 아닙니다: {caps_i2v and caps_i2v.get('previzCapable')}")
+    if caps_i2v and (caps_i2v.get("videoField") or caps_i2v.get("videoListField")):
+        bad.append("(rv-c) i2v 모델에 영상 입력 필드가 잘못 잡혔습니다")
+    if caps_i2v and caps_i2v.get("startImageField") != "image_url":
+        bad.append(f"(rv-c) i2v 모델 startImageField 회귀: {caps_i2v and caps_i2v.get('startImageField')}")
+    # 새 키가 모델에 없을 때 빈값으로 들어가는지(일반 i2v 는 task/draft/seed 없음).
+    if caps_i2v and (caps_i2v.get("taskField") or caps_i2v.get("draftField") or caps_i2v.get("seedField")):
+        bad.append("(rv-c) i2v 모델에 task/draft/seed 필드가 잘못 잡혔습니다")
+
+    if bad:
+        fail("reference-to-video caps 검사 실패\n" + "\n".join(f"  {item}" for item in bad))
+    else:
+        ok(
+            "reference-to-video caps 검사 (rv-a)videoListField·videoListMax 10·imageListMax 10·"
+            "taskField·draftField·previzCapable·등록 허용 (rv-b)vpoc 피커 회귀 없음 "
+            "(rv-c)elements·i2v 기존 caps 유지"
+        )
+
+
 # ---------------------------------------------------------------- main
 
 
@@ -9651,6 +9863,7 @@ def main() -> int:
     check_vnew_real_start()
     check_anime_style()
     check_fal_model_caps()
+    check_vnew_reference_video()
     print()
     if warnings:
         print(f"경고 {len(warnings)}건")
