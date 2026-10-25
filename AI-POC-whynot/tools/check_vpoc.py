@@ -10320,6 +10320,143 @@ def check_vnew_take() -> None:
         )
 
 
+# ---------------------------------------------------------------- 13d. 통 테이크 프롬프트(컷 보존)
+
+
+def check_vnew_take_prompt() -> None:
+    """통 테이크 프롬프트 — 컷이 잘려 나가지 않는지(설계자 2026-10-26, test2 컷 1만 남던 버그 수정).
+
+    외부 호출 없음. _take_prompt·_take_timeline_entries·_short_appearance 를 직접 부른다.
+
+    (tp-a) test2 규모(인물 2명·외형 각 600자·6컷·대사 각 2줄 한국어) → 6개 타임스탬프 모두 존재·≤2,500 바이트.
+    (tp-b) _short_appearance: 인물당 ≤170자, "hair" 정보 포함.
+    (tp-c) 12컷(30초) 극단 입력 → 12개 타임스탬프 모두 존재·≤2,500 바이트.
+    """
+    sys.path.insert(0, str(ROOT / "app"))
+    bad: list[str] = []
+
+    from src.vnew import generate as genmod  # noqa: PLC0415
+
+    # styleEn 로드(캐릭터)를 가짜로 — 네트워크·load_char 를 타지 않게.
+    orig_style = genmod._first_take_style_en
+    genmod._first_take_style_en = lambda plan: "thin sketchy pencil lines, soft pastel flat color"
+
+    # 긴 외형 한 사람분(~600자): hair·wears 문장을 포함한다(요약이 집어내야 한다).
+    long_appearance = (
+        "A middle-aged Korean man in his early fifties with a stern, weathered face and deep "
+        "frown lines across his forehead. He has short black hair combed neatly to one side, "
+        "greying slightly at the temples, and thick dark eyebrows over narrow watchful eyes. "
+        "His jaw is square and he often clenches it when angry. He wears a charcoal-grey "
+        "double-breasted suit with a crisp white dress shirt and a dark navy silk tie, polished "
+        "black leather oxford shoes, and a gold wristwatch on his left wrist. His posture is "
+        "rigid and authoritative, shoulders squared, and he carries a leather document folder "
+        "under one arm. His skin is slightly tanned with age spots on the hands, and his "
+        "fingers are thick and calloused from years of manual work before his promotion."
+    )
+
+    def _make_plan_and_take(n_cuts: int, total_seconds: int):
+        cut_ids = [f"c{i + 1}" for i in range(n_cuts)]
+        per = max(1, total_seconds // n_cuts)
+        cuts = []
+        brief_cuts = {}
+        for i, cid in enumerate(cut_ids):
+            cuts.append(
+                {
+                    "id": cid,
+                    "no": i + 1,
+                    "seconds": per,
+                    "panels": [i],
+                    # 대사 2줄(한국어)을 컷 dialogueKo 에 " / " 로.
+                    "dialogueKo": '에이: "자네 지금 뭐 하는 건가 당장 설명해 보게" / 비: "죄송합니다 부장님 제가 처리하겠습니다"',
+                }
+            )
+            brief_cuts[cid] = {
+                "shotEn": "Medium close-up, 50mm lens at eye level, slight three-quarter angle on the speaker.",
+                "actionEn": "Kim leans forward across the desk, eyes narrowing, one hand flat on the folder as he speaks.",
+                "dialogue": [{"speaker": "에이", "lineKo": "자네 지금 뭐 하는 건가", "deliveryEn": "sharp and low"}],
+            }
+        plan = {
+            "conti": {"cuts": cuts},
+            "previz": {"shotBrief": {"status": "ready", "cuts": brief_cuts}},
+            "script": {"entries": []},
+        }
+        take = {"id": "take1", "cutIds": cut_ids, "seconds": total_seconds}
+        return plan, take
+
+    try:
+        # (tp-b) _short_appearance: ≤170자·"hair" 포함.
+        short = genmod._short_appearance(long_appearance, 170)
+        if len(short) > 170:
+            bad.append(f"(tp-b) 요약 외형이 170자를 넘습니다: {len(short)}자")
+        if "hair" not in short.lower():
+            bad.append(f"(tp-b) 요약 외형에 'hair' 정보가 없습니다: {short!r}")
+        if not short.strip():
+            bad.append("(tp-b) 요약 외형이 비었습니다")
+        # 100자 축소도 단어 경계로 자른다.
+        short100 = genmod._short_appearance(long_appearance, 100)
+        if len(short100) > 100:
+            bad.append(f"(tp-b) 100자 요약이 100자를 넘습니다: {len(short100)}자")
+
+        # cast: 인물 2명(요약 외형·@Image 번호).
+        cast = [
+            {"name": "에이", "colorName": "blue", "frontNo": 1, "backNo": 2,
+             "appearance": genmod._short_appearance(long_appearance, 170)},
+            {"name": "비", "colorName": "red", "frontNo": 3, "backNo": 4,
+             "appearance": genmod._short_appearance(long_appearance, 170)},
+        ]
+
+        # (tp-a) test2 규모: 2명·6컷·대사 각 2줄.
+        plan_a, take_a = _make_plan_and_take(6, 18)
+        prompt_a = genmod._take_prompt(plan_a, take_a, cast=cast, panel_nos=[5, 6, 7], location_no=8)
+        entries_a = genmod._take_timeline_entries(plan_a, take_a)
+        stamps_a = [f"{e['start']}-{e['end']}s" for e in entries_a]
+        if len(stamps_a) != 6:
+            bad.append(f"(tp-a) 타임라인 항목이 6개가 아닙니다: {len(stamps_a)}")
+        missing_a = [s for s in stamps_a if s not in prompt_a]
+        if missing_a:
+            bad.append(f"(tp-a) 프롬프트에 빠진 컷 타임스탬프가 있습니다: {missing_a}")
+        if len(prompt_a.encode("utf-8")) > 2500:
+            bad.append(f"(tp-a) 프롬프트가 2,500바이트를 넘습니다: {len(prompt_a.encode('utf-8'))}")
+        if not prompt_a.startswith("STYLE:"):
+            bad.append(f"(tp-a) 프롬프트가 STYLE 로 시작하지 않습니다: {prompt_a[:30]}")
+        if "TIMELINE" not in prompt_a or "RULES:" not in prompt_a:
+            bad.append("(tp-a) TIMELINE·RULES 섹션이 없습니다")
+        # ASSETS 에 요약 외형(인물당 ≤170)만 들어갔는지 — 원문 전체(600자)가 통째로 들어가면 안 된다.
+        if long_appearance[:200] in prompt_a:
+            bad.append("(tp-a) 외형 원문이 요약되지 않고 통째로 들어갔습니다")
+
+        # (tp-c) 12컷(30초) → 12개 타임스탬프 모두·≤2,500 바이트.
+        plan_c, take_c = _make_plan_and_take(12, 30)
+        prompt_c = genmod._take_prompt(plan_c, take_c, cast=cast, panel_nos=[13, 14], location_no=None)
+        entries_c = genmod._take_timeline_entries(plan_c, take_c)
+        stamps_c = [f"{e['start']}-{e['end']}s" for e in entries_c]
+        if len(stamps_c) != 12:
+            bad.append(f"(tp-c) 타임라인 항목이 12개가 아닙니다: {len(stamps_c)}")
+        missing_c = [s for s in stamps_c if s not in prompt_c]
+        if missing_c:
+            bad.append(f"(tp-c) 12컷 중 빠진 타임스탬프가 있습니다: {missing_c}")
+        if len(prompt_c.encode("utf-8")) > 2500:
+            bad.append(f"(tp-c) 12컷 프롬프트가 2,500바이트를 넘습니다: {len(prompt_c.encode('utf-8'))}")
+        # STYLE·RULES 는 유지.
+        if not prompt_c.startswith("STYLE:"):
+            bad.append("(tp-c) 12컷 프롬프트가 STYLE 로 시작하지 않습니다")
+
+    except Exception as exc:  # noqa: BLE001
+        import traceback as _tb  # noqa: PLC0415
+
+        bad.append("통 테이크 프롬프트 검사 중 예외: " + repr(exc) + "\n" + _tb.format_exc()[:1200])
+    finally:
+        genmod._first_take_style_en = orig_style
+
+    if bad:
+        fail("통 테이크 프롬프트(컷 보존) 검사 실패\n" + "\n".join(f"  {item}" for item in bad))
+    else:
+        ok(
+            "통 테이크 프롬프트(컷 보존) 검사 (tp-a)6컷 타임스탬프 모두·≤2500B·외형 요약 "
+            "(tp-b)_short_appearance ≤170·hair 포함 (tp-c)12컷 타임스탬프 모두·≤2500B"
+        )
+
+
 # ---------------------------------------------------------------- main
 
 
@@ -10352,6 +10489,7 @@ def main() -> int:
     check_fal_model_caps()
     check_vnew_reference_video()
     check_vnew_take()
+    check_vnew_take_prompt()
     print()
     if warnings:
         print(f"경고 {len(warnings)}건")
