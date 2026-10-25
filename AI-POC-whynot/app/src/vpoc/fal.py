@@ -80,6 +80,14 @@ _REFERENCE_FIELDS = (
 _AUDIO_FIELDS = ("generate_audio", "enable_audio")
 # video-to-video 입력 영상 필드 후보(설계자 2026-10-22, 프리비즈 방식).
 _VIDEO_FIELDS = ("video_url", "reference_video_url", "input_video_url", "video")
+# reference-to-video(Seedance 2.5, Claude 조사 2026-10-25) 입력 영상 **배열** 필드 후보.
+# 단일 video_url 과 달리 참조 영상 여러 개(@Video1..)를 받는다.
+_VIDEO_LIST_FIELDS = (
+    "video_urls",
+    "reference_video_urls",
+    "ref_video_urls",
+    "input_video_urls",
+)
 # 인물별 참고(마네킹 색 ↔ 캐릭터)를 담는 elements 배열(각 항목에 정면 이미지 필드가 있다).
 _ELEMENTS_FIELDS = ("elements",)
 _ELEMENT_ITEM_IMAGE_FIELDS = (
@@ -96,8 +104,11 @@ _IMAGE_LIST_FIELDS = (
     "ref_image_urls",
 )
 _KEEP_AUDIO_FIELDS = ("keep_audio",)
-# imageListField 의 maxItems 를 못 찾을 때 기본 상한.
-DEFAULT_IMAGE_LIST_MAX = 4
+# imageListField 의 maxItems 를 못 찾을 때 기본 상한. Seedance reference-to-video(image_urls)처럼
+# maxItems 를 안 적는 스키마가 많아 10 으로 둔다(Claude 조사 2026-10-25). 참조 30 은 과하다.
+DEFAULT_IMAGE_LIST_MAX = 10
+# videoListField 의 maxItems 를 못 찾을 때 기본 상한.
+DEFAULT_VIDEO_LIST_MAX = 10
 
 
 # ---------------------------------------------------------------- 모델 ID / 헬퍼
@@ -769,6 +780,54 @@ def _image_list_max(props: dict, field: str) -> int:
     return DEFAULT_IMAGE_LIST_MAX
 
 
+def _video_list_field(props: dict) -> str:
+    """참조 영상 목록(문자열 배열) 필드(reference-to-video). 없으면 빈 문자열.
+
+    Seedance 2.5 의 video_urls 처럼 @Video1.. 로 참조하는 배열 영상 입력을 가린다.
+    """
+    for name in _VIDEO_LIST_FIELDS:
+        spec = _unwrap(props.get(name))
+        if spec.get("type") == "array":
+            return name
+    return ""
+
+
+def _video_list_max(props: dict, field: str) -> int:
+    """videoListField 의 maxItems(없으면 DEFAULT_VIDEO_LIST_MAX)."""
+    if not field:
+        return DEFAULT_VIDEO_LIST_MAX
+    spec = _unwrap(props.get(field))
+    value = spec.get("maxItems")
+    if isinstance(value, int) and not isinstance(value, bool) and value > 0:
+        return value
+    return DEFAULT_VIDEO_LIST_MAX
+
+
+def _task_field(props: dict) -> tuple[str, list]:
+    """task(enum) 필드 이름과 허용값 목록. 없으면 ("", []).
+
+    Seedance 2.5: task ∈ {'auto','reference','editing','extension'}.
+    """
+    if "task" not in props:
+        return "", []
+    values = [str(item) for item in _enum_of(props, "task")]
+    if not values:
+        return "", []
+    return "task", values
+
+
+def _bool_field(props: dict, name: str) -> str:
+    """name 이 boolean 필드면 name, 아니면 빈 문자열."""
+    spec = _unwrap(props.get(name))
+    return name if spec.get("type") == "boolean" else ""
+
+
+def _seed_field(props: dict) -> str:
+    """seed(정수) 필드 이름. 없으면 빈 문자열."""
+    spec = _unwrap(props.get("seed"))
+    return "seed" if spec.get("type") in ("integer", "number") else ""
+
+
 def extract_caps(openapi: dict, endpoint: str = "") -> tuple[dict | None, str]:
     """OpenAPI 입력 스키마에서 우리가 쓰는 필드를 뽑아 caps 로 만든다.
 
@@ -801,8 +860,16 @@ def extract_caps(openapi: dict, endpoint: str = "") -> tuple[dict | None, str]:
     image_list_field = _image_list_field(props)
     image_list_max = _image_list_max(props, image_list_field)
     keep_audio_field = _keep_audio_field(props)
-    # 프리비즈(영상 입력 → 그림체)로 쓸 수 있는 모델: 영상 입력 필드 + 프롬프트가 둘 다 있어야 한다.
-    previz_capable = bool(video_field and prompt_field)
+    # reference-to-video(Seedance 2.5, Claude 조사 2026-10-25) 필드.
+    video_list_field = _video_list_field(props)
+    video_list_max = _video_list_max(props, video_list_field)
+    task_field, task_values = _task_field(props)
+    draft_field = _bool_field(props, "draft")
+    generate_audio_field = _bool_field(props, "generate_audio")
+    seed_field = _seed_field(props)
+    # 프리비즈(영상 입력 → 그림체)로 쓸 수 있는 모델: 영상 입력(단일 videoField 또는 배열
+    # videoListField) + 프롬프트가 둘 다 있어야 한다.
+    previz_capable = bool((video_field or video_list_field) and prompt_field)
 
     required = input_schema.get("required")
     required = [str(name) for name in required] if isinstance(required, list) else []
@@ -820,6 +887,11 @@ def extract_caps(openapi: dict, endpoint: str = "") -> tuple[dict | None, str]:
             elements_field,
             image_list_field,
             keep_audio_field,
+            video_list_field,
+            task_field,
+            draft_field,
+            generate_audio_field,
+            seed_field,
         )
         if name
     }
@@ -857,6 +929,14 @@ def extract_caps(openapi: dict, endpoint: str = "") -> tuple[dict | None, str]:
         "imageListField": image_list_field,
         "imageListMax": image_list_max,
         "keepAudioField": keep_audio_field,
+        # reference-to-video(Seedance 2.5) 필드(Claude 조사 2026-10-25).
+        "videoListField": video_list_field,
+        "videoListMax": video_list_max,
+        "taskField": task_field,
+        "taskValues": task_values,
+        "draftField": draft_field,
+        "generateAudioField": generate_audio_field,
+        "seedField": seed_field,
         "previzCapable": previz_capable,
         "requiredFields": required,
         "available": not unmet,

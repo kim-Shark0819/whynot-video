@@ -142,11 +142,19 @@ FAL_OPENAPI_URL = os.getenv("FAL_OPENAPI_URL", "https://fal.ai/api/openapi/queue
 FAL_ID_PREFIX = "fal:"
 # 영상 단계에서 실제로 쓸 수 있는 fal 카테고리. 나머지는 카탈로그 목록에만 보이고 등록은 거절된다.
 # video-to-video 추가(설계자 2026-10-22): 영상만들기_신규 ①의 프리비즈 방식은 영상 입력을 받는
-# 모델만 쓸 수 있으므로 등록을 허용한다. vpoc(옛 ②) 피커는 video-to-video/previzCapable 를 걸러
+# 모델만 쓸 수 있으므로 등록을 허용한다. reference-to-video 추가(Claude 조사 2026-10-25): Seedance
+# 2.5 reference-to-video 는 프리비즈 녹화(video_urls)+시트·그림체·장소 참조(image_urls)를 함께 받아
+# 재렌더하는 1순위 후보다. vpoc(옛 ②) 피커는 video-to-video/reference-to-video/previzCapable 를 걸러
 # 기존 화면에 나타나지 않게 한다(ark.choices).
-FAL_VIDEO_CATEGORIES = ("text-to-video", "image-to-video", "video-to-video")
+FAL_VIDEO_CATEGORIES = (
+    "text-to-video",
+    "image-to-video",
+    "video-to-video",
+    "reference-to-video",
+)
 # 카탈로그 조회에서 함께 보여 주는(목록만, 영상 단계 사용 불가) 카테고리.
 FAL_BROWSE_CATEGORIES = (
+    "reference-to-video",
     "video-to-video",
     "image-to-video",
     "text-to-video",
