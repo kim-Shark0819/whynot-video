@@ -1415,14 +1415,58 @@ def _take_owner_hint(plan: dict) -> str:
     return str(plan.get("owner") or "")
 
 
-def _take_timeline_entries(plan: dict, take: dict) -> list[str]:
-    """테이크 컷들의 타임라인 문장 목록(설계자 2026-10-26). 컷마다 "0-3s: {shot} {action}; {화자}: "{대사}"".
+def _short_appearance(text: str, limit: int = 170) -> str:
+    """인물 외형을 짧게 요약한다(설계자 2026-10-26, 컷 보존 수정).
 
-    촬영 지시서(shotBrief)의 shotEn·actionEn 앞 1문장씩 + _cut_lines 로 귀속한 대사.
-    시간 범위는 콘티 컷 seconds 를 누적해 만든다.
+    외형 전체(캐릭터 analysis 전체, 인물당 ~600자)를 그대로 쓰면 TIMELINE 예산을 먹어 컷이 잘린다.
+    외형은 참조 이미지(@Image)가 담당하므로 프롬프트에는 머리(색·스타일)·얼굴 특징 한 구와 의상 한
+    구만 남긴다. 규칙: 문장 단위로 앞에서부터 모으되 "hair"/"wears"(또는 wearing/dressed) 가 든 문장을
+    우선하고, limit 자에서 **단어 경계**로 자른다. 빈 입력이면 빈 문자열.
+    """
+    body = str(text or "").strip()
+    if not body:
+        return ""
+    sentences = _split_sentences(body)
+    if not sentences:
+        sentences = [body]
+
+    def _is_outfit(sentence: str) -> bool:
+        low = sentence.lower()
+        return "wears" in low or "wearing" in low or "dressed" in low or "outfit" in low
+
+    # "hair" 가 든 문장을 머리 문장으로 우선한다. 없으면 얼굴·눈 문장을 쓴다(설계자 2026-10-26).
+    hair = next((s for s in sentences if "hair" in s.lower()), "")
+    if not hair:
+        hair = next((s for s in sentences if "face" in s.lower() or "eyes" in s.lower()), "")
+    outfit = next((s for s in sentences if _is_outfit(s)), "")
+    picked: list[str] = []
+    if hair:
+        picked.append(hair)
+    if outfit and outfit != hair:
+        picked.append(outfit)
+    # hair·outfit 둘 다 못 찾으면 앞 문장부터 채운다.
+    if not picked:
+        picked = sentences[:2]
+
+    summary = " ".join(p.rstrip(".").strip() + "." for p in picked if p.strip()).strip()
+    if len(summary) <= limit:
+        return summary
+    # limit 에서 단어 경계로 자른다(글자 중간 잘림 방지).
+    clipped = summary[:limit]
+    if " " in clipped:
+        clipped = clipped[: clipped.rfind(" ")]
+    return clipped.rstrip().rstrip(",") + "…"
+
+
+def _take_timeline_entries(plan: dict, take: dict) -> list[dict]:
+    """테이크 컷들의 타임라인 항목 목록(구조화, 설계자 2026-10-26, 컷 보존 수정).
+
+    컷마다 dict 를 돌려준다: {start, end, shot, action, speaker, dialogue}. 조립·줄이기는 _take_prompt
+    가 맡는다(여기서는 자르지 않는다). 시간 범위는 콘티 컷 seconds 를 누적해 만든다. shot·action 은
+    촬영 지시서(shotBrief)의 shotEn·actionEn 앞 1문장. 대사는 _cut_lines 로 귀속한 첫 발화(화자·대사).
     """
     cuts_by_id = {str(c.get("id")): c for c in (plan.get("conti") or {}).get("cuts") or []}
-    entries: list[str] = []
+    entries: list[dict] = []
     clock = 0.0
     for cut_id in _seg_cut_ids(take):
         cut = cuts_by_id.get(str(cut_id)) or {}
@@ -1431,35 +1475,52 @@ def _take_timeline_entries(plan: dict, take: dict) -> list[str]:
         end = int(round(clock + seconds))
         clock += seconds
         brief = _cut_brief(plan, cut_id)
-        parts: list[str] = []
         shot_en = str(brief.get("shotEn") or "").strip()
         if shot_en:
             sents = _split_sentences(shot_en)
-            parts.append(sents[0] if sents else shot_en)
+            shot_en = (sents[0] if sents else shot_en).rstrip(".")
         action_en = str(brief.get("actionEn") or "").strip()
         if action_en:
             sents = _split_sentences(action_en)
-            parts.append(sents[0] if sents else action_en)
-        body = " ".join(p.rstrip(".") + "." for p in parts if p)
+            action_en = (sents[0] if sents else action_en).rstrip(".")
         lines = _cut_lines(plan, cut)
         spoken = [ln for ln in lines if not ln.get("silent") and str(ln.get("lineKo") or "").strip()]
-        dlg = ""
-        for ln in spoken:
-            speaker = str(ln.get("speaker") or "").strip() or "A character"
-            text = str(ln.get("lineKo") or "").strip()
-            dlg += f' {speaker}: "{text}".'
-        entry = f"{start}-{end}s: {body}{dlg}".strip()
-        entries.append(entry)
+        speaker = ""
+        dialogue = ""
+        if spoken:
+            first = spoken[0]
+            speaker = str(first.get("speaker") or "").strip() or "A character"
+            dialogue = str(first.get("lineKo") or "").strip()
+        entries.append(
+            {
+                "start": start,
+                "end": end,
+                "shot": shot_en,
+                "action": action_en,
+                "speaker": speaker,
+                "dialogue": dialogue,
+            }
+        )
     return entries
 
 
 def _take_prompt(plan: dict, take: dict, *, cast: list[dict], panel_nos: list[int], location_no) -> str:
-    """통 테이크 프롬프트(영어, UTF-8 ≤ VNEW_TAKE_PROMPT_MAX 바이트, 설계자 2026-10-26, 063).
+    """통 테이크 프롬프트(영어, UTF-8 ≤ VNEW_TAKE_PROMPT_MAX 바이트, 설계자 2026-10-26, 063 — 컷 보존).
 
-    순서: ① STYLE(스타일 앵커 맨 앞) → ② ASSETS(@Video1·@Image 매핑) → ③ TIMELINE(컷마다 1문장+대사)
+    순서: ① STYLE(스타일 앵커 맨 앞) → ② ASSETS(@Video1·@Image 매핑) → ③ TIMELINE(컷마다 1줄+대사)
     → ④ RULES(@Video1 재현·인물 교체·추가 금지) → ⑤ AVOID(3D/photoreal 네거티브).
-    넘으면 ③(TIMELINE)의 각 컷 문장을 뒤에서부터 줄인다(TIMELINE 만 자르고 STYLE·RULES·AVOID 보호).
+
+    TIMELINE 은 이 모드의 핵심(컷 전환·대사·연기)이므로 **컷을 절대 빼지 않는다**. 예산(2,500바이트)을
+    넘으면 아래 순서로만 줄인다(컷 수는 그대로):
+      ① 인물 외형 100자 → ② 각 컷 연기(action) 70자 → ③ 각 컷 샷(shot) 35자 → ④ 대사 25자 →
+      ⑤ AVOID 축약 → ⑥ 그래도 넘으면 연기 문장 제거(타임스탬프+샷+대사는 유지).
+    STYLE·RULES 첫 문장은 유지한다. 마지막에 모든 컷 타임스탬프가 있는지 확인하고, 빠지면 경고 후
+    최소형(`start-end: shot`)으로 재구성한다.
     """
+    budget = int(vnew_settings.VNEW_TAKE_PROMPT_MAX or 2500)
+    entries = _take_timeline_entries(plan, take)
+    all_stamps = [f"{e['start']}-{e['end']}s" for e in entries]
+
     style_en = _first_take_style_en(plan)
     if panel_nos:
         if len(panel_nos) == 1:
@@ -1476,54 +1537,149 @@ def _take_prompt(plan: dict, take: dict, *, cast: list[dict], panel_nos: list[in
         style += f": {style_en.rstrip('.')}"
     style += ". Flat cel shading, clean constant-width ink lines, unlit flat color tones."
 
-    asset_parts = ["@Video1 = rough 3D previz (layout, blocking, camera and cuts only)"]
-    for member in cast:
-        name = member.get("name") or "a character"
-        color = member.get("colorName") or "grey"
-        appearance = str(member.get("appearance") or "").strip()
-        front_no = member.get("frontNo")
-        back_no = member.get("backNo")
-        if front_no:
-            refs = f"@Image{front_no} (front)"
-            if back_no:
-                refs += f" and @Image{back_no} (back)"
-            sentence = f"The {color} mannequin is the person in {refs}: {name}"
-        else:
-            sentence = f"The {color} mannequin is {name}"
-        if appearance:
-            sentence += f", {appearance.rstrip('.')}"
-        asset_parts.append(sentence)
-    if location_no:
-        asset_parts.append(f"@Image{location_no} = the location; keep its structure and props")
-    assets = "ASSETS: " + ". ".join(asset_parts) + "."
-
-    timeline_entries = _take_timeline_entries(plan, take)
-
     rules = (
         "RULES: Reproduce @Video1's composition, camera, positions, cuts and timing exactly. "
         "Replace each mannequin with its person; keep face, hair, body, costume identical to the "
         "references in every cut. Do not add any person, action or scene. No mannequins remain. "
         "No text, no subtitles, no speech bubbles."
     )
-    avoid = (
+    avoid_full = (
         "AVOID: 3D CGI, ambient occlusion, photorealistic skin, gradient shading, cinematic "
         "lighting, generic anime style."
     )
+    avoid_short = "AVOID: 3D CGI, photorealistic skin, cinematic lighting."
 
-    budget = int(vnew_settings.VNEW_TAKE_PROMPT_MAX or 2500)
+    # --- 줄이기 상태(컷 수는 절대 줄이지 않는다) ---
+    state = {
+        "appearance_limit": 170,   # ① 인물 외형 글자 상한
+        "action_limit": 110,       # ② 연기 문장 글자 상한
+        "shot_limit": 60,          # ③ 샷 문구 글자 상한
+        "dialogue_limit": 40,      # ④ 대사 글자 상한
+        "avoid": avoid_full,       # ⑤ AVOID 축약 여부
+        "drop_action": False,      # ⑥ 연기 문장 제거
+    }
 
-    def _assemble(entries: list[str]) -> str:
-        timeline = ("TIMELINE (follow @Video1's cuts exactly): " + " ".join(entries)) if entries else ""
-        blocks = [style, assets, timeline, rules, avoid]
+    def _clip(text: str, limit: int) -> str:
+        text = str(text or "").strip()
+        if not text or len(text) <= limit:
+            return text
+        clipped = text[:limit]
+        if " " in clipped:
+            clipped = clipped[: clipped.rfind(" ")]
+        return clipped.rstrip().rstrip(",") + "…"
+
+    def _assets() -> str:
+        parts = ["@Video1 = rough 3D previz (layout, blocking, camera and cuts only)"]
+        for member in cast:
+            name = member.get("name") or "a character"
+            color = member.get("colorName") or "grey"
+            appearance = _clip(str(member.get("appearance") or "").strip(), state["appearance_limit"])
+            front_no = member.get("frontNo")
+            back_no = member.get("backNo")
+            if front_no:
+                refs = f"@Image{front_no} (front)"
+                if back_no:
+                    refs += f" and @Image{back_no} (back)"
+                sentence = f"The {color} mannequin is the person in {refs}: {name}"
+            else:
+                sentence = f"The {color} mannequin is {name}"
+            if appearance:
+                sentence += f", {appearance.rstrip('.')}"
+            parts.append(sentence)
+        if location_no:
+            parts.append(f"@Image{location_no} = the location; keep its structure and props")
+        return "ASSETS: " + ". ".join(parts) + "."
+
+    def _entry_text(entry: dict) -> str:
+        pieces: list[str] = []
+        shot = _clip(entry.get("shot") or "", state["shot_limit"])
+        if shot:
+            pieces.append(shot)
+        if not state["drop_action"]:
+            action = _clip(entry.get("action") or "", state["action_limit"])
+            if action:
+                pieces.append(action)
+        speaker = str(entry.get("speaker") or "").strip()
+        dialogue = _clip(str(entry.get("dialogue") or "").strip(), state["dialogue_limit"])
+        if dialogue:
+            pieces.append(f'{speaker or "A character"}: "{dialogue}"')
+        body = "; ".join(pieces)
+        return f"{entry['start']}-{entry['end']}s: {body}".rstrip()
+
+    def _timeline() -> str:
+        if not entries:
+            return ""
+        return "TIMELINE (follow @Video1's cuts exactly): " + " ".join(_entry_text(e) for e in entries)
+
+    def _assemble() -> str:
+        blocks = [style, _assets(), _timeline(), rules, state["avoid"]]
         return "\n".join(b for b in blocks if b)
 
-    entries = list(timeline_entries)
-    prompt = _assemble(entries)
-    while _utf8_len(prompt) > budget and entries:
-        entries.pop()
-        prompt = _assemble(entries)
-    if _utf8_len(prompt) > budget:
-        prompt = _trim_utf8(prompt, budget)
+    # 한도 안이면 아무 것도 줄이지 않는다.
+    prompt = _assemble()
+    # 줄이기 순서(각 단계 뒤 한도 안이면 즉시 멈춘다). 컷 수는 그대로.
+    steps = [
+        ("appearance_limit", 100),
+        ("action_limit", 70),
+        ("shot_limit", 35),
+        ("dialogue_limit", 25),
+        ("avoid", avoid_short),
+        ("drop_action", True),
+    ]
+    for field, value in steps:
+        if _utf8_len(prompt) <= budget:
+            break
+        state[field] = value
+        prompt = _assemble()
+
+    # 모든 컷 타임스탬프가 남아 있는지 확인(assert 성격). 축소 6단계로도 넘치거나 타임스탬프가 빠졌으면
+    # TIMELINE 을 점점 더 최소형으로 바꿔 **모든 컷을 지킨다**(STYLE·RULES 첫 문장은 유지).
+    def _all_present(text: str) -> bool:
+        return all(stamp in text for stamp in all_stamps)
+
+    if _utf8_len(prompt) > budget or not _all_present(prompt):
+        if not _all_present(prompt):
+            missing = [s for s in all_stamps if s not in prompt]
+            log.warning(
+                "vnew.gen.take_prompt_cut_dropped take=%s missing=%s bytes=%d",
+                str(take.get("id") or ""), ",".join(missing), _utf8_len(prompt),
+            )
+
+        def _minimal_timeline(shot_chars: int | None) -> str:
+            parts = []
+            for e in entries:
+                head = f"{e['start']}-{e['end']}s"
+                if shot_chars:
+                    shot = _clip(e.get("shot") or "", shot_chars)
+                    parts.append(f"{head}: {shot}".rstrip() if shot else head)
+                else:
+                    parts.append(head)
+            return "TIMELINE (follow @Video1's cuts exactly): " + " ".join(parts)
+
+        style_first = _split_sentences(style)
+        style_first = style_first[0] if style_first else style
+        rules_first = _split_sentences(rules)
+        rules_first = rules_first[0] if rules_first else rules
+
+        # 최소형 후보(점점 더 짧게). 모든 타임스탬프가 들어가고 예산 안에 드는 첫 후보를 쓴다.
+        candidates = [
+            "\n".join(b for b in [style, _assets(), _minimal_timeline(35), rules, state["avoid"]] if b),
+            "\n".join([style_first, _minimal_timeline(35), rules_first]),
+            "\n".join([style_first, _minimal_timeline(None), rules_first]),
+            "\n".join([style_first, _minimal_timeline(None)]),
+            _minimal_timeline(None),
+        ]
+        chosen = None
+        for cand in candidates:
+            if _utf8_len(cand) <= budget and _all_present(cand):
+                chosen = cand
+                break
+        if chosen is None:
+            # 타임스탬프만 남겨도 예산을 넘으면(극단) 마지막에만 바이트로 자른다.
+            chosen = _minimal_timeline(None)
+            if _utf8_len(chosen) > budget:
+                chosen = _trim_utf8(chosen, budget)
+        prompt = chosen
     return prompt
 
 
@@ -1568,7 +1724,8 @@ def _take_payload(owner: str, pid: str, plan: dict, take: dict, caps: dict) -> d
             "colorName": color_name,
             "frontNo": front_no,
             "backNo": back_no,
-            "appearance": appearance,
+            # 외형은 참조 이미지(@Image)가 담당하므로 짧게 요약한다(컷 보존, 설계자 2026-10-26).
+            "appearance": _short_appearance(appearance, 170),
         })
 
     panel_nos: list[int] = []
