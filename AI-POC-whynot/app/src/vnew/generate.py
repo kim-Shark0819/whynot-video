@@ -436,7 +436,141 @@ def _previz_caps(endpoint: str) -> dict:
     return (item or {}).get("caps") or {}
 
 
+# ================================================================ 통 테이크 모드(설계자 2026-10-26, 063)
+#
+# input.videoModel 의 caps 에 videoListField(배열 영상 입력)가 있으면 gen.mode = "previz-take".
+# 블록아웃 녹화를 통째(≤30초)로 Seedance 2.5 reference-to-video 에 넣어 웹툰 그림체를 한 번에
+# 만든다(실사 칸은 skipped). 아니면 지금 그대로 컷 단위 "previz".
+
+
+def _gen_mode(plan: dict) -> str:
+    """이 계획이 쓸 gen 모드(설계자 2026-10-26). caps 에 videoListField 가 있으면 'previz-take',
+    아니면 'previz'(컷 단위). 모드 선택은 input.videoModel 의 등록 caps 로만 정한다.
+    """
+    caps = _previz_caps(_previz_model_endpoint(plan))
+    return "previz-take" if caps.get("videoListField") else "previz"
+
+
+def _take_units(plan: dict) -> list[dict]:
+    """녹화 구간(conti.segments 순서, 녹화 ready)을 앞에서부터 묶어 합계 ≤ VNEW_TAKE_MAX_SECONDS 인
+    테이크로 만든다(넘으면 다음 테이크). 각 테이크:
+      {id:"take1", cutIds:[...], recKeys:[...], recSegIds:[...], seconds, startCutNo, endCutNo}.
+    녹화가 없는 구간은 건너뛴다(선행 조건에서 recordedAll 로 거른다).
+    """
+    conti = plan.get("conti") or {}
+    recordings = (plan.get("previz") or {}).get("recordings") or {}
+    cut_no_by_id = {str(c.get("id")): c.get("no") for c in (conti.get("cuts") or [])}
+    cap = max(4, int(vnew_settings.VNEW_TAKE_MAX_SECONDS or 30))
+
+    takes: list[dict] = []
+    current: dict | None = None
+    for seg in conti.get("segments") or []:
+        seg_id = str(seg.get("id") or "")
+        rec = recordings.get(seg_id) or {}
+        rec_key = str(rec.get("key") or "")
+        if not rec_key:
+            continue
+        seg_seconds = float(rec.get("seconds") or 0) or float(seg.get("seconds") or 0)
+        cut_ids = [str(cid) for cid in (seg.get("cutIds") or [])]
+        # 현재 테이크에 넣으면 상한을 넘고, 이미 뭔가 들어 있으면 새 테이크를 연다.
+        if current is not None and (current["seconds"] + seg_seconds) > cap + 0.01 and current["recKeys"]:
+            takes.append(current)
+            current = None
+        if current is None:
+            current = {
+                "id": f"take{len(takes) + 1}",
+                "cutIds": [],
+                "recKeys": [],
+                "recSegIds": [],
+                "seconds": 0.0,
+                "startCutNo": None,
+                "endCutNo": None,
+            }
+        current["cutIds"].extend(cut_ids)
+        current["recKeys"].append(rec_key)
+        current["recSegIds"].append(seg_id)
+        current["seconds"] = round(current["seconds"] + seg_seconds, 3)
+        for cid in cut_ids:
+            no = cut_no_by_id.get(cid)
+            if no is None:
+                continue
+            if current["startCutNo"] is None:
+                current["startCutNo"] = no
+            current["endCutNo"] = no
+    if current is not None and current["recKeys"]:
+        takes.append(current)
+    return takes
+
+
+def _empty_take_unit(take: dict) -> dict:
+    """테이크 1개 작업(설계자 2026-10-26). 웹툰만 생성(실사는 skipped·제출 0)."""
+    return {
+        "id": str(take.get("id") or ""),
+        "cutIds": [str(c) for c in (take.get("cutIds") or [])],
+        "recKeys": [str(k) for k in (take.get("recKeys") or [])],
+        "recSegIds": [str(s) for s in (take.get("recSegIds") or [])],
+        "seconds": float(take.get("seconds") or 0.0),
+        "startCutNo": take.get("startCutNo"),
+        "endCutNo": take.get("endCutNo"),
+        "draftId": "",
+        "real": {**_empty_variant_state(), "status": "skipped",
+                 "note": "통 테이크(베타)는 웹툰만 만듭니다 — 실사는 기본 모델로 따로 만들 수 있습니다."},
+        "webtoon": {**_empty_variant_state(), "status": "queued"},
+    }
+
+
+def _new_take_gen(plan: dict) -> dict:
+    """통 테이크 gen(설계자 2026-10-26, 063). units = 테이크(웹툰만). finalReal 은 skipped."""
+    units = [_empty_take_unit(t) for t in _take_units(plan)]
+    previz = plan.get("previz") or {}
+    brief = previz.get("shotBrief") or {}
+    return {
+        "genId": _gen_id(),
+        "mode": "previz-take",
+        "status": "running",  # running|done|partial|failed|cancelled
+        "videoModel": _previz_model_endpoint(plan),
+        "resolution": str(vnew_settings.VNEW_TAKE_RESOLUTION),
+        "createdAt": now_iso(),
+        "previzRevision": int(previz.get("revision") or 0),
+        "briefUpdatedAt": str(brief.get("updatedAt") or ""),
+        "units": units,
+        "segments": [],
+        "finalReal": {"status": "skipped", "key": "", "error": "",
+                      "note": "통 테이크(베타)는 웹툰만 만듭니다 — 실사는 기본 모델로 따로 만들 수 있습니다."},
+        "finalWebtoon": {"status": "waiting", "key": "", "error": ""},
+        "selected": None,
+        "costUsd": 0.0,
+    }
+
+
+def _take_usd(endpoint: str, seconds: float, resolution: str) -> float:
+    """통 테이크 1개 금액(설계자 2026-10-26). unit "1000 tokens" 모델 토큰 공식.
+
+    해상도별 (w,h) = TAKE_RESOLUTION_WH. tokens = w×h×24×s/1024. usd = tokens/1000 × unitPrice.
+    단가는 fal pricing(unit "1000 tokens") 을 먼저 쓰고, 못 받으면 VNEW_TAKE_TOKEN_UNIT_PRICE.
+    """
+    wh = vnew_settings.TAKE_RESOLUTION_WH.get(str(resolution or ""), vnew_settings.TAKE_RESOLUTION_WH["480p"])
+    width, height = wh
+    secs = max(0.0, float(seconds or 0))
+    tokens = (width * height * 24.0 * secs) / 1024.0
+    unit_price = _take_unit_price(endpoint)
+    return round((tokens / 1000.0) * unit_price, 4)
+
+
+def _take_unit_price(endpoint: str) -> float:
+    """통 테이크 모델의 "1000 tokens" 단가(USD, 설계자 2026-10-26). fal pricing 우선, 없으면 기본값."""
+    price = vpoc_fal.pricing_for(vpoc_settings.FAL_ID_PREFIX + str(endpoint or ""))
+    if not price:
+        price = vpoc_fal.pricing(str(endpoint or ""))
+    if price and str(price.get("unit") or "").lower().replace("-", " ") == "1000 tokens":
+        unit_price = float(price.get("unitPrice") or 0.0)
+        if unit_price > 0:
+            return unit_price
+    return float(vnew_settings.VNEW_TAKE_TOKEN_UNIT_PRICE)
+
+
 # ================================================================ 금액(estimate)
+
 
 
 def _previz_segments(plan: dict) -> list[dict]:
@@ -535,6 +669,38 @@ def estimate(plan: dict) -> dict:
      segments:[...]}(segments 는 옛 화면 호환). 녹화가 없으면 totalUsd 0.
     """
     endpoint = _previz_model_endpoint(plan)
+
+    # 통 테이크 모드(설계자 2026-10-26): 테이크별 토큰 공식 금액(웹툰만, 실사 0).
+    if _gen_mode(plan) == "previz-take":
+        resolution = str(vnew_settings.VNEW_TAKE_RESOLUTION)
+        rows = []
+        webtoon_usd = 0.0
+        for take in _take_units(plan):
+            seconds = float(take.get("seconds") or 0)
+            cost = _take_usd(endpoint, seconds, resolution)
+            webtoon_usd += cost
+            rows.append(
+                {
+                    "id": take.get("id"),
+                    "cutIds": list(take.get("cutIds") or []),
+                    "seconds": round(seconds, 3),
+                    "realUsd": 0.0,
+                    "webtoonUsd": cost,
+                }
+            )
+        total = round(webtoon_usd, 2)
+        return {
+            "mode": "previz-take",
+            "videoModel": endpoint,
+            "resolution": resolution,
+            "realUsd": 0.0,
+            "webtoonUsd": round(webtoon_usd, 4),
+            "totalUsd": total,
+            "takes": rows,
+            "units": rows,
+            "segments": rows,  # 옛 화면 호환.
+        }
+
     per_sec = _previz_model_unit_price(endpoint)
     rows = []
     real_usd = 0.0
@@ -704,7 +870,7 @@ def start_generate(owner: str, pid: str, confirm_usd: float) -> str:
             409,
         )
 
-    new = _new_previz_gen(plan)
+    new = _new_take_gen(plan) if _gen_mode(plan) == "previz-take" else _new_previz_gen(plan)
 
     def mutator(data: dict) -> None:
         current = data.get("gen") or {}
@@ -820,7 +986,7 @@ def _drive(owner: str, pid: str, gen_id: str) -> None:
         if str(gen.get("genId") or "") != gen_id or gen.get("status") != "running":
             return
 
-        if gen.get("mode") == "previz":
+        if gen.get("mode") in ("previz", "previz-take"):
             # 프리비즈 모드: 한 순회에서 submitted 전부 조회 + queued 를 상한까지 동시 제출(병렬).
             progressed = _drive_previz_pass(owner, pid, gen_id)
             if progressed is None:
@@ -849,7 +1015,7 @@ def _still_in_progress(owner: str, pid: str, gen_id: str) -> bool:
     gen = plan.get("gen") or {}
     if str(gen.get("genId") or "") != gen_id or gen.get("status") != "running":
         return False
-    cells = _previz_cells(gen) if gen.get("mode") == "previz" else (gen.get("segments") or [])
+    cells = _previz_cells(gen) if _is_previz_mode(gen) else (gen.get("segments") or [])
     for seg in cells:
         for variant in ("real", "webtoon"):
             if (seg.get(variant) or {}).get("status") == "submitted":
@@ -1024,6 +1190,11 @@ def _previz_cells(gen: dict) -> list[dict]:
     return gen.get("segments") or []
 
 
+def _is_previz_mode(gen: dict) -> bool:
+    """프리비즈 계열(컷 단위 previz · 통 테이크 previz-take) 모드인지(설계자 2026-10-26)."""
+    return str((gen or {}).get("mode") or "") in ("previz", "previz-take")
+
+
 def _drive_previz_pass(owner: str, pid: str, gen_id: str):
     """프리비즈 모드 한 순회(설계자 2026-10-21, 지시서 041 · 2026-10-22 컷 단위). 반환:
 
@@ -1187,6 +1358,456 @@ def _cut_clip(video_mp4: bytes, unit: dict) -> dict:
             }
 
 
+# ---------------------------------------------------------------- 통 테이크 제출(설계자 2026-10-26, 063)
+
+
+def _stitch_recordings(rec_keys: list[str]) -> bytes:
+    """테이크의 녹화 mp4 들을 순서대로 이어 붙여 1개 mp4 로(720p 유지, stitcher.concat 재사용).
+
+    녹화 1개면 그대로 돌려준다(concat 없이). 여러 개면 _concat 으로 붙인다.
+    """
+    clips = []
+    for key in rec_keys:
+        if not key:
+            continue
+        clips.append(_fetch_bytes(str(key), bucket=vpoc_settings.VIDEO_BUCKET))
+    if not clips:
+        raise VpocError("vnew.generate", "NoRecording", "테이크 녹화가 없습니다.", 409)
+    if len(clips) == 1:
+        return clips[0]
+    return _concat(clips)
+
+
+def _take_location_jpeg(plan: dict, take: dict) -> bytes | None:
+    """테이크 장소의 웹툰 뷰 A(back) 이미지. locations 의 webtoon variant viewKeys.back 을 쓴다.
+
+    못 찾으면 None(장소 시트 생략). 콘티 cut.locationEn 으로 장소를 찾는다.
+    """
+    location = _location_name_en(plan, take)
+    loc = _location_by_name(plan, location)
+    if not loc:
+        return None
+    webtoon = (loc.get("variants") or {}).get("webtoon") or {}
+    key = str((webtoon.get("viewKeys") or {}).get("back") or "")
+    if not key:
+        return None
+    return _load_jpeg(key)
+
+
+def _first_take_style_en(plan: dict) -> str:
+    """등장 캐릭터 중 첫 styleEn(원작 그림체 한 문장, 300자 이내). 없으면 빈 문자열."""
+    for item in (plan.get("input") or {}).get("characters") or []:
+        char_id = str(item.get("charId") or "")
+        if not char_id:
+            continue
+        try:
+            char, _ = characters.load_char(_take_owner_hint(plan), char_id)
+        except Exception:  # noqa: BLE001
+            continue
+        style_en = str(((char or {}).get("analysis") or {}).get("styleEn") or "").strip()
+        if style_en:
+            return style_en[:300]
+    return ""
+
+
+def _take_owner_hint(plan: dict) -> str:
+    """styleEn 로드용 owner. plan 에 owner 가 없으면 빈 문자열(검사는 load_char 를 가짜로 바꾼다)."""
+    return str(plan.get("owner") or "")
+
+
+def _take_timeline_entries(plan: dict, take: dict) -> list[str]:
+    """테이크 컷들의 타임라인 문장 목록(설계자 2026-10-26). 컷마다 "0-3s: {shot} {action}; {화자}: "{대사}"".
+
+    촬영 지시서(shotBrief)의 shotEn·actionEn 앞 1문장씩 + _cut_lines 로 귀속한 대사.
+    시간 범위는 콘티 컷 seconds 를 누적해 만든다.
+    """
+    cuts_by_id = {str(c.get("id")): c for c in (plan.get("conti") or {}).get("cuts") or []}
+    entries: list[str] = []
+    clock = 0.0
+    for cut_id in _seg_cut_ids(take):
+        cut = cuts_by_id.get(str(cut_id)) or {}
+        seconds = float(cut.get("seconds") or 0)
+        start = int(round(clock))
+        end = int(round(clock + seconds))
+        clock += seconds
+        brief = _cut_brief(plan, cut_id)
+        parts: list[str] = []
+        shot_en = str(brief.get("shotEn") or "").strip()
+        if shot_en:
+            sents = _split_sentences(shot_en)
+            parts.append(sents[0] if sents else shot_en)
+        action_en = str(brief.get("actionEn") or "").strip()
+        if action_en:
+            sents = _split_sentences(action_en)
+            parts.append(sents[0] if sents else action_en)
+        body = " ".join(p.rstrip(".") + "." for p in parts if p)
+        lines = _cut_lines(plan, cut)
+        spoken = [ln for ln in lines if not ln.get("silent") and str(ln.get("lineKo") or "").strip()]
+        dlg = ""
+        for ln in spoken:
+            speaker = str(ln.get("speaker") or "").strip() or "A character"
+            text = str(ln.get("lineKo") or "").strip()
+            dlg += f' {speaker}: "{text}".'
+        entry = f"{start}-{end}s: {body}{dlg}".strip()
+        entries.append(entry)
+    return entries
+
+
+def _take_prompt(plan: dict, take: dict, *, cast: list[dict], panel_nos: list[int], location_no) -> str:
+    """통 테이크 프롬프트(영어, UTF-8 ≤ VNEW_TAKE_PROMPT_MAX 바이트, 설계자 2026-10-26, 063).
+
+    순서: ① STYLE(스타일 앵커 맨 앞) → ② ASSETS(@Video1·@Image 매핑) → ③ TIMELINE(컷마다 1문장+대사)
+    → ④ RULES(@Video1 재현·인물 교체·추가 금지) → ⑤ AVOID(3D/photoreal 네거티브).
+    넘으면 ③(TIMELINE)의 각 컷 문장을 뒤에서부터 줄인다(TIMELINE 만 자르고 STYLE·RULES·AVOID 보호).
+    """
+    style_en = _first_take_style_en(plan)
+    if panel_nos:
+        if len(panel_nos) == 1:
+            panel_ref = f"@Image{panel_nos[0]}"
+        else:
+            panel_ref = f"@Image{panel_nos[0]}\u2013@Image{panel_nos[-1]}"
+        style = (
+            f"STYLE: Korean webtoon animation in exactly the drawing style of {panel_ref} "
+            f"(the original panels)"
+        )
+    else:
+        style = "STYLE: Korean webtoon animation (hand-drawn line, coloring and shading)"
+    if style_en:
+        style += f": {style_en.rstrip('.')}"
+    style += ". Flat cel shading, clean constant-width ink lines, unlit flat color tones."
+
+    asset_parts = ["@Video1 = rough 3D previz (layout, blocking, camera and cuts only)"]
+    for member in cast:
+        name = member.get("name") or "a character"
+        color = member.get("colorName") or "grey"
+        appearance = str(member.get("appearance") or "").strip()
+        front_no = member.get("frontNo")
+        back_no = member.get("backNo")
+        if front_no:
+            refs = f"@Image{front_no} (front)"
+            if back_no:
+                refs += f" and @Image{back_no} (back)"
+            sentence = f"The {color} mannequin is the person in {refs}: {name}"
+        else:
+            sentence = f"The {color} mannequin is {name}"
+        if appearance:
+            sentence += f", {appearance.rstrip('.')}"
+        asset_parts.append(sentence)
+    if location_no:
+        asset_parts.append(f"@Image{location_no} = the location; keep its structure and props")
+    assets = "ASSETS: " + ". ".join(asset_parts) + "."
+
+    timeline_entries = _take_timeline_entries(plan, take)
+
+    rules = (
+        "RULES: Reproduce @Video1's composition, camera, positions, cuts and timing exactly. "
+        "Replace each mannequin with its person; keep face, hair, body, costume identical to the "
+        "references in every cut. Do not add any person, action or scene. No mannequins remain. "
+        "No text, no subtitles, no speech bubbles."
+    )
+    avoid = (
+        "AVOID: 3D CGI, ambient occlusion, photorealistic skin, gradient shading, cinematic "
+        "lighting, generic anime style."
+    )
+
+    budget = int(vnew_settings.VNEW_TAKE_PROMPT_MAX or 2500)
+
+    def _assemble(entries: list[str]) -> str:
+        timeline = ("TIMELINE (follow @Video1's cuts exactly): " + " ".join(entries)) if entries else ""
+        blocks = [style, assets, timeline, rules, avoid]
+        return "\n".join(b for b in blocks if b)
+
+    entries = list(timeline_entries)
+    prompt = _assemble(entries)
+    while _utf8_len(prompt) > budget and entries:
+        entries.pop()
+        prompt = _assemble(entries)
+    if _utf8_len(prompt) > budget:
+        prompt = _trim_utf8(prompt, budget)
+    return prompt
+
+
+def _take_payload(owner: str, pid: str, plan: dict, take: dict, caps: dict) -> dict:
+    """통 테이크(웹툰) 참조 이미지 목록·프롬프트(설계자 2026-10-26, 063).
+
+    image_urls(순서 고정 — 프롬프트 번호와 일치):
+      ① 테이크에 등장하는 인물별(등장 많은 순) 웹툰 기본복장 정면, 이어 후면(있으면) — 인물당 2장.
+      ② 원작 그림체 패널 최대 VNEW_TAKE_MAX_PANELS 장.
+      ③ 장소 시트(webtoon back 뷰) — 있으면 1장.
+    전부 061 축소 규칙(긴 변 1024, JPEG q85). 총 ≤ caps.imageListMax(기본 10).
+    반환: {imageUrls:[bytes], prompt, cast, panelNos, locationNo}.
+    """
+    max_images = int(caps.get("imageListMax") or vpoc_fal.DEFAULT_IMAGE_LIST_MAX)
+    actors = _segment_actors(plan, take)
+    char_by_id = _char_by_id(owner, plan)
+
+    image_urls: list[bytes] = []
+    cast: list[dict] = []
+    for actor in actors:
+        if len(image_urls) >= max_images:
+            break
+        name = actor.get("name") or "a character"
+        color_name = actor.get("colorName") or "grey"
+        char_id = actor.get("charId") or ""
+        char = char_by_id.get(char_id) if char_id else None
+        front_no = None
+        back_no = None
+        appearance = actor.get("appearanceEn") or ""
+        if char:
+            front = _load_jpeg(str(char.get("webtoonFrontKey") or ""))
+            if front is not None and len(image_urls) < max_images:
+                image_urls.append(_fit_ref(front))
+                front_no = len(image_urls)
+                back = _load_jpeg(str(char.get("webtoonBackKey") or ""))
+                if back is not None and len(image_urls) < max_images:
+                    image_urls.append(_fit_ref(back))
+                    back_no = len(image_urls)
+                appearance = ((char.get("appearanceEn") or "") + " " + (char.get("outfitEn") or "")).strip() or appearance
+        cast.append({
+            "name": name,
+            "colorName": color_name,
+            "frontNo": front_no,
+            "backNo": back_no,
+            "appearance": appearance,
+        })
+
+    panel_nos: list[int] = []
+    panels = _segment_panel_jpegs(owner, pid, plan, take, int(vnew_settings.VNEW_TAKE_MAX_PANELS or 3))
+    for panel in panels:
+        if len(image_urls) >= max_images:
+            break
+        image_urls.append(_fit_ref(panel))
+        panel_nos.append(len(image_urls))
+
+    location_no = None
+    loc_jpeg = _take_location_jpeg(plan, take)
+    if loc_jpeg is not None and len(image_urls) < max_images:
+        image_urls.append(_fit_ref(loc_jpeg))
+        location_no = len(image_urls)
+
+    prompt = _take_prompt(plan, take, cast=cast, panel_nos=panel_nos, location_no=location_no)
+    if len(image_urls) > max_images:
+        image_urls = image_urls[:max_images]
+    return {
+        "imageUrls": image_urls,
+        "prompt": prompt,
+        "cast": cast,
+        "panelNos": panel_nos,
+        "locationNo": location_no,
+    }
+
+
+def _take_duration_value(caps: dict, duration_int: int):
+    """duration 정수를 caps.durations(enum) 에 맞춘다. enum 이 있으면 ≤ 값 중 가장 큰 것, 없으면 그대로."""
+    durations = caps.get("durations") or []
+    allowed = []
+    for d in durations:
+        try:
+            allowed.append(int(d))
+        except (TypeError, ValueError):
+            continue
+    if not allowed:
+        return duration_int
+    allowed.sort()
+    chosen = allowed[0]
+    for value in allowed:
+        if value <= duration_int:
+            chosen = value
+    return chosen
+
+
+def _submit_take(*, endpoint: str, caps: dict, video_mp4: bytes, prompt: str, output_prefix: str,
+                 image_urls: list[bytes], seconds: float, resolution: str) -> dict:
+    """통 테이크 reference-to-video 제출(fal 큐, 설계자 2026-10-26). 참조 영상·이미지는 data URI.
+
+    caps 의 필드 이름으로 본문을 만든다: videoListField(배열), imageListField(배열), taskField,
+    draftField, generateAudioField, durationAsString. seed 는 보내지 않는다. caps 에 없는 필드는
+    보내지 않는다. 반환 모양은 _submit_previz_edit 과 같다(poll/_find_output_key 재사용).
+    """
+    endpoint = str(endpoint or "").strip()
+    if not vpoc_settings.FAL_KEY:
+        raise VpocError("vnew.generate", "FalKeyMissing", "fal API 키가 설정되지 않았습니다.", 409)
+    if not endpoint:
+        raise VpocError("vnew.generate", "BadEndpoint", "통 테이크 모델 endpoint 가 비어 있습니다.", 400)
+    if not prompt.strip():
+        raise VpocError("vnew.generate", "EmptyPrompt", "프롬프트가 비어 있습니다.", 400)
+    if not video_mp4:
+        raise VpocError("vnew.generate", "EmptyVideo", "참조 영상이 비어 있습니다.", 400)
+
+    def _img_uri(jpeg: bytes) -> str:
+        return "data:image/jpeg;base64," + base64.b64encode(jpeg).decode("ascii")
+
+    video_list_field = str(caps.get("videoListField") or "video_urls")
+    image_list_field = str(caps.get("imageListField") or "image_urls")
+    task_field = str(caps.get("taskField") or "")
+    draft_field = str(caps.get("draftField") or "")
+    audio_field = str(caps.get("generateAudioField") or "")
+    duration_as_string = bool(caps.get("durationAsString"))
+
+    body: dict = {
+        "prompt": prompt,
+        video_list_field: [vpoc_fal._video_data_uri(video_mp4)],
+    }
+    if image_urls and image_list_field:
+        body[image_list_field] = [_img_uri(bytes(j)) for j in image_urls if isinstance(j, (bytes, bytearray))]
+    if task_field:
+        body[task_field] = "reference"
+    body["aspect_ratio"] = "16:9"
+    body["resolution"] = str(resolution)
+    duration_int = max(4, min(30, int(round(float(seconds or 4)))))
+    duration_value = _take_duration_value(caps, duration_int)
+    if duration_value is not None:
+        body["duration"] = str(duration_value) if duration_as_string else duration_value
+    if audio_field:
+        body[audio_field] = bool(vnew_settings.VNEW_TAKE_AUDIO)
+    if draft_field:
+        body[draft_field] = bool(vnew_settings.VNEW_TAKE_DRAFT)
+
+    url = f"{vpoc_settings.FAL_QUEUE_URL}/{endpoint}"
+    result = _previz_request("POST", url, body)
+    request_id = str(result.get("request_id") or "")
+    if not request_id:
+        raise VpocError("vnew.generate", "NoRequestId", f"요청 ID 가 없습니다: {str(result)[:300]}", 502)
+    draft_id = str(result.get("draft_id") or result.get("draftId") or "")
+    return {
+        "provider": vpoc_settings.FAL_ID_PREFIX + endpoint,
+        "invocationArn": f"{vpoc_fal.ARN_PREFIX}{endpoint}/{request_id}",
+        "clientRequestToken": "fal-take-" + request_id,
+        "outputPrefix": output_prefix,
+        "submittedAt": now_iso(),
+        "promptChars": len(prompt),
+        "draftId": draft_id,
+    }
+
+
+def _charge_take(owner: str, pid: str, gen_id: str, result: dict, seconds: float, resolution: str) -> None:
+    """통 테이크 제출 1회 계상(토큰 공식). 키 = 작업 토큰(중복 방지)."""
+    token = str(result.get("clientRequestToken") or "")
+    if not token:
+        return
+    provider = str(result.get("provider") or "")
+    endpoint = provider.split(":", 1)[-1] if provider else str(vnew_settings.VNEW_PREVIZ_EDIT_MODEL)
+    usd = _take_usd(endpoint, seconds, resolution)
+    try:
+        vpoc_ledger.charge(
+            token,
+            kind="video",
+            model=endpoint or vnew_settings.VNEW_PREVIZ_EDIT_MODEL,
+            units=float(seconds or 0),
+            usd=usd,
+            user=owner,
+            project_id=pid,
+            plan_id=gen_id,
+        )
+    except Exception as exc:  # noqa: BLE001
+        log.warning("vnew.gen.charge_take_failed pid=%s err=%s", pid, str(exc)[:200])
+
+
+def _do_submit_take(owner: str, pid: str, gen_id: str, index: int, variant: str, claim: str) -> None:
+    """통 테이크 1개(웹툰)를 Seedance 2.5 reference-to-video 로 제출한다(설계자 2026-10-26, 063).
+
+    video_urls = [테이크 녹화 이어붙인 mp4 data URI]. image_urls = 인물 정면·후면 → 패널 → 장소.
+    준비(녹화 받기·이어붙이기·payload·제출)는 _PREPARE_SEM 안에서(061 OOM 규칙). 실사 칸은 호출되지
+    않는다(skipped). draft_id 가 있으면 cell.draftId 로 저장한다.
+    """
+    if variant != "webtoon":
+        return
+    stage = "start"
+    started = time.monotonic()
+    prompt = ""
+    prompt_bytes = 0
+    prefix = ""
+    result = None
+    take_seconds = 0.0
+    resolution = str(vnew_settings.VNEW_TAKE_RESOLUTION)
+    prepared = False
+    _PREPARE_SEM.acquire()
+    try:
+        plan, _ = plan_mod.load_plan(owner, pid)
+        gen = plan.get("gen") or {}
+        if not _claim_ok_variant(gen, index, variant, claim):
+            return
+        take = _previz_cells(gen)[index]
+        state = take[variant]
+        attempt = int(state.get("attempt") or 1)
+        take_id = str(take.get("id") or index)
+        rec_keys = [str(k) for k in (take.get("recKeys") or []) if k]
+        if not rec_keys:
+            raise VpocError("vnew.generate", "NoRecording", "테이크 녹화가 없습니다.", 409)
+
+        endpoint = str(gen.get("videoModel") or vnew_settings.VNEW_PREVIZ_EDIT_MODEL)
+        caps = _previz_caps(endpoint)
+        resolution = str(gen.get("resolution") or vnew_settings.VNEW_TAKE_RESOLUTION)
+
+        stage = "stitch"
+        video_mp4 = _stitch_recordings(rec_keys)
+
+        stage = "payload"
+        built = _take_payload(owner, pid, plan, take, caps)
+        prompt = built["prompt"]
+        image_urls = built["imageUrls"]
+        prompt_bytes = len(prompt.encode("utf-8"))
+        prefix = _seg_output_prefix(owner, pid, gen_id, take_id + "-" + variant, attempt)
+        take_seconds = float(take.get("seconds") or 0)
+
+        stage = "submit"
+        result = _submit_take(
+            endpoint=endpoint,
+            caps=caps,
+            video_mp4=video_mp4,
+            prompt=prompt,
+            output_prefix=prefix,
+            image_urls=image_urls,
+            seconds=take_seconds,
+            resolution=resolution,
+        )
+        del video_mp4, built, image_urls
+        prepared = True
+        log.info(
+            "vnew.gen.take_submit pid=%s take=%s bytes_body=%d ms=%d",
+            pid, take_id, prompt_bytes, int((time.monotonic() - started) * 1000),
+        )
+    except _Discard:
+        return
+    except Exception as exc:  # noqa: BLE001
+        log.warning(
+            "vnew.gen.take_submit_failed pid=%s take=%s stage=%s err=%s",
+            pid, index, stage, _msg(exc),
+        )
+        _fail_variant(owner, pid, gen_id, index, variant, claim, _msg(exc))
+        return
+    finally:
+        _PREPARE_SEM.release()
+
+    if not prepared:
+        return
+
+    _charge_take(owner, pid, gen_id, result, take_seconds, resolution)
+
+    def mutator(data: dict) -> None:
+        g = data.get("gen") or {}
+        if not _claim_ok_variant(g, index, variant, claim):
+            raise _Discard()
+        cell = _previz_cells(g)[index]
+        s = cell[variant]
+        s["status"] = "submitted"
+        s["invocationArn"] = result.get("invocationArn") or ""
+        s["outputPrefix"] = result.get("outputPrefix") or prefix
+        s["error"] = ""
+        s["promptEn"] = prompt
+        s["promptBytes"] = prompt_bytes
+        draft_id = str(result.get("draftId") or "")
+        if draft_id:
+            cell["draftId"] = draft_id
+
+    try:
+        _commit(owner, pid, mutator)
+    except _Discard:
+        return
+    except Exception as exc:  # noqa: BLE001
+        _fail_variant(owner, pid, gen_id, index, variant, claim, _msg(exc))
+
+
 def _do_submit_previz(owner: str, pid: str, gen_id: str, index: int, variant: str, claim: str) -> None:
     """프리비즈 컷 한 그림체(real/webtoon)를 fal video-to-video/edit 로 제출한다(설계자 2026-10-22, ⑤).
 
@@ -1211,6 +1832,14 @@ def _do_submit_previz(owner: str, pid: str, gen_id: str, index: int, variant: st
     unit_seconds = 0.0
     clip_meta: dict = {}
     prepared = False  # 세마포어 안에서 제출까지 성공했는가.
+    # 통 테이크 모드(설계자 2026-10-26)는 전용 경로로 제출한다(참조 영상 통째 + 참조 이미지 순서).
+    try:
+        plan0, _ = plan_mod.load_plan(owner, pid)
+    except VpocError:
+        return
+    if (plan0.get("gen") or {}).get("mode") == "previz-take":
+        _do_submit_take(owner, pid, gen_id, index, variant, claim)
+        return
     _PREPARE_SEM.acquire()
     try:
         plan, _ = plan_mod.load_plan(owner, pid)
@@ -1372,9 +2001,12 @@ def _maybe_finalize_previz(owner: str, pid: str, gen_id: str) -> None:
 
     for variant in ("real", "webtoon"):
         states = [seg[variant]["status"] for seg in cells]
+        # 통 테이크(설계자 2026-10-26): 실사 칸은 skipped — concat 대상이 아니다(완료로 본다).
+        if states and all(s == "skipped" for s in states):
+            continue
         all_done = all(s == "completed" for s in states)
         final_field = "finalReal" if variant == "real" else "finalWebtoon"
-        if all_done and (gen.get(final_field) or {}).get("status") not in ("done", "running"):
+        if all_done and (gen.get(final_field) or {}).get("status") not in ("done", "running", "skipped"):
             _do_concat(owner, pid, gen_id, variant)
 
     # 상태 확정.
@@ -1395,8 +2027,11 @@ def _maybe_finalize_previz(owner: str, pid: str, gen_id: str) -> None:
             return
         # 더 진행할 일이 없다. 실패가 하나라도 있으면 partial, 아니면 done.
         any_fail = any(x in ("failed", "cancelled") for x in reals + webs)
-        fr_done = (g.get("finalReal") or {}).get("status") == "done"
-        fw_done = (g.get("finalWebtoon") or {}).get("status") == "done"
+        # finalReal/finalWebtoon 이 done 이거나 skipped(통 테이크 실사)면 그 쪽은 '끝'으로 본다.
+        fr_status = (g.get("finalReal") or {}).get("status")
+        fw_status = (g.get("finalWebtoon") or {}).get("status")
+        fr_done = fr_status in ("done", "skipped")
+        fw_done = fw_status in ("done", "skipped")
         if any_fail or not (fr_done and fw_done):
             g["status"] = "partial"
         else:
@@ -2381,7 +3016,7 @@ def _charge_previz(owner: str, pid: str, gen_id: str, result: dict, seconds: flo
 
 def _claim_ok_variant(gen: dict, index: int, variant: str, claim: str) -> bool:
     try:
-        cells = _previz_cells(gen) if gen.get("mode") == "previz" else (gen.get("segments") or [])
+        cells = _previz_cells(gen) if _is_previz_mode(gen) else (gen.get("segments") or [])
         return cells[index][variant].get("claim") == claim
     except Exception:  # noqa: BLE001
         return False
@@ -2717,8 +3352,8 @@ def _do_concat(owner: str, pid: str, gen_id: str, variant: str) -> None:
     try:
         plan, _ = plan_mod.load_plan(owner, pid)
         gen = plan.get("gen") or {}
-        is_previz = gen.get("mode") == "previz"
-        cells = _previz_cells(gen) if is_previz else (gen.get("segments") or [])
+        is_previz = gen.get("mode") == "previz"  # 컷 단위 previz 만 3초 채움 트림 대상.
+        cells = _previz_cells(gen) if _is_previz_mode(gen) else (gen.get("segments") or [])
         clips = []
         for seg in cells:
             state = seg[variant]
@@ -3063,7 +3698,7 @@ def cancel_gen(owner: str, pid: str) -> dict:
         raise VpocError("vnew.generate", "NothingToCancel", "진행 중인 영상 생성이 없습니다.", 409)
 
     remote: dict[str, str] = {}
-    cancel_cells = _previz_cells(gen) if gen.get("mode") == "previz" else (gen.get("segments") or [])
+    cancel_cells = _previz_cells(gen) if _is_previz_mode(gen) else (gen.get("segments") or [])
     for seg in cancel_cells:
         for variant in ("real", "webtoon"):
             state = seg.get(variant) or {}
@@ -3078,7 +3713,7 @@ def cancel_gen(owner: str, pid: str) -> dict:
         if opening.get("status") in ("waiting", "preparing"):
             opening["status"] = "cancelled"
             opening["claim"] = ""
-        cells = _previz_cells(g) if g.get("mode") == "previz" else (g.get("segments") or [])
+        cells = _previz_cells(g) if _is_previz_mode(g) else (g.get("segments") or [])
         for seg in cells:
             for variant in ("real", "webtoon"):
                 state = seg.get(variant) or {}
@@ -3113,9 +3748,12 @@ def retry_segment(owner: str, pid: str, seg_id: str, variant: str = "real") -> d
         gen_id_box["id"] = str(g.get("genId") or "")
         segments = g.get("segments") or []
 
-        # 프리비즈 모드: 그 컷(unit)·그 그림체만 다시 queued. 다른 컷은 건드리지 않는다(컷은 독립).
-        if g.get("mode") == "previz":
-            target = str(variant if variant in ("real", "webtoon") else "real")
+        # 프리비즈 계열: 그 컷/테이크·그 그림체만 다시 queued. 통 테이크는 웹툰만(실사 skipped).
+        if _is_previz_mode(g):
+            if g.get("mode") == "previz-take":
+                target = "webtoon"
+            else:
+                target = str(variant if variant in ("real", "webtoon") else "real")
             cells = _previz_cells(g)
             found = False
             for unit in cells:
@@ -3270,6 +3908,7 @@ def gen_view(owner: str, pid: str, plan: dict) -> dict | None:
             "status": state.get("status"),
             "attempt": state.get("attempt"),
             "error": state.get("error") or "",
+            "note": state.get("note") or "",
             "videoUrl": _presign_video(state.get("outputKey") or ""),
             "promptEn": state.get("promptEn") or "",
             "promptBytes": state.get("promptBytes") or 0,
@@ -3279,8 +3918,30 @@ def gen_view(owner: str, pid: str, plan: dict) -> dict | None:
     # 콘티 cut.no(콘티 컷 번호) 를 cutId 로 찾는다(행 머리 "컷 {no}" 표시용).
     cut_no_by_id = {str(c.get("id")): c.get("no") for c in (plan.get("conti") or {}).get("cuts") or []}
 
+    is_take = mode == "previz-take"
     units_out = []
     for unit in gen.get("units") or []:
+        if is_take:
+            # 통 테이크(설계자 2026-10-26): 프리비즈 미리보기는 테이크 첫 녹화 구간. 컷 범위·draftId 표시.
+            rec_keys = [str(k) for k in (unit.get("recKeys") or []) if k]
+            previz_url = _presign_video(rec_keys[0]) if rec_keys else ""
+            units_out.append(
+                {
+                    "id": unit.get("id"),
+                    "cutIds": list(unit.get("cutIds") or []),
+                    "recKeys": rec_keys,
+                    "recSegIds": list(unit.get("recSegIds") or []),
+                    "seconds": unit.get("seconds"),
+                    "startCutNo": unit.get("startCutNo"),
+                    "endCutNo": unit.get("endCutNo"),
+                    "draftId": unit.get("draftId") or "",
+                    "clipped": True,  # 테이크는 녹화 통째라 #t 되감기가 필요 없다.
+                    "previzUrl": previz_url,
+                    "real": _variant_out(unit.get("real") or {}),
+                    "webtoon": _variant_out(unit.get("webtoon") or {}),
+                }
+            )
+            continue
         rec = previz_recordings.get(str(unit.get("recSegId") or "")) or {}
         # 이미 그 컷만 잘라 둔 클립(clipKey)이 있으면 그것을, 없으면 녹화 구간 전체 mp4(#t 로 구간만 재생).
         clip_key = str(unit.get("clipKey") or "")
@@ -3323,11 +3984,13 @@ def gen_view(owner: str, pid: str, plan: dict) -> dict | None:
         "finalReal": {
             "status": final_real.get("status"),
             "error": final_real.get("error") or "",
+            "note": final_real.get("note") or "",
             "videoUrl": _presign_video(final_real.get("key") or ""),
         },
         "finalWebtoon": {
             "status": final_webtoon.get("status"),
             "error": final_webtoon.get("error") or "",
+            "note": final_webtoon.get("note") or "",
             "videoUrl": _presign_video(final_webtoon.get("key") or ""),
         },
         "selected": gen.get("selected"),
@@ -3506,7 +4169,7 @@ def _fail_variant(owner: str, pid: str, gen_id: str, index: int, variant: str, c
         g = data.get("gen") or {}
         if not _claim_ok_variant(g, index, variant, claim):
             raise _Discard()
-        cells = _previz_cells(g) if g.get("mode") == "previz" else (g.get("segments") or [])
+        cells = _previz_cells(g) if _is_previz_mode(g) else (g.get("segments") or [])
         state = cells[index][variant]
         state["status"] = "failed"
         state["error"] = message

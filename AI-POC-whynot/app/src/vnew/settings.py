@@ -156,6 +156,32 @@ BRIEF_FALLBACK_MODEL = os.getenv("VNEW_BRIEF_FALLBACK_MODEL", ANALYZE_FALLBACK_M
 # 촬영 지시서 작성 task 가 이 시간을 넘게 running 이면 멈춘 것으로 본다(조회 때 failed).
 BRIEF_STALL_S = _int("VNEW_BRIEF_STALL_S", 1800)
 
+# --- ⑤ 통 테이크(Seedance 2.5 reference-to-video) 모드(설계자 2026-10-26, 063) ---
+# input.videoModel 의 caps 에 videoListField(배열 영상 입력)가 있으면 gen.mode = "previz-take" 로
+# 바뀐다(아니면 지금 그대로 컷 단위 "previz"). 블록아웃 녹화 통째(≤30초) + 참조 이미지(인물·그림체·
+# 장소)로 웹툰 그림체 영상을 한 번에 만든다. Claude 조사(video-restyle-research.md) 레시피.
+#
+# 한 테이크 최대 길이(초). 녹화 구간들을 앞에서부터 묶어 합계가 이 값을 넘지 않게 테이크를 만든다.
+VNEW_TAKE_MAX_SECONDS = _int("VNEW_TAKE_MAX_SECONDS", 30)
+# 테이크 출력 해상도(480p 초안 권장 — 비용 통제). 480p/720p/1080p.
+VNEW_TAKE_RESOLUTION = os.getenv("VNEW_TAKE_RESOLUTION", "480p")
+# draft(초안) 모드 — 480p 초안 생성, 응답에 draft_id(나중 1080p 완성용). 기본 켬.
+VNEW_TAKE_DRAFT = _bool("VNEW_TAKE_DRAFT", True)
+# 효과음·립싱크 오디오 생성(비용 가산) — 기본 끔(비용 통제).
+VNEW_TAKE_AUDIO = _bool("VNEW_TAKE_AUDIO", False)
+# Seedance 토큰 단가(fal pricing unit "1000 tokens"). pricing 을 먼저 쓰고, 못 받으면 이 기본값.
+VNEW_TAKE_TOKEN_UNIT_PRICE = _float("VNEW_TAKE_TOKEN_UNIT_PRICE", 0.0214)
+# 참조 이미지 중 원작 그림체 패널 최대 장수.
+VNEW_TAKE_MAX_PANELS = _int("VNEW_TAKE_MAX_PANELS", 3)
+# 테이크 프롬프트 바이트 상한(UTF-8). Seedance 2.5 는 2,500자(바이트로 보수적으로 상한).
+VNEW_TAKE_PROMPT_MAX = _int("VNEW_TAKE_PROMPT_MAX", 2500)
+# 해상도별 (가로, 세로) — 토큰 공식 tokens = w×h×24×s/1024 에 쓴다(fal 실측 기준).
+TAKE_RESOLUTION_WH = {
+    "480p": (854, 480),
+    "720p": (1280, 720),
+    "1080p": (1920, 1080),
+}
+
 
 def previz_edit_usd(seconds: float | None = None) -> float:
     """프리비즈 edit 1건(한 그림체·한 구간) 금액 = 초 × 단가.

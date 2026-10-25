@@ -9833,6 +9833,493 @@ def check_vnew_reference_video() -> None:
         )
 
 
+# ---------------------------------------------------------------- 13c. 통 테이크(Seedance 2.5) 생성
+
+
+def check_vnew_take() -> None:
+    """영상만들기_신규 ⑤ 통 테이크(Seedance 2.5 reference-to-video) — 웹툰만(설계자 2026-10-26, 063).
+
+    외부 호출(fal 제출·조회·concat·원장·캐릭터·장소·패널 로드)은 전부 가짜. 유료 호출 없음.
+
+    (tk-a) videoListField 모델이면 gen.mode previz-take, 아니면 previz(회귀 없음).
+    (tk-b) 녹화 2구간(12s+15s) → 테이크 1개(27s); 3구간(15+15+10) → 테이크 2개(30s, 10s).
+    (tk-c) payload: video_urls 1개, image_urls 순서 = 인물 정면·후면 → 패널 → 장소, ≤10, @Image 번호 일치,
+           task reference·draft true·resolution 480p·duration 문자열·generate_audio false, 실사 skipped·제출 0.
+    (tk-d) 프롬프트 STYLE 맨 앞·AVOID 포함·"cinematic lighting" STYLE/TIMELINE 에 없음·≤2500 바이트.
+    (tk-e) 견적: 480p 15초 ≈ 144k 토큰 × 0.0214/1000 ≈ $3.08(±0.05), 원장 같은 값.
+    (tk-f) draft_id 저장, 완료 → finalWebtoon done·finalReal skipped·gen done.
+    """
+    sys.path.insert(0, str(ROOT / "app"))
+    bad: list[str] = []
+
+    import time as _time  # noqa: PLC0415
+
+    from flask import Flask  # noqa: PLC0415
+
+    from src import vnew  # noqa: PLC0415
+    from src.vnew import generate as genmod  # noqa: PLC0415
+    from src.vnew import plan as planmod  # noqa: PLC0415
+    from src.vnew import settings as vnew_settings  # noqa: PLC0415
+    from src.vpoc import fal as _fal_mod  # noqa: PLC0415
+    from src.vpoc import ledger as _ledger_mod  # noqa: PLC0415
+    from src.vpoc import settings as _settings  # noqa: PLC0415
+
+    fake_store = _FakeCharStore()
+    TAKE_ENDPOINT = "bytedance/seedance-2.5/reference-to-video"
+    TAKE_MODEL_ID = _settings.FAL_ID_PREFIX + TAKE_ENDPOINT
+    # Seedance reference-to-video caps(062 extract_caps 결과 모양).
+    TAKE_CAPS = {
+        "videoListField": "video_urls",
+        "videoListMax": 10,
+        "imageListField": "image_urls",
+        "imageListMax": 10,
+        "taskField": "task",
+        "taskValues": ["auto", "reference", "editing", "extension"],
+        "draftField": "draft",
+        "generateAudioField": "generate_audio",
+        "seedField": "seed",
+        "durationAsString": True,
+        "durations": [4, 8, 12, 30],
+        "previzCapable": True,
+        "available": True,
+    }
+
+    # 가짜 fal.find: 통 테이크 모델이면 caps 를 돌려준다(그 밖은 미등록=None → 기본 previz).
+    def fake_find(model):
+        if str(model) == TAKE_MODEL_ID:
+            return {"id": TAKE_MODEL_ID, "endpointId": TAKE_ENDPOINT, "caps": TAKE_CAPS}
+        return None
+
+    # 가짜 pricing: unit "1000 tokens", unitPrice 0.0214(fal 실측).
+    def fake_pricing_for(model):
+        if str(model) == TAKE_MODEL_ID:
+            return {"unit": "1000 tokens", "unitPrice": 0.0214}
+        return None
+
+    def fake_pricing(endpoint):
+        if str(endpoint) == TAKE_ENDPOINT:
+            return {"unit": "1000 tokens", "unitPrice": 0.0214}
+        return None
+
+    # 제출 본문을 잡아 두고 가짜 request_id·draft_id 를 돌려준다.
+    previz_request_calls: list[dict] = []
+
+    def fake_previz_request(method, url, payload):
+        import secrets as _s  # noqa: PLC0415
+
+        previz_request_calls.append({"method": method, "url": url, "payload": payload})
+        return {"request_id": "take-" + _s.token_hex(4), "draft_id": "draft-" + _s.token_hex(3)}
+
+    # 조회: 바로 Completed.
+    def fake_fal_poll(invocation_arn, output_prefix):
+        return {"status": "Completed", "failureMessage": "", "usage": None}
+
+    concat_calls: list[int] = []
+
+    def fake_concat(clips):
+        concat_calls.append(len(clips))
+        return b"FINAL-TAKE-MP4"
+
+    def fake_fetch_bytes(key, *, bucket=""):
+        return fake_store.blobs.get(key, b"REC-MP4-BYTES")
+
+    ledger_calls: list[dict] = []
+
+    def fake_charge(key, **kwargs):
+        ledger_calls.append({"key": key, **kwargs})
+        return {"spentUsd": 0.0, "capUsd": None}
+
+    # 캐릭터 로드(웹툰 정면·후면 키).
+    def fake_load_char(owner, char_id):
+        return (
+            {
+                "id": char_id,
+                "name": "에이" if char_id.endswith("1") else "비",
+                "status": "ready",
+                "analysis": {"appearanceEn": "a person", "outfitEn": "an outfit", "styleEn": "thin ink lines, soft flat color"},
+                "variants": {
+                    "real": {"frontKey": "rf-" + char_id, "backKey": "rb-" + char_id, "sheetKey": ""},
+                    "webtoon": {"frontKey": "wf-" + char_id, "backKey": "wb-" + char_id, "sheetKey": ""},
+                },
+            },
+            "etag",
+        )
+
+    orig = {
+        "gen_STORE": genmod.STORE,
+        "plan_STORE": planmod.STORE,
+        "ledger_STORE": _ledger_mod.STORE,
+        "find": genmod.vpoc_fal.find,
+        "pricing_for": genmod.vpoc_fal.pricing_for,
+        "pricing": genmod.vpoc_fal.pricing,
+        "previz_request": genmod._previz_request,
+        "fal_poll": _fal_mod.poll,
+        "_concat": genmod._concat,
+        "_fetch_bytes": genmod._fetch_bytes,
+        "load_char": genmod.characters.load_char,
+        "_load_jpeg": genmod._load_jpeg,
+        "_segment_panel_jpegs": genmod._segment_panel_jpegs,
+        "fit_ratio": genmod.imaging.fit_ratio,
+        "charge": _ledger_mod.charge,
+        "Thread": genmod.threading.Thread,
+        "fal_key": _settings.FAL_KEY,
+    }
+    genmod.STORE = fake_store
+    planmod.STORE = fake_store
+    _ledger_mod.STORE = fake_store
+    genmod.vpoc_fal.find = fake_find
+    genmod.vpoc_fal.pricing_for = fake_pricing_for
+    genmod.vpoc_fal.pricing = fake_pricing
+    genmod._previz_request = fake_previz_request
+    _fal_mod.poll = fake_fal_poll
+    genmod._concat = fake_concat
+    genmod._fetch_bytes = fake_fetch_bytes
+    genmod.characters.load_char = fake_load_char
+    # 참조 이미지: 인물 정면·후면·패널·장소를 바이트로 구별(순서 검증). 비율 맞춤은 그대로.
+    fake_blobs = {
+        "wf-ch1": b"WF1", "wb-ch1": b"WB1",
+        "wf-ch2": b"WF2", "wb-ch2": b"WB2",
+    }
+    genmod._load_jpeg = lambda key: fake_blobs.get(str(key or ""))
+    genmod._segment_panel_jpegs = lambda owner, pid, plan, seg, limit: [b"PANEL1", b"PANEL2"][:limit]
+    genmod.imaging.fit_ratio = lambda jpeg, *a, **k: jpeg
+    _ledger_mod.charge = fake_charge
+    _settings.FAL_KEY = "dummy-fal-key"
+
+    started_threads: list = []
+    orig_thread = genmod.threading.Thread
+
+    def _tracking_thread(*args, **kwargs):
+        t = orig_thread(*args, **kwargs)
+        started_threads.append(t)
+        return t
+
+    genmod.threading.Thread = _tracking_thread
+
+    def _join_drivers(timeout: float = 20.0):
+        deadline = _time.time() + timeout
+        for t in list(started_threads):
+            t.join(timeout=max(0.0, deadline - _time.time()))
+        started_threads.clear()
+
+    def _make_take_plan(owner, pid, segments, *, video_model=TAKE_MODEL_ID, record=True, loc_view=True):
+        """통 테이크 선행 조건(③콘티·프리비즈 승인·녹화·지시서)이 된 계획을 써 둔다."""
+        plan = planmod.new_plan()
+        total = sum(int(s["seconds"]) for s in segments)
+        plan["input"]["totalSeconds"] = total
+        plan["input"]["videoModel"] = video_model
+        plan["input"]["order"] = ["f1"]
+        plan["input"]["images"] = [{"fileId": "f1", "name": "1.png", "width": 600, "height": 900}]
+        plan["input"]["characters"] = [
+            {"charId": "ch1", "roleName": "에이"},
+            {"charId": "ch2", "roleName": "비"},
+        ]
+        fake_store.blobs[planmod.upload_key(owner, pid, "f1")] = _tiny_jpeg(600, 900)
+        cuts = []
+        for seg in segments:
+            n_cuts = max(1, len(seg["cutIds"]))
+            for cid in seg["cutIds"]:
+                cuts.append(
+                    {
+                        "id": cid,
+                        "no": len(cuts) + 1,
+                        "seconds": int(seg["seconds"]) // n_cuts,
+                        "panels": [0],
+                        "shotKo": "컷",
+                        "cameraEn": "static camera",
+                        "locationEn": "A closed principal's office",
+                        "characters": [{"name": "에이", "positionEn": "at the desk", "actionEn": "speaks"}],
+                        "dialogueKo": "자네 뭐 하나?",
+                        "situationKo": "호통",
+                        "promptEn": "Kim speaks, static camera.",
+                    }
+                )
+        plan["script"] = {
+            "status": "ready",
+            "setting": {"locationEn": "A closed principal's office", "enclosed": True},
+            "entries": [{"id": "e1", "panels": [0], "locationEn": "A closed principal's office"}],
+        }
+        plan["conti"] = {
+            "status": "ready",
+            "cuts": cuts,
+            "segments": segments,
+            "setting": {"locationEn": "A closed principal's office"},
+        }
+        # 장소(웹툰 back 뷰 키).
+        loc_variants = {"webtoon": {"viewKeys": {"back": "loc-wb-back"}}} if loc_view else {}
+        if loc_view:
+            fake_blobs["loc-wb-back"] = b"LOC-BACK"
+        plan["locations"] = [
+            {
+                "id": "loc1",
+                "nameEn": "A closed principal's office",
+                "key": "a closed principal's office",
+                "panels": [0],
+                "status": "ready",
+                "variants": loc_variants,
+            }
+        ]
+        scene_actors = [
+            {"id": "a1", "name": "에이", "color": "#4363d8", "charId": "ch1", "appearanceEn": "a man"},
+            {"id": "a2", "name": "비", "color": "#e6194b", "charId": "ch2", "appearanceEn": "a woman"},
+        ]
+        timeline = []
+        for c in cuts:
+            timeline.append({"cutId": c["id"], "actors": [{"id": "a1"}, {"id": "a2"}]})
+        recordings = {}
+        if record:
+            for seg in segments:
+                rec_key = f"rec/{pid}/{seg['id']}.mp4"
+                fake_store.blobs[rec_key] = b"PREVIZ-REC-MP4"
+                recordings[seg["id"]] = {"status": "ready", "key": rec_key, "seconds": float(seg["seconds"])}
+        brief_cuts = {}
+        for c in cuts:
+            brief_cuts[c["id"]] = {
+                "shotEn": "MCU, 50mm lens, eye-level.",
+                "actionEn": "Kim leans forward, eyes narrowing.",
+                "dialogue": [{"speaker": "에이", "lineKo": "자네 뭐 하나?", "deliveryEn": "sharp"}],
+            }
+        plan["previz"] = {
+            "status": "ready",
+            "error": "",
+            "revision": 0,
+            "scenes": [{"locationId": "loc1", "actors": scene_actors, "timeline": timeline}],
+            "approved": True,
+            "recordings": recordings,
+            "shotBrief": {
+                "status": "ready",
+                "scene": {"loc1": "A closed principal's office, wood panelling."},
+                "cuts": brief_cuts,
+                "updatedAt": "2026-10-26T00:00:00Z",
+            },
+            "task": {"status": "done", "startedAt": None, "id": None},
+        }
+        planmod.save_plan(owner, pid, plan)
+        return plan
+
+    try:
+        owner = "tester"
+
+        def make_client():
+            app = Flask(__name__)
+            bp = vnew.create_blueprint(
+                vnew.VnewDependencies(
+                    require_auth=lambda h: h,
+                    current_owner=lambda: owner,
+                    get_project=lambda p: {"id": p, "owner": owner, "track": "video_new"},
+                    can_read_project=lambda proj: True,
+                    can_write_project=lambda proj: True,
+                    project_owner_prefix=lambda name: name,
+                )
+            )
+            app.register_blueprint(bp)
+            return app.test_client()
+
+        client = make_client()
+
+        import base64 as _b64  # noqa: PLC0415
+
+        # (tk-a) 모드 선택: videoListField 모델 → previz-take, 기본 모델 → previz.
+        plan_a = _make_take_plan(owner, "prj_tk_a", [{"id": "s1", "cutIds": ["c1"], "seconds": 10}])
+        if genmod._gen_mode(plan_a) != "previz-take":
+            bad.append(f"(tk-a) videoListField 모델인데 mode 가 previz-take 가 아닙니다: {genmod._gen_mode(plan_a)}")
+        plan_a2 = _make_take_plan(owner, "prj_tk_a2", [{"id": "s1", "cutIds": ["c1"], "seconds": 10}],
+                                  video_model="luma-ray2")
+        if genmod._gen_mode(plan_a2) != "previz":
+            bad.append(f"(tk-a) 기본 모델인데 mode 가 previz 가 아닙니다(회귀): {genmod._gen_mode(plan_a2)}")
+
+        # (tk-b) 테이크 그룹핑. 2구간(12+15=27)→1개; 3구간(15+15+10)→2개(30,10).
+        pb = _make_take_plan(owner, "prj_tk_b", [
+            {"id": "s1", "cutIds": ["c1"], "seconds": 12},
+            {"id": "s2", "cutIds": ["c2"], "seconds": 15},
+        ])
+        takes_b = genmod._take_units(pb)
+        if len(takes_b) != 1 or abs(takes_b[0]["seconds"] - 27) > 0.01:
+            bad.append(f"(tk-b) 12+15 가 테이크 1개(27s)가 아닙니다: {[(t['id'], t['seconds']) for t in takes_b]}")
+        pb2 = _make_take_plan(owner, "prj_tk_b2", [
+            {"id": "s1", "cutIds": ["c1"], "seconds": 15},
+            {"id": "s2", "cutIds": ["c2"], "seconds": 15},
+            {"id": "s3", "cutIds": ["c3"], "seconds": 10},
+        ])
+        takes_b2 = genmod._take_units(pb2)
+        secs_b2 = [round(t["seconds"]) for t in takes_b2]
+        if len(takes_b2) != 2 or secs_b2 != [30, 10]:
+            bad.append(f"(tk-b) 15+15+10 가 테이크 [30,10] 가 아닙니다: {secs_b2}")
+
+        # (tk-e) 견적: 480p 15초 ≈ $3.08.
+        pe = _make_take_plan(owner, "prj_tk_e", [{"id": "s1", "cutIds": ["c1"], "seconds": 15}])
+        est_e = genmod.estimate(pe)
+        if est_e.get("mode") != "previz-take":
+            bad.append(f"(tk-e) estimate.mode 가 previz-take 가 아닙니다: {est_e.get('mode')}")
+        if abs(est_e.get("totalUsd", 0) - 3.08) > 0.05:
+            bad.append(f"(tk-e) 480p 15초 견적이 ~$3.08 이 아닙니다: {est_e.get('totalUsd')}")
+        if est_e.get("realUsd") not in (0, 0.0):
+            bad.append(f"(tk-e) 실사 견적이 0 이 아닙니다: {est_e.get('realUsd')}")
+        # 토큰 공식 직접 검산: 854×480×24×15/1024 ≈ 144k, ×0.0214/1000.
+        expect = round((854 * 480 * 24 * 15 / 1024) / 1000 * 0.0214, 4)
+        got = genmod._take_usd(TAKE_ENDPOINT, 15, "480p")
+        if abs(got - expect) > 0.001:
+            bad.append(f"(tk-e) _take_usd 토큰 공식 값이 틀립니다: {got} != {expect}")
+
+        # (tk-c)(tk-d)(tk-f) 전체 진행: 1테이크(2구간 27초) → 제출 1회 → 완료 → done.
+        pid_c = "prj_tk_c"
+        _make_take_plan(owner, pid_c, [
+            {"id": "s1", "cutIds": ["c1"], "seconds": 12},
+            {"id": "s2", "cutIds": ["c2"], "seconds": 15},
+        ])
+        previz_request_calls.clear(); concat_calls.clear(); ledger_calls.clear()
+        planc, _ = planmod.load_plan(owner, pid_c)
+        est_c = genmod.estimate(planc)
+        resp = client.post(f"/api/vnew/p/{pid_c}/generate", json={"confirmUsd": est_c["totalUsd"]})
+        if resp.status_code != 202:
+            bad.append(f"(tk-c) generate 가 202 가 아닙니다: {resp.status_code} {resp.get_json()}")
+        _join_drivers()
+        cplan, _ = planmod.load_plan(owner, pid_c)
+        cgen = cplan.get("gen") or {}
+        if cgen.get("mode") != "previz-take":
+            bad.append(f"(tk-c) gen.mode 가 previz-take 가 아닙니다: {cgen.get('mode')}")
+        # 제출 1회(테이크 1개 × 웹툰만). 실사는 제출 0.
+        if len(previz_request_calls) != 1:
+            bad.append(f"(tk-c) 제출이 1회(웹툰만)가 아닙니다: {len(previz_request_calls)}")
+        if previz_request_calls:
+            body = previz_request_calls[0]["payload"]
+            # video_urls 1개(data URI).
+            vids = body.get("video_urls")
+            if not isinstance(vids, list) or len(vids) != 1:
+                bad.append(f"(tk-c) video_urls 가 1개 배열이 아닙니다: {vids if not isinstance(vids, list) else len(vids)}")
+            elif not str(vids[0]).startswith("data:video/mp4;base64,"):
+                bad.append("(tk-c) video_urls[0] 이 data URI 가 아닙니다")
+            imgs = body.get("image_urls") or []
+            if len(imgs) > 10:
+                bad.append(f"(tk-c) image_urls 가 10 을 넘습니다: {len(imgs)}")
+            # 순서: 인물(정면·후면) → 패널 → 장소. 바이트로 복원.
+            def _b(uri):
+                try:
+                    return _b64.b64decode(str(uri).split(",", 1)[1])
+                except Exception:  # noqa: BLE001
+                    return b""
+            decoded = [_b(u) for u in imgs]
+            # 처음 4장은 두 인물의 정면·후면(순서는 등장도에 따르되, 각 인물 정면→후면).
+            person_imgs = {b"WF1", b"WB1", b"WF2", b"WB2"}
+            if set(decoded[:4]) != person_imgs:
+                bad.append(f"(tk-c) image_urls 앞 4장이 인물 정면·후면 집합이 아닙니다: {decoded[:4]}")
+            # 각 인물 정면이 그 인물 후면보다 앞.
+            for front, back in ((b"WF1", b"WB1"), (b"WF2", b"WB2")):
+                if front in decoded and back in decoded and decoded.index(front) > decoded.index(back):
+                    bad.append(f"(tk-c) 인물 정면이 후면보다 뒤입니다: {front}")
+            # 이어 패널(PANEL1,PANEL2), 장소(LOC-BACK).
+            if b"PANEL1" not in decoded or b"PANEL2" not in decoded:
+                bad.append("(tk-c) image_urls 에 원작 패널이 없습니다")
+            if b"LOC-BACK" not in decoded:
+                bad.append("(tk-c) image_urls 에 장소 시트(back)가 없습니다")
+            # 패널·장소가 인물(앞 4장) 뒤, 장소는 패널 뒤.
+            if decoded.index(b"PANEL1") < 4 or decoded.index(b"LOC-BACK") < decoded.index(b"PANEL1"):
+                bad.append(f"(tk-c) image_urls 순서가 인물→패널→장소가 아닙니다: {decoded}")
+            # 필드 값.
+            if body.get("task") != "reference":
+                bad.append(f"(tk-c) task 가 reference 가 아닙니다: {body.get('task')}")
+            if body.get("draft") is not True:
+                bad.append(f"(tk-c) draft 가 true 가 아닙니다: {body.get('draft')}")
+            if body.get("resolution") != "480p":
+                bad.append(f"(tk-c) resolution 이 480p 가 아닙니다: {body.get('resolution')}")
+            if not isinstance(body.get("duration"), str):
+                bad.append(f"(tk-c) duration 이 문자열이 아닙니다: {body.get('duration')!r}")
+            if body.get("generate_audio") is not False:
+                bad.append(f"(tk-c) generate_audio 가 false 가 아닙니다: {body.get('generate_audio')}")
+            if "seed" in body:
+                bad.append("(tk-c) seed 를 보냈습니다(보내면 안 됨)")
+            if body.get("aspect_ratio") != "16:9":
+                bad.append(f"(tk-c) aspect_ratio 가 16:9 가 아닙니다: {body.get('aspect_ratio')}")
+
+            # (tk-d) 프롬프트.
+            prompt = str(body.get("prompt") or "")
+            if not prompt.startswith("STYLE:"):
+                bad.append(f"(tk-d) 프롬프트가 STYLE 로 시작하지 않습니다: {prompt[:40]}")
+            if "AVOID:" not in prompt:
+                bad.append("(tk-d) 프롬프트에 AVOID 섹션이 없습니다")
+            style_part = prompt.split("TIMELINE", 1)[0]
+            if "cinematic lighting" in style_part.lower():
+                bad.append("(tk-d) STYLE/ASSETS 에 'cinematic lighting' 이 들어 있습니다")
+            # TIMELINE 섹션에도 cinematic lighting 이 없어야.
+            timeline_part = ""
+            if "TIMELINE" in prompt:
+                timeline_part = prompt.split("TIMELINE", 1)[1].split("RULES", 1)[0]
+            if "cinematic lighting" in timeline_part.lower():
+                bad.append("(tk-d) TIMELINE 에 'cinematic lighting' 이 들어 있습니다")
+            if len(prompt.encode("utf-8")) > 2500:
+                bad.append(f"(tk-d) 프롬프트가 2500바이트를 넘습니다: {len(prompt.encode('utf-8'))}")
+            # @Image 번호가 image_urls 순서와 일치(front 는 @Image1, back @Image2 ...).
+            if "@Image1 (front)" not in prompt:
+                bad.append(f"(tk-d) ASSETS 에 @Image1 (front) 매핑이 없습니다: {prompt[:300]}")
+
+        # 실사 칸 skipped·제출 0(제출은 웹툰 1회뿐이므로 위에서 이미 확인).
+        unit_c = (cgen.get("units") or [{}])[0]
+        if (unit_c.get("real") or {}).get("status") != "skipped":
+            bad.append(f"(tk-c) 실사 칸이 skipped 가 아닙니다: {(unit_c.get('real') or {}).get('status')}")
+
+        # (tk-e) 원장: 테이크 토큰 공식 값(27초 480p) 1건.
+        take_charges = [e for e in ledger_calls if e.get("plan_id") == cgen.get("genId")]
+        if len(take_charges) != 1:
+            bad.append(f"(tk-e) 원장 계상이 1건이 아닙니다: {len(take_charges)}")
+        else:
+            exp_charge = genmod._take_usd(TAKE_ENDPOINT, 27, "480p")
+            if abs(float(take_charges[0].get("usd") or 0) - exp_charge) > 0.001:
+                bad.append(f"(tk-e) 원장 금액이 토큰 공식과 다릅니다: {take_charges[0].get('usd')} != {exp_charge}")
+
+        # (tk-f) draft_id 저장, 완료 → finalWebtoon done·finalReal skipped·gen done.
+        if not unit_c.get("draftId"):
+            bad.append("(tk-f) 테이크에 draftId 가 저장되지 않았습니다")
+        if (cgen.get("webtoon") if False else (unit_c.get("webtoon") or {})).get("status") != "completed":
+            bad.append(f"(tk-f) 웹툰 칸이 completed 가 아닙니다: {(unit_c.get('webtoon') or {}).get('status')}")
+        if (cgen.get("finalWebtoon") or {}).get("status") != "done":
+            bad.append(f"(tk-f) finalWebtoon 이 done 이 아닙니다: {cgen.get('finalWebtoon')}")
+        if (cgen.get("finalReal") or {}).get("status") != "skipped":
+            bad.append(f"(tk-f) finalReal 이 skipped 가 아닙니다: {cgen.get('finalReal')}")
+        if cgen.get("status") != "done":
+            bad.append(f"(tk-f) gen.status 가 done 이 아닙니다: {cgen.get('status')}")
+
+        # gen_view 가 터지지 않고 take 필드를 돌려주는지.
+        view = genmod.gen_view(owner, pid_c, cplan)
+        if not view or view.get("mode") != "previz-take":
+            bad.append(f"(tk-f) gen_view mode 가 previz-take 가 아닙니다: {view and view.get('mode')}")
+        vunits = (view or {}).get("units") or []
+        if vunits and ("startCutNo" not in vunits[0] or "draftId" not in vunits[0]):
+            bad.append(f"(tk-f) gen_view units 에 startCutNo·draftId 가 없습니다: {sorted(vunits[0].keys())}")
+
+    except Exception as exc:  # noqa: BLE001
+        import traceback as _tb  # noqa: PLC0415
+
+        bad.append("통 테이크 검사 중 예외: " + repr(exc) + "\n" + _tb.format_exc()[:1500])
+    finally:
+        genmod.STORE = orig["gen_STORE"]
+        planmod.STORE = orig["plan_STORE"]
+        _ledger_mod.STORE = orig["ledger_STORE"]
+        genmod.vpoc_fal.find = orig["find"]
+        genmod.vpoc_fal.pricing_for = orig["pricing_for"]
+        genmod.vpoc_fal.pricing = orig["pricing"]
+        genmod._previz_request = orig["previz_request"]
+        _fal_mod.poll = orig["fal_poll"]
+        genmod._concat = orig["_concat"]
+        genmod._fetch_bytes = orig["_fetch_bytes"]
+        genmod.characters.load_char = orig["load_char"]
+        genmod._load_jpeg = orig["_load_jpeg"]
+        genmod._segment_panel_jpegs = orig["_segment_panel_jpegs"]
+        genmod.imaging.fit_ratio = orig["fit_ratio"]
+        _ledger_mod.charge = orig["charge"]
+        genmod.threading.Thread = orig["Thread"]
+        _settings.FAL_KEY = orig["fal_key"]
+
+    if bad:
+        fail("통 테이크(Seedance 2.5) 검사 실패\n" + "\n".join(f"  {item}" for item in bad))
+    else:
+        ok(
+            "통 테이크(Seedance 2.5) 검사 (tk-a)모드 선택·회귀 없음 (tk-b)≤30초 그룹핑 "
+            "(tk-c)video_urls·image_urls 순서·@Image 번호·task/draft/480p/duration/audio·실사 skipped "
+            "(tk-d)STYLE 맨앞·AVOID·cinematic lighting 없음·≤2500B (tk-e)견적·원장 토큰 공식 "
+            "(tk-f)draft_id·finalWebtoon done·finalReal skipped·gen done"
+        )
+
+
 # ---------------------------------------------------------------- main
 
 
@@ -9864,6 +10351,7 @@ def main() -> int:
     check_anime_style()
     check_fal_model_caps()
     check_vnew_reference_video()
+    check_vnew_take()
     print()
     if warnings:
         print(f"경고 {len(warnings)}건")
