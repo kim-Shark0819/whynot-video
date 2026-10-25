@@ -3744,10 +3744,23 @@
     modal.appendChild(head);
 
     var bodyWrap = el("div", "vnew-modal-body");
-    bodyWrap.appendChild(
-      el("p", null, "승인한 프리비즈 녹화에 실사·웹툰 그림체를 각각 입혀 영상을 만듭니다.")
-    );
-    bodyWrap.appendChild(el("p", "vnew-hint", "구간 " + segCount + "개를 실사·웹툰 두 벌로 만듭니다."));
+    var isTake = est.mode === "previz-take";
+    if (isTake) {
+      var takeSecs = 0;
+      (est.takes || []).forEach(function (t) { takeSecs += Number(t.seconds) || 0; });
+      takeSecs = Math.round(takeSecs);
+      var takeLead = el("p", null, "통 테이크(베타): 승인한 프리비즈 녹화를 통째로 넣어 ");
+      takeLead.appendChild(el("span", null, "웹툰 그림체로 " + takeSecs + "초를 한 번에 만듭니다 (480p 초안)."));
+      bodyWrap.appendChild(takeLead);
+      bodyWrap.appendChild(
+        el("p", "vnew-hint", "테이크 " + ((est.takes || []).length) + "개로 만듭니다. 실사는 건너뜁니다 — 기본 모델로 따로 만들 수 있습니다.")
+      );
+    } else {
+      bodyWrap.appendChild(
+        el("p", null, "승인한 프리비즈 녹화에 실사·웹툰 그림체를 각각 입혀 영상을 만듭니다.")
+      );
+      bodyWrap.appendChild(el("p", "vnew-hint", "구간 " + segCount + "개를 실사·웹툰 두 벌로 만듭니다."));
+    }
     // 이미 결과(done/partial)가 있거나 stale 이면 지금 결과가 '이전 영상'으로만 남는다고 알린다.
     if (opts.hadResult) {
       bodyWrap.appendChild(
@@ -5135,7 +5148,8 @@
     submitted: "만드는 중",
     completed: "완료",
     failed: "실패",
-    cancelled: "취소됨"
+    cancelled: "취소됨",
+    skipped: "건너뜀"
   };
 
   function genStatusLabel(value) {
@@ -5172,6 +5186,19 @@
 
     // 촬영 지시서 카드(승인 후). 진행 표시 → 완료되면 컷별 접이식.
     host.appendChild(shotBriefCard(previz, showError));
+    var startEst = ((plan.gen || {}).estimate) || {};
+    if (startEst.mode === "previz-take") {
+      var takeSecs0 = 0;
+      (startEst.takes || []).forEach(function (t) { takeSecs0 += Number(t.seconds) || 0; });
+      var banner = el("section", "panel vnew-take-banner");
+      var bTitle = el("h2", "vnew-sec-title", "통 테이크");
+      bTitle.appendChild(el("span", "vnew-badge vnew-beta-badge", "BETA"));
+      banner.appendChild(bTitle);
+      banner.appendChild(
+        el("p", "vnew-hint", "웹툰 그림체로 " + Math.round(takeSecs0) + "초를 한 번에 만듭니다 (480p 초안). 실사는 건너뜁니다.")
+      );
+      host.appendChild(banner);
+    }
     if (previz.recordedAll) {
       host.appendChild(
         el("p", "vnew-hint", "프리비즈 녹화가 끝났습니다. 이 녹화를 바탕으로 실사·웹툰 영상을 만듭니다.")
@@ -5296,27 +5323,103 @@
     }
     host.appendChild(statusBar);
 
-    // --- 안내: 프리비즈 기반(설계자 2026-10-21 · 컷 단위 2026-10-22) ---
+    // --- 안내: 프리비즈 기반(설계자 2026-10-21 · 컷 단위 2026-10-22 · 통 테이크 2026-10-26) ---
     if (gen.mode === "previz") {
       host.appendChild(
         el("p", "vnew-hint", "프리비즈를 바탕으로 실사와 웹툰 그림체를 각각 만듭니다. 컷마다 프리비즈 미리보기 옆에 실사·웹툰 결과가 나옵니다.")
       );
+    } else if (gen.mode === "previz-take") {
+      var takeBanner = el("section", "panel vnew-take-banner");
+      var takeTitle = el("h2", "vnew-sec-title", "통 테이크");
+      takeTitle.appendChild(el("span", "vnew-badge vnew-beta-badge", "BETA"));
+      takeBanner.appendChild(takeTitle);
+      var takeSecs = Math.round(takeTotalSeconds(gen));
+      takeBanner.appendChild(
+        el("p", "vnew-hint", "웹툰 그림체로 " + takeSecs + "초를 한 번에 만듭니다 (480p 초안). 실사는 건너뜁니다 — 기본 모델로 따로 만들 수 있습니다.")
+      );
+      host.appendChild(takeBanner);
     }
 
-    // --- 맨 위 결과: 실사 / 웹툰 두 열 ---
+    // --- 맨 위 결과: 통 테이크는 웹툰만, 그 외는 실사·웹툰 두 열 ---
     host.appendChild(finalResults(gen, showError));
 
-    // --- 시작 장면(opening) — 옛 모드만(프리비즈 모드는 시작 장면이 없다) ---
-    if (gen.mode !== "previz") {
+    // --- 시작 장면(opening) — 옛 모드만(프리비즈·통 테이크는 시작 장면이 없다) ---
+    if (gen.mode !== "previz" && gen.mode !== "previz-take") {
       host.appendChild(openingCard(gen.opening || {}));
     }
 
-    // --- 컷/구간 타임라인 ---
-    if (gen.units && gen.units.length) {
+    // --- 타임라인: 통 테이크(테이크 행) · 컷 단위 · 옛 구간 ---
+    if (gen.mode === "previz-take") {
+      host.appendChild(takeTimeline(gen.units || [], showError));
+    } else if (gen.units && gen.units.length) {
       host.appendChild(cutTimeline(gen.units, showError));
     } else {
       host.appendChild(segmentTimeline(gen.segments || [], showError, gen.mode || ""));
     }
+  }
+
+  /* 통 테이크 gen 의 총 초(테이크 seconds 합). */
+  function takeTotalSeconds(gen) {
+    var units = (gen || {}).units || [];
+    var total = 0;
+    units.forEach(function (u) {
+      total += Number(u.seconds) || 0;
+    });
+    return total;
+  }
+
+  /* 통 테이크 타임라인(설계자 2026-10-26, ⑤): 테이크마다 한 줄 — 컷 범위·초,
+     프리비즈 미리보기(테이크 녹화)·웹툰 결과 칸·실사 칸("건너뜀"). 보낸 프롬프트 접이식. */
+  function takeTimeline(units, showError) {
+    var section = el("section", "panel vnew-seg-timeline");
+    section.appendChild(el("h2", "vnew-sec-title", "테이크별 진행"));
+    if (!units.length) {
+      section.appendChild(el("p", "vnew-hint", "테이크가 없습니다."));
+      return section;
+    }
+    section.appendChild(
+      el("p", "vnew-hint", "프리비즈 녹화를 통째(≤30초)로 넣어 웹툰 그림체를 한 번에 만듭니다. 테이크가 여러 개면 끝난 뒤 순서대로 이어 붙입니다.")
+    );
+    var list = el("div", "vnew-seg-rows");
+    units.forEach(function (unit, index) {
+      list.appendChild(takeRow(unit, index, showError));
+    });
+    section.appendChild(list);
+    return section;
+  }
+
+  function takeRow(unit, index, showError) {
+    var row = el("div", "vnew-seg-row");
+    var meta = el("div", "vnew-seg-meta");
+    meta.appendChild(el("span", "vnew-seg-no", "테이크 " + (index + 1)));
+    var startNo = unit.startCutNo;
+    var endNo = unit.endCutNo;
+    var cutLabel = "";
+    if (startNo != null && endNo != null) {
+      cutLabel = (startNo === endNo) ? ("컷 " + startNo) : ("컷 " + startNo + "–" + endNo);
+    } else {
+      cutLabel = "컷 " + ((unit.cutIds || []).length) + "개";
+    }
+    meta.appendChild(el("span", "vnew-seg-range", cutLabel));
+    var seconds = Math.round((Number(unit.seconds) || 0) * 10) / 10;
+    meta.appendChild(el("span", "vnew-seg-seconds", "(" + seconds + "초)"));
+    row.appendChild(meta);
+
+    var cells = el("div", "vnew-seg-cells has-previz");
+    cells.appendChild(previzPreviewCell(unit));
+    // 웹툰 결과 칸.
+    cells.appendChild(cutCell(unit, { key: "webtoon", title: "웹툰 그림체" }, showError));
+    // 실사 칸은 "건너뜀" 안내만.
+    var realCell = el("div", "vnew-seg-cell");
+    var realHead = el("div", "vnew-seg-cell-head");
+    realHead.appendChild(el("span", "vnew-seg-cell-title", "실사"));
+    realHead.appendChild(el("span", "vnew-badge-gen is-skipped", "건너뜀"));
+    realCell.appendChild(realHead);
+    var note = (unit.real || {}).note || "통 테이크(베타)는 웹툰만 만듭니다 — 실사는 기본 모델로 따로 만들 수 있습니다.";
+    realCell.appendChild(el("p", "vnew-hint", note));
+    cells.appendChild(realCell);
+    row.appendChild(cells);
+    return row;
   }
 
   /* 촬영 지시서 카드(설계자 2026-10-22, ⑤). 진행 표시 → 완료되면 장소 SETTING 1회 + 컷마다 접이식.
@@ -5578,6 +5681,12 @@
         }
       } else if (final.status === "failed") {
         col.appendChild(el("p", "login-error", final.error || "이어 붙이기에 실패했습니다."));
+      } else if (final.status === "skipped") {
+        var skip = el("div", "vnew-final-pending");
+        skip.appendChild(
+          el("p", "vnew-hint", final.note || "통 테이크(베타)는 웹툰만 만듭니다 — 실사는 기본 모델로 따로 만들 수 있습니다.")
+        );
+        col.appendChild(skip);
       } else {
         var place = el("div", "vnew-final-pending");
         place.appendChild(el("p", "vnew-hint", "모든 구간이 끝나면 자동으로 이어 붙입니다."));
