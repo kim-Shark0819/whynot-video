@@ -604,6 +604,24 @@ def _take_unit_price(endpoint: str) -> float:
     return float(vnew_settings.VNEW_TAKE_TOKEN_UNIT_PRICE)
 
 
+def _take_prompt_budget(caps: dict | None = None) -> int:
+    """통 테이크 프롬프트 바이트 상한(설계자 2026-10-26, 069-v2).
+
+    기본 VNEW_TAKE_PROMPT_MAX(4000). Seedance 2.5 reference-to-video 의 prompt 에는 스키마상 maxLength
+    가 명시돼 있지 않다(Claude 확인) → 2500 은 우리 fal 기본값(DEFAULT_PROMPT_MAX)일 뿐이라 길이
+    상한으로 보지 않는다. 단, caps.promptMaxLength 가 '스키마 명시 값'(= 기본 2500 이 아닌 실제
+    maxLength)이면 그 값과 4000 중 작은 값을 쓴다. caps 에 "스키마 명시 여부"가 따로 없으므로
+    promptMaxLength 가 DEFAULT_PROMPT_MAX 와 같으면 '미명시'로 간주한다.
+    """
+    budget = int(vnew_settings.VNEW_TAKE_PROMPT_MAX or 4000)
+    caps = caps or {}
+    model_max = int(caps.get("promptMaxLength") or vpoc_fal.DEFAULT_PROMPT_MAX)
+    # 스키마에 실제 maxLength 가 명시됐을 때만(기본값과 다를 때) 그 상한을 적용한다.
+    if model_max != vpoc_fal.DEFAULT_PROMPT_MAX and model_max > 0:
+        budget = min(budget, model_max)
+    return budget
+
+
 # ================================================================ 금액(estimate)
 
 
@@ -2216,6 +2234,113 @@ def _cut_on_screen(plan: dict, cut: dict) -> dict:
     return {"onScreen": on_screen, "offScreenSpeaker": off_speaker}
 
 
+# 한국어 시간대 → 영어(HARMONY 의 "time of day"). 부분일치로 가장 먼저 맞는 것을 쓴다.
+_TIME_OF_DAY_EN = (
+    ("새벽", "dawn"),
+    ("아침", "morning"),
+    ("오전", "morning"),
+    ("점심", "midday"),
+    ("정오", "midday"),
+    ("한낮", "midday"),
+    ("낮", "day"),
+    ("오후", "afternoon"),
+    ("해질", "sunset"),
+    ("노을", "sunset"),
+    ("저녁", "evening"),
+    ("황혼", "dusk"),
+    ("밤", "night"),
+    ("심야", "night"),
+    ("자정", "midnight"),
+)
+
+
+def _time_of_day_en(time_ko: str) -> str:
+    """대본 setting.timeKo(낮/밤/저녁 …) 를 HARMONY 의 'time of day' 영어로. 못 맞추면 빈 문자열."""
+    text = str(time_ko or "").strip()
+    if not text:
+        return ""
+    for needle, english in _TIME_OF_DAY_EN:
+        if needle in text:
+            return english
+    return ""
+
+
+def _harmony_light(plan: dict) -> tuple[str, str]:
+    """HARMONY 에 쓸 (시간대 영어, 장소 빛 요약 ≤80자). 설계자 2026-10-26 재지시 v2.
+
+    시간대: 대본 setting.timeKo → day/night/evening…(없으면 @Video1 시간). 빛: 등장 장소 중 처음으로
+    design.lightEn 이 있는 장소의 요약(첫 문장·≤80자, 단어 경계). 못 찾으면 established light source.
+    """
+    setting = (plan.get("script") or {}).get("setting") or {}
+    tod = _time_of_day_en(setting.get("timeKo") or "")
+    tod_phrase = tod or "the time of day shown in @Video1"
+
+    light_en = ""
+    for loc in plan.get("locations") or []:
+        candidate = str((loc.get("design") or {}).get("lightEn") or "").strip()
+        if candidate:
+            light_en = candidate
+            break
+    if light_en:
+        first = _split_sentences(light_en)
+        light_phrase = _clip_words((first[0] if first else light_en).rstrip("."), 80)
+    else:
+        light_phrase = "the established light source and direction"
+    return tod_phrase, light_phrase
+
+
+def _harmony_line(plan: dict, full: bool) -> str:
+    """인물·배경 조화(HARMONY) 한 줄(영어, 설계자 2026-10-26 재지시 v2).
+
+    v4 에서 인물과 배경의 빛·색온도가 따로 놀고(콘티는 낮인데 노을 톤), 접지 그림자가 없고, 그림체가
+    달랐다 → 시간대·빛을 한쪽으로 고정하고(노을/밤으로 떠내려가지 않게), 인물을 장소 광원으로 비추고
+    색 번짐을 맞추며, 접지 그림자·크기·원근·공유 팔레트를 지시한다.
+
+    full(통 테이크): 전체 지시. short(컷 단위 Kling, ≤250 바이트): 핵심만.
+    """
+    tod_phrase, light_phrase = _harmony_light(plan)
+    if full:
+        return (
+            f"HARMONY: {tod_phrase} light, {light_phrase}; the same light direction, color temperature "
+            "and time of day on characters and background in every cut (no drift to sunset or night "
+            "unless stated); characters lit by the location's lights with matching color spill; soft "
+            "contact shadows where they stand or touch; consistent scale and perspective; one shared "
+            "color palette."
+        )
+    return (
+        f"HARMONY: {tod_phrase} light from {light_phrase}; same light direction and color temperature on "
+        "characters and background in every cut, no drift to sunset; contact shadows; consistent scale; "
+        "one palette."
+    )
+
+
+def _motion_line(full: bool) -> str:
+    """자연스러운 연기(MOTION) 한 줄(영어, 설계자 2026-10-26 재지시 v2).
+
+    프리비즈의 '말하는 중' 머리 흔들림(speaking 플래그)은 화자 표시일 뿐이므로 따라 하지 말고,
+    "이미지 한 장이 움직이는 느낌"이 아니라 실제 캐릭터가 사는 TV 애니처럼 2차 동작(머리카락·옷·
+    숨·깜빡임·눈동자·대사별 표정)과 패럴랙스를 지시한다.
+
+    full(통 테이크): 전체 지시. short(컷 단위 Kling, ≤300 바이트): 핵심만.
+    """
+    if full:
+        return (
+            "MOTION: Animate living characters, not a moving still. The mannequins' head bobbing in "
+            "@Video1 only marks who speaks \u2014 do NOT copy it. Natural acting: breathing, blinks, eye "
+            "darts, micro-expressions that change with each line, mouth shapes matching the Korean "
+            "syllables, small nods or tilts on stressed words; hair strands and clothing react to every "
+            "movement; listeners stay still but alive. Body moves only where @Video1 has real blocking "
+            "(turn, reach, lean, walk) with anticipation and easing. Camera: follow @Video1's moves with "
+            "multi-plane parallax between foreground, characters and background; no jitter or looping "
+            "motion."
+        )
+    return (
+        "MOTION: @Video1's head bobbing only marks the speaker \u2014 do NOT copy it. Natural acting: "
+        "breathing, blinks, eye darts, expressions changing with the line, lip sync; hair and clothes "
+        "react to movement; move only where @Video1 shows blocking; parallax depth; no jitter."
+    )
+
+
 def _take_timeline_entries(plan: dict, take: dict) -> list[dict]:
     """테이크 컷들의 타임라인 항목 목록(구조화, 설계자 2026-10-26, 컷 보존 수정).
 
@@ -2277,11 +2402,18 @@ def _take_timeline_entries(plan: dict, take: dict) -> list[dict]:
     return entries
 
 
-def _take_prompt(plan: dict, take: dict, *, cast: list[dict], panel_nos: list[int], location_no) -> str:
+def _take_prompt(plan: dict, take: dict, *, cast: list[dict], panel_nos: list[int], location_no, caps: dict | None = None) -> str:
     """통 테이크 프롬프트(영어, UTF-8 ≤ VNEW_TAKE_PROMPT_MAX 바이트, 설계자 2026-10-26, 066 — ASSETS·연기 보존).
 
     순서: ① STYLE(스타일 앵커 맨 앞) → ② ASSETS(@Video1·@Image 매핑) → ③ TIMELINE(컷마다 1줄: ON SCREEN
-    + 연기 + 대사) → ④ RULES(@Video1 재현·인물 교체·추가 금지·기본 시선) → ⑤ AVOID(3D/photoreal 네거티브).
+    + 연기 + 대사) → ④ MOTION(마네킹 흔들림 따라 하지 말고 자연 연기) → ⑤ HARMONY(인물·배경 조화) →
+    ⑥ RULES(@Video1 재현·인물 교체·추가 금지·기본 시선) → ⑦ AVOID(3D/photoreal 네거티브).
+
+    MOTION·HARMONY(설계자 2026-10-26): 프리비즈 '말하는 중' 머리 흔들림은 화자 표시일 뿐이므로 따라
+    하지 말고 자연 연기를 하라고 지시(MOTION)하고, 인물과 배경의 빛·색온도·그림체·접지 그림자를 맞춘다
+    (HARMONY). 둘 다 **지우지 않는 등급**(ASSETS·ON SCREEN·연기 핵심과 같은 급) — 바이트 예산에서는
+    목소리·의상·대사·연기를 먼저 줄인다. RULES 의 시선·오디오 문장과 중복되지 않게 정리했다: MOTION 이
+    립싱크·연기를 맡고, RULES 는 재현·교체·금지·오디오 제어(배경음악 없음)만 둔다.
 
     **ON SCREEN**(설계자 2026-10-26, 067): 각 컷 항목 맨 앞(타임스탬프·샷 뒤)에 그 컷에 보이는 사람을
     적는다("ON SCREEN: {A} only" / "{A} (main), {B} (hands only)" / "{A}, {B}"). 화면에 없는 화자의
@@ -2297,13 +2429,13 @@ def _take_prompt(plan: dict, take: dict, *, cast: list[dict], panel_nos: list[in
     끝나지 않는다. 연기를 통째로 지우는 단계는 없다.
 
     예산(2,500바이트)을 넘으면 아래 순서로 **단계별로 조금씩** 줄이고, 매 단계 뒤 길이를 재서 한도 안이면
-    즉시 멈춘다(컷 수·ON SCREEN·샷 약어·대사·ASSETS 인물 문장은 유지):
-      ① 외형 170→100 → ② 목소리 80→40 → ③ 목소리 제거 → ④ 장면 의상 200→110 → ⑤ 대사 40→25 →
-      ⑥ AVOID 축약 → ⑦ RULES 오디오 축약 → ⑧ STYLE 둘째 문장 제거 → ⑨ (마지막) 연기 70→55(핵심 절 유지).
-    그래도 넘치면 모든 후보에 ASSETS 인물 문장·ON SCREEN·연기 핵심을 포함한 최소형으로 재구성한다.
-    마지막에 최종 바이트·적용 단계 이름을 로그로 남긴다.
+    즉시 멈춘다(컷 수·ON SCREEN·샷 약어·대사·MOTION·HARMONY·ASSETS 인물 문장은 유지):
+      ① STYLE 둘째 문장 제거 → ② AVOID 축약 → ③ 목소리 80→40 → ④ 목소리 제거 → ⑤ 외형 170→100 →
+      ⑥ 장면 의상 200→110 → ⑦ 대사 40→25 → ⑧ RULES 오디오 축약 → ⑨ (마지막) 연기 70→55(핵심 절 유지).
+    그래도 넘치면 모든 후보에 ASSETS 인물 문장·ON SCREEN·MOTION·HARMONY·연기 핵심을 포함한 최소형으로
+    재구성한다. 마지막에 최종 바이트·적용 단계 이름을 로그로 남긴다.
     """
-    budget = int(vnew_settings.VNEW_TAKE_PROMPT_MAX or 2500)
+    budget = _take_prompt_budget(caps)
     entries = _take_timeline_entries(plan, take)
     all_stamps = [f"{e['start']}-{e['end']}s" for e in entries]
 
@@ -2332,14 +2464,21 @@ def _take_prompt(plan: dict, take: dict, *, cast: list[dict], panel_nos: list[in
     style_en = _first_take_style_en(plan)
     if panel_nos:
         style = (
-            f"STYLE: Korean webtoon animation in exactly the drawing style of {panel_ref} "
-            f"(the original panels)"
+            f"STYLE: Modern TV-anime adaptation of the original webtoon {panel_ref}: keep the webtoon's "
+            "faces, hair and line art; anime cel shading with anime compositing \u2014 soft rim light and "
+            "color spill from the scene's light sources on skin and clothes, gentle bloom on practical "
+            "lights, shallow depth of field with a softly blurred painted background."
         )
     else:
-        style = "STYLE: Korean webtoon animation (hand-drawn line, coloring and shading)"
+        style = (
+            "STYLE: Modern TV-anime adaptation of the original webtoon: keep the webtoon's faces, hair "
+            "and line art; anime cel shading with anime compositing \u2014 soft rim light and color spill "
+            "from the scene's light sources on skin and clothes, gentle bloom on practical lights, "
+            "shallow depth of field with a softly blurred painted background."
+        )
     if style_en:
-        style += f": {style_en.rstrip('.')}"
-    style += ". Flat cel shading, clean constant-width ink lines, unlit flat color tones."
+        # 원작 그림체 한 구절을 둘째 문장으로(예산 빠듯하면 style_trim 으로 이 문장만 뗀다).
+        style += f" Original art style: {style_en.rstrip('.')}."
 
     # RULES: @Video1 재현 + 인물 교체 + 추가 금지 + 기본 시선(Eyes) + 동기화 오디오. 오디오 문장은
     # 예산이 빠듯하면 짧은 형으로 바꿀 수 있는 **별도 조각**(audio_full/audio_short)으로 둔다.
@@ -2364,14 +2503,20 @@ def _take_prompt(plan: dict, take: dict, *, cast: list[dict], panel_nos: list[in
     # 머리글 축약 때 남길 필수 RULES(기본 시선 규칙 Eyes 는 반드시 포함).
     rules_essential = rule_reproduce + rule_replace + rule_eyes
     audio_full = (
-        " Generate synchronized audio: characters speak the Korean lines with lip sync in their "
-        "voices; natural ambient sound of the location; no background music, no narration."
+        " Generate synchronized audio: characters speak the Korean lines in their voices; natural "
+        "ambient sound of the location; no background music, no narration."
     )
     audio_short = (
-        " Synchronized Korean dialogue with lip sync and ambient sound; no music."
+        " Synchronized Korean dialogue and ambient sound; no background music."
     )
-    avoid_full = "AVOID: 3D CGI, photorealistic skin, cinematic lighting, generic anime style."
-    avoid_short = "AVOID: 3D CGI, photorealistic skin, cinematic lighting."
+    avoid_full = "AVOID: 3D CGI, plastic toy look, photorealistic skin, still-image pan or zoom, subtitles, burned-in text."
+    avoid_short = "AVOID: 3D CGI, plastic toy look, photorealistic skin, still-image pan or zoom, subtitles, burned-in text."
+
+    # MOTION·HARMONY(설계자 2026-10-26 재지시 v2). 둘 다 지우지 않는 등급(고정 본문, full). MOTION 은
+    # 마네킹 흔들림을 따라 하지 말고 살아 움직이는 2차 동작·패럴랙스를 하라고, HARMONY 는 인물·배경
+    # 빛·색온도·접지 그림자를 맞추라고 지시한다. 통 테이크라 둘 다 full.
+    motion = _motion_line(True)
+    harmony = _harmony_line(plan, True)
 
     # --- 줄이기 상태(컷 수·ON SCREEN·ASSETS 인물 문장은 절대 줄이지 않는다). 샷 약어·대사·연기는 유지. ---
     state = {
@@ -2505,25 +2650,27 @@ def _take_prompt(plan: dict, take: dict, *, cast: list[dict], panel_nos: list[in
         return style
 
     def _assemble() -> str:
-        blocks = [_style(), _assets(), _timeline(), _rules(), state["avoid"]]
+        # 순서: STYLE → ASSETS → TIMELINE → MOTION → HARMONY → RULES → AVOID.
+        blocks = [_style(), _assets(), _timeline(), motion, harmony, _rules(), state["avoid"]]
         return "\n".join(b for b in blocks if b)
 
     # 한도 안이면 아무 것도 줄이지 않는다.
     prompt = _assemble()
-    # 줄이기 순서(설계자 2026-10-26, 067). 각 단계는 **조금씩** 줄이고, 매 단계 뒤 길이를 재서 한도
-    # 안이면 즉시 멈춘다. ASSETS 인물 문장(색·이름·@Image·COSTUME)·ON SCREEN·컷 수·샷 약어·대사는 유지한다.
-    # 연기는 **마지막에만** 70→55 로 줄이되 핵심 절(주어+동사+목적어)은 지킨다(통째 제거 없음).
-    #   ① 외형 100 → ② 목소리 40 → ③ 목소리 제거 → ④ 장면 의상 110 → ⑤ 대사 25 → ⑥ AVOID 축약 →
-    #   ⑦ RULES 오디오 축약 → ⑧ STYLE 둘째 문장 제거 → ⑨ (마지막) 연기 70→55.
+    # 줄이기 순서(설계자 2026-10-26, HARMONY/MOTION). 각 단계는 **조금씩** 줄이고, 매 단계 뒤 길이를 재서
+    # 한도 안이면 즉시 멈춘다. MOTION·HARMONY·ASSETS 인물 문장·ON SCREEN·컷 수·샷 약어·대사는 유지한다.
+    # 먼저 STYLE 둘째 문장·AVOID 를 줄이고, 그다음 목소리 → 외형 → 의상 → 대사 → RULES 오디오,
+    # 연기는 **마지막에만** 70→55(핵심 절 유지).
+    #   ① STYLE 둘째 문장 제거 → ② AVOID 축약 → ③ 목소리 40 → ④ 목소리 제거 → ⑤ 외형 100 →
+    #   ⑥ 장면 의상 110 → ⑦ 대사 25 → ⑧ RULES 오디오 축약 → ⑨ (마지막) 연기 70→55.
     steps = [
-        ("appearance_limit", 100, "appearance100"),
+        ("style_trim", True, "styleTrim"),
+        ("avoid", avoid_short, "avoidShort"),
         ("voice_limit", 40, "voice40"),
         ("voice_limit", 0, "voiceDrop"),
+        ("appearance_limit", 100, "appearance100"),
         ("costume_limit", 110, "costume110"),
         ("dialogue_limit", 25, "dialogue25"),
-        ("avoid", avoid_short, "avoidShort"),
         ("audio", audio_short, "audioShort"),
-        ("style_trim", True, "styleTrim"),
         ("action_limit", 55, "action55"),
     ]
     for field, value, label in steps:
@@ -2700,7 +2847,7 @@ def _take_payload(owner: str, pid: str, plan: dict, take: dict, caps: dict) -> d
         image_urls.append(_fit_ref(loc_jpeg))
         location_no = len(image_urls)
 
-    prompt = _take_prompt(plan, take, cast=cast, panel_nos=panel_nos, location_no=location_no)
+    prompt = _take_prompt(plan, take, cast=cast, panel_nos=panel_nos, location_no=location_no, caps=caps)
     if len(image_urls) > max_images:
         image_urls = image_urls[:max_images]
     return {
@@ -3147,6 +3294,8 @@ def _maybe_finalize_previz(owner: str, pid: str, gen_id: str) -> None:
         # 이어야 한다(설계자 2026-10-26, 067 — 실사 skipped·웹툰 completed 인데 partial 로 남던 버그).
         fr_status = (g.get("finalReal") or {}).get("status")
         fw_status = (g.get("finalWebtoon") or {}).get("status")
+        if "running" in (fr_status, fw_status):
+            return  # 다른 드라이버가 합치는 중 — 끝난 뒤 그 드라이버가 상태를 확정한다(partial 오표시 방지)
         fr_done = fr_status in ("done", "skipped")
         fw_done = fw_status in ("done", "skipped")
         if any_fail or not (fr_done and fw_done):
@@ -3647,7 +3796,7 @@ def _scene_summary(scene_en: str, max_chars: int = 350) -> str:
 def _cut_prompt(plan: dict, seg: dict, variant: str, *, cast: list[dict], has_image_ref: bool) -> str:
     """컷 프롬프트(영상 모델 전달문, 설계자 2026-10-22, ⑤). 영어, UTF-8 2,500바이트 이내.
 
-    순서 고정: ASSETS(자료 번호 목록) → @Video1 안내 → CAST → SHOT → BLOCKING → ACTION → MOOD → SETTING → DIALOGUE → CONTINUITY.
+    순서 고정: ASSETS(자료 번호 목록) → @Video1 안내 → CAST → SHOT → BLOCKING → ACTION → MOTION(short) → MOOD → SETTING → HARMONY(short) → DIALOGUE → CONTINUITY.
     SETTING = 컷별 backgroundEn + 장소 요약(sceneEn 앞 2~3문장, 최대 350자). 장소 문단 전체는 넣지 않는다.
     촬영 지시서(shotBrief)를 쓰되, 없으면 그 자리는 비운다(ASSETS·CAST·SHOT·CONTINUITY 는 반드시 유지).
 
@@ -3800,6 +3949,12 @@ def _cut_prompt(plan: dict, seg: dict, variant: str, *, cast: list[dict], has_im
     # SETTING = 컷별 backgroundEn + 장소 요약(sceneEn 앞 2~3문장, 최대 350자). 장소 문단 전체는 X.
     scene_summary_full = _scene_summary(scene_en, 350)
 
+    # MOTION·HARMONY short(설계자 2026-10-26 재지시 v2). 컷 단위(Kling)에서도 마네킹 흔들림을 따라
+    # 하지 말고 살아 움직이는 연기·2차 동작·패럴랙스를 하라고, 인물·배경 빛을 맞추라고 지시한다. 둘 다
+    # **지우지 않는 등급** — 줄이기 단계에서 건드리지 않는다(기존 대사·gaze 등이 먼저 줄어든다).
+    motion_short = _motion_line(False)
+    harmony_short = _harmony_line(plan, False)
+
     def _setting_line(bg: str, scene_summary: str) -> str:
         parts = [p for p in (scene_summary, bg) if p]
         body = " ".join(parts).strip()
@@ -3813,7 +3968,12 @@ def _cut_prompt(plan: dict, seg: dict, variant: str, *, cast: list[dict], has_im
         mood_line = ("MOOD: " + mood) if mood else ""
         setting_line = _setting_line(background, scene_summary)
         dlg = _dialogue_line(with_delivery)
-        blocks = [assets_line, head, cast_line, shot_line, blocking_line, action_line, mood_line, setting_line, dlg, continuity]
+        # 순서(설계자 2026-10-26 재지시 v2): … ACTION → MOTION(short) → MOOD → SETTING → HARMONY(short)
+        # → DIALOGUE → CONTINUITY. MOTION·HARMONY short 는 고정 블록(지우지 않는 등급).
+        blocks = [
+            assets_line, head, cast_line, shot_line, blocking_line, action_line,
+            motion_short, mood_line, setting_line, harmony_short, dlg, continuity,
+        ]
         return "\n".join(b for b in blocks if b)
 
     budget = vnew_settings.PREVIZ_PROMPT_TARGET  # 바이트 상한(2500).
