@@ -1457,6 +1457,23 @@ def _take_owner_hint(plan: dict) -> str:
 # 결과 의상이 맞는다(test2: 범건우 검은 와이셔츠인데 기본 아이보리 셔츠로 나오던 버그). 결과는
 # plan.previz.castNotes[패널 바이트 해시] 로 캐시해 같은 패널이면 재호출하지 않는다.
 
+def _clip_words(text: str, limit: int) -> str:
+    """단어 경계로 자른다(설계자 2026-10-26, 065 — voice/costume 가 단어 중간에 끊기던 버그).
+
+    limit 이하면 그대로. 넘으면 limit 안에서 마지막 공백까지 자른 뒤 끝의 쉼표·마침표를 떼고 마침표
+    하나로 끝맺는다(말줄임표 '…' 는 쓰지 않는다). 공백이 없으면(한 단어) limit 에서 그대로 자른다.
+    """
+    text = str(text or "").strip()
+    if not text:
+        return ""
+    if len(text) <= limit:
+        return text
+    clipped = text[:limit]
+    if " " in clipped:
+        clipped = clipped[: clipped.rfind(" ")]
+    return clipped.rstrip().rstrip(",.") + "."
+
+
 _CAST_NOTES_SYSTEM = (
     "You read original Korean webtoon panels and report, for each named character, the clothing they "
     "actually wear IN THIS SCENE (not a default outfit) and a short voice description. Look only at "
@@ -1479,7 +1496,7 @@ _CAST_NOTES_TOOL = {
                             "name": {"type": "string"},
                             # ≤140자: 이 장면에서 실제로 입은 상의·하의·색·소재·특징. 안 보이면 빈 값.
                             "costumeEn": {"type": "string"},
-                            # ≤60자: 성별·나이대·톤(예 "low, calm adult male voice").
+                            # ≤70자: 성별·나이대·톤(예 "low, calm adult male voice").
                             "voiceEn": {"type": "string"},
                         },
                         "required": ["name"],
@@ -1586,8 +1603,8 @@ def _scene_cast_notes(owner: str, pid: str, plan: dict, take: dict) -> dict:
         if not name:
             continue
         notes[name] = {
-            "costumeEn": str(item.get("costumeEn") or "").strip()[:140],
-            "voiceEn": str(item.get("voiceEn") or "").strip()[:60],
+            "costumeEn": _clip_words(str(item.get("costumeEn") or ""), 140),
+            "voiceEn": _clip_words(str(item.get("voiceEn") or ""), 70),
         }
 
     # 캐시에 저장(패널 바이트 해시 키).
@@ -1814,6 +1831,8 @@ def _cut_eyelines(plan: dict, cut: dict) -> list[dict]:
          screen_left/right→상대가 그쪽이면 person:상대, 아니면 offscreen_left/right.
       ③ 대사 있는 컷의 화자는 person:상대(듣는 사람) — 058 규칙과 일치.
       ④ 촬영 지시서 actionEn 에 "eyes closed"/"closes ... eyes" 가 있으면 그 인물은 closed.
+      ⑤ target 이 자기 자신(person:<자기 이름>)이면 같은 컷의 상대(없으면 대사 상대)로 바꾸고,
+         상대가 없으면 그 항목을 생략한다. 동일 인물 중복 항목은 제거한다(065 dry-run 1 수정).
     """
     cut_id = str(cut.get("id") or "")
     grammar = _cut_grammar(plan, cut_id)
@@ -1822,13 +1841,51 @@ def _cut_eyelines(plan: dict, cut: dict) -> list[dict]:
     if not names:
         return []
 
-    # ① grammar.eyelines 그대로.
+    # 대사 화자(자기 자신 시선 보완에 쓴다 — 화자가 자기를 보면 듣는 사람으로 바꾼다).
+    lines = _cut_lines(plan, cut)
+    spoken = [ln for ln in lines if not ln.get("silent") and str(ln.get("lineKo") or "").strip()]
+    speaker = str(spoken[0].get("speaker") or "").strip() if spoken else ""
+
+    def _fix_self(name: str, target: str) -> str:
+        """target 이 자기 자신(person:<name>)이면 상대(같은 컷의 다른 인물, 없으면 대사 상대)로,
+        상대도 없으면 빈 문자열(생략). 자기 자신 시선 버그(065 dry-run 1)를 막는다."""
+        if not target.startswith("person:"):
+            return target
+        who = target.split(":", 1)[1].strip()
+        if who != name:
+            return target
+        # 상대 1) 같은 컷의 다른 인물.
+        partner = next((n for n in names if n != name), "")
+        # 상대 2) 대사 상대(화자가 자기면 듣는 사람, 듣는 사람이 자기면 화자).
+        if not partner and speaker and speaker != name:
+            partner = speaker
+        return ("person:" + partner) if partner else ""
+
+    def _finalize(pairs: list[dict]) -> list[dict]:
+        """자기 자신 시선 교정 + 동일 인물 중복 제거(앞의 것을 유지)."""
+        out: list[dict] = []
+        seen: set[str] = set()
+        for item in pairs:
+            name = str(item.get("name") or "").strip()
+            target = str(item.get("target") or "").strip()
+            if not name or not target:
+                continue
+            if name in seen:
+                continue
+            target = _fix_self(name, target)
+            if not target:
+                continue
+            seen.add(name)
+            out.append({"name": name, "target": target})
+        return out
+
+    # ① grammar.eyelines 그대로(자기 자신·중복만 교정).
     existing = grammar.get("eyelines") if isinstance(grammar, dict) else None
     if isinstance(existing, list) and existing:
-        out = []
-        for item in existing:
-            if isinstance(item, dict) and str(item.get("name") or "").strip() and str(item.get("target") or "").strip():
-                out.append({"name": str(item["name"]).strip(), "target": str(item["target"]).strip()})
+        out = _finalize(
+            [{"name": item.get("name"), "target": item.get("target")}
+             for item in existing if isinstance(item, dict)]
+        )
         if out:
             return out
 
@@ -1846,11 +1903,6 @@ def _cut_eyelines(plan: dict, cut: dict) -> list[dict]:
             break
     if not other_side and partner_side in ("left", "right"):
         other_side = partner_side
-
-    # 대사 화자(듣는 사람을 본다).
-    lines = _cut_lines(plan, cut)
-    spoken = [ln for ln in lines if not ln.get("silent") and str(ln.get("lineKo") or "").strip()]
-    speaker = str(spoken[0].get("speaker") or "").strip() if spoken else ""
 
     # 촬영 지시서 actionEn 에 눈 감음.
     action_low = str(_cut_brief(plan, cut_id).get("actionEn") or "").lower()
@@ -1888,10 +1940,82 @@ def _cut_eyelines(plan: dict, cut: dict) -> list[dict]:
             partner = next((n for n in names if n != name), "")
             target = ("person:" + partner) if partner else "camera"
         out.append({"name": name, "target": target})
-    return out
+    return _finalize(out)
 
 
-def _gaze_text(eyelines: list[dict]) -> str:
+# 한글 음절 → 로마자(개정 로마자 표기법 근사). 이름 바이트 절약에 쓴다(설계자 2026-10-26, 066-K).
+# 한글 1글자 = UTF-8 3바이트라 TIMELINE·gaze·화자에 한국어 이름을 반복하면 예산을 크게 먹는다.
+# ASSETS 에서 "{한국 이름} ({로마자})" 로 한 번 소개하고, 그 밖에는 로마자를 쓴다(대사 본문은 한국어 유지).
+_ROMAJA_LEAD = [
+    "g", "kk", "n", "d", "tt", "r", "m", "b", "pp", "s", "ss", "", "j", "jj", "ch", "k", "t", "p", "h",
+]
+_ROMAJA_VOWEL = [
+    "a", "ae", "ya", "yae", "eo", "e", "yeo", "ye", "o", "wa", "wae", "oe", "yo", "u", "wo", "we", "wi",
+    "yu", "eu", "ui", "i",
+]
+_ROMAJA_TAIL = [
+    "", "k", "k", "k", "n", "n", "n", "t", "l", "k", "m", "l", "l", "l", "l", "l", "m", "p", "p", "t",
+    "t", "ng", "t", "t", "k", "t", "p", "t",
+]
+
+
+def _romanize_name(name: str) -> str:
+    """한글 이름을 로마자(개정 로마자 근사)로 바꾼다. 한글이 아니면 그대로 돌려준다.
+
+    규칙: 완성형 한글(가~힣)을 초성·중성·종성으로 분해해 표를 매핑하고, 첫 글자를 대문자로 만든다.
+    한글이 섞이지 않은 입력(이미 영문 이름 등)은 변형 없이 반환한다. 빈 입력은 빈 문자열.
+    로마자는 촬영 지시서/캐릭터의 영문 표기를 대신 쓸 수 없을 때의 **폴백**이다(호출부에서 영문 표기를
+    먼저 쓴다).
+    """
+    text = str(name or "").strip()
+    if not text:
+        return ""
+    out: list[str] = []
+    has_hangul = False
+    for ch in text:
+        code = ord(ch)
+        if 0xAC00 <= code <= 0xD7A3:
+            has_hangul = True
+            syl = code - 0xAC00
+            lead = syl // 588
+            vowel = (syl % 588) // 28
+            tail = syl % 28
+            out.append(_ROMAJA_LEAD[lead] + _ROMAJA_VOWEL[vowel] + _ROMAJA_TAIL[tail])
+        else:
+            out.append(ch)
+    if not has_hangul:
+        return text
+    romaja = "".join(out).strip()
+    if not romaja:
+        return text
+    return romaja[:1].upper() + romaja[1:]
+
+
+def _gaze_is_default(eyelines: list[dict], speaker: str, names: list[str]) -> bool:
+    """이 컷 시선이 **기본 규칙**과 같은지(설계자 2026-10-26, 066-E).
+
+    기본 규칙(RULES 에 명시): 말하는 사람은 듣는 사람의 눈을 보고, 듣는 사람은 말하는 사람을 본다
+    (두 사람 상호 eye contact). 이 경우에만 True — TIMELINE 에서 gaze 를 **생략**한다.
+    예외(False → gaze 표기): closed/down/up/camera/offscreen_*, 또는 말하지 않는 사람이 상대 외 대상을
+    볼 때, 또는 인물이 2명이 아닐 때, 또는 화자 미상.
+    """
+    if not eyelines or not speaker:
+        return False
+    people = [n for n in names if n]
+    if len(people) != 2 or speaker not in people:
+        return False
+    listener = next((n for n in people if n != speaker), "")
+    if not listener:
+        return False
+    by_name = {str(e.get("name") or ""): str(e.get("target") or "") for e in eyelines}
+    # 기본: 화자 → 듣는 사람의 눈, 듣는 사람 → 화자의 눈.
+    return (
+        by_name.get(speaker) == "person:" + listener
+        and by_name.get(listener) == "person:" + speaker
+    )
+
+
+def _gaze_text(eyelines: list[dict], name_map: dict | None = None) -> str:
     """시선 목록을 사람이 읽는 한 구로(설계자 2026-10-26, 065-E).
 
     예: "gaze: Geonu → Uijun's eyes; Uijun → down". person:<이름> 은 "<이름>'s eyes", camera 는
@@ -1900,6 +2024,11 @@ def _gaze_text(eyelines: list[dict]) -> str:
     """
     if not eyelines:
         return ""
+    nm = name_map or {}
+
+    def _disp(who: str) -> str:
+        return str(nm.get(who) or who)
+
     parts = []
     for item in eyelines:
         name = str(item.get("name") or "").strip()
@@ -1908,7 +2037,7 @@ def _gaze_text(eyelines: list[dict]) -> str:
             continue
         if target.startswith("person:"):
             who = target.split(":", 1)[1].strip()
-            phrase = f"{who}'s eyes" if who else "the other person"
+            phrase = f"{_disp(who)}'s eyes" if who else "the other person"
         elif target == "camera":
             phrase = "the camera"
         elif target == "offscreen_left":
@@ -1919,16 +2048,54 @@ def _gaze_text(eyelines: list[dict]) -> str:
             phrase = "eyes closed"
         else:
             phrase = target  # down / up
-        parts.append(f"{name} \u2192 {phrase}")
+        parts.append(f"{_disp(name)} \u2192 {phrase}")
     return ("gaze: " + "; ".join(parts)) if parts else ""
+
+
+def _shot_abbrev(plan: dict, cut_id: str) -> str:
+    """컷의 샷 약어(설계자 2026-10-26, 065 — 렌즈·거리 숫자 없이 '크기 + 각도'만).
+
+    예: "MCU 3/4" · "MS OTS" · "ECU profile". 카메라(렌즈·거리)는 @Video1 이 담당하므로 숫자("50 mm",
+    "approximately …")는 넣지 않는다. 연출 문법(previz.panelGrammar)의 shotSize·shotType·vantage 로
+    만든다. grammar 가 없으면(옛/테스트 데이터) 촬영 지시서 shotEn 에서 크기 토큰만 뽑고, 그래도 없으면
+    "MCU".
+
+    각도 토큰: over_shoulder → "OTS", profile_two_shot/vantage=side → "profile", vantage 3q/front3q →
+    "3/4", front → "front", back3q/back → "back". two_shot 는 각도 없이 크기만("MS")."""
+    grammar = _cut_grammar(plan, cut_id)
+    sizes = ("ECU", "CU", "MCU", "MS", "MLS", "FS", "LS")
+    size = str(grammar.get("shotSize") or "").strip().upper()
+    if size not in sizes:
+        # grammar 없음: shotEn 앞부분에서 크기 토큰만 찾는다.
+        shot_en = str(_cut_brief(plan, cut_id).get("shotEn") or "").upper()
+        size = next((s for s in sizes if s in shot_en.replace("-", "").split()), "") or "MCU"
+    shot_type = str(grammar.get("shotType") or "").strip().lower()
+    vantage = str(grammar.get("vantage") or "").strip().lower()
+    angle = ""
+    if shot_type == "over_shoulder":
+        angle = "OTS"
+    elif shot_type == "profile_two_shot" or vantage == "side":
+        angle = "profile"
+    elif vantage in ("3q", "front3q"):
+        angle = "3/4"
+    elif vantage == "front":
+        angle = "front"
+    elif vantage in ("back", "back3q"):
+        angle = "back"
+    return (size + " " + angle).strip() if angle else size
 
 
 def _take_timeline_entries(plan: dict, take: dict) -> list[dict]:
     """테이크 컷들의 타임라인 항목 목록(구조화, 설계자 2026-10-26, 컷 보존 수정).
 
-    컷마다 dict 를 돌려준다: {start, end, shot, action, speaker, dialogue}. 조립·줄이기는 _take_prompt
-    가 맡는다(여기서는 자르지 않는다). 시간 범위는 콘티 컷 seconds 를 누적해 만든다. shot·action 은
-    촬영 지시서(shotBrief)의 shotEn·actionEn 앞 1문장. 대사는 _cut_lines 로 귀속한 첫 발화(화자·대사).
+    컷마다 dict 를 돌려준다: {start, end, shot, action, speaker, dialogue, eyelines, names, gazeDefault,
+    gaze}. 조립·줄이기는 _take_prompt 가 맡는다(여기서는 자르지 않는다). 시간 범위는 콘티 컷 seconds 를
+    누적해 만든다. shot 은 샷 약어(크기+각도, 렌즈·거리 숫자 없음)이고 action 은 촬영 지시서(shotBrief)
+    actionEn 앞 1문장. 대사는 _cut_lines 로 귀속한 첫 발화(화자·대사).
+
+    시선은 구조화해서 넘긴다(설계자 2026-10-26, 066-E): eyelines(원시 [{name,target}]), names(이 컷 인물),
+    gazeDefault(기본 규칙=화자↔듣는 사람 상호 eye contact 면 True → TIMELINE 에서 생략). gaze 는 뒤호환용
+    기본 표기(로마자 매핑 없음) — _take_prompt 는 eyelines 를 로마자·기본 규칙과 함께 다시 렌더한다.
     """
     cuts_by_id = {str(c.get("id")): c for c in (plan.get("conti") or {}).get("cuts") or []}
     entries: list[dict] = []
@@ -1940,10 +2107,8 @@ def _take_timeline_entries(plan: dict, take: dict) -> list[dict]:
         end = int(round(clock + seconds))
         clock += seconds
         brief = _cut_brief(plan, cut_id)
-        shot_en = str(brief.get("shotEn") or "").strip()
-        if shot_en:
-            sents = _split_sentences(shot_en)
-            shot_en = (sents[0] if sents else shot_en).rstrip(".")
+        # 샷 = 약어(크기+각도)만. 렌즈·거리(@Video1 담당)는 넣지 않는다 → "approximately" 등 없음.
+        shot_en = _shot_abbrev(plan, str(cut_id))
         action_en = str(brief.get("actionEn") or "").strip()
         if action_en:
             sents = _split_sentences(action_en)
@@ -1956,7 +2121,10 @@ def _take_timeline_entries(plan: dict, take: dict) -> list[dict]:
             first = spoken[0]
             speaker = str(first.get("speaker") or "").strip() or "A character"
             dialogue = str(first.get("lineKo") or "").strip()
-        gaze = _gaze_text(_cut_eyelines(plan, cut))
+        eyelines = _cut_eyelines(plan, cut)
+        names = [str(e.get("name") or "") for e in eyelines if e.get("name")]
+        gaze_default = _gaze_is_default(eyelines, speaker, names)
+        gaze = _gaze_text(eyelines)
         entries.append(
             {
                 "start": start,
@@ -1965,6 +2133,9 @@ def _take_timeline_entries(plan: dict, take: dict) -> list[dict]:
                 "action": action_en,
                 "speaker": speaker,
                 "dialogue": dialogue,
+                "eyelines": eyelines,
+                "names": names,
+                "gazeDefault": gaze_default,
                 "gaze": gaze,
             }
         )
@@ -1972,21 +2143,46 @@ def _take_timeline_entries(plan: dict, take: dict) -> list[dict]:
 
 
 def _take_prompt(plan: dict, take: dict, *, cast: list[dict], panel_nos: list[int], location_no) -> str:
-    """통 테이크 프롬프트(영어, UTF-8 ≤ VNEW_TAKE_PROMPT_MAX 바이트, 설계자 2026-10-26, 063 — 컷 보존).
+    """통 테이크 프롬프트(영어, UTF-8 ≤ VNEW_TAKE_PROMPT_MAX 바이트, 설계자 2026-10-26, 066 — ASSETS·연기 보존).
 
     순서: ① STYLE(스타일 앵커 맨 앞) → ② ASSETS(@Video1·@Image 매핑) → ③ TIMELINE(컷마다 1줄+대사)
-    → ④ RULES(@Video1 재현·인물 교체·추가 금지) → ⑤ AVOID(3D/photoreal 네거티브).
+    → ④ RULES(@Video1 재현·인물 교체·추가 금지·기본 시선) → ⑤ AVOID(3D/photoreal 네거티브).
 
-    TIMELINE 은 이 모드의 핵심(컷 전환·대사·연기)이므로 **컷을 절대 빼지 않는다**. 예산(2,500바이트)을
-    넘으면 아래 순서로만 줄인다(컷 수는 그대로):
-      ① 인물 외형 100자 → ② 각 컷 연기(action) 70자 → ③ 각 컷 샷(shot) 35자 → ④ 대사 25자 →
-      ⑤ AVOID 축약 → ⑥ 그래도 넘으면 연기 문장 제거(타임스탬프+샷+대사는 유지).
-    STYLE·RULES 첫 문장은 유지한다. 마지막에 모든 컷 타임스탬프가 있는지 확인하고, 빠지면 경고 후
-    최소형(`start-end: shot`)으로 재구성한다.
+    **ASSETS 는 절대 빼지 않는다**(최소형 후보에서도 인물 매핑 문장 = 색·이름·@Image·COSTUME 은 유지.
+    외형·목소리만 줄이거나 뺄 수 있다). 이름은 바이트 절약을 위해 ASSETS 에서 "{한국 이름} ({로마자})"
+    로 한 번 소개하고, TIMELINE·gaze·화자 표기는 로마자를 쓴다(대사 본문은 립싱크를 위해 한국어 유지).
+
+    시선은 **기본 규칙 + 예외만**: RULES 에 "Eyes: in every cut the speaker looks at the listener's
+    eyes and the listener looks back, unless the timeline says otherwise." 를 넣고, TIMELINE 의 컷별
+    gaze 는 이 기본과 **다른 경우만**(closed·down·up·camera·offscreen_*, 또는 말하지 않는 사람이 상대
+    외 대상을 볼 때) 쓴다. 기본과 같으면 생략한다.
+
+    각 컷 항목 형식: "{s}-{e}s {샷 약어}: {연기 ≤70자}; {로마자 화자}: \"{대사}\"[; gaze …]".
+    샷 약어 = shotSize + 각도(예 "MCU 3/4", "MS OTS", "ECU profile") — 렌즈·거리 숫자는 넣지 않는다.
+
+    예산(2,500바이트)을 넘으면 아래 순서로 **단계별로 조금씩** 줄이고, 매 단계 뒤 길이를 재서 한도 안이면
+    즉시 멈춘다(컷 수·샷 약어·대사·ASSETS 인물 문장은 유지):
+      ① 외형 170→100 → ② 목소리 80→40 → ③ 연기 70→45 → ④ 대사 40→30 → ⑤ 장면 의상 200→120 →
+      ⑥ AVOID 축약 → ⑦ RULES 오디오 문장 축약 → ⑧ 연기 30 → ⑨ (마지막) 연기 제거.
+    STYLE·RULES 첫 문장은 유지한다. 그래도 넘치면 모든 후보에 ASSETS 인물 문장을 포함한 최소형으로
+    재구성한다. 마지막에 최종 바이트·적용 단계 이름을 로그로 남긴다.
     """
     budget = int(vnew_settings.VNEW_TAKE_PROMPT_MAX or 2500)
     entries = _take_timeline_entries(plan, take)
     all_stamps = [f"{e['start']}-{e['end']}s" for e in entries]
+
+    # 이름 → 표기 매핑(로마자). 촬영 지시서/캐릭터의 영문 표기(nameEn/roman)가 있으면 그걸, 없으면
+    # 간단 로마자 변환. ASSETS 는 "{한국 이름} ({로마자})" 로 소개하고, TIMELINE·gaze·화자는 로마자를 쓴다.
+    name_map: dict[str, str] = {}
+    for member in cast:
+        ko = str(member.get("name") or "").strip()
+        if not ko:
+            continue
+        roman = str(member.get("nameEn") or member.get("roman") or "").strip() or _romanize_name(ko)
+        name_map[ko] = roman or ko
+
+    def _disp_name(ko: str) -> str:
+        return name_map.get(str(ko or "").strip(), str(ko or "").strip())
 
     # 원작 패널 참조(의상이 빈 인물의 "costume exactly as in the panels" 문구에 쓴다).
     if panel_nos:
@@ -2009,55 +2205,75 @@ def _take_prompt(plan: dict, take: dict, *, cast: list[dict], panel_nos: list[in
         style += f": {style_en.rstrip('.')}"
     style += ". Flat cel shading, clean constant-width ink lines, unlit flat color tones."
 
-    # RULES: @Video1 재현 + 인물 교체 + 추가 금지 + 동기화 오디오(립싱크 대사·환경음, 음악·내레이션 없음).
-    rules = (
-        "RULES: Reproduce @Video1's composition, camera, positions, cuts and timing exactly. "
-        "Replace each mannequin with its person; keep face, hair, body, costume identical to the "
-        "references in every cut. Do not add any person, action or scene. No mannequins remain. "
-        "No text, no subtitles, no speech bubbles. "
-        "Generate synchronized audio: characters speak the Korean lines with lip sync in their "
+    # RULES: @Video1 재현 + 인물 교체 + 추가 금지 + 기본 시선(Eyes) + 동기화 오디오. 오디오 문장은
+    # 예산이 빠듯하면 짧은 형으로 바꿀 수 있는 **별도 조각**(audio_full/audio_short)으로 둔다.
+    # 문장을 조각으로 나눠, 머리글 축약(trim_headers) 때 **필수 문장(재현·인물 교체+의상·기본 시선)만**
+    # 남기고 보조 문장(추가 금지·마네킹 없음·자막 없음)은 뺀다. 기본 시선 규칙(Eyes)은 어떤 축약에서도
+    # 유지한다(설계자 2026-10-26, 067).
+    rule_reproduce = (
+        "RULES: Reproduce @Video1's composition, camera, positions, cuts and timing exactly."
+    )
+    rule_replace = (
+        " Replace each mannequin with its person; keep face and hair identical to the reference sheet "
+        "and the costume exactly as written in ASSETS in every cut."
+    )
+    rule_eyes = (
+        " Eyes: in every cut the speaker looks at the listener's eyes and the listener looks back, "
+        "unless the timeline says otherwise."
+    )
+    rule_extra = (
+        " Do not add any person, action or scene. No mannequins remain. "
+        "No text, no subtitles, no speech bubbles."
+    )
+    rules_head = rule_reproduce + rule_replace + rule_eyes + rule_extra
+    # 머리글 축약 때 남길 필수 RULES(기본 시선 규칙 Eyes 는 반드시 포함).
+    rules_essential = rule_reproduce + rule_replace + rule_eyes
+    audio_full = (
+        " Generate synchronized audio: characters speak the Korean lines with lip sync in their "
         "voices; natural ambient sound of the location; no background music, no narration."
     )
-    avoid_full = (
-        "AVOID: 3D CGI, ambient occlusion, photorealistic skin, gradient shading, cinematic "
-        "lighting, generic anime style."
+    audio_short = (
+        " Synchronized Korean dialogue with lip sync and ambient sound; no music."
     )
+    avoid_full = "AVOID: 3D CGI, photorealistic skin, cinematic lighting, generic anime style."
     avoid_short = "AVOID: 3D CGI, photorealistic skin, cinematic lighting."
 
-    # --- 줄이기 상태(컷 수는 절대 줄이지 않는다) ---
+    # --- 줄이기 상태(컷 수·ASSETS 인물 문장은 절대 줄이지 않는다). 샷 약어·대사는 끝까지 유지한다. ---
     state = {
-        "appearance_limit": 170,   # ① 인물 외형 글자 상한
-        "action_limit": 110,       # ② 연기 문장 글자 상한
-        "shot_limit": 60,          # ③ 샷 문구 글자 상한
-        "dialogue_limit": 40,      # ④ 대사 글자 상한
-        "gaze_limit": 90,          # 시선(gaze) 글자 상한 — 대사와 같은 등급
-        "avoid": avoid_full,       # ⑤ AVOID 축약 여부
-        "drop_action": False,      # ⑥ 연기 문장 제거
+        "appearance_limit": 170,   # ① ASSETS 인물 외형(얼굴·머리만)
+        "voice_limit": 80,         # ② ASSETS 목소리
+        "action_limit": 70,        # ③ 연기 문장 글자 상한(70→45→30)
+        "dialogue_limit": 40,      # ④ 대사 글자 상한(40→30, 제거하지 않는다)
+        "gaze_limit": 90,          # gaze 글자 상한(예외 컷에서만)
+        "costume_limit": 200,      # ⑤ ASSETS 장면 의상 글자 상한(200→120)
+        "avoid": avoid_full,       # ⑥ AVOID 축약
+        "audio": audio_full,       # ⑦ RULES 오디오 문장 축약
+        "trim_headers": False,     # ⑨ STYLE·RULES 첫 문장만(연기를 지키려 머리글 축약)
+        "drop_action": False,      # ⑩ 마지막에만 연기 제거
     }
+    applied: list[str] = []
 
     def _clip(text: str, limit: int) -> str:
-        text = str(text or "").strip()
-        if not text or len(text) <= limit:
-            return text
-        clipped = text[:limit]
-        if " " in clipped:
-            clipped = clipped[: clipped.rfind(" ")]
-        return clipped.rstrip().rstrip(",") + "…"
+        return _clip_words(text, limit)
 
     def _assets() -> str:
+        # ASSETS 인물 문장은 어떤 경우에도 유지한다(색·이름·@Image·COSTUME). 외형·목소리만 줄이거나 뺀다.
         parts = ["@Video1 = rough 3D previz (layout, blocking, camera and cuts only)"]
         for member in cast:
-            name = member.get("name") or "a character"
+            ko = str(member.get("name") or "").strip() or "a character"
+            roman = _disp_name(ko)
             color = member.get("colorName") or "grey"
             appearance = _clip(str(member.get("appearance") or "").strip(), state["appearance_limit"])
             front_no = member.get("frontNo")
-            costume = _clip(str(member.get("costume") or "").strip(), 200)
-            voice = str(member.get("voice") or "").strip()
+            costume = _clip_words(str(member.get("costume") or "").strip(), state["costume_limit"])
+            voice = _clip_words(str(member.get("voice") or "").strip(), state["voice_limit"])
+            # 이름 소개: "{한국 이름} ({로마자})". 로마자가 이름과 같으면(이미 영문) 괄호 생략.
+            label = f"{ko} ({roman})" if roman and roman != ko else ko
             # 얼굴·머리는 참조 정면 1장에서만(후면 제외 — 다른 의상 증거를 줄인다).
             if front_no:
-                sentence = f"The {color} mannequin is {name}: face and hair from @Image{front_no} (front)"
+                sentence = f"The {color} mannequin is {label}: face and hair from @Image{front_no} (front)"
             else:
-                sentence = f"The {color} mannequin is {name}"
+                sentence = f"The {color} mannequin is {label}"
             if appearance:
                 sentence += f", {appearance.rstrip('.')}"
             # COSTUME: override·패널에서 읽은 이 장면의 의상이 시트 복장을 덮어쓴다. 비면 패널을 따르게.
@@ -2072,55 +2288,85 @@ def _take_prompt(plan: dict, take: dict, *, cast: list[dict], panel_nos: list[in
             parts.append(f"@Image{location_no} = the location; keep its structure and props")
         return "ASSETS: " + ". ".join(parts) + "."
 
+    def _entry_gaze(entry: dict) -> str:
+        # 기본 시선(화자↔듣는 사람 상호)이면 생략, 예외만 로마자로 렌더. gaze 문자열은 로마자 매핑 적용.
+        if entry.get("gazeDefault"):
+            return ""
+        eyelines = entry.get("eyelines") or []
+        return _gaze_text(eyelines, name_map)
+
     def _entry_text(entry: dict) -> str:
-        pieces: list[str] = []
-        shot = _clip(entry.get("shot") or "", state["shot_limit"])
+        # 형식: "{s}-{e}s {샷 약어}: {연기}; {로마자 화자}: \"{대사}\"[; gaze …]". 샷 약어는 머리에 붙인다.
+        shot = str(entry.get("shot") or "").strip()
+        head = f"{entry['start']}-{entry['end']}s"
         if shot:
-            pieces.append(shot)
+            head += " " + shot
+        pieces: list[str] = []
         if not state["drop_action"]:
             action = _clip(entry.get("action") or "", state["action_limit"])
             if action:
                 pieces.append(action)
-        speaker = str(entry.get("speaker") or "").strip()
+        speaker = _disp_name(entry.get("speaker") or "")
         dialogue = _clip(str(entry.get("dialogue") or "").strip(), state["dialogue_limit"])
         if dialogue:
             pieces.append(f'{speaker or "A character"}: "{dialogue}"')
-        # gaze(시선)는 대사와 같은 등급 — 연기보다 늦게 줄이고 최소형에서도 컷마다 유지한다.
-        gaze = _clip(str(entry.get("gaze") or "").strip(), state["gaze_limit"])
+        # gaze(시선)는 기본과 다른 예외 컷에서만.
+        gaze = _clip(_entry_gaze(entry), state["gaze_limit"])
         if gaze:
             pieces.append(gaze)
         body = "; ".join(pieces)
-        return f"{entry['start']}-{entry['end']}s: {body}".rstrip()
+        return f"{head}: {body}" if body else head
 
     def _timeline() -> str:
         if not entries:
             return ""
         return "TIMELINE (follow @Video1's cuts exactly): " + " ".join(_entry_text(e) for e in entries)
 
+    def _rules() -> str:
+        if state["trim_headers"]:
+            # 머리글 축약: 필수 RULES(재현·인물 교체+의상·기본 시선 Eyes)만 + 짧은 오디오.
+            # 기본 시선 규칙(Eyes)은 어떤 축약에서도 유지한다(설계자 2026-10-26, 067).
+            return rules_essential + audio_short
+        return rules_head + state["audio"]
+
+    def _style() -> str:
+        if state["trim_headers"]:
+            first = _split_sentences(style)
+            return first[0] if first else style
+        return style
+
     def _assemble() -> str:
-        blocks = [style, _assets(), _timeline(), rules, state["avoid"]]
+        blocks = [_style(), _assets(), _timeline(), _rules(), state["avoid"]]
         return "\n".join(b for b in blocks if b)
 
     # 한도 안이면 아무 것도 줄이지 않는다.
     prompt = _assemble()
-    # 줄이기 순서(각 단계 뒤 한도 안이면 즉시 멈춘다). 컷 수는 그대로.
+    # 줄이기 순서(지시서 066). 각 단계는 **조금씩** 줄이고, 매 단계 뒤 길이를 재서 한도 안이면 즉시
+    # 멈춘다. 연기 제거(drop_action)는 **마지막 수단**. ASSETS 인물 문장(색·이름·@Image·COSTUME)과 컷 수·
+    # 샷 약어·대사는 유지한다.
+    #   ① 외형 100 → ② 목소리 40 → ③ 연기 45 → ④ 대사 30 → ⑤ 장면 의상 120 → ⑥ AVOID 축약 →
+    #   ⑦ RULES 오디오 문장 축약 → ⑧ 연기 30 → ⑨ STYLE 첫 문장·RULES 필수(Eyes 유지) → ⑩ 마지막 수단으로 연기 제거.
     steps = [
-        ("appearance_limit", 100),
-        ("action_limit", 70),
-        ("shot_limit", 35),
-        ("dialogue_limit", 25),
-        ("gaze_limit", 55),
-        ("avoid", avoid_short),
-        ("drop_action", True),
+        ("appearance_limit", 100, "appearance100"),
+        ("voice_limit", 40, "voice40"),
+        ("action_limit", 45, "action45"),
+        ("dialogue_limit", 30, "dialogue30"),
+        ("costume_limit", 120, "costume120"),
+        ("avoid", avoid_short, "avoidShort"),
+        ("audio", audio_short, "audioShort"),
+        ("action_limit", 30, "action30"),
+        ("trim_headers", True, "trimHeaders"),
+        ("drop_action", True, "dropAction"),
     ]
-    for field, value in steps:
+    for field, value, label in steps:
         if _utf8_len(prompt) <= budget:
             break
         state[field] = value
+        applied.append(label)
         prompt = _assemble()
 
-    # 모든 컷 타임스탬프가 남아 있는지 확인(assert 성격). 축소 6단계로도 넘치거나 타임스탬프가 빠졌으면
-    # TIMELINE 을 점점 더 최소형으로 바꿔 **모든 컷을 지킨다**(STYLE·RULES 첫 문장은 유지).
+    # 모든 컷 타임스탬프가 남아 있는지 확인(assert 성격). 축소 단계로도 넘치거나 타임스탬프가 빠졌으면
+    # TIMELINE 을 점점 더 최소형으로 바꿔 **모든 컷을 지킨다**. ASSETS 인물 문장은 모든 후보에 유지.
     def _all_present(text: str) -> bool:
         return all(stamp in text for stamp in all_stamps)
 
@@ -2132,34 +2378,40 @@ def _take_prompt(plan: dict, take: dict, *, cast: list[dict], panel_nos: list[in
                 str(take.get("id") or ""), ",".join(missing), _utf8_len(prompt),
             )
 
-        def _minimal_timeline(shot_chars: int | None) -> str:
+        def _minimal_timeline(with_shot: bool) -> str:
+            # 최소형: 머리(타임스탬프 + 샷 약어) + 대사 + 예외 gaze 만. 샷 약어·대사는 끝까지 유지한다.
             parts = []
             for e in entries:
                 head = f"{e['start']}-{e['end']}s"
+                shot = str(e.get("shot") or "").strip()
+                if with_shot and shot:
+                    head += " " + shot
                 bits = []
-                if shot_chars:
-                    shot = _clip(e.get("shot") or "", shot_chars)
-                    if shot:
-                        bits.append(shot)
-                # gaze 는 최소형에서도 컷마다 유지한다(설계자 2026-10-26, 065-E).
-                gaze = _clip(str(e.get("gaze") or "").strip(), 55)
+                dialogue = _clip(str(e.get("dialogue") or "").strip(), 30)
+                if dialogue:
+                    speaker = _disp_name(e.get("speaker") or "") or "A character"
+                    bits.append(f'{speaker}: "{dialogue}"')
+                gaze = _clip(_entry_gaze(e), 55)
                 if gaze:
                     bits.append(gaze)
-                parts.append(f"{head}: {'; '.join(bits)}".rstrip() if bits else head)
+                parts.append(f"{head}: {'; '.join(bits)}" if bits else head)
             return "TIMELINE (follow @Video1's cuts exactly): " + " ".join(parts)
 
         style_first = _split_sentences(style)
         style_first = style_first[0] if style_first else style
-        rules_first = _split_sentences(rules)
-        rules_first = rules_first[0] if rules_first else rules
+        rules_min = rules_head + audio_short
+        # 축약 RULES 도 기본 시선 규칙(Eyes)을 유지한다(설계자 2026-10-26, 067) — 첫 문장만 쓰지 않는다.
+        rules_short = rules_essential + audio_short
 
-        # 최소형 후보(점점 더 짧게). 모든 타임스탬프가 들어가고 예산 안에 드는 첫 후보를 쓴다.
+        # 최소형 후보(점점 더 짧게). **모든 후보에 ASSETS 인물 문장**(_assets)을 포함한다 — ASSETS 는
+        # 절대 빼지 않는다. 기본 시선 규칙(Eyes)도 유지한다. 모든 타임스탬프가 들어가고 예산 안에 드는
+        # 첫 후보를 쓴다.
+        applied.append("minimalTimeline")
         candidates = [
-            "\n".join(b for b in [style, _assets(), _minimal_timeline(35), rules, state["avoid"]] if b),
-            "\n".join([style_first, _minimal_timeline(35), rules_first]),
-            "\n".join([style_first, _minimal_timeline(None), rules_first]),
-            "\n".join([style_first, _minimal_timeline(None)]),
-            _minimal_timeline(None),
+            "\n".join(b for b in [style, _assets(), _minimal_timeline(True), rules_min, avoid_short] if b),
+            "\n".join(b for b in [style_first, _assets(), _minimal_timeline(True), rules_short] if b),
+            "\n".join(b for b in [style_first, _assets(), _minimal_timeline(False), rules_short] if b),
+            "\n".join(b for b in [style_first, _assets(), _minimal_timeline(False), rule_eyes.strip()] if b),
         ]
         chosen = None
         for cand in candidates:
@@ -2167,11 +2419,23 @@ def _take_prompt(plan: dict, take: dict, *, cast: list[dict], panel_nos: list[in
                 chosen = cand
                 break
         if chosen is None:
-            # 타임스탬프만 남겨도 예산을 넘으면(극단) 마지막에만 바이트로 자른다.
-            chosen = _minimal_timeline(None)
+            # ASSETS 를 넣으면 예산을 넘는 극단: 외형·목소리를 완전히 비운 ASSETS 로 한 번 더 시도.
+            applied.append("assetsStripped")
+            state["appearance_limit"] = 0
+            state["voice_limit"] = 0
+            state["costume_limit"] = 80
+            stripped = "\n".join(b for b in [style_first, _assets(), _minimal_timeline(False)] if b)
+            if _utf8_len(stripped) <= budget and _all_present(stripped):
+                chosen = stripped
+        if chosen is None:
+            # 그래도 넘치면(거의 없음) ASSETS + 최소 타임라인을 바이트로 자른다(ASSETS 머리는 지킨다).
+            applied.append("byteTrim")
+            chosen = "\n".join(b for b in [_assets(), _minimal_timeline(False)] if b)
             if _utf8_len(chosen) > budget:
                 chosen = _trim_utf8(chosen, budget)
         prompt = chosen
+
+    log.info("vnew.gen.take_prompt bytes=%d steps=%s", _utf8_len(prompt), ",".join(applied) or "none")
     return prompt
 
 

@@ -10836,6 +10836,382 @@ def check_vnew_take_costume() -> None:
         )
 
 
+# ---------------------------------------------------------------- 13f. 통 테이크 프롬프트 다듬기(065 dry-run)
+
+
+def check_vnew_take_prompt_polish() -> None:
+    """통 테이크 프롬프트 다듬기 — 065 dry-run 실측 4건 수정(설계자 2026-10-26). 외부 호출 없음.
+
+    (pp-a) 키스 컷(두 사람, 대사 화자=여의준) → gaze 에 자기 자신 대상 없음. grammar.eyelines 에
+           자기 자신(person:여의준)이 있어도 상대(범건우)로 바뀐다. 동일 인물 중복 없음.
+    (pp-b) RULES 에 "costume exactly as written in ASSETS" 있고, "costume identical to the references" 없음.
+    (pp-c) test2 규모(장면 의상·목소리 포함, 6컷) → 6컷 모두 연기 문장 존재·≤2,500 바이트·"approximately" 없음.
+    (pp-d) voice 문구가 단어 중간에서 끊기지 않음(_clip_words 가 마침표로 끝맺는다).
+    """
+    sys.path.insert(0, str(ROOT / "app"))
+    bad: list[str] = []
+
+    from src.vnew import generate as genmod  # noqa: PLC0415
+
+    orig_style = genmod._first_take_style_en
+    genmod._first_take_style_en = lambda plan: "thin ink lines, soft flat color"
+
+    def _plan(n_cuts: int, *, eyelines_self=False, self_name="여의준", other_name="범건우"):
+        """통 테이크 1개(n컷)·인물 2명 계획. grammar.panelGrammar 로 샷 약어·시선을 준다."""
+        cut_ids = [f"c{i + 1}" for i in range(n_cuts)]
+        cuts = []
+        brief_cuts = {}
+        grammar = {}
+        for i, cid in enumerate(cut_ids):
+            # 컷마다 화자를 여의준으로 둔다(키스 컷: 여의준 대사).
+            cuts.append({
+                "id": cid, "no": i + 1, "seconds": 3, "panels": [i],
+                "dialogueKo": f'{self_name}: "조금만 더 있어 줘"',
+            })
+            # shotEn 에는 일부러 렌즈·거리 숫자를 넣어, 샷 약어가 이를 버리는지 본다.
+            brief_cuts[cid] = {
+                "shotEn": "MCU, 50 mm lens, approximately 2.1 m from the subject, three-quarter angle.",
+                "actionEn": f"{self_name} cups {other_name}'s cheek and leans in slowly as their eyes meet.",
+                "dialogue": [{"speaker": self_name, "lineKo": "조금만 더 있어 줘", "deliveryEn": "soft and trembling"}],
+            }
+            g = {"mainSubject": self_name, "shotSize": "MCU", "shotType": "profile_two_shot",
+                 "vantage": "side", "others": [{"name": other_name, "side": "right"}]}
+            if eyelines_self:
+                # 옛 캐시 버그: target 이 자기 자신.
+                g["eyelines"] = [
+                    {"name": self_name, "target": "person:" + self_name},
+                    {"name": other_name, "target": "closed"},
+                ]
+            grammar[cid] = {"grammar": g}
+        scene_actors = [
+            {"id": "a1", "name": self_name, "color": "#4363d8", "charId": "ch1", "appearanceEn": "a man"},
+            {"id": "a2", "name": other_name, "color": "#e6194b", "charId": "ch2", "appearanceEn": "a man"},
+        ]
+        timeline = [{"cutId": c["id"], "actors": [{"id": "a1"}, {"id": "a2"}]} for c in cuts]
+        plan = {
+            "conti": {"status": "ready", "cuts": cuts,
+                      "segments": [{"id": "s1", "cutIds": cut_ids, "seconds": 3 * n_cuts}]},
+            "script": {"status": "ready", "entries": []},
+            "previz": {
+                "status": "ready",
+                "scenes": [{"locationId": "loc1", "actors": scene_actors, "timeline": timeline}],
+                "panelGrammar": grammar,
+                "shotBrief": {"status": "ready", "cuts": brief_cuts},
+            },
+        }
+        take = {"id": "take1", "cutIds": cut_ids, "seconds": 3 * n_cuts}
+        return plan, take
+
+    # 긴 목소리 문구(70자 넘김) — 단어 중간 끊김을 본다.
+    long_voice = "a low, calm, stoic subdued adult male voice with a slow measured cadence and warm timbre"
+
+    try:
+        # (pp-a) 키스 컷: grammar.eyelines 에 자기 자신(person:여의준)이 있어도 상대로 바뀐다.
+        plan_a, take_a = _plan(6, eyelines_self=True)
+        eyelines = genmod._cut_eyelines(plan_a, plan_a["conti"]["cuts"][0])
+        targets = {e["name"]: e["target"] for e in eyelines}
+        # 자기 자신 대상이 없어야 한다.
+        for e in eyelines:
+            if e["target"] == "person:" + e["name"]:
+                bad.append(f"(pp-a) gaze 에 자기 자신 대상이 남아 있습니다: {e}")
+        if targets.get("여의준") != "person:범건우":
+            bad.append(f"(pp-a) 자기 자신 시선이 상대로 바뀌지 않았습니다: {targets}")
+        # 동일 인물 중복 없음.
+        names_seen = [e["name"] for e in eyelines]
+        if len(names_seen) != len(set(names_seen)):
+            bad.append(f"(pp-a) 동일 인물 중복 항목이 있습니다: {names_seen}")
+        gaze_txt = genmod._gaze_text(eyelines)
+        if "여의준 \u2192 여의준's eyes" in gaze_txt:
+            bad.append(f"(pp-a) gaze 문구에 자기 자신(여의준 → 여의준's eyes)이 남아 있습니다: {gaze_txt}")
+
+        # (pp-b)(pp-c)(pp-d) 는 프롬프트로 본다. cast 에 장면 의상·긴 목소리를 넣는다.
+        cast = [
+            {"name": "여의준", "colorName": "blue", "frontNo": 1,
+             "appearance": "short black hair, sharp jaw, narrow eyes",
+             "costume": "black dress shirt, sleeves rolled up", "voice": genmod._clip_words(long_voice, 70)},
+            {"name": "범건우", "colorName": "red", "frontNo": 2,
+             "appearance": "wavy brown hair, soft features",
+             "costume": "grey hoodie", "voice": "soft low adult male voice"},
+        ]
+        plan_c, take_c = _plan(6, eyelines_self=False)
+        prompt = genmod._take_prompt(plan_c, take_c, cast=cast, panel_nos=[3, 4], location_no=5)
+
+        # (pp-b) RULES 문구.
+        if "costume exactly as written in ASSETS" not in prompt:
+            bad.append("(pp-b) RULES 에 'costume exactly as written in ASSETS' 가 없습니다")
+        if "costume identical to the references" in prompt:
+            bad.append("(pp-b) RULES 에 'costume identical to the references' 가 남아 있습니다")
+
+        # (pp-c) 6컷 모두 연기 문장 존재·≤2500B·approximately 없음.
+        entries = genmod._take_timeline_entries(plan_c, take_c)
+        stamps = [f"{e['start']}-{e['end']}s" for e in entries]
+        if len(stamps) != 6:
+            bad.append(f"(pp-c) 타임라인 항목이 6개가 아닙니다: {len(stamps)}")
+        missing = [s for s in stamps if s not in prompt]
+        if missing:
+            bad.append(f"(pp-c) 프롬프트에 빠진 컷 타임스탬프: {missing}")
+        if len(prompt.encode("utf-8")) > 2500:
+            bad.append(f"(pp-c) 프롬프트가 2500바이트를 넘습니다: {len(prompt.encode('utf-8'))}")
+        if "approximately" in prompt:
+            bad.append("(pp-c) 프롬프트에 'approximately'(렌즈·거리 숫자)가 남아 있습니다")
+        if " mm" in prompt or "50 mm" in prompt:
+            bad.append("(pp-c) 프롬프트에 렌즈 숫자(mm)가 남아 있습니다")
+        # 연기 문장(actionEn 유래) 이 6컷 모두에 있다 — cup/lean 등 동사가 보인다.
+        tl_part = prompt.split("TIMELINE", 1)[1] if "TIMELINE" in prompt else ""
+        # 연기 문장(actionEn 유래) 이 6컷 모두에 있어야 한다 — 각 컷 action 에 "cups" 가 든다.
+        if tl_part.count("cups") != 6:
+            bad.append(f"(pp-c) 6컷 모두에 연기 문장이 있지 않습니다('cups' {tl_part.count('cups')}회): {tl_part[:160]}")
+        # 샷 약어가 머리에 붙었는지(MCU profile — profile_two_shot/vantage side).
+        if "MCU profile" not in prompt:
+            bad.append(f"(pp-c) 샷 약어 'MCU profile' 이 없습니다: {tl_part[:120]}")
+
+        # (pp-d) voice 가 단어 중간에서 끊기지 않는다. cast 의 clipped voice 는 마침표로 끝난다.
+        clipped_voice = genmod._clip_words(long_voice, 70)
+        if len(clipped_voice) > 70 + 1:  # 마침표 1자 여유
+            bad.append(f"(pp-d) voice 가 70자(+마침표)를 넘습니다: {len(clipped_voice)} {clipped_voice!r}")
+        if clipped_voice.endswith("…"):
+            bad.append(f"(pp-d) voice 가 말줄임표로 끝납니다(마침표여야 함): {clipped_voice!r}")
+        # 단어 중간 끊김: 원문을 공백으로 나눈 단어들의 접두사로만 끝나면 안 된다.
+        body = clipped_voice.rstrip(".")
+        words = long_voice.split()
+        # body 의 마지막 단어가 원문 단어 목록에 온전히 있는지.
+        last_word = body.split()[-1] if body.split() else ""
+        if last_word and last_word not in words:
+            bad.append(f"(pp-d) voice 가 단어 중간에서 끊겼습니다(마지막 토큰 '{last_word}')")
+        # 프롬프트 ASSETS 의 Voice 문구도 'stoic su' 같은 중간 끊김이 없어야 한다.
+        if "stoic su." in prompt or "stoic su;" in prompt or "stoic su " in prompt.split("Voice:", 1)[-1][:40]:
+            bad.append("(pp-d) 프롬프트 Voice 문구가 단어 중간에서 끊겼습니다")
+
+    except Exception as exc:  # noqa: BLE001
+        import traceback as _tb  # noqa: PLC0415
+
+        bad.append("통 테이크 프롬프트 다듬기 검사 중 예외: " + repr(exc) + "\n" + _tb.format_exc()[:1500])
+    finally:
+        genmod._first_take_style_en = orig_style
+
+    if bad:
+        fail("통 테이크 프롬프트 다듬기(065 dry-run) 검사 실패\n" + "\n".join(f"  {item}" for item in bad))
+    else:
+        ok(
+            "통 테이크 프롬프트 다듬기(065 dry-run) 검사 (pp-a)자기 자신 시선 없음·중복 없음 "
+            "(pp-b)RULES costume ASSETS·references 없음 (pp-c)6컷 연기·≤2500B·approximately 없음·샷 약어 "
+            "(pp-d)voice 단어 경계·마침표"
+        )
+
+
+# ---------------------------------------------------------------- 13g. 통 테이크 프롬프트 바이트 예산(066)
+
+
+def check_vnew_take_prompt_budget() -> None:
+    """통 테이크 프롬프트 — 한국어 실제 길이에서도 ASSETS·연기가 통째로 빠지지 않는지(설계자 2026-10-26, 066).
+
+    외부 호출 없음. _take_prompt·_take_timeline_entries·_romanize_name·_gaze_is_default 를 직접 부른다.
+
+    (pb-a) test2 실제 길이(6컷·한국어 대사 각 25~35자·장면 의상 140자·목소리 70자·인물 2명) →
+           ≤2,500 바이트, ASSETS 에 두 인물 COSTUME 모두, 6컷 모두 연기 문장(최소 30자 이상) 존재.
+    (pb-b) 화자→상대 기본 시선 컷은 TIMELINE 에 gaze 없음, closed/down 예외 컷만 gaze 있음,
+           RULES 에 "Eyes:" 기본 규칙.
+    (pb-c) 12컷 극단 입력에서도 ASSETS 인물 문장·12 타임스탬프 유지, ≤2,500 바이트.
+    """
+    sys.path.insert(0, str(ROOT / "app"))
+    bad: list[str] = []
+
+    from src.vnew import generate as genmod  # noqa: PLC0415
+
+    orig_style = genmod._first_take_style_en
+    genmod._first_take_style_en = lambda plan: "thin sketchy pencil lines, soft pastel flat color"
+
+    # 로마자: 한글 이름을 로마자로 바꾼다(영문 표기 폴백).
+    name_a, name_b = "범건우", "여의준"
+
+    def _plan(n_cuts: int, *, dialogue_len: int, gaze_mode: str = "default"):
+        """통 테이크 1개(n컷)·인물 2명 계획. gaze_mode: default|exception.
+
+        default: grammar.eyelines 없음 → 화자↔듣는 사람 상호(기본) → gaze 생략 기대.
+        exception: 홀수 컷은 듣는 사람이 down/closed(예외) → gaze 표기 기대.
+        """
+        cut_ids = [f"c{i + 1}" for i in range(n_cuts)]
+        cuts = []
+        brief_cuts = {}
+        grammar = {}
+        # 한국어 대사(요청한 길이에 맞춘 글자 수). 25~35자 범위.
+        ko_line = ("자네 지금 뭐 하는 건가 당장 설명해 보게 어서" * 3)[:dialogue_len]
+        for i, cid in enumerate(cut_ids):
+            speaker = name_a if i % 2 == 0 else name_b
+            cuts.append({
+                "id": cid, "no": i + 1, "seconds": 3, "panels": [i],
+                "dialogueKo": f'{speaker}: "{ko_line}"',
+            })
+            brief_cuts[cid] = {
+                "shotEn": "MCU, 50 mm lens, approximately 2.1 m from the subject, three-quarter angle.",
+                "actionEn": (
+                    f"{speaker} leans forward across the desk, eyes narrowing, one hand flat on the "
+                    "folder as he speaks in a low measured voice."
+                ),
+                "dialogue": [{"speaker": speaker, "lineKo": ko_line, "deliveryEn": "sharp and low"}],
+            }
+            listener = name_b if speaker == name_a else name_a
+            g = {"mainSubject": speaker, "shotSize": "MCU", "shotType": "profile_two_shot",
+                 "vantage": "side", "others": [{"name": listener, "side": "right"}]}
+            if gaze_mode == "exception" and i % 2 == 0:
+                # 예외 컷: 듣는 사람이 down(기본과 다름) → gaze 표기.
+                g["eyelines"] = [
+                    {"name": speaker, "target": "person:" + listener},
+                    {"name": listener, "target": "down"},
+                ]
+            elif gaze_mode == "default":
+                # 기본: 화자↔듣는 사람 상호 eye contact → gaze 생략.
+                g["eyelines"] = [
+                    {"name": speaker, "target": "person:" + listener},
+                    {"name": listener, "target": "person:" + speaker},
+                ]
+            grammar[cid] = {"grammar": g}
+        scene_actors = [
+            {"id": "a1", "name": name_a, "color": "#4363d8", "charId": "ch1", "appearanceEn": "a man"},
+            {"id": "a2", "name": name_b, "color": "#e6194b", "charId": "ch2", "appearanceEn": "a man"},
+        ]
+        timeline = [{"cutId": c["id"], "actors": [{"id": "a1"}, {"id": "a2"}]} for c in cuts]
+        plan = {
+            "conti": {"status": "ready", "cuts": cuts,
+                      "segments": [{"id": "s1", "cutIds": cut_ids, "seconds": 3 * n_cuts}]},
+            "script": {"status": "ready", "entries": []},
+            "previz": {
+                "status": "ready",
+                "scenes": [{"locationId": "loc1", "actors": scene_actors, "timeline": timeline}],
+                "panelGrammar": grammar,
+                "shotBrief": {"status": "ready", "cuts": brief_cuts},
+            },
+        }
+        take = {"id": "take1", "cutIds": cut_ids, "seconds": 3 * n_cuts}
+        return plan, take
+
+    # 장면 의상(~140자)·목소리(~70자) — test2 실측 규모.
+    costume_a = (
+        "a charcoal double-breasted suit with a crisp white dress shirt and a dark navy silk tie, "
+        "polished black oxford shoes and a gold wristwatch on the left wrist"
+    )
+    costume_b = (
+        "a loose ivory knit sweater over a pale blue collared shirt, slim grey slacks and white "
+        "canvas sneakers, with a thin silver chain at the neck"
+    )
+    voice_a = "a low, calm, stoic adult male voice with a slow measured cadence and warm timbre"
+    voice_b = "a bright, slightly nervous young adult male voice with a quick light cadence"
+
+    try:
+        # 로마자 변환 자체.
+        if genmod._romanize_name("범건우") != "Beomgeonu":
+            bad.append(f"(pb) _romanize_name(범건우) 예상과 다름: {genmod._romanize_name('범건우')!r}")
+        if genmod._romanize_name("Alice") != "Alice":
+            bad.append(f"(pb) _romanize_name 영문 입력을 바꿨습니다: {genmod._romanize_name('Alice')!r}")
+
+        cast = [
+            {"name": name_a, "colorName": "blue", "frontNo": 1,
+             "appearance": "short black hair combed to one side, narrow watchful eyes, square jaw",
+             "costume": costume_a, "voice": voice_a},
+            {"name": name_b, "colorName": "red", "frontNo": 2,
+             "appearance": "wavy brown hair, soft rounded features, bright eyes",
+             "costume": costume_b, "voice": voice_b},
+        ]
+
+        # ---- (pb-a) test2 실제 길이: 6컷·한국어 대사 30자·장면 의상 140자·목소리 70자 ----
+        plan_a, take_a = _plan(6, dialogue_len=30, gaze_mode="default")
+        prompt_a = genmod._take_prompt(plan_a, take_a, cast=cast, panel_nos=[3, 4], location_no=5)
+        if len(prompt_a.encode("utf-8")) > 2500:
+            bad.append(f"(pb-a) 프롬프트가 2,500바이트를 넘습니다: {len(prompt_a.encode('utf-8'))}")
+        # ASSETS 에 두 인물 COSTUME 모두(장면 의상 문구가 통째로 빠지지 않았는지).
+        assets_a = prompt_a.split("ASSETS:", 1)[1].split("\n", 1)[0] if "ASSETS:" in prompt_a else ""
+        if "COSTUME in this scene" not in assets_a:
+            bad.append("(pb-a) ASSETS 에 'COSTUME in this scene' 문구가 없습니다")
+        if assets_a.count("COSTUME") < 2:
+            bad.append(f"(pb-a) ASSETS 에 두 인물 COSTUME 이 모두 있지 않습니다: {assets_a[:300]}")
+        # 두 인물 이름 소개(한국 이름 + 로마자) 모두 ASSETS 에.
+        if ("범건우 (" not in assets_a) or ("여의준 (" not in assets_a):
+            bad.append(f"(pb-a) ASSETS 인물 이름 소개(한국어+로마자)가 빠졌습니다: {assets_a[:300]}")
+        # 6컷 모두 연기 문장(최소 30자 이상) 존재 — TIMELINE 각 컷 항목에 'leans forward' 동사.
+        entries_a = genmod._take_timeline_entries(plan_a, take_a)
+        stamps_a = [f"{e['start']}-{e['end']}s" for e in entries_a]
+        tl_a = prompt_a.split("TIMELINE", 1)[1].split("\nRULES", 1)[0] if "TIMELINE" in prompt_a else ""
+        missing_a = [s for s in stamps_a if s not in prompt_a]
+        if missing_a:
+            bad.append(f"(pb-a) 프롬프트에 빠진 컷 타임스탬프: {missing_a}")
+        if tl_a.count("leans forward") != 6:
+            bad.append(f"(pb-a) 6컷 모두에 연기 문장이 있지 않습니다('leans forward' {tl_a.count('leans forward')}회)")
+        # 각 컷 연기 문장 30자 이상(머리·대사·gaze 제외한 action 부분).
+        for e in entries_a:
+            act = genmod._clip_words(e.get("action") or "", 45)
+            if len(act) < 30:
+                bad.append(f"(pb-a) 연기 문장이 30자 미만입니다: {act!r}")
+                break
+        # 대사는 한국어 유지(립싱크).
+        if ko_a := (entries_a[0].get("dialogue") or ""):
+            if ko_a not in prompt_a:
+                bad.append("(pb-a) 한국어 대사가 프롬프트에서 빠졌습니다")
+
+        # ---- (pb-b) 기본 시선 컷 gaze 없음·예외 컷만 gaze·RULES Eyes ----
+        if "Eyes: in every cut the speaker looks at the listener's eyes" not in prompt_a:
+            bad.append("(pb-b) RULES 에 기본 시선 규칙(Eyes:)이 없습니다")
+        # 기본(default) 플랜: 어느 컷에도 gaze 가 없어야 한다.
+        if "gaze:" in prompt_a:
+            bad.append(f"(pb-b) 기본 시선인데 TIMELINE 에 gaze 가 있습니다: {tl_a[:200]}")
+        # gazeDefault 플래그 확인.
+        if not all(e.get("gazeDefault") for e in entries_a):
+            bad.append(f"(pb-b) 기본 시선 컷의 gazeDefault 가 True 가 아닙니다: {[e.get('gazeDefault') for e in entries_a]}")
+        # 예외(exception) 플랜: 홀수 컷(듣는 사람 down)만 gaze.
+        plan_b, take_b = _plan(6, dialogue_len=30, gaze_mode="exception")
+        prompt_b = genmod._take_prompt(plan_b, take_b, cast=cast, panel_nos=[3, 4], location_no=5)
+        entries_b = genmod._take_timeline_entries(plan_b, take_b)
+        # 예외 컷(i%2==0 → c1,c3,c5): gazeDefault False, gaze 존재. 짝수 컷: default True.
+        exc_flags = [e.get("gazeDefault") for e in entries_b]
+        if exc_flags != [False, True, False, True, False, True]:
+            bad.append(f"(pb-b) 예외/기본 컷 구분이 틀립니다: {exc_flags}")
+        if "gaze:" not in prompt_b:
+            bad.append("(pb-b) 예외 컷이 있는데 gaze 가 전혀 없습니다")
+        if "down" not in prompt_b:
+            bad.append("(pb-b) 예외 컷의 down 시선이 프롬프트에 없습니다")
+        # gaze 에 로마자 이름이 쓰였는지(한국 이름 아님).
+        gaze_seg = prompt_b.split("gaze:", 1)[1][:60] if "gaze:" in prompt_b else ""
+        if "범건우" in gaze_seg or "여의준" in gaze_seg:
+            bad.append(f"(pb-b) gaze 에 한국 이름이 쓰였습니다(로마자여야 함): {gaze_seg!r}")
+
+        # ---- (pb-c) 12컷 극단 입력: ASSETS 인물 문장·12 타임스탬프·≤2500B ----
+        plan_c, take_c = _plan(12, dialogue_len=35, gaze_mode="default")
+        prompt_c = genmod._take_prompt(plan_c, take_c, cast=cast, panel_nos=[3, 4], location_no=5)
+        if len(prompt_c.encode("utf-8")) > 2500:
+            bad.append(f"(pb-c) 12컷 프롬프트가 2,500바이트를 넘습니다: {len(prompt_c.encode('utf-8'))}")
+        entries_c = genmod._take_timeline_entries(plan_c, take_c)
+        stamps_c = [f"{e['start']}-{e['end']}s" for e in entries_c]
+        if len(stamps_c) != 12:
+            bad.append(f"(pb-c) 타임라인 항목이 12개가 아닙니다: {len(stamps_c)}")
+        missing_c = [s for s in stamps_c if s not in prompt_c]
+        if missing_c:
+            bad.append(f"(pb-c) 12컷 중 빠진 타임스탬프: {missing_c}")
+        # ASSETS 인물 문장(색·이름·@Image·COSTUME) 이 극단 입력에서도 유지.
+        if "ASSETS:" not in prompt_c:
+            bad.append("(pb-c) 12컷 극단 입력에서 ASSETS 섹션이 통째로 빠졌습니다")
+        assets_c = prompt_c.split("ASSETS:", 1)[1].split("\n", 1)[0] if "ASSETS:" in prompt_c else ""
+        if ("범건우" not in assets_c) or ("여의준" not in assets_c):
+            bad.append(f"(pb-c) 12컷 극단 입력에서 ASSETS 인물 이름이 빠졌습니다: {assets_c[:200]}")
+        if assets_c.count("COSTUME") < 2:
+            bad.append(f"(pb-c) 12컷 극단 입력에서 두 인물 COSTUME 이 빠졌습니다: {assets_c[:200]}")
+        if ("@Image1" not in assets_c) or ("@Image2" not in assets_c):
+            bad.append("(pb-c) 12컷 극단 입력에서 @Image 매핑이 빠졌습니다")
+
+    except Exception as exc:  # noqa: BLE001
+        import traceback as _tb  # noqa: PLC0415
+
+        bad.append("통 테이크 프롬프트 바이트 예산 검사 중 예외: " + repr(exc) + "\n" + _tb.format_exc()[:1500])
+    finally:
+        genmod._first_take_style_en = orig_style
+
+    if bad:
+        fail("통 테이크 프롬프트 바이트 예산(066) 검사 실패\n" + "\n".join(f"  {item}" for item in bad))
+    else:
+        ok(
+            "통 테이크 프롬프트 바이트 예산(066) 검사 (pb-a)실길이 6컷 ≤2500B·두 인물 COSTUME·6컷 연기≥30자·대사 한국어 "
+            "(pb-b)기본 시선 gaze 생략·예외만 gaze·RULES Eyes·gaze 로마자 (pb-c)12컷 ASSETS 인물 문장·12 타임스탬프·≤2500B"
+        )
+
+
 # ---------------------------------------------------------------- main
 
 
@@ -10870,6 +11246,8 @@ def main() -> int:
     check_vnew_take()
     check_vnew_take_prompt()
     check_vnew_take_costume()
+    check_vnew_take_prompt_polish()
+    check_vnew_take_prompt_budget()
     print()
     if warnings:
         print(f"경고 {len(warnings)}건")
