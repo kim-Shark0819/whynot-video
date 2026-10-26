@@ -25,7 +25,7 @@ import urllib.parse
 import urllib.request
 
 from . import settings
-from .errors import VpocError, now_iso
+from .errors import VpocError, error_gist, now_iso
 from .store import STORE, video_output_prefix
 
 log = logging.getLogger("vpoc")
@@ -1313,6 +1313,36 @@ def _video_url_from(result: dict) -> str:
     return found[0] if found else ""
 
 
+# 073 R15(작업 7): 결과 조회가 이 kind 로 실패하면 fal 이 요청을 거절한 것으로 본다. fal 은 거절 건의
+# status 를 COMPLETED 로 주고 결과 조회를 4xx 로 돌려준다(유료 검증 V-2 실측 2026-10-26). 402·잔액 403 은
+# _request 가 FalBalanceExhausted 로 바꾸므로 여기 들지 않는다(예외 유지). 5xx·네트워크도 예외 유지.
+_REJECT_HTTP = frozenset({"HTTP400", "HTTP403", "HTTP404", "HTTP422"})
+
+_REJECT_LIKENESS_MSG = (
+    "fal이 실존 인물과 닮았을 수 있는 이미지로 판단해 이 샷을 거절했습니다. "
+    "같은 이미지도 다시 시도하면 통과할 때가 있습니다. "
+    "'다시 만들기'로 다시 시도하거나 인물 이미지를 바꿔 주세요."
+)
+_REJECT_SENSITIVE_MSG = (
+    "fal이 결과 영상에 민감한 내용이 있다고 판단해 거절했습니다. 장면 설명을 바꿔 다시 만들어 주세요."
+)
+
+
+def rejection(detail: str, http: str = "") -> tuple[str, str]:
+    """fal 거절 본문 → (종류, 사용자 문구). 종류는 likeness · sensitive · other(design.md §13.3).
+
+    문구에는 영어 원문 'real person' 이 없다 — vnew `_user_facing_error` 를 지나도 바뀌지 않는다.
+    other 는 원문 요지(error_gist, 200자 — URL 쿼리·data URI·키 제거)를 붙인다.
+    """
+    low = str(detail or "").lower()
+    if "likenesses of real people" in low or "real person" in low:
+        return "likeness", _REJECT_LIKENESS_MSG
+    if "sensitive content" in low:
+        return "sensitive", _REJECT_SENSITIVE_MSG
+    gist = error_gist(detail, 200) or str(http or "").strip() or "알 수 없는 오류"
+    return "other", "fal이 요청을 거절했습니다: " + gist
+
+
 def poll(invocation_arn: str, output_prefix: str) -> dict:
     """작업 상태. 완료면 결과 영상을 우리 버킷 `{prefix}/{request_id}/output.mp4` 로 옮긴 뒤 Completed.
 
@@ -1331,7 +1361,21 @@ def poll(invocation_arn: str, output_prefix: str) -> dict:
         return {"status": "Failed", "failureMessage": message or "상태가 비어 있습니다.", "usage": None}
 
     # 완료 — 결과 본문을 받는다.
-    result = _request("GET", _response_url(endpoint, request_id), where="fal.poll")
+    try:
+        result = _request("GET", _response_url(endpoint, request_id), where="fal.poll")
+    except VpocError as exc:
+        # 073 R15.1: 거절(COMPLETED + 결과 4xx)은 다시 조회해도 같다 — 예외 대신 Failed 로 끝낸다.
+        if exc.kind not in _REJECT_HTTP:
+            raise
+        kind, message = rejection(exc.message, exc.kind)
+        # 원문·프롬프트·키는 남기지 않는다(R15.4). 요청 id·종류·코드만.
+        log.info(
+            "vpoc.fal.rejected request=%s kind=%s http=%s",
+            request_id,
+            kind,
+            exc.kind[len("HTTP"):],
+        )
+        return {"status": "Failed", "failureMessage": message, "usage": None}
     if isinstance(result, dict) and result.get("error"):
         return {
             "status": "Failed",

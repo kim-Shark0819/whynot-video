@@ -380,6 +380,10 @@ READ_TIMEOUT_S = _int("VPOC_READ_TIMEOUT_S", 300)
 TASK_STALL_S = _int("VPOC_TASK_STALL_S", 900)
 # 완료를 빨리 알아채도록 5초(설계자 2026-10-13 "샷 1개 시간 줄이기"). 조회 자체는 무료다.
 POLL_MIN_INTERVAL_S = 5
+# 073 R15.6(작업 7): 결과 조회가 연속 POLL_GIVEUP_ERRORS 회 실패하고 제출 뒤 POLL_GIVEUP_S 초가 지나면
+# 샷을 failed(PollGiveUp)로 끝낸다. 공급자 대기열이 길어지면 config 로 늘린다. 최소 60초(0 이면 곧바로 포기).
+POLL_GIVEUP_S = max(60, _int("VPOC_POLL_GIVEUP_S", 1800))
+POLL_GIVEUP_ERRORS = 5
 
 
 def ark_usd_per_sec(model: str, resolution: str = "") -> float | None:

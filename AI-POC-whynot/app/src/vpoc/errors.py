@@ -7,6 +7,7 @@ AWS 오류는 Error.Code · Error.Message · RequestId · HTTP 상태를 **원�
 from __future__ import annotations
 
 import logging
+import re
 import traceback
 from datetime import datetime, timezone
 
@@ -49,6 +50,32 @@ USER_FACING_KINDS = {
     # 073 R10.5: fal 모델 해제 거절(E3)은 운영(RAW_ERRORS=false)에서도 문구를 그대로 보인다.
     "AdminOnly",
 }
+
+
+_DATA_URI_RE = re.compile(r"data:[\w.+/-]+;base64,[A-Za-z0-9+/=]*")
+_URL_QUERY_RE = re.compile(r"(https?://[^\s?#\"'<>]+)[?#][^\s\"'<>]*")
+_SPACES_RE = re.compile(r"\s+")
+
+
+def error_gist(text: object, limit: int = 200) -> str:
+    """화면·로그용 오류 요지(073 R15, design.md §13.2).
+
+    외부 응답 원문에서 비밀이 될 수 있는 것을 지운다: URL 쿼리(서명·토큰), data URI(이미지 본문),
+    fal 키 값. 공백을 한 칸으로 모으고 limit 자로 자른다(넘으면 끝에 "…").
+    """
+    value = str(text or "")
+    if not value:
+        return ""
+    value = _DATA_URI_RE.sub("data:…", value)
+    value = _URL_QUERY_RE.sub(r"\1", value)
+    key = str(getattr(settings, "FAL_KEY", "") or "")
+    if key:
+        value = value.replace(key, "***")
+    value = _SPACES_RE.sub(" ", value).strip()
+    limit = max(1, int(limit))
+    if len(value) > limit:
+        value = value[: limit - 1].rstrip() + "…"
+    return value
 
 
 def envelope(where: str, exc: BaseException) -> dict:

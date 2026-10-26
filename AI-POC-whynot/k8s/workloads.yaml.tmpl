@@ -309,6 +309,9 @@ spec:
             # fal Seedance 계열 r2v 이미지 지칭(073 R5.7). at(@Image1) | plain(Image 1). 빈 값·틀린 값은 at.
             - name: VPOC_FAL_SEEDANCE_TAG_STYLE
               value: "${VPOC_FAL_SEEDANCE_TAG_STYLE}"
+            # 영상 결과 조회 포기 시간(초, 073 R15). 조회가 연속 5회 실패하고 제출 뒤 이 시간이 지나면 샷을 failed 로 끝낸다.
+            - name: VPOC_POLL_GIVEUP_S
+              value: "${VPOC_POLL_GIVEUP_S}"
             # --- dual-style(실사+애니, 설계자 2026-10-20) ---
             # 화풍을 고르지 않고 실사 영상을 먼저 만든 뒤 애니(웹툰풍)로 변환해 두 결과를 함께 본다.
             # false 면 기존대로 화풍 하나로 만든다. 변환은 FAL_KEY 가 있어야 돈다(없으면 애니에 "변환 키 없음").

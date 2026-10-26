@@ -29,7 +29,9 @@
 - `vnew/*`: 운영 `VNEW_ENABLED=false`라 꺼진 상태 그대로다.
 
 ## 3. 사전 확인 (단계 1 전에 전부 충족)
-- [ ] 073 main(`<sha>`)에서 check_vpoc 전부 통과(CI `check:whynot` success, 로컬 `python -X utf8 tools/check_vpoc.py` 재실행 통과). 새 그룹 ip·rw·fr·du·rz·pm·ai·ad·ns·ml·vl·st·vm 포함.
+- [ ] 073 main(`<sha>`)에서 check_vpoc 전부 통과(CI `check:whynot` success, 로컬 `python -X utf8 tools/check_vpoc.py` 재실행 통과). 새 그룹 ip·rw·fr·du·rz·pm·ai·ad·ns·ml·vl·st·vm·pf 포함.
+- [ ] fal 거절 샷이 failed로 끝난다(R15, 작업 7). 그 커밋이 `<sha>`에 들어 있고 검사 pf-a~f가 통과한다. 개발계에서 거절된 샷(예: V-2)이 `submitted`에 남지 않고 ④에 한국어 거절 문구로 보인다(무료, 로그 `vpoc.fal.rejected`로 확인). 070 이전부터 운영의 모든 fal 모델에 있던 결함이라 단계 1 전에 필요하다.
+- [ ] 렌더 값에 `VPOC_POLL_GIVEUP_S="1800"`이 있다(R15.8).
 - [ ] 바뀐 코드 커버리지 80% 이상(Claude `coverage run tools/check_vpoc.py`).
 - [ ] ECR `whynot-app`·`whynot-frontend`에 `ci-<sha>`가 있다. 롤백용 `prod-ae21dc13`도 있다.
 - [ ] 렌더 값(`config.env.example` + `config.prod.env`, 검사 rw-c와 같은 방식):
