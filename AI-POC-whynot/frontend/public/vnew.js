@@ -5198,6 +5198,8 @@
         el("p", "vnew-hint", "웹툰 그림체로 " + Math.round(takeSecs0) + "초를 한 번에 만듭니다 (480p 초안). 실사는 건너뜁니다.")
       );
       host.appendChild(banner);
+      // 장면 의상·목소리 표(설계자 2026-10-26, 064).
+      host.appendChild(castTableCard(showError));
     }
     if (previz.recordedAll) {
       host.appendChild(
@@ -5366,6 +5368,110 @@
       total += Number(u.seconds) || 0;
     });
     return total;
+  }
+
+  /* 장면 의상·목소리 표(설계자 2026-10-26, 064). 인물별 자동 읽기 값(있으면) + 수정 입력칸(의상·목소리)
+     + [저장]. [의상 읽기] 로 미리 자동 읽기(POST /cast-notes). 저장은 PUT /input {castOverrides}. */
+  function castTableCard(showError) {
+    var plan = state.plan || {};
+    var input = plan.input || {};
+    var rows = input.sceneCast || [];
+    var card = el("section", "panel vnew-cast-card");
+    var head = el("div", "vnew-sec-head");
+    head.appendChild(el("h2", "vnew-sec-title", "장면 의상·목소리"));
+    card.appendChild(head);
+    card.appendChild(
+      el(
+        "p",
+        "vnew-hint",
+        "원작 패널에서 읽은 이 장면의 의상입니다. 다르면 고쳐 주세요(예: 검은 와이셔츠)."
+      )
+    );
+
+    if (!rows.length) {
+      card.appendChild(el("p", "vnew-hint", "등장 인물이 아직 없습니다."));
+    }
+
+    var table = el("div", "vnew-cast-table");
+    var inputs = {};  // name -> {costume, voice}
+    rows.forEach(function (r) {
+      var name = String(r.name || "");
+      var line = el("div", "vnew-cast-row");
+      line.appendChild(el("span", "vnew-cast-name", name));
+
+      var costumeWrap = el("label", "vnew-cast-field");
+      costumeWrap.appendChild(el("span", "vnew-cast-flabel", "의상"));
+      var costume = el("input", "vnew-cast-input");
+      costume.type = "text";
+      costume.maxLength = 200;
+      costume.value = String(r.costume || "");
+      costume.placeholder = r.costumeAuto ? ("자동: " + r.costumeAuto) : "원작 패널에서 읽은 의상";
+      costumeWrap.appendChild(costume);
+      line.appendChild(costumeWrap);
+
+      var voiceWrap = el("label", "vnew-cast-field");
+      voiceWrap.appendChild(el("span", "vnew-cast-flabel", "목소리"));
+      var voice = el("input", "vnew-cast-input");
+      voice.type = "text";
+      voice.maxLength = 80;
+      voice.value = String(r.voice || "");
+      voice.placeholder = r.voiceAuto ? ("자동: " + r.voiceAuto) : "성별·나이대·톤";
+      voiceWrap.appendChild(voice);
+      line.appendChild(voiceWrap);
+
+      inputs[name] = { costume: costume, voice: voice };
+      table.appendChild(line);
+    });
+    card.appendChild(table);
+
+    var tools = el("div", "vnew-cast-tools");
+
+    var readBtn = el("button", "outline-button", "의상 읽기");
+    readBtn.type = "button";
+    readBtn.title = "원작 패널에서 이 장면의 의상·목소리를 읽습니다(무료에 가까운 텍스트 비용).";
+    readBtn.addEventListener("click", function () {
+      readBtn.disabled = true;
+      api("/api/vnew/p/" + encodeURIComponent(state.projectId) + "/cast-notes", { method: "POST" })
+        .then(function (payload) {
+          state.plan = (payload && payload.plan) || state.plan;
+          loadPlan(false);
+        })
+        .catch(function (err) {
+          readBtn.disabled = false;
+          if (showError) showError("의상을 읽지 못했습니다: " + errMessage(err));
+        });
+    });
+    tools.appendChild(readBtn);
+
+    var saveBtn = el("button", "primary-button", "저장");
+    saveBtn.type = "button";
+    saveBtn.addEventListener("click", function () {
+      var overrides = {};
+      Object.keys(inputs).forEach(function (name) {
+        var c = (inputs[name].costume.value || "").trim();
+        var v = (inputs[name].voice.value || "").trim();
+        var entry = {};
+        if (c) entry.costume = c;
+        if (v) entry.voice = v;
+        if (entry.costume || entry.voice) overrides[name] = entry;
+      });
+      saveBtn.disabled = true;
+      api("/api/vnew/p/" + encodeURIComponent(state.projectId) + "/input", {
+        method: "PUT",
+        body: JSON.stringify({ castOverrides: overrides })
+      })
+        .then(function (payload) {
+          state.plan = payload || state.plan;
+          loadPlan(false);
+        })
+        .catch(function (err) {
+          saveBtn.disabled = false;
+          if (showError) showError("저장하지 못했습니다: " + errMessage(err));
+        });
+    });
+    tools.appendChild(saveBtn);
+    card.appendChild(tools);
+    return card;
   }
 
   /* 통 테이크 타임라인(설계자 2026-10-26, ⑤): 테이크마다 한 줄 — 컷 범위·초,
