@@ -711,6 +711,25 @@ def create_blueprint(deps: VnewDependencies) -> Blueprint:
 
     # ------------------------------------------------------------ ④ 영상 생성
 
+    @bp.post("/p/<pid>/cast-notes")
+    @deps.require_auth
+    def plan_cast_notes(pid: str):
+        """장면 의상·목소리 미리 읽기(설계자 2026-10-26, 064). 원작 패널에서 Claude 1회·캐시.
+
+        [의상 읽기] 버튼. 통 테이크 모드일 때만 동작하고, 결과(인물별 자동 읽기 + override 합친 표)를
+        돌려준다. 유료에 가까운 텍스트 비용(캐시되면 0).
+        """
+        try:
+            from . import generate  # noqa: PLC0415
+
+            owner = _project_for(pid, write=True)
+            plan_mod.load_or_create(owner, pid)
+            cast = generate.read_cast_notes_all(owner, pid)
+            data, _ = plan_mod.load_plan(owner, pid)
+            return jsonify({"ok": True, "sceneCast": cast, "plan": plan_mod.plan_view(owner, pid, data)})
+        except Exception as exc:  # noqa: BLE001
+            return _fail(exc)
+
     @bp.post("/p/<pid>/generate")
     @deps.require_auth
     def plan_generate(pid: str):

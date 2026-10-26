@@ -24,6 +24,7 @@ STORE 는 vpoc.store.STORE 를 쓴다(검사가 모듈 변수로 바꿔 끼운�
 from __future__ import annotations
 
 import base64
+import hashlib
 import logging
 import os
 import secrets
@@ -36,6 +37,7 @@ from .. import stitcher
 from ..vpoc import ark as vpoc_ark
 from ..vpoc import fal as vpoc_fal
 from ..vpoc import ledger as vpoc_ledger
+from ..vpoc import llm as vpoc_llm
 from ..vpoc import seedream as vpoc_seedream
 from ..vpoc import settings as vpoc_settings
 from ..vpoc import video as vpoc_video
@@ -256,6 +258,39 @@ def _concat(clips: list[bytes]) -> bytes:
 def _fetch_bytes(key: str, *, bucket: str = "") -> bytes:
     """우리 버킷의 파일 바이트(완료된 구간 영상 등)."""
     return STORE.get_bytes(key, bucket=bucket)
+
+
+def _has_audio_stream(mp4: bytes) -> bool | None:
+    """mp4 에 오디오 스트림이 있는지(진단 로그용, 설계자 2026-10-26, 064).
+
+    ffmpeg -i 출력에서 "Audio:" 스트림 줄을 찾는다(ffprobe 없이, stitcher._audio_params 와 같은 방식).
+    ffmpeg 가 없거나 못 읽으면 None(판정 불가 — 막지 않는다). 통 테이크는 generate_audio=true 로
+    효과음·립싱크를 넣으므로, 최종 결과에 오디오가 있는지 로그로 남겨 사운드가 빠진 회차를 진단한다.
+    """
+    if not mp4:
+        return None
+    try:
+        import subprocess as _subprocess  # noqa: PLC0415
+
+        binary = stitcher.ffmpeg_path()
+        with tempfile.TemporaryDirectory(prefix="vnew-audioprobe-") as workdir:
+            path = os.path.join(workdir, "clip.mp4")
+            with open(path, "wb") as handle:
+                handle.write(mp4)
+            result = _subprocess.run(
+                [binary, "-hide_banner", "-i", path],
+                stdout=_subprocess.PIPE,
+                stderr=_subprocess.PIPE,
+                timeout=120,
+                check=False,
+            )
+            text = result.stderr.decode("utf-8", errors="replace")
+            for line in text.splitlines():
+                if "Stream #" in line and "Audio:" in line:
+                    return True
+            return False
+    except Exception:  # noqa: BLE001 — 진단용이라 실패는 판정 불가로 둔다.
+        return None
 
 
 def _trim_clip(mp4: bytes, seconds: float) -> bytes:
@@ -1415,13 +1450,303 @@ def _take_owner_hint(plan: dict) -> str:
     return str(plan.get("owner") or "")
 
 
+# ---------------------------------------------------------------- 장면 의상·목소리 읽기(설계자 2026-10-26, 064)
+#
+# 이 회차 원작 패널에서 인물이 **실제로 이 장면에서 입은 옷**과 목소리(성별·나이·톤)를 Claude 분석
+# 모델로 1회 읽는다(캐시). 캐릭터 기본 복장 시트(analysis.outfitEn)가 아니라 장면 패널을 따라야
+# 결과 의상이 맞는다(test2: 범건우 검은 와이셔츠인데 기본 아이보리 셔츠로 나오던 버그). 결과는
+# plan.previz.castNotes[패널 바이트 해시] 로 캐시해 같은 패널이면 재호출하지 않는다.
+
+_CAST_NOTES_SYSTEM = (
+    "You read original Korean webtoon panels and report, for each named character, the clothing they "
+    "actually wear IN THIS SCENE (not a default outfit) and a short voice description. Look only at "
+    "what the panels show; do not guess. If a character's clothing is not visible, leave it empty. "
+    "Answer ONLY by calling emit_cast_notes exactly once."
+)
+
+_CAST_NOTES_TOOL = {
+    "name": "emit_cast_notes",
+    "description": "Report each character's in-scene costume and voice from the original panels.",
+    "inputSchema": {
+        "json": {
+            "type": "object",
+            "properties": {
+                "people": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "name": {"type": "string"},
+                            # ≤140자: 이 장면에서 실제로 입은 상의·하의·색·소재·특징. 안 보이면 빈 값.
+                            "costumeEn": {"type": "string"},
+                            # ≤60자: 성별·나이대·톤(예 "low, calm adult male voice").
+                            "voiceEn": {"type": "string"},
+                        },
+                        "required": ["name"],
+                    },
+                },
+            },
+            "required": ["people"],
+        }
+    },
+}
+
+
+def _read_cast_notes(blocks: list[dict], *, model: str) -> tuple[dict, dict]:
+    """llm._converse 로 장면 의상·목소리 JSON 을 받는다. (payload, usage{..model}). 검사가 가짜로 바꾼다."""
+    return vpoc_llm._converse(  # noqa: SLF001 — 공개 래퍼가 없어 내부 함수를 쓴다
+        system_text=_CAST_NOTES_SYSTEM,
+        blocks=blocks,
+        tool=_CAST_NOTES_TOOL,
+        max_tokens=1200,
+        where="vnew.generate.cast_notes",
+        model=model,
+    )
+
+
+def _cast_panel_jpegs(owner: str, pid: str, plan: dict, take: dict, limit: int) -> list[bytes]:
+    """테이크 컷들의 원작 패널 중 인물이 잘 보이는 것 최대 limit 장(설계자 2026-10-26, 064).
+
+    _segment_panel_jpegs 재사용: 테이크가 묶은 녹화 구간(recSegIds)마다 그 몫의 패널을 모은다.
+    구간을 못 찾으면 테이크 전체(seg)로 한 번 모은다. 중복 바이트는 제거하고 앞에서 limit 장.
+    """
+    out: list[bytes] = []
+    seen: set[bytes] = set()
+    seg_ids = [str(s) for s in (take.get("recSegIds") or []) if s]
+    if seg_ids:
+        for seg_id in seg_ids:
+            if len(out) >= limit:
+                break
+            for jpeg in _segment_panel_jpegs(owner, pid, plan, {"id": seg_id}, limit):
+                if jpeg and jpeg not in seen:
+                    seen.add(jpeg)
+                    out.append(jpeg)
+                    if len(out) >= limit:
+                        break
+    else:
+        for jpeg in _segment_panel_jpegs(owner, pid, plan, take, limit):
+            if jpeg and jpeg not in seen:
+                seen.add(jpeg)
+                out.append(jpeg)
+    return out[:limit]
+
+
+def _cast_notes_hash(panels: list[bytes], names: list[str]) -> str:
+    """패널 바이트 + 인물 이름 목록의 해시(캐시 키). 같은 패널·인물이면 같은 키."""
+    hasher = hashlib.sha256()
+    for jpeg in panels:
+        hasher.update(hashlib.sha256(jpeg or b"").digest())
+    for name in sorted(names):
+        hasher.update(str(name or "").encode("utf-8"))
+    return hasher.hexdigest()[:24]
+
+
+def _scene_cast_notes(owner: str, pid: str, plan: dict, take: dict) -> dict:
+    """이 테이크 장면의 인물별 의상·목소리(원작 패널 읽기, Claude 1회·캐시).
+
+    반환: {name: {"costumeEn": str, "voiceEn": str}}. 캐시(plan.previz.castNotes[hash])에 있으면
+    재호출하지 않는다. 없으면 Claude 분석 모델(ANALYZE_FALLBACK_MODEL)로 1회 읽고 저장한다.
+    외부 호출은 _read_cast_notes 래퍼로만(검사가 가짜로 바꾼다). 원장 text 계상.
+    """
+    from . import plan as plan_mod  # noqa: PLC0415
+
+    names = [a.get("name") for a in _segment_actors(plan, take) if a.get("name")]
+    names = [str(n) for n in names if n]
+    panels = _cast_panel_jpegs(owner, pid, plan, take, int(vnew_settings.VNEW_TAKE_CAST_PANELS or 4))
+    if not names:
+        return {}
+    key = _cast_notes_hash(panels, names)
+
+    cache = ((plan.get("previz") or {}).get("castNotes") or {}).get(key)
+    if isinstance(cache, dict) and cache:
+        return {str(n): dict(v) for n, v in cache.items() if isinstance(v, dict)}
+
+    # 패널 + 인물 이름 목록을 Claude 에 보낸다.
+    blocks: list[dict] = []
+    for jpeg in panels:
+        blocks.append({
+            "image": {"format": "jpeg", "source": {"bytes": _fit_ref(jpeg)}},
+        })
+    blocks.append({"text": "Characters in this scene: " + ", ".join(names) + "."})
+
+    model = str(vnew_settings.ANALYZE_FALLBACK_MODEL)
+    try:
+        payload, usage = _read_cast_notes(blocks, model=model)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("vnew.gen.cast_notes_failed pid=%s err=%s", pid, _msg(exc))
+        return {}
+    used = str(usage.get("model") or model)
+    _charge_cast_notes(owner, pid, str(plan.get("planId") or ""), usage, used)
+
+    notes: dict = {}
+    for item in (payload.get("people") or []) if isinstance(payload, dict) else []:
+        if not isinstance(item, dict):
+            continue
+        name = str(item.get("name") or "").strip()
+        if not name:
+            continue
+        notes[name] = {
+            "costumeEn": str(item.get("costumeEn") or "").strip()[:140],
+            "voiceEn": str(item.get("voiceEn") or "").strip()[:60],
+        }
+
+    # 캐시에 저장(패널 바이트 해시 키).
+    def mutator(data: dict) -> None:
+        previz = data.setdefault("previz", {})
+        store = previz.setdefault("castNotes", {})
+        store[key] = notes
+
+    try:
+        plan_mod.mutate_plan(owner, pid, mutator)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("vnew.gen.cast_notes_cache_failed pid=%s err=%s", pid, str(exc)[:200])
+    return notes
+
+
+def _charge_cast_notes(owner: str, pid: str, plan_id: str, usage: dict, model: str) -> None:
+    """장면 의상·목소리 읽기 1회 text 계상(토큰이 있을 때만)."""
+    try:
+        input_tokens = int(usage.get("inputTokens") or 0)
+        output_tokens = int(usage.get("outputTokens") or 0)
+        if not input_tokens and not output_tokens:
+            return
+        vpoc_ledger.charge_text(
+            "vnew-castnotes-" + secrets.token_hex(6),
+            model=model,
+            input_tokens=input_tokens,
+            output_tokens=output_tokens,
+            user=owner,
+            project_id=pid,
+            plan_id=plan_id,
+        )
+    except Exception as exc:  # noqa: BLE001
+        log.warning("vnew.gen.charge_cast_notes_failed pid=%s err=%s", pid, str(exc)[:200])
+
+
+def _resolve_cast(owner: str, pid: str, plan: dict, take: dict, *, read: bool) -> dict:
+    """인물별 최종 의상·목소리(설계자 2026-10-26, 064). override(사용자 수정)가 자동 읽기보다 우선.
+
+    반환: {name: {"costume": str, "voice": str}}. read=True 면 자동 읽기(_scene_cast_notes, Claude
+    1회·캐시)를 수행하고, False 면 캐시만 본다(프롬프트 조립 등 비-생성 경로). override 는
+    input.castOverrides 에서 이름으로 찾아 덮어쓴다(빈 값은 자동값을 가린다).
+    """
+    auto = _scene_cast_notes(owner, pid, plan, take) if read else _cached_cast_notes(plan, take)
+    overrides = (plan.get("input") or {}).get("castOverrides") or {}
+    out: dict = {}
+    names = {str(a.get("name") or "") for a in _segment_actors(plan, take) if a.get("name")}
+    names |= set(auto.keys())
+    names |= {str(n) for n in overrides.keys()}
+    for name in names:
+        name = str(name or "")
+        if not name:
+            continue
+        auto_item = auto.get(name) or {}
+        costume = str(auto_item.get("costumeEn") or "").strip()
+        voice = str(auto_item.get("voiceEn") or "").strip()
+        ov = overrides.get(name) or {}
+        if "costume" in ov:
+            costume = str(ov.get("costume") or "").strip()
+        if "voice" in ov:
+            voice = str(ov.get("voice") or "").strip()
+        out[name] = {"costume": costume, "voice": voice}
+    return out
+
+
+def _cached_cast_notes(plan: dict, take: dict) -> dict:
+    """캐시된 castNotes 만 조회(Claude 호출 없음). 캐시가 없으면 빈 dict."""
+    names = [str(a.get("name")) for a in _segment_actors(plan, take) if a.get("name")]
+    store = (plan.get("previz") or {}).get("castNotes") or {}
+    # 캐시는 패널 바이트 해시 키라 여기서는 다시 못 만든다 → 값이 하나뿐이면 그걸, 아니면 빈 dict.
+    # (조립 경로는 생성 때 read=True 로 이미 채워진 뒤 호출되므로 보통 맞는 값이 들어 있다.)
+    for value in store.values():
+        if isinstance(value, dict) and value:
+            return {str(n): dict(v) for n, v in value.items() if isinstance(v, dict)}
+    _ = names
+    return {}
+
+
+def scene_cast_view(owner: str, pid: str, plan: dict) -> list[dict]:
+    """plan_view 용 장면 의상·목소리 표(설계자 2026-10-26, 064). Claude 호출 없음(캐시만).
+
+    테이크 모드가 아니면 빈 목록. 테이크 모드면 각 인물에 대해 {name, costumeAuto, voiceAuto,
+    costume(override 우선 최종), voice}. 화면은 costumeAuto/voiceAuto 를 안내로, costume/voice 를
+    입력칸 초기값으로 쓴다.
+    """
+    if _gen_mode(plan) != "previz-take":
+        return []
+    takes = _take_units(plan)
+    if not takes:
+        # 녹화 전이라도 등장 인물 표는 보여 준다(첫 테이크 그룹핑 불가 → 전체 배우).
+        actors = []
+        seen = set()
+        for scene in (plan.get("previz") or {}).get("scenes") or []:
+            for actor in scene.get("actors") or []:
+                name = str(actor.get("name") or "")
+                if name and name not in seen:
+                    seen.add(name)
+                    actors.append(name)
+        overrides = (plan.get("input") or {}).get("castOverrides") or {}
+        rows = []
+        for name in actors:
+            ov = overrides.get(name) or {}
+            rows.append({
+                "name": name, "costumeAuto": "", "voiceAuto": "",
+                "costume": str(ov.get("costume") or ""), "voice": str(ov.get("voice") or ""),
+            })
+        return rows
+
+    overrides = (plan.get("input") or {}).get("castOverrides") or {}
+    rows: list[dict] = []
+    seen: set[str] = set()
+    for take in takes:
+        auto = _cached_cast_notes(plan, take)
+        for actor in _segment_actors(plan, take):
+            name = str(actor.get("name") or "")
+            if not name or name in seen:
+                continue
+            seen.add(name)
+            auto_item = auto.get(name) or {}
+            ov = overrides.get(name) or {}
+            costume_auto = str(auto_item.get("costumeEn") or "")
+            voice_auto = str(auto_item.get("voiceEn") or "")
+            rows.append({
+                "name": name,
+                "costumeAuto": costume_auto,
+                "voiceAuto": voice_auto,
+                "costume": str(ov.get("costume")) if "costume" in ov else costume_auto,
+                "voice": str(ov.get("voice")) if "voice" in ov else voice_auto,
+            })
+    return rows
+
+
+def read_cast_notes_all(owner: str, pid: str) -> list[dict]:
+    """[의상 읽기] 버튼(미리보기): 테이크마다 _scene_cast_notes 를 수행(캐시 채움) 후 표를 돌려준다.
+
+    생성 선행 조건을 완전히 요구하지 않는다(녹화 전이라도 패널·배우가 있으면 읽는다). 테이크 모드가
+    아니면 빈 목록.
+    """
+    from . import plan as plan_mod  # noqa: PLC0415
+
+    plan, _ = plan_mod.load_plan(owner, pid)
+    if _gen_mode(plan) != "previz-take":
+        return []
+    for take in _take_units(plan):
+        try:
+            _resolve_cast(owner, pid, plan, take, read=True)
+        except Exception as exc:  # noqa: BLE001
+            log.warning("vnew.gen.read_cast_notes_failed pid=%s err=%s", pid, _msg(exc))
+    plan, _ = plan_mod.load_plan(owner, pid)
+    return scene_cast_view(owner, pid, plan)
+
+
 def _short_appearance(text: str, limit: int = 170) -> str:
-    """인물 외형을 짧게 요약한다(설계자 2026-10-26, 컷 보존 수정).
+    """인물 외형을 짧게 요약한다(설계자 2026-10-26, 064 — 얼굴·머리만).
 
     외형 전체(캐릭터 analysis 전체, 인물당 ~600자)를 그대로 쓰면 TIMELINE 예산을 먹어 컷이 잘린다.
-    외형은 참조 이미지(@Image)가 담당하므로 프롬프트에는 머리(색·스타일)·얼굴 특징 한 구와 의상 한
-    구만 남긴다. 규칙: 문장 단위로 앞에서부터 모으되 "hair"/"wears"(또는 wearing/dressed) 가 든 문장을
-    우선하고, limit 자에서 **단어 경계**로 자른다. 빈 입력이면 빈 문자열.
+    외형·의상은 참조 이미지(@Image)와 ASSETS 의 COSTUME 문구가 담당하므로, 이 요약에는 **얼굴·머리**
+    (색·스타일·특징)만 남기고 **옷 문장은 지운다**. 규칙: 문장 단위로 나눠 "wears"/"wearing"/"dressed"/
+    "outfit"/"shirt" … 같은 의상 단어가 든 문장을 버리고, "hair" 문장을 맨 앞에 두고 얼굴·눈 문장을
+    이어 붙여 limit 자에서 **단어 경계**로 자른다. 빈 입력이면 빈 문자열.
     """
     body = str(text or "").strip()
     if not body:
@@ -1430,23 +1755,35 @@ def _short_appearance(text: str, limit: int = 170) -> str:
     if not sentences:
         sentences = [body]
 
+    # 의상 단어가 든 문장은 전부 버린다(결과 프롬프트에 'shirt'/'wears' 가 남지 않게).
+    outfit_words = (
+        "wear", "dressed", "outfit", "shirt", "trouser", "slacks", "jacket", "coat", "suit",
+        "tie", "dress", "shoe", "sleeve", "collar", "button", "hoodie", "uniform", "clothes",
+        "clothing", "pants", "skirt", "sweater", "blazer", "jeans", "scarf", "vest", "robe",
+    )
+
     def _is_outfit(sentence: str) -> bool:
         low = sentence.lower()
-        return "wears" in low or "wearing" in low or "dressed" in low or "outfit" in low
+        return any(word in low for word in outfit_words)
 
-    # "hair" 가 든 문장을 머리 문장으로 우선한다. 없으면 얼굴·눈 문장을 쓴다(설계자 2026-10-26).
-    hair = next((s for s in sentences if "hair" in s.lower()), "")
-    if not hair:
-        hair = next((s for s in sentences if "face" in s.lower() or "eyes" in s.lower()), "")
-    outfit = next((s for s in sentences if _is_outfit(s)), "")
+    face_sentences = [s for s in sentences if not _is_outfit(s)]
+    if not face_sentences:
+        # 모든 문장이 옷 얘기면(드묾) 얼굴 요약이 없다 → 빈 값(옷은 COSTUME 이 담당).
+        return ""
+
+    # "hair" 문장을 맨 앞에, 그다음 얼굴·눈 문장, 그다음 나머지.
+    hair = next((s for s in face_sentences if "hair" in s.lower()), "")
+    facial = next(
+        (s for s in face_sentences if ("face" in s.lower() or "eyes" in s.lower()) and s != hair),
+        "",
+    )
     picked: list[str] = []
     if hair:
         picked.append(hair)
-    if outfit and outfit != hair:
-        picked.append(outfit)
-    # hair·outfit 둘 다 못 찾으면 앞 문장부터 채운다.
+    if facial and facial != hair:
+        picked.append(facial)
     if not picked:
-        picked = sentences[:2]
+        picked = face_sentences[:2]
 
     summary = " ".join(p.rstrip(".").strip() + "." for p in picked if p.strip()).strip()
     if len(summary) <= limit:
@@ -1456,6 +1793,134 @@ def _short_appearance(text: str, limit: int = 170) -> str:
     if " " in clipped:
         clipped = clipped[: clipped.rfind(" ")]
     return clipped.rstrip().rstrip(",") + "…"
+
+
+def _cut_grammar(plan: dict, cut_id: str) -> dict:
+    """이 컷의 연출 문법(previz.panelGrammar[cutId].grammar). 없으면 빈 dict."""
+    cell = ((plan.get("previz") or {}).get("panelGrammar") or {}).get(str(cut_id))
+    if isinstance(cell, dict):
+        grammar = cell.get("grammar")
+        return grammar if isinstance(grammar, dict) else {}
+    return {}
+
+
+def _cut_eyelines(plan: dict, cut: dict) -> list[dict]:
+    """이 컷의 인물별 시선(눈동자 방향) 목록(설계자 2026-10-26, 065-E).
+
+    반환: [{name, target}] — target 은 person:<이름>|camera|down|up|offscreen_left|offscreen_right|closed.
+    보완 규칙(옛 캐시·빈 값):
+      ① grammar.eyelines 가 있으면 그대로(normalize 된 값).
+      ② 없으면 주인공 faceTurn 으로: toward_camera→camera, down→down, up→up,
+         screen_left/right→상대가 그쪽이면 person:상대, 아니면 offscreen_left/right.
+      ③ 대사 있는 컷의 화자는 person:상대(듣는 사람) — 058 규칙과 일치.
+      ④ 촬영 지시서 actionEn 에 "eyes closed"/"closes ... eyes" 가 있으면 그 인물은 closed.
+    """
+    cut_id = str(cut.get("id") or "")
+    grammar = _cut_grammar(plan, cut_id)
+    actors = _segment_actors(plan, {"cutIds": [cut_id]})
+    names = [str(a.get("name") or "") for a in actors if a.get("name")]
+    if not names:
+        return []
+
+    # ① grammar.eyelines 그대로.
+    existing = grammar.get("eyelines") if isinstance(grammar, dict) else None
+    if isinstance(existing, list) and existing:
+        out = []
+        for item in existing:
+            if isinstance(item, dict) and str(item.get("name") or "").strip() and str(item.get("target") or "").strip():
+                out.append({"name": str(item["name"]).strip(), "target": str(item["target"]).strip()})
+        if out:
+            return out
+
+    # 보완 규칙(옛 캐시). 주인공·상대·faceTurn·화자를 모아 추정한다.
+    main = str(grammar.get("mainSubject") or "") or (names[0] if names else "")
+    other = next((n for n in names if n != main), "")
+    face_turn = str(grammar.get("faceTurn") or "")
+    partner_side = str(grammar.get("offscreenPartnerSide") or "none")
+
+    # 상대가 화면 왼/오 어느 쪽인지(others.side 로 추정).
+    other_side = ""
+    for o in grammar.get("others") or []:
+        if str(o.get("name") or "") == other:
+            other_side = str(o.get("side") or "")
+            break
+    if not other_side and partner_side in ("left", "right"):
+        other_side = partner_side
+
+    # 대사 화자(듣는 사람을 본다).
+    lines = _cut_lines(plan, cut)
+    spoken = [ln for ln in lines if not ln.get("silent") and str(ln.get("lineKo") or "").strip()]
+    speaker = str(spoken[0].get("speaker") or "").strip() if spoken else ""
+
+    # 촬영 지시서 actionEn 에 눈 감음.
+    action_low = str(_cut_brief(plan, cut_id).get("actionEn") or "").lower()
+    eyes_closed = "eyes closed" in action_low or "closes his eyes" in action_low or "closes her eyes" in action_low or "eyes shut" in action_low
+
+    def _main_target() -> str:
+        if face_turn == "toward_camera":
+            return "camera"
+        if face_turn == "down":
+            return "down"
+        if face_turn == "up":
+            return "up"
+        if face_turn in ("screen_left", "screen_right"):
+            want_side = "left" if face_turn == "screen_left" else "right"
+            if other and other_side == want_side:
+                return "person:" + other
+            return "offscreen_" + want_side
+        # away / 기본: 상대가 있으면 상대, 없으면 카메라.
+        return ("person:" + other) if other else "camera"
+
+    out: list[dict] = []
+    for name in names:
+        if eyes_closed and name == main:
+            target = "closed"
+        elif speaker and name == speaker and other:
+            # ③ 화자는 듣는 사람(상대)을 본다.
+            target = "person:" + other
+        elif name == main:
+            target = _main_target()
+        elif other and name == other and speaker == main:
+            # 주인공이 말하면 상대(듣는 사람)는 주인공을 본다.
+            target = "person:" + main
+        else:
+            # 그 밖의 인물: 상대가 있으면 상대, 없으면 카메라.
+            partner = next((n for n in names if n != name), "")
+            target = ("person:" + partner) if partner else "camera"
+        out.append({"name": name, "target": target})
+    return out
+
+
+def _gaze_text(eyelines: list[dict]) -> str:
+    """시선 목록을 사람이 읽는 한 구로(설계자 2026-10-26, 065-E).
+
+    예: "gaze: Geonu → Uijun's eyes; Uijun → down". person:<이름> 은 "<이름>'s eyes", camera 는
+    "the camera", offscreen_left/right 는 "off-screen left/right", closed 는 "eyes closed",
+    down/up 은 "down"/"up".
+    """
+    if not eyelines:
+        return ""
+    parts = []
+    for item in eyelines:
+        name = str(item.get("name") or "").strip()
+        target = str(item.get("target") or "").strip()
+        if not name or not target:
+            continue
+        if target.startswith("person:"):
+            who = target.split(":", 1)[1].strip()
+            phrase = f"{who}'s eyes" if who else "the other person"
+        elif target == "camera":
+            phrase = "the camera"
+        elif target == "offscreen_left":
+            phrase = "off-screen left"
+        elif target == "offscreen_right":
+            phrase = "off-screen right"
+        elif target == "closed":
+            phrase = "eyes closed"
+        else:
+            phrase = target  # down / up
+        parts.append(f"{name} \u2192 {phrase}")
+    return ("gaze: " + "; ".join(parts)) if parts else ""
 
 
 def _take_timeline_entries(plan: dict, take: dict) -> list[dict]:
@@ -1491,6 +1956,7 @@ def _take_timeline_entries(plan: dict, take: dict) -> list[dict]:
             first = spoken[0]
             speaker = str(first.get("speaker") or "").strip() or "A character"
             dialogue = str(first.get("lineKo") or "").strip()
+        gaze = _gaze_text(_cut_eyelines(plan, cut))
         entries.append(
             {
                 "start": start,
@@ -1499,6 +1965,7 @@ def _take_timeline_entries(plan: dict, take: dict) -> list[dict]:
                 "action": action_en,
                 "speaker": speaker,
                 "dialogue": dialogue,
+                "gaze": gaze,
             }
         )
     return entries
@@ -1521,12 +1988,17 @@ def _take_prompt(plan: dict, take: dict, *, cast: list[dict], panel_nos: list[in
     entries = _take_timeline_entries(plan, take)
     all_stamps = [f"{e['start']}-{e['end']}s" for e in entries]
 
-    style_en = _first_take_style_en(plan)
+    # 원작 패널 참조(의상이 빈 인물의 "costume exactly as in the panels" 문구에 쓴다).
     if panel_nos:
         if len(panel_nos) == 1:
             panel_ref = f"@Image{panel_nos[0]}"
         else:
             panel_ref = f"@Image{panel_nos[0]}\u2013@Image{panel_nos[-1]}"
+    else:
+        panel_ref = "the original panels"
+
+    style_en = _first_take_style_en(plan)
+    if panel_nos:
         style = (
             f"STYLE: Korean webtoon animation in exactly the drawing style of {panel_ref} "
             f"(the original panels)"
@@ -1537,11 +2009,14 @@ def _take_prompt(plan: dict, take: dict, *, cast: list[dict], panel_nos: list[in
         style += f": {style_en.rstrip('.')}"
     style += ". Flat cel shading, clean constant-width ink lines, unlit flat color tones."
 
+    # RULES: @Video1 재현 + 인물 교체 + 추가 금지 + 동기화 오디오(립싱크 대사·환경음, 음악·내레이션 없음).
     rules = (
         "RULES: Reproduce @Video1's composition, camera, positions, cuts and timing exactly. "
         "Replace each mannequin with its person; keep face, hair, body, costume identical to the "
         "references in every cut. Do not add any person, action or scene. No mannequins remain. "
-        "No text, no subtitles, no speech bubbles."
+        "No text, no subtitles, no speech bubbles. "
+        "Generate synchronized audio: characters speak the Korean lines with lip sync in their "
+        "voices; natural ambient sound of the location; no background music, no narration."
     )
     avoid_full = (
         "AVOID: 3D CGI, ambient occlusion, photorealistic skin, gradient shading, cinematic "
@@ -1555,6 +2030,7 @@ def _take_prompt(plan: dict, take: dict, *, cast: list[dict], panel_nos: list[in
         "action_limit": 110,       # ② 연기 문장 글자 상한
         "shot_limit": 60,          # ③ 샷 문구 글자 상한
         "dialogue_limit": 40,      # ④ 대사 글자 상한
+        "gaze_limit": 90,          # 시선(gaze) 글자 상한 — 대사와 같은 등급
         "avoid": avoid_full,       # ⑤ AVOID 축약 여부
         "drop_action": False,      # ⑥ 연기 문장 제거
     }
@@ -1575,16 +2051,22 @@ def _take_prompt(plan: dict, take: dict, *, cast: list[dict], panel_nos: list[in
             color = member.get("colorName") or "grey"
             appearance = _clip(str(member.get("appearance") or "").strip(), state["appearance_limit"])
             front_no = member.get("frontNo")
-            back_no = member.get("backNo")
+            costume = _clip(str(member.get("costume") or "").strip(), 200)
+            voice = str(member.get("voice") or "").strip()
+            # 얼굴·머리는 참조 정면 1장에서만(후면 제외 — 다른 의상 증거를 줄인다).
             if front_no:
-                refs = f"@Image{front_no} (front)"
-                if back_no:
-                    refs += f" and @Image{back_no} (back)"
-                sentence = f"The {color} mannequin is the person in {refs}: {name}"
+                sentence = f"The {color} mannequin is {name}: face and hair from @Image{front_no} (front)"
             else:
                 sentence = f"The {color} mannequin is {name}"
             if appearance:
                 sentence += f", {appearance.rstrip('.')}"
+            # COSTUME: override·패널에서 읽은 이 장면의 의상이 시트 복장을 덮어쓴다. 비면 패널을 따르게.
+            if costume:
+                sentence += f". COSTUME in this scene (overrides the sheet's clothing): {costume.rstrip('.')}"
+            else:
+                sentence += f". COSTUME: exactly as in the original panels {panel_ref}"
+            if voice:
+                sentence += f". Voice: {voice.rstrip('.')}"
             parts.append(sentence)
         if location_no:
             parts.append(f"@Image{location_no} = the location; keep its structure and props")
@@ -1603,6 +2085,10 @@ def _take_prompt(plan: dict, take: dict, *, cast: list[dict], panel_nos: list[in
         dialogue = _clip(str(entry.get("dialogue") or "").strip(), state["dialogue_limit"])
         if dialogue:
             pieces.append(f'{speaker or "A character"}: "{dialogue}"')
+        # gaze(시선)는 대사와 같은 등급 — 연기보다 늦게 줄이고 최소형에서도 컷마다 유지한다.
+        gaze = _clip(str(entry.get("gaze") or "").strip(), state["gaze_limit"])
+        if gaze:
+            pieces.append(gaze)
         body = "; ".join(pieces)
         return f"{entry['start']}-{entry['end']}s: {body}".rstrip()
 
@@ -1623,6 +2109,7 @@ def _take_prompt(plan: dict, take: dict, *, cast: list[dict], panel_nos: list[in
         ("action_limit", 70),
         ("shot_limit", 35),
         ("dialogue_limit", 25),
+        ("gaze_limit", 55),
         ("avoid", avoid_short),
         ("drop_action", True),
     ]
@@ -1649,11 +2136,16 @@ def _take_prompt(plan: dict, take: dict, *, cast: list[dict], panel_nos: list[in
             parts = []
             for e in entries:
                 head = f"{e['start']}-{e['end']}s"
+                bits = []
                 if shot_chars:
                     shot = _clip(e.get("shot") or "", shot_chars)
-                    parts.append(f"{head}: {shot}".rstrip() if shot else head)
-                else:
-                    parts.append(head)
+                    if shot:
+                        bits.append(shot)
+                # gaze 는 최소형에서도 컷마다 유지한다(설계자 2026-10-26, 065-E).
+                gaze = _clip(str(e.get("gaze") or "").strip(), 55)
+                if gaze:
+                    bits.append(gaze)
+                parts.append(f"{head}: {'; '.join(bits)}".rstrip() if bits else head)
             return "TIMELINE (follow @Video1's cuts exactly): " + " ".join(parts)
 
         style_first = _split_sentences(style)
@@ -1684,18 +2176,24 @@ def _take_prompt(plan: dict, take: dict, *, cast: list[dict], panel_nos: list[in
 
 
 def _take_payload(owner: str, pid: str, plan: dict, take: dict, caps: dict) -> dict:
-    """통 테이크(웹툰) 참조 이미지 목록·프롬프트(설계자 2026-10-26, 063).
+    """통 테이크(웹툰) 참조 이미지 목록·프롬프트(설계자 2026-10-26, 064).
 
     image_urls(순서 고정 — 프롬프트 번호와 일치):
-      ① 테이크에 등장하는 인물별(등장 많은 순) 웹툰 기본복장 정면, 이어 후면(있으면) — 인물당 2장.
+      ① 테이크에 등장하는 인물별(등장 많은 순) 웹툰 기본복장 **정면 1장만**(후면 제외 — 다른 의상
+         증거를 줄여 장면 의상이 먹히게).
       ② 원작 그림체 패널 최대 VNEW_TAKE_MAX_PANELS 장.
       ③ 장소 시트(webtoon back 뷰) — 있으면 1장.
     전부 061 축소 규칙(긴 변 1024, JPEG q85). 총 ≤ caps.imageListMax(기본 10).
+
+    장면 의상·목소리는 _resolve_cast(원작 패널 읽기 Claude 1회·캐시, override 우선)로 인물별 costume·
+    voice 를 구해 cast 에 담는다(ASSETS 의 COSTUME/Voice 문구가 쓴다).
     반환: {imageUrls:[bytes], prompt, cast, panelNos, locationNo}.
     """
     max_images = int(caps.get("imageListMax") or vpoc_fal.DEFAULT_IMAGE_LIST_MAX)
     actors = _segment_actors(plan, take)
     char_by_id = _char_by_id(owner, plan)
+    # 장면 의상·목소리(override 우선 + 원작 패널 읽기). 생성 경로라 read=True(캐시 없으면 1회 읽음).
+    resolved = _resolve_cast(owner, pid, plan, take, read=True)
 
     image_urls: list[bytes] = []
     cast: list[dict] = []
@@ -1707,25 +2205,24 @@ def _take_payload(owner: str, pid: str, plan: dict, take: dict, caps: dict) -> d
         char_id = actor.get("charId") or ""
         char = char_by_id.get(char_id) if char_id else None
         front_no = None
-        back_no = None
         appearance = actor.get("appearanceEn") or ""
         if char:
+            # 정면 1장만 — 후면은 넣지 않는다(설계자 2026-10-26, 064).
             front = _load_jpeg(str(char.get("webtoonFrontKey") or ""))
             if front is not None and len(image_urls) < max_images:
                 image_urls.append(_fit_ref(front))
                 front_no = len(image_urls)
-                back = _load_jpeg(str(char.get("webtoonBackKey") or ""))
-                if back is not None and len(image_urls) < max_images:
-                    image_urls.append(_fit_ref(back))
-                    back_no = len(image_urls)
-                appearance = ((char.get("appearanceEn") or "") + " " + (char.get("outfitEn") or "")).strip() or appearance
+                # 외형은 appearanceEn(얼굴·머리). 옷은 COSTUME 이 담당하므로 outfitEn 은 섞지 않는다.
+                appearance = str(char.get("appearanceEn") or "") or appearance
+        member = resolved.get(str(name)) or {}
         cast.append({
             "name": name,
             "colorName": color_name,
             "frontNo": front_no,
-            "backNo": back_no,
-            # 외형은 참조 이미지(@Image)가 담당하므로 짧게 요약한다(컷 보존, 설계자 2026-10-26).
+            # 외형은 참조 정면 + 요약(얼굴·머리만, 옷 문구 제거).
             "appearance": _short_appearance(appearance, 170),
+            "costume": str(member.get("costume") or ""),
+            "voice": str(member.get("voice") or ""),
         })
 
     panel_nos: list[int] = []
@@ -2778,6 +3275,10 @@ def _cut_prompt(plan: dict, seg: dict, variant: str, *, cast: list[dict], has_im
     if not shot_en:
         shot_en = "Match the framing, lens, camera height and angle exactly as shown in @Video1."
     blocking_en = str(brief.get("blockingEn") or "").strip()
+    # 시선(눈동자 방향) 한 문장을 BLOCKING 끝에 붙인다(설계자 2026-10-26, 065-E).
+    gaze_en = _gaze_text(_cut_eyelines(plan, cut))
+    if gaze_en:
+        blocking_en = (blocking_en + " " + gaze_en + ".").strip() if blocking_en else (gaze_en + ".")
     action_en = str(brief.get("actionEn") or "").strip()
     mood_en = str(brief.get("moodEn") or "").strip()
     background_en = str(brief.get("backgroundEn") or "").strip()
@@ -3525,7 +4026,17 @@ def _do_concat(owner: str, pid: str, gen_id: str, variant: str) -> None:
                 clips.append(clip_bytes)
         if not clips:
             raise VpocError("vnew.generate", "NoClips", "이어 붙일 영상이 없습니다.", 502)
-        merged = _concat(clips)
+        # 통 테이크(설계자 2026-10-26, 064): 클립이 1개면 결과 mp4 를 **그대로 복사**한다(재인코딩·-an
+        # 없음 → 오디오 스트림 보존). 여러 개면 stitcher.concat(오디오 맞춤 지원)으로 이어 붙인다.
+        if len(clips) == 1:
+            merged = clips[0]
+            log.info("vnew.gen.final_copy variant=%s clips=1 bytes=%d (no re-encode)", variant, len(merged or b""))
+        else:
+            merged = _concat(clips)
+            log.info("vnew.gen.final_concat variant=%s clips=%d bytes=%d", variant, len(clips), len(merged or b""))
+        # 결과에 오디오 스트림이 있는지 로그(막지 않는다 — 진단용).
+        has_audio = _has_audio_stream(merged)
+        log.info("vnew.gen.final_audio variant=%s has_audio=%s", variant, has_audio)
         key = final_real_key(owner, pid, gen_id) if variant == "real" else final_webtoon_key(owner, pid, gen_id)
         STORE.put_bytes(key, merged, "video/mp4", bucket=vpoc_settings.VIDEO_BUCKET)
 

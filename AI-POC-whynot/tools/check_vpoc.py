@@ -9945,6 +9945,22 @@ def check_vnew_take() -> None:
             "etag",
         )
 
+    # 장면 의상·목소리 읽기(Claude) 가짜 — 호출 횟수를 세어 캐시(ca-a)를 검증한다.
+    cast_notes_calls = {"n": 0}
+
+    def fake_read_cast_notes(blocks, *, model):
+        cast_notes_calls["n"] += 1
+        return (
+            {
+                "people": [
+                    {"name": "에이", "costumeEn": "black dress shirt, sleeves rolled; charcoal slacks",
+                     "voiceEn": "low, calm adult male voice"},
+                    {"name": "비", "costumeEn": "navy training top", "voiceEn": "soft young female voice"},
+                ]
+            },
+            {"model": model, "inputTokens": 5, "outputTokens": 10},
+        )
+
     orig = {
         "gen_STORE": genmod.STORE,
         "plan_STORE": planmod.STORE,
@@ -9963,6 +9979,7 @@ def check_vnew_take() -> None:
         "charge": _ledger_mod.charge,
         "Thread": genmod.threading.Thread,
         "fal_key": _settings.FAL_KEY,
+        "read_cast_notes": genmod._read_cast_notes,
     }
     genmod.STORE = fake_store
     planmod.STORE = fake_store
@@ -9983,6 +10000,7 @@ def check_vnew_take() -> None:
     genmod._load_jpeg = lambda key: fake_blobs.get(str(key or ""))
     genmod._segment_panel_jpegs = lambda owner, pid, plan, seg, limit: [b"PANEL1", b"PANEL2"][:limit]
     genmod.imaging.fit_ratio = lambda jpeg, *a, **k: jpeg
+    genmod._read_cast_notes = fake_read_cast_notes
     _ledger_mod.charge = fake_charge
     _settings.FAL_KEY = "dummy-fal-key"
 
@@ -10192,28 +10210,27 @@ def check_vnew_take() -> None:
             imgs = body.get("image_urls") or []
             if len(imgs) > 10:
                 bad.append(f"(tk-c) image_urls 가 10 을 넘습니다: {len(imgs)}")
-            # 순서: 인물(정면·후면) → 패널 → 장소. 바이트로 복원.
+            # 순서: 인물 정면 1장만(후면 제외) → 패널 → 장소. 바이트로 복원.
             def _b(uri):
                 try:
                     return _b64.b64decode(str(uri).split(",", 1)[1])
                 except Exception:  # noqa: BLE001
                     return b""
             decoded = [_b(u) for u in imgs]
-            # 처음 4장은 두 인물의 정면·후면(순서는 등장도에 따르되, 각 인물 정면→후면).
-            person_imgs = {b"WF1", b"WB1", b"WF2", b"WB2"}
-            if set(decoded[:4]) != person_imgs:
-                bad.append(f"(tk-c) image_urls 앞 4장이 인물 정면·후면 집합이 아닙니다: {decoded[:4]}")
-            # 각 인물 정면이 그 인물 후면보다 앞.
-            for front, back in ((b"WF1", b"WB1"), (b"WF2", b"WB2")):
-                if front in decoded and back in decoded and decoded.index(front) > decoded.index(back):
-                    bad.append(f"(tk-c) 인물 정면이 후면보다 뒤입니다: {front}")
+            # 처음 2장은 두 인물의 정면(후면 없음 — 065: 다른 의상 증거를 줄인다).
+            person_fronts = {b"WF1", b"WF2"}
+            if set(decoded[:2]) != person_fronts:
+                bad.append(f"(tk-c) image_urls 앞 2장이 인물 정면(WF1·WF2)이 아닙니다: {decoded[:2]}")
+            # 후면(WB1·WB2)은 들어가면 안 된다.
+            if b"WB1" in decoded or b"WB2" in decoded:
+                bad.append(f"(tk-c) 인물 후면이 참조에 들어갔습니다(들어가면 안 됨): {decoded}")
             # 이어 패널(PANEL1,PANEL2), 장소(LOC-BACK).
             if b"PANEL1" not in decoded or b"PANEL2" not in decoded:
                 bad.append("(tk-c) image_urls 에 원작 패널이 없습니다")
             if b"LOC-BACK" not in decoded:
                 bad.append("(tk-c) image_urls 에 장소 시트(back)가 없습니다")
-            # 패널·장소가 인물(앞 4장) 뒤, 장소는 패널 뒤.
-            if decoded.index(b"PANEL1") < 4 or decoded.index(b"LOC-BACK") < decoded.index(b"PANEL1"):
+            # 패널·장소가 인물(앞 2장) 뒤, 장소는 패널 뒤.
+            if decoded.index(b"PANEL1") < 2 or decoded.index(b"LOC-BACK") < decoded.index(b"PANEL1"):
                 bad.append(f"(tk-c) image_urls 순서가 인물→패널→장소가 아닙니다: {decoded}")
             # 필드 값.
             if body.get("task") != "reference":
@@ -10224,8 +10241,9 @@ def check_vnew_take() -> None:
                 bad.append(f"(tk-c) resolution 이 480p 가 아닙니다: {body.get('resolution')}")
             if not isinstance(body.get("duration"), str):
                 bad.append(f"(tk-c) duration 이 문자열이 아닙니다: {body.get('duration')!r}")
-            if body.get("generate_audio") is not False:
-                bad.append(f"(tk-c) generate_audio 가 false 가 아닙니다: {body.get('generate_audio')}")
+            # 065: generate_audio 기본 true(효과음·립싱크).
+            if body.get("generate_audio") is not True:
+                bad.append(f"(tk-c) generate_audio 가 true 가 아닙니다: {body.get('generate_audio')}")
             if "seed" in body:
                 bad.append("(tk-c) seed 를 보냈습니다(보내면 안 됨)")
             if body.get("aspect_ratio") != "16:9":
@@ -10308,6 +10326,7 @@ def check_vnew_take() -> None:
         _ledger_mod.charge = orig["charge"]
         genmod.threading.Thread = orig["Thread"]
         _settings.FAL_KEY = orig["fal_key"]
+        genmod._read_cast_notes = orig["read_cast_notes"]
 
     if bad:
         fail("통 테이크(Seedance 2.5) 검사 실패\n" + "\n".join(f"  {item}" for item in bad))
@@ -10457,6 +10476,366 @@ def check_vnew_take_prompt() -> None:
         )
 
 
+# ---------------------------------------------------------------- 13e. 통 테이크 의상·소리·시선(065)
+
+
+def check_vnew_take_costume() -> None:
+    """통 테이크 — 장면 의상(원작 패널 읽기·캐시)·소리(generate_audio)·시선(eyelines) (설계자 2026-10-26, 065).
+
+    외부 호출(Claude·fal·concat·원장) 전부 가짜. 유료 호출 없음.
+
+    (ca-a) castNotes 캐시: 같은 패널이면 _read_cast_notes 재호출 0회, 원장(charge_text) 1회.
+    (ca-b) override 가 자동값보다 우선, 프롬프트에 "COSTUME in this scene" + override 문구,
+           외형 요약에 "shirt"/"wears" 없음.
+    (ca-c) 참조: 인물당 정면 1장, 후면 없음, 패널 ≤4, 번호 일치, ≤2,500 바이트, 6컷 타임스탬프 유지.
+    (ca-d) generate_audio true 기본, RULES 에 "lip sync" 포함.
+    (ca-e) 테이크 1개 → final 은 복사(재인코딩 _concat 호출 0), 여러 개 → concat.
+    (ca-f) eyelines 있는 grammar → TIMELINE 에 그대로; 옛 캐시 → 규칙 보완(화자→상대);
+           6컷 모두 gaze 존재, ≤2,500 바이트.
+    """
+    sys.path.insert(0, str(ROOT / "app"))
+    bad: list[str] = []
+
+    from src.vnew import generate as genmod  # noqa: PLC0415
+    from src.vnew import plan as planmod  # noqa: PLC0415
+    from src.vnew import previz_grammar as pgmod  # noqa: PLC0415
+    from src.vnew import settings as vnew_settings  # noqa: PLC0415
+    from src.vpoc import ledger as _ledger_mod  # noqa: PLC0415
+
+    fake_store = _FakeCharStore()
+
+    # 원작 패널·인물 참조는 바이트로 구별. 비율 맞춤은 그대로(식별 보존).
+    fake_blobs = {"wf-ch1": b"WF1", "wb-ch1": b"WB1", "wf-ch2": b"WF2", "wb-ch2": b"WB2", "loc-wb-back": b"LOC-BACK"}
+
+    cast_notes_calls = {"n": 0}
+
+    def fake_read_cast_notes(blocks, *, model):
+        cast_notes_calls["n"] += 1
+        return (
+            {"people": [
+                {"name": "에이", "costumeEn": "black dress shirt, sleeves rolled; charcoal slacks",
+                 "voiceEn": "low, calm adult male voice"},
+                {"name": "비", "costumeEn": "navy training top", "voiceEn": "soft young female voice"},
+            ]},
+            {"model": model, "inputTokens": 5, "outputTokens": 10},
+        )
+
+    textcharge_calls = {"n": 0}
+
+    def fake_charge_text(key, **kwargs):
+        textcharge_calls["n"] += 1
+        return {"spentUsd": 0.0, "capUsd": None}
+
+    def fake_load_char(owner, char_id):
+        # 긴 외형(hair·wears 포함) — 요약이 옷 문장을 버리는지 본다.
+        appearance = (
+            "A middle-aged man with short black hair combed to one side and narrow watchful eyes. "
+            "He wears an ivory button-up shirt and dark slacks."
+        )
+        return (
+            {"id": char_id, "name": ("에이" if char_id.endswith("1") else "비"), "status": "ready",
+             "analysis": {"appearanceEn": appearance, "outfitEn": "ivory button-up shirt", "styleEn": "thin ink lines"},
+             "variants": {"webtoon": {"frontKey": "wf-" + char_id, "backKey": "wb-" + char_id}}},
+            "etag",
+        )
+
+    concat_calls = {"n": 0}
+
+    def fake_concat(clips):
+        concat_calls["n"] += 1
+        return b"CONCATTED"
+
+    def fake_fetch_bytes(key, *, bucket=""):
+        return fake_store.blobs.get(key, b"CLIP-" + str(key).encode("ascii", "ignore"))
+
+    orig = {
+        "gen_STORE": genmod.STORE,
+        "plan_STORE": planmod.STORE,
+        "ledger_STORE": _ledger_mod.STORE,
+        "read_cast_notes": genmod._read_cast_notes,
+        "charge_text": _ledger_mod.charge_text,
+        "load_char": genmod.characters.load_char,
+        "_load_jpeg": genmod._load_jpeg,
+        "_segment_panel_jpegs": genmod._segment_panel_jpegs,
+        "fit_ratio": genmod.imaging.fit_ratio,
+        "_concat": genmod._concat,
+        "_fetch_bytes": genmod._fetch_bytes,
+        "has_audio": genmod._has_audio_stream,
+        "first_style": genmod._first_take_style_en,
+    }
+    genmod.STORE = fake_store
+    planmod.STORE = fake_store
+    _ledger_mod.STORE = fake_store
+    genmod._read_cast_notes = fake_read_cast_notes
+    _ledger_mod.charge_text = fake_charge_text
+    genmod.characters.load_char = fake_load_char
+    genmod._load_jpeg = lambda key: fake_blobs.get(str(key or ""))
+    genmod._segment_panel_jpegs = lambda owner, pid, plan, seg, limit: [b"PANEL1", b"PANEL2"][:limit]
+    genmod.imaging.fit_ratio = lambda jpeg, *a, **k: jpeg
+    genmod._concat = fake_concat
+    genmod._fetch_bytes = fake_fetch_bytes
+    genmod._has_audio_stream = lambda mp4: None  # ffmpeg 없이(진단 로그용) — 막지 않는다.
+    genmod._first_take_style_en = lambda plan: "thin ink lines, soft flat color"
+
+    def _plan_with_cuts(owner, pid, *, n_cuts=6, with_eyelines=False, save=True):
+        """통 테이크 1개(6컷)·인물 2명·녹화 1구간 계획을 fake_store 에 써 둔다."""
+        plan = planmod.new_plan()
+        plan["owner"] = owner
+        plan["input"]["videoModel"] = "fake"  # 모드는 아래에서 _take_units 로 직접 검증
+        plan["input"]["order"] = ["f1"]
+        plan["input"]["images"] = [{"fileId": "f1", "name": "1.png", "width": 600, "height": 900}]
+        plan["input"]["characters"] = [{"charId": "ch1", "roleName": "에이"}, {"charId": "ch2", "roleName": "비"}]
+        fake_store.blobs[planmod.upload_key(owner, pid, "f1")] = b"UP1"
+        cut_ids = ["c" + str(i + 1) for i in range(n_cuts)]
+        cuts = []
+        brief_cuts = {}
+        grammar = {}
+        for i, cid in enumerate(cut_ids):
+            cuts.append({
+                "id": cid, "no": i + 1, "seconds": 3, "panels": [i],
+                "dialogueKo": '에이: "자네 뭐 하나"' if i % 2 == 0 else '비: "죄송합니다"',
+            })
+            brief_cuts[cid] = {
+                "shotEn": "MCU, 50mm, eye level.", "actionEn": "Kim leans forward.",
+                "dialogue": [{"speaker": "에이", "lineKo": "자네 뭐 하나", "deliveryEn": "sharp"}],
+            }
+            g = {"mainSubject": "에이", "faceTurn": "screen_right",
+                 "others": [{"name": "비", "side": "right"}]}
+            if with_eyelines:
+                g["eyelines"] = [{"name": "에이", "target": "person:비"}, {"name": "비", "target": "down"}]
+            grammar[cid] = {"grammar": g}
+        segments = [{"id": "s1", "cutIds": cut_ids, "seconds": 3 * n_cuts}]
+        plan["conti"] = {"status": "ready", "cuts": cuts, "segments": segments,
+                         "setting": {"locationEn": "A closed principal's office"}}
+        plan["script"] = {"status": "ready", "entries": [{"id": "e1", "panels": [0], "locationEn": "A closed principal's office"}],
+                          "setting": {"locationEn": "A closed principal's office"}}
+        rec_key = "rec/" + pid + "/s1.mp4"
+        fake_store.blobs[rec_key] = b"REC"
+        scene_actors = [
+            {"id": "a1", "name": "에이", "color": "#4363d8", "charId": "ch1", "appearanceEn": "a man"},
+            {"id": "a2", "name": "비", "color": "#e6194b", "charId": "ch2", "appearanceEn": "a woman"},
+        ]
+        timeline = [{"cutId": c["id"], "actors": [{"id": "a1"}, {"id": "a2"}]} for c in cuts]
+        plan["locations"] = [{"id": "loc1", "nameEn": "A closed principal's office",
+                              "key": "a closed principal's office", "panels": [0], "status": "ready",
+                              "variants": {"webtoon": {"viewKeys": {"back": "loc-wb-back"}}}}]
+        plan["previz"] = {
+            "status": "ready", "revision": 0, "approved": True,
+            "scenes": [{"locationId": "loc1", "actors": scene_actors, "timeline": timeline}],
+            "recordings": {"s1": {"status": "ready", "key": rec_key, "seconds": float(3 * n_cuts)}},
+            "panelGrammar": grammar,
+            "shotBrief": {"status": "ready", "scene": {"loc1": "office"}, "cuts": brief_cuts, "updatedAt": "2026-10-26T00:00:00Z"},
+        }
+        if save:
+            planmod.save_plan(owner, pid, plan)
+        return plan
+
+    try:
+        TAKE_CAPS = {"videoListField": "video_urls", "imageListField": "image_urls", "imageListMax": 10,
+                     "taskField": "task", "draftField": "draft", "generateAudioField": "generate_audio",
+                     "durationAsString": True, "durations": [4, 8, 12, 30]}
+
+        # ---- (ca-a) castNotes 캐시: 같은 패널이면 재호출 0회, 원장 1회 ----
+        owner = "tester"
+        pid_a = "prj_ca_a"
+        _plan_with_cuts(owner, pid_a)
+        plan_a, _ = planmod.load_plan(owner, pid_a)
+        take_a = genmod._take_units(plan_a)[0]
+        cast_notes_calls["n"] = 0
+        textcharge_calls["n"] = 0
+        notes1 = genmod._scene_cast_notes(owner, pid_a, plan_a, take_a)
+        if cast_notes_calls["n"] != 1:
+            bad.append(f"(ca-a) 첫 읽기가 1회가 아닙니다: {cast_notes_calls['n']}")
+        if textcharge_calls["n"] != 1:
+            bad.append(f"(ca-a) 원장(charge_text) 계상이 1회가 아닙니다: {textcharge_calls['n']}")
+        if (notes1.get("에이") or {}).get("costumeEn") != "black dress shirt, sleeves rolled; charcoal slacks":
+            bad.append(f"(ca-a) 읽은 의상이 저장되지 않았습니다: {notes1}")
+        # 캐시가 채워진 계획을 다시 읽어 재호출 0회·원장 증가 없음.
+        plan_a2, _ = planmod.load_plan(owner, pid_a)
+        notes2 = genmod._scene_cast_notes(owner, pid_a, plan_a2, take_a)
+        if cast_notes_calls["n"] != 1:
+            bad.append(f"(ca-a) 같은 패널 재읽기가 재호출을 일으켰습니다: {cast_notes_calls['n']}")
+        if textcharge_calls["n"] != 1:
+            bad.append(f"(ca-a) 캐시 히트인데 원장이 늘었습니다: {textcharge_calls['n']}")
+        if notes2 != notes1:
+            bad.append("(ca-a) 캐시 값이 첫 읽기와 다릅니다")
+
+        # ---- (ca-b) override 우선 + 프롬프트 COSTUME + 외형 요약에 shirt/wears 없음 ----
+        pid_b = "prj_ca_b"
+        _plan_with_cuts(owner, pid_b)
+        plan_b, _ = planmod.load_plan(owner, pid_b)
+        # override: 에이 = 검은 와이셔츠(한국어). 자동값(black dress shirt...)보다 우선해야 한다.
+        def _set_override(data):
+            data.setdefault("input", {})["castOverrides"] = {"에이": {"costume": "검은 와이셔츠", "voice": "낮고 차분한 남성"}}
+        planmod.mutate_plan(owner, pid_b, _set_override)
+        plan_b, _ = planmod.load_plan(owner, pid_b)
+        take_b = genmod._take_units(plan_b)[0]
+        resolved = genmod._resolve_cast(owner, pid_b, plan_b, take_b, read=True)
+        if (resolved.get("에이") or {}).get("costume") != "검은 와이셔츠":
+            bad.append(f"(ca-b) override 가 자동값보다 우선하지 않습니다: {resolved.get('에이')}")
+        if (resolved.get("비") or {}).get("costume") != "navy training top":
+            bad.append(f"(ca-b) override 없는 인물이 자동값을 쓰지 않습니다: {resolved.get('비')}")
+        built_b = genmod._take_payload(owner, pid_b, plan_b, take_b, TAKE_CAPS)
+        prompt_b = built_b["prompt"]
+        if "COSTUME in this scene" not in prompt_b:
+            bad.append("(ca-b) 프롬프트에 'COSTUME in this scene' 문구가 없습니다")
+        if "검은 와이셔츠" not in prompt_b:
+            bad.append("(ca-b) 프롬프트에 override 의상 문구(검은 와이셔츠)가 없습니다")
+        # ASSETS 부분(외형 요약)에 'shirt'/'wears' 가 없어야 한다(COSTUME 절은 예외).
+        assets_part = prompt_b.split("ASSETS:", 1)[1].split("TIMELINE", 1)[0] if "ASSETS:" in prompt_b else ""
+        # COSTUME 절을 뺀 나머지(외형 요약)만 본다.
+        appearance_only = " ".join(
+            seg.split("COSTUME")[0] for seg in assets_part.split(". ")
+        )
+        if "shirt" in appearance_only.lower() or "wears" in appearance_only.lower():
+            bad.append(f"(ca-b) 외형 요약에 shirt/wears 가 남아 있습니다: {appearance_only[:200]}")
+        # _short_appearance 단위: 옷 문장 제거.
+        short = genmod._short_appearance(
+            "A man with short black hair and narrow eyes. He wears an ivory button-up shirt.", 170
+        )
+        if "shirt" in short.lower() or "wears" in short.lower():
+            bad.append(f"(ca-b) _short_appearance 가 옷 문장을 지우지 않았습니다: {short!r}")
+        if "hair" not in short.lower():
+            bad.append(f"(ca-b) _short_appearance 에 hair 가 없습니다: {short!r}")
+
+        # ---- (ca-c) 참조: 정면 1장·후면 없음·패널 ≤4·번호 일치·≤2500B·6컷 타임스탬프 ----
+        imgs_c = built_b["imageUrls"]
+        if b"WB1" in imgs_c or b"WB2" in imgs_c:
+            bad.append("(ca-c) 참조에 인물 후면이 들어갔습니다")
+        fronts = [x for x in imgs_c if x in (b"WF1", b"WF2")]
+        if len(fronts) != 2:
+            bad.append(f"(ca-c) 인물 정면이 2장(인물당 1장)이 아닙니다: {fronts}")
+        panels_c = [x for x in imgs_c if x in (b"PANEL1", b"PANEL2")]
+        if len(panels_c) > 4:
+            bad.append(f"(ca-c) 패널이 4장을 넘습니다: {len(panels_c)}")
+        # 번호 일치: 앞 2장이 정면이므로 @Image1 (front)·@Image2 (front).
+        if "@Image1 (front)" not in prompt_b or "@Image2 (front)" not in prompt_b:
+            bad.append("(ca-c) ASSETS 의 @Image 정면 번호가 image_urls 순서와 맞지 않습니다")
+        if len(prompt_b.encode("utf-8")) > 2500:
+            bad.append(f"(ca-c) 프롬프트가 2500바이트를 넘습니다: {len(prompt_b.encode('utf-8'))}")
+        entries_b = genmod._take_timeline_entries(plan_b, take_b)
+        stamps_b = [f"{e['start']}-{e['end']}s" for e in entries_b]
+        if len(stamps_b) != 6:
+            bad.append(f"(ca-c) 타임라인 항목이 6개가 아닙니다: {len(stamps_b)}")
+        miss_b = [s for s in stamps_b if s not in prompt_b]
+        if miss_b:
+            bad.append(f"(ca-c) 프롬프트에 빠진 컷 타임스탬프: {miss_b}")
+
+        # ---- (ca-d) generate_audio true 기본 + RULES 에 lip sync ----
+        if vnew_settings.VNEW_TAKE_AUDIO is not True:
+            bad.append(f"(ca-d) VNEW_TAKE_AUDIO 기본이 true 가 아닙니다: {vnew_settings.VNEW_TAKE_AUDIO}")
+        rules_part = prompt_b.split("RULES:", 1)[1] if "RULES:" in prompt_b else ""
+        if "lip sync" not in rules_part.lower():
+            bad.append(f"(ca-d) RULES 에 'lip sync' 가 없습니다: {rules_part[:160]}")
+        if "no background music" not in rules_part.lower():
+            bad.append("(ca-d) RULES 에 'no background music' 가 없습니다")
+
+        # ---- (ca-e) 테이크 1개 → final 복사(_concat 0회), 여러 개 → concat ----
+        # 1개: _do_concat 을 직접 불러 concat 호출 0회를 본다. gen 을 직접 심는다.
+        pid_e = "prj_ca_e"
+        _plan_with_cuts(owner, pid_e)
+        def _seed_gen_one(data):
+            data["gen"] = {
+                "genId": "g1", "mode": "previz-take", "status": "running",
+                "videoModel": "fake", "resolution": "480p",
+                "units": [{"id": "take1", "cutIds": ["c1"], "recKeys": ["rec/" + pid_e + "/s1.mp4"],
+                           "recSegIds": ["s1"], "seconds": 18.0,
+                           "real": {"status": "skipped"},
+                           "webtoon": {"status": "completed", "outputKey": "out/take1.mp4"}}],
+                "segments": [], "finalReal": {"status": "skipped"}, "finalWebtoon": {"status": "waiting"},
+            }
+        planmod.mutate_plan(owner, pid_e, _seed_gen_one)
+        concat_calls["n"] = 0
+        genmod._do_concat(owner, pid_e, "g1", "webtoon")
+        if concat_calls["n"] != 0:
+            bad.append(f"(ca-e) 테이크 1개인데 _concat 이 불렸습니다(복사여야 함): {concat_calls['n']}")
+        plan_e, _ = planmod.load_plan(owner, pid_e)
+        if (plan_e.get("gen") or {}).get("finalWebtoon", {}).get("status") != "done":
+            bad.append(f"(ca-e) 1개 테이크 final 이 done 이 아닙니다: {(plan_e.get('gen') or {}).get('finalWebtoon')}")
+        # 여러 개: 2 테이크 completed → concat 1회.
+        pid_e2 = "prj_ca_e2"
+        _plan_with_cuts(owner, pid_e2)
+        def _seed_gen_two(data):
+            data["gen"] = {
+                "genId": "g2", "mode": "previz-take", "status": "running",
+                "videoModel": "fake", "resolution": "480p",
+                "units": [
+                    {"id": "take1", "cutIds": ["c1"], "recKeys": ["r1"], "recSegIds": ["s1"], "seconds": 30.0,
+                     "real": {"status": "skipped"}, "webtoon": {"status": "completed", "outputKey": "out/t1.mp4"}},
+                    {"id": "take2", "cutIds": ["c2"], "recKeys": ["r2"], "recSegIds": ["s2"], "seconds": 10.0,
+                     "real": {"status": "skipped"}, "webtoon": {"status": "completed", "outputKey": "out/t2.mp4"}},
+                ],
+                "segments": [], "finalReal": {"status": "skipped"}, "finalWebtoon": {"status": "waiting"},
+            }
+        planmod.mutate_plan(owner, pid_e2, _seed_gen_two)
+        concat_calls["n"] = 0
+        genmod._do_concat(owner, pid_e2, "g2", "webtoon")
+        if concat_calls["n"] != 1:
+            bad.append(f"(ca-e) 테이크 여러 개인데 concat 이 1회가 아닙니다: {concat_calls['n']}")
+
+        # ---- (ca-f) eyelines → TIMELINE 그대로; 옛 캐시 → 화자→상대; 6컷 gaze·≤2500B ----
+        # eyelines 있는 grammar.
+        pid_f = "prj_ca_f"
+        _plan_with_cuts(owner, pid_f, with_eyelines=True)
+        plan_f, _ = planmod.load_plan(owner, pid_f)
+        take_f = genmod._take_units(plan_f)[0]
+        eyelines_f = genmod._cut_eyelines(plan_f, (plan_f["conti"]["cuts"][0]))
+        targets_f = {e["name"]: e["target"] for e in eyelines_f}
+        if targets_f.get("에이") != "person:비" or targets_f.get("비") != "down":
+            bad.append(f"(ca-f) grammar.eyelines 가 그대로 쓰이지 않았습니다: {targets_f}")
+        built_f = genmod._take_payload(owner, pid_f, plan_f, take_f, TAKE_CAPS)
+        prompt_f = built_f["prompt"]
+        if "gaze:" not in prompt_f:
+            bad.append("(ca-f) 프롬프트 TIMELINE 에 gaze 가 없습니다")
+        # 6컷 모두 gaze 존재(각 컷 항목에 'gaze:' 포함).
+        entries_f = genmod._take_timeline_entries(plan_f, take_f)
+        if len([e for e in entries_f if (e.get("gaze") or "")]) != 6:
+            bad.append(f"(ca-f) 6컷 중 gaze 가 비는 컷이 있습니다: {[bool(e.get('gaze')) for e in entries_f]}")
+        if len(prompt_f.encode("utf-8")) > 2500:
+            bad.append(f"(ca-f) eyelines 프롬프트가 2500바이트를 넘습니다: {len(prompt_f.encode('utf-8'))}")
+        # 옛 캐시(eyelines 없음): 화자(에이)가 상대(비)를 본다 — c1 은 에이 대사.
+        pid_f2 = "prj_ca_f2"
+        _plan_with_cuts(owner, pid_f2, with_eyelines=False)
+        plan_f2, _ = planmod.load_plan(owner, pid_f2)
+        eyelines_old = genmod._cut_eyelines(plan_f2, plan_f2["conti"]["cuts"][0])
+        targets_old = {e["name"]: e["target"] for e in eyelines_old}
+        # c1 화자 = 에이 → 에이는 비(듣는 사람)를 본다.
+        if targets_old.get("에이") != "person:비":
+            bad.append(f"(ca-f) 옛 캐시 보완: 화자(에이)가 상대(비)를 보지 않습니다: {targets_old}")
+        gaze_old = genmod._gaze_text(eyelines_old)
+        if "gaze:" not in gaze_old or "비" not in gaze_old:
+            bad.append(f"(ca-f) 옛 캐시 gaze 문구가 비었습니다: {gaze_old!r}")
+
+    except Exception as exc:  # noqa: BLE001
+        import traceback as _tb  # noqa: PLC0415
+
+        bad.append("통 테이크 의상·소리·시선 검사 중 예외: " + repr(exc) + "\n" + _tb.format_exc()[:1500])
+    finally:
+        genmod.STORE = orig["gen_STORE"]
+        planmod.STORE = orig["plan_STORE"]
+        _ledger_mod.STORE = orig["ledger_STORE"]
+        genmod._read_cast_notes = orig["read_cast_notes"]
+        _ledger_mod.charge_text = orig["charge_text"]
+        genmod.characters.load_char = orig["load_char"]
+        genmod._load_jpeg = orig["_load_jpeg"]
+        genmod._segment_panel_jpegs = orig["_segment_panel_jpegs"]
+        genmod.imaging.fit_ratio = orig["fit_ratio"]
+        genmod._concat = orig["_concat"]
+        genmod._fetch_bytes = orig["_fetch_bytes"]
+        genmod._has_audio_stream = orig["has_audio"]
+        genmod._first_take_style_en = orig["first_style"]
+
+    if bad:
+        fail("통 테이크 의상·소리·시선(065) 검사 실패\n" + "\n".join(f"  {item}" for item in bad))
+    else:
+        ok(
+            "통 테이크 의상·소리·시선(065) 검사 (ca-a)castNotes 캐시·원장 1회 "
+            "(ca-b)override 우선·COSTUME 문구·외형 shirt/wears 없음 (ca-c)정면 1장·후면 없음·패널≤4·번호·≤2500B·6컷 "
+            "(ca-d)generate_audio true·RULES lip sync (ca-e)1개 복사·여러개 concat "
+            "(ca-f)eyelines→TIMELINE·옛 캐시 화자→상대·6컷 gaze·≤2500B"
+        )
+
+
 # ---------------------------------------------------------------- main
 
 
@@ -10490,6 +10869,7 @@ def main() -> int:
     check_vnew_reference_video()
     check_vnew_take()
     check_vnew_take_prompt()
+    check_vnew_take_costume()
     print()
     if warnings:
         print(f"경고 {len(warnings)}건")

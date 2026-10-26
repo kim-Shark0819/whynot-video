@@ -47,6 +47,9 @@ MAX_IMAGES = 40
 MAX_SCRIPT_TILES = 40
 # 콘티 최소 컷 수.
 MIN_CUTS = 5
+# 장면 의상·목소리 사용자 수정(castOverrides) 글자 상한(설계자 2026-10-26, 064).
+MAX_CAST_COSTUME_LEN = 200
+MAX_CAST_VOICE_LEN = 80
 # running task 가 이 시간을 넘게 그대로면 멈춘 것으로 본다(파드 재시작 대비, 30분).
 TASK_STALL_S = 1800
 
@@ -127,6 +130,9 @@ def new_plan() -> dict:
             "videoModel": default_previz_model(),
             "notes": "",
             "characters": [],  # [{charId, roleName}]
+            # 장면 의상·목소리 사용자 수정(설계자 2026-10-26, 064). name → {costume?, voice?}.
+            # 있으면 원작 패널 자동 읽기(previz.castNotes)보다 우선한다.
+            "castOverrides": {},
         },
         "script": {
             "status": "none",  # none|running|ready|failed
@@ -481,6 +487,31 @@ def update_input(owner: str, pid: str, patch: dict) -> dict:
                     continue
                 chars.append({"charId": char_id, "roleName": role})
             inp["characters"] = chars
+
+        if "castOverrides" in patch:
+            raw = patch.get("castOverrides") or {}
+            if not isinstance(raw, dict):
+                raise VpocError(
+                    "vnew.plan.input",
+                    "BadCastOverrides",
+                    "장면 의상·목소리 수정 값이 올바르지 않습니다.",
+                    400,
+                )
+            overrides: dict = {}
+            for name, item in raw.items():
+                name_key = str(name or "").strip()
+                if not name_key or not isinstance(item, dict):
+                    continue
+                entry: dict = {}
+                costume = str(item.get("costume") or "").strip()
+                voice = str(item.get("voice") or "").strip()
+                if costume:
+                    entry["costume"] = costume[:MAX_CAST_COSTUME_LEN]
+                if voice:
+                    entry["voice"] = voice[:MAX_CAST_VOICE_LEN]
+                if entry:
+                    overrides[name_key] = entry
+            inp["castOverrides"] = overrides
 
     updated, _ = mutate_plan(owner, pid, mutator)
     return updated
@@ -1433,6 +1464,10 @@ def plan_view(owner: str, pid: str, plan: dict) -> dict:
             "videoModel": inp.get("videoModel"),
             "notes": inp.get("notes") or "",
             "characters": characters_out,
+            # 장면 의상·목소리(설계자 2026-10-26, 064). castOverrides = 사용자 수정,
+            # sceneCast = 원작 패널 자동 읽기 + override 를 인물별로 합친 화면용 표.
+            "castOverrides": inp.get("castOverrides") or {},
+            "sceneCast": _scene_cast_view(owner, pid, plan),
         },
         "models": previz_models(),
         "script": plan.get("script") or {},
@@ -1449,6 +1484,21 @@ def _gen_view(owner: str, pid: str, plan: dict) -> dict | None:
     from . import generate  # noqa: PLC0415
 
     return generate.gen_view(owner, pid, plan)
+
+
+def _scene_cast_view(owner: str, pid: str, plan: dict) -> list[dict]:
+    """장면 의상·목소리 표(설계자 2026-10-26, 064). 인물별 자동 읽기(costumeEn·voiceEn) + override.
+
+    자동 읽기는 previz.castNotes 에 캐시돼 있을 때만(미리 [의상 읽기] 또는 생성 때 채워진다). 없으면
+    자동값은 빈 문자열(화면은 참고 안내만 보인다). 화면은 override 가 있으면 그 값을 입력칸에 채운다.
+    """
+    from . import generate  # noqa: PLC0415
+
+    try:
+        return generate.scene_cast_view(owner, pid, plan)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("vnew.plan.scene_cast_view_failed pid=%s err=%s", pid, str(exc)[:200])
+        return []
 
 
 def _locations_view(owner: str, pid: str, plan: dict) -> list[dict]:

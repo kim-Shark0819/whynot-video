@@ -38,6 +38,9 @@ SYSTEM = (
     "- offscreenPartnerSide: if the subject is talking to / looking at someone not in frame, on which side that person must be: left | right | front_of_camera | none.\n"
     "- actions: what each visible person is physically DOING with hands/head/body (acting beats). For each, give {name (the person), actionEn (one sentence on the hand/head/body action), gesture (ONE of: none | point | bow | hands_on_knees | cover_face | hand_to_own_face | wipe_tears | hand_on_other_cheek | both_hands_other_cheeks | hand_on_chest | press_hand_to_other_chest | lean_in | laugh | look_down | look_up | nod | turn_head_to_other), target (the other person the action is directed at, or none)}. Pick the gesture that best matches the drawn action; use none if the person just stands/sits still.\n"
     "- expressionEn: the MAIN subject's facial expression in one short phrase (e.g. 'teary-eyed, trembling lips').\n"
+    "- eyelines: for every visible person, state where their pupils point: target is one of "
+    "'person:<name>' (looking at that person's face) | 'camera' | 'down' | 'up' | 'offscreen_left' | "
+    "'offscreen_right' | 'closed' (eyes shut). One entry per visible person.\n"
     "Identify people by name using the cut description given. Ignore speech bubbles and sound effects. Be precise; do not guess beyond what is drawn."
 )
 
@@ -83,6 +86,16 @@ TOOL = {
                     },
                 },
                 "expressionEn": {"type": "string"},
+                "eyelines": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "name": {"type": "string"},
+                            "target": {"type": "string"},
+                        },
+                    },
+                },
                 "reasonKo": {"type": "string"},
             },
             "required": ["mainSubject", "frameBottomCut", "shotType", "vantage"],
@@ -115,6 +128,9 @@ CAMERA_HEIGHTS = ("low", "eye", "high", "overhead")
 OTHER_HOWS = ("full", "partial_edge", "shoulder_or_back", "hands_only", "lips_or_face_part")
 OTHER_SIDES = ("left", "right", "center", "bottom")
 PARTNER_SIDES = ("left", "right", "front_of_camera", "none")
+
+# eyelines[].target 고정 열거값(person:<name> 은 접두사로 따로 처리). 설계자 2026-10-26, 065-E.
+EYELINE_FIXED_TARGETS = ("camera", "down", "up", "offscreen_left", "offscreen_right", "closed")
 
 # actions[].gesture 열거값 = previz_schema.GESTURES + "none". 모르는 값은 "none".
 from .previz_schema import GESTURES as _SCHEMA_GESTURES  # noqa: E402
@@ -163,6 +179,24 @@ def _num(value, default):
 
 def _clamp(value, low, high):
     return max(low, min(high, value))
+
+
+def _norm_eyeline_target(value) -> str:
+    """eyelines[].target 정리(설계자 2026-10-26, 065-E).
+
+    'person:<name>' 는 이름이 있으면 그대로(공백 정리). 고정 열거값(camera/down/up/offscreen_*/closed)은
+    그대로. 그 밖은 "" (판정 불가 — 보완 규칙이 채운다).
+    """
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    low = text.lower()
+    if low.startswith("person:"):
+        name = text.split(":", 1)[1].strip()
+        return ("person:" + name) if name else ""
+    if low in EYELINE_FIXED_TARGETS:
+        return low
+    return ""
 
 
 # ================================================================ 캐시 해시
@@ -229,6 +263,18 @@ def normalize_grammar(payload: dict) -> dict:
             "target": str(item.get("target") or "none").strip() or "none",
         })
 
+    # eyelines: 보이는 인물의 눈동자 방향(설계자 2026-10-26, 065-E). name 이 비거나 target 이
+    # 판정 불가면 버린다(보완 규칙 _cut_eyelines 가 채운다).
+    eyelines = []
+    for item in payload.get("eyelines") or []:
+        if not isinstance(item, dict):
+            continue
+        name = str(item.get("name") or "").strip()
+        target = _norm_eyeline_target(item.get("target"))
+        if not name or not target:
+            continue
+        eyelines.append({"name": name, "target": target})
+
     return {
         "mainSubject": str(payload.get("mainSubject") or "").strip(),
         "frameBottomCut": bottom_cut,
@@ -243,6 +289,7 @@ def normalize_grammar(payload: dict) -> dict:
         "offscreenPartnerSide": _enum(payload.get("offscreenPartnerSide"), PARTNER_SIDES, "none"),
         "actions": actions,
         "expressionEn": str(payload.get("expressionEn") or "").strip(),
+        "eyelines": eyelines,
         "reasonKo": str(payload.get("reasonKo") or "").strip(),
     }
 
