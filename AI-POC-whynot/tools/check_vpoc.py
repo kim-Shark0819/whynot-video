@@ -11144,12 +11144,13 @@ def check_vnew_take_prompt_budget() -> None:
                 break
         # 대사는 한국어 유지(립싱크).
         if ko_a := (entries_a[0].get("dialogue") or ""):
-            if ko_a not in prompt_a:
+            if ko_a[:15] not in prompt_a:  # 068: 예산 부족 시 대사는 25자까지 줄일 수 있다(앞부분은 유지)
                 bad.append("(pb-a) 한국어 대사가 프롬프트에서 빠졌습니다")
 
         # ---- (pb-b) 기본 시선 컷 gaze 없음·예외 컷만 gaze·RULES Eyes ----
-        if "Eyes: in every cut the speaker looks at the listener's eyes" not in prompt_a:
-            bad.append("(pb-b) RULES 에 기본 시선 규칙(Eyes:)이 없습니다")
+        # 067: RULES 시선 규칙을 ON SCREEN/off-screen 기준으로 바꿨다(이유: 컷별 화면 등장 인물 명시).
+        if "Eyes: the on-screen speaker looks at the listener" not in prompt_a:
+            bad.append("(pb-b) RULES 에 ON SCREEN 기반 시선 규칙(Eyes:)이 없습니다")
         # 기본(default) 플랜: 어느 컷에도 gaze 가 없어야 한다.
         if "gaze:" in prompt_a:
             bad.append(f"(pb-b) 기본 시선인데 TIMELINE 에 gaze 가 있습니다: {tl_a[:200]}")
@@ -11212,6 +11213,241 @@ def check_vnew_take_prompt_budget() -> None:
         )
 
 
+# ---------------------------------------------------------------- 13h. 통 테이크 ON SCREEN·연기 보존·gen 상태(067)
+
+
+def check_vnew_take_on_screen() -> None:
+    """통 테이크 — 컷별 ON SCREEN + 연기 핵심 동사구 보존 + gen 상태 done(설계자 2026-10-26, 067).
+
+    외부 호출은 (os-d)만 가짜 저장소를 쓴다(유료 호출 없음). (os-a)~(os-c)는 _take_prompt·
+    _take_timeline_entries·_action_core 를 직접 부른다.
+
+    (os-a) test2 형태(컷1: 화면 범건우 단독·화자 여의준 화면 밖) → 컷1 항목에 "ON SCREEN: Beomgeonu only"
+           와 "Yeouijun (off-screen voice)".
+    (os-b) 키스 컷 actionEn "Geonu leans the final short distance and places his lips against Uijun's." →
+           프롬프트에 "places his lips" 포함, " and." / " as." 로 끝나는 연기 없음.
+    (os-c) test2 실제 길이(의상·목소리·한국어 대사 6컷) → ≤2,500 바이트, 6컷 모두 ON SCREEN·연기 핵심
+           동사 존재, ASSETS 두 인물 COSTUME 유지.
+    (os-d) 실사 skipped+웹툰 completed → gen done.
+    """
+    sys.path.insert(0, str(ROOT / "app"))
+    bad: list[str] = []
+
+    from src.vnew import generate as genmod  # noqa: PLC0415
+    from src.vnew import plan as planmod  # noqa: PLC0415
+
+    orig_style = genmod._first_take_style_en
+    genmod._first_take_style_en = lambda plan: "thin ink lines, soft flat color"
+
+    name_a, name_b = "범건우", "여의준"  # Beomgeonu, Yeouijun
+
+    def _plan(cuts_spec):
+        """cuts_spec: [{dialogueSpeaker, dialogueKo, actionEn, onScreen:[names], shotSize, shotType, vantage}].
+
+        onScreen 이 1명이면 grammar.mainSubject=그 사람·others=[], 2명이면 mainSubject=첫 사람·others=둘째.
+        장면 배우(timeline.actors)에는 두 인물을 모두 넣어, onScreen 밖 인물은 '숨긴 사람'이 된다.
+        """
+        cut_ids = [f"c{i + 1}" for i in range(len(cuts_spec))]
+        cuts = []
+        brief_cuts = {}
+        grammar = {}
+        for i, (cid, spec) in enumerate(zip(cut_ids, cuts_spec)):
+            cuts.append({
+                "id": cid, "no": i + 1, "seconds": 3, "panels": [i],
+                "dialogueKo": f'{spec["dialogueSpeaker"]}: "{spec["dialogueKo"]}"',
+            })
+            brief_cuts[cid] = {
+                "shotEn": "MCU, 50 mm lens, approximately 2.1 m, three-quarter angle.",
+                "actionEn": spec["actionEn"],
+                "dialogue": [{"speaker": spec["dialogueSpeaker"], "lineKo": spec["dialogueKo"], "deliveryEn": "soft"}],
+            }
+            on = spec["onScreen"]
+            g = {"mainSubject": on[0], "shotSize": spec.get("shotSize", "MCU"),
+                 "shotType": spec.get("shotType", "profile_two_shot"), "vantage": spec.get("vantage", "side"),
+                 "others": [{"name": n, "how": "full", "side": "right"} for n in on[1:]]}
+            grammar[cid] = {"grammar": g}
+        scene_actors = [
+            {"id": "a1", "name": name_a, "color": "#4363d8", "charId": "ch1", "appearanceEn": "a man"},
+            {"id": "a2", "name": name_b, "color": "#e6194b", "charId": "ch2", "appearanceEn": "a man"},
+        ]
+        # timeline actors: 두 인물을 다 넣는다(숨김 판정은 grammar 가 한다).
+        timeline = [{"cutId": c["id"], "actors": [{"id": "a1"}, {"id": "a2"}]} for c in cuts]
+        plan = {
+            "conti": {"status": "ready", "cuts": cuts,
+                      "segments": [{"id": "s1", "cutIds": cut_ids, "seconds": 3 * len(cuts)}]},
+            "script": {"status": "ready", "entries": []},
+            "previz": {
+                "status": "ready",
+                "scenes": [{"locationId": "loc1", "actors": scene_actors, "timeline": timeline}],
+                "panelGrammar": grammar,
+                "shotBrief": {"status": "ready", "cuts": brief_cuts},
+            },
+        }
+        take = {"id": "take1", "cutIds": cut_ids, "seconds": 3 * len(cuts)}
+        return plan, take
+
+    cast = [
+        {"name": name_a, "colorName": "blue", "frontNo": 1,
+         "appearance": "short black hair, sharp jaw, narrow eyes",
+         "costume": "black dress shirt, sleeves rolled up; charcoal slacks", "voice": "low calm adult male voice"},
+        {"name": name_b, "colorName": "red", "frontNo": 2,
+         "appearance": "wavy brown hair, soft features",
+         "costume": "grey hoodie and dark jeans", "voice": "soft young male voice"},
+    ]
+
+    try:
+        # ---- (os-a) 컷1: 화면 범건우 단독·화자 여의준 화면 밖 ----
+        spec_a = [
+            {"dialogueSpeaker": name_b, "dialogueKo": "죄송해요", "onScreen": [name_a],
+             "actionEn": "Beomgeonu turns his head toward the door, his shoulder filling the frame."},
+            {"dialogueSpeaker": name_a, "dialogueKo": "괜찮아", "onScreen": [name_a, name_b],
+             "actionEn": "Beomgeonu steps closer and rests a hand on the desk."},
+        ]
+        plan_a, take_a = _plan(spec_a)
+        entries_a = genmod._take_timeline_entries(plan_a, take_a)
+        # 컷1 onScreen = 범건우 단독, offScreenSpeaker = 여의준.
+        e1 = entries_a[0]
+        on1 = [i.get("name") for i in (e1.get("onScreen") or [])]
+        if on1 != [name_a]:
+            bad.append(f"(os-a) 컷1 onScreen 이 범건우 단독이 아닙니다: {on1}")
+        if (e1.get("offScreenSpeaker") or "") != name_b:
+            bad.append(f"(os-a) 컷1 offScreenSpeaker 가 여의준이 아닙니다: {e1.get('offScreenSpeaker')!r}")
+        prompt_a = genmod._take_prompt(plan_a, take_a, cast=cast, panel_nos=[3, 4], location_no=5)
+        if "ON SCREEN: Beomgeonu only" not in prompt_a:
+            bad.append(f"(os-a) 프롬프트에 'ON SCREEN: Beomgeonu only' 가 없습니다: {prompt_a[:400]}")
+        if "Yeouijun (off-screen voice)" not in prompt_a:
+            bad.append(f"(os-a) 프롬프트에 'Yeouijun (off-screen voice)' 가 없습니다")
+        # 컷2는 둘 다 화면 → off-screen 표기 없어야(컷2 대사 화자 범건우는 화면 안).
+        e2 = entries_a[1]
+        if e2.get("offScreenSpeaker"):
+            bad.append(f"(os-a) 컷2 는 화자가 화면 안인데 offScreenSpeaker 가 있습니다: {e2.get('offScreenSpeaker')}")
+        if "ON SCREEN: Beomgeonu, Yeouijun" not in prompt_a:
+            bad.append(f"(os-a) 컷2 'ON SCREEN: Beomgeonu, Yeouijun' 가 없습니다")
+        # RULES 시선 규칙(ON SCREEN 기반).
+        if "an off-screen voice never appears on screen" not in prompt_a:
+            bad.append("(os-a) RULES 에 off-screen voice 규칙이 없습니다")
+
+        # ---- (os-b) 키스 컷: 핵심 동사구 보존, "and."/"as." 끝 없음 ----
+        kiss_action = "Geonu leans the final short distance and places his lips against Uijun's."
+        core = genmod._action_core(kiss_action, 55)
+        if "places his lips" not in core:
+            bad.append(f"(os-b) _action_core 가 'places his lips' 를 보존하지 않았습니다: {core!r}")
+        if core.rstrip(".").endswith(" and") or core.rstrip(".").endswith(" as"):
+            bad.append(f"(os-b) _action_core 가 접속사(and/as)로 끝납니다: {core!r}")
+        # 프롬프트 레벨: 키스 컷을 넣은 테이크.
+        spec_b = [
+            {"dialogueSpeaker": name_b, "dialogueKo": "조금만 더", "onScreen": [name_a, name_b],
+             "actionEn": kiss_action, "shotSize": "MCU", "shotType": "profile_two_shot", "vantage": "side"},
+        ]
+        plan_b, take_b = _plan(spec_b)
+        prompt_b = genmod._take_prompt(plan_b, take_b, cast=cast, panel_nos=[3, 4], location_no=5)
+        if "places his lips" not in prompt_b:
+            bad.append(f"(os-b) 프롬프트에 'places his lips' 가 없습니다: {prompt_b[-400:]}")
+        # 연기 문장이 " and." / " as." 로 끝나지 않는다(TIMELINE 전체에서).
+        import re as _re  # noqa: PLC0415
+        if _re.search(r"\b(and|as)\.", prompt_b):
+            bad.append(f"(os-b) 연기가 ' and.' / ' as.' 로 끝납니다: {prompt_b}")
+
+        # ---- (os-c) test2 실제 길이: 의상·목소리·한국어 대사 6컷 ≤2500B·6컷 ON SCREEN·연기 핵심 ----
+        ko_line = "자네 지금 뭐 하는 건가 당장 설명해 보게"
+        spec_c = []
+        for i in range(6):
+            speaker = name_a if i % 2 == 0 else name_b
+            # 컷마다 두 인물 화면(일반 대화), 단 컷1만 화자 화면 밖 시나리오를 섞지 않는다(길이 측정용).
+            spec_c.append({
+                "dialogueSpeaker": speaker, "dialogueKo": ko_line, "onScreen": [name_a, name_b],
+                "actionEn": (f"{speaker} leans forward across the desk, eyes narrowing, one hand flat on "
+                             "the folder as he speaks in a low measured voice."),
+            })
+        plan_c, take_c = _plan(spec_c)
+        prompt_c = genmod._take_prompt(plan_c, take_c, cast=cast, panel_nos=[3, 4], location_no=5)
+        if len(prompt_c.encode("utf-8")) > 2500:
+            bad.append(f"(os-c) 프롬프트가 2,500바이트를 넘습니다: {len(prompt_c.encode('utf-8'))}")
+        entries_c = genmod._take_timeline_entries(plan_c, take_c)
+        stamps_c = [f"{e['start']}-{e['end']}s" for e in entries_c]
+        if len(stamps_c) != 6:
+            bad.append(f"(os-c) 타임라인 항목이 6개가 아닙니다: {len(stamps_c)}")
+        miss_c = [s for s in stamps_c if s not in prompt_c]
+        if miss_c:
+            bad.append(f"(os-c) 프롬프트에 빠진 컷 타임스탬프: {miss_c}")
+        # 6컷 모두 ON SCREEN(이 경우 둘 다 화면 → "ON SCREEN: Beomgeonu, Yeouijun" 6회).
+        if prompt_c.count("ON SCREEN:") != 6:
+            bad.append(f"(os-c) ON SCREEN 줄이 6개가 아닙니다: {prompt_c.count('ON SCREEN:')}")
+        # 6컷 모두 연기 핵심 동사("leans forward") 존재.
+        tl_c = prompt_c.split("TIMELINE", 1)[1].split("\nRULES", 1)[0] if "TIMELINE" in prompt_c else ""
+        if tl_c.count("leans forward") != 6:
+            bad.append(f"(os-c) 6컷 모두에 연기 핵심 동사가 있지 않습니다('leans forward' {tl_c.count('leans forward')}회)")
+        # ASSETS 두 인물 COSTUME 유지.
+        assets_c = prompt_c.split("ASSETS:", 1)[1].split("\n", 1)[0] if "ASSETS:" in prompt_c else ""
+        if assets_c.count("COSTUME") < 2:
+            bad.append(f"(os-c) ASSETS 에 두 인물 COSTUME 이 모두 있지 않습니다: {assets_c[:300]}")
+
+        # ---- (os-d) 실사 skipped + 웹툰 completed → gen done ----
+        fake_store = _FakeCharStore()
+        orig_gen_store = genmod.STORE
+        orig_plan_store = planmod.STORE
+        orig_concat = genmod._concat
+        orig_fetch = genmod._fetch_bytes
+        orig_has_audio = genmod._has_audio_stream
+        genmod.STORE = fake_store
+        planmod.STORE = fake_store
+        genmod._concat = lambda clips: b"FINAL"
+        genmod._fetch_bytes = lambda key, *, bucket="": b"CLIP"
+        genmod._has_audio_stream = lambda mp4: None
+        try:
+            owner, pid = "tester", "prj_os_d"
+            base = planmod.new_plan()
+            base["owner"] = owner
+            planmod.save_plan(owner, pid, base)
+
+            def _seed(data):
+                data["gen"] = {
+                    "genId": "gosd", "mode": "previz-take", "status": "running",
+                    "videoModel": "fake", "resolution": "480p",
+                    "units": [{
+                        "id": "take1", "cutIds": ["c1"], "recKeys": ["r1"], "recSegIds": ["s1"], "seconds": 18.0,
+                        "real": {"status": "skipped"},
+                        "webtoon": {"status": "completed", "outputKey": "out/take1.mp4"},
+                    }],
+                    "segments": [],
+                    "finalReal": {"status": "skipped", "key": "", "error": ""},
+                    "finalWebtoon": {"status": "waiting", "key": "", "error": ""},
+                }
+
+            planmod.mutate_plan(owner, pid, _seed)
+            genmod._maybe_finalize_previz(owner, pid, "gosd")
+            dplan, _ = planmod.load_plan(owner, pid)
+            dgen = dplan.get("gen") or {}
+            if dgen.get("status") != "done":
+                bad.append(f"(os-d) 실사 skipped·웹툰 completed 인데 gen.status 가 done 이 아닙니다: {dgen.get('status')}")
+            if (dgen.get("finalWebtoon") or {}).get("status") != "done":
+                bad.append(f"(os-d) finalWebtoon 이 done 이 아닙니다: {dgen.get('finalWebtoon')}")
+            if (dgen.get("finalReal") or {}).get("status") != "skipped":
+                bad.append(f"(os-d) finalReal 이 skipped 가 아닙니다: {dgen.get('finalReal')}")
+        finally:
+            genmod.STORE = orig_gen_store
+            planmod.STORE = orig_plan_store
+            genmod._concat = orig_concat
+            genmod._fetch_bytes = orig_fetch
+            genmod._has_audio_stream = orig_has_audio
+
+    except Exception as exc:  # noqa: BLE001
+        import traceback as _tb  # noqa: PLC0415
+
+        bad.append("통 테이크 ON SCREEN 검사 중 예외: " + repr(exc) + "\n" + _tb.format_exc()[:1500])
+    finally:
+        genmod._first_take_style_en = orig_style
+
+    if bad:
+        fail("통 테이크 ON SCREEN·연기 보존·gen 상태(067) 검사 실패\n" + "\n".join(f"  {item}" for item in bad))
+    else:
+        ok(
+            "통 테이크 ON SCREEN·연기 보존·gen 상태(067) 검사 (os-a)컷1 Beomgeonu only·Yeouijun off-screen voice "
+            "(os-b)키스 컷 places his lips 보존·and./as. 끝 없음 (os-c)6컷 ON SCREEN·연기 핵심·두 COSTUME·≤2500B "
+            "(os-d)실사 skipped·웹툰 completed→gen done"
+        )
+
+
 # ---------------------------------------------------------------- main
 
 
@@ -11248,6 +11484,7 @@ def main() -> int:
     check_vnew_take_costume()
     check_vnew_take_prompt_polish()
     check_vnew_take_prompt_budget()
+    check_vnew_take_on_screen()
     print()
     if warnings:
         print(f"경고 {len(warnings)}건")
