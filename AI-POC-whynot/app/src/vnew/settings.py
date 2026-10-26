@@ -176,8 +176,12 @@ VNEW_TAKE_TOKEN_UNIT_PRICE = _float("VNEW_TAKE_TOKEN_UNIT_PRICE", 0.0214)
 VNEW_TAKE_MAX_PANELS = _int("VNEW_TAKE_MAX_PANELS", 3)
 # 장면 의상·목소리 읽기(castNotes)에 Claude 로 보낼 원작 패널 최대 장수(인물이 보이는 것).
 VNEW_TAKE_CAST_PANELS = _int("VNEW_TAKE_CAST_PANELS", 4)
-# 테이크 프롬프트 바이트 상한(UTF-8). Seedance 2.5 는 2,500자(바이트로 보수적으로 상한).
-VNEW_TAKE_PROMPT_MAX = _int("VNEW_TAKE_PROMPT_MAX", 2500)
+# 통 테이크 프롬프트 바이트 상한(UTF-8, 설계자 2026-10-26). Seedance 2.5 reference-to-video 의
+# prompt 에는 API 스키마상 maxLength 가 명시돼 있지 않다(Claude 확인) → 기본 4000 바이트로 넉넉히 둔다.
+# 단, 모델 caps 의 promptMaxLength 가 '스키마에 명시된 값'이면(= 기본 2500 이 아닌 실제 maxLength)
+# 그 값과 4000 중 작은 값을 쓴다(take_prompt_budget 참고). 2500 은 fal 기본값(미명시)이라 take 에선
+# 길이 상한으로 보지 않는다. Kling 컷 단위는 실측 2,500 제한을 그대로 쓴다(PREVIZ_PROMPT_TARGET).
+VNEW_TAKE_PROMPT_MAX = _int("VNEW_TAKE_PROMPT_MAX", 4000)
 # 해상도별 (가로, 세로) — 토큰 공식 tokens = w×h×24×s/1024 에 쓴다(fal 실측 기준).
 TAKE_RESOLUTION_WH = {
     "480p": (854, 480),

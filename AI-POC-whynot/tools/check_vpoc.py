@@ -8806,26 +8806,33 @@ def check_vnew_shot_brief() -> None:
             bad.append(f"(sb-h) 옛 gen_view 의 segments 가 보이지 않습니다: {view_h and view_h.get('segments')}")
 
         # ---------------- (sb-i) 짧은 지시서 → 아무것도 안 지움(ACTION·MOOD·SETTING 모두) ----------------
-        # 합계가 넉넉히 1,500바이트 안인 짧은 지시서. 섹션이 전부 그대로 들어가야 한다.
+        # 합계가 한도(2500) 안인 짧은 지시서. 069 v2 에서 컷 프롬프트에 MOTION(short)·HARMONY(short)
+        # 고정 블록이 더해져 기본 길이가 늘었다 → 전제 바이트를 2300 → 2450 으로 조정하고, 지시서 본문을
+        # 조금 짧게 둬 아무 섹션도 지워지지 않게 한다(설계자 2026-10-26 재지시 v2).
         plan_i = _plan_cuts(1, 6)
         plan_i["previz"]["shotBrief"] = {
             "status": "ready",
-            "scene": {"loc:office": "A principal's office with pale green walls. Warm daylight from the left window."},
+            "scene": {"loc:office": "A principal's office with pale green walls."},
             "cuts": {"c1": {
-                "shotEn": "MCU, 50mm lens, eye-level, clean single.",
+                "shotEn": "MCU, eye-level, clean single.",
                 "blockingEn": "He stands at frame center facing the camera.",
                 "actionEn": "He leans forward and narrows his eyes.",
                 "moodEn": "tense and controlled.",
-                "backgroundEn": "wood-panelled wall behind, bookshelf soft in shallow focus.",
+                "backgroundEn": "wood-panelled wall behind, bookshelf in shallow focus.",
                 "dialogue": [{"speaker": "범건우", "lineKo": "자네 뭐 하나?", "deliveryEn": "sharp, low voice"}],
             }},
         }
         prompt_i = genmod._cut_prompt(plan_i, {"cutId": "c1"}, "real", cast=cast, has_image_ref=False)
-        if len(prompt_i.encode("utf-8")) > 2300:  # 058 ASSETS·CONTINUITY 보강으로 기본 길이 증가 — 한도(2500) 안이면 충분
-            bad.append(f"(sb-i) 전제: 짧은 지시서 프롬프트가 2300바이트를 넘습니다: {len(prompt_i.encode('utf-8'))}")
+        if len(prompt_i.encode("utf-8")) > 2450:  # 069 v2 MOTION/HARMONY short 고정 블록으로 기본 길이 증가 — 한도(2500) 안
+            bad.append(f"(sb-i) 전제: 짧은 지시서 프롬프트가 2450바이트를 넘습니다: {len(prompt_i.encode('utf-8'))}")
         for must in ("\nACTION:", "\nMOOD:", "\nSETTING:"):
             if must not in ("\n" + prompt_i):
                 bad.append(f"(sb-i) 짧은 지시서인데 섹션 {must.strip()} 이 지워졌습니다")
+        # 069 v2: MOTION(short)·HARMONY(short) 고정 블록이 짧은 지시서에서도 들어 있어야 한다.
+        if "\nMOTION:" not in ("\n" + prompt_i):
+            bad.append("(sb-i) 짧은 지시서인데 MOTION(short) 섹션이 없습니다")
+        if "\nHARMONY:" not in ("\n" + prompt_i):
+            bad.append("(sb-i) 짧은 지시서인데 HARMONY(short) 섹션이 없습니다")
         # 본문이 그대로 들어갔는지(줄이기가 전혀 일어나지 않았다).
         if "He leans forward and narrows his eyes." not in prompt_i:
             bad.append("(sb-i) 짧은 지시서인데 ACTION 본문이 줄여졌습니다")
@@ -8996,7 +9003,7 @@ def check_vnew_shot_brief() -> None:
             " (sb-c)_cut_lines 화자 귀속·silent (sb-d)장소당 1회·lens/shotSize/mood/time/facts 포함"
             " (sb-e)지시서 없음 409 BriefNotReady (sb-f)CAST→CONTINUITY 순서·only these people·'#' 없음·Do not add 없음·UTF-8≤2500"
             " (sb-g)컷 순서 concat·채운 컷 원래 길이로 잘림 (sb-h)옛 segments gen_view"
-            " (sb-i)짧은 지시서 아무것도 안 지움(ACTION·MOOD·SETTING) (sb-j)긴 지시서 ≤2500·ACTION 유지·CAST/CONTINUITY 유지"
+            " (sb-i)짧은 지시서 아무것도 안 지움(ACTION·MOOD·SETTING·MOTION/HARMONY short) (sb-j)긴 지시서 ≤2500·ACTION 유지·CAST/CONTINUITY 유지"
             " (sb-k)CAST 'mannequin.'·'..' 없음·캐릭터 데이터 외형 (sb-l)side±1·wears blue 저장/프롬프트에 없음"
             " (np-b)촬영 지시서 시스템 지침에 keep their eyes on the listener·건축 임의 추가 금지·카메라 흔들림 금지"
         )
@@ -9845,7 +9852,7 @@ def check_vnew_take() -> None:
     (tk-b) 녹화 2구간(12s+15s) → 테이크 1개(27s); 3구간(15+15+10) → 테이크 2개(30s, 10s).
     (tk-c) payload: video_urls 1개, image_urls 순서 = 인물 정면·후면 → 패널 → 장소, ≤10, @Image 번호 일치,
            task reference·draft true·resolution 480p·duration 문자열·generate_audio false, 실사 skipped·제출 0.
-    (tk-d) 프롬프트 STYLE 맨 앞·AVOID 포함·"cinematic lighting" STYLE/TIMELINE 에 없음·≤2500 바이트.
+    (tk-d) 프롬프트 STYLE 맨 앞·AVOID 포함·"cinematic lighting" STYLE/TIMELINE 에 없음·≤4000 바이트.
     (tk-e) 견적: 480p 15초 ≈ 144k 토큰 × 0.0214/1000 ≈ $3.08(±0.05), 원장 같은 값.
     (tk-f) draft_id 저장, 완료 → finalWebtoon done·finalReal skipped·gen done.
     """
@@ -10264,8 +10271,8 @@ def check_vnew_take() -> None:
                 timeline_part = prompt.split("TIMELINE", 1)[1].split("RULES", 1)[0]
             if "cinematic lighting" in timeline_part.lower():
                 bad.append("(tk-d) TIMELINE 에 'cinematic lighting' 이 들어 있습니다")
-            if len(prompt.encode("utf-8")) > 2500:
-                bad.append(f"(tk-d) 프롬프트가 2500바이트를 넘습니다: {len(prompt.encode('utf-8'))}")
+            if len(prompt.encode("utf-8")) > 4000:
+                bad.append(f"(tk-d) 프롬프트가 4000바이트를 넘습니다: {len(prompt.encode('utf-8'))}")
             # @Image 번호가 image_urls 순서와 일치(front 는 @Image1, back @Image2 ...).
             if "@Image1 (front)" not in prompt:
                 bad.append(f"(tk-d) ASSETS 에 @Image1 (front) 매핑이 없습니다: {prompt[:300]}")
@@ -10334,7 +10341,7 @@ def check_vnew_take() -> None:
         ok(
             "통 테이크(Seedance 2.5) 검사 (tk-a)모드 선택·회귀 없음 (tk-b)≤30초 그룹핑 "
             "(tk-c)video_urls·image_urls 순서·@Image 번호·task/draft/480p/duration/audio·실사 skipped "
-            "(tk-d)STYLE 맨앞·AVOID·cinematic lighting 없음·≤2500B (tk-e)견적·원장 토큰 공식 "
+            "(tk-d)STYLE 맨앞·AVOID·cinematic lighting 없음·≤4000B (tk-e)견적·원장 토큰 공식 "
             "(tk-f)draft_id·finalWebtoon done·finalReal skipped·gen done"
         )
 
@@ -10347,9 +10354,9 @@ def check_vnew_take_prompt() -> None:
 
     외부 호출 없음. _take_prompt·_take_timeline_entries·_short_appearance 를 직접 부른다.
 
-    (tp-a) test2 규모(인물 2명·외형 각 600자·6컷·대사 각 2줄 한국어) → 6개 타임스탬프 모두 존재·≤2,500 바이트.
+    (tp-a) test2 규모(인물 2명·외형 각 600자·6컷·대사 각 2줄 한국어) → 6개 타임스탬프 모두 존재·≤4,000 바이트.
     (tp-b) _short_appearance: 인물당 ≤170자, "hair" 정보 포함.
-    (tp-c) 12컷(30초) 극단 입력 → 12개 타임스탬프 모두 존재·≤2,500 바이트.
+    (tp-c) 12컷(30초) 극단 입력 → 12개 타임스탬프 모두 존재·≤4,000 바이트.
     """
     sys.path.insert(0, str(ROOT / "app"))
     bad: list[str] = []
@@ -10434,8 +10441,8 @@ def check_vnew_take_prompt() -> None:
         missing_a = [s for s in stamps_a if s not in prompt_a]
         if missing_a:
             bad.append(f"(tp-a) 프롬프트에 빠진 컷 타임스탬프가 있습니다: {missing_a}")
-        if len(prompt_a.encode("utf-8")) > 2500:
-            bad.append(f"(tp-a) 프롬프트가 2,500바이트를 넘습니다: {len(prompt_a.encode('utf-8'))}")
+        if len(prompt_a.encode("utf-8")) > 4000:
+            bad.append(f"(tp-a) 프롬프트가 4,000바이트를 넘습니다: {len(prompt_a.encode('utf-8'))}")
         if not prompt_a.startswith("STYLE:"):
             bad.append(f"(tp-a) 프롬프트가 STYLE 로 시작하지 않습니다: {prompt_a[:30]}")
         if "TIMELINE" not in prompt_a or "RULES:" not in prompt_a:
@@ -10454,8 +10461,8 @@ def check_vnew_take_prompt() -> None:
         missing_c = [s for s in stamps_c if s not in prompt_c]
         if missing_c:
             bad.append(f"(tp-c) 12컷 중 빠진 타임스탬프가 있습니다: {missing_c}")
-        if len(prompt_c.encode("utf-8")) > 2500:
-            bad.append(f"(tp-c) 12컷 프롬프트가 2,500바이트를 넘습니다: {len(prompt_c.encode('utf-8'))}")
+        if len(prompt_c.encode("utf-8")) > 4000:
+            bad.append(f"(tp-c) 12컷 프롬프트가 4,000바이트를 넘습니다: {len(prompt_c.encode('utf-8'))}")
         # STYLE·RULES 는 유지.
         if not prompt_c.startswith("STYLE:"):
             bad.append("(tp-c) 12컷 프롬프트가 STYLE 로 시작하지 않습니다")
@@ -10471,8 +10478,8 @@ def check_vnew_take_prompt() -> None:
         fail("통 테이크 프롬프트(컷 보존) 검사 실패\n" + "\n".join(f"  {item}" for item in bad))
     else:
         ok(
-            "통 테이크 프롬프트(컷 보존) 검사 (tp-a)6컷 타임스탬프 모두·≤2500B·외형 요약 "
-            "(tp-b)_short_appearance ≤170·hair 포함 (tp-c)12컷 타임스탬프 모두·≤2500B"
+            "통 테이크 프롬프트(컷 보존) 검사 (tp-a)6컷 타임스탬프 모두·≤4000B·외형 요약 "
+            "(tp-b)_short_appearance ≤170·hair 포함 (tp-c)12컷 타임스탬프 모두·≤4000B"
         )
 
 
@@ -10487,8 +10494,8 @@ def check_vnew_take_costume() -> None:
     (ca-a) castNotes 캐시: 같은 패널이면 _read_cast_notes 재호출 0회, 원장(charge_text) 1회.
     (ca-b) override 가 자동값보다 우선, 프롬프트에 "COSTUME in this scene" + override 문구,
            외형 요약에 "shirt"/"wears" 없음.
-    (ca-c) 참조: 인물당 정면 1장, 후면 없음, 패널 ≤4, 번호 일치, ≤2,500 바이트, 6컷 타임스탬프 유지.
-    (ca-d) generate_audio true 기본, RULES 에 "lip sync" 포함.
+    (ca-c) 참조: 인물당 정면 1장, 후면 없음, 패널 ≤4, 번호 일치, ≤4,000 바이트, 6컷 타임스탬프 유지.
+    (ca-d) generate_audio true 기본, MOTION 에 립싱크(입 모양) 지시, RULES 에 "no background music".
     (ca-e) 테이크 1개 → final 은 복사(재인코딩 _concat 호출 0), 여러 개 → concat.
     (ca-f) eyelines 있는 grammar → TIMELINE 에 그대로; 옛 캐시 → 규칙 보완(화자→상대);
            6컷 모두 gaze 존재, ≤2,500 바이트.
@@ -10711,8 +10718,8 @@ def check_vnew_take_costume() -> None:
         # 번호 일치: 앞 2장이 정면이므로 @Image1 (front)·@Image2 (front).
         if "@Image1 (front)" not in prompt_b or "@Image2 (front)" not in prompt_b:
             bad.append("(ca-c) ASSETS 의 @Image 정면 번호가 image_urls 순서와 맞지 않습니다")
-        if len(prompt_b.encode("utf-8")) > 2500:
-            bad.append(f"(ca-c) 프롬프트가 2500바이트를 넘습니다: {len(prompt_b.encode('utf-8'))}")
+        if len(prompt_b.encode("utf-8")) > 4000:
+            bad.append(f"(ca-c) 프롬프트가 4000바이트를 넘습니다: {len(prompt_b.encode('utf-8'))}")
         entries_b = genmod._take_timeline_entries(plan_b, take_b)
         stamps_b = [f"{e['start']}-{e['end']}s" for e in entries_b]
         if len(stamps_b) != 6:
@@ -10721,12 +10728,15 @@ def check_vnew_take_costume() -> None:
         if miss_b:
             bad.append(f"(ca-c) 프롬프트에 빠진 컷 타임스탬프: {miss_b}")
 
-        # ---- (ca-d) generate_audio true 기본 + RULES 에 lip sync ----
+        # ---- (ca-d) generate_audio true 기본 + MOTION 에 립싱크(입 모양) + RULES 에 배경음악 없음 ----
         if vnew_settings.VNEW_TAKE_AUDIO is not True:
             bad.append(f"(ca-d) VNEW_TAKE_AUDIO 기본이 true 가 아닙니다: {vnew_settings.VNEW_TAKE_AUDIO}")
+        # 립싱크는 MOTION 이 맡는다(설계자 2026-10-26 재지시 v2). 통 테이크 MOTION full 은 입 모양을
+        # 한국어 음절에 맞추라고 지시한다("mouth shapes matching the Korean").
+        motion_part = prompt_b.split("MOTION:", 1)[1] if "MOTION:" in prompt_b else ""
+        if "mouth shapes matching the korean" not in motion_part.lower() and "lip sync" not in motion_part.lower():
+            bad.append(f"(ca-d) MOTION 에 립싱크(입 모양) 지시가 없습니다: {motion_part[:160]}")
         rules_part = prompt_b.split("RULES:", 1)[1] if "RULES:" in prompt_b else ""
-        if "lip sync" not in rules_part.lower():
-            bad.append(f"(ca-d) RULES 에 'lip sync' 가 없습니다: {rules_part[:160]}")
         if "no background music" not in rules_part.lower():
             bad.append("(ca-d) RULES 에 'no background music' 가 없습니다")
 
@@ -10791,8 +10801,8 @@ def check_vnew_take_costume() -> None:
         entries_f = genmod._take_timeline_entries(plan_f, take_f)
         if len([e for e in entries_f if (e.get("gaze") or "")]) != 6:
             bad.append(f"(ca-f) 6컷 중 gaze 가 비는 컷이 있습니다: {[bool(e.get('gaze')) for e in entries_f]}")
-        if len(prompt_f.encode("utf-8")) > 2500:
-            bad.append(f"(ca-f) eyelines 프롬프트가 2500바이트를 넘습니다: {len(prompt_f.encode('utf-8'))}")
+        if len(prompt_f.encode("utf-8")) > 4000:
+            bad.append(f"(ca-f) eyelines 프롬프트가 4000바이트를 넘습니다: {len(prompt_f.encode('utf-8'))}")
         # 옛 캐시(eyelines 없음): 화자(에이)가 상대(비)를 본다 — c1 은 에이 대사.
         pid_f2 = "prj_ca_f2"
         _plan_with_cuts(owner, pid_f2, with_eyelines=False)
@@ -10830,9 +10840,9 @@ def check_vnew_take_costume() -> None:
     else:
         ok(
             "통 테이크 의상·소리·시선(065) 검사 (ca-a)castNotes 캐시·원장 1회 "
-            "(ca-b)override 우선·COSTUME 문구·외형 shirt/wears 없음 (ca-c)정면 1장·후면 없음·패널≤4·번호·≤2500B·6컷 "
-            "(ca-d)generate_audio true·RULES lip sync (ca-e)1개 복사·여러개 concat "
-            "(ca-f)eyelines→TIMELINE·옛 캐시 화자→상대·6컷 gaze·≤2500B"
+            "(ca-b)override 우선·COSTUME 문구·외형 shirt/wears 없음 (ca-c)정면 1장·후면 없음·패널≤4·번호·≤4000B·6컷 "
+            "(ca-d)generate_audio true·MOTION 립싱크·RULES no background music (ca-e)1개 복사·여러개 concat "
+            "(ca-f)eyelines→TIMELINE·옛 캐시 화자→상대·6컷 gaze·≤4000B"
         )
 
 
@@ -10845,7 +10855,7 @@ def check_vnew_take_prompt_polish() -> None:
     (pp-a) 키스 컷(두 사람, 대사 화자=여의준) → gaze 에 자기 자신 대상 없음. grammar.eyelines 에
            자기 자신(person:여의준)이 있어도 상대(범건우)로 바뀐다. 동일 인물 중복 없음.
     (pp-b) RULES 에 "costume exactly as written in ASSETS" 있고, "costume identical to the references" 없음.
-    (pp-c) test2 규모(장면 의상·목소리 포함, 6컷) → 6컷 모두 연기 문장 존재·≤2,500 바이트·"approximately" 없음.
+    (pp-c) test2 규모(장면 의상·목소리 포함, 6컷) → 6컷 모두 연기 문장 존재·≤4,000 바이트·"approximately" 없음.
     (pp-d) voice 문구가 단어 중간에서 끊기지 않음(_clip_words 가 마침표로 끝맺는다).
     """
     sys.path.insert(0, str(ROOT / "app"))
@@ -10950,8 +10960,8 @@ def check_vnew_take_prompt_polish() -> None:
         missing = [s for s in stamps if s not in prompt]
         if missing:
             bad.append(f"(pp-c) 프롬프트에 빠진 컷 타임스탬프: {missing}")
-        if len(prompt.encode("utf-8")) > 2500:
-            bad.append(f"(pp-c) 프롬프트가 2500바이트를 넘습니다: {len(prompt.encode('utf-8'))}")
+        if len(prompt.encode("utf-8")) > 4000:
+            bad.append(f"(pp-c) 프롬프트가 4000바이트를 넘습니다: {len(prompt.encode('utf-8'))}")
         if "approximately" in prompt:
             bad.append("(pp-c) 프롬프트에 'approximately'(렌즈·거리 숫자)가 남아 있습니다")
         if " mm" in prompt or "50 mm" in prompt:
@@ -10994,7 +11004,7 @@ def check_vnew_take_prompt_polish() -> None:
     else:
         ok(
             "통 테이크 프롬프트 다듬기(065 dry-run) 검사 (pp-a)자기 자신 시선 없음·중복 없음 "
-            "(pp-b)RULES costume ASSETS·references 없음 (pp-c)6컷 연기·≤2500B·approximately 없음·샷 약어 "
+            "(pp-b)RULES costume ASSETS·references 없음 (pp-c)6컷 연기·≤4000B·approximately 없음·샷 약어 "
             "(pp-d)voice 단어 경계·마침표"
         )
 
@@ -11008,10 +11018,10 @@ def check_vnew_take_prompt_budget() -> None:
     외부 호출 없음. _take_prompt·_take_timeline_entries·_romanize_name·_gaze_is_default 를 직접 부른다.
 
     (pb-a) test2 실제 길이(6컷·한국어 대사 각 25~35자·장면 의상 140자·목소리 70자·인물 2명) →
-           ≤2,500 바이트, ASSETS 에 두 인물 COSTUME 모두, 6컷 모두 연기 문장(최소 30자 이상) 존재.
+           ≤4,000 바이트, ASSETS 에 두 인물 COSTUME 모두, 6컷 모두 연기 문장(최소 30자 이상) 존재.
     (pb-b) 화자→상대 기본 시선 컷은 TIMELINE 에 gaze 없음, closed/down 예외 컷만 gaze 있음,
            RULES 에 "Eyes:" 기본 규칙.
-    (pb-c) 12컷 극단 입력에서도 ASSETS 인물 문장·12 타임스탬프 유지, ≤2,500 바이트.
+    (pb-c) 12컷 극단 입력에서도 ASSETS 인물 문장·12 타임스탬프 유지, ≤4,000 바이트.
     """
     sys.path.insert(0, str(ROOT / "app"))
     bad: list[str] = []
@@ -11116,8 +11126,8 @@ def check_vnew_take_prompt_budget() -> None:
         # ---- (pb-a) test2 실제 길이: 6컷·한국어 대사 30자·장면 의상 140자·목소리 70자 ----
         plan_a, take_a = _plan(6, dialogue_len=30, gaze_mode="default")
         prompt_a = genmod._take_prompt(plan_a, take_a, cast=cast, panel_nos=[3, 4], location_no=5)
-        if len(prompt_a.encode("utf-8")) > 2500:
-            bad.append(f"(pb-a) 프롬프트가 2,500바이트를 넘습니다: {len(prompt_a.encode('utf-8'))}")
+        if len(prompt_a.encode("utf-8")) > 4000:
+            bad.append(f"(pb-a) 프롬프트가 4,000바이트를 넘습니다: {len(prompt_a.encode('utf-8'))}")
         # ASSETS 에 두 인물 COSTUME 모두(장면 의상 문구가 통째로 빠지지 않았는지).
         assets_a = prompt_a.split("ASSETS:", 1)[1].split("\n", 1)[0] if "ASSETS:" in prompt_a else ""
         if "COSTUME in this scene" not in assets_a:
@@ -11177,8 +11187,8 @@ def check_vnew_take_prompt_budget() -> None:
         # ---- (pb-c) 12컷 극단 입력: ASSETS 인물 문장·12 타임스탬프·≤2500B ----
         plan_c, take_c = _plan(12, dialogue_len=35, gaze_mode="default")
         prompt_c = genmod._take_prompt(plan_c, take_c, cast=cast, panel_nos=[3, 4], location_no=5)
-        if len(prompt_c.encode("utf-8")) > 2500:
-            bad.append(f"(pb-c) 12컷 프롬프트가 2,500바이트를 넘습니다: {len(prompt_c.encode('utf-8'))}")
+        if len(prompt_c.encode("utf-8")) > 4000:
+            bad.append(f"(pb-c) 12컷 프롬프트가 4,000바이트를 넘습니다: {len(prompt_c.encode('utf-8'))}")
         entries_c = genmod._take_timeline_entries(plan_c, take_c)
         stamps_c = [f"{e['start']}-{e['end']}s" for e in entries_c]
         if len(stamps_c) != 12:
@@ -11208,8 +11218,8 @@ def check_vnew_take_prompt_budget() -> None:
         fail("통 테이크 프롬프트 바이트 예산(066) 검사 실패\n" + "\n".join(f"  {item}" for item in bad))
     else:
         ok(
-            "통 테이크 프롬프트 바이트 예산(066) 검사 (pb-a)실길이 6컷 ≤2500B·두 인물 COSTUME·6컷 연기≥30자·대사 한국어 "
-            "(pb-b)기본 시선 gaze 생략·예외만 gaze·RULES Eyes·gaze 로마자 (pb-c)12컷 ASSETS 인물 문장·12 타임스탬프·≤2500B"
+            "통 테이크 프롬프트 바이트 예산(066) 검사 (pb-a)실길이 6컷 ≤4000B·두 인물 COSTUME·6컷 연기≥30자·대사 한국어 "
+            "(pb-b)기본 시선 gaze 생략·예외만 gaze·RULES Eyes·gaze 로마자 (pb-c)12컷 ASSETS 인물 문장·12 타임스탬프·≤4000B"
         )
 
 
@@ -11226,7 +11236,7 @@ def check_vnew_take_on_screen() -> None:
            와 "Yeouijun (off-screen voice)".
     (os-b) 키스 컷 actionEn "Geonu leans the final short distance and places his lips against Uijun's." →
            프롬프트에 "places his lips" 포함, " and." / " as." 로 끝나는 연기 없음.
-    (os-c) test2 실제 길이(의상·목소리·한국어 대사 6컷) → ≤2,500 바이트, 6컷 모두 ON SCREEN·연기 핵심
+    (os-c) test2 실제 길이(의상·목소리·한국어 대사 6컷) → ≤4,000 바이트, 6컷 모두 ON SCREEN·연기 핵심
            동사 존재, ASSETS 두 인물 COSTUME 유지.
     (os-d) 실사 skipped+웹툰 completed → gen done.
     """
@@ -11361,8 +11371,8 @@ def check_vnew_take_on_screen() -> None:
             })
         plan_c, take_c = _plan(spec_c)
         prompt_c = genmod._take_prompt(plan_c, take_c, cast=cast, panel_nos=[3, 4], location_no=5)
-        if len(prompt_c.encode("utf-8")) > 2500:
-            bad.append(f"(os-c) 프롬프트가 2,500바이트를 넘습니다: {len(prompt_c.encode('utf-8'))}")
+        if len(prompt_c.encode("utf-8")) > 4000:
+            bad.append(f"(os-c) 프롬프트가 4,000바이트를 넘습니다: {len(prompt_c.encode('utf-8'))}")
         entries_c = genmod._take_timeline_entries(plan_c, take_c)
         stamps_c = [f"{e['start']}-{e['end']}s" for e in entries_c]
         if len(stamps_c) != 6:
@@ -11443,8 +11453,225 @@ def check_vnew_take_on_screen() -> None:
     else:
         ok(
             "통 테이크 ON SCREEN·연기 보존·gen 상태(067) 검사 (os-a)컷1 Beomgeonu only·Yeouijun off-screen voice "
-            "(os-b)키스 컷 places his lips 보존·and./as. 끝 없음 (os-c)6컷 ON SCREEN·연기 핵심·두 COSTUME·≤2500B "
+            "(os-b)키스 컷 places his lips 보존·and./as. 끝 없음 (os-c)6컷 ON SCREEN·연기 핵심·두 COSTUME·≤4000B "
             "(os-d)실사 skipped·웹툰 completed→gen done"
+        )
+
+
+# ---------------------------------------------------------------- 13i. 살아 움직이는 TV 애니 룩·조화·모션(069 v2)
+
+
+def check_vnew_take_harmony_motion() -> None:
+    """살아 움직이는 TV 애니 룩 + 인물·배경 조화 + 마네킹 흔들림 금지 — 통 테이크 예산 4,000 바이트(설계자 2026-10-26 재지시 v2).
+
+    외부 호출 없음. _take_prompt·_cut_prompt·_take_prompt_budget·_motion_line·_harmony_line 을 직접 부른다.
+
+    (hm-a) 통 테이크 test2 규모(6컷·인물2·한국어 대사·의상·목소리) → "anime compositing"·"rim light"·
+           "depth of field"·"do NOT copy"·"parallax"·"same light direction"·"contact shadows" 포함,
+           "unlit flat color tones" 없음, AVOID 에 "cinematic lighting" 없음, 6컷 ON SCREEN·"places his lips"·
+           연기 문장 유지, 두 COSTUME, ≤4,000 바이트.
+    (hm-b) setting.timeKo "낮" → HARMONY 에 "day"·"no drift to sunset".
+    (hm-c) 컷 단위 프롬프트: MOTION(short)·HARMONY(short) 포함, ≤2,500 바이트, 짧은 지시서에서 MOOD·SETTING 유지.
+    (hm-d) 스키마에 prompt maxLength 1800 이 명시된 모델(caps.promptMaxLength=1800) → 통 테이크 예산 1800.
+    """
+    sys.path.insert(0, str(ROOT / "app"))
+    bad: list[str] = []
+
+    from src.vnew import generate as genmod  # noqa: PLC0415
+    from src.vpoc import fal as _fal  # noqa: PLC0415
+
+    orig_style = genmod._first_take_style_en
+    genmod._first_take_style_en = lambda plan: "thin sketchy pencil lines, soft pastel flat color"
+
+    name_a, name_b = "범건우", "여의준"  # Beomgeonu, Yeouijun
+
+    # 장소(design.lightEn)·대본 setting.timeKo 를 주어 HARMONY 변수를 채운다.
+    def _plan(n_cuts: int, *, time_ko: str = "낮", kiss_last: bool = False):
+        cut_ids = [f"c{i + 1}" for i in range(n_cuts)]
+        cuts = []
+        brief_cuts = {}
+        grammar = {}
+        ko_line = "자네 지금 뭐 하는 건가 당장 설명해 보게"
+        for i, cid in enumerate(cut_ids):
+            speaker = name_a if i % 2 == 0 else name_b
+            listener = name_b if speaker == name_a else name_a
+            cuts.append({
+                "id": cid, "no": i + 1, "seconds": 3, "panels": [i],
+                "dialogueKo": f'{speaker}: "{ko_line}"',
+            })
+            action = (
+                f"{speaker} leans forward across the desk, eyes narrowing, one hand flat on the folder "
+                "as he speaks in a low measured voice."
+            )
+            if kiss_last and i == n_cuts - 1:
+                action = f"{speaker} leans the final short distance and places his lips against {listener}'s."
+            brief_cuts[cid] = {
+                "shotEn": "MCU, 50 mm lens, approximately 2.1 m, three-quarter angle.",
+                "actionEn": action,
+                "dialogue": [{"speaker": speaker, "lineKo": ko_line, "deliveryEn": "sharp and low"}],
+            }
+            g = {"mainSubject": speaker, "shotSize": "MCU", "shotType": "profile_two_shot",
+                 "vantage": "side", "others": [{"name": listener, "how": "full", "side": "right"}]}
+            grammar[cid] = {"grammar": g}
+        scene_actors = [
+            {"id": "a1", "name": name_a, "color": "#4363d8", "charId": "ch1", "appearanceEn": "a man"},
+            {"id": "a2", "name": name_b, "color": "#e6194b", "charId": "ch2", "appearanceEn": "a man"},
+        ]
+        timeline = [{"cutId": c["id"], "actors": [{"id": "a1"}, {"id": "a2"}]} for c in cuts]
+        plan = {
+            "conti": {"status": "ready", "cuts": cuts,
+                      "segments": [{"id": "s1", "cutIds": cut_ids, "seconds": 3 * n_cuts}]},
+            "script": {"status": "ready", "setting": {"timeKo": time_ko, "enclosed": True,
+                       "locationEn": "A closed principal's office"}, "entries": []},
+            "locations": [
+                {"key": "a closed principal's office", "nameEn": "A closed principal's office",
+                 "design": {"lightEn": "soft daylight from the north windows, warm white"}},
+            ],
+            "previz": {
+                "status": "ready",
+                "scenes": [{"locationId": "loc1", "actors": scene_actors, "timeline": timeline}],
+                "panelGrammar": grammar,
+                "shotBrief": {"status": "ready",
+                              "scene": {"loc1": "A closed principal's office with wood panelling."},
+                              "cuts": brief_cuts},
+            },
+        }
+        take = {"id": "take1", "cutIds": cut_ids, "seconds": 3 * n_cuts}
+        return plan, take
+
+    cast = [
+        {"name": name_a, "colorName": "blue", "frontNo": 1,
+         "appearance": "short black hair combed to one side, narrow watchful eyes, square jaw",
+         "costume": "a charcoal double-breasted suit with a crisp white dress shirt and a dark navy silk tie",
+         "voice": "a low, calm, stoic adult male voice with a slow measured cadence"},
+        {"name": name_b, "colorName": "red", "frontNo": 2,
+         "appearance": "wavy brown hair, soft rounded features, bright eyes",
+         "costume": "a loose ivory knit sweater over a pale blue collared shirt and slim grey slacks",
+         "voice": "a bright, slightly nervous young adult male voice"},
+    ]
+
+    try:
+        # ---- (hm-a) test2 규모·TV 애니 룩·조화·모션 ----
+        plan_a, take_a = _plan(6, time_ko="낮", kiss_last=True)
+        prompt_a = genmod._take_prompt(plan_a, take_a, cast=cast, panel_nos=[3, 4], location_no=5)
+        need_present = [
+            "anime compositing", "rim light", "depth of field", "do NOT copy", "parallax",
+            "same light direction", "contact shadows",
+        ]
+        for needle in need_present:
+            if needle not in prompt_a:
+                bad.append(f"(hm-a) 프롬프트에 '{needle}' 가 없습니다")
+        for banned in ("unlit flat color tones",):
+            if banned in prompt_a:
+                bad.append(f"(hm-a) 프롬프트에 '{banned}' 가 남아 있습니다")
+        # AVOID 블록에 cinematic lighting 없음.
+        avoid_part = prompt_a.split("AVOID:", 1)[1] if "AVOID:" in prompt_a else ""
+        if "cinematic lighting" in avoid_part:
+            bad.append("(hm-a) AVOID 에 'cinematic lighting' 가 남아 있습니다")
+        # 6컷 ON SCREEN·타임스탬프·연기·키스 컷 보존.
+        if prompt_a.count("ON SCREEN:") != 6:
+            bad.append(f"(hm-a) ON SCREEN 줄이 6개가 아닙니다: {prompt_a.count('ON SCREEN:')}")
+        entries_a = genmod._take_timeline_entries(plan_a, take_a)
+        stamps_a = [f"{e['start']}-{e['end']}s" for e in entries_a]
+        miss_a = [s for s in stamps_a if s not in prompt_a]
+        if miss_a:
+            bad.append(f"(hm-a) 프롬프트에 빠진 컷 타임스탬프: {miss_a}")
+        if "places his lips" not in prompt_a:
+            bad.append("(hm-a) 키스 컷 'places his lips' 가 사라졌습니다")
+        tl_a = prompt_a.split("TIMELINE", 1)[1].split("\nMOTION", 1)[0] if "TIMELINE" in prompt_a else ""
+        if tl_a.count("leans forward") < 5:
+            bad.append(f"(hm-a) 연기 문장이 충분히 유지되지 않았습니다('leans forward' {tl_a.count('leans forward')}회)")
+        assets_a = prompt_a.split("ASSETS:", 1)[1].split("\n", 1)[0] if "ASSETS:" in prompt_a else ""
+        if assets_a.count("COSTUME") < 2:
+            bad.append(f"(hm-a) ASSETS 에 두 인물 COSTUME 이 모두 있지 않습니다: {assets_a[:300]}")
+        if len(prompt_a.encode("utf-8")) > 4000:
+            bad.append(f"(hm-a) 프롬프트가 4,000바이트를 넘습니다: {len(prompt_a.encode('utf-8'))}")
+
+        # ---- (hm-b) 낮 → day · no drift to sunset ----
+        harmony_part = prompt_a.split("HARMONY:", 1)[1].split("\nRULES", 1)[0] if "HARMONY:" in prompt_a else ""
+        if "day light" not in harmony_part:
+            bad.append(f"(hm-b) HARMONY 에 'day light'(낮→day) 가 없습니다: {harmony_part[:160]}")
+        if "no drift to sunset" not in harmony_part:
+            bad.append(f"(hm-b) HARMONY 에 'no drift to sunset' 가 없습니다: {harmony_part[:200]}")
+        # _harmony_line 단위(full): 밤(night)도 바로 반영.
+        night_plan, _ = _plan(1, time_ko="밤")
+        night_harmony = genmod._harmony_line(night_plan, True)
+        if "night light" not in night_harmony:
+            bad.append(f"(hm-b) 밤 setting 이 'night light' 로 반영되지 않았습니다: {night_harmony[:120]}")
+
+        # ---- (hm-c) 컷 단위 프롬프트: MOTION(short)·HARMONY(short)·MOOD·SETTING 유지·≤2500B ----
+        # 짧은 지시서(brief 작게) → 아무 섹션도 지워지지 않아야 한다. cast 는 _cut_prompt 형식(elementRef).
+        cut_cast = [{"colorName": "blue", "name": "Kim", "elementRef": "@Element1",
+                     "appearance": "a middle-aged man in a dark suit"}]
+        plan_c, _ = _plan(1, time_ko="낮")
+        # 짧은 지시서: MOOD·SETTING 이 존재하고, 전체가 2,450 바이트 전제 안에 들도록 적당한 길이.
+        plan_c["previz"]["shotBrief"]["cuts"]["c1"] = {
+            "shotEn": "MCU, eye level, three-quarter angle on Kim.",
+            "blockingEn": "Kim stands at the desk, slightly turned toward the door.",
+            "actionEn": "Kim leans forward and speaks in a low measured voice.",
+            "moodEn": "tense and heavy, the air thick with unspoken anger.",
+            "backgroundEn": "The principal's office behind him, bookshelves and a wide window.",
+            "dialogue": [{"speaker": "Kim", "lineKo": "자네 지금 뭐 하나", "deliveryEn": "sharp and low"}],
+        }
+        plan_c["previz"]["shotBrief"]["scene"] = {"loc1": "A closed principal's office with wood panelling and a wide window."}
+        prompt_cut = genmod._cut_prompt(plan_c, {"cutId": "c1"}, "webtoon", cast=cut_cast, has_image_ref=True)
+        # MOTION short·HARMONY short 포함(ACTION 뒤 MOTION, SETTING 뒤 HARMONY).
+        if "\nMOTION:" not in prompt_cut:
+            bad.append("(hm-c) 컷 프롬프트에 MOTION(short) 섹션이 없습니다")
+        if "\nHARMONY:" not in prompt_cut:
+            bad.append("(hm-c) 컷 프롬프트에 HARMONY(short) 섹션이 없습니다")
+        # short MOTION·HARMONY 핵심 문구.
+        if "do NOT copy it" not in prompt_cut:
+            bad.append("(hm-c) MOTION(short) 핵심 문구(do NOT copy it)가 없습니다")
+        if "no drift to sunset" not in prompt_cut:
+            bad.append("(hm-c) HARMONY(short) 에 'no drift to sunset' 가 없습니다")
+        # 짧은 지시서에서 MOOD·SETTING 유지(지워지지 않는다).
+        if "\nMOOD:" not in prompt_cut:
+            bad.append("(hm-c) 짧은 지시서인데 MOOD 가 지워졌습니다")
+        if "\nSETTING:" not in prompt_cut:
+            bad.append("(hm-c) 짧은 지시서인데 SETTING 이 지워졌습니다")
+        # 순서: ACTION → MOTION → MOOD → SETTING → HARMONY → DIALOGUE → CONTINUITY.
+        order = ["\nACTION:", "\nMOTION:", "\nMOOD:", "\nSETTING:", "\nHARMONY:", "\nDIALOGUE:", "\nCONTINUITY:"]
+        positions = [("\n" + prompt_cut).find(tok) for tok in order]
+        present_pos = [p for p in positions if p >= 0]
+        if present_pos != sorted(present_pos):
+            bad.append(f"(hm-c) 컷 섹션 순서가 틀립니다: {list(zip(order, positions))}")
+        if len(prompt_cut.encode("utf-8")) > 2500:
+            bad.append(f"(hm-c) 컷 프롬프트가 2,500바이트를 넘습니다: {len(prompt_cut.encode('utf-8'))}")
+        # 컷 단위도 Kling 2500 제한 유지(PREVIZ_PROMPT_TARGET).
+        if genmod.vnew_settings.PREVIZ_PROMPT_TARGET != 2500:
+            bad.append(f"(hm-c) 컷 단위 예산(PREVIZ_PROMPT_TARGET)이 2500 이 아닙니다: {genmod.vnew_settings.PREVIZ_PROMPT_TARGET}")
+
+        # ---- (hm-d) 스키마 명시 maxLength 1800 → 통 테이크 예산 1800 ----
+        if genmod._take_prompt_budget(None) != 4000:
+            bad.append(f"(hm-d) caps 없음 통 테이크 예산이 4000 이 아닙니다: {genmod._take_prompt_budget(None)}")
+        # 미명시(기본 2500) → 길이 상한으로 보지 않는다(4000 유지).
+        if genmod._take_prompt_budget({"promptMaxLength": _fal.DEFAULT_PROMPT_MAX}) != 4000:
+            bad.append("(hm-d) promptMaxLength=기본값(미명시)인데 예산이 4000 이 아닙니다")
+        # 스키마 명시 1800 → min(4000, 1800) = 1800.
+        if genmod._take_prompt_budget({"promptMaxLength": 1800}) != 1800:
+            bad.append(f"(hm-d) 스키마 명시 1800 인데 예산이 1800 이 아닙니다: {genmod._take_prompt_budget({'promptMaxLength': 1800})}")
+        # 스키마 명시 1800 caps 로 실제 프롬프트도 1800 이하.
+        prompt_d = genmod._take_prompt(plan_a, take_a, cast=cast, panel_nos=[3, 4], location_no=5,
+                                       caps={"promptMaxLength": 1800})
+        if len(prompt_d.encode("utf-8")) > 1800:
+            bad.append(f"(hm-d) 1800 caps 프롬프트가 1800바이트를 넘습니다: {len(prompt_d.encode('utf-8'))}")
+
+    except Exception as exc:  # noqa: BLE001
+        import traceback as _tb  # noqa: PLC0415
+
+        bad.append("TV 애니 룩·조화·모션 검사 중 예외: " + repr(exc) + "\n" + _tb.format_exc()[:1500])
+    finally:
+        genmod._first_take_style_en = orig_style
+
+    if bad:
+        fail("살아 움직이는 TV 애니 룩·조화·모션(069 v2) 검사 실패\n" + "\n".join(f"  {item}" for item in bad))
+    else:
+        ok(
+            "살아 움직이는 TV 애니 룩·조화·모션(069 v2) 검사 (hm-a)anime compositing·rim light·parallax·"
+            "contact shadows·unlit 없음·AVOID cinematic 없음·6컷·키스 보존·두 COSTUME·≤4000B "
+            "(hm-b)낮→day·no drift to sunset·밤→night (hm-c)컷 MOTION/HARMONY short·MOOD/SETTING 유지·순서·≤2500B "
+            "(hm-d)caps 없음 4000·미명시 4000·스키마 1800→1800"
         )
 
 
@@ -11485,6 +11712,7 @@ def main() -> int:
     check_vnew_take_prompt_polish()
     check_vnew_take_prompt_budget()
     check_vnew_take_on_screen()
+    check_vnew_take_harmony_motion()
     print()
     if warnings:
         print(f"경고 {len(warnings)}건")
