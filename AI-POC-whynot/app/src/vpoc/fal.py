@@ -188,13 +188,13 @@ def _balance_exhausted(raw: str) -> bool:
 # ---------------------------------------------------------------- 등록 저장소
 
 
-def _registry_read() -> list[dict]:
-    """등록된 fal 모델 목록. 없거나 읽기 실패면 빈 목록."""
+def _registry_read() -> list[dict] | None:
+    """등록된 fal 모델 목록. 없으면 빈 목록, 읽기 실패면 None(073 R11.2 — 캐시하지 않게 구분한다)."""
     try:
         data, _ = STORE.read_json(REGISTRY_KEY)
     except Exception as exc:  # noqa: BLE001
         log.warning("vpoc.fal.registry.read_failed err=%s", exc)
-        return []
+        return None
     if not data:
         return []
     models = data.get("models")
@@ -202,12 +202,18 @@ def _registry_read() -> list[dict]:
 
 
 def registered() -> list[dict]:
-    """등록 목록(30초 프로세스 캐시)."""
+    """등록 목록(30초 프로세스 캐시).
+
+    읽기 실패(None)는 캐시하지 않고 빈 목록을 돌려준다 — 다음 호출이 다시 읽는다(073 R11.2, D11).
+    빈 목록을 30초 캐시하면 그동안 등록된 모델이 모두 "미등록"으로 보인다(리뷰 P-3). 성공은 30초 캐시(R11.3).
+    """
     now = time.time()
     with _cache_lock:
         if _cache["models"] is not None and now - _cache["at"] < _CACHE_TTL_S:
             return list(_cache["models"])
     models = _registry_read()
+    if models is None:
+        return []
     with _cache_lock:
         _cache["models"] = models
         _cache["at"] = now
@@ -955,7 +961,48 @@ def unavailable_reason(model: str) -> str:
     caps = item.get("caps") or {}
     if not caps.get("available", True):
         return str(caps.get("reason") or "모델 입력 스키마를 쓸 수 없습니다.")
+    # 금지 목록 재검사(073 R10.4, D10, E4). 등록 때만 보던 것을 고를 때·제출 때도 본다 — 금지 패턴이
+    # 정해지기 전에 등록된 항목이 레지스트리에 남아 있어도 쓸 수 없다(리뷰 S-2). 문구는 register 와 같다.
+    if settings.is_denied_endpoint(str(item.get("endpointId") or endpoint_id(model))):
+        return "설계자 지시로 사용이 금지된 모델입니다."
+    # Seedance 계열 얼굴(i2v)은 짝(r2v)까지 등록·사용 가능해야 고를 수 있다(073 D2, R2.2 E1·E1b).
+    # 짝 자신은 짝 요구가 없다(fal_family_partner 가 빈 값) — vnew 의 r2v 단독 사용은 그대로다.
+    partner = settings.fal_family_partner(model)
+    if partner:
+        partner_item = find(partner)
+        if not partner_item:
+            return "짝 모델(reference-to-video)이 등록되지 않았습니다. 관리자에게 fal 모델 등록을 요청해 주세요."
+        partner_caps = partner_item.get("caps") or {}
+        if not partner_caps.get("available", True):
+            return "짝 모델(reference-to-video)을 쓸 수 없습니다: " + str(
+                partner_caps.get("reason") or "모델 입력 스키마를 쓸 수 없습니다."
+            )
     return ""
+
+
+def route_model(model: str, *, has_references: bool, has_start: bool) -> str:
+    """제출 때 실제로 보낼 모델(design.md §4, 073 R2.3).
+
+    Seedance 계열 얼굴(i2v)일 때만 바꾼다. 참고 이미지가 있으면 짝(r2v) — 시작 프레임이 있어도
+    참고가 우선이다(BytePlus 와 같은 우선순위). 참고 없이 시작 프레임만 있으면 얼굴(i2v). 둘 다
+    없으면(글만) 짝(r2v). 계열이 아니면(짝이 없으면) model 그대로.
+    """
+    partner = settings.fal_family_partner(model)
+    if not partner:
+        return model
+    if has_references:
+        return partner
+    if has_start:
+        return model
+    return partner
+
+
+def reference_caps(model: str) -> dict:
+    """참고 방식을 정할 caps(073 R2.3). 계열 얼굴이면 짝 caps, 아니면 자기 caps(없으면 {})."""
+    partner = settings.fal_family_partner(model)
+    if partner:
+        return dict((find(partner) or {}).get("caps") or {})
+    return dict((find(model) or {}).get("caps") or {})
 
 
 # ---------------------------------------------------------------- 제출 / 조회
@@ -988,10 +1035,12 @@ def build_payload(
     reference_jpegs_b64: list[str] | None = None,
     resolution: str = "",
     duration_s: int | None = None,
+    prompt_max: int | None = None,
 ) -> dict:
     """caps 로 fal 큐 제출 본문을 만든다(네트워크 없이 검증할 수 있게 submit 에서 분리).
 
-    - prompt → promptField
+    - prompt → promptField. 상한(UTF-8 바이트)은 prompt_max 를 주면 그 값(073 R5.1, settings.fal_prompt_max),
+      없으면 caps promptMaxLength(없으면 2,500). 넘으면 문장 경계에서 자른다.
     - 첫 프레임 → startImageField, 끝 프레임 → endImageField(둘 다 있을 때만)
     - 참고 이미지 → referenceImagesField 가 있으면 그 배열, 없고 첫 프레임도 없으면 첫 장을 startImageField 로
     - duration → durations 중 요청값 이상인 가장 작은 값(durationAsString 이면 원래 표기). sendDuration=False 면 생략
@@ -1001,15 +1050,21 @@ def build_payload(
     """
     body: dict = {}
     if caps.get("promptField"):
-        max_length = int(caps.get("promptMaxLength") or DEFAULT_PROMPT_MAX)
+        if prompt_max is not None and int(prompt_max) > 0:
+            max_length = int(prompt_max)
+        else:
+            max_length = int(caps.get("promptMaxLength") or DEFAULT_PROMPT_MAX)
         sent = _trim_prompt(prompt, max_length)
-        if len(sent) != len(prompt):
+        if sent != prompt:
+            # 073 R5.2: 길이만 남긴다(프롬프트 본문은 로그에 남기지 않는다). from/to 는 글자 수(기존), *Bytes 는 바이트.
             log.info(
-                "vpoc.fal.prompt_trimmed field=%s max=%d from=%d to=%d",
+                "vpoc.fal.prompt_trimmed field=%s max=%d from=%d to=%d fromBytes=%d toBytes=%d",
                 caps["promptField"],
                 max_length,
                 len(prompt),
                 len(sent),
+                len(prompt.encode("utf-8")),
+                len(sent.encode("utf-8")),
             )
         body[caps["promptField"]] = sent
 
@@ -1078,6 +1133,8 @@ def submit(
 
     eid = item["endpointId"]
     caps = item.get("caps") or {}
+    # 073 R5.1: 프롬프트 상한은 설정 덮어쓰기(Seedance 2.5 계열 4,000) → caps promptMaxLength → 2,500 순서.
+    prompt_max = settings.fal_prompt_max(eid, caps.get("promptMaxLength") or DEFAULT_PROMPT_MAX)
     body = build_payload(
         caps,
         prompt=prompt,
@@ -1086,6 +1143,15 @@ def submit(
         reference_jpegs_b64=reference_jpegs_b64,
         resolution=resolution,
         duration_s=duration_s,
+        prompt_max=prompt_max,
+    )
+    # 073 R5.2: 실제로 보낸 문장과 잘린 크기(바이트). promptField 가 없는 모델은 문장을 보내지 않으므로 원문 그대로.
+    prompt_field = str(caps.get("promptField") or "")
+    sent_prompt = str(body.get(prompt_field) or "") if prompt_field else prompt
+    prompt_trimmed = (
+        {"fromBytes": len(prompt.encode("utf-8")), "toBytes": len(sent_prompt.encode("utf-8"))}
+        if prompt_field and sent_prompt != prompt
+        else None
     )
 
     started = time.time()
@@ -1112,6 +1178,9 @@ def submit(
         "outputPrefix": prefix,
         "submittedAt": now_iso(),
         "promptChars": len(prompt),
+        # 073 R5.2: 실제로 보낸 문장, 잘렸으면 {fromBytes, toBytes}(아니면 None).
+        "sentPrompt": sent_prompt,
+        "promptTrimmed": prompt_trimmed,
     }
 
 

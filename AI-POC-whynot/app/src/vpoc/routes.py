@@ -56,6 +56,11 @@ def _claims_take() -> list[dict]:
     return list(items)
 
 
+def _no_admin() -> bool:
+    """기본 관리자 판별: 늘 아니다(073 X7, fail-closed). server.py 는 g.role 로 판별하는 함수를 주입한다."""
+    return False
+
+
 @dataclass
 class VpocDependencies:
     """server.py 가 주입한다. `g` 에 의존하는 것은 전부 호출자에서 받는다."""
@@ -66,6 +71,8 @@ class VpocDependencies:
     can_read_project: Callable[[dict], bool]
     can_write_project: Callable[[dict], bool]
     graph_run: Callable[[str, dict], list]
+    # 073 R10.1, X7: 관리자 판별. 주입하지 않으면 거부(_no_admin) — 기존 6개 인자 호출은 그대로 동작한다.
+    is_admin: Callable[[], bool] = _no_admin
 
 
 def _parse_iso(value: str) -> datetime | None:
@@ -113,28 +120,44 @@ def _anime_endpoint() -> str:
     return str(settings.VPOC_ANIME_MODEL or "").strip()
 
 
-def _anime_prompt(reference_count: int) -> str:
-    """fal video-to-video 변환 프롬프트(영어, 설계자 2026-10-20).
+def _anime_prompt(panel_count: int, identity_count: int = 0) -> str:
+    """fal video-to-video 변환 프롬프트(영어, 설계자 2026-10-20, 073 R8·design.md §7.3).
 
-    일반 화풍(clean line art·cel shading·flat soft colors·2D anime)을 지시하지 않는다. 참고 웹툰
-    이미지가 있으면 그 선·채색·명암·색·얼굴/눈/머리 그리는 방식을 그대로 베끼라고 한다(원작 그림체).
-    참고 이미지가 없으면(웹툰을 안 올린 경우) 일반 "Korean webtoon style" 문장을 쓴다. 어느 쪽이든
-    인물·카메라·구도·타이밍·동작은 @Video1 그대로다.
+    일반 화풍(clean line art·셀 음영·평면 색·일반 애니)을 지시하지 않는다. 이미지 번호는 패널 1..P,
+    인물 P+1..P+I 이고 _anime_reference_b64 가 보내는 순서(패널 먼저, 인물 그림 최대 1장)와 같다.
+    - 패널 ≥1: 그 패널(@Image1..P)의 선·채색·명암·색·얼굴/눈/머리 그리는 방식을 그대로 베끼라고 한다(원작 그림체).
+    - 패널 0: 일반 "2D Korean webtoon style" 앵커 문장(실사·3D 로 남지 않게).
+    - 인물 ≥1: 그 이미지는 누구인지(얼굴·머리·의상)만 알려 주는 identity reference 다. 실사 사진의 질감·조명은
+      베끼지 말라고 한다(dual 의 인물 그림은 실사다, O-8).
+    어느 쪽이든 인물·카메라·구도·타이밍·동작은 @Video1 그대로다. 옛 호출 _anime_prompt(n) 은 패널 n 장으로 본다.
     """
-    if reference_count <= 0:
-        return (
-            "Redraw @Video1 in a hand-drawn Korean webtoon style. Keep every character, the camera "
-            "movement, composition, timing and action exactly the same as @Video1. "
-            "No text, no speech bubbles."
+    panels = max(0, int(panel_count or 0))
+    identities = max(0, int(identity_count or 0))
+    parts: list[str] = []
+    if panels:
+        refs = ", ".join(f"@Image{index}" for index in range(1, panels + 1))
+        parts.append(
+            f"Redraw @Video1 in exactly the same drawing style as the reference webtoon panels ({refs}): "
+            "copy their line quality and thickness, coloring and shading, color palette and the way faces, "
+            "eyes and hair are drawn. Do NOT use a generic anime, cartoon or glossy style."
         )
-    refs = ", ".join(f"@Image{index}" for index in range(1, reference_count + 1))
-    return (
-        f"Redraw @Video1 in exactly the same drawing style as the reference webtoon images ({refs}): "
-        "copy their line quality and thickness, coloring and shading, color palette and the way faces, "
-        "eyes and hair are drawn. Do NOT use a generic anime, cartoon or glossy style. Keep every "
-        "character, the camera movement, composition, timing and action exactly the same as @Video1. "
-        "No text, no speech bubbles."
+    else:
+        parts.append(
+            "Redraw @Video1 in a hand-drawn 2D Korean webtoon style: ink line art and webtoon coloring, "
+            "not photorealistic and not 3D."
+        )
+    if identities:
+        ids = ", ".join(f"@Image{index}" for index in range(panels + 1, panels + identities + 1))
+        verb = "is" if identities == 1 else "are"
+        parts.append(
+            f"{ids} {verb} an identity reference only (who each person is: face, hairstyle and outfit). "
+            "Do not copy its photographic look, lighting or rendering."
+        )
+    parts.append(
+        "Keep every character, the camera movement, composition, timing and action exactly the same as "
+        "@Video1. No text, no speech bubbles."
     )
+    return " ".join(parts)
 
 
 def _anime_output_prefix(shot_output_key: str) -> str:
@@ -228,7 +251,15 @@ def create_blueprint(deps: VpocDependencies) -> Blueprint:
     # ------------------------------------------------ ③ 영상 설정 (설계자 2026-10-07)
 
     def _plan_resolution(step3: dict, model: str) -> str:
-        """③에서 고른 화질. 고르지 않았거나 그 모델에 없는 값이면 모델 기본값."""
+        """③에서 고른 화질. 고르지 않았거나 그 모델에 없는 값이면 모델 기본값.
+
+        073 R4.1-4.2: fal Seedance 계열은 caps 화질(ark.video_options)과 기본 720p. 그 밖(계열이 아닌 fal 포함)은
+        073 이전과 같다(VIDEO_RESOLUTIONS, 계열이 아닌 fal 은 540p, R14.3).
+        """
+        if settings.is_fal_seedance_family(model):
+            options = ark.video_options(model)
+            chosen = str(step3.get("resolution") or "")
+            return chosen if chosen in options["resolutions"] else str(options["defaultResolution"])
         allowed = settings.VIDEO_RESOLUTIONS.get(model) or [settings.RESOLUTION]
         chosen = str(step3.get("resolution") or "")
         if chosen in allowed:
@@ -237,13 +268,11 @@ def create_blueprint(deps: VpocDependencies) -> Blueprint:
         return default if default in allowed else allowed[0]
 
     def _shot_seconds(model: str, shot: dict) -> int:
-        """샷 길이(초). 고르지 않았으면 5초, 모델 범위를 벗어나면 범위 안으로 맞춘다."""
-        low, high = settings.VIDEO_DURATION_RANGE.get(model, (settings.DURATION_S, settings.DURATION_S))
-        try:
-            seconds = int(shot.get("durationS") or settings.DURATION_S)
-        except (TypeError, ValueError):
-            seconds = settings.DURATION_S
-        return max(low, min(high, seconds))
+        """샷 길이(초). 고르지 않았으면 5초, 모델 범위를 벗어나면 범위 안으로 맞춘다.
+
+        073 R3.3·X5: ark.snap_seconds 하나로 계산한다(fal Seedance 계열은 caps 값으로 올림, 그 밖은 지금과 같다).
+        """
+        return ark.snap_seconds(model, shot.get("durationS"))
 
     def _make_mode(step2: dict, model: str, step3: dict | None = None) -> str:
         """이 계획의 제작 방식(설계자 2026-10-19).
@@ -405,11 +434,13 @@ def create_blueprint(deps: VpocDependencies) -> Blueprint:
         skip: frozenset = frozenset(),
         panels: list[list] | None = None,
         brief: str = "",
+        tag_style: str = "plain",
     ) -> tuple[str, list[tuple[str | None, str]]]:
         """Seedance 로 보낼 (최종 문장, [(인물 지칭 또는 None=화풍 참고, 이미지 키)]).
 
         ③ 미리보기와 실제 제출이 같은 것을 쓴다. 이미지 순서 = 문장 속 "Image N" 순서.
         skip: 읽지 못해 빼는 이미지 키(제출 때만).
+        tag_style: 지칭 방식(073 R5.3·R5.5, ark.tag_style). 미리보기와 제출이 같은 값을 넘긴다.
         """
         entries: list[tuple[str | None, str]] = []
         user_ids: list[str] = []
@@ -437,7 +468,12 @@ def create_blueprint(deps: VpocDependencies) -> Blueprint:
         prompt = _drop_appearances(steps, prompt, user_ids)
         if brief:
             prompt = f"{prompt} {brief}".strip()
-        return ark.reference_prompt(prompt, [name for name, _ in entries], style_lock=lock), entries
+        return (
+            ark.reference_prompt(
+                prompt, [name for name, _ in entries], style_lock=lock, tag_style=tag_style
+            ),
+            entries,
+        )
 
     def _reference_b64(owner: str, pid: str, key: str, cache: dict) -> str:
         if key.startswith("panel:"):
@@ -460,7 +496,8 @@ def create_blueprint(deps: VpocDependencies) -> Blueprint:
         shots = step3.get("shots") or []
         if not shots or any(not shot.get("promptEn") for shot in shots):
             return None
-        _low, high = settings.VIDEO_DURATION_RANGE.get(model, (5, 5))
+        # 073 R3.4: 상한은 ark.one_take_max_s(ARK·fal Seedance 계열은 duration_range 최대, 그 밖은 지금 값).
+        high = ark.one_take_max_s(model)
         beats = [(_shot_seconds(model, shot), shot.get("promptEn") or "") for shot in shots]
         total = sum(seconds for seconds, _ in beats)
         if total > high:
@@ -552,7 +589,7 @@ def create_blueprint(deps: VpocDependencies) -> Blueprint:
         }
 
     def _shot4_view(
-        shot: dict, plan_shot: dict | None = None, gen_id: str = ""
+        shot: dict, plan_shot: dict | None = None, gen_id: str = "", step4: dict | None = None
     ) -> dict:
         key = shot.get("outputKey") or ""
         url = None
@@ -586,6 +623,19 @@ def create_blueprint(deps: VpocDependencies) -> Blueprint:
             "regen": regen.regen_view(shot),
             # dual(실사+애니, 설계자 2026-10-20): 변환 결과. 옛 회차는 null.
             "anime": _anime_view(shot),
+            # 073 X1: 재생성 확인 금액. 서버(regen.start_regenerate)와 같은 회차 값(steps.4 의 모델·화질 +
+            # 이 샷 durationS)으로 계산한다. ② 에서 모델을 바꿨거나 ARK 가 목록에서 빠져도 409 가 나지 않는다.
+            "regenUsd": (
+                settings.shot_usd(
+                    str(step4.get("videoModel") or ""),
+                    str(step4.get("resolution") or ""),
+                    shot.get("durationS"),
+                )
+                if step4 is not None
+                else None
+            ),
+            # 073 R5.2: fal 이 프롬프트를 잘랐으면 {fromBytes, toBytes}(화면 E8 안내), 아니면 None.
+            "promptTrimmed": shot.get("promptTrimmed"),
         }
 
     def plan_view(state: dict, project: dict, *, can_edit: bool) -> dict:
@@ -625,7 +675,7 @@ def create_blueprint(deps: VpocDependencies) -> Blueprint:
             if ark.is_ark(model) and shot.get("promptEn") and not shot.get("keyframes"):
                 # API 를 부르기 전에 보낼 문장을 그대로 보여 준다(설계자 2026-10-07 1-3).
                 row["sendPromptEn"], entries = _reference_bundle(
-                    steps, owner, pid, shot, shot.get("promptEn") or ""
+                    steps, owner, pid, shot, shot.get("promptEn") or "", tag_style=ark.tag_style(model)
                 )
                 row["referenceCount"] = len(entries)
             step3["shots"].append(row)
@@ -638,7 +688,10 @@ def create_blueprint(deps: VpocDependencies) -> Blueprint:
         if single_mode:
             # 영상 1개(single): 길이는 ② totalSeconds 하나이고, 금액도 그 1개 기준이다.
             options = ark.video_options(model)
-            single_total = _single_total(steps["2"], model)
+            # 073 R3.6: 길이는 ③ 마스터가 정한 master.totalS(generate·제출과 같은 값). 마스터가 없으면 ② 값.
+            single_total = int(
+                (steps["3"].get("master") or {}).get("totalS") or _single_total(steps["2"], model)
+            )
             step3["singleTotalS"] = single_total
             step3["singleMinS"] = int(options.get("minDurationS") or settings.DURATION_S)
             step3["singleMaxS"] = int(options.get("maxDurationS") or settings.DURATION_S)
@@ -699,10 +752,10 @@ def create_blueprint(deps: VpocDependencies) -> Blueprint:
             step3["oneTake"] = steps["3"].get("oneTake") is not False
             step3["oneTakeActive"] = bool(take)
             step3["oneTakeTotalS"] = sum(row["durationS"] for row in step3["shots"])
-            step3["oneTakeMaxS"] = settings.VIDEO_DURATION_RANGE.get(model, (5, 5))[1]
+            step3["oneTakeMaxS"] = ark.one_take_max_s(model)
             if take:
                 step3["oneTakePromptEn"], entries = _reference_bundle(
-                    steps, owner, pid, take, take["promptEn"]
+                    steps, owner, pid, take, take["promptEn"], tag_style=ark.tag_style(model)
                 )
                 step3["oneTakeReferenceCount"] = len(entries)
 
@@ -710,7 +763,7 @@ def create_blueprint(deps: VpocDependencies) -> Blueprint:
         step4 = dict(steps["4"])
         gen_id = str(steps["4"].get("genId") or "")
         step4["shots"] = [
-            _shot4_view(shot, plan_shots.get(shot.get("id")), gen_id)
+            _shot4_view(shot, plan_shots.get(shot.get("id")), gen_id, step4=steps["4"])
             for shot in steps["4"].get("shots", [])
         ]
         final = dict(steps["4"].get("final") or {"status": "none", "url": None, "error": None})
@@ -765,6 +818,8 @@ def create_blueprint(deps: VpocDependencies) -> Blueprint:
             "modelPicker": settings.MODEL_PICKER_ENABLED,
             "videoModels": ark.choices() if settings.MODEL_PICKER_ENABLED else [],
             "videoModel": model,
+            # 073 R12.3: ② 저장값. videoModel(실제로 쓸 모델)과 다르면 화면이 E6 안내를 보인다.
+            "videoModelRequested": steps["2"].get("videoModel"),
             # ③ 영상 설정(화질 · 샷 길이 범위). 고르기가 꺼져 있으면 Luma 값 그대로다.
             "videoOptions": ark.video_options(model),
             "steps": {
@@ -1117,7 +1172,7 @@ def create_blueprint(deps: VpocDependencies) -> Blueprint:
         # 설계자 2026-10-19: 모델 고르기가 켜진 Seedance/fal 모델은 영상 1개(single)가 기본·유일이다.
         # single = 마스터 프롬프트(_build_master). keyframes = 옛 키 장면 콘티(_make_storyboard).
         # shots(옛)만 샷별 계획이다.
-        make_mode = _make_mode(step2, str(step2.get("videoModel") or ""))
+        make_mode = _make_mode(step2, ark.plan_model(step2))
         board_mode = make_mode == "keyframes"
         master_mode = make_mode == "single"
 
@@ -1316,7 +1371,8 @@ def create_blueprint(deps: VpocDependencies) -> Blueprint:
         간격 = 초/(수-1)(실수). t 는 그 간격으로 정한다(마지막 키 장면 = total 초).
         """
         steps_view = {"1": step1, "2": step2, "3": {}}
-        model = str(step2.get("videoModel") or "")
+        # 073 R3.7: ② 저장값이 아니라 실제로 쓸 모델(resolve_model)의 범위로 길이를 정한다.
+        model = ark.plan_model(step2)
         if make_mode == "single":
             total = _single_total(step2, model)
             count = settings.single_keyframe_count(total)
@@ -1819,7 +1875,8 @@ def create_blueprint(deps: VpocDependencies) -> Blueprint:
         배경 그림이 먼저 있어야 미리보기가 그 배경을 참고하므로 배경 → 미리보기 순서로 그린다.
         돌려주는 dict 는 apply_result('prepare') 가 steps["3"] 에 넣는다(master + keyframes + shots=[]).
         """
-        model = str(step2.get("videoModel") or "")
+        # 073 R3.7: 실제로 쓸 모델(resolve_model)의 범위로 영상 1개 길이를 정한다.
+        model = ark.plan_model(step2)
         total = _single_total(step2, model)
         style_en = compose.STYLE[_gen_style((step2.get("story") or {}).get("style") or "")]
         characters = step2.get("characters") or []
@@ -1979,7 +2036,7 @@ def create_blueprint(deps: VpocDependencies) -> Blueprint:
         return chars, bg_key
 
     def _master_submit_inputs(
-        state: dict, owner: str, pid: str, video_model: str
+        state: dict, owner: str, pid: str, video_model: str, *, tag_style: str = "plain"
     ) -> tuple[str, str, list[str], str]:
         """영상 1개(single) 제출 인자: (마스터 문장, 참고 이미지 설명 접두, 참고 이미지 b64 목록, 첫 이미지 b64).
 
@@ -1987,6 +2044,7 @@ def create_blueprint(deps: VpocDependencies) -> Blueprint:
         따로 돌려주고, **참고 이미지를 실제로 보낼 때만** 호출부가 앞에 붙인다(설계자 2026-10-19 수정).
         참고 이미지가 없는 경우(Luma 시작 이미지 · fal start-only · fal 텍스트→영상)에는 틀린 설명이
         붙지 않도록 접두를 빼고 마스터 문장만 보낸다. 참고 이미지 = 인물 사진(등장 순서) + 배경 그림.
+        tag_style: 지칭 방식(073 R5.3, ark.tag_style). "at" 이면 "@Image1 is ...". 번호는 실제로 읽은 그림 순서다.
         """
         master = state["steps"]["3"].get("master") or {}
         base_prompt = compose.master_video_prompt(master, max_chars=ark.MAX_PROMPT_CHARS)
@@ -2002,12 +2060,12 @@ def create_blueprint(deps: VpocDependencies) -> Blueprint:
             except Exception as exc:  # noqa: BLE001
                 log.warning("vpoc.master.ref_failed key=%s err=%s", key, exc)
                 continue
-            labels.append(f"Image {index} is {handle}")
+            labels.append(f"{ark.image_label(index, index, tag_style)} is {handle}")
             index += 1
         if bg_key and len(references) < MAX_REFERENCE_IMAGES:
             try:
                 references.append(images.keyframe_base64(bg_key))
-                labels.append(f"Image {index} is the background setting")
+                labels.append(f"{ark.image_label(index, index, tag_style)} is the background setting")
                 index += 1
             except Exception as exc:  # noqa: BLE001
                 log.warning("vpoc.master.bg_failed key=%s err=%s", bg_key, exc)
@@ -2135,12 +2193,38 @@ def create_blueprint(deps: VpocDependencies) -> Blueprint:
         # 이 회차의 모델 · 화질 · 샷 길이(generate 가 정한다). 옛 계획에는 없고, 그때는 Luma 기본값이다.
         step4 = state["steps"]["4"]
         video_model = str(step4.get("videoModel") or ark.DEFAULT_MODEL)
-        use_ark = ark.is_ark(video_model)
-        video_resolution = str(step4.get("resolution") or settings.default_resolution(video_model))
+        # 073 R11.1·R11.4: 외부 공급자 판정은 등록 여부와 상관없다. 미등록 fal 회차가 Luma 로 새지 않는다.
+        use_ark = ark.is_external(video_model)
+        # 073 R4.3-4.4: fal Seedance 계열은 caps 에 없는 저장 화질(070 이전 540p 등)을 ③ 기본(720p)으로 바꿔
+        # 명시해 보낸다. 그 밖(계열이 아닌 fal 포함)은 지금처럼 저장값 또는 모델 기본값.
+        video_resolution, adjusted_from = ark.submit_resolution(video_model, step4.get("resolution"))
+        if adjusted_from:
+            log.info(
+                "vpoc.fal.resolution_adjusted model=%s from=%s to=%s plan=%s shot=%s",
+                video_model,
+                adjusted_from,
+                video_resolution,
+                plan_id,
+                shot["id"],
+            )
         seconds = int(shot.get("durationS") or _shot_seconds(video_model, plan_shot))
         try:
             if use_ark:
-                low, high = settings.VIDEO_DURATION_RANGE.get(video_model, (seconds, seconds))
+                if settings.is_fal(video_model) and not fal.is_registered(video_model):
+                    # E5(073 R11.1, D11): 이 회차의 fal 모델이 해제됐다. Luma·다른 엔드포인트로 몰래 보내지 않는다.
+                    # 아래 except VpocError 가 샷을 failed 로 두고, 원장에는 계상하지 않는다.
+                    raise VpocError(
+                        "routes.submit_shot",
+                        "ModelUnavailable",
+                        f"{video_model}: 등록되지 않은 모델입니다. 이 회차의 fal 모델이 해제되어 만들 수 없습니다. "
+                        "관리자에게 다시 등록을 요청하거나 ③에서 다시 승인해 주세요.",
+                        400,
+                    )
+                # 073 R3.8·R14.3: 길이 검사는 BytePlus 와 fal Seedance 계열만. 계열이 아닌 fal 은 지금처럼 건너뛴다.
+                if video_model in settings.ARK_MODEL_IDS or settings.is_fal_seedance_family(video_model):
+                    low, high = ark.duration_range(video_model)
+                else:
+                    low, high = seconds, seconds
                 if not low <= seconds <= high:
                     # 상한을 고치기 전에 승인된 계획(예: 20초 한 번에 이어 만들기)은 다시 보내도 거절된다.
                     raise VpocError(
@@ -2165,13 +2249,14 @@ def create_blueprint(deps: VpocDependencies) -> Blueprint:
                     # 참고 이미지, startImageField 만 있는 fal(이미지→영상 전용)은 첫 비트 미리보기를
                     # 시작 이미지로(끝 이미지 없음), 텍스트→영상 fal 은 이미지 없이.
                     base_prompt, lead, references, first_master = _master_submit_inputs(
-                        state, owner, pid, video_model
+                        state, owner, pid, video_model, tag_style=ark.tag_style(video_model)
                     )
                     use_reference = True
                     start_only = False
                     text_only = False
                     if settings.is_fal(video_model):
-                        caps = (fal.find(video_model) or {}).get("caps") or {}
+                        # fal Seedance 계열 얼굴은 짝(r2v) caps 로 참고 방식을 정한다(073 R2.3). 그 밖은 자기 caps.
+                        caps = fal.reference_caps(video_model)
                         use_reference = bool(caps.get("referenceImagesField"))
                         start_only = not use_reference and bool(caps.get("startImageField"))
                         text_only = not use_reference and not start_only
@@ -2179,7 +2264,8 @@ def create_blueprint(deps: VpocDependencies) -> Blueprint:
                         # 참고 이미지를 실제로 보낼 때만 "Image N is ..." 설명을 앞에 붙인다.
                         sent_prompt = (lead + base_prompt).strip()
                         keyframe, last_frame = "", ""
-                        mode = "reference"
+                        # 참고 그림을 하나도 읽지 못했으면 글만 보낸 것이다(073 §4: mode=text).
+                        mode = "reference" if references else "text"
                     elif start_only:
                         # 참고 이미지 없음 → 틀린 "Image N" 설명을 붙이지 않는다(마스터 문장만).
                         sent_prompt = base_prompt
@@ -2196,8 +2282,17 @@ def create_blueprint(deps: VpocDependencies) -> Blueprint:
                     failed: set[str] = set()
                     encoded: dict[str, str] = {}
                     tile_cache: dict = {}
+                    # 073 R5.3: 지칭 방식(계열 얼굴이면 설정, 그 밖은 "Image N"). ③ 미리보기와 같은 값이다.
+                    shot_tag_style = ark.tag_style(video_model)
                     for _, key in _reference_bundle(
-                        state["steps"], owner, pid, plan_shot, prompt, panels=shot_panels, brief=shot_brief
+                        state["steps"],
+                        owner,
+                        pid,
+                        plan_shot,
+                        prompt,
+                        panels=shot_panels,
+                        brief=shot_brief,
+                        tag_style=shot_tag_style,
                     )[1]:
                         try:
                             encoded[key] = _reference_b64(owner, pid, key, tile_cache)
@@ -2213,6 +2308,7 @@ def create_blueprint(deps: VpocDependencies) -> Blueprint:
                         skip=frozenset(failed),
                         panels=shot_panels,
                         brief=shot_brief,
+                        tag_style=shot_tag_style,
                     )
                     references = []
                     for _, key in entries:
@@ -2226,8 +2322,35 @@ def create_blueprint(deps: VpocDependencies) -> Blueprint:
                         mode = "keyframe"
                     if references:
                         mode = "reference"
+                # 엔드포인트 선택(073 §4·R2.3): fal Seedance 계열 얼굴이면 참고·시작 유무로 i2v/r2v 를 고른다.
+                # 그 밖(ARK·계열이 아닌 fal)은 회차 모델 그대로. 회차 저장값(steps.4.videoModel)은 바꾸지 않는다.
+                submit_model = video_model
+                if settings.is_fal(video_model):
+                    submit_model = fal.route_model(
+                        video_model, has_references=bool(references), has_start=bool(keyframe)
+                    )
+                    if submit_model != video_model and not fal.is_registered(submit_model):
+                        # E5(R11.1): 고른 엔드포인트가 회차 도중 해제됐다. 다른 엔드포인트로 몰래 보내지 않는다.
+                        raise VpocError(
+                            "routes.submit_shot",
+                            "ModelUnavailable",
+                            f"{submit_model}: 등록되지 않은 모델입니다. 이 회차의 fal 모델이 해제되어 만들 수 없습니다. "
+                            "관리자에게 다시 등록을 요청하거나 ③에서 다시 승인해 주세요.",
+                            400,
+                        )
+                    if settings.is_fal_seedance_family(video_model):
+                        # R2.7: 어느 엔드포인트로 보냈는지(id·개수만, 프롬프트 본문은 남기지 않는다).
+                        log.info(
+                            "vpoc.fal.route model=%s endpoint=%s mode=%s refs=%d plan=%s shot=%s",
+                            video_model,
+                            submit_model,
+                            mode,
+                            len(references),
+                            plan_id,
+                            shot["id"],
+                        )
                 job = ark.submit(
-                    model=video_model,
+                    model=submit_model,
                     owner=owner,
                     project_id=pid,
                     plan_id=plan_id,
@@ -2294,7 +2417,12 @@ def create_blueprint(deps: VpocDependencies) -> Blueprint:
             model=video_model,
             resolution=video_resolution,
             seconds=seconds,
+            # 073 X2: fal 이면 원장 model 칸에 실제로 보낸 엔드포인트(i2v·r2v·그 모델)를 남긴다. 금액은 회차 모델 단가.
+            endpoint=job["provider"] if settings.is_fal(video_model) else "",
         )
+        # 073 R5.2: fal 이 실제로 보낸 문장·잘린 크기. ARK·Luma 반환에는 없다(None).
+        job_sent_prompt = job.get("sentPrompt")
+        prompt_trimmed = job.get("promptTrimmed") or None
         target.update(
             {
                 "status": "submitted",
@@ -2307,14 +2435,22 @@ def create_blueprint(deps: VpocDependencies) -> Blueprint:
                 "note": None,
                 "error": None,
                 "lastPolledAt": "",
+                # 이번 제출 기준으로 늘 다시 쓴다(앞 시도가 잘렸어도 이번에 안 잘렸으면 None).
+                "promptTrimmed": prompt_trimmed,
             }
         )
         # 영상 1개(single): 승인한 프롬프트 그대로 보냈음을 ④ 화면에서 확인할 수 있게 기록한다(설계자 2026-10-19).
+        # 073 R5.2: 실제로 보낸 문장(fal 이 잘랐으면 잘린 문장). 잘린 샷은 single 이 아니어도 ④ 에 보인다(E8).
         is_single_record = shot["id"] == ark.ONE_TAKE_ID and state["steps"]["4"].get("single")
         if is_single_record:
             master = state["steps"]["3"].get("master") or {}
-            target["sentPromptEn"] = sent_prompt
+            target["sentPromptEn"] = job_sent_prompt or sent_prompt
             target["masterVersion"] = int(master.get("version") or 1)
+        elif prompt_trimmed:
+            target["sentPromptEn"] = job_sent_prompt or sent_prompt
+        elif target.get("sentPromptEn"):
+            # 앞 시도가 잘려 남은 문장을 지운다(이번 제출은 잘리지 않았다).
+            target["sentPromptEn"] = None
         # 샷별 작업 기록. 조회(GET)는 state.json 대신 이 파일만 써도 되는 감사 기록이다.
         store.STORE.write_json(
             store.job_key(owner, pid, plan_id, shot["id"], attempt, gen_id),
@@ -2333,12 +2469,16 @@ def create_blueprint(deps: VpocDependencies) -> Blueprint:
                 "outputPrefix": job["outputPrefix"],
                 "usd": settings.shot_usd(video_model, video_resolution, seconds),
                 "videoModel": video_model,
+                # 실제로 보낸 엔드포인트(073 R2.5). fal Seedance 계열이면 i2v 또는 r2v, 그 밖은 provider 와 같다.
+                "endpointModel": job["provider"],
                 "resolution": video_resolution,
                 "durationS": seconds,
-                # Seedance 에 실제로 보낸 문장(참고 이미지 지시 포함). Luma 는 prompt 와 같다.
-                "sentPrompt": sent_prompt if use_ark else prompt,
+                # Seedance 에 실제로 보낸 문장(참고 이미지 지시 포함). fal 은 잘린 뒤 문장(073 R5.2). Luma 는 prompt 와 같다.
+                "sentPrompt": job_sent_prompt or (sent_prompt if use_ark else prompt),
+                # fal 이 잘랐으면 {fromBytes, toBytes}(073 R5.2), 아니면 None.
+                "promptTrimmed": prompt_trimmed,
                 # single 은 승인한 마스터 프롬프트 · 버전을 기록한다.
-                "sentPromptEn": sent_prompt if is_single_record else None,
+                "sentPromptEn": (job_sent_prompt or sent_prompt) if is_single_record else None,
                 "masterVersion": (
                     int((state["steps"]["3"].get("master") or {}).get("version") or 1)
                     if is_single_record
@@ -2349,17 +2489,19 @@ def create_blueprint(deps: VpocDependencies) -> Blueprint:
 
     # ---------------------------------------------------------------- 실사 → 애니 변환(dual)
 
-    def _anime_reference_b64(state: dict, owner: str, pid: str) -> list[str]:
-        """변환 참고 이미지(원작 그림체) 최대 4장(data URI b64). 원작 웹툰 패널을 먼저.
+    def _anime_reference_b64(state: dict, owner: str, pid: str) -> tuple[list[str], int]:
+        """변환 참고 이미지(원작 그림체) 최대 4장(data URI b64)과 그중 패널 수 (refs, panel_count).
 
         설계자 2026-10-20: ① sceneFiles(웹툰 장면 조각) 최대 3장을 먼저, ② ③ 캐릭터 그림 1장.
         원작 그림체가 기준이므로 패널을 앞에 둔다(프롬프트의 @Image1.. 순서와 같다). 없으면 생략.
+        073 R8.4: 패널 수를 함께 돌려줘 _anime_prompt 가 패널(그림체)·인물(identity only) 번호를 나눠 부른다.
         기존 이미지 로더(images.panel_jpeg·images.jpeg_for_reference·images.keyframe_base64)를 재사용한다.
-        읽기 실패는 조용히 건너뛴다.
+        읽기 실패는 조용히 건너뛴다(실패한 그림은 번호에 들어가지 않는다).
         """
         steps = state["steps"]
         out: list[str] = []
         cache: dict = {}
+        panel_count = 0
         # ① 웹툰 장면 조각(앞에서부터 고르게 최대 3장 — 원작 그림체 참고, 먼저).
         panels = _story_panels(steps, owner, pid)
         for file_id, index in _spread(panels, 3):
@@ -2367,6 +2509,7 @@ def create_blueprint(deps: VpocDependencies) -> Blueprint:
                 break
             try:
                 out.append(images.jpeg_for_reference(images.panel_jpeg(owner, pid, file_id, index, cache)))
+                panel_count += 1
             except Exception as exc:  # noqa: BLE001
                 log.warning("vpoc.anime.panel_ref_failed file=%s err=%s", file_id, exc)
         # ② ③ 캐릭터 그림 1장(준비된 것 중 첫 번째).
@@ -2382,7 +2525,8 @@ def create_blueprint(deps: VpocDependencies) -> Blueprint:
             except Exception as exc:  # noqa: BLE001
                 log.warning("vpoc.anime.char_ref_failed key=%s err=%s", key, exc)
             break  # 캐릭터 그림은 1장만.
-        return out[:4]
+        refs = out[:4]
+        return refs, min(panel_count, len(refs))
 
     def _run_anime_job(owner: str, pid: str, plan_id: str, shot_id: str, claim: str, user: str) -> None:
         """선점(preparing+claim)된 anime 하나를 **mutator 밖에서** 실제 제출한다(016 수정 2026-10-20).
@@ -2476,8 +2620,9 @@ def create_blueprint(deps: VpocDependencies) -> Blueprint:
                     anime0.get("durationS") or settings.DURATION_S
                 )
 
-                references = _anime_reference_b64(state, owner, pid)
-                prompt = _anime_prompt(len(references))
+                references, panel_count = _anime_reference_b64(state, owner, pid)
+                # 073 R8: 패널(그림체 기준) 1..P, 인물 그림(identity only) P+1.. — 보낸 순서와 번호가 같다.
+                prompt = _anime_prompt(panel_count, identity_count=len(references) - panel_count)
                 output_prefix = _anime_output_prefix(source_key)
                 job = fal.submit_edit(
                     endpoint=_anime_endpoint(),
@@ -2709,7 +2854,8 @@ def create_blueprint(deps: VpocDependencies) -> Blueprint:
         inflight = sum(1 for _, target in all_targets() if target.get("status") == "submitted")
         limit = (
             settings.ARK_MAX_INFLIGHT
-            if ark.is_ark(str(state["steps"]["4"].get("videoModel") or ""))
+            # 073 R11.4: 미등록 fal 회차도 외부 공급자 한도로 센다(is_external 은 등록 여부를 보지 않는다).
+            if ark.is_external(str(state["steps"]["4"].get("videoModel") or ""))
             else settings.MAX_INFLIGHT
         )
         briefing = str(state["steps"]["4"].get("briefing") or "")
@@ -3772,12 +3918,17 @@ def create_blueprint(deps: VpocDependencies) -> Blueprint:
             # ③ 영상 설정: 샷 길이(초). 모델 범위를 벗어나면 저장하지 않고 알린다.
             # 영상 설정은 dev 전용이다(모델 고르기가 꺼진 운영은 Luma 540p · 5초 그대로).
             if settings.MODEL_PICKER_ENABLED and incoming and "durationS" in incoming:
-                low, high = settings.VIDEO_DURATION_RANGE.get(model, (5, 5))
+                # 073 fix1(R3.9): 범위는 ark.duration_range(ARK·Luma·비계열 fal 은 073 이전 값과 같다).
+                # fal Seedance 계열은 범위 안의 caps durations(③ 선택지 durationChoices)에 있어야 한다.
+                low, high = ark.duration_range(model)
                 try:
                     seconds = int(incoming["durationS"])
                 except (TypeError, ValueError):
                     seconds = -1
-                if not low <= seconds <= high:
+                allowed_seconds = low <= seconds <= high
+                if allowed_seconds and settings.is_fal_seedance_family(model):
+                    allowed_seconds = seconds in (ark.video_options(model).get("durationChoices") or [])
+                if not allowed_seconds:
                     raise VpocError(
                         "routes.save_step",
                         "BadDuration",
@@ -3790,7 +3941,11 @@ def create_blueprint(deps: VpocDependencies) -> Blueprint:
             step["oneTake"] = bool(body.get("oneTake"))
         if settings.MODEL_PICKER_ENABLED and "resolution" in body:
             wanted = str(body.get("resolution") or "")
-            allowed = settings.VIDEO_RESOLUTIONS.get(model) or [settings.RESOLUTION]
+            # 073 fix1(R4.7): fal Seedance 계열은 ③ 선택지와 같은 caps 화질(ark.video_options). 그 밖은 지금과 같다.
+            if settings.is_fal_seedance_family(model):
+                allowed = [str(item) for item in ark.video_options(model)["resolutions"]]
+            else:
+                allowed = settings.VIDEO_RESOLUTIONS.get(model) or [settings.RESOLUTION]
             if wanted not in allowed:
                 raise VpocError(
                     "routes.save_step",
@@ -4083,6 +4238,19 @@ def create_blueprint(deps: VpocDependencies) -> Blueprint:
             one_take_for_cost = None if single_master else _one_take(state["steps"], video_model)
             if single_master:
                 single_total = int(single_master.get("totalS") or _single_total(state["steps"]["2"], video_model))
+                # 073 R3.5·X6(E2): 영상 1개 길이가 이 모델이 한 번에 만들 수 있는 범위(_single_total 과 같은 출처
+                # ark.video_options) 밖이면 금액 검사보다 먼저 막는다. 계열이 아닌 fal 은 caps 최소~최대(지금과 같다).
+                single_options = ark.video_options(video_model)
+                single_low = int(single_options.get("minDurationS") or settings.DURATION_S)
+                single_high = int(single_options.get("maxDurationS") or settings.DURATION_S)
+                if not single_low <= single_total <= single_high:
+                    raise VpocError(
+                        "routes.run",
+                        "BadDuration",
+                        f"{ark.label(video_model)}는 한 번에 {single_low}~{single_high}초만 만들 수 있습니다"
+                        f"(이 영상 {single_total}초). ③ 계획을 다시 만들어 주세요.",
+                        400,
+                    )
                 expected = round(settings.shot_usd(video_model, video_resolution, single_total), 2)
                 anime_seconds = [single_total] if dual else []
             elif one_take_for_cost:
@@ -4637,9 +4805,23 @@ def create_blueprint(deps: VpocDependencies) -> Blueprint:
     @deps.require_auth
     @enveloped("routes.fal_unregister")
     def fal_unregister(endpoint_id: str):
-        """등록 해제. 이미 그 모델을 고른 계획은 selected() 가 Luma 로 되돌린다(기존 동작)."""
+        """등록 해제(관리자만, 073 R10.1-10.2). 이미 그 모델을 고른 계획은 selected() 가 Luma 로 되돌리고,
+        진행 중 회차의 제출은 submit_shot 이 E5 로 실패시킨다(R11.1)."""
         _require_picker("routes.fal_unregister")
+        user = deps.current_username()
+        # 로그용 id: URL 경로에서 온 값이라 줄바꿈 등 제어 문자를 지우고 길이를 묶는다(로그 위조 방지).
+        endpoint = "".join(ch for ch in str(endpoint_id or "").strip()[:200] if ch.isprintable())
+        if not deps.is_admin():
+            # 레지스트리는 전 사용자 공용이다. 해제 한 번에 운영 Seedance 전체가 바뀌므로 관리자만(D10).
+            log.warning("vpoc.fal.unregister.denied user=%s endpoint=%s", user, endpoint)
+            raise VpocError(
+                "routes.fal_unregister",
+                "AdminOnly",
+                "fal 모델 해제는 관리자만 할 수 있습니다.",
+                403,
+            )
         removed = fal.unregister(endpoint_id)
+        log.info("vpoc.fal.unregistered endpoint=%s by=%s removed=%s", endpoint, user, removed)
         return jsonify({"ok": True, "removed": removed})
 
     return bp

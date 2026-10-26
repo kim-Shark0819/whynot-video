@@ -4539,11 +4539,25 @@
     var duration = 0;
     var createPromise;
     try {
-      createPromise = window.vnewPreviz.create(viewport, {
-        scenes: scenes,
-        textureFetch: previzTextureFetch,
-        width: 1280,
-        height: 720
+      // vnew-previz.js 는 app.js 가 동적 import 한다(073 R9). 로드가 끝난 뒤(window.vnewPrevizReady)
+      // 뷰포트를 만든다. 로드 실패면 E7("3D 뷰어를 불러오지 못했습니다: <원인>")을 아래 .catch 로 보인다.
+      createPromise = Promise.resolve(window.vnewPrevizReady).then(function () {
+        if (!window.vnewPreviz || typeof window.vnewPreviz.create !== "function") {
+          var cause = window.vnewPrevizError
+            ? errMessage(window.vnewPrevizError)
+            : "프리비즈 모듈(vnew-previz.js)이 로드되지 않았습니다.";
+          var loadError = new Error("3D 뷰어를 불러오지 못했습니다: " + cause);
+          loadError.previzLoad = true;
+          throw loadError;
+        }
+        // 기다리는 사이 화면을 떠났으면 three.js 장면을 만들지 않는다.
+        if (!viewport.isConnected) return null;
+        return window.vnewPreviz.create(viewport, {
+          scenes: scenes,
+          textureFetch: previzTextureFetch,
+          width: 1280,
+          height: 720
+        });
       });
     } catch (err) {
       showError("3D 뷰어를 열지 못했습니다: " + errMessage(err));
@@ -4554,6 +4568,7 @@
     // 떠났으면(뷰포트가 DOM 에서 빠졌으면) 결과를 버리고 그 controller 를 정리한다.
     createPromise
       .then(function (ctl) {
+        if (!ctl) return;
         if (!viewport.isConnected) {
           try {
             ctl.destroy();
@@ -4567,7 +4582,8 @@
         buildTimeline();
       })
       .catch(function (err) {
-        showError("3D 뷰어를 열지 못했습니다: " + errMessage(err));
+        // 모듈 로드 실패(E7)는 그 문구 그대로, 그 밖(텍스처·WebGL 등)은 기존 문구로 보인다.
+        showError(err && err.previzLoad ? err.message : "3D 뷰어를 열지 못했습니다: " + errMessage(err));
       });
 
     // 타임라인 눈금: 컷마다 한 칸(길이 비례). 번호·대사 말풍선.

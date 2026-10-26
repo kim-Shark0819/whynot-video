@@ -216,6 +216,119 @@ def fal_endpoint_id(model: str) -> str:
     """fal 모델 ID 에서 endpoint_id 만 떼어 낸다. fal 이 아니면 빈 문자열."""
     return str(model or "")[len(FAL_ID_PREFIX):] if is_fal(model) else ""
 
+
+# fal Seedance 계열(073 D2, R2): ② 목록에는 "얼굴"(image-to-video) 하나만 보이고, 제출 때 샷 방식에 따라
+# 얼굴(i2v) 또는 "짝"(reference-to-video)으로 보낸다(fal.route_model). 형식 `얼굴=짝[,얼굴=짝…]`
+# (endpoint id, `fal:` 없이). 빈 문자열이면 {} — 계열 라우팅을 끄고 070 동작(i2v 하나)으로 돌아간다.
+# 형식이 틀린 항목(= 없음, 한쪽이 빔, 공백 포함, `fal:` 접두, 얼굴=짝 같음)은 버린다.
+FAL_SEEDANCE_FAMILY_DEFAULT = "bytedance/seedance-2.5/image-to-video=bytedance/seedance-2.5/reference-to-video"
+FAL_SEEDANCE_LABEL = "Seedance 2.5 (fal)"
+# fal Seedance 계열 샷·영상 1개 길이 상한(초, 073 D3·R3.2). caps 는 4~30초지만 BytePlus 와 같은 15초로 묶는다
+# (30초는 단가·실패 위험이 크고 미검증). 계열이 아닌 fal 모델에는 쓰지 않는다(R14.3). 최소 1.
+FAL_SEEDANCE_MAX_S = max(1, _int("VPOC_FAL_SEEDANCE_MAX_S", 15))
+
+
+def _parse_fal_family(raw: str) -> dict[str, str]:
+    """`얼굴=짝[,얼굴=짝…]` → {얼굴 endpoint: 짝 endpoint}. 틀린 항목은 버린다."""
+    family: dict[str, str] = {}
+    for item in str(raw or "").split(","):
+        face, sep, partner = item.strip().partition("=")
+        face, partner = face.strip(), partner.strip()
+        if not sep or not face or not partner or face == partner:
+            continue
+        if any(ch.isspace() for ch in face + partner) or "=" in partner:
+            continue
+        if face.startswith(FAL_ID_PREFIX) or partner.startswith(FAL_ID_PREFIX):
+            continue
+        family[face] = partner
+    return family
+
+
+FAL_SEEDANCE_FAMILY: dict[str, str] = _parse_fal_family(
+    os.getenv("VPOC_FAL_SEEDANCE_FAMILY", FAL_SEEDANCE_FAMILY_DEFAULT)
+)
+
+
+def fal_family_partner(model: str) -> str:
+    """계열 얼굴 모델("fal:<i2v>")이면 짝 모델 id("fal:<r2v>"), 아니면 빈 문자열."""
+    partner = FAL_SEEDANCE_FAMILY.get(fal_endpoint_id(model), "")
+    return (FAL_ID_PREFIX + partner) if partner else ""
+
+
+def is_fal_seedance_family(model: str) -> bool:
+    """fal Seedance 계열(얼굴 또는 짝 endpoint)인지. fal 이 아니거나 계열 밖이면 False."""
+    eid = fal_endpoint_id(model)
+    if not eid:
+        return False
+    return eid in FAL_SEEDANCE_FAMILY or eid in FAL_SEEDANCE_FAMILY.values()
+
+
+# fal 프롬프트 상한(UTF-8 바이트) 덮어쓰기(073 D5, R5.1). 형식 `글롭=바이트[,…]`(endpoint id, 소문자 fnmatch).
+# 기본은 Seedance 2.5 계열을 BytePlus 와 같은 4,000 으로 둔다(fal 스키마에는 maxLength 가 없어 2,500 으로 잘렸다).
+# 빈 문자열이면 덮어쓰기 없음(caps promptMaxLength · 2,500). 양의 정수가 아니거나 형식이 틀린 항목은 버린다.
+FAL_PROMPT_MAX_OVERRIDES_DEFAULT = "bytedance/seedance-2.5/*=4000"
+# fal 기본 상한(fal.DEFAULT_PROMPT_MAX 와 같은 값. 순환 import 를 피하려 여기 따로 둔다).
+FAL_PROMPT_MAX_FALLBACK = 2500
+
+
+def _parse_prompt_max_overrides(raw: str) -> tuple[tuple[str, int], ...]:
+    """`글롭=바이트[,…]` → ((소문자 글롭, 바이트), …). 순서를 지킨다(첫 번째로 맞는 값을 쓴다)."""
+    out: list[tuple[str, int]] = []
+    for item in str(raw or "").split(","):
+        pattern, sep, value = item.strip().partition("=")
+        pattern, value = pattern.strip(), value.strip()
+        if not sep or not pattern or not value or any(ch.isspace() for ch in pattern):
+            continue
+        try:
+            limit = int(value)
+        except ValueError:
+            continue
+        if limit <= 0:
+            continue
+        out.append((pattern.lower(), limit))
+    return tuple(out)
+
+
+FAL_PROMPT_MAX_OVERRIDES: tuple[tuple[str, int], ...] = _parse_prompt_max_overrides(
+    os.getenv("VPOC_FAL_PROMPT_MAX_OVERRIDES", FAL_PROMPT_MAX_OVERRIDES_DEFAULT)
+)
+
+
+def fal_prompt_max(endpoint: str, default: object = None) -> int:
+    """이 fal endpoint 의 프롬프트 상한(바이트, 073 R5.1).
+
+    FAL_PROMPT_MAX_OVERRIDES 의 글롭 중 첫 번째로 맞는 값. 없으면 default(caps promptMaxLength),
+    default 가 양의 정수가 아니면 2,500. endpoint 는 endpoint id 또는 "fal:<endpoint id>" 둘 다 받는다.
+    """
+    import fnmatch
+
+    eid = str(endpoint or "").strip()
+    if eid.startswith(FAL_ID_PREFIX):
+        eid = eid[len(FAL_ID_PREFIX):]
+    eid = eid.lower()
+    if eid:
+        for pattern, limit in FAL_PROMPT_MAX_OVERRIDES:
+            if fnmatch.fnmatch(eid, pattern):
+                return limit
+    try:
+        value = int(default)  # type: ignore[call-overload]
+    except (TypeError, ValueError):
+        value = 0
+    return value if value > 0 else FAL_PROMPT_MAX_FALLBACK
+
+
+# fal Seedance 계열 r2v 프롬프트의 이미지 지칭 방식(073 R5.3·R5.7). "at" = @Image1…, "plain" = Image 1….
+# 앞뒤 공백을 지우고 소문자로 읽는다. 빈 값·틀린 값은 "at". 유료 검증 V-2 가 실패하면 config 만 plain 으로 바꾼다.
+FAL_TAG_STYLES = ("at", "plain")
+
+
+def _parse_tag_style(raw: object) -> str:
+    value = str(raw or "").strip().lower()
+    return value if value in FAL_TAG_STYLES else "at"
+
+
+FAL_SEEDANCE_TAG_STYLE = _parse_tag_style(os.getenv("VPOC_FAL_SEEDANCE_TAG_STYLE", "at"))
+
 # ③ 영상 설정 — 사용자가 화질과 샷 길이를 고른다(설계자 2026-10-07).
 # 샷 길이 상한: Seedance 2.0 15초 · 2.5 15초 · Luma Ray2 5초. 하한은 4초.
 # 2.0 은 처음에 30초로 두었으나 BytePlus 가 16초 이상을 "duration not valid"(t2v · r2v 모두)로

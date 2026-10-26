@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import json
 import logging
+import threading
 import time
 import urllib.error
 import urllib.request
@@ -56,13 +57,27 @@ def is_ark_job(invocation_arn: str) -> bool:
     return str(invocation_arn or "").startswith(ARN_PREFIX) or fal.is_fal_job(invocation_arn)
 
 
+def is_external(model: str) -> bool:
+    """외부 공급자(BytePlus·fal) 경로인지. 등록 여부와 상관없다(073 R11.1·R11.4, D11).
+
+    is_ark 는 미등록 fal 을 False 로 보아 제출이 Luma 로 새고 원장이 0달러가 됐다(리뷰 O-6).
+    제출(submit_shot)·동시 제출 한도(refresh_shots)는 이 함수로 가르고, 미등록 fal 은 submit_shot 이 E5 로 막는다.
+    """
+    return model in settings.ARK_MODEL_IDS or settings.is_fal(model)
+
+
 def model_id(model: str) -> str:
     return str(settings.ARK_MODEL_IDS.get(model) or "").strip()
 
 
 def label(model: str) -> str:
-    """화면에 보일 이름. fal 은 등록 label(`fal · <display_name>`), 나머지는 LABELS."""
+    """화면에 보일 이름. fal 은 등록 label(`fal · <display_name>`), 나머지는 LABELS.
+
+    fal Seedance 계열 얼굴(i2v)은 짝(r2v)과 묶어 하나로 보이므로 settings.FAL_SEEDANCE_LABEL(073 R2.1).
+    """
     if settings.is_fal(model):
+        if settings.fal_family_partner(model):
+            return settings.FAL_SEEDANCE_LABEL
         item = fal.find(model)
         return ("fal · " + str(item.get("label"))) if item else model
     return LABELS.get(model, model)
@@ -75,6 +90,22 @@ def unavailable_reason(model: str) -> str:
     # 기존(BytePlus ARK 직결) Seedance 는 꺼져 있으면 고를 수 없다(설계자 2026-10-26).
     if model in settings.ARK_MODEL_IDS and not settings.ARK_SEEDANCE_ENABLED:
         return "기존 Seedance 는 사용 중지 — fal Seedance 를 쓰세요"
+    if not model_id(model):
+        return "모델 ID 미설정"
+    if not settings.ARK_API_KEY:
+        return "API 키 미설정"
+    return ""
+
+
+def _submit_block_reason(model: str) -> str:
+    """제출을 막는 이유. 없으면 빈 문자열(073 D1, R1.1·R1.5).
+
+    unavailable_reason 에서 플래그 게이트(VPOC_ARK_SEEDANCE_ENABLED)만 뺀 것이다. 새 선택·새 생성은
+    unavailable_reason(게이트 포함)을 그대로 쓰고, 이미 ARK 로 승인된 회차(steps.4.videoModel)의
+    제출·재제출·재생성은 플래그와 상관없이 BytePlus 로 끝낸다. 모델 ID·키 검사는 같다.
+    """
+    if settings.is_fal(model):
+        return fal.unavailable_reason(model)
     if not model_id(model):
         return "모델 ID 미설정"
     if not settings.ARK_API_KEY:
@@ -146,10 +177,16 @@ def choices() -> list[dict]:
             continue
         model = str(item.get("id") or "")
         reason = unavailable_reason(model)
+        # 이름(073 R2.1): 계열 얼굴은 label()의 "Seedance 2.5 (fal)", 나머지는 지금과 같은 `fal · <label>`.
+        name = (
+            label(model)
+            if settings.fal_family_partner(model)
+            else "fal · " + str(item.get("label") or item.get("endpointId") or model)
+        )
         items.append(
             {
                 "id": model,
-                "label": "fal · " + str(item.get("label") or item.get("endpointId") or model),
+                "label": name,
                 "available": not reason,
                 "reason": reason,
                 "perShotUsd": 0,
@@ -175,8 +212,29 @@ def resolve_model(model: str) -> str:
         return model
     target = str(settings.ARK_SEEDANCE_FAL_MAP.get(model) or "")
     if target and fal.is_registered(target) and not fal.unavailable_reason(target):
+        _log_resolved(model, target, "ark_disabled")
         return target
+    _log_resolved(model, DEFAULT_MODEL, "fal_target_unavailable")
     return DEFAULT_MODEL
+
+
+# 모델 치환 로그 중복 억제(073 R12.1, D12). plan_view 조회(폴링)마다 resolve_model·selected 가 불리므로
+# 같은 (from, to, reason) 은 프로세스당 10분에 한 번만 남긴다. 키는 그 조합 수만큼만 생긴다.
+_RESOLVED_LOG_INTERVAL_S = 600
+_resolved_logged: dict[tuple[str, str, str], float] = {}
+_resolved_lock = threading.Lock()
+
+
+def _log_resolved(src: str, dst: str, reason: str) -> None:
+    """`vpoc.model.resolved from= to= reason=` info 로그(같은 조합은 10분에 한 번). id 만 남긴다."""
+    key = (str(src), str(dst), str(reason))
+    now = time.monotonic()
+    with _resolved_lock:
+        last = _resolved_logged.get(key)
+        if last is not None and now - last < _RESOLVED_LOG_INTERVAL_S:
+            return
+        _resolved_logged[key] = now
+    log.info("vpoc.model.resolved from=%s to=%s reason=%s", key[0], key[1], key[2])
 
 
 def selected(state: dict) -> str:
@@ -192,7 +250,99 @@ def selected(state: dict) -> str:
     )
     if model == DEFAULT_MODEL or (is_ark(model) and not unavailable_reason(model)):
         return model
+    # 저장값(또는 resolve 결과)을 쓸 수 없어 Luma 로 돌아간다(073 R12.2). 화면에는 videoModelRequested 로 보인다.
+    _log_resolved(model, DEFAULT_MODEL, "unavailable")
     return DEFAULT_MODEL
+
+
+def plan_model(step2: dict) -> str:
+    """③ 준비(prepare)가 길이·방식을 정할 모델(073 R3.7). ② 저장값을 resolve_model 로 바꾼 것.
+
+    기존 ARK Seedance 저장값이고 플래그가 꺼져 있으면 fal 얼굴(등록 시) 또는 Luma 범위로 single 길이를 정한다.
+    """
+    return resolve_model(str((step2 or {}).get("videoModel") or ""))
+
+
+def duration_range(model: str) -> tuple[int, int]:
+    """이 모델이 한 번에 만들 수 있는 길이(초) (최소, 최대) (073 R3.1-3.2, R14.3).
+
+    - fal Seedance 계열(얼굴·짝): caps durations(없으면 [5])의 최소~최대. 최대는 FAL_SEEDANCE_MAX_S 로 묶되
+      최소보다 작아지지 않는다.
+    - 그 밖(ARK·Luma·계열이 아닌 fal): VIDEO_DURATION_RANGE, 없으면 (DURATION_S, DURATION_S) — 073 이전
+      _shot_seconds 와 같은 값이다(계열이 아닌 fal 은 (5, 5)).
+    """
+    if settings.is_fal_seedance_family(model):
+        caps = (fal.find(model) or {}).get("caps") or {}
+        durations = sorted({int(value) for value in (caps.get("durations") or [5])})
+        low, high = durations[0], durations[-1]
+        return low, max(low, min(high, settings.FAL_SEEDANCE_MAX_S))
+    low, high = settings.VIDEO_DURATION_RANGE.get(model, (settings.DURATION_S, settings.DURATION_S))
+    return int(low), int(high)
+
+
+def snap_seconds(model: str, requested: object) -> int:
+    """샷 길이(초)를 이 모델이 실제로 만드는 값으로 맞춘다(073 R3.3, X5). 화면·generate·제출이 같이 쓴다.
+
+    - 요청값이 비거나 숫자가 아니면 DURATION_S 로 본다.
+    - fal Seedance 계열: 범위(duration_range) 안의 caps 값 중 요청 이상인 가장 작은 값, 없으면 범위 안 최댓값
+      (fal._pick_duration 과 같은 쪽으로 반올림해 만든 길이와 계상 길이가 같다).
+    - 그 밖(계열이 아닌 fal 포함): 범위로 자르기(073 이전 _shot_seconds 와 같다. 계열이 아닌 fal 은 늘 5).
+    """
+    try:
+        seconds = int(requested or settings.DURATION_S)  # type: ignore[call-overload]
+    except (TypeError, ValueError):
+        seconds = settings.DURATION_S
+    low, high = duration_range(model)
+    if settings.is_fal_seedance_family(model):
+        caps = (fal.find(model) or {}).get("caps") or {}
+        values = sorted(
+            {int(value) for value in (caps.get("durations") or [5]) if low <= int(value) <= high}
+        ) or [low]
+        return next((value for value in values if value >= seconds), values[-1])
+    return max(low, min(high, seconds))
+
+
+def one_take_max_s(model: str) -> int:
+    """한 번에 만들기(A안) 길이 상한(초, 073 R3.4, R14.3).
+
+    ARK 와 fal Seedance 계열은 duration_range 최대. 그 밖은 073 이전 값 VIDEO_DURATION_RANGE.get(model, (5, 5)).
+    """
+    if model in settings.ARK_MODEL_IDS or settings.is_fal_seedance_family(model):
+        return duration_range(model)[1]
+    return int(settings.VIDEO_DURATION_RANGE.get(model, (5, 5))[1])
+
+
+def submit_resolution(model: str, stored: object) -> tuple[str, str]:
+    """제출 때 보낼 화질과 보정 전 값 (value, adjusted_from) (073 R4.3-4.4, R14.3).
+
+    - fal Seedance 계열: 저장값이 caps 화질에 있으면 그대로. 없으면(070 이전 회차의 540p 등) 승인 금액을 넘지
+      않게 고른다(073 fix1): caps 화질 중 픽셀 수(settings.FAL_RESOLUTION_PX)가 저장 화질 이하인 것 가운데 가장
+      큰 값(540p → 480p), 그런 값이 없거나 저장 화질의 픽셀 수를 모르면 caps 의 가장 작은 화질. 저장값이 비면
+      저장 화질을 settings.default_resolution(model) 로 보고 같은 규칙을 쓴다. 바꿨으면 adjusted_from 은 그 저장
+      화질(빈 값이면 default_resolution 값)이다. 늘 caps 값을 명시해 보낸다.
+    - 그 밖(계열이 아닌 fal 포함): (저장값 또는 default_resolution, "") — 073 이전과 같다. 계열이 아닌 fal 은
+      build_payload 가 enum 에 있을 때만 resolution 을 넣는다.
+    """
+    value = str(stored or "")
+    if settings.is_fal_seedance_family(model):
+        resolutions = [str(item) for item in video_options(model)["resolutions"]]
+        base = value or settings.default_resolution(model)
+        if base in resolutions:
+            return base, ""
+
+        def pixels(resolution: str) -> int | None:
+            size = settings.FAL_RESOLUTION_PX.get(str(resolution or "").lower())
+            return size[0] * size[1] if size else None
+
+        known = [(pixels(item), item) for item in resolutions if pixels(item) is not None]
+        limit = pixels(base)
+        if not known:
+            # caps 화질의 픽셀 수를 하나도 모른다(이론상) — 첫 값을 보낸다.
+            return resolutions[0], base
+        fitting = [entry for entry in known if limit is not None and entry[0] <= limit]
+        chosen = max(fitting)[1] if fitting else min(known)[1]
+        return chosen, base
+    return value or settings.default_resolution(model), ""
 
 
 def video_options(model: str) -> dict:
@@ -208,10 +358,18 @@ def video_options(model: str) -> dict:
         durations = sorted({int(value) for value in (caps.get("durations") or [5])})
         low, high = durations[0], durations[-1]
         resolutions = [str(value) for value in (caps.get("resolutions") or [])] or ["720p"]
+        default_resolution = resolutions[0]
+        if settings.is_fal_seedance_family(model):
+            # fal Seedance 계열(073 R3.2·R4.1): 길이는 duration_range(상한 FAL_SEEDANCE_MAX_S) 안의 caps 값,
+            # 기본 화질은 720p(있으면). 계열이 아닌 fal 은 아래 073 이전 값 그대로(R14.3).
+            low, high = duration_range(model)
+            durations = [value for value in durations if low <= value <= high] or [low]
+            low, high = durations[0], durations[-1]
+            default_resolution = "720p" if "720p" in resolutions else resolutions[0]
         return {
             "model": model,
             "resolutions": resolutions,
-            "defaultResolution": resolutions[0],
+            "defaultResolution": default_resolution,
             "minDurationS": low,
             "maxDurationS": high,
             "durationFixed": low == high,
@@ -235,8 +393,40 @@ def video_options(model: str) -> dict:
     }
 
 
+def tag_style(model: str) -> str:
+    """프롬프트의 참고 이미지 지칭 방식(073 R5.3·R5.7). "at"(@Image1…) 또는 "plain"(Image 1…).
+
+    fal Seedance 계열 얼굴이면 settings.FAL_SEEDANCE_TAG_STYLE(기본 "at"). 그 밖(ARK·Luma·계열이 아닌 fal)은
+    설정과 상관없이 "plain"(073 이전과 같은 "Image N", R5.6·R14.1·R14.3).
+    """
+    if settings.fal_family_partner(model):
+        return settings._parse_tag_style(settings.FAL_SEEDANCE_TAG_STYLE)
+    return "plain"
+
+
+def image_label(start: int, end: int, style: str = "plain") -> str:
+    """참고 이미지 번호 지칭(073 R5.3). plain: "Image 3" / "Images 3-4". at: "@Image3" / "@Image3-@Image4".
+
+    at 에서 3장 이상 이어지면 번호를 모두 적는다("@Image3, @Image4, @Image5") — 가운데 번호가 빠지면
+    프롬프트 지칭 수가 실제 보낸 image_urls 수와 어긋난다(R5.3 "N = image_urls 수").
+    """
+    start, end = int(start), int(end)
+    if style == "at":
+        if end <= start:
+            return f"@Image{start}"
+        if end == start + 1:
+            return f"@Image{start}-@Image{end}"
+        return ", ".join(f"@Image{index}" for index in range(start, end + 1))
+    return f"Image {start}" if end <= start else f"Images {start}-{end}"
+
+
 def reference_prompt(
-    prompt: str, names: list[str | None], *, style_refs: int = 0, style_lock: bool = False
+    prompt: str,
+    names: list[str | None],
+    *,
+    style_refs: int = 0,
+    style_lock: bool = False,
+    tag_style: str = "plain",
 ) -> str:
     """참고 이미지가 있을 때 Seedance 에 보낼 최종 프롬프트.
 
@@ -250,6 +440,9 @@ def reference_prompt(
 
     설계자 2026-10-13: names 는 이미지 한 장마다 하나다. 같은 인물이 이어서 여러 장이면
     "Images 1-2 are X" 로 묶고, None 은 화풍 참고 이미지다(style_refs 를 쓰지 않는 새 호출 방식).
+
+    073 R5.3: tag_style="at" 이면 지칭만 "@Image1"·"@Image1-@Image2"(image_label)로 쓴다. 다른 문장은 같다.
+    지칭 문장은 늘 맨 앞이라 fal 이 뒤를 잘라도 남는다(R5.4).
     """
     names = list(names) + [None] * style_refs
     if not names and not style_lock:
@@ -262,7 +455,7 @@ def reference_prompt(
         end = index
         while end < len(names) and names[end] == name:
             end += 1
-        span = f"Image {index}" if end == index else f"Images {index}-{end}"
+        span = image_label(index, end, tag_style)
         verb = "is" if end == index else "are"
         if name == PANEL_LABEL:
             what = "the webtoon panel" if end == index else "the webtoon panels"
@@ -433,7 +626,8 @@ def submit(
             duration_s=duration_s,
             last_frame_jpeg_b64=last_frame_jpeg_b64,
         )
-    reason = unavailable_reason(model)
+    # 진행 중 회차는 플래그가 꺼져 있어도 BytePlus 로 끝낸다(073 D1). 키·모델 ID 는 그대로 검사한다.
+    reason = _submit_block_reason(model)
     if reason:
         raise VpocError("ark.submit", "ModelUnavailable", f"{label(model)}: {reason}", 400)
     if not prompt.strip():

@@ -1,0 +1,652 @@
+# AI-POC-whynot 저장소 분석 (ANALYSIS)
+
+> 작성 2026-10-26. 저장소 파일을 읽어서만 작성했다(명령 실행·클라우드 조회 없음).
+> 근거는 `파일:줄`로 단다. 확인하지 못한 것은 "미확인", 코드로 증명되지 않은 해석은 "추정"으로 표시한다.
+> 계정 ID·비밀값은 쓰지 않는다. 계정은 `<고객계정>`·`<허브계정>`으로 가린다.
+> 줄 수는 2026-10-26 작업 트리 기준 대략값이다.
+
+---
+
+## 1. 한눈에 보기
+
+웹툰 IP를 드라마·영상으로 각색하는 사내 AI 도구다. 고객 와이낫(whynot) 전용 디렉터리이고(`AI-POC-whynot/README.md:3`), Flask API 1개와 정적 프런트엔드(nginx) 1개로 이루어진다. 크게 세 갈래 기능이 있다.
+
+- **스토리 개발**(track `story`): 원작 자료 → 기획 문서·트리트먼트·대본·콘티(`server.py`, `documents.py`, `story_*`, `roles/`).
+- **영상만들기_기존**(track `video`): vpoc1(`/api/vpoc`, ①입력→②분석→③키 장면·샷→④생성·이어붙이기), vpoc2(`/api/vpoc2`, 명령→캐릭터 확정→15초→리뷰).
+- **영상만들기_신규**(track `video_new`, vnew, `/api/vnew`): 캐릭터 만들기(시트·3D) → ①입력 ②대본 ③콘티·장소 시트 → ④프리비즈(3D 마네킹, 브라우저 three.js) → ⑤영상 생성(실사·웹툰). **개발계에서만 켜져 있다**(`deploy/config.dev.env`의 `VNEW_ENABLED=true`, `deploy/config.prod.env`의 `VNEW_ENABLED=false`).
+
+주요 화면 흐름:
+
+1. 로그인(`POST /api/auth/login`) → 홈(`#homeView`)에서 프로젝트 목록·생성. 프로젝트를 만들 때 트랙을 고르고 이후 바꿀 수 없다(`project_tracks.py:580-586`).
+2. story 트랙 → 프로젝트 상세(`#projectDetailView`)에서 문서·콘티·대본 생성(202 + 백그라운드 스레드, 화면은 폴링).
+3. video 트랙 → vpoc 화면(`vpoc.js`, `#vpoc-root`)에서 ①~④ 단계, 영상은 Luma Ray2 / fal 모델로 만들고 ffmpeg로 이어 붙인다.
+4. video_new 트랙 → `#vnewView`(`vnew.js`, `vnew-previz.js`)에서 ①~⑤, 캐릭터는 메뉴 "캐릭터 만들기"(`#charactersView`).
+5. 관리자 → 사용자·한도·모델·프롬프트 관리(`#usersView`, `#modelsView`, `/api/admin/*`).
+
+```mermaid
+flowchart LR
+  DEVR["개발자"] -->|"push / MR"| GL["고객 GitLab<br/>awstech/ai (main)"]
+  GL --> CI["GitLab CI<br/>check → build → deploy"]
+  CI -->|"kaniko<br/>ci-&lt;sha&gt;"| ECRD["ECR whynot-dev-app<br/>whynot-dev-frontend"]
+  CI -->|"main만<br/>같은 태그"| ECRP["ECR whynot-app<br/>whynot-frontend (IMMUTABLE)"]
+  CI -->|"render.py + git push"| AD["awstech/ai-deploy<br/>whynot/dev · whynot/prod"]
+  AD -->|"자동 동기화"| ARD["ArgoCD argocd-whynot<br/>(whynot-dev-eks)"]
+  AD -->|"자동 동기화"| ARP["ArgoCD whynot-prod<br/>(whynot-prod-eks)"]
+
+  U["브라우저"] --> ALB["ALB (internet-facing)"]
+  ALB -->|"/"| FE["frontend x2<br/>nginx :8080"]
+  ALB -->|"/api"| APP["app x2<br/>gunicorn :8000"]
+  APP --> NEP["Neptune<br/>openCypher"]
+  APP --> S3M["S3 주 버킷<br/>ap-northeast-2"]
+  APP --> S3V["S3 영상 버킷<br/>us-west-2"]
+  APP --> BR["Bedrock<br/>Claude · Stability · Luma"]
+  APP --> FAL["fal.ai 큐 API"]
+  APP --> ARK["BytePlus ARK<br/>Seedream · Seedance"]
+```
+
+근거: `.gitlab-ci.yml:1-37`(헤더 설명), `k8s/ingress.yaml.tmpl:40-58`, `k8s/workloads.yaml.tmpl`, `app/src/server.py:6970-7028`.
+
+---
+
+## 2. 디렉터리 지도
+
+### 2.1 최상위
+
+| 경로 | 역할 |
+|---|---|
+| `.gitlab-ci.yml` (약 380줄) | 고객 GitLab CI. check → build → deploy(dev 자동·prod 수동) |
+| `PLATFORM_FILES.txt` | 여러 고객 디렉터리가 같은 내용을 가져야 하는 "플랫폼 파일" 목록(이 저장소엔 고객 디렉터리가 하나뿐) |
+| `.kiro/steering/`, `.kiro/handoff/` | 작업 원칙과 지시서·로그(000~072) |
+| `AI-POC-whynot/` | 제품 디렉터리(아래) |
+
+### 2.2 `AI-POC-whynot/`
+
+| 경로 | 역할 |
+|---|---|
+| `app/` | Flask 백엔드. `Dockerfile`(python:3.13.7-slim, gunicorn), `requirements.txt`, `src/`(Python 74개, 약 55,100줄) |
+| `frontend/` | nginx 정적 프런트. `Dockerfile`(nginx-unprivileged 1.27.5), `nginx.conf`, `public/` |
+| `deploy/` | `render.py`(템플릿 렌더), `config.env.example`(렌더 원본), `config.dev.env`·`config.prod.env`(오버레이), 옛 PowerShell 배포·운영 스크립트, `verify/` |
+| `k8s/` | 앱 매니페스트 템플릿 5개(`namespace`, `service-account`, `model-catalog`, `workloads`, `ingress`) |
+| `k8s-gpu/` | GPU 영상 워커용 템플릿 4개. 현재 배포 안 함(8장) |
+| `infra/` | IAM·S3·ECR 정책 템플릿, 옛 `build-deploy.sh`, `inventory/`(옛 계정 조회 덤프 JSON) |
+| `terraform/` | 허브 계정 전용 root 모음(bootstrap, hub/20·25·26·40, modules 2개) |
+| `tools/` | `check_vpoc.py`(11,856줄, CI 유일 검사기), `vpoc_e2e.py`, `vpoc_preflight.py` |
+| `video-worker/` | 상주 GPU 워커(SQS 폴링, Wan 2.2). 현재 배포 안 함 |
+| `docs/` | PRD·실행 기록·리뷰. `vpoc1/`, `run-log/`, `vendor/`, `구조분석.md`(2026-09-03) |
+
+### 2.3 `app/src/` 모듈
+
+| 모듈 | 줄 수 | 역할 |
+|---|---|---|
+| `server.py` | 7,031 | Flask 앱, 인증·인가·한도, 스토리·문서·이미지·관리자 라우트 63개, 블루프린트 등록 |
+| `graph_store.py` | 3,888 | Neptune openCypher(HTTPS) 접근, 사용자·프로젝트·문서·사용량 등 정점 |
+| `documents.py` | 1,515 | 문서 종류별 스키마·프롬프트·생성 |
+| `prompt_layers.py` | 899 | 백엔드/프런트 프롬프트 계층, S3 `_config/prompts.json` 덮어쓰기 |
+| `project_tracks.py` | 731 | 프로젝트 트랙(story/video/video_new) 선택·가드, 프로젝트 라우트 교체 설치 |
+| `model_registry.py` | 691 | 모델 카탈로그(내장 → ConfigMap → S3 `_config/models.json`) |
+| `video_prompt.py` | 661 | 한국어 지시 → 영어 영상 프롬프트(구 영상 경로 공용) |
+| `prompts_story.py` | 620 | 스토리 프롬프트 |
+| `pdf_export.py` | 506 | 콘티·대본 PDF(reportlab) |
+| `story_router.py` / `story_models.py` / `story_context.py` | 474 / 291 / 396 | 스토리 역할 분배·모델·계보 지문 |
+| `styles.py` | 468 | 그림체 프리셋·라우팅 |
+| `gateway.py` | 456 | Bedrock 호출 통로(사용량 기록·타임아웃 일원화) |
+| `image_brief.py` | 454 | 참고 이미지 역할 분석(최대 `VIDEO_MAX_REFERENCE_IMAGES`장) |
+| `providers.py` | 344 | 모델별 요청·응답 어댑터 |
+| `stitcher.py` | 399 | ffmpeg(imageio-ffmpeg) 이어 붙이기·자르기·마지막 프레임 |
+| `toon_convert.py` / `prompt_boost.py` | 302 / 266 | 웹툰→실사 변환 모드 / 짧은 지시 확장 |
+| `model_capabilities.py` / `image_validation.py` / `account_guard.py` | 177 / 90 / 72 | 모델 능력 / 이미지 검증 / 계정 고정 가드 |
+| `roles/` (7파일) | 약 1,460 | 스토리 역할(writer·vision·validator·bible·character_sheet·_json) |
+| `vpoc/` (14파일) | 약 10,100 | 영상만들기_기존(vpoc1) — routes 4,645 · fal 1,295 · llm 1,202 · regen 793 · ark 553 · store 422 · settings 412 · compose 357 · video 268 · images 265 · ledger 243 · seedream 141 · errors 108 |
+| `vpoc2/` (13파일) | 약 2,200 | 영상 vpoc2 — service 749 · llm 297 · store 289 · compose 192 · routes 167 · mock 146 외 |
+| `vnew/` (16파일) | 약 21,600 | 영상만들기_신규 — generate 5,485 · locations 2,903 · previz 2,875 · characters 2,387 · plan 1,644 · previz_camera 1,063 · routes 784 · shot_brief 593 · previz_schema 586 · location_views 376 · previz_fit 347 · previz_grammar 345 · settings 216 · prompts 183 · imaging 132 |
+| `fixtures/` | 1 | 빈 패키지 |
+
+---
+
+## 3. 백엔드 모듈
+
+### 3.1 프로세스 모델
+
+- gunicorn `--workers 2 --threads 4 --timeout 60`, `src.server:app`(`app/Dockerfile` 마지막 줄). 앱 Deployment `replicas: 2`(`k8s/workloads.yaml.tmpl` app Deployment). 즉 **동시에 4개 파이썬 프로세스**가 같은 S3 상태를 다룬다.
+- 긴 작업은 모두 "202 응답 → `threading.Thread(daemon=True)`" 방식이다. 프로세스 메모리의 드라이버 목록·잠금은 프로세스마다 따로이고, 프로세스 사이의 경합은 S3 조건부 쓰기(ETag `If-Match`)로 막는다(`vpoc/store.py` 머리 주석, `vnew/generate.py:958-976`).
+
+### 3.2 `server.py` — 앱 본체
+
+- 시작: `app = Flask(__name__)`, `MAX_CONTENT_LENGTH = 100MB`(`server.py:181-182`). 상단에서 `vnew`, `vpoc`, `vpoc2`를 포함한 모든 모듈을 import 한다(`server.py:25-49`).
+- 요청 훅: `enforce_account_guard`(`server.py:829-842`) — `/health`·`/api/health`를 빼고 `account_guard.state()`가 실패하면 503. `add_api_headers`(`:845-852`) — `Cache-Control: no-store`, `nosniff`, `X-Frame-Options: DENY`, `X-Request-ID`.
+- 인증: HMAC-SHA256 서명 토큰(`issue_token` `:293-302`, `verify_token` `:305-334`). 토큰에는 사용자 이름·만료만 있고 role은 매번 Neptune에서 다시 읽는다. TTL 8시간(`TOKEN_TTL_SECONDS`), 로그인 유지 시 7일(`REMEMBER_TOKEN_TTL_SECONDS`, `:99-103`). 데코레이터 `require_auth`(`:342`), `require_admin`(`:359`), `require_quota(category)`(한도 검사, 차감은 결과 완성 시점).
+- 권한: `can_read_project`/`can_write_project`(`:815-825`) — 소유자 또는 admin(공유 프로젝트는 읽기 허용).
+- 백그라운드 스레드: 문서 생성 `run_document_generation`(`:1887`), 콘티 `run_storyboard`(`:5686`), 대본 개요 `run_script_outline`(`:6135`), 대본 작업 `run_script_job`(`:6499`, `:6542`) + 하트비트 `beat`(`:6258`), 회차 재생성(`:6746`), 이미지 병렬 생성 `ThreadPoolExecutor`(`:2207`). 파드가 바뀌면 스레드가 사라지므로 `DOC_STALE_MINUTES`(기본 10분)를 넘긴 `generating` 문서는 조회 때 실패로 정리한다(`:166`, `reap_stale_document`).
+- 블루프린트 등록(**이 한 곳뿐**, `server.py:6970-7011`):
+  - `if VIDEO_GEN_ENABLED and vpoc.settings.VPOC_ENABLED:` → vpoc(`/api/vpoc`)
+  - `if VIDEO_GEN_ENABLED and vpoc2.settings.ENABLED:` → vpoc2(`/api/vpoc2`)
+  - `if VNEW_ENABLED:` → vnew(`/api/vnew`)
+  - 마지막에 `project_tracks.install(...)`(`:7015-7028`)이 `/api/projects` 두 핸들러를 교체하고 `PUT /api/projects/<id>/track`을 더하며, 스토리 전용 프로젝트 라우트에 트랙 가드를 씌운다.
+- 실행: `__main__`에서만 `app.run(port=8000)`(`:7030-7031`). 운영은 gunicorn.
+
+### 3.3 공통 플랫폼 모듈
+
+| 모듈 | 책임 | 주요 함수 | 부르는 쪽 |
+|---|---|---|---|
+| `account_guard.py` | 기동 후 첫 요청 때 STS로 계정 확인, `EXPECTED_ACCOUNT_ID`와 다르거나 비어 있으면 fail-closed | `verify`·`state`(`:56-72`) | `server.py` |
+| `gateway.py` | Bedrock `converse`·이미지·영상 호출 통로, 사용량을 `graph_store`에 기록(기록 실패는 삼킴), read_timeout 일원화(60/600/900초) | `runtime`(`:100`), `converse`(`:184`) | `server.py`, `documents.py`, `roles/*` |
+| `graph_store.py` | Neptune `/openCypher` HTTPS 직접 호출(드라이버 없음, IAM 서명 없음 — SG로 제한), PBKDF2 210,000회 | `run`, `get_user`, `merge_user`, `quota_*`, `begin_document` 등 | 거의 모든 모듈 |
+| `model_registry.py` | 카탈로그 3단계(내장 → `MODEL_CATALOG_PATH` ConfigMap → S3 `_config/models.json`), 30초 캐시 | `resolve_for_generation`, `bucket_region` | `server.py`, `providers.py` |
+| `prompt_layers.py` | 역할별 프롬프트, 관리자 수정분은 S3 `_config/prompts.json`(버전 관리) | — | `gateway.py`, `server.py` |
+| `project_tracks.py` | 트랙 정규화·선택·명령 기록, 라우트 교체 설치 | `install`(`:454`), `_accepted_tracks`(`:398`), `track_enabled`(`:81`) | `server.py` |
+
+의존 방향: `server.py` → (모든 모듈). `gateway` → `graph_store`, `prompt_layers`. `vpoc`·`vnew`는 `gateway`를 거치지 않고 boto3 `bedrock-runtime` 클라이언트를 직접 만든다(`vpoc/llm.py:79-96`, `vpoc/images.py:34`). 즉 vpoc·vnew 호출은 `gateway`의 사용량 기록에 잡히지 않고, 비용은 `vpoc/ledger.py` 원장에 따로 쌓인다.
+
+### 3.4 `vpoc/` — 영상만들기_기존(vpoc1)
+
+| 파일 | 책임 |
+|---|---|
+| `settings.py` | 환경변수 전부(여기에만 `os.getenv`). 모델·버킷·플래그·단가표·fal 카테고리 |
+| `routes.py` | 블루프린트 `whynot_vpoc`(`:151`). 모든 라우트를 `enveloped`로 감싸 오류 봉투로 바꾼다(`:163-178`). 생성 시점에 `ledger.seed()`로 원장에 과거 금액을 넣는다(`:157-161`) |
+| `store.py` | S3 상태(`state.json`) 읽기/조건부 쓰기, 키 규칙(`:62-155`) |
+| `llm.py` | Claude 분석·계획. 도구 1개 강제로 JSON. 모델 체인 `_model_chain`(`:292-300`), 스트리밍, 거부 모델 10분 건너뜀. 일부 모델은 broker 역할(다른 계정 역할을 assume)로 호출(`:38-76`) |
+| `images.py` | 업로드 정규화(JPEG), 분석용 타일, SD3.5 캐릭터 이미지 |
+| `video.py` | Luma Ray2 `start_async_invoke`/`get_async_invoke`, read_timeout 20초(`:66-71`) |
+| `ark.py` | BytePlus ARK Seedance(`/contents/generations/tasks`, `:487`, `:517`), urllib timeout 60초. `choices`·`resolve_model`·`selected`(`:88`, `:164`, `:182`)가 `VPOC_ARK_SEEDANCE_ENABLED`를 보고 ARK Seedance를 목록에서 빼고 fal Seedance로 바꾼다 |
+| `seedream.py` | ARK `/images/generations`(Seedream), timeout 300초(`:65-72`) |
+| `fal.py` | fal 큐 API(`queue.fal.run`)·카탈로그(`api.fal.ai/v1`)·OpenAPI. 등록 레지스트리, caps 추출, `submit`/`poll`/`submit_edit`(`:1128`), 단가 캐시 1시간. 이미지는 data URI로만 보낸다(`:9-13`). timeout 60/300초(`:50-51`) |
+| `regen.py` | "이 샷만 의견 반영해 다시 만들기"(revise/regenerate/select), `require_enabled`(`:43`) |
+| `compose.py` | 영어 프롬프트 조립·코드 검사(모델 호출 없음) |
+| `ledger.py` | 비용 원장(상한 없음, 기록만), 키 중복 계상 방지 |
+| `errors.py` | `VpocError`, 오류 봉투 `envelope`·`status_for` |
+
+**백그라운드 동작(vpoc1)**
+
+1. `run_task`(`routes.py:811-894`): 상태에 `task{id,status:running}`를 쓰고 스레드 시작. 끝날 때 단계 revision 또는 task id가 바뀌었으면 결과를 버린다(되돌리기·취소 = 결과 폐기). 모델 호출 자체는 멈추지 않는다.
+2. `run/generate`(`routes.py:4052-4185`): 화면 금액(`confirmUsd`)과 서버 계산이 0.005 넘게 다르면 409 `CostMismatch`. 새 `genId`로 ④ 상태를 만들고, 응답 뒤 스레드에서 `_prepare_briefs`(ARK) 또는 `_submit_queued` 실행 + `_ensure_driver`.
+3. `_ensure_driver`(`routes.py:3315-3357`): 프로세스당 계획 1개 드라이버. 20초마다 상태를 읽고, 다른 곳이 15초 안에 조회했으면 건너뛰고, `refresh_shots`로 제출·조회·애니 변환(`_start_anime_jobs`)을 진행. ④가 끝나거나 3시간이면 종료.
+4. 동시 제출 상한 `VPOC_MAX_INFLIGHT=1`(Luma 쿼터 1, `settings.py:241`), ARK `VPOC_ARK_MAX_INFLIGHT=1`.
+5. `stitch`(`routes.py:4300-4378`): 완료 샷 mp4를 영상 버킷에서 **전부 메모리로 받아** 임시 디렉터리에 쓰고 `stitcher.concat` → 결과를 다시 메모리로 읽어 주 버킷 `final.mp4`/`final-anime.mp4`에 올린다.
+
+### 3.5 `vpoc2/` — 명령 → 캐릭터 → 15초 → 리뷰
+
+- 블루프린트 `vpoc2`(`vpoc2/routes.py:52`), 모든 라우트가 `require_auth` + 오류 봉투. `before_request`에서 `VPOC2_ENABLED`가 꺼져 있으면 404(`:70-73`) — server.py 등록 조건과 이중 방어.
+- 설정: `vpoc2/settings.py` — 15초 = 5초 × 3샷, Luma Ray2, 540p 기본, 720p 월 1편(`VPOC2_HQ_MONTHLY_LIMIT`). `VPOC2_MOCK`+`VPOC2_LOCAL_DIR`일 때만 로컬 파일 라우트(`routes.py:155-165`).
+- 작업 실행: `service.py:168`의 데몬 스레드.
+
+### 3.6 `vnew/` — 영상만들기_신규
+
+| 파일 | 책임 |
+|---|---|
+| `routes.py` | 블루프린트 `vnew`(`:41`). HTTP 입출력만. 계획 API는 `_project_for`(`:260-282`)에서 프로젝트 존재·읽기/쓰기 권한·**트랙이 `video_new`인지** 확인 |
+| `settings.py` | vnew 전용 환경변수(그 밖은 `vpoc.settings` 재사용) |
+| `characters.py` | 캐릭터 만들기: 웹툰 이미지 분석(Astra → Claude) → Seedream 시트·정면·후면(실사·웹툰 2 variant) → Hunyuan3D(fal) GLB. 빌드·재시도·재개 스레드(`:1587`, `:1645`, `:1808`, `:1909`, `:2191`) |
+| `plan.py` | ①입력 ②대본 ③콘티. `plan.json` 하나가 프로젝트 상태의 단일 원본. task 스레드(`:1393`) |
+| `locations.py` / `location_views.py` | ③ 장소 4면 시트, 참고 사진. `ThreadPoolExecutor(VIEW_WORKERS)`(`:1848`), task 스레드(`:2846`) |
+| `previz*.py` | ④ 프리비즈 3D 장면 설계(Astra), 카메라 문법·토릭 계산(`previz_camera`, `previz_grammar`), 일치도(`previz_fit`), 스키마. task 스레드(`previz.py:2858`) |
+| `shot_brief.py` | 프리비즈 승인 후 장소별 촬영 지시서 |
+| `generate.py` | ⑤ 영상 생성 드라이버(아래) |
+| `imaging.py`, `prompts.py` | 이미지 보조, 프롬프트 |
+
+vnew가 재사용하는 것: `vpoc.llm`·`images`·`store.STORE`·`ark`·`fal`·`seedream`·`video`·`ledger`·`settings`, `stitcher`, `project_tracks`(`vnew/generate.py:31-45`, `vnew/plan.py:21-26`, `vnew/routes.py:11-15`). 프런트 `vnew.js`도 fal 모델 등록에 `/api/vpoc/fal/*`를 부른다(`vnew.js:2255`, `:2280`, `:2370`) — **vnew의 fal 모델 고르기는 vpoc 블루프린트와 `VPOC_MODEL_PICKER_ENABLED`가 켜져 있어야 동작한다.**
+
+**백그라운드 동작(vnew ⑤ generate)**
+
+1. `start_generate` → `plan.json`의 `gen`을 새로 만들고(이전 gen은 `genHistory` 최근 3개 요약) `_spawn_driver`(`generate.py:940-958`).
+2. `_drivers`: 프로세스당 `(owner,pid)`별 스레드 1개(`:960-1007`). `GET /p/<pid>/plan` 조회 때 `ensure_driver`가 running gen의 드라이버를 되살린다(`routes.py:285-300`) — 파드 재시작 후 이어하기 경로.
+3. `_drive`(`:1022-`): 최대 100,000회 반복. 모드 `previz`/`previz-take`면 `_drive_previz_pass`로 submitted 전부 조회 + queued를 `VNEW_GEN_PARALLEL`(기본 2)까지 동시 제출, 아니면 `_next_action`으로 한 단계씩. 진행이 없으면 `POLL_INTERVAL_S`(5초) 쉰다.
+4. 메모리 완화: 준비 단계(녹화 받기→자르기→본문 직렬화)를 프로세스 전역 세마포어 `VNEW_GEN_PREPARE_CONCURRENCY`(기본 1)로 직렬화(`generate.py:51`), 참고 이미지 긴 변 1024px로 축소(`VNEW_REF_MAX_PX`), preparing 선점 300초 지나면 queued로 되돌림(`VNEW_PREPARE_STALE_S`).
+5. 갱신 유실 방지: 같은 프로세스 안에서는 계획별 `threading.Lock`(`_mutate_locked`, `:972-976`), 프로세스 사이는 S3 ETag 조건부 쓰기에 의존.
+6. 모드 판정: 선택한 영상 모델 caps에 배열 영상 입력(`videoListField`)이 있으면 `previz-take`(Seedance 2.5 reference-to-video 통 테이크, ≤30초, 480p draft 기본), 아니면 컷 단위 `previz`(Kling O3 video-to-video edit)(`vnew/settings.py:157-195`).
+
+### 3.7 `stitcher.py`
+
+- ffmpeg는 `imageio-ffmpeg` 휠의 정적 바이너리(`FFMPEG_BINARY` 우선, 없으면 PATH)(`stitcher.py:35-48`). 모든 실행에 `STITCH_TIMEOUT_SECONDS`(기본 600초) timeout(`:51-58`).
+- 함수: `concat`(`:117`), `trim`(`:178`, `threads` 인자로 `-threads 1` 가능), `last_frame_jpeg`(`:218`), `probe_duration`(`:252`), `prepare_for_anime`(`:329`, Kling edit 입력 규격 3~15초·높이 ≥720으로 맞춤).
+- 호출: `vpoc/routes.py` `stitch`, `vnew/generate.py`(`_concat`·`_last_frame`·`_prepare_anime` 래퍼), `server.py`(롱테이크).
+
+---
+
+## 4. API 표면
+
+모든 `/api/*`는 ALB가 app 서비스로 보낸다(`k8s/ingress.yaml.tmpl:44-51`). nginx에는 `/api` 프록시가 없다(`frontend/nginx.conf`). 계정 가드는 `/health`·`/api/health`를 뺀 전 라우트에 걸린다(`server.py:829-842`).
+
+### 4.1 `server.py` 직접 라우트(63개) + `project_tracks` 1개
+
+| 묶음 | 경로(메서드) | 인증 | 근거 |
+|---|---|---|---|
+| 헬스 | `/health`, `/api/health` (GET) | 없음 | `server.py:877-878` |
+| 인증 | `/api/auth/login`·`signup` (POST), `/api/auth/me` (GET), `/api/auth/renew`·`password` (POST) | login·signup 없음, 나머지 auth | `:909-1007` |
+| 관리자 | `/api/admin/company-code` (GET·PUT), `usage`, `video-costs` (GET), `prompts`, `prompts/mapping` (GET), `prompts/<role_id>` (GET·PUT), `users` (GET), `users/<u>/quota` (GET·PATCH), `users/deduplicate` (POST), `users/<u>` (DELETE), `models` (POST), `models/<id>` (PATCH), `story/models` (GET) | `@require_admin`(14개 경로 모두 확인) | `:1065-1496`, `:2649-2663`, `:6884` |
+| 사용자 | `/api/usage/me` (GET), `/api/client-errors` (POST), `/api/dashboard` (GET), `/api/styles`, `/api/models`, `/api/document-kinds` (GET) | auth | `:1159`, `:1233`, `:4002`, `:2358`, `:2626`, `:1809` |
+| 프로젝트 | `/api/projects` (GET·POST), `/api/projects/<id>` (GET·PATCH·DELETE) — install 후 `project_tracks` 핸들러로 교체 | auth | `:1528`, `:1575`, `project_tracks.py:532`, `:616` |
+| 트랙 | `/api/projects/<id>/track` (PUT) | auth, 소유자만 | `project_tracks.py:672-677` |
+| 스토리(트랙 가드) | `.../direction` (PUT), `.../source` (GET·POST), `.../documents` (GET), `.../documents/<kind>/generate` (POST), `.../documents/<kind>` (GET·PUT·DELETE), `.../story`, `.../summary` (POST), `.../assets/analyze` (POST), `.../assets/<key>` (PATCH), `.../bible` (POST·GET), `.../outputs/logline`·`storyboard`·`script` (POST), `.../outputs` (GET), `.../outputs/script/options` (GET), `.../script-jobs` (GET), `.../story-text` (GET) | auth + 트랙이 story + `STORY_DEV_ENABLED` | `:1614-6910`, 가드 `project_tracks.py:679-716` |
+| 표지 | `.../cover`, `.../cover/restore`, `.../cover/generate` (POST) | auth | `:1963-2011` |
+| 영상 계획 | `.../video-plan-from-story` (POST) | auth, `VIDEO_GEN_ENABLED` 아니면 거부 | `:5310`, `:5318` |
+| 결과물·대본 작업 | `/api/outputs/<id>` (GET·DELETE), `/api/outputs/<id>/pdf` (GET), `/api/script-jobs/<id>` (GET·DELETE), `.../approve`·`resume` (POST), `.../episodes/<n>` (GET), `.../episodes/<n>/pdf`, `.../pdf` (GET), `.../episodes/<n>/regenerate` (POST) | auth | `:5799-6701` |
+| 이미지·자산 | `/api/images` (GET·DELETE), `/api/images/generate` (POST), `/api/assets` (GET·POST) | auth(+한도) | `:2365`, `:2438`, `:2686` |
+
+### 4.2 `/api/vpoc` (블루프린트 `whynot_vpoc`, 14개)
+
+등록 조건: `VIDEO_GEN_ENABLED and VPOC_ENABLED`(`server.py:6970`). 전부 `require_auth`.
+
+| 경로 | 메서드 | 추가 플래그 | 근거 |
+|---|---|---|---|
+| `/p/<pid>` | GET | — | `vpoc/routes.py:2987` |
+| `/p/<pid>/plans` | POST | — | `:3417` |
+| `/p/<pid>/plans/<plan_id>` | GET | — | `:3429` |
+| `/p/<pid>/uploads` | POST | — | `:3463` |
+| `/p/<pid>/plans/<plan_id>/steps/<n>` | PUT | — | `:3502` |
+| `/p/<pid>/plans/<plan_id>/back`·`cancel` | POST | — | `:3814`, `:3883` |
+| `/p/<pid>/plans/<plan_id>/run/<action>` | POST | action: analyze·prepare·redraw·generate·retry·stitch, revise·regenerate·select는 `VPOC_REGEN_ENABLED`(꺼지면 404) | `:3927-4291`, `regen.py:43` |
+| `/smoke` | POST | `VPOC_SMOKE_ENABLED`(꺼지면 404) | `:4382-4385` |
+| `/smoke/<id>` | GET | 같음(추정) | `:4485` |
+| `/fal/catalog`, `/fal/models` | GET | `VPOC_MODEL_PICKER_ENABLED`(404), catalog는 `FAL_KEY`도(409) | `:4564`, `:4596`, `:4551-4562` |
+| `/fal/models` | POST | 같음 + `FAL_KEY` | `:4622` |
+| `/fal/models/<path:endpoint_id>` | DELETE | `VPOC_MODEL_PICKER_ENABLED` + **관리자 전용**(073 R10). 비관리자는 403 `AdminOnly`("fal 모델 해제는 관리자만 할 수 있습니다.", 운영 `RAW_ERRORS=false`에서도 보임), warning 로그 `vpoc.fal.unregister.denied`. 판별은 deps `is_admin`(`server.py:6981` `g.role == ROLE_ADMIN`), 주입하지 않으면 거부(fail-closed). 등록(POST)은 로그인 사용자 누구나 | `:4804`, `:4814` |
+
+### 4.3 `/api/vpoc2` (13개 + 목 전용 1개)
+
+등록 조건: `VIDEO_GEN_ENABLED and VPOC2_ENABLED`(`server.py:6986`), 블루프린트 내부에서도 404(`vpoc2/routes.py:70-73`). 전부 `require_auth`.
+`/meta`·`/runs` (GET), `/runs` (POST), `/runs/<id>` (GET), `/runs/<id>/input`·`interpretation`·`prompts/<shot>` (PUT), `/runs/<id>/characters/<c>/confirm` (POST), `/runs/<id>/run/<action>` (POST: interpret·draw·prepare·generate·retry·stitch), `/runs/<id>/back` (POST), `/runs/<id>/review` (PUT), `/reviews` (GET)(`vpoc2/routes.py:76-152`). 목 모드 전용 `/_local/<bucket>/<key>`(`:155-165`).
+
+### 4.4 `/api/vnew` (블루프린트 `vnew`, 45개)
+
+전부 `require_auth`. 계획 API(`/p/<pid>/...`)는 추가로 프로젝트 권한 + 트랙 `video_new` 확인(`vnew/routes.py:260-282`).
+
+| 묶음 | 경로 | 근거 |
+|---|---|---|
+| 헬스 | `/health` (GET) | `vnew/routes.py:62` |
+| 캐릭터 | `/characters` (GET·POST), `/characters/<id>` (GET·DELETE), `/uploads` (POST), `/uploads/<f>` (DELETE), `/build` (POST), `/variants/<v>/retry3d`·`rebuild` (POST), `/outfits` (POST), `/outfits/<o>/build` (POST), `/outfits/<o>` (DELETE), `/model/<variant>.glb` (GET) | `:70-238` |
+| 계획 ①②③ | `/p/<pid>/plan` (GET), `/uploads` (POST), `/uploads/<f>` (DELETE), `/input` (PUT), `/input/sort` (POST), `/script` (POST·PUT), `/conti` (POST·PUT), `/conti/fit` (POST), `/cancel` (POST) | `:285-412` |
+| 장소 | `/p/<pid>/locations/<lid>/build`, `/locations/build-all` (POST), `/locations/<lid>` (PUT), `/locations/<lid>/photos` (POST), `/photos/<id>` (PUT·DELETE·GET) | `:435-529` |
+| 프리비즈 ④ | `/p/<pid>/previz/design`·`approve`·`brief` (POST), `/previz/scene` (PUT), `/previz/recordings/<seg>`·`/frames`·`/finish` (POST), `/previz/texture`·`panel` (GET) | `:555-690` |
+| 생성 ⑤ | `/p/<pid>/cast-notes`, `/generate`, `/generate/retry`, `/select` (POST) | `:714-769` |
+
+### 4.5 `VNEW_ENABLED=false`일 때 `/api/vnew`가 정말 없는가 — 코드 확인 결과
+
+**등록되지 않는다.** 근거:
+
+1. 값 읽기: `VNEW_ENABLED = os.getenv("VNEW_ENABLED", "false").strip().lower() in ("1","true","yes","on")`(`server.py:341`). 기본값도 false.
+2. 등록: `if VNEW_ENABLED: app.register_blueprint(vnew.create_blueprint(...))`(`server.py:6996-7011`). 저장소 전체에서 `vnew.create_blueprint`/`register_blueprint`를 부르는 곳은 이 줄과 검사기(`tools/check_vpoc.py:1866`, 테스트용 별도 Flask 앱)뿐이다(`register_blueprint|Blueprint\(` grep 결과).
+3. vnew 패키지 자체는 `server.py:46`에서 **항상 import 된다.** import 시점에 스레드를 띄우는 코드는 없다 — vnew의 `threading.Thread(` 호출은 모두 함수 안에 있다(`characters.py:1587…`, `plan.py:1393`, `locations.py:2846`, `previz.py:2858`, `generate.py:1006`). 드라이버는 라우트(`GET /plan`의 `ensure_driver`, `POST /generate`)로만 시작되므로 블루프린트가 없으면 시작 경로가 없다.
+4. 트랙: 꺼져 있으면 `_accepted_tracks`가 `video_new`를 빼서 생성·선택 요청이 400 `INVALID_PROJECT_TRACK`이 된다(`project_tracks.py:398-407`, `:488-489`, `:640-641`). 주의: `TRACKS` 튜플에는 항상 `video_new`가 들어 있어(`project_tracks.py:29`) 저장된 값 읽기는 그대로 된다. 같은 파일 27행 주석("TRACKS 에 없어")은 실제 코드와 다르다.
+5. 프런트: `vnewEnabled`가 false면 `vnew`/`characters` 화면 진입을 홈으로 돌리고(`app.js:6353`), vnew 버튼·메뉴 토글을 하지 않는다(`app.js:7090-7095`). `vnew.js`는 그래도 항상 로드된다(`index.html:30`). `vnew-previz.js`·three.js는 073부터 `vnewEnabled`일 때만 동적 import된다(`app.js:22`, 5.4).
+6. 결과: 꺼진 배포에서 `/api/vnew/*`는 Flask 404 핸들러(`server.py:860-862`, `NOT_FOUND`)로 응답한다(추정 — 실제 요청으로는 확인하지 않음).
+
+---
+
+## 5. 프런트엔드
+
+### 5.1 구성
+
+| 파일 | 줄 수 | 역할 |
+|---|---|---|
+| `index.html` | 2,343 | 단일 페이지. view 14개: `homeView`, `projectDetailView`, `studioView`, `imageStudioView`, `videoNewView`, `sceneVideoView`, `videoGenView`, `vnewView`, `charactersView`, `sceneProductionView`(복구 전용), `libraryView`, `usersView`, `modelsView`, `myUsageView`(`index.html:268-1702`) |
+| `app.js` | 8,670 | 공통 상태·로그인·라우팅·스토리·관리자. `APP_VERSION`(`:13`)과 런타임 플래그(`:14-25`) |
+| `vpoc.js` / `vpoc.css` | 3,514 / 1,244 | 영상만들기_기존 화면(`#vpoc-root`) |
+| `vnew.js` / `vnew.css` | 6,146 / 3,116 | 영상만들기_신규·캐릭터 만들기 |
+| `vnew-previz.js` | 1,214 | ④ 프리비즈 three.js 장면·녹화(ES module, `import * as THREE from "/vendor/three/..."`, `:27`) |
+| `vpoc2.html/js/css` | 소형 / 499 / 소형 | vpoc2 독립 페이지(`/vpoc2.html`) |
+| `vpoc-smoke.html/js` | 소형 / 155 | 영상 1건 시험 페이지(API는 `VPOC_SMOKE_ENABLED`로 차단) |
+| `styles.css` | 3,593 | 공통 스타일 |
+| `runtime-config.js` | 2 | 기본값. 배포에서는 ConfigMap이 덮어쓴다 |
+| `fonts/`, `assets/` | — | Pretendard(OFL), 로고·로그인 이미지 |
+
+빌드 도구·번들러가 없다. 상태는 전역 객체 + 화면별 렌더 함수.
+
+### 5.2 런타임 플래그
+
+`k8s/workloads.yaml.tmpl:1-13`의 ConfigMap이 `/usr/share/nginx/html/runtime-config.js`를 덮어써 `window.__WHYNOT_RUNTIME__ = { videoGen, storyDev, persistLogin, noticeSpecup, vnewEnabled }`를 준다. `app.js:14-25`에서 읽는다. 서버 쪽 같은 이름의 env와 **같은 config 값으로 렌더**되므로 화면과 API가 함께 켜지고 꺼진다.
+
+### 5.3 백엔드 연결
+
+- 토큰: `sessionStorage`(`toon-change-ai-pj:token`), `PERSIST_LOGIN`이면 `localStorage`에도(`app.js:65`, `:855-916`). 모든 호출에 `Authorization: Bearer`(`app.js:380`, `:475`, `vpoc.js:118`, `vnew.js:100`).
+- 호출 대상: `app.js` → `/api/auth`·`/api/projects`·`/api/admin`·`/api/outputs`·`/api/script-jobs` 등, `vpoc.js` → `/api/vpoc/p/...`·`/api/vpoc/fal/*`, `vnew.js` → `/api/vnew/...` + `/api/vpoc/fal/*`, `vpoc2.js` → `/api/vpoc2`(`vpoc2.js:6`).
+- 폴링 주기: vnew 상세 5초(`vnew.js:19`), vnew 계획 3초(`vnew.js:1300`), 대본 작업 10초(`app.js:7176`), 옛 Wan 15초(`app.js:5467`), smoke 5초.
+- 영상·이미지는 S3 presigned URL 또는 같은 출처 API(`/model/<v>.glb`, `/photos/<id>`, `/previz/texture`)로 받는다.
+
+### 5.4 캐시 무효화(ASSET_VERSION)
+
+1. CI가 `--build-arg ASSET_VERSION=$IMAGE_TAG`(= `ci-<sha>`)를 넘긴다(`.gitlab-ci.yml:110-133`).
+2. `frontend/Dockerfile`이 `index.html`, `app.js`, `vpoc-smoke.html`, `vnew-previz.js`(073 R9.4)의 `__ASSET_VERSION__`을 sed로 치환하고, 남아 있거나 `APP_VERSION`이 없으면 빌드를 실패시킨다(`frontend/Dockerfile:22-35`).
+3. `index.html`은 `styles.css`, `vpoc.css`, `vnew.css`, `runtime-config.js`, `app.js`, `vpoc.js`, `vnew.js`를 `?v=<태그>`로 부른다(`index.html:14-33`). `vnew-previz.js`(three.js)는 `index.html`에서 싣지 않는다(`index.html:34` 주석).
+   - 동적 import(073 R9.1-9.3): `app.js:22`가 `VNEW_ENABLED`일 때만 `import("/vnew-previz.js?v=<태그>")`를 하고 결과 Promise를 `window.vnewPrevizReady`에 둔다. 꺼진 배포(운영)는 `Promise.resolve(false)`라 `vnew-previz.js`·three.js(약 690KB)를 내려받지 않는다.
+   - `vnew.js:4542`의 ④ 프리비즈 화면이 그 Promise를 기다린 뒤 `window.vnewPreviz.create`를 부른다. 로드 실패면 E7 "3D 뷰어를 불러오지 못했습니다: <원인>"을 기존 `showError` 경로로 보인다.
+   - 치환된 `vnew-previz.js`가 three.js를 `?v=<태그>`로 import하므로 three.js도 배포마다 새 URL이다.
+4. nginx: 정적 확장자(css/js/svg/png/jpg/webp/ico/woff2)는 `public, max-age=2592000, immutable`, HTML은 `no-store`(`nginx.conf`의 두 location). 배포마다 URL이 바뀌어 새 파일을 받는다.
+5. 예외: `vpoc2.html`의 고정 `?v=2026093002`는 치환 대상이 아니다(11장 R-11). `vnew-previz.js`는 073부터 치환 대상이다.
+
+### 5.5 vendor 라이브러리(이름·버전만 확인)
+
+| 라이브러리 | 버전·라이선스 | 근거 | 쓰는 곳 |
+|---|---|---|---|
+| three | 0.169.0, MIT | `frontend/public/vendor/three/VERSION.txt` | `vnew-previz.js:27` |
+| @google/model-viewer | 3.5.0, Apache-2.0 | `frontend/public/vendor/model-viewer/VERSION.txt` | 캐릭터 3D 보기(`index.html:31` 주석) |
+
+`docs/vendor/README.md`는 BytePlus 공식 문서 6개를 받아 둘 자리의 목록이다(파일 자체는 아직 없음).
+
+---
+
+## 6. 외부 의존
+
+### 6.1 Bedrock 모델
+
+| 용도 | 기본 모델(코드) | 리전 | 근거 |
+|---|---|---|---|
+| vpoc ② 분석·샷 설명 | `global.anthropic.claude-fable-5-1` (`VPOC_ANALYZE_MODEL`, `VPOC_BRIEF_MODEL`) | broker 경유(아래) | `vpoc/settings.py:50-53` |
+| vpoc 텍스트 폴백 체인 | primary → `claude-opus-5-5` → `claude-opus-4-6-v1` → `claude-sonnet-4-6` → `claude-sonnet-4-5-20250929-v1:0` → `VPOC_TEXT_MODEL` | `VPOC_TEXT_REGION`(=AWS_REGION) | `vpoc/settings.py:85-93`, `vpoc/llm.py:292-300` |
+| vnew 분석·설계·지시서 | `global.openai.gpt-6-astra`(`VNEW_ASTRA_MODEL`) 먼저, 실패 시 Claude 분석 체인(`ANALYZE_MODEL`). 장소 설계·사실은 반대로 Claude 먼저, Astra 폴백 | broker 경유 | `vnew/settings.py:41-46`, `vnew/locations.py:120-130`, `vnew/characters.py:533` |
+| 문서·스토리 | `DOC_TEXT_MODEL` = `claude-sonnet-4-5`, 표지·그림체 판단 haiku-4-5, prompt_boost opus-4-5 | AWS_REGION | `documents.py:22`, `server.py:104-120` |
+| 이미지 | `stability.sd3-5-large-v1:0` 등(카탈로그) | us-west-2 | `k8s/model-catalog.yaml.tmpl`, `vpoc/settings.py:95-96` |
+| 영상 | `luma.ray-v2:0`, 비동기 출력은 같은 리전 버킷 | us-west-2 | `vpoc/settings.py:98-100`, `k8s/model-catalog.yaml.tmpl` |
+
+- **broker**: 모델 이름에 `claude-fable-`, `claude-opus-5`, `claude-sonnet-5`, `gpt-6`가 들어가면 다른 계정의 역할을 STS `AssumeRole`(ExternalId 사용)로 빌려 호출한다(`vpoc/settings.py:56-62`, `vpoc/llm.py:38-76`). 역할 ARN 기본값이 코드에 들어 있다(값은 여기 옮기지 않는다). `VPOC_BEDROCK_BROKER_ROLE_ARN=""`로 끌 수 있다.
+- IAM: `infra/app-bedrock-policy.json.tmpl` — `InvokeModel`·`StartAsyncInvoke`·`GetAsyncInvoke`, 다른 계정 주체 Deny. 스트리밍(`InvokeModelWithResponseStream`)은 없다 — `vpoc/llm.py:303-305` 주석대로 운영 역할에서 거부되면 일반 호출로 바꾼다. 실제 고객 계정 역할 정책은 미확인.
+
+### 6.2 fal.ai
+
+- 호스트: 큐 `https://queue.fal.run`, 카탈로그 `https://api.fal.ai/v1`, 스키마 `https://fal.ai/api/openapi/queue/openapi.json`(`vpoc/settings.py:147-152`). 인증 `Authorization: Key <FAL_KEY>`(`vpoc/fal.py:129-131`).
+- **등록 레지스트리**: S3 주 버킷 `users/_system/vpoc/fal-models.json`(`vpoc/fal.py:39`), 프로세스 캐시 30초. 등록 때 OpenAPI 스키마에서 caps(프롬프트·첫/끝 프레임·참고 이미지·영상·영상 배열·elements·길이·해상도)를 뽑아 저장(`fal.py:238-299`).
+- 카테고리: 등록 가능 `text-to-video`·`image-to-video`·`video-to-video`·`reference-to-video`(`vpoc/settings.py:162-167`), 목록만 3D 2종 추가. 금지 글롭 `*seedance*2*fast*`(`VPOC_FAL_DENY_ENDPOINTS`).
+- 코드에 박힌 endpoint 기본값: `fal-ai/kling-video/o3/standard/video-to-video/edit`(애니 변환·프리비즈 edit), `fal-ai/hunyuan3d-v3/image-to-3d`(3D), ARK Seedance 대체 `bytedance/seedance-2.5/image-to-video`(`vpoc/settings.py:139-142`, `:203-205`, `vnew/settings.py:58`, `:114-116`).
+- 결과 영상은 만료 URL이라 완료 즉시 우리 영상 버킷으로 옮긴다(`fal.py:9-13`).
+
+### 6.3 BytePlus ARK
+
+- `ARK_BASE_URL` 기본 `https://ark.ap-southeast.bytepluses.com/api/v3`, 키 `ARK_API_KEY`(`vpoc/settings.py:105-106`).
+- Seedance 2.0/2.5: `/contents/generations/tasks`(`vpoc/ark.py:487`, `:517`). 2026-10-26부터 기본 비활성(`VPOC_ARK_SEEDANCE_ENABLED=false`, `settings.py:134`) — 목록에서 빠지고 저장된 선택은 fal Seedance로 바뀐다. 이미 제출된 `ark/tasks/` 작업은 계속 조회한다(`settings.py:128-133` 주석).
+- Seedream 5.0 flash/pro(이미지): `/images/generations`(`vpoc/seedream.py:65`), 모델 `dola-seedream-5-0-*`(`settings.py:78-79`). vnew 캐릭터 시트·장소 시트·시작 장면에 쓴다.
+
+### 6.4 Neptune · S3 · Secret
+
+- Neptune: `NEPTUNE_ENDPOINT:8182/openCypher`(HTTPS, `graph_store.py:38-41`, `:130`). 타임아웃 15초.
+- S3 버킷(이름 패턴만): 주 버킷 `whynot-<고객계정>`(운영)·`whynot-dev-<고객계정>`(개발), 영상 버킷(us-west-2) `whynot-video-<고객계정>-us-west-2`(운영)·`whynot-dev-video-<고객계정>-usw2`(개발)(`deploy/config.prod.env`, `deploy/config.dev.env`). IRSA 정책은 `users/*`와 `_config/models.json`·`_config/prompts.json`만 허용(`infra/app-s3-policy.json.tmpl`).
+- k8s Secret(이름·키만, 값 없음):
+
+| Secret(config 키) | 키 | 주입 env | optional |
+|---|---|---|---|
+| `whynot-auth` (`AUTH_SECRET_NAME`) | `username`, `password`, `token-secret`, `company-code`, `seed-users`, `user-quotas` | `ADMIN_USERNAME`, `ADMIN_PASSWORD`, `TOKEN_SECRET`, `DEFAULT_COMPANY_CODE`, `SEED_USERS`, `USER_QUOTAS` | 아니오 |
+| `seedance-api-key` (`SEEDANCE_SECRET_NAME`) | `ark-api-key` | `ARK_API_KEY` | 예 |
+| `fal-api-key` (`FAL_SECRET_NAME`) | `fal-api-key` | `FAL_KEY` | 예 |
+
+근거: `k8s/workloads.yaml.tmpl`(app env 블록). AWS Secrets Manager를 앱 코드가 직접 읽는 곳은 없다(`secretsmanager` 미사용 — grep 기준 추정). CI의 ai-deploy 쓰기 토큰은 GitLab CI 변수 `AI_DEPLOY_TOKEN`(masked·protected)(`.gitlab-ci.yml:34-37`).
+
+### 6.5 Python 패키지(`app/requirements.txt`)
+
+`boto3==1.40.2`, `Flask==3.1.2`, `gunicorn==23.0.0`, `Pillow==11.3.0`, `imageio-ffmpeg==0.6.0`, `reportlab==5.0.1`. 모두 고정 버전. HTTP는 표준 `urllib`(fal·ARK·Neptune). `video-worker/requirements.txt`는 별도(미배포).
+
+---
+
+## 7. 설정 플래그 표
+
+값 출처: 코드 기본값 / `deploy/config.env.example`(= base, CI 렌더 원본) / `config.dev.env` / `config.prod.env`. 오버레이는 base에 있는 키만 덮어쓸 수 있다(`deploy/render.py:68-90`). "—"는 오버레이에 없어 base 값을 쓴다는 뜻이다.
+
+### 7.1 기능 스위치
+
+| 환경변수 | 읽는 곳 | 코드 기본 | base | dev | prod |
+|---|---|---|---|---|---|
+| `VIDEO_GEN_ENABLED` | `server.py:337`, runtime-config | false | true | — (true) | true |
+| `STORY_DEV_ENABLED` | `server.py:338`, runtime-config | true | true | — | — |
+| `VNEW_ENABLED` | `server.py:341`, runtime-config | false | false | **true** | **false** |
+| `PERSIST_LOGIN` | 프런트만(`app.js:22`) | false | false | — | true |
+| `NOTICE_SPECUP_ENABLED` | 프런트만(`app.js:25`) | false | false | — | true |
+| `VPOC_ENABLED` | `vpoc/settings.py:32` | true | true | — | true |
+| `VPOC_RAW_ERRORS` | `vpoc/settings.py:33` | true | true | — | false |
+| `VPOC_SMOKE_ENABLED` | `vpoc/settings.py:34` | false | true | — | false |
+| `VPOC_REGEN_ENABLED` | `vpoc/settings.py:37` | true | true | — | true |
+| `VPOC_MODEL_PICKER_ENABLED` | `vpoc/settings.py:103` | false | false | true | true |
+| `VPOC_DUAL_STYLE_ENABLED` | `vpoc/settings.py:200` | false | false | true | true |
+| `VPOC2_ENABLED` | `vpoc2/settings.py:24` | false | true | — | true |
+| `VPOC_ARK_SEEDANCE_ENABLED` | `vpoc/settings.py:134` | false | false | — | —(되돌릴 때만 `true`) |
+| `VPOC_FAL_SEEDANCE_FAMILY` | `vpoc/settings.py:248` | `bytedance/seedance-2.5/image-to-video=bytedance/seedance-2.5/reference-to-video` | 같은 값 | — | — |
+| `VPOC_FAL_SEEDANCE_MAX_S` | `vpoc/settings.py:228` | 15 | 15 | — | — |
+| `VPOC_FAL_PROMPT_MAX_OVERRIDES` | `vpoc/settings.py:293` | `bytedance/seedance-2.5/*=4000` | 같은 값 | — | — |
+| `VPOC_FAL_SEEDANCE_TAG_STYLE` | `vpoc/settings.py:330` | `at` | `at` | — | —(V-2 실패 시에만 `plain`) |
+| `PROMPT_BOOST_ENABLED` | `prompt_boost.py:42` | 1 | 키 없음 | — | — |
+
+073 새 키 5개(위 `VPOC_ARK_SEEDANCE_ENABLED`~`VPOC_FAL_SEEDANCE_TAG_STYLE`)는 앱 env(`k8s/workloads.yaml.tmpl:298-311`)와 base(`deploy/config.env.example:368-392`)에 배선돼 있어 오버레이 한 줄로 바꿀 수 있다. 템플릿이 env를 늘 설정하므로 base 값이 실제 기본값이다. 빈 값의 뜻: `FAMILY` 빈 값은 계열 라우팅 끔(070 동작), `PROMPT_MAX_OVERRIDES` 빈 값은 덮어쓰기 없음(caps·2,500), `TAG_STYLE` 빈 값·틀린 값은 `at`(design.md §6).
+
+### 7.2 계정·저장소·리전
+
+| 환경변수 | 읽는 곳 | 코드 기본 | 비고 |
+|---|---|---|---|
+| `EXPECTED_ACCOUNT_ID` (← `AWS_ACCOUNT_ID`) | `account_guard.py:21` | 빈 값(fail-closed) | base는 허브 계정, dev·prod는 고객 계정 |
+| `AWS_REGION` | 여러 곳 | ap-northeast-2 | |
+| `S3_BUCKET` | `server.py:82`, `vpoc/settings.py:39`, `model_registry.py:27`, `prompt_layers.py:58` | `""` / 일부 모듈은 옛 버킷명 | dev·prod 오버레이가 고객 버킷으로 |
+| `S3_VIDEO_BUCKET` | `server.py:83`, `model_registry.py:29` | `""` | prod는 빈 값 |
+| `VPOC_VIDEO_BUCKET` | `vpoc/settings.py:100`, `vpoc2/settings.py:33` | `""` | dev·prod 각자 고객 영상 버킷 |
+| `VPOC_VIDEO_REGION` / `VPOC_IMAGE_REGION` | `vpoc/settings.py:96-99` | us-west-2 | |
+| `VIDEO_OUTPUT_REGION` / `COVER_IMAGE_REGION`(← `IMAGE_MODEL_REGION`) | `server.py:140`, `model_registry.py:30-31` | us-west-2 | |
+| `NEPTUNE_ENDPOINT` / `NEPTUNE_PORT` | `graph_store.py:38-39` | `""` / 8182 | |
+| `MODEL_CATALOG_PATH` / `MODEL_CONFIG_KEY` | `model_registry.py:32-33` | `/etc/AI-POC/models.json` / `_config/models.json` | base는 `/etc/ai-poc/models.json` |
+| `VIDEO_MAX_REFERENCE_IMAGES` | `server.py:2905`, `image_brief.py:56` | 20 | |
+
+### 7.3 모델·단가·동시성(주요)
+
+| 환경변수 | 읽는 곳 | 코드 기본 | base |
+|---|---|---|---|
+| `VPOC_TEXT_MODEL` | `vpoc/settings.py:40` | claude-sonnet-4-5 | 같음 |
+| `VPOC_IMAGE_MODEL` / `VPOC_VIDEO_MODEL` | `:95`, `:98` | sd3-5-large / luma.ray-v2:0 | 같음 |
+| `VPOC_RESOLUTION` / `VPOC_DURATION` / `VPOC_ASPECT` | `:234-236` | 540p / 5s / 16:9 | 같음 |
+| `VPOC_MAX_INFLIGHT` / `VPOC_MAX_SHOTS` | `:241`, 그 아래 | 1 / 6 | 1 / 6 |
+| `VPOC_ARK_MODEL_2_0` / `_2_5` / `VPOC_ARK_RESOLUTION` | `:109-112` | dreamina-seedance-2-0/2-5 / 720p | 같음 |
+| `VPOC_ARK_USD_PER_SEC_2_0` / `_2_5` | `:125-126` | 빈 값(표 사용) | 빈 값 |
+| `VPOC_ANIME_MODEL` / `VPOC_ANIME_USD_PER_S` | `:203-207` | Kling O3 standard v2v edit / 0.14 | 같음 |
+| `VPOC_TEXT_USD_PER_MTOK_IN/OUT` | settings | 3 / 15 | 3 / 15 |
+| `ARK_BASE_URL` | `vpoc/settings.py:105` | ap-southeast BytePlus | 같음 |
+| `VNEW_*` (약 50개) | `vnew/settings.py` | 코드 기본값 | **매니페스트 미주입**(base 주석에만 설명, `config.env.example` "VNEW_* 주석") |
+| `TOKEN_TTL_SECONDS` / `REMEMBER_TOKEN_TTL_SECONDS` | `server.py:99-103` | 28800 / 604800 | 미주입 |
+| `STITCH_TIMEOUT_SECONDS` | `stitcher.py:28` | 600 | 미주입 |
+
+### 7.4 파드 자원
+
+| 키 | base(dev) | prod |
+|---|---|---|
+| `APP_CPU/MEM_REQUEST` | 100m / 128Mi | 500m / 1Gi |
+| `APP_CPU/MEM_LIMIT` | 500m / **512Mi** | 4 / 8Gi |
+| `FRONTEND_*` | 50m·64Mi / 200m·128Mi | 100m·128Mi / 500m·256Mi |
+| `PRESTOP_SLEEP_S` / `TERMINATION_GRACE_S` | 15 / 45 | — |
+
+근거: `deploy/config.env.example`, `deploy/config.prod.env`. dev 오버레이는 자원 키를 덮어쓰지 않는다.
+
+### 7.5 매니페스트에 있지만 코드가 읽지 않는 값
+
+`app/src` 전체를 이름으로 grep 해 읽는 곳이 0건인 것(검사 패턴과 결과는 이 세션의 grep 기준).
+
+| 환경변수 | 매니페스트 주입 | 비고 |
+|---|---|---|
+| `SEEDANCE_MODE` | 예(`workloads.yaml.tmpl` app env) | 옛 `scene_video` 모듈용. 모듈은 삭제됨(`tools/check_vpoc.py`의 `MUST_NOT_EXIST`에 `app/src/scene_video`) |
+| `ARK_MODEL_ID` | 예 | 현재 코드는 `VPOC_ARK_MODEL_2_0/2_5`를 읽는다 |
+| `VENDOR_INPUT_POLICY` | 예 | |
+| `SEEDANCE_SCHEMA_VERIFIED` | 예 | |
+| `SEEDANCE_CONTRACT_TOKEN_TOTAL` / `_RATES` / `_ENDS_AT` | 예 | |
+| `SEEDANCE_ALLOW_ORIGINAL_ASSETS` | 예 | |
+| `PROVIDER_MODE` | 예 | |
+| `STORY_MODEL_MODE` | 예 | prod 오버레이가 `real`로 덮어쓰지만 효과 없음 |
+| `SCENE_VIDEO_PROVIDER` / `_ALLOWED_PROVIDERS` / `_ALLOW_STUB` / `_GPU_ENABLED` / `_VERIFICATION_TTL_SECONDS` | 예 | prod 오버레이가 `SCENE_VIDEO_PROVIDER`를 덮어쓰지만 효과 없음 |
+| `S3_VIDEO_LEGACY_BUCKET` | 예(app env) | 앱은 안 읽음. `render.py`가 IAM 정책 ARN 파생에 씀(`render.py:118-124`) |
+| `STORY_TEXT_INPUT_PREVIEW` / `_GENERATION`, `LEGACY_VIDEO_WRITE_MODE`, `VIDEO_ANALYSIS_CACHE_ENABLED`, `ARK_MODEL_ID_FAST`, `S3_VIDEO_LEGACY_WRITABLE`(앱 기준) | 아니오(config에만) | config 전용 잔재. `S3_VIDEO_LEGACY_WRITABLE`은 `render.py:133`이 정책 파생에 씀 |
+| GPU 키(`GPU_NODEGROUP_NAME`, `VIDEO_WORKER_*`, `VIDEO_CLIP_QUEUE_URL`, `MODEL_PVC_SIZE`, `WAN_*`) | `k8s-gpu/*`만 | CI는 `k8s-gpu` 렌더 결과를 ai-deploy에 쓰지 않는다 |
+| `ARK_API_KEY=`(config 키) | 아니오 | 실제 주입은 Secret `secretKeyRef` |
+
+반대로 **코드는 읽지만 템플릿에 자리가 없는 값**: `VPOC_ANALYZE_MODEL`, `VPOC_BRIEF_MODEL`, `VPOC_BEDROCK_BROKER_*`, `VPOC_TEXT_FALLBACK_MODELS`, `VPOC_FAL_DENY_ENDPOINTS`, `VNEW_*`, `VPOC2_MOCK` 등. 이 값들을 바꾸려면 `config.env.example` 키 추가 + `k8s/workloads.yaml.tmpl` env 추가가 함께 필요하다(`render.py`는 템플릿의 `${VAR}`만 치환한다, `render.py:206-219`).
+
+---
+
+## 8. 빌드·배포 경로
+
+### 8.1 CI job 순서(`.gitlab-ci.yml`)
+
+```mermaid
+flowchart LR
+  C["check:whynot<br/>python:3.12-slim<br/>check_vpoc.py"] --> BA["build:app<br/>kaniko"]
+  C --> BF["build:frontend<br/>kaniko"]
+  BA --> DD["deploy:whynot:dev<br/>main 자동"]
+  BF --> DD
+  BA --> DP["deploy:whynot:prod<br/>main 수동 버튼"]
+  BF --> DP
+```
+
+| job | 단계 | 실행 조건 | 하는 일 | 근거 |
+|---|---|---|---|---|
+| `check:whynot` | check | main, MR, web, api | requirements 설치 후 `python -X utf8 tools/check_vpoc.py` | `:51-65` |
+| `build:app` / `build:frontend` | build | main, web, api (`needs: check:whynot`) | kaniko v1.23.2로 빌드. 항상 `whynot-dev-*:<태그>`에 push, **main이면 같은 태그를 `whynot-*`(운영 리포)에도 push**. build-arg `IMAGE_TAG`, `SOURCE_STAMP`, `ASSET_VERSION`(프런트) | `:68-133` |
+| `deploy:whynot:dev` | deploy | main 자동 | dev ECR 이미지 존재 확인 → `render.py --target dev` → 미치환·태그·허브 계정 문자열 검사 → ai-deploy `whynot/dev/`에 **3개 파일**(service-account, model-catalog, workloads) 커밋·push(rebase 재시도 5회) | `:270-380` |
+| `deploy:whynot:prod` | deploy | main 수동(`when: manual`) | 운영 ECR 이미지 확인 → 같은 manifest로 `prod-<sha>` 보호 태그 추가 → `render.py --target prod` → 검사 → ai-deploy `whynot/prod/`에 **4개 파일**(+ingress) | `:136-268` |
+
+- MR 파이프라인은 check만 돈다(build의 rules에 `merge_request_event`가 없다).
+- 두 deploy job은 `resource_group: ai-deploy`로 직렬화된다(`:145`, `:278`).
+- 자격: runner 서비스 계정이 IRSA로 `whynot-dev-runner-role`을 assume(파일에 키 없음, `:30-33`).
+
+### 8.2 이미지 태그·ECR 수명 주기
+
+- 태그: `IMAGE_TAG = ci-$CI_COMMIT_SHORT_SHA`(`:44`). 운영 승격 시 `prod-<sha>`(`prod_tag="prod-${IMAGE_TAG#ci-}"`, `:165`)를 같은 manifest에 추가.
+- 운영 리포는 IMMUTABLE(`:12-14` 주석).
+- 저장소의 `infra/ecr-lifecycle.json` 규칙: untagged 1일, `20*` 최근 10개, `ci-*` 최근 20개. **`prod-*` 보존 규칙은 이 파일에 없다.** CI 주석은 "ECR lifecycle's top rule keeps prod-*"라고 적는다(`.gitlab-ci.yml:159-163`). 실제 고객 계정 리포의 정책은 미확인(11장 R-6).
+  - **확인(Claude, 2026-10-26, `aws ecr get-lifecycle-policy`)**: 운영 리포 `whynot-app`·`whynot-frontend`의 실제 정책은 1순위 "keep prod-* forever", 2순위 "keep last 20 ci-*"다. 저장소 파일(`infra/ecr-lifecycle.json`)만 실제와 다르다. `prod-ae21dc13` 같은 승격 이미지는 보존된다.
+
+### 8.3 렌더링(`deploy/render.py`)
+
+1. `config.env`(CI에서는 `config.env.example`을 복사하고 `IMAGE_TAG`만 바꿈) 읽기 → `config.<target>.env` 덮어쓰기. 오버레이에만 있는 키는 실패(`render.py:68-90`).
+2. 파생값: `ECR_REGISTRY`(← `ECR_ACCOUNT_ID` 없으면 `AWS_ACCOUNT_ID`), `APP_IMAGE`, `FRONTEND_IMAGE`, `IAM_APP_ROLE_ARN`, TLS 리스너(인증서 있으면 443 + 도메인 있으면 ssl-redirect), 영상 버킷 ARN 대체 등(`:93-200`).
+3. `k8s/`, `k8s-gpu/`, `infra/`의 `*.tmpl`을 `${VAR}` 치환. 값 없는 변수가 있으면 실패(`:206-219`). 결과는 `deploy/rendered/`.
+
+### 8.4 ai-deploy·ArgoCD
+
+- 경로: `awstech/ai-deploy` main 브랜치의 `whynot/dev/`(3개 파일 CI 관리 + `ingress.yaml`·`namespace.yaml` 수동 관리), `whynot/prod/`(4개 파일 CI 관리). 파일 머리에 "Generated by CI … source: <프로젝트>@<sha>" 주석(`.gitlab-ci.yml:228-231`, `:351-354`).
+- dev ingress를 CI가 쓰지 않는 이유: 개발 ALB를 GitLab·ArgoCD와 한 ALB 그룹으로 공유하고 group 설정·host가 템플릿에 없다(`deploy/config.dev.env` 머리 주석, `.gitlab-ci.yml:20-27`).
+- ArgoCD: 운영 클러스터 안 앱 `whynot-prod`, 개발 클러스터 안 앱 `argocd-whynot`이 해당 경로를 자동 동기화·selfHeal(`.gitlab-ci.yml:15-16`, `:28-29`; "3분 안에 동기화" 출력 `:244`, `:367`). `CLAUDE.md`는 개발 앱 이름을 `whynot-dev`로 적는다 — 이름이 문서마다 다르다. **ArgoCD Application 정의는 이 저장소에 없다**(미확인: sync 옵션·prune 설정).
+- 옛 경로 차단: `deploy/deploy.ps1:77-80`이 `DEPLOY_MANAGED_BY=argocd`면 거부(`-ForceManual`만 예외). `CLAUDE.md` "배포" 절도 kubectl 직접 변경을 금지한다.
+
+### 8.5 롤백(코드·문서에서 확인되는 범위)
+
+| 방법 | 근거 | 비고 |
+|---|---|---|
+| 기능 플래그 끄기 후 main 배포 | `config.env.example`의 `VPOC_REGEN_ENABLED`·`VPOC2_ENABLED` 주석("이 값만 false로 바꿔 배포"), `vpoc/settings.py:35-37` | 플래그가 템플릿에 주입된 값일 때만 가능(7.5) |
+| ARK Seedance 되살리기 | `vpoc/settings.py:128-134`(`VPOC_ARK_SEEDANCE_ENABLED=true`) | 073부터 템플릿·base에 배선됨. `config.prod.env`에 한 줄 + 운영 job(design.md §8) |
+| 이전 커밋으로 운영 재배포 | `deploy:whynot:prod`는 그 파이프라인의 `$IMAGE_TAG`를 쓴다(`:136-`) → 이전 main 파이프라인의 수동 버튼을 다시 누르면 그 태그가 렌더된다(추정 — GitLab이 옛 파이프라인 수동 job 재실행을 허용하는지와 그 태그가 ECR에 남아 있는지에 좌우됨) | `prod-<sha>` 태그 이미지는 보존 의도 |
+| ai-deploy 커밋 되돌리기 | ArgoCD가 경로를 그대로 동기화하므로 revert 커밋이 반영될 것(추정, Application 설정 미확인) | 다음 CI 실행이 다시 덮어씀 |
+| kubectl 직접 수정 | 금지(selfHeal이 되돌림, `CLAUDE.md`) | — |
+
+### 8.6 배포 안 하는 구성요소
+
+- `k8s-gpu/`·`video-worker/`: Wan 2.2 상주 GPU 워커(SQS). `render.py:142-151` 주석대로 GPU 대상에만 별도 적용하는 구조이고, CI는 이 결과를 ai-deploy에 쓰지 않는다. `ECR_VIDEO_GEN_REPO`·`VIDEO_GEN_TAG`는 빈 값(`config.env.example`).
+- `terraform/`: "Hub 계정 전용" root 모음(`terraform/README.md:1-3`) — 고객 계정 인프라 IaC는 이 저장소에 없다(미확인: 다른 저장소 여부).
+- `deploy/*.ps1`(start/stop/schedules/backup/bastion/preflight/deploy), `infra/build-deploy.sh`, `infra/verify-*.sh.tmpl`: 허브 계정·배스천 시절 도구. 고객 계정에는 배스천이 없다(`config.prod.env` `BASTION_INSTANCE_ID=` 주석).
+
+---
+
+## 9. 데이터 저장 구조
+
+### 9.1 S3 주 버킷(ap-northeast-2)
+
+| 키 | 내용 | 근거 |
+|---|---|---|
+| `_config/models.json` | 모델 카탈로그 관리자 덮어쓰기 | `model_registry.py:32` |
+| `_config/prompts.json` | 프롬프트 관리자 덮어쓰기(버전) | `prompt_layers.py:62` |
+| `users/{u}/{category}/YYYY/MM/DD/{uuid}_{file}` | 업로드 이미지·영상 | `server.py:577` |
+| `users/{u}/sources/{pid}/{uuid}_{stem}.txt` | 원본 자료 | `server.py:732` |
+| `users/{owner}/documents/{pid}/{kind}_{uuid}.json` | AI 문서 본문 | `server.py:1680` |
+| `users/{u}/covers/YYYY/MM/DD/…` | 표지 | `server.py:2056` |
+| `users/{owner}/video/{pid}/vpoc1/` 아래 `project.json`, `uploads/{id}.jpg·json`, `characters/{c}/{img}.jpg`, `plans/{plan}/state.json`, `jobs/{gen}/{shot}-{n}.json`, `keyframes/…`, `master/background-*.jpg`, `final.json`, `final.mp4`, `final-anime.mp4`, `finals/{stamp}.json`, `track-commands.json` | vpoc1 상태·산출물 | `vpoc/store.py:62-150`, `server.py:6956`, `vpoc/routes.py:4366` |
+| `users/_vpoc1/ledger.json` | vpoc1 비용 원장(전 사용자 공용 1파일) | `vpoc/store.py:154` |
+| `users/{user}/video/_smoke/{id}.json` | smoke 기록 | `vpoc/store.py:155` |
+| `users/{owner}/video/_vpoc2/index.json`, `_vpoc2/{run}/run.json`, `characters/…`, `final-*.mp4` | vpoc2 | `vpoc2/store.py:4-10` |
+| `users/_vpoc2/ledger.json`, `users/_vpoc2/reviews.json` | vpoc2 원장·리뷰 | `vpoc2/store.py:55-56` |
+| `users/_system/vpoc/fal-models.json` | fal 등록 레지스트리(전역) | `vpoc/fal.py:39` |
+| `users/{owner}/characters/index.json`, `{c}/char.json`, `{c}/src/{f}.jpg`, `{c}/{variant}/v{n}/…` | vnew 캐릭터(시트·GLB) | `vnew/characters.py:116-132` |
+| `users/{owner}/video/{pid}/vnew/plan.json` | **vnew 프로젝트 단일 원본** | `vnew/plan.py:64-68` |
+| `users/{owner}/video/{pid}/vnew/uploads/{f}.jpg`, `locations/…`, `previz/{rev}/{seg}.mp4`, `previz/{rev}/frames/{seg}/` | vnew 입력·장소·프리비즈 녹화 | `vnew/plan.py:72`, `vnew/previz.py:185-204` |
+| `users/{owner}/video/{pid}/vnew/gen/{gen}/opening.jpg`, `{seg}-firstframe.jpg`, `final-real.mp4`, `final-webtoon.mp4` | vnew ⑤ 산출물 | `vnew/generate.py:107-124` |
+
+### 9.2 S3 영상 버킷(us-west-2)
+
+- vpoc1 출력: `users/{owner}/video/{pid}/vpoc1/plans/{plan}/shots/{gen}/{shot}-{n}/…`(`vpoc/store.py:146-151`), 애니 변환은 그 옆 `…/anime`(`vpoc/routes.py:139-147`).
+- vnew 출력: 같은 함수로 `plan_id = vnew-{gen}`(`vnew/generate.py:127-129`).
+- vpoc2 출력: `users/{owner}/video/_vpoc2/{run}/shots/{shot}-{n}/`(`vpoc2/store.py:10`).
+- 수명 주기: 저장소의 `infra/s3-lifecycle.json`은 미완료 multipart 1일, `_build/` 1일만 정의. 실제 버킷 설정은 미확인(`config.prod.env` 주석: "users/ 자동 삭제 규칙 없음").
+
+### 9.3 Neptune(openCypher)
+
+정점 라벨(`graph_store.py`의 CREATE/MERGE): `user`, `project`, `setting`, `document`, `sequence`, `storyboard`, `usage`, `credit`, `wanjob`, `story_bible`, `story_output`, `script_job`, `video_scene`, `scene_review`, `scene_review_revision`, `preference_memory`, `preference_memory_reset`, `character_sheet`(`:265-3788`). 간선 `(user)-[:owns]->(project)`(`:11`). 쓰임: 로그인·역할·한도(credit)·사용량(usage)·프로젝트·문서 상태·스토리 계보. vpoc·vnew의 진행 상태는 Neptune이 아니라 S3 JSON에 둔다(vpoc는 프로젝트 정점에 진행 요약만 `update_graph`로 갱신, `vpoc/routes.py:4183`).
+
+---
+
+## 10. 테스트·검증 도구
+
+### 10.1 `tools/check_vpoc.py`(CI 유일 검사기, 11,856줄)
+
+`main()`이 아래 34개를 순서대로 부른다(`check_vpoc.py:11809-11843`). 실패가 하나라도 있으면 종료 코드 1. 외부 호출은 모듈 래퍼를 monkeypatch 하고 S3는 메모리 저장소로 바꾼다(예: `:892` "메모리 S3", `:916`, `:1216`, `:1930`).
+
+| 접두어 | 검사 함수 | 대상 |
+|---|---|---|
+| 기반 | `check_compileall`, `check_import`, `check_js`, `check_residue` | `app/src` compileall, `src.server` import 스모크(`VIDEO_GEN_ENABLED`·`VPOC_ENABLED`=true, `/api/vpoc` 라우트 존재), `frontend/public/*.js` `node --check`(node 없으면 경고 후 건너뜀, `:118-122`), 구 식별자·삭제 파일 잔존 |
+| vpoc | `check_compose`, `check_client_token`, `check_regen`, `check_gen_id`, `check_no_budget_cap`, `check_planview_keys`, `check_cancel`, `check_dual`, `check_anime_style` | `vpoc.compose`, `video`(토큰), `regen`, `store`, `ledger`, `routes`(취소·dual 경로), `ark`, `fal`, `stitcher` |
+| fal | `check_fal_pricing`, `check_fal_model_caps` | `vpoc.fal` 단가·caps 추출, `settings.shot_usd` |
+| ark | `check_ark_seedance_gate` | `VPOC_ARK_SEEDANCE_ENABLED` 게이트(`ark.choices`·`resolve_model`) |
+| vnew | `check_vnew`, `check_vnew_characters`, `check_vnew_plan`, `check_vnew_locations`, `check_vnew_generate`, `check_vnew_real_start`, `check_vnew_previz`, `check_vnew_previz_camera`, `check_vnew_shot_brief`, `check_vnew_mannequin`, `check_vnew_reference_video` | `project_tracks`, `vnew.routes`(별도 Flask 앱에 등록, `:1866`), `characters`, `plan`, `locations`, `location_views`, `previz`, `previz_camera`·`previz_fit`·`previz_grammar`·`previz_schema`, `shot_brief`, `generate` |
+| vnew take | `check_vnew_take`, `check_vnew_take_prompt`, `check_vnew_take_costume`, `check_vnew_take_prompt_polish`, `check_vnew_take_prompt_budget`, `check_vnew_take_on_screen`, `check_vnew_take_harmony_motion` | `vnew.generate` 통 테이크(Seedance reference-to-video) 프롬프트·바이트 예산·의상·화면 행동 |
+
+### 10.2 기타 도구
+
+| 파일 | 역할 | 유료 여부 |
+|---|---|---|
+| `tools/vpoc_e2e.py` | dev API 로그인(`VPOC_E2E_USER`/`PASS`) 또는 앱 파드 안 test client로 vpoc1 전체를 실제로 돈다 | **유료**(약 15.2 USD, `:2`) |
+| `tools/vpoc_preflight.py` | 표준 라이브러리 + boto3로 Bedrock·S3 사전 점검(C1~C10) | C9(SD3.5)·C10(Luma)만 유료(`:7`) |
+| `deploy/verify/*` | 옛 배포 검증 PowerShell·파이썬(스타일·한도·프롬프트·프로젝트·모델·문서 API, 병합 비삭제 검사) | 미확인(대상 API에 따라) |
+| `infra/verify-*.sh.tmpl`, `infra/status-check.sh` | 배스천에서 매니페스트·API 확인(옛 경로) | — |
+
+### 10.3 검사가 비어 있는 모듈
+
+`check_vpoc.py`가 import 하지 않는 모듈(`from src import …` 기준 grep): `server.py`(import 스모크만), `gateway.py`, `graph_store.py`, `documents.py`, `model_registry.py`, `prompt_layers.py`, `providers.py`, `styles.py`, `image_brief.py`, `pdf_export.py`, `toon_convert.py`, `video_prompt.py`, `prompt_boost.py`, `prompts_story.py`, `story_router.py`·`story_models.py`·`story_context.py`, `account_guard.py`, `image_validation.py`, `model_capabilities.py`, `roles/*`, **`vpoc2/*` 전체**. 스토리 트랙·인증·관리자·Neptune 경로는 단위 검사가 없다. 커버리지 수치는 측정하지 않았다(명령 실행 금지).
+
+---
+
+## 11. 위험·남은 정리 거리
+
+| # | 내용 | 근거 | 영향 |
+|---|---|---|---|
+| R-1 | fal 모델 등록·해제가 `require_auth`만 요구한다. 레지스트리는 전 사용자 공용(`users/_system/…`)이라 일반 사용자도 모든 사람의 ② 모델 목록을 바꿀 수 있다 | `vpoc/routes.py:4622-4645`, `vpoc/fal.py:39` | 권한 |
+| R-2 | broker 역할 ARN(다른 계정) 기본값이 코드에 박혀 있다. 환경변수로 끌 수 있지만 템플릿에 자리가 없어 배포 설정으로는 못 끈다 | `vpoc/settings.py:56-59`, `k8s/workloads.yaml.tmpl`(해당 env 없음) | 계정 의존·운영성 |
+| R-3 | 매니페스트에 죽은 env 20여 개(7.5). prod 오버레이의 `SCENE_VIDEO_PROVIDER`·`STORY_MODEL_MODE`는 효과가 없는데 주석은 효과가 있는 것처럼 적는다 | `deploy/config.prod.env`, `k8s/workloads.yaml.tmpl` | 혼동 |
+| R-4 | (073에서 해소) `VPOC_ARK_SEEDANCE_ENABLED`가 템플릿 env·base에 배선돼 config 한 줄로 되돌린다 | `k8s/workloads.yaml.tmpl:298-299`, `deploy/config.env.example:374` | 되돌리기 |
+| R-5 | nginx CSP(Report-Only)의 img-src·media-src가 허브 계정 버킷 호스트를 하드코딩. 고객 계정 버킷이 없다. 강제 모드로 바꾸면 이미지·영상이 막힌다 | `frontend/nginx.conf` `map $host $toon_csp` 블록과 그 위 TODO | 보안 헤더 실효 |
+| R-6 | 저장소 `infra/ecr-lifecycle.json`에 `prod-*` 보존 규칙이 없다. CI 주석은 있다고 가정한다. 이 파일을 그대로 적용하면 `ci-*` 규칙이 승격 이미지를 지울 수 있다(추정 — ECR이 다중 태그 이미지를 어떻게 고르는지는 실제 정책으로 확인 필요) | `infra/ecr-lifecycle.json`, `.gitlab-ci.yml:159-163` | 롤백 대상 소실 |
+| R-7 | 드라이버·잠금이 프로세스 메모리에 있다. gunicorn 2 worker × 2 replica = 4 프로세스라 같은 계획의 드라이버가 여러 개 돌 수 있다. 중복 제출은 S3 ETag·claim·"15초 내 조회 건너뛰기"로 막는 설계 | `vpoc/routes.py:3312-3357`, `vnew/generate.py:960-1007`, `app/Dockerfile` CMD | 동시성 |
+| R-8 | `stitch`가 샷 mp4 전부와 결과 mp4를 메모리로 읽는다. dev 앱 limit 512Mi | `vpoc/routes.py:4339-4358`, `config.env.example` `APP_MEM_LIMIT=512Mi` | OOM(dev). vnew ⑤는 세마포어로 완화(`vnew/generate.py:51`) |
+| R-9 | 비용 원장이 전 사용자 공용 JSON 1개(`users/_vpoc1/ledger.json`)에 항목을 계속 쌓는다. 읽기-수정-쓰기라 크기와 경합이 함께 커진다(추정) | `vpoc/store.py:154`, `vpoc/ledger.py:27-35` | 성능 |
+| R-10 | CI 검사 이미지에 node가 없어 JS 구문 검사가 항상 건너뛰어진다(추정 — `python:3.12-slim`에 node 미포함). 검사 파이썬(3.12)과 앱 이미지(3.13.7)도 다르다 | `.gitlab-ci.yml:53`, `tools/check_vpoc.py:118-122`, `app/Dockerfile:1` | 검사 공백 |
+| R-11 | (073에서 `vnew-previz.js` 부분 해소: Dockerfile 치환 대상에 들어갔다, 5.4) `vpoc2.html`은 고정 버전 쿼리라 30일 immutable 캐시에서 옛 파일이 나올 수 있다 | `frontend/Dockerfile:22-24`, `vpoc2.html:8-12` | 캐시 |
+| R-12 | 단위 검사가 없는 모듈이 많다(10.3). 특히 인증·한도·Neptune·스토리·vpoc2 | `tools/check_vpoc.py` import 목록 | 회귀 |
+| R-13 | `project_tracks.py:27` 주석과 실제 동작(TRACKS에 항상 포함, `_accepted_tracks`가 거절)이 다르다 | `project_tracks.py:27-29`, `:398-407` | 문서 |
+| R-14 | `server.py`의 `TOKEN_SECRET`·회사 코드에 약한 코드 기본값이 있다. 매니페스트는 Secret을 필수(`optional` 없음)로 참조해 Secret이 없으면 파드가 뜨지 않으므로 운영에는 영향이 없다(추정) | `server.py:88`, `:98`, `k8s/workloads.yaml.tmpl` | 로컬·잘못된 배포 |
+| R-15 | `model_registry.py`·`prompt_layers.py`의 `S3_BUCKET` 기본값이 옛 계정 버킷 이름이다 | `model_registry.py:27`, `prompt_layers.py:58` | 잔재 |
+| R-16 | `config.env.example`(base)이 허브 계정 값(계정·클러스터·버킷·인증서)을 그대로 가진다. dev·prod 오버레이가 빠뜨린 키는 허브 값으로 렌더된다. CI의 허브 계정 문자열 검사가 막아 주지만 계정 번호가 없는 값(예: 리전·이름)은 못 잡는다(추정) | `deploy/config.env.example:21`, `.gitlab-ci.yml:195-204`, `:318-327` | 설정 |
+| R-17 | 옛 도구·데이터가 남아 있다: `deploy/*.ps1`, `infra/build-deploy.sh`, `infra/inventory/`(옛 계정 조회 덤프), `terraform/hub/*`, `k8s-gpu/`, `video-worker/`, `README.md` 본문(정본 설명 그대로), `model-catalog.yaml.tmpl` 주석의 옛 계정 정보 | 각 경로 | 정리 |
+| R-18 | vnew의 fal 모델 등록 UI가 vpoc 블루프린트(`VIDEO_GEN_ENABLED`·`VPOC_ENABLED`)와 `VPOC_MODEL_PICKER_ENABLED`에 의존한다. 이 중 하나라도 꺼진 환경에서 vnew만 켜면 모델 등록이 404 | `vnew.js:2255-2370`, `vpoc/routes.py:4551-4553`, `server.py:6970` | 결합 |
+| R-19 | vpoc `create_blueprint`가 등록 시점에 `ledger.seed()`로 S3를 읽고 쓴다(실패는 경고). 파드 기동마다 실행 | `vpoc/routes.py:157-161` | 기동 부작용 |
+| R-20 | ArgoCD Application·dev ingress·운영 ECR 정책이 저장소 밖에 있다. 이름도 문서마다 다르다(`argocd-whynot` vs `whynot-dev`) | `.gitlab-ci.yml:28-29`, `CLAUDE.md` 배포 절 | 추적성 |
+
+---
+
+## 12. 부록 — `구조분석.md`(2026-09-03)와 달라진 점
+
+| 항목 | 2026-09-03 (`구조분석.md`) | 지금(2026-10-26) | 근거 |
+|---|---|---|---|
+| 코드 원본 | 허브 GitLab `gitlab.meta-clouds.com/awstech/ai`, 워크스테이션이 사실상 원본(미커밋 39개) | 고객 계정 GitLab `awstech/ai` main | `.gitlab-ci.yml:1-37` |
+| CI/CD | 없음(`.gitlab-ci.yml` 없음) | check → build(kaniko) → deploy dev 자동 / prod 수동 | `.gitlab-ci.yml` |
+| 배포 방식 | `deploy.ps1` → S3 `_build/` → SSM → 배스천 docker build·`kubectl apply` | CI가 ai-deploy에 매니페스트 커밋 → 클러스터 안 ArgoCD 동기화. `deploy.ps1`은 거부 | `.gitlab-ci.yml`, `deploy/deploy.ps1:77-80` |
+| 클러스터 | `quick-test-eks` 1개(프라이빗 API, 배스천 경유) | 개발 `whynot-dev-eks`, 운영 `whynot-prod-eks`(고객 계정), 배스천 없음 | `config.prod.env` `EKS_CLUSTER_NAME`, 작업 지시 |
+| 계정 | 옛 계정 → 허브 계정 | 고객 계정(dev·prod 모두), 허브 계정 문자열이 매니페스트에 있으면 CI 실패 | `config.dev.env`, `config.prod.env`, `.gitlab-ci.yml:195-204` |
+| 네임스페이스·이름 | `toon-change-ai-pj` | `whynot`(`whynot-app`, `whynot-frontend`, `whynot-auth`) | `config.env.example` |
+| ECR | `toon-change-ai-pj-app/frontend/video-gen` 3개, 태그 `YYYYMMDD-vN` | dev `whynot-dev-app/frontend`, prod `whynot-app/frontend`, 태그 `ci-<sha>` + `prod-<sha>` | `.gitlab-ci.yml:44`, `:85-133`, `:165` |
+| 도메인 | `ai-pj.testlink.click` | 운영 `whynot.meta-clouds.com`, 개발 `dev-whynot.meta-clouds.com` | `.gitlab-ci.yml` environment url |
+| 자체 GPU(Wan 2.2) | 운영 중(g6e.24xlarge, `video-gen` Deployment) | 이관 안 함. `k8s-gpu/`·`video-worker/`만 남음 | `render.py:142-151`, `config.env.example` |
+| 영상 기능 | `/api/videos/*`(Luma), `/api/v2/video/*`(Wan) | `/api/vpoc`(vpoc1), `/api/vpoc2`, `/api/vnew`(개발만). 옛 영상 모듈은 삭제되고 잔존 검사로 막음 | `server.py:6970-7011`, `tools/check_vpoc.py` `MUST_NOT_EXIST` |
+| 외부 영상 공급자 | Bedrock Luma + 자체 GPU | Bedrock Luma + fal.ai(Kling·Seedance·Hunyuan3D) + BytePlus ARK(Seedream, Seedance는 기본 꺼짐) | `vpoc/settings.py`, `vnew/settings.py` |
+| LLM | Bedrock Claude(gateway 경유) | 스토리는 gateway 경유, vpoc·vnew는 직접 boto3 + 모델 체인 + broker 역할 + GPT-6 Astra | `vpoc/llm.py:38-96`, `:292-300` |
+| 백엔드 규모 | 15개 모듈 약 13,100줄, 라우트 55개 | 74개 파일 약 55,100줄, 라우트 server 63 + track 1 + vpoc 14 + vpoc2 13 + vnew 45 | 2장, 4장 |
+| 프런트 규모 | `app.js` 5,835줄 등 약 8,900줄 | `app.js` 8,670 + `vnew.js` 6,146 + `vpoc.js` 3,514 + `index.html` 2,343 등, vendor three·model-viewer 추가 | 5장 |
+| 검사 | `.build/check-*.py` 10여 종 | `tools/check_vpoc.py` 1개(34개 검사 함수)만 CI에서 실행 | `check_vpoc.py:11809-11843` |
+| 비밀값 | `config.env`·`test.json` 평문, `SEED_USERS` 평문 env | k8s Secret `whynot-auth`·`seedance-api-key`·`fal-api-key` 참조, 매니페스트에 비밀값 없음, ai-deploy 토큰은 CI 변수 | `k8s/workloads.yaml.tmpl`, `.gitlab-ci.yml:34-37` |
+| 파드 자원 | 앱·프론트 공통 | 운영만 app limit 4 CPU·8Gi(노드 m6i.2xlarge), 개발은 512Mi | `config.prod.env` |
+| 롤링 무중단 | 기술 없음 | preStop 15초 + 종료 유예 45초 | `config.env.example`, `workloads.yaml.tmpl` |
+| 프로젝트 트랙 | 없음 | 생성 시 story/video/video_new 고정, 스토리 라우트에 트랙 가드 | `project_tracks.py` |
+| 비용 스케줄 | EventBridge 스케줄로 18시 중지(`schedules.ps1`) | 고객 계정 스케줄 여부 미확인(스크립트는 허브 계정 기준으로 남음) | `deploy/schedules.ps1` |

@@ -31,10 +31,7 @@
   <!-- 3D 보기(Google model-viewer 3.5.0, vendor 에 동봉). ES module 이라 type="module" 로 싣는다.
        캐릭터 상세의 실사·웹툰 3D 모델을 <model-viewer> 로 회전·확대한다. 같은 출처라 CSP(script-src 'self') OK. -->
   <script type="module" src="/vendor/model-viewer/model-viewer.min.js?v=__ASSET_VERSION__"></script>
-  <!-- 프리비즈(3D 장면 재생·녹화). three.js(vendor) 를 쓰는 ES module 이라 type="module" 로 싣는다.
-       전역 window.vnewPreviz 를 노출하고, vnew.js 의 ④ 프리비즈 화면이 그것으로 뷰포트를 그린다.
-       VNEW_ENABLED 가 꺼진 배포에서는 vnewView 가 열리지 않아 이 스크립트가 쓰일 일이 없다. -->
-  <script type="module" src="/vnew-previz.js?v=__ASSET_VERSION__"></script>
+  <!-- 프리비즈(vnew-previz.js, three.js)는 여기서 싣지 않는다. app.js 가 vnewEnabled 일 때만 동적 import 한다(073 R9). -->
 </head>
 <body>
   <!-- 키보드 사용자가 사이드바를 지나치지 않아도 되게 한다. 포커스를 받을 때만 나타난다. -->

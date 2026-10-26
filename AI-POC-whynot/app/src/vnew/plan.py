@@ -433,10 +433,13 @@ def update_input(owner: str, pid: str, patch: dict) -> dict:
 
     - totalSeconds: 3~60 정수
     - videoModel: 기본 프리비즈 모델 또는 등록된 previzCapable fal 모델만 허용. 모르는 모델을 보내면
-      400 BadVideoModel, 빈 값은 기본으로 되돌린다(설계자 2026-10-22).
+      400 BadVideoModel, 빈 값은 기본으로 되돌린다(설계자 2026-10-22). 옛 ARK Seedance 값(seedance-2-0/2-5)이
+      프리비즈 모델로 바뀌지 않으면 400 대신 기본 프리비즈 모델로 저장한다(073 R13.1).
     - order: images 의 fileId 순열(빠지거나 모르는 fileId 가 있으면 거절)
     - characters: [{charId, roleName}] — charId 는 캐릭터 만들기에서 만든 것
     """
+    from ..vpoc import settings as vpoc_settings  # noqa: PLC0415
+
     model_ids = _previz_model_ids()
 
     def mutator(data: dict) -> None:
@@ -460,14 +463,22 @@ def update_input(owner: str, pid: str, patch: dict) -> dict:
         if "videoModel" in patch:
             # 기존 ARK Seedance(seedance-2-0/2-5)가 저장/전송돼도 ark.resolve_model 로 먼저 바꾼다
             # (꺼져 있으면 fal Seedance 또는 Luma). 그 뒤 프리비즈 모델 목록으로 검증한다(설계자 2026-10-26).
-            model = vpoc_ark.resolve_model(str(patch.get("videoModel") or ""))
+            raw_model = str(patch.get("videoModel") or "")
+            model = vpoc_ark.resolve_model(raw_model)
             if model and model not in model_ids:
-                raise VpocError(
-                    "vnew.plan.input",
-                    "BadVideoModel",
-                    "고를 수 없는 영상 모델입니다. 기본 모델 또는 프리비즈를 지원하는 fal 모델만 쓸 수 있습니다.",
-                    400,
-                )
+                if raw_model in vpoc_settings.ARK_MODEL_IDS:
+                    # 옛 ARK 값은 프리비즈 모델이 될 수 없다(073 R13.1, 리뷰 O-11). 400 대신 기본 프리비즈
+                    # 모델로 저장해 옛 값이 남은 계획도 ① 입력을 저장할 수 있게 한다. 그 밖의 모르는 값은 400.
+                    reset_to = default_previz_model()
+                    log.info("vnew.plan.video_model_reset from=%s to=%s", raw_model, reset_to)
+                    model = reset_to
+                else:
+                    raise VpocError(
+                        "vnew.plan.input",
+                        "BadVideoModel",
+                        "고를 수 없는 영상 모델입니다. 기본 모델 또는 프리비즈를 지원하는 fal 모델만 쓸 수 있습니다.",
+                        400,
+                    )
             inp["videoModel"] = model or default_previz_model()
 
         if "notes" in patch:

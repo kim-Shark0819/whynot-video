@@ -604,9 +604,11 @@
       drawModelPicker();
 
       // 현재 고른 모델 id. drawModelPicker 안에서 다시 계산한다.
+      // 073 R12.4: 서버가 실제로 쓸 모델(plan.videoModel)을 저장값보다 먼저 본다 — 저장값이 목록에 없는
+      // 옛 값(예: 기존 Seedance)이어도 실제 모델이 선택된 상태로 보인다.
       function currentModelId() {
         if (edits.videoModel) return edits.videoModel;
-        return step.videoModel || plan.videoModel || "luma-ray2";
+        return plan.videoModel || step.videoModel || "luma-ray2";
       }
 
       // 키 장면(콘티) 방식이 기본인 모델인지 — Seedance 또는 fal 모델.
@@ -657,6 +659,20 @@
           modelRow.appendChild(label);
         });
         modelBlock.appendChild(modelRow);
+        // E6(073 R12.4): 저장된 모델을 지금 쓸 수 없어 다른 모델로 만든다는 안내. 사용자가 새로 고르면 숨긴다.
+        if (!edits.videoModel && plan.videoModelRequested && plan.videoModelRequested !== plan.videoModel) {
+          var actualItem = (plan.videoModels || []).filter(function (item) {
+            return item.id === plan.videoModel;
+          })[0];
+          var actualLabel = actualItem ? actualItem.label : plan.videoModel;
+          modelBlock.appendChild(
+            el(
+              "p",
+              "vpoc-hint",
+              "저장된 모델(" + plan.videoModelRequested + ")은 지금 쓸 수 없어 " + actualLabel + "(으)로 만듭니다."
+            )
+          );
+        }
         modelWrap.appendChild(modelBlock);
 
         // "fal 에서 모델 가져오기" — 편집 권한이 있을 때만.
@@ -2181,17 +2197,14 @@
         // 되돌린다 — 현재 _shot4_view 가 sentPromptEn 을 내려 주지 않기 때문이다(결과 보고 참고).
         var sentEn = shot.sentPromptEn || (singleMode ? (step3 || {}).masterPromptEn : "") || "";
         if (sentEn) {
-          var sentBox = el("details", "vpoc-advanced");
-          sentBox.appendChild(el("summary", null, "보낸 프롬프트"));
-          var sentArea = el("textarea", "vpoc-input");
-          sentArea.rows = 6;
-          sentArea.readOnly = true;
-          sentArea.value = sentEn;
-          sentBox.appendChild(sentArea);
-          body.appendChild(sentBox);
+          vpocSentPromptBox(body, sentEn, shot.promptTrimmed);
         }
         body.appendChild(el("p", "vpoc-hint", "의견을 반영하려면 ③ 계획 승인에서 키 장면·구간 내용을 바꿔 다시 승인해 주세요."));
       } else {
+        // 073 E8(R5.2): 샷별 영상도 fal 이 프롬프트를 잘랐으면 안내와 실제로 보낸 문장을 보인다.
+        if (shot.promptTrimmed && shot.sentPromptEn) {
+          vpocSentPromptBox(body, shot.sentPromptEn, shot.promptTrimmed);
+        }
         vpocRegenAttach(body, shot, plan);
       }
       row.appendChild(body);
@@ -2631,10 +2644,14 @@
 
     var actions = el("div", "vpoc-regen-actions");
     // 서버 확인용 금액(화면에는 보이지 않는다). 샷마다 길이가 달라 그 샷의 값을 쓴다.
+    // 073 X1: 서버가 회차 값(④ 모델·화질·샷 길이)으로 계산한 shot.regenUsd 가 있으면 그것을 먼저 쓴다
+    // (② 에서 모델을 바꿨거나 기존 Seedance 가 목록에서 빠진 회차의 409 CostMismatch 방지).
     var planShot = ((plan.steps["3"] || {}).shots || []).filter(function (item) {
       return item.id === shot.id;
     })[0];
-    var amount = planShot && planShot.usd != null ? planShot.usd : ((plan.steps["3"] || {}).cost || {}).perShotUsd;
+    var amount = shot.regenUsd != null
+      ? shot.regenUsd
+      : (planShot && planShot.usd != null ? planShot.usd : ((plan.steps["3"] || {}).cost || {}).perShotUsd);
     var go = el(
       "button",
       "vpoc-btn vpoc-btn-primary vpoc-btn-small",
@@ -3209,6 +3226,28 @@
       completed: "완료",
       cancelled: "취소됨"
     }[status] || status || "";
+  }
+
+  /* 073 E8(R5.2): fal 이 프롬프트를 잘랐을 때의 안내 한 줄. 값은 서버가 센 UTF-8 바이트 수다. */
+  function vpocPromptTrimmedText(trimmed) {
+    var info = trimmed || {};
+    return "보낸 프롬프트가 " + Number(info.toBytes || 0) + "바이트로 잘렸습니다(원래 " +
+      Number(info.fromBytes || 0) + "바이트). 아래가 실제로 보낸 문장입니다.";
+  }
+
+  /* ④ "보낸 프롬프트" 상자. 잘렸으면(E8) 상자 위에 안내 한 줄을 먼저 붙인다. 문장은 textarea 값이라 HTML 로 해석되지 않는다. */
+  function vpocSentPromptBox(body, sentEn, trimmed) {
+    if (trimmed) {
+      body.appendChild(el("p", "vpoc-hint", vpocPromptTrimmedText(trimmed)));
+    }
+    var sentBox = el("details", "vpoc-advanced");
+    sentBox.appendChild(el("summary", null, "보낸 프롬프트"));
+    var sentArea = el("textarea", "vpoc-input");
+    sentArea.rows = 6;
+    sentArea.readOnly = true;
+    sentArea.value = sentEn;
+    sentBox.appendChild(sentArea);
+    body.appendChild(sentBox);
   }
 
   function schedule() {
