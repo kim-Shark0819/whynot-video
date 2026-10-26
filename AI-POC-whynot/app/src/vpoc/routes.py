@@ -20,7 +20,7 @@ from flask import Blueprint, jsonify, request
 
 from . import seedream  # noqa: F401  (키 장면)
 from . import ark, compose, fal, images, ledger, llm, regen, settings, store, video
-from .errors import VpocError, envelope, now_iso, status_for
+from .errors import VpocError, envelope, error_gist, now_iso, status_for
 
 log = logging.getLogger("vpoc")
 
@@ -2437,6 +2437,9 @@ def create_blueprint(deps: VpocDependencies) -> Blueprint:
                 "lastPolledAt": "",
                 # 이번 제출 기준으로 늘 다시 쓴다(앞 시도가 잘렸어도 이번에 안 잘렸으면 None).
                 "promptTrimmed": prompt_trimmed,
+                # 073 R15.7: 새 제출은 조회 연속 실패 수를 새로 센다.
+                "pollErrors": 0,
+                "pollError": None,
             }
         )
         # 영상 1개(single): 승인한 프롬프트 그대로 보냈음을 ④ 화면에서 확인할 수 있게 기록한다(설계자 2026-10-19).
@@ -2671,6 +2674,9 @@ def create_blueprint(deps: VpocDependencies) -> Blueprint:
                     "error": None,
                     "lastPolledAt": "",
                     "outputKey": "",
+                    # 073 R15.7: 새 제출은 조회 연속 실패 수를 새로 센다.
+                    "pollErrors": 0,
+                    "pollError": None,
                 }
             )
 
@@ -2765,9 +2771,40 @@ def create_blueprint(deps: VpocDependencies) -> Blueprint:
                 else:
                     result = video.poll(target["invocationArn"])
             except Exception as exc:  # noqa: BLE001
-                log.warning("vpoc.poll.failed shot=%s err=%s", shot_id, exc)
-                return False
+                # 073 R15.5-6(작업 7): 조회 실패도 기록한다. lastPolledAt 을 바꿔 조회 간격을 지키고,
+                # 연속 실패 수·요지를 남긴다. 제출 뒤 POLL_GIVEUP_S 가 지났고 연속 POLL_GIVEUP_ERRORS 회
+                # 이상이면 failed 로 끝낸다(전에는 경고만 남겨 샷이 submitted 에 영원히 멈췄다).
+                errors = int(target.get("pollErrors") or 0) + 1
+                gist = error_gist(
+                    f"{exc.kind}: {exc.message}" if isinstance(exc, VpocError) else f"{type(exc).__name__}: {exc}"
+                )
+                target["lastPolledAt"] = now_iso()
+                target["pollErrors"] = errors
+                target["pollError"] = gist
+                log.warning("vpoc.poll.failed shot=%s errors=%d err=%s", shot_id, errors, gist)
+                submitted_at = str(target.get("submittedAt") or "")
+                if (
+                    errors >= settings.POLL_GIVEUP_ERRORS
+                    and submitted_at
+                    and _elapsed_s(submitted_at) >= settings.POLL_GIVEUP_S
+                ):
+                    target["status"] = "failed"
+                    target["completedAt"] = now_iso()
+                    target["error"] = {
+                        "where": "routes.poll",
+                        "type": "PollGiveUp",
+                        "message": f"결과를 가져오지 못했습니다({gist}). '다시 만들기'로 다시 시도해 주세요.",
+                        "requestId": "",
+                        "httpStatus": 502,
+                        "at": now_iso(),
+                    }
+                    log.warning("vpoc.poll.giveup shot=%s errors=%d", shot_id, errors)
+                return True
             target["lastPolledAt"] = now_iso()
+            if target.get("pollErrors") or target.get("pollError"):
+                # 073 R15.7: 조회가 성공하면 연속 실패 수를 새로 센다.
+                target["pollErrors"] = 0
+                target["pollError"] = None
             status = result["status"]
             # 오류 위치 표시. Seedance 실패가 luma.* 로 보여 원인을 헷갈리게 했다(2026-10-07).
             where = "ark" if ark.is_ark_job(target["invocationArn"]) else "luma"

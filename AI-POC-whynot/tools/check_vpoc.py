@@ -11819,6 +11819,8 @@ PARITY_ENV_KEYS = [
     "VPOC_FAL_SEEDANCE_MAX_S",
     "VPOC_FAL_PROMPT_MAX_OVERRIDES",
     "VPOC_FAL_SEEDANCE_TAG_STYLE",
+    # 작업 7(R15.8): 결과 조회 포기 시간.
+    "VPOC_POLL_GIVEUP_S",
 ]
 PARITY_FACE = "fal:bytedance/seedance-2.5/image-to-video"
 PARITY_PARTNER = "fal:bytedance/seedance-2.5/reference-to-video"
@@ -12750,6 +12752,9 @@ def check_fal_parity_rollback() -> None:
         if key == "VPOC_FAL_PROMPT_MAX_OVERRIDES" and value != _vpoc_settings.FAL_PROMPT_MAX_OVERRIDES_DEFAULT:
             # design.md §6: base 값 = 코드 기본(bytedance/seedance-2.5/*=4000).
             bad.append(f"(rw-b) {key} 기본값이 코드 기본과 다릅니다: {value!r}")
+        if key == "VPOC_POLL_GIVEUP_S" and value != "1800":
+            # design.md §13.2: base 값 = 코드 기본 1800(작업 7, R15.8).
+            bad.append(f"(rw-b) {key} 기본값이 1800 이 아닙니다: {value!r}")
 
     # (rw-c) render.py 로 실제 렌더(파일은 쓰지 않는다)
     try:
@@ -12788,6 +12793,9 @@ def check_fal_parity_rollback() -> None:
                     tag_style = _rendered_env_values(text, "VPOC_FAL_SEEDANCE_TAG_STYLE")
                     if tag_style != ["at"]:
                         bad.append(f"(rw-c) {target}: 렌더된 VPOC_FAL_SEEDANCE_TAG_STYLE 값이 ['at'] 가 아닙니다: {tag_style}")
+                    giveup = _rendered_env_values(text, "VPOC_POLL_GIVEUP_S")
+                    if giveup != ["1800"]:
+                        bad.append(f"(rw-c) {target}: 렌더된 VPOC_POLL_GIVEUP_S 값이 ['1800'] 이 아닙니다: {giveup}")
                     if "${" in text:
                         bad.append(f"(rw-c) {target}: 렌더 결과에 치환되지 않은 변수가 남았습니다")
             except (Exception, SystemExit) as exc:  # noqa: BLE001 — render.py 는 SystemExit 로 실패를 알린다.
@@ -15653,6 +15661,402 @@ def check_vnew_model_fallback() -> None:
         )
 
 
+def check_fal_poll_failure() -> None:
+    """073 작업 7 — fal 거절 샷·조회 실패 샷 마무리(R15, D14~D16). 외부 호출은 전부 가짜(_parity_env).
+
+    (pf-a) status COMPLETED + 결과 422 likeness(V-2 원문) → fal.poll Failed·likeness 문구, 로그 kind=likeness
+           (원문 없음), 400 'real person' 도 likeness, vnew _user_facing_error 를 지나도 그대로.
+    (pf-b) 422 'Output video has sensitive content' → Failed·sensitive 문구, 로그 kind=sensitive.
+    (pf-c) 400·403·404 기타 → "fal이 요청을 거절했습니다: <요지>"(URL 쿼리·data URI·키 제거, 200자),
+           500·FalUnreachable·FalBalanceExhausted·status 조회 실패 → 예외 유지. error_gist 갈래.
+    (pf-d) 통합: submitted r2v 샷 + (pf-a) 조건 → GET plan 뒤 failed, ④ 보기 문구가 RAW_ERRORS=False 에서도 그대로.
+    (pf-e) 안전장치: ark.poll 이 늘 예외 → lastPolledAt·pollErrors·pollError, 조회 간격, 31분 전 제출 + 연속 5회
+           → failed PollGiveUp·giveup 로그, 10분 전·submittedAt 없음은 유지, 성공 조회 뒤 0, 새 제출 0,
+           POLL_GIVEUP_S 파서(기본·최소·틀린 값).
+    (pf-f) 회귀: IN_QUEUE·IN_PROGRESS·FAILED·결과 error·URL 없음·Completed(가짜 다운로드) 처리가 같고 rejected 로그 없음.
+    """
+    import datetime as _dt  # noqa: PLC0415
+    import urllib.request as _urlrequest  # noqa: PLC0415
+
+    sys.path.insert(0, str(ROOT / "app"))
+    from src.vpoc import ark, errors as vpoc_errors, fal, settings  # noqa: PLC0415
+    from src.vpoc.errors import VpocError  # noqa: PLC0415
+
+    bad: list[str] = []
+    env: _ParityEnv | None = None
+    logs = _LogCapture()
+    arn = "fal/requests/bytedance/seedance-2.5/reference-to-video/req-x"
+    prefix = "users/tester/parity/out"
+    v2_text = (
+        "The images or videos provided may contain likenesses of real people or other private information "
+        "that cannot be processed."
+    )
+    likeness_msg = fal._REJECT_LIKENESS_MSG
+    sensitive_msg = fal._REJECT_SENSITIVE_MSG
+    other_prefix = "fal이 요청을 거절했습니다: "
+    fal_calls: list[str] = []
+
+    def fake_request(status_payload, response):
+        """status URL(…/status)은 status_payload, 결과 URL 은 response. 예외면 올린다."""
+
+        def run(method: str, url: str, payload: dict | None = None, *, where: str = "") -> dict:
+            fal_calls.append(url)
+            if url.endswith("/status"):
+                if isinstance(status_payload, BaseException):
+                    raise status_payload
+                return status_payload
+            if isinstance(response, BaseException):
+                raise response
+            return response
+
+        return run
+
+    def poll_with(status_payload, response) -> dict:
+        env.patch(fal, "_request", fake_request(status_payload, response))
+        return fal.poll(arn, prefix)
+
+    def http_error(code: int, text: str) -> VpocError:
+        # fal._request 가 4xx·5xx 에 올리는 모양(kind HTTP<code>, message = detail[:500]).
+        return VpocError("fal.poll", f"HTTP{code}", text[:500], 502)
+
+    def rejected_lines() -> list[str]:
+        return logs.messages("vpoc.fal.rejected", level=logging.INFO)
+
+    def iso_ago(minutes: int) -> str:
+        moment = _dt.datetime.now(_dt.timezone.utc) - _dt.timedelta(minutes=minutes)
+        return moment.strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    def shot_of(state: dict, shot_id: str = "s1") -> dict:
+        return next((s for s in state["steps"]["4"].get("shots") or [] if s.get("id") == shot_id), {})
+
+    completed = {"status": "COMPLETED"}
+    try:
+        env = _parity_env()
+        env.patch(settings, "FAL_KEY", "dummy-fal-key-XYZ")
+        logs.attach()
+
+        # ---- (pf-a) likeness ----
+        logs.clear()
+        result = poll_with(completed, http_error(422, v2_text))
+        if result != {"status": "Failed", "failureMessage": likeness_msg, "usage": None}:
+            bad.append(f"(pf-a) 422 likeness 결과가 다릅니다: {result}")
+        if rejected_lines() != ["vpoc.fal.rejected request=req-x kind=likeness http=422"]:
+            bad.append(f"(pf-a) vpoc.fal.rejected 로그가 1줄(kind=likeness http=422)이 아닙니다: {rejected_lines()}")
+        if logs.messages("likenesses of real people"):
+            bad.append("(pf-a) 로그에 fal 오류 원문이 남았습니다")
+        result = poll_with(completed, http_error(400, "Request rejected: may contain real person"))
+        if result.get("status") != "Failed" or result.get("failureMessage") != likeness_msg:
+            bad.append(f"(pf-a) 400 'real person' 이 likeness 문구가 아닙니다: {result}")
+        if "real person" in likeness_msg.lower() or "real person" in sensitive_msg.lower():
+            bad.append("(pf-a) 문구에 영어 'real person' 이 있어 vnew 매핑이 덮어씁니다")
+        try:
+            from src.vnew import generate as vnew_generate  # noqa: PLC0415
+
+            if vnew_generate._user_facing_error(likeness_msg) != likeness_msg:
+                bad.append("(pf-a) vnew _user_facing_error 가 likeness 문구를 바꿉니다")
+        except Exception as exc:  # noqa: BLE001
+            bad.append(f"(pf-a) vnew _user_facing_error 확인 실패: {exc!r}")
+
+        # ---- (pf-b) sensitive ----
+        logs.clear()
+        result = poll_with(completed, http_error(422, "Output video has sensitive content."))
+        if result != {"status": "Failed", "failureMessage": sensitive_msg, "usage": None}:
+            bad.append(f"(pf-b) 422 sensitive 결과가 다릅니다: {result}")
+        if rejected_lines() != ["vpoc.fal.rejected request=req-x kind=sensitive http=422"]:
+            bad.append(f"(pf-b) vpoc.fal.rejected 로그가 kind=sensitive 1줄이 아닙니다: {rejected_lines()}")
+
+        # ---- (pf-c) 기타 4xx·예외 유지·error_gist ----
+        for code in (400, 403, 404):
+            logs.clear()
+            result = poll_with(completed, http_error(code, "Unprocessable: field prompt is invalid"))
+            message = str(result.get("failureMessage") or "")
+            if result.get("status") != "Failed" or message != other_prefix + "Unprocessable: field prompt is invalid":
+                bad.append(f"(pf-c) {code} 기타가 other 문구가 아닙니다: {result}")
+            if rejected_lines() != [f"vpoc.fal.rejected request=req-x kind=other http={code}"]:
+                bad.append(f"(pf-c) {code} 로그가 kind=other 1줄이 아닙니다: {rejected_lines()}")
+        secret_body = (
+            "Bad file https://v3.fal.media/files/a/b.png?token=SECRET123&sig=zz "
+            "data:image/jpeg;base64,QUFBQUFBQUFB key=dummy-fal-key-XYZ " + "x" * 600
+        )
+        result = poll_with(completed, http_error(422, secret_body))
+        message = str(result.get("failureMessage") or "")
+        gist_part = message[len(other_prefix):] if message.startswith(other_prefix) else ""
+        if not gist_part:
+            bad.append(f"(pf-c) 비밀 본문 문구가 other 형식이 아닙니다: {message[:80]}")
+        for secret in ("SECRET123", "sig=zz", "QUFBQUFB", "dummy-fal-key-XYZ"):
+            if secret in message:
+                bad.append(f"(pf-c) 문구에 비밀 조각 {secret!r} 가 남았습니다")
+        if len(gist_part) > 200 or not gist_part.endswith("…"):
+            bad.append(f"(pf-c) 요지가 200자 이내로 잘리지 않았습니다: {len(gist_part)}")
+        if "https://v3.fal.media/files/a/b.png" not in gist_part or "data:…" not in gist_part or "***" not in gist_part:
+            bad.append(f"(pf-c) 요지 정리(URL 경로 유지·data:…·***)가 다릅니다: {gist_part[:120]}")
+        result = poll_with(completed, http_error(422, ""))
+        if result.get("failureMessage") != other_prefix + "HTTP422":
+            bad.append(f"(pf-c) 빈 본문 문구가 'HTTP422' 가 아닙니다: {result}")
+        for label, exc in (
+            ("500", http_error(500, "Internal Server Error")),
+            ("FalUnreachable", VpocError("fal.poll", "FalUnreachable", "연결 실패", 502)),
+            ("FalBalanceExhausted", VpocError("fal.poll", "FalBalanceExhausted", "잔액 부족", 402)),
+        ):
+            logs.clear()
+            try:
+                poll_with(completed, exc)
+                bad.append(f"(pf-c) 결과 조회 {label} 가 예외를 올리지 않았습니다")
+            except VpocError as raised:
+                if raised is not exc:
+                    bad.append(f"(pf-c) 결과 조회 {label} 예외가 원래 예외가 아닙니다: {raised.kind}")
+            if rejected_lines():
+                bad.append(f"(pf-c) {label} 에 rejected 로그가 남았습니다")
+        try:
+            poll_with(http_error(422, v2_text), completed)
+            bad.append("(pf-c) status 조회 실패가 예외를 올리지 않았습니다")
+        except VpocError:
+            pass
+        gist = vpoc_errors.error_gist
+        if gist("") != "" or gist(None) != "":
+            bad.append("(pf-c) error_gist 빈 값이 빈 문자열이 아닙니다")
+        if gist("a \n\t  b ") != "a b":
+            bad.append(f"(pf-c) error_gist 공백 모으기가 다릅니다: {gist('a  b')!r}")
+        if gist("abcdef", 4) != "abc…":
+            bad.append(f"(pf-c) error_gist 자르기가 다릅니다: {gist('abcdef', 4)!r}")
+        env.patch(settings, "FAL_KEY", "")
+        if gist("plain text ***") != "plain text ***":
+            bad.append("(pf-c) error_gist 키가 비었을 때 본문을 바꿉니다")
+        env.patch(settings, "FAL_KEY", "dummy-fal-key-XYZ")
+
+        # ---- (pf-d) 통합: submitted r2v 샷 → GET plan → failed, RAW_ERRORS=False ----
+        env.reset_calls()
+        logs.clear()
+        env.patch(settings, "RAW_ERRORS", False)
+        env.patch(fal, "_request", fake_request(completed, http_error(422, v2_text)))
+        env.save(
+            _parity_state(
+                PARITY_FACE,
+                durations=(5,),
+                step4={
+                    "status": "running",
+                    "shots": [
+                        _parity_shot4(
+                            "s1",
+                            "submitted",
+                            mode="reference",
+                            provider=PARITY_PARTNER,
+                            invocationArn=arn,
+                            outputPrefix=prefix,
+                            submittedAt=iso_ago(2),
+                            lastPolledAt="",
+                        )
+                    ],
+                },
+            )
+        )
+        resp = env.client.get(env.plan_url())
+        data = resp.get_json() or {}
+        view = next((s for s in ((data.get("steps") or {}).get("4") or {}).get("shots") or [] if s.get("id") == "s1"), {})
+        stored = shot_of(env.load())
+        if resp.status_code != 200:
+            bad.append(f"(pf-d) GET plan 이 200 이 아닙니다: {resp.status_code}")
+        if stored.get("status") != "failed" or (stored.get("error") or {}).get("type") != "AsyncInvokeFailed":
+            bad.append(f"(pf-d) 저장된 샷이 failed·AsyncInvokeFailed 가 아닙니다: {stored.get('status')} {stored.get('error')}")
+        if view.get("status") != "failed" or (view.get("error") or {}).get("message") != likeness_msg:
+            bad.append(f"(pf-d) ④ 보기 문구가 likeness 문구 그대로가 아닙니다: {view.get('status')} {view.get('error')}")
+        if rejected_lines() != ["vpoc.fal.rejected request=req-x kind=likeness http=422"]:
+            bad.append(f"(pf-d) 통합 경로 rejected 로그가 1줄이 아닙니다: {rejected_lines()}")
+        if env.charges or env.url_calls or env.ark_calls or env.video_calls:
+            bad.append("(pf-d) 조회 중 원장 기록·외부 호출이 있었습니다")
+        env.patch(settings, "RAW_ERRORS", True)
+
+        # ---- (pf-e) 안전장치: ark.poll 이 늘 예외 ----
+        env.reset_calls()
+        poll_calls: list[str] = []
+        poll_mode = {"raise": True}
+
+        def fake_ark_poll(invocation_arn: str, output_prefix: str) -> dict:
+            poll_calls.append(invocation_arn)
+            if poll_mode["raise"]:
+                raise RuntimeError("provider down")
+            return {"status": "InProgress", "failureMessage": "", "usage": None}
+
+        env.patch(ark, "poll", fake_ark_poll)
+
+        def save_submitted(**extra) -> None:
+            shot = _parity_shot4(
+                "s1",
+                "submitted",
+                durationS=5,
+                invocationArn="ark/tasks/task-pf",
+                outputPrefix="p/ark",
+                submittedAt=iso_ago(2),
+                lastPolledAt="",
+            )
+            shot.update(extra)
+            env.save(_parity_state("seedance-2-5", durations=(5,), step4={"status": "running", "shots": [shot]}))
+
+        def poll_again(**extra) -> dict:
+            state = env.load()
+            shot = shot_of(state)
+            shot["lastPolledAt"] = ""
+            shot.update(extra)
+            env.save(state)
+            env.client.get(env.plan_url())
+            return shot_of(env.load())
+
+        logs.clear()
+        save_submitted()
+        env.client.get(env.plan_url())
+        s1 = shot_of(env.load())
+        if not s1.get("lastPolledAt") or s1.get("pollErrors") != 1 or "RuntimeError: provider down" not in str(s1.get("pollError")):
+            bad.append(
+                f"(pf-e) 첫 실패 뒤 lastPolledAt·pollErrors=1·pollError 가 아닙니다: "
+                f"{s1.get('lastPolledAt')!r} {s1.get('pollErrors')} {s1.get('pollError')!r}"
+            )
+        if s1.get("status") != "submitted":
+            bad.append(f"(pf-e) 첫 실패에 상태가 바뀌었습니다: {s1.get('status')}")
+        if not logs.messages("vpoc.poll.failed shot=s1 errors=1", level=logging.WARNING):
+            bad.append(f"(pf-e) warning vpoc.poll.failed errors=1 이 없습니다: {logs.messages('vpoc.poll')}")
+        env.client.get(env.plan_url())
+        if len(poll_calls) != 1:
+            bad.append(f"(pf-e) 조회 간격 안에 다시 조회했습니다: {len(poll_calls)}회")
+
+        # 31분 전 제출 + 연속 5회 → failed
+        logs.clear()
+        save_submitted(submittedAt=iso_ago(31))
+        statuses: list[str] = []
+        for _ in range(5):
+            statuses.append(str(poll_again().get("status")))
+        s1 = shot_of(env.load())
+        if statuses[:4] != ["submitted"] * 4 or statuses[4] != "failed":
+            bad.append(f"(pf-e) 31분 전 제출의 상태 변화가 4회 submitted 뒤 failed 가 아닙니다: {statuses}")
+        error = s1.get("error") or {}
+        expected_giveup = "결과를 가져오지 못했습니다(RuntimeError: provider down). '다시 만들기'로 다시 시도해 주세요."
+        if error.get("type") != "PollGiveUp" or error.get("message") != expected_giveup or not s1.get("completedAt"):
+            bad.append(f"(pf-e) 포기 오류가 PollGiveUp·문구·completedAt 가 아닙니다: {error} {s1.get('completedAt')}")
+        if logs.messages("vpoc.poll.giveup", level=logging.WARNING) != ["vpoc.poll.giveup shot=s1 errors=5"]:
+            bad.append(f"(pf-e) giveup 로그가 1줄(errors=5)이 아닙니다: {logs.messages('vpoc.poll.giveup')}")
+        if int(s1.get("attempt") or 1) != 1 or s1.get("invocationArn") != "ark/tasks/task-pf":
+            bad.append(f"(pf-e) 포기 샷이 E5 재제출로 넘어갔습니다: attempt={s1.get('attempt')} arn={s1.get('invocationArn')}")
+
+        # 10분 전 제출은 5회가 넘어도 유지
+        save_submitted(submittedAt=iso_ago(10), pollErrors=6)
+        s1 = poll_again()
+        if s1.get("status") != "submitted" or s1.get("pollErrors") != 7:
+            bad.append(f"(pf-e) 10분 전 제출이 포기됐거나 pollErrors 가 7 이 아닙니다: {s1.get('status')} {s1.get('pollErrors')}")
+        # submittedAt 이 없으면 포기하지 않는다
+        save_submitted(submittedAt=None, pollErrors=9)
+        s1 = poll_again()
+        if s1.get("status") != "submitted" or s1.get("pollErrors") != 10:
+            bad.append(f"(pf-e) submittedAt 없음이 포기됐습니다: {s1.get('status')} {s1.get('pollErrors')}")
+
+        # 성공 조회 뒤 0
+        save_submitted(pollErrors=3, pollError="RuntimeError: provider down")
+        poll_mode["raise"] = False
+        s1 = poll_again()
+        if s1.get("pollErrors") != 0 or s1.get("pollError") is not None or s1.get("status") != "submitted":
+            bad.append(f"(pf-e) 성공 조회 뒤 pollErrors·pollError 가 초기화되지 않았습니다: {s1.get('pollErrors')} {s1.get('pollError')!r}")
+
+        # 새 제출은 0(옛 값이 남아 있어도)
+        env.reset_calls()
+        env.save(
+            _parity_state(
+                "seedance-2-5",
+                durations=(5,),
+                step4={
+                    "status": "running",
+                    "shots": [_parity_shot4("s1", "queued", durationS=5, pollErrors=4, pollError="old")],
+                },
+            )
+        )
+        env.client.get(env.plan_url())
+        s1 = shot_of(env.load())
+        if s1.get("status") != "submitted" or s1.get("pollErrors") != 0 or s1.get("pollError") is not None:
+            bad.append(f"(pf-e) 새 제출 뒤 pollErrors=0·pollError=None 이 아닙니다: {s1.get('status')} {s1.get('pollErrors')} {s1.get('pollError')!r}")
+
+        # POLL_GIVEUP_S 파서(새 프로세스에서 env 별로 읽는다 — 이 프로세스 설정을 건드리지 않는다)
+        probe = (
+            "import importlib, os, sys\n"
+            "sys.path.insert(0, sys.argv[1])\n"
+            "from src.vpoc import settings\n"
+            "out = []\n"
+            "for value in ('', '30', 'abc', '2400'):\n"
+            "    os.environ['VPOC_POLL_GIVEUP_S'] = value\n"
+            "    importlib.reload(settings)\n"
+            "    out.append(str(settings.POLL_GIVEUP_S))\n"
+            "print(','.join(out), settings.POLL_GIVEUP_ERRORS)\n"
+        )
+        child_env = {k: v for k, v in os.environ.items() if k != "VPOC_POLL_GIVEUP_S"}
+        proc = subprocess.run(
+            [sys.executable, "-X", "utf8", "-c", probe, str(ROOT / "app")],
+            capture_output=True,
+            text=True,
+            env=child_env,
+            timeout=120,
+        )
+        if proc.returncode != 0 or proc.stdout.strip() != "1800,60,1800,2400 5":
+            bad.append(f"(pf-e) POLL_GIVEUP_S 파서가 기본 1800·최소 60·틀린 값 1800 이 아닙니다: {proc.stdout.strip()!r} {proc.stderr[-300:]!r}")
+
+        # ---- (pf-f) 회귀: 기존 분기 ----
+        logs.clear()
+        for raw in ("IN_QUEUE", "IN_PROGRESS"):
+            result = poll_with({"status": raw}, completed)
+            if result != {"status": "InProgress", "failureMessage": "", "usage": None}:
+                bad.append(f"(pf-f) {raw} 가 InProgress 가 아닙니다: {result}")
+        result = poll_with({"status": "FAILED", "error": "boom upstream"}, completed)
+        if result.get("status") != "Failed" or result.get("failureMessage") != "boom upstream":
+            bad.append(f"(pf-f) FAILED 가 원문 그대로 Failed 가 아닙니다: {result}")
+        result = poll_with(completed, {"error": "bad output"})
+        if result.get("status") != "Failed" or result.get("failureMessage") != "bad output":
+            bad.append(f"(pf-f) 결과 본문 error 가 Failed 원문이 아닙니다: {result}")
+        result = poll_with(completed, {"video": {}})
+        if result.get("status") != "Failed" or "영상 URL" not in str(result.get("failureMessage")):
+            bad.append(f"(pf-f) URL 없음이 Failed 가 아닙니다: {result}")
+
+        class _Body:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc):
+                return False
+
+            def read(self) -> bytes:
+                return b"mp4-bytes"
+
+        downloads: list[str] = []
+
+        def fake_urlopen(target, timeout=None):
+            downloads.append(str(target))
+            return _Body()
+
+        env.patch(_urlrequest, "urlopen", fake_urlopen)
+        result = poll_with(completed, {"video": {"url": "https://v3.fal.media/files/out.mp4"}})
+        key = f"{prefix}/req-x/output.mp4"
+        if result != {"status": "Completed", "failureMessage": "", "usage": None} or env.fake.blobs.get(key) != b"mp4-bytes":
+            bad.append(f"(pf-f) Completed 가 우리 버킷 저장과 함께 오지 않습니다: {result} {key in env.fake.blobs}")
+        if downloads != ["https://v3.fal.media/files/out.mp4"]:
+            bad.append(f"(pf-f) 결과 다운로드가 1회가 아닙니다: {downloads}")
+        if rejected_lines():
+            bad.append(f"(pf-f) 정상 분기에 rejected 로그가 남았습니다: {rejected_lines()}")
+        if env.url_calls:
+            bad.append(f"(pf) 실제 네트워크 호출이 있었습니다: {env.url_calls}")
+    except Exception as exc:  # noqa: BLE001
+        import traceback as _tb  # noqa: PLC0415
+
+        bad.append("fal 거절·조회 실패 검사 중 예외: " + repr(exc) + "\n" + _tb.format_exc()[:1500])
+    finally:
+        logs.detach()
+        if env is not None:
+            env.restore()
+
+    if bad:
+        fail("fal-seedance-parity 거절·조회 실패 검사 실패\n" + "\n".join(f"  {item}" for item in bad))
+    else:
+        ok(
+            "fal-seedance-parity 거절·조회 실패 검사 (pf-a)422 likeness·400 real person·로그·vnew 매핑 유지 "
+            "(pf-b)sensitive (pf-c)400·403·404 other·요지 정리·빈 본문·500·Unreachable·Balance·status 실패 예외 "
+            "(pf-d)GET plan → failed·④ 문구 RAW_ERRORS=False (pf-e)lastPolledAt·pollErrors·간격·31분 5회 PollGiveUp·"
+            "10분·submittedAt 없음 유지·성공 0·새 제출 0·파서 (pf-f)IN_QUEUE·IN_PROGRESS·FAILED·error·URL 없음·Completed"
+        )
+
+
 # ---------------------------------------------------------------- main
 
 
@@ -15705,6 +16109,7 @@ def main() -> int:
     check_vnew_previz_lazy()
     check_stitcher_threads()
     check_vnew_model_fallback()
+    check_fal_poll_failure()
     print()
     if warnings:
         print(f"경고 {len(warnings)}건")
