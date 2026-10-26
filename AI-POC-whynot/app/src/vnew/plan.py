@@ -304,11 +304,15 @@ def _real_start_image(model_item: dict) -> bool:
 def default_video_model() -> str:
     """ark.choices 기준 기본 영상 모델(옛 흐름 호환). realStartImage=true 인 available 중 첫 번째,
     없으면 ark.DEFAULT_MODEL(설계자 2026-10-20).
+
+    결과는 ark.resolve_model 을 거친다 — 기존 ARK Seedance 가 꺼져 있으면 fal Seedance(등록 시) 또는
+    Luma 로 바뀐다(설계자 2026-10-26). 꺼져 있을 때 choices 는 이미 byteplus 를 빼므로 보통 그대로지만,
+    옛 기본값이 ARK Seedance 로 떨어지는 경로까지 한 함수로 막는다.
     """
     for item in available_models():
         if item.get("realStartImage"):
-            return str(item.get("id"))
-    return vpoc_ark.DEFAULT_MODEL
+            return vpoc_ark.resolve_model(str(item.get("id")))
+    return vpoc_ark.resolve_model(vpoc_ark.DEFAULT_MODEL)
 
 
 def _model_ids() -> list[str]:
@@ -454,7 +458,9 @@ def update_input(owner: str, pid: str, patch: dict) -> dict:
             inp["totalSeconds"] = value
 
         if "videoModel" in patch:
-            model = str(patch.get("videoModel") or "")
+            # 기존 ARK Seedance(seedance-2-0/2-5)가 저장/전송돼도 ark.resolve_model 로 먼저 바꾼다
+            # (꺼져 있으면 fal Seedance 또는 Luma). 그 뒤 프리비즈 모델 목록으로 검증한다(설계자 2026-10-26).
+            model = vpoc_ark.resolve_model(str(patch.get("videoModel") or ""))
             if model and model not in model_ids:
                 raise VpocError(
                     "vnew.plan.input",

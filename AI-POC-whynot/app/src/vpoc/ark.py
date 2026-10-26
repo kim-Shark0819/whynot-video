@@ -72,6 +72,9 @@ def unavailable_reason(model: str) -> str:
     """고를 수 없으면 그 이유(화면에 그대로 보인다). 고를 수 있으면 빈 문자열."""
     if settings.is_fal(model):
         return fal.unavailable_reason(model)
+    # 기존(BytePlus ARK 직결) Seedance 는 꺼져 있으면 고를 수 없다(설계자 2026-10-26).
+    if model in settings.ARK_MODEL_IDS and not settings.ARK_SEEDANCE_ENABLED:
+        return "기존 Seedance 는 사용 중지 — fal Seedance 를 쓰세요"
     if not model_id(model):
         return "모델 ID 미설정"
     if not settings.ARK_API_KEY:
@@ -111,6 +114,10 @@ def choices() -> list[dict]:
         }
     ]
     for key, label_text in LABELS.items():
+        # 기존(BytePlus ARK 직결) Seedance 가 꺼져 있으면 ② 목록에 넣지 않는다(설계자 2026-10-26).
+        # 켜져 있으면 예전과 동일(provider byteplus 2개 포함).
+        if not settings.ARK_SEEDANCE_ENABLED:
+            continue
         reason = unavailable_reason(key)
         items.append(
             {
@@ -154,11 +161,35 @@ def choices() -> list[dict]:
     return items
 
 
+def resolve_model(model: str) -> str:
+    """저장/선택된 영상 모델을 실제로 쓸 모델로 바꾼다(설계자 2026-10-26).
+
+    기존(BytePlus ARK 직결) Seedance 가 꺼져 있고(기본), 저장된 모델이 ARK Seedance
+    (`seedance-2-0`/`seedance-2-5`)면 settings.ARK_SEEDANCE_FAL_MAP 으로 fal Seedance 로 바꾼다 —
+    **그 fal 모델이 등록·사용 가능할 때만**. 아니면 기본(Luma). 그 밖의 모델(이미 fal·Luma 등)과
+    ARK Seedance 가 켜져 있을 때는 그대로 둔다(회귀 없음).
+    """
+    if settings.ARK_SEEDANCE_ENABLED:
+        return model
+    if model not in settings.ARK_MODEL_IDS:
+        return model
+    target = str(settings.ARK_SEEDANCE_FAL_MAP.get(model) or "")
+    if target and fal.is_registered(target) and not fal.unavailable_reason(target):
+        return target
+    return DEFAULT_MODEL
+
+
 def selected(state: dict) -> str:
-    """이 계획이 쓸 모델. 고르기가 꺼져 있거나 고를 수 없는 값이면 Luma."""
+    """이 계획이 쓸 모델. 고르기가 꺼져 있거나 고를 수 없는 값이면 Luma.
+
+    저장된 값은 resolve_model 을 거친다 — 기존 ARK Seedance 가 꺼져 있으면 fal Seedance(등록 시)
+    또는 Luma 로 바뀐다(설계자 2026-10-26).
+    """
     if not settings.MODEL_PICKER_ENABLED:
         return DEFAULT_MODEL
-    model = str((state.get("steps", {}).get("2") or {}).get("videoModel") or DEFAULT_MODEL)
+    model = resolve_model(
+        str((state.get("steps", {}).get("2") or {}).get("videoModel") or DEFAULT_MODEL)
+    )
     if model == DEFAULT_MODEL or (is_ark(model) and not unavailable_reason(model)):
         return model
     return DEFAULT_MODEL
