@@ -16,6 +16,18 @@ const STORY_DEV_ENABLED = window.__WHYNOT_RUNTIME__?.storyDev !== false;
 // 영상만들기_신규(vnew, 설계자 2026-10-20). 개발계에서만 켠다(운영은 꺼져 지금 화면 그대로).
 // 켜지면 만들기 창에 "영상만들기_기존/신규" 두 버튼, 메뉴 "캐릭터 만들기", 빈 화면이 보인다.
 const VNEW_ENABLED = window.__WHYNOT_RUNTIME__?.vnewEnabled === true;
+// 프리비즈(3D, three.js 약 690KB)는 vnew 가 켜진 배포에서만 내려받는다(073 R9, 리뷰 P-1).
+// vnew.js ④ 화면이 이 Promise 를 기다린 뒤 window.vnewPreviz.create 를 부른다. 실패 원인은
+// window.vnewPrevizError 에 두고 false 로 끝낸다(화면이 E7 로 보인다). 버전 쿼리는 Dockerfile sed 가 치환한다.
+window.vnewPrevizReady = VNEW_ENABLED
+  ? import("/vnew-previz.js?v=__ASSET_VERSION__").then(
+      () => true,
+      (error) => {
+        window.vnewPrevizError = error;
+        return false;
+      }
+    )
+  : Promise.resolve(false);
 // 로그인 유지(운영만 켠다). 토큰은 원래 탭마다 따로인 sessionStorage 에만 있어 새 창마다
 // 다시 로그인해야 했다. 켜져 있으면 localStorage 에도 두고, 새 탭이 열릴 때 sessionStorage 로
 // 옮겨 준다 — vpoc*.js 는 sessionStorage 만 읽으므로 그쪽은 고치지 않는다.

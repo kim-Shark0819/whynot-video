@@ -46,6 +46,8 @@ USER_FACING_KINDS = {
     "ModelUnavailable",
     "CharacterRealMissing",
     "RealStartImageUnsupported",
+    # 073 R10.5: fal 모델 해제 거절(E3)은 운영(RAW_ERRORS=false)에서도 문구를 그대로 보인다.
+    "AdminOnly",
 }
 
 

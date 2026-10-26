@@ -119,13 +119,25 @@ def charge_video(
     model: str = "",
     resolution: str = "",
     seconds: float | None = None,
+    endpoint: str = "",
 ) -> dict:
     # model 이 Seedance 면 그 모델 ID 와 단가로 남긴다. 비면 Luma. 화질·길이는 ③에서 고른 값.
+    # 073 R4.5-4.6·X2·X3: fal 이면 model 칸에 실제로 보낸 엔드포인트 id(endpoint, 없으면 model 의 id)를 남긴다.
+    # 금액은 그대로 model(회차 모델 = 계열 얼굴) 단가다 — 화면에서 승인한 금액과 같다.
     ark_id = settings.ARK_MODEL_IDS.get(model) if model else None
+    if ark_id:
+        record_model = ark_id
+    elif settings.is_fal(model):
+        sent = str(endpoint or "").strip()
+        record_model = (settings.fal_endpoint_id(sent) if settings.is_fal(sent) else sent) or settings.fal_endpoint_id(
+            model
+        )
+    else:
+        record_model = settings.VIDEO_MODEL
     return charge(
         token,
         kind="video",
-        model=ark_id or settings.VIDEO_MODEL,
+        model=record_model,
         units=settings.DURATION_S if seconds is None else seconds,
         usd=settings.shot_usd(model, resolution, seconds),
         user=user,

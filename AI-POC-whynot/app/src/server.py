@@ -6977,6 +6977,8 @@ if VIDEO_GEN_ENABLED and vpoc.settings.VPOC_ENABLED:
                 can_read_project=can_read_project,
                 can_write_project=can_write_project,
                 graph_run=graph_store.run,
+                # 073 R10.1: fal 모델 해제는 관리자만. require_admin 과 같은 조건이다.
+                is_admin=lambda: g.role == ROLE_ADMIN,
             )
         )
     )

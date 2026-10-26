@@ -15,6 +15,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
 import shutil
@@ -11803,6 +11804,3855 @@ def check_ark_seedance_gate() -> None:
         )
 
 
+# ---------------------------------------------------------------- 073 fal-seedance-parity 공용 하네스
+#
+# design.md §11. 작업 1에서 만들고 작업 2~6이 재사용한다. 외부 호출은 모두 가짜다.
+# - BytePlus: ark._call 기록기(POST 는 {"id": "task-N"}).
+# - fal: fal._request 기록기(POST 는 {"request_id": "req-N"}).
+# - 원장: ledger.charge 기록기. Luma: video.submit 기록기. urllib.request.urlopen 은 호출되면 기록 후 예외.
+# - 백그라운드 스레드(드라이버·제출)는 routes.threading 을 바꿔 띄우지 않는다(이름만 기록).
+
+# 운영 되돌리기 배선을 확인할 env 키(템플릿·config.env.example). 작업 2~4가 키를 더한다.
+PARITY_ENV_KEYS = [
+    "VPOC_ARK_SEEDANCE_ENABLED",
+    "VPOC_FAL_SEEDANCE_FAMILY",
+    "VPOC_FAL_SEEDANCE_MAX_S",
+    "VPOC_FAL_PROMPT_MAX_OVERRIDES",
+    "VPOC_FAL_SEEDANCE_TAG_STYLE",
+]
+PARITY_FACE = "fal:bytedance/seedance-2.5/image-to-video"
+PARITY_PARTNER = "fal:bytedance/seedance-2.5/reference-to-video"
+PARITY_OWNER = "tester"
+PARITY_PID = "prj_parity"
+PARITY_PLAN = "pl_parity_01"
+PARITY_CHAR_KEY = "users/tester/projects/prj_parity/vpoc/pl_parity_01/characters/c1.jpg"
+# BytePlus 제출 본문 키(073 이전과 같아야 한다, ip-g).
+PARITY_ARK_BODY_KEYS = {"model", "content", "ratio", "duration", "resolution", "generate_audio", "watermark"}
+
+
+class _LogCapture(logging.Handler):
+    """`vpoc`·`vnew` 로거에 붙였다 떼며 레코드를 모은다(073 작업 1, 작업 2~6 재사용).
+
+    로거 수준을 잠시 DEBUG 로 내려 info 로그도 받는다. detach 가 수준을 되돌린다.
+    with _LogCapture() as logs: ... 또는 attach()/detach() 로 쓴다.
+    """
+
+    def __init__(self, names: tuple[str, ...] = ("vpoc", "vnew")) -> None:
+        super().__init__(level=logging.DEBUG)
+        self.names = tuple(names)
+        self.records: list[logging.LogRecord] = []
+        self._saved: list[tuple[logging.Logger, int]] = []
+
+    def emit(self, record: logging.LogRecord) -> None:
+        self.records.append(record)
+
+    def attach(self) -> "_LogCapture":
+        if self._saved:
+            return self
+        for name in self.names:
+            logger = logging.getLogger(name)
+            self._saved.append((logger, logger.level))
+            logger.addHandler(self)
+            logger.setLevel(logging.DEBUG)
+        return self
+
+    def detach(self) -> None:
+        for logger, level in self._saved:
+            logger.removeHandler(self)
+            logger.setLevel(level)
+        self._saved = []
+
+    def clear(self) -> None:
+        self.records.clear()
+
+    def messages(self, contains: str = "", level: int | None = None) -> list[str]:
+        out: list[str] = []
+        for record in self.records:
+            if level is not None and record.levelno != level:
+                continue
+            try:
+                text = record.getMessage()
+            except Exception:  # noqa: BLE001
+                text = str(record.msg)
+            if contains in text:
+                out.append(text)
+        return out
+
+    def __enter__(self) -> "_LogCapture":
+        return self.attach()
+
+    def __exit__(self, *exc) -> bool:
+        self.detach()
+        return False
+
+
+def _parity_caps(kind: str) -> dict:
+    """개발 레지스트리와 같은 모양의 Seedance 2.5 caps(kind = "i2v" | "r2v")."""
+    durations = [str(value) for value in range(4, 31)]
+    resolutions = ["480p", "720p", "1080p"]
+    caps = {
+        "promptField": "prompt",
+        "promptMaxLength": None,
+        "startImageField": "",
+        "endImageField": "",
+        "referenceImagesField": "",
+        "durations": durations,
+        "durationAsString": True,
+        "durationValues": {value: value for value in durations},
+        "sendDuration": True,
+        "resolutions": resolutions,
+        "resolutionValues": {value: value for value in resolutions},
+        "aspectRatios": ["21:9", "16:9", "4:3", "1:1", "3:4", "9:16"],
+        "audioField": "generate_audio",
+        "videoField": "",
+        "elementsField": "",
+        "imageListField": "",
+        "imageListMax": None,
+        "keepAudioField": "",
+        "videoListField": "",
+        "videoListMax": None,
+        "taskField": "",
+        "taskValues": [],
+        "draftField": "",
+        "generateAudioField": "generate_audio",
+        "seedField": "seed",
+        "previzCapable": False,
+        "requiredFields": ["prompt"],
+        "available": True,
+        "reason": "",
+    }
+    if kind == "i2v":
+        caps.update(
+            {
+                "startImageField": "image_url",
+                "endImageField": "end_image_url",
+                "requiredFields": ["prompt", "image_url"],
+            }
+        )
+    else:
+        caps["referenceImagesField"] = "image_urls"
+    return caps
+
+
+def _parity_registry_items(*, face: bool = True, partner: bool = True) -> list[dict]:
+    """fal 레지스트리 항목(얼굴 i2v·짝 r2v). pricing 은 토큰 단가(개발 레지스트리와 같다)."""
+    items: list[dict] = []
+    pricing = {"unit": "1000 tokens", "unitPrice": 0.0214}
+    if face:
+        items.append(
+            {
+                "id": PARITY_FACE,
+                "endpointId": PARITY_FACE[len("fal:"):],
+                "label": "Bytedance Seedance 2.5 Image to Video",
+                "category": "image-to-video",
+                "caps": _parity_caps("i2v"),
+                "pricing": dict(pricing),
+                "addedBy": "tester",
+            }
+        )
+    if partner:
+        items.append(
+            {
+                "id": PARITY_PARTNER,
+                "endpointId": PARITY_PARTNER[len("fal:"):],
+                "label": "Bytedance Seedance 2.5 Reference to Video",
+                "category": "reference-to-video",
+                "caps": _parity_caps("r2v"),
+                "pricing": dict(pricing),
+                "addedBy": "tester",
+            }
+        )
+    return items
+
+
+def _closure_fn(root, name: str):
+    """create_blueprint 안쪽 함수(클로저)를 이름으로 찾는다. 없으면 None.
+
+    라우트 함수(`__wrapped__`)와 그 클로저 셀을 따라간다. 라우트로 닿지 않는 기본 인자 분기를
+    직접 부를 때만 쓴다.
+    """
+    seen: set[int] = set()
+    stack = [root]
+    while stack:
+        fn = stack.pop()
+        if fn is None or id(fn) in seen:
+            continue
+        seen.add(id(fn))
+        code = getattr(fn, "__code__", None)
+        if code is not None and code.co_name == name:
+            return fn
+        inner = getattr(fn, "__wrapped__", None)
+        if inner is not None:
+            stack.append(inner)
+        for cell in getattr(fn, "__closure__", None) or ():
+            try:
+                value = cell.cell_contents
+            except ValueError:
+                continue
+            if callable(value) and hasattr(value, "__code__"):
+                stack.append(value)
+    return None
+
+
+class _ParityEnv:
+    """_parity_env() 가 돌려주는 가짜 환경. restore() 로 모든 바꿔치기를 되돌린다."""
+
+    def __init__(self) -> None:
+        self.owner = PARITY_OWNER
+        self.pid = PARITY_PID
+        self.plan_id = PARITY_PLAN
+        self.fake = None
+        self.app = None
+        self.client = None
+        self.ark_calls: list[tuple[str, str, dict | None]] = []
+        self.fal_calls: list[tuple[str, str, dict | None]] = []
+        self.charges: list[dict] = []
+        self.video_calls: list[dict] = []
+        self.url_calls: list[str] = []
+        self.threads: list[str] = []
+        self._undo: list[tuple[object, str, object, bool]] = []
+
+    def patch(self, obj, name: str, value):
+        """obj.name 을 value 로 바꾸고 되돌릴 값을 기록한다(같은 속성을 여러 번 바꿔도 된다)."""
+        missing = not hasattr(obj, name)
+        self._undo.append((obj, name, getattr(obj, name, None), missing))
+        setattr(obj, name, value)
+        return value
+
+    def restore(self) -> None:
+        while self._undo:
+            obj, name, old, missing = self._undo.pop()
+            if missing:
+                try:
+                    delattr(obj, name)
+                except AttributeError:
+                    pass
+            else:
+                setattr(obj, name, old)
+        from src.vpoc import fal  # noqa: PLC0415
+
+        fal._invalidate_cache()
+
+    def reset_calls(self) -> None:
+        for bucket in (
+            self.ark_calls, self.fal_calls, self.charges, self.video_calls, self.url_calls, self.threads
+        ):
+            bucket.clear()
+
+    def set_registry(self, items: list[dict]) -> None:
+        from src.vpoc import fal  # noqa: PLC0415
+
+        self.fake.write_json(fal.REGISTRY_KEY, {"models": [dict(item) for item in items]})
+        fal._invalidate_cache()
+
+    def save(self, state: dict) -> None:
+        from src.vpoc import store  # noqa: PLC0415
+
+        store.save_state(self.owner, self.pid, self.plan_id, state)
+
+    def load(self) -> dict:
+        from src.vpoc import store  # noqa: PLC0415
+
+        return store.load_state(self.owner, self.pid, self.plan_id)[0]
+
+    def plan_url(self) -> str:
+        return f"/api/vpoc/p/{self.pid}/plans/{self.plan_id}"
+
+    def run_url(self, action: str) -> str:
+        return f"{self.plan_url()}/run/{action}"
+
+    def ark_posts(self) -> list[tuple[str, str, dict | None]]:
+        return [call for call in self.ark_calls if call[0] == "POST" and call[1] == "/contents/generations/tasks"]
+
+    def fal_posts(self) -> list[tuple[str, str, dict | None]]:
+        return [call for call in self.fal_calls if call[0] == "POST"]
+
+
+def _parity_env(
+    *,
+    registry: bool | list[dict] = True,
+    ark_seedance: bool = False,
+    ark_key: str = "dummy-ark-key",
+    fal_key: str = "dummy-fal-key",
+    picker: bool = True,
+    is_admin=None,
+) -> _ParityEnv:
+    """가짜 저장소·레지스트리·외부 호출 기록기·Flask 클라이언트(design.md §11).
+
+    registry: True 면 얼굴·짝 둘 다, 리스트면 그 항목, False 면 빈 레지스트리.
+    is_admin: VpocDependencies 에 is_admin 필드가 있을 때만 넘긴다(작업 5 이전과 호환).
+    """
+    import dataclasses  # noqa: PLC0415
+    import threading as _threading  # noqa: PLC0415
+    import types  # noqa: PLC0415
+    import urllib.request as _urlrequest  # noqa: PLC0415
+
+    sys.path.insert(0, str(ROOT / "app"))
+    from src.vpoc import ark, fal, images, ledger, routes, settings, store, video  # noqa: PLC0415
+
+    env = _ParityEnv()
+    try:
+        fake = _FakeCharStore()
+        env.fake = fake
+        for module in (store, ark, fal, images, ledger, video):
+            env.patch(module, "STORE", fake)
+        fake.blobs[PARITY_CHAR_KEY] = _tiny_jpeg()
+
+        env.patch(settings, "ARK_SEEDANCE_ENABLED", bool(ark_seedance))
+        env.patch(settings, "ARK_API_KEY", ark_key)
+        env.patch(settings, "FAL_KEY", fal_key)
+        env.patch(settings, "MODEL_PICKER_ENABLED", bool(picker))
+        env.patch(settings, "VPOC_DUAL_STYLE_ENABLED", False)
+        env.patch(settings, "REGEN_ENABLED", True)
+
+        def fake_ark_call(method: str, path: str, payload: dict | None = None) -> dict:
+            env.ark_calls.append((method, path, json.loads(json.dumps(payload)) if payload is not None else None))
+            if method == "POST":
+                return {"id": f"task-{len(env.ark_calls)}"}
+            return {"status": "running"}
+
+        def fake_fal_request(method: str, url: str, payload: dict | None = None, *, where: str = "") -> dict:
+            env.fal_calls.append((method, url, json.loads(json.dumps(payload)) if payload is not None else None))
+            if method == "POST":
+                return {"request_id": f"req-{len(env.fal_calls)}"}
+            return {}
+
+        def fake_charge(key: str, **kwargs) -> dict:
+            env.charges.append({"key": key, **kwargs})
+            return {"spentUsd": 0.0, "capUsd": None}
+
+        def fake_video_submit(**kwargs) -> dict:
+            env.video_calls.append(dict(kwargs))
+            shot_id = str(kwargs.get("shot_id") or "s")
+            return {
+                "provider": "luma-ray2",
+                "invocationArn": "arn:aws:bedrock:test:async-invoke/" + shot_id,
+                "clientRequestToken": "luma-parity-" + shot_id,
+                "outputPrefix": "p/luma",
+                "submittedAt": "2026-10-26T12:00:00Z",
+                "promptChars": len(str(kwargs.get("prompt") or "")),
+            }
+
+        def fake_urlopen(*args, **kwargs):
+            target = args[0] if args else kwargs.get("url")
+            env.url_calls.append(str(getattr(target, "full_url", target))[:120])
+            raise RuntimeError("check_vpoc: 실제 네트워크 호출 금지")
+
+        class _NoThread:
+            """routes 의 백그라운드 스레드를 띄우지 않고 이름만 남긴다."""
+
+            def __init__(self, target=None, name=None, args=(), kwargs=None, daemon=None) -> None:
+                env.threads.append(str(name or getattr(target, "__name__", "thread")))
+
+            def start(self) -> None:
+                return None
+
+            def join(self, timeout=None) -> None:
+                return None
+
+            def is_alive(self) -> bool:
+                return False
+
+        env.patch(ark, "_call", fake_ark_call)
+        env.patch(fal, "_request", fake_fal_request)
+        env.patch(ledger, "charge", fake_charge)
+        env.patch(video, "submit", fake_video_submit)
+        env.patch(_urlrequest, "urlopen", fake_urlopen)
+        env.patch(
+            routes,
+            "threading",
+            types.SimpleNamespace(Thread=_NoThread, Lock=_threading.Lock, local=_threading.local),
+        )
+
+        if registry is True:
+            env.set_registry(_parity_registry_items())
+        elif isinstance(registry, list):
+            env.set_registry(registry)
+        else:
+            env.set_registry([])
+
+        kwargs = {
+            "require_auth": lambda handler: handler,
+            "current_username": lambda: PARITY_OWNER,
+            "get_project": lambda p: {"id": PARITY_PID, "owner": PARITY_OWNER},
+            "can_read_project": lambda proj: True,
+            "can_write_project": lambda proj: True,
+            "graph_run": lambda *a, **k: [],
+        }
+        if is_admin is not None and "is_admin" in {f.name for f in dataclasses.fields(routes.VpocDependencies)}:
+            kwargs["is_admin"] = is_admin
+        from flask import Flask  # noqa: PLC0415
+
+        app = Flask("vpoc-parity")
+        app.register_blueprint(routes.create_blueprint(routes.VpocDependencies(**kwargs)))
+        env.app = app
+        env.client = app.test_client()
+    except Exception:
+        env.restore()
+        raise
+    return env
+
+
+def _parity_shot4(shot_id: str, status: str = "queued", **extra) -> dict:
+    """④ 샷 하나. completed 면 출력 키·시각을 채운다. extra 가 마지막에 덮는다."""
+    shot = {
+        "id": shot_id,
+        "status": status,
+        "attempt": 1,
+        "mode": "text",
+        "durationS": 5,
+        "submittedAt": None,
+        "completedAt": None,
+        "outputKey": "",
+        "invocationArn": "",
+        "videoUrl": None,
+        "note": None,
+        "error": None,
+    }
+    if status == "completed":
+        shot.update(
+            {
+                "submittedAt": "2026-10-26T11:00:00Z",
+                "completedAt": "2026-10-26T11:03:00Z",
+                "outputKey": f"users/tester/parity/{shot_id}.mp4",
+                "invocationArn": f"ark/tasks/task-done-{shot_id}",
+            }
+        )
+    shot.update(extra)
+    return shot
+
+
+def _parity_state(
+    model: str = "seedance-2-5",
+    make_mode: str = "shots",
+    *,
+    step4: dict | None = None,
+    resolution: str = "720p",
+    durations: tuple[int, ...] = (6, 5),
+    use_keyframe: bool = False,
+) -> dict:
+    """단계 1~4 상태(design.md §11). ② 저장 모델 = model. step4 를 주면 ④ 기본값 위에 덮는다.
+
+    인물 c1 의 그림은 PARITY_CHAR_KEY(_parity_env 가 _tiny_jpeg() 를 넣는다)이고 샷마다 나온다.
+    """
+    sys.path.insert(0, str(ROOT / "app"))
+    from src.vpoc import store  # noqa: PLC0415
+
+    state = store.new_state(PARITY_OWNER, PARITY_PID, PARITY_PLAN)
+    state["currentStep"] = 4 if step4 is not None else 3
+    state["maxReachedStep"] = state["currentStep"]
+    steps = state["steps"]
+    steps["1"] = {"status": "saved", "text": "t", "characters": [], "sceneFiles": []}
+    steps["2"] = {
+        "status": "ready",
+        "story": {"style": "live_action", "settingEn": "A quiet rooftop at dusk"},
+        "characters": [
+            {
+                "id": "c1",
+                "nameKo": "서원",
+                "nameEn": "Seo Won",
+                "handleEn": "the black-haired man",
+                "appearanceEn": "A lean man with black hair",
+            }
+        ],
+        "questions": [],
+        "answers": {},
+        "makeMode": make_mode,
+        "videoModel": model,
+    }
+    shots3 = [
+        {
+            "id": f"s{index + 1}",
+            "summaryKo": f"샷{index + 1}",
+            "cameraKo": "고정 샷",
+            "cameraEn": "Static camera",
+            "locationEn": "A quiet rooftop at dusk",
+            "actionEn": "The black-haired man looks at the city",
+            "characters": ["c1"],
+            "promptEn": f"Cinematic live-action film footage. Shot {index + 1} on a quiet rooftop at dusk.",
+            "useKeyframe": bool(use_keyframe),
+            "reviewKo": None,
+            "durationS": int(seconds),
+        }
+        for index, seconds in enumerate(durations)
+    ]
+    steps["3"] = {
+        "status": "ready",
+        "useKeyframes": False,
+        "makeMode": make_mode,
+        "resolution": resolution,
+        "characters": [
+            {"id": "c1", "image": {"status": "ready", "source": "ai", "key": PARITY_CHAR_KEY}}
+        ],
+        "shots": shots3,
+        "cost": {"shots": len(shots3), "totalUsd": 0.0},
+    }
+    if step4 is not None:
+        base = {
+            "status": "running",
+            "genId": "g20261026110000",
+            "videoModel": model,
+            "resolution": resolution,
+            "oneTake": False,
+            "single": make_mode == "single",
+            "dual": False,
+            "shots": [
+                _parity_shot4(item["id"], "completed", durationS=item["durationS"]) for item in shots3
+            ],
+            "final": {"status": "none", "url": None, "error": None},
+        }
+        base.update(step4)
+        steps["4"] = base
+    return state
+
+
+def check_fal_parity_inflight() -> None:
+    """073 작업 1 — 진행 중 BytePlus 회차 유지(R1.1-1.6, D1·X1). 외부 호출은 전부 가짜.
+
+    (ip-a) 플래그 false · 회차 seedance-2-5 · failed 샷 → run/retry → BytePlus 1회(모델·화질·길이)·ARN.
+    (ip-b) 같은 회차 queued 샷 → GET plan(refresh_shots) → 같은 본문으로 제출.
+    (ip-c) 재생성 금액 = ④ regenUsd(회차 값) → CostMismatch 없이 ARK 제출. vpoc.js 가 regenUsd 를 먼저 본다.
+    (ip-d) E5: keyframe 샷 ark.poll Failed → text 로 다시 queued → BytePlus 로 다시 제출.
+    (ip-e) ARK_API_KEY 없음 → failed ModelUnavailable "API 키 미설정", ark._call 0회. _submit_block_reason 3갈래.
+    (ip-f) 새 선택 게이트 유지: choices 에 byteplus 없음, ② 저장 seedance-2-5 400, generate 회차 모델 = fal 얼굴/Luma.
+    (ip-g) 플래그 true: ark.submit 본문 키·content 역할 순서가 073 이전과 같다(플래그 false 와도 같다).
+    """
+    sys.path.insert(0, str(ROOT / "app"))
+    from src.vpoc import ark, settings  # noqa: PLC0415
+
+    bad: list[str] = []
+    ark_model_id = "dreamina-seedance-2-5-260628"
+    env: _ParityEnv | None = None
+    logs = _LogCapture()
+
+    def check_body(tag: str, body: dict | None, seconds: int) -> None:
+        body = body or {}
+        if body.get("model") != ark_model_id:
+            bad.append(f"{tag} 본문 model 이 {ark_model_id} 가 아닙니다: {body.get('model')}")
+        if body.get("resolution") != "720p":
+            bad.append(f"{tag} 본문 resolution 이 회차 값(720p)이 아닙니다: {body.get('resolution')}")
+        if body.get("duration") != seconds:
+            bad.append(f"{tag} 본문 duration 이 샷 durationS({seconds})가 아닙니다: {body.get('duration')}")
+        if set(body) != PARITY_ARK_BODY_KEYS:
+            bad.append(f"{tag} 본문 키가 다릅니다: {sorted(body)}")
+
+    def shot_of(state: dict, shot_id: str) -> dict:
+        return next((s for s in state["steps"]["4"].get("shots") or [] if s.get("id") == shot_id), {})
+
+    try:
+        env = _parity_env()
+        logs.attach()
+
+        # ---- (ip-a) failed 샷 → run/retry ----
+        env.save(
+            _parity_state(
+                "seedance-2-5",
+                step4={
+                    "status": "partial",
+                    "shots": [
+                        _parity_shot4(
+                            "s1",
+                            "failed",
+                            durationS=6,
+                            invocationArn="ark/tasks/task-old",
+                            error={"where": "ark.poll", "type": "AsyncInvokeFailed", "message": "x"},
+                        ),
+                        _parity_shot4("s2", "completed", durationS=5),
+                    ],
+                },
+            )
+        )
+        resp = env.client.post(env.run_url("retry"), json={"shotId": "s1"})
+        posts = env.ark_posts()
+        body_a: dict = {}
+        if resp.status_code != 200:
+            bad.append(f"(ip-a) run/retry 가 200 이 아닙니다: {resp.status_code} {resp.get_json()}")
+        if len(posts) != 1:
+            bad.append(f"(ip-a) ark._call POST 가 1회가 아닙니다: {len(posts)}")
+        else:
+            body_a = posts[0][2] or {}
+            check_body("(ip-a)", body_a, 6)
+        s1 = shot_of(env.load(), "s1")
+        if s1.get("status") != "submitted" or not str(s1.get("invocationArn") or "").startswith("ark/tasks/"):
+            bad.append(f"(ip-a) 샷이 submitted·ark/tasks/ 가 아닙니다: {s1.get('status')} {s1.get('invocationArn')}")
+        if s1.get("invocationArn") == "ark/tasks/task-old":
+            bad.append("(ip-a) 새 작업 ARN 이 아닙니다(옛 ARN 그대로)")
+        expected_usd = settings.shot_usd("seedance-2-5", "720p", 6)
+        if len(env.charges) != 1 or env.charges[0].get("model") != ark_model_id or abs(
+            float(env.charges[0].get("usd") or 0) - expected_usd
+        ) > 1e-6:
+            bad.append(f"(ip-a) 원장 기록이 BytePlus 단가 1건이 아닙니다: {env.charges}")
+        if not logs.messages("where=ark.submit"):
+            bad.append("(ip-a) vpoc.call where=ark.submit 로그가 없습니다")
+        if any("dummy-ark-key" in text for text in logs.messages()):
+            bad.append("(ip-a) 로그에 API 키 값이 남았습니다")
+
+        # ---- (ip-b) queued 샷 → GET plan ----
+        env.reset_calls()
+        env.save(
+            _parity_state(
+                "seedance-2-5",
+                step4={
+                    "status": "running",
+                    "shots": [
+                        _parity_shot4("s1", "queued", durationS=6, attempt=2),
+                        _parity_shot4("s2", "completed", durationS=5),
+                    ],
+                },
+            )
+        )
+        resp = env.client.get(env.plan_url())
+        posts = env.ark_posts()
+        if resp.status_code != 200:
+            bad.append(f"(ip-b) GET plan 이 200 이 아닙니다: {resp.status_code}")
+        if len(posts) != 1:
+            bad.append(f"(ip-b) ark._call POST 가 1회가 아닙니다: {len(posts)}")
+        else:
+            check_body("(ip-b)", posts[0][2], 6)
+            if body_a and posts[0][2] != body_a:
+                bad.append("(ip-b) 본문이 run/retry 경로(ip-a)와 다릅니다")
+        s1 = shot_of(env.load(), "s1")
+        if s1.get("status") != "submitted" or not str(s1.get("invocationArn") or "").startswith("ark/tasks/"):
+            bad.append(f"(ip-b) 샷이 submitted 가 아닙니다: {s1.get('status')} {s1.get('error')}")
+
+        # ---- (ip-c) 재생성: ④ regenUsd 로 보내면 CostMismatch 없이 ARK 제출 ----
+        env.reset_calls()
+        env.save(
+            _parity_state(
+                "seedance-2-5",
+                step4={
+                    "status": "done",
+                    "shots": [
+                        _parity_shot4(
+                            "s1",
+                            "completed",
+                            durationS=6,
+                            revision={
+                                "id": "rev-1",
+                                "feedbackKo": "표정을 밝게",
+                                "summaryKo": "새 버전",
+                                "promptEn": "Cinematic live-action film footage. He smiles at the city.",
+                                "useKeyframe": False,
+                                "reviewKo": None,
+                            },
+                        ),
+                        _parity_shot4("s2", "completed", durationS=5),
+                    ],
+                },
+            )
+        )
+        view = env.client.get(env.plan_url()).get_json() or {}
+        shot_view = next(
+            (s for s in ((view.get("steps") or {}).get("4") or {}).get("shots") or [] if s.get("id") == "s1"), {}
+        )
+        row_usd = next(
+            (r.get("usd") for r in ((view.get("steps") or {}).get("3") or {}).get("shots") or [] if r.get("id") == "s1"),
+            None,
+        )
+        regen_usd = shot_view.get("regenUsd")
+        if regen_usd is None or abs(float(regen_usd) - expected_usd) > 1e-9:
+            bad.append(f"(ip-c) regenUsd 가 회차 값({expected_usd})이 아닙니다: {regen_usd}")
+        if row_usd is not None and regen_usd is not None and abs(float(row_usd) - float(regen_usd)) <= 0.005:
+            bad.append(f"(ip-c) ③ 행 금액({row_usd})이 regenUsd 와 같아 검사가 의미 없습니다")
+        resp = env.client.post(
+            env.run_url("regenerate"), json={"shotId": "s1", "revisionId": "rev-1", "confirmUsd": row_usd}
+        )
+        if resp.status_code != 409 or ((resp.get_json() or {}).get("error") or {}).get("type") != "CostMismatch":
+            bad.append(f"(ip-c) ③ 행 금액으로 보내면 409 CostMismatch 여야 합니다(옛 화면 동작): {resp.status_code}")
+        if env.ark_posts():
+            bad.append("(ip-c) CostMismatch 인데 ARK 로 제출됐습니다")
+        resp = env.client.post(
+            env.run_url("regenerate"), json={"shotId": "s1", "revisionId": "rev-1", "confirmUsd": regen_usd}
+        )
+        posts = env.ark_posts()
+        if resp.status_code != 200:
+            bad.append(f"(ip-c) regenUsd 로 보낸 재생성이 200 이 아닙니다: {resp.status_code} {resp.get_json()}")
+        if len(posts) != 1:
+            bad.append(f"(ip-c) 재생성 ark._call POST 가 1회가 아닙니다: {len(posts)}")
+        else:
+            check_body("(ip-c)", posts[0][2], 6)
+        regen_target = shot_of(env.load(), "s1").get("regen") or {}
+        if regen_target.get("status") != "submitted" or not str(regen_target.get("invocationArn") or "").startswith(
+            "ark/tasks/"
+        ):
+            bad.append(f"(ip-c) 재생성 대상이 ARK 로 제출되지 않았습니다: {regen_target.get('status')}")
+        # 기본 인자(step4 없음) 분기 — 라우트로는 닿지 않아 클로저로 부른다.
+        shot4_view = _closure_fn(env.app.view_functions.get("whynot_vpoc.get_plan"), "_shot4_view")
+        if shot4_view is None:
+            bad.append("(ip-c) _shot4_view 를 찾지 못했습니다")
+        else:
+            plain = shot4_view({"id": "s1", "status": "completed", "durationS": 6})
+            if "regenUsd" not in plain or plain["regenUsd"] is not None:
+                bad.append(f"(ip-c) step4 없이 부르면 regenUsd 가 None 이어야 합니다: {plain.get('regenUsd')}")
+            old = shot4_view({"id": "s1", "status": "completed"}, None, "", step4={})
+            if abs(float(old.get("regenUsd") or 0) - settings.shot_usd("", "", None)) > 1e-9:
+                bad.append(f"(ip-c) 옛 회차(모델 없음) regenUsd 가 서버 계산과 다릅니다: {old.get('regenUsd')}")
+        js = (PUBLIC / "vpoc.js").read_text(encoding="utf-8")
+        if not re.search(r"var amount = shot\.regenUsd != null\s*\?\s*shot\.regenUsd\s*:", js):
+            bad.append("(ip-c) vpoc.js 재생성 금액이 shot.regenUsd 를 먼저 보지 않습니다")
+
+        # ---- (ip-d) E5: keyframe 샷 ark.poll Failed → text 로 queued → ARK 재제출 ----
+        env.reset_calls()
+        poll_calls: list[str] = []
+
+        def fake_poll(invocation_arn: str, output_prefix: str) -> dict:
+            poll_calls.append(invocation_arn)
+            return {"status": "Failed", "failureMessage": "first frame rejected", "usage": None}
+
+        env.patch(ark, "poll", fake_poll)
+        env.save(
+            _parity_state(
+                "seedance-2-5",
+                use_keyframe=True,
+                step4={
+                    "status": "running",
+                    "shots": [
+                        _parity_shot4(
+                            "s1",
+                            "submitted",
+                            durationS=6,
+                            mode="keyframe",
+                            invocationArn="ark/tasks/task-kf",
+                            outputPrefix="p/ark",
+                            submittedAt="2026-10-26T11:00:00Z",
+                            lastPolledAt="",
+                        ),
+                        _parity_shot4("s2", "completed", durationS=5),
+                    ],
+                },
+            )
+        )
+        env.client.get(env.plan_url())
+        posts = env.ark_posts()
+        s1 = shot_of(env.load(), "s1")
+        if poll_calls != ["ark/tasks/task-kf"]:
+            bad.append(f"(ip-d) ark.poll 이 1회 불리지 않았습니다: {poll_calls}")
+        if len(posts) != 1:
+            bad.append(f"(ip-d) E5 재제출 ark._call POST 가 1회가 아닙니다: {len(posts)}")
+        else:
+            check_body("(ip-d)", posts[0][2], 6)
+        if (
+            s1.get("status") != "submitted"
+            or int(s1.get("attempt") or 0) != 2
+            or s1.get("mode") == "keyframe"
+            or not str(s1.get("invocationArn") or "").startswith("ark/tasks/")
+            or s1.get("invocationArn") == "ark/tasks/task-kf"
+        ):
+            bad.append(
+                f"(ip-d) E5 뒤 BytePlus 재제출 상태가 아닙니다: {s1.get('status')} attempt={s1.get('attempt')}"
+                f" mode={s1.get('mode')} arn={s1.get('invocationArn')}"
+            )
+
+        # ---- (ip-e) 키 없음 → failed ModelUnavailable, ark._call 0회 ----
+        env.reset_calls()
+        env.patch(settings, "ARK_API_KEY", "")
+        env.save(
+            _parity_state(
+                "seedance-2-5",
+                step4={
+                    "status": "running",
+                    "shots": [
+                        _parity_shot4("s1", "queued", durationS=6),
+                        _parity_shot4("s2", "completed", durationS=5),
+                    ],
+                },
+            )
+        )
+        env.client.get(env.plan_url())
+        s1 = shot_of(env.load(), "s1")
+        err = s1.get("error") or {}
+        if s1.get("status") != "failed" or err.get("type") != "ModelUnavailable":
+            bad.append(f"(ip-e) 키 없음인데 failed ModelUnavailable 이 아닙니다: {s1.get('status')} {err.get('type')}")
+        if "API 키 미설정" not in str(err.get("message") or ""):
+            bad.append(f"(ip-e) 문구에 'API 키 미설정' 이 없습니다: {err.get('message')}")
+        if env.ark_calls or env.charges:
+            bad.append(f"(ip-e) 키 없음인데 ark._call {len(env.ark_calls)}회·원장 {len(env.charges)}건")
+        if ark._submit_block_reason("seedance-2-5") != "API 키 미설정":
+            bad.append(f"(ip-e) _submit_block_reason 키 없음: {ark._submit_block_reason('seedance-2-5')!r}")
+        env.patch(settings, "ARK_API_KEY", "dummy-ark-key")
+        if ark._submit_block_reason("seedance-2-5") != "":
+            bad.append(f"(ip-e) 플래그 false 인데 _submit_block_reason 이 막습니다: {ark._submit_block_reason('seedance-2-5')!r}")
+        if not ark.unavailable_reason("seedance-2-5"):
+            bad.append("(ip-e) unavailable_reason 의 플래그 게이트가 사라졌습니다(새 선택 게이트)")
+        env.patch(settings, "ARK_MODEL_IDS", {**settings.ARK_MODEL_IDS, "seedance-2-5": ""})
+        if ark._submit_block_reason("seedance-2-5") != "모델 ID 미설정":
+            bad.append(f"(ip-e) _submit_block_reason 모델 ID 없음: {ark._submit_block_reason('seedance-2-5')!r}")
+        try:
+            ark.submit(
+                model="seedance-2-5", owner="o", project_id="p", plan_id="pl", shot_id="s1",
+                attempt=1, prompt="Cinematic test.",
+            )
+            bad.append("(ip-e) 모델 ID 없음인데 ark.submit 이 통과했습니다")
+        except Exception as exc:  # noqa: BLE001
+            if getattr(exc, "kind", "") != "ModelUnavailable" or "Seedance 2.5: 모델 ID 미설정" not in str(
+                getattr(exc, "message", exc)
+            ):
+                bad.append(f"(ip-e) ark.submit 차단 문구가 다릅니다: {getattr(exc, 'kind', '')} {exc}")
+        if env.ark_calls:
+            bad.append(f"(ip-e) 차단인데 ark._call 이 {len(env.ark_calls)}회 불렸습니다")
+        env.patch(settings, "ARK_MODEL_IDS", {**settings.ARK_MODEL_IDS, "seedance-2-5": ark_model_id})
+        if ark._submit_block_reason(PARITY_FACE) != "":
+            bad.append(f"(ip-e) fal 모델 _submit_block_reason 이 fal 판정과 다릅니다: {ark._submit_block_reason(PARITY_FACE)!r}")
+
+        # ---- (ip-f) 새 선택 게이트 유지 ----
+        env.reset_calls()
+        items = ark.choices()
+        if any(item.get("provider") == "byteplus" for item in items):
+            bad.append("(ip-f) 플래그 false 인데 choices 에 byteplus 가 있습니다")
+        if not any(item.get("id") == PARITY_FACE and item.get("available") for item in items):
+            bad.append("(ip-f) choices 에 fal 얼굴이 available 로 없습니다")
+        env.save(_parity_state("seedance-2-5"))
+        resp = env.client.put(f"{env.plan_url()}/steps/2", json={"videoModel": "seedance-2-5"})
+        if resp.status_code != 400 or ((resp.get_json() or {}).get("error") or {}).get("type") != "ModelUnavailable":
+            bad.append(f"(ip-f) ② 저장 videoModel=seedance-2-5 가 400 ModelUnavailable 이 아닙니다: {resp.status_code}")
+        resp = env.client.put(f"{env.plan_url()}/steps/2", json={"videoModel": PARITY_FACE})
+        if resp.status_code != 200:
+            bad.append(f"(ip-f) ② 저장 videoModel=fal 얼굴이 200 이 아닙니다: {resp.status_code}")
+        for tag, registry_items, want in (
+            ("등록", _parity_registry_items(), PARITY_FACE),
+            ("미등록", [], ark.DEFAULT_MODEL),
+        ):
+            env.set_registry(registry_items)
+            env.save(_parity_state("seedance-2-5"))
+            plan = env.client.get(env.plan_url()).get_json() or {}
+            total = (((plan.get("steps") or {}).get("3") or {}).get("cost") or {}).get("totalUsd")
+            resp = env.client.post(env.run_url("generate"), json={"confirmUsd": total})
+            if resp.status_code != 200:
+                bad.append(f"(ip-f) generate({tag})가 200 이 아닙니다: {resp.status_code} {resp.get_json()}")
+                continue
+            got = env.load()["steps"]["4"].get("videoModel")
+            if got != want:
+                bad.append(f"(ip-f) generate({tag}) 회차 모델이 {want} 가 아닙니다: {got}")
+        env.set_registry(_parity_registry_items())
+        if env.ark_calls:
+            bad.append(f"(ip-f) 새 선택·생성 검사 중 ark._call 이 불렸습니다: {len(env.ark_calls)}")
+
+        # ---- (ip-g) 플래그 true: 본문 키·content 역할 순서가 073 이전과 같다 ----
+        env.reset_calls()
+        cases = [
+            ("글만", {}, ["text"]),
+            (
+                "참고 2장(+시작·끝 무시)",
+                {"reference_jpegs_b64": ["AAA", "BBB"], "keyframe_jpeg_b64": "KKK", "last_frame_jpeg_b64": "LLL"},
+                ["text", "reference_image", "reference_image"],
+            ),
+            ("시작·끝", {"keyframe_jpeg_b64": "KKK", "last_frame_jpeg_b64": "LLL"}, ["text", "first_frame", "last_frame"]),
+            ("시작만", {"keyframe_jpeg_b64": "KKK"}, ["text", "first_frame"]),
+        ]
+        bodies: dict[bool, list[dict]] = {}
+        for flag in (True, False):
+            env.patch(settings, "ARK_SEEDANCE_ENABLED", flag)
+            bodies[flag] = []
+            for tag, extra, roles in cases:
+                before = len(env.ark_calls)
+                job = ark.submit(
+                    model="seedance-2-5", owner="o", project_id="p", plan_id="pl", shot_id="s1",
+                    attempt=1, prompt="Cinematic test.", gen_id="g1", resolution="720p", duration_s=6, **extra,
+                )
+                body = (env.ark_calls[before][2] if len(env.ark_calls) > before else {}) or {}
+                bodies[flag].append(body)
+                got_roles = [item.get("role") or item.get("type") for item in body.get("content") or []]
+                if got_roles != roles:
+                    bad.append(f"(ip-g) flag={flag} {tag} content 역할 순서가 다릅니다: {got_roles}")
+                check_body(f"(ip-g) flag={flag} {tag}", body, 6)
+                if body.get("ratio") != settings.ASPECT or body.get("watermark") is not False or body.get(
+                    "generate_audio"
+                ) is not bool(settings.ARK_GENERATE_AUDIO):
+                    bad.append(f"(ip-g) flag={flag} {tag} ratio·watermark·generate_audio 가 다릅니다")
+                if not str(job.get("invocationArn") or "").startswith("ark/tasks/") or job.get("provider") != "seedance-2-5":
+                    bad.append(f"(ip-g) flag={flag} {tag} 반환값이 다릅니다: {job}")
+        if bodies.get(True) != bodies.get(False):
+            bad.append("(ip-g) 플래그 true/false 의 제출 본문이 다릅니다")
+
+        # 외부 호출 0회(실제 네트워크·fal·Luma)
+        if env.url_calls:
+            bad.append(f"실제 네트워크 호출이 있었습니다: {env.url_calls}")
+        if env.fal_calls or env.video_calls:
+            bad.append(f"fal·Luma 제출이 있었습니다: fal={len(env.fal_calls)} luma={len(env.video_calls)}")
+    except Exception as exc:  # noqa: BLE001
+        import traceback as _tb  # noqa: PLC0415
+
+        bad.append("진행 중 BytePlus 회차 검사 중 예외: " + repr(exc) + "\n" + _tb.format_exc()[:1500])
+    finally:
+        logs.detach()
+        if env is not None:
+            env.restore()
+
+    if bad:
+        fail("fal-seedance-parity 진행 중 BytePlus 회차 검사 실패\n" + "\n".join(f"  {item}" for item in bad))
+    else:
+        ok(
+            "fal-seedance-parity 진행 중 BytePlus 회차 검사 (ip-a)retry→ARK 모델·화질·길이·ARN·원장 "
+            "(ip-b)GET 대기 샷 같은 본문 (ip-c)regenUsd 재생성·409 재현·vpoc.js (ip-d)E5 텍스트 재제출 "
+            "(ip-e)키 없음 차단·_submit_block_reason 3갈래 (ip-f)choices·② 400·generate 얼굴/Luma "
+            "(ip-g)본문 키·역할 순서 고정"
+        )
+
+
+def _rendered_env_values(text: str, key: str) -> list[str]:
+    """렌더된 매니페스트에서 `- name: <key>` 바로 다음 `value: "..."` 값들."""
+    pattern = re.compile(r"-\s+name:\s+" + re.escape(key) + r"\s*\n\s*value:\s*\"([^\"]*)\"")
+    return pattern.findall(text)
+
+
+def check_fal_parity_rollback() -> None:
+    """073 작업 1 — 되돌리기 배선(R7.1-7.3, R7.5, D7). 렌더만 하고 배포·클러스터 명령은 없다.
+
+    (rw-a) PARITY_ENV_KEYS 마다 k8s/workloads.yaml.tmpl 에 `- name: <키>` + `value: "${<키>}"`.
+    (rw-b) deploy/config.env.example 에 `<키>=` 줄. 플래그 기본 false(작업 4 뒤 TAG_STYLE 기본 at).
+    (rw-c) render.py: example + prod/dev 오버레이 → add_derived → render_text 예외 없음, 값 "false".
+           오버레이에 true 를 더하면 "true"(되돌리기 경로).
+    """
+    import importlib.util  # noqa: PLC0415
+    import inspect  # noqa: PLC0415
+
+    bad: list[str] = []
+    template_path = ROOT / "k8s" / "workloads.yaml.tmpl"
+    example_path = ROOT / "deploy" / "config.env.example"
+    template = template_path.read_text(encoding="utf-8")
+    example = example_path.read_text(encoding="utf-8")
+    flag = "VPOC_ARK_SEEDANCE_ENABLED"
+    sys.path.insert(0, str(ROOT / "app"))
+    from src.vpoc import settings as _vpoc_settings  # noqa: PLC0415
+
+    family_default = _vpoc_settings.FAL_SEEDANCE_FAMILY_DEFAULT
+
+    def safe(exc: BaseException) -> str:
+        # render.py 의 KEY=VALUE 형식 오류 문구는 원문 줄(값)을 담는다 — 값은 출력하지 않는다.
+        text = str(exc)
+        return "설정 줄 형식 오류(값 생략)" if "KEY=VALUE" in text else text[:300]
+
+    # (rw-a)·(rw-b)
+    for key in PARITY_ENV_KEYS:
+        names = re.findall(r"^\s*-\s+name:\s+" + re.escape(key) + r"\s*$", template, re.M)
+        pair = re.search(
+            r"^\s*-\s+name:\s+" + re.escape(key) + r"\s*\n\s*value:\s*\"\$\{" + re.escape(key) + r"\}\"\s*$",
+            template,
+            re.M,
+        )
+        if len(names) != 1 or not pair:
+            bad.append(f"(rw-a) 템플릿에 '- name: {key}' + 'value: \"${{{key}}}\"' 가 한 번 있지 않습니다")
+        found = re.findall(r"^" + re.escape(key) + r"=(.*)$", example, re.M)
+        if len(found) != 1:
+            bad.append(f"(rw-b) config.env.example 에 '{key}=' 줄이 한 번 있지 않습니다: {len(found)}")
+            continue
+        value = found[0].strip()
+        if key == flag and value != "false":
+            bad.append(f"(rw-b) {key} 기본값이 false 가 아닙니다: {value!r}")
+        if key == "VPOC_FAL_SEEDANCE_TAG_STYLE" and value != "at":
+            bad.append(f"(rw-b) {key} 기본값이 at 이 아닙니다: {value!r}")
+        if key == "VPOC_FAL_SEEDANCE_FAMILY" and value != family_default:
+            # design.md §6: base 값 = 코드 기본(얼굴 i2v = 짝 r2v). 템플릿이 늘 env 를 넣으므로 이 값이 실제 기본이다.
+            bad.append(f"(rw-b) {key} 기본값이 코드 기본과 다릅니다: {value!r}")
+        if key == "VPOC_FAL_SEEDANCE_MAX_S" and value != "15":
+            # design.md §6: base 값 = 코드 기본 15(설계자 승인 상한).
+            bad.append(f"(rw-b) {key} 기본값이 15 가 아닙니다: {value!r}")
+        if key == "VPOC_FAL_PROMPT_MAX_OVERRIDES" and value != _vpoc_settings.FAL_PROMPT_MAX_OVERRIDES_DEFAULT:
+            # design.md §6: base 값 = 코드 기본(bytedance/seedance-2.5/*=4000).
+            bad.append(f"(rw-b) {key} 기본값이 코드 기본과 다릅니다: {value!r}")
+
+    # (rw-c) render.py 로 실제 렌더(파일은 쓰지 않는다)
+    try:
+        spec = importlib.util.spec_from_file_location("_vpoc_deploy_render", ROOT / "deploy" / "render.py")
+        render = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(render)  # type: ignore[union-attr]
+        params = list(inspect.signature(render.add_derived).parameters)
+        if len(params) != 1:
+            bad.append(f"(rw-c) add_derived 시그니처가 (config) 가 아닙니다: {params}")
+        base = render.load_config(example_path)
+        for target in ("prod", "dev"):
+            overlay_path = ROOT / "deploy" / f"config.{target}.env"
+            try:
+                overlay = render.load_config(overlay_path)
+                for extra, want in (({}, "false"), ({flag: "true"}, "true")):
+                    layer = {**overlay, **extra}
+                    unknown = sorted(set(layer) - set(base))
+                    if unknown:
+                        # CI(load_config_chain)는 base 에 없는 키를 거절한다. 키 이름만 적는다.
+                        bad.append(f"(rw-c) {target}: 오버레이에 base 에 없는 키 {unknown}")
+                        continue
+                    values = render.add_derived({**base, **layer})
+                    text = render.render_text(template, values, str(template_path.relative_to(ROOT)))
+                    got = _rendered_env_values(text, flag)
+                    if got != [want]:
+                        bad.append(f"(rw-c) {target}{'+true' if extra else ''}: 렌더된 {flag} 값이 [{want!r}] 가 아닙니다: {got}")
+                    family = _rendered_env_values(text, "VPOC_FAL_SEEDANCE_FAMILY")
+                    if family != [family_default]:
+                        bad.append(f"(rw-c) {target}: 렌더된 VPOC_FAL_SEEDANCE_FAMILY 값이 기본 쌍이 아닙니다: {family}")
+                    max_s = _rendered_env_values(text, "VPOC_FAL_SEEDANCE_MAX_S")
+                    if max_s != ["15"]:
+                        bad.append(f"(rw-c) {target}: 렌더된 VPOC_FAL_SEEDANCE_MAX_S 값이 ['15'] 가 아닙니다: {max_s}")
+                    prompt_max = _rendered_env_values(text, "VPOC_FAL_PROMPT_MAX_OVERRIDES")
+                    if prompt_max != [_vpoc_settings.FAL_PROMPT_MAX_OVERRIDES_DEFAULT]:
+                        bad.append(f"(rw-c) {target}: 렌더된 VPOC_FAL_PROMPT_MAX_OVERRIDES 값이 기본이 아닙니다: {prompt_max}")
+                    tag_style = _rendered_env_values(text, "VPOC_FAL_SEEDANCE_TAG_STYLE")
+                    if tag_style != ["at"]:
+                        bad.append(f"(rw-c) {target}: 렌더된 VPOC_FAL_SEEDANCE_TAG_STYLE 값이 ['at'] 가 아닙니다: {tag_style}")
+                    if "${" in text:
+                        bad.append(f"(rw-c) {target}: 렌더 결과에 치환되지 않은 변수가 남았습니다")
+            except (Exception, SystemExit) as exc:  # noqa: BLE001 — render.py 는 SystemExit 로 실패를 알린다.
+                bad.append(f"(rw-c) {target}: 렌더 실패: {type(exc).__name__} {safe(exc)}")
+    except (Exception, SystemExit) as exc:  # noqa: BLE001
+        bad.append(f"(rw-c) render.py 를 읽지 못했습니다: {type(exc).__name__} {safe(exc)}")
+
+    if bad:
+        fail("fal-seedance-parity 되돌리기 배선 검사 실패\n" + "\n".join(f"  {item}" for item in bad))
+    else:
+        ok(
+            "fal-seedance-parity 되돌리기 배선 검사 (rw-a)템플릿 env "
+            f"{len(PARITY_ENV_KEYS)}개 (rw-b)config.env.example 기본값 "
+            "(rw-c)render.py prod·dev 렌더 false·오버레이 true"
+        )
+PARITY_KLING = "fal:fal-ai/kling-video/v3/pro/image-to-video"
+
+
+def _parity_kling_item() -> dict:
+    """계열이 아닌 fal 모델(Kling i2v 모양 가짜 caps, 073 fr-i·du-h 공용)."""
+    durations = ["5", "10"]
+    return {
+        "id": PARITY_KLING,
+        "endpointId": PARITY_KLING[len("fal:"):],
+        "label": "Kling 3.0 Pro Image to Video",
+        "category": "image-to-video",
+        "caps": {
+            "promptField": "prompt",
+            "promptMaxLength": 2500,
+            "startImageField": "image_url",
+            "endImageField": "tail_image_url",
+            "referenceImagesField": "",
+            "durations": durations,
+            "durationAsString": True,
+            "durationValues": {value: value for value in durations},
+            "sendDuration": True,
+            "resolutions": [],
+            "resolutionValues": {},
+            "aspectRatios": ["16:9", "9:16", "1:1"],
+            "audioField": "generate_audio",
+            "previzCapable": False,
+            "requiredFields": ["prompt", "image_url"],
+            "available": True,
+            "reason": "",
+        },
+        "pricing": {"unit": "seconds", "unitPrice": 0.112},
+        "addedBy": "tester",
+    }
+
+
+def check_fal_parity_route() -> None:
+    """073 작업 2 — Seedance 계열 엔드포인트 선택(i2v·r2v)·소리 고정(R2, R6, R11.1, R14.3·14.5).
+
+    (fr-a) settings 파서·fal_family_partner·is_fal_seedance_family.
+    (fr-b) fal.unavailable_reason(얼굴): 짝 미등록 E1 · 짝 caps 사용 불가 E1b · 둘 다 "" · 짝 자신은 짝 요구 없음.
+    (fr-c) ark.choices·label: 얼굴 "Seedance 2.5 (fal)", r2v 목록에 없음, 짝 미등록 available=false E1, Kling 이름 그대로.
+    (fr-d) fal.route_model 표(§4) 5갈래 + reference_caps 짝 있음·없음.
+    (fr-e) 통합: shots 참고→r2v image_urls · 옛 키 장면→i2v image_url·end_image_url · 글만→r2v ·
+           single 인물2+배경1→r2v 3장 · single 참고 0장→r2v text. videoModel=얼굴, provider·endpointModel=엔드포인트,
+           vpoc.fal.route 로그 1줄.
+    (fr-f) 참고 그림 10장 이상 → image_urls 9장 이하.
+    (fr-g) 회차 도중 짝 해제 → failed ModelUnavailable(E5), i2v 로 보내지 않음, 원장 없음.
+    (fr-h) 소리: i2v·r2v generate_audio == ARK_GENERATE_AUDIO, False 로 바꾸면 False.
+    (fr-i) 회귀: 계열이 아닌 fal(Kling) 본문 = build_payload 기존 결과, URL 은 그 모델.
+    """
+    sys.path.insert(0, str(ROOT / "app"))
+    from src.vpoc import ark, fal, images, settings, store  # noqa: PLC0415
+
+    bad: list[str] = []
+    env: _ParityEnv | None = None
+    logs = _LogCapture()
+    face_eid = PARITY_FACE[len("fal:"):]
+    partner_eid = PARITY_PARTNER[len("fal:"):]
+    e1 = "짝 모델(reference-to-video)이 등록되지 않았습니다"
+    e1b = "짝 모델(reference-to-video)을 쓸 수 없습니다: "
+    image_fields = ("image_url", "end_image_url", "image_urls")
+
+    def shot_of(state: dict, shot_id: str) -> dict:
+        return next((s for s in state["steps"]["4"].get("shots") or [] if s.get("id") == shot_id), {})
+
+    def job_key_of(state: dict, shot_id: str, attempt: int = 1) -> str:
+        step4 = state["steps"]["4"]
+        return store.job_key(PARITY_OWNER, PARITY_PID, PARITY_PLAN, shot_id, attempt, str(step4.get("genId") or ""))
+
+    def job_of(state: dict, shot_id: str, attempt: int = 1) -> dict:
+        return env.fake.read_json(job_key_of(state, shot_id, attempt))[0] or {}
+
+    def run(state: dict, shot_id: str = "s1") -> tuple[list, dict, dict, dict]:
+        """상태를 저장하고 GET plan(refresh_shots → submit_shot)으로 대기 샷 하나를 제출한다."""
+        env.reset_calls()
+        logs.clear()
+        # 앞 경우의 jobs 기록(같은 키)을 지워 이번 제출 기록만 본다.
+        env.fake.json.pop(job_key_of(state, shot_id), None)
+        env.save(state)
+        resp = env.client.get(env.plan_url())
+        if resp.status_code != 200:
+            bad.append(f"GET plan 이 200 이 아닙니다({shot_id}): {resp.status_code}")
+        loaded = env.load()
+        return env.fal_posts(), shot_of(loaded, shot_id), job_of(loaded, shot_id), loaded
+
+    def shots_state(model: str = PARITY_FACE, **plan_extra) -> dict:
+        state = _parity_state(
+            model,
+            step4={
+                "status": "running",
+                "shots": [
+                    _parity_shot4("s1", "queued", durationS=6),
+                    _parity_shot4("s2", "completed", durationS=5),
+                ],
+            },
+        )
+        state["steps"]["3"]["shots"][0].update(plan_extra)
+        return state
+
+    def single_state(char_keys: list[str], bg_key: str) -> dict:
+        state = _parity_state(
+            PARITY_FACE,
+            "single",
+            step4={"status": "running", "shots": [_parity_shot4(ark.ONE_TAKE_ID, "queued", durationS=6)]},
+        )
+        state["steps"]["3"]["master"] = {
+            "version": 1,
+            "totalS": 6,
+            "styleEn": "Cinematic live-action film footage",
+            "background": {"promptEn": "A quiet rooftop at dusk", "imageKey": bg_key},
+            "characters": [
+                {"id": f"c{i + 1}", "handleEn": f"person {i + 1}", "promptEn": "dark coat", "imageKey": key}
+                for i, key in enumerate(char_keys)
+            ],
+            "beats": [{"id": "b1", "t0": 0, "t1": 6, "actionEn": "They look at the city", "cameraEn": "Static"}],
+        }
+        return state
+
+    def expect_route(
+        tag: str, posts: list, shot: dict, job: dict, loaded: dict, *, endpoint: str, fields: dict, mode: str
+    ) -> dict:
+        """POST 1회·URL·이미지 필드·기록(videoModel=얼굴, provider·endpointModel=엔드포인트)·route 로그 1줄."""
+        if len(posts) != 1:
+            bad.append(f"{tag} fal POST 가 1회가 아닙니다: {len(posts)} (샷 {shot.get('status')} {shot.get('error')})")
+            return {}
+        url, body = posts[0][1], posts[0][2] or {}
+        if url != f"{settings.FAL_QUEUE_URL}/{endpoint[len('fal:'):]}":
+            bad.append(f"{tag} POST URL 이 {endpoint} 가 아닙니다: {url}")
+        for field in image_fields:
+            want = fields.get(field)
+            if want is None and field in body:
+                bad.append(f"{tag} 본문에 {field} 가 있으면 안 됩니다")
+            elif want is not None:
+                got = body.get(field)
+                count = len(got) if isinstance(got, list) else (1 if got else 0)
+                if count != want:
+                    bad.append(f"{tag} 본문 {field} 개수가 {want} 가 아닙니다: {count}")
+        if loaded["steps"]["4"].get("videoModel") != PARITY_FACE:
+            bad.append(f"{tag} steps.4.videoModel 이 얼굴 id 가 아닙니다: {loaded['steps']['4'].get('videoModel')}")
+        if shot.get("status") != "submitted" or shot.get("provider") != endpoint:
+            bad.append(f"{tag} ④ 샷 status·provider 가 다릅니다: {shot.get('status')} {shot.get('provider')}")
+        if shot.get("mode") != mode:
+            bad.append(f"{tag} ④ 샷 mode 가 {mode} 가 아닙니다: {shot.get('mode')}")
+        if job.get("endpointModel") != endpoint or job.get("videoModel") != PARITY_FACE:
+            bad.append(f"{tag} jobs endpointModel·videoModel 이 다릅니다: {job.get('endpointModel')} {job.get('videoModel')}")
+        routes_logged = logs.messages("vpoc.fal.route ")
+        if len(routes_logged) != 1 or f"endpoint={endpoint} " not in (routes_logged or [""])[0]:
+            bad.append(f"{tag} vpoc.fal.route 로그가 1줄이 아니거나 엔드포인트가 다릅니다: {routes_logged}")
+        if len(env.charges) != 1:
+            bad.append(f"{tag} 원장 기록이 1건이 아닙니다: {len(env.charges)}")
+        return body
+
+    saved_family = settings.FAL_SEEDANCE_FAMILY
+    saved_audio = settings.ARK_GENERATE_AUDIO
+    try:
+        # ---- (fr-a) 설정 해석 ----
+        parse = settings._parse_fal_family
+        if parse(settings.FAL_SEEDANCE_FAMILY_DEFAULT) != {face_eid: partner_eid}:
+            bad.append(f"(fr-a) 기본 쌍이 1개가 아닙니다: {parse(settings.FAL_SEEDANCE_FAMILY_DEFAULT)}")
+        if os.getenv("VPOC_FAL_SEEDANCE_FAMILY") is None and settings.FAL_SEEDANCE_FAMILY != {face_eid: partner_eid}:
+            bad.append(f"(fr-a) env 없을 때 FAL_SEEDANCE_FAMILY 가 기본 쌍이 아닙니다: {settings.FAL_SEEDANCE_FAMILY}")
+        if parse("a=b,c=d") != {"a": "b", "c": "d"}:
+            bad.append(f"(fr-a) 'a=b,c=d' 가 2쌍이 아닙니다: {parse('a=b,c=d')}")
+        broken = "x, =b ,a=, a b=c, fal:a=b, a=fal:b, a=a, a=b=c,ok/face = ok/partner"
+        if parse(broken) != {"ok/face": "ok/partner"}:
+            bad.append(f"(fr-a) 형식이 틀린 항목을 버리지 않았습니다: {parse(broken)}")
+        if parse("") != {} or parse("  ") != {} or parse(None) != {}:  # type: ignore[arg-type]
+            bad.append("(fr-a) 빈 문자열이 {} 가 아닙니다")
+        if settings.fal_family_partner(PARITY_FACE) != PARITY_PARTNER:
+            bad.append(f"(fr-a) 얼굴의 짝이 다릅니다: {settings.fal_family_partner(PARITY_FACE)!r}")
+        for other in (PARITY_PARTNER, PARITY_KLING, "seedance-2-5", "", face_eid):
+            if settings.fal_family_partner(other):
+                bad.append(f"(fr-a) {other!r} 는 짝이 없어야 합니다: {settings.fal_family_partner(other)!r}")
+        if not (settings.is_fal_seedance_family(PARITY_FACE) and settings.is_fal_seedance_family(PARITY_PARTNER)):
+            bad.append("(fr-a) is_fal_seedance_family 가 얼굴·짝 모두 True 가 아닙니다")
+        for other in (PARITY_KLING, "seedance-2-5", "luma-ray2", "", face_eid):
+            if settings.is_fal_seedance_family(other):
+                bad.append(f"(fr-a) is_fal_seedance_family({other!r}) 가 True 입니다")
+        if settings.FAL_SEEDANCE_LABEL != "Seedance 2.5 (fal)":
+            bad.append(f"(fr-a) FAL_SEEDANCE_LABEL 이 다릅니다: {settings.FAL_SEEDANCE_LABEL!r}")
+
+        env = _parity_env(registry=_parity_registry_items() + [_parity_kling_item()])
+        logs.attach()
+
+        # ---- (fr-b) fal.unavailable_reason 짝 분기 ----
+        if fal.unavailable_reason(PARITY_FACE) != "":
+            bad.append(f"(fr-b) 둘 다 등록인데 얼굴이 막힙니다: {fal.unavailable_reason(PARITY_FACE)!r}")
+        env.set_registry(_parity_registry_items(partner=False))
+        if not fal.unavailable_reason(PARITY_FACE).startswith(e1):
+            bad.append(f"(fr-b) 짝 미등록인데 E1 이 아닙니다: {fal.unavailable_reason(PARITY_FACE)!r}")
+        broken_partner = _parity_registry_items()
+        broken_partner[1]["caps"] = {**broken_partner[1]["caps"], "available": False, "reason": "채울 수 없는 필수 입력: x"}
+        env.set_registry(broken_partner)
+        if fal.unavailable_reason(PARITY_FACE) != e1b + "채울 수 없는 필수 입력: x":
+            bad.append(f"(fr-b) 짝 caps 사용 불가인데 E1b 가 아닙니다: {fal.unavailable_reason(PARITY_FACE)!r}")
+        env.set_registry(_parity_registry_items(face=False))
+        if fal.unavailable_reason(PARITY_PARTNER) != "":
+            bad.append(f"(fr-b) 짝 단독(vnew r2v)이 막힙니다: {fal.unavailable_reason(PARITY_PARTNER)!r}")
+        env.patch(settings, "FAL_SEEDANCE_FAMILY", {})
+        env.set_registry(_parity_registry_items(partner=False))
+        if fal.unavailable_reason(PARITY_FACE) != "":
+            bad.append("(fr-b) 계열 라우팅을 끄면(빈 값) 얼굴 단독이 사용 가능해야 합니다(070 동작)")
+        env.patch(settings, "FAL_SEEDANCE_FAMILY", saved_family)
+
+        # ---- (fr-c) ark.choices·label ----
+        env.set_registry(_parity_registry_items() + [_parity_kling_item()])
+        items = {item.get("id"): item for item in ark.choices()}
+        face_row = items.get(PARITY_FACE) or {}
+        if face_row.get("label") != "Seedance 2.5 (fal)" or not face_row.get("available"):
+            bad.append(f"(fr-c) 얼굴 항목 이름·available 이 다릅니다: {face_row.get('label')!r} {face_row.get('available')}")
+        if PARITY_PARTNER in items:
+            bad.append("(fr-c) r2v 짝이 ② 목록에 있습니다")
+        if (items.get(PARITY_KLING) or {}).get("label") != "fal · Kling 3.0 Pro Image to Video":
+            bad.append(f"(fr-c) Kling 이름이 바뀌었습니다: {(items.get(PARITY_KLING) or {}).get('label')!r}")
+        if ark.label(PARITY_FACE) != "Seedance 2.5 (fal)" or ark.label(PARITY_KLING) != "fal · Kling 3.0 Pro Image to Video":
+            bad.append(f"(fr-c) ark.label 이 다릅니다: {ark.label(PARITY_FACE)!r} {ark.label(PARITY_KLING)!r}")
+        if ark.label("seedance-2-5") != "Seedance 2.5" or ark.label("fal:not/registered") != "fal:not/registered":
+            bad.append("(fr-c) ark.label 비계열 분기(ARK·미등록 fal)가 바뀌었습니다")
+        env.set_registry(_parity_registry_items(partner=False) + [_parity_kling_item()])
+        face_row = {item.get("id"): item for item in ark.choices()}.get(PARITY_FACE) or {}
+        if face_row.get("available") is not False or not str(face_row.get("reason") or "").startswith(e1):
+            bad.append(f"(fr-c) 짝 미등록인데 available=false·E1 이 아닙니다: {face_row.get('available')} {face_row.get('reason')!r}")
+        env.patch(settings, "FAL_SEEDANCE_FAMILY", {})
+        if ark.label(PARITY_FACE) != "fal · Bytedance Seedance 2.5 Image to Video":
+            bad.append(f"(fr-c) 계열을 끄면 얼굴 이름이 fal · <label> 이어야 합니다: {ark.label(PARITY_FACE)!r}")
+        env.patch(settings, "FAL_SEEDANCE_FAMILY", saved_family)
+
+        # ---- (fr-d) route_model 표 + reference_caps ----
+        env.set_registry(_parity_registry_items() + [_parity_kling_item()])
+        table = [
+            ((True, True), PARITY_PARTNER),
+            ((True, False), PARITY_PARTNER),
+            ((False, True), PARITY_FACE),
+            ((False, False), PARITY_PARTNER),
+        ]
+        for (refs, start), want in table:
+            got = fal.route_model(PARITY_FACE, has_references=refs, has_start=start)
+            if got != want:
+                bad.append(f"(fr-d) route_model(참고={refs}, 시작={start}) 가 {want} 가 아닙니다: {got}")
+        for other in (PARITY_KLING, PARITY_PARTNER, "seedance-2-5"):
+            for refs, start in ((True, True), (False, False)):
+                if fal.route_model(other, has_references=refs, has_start=start) != other:
+                    bad.append(f"(fr-d) 계열 아님({other}) 인데 route_model 이 바꿨습니다")
+        if fal.reference_caps(PARITY_FACE).get("referenceImagesField") != "image_urls":
+            bad.append("(fr-d) reference_caps(얼굴) 이 짝 caps 가 아닙니다")
+        if fal.reference_caps(PARITY_KLING).get("startImageField") != "image_url" or fal.reference_caps(
+            PARITY_KLING
+        ).get("referenceImagesField"):
+            bad.append("(fr-d) reference_caps(Kling) 이 자기 caps 가 아닙니다")
+        if fal.reference_caps("fal:not/registered") != {}:
+            bad.append("(fr-d) reference_caps(미등록) 이 {} 가 아닙니다")
+        # 되돌리기(VPOC_FAL_SEEDANCE_FAMILY=""): 얼굴은 늘 자기 자신(070 동작), 계열 판정도 False.
+        env.patch(settings, "FAL_SEEDANCE_FAMILY", {})
+        if fal.route_model(PARITY_FACE, has_references=True, has_start=False) != PARITY_FACE:
+            bad.append("(fr-d) 계열을 끄면 참고 샷도 얼굴(i2v)로 가야 합니다")
+        if fal.reference_caps(PARITY_FACE).get("startImageField") != "image_url" or settings.is_fal_seedance_family(
+            PARITY_FACE
+        ):
+            bad.append("(fr-d) 계열을 끄면 reference_caps(얼굴) 이 자기 caps, 계열 판정이 False 여야 합니다")
+        env.patch(settings, "FAL_SEEDANCE_FAMILY", saved_family)
+        env.set_registry(_parity_registry_items(partner=False))
+        if fal.reference_caps(PARITY_FACE) != {}:
+            bad.append("(fr-d) 짝 미등록이면 reference_caps(얼굴) 이 {} 여야 합니다")
+        env.set_registry(_parity_registry_items() + [_parity_kling_item()])
+
+        # ---- (fr-e) 통합 ----
+        posts, shot, job, loaded = run(shots_state())
+        body_r2v = expect_route(
+            "(fr-e) shots 인물 참고", posts, shot, job, loaded,
+            endpoint=PARITY_PARTNER, fields={"image_urls": 1}, mode="reference",
+        )
+
+        kf_keys = ["users/tester/parity/kf-a.jpg", "users/tester/parity/kf-b.jpg"]
+        for key in kf_keys:
+            env.fake.blobs[key] = _tiny_jpeg()
+
+        def keyframe_state() -> dict:
+            state_kf = shots_state(keyframes=["k1", "k2"])
+            state_kf["steps"]["3"]["keyframes"] = [
+                {"id": "k1", "final": {"key": kf_keys[0]}},
+                {"id": "k2", "final": {"key": kf_keys[1]}},
+            ]
+            return state_kf
+
+        posts, shot, job, loaded = run(keyframe_state())
+        body_i2v = expect_route(
+            "(fr-e) 옛 키 장면", posts, shot, job, loaded,
+            endpoint=PARITY_FACE, fields={"image_url": 1, "end_image_url": 1}, mode="keyframe",
+        )
+
+        posts, shot, job, loaded = run(shots_state(characters=[]))
+        expect_route(
+            "(fr-e) 참고·시작 없음", posts, shot, job, loaded, endpoint=PARITY_PARTNER, fields={}, mode="text",
+        )
+
+        single_keys = ["users/tester/parity/m-c1.jpg", "users/tester/parity/m-c2.jpg", "users/tester/parity/m-bg.jpg"]
+        for key in single_keys:
+            env.fake.blobs[key] = _tiny_jpeg()
+        posts, shot, job, loaded = run(single_state(single_keys[:2], single_keys[2]), ark.ONE_TAKE_ID)
+        expect_route(
+            "(fr-e) single 인물2·배경1", posts, shot, job, loaded,
+            endpoint=PARITY_PARTNER, fields={"image_urls": 3}, mode="reference",
+        )
+        posts, shot, job, loaded = run(single_state([], ""), ark.ONE_TAKE_ID)
+        expect_route(
+            "(fr-e) single 참고 0장", posts, shot, job, loaded, endpoint=PARITY_PARTNER, fields={}, mode="text",
+        )
+
+        # ---- (fr-f) 참고 그림 10장 이상 → 9장 이하 ----
+        state = shots_state()
+        many = [f"c{i}" for i in range(1, 12)]
+        state["steps"]["2"]["characters"] = [
+            {"id": cid, "nameKo": cid, "nameEn": cid, "handleEn": f"person {cid}", "appearanceEn": ""} for cid in many
+        ]
+        state["steps"]["3"]["characters"] = []
+        for cid in many:
+            key = f"users/tester/parity/many-{cid}.jpg"
+            env.fake.blobs[key] = _tiny_jpeg()
+            state["steps"]["3"]["characters"].append({"id": cid, "image": {"status": "ready", "source": "ai", "key": key}})
+        state["steps"]["3"]["shots"][0]["characters"] = many
+        posts, shot, job, loaded = run(state)
+        sent = ((posts[0][2] or {}).get("image_urls") if posts else None) or []
+        if not posts or not 1 <= len(sent) <= 9:
+            bad.append(f"(fr-f) 참고 11장 샷의 image_urls 가 1~9장이 아닙니다: {len(sent)} (POST {len(posts)})")
+        if posts and posts[0][1] != f"{settings.FAL_QUEUE_URL}/{partner_eid}":
+            bad.append(f"(fr-f) 참고 많은 샷이 r2v 로 가지 않았습니다: {posts[0][1]}")
+
+        # ---- (fr-g) 회차 도중 짝 해제 → E5 ----
+        env.set_registry(_parity_registry_items(partner=False))
+        posts, shot, job, loaded = run(shots_state())
+        err = shot.get("error") or {}
+        if shot.get("status") != "failed" or err.get("type") != "ModelUnavailable":
+            bad.append(f"(fr-g) 짝 해제 뒤 failed ModelUnavailable 이 아닙니다: {shot.get('status')} {err.get('type')}")
+        if "등록되지 않은 모델입니다" not in str(err.get("message") or "") or partner_eid not in str(err.get("message") or ""):
+            bad.append(f"(fr-g) E5 문구가 다릅니다: {err.get('message')!r}")
+        if posts or env.fal_calls:
+            bad.append(f"(fr-g) 짝 해제인데 fal 로 보냈습니다(i2v 대체 금지): {[c[1] for c in env.fal_calls]}")
+        if env.charges or job:
+            bad.append(f"(fr-g) 실패인데 원장 {len(env.charges)}건·jobs 기록이 있습니다")
+        env.set_registry(_parity_registry_items() + [_parity_kling_item()])
+
+        # ---- (fr-h) 소리 ----
+        for tag, body in (("r2v", body_r2v), ("i2v", body_i2v)):
+            if body.get("generate_audio") is not bool(settings.ARK_GENERATE_AUDIO) or body.get("generate_audio") is not True:
+                bad.append(f"(fr-h) {tag} generate_audio 가 ARK_GENERATE_AUDIO(True) 가 아닙니다: {body.get('generate_audio')}")
+        env.patch(settings, "ARK_GENERATE_AUDIO", False)
+        posts, *_ = run(shots_state())
+        if not posts or (posts[0][2] or {}).get("generate_audio") is not False:
+            bad.append("(fr-h) ARK_GENERATE_AUDIO=False 인데 r2v generate_audio 가 False 가 아닙니다")
+        posts, *_ = run(keyframe_state())
+        if not posts or (posts[0][2] or {}).get("generate_audio") is not False:
+            bad.append("(fr-h) ARK_GENERATE_AUDIO=False 인데 i2v generate_audio 가 False 가 아닙니다")
+        env.patch(settings, "ARK_GENERATE_AUDIO", saved_audio)
+
+        # ---- (fr-i) 회귀: 계열이 아닌 fal(Kling) ----
+        kling = _parity_kling_item()
+        state = shots_state(PARITY_KLING)
+        state["steps"]["4"]["shots"][0]["durationS"] = 5
+        posts, shot, job, loaded = run(state)
+        if len(posts) != 1:
+            bad.append(f"(fr-i) Kling POST 가 1회가 아닙니다: {len(posts)} {shot.get('error')}")
+        else:
+            expected = fal.build_payload(
+                kling["caps"],
+                prompt=str(job.get("sentPrompt") or ""),
+                reference_jpegs_b64=[images.keyframe_base64(PARITY_CHAR_KEY)],
+                resolution=str(loaded["steps"]["4"].get("resolution") or ""),
+                duration_s=5,
+            )
+            if posts[0][2] != expected:
+                bad.append(f"(fr-i) Kling 본문이 build_payload 기존 결과와 다릅니다: {sorted(posts[0][2] or {})} != {sorted(expected)}")
+            if posts[0][1] != f"{settings.FAL_QUEUE_URL}/{kling['endpointId']}":
+                bad.append(f"(fr-i) Kling URL 이 다릅니다: {posts[0][1]}")
+            if shot.get("provider") != PARITY_KLING or job.get("endpointModel") != PARITY_KLING:
+                bad.append(f"(fr-i) Kling provider·endpointModel 이 다릅니다: {shot.get('provider')} {job.get('endpointModel')}")
+            if logs.messages("vpoc.fal.route "):
+                bad.append("(fr-i) 계열이 아닌데 vpoc.fal.route 로그가 남았습니다")
+
+        # 외부 호출 0회(실제 네트워크·BytePlus·Luma)
+        if env.url_calls:
+            bad.append(f"실제 네트워크 호출이 있었습니다: {env.url_calls}")
+        if env.ark_calls or env.video_calls:
+            bad.append(f"BytePlus·Luma 제출이 있었습니다: ark={len(env.ark_calls)} luma={len(env.video_calls)}")
+        if any("dummy-fal-key" in text for text in logs.messages()):
+            bad.append("로그에 fal 키 값이 남았습니다")
+    except Exception as exc:  # noqa: BLE001
+        import traceback as _tb  # noqa: PLC0415
+
+        bad.append("Seedance 계열 라우팅 검사 중 예외: " + repr(exc) + "\n" + _tb.format_exc()[:1500])
+    finally:
+        logs.detach()
+        settings.FAL_SEEDANCE_FAMILY = saved_family
+        settings.ARK_GENERATE_AUDIO = saved_audio
+        if env is not None:
+            env.restore()
+
+    if bad:
+        fail("fal-seedance-parity 엔드포인트 선택 검사 실패\n" + "\n".join(f"  {item}" for item in bad))
+    else:
+        ok(
+            "fal-seedance-parity 엔드포인트 선택 검사 (fr-a)계열 설정 파서·짝·계열 판정 "
+            "(fr-b)짝 미등록 E1·사용 불가 E1b·짝 단독 통과 (fr-c)choices 이름·r2v 숨김·Kling 그대로 "
+            "(fr-d)route_model 5갈래·reference_caps·빈 값 되돌리기 (fr-e)r2v 참고·i2v 키 장면·글만·single 3장·기록·로그 "
+            "(fr-f)참고 9장 이하 (fr-g)짝 해제 E5·대체 없음 (fr-h)generate_audio 고정 (fr-i)Kling 본문 회귀"
+        )
+
+
+# ------------------------------------------------ 073 작업 3 공용(길이·화질 du·rz)
+
+PARITY_MINIMAX = "fal:fal-ai/minimax/hailuo-02/standard/image-to-video"
+PARITY_GEN_ID = "g20261026110000"  # _parity_state 의 ④ genId
+
+
+def _parity_minimax_item() -> dict:
+    """계열이 아닌 fal 모델(MiniMax i2v 모양 가짜 caps, 073 du-h·rz-f). 길이 6·10초, 화질 512P·768P."""
+    durations = ["6", "10"]
+    return {
+        "id": PARITY_MINIMAX,
+        "endpointId": PARITY_MINIMAX[len("fal:"):],
+        "label": "MiniMax Hailuo 02 Standard Image to Video",
+        "category": "image-to-video",
+        "caps": {
+            "promptField": "prompt",
+            "promptMaxLength": 2000,
+            "startImageField": "image_url",
+            "endImageField": "end_image_url",
+            "referenceImagesField": "",
+            "durations": durations,
+            "durationAsString": True,
+            "durationValues": {value: value for value in durations},
+            "sendDuration": True,
+            "resolutions": ["512P", "768P"],
+            "resolutionValues": {"512p": "512P", "768p": "768P"},
+            "aspectRatios": [],
+            "audioField": "",
+            "previzCapable": False,
+            "requiredFields": ["prompt", "image_url"],
+            "available": True,
+            "reason": "",
+        },
+        "pricing": {"unit": "seconds", "unitPrice": 0.045},
+        "addedBy": "tester",
+    }
+
+
+def _parity_with_caps(items: list[dict], model: str, **caps_update) -> list[dict]:
+    """레지스트리 항목 복사본에서 model 의 caps 만 바꾼다."""
+    out = []
+    for item in items:
+        copy = dict(item)
+        if copy.get("id") == model:
+            copy["caps"] = {**(copy.get("caps") or {}), **caps_update}
+        out.append(copy)
+    return out
+
+
+def _parity_norm_body(body: dict | None) -> dict:
+    """fal 제출 본문을 상수로 비교할 수 있게 줄인다. prompt 는 sha1 앞 16자, data URI 는 표식."""
+    import hashlib  # noqa: PLC0415
+
+    out: dict = {}
+    for key, value in (body or {}).items():
+        if key == "prompt":
+            out[key] = "sha1:" + hashlib.sha1(str(value).encode("utf-8")).hexdigest()[:16]
+        elif isinstance(value, str) and value.startswith("data:"):
+            out[key] = "<data-uri>"
+        elif isinstance(value, list):
+            out[key] = ["<data-uri>" if isinstance(v, str) and v.startswith("data:") else v for v in value]
+        else:
+            out[key] = value
+    return out
+
+
+def _parity_submit(env: _ParityEnv, logs: _LogCapture, state: dict, shot_id: str = "s1") -> tuple[list, dict, dict, dict]:
+    """상태를 저장하고 GET plan(refresh_shots → submit_shot)으로 대기 샷 하나를 제출한다.
+
+    돌려주는 값: (fal POST 목록, ④ 샷, jobs 기록, 저장된 상태). 앞 경우의 jobs 기록은 지운다.
+    """
+    sys.path.insert(0, str(ROOT / "app"))
+    from src.vpoc import store  # noqa: PLC0415
+
+    env.reset_calls()
+    logs.clear()
+    gen_id = str(((state.get("steps") or {}).get("4") or {}).get("genId") or "")
+    key = store.job_key(PARITY_OWNER, PARITY_PID, PARITY_PLAN, shot_id, 1, gen_id)
+    env.fake.json.pop(key, None)
+    env.save(state)
+    env.client.get(env.plan_url())
+    loaded = env.load()
+    shot = next((s for s in loaded["steps"]["4"].get("shots") or [] if s.get("id") == shot_id), {})
+    job = env.fake.read_json(key)[0] or {}
+    return env.fal_posts(), shot, job, loaded
+
+
+def _parity_single_master(total_s: int) -> dict:
+    """single(영상 1개) ③ 마스터(인물 c1 = PARITY_CHAR_KEY, 배경 없음)."""
+    return {
+        "version": 1,
+        "totalS": total_s,
+        "styleEn": "Cinematic",
+        "background": {"promptEn": "rooftop", "imageKey": ""},
+        "characters": [{"id": "c1", "handleEn": "the man", "promptEn": "coat", "imageKey": PARITY_CHAR_KEY}],
+        "beats": [{"id": "b1", "t0": 0, "t1": total_s, "actionEn": "He looks", "cameraEn": "Static"}],
+    }
+
+
+# 073 du-h·rz-f: 계열이 아닌 fal 모델의 길이·화질·제출 회귀 스냅샷. 작업 3 구현 **전** 코드로 같은 입력
+# (_parity_nonfamily_measure)을 돌려 얻은 값이다(2026-10-27). 원장 model 칸만 X2 로 엔드포인트 id 로 바뀐다
+# (구현 전 값은 settings.VIDEO_MODEL "luma.ray-v2:0").
+_PARITY_PROMPT_SHA = "sha1:2016bd6664e5ae30"
+PARITY_NONFAMILY_SNAPSHOT = {
+    PARITY_KLING: {
+        "options": {
+            "durationChoices": [5, 10], "minDurationS": 5, "maxDurationS": 10,
+            "resolutions": ["720p"], "defaultResolution": "720p",
+        },
+        "shotSeconds": [5, 5, 5],
+        "oneTake": [False, 5],
+        "oneTake2x5": [False, 5],
+        "singleTotal": {"7": 7, "12": 10, "0": 10, "10": 10},
+        "generateSingle": {"status": 200, "totalUsd": 1.12, "singleTotalS": 10, "resolution": "540p",
+                           "shots": [["take", 10]]},
+        "generateShots": {"status": 200, "totalUsd": 1.12, "resolution": "540p", "oneTake": False,
+                          "shots": [["s1", 5], ["s2", 5]]},
+        "planResolution": {"none": "540p", "540p": "540p", "720p": "540p"},
+        "submit": {
+            case: {
+                "body": {"aspect_ratio": "16:9", "duration": duration, "generate_audio": True,
+                         "image_url": "<data-uri>", "prompt": _PARITY_PROMPT_SHA},
+                "status": "submitted", "mode": "reference",
+                "jobResolution": res, "jobUsd": usd, "jobDurationS": secs,
+                "charges": [{"kind": "video", "units": secs, "usd": usd}],
+                "chargeVideoResolution": [res],
+            }
+            for case, duration, res, usd, secs in (
+                ("540p/5", "5", "540p", 0.56, 5),
+                ("540p/10", "10", "540p", 1.12, 10),
+                ("none/5", "5", "540p", 0.56, 5),
+                ("720p/5", "5", "720p", 0.56, 5),
+            )
+        },
+    },
+    PARITY_MINIMAX: {
+        "options": {
+            "durationChoices": [6, 10], "minDurationS": 6, "maxDurationS": 10,
+            "resolutions": ["512P", "768P"], "defaultResolution": "512P",
+        },
+        "shotSeconds": [5, 5, 5],
+        "oneTake": [False, 5],
+        "oneTake2x5": [False, 5],
+        "singleTotal": {"7": 7, "12": 10, "0": 10, "10": 10},
+        "generateSingle": {"status": 200, "totalUsd": 0.45, "singleTotalS": 10, "resolution": "540p",
+                           "shots": [["take", 10]]},
+        "generateShots": {"status": 200, "totalUsd": 0.45, "resolution": "540p", "oneTake": False,
+                          "shots": [["s1", 5], ["s2", 5]]},
+        "planResolution": {"none": "540p", "540p": "540p", "720p": "540p"},
+        "submit": {
+            case: {
+                "body": {"duration": duration, "image_url": "<data-uri>", "prompt": _PARITY_PROMPT_SHA},
+                "status": "submitted", "mode": "reference",
+                "jobResolution": res, "jobUsd": usd, "jobDurationS": secs,
+                "charges": [{"kind": "video", "units": secs, "usd": usd}],
+                "chargeVideoResolution": [res],
+            }
+            for case, duration, res, usd, secs in (
+                ("540p/5", "6", "540p", 0.225, 5),
+                ("540p/10", "10", "540p", 0.45, 10),
+                ("none/5", "6", "540p", 0.225, 5),
+                ("720p/5", "6", "720p", 0.225, 5),
+            )
+        },
+    },
+}
+
+
+def _parity_nonfamily_measure(env: _ParityEnv, logs: _LogCapture, model: str, cv_calls: list[dict]) -> dict:
+    """계열이 아닌 fal 모델 하나의 길이·화질·제출 값(PARITY_NONFAMILY_SNAPSHOT 과 같은 모양 + 비교용 부가 값).
+
+    cv_calls: ledger.charge_video 기록기(호출 kwargs). 레지스트리에 model 이 등록돼 있어야 한다.
+    """
+    sys.path.insert(0, str(ROOT / "app"))
+    from src.vpoc import ark  # noqa: PLC0415
+
+    snap: dict = {}
+    opts = ark.video_options(model)
+    snap["options"] = {
+        key: opts.get(key)
+        for key in ("durationChoices", "minDurationS", "maxDurationS", "resolutions", "defaultResolution")
+    }
+    plan_res: dict = {}
+    for stored in ("", "540p", "720p"):
+        state = _parity_state(model, durations=(7, 12, 5), resolution=stored)
+        state["steps"]["3"]["shots"][2]["durationS"] = None
+        if not stored:
+            state["steps"]["3"].pop("resolution", None)
+        env.save(state)
+        step3 = ((env.client.get(env.plan_url()).get_json() or {}).get("steps") or {}).get("3") or {}
+        plan_res[stored or "none"] = step3.get("resolution")
+        if not stored:
+            snap["shotSeconds"] = [row.get("durationS") for row in step3.get("shots") or []]
+            snap["oneTake"] = [step3.get("oneTakeActive"), step3.get("oneTakeMaxS")]
+    snap["planResolution"] = plan_res
+    env.save(_parity_state(model, durations=(5, 5)))
+    step3 = ((env.client.get(env.plan_url()).get_json() or {}).get("steps") or {}).get("3") or {}
+    snap["oneTake2x5"] = [step3.get("oneTakeActive"), step3.get("oneTakeMaxS")]
+    single_total = _closure_fn(env.app.view_functions.get("whynot_vpoc.get_plan"), "_single_total")
+    snap["singleTotal"] = (
+        {str(v): single_total({"totalSeconds": v}, model) for v in (7, 12, 0, 10)} if single_total else None
+    )
+    # generate single(master.totalS = 10, caps 범위 안 → E2 아님)
+    state = _parity_state(model, "single")
+    state["steps"]["2"]["totalSeconds"] = 10
+    state["steps"]["3"]["master"] = _parity_single_master(10)
+    env.save(state)
+    view = env.client.get(env.plan_url()).get_json() or {}
+    step3 = (view.get("steps") or {}).get("3") or {}
+    total = (step3.get("cost") or {}).get("totalUsd")
+    resp = env.client.post(env.run_url("generate"), json={"confirmUsd": total})
+    step4 = env.load()["steps"]["4"]
+    snap["generateSingle"] = {
+        "status": resp.status_code, "totalUsd": total, "singleTotalS": step3.get("singleTotalS"),
+        "resolution": step4.get("resolution"),
+        "shots": [[s.get("id"), s.get("durationS")] for s in step4.get("shots") or []],
+    }
+    # generate shots(7·12초 요청)
+    env.save(_parity_state(model, durations=(7, 12)))
+    view = env.client.get(env.plan_url()).get_json() or {}
+    total = ((((view.get("steps") or {}).get("3") or {}).get("cost")) or {}).get("totalUsd")
+    resp = env.client.post(env.run_url("generate"), json={"confirmUsd": total})
+    step4 = env.load()["steps"]["4"]
+    snap["generateShots"] = {
+        "status": resp.status_code, "totalUsd": total, "resolution": step4.get("resolution"),
+        "oneTake": step4.get("oneTake"),
+        "shots": [[s.get("id"), s.get("durationS")] for s in step4.get("shots") or []],
+    }
+    # submit_shot(회차 화질 540p·없음·720p, 샷 5·10초)
+    submits: dict = {}
+    extra: dict = {}
+    for stored, seconds in (("540p", 5), ("540p", 10), ("", 5), ("720p", 5)):
+        cv_calls.clear()
+        state = _parity_state(
+            model,
+            resolution=stored or "540p",
+            step4={
+                "status": "running",
+                "resolution": stored,
+                "shots": [
+                    _parity_shot4("s1", "queued", durationS=seconds),
+                    _parity_shot4("s2", "completed", durationS=5),
+                ],
+            },
+        )
+        posts, shot, job, _loaded = _parity_submit(env, logs, state)
+        case = f"{stored or 'none'}/{seconds}"
+        submits[case] = {
+            "body": _parity_norm_body(posts[0][2]) if posts else None,
+            "status": shot.get("status"),
+            "mode": shot.get("mode"),
+            "jobResolution": job.get("resolution"),
+            "jobUsd": job.get("usd"),
+            "jobDurationS": job.get("durationS"),
+            "charges": [{k: c.get(k) for k in ("kind", "units", "usd")} for c in env.charges],
+            "chargeVideoResolution": [k.get("resolution") for k in cv_calls],
+        }
+        extra[case] = {
+            "posts": len(posts),
+            "url": posts[0][1] if posts else None,
+            "rawBody": (posts[0][2] or {}) if posts else {},
+            "provider": shot.get("provider"),
+            "chargeModels": [c.get("model") for c in env.charges],
+            "adjustedLogs": logs.messages("vpoc.fal.resolution_adjusted"),
+        }
+    snap["submit"] = submits
+    snap["_extra"] = extra
+    return snap
+
+
+def check_fal_parity_duration() -> None:
+    """073 작업 3 — 샷 길이·한 번에 만들기(R3.1-3.8, R14.2-14.4, D3·X5·X6). 외부 호출은 전부 가짜.
+
+    (du-a) ark.duration_range: ARK (4,15)·Luma (5,5)·비계열 fal [5,10]→(5,5)·계열 4..30→(4,15)·상한 12→(4,12)·
+           상한<최소→(4,4)·미등록 fal (5,5).
+    (du-b) ark.snap_seconds: 비계열 fal 7·12·빈 값→5, 계열 20→15·3→4, 계열 이산 [4,8,12] 5→8·13→12, ARK 20→15·2→4, Luma 9→5.
+    (du-c) video_options(계열): durationChoices 4..15·maxDurationS 15(choices 도 같다).
+    (du-d) plan_view 한 번에 만들기: 계열 2×6 True·15, Kling 2×5 False·5, ARK 2×6 True. one_take_max_s 3갈래.
+    (du-e) generate single: 계열 totalS=20 → 400 BadDuration(E2, 금액 검사 전), 10 → plan_view 금액 그대로 통과.
+    (du-f) ark.plan_model: 플래그 false·seedance-2-5 → 얼굴(등록)/Luma. 준비 3곳이 ark.plan_model( 을 부른다.
+           do_prepare·_build_master·_make_storyboard 를 가짜 LLM·Seedream 으로 실제로 돌려 길이가 실제 모델 범위다.
+    (du-g) 제출: 계열 durationS=20 → failed BadDuration(fal 0회), ARK 20 → BadDuration, Kling 10 → 검사 없이 제출.
+    (du-h) 비계열 fal(Kling·MiniMax 모양) 길이 회귀 스냅샷(구현 전 값).
+    (du-i) ③ 저장 길이(save_step): 계열 4·10·15 저장, 16·3·틀린 값 400, 이산 caps 밖 400, Kling 5 저장·10 400, Luma 5 저장.
+    """
+    sys.path.insert(0, str(ROOT / "app"))
+    from src.vpoc import ark, ledger, settings  # noqa: PLC0415
+
+    bad: list[str] = []
+    env: _ParityEnv | None = None
+    logs = _LogCapture()
+    routes_path = APP_SRC / "vpoc" / "routes.py"
+    base_items = _parity_registry_items() + [_parity_kling_item(), _parity_minimax_item()]
+    saved_max = settings.FAL_SEEDANCE_MAX_S
+    try:
+        env = _parity_env(registry=base_items)
+        logs.attach()
+        cv_calls: list[dict] = []
+        real_charge_video = ledger.charge_video
+
+        def record_charge_video(token: str, **kwargs) -> dict:
+            cv_calls.append(dict(kwargs))
+            return real_charge_video(token, **kwargs)
+
+        env.patch(ledger, "charge_video", record_charge_video)
+
+        # ---- (du-a) duration_range ----
+        table_a = [
+            ("seedance-2-5", (4, 15)),
+            ("luma-ray2", (5, 5)),
+            (PARITY_KLING, (5, 5)),
+            (PARITY_MINIMAX, (5, 5)),
+            (PARITY_FACE, (4, 15)),
+            (PARITY_PARTNER, (4, 15)),
+            ("fal:not/registered", (5, 5)),
+        ]
+        for model, want in table_a:
+            if ark.duration_range(model) != want:
+                bad.append(f"(du-a) duration_range({model}) 가 {want} 가 아닙니다: {ark.duration_range(model)}")
+        env.patch(settings, "FAL_SEEDANCE_MAX_S", 12)
+        if ark.duration_range(PARITY_FACE) != (4, 12):
+            bad.append(f"(du-a) FAL_SEEDANCE_MAX_S=12 인데 (4,12) 가 아닙니다: {ark.duration_range(PARITY_FACE)}")
+        if ark.duration_range(PARITY_KLING) != (5, 5):
+            bad.append("(du-a) 계열 상한이 비계열 fal 범위를 바꿨습니다")
+        env.patch(settings, "FAL_SEEDANCE_MAX_S", 2)
+        if ark.duration_range(PARITY_FACE) != (4, 4):
+            bad.append(f"(du-a) 상한이 최소보다 작으면 (4,4) 여야 합니다: {ark.duration_range(PARITY_FACE)}")
+        env.patch(settings, "FAL_SEEDANCE_MAX_S", saved_max)
+        if saved_max != 15 and os.getenv("VPOC_FAL_SEEDANCE_MAX_S") is None:
+            bad.append(f"(du-a) env 없을 때 FAL_SEEDANCE_MAX_S 가 15 가 아닙니다: {saved_max}")
+
+        # ---- (du-b) snap_seconds ----
+        table_b = [
+            (PARITY_KLING, 7, 5), (PARITY_KLING, 12, 5), (PARITY_KLING, None, 5), (PARITY_KLING, "", 5),
+            (PARITY_FACE, 20, 15), (PARITY_FACE, 3, 4), (PARITY_FACE, 6, 6), (PARITY_FACE, "x", 5),
+            (PARITY_FACE, None, 5),
+            ("seedance-2-5", 20, 15), ("seedance-2-5", 2, 4), ("seedance-2-5", "abc", 5),
+            ("luma-ray2", 9, 5),
+        ]
+        for model, requested, want in table_b:
+            got = ark.snap_seconds(model, requested)
+            if got != want:
+                bad.append(f"(du-b) snap_seconds({model}, {requested!r}) 가 {want} 가 아닙니다: {got}")
+        env.set_registry(_parity_with_caps(base_items, PARITY_FACE, durations=["4", "8", "12"]))
+        for requested, want in ((5, 8), (13, 12), (4, 4), (None, 8)):
+            got = ark.snap_seconds(PARITY_FACE, requested)
+            if got != want:
+                bad.append(f"(du-b) 계열 이산 [4,8,12] snap_seconds({requested!r}) 가 {want} 가 아닙니다: {got}")
+        env.set_registry(base_items)
+
+        # ---- (du-c) video_options(계열) ----
+        opts = ark.video_options(PARITY_FACE)
+        if opts.get("durationChoices") != list(range(4, 16)) or opts.get("maxDurationS") != 15 or opts.get(
+            "minDurationS"
+        ) != 4:
+            bad.append(
+                f"(du-c) 계열 video_options 길이가 4..15 가 아닙니다: {opts.get('durationChoices')} "
+                f"max={opts.get('maxDurationS')} min={opts.get('minDurationS')}"
+            )
+        face_choice = next((item for item in ark.choices() if item.get("id") == PARITY_FACE), {})
+        if face_choice.get("durationChoices") != list(range(4, 16)) or face_choice.get("maxDurationS") != 15:
+            bad.append(f"(du-c) ② choices 의 계열 길이 선택지가 4..15 가 아닙니다: {face_choice.get('durationChoices')}")
+
+        # ---- (du-d) plan_view 한 번에 만들기 ----
+        def one_take_view(model: str, durations: tuple[int, ...]) -> dict:
+            env.save(_parity_state(model, durations=durations))
+            return ((env.client.get(env.plan_url()).get_json() or {}).get("steps") or {}).get("3") or {}
+
+        step3 = one_take_view(PARITY_FACE, (6, 6))
+        if step3.get("oneTakeActive") is not True or step3.get("oneTakeMaxS") != 15:
+            bad.append(f"(du-d) 계열 2×6초 oneTakeActive·MaxS 가 True·15 가 아닙니다: {step3.get('oneTakeActive')} {step3.get('oneTakeMaxS')}")
+        if [row.get("durationS") for row in step3.get("shots") or []] != [6, 6]:
+            bad.append(f"(du-d) 계열 샷 길이가 6·6 이 아닙니다: {[row.get('durationS') for row in step3.get('shots') or []]}")
+        step3 = one_take_view(PARITY_FACE, (10, 10))
+        if step3.get("oneTakeActive") is not False:
+            bad.append("(du-d) 계열 2×10초(20초 > 15)인데 oneTakeActive 가 True 입니다")
+        step3 = one_take_view(PARITY_KLING, (5, 5))
+        if step3.get("oneTakeActive") is not False or step3.get("oneTakeMaxS") != 5:
+            bad.append(f"(du-d) Kling 2×5초가 False·5 가 아닙니다: {step3.get('oneTakeActive')} {step3.get('oneTakeMaxS')}")
+        env.patch(settings, "ARK_SEEDANCE_ENABLED", True)
+        step3 = one_take_view("seedance-2-5", (6, 6))
+        if step3.get("oneTakeActive") is not True or step3.get("oneTakeMaxS") != 15:
+            bad.append(f"(du-d) ARK 2×6초가 True·15 가 아닙니다: {step3.get('oneTakeActive')} {step3.get('oneTakeMaxS')}")
+        env.patch(settings, "ARK_SEEDANCE_ENABLED", False)
+        for model, want in (("seedance-2-5", 15), (PARITY_FACE, 15), (PARITY_KLING, 5), ("luma-ray2", 5), ("fal:x/y", 5)):
+            if ark.one_take_max_s(model) != want:
+                bad.append(f"(du-d) one_take_max_s({model}) 가 {want} 가 아닙니다: {ark.one_take_max_s(model)}")
+
+        # ---- (du-e) generate single E2 ----
+        def single_state(total_s: int) -> dict:
+            state = _parity_state(PARITY_FACE, "single")
+            state["steps"]["2"]["totalSeconds"] = total_s
+            state["steps"]["3"]["master"] = _parity_single_master(total_s)
+            return state
+
+        env.save(single_state(20))
+        resp = env.client.post(env.run_url("generate"), json={"confirmUsd": 0})
+        err = (resp.get_json() or {}).get("error") or {}
+        if resp.status_code != 400 or err.get("type") != "BadDuration":
+            bad.append(f"(du-e) 계열 totalS=20 이 400 BadDuration(E2)이 아닙니다(금액 검사보다 먼저): {resp.status_code} {err.get('type')}")
+        elif "4~15초" not in str(err.get("message") or "") or "20초" not in str(err.get("message") or ""):
+            bad.append(f"(du-e) E2 문구에 범위·길이가 없습니다: {err.get('message')!r}")
+        if env.load()["steps"]["4"].get("genId"):
+            bad.append("(du-e) E2 인데 ④ 회차가 만들어졌습니다")
+        env.save(single_state(10))
+        view = env.client.get(env.plan_url()).get_json() or {}
+        step3 = (view.get("steps") or {}).get("3") or {}
+        total = (step3.get("cost") or {}).get("totalUsd")
+        if step3.get("singleTotalS") != 10:
+            bad.append(f"(du-e) plan_view singleTotalS 가 master.totalS(10)가 아닙니다: {step3.get('singleTotalS')}")
+        resp = env.client.post(env.run_url("generate"), json={"confirmUsd": total})
+        if resp.status_code != 200:
+            bad.append(f"(du-e) 계열 totalS=10 을 화면 금액({total})으로 보낸 generate 가 200 이 아닙니다: {resp.status_code} {resp.get_json()}")
+        else:
+            step4 = env.load()["steps"]["4"]
+            if [[s.get("id"), s.get("durationS")] for s in step4.get("shots") or []] != [["take", 10]]:
+                bad.append(f"(du-e) 회차 샷이 take 10초가 아닙니다: {step4.get('shots')}")
+        # master 가 없으면 ② totalSeconds(_single_total) — plan_view 641 의 대체 분기.
+        state = single_state(12)
+        state["steps"]["3"].pop("master", None)
+        env.save(state)
+        step3 = ((env.client.get(env.plan_url()).get_json() or {}).get("steps") or {}).get("3") or {}
+        if step3.get("singleTotalS") != 12:
+            bad.append(f"(du-e) 마스터 없을 때 singleTotalS 가 ② 값(12)이 아닙니다: {step3.get('singleTotalS')}")
+
+        # ---- (du-f) plan_model ----
+        if ark.plan_model({"videoModel": "seedance-2-5"}) != PARITY_FACE:
+            bad.append(f"(du-f) 플래그 false·seedance-2-5 → 얼굴이 아닙니다: {ark.plan_model({'videoModel': 'seedance-2-5'})}")
+        if ark.plan_model({"videoModel": PARITY_KLING}) != PARITY_KLING or ark.plan_model({}) != "":
+            bad.append("(du-f) plan_model 이 fal·빈 값을 바꿨습니다")
+        env.set_registry([_parity_kling_item()])
+        if ark.plan_model({"videoModel": "seedance-2-5"}) != ark.DEFAULT_MODEL:
+            bad.append(f"(du-f) 얼굴 미등록이면 Luma 여야 합니다: {ark.plan_model({'videoModel': 'seedance-2-5'})}")
+        env.set_registry(base_items)
+        source = routes_path.read_text(encoding="utf-8")
+        for name in ("do_prepare", "_make_storyboard", "_build_master"):
+            match = re.search(r"\n    def " + name + r"\(.*?(?=\n    def |\n    @)", source, re.S)
+            body = match.group(0) if match else ""
+            if "ark.plan_model(" not in body:
+                bad.append(f"(du-f) routes.{name} 가 ark.plan_model( 을 부르지 않습니다")
+            if 'str(step2.get("videoModel") or "")' in body:
+                bad.append(f"(du-f) routes.{name} 에 ② 저장값을 그대로 쓰는 줄이 남았습니다")
+        # 073 fix1: 준비 3곳을 실제로 지나가게 한다. LLM·Seedream 은 가짜, 백그라운드 그림 스레드는 하네스가 막는다.
+        # 상한 12초로 두면 ② 저장값(ARK seedance-2-5, 4~15초)과 실제 모델(fal 얼굴, 4~12초)의 길이가 갈린다.
+        from src.vpoc import llm, seedream  # noqa: PLC0415
+
+        plan_model_calls: list[tuple[str, str]] = []
+        real_plan_model = ark.plan_model
+
+        def spy_plan_model(step2: dict) -> str:
+            got = real_plan_model(step2)
+            plan_model_calls.append((str((step2 or {}).get("videoModel") or ""), got))
+            return got
+
+        llm_calls: list[tuple[str, dict]] = []
+
+        def fake_master_plan(panel_bytes, characters, **kwargs):
+            llm_calls.append(("master_plan", dict(kwargs)))
+            return (
+                {"beats": [{"actionEn": "He looks", "characters": []}], "backgroundEn": "A quiet rooftop at dusk"},
+                {"inputTokens": 1, "outputTokens": 1, "model": "fake"},
+            )
+
+        def fake_storyboard(panel_bytes, characters, **kwargs):
+            llm_calls.append(("storyboard", dict(kwargs)))
+            count = int(kwargs.get("count") or 2)
+            return (
+                {
+                    "keyframes": [{"summaryKo": "k", "sceneEn": "scene", "characters": []} for _ in range(count)],
+                    "segments": [{"summaryKo": "s", "motionEn": "motion"} for _ in range(count - 1)],
+                },
+                {"inputTokens": 1, "outputTokens": 1, "model": "fake"},
+            )
+
+        def fake_llm_other(*args, **kwargs):
+            llm_calls.append(("other", {}))
+            raise RuntimeError("check_vpoc: 이 경로에서 부르면 안 되는 LLM 호출")
+
+        seedream_calls: list[str] = []
+
+        def fake_generate_safe(prompt, refs=None, *, model="", where=""):
+            seedream_calls.append(where)
+            return _tiny_jpeg()
+
+        env.patch(ark, "plan_model", spy_plan_model)
+        env.patch(llm, "master_plan", fake_master_plan)
+        env.patch(llm, "storyboard", fake_storyboard)
+        env.patch(llm, "plan", fake_llm_other)
+        env.patch(seedream, "generate_safe", fake_generate_safe)
+        env.patch(settings, "FAL_SEEDANCE_MAX_S", 12)
+        do_prepare = make_storyboard = None
+        for view in env.app.view_functions.values():
+            do_prepare = do_prepare or _closure_fn(view, "do_prepare")
+            make_storyboard = make_storyboard or _closure_fn(view, "_make_storyboard")
+        prep_step1 = {"status": "saved", "text": "t", "characters": [], "sceneFiles": []}
+        prep_step2 = {
+            "story": {"style": "live_action"},
+            "characters": [],
+            "makeMode": "single",
+            "videoModel": "seedance-2-5",
+            "totalSeconds": 20,
+        }
+        if do_prepare is None or make_storyboard is None:
+            bad.append("(du-f) do_prepare·_make_storyboard 를 찾지 못했습니다")
+        else:
+            result = do_prepare(PARITY_OWNER, PARITY_PID, PARITY_PLAN, PARITY_OWNER, dict(prep_step2), step1=prep_step1)
+            if [call[1] for call in plan_model_calls] != [PARITY_FACE, PARITY_FACE]:
+                bad.append(f"(du-f) do_prepare·_build_master 가 plan_model(→얼굴)을 2번 부르지 않았습니다: {plan_model_calls}")
+            masters = [kw for name, kw in llm_calls if name == "master_plan"]
+            if len(masters) != 1 or masters[0].get("total_s") != 12:
+                bad.append(f"(du-f) _build_master 길이가 실제 모델 범위(12초)가 아닙니다: {[kw.get('total_s') for kw in masters]}")
+            if (result.get("master") or {}).get("totalS") != 12 or result.get("makeMode") != "single":
+                bad.append(f"(du-f) do_prepare 결과 master.totalS·makeMode 가 12·single 이 아닙니다: {(result.get('master') or {}).get('totalS')} {result.get('makeMode')}")
+            plan_model_calls.clear()
+            board = make_storyboard(
+                PARITY_OWNER, PARITY_PID, PARITY_PLAN, PARITY_OWNER, prep_step1, dict(prep_step2), make_mode="single"
+            )
+            boards = [kw for name, kw in llm_calls if name == "storyboard"]
+            if [call[1] for call in plan_model_calls] != [PARITY_FACE]:
+                bad.append(f"(du-f) _make_storyboard 가 plan_model(→얼굴)을 부르지 않았습니다: {plan_model_calls}")
+            if len(boards) != 1 or boards[0].get("total_s") != 12:
+                bad.append(f"(du-f) _make_storyboard 길이가 12초가 아닙니다: {[kw.get('total_s') for kw in boards]}")
+            if not board.get("keyframes") or float(board["keyframes"][-1].get("t") or 0) != 12.0:
+                bad.append(f"(du-f) 마지막 키 장면이 12초가 아닙니다: {[k.get('t') for k in board.get('keyframes') or []]}")
+            if any(name == "other" for name, _ in llm_calls):
+                bad.append("(du-f) 준비 중 llm.plan 이 불렸습니다(single 은 마스터만)")
+            if seedream_calls != ["seedream.master_background"]:
+                bad.append(f"(du-f) Seedream 가짜 호출이 배경 1장이 아닙니다(미리보기는 스레드라 막힘): {seedream_calls}")
+        env.patch(settings, "FAL_SEEDANCE_MAX_S", saved_max)
+        env.patch(ark, "plan_model", real_plan_model)
+
+        # ---- (du-g) 제출 길이 검사 ----
+        def queued_state(model: str, seconds: int) -> dict:
+            return _parity_state(
+                model,
+                step4={
+                    "status": "running",
+                    "shots": [
+                        _parity_shot4("s1", "queued", durationS=seconds),
+                        _parity_shot4("s2", "completed", durationS=5),
+                    ],
+                },
+            )
+
+        posts, shot, job, _ = _parity_submit(env, logs, queued_state(PARITY_FACE, 20))
+        if shot.get("status") != "failed" or (shot.get("error") or {}).get("type") != "BadDuration":
+            bad.append(f"(du-g) 계열 20초 샷이 failed BadDuration 이 아닙니다: {shot.get('status')} {(shot.get('error') or {}).get('type')}")
+        if posts or env.charges or job:
+            bad.append(f"(du-g) 계열 20초인데 fal POST {len(posts)}·원장 {len(env.charges)}·jobs 기록")
+        posts, shot, job, _ = _parity_submit(env, logs, queued_state(PARITY_FACE, 15))
+        if shot.get("status") != "submitted" or not posts or (posts[0][2] or {}).get("duration") != "15":
+            bad.append(f"(du-g) 계열 15초(상한)가 제출되지 않았습니다: {shot.get('status')} {shot.get('error')}")
+        env.patch(settings, "ARK_SEEDANCE_ENABLED", True)
+        _parity_submit(env, logs, queued_state("seedance-2-5", 20))
+        shot = next((s for s in env.load()["steps"]["4"]["shots"] if s.get("id") == "s1"), {})
+        if shot.get("status") != "failed" or (shot.get("error") or {}).get("type") != "BadDuration" or env.ark_calls:
+            bad.append(f"(du-g) ARK 20초가 BadDuration·ark._call 0회가 아닙니다: {shot.get('status')} {len(env.ark_calls)}")
+        env.patch(settings, "ARK_SEEDANCE_ENABLED", False)
+        posts, shot, job, _ = _parity_submit(env, logs, queued_state(PARITY_KLING, 10))
+        if shot.get("status") != "submitted" or len(posts) != 1 or (posts[0][2] or {}).get("duration") != "10":
+            bad.append(f"(du-g) Kling 10초가 검사 없이 제출되지 않았습니다: {shot.get('status')} {shot.get('error')}")
+
+        # ---- (du-i) ③ 저장 길이 검증(save_step, 073 fix1 R3.9) ----
+        def save_duration(model: str, seconds: object) -> tuple[int, str, object]:
+            env.save(_parity_state(model, durations=(5, 5)))
+            resp = env.client.put(f"{env.plan_url()}/steps/3", json={"shots": [{"id": "s1", "durationS": seconds}]})
+            err = ((resp.get_json() or {}).get("error") or {})
+            saved = next((s for s in env.load()["steps"]["3"]["shots"] if s.get("id") == "s1"), {}).get("durationS")
+            return resp.status_code, str(err.get("type") or ""), saved
+
+        cases_i = [
+            (PARITY_FACE, 4, 200), (PARITY_FACE, 10, 200), (PARITY_FACE, 15, 200),
+            (PARITY_FACE, 16, 400), (PARITY_FACE, 3, 400), (PARITY_FACE, "x", 400),
+            (PARITY_KLING, 5, 200), (PARITY_KLING, 10, 400),
+            ("luma-ray2", 5, 200), ("luma-ray2", 6, 400),
+        ]
+        for model, seconds, want in cases_i:
+            status, kind, saved = save_duration(model, seconds)
+            if status != want or (want == 400 and kind != "BadDuration"):
+                bad.append(f"(du-i) {model} durationS={seconds!r} 저장이 {want} 가 아닙니다: {status} {kind}")
+            if want == 200 and saved != seconds:
+                bad.append(f"(du-i) {model} durationS={seconds} 가 저장되지 않았습니다: {saved}")
+            if want == 400 and saved != 5:
+                bad.append(f"(du-i) {model} durationS={seconds!r} 거절인데 값이 바뀌었습니다: {saved}")
+        # 계열 이산 caps [4,8,12]: 범위(4~12) 안이어도 caps 에 없는 값(5)은 거절, 8 은 저장.
+        env.set_registry(_parity_with_caps(base_items, PARITY_FACE, durations=["4", "8", "12"]))
+        for seconds, want in ((5, 400), (8, 200)):
+            status, kind, _saved = save_duration(PARITY_FACE, seconds)
+            if status != want or (want == 400 and kind != "BadDuration"):
+                bad.append(f"(du-i) 계열 이산 caps durationS={seconds} 저장이 {want} 가 아닙니다: {status} {kind}")
+        env.set_registry(base_items)
+        env.save(_parity_state(PARITY_FACE, durations=(5, 5)))
+        resp = env.client.put(f"{env.plan_url()}/steps/3", json={"shots": [{"id": "s1", "durationS": 16}]})
+        message = str(((resp.get_json() or {}).get("error") or {}).get("message") or "")
+        if "샷 길이는 4~15초 사이로 정해 주세요 (받은 값 16)" not in message:
+            bad.append(f"(du-i) 거절 문구 형식이 지금과 다릅니다: {message!r}")
+
+        # ---- (du-h) 비계열 fal 길이 회귀 스냅샷 ----
+        for model, want in PARITY_NONFAMILY_SNAPSHOT.items():
+            got = _parity_nonfamily_measure(env, logs, model, cv_calls)
+            tag = f"(du-h) {model.split('/')[1]}"
+            for key in ("durationChoices", "minDurationS", "maxDurationS"):
+                if got["options"].get(key) != want["options"][key]:
+                    bad.append(f"{tag} video_options {key} 가 구현 전과 다릅니다: {got['options'].get(key)} != {want['options'][key]}")
+            for key in ("shotSeconds", "oneTake", "oneTake2x5", "singleTotal", "generateSingle", "generateShots"):
+                if got.get(key) != want[key]:
+                    bad.append(f"{tag} {key} 가 구현 전과 다릅니다: {got.get(key)} != {want[key]}")
+            for case, expect in want["submit"].items():
+                body = (got["submit"].get(case) or {}).get("body") or {}
+                if body.get("duration") != expect["body"]["duration"]:
+                    bad.append(f"{tag} {case} 제출 duration 이 구현 전과 다릅니다: {body.get('duration')} != {expect['body']['duration']}")
+                if (got["submit"].get(case) or {}).get("jobDurationS") != expect["jobDurationS"]:
+                    bad.append(f"{tag} {case} jobs durationS 가 구현 전과 다릅니다")
+
+        if env.url_calls:
+            bad.append(f"실제 네트워크 호출이 있었습니다: {env.url_calls}")
+        if env.video_calls:
+            bad.append(f"Luma 제출이 있었습니다: {len(env.video_calls)}")
+    except Exception as exc:  # noqa: BLE001
+        import traceback as _tb  # noqa: PLC0415
+
+        bad.append("샷 길이 검사 중 예외: " + repr(exc) + "\n" + _tb.format_exc()[:1500])
+    finally:
+        logs.detach()
+        settings.FAL_SEEDANCE_MAX_S = saved_max
+        if env is not None:
+            env.restore()
+
+    if bad:
+        fail("fal-seedance-parity 샷 길이 검사 실패\n" + "\n".join(f"  {item}" for item in bad))
+    else:
+        ok(
+            "fal-seedance-parity 샷 길이 검사 (du-a)duration_range 계열 caps·상한·비계열 (5,5) "
+            "(du-b)snap_seconds 계열 올림·이산·자르기 (du-c)계열 4..15 선택지 (du-d)한 번에 만들기 계열·Kling·ARK "
+            "(du-e)generate E2·화면 금액 통과 (du-f)plan_model·준비 3곳 실행 (du-g)제출 길이 검사 계열·ARK·Kling 건너뜀 "
+            "(du-h)Kling·MiniMax 길이 회귀 스냅샷 (du-i)③ 저장 길이 계열·Kling·Luma"
+        )
+
+
+def check_fal_parity_resolution() -> None:
+    """073 작업 3 — 화질·원장(R4.1-4.6, R14.3, D4·X2·X3). 외부 호출은 전부 가짜.
+
+    (rz-a) video_options 기본 화질: 계열 [480,720,1080]→720p·[480,1080]→480p·[]→["720p"]/720p,
+           비계열 fal [480,720,1080]→480p(첫 값)·[]→["720p"]/720p.
+    (rz-b) plan_view step3.resolution: 계열 540p→720p·1080p→1080p, Luma 720p→720p·없음→540p.
+    (rz-c) 070 이전 계열 회차(540p·빈 값) 제출 → 본문 480p(승인 금액 이하)·resolution_adjusted 로그·원장/jobs 480p 단가.
+           submit_resolution 갈래(그대로·작은 쪽·더 작은 값 없음·픽셀 모름·빈 값·기본이 caps 에 있음·비계열·ARK·Luma).
+    (rz-d) ledger.charge_video model 칸: fal+endpoint r2v → r2v id(얼굴 단가), endpoint 없음 → 얼굴 id, ARK·Luma 회귀.
+    (rz-e) generate 계열 720p 10초 + dual: plan_view cost.totalUsd 와 서버 계산이 0.005 안(4.6224 + 1.4).
+    (rz-f) 비계열 fal(Kling·MiniMax 모양) 화질·제출 본문·원장 회귀 스냅샷(구현 전 값), 보정 로그 없음.
+    (rz-g) ③ 저장 화질(save_step): 계열 1080p·480p·720p 저장·540p 400, Luma 720p 저장·1080p 400, 비계열 fal 지금 목록.
+    """
+    sys.path.insert(0, str(ROOT / "app"))
+    from src.vpoc import ark, ledger, settings  # noqa: PLC0415
+
+    bad: list[str] = []
+    env: _ParityEnv | None = None
+    logs = _LogCapture()
+    base_items = _parity_registry_items() + [_parity_kling_item(), _parity_minimax_item()]
+    partner_eid = PARITY_PARTNER[len("fal:"):]
+    face_eid = PARITY_FACE[len("fal:"):]
+    try:
+        env = _parity_env(registry=base_items)
+        logs.attach()
+        cv_calls: list[dict] = []
+        real_charge_video = ledger.charge_video
+
+        def record_charge_video(token: str, **kwargs) -> dict:
+            cv_calls.append(dict(kwargs))
+            return real_charge_video(token, **kwargs)
+
+        env.patch(ledger, "charge_video", record_charge_video)
+
+        # ---- (rz-a) video_options 기본 화질 ----
+        family_cases = [
+            (["480p", "720p", "1080p"], ["480p", "720p", "1080p"], "720p"),
+            (["480p", "1080p"], ["480p", "1080p"], "480p"),
+            ([], ["720p"], "720p"),
+        ]
+        for caps_res, want_list, want_default in family_cases:
+            env.set_registry(_parity_with_caps(base_items, PARITY_FACE, resolutions=caps_res))
+            opts = ark.video_options(PARITY_FACE)
+            if opts.get("resolutions") != want_list or opts.get("defaultResolution") != want_default:
+                bad.append(f"(rz-a) 계열 caps {caps_res} → {want_list}/{want_default} 가 아닙니다: {opts.get('resolutions')}/{opts.get('defaultResolution')}")
+        for caps_res, want_list, want_default in (
+            (["480p", "720p", "1080p"], ["480p", "720p", "1080p"], "480p"),
+            ([], ["720p"], "720p"),
+        ):
+            env.set_registry(_parity_with_caps(base_items, PARITY_KLING, resolutions=caps_res))
+            opts = ark.video_options(PARITY_KLING)
+            if opts.get("resolutions") != want_list or opts.get("defaultResolution") != want_default:
+                bad.append(f"(rz-a) 비계열 caps {caps_res} → {want_list}/{want_default}(지금 값) 가 아닙니다: {opts.get('resolutions')}/{opts.get('defaultResolution')}")
+        env.set_registry(base_items)
+
+        # ---- (rz-b) plan_view step3.resolution ----
+        def plan_resolution(model: str, stored: str | None) -> str | None:
+            state = _parity_state(model, resolution=stored or "")
+            if stored is None:
+                state["steps"]["3"].pop("resolution", None)
+            env.save(state)
+            return (((env.client.get(env.plan_url()).get_json() or {}).get("steps") or {}).get("3") or {}).get("resolution")
+
+        for model, stored, want in (
+            (PARITY_FACE, "540p", "720p"),
+            (PARITY_FACE, "1080p", "1080p"),
+            (PARITY_FACE, None, "720p"),
+            ("luma-ray2", "720p", "720p"),
+            ("luma-ray2", None, "540p"),
+        ):
+            got = plan_resolution(model, stored)
+            if got != want:
+                bad.append(f"(rz-b) {model} 저장 {stored} → step3.resolution 이 {want} 가 아닙니다: {got}")
+
+        # ---- (rz-c) 070 이전 계열 회차(540p) 제출 ----
+        # 빈 값 규칙은 default_resolution(fal → settings.RESOLUTION)에 기대므로 기본값(540p)으로 고정한다.
+        env.patch(settings, "RESOLUTION", "540p")
+        for model, stored, want in (
+            (PARITY_FACE, "1080p", ("1080p", "")),
+            (PARITY_FACE, "480p", ("480p", "")),
+            # 073 fix1: caps 에 없으면 픽셀 수가 저장 화질 이하인 caps 값 중 가장 큰 것(승인 금액을 넘지 않게).
+            (PARITY_FACE, "540p", ("480p", "540p")),
+            (PARITY_FACE, "720P", ("720p", "720P")),
+            (PARITY_FACE, "4k", ("480p", "4k")),
+            # 빈 값 = default_resolution(fal → RESOLUTION 540p) 로 보고 같은 규칙.
+            (PARITY_FACE, "", ("480p", settings.default_resolution(PARITY_FACE))),
+            (PARITY_KLING, "", ("540p", "")),
+            (PARITY_KLING, "720p", ("720p", "")),
+            ("seedance-2-5", "", (settings.ARK_RESOLUTION, "")),
+            ("luma-ray2", None, ("540p", "")),
+        ):
+            if ark.submit_resolution(model, stored) != want:
+                bad.append(f"(rz-c) submit_resolution({model}, {stored!r}) 가 {want} 가 아닙니다: {ark.submit_resolution(model, stored)}")
+        # 저장 화질보다 작은 caps 값이 없으면 caps 의 가장 작은 화질.
+        env.set_registry(_parity_with_caps(base_items, PARITY_FACE, resolutions=["720p", "1080p"]))
+        if ark.submit_resolution(PARITY_FACE, "540p") != ("720p", "540p"):
+            bad.append(f"(rz-c) 더 작은 caps 화질이 없으면 가장 작은 값(720p)이어야 합니다: {ark.submit_resolution(PARITY_FACE, '540p')}")
+        # caps 화질의 픽셀 수를 하나도 모르면(이론상) 첫 값.
+        env.set_registry(_parity_with_caps(base_items, PARITY_FACE, resolutions=["SD", "HD"]))
+        if ark.submit_resolution(PARITY_FACE, "540p") != ("SD", "540p"):
+            bad.append(f"(rz-c) 픽셀 수를 모르는 caps 는 첫 값이어야 합니다: {ark.submit_resolution(PARITY_FACE, '540p')}")
+        # 기본 화질이 caps 에 있으면(VPOC_RESOLUTION=720p 배포) 빈 값은 보정 없이 그 값.
+        env.set_registry(base_items)
+        env.patch(settings, "RESOLUTION", "720p")
+        if ark.submit_resolution(PARITY_FACE, "") != ("720p", ""):
+            bad.append(f"(rz-c) 기본 화질이 caps 에 있으면 빈 값이 보정 없이 그 값이어야 합니다: {ark.submit_resolution(PARITY_FACE, '')}")
+        env.patch(settings, "RESOLUTION", "540p")
+        for stored_res, tag in (("540p", "540p"), ("", "빈 값")):
+            cv_calls.clear()
+            state = _parity_state(
+                PARITY_FACE,
+                resolution="540p",
+                step4={
+                    "status": "running",
+                    "resolution": stored_res,
+                    "shots": [_parity_shot4("s1", "queued", durationS=6), _parity_shot4("s2", "completed", durationS=5)],
+                },
+            )
+            posts, shot, job, _ = _parity_submit(env, logs, state)
+            want_usd = settings.shot_usd(PARITY_FACE, "480p", 6)
+            if want_usd >= settings.shot_usd(PARITY_FACE, "540p", 6):
+                bad.append("(rz-c) 480p 단가가 540p(승인 금액) 이상입니다(검사 구성 오류)")
+            if len(posts) != 1 or (posts[0][2] or {}).get("resolution") != "480p":
+                bad.append(f"(rz-c) {tag} 회차 본문 resolution 이 480p 가 아닙니다: {[(p[2] or {}).get('resolution') for p in posts]} {shot.get('error')}")
+            adjusted = logs.messages("vpoc.fal.resolution_adjusted")
+            if len(adjusted) != 1 or "from=540p" not in adjusted[0] or "to=480p" not in adjusted[0]:
+                bad.append(f"(rz-c) {tag} vpoc.fal.resolution_adjusted 로그(from=540p to=480p)가 1줄이 아닙니다: {adjusted}")
+            if [k.get("resolution") for k in cv_calls] != ["480p"]:
+                bad.append(f"(rz-c) {tag} 원장 charge_video resolution 이 480p 가 아닙니다: {[k.get('resolution') for k in cv_calls]}")
+            if len(env.charges) != 1 or abs(float(env.charges[0].get("usd") or 0) - want_usd) > 1e-6:
+                bad.append(f"(rz-c) {tag} 원장 usd 가 shot_usd(얼굴, 480p, 6)={want_usd} 가 아닙니다: {env.charges}")
+            if job.get("resolution") != "480p" or abs(float(job.get("usd") or 0) - want_usd) > 1e-6:
+                bad.append(f"(rz-c) {tag} jobs resolution·usd 가 480p·{want_usd} 가 아닙니다: {job.get('resolution')} {job.get('usd')}")
+        # 저장 화질이 caps 에 있으면 보정 로그가 없다.
+        state["steps"]["4"]["resolution"] = "1080p"
+        posts, _shot, _job, _ = _parity_submit(env, logs, state)
+        if not posts or (posts[0][2] or {}).get("resolution") != "1080p" or logs.messages("vpoc.fal.resolution_adjusted"):
+            bad.append("(rz-c) 1080p 회차가 그대로 보내지지 않았거나 보정 로그가 남았습니다")
+
+        # ---- (rz-d) ledger.charge_video model 칸 ----
+        env.reset_calls()
+        cases_d = [
+            ("fal+r2v", {"model": PARITY_FACE, "endpoint": PARITY_PARTNER}, partner_eid, settings.shot_usd(PARITY_FACE, "720p", 5)),
+            ("fal+r2v(접두 없음)", {"model": PARITY_FACE, "endpoint": partner_eid}, partner_eid, settings.shot_usd(PARITY_FACE, "720p", 5)),
+            ("fal 엔드포인트 없음", {"model": PARITY_FACE}, face_eid, settings.shot_usd(PARITY_FACE, "720p", 5)),
+            ("ARK", {"model": "seedance-2-5", "endpoint": "seedance-2-5"}, settings.ARK_MODEL_IDS["seedance-2-5"], settings.shot_usd("seedance-2-5", "720p", 5)),
+            ("Luma", {"model": "luma-ray2", "endpoint": "luma-ray2"}, settings.VIDEO_MODEL, settings.shot_usd("luma-ray2", "720p", 5)),
+            ("Luma(빈 값)", {}, settings.VIDEO_MODEL, settings.shot_usd("", "720p", 5)),
+        ]
+        for index, (tag, extra, want_model, want_usd) in enumerate(cases_d):
+            before = len(env.charges)
+            real_charge_video(f"t-rz-d-{index}", user="u", project_id="p", plan_id="pl", resolution="720p", seconds=5, **extra)
+            entry = env.charges[before] if len(env.charges) > before else {}
+            if entry.get("model") != want_model or abs(float(entry.get("usd") or 0) - want_usd) > 1e-9:
+                bad.append(f"(rz-d) {tag} 원장 model·usd 가 {want_model}·{want_usd} 가 아닙니다: {entry.get('model')} {entry.get('usd')}")
+        if settings.shot_usd(PARITY_FACE, "720p", 5) <= 0:
+            bad.append("(rz-d) 얼굴 단가가 0 입니다(검사 구성 오류)")
+
+        # ---- (rz-e) generate 금액(계열 720p 10초 + dual) ----
+        env.patch(settings, "VPOC_DUAL_STYLE_ENABLED", True)
+        state = _parity_state(PARITY_FACE, "single", resolution="720p")
+        state["steps"]["2"]["totalSeconds"] = 10
+        state["steps"]["3"]["master"] = _parity_single_master(10)
+        env.save(state)
+        step3 = ((env.client.get(env.plan_url()).get_json() or {}).get("steps") or {}).get("3") or {}
+        total = (step3.get("cost") or {}).get("totalUsd")
+        exact = 4.6224 + 1.4
+        if total is None or abs(float(total) - exact) > 0.005:
+            bad.append(f"(rz-e) plan_view cost.totalUsd 가 토큰식 4.6224 + 변환 1.4 와 0.005 안이 아닙니다: {total}")
+        if step3.get("resolution") != "720p" or (step3.get("cost") or {}).get("resolution") != "720p":
+            bad.append(f"(rz-e) 화질이 720p 가 아닙니다: {step3.get('resolution')}")
+        resp = env.client.post(env.run_url("generate"), json={"confirmUsd": total})
+        if resp.status_code != 200:
+            bad.append(f"(rz-e) 화면 금액({total})으로 보낸 generate 가 200 이 아닙니다(서버 계산 불일치): {resp.status_code} {resp.get_json()}")
+        elif env.load()["steps"]["4"].get("resolution") != "720p":
+            bad.append(f"(rz-e) 회차 화질이 720p 가 아닙니다: {env.load()['steps']['4'].get('resolution')}")
+        env.patch(settings, "VPOC_DUAL_STYLE_ENABLED", False)
+
+        # ---- (rz-g) ③ 저장 화질 검증(save_step, 073 fix1 R4.7) ----
+        def save_resolution(model: str, wanted: str) -> tuple[int, str, object]:
+            env.save(_parity_state(model, resolution="none-yet"))
+            resp = env.client.put(f"{env.plan_url()}/steps/3", json={"resolution": wanted})
+            err = ((resp.get_json() or {}).get("error") or {})
+            return resp.status_code, str(err.get("type") or ""), env.load()["steps"]["3"].get("resolution")
+
+        nonfamily_allowed = settings.VIDEO_RESOLUTIONS.get(PARITY_KLING) or [settings.RESOLUTION]
+        cases_g = [
+            (PARITY_FACE, "1080p", 200), (PARITY_FACE, "480p", 200), (PARITY_FACE, "720p", 200),
+            (PARITY_FACE, "540p", 400),
+            ("luma-ray2", "720p", 200), ("luma-ray2", "1080p", 400),
+        ] + [(model, res, 200 if res in nonfamily_allowed else 400)
+             for model in (PARITY_KLING, PARITY_MINIMAX) for res in ("540p", "720p", "512P")]
+        if nonfamily_allowed != ["540p"]:
+            bad.append(f"(rz-g) 비계열 fal 허용 목록이 지금 값([RESOLUTION]=['540p'])이 아닙니다: {nonfamily_allowed}")
+        for model, wanted, want in cases_g:
+            status, kind, saved = save_resolution(model, wanted)
+            if status != want or (want == 400 and kind != "BadResolution"):
+                bad.append(f"(rz-g) {model} resolution={wanted} 저장이 {want} 가 아닙니다: {status} {kind}")
+            if want == 200 and saved != wanted:
+                bad.append(f"(rz-g) {model} resolution={wanted} 가 저장되지 않았습니다: {saved}")
+            if want == 400 and saved != "none-yet":
+                bad.append(f"(rz-g) {model} resolution={wanted} 거절인데 값이 바뀌었습니다: {saved}")
+        env.save(_parity_state(PARITY_FACE))
+        resp = env.client.put(f"{env.plan_url()}/steps/3", json={"resolution": "540p"})
+        message = str(((resp.get_json() or {}).get("error") or {}).get("message") or "")
+        if "이 모델에서 고를 수 있는 화질이 아닙니다: 540p (가능: 480p, 720p, 1080p)" not in message:
+            bad.append(f"(rz-g) 거절 문구가 지금 형식·계열 목록이 아닙니다: {message!r}")
+
+        # ---- (rz-f) 비계열 fal 화질 회귀 스냅샷 ----
+        for model, want in PARITY_NONFAMILY_SNAPSHOT.items():
+            got = _parity_nonfamily_measure(env, logs, model, cv_calls)
+            tag = f"(rz-f) {model.split('/')[1]}"
+            eid = model[len("fal:"):]
+            for key in ("resolutions", "defaultResolution"):
+                if got["options"].get(key) != want["options"][key]:
+                    bad.append(f"{tag} video_options {key} 가 구현 전과 다릅니다: {got['options'].get(key)} != {want['options'][key]}")
+            if got.get("planResolution") != want["planResolution"]:
+                bad.append(f"{tag} step3.resolution 이 구현 전과 다릅니다: {got.get('planResolution')} != {want['planResolution']}")
+            for case, expect in want["submit"].items():
+                now = got["submit"].get(case) or {}
+                extra = got["_extra"].get(case) or {}
+                for key in ("body", "status", "mode", "jobResolution", "jobUsd", "charges", "chargeVideoResolution"):
+                    if now.get(key) != expect[key]:
+                        bad.append(f"{tag} {case} {key} 가 구현 전과 다릅니다: {now.get(key)} != {expect[key]}")
+                if "resolution" in (extra.get("rawBody") or {}):
+                    bad.append(f"{tag} {case} 본문에 resolution 키가 생겼습니다(지금은 enum 에 없으면 없다)")
+                if extra.get("posts") != 1 or extra.get("url") != f"{settings.FAL_QUEUE_URL}/{eid}" or extra.get("provider") != model:
+                    bad.append(f"{tag} {case} URL·provider 가 그 모델이 아닙니다: {extra.get('url')} {extra.get('provider')}")
+                if extra.get("chargeModels") != [eid]:
+                    bad.append(f"{tag} {case} 원장 model 칸이 엔드포인트 id(X2)가 아닙니다: {extra.get('chargeModels')}")
+                if extra.get("adjustedLogs"):
+                    bad.append(f"{tag} {case} 비계열인데 vpoc.fal.resolution_adjusted 로그가 남았습니다")
+
+        if env.url_calls:
+            bad.append(f"실제 네트워크 호출이 있었습니다: {env.url_calls}")
+        if env.ark_calls or env.video_calls:
+            bad.append(f"BytePlus·Luma 제출이 있었습니다: ark={len(env.ark_calls)} luma={len(env.video_calls)}")
+        if any("dummy-fal-key" in text for text in logs.messages()):
+            bad.append("로그에 fal 키 값이 남았습니다")
+    except Exception as exc:  # noqa: BLE001
+        import traceback as _tb  # noqa: PLC0415
+
+        bad.append("화질·원장 검사 중 예외: " + repr(exc) + "\n" + _tb.format_exc()[:1500])
+    finally:
+        logs.detach()
+        if env is not None:
+            env.restore()
+
+    if bad:
+        fail("fal-seedance-parity 화질·원장 검사 실패\n" + "\n".join(f"  {item}" for item in bad))
+    else:
+        ok(
+            "fal-seedance-parity 화질·원장 검사 (rz-a)계열 기본 720p·비계열 첫 값 (rz-b)step3.resolution 계열·Luma "
+            "(rz-c)540p·빈 값 회차 480p 보정·로그·원장·jobs·submit_resolution 갈래 (rz-d)charge_video model 칸 3갈래 "
+            "(rz-e)720p 10초+dual 화면=서버 (rz-f)Kling·MiniMax 화질·본문·원장 회귀 스냅샷 (rz-g)③ 저장 화질 계열·Luma·비계열"
+        )
+
+
+# ------------------------------------------------ 073 작업 4 공용(프롬프트 상한·지칭 pm·애니 ai)
+
+
+def _parity_text_of_bytes(target_bytes: int, *, korean: bool = False) -> str:
+    """문장을 이어 붙여 target_bytes(UTF-8) 이하에서 가장 긴 문장열을 만든다(문장 경계 자르기 확인용)."""
+    sentence = (
+        "그는 조용한 옥상에서 도시의 불빛을 오래 바라본다. "
+        if korean
+        else "The black-haired man watches the city lights from the quiet rooftop. "
+    )
+    out = ""
+    while len((out + sentence).encode("utf-8")) <= target_bytes:
+        out += sentence
+    return out.strip()
+
+
+def _parity_at_numbers(text: str) -> list[int]:
+    """문장 속 서로 다른 @Image 번호(오름차순)."""
+    return sorted({int(value) for value in re.findall(r"@Image(\d+)", text or "")})
+
+
+def _parity_has_plain_tag(text: str) -> bool:
+    """"Image 1"·"Images 1-2" 같은 plain 지칭이 있는가(@Image 는 제외)."""
+    return bool(re.search(r"(?<![@\w])Images? \d", text or ""))
+
+
+def _parity_closure(env: "_ParityEnv", name: str):
+    """create_blueprint 안쪽 함수를 모든 라우트에서 찾는다(_closure_fn 을 라우트마다 시도)."""
+    for view in (env.app.view_functions or {}).values():
+        found = _closure_fn(view, name)
+        if found is not None:
+            return found
+    return None
+
+
+def check_fal_parity_prompt() -> None:
+    """073 작업 4 — 프롬프트 상한·실제 보낸 문장·@Image 지칭·지칭 방식 설정(R5.1-5.7, R14.1, R14.3).
+
+    (pm-a) settings.fal_prompt_max: 계열 4000 · Kling default · 형식 오류 항목 버림 · 빈 값 덮어쓰기 없음.
+    (pm-b) build_payload(prompt_max=4000): 3,500B 그대로 · 5,000B → ≤4,000B 문장 경계 · 한글 바이트 기준 ·
+           prompt_max 없음 = 지금(caps·2,500) · 로그 fromBytes/toBytes.
+    (pm-c) fal.submit: 자르면 promptTrimmed={fromBytes,toBytes}·sentPrompt=본문, 아니면 None.
+    (pm-d) 통합: 긴 장면 r2v 샷 → jobs sentPrompt=④ sentPromptEn=본문, plan_view ④ promptTrimmed, vpoc.js E8.
+           single 은 sentPromptEn=본문·promptTrimmed None, 그 밖(안 잘림)은 앞 시도 값을 지운다.
+    (pm-e) 지칭: r2v 본문 @Image 번호 수 = image_urls 수(1..N 연속), plain 지칭 없음, 잘린 뒤에도 지칭이 앞에 남음.
+    (pm-f) plan_view 미리보기(sendPromptEn·oneTakePromptEn) = 실제 제출 문장.
+    (pm-g) 회귀: ARK·Kling "Image N", ARK 4,001자 PromptOverBudget, reference_prompt(plain) 기존 문장.
+    (pm-h) VPOC_FAL_SEEDANCE_TAG_STYLE: 파서(기본·plain·틀린 값), plain 이면 계열 r2v·미리보기 "Image N",
+           ARK·Kling·짝은 설정과 상관없이 plain. 설정은 finally 에서 되돌린다.
+    """
+    sys.path.insert(0, str(ROOT / "app"))
+    from src.vpoc import ark, fal, images, settings  # noqa: PLC0415
+
+    bad: list[str] = []
+    env: _ParityEnv | None = None
+    logs = _LogCapture()
+    partner_eid = PARITY_PARTNER[len("fal:"):]
+    face_eid = PARITY_FACE[len("fal:"):]
+    kling_eid = PARITY_KLING[len("fal:"):]
+    saved_overrides = settings.FAL_PROMPT_MAX_OVERRIDES
+    saved_tag_style = settings.FAL_SEEDANCE_TAG_STYLE
+    saved_ark_flag = settings.ARK_SEEDANCE_ENABLED
+    c2_key = "users/tester/projects/prj_parity/vpoc/pl_parity_01/characters/c2.jpg"
+
+    def nbytes(text: str) -> int:
+        return len(str(text or "").encode("utf-8"))
+
+    def shots_state(model: str = PARITY_FACE, *, seconds: int = 6, **plan_extra) -> dict:
+        state = _parity_state(
+            model,
+            step4={
+                "status": "running",
+                "shots": [
+                    _parity_shot4("s1", "queued", durationS=seconds),
+                    _parity_shot4("s2", "completed", durationS=5),
+                ],
+            },
+        )
+        state["steps"]["3"]["shots"][0].update(plan_extra)
+        return state
+
+    def add_second_character(state: dict) -> dict:
+        state["steps"]["2"]["characters"].append(
+            {"id": "c2", "nameKo": "하윤", "nameEn": "Ha Yoon", "handleEn": "the red-haired woman", "appearanceEn": ""}
+        )
+        state["steps"]["3"]["characters"].append(
+            {"id": "c2", "image": {"status": "ready", "source": "ai", "key": c2_key}}
+        )
+        state["steps"]["3"]["shots"][0]["characters"] = ["c1", "c2"]
+        return state
+
+    def single_state(char_keys: list[str], bg_key: str) -> dict:
+        state = _parity_state(
+            PARITY_FACE,
+            "single",
+            step4={"status": "running", "shots": [_parity_shot4(ark.ONE_TAKE_ID, "queued", durationS=6)]},
+        )
+        state["steps"]["3"]["master"] = {
+            "version": 1,
+            "totalS": 6,
+            "styleEn": "Cinematic live-action film footage",
+            "background": {"promptEn": "A quiet rooftop at dusk", "imageKey": bg_key},
+            "characters": [
+                {"id": f"c{i + 1}", "handleEn": f"person {i + 1}", "promptEn": "dark coat", "imageKey": key}
+                for i, key in enumerate(char_keys)
+            ],
+            "beats": [{"id": "b1", "t0": 0, "t1": 6, "actionEn": "They look at the city", "cameraEn": "Static"}],
+        }
+        return state
+
+    def one_take_state() -> dict:
+        return _parity_state(
+            PARITY_FACE,
+            step4={"status": "running", "oneTake": True, "shots": [_parity_shot4(ark.ONE_TAKE_ID, "queued", durationS=11)]},
+        )
+
+    def view_of(state_view: dict, step: str) -> dict:
+        return ((state_view.get("steps") or {}).get(step) or {})
+
+    def preview_row(plan: dict, shot_id: str = "s1") -> dict:
+        return next((row for row in view_of(plan, "3").get("shots") or [] if row.get("id") == shot_id), {})
+
+    def body_prompt(posts: list) -> str:
+        return str(((posts[0][2] or {}).get("prompt") if posts else "") or "")
+
+    try:
+        # ---- (pm-a) settings.fal_prompt_max ----
+        parse = settings._parse_prompt_max_overrides
+        if os.getenv("VPOC_FAL_PROMPT_MAX_OVERRIDES") is None and settings.FAL_PROMPT_MAX_OVERRIDES != (
+            ("bytedance/seedance-2.5/*", 4000),
+        ):
+            bad.append(f"(pm-a) env 없을 때 FAL_PROMPT_MAX_OVERRIDES 가 기본이 아닙니다: {settings.FAL_PROMPT_MAX_OVERRIDES}")
+        if parse(settings.FAL_PROMPT_MAX_OVERRIDES_DEFAULT) != (("bytedance/seedance-2.5/*", 4000),):
+            bad.append(f"(pm-a) 기본 문자열 해석이 다릅니다: {parse(settings.FAL_PROMPT_MAX_OVERRIDES_DEFAULT)}")
+        broken = "a/*=100, bad, x=, =5, y=abc, z=-1, w=0, q r=5, B/*=200,c/*=1.5"
+        if parse(broken) != (("a/*", 100), ("b/*", 200)):
+            bad.append(f"(pm-a) 형식이 틀린 항목을 버리지 않았습니다: {parse(broken)}")
+        if parse("") != () or parse("   ") != () or parse(None) != ():  # type: ignore[arg-type]
+            bad.append("(pm-a) 빈 값 해석이 () 가 아닙니다")
+        settings.FAL_PROMPT_MAX_OVERRIDES = parse(settings.FAL_PROMPT_MAX_OVERRIDES_DEFAULT)
+        for endpoint in (partner_eid, face_eid, PARITY_PARTNER, PARITY_FACE.upper().replace("FAL:", "fal:")):
+            if settings.fal_prompt_max(endpoint, 2500) != 4000:
+                bad.append(f"(pm-a) 계열 {endpoint} 상한이 4000 이 아닙니다: {settings.fal_prompt_max(endpoint, 2500)}")
+        for default, want in ((2500, 2500), (1800, 1800), (None, 2500), (0, 2500), ("x", 2500)):
+            if settings.fal_prompt_max(kling_eid, default) != want:
+                bad.append(f"(pm-a) Kling default={default!r} 상한이 {want} 가 아닙니다: {settings.fal_prompt_max(kling_eid, default)}")
+        if settings.fal_prompt_max("", 1800) != 1800:
+            bad.append("(pm-a) 빈 endpoint 는 default 여야 합니다")
+        settings.FAL_PROMPT_MAX_OVERRIDES = parse("first/*=111,first/x=222")
+        if settings.fal_prompt_max("first/x", 2500) != 111:
+            bad.append("(pm-a) 첫 번째로 맞는 글롭 값을 쓰지 않습니다")
+        settings.FAL_PROMPT_MAX_OVERRIDES = parse("")
+        if settings.fal_prompt_max(partner_eid, 2500) != 2500 or settings.fal_prompt_max(partner_eid, None) != 2500:
+            bad.append("(pm-a) 빈 값이면 덮어쓰기 없이 caps·2,500 이어야 합니다")
+        settings.FAL_PROMPT_MAX_OVERRIDES = saved_overrides
+
+        # ---- (pm-b) build_payload(prompt_max) ----
+        logs.attach()
+        r2v_caps = _parity_caps("r2v")
+        text_3500 = _parity_text_of_bytes(3500)
+        text_5000 = _parity_text_of_bytes(5000)
+        text_ko = _parity_text_of_bytes(6000, korean=True)
+        if not 2500 < nbytes(text_3500) <= 3500 or nbytes(text_5000) <= 4000:
+            bad.append("(pm-b) 검사 문장 구성 오류")
+        if len(text_ko) > 4000 or nbytes(text_ko) <= 4000:
+            bad.append(f"(pm-b) 한글 문장이 '글자 ≤4000·바이트 >4000' 이 아닙니다: {len(text_ko)}자 {nbytes(text_ko)}B")
+        got = fal.build_payload(r2v_caps, prompt=text_3500, duration_s=5, prompt_max=4000).get("prompt")
+        if got != text_3500:
+            bad.append(f"(pm-b) 3,500바이트가 그대로가 아닙니다: {nbytes(got)}B")
+        logs.clear()
+        got = str(fal.build_payload(r2v_caps, prompt=text_5000, duration_s=5, prompt_max=4000).get("prompt") or "")
+        if not 0 < nbytes(got) <= 4000 or not got.endswith(".") or not text_5000.startswith(got):
+            bad.append(f"(pm-b) 5,000바이트가 4,000바이트 이하 문장 경계로 잘리지 않았습니다: {nbytes(got)}B {got[-20:]!r}")
+        trim_logs = logs.messages("vpoc.fal.prompt_trimmed")
+        if len(trim_logs) != 1 or f"fromBytes={nbytes(text_5000)} toBytes={nbytes(got)}" not in trim_logs[0] or "max=4000" not in trim_logs[0]:
+            bad.append(f"(pm-b) prompt_trimmed 로그에 max·fromBytes·toBytes 가 없습니다: {trim_logs}")
+        if any("watches the city" in text for text in logs.messages()):
+            bad.append("(pm-b) 로그에 프롬프트 본문이 남았습니다")
+        got = str(fal.build_payload(r2v_caps, prompt=text_ko, duration_s=5, prompt_max=4000).get("prompt") or "")
+        if not 0 < nbytes(got) <= 4000 or not got.endswith(".") or got == text_ko:
+            bad.append(f"(pm-b) 한글 문장이 바이트 기준으로 잘리지 않았습니다: {len(got)}자 {nbytes(got)}B")
+        # prompt_max 없음·0 → 지금과 같다(caps promptMaxLength, 없으면 2,500).
+        for caps_max, limit in ((None, 2500), (1800, 1800)):
+            caps = {**r2v_caps, "promptMaxLength": caps_max}
+            legacy = fal.build_payload(caps, prompt=text_5000, duration_s=5)
+            for extra in ({}, {"prompt_max": None}, {"prompt_max": 0}):
+                again = fal.build_payload(caps, prompt=text_5000, duration_s=5, **extra)
+                if again != legacy or nbytes(again.get("prompt")) > limit:
+                    bad.append(f"(pm-b) prompt_max {extra} 가 지금(caps {caps_max}) 결과와 다릅니다")
+        no_field = fal.build_payload({**r2v_caps, "promptField": ""}, prompt=text_5000, duration_s=5, prompt_max=4000)
+        if "prompt" in no_field:
+            bad.append("(pm-b) promptField 가 없는데 prompt 를 넣었습니다")
+
+        env = _parity_env(registry=_parity_registry_items() + [_parity_kling_item()])
+        logs.attach()
+        env.fake.blobs[c2_key] = _tiny_jpeg()
+
+        # ---- (pm-c) fal.submit 반환 ----
+        kwargs = dict(owner="o", project_id="p", plan_id="pl", shot_id="s1", attempt=1, gen_id="g1", duration_s=5)
+        env.reset_calls()
+        job = fal.submit(model=PARITY_PARTNER, prompt=text_5000, **kwargs)
+        sent = body_prompt(env.fal_posts())
+        if job.get("promptTrimmed") != {"fromBytes": nbytes(text_5000), "toBytes": nbytes(sent)} or nbytes(sent) > 4000:
+            bad.append(f"(pm-c) 잘린 제출 promptTrimmed 가 다릅니다: {job.get('promptTrimmed')} 본문 {nbytes(sent)}B")
+        if job.get("sentPrompt") != sent or not sent:
+            bad.append("(pm-c) sentPrompt 가 본문 prompt 와 다릅니다")
+        if job.get("promptChars") != len(text_5000):
+            bad.append(f"(pm-c) promptChars 가 원문 길이가 아닙니다: {job.get('promptChars')}")
+        env.reset_calls()
+        job = fal.submit(model=PARITY_PARTNER, prompt=text_3500, **kwargs)
+        if job.get("promptTrimmed") is not None or job.get("sentPrompt") != text_3500 or body_prompt(env.fal_posts()) != text_3500:
+            bad.append(f"(pm-c) 안 잘린 제출이 promptTrimmed None·sentPrompt 원문이 아닙니다: {job.get('promptTrimmed')}")
+        # 계열이 아닌 fal(Kling caps 2,500)은 지금 상한 그대로(R14.3).
+        env.reset_calls()
+        job = fal.submit(model=PARITY_KLING, prompt=text_3500, keyframe_jpeg_b64="AAA", **kwargs)
+        sent = body_prompt(env.fal_posts())
+        if not 0 < nbytes(sent) <= 2500 or job.get("promptTrimmed") != {"fromBytes": nbytes(text_3500), "toBytes": nbytes(sent)}:
+            bad.append(f"(pm-c) Kling 상한이 caps 2,500 이 아니거나 promptTrimmed 가 다릅니다: {nbytes(sent)}B {job.get('promptTrimmed')}")
+
+        # ---- (pm-d) 통합: 긴 장면 r2v 샷 ----
+        long_scene = _parity_text_of_bytes(5000)
+        posts, shot, job, loaded = _parity_submit(env, logs, shots_state(promptEn=long_scene))
+        sent = body_prompt(posts)
+        if len(posts) != 1 or posts[0][1] != f"{settings.FAL_QUEUE_URL}/{partner_eid}":
+            bad.append(f"(pm-d) 긴 샷이 r2v 로 1회 제출되지 않았습니다: {[p[1] for p in posts]} {shot.get('error')}")
+        if not 0 < nbytes(sent) <= 4000:
+            bad.append(f"(pm-d) 본문 prompt 가 4,000바이트 이하가 아닙니다: {nbytes(sent)}B")
+        if job.get("sentPrompt") != sent or shot.get("sentPromptEn") != sent:
+            bad.append("(pm-d) jobs sentPrompt·④ sentPromptEn 이 본문 prompt 와 다릅니다")
+        plan = env.client.get(env.plan_url()).get_json() or {}
+        preview_long = str(preview_row(plan).get("sendPromptEn") or "")
+        trimmed = {"fromBytes": nbytes(preview_long), "toBytes": nbytes(sent)}
+        if shot.get("promptTrimmed") != trimmed or job.get("promptTrimmed") != trimmed:
+            bad.append(f"(pm-d) ④·jobs promptTrimmed 가 {trimmed} 가 아닙니다: {shot.get('promptTrimmed')} {job.get('promptTrimmed')}")
+        shot_view = next((s for s in view_of(plan, "4").get("shots") or [] if s.get("id") == "s1"), {})
+        if shot_view.get("promptTrimmed") != trimmed or shot_view.get("sentPromptEn") != sent:
+            bad.append(f"(pm-d) plan_view ④ 샷에 promptTrimmed·sentPromptEn 이 없습니다: {shot_view.get('promptTrimmed')}")
+        if not preview_long.startswith(sent[:200]) or nbytes(preview_long) <= 4000:
+            bad.append("(pm-d) 잘린 문장이 미리보기(원문)의 앞부분이 아닙니다")
+        trimmed_sent = sent
+        js = (PUBLIC / "vpoc.js").read_text(encoding="utf-8")
+        for needle in ("바이트로 잘렸습니다(원래 ", "아래가 실제로 보낸 문장입니다.", "shot.promptTrimmed"):
+            if needle not in js:
+                bad.append(f"(pm-d) vpoc.js 에 E8 안내({needle!r})가 없습니다")
+        # 그 밖(안 잘림): 앞 시도의 잘린 기록을 지운다.
+        stale = shots_state()
+        stale["steps"]["4"]["shots"][0].update({"sentPromptEn": "old trimmed", "promptTrimmed": {"fromBytes": 9, "toBytes": 5}})
+        posts, shot, job, _ = _parity_submit(env, logs, stale)
+        if shot.get("promptTrimmed") is not None or shot.get("sentPromptEn") is not None or job.get("promptTrimmed") is not None:
+            bad.append(f"(pm-d) 안 잘린 재제출이 앞 시도 기록을 지우지 않았습니다: {shot.get('sentPromptEn')!r} {shot.get('promptTrimmed')}")
+        if job.get("sentPrompt") != body_prompt(posts):
+            bad.append("(pm-d) 안 잘린 샷 jobs sentPrompt 가 본문과 다릅니다")
+        # single(안 잘림): sentPromptEn = 본문, promptTrimmed None.
+        single_keys = ["users/tester/parity/pm-c1.jpg", "users/tester/parity/pm-c2.jpg", "users/tester/parity/pm-bg.jpg"]
+        for key in single_keys:
+            env.fake.blobs[key] = _tiny_jpeg()
+        posts, shot, job, _ = _parity_submit(env, logs, single_state(single_keys[:2], single_keys[2]), ark.ONE_TAKE_ID)
+        sent_single = body_prompt(posts)
+        if not sent_single or shot.get("sentPromptEn") != sent_single or job.get("sentPromptEn") != sent_single:
+            bad.append("(pm-d) single sentPromptEn 이 본문 prompt 와 다릅니다")
+        if shot.get("promptTrimmed") is not None or job.get("sentPrompt") != sent_single:
+            bad.append(f"(pm-d) single 안 잘림 기록이 다릅니다: {shot.get('promptTrimmed')}")
+
+        # ---- (pm-e) 지칭 ----
+        image_urls = (posts[0][2] or {}).get("image_urls") if posts else []
+        if _parity_at_numbers(sent_single) != list(range(1, len(image_urls or []) + 1)) or len(image_urls or []) != 3:
+            bad.append(f"(pm-e) single @Image 번호가 image_urls(3장)와 맞지 않습니다: {_parity_at_numbers(sent_single)}")
+        if not sent_single.startswith("@Image1 is person 1; @Image2 is person 2; @Image3 is the background setting."):
+            bad.append(f"(pm-e) single 지칭 문장이 맨 앞에 없습니다: {sent_single[:120]!r}")
+        if _parity_has_plain_tag(sent_single):
+            bad.append("(pm-e) single 본문에 plain 'Image N' 지칭이 있습니다")
+        panel_calls: list[tuple] = []
+
+        def fake_panel_jpeg(owner, pid, file_id, index, _cache=None):
+            panel_calls.append((file_id, index))
+            return _tiny_jpeg()
+
+        env.patch(images, "panel_jpeg", fake_panel_jpeg)
+        state = add_second_character(shots_state())
+        state["steps"]["4"]["panels"] = {"s1": [["f1", 0], ["f2", 0], ["f3", 0]]}
+        posts, shot, job, _ = _parity_submit(env, logs, state)
+        sent = body_prompt(posts)
+        urls = (posts[0][2] or {}).get("image_urls") if posts else []
+        if len(urls or []) != 5 or _parity_at_numbers(sent) != [1, 2, 3, 4, 5]:
+            bad.append(f"(pm-e) 인물 2·패널 3 샷 @Image 번호가 image_urls 와 맞지 않습니다: {len(urls or [])} {_parity_at_numbers(sent)}")
+        if not sent.startswith("@Image1 is the black-haired man; @Image2 is the red-haired woman; @Image3, @Image4, @Image5 are"):
+            bad.append(f"(pm-e) 지칭 문장 형식이 다릅니다: {sent[:160]!r}")
+        if _parity_has_plain_tag(sent) or "Image 1 is" in sent.replace("@Image", ""):
+            bad.append("(pm-e) r2v 본문에 plain 'Image N' 지칭이 있습니다")
+        if len(panel_calls) < 3:
+            bad.append(f"(pm-e) 패널 그림을 읽지 않았습니다: {panel_calls}")
+        # 잘린 뒤에도 지칭 문장이 앞에 남는다(pm-d 본문).
+        if not trimmed_sent.startswith("@Image1 is the black-haired man.") or not (
+            shot_view.get("sentPromptEn") or ""
+        ).startswith("@Image1 is the black-haired man."):
+            bad.append("(pm-e) 잘린 문장에서 지칭 문장이 맨 앞에 남지 않았습니다")
+        # image_label 단위 갈래.
+        label_table = [
+            ((3, 3, "plain"), "Image 3"), ((3, 4, "plain"), "Images 3-4"), ((3, 5, "plain"), "Images 3-5"),
+            ((3, 3, "at"), "@Image3"), ((3, 4, "at"), "@Image3-@Image4"), ((3, 5, "at"), "@Image3, @Image4, @Image5"),
+        ]
+        for args, want in label_table:
+            if ark.image_label(*args) != want:
+                bad.append(f"(pm-e) image_label{args} 가 {want!r} 가 아닙니다: {ark.image_label(*args)!r}")
+        if ark.image_label(2, 2) != "Image 2":
+            bad.append("(pm-e) image_label 기본 style 이 plain 이 아닙니다")
+
+        # ---- (pm-f) plan_view 미리보기 = 실제 제출 ----
+        env.patch(images, "panel_jpeg", fake_panel_jpeg)
+        posts, shot, job, _ = _parity_submit(env, logs, add_second_character(shots_state()))
+        plan = env.client.get(env.plan_url()).get_json() or {}
+        preview = str(preview_row(plan).get("sendPromptEn") or "")
+        if not preview or preview != body_prompt(posts) or preview_row(plan).get("referenceCount") != 2:
+            bad.append(f"(pm-f) sendPromptEn 이 실제 제출 문장과 다릅니다: {preview[:80]!r} / {body_prompt(posts)[:80]!r}")
+        if _parity_at_numbers(preview) != [1, 2]:
+            bad.append(f"(pm-f) 미리보기 지칭이 @Image1·@Image2 가 아닙니다: {preview[:80]!r}")
+        posts, shot, job, _ = _parity_submit(env, logs, one_take_state(), ark.ONE_TAKE_ID)
+        plan = env.client.get(env.plan_url()).get_json() or {}
+        one_take_preview = str(view_of(plan, "3").get("oneTakePromptEn") or "")
+        if not one_take_preview or one_take_preview != body_prompt(posts):
+            bad.append(
+                f"(pm-f) oneTakePromptEn 이 실제 제출 문장과 다릅니다: {one_take_preview[:80]!r} / {body_prompt(posts)[:80]!r}"
+                f" (샷 {shot.get('status')} {shot.get('error')})"
+            )
+        if not one_take_preview.startswith("@Image1 is the black-haired man."):
+            bad.append(f"(pm-f) oneTakePromptEn 지칭이 @Image 가 아닙니다: {one_take_preview[:80]!r}")
+
+        # ---- (pm-g) 회귀 ----
+        # Kling(계열 아님): "Image N" 지칭.
+        posts, shot, job, _ = _parity_submit(env, logs, shots_state(PARITY_KLING, seconds=5))
+        sent = body_prompt(posts)
+        if "Image 1 is the black-haired man" not in sent or "@Image" in sent:
+            bad.append(f"(pm-g) Kling 프롬프트가 'Image N' 지칭이 아닙니다: {sent[:80]!r}")
+        # ARK(플래그 true): "Image N" 지칭, 미리보기도 같다.
+        env.patch(settings, "ARK_SEEDANCE_ENABLED", True)
+        env.reset_calls()
+        env.save(shots_state("seedance-2-5"))
+        plan = env.client.get(env.plan_url()).get_json() or {}
+        ark_posts = env.ark_posts()
+        ark_text = str(((((ark_posts[0][2] or {}).get("content") or [{}])[0]).get("text")) if ark_posts else "")
+        if len(ark_posts) != 1 or "Image 1 is the black-haired man" not in ark_text or "@Image" in ark_text:
+            bad.append(f"(pm-g) ARK 프롬프트가 'Image N' 지칭이 아닙니다: {len(ark_posts)} {ark_text[:80]!r}")
+        ark_preview = str(preview_row(plan).get("sendPromptEn") or "")
+        if ark_preview != ark_text:
+            bad.append(f"(pm-g) ARK 미리보기가 제출 문장과 다릅니다: {ark_preview[:80]!r}")
+        env.reset_calls()
+        try:
+            ark.submit(
+                model="seedance-2-5", owner="o", project_id="p", plan_id="pl", shot_id="s1",
+                attempt=1, prompt="a" * 4001,
+            )
+            bad.append("(pm-g) ARK 4,001자가 거절되지 않았습니다")
+        except Exception as exc:  # noqa: BLE001
+            if getattr(exc, "kind", "") != "PromptOverBudget":
+                bad.append(f"(pm-g) ARK 4,001자가 PromptOverBudget 이 아닙니다: {getattr(exc, 'kind', '')} {exc}")
+        if env.ark_calls:
+            bad.append("(pm-g) ARK 4,001자인데 ark._call 이 불렸습니다")
+        env.patch(settings, "ARK_SEEDANCE_ENABLED", False)
+        names = ["the man", "the man", ark.PANEL_LABEL, None]
+        plain_labels = (
+            "Images 1-2 are all the man (the same person from different views); Image 3 is the webtoon panel "
+            "this shot brings to life, in story order (follow their setting, art style and events); Image 4 is an "
+            "art-style reference only (not a character)."
+        )
+        at_labels = plain_labels.replace("Images 1-2", "@Image1-@Image2").replace("Image 3", "@Image3").replace(
+            "Image 4", "@Image4"
+        )
+        plain = ark.reference_prompt("A rooftop.", names, tag_style="plain")
+        legacy = ark.reference_prompt("A rooftop.", names)
+        at = ark.reference_prompt("A rooftop.", names, tag_style="at")
+        if plain != legacy or not plain.startswith(plain_labels + " Keep every character exactly") or not plain.endswith(
+            "Scene: A rooftop."
+        ):
+            bad.append(f"(pm-g) reference_prompt(plain) 가 기존 문장과 다릅니다: {plain[:160]!r}")
+        if not at.startswith(at_labels) or at.replace(at_labels, plain_labels, 1) != plain:
+            bad.append(f"(pm-g) reference_prompt(at) 가 지칭만 바뀐 문장이 아닙니다: {at[:160]!r}")
+        if ark.reference_prompt("A rooftop.", [], tag_style="at") != "A rooftop.":
+            bad.append("(pm-g) 참고 없음이면 문장이 그대로여야 합니다")
+
+        # ---- (pm-h) 지칭 방식 설정 ----
+        parse_style = settings._parse_tag_style
+        for raw, want in ((None, "at"), ("plain", "plain"), (" PLAIN ", "plain"), ("", "at"), ("xyz", "at"), ("AT", "at")):
+            if parse_style(raw) != want:
+                bad.append(f"(pm-h) _parse_tag_style({raw!r}) 가 {want} 가 아닙니다: {parse_style(raw)!r}")
+        if os.getenv("VPOC_FAL_SEEDANCE_TAG_STYLE") is None and saved_tag_style != "at":
+            bad.append(f"(pm-h) env 없을 때 FAL_SEEDANCE_TAG_STYLE 이 at 이 아닙니다: {saved_tag_style!r}")
+        for style in ("at", "plain"):
+            settings.FAL_SEEDANCE_TAG_STYLE = style
+            if ark.tag_style(PARITY_FACE) != style:
+                bad.append(f"(pm-h) 설정 {style} 인데 tag_style(얼굴) 이 {ark.tag_style(PARITY_FACE)!r}")
+            for other in ("seedance-2-5", "seedance-2-0", PARITY_KLING, PARITY_PARTNER, "luma-ray2", ""):
+                if ark.tag_style(other) != "plain":
+                    bad.append(f"(pm-h) 설정 {style} 인데 tag_style({other!r}) 가 plain 이 아닙니다")
+        settings.FAL_SEEDANCE_TAG_STYLE = "xyz"
+        if ark.tag_style(PARITY_FACE) != "at":
+            bad.append("(pm-h) 틀린 설정값이면 tag_style(얼굴) 이 at 이어야 합니다")
+        settings.FAL_SEEDANCE_TAG_STYLE = "plain"
+        posts, shot, job, _ = _parity_submit(env, logs, add_second_character(shots_state()))
+        sent = body_prompt(posts)
+        plan = env.client.get(env.plan_url()).get_json() or {}
+        if not posts or posts[0][1] != f"{settings.FAL_QUEUE_URL}/{partner_eid}":
+            bad.append("(pm-h) plain 설정에서 r2v 로 제출되지 않았습니다")
+        if not sent.startswith("Image 1 is the black-haired man; Image 2 is the red-haired woman.") or "@Image" in sent:
+            bad.append(f"(pm-h) plain 설정인데 r2v 본문이 'Image N' 지칭이 아닙니다: {sent[:100]!r}")
+        if str(preview_row(plan).get("sendPromptEn") or "") != sent:
+            bad.append("(pm-h) plain 설정 sendPromptEn 이 제출 문장과 다릅니다")
+        posts, shot, job, _ = _parity_submit(env, logs, one_take_state(), ark.ONE_TAKE_ID)
+        plan = env.client.get(env.plan_url()).get_json() or {}
+        one_take_preview = str(view_of(plan, "3").get("oneTakePromptEn") or "")
+        if one_take_preview != body_prompt(posts) or "@Image" in one_take_preview or not one_take_preview.startswith(
+            "Image 1 is the black-haired man."
+        ):
+            bad.append(f"(pm-h) plain 설정 oneTakePromptEn 이 제출 문장과 다르거나 @Image 입니다: {one_take_preview[:80]!r}")
+        posts, shot, job, _ = _parity_submit(env, logs, single_state(single_keys[:2], single_keys[2]), ark.ONE_TAKE_ID)
+        if not body_prompt(posts).startswith("Image 1 is person 1; Image 2 is person 2; Image 3 is the background setting."):
+            bad.append(f"(pm-h) plain 설정 single 지칭이 'Image N' 이 아닙니다: {body_prompt(posts)[:100]!r}")
+        settings.FAL_SEEDANCE_TAG_STYLE = saved_tag_style
+
+        # 외부 호출 0회(실제 네트워크·Luma), 비밀값·본문 로그 없음.
+        if env.url_calls:
+            bad.append(f"실제 네트워크 호출이 있었습니다: {env.url_calls}")
+        if env.video_calls:
+            bad.append(f"Luma 제출이 있었습니다: {len(env.video_calls)}")
+        if any("dummy-fal-key" in text or "dummy-ark-key" in text for text in logs.messages()):
+            bad.append("로그에 API 키 값이 남았습니다")
+    except Exception as exc:  # noqa: BLE001
+        import traceback as _tb  # noqa: PLC0415
+
+        bad.append("프롬프트 상한·지칭 검사 중 예외: " + repr(exc) + "\n" + _tb.format_exc()[:2000])
+    finally:
+        logs.detach()
+        settings.FAL_PROMPT_MAX_OVERRIDES = saved_overrides
+        settings.FAL_SEEDANCE_TAG_STYLE = saved_tag_style
+        settings.ARK_SEEDANCE_ENABLED = saved_ark_flag
+        if env is not None:
+            env.restore()
+
+    if bad:
+        fail("fal-seedance-parity 프롬프트 상한·지칭 검사 실패\n" + "\n".join(f"  {item}" for item in bad))
+    else:
+        ok(
+            "fal-seedance-parity 프롬프트 상한·지칭 검사 (pm-a)fal_prompt_max 계열 4000·Kling default·형식 오류·빈 값 "
+            "(pm-b)build_payload 3,500B 그대로·5,000B 문장 경계·한글 바이트·prompt_max 없음 회귀·로그 "
+            "(pm-c)submit sentPrompt·promptTrimmed (pm-d)긴 r2v 샷 jobs·④·plan_view·E8·single·안 잘림 지움 "
+            "(pm-e)@Image 번호=image_urls·지칭 맨 앞·image_label (pm-f)sendPromptEn·oneTakePromptEn=제출 "
+            "(pm-g)ARK·Kling Image N·4,001자 거절·reference_prompt plain (pm-h)TAG_STYLE 파서·plain 복귀·비계열 plain"
+        )
+
+
+def check_anime_identity() -> None:
+    """073 작업 4 — 애니 변환 프롬프트: 패널만 그림체 기준, 인물은 identity only, 패널 0장은 2D 앵커(R8, D8).
+
+    (ai-a) _anime_prompt(3, identity_count=1): 그림체 문장 @Image1..3, @Image4 는 identity 문장에만, generic 금지 문장.
+    (ai-b) _anime_prompt(0, identity_count=1): "2D Korean webtoon"·"Korean webtoon style", @Image1 은 identity only.
+    (ai-c) _anime_prompt(0): 앵커 문장, @Image 없음. _anime_prompt(3)(인자 1개)은 계속 동작.
+    (ai-d) 금지 문구 4개가 모든 경우에 없다.
+    (ai-e) 통합(_run_anime_job, 가짜 fal.submit_edit): 패널 2+인물 1 → 3장(패널·패널·인물)·번호 일치,
+           패널 0+인물 1 → 1장·2D 앵커, 패널 5+인물 → 4장 이하, 패널 읽기 실패·인물 없음·인물 읽기 실패.
+    """
+    sys.path.insert(0, str(ROOT / "app"))
+    from src import stitcher  # noqa: PLC0415
+    from src.vpoc import fal, images, routes, settings, store  # noqa: PLC0415
+
+    bad: list[str] = []
+    env: _ParityEnv | None = None
+    banned = ("cel shading", "flat soft colors", "2D anime", "2D animation")
+
+    def identity_sentence(text: str) -> str:
+        match = re.search(r"(@Image\d+(?:, @Image\d+)*) (?:is|are) an identity reference only[^.]*\.", text)
+        return match.group(0) if match else ""
+
+    try:
+        # ---- (ai-a) ----
+        p = routes._anime_prompt(3, identity_count=1)
+        style_part = p.split("Do NOT use a generic anime")[0]
+        if "(@Image1, @Image2, @Image3)" not in style_part:
+            bad.append(f"(ai-a) 그림체 문장에 @Image1, @Image2, @Image3 이 없습니다: {style_part[:160]!r}")
+        if "@Image4" in style_part or p.count("@Image4") != 1 or "@Image4" not in identity_sentence(p):
+            bad.append(f"(ai-a) @Image4 가 identity 문장에만 있지 않습니다: {p!r}")
+        if not identity_sentence(p).startswith("@Image4 is an identity reference only"):
+            bad.append(f"(ai-a) identity 문장 형식이 다릅니다: {identity_sentence(p)!r}")
+        if "Do NOT use a generic anime" not in p or "Do not copy its photographic look" not in p:
+            bad.append("(ai-a) generic 금지·실사 질감 금지 문장이 없습니다")
+        if not p.endswith("No text, no speech bubbles.") or "exactly the same as @Video1" not in p:
+            bad.append("(ai-a) 공통 끝 문장이 없습니다")
+
+        # ---- (ai-b) ----
+        p0i = routes._anime_prompt(0, identity_count=1)
+        if "2D Korean webtoon" not in p0i or "Korean webtoon style" not in p0i:
+            bad.append(f"(ai-b) 패널 0장 앵커 문장이 없습니다: {p0i[:120]!r}")
+        if p0i.count("@Image1") != 1 or not identity_sentence(p0i).startswith("@Image1 is an identity reference only"):
+            bad.append(f"(ai-b) @Image1 이 identity only 가 아닙니다: {p0i!r}")
+        if "drawing style as the reference webtoon panels" in p0i or "@Image2" in p0i:
+            bad.append("(ai-b) 패널 0장인데 패널 그림체 문장·없는 번호가 있습니다")
+
+        # ---- (ai-c) ----
+        p0 = routes._anime_prompt(0)
+        if not p0.startswith("Redraw @Video1 in a hand-drawn 2D Korean webtoon style") or "@Image" in p0:
+            bad.append(f"(ai-c) _anime_prompt(0) 이 앵커 문장·@Image 없음이 아닙니다: {p0!r}")
+        if "identity reference" in p0:
+            bad.append("(ai-c) 인물 0장인데 identity 문장이 있습니다")
+        p3 = routes._anime_prompt(3)
+        if p3 != routes._anime_prompt(3, identity_count=0) or "(@Image1, @Image2, @Image3)" not in p3 or "identity" in p3:
+            bad.append(f"(ai-c) _anime_prompt(3) 인자 1개 호출이 패널 3장 문장이 아닙니다: {p3[:120]!r}")
+        p2 = routes._anime_prompt(1, identity_count=2)
+        if "@Image2, @Image3 are an identity reference only" not in p2:
+            bad.append(f"(ai-c) 인물 2장 identity 문장이 다릅니다: {p2!r}")
+        if routes._anime_prompt(-1, identity_count=-2) != p0:
+            bad.append("(ai-c) 음수 인자는 0 으로 봐야 합니다")
+
+        # ---- (ai-d) 금지 문구 ----
+        for panels in range(0, 4):
+            for identities in range(0, 3):
+                text = routes._anime_prompt(panels, identity_count=identities).lower()
+                for phrase in banned:
+                    if phrase.lower() in text:
+                        bad.append(f"(ai-d) _anime_prompt({panels}, {identities}) 에 금지 문구 {phrase!r}")
+
+        # ---- (ai-e) 통합: _run_anime_job ----
+        env = _parity_env()
+        run_job = _parity_closure(env, "_run_anime_job")
+        if run_job is None:
+            bad.append("(ai-e) _run_anime_job 을 찾지 못했습니다")
+        else:
+            edits: list[dict] = []
+            fail_panels: set[str] = set()
+            fail_chars: set[str] = set()
+
+            def fake_submit_edit(*, endpoint, video_mp4, prompt, output_prefix, reference_jpegs_b64=None, keep_audio=True):
+                edits.append({"prompt": prompt, "references": list(reference_jpegs_b64 or []), "endpoint": endpoint})
+                return {
+                    "provider": settings.FAL_ID_PREFIX + endpoint,
+                    "invocationArn": f"fal/requests/{endpoint}/req-ai-{len(edits)}",
+                    "clientRequestToken": f"fal-ai-{len(edits)}",
+                    "outputPrefix": output_prefix,
+                    "submittedAt": "2026-10-27T00:00:00Z",
+                    "promptChars": len(prompt),
+                }
+
+            def fake_prepare(source_path, output_path, workdir):
+                with open(output_path, "wb") as handle:
+                    handle.write(b"PREPARED")
+                return {"path": output_path, "seconds": 5.0, "height": 720}
+
+            def fake_panel_jpeg(owner, pid, file_id, index, _cache=None):
+                if file_id in fail_panels:
+                    raise OSError("panel read failed")
+                return f"PANEL:{file_id}:{index}".encode()
+
+            def fake_keyframe_b64(key):
+                if key in fail_chars:
+                    raise OSError("char read failed")
+                return "CHAR:" + key
+
+            env.patch(fal, "submit_edit", fake_submit_edit)
+            env.patch(stitcher, "prepare_for_anime", fake_prepare)
+            env.patch(images, "panel_jpeg", fake_panel_jpeg)
+            env.patch(images, "jpeg_for_reference", lambda jpeg: "P64:" + jpeg.decode())
+            env.patch(images, "keyframe_base64", fake_keyframe_b64)
+            source_key = "users/tester/parity/s1-live.mp4"
+            env.fake.blobs[source_key] = b"LIVE-MP4"
+
+            def run_case(tag: str, files: list[str], *, character: bool = True) -> dict:
+                edits.clear()
+                env.reset_calls()
+                fail_panels.clear()
+                state = _parity_state(PARITY_FACE, step4={"status": "running", "dual": True})
+                state["steps"]["1"]["sceneFiles"] = [{"fileId": fid} for fid in files]
+                for fid in files:
+                    env.fake.write_json(store.upload_meta_key(PARITY_OWNER, PARITY_PID, fid), {"height": 1000})
+                if not character:
+                    state["steps"]["3"]["characters"] = [{"id": "c1", "image": {"status": "pending"}}]
+                shot = state["steps"]["4"]["shots"][0]
+                shot["outputKey"] = source_key
+                shot["anime"] = {"status": "preparing", "claim": "claim-" + tag, "sourceOutputKey": source_key}
+                env.save(state)
+                return state
+
+            def run(tag: str) -> dict:
+                run_job(PARITY_OWNER, PARITY_PID, PARITY_PLAN, "s1", "claim-" + tag, PARITY_OWNER)
+                anime = (env.load()["steps"]["4"]["shots"][0].get("anime") or {})
+                if len(edits) != 1:
+                    bad.append(f"(ai-e) {tag}: submit_edit 가 1회가 아닙니다: {len(edits)} {anime.get('status')} {anime.get('error')}")
+                    return {}
+                if anime.get("status") != "submitted":
+                    bad.append(f"(ai-e) {tag}: anime 가 submitted 가 아닙니다: {anime.get('status')}")
+                if len(env.charges) != 1:
+                    bad.append(f"(ai-e) {tag}: 원장이 1건이 아닙니다: {len(env.charges)}")
+                edit = edits[0]
+                if len(edit["references"]) > 4:
+                    bad.append(f"(ai-e) {tag}: 참고가 4장을 넘습니다: {len(edit['references'])}")
+                for phrase in banned:
+                    if phrase.lower() in edit["prompt"].lower():
+                        bad.append(f"(ai-e) {tag}: 금지 문구 {phrase!r}")
+                return edit
+
+            # 패널 2 + 인물 1 → 3장(패널·패널·인물), 프롬프트 번호 일치.
+            run_case("p2c1", ["f1", "f2"])
+            edit = run("p2c1")
+            want_refs = ["P64:PANEL:f1:0", "P64:PANEL:f2:0", "CHAR:" + PARITY_CHAR_KEY]
+            if edit and edit["references"] != want_refs:
+                bad.append(f"(ai-e) 패널 2+인물 1 참고 순서가 다릅니다: {edit['references']}")
+            if edit and (
+                "(@Image1, @Image2)" not in edit["prompt"]
+                or not identity_sentence(edit["prompt"]).startswith("@Image3 is an identity reference only")
+                or "@Image4" in edit["prompt"]
+            ):
+                bad.append(f"(ai-e) 패널 2+인물 1 프롬프트 번호가 참고와 다릅니다: {edit['prompt'][:200]!r}")
+            # 패널 0 + 인물 1 → 1장, 2D 앵커.
+            run_case("p0c1", [])
+            edit = run("p0c1")
+            if edit and (edit["references"] != ["CHAR:" + PARITY_CHAR_KEY] or "2D Korean webtoon" not in edit["prompt"]):
+                bad.append(f"(ai-e) 패널 0+인물 1 이 1장·2D 앵커가 아닙니다: {edit['references']} {edit['prompt'][:100]!r}")
+            if edit and not identity_sentence(edit["prompt"]).startswith("@Image1 is an identity reference only"):
+                bad.append("(ai-e) 패널 0+인물 1 에서 @Image1 이 identity only 가 아닙니다")
+            # 패널 5 + 인물 1 → 패널 3(고르게)+인물 1 = 4장.
+            run_case("p5c1", ["f1", "f2", "f3", "f4", "f5"])
+            edit = run("p5c1")
+            if edit and edit["references"] != ["P64:PANEL:f1:0", "P64:PANEL:f3:0", "P64:PANEL:f5:0", "CHAR:" + PARITY_CHAR_KEY]:
+                bad.append(f"(ai-e) 패널 5+인물 1 참고가 패널 3+인물 1(4장)이 아닙니다: {edit['references']}")
+            if edit and not identity_sentence(edit["prompt"]).startswith("@Image4 is an identity reference only"):
+                bad.append("(ai-e) 패널 5+인물 1 에서 @Image4 가 identity 가 아닙니다")
+            # 패널 읽기 실패 → 실패한 패널은 번호에 들어가지 않는다.
+            run_case("pfail", ["f1", "f2", "f3"])
+            fail_panels.add("f2")
+            edit = run("pfail")
+            if edit and (
+                edit["references"] != ["P64:PANEL:f1:0", "P64:PANEL:f3:0", "CHAR:" + PARITY_CHAR_KEY]
+                or "(@Image1, @Image2)" not in edit["prompt"]
+                or not identity_sentence(edit["prompt"]).startswith("@Image3 is")
+            ):
+                bad.append(f"(ai-e) 패널 읽기 실패 뒤 번호가 맞지 않습니다: {edit['references']} {edit['prompt'][:160]!r}")
+            # 인물 없음(준비 안 됨) → identity 문장 없음.
+            run_case("p1c0", ["f1"], character=False)
+            edit = run("p1c0")
+            if edit and (edit["references"] != ["P64:PANEL:f1:0"] or "identity" in edit["prompt"] or "(@Image1)" not in edit["prompt"]):
+                bad.append(f"(ai-e) 인물 없음이 패널 1장·identity 없음이 아닙니다: {edit['references']} {edit['prompt'][:120]!r}")
+            # 인물 그림 읽기 실패 → identity 문장 없음.
+            run_case("cfail", ["f1"])
+            fail_chars.add(PARITY_CHAR_KEY)
+            edit = run("cfail")
+            fail_chars.clear()
+            if edit and (edit["references"] != ["P64:PANEL:f1:0"] or "identity" in edit["prompt"]):
+                bad.append(f"(ai-e) 인물 읽기 실패가 identity 없음이 아닙니다: {edit['references']}")
+            if env.url_calls or env.fal_calls:
+                bad.append(f"(ai-e) 실제 네트워크·fal 호출이 있었습니다: {env.url_calls} {len(env.fal_calls)}")
+    except Exception as exc:  # noqa: BLE001
+        import traceback as _tb  # noqa: PLC0415
+
+        bad.append("애니 identity 검사 중 예외: " + repr(exc) + "\n" + _tb.format_exc()[:2000])
+    finally:
+        if env is not None:
+            env.restore()
+
+    if bad:
+        fail("fal-seedance-parity 애니 변환 프롬프트 검사 실패\n" + "\n".join(f"  {item}" for item in bad))
+    else:
+        ok(
+            "fal-seedance-parity 애니 변환 프롬프트 검사 (ai-a)패널 3 그림체·@Image4 identity only "
+            "(ai-b)패널 0 2D 앵커·@Image1 identity (ai-c)인자 1개 호환·@Image 없음 (ai-d)금지 문구 없음 "
+            "(ai-e)_run_anime_job 패널·인물 순서·번호·4장 이하·읽기 실패"
+        )
+
+
+# ---------------------------------------------------------------- 073 작업 5: 해제 권한·금지·조용한 대체 금지·치환 로그
+
+PARITY_E3 = "fal 모델 해제는 관리자만 할 수 있습니다."
+PARITY_E4 = "설계자 지시로 사용이 금지된 모델입니다."
+PARITY_E5_PART = "등록되지 않은 모델입니다. 이 회차의 fal 모델이 해제되어 만들 수 없습니다."
+PARITY_DENIED = "fal:fal-ai/seedance-2-0-fast/image-to-video"
+PARITY_UNKNOWN_FAL = "fal:fal-ai/unknown-xyz/image-to-video"
+
+
+def _parity_registry_models(env: "_ParityEnv") -> list[dict]:
+    """가짜 저장소의 fal 레지스트리 항목(캐시를 거치지 않고 직접 읽는다)."""
+    from src.vpoc import fal  # noqa: PLC0415
+
+    data, _ = env.fake.read_json(fal.REGISTRY_KEY)
+    return list((data or {}).get("models") or [])
+
+
+def _parity_error_of(resp) -> dict:
+    return ((resp.get_json(silent=True) or {}).get("error") or {}) if resp is not None else {}
+
+
+def check_fal_admin_deny() -> None:
+    """073 작업 5 — fal 모델 해제 권한·금지 목록 재검사(R10.1-10.5, D10, X7). 외부 호출은 전부 가짜.
+
+    (ad-a) 비관리자 DELETE → 403 AdminOnly·E3(RAW_ERRORS=False 에서도), 레지스트리 그대로, warning 로그.
+    (ad-b) 관리자 DELETE → 200 removed=true, info 로그 vpoc.fal.unregistered.
+    (ad-c) 비관리자 POST /fal/models(가짜 fal.register) → 201.
+    (ad-d) is_admin 없이 만든 deps(기존 6개 인자) → 해제 403(fail-closed). _no_admin 이 기본값이다.
+    (ad-e) 금지 패턴 항목 → unavailable_reason E4, choices available=false, fal.submit ModelUnavailable·_request 0회.
+    """
+    sys.path.insert(0, str(ROOT / "app"))
+    from src.vpoc import ark, errors, fal, routes, settings  # noqa: PLC0415
+
+    bad: list[str] = []
+    face_eid = PARITY_FACE[len("fal:"):]
+    delete_url = "/api/vpoc/fal/models/" + face_eid
+    envs: list[_ParityEnv] = []
+    logs = _LogCapture()
+    saved_raw = settings.RAW_ERRORS
+
+    def new_env(**kwargs) -> _ParityEnv:
+        env = _parity_env(**kwargs)
+        envs.append(env)
+        return env
+
+    try:
+        logs.attach()
+        settings.RAW_ERRORS = False
+
+        # ---- (ad-a) 비관리자 해제 → 403 AdminOnly, 레지스트리 그대로 ----
+        env = new_env(is_admin=lambda: False)
+        before = _parity_registry_models(env)
+        resp = env.client.delete(delete_url)
+        err = _parity_error_of(resp)
+        if resp.status_code != 403:
+            bad.append(f"(ad-a) 비관리자 해제가 403 이 아닙니다: {resp.status_code} {resp.get_json(silent=True)}")
+        if err.get("type") != "AdminOnly":
+            bad.append(f"(ad-a) 오류 type 이 AdminOnly 가 아닙니다: {err.get('type')}")
+        if err.get("message") != PARITY_E3:
+            bad.append(f"(ad-a) RAW_ERRORS=False 에서 E3 문구가 그대로가 아닙니다: {err.get('message')}")
+        if "AdminOnly" not in errors.USER_FACING_KINDS:
+            bad.append("(ad-a) errors.USER_FACING_KINDS 에 AdminOnly 가 없습니다")
+        after = _parity_registry_models(env)
+        if after != before or not fal.is_registered(PARITY_FACE):
+            bad.append(f"(ad-a) 거절됐는데 레지스트리가 바뀌었습니다: {len(before)} → {len(after)}")
+        denied = logs.messages("vpoc.fal.unregister.denied", level=logging.WARNING)
+        if len(denied) != 1 or f"user={PARITY_OWNER}" not in denied[0] or f"endpoint={face_eid}" not in denied[0]:
+            bad.append(f"(ad-a) warning 로그 vpoc.fal.unregister.denied user·endpoint 가 1줄이 아닙니다: {denied}")
+        if logs.messages("vpoc.fal.unregistered"):
+            bad.append("(ad-a) 거절됐는데 vpoc.fal.unregistered 로그가 남았습니다")
+        # 경로의 제어 문자는 로그에 남기지 않는다(로그 위조 방지). 줄바꿈은 Flask path 변환기가 이미 404 로 막아
+        # 그 밖의 제어 문자(탭·ESC)로 확인한다.
+        logs.clear()
+        env.client.delete("/api/vpoc/fal/models/x%09%1Bforged=1")
+        forged = logs.messages("vpoc.fal.unregister.denied")
+        if len(forged) != 1 or "\t" in forged[0] or "\x1b" in forged[0] or "endpoint=xforged=1" not in forged[0]:
+            bad.append(f"(ad-a) 경로 제어 문자가 로그에 그대로 남았습니다: {forged!r}")
+
+        # ---- (ad-b) 관리자 해제 → 200 removed=true ----
+        logs.clear()
+        env = new_env(is_admin=lambda: True)
+        resp = env.client.delete(delete_url)
+        body = resp.get_json(silent=True) or {}
+        if resp.status_code != 200 or body.get("removed") is not True:
+            bad.append(f"(ad-b) 관리자 해제가 200 removed=true 가 아닙니다: {resp.status_code} {body}")
+        left = [item.get("endpointId") for item in _parity_registry_models(env)]
+        if face_eid in left or len(left) != 1:
+            bad.append(f"(ad-b) 해제 뒤 레지스트리가 맞지 않습니다: {left}")
+        done = logs.messages("vpoc.fal.unregistered", level=logging.INFO)
+        if len(done) != 1 or f"endpoint={face_eid}" not in done[0] or f"by={PARITY_OWNER}" not in done[0] or (
+            "removed=True" not in done[0]
+        ):
+            bad.append(f"(ad-b) info 로그 vpoc.fal.unregistered endpoint·by·removed 가 1줄이 아닙니다: {done}")
+        # 없는 항목 해제는 removed=false(기존 동작)이고 로그에 그대로 남는다.
+        logs.clear()
+        resp = env.client.delete(delete_url)
+        if resp.status_code != 200 or (resp.get_json(silent=True) or {}).get("removed") is not False:
+            bad.append(f"(ad-b) 없는 항목 해제가 200 removed=false 가 아닙니다: {resp.status_code}")
+        if not logs.messages("removed=False"):
+            bad.append("(ad-b) 없는 항목 해제 로그에 removed=False 가 없습니다")
+
+        # ---- (ad-c) 비관리자 등록은 그대로 201 ----
+        env = new_env(is_admin=lambda: False)
+        register_calls: list[tuple[str, str]] = []
+
+        def fake_register(endpoint: str, *, added_by: str = "") -> dict:
+            register_calls.append((endpoint, added_by))
+            return {"id": "fal:" + endpoint, "endpointId": endpoint, "addedBy": added_by}
+
+        env.patch(fal, "register", fake_register)
+        resp = env.client.post("/api/vpoc/fal/models", json={"endpointId": "fal-ai/kling-video/v3/pro/image-to-video"})
+        if resp.status_code != 201:
+            bad.append(f"(ad-c) 비관리자 등록이 201 이 아닙니다: {resp.status_code} {resp.get_json(silent=True)}")
+        if register_calls != [("fal-ai/kling-video/v3/pro/image-to-video", PARITY_OWNER)]:
+            bad.append(f"(ad-c) fal.register 호출이 다릅니다: {register_calls}")
+
+        # ---- (ad-d) is_admin 없이 만든 deps → 해제 403(fail-closed) ----
+        env = new_env()  # is_admin=None → 하네스가 기존 6개 인자만 넘긴다
+        deps_plain = routes.VpocDependencies(
+            require_auth=lambda handler: handler,
+            current_username=lambda: PARITY_OWNER,
+            get_project=lambda p: None,
+            can_read_project=lambda proj: True,
+            can_write_project=lambda proj: True,
+            graph_run=lambda *a, **k: [],
+        )
+        if deps_plain.is_admin is not routes._no_admin or routes._no_admin() is not False:
+            bad.append("(ad-d) VpocDependencies.is_admin 기본값이 _no_admin(False) 이 아닙니다")
+        resp = env.client.delete(delete_url)
+        if resp.status_code != 403 or _parity_error_of(resp).get("type") != "AdminOnly":
+            bad.append(f"(ad-d) is_admin 없는 deps 해제가 403 AdminOnly 가 아닙니다: {resp.status_code}")
+        if not fal.is_registered(PARITY_FACE):
+            bad.append("(ad-d) 거절됐는데 얼굴이 해제됐습니다")
+        # server.py 는 require_admin 과 같은 조건(g.role == ROLE_ADMIN)을 주입한다(소스 확인).
+        server_src = (ROOT / "app" / "src" / "server.py").read_text(encoding="utf-8")
+        if "is_admin=lambda: g.role == ROLE_ADMIN" not in server_src:
+            bad.append("(ad-d) server.py 가 VpocDependencies 에 is_admin=lambda: g.role == ROLE_ADMIN 을 넘기지 않습니다")
+
+        # ---- (ad-e) 금지 패턴 항목은 고를 수도 보낼 수도 없다(E4) ----
+        denied_item = {
+            "id": PARITY_DENIED,
+            "endpointId": PARITY_DENIED[len("fal:"):],
+            "label": "Seedance 2.0 Fast Image to Video",
+            "category": "image-to-video",
+            "caps": _parity_caps("i2v"),
+            "pricing": {"unit": "1000 tokens", "unitPrice": 0.0214},
+            "addedBy": "tester",
+        }
+        env = new_env(registry=_parity_registry_items() + [denied_item])
+        if not settings.is_denied_endpoint(denied_item["endpointId"]):
+            bad.append("(ad-e) 검사 전제: 기본 금지 패턴이 seedance-2-0-fast 에 맞지 않습니다")
+        reason = fal.unavailable_reason(PARITY_DENIED)
+        if reason != PARITY_E4:
+            bad.append(f"(ad-e) fal.unavailable_reason 이 E4 가 아닙니다: {reason!r}")
+        if fal.unavailable_reason(PARITY_FACE) != "":
+            bad.append(f"(ad-e) 금지가 아닌 얼굴까지 막혔습니다: {fal.unavailable_reason(PARITY_FACE)!r}")
+        entry = next((item for item in ark.choices() if item.get("id") == PARITY_DENIED), None)
+        if entry is None or entry.get("available") is not False or entry.get("reason") != PARITY_E4:
+            bad.append(f"(ad-e) choices 의 금지 항목이 available=false·E4 가 아닙니다: {entry}")
+        env.reset_calls()
+        try:
+            fal.submit(
+                model=PARITY_DENIED,
+                owner=PARITY_OWNER,
+                project_id=PARITY_PID,
+                plan_id=PARITY_PLAN,
+                shot_id="s1",
+                attempt=1,
+                prompt="A man looks at the city.",
+            )
+            bad.append("(ad-e) 금지 모델 fal.submit 이 예외 없이 끝났습니다")
+        except Exception as exc:  # noqa: BLE001
+            if getattr(exc, "kind", "") != "ModelUnavailable" or PARITY_E4 not in str(getattr(exc, "message", exc)):
+                bad.append(f"(ad-e) 금지 모델 fal.submit 이 ModelUnavailable·E4 가 아닙니다: {exc!r}")
+        if env.fal_calls:
+            bad.append(f"(ad-e) 금지 모델인데 fal._request 가 불렸습니다: {len(env.fal_calls)}")
+
+        for item in envs:
+            if item.url_calls:
+                bad.append(f"실제 네트워크 호출이 있었습니다: {item.url_calls}")
+            if item.charges or item.video_calls or item.ark_calls:
+                bad.append("원장·Luma·ARK 호출이 있었습니다")
+    except Exception as exc:  # noqa: BLE001
+        import traceback as _tb  # noqa: PLC0415
+
+        bad.append("해제 권한·금지 검사 중 예외: " + repr(exc) + "\n" + _tb.format_exc()[:1500])
+    finally:
+        settings.RAW_ERRORS = saved_raw
+        logs.detach()
+        while envs:
+            envs.pop().restore()
+
+    if bad:
+        fail("fal-seedance-parity 해제 권한·금지 검사 실패\n" + "\n".join(f"  {item}" for item in bad))
+    else:
+        ok(
+            "fal-seedance-parity 해제 권한·금지 검사 (ad-a)비관리자 403 AdminOnly·E3·레지스트리 유지·warning·제어 문자 제거 "
+            "(ad-b)관리자 200 removed·info 로그 (ad-c)비관리자 등록 201 (ad-d)is_admin 없는 deps 403·server.py 주입 "
+            "(ad-e)금지 E4·choices 불가·submit ModelUnavailable·_request 0회"
+        )
+
+
+def check_fal_no_silent_fallback() -> None:
+    """073 작업 5 — 조용한 대체 금지(R11.1-11.4, D11). 외부 호출은 전부 가짜.
+
+    (ns-a) 회차 videoModel=fal:<미등록> queued 샷 → GET plan → failed ModelUnavailable(E5), Luma·fal·원장 0회.
+    (ns-b) 레지스트리 읽기 예외 → registered() [] 이고 캐시하지 않는다(읽기 2회). 성공은 30초 캐시(읽기 1회).
+    (ns-c) refresh_shots 한도: 미등록 fal 회차도 ARK_MAX_INFLIGHT(2) — queued 2개가 함께 제출 시도된다.
+    """
+    sys.path.insert(0, str(ROOT / "app"))
+    from src.vpoc import ark, fal, settings  # noqa: PLC0415
+    from src.vpoc.errors import now_iso as _now_iso  # noqa: PLC0415
+
+    bad: list[str] = []
+    env: _ParityEnv | None = None
+    logs = _LogCapture()
+
+    def shots_of(state: dict) -> dict:
+        return {item.get("id"): item for item in state["steps"]["4"].get("shots") or []}
+
+    try:
+        env = _parity_env()
+        logs.attach()
+
+        # ---- (ns-a) 미등록 fal 회차 → E5, 다른 경로로 보내지 않는다 ----
+        if ark.is_ark(PARITY_UNKNOWN_FAL) or not ark.is_external(PARITY_UNKNOWN_FAL):
+            bad.append("(ns-a) 미등록 fal 이 is_ark False·is_external True 가 아닙니다")
+        if not ark.is_external("seedance-2-5") or ark.is_external(ark.DEFAULT_MODEL) or not ark.is_external(PARITY_FACE):
+            bad.append("(ns-a) is_external 이 ARK·등록 fal True, Luma False 가 아닙니다")
+        env.save(
+            _parity_state(
+                PARITY_UNKNOWN_FAL,
+                step4={
+                    "status": "running",
+                    "shots": [
+                        _parity_shot4("s1", "queued", durationS=6),
+                        _parity_shot4("s2", "completed", durationS=5),
+                    ],
+                },
+            )
+        )
+        resp = env.client.get(env.plan_url())
+        if resp.status_code != 200:
+            bad.append(f"(ns-a) GET plan 이 200 이 아닙니다: {resp.status_code}")
+        s1 = shots_of(env.load()).get("s1") or {}
+        err = s1.get("error") or {}
+        if s1.get("status") != "failed" or err.get("type") != "ModelUnavailable":
+            bad.append(f"(ns-a) 샷이 failed ModelUnavailable 이 아닙니다: {s1.get('status')} {err}")
+        if PARITY_E5_PART not in str(err.get("message") or "") or PARITY_UNKNOWN_FAL not in str(err.get("message") or ""):
+            bad.append(f"(ns-a) E5 문구(모델 id 포함)가 아닙니다: {err.get('message')}")
+        if env.video_calls or env.fal_calls or env.charges or env.ark_calls:
+            bad.append(
+                f"(ns-a) 다른 경로로 새거나 원장에 남았습니다: luma={len(env.video_calls)} fal={len(env.fal_calls)} "
+                f"charge={len(env.charges)} ark={len(env.ark_calls)}"
+            )
+        # 같은 상태로 run/retry 도 Luma 로 새지 않는다.
+        env.reset_calls()
+        resp = env.client.post(env.run_url("retry"), json={"shotId": "s1"})
+        s1 = shots_of(env.load()).get("s1") or {}
+        if (s1.get("error") or {}).get("type") != "ModelUnavailable" or env.video_calls or env.charges:
+            bad.append(f"(ns-a) run/retry 가 E5 실패가 아닙니다: {resp.status_code} {s1.get('status')} {s1.get('error')}")
+
+        # ---- (ns-b) 읽기 실패는 캐시하지 않는다 ----
+        reads = {"n": 0}
+        real_read = env.fake.read_json
+
+        def failing_read(key: str):
+            if key == fal.REGISTRY_KEY:
+                reads["n"] += 1
+                raise RuntimeError("S3 read timeout")
+            return real_read(key)
+
+        def counting_read(key: str):
+            if key == fal.REGISTRY_KEY:
+                reads["n"] += 1
+            return real_read(key)
+
+        logs.clear()
+        env.patch(env.fake, "read_json", failing_read)
+        fal._invalidate_cache()
+        if fal._registry_read() is not None:
+            bad.append("(ns-b) 읽기 예외에서 _registry_read 가 None 이 아닙니다")
+        reads["n"] = 0
+        first, second = fal.registered(), fal.registered()
+        if first != [] or second != []:
+            bad.append(f"(ns-b) 읽기 실패인데 registered() 가 [] 가 아닙니다: {first} {second}")
+        if reads["n"] != 2:
+            bad.append(f"(ns-b) 읽기 실패 결과를 캐시했습니다(읽기 {reads['n']}회, 2회여야 함)")
+        if len(logs.messages("vpoc.fal.registry.read_failed", level=logging.WARNING)) < 2:
+            bad.append("(ns-b) warning 로그 vpoc.fal.registry.read_failed 가 매 실패마다 남지 않습니다")
+        env.patch(env.fake, "read_json", counting_read)
+        reads["n"] = 0
+        got = fal.registered()
+        again = fal.registered()
+        if len(got) != 2 or len(again) != 2:
+            bad.append(f"(ns-b) 복구 뒤 registered() 가 2개가 아닙니다: {len(got)} {len(again)}")
+        if reads["n"] != 1:
+            bad.append(f"(ns-b) 성공 결과를 30초 캐시하지 않습니다(읽기 {reads['n']}회, 1회여야 함)")
+        env.patch(env.fake, "read_json", real_read)
+        fal._invalidate_cache()
+
+        # ---- (ns-c) 동시 제출 한도: 미등록 fal 도 ARK_MAX_INFLIGHT ----
+        env.patch(settings, "ARK_MAX_INFLIGHT", 2)
+        env.patch(settings, "MAX_INFLIGHT", 1)
+        env.reset_calls()
+        # 이미 제출된 샷 1개(최근 조회라 다시 조회하지 않는다) + queued 2개.
+        # 한도 2 면 inflight 1 < 2 라 둘 다 제출을 시도한다(둘 다 E5 failed). 한도 1(MAX_INFLIGHT)이면 둘 다 queued 로 남는다.
+        env.save(
+            _parity_state(
+                PARITY_UNKNOWN_FAL,
+                durations=(5, 5, 5),
+                step4={
+                    "status": "running",
+                    "shots": [
+                        _parity_shot4(
+                            "s1",
+                            "submitted",
+                            invocationArn="fal/requests/fal-ai/unknown-xyz/image-to-video/req-old",
+                            submittedAt=_now_iso(),
+                            lastPolledAt=_now_iso(),
+                        ),
+                        _parity_shot4("s2", "queued"),
+                        _parity_shot4("s3", "queued"),
+                    ],
+                },
+            )
+        )
+        env.client.get(env.plan_url())
+        rows = shots_of(env.load())
+        tried = [sid for sid in ("s2", "s3") if (rows.get(sid) or {}).get("status") == "failed"]
+        waiting = [sid for sid in ("s2", "s3") if (rows.get(sid) or {}).get("status") == "queued"]
+        if tried != ["s2", "s3"] or waiting:
+            bad.append(
+                f"(ns-c) 미등록 fal 회차가 ARK_MAX_INFLIGHT(2)로 제출 시도되지 않았습니다: 시도={tried} 대기={waiting}"
+            )
+        if any(((rows.get(sid) or {}).get("error") or {}).get("type") != "ModelUnavailable" for sid in tried):
+            bad.append("(ns-c) 시도한 샷이 E5 ModelUnavailable 이 아닙니다")
+        if env.video_calls or env.fal_posts() or env.charges:
+            bad.append("(ns-c) 미등록 fal 회차가 Luma·fal 로 제출되거나 원장에 남았습니다")
+        # 대조: 등록된 얼굴 회차 queued 3개 → 한도 2 만큼만 제출되고 1개는 대기.
+        env.reset_calls()
+        env.save(
+            _parity_state(
+                PARITY_FACE,
+                durations=(5, 5, 5),
+                step4={
+                    "status": "running",
+                    "shots": [_parity_shot4(sid, "queued") for sid in ("s1", "s2", "s3")],
+                },
+            )
+        )
+        env.client.get(env.plan_url())
+        rows = shots_of(env.load())
+        submitted = [sid for sid, row in rows.items() if row.get("status") == "submitted"]
+        queued = [sid for sid, row in rows.items() if row.get("status") == "queued"]
+        if len(submitted) != 2 or len(queued) != 1 or len(env.fal_posts()) != 2:
+            bad.append(
+                f"(ns-c) 대조: 등록 fal 회차가 한도 2 로 제출되지 않았습니다: 제출={submitted} 대기={queued} "
+                f"fal POST={len(env.fal_posts())}"
+            )
+
+        if env.url_calls:
+            bad.append(f"실제 네트워크 호출이 있었습니다: {env.url_calls}")
+    except Exception as exc:  # noqa: BLE001
+        import traceback as _tb  # noqa: PLC0415
+
+        bad.append("조용한 대체 금지 검사 중 예외: " + repr(exc) + "\n" + _tb.format_exc()[:1500])
+    finally:
+        logs.detach()
+        if env is not None:
+            env.restore()
+
+    if bad:
+        fail("fal-seedance-parity 조용한 대체 금지 검사 실패\n" + "\n".join(f"  {item}" for item in bad))
+    else:
+        ok(
+            "fal-seedance-parity 조용한 대체 금지 검사 (ns-a)미등록 fal 회차 E5·Luma/fal/원장 0회·retry 같음 "
+            "(ns-b)읽기 실패 캐시 안 함(2회)·성공 30초 캐시(1회)·warning (ns-c)미등록 fal 도 ARK_MAX_INFLIGHT·대조 한도 2"
+        )
+
+
+def check_model_resolved_log() -> None:
+    """073 작업 5 — 치환 로그·화면 선택 상태(R12.1-12.4, D12). 외부 호출은 전부 가짜.
+
+    (ml-a) resolve_model("seedance-2-5"): 얼굴 등록 시 reason=ark_disabled 1회·다시 부르면 없음(10분 억제)·
+           10분 뒤 다시 1회. 미등록 시 reason=fal_target_unavailable 이 따로 1회.
+    (ml-b) selected: 저장값 fal:<미등록> → Luma, reason=unavailable 로그.
+    (ml-c) plan_view: videoModel = 실제 모델, videoModelRequested = ② 저장값.
+    (ml-d) vpoc.js: currentModelId 가 plan.videoModel 을 step.videoModel 보다 먼저 본다. E6 안내 문구.
+    """
+    sys.path.insert(0, str(ROOT / "app"))
+    from src.vpoc import ark  # noqa: PLC0415
+
+    bad: list[str] = []
+    env: _ParityEnv | None = None
+    logs = _LogCapture()
+
+    def resolved(contains: str = "") -> list[str]:
+        return [text for text in logs.messages("vpoc.model.resolved", level=logging.INFO) if contains in text]
+
+    try:
+        env = _parity_env()
+        env.patch(ark, "_resolved_logged", {})
+        logs.attach()
+
+        # ---- (ml-a) resolve_model 두 사유와 10분 억제 ----
+        got = ark.resolve_model("seedance-2-5")
+        if got != PARITY_FACE:
+            bad.append(f"(ml-a) 얼굴 등록인데 resolve 결과가 얼굴이 아닙니다: {got}")
+        lines = resolved("reason=ark_disabled")
+        if len(lines) != 1 or f"from=seedance-2-5 to={PARITY_FACE}" not in lines[0]:
+            bad.append(f"(ml-a) reason=ark_disabled 로그가 from·to 와 함께 1줄이 아닙니다: {lines}")
+        ark.resolve_model("seedance-2-5")
+        if len(resolved("reason=ark_disabled")) != 1:
+            bad.append("(ml-a) 같은 조합을 10분 안에 다시 불렀는데 로그가 또 남았습니다")
+        # 10분이 지나면 다시 남는다(마지막 시각을 600초 앞으로 옮긴다).
+        key = ("seedance-2-5", PARITY_FACE, "ark_disabled")
+        if key not in ark._resolved_logged:
+            bad.append(f"(ml-a) 억제 사전 키가 (from, to, reason) 이 아닙니다: {list(ark._resolved_logged)}")
+        else:
+            ark._resolved_logged[key] -= ark._RESOLVED_LOG_INTERVAL_S + 1
+            ark.resolve_model("seedance-2-5")
+            if len(resolved("reason=ark_disabled")) != 2:
+                bad.append("(ml-a) 10분이 지난 뒤 같은 조합 로그가 다시 남지 않습니다")
+        if ark._RESOLVED_LOG_INTERVAL_S != 600:
+            bad.append(f"(ml-a) 억제 간격이 600초가 아닙니다: {ark._RESOLVED_LOG_INTERVAL_S}")
+        # 바꾸지 않는 호출(이미 fal·Luma)은 로그가 없다.
+        logs.clear()
+        ark.resolve_model(PARITY_FACE)
+        ark.resolve_model(ark.DEFAULT_MODEL)
+        if resolved():
+            bad.append(f"(ml-a) 모델을 바꾸지 않았는데 로그가 남았습니다: {resolved()}")
+        # 얼굴 미등록 → Luma, 다른 조합이라 따로 1회.
+        env.set_registry([])
+        got = ark.resolve_model("seedance-2-5")
+        ark.resolve_model("seedance-2-5")
+        lines = resolved("reason=fal_target_unavailable")
+        if got != ark.DEFAULT_MODEL or len(lines) != 1 or f"from=seedance-2-5 to={ark.DEFAULT_MODEL}" not in lines[0]:
+            bad.append(f"(ml-a) 미등록 → Luma·reason=fal_target_unavailable 1줄이 아닙니다: {got} {lines}")
+        if resolved("reason=ark_disabled"):
+            bad.append("(ml-a) 미등록인데 reason=ark_disabled 로그가 남았습니다(억제 사전이 조합을 섞었습니다)")
+        env.set_registry(_parity_registry_items())
+
+        # ---- (ml-b) selected: 저장값 fal:<미등록> → Luma, reason=unavailable ----
+        logs.clear()
+        state = _parity_state(PARITY_UNKNOWN_FAL)
+        got = ark.selected(state)
+        lines = resolved("reason=unavailable")
+        if got != ark.DEFAULT_MODEL:
+            bad.append(f"(ml-b) 미등록 fal 저장값인데 selected 가 Luma 가 아닙니다: {got}")
+        if len(lines) != 1 or f"from={PARITY_UNKNOWN_FAL} to={ark.DEFAULT_MODEL}" not in lines[0]:
+            bad.append(f"(ml-b) reason=unavailable 로그가 from·to 와 함께 1줄이 아닙니다: {lines}")
+        logs.clear()
+        if ark.selected(_parity_state(PARITY_FACE)) != PARITY_FACE or ark.selected(_parity_state("luma-ray2")) != "luma-ray2":
+            bad.append("(ml-b) 쓸 수 있는 저장값(얼굴·Luma)의 selected 가 바뀌었습니다")
+        if resolved():
+            bad.append(f"(ml-b) 대체하지 않았는데 로그가 남았습니다: {resolved()}")
+
+        # ---- (ml-c) plan_view videoModel·videoModelRequested ----
+        cases = [
+            ("seedance-2-5", PARITY_FACE),
+            (PARITY_UNKNOWN_FAL, ark.DEFAULT_MODEL),
+            (PARITY_FACE, PARITY_FACE),
+        ]
+        for stored, actual in cases:
+            env.save(_parity_state(stored))
+            view = env.client.get(env.plan_url()).get_json(silent=True) or {}
+            if view.get("videoModel") != actual or view.get("videoModelRequested") != stored:
+                bad.append(
+                    f"(ml-c) 저장 {stored}: videoModel={view.get('videoModel')}(기대 {actual}) "
+                    f"videoModelRequested={view.get('videoModelRequested')}(기대 {stored})"
+                )
+
+        # ---- (ml-d) vpoc.js 선택 상태·E6 ----
+        js = (PUBLIC / "vpoc.js").read_text(encoding="utf-8")
+        current = re.search(r"function currentModelId\(\)\s*\{(.*?)\n\s*\}", js, re.S)
+        body = current.group(1) if current else ""
+        if not re.search(r"return plan\.videoModel \|\| step\.videoModel \|\| \"luma-ray2\";", body):
+            bad.append("(ml-d) currentModelId 가 plan.videoModel 을 step.videoModel 보다 먼저 보지 않습니다")
+        if "edits.videoModel" not in body:
+            bad.append("(ml-d) currentModelId 가 사용자가 새로 고른 값(edits.videoModel)을 먼저 보지 않습니다")
+        picker_at = js.find("function drawModelPicker()")
+        picker = js[picker_at : js.find("falSection()", picker_at)] if picker_at >= 0 else ""
+        if "plan.videoModelRequested !== plan.videoModel" not in picker:
+            bad.append("(ml-d) drawModelPicker 가 videoModelRequested·videoModel 차이를 보지 않습니다")
+        if '"저장된 모델(" + plan.videoModelRequested + ")은 지금 쓸 수 없어 "' not in picker or (
+            '"(으)로 만듭니다."' not in picker
+        ):
+            bad.append("(ml-d) drawModelPicker 에 E6 안내 문구가 없습니다")
+
+        if env.url_calls or env.fal_calls or env.ark_calls or env.video_calls or env.charges:
+            bad.append("외부 호출·제출·원장 기록이 있었습니다")
+    except Exception as exc:  # noqa: BLE001
+        import traceback as _tb  # noqa: PLC0415
+
+        bad.append("치환 로그 검사 중 예외: " + repr(exc) + "\n" + _tb.format_exc()[:1500])
+    finally:
+        logs.detach()
+        if env is not None:
+            env.restore()
+
+    if bad:
+        fail("fal-seedance-parity 치환 로그·선택 상태 검사 실패\n" + "\n".join(f"  {item}" for item in bad))
+    else:
+        ok(
+            "fal-seedance-parity 치환 로그·선택 상태 검사 (ml-a)ark_disabled 1회·10분 억제·10분 뒤 재기록·"
+            "fal_target_unavailable 따로 (ml-b)selected Luma 대체 reason=unavailable (ml-c)plan_view "
+            "videoModel·videoModelRequested (ml-d)vpoc.js plan.videoModel 우선·E6"
+        )
+
+
+def check_vnew_previz_lazy() -> None:
+    """073 작업 6 — three.js 지연 로드(R9.1-9.4, D9). 소스·Dockerfile 정적 검사, 네트워크 없음.
+
+    (vl-a) index.html 에 vnew-previz.js 정적 module 로드가 없다. app.js 가 VNEW_ENABLED 일 때만
+           import("/vnew-previz.js?v=__ASSET_VERSION__") 한다(꺼지면 Promise.resolve(false)).
+    (vl-b) vnew.js 가 window.vnewPrevizReady 를 기다린 뒤 window.vnewPreviz.create 를 부른다. E7 문구,
+           .catch 가 showError 로 E7 을 보인다.
+    (vl-c) frontend/Dockerfile 치환 목록에 /usr/share/nginx/html/vnew-previz.js 가 있다.
+    (vl-d) Dockerfile sed 를 파이썬으로 흉내 낸다: 목록 파일(vnew-previz.js·app.js·index.html 포함)의
+           __ASSET_VERSION__ 이 바뀐 뒤 0개다.
+    (vl-e) node --check: app.js(classic, 동적 import)·vnew.js·vnew-previz.js(module).
+    """
+    bad: list[str] = []
+    try:
+        index_src = (PUBLIC / "index.html").read_text(encoding="utf-8")
+        app_src = (PUBLIC / "app.js").read_text(encoding="utf-8")
+        vnew_src = (PUBLIC / "vnew.js").read_text(encoding="utf-8")
+        previz_src = (PUBLIC / "vnew-previz.js").read_text(encoding="utf-8")
+        docker_src = (ROOT / "frontend" / "Dockerfile").read_text(encoding="utf-8")
+
+        # ---- (vl-a) 정적 로드 없음·동적 import ----
+        if 'type="module" src="/vnew-previz.js' in index_src:
+            bad.append('(vl-a) index.html 이 아직 vnew-previz.js 를 type="module" 로 정적 로드합니다')
+        if re.search(r"<script[^>]*vnew-previz\.js", index_src):
+            bad.append("(vl-a) index.html 에 vnew-previz.js script 태그가 남아 있습니다")
+        literal = 'import("/vnew-previz.js?v=__ASSET_VERSION__")'
+        if app_src.count(literal) != 1:
+            bad.append(f"(vl-a) app.js 에 {literal} 가 정확히 1번 있지 않습니다: {app_src.count(literal)}")
+        gated = re.search(
+            r"window\.vnewPrevizReady\s*=\s*VNEW_ENABLED\s*\?\s*import\(\"/vnew-previz\.js\?v=__ASSET_VERSION__\"\)"
+            r".*?:\s*Promise\.resolve\(false\);",
+            app_src,
+            re.S,
+        )
+        if not gated:
+            bad.append("(vl-a) app.js 동적 import 가 VNEW_ENABLED 조건(꺼지면 Promise.resolve(false)) 안에 있지 않습니다")
+        else:
+            body = gated.group(0)
+            if "window.vnewPrevizError = error" not in body or "return false" not in body:
+                bad.append("(vl-a) app.js 동적 import 실패 처리(vnewPrevizError 저장·false)가 없습니다")
+        enabled_at = app_src.find("const VNEW_ENABLED")
+        if enabled_at < 0 or not gated or app_src.find("window.vnewPrevizReady") < enabled_at:
+            bad.append("(vl-a) window.vnewPrevizReady 가 VNEW_ENABLED 선언 뒤에 있지 않습니다")
+
+        # ---- (vl-b) vnew.js 가 로드를 기다린 뒤 create, E7 ----
+        wait_at = vnew_src.find("Promise.resolve(window.vnewPrevizReady).then(")
+        create_at = vnew_src.find("window.vnewPreviz.create(")
+        if wait_at < 0:
+            bad.append("(vl-b) vnew.js 가 window.vnewPrevizReady 를 기다리지 않습니다")
+        if vnew_src.count("window.vnewPreviz.create(") != 1:
+            bad.append(f"(vl-b) window.vnewPreviz.create 호출이 1곳이 아닙니다: {vnew_src.count('window.vnewPreviz.create(')}")
+        if wait_at >= 0 and not (wait_at < create_at):
+            bad.append("(vl-b) window.vnewPreviz.create 가 vnewPrevizReady 를 기다린 뒤에 불리지 않습니다")
+        block = vnew_src[wait_at : vnew_src.find("function buildTimeline()", wait_at)] if wait_at >= 0 else ""
+        if '"3D 뷰어를 불러오지 못했습니다: "' not in block:
+            bad.append("(vl-b) vnew.js 에 E7 문구(3D 뷰어를 불러오지 못했습니다: <원인>)가 없습니다")
+        if "window.vnewPrevizError" not in block:
+            bad.append("(vl-b) E7 원인에 window.vnewPrevizError 를 쓰지 않습니다")
+        if not re.search(r"\.catch\(function \(err\) \{\s*//[^\n]*\n\s*showError\(err && err\.previzLoad \? err\.message", block):
+            bad.append("(vl-b) createPromise 뒤 .catch 가 showError 로 E7 을 보이지 않습니다")
+        if "if (!ctl) return;" not in block:
+            bad.append("(vl-b) 화면을 떠나 create 를 건너뛴 경우(null)를 처리하지 않습니다")
+
+        # ---- (vl-c) Dockerfile 치환 목록 ----
+        loop = re.search(r"for f in (.*?); do", docker_src, re.S)
+        listed = re.findall(r"/usr/share/nginx/html/[\w.\-]+", loop.group(1)) if loop else []
+        if "/usr/share/nginx/html/vnew-previz.js" not in listed:
+            bad.append(f"(vl-c) Dockerfile 치환 목록에 vnew-previz.js 가 없습니다: {listed}")
+        if 'grep -q "__ASSET_VERSION__" "$f"' not in docker_src:
+            bad.append("(vl-c) Dockerfile 이 치환 뒤 남은 __ASSET_VERSION__ 으로 빌드를 실패시키지 않습니다")
+
+        # ---- (vl-d) sed 흉내 ----
+        for need in ("index.html", "app.js", "vnew-previz.js"):
+            if f"/usr/share/nginx/html/{need}" not in listed:
+                bad.append(f"(vl-d) 치환 목록에 {need} 가 없습니다")
+        if "__ASSET_VERSION__" not in previz_src:
+            bad.append("(vl-d) vnew-previz.js 에 __ASSET_VERSION__ 이 없습니다(three.js import 버전 쿼리)")
+        if "__ASSET_VERSION__" not in app_src or "__ASSET_VERSION__" not in index_src:
+            bad.append("(vl-d) app.js·index.html 에 __ASSET_VERSION__ 이 없습니다")
+        for path in listed:
+            name = path.rsplit("/", 1)[-1]
+            local = PUBLIC / name
+            if not local.exists():
+                bad.append(f"(vl-d) 치환 목록 파일이 frontend/public 에 없습니다: {name}")
+                continue
+            replaced = local.read_text(encoding="utf-8").replace("__ASSET_VERSION__", "ci-check0001")
+            if "__ASSET_VERSION__" in replaced:
+                bad.append(f"(vl-d) 치환 뒤에도 {name} 에 __ASSET_VERSION__ 이 남습니다")
+            if name == "app.js" and 'import("/vnew-previz.js?v=ci-check0001")' not in replaced:
+                bad.append("(vl-d) 치환 뒤 app.js 동적 import URL 에 버전이 들어가지 않습니다")
+            if name == "vnew-previz.js" and "three.module.min.js?v=ci-check0001" not in replaced:
+                bad.append("(vl-d) 치환 뒤 vnew-previz.js 의 three.js import 에 버전이 들어가지 않습니다")
+
+        # ---- (vl-e) node --check ----
+        if _is_es_module(app_src):
+            bad.append("(vl-e) app.js 가 ES module 로 판정됩니다(classic script 여야 한다, 동적 import 만 허용)")
+        node = shutil.which("node")
+        if not node:
+            warn("node 가 없어 (vl-e) 구문 검사를 건너뜁니다 (E16)")
+        else:
+            for name, text in (("app.js", app_src), ("vnew.js", vnew_src)):
+                result = subprocess.run([node, "--check", str(PUBLIC / name)], capture_output=True, text=True)
+                if result.returncode != 0:
+                    bad.append(f"(vl-e) node --check {name} 실패: {(result.stderr or '').strip()[:300]}")
+            result = _check_as_module(node, previz_src)
+            if result.returncode != 0:
+                bad.append(f"(vl-e) node --check vnew-previz.js(module) 실패: {(result.stderr or '').strip()[:300]}")
+    except Exception as exc:  # noqa: BLE001
+        import traceback as _tb  # noqa: PLC0415
+
+        bad.append("three.js 지연 로드 검사 중 예외: " + repr(exc) + "\n" + _tb.format_exc()[:1500])
+
+    if bad:
+        fail("fal-seedance-parity three.js 지연 로드 검사 실패\n" + "\n".join(f"  {item}" for item in bad))
+    else:
+        ok(
+            "fal-seedance-parity three.js 지연 로드 검사 (vl-a)index.html 정적 로드 없음·app.js VNEW_ENABLED 동적 import "
+            "(vl-b)vnew.js vnewPrevizReady 대기 후 create·E7 .catch (vl-c)Dockerfile 치환 목록 vnew-previz.js "
+            "(vl-d)sed 흉내 뒤 __ASSET_VERSION__ 0개 (vl-e)node --check app.js·vnew.js·vnew-previz.js"
+        )
+
+
+def check_stitcher_threads() -> None:
+    """073 작업 6 — stitcher threads 를 인코더에도(R13.2-13.3, D13, 리뷰 P-5). 실제 ffmpeg 는 돌리지 않는다.
+
+    stitcher._run·ffmpeg_path·probe_duration 을 가짜로 바꿔 명령 리스트를 받는다. 출력 파일은 가짜 _run 이 만든다.
+    (st-a) trim(threads=1): -threads 1 이 -i 앞과 libx264 설정(-crf 20) 바로 뒤에 하나씩.
+    (st-b) scale_to_min_height(threads=1): 같음.
+    (st-c) pad_to_seconds(threads=1): 같음. 이미 충분히 길면 _run 없이 복사한다.
+    (st-d) threads=None·0·-1: 세 함수 명령이 073 이전 리스트와 정확히 같다. _threads_args(None·0·-1) → [].
+    """
+    sys.path.insert(0, str(ROOT / "app"))
+    from src import stitcher  # noqa: PLC0415
+
+    bad: list[str] = []
+    calls: list[list[str]] = []
+    durations = {"value": 1.0}
+    binary = "/fake/ffmpeg"
+    saved = {name: getattr(stitcher, name) for name in ("_run", "ffmpeg_path", "probe_duration")}
+    workdir = tempfile.mkdtemp(prefix="st-check-")
+
+    def fake_run(command):
+        calls.append(list(command))
+        with open(command[-1], "wb") as handle:
+            handle.write(b"fake-mp4")
+        return subprocess.CompletedProcess(command, 0, stdout=b"", stderr=b"")
+
+    try:
+        stitcher._run = fake_run
+        stitcher.ffmpeg_path = lambda: binary
+        stitcher.probe_duration = lambda path: durations["value"]
+        src = os.path.join(workdir, "src.mp4")
+        with open(src, "wb") as handle:
+            handle.write(b"source-bytes")
+        head = [binary, "-y", "-hide_banner", "-loglevel", "error"]
+        enc = ["-c:v", "libx264", "-preset", "veryfast", "-crf", "20"]
+
+        def out(name: str) -> str:
+            return os.path.join(workdir, name)
+
+        # 073 이전 명령(회귀 스냅샷, stitcher.py 2026-10-26 작업 트리에서 옮겨 적음).
+        def base_trim(o: str) -> list[str]:
+            return head + ["-i", src, "-ss", "0.000", "-to", "1.500"] + enc + [
+                "-pix_fmt", "yuv420p", "-an", "-movflags", "+faststart", o
+            ]
+
+        def base_scale(o: str) -> list[str]:
+            return head + ["-i", src, "-vf", "scale=-2:720:flags=lanczos"] + enc + [
+                "-pix_fmt", "yuv420p", "-c:a", "copy", "-movflags", "+faststart", o
+            ]
+
+        def base_pad(o: str) -> list[str]:
+            return head + ["-i", src, "-vf", "tpad=stop_mode=clone:stop_duration=2.000"] + enc + [
+                "-pix_fmt", "yuv420p", "-an", "-movflags", "+faststart", o
+            ]
+
+        def with_threads(base: list[str], n: int) -> list[str]:
+            crf_end = base.index("-crf") + 2
+            return base[:5] + ["-threads", str(n)] + base[5:crf_end] + ["-threads", str(n)] + base[crf_end:]
+
+        def run_one(label: str, threads):
+            calls.clear()
+            o = out(f"{label}-{threads}.mp4")
+            if label == "trim":
+                stitcher.trim(src, o, start_sec=0.0, end_sec=1.5, threads=threads)
+                return o, base_trim(o)
+            if label == "scale":
+                stitcher.scale_to_min_height(src, o, min_height=720, threads=threads)
+                return o, base_scale(o)
+            durations["value"] = 1.0
+            stitcher.pad_to_seconds(src, o, target_sec=3.0, threads=threads)
+            return o, base_pad(o)
+
+        prefix = {"trim": "st-a", "scale": "st-b", "pad": "st-c"}
+        for label in ("trim", "scale", "pad"):
+            tag = prefix[label]
+            o, base = run_one(label, 1)
+            if len(calls) != 1:
+                bad.append(f"({tag}) {label}(threads=1) _run 호출이 1회가 아닙니다: {len(calls)}")
+                continue
+            cmd = calls[0]
+            idx = [i for i, value in enumerate(cmd) if value == "-threads"]
+            if len(idx) != 2 or any(cmd[i + 1] != "1" for i in idx):
+                bad.append(f"({tag}) {label}: -threads 1 이 정확히 2번이 아닙니다: {cmd}")
+            else:
+                if not idx[0] < cmd.index("-i"):
+                    bad.append(f"({tag}) {label}: 첫 -threads 가 -i 앞에 없습니다")
+                if idx[1] != cmd.index("-crf") + 2 or cmd.index("libx264") > idx[1]:
+                    bad.append(f"({tag}) {label}: 둘째 -threads 가 libx264 설정(-crf 20) 바로 뒤에 없습니다: {cmd}")
+            if cmd != with_threads(base, 1):
+                bad.append(f"({tag}) {label}(threads=1) 명령이 기대와 다릅니다:\n    got {cmd}\n    exp {with_threads(base, 1)}")
+            if not os.path.exists(o):
+                bad.append(f"({tag}) {label}: 출력 파일이 없습니다")
+
+        # (st-c) 이미 충분히 길면 _run 없이 복사.
+        calls.clear()
+        durations["value"] = 3.0
+        copied = out("pad-copy.mp4")
+        stitcher.pad_to_seconds(src, copied, target_sec=3.0, threads=1)
+        if calls:
+            bad.append(f"(st-c) 이미 충분히 긴데 _run 이 불렸습니다: {calls}")
+        if not os.path.exists(copied) or open(copied, "rb").read() != b"source-bytes":
+            bad.append("(st-c) 이미 충분히 긴 영상이 그대로 복사되지 않았습니다")
+        durations["value"] = 1.0
+
+        # (st-d) threads None·0·-1 → 073 이전과 같다.
+        for threads in (None, 0, -1):
+            for label in ("trim", "scale", "pad"):
+                _o, base = run_one(label, threads)
+                if calls != [base]:
+                    bad.append(f"(st-d) {label}(threads={threads}) 명령이 073 이전과 다릅니다:\n    got {calls}\n    exp {base}")
+            if stitcher._threads_args(threads) != []:
+                bad.append(f"(st-d) _threads_args({threads}) 가 [] 가 아닙니다: {stitcher._threads_args(threads)}")
+        if stitcher._threads_args(2) != ["-threads", "2"]:
+            bad.append(f"(st-d) _threads_args(2) 가 ['-threads', '2'] 가 아닙니다: {stitcher._threads_args(2)}")
+    except Exception as exc:  # noqa: BLE001
+        import traceback as _tb  # noqa: PLC0415
+
+        bad.append("stitcher threads 검사 중 예외: " + repr(exc) + "\n" + _tb.format_exc()[:1500])
+    finally:
+        for name, value in saved.items():
+            setattr(stitcher, name, value)
+        shutil.rmtree(workdir, ignore_errors=True)
+
+    if bad:
+        fail("fal-seedance-parity stitcher threads 검사 실패\n" + "\n".join(f"  {item}" for item in bad))
+    else:
+        ok(
+            "fal-seedance-parity stitcher threads 검사 (st-a)trim -threads 1 입력 앞·인코더 뒤 "
+            "(st-b)scale_to_min_height 같음 (st-c)pad_to_seconds 같음·충분히 길면 복사 "
+            "(st-d)threads None·0·-1 073 이전 명령 그대로·_threads_args []"
+        )
+
+
+def check_vnew_model_fallback() -> None:
+    """073 작업 6 — vnew ① 옛 ARK 값(R13.1, D13, 리뷰 O-11). 외부 호출은 전부 가짜(_parity_env).
+
+    (vm-a) 플래그 false, update_input(videoModel="seedance-2-5"/"seedance-2-0") → 400 이 아니다. 저장값이
+           default_previz_model() 이고 vnew.plan.video_model_reset 로그가 남는다(fal 얼굴 등록·미등록 둘 다).
+    (vm-b) videoModel="fal:unknown-xyz" → 400 BadVideoModel(회귀), 저장값이 바뀌지 않는다.
+    (vm-c) 빈 값 → 기본 프리비즈 모델(회귀). 등록된 previzCapable 모델은 그대로 저장되고 reset 로그가 없다.
+    """
+    sys.path.insert(0, str(ROOT / "app"))
+    from src.vnew import plan as planmod  # noqa: PLC0415
+    from src.vpoc import ark, settings  # noqa: PLC0415
+    from src.vpoc.errors import VpocError  # noqa: PLC0415
+
+    bad: list[str] = []
+    env: _ParityEnv | None = None
+    logs = _LogCapture()
+    owner, pid = "tester", "prj_vm"
+    good_v2v = "fal:fal-ai/check/previz-v2v"
+
+    def reset_lines() -> list[str]:
+        return logs.messages("vnew.plan.video_model_reset", level=logging.INFO)
+
+    def stored() -> str:
+        data, _ = planmod.load_plan(owner, pid)
+        return str((data.get("input") or {}).get("videoModel") or "")
+
+    try:
+        env = _parity_env()
+        env.patch(planmod, "STORE", env.fake)
+        env.patch(settings, "ARK_SEEDANCE_ENABLED", False)
+        env.patch(ark, "_resolved_logged", {})
+        previz_item = {
+            "id": good_v2v,
+            "endpointId": good_v2v[len("fal:"):],
+            "label": "Check Previz V2V",
+            "category": "video-to-video",
+            "caps": {"previzCapable": True, "available": True, "videoField": "video_url", "promptField": "prompt"},
+            "pricing": {"unit": "seconds", "unitPrice": 0.1},
+            "addedBy": "tester",
+        }
+        env.set_registry(_parity_registry_items() + [previz_item])
+        logs.attach()
+        planmod.load_or_create(owner, pid)
+        default_id = planmod.default_previz_model()
+
+        # ---- (vm-a) 옛 ARK 값 → 기본 프리비즈 모델 ----
+        for registry_label, items in (
+            ("얼굴 등록", _parity_registry_items() + [previz_item]),
+            ("얼굴 미등록", [previz_item]),
+        ):
+            env.set_registry(items)
+            for ark_value in ("seedance-2-5", "seedance-2-0"):
+                if ark_value not in settings.ARK_MODEL_IDS:
+                    bad.append(f"(vm-a) {ark_value} 가 ARK_MODEL_IDS 에 없습니다(검사 전제)")
+                    continue
+                logs.clear()
+                planmod.update_input(owner, pid, {"videoModel": good_v2v})
+                try:
+                    planmod.update_input(owner, pid, {"videoModel": ark_value})
+                except VpocError as exc:
+                    bad.append(f"(vm-a) {registry_label}·{ark_value} 가 {exc.status} {exc.kind} 로 거절됐습니다")
+                    continue
+                if stored() != default_id:
+                    bad.append(f"(vm-a) {registry_label}·{ark_value} 저장값이 기본 프리비즈 모델이 아닙니다: {stored()}")
+                lines = reset_lines()
+                if len(lines) != 1 or f"from={ark_value} to={default_id}" not in lines[0]:
+                    bad.append(f"(vm-a) {registry_label}·{ark_value} vnew.plan.video_model_reset 로그(from·to)가 1줄이 아닙니다: {lines}")
+        env.set_registry(_parity_registry_items() + [previz_item])
+
+        # ---- (vm-b) 모르는 값 → 400 BadVideoModel ----
+        planmod.update_input(owner, pid, {"videoModel": good_v2v})
+        logs.clear()
+        try:
+            planmod.update_input(owner, pid, {"videoModel": "fal:unknown-xyz"})
+            bad.append("(vm-b) fal:unknown-xyz 가 거절되지 않았습니다")
+        except VpocError as exc:
+            if exc.status != 400 or exc.kind != "BadVideoModel":
+                bad.append(f"(vm-b) fal:unknown-xyz 가 400 BadVideoModel 이 아닙니다: {exc.status} {exc.kind}")
+        if stored() != good_v2v:
+            bad.append(f"(vm-b) 거절됐는데 저장값이 바뀌었습니다: {stored()}")
+        if reset_lines():
+            bad.append(f"(vm-b) 모르는 값인데 reset 로그가 남았습니다: {reset_lines()}")
+
+        # ---- (vm-c) 빈 값·정상 값 ----
+        logs.clear()
+        planmod.update_input(owner, pid, {"videoModel": ""})
+        if stored() != default_id:
+            bad.append(f"(vm-c) 빈 값이 기본 프리비즈 모델로 저장되지 않았습니다: {stored()}")
+        planmod.update_input(owner, pid, {"videoModel": good_v2v})
+        if stored() != good_v2v:
+            bad.append(f"(vm-c) 등록된 previzCapable 모델이 그대로 저장되지 않았습니다: {stored()}")
+        planmod.update_input(owner, pid, {"videoModel": default_id})
+        if stored() != default_id:
+            bad.append(f"(vm-c) 기본 프리비즈 모델이 그대로 저장되지 않았습니다: {stored()}")
+        if reset_lines():
+            bad.append(f"(vm-c) 정상 값인데 reset 로그가 남았습니다: {reset_lines()}")
+
+        if env.url_calls or env.fal_posts() or env.ark_calls or env.video_calls or env.charges:
+            bad.append("외부 호출·제출·원장 기록이 있었습니다")
+    except Exception as exc:  # noqa: BLE001
+        import traceback as _tb  # noqa: PLC0415
+
+        bad.append("vnew 옛 모델 값 검사 중 예외: " + repr(exc) + "\n" + _tb.format_exc()[:1500])
+    finally:
+        logs.detach()
+        if env is not None:
+            env.restore()
+
+    if bad:
+        fail("fal-seedance-parity vnew 옛 모델 값 검사 실패\n" + "\n".join(f"  {item}" for item in bad))
+    else:
+        ok(
+            "fal-seedance-parity vnew 옛 모델 값 검사 (vm-a)seedance-2-5·2-0 → 기본 프리비즈·reset 로그(얼굴 등록·미등록) "
+            "(vm-b)fal:unknown-xyz 400 BadVideoModel·값 유지 (vm-c)빈 값 기본·previzCapable·기본 모델 그대로"
+        )
+
+
 # ---------------------------------------------------------------- main
 
 
@@ -11842,6 +15692,19 @@ def main() -> int:
     check_vnew_take_on_screen()
     check_vnew_take_harmony_motion()
     check_ark_seedance_gate()
+    check_fal_parity_inflight()
+    check_fal_parity_rollback()
+    check_fal_parity_route()
+    check_fal_parity_duration()
+    check_fal_parity_resolution()
+    check_fal_parity_prompt()
+    check_anime_identity()
+    check_fal_admin_deny()
+    check_fal_no_silent_fallback()
+    check_model_resolved_log()
+    check_vnew_previz_lazy()
+    check_stitcher_threads()
+    check_vnew_model_fallback()
     print()
     if warnings:
         print(f"경고 {len(warnings)}건")

@@ -205,6 +205,8 @@ def trim(source_path: str, output_path: str, *, start_sec: float, end_sec: float
         # `-ss` 를 `-i` **앞**에 두면 빠르지만 키프레임으로 스냅한다. 정확도가 목적이라 뒤에 둔다.
         "-i", source_path, "-ss", f"{start:.3f}", "-to", f"{end:.3f}",
         "-c:v", "libx264", "-preset", "veryfast", "-crf", "20",
+        # `-i` 앞 -threads 는 디코더 옵션이다. 인코더(libx264)에도 같은 값을 건다(073 R13.2, 리뷰 P-5).
+        *_threads_args(threads),
         "-pix_fmt", "yuv420p", "-an", "-movflags", "+faststart", output_path,
     ]
     result = _run(command)
@@ -306,6 +308,7 @@ def scale_to_min_height(source_path: str, output_path: str, *, min_height: int =
         "-i", source_path,
         "-vf", f"scale=-2:{int(min_height)}:flags=lanczos",
         "-c:v", "libx264", "-preset", "veryfast", "-crf", "20",
+        *_threads_args(threads),  # 인코더 스레드(073 R13.2)
         "-pix_fmt", "yuv420p", "-c:a", "copy", "-movflags", "+faststart", output_path,
     ]
     result = _run(command)
@@ -389,6 +392,7 @@ def pad_to_seconds(source_path: str, output_path: str, *, target_sec: float, thr
         "-i", source_path,
         "-vf", f"tpad=stop_mode=clone:stop_duration={max(0.0, target - (current or 0.0)):.3f}",
         "-c:v", "libx264", "-preset", "veryfast", "-crf", "20",
+        *_threads_args(threads),  # 인코더 스레드(073 R13.2)
         "-pix_fmt", "yuv420p", "-an", "-movflags", "+faststart", output_path,
     ]
     result = _run(command)
