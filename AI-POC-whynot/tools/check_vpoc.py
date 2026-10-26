@@ -11675,6 +11675,134 @@ def check_vnew_take_harmony_motion() -> None:
         )
 
 
+# ---------------------------------------------------------------- ARK Seedance 게이트
+
+
+def check_ark_seedance_gate() -> None:
+    """기존(BytePlus ARK 직결) Seedance 제외 — fal Seedance 만(설계자 2026-10-26).
+
+    기본 VPOC_ARK_SEEDANCE_ENABLED=false 이면 ② 목록에서 ARK Seedance(provider byteplus)가 빠지고,
+    저장된 ARK Seedance 선택은 ark.resolve_model 로 fal Seedance(등록 시) 또는 Luma 로 바뀐다.
+    이미 제출된 ARK 작업(ark/tasks/ ARN)은 그대로 조회된다(is_ark_job 유지). env=true 면 예전과 동일.
+
+    (sf-a) 기본(false): choices 에 provider byteplus 항목 없음, fal 등록 seedance i2v(가짜) 있음.
+    (sf-b) 저장 videoModel "seedance-2-5" → resolve 결과 fal seedance 2.5 i2v(등록 시), 미등록이면 Luma.
+    (sf-c) ARK ARN(ark/tasks/...) 조회 경로 유지(is_ark_job True).
+    (sf-d) env true → 예전 choices(byteplus 2개 포함) 그대로.
+    """
+    sys.path.insert(0, str(ROOT / "app"))
+    from src.vpoc import ark, fal, settings  # noqa: PLC0415
+
+    bad: list[str] = []
+
+    fal_target = settings.ARK_SEEDANCE_FAL_MAP["seedance-2-5"]  # "fal:bytedance/seedance-2.5/image-to-video"
+    fake_item = {
+        "id": fal_target,
+        "endpointId": fal_target[len("fal:"):],
+        "label": "Seedance 2.5 i2v",
+        "category": "image-to-video",
+        "caps": {"available": True, "durations": [5], "resolutions": ["720p"], "startImageField": "image_url"},
+    }
+
+    saved = {
+        "enabled": settings.ARK_SEEDANCE_ENABLED,
+        "api_key": settings.ARK_API_KEY,
+        "picker": settings.MODEL_PICKER_ENABLED,
+        "fal_registered": fal.registered,
+        "fal_is_registered": fal.is_registered,
+        "fal_unavailable": fal.unavailable_reason,
+        "fal_find": fal.find,
+        "fal_pricing_for": fal.pricing_for,
+    }
+
+    def _install_fake_fal(registered_items: list[dict]) -> None:
+        by_id = {item["id"]: item for item in registered_items}
+        fal.registered = lambda: [dict(item) for item in registered_items]
+        fal.is_registered = lambda model: model in by_id
+        fal.unavailable_reason = lambda model: "" if model in by_id else "등록되지 않은 모델"
+        fal.find = lambda model: dict(by_id[model]) if model in by_id else None
+        fal.pricing_for = lambda model: {"unit": "seconds", "unitPrice": 0.0}
+
+    try:
+        # ARK_API_KEY 를 채워 env=true 일 때 byteplus 가 '사용 가능'으로 보이게 한다(실제 호출 없음).
+        settings.ARK_API_KEY = "dummy-ark-key"
+
+        # ---- (sf-a) 기본(false): byteplus 없음, fal 등록 seedance i2v 있음 ----
+        settings.ARK_SEEDANCE_ENABLED = False
+        _install_fake_fal([fake_item])
+        items = ark.choices()
+        providers = [item.get("provider") for item in items]
+        if "byteplus" in providers:
+            bad.append(f"(sf-a) 기본(false)인데 choices 에 byteplus 항목이 있습니다: {providers}")
+        ids = {item.get("id") for item in items}
+        if fal_target not in ids:
+            bad.append(f"(sf-a) fal 등록 seedance i2v 가 choices 에 없습니다: {sorted(ids)}")
+        # ARK Seedance id 의 unavailable_reason 은 '사용 중지' 안내.
+        reason = ark.unavailable_reason("seedance-2-5")
+        if "사용 중지" not in reason or "fal" not in reason:
+            bad.append(f"(sf-a) ARK Seedance unavailable_reason 안내가 다릅니다: {reason!r}")
+
+        # ---- (sf-b) 저장 videoModel 'seedance-2-5' → fal seedance 2.5 i2v(등록 시) ----
+        if ark.resolve_model("seedance-2-5") != fal_target:
+            bad.append(f"(sf-b) 등록된 fal seedance 로 resolve 되지 않았습니다: {ark.resolve_model('seedance-2-5')}")
+        if ark.resolve_model("seedance-2-0") != fal_target:
+            bad.append(f"(sf-b) seedance-2-0 가 fal seedance 로 resolve 되지 않았습니다: {ark.resolve_model('seedance-2-0')}")
+        # selected() 도 같은 함수를 거친다(MODEL_PICKER 켬).
+        settings.MODEL_PICKER_ENABLED = True
+        state = {"steps": {"2": {"videoModel": "seedance-2-5"}}}
+        if ark.selected(state) != fal_target:
+            bad.append(f"(sf-b) selected() 가 fal seedance 로 바뀌지 않았습니다: {ark.selected(state)}")
+        # 미등록이면 Luma(DEFAULT_MODEL) 로 떨어진다.
+        _install_fake_fal([])  # fal 에 아무것도 등록 안 됨
+        if ark.resolve_model("seedance-2-5") != ark.DEFAULT_MODEL:
+            bad.append(f"(sf-b) 미등록인데 Luma 로 안 떨어졌습니다: {ark.resolve_model('seedance-2-5')}")
+        if ark.selected(state) != ark.DEFAULT_MODEL:
+            bad.append(f"(sf-b) 미등록 selected() 가 Luma 가 아닙니다: {ark.selected(state)}")
+        settings.MODEL_PICKER_ENABLED = saved["picker"]
+        _install_fake_fal([fake_item])  # 다시 등록 상태로
+
+        # ---- (sf-c) ARK ARN 조회 경로 유지 ----
+        if not ark.is_ark_job("ark/tasks/task-xyz"):
+            bad.append("(sf-c) ark/tasks/ ARN 이 is_ark_job True 가 아닙니다")
+        # fal 작업도 여전히 ark_job(공용 외부 경로).
+        if not ark.is_ark_job("fal/requests/x/req-1"):
+            bad.append("(sf-c) fal 작업이 is_ark_job True 가 아닙니다")
+
+        # ---- (sf-d) env true → 예전 choices(byteplus 2개 포함) ----
+        settings.ARK_SEEDANCE_ENABLED = True
+        items_on = ark.choices()
+        byteplus_ids = [item.get("id") for item in items_on if item.get("provider") == "byteplus"]
+        if sorted(byteplus_ids) != ["seedance-2-0", "seedance-2-5"]:
+            bad.append(f"(sf-d) env=true 인데 byteplus 2개가 아닙니다: {byteplus_ids}")
+        # env=true 면 ARK Seedance 는 그대로 고를 수 있고 resolve 는 바꾸지 않는다(회귀 없음).
+        if ark.unavailable_reason("seedance-2-5") != "":
+            bad.append(f"(sf-d) env=true 인데 ARK Seedance 가 unavailable 입니다: {ark.unavailable_reason('seedance-2-5')!r}")
+        if ark.resolve_model("seedance-2-5") != "seedance-2-5":
+            bad.append(f"(sf-d) env=true 인데 resolve 가 모델을 바꿨습니다: {ark.resolve_model('seedance-2-5')}")
+    except Exception as exc:  # noqa: BLE001
+        import traceback as _tb  # noqa: PLC0415
+
+        bad.append("ARK Seedance 게이트 검사 중 예외: " + repr(exc) + "\n" + _tb.format_exc()[:1200])
+    finally:
+        settings.ARK_SEEDANCE_ENABLED = saved["enabled"]
+        settings.ARK_API_KEY = saved["api_key"]
+        settings.MODEL_PICKER_ENABLED = saved["picker"]
+        fal.registered = saved["fal_registered"]
+        fal.is_registered = saved["fal_is_registered"]
+        fal.unavailable_reason = saved["fal_unavailable"]
+        fal.find = saved["fal_find"]
+        fal.pricing_for = saved["fal_pricing_for"]
+
+    if bad:
+        fail("ARK Seedance 게이트 검사 실패\n" + "\n".join(f"  {item}" for item in bad))
+    else:
+        ok(
+            "ARK Seedance 게이트 검사 (sf-a)기본 byteplus 없음·fal i2v 있음·안내 "
+            "(sf-b)저장 seedance-2-5→fal(등록)·미등록→Luma·selected 동일 "
+            "(sf-c)ark/tasks ARN is_ark_job 유지 (sf-d)env=true byteplus 2개·resolve 무변경"
+        )
+
+
 # ---------------------------------------------------------------- main
 
 
@@ -11713,6 +11841,7 @@ def main() -> int:
     check_vnew_take_prompt_budget()
     check_vnew_take_on_screen()
     check_vnew_take_harmony_motion()
+    check_ark_seedance_gate()
     print()
     if warnings:
         print(f"경고 {len(warnings)}건")

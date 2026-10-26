@@ -126,6 +126,19 @@ ARK_USD_PER_SEC = {
     "seedance-2-5": os.getenv("VPOC_ARK_USD_PER_SEC_2_5", ""),
 }
 
+# 기존(BytePlus ARK 직결) Seedance 사용 여부(설계자 2026-10-26: "운영과 개발에 fal.ai 의 seedance 를
+# 사용하도록 활성하고 기존 seedance 는 제외"). 기본 false — ARK Seedance(seedance-2-0/2-5)는 ② 모델
+# 목록에서 빠지고, 저장된 선택은 아래 ARK_SEEDANCE_FAL_MAP 으로 fal Seedance 로 바뀐다(ark.resolve_model).
+# "true" 면 예전처럼 ARK Seedance 가 그대로 보이고 쓰인다(회귀 없음). 이미 제출된 ARK 작업
+# (ark/tasks/ ARN)은 이 값과 무관하게 계속 조회·완료된다(ark.is_ark_job 유지).
+ARK_SEEDANCE_ENABLED = _flag("VPOC_ARK_SEEDANCE_ENABLED", "false")
+# 꺼져 있을 때 저장된 ARK Seedance 선택(seedance-2-0/2-5)을 바꿔 쓸 fal 모델. 둘 다 fal Seedance 2.5
+# image-to-video 로 보낸다(등록·사용 가능할 때만 — ark.resolve_model 이 확인하고, 아니면 Luma 로 떨어진다).
+ARK_SEEDANCE_FAL_MAP = {
+    "seedance-2-0": "fal:bytedance/seedance-2.5/image-to-video",
+    "seedance-2-5": "fal:bytedance/seedance-2.5/image-to-video",
+}
+
 # fal.ai — 키 하나로 수백 개의 영상 모델(Kling · MiniMax Hailuo · Wan · Veo …)을 큐 API 로 부른다
 # (설계자 2026-10-18). Seedance(ark.py)와 같은 "외부 영상 공급자" 경로를 탄다. 키는 Secret 에서만
 # 온다(FAL_KEY). 사용자가 ② 화면에서 "fal 에서 모델 가져오기"로 등록한 모델만 ② 목록에 나타난다.
