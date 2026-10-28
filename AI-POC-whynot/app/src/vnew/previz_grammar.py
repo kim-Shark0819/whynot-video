@@ -303,7 +303,8 @@ def _read(blocks: list[dict], *, model: str) -> tuple[dict, dict]:
         system_text=SYSTEM,
         blocks=blocks,
         tool=TOOL,
-        max_tokens=900,
+        # 900 은 5.x 모델 출력이 잘렸다(llm-top-model-first R3, 2026-10-28). 출력 토큰은 쓴 만큼만 과금된다.
+        max_tokens=2000,
         where="vnew.previz.grammar",
         model=model,
     )

@@ -11821,6 +11821,11 @@ PARITY_ENV_KEYS = [
     "VPOC_FAL_SEEDANCE_TAG_STYLE",
     # 작업 7(R15.8): 결과 조회 포기 시간.
     "VPOC_POLL_GIVEUP_S",
+    # llm-top-model-first R6: 설정 거절 미리 적용·잘림 재시도.
+    "VPOC_LLM_NO_FORCED_TOOL",
+    "VPOC_LLM_NO_TEMPERATURE",
+    "VPOC_LLM_TRUNC_RETRY_FACTOR",
+    "VPOC_LLM_TRUNC_RETRY_CAP",
 ]
 PARITY_FACE = "fal:bytedance/seedance-2.5/image-to-video"
 PARITY_PARTNER = "fal:bytedance/seedance-2.5/reference-to-video"
@@ -16528,6 +16533,604 @@ def check_vnew_model_list_parity() -> None:
         )
 
 
+# ---------------------------------------------------------------- llm-top-model-first
+
+# 검사가 쓰는 모델 id(코드 기본 체인과 같은 값).
+LT_FABLE = "global.anthropic.claude-fable-5-1"
+LT_OPUS55 = "global.anthropic.claude-opus-5-5"
+LT_OPUS46 = "global.anthropic.claude-opus-4-6-v1"
+LT_SONNET46 = "global.anthropic.claude-sonnet-4-6"
+LT_SONNET45 = "global.anthropic.claude-sonnet-4-5-20250929-v1:0"
+LT_ASTRA = "global.openai.gpt-6-astra"
+LT_KEYS = (
+    "VPOC_LLM_NO_FORCED_TOOL",
+    "VPOC_LLM_NO_TEMPERATURE",
+    "VPOC_LLM_TRUNC_RETRY_FACTOR",
+    "VPOC_LLM_TRUNC_RETRY_CAP",
+)
+
+
+class _LtFakeBedrock:
+    """가짜 bedrock-runtime. script 의 응답을 차례로 준다(예외면 올린다). 요청을 (종류, 요청) 으로 모은다."""
+
+    def __init__(self) -> None:
+        self.script: list = []
+        self.calls: list[tuple[str, dict]] = []
+
+    def load(self, *items) -> None:
+        self.script = list(items)
+        self.calls = []
+
+    def _next(self, kind: str, request: dict):
+        self.calls.append((kind, request))
+        if not self.script:
+            raise AssertionError(f"가짜 Bedrock 응답이 모자랍니다({kind} {request.get('modelId')})")
+        item = self.script.pop(0)
+        if isinstance(item, BaseException):
+            raise item
+        return item
+
+    def converse_stream(self, **request):
+        return self._next("stream", request)
+
+    def converse(self, **request):
+        return self._next("converse", request)
+
+    def models(self) -> list:
+        return [request.get("modelId") for _, request in self.calls]
+
+    def budgets(self) -> list:
+        return [(request.get("inferenceConfig") or {}).get("maxTokens") for _, request in self.calls]
+
+    def kinds(self) -> list:
+        return [kind for kind, _ in self.calls]
+
+
+def _lt_stream(*, tool_json: str | None = None, text: str = "", stop: str | None = "tool_use", out: int = 20) -> dict:
+    """converse_stream 응답 모양(이벤트 목록). stop=None 이면 messageStop 이 없다."""
+    events: list[dict] = [{"messageStart": {"role": "assistant"}}]
+    if text:
+        events.append({"contentBlockDelta": {"contentBlockIndex": 0, "delta": {"text": text}}})
+    if tool_json is not None:
+        events.append({"contentBlockStart": {"contentBlockIndex": 1, "start": {"toolUse": {"toolUseId": "t1", "name": "emit"}}}})
+        events.append({"contentBlockDelta": {"contentBlockIndex": 1, "delta": {"toolUse": {"input": tool_json}}}})
+        events.append({"contentBlockStop": {"contentBlockIndex": 1}})
+    if stop is not None:
+        events.append({"messageStop": {"stopReason": stop}})
+    events.append({"metadata": {"usage": {"inputTokens": 100, "outputTokens": out}, "metrics": {"latencyMs": 5}}})
+    return {"stream": events}
+
+
+def _lt_converse(*, tool_input: dict | None = None, text: str = "", stop: str | None = "tool_use", out: int = 20) -> dict:
+    """converse(보통 호출) 응답 모양. stop=None 이면 stopReason 키가 없다."""
+    content: list[dict] = []
+    if text:
+        content.append({"text": text})
+    if tool_input is not None:
+        content.append({"toolUse": {"toolUseId": "t1", "name": "emit", "input": tool_input}})
+    response: dict = {
+        "output": {"message": {"role": "assistant", "content": content}},
+        "usage": {"inputTokens": 100, "outputTokens": out},
+    }
+    if stop is not None:
+        response["stopReason"] = stop
+    return response
+
+
+def check_llm_top_model_first() -> None:
+    """llm-top-model-first — 잘림 재시도·설정 거절 미리 적용·호출부 예산·로그·배선(R1~R6). 외부 호출은 전부 가짜.
+
+    (lt-a) 스트림 잘림(messageStop max_tokens + 깨진 JSON) → 같은 모델 재시도 400→1600·900→3600·2000→4096, 성공·model·로그
+    (lt-b) 재시도도 잘림 → 다음 모델(원래 예산)·체인 전부 잘림 문구·8000 재시도 없음·FACTOR=1 재시도 없음
+    (lt-c) end_turn 도구 없음 → 재시도 없이 다음 모델·지금 문구, max_tokens 인데 JSON 온전 → 성공 1회
+    (lt-d) 미리 적용: opus-5-5·fable-5-1 temperature 없음·auto·강제 문장, gpt-6 temperature 없음·tool, 4.6·4.5 그대로
+    (lt-e) 설정 빈 값 → 미리 적용 꺼짐·_adapt 2회(회귀)·_parse_marks
+    (lt-f) 보통 호출 stopReason 잘림 재시도·스트림 권한 거절 전환·4개 반환
+    (lt-g) count_people 400·previz.grammar 2000(가짜 _converse 인자)
+    (lt-h) vpoc.call stop=·프롬프트 본문 로그 없음·실제 클라이언트 0
+    (lt-i) config.env.example 값 = 코드 기본·render.py base+dev·prod 렌더 값
+    """
+    import importlib.util  # noqa: PLC0415
+    import time as _time_mod  # noqa: PLC0415
+    import types as _types  # noqa: PLC0415
+
+    from botocore.exceptions import ClientError, ReadTimeoutError  # noqa: PLC0415
+
+    sys.path.insert(0, str(ROOT / "app"))
+    from src.vnew import characters, previz_grammar  # noqa: PLC0415
+    from src.vnew import settings as vnew_settings  # noqa: PLC0415
+    from src.vpoc import llm, settings  # noqa: PLC0415
+    from src.vpoc.errors import VpocError  # noqa: PLC0415
+
+    bad: list[str] = []
+    logs = _LogCapture()
+    fake = _LtFakeBedrock()
+    real_calls: list[str] = []
+    sleeps: list[float] = []
+    sys_mark = "LT-SYSTEM-SECRET-PROMPT-7f3a"
+    user_mark = "LT-USER-SECRET-BLOCK-9c1e"
+    tool = {
+        "name": "emit_people_count",
+        "description": "Count people.",
+        "inputSchema": {"json": {"type": "object", "properties": {"people": {"type": "integer"}}, "required": ["people"]}},
+    }
+    blocks = [{"text": user_mark}]
+    forced_line = "You MUST answer by calling the emit_people_count tool exactly once. No plain text."
+    saved = {
+        "client_for": llm.client_for,
+        "runtime": llm.runtime,
+        "_broker_client": llm._broker_client,
+        "_converse": llm._converse,
+        "time": llm.time,
+        "STREAM": dict(llm._STREAM),
+        "DENIED": dict(llm._DENIED),
+        "NO_FORCED_TOOL": set(llm._NO_FORCED_TOOL),
+        "NO_TEMPERATURE": set(llm._NO_TEMPERATURE),
+    }
+    setting_names = (
+        "TEXT_FALLBACK_MODELS",
+        "TEXT_MODEL",
+        "LLM_NO_FORCED_TOOL",
+        "LLM_NO_TEMPERATURE",
+        "LLM_TRUNC_RETRY_FACTOR",
+        "LLM_TRUNC_RETRY_CAP",
+    )
+    saved_settings = {name: getattr(settings, name) for name in setting_names}
+    chain = [LT_FABLE, LT_OPUS55, LT_OPUS46, LT_SONNET46, LT_SONNET45]
+
+    def reset() -> None:
+        llm._STREAM.clear()
+        llm._STREAM.update({"ok": True, "broker": True})
+        llm._DENIED.clear()
+        llm._NO_FORCED_TOOL.clear()
+        llm._NO_TEMPERATURE.clear()
+        settings.TEXT_FALLBACK_MODELS = [LT_OPUS55, LT_OPUS46, LT_SONNET46, LT_SONNET45]
+        settings.TEXT_MODEL = LT_SONNET45
+        settings.LLM_NO_FORCED_TOOL = settings._parse_marks(settings.LLM_NO_FORCED_TOOL_DEFAULT)
+        settings.LLM_NO_TEMPERATURE = settings._parse_marks(settings.LLM_NO_TEMPERATURE_DEFAULT)
+        settings.LLM_TRUNC_RETRY_FACTOR = 4
+        settings.LLM_TRUNC_RETRY_CAP = 4096
+        logs.clear()
+
+    def call(max_tokens: int = 400, model: str = LT_FABLE, where: str = "check.lt"):
+        return llm._converse(
+            system_text=sys_mark,
+            blocks=blocks,
+            tool=tool,
+            max_tokens=max_tokens,
+            where=where,
+            model=model,
+        )
+
+    def trunc_lines() -> list[str]:
+        return logs.messages("vpoc.call.trunc_retry", level=logging.INFO)
+
+    def call_lines() -> list[str]:
+        return logs.messages("vpoc.call where=", level=logging.INFO)
+
+    def validation(message: str) -> ClientError:
+        return ClientError({"Error": {"Code": "ValidationException", "Message": message}}, "ConverseStream")
+
+    def no_real(name: str):
+        def refuse(*_args, **_kwargs):
+            real_calls.append(name)
+            raise AssertionError(f"실제 Bedrock 클라이언트({name})를 만들려 했습니다")
+
+        return refuse
+
+    try:
+        llm.client_for = lambda model: fake
+        llm.runtime = no_real("runtime")
+        llm._broker_client = no_real("broker")
+        # 일시 오류 대기(3초)는 기록만 한다. 전역 time 모듈은 건드리지 않고 llm 이 보는 이름만 바꾼다.
+        llm.time = _types.SimpleNamespace(time=_time_mod.time, sleep=sleeps.append)
+        logs.attach()
+
+        # ---- (lt-a) 스트림 잘림 → 같은 모델 재시도 ----
+        for max_tokens, want in ((400, 1600), (900, 3600), (2000, 4096)):
+            reset()
+            if llm._trunc_budget(max_tokens) != want:
+                bad.append(f"(lt-a) _trunc_budget({max_tokens}) != {want}: {llm._trunc_budget(max_tokens)}")
+            fake.load(
+                _lt_stream(text="Looking at the image, ", tool_json='{"people": 2', stop="max_tokens", out=max_tokens),
+                _lt_stream(tool_json='{"people": 2}', stop="tool_use", out=40),
+            )
+            try:
+                payload, usage = call(max_tokens)
+            except Exception as exc:  # noqa: BLE001
+                bad.append(f"(lt-a) {max_tokens}: 재시도가 성공하지 않았습니다: {type(exc).__name__} {str(exc)[:200]}")
+                continue
+            if payload != {"people": 2} or usage.get("model") != LT_FABLE or usage.get("outputTokens") != 40:
+                bad.append(f"(lt-a) {max_tokens}: payload·usage 가 재시도 결과가 아닙니다: {payload} {usage}")
+            if fake.models() != [LT_FABLE, LT_FABLE] or fake.budgets() != [max_tokens, want]:
+                bad.append(
+                    f"(lt-a) {max_tokens}: 요청이 같은 모델 [{max_tokens}, {want}] 가 아닙니다: {fake.models()} {fake.budgets()}"
+                )
+            lines = trunc_lines()
+            if lines != [f"vpoc.call.trunc_retry where=check.lt model={LT_FABLE} budget={want}"]:
+                bad.append(f"(lt-a) {max_tokens}: trunc_retry 로그가 1줄(where·model·budget)이 아닙니다: {lines}")
+
+        # ---- (lt-b) 재시도도 잘림 → 다음 모델 ----
+        reset()
+        fake.load(
+            _lt_stream(tool_json='{"peo', stop="max_tokens", out=400),
+            _lt_stream(text="x" * 50, stop="max_tokens", out=1600),
+            _lt_stream(tool_json='{"people": 1}', stop="tool_use"),
+        )
+        payload, usage = call(400)
+        if fake.models() != [LT_FABLE, LT_FABLE, LT_OPUS55] or fake.budgets() != [400, 1600, 400]:
+            bad.append(f"(lt-b) 재시도 잘림 뒤 다음 모델(원래 예산)이 아닙니다: {fake.models()} {fake.budgets()}")
+        if payload != {"people": 1} or usage.get("model") != LT_OPUS55:
+            bad.append(f"(lt-b) 다음 모델 결과가 아닙니다: {payload} {usage}")
+        if len(trunc_lines()) != 1:
+            bad.append(f"(lt-b) trunc_retry 로그가 1줄이 아닙니다: {trunc_lines()}")
+        # 체인 전부 잘림 → 모델마다 2회, 마지막 오류는 잘림 문구
+        reset()
+        fake.load(*[_lt_stream(text="thinking...", stop="max_tokens", out=400) for _ in range(len(chain) * 2)])
+        try:
+            call(400)
+            bad.append("(lt-b) 체인 전부 잘림인데 오류가 없습니다")
+        except VpocError as exc:
+            if (
+                exc.kind != "SchemaViolation"
+                or exc.status != 502
+                or not exc.message.startswith("모델 출력이 출력 한도(1600 토큰)에서 잘렸습니다. 출력 앞부분: thinking")
+            ):
+                bad.append(f"(lt-b) 잘림 오류가 SchemaViolation 502·잘림 문구가 아닙니다: {exc.kind} {exc.status} {exc.message[:120]}")
+        want_models = [model for model in chain for _ in range(2)]
+        if fake.models() != want_models or fake.budgets() != [400, 1600] * len(chain):
+            bad.append(f"(lt-b) 체인 순서·예산이 모델마다 [400, 1600] 이 아닙니다: {fake.models()} {fake.budgets()}")
+        if len(trunc_lines()) != len(chain):
+            bad.append(f"(lt-b) 체인 전부 잘림 trunc_retry 로그가 {len(chain)}줄이 아닙니다: {len(trunc_lines())}")
+        # 원래 예산 ≥ 상한 → 재시도 없음
+        reset()
+        fake.load(_lt_stream(text="t", stop="max_tokens", out=8000), _lt_stream(tool_json='{"people": 0}'))
+        call(8000)
+        if fake.models() != [LT_FABLE, LT_OPUS55] or fake.budgets() != [8000, 8000] or trunc_lines():
+            bad.append(f"(lt-b) 8000 잘림이 재시도 없이 다음 모델로 가지 않았습니다: {fake.models()} {fake.budgets()} {trunc_lines()}")
+        # FACTOR=1 → 재시도 없음(되돌리기 스위치)
+        reset()
+        settings.LLM_TRUNC_RETRY_FACTOR = 1
+        fake.load(_lt_stream(text="t", stop="max_tokens", out=400), _lt_stream(tool_json='{"people": 0}'))
+        call(400)
+        if fake.models() != [LT_FABLE, LT_OPUS55] or fake.budgets() != [400, 400] or trunc_lines():
+            bad.append(f"(lt-b) FACTOR=1 인데 재시도했습니다: {fake.models()} {fake.budgets()} {trunc_lines()}")
+        # 잘림 재시도 중 일시 오류(혼잡·읽기 시간 초과) → 늘린 예산으로 같은 모델 한 번 더(design.md §3)
+        for label, error in (
+            ("Throttling", ClientError({"Error": {"Code": "ThrottlingException", "Message": "Too many requests"}}, "ConverseStream")),
+            ("ReadTimeout", ReadTimeoutError(endpoint_url="https://bedrock-runtime.invalid")),
+        ):
+            reset()
+            sleeps.clear()
+            fake.load(_lt_stream(text="t", stop="max_tokens", out=400), error, _lt_stream(tool_json='{"people": 7}'))
+            payload, usage = call(400)
+            if fake.models() != [LT_FABLE] * 3 or fake.budgets() != [400, 1600, 1600] or payload != {"people": 7} or sleeps != [3]:
+                bad.append(
+                    f"(lt-b) 재시도 중 {label} 뒤 같은 모델·1600 이 아닙니다: {fake.models()} {fake.budgets()} {payload} {sleeps}"
+                )
+        # 미허용(AccessDenied) → 거부 기억·다음 모델은 원래 예산
+        reset()
+        fake.load(
+            ClientError({"Error": {"Code": "AccessDeniedException", "Message": "no access to model"}}, "ConverseStream"),
+            _lt_stream(tool_json='{"people": 1}'),
+        )
+        payload, usage = call(400)
+        if fake.models() != [LT_FABLE, LT_OPUS55] or fake.budgets() != [400, 400] or LT_FABLE not in llm._DENIED:
+            bad.append(f"(lt-b) AccessDenied 뒤 다음 모델·거부 기억이 지금과 다릅니다: {fake.models()} {fake.budgets()}")
+
+        # ---- (lt-c) 잘림이 아닌 실패(회귀) ----
+        reset()
+        fake.load(_lt_stream(text="There are two people.", stop="end_turn"), _lt_stream(tool_json='{"people": 2}'))
+        payload, usage = call(400)
+        if fake.models() != [LT_FABLE, LT_OPUS55] or fake.budgets() != [400, 400] or trunc_lines():
+            bad.append(f"(lt-c) end_turn 도구 없음이 재시도 없이 다음 모델로 가지 않았습니다: {fake.models()} {fake.budgets()}")
+        if usage.get("model") != LT_OPUS55:
+            bad.append(f"(lt-c) 다음 모델 결과가 아닙니다: {usage}")
+        reset()
+        fake.load(*[_lt_stream(text="plain answer", stop="end_turn") for _ in chain])
+        try:
+            call(400)
+            bad.append("(lt-c) 체인 전부 도구 없음인데 오류가 없습니다")
+        except VpocError as exc:
+            if not exc.message.startswith("모델이 도구를 쓰지 않았습니다. 출력 앞부분: plain answer") or "잘렸습니다" in exc.message:
+                bad.append(f"(lt-c) 도구 없음 오류 문구가 지금과 다릅니다: {exc.message[:120]}")
+        if fake.models() != chain:
+            bad.append(f"(lt-c) 도구 없음이 모델마다 1회가 아닙니다: {fake.models()}")
+        reset()
+        fake.load(_lt_stream(tool_json='{"people": 5}', stop="max_tokens", out=400))
+        payload, usage = call(400)
+        if payload != {"people": 5} or len(fake.calls) != 1 or trunc_lines():
+            bad.append(f"(lt-c) max_tokens 인데 JSON 이 온전하면 1회로 성공해야 합니다: {payload} {len(fake.calls)}")
+
+        # ---- (lt-d) 미리 적용 ----
+        reset()
+        for model in (LT_OPUS55, LT_FABLE):
+            request = llm._request(model, sys_mark, blocks, tool, 400)
+            inference = request.get("inferenceConfig") or {}
+            choice = (request.get("toolConfig") or {}).get("toolChoice")
+            system = request["system"][0]["text"]
+            if "temperature" in inference or choice != {"auto": {}} or not system.endswith(forced_line):
+                bad.append(f"(lt-d) {model}: temperature 없음·auto·강제 문장이 아닙니다: {inference} {choice} {system[-60:]!r}")
+            if inference.get("maxTokens") != 400 or not system.startswith(sys_mark):
+                bad.append(f"(lt-d) {model}: maxTokens·system 원문이 바뀌었습니다")
+        request = llm._request(LT_ASTRA, sys_mark, blocks, tool, 400)
+        if "temperature" in request["inferenceConfig"] or request["toolConfig"]["toolChoice"] != {"tool": {"name": tool["name"]}}:
+            bad.append(
+                f"(lt-d) gpt-6-astra: temperature 없음·toolChoice tool 이 아닙니다: "
+                f"{request['inferenceConfig']} {request['toolConfig']['toolChoice']}"
+            )
+        if request["system"][0]["text"] != sys_mark:
+            bad.append("(lt-d) gpt-6-astra: system 에 강제 문장이 붙었습니다")
+        for model in (LT_OPUS46, LT_SONNET45, LT_SONNET46):
+            request = llm._request(model, sys_mark, blocks, tool, 400)
+            if (
+                request["inferenceConfig"].get("temperature") != 0.6
+                or request["toolConfig"]["toolChoice"] != {"tool": {"name": tool["name"]}}
+                or request["system"][0]["text"] != sys_mark
+            ):
+                bad.append(f"(lt-d) {model}: 요청이 지금과 다릅니다: {request['inferenceConfig']} {request['toolConfig']['toolChoice']}")
+        if not llm._listed("GLOBAL.ANTHROPIC.CLAUDE-OPUS-5-5", settings.LLM_NO_FORCED_TOOL) or llm._listed(
+            LT_OPUS46, settings.LLM_NO_FORCED_TOOL
+        ):
+            bad.append("(lt-d) _listed 가 대소문자·4.6 을 잘못 판정합니다")
+        for model in (LT_FABLE, LT_OPUS55, LT_ASTRA):
+            reset()
+            fake.load(_lt_stream(tool_json='{"people": 2}'))
+            call(400, model=model)
+            first = fake.calls[0][1] if fake.calls else {}
+            want_choice = {"tool": {"name": tool["name"]}} if model == LT_ASTRA else {"auto": {}}
+            if (
+                len(fake.calls) != 1
+                or "temperature" in (first.get("inferenceConfig") or {})
+                or (first.get("toolConfig") or {}).get("toolChoice") != want_choice
+            ):
+                bad.append(f"(lt-d) {model} 첫 요청이 거절 없이 1회(미리 적용)가 아닙니다: {len(fake.calls)} {first.get('inferenceConfig')}")
+            if logs.messages("vpoc.call.adapt") or llm._NO_FORCED_TOOL or llm._NO_TEMPERATURE:
+                bad.append(f"(lt-d) {model}: 미리 적용인데 적응 로그·기억 집합이 생겼습니다: {llm._NO_FORCED_TOOL} {llm._NO_TEMPERATURE}")
+
+        # ---- (lt-e) 설정 빈 값 → 미리 적용 꺼짐, _adapt 경로 ----
+        for raw, want in (("", ()), (None, ()), (" Claude-Opus-5 , ,gpt-6 ", ("claude-opus-5", "gpt-6")), (",", ())):
+            if settings._parse_marks(raw) != want:
+                bad.append(f"(lt-e) _parse_marks({raw!r}) != {want}: {settings._parse_marks(raw)}")
+        reset()
+        settings.LLM_NO_FORCED_TOOL = settings._parse_marks("")
+        settings.LLM_NO_TEMPERATURE = settings._parse_marks("")
+        request = llm._request(LT_FABLE, sys_mark, blocks, tool, 400)
+        if request["inferenceConfig"].get("temperature") != 0.6 or request["toolConfig"]["toolChoice"] != {"tool": {"name": tool["name"]}}:
+            bad.append(
+                f"(lt-e) 빈 값인데 fable 요청에 미리 적용이 남았습니다: "
+                f"{request['inferenceConfig']} {request['toolConfig']['toolChoice']}"
+            )
+        fake.load(
+            validation("The model returned the following errors: tool_choice.type any is not supported"),
+            validation("`temperature` is deprecated for this model."),
+            _lt_stream(tool_json='{"people": 4}'),
+        )
+        payload, usage = call(400, model=LT_FABLE)
+        shapes = [
+            ("temperature" in (req.get("inferenceConfig") or {}), sorted((req.get("toolConfig") or {}).get("toolChoice") or {}))
+            for _, req in fake.calls
+        ]
+        if shapes != [(True, ["tool"]), (True, ["auto"]), (False, ["auto"])]:
+            bad.append(f"(lt-e) 적응 경로 요청 모양이 [tool+temp, auto+temp, auto] 가 아닙니다: {shapes}")
+        if payload != {"people": 4} or usage.get("model") != LT_FABLE:
+            bad.append(f"(lt-e) 적응 뒤 같은 모델 성공이 아닙니다: {payload} {usage}")
+        if len(logs.messages("vpoc.call.adapt", level=logging.INFO)) != 2:
+            bad.append(f"(lt-e) vpoc.call.adapt 로그가 2줄이 아닙니다: {logs.messages('vpoc.call.adapt')}")
+        if LT_FABLE not in llm._NO_FORCED_TOOL or LT_FABLE not in llm._NO_TEMPERATURE:
+            bad.append("(lt-e) 적응 뒤 기억 집합에 fable 이 없습니다")
+
+        # ---- (lt-f) 보통 호출(converse) 경로 ----
+        reset()
+        llm._STREAM.update({"ok": False, "broker": False})
+        fake.load(
+            _lt_converse(text="Let me look carefully at the image first. " * 3, stop="max_tokens", out=400),
+            _lt_converse(tool_input={"people": 3}, stop="tool_use", out=30),
+        )
+        payload, usage = call(400)
+        if fake.kinds() != ["converse", "converse"] or fake.models() != [LT_FABLE, LT_FABLE] or fake.budgets() != [400, 1600]:
+            bad.append(
+                f"(lt-f) 보통 호출 잘림이 같은 모델 1600 재시도가 아닙니다: {fake.kinds()} {fake.models()} {fake.budgets()}"
+            )
+        if payload != {"people": 3} or usage.get("model") != LT_FABLE or len(trunc_lines()) != 1:
+            bad.append(f"(lt-f) 보통 호출 재시도 결과·로그가 다릅니다: {payload} {usage} {trunc_lines()}")
+        fake.load(_lt_converse(tool_input={"people": 1}, stop=None))
+        got = llm._converse_once(LT_FABLE, sys_mark, blocks, tool, 400)
+        if len(got) != 4 or got[0] != {"people": 1} or got[3] != "":
+            bad.append(f"(lt-f) _converse_once 가 (payload, text, usage, stop) 4개가 아닙니다: {got}")
+        reset()
+        fake.load(
+            ClientError(
+                {"Error": {"Code": "AccessDeniedException", "Message": "not authorized to perform: bedrock:InvokeModelWithResponseStream"}},
+                "ConverseStream",
+            ),
+            _lt_converse(tool_input={"people": 1}, stop=None),
+        )
+        payload, usage = call(400)
+        if fake.kinds() != ["stream", "converse"] or payload != {"people": 1}:
+            bad.append(f"(lt-f) 스트림 권한 거절 → 보통 호출 전환이 아닙니다: {fake.kinds()} {payload}")
+        if all(llm._STREAM.values()):
+            bad.append(f"(lt-f) 스트림 권한 거절이 기억되지 않았습니다: {llm._STREAM}")
+        if [line for line in call_lines() if line.endswith(" stop=-")] != call_lines() or len(call_lines()) != 1:
+            bad.append(f"(lt-f) stopReason 없는 응답의 vpoc.call 이 stop=- 1줄이 아닙니다: {call_lines()}")
+        reset()
+        fake.load(_lt_stream(tool_json='{"people": 6}', stop="tool_use"))
+        got = llm._stream_once(LT_FABLE, sys_mark, blocks, tool, 400)
+        if len(got) != 4 or got[0] != {"people": 6} or got[3] != "tool_use":
+            bad.append(f"(lt-f) _stream_once 가 (payload, text, usage, stop) 4개가 아닙니다: {got}")
+        got = llm._read_stream(_lt_stream(tool_json='{"people": 6}', stop=None))
+        if len(got) != 4 or got[3] != "":
+            bad.append(f"(lt-f) messageStop 없는 스트림의 stop 이 빈 값이 아닙니다: {got}")
+        got = llm._read_stream(_lt_stream(tool_json='{"people": ', stop="max_tokens"))
+        if got[0] is not None or not got[1].startswith("(도구 입력 JSON 이 깨짐) ") or got[3] != "max_tokens":
+            bad.append(f"(lt-f) 깨진 JSON 스트림이 (None, 깨짐 표시, …, max_tokens) 가 아닙니다: {got}")
+
+        # ---- (lt-h) 로그 형식 ----
+        reset()
+        fake.load(
+            _lt_stream(text="I see ", tool_json='{"people": ', stop="max_tokens", out=400),
+            _lt_stream(tool_json='{"people": 2}', stop="tool_use"),
+        )
+        call(400, where="check.lt.log")
+        lines = [line for line in call_lines() if "where=check.lt.log " in line]
+        if len(lines) != 2 or not lines[0].endswith(" stop=max_tokens") or not lines[1].endswith(" stop=tool_use"):
+            bad.append(f"(lt-h) vpoc.call 줄 끝이 stop=max_tokens·stop=tool_use 가 아닙니다: {lines}")
+        pattern = r"vpoc\.call where=check\.lt\.log model=\S+ ms=\d+ ok=False in=100 out=400 stop=max_tokens$"
+        if not lines or not re.match(pattern, lines[0]):
+            bad.append(f"(lt-h) vpoc.call 형식이 다릅니다: {lines[:1]}")
+        sent = fake.calls[0][1] if fake.calls else {}
+        sent_system = ((sent.get("system") or [{}])[0] or {}).get("text") or ""
+        if not sent_system.startswith(sys_mark) or user_mark not in json.dumps(sent.get("messages"), ensure_ascii=False):
+            bad.append("(lt-h) 표식 문자열이 요청에 실리지 않았습니다(검사 전제)")
+
+        # ---- (lt-g) 호출부 예산 ----
+        got_calls: list[dict] = []
+
+        def fake_converse(**kwargs):
+            got_calls.append(dict(kwargs))
+            if kwargs.get("where") == "vnew.count_people":
+                return {"people": 2}, {"model": kwargs.get("model")}
+            return {"mainSubject": "A", "frameBottomCut": "chest"}, {"model": kwargs.get("model")}
+
+        llm._converse = fake_converse
+        try:
+            people = characters._count_people(b"JPEG")
+            charged: list = []
+            grammar = previz_grammar.read_cut(
+                "tester",
+                "prj_lt",
+                "pl_lt",
+                {"cutId": "c1", "shotKo": "s", "characters": ["A"]},
+                [b"JPEG"],
+                ["A"],
+                charge=lambda usage, model: charged.append((usage, model)),
+            )
+            # 모델 오류·정수가 아닌 값이면 None(검사 건너뜀, 지금 동작)
+            llm._converse = lambda **kwargs: (_ for _ in ()).throw(VpocError("vnew.count_people", "SchemaViolation", "x", 502))
+            people_error = characters._count_people(b"JPEG")
+            llm._converse = lambda **kwargs: ({"people": "many"}, {"model": kwargs.get("model")})
+            people_bad = characters._count_people(b"JPEG")
+        finally:
+            llm._converse = saved["_converse"]
+        if people_error is not None or people_bad is not None:
+            bad.append(f"(lt-g) count_people 오류·정수 아님이 None 이 아닙니다: {people_error} {people_bad}")
+        wants = [
+            ("vnew.count_people", 400, vnew_settings.PEOPLE_COUNT_MODEL),
+            ("vnew.previz.grammar", 2000, previz_grammar.GRAMMAR_MODEL),
+        ]
+        seen = [(item.get("where"), item.get("max_tokens"), item.get("model")) for item in got_calls]
+        if seen != wants:
+            bad.append(f"(lt-g) 호출부 (where, max_tokens, model) 이 다릅니다: {seen}")
+        if people != 2 or not isinstance(grammar, dict) or grammar.get("shotSize") != "MCU" or len(charged) != 1:
+            bad.append(
+                f"(lt-g) 호출부 결과가 다릅니다: people={people} "
+                f"grammar={isinstance(grammar, dict) and grammar.get('shotSize')} charged={len(charged)}"
+            )
+
+        # ---- (lt-h) 프롬프트 본문이 어떤 로그에도 없다(이 그룹의 레코드 전부) ----
+        leaked = [
+            record.getMessage()[:120]
+            for record in logs.records
+            if sys_mark in record.getMessage() or user_mark in record.getMessage()
+        ]
+        if leaked:
+            bad.append(f"(lt-h) 로그에 프롬프트 본문이 남았습니다: {leaked[:3]}")
+        if real_calls:
+            bad.append(f"(lt-h) 실제 Bedrock 클라이언트를 만들려 했습니다: {real_calls}")
+
+        # ---- (lt-i) 배선 값 ----
+        example_path = ROOT / "deploy" / "config.env.example"
+        example = example_path.read_text(encoding="utf-8")
+        saved_env = {key: os.environ.pop(key) for key in LT_KEYS if key in os.environ}
+        try:
+            spec = importlib.util.spec_from_file_location("_lt_settings_fresh", APP_SRC / "vpoc" / "settings.py")
+            fresh = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(fresh)  # type: ignore[union-attr]
+            os.environ["VPOC_LLM_NO_FORCED_TOOL"] = ""
+            os.environ["VPOC_LLM_NO_TEMPERATURE"] = ""
+            os.environ["VPOC_LLM_TRUNC_RETRY_FACTOR"] = ""
+            spec_empty = importlib.util.spec_from_file_location("_lt_settings_empty", APP_SRC / "vpoc" / "settings.py")
+            empty = importlib.util.module_from_spec(spec_empty)
+            spec_empty.loader.exec_module(empty)  # type: ignore[union-attr]
+        finally:
+            for key in LT_KEYS:
+                os.environ.pop(key, None)
+            os.environ.update(saved_env)
+        if empty.LLM_NO_FORCED_TOOL != () or empty.LLM_NO_TEMPERATURE != () or empty.LLM_TRUNC_RETRY_FACTOR != 4:
+            bad.append(
+                f"(lt-i) env 빈 값이 ()·()·4 가 아닙니다: {empty.LLM_NO_FORCED_TOOL} {empty.LLM_NO_TEMPERATURE} "
+                f"{empty.LLM_TRUNC_RETRY_FACTOR}"
+            )
+        code_defaults = {
+            "VPOC_LLM_NO_FORCED_TOOL": fresh.LLM_NO_FORCED_TOOL_DEFAULT,
+            "VPOC_LLM_NO_TEMPERATURE": fresh.LLM_NO_TEMPERATURE_DEFAULT,
+            "VPOC_LLM_TRUNC_RETRY_FACTOR": str(fresh.LLM_TRUNC_RETRY_FACTOR),
+            "VPOC_LLM_TRUNC_RETRY_CAP": str(fresh.LLM_TRUNC_RETRY_CAP),
+        }
+        if code_defaults["VPOC_LLM_TRUNC_RETRY_FACTOR"] != "4" or code_defaults["VPOC_LLM_TRUNC_RETRY_CAP"] != "4096":
+            bad.append(f"(lt-i) 코드 기본 배수·상한이 4·4096 이 아닙니다: {code_defaults}")
+        if fresh.LLM_NO_FORCED_TOOL != ("claude-opus-5", "claude-fable-5") or fresh.LLM_NO_TEMPERATURE != (
+            "claude-opus-5",
+            "claude-fable-5",
+            "gpt-6",
+        ):
+            bad.append(f"(lt-i) 코드 기본 목록이 다릅니다: {fresh.LLM_NO_FORCED_TOOL} {fresh.LLM_NO_TEMPERATURE}")
+        for key, want in code_defaults.items():
+            found = re.findall(r"^" + re.escape(key) + r"=(.*)$", example, re.M)
+            if [value.strip() for value in found] != [want]:
+                bad.append(f"(lt-i) config.env.example {key} 값이 코드 기본 {want!r} 이 아닙니다: {found}")
+        try:
+            spec = importlib.util.spec_from_file_location("_lt_deploy_render", ROOT / "deploy" / "render.py")
+            render = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(render)  # type: ignore[union-attr]
+            template_path = ROOT / "k8s" / "workloads.yaml.tmpl"
+            template = template_path.read_text(encoding="utf-8")
+            base = render.load_config(example_path)
+            for target in ("dev", "prod"):
+                overlay = render.load_config(ROOT / "deploy" / f"config.{target}.env")
+                values = render.add_derived({**base, **overlay})
+                text = render.render_text(template, values, str(template_path.relative_to(ROOT)))
+                for key, want in code_defaults.items():
+                    got = _rendered_env_values(text, key)
+                    if got != [want]:
+                        bad.append(f"(lt-i) {target}: 렌더된 {key} 값이 [{want!r}] 가 아닙니다: {got}")
+        except (Exception, SystemExit) as exc:  # noqa: BLE001 — render.py 는 SystemExit 로 실패를 알린다.
+            bad.append(f"(lt-i) render.py 렌더 실패: {type(exc).__name__}")
+    except Exception as exc:  # noqa: BLE001
+        import traceback as _tb  # noqa: PLC0415
+
+        bad.append("llm-top-model-first 검사 중 예외: " + repr(exc)[:300] + "\n" + _tb.format_exc()[:1500])
+    finally:
+        logs.detach()
+        llm.client_for = saved["client_for"]
+        llm.runtime = saved["runtime"]
+        llm._broker_client = saved["_broker_client"]
+        llm._converse = saved["_converse"]
+        llm.time = saved["time"]
+        llm._STREAM.clear()
+        llm._STREAM.update(saved["STREAM"])
+        llm._DENIED.clear()
+        llm._DENIED.update(saved["DENIED"])
+        llm._NO_FORCED_TOOL.clear()
+        llm._NO_FORCED_TOOL.update(saved["NO_FORCED_TOOL"])
+        llm._NO_TEMPERATURE.clear()
+        llm._NO_TEMPERATURE.update(saved["NO_TEMPERATURE"])
+        for name, value in saved_settings.items():
+            setattr(settings, name, value)
+
+    if bad:
+        fail("llm-top-model-first 검사 실패\n" + "\n".join(f"  {item}" for item in bad))
+    else:
+        ok(
+            "llm-top-model-first 검사 (lt-a)스트림 잘림 같은 모델 재시도 400→1600·900→3600·2000→4096·model·trunc_retry "
+            "(lt-b)재시도 잘림 → 다음 모델 원래 예산·체인 전부 잘림 문구·8000·FACTOR=1 재시도 없음·재시도 중 일시 오류·AccessDenied "
+            "(lt-c)end_turn 재시도 없음·지금 문구·온전한 JSON 1회 (lt-d)opus-5-5·fable-5-1 auto·temperature 없음·"
+            "gpt-6 tool·4.6·4.5 그대로·첫 요청 1회·기억 집합 그대로 (lt-e)빈 값 → _adapt 2회·_parse_marks "
+            "(lt-f)converse stopReason 재시도·스트림 권한 전환·4개 반환·깨진 JSON (lt-g)count_people 400·previz.grammar 2000·오류 None "
+            "(lt-h)stop=·프롬프트 본문 로그 없음·실제 클라이언트 0 (lt-i)config.env.example = 코드 기본·env 빈 값·dev·prod 렌더"
+        )
+
+
 # ---------------------------------------------------------------- main
 
 
@@ -16582,6 +17185,7 @@ def main() -> int:
     check_vnew_model_fallback()
     check_fal_poll_failure()
     check_vnew_model_list_parity()
+    check_llm_top_model_first()
     print()
     if warnings:
         print(f"경고 {len(warnings)}건")

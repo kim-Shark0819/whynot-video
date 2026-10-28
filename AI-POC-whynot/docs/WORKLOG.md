@@ -189,3 +189,51 @@
 - **확인**: `python -X utf8 tools/check_vpoc.py` 전부 통과(새 그룹 `check_vnew_model_list_parity` vq-a~g 포함). `node --check frontend/public/vnew.js` 통과. 유료 호출 0회.
 - **줄 끝**: 파일 끝 덧붙이기(append)를 한 세 파일(`requirements.md`·`design.md`·`WORKLOG.md`)만 편집 뒤 전체 CRLF였다. `WORKLOG.md`는 덧붙이기 전 LF였음을 확인했다. 스펙 두 파일의 편집 전 상태는 확인하지 못했다(같은 원인으로 추정 — 덧붙이기 없이 고친 `tasks.md`·`ANALYSIS.md`는 LF 그대로였다). 세 파일 모두 LF로 맞췄다. 커밋 전 `git diff --stat`에서 스펙 두 파일이 전 줄 변경으로 보이면 원래 CRLF였던 것이다.
 - **관련 파일**: `app/src/vnew/plan.py`, `frontend/public/vnew.js`, `tools/check_vpoc.py`, 스펙 R16·design.md §14·tasks.md 작업 8.
+
+### llm-top-model-first — Bedrock 상위 모델이 첫 시도에 끝내게: 잘림 재시도·설정 거절 미리 적용·예산 (Kiro, claude-opus-5.5)
+- **배경**: 설계자 지시(2026-10-28) "제작을 진행하는 것은 sonnet이나 opus, gpt 최대한 상위 모델을 이용해라". 체인(`vpoc/llm._model_chain`)은 이미 상위 모델부터 시작한다(Fable 5.1·GPT-6 Astra → Opus 5.5 → Opus 4.6 → Sonnet 4.6 → Sonnet 4.5). 그런데 상위 모델이 자주 실패해 Opus 4.6이 일을 했다. 프리비즈 설계 한 번이 5분 넘게 걸렸다(02:38:26→02:43:45 UTC).
+- **근거 표**(개발계 로그, 2026-10-28 최근 16시간 `vpoc.call` 160건, 설계자 집계):
+
+  | where | 모델 | 성공 | 실패(out=max_tokens) |
+  |---|---|---|---|
+  | vnew.count_people | fable-5-1 | 56 | 27 (out=120) |
+  | vnew.count_people | opus-5-5 | 4 | 23 (out=120) |
+  | vnew.count_people | opus-4-6 | 23 | 0 |
+  | vnew.previz.grammar | fable-5-1 | 2 | 5 (out=900) |
+  | vnew.previz.grammar | opus-5-5 | 3 | 2 (out=900) |
+  | vnew.previz.grammar | opus-4-6 | 2 | 0 |
+
+  - 실패 57건 전부 출력 토큰 = 그 호출의 `max_tokens`다. 출력이 잘려 도구 입력(JSON)이 없거나 깨졌다(`ok=False`). count_people 83건 중 23건(28%)은 사실상 Opus 4.6이 처리했다.
+  - 5.x 모델은 적응 뒤 toolChoice가 auto라 도구 호출 앞에 글을 쓰기도 하고, 작은 예산에서 잘린다.
+  - 프로세스마다 첫 호출이 설정 거절(Opus 5.5·Fable 5.1: toolChoice tool/any·temperature, Astra: temperature)을 겪은 뒤 적응했다(`vpoc.call.adapt`).
+- **결정**(스펙 `.kiro/specs/llm-top-model-first/`, design.md §9):
+  - D1 — 잘림이면 같은 모델로 1회 더: stopReason(stream `messageStop.stopReason`, converse `response["stopReason"]`)이 `max_tokens`이고 도구 입력이 없으면, 다음 모델로 가기 전에 같은 모델로 `min(max_tokens × 4, 4096)` 예산으로 다시 부른다. 재시도도 잘리면 지금처럼 다음 모델(원래 예산으로 시작).
+    - 이유: 원인이 예산이라 같은 상위 모델로 고칠 수 있다. 하위 모델로 내려가지 않는다.
+    - 대안: 지금처럼 바로 다음 모델(하위 모델이 일함, 기각), 무한 확대(시간·비용 상한 없음, 기각), 전 호출부 예산 일괄 상향(근거 없는 곳까지 바뀜, 기각).
+  - D2 — 재시도 예산이 원래 이하면 재시도하지 않는다(8000·6000 호출부, FACTOR=1). 같은 예산 반복은 같은 결과라서다.
+  - D3 — 알려진 거절은 첫 요청부터 뺀다: `VPOC_LLM_NO_FORCED_TOOL`(기본 `claude-opus-5,claude-fable-5`), `VPOC_LLM_NO_TEMPERATURE`(기본 `claude-opus-5,claude-fable-5,gpt-6`). 모델 id 소문자 부분 문자열 비교다. `_adapt`와 프로세스 기억은 그대로 두어 목록에 없는 새 모델은 지금처럼 적응한다.
+    - 대안: 정확한 모델 id(버전마다 설정 수정, 기각), 기억 집합을 미리 채우기(`_adapt`와 섞여 끄기 어려움, 기각).
+  - D4 — stopReason은 `_converse_once`·`_stream_once`·`_read_stream`의 4번째 반환값이다. 세 함수의 호출자는 `llm.py` 안뿐이다(저장소 검색). usage에 넣으면 호출부·원장으로 새 키가 퍼져 기각했다.
+  - D5 — 호출부 예산: `vnew.count_people` 120→400, `vnew.previz.grammar` 900→2000. 로그에서 잘림이 확인된 두 곳만 바꿨다.
+    - count_people 출력은 `{"people": n}` 하나다. 400은 앞글 몇 문장까지 들어간다. grammar는 15개 필드(배열 3개·한국어 `reasonKo`)라 2000으로 둔다.
+    - 출력 토큰은 쓴 만큼만 과금된다. 최악(예산을 다 씀) 추가는 Opus 단가(25 USD/1M) 어림으로 count_people 약 $0.007/회, grammar 약 $0.028/회다. Fable 5.1 실제 단가는 미확인이다.
+  - D6 — 로그: `vpoc.call` 줄 끝에 `stop=<stopReason>`(없으면 `-`), 재시도 때 `vpoc.call.trunc_retry where= model= budget=`(info). 마지막 실패가 잘림이면 오류 문구가 "모델 출력이 출력 한도(N 토큰)에서 잘렸습니다. 출력 앞부분: …"이다(종류 `SchemaViolation`·502 그대로). 프롬프트 본문은 로그에 남기지 않는다.
+  - 모델 체인 순서와 기본 모델 id는 바꾸지 않았다.
+- **O-7(원장, 이번에 바꾸지 않음)**: 번호는 073 작업 8의 미확인 O-6 다음이다(리뷰 072의 O-7과는 다른 항목). 호출부는 `_converse`가 돌려준 성공 호출의 usage만 계상한다. 실패한(잘린) 시도와 거절된 시도의 사용량은 원장에 빠진다. 그 토큰은 `vpoc.call` 로그(`in=`·`out=`)에만 남는다. D1·D3·D5로 잘린 시도 대부분이 없어질 것으로 본다. 원장 의미를 바꾸려면(실패 시도 계상) 따로 결정한다. 이와 별개로 `previz_grammar.read_cut`은 실제로 답한 모델이 아니라 `GRAMMAR_MODEL`로 계상한다(`charge(usage, GRAMMAR_MODEL)`, 이번 범위 밖).
+- **되돌리기**(`config.<target>.env`에서 덮는다. 오버레이는 base에 있는 키만 덮을 수 있다):
+  - 미리 적용 끄기: `VPOC_LLM_NO_FORCED_TOOL=`·`VPOC_LLM_NO_TEMPERATURE=`(빈 값) → 거절 뒤 적응(예전 동작).
+  - 잘림 재시도 끄기: `VPOC_LLM_TRUNC_RETRY_FACTOR=1`.
+  - 호출부 예산·`stop=` 로그·잘림 문구: 플래그 없음(커밋 revert).
+- **확인**:
+  - `python -X utf8 tools/check_vpoc.py` 전부 통과. 새 그룹 `check_llm_top_model_first` lt-a~i, 기존 rw-a~c(템플릿 env 10개)를 포함한다. 가짜 Bedrock만 썼고 유료 호출은 0회다.
+  - 변형 검사(메모리에서만): 잘림 재시도를 끄면 lt-a·b·f, 미리 적용(temperature·강제 도구)을 끄면 lt-d, stream stopReason을 버리면 lt-a·b·f·h, converse stopReason을 버리면 lt-f가 실패한다.
+  - `coverage run tools/check_vpoc.py`: 바뀐 함수 143문 중 140문(97.9%). 빠진 곳은 `_converse` 읽기 시간 초과 2회째 break(505)·`NoModel`(535)·`read_cut`의 bytes가 아닌 조각(329)으로, 이번 변경 전부터 있던 분기다.
+- **미확인**:
+  - Bedrock converse(비스트림)가 도구 입력 도중 잘렸을 때 toolUse 블록 모양. 지금은 payload가 없을 때만 잘림으로 본다.
+  - 거절(ValidationException)된 요청의 과금 여부. 미리 적용의 확실한 효과는 지연 제거다.
+  - 성공 호출의 `out` 분포. 배포 뒤 `vpoc.call ... stop=`와 `vpoc.call.trunc_retry` 수, 후보별 `ok=True` 비율로 효과를 잰다.
+- **남은 이슈**:
+  - `claude.plan`(③ 샷 계획)·`claude.safe_image_prompt`·`claude.revise`는 호출부가 model을 넘기지 않아 `VPOC_TEXT_MODEL`(Sonnet 4.5)이 1순위다. 설계자 지시(상위 모델 우선)와 어긋나지만 기본 모델 id 수정 금지 범위라 바꾸지 않았다.
+  - Fable 5.1은 `VPOC_TEXT_FALLBACK_MODELS`에 없다. 그래서 Astra가 1순위인 호출은 Astra → Opus 5.5 → … → Sonnet 4.5를 다 실패해야 Fable 5.1로 간다(`docs/ANALYSIS.md` §6.1.1).
+  - `max_tokens ≤ 300` 도구 호출부: `vnew.outfit_check` 300(Fable 5.1), `vnew.outfit_translate` 200(Astra → Fable 5.1). 이번에는 바꾸지 않았다(로그 근거 없음). 잘림 재시도가 1200·800으로 받쳐 준다.
+- **관련 파일**: `app/src/vpoc/{llm,settings}.py`, `app/src/vnew/{characters,previz_grammar}.py`, `k8s/workloads.yaml.tmpl`, `deploy/config.env.example`, `tools/check_vpoc.py`, `docs/ANALYSIS.md` §6.1.1·§7.3, 스펙 `.kiro/specs/llm-top-model-first/`.
