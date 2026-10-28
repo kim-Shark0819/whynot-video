@@ -237,3 +237,13 @@
   - Fable 5.1은 `VPOC_TEXT_FALLBACK_MODELS`에 없다. 그래서 Astra가 1순위인 호출은 Astra → Opus 5.5 → … → Sonnet 4.5를 다 실패해야 Fable 5.1로 간다(`docs/ANALYSIS.md` §6.1.1).
   - `max_tokens ≤ 300` 도구 호출부: `vnew.outfit_check` 300(Fable 5.1), `vnew.outfit_translate` 200(Astra → Fable 5.1). 이번에는 바꾸지 않았다(로그 근거 없음). 잘림 재시도가 1200·800으로 받쳐 준다.
 - **관련 파일**: `app/src/vpoc/{llm,settings}.py`, `app/src/vnew/{characters,previz_grammar}.py`, `k8s/workloads.yaml.tmpl`, `deploy/config.env.example`, `tools/check_vpoc.py`, `docs/ANALYSIS.md` §6.1.1·§7.3, 스펙 `.kiro/specs/llm-top-model-first/`.
+
+### 개발계 기본 텍스트 모델을 Fable 5.1로 (설계자 지시, Claude 직접 — 설정 1줄)
+- **지시**: "그래 개발에만 상위 모델로 변경해서 배포해라"(2026-10-28). 위 남은 이슈의 Sonnet 4.5 1순위 단계가 대상이다.
+- **결정**
+  - `deploy/config.dev.env`에 `VPOC_TEXT_MODEL=global.anthropic.claude-fable-5-1`을 더한다.
+  - 운영(`config.prod.env`)과 base(`config.env.example`)는 그대로 Sonnet 4.5다.
+  - 개발 체인은 Fable 5.1 → Opus 5.5 → Opus 4.6 → Sonnet 4.6 → Sonnet 4.5다.
+  - Fable 5.1은 첫 요청부터 강제 도구·temperature를 빼고 보낸다(위 미리 적용).
+- **확인**: `render.load_config_chain`으로 dev는 Fable 5.1, prod는 Sonnet 4.5인 것을 봤다. check_vpoc 전부 통과.
+- **되돌리기**: 이 줄을 지우고 개발 재배포.
