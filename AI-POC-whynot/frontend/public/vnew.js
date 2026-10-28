@@ -4269,7 +4269,54 @@
     } else {
       card.appendChild(el("p", "vnew-hint", "이 컷의 웹툰 연출을 읽지 못했습니다(패널 없음)."));
     }
+    var collisionBadges = previzCollisionBadges(cut, previz);
+    if (collisionBadges) card.appendChild(collisionBadges);
     return card;
+  }
+
+  /* 소품 관통 보정(084 R1.8·R1.9·R1.11) 배지. previz.collision[cutId] = {fixes, unresolved, source}.
+     source "view" 는 보정과 함께 설계된 장면을 화면에서 다시 맞춘 것(저장 안 됨). 옛 장면(보정 전에 설계)은
+     사본을 바꾸지 않고 previz.collision.needsRedesign·cuts 로만 알린다. 승인은 막지 않는다. 글은 textContent 로만 넣는다. */
+  var COLLISION_VIEW_TITLE = "화면에서만 보정했습니다. 다시 설계하면 저장됩니다.";
+  var COLLISION_REDESIGN_TEXT = "이 프리비즈는 소품 관통 보정 전에 만들었습니다. '다시 설계'하면 인물이 소품 위에 제대로 앉고 카메라도 다시 맞춰집니다.";
+
+  function previzCollisionBadges(cut, previz) {
+    var cutId = cut && cut.cutId;
+    var all = (previz && previz.collision) || {};
+    var col = cutId ? all[cutId] : null;
+    var wrap = el("div", "vnew-previz-collision");
+    if (all.needsRedesign && cutId && (all.cuts || []).indexOf(cutId) >= 0) {
+      wrap.appendChild(el("p", "vnew-hint vnew-previz-collision-redesign", COLLISION_REDESIGN_TEXT));
+    }
+    if (!col || typeof col !== "object" || !col.source) return wrap.childNodes.length ? wrap : null;
+    var viewOnly = col.source === "view";
+    var box = el("div", "vnew-previz-panel-badges");
+    (col.fixes || []).forEach(function (fix) {
+      var name = cheatActorName({ actor: fix.actor }, cut);
+      var dist = (Number(fix.dist) || 0).toFixed(2);
+      box.appendChild(grammarTag("소품 겹침 보정: " + name + " " + dist + "m", "vnew-previz-tag-collision",
+        viewOnly ? COLLISION_VIEW_TITLE : "인물이 소품과 겹치지 않게 서버가 자리를 맞췄습니다(" + collisionPropLabel(fix.prop) + ")."));
+    });
+    (col.unresolved || []).forEach(function (item) {
+      var name = cheatActorName({ actor: item.actor }, cut);
+      box.appendChild(grammarTag("소품과 겹침을 풀지 못했습니다: " + name + " ↔ " + collisionPropLabel(item.prop),
+        "vnew-previz-tag-collision is-warn",
+        viewOnly ? COLLISION_VIEW_TITLE : "자리를 옮길 곳이 없어 그대로 두었습니다. 승인은 할 수 있습니다."));
+    });
+    if (box.childNodes.length) wrap.appendChild(box);
+    return wrap.childNodes.length ? wrap : null;
+  }
+
+  /* 소품 id → 화면 이름(labelKo → labelEn → id). */
+  function collisionPropLabel(propId) {
+    var scenes = ((state.plan || {}).previz || {}).scenes || [];
+    for (var si = 0; si < scenes.length; si++) {
+      var props = scenes[si].props || [];
+      for (var pi = 0; pi < props.length; pi++) {
+        if (props[pi].id === propId) return props[pi].labelKo || props[pi].labelEn || propId;
+      }
+    }
+    return propId || "소품";
   }
 
   /* 연출 문법 배지 한 조각(라인 넘음·배우 조정·사용자 수정). */
@@ -4890,6 +4937,22 @@
       list.appendChild(row);
     });
     host.appendChild(list);
+
+    // 소품과 겹침을 풀지 못한 컷(084 R1.9) — 한 줄 안내. 승인은 막지 않는다.
+    var collisionMap = previz.collision || {};
+    var stuckCuts = [];
+    flattenCuts(previz.scenes || []).forEach(function (item, idx) {
+      var col = collisionMap[item.cut && item.cut.cutId];
+      if (col && (col.unresolved || []).length) stuckCuts.push("컷 " + (idx + 1));
+    });
+    if (stuckCuts.length) {
+      host.appendChild(el("p", "vnew-hint vnew-previz-collision-note",
+        "소품과 겹침을 풀지 못한 컷: " + stuckCuts.join(", ") + " — 승인은 할 수 있습니다."));
+    }
+    // 보정 전에 만든 옛 프리비즈(084 R1.11) — 화면·녹화는 그대로 두고 다시 설계를 권한다. 승인·녹화는 막지 않는다.
+    if (collisionMap.needsRedesign) {
+      host.appendChild(el("p", "vnew-hint vnew-previz-collision-redesign", COLLISION_REDESIGN_TEXT));
+    }
 
     // 승인하고 녹화 버튼
     var btn = el("button", "primary-button vnew-previz-approve", previz.approved ? "모두 녹화" : "승인하고 녹화");

@@ -247,3 +247,50 @@
   - Fable 5.1은 첫 요청부터 강제 도구·temperature를 빼고 보낸다(위 미리 적용).
 - **확인**: `render.load_config_chain`으로 dev는 Fable 5.1, prod는 Sonnet 4.5인 것을 봤다. check_vpoc 전부 통과.
 - **되돌리기**: 이 줄을 지우고 개발 재배포.
+
+
+### 084 작업 1 — 프리비즈 소품 관통 수정: 앉을 자리·다리 방향·겹침 보정 (Kiro, claude-opus-5.5)
+- **배경**: 개발계 "위험한편의점 test3"에서 두 인물이 난간을 관통했다. sit 엉덩이가 0.5로 고정(`vnew-previz.js`)이라 몸통이 상부 가로대(0.94)를, 다리가 하부 가로대(0.40)를 지났다. 인물↔소품 겹침 처리는 어디에도 없었다. 설계자 지시: "관통 수정 끝나면 바로 개발에 배포".
+- **스펙 수정(Claude 검토 필수 수정 A·B)**: `.kiro/specs/previz-camera-only/`
+  - A: design.md §4.10 고정 입력을 test3 plan.json 실측값(방 8×5×3, 소품 12개·rotY 0, 7컷 자리·facing)으로 바꿨다. 인물 키 1.75·1.70만 가정이다. requirements R1 근거도 실측값으로 고쳤다.
+  - B: 길쭉한 앉을 소품의 다리 방향. requirements R1.15-1.19 신규, R1.2·R1.5 `legYawDeg`. design §4.2(다리 기준 = legYaw)·§4.3·§4.4(전면 재작성)·§4.7(렌더러 몸 돌림)·§12.2(cs-a·b·m 수정, cs-o 신규). tasks.md 작업 1(요구사항 R1.1-1.19, cs-a~o).
+- **결정**
+  - D1 — 앉을 소품은 서버가 결정적 규칙(지정 sitOn → sittable → 이름 → 발이 바닥면 안, 같은 등급은 거리·높은 윗면·id)으로 고른다. 엉덩이 = 소품 윗면. test3은 상부 가로대("걸터앉는", 등급 3)·hipY 0.985다.
+    - 대안: LLM에게 높이를 받기(기각 — 숫자는 서버가 정한다는 1-5 교훈), 렌더러만 엉덩이를 올리기(기각 — 카메라 계산이 0.5로 남아 구도가 어긋난다).
+  - D2 — 다리 방향 `sit.legYawDeg`. 바닥면 긴 변 ≥ 짧은 변 × 2인 box는 "길쭉한 자리"로 보고 짧은 축 두 법선만 후보로 둔다. 순서는 풀리는 쪽 → facing에 가까운 쪽 → 방 중심 쪽 → + 쪽이다. 그 밖(의자·상자·원기둥)은 facing 먼저, 막히면 축 4방향이다.
+    - 이유: facing 90/270(난간 방향으로 마주 봄)이면 facing 방향 다리가 난간 평면에 놓인다. 변형 검사에서 facing 다리로 바꾸면 cut-04 여의준(81.64)이 `lower_rail`과 겹치고 cs-a·g·i·o가 실패했다.
+    - 대안: facing을 바꾸기(기각 — 카메라·시선 연출이 바뀐다), 각도만 바꾸기(기각 — 모든 각도가 같은 평면).
+  - D3 — 렌더러는 엉덩이·다리를 legYaw로, 몸통·머리를 facing 쪽으로(다리 방향 ±90° 안) 돌린다. 카메라 계산은 facingDeg 그대로다.
+  - D4 — 정강이는 앉은 소품과도 겹침을 본다(좌판 밑으로 다리를 넣지 않게). 허벅지는 앉은 소품을 뺀다.
+  - D5 — 보기 때 보정은 사본에만 하고 로그를 남기지 않는다. 저장본(plan.json)은 바꾸지 않는다. 설정을 끄면 보기 사본에서 `sit`을 빼 엉덩이 0.5로 그린다. (아래 "필수 수정 C"로 범위를 줄였다: 보정과 함께 설계된 장면만 사본 보정.)
+  - D6 — 2차 보정(카메라 계산 뒤)에서 인물이 움직인 컷은 `_rematch_cut`으로 `fit.match`를 다시 잰다. closeapex(CU 투샷) 배우 조정이 인물을 소품 안으로 당기는 경우다(cs-n).
+- **test3 결과**(실측 장면, `resolve_scene`): 7컷 11명 모두 `upper_rail`·hipY 0.985·legPitch 75·legYaw 0, unresolved 0. 자리 맞춤 fix는 cut-04 범건우 0.081m·cut-07 범건우 0.122m(z −1.3545·−1.313 → −1.435). 처리 시간 약 3ms.
+- **되돌리기**: `config.dev.env`에 `VNEW_PREVIZ_COLLISION=false` → 개발 배포. 보정·sit 없음, 엉덩이 0.5(지금 동작). 저장된 `sit`·`sitOn`·`fit.collision`은 남지만 보기·렌더러가 쓰지 않는다(`sitOn`은 다시 켜면 힌트로 쓴다).
+- **확인**
+  - `python -X utf8 tools/check_vpoc.py` 전부 통과(51개 ok 줄). 새 그룹 `check_previz_collision` cs-a~o. 기존 rw-a~c는 템플릿 env 11개로 통과. 기존 그룹 기대값은 바꾸지 않았고 끔 고정도 필요 없었다.
+  - 유료 호출 0회(`_guard_real_llm`가 `vpoc.llm._converse`를 막는다).
+  - 변형 검사(메모리에서만): `choose_leg_yaw`를 facing 방향으로 바꾸면 cs-a·g·i·o가 실패한다.
+- **3단계 리뷰**
+  - 보안: 로그에 넣는 actor·prop·cut id는 LLM·사용자 값이라 `_log_id`로 영숫자·`-_.:`만 64자 이하로 남긴다(줄 위조 방지, cs-c). 화면 배지는 `textContent`·`title` 속성만 쓴다(cs-m). `sit` 정규화는 propId가 장면 소품일 때만, hipY 0.2~2.0, legPitch 후보만, legYaw는 유한수만 받는다(NaN·inf는 facing, cs-l). 새 API·외부 전송·비밀값 없음.
+  - 성능: 보기 때 보정은 조회마다 돈다. 측정(로컬): test3 3ms, 30컷×6명×소품 40개 무작위 72ms, 인물이 모두 소품 안 125ms, 방을 덮는 상자에 180명 전부 풀 수 없음(고리 탐색 320후보 전부 실패) 612ms. 마지막은 비정상 배치에서만 생긴다(남은 이슈). 메모리는 장면 사본(이미 하던 deepcopy) 외에 늘지 않는다. 외부 호출 0.
+  - 운영성: 보정 함수가 예외를 내도 설계는 끝나고(warning `vnew.previz.collision.failed pid= pass=A|B err=`, 1차 실패면 2차도 건너뛴다), 보기는 저장본 그대로 보인다(warning `vnew.previz.collision.view_failed`) — cs-i에서 확인. 설정은 `run_design` 시작 때 한 번 읽는다. 새 설계만 `sit`·`fit.collision`을 저장하고 옛 계획은 보기 때만 보정한다.
+- **미확인·남은 이슈**
+  - 1인 컷(test3 cut-01~03): 상대가 없으면 `place_cut`이 가짜 상대를 −z에 둔다(기존 규칙). 카메라가 난간 뒤 벽에 막혀 가짜 문법 검사에서 일치도가 0.0이다(보정을 끄면 0.30~0.33, 어느 쪽이든 승인 기준 0.7 미만). 이번 범위 밖이다(카메라 자리 규칙). 실제 연출 문법으로 다시 설계했을 때의 값은 개발계에서 본다.
+  - 인물 키 1.75·1.70은 가정이다. 실제 키가 다르면 legPitch만 달라질 수 있다(hipY·legYaw는 같다).
+  - 옛 계획 test3는 보기 때 관통 안내만 하고(필수 수정 C), 다시 설계해야 `sit`·`sitOn`이 저장되고 관통이 사라진다.
+  - 비정상 배치(방을 덮는 소품 안에 인물이 많음)에서 보기 때 보정이 수백 ms 걸린다(180명 612ms). 필요하면 고리 탐색 상한이나 보기 결과 캐시(revision 기준)를 둔다.
+  - 커버리지는 이 실행에서 재지 않았다(Claude가 `coverage run tools/check_vpoc.py`로 잰다).
+- **관련 파일**: `app/src/vnew/{previz_collision(신규),previz_schema,previz_fit,previz_camera,previz,settings}.py`, `frontend/public/{vnew-previz.js,vnew.js,vnew.css}`, `k8s/workloads.yaml.tmpl`, `deploy/config.env.example`, `tools/check_vpoc.py`, `docs/ANALYSIS.md` §3.6·§7.1·§10.1, 스펙 `.kiro/specs/previz-camera-only/`.
+
+
+### 084 작업 1 필수 수정 C — 옛 계획 보기 때 보정이 얼굴을 화면 밖으로 밀어냄 (Kiro, claude-opus-5.5)
+- **발견(Claude 검증, 개발계 test3 plan.json 사본)**: 옛 계획을 볼 때 `_scene_view(collision=True)`가 엉덩이를 0.985로 올리는데 카메라는 엉덩이 0.5 기준 그대로라, 거의 모든 컷에서 머리가 화면 위로 나갔다(cut-01 여의준 머리 y 0.21~0.73 → −0.86~−0.29, cut-04 범건우 0.04~0.56 → −0.93~−0.38). 배포 불가 판정. 다시 설계 경로(1차 → `_place_cameras` → 2차)는 맞았다.
+- **결정**: 보기 때 보정은 "보정과 함께 설계된 장면"(어떤 컷 인물이든 `sit`, 또는 그 장면 컷의 `fit.collision`)에만 한다. 옛 장면은 보기 사본을 바꾸지 않고 `previz_collision.detect_scene`(신규, 읽기만)으로 관통 컷을 찾아 `previz.collision = {source:"none", needsRedesign:true, cuts}`를 준다. 화면은 녹화 영역과 관통 컷의 컷 패널에 다시 설계 안내 한 줄(`textContent`). 승인·녹화는 막지 않는다.
+  - 검출 모양 = 지금 화면에 그려지는 모양(엉덩이 0.5, 허벅지 수평, 다리 = facing). 앉을 소품 윗면이 0.6(0.5 + `OLD_SEAT_TOL` 0.1) 이하일 때만 그 소품 접촉을 허용한다. 그래서 옛 의자 장면(좌판 0.45)은 관통으로 잡지 않고, test3(상부 가로대 0.985)는 7컷 모두 잡는다.
+  - 대안: 보기 때 카메라도 다시 계산(기각 — 보기마다 `place_cut`·연출 문법이 필요하고 저장된 fit과 달라진다), 엉덩이만 올리고 카메라를 머리 차이만큼 올리기(기각 — 구도·일치도가 근거 없이 바뀐다).
+- **스펙**: requirements R1.11 전면 수정. design §4.1(실행 위치·검출 규칙·`collision` 모양)·§4.9(안내 문구)·§12.2(cs-h 수정, cs-p 신규). 모순을 없애려고 §1 요약 한 줄, §3.2 `previz.collision` 행, §3.3 옛 데이터 두 행, §11 작업 1 행(`detect_cut`·`detect_scene`, 화면 함수·class), §14 R-b도 고쳤다. tasks.md 작업 1 구현 메모·검사 범위(cs-a~p)·완료 조건, V-0 행(열기는 안내 확인, 관통 해소는 다시 설계 1회 뒤).
+- **확인**: `python -X utf8 tools/check_vpoc.py` 전부 통과. cs-a~p. 변형 검사(메모리): `previz_view`가 모든 장면을 보정하게 되돌리면 cs-h·cs-p가 실패한다.
+  - 로컬 측정(가짜 문법, test3을 보정 끔으로 설계한 옛 장면): 주인공 머리 y는 옛 카메라 그대로 0.02~0.40. 옛 동작(사본 보정)이면 −0.58~−0.18로 화면 밖. 보정 켬으로 다시 설계하면 0.01~0.40(7컷 모두 화면 안).
+- **남은 이슈**
+  - 되돌리기 방향의 같은 문제: 보정 켬으로 다시 설계한 계획을 `VNEW_PREVIZ_COLLISION=false`로 보면 보기 사본이 `sit`을 빼 엉덩이 0.5로 그린다. 카메라는 hipY 기준이라 머리가 아래로 내려간다(로컬 측정 2인 컷 머리 y 0.72~1.03, 화면 아래 끝에 걸림). 되돌린 뒤에는 다시 설계해야 한다. cs-k 기대값(끔이면 `sit` 뺌)을 바꾸지 않으려고 이번에는 고치지 않았다. 고친다면 끔에서도 저장된 `sit`을 그대로 그리는 쪽이다.
+  - 섞인 계획(다시 만들기에서 일부 장면만 다시 설계)은 설계된 장면만 사본 보정되고 옛 장면은 안내가 남는다.

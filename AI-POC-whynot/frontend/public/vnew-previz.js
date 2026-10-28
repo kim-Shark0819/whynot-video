@@ -220,17 +220,29 @@ class Mannequin {
 
   /* 포즈·제스처·발화를 매 프레임 적용한다. t 는 장면 시각(초) — 걷기·끄덕임·반복 동작 위상에 쓴다.
      targetYaw 는 gestureTarget(상대) 쪽으로 돌릴 마네킹 로컬 yaw(rad, 없으면 null) — 상대가 필요한
-     동작(뺨 감싸기·가슴에 손·기울이기·목 돌리기)의 팔·기울기·목 방향을 그 사람 쪽으로 잡는다. */
-  apply(pose, gesture, speaking, t, targetYaw) {
+     동작(뺨 감싸기·가슴에 손·기울이기·목 돌리기)의 팔·기울기·목 방향을 그 사람 쪽으로 잡는다.
+     sit(084 R1.5·R1.17, 없으면 지금과 같다) = {hipY, legPitchDeg, turn} — 서버가 정한 앉을 자리. 엉덩이를
+     hipY(m)에, 허벅지를 legPitchDeg 만큼 아래로, 정강이는 수직. turn(rad)은 다리 방향에서 몸통을 돌린 각. */
+  apply(pose, gesture, speaking, t, targetYaw, sit) {
     // 기본 자세로 되돌린 뒤 포즈별로 굽힌다.
     this.hips.position.y = 0.9;
     this.hips.rotation.set(0, 0, 0);
     this.spine.rotation.set(0, 0, 0);
     this.neck.rotation.set(0, 0, 0);
     this._resetLimb(this.hipL, this.hipR, this.shoulderL, this.shoulderR);
+    const seated = pose === "sit" && sit && typeof sit.hipY === "number" && isFinite(sit.hipY);
 
     switch (pose) {
       case "sit": {
+        if (seated) {
+          // 앉을 소품 윗면(sit.hipY, m)에 엉덩이. group 이 키 비율로 커지므로 로컬 단위로 나눈다.
+          const scale = this.group.scale.y || 1;
+          const theta = (Number(sit.legPitchDeg) || 0) * Math.PI / 180;
+          this.hips.position.y = sit.hipY / scale;
+          this._bendLeg(this.hipL, -(Math.PI / 2 - theta), Math.PI / 2 - theta);
+          this._bendLeg(this.hipR, -(Math.PI / 2 - theta), Math.PI / 2 - theta);
+          break;
+        }
         // 의자 높이(≈0.45). 허벅지 앞으로, 무릎 굽힘.
         this.hips.position.y = 0.5;
         this._bendLeg(this.hipL, -Math.PI / 2, Math.PI / 2);
@@ -270,6 +282,11 @@ class Mannequin {
     if (speaking) {
       // 머리를 살짝 끄덕임.
       this.neck.rotation.x = Math.sin(t * 8) * 0.12;
+    }
+
+    if (seated && typeof sit.turn === "number" && isFinite(sit.turn)) {
+      // 앉아서 몸을 돌린 자세: 다리는 그대로, 몸통·팔·머리만 facing 쪽으로(±90° 안, update 가 자른다).
+      this.spine.rotation.y += sit.turn;
     }
   }
 
@@ -642,19 +659,37 @@ class PrevizScene {
       const pz = self.z;
       const facing = (Number(ca.facingDeg) || 0) * Math.PI / 180;
       entry.mannequin.group.position.set(px, 0, pz);
-      entry.mannequin.group.rotation.y = facing;
-      // gestureTarget 이 있으면 그 상대 쪽으로 돌릴 마네킹 로컬 yaw 를 구한다(세계 방위 - 내 facing).
+      // 앉을 자리(084 R1.17): 엉덩이·다리는 sit.legYawDeg, 몸통·머리는 facing 쪽(다리 방향 ±90° 안).
+      // 카메라는 서버가 facingDeg 로 계산했다. sit 이 없으면 지금처럼 몸 전체가 facing.
+      let bodyYaw = facing;
+      let sitArg = null;
+      const sitData = ca.sit;
+      if ((ca.pose || "stand") === "sit" && sitData && typeof sitData.hipY === "number" && isFinite(sitData.hipY)) {
+        const legYaw = (typeof sitData.legYawDeg === "number" && isFinite(sitData.legYawDeg))
+          ? sitData.legYawDeg * Math.PI / 180
+          : facing;
+        let turn = Math.atan2(Math.sin(facing - legYaw), Math.cos(facing - legYaw));
+        turn = Math.max(-Math.PI / 2, Math.min(Math.PI / 2, turn));
+        bodyYaw = legYaw + turn;
+        entry.mannequin.group.rotation.y = legYaw;
+        sitArg = { hipY: sitData.hipY, legPitchDeg: Number(sitData.legPitchDeg) || 0, turn: turn };
+      } else {
+        entry.mannequin.group.rotation.y = facing;
+      }
+      // gestureTarget 이 있으면 그 상대 쪽으로 돌릴 마네킹 로컬 yaw 를 구한다(세계 방위 - 내 몸통 방향).
       let targetYaw = null;
       const tgt = ca.gestureTarget ? posById[ca.gestureTarget] : null;
       if (tgt) {
-        // three 의 +z 를 '앞'으로 쓰므로 atan2(dx, dz) 가 세계 yaw. 내 facing 을 빼 로컬로.
+        // three 의 +z 를 '앞'으로 쓰므로 atan2(dx, dz) 가 세계 yaw. 내 몸통 방향을 빼 로컬로.
         const worldYaw = Math.atan2(tgt.x - px, tgt.z - pz);
-        targetYaw = worldYaw - facing;
+        targetYaw = worldYaw - bodyYaw;
       }
-      entry.mannequin.apply(ca.pose || "stand", ca.gesture || null, !!ca.speaking, t, targetYaw);
+      entry.mannequin.apply(ca.pose || "stand", ca.gesture || null, !!ca.speaking, t, targetYaw, sitArg);
 
-      // 인물 라벨 오버레이 위치(머리 위).
-      entry._overlayPos = new THREE.Vector3(px, (Number(entry.data.heightM) || 1.7) + 0.2, pz);
+      // 인물 라벨 오버레이 위치(머리 위). 앉을 자리가 있으면 엉덩이 + 상체 높이.
+      const heightM = Number(entry.data.heightM) || 1.7;
+      const labelY = sitArg ? sitArg.hipY + 0.86 * heightM / 1.7 + 0.2 : heightM + 0.2;
+      entry._overlayPos = new THREE.Vector3(px, labelY, pz);
     });
     // 이 컷에 없는 인물은 숨긴다.
     Object.keys(this.actors).forEach((id) => {

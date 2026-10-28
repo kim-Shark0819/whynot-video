@@ -299,16 +299,17 @@ BODY_FRACTION = {
 SEAT_Y = 0.45
 
 
-def body_y(point: str, height_m: float, pose: str) -> float:
+def body_y(point: str, height_m: float, pose: str, hip_y: float | None = None) -> float:
     """몸 지점(top·eye·chin·shoulder·chest·waist·knee·foot 등)의 세계 y(높이 m).
 
     pose 가 sit/seated/sitting 이면 상체는 엉덩이(SEAT_Y+0.05) 위로 길이를 유지하고, 하체는
     바닥~엉덩이로 눌린다(solver.py body_y 와 같은 규칙). 모르는 지점은 chest 로 본다.
+    hip_y(084 R1.6)를 주면 앉은 엉덩이 높이로 그 값을 쓴다(앉을 소품 윗면, previz_collision).
     """
     frac = BODY_FRACTION.get(point, BODY_FRACTION["chest"])
     height = float(height_m or 1.7)
     if str(pose or "").lower() in ("sit", "seated", "sitting"):
-        hip = SEAT_Y + 0.05
+        hip = float(hip_y) if hip_y is not None else SEAT_Y + 0.05
         if frac >= 0.5:  # 상체는 엉덩이 위로 제 길이를 유지한다.
             return hip + (frac - 0.5) * height
         return frac / 0.5 * hip
@@ -323,6 +324,7 @@ def match_visible(
     top_y: float,
     subject_x: float,
     bottom_key: str,
+    hip_y: float | None = None,
 ) -> float:
     """보이는 부분 기준 일치도(0..1). 전신 키가 아니라 "머리 위~자르는 지점"을 화면에 맞춘다.
 
@@ -330,12 +332,12 @@ def match_visible(
     - 화면 아래 몸 지점(bottom_key, 예: chest) 투영 y 가 화면 아래(1.0)에 얼마나 가까운지.
     - 머리 x 투영이 목표 subject_x 와 얼마나 가까운지.
     세 오차 중 가장 큰 것(worst)을 보고 max(0, 1 - worst/0.25) 로 환산한다(0.25 벗어나면 0).
-    카메라 뒤로 가려 투영이 안 되면 0.
+    카메라 뒤로 가려 투영이 안 되면 0. hip_y 는 body_y 와 같다(앉은 엉덩이 높이, 없으면 지금 값).
     """
     foot = _vec3(foot)
     height = float(height_m or 1.7)
-    top_world = (foot[0], body_y("top", height, pose), foot[2])
-    bottom_world = (foot[0], body_y(bottom_key or "chest", height, pose), foot[2])
+    top_world = (foot[0], body_y("top", height, pose, hip_y), foot[2])
+    bottom_world = (foot[0], body_y(bottom_key or "chest", height, pose, hip_y), foot[2])
     top_sp = project_point(camera, top_world)
     bottom_sp = project_point(camera, bottom_world)
     if top_sp is None or bottom_sp is None:
