@@ -307,17 +307,41 @@ _STREAM = {"ok": True, "broker": True}
 
 # 모델마다 받지 않는 설정이 있다(2026-10-14 실측): Opus 5.5 · Fable 5.x 는 toolChoice tool/any 를,
 # GPT-6 Astra 는 temperature 를 거절한다. 거절되면 그 설정을 빼고 다시 부르고, 프로세스 동안 기억한다.
+# llm-top-model-first(2026-10-28): 이미 아는 모델은 settings.LLM_NO_FORCED_TOOL · LLM_NO_TEMPERATURE(모델 id
+# 부분 문자열)로 첫 요청부터 뺀다. 목록에 없는 새 모델은 지금처럼 거절을 겪은 뒤 이 집합에 기억된다.
 _NO_FORCED_TOOL: set[str] = set()
 _NO_TEMPERATURE: set[str] = set()
 
 
+def _listed(model: str, marks) -> bool:
+    """모델 id(소문자)에 marks(소문자 부분 문자열) 중 하나가 들어 있으면 True."""
+    lowered = str(model or "").lower()
+    return any(mark and mark in lowered for mark in marks or ())
+
+
+def _skip_forced_tool(model: str) -> bool:
+    """이 모델에는 toolChoice tool 을 보내지 않는다(거절을 겪었거나 설정 목록에 있다)."""
+    return model in _NO_FORCED_TOOL or _listed(model, settings.LLM_NO_FORCED_TOOL)
+
+
+def _skip_temperature(model: str) -> bool:
+    """이 모델에는 temperature 를 보내지 않는다(거절을 겪었거나 설정 목록에 있다)."""
+    return model in _NO_TEMPERATURE or _listed(model, settings.LLM_NO_TEMPERATURE)
+
+
+def _trunc_budget(max_tokens: int) -> int:
+    """잘림 재시도 예산 = min(max_tokens × FACTOR, CAP)."""
+    return min(int(max_tokens) * int(settings.LLM_TRUNC_RETRY_FACTOR), int(settings.LLM_TRUNC_RETRY_CAP))
+
+
 def _request(model: str, system_text: str, blocks: list[dict], tool: dict, max_tokens: int) -> dict:
     inference: dict = {"maxTokens": max_tokens}
-    if model not in _NO_TEMPERATURE:
+    if not _skip_temperature(model):
         inference["temperature"] = 0.6
-    choice = {"auto": {}} if model in _NO_FORCED_TOOL else {"tool": {"name": tool["name"]}}
+    forced = not _skip_forced_tool(model)
+    choice = {"tool": {"name": tool["name"]}} if forced else {"auto": {}}
     system = system_text
-    if model in _NO_FORCED_TOOL:
+    if not forced:
         system += f"\n\nYou MUST answer by calling the {tool['name']} tool exactly once. No plain text."
     return {
         "modelId": model,
@@ -342,7 +366,7 @@ def _adapt(model: str, exc: ClientError) -> bool:
 
 
 def _converse_once(model: str, system_text: str, blocks: list[dict], tool: dict, max_tokens: int):
-    """보통 호출 한 번(스트리밍을 못 쓸 때). (도구 입력 dict 또는 None, 텍스트, usage)."""
+    """보통 호출 한 번(스트리밍을 못 쓸 때). (도구 입력 dict 또는 None, 텍스트, usage, stopReason)."""
     response = client_for(model).converse(**_request(model, system_text, blocks, tool, max_tokens))
     payload = None
     text_dump = ""
@@ -351,11 +375,11 @@ def _converse_once(model: str, system_text: str, blocks: list[dict], tool: dict,
             payload = block["toolUse"].get("input")
         elif "text" in block:
             text_dump += block["text"]
-    return payload, text_dump, response.get("usage", {}) or {}
+    return payload, text_dump, response.get("usage", {}) or {}, str(response.get("stopReason") or "")
 
 
 def _stream_once(model: str, system_text: str, blocks: list[dict], tool: dict, max_tokens: int):
-    """converse_stream 한 번. (도구 입력 dict 또는 None, 텍스트, usage)."""
+    """converse_stream 한 번. (도구 입력 dict 또는 None, 텍스트, usage, stopReason)."""
     kind = "broker" if _uses_broker(model) else "ok"
     if not _STREAM[kind]:
         return _converse_once(model, system_text, blocks, tool, max_tokens)
@@ -371,16 +395,19 @@ def _stream_once(model: str, system_text: str, blocks: list[dict], tool: dict, m
 
 
 def _read_stream(response):
-    """converse_stream 응답을 끝까지 읽는다. (도구 입력 dict 또는 None, 텍스트, usage)."""
+    """converse_stream 응답을 끝까지 읽는다. (도구 입력 dict 또는 None, 텍스트, usage, stopReason)."""
     tool_json = ""
     text_dump = ""
     usage: dict = {}
+    stop = ""
     for event in response["stream"]:
         delta = (event.get("contentBlockDelta") or {}).get("delta") or {}
         if "toolUse" in delta:
             tool_json += delta["toolUse"].get("input") or ""
         elif "text" in delta:
             text_dump += delta["text"]
+        elif "messageStop" in event:
+            stop = str((event.get("messageStop") or {}).get("stopReason") or "")
         elif "metadata" in event:
             usage = event["metadata"].get("usage") or {}
     payload = None
@@ -389,7 +416,7 @@ def _read_stream(response):
             payload = json.loads(tool_json)
         except ValueError:
             text_dump = "(도구 입력 JSON 이 깨짐) " + tool_json[:1500]
-    return payload, text_dump, usage
+    return payload, text_dump, usage, stop
 
 
 def _coerce(value, schema: dict):
@@ -433,16 +460,20 @@ def _converse(
 
     모델마다: 설정 거절(toolChoice · temperature)은 그 설정을 빼고 바로 다시, 일시 오류(혼잡 · 시간 초과)는
     한 번 쉬고 다시, 그 밖의 오류(미허용 · 입력 오류 · 도구 미사용)는 다음 모델로 넘어간다.
+    출력이 max_tokens 에서 잘려 도구 입력이 없으면(llm-top-model-first R1), 다음 모델로 가기 전에 같은 모델로
+    더 큰 예산(_trunc_budget)으로 한 번 더 부른다. 다음 모델은 원래 max_tokens 로 시작한다.
     """
     last: BaseException | None = None
     for candidate in _model_chain(model or settings.TEXT_MODEL):
         transient_left = 1
         adapt_left = 2
+        trunc_left = 1
+        budget = max_tokens
         while True:
             started = time.time()
             try:
-                payload, text_dump, usage = _stream_once(
-                    candidate, system_text, blocks, tool, max_tokens
+                payload, text_dump, usage, stop = _stream_once(
+                    candidate, system_text, blocks, tool, budget
                 )
             except ClientError as exc:
                 code = str((exc.response.get("Error") or {}).get("Code") or type(exc).__name__)
@@ -473,21 +504,29 @@ def _converse(
                     continue
                 break
             log.info(
-                "vpoc.call where=%s model=%s ms=%d ok=%s in=%s out=%s",
+                "vpoc.call where=%s model=%s ms=%d ok=%s in=%s out=%s stop=%s",
                 where,
                 candidate,
                 int((time.time() - started) * 1000),
                 payload is not None,
                 usage.get("inputTokens"),
                 usage.get("outputTokens"),
+                stop or "-",
             )
             if payload is None:
-                last = VpocError(
-                    where,
-                    "SchemaViolation",
-                    "모델이 도구를 쓰지 않았습니다. 출력 앞부분: " + text_dump[:2000],
-                    502,
+                truncated = stop == "max_tokens"
+                retry_budget = _trunc_budget(max_tokens)
+                if truncated and trunc_left and retry_budget > budget:
+                    trunc_left -= 1
+                    budget = retry_budget
+                    log.info("vpoc.call.trunc_retry where=%s model=%s budget=%d", where, candidate, budget)
+                    continue
+                head = (
+                    f"모델 출력이 출력 한도({budget} 토큰)에서 잘렸습니다. 출력 앞부분: "
+                    if truncated
+                    else "모델이 도구를 쓰지 않았습니다. 출력 앞부분: "
                 )
+                last = VpocError(where, "SchemaViolation", head + text_dump[:2000], 502)
                 break
             payload = _coerce(payload, (tool.get("inputSchema") or {}).get("json") or {})
             return payload, {**usage, "model": candidate}

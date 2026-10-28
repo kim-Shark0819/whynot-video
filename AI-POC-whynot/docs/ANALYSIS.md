@@ -347,6 +347,45 @@ vnew가 재사용하는 것: `vpoc.llm`·`images`·`store.STORE`·`ark`·`fal`·
 - **broker**: 모델 이름에 `claude-fable-`, `claude-opus-5`, `claude-sonnet-5`, `gpt-6`가 들어가면 다른 계정의 역할을 STS `AssumeRole`(ExternalId 사용)로 빌려 호출한다(`vpoc/settings.py:56-62`, `vpoc/llm.py:38-76`). 역할 ARN 기본값이 코드에 들어 있다(값은 여기 옮기지 않는다). `VPOC_BEDROCK_BROKER_ROLE_ARN=""`로 끌 수 있다.
 - IAM: `infra/app-bedrock-policy.json.tmpl` — `InvokeModel`·`StartAsyncInvoke`·`GetAsyncInvoke`, 다른 계정 주체 Deny. 스트리밍(`InvokeModelWithResponseStream`)은 없다 — `vpoc/llm.py:303-305` 주석대로 운영 역할에서 거부되면 일반 호출로 바꾼다. 실제 고객 계정 역할 정책은 미확인.
 
+#### 6.1.1 LLM 호출 — 단계별 1순위 모델 (2026-10-28, llm-top-model-first)
+
+vpoc·vnew의 Bedrock 도구 호출은 전부 `vpoc.llm._converse`(`vpoc/llm.py:450-535`)를 지난다. 모델 순서는 두 겹이다.
+
+1. **체인**(`_model_chain`, `llm.py:293-300`): [1순위, Opus 5.5, Opus 4.6, Sonnet 4.6, Sonnet 4.5] 중복 제거. 거부된 모델은 10분 건너뛴다.
+2. **호출부 다음 모델**: 호출부가 `for model in (A, B)`로 다시 부른다. 체인 전체가 실패해야 B로 간다. Fable 5.1은 `VPOC_TEXT_FALLBACK_MODELS`에 없으므로, Astra가 1순위인 호출은 Astra → Opus 5.5 → Opus 4.6 → Sonnet 4.6 → Sonnet 4.5 순서이고 그다음에야 Fable 5.1 체인으로 간다.
+
+| 화면·단계 | where | 1순위 | 호출부 다음 모델 | max_tokens(잘림 재시도) | 근거 |
+|---|---|---|---|---|---|
+| vpoc ② 분석 | `claude.analyze`(`.retry`) | Fable 5.1 | — | 8000(없음) | `vpoc/llm.py:858`, `:879` |
+| vpoc ③ 키 장면 콘티 | `claude.storyboard`(`.retry`) | Fable 5.1 | — | 8000(없음) | `vpoc/llm.py:767`, `:782` |
+| vpoc ③ 마스터 계획(영상 1개) | `claude.master_plan` | Fable 5.1 | — | 4000(4096) | `vpoc/llm.py:1238` |
+| vpoc ③ 샷 계획 | `claude.plan`(`.retry`, `.retry2`) | **Sonnet 4.5**(`VPOC_TEXT_MODEL`, model 미지정) | — | 6000(없음) | `vpoc/llm.py:1075-1106` |
+| vpoc ④ 샷 설명 | `claude.scene_brief` | Fable 5.1(`VPOC_BRIEF_MODEL`) | — | 1500(4096) | `vpoc/llm.py:645` |
+| vpoc 그림 필터 재작성 | `claude.safe_image_prompt` | **Sonnet 4.5** | — | 600(2400) | `vpoc/llm.py:565` |
+| vpoc ④ 의견 반영 | `claude.revise`(`.retry`) | **Sonnet 4.5** | — | 2000(4096) | `vpoc/regen.py:458`, `:468` |
+| vnew 캐릭터 분석 | `vnew.analyze` | GPT-6 Astra | Fable 5.1 | 1200(4096) | `vnew/characters.py:415`, `:533` |
+| vnew 캐릭터 사람 수 | `vnew.count_people` | Fable 5.1(`VNEW_PEOPLE_COUNT_MODEL`) | — | **400**(1600) | `vnew/characters.py:620` |
+| vnew 캐릭터 복장 일관성 | `vnew.outfit_check` | Fable 5.1(`VNEW_OUTFIT_CHECK_MODEL`) | — | 300(1200) | `vnew/characters.py:689` |
+| vnew 추가 복장 번역 | `vnew.outfit_translate` | GPT-6 Astra | Fable 5.1 | 200(800) | `vnew/characters.py:2113` |
+| vnew ② 대본 | `vnew.script` | Fable 5.1 | — | 8000(없음) | `vnew/plan.py:617`, `:1332-1335` |
+| vnew ③ 콘티 | `vnew.conti` | Fable 5.1 | — | 8000(없음) | `vnew/plan.py:629`, `:1338-1341` |
+| vnew ③ 장소 설계 | `vnew.location.design` | Fable 5.1 | GPT-6 Astra | 1600(4096) | `vnew/locations.py:447`, `:584` |
+| vnew ③ 장소 사실 | `vnew.location.facts` | Fable 5.1 | GPT-6 Astra | 2400(4096) | `vnew/locations.py:969`, `:1007` |
+| vnew ③ 장소 그림 문장 | `vnew.location.prompt` | GPT-6 Astra | Fable 5.1 | 1400(4096) | `vnew/locations.py:1260`, `:1322` |
+| vnew ③ 장소 검수 | `vnew.location.verify` | Fable 5.1 | — | 700(2800) | `vnew/locations.py:1914` |
+| vnew ④ 프리비즈 설계 | `vnew.previz.design` | GPT-6 Astra | Fable 5.1 | 8000(없음) | `vnew/previz.py:425`, `:1713` |
+| vnew ④ 패널 분석 | `vnew.previz.panel` | Fable 5.1 | — | 1200(4096) | `vnew/previz.py:441` |
+| vnew ④ 연출 문법 | `vnew.previz.grammar` | Fable 5.1 | — | **2000**(4096) | `vnew/previz_grammar.py:308` |
+| vnew ④ 다시 만들기 지시 | `vnew.previz.edits` | GPT-6 Astra | Fable 5.1 | 1500(4096) | `vnew/previz.py:458`, `:1590`, `:1629` |
+| vnew ④ 촬영 지시서 | `vnew.shot_brief` | GPT-6 Astra(`VNEW_BRIEF_MODEL`) | Fable 5.1 | 6000(없음) | `vnew/shot_brief.py:114`, `:121` |
+| vnew ⑤ 의상·목소리 메모 | `vnew.generate.cast_notes` | Fable 5.1 | — | 1200(4096) | `vnew/generate.py:1609` |
+
+- 굵은 max_tokens는 2026-10-28에 올린 값이다(120→400, 900→2000). 굵은 1순위(Sonnet 4.5)는 호출부가 model을 넘기지 않아 `VPOC_TEXT_MODEL`이 1순위가 되는 곳이다(바꾸지 않았다. WORKLOG 2026-10-28 남은 이슈).
+- **미리 적용**(`_request`, `llm.py:337-352`): 모델 id(소문자)에 `VPOC_LLM_NO_FORCED_TOOL`의 부분 문자열이 있으면 첫 요청부터 toolChoice `auto` + system 끝 도구 강제 문장, `VPOC_LLM_NO_TEMPERATURE`에 있으면 temperature를 뺀다. 기본값에서 Opus 5.5·Fable 5.1은 auto·temperature 없음, Astra는 tool·temperature 없음, Opus 4.6·Sonnet 4.x는 tool·temperature 0.6. 목록에 없는 모델은 거절 뒤 적응한다(`_adapt`, `llm.py:355-365`).
+- **잘림 재시도**(`_converse`): stopReason이 `max_tokens`이고 도구 입력이 없으면, 같은 모델로 `min(max_tokens × VPOC_LLM_TRUNC_RETRY_FACTOR, VPOC_LLM_TRUNC_RETRY_CAP)`(기본 ×4, 4096) 예산으로 한 번 더 부른다. 그 값이 원래 이하면(4096 이상 호출부) 재시도 없이 다음 모델로 간다. 다음 모델은 원래 예산으로 시작한다.
+- **로그**: `vpoc.call where= model= ms= ok= in= out= stop=`(응답마다), `vpoc.call.trunc_retry where= model= budget=`, `vpoc.call.adapt`(적응 때). 프롬프트 본문은 남기지 않는다.
+- **원장**: 호출부가 성공한 호출의 usage만 계상한다. 실패한(잘린) 시도의 토큰은 `vpoc.call` 로그에만 남는다(WORKLOG O-7).
+
 ### 6.2 fal.ai
 
 - 호스트: 큐 `https://queue.fal.run`, 카탈로그 `https://api.fal.ai/v1`, 스키마 `https://fal.ai/api/openapi/queue/openapi.json`(`vpoc/settings.py:147-152`). 인증 `Authorization: Key <FAL_KEY>`(`vpoc/fal.py:129-131`).
@@ -430,6 +469,8 @@ vnew가 재사용하는 것: `vpoc.llm`·`images`·`store.STORE`·`ark`·`fal`·
 | 환경변수 | 읽는 곳 | 코드 기본 | base |
 |---|---|---|---|
 | `VPOC_TEXT_MODEL` | `vpoc/settings.py:40` | claude-sonnet-4-5 | 같음 |
+| `VPOC_LLM_NO_FORCED_TOOL` / `VPOC_LLM_NO_TEMPERATURE` | `vpoc/settings.py:104-107` | `claude-opus-5,claude-fable-5` / `claude-opus-5,claude-fable-5,gpt-6`(부분 문자열, 빈 값이면 미리 적용 끔) | 같음 |
+| `VPOC_LLM_TRUNC_RETRY_FACTOR` / `VPOC_LLM_TRUNC_RETRY_CAP` | `vpoc/settings.py:111-112` | 4 / 4096(FACTOR=1이면 잘림 재시도 끔) | 같음 |
 | `VPOC_IMAGE_MODEL` / `VPOC_VIDEO_MODEL` | `:95`, `:98` | sd3-5-large / luma.ray-v2:0 | 같음 |
 | `VPOC_RESOLUTION` / `VPOC_DURATION` / `VPOC_ASPECT` | `:234-236` | 540p / 5s / 16:9 | 같음 |
 | `VPOC_MAX_INFLIGHT` / `VPOC_MAX_SHOTS` | `:241`, 그 아래 | 1 / 6 | 1 / 6 |

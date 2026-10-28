@@ -92,6 +92,25 @@ TEXT_FALLBACK_MODELS = [
     if item.strip()
 ]
 
+
+def _parse_marks(raw: object) -> tuple[str, ...]:
+    """쉼표로 나눈 모델 id 부분 문자열 목록 → (소문자, …). 앞뒤 공백·빈 항목은 버린다. 빈 값이면 ()."""
+    return tuple(item.strip().lower() for item in str(raw or "").split(",") if item.strip())
+
+
+# 모델마다 받지 않는 설정을 첫 요청부터 뺀다(llm-top-model-first R2, 2026-10-28). 모델 id(소문자)에 이
+# 부분 문자열 중 하나가 들어 있으면 적용한다. 2026-10-14 실측: Opus 5.x · Fable 5.x 는 toolChoice tool/any 와
+# temperature 를, GPT-6 Astra 는 temperature 를 거절한다. 빈 값이면 끄고 예전처럼 거절을 겪은 뒤 적응한다.
+LLM_NO_FORCED_TOOL_DEFAULT = "claude-opus-5,claude-fable-5"
+LLM_NO_TEMPERATURE_DEFAULT = "claude-opus-5,claude-fable-5,gpt-6"
+LLM_NO_FORCED_TOOL = _parse_marks(os.getenv("VPOC_LLM_NO_FORCED_TOOL", LLM_NO_FORCED_TOOL_DEFAULT))
+LLM_NO_TEMPERATURE = _parse_marks(os.getenv("VPOC_LLM_NO_TEMPERATURE", LLM_NO_TEMPERATURE_DEFAULT))
+# 출력이 max_tokens 에서 잘려 도구 입력이 없으면, 다음 모델로 넘어가기 전에 같은 모델로 한 번 더 부른다
+# (llm-top-model-first R1). 예산 = min(max_tokens × FACTOR, CAP). 그 값이 원래 예산 이하면 다시 부르지 않는다
+# (FACTOR=1 이면 끈다).
+LLM_TRUNC_RETRY_FACTOR = _int("VPOC_LLM_TRUNC_RETRY_FACTOR", 4)
+LLM_TRUNC_RETRY_CAP = _int("VPOC_LLM_TRUNC_RETRY_CAP", 4096)
+
 IMAGE_MODEL = os.getenv("VPOC_IMAGE_MODEL", "stability.sd3-5-large-v1:0")
 IMAGE_REGION = os.getenv("VPOC_IMAGE_REGION", "us-west-2")
 

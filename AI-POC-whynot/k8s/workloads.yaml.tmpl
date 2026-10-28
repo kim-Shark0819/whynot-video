@@ -248,6 +248,17 @@ spec:
               value: "${VPOC_SMOKE_ENABLED}"
             - name: VPOC_TEXT_MODEL
               value: "${VPOC_TEXT_MODEL}"
+            # Bedrock 상위 모델 첫 시도 성공(llm-top-model-first, 2026-10-28). 모델 id 부분 문자열 목록(쉼표).
+            # 들어 있는 모델은 첫 요청부터 강제 도구(toolChoice tool) · temperature 를 뺀다. 빈 값이면 거절 뒤 적응(예전 동작).
+            - name: VPOC_LLM_NO_FORCED_TOOL
+              value: "${VPOC_LLM_NO_FORCED_TOOL}"
+            - name: VPOC_LLM_NO_TEMPERATURE
+              value: "${VPOC_LLM_NO_TEMPERATURE}"
+            # 출력이 max_tokens 에서 잘리면 같은 모델로 min(max_tokens × FACTOR, CAP) 예산으로 한 번 더. FACTOR=1 이면 끈다.
+            - name: VPOC_LLM_TRUNC_RETRY_FACTOR
+              value: "${VPOC_LLM_TRUNC_RETRY_FACTOR}"
+            - name: VPOC_LLM_TRUNC_RETRY_CAP
+              value: "${VPOC_LLM_TRUNC_RETRY_CAP}"
             - name: VPOC_IMAGE_MODEL
               value: "${VPOC_IMAGE_MODEL}"
             - name: VPOC_IMAGE_REGION

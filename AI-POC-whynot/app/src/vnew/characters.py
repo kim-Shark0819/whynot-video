@@ -615,7 +615,8 @@ def _count_people(jpeg: bytes) -> int | None:
             system_text=_PEOPLE_SYSTEM,
             blocks=blocks,
             tool=_PEOPLE_TOOL,
-            max_tokens=120,
+            # 120 은 5.x 모델(toolChoice auto)이 도구 앞에 글을 쓰면 잘렸다(llm-top-model-first R3, 2026-10-28).
+            max_tokens=400,
             where="vnew.count_people",
             model=settings.PEOPLE_COUNT_MODEL,
         )
