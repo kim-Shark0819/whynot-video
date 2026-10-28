@@ -1450,6 +1450,17 @@
     }
   }
 
+  /* ① 영상 모델 단가 문구(073 R16.8, 설계자 2026-10-28). 단가를 모르면(priceKnown false) "단가 미정".
+     목록(infoLine false)은 "$0.206/초", 고른 모델 설명 줄(infoLine true)은 "초당 $0.206".
+     priceResolution(서버가 실제 전송 해상도로 계산한 기준)이 있으면 끝에 "(480p)"처럼 붙인다. */
+  function previzPriceText(model, infoLine) {
+    if (!model || !model.priceKnown) return "단가 미정";
+    var amount = "$" + (Number(model.usdPerSecond) || 0).toFixed(3);
+    var text = infoLine ? "초당 " + amount : amount + "/초";
+    if (model.priceResolution) text += "(" + String(model.priceResolution) + ")";
+    return text;
+  }
+
   /* 선택 모델의 한 번 생성 최대 길이(초). plan.models 에서 찾는다(없으면 0). */
   function modelMaxSeconds() {
     var plan = state.plan || {};
@@ -2070,9 +2081,7 @@
             : model.refMode === "imageList"
             ? "참고: 이미지 목록"
             : "참고: 없음";
-        var priceText = model.priceKnown
-          ? "$" + (Number(model.usdPerSecond) || 0).toFixed(3) + "/초"
-          : "단가 미정";
+        var priceText = previzPriceText(model, false);
         var label =
           (model.label || model.id) +
           (model.recommended ? " · 추천" : "") +
@@ -2114,9 +2123,7 @@
           : chosen.refMode === "imageList"
           ? "참고 이미지: 이미지 목록"
           : "참고 이미지: 없음";
-      var priceText = chosen.priceKnown
-        ? "초당 $" + (Number(chosen.usdPerSecond) || 0).toFixed(3)
-        : "단가 미정";
+      var priceText = previzPriceText(chosen, true);
       modelInfo.textContent = priceText + " · " + refText;
     }
     select.addEventListener("change", function () {
