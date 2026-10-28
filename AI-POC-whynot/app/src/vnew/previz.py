@@ -29,6 +29,7 @@ import secrets
 import subprocess
 import tempfile
 import threading
+import time
 from datetime import datetime, timezone
 
 from .. import stitcher
@@ -41,6 +42,7 @@ from ..vpoc.store import STORE
 from ..vpoc import store as vpoc_store
 
 from . import previz_camera
+from . import previz_collision
 from . import previz_fit
 from . import previz_grammar
 from . import previz_schema
@@ -701,7 +703,11 @@ _DESIGN_SYSTEM = (
     "ceilings) that the location references do not show; distinguish indoor/outdoor, terrace/balcony, "
     "doors, railings and whether there is a ceiling. Avoid meaningless camera shake or excessive "
     "rotation; keep each cut's camera steady as the previz cut. "
-    "Write Korean for notesKo. Do not add text outside the tool."
+    "Write Korean for notesKo. Do not add text outside the tool. "
+    "Mark every prop a person can sit on (chair, bench, step, rail, ledge, box) with sittable:true, and when "
+    "an actor's pose is 'sit' set sitOn to that prop id. rotY is in radians. Never place a person inside a "
+    "prop: standing people stand beside props and seated people sit on the prop's top; the server computes "
+    "the exact height and fixes overlaps."
 )
 
 _DESIGN_OPENING = {
@@ -730,6 +736,7 @@ _DESIGN_CUT_ACTOR = {
         "pos": {"type": "array", "items": {"type": "number"}},
         "facingDeg": {"type": "number"},
         "pose": {"type": "string"},
+        "sitOn": {"type": "string"},
         "moveTo": {"type": "array", "items": {"type": "number"}},
         "gesture": {"type": "string"},
         "gestureTarget": {"type": "string"},
@@ -797,6 +804,7 @@ _DESIGN_TOOL = {
                             "pos": {"type": "array", "items": {"type": "number"}},
                             "rotY": {"type": "number"},
                             "color": {"type": "string"},
+                            "sittable": {"type": "boolean"},
                         },
                     },
                 },
@@ -970,6 +978,8 @@ def run_design(owner: str, pid: str, task_id: str) -> None:
     """
     from . import plan as plan_mod  # noqa: PLC0415
 
+    # 소품 관통 보정(084 R1)은 시작 때 한 번 읽은 값으로 끝까지 간다(도중에 설정이 바뀌어도 섞지 않는다).
+    collision_on = bool(vnew_settings.VNEW_PREVIZ_COLLISION)
     try:
         plan, _ = plan_mod.load_plan(owner, pid)
         conti = plan.get("conti") or {}
@@ -1070,9 +1080,51 @@ def run_design(owner: str, pid: str, task_id: str) -> None:
         _apply_appearance(owner, scenes, chars)
         _apply_gestures(scenes, groups, grammar_by_cut, plan)
 
+        # 2.7) 소품 관통 보정 1차(084 R1.7): 설계 배치에서 앉을 자리(sit)를 채우고 겹친 인물을 밀어낸다.
+        collision_a: dict = {}
+        collision_ms = 0.0
+        if collision_on:
+            started = time.monotonic()
+            try:
+                collision_a = previz_collision.resolve_scenes(scenes, log_fixes=True, pass_name="A")
+            except Exception as exc:  # noqa: BLE001 — 보정 실패가 설계를 막지 않는다(보정 없이 계속).
+                log.warning("vnew.previz.collision.failed pid=%s pass=A err=%s", pid, str(exc)[:200])
+                collision_on = False
+            collision_ms += (time.monotonic() - started) * 1000.0
+
         # 3) camera: 장소마다 scene_line → 컷마다 place_cut. (progress: camera, total=컷 수)
         _set_progress(owner, pid, task_id, step="camera", done=0, total=total_cuts)
         fit = _place_cameras(owner, pid, scenes, groups, grammar_by_cut, overrides, task_id=task_id)
+
+        # 3.5) 보정 2차: 배우 조정(cheat)으로 옮겨진 인물. 인물이 움직인 컷은 일치도를 다시 잰다.
+        if collision_on:
+            started = time.monotonic()
+            try:
+                collision_b = previz_collision.resolve_scenes(scenes, log_fixes=True, pass_name="B")
+            except Exception as exc:  # noqa: BLE001 — 2차 실패는 1차 결과만 남긴다.
+                log.warning("vnew.previz.collision.failed pid=%s pass=B err=%s", pid, str(exc)[:200])
+                collision_b = {cid: {"fixes": [], "unresolved": list(r.get("unresolved") or [])} for cid, r in collision_a.items()}
+            for scene in scenes:
+                for cut in scene.get("timeline") or []:
+                    cut_id = str(cut.get("cutId") or "")
+                    res_a = collision_a.get(cut_id) or {"fixes": [], "unresolved": []}
+                    res_b = collision_b.get(cut_id) or {"fixes": [], "unresolved": []}
+                    entry = fit.setdefault(cut_id, {"match": None, "method": "astra"})
+                    if res_b["fixes"] and isinstance(grammar_by_cut.get(cut_id), dict):
+                        grammar = _merge_override(grammar_by_cut[cut_id], overrides.get(cut_id))
+                        _rematch_cut(scene, cut, grammar, entry)
+                    # fixes 는 1·2차를 합치고, unresolved 는 마지막(2차) 상태를 쓴다(같은 인물·소품이면 같은 값).
+                    entry["collision"] = {
+                        "fixes": list(res_a["fixes"]) + list(res_b["fixes"]),
+                        "unresolved": list(res_b["unresolved"]),
+                    }
+            collision_ms += (time.monotonic() - started) * 1000.0
+            n_fixes = sum(len((e.get("collision") or {}).get("fixes") or []) for e in fit.values() if isinstance(e, dict))
+            n_unresolved = sum(len((e.get("collision") or {}).get("unresolved") or []) for e in fit.values() if isinstance(e, dict))
+            log.info(
+                "vnew.previz.stage pid=%s step=collision ms=%d fixes=%d unresolved=%d",
+                pid, int(round(collision_ms)), n_fixes, n_unresolved,
+            )
 
         # 4) 저장(done). lastRebuild 요약을 남긴다(다시 만들기였으면).
         _set_step(owner, pid, task_id, step="done")
@@ -1249,8 +1301,60 @@ def _actors_in_cut(scene: dict, cut: dict) -> list[dict]:
             "foot": [float(pos[0]) if len(pos) > 0 else 0.0, 0.0, float(pos[2]) if len(pos) > 2 else 0.0],
             "pose": str(ca.get("pose") or "stand"),
             "facingDeg": ca.get("facingDeg"),
+            # 앉은 엉덩이 높이(084 R1.6, previz_collision 이 채운 sit). 없으면 None(지금 값 SEAT_Y+0.05).
+            "hipY": (ca.get("sit") or {}).get("hipY") if isinstance(ca.get("sit"), dict) else None,
         })
     return out
+
+
+def _rematch_cut(scene: dict, cut: dict, grammar: dict, fit_entry: dict) -> None:
+    """보정 2차로 인물이 움직인 컷의 fit.match 를 place_cut 과 같은 방식으로 다시 잰다(084 R1.7).
+
+    샷 크기는 문법 shotSize(ECU 는 CU — _place_cameras 와 같다)에서 시작해 fit.lens 와 맞을 때까지 한 단계씩
+    넓힌다(place_cut 의 벽 안쪽 넓히기와 같은 순서). 가림·extraVisible 이 있던 컷은 지금처럼 × 0.5.
+    camera 가 없거나 method 가 grammar 가 아니면 그대로 둔다.
+    """
+    if not isinstance(fit_entry, dict) or fit_entry.get("method") != "grammar" or not isinstance(grammar, dict):
+        return
+    camera = cut.get("camera") or {}
+    if not camera.get("pos") or not camera.get("target"):
+        return
+    size = str(grammar.get("shotSize") or "MCU")
+    if size == "ECU":
+        size = "CU"
+    if size not in previz_camera.LENS:
+        size = "MCU"
+    lens = str(fit_entry.get("lens") or "")
+    for _ in range(len(previz_camera.LENS)):
+        if not lens or previz_camera.LENS[size][1] == lens:
+            break
+        wider = previz_camera._wider_lens(size)  # noqa: SLF001
+        if wider == size:
+            break
+        size = wider
+    bottom = previz_camera.LENS[size][2]
+    actors = _actors_in_cut(scene, cut)
+    if not actors:
+        return
+    subject_name = str(grammar.get("mainSubject") or "")
+    subject = next((a for a in actors if a.get("name") == subject_name), actors[0])
+    try:
+        match = previz_fit.match_visible(
+            camera,
+            subject["foot"],
+            subject["heightM"],
+            subject["pose"],
+            previz_camera._grammar_num(grammar.get("headTopY"), 0.1),  # noqa: SLF001
+            previz_camera._grammar_num(grammar.get("subjectX"), 0.5),  # noqa: SLF001
+            bottom,
+            subject.get("hipY"),
+        )
+    except Exception as exc:  # noqa: BLE001
+        log.warning("vnew.previz.collision.rematch_failed cut=%s err=%s", cut.get("cutId"), str(exc)[:150])
+        return
+    if fit_entry.get("occluded") or fit_entry.get("extraVisible"):
+        match *= 0.5
+    fit_entry["match"] = round(match, 4)
 
 
 def _merge_override(grammar: dict, override: dict | None) -> dict:
@@ -2018,6 +2122,8 @@ def _design_prompt(
         "",
         "인물은 고유의 밝은 색(서로 확실히 다르게)으로, 배경은 하나의 덩어리(회색조), 빛은 어디서 오는지"
         " light 로 표기하세요. 컷 안에서 인물이 걸으면 actor.moveTo 로.",
+        "앉는 소품에는 sittable:true, 앉은 인물에는 sitOn(소품 id)을 쓰세요. 인물이 소품을 관통하지 않게 두세요"
+        "(높이·겹침은 서버가 맞춥니다).",
     ]
     # --- 사용자 blocking(인물 자리 지시) ---
     blocking = blocking or []
@@ -2303,9 +2409,13 @@ def _recompute_manual_fit(previz: dict, old_scenes: list[dict], new_scenes: list
                 foot = _actor_foot(scene, cut, (meta or {}).get("id")) if meta else [0, 0, 0]
                 height = float((meta or {}).get("heightM") or 1.7)
                 pose = "stand"
+                hip_y = None
                 for ca in cut.get("actors") or []:
                     if str(ca.get("id")) == str((meta or {}).get("id")):
                         pose = str(ca.get("pose") or "stand")
+                        sit = ca.get("sit") if isinstance(ca.get("sit"), dict) else {}
+                        if isinstance(sit.get("hipY"), (int, float)) and not isinstance(sit.get("hipY"), bool):
+                            hip_y = float(sit["hipY"])  # 앉은 엉덩이 높이(084 R1.6)
                         break
                 shot_size = str(grammar.get("shotSize") or "MCU")
                 bottom = previz_camera.LENS.get(shot_size, previz_camera.LENS["MCU"])[2]
@@ -2313,7 +2423,7 @@ def _recompute_manual_fit(previz: dict, old_scenes: list[dict], new_scenes: list
                 subject_x = float(grammar.get("subjectX") or 0.5)
                 try:
                     match = round(previz_fit.match_visible(
-                        new_cam, foot, height, pose, top_y, subject_x, bottom
+                        new_cam, foot, height, pose, top_y, subject_x, bottom, hip_y
                     ), 4)
                 except Exception as exc:  # noqa: BLE001
                     log.warning("vnew.previz.manual_fit.failed cut=%s err=%s", cut_id, str(exc)[:150])
@@ -2741,9 +2851,50 @@ def previz_view(owner: str, pid: str, plan: dict) -> dict:
     previz = _reconcile_stale(previz)
     rev = int(previz.get("revision") or 0)
 
+    # 소품 관통 보정(084 R1.11): 보기 사본에만 적용한다(저장본은 그대로, 보기 때는 로그 없음).
+    # "보정과 함께 설계된 장면"(어떤 컷 인물이든 sit 이 있거나 그 장면 컷의 fit.collision 이 있음)만 사본을
+    # 보정한다 — 저장된 카메라가 이미 앉은 엉덩이 높이(hipY) 기준이라 멱등이다. 옛 장면은 카메라가 엉덩이
+    # 0.5 기준이라 엉덩이만 올리면 얼굴이 화면 밖으로 나간다(Claude 검증 2026-10-28). 그래서 옛 장면은
+    # 사본을 바꾸지 않고 겹침 검출만 해 needsRedesign 으로 알린다(화면·녹화는 지금과 같다).
+    collision_on = bool(vnew_settings.VNEW_PREVIZ_COLLISION)
+    fit_in = previz.get("fit") if isinstance(previz.get("fit"), dict) else {}
+    collision_out: dict = {}
+    legacy_cuts: list[str] = []
     scenes_out = []
     for scene in previz.get("scenes") or []:
-        scenes_out.append(_scene_view(pid, scene))
+        timeline = [c for c in (scene.get("timeline") or []) if isinstance(c, dict)]
+        designed = any(
+            isinstance(ca, dict) and isinstance(ca.get("sit"), dict)
+            for cut in timeline for ca in (cut.get("actors") or [])
+        ) or any(
+            isinstance(fit_in.get(str(cut.get("cutId") or "")), dict)
+            and isinstance(fit_in[str(cut.get("cutId") or "")].get("collision"), dict)
+            for cut in timeline
+        )
+        if collision_on and not designed:
+            scenes_out.append(_scene_view(pid, scene))
+            try:
+                found = previz_collision.detect_scene(scene)
+            except Exception as exc:  # noqa: BLE001 — 검출 실패는 보기를 막지 않는다.
+                log.warning("vnew.previz.collision.view_failed loc=%s err=%s", scene.get("locationId"), str(exc)[:150])
+                found = {}
+            legacy_cuts.extend(str(c.get("cutId") or "") for c in timeline if str(c.get("cutId") or "") in found)
+            continue
+        view_res: dict[str, dict] = {}
+        scenes_out.append(_scene_view(pid, scene, collision=collision_on, collision_out=view_res))
+        for cut_id, res in view_res.items():
+            stored = (fit_in.get(cut_id) or {}).get("collision") if isinstance(fit_in.get(cut_id), dict) else None
+            if isinstance(stored, dict) and not res.get("fixes"):
+                # 설계 때 저장한 보정 내역(보기 때 더 고칠 것이 없다).
+                fixes = list(stored.get("fixes") or [])
+                source = "design"
+            else:
+                fixes = list(res.get("fixes") or [])
+                source = "view"
+            collision_out[cut_id] = {"fixes": fixes, "unresolved": list(res.get("unresolved") or []), "source": source}
+    if legacy_cuts:
+        # 옛 장면에서 관통이 보이는 컷(plan 컷 순서). 컷 id 항목과 같은 dict 에 둔다(컷 id 가 이 키와 겹치지 않는다).
+        collision_out.update({"source": "none", "needsRedesign": True, "cuts": legacy_cuts})
 
     segments = (plan.get("conti") or {}).get("segments") or []
     recordings_in = previz.get("recordings") or {}
@@ -2762,7 +2913,7 @@ def previz_view(owner: str, pid: str, plan: dict) -> dict:
             recordings_out[seg_id] = {"status": "none", "url": "", "seconds": None}
             recorded_all = False
 
-    return {
+    out = {
         "status": previz.get("status") or "none",
         "error": previz.get("error") or "",
         "model": previz.get("model") or "",
@@ -2787,14 +2938,20 @@ def previz_view(owner: str, pid: str, plan: dict) -> dict:
         "lastRebuild": previz.get("lastRebuild"),
         "shotBrief": _shot_brief_view(plan),
     }
+    if collision_on:
+        out["collision"] = collision_out
+    return out
 
 
-def _scene_view(pid: str, scene: dict) -> dict:
+def _scene_view(pid: str, scene: dict, *, collision: bool | None = None, collision_out: dict | None = None) -> dict:
     """scene JSON 에 텍스처 API 경로(textureUrl)를 더해 돌려준다(키는 그대로 남긴다).
 
     서명 URL(S3 직통) 대신 같은 출처 API 경로를 준다 — 버킷에 CORS 설정이 없어 three.js 가 S3 를
     직접 부르면 텍스처가 안 불러지거나 캔버스가 오염돼 녹화가 막히기 때문. 브라우저는 이 경로를
     Authorization 헤더로 받아 blob 으로 넘긴다(previz.texture_bytes).
+
+    collision(084 R1.11): True 면 사본에 previz_collision.resolve_scene(log_fixes=False)을 적용하고
+    컷별 결과를 collision_out 에 담는다. False(보정 끔)면 사본에서 sit 을 뺀다(엉덩이 0.5). None 은 그대로.
     """
     out = copy.deepcopy(scene)
     room = out.get("room") or {}
@@ -2805,6 +2962,18 @@ def _scene_view(pid: str, scene: dict) -> dict:
             wall["textureUrl"] = texture_api_path(pid, str(wall.get("textureKey")))
     if room.get("floorTextureKey"):
         room["floorTextureUrl"] = texture_api_path(pid, str(room.get("floorTextureKey")))
+    if collision is True:
+        try:
+            result = previz_collision.resolve_scene(out, log_fixes=False, pass_name="view")
+            if collision_out is not None:
+                collision_out.update(result)
+        except Exception as exc:  # noqa: BLE001 — 보정 실패는 보기를 막지 않는다(저장본 그대로 보인다).
+            log.warning("vnew.previz.collision.view_failed loc=%s err=%s", out.get("locationId"), str(exc)[:150])
+    elif collision is False:
+        for cut in out.get("timeline") or []:
+            for ca in cut.get("actors") or []:
+                if isinstance(ca, dict):
+                    ca.pop("sit", None)
     return out
 
 

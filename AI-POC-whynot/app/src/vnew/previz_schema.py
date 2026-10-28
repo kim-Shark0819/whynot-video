@@ -284,6 +284,9 @@ def _normalize_props(raw_props, room: dict) -> list[dict]:
                 "color": _color(item.get("color"), DEFAULT_PROP_COLOR),
             }
         )
+        # 앉을 수 있는 면(084 R1.1). 참일 때만 둔다(거짓이면 키 없음 — 옛 출력과 같다).
+        if _as_bool(item.get("sittable")):
+            props[-1]["sittable"] = True
     return props
 
 
@@ -357,8 +360,37 @@ def _normalize_camera(raw: dict, room: dict) -> dict:
     return camera
 
 
-def _normalize_cut_actors(raw_actors, actor_ids: list[str], room: dict) -> list[dict]:
-    """컷 안 인물 상태(위치·방향·포즈). 방 밖 좌표는 방 안으로 보정."""
+def _normalize_sit(raw_sit, facing_deg: float, prop_ids: list[str]) -> dict | None:
+    """컷 인물 sit(084 R1.2·R1.18). propId 가 장면 소품, 0.2 ≤ hipY ≤ 2.0, legPitchDeg 가 후보일 때만.
+
+    legYawDeg 는 (−180, 180] 로 감는다. 없거나 숫자가 아니면 facingDeg(옛 데이터).
+    """
+    from . import previz_collision  # noqa: PLC0415 — previz_collision 이 이 모듈을 import 한다(순환 피함)
+
+    if not isinstance(raw_sit, dict):
+        return None
+    prop_id = _str(raw_sit.get("propId"))
+    hip = raw_sit.get("hipY")
+    pitch = raw_sit.get("legPitchDeg")
+    if not prop_id or prop_id not in prop_ids or not _is_num(hip) or not (0.2 <= float(hip) <= 2.0):
+        return None
+    if not _is_num(pitch) or float(pitch) not in [float(p) for p in previz_collision.LEG_PITCHES]:
+        return None
+    yaw_raw = raw_sit.get("legYawDeg")
+    yaw = float(yaw_raw) if _is_num(yaw_raw) and abs(float(yaw_raw)) < 1e6 else float(facing_deg)
+    return {
+        "propId": prop_id,
+        "hipY": round(float(hip), 4),
+        "legPitchDeg": int(float(pitch)),
+        "legYawDeg": round(previz_collision.wrap_deg(yaw), 2),
+    }
+
+
+def _normalize_cut_actors(raw_actors, actor_ids: list[str], room: dict, prop_ids: list[str] | None = None) -> list[dict]:
+    """컷 안 인물 상태(위치·방향·포즈). 방 밖 좌표는 방 안으로 보정.
+
+    prop_ids(장면 소품 id)를 주면 앉은 인물의 sitOn·sit 을 검증해 둔다(084 R1). None 이면 지금과 같다.
+    """
     xmin, xmax, zmin, zmax = _room_bounds(room)
     out: list[dict] = []
     if not isinstance(raw_actors, list):
@@ -396,11 +428,19 @@ def _normalize_cut_actors(raw_actors, actor_ids: list[str], room: dict) -> list[
             mv[1] = 0.0
             mv[2] = _round(_clamp(mv[2], zmin, zmax))
             cut_actor["moveTo"] = mv
+        # 앉을 자리(084 R1): sit 자세 + 장면에 있는 소품 id 만.
+        if prop_ids and pose == "sit":
+            sit_on = _str(item.get("sitOn"))
+            if sit_on and sit_on in prop_ids:
+                cut_actor["sitOn"] = sit_on
+            sit = _normalize_sit(item.get("sit"), cut_actor["facingDeg"], prop_ids)
+            if sit is not None:
+                cut_actor["sit"] = sit
         out.append(cut_actor)
     return out
 
 
-def _normalize_timeline(raw_timeline, room: dict, actor_ids: list[str], cut_specs: list[dict], start_clock: float = 0.0) -> tuple[list[dict], float]:
+def _normalize_timeline(raw_timeline, room: dict, actor_ids: list[str], cut_specs: list[dict], start_clock: float = 0.0, prop_ids: list[str] | None = None) -> tuple[list[dict], float]:
     """타임라인을 콘티 컷과 1:1 로 맞춘다.
 
     cut_specs = [{cutId, seconds}] (콘티 순서). 모델 timeline 을 cutId 로 맞추되,
@@ -439,7 +479,7 @@ def _normalize_timeline(raw_timeline, room: dict, actor_ids: list[str], cut_spec
 
         if raw_cut is not None:
             camera = _normalize_camera(raw_cut.get("camera") or {}, room)
-            cut_actors = _normalize_cut_actors(raw_cut.get("actors") or [], actor_ids, room)
+            cut_actors = _normalize_cut_actors(raw_cut.get("actors") or [], actor_ids, room, prop_ids)
         elif prev_camera is not None:
             # 빠진 컷: 앞 컷 상태를 복사(카메라만 이어지고 인물 자리는 이어진다).
             camera = copy.deepcopy(prev_camera)
@@ -487,7 +527,8 @@ def normalize_scene(raw: dict, *, location_id: str, cut_specs: list[dict], textu
     props = _normalize_props(raw.get("props"), room)
     actors = _normalize_actors(raw.get("actors"))
     actor_ids = [a["id"] for a in actors]
-    timeline, _ = _normalize_timeline(raw.get("timeline"), room, actor_ids, cut_specs, start_clock)
+    prop_ids = [p["id"] for p in props]
+    timeline, _ = _normalize_timeline(raw.get("timeline"), room, actor_ids, cut_specs, start_clock, prop_ids=prop_ids)
 
     scene = {
         "version": VERSION,

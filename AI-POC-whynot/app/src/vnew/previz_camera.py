@@ -275,12 +275,14 @@ def scene_line(cuts_grammar, a_name, b_name, a_pos, b_pos) -> dict:
 
 
 def _actor_points(actor: dict, foot, pose: str):
-    """한 인물의 몸 지점 계산 도우미. foot=[x,0,z], actor.heightM."""
+    """한 인물의 몸 지점 계산 도우미. foot=[x,0,z], actor.heightM, actor.hipY(앉은 엉덩이, 084 R1.6)."""
     height = float(actor.get("heightM") or 1.7)
     foot = _vec3(foot)
+    hip_raw = actor.get("hipY")
+    hip_y = float(hip_raw) if isinstance(hip_raw, (int, float)) and not isinstance(hip_raw, bool) else None
 
     def y(point: str) -> float:
-        return body_y(point, height, pose)
+        return body_y(point, height, pose, hip_y)
 
     return {
         "foot": foot,
@@ -756,6 +758,7 @@ def place_cut(grammar: dict, actors_in_cut: list[dict], room: dict | None, side:
     # --- 일치도(보이는 부분 기준) ---
     cam_dict = _to_camera_dict(cam)
     if subject is not None:
+        subject_hip = (subject.get("actor") or {}).get("hipY")
         match = match_visible(
             cam_dict,
             _world(subject, 0.0),
@@ -764,6 +767,7 @@ def place_cut(grammar: dict, actors_in_cut: list[dict], room: dict | None, side:
             top_y,
             subject_x,
             bottom,
+            subject_hip if isinstance(subject_hip, (int, float)) and not isinstance(subject_hip, bool) else None,
         )
         dist = _planar_dist(cam[0], _world(subject, 0.0))
     else:

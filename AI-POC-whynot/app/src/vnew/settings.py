@@ -148,6 +148,11 @@ VNEW_PREPARE_STALE_S = _int("VNEW_PREPARE_STALE_S", 300)
 # 이상이어야 승인된다(force 로 넘길 수 있다). match 가 null(판정 불가)인 컷도 낮은 컷으로 센다.
 VNEW_PREVIZ_APPROVE_MIN = _float("VNEW_PREVIZ_APPROVE_MIN", 0.7)
 
+# 프리비즈 소품 관통 보정(084 R1, 2026-10-28). 켜면 서버가 앉을 소품·엉덩이 높이·다리 방향·각도를 정하고
+# 인물이 소품과 겹치면 밀어낸다(설계 저장 전 2회, 보기 때 사본에). false 면 지금 동작(보정·sit 없음,
+# 엉덩이 0.5). 템플릿·base 에 배선해 config.<target>.env 한 줄로 되돌린다.
+VNEW_PREVIZ_COLLISION = _bool("VNEW_PREVIZ_COLLISION", True)
+
 # --- ⑤ 촬영 지시서(shot brief) (설계자 2026-10-22) ---
 # 프리비즈 승인 직후, 장소마다 1회 호출해 그 장소 컷들의 "촬영 전문 언어" 지시서를 쓴다. 작성 모델은
 # 설계와 같은 체인(Astra 먼저, 실패 시 Claude 분석 체인). 장면·배경·연기·대사 연기를 영어로 섬세히.

@@ -179,6 +179,7 @@ flowchart LR
 | `plan.py` | ①입력 ②대본 ③콘티. `plan.json` 하나가 프로젝트 상태의 단일 원본. task 스레드(`:1393`) |
 | `locations.py` / `location_views.py` | ③ 장소 4면 시트, 참고 사진. `ThreadPoolExecutor(VIEW_WORKERS)`(`:1848`), task 스레드(`:2846`) |
 | `previz*.py` | ④ 프리비즈 3D 장면 설계(Astra), 카메라 문법·토릭 계산(`previz_camera`, `previz_grammar`), 일치도(`previz_fit`), 스키마. task 스레드(`previz.py:2858`) |
+| `previz_collision.py` | ④ 인물↔소품 겹침 보정(084 R1, 순수 함수, LLM·네트워크 없음). 앉을 소품(`pick_seat`)·엉덩이 높이 = 소품 윗면·다리 방향(`choose_leg_yaw`, 길쭉한 자리는 짧은 축 법선)·다리 각도(`solve_legs`)·밀어내기(`push_out`). `run_design`이 카메라 계산 전·후 2회 부르고 `fit[cut].collision`에 저장. `previz_view`는 보정과 함께 설계된 장면(`sit` 또는 `fit.collision` 있음)만 보기 사본에 다시 적용하고, 옛 장면은 사본을 바꾸지 않고 `detect_scene`으로 관통 컷만 찾아 `collision.needsRedesign`으로 알린다(저장본 그대로). `VNEW_PREVIZ_COLLISION`으로 끈다 |
 | `shot_brief.py` | 프리비즈 승인 후 장소별 촬영 지시서 |
 | `generate.py` | ⑤ 영상 생성 드라이버(아래) |
 | `imaging.py`, `prompts.py` | 이미지 보조, 프롬프트 |
@@ -446,6 +447,9 @@ vpoc·vnew의 Bedrock 도구 호출은 전부 `vpoc.llm._converse`(`vpoc/llm.py:
 | `VPOC_FAL_PROMPT_MAX_OVERRIDES` | `vpoc/settings.py:293` | `bytedance/seedance-2.5/*=4000` | 같은 값 | — | — |
 | `VPOC_FAL_SEEDANCE_TAG_STYLE` | `vpoc/settings.py:330` | `at` | `at` | — | —(V-2 실패 시에만 `plain`) |
 | `PROMPT_BOOST_ENABLED` | `prompt_boost.py:42` | 1 | 키 없음 | — | — |
+| `VNEW_PREVIZ_COLLISION` | `vnew/settings.py`(`_bool`), `previz.run_design`·`previz_view` | true | true | — | —(VNEW 꺼짐이라 영향 없음) |
+
+`VNEW_PREVIZ_COLLISION`(084 작업 1, 2026-10-28)은 앱 env(`k8s/workloads.yaml.tmpl`의 `VNEW_ENABLED` 바로 뒤)와 base(`deploy/config.env.example`의 `VNEW_ENABLED` 뒤)에 배선돼 있다. false면 보정·앉을 자리(`sit`)가 없고 엉덩이 0.5(지금 동작)다. 설계는 시작 때 읽은 값으로 끝낸다. 되돌림 배선 검사 `PARITY_ENV_KEYS`(rw-a~c)에 들어 있다.
 
 073 새 키 5개(위 `VPOC_ARK_SEEDANCE_ENABLED`~`VPOC_FAL_SEEDANCE_TAG_STYLE`)는 앱 env(`k8s/workloads.yaml.tmpl:298-311`)와 base(`deploy/config.env.example:368-392`)에 배선돼 있어 오버레이 한 줄로 바꿀 수 있다. 템플릿이 env를 늘 설정하므로 base 값이 실제 기본값이다. 빈 값의 뜻: `FAMILY` 빈 값은 계열 라우팅 끔(070 동작), `PROMPT_MAX_OVERRIDES` 빈 값은 덮어쓰기 없음(caps·2,500), `TAG_STYLE` 빈 값·틀린 값은 `at`(design.md §6).
 
@@ -631,6 +635,7 @@ flowchart LR
 | ark | `check_ark_seedance_gate` | `VPOC_ARK_SEEDANCE_ENABLED` 게이트(`ark.choices`·`resolve_model`) |
 | vnew | `check_vnew`, `check_vnew_characters`, `check_vnew_plan`, `check_vnew_locations`, `check_vnew_generate`, `check_vnew_real_start`, `check_vnew_previz`, `check_vnew_previz_camera`, `check_vnew_shot_brief`, `check_vnew_mannequin`, `check_vnew_reference_video` | `project_tracks`, `vnew.routes`(별도 Flask 앱에 등록, `:1866`), `characters`, `plan`, `locations`, `location_views`, `previz`, `previz_camera`·`previz_fit`·`previz_grammar`·`previz_schema`, `shot_brief`, `generate` |
 | vnew take | `check_vnew_take`, `check_vnew_take_prompt`, `check_vnew_take_costume`, `check_vnew_take_prompt_polish`, `check_vnew_take_prompt_budget`, `check_vnew_take_on_screen`, `check_vnew_take_harmony_motion` | `vnew.generate` 통 테이크(Seedance reference-to-video) 프롬프트·바이트 예산·의상·화면 행동 |
+| vnew previz 084 | `check_previz_collision`(cs-a~p, 2026-10-28) | `previz_collision` 전 함수, `previz_schema` sit 정규화, `previz_fit.body_y`·`match_visible` hip_y, `previz_camera._actor_points`, `previz.run_design` 1·2차 보정·`_rematch_cut`·`_recompute_manual_fit`·`previz_view`·`_scene_view`, 렌더러·화면 문자열. 개발계 test3 실측 장면(`_previz_test3_scene`)을 쓴다. 공용 도우미 `_pin_vnew`·`_guard_real_llm`(실제 Bedrock 0회 보장) |
 
 ### 10.2 기타 도구
 

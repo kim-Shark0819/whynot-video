@@ -14,6 +14,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import json
 import logging
 import os
@@ -11826,6 +11827,8 @@ PARITY_ENV_KEYS = [
     "VPOC_LLM_NO_TEMPERATURE",
     "VPOC_LLM_TRUNC_RETRY_FACTOR",
     "VPOC_LLM_TRUNC_RETRY_CAP",
+    # 084 작업 1(R1.13): 프리비즈 소품 관통 보정.
+    "VNEW_PREVIZ_COLLISION",
 ]
 PARITY_FACE = "fal:bytedance/seedance-2.5/image-to-video"
 PARITY_PARTNER = "fal:bytedance/seedance-2.5/reference-to-video"
@@ -17134,6 +17137,892 @@ def check_llm_top_model_first() -> None:
 # ---------------------------------------------------------------- main
 
 
+# ---------------------------------------------------------------- 084 previz-camera-only 공용 도우미(design.md §12.1)
+
+# 개발계 "위험한편의점 test3" plan.json 실측(Claude, 2026-10-28). 모든 rotY 0. label 은 upper·lower 만 실측.
+_TEST3_PROPS = (
+    ("kerb", "box", [7.6, 0.12, 0.35], [0.0, 0.06, -1.8], "경계석"),
+    ("upper_rail", "box", [7.2, 0.09, 0.09], [0.0, 0.94, -1.45], "두 사람이 걸터앉는 철제 상부 가로대"),
+    ("lower_rail", "box", [7.2, 0.06, 0.06], [0.0, 0.40, -1.45], "철제 하부 가로대"),
+    ("post_left", "cylinder", [0.08, 0.96, 0.08], [-3.5, 0.48, -1.45], "철제 기둥"),
+    ("post_mid_left", "cylinder", [0.08, 0.96, 0.08], [-1.4, 0.48, -1.45], "철제 기둥"),
+    ("post_mid_right", "cylinder", [0.08, 0.96, 0.08], [1.4, 0.48, -1.45], "철제 기둥"),
+    ("post_right", "cylinder", [0.08, 0.96, 0.08], [3.5, 0.48, -1.45], "철제 기둥"),
+    ("utility_pole", "cylinder", [0.24, 3.0, 0.24], [3.5, 1.5, -1.85], "전봇대"),
+    ("bin", "box", [0.48, 0.72, 0.48], [-3.35, 0.36, -0.65], "쓰레기통"),
+    ("ac_unit", "box", [0.85, 0.55, 0.38], [3.25, 0.55, -2.08], "에어컨 실외기"),
+    ("ac_bracket", "box", [0.95, 0.08, 0.46], [3.25, 0.235, -2.08], "실외기 받침대"),
+    ("apartment_mass", "box", [7.8, 3.0, 0.8], [-0.1, 1.5, -2.3], "뒤편 아파트 덩어리"),
+)
+_TEST3_CUTS = (
+    ("cut-01", (("geonwoo", [0.44, 0, -1.45], 270),)),
+    ("cut-02", (("uijun", [-0.18, 0, -1.45], 90),)),
+    ("cut-03", (("geonwoo", [0.44, 0, -1.45], 270),)),
+    ("cut-04", (("uijun", [-0.18, 0, -1.45], 81.64), ("geonwoo", [0.4697, 0, -1.3545], 0))),
+    ("cut-05", (("uijun", [-0.18, 0, -1.45], 90), ("geonwoo", [0.44, 0, -1.45], 0))),
+    ("cut-06", (("uijun", [-0.095, 0, -1.45], 0), ("geonwoo", [0.355, 0, -1.45], 270))),
+    ("cut-07", (("uijun", [-0.18, 0, -1.45], 78.62), ("geonwoo", [0.501, 0, -1.313], 0))),
+)
+
+
+def _previz_test3_scene() -> dict:
+    """084 design.md §4.10 — test3 실측 장면(방 8×5×3, 소품 12개(기둥 4개 포함), 인물 2명, 7컷 모두 sit).
+
+    인물 키 1.75(여의준)·1.70(범건우)은 실측이 없어 가정이다. sitOn·sit 은 없다(옛 계획과 같다).
+    """
+    return {
+        "room": {"width": 8.0, "depth": 5.0, "height": 3.0},
+        "props": [
+            {"id": pid, "shape": shape, "size": list(size), "pos": list(pos), "rotY": 0.0, "labelKo": label}
+            for pid, shape, size, pos, label in _TEST3_PROPS
+        ],
+        "actors": [
+            {"id": "uijun", "name": "여의준", "heightM": 1.75},
+            {"id": "geonwoo", "name": "범건우", "heightM": 1.70},
+        ],
+        "timeline": [
+            {
+                "cutId": cut_id,
+                "actors": [{"id": aid, "pos": list(pos), "facingDeg": facing, "pose": "sit"} for aid, pos, facing in actors],
+            }
+            for cut_id, actors in _TEST3_CUTS
+        ],
+    }
+
+
+@contextlib.contextmanager
+def _pin_vnew(**values):
+    """`vnew.settings` 속성을 잠시 바꾸고 되돌린다. 예: with _pin_vnew(VNEW_PREVIZ_COLLISION=False): …"""
+    sys.path.insert(0, str(ROOT / "app"))
+    from src.vnew import settings as vnew_settings  # noqa: PLC0415
+
+    saved = {name: getattr(vnew_settings, name) for name in values}
+    try:
+        for name, value in values.items():
+            setattr(vnew_settings, name, value)
+        yield vnew_settings
+    finally:
+        for name, value in saved.items():
+            setattr(vnew_settings, name, value)
+
+
+@contextlib.contextmanager
+def _guard_real_llm():
+    """`vpoc.llm._converse` 를 "가짜가 아닌 LLM 호출" 예외로 바꿔 둔다(실제 Bedrock 0회 보장). 호출 where 목록을 준다."""
+    sys.path.insert(0, str(ROOT / "app"))
+    from src.vpoc import llm as vpoc_llm  # noqa: PLC0415
+
+    saved = vpoc_llm._converse  # noqa: SLF001
+    calls: list[str] = []
+
+    def _blocked(*_args, **kwargs):
+        calls.append(str(kwargs.get("where") or ""))
+        raise RuntimeError("가짜가 아닌 LLM 호출이 일어났습니다(검사)")
+
+    vpoc_llm._converse = _blocked  # noqa: SLF001
+    try:
+        yield calls
+    finally:
+        vpoc_llm._converse = saved  # noqa: SLF001
+
+
+def check_previz_collision() -> None:
+    """084 작업 1 — 프리비즈 소품 관통 보정(R1.1-1.19). 외부 호출은 모두 가짜다(유료 0회).
+
+    (cs-a) test3 실측 7컷: upper_rail·hipY 0.985·legPitch 후보·legYaw 0·unresolved 0·겹침 0·두 번 같음
+    (cs-b) 의자 좌판+등받이: 좌판·hipY 0.45·legPitch 0·legYaw 0·등받이 겹침 0
+    (cs-c) 기둥 안 서 있는 인물 → 밀려남, fix 로그 형식 1줄
+    (cs-d) 회전 상자(rotY π/4)·눕기(상자·원기둥)·무릎·소품 없는 앉기 밀어내기
+    (cs-e) 밀 수 없음 → unresolved·warning 로그·자리 그대로
+    (cs-f) 다른 인물 간격을 지키는 자리를 고른다
+    (cs-g) 멱등(다시 보정하면 fix 0)
+    (cs-h) 옛 장면 보기: 사본 그대로(인물 pos·카메라·sit 없음)·needsRedesign·관통 컷 목록, 섞인 계획에서 설계된 장면만
+           사본 보정(sit·fit.collision 두 조건)·source view, 옛 의자 장면은 관통 아님, 보기 로그 0, 안내 문구
+    (cs-i) 설계 통합: sittable·sitOn → 저장 sit·fit.collision, 카메라 눈높이 = 앉은 hipY, match ≥ 0.7, stage 로그
+    (cs-j) body_y·match_visible·_actor_points·_recompute_manual_fit 의 hip_y
+    (cs-k) VNEW_PREVIZ_COLLISION=False: 보정 0회·sit 없음·보기 = 저장본
+    (cs-l) 정규화: sittable·sitOn·sit(legYaw 감기·facing 대체·범위 밖 버림)
+    (cs-m) 렌더러·화면 문자열, node --check
+    (cs-n) 2차 보정: 배우 조정(closeapex)으로 소품 안에 들어간 인물 → 밀려남, _rematch_cut
+    (cs-o) 다리 방향 규칙: 의자 4방향 탐색·벤치 정렬 4단계·회전 벤치·등급 4·sitOn 등급 1·무시 로그
+    (cs-p) test3 을 보정 끔으로 설계한 옛 장면: 보기 사본·주인공 머리 위치 그대로. 보정 켬으로 다시 설계하면
+           7컷 주인공 머리 사각형이 화면 안(0 ≤ y0, y1 ≤ 1)·보기 보정 멱등
+    """
+    sys.path.insert(0, str(ROOT / "app"))
+    import copy as _copy  # noqa: PLC0415
+    import math as _math  # noqa: PLC0415
+    import traceback as _tb  # noqa: PLC0415
+
+    from src.vnew import plan as planmod  # noqa: PLC0415
+    from src.vnew import previz as pvmod  # noqa: PLC0415
+    from src.vnew import previz_camera as pcam  # noqa: PLC0415
+    from src.vnew import previz_collision as pcol  # noqa: PLC0415
+    from src.vnew import previz_fit as pfit  # noqa: PLC0415
+    from src.vnew import previz_grammar as grammarmod  # noqa: PLC0415
+    from src.vnew import previz_schema as pschema  # noqa: PLC0415
+    from src.vnew import settings as vset  # noqa: PLC0415
+
+    bad: list[str] = []
+    fake_store = _FakeCharStore()
+    saved = {
+        "pv_STORE": pvmod.STORE,
+        "plan_STORE": planmod.STORE,
+        "_design": pvmod._design,
+        "gr_read": grammarmod._read,
+        "_cut_tiles": pvmod._cut_tiles,
+        "_spawn": pvmod._spawn,
+        "_rematch_cut": pvmod._rematch_cut,
+        "resolve_scenes": pcol.resolve_scenes,
+        "resolve_scene": pcol.resolve_scene,
+        "detect_scene": pcol.detect_scene,
+        "pv_charge_text": pvmod.vpoc_ledger.charge_text,
+        "collision_flag": vset.VNEW_PREVIZ_COLLISION,
+    }
+    seen_ids: set[str] = set()
+
+    def mark(*ids: str) -> None:
+        seen_ids.update(ids)
+
+    def bx(pid, size, pos, *, rot=0.0, label="", shape="box", **extra):
+        item = {"id": pid, "shape": shape, "size": list(size), "pos": list(pos), "rotY": rot, "labelKo": label}
+        item.update(extra)
+        return item
+
+    def sc(props, actors, *, room=(10.0, 10.0), heights=None):
+        heights = heights or {}
+        return {
+            "room": {"width": room[0], "depth": room[1], "height": 3.0},
+            "props": props,
+            "actors": [{"id": a["id"], "name": a["id"], "heightM": heights.get(a["id"], 1.7)} for a in actors],
+            "timeline": [{"cutId": "c1", "actors": actors}],
+        }
+
+    def cut_actor(scene, actor_id, cut_index=0):
+        return next(ca for ca in scene["timeline"][cut_index]["actors"] if ca["id"] == actor_id)
+
+    def plan_key(owner, pid):
+        return planmod.plan_key(owner, pid)
+
+    # --- 설계 하네스(가짜 Astra·가짜 문법·가짜 타일, 실제 run_design 경로) ---
+    design_prompts: list[str] = []
+
+    def run_design_with(tag: str, raw_scene: dict, grammar_by_cut: dict, cut_ids: list[str]) -> tuple[str, str, dict]:
+        owner = "tester"
+        pid = f"prj_cs_{tag}"
+        location_en = "Railing outside a convenience store at night"
+        planmod.load_or_create(owner, pid)
+
+        def seed(data):
+            data["script"] = {"status": "ready", "setting": {"locationEn": location_en, "enclosed": False}, "entries": []}
+            data["conti"] = {
+                "status": "ready",
+                "segments": [],
+                "cuts": [
+                    {"id": cid, "no": i + 1, "seconds": 3, "panels": [i], "shotKo": f"[{cid}]", "cameraEn": "",
+                     "locationEn": location_en, "characters": [], "dialogueKo": "", "situationKo": "", "promptEn": "x"}
+                    for i, cid in enumerate(cut_ids)
+                ],
+            }
+
+        planmod.mutate_plan(owner, pid, seed)
+
+        def fake_design(blocks, *, model):
+            design_prompts.append(str((blocks[0] or {}).get("text") or ""))
+            return _copy.deepcopy(raw_scene), {"model": model, "inputTokens": 1, "outputTokens": 1}
+
+        def fake_read(blocks, *, model):
+            text = str((blocks[0] or {}).get("text") or "")
+            found = re.search(r"\[([\w-]+)\]", text)
+            payload = grammar_by_cut.get(found.group(1) if found else "") or {}
+            return _copy.deepcopy(payload), {"model": model, "inputTokens": 1, "outputTokens": 1}
+
+        pvmod._design = fake_design
+        grammarmod._read = fake_read
+        task_id = pvmod.start_design(owner, pid)
+        pvmod.run_design(owner, pid, task_id)
+        plan, _ = planmod.load_plan(owner, pid)
+        previz = plan.get("previz") or {}
+        if previz.get("status") != "ready":
+            bad.append(f"({tag}) 설계가 ready 가 아닙니다: {previz.get('status')} / {previz.get('error')}")
+        return owner, pid, plan
+
+    def test3_design_payload() -> dict:
+        raw = _previz_test3_scene()
+        for prop in raw["props"]:
+            if prop["id"] == "upper_rail":
+                prop["sittable"] = True
+        for cut in raw["timeline"]:
+            for ca in cut["actors"]:
+                ca["sitOn"] = "upper_rail"
+        return raw
+
+    def grammar(subject, partner=None, *, shot_type="clean_single", bottom="belly", side="right", subject_x=0.5):
+        out = {
+            "mainSubject": subject, "frameBottomCut": bottom, "shotType": shot_type, "vantage": "3q",
+            "faceTurn": "screen_right" if side == "right" else "screen_left", "cameraHeight": "eye",
+            "headTopY": 0.1, "subjectX": subject_x,
+            "others": [], "offscreenPartnerSide": side if partner else "none", "reasonKo": "검사",
+        }
+        if partner and shot_type == "two_shot":
+            out["others"] = [{"name": partner, "how": "full", "side": side, "screenX": 1.0 - subject_x}]
+        return out
+
+    # 1인 컷(cut-01~03)은 상대가 없어 place_cut 이 가짜 상대를 −z 에 둔다(기존 규칙) — 카메라가 난간 뒤 벽에
+    # 막혀 일치도가 낮다. 그래서 일치도 검사는 2인 컷(cut-04~07)만 본다. 화면 쪽은 +z 반원 기준이다.
+    test3_grammar = {
+        "cut-01": grammar("범건우"), "cut-02": grammar("여의준"), "cut-03": grammar("범건우"),
+        "cut-04": grammar("여의준", "범건우"),
+        "cut-05": grammar("여의준", "범건우", shot_type="two_shot", subject_x=0.35),
+        "cut-06": grammar("범건우", "여의준", side="left"), "cut-07": grammar("여의준", "범건우"),
+    }
+    two_person_cuts = ("cut-04", "cut-05", "cut-06", "cut-07")
+
+    logs = _LogCapture()
+    try:
+        pvmod.STORE = fake_store
+        planmod.STORE = fake_store
+        pvmod._cut_tiles = lambda cut_panels, all_tiles: [b"FAKE-PANEL-JPEG"] if cut_panels else []
+        pvmod._spawn = lambda *_a, **_k: None
+        pvmod.vpoc_ledger.charge_text = lambda *_a, **_k: {"spentUsd": 0.0, "capUsd": None}
+        vset.VNEW_PREVIZ_COLLISION = True
+        with _guard_real_llm() as real_calls, logs:
+            forbidden = {"lower_rail", "kerb", "post_left", "post_mid_left", "post_mid_right", "post_right", "apartment_mass"}
+
+            # ---------------- (cs-a) test3 실측 7컷 ----------------
+            base = _previz_test3_scene()
+            s1, s2 = _copy.deepcopy(base), _copy.deepcopy(base)
+            r1 = pcol.resolve_scene(s1, log_fixes=False)
+            r2 = pcol.resolve_scene(s2, log_fixes=False)
+            if json.dumps([s1, r1], sort_keys=True) != json.dumps([s2, r2], sort_keys=True):
+                bad.append("(cs-a) 같은 test3 장면을 두 번 보정한 결과가 다릅니다")
+            if len(r1) != 7:
+                bad.append(f"(cs-a) 7컷 결과가 아닙니다: {sorted(r1)}")
+            for cut in s1["timeline"]:
+                res = r1.get(cut["cutId"]) or {}
+                if res.get("unresolved"):
+                    bad.append(f"(cs-a) {cut['cutId']} unresolved 가 비어 있지 않습니다: {res.get('unresolved')}")
+                for ca in cut["actors"]:
+                    sit = ca.get("sit") or {}
+                    where = f"{cut['cutId']}/{ca['id']}"
+                    if sit.get("propId") != "upper_rail":
+                        bad.append(f"(cs-a) {where} 앉은 소품이 upper_rail 이 아닙니다: {sit}")
+                    if abs(float(sit.get("hipY") or 0) - 0.985) > 0.001:
+                        bad.append(f"(cs-a) {where} hipY 가 0.985 가 아닙니다: {sit.get('hipY')}")
+                    if sit.get("legPitchDeg") not in pcol.LEG_PITCHES:
+                        bad.append(f"(cs-a) {where} legPitchDeg 가 후보 밖입니다: {sit.get('legPitchDeg')}")
+                    if sit.get("legYawDeg") != 0.0:
+                        bad.append(f"(cs-a) {where} legYawDeg 가 0(방 쪽 +z)이 아닙니다(facing {ca['facingDeg']}): {sit.get('legYawDeg')}")
+                    overlaps = pcol.actor_overlaps(s1, ca)
+                    if overlaps:
+                        bad.append(f"(cs-a) {where} 소품과 겹칩니다: {overlaps} (금지 {sorted(set(overlaps) & forbidden)})")
+            # 길쭉한 자리의 반대쪽(−z)은 경계석·아파트에 막혀 풀리지 않는다(규칙 1이 실제로 작동하는 입력).
+            vols = pcol._scene_vols(base)  # noqa: SLF001
+            rail = next(v for v in vols if v["id"] == "upper_rail")
+            if not pcol.is_elongated(rail):
+                bad.append("(cs-a) 상부 가로대가 길쭉한 자리로 판정되지 않습니다")
+            if pcol.solve_legs(-0.18, -1.45, 0.985, 1.75 / 1.7, 180.0, rail, vols)[1]:
+                bad.append("(cs-a) 반대쪽(180°) 다리가 풀린다고 나옵니다(경계석·아파트에 막혀야 함)")
+            mark("cs-a")
+
+            # ---------------- (cs-b) 의자 ----------------
+            chair = sc([bx("seat", [0.45, 0.45, 0.45], [0, 0.225, 0], label="의자 좌판"),
+                        bx("back", [0.45, 0.45, 0.05], [0, 0.675, -0.25], label="의자 등받이")],
+                       [{"id": "a1", "pos": [0, 0, 0], "pose": "sit", "facingDeg": 0}])
+            res = pcol.resolve_scene(chair, log_fixes=False)["c1"]
+            sit = cut_actor(chair, "a1").get("sit") or {}
+            if sit != {"propId": "seat", "hipY": 0.45, "legPitchDeg": 0, "legYawDeg": 0.0}:
+                bad.append(f"(cs-b) 의자 좌판 sit 이 기대와 다릅니다: {sit}")
+            if res["unresolved"] or pcol.actor_overlaps(chair, cut_actor(chair, "a1")):
+                bad.append(f"(cs-b) 의자에서 겹침이 남았습니다: {res}")
+            mark("cs-b")
+
+            # ---------------- (cs-c) 기둥 안 서기 + 로그 ----------------
+            logs.clear()
+            post = sc([bx("post_1", [0.1, 1.0, 0.1], [1.4, 0.5, 0.0], shape="cylinder")],
+                      [{"id": "a1", "pos": [1.42, 0, 0], "pose": "stand"}], room=(6.0, 6.0))
+            res = pcol.resolve_scene(post, log_fixes=True)["c1"]
+            pos = cut_actor(post, "a1")["pos"]
+            if _math.hypot(pos[0] - 1.4, pos[2]) < 0.22 + 0.05 - 0.01:
+                bad.append(f"(cs-c) 기둥에서 충분히 밀려나지 않았습니다: {pos}")
+            if not (abs(pos[0]) <= 2.8 and abs(pos[2]) <= 2.8):
+                bad.append(f"(cs-c) 방 밖으로 밀렸습니다: {pos}")
+            fix_lines = logs.messages("vnew.previz.collision.fix")
+            if len(fix_lines) != 1 or not re.fullmatch(
+                r"vnew\.previz\.collision\.fix cut=c1 actor=a1 prop=post_1 dist=\d+\.\d{3} kind=push", fix_lines[0]
+            ):
+                bad.append(f"(cs-c) fix 로그 형식이 다릅니다: {fix_lines}")
+            if len(res["fixes"]) != 1 or res["fixes"][0].get("kind") != "push":
+                bad.append(f"(cs-c) fixes 가 push 1개가 아닙니다: {res['fixes']}")
+            if pcol._log_id("post\nvnew.fake line=1") != "post_vnew.fake_line_1" or pcol._log_id("") != "-":  # noqa: SLF001
+                bad.append("(cs-c) 로그 id 정리(_log_id)가 줄바꿈·공백을 막지 않습니다")
+            mark("cs-c")
+
+            # ---------------- (cs-d) 회전·눕기·무릎·소품 없는 앉기 ----------------
+            rot_on = sc([bx("crate", [1.0, 1.0, 1.0], [0, 0.5, 0], rot=_math.pi / 4)], [{"id": "a1", "pos": [0.8, 0, 0], "pose": "stand"}])
+            rot_off = sc([bx("crate", [1.0, 1.0, 1.0], [0, 0.5, 0], rot=0.0)], [{"id": "a1", "pos": [0.8, 0, 0], "pose": "stand"}])
+            if not pcol.resolve_scene(rot_on, log_fixes=False)["c1"]["fixes"]:
+                bad.append("(cs-d) rotY=π/4 상자 모서리 안 인물이 밀리지 않았습니다(회전 무시)")
+            if pcol.actor_overlaps(rot_on, cut_actor(rot_on, "a1")):
+                bad.append("(cs-d) 회전 상자와 겹침이 남았습니다")
+            if pcol.resolve_scene(rot_off, log_fixes=False)["c1"]["fixes"]:
+                bad.append("(cs-d) 회전이 없으면 겹치지 않는 배치인데 밀렸습니다")
+            pose_cases = (
+                ("lie-box", [bx("box1", [0.4, 0.4, 0.4], [0, 0.2, -1.5])], {"pose": "lie", "facingDeg": 0}),
+                ("lie-cyl", [bx("pole", [0.2, 1.0, 0.2], [0, 0.5, -1.0], shape="cylinder")], {"pose": "lie", "facingDeg": 0}),
+                ("kneel", [bx("box2", [0.4, 0.6, 0.4], [0, 0.3, 0])], {"pose": "kneel"}),
+                ("loose-sit", [bx("tall", [0.4, 2.0, 0.4], [0, 1.0, 0])], {"pose": "sit"}),
+            )
+            for name, props, extra in pose_cases:
+                scene = sc(props, [dict({"id": "a1", "pos": [0, 0, 0]}, **extra)])
+                if pcol.actor_overlaps(scene, cut_actor(scene, "a1")) == []:
+                    bad.append(f"(cs-d) {name}: 보정 전 겹침이 없어 검사가 성립하지 않습니다")
+                got = pcol.resolve_scene(scene, log_fixes=False)["c1"]
+                ca = cut_actor(scene, "a1")
+                if len(got["fixes"]) != 1 or got["fixes"][0]["kind"] != "push" or pcol.actor_overlaps(scene, ca):
+                    bad.append(f"(cs-d) {name}: 밀어내기 결과가 다릅니다 {got} pos={ca['pos']}")
+                if name == "loose-sit" and "sit" in ca:
+                    bad.append("(cs-d) 앉을 소품이 없는데 sit 이 생겼습니다")
+            mark("cs-d")
+
+            # ---------------- (cs-e) 밀 수 없음 ----------------
+            logs.clear()
+            stuck = sc([bx("big_box", [2.9, 1.0, 2.9], [0, 0.5, 0], label="큰 상자")],
+                       [{"id": "a1", "pos": [0, 0, 0], "pose": "stand"}], room=(3.0, 3.0))
+            res = pcol.resolve_scene(stuck, log_fixes=True)["c1"]
+            warn_lines = logs.messages("vnew.previz.collision.unresolved", level=logging.WARNING)
+            if res["unresolved"] != [{"actor": "a1", "prop": "big_box"}] or res["fixes"]:
+                bad.append(f"(cs-e) unresolved 1개·fix 0 이 아닙니다: {res}")
+            if warn_lines != ["vnew.previz.collision.unresolved cut=c1 actor=a1 prop=big_box"]:
+                bad.append(f"(cs-e) warning 로그가 1줄이 아닙니다: {warn_lines}")
+            if cut_actor(stuck, "a1")["pos"] != [0, 0, 0]:
+                bad.append(f"(cs-e) 못 미는 인물이 옮겨졌습니다: {cut_actor(stuck, 'a1')['pos']}")
+            mark("cs-e")
+
+            # ---------------- (cs-f) 인물 간격 ----------------
+            gap_scene = sc([bx("post_g", [0.1, 2.0, 0.1], [0.05, 1.0, 0.0], shape="cylinder")],
+                           [{"id": "a1", "pos": [0, 0, 0], "pose": "stand"}, {"id": "a2", "pos": [-0.5, 0, 0], "pose": "stand"}])
+            # 첫 MTV 방향(−x, 깊이 0.22+0.02)으로 밀면 a2 와 0.31m — 0.45 미만이라 그 자리는 안 된다.
+            mtv_x = 0.0 - (0.22 + 0.05 - 0.05 + 0.02)
+            if abs(mtv_x - (-0.5)) >= 0.45:
+                bad.append("(cs-f) 검사 전제가 틀렸습니다(첫 MTV 자리가 이미 간격을 지킴)")
+            pcol.resolve_scene(gap_scene, log_fixes=False)
+            p1, p2 = cut_actor(gap_scene, "a1")["pos"], cut_actor(gap_scene, "a2")["pos"]
+            gap = _math.hypot(p1[0] - p2[0], p1[2] - p2[2])
+            if gap < 0.45 - 1e-6 or pcol.actor_overlaps(gap_scene, cut_actor(gap_scene, "a1")):
+                bad.append(f"(cs-f) 간격 {gap:.3f}m 또는 겹침이 남았습니다: a1={p1}")
+            if abs(p1[0] - mtv_x) < 1e-3 and abs(p1[2]) < 1e-3:
+                bad.append("(cs-f) 간격을 깨는 첫 MTV 자리를 골랐습니다")
+            mark("cs-f")
+
+            # ---------------- (cs-g) 멱등 ----------------
+            again = pcol.resolve_scene(s1, log_fixes=False)
+            if any(item["fixes"] or item["unresolved"] for item in again.values()):
+                bad.append(f"(cs-g) 보정한 test3 을 다시 보정하면 fix 가 생깁니다: {again}")
+            if pcol.resolve_scene(post, log_fixes=False)["c1"]["fixes"]:
+                bad.append("(cs-g) 밀어낸 장면을 다시 보정하면 fix 가 생깁니다")
+            mark("cs-g")
+
+            # ---------------- (cs-h) 옛 계획 보기 ----------------
+            owner_h, pid_h = "tester", "prj_cs_view"
+            planmod.load_or_create(owner_h, pid_h)
+            old_scene = pschema.normalize_scene(
+                _previz_test3_scene(), location_id="loc1",
+                cut_specs=[{"cutId": cid, "seconds": 3} for cid, _a in _TEST3_CUTS],
+            )
+
+            def seed_old(data):
+                data["previz"] = dict(pvmod.new_previz(), status="ready", scenes=[old_scene], fit={}, revision=2)
+
+            planmod.mutate_plan(owner_h, pid_h, seed_old)
+            stored_before = json.dumps(fake_store.json[plan_key(owner_h, pid_h)][0], sort_keys=True)
+            plan_h, _ = planmod.load_plan(owner_h, pid_h)
+            plan_h_copy = _copy.deepcopy(plan_h)
+            logs.clear()
+            view_h = planmod._previz_view(owner_h, pid_h, plan_h)  # noqa: SLF001 — plan_view 의 previz 부분
+            if logs.messages("vnew.previz.collision."):
+                bad.append(f"(cs-h) 보기 때 보정 로그가 남았습니다: {logs.messages('vnew.previz.collision.')}")
+            if json.dumps(fake_store.json[plan_key(owner_h, pid_h)][0], sort_keys=True) != stored_before:
+                bad.append("(cs-h) 보기가 저장된 plan.json 을 바꿨습니다")
+            if plan_h != plan_h_copy:
+                bad.append("(cs-h) 보기가 넘겨받은 계획 dict 를 바꿨습니다")
+            if any("sit" in ca for cut in old_scene["timeline"] for ca in cut["actors"]):
+                bad.append("(cs-h) 검사 전제: 옛 장면에 sit 이 있습니다")
+            view_scene = (view_h.get("scenes") or [{}])[0]
+            for cut_v, cut_s in zip(view_scene.get("timeline") or [], old_scene["timeline"]):
+                if [ca.get("pos") for ca in cut_v.get("actors") or []] != [ca.get("pos") for ca in cut_s["actors"]]:
+                    bad.append(f"(cs-h) 옛 장면 {cut_s['cutId']} 보기 사본의 인물 자리가 저장본과 다릅니다")
+                if cut_v.get("camera") != cut_s.get("camera"):
+                    bad.append(f"(cs-h) 옛 장면 {cut_s['cutId']} 보기 사본의 카메라가 저장본과 다릅니다")
+                if any("sit" in ca for ca in cut_v.get("actors") or []):
+                    bad.append(f"(cs-h) 옛 장면 {cut_s['cutId']} 보기 사본에 sit 이 생겼습니다(카메라는 엉덩이 0.5 기준)")
+            col_h = view_h.get("collision") or {}
+            if col_h != {"source": "none", "needsRedesign": True, "cuts": [cid for cid, _a in _TEST3_CUTS]}:
+                bad.append(f"(cs-h) 옛 장면 collision 이 needsRedesign·7컷이 아닙니다: {col_h}")
+
+            # 섞인 계획: 옛 장면(test3) + sit 으로 설계된 장면(b1) + fit.collision 으로 설계된 장면(c1) + 옛 의자 장면(d1).
+            def _norm(raw, loc, cut_id):
+                return pschema.normalize_scene(raw, location_id=loc, cut_specs=[{"cutId": cut_id, "seconds": 3}])
+
+            post_m = bx("post_m", [0.1, 2.0, 0.1], [1.5, 1.0, 0.0], shape="cylinder", label="기둥")
+            scene_b = _norm({
+                "room": {"width": 8.0, "depth": 6.0, "height": 3.0},
+                "props": [bx("bench", [2.0, 0.45, 0.45], [0, 0.225, -1.0], label="벤치"), post_m],
+                "actors": [{"id": "b_sit", "heightM": 1.7}, {"id": "b_std", "heightM": 1.7}],
+                "timeline": [{"cutId": "b1", "actors": [
+                    {"id": "b_sit", "pos": [0, 0, -1.0], "pose": "sit", "facingDeg": 0,
+                     "sit": {"propId": "bench", "hipY": 0.45, "legPitchDeg": 0, "legYawDeg": 0}},
+                    {"id": "b_std", "pos": [1.52, 0, 0], "pose": "stand"}]}],
+            }, "loc_b", "b1")
+            scene_c = _norm({
+                "room": {"width": 8.0, "depth": 6.0, "height": 3.0}, "props": [post_m],
+                "actors": [{"id": "c_std", "heightM": 1.7}],
+                "timeline": [{"cutId": "c1", "actors": [{"id": "c_std", "pos": [1.52, 0, 0], "pose": "stand"}]}],
+            }, "loc_c", "c1")
+            scene_d = _norm({
+                "room": {"width": 8.0, "depth": 6.0, "height": 3.0},
+                "props": [bx("seat", [0.45, 0.45, 0.45], [0, 0.225, 0], label="의자 좌판")],
+                "actors": [{"id": "d_sit", "heightM": 1.7}],
+                "timeline": [{"cutId": "d1", "actors": [{"id": "d_sit", "pos": [0, 0, 0], "pose": "sit", "facingDeg": 0}]}],
+            }, "loc_d", "d1")
+            if "sit" not in scene_b["timeline"][0]["actors"][0] or any("sit" in ca for ca in scene_c["timeline"][0]["actors"]):
+                bad.append("(cs-h) 검사 전제: b1 에 저장된 sit 이 없거나 c1 에 sit 이 있습니다")
+            owner_m, pid_m = "tester", "prj_cs_view_mixed"
+            planmod.load_or_create(owner_m, pid_m)
+
+            def seed_mixed(data):
+                data["previz"] = dict(
+                    pvmod.new_previz(), status="ready", revision=3,
+                    scenes=[_copy.deepcopy(old_scene), scene_b, scene_c, scene_d],
+                    fit={"c1": {"match": None, "method": "astra", "collision": {"fixes": [], "unresolved": []}}},
+                )
+
+            planmod.mutate_plan(owner_m, pid_m, seed_mixed)
+            stored_m = json.dumps(fake_store.json[plan_key(owner_m, pid_m)][0], sort_keys=True)
+            logs.clear()
+            view_m = planmod._previz_view(owner_m, pid_m, planmod.load_plan(owner_m, pid_m)[0])  # noqa: SLF001
+            if logs.messages("vnew.previz.collision."):
+                bad.append(f"(cs-h) 섞인 계획 보기 때 보정 로그가 남았습니다: {logs.messages('vnew.previz.collision.')}")
+            if json.dumps(fake_store.json[plan_key(owner_m, pid_m)][0], sort_keys=True) != stored_m:
+                bad.append("(cs-h) 섞인 계획 보기가 저장된 plan.json 을 바꿨습니다")
+            col_m = view_m.get("collision") or {}
+            if col_m.get("needsRedesign") is not True or col_m.get("source") != "none" or col_m.get("cuts") != [cid for cid, _a in _TEST3_CUTS]:
+                bad.append(f"(cs-h) 섞인 계획의 옛 장면 안내가 다릅니다(옛 의자 d1 은 관통이 아니라 빠져야 함): {col_m.get('cuts')}")
+            for cut_id, actor_id in (("b1", "b_std"), ("c1", "c_std")):
+                entry = col_m.get(cut_id) or {}
+                if entry.get("source") != "view" or [(f.get("actor"), f.get("kind")) for f in entry.get("fixes") or []] != [(actor_id, "push")]:
+                    bad.append(f"(cs-h) 보정과 함께 설계된 장면 {cut_id} 가 사본 보정·source view 가 아닙니다: {entry}")
+            views_m = view_m.get("scenes") or []
+            if len(views_m) == 4:
+                b_std = next(ca for ca in views_m[1]["timeline"][0]["actors"] if ca["id"] == "b_std")
+                if b_std["pos"] == [1.52, 0.0, 0.0] or pcol.actor_overlaps(views_m[1], b_std):
+                    bad.append(f"(cs-h) 설계된 장면 b1 의 겹친 인물이 보기 사본에서 밀리지 않았습니다: {b_std['pos']}")
+                if views_m[0]["timeline"] != old_scene["timeline"] or views_m[3]["timeline"] != scene_d["timeline"]:
+                    bad.append("(cs-h) 섞인 계획의 옛 장면 보기 사본이 저장본과 다릅니다")
+            else:
+                bad.append(f"(cs-h) 섞인 계획 보기 장면 수가 4가 아닙니다: {len(views_m)}")
+            vjs_h = (PUBLIC / "vnew.js").read_text(encoding="utf-8")
+            css_h = (ROOT / "frontend" / "public" / "vnew.css").read_text(encoding="utf-8")
+            redesign_text = ("이 프리비즈는 소품 관통 보정 전에 만들었습니다. '다시 설계'하면 인물이 소품 위에 제대로 앉고 "
+                             "카메라도 다시 맞춰집니다.")
+            if redesign_text not in vjs_h or vjs_h.count("COLLISION_REDESIGN_TEXT") < 3:
+                bad.append("(cs-h) vnew.js 에 다시 설계 안내 문구(녹화 영역·컷 패널)가 없습니다")
+            if ".vnew-previz-collision-redesign {" not in css_h:
+                bad.append("(cs-h) vnew.css 에 .vnew-previz-collision-redesign 이 없습니다")
+            mark("cs-h")
+
+            # ---------------- (cs-i) 설계 통합 ----------------
+            logs.clear()
+            design_prompts.clear()
+            owner_i, pid_i, plan_i = run_design_with("cs-i", test3_design_payload(), test3_grammar, [c for c, _a in _TEST3_CUTS])
+            pv_i = plan_i.get("previz") or {}
+            scene_i = (pv_i.get("scenes") or [{}])[0]
+            fit_i = pv_i.get("fit") or {}
+            if not any(p.get("sittable") is True and p.get("id") == "upper_rail" for p in scene_i.get("props") or []):
+                bad.append("(cs-i) 저장 소품에 sittable 이 없습니다")
+            if not design_prompts or "sittable:true" not in design_prompts[0] or "sitOn" not in design_prompts[0]:
+                bad.append("(cs-i) 설계 프롬프트에 앉을 소품 안내가 없습니다")
+            if "sittable:true" not in pvmod._DESIGN_SYSTEM or "sitOn" not in pvmod._DESIGN_CUT_ACTOR["properties"]:
+                bad.append("(cs-i) 설계 도구 문장·스키마에 sittable·sitOn 이 없습니다")
+            prop_schema = pvmod._DESIGN_TOOL["inputSchema"]["json"]["properties"]["props"]["items"]["properties"]
+            if prop_schema.get("sittable") != {"type": "boolean"}:
+                bad.append("(cs-i) 설계 도구 소품에 sittable(boolean)이 없습니다")
+            heights = {a["id"]: float(a.get("heightM") or 1.7) for a in scene_i.get("actors") or []}
+            names = {a["id"]: a.get("name") for a in scene_i.get("actors") or []}
+            for cut in scene_i.get("timeline") or []:
+                cid = cut["cutId"]
+                entry = fit_i.get(cid) or {}
+                if not isinstance(entry.get("collision"), dict) or entry["collision"].get("unresolved"):
+                    bad.append(f"(cs-i) {cid} fit.collision 이 없거나 unresolved 가 있습니다: {entry.get('collision')}")
+                for ca in cut.get("actors") or []:
+                    if (ca.get("sit") or {}).get("propId") != "upper_rail" or ca.get("sitOn") != "upper_rail":
+                        bad.append(f"(cs-i) {cid}/{ca['id']} 저장 sit·sitOn 이 다릅니다: {ca.get('sit')} {ca.get('sitOn')}")
+                    elif pcol.actor_overlaps(scene_i, ca):
+                        bad.append(f"(cs-i) {cid}/{ca['id']} 저장 장면에서 겹칩니다: {pcol.actor_overlaps(scene_i, ca)}")
+                if cid in two_person_cuts:
+                    subject = test3_grammar[cid]["mainSubject"]
+                    aid = next((k for k, v in names.items() if v == subject), "")
+                    eye = pfit.body_y("eye", heights.get(aid, 1.7), "sit", 0.985)
+                    cam_y = float(((cut.get("camera") or {}).get("pos") or [0, 0, 0])[1])
+                    if abs(cam_y - eye) > 0.35:
+                        bad.append(f"(cs-i) {cid} 카메라 높이 {cam_y:.3f} 가 앉은 눈높이 {eye:.3f} ± 0.35 밖입니다")
+                    if not isinstance(entry.get("match"), (int, float)) or entry["match"] < 0.7:
+                        bad.append(f"(cs-i) {cid} fit.match 가 0.7 미만입니다: {entry.get('match')}")
+            stage = logs.messages("vnew.previz.stage")
+            if len(stage) != 1 or not re.fullmatch(
+                rf"vnew\.previz\.stage pid={pid_i} step=collision ms=\d+ fixes=\d+ unresolved=0", stage[0]
+            ):
+                bad.append(f"(cs-i) stage 로그가 다릅니다: {stage}")
+            if not logs.messages("vnew.previz.collision.fix cut=cut-04 actor=geonwoo prop=upper_rail"):
+                bad.append("(cs-i) 설계 때 seat fix 로그가 없습니다(cut-04 범건우)")
+            view_i = planmod._previz_view(owner_i, pid_i, plan_i)  # noqa: SLF001
+            if any(v.get("source") != "design" for v in (view_i.get("collision") or {}).values()):
+                bad.append(f"(cs-i) 다시 설계한 계획의 보기 collision 이 source design 이 아닙니다: {view_i.get('collision')}")
+            # 보정 함수가 예외를 내도 설계·보기는 끝난다(warning 만, 보정 없이 계속).
+            def _boom(*_a, **_k):
+                raise RuntimeError("검사용 보정 실패")
+
+            pcol.resolve_scenes = _boom
+            pcol.resolve_scene = _boom
+            pcol.detect_scene = _boom  # 1차가 실패하면 장면이 옛 장면이 되어 보기는 검출 경로를 탄다.
+            logs.clear()
+            _o, _p, plan_f = run_design_with("cs-i-fail", test3_design_payload(), test3_grammar, [c for c, _a in _TEST3_CUTS])
+            view_f = planmod._previz_view(_o, _p, plan_f)  # noqa: SLF001
+            pcol.resolve_scenes = saved["resolve_scenes"]
+            pcol.resolve_scene = saved["resolve_scene"]
+            pcol.detect_scene = saved["detect_scene"]
+            if (plan_f.get("previz") or {}).get("status") != "ready" or not view_f.get("scenes"):
+                bad.append("(cs-i) 보정 함수 예외가 설계·보기를 막았습니다")
+            if len(logs.messages("vnew.previz.collision.failed")) != 1 or len(logs.messages("vnew.previz.collision.view_failed")) != 1:
+                bad.append(f"(cs-i) 보정 실패 warning 로그가 다릅니다: {logs.messages('collision.')}")
+            mark("cs-i")
+
+            # ---------------- (cs-j) 높이 함수 ----------------
+            for height in (1.6, 1.75):
+                for point in ("top", "eye", "chest", "waist", "knee", "foot"):
+                    frac = pfit.BODY_FRACTION[point]
+                    old = 0.5 + (frac - 0.5) * height if frac >= 0.5 else frac / 0.5 * 0.5
+                    if abs(pfit.body_y(point, height, "sit") - old) > 1e-9:
+                        bad.append(f"(cs-j) hip_y 없을 때 body_y({point}, {height}, sit) 가 지금 값과 다릅니다")
+                    if abs(pfit.body_y(point, height, "stand", 0.985) - frac * height) > 1e-9:
+                        bad.append("(cs-j) 서 있는 인물에 hip_y 가 쓰였습니다")
+            if abs(pfit.body_y("top", 1.75, "sit", 0.985) - (0.985 + 0.5 * 1.75)) > 1e-9:
+                bad.append("(cs-j) hip_y 0.985 의 top 이 0.985 + 0.5·h 가 아닙니다")
+            cam_j = {"pos": [0.0, 1.4, 2.5], "target": [0.0, 1.2, 0.0], "fov": 22.6}
+            if pfit.match_visible(cam_j, [0, 0, 0], 1.7, "sit", 0.1, 0.5, "waist") != pfit.match_visible(cam_j, [0, 0, 0], 1.7, "sit", 0.1, 0.5, "waist", None):
+                bad.append("(cs-j) match_visible hip_y 기본값이 지금과 다릅니다")
+            info = pcam._actor_points({"heightM": 1.75, "hipY": 0.985}, [0, 0, 0], "sit")  # noqa: SLF001
+            if abs(info["y"]("top") - (0.985 + 0.875)) > 1e-9 or abs(info["eyeY"] - pfit.body_y("eye", 1.75, "sit", 0.985)) > 1e-9:
+                bad.append("(cs-j) _actor_points 가 actor.hipY 를 쓰지 않습니다")
+            # 수동 카메라 재계산(PUT)도 sit.hipY 를 쓴다.
+            j_scene = {"actors": [{"id": "a1", "name": "김", "heightM": 1.7}],
+                       "timeline": [{"cutId": "c1", "camera": cam_j, "actors": [{"id": "a1", "pos": [0, 0, 0], "pose": "sit",
+                                                                                "sit": {"propId": "p", "hipY": 0.985, "legPitchDeg": 75, "legYawDeg": 0}}]}]}
+            j_old = _copy.deepcopy(j_scene)
+            j_old["timeline"][0]["camera"] = {"pos": [0.0, 1.0, 3.0], "target": [0.0, 1.0, 0.0], "fov": 22.6}
+            j_prev = {"fit": {"c1": {"match": 0.1, "method": "grammar"}},
+                      "panelGrammar": {"c1": {"hash": "h", "grammar": grammarmod.normalize_grammar(grammar("김"))}}}
+            pvmod._recompute_manual_fit(j_prev, [j_old], [j_scene])  # noqa: SLF001
+            want = round(pfit.match_visible(cam_j, [0, 0, 0], 1.7, "sit", 0.1, 0.5, "waist", 0.985), 4)
+            if j_prev["fit"]["c1"].get("match") != want or j_prev["fit"]["c1"].get("method") != "manual":
+                bad.append(f"(cs-j) _recompute_manual_fit 가 sit.hipY 를 쓰지 않습니다: {j_prev['fit']['c1']} 기대 {want}")
+            mark("cs-j")
+
+            # ---------------- (cs-k) 설정 끔 ----------------
+            calls = {"n": 0}
+
+            def counting(real):
+                def _wrapped(*args, **kwargs):
+                    calls["n"] += 1
+                    return real(*args, **kwargs)
+                return _wrapped
+
+            pcol.resolve_scenes = counting(saved["resolve_scenes"])
+            pcol.resolve_scene = counting(saved["resolve_scene"])
+            with _pin_vnew(VNEW_PREVIZ_COLLISION=False):
+                logs.clear()
+                _o, _p, plan_k = run_design_with("cs-k", test3_design_payload(), test3_grammar, [c for c, _a in _TEST3_CUTS])
+                scenes_k = (plan_k.get("previz") or {}).get("scenes") or []
+                view_k = planmod._previz_view(_o, _p, plan_k)  # noqa: SLF001
+                view_old = planmod._previz_view(owner_h, pid_h, planmod.load_plan(owner_h, pid_h)[0])  # noqa: SLF001
+            pcol.resolve_scenes = saved["resolve_scenes"]
+            pcol.resolve_scene = saved["resolve_scene"]
+            if calls["n"]:
+                bad.append(f"(cs-k) 설정을 껐는데 보정이 {calls['n']}회 불렸습니다")
+            if any("sit" in ca for s in scenes_k for cut in s.get("timeline") or [] for ca in cut.get("actors") or []):
+                bad.append("(cs-k) 설정을 껐는데 설계 저장 장면에 sit 이 있습니다")
+            if any("collision" in (e or {}) for e in ((plan_k.get("previz") or {}).get("fit") or {}).values()):
+                bad.append("(cs-k) 설정을 껐는데 fit.collision 이 있습니다")
+            if "collision" in view_k or "collision" in view_old:
+                bad.append("(cs-k) 설정을 껐는데 보기 응답에 collision 이 있습니다")
+            if view_old.get("scenes") != [old_scene]:
+                bad.append("(cs-k) 설정을 껐는데 보기 장면이 저장본 사본과 다릅니다")
+            if logs.messages("vnew.previz.collision.") or logs.messages("step=collision"):
+                bad.append("(cs-k) 설정을 껐는데 보정 로그가 남았습니다")
+            stripped = pvmod._scene_view("p", {"timeline": [{"actors": [{"id": "a", "pose": "sit", "sit": {"hipY": 1.0}}]}]}, collision=False)  # noqa: SLF001
+            if "sit" in stripped["timeline"][0]["actors"][0]:
+                bad.append("(cs-k) 설정을 껐는데 보기 사본에 저장된 sit 이 남습니다(엉덩이 0.5 가 아님)")
+            mark("cs-k")
+
+            # ---------------- (cs-l) 정규화 ----------------
+            raw_l = {
+                "props": [
+                    {"id": "rail", "size": [3, 0.1, 0.1], "pos": [0, 0.9, 0], "sittable": True},
+                    {"id": "box", "size": [0.5, 0.5, 0.5], "pos": [1, 0.25, 0], "sittable": False},
+                    {"id": "step", "size": [1, 0.3, 0.4], "pos": [-1, 0.15, 0], "sittable": "yes"},
+                ],
+                "actors": [{"id": f"a{i}"} for i in range(1, 9)],
+                "timeline": [{"cutId": "c1", "actors": [
+                    {"id": "a1", "pose": "sit", "facingDeg": 270, "sitOn": "rail", "sit": {"propId": "rail", "hipY": 0.95, "legPitchDeg": 75, "legYawDeg": 270}},
+                    {"id": "a2", "pose": "sit", "facingDeg": 90, "sitOn": "nope", "sit": {"propId": "rail", "hipY": 0.95, "legPitchDeg": 60}},
+                    {"id": "a3", "pose": "stand", "sitOn": "rail", "sit": {"propId": "rail", "hipY": 0.95, "legPitchDeg": 75, "legYawDeg": 0}},
+                    {"id": "a4", "pose": "sit", "sit": {"propId": "rail", "hipY": 5.0, "legPitchDeg": 75, "legYawDeg": 0}},
+                    {"id": "a5", "pose": "sit", "sit": {"propId": "rail", "hipY": 0.95, "legPitchDeg": 20, "legYawDeg": 0}},
+                    {"id": "a6", "pose": "sit", "sit": {"propId": "ghost", "hipY": 0.95, "legPitchDeg": 75, "legYawDeg": 0}},
+                    {"id": "a7", "pose": "sit", "sit": {"propId": "rail", "hipY": 0.95, "legPitchDeg": 75, "legYawDeg": -540}},
+                    {"id": "a8", "pose": "sit", "sit": {"propId": "rail", "hipY": 0.95, "legPitchDeg": 75, "legYawDeg": "x"}, "facingDeg": 450},
+                ]}],
+            }
+            norm = pschema.normalize_scene(raw_l, location_id="l", cut_specs=[{"cutId": "c1", "seconds": 3}])
+            flags = {p["id"]: p.get("sittable") for p in norm["props"]}
+            if flags != {"rail": True, "box": None, "step": True} or "sittable" in norm["props"][1]:
+                bad.append(f"(cs-l) sittable 정규화가 다릅니다: {flags}")
+            got_l = {ca["id"]: ca for ca in norm["timeline"][0]["actors"]}
+            want_l = {
+                "a1": ("rail", {"propId": "rail", "hipY": 0.95, "legPitchDeg": 75, "legYawDeg": -90.0}),
+                "a2": (None, {"propId": "rail", "hipY": 0.95, "legPitchDeg": 60, "legYawDeg": 90.0}),
+                "a3": (None, None), "a4": (None, None), "a5": (None, None), "a6": (None, None),
+                "a7": (None, {"propId": "rail", "hipY": 0.95, "legPitchDeg": 75, "legYawDeg": 180.0}),
+                "a8": (None, {"propId": "rail", "hipY": 0.95, "legPitchDeg": 75, "legYawDeg": 90.0}),
+            }
+            for aid, (want_on, want_sit) in want_l.items():
+                ca = got_l.get(aid) or {}
+                if ca.get("sitOn") != want_on or ca.get("sit") != want_sit:
+                    bad.append(f"(cs-l) {aid} sitOn·sit 정규화가 다릅니다: {ca.get('sitOn')} {ca.get('sit')} 기대 {want_on} {want_sit}")
+            no_props = pschema._normalize_cut_actors([{"id": "a1", "pose": "sit", "sitOn": "rail"}], ["a1"], {"width": 6, "depth": 6})  # noqa: SLF001
+            if "sitOn" in no_props[0] or "sit" in no_props[0]:
+                bad.append("(cs-l) prop_ids 없이 부르면 sitOn·sit 을 두지 않아야 합니다(지금 출력과 같게)")
+            mark("cs-l")
+
+            # ---------------- (cs-m) 렌더러·화면 문자열 ----------------
+            js = (PUBLIC / "vnew-previz.js").read_text(encoding="utf-8")
+            vjs = (PUBLIC / "vnew.js").read_text(encoding="utf-8")
+            css = (ROOT / "frontend" / "public" / "vnew.css").read_text(encoding="utf-8")
+            for needle in ("apply(pose, gesture, speaking, t, targetYaw, sit)", "this.hips.position.y = sit.hipY / scale;",
+                           "sitData.legYawDeg", "sit.legPitchDeg", "this.spine.rotation.y += sit.turn;",
+                           "Math.max(-Math.PI / 2, Math.min(Math.PI / 2, turn))", "entry.mannequin.group.rotation.y = legYaw;",
+                           "this.hips.position.y = 0.5;", "const GESTURES", "sitArg.hipY + 0.86 * heightM / 1.7 + 0.2"):
+                if needle not in js:
+                    bad.append(f"(cs-m) vnew-previz.js 에 '{needle}' 이 없습니다")
+            for needle in ("소품 겹침 보정: ", "소품과 겹침을 풀지 못했습니다: ", "화면에서만 보정했습니다. 다시 설계하면 저장됩니다.",
+                           "소품과 겹침을 풀지 못한 컷: ", "function previzCollisionBadges(cut, previz)"):
+                if needle not in vjs:
+                    bad.append(f"(cs-m) vnew.js 에 '{needle}' 이 없습니다")
+            if "innerHTML" in vjs[vjs.find("function previzCollisionBadges"):vjs.find("function collisionPropLabel")]:
+                bad.append("(cs-m) 보정 배지가 innerHTML 을 씁니다(textContent 만)")
+            for needle in (".vnew-previz-tag-collision {", ".vnew-previz-tag-collision.is-warn {"):
+                if needle not in css:
+                    bad.append(f"(cs-m) vnew.css 에 '{needle}' 이 없습니다")
+            node = shutil.which("node")
+            if not node:
+                warn("node 가 없어 cs-m node --check 를 건너뜁니다 (E16)")
+            else:
+                for name, text in (("vnew-previz.js", js), ("vnew.js", vjs)):
+                    result = _check_as_module(node, text) if _is_es_module(text) else subprocess.run(
+                        [node, "--check", str(PUBLIC / name)], capture_output=True, text=True)
+                    if result.returncode != 0:
+                        bad.append(f"(cs-m) node --check {name} 실패: {(result.stderr or '').strip()[:300]}")
+            mark("cs-m")
+
+            # ---------------- (cs-n) 2차 보정(closeapex 배우 조정) ----------------
+            rematch_calls: list[str] = []
+            real_rematch = saved["_rematch_cut"]
+
+            def spy_rematch(scene, cut, grammar_in, fit_entry):
+                rematch_calls.append(str(cut.get("cutId")))
+                return real_rematch(scene, cut, grammar_in, fit_entry)
+
+            pvmod._rematch_cut = spy_rematch
+            raw_n = {
+                "room": {"width": 8.0, "depth": 6.0, "height": 3.0},
+                "props": [{"id": "pole_n", "shape": "cylinder", "size": [0.1, 2.0, 0.1], "pos": [0.3, 1.0, 0.0], "labelKo": "기둥"}],
+                "actors": [{"id": "a1", "name": "가", "heightM": 1.7}, {"id": "a2", "name": "나", "heightM": 1.7}],
+                "timeline": [{"cutId": "c1", "actors": [{"id": "a1", "pos": [-1.0, 0, 0], "pose": "stand", "facingDeg": 90},
+                                                        {"id": "a2", "pos": [1.0, 0, 0], "pose": "stand", "facingDeg": 270}]}],
+            }
+            g_n = grammar("가", "나", shot_type="two_shot", bottom="shoulders", subject_x=0.35)
+            logs.clear()
+            _o, _p, plan_n = run_design_with("cs-n", raw_n, {"c1": g_n}, ["c1"])
+            pvmod._rematch_cut = real_rematch
+            pv_n = plan_n.get("previz") or {}
+            scene_n = (pv_n.get("scenes") or [{}])[0]
+            fit_n = (pv_n.get("fit") or {}).get("c1") or {}
+            fixes_n = (fit_n.get("collision") or {}).get("fixes") or []
+            # closeapex(CU 투샷) 배우 조정은 두 인물을 0.45m 까지 당긴다 — a2 가 기둥(x 0.3) 안으로 들어간다.
+            if [(f.get("pass"), f.get("kind"), f.get("actor"), f.get("prop")) for f in fixes_n] != [("B", "push", "a2", "pole_n")]:
+                bad.append(f"(cs-n) 2차 push fix 가 a2↔pole_n 1개가 아닙니다: {fixes_n}")
+            ca_n = {ca["id"]: ca for ca in (scene_n.get("timeline") or [{}])[0].get("actors") or []}
+            if "a2" not in ca_n or pcol.actor_overlaps(scene_n, ca_n["a2"]):
+                bad.append(f"(cs-n) 2차 뒤에도 a2 가 기둥과 겹칩니다: {ca_n.get('a2')}")
+            elif _math.hypot(ca_n["a1"]["pos"][0] - ca_n["a2"]["pos"][0], ca_n["a1"]["pos"][2] - ca_n["a2"]["pos"][2]) < 0.45 - 1e-6:
+                bad.append("(cs-n) 2차 밀어내기가 두 인물 간격 0.45 를 깼습니다")
+            if rematch_calls != ["c1"]:
+                bad.append(f"(cs-n) 2차에서 움직인 컷의 _rematch_cut 호출이 다릅니다: {rematch_calls}")
+            # 단위: 주인공이 움직이면 match 가 다시 계산된다(match_visible 과 같은 값).
+            unit_scene = _copy.deepcopy(scene_n)
+            unit_cut = unit_scene["timeline"][0]
+            unit_fit = dict(fit_n)
+            for ca in unit_cut["actors"]:
+                if ca["id"] == "a1":
+                    ca["pos"] = [round(ca["pos"][0] - 0.3, 4), 0.0, ca["pos"][2]]
+            real_rematch(unit_scene, unit_cut, grammarmod.normalize_grammar(g_n), unit_fit)
+            a1_unit = next(ca for ca in unit_cut["actors"] if ca["id"] == "a1")
+            size_n = next((k for k, v in pcam.LENS.items() if v[1] == fit_n.get("lens")), "CU")
+            want_n = pfit.match_visible(unit_cut["camera"], a1_unit["pos"], 1.7, "stand", 0.1, 0.5, pcam.LENS[size_n][2])
+            if fit_n.get("occluded") or fit_n.get("extraVisible"):
+                want_n *= 0.5
+            if unit_fit.get("match") != round(want_n, 4) or unit_fit.get("match") == fit_n.get("match"):
+                bad.append(f"(cs-n) _rematch_cut 결과가 다릅니다: {unit_fit.get('match')} 기대 {round(want_n, 4)} (전 {fit_n.get('match')})")
+            mark("cs-n")
+
+            # ---------------- (cs-o) 다리 방향 규칙 ----------------
+            boxed = sc([
+                bx("seat", [0.45, 0.45, 0.45], [0, 0.225, 0], label="의자 좌판"),
+                bx("back", [0.45, 0.9, 0.05], [0, 0.45, -0.25], label="의자 등받이"),
+                bx("side_l", [0.05, 0.9, 0.45], [-0.25, 0.45, 0], label="의자 옆판"),
+                bx("side_r", [0.05, 0.9, 0.45], [0.25, 0.45, 0], label="의자 옆판"),
+            ], [{"id": "a1", "pos": [0, 0, 0], "pose": "sit", "facingDeg": 180}])
+            b_vols = pcol._scene_vols(boxed)  # noqa: SLF001
+            b_seat = next(v for v in b_vols if v["id"] == "seat")
+            blocked = [y for y in (180.0, 90.0, 270.0) if pcol.solve_legs(0, 0, 0.45, 1.0, y, b_seat, b_vols)[1]]
+            if blocked or pcol.is_elongated(b_seat):
+                bad.append(f"(cs-o) 검사 전제: 의자 facing·옆 방향이 막혀 있지 않습니다: {blocked}")
+            res_o = pcol.resolve_scene(boxed, log_fixes=False)["c1"]
+            if (cut_actor(boxed, "a1").get("sit") or {}).get("legYawDeg") != 0.0 or res_o["unresolved"]:
+                bad.append(f"(cs-o) 의자 등받이 쪽 facing 이 4방향 탐색으로 0° 가 되지 않았습니다: {cut_actor(boxed, 'a1').get('sit')} {res_o}")
+            bench_cases = (
+                ("z-1·f90", [0, 0.225, -1], 0.0, 90, 0.0),
+                ("z+1·f90", [0, 0.225, 1], 0.0, 90, 180.0),
+                ("z+1·f30", [0, 0.225, 1], 0.0, 30, 0.0),
+                ("중심·f90", [0, 0.225, 0], 0.0, 90, 0.0),
+                ("rotY π/2·x-1·f0", [-1, 0.225, 0], _math.pi / 2, 0, 90.0),
+            )
+            for name, pos, rot, facing, want_yaw in bench_cases:
+                bench = sc([bx("bench", [2.0, 0.45, 0.45], pos, rot=rot, label="벤치")],
+                           [{"id": "a1", "pos": [pos[0], 0, pos[2]], "pose": "sit", "facingDeg": facing}])
+                pcol.resolve_scene(bench, log_fixes=False)
+                got_yaw = (cut_actor(bench, "a1").get("sit") or {}).get("legYawDeg")
+                if got_yaw != want_yaw:
+                    bad.append(f"(cs-o) 벤치 {name}: legYawDeg {got_yaw} 기대 {want_yaw}")
+            crate = sc([bx("crate", [0.6, 0.5, 0.6], [0, 0.25, 0])], [{"id": "a1", "pos": [0, 0, 0], "pose": "sit", "facingDeg": 0}])
+            pcol.resolve_scene(crate, log_fixes=False)
+            if (cut_actor(crate, "a1").get("sit") or {}).get("propId") != "crate":
+                bad.append("(cs-o) 이름·표시 없는 상자 안 앉기가 등급 4로 앉지 않았습니다")
+            stool = sc([bx("stool", [0.3, 0.45, 0.3], [0.5, 0.225, 0])], [{"id": "a1", "pos": [0, 0, 0], "pose": "sit", "sitOn": "stool"}])
+            res_s = pcol.resolve_scene(stool, log_fixes=False)["c1"]
+            if (cut_actor(stool, "a1").get("sit") or {}).get("propId") != "stool" or [f["kind"] for f in res_s["fixes"]] != ["seat"]:
+                bad.append(f"(cs-o) sitOn(0.35m) 등급 1 자리 맞춤이 다릅니다: {cut_actor(stool, 'a1')} {res_s}")
+            logs.clear()
+            far = sc([bx("stool", [0.3, 0.45, 0.3], [2.0, 0.225, 0])], [{"id": "a1", "pos": [0, 0, 0], "pose": "sit", "sitOn": "stool"}])
+            pcol.resolve_scene(far, log_fixes=True)
+            if "sit" in cut_actor(far, "a1") or logs.messages("vnew.previz.collision.sit_on_ignored") != [
+                "vnew.previz.collision.sit_on_ignored cut=c1 actor=a1 prop=stool"
+            ]:
+                bad.append(f"(cs-o) 먼 sitOn 무시·로그가 다릅니다: {logs.messages('sit_on_ignored')}")
+            mark("cs-o")
+
+            # ---------------- (cs-p) 옛 장면 보기는 그대로, 다시 설계하면 얼굴이 화면 안 ----------------
+            def subject_heads(scene_p):
+                """컷마다 주인공 머리 화면 사각형 (cutId, y0, y1). sit.hipY 가 있으면 그 엉덩이로 계산한다."""
+                names_p = {a["id"]: a.get("name") for a in scene_p.get("actors") or []}
+                heights_p = {a["id"]: float(a.get("heightM") or 1.7) for a in scene_p.get("actors") or []}
+                out_p = []
+                for cut in scene_p.get("timeline") or []:
+                    subject = test3_grammar[cut["cutId"]]["mainSubject"]
+                    ca = next((x for x in cut.get("actors") or [] if names_p.get(x["id"]) == subject), None)
+                    if ca is None:
+                        out_p.append((cut["cutId"], None, None))
+                        continue
+                    info_p = pcam._actor_points(  # noqa: SLF001
+                        {"heightM": heights_p.get(ca["id"], 1.7), "hipY": (ca.get("sit") or {}).get("hipY")},
+                        ca.get("pos"), str(ca.get("pose") or "stand"),
+                    )
+                    box_p = pcam._head_box(cut.get("camera") or {}, info_p)  # noqa: SLF001
+                    out_p.append((cut["cutId"], None if box_p is None else box_p["y0"], None if box_p is None else box_p["y1"]))
+                return out_p
+
+            cut_ids_p = [c for c, _a in _TEST3_CUTS]
+            with _pin_vnew(VNEW_PREVIZ_COLLISION=False):
+                owner_p, pid_p, plan_p_old = run_design_with("cs-p", _previz_test3_scene(), test3_grammar, cut_ids_p)
+            scene_p_old = ((plan_p_old.get("previz") or {}).get("scenes") or [{}])[0]
+            fit_p_old = (plan_p_old.get("previz") or {}).get("fit") or {}
+            if any("sit" in ca for cut in scene_p_old.get("timeline") or [] for ca in cut.get("actors") or []) or any(
+                "collision" in (e or {}) for e in fit_p_old.values()
+            ):
+                bad.append("(cs-p) 검사 전제: 보정 끔으로 설계한 옛 장면에 sit·fit.collision 이 있습니다")
+            heads_old = subject_heads(scene_p_old)
+            bug_scene = _copy.deepcopy(scene_p_old)
+            saved["resolve_scene"](bug_scene, log_fixes=False)
+            if not any(y1 is not None and y1 < 0 for _cid, _y0, y1 in subject_heads(bug_scene)):
+                bad.append("(cs-p) 검사 전제: 옛 장면 사본을 보정하면 얼굴이 화면 위로 나가야 합니다(옛 보기 동작의 결함)")
+            logs.clear()
+            view_p = planmod._previz_view(owner_p, pid_p, plan_p_old)  # noqa: SLF001
+            view_scene_p = (view_p.get("scenes") or [{}])[0]
+            for cut_v, cut_s in zip(view_scene_p.get("timeline") or [], scene_p_old.get("timeline") or []):
+                if cut_v.get("actors") != cut_s.get("actors") or cut_v.get("camera") != cut_s.get("camera"):
+                    bad.append(f"(cs-p) 옛 장면 {cut_s['cutId']} 보기 사본이 저장본과 다릅니다(인물·카메라)")
+            if subject_heads(view_scene_p) != heads_old:
+                bad.append("(cs-p) 옛 장면 보기의 주인공 머리 위치가 저장본과 다릅니다")
+            if (view_p.get("collision") or {}).get("needsRedesign") is not True or logs.messages("vnew.previz.collision."):
+                bad.append(f"(cs-p) 옛 장면 보기에 needsRedesign 이 없거나 로그가 남았습니다: {view_p.get('collision')}")
+            # 같은 장면을 보정 켬으로 다시 설계(run_design 경로, 가짜 LLM).
+            owner_p, pid_p, plan_p_new = run_design_with("cs-p", _previz_test3_scene(), test3_grammar, cut_ids_p)
+            scene_p_new = ((plan_p_new.get("previz") or {}).get("scenes") or [{}])[0]
+            for cid_p, y0, y1 in subject_heads(scene_p_new):
+                if y0 is None or not (0.0 <= y0 and y1 <= 1.0):
+                    bad.append(f"(cs-p) 다시 설계한 {cid_p} 주인공 머리 사각형이 화면 밖입니다: y0={y0} y1={y1}")
+            if any(not (ca.get("sit") or {}).get("hipY") for cut in scene_p_new.get("timeline") or [] for ca in cut.get("actors") or []):
+                bad.append("(cs-p) 다시 설계한 장면에 sit.hipY 가 없습니다")
+            view_p2 = planmod._previz_view(owner_p, pid_p, plan_p_new)  # noqa: SLF001
+            if "needsRedesign" in (view_p2.get("collision") or {}):
+                bad.append("(cs-p) 다시 설계한 계획에 needsRedesign 안내가 남았습니다")
+            if subject_heads((view_p2.get("scenes") or [{}])[0]) != subject_heads(scene_p_new):
+                bad.append("(cs-p) 다시 설계한 계획의 보기 사본 보정이 주인공 머리 위치를 바꿨습니다(멱등 아님)")
+            mark("cs-p")
+
+            if real_calls:
+                bad.append(f"(guard) 가짜가 아닌 LLM 호출이 있었습니다: {real_calls}")
+    except Exception as exc:  # noqa: BLE001
+        bad.append(f"검사 중 예외: {type(exc).__name__} {str(exc)[:200]}\n{_tb.format_exc()[-1200:]}")
+    finally:
+        pvmod.STORE = saved["pv_STORE"]
+        planmod.STORE = saved["plan_STORE"]
+        pvmod._design = saved["_design"]
+        grammarmod._read = saved["gr_read"]
+        pvmod._cut_tiles = saved["_cut_tiles"]
+        pvmod._spawn = saved["_spawn"]
+        pvmod._rematch_cut = saved["_rematch_cut"]
+        pcol.resolve_scenes = saved["resolve_scenes"]
+        pcol.resolve_scene = saved["resolve_scene"]
+        pcol.detect_scene = saved["detect_scene"]
+        pvmod.vpoc_ledger.charge_text = saved["pv_charge_text"]
+        vset.VNEW_PREVIZ_COLLISION = saved["collision_flag"]
+
+    expected = [f"cs-{c}" for c in "abcdefghijklmnop"]
+    missing = [i for i in expected if i not in seen_ids]
+    if missing and not bad:
+        bad.append(f"끝까지 돌지 않은 검사: {missing}")
+    if bad:
+        fail("084 프리비즈 소품 관통 보정 검사 실패\n" + "\n".join(f"  {item}" for item in bad))
+    else:
+        ok(
+            "084 프리비즈 소품 관통 보정 검사 (cs-a)test3 실측 7컷 upper_rail·0.985·legYaw 0·겹침 0·결정적 "
+            "(cs-b)의자 (cs-c)기둥 push·로그 (cs-d)회전·눕기·무릎·앉기 (cs-e)unresolved (cs-f)인물 간격 "
+            "(cs-g)멱등 (cs-h)옛 장면 보기 그대로·needsRedesign·설계된 장면만 사본 보정 (cs-i)설계 통합·카메라 hipY·match (cs-j)hip_y 함수 "
+            "(cs-k)설정 끔 (cs-l)정규화 (cs-m)렌더러·화면 문자열 (cs-n)2차 보정·_rematch_cut "
+            "(cs-o)다리 방향 규칙 (cs-p)옛 test3 보기 그대로·다시 설계하면 얼굴 화면 안"
+        )
+
+
 def main() -> int:
     print("== vpoc1 check ==")
     check_compileall()
@@ -17186,6 +18075,7 @@ def main() -> int:
     check_fal_poll_failure()
     check_vnew_model_list_parity()
     check_llm_top_model_first()
+    check_previz_collision()
     print()
     if warnings:
         print(f"경고 {len(warnings)}건")

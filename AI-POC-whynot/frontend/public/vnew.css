@@ -2775,6 +2775,28 @@ textarea.vnew-field-input {
   border-color: #c4b5fd;
 }
 
+/* 소품 관통 보정(084 R1): 보정 배지(정보)·풀지 못한 겹침(경고) */
+.vnew-previz-tag-collision {
+  background: #ecfdf5;
+  color: #065f46;
+  border-color: #6ee7b7;
+}
+
+.vnew-previz-tag-collision.is-warn {
+  background: #fef2f2;
+  color: #991b1b;
+  border-color: #fca5a5;
+}
+
+/* 보정 전에 만든 옛 프리비즈 — 다시 설계 안내(084 R1.11) */
+.vnew-previz-collision-redesign {
+  margin: 6px 0;
+  padding: 8px 10px;
+  border-left: 3px solid #f59e0b;
+  background: #fffbeb;
+  color: #92400e;
+}
+
 /* 70% 승인 관문: 낮은 컷 안내 + [그래도 승인] */
 .vnew-previz-lowmatch {
   display: flex;
