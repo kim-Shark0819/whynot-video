@@ -16057,6 +16057,477 @@ def check_fal_poll_failure() -> None:
         )
 
 
+def check_vnew_model_list_parity() -> None:
+    """073 작업 8 — vnew ① 영상 모델 목록: Seedance 이름·중복·토큰 단가(R16, D17~D19). 외부 호출은 전부 가짜.
+
+    레지스트리 = 계열 얼굴(i2v)·짝(r2v, 통 테이크 caps) + 가짜 H3 Max(i2v) + 초 단위 v2v (+ 토큰 컷 단위 v2v).
+    (vq-a) previz_models 에 r2v 한 줄, i2v 없음. label == ark.label(얼굴) == FAL_SEEDANCE_LABEL, "fal · " 없음.
+           계열 설정이 비면 둘 다 지금처럼 `fal · <label>`. _family_face_of 갈래.
+    (vq-b) r2v 단가: priceKnown·usdPerSecond == shot_usd(id, VNEW_TAKE_RESOLUTION, 1)·priceResolution(480p 0.2056,
+           720p 0.4622). pricing 없음·단가 0·토큰 컷 단위(전송 해상도 모름)는 "단가 미정". _previz_send_resolution.
+    (vq-c) 계열 밖 i2v(H3 Max): previzCapable False·available False·"프리비즈 미지원"·"fal · " 접두어(회귀).
+    (vq-d) 초 단위 v2v·기본 모델 행 값·키가 지금과 같다(회귀).
+    (vq-e) 통합: 통 테이크 POST /generate → 제출 본문 resolution == gen.resolution == priceResolution,
+           _charge_take 원장 == shot_usd(id, res, 초) == 표시 단가 × 초(반올림 차이 이내), ④ 견적 일치(480p·720p).
+           옛 흐름 _charge_video 도 shot_usd 공식.
+    (vq-f) update_input r2v 저장·i2v 400 BadVideoModel·빈 값 기본, _previz_model_ids 집합 그대로(회귀).
+    (vq-g) vnew.js previzPriceText: "단가 미정"은 priceKnown false 일 때만, priceResolution 표기, 목록·설명 줄 호출.
+    """
+    sys.path.insert(0, str(ROOT / "app"))
+    import threading as _threading_mod  # noqa: PLC0415
+    import time as _time  # noqa: PLC0415
+
+    from flask import Flask  # noqa: PLC0415
+
+    from src import vnew  # noqa: PLC0415
+    from src.vnew import generate as genmod  # noqa: PLC0415
+    from src.vnew import plan as planmod  # noqa: PLC0415
+    from src.vnew import settings as vnew_settings  # noqa: PLC0415
+    from src.vpoc import ark, fal, settings  # noqa: PLC0415
+    from src.vpoc.errors import VpocError  # noqa: PLC0415
+
+    bad: list[str] = []
+    env: _ParityEnv | None = None
+    owner = PARITY_OWNER
+    r2v, i2v = PARITY_PARTNER, PARITY_FACE
+    r2v_endpoint = r2v[len("fal:"):]
+    h3 = "fal:fal-ai/check/h3-max/image-to-video"
+    v2v_sec = "fal:fal-ai/check/seconds-v2v"
+    v2v_tok = "fal:fal-ai/check/token-cut-v2v"
+    token_price = {"unit": "1000 tokens", "unitPrice": 0.0214}
+    started_threads: list = []
+    pricing_calls: list[str] = []
+    orig_thread = _threading_mod.Thread
+
+    def registry(*, r2v_pricing: dict | None = token_price, with_token_cut: bool = False) -> list[dict]:
+        items = _parity_registry_items()
+        for item in items:
+            if item["id"] == r2v:
+                # 개발 레지스트리 r2v 모양(extract_caps): 배열 영상 입력 → 통 테이크(previz-take).
+                item["caps"] = dict(
+                    item["caps"],
+                    videoListField="video_urls",
+                    videoListMax=3,
+                    imageListField="image_urls",
+                    imageListMax=10,
+                    taskField="task",
+                    taskValues=["auto", "reference", "editing", "extension"],
+                    draftField="draft",
+                    previzCapable=True,
+                )
+                if r2v_pricing is None:
+                    item.pop("pricing", None)
+                else:
+                    item["pricing"] = dict(r2v_pricing)
+        items.append(
+            {
+                "id": h3,
+                "endpointId": h3[len("fal:"):],
+                "label": "H3 Max Image to Video",
+                "category": "image-to-video",
+                "caps": {"previzCapable": False, "available": True, "startImageField": "image_url", "promptField": "prompt"},
+                "pricing": {"unit": "seconds", "unitPrice": 0.1},
+                "addedBy": "tester",
+            }
+        )
+        items.append(
+            {
+                "id": v2v_sec,
+                "endpointId": v2v_sec[len("fal:"):],
+                "label": "Check Seconds V2V",
+                "category": "video-to-video",
+                "caps": {"previzCapable": True, "available": True, "videoField": "video_url", "promptField": "prompt",
+                         "imageListField": "image_urls"},
+                "pricing": {"unit": "seconds", "unitPrice": 0.1},
+                "addedBy": "tester",
+            }
+        )
+        if with_token_cut:
+            items.append(
+                {
+                    "id": v2v_tok,
+                    "endpointId": v2v_tok[len("fal:"):],
+                    "label": "Check Token Cut V2V",
+                    "category": "video-to-video",
+                    "caps": {"previzCapable": True, "available": True, "videoField": "video_url", "promptField": "prompt"},
+                    "pricing": dict(token_price),
+                    "addedBy": "tester",
+                }
+            )
+        return items
+
+    def rows_by_id() -> tuple[list[dict], dict]:
+        rows = planmod.previz_models()
+        return rows, {str(row.get("id")): row for row in rows}
+
+    def tracking_thread(*args, **kwargs):
+        thread = orig_thread(*args, **kwargs)
+        started_threads.append(thread)
+        return thread
+
+    def join_drivers(timeout: float = 30.0) -> None:
+        deadline = _time.time() + timeout
+        for thread in list(started_threads):
+            thread.join(timeout=max(0.0, deadline - _time.time()))
+        started_threads.clear()
+
+    fake_blobs = {"wf-ch1": b"WF1", "wb-ch1": b"WB1", "wf-ch2": b"WF2", "wb-ch2": b"WB2", "loc-wb-back": b"LOC"}
+
+    def fake_load_char(_owner, char_id):
+        return (
+            {
+                "id": char_id,
+                "name": "에이" if char_id.endswith("1") else "비",
+                "status": "ready",
+                "analysis": {"appearanceEn": "a person", "outfitEn": "an outfit", "styleEn": "thin ink lines"},
+                "variants": {
+                    "real": {"frontKey": "rf-" + char_id, "backKey": "rb-" + char_id, "sheetKey": ""},
+                    "webtoon": {"frontKey": "wf-" + char_id, "backKey": "wb-" + char_id, "sheetKey": ""},
+                },
+            },
+            "etag",
+        )
+
+    def make_take_plan(pid: str, seconds: list[int]) -> None:
+        """통 테이크 선행 조건(③ 콘티·프리비즈 승인·녹화·지시서)을 갖춘 r2v 계획(check_vnew_take 와 같은 모양)."""
+        plan = planmod.new_plan()
+        segments = [{"id": f"s{i + 1}", "cutIds": [f"c{i + 1}"], "seconds": sec} for i, sec in enumerate(seconds)]
+        plan["input"].update(
+            {
+                "totalSeconds": sum(seconds),
+                "videoModel": r2v,
+                "order": ["f1"],
+                "images": [{"fileId": "f1", "name": "1.png", "width": 600, "height": 900}],
+                "characters": [{"charId": "ch1", "roleName": "에이"}, {"charId": "ch2", "roleName": "비"}],
+            }
+        )
+        env.fake.blobs[planmod.upload_key(owner, pid, "f1")] = _tiny_jpeg(600, 900)
+        cuts = [
+            {
+                "id": seg["cutIds"][0],
+                "no": index + 1,
+                "seconds": seg["seconds"],
+                "panels": [0],
+                "shotKo": "컷",
+                "cameraEn": "static camera",
+                "locationEn": "A closed office",
+                "characters": [{"name": "에이", "positionEn": "at the desk", "actionEn": "speaks"}],
+                "dialogueKo": "자네 뭐 하나?",
+                "situationKo": "호통",
+                "promptEn": "Kim speaks, static camera.",
+            }
+            for index, seg in enumerate(segments)
+        ]
+        plan["script"] = {
+            "status": "ready",
+            "setting": {"locationEn": "A closed office", "enclosed": True},
+            "entries": [{"id": "e1", "panels": [0], "locationEn": "A closed office"}],
+        }
+        plan["conti"] = {"status": "ready", "cuts": cuts, "segments": segments, "setting": {"locationEn": "A closed office"}}
+        plan["locations"] = [
+            {
+                "id": "loc1",
+                "nameEn": "A closed office",
+                "key": "a closed office",
+                "panels": [0],
+                "status": "ready",
+                "variants": {"webtoon": {"viewKeys": {"back": "loc-wb-back"}}},
+            }
+        ]
+        actors = [
+            {"id": "a1", "name": "에이", "color": "#4363d8", "charId": "ch1", "appearanceEn": "a man"},
+            {"id": "a2", "name": "비", "color": "#e6194b", "charId": "ch2", "appearanceEn": "a woman"},
+        ]
+        recordings = {}
+        for seg in segments:
+            rec_key = f"rec/{pid}/{seg['id']}.mp4"
+            env.fake.blobs[rec_key] = b"PREVIZ-REC-MP4"
+            recordings[seg["id"]] = {"status": "ready", "key": rec_key, "seconds": float(seg["seconds"])}
+        plan["previz"] = {
+            "status": "ready",
+            "error": "",
+            "revision": 0,
+            "scenes": [
+                {
+                    "locationId": "loc1",
+                    "actors": actors,
+                    "timeline": [{"cutId": cut["id"], "actors": [{"id": "a1"}, {"id": "a2"}]} for cut in cuts],
+                }
+            ],
+            "approved": True,
+            "recordings": recordings,
+            "shotBrief": {
+                "status": "ready",
+                "scene": {"loc1": "A closed office, wood panelling."},
+                "cuts": {
+                    cut["id"]: {
+                        "shotEn": "MCU, 50mm lens, eye-level.",
+                        "actionEn": "Kim leans forward.",
+                        "dialogue": [{"speaker": "에이", "lineKo": "자네 뭐 하나?", "deliveryEn": "sharp"}],
+                    }
+                    for cut in cuts
+                },
+                "updatedAt": "2026-10-28T00:00:00Z",
+            },
+            "task": {"status": "done", "startedAt": None, "id": None},
+        }
+        planmod.save_plan(owner, pid, plan)
+
+    try:
+        env = _parity_env(registry=registry())
+        for module in (planmod, genmod):
+            env.patch(module, "STORE", env.fake)
+        env.patch(fal, "pricing", lambda endpoint: pricing_calls.append(str(endpoint)) or None)
+        env.patch(vnew_settings, "VNEW_TAKE_RESOLUTION", "480p")
+        default_id = planmod.default_previz_model()
+
+        # ---- (vq-a) 이름·중복 ----
+        rows, by_id = rows_by_id()
+        ids = [str(row.get("id")) for row in rows]
+        if ids.count(r2v) != 1:
+            bad.append(f"(vq-a) r2v 가 목록에 한 줄이 아닙니다: {ids}")
+        if i2v in ids:
+            bad.append(f"(vq-a) 계열 얼굴(i2v)이 목록에 남았습니다: {ids}")
+        family_rows = [row_id for row_id in ids if settings.is_fal_seedance_family(row_id)]
+        if family_rows != [r2v]:
+            bad.append(f"(vq-a) Seedance 계열 행이 r2v 하나가 아닙니다: {family_rows}")
+        r2v_label = str((by_id.get(r2v) or {}).get("label") or "")
+        if r2v_label != ark.label(i2v) or r2v_label != settings.FAL_SEEDANCE_LABEL:
+            bad.append(f"(vq-a) r2v label 이 vpoc 계열 이름(ark.label(얼굴))과 다릅니다: {r2v_label!r} != {ark.label(i2v)!r}")
+        if r2v_label.startswith("fal · "):
+            bad.append(f"(vq-a) r2v label 에 'fal · ' 접두어가 있습니다: {r2v_label!r}")
+        for model_id, expect in ((r2v, i2v), (i2v, ""), (h3, ""), ("luma-ray2", ""), ("", "")):
+            if planmod._family_face_of(model_id) != expect:
+                bad.append(f"(vq-a) _family_face_of({model_id!r}) != {expect!r}: {planmod._family_face_of(model_id)!r}")
+        # 계열 설정이 비면 계열이 없다 — r2v·i2v 모두 073 이전과 같은 `fal · <label>` 행.
+        orig_family = settings.FAL_SEEDANCE_FAMILY
+        env.patch(settings, "FAL_SEEDANCE_FAMILY", {})
+        _rows_off, off = rows_by_id()
+        if (off.get(r2v) or {}).get("label") != "fal · Bytedance Seedance 2.5 Reference to Video":
+            bad.append(f"(vq-a) 계열 설정이 비었는데 r2v label 이 지금 값이 아닙니다: {(off.get(r2v) or {}).get('label')}")
+        off_i2v = off.get(i2v) or {}
+        if off_i2v.get("label") != "fal · Bytedance Seedance 2.5 Image to Video" or off_i2v.get("previzCapable") is not False:
+            bad.append(f"(vq-a) 계열 설정이 비었는데 i2v 행이 지금(회색 fal · ) 값이 아닙니다: {off_i2v}")
+        env.patch(settings, "FAL_SEEDANCE_FAMILY", orig_family)
+
+        # ---- (vq-b) 토큰 단가 ----
+        row = by_id.get(r2v) or {}
+        expect_480 = settings.shot_usd(r2v, "480p", 1)
+        if row.get("priceKnown") is not True or row.get("usdPerSecond") != round(expect_480, 4):
+            bad.append(f"(vq-b) r2v 단가가 shot_usd(id, 480p, 1)={expect_480} 이 아닙니다: {row}")
+        if abs(float(row.get("usdPerSecond") or 0) - 0.2056) > 0.0001:
+            bad.append(f"(vq-b) 480p 초당 단가가 약 0.2056 이 아닙니다: {row.get('usdPerSecond')}")
+        if row.get("priceResolution") != str(vnew_settings.VNEW_TAKE_RESOLUTION):
+            bad.append(f"(vq-b) priceResolution 이 전송 해상도(VNEW_TAKE_RESOLUTION)가 아닙니다: {row.get('priceResolution')}")
+        env.patch(vnew_settings, "VNEW_TAKE_RESOLUTION", "720p")
+        row_720 = planmod._previz_price_row(r2v)
+        if row_720 != {"usdPerSecond": round(settings.shot_usd(r2v, "720p", 1), 4), "priceKnown": True, "priceResolution": "720p"}:
+            bad.append(f"(vq-b) 720p 단가 행이 다릅니다: {row_720}")
+        if abs(float(row_720.get("usdPerSecond") or 0) - 0.4622) > 0.0001:
+            bad.append(f"(vq-b) 720p 초당 단가가 약 0.4622 가 아닙니다: {row_720.get('usdPerSecond')}")
+        env.patch(vnew_settings, "VNEW_TAKE_RESOLUTION", "480p")
+        if planmod._previz_send_resolution({"videoListField": "video_urls"}) != "480p":
+            bad.append("(vq-b) _previz_send_resolution(통 테이크) 이 VNEW_TAKE_RESOLUTION 이 아닙니다")
+        if planmod._previz_send_resolution({"videoField": "video_url"}) != "" or planmod._previz_send_resolution({}) != "":
+            bad.append("(vq-b) _previz_send_resolution(컷 단위·빈 caps) 이 빈 값이 아닙니다")
+        # 원장 공식(TAKE_RESOLUTION_WH)에 없는 설정 값은 표시·원장 픽셀이 달라지므로 "단가 미정"(리뷰 3단계).
+        for odd in ("540p", "4k"):
+            env.patch(vnew_settings, "VNEW_TAKE_RESOLUTION", odd)
+            got_odd = planmod._previz_price_row(r2v)
+            if planmod._previz_send_resolution({"videoListField": "video_urls"}) != "" or got_odd != {
+                "usdPerSecond": 0.0,
+                "priceKnown": False,
+            }:
+                bad.append(f"(vq-b) VNEW_TAKE_RESOLUTION={odd} 인데 '단가 미정'이 아닙니다: {got_odd}")
+        env.patch(vnew_settings, "VNEW_TAKE_RESOLUTION", "480p")
+        # pricing 없음 / 단가 0 / 토큰 컷 단위(전송 해상도 모름) → "단가 미정".
+        for case, items, model_id in (
+            ("pricing 없음", registry(r2v_pricing=None), r2v),
+            ("토큰 단가 0", registry(r2v_pricing={"unit": "1000 tokens", "unitPrice": 0}), r2v),
+            ("토큰 컷 단위", registry(with_token_cut=True), v2v_tok),
+        ):
+            env.set_registry(items)
+            got = planmod._previz_price_row(model_id)
+            if got != {"usdPerSecond": 0.0, "priceKnown": False}:
+                bad.append(f"(vq-b) {case} 인데 '단가 미정' 행이 아닙니다: {got}")
+            _rows_case, case_by_id = rows_by_id()
+            if "priceResolution" in (case_by_id.get(model_id) or {}):
+                bad.append(f"(vq-b) {case} 행에 priceResolution 이 있습니다: {case_by_id.get(model_id)}")
+        env.set_registry(registry())
+
+        # ---- (vq-c) 계열 밖 i2v 회귀 ----
+        rows, by_id = rows_by_id()
+        h3_row = by_id.get(h3) or {}
+        if (
+            h3_row.get("previzCapable") is not False
+            or h3_row.get("available") is not False
+            or not str(h3_row.get("reason") or "").startswith("프리비즈 미지원")
+            or h3_row.get("label") != "fal · H3 Max Image to Video"
+            or "priceResolution" in h3_row
+        ):
+            bad.append(f"(vq-c) 계열 밖 i2v(H3 Max) 행이 지금(회색·fal · ) 값이 아닙니다: {h3_row}")
+
+        # ---- (vq-d) 초 단위·기본 모델 회귀 ----
+        if planmod._previz_price_row(v2v_sec) != {"usdPerSecond": 0.1, "priceKnown": True}:
+            bad.append(f"(vq-d) 초 단위 v2v 단가 행이 지금 값이 아닙니다: {planmod._previz_price_row(v2v_sec)}")
+        sec_row = by_id.get(v2v_sec) or {}
+        if sec_row.get("label") != "fal · Check Seconds V2V" or sec_row.get("available") is not True:
+            bad.append(f"(vq-d) 초 단위 v2v 행 이름·사용 가능이 지금 값이 아닙니다: {sec_row}")
+        first = rows[0] if rows else {}
+        expect_default = {"usdPerSecond": round(float(vnew_settings.VNEW_PREVIZ_EDIT_USD_PER_S), 4), "priceKnown": True}
+        default_keys = {"id", "label", "recommended", "previzCapable", "refMode", "available", "reason", "usdPerSecond", "priceKnown"}
+        if (
+            first.get("id") != default_id
+            or first.get("recommended") is not True
+            or first.get("label") != "Kling O3 (추천)"
+            or set(first) != default_keys
+            or {key: first.get(key) for key in ("usdPerSecond", "priceKnown")} != expect_default
+        ):
+            bad.append(f"(vq-d) 기본 모델 행이 지금 값이 아닙니다: {first}")
+
+        # ---- (vq-f) 검증 규칙 회귀 ----
+        pid_f = "prj_vq_f"
+        planmod.load_or_create(owner, pid_f)
+        if planmod._previz_model_ids() != {default_id, r2v, v2v_sec}:
+            bad.append(f"(vq-f) 고를 수 있는 모델 집합이 다릅니다: {sorted(planmod._previz_model_ids())}")
+
+        def stored_model(pid: str) -> str:
+            data, _ = planmod.load_plan(owner, pid)
+            return str((data.get("input") or {}).get("videoModel") or "")
+
+        planmod.update_input(owner, pid_f, {"videoModel": r2v})
+        if stored_model(pid_f) != r2v:
+            bad.append(f"(vq-f) r2v 가 저장되지 않았습니다: {stored_model(pid_f)}")
+        try:
+            planmod.update_input(owner, pid_f, {"videoModel": i2v})
+            bad.append("(vq-f) 계열 i2v 가 거절되지 않았습니다(지금 규칙은 400)")
+        except VpocError as exc:
+            if exc.status != 400 or exc.kind != "BadVideoModel":
+                bad.append(f"(vq-f) 계열 i2v 가 400 BadVideoModel 이 아닙니다: {exc.status} {exc.kind}")
+        if stored_model(pid_f) != r2v:
+            bad.append(f"(vq-f) i2v 거절 뒤 저장값이 바뀌었습니다: {stored_model(pid_f)}")
+        planmod.update_input(owner, pid_f, {"videoModel": ""})
+        if stored_model(pid_f) != default_id:
+            bad.append(f"(vq-f) 빈 값이 기본 프리비즈 모델로 저장되지 않았습니다: {stored_model(pid_f)}")
+
+        # ---- (vq-e) 통합: 표시 단가 = 전송 해상도 = 원장 ----
+        env.patch(genmod.characters, "load_char", fake_load_char)
+        env.patch(genmod, "_load_jpeg", lambda key: fake_blobs.get(str(key or "")))
+        env.patch(genmod, "_segment_panel_jpegs", lambda o, p, plan, seg, limit: [b"PANEL1", b"PANEL2"][:limit])
+        env.patch(genmod.imaging, "fit_ratio", lambda jpeg, *a, **k: jpeg)
+        env.patch(genmod, "_read_cast_notes", lambda blocks, *, model: ({"people": []}, {"model": model}))
+        env.patch(genmod, "_concat", lambda clips: b"FINAL-TAKE-MP4")
+        env.patch(genmod, "_fetch_bytes", lambda key, *, bucket="": env.fake.blobs.get(key, b"REC-MP4-BYTES"))
+        env.patch(fal, "poll", lambda arn, prefix: {"status": "Completed", "failureMessage": "", "usage": None})
+        env.patch(_threading_mod, "Thread", tracking_thread)
+        app = Flask("vnew-model-list-parity")
+        app.register_blueprint(
+            vnew.create_blueprint(
+                vnew.VnewDependencies(
+                    require_auth=lambda handler: handler,
+                    current_owner=lambda: owner,
+                    get_project=lambda p: {"id": p, "owner": owner, "track": "video_new"},
+                    can_read_project=lambda proj: True,
+                    can_write_project=lambda proj: True,
+                    project_owner_prefix=lambda name: name,
+                )
+            )
+        )
+        client = app.test_client()
+        for resolution in ("480p", "720p"):
+            env.patch(vnew_settings, "VNEW_TAKE_RESOLUTION", resolution)
+            env.reset_calls()
+            pid = "prj_vq_e_" + resolution
+            make_take_plan(pid, [12, 15])
+            shown = planmod._previz_price_row(r2v)
+            plan_e, _ = planmod.load_plan(owner, pid)
+            est = genmod.estimate(plan_e)
+            resp = client.post(f"/api/vnew/p/{pid}/generate", json={"confirmUsd": est["totalUsd"]})
+            if resp.status_code != 202:
+                bad.append(f"(vq-e) {resolution} generate 가 202 가 아닙니다: {resp.status_code} {resp.get_json()}")
+                continue
+            join_drivers()
+            gen = (planmod.load_plan(owner, pid)[0].get("gen")) or {}
+            posts = env.fal_posts()
+            if len(posts) != 1 or not str(posts[0][1]).endswith("/" + r2v_endpoint):
+                bad.append(f"(vq-e) {resolution} r2v 제출이 1회가 아닙니다: {[call[1] for call in posts]}")
+                continue
+            body = posts[0][2] or {}
+            if not (body.get("resolution") == gen.get("resolution") == shown.get("priceResolution") == resolution):
+                bad.append(
+                    f"(vq-e) {resolution} 전송·gen·표시 해상도가 다릅니다: body={body.get('resolution')} "
+                    f"gen={gen.get('resolution')} shown={shown.get('priceResolution')}"
+                )
+            charges = [entry for entry in env.charges if entry.get("plan_id") == gen.get("genId")]
+            formula = settings.shot_usd(r2v, resolution, 27)
+            if len(charges) != 1:
+                bad.append(f"(vq-e) {resolution} 원장 계상이 1건이 아닙니다: {len(charges)}")
+            else:
+                usd = float(charges[0].get("usd") or 0)
+                if abs(usd - formula) > 0.0001:
+                    bad.append(f"(vq-e) {resolution} 원장 {usd} != shot_usd(id, {resolution}, 27)={formula}")
+                if abs(usd - float(shown.get("usdPerSecond") or 0) * 27) > 0.00005 * 27 + 0.0001:
+                    bad.append(f"(vq-e) {resolution} 원장 {usd} 이 표시 단가×27({shown.get('usdPerSecond')}×27)과 다릅니다")
+                if charges[0].get("model") != r2v_endpoint:
+                    bad.append(f"(vq-e) {resolution} 원장 model 이 r2v endpoint 가 아닙니다: {charges[0].get('model')}")
+            if est.get("mode") != "previz-take" or est.get("totalUsd") != round(formula, 2):
+                bad.append(f"(vq-e) {resolution} ④ 견적이 같은 공식이 아닙니다: {est.get('mode')} {est.get('totalUsd')} != {round(formula, 2)}")
+        env.patch(vnew_settings, "VNEW_TAKE_RESOLUTION", "480p")
+        # 옛 흐름 계상(_charge_video)도 shot_usd(id, 해상도, 초)다.
+        env.reset_calls()
+        genmod._charge_video(owner, "prj_vq_e_old", "gen-vq-old", {"clientRequestToken": "tok-vq-old"}, r2v, "720p", 10)
+        old = [entry for entry in env.charges if entry.get("key") == "tok-vq-old"]
+        if len(old) != 1 or abs(float(old[0].get("usd") or 0) - settings.shot_usd(r2v, "720p", 10)) > 0.0001:
+            bad.append(f"(vq-e) _charge_video 원장이 shot_usd(id, 720p, 10) 이 아닙니다: {old}")
+
+        # ---- (vq-g) 프런트 문구 ----
+        js = (PUBLIC / "vnew.js").read_text(encoding="utf-8")
+        start = js.find("function previzPriceText(")
+        body_js = js[start : js.find("\n  }\n", start)] if start >= 0 else ""
+        # 주석 줄(/* … */ · //)은 빼고 코드 줄만 본다.
+        miss_lines = [
+            line
+            for line in js.splitlines()
+            if "단가 미정" in line and not line.strip().startswith(("/*", "*", "//"))
+        ]
+        if start < 0:
+            bad.append("(vq-g) vnew.js 에 previzPriceText 함수가 없습니다")
+        if len(miss_lines) != 1 or "!model.priceKnown" not in miss_lines[0]:
+            bad.append(f"(vq-g) '단가 미정'이 priceKnown false 조건 한 곳에만 있지 않습니다: {miss_lines}")
+        if "model.priceResolution" not in body_js or '"(" + String(model.priceResolution) + ")"' not in body_js:
+            bad.append("(vq-g) previzPriceText 가 priceResolution 을 '(480p)' 형식으로 붙이지 않습니다")
+        if '"초당 " + amount' not in body_js or 'amount + "/초"' not in body_js:
+            bad.append("(vq-g) previzPriceText 의 목록('/초')·설명 줄('초당 ') 형식이 없습니다")
+        if "previzPriceText(model, false)" not in js or "previzPriceText(chosen, true)" not in js:
+            bad.append("(vq-g) 목록·설명 줄이 previzPriceText 를 부르지 않습니다")
+        if 'toFixed(3) + "/초"' in js or '"초당 $" + (Number(chosen.usdPerSecond)' in js:
+            bad.append("(vq-g) 옛 단가 문구 조립이 남아 있습니다")
+
+        if env.url_calls:
+            bad.append(f"실제 네트워크 호출이 있었습니다: {env.url_calls}")
+        if env.ark_calls or env.video_calls:
+            bad.append("BytePlus·Luma 호출이 있었습니다")
+    except Exception as exc:  # noqa: BLE001
+        import traceback as _tb  # noqa: PLC0415
+
+        bad.append("vnew 모델 목록 검사 중 예외: " + repr(exc) + "\n" + _tb.format_exc()[:1500])
+    finally:
+        join_drivers(5.0)
+        if env is not None:
+            env.restore()
+        _threading_mod.Thread = orig_thread
+
+    if bad:
+        fail("fal-seedance-parity vnew 모델 목록 검사 실패\n" + "\n".join(f"  {item}" for item in bad))
+    else:
+        ok(
+            "fal-seedance-parity vnew 모델 목록 검사 (vq-a)r2v 한 줄·i2v 숨김·ark.label 이름·fal · 없음·계열 끔 회귀 "
+            "(vq-b)토큰 단가 shot_usd 480p 0.2056·720p 0.4622·priceResolution·pricing 없음·0·컷 단위·540p/4k 미정 "
+            "(vq-c)H3 Max 회색·fal · (vq-d)초 단위·기본 모델 행 그대로 (vq-e)전송=gen=표시 해상도·원장=shot_usd=단가×초·"
+            "견적(480p·720p)·_charge_video (vq-f)r2v 저장·i2v 400·빈 값 기본·집합 그대로 (vq-g)previzPriceText 문구"
+        )
+
+
 # ---------------------------------------------------------------- main
 
 
@@ -16110,6 +16581,7 @@ def main() -> int:
     check_stitcher_threads()
     check_vnew_model_fallback()
     check_fal_poll_failure()
+    check_vnew_model_list_parity()
     print()
     if warnings:
         print(f"경고 {len(warnings)}건")

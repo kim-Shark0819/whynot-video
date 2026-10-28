@@ -194,6 +194,13 @@ vnew가 재사용하는 것: `vpoc.llm`·`images`·`store.STORE`·`ark`·`fal`·
 5. 갱신 유실 방지: 같은 프로세스 안에서는 계획별 `threading.Lock`(`_mutate_locked`, `:972-976`), 프로세스 사이는 S3 ETag 조건부 쓰기에 의존.
 6. 모드 판정: 선택한 영상 모델 caps에 배열 영상 입력(`videoListField`)이 있으면 `previz-take`(Seedance 2.5 reference-to-video 통 테이크, ≤30초, 480p draft 기본), 아니면 컷 단위 `previz`(Kling O3 video-to-video edit)(`vnew/settings.py:157-195`).
 
+**① 영상 모델 목록(`plan.previz_models`, 073 R16, 2026-10-28)**
+
+- 목록 = 기본(Kling O3 edit, 첫 번째·추천) + 등록된 fal 모델. previzCapable이 아닌 모델(H3 Max·Kling v3 Pro 등 i2v)은 `fal · <label>` 회색 "프리비즈 미지원"으로 보이고 고를 수 없다.
+- fal Seedance 계열(`VPOC_FAL_SEEDANCE_FAMILY`): 얼굴(i2v)은 숨기고, 짝(r2v) 한 줄을 vpoc ②와 같은 이름 `ark.label(<얼굴>)`("Seedance 2.5 (fal)")로 보인다(`_family_face_of`). 계열 설정이 비면 073 이전처럼 둘 다 `fal · ` 행이다.
+- 단가(`_previz_price_row`): unit `seconds`는 그 초당 단가, 기본 모델은 단가를 모르면 `VNEW_PREVIZ_EDIT_USD_PER_S`. 토큰 단가는 전송 해상도를 아는 통 테이크 모델에만 `vpoc settings.shot_usd(id, VNEW_TAKE_RESOLUTION, 1)`과 `priceResolution`을 준다(`_previz_send_resolution`). 통 테이크는 그 해상도를 본문 `resolution`에 늘 명시해 보내고(`generate.py:2918`), 견적·원장(`_take_usd`)도 같은 값이다. 컷 단위 토큰 모델은 `resolution`을 보내지 않아 "단가 미정"이다.
+- 화면: `vnew.js` `previzPriceText`가 `$0.206/초(480p)`(목록)·`초당 $0.206(480p)`(설명 줄)을 만든다.
+
 ### 3.7 `stitcher.py`
 
 - ffmpeg는 `imageio-ffmpeg` 휠의 정적 바이너리(`FFMPEG_BINARY` 우선, 없으면 PATH)(`stitcher.py:35-48`). 모든 실행에 `STITCH_TIMEOUT_SECONDS`(기본 600초) timeout(`:51-58`).

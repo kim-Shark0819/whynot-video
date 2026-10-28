@@ -340,23 +340,75 @@ def default_previz_model() -> str:
     return vpoc_settings.FAL_ID_PREFIX + str(vnew_settings_module().VNEW_PREVIZ_EDIT_MODEL or "")
 
 
+def _family_face_of(model_id: str) -> str:
+    """fal Seedance 계열 짝(r2v) id 면 그 얼굴(i2v) id, 아니면 빈 문자열(073 R16.1, 작업 8).
+
+    vpoc settings.FAL_SEEDANCE_FAMILY(얼굴 → 짝)를 거꾸로 찾는다. 얼굴 id·계열 밖·fal 이 아닌 id 는 빈 값.
+    ① 목록은 이 얼굴 id 로 vpoc 과 같은 이름(ark.label)을 만든다.
+    """
+    from ..vpoc import settings as vpoc_settings  # noqa: PLC0415
+
+    endpoint = vpoc_settings.fal_endpoint_id(model_id)
+    if not endpoint:
+        return ""
+    for face, partner in vpoc_settings.FAL_SEEDANCE_FAMILY.items():
+        if partner == endpoint:
+            return vpoc_settings.FAL_ID_PREFIX + face
+    return ""
+
+
+def _previz_send_resolution(caps: dict) -> str:
+    """vnew 가 이 프리비즈 모델에 실제로 보내는 해상도. 모르면 빈 문자열(073 R16.4-16.5, D18·D19).
+
+    - 통 테이크 모델(caps videoListField — generate._gen_mode 가 "previz-take" 로 고른다):
+      generate._new_take_gen 이 gen.resolution = VNEW_TAKE_RESOLUTION 으로 두고, _do_submit_take 가 그 값을
+      _submit_take 본문 "resolution" 에 늘 명시해 보낸다(fal 스키마 기본값을 쓰지 않는다). ④ 견적(estimate)과
+      원장(_charge_take → _take_usd)도 같은 값이다.
+    - 컷 단위 모델: _submit_previz_edit 이 resolution 을 보내지 않아 fal 기본 해상도로 만든다 — 모른다("").
+    - 설정 값이 원장 공식(generate._take_usd 의 TAKE_RESOLUTION_WH)에 없는 해상도(예: 540p·4k)면 표시
+      (shot_usd)와 원장이 다른 픽셀로 계산되므로 모르는 것으로 본다("") — 화면은 "단가 미정".
+    """
+    if (caps or {}).get("videoListField"):
+        vnew_settings = vnew_settings_module()
+        resolution = str(vnew_settings.VNEW_TAKE_RESOLUTION or "")
+        return resolution if resolution in vnew_settings.TAKE_RESOLUTION_WH else ""
+    return ""
+
+
 def _previz_price_row(model_id: str) -> dict:
-    """프리비즈 모델 한 행의 단가·참고 방식 정보(화면 표시용)."""
+    """프리비즈 모델 한 행의 단가·참고 방식 정보(화면 표시용).
+
+    - fal 단가 unit 이 "seconds" 면 그 초당 단가(지금 그대로).
+    - 기본 모델(Kling O3)은 단가를 모르면 설정 기본 단가(초당, 지금 그대로).
+    - 토큰 단가("1000 tokens" 등)이고 vnew 가 보내는 해상도를 알면(통 테이크 모델) 초당 단가 =
+      vpoc settings.shot_usd(id, <전송 해상도>, 1) — vpoc 과 같은 토큰 공식(073 R16.4, 작업 8). 이때만
+      priceResolution(예: "480p")을 더한다. 해상도를 모르는 컷 단위 토큰 모델은 "단가 미정"(R16.5).
+    """
     from ..vpoc import fal as vpoc_fal  # noqa: PLC0415
+    from ..vpoc import settings as vpoc_settings  # noqa: PLC0415
 
     vnew_settings = vnew_settings_module()
     endpoint = str(model_id).split(":", 1)[-1]
     # 단가: 등록 모델이면 pricing_for, 아니면 fal pricing(endpoint). 초당 USD 만 표시한다.
     unit_price = 0.0
     price_known = False
-    price = vpoc_fal.pricing_for(model_id) if vpoc_fal.find(model_id) else vpoc_fal.pricing(endpoint)
-    if price and str(price.get("unit") or "").lower() == "seconds":
+    item = vpoc_fal.find(model_id)
+    price = vpoc_fal.pricing_for(model_id) if item else vpoc_fal.pricing(endpoint)
+    unit = str((price or {}).get("unit") or "").lower()
+    if price and unit == "seconds":
         unit_price = float(price.get("unitPrice") or 0.0)
         price_known = unit_price > 0
     if not price_known and model_id == default_previz_model():
         # 기본 모델은 설정 기본 단가(초당)를 쓴다.
         unit_price = float(vnew_settings.VNEW_PREVIZ_EDIT_USD_PER_S)
         price_known = True
+    if not price_known and price and vpoc_settings._fal_token_multiplier(unit) is not None:
+        # 토큰 단가(Seedance 2.5 등, 073 R16.4): 실제 전송 해상도로 1초 금액을 vpoc 공식(shot_usd)으로 낸다.
+        resolution = _previz_send_resolution((item or {}).get("caps") or {})
+        if resolution:
+            per_second = float(vpoc_settings.shot_usd(model_id, resolution, 1))
+            if per_second > 0:
+                return {"usdPerSecond": round(per_second, 4), "priceKnown": True, "priceResolution": resolution}
     return {"usdPerSecond": round(unit_price, 4), "priceKnown": price_known}
 
 
@@ -373,9 +425,15 @@ def previz_models() -> list[dict]:
     """① 프리비즈 영상 모델 목록(설계자 2026-10-22).
 
     목록 = 기본(Kling O3 edit, 항상 첫 번째, recommended) + fal 등록 모델 중 previzCapable 인 것.
-    각 행: id·label·recommended·previzCapable·refMode(elements/imageList)·usdPerSecond·priceKnown·available·reason.
+    각 행: id·label·recommended·previzCapable·refMode(elements/imageList)·usdPerSecond·priceKnown·available·reason
+    (+ 토큰 단가를 실제 전송 해상도로 계산한 행은 priceResolution).
+
+    fal Seedance 계열(073 R16.1-16.3, 설계자 2026-10-28 "신규화면도 개발에 적용해"): 얼굴(i2v)은 영상 입력을
+    받지 않아 늘 "프리비즈 미지원"이므로 숨기고, 짝(r2v) 한 줄을 vpoc ② 와 같은 이름(ark.label(<얼굴>),
+    "Seedance 2.5 (fal)")으로 보인다. 계열 밖 fal 모델은 지금 그대로 `fal · <label>`.
     """
     from ..vpoc import fal as vpoc_fal  # noqa: PLC0415
+    from ..vpoc import settings as vpoc_settings  # noqa: PLC0415
 
     default_id = default_previz_model()
     models: list[dict] = []
@@ -400,14 +458,24 @@ def previz_models() -> list[dict]:
         model_id = str(item.get("id") or "")
         if not model_id or model_id == default_id:
             continue
+        # 073 R16.2(D17): Seedance 계열 얼굴(i2v)은 숨긴다 — 짝(r2v) 한 줄로 보인다.
+        if vpoc_settings.fal_family_partner(model_id):
+            continue
         caps = item.get("caps") or {}
         capable = bool(caps.get("previzCapable"))
         reason = "프리비즈 미지원(영상 입력을 받지 않는 모델)"
         if capable:
             reason = vpoc_fal.unavailable_reason(model_id)
+        # 073 R16.1: 계열 짝은 vpoc 과 같은 이름 함수(ark.label(<얼굴>))로, 그 밖은 지금 그대로 `fal · <label>`.
+        face = _family_face_of(model_id)
+        label = (
+            vpoc_ark.label(face)
+            if face
+            else "fal · " + str(item.get("label") or item.get("endpointId") or model_id)
+        )
         row = {
             "id": model_id,
-            "label": "fal · " + str(item.get("label") or item.get("endpointId") or model_id),
+            "label": label,
             "recommended": False,
             "previzCapable": capable,
             "refMode": _ref_mode(caps),

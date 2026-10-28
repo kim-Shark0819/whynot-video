@@ -1,6 +1,6 @@
 # 운영 배포 계획: Seedance fal 경유 전환 (073 fal-seedance-parity 반영 main → 운영)
 
-> 상태: **계획 — 단계마다 설계자 승인 후 실행**. 이 문서는 계획이며, 승인 전에는 아무 단계도 실행하지 않는다(이번 주 원칙 7번).
+> 상태: **보류 — 설계자 지시(2026-10-27) "아직 운영배포는 하지 마라". 다시 지시가 있을 때까지 어떤 단계도 실행하지 않는다.** 이 문서는 계획이며, 승인 전에는 아무 단계도 실행하지 않는다(이번 주 원칙 7번).
 > 개정 2026-10-27: 072 리뷰(O-1·O-2·O-3·O-10)와 스펙 `.kiro/specs/fal-seedance-parity/` 구현(작업 1~6)에 맞춰 design.md §9의 두 단계 순서(안전 모드 배포 → 등록 → 전환)로 고쳤다.
 > 이전 판(main `0271fdb0` 기준 한 번에 배포·배포 후 등록)은 쓰지 않는다. 진행 중 BytePlus 회차 실패(O-1), 플래그 되돌리기 불가(O-3), 등록 공백 동안 Luma 대체(O-2) 때문이다.
 > 관련: WORKLOG 2026-10-26·2026-10-27, 리뷰 보고서 `docs/reviews/2026-10-26-prod-release-review.md`, design.md §8·§9, tasks.md "설계자 승인 후 유료 검증".
@@ -13,7 +13,7 @@
 ## 2. 무엇이 바뀌나
 | 구분 | 지금 운영(`prod-ae21dc13`, 2026-10-20) | 단계 1 뒤(안전 모드) | 단계 3 뒤(전환) |
 |---|---|---|---|
-| 이미지 | `ci-ae21dc13` | `ci-<073 main sha>` | 같음 |
+| 이미지 | `ci-ae21dc13` | `ci-41ab5f0e` | 같음 |
 | ② 모델 목록 | Luma + BytePlus Seedance 2.0/2.5 + 등록된 fal | 지금과 같다(`VPOC_ARK_SEEDANCE_ENABLED=true`) | Luma + 등록된 fal. "Seedance 2.5 (fal)" 하나(i2v·r2v 짝). BytePlus 없음 |
 | 옛 Seedance 저장 계획 | BytePlus로 생성 | BytePlus로 생성 | ②에서 "Seedance 2.5 (fal)"로 보이고 E6 안내. 로그 `vpoc.model.resolved reason=ark_disabled` |
 | 진행 중 BytePlus 회차 | — | BytePlus로 끝난다 | BytePlus로 끝난다(R1, 재생성 포함, 회차 금액 `regenUsd`) |
@@ -29,17 +29,26 @@
 - `vnew/*`: 운영 `VNEW_ENABLED=false`라 꺼진 상태 그대로다.
 
 ## 3. 사전 확인 (단계 1 전에 전부 충족)
-- [ ] 073 main(`<sha>`)에서 check_vpoc 전부 통과(CI `check:whynot` success, 로컬 `python -X utf8 tools/check_vpoc.py` 재실행 통과). 새 그룹 ip·rw·fr·du·rz·pm·ai·ad·ns·ml·vl·st·vm·pf 포함.
-- [ ] fal 거절 샷이 failed로 끝난다(R15, 작업 7). 그 커밋이 `<sha>`에 들어 있고 검사 pf-a~f가 통과한다. 개발계에서 거절된 샷(예: V-2)이 `submitted`에 남지 않고 ④에 한국어 거절 문구로 보인다(무료, 로그 `vpoc.fal.rejected`로 확인). 070 이전부터 운영의 모든 fal 모델에 있던 결함이라 단계 1 전에 필요하다.
+
+> 2026-10-27 Claude 확인:
+> - CI pipeline 115 `check:whynot` 성공. 로컬 check_vpoc 전부 통과.
+> - 073 바뀐 코드 커버리지 100%(289문 + 작업 7 57문).
+> - 개발 `ci-41ab5f0e`에서 실제 거절된 V-2 요청을 다시 조회하면 Failed와 한국어 문구가 나온다.
+> - ECR 운영 리포에 `ci-41ab5f0e`와 `prod-ae21dc13`이 있다.
+> - 개발 무료 확인을 통과했다.
+> - 유료 검증: V-3·V-6 성공. V-2는 fal 실존 인물 필터로 거절됐다(같은 이미지로 V-6은 통과). 지칭 인식은 V-6으로 확인돼 `TAG_STYLE` 변경은 필요 없다.
+> - 남은 확인: 렌더 값(단계 1 커밋 때), 실행 직전 30분 운영 작업 없음.
+- [x] 073 main(`41ab5f0e`)에서 check_vpoc 전부 통과(CI `check:whynot` success, 로컬 `python -X utf8 tools/check_vpoc.py` 재실행 통과). 새 그룹 ip·rw·fr·du·rz·pm·ai·ad·ns·ml·vl·st·vm·pf 포함.
+- [x] fal 거절 샷이 failed로 끝난다(R15, 작업 7). 그 커밋이 `41ab5f0e`에 들어 있고 검사 pf-a~f가 통과한다. 개발계에서 거절된 샷(예: V-2)이 `submitted`에 남지 않고 ④에 한국어 거절 문구로 보인다(무료, 로그 `vpoc.fal.rejected`로 확인). 070 이전부터 운영의 모든 fal 모델에 있던 결함이라 단계 1 전에 필요하다.
 - [ ] 렌더 값에 `VPOC_POLL_GIVEUP_S="1800"`이 있다(R15.8).
-- [ ] 바뀐 코드 커버리지 80% 이상(Claude `coverage run tools/check_vpoc.py`).
-- [ ] ECR `whynot-app`·`whynot-frontend`에 `ci-<sha>`가 있다. 롤백용 `prod-ae21dc13`도 있다.
+- [x] 바뀐 코드 커버리지 80% 이상(Claude `coverage run tools/check_vpoc.py`).
+- [x] ECR `whynot-app`·`whynot-frontend`에 `ci-41ab5f0e`가 있다. 롤백용 `prod-ae21dc13`도 있다.
 - [ ] 렌더 값(`config.env.example` + `config.prod.env`, 검사 rw-c와 같은 방식):
   - `VNEW_ENABLED=false`, `VPOC_MODEL_PICKER_ENABLED=true`, `VPOC_RAW_ERRORS=false`.
   - 단계 1 커밋에서 `VPOC_ARK_SEEDANCE_ENABLED="true"`.
   - 나머지 새 키는 base 값: `VPOC_FAL_SEEDANCE_FAMILY=bytedance/seedance-2.5/image-to-video=bytedance/seedance-2.5/reference-to-video`, `VPOC_FAL_SEEDANCE_MAX_S=15`, `VPOC_FAL_PROMPT_MAX_OVERRIDES=bytedance/seedance-2.5/*=4000`, `VPOC_FAL_SEEDANCE_TAG_STYLE=at`.
-- [ ] 개발(단계 0): 개발 레지스트리에 i2v·r2v 둘 다 있고, 무료 확인 목록(6절)을 통과했다.
-- [ ] 072 리뷰 "운영 배포 전 필수"가 0건이다: O-1(작업 1 `_submit_block_reason`), O-3(작업 1~4 템플릿·base 배선), O-2(이 계획의 두 단계 순서)로 해소했는지 확인한다.
+- [x] 개발(단계 0): 개발 레지스트리에 i2v·r2v 둘 다 있고, 무료 확인 목록(6절)을 통과했다.
+- [x] 072 리뷰 "운영 배포 전 필수"가 0건이다: O-1(작업 1 `_submit_block_reason`), O-3(작업 1~4 템플릿·base 배선), O-2(이 계획의 두 단계 순서)로 해소했는지 확인한다.
 - [ ] 실행 직전 30분 동안 운영 사용자 작업 요청이 없다(운영 로그의 POST·`/api/vpoc`).
 - 단계 3의 선행 조건은 따로 있다(4절 단계 3).
 
@@ -51,7 +60,7 @@
    - job이 이미지에 `prod-<sha>` 보호 태그를 달고 `awstech/ai-deploy` `whynot/prod/*`에 커밋한다.
 3. 클러스터 안 ArgoCD 앱 `whynot-prod`의 자동 동기화와 롤아웃 완료를 기다린다.
 4. 확인(읽기 전용, 유료 호출 없음):
-   - `https://whynot.meta-clouds.com/api/health`의 `build.imageTag`가 `ci-<sha>`다.
+   - `https://whynot.meta-clouds.com/api/health`의 `build.imageTag`가 `ci-41ab5f0e`다.
    - ② 목록이 지금 운영과 같다(BytePlus 2개 + 등록된 fal).
    - 진행 중 BytePlus 회차가 있으면 계속 제출·조회된다.
    - 프런트 첫 화면이 `vnew-previz.js`·`three.module.min.js`를 요청하지 않는다(브라우저 네트워크 탭).
