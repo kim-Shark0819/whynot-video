@@ -294,3 +294,44 @@
 - **남은 이슈**
   - 되돌리기 방향의 같은 문제: 보정 켬으로 다시 설계한 계획을 `VNEW_PREVIZ_COLLISION=false`로 보면 보기 사본이 `sit`을 빼 엉덩이 0.5로 그린다. 카메라는 hipY 기준이라 머리가 아래로 내려간다(로컬 측정 2인 컷 머리 y 0.72~1.03, 화면 아래 끝에 걸림). 되돌린 뒤에는 다시 설계해야 한다. cs-k 기대값(끔이면 `sit` 뺌)을 바꾸지 않으려고 이번에는 고치지 않았다. 고친다면 끔에서도 저장된 `sit`을 그대로 그리는 쪽이다.
   - 섞인 계획(다시 만들기에서 일부 장면만 다시 설계)은 설계된 장면만 사본 보정되고 옛 장면은 안내가 남는다.
+
+
+## 2026-10-29
+
+### previz-support-reasoning — 프리비즈 받침 판단: 무엇에·어떻게 앉았는지 그림에서 읽기 (Kiro, claude-opus-5.5)
+- **배경**: 설계자 요청 "캐릭터가 앉아 있다 → 어디에? 주차봉 → 주차봉은 무엇이고 어떻게 앉았나?(주차를 막는 기둥, 보통 무릎 위 높이. 그 위에 걸터앉아 있다)". 그림을 보는 유일한 단계(`previz_grammar.read_cut`)는 카메라 문법·동작만 읽고, 장면 설계(Astra → Fable)는 글만 받아 받침 종류·높이를 추측했다. 그래서 받침이 바뀌거나(낮은 기둥 → 1m 난간) 높이가 틀리면 084 보정이 맞아도 그림과 다른 프리비즈가 됐다.
+- **스펙**: `.kiro/specs/previz-support-reasoning/`(requirements 107줄·design 175줄·tasks 56줄). 084 작업 2~7은 하지 않았다.
+- **결정**
+  - D1 — 패널 읽기에 `supports[]`(인물마다 1개)를 더했다. 필드 순서가 생각 순서다: 자세 → 받침 물체(`supportEn`) → 정체·보통 크기(`supportWhatEn`) → 종류 → 서 있는 사람 몸 기준 윗면 높이(`heightCue`) → 추정 m → 앉는 방식(`contact`) → 발 → 근거. `required`는 늘리지 않았다(옛 출력과 같은 필수 키, 거절 위험 없음).
+    - 대안: 모델 m 숫자만 받기(기각 — 숫자는 서버가 정한다는 1-5 교훈. `supportHeightM`은 `heightCue`가 없을 때 대비책).
+  - D2 — 높이는 서버가 `heightCue` × 인물 키로 바꾼다. knee·waist·chest·shoulder 비율은 카메라 몸 모델(`previz_fit.BODY_FRACTION`)과 같고, above_knee 0.33(1.7m에서 0.56m)은 주차봉 0.5~0.6m에 맞췄다.
+  - D3 — 서버 받침 맞춤은 소품 높이만 바꾸고 모양은 바꾸지 않는다. 앉을 소품 후보는 084 `pick_seat` 등급 1과 같은 조건(윗면 0.25~1.30m, 발 → 바닥면 0.6m 이하)이다. 그 안에서 `sitOn` → 받침 낱말 라벨 → `sittable` → 가장 가까운 소품 순이고, 고른 소품을 `sitOn`으로 적어 보정이 같은 소품에 앉힌다.
+    - 이유: 지시서는 "`sitOn`이 있으면 그대로"였지만, 보정이 실제로 앉히지 않는 먼 `sitOn` 소품의 높이를 바꾸면 엉뚱한 소품만 줄어든다. 창이 없으면 3m 벽 같은 소품도 0.56m로 줄일 수 있었다(sr-f noProp 검사).
+    - 대안: 서버가 받침 소품을 새로 만들기(기각 — 범위를 넘고 장면 일관성이 깨진다).
+  - D4 — 목표 윗면 = 같은 소품에 앉은 읽기들의 중앙값(0.25~1.30으로 자름), 차이가 0.15m를 넘을 때만 바꾼다. 바닥 소품은 높이 = 목표, 떠 있는 소품(가로대)은 두께를 두고 위아래로만 옮긴다.
+  - D5 — 옛 캐시(`v` 없음)는 컷마다 한 번 다시 읽되 `supports`만 새 값으로 채운다. 카메라 문법은 옛 값이다(사용자가 확인한 카메라가 바뀌지 않게). 실패하면 `supports=[]`로 설계하고 캐시는 그대로 둔다(다음에 다시 시도).
+    - 대안: 새 읽기 전체 쓰기(기각 — test3 카메라가 바뀐다).
+  - D6 — 프롬프트 지시 단락은 받침 줄이 하나라도 있을 때 한 번만 넣는다(컷마다 되풀이하면 7컷에서 약 2KB가 더 는다). `_DESIGN_SYSTEM` 예 목록에 bollard·post를 더했다. 이 한 문장은 상수라 설정과 상관없이 바뀐다.
+  - D7 — `feet: dangling`이면 `solve_legs` 목표 각도를 0°(허벅지 수평)로 둔다. `support`가 없거나 floor·on_prop이면 지금 계산과 같다.
+- **test3 결과**(sr-h, 가짜 LLM): 그림 읽기 "parking bollard·above_knee·perch·발 바닥" + Astra 1m 가로대(윗면 1.0) → 가로대 윗면 0.561m(11개 읽기 중앙값), 두께 0.09 그대로, 하부 가로대 그대로. 11명 모두 hipY = 0.561, 관통 0, unresolved 0, 7컷 주인공 머리가 화면 안이다. 옛 캐시 7컷은 한 번씩 다시 읽었고 카메라 문법(vantage)은 옛 값이다.
+- **되돌리기**: `config.dev.env`에 `VNEW_PREVIZ_SUPPORT=false` → 개발 배포. 다음 설계부터 프롬프트 받침 줄·받침 맞춤·`fit.support`가 없다(지금 동작). 이미 저장된 장면의 소품 높이와 `fit.support` 화면 줄은 그대로다(다시 설계하면 사라진다). 패널 읽기의 `supports`는 끈 상태에서도 읽어 캐시에 둔다(sr-j).
+- **확인**
+  - `python -X utf8 tools/check_vpoc.py` 전부 통과(52개 ok 줄, FAIL·WARN 0). 새 그룹 `check_previz_support` sr-a~l. rw-a는 템플릿 env 12개다. 기존 그룹 기대값은 바꾸지 않았다(emit_shot 스키마·SYSTEM 문자열을 그대로 비교하는 기존 검사는 없었다).
+  - 설정 끔 프롬프트는 변경 전 sha256과 같다(sr-e, 첫 설계·다시 만들기 두 입력).
+  - 변형 검사(메모리에서만): feet 무시 → sr-g, 정규화가 support를 버림 → sr-i, 허용오차 10m → sr-f·sr-h, 소품 순서 무시 → sr-f, 지시 단락 바꿈 → sr-e·sr-h·sr-j가 실패한다.
+  - 검사가 찾은 결함 1건: 문자열을 자른 뒤 끝 공백이 남아 정리가 멱등이 아니었다(sr-a). `_text`가 자른 뒤 `rstrip` 하도록 고쳤다.
+  - 커버리지(`coverage run --source=app\src\vnew tools/check_vpoc.py`, coverage 7.17, 원본 사본과 difflib으로 바뀐 줄): 실행 대상 330줄 전부 실행, 100%. 처음 측정은 326/330(98.8%)이었다. 안 탄 4줄(`previz_support` 한국어 라벨 낱말·원소가 모자란 소품·dict가 아닌 장면 인물)에 sr-f 사례를 더하고 다시 쟀다. `previz_support.py` 파일 전체도 100%다.
+  - 유료 호출 0회(`_guard_real_llm`).
+- **3단계 리뷰**
+  - 보안: 모델이 쓴 받침 문자열은 제어 문자·줄바꿈을 한 칸으로 바꾸고 `supportEn` 80자·`supportWhatEn`·`reasonEn` 200자·이름 40자로 자른 뒤에만 프롬프트에 넣는다. 받침 이름에 줄바꿈으로 "[사용자 배치 지시]" 같은 가짜 줄을 넣어도 새 줄이 생기지 않는다(sr-e). 열거값은 정해진 값만 받는다.
+  - 보안(이어서): 화면은 `el()`(textContent)과 `title` 속성만 쓴다(sr-k가 node로 `<b>`가 글자 그대로인지 확인). 로그에는 id·숫자만 넣고 id는 `_log_id`로 거른다. 새 API·외부 전송·비밀값은 없다.
+  - 성능: 읽기 출력은 받침 항목당 보통 약 110·상한 약 230토큰 는다(sr-b 추정: 2인 보통 컷 전체 501, 4인·모든 문자열 상한 1,609 — `max_tokens` 2000 안). 넘치면 llm-top-model-first 잘림 재시도가 같은 모델로 4,096에 한 번 더 부른다. 그래서 2000을 유지했다(lt-g 기대값 그대로).
+  - 성능(이어서): `apply_supports`는 test3 0.44ms, 30컷·6명·소품 40개 8.5ms(로컬, 최솟값)다. 메모리는 장면 사본 1개다. test3 설계 프롬프트는 4,606 → 7,821바이트(+3.2KB)다.
+  - 운영: 끄기는 `VNEW_PREVIZ_SUPPORT=false` 한 줄이다. 설정은 `run_design` 시작 때 한 번 읽는다. 받침 맞춤이 예외를 내면 사본을 버리고 warning `vnew.previz.support.failed pid= err=`만 남긴 채 설계를 끝낸다(sr-h). 로그는 `vnew.previz.stage step=support ms= entries= heightFixes= noProp=`, `vnew.previz.support.height loc= prop= from= to= n=`, `vnew.previz.grammar.upgrade cut= ok=`다.
+  - 운영(이어서): 옛 캐시는 다음 설계에서 컷마다 연출 문법 읽기 1회(Fable 5.1, 이미지 1장 + 출력 ≈ 0.6~1K토큰)가 더 든다. test3는 7회다. 그다음 설계부터는 0회다(V-2에서 upgrade 로그 0줄로 확인). 다시 읽기가 실패한 컷은 다음 설계에서 다시 시도한다.
+- **미확인·남은 이슈**
+  - 실제 모델(Fable 5.1)이 `supports`를 지시대로 쓰는지, 특히 앉은 인물의 `heightCue`를 "서 있는 사람 기준"으로 답하는지는 개발계에서 본다(V-1). 토큰 수는 추정이다.
+  - 지시서와 다른 점: `sitOn`은 보정이 앉히는 창(0.6m·윗면 0.25~1.30m) 안일 때만 그대로 쓴다(D3). 화면 예문 "발 바닥"은 라벨 표 "바닥에 닿음"을 써서 "발 바닥에 닿음"이다. `step=support` 로그는 받침 항목이 1개 이상일 때만 남긴다(빈 줄을 남기지 않고, 084 cs-i의 stage 줄 수 기대값을 지키려고).
+  - 받침 맞춤 뒤 설정을 끄고 보면, 저장된 소품 높이는 그대로이고 `fit.support` 줄도 보인다. 되돌린 결과는 다시 설계해야 보인다.
+  - 1인 컷의 가짜 상대 카메라 문제(084 남은 이슈)는 그대로다.
+- **관련 파일**: `app/src/vnew/{previz_support(신규),previz_grammar,previz,previz_schema,previz_collision,settings}.py`, `frontend/public/{vnew.js,vnew.css}`, `k8s/workloads.yaml.tmpl`, `deploy/config.env.example`, `tools/check_vpoc.py`, `docs/ANALYSIS.md` §3.6·§7.1·§10.1, 스펙 `.kiro/specs/previz-support-reasoning/`.

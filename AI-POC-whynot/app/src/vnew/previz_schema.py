@@ -436,8 +436,19 @@ def _normalize_cut_actors(raw_actors, actor_ids: list[str], room: dict, prop_ids
             sit = _normalize_sit(item.get("sit"), cut_actor["facingDeg"], prop_ids)
             if sit is not None:
                 cut_actor["sit"] = sit
+        # 받침 판단(previz-support-reasoning R5.7): 자세·소품과 상관없이 정리해 보존한다(없으면 키 없음 — 옛 출력과 같다).
+        support = _normalize_support(item.get("support"))
+        if support is not None:
+            cut_actor["support"] = support
         out.append(cut_actor)
     return out
+
+
+def _normalize_support(raw) -> dict | None:
+    """컷 인물 support(previz_support.apply_supports 가 붙인 값). 열거값 검사·heightM 숫자. dict 가 아니면 None."""
+    from . import previz_support  # noqa: PLC0415 — previz_support → previz_collision 이 이 모듈을 import 한다(순환 피함)
+
+    return previz_support.normalize_actor_support(raw)
 
 
 def _normalize_timeline(raw_timeline, room: dict, actor_ids: list[str], cut_specs: list[dict], start_clock: float = 0.0, prop_ids: list[str] | None = None) -> tuple[list[dict], float]:
