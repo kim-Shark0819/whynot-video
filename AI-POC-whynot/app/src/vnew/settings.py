@@ -153,6 +153,11 @@ VNEW_PREVIZ_APPROVE_MIN = _float("VNEW_PREVIZ_APPROVE_MIN", 0.7)
 # 엉덩이 0.5). 템플릿·base 에 배선해 config.<target>.env 한 줄로 되돌린다.
 VNEW_PREVIZ_COLLISION = _bool("VNEW_PREVIZ_COLLISION", True)
 
+# 프리비즈 받침 판단 반영(previz-support-reasoning, 2026-10-29). 켜면 패널에서 읽은 받침 판단(자세 → 받침 → 높이 →
+# 앉는 방식 → 발)을 장면 설계 프롬프트에 넣고, 서버가 컷 인물 자세·앉을 소품·소품 윗면 높이를 맞춰 fit[cut].support 에
+# 남긴다. false 면 프롬프트·맞춤·fit.support 없음(지금 동작). 패널 읽기의 supports 는 설정과 상관없이 읽어 캐시에 둔다.
+VNEW_PREVIZ_SUPPORT = _bool("VNEW_PREVIZ_SUPPORT", True)
+
 # --- ⑤ 촬영 지시서(shot brief) (설계자 2026-10-22) ---
 # 프리비즈 승인 직후, 장소마다 1회 호출해 그 장소 컷들의 "촬영 전문 언어" 지시서를 쓴다. 작성 모델은
 # 설계와 같은 체인(Astra 먼저, 실패 시 Claude 분석 체인). 장면·배경·연기·대사 연기를 영어로 섬세히.

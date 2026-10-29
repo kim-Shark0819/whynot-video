@@ -454,9 +454,16 @@ def _legs_hit(x, z, hip_y, s, pitch, yaw, seat: dict, vols: list[dict]) -> str:
     return ""
 
 
-def solve_legs(x: float, z: float, hip_y: float, s: float, yaw_deg: float, seat: dict, vols: list[dict]) -> tuple[int, bool, str]:
-    """다리 방향 하나에 대한 각도. (각도, 풀림 여부, 처음 겹친 소품 id)."""
-    theta_star = math.degrees(math.asin(_clamp((hip_y - SHIN_L * s) / (THIGH_L * s), 0.0, 1.0)))
+def solve_legs(x: float, z: float, hip_y: float, s: float, yaw_deg: float, seat: dict, vols: list[dict], *, feet: str = "") -> tuple[int, bool, str]:
+    """다리 방향 하나에 대한 각도. (각도, 풀림 여부, 처음 겹친 소품 id).
+
+    feet(previz-support-reasoning R6): 패널에서 읽은 발 위치. "dangling"(발을 띄움)이면 목표 각도를 0°(허벅지 수평,
+    정강이 늘어뜨림)로 둔다. 그 밖(floor·on_prop·빈 값)은 발이 바닥에 닿는 각도 θ* 다(지금 동작).
+    """
+    if feet == "dangling":
+        theta_star = 0.0
+    else:
+        theta_star = math.degrees(math.asin(_clamp((hip_y - SHIN_L * s) / (THIGH_L * s), 0.0, 1.0)))
     order = sorted(LEG_PITCHES, key=lambda p: (abs(p - theta_star), p))
     first_hit = ""
     for pitch in order:
@@ -481,8 +488,8 @@ def _room_side(vol: dict, yaw_deg: float) -> bool:
     return (nx * -vol["cx"] + nz * -vol["cz"]) > 1e-9
 
 
-def choose_leg_yaw(x: float, z: float, hip_y: float, s: float, facing_deg: float, seat: dict, vols: list[dict]) -> tuple[float, int, bool, str]:
-    """다리 방향(도)·각도. (legYawDeg (−180,180], legPitchDeg, 풀림 여부, 처음 겹친 소품 id)."""
+def choose_leg_yaw(x: float, z: float, hip_y: float, s: float, facing_deg: float, seat: dict, vols: list[dict], *, feet: str = "") -> tuple[float, int, bool, str]:
+    """다리 방향(도)·각도. (legYawDeg (−180,180], legPitchDeg, 풀림 여부, 처음 겹친 소품 id). feet 는 solve_legs 에 넘긴다."""
     facing = wrap_deg(facing_deg)
     r = math.degrees(seat["rot"])
     if is_elongated(seat):
@@ -491,20 +498,20 @@ def choose_leg_yaw(x: float, z: float, hip_y: float, s: float, facing_deg: float
         else:
             cands = [(r + 90.0, True), (r + 270.0, False)]  # 짧은 축 = 로컬 x
         cands.sort(key=lambda c: (round(_angle_diff(facing, c[0]), 3), 0 if _room_side(seat, c[0]) else 1, 0 if c[1] else 1))
-        results = [(yaw, solve_legs(x, z, hip_y, s, yaw, seat, vols)) for yaw, _plus in cands]
+        results = [(yaw, solve_legs(x, z, hip_y, s, yaw, seat, vols, feet=feet)) for yaw, _plus in cands]
         for yaw, (pitch, ok, _hit) in results:
             if ok:
                 return wrap_deg(yaw), pitch, True, ""
         yaw, (pitch, _ok, hit) = results[0]
         return wrap_deg(yaw), pitch, False, hit
-    pitch, ok, hit = solve_legs(x, z, hip_y, s, facing, seat, vols)
+    pitch, ok, hit = solve_legs(x, z, hip_y, s, facing, seat, vols, feet=feet)
     if ok:
         return facing, pitch, True, ""
     axes = [(r + 90.0 * i, i) for i in range(4)]  # +z, +x, −z, −x
     axes = [a for a in axes if _angle_diff(facing, a[0]) > 1e-6]
     axes.sort(key=lambda a: (round(_angle_diff(facing, a[0]), 3), 0 if _room_side(seat, a[0]) else 1, a[1]))
     for yaw, _i in axes:
-        pitch2, ok2, _hit2 = solve_legs(x, z, hip_y, s, yaw, seat, vols)
+        pitch2, ok2, _hit2 = solve_legs(x, z, hip_y, s, yaw, seat, vols, feet=feet)
         if ok2:
             return wrap_deg(yaw), pitch2, True, ""
     return facing, pitch, False, hit
@@ -642,7 +649,10 @@ def resolve_cut(scene: dict, cut: dict, *, log_fixes: bool = True, pass_name: st
         s = _scale(heights.get(actor_id, BASE_HEIGHT_M))
         hip = round(seat["cy"] + seat["hy"], 4)
         near = _near_vols(vols, x, z)
-        yaw, pitch, ok, hit = choose_leg_yaw(x, z, hip, s, _num(ca.get("facingDeg"), 0.0), seat, near)
+        # 패널에서 읽은 발 위치(previz-support-reasoning R6). support 가 없으면 "" — 지금 결과와 같다.
+        support = ca.get("support") if isinstance(ca.get("support"), dict) else {}
+        feet = str(support.get("feet") or "")
+        yaw, pitch, ok, hit = choose_leg_yaw(x, z, hip, s, _num(ca.get("facingDeg"), 0.0), seat, near, feet=feet)
         ca["sit"] = {"propId": seat["id"], "hipY": hip, "legPitchDeg": int(pitch), "legYawDeg": round(yaw, 2)}
         if not ok:
             _add_unresolved(actor_id, hit)

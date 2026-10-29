@@ -16,10 +16,15 @@ import hashlib
 import json
 
 from ..vpoc import llm as vpoc_llm
+from . import previz_support
 from . import settings as vnew_settings
 
 # 패널 분석과 같은 모델(Claude 분석 체인). previz.PANEL_ANALYZE_MODEL 과 같은 값.
 GRAMMAR_MODEL = vnew_settings.ANALYZE_FALLBACK_MODEL
+
+# 읽기 결과 판(previz.panelGrammar[cutId].v). 2 = 받침 판단(supports) 포함(previz-support-reasoning R2, 2026-10-29).
+# 같은 패널 해시라도 v 가 이보다 작은 옛 캐시는 한 번 다시 읽어 supports 만 채운다(previz._read_grammars).
+GRAMMAR_VERSION = 2
 
 # ================================================================ 시스템·도구(read_test.py 원본)
 
@@ -41,6 +46,26 @@ SYSTEM = (
     "- eyelines: for every visible person, state where their pupils point: target is one of "
     "'person:<name>' (looking at that person's face) | 'camera' | 'down' | 'up' | 'offscreen_left' | "
     "'offscreen_right' | 'closed' (eyes shut). One entry per visible person.\n"
+    "- supports: for every visible person, one entry on WHAT carries their weight and HOW. Decide in this order, which is "
+    "also the field order: first the posture, then the supporting object, then what that object is and its usual real "
+    "size, then its height compared with a person standing next to it, then how they sit on it, then the feet. "
+    "(1) posture: stand | sit | kneel | lie | crouch | lean | walk. "
+    "(2) supportEn: the object that carries their weight, in a few English words (e.g. 'parking bollard', 'metal railing "
+    "top bar', 'plastic chair'); 'ground' if they stand or sit directly on the ground or floor. "
+    "(3) supportWhatEn: one sentence on what that object is and its usual real size (e.g. 'a short post that stops cars "
+    "from parking; usually just above knee height'). "
+    "(4) supportKind: floor | chair | sofa | bench | stool | step | stairs | rail | bollard | ledge | box | table | "
+    "counter | vehicle | bed | wall | pole | other | none. "
+    "(5) heightCue: the height of the object's top compared with the body of a person STANDING next to it: floor | "
+    "ankle | shin | knee | above_knee | mid_thigh | hip | waist | chest | shoulder. Answer this even when the drawn "
+    "person is sitting: where would that top reach on the same person if they stood beside it? "
+    "(6) supportHeightM: your estimate of that top height in metres (one number). "
+    "(7) contact: perch (only the buttocks rest on the top edge) | seat (the thighs rest on the top, like a chair) | "
+    "straddle | lean (standing, hips or back against it) | kneel_on | lie_on | stand_on | floor (no object: standing "
+    "or sitting on the floor) | none. "
+    "(8) feet: floor | dangling | on_prop (feet on a lower bar or step) | tucked | none. "
+    "(9) reasonEn: one sentence on how you reasoned through these steps. "
+    "Write only what is drawn. If the body is hidden so you cannot judge, use supportKind:none and contact:none.\n"
     "Identify people by name using the cut description given. Ignore speech bubbles and sound effects. Be precise; do not guess beyond what is drawn."
 )
 
@@ -93,6 +118,26 @@ TOOL = {
                         "properties": {
                             "name": {"type": "string"},
                             "target": {"type": "string"},
+                        },
+                    },
+                },
+                # 받침 판단(previz-support-reasoning R1.1). 필드 순서 = 생각 순서(자세 → 받침 → 정체·크기 → 높이 →
+                # 앉는 방식 → 발 → 근거). required 는 늘리지 않는다(옛 출력과 같은 필수 키).
+                "supports": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "name": {"type": "string"},
+                            "posture": {"type": "string"},
+                            "supportEn": {"type": "string"},
+                            "supportWhatEn": {"type": "string"},
+                            "supportKind": {"type": "string"},
+                            "heightCue": {"type": "string"},
+                            "supportHeightM": {"type": "number"},
+                            "contact": {"type": "string"},
+                            "feet": {"type": "string"},
+                            "reasonEn": {"type": "string"},
                         },
                     },
                 },
@@ -224,8 +269,9 @@ def normalize_grammar(payload: dict) -> dict:
       frameBottomCut 에서 도출; frameBottomCut 이 없거나 모르면 모델 shotSize, 그래도 없으면 MCU).
     - headTopY -0.8~0.9, subjectX 0~1 로 clamp.
     - others 는 name·how·side·screenX 만 남긴다.
+    - supports(받침 판단)는 previz_support.normalize_supports 로 정리한다. 늘 리스트(없으면 []).
     반환 키: mainSubject, frameBottomCut, shotSize, shotType, vantage, faceTurn, cameraHeight,
-    headTopY, subjectX, others[], offscreenPartnerSide, reasonKo.
+    headTopY, subjectX, others[], offscreenPartnerSide, actions[], expressionEn, eyelines[], supports[], reasonKo.
     """
     payload = payload if isinstance(payload, dict) else {}
 
@@ -290,6 +336,8 @@ def normalize_grammar(payload: dict) -> dict:
         "actions": actions,
         "expressionEn": str(payload.get("expressionEn") or "").strip(),
         "eyelines": eyelines,
+        # 받침 판단(previz-support-reasoning R1.3): 모르는 열거값 기본값·높이 clamp·길이 자름·이름 중복 제거.
+        "supports": previz_support.normalize_supports(payload.get("supports")),
         "reasonKo": str(payload.get("reasonKo") or "").strip(),
     }
 
@@ -304,6 +352,8 @@ def _read(blocks: list[dict], *, model: str) -> tuple[dict, dict]:
         blocks=blocks,
         tool=TOOL,
         # 900 은 5.x 모델 출력이 잘렸다(llm-top-model-first R3, 2026-10-28). 출력 토큰은 쓴 만큼만 과금된다.
+        # 받침 판단(supports)은 인물당 보통 ≈110·상한 ≈175 토큰이 는다(2인 컷 합계 ≈650~1,050). 2000 을 유지한다 —
+        # 넘치면 잘림 재시도가 같은 모델로 min(2000×4, 4096) 에 한 번 더 부른다(previz-support-reasoning design §5).
         max_tokens=2000,
         where="vnew.previz.grammar",
         model=model,

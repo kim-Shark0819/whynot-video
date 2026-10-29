@@ -239,6 +239,9 @@ spec:
             # 프리비즈 소품 관통 보정(084 R1). 기본 true. false 면 보정·앉을 자리 없음(엉덩이 0.5, 지금 동작).
             - name: VNEW_PREVIZ_COLLISION
               value: "${VNEW_PREVIZ_COLLISION}"
+            # 프리비즈 받침 판단 반영(previz-support-reasoning). 기본 true. false 면 프롬프트 받침 줄·받침 맞춤·fit.support 없음.
+            - name: VNEW_PREVIZ_SUPPORT
+              value: "${VNEW_PREVIZ_SUPPORT}"
             # --- vpoc1 영상 기능 (PRD 6.8) ---
             # VIDEO_GEN_ENABLED 가 꺼진 배포에서는 이 값과 무관하게 라우트가 없다.
             - name: VPOC_ENABLED

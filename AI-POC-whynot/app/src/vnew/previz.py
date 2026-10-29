@@ -46,6 +46,7 @@ from . import previz_collision
 from . import previz_fit
 from . import previz_grammar
 from . import previz_schema
+from . import previz_support
 from . import settings as vnew_settings
 
 log = logging.getLogger("vpoc")
@@ -704,7 +705,7 @@ _DESIGN_SYSTEM = (
     "doors, railings and whether there is a ceiling. Avoid meaningless camera shake or excessive "
     "rotation; keep each cut's camera steady as the previz cut. "
     "Write Korean for notesKo. Do not add text outside the tool. "
-    "Mark every prop a person can sit on (chair, bench, step, rail, ledge, box) with sittable:true, and when "
+    "Mark every prop a person can sit on (chair, bench, step, rail, ledge, box, bollard, post) with sittable:true, and when "
     "an actor's pose is 'sit' set sitOn to that prop id. rotY is in radians. Never place a person inside a "
     "prop: standing people stand beside props and seated people sit on the prop's top; the server computes "
     "the exact height and fixes overlaps."
@@ -960,11 +961,14 @@ def run_design(owner: str, pid: str, task_id: str) -> None:
     """프리비즈 설계(백그라운드). 흐름(설계자 2026-10-21, 지시서 049·④):
 
     1) panels: 컷마다 previz_grammar.read_cut 로 웹툰 패널의 '연출 문법'(샷 크기·종류·정면성·시선·
-       상대 쪽·높이)을 읽는다. tiles_hash 로 캐시(previz["panelGrammar"][cutId]={hash,grammar}) —
-       같은 패널이면 Claude 를 다시 부르지 않는다(다시 만들기 때 재호출 없음). 진행 total=컷 수.
+       상대 쪽·높이·받침 판단)을 읽는다. tiles_hash 로 캐시(previz["panelGrammar"][cutId]={hash,grammar,v}) —
+       같은 패널이면 Claude 를 다시 부르지 않는다(다시 만들기 때 재호출 없음). 받침 판단 이전 캐시(v<2)는 한 번
+       다시 읽어 supports 만 채운다. 진행 total=컷 수.
     2) design: Astra 가 장면(방·소품·인물 자리·자세·facingDeg)을 쓴다. 카메라는 서버가 계산하므로
        Astra 카메라는 대충 둬도 된다(프롬프트에 그렇게 지시). 컷마다 패널 연출 문법 요약을 함께 준다.
-       방 높이는 닫힌 방 2.4~3.5m / 열린 공간 3.0m 로 clamp.
+       VNEW_PREVIZ_SUPPORT 면 [받침 판단] 줄도 준다. 방 높이는 닫힌 방 2.4~3.5m / 열린 공간 3.0m 로 clamp.
+    2.6) support: VNEW_PREVIZ_SUPPORT 면 previz_support.apply_supports 로 자세·앉을 소품·소품 윗면 높이를
+       받침 판단에 맞춘다(보정 1차 전). 결과는 카메라 계산 뒤 fit[cut].support.
     3) camera: 장소(scene)마다 핵심 두 인물로 previz_camera.scene_line → 기본 쪽·crossed. 컷마다
        place_cut(grammar, actors_in_cut, room, side) 로 카메라·actors(hide·move·facingDeg 반영)를
        바꾸고 fit 에 {match, method:"grammar", lens, distanceM, vantageDeg, side, crossed, cheats,
@@ -980,6 +984,8 @@ def run_design(owner: str, pid: str, task_id: str) -> None:
 
     # 소품 관통 보정(084 R1)은 시작 때 한 번 읽은 값으로 끝까지 간다(도중에 설정이 바뀌어도 섞지 않는다).
     collision_on = bool(vnew_settings.VNEW_PREVIZ_COLLISION)
+    # 받침 판단 반영(previz-support-reasoning R4·R5)도 같은 방식으로 한 번 읽는다.
+    support_on = bool(vnew_settings.VNEW_PREVIZ_SUPPORT)
     try:
         plan, _ = plan_mod.load_plan(owner, pid)
         conti = plan.get("conti") or {}
@@ -1052,7 +1058,7 @@ def run_design(owner: str, pid: str, task_id: str) -> None:
             blocks = [{"text": _design_prompt(
                 name_en, loc, group["cuts"], script, chars, grammar_by_cut,
                 previous_scene=prev_summary, is_rebuild=is_rebuild, blocking=group_blocking,
-                room_height=room_h_clamp,
+                room_height=room_h_clamp, supports=support_on,
             )}]
             payload, model = _design_scene(owner, pid, plan_id, blocks)
             used_model = model or used_model
@@ -1079,6 +1085,27 @@ def run_design(owner: str, pid: str, task_id: str) -> None:
         # 2.5) 외형(머리카락 색)·연기(gesture·gestureTarget)를 장면 인물·timeline 에 채운다.
         _apply_appearance(owner, scenes, chars)
         _apply_gestures(scenes, groups, grammar_by_cut, plan)
+
+        # 2.6) 받침 맞춤(previz-support-reasoning R5): 패널에서 읽은 받침 판단으로 컷 인물 자세·앉을 소품·소품 윗면
+        # 높이를 맞춘다(보정 1차 전 — 1차가 이 sitOn·높이로 앉힌다). 사본에 적용하고 성공하면 바꾼다(실패하면 그대로).
+        support_by_cut: dict = {}
+        if support_on:
+            started = time.monotonic()
+            try:
+                trial = copy.deepcopy(scenes)
+                support_by_cut = previz_support.apply_supports(trial, grammar_by_cut)
+                scenes[:] = trial
+            except Exception as exc:  # noqa: BLE001 — 받침 맞춤 실패가 설계를 막지 않는다(맞춤 없이 계속).
+                log.warning("vnew.previz.support.failed pid=%s err=%s", pid, str(exc)[:200])
+                support_by_cut = {}
+            if support_by_cut:
+                entries = [e for items in support_by_cut.values() for e in items]
+                log.info(
+                    "vnew.previz.stage pid=%s step=support ms=%d entries=%d heightFixes=%d noProp=%d",
+                    pid, int(round((time.monotonic() - started) * 1000.0)), len(entries),
+                    len({(e.get("heightFix") or {}).get("propId") for e in entries if e.get("heightFix")}),
+                    sum(1 for e in entries if e.get("status") == "noProp"),
+                )
 
         # 2.7) 소품 관통 보정 1차(084 R1.7): 설계 배치에서 앉을 자리(sit)를 채우고 겹친 인물을 밀어낸다.
         collision_a: dict = {}
@@ -1125,6 +1152,11 @@ def run_design(owner: str, pid: str, task_id: str) -> None:
                 "vnew.previz.stage pid=%s step=collision ms=%d fixes=%d unresolved=%d",
                 pid, int(round(collision_ms)), n_fixes, n_unresolved,
             )
+
+        # 3.6) 받침 맞춤 결과(R5.6): 카메라 계산 뒤 fit[cut].support 에 둔다(084 fit[cut].collision 과 같은 방식).
+        # 받침 판단이 짝지어진 컷만. 끈 상태면 support_by_cut 이 비어 키가 없다.
+        for cut_id, entries in support_by_cut.items():
+            fit.setdefault(cut_id, {"match": None, "method": "astra"})["support"] = entries
 
         # 4) 저장(done). lastRebuild 요약을 남긴다(다시 만들기였으면).
         _set_step(owner, pid, task_id, step="done")
@@ -1199,14 +1231,19 @@ def _grammar_charge(owner: str, pid: str, plan_id: str):
 def _read_grammars(owner, pid, plan_id, groups, chars, grammar_cache, reread_cuts, *, task_id=""):
     """컷마다 연출 문법을 읽는다(캐시). 반환 (grammar_by_cut, 갱신된 grammar_cache).
 
-    - 캐시 previz["panelGrammar"][cutId] = {hash, grammar}. 그 컷 조각 tiles_hash 가 같고 reread 대상이
-      아니면 read_cut 을 부르지 않는다(다시 만들기 때 Claude 재호출 없음).
+    - 캐시 previz["panelGrammar"][cutId] = {hash, grammar, v}. 그 컷 조각 tiles_hash 가 같고 reread 대상이
+      아니고 v ≥ previz_grammar.GRAMMAR_VERSION 이면 read_cut 을 부르지 않는다(다시 만들기 때 Claude 재호출 없음).
+    - 같은 해시의 옛 캐시(v 없음·작음, 받침 판단 이전)는 한 번 다시 읽되, 옛 grammar 의 다른 필드는 그대로 두고
+      supports 만 새 값으로 채워 v 를 올린다(사용자가 본 카메라가 바뀌지 않게, previz-support-reasoning R2.3).
+      다시 읽기가 실패하면 옛 grammar + supports [] 로 이번 설계를 하고 캐시는 그대로 둔다(다음 설계에서 다시 시도).
+    - reread 대상·해시가 바뀐 컷은 새 읽기 전체를 쓴다.
     - 읽기 실패(이미지 없음·None)면 grammar_by_cut 에 넣지 않는다(camera 가 Astra 카메라를 둔다).
     - charge 는 _grammar_charge 콜백으로 원장에.
     """
     all_tiles = _all_tiles(owner, pid)
     role_names = _role_names(chars)
     charge = _grammar_charge(owner, pid, plan_id)
+    version = int(previz_grammar.GRAMMAR_VERSION)
     grammar_by_cut: dict[str, dict] = {}
     cache: dict[str, dict] = dict(grammar_cache or {})
     for group in groups:
@@ -1215,12 +1252,14 @@ def _read_grammars(owner, pid, plan_id, groups, chars, grammar_cache, reread_cut
             tiles = _cut_tiles(cut.get("panels") or [], all_tiles)
             hashed = previz_grammar.tiles_hash(tiles)
             cached = cache.get(cut_id)
-            if (
+            same = (
                 cut_id not in reread_cuts
                 and isinstance(cached, dict)
                 and cached.get("hash") == hashed
                 and isinstance(cached.get("grammar"), dict)
-            ):
+            )
+            cached_v = cached.get("v") if same else None
+            if same and isinstance(cached_v, int) and not isinstance(cached_v, bool) and cached_v >= version:
                 grammar_by_cut[cut_id] = cached["grammar"]
                 if task_id:
                     _bump_progress(owner, pid, task_id, step="panels")
@@ -1232,9 +1271,18 @@ def _read_grammars(owner, pid, plan_id, groups, chars, grammar_cache, reread_cut
             except Exception as exc:  # noqa: BLE001
                 log.warning("vnew.previz.grammar.failed cut=%s err=%s", cut_id, str(exc)[:200])
                 grammar = None
-            if isinstance(grammar, dict):
+            if same:
+                # 옛 캐시 판 올림: 카메라 문법은 옛 값, supports 만 새 읽기 값.
+                upgraded = copy.deepcopy(cached["grammar"])
+                ok = isinstance(grammar, dict)
+                upgraded["supports"] = list(grammar.get("supports") or []) if ok else []
+                grammar_by_cut[cut_id] = upgraded
+                if ok:
+                    cache[cut_id] = {"hash": hashed, "grammar": upgraded, "v": version}
+                log.info("vnew.previz.grammar.upgrade cut=%s ok=%d", previz_collision._log_id(cut_id), int(ok))  # noqa: SLF001
+            elif isinstance(grammar, dict):
                 grammar_by_cut[cut_id] = grammar
-                cache[cut_id] = {"hash": hashed, "grammar": grammar}
+                cache[cut_id] = {"hash": hashed, "grammar": grammar, "v": version}
             if task_id:
                 _bump_progress(owner, pid, task_id, step="panels")
     return grammar_by_cut, cache
@@ -2029,6 +2077,7 @@ def _design_prompt(
     is_rebuild: bool = False,
     blocking: list[str] | None = None,
     room_height: tuple[float, float] | None = None,
+    supports: bool = False,
 ) -> str:
     """한 장소(연속 컷)의 설계 요청 문단(049). 카메라는 서버가 계산하므로 Astra 는 인물 자리·자세·
     서로 보는 방향·소품만 정확히 쓴다. 컷마다 패널 연출 문법 요약(주인공·샷 종류·상대 쪽)을 함께 준다.
@@ -2038,6 +2087,8 @@ def _design_prompt(
     is_rebuild = 다시 만들기이면 '이전과 다른 대안' 요구 문장을 넣는다.
     blocking = [영어 문장] — 사용자 지시의 인물 자리(배치) 문장(Astra 배치 프롬프트에 넣는다).
     room_height = (low, high) — 방 높이 clamp 범위(프롬프트에 알려 둔다).
+    supports = True 면 컷마다 grammar.supports 의 [받침 판단] 줄과 지시 단락 1개를 넣는다(VNEW_PREVIZ_SUPPORT,
+    previz-support-reasoning R4). False(기본)면 결과가 지금과 바이트 단위로 같다.
     """
     grammar_by_cut = grammar_by_cut or {}
     setting = script.get("setting") or {}
@@ -2095,6 +2146,7 @@ def _design_prompt(
     else:
         lines.append("(연결된 캐릭터 없음 — 대본 화자 이름을 쓰세요)")
     lines += ["", "[콘티 컷(순서대로 — 각 컷을 timeline 한 항목으로)]"]
+    support_lines = 0
     for index, cut in enumerate(cuts, start=1):
         char_pos = _entry_positions(cut.get("panels") or [], entries)
         lines.append(
@@ -2118,6 +2170,15 @@ def _design_prompt(
                 "   위 문법은 '이 컷에서 누가 주인공이고 누구를 보는지'의 근거입니다. 그 주인공과 상대가"
                 " 서로 옆/맞은편에 오도록 인물 자리·facingDeg 를 두세요(카메라는 서버가 계산합니다)."
             )
+            if supports:
+                # 받침 판단(그림에서 읽은 자세 → 받침 → 정체·크기 → 높이 → 앉는 방식, 발). 판단 불가 항목은 뺀다.
+                for item in grammar.get("supports") or []:
+                    line = previz_support.prompt_line(item)
+                    if line:
+                        lines.append(line)
+                        support_lines += 1
+    if support_lines:
+        lines += ["", previz_support.PROMPT_GUIDE_KO]
     lines += [
         "",
         "인물은 고유의 밝은 색(서로 확실히 다르게)으로, 배경은 하나의 덩어리(회색조), 빛은 어디서 오는지"

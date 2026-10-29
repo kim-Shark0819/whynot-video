@@ -4271,7 +4271,71 @@
     }
     var collisionBadges = previzCollisionBadges(cut, previz);
     if (collisionBadges) card.appendChild(collisionBadges);
+    var supportLines = previzSupportLines(cut, previz);
+    if (supportLines) card.appendChild(supportLines);
     return card;
+  }
+
+  /* 받침 판단(previz-support-reasoning R7). fit[cutId].support = [{name, posture, supportKind, supportEn, contact, feet,
+     heightM, propId, propTopM, heightFix?, status}] — 패널 그림에서 읽은 받침과 서버가 맞춘 소품 높이. 인물마다 한 줄.
+     fit.support 가 없으면(옛 계획·설정 끔) 아무것도 보이지 않는다. 글은 textContent(el)로만 넣는다.
+     라벨 표는 previz_support.py 의 *_KO 와 같은 글자다(검사 sr-k). */
+  var SUPPORT_POSTURE_KO = {
+    stand: "서 있음", sit: "앉음", kneel: "무릎 꿇음", lie: "누움", crouch: "웅크림", lean: "기댐", walk: "걷기"
+  };
+  var SUPPORT_CONTACT_KO = {
+    perch: "걸터앉기", seat: "의자처럼 앉기", straddle: "올라타기", lean: "기대기",
+    kneel_on: "무릎 꿇기", lie_on: "눕기", stand_on: "올라서기", floor: "바닥"
+  };
+  var SUPPORT_FEET_KO = { floor: "바닥에 닿음", dangling: "띄움", on_prop: "받침에 올림", tucked: "접음" };
+  var SUPPORT_KIND_KO = {
+    floor: "바닥", chair: "의자", sofa: "소파", bench: "벤치", stool: "스툴", step: "디딤", stairs: "계단",
+    rail: "난간", bollard: "주차봉", ledge: "턱", box: "상자", table: "탁자", counter: "카운터", vehicle: "차량",
+    bed: "침대", wall: "벽", pole: "기둥", other: "물체"
+  };
+
+  /* 받침 한 줄 문구(순수 함수 — DOM 없음, 검사가 node 로 실행한다). 판단 불가(skipped)·빈 항목은 "". */
+  function previzSupportText(entry) {
+    if (!entry || typeof entry !== "object" || entry.status === "skipped") return "";
+    var name = String(entry.name || "인물");
+    var posture = SUPPORT_POSTURE_KO[entry.posture] || "";
+    var text;
+    if (entry.supportKind === "floor" || entry.contact === "floor") {
+      text = "받침: " + name + " — 바닥에 " + (posture || "있음");
+    } else {
+      var kind = SUPPORT_KIND_KO[entry.supportKind] || "";
+      var en = String(entry.supportEn || "");
+      var what = kind && en ? kind + "(" + en + ")" : (kind || en || "받침");
+      var top = entry.propTopM != null ? Number(entry.propTopM) : (entry.heightM != null ? Number(entry.heightM) : null);
+      var how = SUPPORT_CONTACT_KO[entry.contact] || posture;
+      text = "받침: " + name + " — " + what;
+      if (top != null && isFinite(top)) text += " 윗면 " + top.toFixed(2) + "m";
+      if (how) text += (top != null && isFinite(top) ? "에 " : " ") + how;
+    }
+    if (SUPPORT_FEET_KO[entry.feet]) text += " · 발 " + SUPPORT_FEET_KO[entry.feet];
+    var fix = entry.heightFix;
+    if (fix && fix.fromTopM != null && fix.toTopM != null) {
+      text += " · 소품 높이 " + Number(fix.fromTopM).toFixed(2) + "→" + Number(fix.toTopM).toFixed(2) + "m 맞춤";
+    }
+    if (entry.status === "noProp") text += " · 맞는 소품을 찾지 못함";
+    return text;
+  }
+
+  function previzSupportLines(cut, previz) {
+    var cutId = cut && cut.cutId;
+    var fit = (previz && previz.fit) || {};
+    var entries = cutId && fit[cutId] && fit[cutId].support;
+    if (!entries || !entries.length) return null;
+    var wrap = el("div", "vnew-previz-support");
+    entries.forEach(function (entry) {
+      var text = previzSupportText(entry);
+      if (!text) return;
+      var cls = "vnew-previz-support-line" + (entry.status === "noProp" ? " is-warn" : "");
+      var line = el("p", cls, text);
+      line.title = "패널 그림에서 읽은 받침 판단입니다. 서버가 이 값으로 앉을 소품과 높이를 맞췄습니다.";
+      wrap.appendChild(line);
+    });
+    return wrap.childNodes.length ? wrap : null;
   }
 
   /* 소품 관통 보정(084 R1.8·R1.9·R1.11) 배지. previz.collision[cutId] = {fixes, unresolved, source}.
