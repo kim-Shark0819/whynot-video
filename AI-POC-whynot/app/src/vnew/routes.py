@@ -409,6 +409,22 @@ def create_blueprint(deps: VnewDependencies) -> Blueprint:
         except Exception as exc:  # noqa: BLE001
             return _fail(exc)
 
+    @bp.post("/p/<pid>/conti/fx")
+    @deps.require_auth
+    def plan_conti_fx(pid: str):
+        """③ [기호·분위기 채우기](vnew-live-fx A.3). 빈 컷만 채우고 번역 대상 컷은 moodEn 만. 202 {ok, taskId, targets, translate}.
+
+        설정이 꺼져 있으면 프로젝트를 보기 전에 404 FxDisabled(새 라우트가 없는 것과 같다).
+        """
+        try:
+            if not plan_mod.vnew_settings_module().VNEW_FX:
+                raise VpocError("vnew.conti.fx", "FxDisabled", "기호·분위기 기능이 꺼져 있습니다.", 404)
+            owner = _project_for(pid, write=True)
+            info = plan_mod.start_fx_fill(owner, pid)
+            return jsonify({"ok": True, **info}), 202
+        except Exception as exc:  # noqa: BLE001
+            return _fail(exc)
+
     @bp.post("/p/<pid>/cancel")
     @deps.require_auth
     def plan_cancel(pid: str):

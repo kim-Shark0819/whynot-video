@@ -342,3 +342,179 @@
   - 대안: 지시 문장만 더 세게 쓰기(기각 — 실측에서 지시가 짐작을 막지 못했다), 자세 맞춤을 없애기(기각 — 그림에 보이는 자세 차이까지 버린다).
 - **확인**: `check_vpoc` 전부 통과(52개 ok 줄). sr-a·b·e·f·h·i·k 갱신, sr-m 신규. sr-m은 test3 실측 읽기 3종을 seen 없음·hidden으로 넣으면 pose·sitOn·소품이 그대로이고, visible·partial이면 지금처럼 적용되는지(cut-02·07 sit → stand) 본다. run_design 경로에서는 7컷 모두 앉은 채이고 가로대는 그대로, `hidden=10`이다. 기존 시나리오는 고정값에 `seen:"visible"`을 넣어 기대값을 지켰다. 변형 검사(메모리): 없는 seen을 visible로 보면 sr-a·k·m, seen을 무시하면 sr-a·e·f·k·m이 실패한다. 이번 수정의 바뀐 실행 줄 18/18, 086 전체 339/339(coverage 7.17).
 - **남은 이슈**: 이 수정 전 코드로 이미 v2 캐시가 저장된 계획은 `supports`에 seen이 없어 모두 hidden으로 본다(받침 맞춤이 꺼진 것과 같다). 그 계획에서 받침을 다시 쓰려면 그 컷을 다시 읽기 지시하거나 `GRAMMAR_VERSION`을 3으로 올려 1회 다시 읽게 해야 한다(이번에는 올리지 않았다). 실제 모델이 seen을 지시대로 쓰는지는 개발계 V-1에서 본다.
+
+
+
+## 2026-10-30
+
+### vnew-live-fx 스펙 — 기호·분위기 · 실사 캐스팅 · 통 테이크 실사 버전 (Kiro, claude-opus-5.5, 스펙만)
+- **배경**: 설계자는 외부 저장소 `ottlseo/video-vibecode`(참고 구현)의 실사 구성(실사 캐스팅·기호·캐릭터 묘사)과 vnew의 캐릭터 설정·프리비즈·영상화를 합쳐 보려 한다. 비교는 `.kiro/handoff/logs/087.log` 끝 보고서다. 참고 구현의 장점은 컷 간 일관성, 단계별로 보이는 진행, 부드러운 실사화와 미리 뽑는 캐스팅, 기호, 캐릭터 묘사다. 단점은 인체 뒤틀림과 소리 없음이다. vnew는 3D 덕에 뒤틀림이 적고 소리가 잘 되지만, 컷을 나누면 일관성이 깨지고 통 테이크 실사가 없다.
+- **이번 실행**: 스펙 `.kiro/specs/vnew-live-fx/`(requirements·design·tasks)와 `docs/ANALYSIS.md` §3.6.1(A·B·C가 닿는 지금 코드 경로)만 썼다. 앱 코드는 바꾸지 않았다.
+- **PM 결정(Claude, 설계자 부재)과 근거**
+  - 결정 1 — 세 묶음으로 나누고 A → B → C 순서로 따로 구현·검증·개발 배포한다.
+    - 근거: 묶음마다 비용과 위험이 다르다. A는 텍스트 비용뿐이고 기존 웹툰 통 테이크 품질에 바로 닿는다. B는 사진 장당 $0.04다. C는 회차마다 영상 비용(480p 15초 ≈ $3.1)이 들고 B의 사진을 쓴다. 따로 배포하면 문제가 생긴 묶음만 끌 수 있다.
+    - 대안: 한 번에 구현(기각 — 검토·되돌리기 단위가 너무 크다). C를 먼저(기각 — 캐스팅 사진 없이 실사 정면만으로는 참고 구현의 "부드러운 실사화" 이점이 줄어든다).
+  - 결정 2 — A: 컷마다 `fx`(적용 0~2)·`fxSuggest`(추천 0~2)·`moodKo`(≤60자)를 두고, 기호 열거값·문장은 참고 구현(`vpoc/compose.py:329-336`)과 같게, 추천 규칙은 d9a48ad(`vpoc/llm.py:1217-1222`)와 같게 둔다. 콘티를 만들 때 함께 채우고, 이미 있는 계획에는 ③ "기호·분위기 채우기"(빈 컷만, 상위 모델 1회, 패널 이미지 포함)를 둔다. ③에서 고치고 ④에서 읽기 전용으로 보이고, TIMELINE·RULES와 컷 단위 프롬프트에 넣는다. 묘사 규칙(손 두 개·머리색·무늬 위치)과 장소 일관성 줄을 넣는다. 되돌리기 `VNEW_FX`.
+    - 근거: 설계자가 기호를 "장면 분위기와 표정을 어떻게 연출할지 알 수 있다"고 평가했다. 모양을 못 박은 문장은 참고 구현 exp2(땀방울을 핏대로 그린 사고)에서 나온 것이라 그대로 쓴다. 손·머리색·무늬 규칙도 참고 구현 실험(여의준 줄무늬·금발)에서 나왔다.
+    - 설계 결정: 기호는 콘티 도구에 섞지 않고 따로 부른다(`emit_fx`). 지금 콘티 호출은 글만 보내고, 기호에는 그림이 필요하다. 콘티 출력 예산(8,000토큰)을 나누지 않고, 버튼과 같은 함수를 쓴다. 영상 프롬프트에 쓸 영어 분위기 `moodEn`(≤80)을 함께 저장한다(한국어를 영상 모델에 넣지 않으려고). 그려진 기호는 3컷 한도에서 뺀다(원작 충실 우선). 기호·분위기만 고친 저장은 프리비즈 승인을 풀지 않는다(기호는 마네킹·녹화에 영향이 없다).
+    - 대안: 콘티 도구에 필드 추가 + 콘티 호출에 패널 이미지 추가(기각 — 콘티 결과 자체가 바뀌어 회귀 위험), 패널 읽기(`previz_grammar`) 단계에서 읽기(기각 — ③에서 보여야 하는데 그 단계는 ④다).
+  - 결정 3 — B: 캐릭터마다 `casting`(preset idol·real, lookEn, candidates, history ≤12, chosen)을 두고 Seedream 4.5 text-to-image로 글만으로 2장을 만든다. 금액은 장당 설정값으로 보이고 확인 뒤 만든다. 성별·대명사는 분석으로 정한다(참고 구현 `CAST_BASE` 남성 고정 수정). 고른 사진은 실사 영상 인물 참고로 쓰고, 없으면 실사 정면이다. 기존 실사 시트·3D는 바꾸지 않는다. 되돌리기 `VNEW_CASTING`.
+    - 근거: 참고 구현이 그림 편집 방식에서 웹툰 선·회색 눈·그림 포즈가 남는 것을 확인하고 글로 만드는 방식으로 바꿨다(`vpoc/live.py:27-32`). 여성 캐릭터에 "male … He is"가 들어가는 버그는 그대로 옮기면 안 된다.
+    - 설계 결정: 분석 도구에 `genderEn`(선택 필드)을 더하고, 사용자가 화면에서 고칠 수 있게 한다. 참고 구현의 동기 `fal.run` 2회 대신 fal 큐로 제출·조회해 파드가 재시작돼도 이어 받는다. 이어할 때 아직 제출하지 않은 칸은 다시 제출하지 않는다(뜻밖의 과금 방지).
+  - 결정 4 — C: 웹툰 통 테이크가 끝난 gen에 "실사 버전 만들기"(금액 확인)를 둔다. 같은 녹화(@Video1) + 캐스팅 사진(없으면 실사 정면) + 실사 장소 뷰를 쓰고, 웹툰 문구 없이 실사 화풍과 기호의 실제 표현(`REAL_FX`)을 쓰며, "webtoon"이 남으면 제출하지 않는다. 결과는 `unit.real` → `finalReal`, 다시 만들면 `realHistory`(≤3). 고르기는 지금 `selected`, 웹툰·실사 나란히 보기. 소리 검사 거절은 한국어 안내와 "소리 없이 다시 만들기"(웹툰 테이크 포함). 되돌리기 `VNEW_TAKE_REAL`.
+    - 근거: 지금 통 테이크는 실사를 건너뛴다(`_empty_take_unit`). 같은 녹화를 쓰면 vnew의 장점(구도·인체·타이밍 고정)을 실사에서도 지킨다. 참고 구현은 웹툰을 실사로 바꾸지 않고 처음부터 실사로 다시 만든다. 우리도 같은 방식이다(웹툰 결과를 입력으로 쓰지 않는다).
+    - 설계 결정: 실사 회차마다 파일 이름을 바꾼다(`final-real-r{n}.mp4`, 지금 키는 고정이라 덮어쓴다). 조사 중 찾은 기존 결함 두 가지를 함께 고친다. 하나는 previz-take에서 실사 실패가 gen을 바로 partial로 바꾸는 `_fail_variant`, 다른 하나는 `createdAt`만 보는 `_gen_stale`이다. fal 거절 판정에 소리 종류(`failureKind: "audio"`)를 더한다. 지금은 소리 거절이 영상 내용 거절과 같은 문구가 돼 화면이 구분할 수 없다. 소리 거절 처리와 결함 수정은 `VNEW_TAKE_REAL`과 상관없이 적용한다(결함 수정이라서).
+  - 결정 5 — 보안 원칙을 바꾸지 않는다. 이미지·영상은 data URI로만 보내고, 서명 URL을 외부로 주지 않는다. `_defaults` 복사와 다른 계정 역할 빌림은 가져오지 않는다.
+    - 근거: 087 보고서 4장. 참고 구현은 8MB 넘는 클립에 서명 URL을 fal에 보낸다(`vpoc/shotfix_service.py:202-204`). `_defaults`는 우리 IRSA(`users/*`만)에서 접근도 안 된다. 캐스팅 요청은 글만 보내고, 결과 사진은 우리 버킷 `users/{owner}/characters/{id}/casting/`에 둔다.
+  - 결정 6 — 프로덕션 LLM은 지금 최상위 설정을 쓴다. 기호 채우기는 `ANALYZE_MODEL`(콘티와 같다, Fable 5.1), 캐릭터 분석은 지금 체인(Astra → Fable)이다.
+    - 근거: llm-top-model-first(2026-10-28) 원칙. 기호 판단은 그림을 읽어야 해서 상위 모델이 맞다. max_tokens는 8,000이다(40컷 추정 출력 ≈ 6K).
+  - 결정 7 — 유료 호출은 검사에서 모두 가짜다(그룹 `fx-`·`cast-`·`lr-`).
+    - 근거: 이번 주 작업 원칙(`.kiro/steering/quality-week.md` 4). 실제 비용 확인은 묶음마다 "배포 뒤 확인"(VA·VB·VC)으로 설계자 승인 뒤에만 한다.
+- **작업 나누기**(tasks.md): A 4개(작음 1·중간 3), B 3개(작음 1·중간 2), C 3개(작음 1·중간 1·큼 1). 묶음 끝 작업이 리뷰·커버리지·문서를 맡는다.
+- **확인**: 스펙 3개 파일을 만들었다(requirements 221줄·design 606줄·tasks 102줄). 앱 코드(`app/`·`frontend/`·`tools/`·`k8s/`·`deploy/`)와 참고 구현 폴더는 읽기만 했고 실행하지 않았다.
+- **Claude 결정(2026-10-30 검토, 열린 질문 9개)**: 스펙 3개 파일에 반영했다(requirements.md 「검토 결정」 표, design·tasks 본문의 "(결정 N)").
+  1. 금액 표시 — 새 기능(캐스팅 뽑기·실사 버전·기호 채우기)의 확인창에는 금액 숫자를 보인다. 기존 생성 확인창은 그대로 둔다(설계자 2026-10-20 규칙). 기호 채우기는 토큰 추정 금액(`fxFill.estimateUsd`)을 "약 $X"로 보인다.
+  2. 새 필드 `fxDrawn`·`moodEn`·`analysis.genderEn`을 둔다.
+  3. 그려진 기호(`fxDrawn`)는 "같은 기호 3컷 넘게 추천 금지" 한도에서 뺀다(원작 충실).
+  4. 캐스팅 사진은 통 테이크 실사(묶음 C)에만 쓴다. 컷 단위 Kling 실사 payload(`_previz_payload_elements`, `_previz_payload_image_list`)는 바꾸지 않는다. tasks B3의 해당 항목을 지우고 cast-k를 "캐스팅을 골라도 컷 단위 실사 payload가 지금과 같다"로 바꿨다.
+     - 근거: 가슴 위 캐스팅 사진과 전신 실사 후면(시트 얼굴)이 Kling에서 다른 사람처럼 보일 위험(design §7).
+  5. 다시 뽑아도 이미 고른 사진(`chosen`)은 유지한다.
+  6. 사용자가 고친 분위기는 [기호·분위기 채우기]에서 영어로 옮긴다. 옮기기 전 컷은 `moodEn`이 비고, 영상 프롬프트에 분위기를 넣지 않는다(한국어는 넣지 않는다). 화면 분위기 칸 옆에 "영어로 옮기려면 [기호·분위기 채우기]" 안내를 둔다(A4).
+  7. 실사 STYLE 문구 두 곳을 바꾼다(묶음 C): "warm pastel color grading"을 빼고, "romance K-drama cinematography"를 "K-drama cinematography"로 바꾼다.
+  8. vpoc ② 소리 거절 문구가 새 문구로 바뀌는 것을 받아들인다.
+  9. 새 기본값(켬) 때문에 깨지는 기존 검사는 함수 본문만 `_pin_vnew(VNEW_FX=False)`로 고정한다. 기대값은 바꾸지 않고 보고한다.
+- **남은 이슈**: `_gen_previz_stale`이 previz-take를 늘 false로 본다(ANALYSIS §3.6.1 문제 5, 범위 밖). Seedance가 실사 사진 참고를 likeness로 거절할 가능성이 있어 C의 첫 개발계 확인(VC-1)에서 본다.
+
+### vnew-live-fx 묶음 A — A1·A2 기호 모듈·저장 규칙·채우기 호출·작업·라우트 (Kiro, claude-opus-5.5)
+- **범위**: tasks.md A1·A2만 했다. 영상 프롬프트(A3)·화면·ANALYSIS 갱신(A4), 묶음 B·C는 하지 않았다. 첫 단계로 Claude 결정 1~9를 스펙 3개와 위 2026-10-30 항목에 반영했다.
+- **바꾼 것**: `vnew/fx.py`(신규, 순수 함수), `vnew/settings.py`(`VNEW_FX` 기본 true, `VNEW_FX_MAX_PANELS` 20), `vnew/prompts.py`(`EMIT_FX`·`FX_SYSTEM` design 원문), `vnew/plan.py`(`update_conti`, `run_conti`, `_analyze_fx`, `_fx_blocks`, `fill_fx`, `start_fx_fill`, `run_fx_fill`, `_commit_step(extra=None)`, `cancel_task`·`reconcile_stale` 단계 목록, `plan_view` `features`·`fxFill`), `vnew/routes.py`(`POST /p/<pid>/conti/fx`), `k8s/workloads.yaml.tmpl`·`deploy/config.env.example`(`VNEW_PREVIZ_SUPPORT` 바로 뒤), `tools/check_vpoc.py`(`check_vnew_fx`, `PARITY_ENV_KEYS`).
+- **결정**
+  - D1 — 켬 상태에서 아무것도 바뀌지 않은 콘티 저장도 프리비즈 승인을 풀지 않는다(`only_fx_changed`가 같은 목록을 True로 본다).
+    - 이유: A4의 [기호·분위기 채우기]는 지금 수정본을 먼저 `PUT /conti`로 저장한다. 같은 목록 저장이 승인을 풀면 RA2.2("승인을 풀지 않는다")가 깨진다.
+    - 대안: 기호 필드에 차이가 있을 때만 유지(기각 — 버튼이 승인을 푼다). 영향: `check_vnew_previz` (e)가 같은 컷 PUT으로 해제를 기대한다 → 결정 9대로 끔 고정.
+  - D2 — 채우기 확인창 금액(결정 1)은 서버 추정값 `plan_view.fxFill.estimateUsd`(`fx.estimate_usd`, 원장과 같은 단가표)다. 토큰 추정이라 서버는 확인 금액을 받지 않는다.
+    - 대안: 화면에서 계산(기각 — 단가표가 서버 설정이다), `confirmUsd` 검사(기각 — 실제 금액과 달라 의미가 없다).
+  - D3 — 채우기 실패 문구는 `VpocError`면 그 문구(한 줄, 300자), 그 밖은 "기호·분위기를 채우지 못했습니다(종류)."다. 내부 예외 원문을 plan에 저장하지 않는다(기존 `run_conti`의 `str(exc)` 저장은 바꾸지 않았다).
+  - D4 — 채우기 요청 글에서 컷 id는 한 줄로 정리해 보이고, 대상 판단·합치기는 저장된 id 그대로 한다. TRANSLATE `moodKo`는 JSON 문자열로 감싼다(따옴표·줄바꿈으로 가짜 줄을 만들 수 없다).
+  - D5 — 끔이면 라우트가 프로젝트를 보기 전에 404 `FxDisabled`다(`start_fx_fill`도 한 번 더 막는다).
+  - D6 — `merge_fill` 통계에 `filledIds`(한도 계산용), `apply_cap`은 뺀 추천 수(로그 `capped=`)를 돌려준다. design §A.1 표에 적었다.
+  - D7 — `features`는 지금 `{fx}`만 둔다. B1·C1이 `casting`·`takeReal`을 더한다(design §2에 적었다).
+- **확인**
+  - `python -X utf8 tools/check_vpoc.py` 전부 통과(53개 ok 줄, FAIL·WARN 0). 새 그룹 `check_vnew_fx`(fx-a~g·fx-m·fx-n 저장 쪽). rw-a는 템플릿 env 13개다.
+  - 끔 비교: 같은 시나리오(run_conti → 기호만 바꾼 PUT → 같은 PUT)를 변경 전 트리와 새 코드(`VNEW_FX=false`)로 돌려 저장본·LLM 호출·저장 횟수·원장이 모두 같다(임시 폴더의 사본에서만 실행).
+  - 변형 검사 28개(메모리에서만 소스를 바꿔 다시 실행): 모두 `check_vnew_fx`가 실패로 잡았다.
+  - 바뀐 줄 커버리지(`coverage run --source=app\src tools/check_vpoc.py`, coverage 7.17, 원본 사본과 difflib): 실행 대상 439줄 중 436줄(99.3%). 안 탄 3줄은 id 없는 컷 건너뛰기 1줄과 `_fx_fill_view` 방어 except 2줄이다.
+  - 유료 호출 0회: 최종 전체 실행 출력에 `vpoc.call` 줄이 없다. LLM 층의 boto3·urlopen을 막고 기록하는 실행에서도 boto3 시도는 0이다.
+- **기존 검사 끔 고정(결정 9, 기대값 그대로)**: `check_vnew_plan`·`check_vnew_locations`(POST /conti → 채우기가 가짜가 아닌 LLM을 부른다), `check_vnew_previz`((e) 같은 컷 PUT의 승인 해제 기대, D1).
+- **개발 중 사고**: 끔 고정 전 전체 검사 1회에서 `check_vnew_locations`·`check_vnew_previz`의 POST /conti가 실제 `_converse`로 채우기를 불러 Bedrock 호출을 시도했다. IAM이 AssumeRole·InvokeModel을 거절해(AccessDenied) 모델은 실행되지 않았고 비용은 없다. 그 뒤 두 검사를 끔으로 고정했다.
+- **3단계 리뷰**
+  - 보안: 저장·프롬프트에 들어가는 글(분위기·대사·상황·이름·id)은 `clean_text`(제어·서식 문자·줄바꿈 → 한 칸, 길이 자름)를 지나고, 기호는 열거값만 받는다. 채우기 요청 글은 컷마다 한 줄이다(fx-n). 이미지는 Bedrock 요청 바이트로만 보내고 서명 URL을 만들지 않는다. 라우트는 쓰기 권한(`_project_for(write=True)`)을 본다. 로그에는 개수·ms만 남긴다. 다른 계정 역할·`_defaults`는 없다.
+  - 성능: 채우기 1회 = LLM 1회(max_tokens 8000). 보낼 패널은 ≤ 20장이고 블록에는 고른 타일만 남는다. `ordered_tiles`는 대본 단계와 같은 메모리 봉우리(업로드 원본 + 타일 ≤ 40장)이고 계획당 작업은 하나다. 콘티 만들기는 채우기 호출만큼 길어진다(추정 30~60초, 실측은 VA-1). 번역만이면 타일을 읽지 않는다. `plan_view` 추가 계산은 컷 수에 비례한다.
+  - 운영성: 로그 `vnew.conti.fx pid= fill= translate= panels= filled= translated= missed= capped= ms=`, `vnew.conti.fx.failed pid= err=`, `vnew.fxFill.discarded pid= task=`. 되돌리기는 `config.<target>.env`에 `VNEW_FX=false` 한 줄이다(끔 비교로 지금과 같음 확인). 진행 중 채우기는 끝까지 간다. 파드가 죽으면 fxFill 작업은 30분 뒤 멈춤으로 정리되고 다시 누를 수 있다. 그동안 대본·콘티 작업도 막힌다(지금 대본·콘티와 같은 한계).
+- **남은 이슈**
+  - 운영(`VPOC_RAW_ERRORS=false`)에서 `FxDisabled`·`ContiNotReady`·`NothingToFill`의 문구는 "처리 중 오류가 발생했습니다 (코드: …)"로 감춰진다(`vpoc/errors.USER_FACING_KINDS`, 범위 밖). A4 화면이 대상 0일 때 버튼을 막으면 대부분 보이지 않는다.
+  - 기존 검사 `check_vnew_generate`·`check_vnew_shot_brief`(와 그 스레드)가 fal 가격 조회 GET을 실제로 61회 보낸다(생성 아님, 유료 아님). 변경 전 트리에서도 같은 61회다.
+  - 실제 모델(Fable 5.1)이 drawnFx·3컷 한도·감정 없음 → 빈 추천을 지시대로 쓰는지, 금액 추정이 맞는지는 VA-1에서 본다.
+  - `docs/ANALYSIS.md` 갱신은 tasks대로 A4에서 한다.
+
+
+### vnew-live-fx 묶음 A — A3·A4 영상 프롬프트·분석 규칙·화면·문서·리뷰 (Kiro, claude-opus-5.5)
+- **범위**: tasks.md A3·A4와 Claude 검토 피드백 1·2만 했다. 묶음 B·C는 하지 않았다. 커밋·push 하지 않았다.
+- **검토 피드백 처리**
+  - 피드백 1 — A2가 감싼 `check_vnew_plan`·`check_vnew_locations`·`check_vnew_previz` 본문의 들여쓰기를 되돌렸다(세 함수 모두 A 이전 사본과 글자까지 같음). 고정은 `main()`의 부르는 줄에서 `_run_fx_off(check)`(= `with _pin_vnew(VNEW_FX=False): check()`)로 한다. 원본 사본과 difflib으로 잰 `check_vpoc.py`의 공백만 바뀐 줄: 5,658 → 0. tasks 공통 규칙·결정 9 문구도 "부르는 줄에서 고정"으로 고쳤다(B·C에서 다시 들여쓰지 않게).
+  - 피드백 2 — `vpoc/errors.USER_FACING_KINDS`에 `FxDisabled`·`ContiNotReady`·`NothingToFill`을 더했다. 안전 근거: 이 kind를 던지는 곳 5곳(`plan.py` 3, `routes.py` 1, `generate.check_preconditions` 1)이 모두 고정 한국어 문구이고 외부 원문을 싣지 않는다. 다른 kind는 건드리지 않았다(fx-l이 `TaskRunning`은 여전히 가려지는지도 본다). 부수 효과: ⑤ 선행 조건의 `ContiNotReady`("먼저 콘티를 완성해 주세요.")도 운영에서 보인다.
+- **바꾼 것**: `vnew/generate.py`(`RULE_BODY`·`CUT_RULE_BODY`, `_take_timeline_entries` fx·moodEn, `_take_prompt` mood·FX 조각·RULES·줄이기 단계·최소형, `_cut_prompt` FX·EXPRESSION·MOOD·CONTINUITY·⑥-1, `_cast_notes_system`·`_read_cast_notes`), `vnew/characters.py`(`_analyze_system`·`_analyze`), `vpoc/errors.py`(피드백 2), `frontend/public/vnew.js`(기호 구역 `FX_KEYS`~`previzFxLine`, `cutCard`·`renderContiStep`·`decidePlanStep`·`previzPanelMatchCard` 배선), `vnew.css`(`vnew-fx-*`·`vnew-mood-input`·`vnew-previz-fx-line`), `tools/check_vpoc.py`(`check_vnew_fx_prompt` fx-h~k·n, `check_vnew_fx_screen` fx-l, 고정 입력·sha 상수, `_run_fx_off`), `docs/ANALYSIS.md`(§3.6·§3.6.1 A 구현 결과·§7.1·§10.1), 스펙 3개(고정 방식 문구, A3·A4 체크).
+- **결정**
+  - D1 — 변경 전 sha256(fx-i)은 코드를 바꾸기 전에 잰 5종이다: 통 테이크 6컷(tp-a)·12컷(tp-c), 컷 단위 웹툰(hm-c)·실사(hm-c)·실사 긴 입력(sb-f 문장). 입력은 기존 take 검사 고정값을 모듈 수준 도우미(`_fx_take_fixture`·`_fx_cut_fixture`)로 옮겨 쓴다. 기존 검사 본문은 바꾸지 않았다. 끔 상태는 컷에 기호·분위기 필드가 있어도 같은 해시다.
+  - D2 — 분위기의 한국 이름 → 로마자 치환과 한글 검사는 컷마다 한 번만 하고(`moodText`), 뺀 컷마다 로그 `vnew.gen.take_mood_dropped take= at= reason=hangul` 1줄이다. 새 줄이기 단계를 넣을지(`has_content`)는 이 결과로 판단한다(한글로 빠진 분위기만 있으면 단계를 넣지 않는다).
+  - D3 — 컷 단위 MOOD는 "{컷 moodEn}. {지시서 moodEn}"이다. 기존 ③ MOOD 줄이기가 뒤 문장부터 떼므로 지시서 분위기가 먼저 빠진다. 실사 EXPRESSION에는 짧은 형이 없어 ⑥-1을 건너뛴다.
+  - D4 — [기호·분위기 채우기]는 저장(PUT) 뒤 서버가 다시 센 대상 수·금액이 확인한 값과 다르면 새 숫자로 한 번 더 묻고, 대상이 0이면 시작하지 않는다("저장했습니다. 채울 컷이 없습니다."). 리뷰(과금)에서 찾았다: 고친 분위기는 저장해야 번역 대상이 되므로 처음 확인한 숫자가 틀릴 수 있다. 대안: 화면에서 대상을 다시 세기(기각 — 금액 단가표가 서버 설정이다).
+  - D5 — `decidePlanStep`에 `fxFill`을 더해 채우기 중에는 ③을 보인다. design 함수 목록 밖이지만 이 한 줄이 없으면 진행 막대(RA7.2) 대신 ②가 열린다.
+  - D6 — 그린 기호는 title("패널에 그려진 기호")에 더해 칩 안에 "그림" 표를 보인다(지시 "그린 기호 표시"). 분위기 칸 안내는 저장된 moodEn이 없을 때와, 입력을 바꿔 저장하면 moodEn이 비워질 때 보인다.
+  - D7 — 화면 기호 이름은 design·`fx.py`의 `FX_LABEL_KO`(눈물 줄기·땀 한 방울·볼 홍조·분홍 반짝이 배경·속도선)를 그대로 썼다. 지시서 예시("땀방울", "볼 홍조 빗금")와 두 개가 다르다(남은 이슈 3).
+- **확인**
+  - `python -X utf8 tools/check_vpoc.py` 전부 통과(55개 ok 줄, FAIL·WARN 0). `[ok  ]` 줄에 fx-a~n이 모두 있다(fx-a~g·m·n 저장 쪽 / fx-h~k·n 프롬프트 쪽 / fx-l).
+  - `python -m py_compile`(generate·characters·errors·check_vpoc), `node --check frontend/public/vnew.js` 통과.
+  - 끔 상태 프롬프트 sha256 5종이 변경 전과 같다(fx-i). 켬 상태 통 테이크 ≤ 4,000바이트, 컷 단위 ≤ 2,500바이트, 모든 타임스탬프가 남는다(fx-h·fx-j).
+  - 프롬프트 바이트(fx-h 출력, 변경 전 = 끔):
+
+    | 입력 | 끔 | 켬 기호 없음 | 켬 보통(기호 1·분위기 ≈45자) | 켬 최악(기호 2·분위기 80자) |
+    |---|---|---|---|---|
+    | 통 테이크 6컷(tp-a) | 3,945B styleTrim · MOTION·HARMONY 있음 | 3,043B 최소형 | 3,226B 최소형 | 3,427B 최소형 |
+    | 통 테이크 12컷(tp-c) | 3,922B 최소형 | 3,641B 최소형 | — | 2,469B 최소형(연기 없는 후보) |
+    | 컷 단위 웹툰(hm-c) | 2,362B | 2,455B(장소 요약 뗌) | 2,463B(기호 2+분위기, 장소 요약·배경 뗌) | 긴 입력 2,490B(FX 짧은 형) |
+
+  - 바뀐 줄 커버리지(묶음 A 전체 .py, `coverage run --source=app\src tools/check_vpoc.py`, 원본 사본과 difflib): 실행 대상 495줄 중 492줄(99.4%). 안 탄 3줄은 A2의 id 없는 컷 `continue` 1줄과 `_fx_fill_view` 방어 except 2줄이다. JS는 coverage.py 밖이고, fx-l이 기호 구역의 순수 함수 전부와 DOM 조립(`fxRow`·`fxToolbar`·`previzFxLine`)을 node 가짜 DOM으로 실행한다.
+  - 변형 검사 26개(메모리·임시 사본에서만, Python 18 · JS 8): 모두 해당 검사가 실패로 잡았다.
+  - 유료 호출 0회: LLM 층 boto3와 urlopen을 막고 기록하는 실행에서 boto3 시도 0. urlopen은 `api.fal.ai/v1/models/pricing` 가격 조회 GET 61회(`check_vnew_generate`·`check_vnew_shot_brief`와 그 스레드, 생성 아님·무료)이고, 막으면 그 두 검사가 실패한다. A 이전 트리 사본에서도 61회·같은 두 실패라 이번 변경과 무관하다.
+  - 공백만 바뀐 줄 0, CRLF 0(바뀐 18개 파일 전부). 기존 함수 정의는 하나도 지우지 않았다(ast·정규식 비교).
+- **기존 검사 끔 고정(결정 9, 부르는 줄에서, 기대값 그대로)**: A2의 `check_vnew_plan`·`check_vnew_locations`·`check_vnew_previz`에 더해 A3에서 `check_vnew_take_harmony_motion` 1개. 이유: 켬이면 hm-a 6컷 입력이 묘사 규칙(+229B) 때문에 최소형으로 떨어져 MOTION·HARMONY가 빠진다(hm-a 'do NOT copy'·'parallax'·'contact shadows', hm-b 'day light'). 나머지 take 검사(`check_vnew_take`·`_prompt`·`_costume`·`_prompt_polish`·`_prompt_budget`·`_on_screen`)는 켬 그대로 통과한다.
+- **3단계 리뷰(묶음 A 전체)**
+  - 보안
+    - 프롬프트로 가는 사용자·모델 글(moodEn)은 저장 때와 프롬프트를 만들 때 두 번 `clean_text`(제어·서식 문자·줄바꿈 → 한 칸, 80자)를 지나고, 기호는 열거값만 문장으로 바뀐다. 줄바꿈·"RULES:"·모르는 기호를 넣어도 새 줄·새 머리글이 생기지 않는다(fx-n 두 쪽). moodKo(한국어)는 어느 영상 프롬프트에도 들어가지 않는다(결정 6).
+    - 분석·의상 읽기 SYSTEM 추가 문장은 고정 문자열이다. 새 외부 전송·서명 URL·비밀값은 없다. 로그에는 take id·시간 범위·바이트·단계 이름만 남긴다.
+    - 화면은 `el()`(textContent)과 속성(`title`·`placeholder`·`aria-pressed`)만 쓰고 fx-l이 가짜 DOM에서 innerHTML 0을 확인한다. 경로의 프로젝트 id는 `encodeURIComponent`. 라우트 권한은 A2 그대로(`_project_for(write=True)`).
+    - 발견: 운영에서 채우기 거절 문구 3종이 가려졌다(피드백 2) → 조치함. 사용자가 쓴 영어 분위기는 그대로 영상 프롬프트에 들어간다. 이미 사용자가 고칠 수 있는 promptEn·의상 덮어쓰기와 같은 신뢰 수준이라 그대로 둔다.
+  - 성능
+    - A3·A4는 외부 호출을 늘리지 않는다(프롬프트 문자열만). 분석 SYSTEM +282자, 의상 읽기 SYSTEM +110자(호출당 입력 ≈ +70·+30토큰). 화면은 버튼 1번에 PUT 1 + POST 1, 진행 중 폴링은 기존 5초 간격이다. 칩은 칩 줄만 다시 그린다.
+    - 메모리: 프롬프트 조립에 컷당 문자열 몇 개(수 KB)만 더한다. 채우기의 타일 메모리는 A2 리뷰 그대로(대본 단계와 같은 봉우리, 계획당 작업 1개).
+    - 발견(조치 안 함, 남은 이슈 1·2): 켬이면 통 테이크 RULES가 229B 길어져 test2 규모 6컷이 최소형으로 떨어지고 MOTION·HARMONY가 빠진다. 컷 단위는 CONTINUITY가 160B 길어져 SETTING이 더 자주 줄어든다.
+  - 운영성
+    - 되돌리기: `VNEW_FX=false` 한 줄이면 프롬프트 5종·분석 SYSTEM이 구현 전과 글자까지 같고(fx-i·fx-k) 화면 요소가 숨는다(fx-l). 저장된 기호·분위기 필드는 남는다(R0.3). 프롬프트는 제출 때 설정을 읽으므로 진행 중 gen의 남은 칸만 바뀐 설정을 따른다.
+    - 진행 중 작업: 배포 시점에 이미 제출된 칸은 영향이 없고, queued 칸·다시 시도는 새 프롬프트(묘사 규칙 포함)로 나간다. 채우기 중에는 ③에 진행 막대·[취소](`POST /cancel` → `cancel_task` fxFill)가 보인다. 파드가 죽으면 30분 뒤 멈춤 정리(A2) → 실패 문구 + "[기호·분위기 채우기]로 다시 시도할 수 있습니다."
+    - 로그: `vnew.gen.take_prompt bytes= steps=`에 mood40·moodDrop·fxShort가 보인다. 새 로그 `vnew.gen.take_mood_dropped`.
+    - 발견: 채우기 중 화면이 ②로 넘어갔다(`decidePlanStep`) → 조치함(D5). 저장 뒤 대상 수·금액이 확인창과 달라질 수 있었다 → 조치함(D4).
+- **남은 이슈**
+  1. **켬 상태 통 테이크에서 MOTION·HARMONY가 빠진다**(가장 중요). test2 규모 6컷(tp-a): 끔 3,945B(styleTrim만) → 켬 줄이기 9단계를 다 써도 4,019B라 최소형 3,043B로 떨어진다. hm-a 입력(의상·목소리 있음)도 끔 3,954B → 켬 3,230B 최소형이다. 기호가 하나도 없어도 같다(RULE_BODY는 켬이면 늘 붙는다). 줄이기 단계 중 avoidShort(긴 형과 같은 문자열)·action55(70자 하한 때문에 이 입력에서 0B)는 줄이는 양이 0이다. design대로 구현하고 기존 검사는 끔 고정했다. 개발 배포(VA-2) 전에 결정이 필요하다. 대안:
+     - (가) 묘사 규칙 짧은 형 단계(예 ≈120B)를 action55 다음·최소형 전에 둔다(문구는 Claude가 정한다).
+     - (나) 최소형 전에 묘사 규칙을 빼는 단계를 둔다(손 두 개 규칙을 잃는다).
+     - (다) 최소형 후보에도 MOTION·HARMONY 짧은 형을 넣는다(069 v2 규칙 "지우지 않는 등급"을 최소형까지 넓힘).
+     - (라) 그대로 두고 VA-2에서 눈으로 본다.
+  2. 컷 단위(Kling) CONTINUITY 문장 +160B: hm-c 짧은 지시서도 2,362 → 2,522B가 돼 기호가 없어도 SETTING의 장소 요약을 떼고 2,455B가 된다. 기호 2개+분위기면 SETTING(장소 요약·배경)이 모두 빠진다. 컷 단위는 줄이기 단계 로그가 없어(기존) 개발계에서 FX 짧은 형이 쓰였는지 로그로 볼 수 없다.
+  3. 화면 기호 이름: 지시서 예시는 "땀방울"·"볼 홍조 빗금"인데 design·`fx.py`·화면은 "땀 한 방울"·"볼 홍조"다. 스펙을 따랐다. 바꾸려면 `fx.FX_LABEL_KO`·`vnew.js FX_LABEL_KO`·fx-a 기대값을 함께 바꾼다.
+  4. 운영에서 `TaskRunning`(채우기·대본·콘티 진행 중 다시 누름)은 여전히 가려진다(이번 범위 밖). 진행 중에는 버튼이 없어 거의 보이지 않는다.
+  5. VA-1(채우기 1회 ≈ $0.15)·VA-2(웹툰 통 테이크 1회 ≈ $3.1)는 설계자 승인 뒤 개발계에서 한다. 실제 모델이 분위기를 80자 영어로 쓰는지, 확인창 금액이 원장과 맞는지는 그때 본다.
+
+
+### vnew-live-fx 묶음 A — 090 필수 수정 2건: 통 테이크 MOTION·HARMONY 보존, 컷 단위 SETTING 보존 (Kiro, claude-opus-5.5)
+- **범위**: Claude 피드백(090 남은 이슈 1·2)만 고쳤다. 기호 이름·`TaskRunning` 문구는 그대로다. 커밋하지 않았다.
+- **바꾼 것**: `vnew/generate.py`(`RULE_BODY_SHORT`·`MOTION_MIN`·`HARMONY_MIN`·`_harmony_min` 신규, `CUT_RULE_BODY` 짧은 형, `_take_prompt` RULES `state.body`·`bodyShort` 단계·최소형 MOTION·HARMONY, `_cut_prompt` `_continuity`·`bodyDrop`·단계 로그), `tools/check_vpoc.py`(fx-h 합격 기준 `_FX_TAKE_MUST`·짧은 형 상수, fx-j 기본 입력 SETTING·로그, fx-n 로그 컷 id, `check_vnew_take_harmony_motion` 끔 고정 해제), 스펙(design §A.4·§A.5·§8, RA4.2·RA4.3·RA5.2·RA5.3, tasks A3 메모), `docs/ANALYSIS.md` §3.6.1·§10.1.
+- **고친 줄이기 순서**
+  - 통 테이크: `styleTrim → avoidShort → voice40 → voiceDrop → [mood40] → appearance100 → costume110 → dialogue25 → audioShort → [moodDrop → fxShort] → {bodyShort} → action55 → 최소형`. `{bodyShort}`는 켬이면 늘 들어간다(묘사 규칙이 늘 붙으므로). 최소형 후보는 연기 있는 4개 × MOTION·HARMONY 원문 → 같은 4개 × 짧은 형 → 연기 없는 3개 × 원문 → × 짧은 형 → 의상을 줄인 ASSETS × 짧은 형 → 지금 후보(없음) 순이다. 단계 로그 끝에 `motionHarmonyShort`·`motionHarmonyDrop`.
+  - 컷 단위: `⓪ bodyDrop → ① 장소 요약 → ② 배경 → ③ MOOD → ④ BLOCKING → ⑤ 대사 연기 → ⑥ SHOT → ⑥-1 FX 짧은 형 → ⑦ ACTION → 바이트 자르기`. 로그 `vnew.gen.cut_prompt cut= variant= bytes= steps=`.
+- **결정**
+  - D1 — `RULE_BODY_SHORT` 문구: Claude 제시 문구는 116B라 "(including where its pattern is)" → "(and where its pattern is)"만 바꿔 110B로 맞췄다(뜻 같음). 대안: "incl."(112B, 여전히 초과), 한도 우선 대신 문구 우선(기각 — 한도가 합격 기준).
+  - D2 — `CUT_RULE_BODY`: Claude 예시("hair and outfit colors")는 무늬 위치가 빠져 RA5.2와 어긋나서 "hair color and outfit patterns as placed in the references"(89B)로 썼다.
+  - D3 — HARMONY 짧은 형은 장소 빛 문장(`lightEn`, 최대 80자)을 빼고 시간대만 남긴다. 시간대를 모르면 `@Video1's light`(원문의 "the time of day shown in @Video1"는 160B를 넘긴다). 늦은 시간대(sunset·evening·dusk·night·midnight)에서는 "no drift to sunset or night"가 모순이라 "no drift in time of day"로 쓴다.
+  - D4 — 최소형 후보 순서는 069 등급을 따른다. MOTION·HARMONY는 연기 핵심과 같은 등급, 외형·의상보다 위다. 그래서 "외형을 뺀 원문"을 "외형을 둔 짧은 형"보다 먼저 보고, 연기 있는 짧은 형을 연기 없는 원문보다 먼저 본다.
+  - D5 — 컷 단계 로그는 설정과 상관없이 남긴다(프롬프트 글자는 그대로라 fx-i가 같다). 프롬프트를 실제로 바꾼 단계만 적는다. 컷 id는 `clean_text` 40자라 줄바꿈으로 가짜 로그 줄을 만들 수 없다(fx-n).
+- **바이트(fx-h·fx-j 출력, 같은 고정 입력)**
+
+  | 입력 | 끔 | 켬(수정 전, 090) | 켬(수정 후) |
+  |---|---|---|---|
+  | 통 테이크 6컷 기호없음 | 3,945B · M·H 원문 | 3,043B 최소형 · M·H 없음 | 3,901B · M·H 원문 · 묘사 짧은 형(최소형 아님) |
+  | 통 테이크 6컷 보통 | 3,945B | 3,226B · 없음 | 3,874B 최소형 · M·H 원문 · 연기·기호 짧은 형 남음 |
+  | 통 테이크 6컷 최악 | 3,945B | 3,427B · 없음 | 3,875B 최소형 · M·H 원문 · 연기·기호 짧은 형 남음(외형 뺌) |
+  | 통 테이크 12컷 기호없음 | 3,922B · 없음 | 3,641B · 없음 | 3,857B 최소형 · M·H 짧은 형 · 연기 남음 |
+  | 통 테이크 12컷 최악 | 3,922B · 없음 | 2,469B · 없음 | 3,627B 최소형 · M·H 원문 · 연기 없음 |
+  | hm-a 입력(의상·목소리) | 3,954B · 원문 | 3,230B · 없음 | 3,855B 최소형 · M·H 원문 |
+  | 컷 단위 웹툰 기본 | 2,362B | 2,455B · 장소 요약 뗌 | 2,452B · steps none · SETTING = 끔 |
+  | 컷 단위 실사 기본 | 2,193B | 2,353B | 2,283B · steps none · SETTING = 끔 |
+  | 컷 단위 웹툰 기호2+분위기 | — | 2,463B · 장소 요약·배경 뗌 | 2,497B · bodyDrop만 · SETTING = 기본 |
+
+- **확인**
+  - `python -X utf8 tools/check_vpoc.py` 전부 통과(55개 ok 줄, FAIL·WARN 0). `check_vnew_take_harmony_motion`은 끔 고정을 풀고 켬 상태에서 기대값 그대로 통과한다(hm-a 6컷 입력이 MOTION·HARMONY 원문을 남긴다).
+  - fx-i 끔 sha256 5종이 변경 전과 같다. 컷 단위 로그는 프롬프트에 영향이 없다.
+  - 합격 기준 `_FX_TAKE_MUST`(검사 상수): 6컷 기호없음·보통·최악 = MOTION·HARMONY 원문 + 묘사 규칙 짧은 형, 12컷 기호없음 = 짧은 형, 12컷 최악 = 원문, 모두 ≤ 4,000B·모든 타임스탬프. 짧은 형 바이트: `RULE_BODY_SHORT` 110, `CUT_RULE_BODY` 89, `MOTION_MIN` 146, `HARMONY_MIN` 149~157(시간대 표 전부).
+  - 1800 caps: 연기 있는·없는 후보가 모두 넘쳐 의상을 줄인 ASSETS + MOTION·HARMONY 짧은 형(1,728B). 1500 caps: 그것도 넘쳐 빠지고 로그 `motionHarmonyDrop`(1,423B).
+  - 변형 검사 15개(메모리에서만): 모두 fx-h·fx-j·fx-n이 잡았다.
+  - 바뀐 줄 커버리지(묶음 A 전체 .py): 571줄 중 561줄(98.2%). `generate.py` 127줄 중 120줄. 안 탄 7줄은 `_cut_prompt`의 단계별 중간 return 5줄과 바이트 자르기 2줄이다(기존 경로, 고정 입력이 그 지점에서 끝나지 않는다).
+  - 유료 호출 0회(boto3 시도 0, urlopen은 기존 가격 조회 GET 61회 그대로). 공백만 바뀐 줄 0(`check_vpoc.py`·`generate.py` 짝 비교), CRLF 0.
+- **3단계 리뷰(이번 변경분)**
+  - 보안: 새 문장은 모두 고정 문자열이다. 사용자 입력이 새로 들어가는 곳은 컷 단계 로그의 컷 id 하나이고 `clean_text`(줄바꿈·제어 문자 → 한 칸, 40자)를 지난다.
+  - 성능: 최소형 후보가 켬이면 7개 → 14개(원문·짧은 형) + 의상 줄인 1개 + 지금 7개로 는다. 문자열 합치기뿐이고 모델 호출·메모리 봉우리는 그대로다. 컷 단위는 단계마다 `_current()`를 한 번 더 만든다(≤ 10회, 수 KB).
+  - 운영성: 켬·끔 되돌리기는 그대로다(`VNEW_FX=false` → fx-i). 개발계에서는 `vnew.gen.take_prompt … steps=…,motionHarmonyShort`와 `vnew.gen.cut_prompt … steps=bodyDrop,…`로 어느 컷이 줄었는지 볼 수 있다.
+- **남은 이슈**
+  1. 12컷 최악(컷마다 기호 2개)은 연기 있는 최소형이 모두 넘쳐 연기와 기호가 빠지고 MOTION·HARMONY 원문이 남는다(수정 전에도 연기는 빠졌다). 대안: 최소형에 "연기는 남기고 기호를 뺀" 후보를 연기 없는 후보보다 먼저 둔다. 이번 범위 밖이라 하지 않았다.
+  2. 통 테이크 `avoidShort`는 긴 형과 같은 문자열이라 줄이는 양이 0이다(069부터, 범위 밖).
+  3. 컷 단위 로그는 끈 상태에서도 나온다(새 로그 줄 1개/컷 제출). 프롬프트·저장은 그대로다.

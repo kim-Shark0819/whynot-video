@@ -176,7 +176,8 @@ flowchart LR
 | `routes.py` | 블루프린트 `vnew`(`:41`). HTTP 입출력만. 계획 API는 `_project_for`(`:260-282`)에서 프로젝트 존재·읽기/쓰기 권한·**트랙이 `video_new`인지** 확인 |
 | `settings.py` | vnew 전용 환경변수(그 밖은 `vpoc.settings` 재사용) |
 | `characters.py` | 캐릭터 만들기: 웹툰 이미지 분석(Astra → Claude) → Seedream 시트·정면·후면(실사·웹툰 2 variant) → Hunyuan3D(fal) GLB. 빌드·재시도·재개 스레드(`:1587`, `:1645`, `:1808`, `:1909`, `:2191`) |
-| `plan.py` | ①입력 ②대본 ③콘티. `plan.json` 하나가 프로젝트 상태의 단일 원본. task 스레드(`:1393`) |
+| `plan.py` | ①입력 ②대본 ③콘티. `plan.json` 하나가 프로젝트 상태의 단일 원본. task 스레드(`:1393`). 공용 `plan.task` 단계는 script·conti·fxFill(`_TASK_STEPS` `:60`) |
+| `fx.py` | ③ 만화 기호·분위기(vnew-live-fx 묶음 A, 2026-10-30, 순수 함수 — 네트워크·S3·LLM 없음). 기호 5종 열거값·문장(참고 구현 원문)·짧은 형·실사 표현·화면 라벨, 컷 필드 정리(`normalize_cut_fx`), 채우기 대상(`fill_targets`)·합치기(`merge_fill`)·3컷 한도(`apply_cap`)·금액 추정(`estimate_usd`), 프롬프트 문장(`sentences`). `plan.py`(저장·채우기)·`generate.py`(프롬프트)가 읽는다. `VNEW_FX`로 끈다 |
 | `locations.py` / `location_views.py` | ③ 장소 4면 시트, 참고 사진. `ThreadPoolExecutor(VIEW_WORKERS)`(`:1848`), task 스레드(`:2846`) |
 | `previz*.py` | ④ 프리비즈 3D 장면 설계(Astra), 카메라 문법·토릭 계산(`previz_camera`, `previz_grammar`), 일치도(`previz_fit`), 스키마. task 스레드(`previz.py:2858`) |
 | `previz_collision.py` | ④ 인물↔소품 겹침 보정(084 R1, 순수 함수, LLM·네트워크 없음). 앉을 소품(`pick_seat`)·엉덩이 높이 = 소품 윗면·다리 방향(`choose_leg_yaw`, 길쭉한 자리는 짧은 축 법선)·다리 각도(`solve_legs`)·밀어내기(`push_out`). `run_design`이 카메라 계산 전·후 2회 부르고 `fit[cut].collision`에 저장. `previz_view`는 보정과 함께 설계된 장면(`sit` 또는 `fit.collision` 있음)만 보기 사본에 다시 적용하고, 옛 장면은 사본을 바꾸지 않고 `detect_scene`으로 관통 컷만 찾아 `collision.needsRedesign`으로 알린다(저장본 그대로). `VNEW_PREVIZ_COLLISION`으로 끈다 |
@@ -202,6 +203,83 @@ vnew가 재사용하는 것: `vpoc.llm`·`images`·`store.STORE`·`ark`·`fal`·
 - fal Seedance 계열(`VPOC_FAL_SEEDANCE_FAMILY`): 얼굴(i2v)은 숨기고, 짝(r2v) 한 줄을 vpoc ②와 같은 이름 `ark.label(<얼굴>)`("Seedance 2.5 (fal)")로 보인다(`_family_face_of`). 계열 설정이 비면 073 이전처럼 둘 다 `fal · ` 행이다.
 - 단가(`_previz_price_row`): unit `seconds`는 그 초당 단가, 기본 모델은 단가를 모르면 `VNEW_PREVIZ_EDIT_USD_PER_S`. 토큰 단가는 전송 해상도를 아는 통 테이크 모델에만 `vpoc settings.shot_usd(id, VNEW_TAKE_RESOLUTION, 1)`과 `priceResolution`을 준다(`_previz_send_resolution`). 통 테이크는 그 해상도를 본문 `resolution`에 늘 명시해 보내고(`generate.py:2918`), 견적·원장(`_take_usd`)도 같은 값이다. 컷 단위 토큰 모델은 `resolution`을 보내지 않아 "단가 미정"이다.
 - 화면: `vnew.js` `previzPriceText`가 `$0.206/초(480p)`(목록)·`초당 $0.206(480p)`(설명 줄)을 만든다.
+
+#### 3.6.1 기호·실사 캐스팅·실사 버전(vnew-live-fx)이 닿는 코드 경로 (2026-10-30 조사, 구현 전 · 묶음 A 구현 결과는 표 아래)
+
+스펙은 `.kiro/specs/vnew-live-fx/`다. 아래 표는 **구현 전 지금 코드**를 적는다. 줄 번호는 2026-10-30 작업 트리 기준이다. "참고 구현"은 외부 저장소 `ottlseo/video-vibecode` 사본(읽기 전용)이고, 비교는 `.kiro/handoff/logs/087.log` 끝 보고서에 있다. 묶음 A(기호·분위기)는 같은 날 구현했다(아래 「A 구현 결과」). B·C 표는 아직 구현 전이다.
+
+**A. 기호·분위기·묘사 규칙(③ 콘티 → ④ 프리비즈 카드 → 영상 프롬프트)**
+
+| 위치 | 지금 동작 | A가 닿는 점 |
+|---|---|---|
+| `vnew/prompts.py:112-158` `EMIT_CONTI` | 컷 필드는 id·no·seconds·panels·shotKo·cameraEn·locationEn·characters·dialogueKo·situationKo·promptEn이다. 기호·분위기 칸이 없다 | 바꾸지 않는다(기호는 따로 부른다) |
+| `vnew/plan.py:835-878` `run_conti` | 대본 글만 보낸다(`_conti_prompt` `:910`, 이미지 없음). `_analyze_conti`(`:622`, `ANALYZE_MODEL`, max_tokens 8000) 1회, 컷이 모자라면 재요청 1회 | 저장 전에 기호·분위기 채우기 1회(패널 이미지 포함) |
+| `plan.py:985-1033` `_normalize_cuts` | 모델 출력에서 알려진 키만 남긴다 | 그대로 둔다 |
+| `plan.py:1279-1309` `update_conti` | 화면이 보낸 컷 dict를 그대로 저장한다(`dict(cut)`). 저장할 때마다 `_unapprove_previz` | 기호 칸 정규화. 기호·분위기만 바뀐 저장은 승인을 풀지 않는다 |
+| `plan.py:1358` `start_task`, `:1377` `cancel_task`, `:1441` `reconcile_stale` | 공용 `plan.task` 하나. 취소·멈춤 정리는 script·conti 단계만 되돌린다 | 작업 이름 `fxFill`을 더한다 |
+| `plan.py:637-659` `ordered_tiles` | 대본 단계와 같은 타일 목록(≤40장, 넘으면 균등 선택). 컷 `panels`가 이 목록의 번호다 | 채우기 호출의 패널 이미지 출처 |
+| `vnew/generate.py:2344-2402` `_take_timeline_entries` | 컷마다 시간·샷 약어·ON SCREEN·연기(촬영 지시서 actionEn 첫 문장)·대사·시선 | 기호·분위기 값을 더한다 |
+| `generate.py:2405-2783` `_take_prompt` | STYLE → ASSETS → TIMELINE → MOTION → HARMONY → RULES → AVOID. UTF-8 4,000바이트. 줄이기 9단계(`:2665`)와 최소형 후보(`:2748`). 인물 일관성 문장은 RULES `rule_replace`(`:2491`)에 있다. 장소는 ASSETS "keep its structure and props"(`:2573`)뿐이고 "모든 컷에서 같게"는 없다. 손 개수·머리색·무늬 위치 규칙이 없다 | TIMELINE 기호 문장·분위기, RULES 묘사 규칙, 장소 일관성 낱말 |
+| `generate.py:3796-` `_cut_prompt`(컷 단위 Kling) | ASSETS → … → ACTION(`:3967`) → MOTION → MOOD(`:3968`, 지시서 moodEn) → SETTING → HARMONY → DIALOGUE → CONTINUITY(`:3938`, 인물·배경 유지 문장 있음). 2,500바이트 | ACTION 뒤 FX 줄, MOOD 앞 분위기, CONTINUITY 묘사 규칙 |
+| `vnew/characters.py:444-468` `_ANALYZE_SYSTEM` | appearanceEn = 얼굴·머리·체형·나이, baseOutfitEn = 기본 복장. 머리색·무늬 위치 규칙이 없다 | 규칙 문장 |
+| `generate.py:1567-1572` `_CAST_NOTES_SYSTEM` | 장면 의상 읽기. 무늬 위치 규칙이 없다 | 규칙 문장 |
+| `frontend/public/vnew.js:2950` `renderContiStep`, `:3903` `cutCard` | 컷 카드 칸은 초·썸네일·샷 종류·카메라·장소·대사·상황·인물·프롬프트다. 저장은 `PUT /conti {cuts}`로 컷 전체를 보낸다 | 기호 칩·분위기 한 줄·채우기 버튼 |
+| `vnew.js:4170` `previzPanelMatchCard` | 패널 썸네일 → 연출 문법 → 보정 배지 → 받침 줄(`:4274`) | 읽기 전용 기호·분위기 줄 |
+
+**A 구현 결과(2026-10-30, 작업 A1~A4, `VNEW_FX` 기본 true)** — 줄 번호는 구현 뒤 작업 트리 기준이다.
+
+| 단계 | 위치 | 동작 |
+|---|---|---|
+| 저장 | `plan.py:1312` `update_conti`, `:1355` `_clear_stale_mood_en` | 켬이면 컷 기호·분위기 필드를 정리(`fx.normalize_cut_fx`, 들어온 키만)하고, moodKo만 바뀐 컷은 moodEn을 비운다. 기호·분위기만 다른 저장(아무것도 안 바뀐 저장 포함)은 프리비즈 승인을 풀지 않는다 |
+| 채우기 | `plan.py:857` `run_conti`(콘티를 만들 때 1회), `:1596` `start_fx_fill` → `:1617` `run_fx_fill`(작업 `fxFill`), `:1526` `fill_fx`, `:1443` `_fx_blocks`, `:640` `_analyze_fx`(`ANALYZE_MODEL`, max_tokens 8000, where `vnew.conti.fx`) | 빈 컷(FILL)은 기호·분위기, 번역 대상 컷(TRANSLATE)은 moodEn만. 패널 이미지는 대본 단계와 같은 타일 번호로 ≤ `VNEW_FX_MAX_PANELS`(20)장. 저장 때 지금 컷에 다시 합치고(`fx.merge_fill`) 3컷 한도(`fx.apply_cap`, 그려진 기호 면제)를 적용한다. 원장 `plan._charge` |
+| 라우트 | `routes.py:412` `POST /p/<pid>/conti/fx` | 202 `{ok, taskId, targets, translate}`. 404 `FxDisabled`(끔) · 409 `ContiNotReady`·`NothingToFill`·`TaskRunning`. 세 문구는 운영(`VPOC_RAW_ERRORS=false`)에서도 그대로 보인다(`vpoc/errors.py` `USER_FACING_KINDS`) |
+| 보기 | `plan.py:1842` `plan_view` → `features {fx}`(`:1906`), `fxFill`(`:1929` — 상태·`targets`·`translate`·`estimateUsd`) | 화면이 설정·대상 수·확인창 금액을 안다 |
+| 통 테이크 프롬프트 | `generate.py:2358` `_take_timeline_entries`(항목 `fx`·`moodEn`), `:2427` `RULE_BODY`·`:2434` `RULE_BODY_SHORT`, `:2440` `MOTION_MIN`·`:2445` `HARMONY_MIN`·`:2452` `_harmony_min`, `:2463` `_take_prompt` | 컷 항목 연기 다음 `mood: {moodEn}`(한국 이름 → 로마자, 한글이 남으면 뺌, 로그 `vnew.gen.take_mood_dropped`) → `FX: {기호 문장 " / "}`. RULES에 `RULE_BODY`(손 두 개·머리색·무늬 위치·장소 고정). 기호·분위기가 있으면 줄이기 단계 `mood40`(voiceDrop 뒤)·`moodDrop`·`fxShort`(audioShort 뒤), 켬이면 늘 `bodyShort`(RULE_BODY → 짧은 형, action55 앞). 최소형은 연기를 남기는 후보만 기호 짧은 형, RULES에 묘사 규칙 짧은 형, MOTION·HARMONY는 원문 → 짧은 형 순(로그 `motionHarmonyShort`·`motionHarmonyDrop`) |
+| 컷 단위 프롬프트 | `generate.py:2437` `CUT_RULE_BODY`(89B), `:3941` `_cut_prompt` | 웹툰 `FX:` 줄·실사 `EXPRESSION:` 줄(ACTION 바로 뒤), MOOD 맨 앞 컷 moodEn, CONTINUITY "The mannequin colors" 앞에 손·머리색·무늬 문장. 줄이기 ⓪ `bodyDrop`(묘사 문장 빼기, 장소 요약보다 먼저) → ①~⑥ → ⑥-1 FX 짧은 형 → ⑦ ACTION. 로그 `vnew.gen.cut_prompt cut= variant= bytes= steps=`(설정과 상관없이 1줄) |
+| 분석 규칙 | `characters.py:479` `_analyze_system`(`_analyze`가 부른다), `generate.py:1581` `_cast_notes_system`(`_read_cast_notes`가 부른다) | 켬이면 상수 끝에 머리색 그대로·무늬 위치 문장. 의상 캐시 키(`_cast_notes_hash`)는 그대로라 이미 읽은 장면은 다시 읽지 않는다 |
+| 화면 | `vnew.js:4038-4272`(`FX_KEYS`·`FX_LABEL_KO`·순수 함수 `fxChipStates`·`fxToggled`·`fxFillConfirmText`·`previzFxText` …, DOM `fxRow`·`fxToolbar`·`previzFxLine`), `cutCard`(`:3916`), `renderContiStep`(`:2951`), `decidePlanStep`(`:1587`), `previzPanelMatchCard`(`:4425`); `vnew.css` `vnew-fx-*`·`vnew-mood-input`·`vnew-previz-fx-line` | ③ 칩(추천 먼저·그림 표시·최대 2개·없음)·분위기 60자·영어 옮기기 안내, [기호·분위기 채우기](대상 0이면 막힘, 확인창에 대상 수·예상 금액, 저장 뒤 숫자가 바뀌면 다시 확인 → `POST /conti/fx`), 진행 막대·실패 문구, ④ 읽기 전용 한 줄. `features.fx`가 false면 그리지 않는다 |
+
+끔(`VNEW_FX=false`)이면 저장·채우기·프롬프트·분석 SYSTEM이 구현 전과 같다(fx-e, fx-f, fx-i sha256 5종, fx-k). 켬 상태 바이트는 §10.1 fx-h 출력에 있다. 090 필수 수정(2026-10-30) 뒤 켬 상태 test2 규모 6컷 통 테이크는 MOTION·HARMONY 원문과 묘사 규칙 짧은 형을 남기고(3,874~3,901B), 12컷은 최소형에서도 MOTION·HARMONY(원문 또는 짧은 형)를 남긴다(fx-h 합격 기준 `_FX_TAKE_MUST`). 컷 단위 기본 입력은 켬에서도 SETTING 장소 요약이 끔과 같다(fx-j).
+
+**B. 실사 캐스팅(캐릭터 메이커)**
+
+| 위치 | 지금 동작 |
+|---|---|
+| `characters.py:225-253` `new_char` | variants webtoon·real(시트·정면·후면·3D)과 outfits가 있다. 캐스팅 칸이 없다 |
+| `characters.py:470-500` `_ANALYZE_TOOL`, `:503-560` `analyze_sources` | 성별 필드가 없다(appearanceEn 문장 안에만 있다). Astra → `ANALYZE_FALLBACK_MODEL` 순서 |
+| `characters.py:431` `_fal_request`, `:436` `_fetch_url`, `:877` `_status_url`, `:881` `_response_url` | fal 큐 제출·조회·결과 받기 래퍼(3D가 쓴다). 검사가 바꿔 끼운다 |
+| `characters.py:1052` `_charge_seedream`, `vnew/settings.py` `SEEDREAM_USD` | 원장 kind image, 시트 그림 장당 0.04. 캐스팅 모델·단가 설정이 없다 |
+| `characters.py:2011` `reconcile_stale`, `:2313` `detail_view` | 조회 때 멈춘 빌드를 정리하고 presigned URL을 담는다 |
+| `generate.py:792-827` `_char_entries` | 실사 `realFrontKey`·`realBackKey`를 모은다. 컷 단위 실사(Kling)는 `_previz_payload_elements`(`:3568`)·`_previz_payload_image_list`(`:3623`)에서 실사 정면을 인물 참고로 쓴다 |
+| `vnew.js:474` `renderDetail`, `:440` `schedulePoll` | 분석 카드 → 실사·웹툰 열 → 추가 복장. 폴링은 `status === "building"`일 때만 |
+| `vnew/routes.py:70-238` | 캐릭터 라우트. 캐스팅 라우트가 없다 |
+
+**C. 통 테이크 실사 버전(⑤)**
+
+| 위치 | 지금 동작 |
+|---|---|
+| `generate.py:540-554` `_empty_take_unit`, `:557-578` `_new_take_gen` | 테이크 real 칸·finalReal은 `skipped`(안내 문구), webtoon만 queued |
+| `generate.py:2968-3070` `_do_submit_take` | `variant != "webtoon"`이면 바로 돌아간다. 준비는 `_PREPARE_SEM` 안에서 녹화 이어붙이기 → `_take_payload` → `_submit_take` |
+| `generate.py:2786-2859` `_take_payload` | 인물 웹툰 정면 → 원작 패널 ≤3장 → 장소(`_take_location_jpeg` `:1434`, webtoon `viewKeys.back`) |
+| `generate.py:2881-2942` `_submit_take` | 영상·이미지는 data URI. `generate_audio`는 `VNEW_TAKE_AUDIO` 하나이고 칸별로 바꿀 수 없다 |
+| `generate.py:3246-3309` `_maybe_finalize_previz` | 칸이 전부 skipped인 그림체는 건너뛴다. take는 finalReal skipped를 "끝"으로 본다 |
+| `generate.py:4607-4680` `_do_concat` | 키가 고정(`final_real_key` `:119` = `final-real.mp4`)이라 다시 만들면 덮어쓴다. 클립 1개면 그대로 복사 |
+| `generate.py:5027-5124` `retry_segment` | previz-take는 대상이 webtoon으로 고정 |
+| `generate.py:5127-5146` `select_variant`, `:5150-5292` `gen_view` | 고르기는 gen done + 그 final done. 보기는 칸별 `_variant_out` |
+| `generate.py:5304-5310` `_gen_stale` | `createdAt`에서 30분이 지나면 running을 멈춘 것으로 본다 |
+| `generate.py:5456-5477` `_fail_variant` | `variant == "real" and mode != "previz"`이면 gen을 partial로 바꾼다 |
+| `vpoc/fal.py:1331-1343` `rejection`, `:1346` `poll` | 거절을 likeness·sensitive·other로 나눈다. "Output audio has sensitive content."도 sensitive 문구로 바뀌고 원문은 버린다 |
+| `vnew/locations.py:355-364` `_empty_variant`, `:1838` `_generate_views` | real·webtoon 각각 `viewKeys{back,front}`. 실사 장소 뷰는 이미 만든다 |
+| `routes.py:714-769` | cast-notes·generate·generate/retry·select. 실사 버전 라우트가 없다 |
+| `vnew.js:5407` `renderGenStep`, `:5649` `takeRow`, `:5844` `cutCell`, `:5900` `finalResults`, `:3736` `openGenerateConfirm` | take 행의 실사 칸은 "건너뜀" 고정. 고르기 버튼은 두 final이 모두 done일 때만 보인다. 생성 확인창은 금액 숫자를 보이지 않는다(설계자 2026-10-20) |
+
+**조사 중 찾은 지금 코드의 문제**(1~4는 vnew-live-fx 묶음 C에서 함께 고친다)
+
+1. `_fail_variant`: previz-take에서 real 칸이 실패하면 gen이 partial이 되고 `_drive`가 멈춘다. 지금은 real 칸이 늘 skipped라 드러나지 않는다.
+2. `_gen_stale`이 `createdAt`만 본다. 30분 지난 gen에서 [다시 시도]를 누르면 화면이 곧바로 partial로 보이고, 새 생성이 진행 중인 gen을 덮을 수 있다.
+3. `vpoc/fal.rejection`이 소리 검사 거절과 영상 내용 거절을 같은 문구로 바꿔, 화면이 "소리 없이 다시 만들기"를 고를 근거가 없다.
+4. take gen 화면에는 고르기 버튼이 없다(`finalResults`가 두 final done을 요구하는데 finalReal이 skipped다).
+5. `_gen_previz_stale`은 previz-take를 늘 false로 본다(프리비즈를 다시 녹화해도 take gen이 stale로 보이지 않는다). 이번 스펙 범위 밖이고 기록만 한다.
 
 ### 3.7 `stitcher.py`
 
@@ -450,10 +528,14 @@ vpoc·vnew의 Bedrock 도구 호출은 전부 `vpoc.llm._converse`(`vpoc/llm.py:
 | `PROMPT_BOOST_ENABLED` | `prompt_boost.py:42` | 1 | 키 없음 | — | — |
 | `VNEW_PREVIZ_COLLISION` | `vnew/settings.py`(`_bool`), `previz.run_design`·`previz_view` | true | true | — | —(VNEW 꺼짐이라 영향 없음) |
 | `VNEW_PREVIZ_SUPPORT` | `vnew/settings.py`(`_bool`), `previz.run_design` | true | true | — | —(VNEW 꺼짐이라 영향 없음) |
+| `VNEW_FX` | `vnew/settings.py:164`(`_bool`), `plan.update_conti`·`run_conti`·`start_fx_fill`·`plan_view`, `generate._take_timeline_entries`·`_take_prompt`·`_cut_prompt`·`_cast_notes_system`, `characters._analyze_system`, 화면 `features.fx` | true | true | — | —(VNEW 꺼짐이라 영향 없음) |
+| `VNEW_FX_MAX_PANELS` | `vnew/settings.py:166`(`_int`), `plan._fx_blocks`·`_fx_estimate_usd` | 20 | 키 없음(코드 기본) | — | — |
 
 `VNEW_PREVIZ_COLLISION`(084 작업 1, 2026-10-28)은 앱 env(`k8s/workloads.yaml.tmpl`의 `VNEW_ENABLED` 바로 뒤)와 base(`deploy/config.env.example`의 `VNEW_ENABLED` 뒤)에 배선돼 있다. false면 보정·앉을 자리(`sit`)가 없고 엉덩이 0.5(지금 동작)다. 설계는 시작 때 읽은 값으로 끝낸다. 되돌림 배선 검사 `PARITY_ENV_KEYS`(rw-a~c)에 들어 있다.
 
 `VNEW_PREVIZ_SUPPORT`(previz-support-reasoning, 2026-10-29)는 템플릿·base 모두 `VNEW_PREVIZ_COLLISION` 바로 뒤에 배선돼 있고 `PARITY_ENV_KEYS`에 들어 있다(rw-a~c, sr-l). false면 설계 프롬프트의 `[받침 판단]` 줄·지시 단락, 서버 받침 맞춤(자세·`sitOn`·소품 높이), `fit[cut].support`가 없다(지금 동작). 패널 읽기의 `supports`는 설정과 상관없이 읽어 캐시에 둔다. 설계는 시작 때 읽은 값으로 끝낸다. 되돌린 뒤에도 이미 저장된 장면(맞춘 소품 높이)과 `fit.support` 화면 줄은 그대로다(다음 설계부터 지금 동작).
+
+`VNEW_FX`(vnew-live-fx 묶음 A, 2026-10-30)는 템플릿·base 모두 `VNEW_PREVIZ_SUPPORT` 바로 뒤에 배선돼 있고 `PARITY_ENV_KEYS`에 들어 있다(rw-a~c, fx-m). 되돌리기는 `config.<target>.env`에 `VNEW_FX=false` 한 줄이다. false면 `POST /conti/fx`가 404, 콘티 만들기에 채우기 호출이 없고, `update_conti`가 지금처럼 늘 승인을 풀며, 통 테이크·컷 단위 프롬프트와 분석·의상 읽기 SYSTEM이 구현 전과 글자 하나 다르지 않다(fx-i sha256). 화면은 `plan_view.features.fx`로 칩·버튼·④ 한 줄을 숨긴다. 이미 저장된 컷 필드(`fx`·`fxSuggest`·`fxDrawn`·`moodKo`·`moodEn`)와 `plan.fxFill`은 지우지 않는다. 채우기 스레드는 시작 때, 프롬프트는 제출 때 설정을 읽는다(진행 중인 채우기는 끝까지 간다). `VNEW_FX_MAX_PANELS`는 코드 기본값만 쓴다.
 
 073 새 키 5개(위 `VPOC_ARK_SEEDANCE_ENABLED`~`VPOC_FAL_SEEDANCE_TAG_STYLE`)는 앱 env(`k8s/workloads.yaml.tmpl:298-311`)와 base(`deploy/config.env.example:368-392`)에 배선돼 있어 오버레이 한 줄로 바꿀 수 있다. 템플릿이 env를 늘 설정하므로 base 값이 실제 기본값이다. 빈 값의 뜻: `FAMILY` 빈 값은 계열 라우팅 끔(070 동작), `PROMPT_MAX_OVERRIDES` 빈 값은 덮어쓰기 없음(caps·2,500), `TAG_STYLE` 빈 값·틀린 값은 `at`(design.md §6).
 
@@ -627,9 +709,9 @@ flowchart LR
 
 ## 10. 테스트·검증 도구
 
-### 10.1 `tools/check_vpoc.py`(CI 유일 검사기, 11,856줄)
+### 10.1 `tools/check_vpoc.py`(CI 유일 검사기, 21,051줄)
 
-`main()`이 아래 34개를 순서대로 부른다(`check_vpoc.py:11809-11843`). 실패가 하나라도 있으면 종료 코드 1. 외부 호출은 모듈 래퍼를 monkeypatch 하고 S3는 메모리 저장소로 바꾼다(예: `:892` "메모리 S3", `:916`, `:1216`, `:1930`).
+`main()`이 아래 55개를 순서대로 부른다(`check_vpoc.py:20983-`). 실패가 하나라도 있으면 종료 코드 1. 외부 호출은 모듈 래퍼를 monkeypatch 하고 S3는 메모리 저장소로 바꾼다(예: `:892` "메모리 S3", `:916`, `:1216`, `:1930`). 새 기본값(`VNEW_FX` 켬)에서 기대값이 달라지는 기존 검사 3개(`check_vnew_plan`·`check_vnew_locations`·`check_vnew_previz`)는 `main()`의 부르는 줄에서 `_run_fx_off(...)`(`:20977`, `_pin_vnew(VNEW_FX=False)`)로 끔 고정한다. 본문·기대값은 그대로다.
 
 | 접두어 | 검사 함수 | 대상 |
 |---|---|---|
@@ -641,6 +723,7 @@ flowchart LR
 | vnew take | `check_vnew_take`, `check_vnew_take_prompt`, `check_vnew_take_costume`, `check_vnew_take_prompt_polish`, `check_vnew_take_prompt_budget`, `check_vnew_take_on_screen`, `check_vnew_take_harmony_motion` | `vnew.generate` 통 테이크(Seedance reference-to-video) 프롬프트·바이트 예산·의상·화면 행동 |
 | vnew previz 084 | `check_previz_collision`(cs-a~p, 2026-10-28) | `previz_collision` 전 함수, `previz_schema` sit 정규화, `previz_fit.body_y`·`match_visible` hip_y, `previz_camera._actor_points`, `previz.run_design` 1·2차 보정·`_rematch_cut`·`_recompute_manual_fit`·`previz_view`·`_scene_view`, 렌더러·화면 문자열. 개발계 test3 실측 장면(`_previz_test3_scene`)을 쓴다. 공용 도우미 `_pin_vnew`·`_guard_real_llm`(실제 Bedrock 0회 보장) |
 | vnew previz 받침 | `check_previz_support`(sr-a~m, 2026-10-29) | `previz_support` 전 함수, `previz_grammar` emit_shot `supports`·SYSTEM·`normalize_grammar`·`GRAMMAR_VERSION`, `previz._read_grammars` 캐시 판 올림·`_design_prompt` 받침 줄(끔 = 변경 전 sha256)·`run_design` 받침 맞춤·`fit.support`, `previz_schema` 컷 인물 `support`, `previz_collision.solve_legs` `feet`, `vnew.js` `previzSupportText`(node 실행)·`vnew.css`, 배선. test3 실측 장면 + Astra 1m 가로대 → 윗면 0.561m. sr-m은 test3 실제 패널 읽기 3종(몸·받침 화면 밖)이 자세·소품을 바꾸지 않는지 본다 |
+| vnew 기호·분위기 | `check_vnew_fx`(fx-a~g·fx-m·fx-n 저장 쪽), `check_vnew_fx_prompt`(fx-h~k·fx-n 프롬프트 쪽), `check_vnew_fx_screen`(fx-l), 2026-10-30 | `vnew/fx.py` 전 함수, `plan` 저장 규칙·채우기 호출(가짜 `vnew.conti.fx`)·작업·`plan_view`, `POST /conti/fx`(별도 Flask 앱), 배선, `generate._take_prompt`·`_cut_prompt`(끔 = 변경 전 sha256 5종 `_FX_PROMPT_SHA_OFF`, 켬 바이트·단계 출력)·`_cast_notes_system`, `characters._analyze_system`, `vnew.js` 기호 구역(순수 함수·DOM 조립을 node 가짜 DOM으로 실행)·`vnew.css`, 운영 오류 문구(`USER_FACING_KINDS`). 고정 입력은 기존 take 검사 값(`_fx_take_fixture`·`_fx_cut_fixture`) |
 
 ### 10.2 기타 도구
 

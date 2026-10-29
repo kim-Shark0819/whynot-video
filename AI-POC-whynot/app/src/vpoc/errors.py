@@ -49,6 +49,11 @@ USER_FACING_KINDS = {
     "RealStartImageUnsupported",
     # 073 R10.5: fal 모델 해제 거절(E3)은 운영(RAW_ERRORS=false)에서도 문구를 그대로 보인다.
     "AdminOnly",
+    # vnew-live-fx A(2026-10-30 검토): ③ [기호·분위기 채우기] 거절 문구. 모두 고정 한국어 문구라(외부 원문 없음) 운영에서도 보인다.
+    # ContiNotReady 는 generate.check_preconditions 의 고정 문구("먼저 콘티를 완성해 주세요.")에도 같이 적용된다.
+    "FxDisabled",
+    "ContiNotReady",
+    "NothingToFill",
 }
 
 

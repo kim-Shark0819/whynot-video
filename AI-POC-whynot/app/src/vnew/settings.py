@@ -158,6 +158,13 @@ VNEW_PREVIZ_COLLISION = _bool("VNEW_PREVIZ_COLLISION", True)
 # 남긴다. false 면 프롬프트·맞춤·fit.support 없음(지금 동작). 패널 읽기의 supports 는 설정과 상관없이 읽어 캐시에 둔다.
 VNEW_PREVIZ_SUPPORT = _bool("VNEW_PREVIZ_SUPPORT", True)
 
+# 만화 기호·분위기(vnew-live-fx 묶음 A, 2026-10-30). 켜면 ③ 콘티 컷마다 기호(fx·fxSuggest·fxDrawn)와 분위기 한 줄
+# (moodKo·moodEn)을 두고, 콘티를 만들 때·[기호·분위기 채우기] 때 상위 모델 1회로 채운다. 기호·분위기만 고친 저장은
+# 프리비즈 승인을 풀지 않는다. false 면 지금 동작(채우기 라우트 404·저장 정규화 없음·늘 승인 해제). 저장된 값은 지우지 않는다.
+VNEW_FX = _bool("VNEW_FX", True)
+# 채우기 1회에 보낼 패널 이미지 상한. 넘으면 순서를 지켜 고르게 고른다(코드 기본, 템플릿에 넣지 않는다).
+VNEW_FX_MAX_PANELS = _int("VNEW_FX_MAX_PANELS", 20)
+
 # --- ⑤ 촬영 지시서(shot brief) (설계자 2026-10-22) ---
 # 프리비즈 승인 직후, 장소마다 1회 호출해 그 장소 컷들의 "촬영 전문 언어" 지시서를 쓴다. 작성 모델은
 # 설계와 같은 체인(Astra 먼저, 실패 시 Claude 분석 체인). 장면·배경·연기·대사 연기를 영어로 섬세히.
