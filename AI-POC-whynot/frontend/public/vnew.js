@@ -4276,8 +4276,9 @@
     return card;
   }
 
-  /* 받침 판단(previz-support-reasoning R7). fit[cutId].support = [{name, posture, supportKind, supportEn, contact, feet,
+  /* 받침 판단(previz-support-reasoning R7). fit[cutId].support = [{name, seen, posture, supportKind, supportEn, contact, feet,
      heightM, propId, propTopM, heightFix?, status}] — 패널 그림에서 읽은 받침과 서버가 맞춘 소품 높이. 인물마다 한 줄.
+     그림에 받침이 안 보인 항목(status hidden)은 보이지 않는다.
      fit.support 가 없으면(옛 계획·설정 끔) 아무것도 보이지 않는다. 글은 textContent(el)로만 넣는다.
      라벨 표는 previz_support.py 의 *_KO 와 같은 글자다(검사 sr-k). */
   var SUPPORT_POSTURE_KO = {
@@ -4294,9 +4295,10 @@
     bed: "침대", wall: "벽", pole: "기둥", other: "물체"
   };
 
-  /* 받침 한 줄 문구(순수 함수 — DOM 없음, 검사가 node 로 실행한다). 판단 불가(skipped)·빈 항목은 "". */
+  /* 받침 한 줄 문구(순수 함수 — DOM 없음, 검사가 node 로 실행한다). 판단 불가(skipped)·그림에 안 보임(hidden)·빈 항목은 "". */
   function previzSupportText(entry) {
-    if (!entry || typeof entry !== "object" || entry.status === "skipped") return "";
+    if (!entry || typeof entry !== "object") return "";
+    if (entry.status === "skipped" || entry.status === "hidden" || entry.seen === "hidden") return "";
     var name = String(entry.name || "인물");
     var posture = SUPPORT_POSTURE_KO[entry.posture] || "";
     var text;

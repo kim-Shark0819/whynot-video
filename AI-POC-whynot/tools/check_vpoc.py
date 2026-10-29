@@ -18034,17 +18034,17 @@ _SR_BOLLARD_WHAT = "a short post that stops cars from parking; usually just abov
 def _sr_prompt_fixture() -> tuple:
     """sr-e 프롬프트 고정 입력(컷 4개: 받침 1명 · 바닥+받침 2명 · 문법 없음 · 가려 판단 불가). 해시를 잰 입력과 같다."""
     support_a = {
-        "name": "여의준", "posture": "sit", "supportEn": "parking bollard", "supportWhatEn": _SR_BOLLARD_WHAT,
+        "name": "여의준", "seen": "visible", "posture": "sit", "supportEn": "parking bollard", "supportWhatEn": _SR_BOLLARD_WHAT,
         "supportKind": "bollard", "heightCue": "above_knee", "supportHeightM": 0.6, "contact": "perch",
         "feet": "floor", "reasonEn": "She sits on the top of a short post by the road.",
     }
     support_b = {
-        "name": "범건우", "posture": "stand", "supportEn": "ground", "supportWhatEn": "",
+        "name": "범건우", "seen": "visible", "posture": "stand", "supportEn": "ground", "supportWhatEn": "",
         "supportKind": "floor", "heightCue": "floor", "supportHeightM": 0.0, "contact": "floor",
         "feet": "floor", "reasonEn": "He stands on the pavement.",
     }
     support_hidden = {
-        "name": "범건우", "posture": "sit", "supportEn": "", "supportWhatEn": "", "supportKind": "none",
+        "name": "범건우", "seen": "hidden", "posture": "sit", "supportEn": "", "supportWhatEn": "", "supportKind": "none",
         "heightCue": "", "supportHeightM": None, "contact": "none", "feet": "none", "reasonEn": "hidden",
     }
     base = {
@@ -18094,8 +18094,12 @@ def check_previz_support() -> None:
            주인공 머리 화면 안·fit.support·로그·옛 문법 유지. apply_supports 예외면 사본 버림·warning
     (sr-i) 저장(PUT) → 보기 왕복: 컷 인물 support·fit.support 보존, 옛 계획 보기에 support 없음, 정규화 분기
     (sr-j) 설정 끔: 받침 맞춤 0회·fit.support 없음·프롬프트 줄 없음·소품 그대로·캐시에는 supports(v 2)
-    (sr-k) 화면: previzSupportText 를 node 로 실행(예문·높이 맞춤·noProp·바닥·판단 불가), 라벨 표 = Python, textContent·css
+    (sr-k) 화면: previzSupportText 를 node 로 실행(예문·높이 맞춤·noProp·바닥·판단 불가·hidden), 라벨 표 = Python, textContent·css
     (sr-l) 배선: 코드 기본 true·템플릿·base(COLLISION 바로 뒤, 되돌리기 주석)·PARITY_ENV_KEYS·render dev/prod true·오버레이 false
+    (sr-m) 필수 수정 A: test3 실측 읽기 3종(cut-01 난간·cut-02/07 서 있음, 몸·받침 화면 밖)을 seen 없음·hidden 으로 넣으면
+           pose·sitOn·소품 그대로·status hidden·프롬프트 줄 0·화면 줄 0, visible·partial 이면 지금처럼 적용(sit → stand),
+           run_design 7컷 앉은 채·가로대 그대로·fit.support hidden 10·stage hidden=10
+    (sr-a 보강) seen 모르는 값·빈 값·없음 → hidden, hidden → supportKind·contact·feet none·heightCue ""·높이 None
     """
     sys.path.insert(0, str(ROOT / "app"))
     import copy as _copy  # noqa: PLC0415
@@ -18135,12 +18139,12 @@ def check_previz_support() -> None:
         seen_ids.update(ids)
 
     fake_tile = b"FAKE-PANEL-JPEG"
-    field_order = ["name", "posture", "supportEn", "supportWhatEn", "supportKind", "heightCue", "supportHeightM",
+    field_order = ["name", "seen", "posture", "supportEn", "supportWhatEn", "supportKind", "heightCue", "supportHeightM",
                    "contact", "feet", "reasonEn"]
 
     def sup(name, posture="sit", kind="bollard", en="parking bollard", cue="above_knee", contact="perch", feet="floor",
-            hm=None, what=_SR_BOLLARD_WHAT):
-        return {"name": name, "posture": posture, "supportEn": en, "supportWhatEn": what, "supportKind": kind,
+            hm=None, what=_SR_BOLLARD_WHAT, seen="visible"):
+        return {"name": name, "seen": seen, "posture": posture, "supportEn": en, "supportWhatEn": what, "supportKind": kind,
                 "heightCue": cue, "supportHeightM": hm, "contact": contact, "feet": feet, "reasonEn": "검사"}
 
     def prop(pid, size, pos, *, shape="box", label="", label_en="", **extra):
@@ -18281,16 +18285,16 @@ def check_previz_support() -> None:
             raw_a = {
                 "mainSubject": "여의준", "frameBottomCut": "chest",
                 "supports": [
-                    {"name": " 여의준 ", "posture": "SIT", "supportEn": long_en, "supportWhatEn": "w" * 300,
+                    {"name": " 여의준 ", "seen": " Visible ", "posture": "SIT", "supportEn": long_en, "supportWhatEn": "w" * 300,
                      "supportKind": "Bollard", "heightCue": "above-knee", "supportHeightM": 2.0, "contact": "PERCH",
                      "feet": "Dangling", "reasonEn": "line one\nline two\t" + "r" * 250},
                     {"name": "", "posture": "sit"},
                     {"name": "여의준", "posture": "lie"},
-                    {"name": "범건우", "posture": "fly", "supportKind": "spaceship", "heightCue": "knees",
+                    {"name": "범건우", "seen": "partial", "posture": "fly", "supportKind": "spaceship", "heightCue": "knees",
                      "supportHeightM": "0.5", "contact": "hover", "feet": "x"},
-                    {"name": "김", "supportKind": "", "supportHeightM": -0.3},
+                    {"name": "김", "seen": "visible", "supportKind": "", "supportHeightM": -0.3},
                     "not a dict",
-                    {"name": "박", "supportKind": None, "supportHeightM": True, "posture": None},
+                    {"name": "박", "seen": "VISIBLE", "supportKind": None, "supportHeightM": True, "posture": None},
                     {"name": "최", "supportHeightM": float("nan"), "supportEn": ["list"]},
                 ],
             }
@@ -18299,7 +18303,7 @@ def check_previz_support() -> None:
             if [s.get("name") for s in sup_a] != ["여의준", "범건우", "김", "박", "최"]:
                 bad.append(f"(sr-a) 이름 없음·중복 처리가 다릅니다: {[s.get('name') for s in sup_a]}")
             want_first = {
-                "name": "여의준", "posture": "sit", "supportEn": " ".join(long_en.split())[:80].rstrip(), "supportWhatEn": "w" * 200,
+                "name": "여의준", "seen": "visible", "posture": "sit", "supportEn": " ".join(long_en.split())[:80].rstrip(), "supportWhatEn": "w" * 200,
                 "supportKind": "bollard", "heightCue": "above_knee", "supportHeightM": 1.5, "contact": "perch",
                 "feet": "dangling", "reasonEn": ("line one line two " + "r" * 250)[:200],
             }
@@ -18308,16 +18312,35 @@ def check_previz_support() -> None:
             if any(list(s) != field_order for s in sup_a):
                 bad.append("(sr-a) 정리한 항목의 필드 순서가 생각 순서와 다릅니다")
             want_rest = {
-                "범건우": {"posture": "stand", "supportKind": "other", "heightCue": "", "supportHeightM": None,
+                "범건우": {"seen": "partial", "posture": "stand", "supportKind": "other", "heightCue": "", "supportHeightM": None,
                          "contact": "none", "feet": "none", "supportEn": "", "supportWhatEn": "", "reasonEn": ""},
-                "김": {"supportKind": "none", "supportHeightM": 0.0, "posture": "stand"},
-                "박": {"supportKind": "none", "supportHeightM": None, "posture": "stand"},
-                "최": {"supportHeightM": None, "supportEn": "", "supportKind": "none"},
+                "김": {"seen": "visible", "supportKind": "none", "supportHeightM": 0.0, "posture": "stand"},
+                "박": {"seen": "visible", "supportKind": "none", "supportHeightM": None, "posture": "stand"},
+                "최": {"seen": "hidden", "supportHeightM": None, "supportEn": "", "supportKind": "none"},
             }
             for item in sup_a[1:]:
                 for key, value in (want_rest.get(item["name"]) or {}).items():
                     if item.get(key) != value:
                         bad.append(f"(sr-a) {item['name']} {key} 가 {value!r} 가 아닙니다: {item.get(key)!r}")
+            # seen(필수 수정 A): 모르는 값·빈 값·없음 → hidden. hidden 이면 받침 값을 비우고 문자열·자세는 그대로 둔다.
+            if psup.SEEN != ("visible", "partial", "hidden"):
+                bad.append(f"(sr-a) seen 열거값이 다릅니다: {psup.SEEN}")
+            hidden_want = {"supportKind": "none", "heightCue": "", "supportHeightM": None, "contact": "none", "feet": "none",
+                           "supportEn": "parking bollard", "supportWhatEn": _SR_BOLLARD_WHAT, "reasonEn": "검사", "posture": "sit"}
+            for raw_seen in ("hidden", "maybe", "", None, 3, "HIDDEN"):
+                item_s = sup("가", hm=0.6, seen=raw_seen)
+                got_s = (psup.normalize_supports([item_s]) or [{}])[0]
+                if got_s.get("seen") != "hidden" or any(got_s.get(k) != v for k, v in hidden_want.items()):
+                    bad.append(f"(sr-a) seen={raw_seen!r} 가 hidden·받침 값 비움이 아닙니다: {got_s}")
+            missing_s = sup("가", hm=0.6)
+            missing_s.pop("seen")
+            if (psup.normalize_supports([missing_s]) or [{}])[0].get("seen") != "hidden":
+                bad.append("(sr-a) seen 이 없으면 hidden 이어야 합니다")
+            for raw_seen, want_seen in (("visible", "visible"), (" PARTIAL ", "partial")):
+                got_s = (psup.normalize_supports([sup("가", hm=0.6, seen=raw_seen)]) or [{}])[0]
+                if got_s.get("seen") != want_seen or got_s.get("supportKind") != "bollard" or got_s.get("heightCue") != "above_knee" \
+                        or got_s.get("supportHeightM") != 0.6 or got_s.get("contact") != "perch" or got_s.get("feet") != "floor":
+                    bad.append(f"(sr-a) seen={raw_seen!r} 의 받침 값이 그대로가 아닙니다: {got_s}")
             for raw_none in ({}, {"supports": "str"}, {"supports": {"name": "x"}}, {"supports": None}):
                 if grammarmod.normalize_grammar(raw_none).get("supports") != []:
                     bad.append(f"(sr-a) supports 가 없거나 리스트가 아닐 때 [] 가 아닙니다: {raw_none}")
@@ -18340,14 +18363,19 @@ def check_previz_support() -> None:
             if props_b["supports"]["items"]["properties"]["supportHeightM"] != {"type": "number"}:
                 bad.append("(sr-b) supportHeightM 이 number 가 아닙니다")
             for phrase in (
-                "first the posture, then the supporting object, then what that object is and its usual real size, then its "
-                "height compared with a person standing next to it, then how they sit on it, then the feet",
-                "Write only what is drawn.", "use supportKind:none and contact:none",
+                "first whether the support and the body parts touching it are actually drawn, then the posture, then the "
+                "supporting object, then what that object is and its usual real size, then its height compared with a person "
+                "standing next to it, then how they sit on it, then the feet",
+                "If the support or the body parts touching it are outside the frame, seen is hidden: do NOT guess the posture "
+                "from context, and decide posture only from the visible upper body.",
+                "When seen is hidden, supportKind, contact and feet are none.",
+                "this includes anything you would only infer from the cut description",
+                "Write only what is drawn.", "use seen:hidden, supportKind:none and contact:none",
                 "Answer this even when the drawn person is sitting", "'parking bollard'",
             ):
                 if phrase not in grammarmod.SYSTEM:
                     bad.append(f"(sr-b) SYSTEM 에 '{phrase[:50]}…' 이 없습니다")
-            for enum in (psup.POSTURES, psup.SUPPORT_KINDS, psup.HEIGHT_CUES, psup.CONTACTS, psup.FEET):
+            for enum in (psup.SEEN, psup.POSTURES, psup.SUPPORT_KINDS, psup.HEIGHT_CUES, psup.CONTACTS, psup.FEET):
                 missing_e = [value for value in enum if value not in grammarmod.SYSTEM]
                 if missing_e:
                     bad.append(f"(sr-b) SYSTEM 에 열거값이 없습니다: {missing_e}")
@@ -18575,7 +18603,7 @@ def check_previz_support() -> None:
             for key, (item, want) in extra_e.items():
                 if psup.prompt_line(item) != want:
                     bad.append(f"(sr-e) prompt_line({key}) 가 다릅니다: {psup.prompt_line(item)}")
-            for none_case in ("x", {"name": ""}, grammar_e["cut-04"]["supports"][0]):
+            for none_case in ("x", {"name": ""}, grammar_e["cut-04"]["supports"][0], sup("김", seen="hidden"), dict(sup("김"), seen="maybe")):
                 if psup.prompt_line(none_case) is not None:
                     bad.append(f"(sr-e) prompt_line 이 None 이 아닙니다: {none_case}")
             inject = _copy.deepcopy(grammar_e)
@@ -18598,6 +18626,8 @@ def check_previz_support() -> None:
                 ("a6", "sit", None, sup("a6", posture="lie", kind="bed", contact="lie_on"), "lie", "sit", "ok"),
                 ("a7", "sit", None, sup("a7", kind="floor", contact="floor"), "sit", None, "ok"),
                 ("a8", "stand", None, sup("a8", kind="none", contact="none"), "stand", None, "skipped"),
+                # seen hidden: 읽은 자세(stand)가 달라도 pose·sitOn 을 바꾸지 않는다(필수 수정 A).
+                ("a9", "sit", "ghost", sup("a9", posture="stand", kind="floor", contact="floor", seen="hidden"), "sit", None, "hidden"),
             ]
             cas_f1 = []
             for i, (aid, pose, sit_on, _s, _p, _f, _st) in enumerate(pose_cases):
@@ -18617,16 +18647,21 @@ def check_previz_support() -> None:
             a2 = next(c for c in sc_f1["timeline"][0]["actors"] if c["id"] == "a2")
             if "sitOn" in a2:
                 bad.append("(sr-f) 앉지 않게 된 인물(lean)에 sitOn 이 남았습니다")
+            a9 = next(c for c in sc_f1["timeline"][0]["actors"] if c["id"] == "a9")
+            if a9.get("sitOn") != "ghost" or a9.get("support") != {"seen": "hidden", "posture": "stand", "supportKind": "none",
+                                                                  "supportEn": "parking bollard", "contact": "none", "feet": "none",
+                                                                  "heightM": None}:
+                bad.append(f"(sr-f) seen hidden 인물의 sitOn·support 가 다릅니다: {a9}")
             a1 = next(c for c in sc_f1["timeline"][0]["actors"] if c["id"] == "a1")
-            if a1.get("support") != {"posture": "sit", "supportKind": "bollard", "supportEn": "parking bollard",
+            if a1.get("support") != {"seen": "visible", "posture": "sit", "supportKind": "bollard", "supportEn": "parking bollard",
                                      "contact": "perch", "feet": "floor", "heightM": 0.561} or "sitOn" in a1:
                 bad.append(f"(sr-f) 컷 인물 support 가 다르거나 noProp 인데 sitOn 이 생겼습니다: {a1}")
             if (by_actor.get("a1") or {}).get("propId") != "" or (by_actor.get("a1") or {}).get("propTopM") is not None:
                 bad.append("(sr-f) noProp 항목의 propId·propTopM 이 비어 있지 않습니다")
-            want_keys = ["actorId", "name", "posture", "supportKind", "supportEn", "contact", "feet", "heightM", "propId", "propTopM"]
+            want_keys = ["actorId", "name", "seen", "posture", "supportKind", "supportEn", "contact", "feet", "heightM", "propId", "propTopM"]
             for entry in res_f1:
                 keys = list(entry)
-                if keys[:10] != want_keys or keys[-1] != "status" or entry["status"] not in ("ok", "noProp", "standing", "skipped"):
+                if keys[:11] != want_keys or keys[-1] != "status" or entry["status"] not in ("ok", "noProp", "standing", "skipped", "hidden"):
                     bad.append(f"(sr-f) 결과 항목 키 순서·status 가 다릅니다: {keys}")
 
             # (f2) sitOn 유지(가까운 주차봉 낱말이 있어도)
@@ -18850,7 +18885,7 @@ def check_previz_support() -> None:
                     bad.append(f"(sr-h) {cid} 주인공 머리 사각형이 화면 밖입니다: y0={y0} y1={y1}")
             stage_sup = logs.messages("step=support")
             if len(stage_sup) != 1 or not re.fullmatch(
-                rf"vnew\.previz\.stage pid={pid_h} step=support ms=\d+ entries=11 heightFixes=1 noProp=0", stage_sup[0]
+                rf"vnew\.previz\.stage pid={pid_h} step=support ms=\d+ entries=11 heightFixes=1 noProp=0 hidden=0", stage_sup[0]
             ):
                 bad.append(f"(sr-h) stage support 로그가 다릅니다: {stage_sup}")
             height_h = logs.messages("vnew.previz.support.height")
@@ -18913,19 +18948,23 @@ def check_previz_support() -> None:
             ):
                 bad.append("(sr-i) 옛 계획 보기에 support 가 생겼습니다")
             norm_i = pschema._normalize_cut_actors([  # noqa: SLF001
-                {"id": "a1", "pose": "sit", "support": {"posture": "SIT", "supportKind": "Bollard", "supportEn": "x\ny",
+                {"id": "a1", "pose": "sit", "support": {"seen": " PARTIAL ", "posture": "SIT", "supportKind": "Bollard", "supportEn": "x\ny",
                                                         "contact": "perch", "feet": "floor", "heightM": "0.5"}},
-                {"id": "a2", "pose": "stand", "support": {"posture": "lean", "supportKind": "", "contact": "bad", "feet": "x", "heightM": 9}},
+                {"id": "a2", "pose": "stand", "support": {"seen": "bogus", "posture": "lean", "supportKind": "", "contact": "bad",
+                                                          "feet": "x", "heightM": 9}},
                 {"id": "a3", "pose": "stand", "support": "not a dict"},
                 {"id": "a4", "pose": "stand"},
-            ], ["a1", "a2", "a3", "a4"], {"width": 6, "depth": 6})
+                {"id": "a5", "pose": "sit", "support": {"posture": "sit", "supportKind": "rail", "contact": "perch", "feet": "floor",
+                                                        "heightM": 0.9}},
+            ], ["a1", "a2", "a3", "a4", "a5"], {"width": 6, "depth": 6})
             want_i = [
-                {"posture": "sit", "supportKind": "bollard", "supportEn": "x y", "contact": "perch", "feet": "floor", "heightM": None},
-                {"posture": "lean", "supportKind": "none", "supportEn": "", "contact": "none", "feet": "none", "heightM": 1.5},
+                {"seen": "partial", "posture": "sit", "supportKind": "bollard", "supportEn": "x y", "contact": "perch", "feet": "floor", "heightM": None},
+                {"seen": "hidden", "posture": "lean", "supportKind": "none", "supportEn": "", "contact": "none", "feet": "none", "heightM": 1.5},
                 None, None,
+                {"posture": "sit", "supportKind": "rail", "supportEn": "", "contact": "perch", "feet": "floor", "heightM": 0.9},
             ]
             if [ca.get("support") for ca in norm_i] != want_i or "support" in norm_i[2] or "support" in norm_i[3]:
-                bad.append(f"(sr-i) 컷 인물 support 정규화가 다릅니다: {[ca.get('support') for ca in norm_i]}")
+                bad.append(f"(sr-i) 컷 인물 support 정규화가 다릅니다(seen 없는 옛 저장본은 키 없음): {[ca.get('support') for ca in norm_i]}")
             mark("sr-i")
 
             # ---------------- (sr-j) 설정 끔 ----------------
@@ -18963,6 +19002,140 @@ def check_previz_support() -> None:
                 bad.append("(sr-j) 설정을 꺼도 읽기 캐시에는 supports(v 2)가 남아야 합니다")
             mark("sr-j")
 
+            # ---------------- (sr-m) test3 실측 읽기(필수 수정 A): 안 보이는 받침은 적용하지 않는다 ----------------
+            # Claude 검증(2026-10-29, 개발계 ci-bca31ec1, test3 실제 패널 → Fable 5.1) 표의 값이다. 그때 도구에는 seen 이
+            # 없었다(= 지금 정규화로는 hidden). reasonEn 은 표의 근거 요약을 영어로 옮긴 것이다(원문 아님).
+            real_reads = {
+                "cut-01": {"name": "범건우", "posture": "sit", "supportKind": "rail", "supportEn": "metal railing top bar",
+                           "heightCue": "hip", "contact": "perch", "feet": "none",
+                           "reasonEn": "The seat itself is not drawn; the cut description says he sits on the railing."},
+                "cut-02": {"name": "여의준", "posture": "stand", "supportKind": "floor", "supportEn": "ground",
+                           "heightCue": "floor", "contact": "floor", "feet": "floor",
+                           "reasonEn": "The legs are outside the frame, but he seems to be standing."},
+                "cut-07": {"name": "여의준", "posture": "stand", "supportKind": "floor", "supportEn": "ground",
+                           "heightCue": "floor", "contact": "floor", "feet": "floor",
+                           "reasonEn": "The feet are outside the frame, but he stands on the ground."},
+            }
+
+            def m_scene():
+                raw = _previz_test3_scene()  # 실측 상부 가로대 윗면 0.985, 7컷 모두 sit
+                for item in raw["props"]:
+                    if item["id"] == "upper_rail":
+                        item["sittable"] = True
+                for cut in raw["timeline"]:
+                    for ca in cut["actors"]:
+                        ca["sitOn"] = "upper_rail"
+                return raw
+
+            def m_reads(seen):
+                out_m = {}
+                for cid, read in real_reads.items():
+                    item = dict(read)
+                    if seen is not None:
+                        item["seen"] = seen
+                    out_m[cid] = {"supports": [item]}
+                return out_m
+
+            def strip_support(scene):
+                clone = _copy.deepcopy(scene)
+                for cut in clone["timeline"]:
+                    for ca in cut["actors"]:
+                        ca.pop("support", None)
+                return clone
+
+            def actor_of(scene, cid, aid):
+                return next(ca for cut in scene["timeline"] if cut["cutId"] == cid for ca in cut["actors"] if ca["id"] == aid)
+
+            hidden_entries_m: list[dict] = []
+            for label, seen in (("seen 없음(실측 그대로)", None), ("seen hidden", "hidden")):
+                sc_m = m_scene()
+                before_m = _copy.deepcopy(sc_m)
+                res_m = psup.apply_supports([sc_m], m_reads(seen))
+                if strip_support(sc_m) != before_m:
+                    bad.append(f"(sr-m) {label}: pose·sitOn·소품이 바뀌었습니다")
+                entries_m = [e for items in res_m.values() for e in items]
+                if len(entries_m) != 3 or any(e.get("status") != "hidden" or e.get("seen") != "hidden" or e.get("propId") != ""
+                                              or e.get("heightM") is not None or "poseFrom" in e or "heightFix" in e for e in entries_m):
+                    bad.append(f"(sr-m) {label}: 결과가 status hidden 3개가 아닙니다: {[(e.get('status'), e.get('seen')) for e in entries_m]}")
+                for cid, aid in (("cut-01", "geonwoo"), ("cut-02", "uijun"), ("cut-07", "uijun")):
+                    supp = actor_of(sc_m, cid, aid).get("support") or {}
+                    if supp.get("seen") != "hidden" or (supp.get("supportKind"), supp.get("contact"), supp.get("feet")) != ("none", "none", "none"):
+                        bad.append(f"(sr-m) {label}: {cid} 컷 인물 support 가 hidden·none 이 아닙니다: {supp}")
+                hidden_entries_m.extend(entries_m)
+                norm_m = [psup.normalize_supports(r["supports"])[0] for r in m_reads(seen).values()]
+                if any(psup.prompt_line(s) is not None for s in norm_m):
+                    bad.append(f"(sr-m) {label}: 프롬프트 줄이 생겼습니다")
+                if norm_m[0]["supportEn"] != "metal railing top bar" or norm_m[0]["posture"] != "sit" or norm_m[0]["heightCue"] != "":
+                    bad.append(f"(sr-m) {label}: hidden 정규화가 문자열·자세를 지키고 높이만 비우지 않았습니다: {norm_m[0]}")
+            cuts_m = [{"cutId": cid, "seconds": 3, "panels": [i], "shotKo": f"[{cid}]", "situationKo": "편의점 앞 난간"}
+                      for i, cid in enumerate(cut_ids3)]
+            grammar_m = {cid: dict(test3_g[cid], supports=psup.normalize_supports((m_reads("hidden").get(cid) or {}).get("supports")))
+                         for cid in cut_ids3}
+            off_m = pvmod._design_prompt("x", None, cuts_m, {"setting": {}, "entries": []}, [], grammar_m, room_height=(3.0, 3.0))  # noqa: SLF001
+            on_m = pvmod._design_prompt("x", None, cuts_m, {"setting": {}, "entries": []}, [], grammar_m, room_height=(3.0, 3.0), supports=True)  # noqa: SLF001
+            if on_m != off_m or "[받침 판단]" in on_m:
+                bad.append("(sr-m) hidden 읽기만 있으면 프롬프트가 끔과 같아야 합니다(받침 줄 0개·단락 없음)")
+
+            # 같은 값을 visible·partial 로 바꾸면 지금처럼 적용된다(cut-02·cut-07 sit → stand, cut-01 은 앉을 소품 지정).
+            applied = {}
+            for seen in ("visible", "partial"):
+                sc_v = m_scene()
+                res_v = psup.apply_supports([sc_v], m_reads(seen))
+                applied[seen] = (sc_v, res_v)
+                e01 = (res_v.get("cut-01") or [{}])[0]
+                e02 = (res_v.get("cut-02") or [{}])[0]
+                e07 = (res_v.get("cut-07") or [{}])[0]
+                if (e01.get("status"), e01.get("propId"), e01.get("propTopM"), "heightFix" in e01) != ("ok", "upper_rail", 0.985, False):
+                    bad.append(f"(sr-m) {seen}: cut-01 이 앉을 소품 지정·높이 유지(0.985 − 0.85 ≤ 0.15)가 아닙니다: {e01}")
+                for cid, entry in (("cut-02", e02), ("cut-07", e07)):
+                    ca = actor_of(sc_v, cid, "uijun")
+                    if entry.get("status") != "standing" or entry.get("poseFrom") != "sit" or ca.get("pose") != "stand" or "sitOn" in ca:
+                        bad.append(f"(sr-m) {seen}: {cid} 여의준이 sit → stand 로 바뀌지 않았습니다: {entry} {ca.get('pose')}")
+                if actor_of(sc_v, "cut-07", "geonwoo").get("pose") != "sit":
+                    bad.append(f"(sr-m) {seen}: 읽기가 없는 cut-07 범건우의 자세가 바뀌었습니다")
+                if any(e.get("seen") != seen for items in res_v.values() for e in items):
+                    bad.append(f"(sr-m) {seen}: 결과 항목 seen 이 {seen} 이 아닙니다")
+            if strip_support(applied["visible"][0]) != strip_support(applied["partial"][0]):
+                bad.append("(sr-m) partial 결과가 visible 과 다릅니다(둘 다 적용해야 함)")
+
+            # run_design(가짜 LLM): 실측 읽기(seen 없음) + 나머지 컷 "stand, none, none" → 7컷 모두 앉은 채, 소품 그대로.
+            saved_reads = dict(new_reads)
+            new_reads.clear()
+            for cid in cut_ids3:
+                if cid in real_reads:
+                    sups = [dict(real_reads[cid])]
+                else:
+                    sups = [{"name": n, "posture": "stand", "supportKind": "none", "contact": "none",
+                             "reasonEn": "Below the chest is not drawn."} for n in visible.get(cid, ["여의준", "범건우"])]
+                new_reads[cid] = dict(test3_g[cid], supports=sups)
+            logs.clear()
+            design_prompts.clear()
+            try:
+                _o, pid_m, plan_m = design_sr("m", test3_astra_rail())
+            finally:
+                new_reads.clear()
+                new_reads.update(saved_reads)
+            pv_m = plan_m.get("previz") or {}
+            scene_m = (pv_m.get("scenes") or [{}])[0]
+            rail_m = next((p for p in scene_m.get("props") or [] if p["id"] == "upper_rail"), {})
+            if rail_m.get("pos") != [0.0, 0.955, -1.45] or rail_m.get("size") != [7.2, 0.09, 0.09]:
+                bad.append(f"(sr-m) hidden 읽기로 가로대 높이가 바뀌었습니다: {rail_m}")
+            for cut in scene_m.get("timeline") or []:
+                for ca in cut.get("actors") or []:
+                    if ca.get("pose") != "sit" or ca.get("sitOn") != "upper_rail" or abs(float((ca.get("sit") or {}).get("hipY") or 0) - 1.0) > 1e-6:
+                        bad.append(f"(sr-m) {cut['cutId']}/{ca['id']} 이 앉은 채(가로대 1.0)가 아닙니다: {ca.get('pose')} {ca.get('sit')}")
+            statuses_m = [e.get("status") for cid in cut_ids3 for e in ((pv_m.get("fit") or {}).get(cid) or {}).get("support") or []]
+            if statuses_m != ["hidden"] * 10:
+                bad.append(f"(sr-m) fit.support 가 hidden 10개가 아닙니다: {statuses_m}")
+            if not design_prompts or "[받침 판단]" in design_prompts[0] or psup.PROMPT_GUIDE_KO in design_prompts[0]:
+                bad.append("(sr-m) hidden 읽기만 있는데 설계 프롬프트에 받침 줄·단락이 있습니다")
+            stage_m = logs.messages("step=support")
+            if len(stage_m) != 1 or not re.fullmatch(
+                rf"vnew\.previz\.stage pid={pid_m} step=support ms=\d+ entries=10 heightFixes=0 noProp=0 hidden=10", stage_m[0]
+            ) or logs.messages("vnew.previz.support.height"):
+                bad.append(f"(sr-m) stage 로그가 다르거나 높이 맞춤 로그가 있습니다: {stage_m}")
+            mark("sr-m")
+
             # ---------------- (sr-k) 화면 ----------------
             vjs = (PUBLIC / "vnew.js").read_text(encoding="utf-8")
             css = (ROOT / "frontend" / "public" / "vnew.css").read_text(encoding="utf-8")
@@ -18994,6 +19167,10 @@ def check_previz_support() -> None:
                         None,
                         {"name": "<b>x</b>", "posture": "lean", "supportKind": "other", "supportEn": "", "contact": "lean",
                          "feet": "none", "heightM": None, "propTopM": None, "status": "standing"},
+                        # 그림에 안 보인 받침(sr-m 실측 읽기 결과) — 화면 줄 0개.
+                        *hidden_entries_m[:3],
+                        {"name": "최", "seen": "hidden", "posture": "sit", "supportKind": "bollard", "supportEn": "parking bollard",
+                         "contact": "perch", "feet": "floor", "heightM": 0.56, "propTopM": 0.56, "status": "ok"},
                     ]
                     want_k = [
                         "받침: 여의준 — 주차봉(parking bollard) 윗면 0.56m에 걸터앉기 · 발 바닥에 닿음",
@@ -19002,7 +19179,10 @@ def check_previz_support() -> None:
                         "받침: 김 — 바닥에 서 있음 · 발 바닥에 닿음",
                         "", "",
                         "받침: <b>x</b> — 물체 기대기",
+                        "", "", "", "",
                     ]
+                    if len(hidden_entries_m) < 3:
+                        bad.append("(sr-k) sr-m 의 hidden 결과가 없어 화면 검사가 성립하지 않습니다")
                     script_k = (
                         vjs[k_start:k_func]
                         + "\nconst cases = " + json.dumps(cases_k, ensure_ascii=False) + ";\n"
@@ -19098,7 +19278,7 @@ def check_previz_support() -> None:
         vset.VNEW_PREVIZ_COLLISION = saved["collision_flag"]
         vset.VNEW_PREVIZ_SUPPORT = saved["support_flag"]
 
-    expected = [f"sr-{c}" for c in "abcdefghijkl"]
+    expected = [f"sr-{c}" for c in "abcdefghijklm"]
     missing = [i for i in expected if i not in seen_ids]
     if missing and not bad:
         bad.append(f"끝까지 돌지 않은 검사: {missing}")
@@ -19110,7 +19290,7 @@ def check_previz_support() -> None:
             f"출력 추정 2인 {tok_typical}·4인 상한 {tok_worst}·항목 상한 {tok_support} 토큰 (sr-c)캐시 판 올림·v2 0회·reread·실패 "
             "(sr-d)높이 환산·라벨 (sr-e)프롬프트 켬 순서·끔 sha256 같음·주입 (sr-f)apply_supports 자세·소품 순서·높이·중앙값 "
             "(sr-g)feet dangling (sr-h)test3 run_design 윗면 0.561·관통 0·머리 화면 안 (sr-i)PUT·보기 왕복 (sr-j)설정 끔 "
-            "(sr-k)화면 문구 node 실행 (sr-l)배선"
+            "(sr-k)화면 문구 node 실행 (sr-l)배선 (sr-m)test3 실측 읽기 seen hidden 자세·소품 그대로·visible·partial 적용"
         )
 
 

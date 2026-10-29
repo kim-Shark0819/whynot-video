@@ -335,3 +335,10 @@
   - 받침 맞춤 뒤 설정을 끄고 보면, 저장된 소품 높이는 그대로이고 `fit.support` 줄도 보인다. 되돌린 결과는 다시 설계해야 보인다.
   - 1인 컷의 가짜 상대 카메라 문제(084 남은 이슈)는 그대로다.
 - **관련 파일**: `app/src/vnew/{previz_support(신규),previz_grammar,previz,previz_schema,previz_collision,settings}.py`, `frontend/public/{vnew.js,vnew.css}`, `k8s/workloads.yaml.tmpl`, `deploy/config.env.example`, `tools/check_vpoc.py`, `docs/ANALYSIS.md` §3.6·§7.1·§10.1, 스펙 `.kiro/specs/previz-support-reasoning/`.
+
+### previz-support-reasoning 필수 수정 A — 실측 검증 → seen 추가: 안 보이는 받침은 적용하지 않는다 (Kiro, claude-opus-5.5)
+- **발견(Claude 검증, 개발계 `ci-bca31ec1`, test3 실제 패널을 Fable 5.1로 읽기만)**: 몸·받침이 화면 밖인데도 모델이 컷 설명·맥락으로 받침을 짐작해 썼다. cut-01은 "앉은 자리가 안 그려졌지만 컷 설명이 난간이라" rail·hip·perch, cut-02·07은 "다리·발이 화면 밖이지만 서 있는 것 같다"고 stand·floor였다. 그대로면 서버가 cut-02·07을 sit → stand로 바꿔 이어지는 컷에서 인물이 앉았다 섰다 한다. 같은 cut-02의 옛 읽기 `actions`는 "Sits hunched forward"여서 짐작이 매번 다르다. SYSTEM의 "그려진 것만" 지시로는 막히지 않았다.
+- **결정**: `supports[]`에 `seen`(visible·partial·hidden, `posture` 바로 앞)을 더했다. 받침과 닿는 몸(엉덩이·허벅지·발)이 화면 밖이거나 맥락으로 짐작했으면 hidden이다. 정규화는 모르는 값·빈 값·없음을 hidden으로 보고, hidden이면 kind·contact·feet를 none, heightCue를 "", 높이를 null로 비운다(문자열·자세는 그대로 남겨 근거를 볼 수 있다). 서버는 visible·partial만 자세·앉을 소품·높이 맞춤에 쓰고, hidden은 컷 인물에 `support`(seen 포함)만 붙여 `status:"hidden"`으로 둔다. 프롬프트 줄·화면 줄은 없다. stage 로그에 `hidden=`을 더했다(개발계에서 무시된 읽기 수를 본다).
+  - 대안: 지시 문장만 더 세게 쓰기(기각 — 실측에서 지시가 짐작을 막지 못했다), 자세 맞춤을 없애기(기각 — 그림에 보이는 자세 차이까지 버린다).
+- **확인**: `check_vpoc` 전부 통과(52개 ok 줄). sr-a·b·e·f·h·i·k 갱신, sr-m 신규. sr-m은 test3 실측 읽기 3종을 seen 없음·hidden으로 넣으면 pose·sitOn·소품이 그대로이고, visible·partial이면 지금처럼 적용되는지(cut-02·07 sit → stand) 본다. run_design 경로에서는 7컷 모두 앉은 채이고 가로대는 그대로, `hidden=10`이다. 기존 시나리오는 고정값에 `seen:"visible"`을 넣어 기대값을 지켰다. 변형 검사(메모리): 없는 seen을 visible로 보면 sr-a·k·m, seen을 무시하면 sr-a·e·f·k·m이 실패한다. 이번 수정의 바뀐 실행 줄 18/18, 086 전체 339/339(coverage 7.17).
+- **남은 이슈**: 이 수정 전 코드로 이미 v2 캐시가 저장된 계획은 `supports`에 seen이 없어 모두 hidden으로 본다(받침 맞춤이 꺼진 것과 같다). 그 계획에서 받침을 다시 쓰려면 그 컷을 다시 읽기 지시하거나 `GRAMMAR_VERSION`을 3으로 올려 1회 다시 읽게 해야 한다(이번에는 올리지 않았다). 실제 모델이 seen을 지시대로 쓰는지는 개발계 V-1에서 본다.

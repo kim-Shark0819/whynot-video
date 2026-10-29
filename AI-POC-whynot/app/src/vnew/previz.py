@@ -1101,10 +1101,11 @@ def run_design(owner: str, pid: str, task_id: str) -> None:
             if support_by_cut:
                 entries = [e for items in support_by_cut.values() for e in items]
                 log.info(
-                    "vnew.previz.stage pid=%s step=support ms=%d entries=%d heightFixes=%d noProp=%d",
+                    "vnew.previz.stage pid=%s step=support ms=%d entries=%d heightFixes=%d noProp=%d hidden=%d",
                     pid, int(round((time.monotonic() - started) * 1000.0)), len(entries),
                     len({(e.get("heightFix") or {}).get("propId") for e in entries if e.get("heightFix")}),
                     sum(1 for e in entries if e.get("status") == "noProp"),
+                    sum(1 for e in entries if e.get("status") == "hidden"),
                 )
 
         # 2.7) 소품 관통 보정 1차(084 R1.7): 설계 배치에서 앉을 자리(sit)를 채우고 겹친 인물을 밀어낸다.

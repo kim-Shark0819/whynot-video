@@ -5,10 +5,12 @@
 인물마다 이 순서로 받침을 읽고(grammar.supports), 이 모듈이 그 값을 정리·환산해 장면 설계 프롬프트와 서버 보정에
 넘긴다.
 
-- normalize_supports: 모델 출력 supports[] 정리(열거값·길이·한 줄·이름 중복).
+- normalize_supports: 모델 출력 supports[] 정리(열거값·길이·한 줄·이름 중복). seen(받침과 닿는 몸이 그려졌는지)이
+  hidden(모르는 값 포함)이면 받침 값을 none 으로 비운다.
 - support_height_m: heightCue(서 있는 사람 몸 기준 말) → 윗면 높이(m). 숫자는 서버가 정한다(모델 m 값은 대비책).
 - prompt_line·PROMPT_GUIDE_KO: 장면 설계 프롬프트의 [받침 판단] 줄·지시 단락.
 - apply_supports: 컷 인물 자세·앉을 소품(sitOn·sittable)·소품 윗면 높이를 받침 판단에 맞춘다(084 보정 1차 전).
+  seen 이 visible·partial 인 읽기만 쓴다.
 
 스펙: .kiro/specs/previz-support-reasoning/design.md §3. 순수 함수 모듈이다(네트워크·S3·LLM·numpy 없음). 로그만 남긴다.
 """
@@ -26,6 +28,11 @@ log = logging.getLogger("vpoc")
 
 # ================================================================ 열거값(requirements R1.1)
 
+# seen(필수 수정 A, 2026-10-29): 받침과 그 받침에 닿는 몸(엉덩이·허벅지·발)이 그림에 실제로 그려졌는지.
+# Claude 실측(test3, Fable 5.1): 다리·받침이 화면 밖인데도 컷 설명·맥락으로 stand/floor·난간을 짐작해 썼다.
+# 그래서 hidden(모르는 값·빈 값 포함)이면 서버가 자세·앉을 소품·소품 높이를 바꾸지 않는다.
+SEEN = ("visible", "partial", "hidden")
+SEEN_APPLY = ("visible", "partial")
 POSTURES = ("stand", "sit", "kneel", "lie", "crouch", "lean", "walk")
 SUPPORT_KINDS = (
     "floor", "chair", "sofa", "bench", "stool", "step", "stairs", "rail", "bollard", "ledge",
@@ -173,22 +180,27 @@ def _name_key(value) -> str:
 
 
 def normalize_supports(raw) -> list[dict]:
-    """모델 출력 supports[] 를 정리한다. 이름이 비면 버리고, 같은 이름은 첫 항목만 쓴다. 늘 리스트."""
+    """모델 출력 supports[] 를 정리한다. 이름이 비면 버리고, 같은 이름은 첫 항목만 쓴다. 늘 리스트.
+
+    seen 이 모르는 값·빈 값이면 hidden 이다(보수적). hidden 이면 supportKind·contact·feet 는 none, heightCue 는 "",
+    supportHeightM 은 None 으로 둔다(그림으로 판단하지 않은 값을 쓰지 않는다). 문자열(supportEn 등)은 그대로 둔다.
+    """
     out: list[dict] = []
     if not isinstance(raw, list):
         return out
-    seen: set[str] = set()
+    names: set[str] = set()
     for item in raw:
         if len(out) >= MAX_SUPPORTS:
             break
         if not isinstance(item, dict):
             continue
         name = _name_key(item.get("name"))
-        if not name or name in seen:
+        if not name or name in names:
             continue
-        seen.add(name)
-        out.append({
+        names.add(name)
+        entry = {
             "name": name,
+            "seen": _enum(item.get("seen"), SEEN, "hidden"),
             "posture": _enum(item.get("posture"), POSTURES, "stand"),
             "supportEn": _text(item.get("supportEn"), SUPPORT_EN_MAX),
             "supportWhatEn": _text(item.get("supportWhatEn"), SUPPORT_WHAT_MAX),
@@ -198,22 +210,32 @@ def normalize_supports(raw) -> list[dict]:
             "contact": _enum(item.get("contact"), CONTACTS, "none"),
             "feet": _enum(item.get("feet"), FEET, "none"),
             "reasonEn": _text(item.get("reasonEn"), REASON_MAX),
-        })
+        }
+        if entry["seen"] == "hidden":
+            entry.update({"supportKind": "none", "heightCue": "", "supportHeightM": None, "contact": "none", "feet": "none"})
+        out.append(entry)
     return out
 
 
 def normalize_actor_support(raw) -> dict | None:
-    """컷 인물 support(apply_supports 가 붙인 6개 키)를 정리한다. dict 가 아니면 None."""
+    """컷 인물 support(apply_supports 가 붙인 값)를 정리한다. dict 가 아니면 None.
+
+    seen 은 열거값으로 검사한다(모르는 값은 hidden). 키가 없으면 두지 않는다(seen 이전 저장본 그대로).
+    """
     if not isinstance(raw, dict):
         return None
-    return {
+    out: dict = {}
+    if "seen" in raw:
+        out["seen"] = _enum(raw.get("seen"), SEEN, "hidden")
+    out.update({
         "posture": _enum(raw.get("posture"), POSTURES, "stand"),
         "supportKind": _kind(raw.get("supportKind")),
         "supportEn": _text(raw.get("supportEn"), SUPPORT_EN_MAX),
         "contact": _enum(raw.get("contact"), CONTACTS, "none"),
         "feet": _enum(raw.get("feet"), FEET, "none"),
         "heightM": _height(raw.get("heightM")),
-    }
+    })
+    return out
 
 
 def support_height_m(support, height_m=None):
@@ -248,14 +270,14 @@ PROMPT_GUIDE_KO = (
 
 
 def prompt_line(support) -> str | None:
-    """[받침 판단] 한 줄(생각 순서: 자세 → 받침 → 정체·보통 크기 → 윗면 높이 → 앉는 방식, 발). 판단 불가면 None.
+    """[받침 판단] 한 줄(생각 순서: 자세 → 받침 → 정체·보통 크기 → 윗면 높이 → 앉는 방식, 발). 판단 불가·hidden 이면 None.
 
     키는 BASE_HEIGHT_M 기준이다(설계 전이라 인물 키를 모른다). 문자열은 normalize_supports 로 한 줄·길이 제한된 값이다.
     """
     if not isinstance(support, dict):
         return None
     sup = (normalize_supports([support]) or [None])[0]
-    if sup is None or _skipped(sup):
+    if sup is None or sup["seen"] == "hidden" or _skipped(sup):
         return None
     parts = [f"{sup['name']}: {POSTURE_KO.get(sup['posture'], sup['posture'])}"]
     cue_ko = HEIGHT_CUE_KO.get(sup["heightCue"], "")
@@ -389,10 +411,15 @@ def _fit_height(prop: dict, target: float) -> tuple[float, float] | None:
 
 
 def _apply_actor(ca: dict, sup: dict, height_m: float, items: list[tuple[dict, dict]]) -> tuple[dict, dict | None]:
-    """컷 인물 하나에 받침 판단을 붙인다. (결과 항목, 앉힌 prop 또는 None)."""
+    """컷 인물 하나에 받침 판단을 붙인다. (결과 항목, 앉힌 prop 또는 None).
+
+    seen 이 visible·partial 일 때만 자세·앉을 소품을 맞추고 높이 맞춤 읽기에 넣는다. hidden 이면 support 만 붙이고
+    pose·sitOn·소품은 그대로 둔다(그림에 없는 받침을 짐작해 컷마다 앉았다 섰다 하지 않게, 필수 수정 A).
+    """
     entry = {
         "actorId": str(ca.get("id") or ""),
         "name": sup["name"],
+        "seen": sup["seen"],
         "posture": sup["posture"],
         "supportKind": sup["supportKind"],
         "supportEn": sup["supportEn"],
@@ -402,9 +429,10 @@ def _apply_actor(ca: dict, sup: dict, height_m: float, items: list[tuple[dict, d
         "propId": "",
         "propTopM": None,
     }
-    ca["support"] = {key: entry[key] for key in ("posture", "supportKind", "supportEn", "contact", "feet", "heightM")}
-    if _skipped(sup):
-        entry["status"] = "skipped"
+    ca["support"] = {key: entry[key] for key in ("seen", "posture", "supportKind", "supportEn", "contact", "feet", "heightM")}
+    if sup["seen"] not in SEEN_APPLY or _skipped(sup):
+        # 판단 불가. 정규화 뒤 hidden 은 늘 supportKind·contact none 이다 — 상태 이름만 hidden 으로 구분한다.
+        entry["status"] = "hidden" if sup["seen"] == "hidden" else "skipped"
         return entry, None
     new_pose = POSE_FROM_POSTURE.get(sup["posture"])
     old_pose = str(ca.get("pose") or "stand")
@@ -498,8 +526,8 @@ def _apply_scene(scene: dict, grammar_by_cut: dict) -> dict:
 def apply_supports(scenes, grammar_by_cut) -> dict:
     """장면마다 컷 인물에 받침 판단을 맞춘다(제자리에서 고친다). 반환 {cutId: [항목]} — 받침 판단이 짝지어진 컷만.
 
-    항목 = {actorId, name, posture, supportKind, supportEn, contact, feet, heightM, propId, propTopM, poseFrom?,
-    heightFix?, status}. status: ok | noProp | standing | skipped. 컷 인물에 support·pose·sitOn, 소품에 sittable·높이.
+    항목 = {actorId, name, seen, posture, supportKind, supportEn, contact, feet, heightM, propId, propTopM, poseFrom?,
+    heightFix?, status}. status: ok | noProp | standing | skipped | hidden. 컷 인물에 support·pose·sitOn, 소품에 sittable·높이.
     """
     out: dict[str, list[dict]] = {}
     grammar_by_cut = grammar_by_cut if isinstance(grammar_by_cut, dict) else {}
