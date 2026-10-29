@@ -7,7 +7,8 @@
 tiles_for_analysis · jpeg_for_reference) · vpoc.store(S3) · vpoc.ark(choices · video_options) ·
 vpoc.ledger(원장) · vnew.characters(load_char). routes.py 는 이 함수들을 HTTP 로 감싼다.
 
-외부 호출(LLM)은 아래 래퍼 하나로 감싼다(검사가 가짜로 바꿔 끼운다): _analyze_script · _analyze_conti.
+외부 호출(LLM)은 아래 래퍼 하나로 감싼다(검사가 가짜로 바꿔 끼운다): _analyze_script · _analyze_conti ·
+_analyze_fx(③ 기호·분위기 채우기, vnew-live-fx 묶음 A).
 STORE 는 vpoc.store.STORE 를 쓴다(검사가 모듈 변수로 바꿔 끼운다).
 """
 
@@ -18,6 +19,7 @@ import logging
 import re
 import secrets
 import threading
+import time
 from datetime import datetime, timezone
 
 from ..vpoc import ark as vpoc_ark
@@ -28,6 +30,7 @@ from ..vpoc.errors import VpocError, now_iso
 from ..vpoc.store import STORE
 
 from . import characters
+from . import fx as vnew_fx
 from . import prompts
 
 log = logging.getLogger("vpoc")
@@ -52,6 +55,9 @@ MAX_CAST_COSTUME_LEN = 200
 MAX_CAST_VOICE_LEN = 80
 # running task 가 이 시간을 넘게 그대로면 멈춘 것으로 본다(파드 재시작 대비, 30분).
 TASK_STALL_S = 1800
+# 계획 작업(plan.task) 중 단계 상태(plan[name].status)를 같이 두는 작업. 취소는 none, 멈춤은 failed 로 정리한다.
+# fxFill = ③ 기호·분위기 채우기(vnew-live-fx 묶음 A).
+_TASK_STEPS = ("script", "conti", "fxFill")
 
 
 # ================================================================ 키 규칙
@@ -631,6 +637,22 @@ def _analyze_conti(blocks: list[dict], *, model: str) -> tuple[dict, dict]:
     )
 
 
+def _analyze_fx(blocks: list[dict], *, model: str) -> tuple[dict, dict]:
+    """llm._converse 로 기호·분위기 JSON 을 받는다(vnew-live-fx A.3). (payload, usage{..model}).
+
+    max_tokens 8000: 채울 컷당 출력 ≈ 140토큰 × 40컷 + 도구 앞 글 ≈ 500. 8000 ≥ 4096 이라 잘림 재시도 없이
+    다음 모델로 간다(llm-top-model-first 규칙).
+    """
+    return vpoc_llm._converse(  # noqa: SLF001
+        system_text=prompts.FX_SYSTEM,
+        blocks=blocks,
+        tool=prompts.EMIT_FX,
+        max_tokens=8000,
+        where="vnew.conti.fx",
+        model=model,
+    )
+
+
 # ================================================================ 타일 고르기
 
 
@@ -833,8 +855,13 @@ def update_script(owner: str, pid: str, patch: dict) -> dict:
 
 
 def run_conti(owner: str, pid: str, task_id: str) -> None:
-    """콘티 작성(백그라운드 스레드). script + input 으로 드라마 컷을 받아 초를 맞추고 segments 를 계산한다."""
+    """콘티 작성(백그라운드 스레드). script + input 으로 드라마 컷을 받아 초를 맞추고 segments 를 계산한다.
+
+    VNEW_FX 가 켜져 있으면(작업 시작 때 한 번 읽는다) 저장 전에 기호·분위기 채우기를 1회 부르고 결과를 같은 저장에
+    넣는다(fxFill). 채우기가 실패해도 콘티는 기호 없이 저장한다(vnew-live-fx RA2.1). 끄면 지금 동작.
+    """
     try:
+        fx_on = bool(vnew_settings_module().VNEW_FX)
         plan, _ = load_plan(owner, pid)
         script = plan.get("script") or {}
         if script.get("status") != "ready" or not (script.get("entries")):
@@ -866,8 +893,14 @@ def run_conti(owner: str, pid: str, task_id: str) -> None:
         cuts = fit_seconds(cuts, total_seconds)
         cuts, segments = compute_segments(cuts, _max_segment_seconds(video_model))
 
+        # 기호·분위기 채우기(켬일 때만, 실패해도 콘티는 저장). 결과 상태는 콘티와 같은 저장에 넣는다.
+        extra = None
+        if fx_on:
+            cuts, fx_state = _fill_new_conti(owner, pid, plan, cuts)
+            extra = {"fxFill": fx_state}
+
         conti = {"status": "ready", "error": "", "model": model, "cuts": cuts, "segments": segments}
-        _commit_step(owner, pid, "conti", task_id, conti)
+        _commit_step(owner, pid, "conti", task_id, conti, extra=extra)
         # 콘티가 바뀌면 프리비즈 승인을 해제한다(콘티·장면이 바뀌면 다시 확인·승인).
         _unapprove_previz_after_conti(owner, pid)
         # 콘티가 정해지면 장소 목록만 갱신한다(자동으로 그리지는 않는다 — 비용). 같은 이름이면 유지.
@@ -1280,12 +1313,21 @@ def update_conti(owner: str, pid: str, patch: dict) -> dict:
     """사용자 수정(컷 추가·삭제·순서·내용·초). 저장 때마다 segments 를 다시 계산한다.
 
     seconds 합이 totalSeconds 와 다르면 fitNeeded 를 True 로 둬 프런트가 /conti/fit 을 부르게 한다.
+
+    VNEW_FX 가 켜져 있으면(vnew-live-fx A.2): 1) 컷의 기호·분위기 필드를 정리한다(들어온 키만). 2) 같은 id 의 옛 컷과
+    moodKo 가 다르고 moodEn 이 옛 값 그대로면 moodEn 을 비운다(번역 대상, Claude 결정 6). 3) 저장 전후 컷 목록이
+    기호·분위기 필드만 다르면 프리비즈 승인을 풀지 않는다(revision 은 올린다). 끄면 1~3 없이 지금 동작이다.
     """
+    fx_on = bool(vnew_settings_module().VNEW_FX)
 
     def mutator(data: dict) -> dict:
         conti = data.setdefault("conti", {})
+        old_cuts = [dict(cut) for cut in (conti.get("cuts") or []) if isinstance(cut, dict)]
         if "cuts" in patch and isinstance(patch["cuts"], list):
             cuts = [dict(cut) for cut in patch["cuts"]]
+            if fx_on:
+                cuts = [vnew_fx.normalize_cut_fx(cut) for cut in cuts]
+                _clear_stale_mood_en(old_cuts, cuts)
             for no, cut in enumerate(cuts, start=1):
                 cut["no"] = no
                 try:
@@ -1301,12 +1343,29 @@ def update_conti(owner: str, pid: str, patch: dict) -> dict:
         total = int((data.get("input") or {}).get("totalSeconds") or 0)
         summed = sum(int(cut.get("seconds") or 0) for cut in conti.get("cuts") or [])
         data["revision"] = int(data.get("revision") or 0) + 1
-        _unapprove_previz(data)
+        if not (fx_on and vnew_fx.only_fx_changed(old_cuts, conti.get("cuts") or [])):
+            _unapprove_previz(data)
         return {"fitNeeded": total != summed, "totalSeconds": total, "sumSeconds": summed}
 
     updated, info = mutate_plan(owner, pid, mutator)
     updated["_fit"] = info  # routes 가 응답에 쓴다(저장 데이터가 아니라 반환용).
     return updated
+
+
+def _clear_stale_mood_en(old_cuts: list[dict], new_cuts: list[dict]) -> None:
+    """같은 id 의 옛 컷과 moodKo 가 다르고 moodEn 이 옛 값 그대로인 새 컷의 moodEn 을 비운다(제자리, A.2-2).
+
+    새 컷은 이미 정리된 값이다. 옛 컷은 끔 상태에서 저장됐을 수 있어 비교 전에 같은 규칙으로 정리한다.
+    """
+    old_by_id = {str(cut.get("id") or ""): cut for cut in old_cuts if cut.get("id")}
+    for cut in new_cuts:
+        old = old_by_id.get(str(cut.get("id") or ""))
+        if old is None or not cut.get("moodEn"):
+            continue
+        mood_changed = cut.get("moodKo", "") != vnew_fx.clean_text(old.get("moodKo"), vnew_fx.MOOD_KO_MAX)
+        same_en = cut.get("moodEn") == vnew_fx.clean_text(old.get("moodEn"), vnew_fx.MOOD_EN_MAX)
+        if mood_changed and same_en:
+            cut["moodEn"] = ""
 
 
 def fit_conti(owner: str, pid: str) -> dict:
@@ -1324,6 +1383,271 @@ def fit_conti(owner: str, pid: str) -> dict:
 
     updated, _ = mutate_plan(owner, pid, mutator)
     return updated
+
+
+# ================================================================ ③ 기호·분위기 채우기(vnew-live-fx 묶음 A, design §A.3)
+#
+# 상위 모델 1회 호출(_analyze_fx). 빈 컷(FILL)은 기호·분위기를, 번역 대상 컷(TRANSLATE)은 moodEn 만 채운다.
+# 모델에 보내는 글은 모두 clean_text 를 지나 한 줄씩이고, 이미지는 대본 단계와 같은 타일 번호(ordered_tiles)다.
+
+FX_DIALOGUE_MAX, FX_SITUATION_MAX, FX_EMOTION_MAX, FX_NAME_MAX, FX_NAMES_MAX = 80, 120, 60, 40, 12
+
+
+def _fx_model() -> str:
+    """채우기 모델 = 콘티와 같은 최상위 분석 모델(ANALYZE_MODEL 체인, llm-top-model-first)."""
+    from ..vpoc import settings as vpoc_settings  # noqa: PLC0415
+
+    return vpoc_settings.ANALYZE_MODEL
+
+
+def _fx_names(plan: dict, cuts: list[dict]) -> list[str]:
+    """등장인물 이름(입력 역할명 → 컷 인물 이름 순, 중복 제거, 최대 12)."""
+    names: list[str] = []
+    raw = [item.get("roleName") for item in ((plan.get("input") or {}).get("characters") or []) if isinstance(item, dict)]
+    for cut in cuts:
+        raw.extend(c.get("name") for c in (cut.get("characters") or []) if isinstance(c, dict))
+    for value in raw:
+        name = vnew_fx.clean_text(value, FX_NAME_MAX)
+        if name and name not in names:
+            names.append(name)
+        if len(names) >= FX_NAMES_MAX:
+            break
+    return names
+
+
+def _cut_panels(cut: dict) -> list[int]:
+    return [p for p in (cut.get("panels") or []) if _is_int(p) and p >= 0]
+
+
+def _cut_emotions(cut: dict, entries: list) -> str:
+    """대본 entries 중 이 컷 panels 와 겹치는 항목의 emotionKo(중복 제거, 쉼표, 60자)."""
+    panels = set(_cut_panels(cut))
+    found: list[str] = []
+    for entry in entries or []:
+        if not isinstance(entry, dict) or not panels & set(entry.get("panels") or []):
+            continue
+        emotion = vnew_fx.clean_text(entry.get("emotionKo"), FX_EMOTION_MAX)
+        if emotion and emotion not in found:
+            found.append(emotion)
+    return vnew_fx.clean_text(", ".join(found), FX_EMOTION_MAX)
+
+
+def _pick_even(numbers: list[int], cap: int) -> list[int]:
+    """순서를 지켜 고르게 cap 개를 고른다(ordered_tiles 와 같은 방식)."""
+    if len(numbers) <= cap:
+        return list(numbers)
+    step = len(numbers) / cap
+    return [numbers[i] for i in sorted({min(len(numbers) - 1, int(i * step)) for i in range(cap)})]
+
+
+def _fx_blocks(
+    owner: str, pid: str, plan: dict, cuts: list[dict], empty_ids: list[str], translate_ids: list[str]
+) -> tuple[list[dict], list[int], dict]:
+    """채우기 요청 블록. (blocks, 보낸 패널 번호, {TRANSLATE 컷 id: 보낸 moodKo}).
+
+    글 1개(등장인물·컷 줄) + FILL 컷 panels 합집합의 패널 이미지(번호 순, VNEW_FX_MAX_PANELS 넘으면 고르게).
+    이미지마다 앞에 "Panel N". TRANSLATE 만 있으면 이미지 없이 글만(S3·타일을 읽지 않는다).
+    """
+    fill_set, translate_set = set(empty_ids), set(translate_ids)
+    entries = (plan.get("script") or {}).get("entries") or []
+    names = _fx_names(plan, cuts)
+    lines = [
+        "[등장인물] " + (", ".join(names) if names else "(없음)"),
+        "[컷] FILL = 채울 컷, TRANSLATE = moodEn만, - = 참고",
+    ]
+    sent_mood: dict[str, str] = {}
+    fill_panels: set[int] = set()
+    for index, cut in enumerate(cuts, start=1):
+        # 대상 판단은 저장된 id 그대로, 글에는 한 줄로 정리한 id 를 쓴다(id 에 줄바꿈을 넣어 줄을 꾸밀 수 없게).
+        cid = str(cut.get("id") or "")
+        label = vnew_fx.clean_text(cid, FX_NAME_MAX)
+        if not label:
+            continue
+        no = cut.get("no") if _is_int(cut.get("no")) else index
+        head = f"{label} (컷 {no})"
+        if cid in fill_set:
+            panels = _cut_panels(cut)
+            fill_panels.update(panels)
+            parts = [f"FILL {head} panels=" + (",".join(str(p) for p in panels) or "-")]
+            dialogue = vnew_fx.clean_text(cut.get("dialogueKo"), FX_DIALOGUE_MAX)
+            situation = vnew_fx.clean_text(cut.get("situationKo"), FX_SITUATION_MAX)
+            emotion = _cut_emotions(cut, entries)
+            if dialogue:
+                parts.append(f"대사: {dialogue}")
+            if situation:
+                parts.append(f"상황: {situation}")
+            if emotion:
+                parts.append(f"감정(대본): {emotion}")
+            lines.append(" | ".join(parts))
+        elif cid in translate_set:
+            mood = vnew_fx.clean_text(cut.get("moodKo"), vnew_fx.MOOD_KO_MAX)
+            sent_mood[cid] = mood
+            lines.append(f"TRANSLATE {head} moodKo=" + json.dumps(mood, ensure_ascii=False))
+        else:
+            parts = [f"- {head}"]
+            for label, key, limit in (("fxSuggest", "fxSuggest", vnew_fx.FX_MAX), ("fx", "fx", vnew_fx.FX_MAX),
+                                      ("drawnFx", "fxDrawn", vnew_fx.DRAWN_MAX)):
+                keys = vnew_fx.fx_list(cut.get(key), limit)
+                if keys:
+                    parts.append(f"{label}=" + ", ".join(keys))
+            lines.append(" | ".join(parts))
+    blocks: list[dict] = [{"text": "\n".join(lines)}]
+    numbers: list[int] = []
+    if fill_set and fill_panels:
+        order = list((plan.get("input") or {}).get("order") or [])
+        tiles, _total, _picked = ordered_tiles(owner, pid, order)
+        numbers = sorted(p for p in fill_panels if p < len(tiles))
+        numbers = _pick_even(numbers, max(1, int(vnew_settings_module().VNEW_FX_MAX_PANELS)))
+        for number in numbers:
+            blocks.append({"text": f"Panel {number}"})
+            blocks.append({"image": {"format": "jpeg", "source": {"bytes": tiles[number]}}})
+    return blocks, numbers, sent_mood
+
+
+def _fx_items(payload: dict) -> list[dict]:
+    """모델 결과 cuts 를 dict 목록으로(Fable 계열의 JSON 문자열 중첩을 푼다). 값 정리는 merge_fill 이 한다."""
+    raw = _loads_if_str((payload or {}).get("cuts") if isinstance(payload, dict) else None)
+    if not isinstance(raw, list):
+        return []
+    items: list[dict] = []
+    for item in raw:
+        item = _loads_if_str(item)
+        if not isinstance(item, dict):
+            continue
+        row = {"id": str(item.get("id") or "").strip()}
+        for key in ("drawnFx", "fxSuggest", "fx"):
+            row[key] = _loads_if_str(item.get(key))
+        row["moodKo"] = item.get("moodKo")
+        row["moodEn"] = item.get("moodEn")
+        items.append(row)
+    return items
+
+
+def fill_fx(
+    owner: str, pid: str, plan: dict, cuts: list[dict], empty_ids: list[str], translate_ids: list[str]
+) -> dict:
+    """채우기 1회(모델 호출·원장). 합치기는 부르는 쪽이 지금 컷에 한다(_apply_fx).
+
+    반환: {items, model, panels(보낸 장수), sentMood, called}. 대상이 없으면 호출하지 않는다(called False).
+    """
+    if not empty_ids and not translate_ids:
+        return {"items": [], "model": "", "panels": 0, "sentMood": {}, "called": False}
+    blocks, numbers, sent_mood = _fx_blocks(owner, pid, plan, cuts, empty_ids, translate_ids)
+    model = _fx_model()
+    payload, usage = _analyze_fx(blocks, model=model)
+    used = str((usage or {}).get("model") or model)
+    _charge(owner, pid, plan.get("planId") or "", usage or {}, used)
+    return {"items": _fx_items(payload), "model": used, "panels": len(numbers), "sentMood": sent_mood, "called": True}
+
+
+def _apply_fx(cuts: list[dict], result: dict, empty_ids: list[str]) -> tuple[list[dict], dict]:
+    """지금 컷에 결과를 합치고(merge_fill) 같은 기호 3컷 한도를 다시 적용한다(apply_cap). (새 cuts, 통계)."""
+    merged, stats = vnew_fx.merge_fill(cuts, result.get("items") or [], empty_ids, result.get("sentMood") or {})
+    merged, capped = vnew_fx.apply_cap(merged, stats.get("filledIds") or [])
+    stats["capped"] = capped
+    return merged, stats
+
+
+def _fx_state(status: str, *, model: str = "", stats: dict | None = None, error: str = "") -> dict:
+    """plan.fxFill 저장 모양: {status, error, model, filled, translated, missed, at}."""
+    stats = stats or {}
+    return {
+        "status": status,
+        "error": error,
+        "model": model,
+        "filled": int(stats.get("filled") or 0),
+        "translated": int(stats.get("translated") or 0),
+        "missed": int(stats.get("missed") or 0),
+        "at": now_iso(),
+    }
+
+
+def _fx_error_message(exc: BaseException) -> str:
+    """화면용 실패 문구(300자). VpocError 는 그 문구, 그 밖은 종류 이름만(내부 원문을 화면에 두지 않는다)."""
+    if isinstance(exc, VpocError):
+        return vnew_fx.clean_text(exc.message, 300) or "기호·분위기를 채우지 못했습니다."
+    return f"기호·분위기를 채우지 못했습니다({type(exc).__name__})."
+
+
+def _log_fx(pid: str, empty_ids: list, translate_ids: list, result: dict, stats: dict, started: float) -> None:
+    """한 줄 로그(모델 글은 남기지 않는다)."""
+    log.info(
+        "vnew.conti.fx pid=%s fill=%d translate=%d panels=%d filled=%d translated=%d missed=%d capped=%d ms=%d",
+        pid, len(empty_ids), len(translate_ids), int(result.get("panels") or 0), int(stats.get("filled") or 0),
+        int(stats.get("translated") or 0), int(stats.get("missed") or 0), int(stats.get("capped") or 0),
+        int((time.monotonic() - started) * 1000),
+    )
+
+
+def _fill_new_conti(owner: str, pid: str, plan: dict, cuts: list[dict]) -> tuple[list[dict], dict]:
+    """콘티를 새로 만들 때 채우기 1회(RA2.1). (컷, fxFill). 실패하면 경고 로그 · 기호 없는 컷 · fxFill failed."""
+    started = time.monotonic()
+    empty_ids, translate_ids = vnew_fx.fill_targets(cuts)
+    try:
+        result = fill_fx(owner, pid, plan, cuts, empty_ids, translate_ids)
+        merged, stats = _apply_fx(cuts, result, empty_ids)
+    except Exception as exc:  # noqa: BLE001 — 채우기 실패는 콘티 실패가 아니다.
+        log.warning("vnew.conti.fx.failed pid=%s err=%s", pid, str(exc)[:300])
+        return cuts, _fx_state("failed", error=_fx_error_message(exc))
+    _log_fx(pid, empty_ids, translate_ids, result, stats, started)
+    return merged, _fx_state("ready", model=str(result.get("model") or ""), stats=stats)
+
+
+def start_fx_fill(owner: str, pid: str) -> dict:
+    """③ [기호·분위기 채우기] 시작(RA2.2·RA2.5). {taskId, targets, translate}.
+
+    끔 404 FxDisabled → 콘티 ready·컷 있음(아니면 409 ContiNotReady) → 대상 0 이면 409 NothingToFill →
+    start_task("fxFill")(진행 중이면 409 TaskRunning) → 스레드 run_fx_fill.
+    """
+    if not vnew_settings_module().VNEW_FX:
+        raise VpocError("vnew.conti.fx", "FxDisabled", "기호·분위기 기능이 꺼져 있습니다.", 404)
+    plan, _ = load_plan(owner, pid)
+    conti = plan.get("conti") or {}
+    cuts = [cut for cut in (conti.get("cuts") or []) if isinstance(cut, dict)]
+    if conti.get("status") != "ready" or not cuts:
+        raise VpocError("vnew.conti.fx", "ContiNotReady", "먼저 콘티를 만들어 주세요.", 409)
+    empty_ids, translate_ids = vnew_fx.fill_targets(cuts)
+    if not empty_ids and not translate_ids:
+        raise VpocError("vnew.conti.fx", "NothingToFill", "채울 컷이 없습니다.", 409)
+    task_id = start_task(owner, pid, "fxFill")
+    _spawn(run_fx_fill, owner, pid, task_id, name=f"vnew-fx-{pid}")
+    return {"taskId": task_id, "targets": len(empty_ids), "translate": len(translate_ids)}
+
+
+def run_fx_fill(owner: str, pid: str, task_id: str) -> None:
+    """채우기 작업(백그라운드 스레드). 계획을 다시 읽어 대상을 정하고 1회 호출한 뒤, 저장 때 지금 컷에 합친다.
+
+    task.id 가 다르면(취소·재실행) 결과를 버린다. 그 사이 빈 컷이 아니게 됐거나 moodKo 가 바뀐 컷은 건너뛴다.
+    프리비즈 승인·revision 은 건드리지 않는다. 실패는 _fail_step("fxFill").
+    """
+    started = time.monotonic()
+    try:
+        plan, _ = load_plan(owner, pid)
+        cuts = [cut for cut in ((plan.get("conti") or {}).get("cuts") or []) if isinstance(cut, dict)]
+        empty_ids, translate_ids = vnew_fx.fill_targets(cuts)
+        result = fill_fx(owner, pid, plan, cuts, empty_ids, translate_ids)
+
+        def mutator(data: dict) -> dict:
+            if (data.get("task") or {}).get("id") != task_id:
+                raise _Discard()
+            conti = data.setdefault("conti", {})
+            merged, stats = _apply_fx(conti.get("cuts") or [], result, empty_ids)
+            conti["cuts"] = merged
+            data["fxFill"] = _fx_state("ready", model=str(result.get("model") or ""), stats=stats)
+            data["task"] = {
+                "name": "fxFill", "status": "done", "startedAt": (data.get("task") or {}).get("startedAt"), "id": None,
+            }
+            return stats
+
+        try:
+            _, stats = mutate_plan(owner, pid, mutator)
+        except _Discard:
+            log.info("vnew.fxFill.discarded pid=%s task=%s", pid, task_id)
+            return
+        _log_fx(pid, empty_ids, translate_ids, result, stats, started)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("vnew.conti.fx.failed pid=%s err=%s", pid, str(exc)[:300])
+        _fail_step(owner, pid, "fxFill", task_id, _fx_error_message(exc))
 
 
 # ================================================================ 모델 · 길이
@@ -1383,7 +1707,7 @@ def cancel_task(owner: str, pid: str) -> dict:
             raise VpocError("vnew.task", "NothingToCancel", "진행 중인 작업이 없습니다.", 409)
         name = task.get("name") or ""
         data["task"] = {"name": name, "status": "cancelled", "startedAt": task.get("startedAt"), "id": None}
-        if name in ("script", "conti"):
+        if name in _TASK_STEPS:
             step = data.setdefault(name, {})
             if step.get("status") == "running":
                 step["status"] = "none"
@@ -1392,8 +1716,11 @@ def cancel_task(owner: str, pid: str) -> dict:
     return updated.get("task") or _empty_task()
 
 
-def _commit_step(owner: str, pid: str, name: str, task_id: str, result: dict) -> None:
-    """백그라운드 결과를 저장한다. 현재 task.id 가 다르면(취소·재실행) 버린다."""
+def _commit_step(owner: str, pid: str, name: str, task_id: str, result: dict, extra: dict | None = None) -> None:
+    """백그라운드 결과를 저장한다. 현재 task.id 가 다르면(취소·재실행) 버린다.
+
+    extra 가 있으면 같은 저장에 최상위 키로 함께 넣는다(예: run_conti 의 fxFill). 기본 None 이면 지금과 같다.
+    """
 
     def mutator(data: dict) -> None:
         current = (data.get("task") or {}).get("id")
@@ -1401,6 +1728,8 @@ def _commit_step(owner: str, pid: str, name: str, task_id: str, result: dict) ->
             # 늦게 온 결과: 버린다.
             raise _Discard()
         data[name] = result
+        if extra:
+            data.update(extra)
         data["task"] = {"name": name, "status": "done", "startedAt": (data.get("task") or {}).get("startedAt"), "id": None}
 
     try:
@@ -1445,7 +1774,7 @@ def reconcile_stale(plan: dict) -> dict:
         name = task.get("name") or ""
         plan = dict(plan)
         plan["task"] = {"name": name, "status": "error", "startedAt": task.get("startedAt"), "id": None}
-        if name in ("script", "conti"):
+        if name in _TASK_STEPS:
             step = dict(plan.get(name) or {})
             step["status"] = "failed"
             step["error"] = "작업이 중단되었습니다. 다시 시도해 주세요."
@@ -1557,6 +1886,9 @@ def plan_view(owner: str, pid: str, plan: dict) -> dict:
         "models": previz_models(),
         "script": plan.get("script") or {},
         "conti": plan.get("conti") or {},
+        # vnew-live-fx 설정(화면이 새 요소를 숨길지 안다)과 ③ 기호·분위기 채우기 상태·대상 수·추정 금액.
+        "features": _features_view(),
+        "fxFill": _fx_fill_view(plan),
         "locations": _locations_view(owner, pid, plan),
         "previz": _previz_view(owner, pid, plan),
         "gen": _gen_view(owner, pid, plan),
@@ -1569,6 +1901,61 @@ def _gen_view(owner: str, pid: str, plan: dict) -> dict | None:
     from . import generate  # noqa: PLC0415
 
     return generate.gen_view(owner, pid, plan)
+
+
+def _features_view() -> dict:
+    """vnew-live-fx 묶음 설정(design §2). 묶음 B·C 가 casting·takeReal 을 더한다."""
+    return {"fx": bool(vnew_settings_module().VNEW_FX)}
+
+
+def _fx_estimate_usd(cuts: list, empty_ids: list[str], translate_ids: list[str]) -> float:
+    """채우기 1회 추정 금액(확인창용, Claude 결정 1). 원장과 같은 단가표, 패널 수 = FILL 컷 panels 합집합(상한)."""
+    from ..vpoc import settings as vpoc_settings  # noqa: PLC0415
+
+    opus = "opus" in str(_fx_model() or "")
+    usd_in = vpoc_settings.OPUS_USD_PER_MTOK_IN if opus else vpoc_settings.TEXT_USD_PER_MTOK_IN
+    usd_out = vpoc_settings.OPUS_USD_PER_MTOK_OUT if opus else vpoc_settings.TEXT_USD_PER_MTOK_OUT
+    fill_set = set(empty_ids)
+    panels: set[int] = set()
+    for cut in cuts:
+        if isinstance(cut, dict) and str(cut.get("id") or "") in fill_set:
+            panels.update(_cut_panels(cut))
+    count = min(len(panels), max(1, int(vnew_settings_module().VNEW_FX_MAX_PANELS)))
+    return vnew_fx.estimate_usd(
+        count, len(empty_ids), len(translate_ids), len(cuts), usd_in_per_mtok=usd_in, usd_out_per_mtok=usd_out
+    )
+
+
+def _fx_fill_view(plan: dict) -> dict:
+    """plan.fxFill 보기: 저장 상태(없으면 none) + 지금 컷 기준 targets·translate·estimateUsd. 실패해도 plan_view 는 산다."""
+    state = plan.get("fxFill") if isinstance(plan.get("fxFill"), dict) else {}
+
+    def count(key: str) -> int:
+        value = state.get(key)
+        return value if _is_int(value) and value >= 0 else 0
+
+    view = {
+        "status": str(state.get("status") or "none"),
+        "error": str(state.get("error") or ""),
+        "model": str(state.get("model") or ""),
+        "filled": count("filled"),
+        "translated": count("translated"),
+        "missed": count("missed"),
+        "at": str(state.get("at") or ""),
+        "targets": 0,
+        "translate": 0,
+        "estimateUsd": 0.0,
+    }
+    try:
+        conti = plan.get("conti") or {}
+        cuts = [cut for cut in (conti.get("cuts") or []) if isinstance(cut, dict)] if conti.get("status") == "ready" else []
+        empty_ids, translate_ids = vnew_fx.fill_targets(cuts)
+        view["targets"] = len(empty_ids)
+        view["translate"] = len(translate_ids)
+        view["estimateUsd"] = _fx_estimate_usd(cuts, empty_ids, translate_ids)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("vnew.plan.fx_view_failed err=%s", str(exc)[:200])
+    return view
 
 
 def _scene_cast_view(owner: str, pid: str, plan: dict) -> list[dict]:

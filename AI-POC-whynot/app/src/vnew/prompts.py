@@ -13,6 +13,9 @@ broker 는 vpoc.llm 이 그대로 맡는다(여기서는 프롬프트·스키마
 
 from __future__ import annotations
 
+# 기호 열거값은 순수 모듈 fx.py 한 곳에서 읽는다(네트워크·S3 없음).
+from .fx import FX_KEYS
+
 # ================================================================ ② 대본(script)
 
 EMIT_SCRIPT = {
@@ -181,3 +184,46 @@ Rules you must follow:
    instruction (e.g. static camera, slow push-in, over-the-shoulder).
 7. Write Korean for every *Ko field and plain English for every *En field. Answer only with the
    emit_conti tool."""
+
+
+# ================================================================ ③ 기호·분위기 채우기(vnew-live-fx 묶음 A, 2026-10-30)
+#
+# 콘티 도구와 따로 부른다(콘티 호출은 글만 보내고, 기호에는 그림이 필요하다). 규칙 문장은 참고 구현
+# vpoc/llm.py:1217-1222(fxEn·fxSuggest)와 :1246-1253(패널 → 기호 표)을 컷 단위 말로 옮긴 것이다(design §A.3 원문).
+
+EMIT_FX = {
+    "name": "emit_fx",
+    "description": "Return webtoon visual symbols and a one-line mood for the requested storyboard cuts.",
+    "inputSchema": {"json": {"type": "object", "required": ["cuts"], "properties": {"cuts": {"type": "array", "items": {
+        "type": "object", "required": ["id"], "properties": {
+            "id": {"type": "string"},
+            "drawnFx": {"type": "array", "items": {"type": "string", "enum": list(FX_KEYS)}},
+            "fxSuggest": {"type": "array", "maxItems": 2, "items": {"type": "string", "enum": list(FX_KEYS)}},
+            "fx": {"type": "array", "maxItems": 2, "items": {"type": "string", "enum": list(FX_KEYS)}},
+            "moodKo": {"type": "string"},
+            "moodEn": {"type": "string"}}}}}}},
+}
+
+FX_SYSTEM = """You read Korean webtoon panels and add webtoon visual symbols and a one-line mood to storyboard cuts.
+Call the emit_fx tool exactly once.
+You are given the character names and every cut of the storyboard. Cuts marked FILL need symbols and a mood;
+cuts marked TRANSLATE need only moodEn; the other cuts are context. Each image is labeled "Panel N", the same
+numbers as the cuts' panels.
+For each FILL cut:
+- drawnFx: the symbols actually drawn in this cut's panels, only from: tear streams | sweat drop | blush lines |
+  pink sparkle background | speed lines. Drawn blush lines -> blush lines; a drawn sweat drop -> sweat drop;
+  drawn tears -> tear streams; a sparkle or flower background -> pink sparkle background; speed or focus lines
+  -> speed lines. Empty when none is drawn.
+- fxSuggest: one or two symbols from the same list (never a new symbol) that would suit this cut's emotion, best
+  first. If a symbol is drawn in this cut's panels, list it first. If the cut has no clear emotion (a neutral
+  look, a plain action, an object), give an empty list. Do not suggest the same symbol for more than three cuts
+  in the whole storyboard, counting the context cuts.
+- fx: the symbols to apply, zero to two, taken from fxSuggest: the drawn ones and one the emotion clearly calls
+  for. Usually zero or one.
+- moodKo (<= 60 characters, Korean): the mood and each visible character's facial expression in one line,
+  e.g. "민지가 당황해 굳은 웃음, 어색한 공기". Use the given character names.
+- moodEn (<= 80 characters, English): the same line for a video model, e.g. "민지's frozen, embarrassed smile;
+  awkward air". Keep the character names exactly as given; do not translate or romanize them.
+For each TRANSLATE cut: only id and moodEn (the English of its moodKo, <= 80 characters, names kept as given).
+Describe only what the panels and the cut text show. Never describe hair, skin or clothing colors. No dialogue
+text. Answer only with the emit_fx tool."""

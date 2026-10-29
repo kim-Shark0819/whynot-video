@@ -1600,7 +1600,8 @@
       return;
     }
     if (task.status === "running") {
-      state.planStep = task.name === "conti" ? 3 : 2;
+      // 콘티·기호 채우기(fxFill, vnew-live-fx)는 ③, 대본은 ②.
+      state.planStep = task.name === "conti" || task.name === "fxFill" ? 3 : 2;
       return;
     }
     // 사용자가 이미 단계를 골랐으면(1~6) 그대로 둔다(단, 갈 수 없는 단계면 되돌린다).
@@ -2962,6 +2963,11 @@
       host.appendChild(progressBar("콘티를 쓰고 있습니다…", showError));
       return;
     }
+    // vnew-live-fx RA7.2: 채우기 진행 중이면 진행 막대만(설정을 꺼도 이미 시작한 작업은 끝까지 보인다).
+    if (task.status === "running" && task.name === "fxFill") {
+      host.appendChild(progressBar("기호·분위기를 채우고 있습니다…", showError));
+      return;
+    }
     if (conti.status === "failed") {
       host.appendChild(planError(conti.error || "콘티 만들기에 실패했습니다."));
     }
@@ -2995,6 +3001,13 @@
     // segments 안내
     if (segments.length) {
       host.appendChild(segmentsPanel(segments, cuts));
+    }
+
+    // vnew-live-fx RA7.2: 채우기 실패 문구 + [기호·분위기 채우기](컷 목록 위).
+    if (fxEnabled()) {
+      var fxError = fxFillErrorText(plan.fxFill);
+      if (fxError) host.appendChild(planError(fxError));
+      host.appendChild(fxToolbar(cuts, showError));
     }
 
     // 컷 카드
@@ -3975,6 +3988,7 @@
     grid.appendChild(textField("대사", cut, "dialogueKo", true));
     grid.appendChild(textField("상황", cut, "situationKo", true));
     card.appendChild(grid);
+    if (fxEnabled()) card.appendChild(fxRow(cut));
 
     // 인물 위치·동작
     var who = cut.characters || [];
@@ -4014,6 +4028,247 @@
     cuts[a] = cuts[b];
     cuts[b] = tmp;
     renderPlan();
+  }
+
+  /* ================================================================ ③ 기호·분위기 (vnew-live-fx 묶음 A, RA7)
+
+     컷 필드: fx(적용 0~2) · fxSuggest(추천, 좋은 순) · fxDrawn(패널에 그려진 기호) · moodKo(60자) · moodEn(영어, 서버가 채움).
+     plan.features.fx 가 false 면 칩·분위기 칸·채우기 버튼·④ 한 줄을 그리지 않는다. 글은 모두 textContent(el)로만 넣는다.
+     FX_LABEL_KO 는 vnew/fx.py 와 같은 글자다(검사 fx-l). 아래 순수 함수(DOM 없음)는 검사가 node 로 실행한다. */
+  var FX_KEYS = ["tear streams", "sweat drop", "blush lines", "pink sparkle background", "speed lines"];
+  var FX_LABEL_KO = {
+    "tear streams": "눈물 줄기",
+    "sweat drop": "땀 한 방울",
+    "blush lines": "볼 홍조",
+    "pink sparkle background": "분홍 반짝이 배경",
+    "speed lines": "속도선"
+  };
+  var FX_APPLY_MAX = 2;
+  var FX_MOOD_PLACEHOLDER = "분위기·표정 한 줄 (예: 민지가 당황해 굳은 웃음, 어색한 공기)";
+  var FX_TRANSLATE_HINT = "영상용 영어 문장이 아직 없습니다. 영어로 옮기려면 [기호·분위기 채우기]를 누르세요.";
+
+  /* 알려진 기호만, 중복 없이, limit 개(서버 fx_list 와 같은 규칙: 소문자·공백 정리). */
+  function fxKeys(value, limit) {
+    var list = typeof value === "string" ? [value] : (Array.isArray(value) ? value : []);
+    var out = [];
+    for (var i = 0; i < list.length && out.length < limit; i++) {
+      if (typeof list[i] !== "string") continue;
+      var key = list[i].toLowerCase().split(/\s+/).filter(Boolean).join(" ");
+      if (FX_KEYS.indexOf(key) >= 0 && out.indexOf(key) < 0) out.push(key);
+    }
+    return out;
+  }
+
+  /* 칩 순서·상태: 추천(fxSuggest) 먼저, 그다음 나머지 FX_KEYS. 적용이 2개면 나머지 칩은 full. */
+  function fxChipStates(cut) {
+    var c = cut || {};
+    var applied = fxKeys(c.fx, FX_APPLY_MAX);
+    var suggest = fxKeys(c.fxSuggest, FX_APPLY_MAX);
+    var drawn = fxKeys(c.fxDrawn, FX_KEYS.length);
+    var order = suggest.concat(FX_KEYS.filter(function (key) { return suggest.indexOf(key) < 0; }));
+    return order.map(function (key) {
+      var on = applied.indexOf(key) >= 0;
+      return {
+        key: key,
+        label: FX_LABEL_KO[key],
+        on: on,
+        suggest: suggest.indexOf(key) >= 0,
+        drawn: drawn.indexOf(key) >= 0,
+        full: !on && applied.length >= FX_APPLY_MAX
+      };
+    });
+  }
+
+  /* 칩을 누른 뒤 적용 목록. 있으면 빼고, 없으면 2개 미만일 때만 넣는다(2개면 그대로). */
+  function fxToggled(list, key) {
+    var applied = fxKeys(list, FX_APPLY_MAX);
+    var at = applied.indexOf(key);
+    if (at >= 0) return applied.slice(0, at).concat(applied.slice(at + 1));
+    if (FX_KEYS.indexOf(key) < 0 || applied.length >= FX_APPLY_MAX) return applied;
+    return applied.concat([key]);
+  }
+
+  /* 번역 안내를 보일지: 분위기(한국어)는 있는데 영상용 영어가 비었다(고친 뒤 저장했거나 아직 옮기지 않음). */
+  function fxNeedsTranslation(cut) {
+    var c = cut || {};
+    return !!String(c.moodKo || "").trim() && !String(c.moodEn || "").trim();
+  }
+
+  function fxCount(value) {
+    var n = Number(value);
+    return isFinite(n) && n > 0 ? Math.floor(n) : 0;
+  }
+
+  /* [기호·분위기 채우기] 버튼 글·확인창 글·오류 글(plan.fxFill: targets·translate·estimateUsd·status·error). */
+  function fxFillButtonText(fill) {
+    var f = fill || {};
+    return "기호·분위기 채우기 (빈 컷 " + fxCount(f.targets) + "개 · 영어 옮기기 " + fxCount(f.translate) + "개)";
+  }
+
+  function fxFillConfirmText(fill) {
+    var f = fill || {};
+    var usd = Number(f.estimateUsd);
+    return "빈 컷 " + fxCount(f.targets) + "개 · 영어 옮기기 " + fxCount(f.translate) + "개를 채웁니다. 예상 비용 약 $" +
+      (isFinite(usd) && usd > 0 ? usd : 0).toFixed(2) + "입니다. 계속할까요?";
+  }
+
+  function fxFillErrorText(fill) {
+    var f = fill || {};
+    if (f.status !== "failed") return "";
+    return (String(f.error || "").trim() || "기호·분위기를 채우지 못했습니다.") + " [기호·분위기 채우기]로 다시 시도할 수 있습니다.";
+  }
+
+  /* ④ 프리비즈 컷 카드 한 줄(읽기 전용): "기호: 볼 홍조 · 땀 한 방울 · 분위기: …". 둘 다 없으면 "". */
+  function previzFxText(contiCut) {
+    var c = contiCut || {};
+    var parts = [];
+    var labels = fxKeys(c.fx, FX_APPLY_MAX).map(function (key) { return FX_LABEL_KO[key]; });
+    if (labels.length) parts.push("기호: " + labels.join(" · "));
+    var mood = String(c.moodKo || "").replace(/\s+/g, " ").trim();
+    if (mood) parts.push("분위기: " + mood);
+    return parts.join(" · ");
+  }
+
+  function fxEnabled() {
+    return !!(((state.plan || {}).features || {}).fx);
+  }
+
+  /* ③ 컷 카드의 기호 칩 줄 + 분위기 한 줄. 칩을 누르면 cut.fx 만 바꾸고 칩 줄만 다시 그린다(저장은 [저장]). */
+  function fxRow(cut) {
+    var wrap = el("div", "vnew-fx-row");
+    var chips = el("div", "vnew-fx-chips");
+
+    function drawChips() {
+      clear(chips);
+      chips.appendChild(el("span", "vnew-field-label vnew-fx-label", "기호"));
+      var states = fxChipStates(cut);
+      var noneBtn = el("button", "vnew-fx-chip" + (fxKeys(cut.fx, FX_APPLY_MAX).length ? "" : " is-on"), "없음");
+      noneBtn.type = "button";
+      noneBtn.title = "기호를 쓰지 않습니다";
+      noneBtn.addEventListener("click", function () {
+        cut.fx = [];
+        drawChips();
+      });
+      chips.appendChild(noneBtn);
+      states.forEach(function (chip) {
+        var cls = "vnew-fx-chip" + (chip.on ? " is-on" : "") + (chip.suggest ? " is-suggest" : "") +
+          (chip.drawn ? " is-drawn" : "") + (chip.full ? " is-full" : "");
+        var btn = el("button", cls, chip.label);
+        btn.type = "button";
+        btn.setAttribute("aria-pressed", chip.on ? "true" : "false");
+        var titles = [];
+        if (chip.drawn) titles.push("패널에 그려진 기호");
+        if (chip.suggest) titles.push("이 컷에 추천하는 기호");
+        if (chip.full) titles.push("최대 2개까지 고를 수 있습니다");
+        if (titles.length) btn.title = titles.join(" · ");
+        if (chip.suggest) btn.appendChild(el("span", "vnew-fx-chip-tag", "추천"));
+        if (chip.drawn) btn.appendChild(el("span", "vnew-fx-chip-tag is-drawn", "그림"));
+        btn.addEventListener("click", function () {
+          if (chip.full) return;
+          cut.fx = fxToggled(cut.fx, chip.key);
+          drawChips();
+        });
+        chips.appendChild(btn);
+      });
+    }
+
+    drawChips();
+    wrap.appendChild(chips);
+
+    var moodWrap = el("label", "vnew-field vnew-fx-mood");
+    moodWrap.appendChild(el("span", "vnew-field-label", "분위기·표정"));
+    var input = el("input", "vnew-field-input vnew-mood-input");
+    input.type = "text";
+    input.maxLength = 60;
+    input.placeholder = FX_MOOD_PLACEHOLDER;
+    input.value = cut.moodKo || "";
+    var loaded = input.value;
+    var hint = el("p", "vnew-hint vnew-fx-hint", FX_TRANSLATE_HINT);
+    function updateHint() {
+      // 저장된 영어가 없거나, 분위기를 고쳐 저장하면 영어가 비워지는 경우(서버 update_conti 규칙) 안내한다.
+      var changed = input.value.trim() && input.value !== loaded;
+      hint.style.display = fxNeedsTranslation(cut) || changed ? "" : "none";
+    }
+    input.addEventListener("input", function () {
+      cut.moodKo = input.value;
+      updateHint();
+    });
+    moodWrap.appendChild(input);
+    moodWrap.appendChild(hint);
+    updateHint();
+    wrap.appendChild(moodWrap);
+    return wrap;
+  }
+
+  /* ③ 컷 목록 위 [기호·분위기 채우기]. 확인창에 대상 수·예상 금액(Claude 결정 1) → 지금 수정본 PUT → POST /conti/fx.
+     대상 수·금액은 서버 plan_view.fxFill(저장된 콘티 기준)이다. 대상이 0이면 누를 수 없다. 저장으로 대상 수·금액이
+     바뀌면(예: 고친 분위기가 영어 옮기기 대상이 됨) 새 숫자로 한 번 더 묻고, 대상이 0이 되면 시작하지 않는다. */
+  function fxSameFill(a, b) {
+    return fxCount((a || {}).targets) === fxCount((b || {}).targets) &&
+      fxCount((a || {}).translate) === fxCount((b || {}).translate) &&
+      Number((a || {}).estimateUsd || 0).toFixed(2) === Number((b || {}).estimateUsd || 0).toFixed(2);
+  }
+
+  function fxToolbar(cuts, showError) {
+    var fill = (state.plan || {}).fxFill || {};
+    var wrap = el("div", "vnew-fx-toolbar");
+    var btn = el("button", "outline-button vnew-fx-fill", fxFillButtonText(fill));
+    btn.type = "button";
+    var empty = fxCount(fill.targets) + fxCount(fill.translate) === 0;
+    btn.disabled = empty;
+    btn.title = empty ? "채울 컷이 없습니다(고친 분위기는 먼저 [저장]하면 영어 옮기기 대상이 됩니다)" : "";
+    btn.addEventListener("click", function () {
+      if (!window.confirm(fxFillConfirmText(fill))) return;
+      btn.disabled = true;
+      var base = "/api/vnew/p/" + encodeURIComponent(state.projectId);
+      api(base + "/conti", { method: "PUT", body: JSON.stringify({ cuts: cuts }) })
+        .then(function (plan) {
+          state.plan = plan;
+          var next = plan.fxFill || {};
+          btn.textContent = fxFillButtonText(next);
+          if (fxCount(next.targets) + fxCount(next.translate) === 0) {
+            showError("저장했습니다. 채울 컷이 없습니다.");
+            return null;
+          }
+          if (!fxSameFill(fill, next)) {
+            fill = next;
+            if (!window.confirm(fxFillConfirmText(next))) {
+              btn.disabled = false;
+              return null;
+            }
+          }
+          return api(base + "/conti/fx", { method: "POST" });
+        })
+        .then(function (started) {
+          if (started) loadPlan(false);
+        })
+        .catch(function (err) {
+          btn.disabled = false;
+          showError("기호·분위기 채우기를 시작하지 못했습니다: " + errMessage(err));
+        });
+    });
+    wrap.appendChild(btn);
+    wrap.appendChild(el("span", "vnew-hint", "빈 컷만 채우고, 고친 분위기는 영어로 옮깁니다. 프리비즈 승인은 그대로입니다."));
+    return wrap;
+  }
+
+  /* ④ 프리비즈 컷 카드(받침 줄 아래) 읽기 전용 한 줄. previz 컷(cutId)으로 콘티 컷을 찾는다. */
+  function previzFxLine(previzCut) {
+    if (!fxEnabled()) return null;
+    var cutId = previzCut && previzCut.cutId;
+    var cuts = (((state.plan || {}).conti || {}).cuts) || [];
+    var contiCut = null;
+    for (var i = 0; i < cuts.length; i++) {
+      if (cuts[i] && cuts[i].id === cutId) {
+        contiCut = cuts[i];
+        break;
+      }
+    }
+    var text = previzFxText(contiCut);
+    if (!text) return null;
+    var line = el("p", "vnew-previz-fx-line", text);
+    line.title = "③ 콘티에서 정한 기호·분위기입니다. 영상 프롬프트에 들어갑니다(마네킹·장면은 바꾸지 않습니다).";
+    return line;
   }
 
   /* ================================================================ ④ 프리비즈(3D)
@@ -4273,6 +4528,8 @@
     if (collisionBadges) card.appendChild(collisionBadges);
     var supportLines = previzSupportLines(cut, previz);
     if (supportLines) card.appendChild(supportLines);
+    var fxLine = previzFxLine(cut);
+    if (fxLine) card.appendChild(fxLine);
     return card;
   }
 

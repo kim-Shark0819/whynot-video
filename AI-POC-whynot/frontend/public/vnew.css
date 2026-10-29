@@ -1438,6 +1438,88 @@ textarea.vnew-field-input {
   margin-top: 8px;
 }
 
+/* ---- ③ 기호 칩·분위기 한 줄(vnew-live-fx RA7) ---- */
+
+.vnew-fx-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 12px;
+}
+
+.vnew-fx-row {
+  display: grid;
+  gap: 10px;
+  margin-top: 12px;
+  padding-top: 10px;
+  border-top: 1px dashed var(--line, #e5e7eb);
+}
+
+.vnew-fx-chips {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+}
+
+.vnew-fx-label {
+  margin-right: 4px;
+}
+
+.vnew-fx-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 3px 10px;
+  border: 1px solid var(--line, #e5e7eb);
+  border-radius: 999px;
+  background: var(--surface, #ffffff);
+  color: var(--text, #1b1d21);
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.vnew-fx-chip.is-suggest {
+  border-color: #fdba74;
+}
+
+.vnew-fx-chip.is-on {
+  border-color: var(--accent, #cb3208);
+  background: var(--accent-soft, #fef3c7);
+  color: var(--accent-strong, #b45309);
+  font-weight: 600;
+}
+
+.vnew-fx-chip.is-full {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+.vnew-fx-chip-tag {
+  padding: 0 5px;
+  border-radius: 999px;
+  font-size: 10px;
+  font-weight: 600;
+  background: #fff7ed;
+  color: #9a3412;
+}
+
+.vnew-fx-chip-tag.is-drawn {
+  background: #eff6ff;
+  color: #1e40af;
+}
+
+.vnew-mood-input {
+  max-width: 560px;
+}
+
+.vnew-fx-hint {
+  margin: 2px 0 0;
+  font-size: 12px;
+}
+
 /* ---- 좁은 화면(≤768px) ---- */
 
 @media (max-width: 768px) {
@@ -2814,6 +2896,13 @@ textarea.vnew-field-input {
 .vnew-previz-support-line.is-warn {
   color: #92400e;
   font-weight: 600;
+}
+
+/* ④ 기호·분위기 읽기 전용 한 줄(vnew-live-fx RA7.3) */
+.vnew-previz-fx-line {
+  margin: 6px 0 0;
+  font-size: 12px;
+  color: var(--text-muted, #6b7280);
 }
 
 /* 70% 승인 관문: 낮은 컷 안내 + [그래도 승인] */

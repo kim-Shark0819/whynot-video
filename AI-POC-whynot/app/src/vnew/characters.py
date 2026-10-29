@@ -408,7 +408,7 @@ def source_jpeg(owner: str, char_id: str, file_id: str) -> bytes:
 def _analyze(blocks: list[dict], *, model: str) -> tuple[dict, dict]:
     """llm._converse 로 분석 JSON 을 받는다. (payload, usage{..model})."""
     return vpoc_llm._converse(  # noqa: SLF001 — 공개 래퍼가 없어 내부 함수를 쓴다
-        system_text=_ANALYZE_SYSTEM,
+        system_text=_analyze_system(),
         blocks=blocks,
         tool=_ANALYZE_TOOL,
         max_tokens=1200,
@@ -466,6 +466,22 @@ _ANALYZE_SYSTEM = (
     "If the user gives an extra request (extraPromptKo), turn it into a short English drawing "
     "instruction in extraEn; otherwise leave extraEn empty. Do not add text outside the tool."
 )
+
+# vnew-live-fx RA6.1(참고 구현 vpoc/llm.py:1255-1258): 켬이면 머리색을 그림 그대로, 옷 무늬는 위치까지 쓰게 한다.
+# 이미 분석된 캐릭터는 다시 읽지 않는다(다음 분석부터 적용, RA6.2).
+_ANALYZE_DETAIL_RULE = (
+    " Name the hair color exactly as drawn (e.g. 'ash blonde' rather than 'light brown' when the drawing is pale "
+    "blonde). For clothing patterns in baseOutfitEn and outfitLayersEn, say where the pattern is (e.g. 'a white "
+    "stripe down each sleeve, plain black body', 'a logo on the chest')."
+)
+
+
+def _analyze_system() -> str:
+    """캐릭터 분석 SYSTEM. VNEW_FX 켬이면 머리색·무늬 위치 규칙을 끝에 더한다(끔이면 지금 상수 그대로)."""
+    if settings.VNEW_FX:
+        return _ANALYZE_SYSTEM + _ANALYZE_DETAIL_RULE
+    return _ANALYZE_SYSTEM
+
 
 _ANALYZE_TOOL = {
     "name": "emit_character",
