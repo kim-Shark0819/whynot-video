@@ -178,6 +178,7 @@ flowchart LR
 | `characters.py` | 캐릭터 만들기: 웹툰 이미지 분석(Astra → Claude) → Seedream 시트·정면·후면(실사·웹툰 2 variant) → Hunyuan3D(fal) GLB. 빌드·재시도·재개 스레드(`:1587`, `:1645`, `:1808`, `:1909`, `:2191`) |
 | `plan.py` | ①입력 ②대본 ③콘티. `plan.json` 하나가 프로젝트 상태의 단일 원본. task 스레드(`:1393`). 공용 `plan.task` 단계는 script·conti·fxFill(`_TASK_STEPS` `:60`) |
 | `fx.py` | ③ 만화 기호·분위기(vnew-live-fx 묶음 A, 2026-10-30, 순수 함수 — 네트워크·S3·LLM 없음). 기호 5종 열거값·문장(참고 구현 원문)·짧은 형·실사 표현·화면 라벨, 컷 필드 정리(`normalize_cut_fx`), 채우기 대상(`fill_targets`)·합치기(`merge_fill`)·3컷 한도(`apply_cap`)·금액 추정(`estimate_usd`), 프롬프트 문장(`sentences`). `plan.py`(저장·채우기)·`generate.py`(프롬프트)가 읽는다. `VNEW_FX`로 끈다 |
+| `casting.py` | 캐릭터 실사 캐스팅(vnew-live-fx 묶음 B, 2026-10-30). 캐스팅 문장·성별(순수 함수)과 뽑기 상태(`char.casting`)·fal 큐 제출·조회(글만, 래퍼 `_fal_request`·`_fetch_url`)·이어하기·고르기·상세 보기. `characters.py`(상세·키)·`routes.py`(라우트 3개)·`generate.py`(`_char_entries.castingKey`)가 읽는다. `VNEW_CASTING`으로 끈다 |
 | `locations.py` / `location_views.py` | ③ 장소 4면 시트, 참고 사진. `ThreadPoolExecutor(VIEW_WORKERS)`(`:1848`), task 스레드(`:2846`) |
 | `previz*.py` | ④ 프리비즈 3D 장면 설계(Astra), 카메라 문법·토릭 계산(`previz_camera`, `previz_grammar`), 일치도(`previz_fit`), 스키마. task 스레드(`previz.py:2858`) |
 | `previz_collision.py` | ④ 인물↔소품 겹침 보정(084 R1, 순수 함수, LLM·네트워크 없음). 앉을 소품(`pick_seat`)·엉덩이 높이 = 소품 윗면·다리 방향(`choose_leg_yaw`, 길쭉한 자리는 짧은 축 법선)·다리 각도(`solve_legs`)·밀어내기(`push_out`). `run_design`이 카메라 계산 전·후 2회 부르고 `fit[cut].collision`에 저장. `previz_view`는 보정과 함께 설계된 장면(`sit` 또는 `fit.collision` 있음)만 보기 사본에 다시 적용하고, 옛 장면은 사본을 바꾸지 않고 `detect_scene`으로 관통 컷만 찾아 `collision.needsRedesign`으로 알린다(저장본 그대로). `VNEW_PREVIZ_COLLISION`으로 끈다 |
@@ -204,9 +205,9 @@ vnew가 재사용하는 것: `vpoc.llm`·`images`·`store.STORE`·`ark`·`fal`·
 - 단가(`_previz_price_row`): unit `seconds`는 그 초당 단가, 기본 모델은 단가를 모르면 `VNEW_PREVIZ_EDIT_USD_PER_S`. 토큰 단가는 전송 해상도를 아는 통 테이크 모델에만 `vpoc settings.shot_usd(id, VNEW_TAKE_RESOLUTION, 1)`과 `priceResolution`을 준다(`_previz_send_resolution`). 통 테이크는 그 해상도를 본문 `resolution`에 늘 명시해 보내고(`generate.py:2918`), 견적·원장(`_take_usd`)도 같은 값이다. 컷 단위 토큰 모델은 `resolution`을 보내지 않아 "단가 미정"이다.
 - 화면: `vnew.js` `previzPriceText`가 `$0.206/초(480p)`(목록)·`초당 $0.206(480p)`(설명 줄)을 만든다.
 
-#### 3.6.1 기호·실사 캐스팅·실사 버전(vnew-live-fx)이 닿는 코드 경로 (2026-10-30 조사, 구현 전 · 묶음 A 구현 결과는 표 아래)
+#### 3.6.1 기호·실사 캐스팅·실사 버전(vnew-live-fx)이 닿는 코드 경로 (2026-10-30 조사, 구현 전 · 묶음 A·B 구현 결과는 각 표 아래)
 
-스펙은 `.kiro/specs/vnew-live-fx/`다. 아래 표는 **구현 전 지금 코드**를 적는다. 줄 번호는 2026-10-30 작업 트리 기준이다. "참고 구현"은 외부 저장소 `ottlseo/video-vibecode` 사본(읽기 전용)이고, 비교는 `.kiro/handoff/logs/087.log` 끝 보고서에 있다. 묶음 A(기호·분위기)는 같은 날 구현했다(아래 「A 구현 결과」). B·C 표는 아직 구현 전이다.
+스펙은 `.kiro/specs/vnew-live-fx/`다. 아래 표는 **구현 전 지금 코드**를 적는다. 줄 번호는 2026-10-30 작업 트리 기준이다. "참고 구현"은 외부 저장소 `ottlseo/video-vibecode` 사본(읽기 전용)이고, 비교는 `.kiro/handoff/logs/087.log` 끝 보고서에 있다. 묶음 A(기호·분위기)와 묶음 B(실사 캐스팅)는 같은 날 구현했다(아래 「A 구현 결과」·「B 구현 결과」). C 표는 아직 구현 전이다.
 
 **A. 기호·분위기·묘사 규칙(③ 콘티 → ④ 프리비즈 카드 → 영상 프롬프트)**
 
@@ -253,6 +254,45 @@ vnew가 재사용하는 것: `vpoc.llm`·`images`·`store.STORE`·`ark`·`fal`·
 | `generate.py:792-827` `_char_entries` | 실사 `realFrontKey`·`realBackKey`를 모은다. 컷 단위 실사(Kling)는 `_previz_payload_elements`(`:3568`)·`_previz_payload_image_list`(`:3623`)에서 실사 정면을 인물 참고로 쓴다 |
 | `vnew.js:474` `renderDetail`, `:440` `schedulePoll` | 분석 카드 → 실사·웹툰 열 → 추가 복장. 폴링은 `status === "building"`일 때만 |
 | `vnew/routes.py:70-238` | 캐릭터 라우트. 캐스팅 라우트가 없다 |
+
+**B 구현 결과(2026-10-30, 작업 B1~B3, `VNEW_CASTING` 기본 true)** — 줄 번호는 구현 뒤 작업 트리 기준이다.
+
+| 단계 | 위치 | 동작 |
+|---|---|---|
+| 문장·성별 | `casting.py:117` `resolve_gender`, `:305` `look_sentence`, `:368` `pattern_warning`, `:388` `cast_prompt` | 성별 = 사용자 지정 → 분석 `genderEn` → 외모 문장 주어(man·boy·woman·girl) → unknown. genderEn이 unknown이어도 외모 문장에 man·woman이 있으면 그 값이다(091 남은 이슈 3, PM 결정으로 유지). 프리셋 문구(아이돌풍·현실 배우풍)의 male 결과는 참고 구현 원문과 같다. 모든 결과에서 그림 낱말을 지운다 |
+| 분석 | `characters.py:501` `_analyze_tool`, `:485` `_analyze_system`, `:552` `analyze_sources` | 켬이면 분석 도구에 선택 필드 `genderEn`, SYSTEM에 성별 문장. 이미 분석된 캐릭터는 다시 분석하지 않는다 |
+| 설정 저장 | `routes.py:242` `PUT /characters/<id>/casting` → `casting.py:613` `update_settings` | 느낌·성별·외모 문장(300자, `clean_text`). 빈 외모 문장은 자동 문장으로 되돌린다 |
+| 뽑기 | `routes.py:257` `POST …/casting/draw` → `casting.py:625` `start_draw` → 스레드 `:982` `run_draw`(`:847` `_submit_slot` · `:906` `_poll_slot` · `:956` `_finish`) | 확인 금액(`confirmUsd`)이 장 수 × `VNEW_CASTING_USD`와 다르면 409 `CostMismatch`. 진행 중이면 409 `CastingRunning`. fal 큐에 칸마다 **글만** 제출(본문 `{prompt, num_images, image_size}`), 결과는 `users/{owner}/characters/{id}/casting/`에 JPEG(긴 변 1536)로 옮기고 사진마다 원장 1건. 이전 후보는 `history`(12개)로 옮기고 고른 사진(`chosen`)은 유지(결정 5). 4xx 거절 칸 문구는 캐스팅용(`:427` `_MSG_REJECTED` + `error_gist` 요지, B3) |
+| 이어하기 | `casting.py:766` `reconcile`(`characters.py:2406` `_casting_detail`이 상세 조회 때 부른다) | 하트비트가 `VNEW_CASTING_STALL_S`(600초)보다 오래됐고 이 파드에서 돌지 않으면 새 claim으로 제출한 칸만 조회한다. 제출하지 않은 칸은 실패로 둔다(다시 과금하지 않음). 시작부터 900초면 남은 칸 실패 |
+| 고르기 | `routes.py:274` `POST …/casting/choose` → `casting.py:685` `choose` | 후보·이전 후보 id 또는 ""(고르기 풀기 = 실사 정면) |
+| 보기 | `casting.py:711` `view`(상세 `casting`) | `{enabled, preset, presets, gender, genderAuto, lookEn, lookAuto, lookEdited, patternWarning, status, error, slots, unitUsd, count, totalUsd, candidates, history, chosen, chosenUrl}`. 사진은 presigned URL(브라우저 표시용). 끔이면 `{enabled:false}` |
+| 영상에 쓰기(B3) | `generate.py:794` `_char_entries`, `:833` `_casting_key_of`, `:842` `_real_front_key` | 켬이면 항목에 `castingKey`(= `casting.chosen_key`, 없거나 저장값이 깨지면 "")를 더한다. 끔이면 키가 없어 B 이전과 키·값이 같다. `_real_front_key`는 `castingKey`가 있으면 그것, 없으면 `realFrontKey`. **이번에는 정의와 검사만 있고 부르는 곳이 없다**(묶음 C 통 테이크 실사가 부른다) |
+| 화면(B3) | `vnew.js:963-` 캐스팅 구역(순수 문구 함수 + `:1052` `castingSection`), `renderDetail`(`:539`, 실사·웹툰 열 다음·추가 복장 앞), `schedulePoll`(`:440`, 뽑는 중에도 5초마다); `vnew.css` `vnew-casting-*` | 아래 「캐스팅 화면」 |
+
+캐스팅 화면(`detail.casting.enabled`가 false면 그리지 않는다):
+- 머리 "실사 캐스팅"과 안내 "웹툰 그림 없이 글로 실사 배우 사진을 만듭니다. 고른 사진은 통 테이크 실사 버전의 인물 참고로 씁니다(고르지 않으면 실사 정면)."
+- 느낌 라디오(아이돌풍·현실 배우풍), 성별 select("자동(분석: 남/여/모름)"·남·여·모름 — "자동" 옆 값은 서버가 정한 `genderAuto`), 외모 문장 textarea(300자), [저장], [분석 문장으로 되돌리기], 무늬 위치 경고.
+- [실사 캐스팅 뽑기 (2장 · $0.08)] → `window.confirm("실사 캐스팅 사진 2장을 만듭니다. 예상 비용 $0.08입니다. 계속할까요?")` → `POST /draw {confirmUsd, preset, gender[, lookEn]}`. 409 `CostMismatch`면 상세를 다시 읽어 버튼 글을 새 금액으로 바꾸고 "금액이 바뀌었습니다. 새 금액은 $X입니다. 다시 누르면 새 금액으로 확인합니다."를 보인다. 다시 눌러 새 금액으로 확인해야 보낸다.
+- 뽑는 중: 진행 막대 "사진을 만드는 중… (끝난 칸/전체)", 입력 칸·버튼 막힘(5초마다 다시 그리므로 쓰던 글이 사라지지 않게). 실패·일부 실패: 오류 문구.
+- "실사 버전에 쓰는 사진: 고른 캐스팅 사진 / 실사 정면" 한 줄과 [실사 정면 쓰기](고른 사진이 있을 때).
+- 후보 격자(사진을 누르면 크게, "실사 버전에 쓰는 사진" 배지, [이 사진으로]), 접기 "이전 사진 (n)".
+- 사진 `src`는 응답의 presigned `url`만 쓰고, 문구는 모두 `textContent`·속성으로 넣는다.
+
+결정 4(Claude, 2026-10-30): 캐스팅 사진은 통 테이크 실사 버전(묶음 C)에만 쓴다. 컷 단위 Kling 실사 payload(`generate.py:3737` `_previz_payload_elements`, `:3792` `_previz_payload_image_list`)는 바꾸지 않고 지금처럼 실사 정면·실사 후면을 쓴다. 가슴 위 캐스팅 사진과 전신 실사 후면(시트 얼굴)을 같이 넣으면 Kling에서 다른 사람처럼 보일 위험이 있어서다. cast-k가 캐스팅을 고르기 전·후·끔 세 경우의 두 payload(실사·웹툰)가 deep-equal·sha256까지 같고 캐스팅 사진이 들어가지 않는지 본다.
+
+운영 오류 문구(B3, 091 남은 이슈 2): `vpoc/errors.py` `USER_FACING_KINDS`에 고정 한국어 문구 9종(`CastingDisabled`·`CastingRunning`·`NoLook`·`CandidateNotFound`·`BadPreset`·`BadGender`·`BadLook`·`NoConfirmUsd`·`NoCandidateId`)을 더했다. `CostMismatch`는 문구에 화면이 보낸 금액이 들어가고 vpoc(`regen.py`·`routes.py`)는 그 입력 원문을 그대로 실어 넣지 않았다. 운영에서는 "처리 중 오류가 발생했습니다 (코드: CostMismatch)"로 보이지만 봉투의 `type`은 남아 화면이 새 금액을 다시 읽는다.
+
+B의 남은 위험(design §7):
+
+| 위험 | 영향 | 대응 |
+|---|---|---|
+| 캐스팅 사진(가슴 위)과 실사 후면(전신)이 Kling에서 다른 사람처럼 보임 | 컷 단위 실사 얼굴 흔들림 | 결정 4로 컷 단위에는 쓰지 않는다(cast-k) |
+| fal Seedance가 실사 사진 참고를 "실존 인물과 닮음"으로 거절(073 V-2 실측) | C 실사 테이크 실패 | C에서 칸별 실패·다시 시도. 대안: 캐스팅 사진 대신 실사 정면, 컷 단위 Kling 실사 |
+| 뽑기 이어하기: fal이 요청을 받은 뒤 submitted를 저장하기 전에 파드가 죽음 | 결과를 못 받는 요청 1건 과금 가능(원장 없음) | 3D와 같은 한계. fal 요청 id를 미리 예약할 수 없어 받아들인다 |
+| 재시작 뒤 이어받기까지 최대 600초 | 화면이 그동안 "만드는 중" | 하트비트 기준(`VNEW_CASTING_STALL_S`). 시작부터 900초면 끝난다 |
+| 참고 구현 원문이 없는 머리색·주어·나이 표, 무늬·위치 낱말, 경고 문구 | 문장 품질이 참고 구현과 다를 수 있다 | 같은 뜻으로 새로 썼다(091 남은 이슈 1). 원문을 받으면 상수만 바꾼다 |
+
+끔(`VNEW_CASTING=false`)이면 캐스팅 라우트 3개가 404 `CastingDisabled`, 상세 `casting`이 `{enabled:false}`라 화면 칸과 뽑는 중 폴링이 없고, 분석 도구·SYSTEM이 B 이전과 같으며(cast-d sha256), `_char_entries` 항목에 `castingKey`가 없다(cast-k). 이미 저장된 `char.casting`은 지우지 않는다. 진행 중인 뽑기는 끝까지 간다.
 
 **C. 통 테이크 실사 버전(⑤)**
 
@@ -530,12 +570,16 @@ vpoc·vnew의 Bedrock 도구 호출은 전부 `vpoc.llm._converse`(`vpoc/llm.py:
 | `VNEW_PREVIZ_SUPPORT` | `vnew/settings.py`(`_bool`), `previz.run_design` | true | true | — | —(VNEW 꺼짐이라 영향 없음) |
 | `VNEW_FX` | `vnew/settings.py:164`(`_bool`), `plan.update_conti`·`run_conti`·`start_fx_fill`·`plan_view`, `generate._take_timeline_entries`·`_take_prompt`·`_cut_prompt`·`_cast_notes_system`, `characters._analyze_system`, 화면 `features.fx` | true | true | — | —(VNEW 꺼짐이라 영향 없음) |
 | `VNEW_FX_MAX_PANELS` | `vnew/settings.py:166`(`_int`), `plan._fx_blocks`·`_fx_estimate_usd` | 20 | 키 없음(코드 기본) | — | — |
+| `VNEW_CASTING` | `vnew/settings.py:171`(`_bool`), `casting.require_enabled`·`view`, `characters._analyze_tool`·`_analyze_system`·`analyze_sources`, `generate._char_entries`, 화면 `detail.casting.enabled` | true | true | — | —(VNEW 꺼짐이라 영향 없음) |
+| `VNEW_CASTING_MODEL`·`_USD`·`_COUNT`·`_SIZE`·`_STALL_S`·`_POLL_MAX_S` | `vnew/settings.py:173-180`, `casting.py` | Seedream 4.5 t2i · 0.04 · 2(1~4) · 1920x2560 · 600 · 900 | 키 없음(코드 기본) | — | — |
 
 `VNEW_PREVIZ_COLLISION`(084 작업 1, 2026-10-28)은 앱 env(`k8s/workloads.yaml.tmpl`의 `VNEW_ENABLED` 바로 뒤)와 base(`deploy/config.env.example`의 `VNEW_ENABLED` 뒤)에 배선돼 있다. false면 보정·앉을 자리(`sit`)가 없고 엉덩이 0.5(지금 동작)다. 설계는 시작 때 읽은 값으로 끝낸다. 되돌림 배선 검사 `PARITY_ENV_KEYS`(rw-a~c)에 들어 있다.
 
 `VNEW_PREVIZ_SUPPORT`(previz-support-reasoning, 2026-10-29)는 템플릿·base 모두 `VNEW_PREVIZ_COLLISION` 바로 뒤에 배선돼 있고 `PARITY_ENV_KEYS`에 들어 있다(rw-a~c, sr-l). false면 설계 프롬프트의 `[받침 판단]` 줄·지시 단락, 서버 받침 맞춤(자세·`sitOn`·소품 높이), `fit[cut].support`가 없다(지금 동작). 패널 읽기의 `supports`는 설정과 상관없이 읽어 캐시에 둔다. 설계는 시작 때 읽은 값으로 끝낸다. 되돌린 뒤에도 이미 저장된 장면(맞춘 소품 높이)과 `fit.support` 화면 줄은 그대로다(다음 설계부터 지금 동작).
 
 `VNEW_FX`(vnew-live-fx 묶음 A, 2026-10-30)는 템플릿·base 모두 `VNEW_PREVIZ_SUPPORT` 바로 뒤에 배선돼 있고 `PARITY_ENV_KEYS`에 들어 있다(rw-a~c, fx-m). 되돌리기는 `config.<target>.env`에 `VNEW_FX=false` 한 줄이다. false면 `POST /conti/fx`가 404, 콘티 만들기에 채우기 호출이 없고, `update_conti`가 지금처럼 늘 승인을 풀며, 통 테이크·컷 단위 프롬프트와 분석·의상 읽기 SYSTEM이 구현 전과 글자 하나 다르지 않다(fx-i sha256). 화면은 `plan_view.features.fx`로 칩·버튼·④ 한 줄을 숨긴다. 이미 저장된 컷 필드(`fx`·`fxSuggest`·`fxDrawn`·`moodKo`·`moodEn`)와 `plan.fxFill`은 지우지 않는다. 채우기 스레드는 시작 때, 프롬프트는 제출 때 설정을 읽는다(진행 중인 채우기는 끝까지 간다). `VNEW_FX_MAX_PANELS`는 코드 기본값만 쓴다.
+
+`VNEW_CASTING`(vnew-live-fx 묶음 B, 2026-10-30)은 템플릿·base 모두 `VNEW_FX` 바로 뒤에 배선돼 있고 `PARITY_ENV_KEYS`에 들어 있다(rw-a~c, cast-m). 되돌리기는 `config.<target>.env`에 `VNEW_CASTING=false` 한 줄이다. false면 캐스팅 라우트 3개가 404 `CastingDisabled`, 상세 `casting`이 `{enabled:false}`(화면 칸·뽑는 중 폴링 없음), 분석 도구·SYSTEM이 B 이전과 같고(cast-d sha256), `generate._char_entries`에 `castingKey`가 없다(cast-k). 이미 저장된 `char.casting`은 지우지 않고, 진행 중인 뽑기는 끝까지 간다(뽑기 스레드는 시작 때 설정을 읽는다). 나머지 `VNEW_CASTING_*`는 코드 기본값만 쓴다.
 
 073 새 키 5개(위 `VPOC_ARK_SEEDANCE_ENABLED`~`VPOC_FAL_SEEDANCE_TAG_STYLE`)는 앱 env(`k8s/workloads.yaml.tmpl:298-311`)와 base(`deploy/config.env.example:368-392`)에 배선돼 있어 오버레이 한 줄로 바꿀 수 있다. 템플릿이 env를 늘 설정하므로 base 값이 실제 기본값이다. 빈 값의 뜻: `FAMILY` 빈 값은 계열 라우팅 끔(070 동작), `PROMPT_MAX_OVERRIDES` 빈 값은 덮어쓰기 없음(caps·2,500), `TAG_STYLE` 빈 값·틀린 값은 `at`(design.md §6).
 
@@ -709,9 +753,9 @@ flowchart LR
 
 ## 10. 테스트·검증 도구
 
-### 10.1 `tools/check_vpoc.py`(CI 유일 검사기, 21,051줄)
+### 10.1 `tools/check_vpoc.py`(CI 유일 검사기, 22,670줄)
 
-`main()`이 아래 55개를 순서대로 부른다(`check_vpoc.py:20983-`). 실패가 하나라도 있으면 종료 코드 1. 외부 호출은 모듈 래퍼를 monkeypatch 하고 S3는 메모리 저장소로 바꾼다(예: `:892` "메모리 S3", `:916`, `:1216`, `:1930`). 새 기본값(`VNEW_FX` 켬)에서 기대값이 달라지는 기존 검사 3개(`check_vnew_plan`·`check_vnew_locations`·`check_vnew_previz`)는 `main()`의 부르는 줄에서 `_run_fx_off(...)`(`:20977`, `_pin_vnew(VNEW_FX=False)`)로 끔 고정한다. 본문·기대값은 그대로다.
+`main()`이 아래 56개를 순서대로 부른다(`check_vpoc.py:22600-`). 실패가 하나라도 있으면 종료 코드 1. 외부 호출은 모듈 래퍼를 monkeypatch 하고 S3는 메모리 저장소로 바꾼다(예: `:892` "메모리 S3", `:916`, `:1216`, `:1930`). 새 기본값(`VNEW_FX` 켬)에서 기대값이 달라지는 기존 검사 3개(`check_vnew_plan`·`check_vnew_locations`·`check_vnew_previz`)는 `main()`의 부르는 줄에서 `_run_fx_off(...)`(`_pin_vnew(VNEW_FX=False)`)로, `VNEW_CASTING` 켬에서 달라지는 `check_vnew_fx_prompt` 1개는 `_run_casting_off(...)`(`:22594`)로 끔 고정한다. 본문·기대값은 그대로다.
 
 | 접두어 | 검사 함수 | 대상 |
 |---|---|---|
@@ -724,6 +768,7 @@ flowchart LR
 | vnew previz 084 | `check_previz_collision`(cs-a~p, 2026-10-28) | `previz_collision` 전 함수, `previz_schema` sit 정규화, `previz_fit.body_y`·`match_visible` hip_y, `previz_camera._actor_points`, `previz.run_design` 1·2차 보정·`_rematch_cut`·`_recompute_manual_fit`·`previz_view`·`_scene_view`, 렌더러·화면 문자열. 개발계 test3 실측 장면(`_previz_test3_scene`)을 쓴다. 공용 도우미 `_pin_vnew`·`_guard_real_llm`(실제 Bedrock 0회 보장) |
 | vnew previz 받침 | `check_previz_support`(sr-a~m, 2026-10-29) | `previz_support` 전 함수, `previz_grammar` emit_shot `supports`·SYSTEM·`normalize_grammar`·`GRAMMAR_VERSION`, `previz._read_grammars` 캐시 판 올림·`_design_prompt` 받침 줄(끔 = 변경 전 sha256)·`run_design` 받침 맞춤·`fit.support`, `previz_schema` 컷 인물 `support`, `previz_collision.solve_legs` `feet`, `vnew.js` `previzSupportText`(node 실행)·`vnew.css`, 배선. test3 실측 장면 + Astra 1m 가로대 → 윗면 0.561m. sr-m은 test3 실제 패널 읽기 3종(몸·받침 화면 밖)이 자세·소품을 바꾸지 않는지 본다 |
 | vnew 기호·분위기 | `check_vnew_fx`(fx-a~g·fx-m·fx-n 저장 쪽), `check_vnew_fx_prompt`(fx-h~k·fx-n 프롬프트 쪽), `check_vnew_fx_screen`(fx-l), 2026-10-30 | `vnew/fx.py` 전 함수, `plan` 저장 규칙·채우기 호출(가짜 `vnew.conti.fx`)·작업·`plan_view`, `POST /conti/fx`(별도 Flask 앱), 배선, `generate._take_prompt`·`_cut_prompt`(끔 = 변경 전 sha256 5종 `_FX_PROMPT_SHA_OFF`, 켬 바이트·단계 출력)·`_cast_notes_system`, `characters._analyze_system`, `vnew.js` 기호 구역(순수 함수·DOM 조립을 node 가짜 DOM으로 실행)·`vnew.css`, 운영 오류 문구(`USER_FACING_KINDS`). 고정 입력은 기존 take 검사 값(`_fx_take_fixture`·`_fx_cut_fixture`) |
+| vnew 실사 캐스팅 | `check_vnew_casting`(cast-a~m, `:21336`, 2026-10-30) | `vnew/casting.py` 전 함수(문장·성별·뽑기·이어하기·고르기·보기, 가짜 fal 큐·내려받기·원장·스레드), `characters` 분석 도구·SYSTEM(끔 = 변경 전 sha256)·`genderEn`·`casting_key`·`_casting_detail`, 캐스팅 라우트 3개(별도 Flask 앱), 배선. cast-k: `generate._char_entries.castingKey`·`_real_front_key`(고름·안 고름·끔), 캐스팅을 골라도 컷 단위 Kling payload 2종이 그대로(결정 4). cast-l: `vnew.js` 캐스팅 구역(문구 함수·`castingSection`·`schedulePoll`)을 node 가짜 DOM으로 실행(`_CAST_SCREEN_NODE_HARNESS`·`_cast_screen_problems`)·`vnew.css`·`node --check`·운영 문구 9종(`USER_FACING_KINDS`) |
 
 ### 10.2 기타 도구
 

@@ -518,3 +518,102 @@
   1. 12컷 최악(컷마다 기호 2개)은 연기 있는 최소형이 모두 넘쳐 연기와 기호가 빠지고 MOTION·HARMONY 원문이 남는다(수정 전에도 연기는 빠졌다). 대안: 최소형에 "연기는 남기고 기호를 뺀" 후보를 연기 없는 후보보다 먼저 둔다. 이번 범위 밖이라 하지 않았다.
   2. 통 테이크 `avoidShort`는 긴 형과 같은 문자열이라 줄이는 양이 0이다(069부터, 범위 밖).
   3. 컷 단위 로그는 끈 상태에서도 나온다(새 로그 줄 1개/컷 제출). 프롬프트·저장은 그대로다.
+
+
+### vnew-live-fx 묶음 B — B1·B2 캐스팅 문장·성별, 뽑기·이어하기·라우트 (Kiro, claude-opus-5.5)
+- **범위**: tasks.md B1·B2만 했다. B3(영상에 쓰기·화면·ANALYSIS 갱신)와 묶음 C는 하지 않았다. 커밋하지 않았다.
+- **바꾼 것**: `vnew/casting.py`(신규 — 문장: `base_text`·`PRESETS`·`preset_of`·`normalize_gender`·`auto_gender`·`resolve_gender`·`age_phrase`·`align_gender`·`look_sentence`·`pattern_warning`·`prompt_look`·`cast_prompt`, 뽑기: `update_settings`·`start_draw`·`_spawn`·`run_draw`·`reconcile`·`choose`·`view`·`chosen_key`·`auto_look`·`current_look`·`total_usd`·`parse_confirm_usd`, 래퍼 `_fal_request`·`_fetch_url`, `_CAST_RUNNING`), `vnew/characters.py`(`casting_key`, `_analyze_tool`·`_with_gender_en`·`_ANALYZE_GENDER_RULE`, `_analyze_system` 성별 문장, `_analyze` 도구, `analyze_sources` genderEn, `detail_view`→`_casting_detail`), `vnew/routes.py`(PUT `/characters/<id>/casting`, POST `…/casting/draw`·`…/casting/choose`), `vnew/settings.py`(`VNEW_CASTING`·`_MODEL`·`_USD`·`_COUNT`·`_SIZE`·`_STALL_S`·`_POLL_MAX_S`), `k8s/workloads.yaml.tmpl`·`deploy/config.env.example`(`VNEW_FX` 바로 뒤), `tools/check_vpoc.py`(`check_vnew_casting` cast-a~j·cast-m, `PARITY_ENV_KEYS`, `_run_casting_off`).
+- **결정**
+  - D1 — 참고 구현의 `_HAIR`·`_SUBJECT`·`_AGE`·`_PATTERN`·`_POSITION`과 무늬 경고 문구는 design §B.2에 원문이 없다(참고 구현 폴더는 읽지 않는다). 같은 뜻으로 새로 썼다. 프리셋 두 문장(`_IDOL`·`_REAL`)만 design 원문이고, male 결과는 그 원문과 글자까지 같다(cast-a). 대안: 원문을 받아 옮기기(Claude가 붙여 주면 상수만 바꾸면 된다).
+  - D2 — 성별은 RB2.1 순서(사용자 → `analysis.genderEn` → 외모 문장 주어 man·boy·woman·girl → unknown)다. 옛 캐릭터는 다시 분석하지 않고 genderEn 없음 = unknown으로 보고 다음 단계로 간다. 보기에 `gender`(사용자 값, ""=자동)·`genderAuto`를 둔다.
+  - D3 — 나이가 10대·학생이면 "early 20s"로 올린다. 프리셋이 "adult … in {pos} 20s"라 미성년 사진을 만들지 않는다.
+  - D4 — 후보 id = fal 요청 id의 sha256 앞 10자. 저장 → 원장 → 칸 ready 순서다. 파드가 그 사이 죽어 같은 요청을 다시 받아도 같은 S3 키·같은 원장 키라 두 번 계상하지 않는다. 대안: 임의 id(기각 — 재처리 때 이중 계상).
+  - D5 — 고른 사진이 history 12개 밖으로 밀리면 마지막 자리에 남긴다(결정 5 보호). 대안: 그대로 버림(기각 — 6회 뒤 chosen이 없는 id를 가리킨다).
+  - D6 — 제출 실패는 5xx라도 그 칸을 실패로 두고 다시 제출하지 않는다(요청이 만들어졌을 수 있다 → 이중 과금 방지). 조회·받기의 일시 오류(5xx·429·연결)는 다음 순회에 다시 한다.
+  - D7 — 뽑기 스레드의 뜻밖의 예외는 상태를 그대로 두고 끝낸다. 하트비트가 멈추면 이어하기가 제출한 칸만 다시 조회하고, `VNEW_CASTING_POLL_MAX_S`가 끝을 보장한다. 대안: 바로 failed(기각 — 제출해 과금될 결과를 버린다).
+  - D8 — `casting_key`는 design §B.1·§9대로 `characters.py`에 둔다(tasks B2 줄은 casting.py라고 적었다). 키 규칙이 한 파일에 모인다.
+  - D9 — design 표에 없는 입력 오류 2개: 400 `BadLook`(외모 문장이 글이 아님), 400 `NoCandidateId`(choose 본문에 candidateId 키 없음). 고르기 풀기는 `""`를 명시해야 한다(키가 빠진 요청이 고른 사진을 지우지 않게).
+  - D10 — 결과 사진 받기: https만, 120초, 25MB 상한, 풀기 전 2,000만 픽셀 상한, 프로세스 전체 한 장씩(`_PHOTO_SEM`). 저장은 RGB JPEG 긴 변 1536·q90.
+  - D11 — 후보의 느낌(preset)은 그 회차 문장에서 읽는다(뽑는 중 느낌을 바꿔도 후보 표시는 회차 값).
+- **확인**
+  - `python -m py_compile` 통과, `python -X utf8 tools/check_vpoc.py` 전부 통과(56개 ok 줄, FAIL·WARN 0). `[ok  ]` 줄에 cast-a~j·cast-m.
+  - cast-a: male `base_text`(idol·real)가 design 원문 상수와 같다. 3성별 × 2프리셋 × 14외모 = 84문장에서 female·unknown에 낱말 male·"He is"·his가 없고, 모두 webtoon이 없다(주입 문장·webtoonish 포함).
+  - cast-d: `VNEW_CASTING=False`면 분석 도구 JSON·SYSTEM sha256이 변경 전과 같다. cast-j: 끔이면 라우트 3개 404 `CastingDisabled`, 상세 `casting` = `{enabled:false}`.
+  - cast-f·cast-m: 가짜 fal 제출 13건 본문 키가 모두 정확히 `{prompt, num_images, image_size}`이고 http·data:·base64·서명 URL·`users/`가 없다. 원장 = 만든 사진 수(성공 2·한 칸 실패 1·두 칸 실패 0·이어하기 1·원장 쓰기 실패 0). cast-h: 이어하기에서 queued 칸 제출 0.
+  - 변형 검사 21개(실제 소스를 한 개씩 바꾸고 되돌림): 모두 `check_vnew_casting`이 잡았다.
+  - 바뀐 줄 커버리지(coverage 7.17, `--source=app\src`, 원본 사본과 difflib): 699줄 중 692줄(99.0%).
+  - 실제 fal·Bedrock 호출 0회: 캐스팅 검사는 `casting._fal_request`·`_fetch_url`을 가짜로 두고 `vpoc.fal._request`·`characters._fal_request`를 막아 호출 0을 확인한다. boto3·urlopen을 막는 실행에서 boto3 시도 0, 캐스팅 검사 urlopen 0(기존 가격 조회 GET 61회는 그대로).
+  - LF: 바뀐 파일 CRLF 0, 공백만 바뀐 줄 0, 지운 함수 정의 0.
+- **기존 검사 끔 고정(결정 9, 기대값 그대로)**: `check_vnew_fx_prompt` — (fx-k)가 분석 SYSTEM을 "상수 + 묘사 규칙"과 글자째 비교한다. 켬이면 성별 문장이 더 붙는다. `main()`의 부르는 줄에서 `_run_casting_off(check_vnew_fx_prompt)`로 고정했다.
+- **3단계 리뷰**
+  - 보안: fal에는 글만 보낸다(본문 3키, cast-m). 결과 주소는 https만 받고 요청 id는 `[A-Za-z0-9._-]{1,128}`만 받는다(주소·S3 키 끼워 넣기 방지). 외모 문장은 `clean_text`(줄바꿈·제어 문자 → 한 칸, 300자)를 지난다. 칸 오류 문구는 `error_gist`(URL 쿼리·data URI·키 제거)를 지난다. 저장 경로는 `users/{owner}/characters/{id}/casting/`이고 다른 사용자는 404다. 화면에는 presigned 주소만 준다. 로그에 문장·주소·키를 남기지 않는다.
+  - 성능(512Mi): 사진은 프로세스 전체에서 한 장씩 받고 줄인다(봉우리 ≈ 받은 파일 ≤25MB + RGB ≈15MB). 리뷰 중 고침: 픽셀이 많은 작은 PNG가 풀 때 수백 MB가 될 수 있어 풀기 전 픽셀 상한을 넣었다. 외부 호출은 칸마다 제출 1 + 5초마다 상태 조회 + 결과 1 + 받기 1이고, 뽑기 1회는 최대 900초다. S3는 순회마다 읽기 3·쓰기 1(하트비트)이다.
+  - 운영성: 로그 `vnew.casting.draw_start`·`submitted`·`slot_failed kind=`·`transient`·`saved`·`done status= ready= failed= timeout=`·`resume queued_failed=`·`claim_lost`·`run_failed`·`run_end ms=`·`ledger_failed`·`reconcile_failed`. 되돌리기는 `config.<target>.env`에 `VNEW_CASTING=false` 한 줄이다. 진행 중 뽑기는 끝까지 가고, 저장된 casting은 지우지 않는다. 재시작: 하트비트가 600초 넘게 멈추면 조회 때 이어받는다(queued → 실패, submitted → 조회).
+- **남은 이슈**
+  1. D1의 참고 구현 원문(머리색·주어·나이 표, 무늬 낱말·위치 낱말, 경고 문구)을 확인하지 못했다. 같은 동작인지는 VB-1과 원문 대조로 본다.
+  2. 운영(`VPOC_RAW_ERRORS=false`)에서는 B 오류 코드(`CastingDisabled`·`CastingRunning`·`CostMismatch`·`NoLook`·`CandidateNotFound`·`BadPreset`·`BadGender`·`BadLook`·`NoConfirmUsd`·`NoCandidateId`)의 문구가 "처리 중 오류가 발생했습니다 (코드: …)"로 감춰진다(`vpoc/errors.USER_FACING_KINDS`, B 파일 목록 밖). B3 화면이 코드별 문구를 두거나 errors.py에 더해야 한다.
+  3. 4xx 거절 문구는 `vpoc.fal.rejection`의 영상용 문구("이 샷을 거절했습니다")가 그대로 나온다(design대로).
+  4. 제출 직후 "submitted" 기록 전에 파드가 죽으면 그 요청 1건은 결과를 못 받는다(fal 과금 가능, 원장 없음, design §7 한계).
+  5. 재시작 뒤 이어받기까지 최대 10분 동안 화면은 "만드는 중"이다.
+  6. `analysis.genderEn`이 unknown이어도 외모 문장에 man·woman이 있으면 그 낱말로 성별을 정한다(RB2.1 순서). "unknown이면 성 중립"을 genderEn만으로 읽으면 결과가 다르다.
+  7. boto3·urlopen을 전역으로 막는 실행에서 `check_vnew_generate`·`check_vnew_shot_brief`가 실패한다. 묶음 A 때의 같은 실행에서도 같은 두 검사가 실패했다(가격 조회 GET 61회, 이번 변경과 무관).
+  8. `docs/ANALYSIS.md` 갱신은 tasks대로 B3에서 한다.
+
+
+### vnew-live-fx 묶음 B — B3 영상에 쓰기·캐스팅 화면·091 남은 이슈·문서·리뷰 (Kiro, claude-opus-5.5)
+- **범위**: tasks.md B3와 091 남은 이슈 2·3·5(PM 결정)만 했다. 묶음 C는 하지 않았다. 컷 단위 Kling 실사 payload(`_previz_payload_elements`·`_previz_payload_image_list`)와 `vpoc/fal.py`는 바꾸지 않았다. 커밋하지 않았다.
+- **바꾼 것**
+  - `vnew/generate.py`: `_char_entries`(켬이면 항목에 `castingKey`), `_casting_key_of`·`_real_front_key`(신규), `casting` import.
+  - `vnew/casting.py`: `_MSG_REJECTED`·`_REJECT_GIST_MAX`(신규 상수), `_slot_error`의 4xx 거절 문구.
+  - `vpoc/errors.py`: `USER_FACING_KINDS`에 9종.
+  - `frontend/public/vnew.js`: 캐스팅 구역(`CASTING_*` 상수, 순수 함수 `castingCount`·`castingUsdText`·`castingGenderLabel`·`castingGenderOptions`·`castingDrawLabel`·`castingConfirmText`·`castingCostChangedText`·`castingProgress`·`castingUsingText`·`castingPhotoCaption`·`castingLockText`, DOM `castingSection`), `renderDetail` 배선, `schedulePoll` 조건. `vnew.css`: `vnew-casting-*`.
+  - `tools/check_vpoc.py`: `check_vnew_casting`에 cast-k·cast-l과 cast-g 거절 문구 경우, 모듈 상수 `_CAST_REJECT_MSG`·`_CAST_ENTRY_KEYS_BEFORE`·`_CAST_USER_FACING`·`_CAST_SCREEN_NODE_HARNESS`·`_CAST_SCREEN_NODE_CASES`, 도우미 `_cast_screen_problems`.
+  - 문서: `docs/ANALYSIS.md`(§3.6 모듈 표, §3.6.1 「B 구현 결과」·캐스팅 화면·결정 4·남은 위험, §7.1 `VNEW_CASTING`, §10.1), tasks.md B3 체크.
+- **결정**
+  - D1 — `castingKey`는 dict 리터럴을 고치지 않고 `out[-1]`에 켬일 때만 더한다. 끔 경로의 항목은 B 이전과 키·값까지 같다(cast-k가 `set(entry) == _CAST_ENTRY_KEYS_BEFORE`와 값 전체를 본다). `casting.chosen_key`가 예외를 내면 ""와 경고 로그 `vnew.gen.casting_key_unreadable char= err=`(예외 종류만)로 넘긴다. 대안: 예외를 그대로 올림(기각 — 컷 단위는 이 키를 쓰지 않는데, 깨진 캐스팅 값 하나가 ⑤ 선행 조건과 모든 생성을 막는다).
+  - D2 — `_real_front_key`는 정의와 검사만 있고 부르는 곳이 없다(묶음 C `_take_payload(variant="real")`·`start_real`이 부른다). 결정 4대로 컷 단위 payload 두 함수는 손대지 않았다. cast-k가 캐스팅을 고르기 전·후·끔 세 경우의 payload 4종(elements·imageList × 실사·웹툰)을 deep-equal과 sha256으로 비교하고, 캐스팅 사진 바이트가 들어가지 않는지, 두 함수 소스에 `castingKey`·`_real_front_key`가 없는지 본다.
+  - D3 — 캐스팅 4xx 거절 문구(091 남은 이슈 5): "fal이 이 캐스팅 문장을 거절했습니다. 외모 문장을 바꿔 다시 뽑아 주세요." 뒤에 ` (fal: {요지})`를 붙인다. 요지는 `error_gist`(URL 쿼리·data URI·fal 키 제거) 120자이고, 비면 문구만 쓴다. 400·403·404·422 모두 같은 문구다. 영상용 `vpoc.fal.rejection`(likeness·sensitive 구분, "이 샷을")은 쓰지 않는다. 대안: `rejection`의 종류만 빌려 캐스팅 문구를 셋으로 나눔(기각 — `fal.py` 문구 표에 묶이고, 글만 보내는 t2i라 likeness 안내 "인물 이미지를 바꿔"가 맞지 않는다).
+  - D4 — `USER_FACING_KINDS`(091 남은 이슈 2): `CastingDisabled`·`CastingRunning`·`NoLook`·`CandidateNotFound`·`BadPreset`·`BadGender`·`BadLook`·`NoConfirmUsd`·`NoCandidateId` 9종을 더했다. 모두 처음 넣는 이름이다(중복 없음). 던지는 곳(`casting.py` 10곳, `routes.py` 2곳)이 모두 고정 문자열이다. cast-l이 `app/src` 전체를 ast로 훑어 이 9종의 `VpocError` 문구 인자가 모두 상수인지 본다. `NoConfirmUsd`는 ⑤ 생성 시작(`routes.py`)의 같은 고정 문구에도 적용된다. **`CostMismatch`는 뺐다**: vnew(`casting.py`·`generate.py`) 문구에 화면이 보낸 금액이 들어가고, vpoc(`regen.py`·`routes.py`)는 `confirmUsd` 입력 원문을 그대로 싣는다. 운영에서도 봉투의 `type`은 남으므로 화면은 문구가 아니라 `err.type === "CostMismatch"`로 판단한다.
+  - D5 — 성별(091 남은 이슈 3): 서버 규칙은 그대로다(genderEn unknown이어도 외모 문장의 man·woman으로 정함). select의 "자동" 옆에 서버가 정한 `genderAuto`를 "자동(분석: 남/여/모름)"으로 보인다.
+  - D6 — 409 `CostMismatch`: 상세를 다시 읽어 버튼 글을 새 금액으로 바꾸고 "금액이 바뀌었습니다. 새 금액은 $X입니다. 다시 누르면 새 금액으로 확인합니다."를 보인다. 이때 보내지 않는다. 사용자가 다시 누르면 새 금액이 든 확인창을 보이고, 확인해야 새 `confirmUsd`로 보낸다. 다시 읽는 사이 기능이 꺼졌으면 상세를 다시 그린다. 대안: 다시 읽은 직후 바로 새 확인창을 띄움(기각 — 버튼 글과 안내가 바뀌는 것을 먼저 보이는 편이 덜 놀랍고, 검사로 "보내지 않음"을 분명히 볼 수 있다).
+  - D7 — 뽑는 중이거나 캐릭터를 만드는 중에는 느낌·성별·외모 칸과 [저장]·[되돌리기]·[뽑기]를 막고 이유를 한 줄 보인다. 그동안 상세가 5초마다 다시 그려져 쓰던 글이 사라지기 때문이다. 다시 만드는 중에는 분석 문장도 바뀐다. 서버는 뽑는 중 PUT을 받지만 화면에서만 막는다. 대안: 다시 그릴 때 입력 중인 글을 상태에 보관(기각 — 상태가 늘고, 뽑기는 최대 900초다).
+  - D8 — [저장]과 뽑기는 textarea가 처음 값에서 바뀌었을 때만 `lookEn`을 보낸다. 느낌·성별만 바꿔 저장해도 자동 문장이 "고친 문장"(`lookEdited`)으로 굳지 않는다. [분석 문장으로 되돌리기]는 `lookEn: ""`를 보내고, 고친 문장이 없으면 누를 수 없다. 외모 문장이 비면 뽑기를 막고 title로 "먼저 캐릭터를 만들어 분석해 주세요."를 보인다.
+  - D9 — 사진 `src`는 상세 응답의 presigned `url`만 쓴다. url이 비면(presign 실패) img 대신 "사진을 불러오지 못했습니다."를 보인다. id 없는 항목은 그리지도 세지도 않는다. 고른 사진이 이전 사진에 있으면 "이전 사진 (n)" 접기를 펼쳐 배지를 보인다. 사진 아래에는 "느낌 · n회차"를 보인다.
+  - D10 — cast-l은 fx-l과 같은 방식이다. `vnew.js`에서 `el`·`schedulePoll`·캐스팅 구역을 잘라 가짜 DOM·`api`·`window.confirm`과 함께 node로 돌린다. 기대값은 design §B.6 문구다.
+- **기존 검사 기대값 변경(보고)**: cast-g의 거절 문구 기대값 2줄을 새 캐스팅 문구로 바꿨다(PM이 정한 동작 변경, 091 남은 이슈 5). 다른 검사의 기대값은 바꾸지 않았다. 새 끔 고정도 없다(`_run_casting_off(check_vnew_fx_prompt)` 1곳은 B1 그대로).
+- **확인**
+  - `python -m py_compile`(generate·casting·errors·check_vpoc), `node --check frontend/public/vnew.js`(rc 0) 통과.
+  - `python -X utf8 tools/check_vpoc.py` 전부 통과: ok 56줄, FAIL·WARN 0. `[ok  ]` 캐스팅 줄에 cast-a~m이 모두 있다. `check_vnew_real_start`·`check_fal_model_caps`(컷 단위 payload)·take 검사는 기대값 그대로 통과한다.
+  - 바뀐 줄 커버리지(묶음 B 전체 .py, `coverage run --source=app\src tools/check_vpoc.py`, B 이전 사본과 difflib): 714줄 중 707줄(99.0%).
+    - `casting.py` 621/626. 안 탄 줄: `_sleep` 본문, `_spawn` 스레드 시작 실패 3줄, `_poll_slot` `except _ClaimLost: raise`.
+    - `characters.py` 29/29, `routes.py` 38/40(B2 그대로: 기존 `delete_outfit` except 2줄을 difflib이 바뀐 줄로 셈), `settings.py` 7/7, `generate.py` 12/12.
+    - `errors.py`는 집합 리터럴이 문장 1개(바뀌지 않은 첫 줄)로 잡혀 0/0이다. 동작은 cast-l이 운영 봉투로 본다.
+  - 변형 검사 20개(실제 파일을 한 군데씩 바꾸고 `check_vnew_casting` 실행 → 원래 바이트로 되돌림, sha256 같음 확인). Python 10 · JS 10, 모두 잡혔다. 예: 끔에서도 castingKey를 더함, `_real_front_key` 순서 뒤집기, Kling elements·imageList에 `_real_front_key` 사용, 영상용 거절 문구, error_gist 생략, `CostMismatch` 추가, 폴링 조건 빠짐, 확인창 금액 빠짐, innerHTML, presigned가 아닌 src, CostMismatch 뒤 바로 다시 보냄.
+  - 유료 호출 0회: LLM boto3와 urlopen을 막고 기록하는 실행에서 boto3 0회, `check_vnew_casting`의 urlopen 0회다. urlopen은 `api.fal.ai/v1/models/pricing` 가격 조회 GET 61회뿐이다(`check_vnew_generate`·`check_vnew_shot_brief`, 무료). 그 두 검사가 막힌 실행에서 실패하는 것은 A·B2와 같다.
+  - 바뀐 9개 파일 모두 CRLF 0이고, 공백만 바뀐 줄 0, 지운 함수 정의 0이다(B3 이전·B 이전 사본과 비교).
+- **3단계 리뷰(B3 변경분 + 묶음 B 전체 재확인)**
+  - 보안
+    - `castingKey`는 서버 안 항목에만 있다. 화면 응답(`plan_view`·`gen_view`·상세)에는 나가지 않고, 컷 단위 fal 본문에도 들어가지 않는다(cast-k). 상세는 지금처럼 presigned URL만 준다.
+    - 화면 글은 모두 `el()`(textContent)과 속성(`title`·`placeholder`·`value`·`name`)으로 넣는다. cast-l이 외모 문장·경고·오류에 `<img onerror>`를 넣어 글자로 남는지, 가짜 DOM에서 innerHTML이 0회인지 본다. 경로의 캐릭터 id는 `encodeURIComponent`.
+    - 확인 금액은 서버가 다시 계산한다(`start_draw`). 화면 값은 확인창 표시용이다.
+    - 거절 상세는 `error_gist`를 지난다(cast-g: 서명 쿼리·data URI·fal 키가 남지 않음).
+    - 운영 문구 9종은 고정 문구만 연다. `CostMismatch`는 입력 원문이 섞여 계속 가린다.
+    - 발견: 없음.
+  - 성능(512Mi)
+    - `_char_entries`는 이미 읽은 char.json에서 키를 찾는다(S3 호출 추가 없음, 후보 ≤ 14개 복사). 컷 단위 payload는 바뀌지 않아 이미지 수·바이트·메모리가 같다.
+    - 화면은 뽑는 중 5초마다 상세 GET 1회다(뽑기 최대 900초 → 최대 약 180회). 상세 1회당 presign은 사진 수(≤ 14 + 1)만큼이고, 서명은 로컬에서 계산한다.
+    - 버튼 1번에 POST 1회, `CostMismatch`면 GET 1회가 더 든다. 다시 그리기는 상세 전체 렌더(기존과 같다).
+    - 발견: 없음.
+  - 운영성
+    - 되돌리기는 `VNEW_CASTING=false` 한 줄이다. 끄면 라우트 404, 상세 `{enabled:false}`, 화면 칸·폴링 없음, `_char_entries`가 B 이전과 같다(cast-j·cast-k·cast-l). 저장된 `char.casting`은 남는다.
+    - 진행 중 작업: 컷 단위·웹툰 통 테이크 생성은 `castingKey`를 읽지 않아 배포·되돌리기와 상관없다. 뽑는 중 설정을 끄면 뽑기는 끝까지 가지만 화면에서는 다시 켤 때까지 보이지 않는다(R0.3·R0.5).
+    - 재시작: 상세를 보는 동안 5초 폴링이 `reconcile`을 부르므로 600초 뒤 이어받는다.
+    - 로그: 새 로그 `vnew.gen.casting_key_unreadable char= err=`(예외 종류만). 칸 실패 로그 `vnew.casting.slot_failed kind=HTTP422`는 그대로다.
+    - 발견·조치: 뽑는 중 5초 다시 그리기가 쓰던 외모 문장을 지운다 → 입력을 막았다(D7). 자동 문장이 [저장]으로 "고친 문장"이 되는 문제 → 바뀌었을 때만 보낸다(D8). 이 항목을 쓰는 중 `WORKLOG.md` 전체가 CRLF로 바뀌었다(편집 도구) → LF로 되돌리고 9개 파일을 다시 쟀다(CRLF 0).
+- **남은 이슈**
+  1. `_real_front_key`는 아직 부르는 곳이 없다. 묶음 C(`_take_payload(variant="real")`·`start_real` 인물 확인)에서 쓴다.
+  2. 운영에서 `CostMismatch` 문구는 여전히 "처리 중 오류가 발생했습니다 (코드: CostMismatch)"다. 캐스팅 화면은 `type`으로 새 금액을 다시 읽어 안내하므로 문제없다. ⑤ 생성·vpoc 확인창의 같은 코드는 이전과 같다.
+  3. 뽑는 중·캐릭터를 만드는 중에는 캐스팅 입력을 막는다(D7). 제품 판단이 필요하면 알려 주세요.
+  4. 거절 요지는 fal 원문(영어)이라 한국어 문구 뒤에 영어가 붙는다(예: "(fal: Image has sensitive content.)").
+  5. 091 남은 이슈 1(참고 구현 원문 없음)·4(제출 직후 파드가 죽으면 1건 과금 가능, 재시작 뒤 최대 10분 "만드는 중")는 그대로다.
+  6. VB-1(남·여 캐스팅 2장씩, $0.16)·VB-2(뽑는 중 재시작)는 개발 배포 뒤 설계자 승인으로 한다.

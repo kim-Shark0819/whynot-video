@@ -165,6 +165,20 @@ VNEW_FX = _bool("VNEW_FX", True)
 # 채우기 1회에 보낼 패널 이미지 상한. 넘으면 순서를 지켜 고르게 고른다(코드 기본, 템플릿에 넣지 않는다).
 VNEW_FX_MAX_PANELS = _int("VNEW_FX_MAX_PANELS", 20)
 
+# 실사 캐스팅(vnew-live-fx 묶음 B, 2026-10-30). 켜면 캐릭터 상세에서 실사 배우 사진을 글로만 뽑아 고르고(Seedream 4.5
+# text-to-image, 웹툰 그림은 보내지 않는다), 캐릭터 분석에 성별(genderEn)을 더한다. false 면 지금 동작(캐스팅 라우트 404·
+# 분석 도구·SYSTEM 그대로). 이미 시작한 뽑기는 끝까지 진행하고, 저장된 casting 은 지우지 않는다.
+VNEW_CASTING = _bool("VNEW_CASTING", True)
+# 아래는 코드 기본(템플릿에 넣지 않는다). 모델·장당 금액·장 수는 참고 구현 vpoc/live_service.py:36-39.
+VNEW_CASTING_MODEL = os.getenv("VNEW_CASTING_MODEL", "fal-ai/bytedance/seedream/v4.5/text-to-image")
+VNEW_CASTING_USD = _float("VNEW_CASTING_USD", 0.04)  # 장당(fal 가격 2026-10-26)
+VNEW_CASTING_COUNT = max(1, min(4, _int("VNEW_CASTING_COUNT", 2)))  # 1~4로 자른다
+VNEW_CASTING_SIZE = os.getenv("VNEW_CASTING_SIZE", "1920x2560")  # 세로 초상, 스키마 최소 1920
+# 뽑기 하트비트가 이 시간보다 오래됐고 이 파드에서 돌지 않으면 이어 조회한다(제출 전 칸은 실패로 끝낸다).
+VNEW_CASTING_STALL_S = _int("VNEW_CASTING_STALL_S", 600)
+# 뽑기 시작부터 이 시간이 지나면 남은 칸을 실패로 끝낸다.
+VNEW_CASTING_POLL_MAX_S = _int("VNEW_CASTING_POLL_MAX_S", 900)
+
 # --- ⑤ 촬영 지시서(shot brief) (설계자 2026-10-22) ---
 # 프리비즈 승인 직후, 장소마다 1회 호출해 그 장소 컷들의 "촬영 전문 언어" 지시서를 쓴다. 작성 모델은
 # 설계와 같은 체인(Astra 먼저, 실패 시 Claude 분석 체인). 장면·배경·연기·대사 연기를 영어로 섬세히.

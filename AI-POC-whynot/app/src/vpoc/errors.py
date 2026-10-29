@@ -54,6 +54,18 @@ USER_FACING_KINDS = {
     "FxDisabled",
     "ContiNotReady",
     "NothingToFill",
+    # vnew-live-fx B3(2026-10-30, 091 남은 이슈 2 PM 결정): 실사 캐스팅 거절 문구. 던지는 곳(vnew/casting.py · vnew/routes.py)이
+    # 모두 고정 한국어 문구다(사용자 입력·URL·키 없음). NoConfirmUsd 는 ⑤ 생성 시작(routes.py)의 같은 고정 문구에도 적용된다.
+    # CostMismatch 는 넣지 않는다: 문구에 화면이 보낸 금액이 들어가고, vpoc(regen·routes)는 그 입력 원문을 그대로 싣는다.
+    "CastingDisabled",
+    "CastingRunning",
+    "NoLook",
+    "CandidateNotFound",
+    "BadPreset",
+    "BadGender",
+    "BadLook",
+    "NoConfirmUsd",
+    "NoCandidateId",
 }
 
 

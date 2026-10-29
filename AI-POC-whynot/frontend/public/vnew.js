@@ -440,7 +440,9 @@
   function schedulePoll(host, detail) {
     stopPolling();
     var building = detail && detail.status === "building";
-    if (!building) return;
+    // 실사 캐스팅 뽑기 중에도 다시 불러온다(vnew-live-fx RB7.2). 끔이면 casting 이 {enabled:false} 라 status 가 없다.
+    var drawing = !!(detail && detail.casting && detail.casting.status === "drawing");
+    if (!building && !drawing) return;
     state.pollTimer = window.setTimeout(function () {
       // 화면을 떠났으면 멈춘다(schedulePoll/ stopPolling 가 보장).
       if (state.view !== "detail") return;
@@ -532,6 +534,10 @@
       columns.appendChild(variantColumn(host, detail, meta));
     });
     host.appendChild(columns);
+
+    // 실사 캐스팅(vnew-live-fx 묶음 B). detail.casting.enabled 가 아니면 그리지 않는다.
+    var castingNode = castingSection(host, detail);
+    if (castingNode) host.appendChild(castingNode);
 
     // 추가 복장 섹션(기본 복장 위에 더 입히는 옷차림)
     host.appendChild(outfitsSection(host, detail));
@@ -952,6 +958,362 @@
 
     column.appendChild(sheets);
     return column;
+  }
+
+  /* ---- 실사 캐스팅(vnew-live-fx 묶음 B, RB7 · design §B.6) ----
+
+     캐릭터 상세의 실사·웹툰 열 아래, 추가 복장 위. detail.casting.enabled 가 false 면(VNEW_CASTING 끔) 아무것도 그리지 않는다.
+     사진 src 는 응답의 presigned url 만 쓰고, 글은 모두 textContent(el)·속성으로만 넣는다. 뽑기 확인창에는 금액 숫자를
+     보인다(결정 1). 409 CostMismatch 면 상세를 다시 읽어 새 금액을 버튼에 보이고, 다시 눌러 새 금액으로 확인해야 보낸다.
+     뽑는 중·캐릭터를 만드는 중에는 5초마다 다시 그리므로(schedulePoll) 입력 칸을 막아 쓰던 글이 사라지지 않게 한다.
+     아래 순수 함수(DOM 없음)와 castingSection 은 검사 cast-l 이 node 가짜 DOM 으로 실행한다. */
+  var CASTING_GENDER_LABEL = { male: "남", female: "여", unknown: "모름" };
+  var CASTING_LEAD =
+    "웹툰 그림 없이 글로 실사 배우 사진을 만듭니다. 고른 사진은 통 테이크 실사 버전의 인물 참고로 씁니다(고르지 않으면 실사 정면).";
+  var CASTING_NO_LOOK = "먼저 캐릭터를 만들어 분석해 주세요.";
+
+  function castingCount(value) {
+    var n = Number(value);
+    return isFinite(n) && n > 0 ? Math.floor(n) : 0;
+  }
+
+  function castingUsdText(value) {
+    var usd = Number(value);
+    return "$" + (isFinite(usd) && usd > 0 ? usd : 0).toFixed(2);
+  }
+
+  function castingGenderLabel(value) {
+    return CASTING_GENDER_LABEL[value] || CASTING_GENDER_LABEL.unknown;
+  }
+
+  /* 성별 고르기: "" = 자동(옆에 지금 정해진 값 genderAuto, 091 남은 이슈 3) · male · female · unknown. */
+  function castingGenderOptions(cast) {
+    var c = cast || {};
+    return [{ value: "", label: "자동(분석: " + castingGenderLabel(c.genderAuto) + ")" }].concat(
+      ["male", "female", "unknown"].map(function (key) {
+        return { value: key, label: CASTING_GENDER_LABEL[key] };
+      })
+    );
+  }
+
+  function castingDrawLabel(cast) {
+    var c = cast || {};
+    return "실사 캐스팅 뽑기 (" + castingCount(c.count) + "장 · " + castingUsdText(c.totalUsd) + ")";
+  }
+
+  function castingConfirmText(cast) {
+    var c = cast || {};
+    return "실사 캐스팅 사진 " + castingCount(c.count) + "장을 만듭니다. 예상 비용 " + castingUsdText(c.totalUsd) +
+      "입니다. 계속할까요?";
+  }
+
+  function castingCostChangedText(cast) {
+    return "금액이 바뀌었습니다. 새 금액은 " + castingUsdText((cast || {}).totalUsd) +
+      "입니다. 다시 누르면 새 금액으로 확인합니다.";
+  }
+
+  /* 진행: 끝난 칸(ready·failed) / 전체 칸. */
+  function castingProgress(cast) {
+    var c = cast || {};
+    var slots = Array.isArray(c.slots) ? c.slots : [];
+    var done = slots.filter(function (slot) {
+      return slot && (slot.status === "ready" || slot.status === "failed");
+    }).length;
+    var total = slots.length || castingCount(c.count);
+    return { done: done, total: total, text: "사진을 만드는 중… (" + done + "/" + total + ")" };
+  }
+
+  function castingUsingText(cast) {
+    return (cast || {}).chosen
+      ? "실사 버전에 쓰는 사진: 고른 캐스팅 사진"
+      : "실사 버전에 쓰는 사진: 실사 정면 (캐스팅 사진을 고르지 않았습니다)";
+  }
+
+  /* 사진 아래 한 줄: "아이돌풍 · 2회차"(느낌 라벨은 상세의 presets 에서 찾는다). */
+  function castingPhotoCaption(photo, cast) {
+    var p = photo || {};
+    var presets = Array.isArray((cast || {}).presets) ? cast.presets : [];
+    var label = "";
+    presets.forEach(function (item) {
+      if (item && item.key === p.preset) label = String(item.label || "");
+    });
+    var round = castingCount(p.round);
+    return [label, round ? round + "회차" : ""].filter(Boolean).join(" · ");
+  }
+
+  /* 입력을 막는 이유(다시 그리기 중 쓰던 글이 사라지지 않게). 막지 않으면 "". */
+  function castingLockText(detail) {
+    var d = detail || {};
+    if ((d.casting || {}).status === "drawing") return "사진을 만드는 동안에는 느낌·성별·외모 문장을 바꿀 수 없습니다.";
+    if (d.status === "building") return "캐릭터를 만드는 동안에는 실사 캐스팅을 쓸 수 없습니다.";
+    return "";
+  }
+
+  function castingSection(host, detail) {
+    var cast = (detail && detail.casting) || {};
+    if (!cast.enabled) return null;
+    var base = "/api/vnew/characters/" + encodeURIComponent(detail.id) + "/casting";
+    var drawing = cast.status === "drawing";
+    var lock = castingLockText(detail);
+    var price = { count: cast.count, totalUsd: cast.totalUsd };
+    var form = { preset: cast.preset || "idol", gender: cast.gender || "" };
+    var loadedLook = String(cast.lookEn || "");
+
+    var section = el("section", "panel vnew-casting");
+    var headRow = el("div", "vnew-section-head");
+    headRow.appendChild(el("h2", null, "실사 캐스팅"));
+    section.appendChild(headRow);
+    section.appendChild(el("p", "vnew-hint vnew-casting-lead", CASTING_LEAD));
+
+    var message = el("p", "login-error vnew-casting-msg");
+    message.setAttribute("role", "alert");
+    message.style.display = "none";
+    function showMessage(text) {
+      message.textContent = text;
+      message.style.display = "";
+    }
+
+    // 느낌 · 성별 · 외모 문장
+    var formBox = el("div", "vnew-casting-form");
+    var presetRow = el("div", "vnew-casting-presets");
+    presetRow.appendChild(el("span", "vnew-field-label", "느낌"));
+    (Array.isArray(cast.presets) ? cast.presets : []).forEach(function (item) {
+      var label = el("label", "vnew-casting-preset");
+      var radio = el("input");
+      radio.type = "radio";
+      radio.name = "vnew-casting-preset-" + detail.id;
+      radio.value = item.key;
+      radio.checked = item.key === form.preset;
+      radio.disabled = !!lock;
+      radio.addEventListener("change", function () {
+        if (radio.checked) form.preset = item.key;
+      });
+      label.appendChild(radio);
+      label.appendChild(el("span", null, item.label));
+      presetRow.appendChild(label);
+    });
+    formBox.appendChild(presetRow);
+
+    var genderWrap = el("label", "vnew-field vnew-casting-gender");
+    genderWrap.appendChild(el("span", "vnew-field-label", "성별"));
+    var select = el("select", "vnew-field-input");
+    castingGenderOptions(cast).forEach(function (opt) {
+      var option = el("option", null, opt.label);
+      option.value = opt.value;
+      select.appendChild(option);
+    });
+    select.value = form.gender;
+    select.disabled = !!lock;
+    select.addEventListener("change", function () {
+      form.gender = select.value;
+    });
+    genderWrap.appendChild(select);
+    formBox.appendChild(genderWrap);
+
+    var lookWrap = el("label", "vnew-field vnew-casting-look");
+    lookWrap.appendChild(el("span", "vnew-field-label", "외모 문장 (영어, 300자 이하)"));
+    var textarea = el("textarea", "vnew-rebuild-text vnew-casting-look-text");
+    textarea.rows = 3;
+    textarea.maxLength = 300;
+    textarea.placeholder = "캐릭터를 만들어 분석하면 외모 문장이 채워집니다.";
+    textarea.value = loadedLook;
+    textarea.disabled = !!lock;
+    lookWrap.appendChild(textarea);
+    formBox.appendChild(lookWrap);
+    if (cast.patternWarning) formBox.appendChild(el("p", "vnew-casting-warn", cast.patternWarning));
+
+    var formBtns = el("div", "vnew-casting-btns");
+    var saveBtn = el("button", "outline-button vnew-casting-save", "저장");
+    saveBtn.type = "button";
+    var revertBtn = el("button", "text-action vnew-casting-revert", "분석 문장으로 되돌리기");
+    revertBtn.type = "button";
+    formBtns.appendChild(saveBtn);
+    formBtns.appendChild(revertBtn);
+    formBox.appendChild(formBtns);
+    section.appendChild(formBox);
+    if (lock) section.appendChild(el("p", "vnew-hint vnew-casting-lock", lock));
+
+    // [실사 캐스팅 뽑기 (N장 · $X)]
+    var drawBtn = el("button", "primary-button vnew-casting-draw", castingDrawLabel(price));
+    drawBtn.type = "button";
+    section.appendChild(drawBtn);
+    section.appendChild(message);
+
+    function lookChanged() {
+      return textarea.value !== loadedLook;
+    }
+
+    function updateButtons() {
+      var hasLook = !!textarea.value.trim();
+      saveBtn.disabled = !!lock;
+      revertBtn.disabled = !!lock || !(cast.lookEdited || lookChanged());
+      drawBtn.disabled = !!lock || !hasLook;
+      drawBtn.title = hasLook ? "" : CASTING_NO_LOOK;
+    }
+
+    // 저장(PUT). lookValue 가 null 이면 외모 문장은 보내지 않는다(고치지 않은 자동 문장을 "고친 문장"으로 굳히지 않게).
+    function save(lookValue) {
+      var body = { preset: form.preset, gender: form.gender };
+      if (lookValue !== null) body.lookEn = lookValue;
+      saveBtn.disabled = true;
+      revertBtn.disabled = true;
+      message.style.display = "none";
+      api(base, { method: "PUT", body: JSON.stringify(body) })
+        .then(function () {
+          refreshDetail(host, false);
+        })
+        .catch(function (err) {
+          updateButtons();
+          showMessage("저장하지 못했습니다: " + errMessage(err));
+        });
+    }
+
+    // 409 CostMismatch: 상세를 다시 읽어 새 금액을 버튼에 보인다. 여기서는 보내지 않는다(다시 눌러 새 금액으로 확인).
+    function rereadPrice() {
+      return api("/api/vnew/characters/" + encodeURIComponent(detail.id))
+        .then(function (fresh) {
+          var next = (fresh && fresh.casting) || {};
+          if (!next.enabled) {
+            refreshDetail(host, false);
+            return;
+          }
+          price = { count: next.count, totalUsd: next.totalUsd };
+          drawBtn.textContent = castingDrawLabel(price);
+          updateButtons();
+          showMessage(castingCostChangedText(price));
+        })
+        .catch(function (err) {
+          updateButtons();
+          showMessage("새 금액을 불러오지 못했습니다: " + errMessage(err));
+        });
+    }
+
+    function choose(candidateId, button) {
+      button.disabled = true;
+      message.style.display = "none";
+      api(base + "/choose", { method: "POST", body: JSON.stringify({ candidateId: candidateId }) })
+        .then(function () {
+          refreshDetail(host, false);
+        })
+        .catch(function (err) {
+          button.disabled = false;
+          showMessage("사진을 고르지 못했습니다: " + errMessage(err));
+        });
+    }
+
+    textarea.addEventListener("input", updateButtons);
+    saveBtn.addEventListener("click", function () {
+      save(lookChanged() ? textarea.value : null);
+    });
+    revertBtn.addEventListener("click", function () {
+      save("");
+    });
+    drawBtn.addEventListener("click", function () {
+      if (!window.confirm(castingConfirmText(price))) return;
+      var body = { confirmUsd: Number(price.totalUsd), preset: form.preset, gender: form.gender };
+      if (lookChanged()) body.lookEn = textarea.value;
+      drawBtn.disabled = true;
+      message.style.display = "none";
+      api(base + "/draw", { method: "POST", body: JSON.stringify(body) })
+        .then(function () {
+          refreshDetail(host, false);
+        })
+        .catch(function (err) {
+          if (err && err.type === "CostMismatch") return rereadPrice();
+          updateButtons();
+          showMessage("실사 캐스팅 뽑기를 시작하지 못했습니다: " + errMessage(err));
+        });
+    });
+    updateButtons();
+
+    // 진행 막대(뽑는 중) / 오류 문구(실패·일부 실패)
+    if (drawing) {
+      var progress = castingProgress(cast);
+      var bar = el("div", "vnew-casting-progress");
+      bar.appendChild(el("p", "vnew-progress-label", progress.text));
+      var track = el("div", "vnew-progress-track");
+      var fill = el("div", "vnew-casting-progress-fill");
+      fill.style.width = Math.max(5, progress.total ? Math.round((100 * progress.done) / progress.total) : 0) + "%";
+      track.appendChild(fill);
+      bar.appendChild(track);
+      section.appendChild(bar);
+    } else if (cast.error) {
+      section.appendChild(
+        el("p", (cast.status === "failed" ? "login-error" : "vnew-hint") + " vnew-casting-error", cast.error)
+      );
+    }
+
+    // 실사 버전에 쓰는 사진 + [실사 정면 쓰기]
+    var usingRow = el("div", "vnew-casting-using");
+    usingRow.appendChild(el("span", null, castingUsingText(cast)));
+    if (cast.chosen) {
+      var frontBtn = el("button", "text-action vnew-casting-front", "실사 정면 쓰기");
+      frontBtn.type = "button";
+      frontBtn.title = "캐스팅 사진을 고르지 않고 실사 정면을 씁니다";
+      frontBtn.addEventListener("click", function () {
+        choose("", frontBtn);
+      });
+      usingRow.appendChild(frontBtn);
+    }
+    section.appendChild(usingRow);
+
+    function photoCard(photo) {
+      var chosen = photo.id === cast.chosen;
+      var fig = el("figure", "vnew-casting-photo" + (chosen ? " is-chosen" : ""));
+      if (photo.url) {
+        var img = el("img");
+        img.src = photo.url;
+        img.alt = "실사 캐스팅 사진";
+        img.addEventListener("click", function () {
+          openLightbox(photo.url, "실사 캐스팅 사진");
+        });
+        fig.appendChild(img);
+      } else {
+        fig.appendChild(el("p", "vnew-hint", "사진을 불러오지 못했습니다."));
+      }
+      var caption = castingPhotoCaption(photo, cast);
+      if (caption) fig.appendChild(el("figcaption", null, caption));
+      if (chosen) {
+        fig.appendChild(el("span", "vnew-casting-badge", "실사 버전에 쓰는 사진"));
+      } else {
+        var pick = el("button", "outline-button vnew-casting-pick", "이 사진으로");
+        pick.type = "button";
+        pick.addEventListener("click", function () {
+          choose(photo.id, pick);
+        });
+        fig.appendChild(pick);
+      }
+      return fig;
+    }
+
+    function photoGrid(list) {
+      var grid = el("div", "vnew-casting-grid");
+      list.forEach(function (photo) {
+        grid.appendChild(photoCard(photo));
+      });
+      return grid;
+    }
+
+    function validPhotos(list) {
+      return (Array.isArray(list) ? list : []).filter(function (photo) {
+        return photo && photo.id;
+      });
+    }
+
+    var candidates = validPhotos(cast.candidates);
+    if (candidates.length) section.appendChild(photoGrid(candidates));
+    var history = validPhotos(cast.history);
+    if (history.length) {
+      var fold = el("details", "vnew-casting-history");
+      fold.appendChild(el("summary", null, "이전 사진 (" + history.length + ")"));
+      fold.appendChild(photoGrid(history));
+      // 고른 사진이 이전 사진에 있으면 펼쳐 둔다(배지가 보이게).
+      fold.open = !!cast.chosen && history.some(function (photo) {
+        return photo.id === cast.chosen;
+      });
+      section.appendChild(fold);
+    }
+    return section;
   }
 
   /* ---- 추가 복장 섹션 ---- */

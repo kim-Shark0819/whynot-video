@@ -11833,6 +11833,8 @@ PARITY_ENV_KEYS = [
     "VNEW_PREVIZ_SUPPORT",
     # vnew-live-fx 묶음 A(R0.2): 만화 기호·분위기.
     "VNEW_FX",
+    # vnew-live-fx 묶음 B(R0.2): 실사 캐스팅.
+    "VNEW_CASTING",
 ]
 PARITY_FACE = "fal:bytedance/seedance-2.5/image-to-video"
 PARITY_PARTNER = "fal:bytedance/seedance-2.5/reference-to-video"
@@ -20969,6 +20971,1613 @@ def check_vnew_fx_screen() -> None:
         )
 
 
+# ---------------------------------------------------------------- vnew-live-fx 묶음 B — 실사 캐스팅(cast-)
+#
+# cast-a: 참고 구현 vpoc/live.py:33-39 CAST_BASE·:83-89 CAST_BASE_REAL 원문(design §B.2 에서 옮겨 male 낱말을 채운 글자).
+_CAST_IDOL_MALE = (
+    "Official profile photo of a male K-pop idol, adult Korean man in his 20s, real photograph of a real person, "
+    "photorealistic, slim V-line face, clear skin with natural skin texture (lightly retouched), subtle idol makeup, "
+    "glossy styled hair, calm expression, facing the camera, chest-up framing, soft studio lighting, plain light "
+    "background, full frame, no border, no illustration, no anime, not a painting, fully clothed. Clothing and its "
+    "pattern exactly as described, including where the pattern is."
+)
+_CAST_REAL_MALE = (
+    "Unretouched photo of a Korean actor on a K-drama set, natural East Asian facial features, dark brown eyes, "
+    "natural skin texture with pores and slight imperfections, no heavy makeup, soft natural light, calm neutral "
+    "expression, facing the camera, chest-up framing, hands not visible, plain background, full frame, no border, "
+    "no illustration, fully clothed, not a model photoshoot. Clothing and its pattern exactly as described, "
+    "including where the pattern is."
+)
+# cast-d: design §B.2 성별 문장 원문, 변경 전(2026-10-30, 묶음 A 커밋 뒤) 분석 도구 JSON·SYSTEM(VNEW_FX 켬) sha256.
+_CAST_GENDER_RULE_DESIGN = (
+    " genderEn is the character's gender as drawn: male, female or unknown (unknown when the drawings do not make it clear)."
+)
+_CAST_ANALYZE_TOOL_SHA = "a92d3534328a3ebf788bc9b934a1c8101ae96b0d3d4e81a7401000f27cc9ba57"
+_CAST_ANALYZE_SYSTEM_FX_SHA = "b668cc773ac780eeb2016ce20057ab13435be7fce53ccbf14071f34963ea83e9"
+# cast-d: 변경 전 analyze_sources 결과 키(끔이면 genderEn 이 없어야 한다).
+_CAST_ANALYSIS_KEYS_BEFORE = {
+    "nameGuess", "descriptionKo", "appearanceEn", "styleEn", "baseOutfitEn", "outfitEn", "outfitLayersEn",
+    "altOutfitsEn", "expressionsKo", "extraEn", "model",
+}
+# cast-g(B3, 091 남은 이슈 5 PM 결정): 캐스팅 칸 4xx 거절 문구(영상용 vpoc.fal.rejection "이 샷을" 대신).
+_CAST_REJECT_MSG = "fal이 이 캐스팅 문장을 거절했습니다. 외모 문장을 바꿔 다시 뽑아 주세요."
+# cast-k: 변경 전(B3 전) generate._char_entries 항목 키. VNEW_CASTING 끔이면 정확히 이 키여야 한다.
+_CAST_ENTRY_KEYS_BEFORE = {
+    "charId", "roleName", "name", "appearanceEn", "outfitEn", "styleEn", "realFrontKey", "realSheetKey", "realBackKey",
+    "webtoonSheetKey", "webtoonFrontKey", "webtoonBackKey", "missing",
+}
+# cast-l: 운영(RAW_ERRORS=false)에서도 문구를 그대로 보이는 캐스팅 kind(9종). CostMismatch 는 문구에 화면 금액이 들어가 뺀다.
+_CAST_USER_FACING = (
+    "CastingDisabled", "CastingRunning", "NoLook", "CandidateNotFound", "BadPreset", "BadGender", "BadLook",
+    "NoConfirmUsd", "NoCandidateId",
+)
+
+# cast-l: vnew.js 캐스팅 칸을 node 로 돌리는 가짜 DOM·api·window(fx-l 하네스와 같은 방식, 외부 호출 없음).
+_CAST_SCREEN_NODE_HARNESS = r"""
+var out = {};
+var innerHTMLUsed = false;
+function FakeNode(tag) {
+  this.tagName = tag; this.children = []; this.style = {}; this.attrs = {}; this.listeners = {};
+  this.className = ""; this._text = ""; this.disabled = false; this.title = ""; this.value = "";
+}
+Object.defineProperty(FakeNode.prototype, "textContent", {
+  get: function () { return this._text + this.children.map(function (c) { return c.textContent; }).join(""); },
+  set: function (v) { this._text = String(v); this.children = []; }
+});
+Object.defineProperty(FakeNode.prototype, "firstChild", { get: function () { return this.children[0] || null; } });
+Object.defineProperty(FakeNode.prototype, "innerHTML", { set: function () { innerHTMLUsed = true; } });
+FakeNode.prototype.appendChild = function (c) { this.children.push(c); return c; };
+FakeNode.prototype.removeChild = function (c) { var i = this.children.indexOf(c); if (i >= 0) this.children.splice(i, 1); return c; };
+FakeNode.prototype.setAttribute = function (k, v) { this.attrs[k] = String(v); };
+FakeNode.prototype.addEventListener = function (t, f) { (this.listeners[t] = this.listeners[t] || []).push(f); };
+FakeNode.prototype.fire = function (t) { (this.listeners[t] || []).forEach(function (f) { f({}); }); };
+FakeNode.prototype.focus = function () {};
+var document = { createElement: function (tag) { return new FakeNode(tag); } };
+var confirms = [], confirmAnswers = [], calls = [], apiPlan = [], refreshed = [], lightbox = [], timers = [];
+var window = {
+  confirm: function (msg) { confirms.push(msg); return confirmAnswers.length ? confirmAnswers.shift() : false; },
+  setTimeout: function (fn, ms) { timers.push([fn, ms]); return timers.length; },
+  clearTimeout: function () {}
+};
+var POLL_MS = 5000;
+var state = { view: "detail", pollTimer: 0 };
+function api(path, init) {
+  var method = (init && init.method) || "GET";
+  calls.push([method, path, init && init.body ? JSON.parse(init.body) : null]);
+  var next = apiPlan.length ? apiPlan.shift() : { ok: {} };
+  return next.err ? Promise.reject(next.err) : Promise.resolve(next.ok);
+}
+function refreshDetail(host, first) { refreshed.push(String(first)); }
+function openLightbox(url, alt) { lightbox.push([url, alt]); }
+function errMessage(e) { return (e && e.message) || "?"; }
+function walk(node, list) { list = list || []; list.push(node); (node.children || []).forEach(function (c) { walk(c, list); }); return list; }
+function byClass(node, cls) { return walk(node).filter(function (n) { return (" " + n.className + " ").indexOf(" " + cls + " ") >= 0; }); }
+function byTag(node, tag) { return walk(node).filter(function (n) { return n.tagName === tag; }); }
+function byText(node, tag, text) { return byTag(node, tag).filter(function (n) { return n.textContent === text; })[0]; }
+function tick() { return new Promise(function (resolve) { setTimeout(resolve, 5); }); }
+function reset() { calls.length = 0; confirms.length = 0; refreshed.length = 0; apiPlan.length = 0; confirmAnswers.length = 0; }
+"""
+
+_CAST_SCREEN_NODE_CASES = r"""
+var B = "/api/vnew/characters/ch%201/casting";
+var presets = [{ key: "idol", label: "아이돌풍" }, { key: "real", label: "현실 배우풍" }];
+var evil = "<img src=x onerror=alert(1)>";
+function detailOf(extra, castExtra) {
+  var cast = { enabled: true, preset: "idol", presets: presets, gender: "", genderAuto: "male",
+    lookEn: "a Korean man with short black hair", lookAuto: "a Korean man with short black hair", lookEdited: false,
+    patternWarning: "", status: "ready", error: "", slots: [], unitUsd: 0.04, count: 2, totalUsd: 0.08,
+    candidates: [], history: [], chosen: "", chosenUrl: "" };
+  Object.keys(castExtra || {}).forEach(function (k) { cast[k] = castExtra[k]; });
+  var d = { id: "ch 1", status: "ready", casting: cast };
+  Object.keys(extra || {}).forEach(function (k) { d[k] = extra[k]; });
+  return d;
+}
+function msgOf(section) { var m = byClass(section, "vnew-casting-msg")[0]; return [m.textContent, m.style.display, m.attrs.role]; }
+function view(section) {
+  var area = byTag(section, "textarea")[0], select = byTag(section, "select")[0], draw = byClass(section, "vnew-casting-draw")[0];
+  return {
+    cls: section.className,
+    head: byTag(section, "h2")[0].textContent,
+    lead: byClass(section, "vnew-casting-lead")[0].textContent,
+    radios: byTag(section, "input").filter(function (n) { return n.type === "radio"; }).map(function (n) { return [n.value, n.checked, n.disabled, n.name]; }),
+    radioLabels: byClass(section, "vnew-casting-preset").map(function (n) { return n.textContent; }),
+    options: byTag(section, "option").map(function (n) { return [n.value, n.textContent]; }),
+    select: [select.value, select.disabled],
+    look: [area.value, area.maxLength, area.disabled, area.placeholder],
+    warn: byClass(section, "vnew-casting-warn").map(function (n) { return n.textContent; }),
+    buttons: byTag(section, "button").map(function (n) { return [n.textContent, n.disabled]; }),
+    draw: [draw.textContent, draw.disabled, draw.title],
+    lock: byClass(section, "vnew-casting-lock").map(function (n) { return n.textContent; }),
+    progress: byClass(section, "vnew-casting-progress").map(function (n) { return [n.textContent, byClass(n, "vnew-casting-progress-fill")[0].style.width]; }),
+    error: byClass(section, "vnew-casting-error").map(function (n) { return [n.className, n.textContent]; }),
+    using: byClass(section, "vnew-casting-using").map(function (n) { return n.textContent; }),
+    photos: byTag(section, "figure").map(function (f) { var img = byTag(f, "img")[0]; return [f.className, img ? img.src : "", img ? img.alt : "", f.textContent]; }),
+    history: byTag(section, "details").map(function (d) { return [byTag(d, "summary")[0].textContent, d.open, byTag(d, "figure").length]; }),
+    message: msgOf(section)
+  };
+}
+async function run() {
+  out.pure = {
+    options: [castingGenderOptions({ genderAuto: "female" }), castingGenderOptions({ genderAuto: "zz" }), castingGenderOptions(null)]
+      .map(function (list) { return list.map(function (o) { return o.label; }); }),
+    optionValues: castingGenderOptions({}).map(function (o) { return o.value; }),
+    draw: [castingDrawLabel({ count: 2, totalUsd: 0.08 }), castingDrawLabel({ count: "x", totalUsd: -1 }), castingDrawLabel(null)],
+    confirm: [castingConfirmText({ count: 2, totalUsd: 0.08 }), castingConfirmText({ count: 4, totalUsd: 0.16 })],
+    changed: castingCostChangedText({ totalUsd: 0.12 }),
+    progress: [castingProgress({ slots: [{ status: "ready" }, { status: "submitted" }] }).text,
+               castingProgress({ slots: [{ status: "failed" }, { status: "ready" }, { status: "queued" }] }).text,
+               castingProgress({ count: 2 }).text, castingProgress(null).text],
+    using: [castingUsingText({ chosen: "k_a" }), castingUsingText({})],
+    caption: [castingPhotoCaption({ preset: "real", round: 2 }, { presets: presets }), castingPhotoCaption({ preset: "zz", round: 1 }, { presets: presets }),
+              castingPhotoCaption({}, {})],
+    lock: [castingLockText({ casting: { status: "drawing" } }), castingLockText({ status: "building", casting: {} }),
+           castingLockText({ status: "ready", casting: { status: "ready" } }), castingLockText(null)]
+  };
+  out.off = [castingSection({}, { id: "x", casting: { enabled: false } }), castingSection({}, { id: "x" }), castingSection({}, null)];
+  var host = new FakeNode("div");
+  var dR = detailOf({}, {
+    lookEn: "a Korean man wearing a striped shirt " + evil, lookEdited: true, patternWarning: "옷 무늬 경고 " + evil,
+    error: "사진 2장 중 1장을 만들지 못했습니다: " + evil, chosen: "k_a",
+    candidates: [{ id: "k_a", url: "https://signed.example/a.jpg?e=3600", preset: "idol", round: 2 }],
+    history: [{ id: "k_b", url: "https://signed.example/b.jpg?e=3600", preset: "real", round: 1 }, { id: "k_c", url: "", preset: "idol", round: 1 }, null]
+  });
+  var sR = castingSection(host, dR);
+  out.ready = view(sR);
+  byTag(sR, "img")[0].fire("click");
+  out.lightbox = lightbox.slice();
+  // 저장: 느낌·성별·고친 외모 문장
+  reset();
+  var radios = byTag(sR, "input"); radios[1].checked = true; radios[1].fire("change");
+  var sel = byTag(sR, "select")[0]; sel.value = "female"; sel.fire("change");
+  var area = byTag(sR, "textarea")[0]; area.value = "a Korean woman in a navy coat"; area.fire("input");
+  byText(sR, "button", "저장").fire("click"); await tick();
+  out.save = [calls.slice(), refreshed.slice()];
+  reset();
+  var s2 = castingSection(host, detailOf());
+  out.s2 = view(s2).buttons;
+  byText(s2, "button", "저장").fire("click"); await tick();
+  out.saveNoLook = calls.slice();
+  reset();
+  var s3 = castingSection(host, detailOf({}, { lookEdited: true, lookEn: "edited" }));
+  byText(s3, "button", "분석 문장으로 되돌리기").fire("click"); await tick();
+  out.revert = calls.slice();
+  reset();
+  apiPlan = [{ err: { message: "알 수 없는 느낌입니다.", status: 400, type: "BadPreset" } }];
+  var s8 = castingSection(host, detailOf());
+  byText(s8, "button", "저장").fire("click"); await tick();
+  out.saveFail = [msgOf(s8), byText(s8, "button", "저장").disabled];
+  // 뽑기: 확인창 취소 → 호출 0, 확인 → confirmUsd 와 함께 POST
+  reset();
+  var s4 = castingSection(host, detailOf());
+  var d4 = byClass(s4, "vnew-casting-draw")[0];
+  confirmAnswers = [false]; d4.fire("click"); await tick();
+  out.drawCancel = [confirms.slice(), calls.slice()];
+  reset();
+  confirmAnswers = [true]; d4.fire("click"); await tick();
+  out.draw = [confirms.slice(), calls.slice(), refreshed.slice()];
+  reset();
+  var s5 = castingSection(host, detailOf());
+  var a5 = byTag(s5, "textarea")[0]; a5.value = "a Korean man in a grey coat"; a5.fire("input");
+  confirmAnswers = [true]; byClass(s5, "vnew-casting-draw")[0].fire("click"); await tick();
+  out.drawLook = calls.slice();
+  // 409 CostMismatch → 새 금액을 다시 읽어 버튼에 보이고, 보내지 않는다. 다시 누르면 새 금액으로 확인한다.
+  reset();
+  var s6 = castingSection(host, detailOf());
+  var d6 = byClass(s6, "vnew-casting-draw")[0];
+  apiPlan = [{ err: { type: "CostMismatch", status: 409, message: "처리 중 오류가 발생했습니다 (코드: CostMismatch)" } },
+             { ok: detailOf({}, { count: 3, totalUsd: 0.12 }) }];
+  confirmAnswers = [true]; d6.fire("click"); await tick(); await tick();
+  out.mismatch = [confirms.slice(), calls.slice(), d6.textContent, d6.disabled, msgOf(s6), refreshed.slice()];
+  reset();
+  confirmAnswers = [false]; d6.fire("click"); await tick();
+  out.mismatchCancel = [confirms.slice(), calls.slice()];
+  reset();
+  confirmAnswers = [true]; d6.fire("click"); await tick();
+  out.mismatchRetry = [confirms.slice(), calls.slice()];
+  reset();
+  var s9 = castingSection(host, detailOf());
+  apiPlan = [{ err: { type: "CostMismatch", status: 409, message: "x" } }, { err: { message: "network" } }];
+  confirmAnswers = [true]; byClass(s9, "vnew-casting-draw")[0].fire("click"); await tick(); await tick();
+  out.rereadFail = [msgOf(s9), byClass(s9, "vnew-casting-draw")[0].disabled];
+  reset();
+  var s10 = castingSection(host, detailOf());
+  apiPlan = [{ err: { type: "CostMismatch", status: 409, message: "x" } }, { ok: { casting: { enabled: false } } }];
+  confirmAnswers = [true]; byClass(s10, "vnew-casting-draw")[0].fire("click"); await tick(); await tick();
+  out.rereadOff = [calls.map(function (c) { return c[0]; }), refreshed.slice()];
+  reset();
+  var s11 = castingSection(host, detailOf());
+  apiPlan = [{ err: { type: "CastingRunning", status: 409, message: "이미 실사 캐스팅 사진을 만들고 있습니다." } }];
+  confirmAnswers = [true]; byClass(s11, "vnew-casting-draw")[0].fire("click"); await tick();
+  out.drawFail = [msgOf(s11), byClass(s11, "vnew-casting-draw")[0].disabled];
+  // 고르기·실사 정면 쓰기·실패
+  reset();
+  var s7 = castingSection(host, dR);
+  byText(s7, "button", "이 사진으로").fire("click"); await tick();
+  out.choose = [calls.slice(), refreshed.slice()];
+  reset();
+  byText(s7, "button", "실사 정면 쓰기").fire("click"); await tick();
+  out.front = calls.slice();
+  reset();
+  var s12 = castingSection(host, dR);
+  apiPlan = [{ err: { message: "고를 사진을 찾을 수 없습니다." } }];
+  var pick12 = byText(s12, "button", "이 사진으로");
+  pick12.fire("click"); await tick();
+  out.chooseFail = [msgOf(s12), pick12.disabled];
+  // 뽑는 중·만드는 중·외모 없음·실패·고른 사진이 이전 사진에 있음
+  out.drawing = view(castingSection(host, detailOf({}, { status: "drawing", slots: [{ slot: 0, status: "ready" }, { slot: 1, status: "submitted" }],
+    candidates: [{ id: "k_n", url: "https://signed.example/n.jpg", preset: "idol", round: 3 }] })));
+  out.building = view(castingSection(host, detailOf({ status: "building" })));
+  var sN = castingSection(host, detailOf({}, { lookEn: "", lookAuto: "" }));
+  out.noLook = [view(sN).draw];
+  var aN = byTag(sN, "textarea")[0]; aN.value = "a Korean man"; aN.fire("input");
+  out.noLook.push(view(sN).draw);
+  out.failed = view(castingSection(host, detailOf({}, { status: "failed", error: "사진 2장 중 2장을 만들지 못했습니다: x" }))).error;
+  out.histChosen = view(castingSection(host, detailOf({}, { chosen: "k_b", history: [{ id: "k_b", url: "u", preset: "idol", round: 1 }] }))).history;
+  // schedulePoll: 뽑는 중·만드는 중에만 5초 뒤 다시 불러온다(끔이면 casting.status 가 없다)
+  out.poll = [{ status: "ready", casting: { status: "drawing" } }, { status: "ready", casting: { enabled: false } },
+              { status: "building", casting: { enabled: false } }, { status: "ready", casting: { status: "ready" } }, null]
+    .map(function (d) { timers.length = 0; schedulePoll({}, d); return timers.length ? timers[0][1] : 0; });
+  reset(); timers.length = 0; state.view = "detail";
+  schedulePoll({}, { status: "ready", casting: { status: "drawing" } });
+  timers[0][0]();
+  out.pollFire = refreshed.slice();
+  reset(); state.view = "list"; timers[0][0]();
+  out.pollLeft = refreshed.slice();
+  out.innerHTML = innerHTMLUsed;
+  console.log(JSON.stringify(out));
+}
+run().catch(function (e) { console.error((e && e.stack) || String(e)); process.exit(1); });
+"""
+
+
+def _cast_screen_problems(got: dict) -> list[str]:
+    """cast-l node 결과(_CAST_SCREEN_NODE_CASES)를 design §B.6 문구·동작과 비교해 문제 목록을 돌려준다."""
+    problems: list[str] = []
+    base = "/api/vnew/characters/ch%201/casting"
+    evil = "<img src=x onerror=alert(1)>"
+    lead = "웹툰 그림 없이 글로 실사 배우 사진을 만듭니다. 고른 사진은 통 테이크 실사 버전의 인물 참고로 씁니다(고르지 않으면 실사 정면)."
+    label2 = "실사 캐스팅 뽑기 (2장 · $0.08)"
+    confirm2 = "실사 캐스팅 사진 2장을 만듭니다. 예상 비용 $0.08입니다. 계속할까요?"
+    confirm3 = "실사 캐스팅 사진 3장을 만듭니다. 예상 비용 $0.12입니다. 계속할까요?"
+    changed = "금액이 바뀌었습니다. 새 금액은 $0.12입니다. 다시 누르면 새 금액으로 확인합니다."
+    lock_draw = "사진을 만드는 동안에는 느낌·성별·외모 문장을 바꿀 수 없습니다."
+    lock_build = "캐릭터를 만드는 동안에는 실사 캐스팅을 쓸 수 없습니다."
+    using_none = "실사 버전에 쓰는 사진: 실사 정면 (캐스팅 사진을 고르지 않았습니다)"
+    genders = ["남", "여", "모름"]
+    want_pure = {
+        "options": [["자동(분석: 여)"] + genders, ["자동(분석: 모름)"] + genders, ["자동(분석: 모름)"] + genders],
+        "optionValues": ["", "male", "female", "unknown"],
+        "draw": [label2, "실사 캐스팅 뽑기 (0장 · $0.00)", "실사 캐스팅 뽑기 (0장 · $0.00)"],
+        "confirm": [confirm2, "실사 캐스팅 사진 4장을 만듭니다. 예상 비용 $0.16입니다. 계속할까요?"],
+        "changed": changed,
+        "progress": ["사진을 만드는 중… (1/2)", "사진을 만드는 중… (2/3)", "사진을 만드는 중… (0/2)", "사진을 만드는 중… (0/0)"],
+        "using": ["실사 버전에 쓰는 사진: 고른 캐스팅 사진", using_none],
+        "caption": ["현실 배우풍 · 2회차", "1회차", ""],
+        "lock": [lock_draw, lock_build, "", ""],
+    }
+    if got.get("pure") != want_pure:
+        problems.append(f"(cast-l) 문구 함수 결과가 design §B.6 과 다릅니다: {got.get('pure')}")
+    if got.get("off") != [None, None, None]:
+        problems.append(f"(cast-l) casting.enabled 가 아니면 아무것도 그리지 않아야 합니다: {got.get('off')}")
+    radio_name = "vnew-casting-preset-ch 1"
+    want_ready = {
+        "cls": "panel vnew-casting", "head": "실사 캐스팅", "lead": lead,
+        "radios": [["idol", True, False, radio_name], ["real", False, False, radio_name]],
+        "radioLabels": ["아이돌풍", "현실 배우풍"],
+        "options": [["", "자동(분석: 남)"], ["male", "남"], ["female", "여"], ["unknown", "모름"]],
+        "select": ["", False],
+        "look": ["a Korean man wearing a striped shirt " + evil, 300, False, "캐릭터를 만들어 분석하면 외모 문장이 채워집니다."],
+        "warn": ["옷 무늬 경고 " + evil],
+        "buttons": [["저장", False], ["분석 문장으로 되돌리기", False], [label2, False], ["실사 정면 쓰기", False],
+                    ["이 사진으로", False], ["이 사진으로", False]],
+        "draw": [label2, False, ""], "lock": [], "progress": [],
+        "error": [["vnew-hint vnew-casting-error", "사진 2장 중 1장을 만들지 못했습니다: " + evil]],
+        "using": ["실사 버전에 쓰는 사진: 고른 캐스팅 사진실사 정면 쓰기"],
+        "photos": [
+            ["vnew-casting-photo is-chosen", "https://signed.example/a.jpg?e=3600", "실사 캐스팅 사진", "아이돌풍 · 2회차실사 버전에 쓰는 사진"],
+            ["vnew-casting-photo", "https://signed.example/b.jpg?e=3600", "실사 캐스팅 사진", "현실 배우풍 · 1회차이 사진으로"],
+            ["vnew-casting-photo", "", "", "사진을 불러오지 못했습니다.아이돌풍 · 1회차이 사진으로"],
+        ],
+        "history": [["이전 사진 (2)", False, 2]],
+        "message": ["", "none", "alert"],
+    }
+    ready = got.get("ready") or {}
+    for key, value in want_ready.items():
+        if ready.get(key) != value:
+            problems.append(f"(cast-l) 캐스팅 칸 {key} 가 다릅니다: {ready.get(key)!r} != {value!r}")
+    if got.get("lightbox") != [["https://signed.example/a.jpg?e=3600", "실사 캐스팅 사진"]]:
+        problems.append(f"(cast-l) 사진을 누르면 크게 보이지 않습니다: {got.get('lightbox')}")
+    if got.get("save") != [[["PUT", base, {"preset": "real", "gender": "female", "lookEn": "a Korean woman in a navy coat"}]], ["false"]] \
+            or got.get("saveNoLook") != [["PUT", base, {"preset": "idol", "gender": ""}]] \
+            or got.get("revert") != [["PUT", base, {"preset": "idol", "gender": "", "lookEn": ""}]] \
+            or got.get("s2") != [["저장", False], ["분석 문장으로 되돌리기", True], [label2, False]] \
+            or got.get("saveFail") != [["저장하지 못했습니다: 알 수 없는 느낌입니다.", "", "alert"], False]:
+        problems.append(f"(cast-l) [저장]·[분석 문장으로 되돌리기]가 다릅니다: {got.get('save')} {got.get('saveNoLook')} {got.get('revert')}")
+    draw_body = {"confirmUsd": 0.08, "preset": "idol", "gender": ""}
+    if got.get("drawCancel") != [[confirm2], []] or got.get("draw") != [[confirm2], [["POST", base + "/draw", draw_body]], ["false"]] \
+            or got.get("drawLook") != [["POST", base + "/draw", dict(draw_body, lookEn="a Korean man in a grey coat")]]:
+        problems.append(f"(cast-l) 뽑기 확인창(금액 숫자)·confirmUsd 가 다릅니다: {got.get('drawCancel')} {got.get('draw')}")
+    want_mismatch = [[confirm2], [["POST", base + "/draw", draw_body], ["GET", "/api/vnew/characters/ch%201", None]],
+                     "실사 캐스팅 뽑기 (3장 · $0.12)", False, [changed, "", "alert"], []]
+    if got.get("mismatch") != want_mismatch or got.get("mismatchCancel") != [[confirm3], []] \
+            or got.get("mismatchRetry") != [[confirm3], [["POST", base + "/draw", dict(draw_body, confirmUsd=0.12)]]]:
+        problems.append(f"(cast-l) 409 CostMismatch → 새 금액 다시 읽기·다시 확인 전 보내지 않기가 다릅니다: "
+                        f"{got.get('mismatch')} {got.get('mismatchCancel')} {got.get('mismatchRetry')}")
+    if got.get("rereadFail") != [["새 금액을 불러오지 못했습니다: network", "", "alert"], False] \
+            or got.get("rereadOff") != [["POST", "GET"], ["false"]] \
+            or got.get("drawFail") != [["실사 캐스팅 뽑기를 시작하지 못했습니다: 이미 실사 캐스팅 사진을 만들고 있습니다.", "", "alert"], False]:
+        problems.append(f"(cast-l) 뽑기 실패 문구가 다릅니다: {got.get('rereadFail')} {got.get('rereadOff')} {got.get('drawFail')}")
+    if got.get("choose") != [[["POST", base + "/choose", {"candidateId": "k_b"}]], ["false"]] \
+            or got.get("front") != [["POST", base + "/choose", {"candidateId": ""}]] \
+            or got.get("chooseFail") != [["사진을 고르지 못했습니다: 고를 사진을 찾을 수 없습니다.", "", "alert"], False]:
+        problems.append(f"(cast-l) [이 사진으로]·[실사 정면 쓰기]가 다릅니다: {got.get('choose')} {got.get('front')} {got.get('chooseFail')}")
+    drawing = got.get("drawing") or {}
+    if [r[2] for r in drawing.get("radios") or []] != [True, True] or (drawing.get("select") or [0, 0])[1] is not True \
+            or (drawing.get("look") or [0, 0, 0])[2] is not True or drawing.get("lock") != [lock_draw] \
+            or drawing.get("buttons") != [["저장", True], ["분석 문장으로 되돌리기", True], [label2, True], ["이 사진으로", False]] \
+            or drawing.get("progress") != [["사진을 만드는 중… (1/2)", "50%"]] or drawing.get("error") != [] \
+            or drawing.get("using") != [using_none]:
+        problems.append(f"(cast-l) 뽑는 중 화면(진행 막대·입력 막힘)이 다릅니다: {drawing}")
+    building = got.get("building") or {}
+    if building.get("lock") != [lock_build] or (building.get("draw") or [0, 0])[1] is not True:
+        problems.append(f"(cast-l) 캐릭터를 만드는 중 화면이 다릅니다: {building.get('lock')} {building.get('draw')}")
+    if got.get("noLook") != [[label2, True, "먼저 캐릭터를 만들어 분석해 주세요."], [label2, False, ""]]:
+        problems.append(f"(cast-l) 외모 문장이 없을 때 뽑기 막힘이 다릅니다: {got.get('noLook')}")
+    if got.get("failed") != [["login-error vnew-casting-error", "사진 2장 중 2장을 만들지 못했습니다: x"]] \
+            or got.get("histChosen") != [["이전 사진 (1)", True, 1]]:
+        problems.append(f"(cast-l) 실패 문구·이전 사진 접기가 다릅니다: {got.get('failed')} {got.get('histChosen')}")
+    if got.get("poll") != [5000, 0, 5000, 0, 0] or got.get("pollFire") != ["false"] or got.get("pollLeft") != []:
+        problems.append(f"(cast-l) schedulePoll(뽑는 중 5초 다시 불러오기)이 다릅니다: {got.get('poll')} {got.get('pollFire')}")
+    if got.get("innerHTML") is not False:
+        problems.append("(cast-l) 화면 조립 중 innerHTML 을 썼습니다")
+    return problems
+
+
+def check_vnew_casting() -> None:
+    """vnew-live-fx 묶음 B — 실사 캐스팅(RB1~RB5, 작업 B1·B2). 외부 호출은 모두 가짜다(fal·Bedrock 0회).
+
+    (cast-a) male base_text(idol·real) = 참고 구현 원문, female·unknown 낱말, cast_prompt He/She/They, female·unknown 결과에
+             낱말 male·"He is"·his 없음, 모든 결과에 webtoon 없음(대소문자·webtoonish·주입 문장 포함)
+    (cast-b) look_sentence: 주어 명사·나이(his/her/their)·dyed(검정·짙은 갈색·나이 든 회색 제외·중복 없음)·표정 조각·눈 색 제거·
+             옷 덧붙임·그림 낱말 제거·boy/girl 유지·≤300 단어 경계, age_phrase 경우(10대·학생 → 성인 early 20s)
+    (cast-c) pattern_warning 경우·문구
+    (cast-d) resolve_gender 순서(사용자 → genderEn → 주어 → unknown, 옛 캐릭터 genderEn 없음), normalize_gender,
+             분석 도구 스키마·SYSTEM 켬/끔(끔 = 변경 전 sha256), _analyze 가 보낸 도구·SYSTEM, analyze_sources genderEn 켬/끔
+    (cast-m) VNEW_CASTING 기본 true·템플릿·base(VNEW_FX 바로 뒤, 되돌리기 주석)·PARITY_ENV_KEYS·render dev/prod true·오버레이 false,
+             코드 기본값(모델·$0.04·2장·1~4 자르기·1920x2560·600·900, 템플릿 없음), fal 본문 어디에도 http·data URI·서명 URL 없음
+    (cast-e) start_draw: 404 끔·409 FalKeyMissing·400 BadPreset·BadGender·409 CostMismatch(금액 문구)·NoLook·404 캐릭터, 성공 → drawing·
+             칸 2 queued·round·usd·claim·스레드 1·prompt = cast_prompt, 다시 → 409 CastingRunning, history 이동(최신 먼저 12·chosen 남김)·
+             chosen 유지(결정 5)·lookEdited·update_settings 되돌리기, 캐릭터 status·variants 그대로
+    (cast-f) run_draw(가짜 fal): 제출 2건·본문 키 정확히 {prompt, num_images, image_size}·큐 주소, 진행 중 → 5초 쉼, S3 users/{owner}/
+             characters/{cid}/casting/ JPEG ≤1536 2장, 원장 2건 $0.04(키·모델·사용자), ready·첫 후보 선택·claim 해제, 다시 돌려도 0건
+    (cast-g) 한 칸 422 거절(문구) + 503 일시 오류 뒤 완료 → 후보 1·ready·오류 요약·원장 1, 두 칸 실패 → failed·원장 0, 요청 ID 없음·
+             이상한 ID·FAILED·http 결과·읽을 수 없는 사진·내려받기 일시 오류·뜻밖의 예외 → 그 칸만, 프리셋 = 회차 문장
+    (cast-h) 이어하기: 오래된 하트비트·submitted 1·queued 1 → queued 는 failed(제출 0)·새 claim·스레드 1, 이어 조회 → 결과·원장 1,
+             옛 claim 실행은 접음, 하트비트 신선·이 파드에서 실행 중·다른 파드가 먼저 잡음 → 건너뜀, 900초 → failed(조회 0·원장 0),
+             뜻밖의 예외 → 상태 그대로
+    (cast-i) choose: 이전 후보·"" 고르기·presigned chosenUrl·모르는 id 404·끔 404, 깨진 저장값 보기
+    (cast-j) 라우트 3개(Flask): PUT 200·400 3종·404, draw 400 NoConfirmUsd 4종·409·202·409, choose 400·404·200, 다른 사용자 404,
+             끔 404 3개·상세 {enabled:false}, 상세 casting 키·presigned·totalUsd·genderAuto, 실제 래퍼(_fal_request·_fetch_url·_spawn)
+    (cast-k) B3 영상에 쓰기: _char_entries.castingKey(고름 = 후보·이전 사진 키, 안 고름 "", 끔 = 키 없음·B3 이전과 키·값 같음,
+             없는 캐릭터·깨진 저장값·chosen_key 예외 → ""), _real_front_key(고름 → 캐스팅, 안 고름·끔 → 실사 정면), 캐스팅을 골라도
+             컷 단위 Kling payload(_previz_payload_elements·_previz_payload_image_list, 실사·웹툰) deep-equal·sha256 같음·캐스팅 사진 0(결정 4)
+    (cast-l) B3 화면: vnew.js 캐스팅 칸 문구 함수·castingSection(느낌·성별 "자동(분석: …)"·외모·저장·되돌리기·무늬 경고·뽑기 확인창 금액·
+             confirmUsd·409 CostMismatch 새 금액 다시 읽기·진행 막대·후보 격자·배지·이전 사진 접기·실사 정면 쓰기)·schedulePoll 을 node
+             가짜 DOM 으로 실행, innerHTML 0, 배선·CSS·node --check, 운영 문구 9종 그대로·CostMismatch 가림(type 유지)·9종 고정 문구,
+             (cast-g 추가) 캐스팅 4xx 거절 문구 + error_gist 요지(URL 쿼리·data URI·키 제거·120자)
+    """
+    sys.path.insert(0, str(ROOT / "app"))
+    import ast as _ast  # noqa: PLC0415
+    import copy as _copy  # noqa: PLC0415
+    import hashlib as _hashlib  # noqa: PLC0415
+    import importlib.util as _ilu  # noqa: PLC0415
+    import inspect as _inspect  # noqa: PLC0415
+    import io as _io  # noqa: PLC0415
+    import json as _json  # noqa: PLC0415
+    import threading as _threading  # noqa: PLC0415
+    import traceback as _tb  # noqa: PLC0415
+    import urllib.error as _uerr  # noqa: PLC0415
+    import urllib.request as _ureq  # noqa: PLC0415
+    from datetime import datetime as _dt, timedelta as _td, timezone as _tz  # noqa: PLC0415
+
+    from flask import Flask  # noqa: PLC0415
+    from PIL import Image as _Image  # noqa: PLC0415
+
+    from src import vnew  # noqa: PLC0415
+    from src.vnew import casting as castmod  # noqa: PLC0415
+    from src.vnew import characters as charmod  # noqa: PLC0415
+    from src.vnew import generate as genmod  # noqa: PLC0415
+    from src.vnew import settings as vset  # noqa: PLC0415
+    from src.vpoc import fal as vpoc_fal  # noqa: PLC0415
+    from src.vpoc import llm as vpoc_llm  # noqa: PLC0415
+    from src.vpoc import settings as vpoc_settings  # noqa: PLC0415
+    from src.vpoc.errors import VpocError  # noqa: PLC0415
+
+    bad: list[str] = []
+    seen_ids: set[str] = set()
+
+    def mark(*ids: str) -> None:
+        seen_ids.update(ids)
+
+    fake_store = _FakeCharStore()
+    saved = {
+        "STORE": charmod.STORE,
+        "_analyze": charmod._analyze,
+        "char_fal": charmod._fal_request,
+        "load_char": charmod.load_char,
+        "cast_fal": castmod._fal_request,
+        "cast_fetch": castmod._fetch_url,
+        "cast_spawn": castmod._spawn,
+        "cast_sleep": castmod._sleep,
+        "cast_run": castmod.run_draw,
+        "charge": castmod.vpoc_ledger.charge,
+        "vpoc_request": vpoc_fal._request,
+        "urlopen": _ureq.urlopen,
+        "fal_key": vpoc_settings.FAL_KEY,
+        "casting_flag": vset.VNEW_CASTING,
+        "fx_flag": vset.VNEW_FX,
+    }
+    male_word = re.compile(r"\bmale\b", re.IGNORECASE)
+    his_word = re.compile(r"\bhis\b", re.IGNORECASE)
+
+    def tool_sha(tool: dict) -> str:
+        return _hashlib.sha256(_json.dumps(tool, sort_keys=True, ensure_ascii=False).encode("utf-8")).hexdigest()
+
+    owner = "tester"
+    all_posts: list[dict] = []  # cast-m: 이 검사에서 fal 에 보낸 모든 제출 본문
+    prompt_count = 0
+    post_total = 0
+
+    logs = _LogCapture()
+    try:
+        charmod.STORE = fake_store
+        vset.VNEW_CASTING = True
+        vset.VNEW_FX = True
+        with _guard_real_llm() as real_calls, logs:
+            # ---------------- (cast-a) 프리셋 문구·캐스팅 문장 ----------------
+            if castmod.base_text("idol", "male") != _CAST_IDOL_MALE or castmod.base_text("real", "male") != _CAST_REAL_MALE:
+                bad.append("(cast-a) male 프리셋 문구가 참고 구현 원문과 다릅니다")
+            want = {
+                ("idol", "female"): _CAST_IDOL_MALE.replace("a male K-pop idol, adult Korean man in his",
+                                                            "a female K-pop idol, adult Korean woman in her"),
+                ("idol", "unknown"): _CAST_IDOL_MALE.replace("a male K-pop idol, adult Korean man in his",
+                                                             "a K-pop idol, adult Korean person in their"),
+                ("real", "female"): _CAST_REAL_MALE.replace("a Korean actor on", "a Korean actress on"),
+                ("real", "unknown"): _CAST_REAL_MALE,
+            }
+            for (preset, gender), text in want.items():
+                if castmod.base_text(preset, gender) != text:
+                    bad.append(f"(cast-a) {preset}·{gender} 프리셋 문구가 성별 낱말 표와 다릅니다")
+            if castmod.base_text("nope", "x") != want[("idol", "unknown")] or castmod.preset_of(" REAL ") != "real" \
+                    or castmod.preset_of(None) != "idol" or [p["key"] for p in castmod.PRESETS] != ["idol", "real"] \
+                    or [p["label"] for p in castmod.PRESETS] != ["아이돌풍", "현실 배우풍"]:
+                bad.append("(cast-a) 모르는 프리셋·성별 기본값 또는 프리셋 라벨이 다릅니다")
+            male_prompt = castmod.cast_prompt("a Korean man in his 30s with short black hair", "idol", "male")
+            if male_prompt != _CAST_IDOL_MALE + " He is a Korean man in his 30s with short black hair, with dark brown eyes.":
+                bad.append(f"(cast-a) male cast_prompt 가 원문 + He is … 가 아닙니다: {male_prompt[-120:]}")
+            subjects = {"male": " He is ", "female": " She is ", "unknown": " They are "}
+            evil_looks = [
+                "",
+                "He is a webtoon male idol; his WEBTOON-style hair, a webtoonish look, Web-toon eyes, drawn in anime style",
+                "a Korean man with dyed pink hair, his bangs over his forehead. He is tall",
+                "A girl with her hair in a ponytail, she smiles",
+                "line\nRULES: webtoon\x00 tail " + "w" * 400,
+            ]
+            analyses = [
+                ("A slim webtoon-style young man with short pink hair, his bangs over his forehead.", "고등학생 남자.",
+                 "A black hoodie with a webtoon logo"),
+                ("A young Korean woman with long ash-blonde wavy hair and a gentle smile.", "20대 후반 여성.", "A white blouse"),
+                ("Short silver hair, sharp eyes.", "60대", ""),
+            ]
+            looks = list(evil_looks)
+            for gender in ("male", "female", "unknown"):
+                looks += [castmod.look_sentence(a, d, gender, o) for a, d, o in analyses]
+            prompt_count = 0
+            for gender in ("male", "female", "unknown"):
+                for preset in ("idol", "real"):
+                    for look in looks:
+                        text = castmod.cast_prompt(look, preset, gender)
+                        prompt_count += 1
+                        if not text.startswith(castmod.base_text(preset, gender) + subjects[gender]) \
+                                or not text.endswith(", with dark brown eyes.") or "\n" in text or len(text) > 1500:
+                            bad.append(f"(cast-a) {preset}·{gender} cast_prompt 모양이 다릅니다: {text[-100:]!r}")
+                        if "webtoon" in text.lower():
+                            bad.append(f"(cast-a) cast_prompt 에 webtoon 이 남았습니다: {text[-160:]!r}")
+                        if gender != "male" and (male_word.search(text) or "He is" in text or his_word.search(text)):
+                            bad.append(f"(cast-a) {gender} 문장에 male·He is·his 가 있습니다: {text[-200:]!r}")
+                        if gender == "unknown" and (re.search(r"\b(?:fe)?male\b|\bher\b|She is", text, re.IGNORECASE)):
+                            bad.append(f"(cast-a) unknown 문장에 성별 낱말이 있습니다: {text[-200:]!r}")
+            for look in looks:
+                if "webtoon" in look.lower() and look not in evil_looks:
+                    bad.append(f"(cast-a) look_sentence 결과에 webtoon 이 남았습니다: {look!r}")
+            mark("cast-a")
+
+            # ---------------- (cast-b) 외모 문장·나이 ----------------
+            got_b = {
+                "male40": castmod.look_sentence("A middle-aged Korean man with glasses and short black hair.", "중년 남성 캐릭터. 안경을 썼다.",
+                                                "male", "A beige button-up shirt with dark trousers and loafers."),
+                "female28": castmod.look_sentence("A young Korean woman with long ash-blonde wavy hair, large gray eyes and a gentle smile.",
+                                                  "20대 후반 직장인 여성.", "female", "A white blouse with a navy stripe down each sleeve."),
+                "teenSwap": castmod.look_sentence("A slim webtoon-style young man with short pink hair, his bangs over his forehead.",
+                                                  "고등학생.", "female", "A black hoodie with a logo"),
+                "old": castmod.look_sentence("Short silver hair, sharp eyes, frowning.", "60대 노인", "unknown", ""),
+                "noSubject": castmod.look_sentence("Short pink hair, sharp eyes.", "20대", "female", ""),
+                "darkBrown": castmod.look_sentence("A man with dark brown hair and a calm expression.", "", "male", ""),
+                "lightBrown": castmod.look_sentence("A tall girl with light brown hair.", "", "unknown", "striped shirt"),
+                "alreadyDyed": castmod.look_sentence("A man with dyed red hair.", "", "male", ""),
+                "boy": castmod.look_sentence("A Korean boy with deep frown lines across his forehead.", "", "male", ""),
+                "girlMale": castmod.look_sentence("A cheerful girl with black hair.", "", "male", ""),
+                "outfitOnly": castmod.look_sentence("", "", "male", "The navy school uniform."),
+                "manga": castmod.look_sentence("A manga-style woman drawn with blue eyes and pink hair.", "", "female", ""),
+                "darkOnly": castmod.look_sentence("A man with dark hair.", "", "male", ""),
+            }
+            want_b = {
+                "male40": "a Korean man in his 40s with glasses and short black hair, wearing a beige button-up shirt with dark trousers and loafers",
+                "female28": "a Korean woman in her late 20s with long dyed ash-blonde wavy hair, large eyes, wearing a white blouse with a navy "
+                            "stripe down each sleeve",
+                "teenSwap": "a slim Korean woman in her early 20s with short dyed pink hair, her bangs over her forehead, wearing a black hoodie "
+                            "with a logo",
+                "old": "a Korean person in their 60s, short silver hair, sharp eyes",
+                "noSubject": "a Korean woman in her 20s, short dyed pink hair, sharp eyes",
+                "darkBrown": "a Korean man with dark brown hair",
+                "lightBrown": "a tall Korean person with dyed light brown hair, wearing striped shirt",
+                "alreadyDyed": "a Korean man with dyed red hair",
+                "boy": "a Korean boy with deep frown lines across his forehead",
+                "girlMale": "a cheerful Korean man with black hair",
+                "outfitOnly": "a Korean man wearing the navy school uniform",
+                "manga": "a Korean woman with dyed pink hair",
+                "darkOnly": "a Korean man with dark hair",
+            }
+            for name, text in want_b.items():
+                if got_b[name] != text:
+                    bad.append(f"(cast-b) look_sentence {name}: {got_b[name]!r} != {text!r}")
+            long_look = castmod.look_sentence("A Korean man with " + ", ".join(f"feature{n} detail" for n in range(80)) + ".", "", "male", "")
+            if len(long_look) > 300 or not long_look.endswith("detail") or "  " in long_look:
+                bad.append(f"(cast-b) 긴 외모가 300자 단어 경계에서 잘리지 않았습니다: {len(long_look)} {long_look[-30:]!r}")
+            ages = {
+                ("27살 남자", "male"): "in his late 20s", ("30대 초반", "female"): "in her early 30s", ("10대 소녀", "unknown"): "in their early 20s",
+                ("", "male"): "", ("중년의 회사원", "male"): "in his 40s", ("할머니", "female"): "in her 60s", ("5살", "male"): "in his early 20s",
+                ("40대 중반", "unknown"): "in their mid 40s", ("고등학생", "female"): "in her early 20s", ("35세", "x"): "in their mid 30s",
+            }
+            for (desc, gender), text in ages.items():
+                if castmod.age_phrase(desc, gender) != text:
+                    bad.append(f"(cast-b) age_phrase({desc!r}, {gender}) = {castmod.age_phrase(desc, gender)!r} != {text!r}")
+            if castmod.align_gender("He is tall; his hair, a male idol", "female") != "She is tall; her hair, a female idol" \
+                    or castmod.align_gender("She is tall; her hair, a female idol, a woman", "unknown") != "They are tall; their hair, a idol, a person" \
+                    or castmod.align_gender("She has her bag", "male") != "He has his bag":
+                bad.append("(cast-b) align_gender 낱말 맞춤이 다릅니다")
+            if castmod.prompt_look("a man with dyed blue hair with realistic hair strands", "male").count("hair strands") != 1:
+                bad.append("(cast-b) strands 가 두 번 붙습니다")
+            mark("cast-b")
+
+            # ---------------- (cast-c) 무늬 위치 경고 ----------------
+            warn_cases = {
+                "a striped shirt": True, "a white stripe down each sleeve, plain black body": False, "a plain black hoodie": False,
+                "a hoodie with a logo on the chest": False, "a polka dot dress": True, "a checkered skirt": True, "": False, None: False,
+                "plaid\nshirt": True,
+            }
+            for text, want_warn in warn_cases.items():
+                got = castmod.pattern_warning(text)
+                if bool(got) != want_warn or (got and got != castmod.PATTERN_WARNING):
+                    bad.append(f"(cast-c) pattern_warning({text!r}) = {got!r}")
+            if "무늬" not in castmod.PATTERN_WARNING or "위치" not in castmod.PATTERN_WARNING:
+                bad.append("(cast-c) 경고 문구에 무늬·위치 안내가 없습니다")
+            mark("cast-c")
+
+            # ---------------- (cast-d) 성별 정하기·분석 도구·SYSTEM ----------------
+            rg = castmod.resolve_gender
+            gender_cases = [
+                (({"gender": "male"}, {"genderEn": "female"}), "male"),
+                (({"gender": ""}, {"genderEn": "female", "appearanceEn": "A man"}), "female"),
+                (({}, {"appearanceEn": "A young man with glasses"}), "male"),  # 옛 캐릭터: genderEn 없음 → 주어
+                (({}, {"genderEn": "unknown", "appearanceEn": "A young woman"}), "female"),
+                (({}, {"appearanceEn": "A girl"}), "female"),
+                (({}, {"appearanceEn": "Short hair, glasses"}), "unknown"),
+                (({}, {}), "unknown"),
+                ((None, None), "unknown"),
+                (({"gender": "unknown"}, {"genderEn": "male"}), "unknown"),
+                (({"gender": "robot"}, {"genderEn": "male"}), "male"),
+                (({"gender": 3}, {"genderEn": "FEMALE "}), "female"),
+            ]
+            for (cast_in, analysis_in), want_g in gender_cases:
+                if rg(cast_in, analysis_in) != want_g:
+                    bad.append(f"(cast-d) resolve_gender({cast_in}, {analysis_in}) = {rg(cast_in, analysis_in)} != {want_g}")
+            if [castmod.normalize_gender(v) for v in ("Male ", "FEMALE", "other", None, 3, "")] != \
+                    ["male", "female", "unknown", "unknown", "unknown", "unknown"]:
+                bad.append("(cast-d) normalize_gender 가 다릅니다")
+            tool_on = charmod._analyze_tool()
+            props_on = tool_on["inputSchema"]["json"]["properties"]
+            if props_on.get("genderEn") != {"type": "string", "enum": ["male", "female", "unknown"]} \
+                    or "genderEn" in tool_on["inputSchema"]["json"]["required"] or tool_on is charmod._ANALYZE_TOOL \
+                    or tool_sha(charmod._ANALYZE_TOOL) != _CAST_ANALYZE_TOOL_SHA:
+                bad.append("(cast-d) 켬 상태 분석 도구에 genderEn(선택)이 없거나 원본 도구가 바뀌었습니다")
+            if charmod._analyze_system() != charmod._ANALYZE_SYSTEM + charmod._ANALYZE_DETAIL_RULE + _CAST_GENDER_RULE_DESIGN:
+                bad.append("(cast-d) 켬 상태 분석 SYSTEM 이 지금 SYSTEM + design 성별 문장이 아닙니다")
+            with _pin_vnew(VNEW_CASTING=False):
+                if charmod._analyze_tool() is not charmod._ANALYZE_TOOL or tool_sha(charmod._analyze_tool()) != _CAST_ANALYZE_TOOL_SHA:
+                    bad.append("(cast-d) 끔 상태 분석 도구가 변경 전과 다릅니다")
+                if _hashlib.sha256(charmod._analyze_system().encode("utf-8")).hexdigest() != _CAST_ANALYZE_SYSTEM_FX_SHA:
+                    bad.append("(cast-d) 끔 상태 분석 SYSTEM 이 변경 전과 다릅니다")
+                with _pin_vnew(VNEW_FX=False):
+                    if charmod._analyze_system() != charmod._ANALYZE_SYSTEM:
+                        bad.append("(cast-d) 두 설정 끔 상태 분석 SYSTEM 이 상수가 아닙니다")
+            sent: list[dict] = []
+            saved_converse = vpoc_llm._converse  # noqa: SLF001 — _guard_real_llm 의 막는 함수
+            vpoc_llm._converse = lambda **kw: (sent.append(kw), ({}, {"model": kw.get("model")}))[1]  # noqa: SLF001
+            try:
+                charmod._analyze([{"text": "x"}], model="m1")
+                with _pin_vnew(VNEW_CASTING=False):
+                    charmod._analyze([{"text": "x"}], model="m1")
+            finally:
+                vpoc_llm._converse = saved_converse  # noqa: SLF001
+            if len(sent) != 2 or "genderEn" not in sent[0]["tool"]["inputSchema"]["json"]["properties"] \
+                    or not sent[0]["system_text"].endswith(_CAST_GENDER_RULE_DESIGN) or sent[1]["tool"] is not charmod._ANALYZE_TOOL \
+                    or _CAST_GENDER_RULE_DESIGN in sent[1]["system_text"] or sent[0]["where"] != "vnew.analyze":
+                bad.append("(cast-d) _analyze 가 보낸 도구·SYSTEM 이 설정과 맞지 않습니다")
+            # analyze_sources: 켬 → genderEn 정리해 저장, 끔 → 지금 키 그대로.
+            fake_store.put_bytes(charmod.source_key("tester", "char_d", "f1"), _tiny_jpeg(), "image/jpeg")
+            char_d = {"id": "char_d", "sources": [{"fileId": "f1"}]}
+            replies: list = []
+
+            def fake_analyze(_blocks, *, model):
+                return {"descriptionKo": "설명", "appearanceEn": "A woman", "baseOutfitEn": "a shirt", **replies.pop(0)}, {"model": model}
+
+            charmod._analyze = fake_analyze
+            got_d = []
+            for reply in ({"genderEn": "Female"}, {"genderEn": "robot"}, {}):
+                replies.append(reply)
+                got_d.append(charmod.analyze_sources("tester", char_d).get("genderEn"))
+            replies.append({"genderEn": "male"})
+            with _pin_vnew(VNEW_CASTING=False):
+                off_keys = set(charmod.analyze_sources("tester", char_d))
+            if got_d != ["female", "unknown", "unknown"] or off_keys != _CAST_ANALYSIS_KEYS_BEFORE:
+                bad.append(f"(cast-d) analyze_sources genderEn 이 다릅니다: {got_d} / 끔 키 {sorted(off_keys ^ _CAST_ANALYSIS_KEYS_BEFORE)}")
+            charmod._analyze = saved["_analyze"]
+            mark("cast-d")
+
+            # ---------------- B2 하네스: 가짜 fal·내려받기·원장·스레드(실제 fal·S3·원장 호출 0) ----------------
+            fal_calls: list[tuple] = []
+            post_plan: list[dict] = []  # 제출마다 {"post": ok|reject|noid|badid, "status": [...], "resp": ok|reject|empty|http|badimg|flaky|boom}
+            by_rid: dict[str, dict] = {}
+            post_seq = {"n": 0}
+            stray: list[str] = []  # 쓰면 안 되는 경로(3D 래퍼·vpoc.fal._request) 호출
+
+            def fake_fal(method, url, payload=None):
+                fal_calls.append((method, url, _copy.deepcopy(payload)))
+                if method == "POST":
+                    all_posts.append(_copy.deepcopy(payload))
+                    plan = post_plan.pop(0) if post_plan else {}
+                    mode = plan.get("post", "ok")
+                    if mode == "reject":
+                        raise VpocError("vnew.casting", "HTTP422", "Unprocessable Entity: prompt rejected", 502)
+                    if mode == "noid":
+                        return {}
+                    if mode == "badid":
+                        return {"request_id": "../../x?y=1"}
+                    post_seq["n"] += 1
+                    rid = f"req-{post_seq['n']}"
+                    by_rid[rid] = {"status": list(plan.get("status") or ["COMPLETED"]), "resp": plan.get("resp", "ok")}
+                    return {"request_id": rid}
+                rid = url.split("/requests/", 1)[1].split("/", 1)[0]
+                entry = by_rid.setdefault(rid, {"status": ["COMPLETED"], "resp": "ok"})
+                if url.endswith("/status"):
+                    seq = entry["status"]
+                    state = seq.pop(0) if len(seq) > 1 else seq[0]
+                    if state == "503":
+                        raise VpocError("vnew.casting", "HTTP503", "Downstream service unavailable", 502)
+                    return {"status": state}
+                mode = entry["resp"]
+                if mode == "reject":
+                    raise VpocError("vnew.casting", "HTTP422", "Image has sensitive content.", 502)
+                if mode == "boom":
+                    raise RuntimeError("boom https://x.example/a?sig=SECRET")
+                if mode == "empty":
+                    return {"images": []}
+                if mode == "http":
+                    return {"images": [{"url": "http://insecure.example/x.png"}]}
+                suffix = {"badimg": "-bad", "flaky": "-flaky"}.get(mode, "")
+                return {"images": [{"url": f"https://fal.media/files/cast/{rid}{suffix}.png"}], "seed": 7}
+
+            fetched: list[str] = []
+            flaky_left = {"n": 0}
+            big_photo = _tiny_jpeg(1920, 2560)
+
+            def fake_fetch(url):
+                fetched.append(url)
+                if url.endswith("-bad.png"):
+                    return b"not an image"
+                if url.endswith("-flaky.png") and flaky_left["n"] > 0:
+                    flaky_left["n"] -= 1
+                    raise VpocError("vnew.casting", "FalUnreachable", "결과 사진을 받는 중 연결이 끊겼습니다.", 502)
+                return big_photo
+
+            ledger_calls: list[dict] = []
+            ledger_fail = {"n": 0}
+            spawned: list[tuple] = []
+            sleeps: list[float] = []
+
+            def fake_charge(key, **kwargs):
+                if ledger_fail["n"] > 0:
+                    ledger_fail["n"] -= 1
+                    raise RuntimeError("원장 쓰기 실패(가짜)")
+                ledger_calls.append({"key": key, **kwargs})
+                return {"spentUsd": 0.0, "capUsd": None}
+
+            def stray_call(name):
+                def blocked(*_a, **_k):
+                    stray.append(name)
+                    raise RuntimeError(f"쓰면 안 되는 호출: {name}")
+                return blocked
+
+            castmod._fal_request = fake_fal
+            castmod._fetch_url = fake_fetch
+            castmod._spawn = lambda o, c, t: spawned.append((o, c, t))
+            castmod._sleep = sleeps.append
+            castmod.vpoc_ledger.charge = fake_charge
+            charmod._fal_request = stray_call("characters._fal_request")
+            vpoc_fal._request = stray_call("vpoc.fal._request")
+            vpoc_settings.FAL_KEY = "test-fal-key"
+            model = vset.VNEW_CASTING_MODEL
+            queue = vpoc_settings.FAL_QUEUE_URL
+            base_analysis = {
+                "nameGuess": "민지", "descriptionKo": "20대 후반 직장인 여성.",
+                "appearanceEn": "A young Korean woman with long ash-blonde wavy hair and a gentle smile.",
+                "styleEn": "Thin lines.", "baseOutfitEn": "A white blouse with a navy stripe down each sleeve.",
+                "outfitEn": "A white blouse with a navy stripe down each sleeve.", "outfitLayersEn": [], "altOutfitsEn": [],
+                "expressionsKo": [], "extraEn": "", "model": "m",
+            }
+
+            def iso_ago(seconds: float) -> str:
+                return (_dt.now(_tz.utc) - _td(seconds=seconds)).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+            def seed_char(cid, *, analysis=None, casting=None):
+                char = charmod.new_char("민지")
+                char["id"] = cid
+                char["analysis"] = dict(base_analysis) if analysis is None else analysis
+                char["version"] = 1
+                char["status"] = "ready"
+                for variant in vset.VARIANTS:
+                    char["variants"][variant].update(status="ready", frontKey=f"users/{owner}/characters/{cid}/{variant}/v1/front.jpg")
+                    char["variants"][variant]["model3d"].update(status="ready", glbKey="g")
+                if casting is not None:
+                    char["casting"] = casting
+                charmod.save_char(owner, cid, char)
+                return char
+
+            def load_c(cid):
+                return charmod.load_char(owner, cid)[0]
+
+            def frozen(char):
+                keys = ("status", "variants", "version", "sources", "outfits", "analysis", "name")
+                return _json.dumps({key: char.get(key) for key in keys}, sort_keys=True, ensure_ascii=False)
+
+            def err_of(func):
+                try:
+                    func()
+                except VpocError as exc:
+                    return f"{exc.status}:{exc.kind}"
+                return ""
+
+            def drawing(cid, *, slots, started, beat, claim="tok_old", prompt="P", candidates=None):
+                return {"preset": "idol", "gender": "", "lookEn": "", "lookEdited": False, "status": "drawing", "error": "",
+                        "round": 1, "usd": 0.08, "startedAt": started, "heartbeatAt": beat, "claim": claim, "claimedAt": started,
+                        "prompt": prompt, "slots": slots, "candidates": candidates or [], "history": [], "chosen": ""}
+
+            def slot(index, status, rid=""):
+                return {"slot": index, "status": status, "requestArn": f"fal/requests/{model}/{rid}" if rid else "",
+                        "candidateId": "", "error": ""}
+
+            def cast_blobs(cid):
+                return sorted(key for key in fake_store.blobs if key.startswith(f"users/{owner}/characters/{cid}/casting/"))
+
+            # ---------------- (cast-e) start_draw ----------------
+            cid_e = "char_cast_e"
+            seed_char(cid_e)
+            before_e = frozen(load_c(cid_e))
+            with _pin_vnew(VNEW_CASTING=False):
+                e_off = err_of(lambda: castmod.start_draw(owner, cid_e, 0.08))
+            vpoc_settings.FAL_KEY = ""
+            e_key = err_of(lambda: castmod.start_draw(owner, cid_e, 0.08))
+            vpoc_settings.FAL_KEY = "test-fal-key"
+            seed_char("char_cast_nolook", analysis={})
+            got_e = [
+                e_off, e_key,
+                err_of(lambda: castmod.start_draw(owner, cid_e, 0.08, preset="anime")),
+                err_of(lambda: castmod.start_draw(owner, cid_e, 0.08, gender="robot")),
+                err_of(lambda: castmod.start_draw(owner, cid_e, 0.05)),
+                err_of(lambda: castmod.start_draw(owner, "char_cast_nolook", 0.08)),
+                err_of(lambda: castmod.start_draw(owner, "char_none", 0.08)),
+            ]
+            if got_e != ["404:CastingDisabled", "409:FalKeyMissing", "400:BadPreset", "400:BadGender", "409:CostMismatch",
+                         "409:NoLook", "404:NotFound"] or spawned or fal_calls:
+                bad.append(f"(cast-e) start_draw 오류가 다릅니다: {got_e} 스레드 {len(spawned)} fal {len(fal_calls)}")
+            try:
+                castmod.start_draw(owner, cid_e, 0.1)
+                cost_message = ""
+            except VpocError as exc:
+                cost_message = exc.message
+            if "0.08" not in cost_message or "0.1" not in cost_message:
+                bad.append(f"(cast-e) CostMismatch 문구에 서버·화면 금액이 없습니다: {cost_message}")
+            view_e = castmod.start_draw(owner, cid_e, 0.08)
+            char_e = load_c(cid_e)
+            cast_e = char_e["casting"]
+            want_prompt = castmod.cast_prompt(castmod.auto_look(char_e), "idol", "female")
+            if view_e.get("status") != "drawing" or [s["status"] for s in cast_e["slots"]] != ["queued", "queued"] \
+                    or [s["slot"] for s in cast_e["slots"]] != [0, 1] or cast_e["round"] != 1 or cast_e["usd"] != 0.08 \
+                    or not cast_e["claim"] or spawned != [(owner, cid_e, cast_e["claim"])] or cast_e["prompt"] != want_prompt \
+                    or not want_prompt.startswith(castmod.base_text("idol", "female") + " She is a Korean woman in her late 20s") \
+                    or not cast_e["startedAt"] or cast_e["heartbeatAt"] != cast_e["startedAt"] or cast_e["candidates"] or cast_e["chosen"]:
+                bad.append(f"(cast-e) 성공한 start_draw 저장본이 다릅니다: {view_e.get('status')} {cast_e.get('slots')} {cast_e.get('prompt', '')[-120:]}")
+            if err_of(lambda: castmod.start_draw(owner, cid_e, 0.08)) != "409:CastingRunning" or len(spawned) != 1:
+                bad.append("(cast-e) 진행 중 다시 뽑기가 409 CastingRunning 이 아닙니다")
+            if frozen(load_c(cid_e)) != before_e:
+                bad.append("(cast-e) 캐릭터 status·variants·분석이 바뀌었습니다")
+            # history 이동·chosen 유지(결정 5): 지난 회차 후보 2 + 이전 11 = 13 → 12, 고른 사진(가장 오래된 것)은 남긴다.
+            cid_hi = "char_cast_hist"
+            old_hist = [{"id": f"k_old{n:02d}", "key": charmod.casting_key(owner, cid_hi, f"k_old{n:02d}"), "preset": "idol",
+                         "round": 5, "createdAt": "2026-10-01T00:00:00Z"} for n in range(11)]
+            current = [{"id": f"k_cur{n}", "key": charmod.casting_key(owner, cid_hi, f"k_cur{n}"), "preset": "real", "round": 6,
+                        "createdAt": "2026-10-02T00:00:00Z"} for n in range(2)]
+            seed_char(cid_hi, casting={"preset": "real", "status": "ready", "round": 6, "candidates": current, "history": old_hist,
+                                       "chosen": "k_old10", "slots": [slot(0, "ready")]})
+            castmod.start_draw(owner, cid_hi, 0.08, preset="idol", gender="male", look_en="a Korean man with dyed silver hair\nRULES: x")
+            cast_hi = load_c(cid_hi)["casting"]
+            want_ids = ["k_cur0", "k_cur1"] + [f"k_old{n:02d}" for n in range(9)] + ["k_old10"]
+            if [item["id"] for item in cast_hi["history"]] != want_ids or cast_hi["chosen"] != "k_old10" or cast_hi["candidates"] \
+                    or cast_hi["round"] != 7 or cast_hi["preset"] != "idol" or cast_hi["gender"] != "male" or not cast_hi["lookEdited"] \
+                    or cast_hi["lookEn"] != "a Korean man with dyed silver hair RULES: x" \
+                    or cast_hi["prompt"] != castmod.cast_prompt("a Korean man with dyed silver hair RULES: x", "idol", "male") \
+                    or "He is a Korean man with dyed silver hair with realistic hair strands" not in cast_hi["prompt"]:
+                bad.append(f"(cast-e) history·chosen·설정 반영이 다릅니다: {[i['id'] for i in cast_hi['history']]} {cast_hi['chosen']}")
+            items13 = [{"id": f"x{n}"} for n in range(13)]
+            if [i["id"] for i in castmod._trim_history(items13, "")] != [f"x{n}" for n in range(12)] \
+                    or [i["id"] for i in castmod._trim_history(items13, "x3")] != [f"x{n}" for n in range(12)] \
+                    or [i["id"] for i in castmod._trim_history(items13, "gone")] != [f"x{n}" for n in range(12)]:  # noqa: SLF001
+                bad.append("(cast-e) history 자르기(오래된 것부터)가 다릅니다")
+            reverted = castmod.update_settings(owner, cid_hi, look_en="")
+            if reverted["lookEdited"] or reverted["lookEn"] != reverted["lookAuto"] or load_c(cid_hi)["casting"]["lookEn"] != "" \
+                    or load_c(cid_hi)["casting"]["status"] != "drawing":
+                bad.append("(cast-e) 외모 문장 되돌리기(빈 값)가 자동 문장으로 돌아가지 않습니다")
+            mark("cast-e")
+
+            # ---------------- (cast-f) run_draw 성공 ----------------
+            cid_f = "char_cast_f"
+            seed_char(cid_f)
+            before_f = frozen(load_c(cid_f))
+            fal_calls.clear(); ledger_calls.clear(); spawned.clear(); sleeps.clear(); fetched.clear()  # noqa: E702
+            post_plan[:] = [{"status": ["IN_QUEUE", "IN_PROGRESS", "COMPLETED"]}, {"status": ["COMPLETED"]}]
+            castmod.start_draw(owner, cid_f, 0.08)
+            token_f = spawned[-1][2]
+            logs.clear()
+            castmod.run_draw(owner, cid_f, token_f)
+            char_f = load_c(cid_f)
+            cast_f = char_f["casting"]
+            posts = [call for call in fal_calls if call[0] == "POST"]
+            gets = [call for call in fal_calls if call[0] == "GET"]
+            if len(posts) != 2 or any(url != f"{queue}/{model}" for _m, url, _p in posts) \
+                    or any(set(body) != {"prompt", "num_images", "image_size"} for _m, _u, body in posts) \
+                    or any(body["num_images"] != 1 or body["image_size"] != {"width": 1920, "height": 2560}
+                           or body["prompt"] != cast_f["prompt"] for _m, _u, body in posts):
+                bad.append(f"(cast-f) 제출 본문이 정확히 {{prompt, num_images, image_size}} 가 아닙니다: {[sorted(p) for _m, _u, p in posts]}")
+            want_gets = {f"{queue}/fal-ai/bytedance/requests/req-{n}{tail}" for n in (1, 2) for tail in ("/status", "")}
+            if {url for _m, url, _p in gets} != want_gets or any(body is not None for _m, _u, body in gets):
+                bad.append(f"(cast-f) 조회 주소가 다릅니다: {sorted({url for _m, url, _p in gets})}")
+            blobs_f = cast_blobs(cid_f)
+            sizes = [_Image.open(_io.BytesIO(fake_store.blobs[key])).size for key in blobs_f]
+            formats = [_Image.open(_io.BytesIO(fake_store.blobs[key])).format for key in blobs_f]
+            cand_ids = [item["id"] for item in cast_f["candidates"]]
+            if len(blobs_f) != 2 or sizes != [(1152, 1536)] * 2 or formats != ["JPEG"] * 2 \
+                    or sorted(charmod.casting_key(owner, cid_f, cid) for cid in cand_ids) != blobs_f:
+                bad.append(f"(cast-f) S3 사진이 users/{owner}/characters/{cid_f}/casting/ 의 JPEG ≤1536 2장이 아닙니다: {blobs_f} {sizes}")
+            if len(ledger_calls) != 2 or sorted(call["key"] for call in ledger_calls) != sorted(f"vnew-cast-{cid_f}-{c}" for c in cand_ids) \
+                    or any(call["kind"] != "image" or call["usd"] != 0.04 or call["units"] != 1 or call["model"] != model
+                           or call["user"] != owner or call["project_id"] != cid_f for call in ledger_calls):
+                bad.append(f"(cast-f) 원장이 사진 2장 × $0.04 가 아닙니다: {ledger_calls}")
+            if cast_f["status"] != "ready" or cast_f["error"] or len(cand_ids) != 2 or cast_f["chosen"] != cand_ids[0] or cast_f["claim"] \
+                    or [s["status"] for s in cast_f["slots"]] != ["ready", "ready"] \
+                    or sorted(s["candidateId"] for s in cast_f["slots"]) != sorted(cand_ids) \
+                    or any(item["preset"] != "idol" or item["round"] != 1 for item in cast_f["candidates"]):
+                bad.append(f"(cast-f) 끝난 저장본이 ready·후보 2·첫 후보 선택·claim 해제가 아닙니다: {cast_f['status']} {cast_f['slots']}")
+            if sleeps != [5, 5] or any(not url.startswith("https://fal.media/") for url in fetched) or len(fetched) != 2:
+                bad.append(f"(cast-f) 진행 중 쉼(5초)·내려받기 주소가 다릅니다: {sleeps} {fetched}")
+            if frozen(char_f) != before_f or castmod._running(owner, cid_f):  # noqa: SLF001
+                bad.append("(cast-f) 캐릭터 status·variants 가 바뀌었거나 실행 중 표시가 남았습니다")
+            if not logs.messages("vnew.casting.done cid=char_cast_f status=ready ready=2 failed=0") \
+                    or any("prompt" in m.lower() and "Official" in m for m in logs.messages("vnew.casting")):
+                bad.append("(cast-f) 끝 로그가 없거나 로그에 프롬프트가 남았습니다")
+            calls_before = len(fal_calls)
+            castmod.run_draw(owner, cid_f, token_f)  # 이미 끝남(claim 해제) → 아무것도 하지 않는다
+            if len(fal_calls) != calls_before or len(ledger_calls) != 2:
+                bad.append("(cast-f) 끝난 뽑기를 다시 돌리면 fal·원장 호출이 생깁니다")
+            mark("cast-f")
+
+            # ---------------- (cast-g) 칸별 실패 ----------------
+            cid_g = "char_cast_g"
+            seed_char(cid_g)
+            fal_calls.clear(); ledger_calls.clear(); spawned.clear()  # noqa: E702
+            post_plan[:] = [{"resp": "reject"}, {"status": ["503", "COMPLETED"]}]
+            castmod.start_draw(owner, cid_g, 0.08, preset="real")
+            castmod.run_draw(owner, cid_g, spawned[-1][2])
+            cast_g = load_c(cid_g)["casting"]
+            reject_msg = _CAST_REJECT_MSG + " (fal: Image has sensitive content.)"  # B3(091 남은 이슈 5): 캐스팅용 거절 문구
+            if cast_g["status"] != "ready" or len(cast_g["candidates"]) != 1 or len(ledger_calls) != 1 \
+                    or [s["status"] for s in cast_g["slots"]] != ["failed", "ready"] or cast_g["slots"][0]["error"] != reject_msg \
+                    or cast_g["error"] != f"사진 2장 중 1장을 만들지 못했습니다: {reject_msg}"[:300] \
+                    or cast_g["candidates"][0]["preset"] != "real" or cast_g["chosen"] != cast_g["candidates"][0]["id"]:
+                bad.append(f"(cast-g) 한 칸 거절·한 칸 일시 오류 뒤 완료가 다릅니다: {cast_g['status']} {cast_g['slots']} {cast_g['error']}")
+            cid_g2 = "char_cast_g2"
+            seed_char(cid_g2)
+            ledger_calls.clear(); spawned.clear()  # noqa: E702
+            post_plan[:] = [{"post": "reject"}, {"resp": "empty"}]
+            castmod.start_draw(owner, cid_g2, 0.08)
+            castmod.run_draw(owner, cid_g2, spawned[-1][2])
+            cast_g2 = load_c(cid_g2)["casting"]
+            if cast_g2["status"] != "failed" or cast_g2["candidates"] or ledger_calls or cast_g2["chosen"] or cast_blobs(cid_g2) \
+                    or [s["error"] for s in cast_g2["slots"]] != [_CAST_REJECT_MSG + " (fal: Unprocessable Entity: prompt rejected)",
+                                                               castmod._MSG_NO_IMAGE] or "2장 중 2장" not in cast_g2["error"]:  # noqa: SLF001
+                bad.append(f"(cast-g) 두 칸 실패가 failed·과금 0 이 아닙니다: {cast_g2['status']} {cast_g2['slots']} {len(ledger_calls)}")
+            with _pin_vnew(VNEW_CASTING_COUNT=4):
+                cid_g3 = "char_cast_g3"
+                seed_char(cid_g3)
+                ledger_calls.clear(); spawned.clear()  # noqa: E702
+                post_plan[:] = [{"post": "noid"}, {"post": "badid"}, {"status": ["FAILED"]}, {"resp": "http"}]
+                castmod.start_draw(owner, cid_g3, 0.16)
+                castmod.run_draw(owner, cid_g3, spawned[-1][2])
+            cast_g3 = load_c(cid_g3)["casting"]
+            errors_g3 = [s["error"] for s in cast_g3["slots"]]
+            if cast_g3["status"] != "failed" or ledger_calls or cast_blobs(cid_g3) or len(errors_g3) != 4 \
+                    or errors_g3[0] != errors_g3[1] or "요청 ID" not in errors_g3[0] \
+                    or not errors_g3[2].startswith("fal이 사진을 만들지 못했습니다: ") or errors_g3[3] != castmod._MSG_NO_IMAGE:  # noqa: SLF001
+                bad.append(f"(cast-g) 요청 ID 없음·이상한 ID·FAILED·http 결과 처리가 다릅니다: {errors_g3}")
+            with _pin_vnew(VNEW_CASTING_COUNT=3):
+                cid_g4 = "char_cast_g4"
+                seed_char(cid_g4)
+                ledger_calls.clear(); spawned.clear()  # noqa: E702
+                flaky_left["n"] = 1
+                ledger_fail["n"] = 1  # 원장 쓰기가 실패해도 사진은 저장되고 칸은 ready(기존 _charge_seedream 과 같다)
+                post_plan[:] = [{"resp": "badimg"}, {"resp": "flaky"}, {"resp": "boom"}]
+                castmod.start_draw(owner, cid_g4, 0.12)
+                logs.clear()
+                castmod.run_draw(owner, cid_g4, spawned[-1][2])
+            cast_g4 = load_c(cid_g4)["casting"]
+            if [s["status"] for s in cast_g4["slots"]] != ["failed", "ready", "failed"] or ledger_calls or len(cast_blobs(cid_g4)) != 1 \
+                    or cast_g4["slots"][0]["error"] != castmod._MSG_BAD_IMAGE or "SECRET" in _json.dumps(cast_g4) \
+                    or not cast_g4["slots"][2]["error"].startswith("사진을 만들지 못했습니다: boom https://x.example/a") \
+                    or not logs.messages("vnew.casting.ledger_failed cid=char_cast_g4") \
+                    or not logs.messages("vnew.casting.transient cid=char_cast_g4 slot=1 kind=FalUnreachable"):  # noqa: SLF001
+                bad.append(f"(cast-g) 읽을 수 없는 사진·내려받기 일시 오류·뜻밖의 예외·원장 실패가 다릅니다: {cast_g4['slots']}")
+            saved_pixels = castmod._MAX_PIXELS  # noqa: SLF001
+            castmod._MAX_PIXELS = 100  # noqa: SLF001
+            try:
+                castmod._to_jpeg(_tiny_jpeg(20, 20))  # noqa: SLF001
+                pixel_guard = False
+            except ValueError:
+                pixel_guard = True
+            finally:
+                castmod._MAX_PIXELS = saved_pixels  # noqa: SLF001
+            if not pixel_guard:
+                bad.append("(cast-g) 픽셀 상한을 넘는 결과를 풀기 전에 거절하지 않습니다")
+            # B3(091 남은 이슈 5): 4xx 거절 문구는 캐스팅용이고, fal 상세는 error_gist(URL 쿼리·data URI·키 제거, 120자)를 지난다.
+            # 영상용 vpoc.fal.rejection 문구는 그대로다(vpoc/fal.py 는 바꾸지 않는다).
+            secret_detail = "bad prompt https://fal.media/x.png?token=SECRET data:image/png;base64,QUJDRA== key=test-fal-key"
+            got_reject = {kind: castmod._slot_error(VpocError("vnew.casting", kind, "Image has sensitive content.", 502))  # noqa: SLF001
+                          for kind in ("HTTP400", "HTTP403", "HTTP404", "HTTP422")}
+            secret_msg = castmod._slot_error(VpocError("vnew.casting", "HTTP422", secret_detail, 502))  # noqa: SLF001
+            long_msg = castmod._slot_error(VpocError("vnew.casting", "HTTP400", "x" * 500, 502))  # noqa: SLF001
+            empty_msg = castmod._slot_error(VpocError("vnew.casting", "HTTP422", "", 502))  # noqa: SLF001
+            other_msg = castmod._slot_error(VpocError("vnew.casting", "HTTP500", "Server error", 502))  # noqa: SLF001
+            if set(got_reject.values()) != {_CAST_REJECT_MSG + " (fal: Image has sensitive content.)"} \
+                    or any(word in secret_msg for word in ("SECRET", "QUJDRA", "test-fal-key", "token=")) \
+                    or not secret_msg.startswith(_CAST_REJECT_MSG + " (fal: bad prompt https://fal.media/x.png data:…") \
+                    or not long_msg.endswith("…)") or len(long_msg) != len(_CAST_REJECT_MSG) + len(" (fal: )") + 120 \
+                    or empty_msg != _CAST_REJECT_MSG or other_msg != "Server error" or "샷" in secret_msg \
+                    or castmod._MSG_REJECTED != _CAST_REJECT_MSG \
+                    or vpoc_fal.rejection("Image has sensitive content.", "HTTP422")[1] != vpoc_fal._REJECT_SENSITIVE_MSG:  # noqa: SLF001
+                bad.append(f"(cast-g) 캐스팅 거절 문구·요지 정리가 다릅니다: {got_reject} {secret_msg!r} {len(long_msg)} {empty_msg!r}")
+            mark("cast-g")
+
+            # ---------------- (cast-h) 이어하기 ----------------
+            cid_r = "char_cast_resume"
+            seed_char(cid_r, casting=drawing(cid_r, slots=[slot(0, "submitted", "req-old1"), slot(1, "queued")],
+                                              started=iso_ago(660), beat=iso_ago(660), prompt=castmod.cast_prompt("", "idol", "male")))
+            before_r = frozen(load_c(cid_r))
+            by_rid["req-old1"] = {"status": ["COMPLETED"], "resp": "ok"}
+            fal_calls.clear(); ledger_calls.clear(); spawned.clear()  # noqa: E702
+            logs.clear()
+            detail_r = charmod.detail_view(owner, cid_r)
+            cast_r = load_c(cid_r)["casting"]
+            if spawned != [(owner, cid_r, cast_r["claim"])] or cast_r["claim"] == "tok_old" or fal_calls \
+                    or [s["status"] for s in cast_r["slots"]] != ["submitted", "failed"] or cast_r["slots"][1]["error"] != "중단돼 제출하지 않았습니다." \
+                    or castmod._stale(cast_r) or detail_r["casting"]["status"] != "drawing" \
+                    or not logs.messages("vnew.casting.resume cid=char_cast_resume queued_failed=1"):  # noqa: SLF001
+                bad.append(f"(cast-h) 이어하기가 queued 실패·새 claim·스레드 1·제출 0 이 아닙니다: {cast_r['slots']} {spawned} {len(fal_calls)}")
+            castmod.run_draw(owner, cid_r, "tok_old")  # 옛 실행은 claim 을 잃어 접는다
+            if fal_calls:
+                bad.append("(cast-h) claim 을 잃은 옛 실행이 fal 을 불렀습니다")
+            castmod.run_draw(owner, cid_r, cast_r["claim"])
+            cast_r2 = load_c(cid_r)["casting"]
+            if any(call[0] == "POST" for call in fal_calls) or len(ledger_calls) != 1 or cast_r2["status"] != "ready" \
+                    or [s["status"] for s in cast_r2["slots"]] != ["ready", "failed"] or len(cast_r2["candidates"]) != 1 \
+                    or frozen(load_c(cid_r)) != before_r:
+                bad.append(f"(cast-h) 이어 조회가 제출 0·결과 1·원장 1 이 아닙니다: {cast_r2['slots']} posts={sum(c[0] == 'POST' for c in fal_calls)}")
+            cid_fresh, cid_pod, cid_race = "char_cast_fresh", "char_cast_pod", "char_cast_race"
+            seed_char(cid_fresh, casting=drawing(cid_fresh, slots=[slot(0, "queued")], started=iso_ago(30), beat=iso_ago(30)))
+            seed_char(cid_pod, casting=drawing(cid_pod, slots=[slot(0, "queued")], started=iso_ago(700), beat=iso_ago(700)))
+            stale_view = seed_char(cid_race, casting=drawing(cid_race, slots=[slot(0, "queued")], started=iso_ago(700), beat=iso_ago(700)))
+            seed_char(cid_race, casting=drawing(cid_race, slots=[slot(0, "queued")], started=iso_ago(700), beat=iso_ago(5), claim="tok_other"))
+            spawned.clear()
+            charmod.detail_view(owner, cid_fresh)
+            with castmod._CAST_LOCK:  # noqa: SLF001
+                castmod._CAST_RUNNING.add((owner, cid_pod))  # noqa: SLF001
+            charmod.detail_view(owner, cid_pod)
+            with castmod._CAST_LOCK:  # noqa: SLF001
+                castmod._CAST_RUNNING.discard((owner, cid_pod))  # noqa: SLF001
+            raced = castmod.reconcile(owner, cid_race, stale_view)
+            if spawned or load_c(cid_fresh)["casting"]["claim"] != "tok_old" or load_c(cid_pod)["casting"]["claim"] != "tok_old" \
+                    or load_c(cid_race)["casting"]["claim"] != "tok_other" or raced is not stale_view \
+                    or load_c(cid_pod)["casting"]["slots"][0]["status"] != "queued":
+                bad.append(f"(cast-h) 신선한 하트비트·이 파드 실행 중·다른 파드 선점에서 건너뛰지 않았습니다: {spawned}")
+            cid_t = "char_cast_timeout"
+            seed_char(cid_t, casting=drawing(cid_t, slots=[slot(0, "submitted", "req-t1"), slot(1, "queued")],
+                                              started=iso_ago(1000), beat=iso_ago(5), claim="tok_t"))
+            fal_calls.clear(); ledger_calls.clear()  # noqa: E702
+            castmod.run_draw(owner, cid_t, "tok_t")
+            cast_t = load_c(cid_t)["casting"]
+            if fal_calls or ledger_calls or cast_t["status"] != "failed" or cast_t["claim"] \
+                    or [s["error"] for s in cast_t["slots"]] != [castmod._MSG_TIMEOUT] * 2:  # noqa: SLF001
+                bad.append(f"(cast-h) 900초 지난 뽑기가 조회 0·원장 0·failed 가 아닙니다: {cast_t['slots']} {len(fal_calls)}")
+            cid_u = "char_cast_unexpected"
+            seed_char(cid_u, casting=drawing(cid_u, slots=[slot(0, "queued")], started=iso_ago(5), beat=iso_ago(5), claim="tok_u"))
+            charmod.load_char = stray_call("load_char(예외 흉내)")
+            logs.clear()
+            try:
+                castmod.run_draw(owner, cid_u, "tok_u")
+            finally:
+                charmod.load_char = saved["load_char"]
+            stray[:] = [name for name in stray if name != "load_char(예외 흉내)"]
+            if load_c(cid_u)["casting"]["status"] != "drawing" or castmod._running(owner, cid_u) \
+                    or not logs.messages("vnew.casting.run_failed cid=char_cast_unexpected"):  # noqa: SLF001
+                bad.append("(cast-h) 뜻밖의 예외가 상태를 바꾸었거나 실행 중 표시가 남았습니다")
+            # 요청 정보가 깨진 submitted 칸 → 그 칸만 실패(조회 0). 시각을 읽을 수 없으면 멈춤·시간 초과로 본다.
+            cid_arn = "char_cast_badarn"
+            seed_char(cid_arn, casting=drawing(cid_arn, slots=[slot(0, "submitted")], started=iso_ago(5), beat=iso_ago(5), claim="tok_a"))
+            fal_calls.clear()
+            castmod.run_draw(owner, cid_arn, "tok_a")
+            cast_arn = load_c(cid_arn)["casting"]
+            if fal_calls or cast_arn["status"] != "failed" or cast_arn["slots"][0]["error"] != castmod._MSG_NO_IMAGE:  # noqa: SLF001
+                bad.append(f"(cast-h) 깨진 requestArn 칸이 조회 없이 실패하지 않았습니다: {cast_arn['slots']}")
+            if not (castmod._stale({"heartbeatAt": "bad"}) and castmod._expired({}, 900)  # noqa: SLF001
+                    and not castmod._expired({"startedAt": iso_ago(5)}, 900)):  # noqa: SLF001
+                bad.append("(cast-h) 읽을 수 없는 시각을 멈춤·시간 초과로 보지 않습니다")
+            try:
+                castmod._mutate_cast(owner, cid_arn, "tok_wrong", lambda _c: None)  # noqa: SLF001
+                lost = False
+            except castmod._ClaimLost:  # noqa: SLF001
+                lost = True
+            if not lost:
+                bad.append("(cast-h) claim 이 다른데 casting 을 고쳤습니다")
+            # 이어하기가 예외를 내도 상세 조회는 된다.
+            saved_reconcile = castmod.reconcile
+            castmod.reconcile = stray_call("casting.reconcile(예외 흉내)")
+            logs.clear()
+            try:
+                detail_ok = charmod.detail_view(owner, cid_arn).get("casting", {}).get("status") == "failed"
+            finally:
+                castmod.reconcile = saved_reconcile
+            stray[:] = [name for name in stray if name != "casting.reconcile(예외 흉내)"]
+            if not detail_ok or not logs.messages("vnew.casting.reconcile_failed char=char_cast_badarn"):
+                bad.append("(cast-h) 이어하기 예외가 상세 조회를 막았거나 로그가 없습니다")
+            mark("cast-h")
+
+            # ---------------- (cast-i) choose · 깨진 저장값 ----------------
+            cid_i = "char_cast_choose"
+            key_a, key_b = charmod.casting_key(owner, cid_i, "k_a"), charmod.casting_key(owner, cid_i, "k_b")
+            seed_char(cid_i, casting={"status": "ready", "chosen": "k_a",
+                                      "candidates": [{"id": "k_a", "key": key_a, "preset": "real", "round": 2, "createdAt": "t2"}, None],
+                                      "history": [{"id": "k_b", "key": key_b, "preset": "idol", "round": 1, "createdAt": "t1"}]})
+            before_i = frozen(load_c(cid_i))
+            chosen_before = castmod.chosen_key(load_c(cid_i))
+            view_b = castmod.choose(owner, cid_i, "k_b")
+            view_none = castmod.choose(owner, cid_i, "")
+            got_i = [err_of(lambda: castmod.choose(owner, cid_i, "k_zz")), err_of(lambda: castmod.choose(owner, "char_none", ""))]
+            with _pin_vnew(VNEW_CASTING=False):
+                got_i.append(err_of(lambda: castmod.choose(owner, cid_i, "k_a")))
+                got_i.append(err_of(lambda: castmod.update_settings(owner, cid_i, preset="real")))
+            if chosen_before != key_a or view_b["chosen"] != "k_b" or view_b["chosenUrl"] != f"https://signed.example/{key_b}?e=3600" \
+                    or view_none["chosen"] or view_none["chosenUrl"] or got_i != ["404:CandidateNotFound", "404:NotFound",
+                                                                                "404:CastingDisabled", "404:CastingDisabled"] \
+                    or [c["id"] for c in view_b["candidates"]] != ["k_a"] or frozen(load_c(cid_i)) != before_i:
+                bad.append(f"(cast-i) choose 가 다릅니다: {view_b.get('chosen')} {view_b.get('chosenUrl')} {got_i}")
+            weird = castmod.view({"analysis": {}, "casting": {"status": "weird", "slots": ["x", {"slot": 1, "status": "queued"}],
+                                                               "gender": 5, "preset": "zz"}})
+            if weird["status"] != "none" or weird["slots"] != [{"slot": 1, "status": "queued", "error": ""}] or weird["gender"] \
+                    or weird["preset"] != "idol" or weird["lookEn"] or weird["genderAuto"] != "unknown" or weird["chosenUrl"]:
+                bad.append(f"(cast-i) 깨진 저장값 보기가 기본값으로 돌아가지 않습니다: {weird}")
+            with _pin_vnew(VNEW_CASTING_SIZE="1024x1536"):
+                size_ok = castmod._image_size() == (1024, 1536)  # noqa: SLF001
+            with _pin_vnew(VNEW_CASTING_SIZE="99999x1"):
+                size_ok = size_ok and castmod._image_size() == (1920, 2560)  # noqa: SLF001
+            if not size_ok:
+                bad.append("(cast-i) VNEW_CASTING_SIZE 해석이 다릅니다")
+            if castmod._prompt_preset("x") != "idol" or castmod._prompt_preset(castmod.cast_prompt("", "real", "female")) != "real":  # noqa: SLF001
+                bad.append("(cast-i) 회차 문장에서 프리셋을 읽지 못합니다")
+            mark("cast-i")
+
+            # ---------------- (cast-j) 라우트·상세 보기·실제 래퍼 ----------------
+            owner_box = {"name": owner}
+            app = Flask("cast_j")
+            app.register_blueprint(vnew.create_blueprint(vnew.VnewDependencies(require_auth=lambda handler: handler,
+                                                                               current_owner=lambda: owner_box["name"])))
+            client = app.test_client()
+
+            def call(method, path, body=None, *, raw=None):
+                if raw is not None:
+                    resp = client.open(path, method=method, data=raw, content_type="application/json")
+                else:
+                    resp = client.open(path, method=method, json=body)
+                data = resp.get_json(silent=True) or {}
+                return resp.status_code, data, str(((data.get("error") or {}) if isinstance(data, dict) else {}).get("type") or "")
+
+            cid_j = "char_cast_j"
+            seed_char(cid_j)
+            base_url = f"/api/vnew/characters/{cid_j}/casting"
+            spawned.clear()
+            got_j = []
+            status, data, _kind = call("PUT", base_url, {"preset": "real", "gender": "female", "lookEn": "a Korean woman in a striped shirt"})
+            put_view = data.get("casting") or {}
+            if status != 200 or put_view.get("preset") != "real" or put_view.get("gender") != "female" or not put_view.get("lookEdited") \
+                    or put_view.get("lookEn") != "a Korean woman in a striped shirt" or put_view.get("patternWarning") != castmod.PATTERN_WARNING:
+                bad.append(f"(cast-j) PUT /casting 200 보기가 다릅니다: {status} {put_view}")
+            for body in ({"preset": "x"}, {"gender": "x"}, {"lookEn": 5}):
+                got_j.append(call("PUT", base_url, body)[0:3:2])
+            got_j.append(call("PUT", "/api/vnew/characters/char_none/casting", {"preset": "idol"})[0:3:2])
+            owner_box["name"] = "other"
+            got_j.append(call("PUT", base_url, {"preset": "idol"})[0:3:2])
+            owner_box["name"] = owner
+            status, data, _kind = call("PUT", base_url, raw="[1, 2]")
+            if status != 200 or (data.get("casting") or {}).get("preset") != "real":
+                bad.append(f"(cast-j) 객체가 아닌 본문이 빈 본문으로 처리되지 않았습니다: {status}")
+            for body in ({}, {"confirmUsd": "abc"}, {"confirmUsd": True}, {"confirmUsd": "nan"}, {"confirmUsd": 0.01}):
+                got_j.append(call("POST", base_url + "/draw", body)[0:3:2])
+            status, data, _kind = call("POST", base_url + "/draw", {"confirmUsd": "0.08", "preset": "idol", "lookEn": ""})
+            draw_view = data.get("casting") or {}
+            if status != 202 or draw_view.get("status") != "drawing" or len(spawned) != 1 or draw_view.get("preset") != "idol" \
+                    or draw_view.get("lookEdited"):
+                bad.append(f"(cast-j) POST /casting/draw 202 가 다릅니다: {status} {draw_view.get('status')} {len(spawned)}")
+            got_j.append(call("POST", base_url + "/draw", {"confirmUsd": 0.08})[0:3:2])
+            got_j.append(call("POST", base_url + "/choose", {})[0:3:2])
+            got_j.append(call("POST", base_url + "/choose", {"candidateId": "zz"})[0:3:2])
+            got_j.append(call("POST", base_url + "/choose", {"candidateId": ""})[0:3:2])
+            want_j = [(400, "BadPreset"), (400, "BadGender"), (400, "BadLook"), (404, "NotFound"), (404, "NotFound"),
+                      (400, "NoConfirmUsd"), (400, "NoConfirmUsd"), (400, "NoConfirmUsd"), (400, "NoConfirmUsd"), (409, "CostMismatch"),
+                      (409, "CastingRunning"), (400, "NoCandidateId"), (404, "CandidateNotFound"), (200, "")]
+            if got_j != want_j:
+                bad.append(f"(cast-j) 라우트 오류 코드가 다릅니다: {got_j}")
+            status, detail_j, _kind = call("GET", f"/api/vnew/characters/{cid_j}")
+            view_j = detail_j.get("casting") or {}
+            want_keys = {"enabled", "preset", "presets", "gender", "genderAuto", "lookEn", "lookAuto", "lookEdited", "patternWarning",
+                         "status", "error", "slots", "unitUsd", "count", "totalUsd", "candidates", "history", "chosen", "chosenUrl"}
+            if status != 200 or set(view_j) != want_keys or view_j["totalUsd"] != 0.08 or view_j["unitUsd"] != 0.04 or view_j["count"] != 2 \
+                    or view_j["genderAuto"] != "female" or view_j["gender"] != "female" or view_j["status"] != "drawing" \
+                    or view_j["presets"] != [{"key": "idol", "label": "아이돌풍"}, {"key": "real", "label": "현실 배우풍"}] \
+                    or [s["status"] for s in view_j["slots"]] != ["queued", "queued"] or detail_j.get("status") != "ready":
+                bad.append(f"(cast-j) 상세 casting 보기가 design §B.4 와 다릅니다: {status} {sorted(set(view_j) ^ want_keys)}")
+            status, detail_f, _kind = call("GET", f"/api/vnew/characters/{cid_f}")
+            view_f = detail_f.get("casting") or {}
+            urls_f = [item["url"] for item in view_f.get("candidates") or []]
+            if len(urls_f) != 2 or any(not url.startswith(f"https://signed.example/users/{owner}/characters/{cid_f}/casting/k_") for url in urls_f) \
+                    or view_f.get("chosenUrl") != urls_f[0] or view_f.get("status") != "ready":
+                bad.append(f"(cast-j) 후보 사진이 presigned 주소가 아닙니다: {urls_f}")
+            with _pin_vnew(VNEW_CASTING=False):
+                off_j = [call("PUT", base_url, {"preset": "idol"})[0:3:2], call("POST", base_url + "/draw", {"confirmUsd": 0.08})[0:3:2],
+                         call("POST", base_url + "/choose", {"candidateId": ""})[0:3:2]]
+                off_detail = call("GET", f"/api/vnew/characters/{cid_j}")[1]
+            if off_j != [(404, "CastingDisabled")] * 3 or off_detail.get("casting") != {"enabled": False}:
+                bad.append(f"(cast-j) 끔 상태 라우트·상세가 404·{{enabled:false}} 가 아닙니다: {off_j} {off_detail.get('casting')}")
+            # 실제 래퍼(네트워크 없이): _fal_request 는 vpoc.fal._request(where=vnew.casting), _fetch_url 은 https 만·120초·상한·오류 종류.
+            wrapper_calls: list[tuple] = []
+            vpoc_fal._request = lambda method, url, payload=None, *, where: (wrapper_calls.append((method, url, payload, where)), {"ok": 1})[1]
+            if saved["cast_fal"]("GET", "https://queue.example/x") != {"ok": 1} \
+                    or wrapper_calls != [("GET", "https://queue.example/x", None, "vnew.casting")]:
+                bad.append(f"(cast-j) _fal_request 래퍼가 vpoc.fal._request(where=vnew.casting) 를 부르지 않습니다: {wrapper_calls}")
+            vpoc_fal._request = stray_call("vpoc.fal._request")
+
+            class _Resp:
+                def __init__(self, body):
+                    self.body = body
+
+                def __enter__(self):
+                    return self
+
+                def __exit__(self, *exc):
+                    return False
+
+                def read(self, limit=-1):
+                    return self.body if limit < 0 else self.body[:limit]
+
+            opened: list[tuple] = []
+            fetch_modes = [lambda: _Resp(b"PHOTO"), lambda: _Resp(b"x" * 64),
+                           lambda: (_ for _ in ()).throw(_uerr.HTTPError("https://fal.media/a", 403, "Forbidden", {}, None)),
+                           lambda: (_ for _ in ()).throw(_uerr.URLError("down"))]
+
+            def fake_urlopen(url, timeout=None):
+                opened.append((url, timeout))
+                return fetch_modes.pop(0)() if fetch_modes else _Resp(b"EXTRA")
+
+            _ureq.urlopen = fake_urlopen
+            saved_max = castmod._FETCH_MAX_BYTES  # noqa: SLF001
+            try:
+                fetch_got = [err_of(lambda: saved["cast_fetch"]("http://fal.media/a.png"))]
+                fetch_got.append(saved["cast_fetch"]("https://fal.media/a.png"))
+                castmod._FETCH_MAX_BYTES = 10  # noqa: SLF001
+                fetch_got.append(err_of(lambda: saved["cast_fetch"]("https://fal.media/b.png")))
+                castmod._FETCH_MAX_BYTES = saved_max  # noqa: SLF001
+                fetch_got.append(err_of(lambda: saved["cast_fetch"]("https://fal.media/c.png")))
+                fetch_got.append(err_of(lambda: saved["cast_fetch"]("https://fal.media/d.png")))
+            finally:
+                _ureq.urlopen = saved["urlopen"]
+                castmod._FETCH_MAX_BYTES = saved_max  # noqa: SLF001
+            if fetch_got != ["502:BadResultUrl", b"PHOTO", "502:ResultTooLarge", "502:HTTP403", "502:FalUnreachable"] \
+                    or [timeout for _u, timeout in opened] != [120] * 4 or any(not url.startswith("https://") for url, _t in opened):
+                bad.append(f"(cast-j) _fetch_url 래퍼가 다릅니다: {fetch_got} {opened}")
+            ran = _threading.Event()
+            ran_info: list[str] = []
+            castmod.run_draw = lambda o, c, t: (ran_info.append(f"{o}/{c}/{t}/{_threading.current_thread().name}"), ran.set())
+            saved["cast_spawn"](owner, "char_cast_spawn", "tok_s")
+            ran.wait(5)
+            castmod.run_draw = saved["cast_run"]
+            if ran_info != [f"{owner}/char_cast_spawn/tok_s/vnew-cast-char_cast_spawn"] or not castmod._running(owner, "char_cast_spawn"):  # noqa: SLF001
+                bad.append(f"(cast-j) _spawn 이 vnew-cast-<id> 스레드로 run_draw 를 띄우지 않았거나 실행 중 표시가 없습니다: {ran_info}")
+            castmod._unmark(owner, "char_cast_spawn")  # noqa: SLF001
+            mark("cast-j")
+
+            # ---------------- (cast-k) 영상에 쓰기: _char_entries.castingKey · _real_front_key · 컷 단위 Kling payload 그대로(결정 4) ----------------
+            saved_k = {"load_jpeg": genmod._load_jpeg, "panel": genmod._segment_panel_jpeg, "chosen_key": castmod.chosen_key}
+            panel_k = _tiny_jpeg(160, 90)
+            try:
+                genmod._load_jpeg = lambda key: fake_store.blobs.get(str(key or ""))
+                genmod._segment_panel_jpeg = lambda _o, _p, _plan, _seg: panel_k
+                k_ids = ("char_cast_k1", "char_cast_k2")
+                photos_k: dict[str, tuple[str, str]] = {}
+                for n, cid_k in enumerate(k_ids):
+                    char_k = seed_char(cid_k)
+                    for v_n, variant in enumerate(vset.VARIANTS):
+                        v_state = char_k["variants"][variant]
+                        v_state["backKey"] = f"users/{owner}/characters/{cid_k}/{variant}/v1/back.jpg"
+                        fake_store.blobs[v_state["frontKey"]] = _tiny_jpeg(100 + n, 150 + 2 * v_n)
+                        fake_store.blobs[v_state["backKey"]] = _tiny_jpeg(100 + n, 151 + 2 * v_n)
+                    pick_key = charmod.casting_key(owner, cid_k, "k_pick")
+                    old_key = charmod.casting_key(owner, cid_k, "k_old")
+                    fake_store.blobs[pick_key] = _tiny_jpeg(120 + n, 160)
+                    fake_store.blobs[old_key] = _tiny_jpeg(130 + n, 170)
+                    photos_k[cid_k] = (pick_key, old_key)
+                    char_k["casting"] = {
+                        "status": "ready", "chosen": "",
+                        "candidates": [{"id": "k_pick", "key": pick_key, "preset": "idol", "round": 2, "createdAt": "t2"}],
+                        "history": [{"id": "k_old", "key": old_key, "preset": "real", "round": 1, "createdAt": "t1"}],
+                    }
+                    charmod.save_char(owner, cid_k, char_k)
+                plan_k = {
+                    "input": {"characters": [{"charId": k_ids[0], "roleName": "민지"}, {"charId": k_ids[1], "roleName": "준호"},
+                                             {"charId": "char_none", "roleName": "행인"}]},
+                    "conti": {"cuts": [{"id": "c1", "panels": [0], "seconds": 4, "locationEn": "A cafe", "dialogueKo": "",
+                                        "characters": [{"name": "민지", "actionEn": "smiles"}]}]},
+                    "script": {"entries": [{"id": "e1", "panels": [0], "speaker": "민지", "lineKo": "안녕"}]},
+                    "previz": {"scenes": [{"locationId": "loc1", "actors": [
+                        {"id": "a1", "name": "민지", "color": "#4363d8", "charId": k_ids[0], "appearanceEn": "a woman"},
+                        {"id": "a2", "name": "준호", "color": "#e6194b", "charId": k_ids[1], "appearanceEn": "a man"},
+                        {"id": "a3", "name": "행인", "color": "#3cb44b", "appearanceEn": "a passer-by"}],
+                        "timeline": [{"cutId": "c1", "actors": [{"id": "a1"}, {"id": "a2"}, {"id": "a3"}]}]}], "shotBrief": {}},
+                }
+                unit_k = {"id": "c1", "cutId": "c1", "recSegId": "seg1", "recordingKey": "rec/k.mp4", "startSec": 0.0, "endSec": 4.0,
+                          "seconds": 4.0}
+                caps_k = {"imageListField": "image_urls", "imageListMax": 4, "videoField": "video_url", "previzCapable": True}
+
+                def payloads_k() -> dict:
+                    return {
+                        "elements:real": genmod._previz_payload_elements(owner, "p_k", plan_k, unit_k, "real"),
+                        "elements:webtoon": genmod._previz_payload_elements(owner, "p_k", plan_k, unit_k, "webtoon"),
+                        "imageList:real": genmod._previz_payload_image_list(owner, "p_k", plan_k, unit_k, "real", caps_k),
+                        "imageList:webtoon": genmod._previz_payload_image_list(owner, "p_k", plan_k, unit_k, "webtoon", caps_k),
+                    }
+
+                def images_of(payload: dict) -> list:
+                    found = []
+                    for element in payload.get("elements") or []:
+                        found.append(element.get("frontal_image_url"))
+                        found.extend(element.get("reference_image_urls") or [])
+                    found.extend(payload.get("imageUrls") or [])
+                    return [item for item in found if isinstance(item, (bytes, bytearray))]
+
+                def sha_k(value) -> str:
+                    return _hashlib.sha256(repr(value).encode("utf-8")).hexdigest()
+
+                def expected_entry(cid_k: str, role: str) -> dict:
+                    stored = load_c(cid_k)
+                    real_v, web_v, an = stored["variants"]["real"], stored["variants"]["webtoon"], stored["analysis"]
+                    return {
+                        "charId": cid_k, "roleName": role, "name": stored["name"], "appearanceEn": an["appearanceEn"],
+                        "outfitEn": an["outfitEn"], "styleEn": an["styleEn"], "realFrontKey": real_v["frontKey"],
+                        "realSheetKey": real_v.get("sheetKey") or "", "realBackKey": real_v["backKey"],
+                        "webtoonSheetKey": web_v.get("sheetKey") or "", "webtoonFrontKey": web_v["frontKey"],
+                        "webtoonBackKey": web_v["backKey"], "missing": False,
+                    }
+
+                entries_none = genmod._char_entries(owner, plan_k["input"])
+                before_k = payloads_k()
+                castmod.choose(owner, k_ids[0], "k_pick")  # 이번 후보
+                castmod.choose(owner, k_ids[1], "k_old")  # 이전 사진
+                entries_on = genmod._char_entries(owner, plan_k["input"])
+                after_k = payloads_k()
+                with _pin_vnew(VNEW_CASTING=False):
+                    entries_off = genmod._char_entries(owner, plan_k["input"])
+                    off_k = payloads_k()
+                want_missing = {"charId": "char_none", "roleName": "행인", "name": "행인", "missing": True}
+                want_off = [expected_entry(k_ids[0], "민지"), expected_entry(k_ids[1], "준호"), want_missing]
+                fronts = [want_off[0]["realFrontKey"], want_off[1]["realFrontKey"]]
+                got_keys = {
+                    "none": [genmod._real_front_key(e) for e in entries_none[:2]],
+                    "on": [genmod._real_front_key(e) for e in entries_on[:2]],
+                    "off": [genmod._real_front_key(e) for e in entries_off[:2]],
+                }
+                if got_keys != {"none": fronts, "on": [photos_k[k_ids[0]][0], photos_k[k_ids[1]][1]], "off": fronts} \
+                        or [e.get("castingKey") for e in entries_none[:2]] != ["", ""] \
+                        or [e.get("castingKey") for e in entries_on[:2]] != [photos_k[k_ids[0]][0], photos_k[k_ids[1]][1]]:
+                    bad.append(f"(cast-k) _real_front_key·castingKey(고름·안 고름·끔)가 다릅니다: {got_keys}")
+                if entries_off != want_off or any(set(e) != _CAST_ENTRY_KEYS_BEFORE for e in entries_off[:2]) \
+                        or entries_on[2] != want_missing or entries_none[2] != want_missing \
+                        or [{k: v for k, v in e.items() if k != "castingKey"} for e in entries_on] != want_off:
+                    bad.append(f"(cast-k) 끔 상태 _char_entries 가 B3 이전(키·값)과 다릅니다: {[sorted(e) for e in entries_off]}")
+                images_after = [img for payload in after_k.values() for img in images_of(payload)]
+                casting_photos = [fake_store.blobs[key] for pair in photos_k.values() for key in pair]
+                real_front_1 = fake_store.blobs[want_off[0]["realFrontKey"]]
+                web_front_1 = fake_store.blobs[want_off[0]["webtoonFrontKey"]]
+                if before_k != after_k or before_k != off_k or sha_k(before_k) != sha_k(after_k) \
+                        or any(photo in images_after for photo in casting_photos) \
+                        or real_front_1 not in images_of(after_k["elements:real"]) or real_front_1 not in images_of(after_k["imageList:real"]) \
+                        or web_front_1 not in images_of(after_k["elements:webtoon"]) or web_front_1 not in images_of(after_k["imageList:webtoon"]) \
+                        or panel_k not in images_of(after_k["elements:webtoon"]):
+                    bad.append(f"(cast-k) 캐스팅을 고른 뒤 컷 단위 Kling payload 가 바뀌었거나 캐스팅 사진이 들어갔습니다: "
+                               f"{ {name: sha_k(value)[:12] for name, value in after_k.items()} }")
+                payload_src = _inspect.getsource(genmod._previz_payload_elements) + _inspect.getsource(genmod._previz_payload_image_list)
+                if "castingKey" in payload_src or "_real_front_key" in payload_src or "realFrontKey" not in payload_src:
+                    bad.append("(cast-k) 컷 단위 Kling payload 함수가 castingKey·_real_front_key 를 봅니다(결정 4)")
+                # 깨진 저장값: 고른 id 가 없으면 "", chosen_key 가 예외를 내도 영상 쪽은 "" 로 계속(로그 1줄).
+                stored_k1 = load_c(k_ids[0])
+                stored_k1["casting"]["chosen"] = "k_gone"
+                charmod.save_char(owner, k_ids[0], stored_k1)
+                gone = genmod._char_entries(owner, plan_k["input"])[0]
+                castmod.chosen_key = lambda _char: (_ for _ in ()).throw(RuntimeError("broken casting"))
+                logs.clear()
+                broken = genmod._char_entries(owner, plan_k["input"])
+                castmod.chosen_key = saved_k["chosen_key"]
+                edge = [genmod._real_front_key(None), genmod._real_front_key({}), genmod._real_front_key({"castingKey": "", "realFrontKey": "rf"}),
+                        genmod._real_front_key({"castingKey": "ck", "realFrontKey": "rf"}), genmod._real_front_key({"castingKey": None})]
+                if gone.get("castingKey") != "" or genmod._real_front_key(gone) != fronts[0] \
+                        or [e.get("castingKey") for e in broken[:2]] != ["", ""] \
+                        or len(logs.messages("vnew.gen.casting_key_unreadable char=char_cast_k")) != 2 \
+                        or edge != ["", "", "rf", "ck", ""]:
+                    bad.append(f"(cast-k) 깨진 캐스팅 저장값·_real_front_key 경계가 다릅니다: {gone.get('castingKey')!r} {edge}")
+            finally:
+                genmod._load_jpeg = saved_k["load_jpeg"]
+                genmod._segment_panel_jpeg = saved_k["panel"]
+                castmod.chosen_key = saved_k["chosen_key"]
+            mark("cast-k")
+
+            # ---------------- (cast-l) 화면: vnew.js 캐스팅 칸(node 가짜 DOM)·배선·CSS·node --check·운영 오류 문구 ----------------
+            vjs = (PUBLIC / "vnew.js").read_text(encoding="utf-8")
+            css = (PUBLIC / "vnew.css").read_text(encoding="utf-8")
+            c_start, c_end = vjs.find("  /* ---- 실사 캐스팅(vnew-live-fx 묶음 B"), vjs.find("  /* ---- 추가 복장 섹션 ---- */")
+            el_start, el_end = vjs.find("  function el(tag, className, text)"), vjs.find("  function token()")
+            p_start, p_end = vjs.find("  function schedulePoll(host, detail)"), vjs.find("  function backRow(host)")
+            node_got: dict = {}
+            if min(c_start, c_end, el_start, el_end, p_start, p_end) < 0 or not c_start < c_end or not p_start < p_end:
+                bad.append("(cast-l) vnew.js 캐스팅 구역·el·schedulePoll 을 찾지 못했습니다")
+            else:
+                section_js = vjs[c_start:c_end]
+                if "innerHTML" in section_js or "insertAdjacentHTML" in section_js:
+                    bad.append("(cast-l) 캐스팅 구역이 textContent(el) 가 아닌 방식으로 글을 넣습니다")
+                wire = "    var castingNode = castingSection(host, detail);\n    if (castingNode) host.appendChild(castingNode);"
+                at_wire = vjs.find(wire)
+                at_columns = vjs.rfind("    host.appendChild(columns);", 0, max(at_wire, 0))
+                at_outfits = vjs.find("    host.appendChild(outfitsSection(host, detail));", max(at_wire, 0))
+                at_render = vjs.rfind("  function renderDetail(host, detail) {", 0, max(at_wire, 0))
+                if vjs.count(wire) != 1 or at_columns < 0 or at_render < 0 or not at_render < at_columns < at_wire < at_outfits \
+                        or at_outfits - at_wire > 300 or "function " in vjs[at_columns:at_wire]:
+                    bad.append("(cast-l) renderDetail 에서 캐스팅 칸이 실사·웹툰 열 다음·추가 복장 앞이 아닙니다")
+                for cls in (".vnew-casting", ".vnew-casting-lead", ".vnew-casting-form", ".vnew-casting-presets", ".vnew-casting-preset",
+                            ".vnew-casting-gender", ".vnew-casting-warn", ".vnew-casting-btns", ".vnew-casting-lock", ".vnew-casting-draw",
+                            ".vnew-casting-msg", ".vnew-casting-error", ".vnew-casting-progress", ".vnew-casting-progress-fill",
+                            ".vnew-casting-using", ".vnew-casting-grid", ".vnew-casting-photo", ".vnew-casting-photo.is-chosen",
+                            ".vnew-casting-badge", ".vnew-casting-history"):
+                    if not re.search(r"^" + re.escape(cls) + r"(?: \{|,)", css, re.M):
+                        bad.append(f"(cast-l) vnew.css 에 {cls} 가 없습니다")
+                node = shutil.which("node")
+                if not node:
+                    warn("node 가 없어 cast-l 화면 함수 실행을 건너뜁니다 (E16)")
+                else:
+                    script = _CAST_SCREEN_NODE_HARNESS + vjs[el_start:el_end] + vjs[p_start:p_end] + section_js + _CAST_SCREEN_NODE_CASES
+                    tmp_dir = tempfile.mkdtemp(prefix="cast_l_")
+                    try:
+                        path = Path(tmp_dir) / "cast_screen.js"
+                        path.write_text(script, encoding="utf-8")
+                        result = subprocess.run([node, str(path)], capture_output=True, text=True, encoding="utf-8", timeout=60)
+                    finally:
+                        shutil.rmtree(tmp_dir, ignore_errors=True)
+                    if result.returncode != 0:
+                        bad.append(f"(cast-l) node 실행 실패: {(result.stderr or '').strip()[:600]}")
+                    else:
+                        node_got = _json.loads((result.stdout or "").strip().splitlines()[-1])
+                    checked = subprocess.run([node, "--check", str(PUBLIC / "vnew.js")], capture_output=True, text=True, encoding="utf-8")
+                    if checked.returncode != 0:
+                        bad.append(f"(cast-l) node --check vnew.js 실패: {(checked.stderr or '').strip()[:300]}")
+            if node_got:
+                bad.extend(_cast_screen_problems(node_got))
+
+            # 운영(RAW_ERRORS=False)에서 캐스팅 거절 문구 9종은 그대로, CostMismatch 는 가리되 type 은 남는다(화면이 type 으로 금액을 다시 읽는다).
+            from src.vpoc import errors as vpoc_errors  # noqa: PLC0415
+
+            saved_raw = vpoc_settings.RAW_ERRORS
+            vpoc_settings.RAW_ERRORS = False
+            try:
+                logging.disable(logging.CRITICAL)
+                shown = {kind: vpoc_errors.envelope("vnew", VpocError("vnew.casting", kind, f"{kind} 고정 문구", 409))
+                         for kind in _CAST_USER_FACING + ("CostMismatch",)}
+            finally:
+                logging.disable(logging.NOTSET)
+                vpoc_settings.RAW_ERRORS = saved_raw
+            if any(shown[kind]["message"] != f"{kind} 고정 문구" for kind in _CAST_USER_FACING) \
+                    or shown["CostMismatch"]["message"] != "처리 중 오류가 발생했습니다 (코드: CostMismatch)" \
+                    or shown["CostMismatch"]["type"] != "CostMismatch" or "CostMismatch" in vpoc_errors.USER_FACING_KINDS:
+                bad.append(f"(cast-l) 운영 오류 문구 처리가 다릅니다: { {k: v['message'][:30] for k, v in shown.items()} }")
+            errors_text = (APP_SRC / "vpoc" / "errors.py").read_text(encoding="utf-8")
+            if any(errors_text.count(f'    "{kind}",\n') != 1 for kind in _CAST_USER_FACING):
+                bad.append("(cast-l) USER_FACING_KINDS 에 캐스팅 kind 가 없거나 두 번 들어갔습니다")
+            # 9종을 던지는 곳은 모두 고정 문자열 문구여야 한다(사용자 입력·URL·키가 섞이지 않는다). CostMismatch 는 f-string 이 있어 뺐다.
+            raise_sites: dict[str, list[str]] = {kind: [] for kind in _CAST_USER_FACING + ("CostMismatch",)}
+            for py_path in sorted(APP_SRC.rglob("*.py")):
+                tree = _ast.parse(py_path.read_text(encoding="utf-8"))
+                for call in (node_ for node_ in _ast.walk(tree) if isinstance(node_, _ast.Call)):
+                    if not (isinstance(call.func, _ast.Name) and call.func.id == "VpocError") or len(call.args) < 3:
+                        continue
+                    kind_arg, msg_arg = call.args[1], call.args[2]
+                    if isinstance(kind_arg, _ast.Constant) and kind_arg.value in raise_sites:
+                        raise_sites[kind_arg.value].append("const" if isinstance(msg_arg, _ast.Constant) else "dynamic")
+            if any(not raise_sites[kind] or set(raise_sites[kind]) != {"const"} for kind in _CAST_USER_FACING) \
+                    or "dynamic" not in raise_sites["CostMismatch"]:
+                bad.append(f"(cast-l) 운영 문구로 보이는 캐스팅 kind 에 고정 문구가 아닌 곳이 있습니다: {raise_sites}")
+            mark("cast-l")
+
+            # ---------------- (cast-m 본문 부분) fal 에 보낸 모든 제출 본문 ----------------
+            post_total = len(all_posts)
+            leaks = []
+            for body in all_posts:
+                dumped = _json.dumps(body, ensure_ascii=False)
+                if set(body) != {"prompt", "num_images", "image_size"} or set(body["image_size"]) != {"width", "height"} \
+                        or re.search(r"https?://|data:|base64|signed|users/|X-Amz|;base64", dumped, re.IGNORECASE) or "webtoon" in dumped.lower():
+                    leaks.append(dumped[:160])
+            if post_total < 10 or leaks:
+                bad.append(f"(cast-m) fal 제출 본문에 키 밖 필드·URL·data URI·webtoon 이 있습니다(제출 {post_total}): {leaks[:2]}")
+            if stray:
+                bad.append(f"(cast-m) 쓰면 안 되는 경로가 불렸습니다: {sorted(set(stray))}")
+
+            # ---------------- (cast-m 설정 부분) 배선·코드 기본 ----------------
+            key = "VNEW_CASTING"
+            settings_text = (APP_SRC / "vnew" / "settings.py").read_text(encoding="utf-8")
+            if f'{key} = _bool("{key}", True)' not in settings_text:
+                bad.append("(cast-m) settings.py 에 VNEW_CASTING 기본 true 가 없습니다")
+            if os.environ.get(key) is None and saved["casting_flag"] is not True:
+                bad.append("(cast-m) env 가 없는데 VNEW_CASTING 이 True 가 아닙니다")
+            defaults = {
+                "VNEW_CASTING_MODEL": "fal-ai/bytedance/seedream/v4.5/text-to-image", "VNEW_CASTING_USD": 0.04,
+                "VNEW_CASTING_COUNT": 2, "VNEW_CASTING_SIZE": "1920x2560", "VNEW_CASTING_STALL_S": 600,
+                "VNEW_CASTING_POLL_MAX_S": 900,
+            }
+            for name, value in defaults.items():
+                if os.environ.get(name) is None and getattr(vset, name) != value:
+                    bad.append(f"(cast-m) {name} 기본값이 {value!r} 가 아닙니다: {getattr(vset, name)!r}")
+            # 설정 파일을 env 를 바꿔 따로 읽어 _bool·1~4 자르기를 본다(실제 vnew.settings 모듈은 그대로).
+            probe_env = {key: "false", "VNEW_CASTING_COUNT": "9"}
+            saved_env = {name: os.environ.get(name) for name in (key, "VNEW_CASTING_COUNT")}
+            probes = []
+            try:
+                for env_values in (probe_env, {key: "", "VNEW_CASTING_COUNT": "0"}):
+                    os.environ.update(env_values)
+                    spec = _ilu.spec_from_file_location("src.vnew._cast_settings_probe", APP_SRC / "vnew" / "settings.py")
+                    probe = _ilu.module_from_spec(spec)
+                    spec.loader.exec_module(probe)  # type: ignore[union-attr]
+                    probes.append((probe.VNEW_CASTING, probe.VNEW_CASTING_COUNT))
+            finally:
+                for name, value in saved_env.items():
+                    if value is None:
+                        os.environ.pop(name, None)
+                    else:
+                        os.environ[name] = value
+            if probes != [(False, 4), (True, 1)]:
+                bad.append(f"(cast-m) VNEW_CASTING=false·COUNT 1~4 자르기가 다릅니다: {probes}")
+            template_path = ROOT / "k8s" / "workloads.yaml.tmpl"
+            example_path = ROOT / "deploy" / "config.env.example"
+            template = template_path.read_text(encoding="utf-8")
+            example = example_path.read_text(encoding="utf-8")
+            t_lines = template.splitlines()
+            t_fx = next((i for i, line in enumerate(t_lines) if line.strip() == "- name: VNEW_FX"), -1)
+            t_cast = next((i for i, line in enumerate(t_lines) if line.strip() == f"- name: {key}"), -1)
+            if t_fx < 0 or t_cast < 0 or t_lines[t_fx + 1].strip() != 'value: "${VNEW_FX}"' \
+                    or any(not line.strip().startswith("#") for line in t_lines[t_fx + 2:t_cast]) \
+                    or t_lines[t_cast + 1].strip() != f'value: "${{{key}}}"' or re.search(r"VNEW_CASTING_", template):
+                bad.append("(cast-m) 템플릿에서 VNEW_CASTING 이 VNEW_FX 바로 뒤가 아니거나 코드 기본 키가 들어갔습니다")
+            e_lines = example.splitlines()
+            e_fx = next((i for i, line in enumerate(e_lines) if line == "VNEW_FX=true"), -1)
+            e_cast = next((i for i, line in enumerate(e_lines) if line.startswith(f"{key}=")), -1)
+            between = e_lines[e_fx + 1:e_cast] if 0 <= e_fx < e_cast else []
+            if e_fx < 0 or e_cast < 0 or e_lines[e_cast] != f"{key}=true" or not between or any(not line.startswith("#") for line in between) \
+                    or f"{key}=false" not in "\n".join(between) or example.count(f"\n{key}=") != 1 or re.search(r"^VNEW_CASTING_", example, re.M):
+                bad.append("(cast-m) config.env.example 에 VNEW_FX 바로 뒤 true·되돌리기 주석이 없습니다")
+            if key not in PARITY_ENV_KEYS or PARITY_ENV_KEYS.index(key) != PARITY_ENV_KEYS.index("VNEW_FX") + 1:
+                bad.append("(cast-m) PARITY_ENV_KEYS 에 VNEW_FX 바로 뒤로 없습니다")
+            for target in ("dev", "prod"):
+                if re.search(r"^VNEW_CASTING", (ROOT / "deploy" / f"config.{target}.env").read_text(encoding="utf-8"), re.M):
+                    bad.append(f"(cast-m) config.{target}.env 를 바꿨습니다(이번 범위 밖)")
+            try:
+                spec = _ilu.spec_from_file_location("_cast_deploy_render", ROOT / "deploy" / "render.py")
+                render = _ilu.module_from_spec(spec)
+                spec.loader.exec_module(render)  # type: ignore[union-attr]
+                base_cfg = render.load_config(example_path)
+                for target in ("dev", "prod"):
+                    overlay = render.load_config(ROOT / "deploy" / f"config.{target}.env")
+                    for extra, want_v in (({}, "true"), ({key: "false"}, "false")):
+                        values = render.add_derived({**base_cfg, **overlay, **extra})
+                        text = render.render_text(template, values, str(template_path.relative_to(ROOT)))
+                        got_v = _rendered_env_values(text, key)
+                        if got_v != [want_v]:
+                            bad.append(f"(cast-m) {target}{'+false' if extra else ''}: 렌더 값이 [{want_v!r}] 가 아닙니다: {got_v}")
+            except (Exception, SystemExit) as exc:  # noqa: BLE001 — render.py 는 SystemExit 로 실패를 알린다.
+                bad.append(f"(cast-m) 렌더 실패: {type(exc).__name__}")
+            mark("cast-m")
+
+            if real_calls:
+                bad.append(f"(guard) 가짜가 아닌 LLM 호출이 있었습니다: {real_calls}")
+    except Exception as exc:  # noqa: BLE001
+        bad.append(f"검사 중 예외: {type(exc).__name__} {str(exc)[:200]}\n{_tb.format_exc()[-1500:]}")
+    finally:
+        charmod.STORE = saved["STORE"]
+        charmod._analyze = saved["_analyze"]
+        charmod._fal_request = saved["char_fal"]
+        charmod.load_char = saved["load_char"]
+        castmod._fal_request = saved["cast_fal"]
+        castmod._fetch_url = saved["cast_fetch"]
+        castmod._spawn = saved["cast_spawn"]
+        castmod._sleep = saved["cast_sleep"]
+        castmod.run_draw = saved["cast_run"]
+        castmod.vpoc_ledger.charge = saved["charge"]
+        vpoc_fal._request = saved["vpoc_request"]
+        _ureq.urlopen = saved["urlopen"]
+        vpoc_settings.FAL_KEY = saved["fal_key"]
+        vset.VNEW_CASTING = saved["casting_flag"]
+        vset.VNEW_FX = saved["fx_flag"]
+        with castmod._CAST_LOCK:  # noqa: SLF001
+            castmod._CAST_RUNNING.clear()  # noqa: SLF001
+
+    expected = ["cast-a", "cast-b", "cast-c", "cast-d", "cast-e", "cast-f", "cast-g", "cast-h", "cast-i", "cast-j", "cast-k", "cast-l",
+                "cast-m"]
+    missing = [item for item in expected if item not in seen_ids]
+    if missing and not bad:
+        bad.append(f"끝까지 돌지 않은 검사: {missing}")
+    if bad:
+        fail("vnew-live-fx 실사 캐스팅 검사 실패\n" + "\n".join(f"  {item}" for item in bad))
+    else:
+        ok(
+            "vnew-live-fx 실사 캐스팅 검사 (cast-a)male 프리셋 = 참고 구현 원문·성별 낱말·He/She/They·female·unknown 에 male·He is·his 없음·"
+            f"webtoon 0({prompt_count}문장) (cast-b)외모 문장·나이·dyed·표정·눈 색·300자 (cast-c)무늬 위치 경고 "
+            "(cast-d)성별 순서·분석 도구·SYSTEM 켬/끔(끔 = 변경 전 sha256)·genderEn 저장 (cast-e)start_draw 오류 7종·drawing·history 12·"
+            "chosen 유지 (cast-f)run_draw 본문 3키·S3 JPEG≤1536·원장 2건 (cast-g)칸별 실패·과금 0 (cast-h)이어하기 queued 제출 0·900초 "
+            "(cast-i)choose (cast-j)라우트 3개·끔 404·상세 보기 (cast-k)castingKey·_real_front_key(고름·안 고름·끔)·컷 단위 Kling payload "
+            "그대로(결정 4) (cast-l)캐스팅 칸 node 실행·확인창 금액·CostMismatch 다시 읽기·schedulePoll·innerHTML 0·node --check·운영 문구 9종 "
+            "(cast-m)VNEW_CASTING 배선·코드 기본·fal 본문 URL·data URI 0"
+            f"(제출 {post_total}건)"
+        )
+
+
 # vnew-live-fx A(Claude 결정 9, 2026-10-30 검토): 새 기본값(VNEW_FX 켬)에서 기대값이 달라지는 기존 검사는 **부르는 줄에서**
 # 끔으로 고정한다(검사 본문·기대값·들여쓰기는 그대로). 이유:
 #   check_vnew_plan·check_vnew_locations — 켬이면 POST /conti 가 기호·분위기 채우기(가짜가 아닌 LLM)를 부른다.
@@ -20977,6 +22586,14 @@ def check_vnew_fx_screen() -> None:
 def _run_fx_off(check) -> None:
     """`check()` 를 VNEW_FX=False 로 부르고 설정을 되돌린다."""
     with _pin_vnew(VNEW_FX=False):
+        check()
+
+
+# vnew-live-fx B(Claude 결정 9): 새 기본값(VNEW_CASTING 켬)에서 기대값이 달라지는 기존 검사도 부르는 줄에서 끔으로 고정한다.
+#   check_vnew_fx_prompt — (fx-k) 가 분석 SYSTEM 을 "상수 + 묘사 규칙"과 글자째 비교한다. 켬이면 성별 문장이 더 붙는다.
+def _run_casting_off(check) -> None:
+    """`check()` 를 VNEW_CASTING=False 로 부르고 설정을 되돌린다."""
+    with _pin_vnew(VNEW_CASTING=False):
         check()
 
 
@@ -21035,8 +22652,9 @@ def main() -> int:
     check_previz_collision()
     check_previz_support()
     check_vnew_fx()
-    check_vnew_fx_prompt()
+    _run_casting_off(check_vnew_fx_prompt)
     check_vnew_fx_screen()
+    check_vnew_casting()
     print()
     if warnings:
         print(f"경고 {len(warnings)}건")

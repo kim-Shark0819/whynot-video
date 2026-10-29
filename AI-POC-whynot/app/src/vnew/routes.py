@@ -13,6 +13,7 @@ from flask import Blueprint, Response, jsonify, request
 from ..vpoc.errors import VpocError, envelope, status_for
 
 from .. import project_tracks
+from . import casting
 from . import characters
 from . import plan as plan_mod
 
@@ -230,6 +231,59 @@ def create_blueprint(deps: VnewDependencies) -> Blueprint:
             characters.load_char(owner, char_id)  # 존재·소유 확인
             characters.delete_outfit(owner, char_id, outfit_id)
             return jsonify({"ok": True})
+        except Exception as exc:  # noqa: BLE001
+            return _fail(exc)
+
+    # ------------------------------------------------------------ 실사 캐스팅(vnew-live-fx 묶음 B)
+    #
+    # 설정(VNEW_CASTING)이 꺼져 있으면 캐릭터를 보기 전에 404 CastingDisabled(새 라우트가 없는 것과 같다, R0.3).
+    # 저장 경로의 주인은 지금 사용자(_owner)다 — 다른 사용자 캐릭터는 404.
+
+    @bp.put("/characters/<char_id>/casting")
+    @deps.require_auth
+    def casting_settings(char_id: str):
+        try:
+            casting.require_enabled("vnew.casting")
+            owner = _owner()
+            payload = request.get_json(silent=True)
+            payload = payload if isinstance(payload, dict) else {}
+            view = casting.update_settings(
+                owner, char_id, preset=payload.get("preset"), gender=payload.get("gender"), look_en=payload.get("lookEn")
+            )
+            return jsonify({"casting": view})
+        except Exception as exc:  # noqa: BLE001
+            return _fail(exc)
+
+    @bp.post("/characters/<char_id>/casting/draw")
+    @deps.require_auth
+    def casting_draw(char_id: str):
+        try:
+            casting.require_enabled("vnew.casting.draw")
+            owner = _owner()
+            payload = request.get_json(silent=True)
+            payload = payload if isinstance(payload, dict) else {}
+            confirm = casting.parse_confirm_usd(payload.get("confirmUsd"))
+            view = casting.start_draw(
+                owner, char_id, confirm,
+                preset=payload.get("preset"), gender=payload.get("gender"), look_en=payload.get("lookEn"),
+            )
+            return jsonify({"casting": view}), 202
+        except Exception as exc:  # noqa: BLE001
+            return _fail(exc)
+
+    @bp.post("/characters/<char_id>/casting/choose")
+    @deps.require_auth
+    def casting_choose(char_id: str):
+        try:
+            casting.require_enabled("vnew.casting.choose")
+            owner = _owner()
+            payload = request.get_json(silent=True)
+            payload = payload if isinstance(payload, dict) else {}
+            candidate = payload.get("candidateId")
+            if not isinstance(candidate, str):
+                # 고르기 풀기는 빈 문자열을 명시해야 한다(키가 빠진 요청이 고른 사진을 지우지 않게).
+                raise VpocError("vnew.casting.choose", "NoCandidateId", "고를 사진(candidateId)이 필요합니다.", 400)
+            return jsonify({"casting": casting.choose(owner, char_id, candidate)})
         except Exception as exc:  # noqa: BLE001
             return _fail(exc)
 

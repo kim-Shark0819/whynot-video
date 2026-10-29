@@ -44,6 +44,7 @@ from ..vpoc import video as vpoc_video
 from ..vpoc.errors import VpocError, now_iso
 from ..vpoc.store import STORE, video_output_prefix
 
+from . import casting as vnew_casting
 from . import characters
 from . import fx as vnew_fx
 from . import imaging
@@ -822,7 +823,30 @@ def _char_entries(owner: str, inp: dict) -> list[dict]:
                 "missing": False,
             }
         )
+        if vnew_settings.VNEW_CASTING:
+            # vnew-live-fx B(design §B.5): 고른 캐스팅 사진의 S3 키(없으면 ""). 통 테이크 실사(묶음 C)만 _real_front_key 로 쓴다.
+            # 끔이면 키를 두지 않는다(결과 dict 가 B 이전과 같다). 컷 단위 Kling 실사 payload 는 이 키를 보지 않는다(결정 4).
+            out[-1]["castingKey"] = _casting_key_of(char_id, char)
     return out
+
+
+def _casting_key_of(char_id: str, char: dict) -> str:
+    """캐릭터의 고른 캐스팅 사진 키(casting.chosen_key). 저장값이 깨져 읽지 못하면 "" — 영상 생성을 막지 않는다."""
+    try:
+        return vnew_casting.chosen_key(char)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("vnew.gen.casting_key_unreadable char=%s err=%s", char_id, type(exc).__name__)
+        return ""
+
+
+def _real_front_key(entry: dict) -> str:
+    """실사 인물 사진 키: 고른 캐스팅 사진(castingKey)이 있으면 그것, 없으면 실사 정면(realFrontKey)(design §B.5).
+
+    통 테이크 실사(묶음 C: _take_payload(variant="real")·start_real 인물 확인)만 쓴다. 결정 4: 컷 단위 Kling 실사
+    payload(_previz_payload_elements·_previz_payload_image_list)는 이 함수를 쓰지 않고 지금처럼 realFrontKey 를 쓴다.
+    """
+    entry = entry if isinstance(entry, dict) else {}
+    return str(entry.get("castingKey") or entry.get("realFrontKey") or "")
 
 def _model_accepts_real_start(model: str) -> bool:
     """이 모델이 실사 인물 시작 이미지를 받는지(설계자 2026-10-20).
