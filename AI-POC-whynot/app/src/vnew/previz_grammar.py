@@ -47,25 +47,33 @@ SYSTEM = (
     "'person:<name>' (looking at that person's face) | 'camera' | 'down' | 'up' | 'offscreen_left' | "
     "'offscreen_right' | 'closed' (eyes shut). One entry per visible person.\n"
     "- supports: for every visible person, one entry on WHAT carries their weight and HOW. Decide in this order, which is "
-    "also the field order: first the posture, then the supporting object, then what that object is and its usual real "
+    "also the field order: first whether the support and the body parts touching it are actually drawn, then the posture, "
+    "then the supporting object, then what that object is and its usual real "
     "size, then its height compared with a person standing next to it, then how they sit on it, then the feet. "
-    "(1) posture: stand | sit | kneel | lie | crouch | lean | walk. "
-    "(2) supportEn: the object that carries their weight, in a few English words (e.g. 'parking bollard', 'metal railing "
+    "(1) seen: visible (the support and the body parts touching it — buttocks, thighs, feet — are all drawn) | partial "
+    "(only some of them are drawn, but the drawing is enough to judge) | hidden (they are outside the frame or covered, so "
+    "the drawing cannot tell; this includes anything you would only infer from the cut description, other panels or "
+    "context). If the support or the body parts touching it are outside the frame, seen is hidden: do NOT guess the "
+    "posture from context, and decide posture only from the visible upper body. When seen is hidden, supportKind, contact "
+    "and feet are none. "
+    "(2) posture: stand | sit | kneel | lie | crouch | lean | walk. "
+    "(3) supportEn: the object that carries their weight, in a few English words (e.g. 'parking bollard', 'metal railing "
     "top bar', 'plastic chair'); 'ground' if they stand or sit directly on the ground or floor. "
-    "(3) supportWhatEn: one sentence on what that object is and its usual real size (e.g. 'a short post that stops cars "
+    "(4) supportWhatEn: one sentence on what that object is and its usual real size (e.g. 'a short post that stops cars "
     "from parking; usually just above knee height'). "
-    "(4) supportKind: floor | chair | sofa | bench | stool | step | stairs | rail | bollard | ledge | box | table | "
+    "(5) supportKind: floor | chair | sofa | bench | stool | step | stairs | rail | bollard | ledge | box | table | "
     "counter | vehicle | bed | wall | pole | other | none. "
-    "(5) heightCue: the height of the object's top compared with the body of a person STANDING next to it: floor | "
+    "(6) heightCue: the height of the object's top compared with the body of a person STANDING next to it: floor | "
     "ankle | shin | knee | above_knee | mid_thigh | hip | waist | chest | shoulder. Answer this even when the drawn "
     "person is sitting: where would that top reach on the same person if they stood beside it? "
-    "(6) supportHeightM: your estimate of that top height in metres (one number). "
-    "(7) contact: perch (only the buttocks rest on the top edge) | seat (the thighs rest on the top, like a chair) | "
+    "(7) supportHeightM: your estimate of that top height in metres (one number). "
+    "(8) contact: perch (only the buttocks rest on the top edge) | seat (the thighs rest on the top, like a chair) | "
     "straddle | lean (standing, hips or back against it) | kneel_on | lie_on | stand_on | floor (no object: standing "
     "or sitting on the floor) | none. "
-    "(8) feet: floor | dangling | on_prop (feet on a lower bar or step) | tucked | none. "
-    "(9) reasonEn: one sentence on how you reasoned through these steps. "
-    "Write only what is drawn. If the body is hidden so you cannot judge, use supportKind:none and contact:none.\n"
+    "(9) feet: floor | dangling | on_prop (feet on a lower bar or step) | tucked | none. "
+    "(10) reasonEn: one sentence on how you reasoned through these steps. "
+    "Write only what is drawn. If the body is hidden so you cannot judge, use seen:hidden, supportKind:none and "
+    "contact:none.\n"
     "Identify people by name using the cut description given. Ignore speech bubbles and sound effects. Be precise; do not guess beyond what is drawn."
 )
 
@@ -121,14 +129,15 @@ TOOL = {
                         },
                     },
                 },
-                # 받침 판단(previz-support-reasoning R1.1). 필드 순서 = 생각 순서(자세 → 받침 → 정체·크기 → 높이 →
-                # 앉는 방식 → 발 → 근거). required 는 늘리지 않는다(옛 출력과 같은 필수 키).
+                # 받침 판단(previz-support-reasoning R1.1). 필드 순서 = 생각 순서(그려졌는지 → 자세 → 받침 → 정체·크기 →
+                # 높이 → 앉는 방식 → 발 → 근거). required 는 늘리지 않는다(옛 출력과 같은 필수 키).
                 "supports": {
                     "type": "array",
                     "items": {
                         "type": "object",
                         "properties": {
                             "name": {"type": "string"},
+                            "seen": {"type": "string"},
                             "posture": {"type": "string"},
                             "supportEn": {"type": "string"},
                             "supportWhatEn": {"type": "string"},
