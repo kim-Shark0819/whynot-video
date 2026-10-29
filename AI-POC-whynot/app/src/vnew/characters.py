@@ -13,6 +13,7 @@ _analyze · _seedream · _fal_request · _fetch_url. STORE 는 vpoc.store.STORE 
 from __future__ import annotations
 
 import base64
+import copy
 import io
 import json
 import logging
@@ -160,6 +161,11 @@ def outfit_front_key(owner: str, char_id: str, outfit_id: str, variant: str) -> 
 def outfit_back_key(owner: str, char_id: str, outfit_id: str, variant: str) -> str:
     """추가 복장 이미지(후면)."""
     return f"{_root(owner)}/{char_id}/outfits/{outfit_id}/{variant}/back.jpg"
+
+
+def casting_key(owner: str, char_id: str, cand_id: str) -> str:
+    """실사 캐스팅 후보 사진(vnew-live-fx 묶음 B). fal 결과를 우리 버킷 이 키로 옮긴다(IRSA users/* 안)."""
+    return f"{_root(owner)}/{char_id}/casting/{cand_id}.jpg"
 
 
 # ================================================================ 저장 레이어
@@ -410,7 +416,7 @@ def _analyze(blocks: list[dict], *, model: str) -> tuple[dict, dict]:
     return vpoc_llm._converse(  # noqa: SLF001 — 공개 래퍼가 없어 내부 함수를 쓴다
         system_text=_analyze_system(),
         blocks=blocks,
-        tool=_ANALYZE_TOOL,
+        tool=_analyze_tool(),
         max_tokens=1200,
         where="vnew.analyze",
         model=model,
@@ -477,10 +483,37 @@ _ANALYZE_DETAIL_RULE = (
 
 
 def _analyze_system() -> str:
-    """캐릭터 분석 SYSTEM. VNEW_FX 켬이면 머리색·무늬 위치 규칙을 끝에 더한다(끔이면 지금 상수 그대로)."""
-    if settings.VNEW_FX:
-        return _ANALYZE_SYSTEM + _ANALYZE_DETAIL_RULE
-    return _ANALYZE_SYSTEM
+    """캐릭터 분석 SYSTEM. VNEW_FX 켬이면 머리색·무늬 위치 규칙을, VNEW_CASTING 켬이면 성별 문장을 끝에 더한다(둘 다 끔이면 지금 상수 그대로)."""
+    text = _ANALYZE_SYSTEM + _ANALYZE_DETAIL_RULE if settings.VNEW_FX else _ANALYZE_SYSTEM
+    if settings.VNEW_CASTING:
+        text += _ANALYZE_GENDER_RULE
+    return text
+
+
+# vnew-live-fx RB2.1(실사 캐스팅, 결정 2): 켬이면 분석 도구에 선택 필드 genderEn 을 더하고 SYSTEM 에 이 문장을 더한다.
+# 이미 분석된 캐릭터는 다시 분석하지 않는다(genderEn 없음 = unknown 으로 본다).
+_ANALYZE_GENDER_RULE = (
+    " genderEn is the character's gender as drawn: male, female or unknown (unknown when the drawings do not make it clear)."
+)
+_ANALYZE_GENDER_FIELD = {"type": "string", "enum": ["male", "female", "unknown"]}
+
+
+def _analyze_tool() -> dict:
+    """캐릭터 분석 도구. VNEW_CASTING 켬이면 _ANALYZE_TOOL 사본에 genderEn(required 아님)을 더한다. 끔이면 상수 그대로."""
+    if not settings.VNEW_CASTING:
+        return _ANALYZE_TOOL
+    tool = copy.deepcopy(_ANALYZE_TOOL)
+    tool["inputSchema"]["json"]["properties"]["genderEn"] = dict(_ANALYZE_GENDER_FIELD)
+    return tool
+
+
+def _with_gender_en(payload: dict, analysis: dict) -> dict:
+    """VNEW_CASTING 켬이면 분석 결과에 genderEn(male | female | unknown, 모르는 값 unknown)을 둔다. 끔이면 그대로."""
+    if settings.VNEW_CASTING:
+        from . import casting  # noqa: PLC0415 — casting 이 characters 를 읽으므로 늦게 import
+
+        analysis["genderEn"] = casting.normalize_gender(payload.get("genderEn"))
+    return analysis
 
 
 _ANALYZE_TOOL = {
@@ -557,7 +590,7 @@ def analyze_sources(owner: str, char: dict) -> dict:
         # baseOutfitEn 이 가장 기본 한 벌. 옛 응답(baseOutfitEn 없음)은 outfitEn 으로 대신한다.
         base_outfit = str(payload.get("baseOutfitEn") or payload.get("outfitEn") or "").strip()
         layers = _parse_outfit_layers(payload.get("outfitLayersEn"))
-        return {
+        return _with_gender_en(payload, {
             "nameGuess": str(payload.get("nameGuess") or "").strip(),
             "descriptionKo": str(payload.get("descriptionKo") or "").strip(),
             "appearanceEn": str(payload.get("appearanceEn") or "").strip(),
@@ -572,7 +605,7 @@ def analyze_sources(owner: str, char: dict) -> dict:
             else [],
             "extraEn": str(payload.get("extraEn") or "").strip(),
             "model": str(usage.get("model") or model),
-        }
+        })
     raise VpocError("vnew.analyze", "AnalyzeFailed", "캐릭터 분석에 실패했습니다.", 502)
 
 
@@ -2329,6 +2362,7 @@ def _presign(key: str) -> str:
 def detail_view(owner: str, char_id: str) -> dict:
     """상세: 이미지·썸네일을 presigned URL 로 담는다. building 이 멈췄으면 failed 로 조정."""
     char = reconcile_stale(owner, char_id)
+    char, casting_out = _casting_detail(owner, char_id, char)
     variants_out: dict = {}
     for variant in settings.VARIANTS:
         v = (char.get("variants") or {}).get(variant) or _empty_variant()
@@ -2365,7 +2399,22 @@ def detail_view(owner: str, char_id: str) -> dict:
         "variants": variants_out,
         "costumes": char.get("costumes") or [],
         "outfits": _outfits_view(owner, char),
+        "casting": casting_out,
     }
+
+
+def _casting_detail(owner: str, char_id: str, char: dict) -> tuple[dict, dict]:
+    """실사 캐스팅(vnew-live-fx B): 멈춘 뽑기를 이어 조회하고(casting.reconcile) 보기를 만든다(casting.view).
+
+    이어하기는 설정과 상관없이 한다(진행 중 뽑기는 끝까지, R0.5). 이어하기가 실패해도 상세 조회는 막지 않는다.
+    """
+    from . import casting  # noqa: PLC0415 — casting 이 characters 를 읽으므로 늦게 import
+
+    try:
+        char = casting.reconcile(owner, char_id, char)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("vnew.casting.reconcile_failed char=%s err=%s", char_id, str(exc)[:200])
+    return char, casting.view(char)
 
 
 def _outfits_view(owner: str, char: dict) -> list[dict]:
