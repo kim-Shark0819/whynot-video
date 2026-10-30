@@ -122,6 +122,11 @@ def final_real_key(owner: str, pid: str, gen_id: str) -> str:
     return f"{_gen_root(owner, pid, gen_id)}/final-real.mp4"
 
 
+def final_real_run_key(owner: str, pid: str, gen_id: str, n: int) -> str:
+    """통 테이크 실사 회차 n 의 병합본(vnew-live-fx C.1). 회차마다 이름이 달라 이전 회차를 덮어쓰지 않는다."""
+    return f"{_gen_root(owner, pid, gen_id)}/final-real-r{int(n)}.mp4"
+
+
 def final_webtoon_key(owner: str, pid: str, gen_id: str) -> str:
     return f"{_gen_root(owner, pid, gen_id)}/final-webtoon.mp4"
 
@@ -984,6 +989,205 @@ def start_generate(owner: str, pid: str, confirm_usd: float) -> str:
     return new["genId"]
 
 
+# ================================================================ 통 테이크 실사 버전(vnew-live-fx 묶음 C)
+#
+# 웹툰 통 테이크가 끝난 gen 에서 **같은 프리비즈 녹화(unit.recKeys, @Video1)** 로 실사 회차를 만든다. 실사 칸은
+# 웹툰과 같은 드라이버(_drive_previz_pass)·선점·준비 세마포어(_PREPARE_SEM)·동시 상한(VNEW_GEN_PARALLEL)으로 간다.
+# 회차 번호는 gen.realRun.n, 이전 회차 요약은 gen.realHistory(최대 3), 병합본은 final-real-r{n}.mp4 다.
+
+REAL_HISTORY_MAX = 3
+
+
+def _require_take_real(where: str = "vnew.generate.real") -> None:
+    """VNEW_TAKE_REAL 이 꺼져 있으면 404 TakeRealDisabled(새 라우트가 없는 것과 같다, R0.3)."""
+    if not vnew_settings.VNEW_TAKE_REAL:
+        raise VpocError(where, "TakeRealDisabled", "통 테이크 실사 버전 기능이 꺼져 있습니다.", 404)
+
+
+def real_estimate(gen: dict) -> dict:
+    """실사 회차 1번 금액(design §C.4). 테이크마다 _take_usd(gen.videoModel, unit.seconds, gen.resolution) 합.
+
+    웹툰 테이크와 같은 공식·같은 저장값(모델·해상도)이다. 반환 {usd(소수 2자리), seconds, takes, resolution}.
+    """
+    gen = gen if isinstance(gen, dict) else {}
+    endpoint = str(gen.get("videoModel") or vnew_settings.VNEW_PREVIZ_EDIT_MODEL)
+    resolution = str(gen.get("resolution") or vnew_settings.VNEW_TAKE_RESOLUTION)
+    usd = 0.0
+    seconds = 0.0
+    takes = 0
+    for unit in gen.get("units") or []:
+        secs = float(unit.get("seconds") or 0)
+        usd += _take_usd(endpoint, secs, resolution)
+        seconds += secs
+        takes += 1
+    return {"usd": round(usd, 2), "seconds": round(seconds, 3), "takes": takes, "resolution": resolution}
+
+
+def _real_ready_error(gen: dict) -> VpocError | None:
+    """실사 회차를 시작할 수 없는 gen 상태(설정·캐릭터 제외). 시작할 수 있으면 None(design §C.4 1)."""
+    gen = gen if isinstance(gen, dict) else {}
+    if gen.get("mode") != "previz-take" or (gen.get("finalWebtoon") or {}).get("status") != "done":
+        return VpocError(
+            "vnew.generate.real",
+            "RealNotReady",
+            "웹툰 통 테이크가 끝난 뒤에 실사 버전을 만들 수 있습니다.",
+            409,
+        )
+    if gen.get("status") == "running" and not _gen_stale(gen):
+        return VpocError("vnew.generate.real", "RealRunning", "영상 생성이 진행 중입니다. 끝난 뒤에 다시 눌러 주세요.", 409)
+    return None
+
+
+def _real_missing_names(owner: str, plan: dict, gen: dict) -> list[str]:
+    """테이크에 나오는 인물(charId 가 있는 배우) 중 캐스팅 사진도 실사 정면도 없는 인물 이름(RC1.3)."""
+    char_by_id = _char_by_id(owner, plan)
+    names: list[str] = []
+    for unit in gen.get("units") or []:
+        for actor in _segment_actors(plan, unit):
+            char_id = str(actor.get("charId") or "")
+            if not char_id:
+                continue
+            entry = char_by_id.get(char_id)
+            if not entry or entry.get("missing") or not _real_front_key(entry):
+                name = str(actor.get("name") or (entry or {}).get("roleName") or char_id)
+                if name not in names:
+                    names.append(name)
+    return names
+
+
+def _real_run_summary(gen: dict) -> dict:
+    """끝난(또는 멈춘) 실사 회차 요약 → realHistory 항목(design §C.1). 파일은 지우지 않는다."""
+    run = gen.get("realRun") or {}
+    final = gen.get("finalReal") or {}
+    units = []
+    for unit in gen.get("units") or []:
+        state = unit.get("real") or {}
+        units.append({
+            "id": str(unit.get("id") or ""),
+            "status": str(state.get("status") or ""),
+            "outputKey": str(state.get("outputKey") or ""),
+            "error": str(state.get("error") or "")[:300],
+        })
+    states = [u["status"] for u in units]
+    if final.get("status") == "done":
+        status = "done"
+    elif "cancelled" in states:
+        status = "cancelled"
+    elif final.get("status") == "failed" or (states and all(s == "failed" for s in states)):
+        status = "failed"
+    else:
+        status = "partial"
+    return {
+        "n": int(run.get("n") or 0),
+        "startedAt": str(run.get("startedAt") or ""),
+        "status": status,
+        "finalKey": str(final.get("key") or "") if final.get("status") == "done" else "",
+        "audio": bool(run.get("audio")),
+        "units": units,
+    }
+
+
+def _empty_real_state(audio: bool) -> dict:
+    """실사 회차 칸 초기값(design §C.1: _empty_variant_state + audio·failureKind·promptEn·promptBytes)."""
+    return {**_empty_variant_state(), "status": "queued", "audio": bool(audio), "failureKind": "", "promptEn": "",
+            "promptBytes": 0}
+
+
+def start_real(owner: str, pid: str, confirm_usd: float, audio: bool | None = None) -> dict:
+    """웹툰 통 테이크가 끝난 gen 에서 실사 회차를 시작한다(design §C.4). 반환 {n, usd}.
+
+    금액(confirm_usd)이 real_estimate 와 다르면 409 CostMismatch(원장 기록용이고 생성을 막지 않는다 — 기존과 같다).
+    이전 회차가 있으면 realHistory 에 요약을 넣고(최대 3, 오래된 것부터 버림) 칸을 모두 queued 로 되돌린다.
+    웹툰 결과(unit.webtoon·finalWebtoon)는 건드리지 않는다. selected 가 real 이면 비운다(RC4.4).
+    """
+    _require_take_real()
+    plan, _ = plan_mod.load_plan(owner, pid)
+    gen = plan.get("gen") or {}
+    blocked = _real_ready_error(gen)
+    if blocked is not None:
+        raise blocked
+    if not vpoc_settings.FAL_KEY:
+        raise VpocError("vnew.generate.real", "FalKeyMissing", "fal API 키가 설정되지 않았습니다.", 409)
+    missing = _real_missing_names(owner, plan, gen)
+    if missing:
+        raise VpocError(
+            "vnew.generate.real",
+            "CharacterRealMissing",
+            "실사 사진(캐스팅 사진 또는 실사 정면)이 없는 등장인물이 있습니다: " + ", ".join(missing),
+            409,
+        )
+    est = real_estimate(gen)
+    shown = round(float(confirm_usd), 2)
+    if shown != est["usd"]:
+        raise VpocError(
+            "vnew.generate.real",
+            "CostMismatch",
+            f"금액이 서버 계산과 다릅니다. 서버 {est['usd']} USD, 화면 {shown} USD.",
+            409,
+        )
+    gen_id = str(gen.get("genId") or "")
+    audio_on = bool(vnew_settings.VNEW_TAKE_AUDIO if audio is None else audio)
+    box = {"n": 0}
+
+    def mutator(data: dict) -> None:
+        g = data.get("gen") or {}
+        if str(g.get("genId") or "") != gen_id:
+            raise VpocError("vnew.generate.real", "RealNotReady",
+                            "웹툰 통 테이크가 끝난 뒤에 실사 버전을 만들 수 있습니다.", 409)
+        again = _real_ready_error(g)  # 동시 시작 막기: 저장 직전에 running 을 다시 본다.
+        if again is not None:
+            raise again
+        previous = g.get("realRun") or {}
+        if previous.get("n"):
+            history = list(g.get("realHistory") or [])
+            history.append(_real_run_summary(g))
+            g["realHistory"] = history[-REAL_HISTORY_MAX:]
+        n = int(previous.get("n") or 0) + 1
+        for unit in g.get("units") or []:
+            unit["real"] = _empty_real_state(audio_on)
+        g["finalReal"] = {"status": "waiting", "key": "", "error": "", "n": n}
+        g["realRun"] = {
+            "n": n,
+            "startedAt": now_iso(),
+            "audio": audio_on,
+            "usd": est["usd"],
+            "endpoint": str(g.get("videoModel") or ""),
+            "resolution": est["resolution"],
+        }
+        g["activeSince"] = now_iso()
+        g["status"] = "running"
+        if g.get("selected") == "real":
+            g["selected"] = None
+        box["n"] = n
+
+    _mutate_locked(owner, pid, mutator)
+    _spawn_driver(owner, pid, gen_id)
+    log.info(
+        "vnew.gen.real_start pid=%s n=%d takes=%d usd=%.2f audio=%s",
+        pid, box["n"], est["takes"], est["usd"], "on" if audio_on else "off",
+    )
+    return {"n": box["n"], "usd": est["usd"]}
+
+
+def _real_block_text(owner: str, plan: dict, gen: dict) -> str:
+    """gen_view 의 realBlock(실사 버전을 시작하지 못하는 이유, 한국어). 시작할 수 있으면 ""."""
+    if not vnew_settings.VNEW_TAKE_REAL:
+        return "실사 버전 기능이 꺼져 있습니다."
+    blocked = _real_ready_error(gen)
+    if blocked is not None:
+        return blocked.message
+    if not vpoc_settings.FAL_KEY:
+        return "fal API 키가 설정되지 않았습니다."
+    try:
+        missing = _real_missing_names(owner, plan, gen)
+    except Exception as exc:  # noqa: BLE001 — 보기는 실패하지 않는다(시작 때 다시 확인한다).
+        log.warning("vnew.gen.real_block_failed err=%s", type(exc).__name__)
+        return ""
+    if missing:
+        return "실사 사진(캐스팅 사진 또는 실사 정면)이 없는 등장인물이 있습니다: " + ", ".join(missing)
+    return ""
+
+
 # ================================================================ 진행 드라이버
 #
 # vpoc _ensure_driver 개념: 파드당 계획 1개. 드라이버 스레드가 한 번에 하나씩 진행한다.
@@ -1456,16 +1660,17 @@ def _stitch_recordings(rec_keys: list[str]) -> bytes:
     return _concat(clips)
 
 
-def _take_location_jpeg(plan: dict, take: dict) -> bytes | None:
-    """테이크 장소의 웹툰 뷰 A(back) 이미지. locations 의 webtoon variant viewKeys.back 을 쓴다.
+def _take_location_jpeg(plan: dict, take: dict, variant: str = "webtoon") -> bytes | None:
+    """테이크 장소의 뷰 A(back) 이미지. locations 의 {variant} variant viewKeys.back 을 쓴다.
 
-    못 찾으면 None(장소 시트 생략). 콘티 cut.locationEn 으로 장소를 찾는다.
+    variant 기본 webtoon(웹툰 통 테이크). real 이면 실사 장소 뷰(vnew-live-fx C.5). 못 찾으면 None(장소 시트 생략).
+    콘티 cut.locationEn 으로 장소를 찾는다.
     """
     location = _location_name_en(plan, take)
     loc = _location_by_name(plan, location)
     if not loc:
         return None
-    webtoon = (loc.get("variants") or {}).get("webtoon") or {}
+    webtoon = (loc.get("variants") or {}).get("real" if variant == "real" else "webtoon") or {}
     key = str((webtoon.get("viewKeys") or {}).get("back") or "")
     if not key:
         return None
@@ -2484,7 +2689,51 @@ def _harmony_min(plan: dict) -> str:
     return HARMONY_MIN.format(tod=tod or "@Video1's", drift=drift)
 
 
-def _take_prompt(plan: dict, take: dict, *, cast: list[dict], panel_nos: list[int], location_no, caps: dict | None = None) -> str:
+# vnew-live-fx C.5 실사 통 테이크 조각(design 표 원문). STYLE 은 참고 구현 vpoc/compose.py:13-17 STYLE["live_action"] 에서
+# 결정 7로 두 곳을 바꿨다("warm pastel color grading" 뺌, "romance K-drama cinematography" → "K-drama cinematography").
+REAL_TAKE_STYLE = (
+    "STYLE: Cinematic live-action film footage, photorealistic, natural skin texture, 35mm lens, soft natural light, "
+    "K-drama cinematography, soft glow, shallow depth of field."
+)
+REAL_TAKE_RULE_REPLACE = (
+    " Replace each mannequin with its person; keep face and hair identical to the reference photo "
+    "and the costume exactly as written in ASSETS in every cut."
+)
+REAL_TAKE_AVOID = (
+    "AVOID: anime or cartoon look, illustration, cel shading, line art, plastic CGI skin, still-image pan or zoom, "
+    "subtitles, burned-in text."
+)
+
+
+def _real_action(text: str) -> str:
+    """실사 연기 문장(참고 구현 vpoc/live.py:146-154 real_action): 홍조 선 → 옅은 홍조, 눈물 줄기 → 눈물, 그림 낱말 제거."""
+    import re as _re  # noqa: PLC0415
+
+    out = _re.sub(r"\bblush (?:marks?|lines?)\b", "a faint flush", str(text or ""), flags=_re.IGNORECASE)
+    out = _re.sub(r"\btear streams?\b", "tears", out, flags=_re.IGNORECASE)
+    return vnew_fx.strip_drawing_words(out)
+
+
+def _with_real_expressions(action: str, fx_keys) -> str:
+    """연기 뒤에 실사 표현(fx.REAL_FX, 배경 기호는 빈 값이라 빠진다)을 ", " 로 붙인다(RC3.2). 표현이 없으면 그대로."""
+    expressions = vnew_fx.sentences(fx_keys, real=True)
+    if not expressions:
+        return action
+    head = action.rstrip(".").strip()
+    return (head + ", " if head else "") + ", ".join(expressions) + "."
+
+
+def _assert_no_webtoon(prompt: str) -> None:
+    """실사 프롬프트에 "webtoon"(대소문자 무시)이 남으면 제출하지 않는다(RC3.4, 참고 구현 vpoc/live.py:171-178).
+
+    준비 단계 예외라 칸은 failed, 제출·원장 0이다. 한국어 대사 속 "웹툰"은 검사 대상이 아니다.
+    """
+    if "webtoon" in str(prompt or "").lower():
+        raise VpocError("vnew.generate", "RealPromptWebtoon", "실사 프롬프트에 웹툰 문구가 남아 제출하지 않았습니다.", 500)
+
+
+def _take_prompt(plan: dict, take: dict, *, cast: list[dict], panel_nos: list[int], location_no, caps: dict | None = None,
+                 variant: str = "webtoon") -> str:
     """통 테이크 프롬프트(영어, UTF-8 ≤ VNEW_TAKE_PROMPT_MAX 바이트, 설계자 2026-10-26, 066 — ASSETS·연기 보존).
 
     순서: ① STYLE(스타일 앵커 맨 앞) → ② ASSETS(@Video1·@Image 매핑) → ③ TIMELINE(컷마다 1줄: ON SCREEN
@@ -2528,9 +2777,16 @@ def _take_prompt(plan: dict, take: dict, *, cast: list[dict], panel_nos: list[in
     짧은 형(MOTION_MIN·_harmony_min) → 연기 없는 후보 × 원문 → × 짧은 형 → 의상을 줄인 ASSETS(assetsStripped) × 짧은 형
     → (그래도 안 들어가면) 지금 후보. 적용 단계 로그 끝에 motionHarmonyShort(짧은 형)·motionHarmonyDrop(빠짐)을 적는다.
     끔이면 이 모두가 없어 지금과 바이트 단위로 같다(fx-i).
+
+    **실사 버전**(vnew-live-fx C.5, variant="real"): 틀·줄이기·타임스탬프 보존은 같고 조각만 바뀐다 — STYLE 은
+    REAL_TAKE_STYLE(둘째 문장 없음), ASSETS 인물은 "(photo)"·"overrides the photo's clothing", 장소는 "(real photo)",
+    TIMELINE 연기는 _real_action 뒤에 실사 표현(배경 기호 없음, FX 조각 없음), rule_replace·AVOID 는 실사 문장이다.
+    외형·의상·목소리·연기·분위기·HARMONY 는 strip_drawing_words 를 지난다. 로그는 "vnew.gen.take_prompt variant=real".
+    variant="webtoon"(기본)은 지금과 글자 하나 다르지 않다(lr-e).
     """
     budget = _take_prompt_budget(caps)
     fx_on = bool(vnew_settings.VNEW_FX)
+    real = variant == "real"
     entries = _take_timeline_entries(plan, take)
     all_stamps = [f"{e['start']}-{e['end']}s" for e in entries]
 
@@ -2559,8 +2815,11 @@ def _take_prompt(plan: dict, take: dict, *, cast: list[dict], panel_nos: list[in
                 str(take.get("id") or ""), entry.get("start"), entry.get("end"),
             )
             mood = ""
-        entry["moodText"] = mood
-    fx_content = vnew_fx.has_content([{"fx": e.get("fx"), "moodEn": e.get("moodText")} for e in entries])
+        entry["moodText"] = vnew_fx.strip_drawing_words(mood) if real else mood
+    fx_content = vnew_fx.has_content([
+        {"fx": vnew_fx.sentences(e.get("fx"), real=True) if real else e.get("fx"), "moodEn": e.get("moodText")}
+        for e in entries
+    ])
     # 원작 패널 참조(의상이 빈 인물의 "costume exactly as in the panels" 문구에 쓴다).
     if panel_nos:
         if len(panel_nos) == 1:
@@ -2570,8 +2829,11 @@ def _take_prompt(plan: dict, take: dict, *, cast: list[dict], panel_nos: list[in
     else:
         panel_ref = "the original panels"
 
-    style_en = _first_take_style_en(plan)
-    if panel_nos:
+    style_en = "" if real else _first_take_style_en(plan)
+    if real:
+        # 실사 STYLE(결정 7). 원작 그림체 둘째 문장은 없다(그림 낱말이 남지 않게).
+        style = REAL_TAKE_STYLE
+    elif panel_nos:
         style = (
             f"STYLE: Modern TV-anime adaptation of the original webtoon {panel_ref}: keep the webtoon's "
             "faces, hair and line art; anime cel shading with anime compositing \u2014 soft rim light and "
@@ -2601,6 +2863,8 @@ def _take_prompt(plan: dict, take: dict, *, cast: list[dict], panel_nos: list[in
         " Replace each mannequin with its person; keep face and hair identical to the reference sheet "
         "and the costume exactly as written in ASSETS in every cut."
     )
+    if real:
+        rule_replace = REAL_TAKE_RULE_REPLACE
     rule_eyes = (
         " Eyes: the on-screen speaker looks at the listener; an off-screen voice never appears on screen."
     )
@@ -2620,12 +2884,16 @@ def _take_prompt(plan: dict, take: dict, *, cast: list[dict], panel_nos: list[in
     )
     avoid_full = "AVOID: 3D CGI, plastic toy look, photorealistic skin, still-image pan or zoom, subtitles, burned-in text."
     avoid_short = "AVOID: 3D CGI, plastic toy look, photorealistic skin, still-image pan or zoom, subtitles, burned-in text."
+    if real:
+        avoid_full = avoid_short = REAL_TAKE_AVOID
 
     # MOTION·HARMONY(설계자 2026-10-26 재지시 v2). 둘 다 지우지 않는 등급(고정 본문, full). MOTION 은
     # 마네킹 흔들림을 따라 하지 말고 살아 움직이는 2차 동작·패럴랙스를 하라고, HARMONY 는 인물·배경
     # 빛·색온도·접지 그림자를 맞추라고 지시한다. 통 테이크라 둘 다 full.
     motion = _motion_line(True)
     harmony = _harmony_line(plan, True)
+    if real:
+        harmony = vnew_fx.strip_drawing_words(harmony)  # 장소 빛 문장(lightEn)의 그림 낱말
 
     # --- 줄이기 상태(컷 수·ON SCREEN·ASSETS 인물 문장은 절대 줄이지 않는다). 샷 약어·대사·연기는 유지. ---
     state = {
@@ -2647,6 +2915,11 @@ def _take_prompt(plan: dict, take: dict, *, cast: list[dict], panel_nos: list[in
     def _clip(text: str, limit: int) -> str:
         return _clip_words(text, limit)
 
+    def _txt(value) -> str:
+        # 실사 버전은 외형·의상·목소리 글에서 그림 낱말을 지운다(RC3.3). 웹툰은 지금 그대로.
+        text = str(value or "").strip()
+        return vnew_fx.strip_drawing_words(text) if real else text
+
     def _assets() -> str:
         # ASSETS 인물 문장은 어떤 경우에도 유지한다(색·이름·@Image·COSTUME). 외형·목소리만 줄이거나 뺀다.
         parts = ["@Video1 = rough 3D previz (layout, blocking, camera and cuts only)"]
@@ -2655,34 +2928,41 @@ def _take_prompt(plan: dict, take: dict, *, cast: list[dict], panel_nos: list[in
             roman = _disp_name(ko)
             color = member.get("colorName") or "grey"
             appearance = (
-                _clip(str(member.get("appearance") or "").strip(), state["appearance_limit"])
+                _clip(_txt(member.get("appearance")), state["appearance_limit"])
                 if state["appearance_limit"] > 0 else ""
             )
             front_no = member.get("frontNo")
-            costume = _clip_words(str(member.get("costume") or "").strip(), state["costume_limit"])
+            costume = _clip_words(_txt(member.get("costume")), state["costume_limit"])
             voice = (
-                _clip_words(str(member.get("voice") or "").strip(), state["voice_limit"])
+                _clip_words(_txt(member.get("voice")), state["voice_limit"])
                 if state["voice_limit"] > 0 else ""
             )
             # 이름 소개: "{한국 이름} ({로마자})". 로마자가 이름과 같으면(이미 영문) 괄호 생략.
             label = f"{ko} ({roman})" if roman and roman != ko else ko
-            # 얼굴·머리는 참조 정면 1장에서만(후면 제외 — 다른 의상 증거를 줄인다).
+            # 얼굴·머리는 참조 정면 1장에서만(후면 제외 — 다른 의상 증거를 줄인다). 실사는 인물 사진 1장(photo).
             if front_no:
-                sentence = f"The {color} mannequin is {label}: face and hair from @Image{front_no} (front)"
+                sentence = f"The {color} mannequin is {label}: face and hair from @Image{front_no} " + (
+                    "(photo)" if real else "(front)")
             else:
                 sentence = f"The {color} mannequin is {label}"
             if appearance:
                 sentence += f", {appearance.rstrip('.')}"
             # COSTUME: override·패널에서 읽은 이 장면의 의상이 시트 복장을 덮어쓴다. 비면 패널을 따르게.
+            # 실사: 사진의 옷을 덮어쓰고, 비면 사진에 입은 그대로(사진이 없으면 COSTUME 문장 없음).
             if costume:
-                sentence += f". COSTUME in this scene (overrides the sheet's clothing): {costume.rstrip('.')}"
+                source = "photo" if real else "sheet"
+                sentence += f". COSTUME in this scene (overrides the {source}'s clothing): {costume.rstrip('.')}"
+            elif real:
+                if front_no:
+                    sentence += f". COSTUME: as worn in @Image{front_no}"
             else:
                 sentence += f". COSTUME: exactly as in the original panels {panel_ref}"
             if voice:
                 sentence += f". Voice: {voice.rstrip('.')}"
             parts.append(sentence)
         if location_no:
-            parts.append(f"@Image{location_no} = the location; keep its structure and props")
+            where = " (real photo)" if real else ""
+            parts.append(f"@Image{location_no} = the location{where}; keep its structure and props")
         return "ASSETS: " + ". ".join(parts) + "."
 
     def _entry_gaze(entry: dict) -> str:
@@ -2725,13 +3005,17 @@ def _take_prompt(plan: dict, take: dict, *, cast: list[dict], panel_nos: list[in
             head += " " + shot
         pieces: list[str] = [_on_screen_text(entry)]
         action = _action_core(entry.get("action") or "", state["action_limit"])
+        if real:
+            # 실사: 홍조 선·눈물 줄기를 실사 말로 바꾸고 연기 뒤에 실사 표현을 붙인다(FX 조각 없음, RC3.2).
+            action = _with_real_expressions(
+                _action_core(_real_action(entry.get("action") or ""), state["action_limit"]), entry.get("fx"))
         if action:
             pieces.append(action)
         # vnew-live-fx RA4.1: 연기 → 분위기 → 기호 → 대사 → 시선. 끔이면 moodText·fx 가 비어 아무것도 붙지 않는다.
         mood = _clip(str(entry.get("moodText") or ""), state["mood_limit"]) if state["mood_limit"] > 0 else ""
         if mood:
             pieces.append(f"mood: {mood}")
-        fx_texts = vnew_fx.sentences(entry.get("fx"), short=state["fx_short"])
+        fx_texts = [] if real else vnew_fx.sentences(entry.get("fx"), short=state["fx_short"])
         if fx_texts:
             pieces.append("FX: " + (", " if state["fx_short"] else " / ").join(fx_texts))
         speaker_ko = str(entry.get("speaker") or "").strip()
@@ -2798,7 +3082,8 @@ def _take_prompt(plan: dict, take: dict, *, cast: list[dict], panel_nos: list[in
         # 어느 컷에도 기호·분위기가 없으면 넣지 않는다(적용 단계 로그가 지금과 같다).
         steps.insert(steps.index(("voice_limit", 0, "voiceDrop")) + 1, ("mood_limit", 40, "mood40"))
         at = steps.index(("audio", audio_short, "audioShort")) + 1
-        steps[at:at] = [("mood_limit", 0, "moodDrop"), ("fx_short", True, "fxShort")]
+        # 실사는 FX 조각이 없어(실사 표현은 연기에 붙는다) fxShort 단계를 두지 않는다.
+        steps[at:at] = [("mood_limit", 0, "moodDrop")] + ([] if real else [("fx_short", True, "fxShort")])
     if fx_on:
         # 090 필수 수정 1(가): 묘사 규칙 짧은 형은 fxShort(없으면 audioShort) 다음, 연기를 줄이는 action55 앞.
         # 묘사 규칙은 켬이면 늘 붙으므로 기호·분위기가 없어도 이 단계를 둔다.
@@ -2834,7 +3119,12 @@ def _take_prompt(plan: dict, take: dict, *, cast: list[dict], panel_nos: list[in
                 if with_shot and shot:
                     head += " " + shot
                 bits = [_on_screen_text(e)]
-                if with_action:
+                if with_action and real:
+                    # 실사 최소형: 연기 핵심 + 실사 표현(기호 짧은 형 대신, 배경 기호 없음).
+                    action = _with_real_expressions(_action_core(_real_action(e.get("action") or ""), 55), e.get("fx"))
+                    if action:
+                        bits.append(action)
+                elif with_action:
                     action = _action_core(e.get("action") or "", 55)
                     if action:
                         bits.append(action)
@@ -2948,11 +3238,38 @@ def _take_prompt(plan: dict, take: dict, *, cast: list[dict], panel_nos: list[in
             # 090: 최소형의 MOTION·HARMONY 형을 단계 로그 끝에 적는다(원문이면 적지 않는다).
             applied.append("motionHarmonyShort" if MOTION_MIN in prompt else "motionHarmonyDrop")
 
+    if real:
+        # vnew-live-fx C2: 실사 프롬프트 바이트·줄이기 단계(개발계에서 실사 회차가 얼마나 줄었는지 본다).
+        log.info("vnew.gen.take_prompt variant=real bytes=%d steps=%s", _utf8_len(prompt), ",".join(applied) or "none")
+        return prompt
     log.info("vnew.gen.take_prompt bytes=%d steps=%s", _utf8_len(prompt), ",".join(applied) or "none")
     return prompt
 
 
-def _take_payload(owner: str, pid: str, plan: dict, take: dict, caps: dict) -> dict:
+def _real_look(owner: str, char_id: str) -> str:
+    """실사 외모 문장(casting.lookEn, 없으면 자동 문장 look_sentence). 캐릭터를 못 읽으면 ""(제출을 막지 않는다)."""
+    if not char_id:
+        return ""
+    try:
+        char, _ = characters.load_char(owner, char_id)
+        return vnew_casting.current_look(char) if vnew_settings.VNEW_CASTING else vnew_casting.auto_look(char)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("vnew.gen.real_look_unreadable char=%s err=%s", char_id, type(exc).__name__)
+        return ""
+
+
+def _real_appearance(look: str, limit: int = 170) -> str:
+    """실사 외모 문장 → ASSETS 외형(얼굴·머리, ≤limit자). 쉼표 조각 중 옷 낱말이 든 조각을 빼고 그림 낱말을 지운다.
+
+    look_sentence 는 옷까지 한 문장이라 _short_appearance(문장 단위)를 그대로 쓰면 늘 빈 값이 된다. 조각마다
+    _short_appearance 의 옷 판정을 빌린다(옷 낱말이 있으면 그 조각의 요약이 빈 값). 옷은 COSTUME 이 맡는다.
+    """
+    pieces = [piece.strip() for piece in str(look or "").split(",")]
+    kept = [piece for piece in pieces if piece and _short_appearance(piece, 1000)]
+    return _clip_words(vnew_fx.strip_drawing_words(", ".join(kept)), limit)
+
+
+def _take_payload(owner: str, pid: str, plan: dict, take: dict, caps: dict, variant: str = "webtoon") -> dict:
     """통 테이크(웹툰) 참조 이미지 목록·프롬프트(설계자 2026-10-26, 064).
 
     image_urls(순서 고정 — 프롬프트 번호와 일치):
@@ -2962,10 +3279,15 @@ def _take_payload(owner: str, pid: str, plan: dict, take: dict, caps: dict) -> d
       ③ 장소 시트(webtoon back 뷰) — 있으면 1장.
     전부 061 축소 규칙(긴 변 1024, JPEG q85). 총 ≤ caps.imageListMax(기본 10).
 
+    vnew-live-fx C.5(variant="real"): ① 인물마다 _real_front_key 사진 1장(캐스팅 사진, 없으면 실사 정면) → 원작 패널
+    없음 → ③ 실사 장소 뷰(locations real viewKeys.back). 외형은 실사 외모 문장(_real_look → _real_appearance).
+    이미지는 모두 _fit_ref 를 지나고 제출 때 data URI 가 된다(_submit_take). 웹툰(기본)은 지금 그대로다.
+
     장면 의상·목소리는 _resolve_cast(원작 패널 읽기 Claude 1회·캐시, override 우선)로 인물별 costume·
     voice 를 구해 cast 에 담는다(ASSETS 의 COSTUME/Voice 문구가 쓴다).
     반환: {imageUrls:[bytes], prompt, cast, panelNos, locationNo}.
     """
+    real = variant == "real"
     max_images = int(caps.get("imageListMax") or vpoc_fal.DEFAULT_IMAGE_LIST_MAX)
     actors = _segment_actors(plan, take)
     char_by_id = _char_by_id(owner, plan)
@@ -2983,6 +3305,22 @@ def _take_payload(owner: str, pid: str, plan: dict, take: dict, caps: dict) -> d
         char = char_by_id.get(char_id) if char_id else None
         front_no = None
         appearance = actor.get("appearanceEn") or ""
+        if real:
+            # 실사: 캐스팅 사진(고름) → 실사 정면 1장(결정 4·RC2.2). 외형은 실사 외모 문장의 얼굴·머리 조각.
+            photo = _load_jpeg(_real_front_key(char)) if char else None
+            if photo is not None and len(image_urls) < max_images:
+                image_urls.append(_fit_ref(photo))
+                front_no = len(image_urls)
+            member = resolved.get(str(name)) or {}
+            cast.append({
+                "name": name,
+                "colorName": color_name,
+                "frontNo": front_no,
+                "appearance": _real_appearance(_real_look(owner, str(char_id))) if char else "",
+                "costume": vnew_fx.strip_drawing_words(member.get("costume") or ""),
+                "voice": vnew_fx.strip_drawing_words(member.get("voice") or ""),
+            })
+            continue
         if char:
             # 정면 1장만 — 후면은 넣지 않는다(설계자 2026-10-26, 064).
             front = _load_jpeg(str(char.get("webtoonFrontKey") or ""))
@@ -3003,7 +3341,8 @@ def _take_payload(owner: str, pid: str, plan: dict, take: dict, caps: dict) -> d
         })
 
     panel_nos: list[int] = []
-    panels = _segment_panel_jpegs(owner, pid, plan, take, int(vnew_settings.VNEW_TAKE_MAX_PANELS or 3))
+    # 실사는 원작 웹툰 패널을 넣지 않는다(RC2.2).
+    panels = [] if real else _segment_panel_jpegs(owner, pid, plan, take, int(vnew_settings.VNEW_TAKE_MAX_PANELS or 3))
     for panel in panels:
         if len(image_urls) >= max_images:
             break
@@ -3011,12 +3350,14 @@ def _take_payload(owner: str, pid: str, plan: dict, take: dict, caps: dict) -> d
         panel_nos.append(len(image_urls))
 
     location_no = None
-    loc_jpeg = _take_location_jpeg(plan, take)
+    loc_jpeg = _take_location_jpeg(plan, take, variant="real") if real else _take_location_jpeg(plan, take)
     if loc_jpeg is not None and len(image_urls) < max_images:
         image_urls.append(_fit_ref(loc_jpeg))
         location_no = len(image_urls)
 
-    prompt = _take_prompt(plan, take, cast=cast, panel_nos=panel_nos, location_no=location_no, caps=caps)
+    # 웹툰은 지금과 같은 호출(variant 인자 없음), 실사만 variant="real".
+    prompt_kwargs = {"variant": "real"} if real else {}
+    prompt = _take_prompt(plan, take, cast=cast, panel_nos=panel_nos, location_no=location_no, caps=caps, **prompt_kwargs)
     if len(image_urls) > max_images:
         image_urls = image_urls[:max_images]
     return {
@@ -3048,12 +3389,13 @@ def _take_duration_value(caps: dict, duration_int: int):
 
 
 def _submit_take(*, endpoint: str, caps: dict, video_mp4: bytes, prompt: str, output_prefix: str,
-                 image_urls: list[bytes], seconds: float, resolution: str) -> dict:
+                 image_urls: list[bytes], seconds: float, resolution: str, audio: bool | None = None) -> dict:
     """통 테이크 reference-to-video 제출(fal 큐, 설계자 2026-10-26). 참조 영상·이미지는 data URI.
 
     caps 의 필드 이름으로 본문을 만든다: videoListField(배열), imageListField(배열), taskField,
     draftField, generateAudioField, durationAsString. seed 는 보내지 않는다. caps 에 없는 필드는
     보내지 않는다. 반환 모양은 _submit_previz_edit 과 같다(poll/_find_output_key 재사용).
+    audio(vnew-live-fx C.6): None 이면 VNEW_TAKE_AUDIO, bool 이면 그 값(칸 state.audio — "소리 없이 다시 만들기").
     """
     endpoint = str(endpoint or "").strip()
     if not vpoc_settings.FAL_KEY:
@@ -3090,7 +3432,7 @@ def _submit_take(*, endpoint: str, caps: dict, video_mp4: bytes, prompt: str, ou
     if duration_value is not None:
         body["duration"] = str(duration_value) if duration_as_string else duration_value
     if audio_field:
-        body[audio_field] = bool(vnew_settings.VNEW_TAKE_AUDIO)
+        body[audio_field] = bool(vnew_settings.VNEW_TAKE_AUDIO if audio is None else audio)
     if draft_field:
         body[draft_field] = bool(vnew_settings.VNEW_TAKE_DRAFT)
 
@@ -3138,11 +3480,17 @@ def _do_submit_take(owner: str, pid: str, gen_id: str, index: int, variant: str,
     """통 테이크 1개(웹툰)를 Seedance 2.5 reference-to-video 로 제출한다(설계자 2026-10-26, 063).
 
     video_urls = [테이크 녹화 이어붙인 mp4 data URI]. image_urls = 인물 정면·후면 → 패널 → 장소.
-    준비(녹화 받기·이어붙이기·payload·제출)는 _PREPARE_SEM 안에서(061 OOM 규칙). 실사 칸은 호출되지
-    않는다(skipped). draft_id 가 있으면 cell.draftId 로 저장한다.
+    준비(녹화 받기·이어붙이기·payload·제출)는 _PREPARE_SEM 안에서(061 OOM 규칙). draft_id 가 있으면
+    cell.draftId 로 저장한다.
+
+    vnew-live-fx C.5: 실사 칸은 gen.realRun(실사 회차)이 있을 때만 같은 녹화·같은 세마포어로 제출한다. 실사
+    payload(_take_payload variant="real")는 제출 직전 _assert_no_webtoon 을 지나야 한다(걸리면 칸 failed·제출·원장 0).
+    칸 state.audio(bool)가 있으면 generate_audio 로 보낸다("소리 없이 다시 만들기"). 실사 draft_id 는 칸에 둔다.
     """
-    if variant != "webtoon":
+    if variant not in ("webtoon", "real"):
         return
+    real = variant == "real"
+    tag = " variant=real" if real else ""  # 실사 로그 꼬리표(웹툰 로그 형식은 그대로)
     stage = "start"
     started = time.monotonic()
     prompt = ""
@@ -3158,9 +3506,13 @@ def _do_submit_take(owner: str, pid: str, gen_id: str, index: int, variant: str,
         gen = plan.get("gen") or {}
         if not _claim_ok_variant(gen, index, variant, claim):
             return
+        if real and not gen.get("realRun"):
+            # 실사 회차가 없는데 실사 칸이 선점됐다(옛 데이터·수동 수정). 제출하지 않고 실패로 끝낸다(무한 재선점 방지).
+            raise VpocError("vnew.generate", "RealNotReady", "실사 회차가 없어 제출하지 않았습니다.", 409)
         take = _previz_cells(gen)[index]
         state = take[variant]
         attempt = int(state.get("attempt") or 1)
+        audio_choice = state.get("audio") if isinstance(state.get("audio"), bool) else None
         take_id = str(take.get("id") or index)
         rec_keys = [str(k) for k in (take.get("recKeys") or []) if k]
         if not rec_keys:
@@ -3174,12 +3526,16 @@ def _do_submit_take(owner: str, pid: str, gen_id: str, index: int, variant: str,
         video_mp4 = _stitch_recordings(rec_keys)
 
         stage = "payload"
-        built = _take_payload(owner, pid, plan, take, caps)
+        built = _take_payload(owner, pid, plan, take, caps, variant="real") if real else _take_payload(
+            owner, pid, plan, take, caps)
         prompt = built["prompt"]
         image_urls = built["imageUrls"]
         prompt_bytes = len(prompt.encode("utf-8"))
         prefix = _seg_output_prefix(owner, pid, gen_id, take_id + "-" + variant, attempt)
         take_seconds = float(take.get("seconds") or 0)
+        if real:
+            stage = "check"
+            _assert_no_webtoon(prompt)
 
         stage = "submit"
         result = _submit_take(
@@ -3191,19 +3547,20 @@ def _do_submit_take(owner: str, pid: str, gen_id: str, index: int, variant: str,
             image_urls=image_urls,
             seconds=take_seconds,
             resolution=resolution,
+            audio=audio_choice,
         )
         del video_mp4, built, image_urls
         prepared = True
         log.info(
-            "vnew.gen.take_submit pid=%s take=%s bytes_body=%d ms=%d",
-            pid, take_id, prompt_bytes, int((time.monotonic() - started) * 1000),
+            "vnew.gen.take_submit pid=%s take=%s bytes_body=%d ms=%d%s",
+            pid, take_id, prompt_bytes, int((time.monotonic() - started) * 1000), tag,
         )
     except _Discard:
         return
     except Exception as exc:  # noqa: BLE001
         log.warning(
-            "vnew.gen.take_submit_failed pid=%s take=%s stage=%s err=%s",
-            pid, index, stage, _msg(exc),
+            "vnew.gen.take_submit_failed pid=%s take=%s stage=%s err=%s%s",
+            pid, index, stage, _msg(exc), tag,
         )
         _fail_variant(owner, pid, gen_id, index, variant, claim, _msg(exc))
         return
@@ -3228,7 +3585,9 @@ def _do_submit_take(owner: str, pid: str, gen_id: str, index: int, variant: str,
         s["promptEn"] = prompt
         s["promptBytes"] = prompt_bytes
         draft_id = str(result.get("draftId") or "")
-        if draft_id:
+        if draft_id and real:
+            s["draftId"] = draft_id  # 웹툰 테이크의 cell.draftId 를 덮어쓰지 않는다.
+        elif draft_id:
             cell["draftId"] = draft_id
 
     try:
@@ -3390,7 +3749,10 @@ def _do_poll_previz(owner: str, pid: str, gen_id: str, index: int, variant: str,
         if status == "InProgress":
             return
         if status != "Completed":
-            _fail_variant(owner, pid, gen_id, index, variant, claim, poll_result.get("failureMessage") or "영상 생성 실패")
+            message = poll_result.get("failureMessage") or "영상 생성 실패"
+            # vnew-live-fx C.6: 소리 검사 거절이면 칸에 failureKind "audio"(화면이 '소리 없이 다시 만들기'를 보인다).
+            _fail_variant(owner, pid, gen_id, index, variant, claim, message,
+                          kind=str(poll_result.get("failureKind") or "") or _audio_kind(message))
             return
         output_key = _find_output_key(prefix, arn)
 
@@ -4897,6 +5259,11 @@ def _do_concat(owner: str, pid: str, gen_id: str, variant: str) -> None:
         has_audio = _has_audio_stream(merged)
         log.info("vnew.gen.final_audio variant=%s has_audio=%s", variant, has_audio)
         key = final_real_key(owner, pid, gen_id) if variant == "real" else final_webtoon_key(owner, pid, gen_id)
+        # vnew-live-fx C.7: 통 테이크 실사 회차는 회차마다 다른 파일(final-real-r{n}.mp4)에 두고 결과에 n 을 둔다.
+        run_n = int((gen.get("realRun") or {}).get("n") or 0)
+        take_real = variant == "real" and gen.get("mode") == "previz-take" and run_n > 0
+        if take_real:
+            key = final_real_run_key(owner, pid, gen_id, run_n)
         STORE.put_bytes(key, merged, "video/mp4", bucket=vpoc_settings.VIDEO_BUCKET)
 
         def done_mutator(data: dict) -> None:
@@ -4904,6 +5271,8 @@ def _do_concat(owner: str, pid: str, gen_id: str, variant: str) -> None:
             if str(g.get("genId") or "") != gen_id:
                 raise _Discard()
             g[final_field] = {"status": "done", "key": key, "error": ""}
+            if take_real:
+                g[final_field]["n"] = run_n
 
         _commit(owner, pid, done_mutator)
     except _Discard:
@@ -4914,6 +5283,9 @@ def _do_concat(owner: str, pid: str, gen_id: str, variant: str) -> None:
             if str(g.get("genId") or "") != gen_id:
                 raise _Discard()
             g[final_field] = {"status": "failed", "key": "", "error": _msg(exc)}
+            run = (g.get("realRun") or {}).get("n")
+            if variant == "real" and g.get("mode") == "previz-take" and run:
+                g[final_field]["n"] = int(run)
 
         try:
             _commit(owner, pid, fail_mutator)
@@ -5260,9 +5632,13 @@ def cancel_gen(owner: str, pid: str) -> dict:
     return updated.get("gen") or {}
 
 
-def retry_segment(owner: str, pid: str, seg_id: str, variant: str = "real") -> dict:
+def retry_segment(owner: str, pid: str, seg_id: str, variant: str = "real", audio: bool | None = None) -> dict:
     """실패한 구간부터 다시(attempt+1). variant="real" 이면 그 구간부터 실사 재개,
     variant="webtoon" 이면 그 구간 웹툰 변환만 재시도(실사 진행을 막지 않았던 것).
+
+    vnew-live-fx C.6·C.10: audio 가 bool 이면 그 칸 state.audio(통 테이크 generate_audio)로 둔다("소리 없이 다시
+    만들기" = False). 다시 시도는 failureKind·error 를 비우고 gen.activeSince 를 지금으로 둔다(_gen_stale 이 본다).
+    통 테이크는 실사 회차(realRun)가 있을 때만 실사 칸을 다시 하고, 없으면 지금처럼 웹툰이다.
 
     gen 이 없거나 seg_id 를 못 찾으면 404. 진행 재개 후 드라이버를 깨운다.
     """
@@ -5275,10 +5651,10 @@ def retry_segment(owner: str, pid: str, seg_id: str, variant: str = "real") -> d
         gen_id_box["id"] = str(g.get("genId") or "")
         segments = g.get("segments") or []
 
-        # 프리비즈 계열: 그 컷/테이크·그 그림체만 다시 queued. 통 테이크는 웹툰만(실사 skipped).
+        # 프리비즈 계열: 그 컷/테이크·그 그림체만 다시 queued. 통 테이크는 실사 회차가 있으면 실사도, 없으면 웹툰만.
         if _is_previz_mode(g):
             if g.get("mode") == "previz-take":
-                target = "webtoon"
+                target = "real" if variant == "real" and g.get("realRun") else "webtoon"
             else:
                 target = str(variant if variant in ("real", "webtoon") else "real")
             cells = _previz_cells(g)
@@ -5294,15 +5670,21 @@ def retry_segment(owner: str, pid: str, seg_id: str, variant: str = "real") -> d
                 st["claimedAt"] = ""
                 st["invocationArn"] = ""
                 st["outputKey"] = ""
+                st.pop("failureKind", None)
+                if isinstance(audio, bool):
+                    st["audio"] = audio
                 break
             if not found:
                 raise VpocError("vnew.generate", "SegmentNotFound", "컷을 찾을 수 없습니다.", 404)
             # 그 그림체 병합만 다시(다른 그림체는 그대로).
             if target == "real":
                 g["finalReal"] = {"status": "waiting", "key": "", "error": ""}
+                if g.get("mode") == "previz-take":
+                    g["finalReal"]["n"] = int((g.get("realRun") or {}).get("n") or 0)
             else:
                 g["finalWebtoon"] = {"status": "waiting", "key": "", "error": ""}
             g["status"] = "running"
+            g["activeSince"] = now_iso()
             return
 
         found = False
@@ -5353,6 +5735,7 @@ def retry_segment(owner: str, pid: str, seg_id: str, variant: str = "real") -> d
         else:
             g["finalWebtoon"] = {"status": "waiting", "key": "", "error": ""}
         g["status"] = "running"
+        g["activeSince"] = now_iso()  # vnew-live-fx C.10: 다시 시작한 gen 이 createdAt 기준으로 곧바로 멈춤 판정되지 않게.
 
     updated, _ = plan_mod.mutate_plan(owner, pid, mutator)
     if gen_id_box["id"]:
@@ -5369,7 +5752,12 @@ def select_variant(owner: str, pid: str, variant: str) -> dict:
         g = data.get("gen") or {}
         if not g:
             raise VpocError("vnew.generate", "NoGen", "영상 생성 기록이 없습니다.", 404)
-        if g.get("status") != "done":
+        if g.get("mode") == "previz-take":
+            # vnew-live-fx C.8: 통 테이크는 gen 이 진행 중이 아니고 그 그림체 final 이 done 이면 고른다
+            # (실사 회차가 실패해 partial 이어도 웹툰을 고를 수 있다).
+            if g.get("status") == "running":
+                raise VpocError("vnew.generate", "NotDone", "영상 생성이 끝난 뒤에 고를 수 있습니다.", 409)
+        elif g.get("status") != "done":
             raise VpocError("vnew.generate", "NotDone", "영상 생성이 끝난 뒤에 고를 수 있습니다.", 409)
         final = g.get("finalReal") if variant == "real" else g.get("finalWebtoon")
         if (final or {}).get("status") != "done":
@@ -5440,6 +5828,9 @@ def gen_view(owner: str, pid: str, plan: dict) -> dict | None:
             "promptEn": state.get("promptEn") or "",
             "promptBytes": state.get("promptBytes") or 0,
             "padded": bool(state.get("padded")),
+            # vnew-live-fx C.2: 소리 거절이면 "audio"(화면 '소리 없이 다시 만들기'), 칸 소리 설정(없으면 None).
+            "failureKind": state.get("failureKind") or "",
+            "audio": state.get("audio") if isinstance(state.get("audio"), bool) else None,
         }
 
     # 콘티 cut.no(콘티 컷 번호) 를 cutId 로 찾는다(행 머리 "컷 {no}" 표시용).
@@ -5494,6 +5885,23 @@ def gen_view(owner: str, pid: str, plan: dict) -> dict | None:
 
     final_real = gen.get("finalReal") or {}
     final_webtoon = gen.get("finalWebtoon") or {}
+    # vnew-live-fx C.2: 통 테이크 실사 버전 보기. 이전 회차 영상은 presigned(브라우저 표시용, 모델에는 보내지 않는다).
+    real_history_out = []
+    for item in gen.get("realHistory") or []:
+        if not isinstance(item, dict):
+            continue
+        real_history_out.append({
+            "n": item.get("n"),
+            "startedAt": item.get("startedAt") or "",
+            "status": item.get("status") or "",
+            "audio": bool(item.get("audio")),
+            "finalUrl": _presign_video(str(item.get("finalKey") or "")),
+            "units": [
+                {"id": u.get("id"), "status": u.get("status"), "error": u.get("error") or ""}
+                for u in item.get("units") or [] if isinstance(u, dict)
+            ],
+        })
+    real_block = _real_block_text(owner, plan, gen) if is_take else ""
     return {
         "genId": gen.get("genId"),
         "mode": mode,
@@ -5513,6 +5921,7 @@ def gen_view(owner: str, pid: str, plan: dict) -> dict | None:
             "error": final_real.get("error") or "",
             "note": final_real.get("note") or "",
             "videoUrl": _presign_video(final_real.get("key") or ""),
+            "n": final_real.get("n"),
         },
         "finalWebtoon": {
             "status": final_webtoon.get("status"),
@@ -5526,6 +5935,13 @@ def gen_view(owner: str, pid: str, plan: dict) -> dict | None:
         # 프리비즈가 바뀌어 이 gen 의 계획(녹화·지시서)이 지금과 맞지 않으면 True(설계자 2026-10-22, ⑤).
         # 화면은 stale 이면 '새로 만들기'로 유도하고 이전 결과는 접이식으로만 보인다.
         "stale": _gen_previz_stale(gen, plan),
+        # vnew-live-fx C.2: 실사 회차(realRun)·이전 회차(최대 3)·금액·시작 가능 여부와 못 하는 이유(한국어).
+        "realRun": dict(gen.get("realRun")) if isinstance(gen.get("realRun"), dict) else None,
+        "realHistory": real_history_out,
+        "realEstimate": real_estimate(gen) if is_take else None,
+        "canStartReal": bool(is_take and not real_block),
+        "realBlock": real_block,
+        "realEnabled": bool(vnew_settings.VNEW_TAKE_REAL),  # vnew-live-fx C3: 화면이 실사 열을 그릴지(끔 + 회차 없음이면 지금 화면)
     }
 
 
@@ -5540,7 +5956,9 @@ def _reconcile_gen_stale(gen: dict) -> dict:
 def _gen_stale(gen: dict) -> bool:
     if gen.get("status") != "running":
         return False
-    created = plan_mod._parse_iso(gen.get("createdAt") or "")
+    # vnew-live-fx C.10: 실사 회차 시작·다시 시도 때 둔 activeSince 를 먼저 본다(없으면 지금처럼 createdAt).
+    # 30분 지난 gen 에서 다시 시작한 작업이 곧바로 멈춘 것으로 보이던 결함을 고쳤다.
+    created = plan_mod._parse_iso(gen.get("activeSince") or gen.get("createdAt") or "")
     if not created:
         return False
     return (datetime.now(timezone.utc) - created).total_seconds() > GEN_STALL_S
@@ -5689,7 +6107,9 @@ def _user_facing_error(message: str) -> str:
     return message
 
 
-def _fail_variant(owner: str, pid: str, gen_id: str, index: int, variant: str, claim: str, message: str) -> None:
+def _fail_variant(owner: str, pid: str, gen_id: str, index: int, variant: str, claim: str, message: str,
+                  kind: str = "") -> None:
+    """칸 하나를 failed 로 둔다. kind(vnew-live-fx C.6, 예 "audio")가 있으면 state.failureKind, 없으면 그 키를 지운다."""
     message = _user_facing_error(message)
 
     def mutator(data: dict) -> None:
@@ -5702,15 +6122,28 @@ def _fail_variant(owner: str, pid: str, gen_id: str, index: int, variant: str, c
         state["error"] = message
         state["claim"] = ""
         state["claimedAt"] = ""
+        if kind:
+            state["failureKind"] = str(kind)
+        else:
+            state.pop("failureKind", None)
         # 옛 순차 모드: 실사 구간 실패는 그 뒤 진행을 막고 gen partial. 웹툰 실패는 실사를 막지 않는다.
-        # 프리비즈 컷 단위: 컷은 서로 독립 — 한 컷 실패가 다른 컷을 막지 않는다(실패 컷만 retry).
-        if variant == "real" and g.get("mode") != "previz":
+        # 프리비즈 컷 단위·통 테이크: 칸은 서로 독립 — 한 칸 실패가 다른 칸을 막지 않는다(실패 칸만 retry).
+        # vnew-live-fx C.10: previz-take 실사 실패가 gen 을 바로 partial 로 바꿔 드라이버를 멈추던 결함을 고쳤다.
+        if variant == "real" and g.get("mode") not in ("previz", "previz-take"):
             g["status"] = "partial"
 
     try:
         _commit(owner, pid, mutator)
     except _Discard:
         return
+
+
+def _audio_kind(message: str) -> str:
+    """실패 문구가 소리 검사 거절(fal 안내 문구 또는 audio+sensitive 원문)이면 "audio", 아니면 ""(vnew-live-fx C.6)."""
+    text = str(message or "")
+    if text == vpoc_fal._REJECT_AUDIO_MSG or vpoc_fal._is_audio_rejection(text):
+        return "audio"
+    return ""
 
 
 def _msg(exc: BaseException) -> str:

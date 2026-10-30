@@ -2166,6 +2166,96 @@ textarea.vnew-field-input {
   color: var(--text-muted, #6b7280);
 }
 
+/* ---- ⑤ 통 테이크 실사 버전·나란히 보기(vnew-live-fx 묶음 C, RC5·RC9) ---- */
+
+.vnew-real-lead,
+.vnew-real-block,
+.vnew-real-error {
+  margin: 0;
+}
+
+.vnew-real-start {
+  align-self: flex-start;
+}
+
+.vnew-real-progress {
+  display: grid;
+  gap: 6px;
+}
+
+.vnew-real-progress-fill {
+  height: 100%;
+  border-radius: 999px;
+  background: var(--accent, #cb3208);
+  transition: width 0.3s ease;
+}
+
+.vnew-real-history {
+  margin-top: 4px;
+}
+
+.vnew-real-history summary {
+  cursor: pointer;
+  font-size: 13px;
+  color: var(--text-muted, #6b7280);
+}
+
+.vnew-real-history-item {
+  display: grid;
+  gap: 6px;
+  margin-top: 10px;
+}
+
+.vnew-real-history-label {
+  margin: 0;
+  font-size: 12px;
+  color: var(--text-muted, #6b7280);
+}
+
+.vnew-real-confirm-text {
+  margin: 0 0 8px;
+}
+
+.vnew-real-audio {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin: 4px 0 8px;
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.vnew-take-compare {
+  grid-column: 1 / -1;
+}
+
+.vnew-take-compare-row {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 16px;
+  margin-top: 10px;
+}
+
+.vnew-take-compare-item {
+  display: grid;
+  gap: 6px;
+  align-content: start;
+}
+
+.vnew-take-compare-tools {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+  margin-top: 12px;
+}
+
+@media (max-width: 768px) {
+  .vnew-take-compare-row {
+    grid-template-columns: 1fr;
+  }
+}
+
 /* ---- 추가 복장(outfits) ---- */
 
 .vnew-outfits {

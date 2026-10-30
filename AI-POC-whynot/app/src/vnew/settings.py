@@ -179,6 +179,12 @@ VNEW_CASTING_STALL_S = _int("VNEW_CASTING_STALL_S", 600)
 # 뽑기 시작부터 이 시간이 지나면 남은 칸을 실패로 끝낸다.
 VNEW_CASTING_POLL_MAX_S = _int("VNEW_CASTING_POLL_MAX_S", 900)
 
+# 통 테이크 실사 버전(vnew-live-fx 묶음 C, 2026-10-30). 켜면 웹툰 통 테이크가 끝난 gen 에서 같은 프리비즈 녹화로
+# 실사 버전(회차)을 만들 수 있다(POST /generate/real). false 면 그 시작만 404(TakeRealDisabled)이고, 이미 시작한 실사
+# 회차는 드라이버가 끝까지 진행한다. 소리 검사 거절 안내·"소리 없이 다시 만들기"·기존 결함 수정(C.6·C.10)은 이 설정과
+# 상관없이 적용한다. 저장된 realRun·realHistory 는 지우지 않는다.
+VNEW_TAKE_REAL = _bool("VNEW_TAKE_REAL", True)
+
 # --- ⑤ 촬영 지시서(shot brief) (설계자 2026-10-22) ---
 # 프리비즈 승인 직후, 장소마다 1회 호출해 그 장소 컷들의 "촬영 전문 언어" 지시서를 쓴다. 작성 모델은
 # 설계와 같은 체인(Astra 먼저, 실패 시 Claude 분석 체인). 장면·배경·연기·대사 연기를 영어로 섬세히.
