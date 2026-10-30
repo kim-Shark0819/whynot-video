@@ -25973,7 +25973,9 @@ _CF_OFF_SHA = {
     "outfit.real.back": "1eb3c9e7c4ad6eeb3c168dc4257997ffb4a21a6c57ce9fc06fb492ae984db430",
     "detailOld": "d4f1a977a93bc0cb12c39239f07c7b15c855295353199fd9391ec9b6c3dd58a2",
     "buildTrace": "8f36c6867cb5c31ecaa7629587bbc20b4caee9b41f96979892221a97e6c70af7",
-    "buildKeys": "d43c5c325f757635bb9290a8b990d83f26c59cb7a4c609d8358e1c465915292b",
+    # 지시서 102 피드백(2026-10-30): start_build_outfit 이 추가 복장 variant 에 startedAt 을 적어 저장 키 집합이 하나 늘었다.
+    # 그 키만 빼고 재면 구현 전 값 d43c5c325f757635bb9290a8b990d83f26c59cb7a4c609d8358e1c465915292b 그대로다(다른 지문 31개는 그대로).
+    "buildKeys": "619815f5e47898ba29debf3394dee6788c433d25453352fec5916f6c3a9c9ae5",
 }
 
 # cf-g: 충실 SYSTEM(design §4.1 원문) sha256. 설계 문서의 원문과 글자째 같은 것을 확인하고 잰 값이다.
@@ -29383,6 +29385,796 @@ def check_vnew_char_fidelity_screen() -> None:
             print(f"       cf: {line}")
 
 
+# ---------------------------------------------------------------- 추가 복장 버튼·운영 스토리 버튼(ob, 2026-10-30, 지시서 102)
+#
+# 결함: 아직 만들지 않은 추가 복장 variant 는 서버(_empty_outfit_variant)가 status "queued" 로 저장한다. vnew.js outfitCard 가
+# queued 도 "만드는 중"으로 보아 [이미지 만들기]가 늘 막혔다(049a78b 부터). 서버 start_build_outfit 은 images 일 때만 409 다.
+# 화면 기준을 images 로 맞췄다. 운영은 vnew 를 켜도 만들기 창의 story 버튼을 보인다(VNEW_HIDE_STORY=false, 화면만 읽는다).
+# 피드백(같은 날): 복장을 그리는 동안 상세 폴링이 따라가고(schedulePoll·outfitsBuilding), 결과 칸이 없어도 "만드는 중…"을 보인다.
+# 서버는 그리기 시작 시각(startedAt)을 적고 VNEW_OUTFIT_STALL_S(기본 1200초)를 넘은 images 를 멈춘 것으로 본다(상세 failed·
+# 다시 만들기 409 없음). node 가짜 DOM(_CAST_SCREEN_NODE_HARNESS·_CF_SCREEN_NODE_STUBS 그대로)·메모리 저장소·render.py 렌더
+# (파일 쓰지 않음). 외부 호출 없음.
+
+_OB_TITLE_NO_BASE = "먼저 캐릭터(기본 복장)를 만들어 주세요."
+_OB_STALLED = "만들기가 중단됐습니다. 다시 만들어 주세요."
+_OB_STALL_S = 1200
+# outfitCard 의 고친 두 줄과 고치기 전 줄(변형 검사 ob-c 가 옛 판단으로 되돌려 검사가 결함을 잡는지 본다).
+_OB_FIXED_LINES = (
+    ('      if (ov.status === "images") anyBuilding = true;',
+     '      if (ov.status === "images" || ov.status === "queued") anyBuilding = true;'),
+    ('        } else if (ov.status === "images") {',
+     '        } else if (ov.status === "images" || ov.status === "queued") {'),
+)
+
+_OB_CARD_NODE_CASES = r"""
+function cardView(card) {
+  var make = byClass(card, "vnew-outfit-make")[0];
+  var del = byClass(card, "vnew-outfit-del")[0];
+  return {
+    make: [make.textContent, make.disabled, make.title],
+    del: del.disabled,
+    cols: byClass(card, "vnew-outfit-col").map(function (col) {
+      return [byTag(col, "h3")[0].textContent, col.children.slice(1).map(function (n) { return [n.className, n.textContent]; })];
+    }),
+    building: walk(card).filter(function (n) { return n._text === "만드는 중…"; }).length,
+    order: card.children.map(function (n) { return n.className; })
+  };
+}
+function ov(status, extra) {
+  var o = { status: status, frontUrl: "", backUrl: "", error: "" };
+  Object.keys(extra || {}).forEach(function (k) { o[k] = extra[k]; });
+  return o;
+}
+var READY = ov("ready", { frontUrl: "https://signed.example/f.jpg", backUrl: "https://signed.example/b.jpg" });
+function outfitOf(real, webtoon) {
+  var o = { id: "o 1", labelKo: "후드티", promptEn: "a light blue hoodie", source: "auto" };
+  if (real !== undefined || webtoon !== undefined) o.variants = { real: real, webtoon: webtoon };
+  return o;
+}
+var DETAIL = { id: "ch 1", version: 2 };
+var STALLED = "만들기가 중단됐습니다. 다시 만들어 주세요.";
+function card(outfit, madeBefore) { return outfitCard(new FakeNode("div"), DETAIL, outfit, madeBefore); }
+async function run() {
+  out.cards = {
+    queued: cardView(card(outfitOf(ov("queued"), ov("queued")), true)),
+    images: cardView(card(outfitOf(ov("images"), ov("images")), true)),
+    imagesQueued: cardView(card(outfitOf(ov("images"), ov("queued")), true)),
+    imagesFailed: cardView(card(outfitOf(ov("images"), ov("failed", { error: "가짜 실패" })), true)),
+    stalled: cardView(card(outfitOf(ov("failed", { error: STALLED }), ov("failed", { error: STALLED })), true)),
+    failedNoText: cardView(card(outfitOf(ov("failed"), ov("queued")), true)),
+    readyImages: cardView(card(outfitOf(ov("images"), READY), true)),
+    ready: cardView(card(outfitOf(READY, READY), true)),
+    readyQueued: cardView(card(outfitOf(ov("queued"), READY), true)),
+    version0: cardView(card(outfitOf(ov("queued"), ov("queued")), false)),
+    version0Ready: cardView(card(outfitOf(READY, READY), false)),
+    failed: cardView(card(outfitOf(ov("failed", { error: "실패 A" }), ov("failed", { error: "실패 B" })), true)),
+    readyFailed: cardView(card(outfitOf(ov("failed", { error: "가짜 실패" }), READY), true)),
+    noVariants: cardView(card(outfitOf(), true))
+  };
+  // queued 카드 [이미지 만들기] → 확인 → POST build → 화면 다시 읽기.
+  reset(); confirmAnswers.push(true);
+  var c1 = card(outfitOf(ov("queued"), ov("queued")), true);
+  var b1 = byClass(c1, "vnew-outfit-make")[0];
+  b1.fire("click");
+  var during = b1.disabled;
+  await tick();
+  out.click = { confirms: confirms.length, calls: calls.slice(), refreshed: refreshed.slice(), during: during };
+  // 확인 창에서 취소 → 호출 없음.
+  reset(); confirmAnswers.push(false);
+  var c2 = card(outfitOf(ov("queued"), ov("queued")), true);
+  var b2 = byClass(c2, "vnew-outfit-make")[0];
+  b2.fire("click");
+  await tick();
+  out.cancel = { confirms: confirms.length, calls: calls.slice(), disabled: b2.disabled };
+  // 서버가 거절(409 이미 만드는 중) → 버튼 다시 켬·오류 문구.
+  reset(); confirmAnswers.push(true); apiPlan.push({ err: { message: "이미 만들고 있습니다." } });
+  var c3 = card(outfitOf(ov("queued"), ov("queued")), true);
+  var b3 = byClass(c3, "vnew-outfit-make")[0];
+  b3.fire("click");
+  await tick();
+  var e3 = byClass(c3, "vnew-outfit-error")[0];
+  out.conflict = { disabled: b3.disabled, error: [e3.textContent, e3.style.display], refreshed: refreshed.slice() };
+  // 서버 응답(실제 detail_view, ob-b) → outfitsSection 카드.
+  out.server = SERVER.map(function (d) {
+    var sec = outfitsSection(new FakeNode("div"), d);
+    return byClass(sec, "vnew-outfit-card").map(function (c) {
+      var v = cardView(c);
+      return [byClass(c, "vnew-outfit-name")[0].textContent, v.make, v.building];
+    });
+  });
+  out.innerHTML = innerHTMLUsed;
+  console.log(JSON.stringify(out));
+}
+run().catch(function (e) { console.error(String((e && e.stack) || e)); process.exit(1); });
+"""
+
+# app.js applyVnewToggles 를 vm 문맥마다 새로 돌린다(const 를 경우마다 다시 선언). 버튼·메뉴는 index.html 과 같은 모양의 가짜다.
+_OB_TOGGLE_NODE = r"""
+var vm = require("vm");
+function classes(list) {
+  var set = list.slice();
+  return {
+    add: function (c) { if (set.indexOf(c) < 0) set.push(c); },
+    remove: function (c) { set = set.filter(function (x) { return x !== c; }); },
+    contains: function (c) { return set.indexOf(c) >= 0; }
+  };
+}
+function node(cls, text) { return { classList: classes(cls), textContent: text || "" }; }
+function trackButton(track, hidden) {
+  var b = node(["input-type"].concat(hidden ? ["is-hidden"] : []));
+  b.strong = node([], track === "video" ? "영상 개발로 진행" : track);
+  b.smalls = [node([], track === "video" ? "웹툰 컷 → 영상" : track), node(["track-disabled-reason", "is-hidden"], "꺼짐")];
+  b.querySelector = function (sel) { return sel === "strong" ? b.strong : null; };
+  b.querySelectorAll = function (sel) { return sel === "small" ? b.smalls : []; };
+  return b;
+}
+var results = {};
+CASES.forEach(function (c) {
+  var dom = {
+    story: [trackButton("story"), trackButton("story")],
+    video: [trackButton("video"), trackButton("video")],
+    vnew: [trackButton("video_new", true), trackButton("video_new", true)],
+    nav: node(["nav-item", "is-hidden"])
+  };
+  var unknown = [];
+  var sandbox = { window: {}, __out: {} };
+  sandbox.$$ = function (sel) {
+    if (sel === '[data-vnew-only="1"]') return dom.vnew;
+    if (sel === '.project-track-options [data-track="story"]') return dom.story;
+    if (sel === '.project-track-options [data-track="video"]') return dom.video;
+    unknown.push(sel);
+    return [];
+  };
+  sandbox.$ = function (sel) {
+    if (sel === "#navCharacters") return dom.nav;
+    unknown.push(sel);
+    return null;
+  };
+  vm.createContext(sandbox);
+  if (c[1] !== null) vm.runInContext(c[1], sandbox);
+  vm.runInContext(CODE + "\napplyVnewToggles();\n__out.hide = VNEW_HIDE_STORY;\n", sandbox);
+  results[c[0]] = {
+    hideStory: sandbox.__out.hide,
+    story: dom.story.map(function (b) { return b.classList.contains("is-hidden"); }),
+    vnew: dom.vnew.map(function (b) { return b.classList.contains("is-hidden"); }),
+    video: dom.video.map(function (b) { return [b.strong.textContent, b.smalls[0].textContent]; }),
+    nav: dom.nav.classList.contains("is-hidden"),
+    unknown: unknown
+  };
+});
+console.log(JSON.stringify(results));
+"""
+
+# ob-f: vnew.js schedulePoll(+ outfitsBuilding·stopPolling) 를 node 로 돌린다. FLOWS 는 실제 detail_view 응답 목록이다.
+# refreshDetail 을 "다음 응답으로 outfitsSection 을 그리고 schedulePoll" 로 바꿔 끼워 예약이 없을 때까지 타이머를 쏜다.
+_OB_POLL_NODE_CASES = r"""
+function pollOf(d) { timers.length = 0; state.view = "detail"; schedulePoll({}, d); return timers.map(function (t) { return t[1]; }); }
+function o2(real, webtoon) { return { id: "o", variants: { real: { status: real }, webtoon: { status: webtoon } } }; }
+function cardsOf(sec) {
+  return byClass(sec, "vnew-outfit-card").map(function (c) {
+    var make = byClass(c, "vnew-outfit-make")[0];
+    return [byClass(c, "vnew-outfit-name")[0].textContent, [make.textContent, make.disabled],
+            walk(c).filter(function (n) { return n._text === "만드는 중…"; }).length,
+            byClass(c, "login-error").filter(function (n) { return n.className === "login-error"; }).map(function (n) { return n.textContent; })];
+  });
+}
+out.poll = {
+  images: pollOf({ status: "ready", outfits: [o2("images", "images")] }),
+  oneOfTwo: pollOf({ status: "ready", outfits: [o2("ready", "ready"), o2("queued", "images")] }),
+  readyFailed: pollOf({ status: "ready", outfits: [o2("ready", "failed")] }),
+  queued: pollOf({ status: "ready", outfits: [o2("queued", "queued")] }),
+  failed: pollOf({ status: "ready", outfits: [o2("failed", "failed")] }),
+  odd: pollOf({ status: "ready", outfits: [{ id: "x" }, null, "s", { variants: null }] }),
+  notArray: pollOf({ status: "ready", outfits: { a: o2("images", "images") } }),
+  otherKey: pollOf({ status: "ready", outfits: [{ variants: { extra: { status: "images" } } }] }),
+  building: pollOf({ status: "building", outfits: [o2("ready", "ready")] }),
+  drawing: pollOf({ status: "ready", casting: { status: "drawing" }, outfits: [] }),
+  none: pollOf({ status: "ready" }),
+  nul: pollOf(null)
+};
+out.flows = FLOWS.map(function (list) {
+  var flow = list.slice();
+  var host = new FakeNode("div");
+  var steps = [];
+  var calls = 0;
+  refreshDetail = function (h, first) {
+    calls += 1;
+    var d = flow.shift();
+    if (!d) { steps.push("응답이 끝난 뒤에도 다시 읽음"); return; }
+    steps.push(cardsOf(outfitsSection(h, d)));
+    schedulePoll(h, d);
+  };
+  timers.length = 0; state.view = "detail";
+  var first = flow.shift();
+  steps.push(cardsOf(outfitsSection(host, first)));
+  schedulePoll(host, first);
+  var delays = [];
+  while (timers.length && delays.length < 10) {
+    var t = timers.pop();
+    delays.push(t[1]);
+    timers.length = 0;
+    t[0]();
+  }
+  return { steps: steps, delays: delays, calls: calls, left: flow.length, pending: timers.length };
+});
+// 화면을 떠나면(목록) 예약이 와도 다시 읽지 않는다.
+var leftCalls = 0;
+refreshDetail = function () { leftCalls += 1; };
+timers.length = 0; state.view = "detail";
+schedulePoll({}, { status: "ready", outfits: [o2("images", "images")] });
+state.view = "list";
+var leftTimer = timers.pop();
+if (leftTimer) leftTimer[0]();
+out.left = [leftTimer ? 1 : 0, timers.length, leftCalls];
+console.log(JSON.stringify(out));
+"""
+
+
+class _ObIdleThread(_CfSyncThread):
+    """threading.Thread 대신: start() 가 아무것도 하지 않는다(그림 0장 — 서버가 둔 images 상태를 그대로 본다)."""
+
+    def start(self) -> None:
+        return None
+
+
+def _ob_card_script(vjs: str, details: list, *, outfits_js: str | None = None) -> str:
+    """vnew.js 구역 el·pure·outfits(_CF_SCREEN_SLICES) + cf-s 하네스·대역 + 상세 응답으로 node 스크립트를 만든다.
+
+    outfits_js 가 있으면 outfits 구역 대신 그 글을 넣는다(변형 검사).
+    """
+    parts: list[str] = []
+    for name, start, end in _CF_SCREEN_SLICES:
+        if name not in ("el", "pure", "outfits"):
+            continue
+        at = vjs.find(start)
+        until = vjs.find(end, at + 1) if at >= 0 else -1
+        if at < 0 or until < 0:
+            raise ValueError(f"vnew.js 구역을 찾지 못했습니다: {name}")
+        parts.append(outfits_js if name == "outfits" and outfits_js is not None else vjs[at:until])
+    head = _CAST_SCREEN_NODE_HARNESS + "var SERVER = " + json.dumps(details, ensure_ascii=False) + ";\n" + _CF_SCREEN_NODE_STUBS
+    return head + "".join(parts) + _OB_CARD_NODE_CASES
+
+
+# ob-f: schedulePoll 구역(cast-l 이 자르는 것과 같은 "schedulePoll ~ backRow": schedulePoll·outfitsBuilding·stopPolling).
+_OB_POLL_SLICE = ("  function schedulePoll(host, detail) {", "  function backRow(host) {")
+
+
+def _ob_poll_script(vjs: str, flows: list) -> str:
+    """vnew.js el·pure·outfits 구역 + schedulePoll 구역 + cf-s 하네스·대역 + 상세 응답 흐름(FLOWS)으로 node 스크립트를 만든다."""
+    parts: list[str] = []
+    for name, start, end in _CF_SCREEN_SLICES + (("poll",) + _OB_POLL_SLICE,):
+        if name not in ("el", "pure", "outfits", "poll"):
+            continue
+        at = vjs.find(start)
+        until = vjs.find(end, at + 1) if at >= 0 else -1
+        if at < 0 or until < 0 or vjs.count(start) != 1:
+            raise ValueError(f"vnew.js 구역을 한 번 찾지 못했습니다: {name}")
+        parts.append(vjs[at:until])
+    head = _CAST_SCREEN_NODE_HARNESS + "var FLOWS = " + json.dumps(flows, ensure_ascii=False) + ";\n" + _CF_SCREEN_NODE_STUBS
+    return head + "".join(parts) + _OB_POLL_NODE_CASES
+
+
+def _ob_server_details(charmod, vnew_pkg, flask_cls) -> dict:
+    """ob-b·ob-g: 메모리 저장소에서 실제 서버 경로로 추가 복장 상태를 바꿔 가며 상세 응답(GET 라우트)과 POST build 응답 코드를 모은다.
+
+    복장 후보 = sync_auto_outfits(분석 outfitLayersEn → _empty_outfit_variant queued, 개발 데이터와 같은 모양).
+    스레드는 시작하지 않는다(_ObIdleThread) — 그림·원장 0회. 완료는 run_build_outfit 이 쓰는 _set_outfit_variant 로 둔다.
+    ob-g 는 둘째 복장의 저장값(startedAt·char updatedAt)을 경우마다 써 넣고 GET·POST 한다. 시각은 지금 기준 몇 초 전으로 만든다.
+    """
+    owner, char_id = "tester", "char_ob"
+    with _pin_vnew(**_CF_PINS, VNEW_CHAR_FIDELITY=True, VNEW_3D_SIDE_VIEWS=True, OUTFIT_STALL_S=_OB_STALL_S), _CfFakes(charmod) as fakes:
+        charmod.threading.Thread = _ObIdleThread  # __exit__ 이 원래 Thread 로 되돌린다
+        char = _cf_old_char(char_id)
+        char["version"] = 2
+        char["outfits"] = []
+        char["analysis"]["outfitLayersEn"] = [{"labelKo": "후드티", "promptEn": "a light blue hoodie"},
+                                              {"labelKo": "정장 자켓", "promptEn": "a navy suit jacket"}]
+        key = charmod.char_key(owner, char_id)
+        fakes.store.json[key] = (json.loads(json.dumps(char)), "etag-ob")
+        charmod.sync_auto_outfits(owner, char_id, char["analysis"])
+        from datetime import datetime as _dt, timedelta as _td, timezone as _tz  # noqa: PLC0415
+
+        def ago(seconds: int) -> str:
+            return (_dt.now(_tz.utc) - _td(seconds=seconds)).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+        def age_of(value) -> str:
+            try:
+                age = (_dt.now(_tz.utc) - _dt.strptime(value, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=_tz.utc)).total_seconds()
+            except (TypeError, ValueError):
+                return "none" if value is None else "unreadable"
+            return "recent" if -5 <= age <= 120 else "old"
+
+        def stored_status() -> list:
+            # startedAt 은 시각 대신 "recent"(지금부터 2분 안)·"old" 로 적는다.
+            out = []
+            for o in fakes.store.json[key][0].get("outfits") or []:
+                row = {}
+                for v in charmod.settings.VARIANTS:
+                    ov = dict((o.get("variants") or {}).get(v) or {})
+                    if "startedAt" in ov:
+                        ov["startedAt"] = age_of(ov["startedAt"])
+                    row[v] = ov
+                out.append([o.get("labelKo"), row])
+            return out
+
+        app = flask_cls(__name__)
+        app.register_blueprint(vnew_pkg.create_blueprint(vnew_pkg.VnewDependencies(
+            require_auth=lambda handler: handler, current_owner=lambda: owner)))
+        client = app.test_client()
+
+        def detail() -> dict:
+            resp = client.get(f"/api/vnew/characters/{char_id}")
+            body = resp.get_json() or {}
+            return {"code": resp.status_code, "outfits": body.get("outfits") or [], "body": body}
+
+        def post(outfit_id: str) -> int:
+            return client.post(f"/api/vnew/characters/{char_id}/outfits/{outfit_id}/build").status_code
+
+        seeded = stored_status()
+        d_queued = detail()
+        ids = [o.get("id") for o in d_queued["outfits"]]
+        first, second = (ids + ["", ""])[:2]
+        s_first = post(first)
+        after_first = stored_status()
+        first_starts = [next(o for o in fakes.store.json[key][0]["outfits"] if o.get("id") == first)["variants"][v].get("startedAt")
+                        for v in charmod.settings.VARIANTS]
+        d_images = detail()
+        s_again = post(first)
+        root = f"users/{owner}/characters/{char_id}/outfits/{first}"
+        charmod._set_outfit_variant(owner, char_id, first, "webtoon",  # noqa: SLF001 — run_build_outfit 이 쓰는 함수
+                                    {"status": "ready", "frontKey": f"{root}/webtoon/front.jpg", "backKey": f"{root}/webtoon/back.jpg"})
+        charmod._set_outfit_variant(owner, char_id, first, "real", {"status": "failed", "error": "가짜 실패"})  # noqa: SLF001
+        d_done = detail()
+        s_rebuild = post(first)
+        s_second = post(second)
+        after_second = stored_status()
+
+        # ob-g: 멈춘 복장(지시서 102 피드백). 첫 복장은 다시 끝낸 상태로 두고, 둘째 복장의 저장값을 경우마다 바로 써 넣는다.
+        charmod._set_outfit_variant(owner, char_id, first, "webtoon", {"status": "ready"})  # noqa: SLF001
+        charmod._set_outfit_variant(owner, char_id, first, "real", {"status": "failed", "error": "가짜 실패"})  # noqa: SLF001
+
+        def outfit_of(data: dict, oid: str) -> dict:
+            return next(o for o in data.get("outfits") or [] if o.get("id") == oid)
+
+        def img(**extra) -> dict:
+            return {"status": "images", "frontKey": "", "backKey": "", "error": "", **extra}
+
+        stall = _OB_STALL_S
+        root2 = f"users/{owner}/characters/{char_id}/outfits/{second}"
+        both = lambda fields: {"webtoon": fields, "real": dict(fields)}  # noqa: E731
+        scenarios = [
+            ("recent", both(img(startedAt=ago(60))), ago(30)),
+            ("edgeIn", both(img(startedAt=ago(stall - 30))), ago(30)),
+            ("stalled", both(img(startedAt=ago(stall + 60))), ago(30)),
+            ("oldNoStartOld", both(img()), ago(stall + 60)),
+            ("oldNoStartRecent", both(img()), ago(60)),
+            ("badStartRecent", both(img(startedAt="2026-10-30 12:00")), ago(60)),
+            ("badStartOld", both(img(startedAt="garbage")), ago(stall + 60)),
+            ("startRecentUpdOld", both(img(startedAt=ago(60))), ago(stall * 4)),
+            ("future", both(img(startedAt=ago(-600))), ago(stall + 60)),
+            ("noTimes", both(img()), None),
+            ("mixed", {"webtoon": {"status": "ready", "frontKey": f"{root2}/webtoon/front.jpg", "backKey": f"{root2}/webtoon/back.jpg",
+                                   "error": "", "startedAt": ago(stall + 60)},
+                       "real": img(startedAt=ago(stall + 60))}, ago(30)),
+        ]
+        stalls: dict = {}
+        bodies: dict = {}
+        for name, fields, updated_at in scenarios:
+            data = fakes.store.json[key][0]
+            outfit_of(data, second)["variants"] = json.loads(json.dumps(fields))
+            if updated_at is None:
+                data.pop("updatedAt", None)
+            else:
+                data["updatedAt"] = updated_at
+            seeded_text = json.dumps(fakes.store.json[key][0], sort_keys=True)
+            resp = detail()
+            after_get = json.dumps(fakes.store.json[key][0], sort_keys=True)
+            bodies[name] = resp["body"]
+            view = outfit_of(resp["body"], second)["variants"]
+            with _LogCapture() as logs:
+                code = post(second)
+                restart_logs = logs.messages("vnew.outfit.stale_restart", level=logging.WARNING)
+            stored = outfit_of(fakes.store.json[key][0], second)["variants"]
+            stalls[name] = {
+                "get": [resp["code"], {v: [view[v]["status"], view[v]["error"]] for v in charmod.settings.VARIANTS}],
+                "getWrites": after_get != seeded_text,
+                "post": code,
+                "postWrites": json.dumps(fakes.store.json[key][0], sort_keys=True) != seeded_text,
+                "logs": restart_logs,
+                "stored": {v: [stored[v].get("status"), age_of(stored[v].get("startedAt"))] for v in charmod.settings.VARIANTS},
+            }
+        return {
+            "empty": charmod._empty_outfit_variant(),  # noqa: SLF001
+            "seeded": seeded, "afterFirst": after_first, "afterSecond": after_second,
+            "sameStart": [len(set(first_starts)), age_of(first_starts[0])],
+            "codes": [d_queued["code"], d_images["code"], d_done["code"]],
+            "posts": [s_first, s_again, s_rebuild, s_second],
+            "details": [d_queued["body"], d_images["body"], d_done["body"]],
+            "stalls": stalls, "second": second,
+            "flows": [[bodies["recent"], bodies["recent"], d_done["body"]], [bodies["recent"], bodies["stalled"]],
+                      [bodies["recent"], bodies["mixed"]], [bodies["oldNoStartRecent"], bodies["oldNoStartOld"]]],
+            "calls": {"llm": len(fakes.llm), "seedream": len(fakes.seedream), "fal": len(fakes.fal), "ledger": len(fakes.ledger)},
+        }
+
+
+def check_vnew_outfit_button() -> None:
+    """지시서 102 — 추가 복장 [이미지 만들기] 비활성 결함, 운영 story 버튼 유지 설정(VNEW_HIDE_STORY). 외부 호출 없음.
+
+    (ob-a) vnew.js outfitCard 를 node 가짜 DOM 으로 실행: queued 켬 "이미지 만들기"·images 끔·ready+images 끔 "만드는 중…"·ready
+           "다시 만들기" 켬·ready+queued 켬(만드는 중 없음)·version 0 끔 title 안내·failed 켬·ready+failed 오류·variants 없음 켬.
+           누르기: 확인 → POST …/outfits/<id>/build → 다시 읽기, 취소 → 호출 0, 거절 → 다시 켬·오류 문구. innerHTML 0
+    (ob-b) 서버 → 화면: sync_auto_outfits 후보(queued) → GET 상세 → 카드 켬 → POST 202 → images → 카드 끔·POST 409 →
+           ready+failed → "다시 만들기" 켬·POST 202. 카드가 꺼진 경우 = 서버가 409 를 낸 경우. 그림·원장·LLM 0회
+    (ob-c) 변형: outfitCard 를 옛 판단(images||queued)으로 되돌리면 queued 카드가 막힌다(검사가 결함을 잡는다).
+           outfits 구역에 "queued" 비교 0, node --check vnew.js·app.js
+    (ob-d) 렌더(render.py, 파일 쓰지 않음): base VNEW_HIDE_STORY=true, 템플릿 runtime-config·runtime-track-flags 두 자리만(앱 env 없음),
+           prod runtime-config vnewHideStory: false·dev true·prod+true 되돌리기 true, config.prod.env BOM·LF·끝 두 줄, dev 오버레이 키 없음
+    (ob-e) app.js applyVnewToggles 를 node vm 으로 실행: 렌더된 prod·dev runtime-config.js, 플래그 true·없음·"false"(글자) → story 숨김,
+           false → 보임, 나머지 토글(vnew 버튼·video 제목·메뉴)은 같음, vnew 끔·runtime 없음 → 아무것도 안 바꿈
+    피드백(남은 이슈 1·2):
+    (ob-a) 위에 더해 images·images+queued → 버튼 줄 바로 위 "만드는 중…" 한 줄, images+failed·멈춤·오류 없는 failed → 결과 칸 오류
+    (ob-f) schedulePoll(+outfitsBuilding) node 실행: 복장 images 면 5000ms 예약, ready·failed·queued·이상한 모양 → 없음(기본 building·
+           캐스팅 drawing 그대로). 실제 detail_view 응답 흐름 4개(완료·멈춤·한쪽 멈춤·옛 데이터 멈춤)로 타이머를 쏴 끝나면 멈춤, 떠나면 안 읽음
+    (ob-g) 서버 멈춘 복장 11경우(OUTFIT_STALL_S 1200 고정): 안 409·경계 안 409·지남 202 + 경고 로그·startedAt 없음 + updatedAt 오래됨 202·
+           최근 409·startedAt 못 읽음(최근 409·오래됨 202)·startedAt 최근이면 updatedAt 무관 409·미래 409·시각 없음 409·한쪽만 멈춤 202.
+           상세는 멈춤만 failed + 문구, GET 은 저장을 바꾸지 않음, 409 는 저장 불변, 202 는 startedAt 새로 적음
+    (ob-h) VNEW_OUTFIT_STALL_S: settings 읽기(기본 1200·60 아래 60·글자 1200)·base·템플릿 앱 env(VNEW_3D_SIDE_SWAP 뒤)·prod·dev 렌더
+    """
+    import importlib.util  # noqa: PLC0415
+    import traceback as _tb  # noqa: PLC0415
+
+    sys.path.insert(0, str(ROOT / "app"))
+    from flask import Flask  # noqa: PLC0415
+
+    from src import vnew as vnew_pkg  # noqa: PLC0415
+    from src.vnew import characters as charmod  # noqa: PLC0415
+
+    bad: list[str] = []
+    seen: set[str] = set()
+    report: list[str] = []
+
+    def expect(group: str, got, want, what: str) -> None:
+        if got != want:
+            bad.append(f"({group}) {what}\n      결과 {got!r}\n      기대 {want!r}")
+
+    def safe(exc: BaseException) -> str:
+        # render.py 의 KEY=VALUE 형식 오류 문구는 원문 줄(값)을 담는다 — 값은 출력하지 않는다.
+        text = str(exc)
+        return "설정 줄 형식 오류(값 생략)" if "KEY=VALUE" in text else text[:300]
+
+    node = shutil.which("node")
+    vjs = (PUBLIC / "vnew.js").read_text(encoding="utf-8")
+    app_js = (PUBLIC / "app.js").read_text(encoding="utf-8")
+    runtime_js: dict[str, str] = {}
+    server_box: dict = {}
+
+    def server_of() -> dict:
+        # 서버 경우(ob-b·ob-g·ob-f 흐름)는 한 번만 돈다. node 가 없어도 ob-g 는 돈다.
+        if "server" not in server_box:
+            with _guard_real_llm() as real_llm:
+                server_box["server"] = _ob_server_details(charmod, vnew_pkg, Flask)
+                real_llm = list(real_llm)
+            expect("ob-b", real_llm, [], "가짜가 아닌 LLM 호출 0회")
+        return server_box["server"]
+
+    def ob_g() -> None:
+        # (ob-g) 멈춘 복장: 서버 판단·상세 보기·다시 시작·로그·저장 불변.
+        server = server_of()
+        restart = f"vnew.outfit.stale_restart char=char_ob outfit={server['second']} variants="
+        img_view = {"webtoon": ["images", ""], "real": ["images", ""]}
+        stalled_view = {"webtoon": ["failed", _OB_STALLED], "real": ["failed", _OB_STALLED]}
+
+        def kept(view, stored_age) -> dict:
+            return {"get": [200, view], "getWrites": False, "post": 409, "postWrites": False, "logs": [],
+                    "stored": {"webtoon": ["images", stored_age], "real": ["images", stored_age]}}
+
+        def restarted(view, variants: str) -> dict:
+            return {"get": [200, view], "getWrites": False, "post": 202, "postWrites": True, "logs": [restart + variants],
+                    "stored": {"webtoon": ["images", "recent"], "real": ["images", "recent"]}}
+
+        want_stalls = {
+            "recent": kept(img_view, "recent"),
+            "edgeIn": kept(img_view, "old"),
+            "stalled": restarted(stalled_view, "webtoon,real"),
+            "oldNoStartOld": restarted(stalled_view, "webtoon,real"),
+            "oldNoStartRecent": kept(img_view, "none"),
+            "badStartRecent": kept(img_view, "unreadable"),
+            "badStartOld": restarted(stalled_view, "webtoon,real"),
+            "startRecentUpdOld": kept(img_view, "recent"),
+            "future": kept(img_view, "old"),
+            "noTimes": kept(img_view, "none"),
+            "mixed": restarted({"webtoon": ["ready", ""], "real": ["failed", _OB_STALLED]}, "real"),
+        }
+        for name, want in want_stalls.items():
+            expect("ob-g", server["stalls"].get(name), want, f"멈춘 복장 {name}")
+        expect("ob-g", sorted(server["stalls"]), sorted(want_stalls), "멈춘 복장 경우 목록")
+        seen.add("ob-g")
+        report.append(f"ob-g: STALL {_OB_STALL_S}초 안 409 · 지남 202 + 로그 · startedAt 없음 + updatedAt 오래됨 202 · 최근 409 · "
+                      "상세 failed + 문구 · GET 저장 불변(11경우)")
+
+    def ob_ad() -> None:
+        if not node:
+            warn("node 가 없어 ob-a·ob-b·ob-f 화면 실행을 건너뜁니다 (E16)")
+            return
+        server = server_of()
+        got = _cf_run_node(node, _ob_card_script(vjs, server["details"]))
+
+        # (ob-a) 상태별 카드. order = 카드 자식 순서(결과 칸·"만드는 중…" 한 줄은 버튼 줄 바로 위).
+        figs = [["vnew-outfit-fig", "정면"], ["vnew-outfit-fig", "후면"]]
+        head, tail = ["vnew-outfit-top", "vnew-outfit-prompt"], ["vnew-outfit-btns", "login-error vnew-outfit-error"]
+        plain, grid, line = head + tail, head + ["vnew-outfit-grid"] + tail, head + ["vnew-hint vnew-outfit-building"] + tail
+        building = ["vnew-hint", "만드는 중…"]
+
+        def card(make, deleting, cols, n_building, order) -> dict:
+            return {"make": make, "del": deleting, "cols": cols, "building": n_building, "order": order}
+
+        make_on, make_off = ["이미지 만들기", False, ""], ["이미지 만들기", True, ""]
+        remake_on, remake_off = ["다시 만들기", False, ""], ["다시 만들기", True, ""]
+        want_cards = {
+            "queued": card(make_on, False, [], 0, plain),
+            "images": card(make_off, True, [], 1, line),
+            "imagesQueued": card(make_off, True, [], 1, line),
+            "imagesFailed": card(make_off, True, [["실사", [building]], ["웹툰 그림체", [["login-error", "가짜 실패"]]]], 1, grid),
+            "stalled": card(make_on, False, [["실사", [["login-error", _OB_STALLED]]], ["웹툰 그림체", [["login-error", _OB_STALLED]]]],
+                            0, grid),
+            "failedNoText": card(make_on, False, [["실사", [["login-error", "만들기에 실패했습니다."]]], ["웹툰 그림체", []]], 0, grid),
+            "readyImages": card(remake_off, True, [["실사", [building]], ["웹툰 그림체", figs]], 1, grid),
+            "ready": card(remake_on, False, [["실사", figs], ["웹툰 그림체", figs]], 0, grid),
+            "readyQueued": card(remake_on, False, [["실사", []], ["웹툰 그림체", figs]], 0, grid),
+            "version0": card(["이미지 만들기", True, _OB_TITLE_NO_BASE], False, [], 0, plain),
+            "version0Ready": card(["다시 만들기", True, _OB_TITLE_NO_BASE], False, [["실사", figs], ["웹툰 그림체", figs]], 0, grid),
+            "failed": card(make_on, False, [["실사", [["login-error", "실패 A"]]], ["웹툰 그림체", [["login-error", "실패 B"]]]], 0, grid),
+            "readyFailed": card(remake_on, False, [["실사", [["login-error", "가짜 실패"]]], ["웹툰 그림체", figs]], 0, grid),
+            "noVariants": card(make_on, False, [], 0, plain),
+        }
+        for name, want in want_cards.items():
+            expect("ob-a", got["cards"].get(name), want, f"outfitCard {name}")
+        expect("ob-a", sorted(got["cards"]), sorted(want_cards), "outfitCard 경우 목록")
+        expect("ob-a", got["click"], {"confirms": 1, "calls": [["POST", "/api/vnew/characters/ch%201/outfits/o%201/build", None]],
+                                      "refreshed": ["false"], "during": True}, "queued [이미지 만들기] 누르기 → 확인 → POST build → 다시 읽기")
+        expect("ob-a", got["cancel"], {"confirms": 1, "calls": [], "disabled": False}, "확인 창 취소 → 호출 0·버튼 그대로")
+        expect("ob-a", got["conflict"], {"disabled": False, "error": ["만들기를 시작하지 못했습니다: 이미 만들고 있습니다.", ""],
+                                         "refreshed": []}, "서버 거절 → 버튼 다시 켬·오류 문구")
+        expect("ob-a", got["innerHTML"], False, "innerHTML 을 쓰지 않는다")
+        seen.add("ob-a")
+
+        # (ob-b) 서버 → 화면.
+        empty = {"status": "queued", "frontKey": "", "backKey": "", "error": ""}
+        expect("ob-b", server["empty"], empty, "_empty_outfit_variant() 모양(서버 데이터 모양 그대로)")
+        expect("ob-b", server["seeded"], [["후드티", {"webtoon": empty, "real": empty}], ["정장 자켓", {"webtoon": empty, "real": empty}]],
+               "sync_auto_outfits 후보 = 두 그림체 queued")
+        images = dict(empty, status="images", startedAt="recent")
+        expect("ob-b", server["afterFirst"], [["후드티", {"webtoon": images, "real": images}], ["정장 자켓", {"webtoon": empty, "real": empty}]],
+               "POST build 뒤 그 복장만 두 그림체 images + startedAt(지금)")
+        expect("ob-b", server["sameStart"], [1, "recent"], "두 그림체 startedAt 이 같은 값(now_iso 한 번)")
+        expect("ob-b", [[row[0], {v: [ov.get("status"), ov.get("startedAt")] for v, ov in row[1].items()}] for row in server["afterSecond"]],
+               [["후드티", {"webtoon": ["images", "recent"], "real": ["images", "recent"]}],
+                ["정장 자켓", {"webtoon": ["images", "recent"], "real": ["images", "recent"]}]],
+               "다시 만들기·다른 복장 POST 뒤 startedAt 새로 적음")
+        expect("ob-b", server["codes"], [200, 200, 200], "GET 상세 200")
+        expect("ob-b", server["posts"], [202, 409, 202, 202], "POST build: queued 202·images 409·ready+failed 202·다른 queued 202")
+        expect("ob-b", [[o.get("variants", {}).get(v, {}).get("status") for o in d.get("outfits") or [] for v in ("webtoon", "real")]
+                        for d in server["details"]],
+               [["queued"] * 4, ["images", "images", "queued", "queued"], ["ready", "failed", "queued", "queued"]],
+               "상세 응답 복장 상태(실제 detail_view)")
+        expect("ob-b", sorted({k for d in server["details"] for o in d.get("outfits") or [] for ov in o["variants"].values() for k in ov}),
+               ["backUrl", "error", "frontUrl", "status"], "상세 응답 복장 variant 키 그대로(startedAt 은 보이지 않는다)")
+        expect("ob-b", got["server"], [
+            [["후드티", make_on, 0], ["정장 자켓", make_on, 0]],
+            [["후드티", make_off, 1], ["정장 자켓", make_on, 0]],
+            [["후드티", remake_on, 0], ["정장 자켓", make_on, 0]],
+        ], "서버 응답 → outfitsSection 카드(queued 켬·images 끔 + '만드는 중…'·ready+failed 다시 만들기 켬)")
+        pairs = [(got["server"][0][0][1][1], server["posts"][0]), (got["server"][1][0][1][1], server["posts"][1]),
+                 (got["server"][2][0][1][1], server["posts"][2]), (got["server"][1][1][1][1], server["posts"][3])]
+        expect("ob-b", [disabled == (code == 409) for disabled, code in pairs], [True] * 4, "카드가 꺼진 경우 = 서버가 409 를 낸 경우")
+        expect("ob-b", server["calls"], {"llm": 0, "seedream": 0, "fal": 0, "ledger": 0}, "그림·3D·원장·LLM 0회")
+        seen.add("ob-b")
+        report.append("ob-a·ob-b: queued 카드 켬 '이미지 만들기' · images 끔 + '만드는 중…' · 서버 409 와 카드 끔이 4경우 모두 같음")
+
+        # (ob-f) 폴링: 복장 images 면 5초 뒤 다시 읽기, 끝나면(ready·failed·멈춤) 예약 없음.
+        polled = _cf_run_node(node, _ob_poll_script(vjs, server["flows"]))
+        expect("ob-f", polled["poll"], {
+            "images": [5000], "oneOfTwo": [5000], "readyFailed": [], "queued": [], "failed": [], "odd": [], "notArray": [],
+            "otherKey": [], "building": [5000], "drawing": [5000], "none": [], "nul": [],
+        }, "schedulePoll 예약(복장 images·기본 building·캐스팅 drawing 만 5000ms)")
+        hood = ["후드티", ["다시 만들기", False], 0, ["가짜 실패"]]
+        jacket_busy = ["정장 자켓", ["이미지 만들기", True], 1, []]
+        want_flows = [
+            {"steps": [[hood, jacket_busy], [hood, jacket_busy], [hood, ["정장 자켓", ["이미지 만들기", False], 0, []]]],
+             "delays": [5000, 5000], "calls": 2, "left": 0, "pending": 0},
+            {"steps": [[hood, jacket_busy], [hood, ["정장 자켓", ["이미지 만들기", False], 0, [_OB_STALLED, _OB_STALLED]]]],
+             "delays": [5000], "calls": 1, "left": 0, "pending": 0},
+            {"steps": [[hood, jacket_busy], [hood, ["정장 자켓", ["다시 만들기", False], 0, [_OB_STALLED]]]],
+             "delays": [5000], "calls": 1, "left": 0, "pending": 0},
+            {"steps": [[hood, jacket_busy], [hood, ["정장 자켓", ["이미지 만들기", False], 0, [_OB_STALLED, _OB_STALLED]]]],
+             "delays": [5000], "calls": 1, "left": 0, "pending": 0},
+        ]
+        for index, want in enumerate(want_flows):
+            expect("ob-f", polled["flows"][index] if index < len(polled["flows"]) else None, want,
+                   f"흐름 {index}(실제 상세 응답): 그리는 동안 5초마다 다시 읽고, 끝나면 멈춘다")
+        expect("ob-f", polled["left"], [1, 0, 0], "예약 뒤 화면을 떠나면(목록) 다시 읽지 않고 새 예약도 없다")
+        seen.add("ob-f")
+        report.append("ob-f: 복장 images → 5초 예약 · ready·failed·멈춤 → 예약 없음 · 실제 응답 흐름 4개(완료·멈춤·한쪽 멈춤·옛 데이터)")
+
+    def ob_c() -> None:
+        at = vjs.find("  function outfitCard(host, detail, outfit, madeBefore) {")
+        until = vjs.find("  function addOutfitForm(host, detail) {", at + 1) if at >= 0 else -1
+        card_js = vjs[at:until] if at >= 0 and until >= 0 else ""
+        if not card_js:
+            bad.append("(ob-c) vnew.js 에서 outfitCard 를 찾지 못했습니다")
+        expect("ob-c", card_js.count('"queued"'), 0, "outfitCard 에 \"queued\" 비교가 없다(서버와 같은 기준 images)")
+        for fixed, _old in _OB_FIXED_LINES:
+            expect("ob-c", card_js.count(fixed + "\n"), 1, f"outfitCard 고친 줄 한 번: {fixed.strip()}")
+        if not node:
+            warn("node 가 없어 ob-c 변형·node --check 를 건너뜁니다 (E16)")
+            return
+        for name in ("vnew.js", "app.js"):
+            checked = subprocess.run([node, "--check", str(PUBLIC / name)], capture_output=True, text=True, encoding="utf-8")
+            if checked.returncode != 0:
+                bad.append(f"(ob-c) node --check {name} 실패: {(checked.stderr or '').strip()[:300]}")
+        start, end = next((s, e) for n, s, e in _CF_SCREEN_SLICES if n == "outfits")
+        s_at = vjs.find(start)
+        outfits_js = vjs[s_at:vjs.find(end, s_at + 1)]
+        mutated = outfits_js
+        for fixed, old in _OB_FIXED_LINES:
+            mutated = mutated.replace(fixed + "\n", old + "\n", 1)
+        if mutated == outfits_js:
+            bad.append("(ob-c) 변형을 만들지 못했습니다(고친 줄이 없다)")
+            return
+        got = _cf_run_node(node, _ob_card_script(vjs, [], outfits_js=mutated))
+        expect("ob-c", [got["cards"]["queued"]["make"], got["cards"]["readyQueued"]["cols"][0]],
+               [["이미지 만들기", True, ""], ["실사", [["vnew-hint", "만드는 중…"]]]],
+               "옛 판단(images||queued)이면 queued 카드가 막히고 '만드는 중…'(검사가 결함을 잡는다)")
+        seen.add("ob-c")
+
+    def ob_d() -> None:
+        template_path = ROOT / "k8s" / "workloads.yaml.tmpl"
+        example_path = ROOT / "deploy" / "config.env.example"
+        template = template_path.read_text(encoding="utf-8")
+        example = example_path.read_text(encoding="utf-8")
+        expect("ob-d", re.findall(r"^VNEW_HIDE_STORY=(.*)$", example, re.M), ["true"], "base(config.env.example) VNEW_HIDE_STORY=true 한 줄")
+        expect("ob-d", [template.count("${VNEW_HIDE_STORY}"), template.count("vnewHideStory: ${VNEW_HIDE_STORY},"),
+                        template.count(";vnewHideStory=${VNEW_HIDE_STORY}\"")], [2, 1, 1],
+               "템플릿 자리 = runtime-config 1·runtime-track-flags 1")
+        expect("ob-d", re.findall(r"^\s*-\s+name:\s+VNEW_HIDE_STORY\s*$", template, re.M), [], "앱 env 에는 없다(화면만)")
+        prod_bytes = (ROOT / "deploy" / "config.prod.env").read_bytes()
+        expect("ob-d", [prod_bytes[:3] == b"\xef\xbb\xbf", prod_bytes.count(b"\r"),
+                        prod_bytes.decode("utf-8-sig").splitlines()[-2:]],
+               [True, 0, ["# 2026-10-30, 운영은 스토리 만들기를 유지: vnew 를 켜도 만들기 창의 story 버튼을 숨기지 않는다(base 기본 true = 숨김).",
+                          "VNEW_HIDE_STORY=false"]], "config.prod.env BOM·LF·끝 두 줄(주석 + VNEW_HIDE_STORY=false)")
+        try:
+            spec = importlib.util.spec_from_file_location("_vpoc_deploy_render_ob", ROOT / "deploy" / "render.py")
+            render = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(render)  # type: ignore[union-attr]
+            base = render.load_config(example_path)
+            overlays = {t: render.load_config(ROOT / "deploy" / f"config.{t}.env") for t in ("prod", "dev")}
+            expect("ob-d", [overlays["prod"].get("VNEW_HIDE_STORY"), "VNEW_HIDE_STORY" in overlays["dev"]], ["false", False],
+                   "오버레이: prod false · dev 없음(base true)")
+            for target, extra, want in (("prod", {}, "false"), ("dev", {}, "true"), ("prod", {"VNEW_HIDE_STORY": "true"}, "true")):
+                layer = {**overlays[target], **extra}
+                label = target + ("+true" if extra else "")
+                unknown = sorted(set(layer) - set(base))
+                if unknown:
+                    bad.append(f"(ob-d) {label}: 오버레이에 base 에 없는 키 {unknown}")
+                    continue
+                text = render.render_text(template, render.add_derived({**base, **layer}), str(template_path.relative_to(ROOT)))
+                runtime = re.findall(r"^\s*(window\.__WHYNOT_RUNTIME__ = Object\.freeze\(\{.*\}\);)\s*$", text, re.M)
+                flags = re.findall(r"runtime-track-flags:\s*\"([^\"]*)\"", text)
+                expect("ob-d", [len(runtime), f"vnewHideStory: {want}, vnewEnabled: true }}" in "".join(runtime),
+                                [f.endswith(f";vnew=true;vnewHideStory={want}") for f in flags],
+                                _rendered_env_values(text, "VNEW_HIDE_STORY"), "${" in text],
+                       [1, True, [True], [], False], f"{label} 렌더: runtime-config vnewHideStory: {want}·주석·앱 env 없음")
+                if not extra and runtime:
+                    runtime_js[target] = runtime[0]
+        except (Exception, SystemExit) as exc:  # noqa: BLE001 — render.py 는 SystemExit 로 실패를 알린다.
+            bad.append(f"(ob-d) 렌더 실패: {type(exc).__name__} {safe(exc)}")
+        seen.add("ob-d")
+        report.append("ob-d: 렌더 prod vnewHideStory: false · dev true · prod+true 되돌리기 true · 앱 env 없음")
+
+    def ob_e() -> None:
+        enabled_line = re.findall(r"^const VNEW_ENABLED = window\.__WHYNOT_RUNTIME__\?\.vnewEnabled === true;$", app_js, re.M)
+        hide_line = re.findall(r"^const VNEW_HIDE_STORY = window\.__WHYNOT_RUNTIME__\?\.vnewHideStory !== false;$", app_js, re.M)
+        fn_at = app_js.find("function applyVnewToggles() {")
+        fn_end = app_js.find('\nwindow.addEventListener("DOMContentLoaded", applyVnewToggles, { once: true });', fn_at + 1)
+        if len(enabled_line) != 1 or len(hide_line) != 1 or fn_at < 0 or fn_end < 0 or app_js.count("function applyVnewToggles() {") != 1:
+            bad.append("(ob-e) app.js 에서 VNEW_ENABLED·VNEW_HIDE_STORY 선언 한 줄씩과 applyVnewToggles 를 찾지 못했습니다")
+            return
+        if not node:
+            warn("node 가 없어 ob-e applyVnewToggles 실행을 건너뜁니다 (E16)")
+            return
+        if set(runtime_js) != {"prod", "dev"}:
+            bad.append("(ob-e) ob-d 렌더 runtime-config 가 없어 렌더 경우를 돌리지 못했습니다")
+            return
+        code = enabled_line[0] + "\n" + hide_line[0] + "\n" + app_js[fn_at:fn_end] + "\n"
+        rt = "window.__WHYNOT_RUNTIME__ = "
+        cases = [
+            ["renderProd", runtime_js["prod"]], ["renderDev", runtime_js["dev"]],
+            ["true", rt + "{ vnewEnabled: true, vnewHideStory: true };"], ["missing", rt + "{ vnewEnabled: true };"],
+            ["false", rt + "{ vnewEnabled: true, vnewHideStory: false };"],
+            ["textFalse", rt + "{ vnewEnabled: true, vnewHideStory: \"false\" };"],
+            ["vnewOff", rt + "{ vnewEnabled: false, vnewHideStory: true };"], ["noRuntime", None],
+        ]
+        script = "var CODE = " + json.dumps(code) + ";\nvar CASES = " + json.dumps(cases) + ";\n" + _OB_TOGGLE_NODE
+        got = _cf_run_node(node, script)
+        on_rest = {"vnew": [False, False], "video": [["영상만들기_기존", "지금 쓰는 영상 기능"]] * 2, "nav": False, "unknown": []}
+        off_rest = {"vnew": [True, True], "video": [["영상 개발로 진행", "웹툰 컷 → 영상"]] * 2, "nav": True, "unknown": []}
+        want = {
+            "renderProd": dict(on_rest, hideStory=False, story=[False, False]),
+            "renderDev": dict(on_rest, hideStory=True, story=[True, True]),
+            "true": dict(on_rest, hideStory=True, story=[True, True]),
+            "missing": dict(on_rest, hideStory=True, story=[True, True]),
+            "false": dict(on_rest, hideStory=False, story=[False, False]),
+            "textFalse": dict(on_rest, hideStory=True, story=[True, True]),
+            "vnewOff": dict(off_rest, hideStory=True, story=[False, False]),
+            "noRuntime": dict(off_rest, hideStory=True, story=[False, False]),
+        }
+        for name, value in want.items():
+            expect("ob-e", got.get(name), value, f"applyVnewToggles {name}")
+        seen.add("ob-e")
+        report.append("ob-e: 렌더 prod → story 보임 · dev → 숨김 · 플래그 없음 → 숨김 · 나머지 토글 같음")
+
+    def ob_h() -> None:
+        # (ob-h) VNEW_OUTFIT_STALL_S: settings 읽기(60 아래는 60)·base·템플릿 앱 env·렌더(prod·dev 1200).
+        settings_text = (APP_SRC / "vnew" / "settings.py").read_text(encoding="utf-8")
+        expect("ob-h", len(re.findall(r'^OUTFIT_STALL_S = max\(60, _int\("VNEW_OUTFIT_STALL_S", 1200\)\)', settings_text, re.M)), 1,
+               "settings.py OUTFIT_STALL_S 읽기 한 줄(기본 1200·아래 60)")
+        raws = ["", "900", "0", "-5", "59", "61", "abc", " 1800 "]
+        code = ("import importlib, json, os, sys; sys.path.insert(0, %r); from src.vnew import settings as s; out = []\n"
+                "for raw in %r:\n"
+                "    os.environ['VNEW_OUTFIT_STALL_S'] = raw\n"
+                "    out.append(importlib.reload(s).OUTFIT_STALL_S)\n"
+                "print(json.dumps(out))\n") % (str(ROOT / "app"), raws)
+        env = {k: v for k, v in os.environ.items() if k != "VNEW_OUTFIT_STALL_S"}
+        env["PYTHONIOENCODING"] = "utf-8"
+        result = subprocess.run([sys.executable, "-X", "utf8", "-c", code], capture_output=True, text=True, env=env, encoding="utf-8")
+        if result.returncode != 0:
+            bad.append(f"(ob-h) settings 하위 프로세스 실패: {result.stderr[-600:]}")
+        else:
+            expect("ob-h", json.loads(result.stdout.strip().splitlines()[-1]), [1200, 900, 60, 60, 60, 61, 1200, 1800],
+                   "VNEW_OUTFIT_STALL_S 읽기(없음·숫자·0·음수·59·61·글자·공백)")
+        template_path = ROOT / "k8s" / "workloads.yaml.tmpl"
+        example_path = ROOT / "deploy" / "config.env.example"
+        template = template_path.read_text(encoding="utf-8")
+        example = example_path.read_text(encoding="utf-8")
+        expect("ob-h", re.findall(r"^VNEW_OUTFIT_STALL_S=(.*)$", example, re.M), ["1200"], "base VNEW_OUTFIT_STALL_S=1200 한 줄")
+        pair = re.findall(r"^\s*-\s+name:\s+VNEW_OUTFIT_STALL_S\s*\n\s*value:\s*\"\$\{VNEW_OUTFIT_STALL_S\}\"\s*$", template, re.M)
+        names = re.findall(r"^\s*-\s+name:\s+(\S+)\s*$", template, re.M)
+        at = names.index("VNEW_3D_SIDE_SWAP") if "VNEW_3D_SIDE_SWAP" in names else -1
+        expect("ob-h", [len(pair), template.count("${VNEW_OUTFIT_STALL_S}"), names[at + 1] if 0 <= at < len(names) - 1 else ""],
+               [1, 1, "VNEW_OUTFIT_STALL_S"], "템플릿 앱 env 한 쌍(VNEW_3D_SIDE_SWAP 바로 뒤)")
+        spec = importlib.util.spec_from_file_location("_vpoc_deploy_render_ob_h", ROOT / "deploy" / "render.py")
+        render = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(render)  # type: ignore[union-attr]
+        base = render.load_config(example_path)
+        for target in ("prod", "dev"):
+            overlay = render.load_config(ROOT / "deploy" / f"config.{target}.env")
+            text = render.render_text(template, render.add_derived({**base, **overlay}), str(template_path.relative_to(ROOT)))
+            expect("ob-h", ["VNEW_OUTFIT_STALL_S" in overlay, _rendered_env_values(text, "VNEW_OUTFIT_STALL_S")], [False, ["1200"]],
+                   f"{target} 렌더 VNEW_OUTFIT_STALL_S 1200(오버레이 없음)")
+        seen.add("ob-h")
+        report.append("ob-h: VNEW_OUTFIT_STALL_S 기본 1200 · 60 아래 60 · base·템플릿 env · prod·dev 렌더 1200")
+
+    for name, step in (("ob-g", ob_g), ("ob-a·ob-b·ob-f", ob_ad), ("ob-c", ob_c), ("ob-d", ob_d), ("ob-e", ob_e), ("ob-h", ob_h)):
+        try:
+            step()
+        except Exception as exc:  # noqa: BLE001
+            bad.append(f"({name}) 검사 중 예외: {exc!r}\n{_tb.format_exc()[:2500]}")
+    expected = {"ob-a", "ob-b", "ob-c", "ob-d", "ob-e", "ob-f", "ob-g", "ob-h"} if node else {"ob-d", "ob-g", "ob-h"}
+    if not bad and seen != expected:
+        bad.append(f"끝까지 돌지 않은 검사: {sorted(expected - seen)}")
+    if bad:
+        fail("추가 복장 버튼·운영 스토리 버튼 검사 실패\n" + "\n".join(f"  {item}" for item in bad))
+    else:
+        ok(
+            "추가 복장 버튼·운영 스토리 버튼 검사 (ob-a)outfitCard 14상태·누르기 3경우 (ob-b)서버 detail_view·POST build 409 = 카드 끔 "
+            "(ob-c)옛 판단 변형 잡음·node --check (ob-d)VNEW_HIDE_STORY base·템플릿·prod false·dev true 렌더 "
+            "(ob-e)applyVnewToggles 8경우 (ob-f)복장 폴링 12경우·실제 응답 흐름 4개 (ob-g)멈춘 복장 11경우 "
+            "(ob-h)VNEW_OUTFIT_STALL_S 배선"
+        )
+        for line in report:
+            print(f"       ob: {line}")
+
+
 # vnew-live-fx A(Claude 결정 9, 2026-10-30 검토): 새 기본값(VNEW_FX 켬)에서 기대값이 달라지는 기존 검사는 **부르는 줄에서**
 # 끔으로 고정한다(검사 본문·기대값·들여쓰기는 그대로). 이유:
 #   check_vnew_plan·check_vnew_locations — 켬이면 POST /conti 가 기호·분위기 채우기(가짜가 아닌 LLM)를 부른다.
@@ -29486,6 +30278,7 @@ def main() -> int:
     _run_3d_hunyuan(check_vnew_char_fidelity)
     check_vnew_3d_tripo()
     check_vnew_char_fidelity_screen()
+    check_vnew_outfit_button()
     print()
     if warnings:
         print(f"경고 {len(warnings)}건")

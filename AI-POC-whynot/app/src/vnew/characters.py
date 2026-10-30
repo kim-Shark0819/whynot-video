@@ -3593,10 +3593,30 @@ def delete_outfit(owner: str, char_id: str, outfit_id: str) -> None:
     mutate_char(owner, char_id, mutator)
 
 
+# 멈춘 추가 복장(지시서 102 피드백)을 상세에 보일 때의 오류 문구. 저장 데이터는 바꾸지 않는다(읽기 전용 보기).
+_OUTFIT_STALLED_ERROR = "만들기가 중단됐습니다. 다시 만들어 주세요."
+
+
+def _outfit_variant_stalled(char: dict, ov: dict) -> bool:
+    """추가 복장 그림체 하나의 그리기(images)가 멈췄는가. images 가 아니면 False.
+
+    startedAt 이 OUTFIT_STALL_S 보다 오래됐으면 멈춤이다. startedAt 이 없는(또는 읽을 수 없는) 옛 데이터는 캐릭터 updatedAt
+    (char.json 을 마지막으로 쓴 시각)도 OUTFIT_STALL_S 보다 오래됐을 때만 멈춤으로 본다. 그 시각도 읽을 수 없으면 확실하지 않으므로
+    멈춤이 아니다(409 유지 — 실제 진행 중인 빌드를 두 번 시작하지 않는다).
+    """
+    if not isinstance(ov, dict) or ov.get("status") != "images":
+        return False
+    since = _parse_iso(ov.get("startedAt") or "") or _parse_iso(char.get("updatedAt") or "")
+    if since is None:
+        return False
+    return (datetime.now(timezone.utc) - since).total_seconds() > settings.OUTFIT_STALL_S
+
+
 def start_build_outfit(owner: str, char_id: str, outfit_id: str) -> None:
     """추가 복장 이미지 만들기(백그라운드 스레드 시작). 두 그림체 각각 정면·후면.
 
-    기본 정면·후면이 없으면(아직 안 만듦) 400. 진행 중이면 409.
+    기본 정면·후면이 없으면(아직 안 만듦) 400. 진행 중이면 409. 멈춘 그리기(_outfit_variant_stalled)는 409 없이 다시 시작하고
+    경고 로그 vnew.outfit.stale_restart 1줄을 남긴다. 시작할 때 그림체마다 startedAt 을 적는다.
     """
     char, _ = load_char(owner, char_id)
     outfit = _find_outfit(char, outfit_id)
@@ -3613,18 +3633,27 @@ def start_build_outfit(owner: str, char_id: str, outfit_id: str) -> None:
             "먼저 캐릭터(기본 복장)를 만들어야 추가 복장을 그릴 수 있습니다.", 400,
         )
 
-    def mutator(data: dict) -> None:
+    def mutator(data: dict) -> list[str]:
         o = _find_outfit(data, outfit_id)
         if o is None:
-            return
+            return []
+        stalled: list[str] = []
+        started_at = now_iso()
         for v in settings.VARIANTS:
             ov = o.setdefault("variants", {}).setdefault(v, _empty_outfit_variant())
             if ov.get("status") == "images":
-                raise VpocError("vnew.build_outfit", "AlreadyBuilding", "이미 만들고 있습니다.", 409)
+                # 멈춘 그리기(_outfit_variant_stalled)만 다시 시작한다. OUTFIT_STALL_S 안이면 지금처럼 409.
+                if not _outfit_variant_stalled(data, ov):
+                    raise VpocError("vnew.build_outfit", "AlreadyBuilding", "이미 만들고 있습니다.", 409)
+                stalled.append(v)
             ov["status"] = "images"
             ov["error"] = ""
+            ov["startedAt"] = started_at
+        return stalled
 
-    mutate_char(owner, char_id, mutator)
+    _, stalled = mutate_char(owner, char_id, mutator)
+    if stalled:
+        log.warning("vnew.outfit.stale_restart char=%s outfit=%s variants=%s", char_id, outfit_id, ",".join(stalled))
 
     thread = threading.Thread(
         target=run_build_outfit,
@@ -3860,9 +3889,11 @@ def _outfits_view(owner: str, char: dict) -> list[dict]:
         variants_out: dict = {}
         for variant in settings.VARIANTS:
             ov = (o.get("variants") or {}).get(variant) or _empty_outfit_variant()
+            # 멈춘 그리기(지시서 102 피드백)는 failed 와 안내 문구로 보인다. 저장 데이터는 그대로다(다시 만들기가 풀어 준다).
+            stalled = _outfit_variant_stalled(char, ov)
             variants_out[variant] = {
-                "status": ov.get("status") or "queued",
-                "error": ov.get("error") or "",
+                "status": "failed" if stalled else (ov.get("status") or "queued"),
+                "error": _OUTFIT_STALLED_ERROR if stalled else (ov.get("error") or ""),
                 "frontUrl": _presign(ov.get("frontKey")),
                 "backUrl": _presign(ov.get("backKey")),
             }

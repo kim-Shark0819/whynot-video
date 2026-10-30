@@ -443,12 +443,26 @@
     var building = detail && detail.status === "building";
     // 실사 캐스팅 뽑기 중에도 다시 불러온다(vnew-live-fx RB7.2). 끔이면 casting 이 {enabled:false} 라 status 가 없다.
     var drawing = !!(detail && detail.casting && detail.casting.status === "drawing");
-    if (!building && !drawing) return;
+    // 추가 복장을 그리는 중(어느 복장이든 images)에도 다시 불러온다(지시서 102 피드백). 끝나면(ready·failed) 멈춘다.
+    var outfitDrawing = outfitsBuilding(detail);
+    if (!building && !drawing && !outfitDrawing) return;
     state.pollTimer = window.setTimeout(function () {
       // 화면을 떠났으면 멈춘다(schedulePoll/ stopPolling 가 보장).
       if (state.view !== "detail") return;
       refreshDetail(host, false);
     }, POLL_MS);
+  }
+
+  /* 상세의 추가 복장 중 하나라도 그리는 중(어느 그림체든 images)인가. outfitCard 의 "만드는 중"과 같은 기준이다
+     (서버 start_build_outfit 의 409 기준. queued 는 아직 안 만듦이고, 멈춘 그리기는 서버가 failed 로 준다). */
+  function outfitsBuilding(detail) {
+    var outfits = detail && Array.isArray(detail.outfits) ? detail.outfits : [];
+    return outfits.some(function (outfit) {
+      var variants = (outfit && outfit.variants) || {};
+      return VARIANTS.some(function (meta) {
+        return (variants[meta.key] || {}).status === "images";
+      });
+    });
   }
 
   function stopPolling() {
@@ -1454,21 +1468,24 @@
     }
 
     var variants = outfit.variants || {};
-    // 상태: 하나라도 images 면 만드는 중, 하나라도 ready 면 결과 있음.
+    // 상태: 하나라도 images 면 만드는 중(schedulePoll 의 outfitsBuilding 과 같은 기준), 하나라도 ready·failed 면 결과 칸.
+    // queued 는 "아직 안 만듦"(서버 _empty_outfit_variant 의 기본값)이다. 서버 start_build_outfit 도 images 일 때만 409 다.
     var anyBuilding = false;
     var anyReady = false;
+    var anyFailed = false;
     VARIANTS.forEach(function (meta) {
       var ov = variants[meta.key] || {};
-      if (ov.status === "images" || ov.status === "queued") anyBuilding = true;
+      if (ov.status === "images") anyBuilding = true;
       if (ov.status === "ready") anyReady = true;
+      if (ov.status === "failed") anyFailed = true;
     });
 
     var error = el("p", "login-error vnew-outfit-error");
     error.setAttribute("role", "alert");
     error.style.display = "none";
 
-    // 결과: 두 그림체 정면·후면 나란히
-    if (anyReady) {
+    // 결과: 두 그림체 정면·후면 나란히. 실패한 그림체는 오류 문구, 그리는 그림체는 "만드는 중…".
+    if (anyReady || anyFailed) {
       var grid = el("div", "vnew-outfit-grid");
       VARIANTS.forEach(function (meta) {
         var ov = variants[meta.key] || {};
@@ -1491,12 +1508,15 @@
           });
         } else if (ov.status === "failed") {
           col.appendChild(el("p", "login-error", ov.error || "만들기에 실패했습니다."));
-        } else if (ov.status === "images" || ov.status === "queued") {
+        } else if (ov.status === "images") {
           col.appendChild(el("p", "vnew-hint", "만드는 중…"));
         }
         grid.appendChild(col);
       });
       card.appendChild(grid);
+    } else if (anyBuilding) {
+      // 결과 칸이 없을 때(그린 그림·오류가 아직 없음)도 버튼 줄 바로 위에 한 줄을 둔다.
+      card.appendChild(el("p", "vnew-hint vnew-outfit-building", "만드는 중…"));
     }
 
     // 버튼 줄: [이미지 만들기]/[다시 만들기] + 삭제
