@@ -4,6 +4,7 @@
 > 근거는 `파일:줄`로 단다. 확인하지 못한 것은 "미확인", 코드로 증명되지 않은 해석은 "추정"으로 표시한다.
 > 계정 ID·비밀값은 쓰지 않는다. 계정은 `<고객계정>`·`<허브계정>`으로 가린다.
 > 줄 수는 2026-10-26 작업 트리 기준 대략값이다.
+> 갱신 2026-10-30: char-fidelity T1·T2·T2b·T3(§3.6.2 구현 결과·Tripo 전환, §7.1, §9.1, §10.1), 운영 `VNEW_ENABLED=true`·`VPOC_ARK_SEEDANCE_ENABLED=true`(사용자 결정, 배포 전 — §1, §5.4, §6.3, §7.1, §8.5, R-21).
 
 ---
 
@@ -13,7 +14,7 @@
 
 - **스토리 개발**(track `story`): 원작 자료 → 기획 문서·트리트먼트·대본·콘티(`server.py`, `documents.py`, `story_*`, `roles/`).
 - **영상만들기_기존**(track `video`): vpoc1(`/api/vpoc`, ①입력→②분석→③키 장면·샷→④생성·이어붙이기), vpoc2(`/api/vpoc2`, 명령→캐릭터 확정→15초→리뷰).
-- **영상만들기_신규**(track `video_new`, vnew, `/api/vnew`): 캐릭터 만들기(시트·3D) → ①입력 ②대본 ③콘티·장소 시트 → ④프리비즈(3D 마네킹, 브라우저 three.js) → ⑤영상 생성(실사·웹툰). **개발계에서만 켜져 있다**(`deploy/config.dev.env`의 `VNEW_ENABLED=true`, `deploy/config.prod.env`의 `VNEW_ENABLED=false`).
+- **영상만들기_신규**(track `video_new`, vnew, `/api/vnew`): 캐릭터 만들기(시트·3D) → ①입력 ②대본 ③콘티·장소 시트 → ④프리비즈(3D 마네킹, 브라우저 three.js) → ⑤영상 생성(실사·웹툰). 개발계는 켜져 있다(`deploy/config.dev.env`의 `VNEW_ENABLED=true`). **운영은 2026-10-30 사용자 결정("켠다")으로 `deploy/config.prod.env`를 `VNEW_ENABLED=true`로 바꿨고, 그 커밋을 운영 job으로 배포할 때 켜진다**(계획 `docs/plans/2026-10-30-prod-vnew-enable.md`). 그 전까지 운영은 꺼진 화면 그대로다.
 
 주요 화면 흐름:
 
@@ -70,7 +71,7 @@ flowchart LR
 | `k8s-gpu/` | GPU 영상 워커용 템플릿 4개. 현재 배포 안 함(8장) |
 | `infra/` | IAM·S3·ECR 정책 템플릿, 옛 `build-deploy.sh`, `inventory/`(옛 계정 조회 덤프 JSON) |
 | `terraform/` | 허브 계정 전용 root 모음(bootstrap, hub/20·25·26·40, modules 2개) |
-| `tools/` | `check_vpoc.py`(11,856줄, CI 유일 검사기), `vpoc_e2e.py`, `vpoc_preflight.py` |
+| `tools/` | `check_vpoc.py`(29,501줄 — 2026-10-30, CI 유일 검사기), `vpoc_e2e.py`, `vpoc_preflight.py` |
 | `video-worker/` | 상주 GPU 워커(SQS 폴링, Wan 2.2). 현재 배포 안 함 |
 | `docs/` | PRD·실행 기록·리뷰. `vpoc1/`, `run-log/`, `vendor/`, `구조분석.md`(2026-09-03) |
 
@@ -175,7 +176,8 @@ flowchart LR
 |---|---|
 | `routes.py` | 블루프린트 `vnew`(`:41`). HTTP 입출력만. 계획 API는 `_project_for`(`:260-282`)에서 프로젝트 존재·읽기/쓰기 권한·**트랙이 `video_new`인지** 확인 |
 | `settings.py` | vnew 전용 환경변수(그 밖은 `vpoc.settings` 재사용) |
-| `characters.py` | 캐릭터 만들기: 웹툰 이미지 분석(Astra → Claude) → Seedream 시트·정면·후면(실사·웹툰 2 variant) → Hunyuan3D(fal) GLB. 빌드·재시도·재개 스레드(`:1587`, `:1645`, `:1808`, `:1909`, `:2191`) |
+| `characters.py` | 캐릭터 만들기: 웹툰 이미지 분석(Astra → Claude) → Seedream 시트·정면·후면(+ 옆모습 두 장, char-fidelity)(실사·웹툰 2 variant) → 3D GLB(fal, 기본 Tripo H3.1 · 되돌리면 Hunyuan3D v3). 빌드·재시도·재개 스레드(`:1587`, `:1645`, `:1808`, `:1909`, `:2191`, 줄 번호는 2026-10-26 기준) |
+| `char_fidelity.py` | 캐릭터 충실도(char-fidelity, 2026-10-30, 순수 함수 — import 는 `re` 뿐). 화면 쪽 → 캐릭터 쪽 좌우 계산·다수결, 기본 복장 좌우 낱말 지우기·꼬리, 좌우 문장·고칠 문장 원문, 그림·시트 검사 기대값·반전 규칙·warning 문구. `characters.py`가 부른다 |
 | `plan.py` | ①입력 ②대본 ③콘티. `plan.json` 하나가 프로젝트 상태의 단일 원본. task 스레드(`:1393`). 공용 `plan.task` 단계는 script·conti·fxFill(`_TASK_STEPS` `:60`) |
 | `fx.py` | ③ 만화 기호·분위기(vnew-live-fx 묶음 A, 2026-10-30, 순수 함수 — 네트워크·S3·LLM 없음). 기호 5종 열거값·문장(참고 구현 원문)·짧은 형·실사 표현·화면 라벨, 컷 필드 정리(`normalize_cut_fx`), 채우기 대상(`fill_targets`)·합치기(`merge_fill`)·3컷 한도(`apply_cap`)·금액 추정(`estimate_usd`), 프롬프트 문장(`sentences`). `plan.py`(저장·채우기)·`generate.py`(프롬프트)가 읽는다. `VNEW_FX`로 끈다 |
 | `casting.py` | 캐릭터 실사 캐스팅(vnew-live-fx 묶음 B, 2026-10-30). 캐스팅 문장·성별(순수 함수)과 뽑기 상태(`char.casting`)·fal 큐 제출·조회(글만, 래퍼 `_fal_request`·`_fetch_url`)·이어하기·고르기·상세 보기. `characters.py`(상세·키)·`routes.py`(라우트 3개)·`generate.py`(`_char_entries.castingKey`)가 읽는다. `VNEW_CASTING`으로 끈다 |
@@ -357,6 +359,93 @@ B의 남은 위험(design §7):
 5. 실사 열 [실사 버전 만들기 ($X.XX)] → 확인창의 테이크 수·초·금액과 "소리도 만들기"를 확인하고 [만들기 시작] → 진행 막대(완료/전체)를 본다(VC-1, 480p 15초 ≈ $3.08). 소리 거절이 나오면 그 테이크 행의 [소리 없이 다시 만들기](VC-3).
 6. 실사가 끝나면 아래 「나란히 보기」에서 [같이 재생]·한쪽 시간 옮기기·[소리: 웹툰/실사]로 비교하고, 원하는 열의 [이걸로 고르기] → ⑥ 사운드. 다시 만들면(VC-2) 이전 결과는 "이전 실사 보기"에 남는다.
 
+#### 3.6.2 캐릭터 메이커 — 지금 흐름과 char-fidelity 변경 지점 (2026-10-30 조사, 구현 전)
+
+스펙은 `.kiro/specs/char-fidelity/`다. 아래 표는 **구현 전 지금 코드**다. 줄 번호는 2026-10-30 작업 트리 기준이다(`vnew/characters.py` 약 2,450줄). 계기는 설계자가 개발계 캐릭터 "여의준"에서 본 세 문제다. 시트 4번째가 3/4 후면이 아니라 후면이었다. 시계가 원본과 반대 손목에 있고 3D에서는 양 손목에 생겼다. 기본 복장이 사진 속 옷과 달랐다.
+
+**지금 흐름**
+
+| 단계 | 위치 | 지금 동작 | char-fidelity가 닿는 점 |
+|---|---|---|---|
+| 업로드 | `characters.py:374` `add_source` | 최대 `MAX_SOURCES`(8)장, JPEG 정규화, `src/{fileId}.jpg` | 없음 |
+| 빌드 시작 | `:1598` `start_build` | version+1, variant(webtoon·real)를 새로 만들고 claim·하트비트를 먼저 찍고 스레드 `run_build` | 없음 |
+| 분석 | `:1523` `run_build` → `:552` `analyze_sources` → `:414` `_analyze` | 업로드 앞 `MAX_ANALYSIS_IMAGES`(6)장, 이미지 번호 표시 없음. Astra → `ANALYZE_FALLBACK_MODEL`(Fable 5.1), `max_tokens` 1200. SYSTEM `_analyze_system`(`:485`, 상수 `_ANALYZE_SYSTEM` `:450` + FX·성별 규칙), 도구 `_analyze_tool`(`:501`) | 충실 SYSTEM·도구(기준 사진 번호·사진 속 옷·한쪽 소품 화면 쪽), "Image N:" 표시, 2000, 코드가 캐릭터 좌우 계산·`baseOutfitEn` 다시 쓰기(`vnew/char_fidelity.py` 신규) |
+| 기본 복장 규칙 | `_ANALYZE_SYSTEM` | "MOST BASIC single outfit … every extra layer removed". `outfitLayersEn` = 덧입힐 옷 한 점 | 기준 사진 한 장의 옷 그대로, 사진 속 옷 = 다른 그림의 한 벌 전체 |
+| 참고 이미지 | `:1542-1544`(`run_build`), `:1895-1897`(`run_resume_variant`), `:1987-1989`(`run_rebuild_variant`) | 업로드 순 앞 `MAX_REFERENCE_IMAGES`(4)장 | `_reference_jpegs`: 기준 사진 먼저 |
+| variant 순서 | `run_build` | webtoon → real 차례로. 대기 variant는 `_KEEPALIVE`로 claim·하트비트를 함께 찍는다 | 없음 |
+| 시트 | `:1313` `_gen_sheet_checked`, 프롬프트 `:801` `_sheet_prompt` | 2560x1440. 다섯 방향 낱말만 있다. 복장 검사 `_check_outfit_consistency`(`:712`, `OUTFIT_CHECK_MODEL`) → 불일치면 `OUTFIT_SHEET_RETRY`(1)회 다시 | 회전 문장(화면 왼쪽으로 45°씩, 4번째 3/4 후면), 회전·복장 한 번에 검사(`_inspect_sheet`) |
+| 정면 | `:1292` `_gen_checked`, `:828` `_front_prompt` | 참고 [시트] + 원본 3장, 1440x2560. 사람 수 검사 `_count_people`(`:656`, `PEOPLE_COUNT_MODEL`) ≠1이면 1회 다시 | 옷 그대로 문장(Image 2), 좌우 문장. 소품이 있으면 사람 수·방향·소품 쪽 한 번에 검사(`_inspect_view`) → 1회 다시 → 반전 → warning |
+| 후면 | `_gen_checked`, `:854` `_back_prompt` | 참고 [정면, 시트] + 원본 2장 | 같음(Image 3) |
+| 옆모습 | 없음 | — | 왼쪽·오른쪽 옆모습([정면, 후면, 시트, 기준 사진]), 검사, 안 맞으면 3D에서 뺌 |
+| 원장 | `:1101` `_charge_seedream` | 종류(sheet·front·back)마다 1건. 다시 그린 그림은 남지 않는다 | 종류 left·right |
+| 3D | `:1457` `_build_3d_from_images` → `:907` `submit_3d` → `:1024` `_wait_3d` → `:1499` `_copy_3d_result` | 정면·후면을 1024 정사각 흰 패딩 data URI로. 5초 간격·15분, 일시 오류는 다시 조회, unavailable 8회면 `_make_3d_resubmit`(`:1423`, 최대 2회) | 본문에 `left_image_url`·`right_image_url`(있을 때만), 재제출도 같은 묶음 |
+| 3D만 다시 | `:1662` `start_retry3d` → `:1705` `run_retry3d` | 이전 요청이 완료면 재사용, 아니면 정면·후면으로 새로 제출 | 저장된 옆모습도 보낸다(설정 켬) |
+| 이어 만들기 | `:2362` `detail_view` → `:2060` `reconcile_stale` → `:1805` `_resume_variants` → `:1867` `run_resume_variant` | 하트비트 10분 넘게 멈춘 variant를 claim으로 선점. 시트·정면·후면이 다 있으면 `run_retry3d`, 아니면 그 variant를 처음부터. 최대 `MAX_RESUME`(2)회 | 그림 3개는 있고 옆모습 결과·3D 요청이 없으면 옆모습만 그리고 3D로 |
+| 그림체만 다시 | `:1919` `start_rebuild_variant` → `:1969` `run_rebuild_variant` | 저장된 분석을 다시 쓴다 | 참고 순서 도우미 |
+| 추가 복장 후보 | `:2099` `sync_auto_outfits` | `outfitLayersEn` → `source:"auto"` 후보, 그림 0장 | 충실 분석이면 `kind:"photo"`·`sourceFileId`·`whereEn` |
+| 추가 복장 그리기 | `:2208` `start_build_outfit` → `:2250` `run_build_outfit`, `:2319` `_outfit_prompt` | "same base outfit ({base}), plus {promptEn}", 참고 기본 정면 / [정면, 기본 후면], 검사·3D 없음 | 사진 속 옷은 "기본 복장 대신 이 한 벌", 참고에 원본 그림 |
+| 상세 | `:2362` `detail_view`, `:2420` `_outfits_view` | variant `sheetUrl`·`frontUrl`·`backUrl`·`model3d`, 분석 원본, 추가 복장 | `leftUrl`·`rightUrl`, `features`, `kind` |
+| 화면 | `vnew.js:476` `renderDetail`(분석 카드 `:492-529`), `:909` `variantColumn`(정면·후면 `:941-944`), `:1324` `outfitsSection`, `:1354` `outfitCard`(후보 배지 `:1359`) | 분석 카드(설명·그림체·대표 옷차림·기본 복장·표정), 3D 보기·시트·정면·후면 | "기준 사진: N번째"·"소품: … — 오른쪽 손목", 왼쪽·오른쪽 그림, "사진 속 옷" 배지 |
+
+**검사·선점 요약(지금, 바꾸지 않는다)**
+- 외부 유료 제출(Seedream·3D) 직전마다 `_guard_submit_claim`(`:1222`)이 자기 claim과 "이미 ready"를 확인하고, 아니면 `ClaimLost`로 접는다.
+- 하트비트 `_touch_heartbeat`(`:1154`)는 그림마다 갱신하고 대기 variant도 찍는다.
+- 끊김 기준은 `VARIANT_STALL_S`·`CLAIM_STALL_S`(600초)다. `BUILD_STALL_S`(1800초)는 `start_build` 409에만 쓴다.
+
+**영상 쪽이 읽는 것(바꾸지 않는다)**
+- `generate.py:797` `_char_entries`는 `analysis.outfitEn`과 real·webtoon `sheetKey`·`frontKey`·`backKey`를 모은다.
+- 컷 단위 Kling `_previz_payload_elements`는 정면 + 후면과 `appearanceEn + outfitEn`을 쓴다. `_previz_payload_image_list`는 정면을 쓴다.
+- 통 테이크 `_take_payload`는 웹툰 정면을 쓰고, 옷은 장면 패널 읽기(`castNotes`)에서 가져온다.
+- `generate._appearance_text`와 `shot_brief.py:523`은 `outfitEn`을 쓴다.
+- 다시 만든 캐릭터부터 `outfitEn` 끝에 "Worn on one side only: … on the RIGHT wrist only."가 붙어 영상 프롬프트도 같은 좌우를 쓴다. 옆모습은 영상에 쓰지 않는다.
+
+**세 문제의 코드 원인**
+1. 회전: 시트 프롬프트가 방향 낱말만 주고 각도·도는 쪽을 정하지 않는다. 검사는 복장만 본다.
+2. 시계: 분석이 좌우 기준을 모른 채 "left wrist"라고 썼다(화면 왼쪽 = 캐릭터 오른쪽). 정면·후면은 그 글대로 그렸다. 3D는 정면·후면만 받아 보이지 않는 옆면을 지어내며 반대 손목에도 줄을 만들었다.
+3. 기본 복장: "겹옷을 모두 뺀 가장 기본 한 벌" 규칙과 "기본 복장 위에 덧입힘" 추가 복장 규칙 때문에 사진 속 옷과 다른 조합이 나왔다.
+
+**설정(구현 뒤)**: `VNEW_CHAR_FIDELITY`(D1~D3·D5), `VNEW_3D_SIDE_VIEWS`(D4), 둘 다 기본 true. 둘 다 끄면 분석·프롬프트·검사·3D 본문·상세 응답이 지금과 바이트 단위로 같다(검사 cf-b·cf-r). 값·되돌리기는 §7.1 표에 있다.
+
+**예상 비용·시간 변화**(design §13)
+- variant당 Seedream이 보통 +2장($0.08), 최대 +4장이다. 검사 LLM은 보통 +2회, 최대 +4회다.
+- 캐릭터 빌드 시간은 보통 13분 → 19분, 최악 22분 → 38분이다.
+- 옆모습은 차례로 그린다(병렬 아님).
+
+**구현 결과(2026-10-30, 묶음 T1·T2·T2b·T3)**
+
+| 묶음 | 바뀐 곳 | 하는 일 | 검사 |
+|---|---|---|---|
+| T1 분석·좌우·참고·프롬프트·사진 속 옷 | `vnew/char_fidelity.py`(신규), `characters.py` `_analyze_system`·`_analyze_tool`·`analyze_sources`·`_with_fidelity`·`_reference_jpegs`·`_fidelity_prompt`·`_photo_outfit_prompt`·`sync_auto_outfits`·`run_build_outfit` | 충실 분석(기준 사진 번호·한쪽 소품의 화면 쪽·사진 속 옷), 블록 "Image N:", `max_tokens` 2000. 코드가 캐릭터 좌우를 계산해 `baseOutfitEn` 끝에 "Worn on one side only: … on the RIGHT wrist only."를 붙인다. 기준 사진을 참고 맨 앞에 둔다. 시트 회전 문장(화면 왼쪽으로 45°씩, 4번째 3/4 후면), 프롬프트 길이 예산 2,900자. 사진 속 옷은 "기본 복장 대신 이 한 벌" | cf-a~d·f·g·h·i·l |
+| T2 그림·시트 검사·옆모습·3D | `characters.py` `_inspect_view`·`_inspect_sheet`·`_gen_view_checked`·`_gen_sheet_fidelity`·`_draw_side_views`·`_set_view_check`·`_resume_side_views`, `submit_3d`·`run_retry3d`·`run_resume_variant` | 그림마다 검사 LLM 1회(사람 수·방향·소품 쪽). 틀리면 1회 다시 그리고, 그래도 틀리면 반전, 그래도 틀리면 warning. 시트는 회전·복장을 한 번에 검사한다. 왼쪽·오른쪽 옆모습을 그려 `left.jpg`·`right.jpg`로 두고, 안 맞는 쪽은 3D에서 뺀다. 다시 그린 장은 원장 `{kind}-retry`. 이어 만들기는 옆모습만 그린다 | cf-e·f2·j·k·m·n·o·p·q |
+| T2b 3D 공급자 | `settings.py` 설정 11개, `characters.py` `_3d_provider`·`_tripo_request`·`_3d_squares`·`_post_3d`·`_charge_3d_request`·`_note_3d_endpoint`·`_orient_glb` 등 | 기본 Tripo H3.1(아래). `VNEW_3D_PROVIDER=hunyuan`이면 T2 Hunyuan 본문·원장·저장 바이트 그대로 | tr-a~l |
+| T3 상세·화면 | `characters.py` `detail_view`·`_outfits_view`, `vnew.js` 순수 함수(`analysisFidelityLines`·`variantViewPairs`·`outfitBadgeText`·`outfitsHintText`·`model3dEndpointLabel`)와 DOM 4곳(`renderDetail`·`variantColumn`·`outfitsSection`·`outfitCard`), `vnew.css` | 상세 응답: `leftUrl`·`rightUrl`(키가 있을 때만), `model3d.endpoint`(저장돼 있을 때만), `features{charFidelity, sideViews}`(설정 하나라도 켬), 추가 복장 `kind`. 화면: 분석 카드 "기준 사진: N번째"·"소품: 시계 — 오른쪽 손목", 작은 그림 정면·후면·왼쪽·오른쪽(좁으면 줄바꿈), 3D 아래 작은 글씨 "3D: Tripo H3.1", 배지 "사진 속 옷", 추가 복장 안내 문장(결정 S11) | cf-r·cf-s |
+
+- 옛 데이터: 두 설정을 끄면 분석·프롬프트·검사·3D 본문·상세 응답이 구현 전과 바이트까지 같다(cf-b 지문 32개, cf-o, cf-r). 화면도 옛 캐릭터 + 끔이면 DOM이 구현 전과 같다(cf-s sha256). 켜면 옛 캐릭터 화면은 추가 복장 안내 문장만 바뀐다.
+- 새 기본값(켬·tripo) 때문에 `main()` 호출 줄에서 고정한 기존 검사는 §10.1에 적었다.
+
+**3D 공급자 Tripo H3.1 전환(T2b, 2026-10-30)**
+
+- 계기: 사용자 지시(원문) "캐릭터 만들기에서 3D 모델링 할 때 얼굴이 일그러져서 제대로 보이지 않는 상태로 보이고 있다. 이 부분도 개선을 할 수 있도록 진행해라."
+- 원인(Claude 확인, 개발계 여의준 정면·후면 그대로): 입력이 1024 정사각이라 얼굴이 약 150px이고, `face_count` 60000이라 머리에 약 8천 면이다. 웹툰은 눈 위 앞머리가 덩어리로 굳어 한쪽 눈을 덮고, 실사는 얼굴 질감이 부어 보이고 이음선이 있다.
+- 같은 입력 비교(Claude):
+
+  | 모델 | 결과 |
+  |---|---|
+  | Hunyuan3D v3, 2048 입력 + 50만 면 | 굴곡은 매끄러워졌지만 앞머리 덩어리와 부은 얼굴은 그대로 |
+  | Hunyuan 3.1 Pro | 조금 나음 |
+  | Rodin Gen-2 | 얼굴이 일그러짐 |
+  | Meshy 6 | 얼굴은 괜찮지만 3만 면에 2K 텍스처 |
+  | **Tripo H3.1**(`texture_quality`·`geometry_quality` detailed) | **두 그림체 모두 사진과 가장 가깝다.** 웹툰은 두 눈과 그림체가 살고, 실사도 얼굴이 사진과 비슷하다 |
+
+- 설정(`vnew/settings.py`, 템플릿·base의 `VNEW_3D_SIDE_VIEWS` 바로 뒤). 틀린 값이면 기본값을 쓰고 경고 `vnew.settings.invalid`를 1줄 남긴다: `VNEW_3D_PROVIDER=tripo`, `VNEW_3D_TRIPO_ENDPOINT=tripo3d/h3.1/multiview-to-3d`, `VNEW_3D_TRIPO_SINGLE_ENDPOINT=tripo3d/h3.1/image-to-3d`, `VNEW_3D_TRIPO_FACE_LIMIT=300000`(GLB 약 12MB), `VNEW_3D_TRIPO_TEXTURE_QUALITY=detailed`, `VNEW_3D_TRIPO_GEOMETRY_QUALITY=detailed`, `VNEW_3D_TRIPO_INPUT_SQUARE=2048`, `VNEW_3D_TRIPO_MULTIVIEW=true`, `VNEW_3D_TRIPO_YAW_DEG=-90`, `VNEW_3D_TRIPO_USD=0.60`(fal 가격표 2026-10-30: HD 텍스처 $0.40 + detailed 형상 $0.20), `VNEW_3D_SIDE_SWAP=false`.
+- 본문: 왼쪽 옆모습이 있으면 다시점 `image_urls = [정면, 왼쪽, 후면(, 오른쪽)]`, 없으면 단일 `image_url = 정면`. 공통 `texture: true`·`pbr`·`texture_quality`·`geometry_quality`·`orientation: "align_image"`·`face_limit`. 그림은 data URI만 보낸다.
+- 진행 중 요청: 공급자 설정이 아니라 `requestArn`의 endpoint로 조회·재제출·회전·원장을 정한다. 배포 전에 낸 Hunyuan 요청은 Hunyuan으로 끝나고 돌리지 않는다.
+- 원장: Tripo 1건 $0.60(model = 실제 endpoint). Hunyuan은 지금대로 $0.675.
+- 정면 방향 회전: Tripo 결과는 정면이 +X를 보고, 화면 model-viewer의 정면은 +Z다. 우리 버킷으로 옮길 때 기본 scene 루트 노드마다 Y축 `VNEW_3D_TRIPO_YAW_DEG`(기본 −90°, 쿼터니언 (0, −0.7071, 0, 0.7071), +X → +Z)를 앞에서 곱한다(`_orient_glb`, 순수 함수). JSON은 공백, BIN은 0으로 4바이트 정렬하고 BIN 바이트는 그대로다. 읽지 못하는 GLB면 경고 `vnew.3d.orient_failed`를 남기고 받은 GLB를 저장한다. 12MB GLB의 회전 메모리 최고점은 약 12MB다(tr-l).
+- 화면(T3): Tripo 요청에만 저장되는 `model3d.endpoint`를 고정 표로 바꿔 3D 아래에 "3D: Tripo H3.1"을 보인다. Hunyuan 요청과 옛 데이터는 endpoint가 없어 이름표가 없다.
+- **되돌리기: `config.<target>.env`에 `VNEW_3D_PROVIDER=hunyuan` 한 줄 + 재배포.** 다음 새 요청부터 T2 Hunyuan 본문·원장이다(tr-k). 회전만 끄기는 `VNEW_3D_TRIPO_YAW_DEG=0`, 다시점만 끄기는 `VNEW_3D_TRIPO_MULTIVIEW=false`, 좌우가 반대면 `VNEW_3D_SIDE_SWAP=true`, 본문 크기 거절이면 `VNEW_3D_TRIPO_INPUT_SQUARE=1536`.
+- 확인 남음: 정면 방향(−90°)과 좌우 자리는 개발계 VD-4(tasks)로 확인한다.
+
 ### 3.7 `stitcher.py`
 
 - ffmpeg는 `imageio-ffmpeg` 휠의 정적 바이너리(`FFMPEG_BINARY` 우선, 없으면 PATH)(`stitcher.py:35-48`). 모든 실행에 `STITCH_TIMEOUT_SECONDS`(기본 600초) timeout(`:51-58`).
@@ -471,7 +560,7 @@ B의 남은 위험(design §7):
 1. CI가 `--build-arg ASSET_VERSION=$IMAGE_TAG`(= `ci-<sha>`)를 넘긴다(`.gitlab-ci.yml:110-133`).
 2. `frontend/Dockerfile`이 `index.html`, `app.js`, `vpoc-smoke.html`, `vnew-previz.js`(073 R9.4)의 `__ASSET_VERSION__`을 sed로 치환하고, 남아 있거나 `APP_VERSION`이 없으면 빌드를 실패시킨다(`frontend/Dockerfile:22-35`).
 3. `index.html`은 `styles.css`, `vpoc.css`, `vnew.css`, `runtime-config.js`, `app.js`, `vpoc.js`, `vnew.js`를 `?v=<태그>`로 부른다(`index.html:14-33`). `vnew-previz.js`(three.js)는 `index.html`에서 싣지 않는다(`index.html:34` 주석).
-   - 동적 import(073 R9.1-9.3): `app.js:22`가 `VNEW_ENABLED`일 때만 `import("/vnew-previz.js?v=<태그>")`를 하고 결과 Promise를 `window.vnewPrevizReady`에 둔다. 꺼진 배포(운영)는 `Promise.resolve(false)`라 `vnew-previz.js`·three.js(약 690KB)를 내려받지 않는다.
+   - 동적 import(073 R9.1-9.3): `app.js:22`가 `VNEW_ENABLED`일 때만 `import("/vnew-previz.js?v=<태그>")`를 하고 결과 Promise를 `window.vnewPrevizReady`에 둔다. 꺼진 배포는 `Promise.resolve(false)`라 `vnew-previz.js`·three.js(약 690KB)를 내려받지 않는다. 켜진 배포는 ④를 열기 전, **앱을 처음 읽을 때** 이 둘(약 735KB, 압축 전)을 비동기로 받는다(첫 화면 그리기를 막지는 않는다). 운영은 2026-10-30 `VNEW_ENABLED=true` 배포부터 받는다(11장 R-21).
    - `vnew.js:4542`의 ④ 프리비즈 화면이 그 Promise를 기다린 뒤 `window.vnewPreviz.create`를 부른다. 로드 실패면 E7 "3D 뷰어를 불러오지 못했습니다: <원인>"을 기존 `showError` 경로로 보인다.
    - 치환된 `vnew-previz.js`가 three.js를 `?v=<태그>`로 import하므로 three.js도 배포마다 새 URL이다.
 4. nginx: 정적 확장자(css/js/svg/png/jpg/webp/ico/woff2)는 `public, max-age=2592000, immutable`, HTML은 `no-store`(`nginx.conf`의 두 location). 배포마다 URL이 바뀌어 새 파일을 받는다.
@@ -548,13 +637,13 @@ vpoc·vnew의 Bedrock 도구 호출은 전부 `vpoc.llm._converse`(`vpoc/llm.py:
 - 호스트: 큐 `https://queue.fal.run`, 카탈로그 `https://api.fal.ai/v1`, 스키마 `https://fal.ai/api/openapi/queue/openapi.json`(`vpoc/settings.py:147-152`). 인증 `Authorization: Key <FAL_KEY>`(`vpoc/fal.py:129-131`).
 - **등록 레지스트리**: S3 주 버킷 `users/_system/vpoc/fal-models.json`(`vpoc/fal.py:39`), 프로세스 캐시 30초. 등록 때 OpenAPI 스키마에서 caps(프롬프트·첫/끝 프레임·참고 이미지·영상·영상 배열·elements·길이·해상도)를 뽑아 저장(`fal.py:238-299`).
 - 카테고리: 등록 가능 `text-to-video`·`image-to-video`·`video-to-video`·`reference-to-video`(`vpoc/settings.py:162-167`), 목록만 3D 2종 추가. 금지 글롭 `*seedance*2*fast*`(`VPOC_FAL_DENY_ENDPOINTS`).
-- 코드에 박힌 endpoint 기본값: `fal-ai/kling-video/o3/standard/video-to-video/edit`(애니 변환·프리비즈 edit), `fal-ai/hunyuan3d-v3/image-to-3d`(3D), ARK Seedance 대체 `bytedance/seedance-2.5/image-to-video`(`vpoc/settings.py:139-142`, `:203-205`, `vnew/settings.py:58`, `:114-116`).
+- 코드에 박힌 endpoint 기본값: `fal-ai/kling-video/o3/standard/video-to-video/edit`(애니 변환·프리비즈 edit), 캐릭터 3D `tripo3d/h3.1/multiview-to-3d`·`tripo3d/h3.1/image-to-3d`(T2b 기본, `vnew/settings.py` `VNEW_3D_TRIPO_*`)와 되돌릴 때의 `fal-ai/hunyuan3d-v3/image-to-3d`, ARK Seedance 대체 `bytedance/seedance-2.5/image-to-video`(`vpoc/settings.py:139-142`, `:203-205`, `vnew/settings.py:58`, `:114-116`). 3D endpoint는 fal 레지스트리에 등록하지 않고 코드가 큐로 바로 낸다.
 - 결과 영상은 만료 URL이라 완료 즉시 우리 영상 버킷으로 옮긴다(`fal.py:9-13`).
 
 ### 6.3 BytePlus ARK
 
 - `ARK_BASE_URL` 기본 `https://ark.ap-southeast.bytepluses.com/api/v3`, 키 `ARK_API_KEY`(`vpoc/settings.py:105-106`).
-- Seedance 2.0/2.5: `/contents/generations/tasks`(`vpoc/ark.py:487`, `:517`). 2026-10-26부터 기본 비활성(`VPOC_ARK_SEEDANCE_ENABLED=false`, `settings.py:134`) — 목록에서 빠지고 저장된 선택은 fal Seedance로 바뀐다. 이미 제출된 `ark/tasks/` 작업은 계속 조회한다(`settings.py:128-133` 주석).
+- Seedance 2.0/2.5: `/contents/generations/tasks`(`vpoc/ark.py:487`, `:517`). 2026-10-26부터 코드·base 기본 비활성(`VPOC_ARK_SEEDANCE_ENABLED=false`, `settings.py:134`) — 목록에서 빠지고 저장된 선택은 fal Seedance로 바뀐다. 이미 제출된 `ark/tasks/` 작업은 계속 조회한다(`settings.py:128-133` 주석). **운영은 2026-10-30 사용자 결정("seedance도 사용할 수 있고 fal seedance도 사용할 수 있게 해라")으로 `config.prod.env`에 `true`를 둔다** — ②에 BytePlus Seedance와 "Seedance 2.5 (fal)"이 함께 보인다. 개발은 `false`(fal만).
 - Seedream 5.0 flash/pro(이미지): `/images/generations`(`vpoc/seedream.py:65`), 모델 `dola-seedream-5-0-*`(`settings.py:78-79`). vnew 캐릭터 시트·장소 시트·시작 장면에 쓴다.
 
 ### 6.4 Neptune · S3 · Secret
@@ -587,7 +676,7 @@ vpoc·vnew의 Bedrock 도구 호출은 전부 `vpoc.llm._converse`(`vpoc/llm.py:
 |---|---|---|---|---|---|
 | `VIDEO_GEN_ENABLED` | `server.py:337`, runtime-config | false | true | — (true) | true |
 | `STORY_DEV_ENABLED` | `server.py:338`, runtime-config | true | true | — | — |
-| `VNEW_ENABLED` | `server.py:341`, runtime-config | false | false | **true** | **false** |
+| `VNEW_ENABLED` | `server.py:341`, runtime-config | false | false | **true** | **true**(2026-10-30 사용자 결정 "켠다", 배포 전) |
 | `PERSIST_LOGIN` | 프런트만(`app.js:22`) | false | false | — | true |
 | `NOTICE_SPECUP_ENABLED` | 프런트만(`app.js:25`) | false | false | — | true |
 | `VPOC_ENABLED` | `vpoc/settings.py:32` | true | true | — | true |
@@ -597,19 +686,23 @@ vpoc·vnew의 Bedrock 도구 호출은 전부 `vpoc.llm._converse`(`vpoc/llm.py:
 | `VPOC_MODEL_PICKER_ENABLED` | `vpoc/settings.py:103` | false | false | true | true |
 | `VPOC_DUAL_STYLE_ENABLED` | `vpoc/settings.py:200` | false | false | true | true |
 | `VPOC2_ENABLED` | `vpoc2/settings.py:24` | false | true | — | true |
-| `VPOC_ARK_SEEDANCE_ENABLED` | `vpoc/settings.py:134` | false | false | — | —(되돌릴 때만 `true`) |
+| `VPOC_ARK_SEEDANCE_ENABLED` | `vpoc/settings.py:134` | false | false | — | **true**(2026-10-30 사용자 결정: BytePlus·fal Seedance 둘 다) |
 | `VPOC_FAL_SEEDANCE_FAMILY` | `vpoc/settings.py:248` | `bytedance/seedance-2.5/image-to-video=bytedance/seedance-2.5/reference-to-video` | 같은 값 | — | — |
 | `VPOC_FAL_SEEDANCE_MAX_S` | `vpoc/settings.py:228` | 15 | 15 | — | — |
 | `VPOC_FAL_PROMPT_MAX_OVERRIDES` | `vpoc/settings.py:293` | `bytedance/seedance-2.5/*=4000` | 같은 값 | — | — |
 | `VPOC_FAL_SEEDANCE_TAG_STYLE` | `vpoc/settings.py:330` | `at` | `at` | — | —(V-2 실패 시에만 `plain`) |
 | `PROMPT_BOOST_ENABLED` | `prompt_boost.py:42` | 1 | 키 없음 | — | — |
-| `VNEW_PREVIZ_COLLISION` | `vnew/settings.py`(`_bool`), `previz.run_design`·`previz_view` | true | true | — | —(VNEW 꺼짐이라 영향 없음) |
-| `VNEW_PREVIZ_SUPPORT` | `vnew/settings.py`(`_bool`), `previz.run_design` | true | true | — | —(VNEW 꺼짐이라 영향 없음) |
-| `VNEW_FX` | `vnew/settings.py:164`(`_bool`), `plan.update_conti`·`run_conti`·`start_fx_fill`·`plan_view`, `generate._take_timeline_entries`·`_take_prompt`·`_cut_prompt`·`_cast_notes_system`, `characters._analyze_system`, 화면 `features.fx` | true | true | — | —(VNEW 꺼짐이라 영향 없음) |
+| `VNEW_PREVIZ_COLLISION` | `vnew/settings.py`(`_bool`), `previz.run_design`·`previz_view` | true | true | — | —(base 값. 운영 VNEW 켬 배포부터 적용) |
+| `VNEW_PREVIZ_SUPPORT` | `vnew/settings.py`(`_bool`), `previz.run_design` | true | true | — | —(base 값. 운영 VNEW 켬 배포부터 적용) |
+| `VNEW_FX` | `vnew/settings.py:164`(`_bool`), `plan.update_conti`·`run_conti`·`start_fx_fill`·`plan_view`, `generate._take_timeline_entries`·`_take_prompt`·`_cut_prompt`·`_cast_notes_system`, `characters._analyze_system`, 화면 `features.fx` | true | true | — | —(base 값. 운영 VNEW 켬 배포부터 적용) |
 | `VNEW_FX_MAX_PANELS` | `vnew/settings.py:166`(`_int`), `plan._fx_blocks`·`_fx_estimate_usd` | 20 | 키 없음(코드 기본) | — | — |
-| `VNEW_CASTING` | `vnew/settings.py:171`(`_bool`), `casting.require_enabled`·`view`, `characters._analyze_tool`·`_analyze_system`·`analyze_sources`, `generate._char_entries`, 화면 `detail.casting.enabled` | true | true | — | —(VNEW 꺼짐이라 영향 없음) |
+| `VNEW_CASTING` | `vnew/settings.py:171`(`_bool`), `casting.require_enabled`·`view`, `characters._analyze_tool`·`_analyze_system`·`analyze_sources`, `generate._char_entries`, 화면 `detail.casting.enabled` | true | true | — | —(base 값. 운영 VNEW 켬 배포부터 적용) |
 | `VNEW_CASTING_MODEL`·`_USD`·`_COUNT`·`_SIZE`·`_STALL_S`·`_POLL_MAX_S` | `vnew/settings.py:173-180`, `casting.py` | Seedream 4.5 t2i · 0.04 · 2(1~4) · 1920x2560 · 600 · 900 | 키 없음(코드 기본) | — | — |
-| `VNEW_TAKE_REAL` | `vnew/settings.py:186`(`_bool`), `generate._require_take_real`(`start_real`·`POST /generate/real`)·`_real_block_text`·`gen_view.realEnabled`, 화면 `takeRealShown` | true | true | — | —(VNEW 꺼짐이라 영향 없음) |
+| `VNEW_TAKE_REAL` | `vnew/settings.py:186`(`_bool`), `generate._require_take_real`(`start_real`·`POST /generate/real`)·`_real_block_text`·`gen_view.realEnabled`, 화면 `takeRealShown` | true | true | — | —(base 값. 운영 VNEW 켬 배포부터 적용) |
+| `VNEW_CHAR_FIDELITY` | `vnew/settings.py`(`_bool`), `characters._analyze_system`·`_analyze_tool`·`analyze_sources`·프롬프트·그림·시트 검사·`sync_auto_outfits`·`run_build_outfit`·`detail_view.features`, 화면 분석 카드·배지·안내 | true | true | — | —(base 값. 운영 VNEW 켬 배포부터 적용) |
+| `VNEW_3D_SIDE_VIEWS` | `vnew/settings.py`(`_bool`), `characters._build_variant`·`_draw_side_views`·`run_retry3d`·`run_resume_variant`·`detail_view.features` | true | true | — | —(base 값. 운영 VNEW 켬 배포부터 적용) |
+| `VNEW_3D_PROVIDER` | `vnew/settings.py`(`_checked_choice`), `characters._3d_provider`(새 3D 제출만) | `tripo` | `tripo` | — | —(되돌릴 때만 `hunyuan`) |
+| `VNEW_3D_TRIPO_*`(9개)·`VNEW_3D_SIDE_SWAP` | `vnew/settings.py`(`_checked_*`), `characters._tripo_request`·`_3d_squares`·`_charge_tripo_3d`·`_copy_3d_result` | §3.6.2 「3D 공급자 Tripo H3.1 전환」 목록 | 코드 기본과 같음 | — | — |
 
 `VNEW_PREVIZ_COLLISION`(084 작업 1, 2026-10-28)은 앱 env(`k8s/workloads.yaml.tmpl`의 `VNEW_ENABLED` 바로 뒤)와 base(`deploy/config.env.example`의 `VNEW_ENABLED` 뒤)에 배선돼 있다. false면 보정·앉을 자리(`sit`)가 없고 엉덩이 0.5(지금 동작)다. 설계는 시작 때 읽은 값으로 끝낸다. 되돌림 배선 검사 `PARITY_ENV_KEYS`(rw-a~c)에 들어 있다.
 
@@ -622,6 +715,15 @@ vpoc·vnew의 Bedrock 도구 호출은 전부 `vpoc.llm._converse`(`vpoc/llm.py:
 `VNEW_TAKE_REAL`(vnew-live-fx 묶음 C, 2026-10-30)은 템플릿·base 모두 `VNEW_CASTING` 바로 뒤에 배선돼 있고 `PARITY_ENV_KEYS`에 들어 있다(rw-a~c, lr-o). 되돌리기는 `config.<target>.env`에 `VNEW_TAKE_REAL=false` 한 줄이다. false면 `POST /generate/real`이 프로젝트를 보기 전에 404 `TakeRealDisabled`, `gen_view.realEnabled`가 false(`realBlock` "실사 버전 기능이 꺼져 있습니다.")라 실사 회차가 없는 gen은 C 이전 화면("건너뜀")이다. 이미 시작한 회차는 드라이버가 끝까지 진행하고(드라이버·제출은 설정을 보지 않는다) 결과는 화면에 보인다. 소리 거절 처리([소리 없이 다시 만들기])와 결함 수정(`_fail_variant`·`_gen_stale` `activeSince`·take 웹툰 고르기)은 설정과 상관없다(R0.3 예외). 저장된 `realRun`·`realHistory`·`units[].real`·`final-real-r{n}.mp4`는 지우지 않는다. **코드 이미지를 C 이전으로 되돌릴 때**는 진행 중인 실사 회차를 먼저 취소한다(옛 `_do_submit_take`는 실사 칸을 제출하지 않고 돌아가 preparing·queued를 30분까지 오간다, 093 운영성 리뷰).
 
 073 새 키 5개(위 `VPOC_ARK_SEEDANCE_ENABLED`~`VPOC_FAL_SEEDANCE_TAG_STYLE`)는 앱 env(`k8s/workloads.yaml.tmpl:298-311`)와 base(`deploy/config.env.example:368-392`)에 배선돼 있어 오버레이 한 줄로 바꿀 수 있다. 템플릿이 env를 늘 설정하므로 base 값이 실제 기본값이다. 빈 값의 뜻: `FAMILY` 빈 값은 계열 라우팅 끔(070 동작), `PROMPT_MAX_OVERRIDES` 빈 값은 덮어쓰기 없음(caps·2,500), `TAG_STYLE` 빈 값·틀린 값은 `at`(design.md §6).
+
+**운영 오버레이 2줄(2026-10-30 사용자 결정, 배포 전)**: `config.prod.env`의 `VNEW_ENABLED=false`를 `true`로 바꾸고, `VPOC_ARK_SEEDANCE_ENABLED=true`를 더했다(바로 위에 날짜·결정 주석 1줄). 사용자 원문은 "앞으로 추가로 운영에도 같이 배포를 진행해라", 운영 vnew "켠다", "seedance도 사용할 수 있고 fal seedance도 사용할 수 있게 해라"다. 개발(`config.dev.env`)은 바꾸지 않았다(vnew 켬·fal Seedance만). 검사 rw-c가 렌더 값을 본다(prod `VPOC_ARK_SEEDANCE_ENABLED="true"`·`VNEW_ENABLED="true"`, dev `"false"`). 배포·확인·되돌리기는 `docs/plans/2026-10-30-prod-vnew-enable.md`와 `docs/plans/2026-10-26-prod-deploy-fal-seedance.md`다. `config.prod.env`의 VNEW 주석 3줄("운영은 꺼진 채로 둔다")은 이번에 바꾸지 않아 값과 맞지 않는다(지시 범위: 두 줄만).
+
+`VNEW_CHAR_FIDELITY`·`VNEW_3D_SIDE_VIEWS`(char-fidelity T1, 2026-10-30)는 템플릿·base 모두 `VNEW_TAKE_REAL` 바로 뒤에 배선돼 있고 `PARITY_ENV_KEYS`에 들어 있다(rw-a~c, cf-a). 되돌리기는 `config.<target>.env`에 `VNEW_CHAR_FIDELITY=false`·`VNEW_3D_SIDE_VIEWS=false` 한 줄씩이다.
+- 둘 다 false면 분석 SYSTEM·도구·블록·`max_tokens` 1200, 시트·정면·후면·추가 복장 프롬프트, 사람 수·복장 검사 호출, 3D 본문, 상세 응답이 구현 전과 바이트까지 같다(cf-b 지문 32개, cf-o, cf-r). 화면도 같다(cf-s).
+- `VNEW_CHAR_FIDELITY`만 false면 분석·프롬프트·검사·화면 새 줄이 지금 동작이고, 옆모습만 그린다. `VNEW_3D_SIDE_VIEWS`만 false면 옆모습을 그리지 않고 저장된 옆모습도 3D에 보내지 않는다.
+- 상세 `features{charFidelity, sideViews}`는 둘 중 하나라도 켜져 있을 때만 있다. `leftUrl`·`rightUrl`·추가 복장 `kind`·`model3d.endpoint`는 설정이 아니라 저장값이 있을 때만 있다.
+- 이미 저장한 새 필드(`fidelity`·`sidedItems`·`leftKey`·`viewCheck`·`kind` 등)는 지우지 않는다. 다음 빌드부터 끈 동작이다. 끈 뒤 재시작하면 이어 만들기도 끈 동작으로 이어 간다(옆모습 없이 3D).
+- `VNEW_3D_PROVIDER` 등 3D 공급자 설정 11개(T2b)는 템플릿·base 모두 `VNEW_3D_SIDE_VIEWS` 바로 뒤에 있고 `PARITY_ENV_KEYS`에 들어 있다(tr-b). 값·되돌리기는 §3.6.2 「3D 공급자 Tripo H3.1 전환」이다.
 
 ### 7.2 계정·저장소·리전
 
@@ -742,7 +844,9 @@ flowchart LR
 | 방법 | 근거 | 비고 |
 |---|---|---|
 | 기능 플래그 끄기 후 main 배포 | `config.env.example`의 `VPOC_REGEN_ENABLED`·`VPOC2_ENABLED` 주석("이 값만 false로 바꿔 배포"), `vpoc/settings.py:35-37` | 플래그가 템플릿에 주입된 값일 때만 가능(7.5) |
-| ARK Seedance 되살리기 | `vpoc/settings.py:128-134`(`VPOC_ARK_SEEDANCE_ENABLED=true`) | 073부터 템플릿·base에 배선됨. `config.prod.env`에 한 줄 + 운영 job(design.md §8) |
+| ARK Seedance 되살리기 | `vpoc/settings.py:128-134`(`VPOC_ARK_SEEDANCE_ENABLED=true`) | 073부터 템플릿·base에 배선됨. `config.prod.env`에 한 줄 + 운영 job(design.md §8). 운영은 2026-10-30부터 이 줄이 있다(BytePlus·fal 둘 다) |
+| 운영 vnew 끄기 | `config.prod.env` `VNEW_ENABLED=false` 한 줄 + 운영 job | 화면·`/api/vnew`가 함께 꺼진다(같은 config 값으로 렌더, 5.2). 저장된 vnew 데이터(`users/{owner}/characters/…`·`…/vnew/…`)는 남는다(무해) |
+| 캐릭터 3D 공급자 되돌리기 | `config.<target>.env` `VNEW_3D_PROVIDER=hunyuan` 한 줄 + 재배포 | 다음 새 3D 요청부터 Hunyuan(T2 본문). 진행 중 요청은 arn 공급자로 끝난다(§3.6.2) |
 | 이전 커밋으로 운영 재배포 | `deploy:whynot:prod`는 그 파이프라인의 `$IMAGE_TAG`를 쓴다(`:136-`) → 이전 main 파이프라인의 수동 버튼을 다시 누르면 그 태그가 렌더된다(추정 — GitLab이 옛 파이프라인 수동 job 재실행을 허용하는지와 그 태그가 ECR에 남아 있는지에 좌우됨) | `prod-<sha>` 태그 이미지는 보존 의도 |
 | ai-deploy 커밋 되돌리기 | ArgoCD가 경로를 그대로 동기화하므로 revert 커밋이 반영될 것(추정, Application 설정 미확인) | 다음 CI 실행이 다시 덮어씀 |
 | kubectl 직접 수정 | 금지(selfHeal이 되돌림, `CLAUDE.md`) | — |
@@ -773,7 +877,7 @@ flowchart LR
 | `users/{owner}/video/_vpoc2/index.json`, `_vpoc2/{run}/run.json`, `characters/…`, `final-*.mp4` | vpoc2 | `vpoc2/store.py:4-10` |
 | `users/_vpoc2/ledger.json`, `users/_vpoc2/reviews.json` | vpoc2 원장·리뷰 | `vpoc2/store.py:55-56` |
 | `users/_system/vpoc/fal-models.json` | fal 등록 레지스트리(전역) | `vpoc/fal.py:39` |
-| `users/{owner}/characters/index.json`, `{c}/char.json`, `{c}/src/{f}.jpg`, `{c}/{variant}/v{n}/…` | vnew 캐릭터(시트·GLB) | `vnew/characters.py:116-132` |
+| `users/{owner}/characters/index.json`, `{c}/char.json`, `{c}/src/{f}.jpg`, `{c}/{variant}/v{n}/…`, `{c}/outfits/{o}/{variant}/front.jpg`·`back.jpg`, `{c}/casting/{id}.jpg` | vnew 캐릭터. `{c}/{variant}/v{n}/` 아래 `sheet.jpg`·`front.jpg`·`back.jpg`·**`left.jpg`·`right.jpg`**(옆모습, char-fidelity T2 — 3D에 쓸 수 있는 쪽만 저장하고 `char.json` variant `leftKey`·`rightKey`에 키, 뺀 쪽은 `""`)·`model.glb`(Tripo 결과는 정면을 +Z로 돌린 GLB)·`thumb.png` | `vnew/characters.py:116-185`(`left_key`·`right_key`) |
 | `users/{owner}/video/{pid}/vnew/plan.json` | **vnew 프로젝트 단일 원본** | `vnew/plan.py:64-68` |
 | `users/{owner}/video/{pid}/vnew/uploads/{f}.jpg`, `locations/…`, `previz/{rev}/{seg}.mp4`, `previz/{rev}/frames/{seg}/` | vnew 입력·장소·프리비즈 녹화 | `vnew/plan.py:72`, `vnew/previz.py:185-204` |
 | `users/{owner}/video/{pid}/vnew/gen/{gen}/opening.jpg`, `{seg}-firstframe.jpg`, `final-real.mp4`, `final-webtoon.mp4` | vnew ⑤ 산출물 | `vnew/generate.py:107-124` |
@@ -793,9 +897,20 @@ flowchart LR
 
 ## 10. 테스트·검증 도구
 
-### 10.1 `tools/check_vpoc.py`(CI 유일 검사기, 24,832줄)
+### 10.1 `tools/check_vpoc.py`(CI 유일 검사기, 29,501줄 — 2026-10-30)
 
-`main()`이 아래 58개를 순서대로 부른다(`check_vpoc.py:24760-`). 실패가 하나라도 있으면 종료 코드 1. 외부 호출은 모듈 래퍼를 monkeypatch 하고 S3는 메모리 저장소로 바꾼다(예: `:892` "메모리 S3", `:916`, `:1216`, `:1930`). 새 기본값(`VNEW_FX` 켬)에서 기대값이 달라지는 기존 검사 3개(`check_vnew_plan`·`check_vnew_locations`·`check_vnew_previz`)는 `main()`의 부르는 줄에서 `_run_fx_off(...)`(`_pin_vnew(VNEW_FX=False)`)로, `VNEW_CASTING` 켬에서 달라지는 `check_vnew_fx_prompt` 1개는 `_run_casting_off(...)`(`:24754`)로 끔 고정한다. 본문·기대값은 그대로다.
+`main()`이 아래 61개를 순서대로 부른다(`check_vpoc.py` 끝 `def main`). 실패가 하나라도 있으면 종료 코드 1. 외부 호출은 모듈 래퍼를 monkeypatch 하고 S3는 메모리 저장소로 바꾼다(예: `:892` "메모리 S3", `:916`, `:1216`, `:1930`). 새 기본값(`VNEW_FX` 켬)에서 기대값이 달라지는 기존 검사 3개(`check_vnew_plan`·`check_vnew_locations`·`check_vnew_previz`)는 `main()`의 부르는 줄에서 `_run_fx_off(...)`(`_pin_vnew(VNEW_FX=False)`)로, `VNEW_CASTING` 켬에서 달라지는 `check_vnew_fx_prompt` 1개는 `_run_casting_off(...)`로 끔 고정한다. 본문·기대값은 그대로다.
+
+char-fidelity 새 기본값 때문에 `main()` 호출 줄에서만 고정한 기존 검사(본문·기대값 그대로):
+
+| 기존 검사 | 고정 | 이유 |
+|---|---|---|
+| `check_vnew_characters` | `_run_3d_hunyuan(lambda: _run_char_fidelity_off(check_vnew_characters))` | T1: 켬이면 분석·프롬프트·검사 함수가 바뀐다. T2b: tripo면 3D 본문·조회 주소·원장 수가 Hunyuan 기준과 다르다 |
+| `check_vnew_fx_prompt` | `_run_char_fidelity_off(lambda: _run_casting_off(check_vnew_fx_prompt))` | T1: fx-k가 분석 SYSTEM을 `_ANALYZE_SYSTEM` + 규칙과 글자째 비교한다 |
+| `check_vnew_casting` | `_run_char_fidelity_off(check_vnew_casting)` | T1: cast-d가 끔 도구 = 원본 객체·SYSTEM sha256을 본다 |
+| `check_vnew_char_fidelity` | `_run_3d_hunyuan(check_vnew_char_fidelity)` | T2b: cf-b·cf-m·cf-o·cf-p가 Hunyuan 본문을 본다 |
+
+T3에서 새로 고정한 기존 검사는 없다. 기대값을 바꾼 기존 검사는 `check_fal_parity_rollback`(rw-c) 하나다: 2026-10-30 사용자 결정으로 운영 렌더 `VPOC_ARK_SEEDANCE_ENABLED`가 `"true"`(개발 `"false"`), 운영 `VNEW_ENABLED`가 `"true"`다.
 
 | 접두어 | 검사 함수 | 대상 |
 |---|---|---|
@@ -810,6 +925,9 @@ flowchart LR
 | vnew 기호·분위기 | `check_vnew_fx`(fx-a~g·fx-m·fx-n 저장 쪽), `check_vnew_fx_prompt`(fx-h~k·fx-n 프롬프트 쪽), `check_vnew_fx_screen`(fx-l), 2026-10-30 | `vnew/fx.py` 전 함수, `plan` 저장 규칙·채우기 호출(가짜 `vnew.conti.fx`)·작업·`plan_view`, `POST /conti/fx`(별도 Flask 앱), 배선, `generate._take_prompt`·`_cut_prompt`(끔 = 변경 전 sha256 5종 `_FX_PROMPT_SHA_OFF`, 켬 바이트·단계 출력)·`_cast_notes_system`, `characters._analyze_system`, `vnew.js` 기호 구역(순수 함수·DOM 조립을 node 가짜 DOM으로 실행)·`vnew.css`, 운영 오류 문구(`USER_FACING_KINDS`). 고정 입력은 기존 take 검사 값(`_fx_take_fixture`·`_fx_cut_fixture`) |
 | vnew 실사 캐스팅 | `check_vnew_casting`(cast-a~m, `:21336`, 2026-10-30) | `vnew/casting.py` 전 함수(문장·성별·뽑기·이어하기·고르기·보기, 가짜 fal 큐·내려받기·원장·스레드), `characters` 분석 도구·SYSTEM(끔 = 변경 전 sha256)·`genderEn`·`casting_key`·`_casting_detail`, 캐스팅 라우트 3개(별도 Flask 앱), 배선. cast-k: `generate._char_entries.castingKey`·`_real_front_key`(고름·안 고름·끔), 캐스팅을 골라도 컷 단위 Kling payload 2종이 그대로(결정 4). cast-l: `vnew.js` 캐스팅 구역(문구 함수·`castingSection`·`schedulePoll`)을 node 가짜 DOM으로 실행(`_CAST_SCREEN_NODE_HARNESS`·`_cast_screen_problems`)·`vnew.css`·`node --check`·운영 문구 9종(`USER_FACING_KINDS`) |
 | vnew 통 테이크 실사 버전 | `check_vnew_take_real`(lr-a~m, `:23104`), `check_vnew_take_real_screen`(lr-n·lr-o, `:24490`), 2026-10-30 | lr-a~m: `start_real`·`POST /generate/real`·실사 payload·프롬프트(웹툰 sha256 그대로 `_LR_TAKE_SHA_ON`)·드라이버·병합·소리 거절(`vpoc.fal.poll`)·`_fail_variant`·`_gen_stale`·재시작·취소·`select`·`gen_view`·세마포어(하네스 `_LrEnv`: 가짜 fal 제출·조회·취소·concat·원장·캐릭터, urlopen 막음). lr-n: `vnew.js` ⑤ 결과·실사 열·확인창·나란히 보기·테이크 행·`cutCell` 소리 없이 다시·`schedulePlanPoll`을 잘라(`_LR_SCREEN_SLICES`) node 가짜 DOM으로 실행(`_LR_SCREEN_NODE_HARNESS`·`_lr_screen_problems`), 배선·`vnew.css`·`node --check`. lr-o: 설정·배선, `_LrEnv`의 실제 `gen_view`(끔·소리 거절·켬·회차 중 끔)를 화면 함수에 넣고 화면이 만든 요청 본문을 Flask 라우트에 그대로 보낸다 |
+| vnew 캐릭터 충실도 | `check_vnew_char_fidelity`(cf-a~r), `check_vnew_char_fidelity_screen`(cf-s), 2026-10-30 | `vnew/char_fidelity.py` 전 함수. `characters`의 분석·좌우·참고 순서·프롬프트·길이 예산·사진 속 옷(T1), 그림·시트 검사·반전·옆모습·3D 본문·재제출·이어 만들기·선점(T2), `detail_view`·`_outfits_view`(cf-r: 끔 = 구현 전 sha256, 켬 Tripo 빌드 → 라우트 상세·다른 사용자 404). 끔 지문 `_CF_OFF_SHA` 32개·`_CF_3D_OLD_SHA`는 구현 전에 잰 값이다. 하네스 `_CfFakes`·`_CfFakesT2`(가짜 LLM·Seedream·fal·원장, 동기 스레드). cf-s: `vnew.js` 캐릭터 충실도 순수 함수와 DOM 4곳을 잘라(`_CF_SCREEN_SLICES`) node 가짜 DOM으로 실행하고 실제 `detail_view` 응답을 넣는다. 옛 캐릭터 + 끔 화면 DOM = 구현 전 sha256(`_CF_SCREEN_OLD_SHA`) |
+| vnew 3D 공급자 | `check_vnew_3d_tripo`(tr-a~l), 2026-10-30 | `settings._checked_*`·설정 11개(하위 프로세스), 배선·렌더, `_tripo_request`·`submit_3d`·`_3d_squares`·`poll_3d`·`_orient_glb`(진짜 GLB)·`_copy_3d_result`·원장·재제출·`run_retry3d`·이어 만들기, Hunyuan 지문 16개 = 시작 전(`_TR_HUNYUAN_SHA`), 12MB GLB 회전 메모리. 하네스 `_TrFakes` |
+| 되돌리기 배선 | `check_fal_parity_rollback`(rw-a~c) | `PARITY_ENV_KEYS`(28개)의 템플릿·base 배선, `render.py` prod·dev 렌더. 운영 `VPOC_ARK_SEEDANCE_ENABLED`·`VNEW_ENABLED`는 `"true"`, 개발 `VPOC_ARK_SEEDANCE_ENABLED`는 `"false"`(2026-10-30 사용자 결정), 오버레이 `true` 한 줄 되돌리기 경로 |
 
 ### 10.2 기타 도구
 
@@ -850,6 +968,7 @@ flowchart LR
 | R-18 | vnew의 fal 모델 등록 UI가 vpoc 블루프린트(`VIDEO_GEN_ENABLED`·`VPOC_ENABLED`)와 `VPOC_MODEL_PICKER_ENABLED`에 의존한다. 이 중 하나라도 꺼진 환경에서 vnew만 켜면 모델 등록이 404 | `vnew.js:2255-2370`, `vpoc/routes.py:4551-4553`, `server.py:6970` | 결합 |
 | R-19 | vpoc `create_blueprint`가 등록 시점에 `ledger.seed()`로 S3를 읽고 쓴다(실패는 경고). 파드 기동마다 실행 | `vpoc/routes.py:157-161` | 기동 부작용 |
 | R-20 | ArgoCD Application·dev ingress·운영 ECR 정책이 저장소 밖에 있다. 이름도 문서마다 다르다(`argocd-whynot` vs `whynot-dev`) | `.gitlab-ci.yml:28-29`, `CLAUDE.md` 배포 절 | 추적성 |
+| R-21 | 운영 vnew를 처음 켠다(2026-10-30 사용자 결정, 배포 전). 켜는 순간 운영 사용자 전체의 화면이 바뀐다: 만들기·트랙 고르기 창의 "영상" → "영상만들기_기존", "영상만들기_신규" 버튼, 메뉴 "캐릭터 만들기"가 생기고 **"스토리" 버튼이 숨는다**(기존 스토리 프로젝트는 목록·열기 그대로). 앱을 처음 읽을 때 `vnew-previz.js`·three.js(약 735KB)를 비동기로 받는다. 새 유료 기능(캐릭터 1명 약 $1.2, Tripo 3D $0.60 × 2 포함)이 로그인한 운영 사용자 누구에게나 열린다. 비용 상한은 없다(2026-09-23 사용자 결정, 원장 기록만 — `check_no_budget_cap`) | `app.js:18-30`·`:100-111`·`applyVnewToggles`, `config.prod.env`, `docs/plans/2026-10-30-prod-vnew-enable.md` | 화면·비용·운영 |
 
 ---
 
@@ -866,7 +985,7 @@ flowchart LR
 | ECR | `toon-change-ai-pj-app/frontend/video-gen` 3개, 태그 `YYYYMMDD-vN` | dev `whynot-dev-app/frontend`, prod `whynot-app/frontend`, 태그 `ci-<sha>` + `prod-<sha>` | `.gitlab-ci.yml:44`, `:85-133`, `:165` |
 | 도메인 | `ai-pj.testlink.click` | 운영 `whynot.meta-clouds.com`, 개발 `dev-whynot.meta-clouds.com` | `.gitlab-ci.yml` environment url |
 | 자체 GPU(Wan 2.2) | 운영 중(g6e.24xlarge, `video-gen` Deployment) | 이관 안 함. `k8s-gpu/`·`video-worker/`만 남음 | `render.py:142-151`, `config.env.example` |
-| 영상 기능 | `/api/videos/*`(Luma), `/api/v2/video/*`(Wan) | `/api/vpoc`(vpoc1), `/api/vpoc2`, `/api/vnew`(개발만). 옛 영상 모듈은 삭제되고 잔존 검사로 막음 | `server.py:6970-7011`, `tools/check_vpoc.py` `MUST_NOT_EXIST` |
+| 영상 기능 | `/api/videos/*`(Luma), `/api/v2/video/*`(Wan) | `/api/vpoc`(vpoc1), `/api/vpoc2`, `/api/vnew`(개발. 운영은 2026-10-30 `VNEW_ENABLED=true` 배포부터). 옛 영상 모듈은 삭제되고 잔존 검사로 막음 | `server.py:6970-7011`, `tools/check_vpoc.py` `MUST_NOT_EXIST` |
 | 외부 영상 공급자 | Bedrock Luma + 자체 GPU | Bedrock Luma + fal.ai(Kling·Seedance·Hunyuan3D) + BytePlus ARK(Seedream, Seedance는 기본 꺼짐) | `vpoc/settings.py`, `vnew/settings.py` |
 | LLM | Bedrock Claude(gateway 경유) | 스토리는 gateway 경유, vpoc·vnew는 직접 boto3 + 모델 체인 + broker 역할 + GPT-6 Astra | `vpoc/llm.py:38-96`, `:292-300` |
 | 백엔드 규모 | 15개 모듈 약 13,100줄, 라우트 55개 | 74개 파일 약 55,100줄, 라우트 server 63 + track 1 + vpoc 14 + vpoc2 13 + vnew 45 | 2장, 4장 |

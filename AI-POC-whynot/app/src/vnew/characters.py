@@ -17,14 +17,17 @@ import copy
 import io
 import json
 import logging
+import math
+import re
 import secrets
 import socket
+import struct
 import threading
 import time
 import urllib.request
 from datetime import datetime, timezone
 
-from PIL import Image
+from PIL import Image, ImageOps
 
 from ..vpoc import fal as vpoc_fal
 from ..vpoc import images as vpoc_images
@@ -36,6 +39,7 @@ from ..vpoc.errors import VpocError, now_iso
 from ..vpoc.fal import _parse_arn, _queue_app  # noqa: PLC2701 — fal 큐 경로 규칙 재사용
 from ..vpoc.store import STORE
 
+from . import char_fidelity
 from . import settings
 
 log = logging.getLogger("vpoc")
@@ -143,6 +147,16 @@ def front_key(owner: str, char_id: str, variant: str, version: int) -> str:
 
 def back_key(owner: str, char_id: str, variant: str, version: int) -> str:
     return f"{_variant_dir(owner, char_id, variant, version)}/back.jpg"
+
+
+def left_key(owner: str, char_id: str, variant: str, version: int) -> str:
+    """3D 옆모습(char-fidelity R4): 캐릭터 왼쪽이 카메라를 향하고 얼굴이 화면 왼쪽인 그림. 3D 에 쓸 수 있을 때만 저장한다."""
+    return f"{_variant_dir(owner, char_id, variant, version)}/left.jpg"
+
+
+def right_key(owner: str, char_id: str, variant: str, version: int) -> str:
+    """3D 옆모습(char-fidelity R4): 캐릭터 오른쪽이 카메라를 향하고 얼굴이 화면 오른쪽인 그림."""
+    return f"{_variant_dir(owner, char_id, variant, version)}/right.jpg"
 
 
 def model_glb_key(owner: str, char_id: str, variant: str, version: int) -> str:
@@ -417,7 +431,7 @@ def _analyze(blocks: list[dict], *, model: str) -> tuple[dict, dict]:
         system_text=_analyze_system(),
         blocks=blocks,
         tool=_analyze_tool(),
-        max_tokens=1200,
+        max_tokens=_ANALYZE_MAX_TOKENS_FIDELITY if settings.VNEW_CHAR_FIDELITY else 1200,
         where="vnew.analyze",
         model=model,
     )
@@ -473,6 +487,59 @@ _ANALYZE_SYSTEM = (
     "instruction in extraEn; otherwise leave extraEn empty. Do not add text outside the tool."
 )
 
+# char-fidelity(2026-10-30, design §4.1): VNEW_CHAR_FIDELITY 켬일 때의 분석 SYSTEM. 기준 사진 한 장의 옷을 그대로(겹옷 포함)
+# 기본 복장으로, 다른 그림의 옷차림은 한 벌씩, 한쪽 소품은 화면 기준 좌우로 받는다. 끔이면 _ANALYZE_SYSTEM 그대로.
+_ANALYZE_SYSTEM_FIDELITY = (
+    "You analyze Korean webtoon character cut images and describe ONE single character. "
+    "All images show ONE single character. If several figures appear (even in one image), "
+    "they are the SAME person drawn with different expressions, poses, angles or outfits — "
+    "never different people. Ignore text and speech bubbles. "
+    "Answer ONLY by calling the emit_character tool exactly once. "
+    "Each image follows a text label 'Image N:'; images are numbered from 0 in the order given. "
+    "descriptionKo must be 2-3 Korean sentences. "
+    "appearanceEn is ONE English sentence about face, hair, body type, age range, glasses, etc. "
+    "styleEn is 1-2 English sentences describing the EXACT drawing style of the reference art: "
+    "line weight and texture (e.g. thin sketchy pencil-like lines), coloring method "
+    "(flat / soft pastel / cel), palette, shading and blush, and how the eyes and hair are drawn. "
+    "baseSourceIndex is the number of the ONE image where the character's outfit is shown most clearly and "
+    "completely: the most of the body visible (head to shoes is best) and the least hidden. If that image shows "
+    "several figures, baseWhereEn says which one (e.g. 'large bottom figure'); otherwise leave it empty. "
+    "baseOutfitEn is exactly the outfit drawn on that figure in that image, as drawn: keep every layer (do not "
+    "remove a jacket, overshirt, coat, cardigan or hoodie), do not mix in clothes from other images, and keep the "
+    "drawn colours (e.g. 'pale grey-blue', not 'blue'). Describe each piece concretely: garment type, colour, fit "
+    "(loose, slim, oversized), how it is worn (untucked, sleeves rolled up, buttons open), rips or patterns and "
+    "where they are, the shoes and every accessory. If a part is not visible in that image, take it from another "
+    "image only when the same outfit is clearly visible there; otherwise choose a plain item that fits and say so "
+    "briefly (e.g. 'shoes not shown, plain white sneakers assumed'). This is the outfit the 3D model is built from. "
+    "Never write left or right in baseOutfitEn or outfitLayersEn; put every item that is on one side only in "
+    "sidedItemsEn. "
+    "outfitLayersEn lists the OTHER outfits seen in other images, one item per outfit: {labelKo, promptEn, "
+    "sourceIndex, whereEn}. promptEn is the WHOLE outfit as drawn in that image, with the same detail as "
+    "baseOutfitEn (e.g. 'white crew-neck T-shirt under an open sage-green overshirt, light-wash straight jeans, "
+    "white sneakers'), not one garment to add; labelKo is a short Korean name; sourceIndex is the image number; "
+    "whereEn says which figure when that image shows several, otherwise empty. Do not list the base outfit again. "
+    "sidedItemsEn lists items or marks that are on ONE side of the body only (wristwatch, bracelet, ring, single "
+    "earring, a bag strap on one shoulder, eyepatch, bandage, tattoo, hair parting, a logo on one side of the "
+    "chest): {itemEn, labelKo, partEn, sightings}. itemEn is a short noun phrase with no left/right words (e.g. "
+    "'round pale-faced wristwatch with a brown leather strap'); labelKo is a short Korean name; partEn is the body "
+    "part; sightings lists every image where you can see it as {sourceIndex, imageSide, facing}. imageSide is the "
+    "side of the PICTURE as you look at it: 'left' when the item is on the viewer's left of that figure's body "
+    "midline, 'right' when on the viewer's right. Do NOT convert it to the character's own left or right; report "
+    "only what you see on the picture. facing is 'toward' when the figure faces the viewer (front or three-quarter "
+    "front), 'away' when it shows its back (back or three-quarter back), 'unclear' for side profiles or when you "
+    "cannot tell. "
+    "outfitEn is the SAME as baseOutfitEn (kept for compatibility). "
+    "altOutfitsEn lists other outfits seen (reference only). "
+    "expressionsKo lists the facial expressions you can see (Korean words). "
+    "If the user gives an extra request (extraPromptKo), turn it into a short English drawing "
+    "instruction in extraEn; otherwise leave extraEn empty. Do not add text outside the tool."
+)
+
+# char-fidelity(design §2·§6.6): 분석 출력이 길어져 max_tokens 를 올리고(결정 S9, 켬만), 켬 프롬프트는 Seedream 이 3,000자에서
+# 자르기 전에 2,900자 안으로 맞춘다(결정 S8).
+_ANALYZE_MAX_TOKENS_FIDELITY = 2000
+_PROMPT_MAX = 2900
+
 # vnew-live-fx RA6.1(참고 구현 vpoc/llm.py:1255-1258): 켬이면 머리색을 그림 그대로, 옷 무늬는 위치까지 쓰게 한다.
 # 이미 분석된 캐릭터는 다시 읽지 않는다(다음 분석부터 적용, RA6.2).
 _ANALYZE_DETAIL_RULE = (
@@ -483,8 +550,12 @@ _ANALYZE_DETAIL_RULE = (
 
 
 def _analyze_system() -> str:
-    """캐릭터 분석 SYSTEM. VNEW_FX 켬이면 머리색·무늬 위치 규칙을, VNEW_CASTING 켬이면 성별 문장을 끝에 더한다(둘 다 끔이면 지금 상수 그대로)."""
-    text = _ANALYZE_SYSTEM + _ANALYZE_DETAIL_RULE if settings.VNEW_FX else _ANALYZE_SYSTEM
+    """캐릭터 분석 SYSTEM. VNEW_FX 켬이면 머리색·무늬 위치 규칙을, VNEW_CASTING 켬이면 성별 문장을 끝에 더한다(둘 다 끔이면 지금 상수 그대로).
+
+    VNEW_CHAR_FIDELITY 켬이면 바탕을 충실 SYSTEM(_ANALYZE_SYSTEM_FIDELITY)으로 바꾼다(끔이면 지금과 같다).
+    """
+    base = _ANALYZE_SYSTEM_FIDELITY if settings.VNEW_CHAR_FIDELITY else _ANALYZE_SYSTEM
+    text = base + _ANALYZE_DETAIL_RULE if settings.VNEW_FX else base
     if settings.VNEW_CASTING:
         text += _ANALYZE_GENDER_RULE
     return text
@@ -499,10 +570,20 @@ _ANALYZE_GENDER_FIELD = {"type": "string", "enum": ["male", "female", "unknown"]
 
 
 def _analyze_tool() -> dict:
-    """캐릭터 분석 도구. VNEW_CASTING 켬이면 _ANALYZE_TOOL 사본에 genderEn(required 아님)을 더한다. 끔이면 상수 그대로."""
-    if not settings.VNEW_CASTING:
+    """캐릭터 분석 도구. VNEW_CASTING 켬이면 _ANALYZE_TOOL 사본에 genderEn(required 아님)을 더한다. 끔이면 상수 그대로.
+
+    VNEW_CHAR_FIDELITY 켬이면 사본에 충실 필드(_ANALYZE_FIDELITY_FIELDS)를 더하고 baseSourceIndex 를 required 에 넣는다.
+    켜진 설정이 없으면 지금처럼 같은 객체(_ANALYZE_TOOL)를 돌려준다.
+    """
+    if not settings.VNEW_CASTING and not settings.VNEW_CHAR_FIDELITY:
         return _ANALYZE_TOOL
     tool = copy.deepcopy(_ANALYZE_TOOL)
+    if settings.VNEW_CHAR_FIDELITY:
+        schema = tool["inputSchema"]["json"]
+        schema["properties"].update(copy.deepcopy(_ANALYZE_FIDELITY_FIELDS))
+        schema["required"] = list(schema["required"]) + ["baseSourceIndex"]
+    if not settings.VNEW_CASTING:
+        return tool
     tool["inputSchema"]["json"]["properties"]["genderEn"] = dict(_ANALYZE_GENDER_FIELD)
     return tool
 
@@ -548,6 +629,51 @@ _ANALYZE_TOOL = {
     },
 }
 
+# char-fidelity(design §4.3): 켬일 때 분석 도구에 더하는 필드. 부위 enum 은 char_fidelity.PARTS 의 키 목록이다.
+_PART_ENUM = list(char_fidelity.PARTS)
+
+_ANALYZE_FIDELITY_FIELDS = {
+    "baseSourceIndex": {"type": "integer"},
+    "baseWhereEn": {"type": "string"},
+    # outfitLayersEn 은 같은 이름으로 덮는다(labelKo·promptEn 은 지금 그대로, 두 필드를 더한다).
+    "outfitLayersEn": {
+        "type": "array",
+        "items": {
+            "type": "object",
+            "properties": {
+                "labelKo": {"type": "string"},
+                "promptEn": {"type": "string"},
+                "sourceIndex": {"type": "integer"},
+                "whereEn": {"type": "string"},
+            },
+        },
+    },
+    "sidedItemsEn": {
+        "type": "array",
+        "items": {
+            "type": "object",
+            "properties": {
+                "itemEn": {"type": "string"},
+                "labelKo": {"type": "string"},
+                "partEn": {"type": "string", "enum": _PART_ENUM},
+                "sightings": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "sourceIndex": {"type": "integer"},
+                            "imageSide": {"type": "string", "enum": ["left", "right"]},
+                            "facing": {"type": "string", "enum": ["toward", "away", "unclear"]},
+                        },
+                        "required": ["sourceIndex", "imageSide", "facing"],
+                    },
+                },
+            },
+            "required": ["itemEn", "partEn", "sightings"],
+        },
+    },
+}
+
 
 def analyze_sources(owner: str, char: dict) -> dict:
     """업로드 이미지를 Astra 에 먼저, 실패하면 Claude 분석 체인으로 보내 분석 JSON 을 받는다.
@@ -563,6 +689,9 @@ def analyze_sources(owner: str, char: dict) -> dict:
     jpegs: list[bytes] = []
     for src in sources[: settings.MAX_ANALYSIS_IMAGES]:
         jpegs.append(source_jpeg(owner, char["id"], src["fileId"]))
+    # char-fidelity: 분석에 보낸 그림의 fileId(순서 = 그림 번호). 켬일 때 기준 사진·사진 속 옷 번호를 fileId 로 바꾼다.
+    file_ids = [src["fileId"] for src in sources[: settings.MAX_ANALYSIS_IMAGES]]
+    fidelity = settings.VNEW_CHAR_FIDELITY
 
     extra_ko = str(char.get("extraPromptKo") or "").strip()
 
@@ -575,7 +704,10 @@ def analyze_sources(owner: str, char: dict) -> dict:
         blocks.append(
             {"text": "사용자 추가 요청(이 지시를 extraEn 영어 한 줄로 바꿔 주세요): " + extra_ko}
         )
-    for jpeg in jpegs:
+    for index, jpeg in enumerate(jpegs):
+        if fidelity:
+            # 켬: 그림마다 바로 앞에 번호 글(0부터). baseSourceIndex·sourceIndex 가 이 번호를 쓴다(R1.3).
+            blocks.append({"text": f"Image {index}:"})
         blocks.append({"image": {"format": "jpeg", "source": {"bytes": jpeg}}})
 
     # Astra 먼저, 실패하면 Claude 분석 체인.
@@ -590,7 +722,7 @@ def analyze_sources(owner: str, char: dict) -> dict:
         # baseOutfitEn 이 가장 기본 한 벌. 옛 응답(baseOutfitEn 없음)은 outfitEn 으로 대신한다.
         base_outfit = str(payload.get("baseOutfitEn") or payload.get("outfitEn") or "").strip()
         layers = _parse_outfit_layers(payload.get("outfitLayersEn"))
-        return _with_gender_en(payload, {
+        analysis = {
             "nameGuess": str(payload.get("nameGuess") or "").strip(),
             "descriptionKo": str(payload.get("descriptionKo") or "").strip(),
             "appearanceEn": str(payload.get("appearanceEn") or "").strip(),
@@ -605,8 +737,46 @@ def analyze_sources(owner: str, char: dict) -> dict:
             else [],
             "extraEn": str(payload.get("extraEn") or "").strip(),
             "model": str(usage.get("model") or model),
-        })
+        }
+        if fidelity:
+            analysis = _with_fidelity(payload, analysis, file_ids)
+        return _with_gender_en(payload, analysis)
     raise VpocError("vnew.analyze", "AnalyzeFailed", "캐릭터 분석에 실패했습니다.", 502)
+
+
+def _with_fidelity(payload: dict, analysis: dict, file_ids: list[str]) -> dict:
+    """VNEW_CHAR_FIDELITY 켬일 때 분석 결과에 충실 필드를 더한다(design §4.5). 끔이면 부르지 않는다.
+
+    - fidelity 1(충실 분석 표시), baseSourceIndex(틀리면 None)·baseSourceFileId("")·baseWhereEn(한 줄 60자).
+    - sidedItems: 모델이 화면 기준으로 적은 소품 좌우를 코드가 캐릭터 좌우로 정한 것(char_fidelity.resolve_sided_items).
+    - baseOutfitEn = outfitEn = 원문의 좌우 표현을 지우고 계산한 좌우 꼬리를 붙인 글. 원문은 baseOutfitRawEn.
+    - outfitLayersEn: 다른 그림의 옷차림 한 벌씩(sourceIndex·sourceFileId·whereEn·sided 포함).
+    로그에는 번호·개수만 남긴다(모델 글 없음).
+    """
+    n_images = len(file_ids)
+    index = char_fidelity.pick_index(payload.get("baseSourceIndex"), n_images)
+    raw_items = payload.get("sidedItemsEn")
+    items = char_fidelity.resolve_sided_items(raw_items, n_images)
+    raw_outfit = analysis.get("baseOutfitEn") or ""
+    outfit = char_fidelity.apply_sides(raw_outfit, items)
+    layers = char_fidelity.photo_layers(payload.get("outfitLayersEn"), file_ids, items, limit=settings.MAX_OUTFITS)
+    analysis.update({
+        "baseOutfitEn": outfit,
+        "outfitEn": outfit,
+        "outfitLayersEn": layers,
+        "fidelity": 1,
+        "baseSourceIndex": index,
+        "baseSourceFileId": file_ids[index] if index is not None else "",
+        "baseWhereEn": char_fidelity.clean_line(payload.get("baseWhereEn"), 60),
+        "sidedItems": items,
+        "baseOutfitRawEn": raw_outfit,
+    })
+    dropped = max(0, (len(raw_items) if isinstance(raw_items, list) else 0) - len(items))
+    log.info(
+        "vnew.char.analysis_fidelity base=%s sided=%d dropped=%d layers=%d",
+        "none" if index is None else index, len(items), dropped, len(layers),
+    )
+    return analysis
 
 
 def _parse_outfit_layers(raw) -> list[dict]:
@@ -750,6 +920,179 @@ def _check_outfit_consistency(sheet: bytes, base_outfit: str) -> dict | None:
     }
 
 
+# ---- char-fidelity 그림 검사(design §7.1·§7.3). VNEW_CHAR_FIDELITY·VNEW_3D_SIDE_VIEWS 켬일 때만 부른다. ----
+#
+# 그림 1장 = LLM 1회. 검사 모델은 화면에 보이는 것(사람 수·방향·글자·소품이 보이는 쪽)만 적고, 맞는지·반전·고칠 문장은
+# char_fidelity 순수 함수가 정한다. 모델 오류·도구 미사용이면 None(정면·후면은 그대로 쓰고, 옆모습은 3D 에서 뺀다).
+
+_VIEW_CHECK_MAX_TOKENS = 500
+_SHEET_CHECK_MAX_TOKENS = 600
+
+_VIEW_SYSTEM_HEAD = (
+    "You check ONE generated character image. people is the number of distinct people drawn. facing is where the person "
+    "faces: 'front' (toward the viewer), 'back' (we see the back of the head and body), 'left' (side profile with the face "
+    "pointing to the LEFT edge of the picture), 'right' (side profile with the face pointing to the RIGHT edge of the "
+    "picture) or 'other'. lettering is true when the clothes or accessories show readable letters or numbers."
+)
+_VIEW_ITEMS_FLAT = (
+    " For each listed item give seen: 'left' when it appears on the viewer's left of the person's body midline, 'right' "
+    "when on the viewer's right, 'both' when it appears on both sides, 'none' when you cannot see it. Report only what you "
+    "see on the picture; do not think about the person's own left or right."
+)
+_VIEW_ITEMS_SIDE = (
+    " For each listed item give seen: 'near' when it is on the arm or side of the body closest to the viewer, 'far' when it "
+    "is visible only on the far side behind the body, 'both' when it appears on both sides, 'none' when you cannot see it."
+)
+_VIEW_SYSTEM_TAIL = " Answer only by calling the emit_view_check tool exactly once."
+
+
+def _view_tool(view: str) -> dict:
+    """그림 검사 도구(design §7.1). 보기마다 seen 열거값만 다르다(정면·후면 left·right, 옆모습 near·far)."""
+    return {
+        "name": "emit_view_check",
+        "description": "Check one character image: how many people, which way the person faces, and where listed "
+        "one-sided items appear.",
+        "inputSchema": {
+            "json": {
+                "type": "object",
+                "properties": {
+                    "people": {"type": "integer"},
+                    "facing": {"type": "string", "enum": list(char_fidelity.VIEW_FACINGS)},
+                    "lettering": {"type": "boolean"},
+                    "items": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "index": {"type": "integer"},
+                                "seen": {"type": "string", "enum": list(char_fidelity.seen_values(view))},
+                            },
+                            "required": ["index", "seen"],
+                        },
+                    },
+                },
+                "required": ["people", "facing", "items"],
+            }
+        },
+    }
+
+
+def _view_system(view: str) -> str:
+    rule = _VIEW_ITEMS_SIDE if view in char_fidelity.SIDES else _VIEW_ITEMS_FLAT
+    return _VIEW_SYSTEM_HEAD + rule + _VIEW_SYSTEM_TAIL
+
+
+def _inspect_view(jpeg: bytes, view: str, items: list[dict]) -> dict | None:
+    """그림 1장 검사(LLM 1회, design §7.1). 반환 char_fidelity.normalize_view_obs 모양, 모델 오류면 None.
+
+    정면·후면은 정한 소품이 있을 때만 사람 수 검사(_count_people)를 대신하고, 옆모습은 소품이 없어도 부른다(사람 수·방향).
+    로그에는 오류 앞 200자만 남긴다(소품 글·프롬프트 없음).
+    """
+    if items:
+        listed = "; ".join(f"{i}) {item['itemEn']} ({char_fidelity.PARTS[item['partEn']][0]})" for i, item in enumerate(items))
+        text = "Items to check: " + listed
+    else:
+        text = "No items to check; return an empty items list."
+    blocks = [{"text": text}, {"image": {"format": "jpeg", "source": {"bytes": jpeg}}}]
+    try:
+        payload, _usage = vpoc_llm._converse(  # noqa: SLF001
+            system_text=_view_system(view),
+            blocks=blocks,
+            tool=_view_tool(view),
+            max_tokens=_VIEW_CHECK_MAX_TOKENS,
+            where="vnew.view_check",
+            model=settings.PEOPLE_COUNT_MODEL,
+        )
+    except Exception as exc:  # noqa: BLE001
+        log.warning("vnew.view_check.failed err=%s", str(exc)[:200])
+        return None
+    obs = char_fidelity.normalize_view_obs(payload, view, len(items))
+    if obs is None:
+        log.warning("vnew.view_check.failed err=bad_payload")
+    return obs
+
+
+_SHEET_TOOL = {
+    "name": "emit_sheet_check",
+    "description": "Check a character turnaround sheet: the view of each figure from left to right and whether every figure "
+    "wears the same base outfit.",
+    "inputSchema": {
+        "json": {
+            "type": "object",
+            "properties": {
+                "figures": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "view": {"type": "string", "enum": list(char_fidelity.SHEET_VIEW_VALUES)},
+                            "faceSide": {"type": "string", "enum": list(char_fidelity.SHEET_FACE_SIDES)},
+                        },
+                        "required": ["view", "faceSide"],
+                    },
+                },
+                "consistent": {"type": "boolean"},
+                "problems": {"type": "array", "items": {"type": "string"}},
+            },
+            "required": ["figures", "consistent"],
+        }
+    },
+}
+
+# 시트 검사 SYSTEM(design §7.3 원문). 복장 부분은 _OUTFIT_SYSTEM 문장을 옮기고 소품 좌우를 보지 말라는 문장을 더했다.
+_SHEET_SYSTEM = (
+    "You check a character turnaround reference sheet. List every full-body figure from left to right in figures. view is "
+    "'front' (faces the viewer), 'three-quarter front' (turned about 45°, the face still mostly visible), 'side' (exact side "
+    "profile), 'three-quarter back' (turned about 135°, mostly the back, only a cheek or ear outline of the face), 'back' "
+    "(seen from directly behind) or 'other'. faceSide is the edge of the PICTURE the face or the front of the body points "
+    "toward as you look at it: 'left', 'right', 'center' when it faces the viewer, 'hidden' when it faces away. The "
+    "character must also wear ONE single base outfit in EVERY view (front, side, back). Compare what you see against the "
+    "required base outfit given by the user. Set consistent=false if any view adds or swaps a garment (an extra jacket, "
+    "coat, cardigan or hoodie, a different colour, a different top or bottom) so the views do not all match the base "
+    "outfit; otherwise consistent=true. Do not judge which side small accessories are on. In problems, list each mismatch "
+    "as a short English phrase (e.g. 'back view adds a black jacket'). Answer only by calling the emit_sheet_check tool "
+    "exactly once."
+)
+
+
+def _inspect_sheet(sheet: bytes, base_outfit: str) -> dict | None:
+    """시트 검사(회전 순서 + 복장 일관성, LLM 1회, design §7.3). 지금 복장 검사(_check_outfit_consistency)를 대신한다.
+
+    기본 복장 글이 비면 회전만 본다(consistent 는 늘 참). 모델 오류면 None(다시 그리지 않고 그 시트를 쓴다).
+    """
+    base = (base_outfit or "").strip()
+    if base:
+        text = (
+            "The required base outfit is: "
+            + base
+            + " Does every view in this turnaround sheet wear exactly this base outfit "
+            "and nothing else (no extra jacket/coat/layer, no swapped garment)?"
+            + " Also list every figure from left to right."
+        )
+    else:
+        text = "No base outfit is given: set consistent=true. List every figure from left to right."
+    blocks = [{"text": text}, {"image": {"format": "jpeg", "source": {"bytes": sheet}}}]
+    try:
+        payload, _usage = vpoc_llm._converse(  # noqa: SLF001
+            system_text=_SHEET_SYSTEM,
+            blocks=blocks,
+            tool=_SHEET_TOOL,
+            max_tokens=_SHEET_CHECK_MAX_TOKENS,
+            where="vnew.sheet_check",
+            model=settings.OUTFIT_CHECK_MODEL,
+        )
+    except Exception as exc:  # noqa: BLE001
+        log.warning("vnew.sheet_check.failed err=%s", str(exc)[:200])
+        return None
+    obs = char_fidelity.normalize_sheet_obs(payload)
+    if obs is None:
+        log.warning("vnew.sheet_check.failed err=bad_payload")
+        return None
+    if not base:
+        obs["consistent"] = True
+    return obs
+
+
 # ================================================================ 프롬프트(b)
 
 
@@ -798,7 +1141,289 @@ def _with_extra(prompt: str, analysis: dict) -> str:
     return prompt
 
 
+# ---- char-fidelity 프롬프트(design §6). VNEW_CHAR_FIDELITY 켬일 때만 쓴다(끔이면 아래 지금 함수 본문 그대로). ----
+
+# 시트 회전 문장(design §6.2 원문, 웹툰·실사 같음). 옛 분석에도 넣는다(결정 S4).
+_SHEET_ROTATION = (
+    "Five full-body views of the same person side by side on a plain white background, turning in place toward the "
+    "LEFT of the image in 45° steps, from left to right: 1 FRONT, facing the viewer; 2 THREE-QUARTER FRONT, body and "
+    "face turned 45° toward the left of the image; 3 SIDE PROFILE facing the left edge of the image; 4 THREE-QUARTER "
+    "BACK, turned 135°: mostly the back shows and the head turns to the upper left so only the cheek and ear outline "
+    "are visible; 5 BACK, seen from directly behind. All five figures the same size, feet on one ground line, evenly "
+    "spaced, the same relaxed standing pose."
+)
+# 켬일 때 _one_person_outfit 대신 쓰는 문장(옷 글 반복을 뺐다 — 길이 예산, design §6.1 ONE_F).
+_ONE_PERSON_F = (
+    "Draw exactly ONE person — only ONE single person in the image, no extra figures, no duplicates, no background "
+    "characters. Every view wears exactly the outfit described above and nothing else. No jacket, coat or extra layer "
+    "unless listed."
+)
+_REAL_STYLE = "Real photograph, natural skin texture, soft studio lighting."
+_SIDED_TAIL_MARK = "Worn on one side only:"
+
+
+def _is_fidelity_analysis(analysis: dict) -> bool:
+    """충실 분석(analysis.fidelity == 1, bool 아님)인가. R1·R2 프롬프트 조각은 충실 분석일 때만 넣는다(결정 S4)."""
+    value = analysis.get("fidelity") if isinstance(analysis, dict) else None
+    return isinstance(value, int) and not isinstance(value, bool) and value == 1
+
+
+def _valid_sided_item(item) -> bool:
+    """저장된 한쪽 소품 한 항목의 모양 검사(itemEn 글·partEn·side 열거값)."""
+    return (
+        isinstance(item, dict)
+        and isinstance(item.get("itemEn"), str)
+        and bool(item["itemEn"].strip())
+        and item.get("partEn") in char_fidelity.PARTS
+        and item.get("side") in char_fidelity.SIDES
+    )
+
+
+def _sided_items(analysis: dict) -> list[dict]:
+    """켬 + 충실 분석이면 analysis.sidedItems 중 모양이 맞는 것(최대 MAX_ITEMS), 아니면 []."""
+    if not settings.VNEW_CHAR_FIDELITY or not _is_fidelity_analysis(analysis):
+        return []
+    raw = analysis.get("sidedItems")
+    return [item for item in raw if _valid_sided_item(item)][: char_fidelity.MAX_ITEMS] if isinstance(raw, list) else []
+
+
+def _pronoun_of(analysis: dict) -> str:
+    """좌우 문장 대명사: casting.auto_gender(분석 genderEn → 외모 문장 주어) → his·her·their."""
+    from . import casting  # noqa: PLC0415 — casting 이 characters 를 읽으므로 늦게 import
+
+    return char_fidelity.pronoun(casting.auto_gender(analysis))
+
+
+def _figure_ref(where) -> str:
+    """'the character' 또는 'the {whereEn}'(모델 글은 한 줄 60자, 앞 관사 제거)."""
+    where = re.sub(r"^(?:the|a|an)\s+", "", char_fidelity.clean_line(where, 60), flags=re.IGNORECASE)
+    return f"the {where}" if where else "the character"
+
+
+def _source_clause(analysis: dict, source_no: int | None) -> str:
+    """옷 그대로 문장(design §6.1 SOURCE). 충실 분석이고 기준 사진이 참고 맨 앞일 때(source_no 있음)만."""
+    if source_no is None or not _is_fidelity_analysis(analysis):
+        return ""
+    return (
+        f"Copy the clothes exactly as drawn on {_figure_ref(analysis.get('baseWhereEn'))} in Image {source_no}: the same "
+        "garments and layers, colours, fit, how each piece is worn, rips or patterns and where they are, shoes and "
+        "accessories."
+    )
+
+
+def _join(*pieces: str) -> str:
+    """빈 조각은 빼고 한 칸으로 잇는다(design §6.2)."""
+    return " ".join(p.strip() for p in pieces if p and p.strip())
+
+
+def _clip_outfit_body(outfit: str, limit: int) -> str:
+    """기본 복장 본문만 limit 자로 줄이고 'Worn on one side only:' 꼬리는 그대로 다시 붙인다(design §6.6 단계 3)."""
+    at = outfit.find(_SIDED_TAIL_MARK)
+    body, tail = (outfit[:at], outfit[at:]) if at >= 0 else (outfit, "")
+    body = char_fidelity.clip_words(body.strip().rstrip(".").rstrip(), limit)
+    return f"{body}. {tail}" if (tail and body) else (tail or body)
+
+
+def _budget_prompt(build, *, style: str, appearance: str, outfit: str, kind: str, variant: str) -> str:
+    """켬 프롬프트를 _PROMPT_MAX(2,900자) 안으로 맞춘다(design §6.6, 결정 S8).
+
+    build(style, appearance, outfit) → 프롬프트. 넘으면 styleEn ≤200 → appearanceEn ≤200 → 기본 복장 본문 ≤450 순서로
+    줄인다. 좌우·고칠·회전 문장·추가 요청은 줄이지 않는다. 그래도 넘으면 전체를 단어 경계로 자르고 경고 로그(길이만).
+    """
+    clip = char_fidelity.clip_words
+    steps = (
+        (style, appearance, outfit),
+        (clip(style, 200), appearance, outfit),
+        (clip(style, 200), clip(appearance, 200), outfit),
+        (clip(style, 200), clip(appearance, 200), _clip_outfit_body(outfit, 450)),
+    )
+    prompt = ""
+    for step_style, step_appearance, step_outfit in steps:
+        prompt = build(step_style, step_appearance, step_outfit)
+        if len(prompt) <= _PROMPT_MAX:
+            return prompt
+    log.warning("vnew.char_prompt.clipped kind=%s variant=%s len=%d", kind, variant, len(prompt))
+    return clip(prompt, _PROMPT_MAX)
+
+
+def _fidelity_prompt(
+    kind: str, variant: str, analysis: dict, *, source_no: int | None = None, fix: str = ""
+) -> str:
+    """켬 시트·정면·후면 프롬프트(design §6.2·§6.3 원문). kind = sheet | front | back.
+
+    source_no: 기준 사진의 참고 번호(시트 1·정면 2·후면 3). None 이면 옷 그대로 문장(SOURCE)을 넣지 않는다.
+    fix: 다시 그릴 때 붙이는 고칠 문장(처음은 ""). 좌우 문장은 충실 분석에 정한 소품이 있을 때만 넣는다.
+    """
+    real = variant == "real"
+    items = _sided_items(analysis)
+    sided = char_fidelity.side_sentences(items, kind, _pronoun_of(analysis)) if items else ""
+    source = _source_clause(analysis, source_no)
+    extra = (analysis.get("extraEn") or "").strip()
+
+    def build(style: str, appearance: str, outfit: str) -> str:
+        who = _who({"appearanceEn": appearance, "baseOutfitEn": outfit})
+        style_text = _REAL_STYLE if real else _style_clause({"styleEn": style})
+        if kind == "sheet":
+            head = (
+                "Photorealistic live-action character turnaround reference sheet of a real Korean actor playing the "
+                "character from the reference images."
+                if real
+                else "Character turnaround reference sheet."
+            )
+            middle = _SHEET_ROTATION + " Same person, same outfit in every view."
+            end = "No text, no labels." if real else "No text, no speech bubbles, no labels."
+        elif kind == "back":
+            head = (
+                "Single full-body BACK view photograph of the same real Korean actor as in the reference images, seen "
+                "from directly behind."
+                if real
+                else "Single full-body BACK view of the same single person as in the reference images, seen from "
+                "directly behind."
+            )
+            middle = (
+                "Back view of the same single person, same outfit, standing straight in a relaxed A-pose, whole body "
+                "from head to shoes visible, centered, plain white background, no shadow."
+            )
+            end = "No text."
+        else:
+            head = (
+                "Single full-body front view photograph of a real Korean actor playing the character."
+                if real
+                else "Single full-body front view."
+            )
+            middle = (
+                "Standing straight in a relaxed A-pose facing the camera, whole body from head to shoes visible, "
+                "centered, plain white background, no shadow."
+            )
+            end = "No text."
+        return _join(head, who, middle, _ONE_PERSON_F, source, sided, fix, style_text, end, extra)
+
+    return _budget_prompt(
+        build,
+        style=(analysis.get("styleEn") or "").strip(),
+        appearance=analysis.get("appearanceEn") or "",
+        outfit=_base_outfit(analysis),
+        kind=kind,
+        variant=variant,
+    )
+
+
+def _side_prompt(side: str, variant: str, analysis: dict, *, source_no: int | None = None, fix: str = "") -> str:
+    """옆모습 프롬프트(design §6.4 원문). side = left(캐릭터 왼쪽이 카메라, 얼굴 화면 왼쪽) | right.
+
+    참고 [정면, 후면, 시트, 기준 사진] 이라 기준 사진은 Image 4(source_no). VNEW_CHAR_FIDELITY 끔(옆모습만 켬)이면 SOURCE·좌우
+    문장을 넣지 않고 ONE_F 대신 지금 _one_person_outfit 을 쓴다. 길이 예산은 늘 적용한다(새 프롬프트).
+    """
+    real = variant == "real"
+    side = "right" if side == "right" else "left"
+    big, near, far = ("RIGHT", "right", "left") if side == "right" else ("LEFT", "left", "right")
+    fidelity = settings.VNEW_CHAR_FIDELITY
+    items = _sided_items(analysis)
+    sided = char_fidelity.side_sentences(items, side, _pronoun_of(analysis)) if items else ""
+    source = _source_clause(analysis, source_no) if fidelity else ""
+    extra = (analysis.get("extraEn") or "").strip()
+
+    def build(style: str, appearance: str, outfit: str) -> str:
+        who = _who({"appearanceEn": appearance, "baseOutfitEn": outfit})
+        one = _ONE_PERSON_F if fidelity else _one_person_outfit({"baseOutfitEn": outfit})
+        what = (
+            f"Single full-body {big} SIDE view photograph of the same real Korean actor as in the reference images"
+            if real
+            else f"Single full-body {big} SIDE view of the same single person as in the reference images"
+        )
+        head = (
+            f"{what}: exact side profile, the person's {big} side faces the camera and the face points to the {big} "
+            "edge of the image."
+        )
+        middle = (
+            "Same person, same outfit and the same relaxed A-pose as the front view in Image 1, seen exactly from the "
+            f"side: the {near} arm, shoulder and leg are nearest to us and the {far} arm is mostly hidden behind the "
+            "body. Whole body from head to shoes visible, centered, plain white background, no shadow."
+        )
+        style_text = _REAL_STYLE if real else _style_clause({"styleEn": style})
+        return _join(head, who, middle, one, source, sided, fix, style_text, "No text.", extra)
+
+    return _budget_prompt(
+        build,
+        style=(analysis.get("styleEn") or "").strip(),
+        appearance=analysis.get("appearanceEn") or "",
+        outfit=_base_outfit(analysis),
+        kind=f"side-{side}",
+        variant=variant,
+    )
+
+
+def _photo_outfit_prompt(
+    variant: str, analysis: dict, outfit: dict, view: str, *, source_no: int | None, base_back_no: int | None
+) -> str:
+    """사진 속 옷(kind photo) 정면·후면 프롬프트(design §6.5 원문). '기본 복장 대신 이 한 벌 그대로'.
+
+    정면 참고 [기본 정면, 원본 그림] → source_no 2. 후면 참고 [방금 정면, 원본 그림, 기본 후면] → source_no 2·base_back_no 3.
+    원본 그림이 없으면 source_no None(그 문장을 뺀다), 기본 후면이 없으면 base_back_no None.
+    """
+    real = variant == "real"
+    back = view == "back"
+    raw_items = outfit.get("sidedItems") if isinstance(outfit.get("sidedItems"), list) else []
+    items = [item for item in raw_items if _valid_sided_item(item)][: char_fidelity.MAX_ITEMS]
+    sided = char_fidelity.side_sentences(items, "back" if back else "front", _pronoun_of(analysis)) if items else ""
+    figure = _figure_ref(outfit.get("whereEn"))
+
+    def build(style: str, appearance: str, prompt_en: str) -> str:
+        wear = prompt_en.strip().rstrip(".").rstrip() or "the outfit described"
+        style_text = _REAL_STYLE if real else _style_clause({"styleEn": style})
+        end = "No text."
+        if back:
+            what = (
+                "Single full-body BACK view photograph of the same real Korean actor as in Image 1"
+                if real
+                else "Single full-body BACK view of the same single person as in Image 1"
+            )
+            head = f"{what}, seen from directly behind, wearing the same outfit as in Image 1: {wear}."
+            drawn = f"The outfit is drawn on {figure} in Image {source_no}." if source_no is not None else ""
+            base_back = (
+                f"Image {base_back_no} shows the same person from behind in other clothes; use it only for the hair "
+                "and body, not for the clothes."
+                if base_back_no is not None
+                else ""
+            )
+            pose = (
+                "Standing straight in a relaxed A-pose, whole body from head to shoes visible, centered, plain white "
+                "background, no shadow."
+            )
+            return _join(head, drawn, base_back, sided, pose, "Draw exactly ONE person, no extra figures.", style_text, end)
+        head = (
+            "Single full-body front view photograph of the same real Korean actor as in Image 1."
+            if real
+            else "Single full-body front view of the same single person as in Image 1."
+        )
+        if source_no is not None:
+            wears = (
+                f"Instead of the base outfit, this person wears this whole outfit exactly as drawn on {figure} in Image "
+                f"{source_no}: {wear}. Copy the garments and layers, colours, fit, how each piece is worn, rips or "
+                "patterns and where they are, shoes and accessories."
+            )
+        else:
+            wears = f"Instead of the base outfit, this person wears this whole outfit: {wear}."
+        pose = (
+            "Standing straight in a relaxed A-pose facing the camera, whole body from head to shoes visible, centered, "
+            "plain white background, no shadow."
+        )
+        return _join(head, f"The character: {appearance}", wears, sided, pose,
+                     "Draw exactly ONE person, no extra figures.", style_text, end)
+
+    return _budget_prompt(
+        build,
+        style=(analysis.get("styleEn") or "").strip(),
+        appearance=analysis.get("appearanceEn") or "",
+        outfit=str(outfit.get("promptEn") or ""),
+        kind=f"outfit-{view}",
+        variant=variant,
+    )
+
+
 def _sheet_prompt(variant: str, analysis: dict) -> str:
+    if settings.VNEW_CHAR_FIDELITY:
+        return _fidelity_prompt("sheet", variant, analysis)
     who = _who(analysis)
     one = _one_person_outfit(analysis)
     if variant == "real":
@@ -826,6 +1451,8 @@ def _sheet_prompt(variant: str, analysis: dict) -> str:
 
 
 def _front_prompt(variant: str, analysis: dict) -> str:
+    if settings.VNEW_CHAR_FIDELITY:
+        return _fidelity_prompt("front", variant, analysis)
     who = _who(analysis)
     one = _one_person_outfit(analysis)
     if variant == "real":
@@ -853,6 +1480,8 @@ def _front_prompt(variant: str, analysis: dict) -> str:
 
 def _back_prompt(variant: str, analysis: dict) -> str:
     """후면 전신 — 정면 이미지 + 시트를 참고로 '같은 한 사람, 같은 옷, 뒷모습'."""
+    if settings.VNEW_CHAR_FIDELITY:
+        return _fidelity_prompt("back", variant, analysis)
     who = _who(analysis)
     one = _one_person_outfit(analysis)
     if variant == "real":
@@ -901,14 +1530,115 @@ def _data_uri(jpeg: bytes) -> str:
     return "data:image/jpeg;base64," + base64.b64encode(jpeg).decode("ascii")
 
 
+def _mirror_jpeg(jpeg: bytes) -> bytes:
+    """그림을 좌우로 뒤집는다(PIL ImageOps.mirror, JPEG q92). 반전으로 맞는 그림만 쓴다(char-fidelity design §5.7).
+
+    디코드하는 그림은 Seedream 결과(1440x2560 이하)뿐이다. 사용자 업로드는 뒤집지 않는다.
+    """
+    with Image.open(io.BytesIO(jpeg)) as image:
+        mirrored = ImageOps.mirror(image.convert("RGB"))
+    buffer = io.BytesIO()
+    mirrored.save(buffer, format="JPEG", quality=92)
+    return buffer.getvalue()
+
+
 # ================================================================ 3D(c) — fal Hunyuan3D v3
 
+# char-fidelity(design §10.3): 옆모습 입력 필드. left = 캐릭터 왼쪽이 카메라를 향한 그림(Hunyuan3D-2 예제 left.png 규칙).
+# 개발계 확인(VD-1)에서 좌우가 반대로 나오면 이 한 줄만 바꾼다.
+_HUNYUAN_SIDE_FIELDS = {"left": "left_image_url", "right": "right_image_url"}
 
-def submit_3d(front_square: bytes, back_square: bytes) -> str:
-    """Hunyuan3D v3 에 제출하고 requestArn 을 돌려준다(data URI 입력).
+# ---------------------------------------------------------------- 3D 공급자(char-fidelity T2b, design §19)
+#
+# 새 제출은 설정 VNEW_3D_PROVIDER(기본 tripo)를 따른다. 이미 낸 요청은 설정이 아니라 requestArn 의 endpoint 로 공급자를 가린다
+# (배포 전에 낸 Hunyuan 요청도 Hunyuan 으로 조회·재제출·저장한다). Tripo 결과만 정면을 +Z 로 돌린다(_orient_glb).
 
-    face_count·enable_pbr 은 설정값을 쓴다(기본 60000·PBR off → GLB 약 10MB, 실측 2026-10-20).
+_TRIPO_PREFIX = "tripo3d/"
+
+
+def _3d_provider() -> str:
+    """설정의 3D 공급자("tripo" | "hunyuan"). 새 제출만 이 값을 쓴다."""
+    return "hunyuan" if settings.VNEW_3D_PROVIDER == "hunyuan" else "tripo"
+
+
+def _is_tripo_endpoint(endpoint: str) -> bool:
+    return str(endpoint or "").startswith(_TRIPO_PREFIX)
+
+
+def _provider_of(request_arn: str) -> str:
+    """requestArn("fal/requests/<endpoint>/<id>")의 endpoint 로 가린 공급자. Tripo 접두사가 아니면 hunyuan(옛 요청)."""
+    return "tripo" if _is_tripo_endpoint(_parse_arn(str(request_arn or ""))[0]) else "hunyuan"
+
+
+def _3d_squares(
+    front: bytes, back: bytes, left: bytes | None = None, right: bytes | None = None, *, provider: str
+) -> tuple[bytes, bytes, bytes | None, bytes | None]:
+    """3D 입력 정사각(흰 배경 패딩) 네 장. 처음 제출·잃은 요청 재제출·retry3d·이어 만들기가 모두 이 함수로 만든다.
+
+    한 변: hunyuan = MODEL_INPUT_SQUARE(T2 그대로), tripo = VNEW_3D_TRIPO_INPUT_SQUARE(기본 2048). 없는 옆모습은 None.
     """
+    side = settings.VNEW_3D_TRIPO_INPUT_SQUARE if provider == "tripo" else settings.MODEL_INPUT_SQUARE
+    return (
+        _square_pad(front, side),
+        _square_pad(back, side),
+        _square_pad(left, side) if left is not None else None,
+        _square_pad(right, side) if right is not None else None,
+    )
+
+
+def _tripo_request(
+    front_square: bytes, back_square: bytes | None, left_square: bytes | None = None, right_square: bytes | None = None
+) -> tuple[str, dict]:
+    """Tripo H3.1 제출 (endpoint, 본문). 설정만 읽는 순수 함수다.
+
+    - 다시점: VNEW_3D_TRIPO_MULTIVIEW 켬이고 왼쪽 자리에 그림이 있으면 VNEW_3D_TRIPO_ENDPOINT,
+      image_urls = [front, left, back] + (오른쪽이 있으면 right). fal·Tripo 순서 [front, left, back, right], left = 인물 자신의 왼쪽 옆면.
+    - VNEW_3D_SIDE_SWAP 이면 왼쪽·오른쪽 자리를 바꿔 넣는다. 바꾼 뒤 왼쪽 자리가 비면 단일이다.
+    - 단일(그 밖): VNEW_3D_TRIPO_SINGLE_ENDPOINT, image_url = front.
+    - 빈 바이트·None 자리는 목록에 넣지 않는다(fal 이 빈 자리를 "Failed to download the file" 로 거절, Claude 실측).
+    - 그림은 모두 data URI 다(우리 그림을 외부 저장소에 올리지 않고 presigned URL 도 넣지 않는다). enable_safety_checker 는 보내지 않는다.
+    """
+    slot_left, slot_right = (right_square, left_square) if settings.VNEW_3D_SIDE_SWAP else (left_square, right_square)
+    common = {
+        "texture": True,
+        "pbr": bool(settings.HUNYUAN_ENABLE_PBR),
+        "texture_quality": settings.VNEW_3D_TRIPO_TEXTURE_QUALITY,
+        "geometry_quality": settings.VNEW_3D_TRIPO_GEOMETRY_QUALITY,
+        "orientation": "align_image",
+        "face_limit": settings.VNEW_3D_TRIPO_FACE_LIMIT,
+    }
+    if settings.VNEW_3D_TRIPO_MULTIVIEW and slot_left and back_square:
+        views = [front_square, slot_left, back_square] + ([slot_right] if slot_right else [])
+        return settings.VNEW_3D_TRIPO_ENDPOINT, {"image_urls": [_data_uri(view) for view in views], **common}
+    return settings.VNEW_3D_TRIPO_SINGLE_ENDPOINT, {"image_url": _data_uri(front_square), **common}
+
+
+def _post_3d(eid: str, body: dict) -> str:
+    """fal 큐에 3D 작업을 내고 requestArn(실제로 쓴 endpoint 로 만든다)을 돌려준다."""
+    result = _fal_request("POST", f"{vpoc_settings.FAL_QUEUE_URL}/{eid}", body)
+    request_id = str(result.get("request_id") or "")
+    if not request_id:
+        raise VpocError("vnew.submit_3d", "NoRequestId", f"요청 ID 가 없습니다: {str(result)[:200]}", 502)
+    return f"{ARN_PREFIX}{eid}/{request_id}"
+
+
+def submit_3d(
+    front_square: bytes,
+    back_square: bytes,
+    *,
+    left_square: bytes | None = None,
+    right_square: bytes | None = None,
+    provider: str | None = None,
+) -> str:
+    """3D 작업(Tripo H3.1 또는 Hunyuan3D v3)을 제출하고 requestArn 을 돌려준다(data URI 입력).
+
+    Hunyuan: face_count·enable_pbr 은 설정값을 쓴다(기본 60000·PBR off → GLB 약 10MB, 실측 2026-10-20).
+    left_square·right_square(char-fidelity R4.5): 있을 때만 옆모습 data URI 를 더한다. 없으면 지금 본문 그대로다.
+    provider(char-fidelity T2b R8): "tripo" 면 Tripo H3.1 본문(_tripo_request)으로 내고, "hunyuan" 이면 아래 T2 본문 그대로다.
+    None 이면 설정(_3d_provider). 잃은 요청 재제출은 처음 제출과 같은 provider 를 넘긴다.
+    """
+    if (provider or _3d_provider()) == "tripo":
+        return _post_3d(*_tripo_request(front_square, back_square, left_square, right_square))
     eid = settings.HUNYUAN_ENDPOINT
     body = {
         "input_image_url": _data_uri(front_square),
@@ -916,11 +1646,11 @@ def submit_3d(front_square: bytes, back_square: bytes) -> str:
         "enable_pbr": bool(settings.HUNYUAN_ENABLE_PBR),
         "face_count": settings.HUNYUAN_FACE_COUNT,
     }
-    result = _fal_request("POST", f"{vpoc_settings.FAL_QUEUE_URL}/{eid}", body)
-    request_id = str(result.get("request_id") or "")
-    if not request_id:
-        raise VpocError("vnew.submit_3d", "NoRequestId", f"요청 ID 가 없습니다: {str(result)[:200]}", 502)
-    return f"{ARN_PREFIX}{eid}/{request_id}"
+    if left_square is not None:
+        body[_HUNYUAN_SIDE_FIELDS["left"]] = _data_uri(left_square)
+    if right_square is not None:
+        body[_HUNYUAN_SIDE_FIELDS["right"]] = _data_uri(right_square)
+    return _post_3d(eid, body)
 
 
 def _status_url(endpoint: str, request_id: str) -> str:
@@ -1014,6 +1744,10 @@ def poll_3d(request_arn: str) -> dict:
         thumb = result.get("thumbnail")
         if isinstance(thumb, dict):
             thumb_url = str(thumb.get("url") or "")
+        # Tripo 결과(char-fidelity T2b): thumbnail 이 없고 rendered_image{url(.png)} 가 있다(Claude 실측 2026-10-30).
+        rendered = result.get("rendered_image")
+        if not thumb_url and isinstance(rendered, dict):
+            thumb_url = str(rendered.get("url") or "")
     if not thumb_url:
         thumb_url = _find_url(result, ".png")
     if not glb_url:
@@ -1115,6 +1849,16 @@ def _charge_seedream(owner: str, char_id: str, variant: str, kind: str) -> None:
         log.warning("vnew.ledger.seedream_failed char=%s err=%s", char_id, str(exc)[:200])
 
 
+def _charge_draws(owner: str, char_id: str, variant: str, kind: str, draws: int) -> None:
+    """그림 draws 장의 원장(char-fidelity, Claude 결정 1). 첫 장은 kind, 다시 그린 장은 '{kind}-retry'.
+
+    draws 는 _gen_view_checked·_gen_sheet_fidelity 가 돌려준 Seedream 호출 수다. 끔 경로·_gen_checked 는 draws=1(지금 원장 그대로).
+    """
+    _charge_seedream(owner, char_id, variant, kind)
+    for _ in range(max(0, int(draws) - 1)):
+        _charge_seedream(owner, char_id, variant, f"{kind}-retry")
+
+
 def _charge_3d(owner: str, char_id: str, variant: str) -> None:
     key = f"vnew-{char_id}-{variant}-3d-{secrets.token_hex(3)}"
     try:
@@ -1132,6 +1876,33 @@ def _charge_3d(owner: str, char_id: str, variant: str) -> None:
         log.warning("vnew.ledger.3d_failed char=%s err=%s", char_id, str(exc)[:200])
 
 
+def _charge_tripo_3d(owner: str, char_id: str, variant: str, endpoint: str) -> None:
+    """Tripo 3D 1건 원장(char-fidelity T2b 결정 7): 단가 VNEW_3D_TRIPO_USD, model 은 실제로 쓴 endpoint."""
+    key = f"vnew-{char_id}-{variant}-3d-{secrets.token_hex(3)}"
+    try:
+        vpoc_ledger.charge(
+            key,
+            kind="model3d",
+            model=endpoint,
+            units=1,
+            usd=settings.VNEW_3D_TRIPO_USD,
+            user=owner,
+            project_id=char_id,
+            plan_id=variant,
+        )
+    except Exception as exc:  # noqa: BLE001
+        log.warning("vnew.ledger.3d_failed char=%s err=%s", char_id, str(exc)[:200])
+
+
+def _charge_3d_request(owner: str, char_id: str, variant: str, request_arn: str) -> None:
+    """방금 낸 3D 요청 1건의 원장. Tripo 요청이면 _charge_tripo_3d, 아니면 지금 _charge_3d 그대로(Hunyuan 단가·model)."""
+    endpoint = _parse_arn(str(request_arn or ""))[0]
+    if _is_tripo_endpoint(endpoint):
+        _charge_tripo_3d(owner, char_id, variant, endpoint)
+    else:
+        _charge_3d(owner, char_id, variant)
+
+
 # ================================================================ 파이프라인(e)
 
 
@@ -1147,6 +1918,30 @@ def _set_variant_3d(owner: str, char_id: str, variant: str, patch: dict) -> None
     def mutator(data: dict) -> None:
         v = data.setdefault("variants", {}).setdefault(variant, _empty_variant())
         v.setdefault("model3d", {}).update(patch)
+
+    mutate_char(owner, char_id, mutator)
+
+
+def _note_3d_endpoint(m3d: dict, request_arn: str) -> None:
+    """model3d.endpoint(char-fidelity T2b 결정 8): Tripo 요청이면 실제로 쓴 endpoint 를 쓰고, 아니면 남은 값을 지운다.
+
+    Hunyuan 요청은 키를 두지 않는다(옛 데이터·T2 저장과 같다). 공급자를 되돌린 뒤 새 Hunyuan 요청에 옛 Tripo 이름이 남지 않게 한다.
+    """
+    endpoint = _parse_arn(str(request_arn or ""))[0]
+    if _is_tripo_endpoint(endpoint):
+        m3d["endpoint"] = endpoint
+    else:
+        m3d.pop("endpoint", None)
+
+
+def _set_variant_3d_request(owner: str, char_id: str, variant: str, patch: dict) -> None:
+    """_set_variant_3d(patch) + _note_3d_endpoint(patch.requestArn) 를 쓰기 한 번에 한다(새 3D 요청을 저장할 때)."""
+
+    def mutator(data: dict) -> None:
+        v = data.setdefault("variants", {}).setdefault(variant, _empty_variant())
+        m3d = v.setdefault("model3d", {})
+        m3d.update(patch)
+        _note_3d_endpoint(m3d, str(patch.get("requestArn") or ""))
 
     mutate_char(owner, char_id, mutator)
 
@@ -1311,16 +2106,18 @@ def _gen_checked(
 
 
 def _gen_sheet_checked(
-    variant: str, analysis: dict, references: list[bytes], *, size: str
+    variant: str, analysis: dict, references: list[bytes], *, size: str, prompt: str | None = None
 ) -> tuple[bytes, bool]:
     """시트 1장 생성 후 복장 일관성을 검사. 면마다 옷이 다르면 problems 를 고칠 지시를 붙여
     시트를 OUTFIT_SHEET_RETRY(기본 1)회만 다시 그린다.
 
     반환: (sheet_jpeg, outfit_warn) — outfit_warn 은 재생성 뒤에도 일관되지 않으면 True
     (warning 대상). 검사가 모델 오류로 건너뛰어지면(None) 재생성하지 않고 False.
+    prompt: 주면 그 시트 프롬프트를 쓴다(char-fidelity 켬 — _build_variant 가 기준 사진 번호를 넣어 만든다). 없으면 지금처럼
+    _sheet_prompt.
     """
     base_outfit = _base_outfit(analysis)
-    prompt = _sheet_prompt(variant, analysis)
+    prompt = prompt if prompt is not None else _sheet_prompt(variant, analysis)
     sheet = _seedream(prompt, references, size=size)
     result = _check_outfit_consistency(sheet, base_outfit)
     if result is None or result.get("consistent"):
@@ -1344,22 +2141,233 @@ def _gen_sheet_checked(
     return sheet, True
 
 
+def _gen_view_checked(
+    build_prompt,
+    references: list[bytes],
+    *,
+    size: str,
+    view: str,
+    items: list[dict],
+    pron: str,
+    guard=None,
+    beat=None,
+    log_ctx: tuple = (),
+) -> dict:
+    """그림 1장 생성 + 검사(LLM 1회). 틀리면 고칠 문장으로 1회만 다시 그리고, 그래도 틀리면 반전을 검토한다(design §7.2).
+
+    build_prompt(fix) → 프롬프트(fix 는 처음 "", 다시 그릴 때 char_fidelity.view_fix_text). view = front|back|left|right.
+    guard()·beat() 는 Seedream 제출 직전 선점 확인(ClaimLost 를 그대로 올린다)·그린 뒤 하트비트다.
+    반환 {"jpeg", "status", "warnings", "draws"}:
+    - ok(첫 그림 통과) · fixed(다시 그린 그림 통과) · flipped(다시 그린 그림을 반전해 통과, 반전한 그림, 다시 검사하지 않는다)
+    - warned(정면·후면: 다시 그려도 틀려 그대로 쓰고 warning) · dropped(옆모습: 3D 에서 뺀다, jpeg None)
+    - unchecked(검사가 모델 오류. 정면·후면은 그 그림, 옆모습은 jpeg None)
+    """
+    side_view = view in char_fidelity.SIDES
+    char_id, variant = (tuple(log_ctx) + ("", ""))[:2]
+    draws = 0
+
+    def draw(fix: str) -> bytes:
+        nonlocal draws
+        if guard is not None:
+            guard()
+        image = _seedream(build_prompt(fix), references, size=size)
+        draws += 1
+        if beat is not None:
+            beat()
+        return image
+
+    def finish(jpeg, status: str, obs, warnings: list[str]) -> dict:
+        seen = (obs or {}).get("items") or {}
+        log.info(
+            "vnew.char.view_check char=%s variant=%s view=%s status=%s draws=%d people=%s facing=%s items=%s",
+            char_id, variant, view, status, draws,
+            "-" if obs is None else obs.get("people"), "-" if obs is None else obs.get("facing"),
+            ",".join(f"{i}:{seen[i]}" for i in sorted(seen)) or "-",
+        )
+        return {"jpeg": jpeg, "status": status, "warnings": warnings, "draws": draws}
+
+    unchecked_warning = char_fidelity.side_warnings({view: "unchecked"}) if side_view else []
+    image = draw("")
+    obs = _inspect_view(image, view, items)
+    if obs is None:
+        return finish(None if side_view else image, "unchecked", None, unchecked_warning)
+    mismatches = char_fidelity.view_mismatches(obs, view, items)
+    if not mismatches:
+        return finish(image, "ok", obs, [])
+    image = draw(char_fidelity.view_fix_text(mismatches, view, items, pron))
+    obs = _inspect_view(image, view, items)
+    if obs is None:
+        return finish(None if side_view else image, "unchecked", None, unchecked_warning)
+    mismatches = char_fidelity.view_mismatches(obs, view, items)
+    if not mismatches:
+        return finish(image, "fixed", obs, [])
+    if char_fidelity.can_flip(obs, view, items):
+        return finish(_mirror_jpeg(image), "flipped", char_fidelity.flip_observation(obs, view), [])
+    warnings = char_fidelity.view_warnings(mismatches, view)
+    if side_view:
+        return finish(None, "dropped", obs, warnings)
+    return finish(image, "warned", obs, warnings)
+
+
+def _sheet_outfit_fix(problems: list[str], base_outfit: str, *, with_outfit: bool) -> str:
+    """시트 복장 고칠 문장(지금 _gen_sheet_checked 문장). with_outfit 이 거짓이면 끝의 기본 복장 글 반복만 뺀다(길이 예산).
+
+    충실 분석의 기본 복장은 'only.' 로 끝나므로 끝 마침표를 한 번 떼고 붙인다(마침표 두 개 방지).
+    """
+    fix = ""
+    if problems:
+        fix = " Fix these so every view wears the base outfit only: " + "; ".join(problems) + "."
+    if with_outfit:
+        outfit = (base_outfit or "").strip().rstrip(".").rstrip()
+        return fix + f" Make EVERY view wear exactly this same base outfit and nothing else: {outfit}."
+    return fix + " Make EVERY view wear exactly this same base outfit and nothing else."
+
+
+def _gen_sheet_fidelity(
+    variant: str,
+    analysis: dict,
+    references: list[bytes],
+    *,
+    size: str,
+    source_no: int | None,
+    guard=None,
+    beat=None,
+    log_ctx: tuple = (),
+) -> dict:
+    """켬 시트 1장 생성 + 시트 검사(회전 순서·복장, LLM 1회). 틀리면 OUTFIT_SHEET_RETRY 한도 안에서 다시 그린다(design §7.4).
+
+    고칠 문장(회전 + 복장)은 _fidelity_prompt(fix=…)로 넣어 길이 예산(_budget_prompt, 2,900자) 안에 둔다(Claude 결정 4).
+    복장 고칠 문장 끝의 기본 복장 글 반복은 첫 프롬프트에 남은 자리에 들어갈 때만 넣는다. 기본 복장은 이미 WHO 에 있고,
+    반복 때문에 예산이 넘치면 끝의 그림체·추가 요청이 잘리기 때문이다(ONE_F 가 옷 글 반복을 뺀 것과 같은 이유).
+    반환 {"jpeg", "status"(ok|fixed|warned|unchecked), "warnings", "draws"}.
+    """
+    char_id, variant_name = (tuple(log_ctx) + ("", ""))[:2]
+    base = _base_outfit(analysis)
+    prompt = _fidelity_prompt("sheet", variant, analysis, source_no=source_no)
+    room = _PROMPT_MAX - len(prompt) - 1
+    draws = 1
+    sheet = _seedream(prompt, references, size=size)
+    if beat is not None:
+        beat()
+    obs = _inspect_sheet(sheet, base)
+    status = ""
+    mismatches: list[tuple] = []
+    if obs is None:
+        status = "unchecked"
+    else:
+        mismatches = char_fidelity.sheet_mismatches(obs)
+        status = "" if mismatches else "ok"
+    if not status:
+        for _ in range(max(0, settings.OUTFIT_SHEET_RETRY)):
+            rotation = [mm for mm in mismatches if mm[0] != "outfit"]
+            fix = char_fidelity.sheet_fix_text(rotation)
+            if any(mm[0] == "outfit" for mm in mismatches):
+                problems = obs.get("problems") or []
+                full = fix + _sheet_outfit_fix(problems, base, with_outfit=True)
+                fix = full if len(full.strip()) <= room else fix + _sheet_outfit_fix(problems, base, with_outfit=False)
+            if guard is not None:
+                guard()
+            sheet = _seedream(_fidelity_prompt("sheet", variant, analysis, source_no=source_no, fix=fix), references, size=size)
+            draws += 1
+            if beat is not None:
+                beat()
+            obs = _inspect_sheet(sheet, base)
+            if obs is None:
+                status = "unchecked"
+                break
+            mismatches = char_fidelity.sheet_mismatches(obs)
+            if not mismatches:
+                status = "fixed"
+                break
+    warnings: list[str] = []
+    if not status:
+        status = "warned"
+        if any(mm[0] == "outfit" for mm in mismatches):
+            warnings.append(char_fidelity.WARN_SHEET_OUTFIT)
+        if any(mm[0] != "outfit" for mm in mismatches):
+            warnings.append(char_fidelity.WARN_SHEET_ROTATION)
+    log.info(
+        "vnew.char.sheet_check char=%s variant=%s status=%s draws=%d figures=%s outfit=%s",
+        char_id, variant_name or variant, status, draws, char_fidelity.sheet_figures_text(obs),
+        "-" if obs is None else ("ok" if obs.get("consistent") else "bad"),
+    )
+    return {"jpeg": sheet, "status": status, "warnings": warnings, "draws": draws}
+
+
 def _build_variant(
-    owner: str, char_id: str, variant: str, version: int, analysis: dict, refs: list[bytes], token: str = ""
+    owner: str,
+    char_id: str,
+    variant: str,
+    version: int,
+    analysis: dict,
+    refs: list[bytes],
+    token: str = "",
+    *,
+    base_first: bool = False,
 ) -> None:
     """한 variant 의 그림 + 3D. 실패하면 그 variant 만 failed 로 두고 예외를 올리지 않는다.
 
     token 이 있으면 외부 유료 제출(seedream·submit_3d) 직전마다 자기 claim 을 다시 확인하고,
     아니면 ClaimLost 로 접는다(중복 실행 이중 과금 방지).
+
+    base_first: refs 맨 앞이 기준 사진인가(_reference_jpegs). VNEW_CHAR_FIDELITY 켬 + 충실 분석 + base_first 이면 시트·정면·
+    후면 프롬프트에 기준 사진의 참고 번호(시트 1·정면 2·후면 3)로 옷 그대로 문장을 넣는다(결정 S2).
+
+    char-fidelity T2(design §10.1): VNEW_CHAR_FIDELITY 켬이면 시트를 회전·복장 검사 1회(_gen_sheet_fidelity)로, 정한 소품이
+    있으면 정면·후면을 그림 검사(_gen_view_checked)로 한다(소품이 없으면 지금 사람 수 검사). VNEW_3D_SIDE_VIEWS 켬이면 후면
+    다음에 옆모습 두 장을 그려(_draw_side_views) 쓸 수 있는 것만 3D 에 보낸다. 다시 그린 그림은 '{kind}-retry' 원장(결정 1).
+    두 설정 끔이면 호출·원장·저장 patch 가 지금과 같다(cf-b).
     """
+    fidelity = settings.VNEW_CHAR_FIDELITY
+    sides_on = settings.VNEW_3D_SIDE_VIEWS
+    source_ok = fidelity and base_first and _is_fidelity_analysis(analysis)
+    # 정한 소품(켬 + 충실 분석). 없으면 정면·후면은 지금 사람 수 검사(R2.13), 대명사도 쓰지 않는다.
+    items = _sided_items(analysis)
+    pron = _pronoun_of(analysis) if items else "their"
+    check: dict[str, str] = {}  # viewCheck 에 쓸 검사 결과(검사한 것만)
+
+    def src(n: int) -> int | None:
+        return n if source_ok else None
+
+    def guard() -> None:
+        _guard_submit_claim(owner, char_id, variant, token)
+
+    def beat() -> None:
+        _touch_heartbeat(owner, char_id, variant)
+
+    def checked_view(view: str, source_n: int, references: list[bytes], size: str) -> tuple[bytes, list[str], int]:
+        """켬 + 소품 있음: 정면·후면 그림 검사(LLM 1회, 1회 재생성, 반전). (jpeg, warnings, draws)."""
+        result = _gen_view_checked(
+            lambda fix: _fidelity_prompt(view, variant, analysis, source_no=src(source_n), fix=fix),
+            references, size=size, view=view, items=items, pron=pron, guard=guard, beat=beat, log_ctx=(char_id, variant),
+        )
+        check[view] = result["status"]
+        return result["jpeg"], result["warnings"], result["draws"]
+
+    def plain_prompt(view: str, source_n: int) -> str:
+        """소품 없음·끔: 지금 사람 수 검사(_gen_checked)에 넘기는 프롬프트. 켬이면 _fidelity_prompt, 끔이면 지금 함수."""
+        if fidelity:
+            return _fidelity_prompt(view, variant, analysis, source_no=src(source_n))
+        return _front_prompt(variant, analysis) if view == "front" else _back_prompt(variant, analysis)
+
     try:
         _set_variant(owner, char_id, variant, {"status": "images", "warning": "", "heartbeatAt": now_iso()})
 
         # 시트(2560x1440) — 복장 일관성 검사: 면마다 옷이 다르면 1회 다시 그리고, 그래도면 warning.
         # front/back 은 '일관성 검사를 통과한(또는 재생성한) 시트' 를 참고로 그린다.
         _guard_submit_claim(owner, char_id, variant, token)
-        sheet, outfit_warn = _gen_sheet_checked(variant, analysis, refs, size=settings.SHEET_SIZE)
-        _charge_seedream(owner, char_id, variant, "sheet")
+        sheet_warnings: list[str] = []
+        sheet_draws = 1
+        if fidelity:
+            # 켬: 회전 순서 + 복장을 한 번에 검사(_inspect_sheet)하고 틀린 인물마다 고칠 문장을 붙여 다시 그린다(R3.3~R3.7).
+            result = _gen_sheet_fidelity(variant, analysis, refs, size=settings.SHEET_SIZE, source_no=src(1),
+                                         guard=guard, beat=beat, log_ctx=(char_id, variant))
+            sheet, outfit_warn = result["jpeg"], False
+            sheet_warnings, sheet_draws = result["warnings"], result["draws"]
+            check["sheet"] = result["status"]
+        else:
+            sheet, outfit_warn = _gen_sheet_checked(variant, analysis, refs, size=settings.SHEET_SIZE)
+        _charge_draws(owner, char_id, variant, "sheet", sheet_draws)
         s_key = sheet_key(owner, char_id, variant, version)
         STORE.put_bytes(s_key, sheet, "image/jpeg")
         _touch_heartbeat(owner, char_id, variant)
@@ -1367,20 +2375,30 @@ def _build_variant(
         # 정면 전신(1440x2560) — 시트를 첫 참고로 넣어 같은 인물·옷이 되게 한다.
         # 사람 수 검사: 여러 명이면 1회 다시 그리고, 그래도면 warning.
         _guard_submit_claim(owner, char_id, variant, token)
-        front, front_multi = _gen_checked(
-            _front_prompt(variant, analysis), [sheet] + list(refs)[:3], size=settings.FRONT_SIZE
-        )
-        _charge_seedream(owner, char_id, variant, "front")
+        front_warnings: list[str] = []
+        front_draws = 1
+        front_multi = False
+        if fidelity and items:
+            front, front_warnings, front_draws = checked_view("front", 2, [sheet] + list(refs)[:3], settings.FRONT_SIZE)
+        else:
+            front, front_multi = _gen_checked(plain_prompt("front", 2), [sheet] + list(refs)[:3], size=settings.FRONT_SIZE)
+        _charge_draws(owner, char_id, variant, "front", front_draws)
         f_key = front_key(owner, char_id, variant, version)
         STORE.put_bytes(f_key, front, "image/jpeg")
         _touch_heartbeat(owner, char_id, variant)
 
         # 후면 전신(1440x2560) — 정면 + 시트를 참고로 따로 생성(이전엔 시트 5번째 칸을 잘랐음).
+        # 정면을 반전해 썼으면 후면은 반전한 정면을 참고로 그린다.
         _guard_submit_claim(owner, char_id, variant, token)
-        back, back_multi = _gen_checked(
-            _back_prompt(variant, analysis), [front, sheet] + list(refs)[:2], size=settings.BACK_SIZE
-        )
-        _charge_seedream(owner, char_id, variant, "back")
+        back_warnings: list[str] = []
+        back_draws = 1
+        back_multi = False
+        if fidelity and items:
+            back, back_warnings, back_draws = checked_view("back", 3, [front, sheet] + list(refs)[:2], settings.BACK_SIZE)
+        else:
+            back_refs = [front, sheet] + list(refs)[:2]
+            back, back_multi = _gen_checked(plain_prompt("back", 3), back_refs, size=settings.BACK_SIZE)
+        _charge_draws(owner, char_id, variant, "back", back_draws)
         b_key = back_key(owner, char_id, variant, version)
         STORE.put_bytes(b_key, back, "image/jpeg")
 
@@ -1389,23 +2407,25 @@ def _build_variant(
             warnings.append("복장이 면마다 다를 수 있습니다")
         if front_multi or back_multi:
             warnings.append("정면/후면에 여러 사람이 보일 수 있습니다")
+        warnings = char_fidelity.merge_warnings(sheet_warnings, warnings, front_warnings, back_warnings)
         warning = " / ".join(warnings)
-        _set_variant(
-            owner,
-            char_id,
-            variant,
-            {
-                "status": "model3d",
-                "sheetKey": s_key,
-                "frontKey": f_key,
-                "backKey": b_key,
-                "warning": warning,
-                "heartbeatAt": now_iso(),
-            },
-        )
+        patch = {"status": "model3d", "sheetKey": s_key, "frontKey": f_key, "backKey": b_key,
+                 "warning": warning, "heartbeatAt": now_iso()}
+        left = right = None
+        if sides_on:
+            # 옆모습을 그리는 동안 variant 는 images(R4.8). 키 3개·warning·검사 결과를 먼저 저장해 끊겨도 옆모습만 이어 그린다.
+            _set_variant_checked(owner, char_id, variant, dict(patch, status="images"), check)
+            sides = _draw_side_views(owner, char_id, variant, version, analysis, front, back, sheet,
+                                     refs[0] if refs else None, base_first=base_first, token=token, need=("left", "right"))
+            side_warnings = char_fidelity.side_warnings({view: r["status"] for view, r in sides.items()})
+            warnings = char_fidelity.merge_warnings(warnings, side_warnings)
+            _set_variant(owner, char_id, variant, {"status": "model3d", "warning": " / ".join(warnings), "heartbeatAt": now_iso()})
+            left, right = sides["left"]["jpeg"], sides["right"]["jpeg"]
+        else:
+            _set_variant_checked(owner, char_id, variant, patch, check)
 
-        # 3D: front·back 정사각 패딩 → data URI 제출 → 완료까지 폴링 → 복사
-        _build_3d_from_images(owner, char_id, variant, version, front, back, token)
+        # 3D: front·back(+ 쓸 수 있는 옆모습) 정사각 패딩 → data URI 제출 → 완료까지 폴링 → 복사
+        _build_3d_from_images(owner, char_id, variant, version, front, back, token, left=left, right=right)
     except Exception as exc:  # noqa: BLE001
         # ClaimLost: 다른 실행이 이 variant 를 가져갔다 — 제출하지 않고 접는다. 상태는 그쪽이
         # 관리하므로 건드리지 않는다(실패로 덮어쓰지 않는다).
@@ -1420,14 +2440,114 @@ def _build_variant(
         _set_variant(owner, char_id, variant, {"status": "failed", "error": message})
 
 
-def _make_3d_resubmit(owner: str, char_id: str, variant: str, front_sq: bytes, back_sq: bytes, token: str = ""):
+def _set_variant_checked(owner: str, char_id: str, variant: str, patch: dict, check: dict) -> None:
+    """_set_variant + 검사 결과(viewCheck) 합치기. 이미 있는 viewCheck 값은 지우지 않는다. check 가 비면 _set_variant 그대로."""
+    if not check:
+        _set_variant(owner, char_id, variant, patch)
+        return
+
+    def mutator(data: dict) -> None:
+        v = data.setdefault("variants", {}).setdefault(variant, _empty_variant())
+        v.update(patch)
+        merged = dict(v["viewCheck"]) if isinstance(v.get("viewCheck"), dict) else {}
+        merged.update(check)
+        v["viewCheck"] = merged
+
+    mutate_char(owner, char_id, mutator)
+
+
+def _set_view_check(owner: str, char_id: str, variant: str, view: str, status: str, key: str = "") -> None:
+    """viewCheck[view] = status. 옆모습(left·right)이면 leftKey·rightKey 도 함께 쓴다(3D 에 못 쓰면 "")(design §10.2).
+
+    옆모습 하나를 끝낼 때마다 저장하므로, 왼쪽만 끝내고 끊겨도 이어 만들기가 오른쪽만 그린다.
+    """
+
+    def mutator(data: dict) -> None:
+        v = data.setdefault("variants", {}).setdefault(variant, _empty_variant())
+        if not isinstance(v.get("viewCheck"), dict):
+            v["viewCheck"] = {}
+        v["viewCheck"][view] = status
+        if view in char_fidelity.SIDES:
+            v[f"{view}Key"] = key
+
+    mutate_char(owner, char_id, mutator)
+
+
+def _draw_side_views(
+    owner: str,
+    char_id: str,
+    variant: str,
+    version: int,
+    analysis: dict,
+    front: bytes,
+    back: bytes,
+    sheet: bytes,
+    base_ref: bytes | None,
+    *,
+    base_first: bool,
+    token: str,
+    need: tuple = ("left", "right"),
+) -> dict:
+    """옆모습을 차례로(왼쪽 → 오른쪽, 결정 S10) 그리고 검사한다(design §10.2). 반환 {side: _gen_view_checked 결과}.
+
+    참고 [정면, 후면, 시트, 기준 사진(참고 맨 앞 원본)] 이라 기준 사진은 Image 4(base_first 일 때만 SOURCE 문장).
+    그림마다 Seedream 제출 직전 선점 확인(_guard_submit_claim)·그린 뒤 하트비트. 3D 에서 뺀 그림도 원장에 남긴다(R4.4).
+    3D 에 쓸 수 있는 옆모습(ok·fixed·flipped)만 left.jpg·right.jpg 로 저장하고, 결과는 viewCheck 에 둔다.
+    """
+    refs = [front, back, sheet] + ([base_ref] if base_ref is not None else [])
+    items = _sided_items(analysis)
+    pron = _pronoun_of(analysis) if items else "their"
+    source_no = 4 if (base_first and base_ref is not None) else None
+
+    def guard() -> None:
+        _guard_submit_claim(owner, char_id, variant, token)
+
+    def beat() -> None:
+        _touch_heartbeat(owner, char_id, variant)
+
+    out: dict = {}
+    for side in need:
+        if side not in char_fidelity.SIDES:
+            continue
+        result = _gen_view_checked(
+            lambda fix, _side=side: _side_prompt(_side, variant, analysis, source_no=source_no, fix=fix),
+            refs, size=settings.FRONT_SIZE, view=side, items=items, pron=pron, guard=guard, beat=beat,
+            log_ctx=(char_id, variant),
+        )
+        _charge_draws(owner, char_id, variant, side, result["draws"])
+        key = ""
+        if result["jpeg"] is not None:
+            key = (left_key if side == "left" else right_key)(owner, char_id, variant, version)
+            STORE.put_bytes(key, result["jpeg"], "image/jpeg")
+        _set_view_check(owner, char_id, variant, side, result["status"], key)
+        beat()
+        out[side] = result
+    return out
+
+
+def _make_3d_resubmit(
+    owner: str,
+    char_id: str,
+    variant: str,
+    front_sq: bytes,
+    back_sq: bytes,
+    token: str = "",
+    *,
+    left_sq: bytes | None = None,
+    right_sq: bytes | None = None,
+    provider: str | None = None,
+    counter: dict | None = None,
+):
     """'잃은 요청' 재제출 콜백을 만든다(_wait_3d 에 넘긴다).
 
     같은 front/back 정사각으로 새로 제출하고, 원장을 1회 더 달고, model3d.requestArn·resubmits 를
     갱신한 뒤 새 requestArn 을 돌려준다. 재제출 한도(MAX_RESUBMITS)를 넘으면 None(그러면 실패).
     제출 직전 자기 claim 을 다시 확인한다(token 이 있으면). 아니면 빈 문자열(=재제출 포기).
+    left_sq·right_sq(char-fidelity R4.6): 처음 제출과 같은 옆모습 정사각을 함께 다시 낸다(없으면 지금처럼 정면·후면만).
+    provider(T2b R8.6): 처음 제출과 같은 공급자로 다시 낸다(None 이면 설정). counter: 콜백 둘이 재제출 한도를 함께 셀 때 넘긴다
+    (run_retry3d 가 이전 요청과 새 요청의 공급자가 다를 때).
     """
-    done = {"n": 0}
+    done = counter if counter is not None else {"n": 0}
 
     def resubmit() -> str:
         if done["n"] >= settings.MAX_RESUBMITS:
@@ -1436,8 +2556,8 @@ def _make_3d_resubmit(owner: str, char_id: str, variant: str, front_sq: bytes, b
         if token and not _holds_claim(owner, char_id, variant, token):
             return ""
         done["n"] += 1
-        request_arn = submit_3d(front_sq, back_sq)
-        _charge_3d(owner, char_id, variant)
+        request_arn = submit_3d(front_sq, back_sq, left_square=left_sq, right_square=right_sq, provider=provider)
+        _charge_3d_request(owner, char_id, variant, request_arn)
 
         def mutator(data: dict) -> None:
             v = data.setdefault("variants", {}).setdefault(variant, _empty_variant())
@@ -1446,6 +2566,7 @@ def _make_3d_resubmit(owner: str, char_id: str, variant: str, front_sq: bytes, b
             m3d["requestArn"] = request_arn
             m3d["resubmits"] = int(m3d.get("resubmits") or 0) + 1
             m3d["error"] = ""
+            _note_3d_endpoint(m3d, request_arn)
 
         mutate_char(owner, char_id, mutator)
         _touch_heartbeat(owner, char_id, variant)
@@ -1455,31 +2576,44 @@ def _make_3d_resubmit(owner: str, char_id: str, variant: str, front_sq: bytes, b
 
 
 def _build_3d_from_images(
-    owner: str, char_id: str, variant: str, version: int, front: bytes, back: bytes, token: str = ""
+    owner: str,
+    char_id: str,
+    variant: str,
+    version: int,
+    front: bytes,
+    back: bytes,
+    token: str = "",
+    *,
+    left: bytes | None = None,
+    right: bytes | None = None,
 ) -> None:
     """front/back 바이트로 3D 를 새로 제출하고 완료까지 폴링해 복사한다(예외는 올린다).
 
     조회가 'Downstream service unavailable' 만 연속으로 돌려주면(fal 이 요청을 잃음) 같은
     front/back 으로 새로 제출한다(variant 당 최대 MAX_RESUBMITS 회).
     제출 직전 자기 claim 을 다시 확인한다(token 이 있으면). 아니면 ClaimLost 로 접는다.
+    left·right(char-fidelity R4.5): 3D 에 쓸 수 있는 옆모습이 있으면 같은 정사각 패딩으로 함께 보내고 재제출도 같은 묶음을 쓴다.
+    T2b(R8): 공급자는 시작 때 한 번 정한다(_3d_provider). 정사각(_3d_squares)·제출·재제출·원장·회전이 모두 그 공급자를 따른다.
     """
-    side = settings.MODEL_INPUT_SQUARE
-    front_sq = _square_pad(front, side)
-    back_sq = _square_pad(back, side)
+    provider = _3d_provider()
+    front_sq, back_sq, left_sq, right_sq = _3d_squares(front, back, left, right, provider=provider)
     _guard_submit_claim(owner, char_id, variant, token)  # 제출 직전 claim 재확인(이중 제출 방지)
-    request_arn = submit_3d(front_sq, back_sq)
-    _charge_3d(owner, char_id, variant)
-    _set_variant_3d(owner, char_id, variant, {"status": "submitted", "requestArn": request_arn})
+    request_arn = submit_3d(front_sq, back_sq, left_square=left_sq, right_square=right_sq, provider=provider)
+    _charge_3d_request(owner, char_id, variant, request_arn)
+    _set_variant_3d_request(owner, char_id, variant, {"status": "submitted", "requestArn": request_arn})
     _touch_heartbeat(owner, char_id, variant)
 
-    resubmit = _make_3d_resubmit(owner, char_id, variant, front_sq, back_sq, token)
+    resubmit = _make_3d_resubmit(
+        owner, char_id, variant, front_sq, back_sq, token, left_sq=left_sq, right_sq=right_sq, provider=provider
+    )
     state = _wait_3d(request_arn, resubmit=resubmit, owner=owner, char_id=char_id, variant=variant)
     if state["status"] != "Completed":
         _set_variant_3d(owner, char_id, variant, {"status": "failed", "error": state.get("error", "")})
         _set_variant(owner, char_id, variant, {"status": "failed", "error": state.get("error", "3D 실패")})
         return
 
-    _copy_3d_result(owner, char_id, variant, version, state)
+    # 재제출은 같은 공급자로만 하므로, 처음 요청의 endpoint 로 Tripo 결과인지 가린다.
+    _copy_3d_result(owner, char_id, variant, version, state, request_arn=request_arn)
 
 
 def _fail_pending_3d(owner: str, char_id: str, variant: str, message: str) -> None:
@@ -1496,9 +2630,20 @@ def _fail_pending_3d(owner: str, char_id: str, variant: str, message: str) -> No
     mutate_char(owner, char_id, mutator)
 
 
-def _copy_3d_result(owner: str, char_id: str, variant: str, version: int, state: dict) -> None:
-    """완료된 3D 결과(GLB·썸네일)를 우리 버킷으로 옮기고 variant 를 ready 로 맞춘다."""
+def _copy_3d_result(owner: str, char_id: str, variant: str, version: int, state: dict, request_arn: str = "") -> None:
+    """완료된 3D 결과(GLB·썸네일)를 우리 버킷으로 옮기고 variant 를 ready 로 맞춘다.
+
+    request_arn(char-fidelity T2b R8.5): endpoint 가 tripo3d/ 로 시작하고 VNEW_3D_TRIPO_YAW_DEG 가 0 이 아니면 GLB 정면을 +Z 로
+    돌려(_orient_glb) 저장한다. 돌리지 못하면 경고 로그 1줄을 남기고 받은 GLB 를 그대로 저장한다(빌드는 실패시키지 않는다).
+    """
     glb_bytes_data = _fetch_url(state["glbUrl"])
+    yaw = settings.VNEW_3D_TRIPO_YAW_DEG
+    if yaw and _provider_of(request_arn) == "tripo":
+        try:
+            glb_bytes_data = _orient_glb(glb_bytes_data, yaw)
+            log.info("vnew.3d.oriented char=%s variant=%s yaw=%s bytes=%d", char_id, variant, yaw, len(glb_bytes_data))
+        except Exception as exc:  # noqa: BLE001 — 회전 실패는 원본 저장(R8.5)
+            log.warning("vnew.3d.orient_failed char=%s variant=%s err=%s", char_id, variant, str(exc)[:200])
     glb_key = model_glb_key(owner, char_id, variant, version)
     STORE.put_bytes(glb_key, glb_bytes_data, "model/gltf-binary")
 
@@ -1520,6 +2665,137 @@ def _copy_3d_result(owner: str, char_id: str, variant: str, version: int, state:
     _set_variant(owner, char_id, variant, {"status": "ready", "error": ""})
 
 
+# ---------------------------------------------------------------- GLB 정면 돌리기(char-fidelity T2b, design §19.5)
+#
+# Tripo H3.1 결과는 정면이 +X 를 본다(orientation align_image 도 같음, Claude 실측). 화면(model-viewer)은 +Z 가 정면이다.
+# Y축 θ 회전 R = [[cosθ, 0, sinθ], [0, 1, 0], [-sinθ, 0, cosθ]] 라 θ = -90° 면 +X → +Z, 쿼터니언 (0, -0.7071, 0, 0.7071).
+
+_GLB_MAGIC = b"glTF"
+_GLB_CHUNK_JSON = 0x4E4F534A
+
+
+def _snap(value: float) -> float:
+    """cos(90°) 같은 1e-12 미만 오차를 0 으로(돌린 값이 6e-17 꼴로 남지 않게)."""
+    return 0.0 if abs(value) < 1e-12 else value
+
+
+def _glb_numbers(value, count: int, what: str) -> list[float]:
+    """glTF 숫자 배열 검사(길이·유한 실수, bool 거절). 틀리면 ValueError."""
+    if not isinstance(value, list) or len(value) != count:
+        raise ValueError(f"{what} must be {count} numbers")
+    out = []
+    for item in value:
+        if isinstance(item, bool) or not isinstance(item, (int, float)) or not math.isfinite(item):
+            raise ValueError(f"{what} has a non-number")
+        out.append(float(item))
+    return out
+
+
+def _yaw_node(node: dict, yaw_deg: float) -> None:
+    """노드 한 개의 변환 앞에 Y축 yaw_deg 회전을 곱한다(제자리 수정).
+
+    matrix 가 있으면 R·M(열 우선 16개). 없으면 rotation = q_yaw ⊗ rotation(없으면 q_yaw), translation = R·translation(있을 때).
+    R·(T·Rn·S) = (R·T·R⁻¹)·(R·Rn)·S 이고 R·T·R⁻¹ 은 R·t 만큼 옮기는 것이라 노드 변환 전체를 앞에서 곱한 것과 같다.
+    """
+    theta = math.radians(yaw_deg)
+    c, s = _snap(math.cos(theta)), _snap(math.sin(theta))
+    rot = ((c, 0.0, s), (0.0, 1.0, 0.0), (-s, 0.0, c))
+    if "matrix" in node:
+        m = _glb_numbers(node["matrix"], 16, "matrix")
+        out = list(m)
+        for col in range(4):
+            x, y, z = m[col * 4], m[col * 4 + 1], m[col * 4 + 2]
+            for row in range(3):
+                out[col * 4 + row] = _snap(rot[row][0] * x + rot[row][1] * y + rot[row][2] * z)
+        node["matrix"] = out
+        return
+    bx, by, bz, bw = _glb_numbers(node.get("rotation", [0.0, 0.0, 0.0, 1.0]), 4, "rotation")
+    ay, aw = _snap(math.sin(theta / 2)), _snap(math.cos(theta / 2))  # q_yaw = (0, ay, 0, aw)
+    node["rotation"] = [
+        _snap(aw * bx + ay * bz),
+        _snap(aw * by + ay * bw),
+        _snap(aw * bz - ay * bx),
+        _snap(aw * bw - ay * by),
+    ]
+    if "translation" in node:
+        t = _glb_numbers(node["translation"], 3, "translation")
+        node["translation"] = [_snap(rot[row][0] * t[0] + rot[row][1] * t[1] + rot[row][2] * t[2]) for row in range(3)]
+
+
+def _orient_glb(glb_bytes: bytes, yaw_deg: float) -> bytes:
+    """GLB 기본 scene 의 루트 노드마다 Y축 yaw_deg 회전을 앞에서 곱해 다시 묶는다. 순수 함수(입출력·로그 없음).
+
+    - 읽기: magic "glTF", version 2, 헤더 길이 = 바이트 길이, 첫 청크 JSON. 그 뒤 청크(BIN 등)는 바이트 그대로 둔다.
+    - 루트 노드 = scenes[scene(없으면 0)].nodes(같은 번호는 한 번). 자식 노드는 부모를 따라 돌므로 건드리지 않는다.
+    - 쓰기: JSON 은 공백(0x20), 그 밖 청크는 0 으로 4바이트 정렬. 헤더 길이를 다시 쓴다.
+    - GLB 가 아니거나 모양이 틀리면 ValueError(호출한 _copy_3d_result 가 원본을 저장한다).
+    메모리: BIN 은 memoryview 로 넘겨 결과 한 벌(약 GLB 크기)만 새로 만든다.
+    """
+    try:
+        data = memoryview(glb_bytes)
+        if len(data) < 20 or bytes(data[:4]) != _GLB_MAGIC:
+            raise ValueError("not a GLB (magic)")
+        version, total = struct.unpack_from("<II", data, 4)
+        if version != 2 or total != len(data):
+            raise ValueError(f"bad GLB header version={version} length={total}/{len(data)}")
+        chunks: list[tuple[int, memoryview]] = []
+        offset = 12
+        while offset < total:
+            if offset + 8 > total:
+                raise ValueError("truncated GLB chunk header")
+            length, kind = struct.unpack_from("<II", data, offset)
+            end = offset + 8 + length
+            if end > total:
+                raise ValueError("truncated GLB chunk")
+            chunks.append((kind, data[offset + 8:end]))
+            offset = end
+        if not chunks or chunks[0][0] != _GLB_CHUNK_JSON:
+            raise ValueError("first GLB chunk is not JSON")
+        gltf = json.loads(bytes(chunks[0][1]).rstrip(b"\x00").decode("utf-8"))
+        scenes, nodes = gltf.get("scenes"), gltf.get("nodes")
+        index = gltf.get("scene", 0)
+        if not isinstance(scenes, list) or not isinstance(nodes, list) or isinstance(index, bool) or not isinstance(index, int):
+            raise ValueError("GLB has no scenes/nodes")
+        if not 0 <= index < len(scenes) or not isinstance(scenes[index], dict):
+            raise ValueError("GLB default scene out of range")
+        roots = scenes[index].get("nodes")
+        if not isinstance(roots, list) or not roots:
+            raise ValueError("GLB default scene has no root nodes")
+        for root in dict.fromkeys(roots):
+            if isinstance(root, bool) or not isinstance(root, int) or not 0 <= root < len(nodes):
+                raise ValueError("GLB root node out of range")
+            if not isinstance(nodes[root], dict):
+                raise ValueError("GLB root node is not an object")
+            _yaw_node(nodes[root], yaw_deg)
+        text = json.dumps(gltf, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+        text += b" " * (-len(text) % 4)
+        parts: list = [b"", struct.pack("<II", len(text), _GLB_CHUNK_JSON), text]
+        for kind, body in chunks[1:]:
+            pad = -len(body) % 4
+            parts += [struct.pack("<II", len(body) + pad, kind), body] + ([b"\x00" * pad] if pad else [])
+        parts[0] = struct.pack("<4sII", _GLB_MAGIC, 2, sum(len(part) for part in parts) + 12)
+        return b"".join(parts)
+    except ValueError:
+        raise
+    except (struct.error, TypeError, KeyError, IndexError, AttributeError, RecursionError) as exc:
+        raise ValueError(f"bad GLB: {type(exc).__name__}") from exc
+
+
+def _reference_jpegs(owner: str, char: dict, analysis: dict) -> tuple[list[bytes], bool]:
+    """Seedream 참고 그림(최대 MAX_REFERENCE_IMAGES 장)과 '기준 사진이 맨 앞인가'(design §8).
+
+    VNEW_CHAR_FIDELITY 켬 + 충실 분석이고 baseSourceFileId 가 지금 업로드 목록에 있으면 그 그림을 맨 앞에, 나머지를 업로드
+    순서로 둔다. 아니면(끔·옛 분석·틀린 번호·지운 그림) 지금처럼 업로드 순서다. run_build·run_resume_variant·
+    run_rebuild_variant 가 쓴다.
+    """
+    ids = [src["fileId"] for src in (char.get("sources") or [])]
+    base_id = ""
+    if settings.VNEW_CHAR_FIDELITY and _is_fidelity_analysis(analysis):
+        base_id = str(analysis.get("baseSourceFileId") or "")
+    order, base_first = char_fidelity.reference_order(ids, base_id, settings.MAX_REFERENCE_IMAGES)
+    return [source_jpeg(owner, char["id"], file_id) for file_id in order], base_first
+
+
 def run_build(owner: str, char_id: str, version: int, tokens: dict | None = None) -> None:
     """빌드 파이프라인(백그라운드 스레드에서 호출). 한 variant 실패해도 다른 variant 는 계속.
 
@@ -1538,10 +2814,8 @@ def run_build(owner: str, char_id: str, version: int, tokens: dict | None = None
 
         mutate_char(owner, char_id, set_analysis)
 
-        # 참고 이미지(최대 4장)
-        refs: list[bytes] = []
-        for src in (char.get("sources") or [])[: settings.MAX_REFERENCE_IMAGES]:
-            refs.append(source_jpeg(owner, char_id, src["fileId"]))
+        # 참고 이미지(최대 4장). char-fidelity 켬 + 충실 분석이면 기준 사진을 맨 앞에(_reference_jpegs).
+        refs, base_first = _reference_jpegs(owner, char, analysis)
 
         # b~d. variant 별(순차. 실패해도 다음 variant 진행). 파드 안 실행 중 표시 + 선점 확인.
         # 아직 시작 안 한(대기) variant 는 keepalive 로 등록해, 앞 variant 의 heartbeat 갱신마다
@@ -1562,7 +2836,7 @@ def run_build(owner: str, char_id: str, version: int, tokens: dict | None = None
                 _mark_running(owner, char_id, variant)
                 try:
                     _touch_heartbeat(owner, char_id, variant)
-                    _build_variant(owner, char_id, variant, version, analysis, refs, token)
+                    _build_variant(owner, char_id, variant, version, analysis, refs, token, base_first=base_first)
                 finally:
                     _clear_running(owner, char_id, variant)
                     if token:
@@ -1702,6 +2976,19 @@ def start_retry3d(owner: str, char_id: str, variant: str) -> int:
     return version
 
 
+def _stored_side_view(v: dict, view: str, char_id: str, variant: str, where: str) -> bytes | None:
+    """저장된 옆모습(leftKey·rightKey) 바이트. 키가 없으면 None, 읽기 실패면 None + 경고 로그(보기·예외 종류만, 키 없음)."""
+    key = str(v.get(f"{view}Key") or "")
+    if not key:
+        return None
+    try:
+        return STORE.get_bytes(key)
+    except Exception as exc:  # noqa: BLE001 — 그 옆모습만 빼고 3D 는 진행한다
+        log.warning("vnew.%s.side_missing char=%s variant=%s view=%s err=%s", where, char_id, variant, view,
+                    type(exc).__name__)
+        return None
+
+
 def run_retry3d(owner: str, char_id: str, variant: str, version: int, token: str = "", owns_claim: bool = True) -> None:
     """3D만 다시(백그라운드). 이전 requestArn 이 완료면 재사용(제출 0회), 아니면 새로 제출한다.
 
@@ -1712,6 +2999,8 @@ def run_retry3d(owner: str, char_id: str, variant: str, version: int, token: str
 
     이전 요청 조회가 'Downstream service unavailable' 만 연속으로 돌려주면(fal 이 요청을 잃음)
     기다리지 않고 같은 front/back 으로 바로 새로 제출한다(variant 당 최대 MAX_RESUBMITS 회).
+    char-fidelity R4.6: VNEW_3D_SIDE_VIEWS 켬이면 저장된 옆모습을 새 제출·재제출에 함께 보낸다(끔이면 정면·후면만).
+    char-fidelity T2b(R8.6): 이전 요청은 그 requestArn 의 공급자로 조회·재제출·회전하고, 새 제출은 설정의 공급자로 한다.
     """
     try:
         if token and not _holds_claim(owner, char_id, variant, token):
@@ -1728,25 +3017,46 @@ def run_retry3d(owner: str, char_id: str, variant: str, version: int, token: str
         # front/back 정사각을 미리 만들어 둔다('잃은 요청' 재제출에 쓴다).
         front = STORE.get_bytes(front_key)
         back = STORE.get_bytes(back_key)
-        side = settings.MODEL_INPUT_SQUARE
-        front_sq = _square_pad(front, side)
-        back_sq = _square_pad(back, side)
-        resubmit = _make_3d_resubmit(owner, char_id, variant, front_sq, back_sq, token)
+        # char-fidelity R4.6: 옆모습 설정이 켜져 있으면 저장된 옆모습(leftKey·rightKey)도 같은 묶음으로 보낸다(읽기 실패면 그 쪽만 뺀다).
+        stored: dict[str, bytes | None] = {"left": None, "right": None}
+        if settings.VNEW_3D_SIDE_VIEWS:
+            for view in char_fidelity.SIDES:
+                stored[view] = _stored_side_view(v, view, char_id, variant, "retry3d")
+        # T2b(R8.6): 새 제출은 설정의 공급자, 이전 요청의 잃은 요청 재제출은 그 요청의 공급자(arn endpoint)로 같은 그림을 다시 낸다.
+        # 두 콜백은 재제출 한도(MAX_RESUBMITS)를 함께 센다(지금처럼 한 번의 retry3d 에 최대 1 + MAX_RESUBMITS 건).
+        provider = _3d_provider()
+        front_sq, back_sq, left_sq, right_sq = _3d_squares(front, back, stored["left"], stored["right"], provider=provider)
+        counter = {"n": 0}
+        resubmit = _make_3d_resubmit(
+            owner, char_id, variant, front_sq, back_sq, token, left_sq=left_sq, right_sq=right_sq, provider=provider,
+            counter=counter,
+        )
+        prior_resubmit = resubmit
+        if prior_arn and _provider_of(prior_arn) != provider:
+            prior_provider = _provider_of(prior_arn)
+            p_front, p_back, p_left, p_right = _3d_squares(front, back, stored["left"], stored["right"], provider=prior_provider)
+            prior_resubmit = _make_3d_resubmit(
+                owner, char_id, variant, p_front, p_back, token, left_sq=p_left, right_sq=p_right, provider=prior_provider,
+                counter=counter,
+            )
+        del stored  # 정사각만 쥐고 폴링한다(최대 15분, 512Mi).
 
         state = None
+        done_arn = prior_arn  # 결과를 받은 요청(Tripo 인지 가려 GLB 를 돌린다)
         # 1) 이전 요청이 있으면 먼저 조회 — 완료면 그 결과를 쓴다. unavailable 이 연속 LOST_AFTER 회면
         #    기다리지 않고 바로 새로 제출한다(resubmit 콜백). 그래도 못 받으면 아래 2) 로 넘어간다.
         if prior_arn:
-            state = _wait_3d(prior_arn, resubmit=resubmit, owner=owner, char_id=char_id, variant=variant)
+            state = _wait_3d(prior_arn, resubmit=prior_resubmit, owner=owner, char_id=char_id, variant=variant)
             if state["status"] != "Completed":
                 state = None  # 실패·시간초과면 새로 제출한다.
 
         # 2) 이전 결과를 못 쓰면 front/back 으로 새로 제출한다. 제출 직전 claim 재확인.
         if state is None:
             _guard_submit_claim(owner, char_id, variant, token)
-            request_arn = submit_3d(front_sq, back_sq)
-            _charge_3d(owner, char_id, variant)
-            _set_variant_3d(
+            request_arn = submit_3d(front_sq, back_sq, left_square=left_sq, right_square=right_sq, provider=provider)
+            done_arn = request_arn
+            _charge_3d_request(owner, char_id, variant, request_arn)
+            _set_variant_3d_request(
                 owner, char_id, variant, {"status": "submitted", "requestArn": request_arn, "error": ""}
             )
             _touch_heartbeat(owner, char_id, variant)
@@ -1757,7 +3067,7 @@ def run_retry3d(owner: str, char_id: str, variant: str, version: int, token: str
                 _refresh_char_status(owner, char_id)
                 return
 
-        _copy_3d_result(owner, char_id, variant, version, state)
+        _copy_3d_result(owner, char_id, variant, version, state, request_arn=done_arn)
         _refresh_char_status(owner, char_id)
     except Exception as exc:  # noqa: BLE001
         # ClaimLost: 다른 실행이 이 variant 를 가져갔다 — 제출하지 않고 접는다(상태 건드리지 않음).
@@ -1870,6 +3180,7 @@ def run_resume_variant(owner: str, char_id: str, variant: str, version: int, tok
     - sheet/front/back 이 다 있으면 그림은 다시 그리지 않고 3D 만(run_retry3d 처럼 이전 requestArn
       이 있으면 조회부터).
     - 그림이 덜 됐으면 분석 결과를 재사용해 그 variant 를 처음부터 다시 그린다.
+    - char-fidelity R4.7: VNEW_3D_SIDE_VIEWS 켬이고 그림 3개는 있는데 옆모습 결과가 없고 3D 요청이 없으면 없는 옆모습만 그리고 3D.
     선점 token 이 더는 내 것이 아니면(다른 파드가 가져감) 아무것도 하지 않는다.
     """
     try:
@@ -1879,6 +3190,11 @@ def run_resume_variant(owner: str, char_id: str, variant: str, version: int, tok
         v = (char.get("variants") or {}).get(variant) or {}
         has_images = bool(v.get("sheetKey") and v.get("frontKey") and v.get("backKey"))
         if has_images:
+            # char-fidelity R4.7: 옆모습 결과가 없고 3D 요청이 아직 없으면 없는 옆모습만 그리고 3D 로 간다.
+            if settings.VNEW_3D_SIDE_VIEWS and _needs_side_views(v) and (char.get("analysis") or {}).get("appearanceEn"):
+                _resume_side_views(owner, char_id, variant, version, token)
+                _refresh_char_status(owner, char_id)
+                return
             # 그림은 그대로 두고 3D 만 이어서(이전 requestArn 재사용 포함). resume 가 claim 수명을
             # 쥐고 있으므로(owns_claim=False) retry3d 는 해제하지 않고, token 으로 제출 직전 가드만 한다.
             run_retry3d(owner, char_id, variant, version, token, owns_claim=False)
@@ -1892,10 +3208,8 @@ def run_resume_variant(owner: str, char_id: str, variant: str, version: int, tok
                 data["analysis"] = analysis
 
             mutate_char(owner, char_id, set_analysis)
-        refs: list[bytes] = []
-        for src in (char.get("sources") or [])[: settings.MAX_REFERENCE_IMAGES]:
-            refs.append(source_jpeg(owner, char_id, src["fileId"]))
-        _build_variant(owner, char_id, variant, version, analysis, refs, token)
+        refs, base_first = _reference_jpegs(owner, char, analysis)
+        _build_variant(owner, char_id, variant, version, analysis, refs, token, base_first=base_first)
         _refresh_char_status(owner, char_id)
     except Exception as exc:  # noqa: BLE001
         if isinstance(exc, VpocError) and exc.kind == "ClaimLost":
@@ -1909,6 +3223,48 @@ def run_resume_variant(owner: str, char_id: str, variant: str, version: int, tok
     finally:
         _clear_running(owner, char_id, variant)
         _release_claim(owner, char_id, variant, token)
+
+
+def _needs_side_views(v: dict) -> bool:
+    """이어 만들기가 옆모습부터 그려야 하는가(design §10.5): viewCheck 에 left·right 중 없는 것이 있고, 3D 요청이 없고,
+    3D 가 ready 가 아니다. 3D 요청이 이미 있으면 그 요청부터 조회한다(옆모습을 그리지 않는다)."""
+    check = v.get("viewCheck") if isinstance(v.get("viewCheck"), dict) else {}
+    m3d = v.get("model3d") or {}
+    missing = any(view not in check for view in char_fidelity.SIDES)
+    return missing and not m3d.get("requestArn") and m3d.get("status") != "ready"
+
+
+def _resume_side_views(owner: str, char_id: str, variant: str, version: int, token: str) -> None:
+    """끊긴 variant 의 없는 옆모습만 그리고 3D 로 간다(design §10.5). 예외는 run_resume_variant 의 except 가 처리한다.
+
+    이미 끝난 옆모습은 저장된 그림(leftKey·rightKey)을 읽는다. warning 은 지금 warning + 옆모습 결과(viewCheck 전체)로
+    다시 만든다(같은 문구는 한 번). 그림마다 제출 직전 선점 확인·하트비트는 _draw_side_views 가 한다.
+    """
+    char, _ = load_char(owner, char_id)
+    v = (char.get("variants") or {}).get(variant) or {}
+    analysis = char.get("analysis") or {}
+    front = STORE.get_bytes(v["frontKey"])
+    back = STORE.get_bytes(v["backKey"])
+    sheet = STORE.get_bytes(v["sheetKey"])
+    refs, base_first = _reference_jpegs(owner, char, analysis)
+    base_ref = refs[0] if refs else None
+    del refs  # 기준 사진 한 장만 쓴다. 3D 폴링(최대 15분) 동안 나머지 업로드 바이트를 쥐지 않는다(512Mi).
+    done = dict(v["viewCheck"]) if isinstance(v.get("viewCheck"), dict) else {}
+    need = tuple(view for view in char_fidelity.SIDES if view not in done)
+    _set_variant(owner, char_id, variant, {"status": "images", "heartbeatAt": now_iso()})
+    drawn = _draw_side_views(
+        owner, char_id, variant, version, analysis, front, back, sheet, base_ref,
+        base_first=base_first, token=token, need=need,
+    )
+    statuses = {view: done[view] for view in char_fidelity.SIDES if view in done}
+    statuses.update({view: result["status"] for view, result in drawn.items()})
+    images = {}
+    for view in char_fidelity.SIDES:
+        images[view] = drawn[view]["jpeg"] if view in drawn else _stored_side_view(v, view, char_id, variant, "resume")
+    old = [text for text in str(v.get("warning") or "").split(" / ") if text]
+    warning = " / ".join(char_fidelity.merge_warnings(old, char_fidelity.side_warnings(statuses)))
+    _set_variant(owner, char_id, variant, {"status": "model3d", "warning": warning, "heartbeatAt": now_iso()})
+    _build_3d_from_images(owner, char_id, variant, version, front, back, token, left=images["left"], right=images["right"])
 
 
 # ================================================================ 그림체만 다시(variant rebuild)
@@ -1984,10 +3340,8 @@ def run_rebuild_variant(owner: str, char_id: str, variant: str, version: int, to
                 data["analysis"] = analysis
 
             mutate_char(owner, char_id, set_analysis)
-        refs: list[bytes] = []
-        for src in (char.get("sources") or [])[: settings.MAX_REFERENCE_IMAGES]:
-            refs.append(source_jpeg(owner, char_id, src["fileId"]))
-        _build_variant(owner, char_id, variant, version, analysis, refs, token)
+        refs, base_first = _reference_jpegs(owner, char, analysis)
+        _build_variant(owner, char_id, variant, version, analysis, refs, token, base_first=base_first)
         _refresh_char_status(owner, char_id)
     except Exception as exc:  # noqa: BLE001
         if isinstance(exc, VpocError) and exc.kind == "ClaimLost":
@@ -2105,23 +3459,57 @@ def sync_auto_outfits(owner: str, char_id: str, analysis: dict) -> None:
     layers = _parse_outfit_layers(analysis.get("outfitLayersEn"))
     if not layers:
         return
+    # char-fidelity(design §9.1): 켬 + 충실 분석이면 후보는 '사진 속 옷'(kind photo) — 그 옷이 보인 그림·인물·소품을 함께 둔다.
+    photo = settings.VNEW_CHAR_FIDELITY and _is_fidelity_analysis(analysis)
+    photo_fields = _photo_outfit_fields(analysis) if photo else []
 
     def mutator(data: dict) -> None:
         outfits = data.setdefault("outfits", [])
         existing = {str(o.get("promptEn") or "").strip().lower() for o in outfits}
-        for layer in layers:
+        for index, layer in enumerate(layers):
             prompt_en = layer["promptEn"]
             if prompt_en.strip().lower() in existing:
                 continue
             if len(outfits) >= settings.MAX_OUTFITS:
                 break
-            outfits.append(_empty_outfit(layer["labelKo"], prompt_en, "auto"))
+            outfit = _empty_outfit(layer["labelKo"], prompt_en, "auto")
+            if photo:
+                outfit.update(photo_fields[index])
+            outfits.append(outfit)
             existing.add(prompt_en.strip().lower())
 
     try:
         mutate_char(owner, char_id, mutator)
     except Exception as exc:  # noqa: BLE001
         log.warning("vnew.sync_auto_outfits_failed char=%s err=%s", char_id, str(exc)[:200])
+
+
+def _photo_outfit_fields(analysis: dict) -> list[dict]:
+    """충실 분석 outfitLayersEn 마다 사진 속 옷 필드(kind·sourceFileId·whereEn·sidedItems). _parse_outfit_layers 와 같은 순서.
+
+    sidedItems 는 그 옷 그림에서 본 analysis.sidedItems(sided 순번) 중 모양이 맞는 것만 itemEn·labelKo·partEn·side 로 둔다.
+    """
+    raw_layers = analysis.get("outfitLayersEn") if isinstance(analysis.get("outfitLayersEn"), list) else []
+    sided = analysis.get("sidedItems") if isinstance(analysis.get("sidedItems"), list) else []
+    out: list[dict] = []
+    for layer in raw_layers:
+        if not _parse_outfit_layers([layer]):
+            continue
+        layer = layer if isinstance(layer, dict) else {}
+        picked = [
+            sided[i] for i in (layer.get("sided") if isinstance(layer.get("sided"), list) else [])
+            if isinstance(i, int) and not isinstance(i, bool) and 0 <= i < len(sided) and _valid_sided_item(sided[i])
+        ]
+        out.append({
+            "kind": "photo",
+            "sourceFileId": str(layer.get("sourceFileId") or ""),
+            "whereEn": char_fidelity.clean_line(layer.get("whereEn"), 60),
+            "sidedItems": [
+                {"itemEn": item["itemEn"], "labelKo": str(item.get("labelKo") or ""), "partEn": item["partEn"], "side": item["side"]}
+                for item in picked
+            ],
+        })
+    return out
 
 
 def _translate_outfit_prompt(owner: str, char: dict, prompt_ko: str) -> str:
@@ -2252,6 +3640,9 @@ def run_build_outfit(owner: str, char_id: str, outfit_id: str) -> None:
 
     각 그림체의 기본 정면·후면을 참고로 'same person, same base outfit, plus {promptEn}' 정면·후면을
     그린다. 3D 는 만들지 않는다(기본 복장 3D 하나만). 원장은 Seedream 장당.
+
+    char-fidelity(design §9.2): 켬이고 kind photo(사진 속 옷)이면 '기본 복장 대신 이 한 벌 그대로'(_photo_outfit_prompt)로
+    그린다. 정면 참고 [기본 정면, 원본 그림], 후면 참고 [방금 정면, 원본 그림, 기본 후면]. 원본 그림을 못 읽으면 원본 없이.
     """
     try:
         char, _ = load_char(owner, char_id)
@@ -2260,6 +3651,8 @@ def run_build_outfit(owner: str, char_id: str, outfit_id: str) -> None:
             return
         analysis = char.get("analysis") or {}
         prompt_en = str(outfit.get("promptEn") or "").strip()
+        photo = settings.VNEW_CHAR_FIDELITY and outfit.get("kind") == "photo"
+        source = _photo_outfit_source(owner, char, outfit) if photo else None
         for variant in settings.VARIANTS:
             try:
                 base_v = (char.get("variants") or {}).get(variant) or {}
@@ -2273,22 +3666,32 @@ def run_build_outfit(owner: str, char_id: str, outfit_id: str) -> None:
                 base_back = STORE.get_bytes(base_back_key) if base_back_key else None
 
                 # 정면 — 기본 정면을 첫 참고로.
-                front = _seedream(
-                    _outfit_prompt(variant, analysis, prompt_en, "front"),
-                    [base_front], size=settings.FRONT_SIZE,
-                )
+                source_no = 2 if source is not None else None
+                if photo:
+                    front_refs = [base_front] + ([source] if source is not None else [])
+                    front_prompt = _photo_outfit_prompt(
+                        variant, analysis, outfit, "front", source_no=source_no, base_back_no=None)
+                else:
+                    front_refs = [base_front]
+                    front_prompt = _outfit_prompt(variant, analysis, prompt_en, "front")
+                front = _seedream(front_prompt, front_refs, size=settings.FRONT_SIZE)
                 _charge_seedream(owner, char_id, variant, "outfit-front")
                 fk = outfit_front_key(owner, char_id, outfit_id, variant)
                 STORE.put_bytes(fk, front, "image/jpeg")
 
                 # 후면 — 방금 만든 정면 + 기본 후면을 참고로.
                 back_refs = [front]
+                if photo and source is not None:
+                    back_refs.append(source)
                 if base_back is not None:
                     back_refs.append(base_back)
-                back = _seedream(
-                    _outfit_prompt(variant, analysis, prompt_en, "back"),
-                    back_refs, size=settings.BACK_SIZE,
-                )
+                if photo:
+                    back_no = len(back_refs) if base_back is not None else None
+                    back_prompt = _photo_outfit_prompt(
+                        variant, analysis, outfit, "back", source_no=source_no, base_back_no=back_no)
+                else:
+                    back_prompt = _outfit_prompt(variant, analysis, prompt_en, "back")
+                back = _seedream(back_prompt, back_refs, size=settings.BACK_SIZE)
                 _charge_seedream(owner, char_id, variant, "outfit-back")
                 bk = outfit_back_key(owner, char_id, outfit_id, variant)
                 STORE.put_bytes(bk, back, "image/jpeg")
@@ -2303,6 +3706,21 @@ def run_build_outfit(owner: str, char_id: str, outfit_id: str) -> None:
                                     {"status": "failed", "error": message})
     except Exception as exc:  # noqa: BLE001
         log.warning("vnew.build_outfit_failed char=%s outfit=%s err=%s", char_id, outfit_id, str(exc)[:300])
+
+
+def _photo_outfit_source(owner: str, char: dict, outfit: dict) -> bytes | None:
+    """사진 속 옷의 원본 그림 바이트. 그 그림이 업로드 목록에 없거나(지운 그림) 읽지 못하면 None(원본 없이 그린다)."""
+    file_id = str(outfit.get("sourceFileId") or "")
+    known = {src.get("fileId") for src in (char.get("sources") or []) if isinstance(src, dict)}
+    if file_id and file_id in known:
+        try:
+            return source_jpeg(owner, char["id"], file_id)
+        except Exception as exc:  # noqa: BLE001 — 원본이 없어도 그림은 그린다
+            log.warning("vnew.build_outfit.source_missing char=%s outfit=%s err=%s", char.get("id"), outfit.get("id"),
+                        type(exc).__name__)
+            return None
+    log.warning("vnew.build_outfit.source_missing char=%s outfit=%s err=not_in_sources", char.get("id"), outfit.get("id"))
+    return None
 
 
 def _set_outfit_variant(owner: str, char_id: str, outfit_id: str, variant: str, patch: dict) -> None:
@@ -2332,10 +3750,14 @@ def _outfit_prompt(variant: str, analysis: dict, prompt_en: str, view: str) -> s
         if variant == "real"
         else "Single full-body " + side + " of " + person + ". "
     )
+    # char-fidelity(design §6.5): 켬 + 충실 분석에 정한 소품이 있으면 덧입힘 문장 바로 뒤에 좌우 문장만 더한다(끔이면 "").
+    items = _sided_items(analysis)
+    sided = char_fidelity.side_sentences(items, "back" if view == "back" else "front", _pronoun_of(analysis)) if items else ""
     prompt = (
         head
         + who
         + f" Same person, same base outfit ({base}), plus {extra}. "
+        + (sided + " " if sided else "")
         + "Standing straight in a relaxed A-pose, whole body from head to shoes visible, centered, "
         "plain white background, no shadow. Draw exactly ONE person, no extra figures. "
     )
@@ -2382,8 +3804,15 @@ def detail_view(owner: str, char_id: str) -> dict:
                 "thumbUrl": _presign(model3d.get("thumbKey")),
             },
         }
+        # char-fidelity(design §11.1, R4.9): 옆모습 그림은 키가 있을 때만 leftUrl·rightUrl 을 둔다(3D 에서 뺀 쪽은 키가 "").
+        # 3D 이름표(T2b·T3): model3d.endpoint 는 저장돼 있을 때만(Tripo 요청) 준다. 옛 데이터는 응답이 지금과 같다(cf-r).
+        for side in char_fidelity.SIDES:
+            if v.get(f"{side}Key"):
+                variants_out[variant][f"{side}Url"] = _presign(v.get(f"{side}Key"))
+        if isinstance(model3d.get("endpoint"), str) and model3d.get("endpoint"):
+            variants_out[variant]["model3d"]["endpoint"] = model3d["endpoint"]
     analysis = char.get("analysis") or {}
-    return {
+    detail = {
         "id": char["id"],
         "name": char.get("name") or "",
         "status": char.get("status"),
@@ -2401,6 +3830,13 @@ def detail_view(owner: str, char_id: str) -> dict:
         "outfits": _outfits_view(owner, char),
         "casting": casting_out,
     }
+    # char-fidelity(design §11.1, R5.1): 두 설정 중 하나라도 켜져 있을 때만 features 를 둔다. 둘 다 끔이면 키가 없다(R0.2).
+    if settings.VNEW_CHAR_FIDELITY or settings.VNEW_3D_SIDE_VIEWS:
+        detail["features"] = {
+            "charFidelity": bool(settings.VNEW_CHAR_FIDELITY),
+            "sideViews": bool(settings.VNEW_3D_SIDE_VIEWS),
+        }
+    return detail
 
 
 def _casting_detail(owner: str, char_id: str, char: dict) -> tuple[dict, dict]:
@@ -2437,6 +3873,9 @@ def _outfits_view(owner: str, char: dict) -> list[dict]:
             "source": o.get("source") or "user",
             "variants": variants_out,
         })
+        # char-fidelity(design §11.1): 저장된 kind(사진 속 옷 "photo")가 있을 때만 둔다. 옛 후보·사용자 복장은 지금 응답 그대로.
+        if o.get("kind"):
+            out[-1]["kind"] = o.get("kind")
     return out
 
 

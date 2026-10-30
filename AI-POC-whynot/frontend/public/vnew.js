@@ -474,6 +474,85 @@
     return row;
   }
 
+  /* ---- 캐릭터 충실도 표시(char-fidelity T3, design §11.2) ----
+
+     상세 응답의 features·analysis(baseSourceFileId·sidedItems)·variant leftUrl·rightUrl·model3d.endpoint·추가 복장 kind 를
+     화면 글로 바꾸는 순수 함수(DOM 없음). 검사 cf-s 가 node 로 실행한다. 표에 없는 값은 표시하지 않는다(빈 목록·""). */
+  var CHAR_PART_KO = { wrist: "손목", hand: "손", arm: "팔", shoulder: "어깨", ear: "귀", eye: "눈", cheek: "볼",
+    chest: "가슴", hip: "허리 옆", leg: "다리", ankle: "발목", foot: "발", hair: "머리" };
+  var CHAR_SIDE_KO = { left: "왼쪽", right: "오른쪽" };
+  // 3D 이름표(T2b model3d.endpoint → 이름). 고정 표다. 표에 없는 endpoint 는 이름표를 달지 않는다.
+  var CHAR_3D_ENDPOINT_LABEL = {
+    "tripo3d/h3.1/multiview-to-3d": "Tripo H3.1",
+    "tripo3d/h3.1/image-to-3d": "Tripo H3.1",
+    "fal-ai/hunyuan3d-v3/image-to-3d": "Hunyuan3D v3"
+  };
+  var CHAR_VIEW_PAIRS = [["frontUrl", "정면"], ["backUrl", "후면"], ["leftUrl", "왼쪽"], ["rightUrl", "오른쪽"]];
+  var OUTFITS_HINT = "기본 복장 위에 더 입히는 옷차림(예: 정장 자켓)을 따로 만듭니다. 3D 는 기본 복장 하나만 만듭니다.";
+  var OUTFITS_HINT_FIDELITY =
+    "사진 속 다른 옷차림(사진 속 옷)은 그 사진 그대로, 직접 넣은 옷은 기본 복장 위에 더 입혀 그립니다. 3D 는 기본 복장 하나만 만듭니다.";
+
+  /* 표에서 key 의 값. 표 자신의 키만 본다(constructor·__proto__ 같은 이름은 ""). */
+  function charTableValue(table, key) {
+    return typeof key === "string" && Object.prototype.hasOwnProperty.call(table, key) ? table[key] : "";
+  }
+
+  function charFidelityOn(detail) {
+    return !!(detail && detail.features && detail.features.charFidelity === true);
+  }
+
+  /* 분석 카드 새 줄 [{label, text}]. features.charFidelity 가 아니면 []. 기준 사진은 지금 업로드 목록에 있을 때만(지운 그림이면 없음). */
+  function analysisFidelityLines(detail) {
+    if (!charFidelityOn(detail)) return [];
+    var analysis = detail.analysis || {};
+    var sources = Array.isArray(detail.sources) ? detail.sources : [];
+    var lines = [];
+    var baseId = analysis.baseSourceFileId;
+    var baseIndex = -1;
+    if (typeof baseId === "string" && baseId) {
+      sources.forEach(function (source, index) {
+        if (baseIndex < 0 && source && source.fileId === baseId) baseIndex = index;
+      });
+    }
+    if (baseIndex >= 0) lines.push({ label: "기준 사진", text: baseIndex + 1 + "번째" });
+    var items = [];
+    (Array.isArray(analysis.sidedItems) ? analysis.sidedItems : []).forEach(function (item) {
+      if (!item || !charTableValue(CHAR_SIDE_KO, item.side)) return;
+      var name = String(item.labelKo || item.itemEn || "").trim();
+      if (!name) return;
+      var part = charTableValue(CHAR_PART_KO, item.partEn) || String(item.partEn || "").trim();
+      items.push((name + " — " + CHAR_SIDE_KO[item.side] + " " + part).trim());
+    });
+    if (items.length) lines.push({ label: "소품", text: items.join(", ") });
+    return lines;
+  }
+
+  /* variant 열 작은 그림: url 이 있는 것만 [[urlKey, 이름]] (정면·후면·왼쪽·오른쪽 순서). */
+  function variantViewPairs(v) {
+    var variant = v || {};
+    return CHAR_VIEW_PAIRS.filter(function (pair) {
+      return !!variant[pair[0]];
+    });
+  }
+
+  /* 추가 복장 배지: kind photo + features.charFidelity → "사진 속 옷", source auto → "후보", 그 밖 "". */
+  function outfitBadgeText(outfit, detail) {
+    var o = outfit || {};
+    if (o.kind === "photo" && charFidelityOn(detail)) return "사진 속 옷";
+    return o.source === "auto" ? "후보" : "";
+  }
+
+  /* 추가 복장 안내 문장(결정 S11). features.charFidelity 면 사진 속 옷 문장, 아니면 지금 문장. */
+  function outfitsHintText(detail) {
+    return charFidelityOn(detail) ? OUTFITS_HINT_FIDELITY : OUTFITS_HINT;
+  }
+
+  /* 3D 이름표 "3D: Tripo H3.1". endpoint 가 없거나(옛 데이터·Hunyuan 요청) 표에 없으면 "". */
+  function model3dEndpointLabel(model3d) {
+    var name = charTableValue(CHAR_3D_ENDPOINT_LABEL, (model3d || {}).endpoint);
+    return name ? "3D: " + name : "";
+  }
+
   function renderDetail(host, detail) {
     clear(host);
 
@@ -519,6 +598,13 @@
         baseRow.appendChild(el("span", null, detail.baseOutfitEn || analysis.baseOutfitEn));
         card.appendChild(baseRow);
       }
+      // char-fidelity(R5.2): "기준 사진: N번째"·"소품: 시계 — 오른쪽 손목". features.charFidelity 이고 값이 있을 때만.
+      analysisFidelityLines(detail).forEach(function (line) {
+        var fidelityRow = el("p", "vnew-analysis-meta");
+        fidelityRow.appendChild(el("span", "vnew-analysis-label", line.label));
+        fidelityRow.appendChild(el("span", null, line.text));
+        card.appendChild(fidelityRow);
+      });
       if (analysis.expressionsKo && analysis.expressionsKo.length) {
         var exprRow = el("p", "vnew-analysis-meta");
         exprRow.appendChild(el("span", "vnew-analysis-label", "표정"));
@@ -922,6 +1008,9 @@
 
     // (a) 3D 보기
     column.appendChild(viewer3d(host, detail, meta, v, model3d));
+    // 3D 이름표(T2b model3d.endpoint, 작은 글씨). endpoint 가 없으면(옛 데이터) 아무것도 달지 않는다.
+    var endpointLabel = model3dEndpointLabel(model3d);
+    if (endpointLabel) column.appendChild(el("p", "vnew-3d-endpoint", endpointLabel));
 
     // (b) 5면 시트 + 정면·후면
     var sheets = el("div", "vnew-sheets");
@@ -938,10 +1027,8 @@
     }
 
     var smalls = el("div", "vnew-sheet-smalls");
-    [
-      ["frontUrl", "정면"],
-      ["backUrl", "후면"]
-    ].forEach(function (pair) {
+    // 정면·후면 + 옆모습(char-fidelity R5.3, leftUrl·rightUrl 이 있을 때만)
+    variantViewPairs(v).forEach(function (pair) {
       var url = v[pair[0]];
       if (!url) return;
       var fig = el("figure", "vnew-sheet-small");
@@ -1330,7 +1417,7 @@
       el(
         "p",
         "vnew-hint",
-        "기본 복장 위에 더 입히는 옷차림(예: 정장 자켓)을 따로 만듭니다. 3D 는 기본 복장 하나만 만듭니다."
+        outfitsHintText(detail)
       )
     );
 
@@ -1356,8 +1443,10 @@
     var top = el("div", "vnew-outfit-top");
     var title = el("span", "vnew-outfit-name", outfit.labelKo || outfit.promptEn || "추가 복장");
     top.appendChild(title);
-    if (outfit.source === "auto") {
-      top.appendChild(el("span", "vnew-outfit-badge", "후보"));
+    // 배지: 사진 속 옷(kind photo, char-fidelity R5.4) · 후보(auto) · 없음
+    var badge = outfitBadgeText(outfit, detail);
+    if (badge) {
+      top.appendChild(el("span", "vnew-outfit-badge", badge));
     }
     card.appendChild(top);
     if (outfit.promptEn) {
