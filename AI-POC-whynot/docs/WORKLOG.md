@@ -1169,3 +1169,130 @@
   6. `deploy/config.env.example`의 단가 주석 `VNEW_3D_USD=0.375`(T2·T2b 남은 이슈)는 이번 범위(허용 파일) 밖이라 그대로다.
   7. design §18의 "바꾸지 않는 파일: `deploy/config.{dev,prod}.env`" 문장은 고치지 않았다(이번 허용 범위는 tasks.md T3 체크뿐).
   8. 개발 유료 확인 VD-1~VD-4(tasks 「배포 뒤 확인」)와 운영 유료 확인은 승인 뒤 Claude가 한다.
+
+
+### 지시서 102 — 추가 복장 [이미지 만들기]가 늘 꺼지는 결함, 운영 "스토리" 버튼 유지 설정 `VNEW_HIDE_STORY` (Kiro, claude-opus-5.5)
+- **범위**: `.kiro/handoff/102-outfit-button-story-flag.md`. 작은 작업이라 스펙 폴더 없이 지시서와 이 항목을 스펙으로 삼았다. 커밋·push 하지 않았다. git·aws·kubectl·네트워크·유료 API를 쓰지 않았고 사용자 데이터를 읽지 않았다.
+- **먼저 한 일**: 바꿀 파일 8개의 시작 전 사본을 저장소 밖(`%TEMP%`)에 두었다. 시작 전 전체 검사는 전부 통과(ok 61줄, 78초).
+- **1. 추가 복장 버튼 결함**
+  - 사용자 보고(2026-10-30, 개발계 `char_20261030_a7b69d`): 추가 복장 후보 카드의 [이미지 만들기]가 꺼져 있다.
+  - 원인(Claude 확인, 코드로 다시 확인): 아직 만들지 않은 복장 variant는 `characters._empty_outfit_variant()`가 `status: "queued"`로 저장하고, `_outfits_view`도 빈 상태를 `"queued"`로 준다. `vnew.js` `outfitCard`는 `images`이거나 `queued`이면 `anyBuilding = true`로 보고 버튼을 막았다. 서버 `start_build_outfit`은 `images`일 때만 409다. 그래서 한 번도 만들지 않은 복장은 늘 막혔다(049a78b, 지시서 034부터). 같은 판단을 쓰는 [삭제]도 함께 막혀 있었다.
+  - 결정: 카드의 "만드는 중" 판단을 서버와 같게 `images`일 때만으로 바꿨다(`anyBuilding`, 결과 칸의 "만드는 중…" 분기 두 줄). 서버 데이터 모양은 바꾸지 않았다.
+  - 검토한 대안
+    - (가) 서버가 빈 복장을 `queued`가 아닌 값(예: `draft`)으로 저장: 이미 저장된 복장(개발 6벌)이 `queued`라 옮기기가 필요하고, 서버는 이번 수정 금지 범위다.
+    - (나) 화면이 `queued`에 진행 흔적(시각 등)을 더해 판단: 복장 variant에는 그런 필드가 없다.
+    - (다) 채택: 서버의 409 기준(`images`)을 화면에 그대로 쓴다.
+- **2. 운영 "스토리" 버튼 유지**
+  - 배경: `applyVnewToggles`는 vnew가 켜지면 만들기·트랙 고르기 창의 story 버튼을 숨긴다(설계자 2026-10-20). 운영에서 vnew를 켜면(2026-10-30 사용자 결정) 새 스토리 프로젝트를 만들 길이 없어진다. 사용자에게 물었지만 답이 없어, Claude가 기존 기능을 잃지 않는 쪽으로 정했다. 개발은 지금처럼 숨긴다.
+  - 결정: 화면 전용 설정 `VNEW_HIDE_STORY`(base 기본 `true` = 지금 동작). 운영 오버레이만 `false`. 앱 env에는 넣지 않았다.
+  - 서버 확인: `project_tracks.track_enabled`는 story를 `STORY_DEV_ENABLED`로만 판단한다(vnew와 무관). 운영 렌더 `STORY_DEV_ENABLED="true"`라 버튼을 보이면 바로 만들 수 있다.
+  - E1 — runtime-config에서 `vnewHideStory`를 `vnewEnabled` **앞**에 두었다. 기존 rw-c가 운영 렌더에서 `"vnewEnabled: true }"`(맨 끝)를 찾기 때문이다. 뒤에 두면 rw-c 기대값을 바꿔야 한다(지시서: 다른 기존 검사의 기대값은 바꾸지 않는다). `runtime-track-flags` 주석은 끝에 `;vnewHideStory=…`를 붙였다. runtime-config.js는 subPath로 붙어 ConfigMap만 바뀌면 파드가 새 값을 읽지 못하므로, 이 주석 값이 바뀌어 프런트 파드를 다시 띄운다.
+  - E2 — app.js는 지시서 그대로 `vnewHideStory !== false`로 읽는다. 값이 없거나(옛 runtime-config, 이미지 안의 기본 `frontend/public/runtime-config.js`) 글자 `"false"`이면 숨긴다(지금 동작). 템플릿은 따옴표 없는 `false`로 렌더한다(ob-d·ob-e).
+  - E3 — story 숨김 한 줄을 `if (VNEW_HIDE_STORY) …;` 한 줄로 바꿨다(같은 함수의 `if (strong) …;`와 같은 꼴). 블록으로 감싸면 원래 줄이 들여쓰기만 바뀐다.
+  - 검토한 대안
+    - (가) 운영도 숨김 유지: 운영 사용자가 새 스토리 프로젝트를 만들 수 없다.
+    - (나) story 숨김을 지운다: 개발 동작(설계자 결정)이 바뀐다.
+    - (다) `STORY_DEV_ENABLED`와 묶는다: 그 값은 서버 트랙 허용과 영상 쪽 판단도 함께 바꾼다.
+    - (라) 채택: 화면 전용 설정 하나.
+- **바꾼 것**
+  - `frontend/public/vnew.js` `outfitCard`: `anyBuilding` 판단·결과 칸 "만드는 중…" 분기(`queued` 제외), 설명 주석 1줄.
+  - `frontend/public/app.js`: 상수 `VNEW_HIDE_STORY`(설명 2줄), `applyVnewToggles`의 story 숨김을 `VNEW_HIDE_STORY`일 때만. 위 설명 주석에 한 구절.
+  - `k8s/workloads.yaml.tmpl`: runtime-config `vnewHideStory: ${VNEW_HIDE_STORY}`, `runtime-track-flags` 끝 `;vnewHideStory=${VNEW_HIDE_STORY}`.
+  - `deploy/config.env.example`: `VNEW_ENABLED` 뒤에 주석 2줄 + `VNEW_HIDE_STORY=true`.
+  - `deploy/config.prod.env`: 끝에 주석 1줄 + `VNEW_HIDE_STORY=false`. BOM·LF 그대로, 다른 줄 그대로.
+  - `tools/check_vpoc.py`: 새 `check_vnew_outfit_button`(ob-a~ob-e)과 `_OB_TITLE_NO_BASE`·`_OB_FIXED_LINES`·`_OB_CARD_NODE_CASES`·`_OB_TOGGLE_NODE`·`_ObIdleThread`·`_ob_card_script`·`_ob_server_details`. `main()` 끝에서 부른다. cf-s 하네스(`_CAST_SCREEN_NODE_HARNESS`·`_CF_SCREEN_NODE_STUBS`·`_CF_SCREEN_SLICES`·`_cf_run_node`)와 cf 메모리 저장소(`_CfFakes`·`_cf_old_char`)를 그대로 쓴다.
+  - `docs/plans/2026-10-30-prod-vnew-enable.md`: §1(설정 한 줄·표), §2(렌더 확인), §4(무료 확인에 "스토리" 버튼), §5(되돌리기 줄), §6(메뉴 영향).
+- **검사(새 그룹 `check_vnew_outfit_button`)**
+
+  | 검사 | 덮는 것 |
+  |---|---|
+  | ob-a | `outfitCard`를 node 가짜 DOM으로 10상태 실행: queued 켬 "이미지 만들기", images 끔, ready+images 끔·그 칸 "만드는 중…", ready "다시 만들기" 켬, ready+queued 켬·그 칸 비어 있음, version 0 끔·title 안내(queued·ready 둘 다), failed 켬, ready+failed 오류 문구, variants 없음 켬. [삭제]도 같은 판단. 누르기: 확인 → `POST /api/vnew/characters/ch%201/outfits/o%201/build` → 다시 읽기, 취소 → 호출 0, 거절 → 버튼 다시 켬·오류 문구. innerHTML 0 |
+  | ob-b | 서버 → 화면: `sync_auto_outfits`가 만든 후보(두 그림체 queued, `_empty_outfit_variant` 모양) → `GET` 상세(Flask 블루프린트, 실제 `detail_view`) → 카드 켬 → `POST` 202 → 저장값 images → 카드 끔·`POST` 409 → `_set_outfit_variant`로 ready+failed → "다시 만들기" 켬·`POST` 202, 다른 queued 후보 202. 네 경우 모두 "카드 끔 = 서버 409". 그림·3D·원장·LLM 0회 |
+  | ob-c | `outfitCard`에 `"queued"` 비교 0, 고친 줄 한 번씩. 변형: 옛 판단(`images || queued`)으로 되돌리면 queued 카드가 막히고 "만드는 중…"이 생긴다(검사가 결함을 잡는다). `node --check` vnew.js·app.js |
+  | ob-d | `render.py`로 렌더만(파일 쓰지 않음): base `VNEW_HIDE_STORY=true` 한 줄, 템플릿 자리 2개(runtime-config 1·주석 1), 앱 env 없음, prod runtime-config `vnewHideStory: false, vnewEnabled: true }`·주석 `vnewHideStory=false`, dev `true`, prod+`true` 되돌리기 `true`, dev 오버레이에 키 없음, `config.prod.env` BOM·CR 0·끝 두 줄 |
+  | ob-e | app.js `VNEW_ENABLED`·`VNEW_HIDE_STORY` 선언과 `applyVnewToggles`를 node vm으로 실행(경우마다 새 문맥): 렌더된 prod runtime-config → story 보임, 렌더된 dev → 숨김, 플래그 `true`·없음·글자 `"false"` → 숨김, `false` → 보임. 켬 경우 모두 vnew 버튼 보임·video 제목 "영상만들기_기존"·메뉴 보임이 같다. vnew 끔·runtime 없음 → 아무것도 바꾸지 않음. 모르는 선택자 0 |
+
+- **확인**
+  - `node --check frontend/public/vnew.js`·`app.js` 통과. `python -X utf8 tools/check_vpoc.py` 전부 통과: ok 62줄(시작 전 61줄 + ob 1줄), FAIL·WARN 0(약 74초).
+  - 바뀐 기존 기대값 없음. cf-s의 옛 화면 DOM sha256은 구현 전 값(`a8ec4eff…`) 그대로다. 그 옛 캐릭터의 추가 복장은 ready뿐이라 이번 판단 변경이 닿지 않는다. rw-c도 기대값 그대로 통과한다(E1).
+  - 변형 검사 15개(저장소 밖 임시 사본으로 `check_vnew_outfit_button` 실행): 옛 vnew.js·옛 app.js·옛 템플릿·옛 base·옛 prod 오버레이, story 늘 숨김, `=== true`로 읽기, 결과 칸만 옛 판단, 버튼만 옛 판단, images도 안 막음, 주석 자리 빠짐, 앱 env에도 넣음, prod `true`, dev 오버레이에 키, base `false`. 15개 모두 잡았고 지금 코드는 통과한다.
+  - JS 실행 범위(node `NODE_V8_COVERAGE` 블록 커버리지, ob-a·ob-e 스크립트): `applyVnewToggles` 실행 안 된 블록 0. `outfitCard`는 바뀐 두 조건의 참·거짓이 모두 실행되고, 실행 안 된 블록 8개는 모두 이번에 바꾸지 않은 곳이다(이름·오류 문구 기본값, 빈 URL 건너뛰기, 그림 크게 보기, confirm 예외, 삭제 누르기).
+  - Python 쪽 바뀐 앱 코드는 없다(`app/src` 변경 0). 커버리지 대상은 검사 코드뿐이다.
+  - 줄 끝 LF(바뀐 8개 파일 CR 0), `config.prod.env` BOM 그대로, 공백만 바뀐 줄 0, 새 줄 끝 공백 0, 지운 정의 0, 저장소 안 부산물 0. 수정 금지 파일(`app/src/*`·`config.dev.env`·`.gitlab-ci.yml`·`whynot-20261029`)은 바뀌지 않았다.
+- **3단계 리뷰**
+  - 보안: 새 입력·라우트·비밀값 없음. 버튼이 켜져도 서버가 소유자(`users/{owner}/…`)·기본 그림 유무(400)·진행 중(409)을 그대로 본다(ob-b). 설정값은 템플릿이 따옴표 없는 JS 글자로 넣는다. 오버레이 값은 운영자가 쓰는 파일이고 `true`/`false` 밖의 값을 넣으면 runtime-config가 깨지는 위험은 기존 `vnewEnabled`와 같다. 새 줄에 계정 ID·비밀값 없음. 발견·조치: 없음.
+  - 성능: 화면 판단 두 줄과 상수 하나. 메모리·외부 호출·타임아웃 변화 없음. 버튼이 켜져 복장 만들기 요청(Seedream 4장, 장당 $0.04)이 실제로 가능해진다. 원래 의도된 기능이고 확인 창에 비용 문구가 있다. 발견·조치: 없음.
+  - 운영성
+    - 되돌리기: 화면 수정은 이미지 되돌리기로만 되돌린다(설정 없음). 서버가 원래 받던 요청이라 따로 둘 필요가 없다고 봤다. 스토리 버튼은 `config.prod.env`의 `VNEW_HIDE_STORY=false`를 `true`로(또는 줄 삭제) + 운영 job.
+    - 롤아웃: 이 커밋 배포 때 `runtime-track-flags` 값이 바뀌어 개발·운영 프런트 파드가 한 번 다시 뜬다(이미지 태그도 바뀌므로 어차피 다시 뜬다). 앱 파드 env는 그대로다.
+    - 섞인 버전: 새 app.js + 옛 runtime-config(값 없음)는 숨김(지금 동작). 옛 app.js + 새 runtime-config는 새 키를 읽지 않는다. 오류 없음.
+    - 진행 중 작업: 서버 데이터·상태 전이는 그대로다. 만들던 복장(images)은 지금처럼 막혀 있다.
+    - 발견·조치: 복장 진행 표시·폴링·멈춘 복장(남은 이슈 1·2)은 이번 범위 밖이라 고치지 않고 적었다.
+- **남은 이슈**
+  1. 상세 폴링(`schedulePoll`)은 `detail.status === "building"`(기본 variant 기준)과 캐스팅 뽑기만 본다. 추가 복장을 누르면 한 번 다시 읽고 끝나므로, 다 그려진 뒤에도 다시 들어오기 전까지 카드가 꺼진 채다. 두 그림체가 모두 images면 결과 칸이 없어 "만드는 중…"도 보이지 않는다(버튼만 꺼진다). 고치려면 `schedulePoll`과 `outfitCard` 표시를 바꿔야 한다.
+  2. 복장 variant에는 heartbeat·이어 만들기가 없다. 앱이 그리는 도중 재시작되면 그 복장은 images로 남아 서버가 계속 409를 내고 화면도 계속 막힌다(지금도 같다). 서버 범위다.
+  3. 다시 만들기를 누르면 서버가 두 그림체를 모두 images로 바꿔 이전 그림이 카드에서 사라지고 버튼 글자가 "이미지 만들기"로 돌아간다(지금 동작).
+  4. 이제 queued 후보의 [삭제]도 켜진다(같은 판단). 지운 auto 후보는 캐릭터를 다시 만들 때 `sync_auto_outfits`가 다시 넣는다(지금 동작).
+  5. `docs/ANALYSIS.md`의 runtime-config 키 목록(§5.2)과 설정 표에 `VNEW_HIDE_STORY`가 없다. 이번 허용 파일 밖이라 그대로 두었다.
+  6. 이미지 안의 기본 `frontend/public/runtime-config.js`에는 `vnewHideStory`가 없다(값 없음 = 숨김). 배포는 ConfigMap이 덮으므로 영향이 없다.
+- **피드백(같은 날, Claude): 남은 이슈 1·2를 이번에 고친다.** 사용자가 버튼이 켜지면 바로 복장을 만들어 볼 것이라 진행 표시와 멈춘 복장을 함께 고쳤다. 같은 작업 트리에서 이어서 했고, 시작 전 사본(8개 파일)을 `%TEMP%`에 두었다.
+  - 원인
+    - 이슈 1: `schedulePoll`은 기본 variant(`detail.status === "building"`)와 캐스팅 뽑기만 본다. 복장을 누르면 한 번 다시 읽고 끝나, 다 그려도 다시 들어오기 전까지 카드가 꺼진 채였다. 결과 칸은 ready가 있을 때만 그려서 두 그림체가 모두 images면 "만드는 중…"도 없었고, 두 그림체가 모두 failed면 오류 문구도 없었다.
+    - 이슈 2: 복장 variant에는 시작 시각·heartbeat가 없다. 그리는 도중 앱이 재시작되면 images가 남아 서버가 계속 409를 냈다.
+  - 결정
+    - 화면(`vnew.js`): `schedulePoll`이 새 `outfitsBuilding(detail)`(어느 복장이든 images)도 보고 계속 다시 읽는다. 간격은 지금과 같은 `POLL_MS`(5초)다. 기본 building·캐스팅 drawing 판단은 그대로다. `outfitCard`는 결과 칸을 ready **또는 failed**가 있을 때 그리고(실패한 그림체는 오류 문구), 결과 칸이 없고 images면 버튼 줄 바로 위에 `p.vnew-hint.vnew-outfit-building` "만드는 중…" 한 줄을 둔다.
+    - 서버(`characters.py`): `start_build_outfit`이 images로 바꿀 때 두 그림체에 같은 `startedAt`(now_iso 한 번)을 적는다. 새 `_outfit_variant_stalled(char, ov)`가 images이면서 `startedAt`이 `OUTFIT_STALL_S`보다 오래됐는지 본다. `startedAt`이 없거나 읽을 수 없으면 char `updatedAt`을 대신 보고, 그것도 없으면 멈춤이 아니다(409 유지). 멈춘 것만 409 없이 다시 시작하고 경고 1줄 `vnew.outfit.stale_restart char=… outfit=… variants=webtoon,real`을 남긴다(mutator가 멈춘 그림체 목록을 돌려주고, 저장이 끝난 뒤 한 번 찍는다). `_outfits_view`는 멈춘 images를 `failed` + "만들기가 중단됐습니다. 다시 만들어 주세요."로 보인다(저장값은 그대로, 읽기 전용).
+    - 설정: `VNEW_OUTFIT_STALL_S`(기본 1200초). `settings.OUTFIT_STALL_S = max(60, _int(...))`, base·템플릿 앱 env(`VNEW_3D_SIDE_SWAP` 바로 뒤). 0·음수면 모든 그리기가 곧바로 멈춘 것으로 보여 이중 빌드(이중 과금)가 되므로 60초 아래로 내리지 않는다.
+  - 결정(지시와 다르거나 정하지 않은 점)
+    - F1 — `outfitsBuilding`은 `schedulePoll` 바로 뒤(cast-l이 자르는 "schedulePoll ~ backRow" 구역 안)에 두었다. `outfitCard`는 같은 기준(`=== "images"`)을 자기 줄로 계속 쓴다. 한 함수를 두 곳이 부르면 cf-s(추가 복장 구역)나 cast-l(폴링 구역) 중 한쪽 하네스가 그 함수를 갖지 못해, 기존 검사 본문을 고쳐야 한다. 두 기준이 같은지는 ob-f 흐름(실제 응답 → 카드 끔 ↔ 폴링 계속)이 본다.
+    - F2 — 결과 칸 조건을 `anyReady`에서 `anyReady || anyFailed`로 넓혔다. "끝나면 결과 또는 오류와 켜진 버튼"(피드백)과 멈춘 복장 문구를 보이려면 두 그림체가 모두 failed일 때도 칸이 있어야 한다.
+    - F3 — 로그에 `variants=`를 더했다(한쪽만 멈춘 경우를 구분).
+    - F4 — `startedAt`은 응답에 내지 않는다(복장 variant 응답 키 그대로, ob-b).
+  - 검토한 대안
+    - (가) 복장 그리기에 heartbeat(그림마다 갱신)를 두고 그것으로 멈춤을 판단: 더 정확하지만 `run_build_outfit`의 쓰기가 늘고 지시 범위 밖이다(남은 이슈 1).
+    - (나) 상세 조회 때 멈춘 복장을 저장값까지 failed로 바꾸기: 지시가 "저장 데이터는 바꾸지 않는다"였다. 읽기 전용 보기 + 다시 만들기 때만 푸는 쪽이 GET에서 쓰기 경합이 없다.
+    - (다) 폴링을 복장만 다시 그리는 부분 갱신으로: 지금 상세 폴링(전체 다시 그리기)과 다른 길이 생긴다. 지시가 "지금 상세 폴링과 같다"였다(남은 이슈 2).
+  - 바꾼 것(이번)
+    - `frontend/public/vnew.js`: `schedulePoll`(판단 한 줄 + 주석), 새 `outfitsBuilding`, `outfitCard`(`anyFailed`, 결과 칸 조건, "만드는 중…" 한 줄, 주석).
+    - `app/src/vnew/characters.py`: 새 `_OUTFIT_STALLED_ERROR`·`_outfit_variant_stalled`, `start_build_outfit`(docstring·mutator·로그), `_outfits_view`(status·error 두 줄). 다른 함수는 바꾸지 않았다.
+    - `app/src/vnew/settings.py`: `OUTFIT_STALL_S`(주석 3줄).
+    - `k8s/workloads.yaml.tmpl`·`deploy/config.env.example`: `VNEW_OUTFIT_STALL_S` 한 쌍·한 줄(주석 포함).
+    - `tools/check_vpoc.py`: ob 그룹에 ob-f·ob-g·ob-h와 ob-a 경우 4개(`imagesQueued`·`imagesFailed`·`stalled`·`failedNoText`)·카드 자식 순서, `_OB_STALLED`·`_OB_STALL_S`·`_OB_POLL_NODE_CASES`·`_OB_POLL_SLICE`·`_ob_poll_script`, `_ob_server_details`(ob-g 경우·흐름), `_CF_OFF_SHA["buildKeys"]`(아래).
+    - `docs/ANALYSIS.md`: 머리 갱신 줄, §5.2 runtime-config 키 목록(`vnewHideStory`), §7.1 표(`VNEW_HIDE_STORY`·`VNEW_OUTFIT_STALL_S`)와 설명 한 단락(102 남은 이슈 5도 함께 끝냈다).
+  - **바꾼 기존 검사 기대값**: `_CF_OFF_SHA["buildKeys"]`(cf-b) 하나. 가짜 빌드 뒤 저장 키 집합 지문인데, 지시대로 `start_build_outfit`이 복장 variant에 `startedAt`을 적어 키가 하나 늘었다. 저장소 밖 스크립트로 같은 지문을 `startedAt`만 빼고 다시 재면 구현 전 값 `d43c5c32…`와 같았고, 나머지 지문 31개도 그대로였다. 새 값 `619815f5…`로 바꾸고 옛 값을 주석에 남겼다. cf-s 옛 화면 DOM sha256(`a8ec4eff…`)·cast-l·rw-c·tr-b 등 다른 기존 검사는 기대값 그대로 통과한다. 102에서 새로 만든 ob-a의 `images`·`failed` 기대값은 이번 화면 변경(한 줄·오류 칸)에 맞춰 고쳤다(커밋 전 같은 작업).
+  - 검사(이번에 더한 것)
+
+    | 검사 | 덮는 것 |
+    |---|---|
+    | ob-a | 102의 10경우에 더해 images·images+queued → 결과 칸 없이 버튼 줄 바로 위 "만드는 중…"(카드 자식 순서), images+failed → 오류 칸 + "만드는 중…"·버튼 끔, 멈춤(두 그림체 failed + 문구) → 오류 칸·버튼 켬, 오류 문구 없는 failed → "만들기에 실패했습니다." |
+    | ob-f | `schedulePoll` 구역을 node로 실행: 복장 images(한 벌·여러 벌 중 하나) → 5000ms 예약, ready+failed·queued·failed·이상한 모양(null·글자·`variants: null`·배열 아님·모르는 그림체) → 예약 없음, 기본 building·캐스팅 drawing 그대로. 실제 `detail_view` 응답 흐름 4개(진행 → 완료, 진행 → 멈춤, 진행 → 한쪽 멈춤, 옛 데이터 진행 → 멈춤)로 타이머를 쏴 그리는 동안 5초마다 다시 읽고 끝나면 멈춘다. 마지막 카드는 결과·오류와 켜진 버튼. 예약 뒤 화면을 떠나면 다시 읽지 않는다 |
+    | ob-g | 서버 11경우(`OUTFIT_STALL_S` 1200 고정, 메모리 저장소·Flask 라우트): 최근 409, 경계 안(1170초) 409, 지남(1260초) 202 + 로그, startedAt 없음 + updatedAt 오래됨 202 + 로그, startedAt 없음 + 최근 409, 못 읽는 startedAt + 최근 409·+ 오래됨 202, startedAt 최근이면 updatedAt이 오래돼도 409, 미래 시각 409, 시각 없음 409, 한쪽만 멈춤 202(로그 `variants=real`). 상세는 멈춤만 failed + 문구, GET은 저장을 바꾸지 않음(11경우 모두), 409는 저장 불변, 202는 두 그림체 images + 새 startedAt |
+    | ob-b(보강) | POST 뒤 두 그림체 같은 startedAt(지금), 다시 만들기·다른 복장 POST도 새로 적음, 상세 응답 복장 키 그대로(startedAt 없음), 서버 응답 카드의 "만드는 중…" |
+    | ob-h | `VNEW_OUTFIT_STALL_S` 읽기(하위 프로세스, 없음 1200·900·0 → 60·-5 → 60·59 → 60·61·글자 → 1200·공백 1800), base 한 줄, 템플릿 앱 env 한 쌍(`VNEW_3D_SIDE_SWAP` 바로 뒤), prod·dev 렌더 `"1200"`(오버레이 없음) |
+
+  - 확인
+    - `node --check` vnew.js·app.js 통과. `python -X utf8 tools/check_vpoc.py` 전부 통과: ok 62줄(ob는 1줄 그대로), FAIL·WARN 0(약 77초).
+    - 바뀐 서버 줄 커버리지(`coverage run --data-file=%TEMP%\… --source=app/src tools/check_vpoc.py`, coverage 7.17, 이번 시작 전 사본과 difflib): 실행문 22줄 중 21줄(95.5%). `characters.py` 20/21, `settings.py` 1/1. 안 덮은 1줄은 `start_build_outfit` mutator의 `return []`(읽은 뒤·쓰기 전에 복장이 지워진 경합 경로, 이전에도 `return`으로 안 덮였다).
+    - JS 실행 범위(node `NODE_V8_COVERAGE`, ob-a·ob-f 스크립트): `schedulePoll`·`outfitsBuilding` 실행 안 된 블록 0. `outfitCard`는 실행 안 된 블록 5개가 모두 이번에 바꾸지 않은 곳이다(이름·제목 기본값, 빈 URL 건너뛰기, 그림 크게 보기·삭제 누르기 함수).
+    - 변형 검사 19개(저장소 밖 사본 트리, 하위 프로세스에서 `check_vnew_outfit_button` 실행): 폴링이 복장을 안 봄·queued도 만드는 중·늘 false, "만드는 중…" 한 줄 없음, 결과 칸 ready만, startedAt 안 적음, updatedAt만 봄, 시각 없음 = 멈춤, startedAt 없으면 늘 멈춤, 못 읽는 startedAt 되짚기 없음, 상세가 멈춤을 안 보임, 로그 없음, 409 없음, 멈춤이어도 409, STALL 무시, 설정 하한 없음, 기본 600, 템플릿 env 없음, base 600. 19개 모두 잡았고 지금 코드는 통과한다.
+    - 실제 외부 호출 0회: ob-g·ob-b는 `_CfFakes`(LLM·Seedream·fal·원장 가짜) + `_guard_real_llm` 안에서 돌고, 스레드는 시작하지 않는다(`_ObIdleThread`). LLM·Seedream·fal·원장 0회를 본다.
+    - 줄 끝 LF(이번에 바뀐 8개 파일 CR 0), 공백만 바뀐 줄 0, 새 줄 끝 공백 0, 지운 정의 0, 저장소 안 부산물(`.coverage` 등) 0. 수정 금지 파일은 바뀌지 않았다.
+  - 3단계 리뷰
+    - 보안: `startedAt`은 서버가 적고 응답에 내지 않는다. 클라이언트가 멈춤을 만들 수 없다(STALL 안에서는 409). 멈춤 문구는 상수다. 로그는 캐릭터·복장 id와 그림체 이름뿐이다. 라우트·권한(소유자 접두사, `require_auth`)은 그대로다. 설정 하한 60초로 0·음수 설정이 이중 빌드(이중 과금)를 부르지 않게 했다. 발견·조치: 하한(위).
+    - 성능
+      - 서버(512Mi): 판단은 images 그림체마다 시각 두 개 읽기다. 메모리·외부 호출 변화 없음. 폴링으로 상세 GET이 그리는 동안 5초마다 1번 늘어난다(지시가 말한 정상 상한 10분이면 약 120번, 멈춤이면 20분 동안 약 240번 뒤 멈춘다). GET 한 번은 지금처럼 char.json 읽기 + presign(로컬 서명)이다. GET은 저장하지 않는다(ob-g).
+      - 화면: 폴링마다 상세 전체를 다시 그린다(기본 빌드·캐스팅 폴링과 같다). 3D 보기는 캐시한 blob URL로 다시 만들어 GLB를 다시 받지 않는다.
+      - 발견·조치: 다시 그리기가 3D 카메라 각도와 열어 둔 [추가 복장 넣기] 입력을 지우는 문제를 찾았다. 기존 폴링과 같은 동작이고 지시가 "지금 상세 폴링과 같다"여서 고치지 않고 남은 이슈 2에 적었다.
+    - 운영성
+      - 로그: 다시 시작할 때 경고 `vnew.outfit.stale_restart`. 409는 지금처럼 `vpoc.error … AlreadyBuilding`.
+      - 되돌리기: `config.<target>.env`에 `VNEW_OUTFIT_STALL_S=<초>` 한 줄. 멈춤 판단을 사실상 끄려면 큰 값(예: 86400). 화면·서버 코드는 이미지 되돌리기로 되돌린다.
+      - 진행 중 작업·배포: 배포 전에 시작한 복장 그리기는 startedAt이 없다. 파드 교체로 스레드가 죽으면 마지막 char.json 쓰기(updatedAt)부터 20분 뒤 상세에 "중단"으로 보이고 다시 만들 수 있다. 지금까지는 영원히 막혔다.
+      - 섞인 버전(롤링 중): 옛 파드는 startedAt을 무시하고 images면 409(지금 동작), 새 파드는 위 규칙. 옛 화면은 새 응답을 지금처럼 그린다(폴링만 없다). 오류 없음.
+      - 재시작 뒤 이어하기: 복장은 자동으로 이어 그리지 않는다. 사용자가 [이미지 만들기]를 다시 누른다(지시 범위).
+      - 발견·조치: 로그를 mutator 안에서 찍으면 조건부 쓰기 재시도·뒤 그림체 409 때 거짓 로그가 생겨, 저장이 끝난 뒤 한 번 찍게 했다.
+  - 남은 이슈(이번)
+    1. 멈춤 판단이 시작 시각 기준이라, 실제로 20분 넘게 걸리는 정상 빌드(Seedream 응답 지연·재시도: 한 장 `urlopen` 300초 × 최대 몇 번)에 다시 만들기를 누르면 두 번째 스레드가 돈다. 비용이 두 번 들고, 늦게 끝난 첫 스레드가 상태를 덮을 수 있다. 막으려면 그림마다 heartbeat를 갱신하거나 실행 토큰(claim)을 두어야 한다(서버 `run_build_outfit` 변경).
+    2. 폴링이 상세 전체를 다시 그려 3D 카메라 각도가 5초마다 처음으로 돌아가고, 열어 둔 [추가 복장 넣기] 입력이 지워진다(기본 빌드·캐스팅 폴링과 같은 기존 동작). 고치려면 입력을 `state`에 보존하거나, 상태 서명이 같으면 다시 그리지 않게 해야 한다(⑤ `genViewSig`와 같은 방식).
+    3. 102 남은 이슈 3·4(다시 만들기 때 이전 그림이 사라짐, 지운 auto 후보가 다시 생김)는 그대로다.
+    4. 멈춘 복장은 자동으로 이어 그리지 않는다. 사용자가 다시 눌러야 한다.
+    5. 이미지 안의 기본 `frontend/public/runtime-config.js`에는 `vnewHideStory`가 없다(102 남은 이슈 6, 영향 없음).

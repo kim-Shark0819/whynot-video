@@ -186,6 +186,10 @@ MAX_OUTFIT_LABEL_LEN = _int("VNEW_MAX_OUTFIT_LABEL_LEN", 60)
 MAX_OUTFIT_PROMPT_LEN = _int("VNEW_MAX_OUTFIT_PROMPT_LEN", 300)
 # 복장 일관성 검사에서 시트를 다시 그리는 최대 횟수(1회). 넘으면 warning.
 OUTFIT_SHEET_RETRY = _int("VNEW_OUTFIT_SHEET_RETRY", 1)
+# 추가 복장 그리기(images)가 시작(startedAt)부터 이 시간을 넘으면 멈춘 것으로 본다(앱 재시작 등, 지시서 102 피드백).
+# 정상 1벌은 Seedream 4장이라 10분 안쪽이다. 멈춘 복장은 상세에 failed 로 보이고 다시 만들기가 409 없이 시작한다.
+# 0·음수처럼 짧은 값이면 진행 중 빌드를 두 번 시작할 수 있어 60초 아래로는 내리지 않는다.
+OUTFIT_STALL_S = max(60, _int("VNEW_OUTFIT_STALL_S", 1200))  # 20분
 
 # --- ⑤ 영상 생성: 프리비즈 → 실사·웹툰(설계자 2026-10-21, 지시서 038) ---
 # 승인된 프리비즈(3D 마네킹) 영상에 실사·웹툰 그림체를 각각 입히는 fal video-to-video/edit 모델.

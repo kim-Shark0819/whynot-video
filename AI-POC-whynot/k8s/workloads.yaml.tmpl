@@ -9,7 +9,7 @@ metadata:
     app.kubernetes.io/part-of: ${PROJECT_NAME}
 data:
   runtime-config.js: |
-    window.__WHYNOT_RUNTIME__ = Object.freeze({ videoGen: ${VIDEO_GEN_ENABLED}, storyDev: ${STORY_DEV_ENABLED}, persistLogin: ${PERSIST_LOGIN}, noticeSpecup: ${NOTICE_SPECUP_ENABLED}, vnewEnabled: ${VNEW_ENABLED} });
+    window.__WHYNOT_RUNTIME__ = Object.freeze({ videoGen: ${VIDEO_GEN_ENABLED}, storyDev: ${STORY_DEV_ENABLED}, persistLogin: ${PERSIST_LOGIN}, noticeSpecup: ${NOTICE_SPECUP_ENABLED}, vnewHideStory: ${VNEW_HIDE_STORY}, vnewEnabled: ${VNEW_ENABLED} });
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -33,7 +33,7 @@ spec:
   template:
     metadata:
       annotations:
-        whynot.meta-clouds.com/runtime-track-flags: "video=${VIDEO_GEN_ENABLED};story=${STORY_DEV_ENABLED};persistLogin=${PERSIST_LOGIN};noticeSpecup=${NOTICE_SPECUP_ENABLED};vnew=${VNEW_ENABLED}"
+        whynot.meta-clouds.com/runtime-track-flags: "video=${VIDEO_GEN_ENABLED};story=${STORY_DEV_ENABLED};persistLogin=${PERSIST_LOGIN};noticeSpecup=${NOTICE_SPECUP_ENABLED};vnew=${VNEW_ENABLED};vnewHideStory=${VNEW_HIDE_STORY}"
       labels:
         app.kubernetes.io/name: ${FRONTEND_DEPLOYMENT_NAME}
         app.kubernetes.io/component: frontend
@@ -283,6 +283,9 @@ spec:
             # Tripo 다시점 왼쪽·오른쪽 자리 바꾸기. 개발계 확인에서 GLB 좌우가 반대면 true.
             - name: VNEW_3D_SIDE_SWAP
               value: "${VNEW_3D_SIDE_SWAP}"
+            # 추가 복장 그리기가 시작부터 이 초를 넘으면 멈춘 것으로 본다(지시서 102 피드백). 기본 1200. 상세에 failed, 다시 만들기 409 없음.
+            - name: VNEW_OUTFIT_STALL_S
+              value: "${VNEW_OUTFIT_STALL_S}"
             # --- vpoc1 영상 기능 (PRD 6.8) ---
             # VIDEO_GEN_ENABLED 가 꺼진 배포에서는 이 값과 무관하게 라우트가 없다.
             - name: VPOC_ENABLED

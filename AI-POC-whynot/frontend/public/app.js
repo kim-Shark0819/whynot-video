@@ -16,6 +16,9 @@ const STORY_DEV_ENABLED = window.__WHYNOT_RUNTIME__?.storyDev !== false;
 // 영상만들기_신규(vnew, 설계자 2026-10-20). 개발계에서만 켠다(운영은 꺼져 지금 화면 그대로).
 // 켜지면 만들기 창에 "영상만들기_기존/신규" 두 버튼, 메뉴 "캐릭터 만들기", 빈 화면이 보인다.
 const VNEW_ENABLED = window.__WHYNOT_RUNTIME__?.vnewEnabled === true;
+// vnew 가 켜졌을 때 만들기 창의 story 버튼을 숨길지(VNEW_HIDE_STORY, 2026-10-30). 값이 없으면 true(지금처럼 숨김).
+// 운영은 false 로 두어 새 스토리 프로젝트를 계속 만들 수 있게 한다.
+const VNEW_HIDE_STORY = window.__WHYNOT_RUNTIME__?.vnewHideStory !== false;
 // 프리비즈(3D, three.js 약 690KB)는 vnew 가 켜진 배포에서만 내려받는다(073 R9, 리뷰 P-1).
 // vnew.js ④ 화면이 이 Promise 를 기다린 뒤 window.vnewPreviz.create 를 부른다. 실패 원인은
 // window.vnewPrevizError 에 두고 false 로 끝낸다(화면이 E7 로 보인다). 버전 쿼리는 Dockerfile sed 가 치환한다.
@@ -7101,14 +7104,15 @@ window.addEventListener("DOMContentLoaded", validateSession, { once: true });
 
 /* 영상만들기_신규(vnew, 설계자 2026-10-20) 화면 요소 토글. VNEW_ENABLED 가 꺼져 있으면
    아무것도 하지 않는다 — vnew 버튼·메뉴는 index.html 에서 is-hidden 으로 시작해 운영은 지금 그대로다.
-   켜져 있으면: 만들기 창·트랙 고르기 창에서 story 버튼을 숨기고 video_new 버튼을 보이며,
+   켜져 있으면: 만들기 창·트랙 고르기 창에서 story 버튼을 숨기고(VNEW_HIDE_STORY 가 false 면 그대로 둔다) video_new 버튼을 보이며,
    기존 video 버튼 제목을 "영상만들기_기존"으로 바꾸고, 메뉴 "캐릭터 만들기"를 보인다. */
 function applyVnewToggles() {
   if (!VNEW_ENABLED) return;
   // vnew 전용 버튼(만들기 창·트랙 고르기 창)을 보인다.
   $$('[data-vnew-only="1"]').forEach((button) => button.classList.remove("is-hidden"));
   // story 버튼은 숨긴다(데이터에는 영향 없음 — 기존 story 프로젝트는 목록·열기 그대로).
-  $$('.project-track-options [data-track="story"]').forEach((button) => button.classList.add("is-hidden"));
+  // 운영(VNEW_HIDE_STORY=false, 2026-10-30)은 새 스토리 프로젝트를 만들 수 있게 그대로 둔다.
+  if (VNEW_HIDE_STORY) $$('.project-track-options [data-track="story"]').forEach((button) => button.classList.add("is-hidden"));
   // 기존 video 버튼 제목을 "영상만들기_기존"으로, 부제를 "지금 쓰는 영상 기능"으로 바꾼다.
   $$('.project-track-options [data-track="video"]').forEach((button) => {
     const strong = button.querySelector("strong");

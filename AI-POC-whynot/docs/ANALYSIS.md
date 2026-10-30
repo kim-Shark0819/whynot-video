@@ -5,6 +5,7 @@
 > 계정 ID·비밀값은 쓰지 않는다. 계정은 `<고객계정>`·`<허브계정>`으로 가린다.
 > 줄 수는 2026-10-26 작업 트리 기준 대략값이다.
 > 갱신 2026-10-30: char-fidelity T1·T2·T2b·T3(§3.6.2 구현 결과·Tripo 전환, §7.1, §9.1, §10.1), 운영 `VNEW_ENABLED=true`·`VPOC_ARK_SEEDANCE_ENABLED=true`(사용자 결정, 배포 전 — §1, §5.4, §6.3, §7.1, §8.5, R-21).
+> 갱신 2026-10-30(지시서 102·피드백): `VNEW_HIDE_STORY`(화면 전용, 운영 false — §5.2, §7.1), `VNEW_OUTFIT_STALL_S`(추가 복장 멈춤 판단 — §7.1).
 
 ---
 
@@ -546,7 +547,7 @@ B의 남은 위험(design §7):
 
 ### 5.2 런타임 플래그
 
-`k8s/workloads.yaml.tmpl:1-13`의 ConfigMap이 `/usr/share/nginx/html/runtime-config.js`를 덮어써 `window.__WHYNOT_RUNTIME__ = { videoGen, storyDev, persistLogin, noticeSpecup, vnewEnabled }`를 준다. `app.js:14-25`에서 읽는다. 서버 쪽 같은 이름의 env와 **같은 config 값으로 렌더**되므로 화면과 API가 함께 켜지고 꺼진다.
+`k8s/workloads.yaml.tmpl:1-13`의 ConfigMap이 `/usr/share/nginx/html/runtime-config.js`를 덮어써 `window.__WHYNOT_RUNTIME__ = { videoGen, storyDev, persistLogin, noticeSpecup, vnewHideStory, vnewEnabled }`를 준다. `app.js:14-25`에서 읽는다. 서버 쪽 같은 이름의 env와 **같은 config 값으로 렌더**되므로 화면과 API가 함께 켜지고 꺼진다. `vnewHideStory`(`VNEW_HIDE_STORY`, 2026-10-30 지시서 102)만 화면 전용이라 앱 env가 없다. vnew가 켜졌을 때 만들기·트랙 고르기 창의 "스토리" 버튼을 숨길지 정한다(값이 없거나 `false`가 아니면 숨김). 프런트 파드 주석 `runtime-track-flags`에도 같은 값이 들어가 값이 바뀌면 프런트 파드가 다시 뜬다.
 
 ### 5.3 백엔드 연결
 
@@ -677,6 +678,7 @@ vpoc·vnew의 Bedrock 도구 호출은 전부 `vpoc.llm._converse`(`vpoc/llm.py:
 | `VIDEO_GEN_ENABLED` | `server.py:337`, runtime-config | false | true | — (true) | true |
 | `STORY_DEV_ENABLED` | `server.py:338`, runtime-config | true | true | — | — |
 | `VNEW_ENABLED` | `server.py:341`, runtime-config | false | false | **true** | **true**(2026-10-30 사용자 결정 "켠다", 배포 전) |
+| `VNEW_HIDE_STORY` | 프런트만(runtime-config `vnewHideStory`, `app.js` `applyVnewToggles`) | true(값 없음 = 숨김) | true | — | **false**(2026-10-30 지시서 102: 운영은 스토리 만들기 유지, 배포 전) |
 | `PERSIST_LOGIN` | 프런트만(`app.js:22`) | false | false | — | true |
 | `NOTICE_SPECUP_ENABLED` | 프런트만(`app.js:25`) | false | false | — | true |
 | `VPOC_ENABLED` | `vpoc/settings.py:32` | true | true | — | true |
@@ -703,6 +705,9 @@ vpoc·vnew의 Bedrock 도구 호출은 전부 `vpoc.llm._converse`(`vpoc/llm.py:
 | `VNEW_3D_SIDE_VIEWS` | `vnew/settings.py`(`_bool`), `characters._build_variant`·`_draw_side_views`·`run_retry3d`·`run_resume_variant`·`detail_view.features` | true | true | — | —(base 값. 운영 VNEW 켬 배포부터 적용) |
 | `VNEW_3D_PROVIDER` | `vnew/settings.py`(`_checked_choice`), `characters._3d_provider`(새 3D 제출만) | `tripo` | `tripo` | — | —(되돌릴 때만 `hunyuan`) |
 | `VNEW_3D_TRIPO_*`(9개)·`VNEW_3D_SIDE_SWAP` | `vnew/settings.py`(`_checked_*`), `characters._tripo_request`·`_3d_squares`·`_charge_tripo_3d`·`_copy_3d_result` | §3.6.2 「3D 공급자 Tripo H3.1 전환」 목록 | 코드 기본과 같음 | — | — |
+| `VNEW_OUTFIT_STALL_S` | `vnew/settings.py`(`OUTFIT_STALL_S`, `max(60, _int)`), `characters._outfit_variant_stalled`(`start_build_outfit`·`_outfits_view`) | 1200(60 아래는 60) | 1200 | — | — |
+
+`VNEW_OUTFIT_STALL_S`(2026-10-30 지시서 102 피드백)는 앱 env(`k8s/workloads.yaml.tmpl`의 `VNEW_3D_SIDE_SWAP` 바로 뒤)와 base(같은 자리)에 배선돼 있다. 추가 복장 그리기(`images`)가 `startedAt`(`start_build_outfit`이 적는다)부터 이 초를 넘으면 멈춘 것으로 본다. `startedAt`이 없거나 읽을 수 없는 옛 데이터는 캐릭터 `updatedAt`이 이 초보다 오래됐을 때만 멈춤이다. 멈춘 복장은 상세(`_outfits_view`)에 `failed`와 "만들기가 중단됐습니다. 다시 만들어 주세요."로 보이고(저장값은 그대로), 다시 만들기가 409 없이 시작하며 경고 `vnew.outfit.stale_restart`를 1줄 남긴다. 화면 상세 폴링(5초)은 어느 복장이든 `images`이면 계속된다(`vnew.js` `schedulePoll`·`outfitsBuilding`). 검사는 ob-f·ob-g·ob-h다.
 
 `VNEW_PREVIZ_COLLISION`(084 작업 1, 2026-10-28)은 앱 env(`k8s/workloads.yaml.tmpl`의 `VNEW_ENABLED` 바로 뒤)와 base(`deploy/config.env.example`의 `VNEW_ENABLED` 뒤)에 배선돼 있다. false면 보정·앉을 자리(`sit`)가 없고 엉덩이 0.5(지금 동작)다. 설계는 시작 때 읽은 값으로 끝낸다. 되돌림 배선 검사 `PARITY_ENV_KEYS`(rw-a~c)에 들어 있다.
 

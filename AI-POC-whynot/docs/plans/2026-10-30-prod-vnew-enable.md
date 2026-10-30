@@ -17,10 +17,16 @@ VNEW_ENABLED=true                 # false → true
 VPOC_ARK_SEEDANCE_ENABLED=true    # 새 줄(바로 위에 날짜·결정 주석 1줄)
 ```
 
+2026-10-30 지시서 102로 한 줄을 더했다. 운영은 vnew를 켜도 "스토리" 만들기 버튼을 그대로 둔다. 원래 vnew를 켜면 이 버튼이 숨어 운영 사용자가 새 스토리 프로젝트를 만들 길이 없어진다. 사용자에게 물었지만 답이 없어, Claude가 기존 기능을 잃지 않는 쪽으로 정했다. 개발은 base 기본값(`true`, 숨김) 그대로다.
+
+```
+VNEW_HIDE_STORY=false             # 새 줄(바로 위에 날짜·결정 주석 1줄). 화면 runtime-config 만 읽는다(앱 env 없음)
+```
+
 | 구분 | 지금 운영(`ci-ae21dc13`) | 배포 뒤 |
 |---|---|---|
 | 이미지 | `ci-ae21dc13` | 이번 main 커밋의 `ci-<sha>` |
-| 만들기·트랙 고르기 창 | "영상", "스토리" | "영상만들기_기존", "영상만들기_신규". **"스토리" 버튼은 숨는다**(`app.js` `applyVnewToggles`). 기존 스토리 프로젝트는 목록·열기 그대로다 |
+| 만들기·트랙 고르기 창 | "영상", "스토리" | "스토리", "영상만들기_기존", "영상만들기_신규". **운영은 "스토리" 버튼을 그대로 보인다**(`VNEW_HIDE_STORY=false`, `app.js` `applyVnewToggles`). 개발은 지금처럼 숨긴다 |
 | 메뉴 | — | "캐릭터 만들기"가 생긴다 |
 | API | `/api/vnew` 없음 | `/api/vnew` 블루프린트 등록(`server.py`의 `if VNEW_ENABLED:`) |
 | 첫 화면 다운로드 | three.js 없음 | 앱을 처음 읽을 때 `vnew-previz.js`(약 48KB)·`three.module.min.js`(약 690KB)를 비동기로 받는다. 첫 화면 그리기는 기다리지 않는다. 배포 태그가 같으면 브라우저 캐시(30일 immutable)를 쓴다 |
@@ -40,6 +46,7 @@ Claude 읽기 전용 확인(2026-10-30):
 Kiro 로컬 확인(2026-10-30, 유료·네트워크 없음):
 - [x] `python -X utf8 tools/check_vpoc.py` 전부 통과(ok 61줄).
 - [x] 렌더 값(`config.env.example` + `config.prod.env`, `render.py`를 메모리에서만): `VNEW_ENABLED="true"`, runtime-config `vnewEnabled: true`, `VPOC_ARK_SEEDANCE_ENABLED="true"`, `VPOC_MODEL_PICKER_ENABLED="true"`, `VPOC_RAW_ERRORS="false"`, `VPOC_POLL_GIVEUP_S="1800"`, `VNEW_CHAR_FIDELITY`·`VNEW_3D_SIDE_VIEWS`·`VNEW_FX`·`VNEW_CASTING`·`VNEW_TAKE_REAL`=`"true"`, `VNEW_3D_PROVIDER="tripo"`, `STORY_DEV_ENABLED="true"`. 개발 렌더 `VPOC_ARK_SEEDANCE_ENABLED="false"`. 검사 rw-c가 같은 값을 본다.
+- [x] (지시서 102) 렌더 runtime-config `vnewHideStory: false`(운영)·`true`(개발), `runtime-track-flags` 끝 `vnewHideStory=false`/`true`. 검사 ob-d가 렌더 값을, ob-e가 렌더된 runtime-config로 `applyVnewToggles`를 돌려 운영 "스토리" 버튼이 보이는지 본다.
 
 실행 직전(Claude):
 - [ ] MR 파이프라인 `check:whynot` 성공.
@@ -59,12 +66,13 @@ Kiro 로컬 확인(2026-10-30, 유료·네트워크 없음):
 ## 4. 무료 확인(유료 호출 없음)
 
 - [ ] 첫 화면 메뉴가 "영상만들기_기존"·"영상만들기_신규"다.
+- [ ] 새 프로젝트 만들기 창에 "스토리 개발로 진행" 버튼이 보인다(눌러서 고를 수 있다. 프로젝트는 만들지 않는다).
 - [ ] 캐릭터 목록이 열린다(메뉴 "캐릭터 만들기" → `GET /api/vnew/characters` 200).
 - [ ] ② 목록에 BytePlus Seedance와 "Seedance 2.5 (fal)"이 함께 있다.
 - [ ] 로그 `vpoc.error`가 늘지 않는다(10분).
 - 함께 볼 것:
   - 브라우저 네트워크 탭에서 `vnew-previz.js`·`three.module.min.js` 요청이 `app.js` 뒤에 비동기로 나가고, 첫 화면이 그 전에 그려진다.
-  - 기존 스토리 프로젝트가 목록에서 열린다("스토리" 만들기 버튼만 숨는다).
+  - 기존 스토리 프로젝트가 목록에서 열린다.
   - 캐릭터 빌드·⑤ 영상 생성 같은 유료 확인은 하지 않는다. 운영 유료 확인은 따로 승인받는다(7절).
 
 ## 5. 되돌리기
@@ -73,12 +81,13 @@ Kiro 로컬 확인(2026-10-30, 유료·네트워크 없음):
 |---|---|---|---|
 | vnew 전체 | `config.prod.env`의 `VNEW_ENABLED=false` 한 줄 + 운영 job | 화면(메뉴·버튼·three.js)과 `/api/vnew`가 함께 꺼진다. 저장된 vnew 데이터(`users/{owner}/characters/…`, `…/vnew/…`)는 남는다(무해) | 끄기 전에 진행 중인 캐릭터 빌드·⑤ 생성이 없는지 본다. 끄면 그 작업의 조회·이어 만들기가 멈추고, 이미 낸 fal·ARK 요청의 비용은 든다 |
 | 캐릭터 3D 공급자 | `VNEW_3D_PROVIDER=hunyuan` 한 줄 + 운영 job | 다음 새 3D 요청부터 Hunyuan3D v3(T2 본문·$0.675). 진행 중 요청은 arn의 공급자로 끝난다 | — |
+| "스토리" 버튼 숨기기 | `config.prod.env`의 `VNEW_HIDE_STORY=false`를 `true`로(또는 줄 삭제, base `true`) + 운영 job | 만들기·트랙 고르기 창의 "스토리" 버튼이 숨는다(개발과 같다). 기존 스토리 프로젝트는 목록·열기 그대로다 | 화면 runtime-config만 바뀐다(앱 env 없음). `runtime-track-flags` 주석 값이 바뀌므로 프런트 파드가 새 설정으로 다시 뜬다 |
 | BytePlus Seedance 빼기 | `VPOC_ARK_SEEDANCE_ENABLED=true` 줄 삭제 + 운영 job | 2026-10-26 계획 단계 3과 같다 | **승인되지 않음.** 다시 지시가 있을 때만 |
 | 전체 | `awstech/ai-deploy` `whynot/prod` 이번 커밋 revert(이미지 `prod-ae21dc13`) | 10/20 운영 상태. ArgoCD 자동 동기화 | 레지스트리 항목은 남는다(무해) |
 
 ## 6. 영향과 위험
 
-- 메뉴: 운영 사용자 전체의 메뉴 이름이 바뀐다("영상" → "영상만들기_기존", "영상만들기_신규"·"캐릭터 만들기" 추가, "스토리" 만들기 버튼 숨김). 사용자 안내가 필요하면 배포 전에 한다.
+- 메뉴: 운영 사용자 전체의 메뉴 이름이 바뀐다("영상" → "영상만들기_기존", "영상만들기_신규"·"캐릭터 만들기" 추가). "스토리" 만들기 버튼은 운영에서 그대로 보인다(`VNEW_HIDE_STORY=false`, 2026-10-30 지시서 102). 사용자 안내가 필요하면 배포 전에 한다.
 - 비용: 새 유료 기능이 로그인한 운영 사용자 누구에게나 열린다. 캐릭터 1명 약 $1.2(Seedream 그림 약 10장 × $0.04 + 검사 LLM 소액 + Tripo 3D $0.60 × 2 포함, 다시 그리면 더). ⑤ 영상은 고른 모델 단가대로다(①·② 화면에 보인다). 비용 상한은 없고 원장에 기록만 남는다(2026-09-23 사용자 결정).
 - 권한: 새 권한이 필요 없다(S3 `users/*`, Bedrock 중개 역할, fal·ARK 키 — 2절 사전 확인).
 - 메모리: 운영 앱 한도 8Gi. 캐릭터 빌드는 빌드 하나에 수십 MB 안쪽, Tripo GLB 옮기기는 약 24MB 순간 최고점이다(개발 512Mi 기준 리뷰, WORKLOG T2·T2b).
