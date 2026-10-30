@@ -59,6 +59,7 @@
     planStep: 1, // 지금 보고 있는 단계(1 입력 · 2 대본 · 3 콘티 · 4 영상 · 5 사운드)
     planPollTimer: 0, // ②③ 진행 중 다시 불러오기 타이머
     progressTicker: 0, // 진행 표시 경과 시간 1초 갱신 타이머
+    genViewSig: "", // ⑤ 마지막으로 그린 gen 상태 서명(genViewSignature). ⑤가 아니거나 시작 화면이면 ""
     orderSaveTimer: 0 // ① 순서 저장 디바운스
   };
 
@@ -1915,10 +1916,12 @@
 
   /* ---------------------------------------------------------------- 불러오기 · 저장 */
 
-  function loadPlan(first) {
+  /* fromPoll(선택): schedulePlanPoll 의 폴링이면 true. ⑤에서 화면에 보이는 상태가 그대로면 다시 그리지 않는다(genPollUnchanged). */
+  function loadPlan(first, fromPoll) {
     var host = planHost();
     if (!host) return;
     if (first) {
+      state.genViewSig = "";
       clear(host);
       host.appendChild(el("p", "vnew-boot", "불러오는 중…"));
     }
@@ -1928,10 +1931,17 @@
         if (!state.mounted || state.projectId !== pid) return;
         state.plan = plan;
         decidePlanStep();
+        // ⑤ 폴링: 상태 서명이 지금 그린 ⑤와 같으면 다시 그리지 않고 폴링만 다시 건다(재생 중인 영상이 끊기지 않게).
+        // state.plan 은 위에서 새 값으로 바꿨다(다음 버튼 동작이 새 데이터를 쓴다).
+        if (fromPoll === true && genPollUnchanged()) {
+          schedulePlanPoll();
+          return;
+        }
         renderPlan();
       })
       .catch(function (err) {
         if (!state.mounted || state.projectId !== pid) return;
+        state.genViewSig = "";
         clear(host);
         host.appendChild(el("h1", "vnew-h1", "영상만들기_신규"));
         host.appendChild(planError("불러오지 못했습니다: " + errMessage(err)));
@@ -2008,7 +2018,7 @@
     }
     state.planPollTimer = window.setTimeout(function () {
       if (!state.mounted) return;
-      loadPlan(false);
+      loadPlan(false, true);
     }, interval);
   }
 
@@ -2036,6 +2046,40 @@
     return false;
   }
 
+  /* ⑤ 화면에 보이는 gen 상태 서명(095 피드백 2, 2026-10-30). 폴링으로 받은 plan 의 서명이 지금 그린 ⑤와 같으면
+     ⑤를 다시 그리지 않는다(실사 회차 중 웹툰 영상 재생이 끊기지 않게). 넣는 것: gen.status, 칸별(units, 없으면
+     segments — genBusyFast 와 같다) 웹툰·실사 status·failureKind, finalWebtoon·finalReal 의 status·key, realRun.n,
+     realHistory 길이, selected. key 는 영상 주소에서 ?·# 뒤를 뺀 경로다(presigned 서명은 조회마다 바뀐다).
+     gen 이 없거나(none) stale 이면 시작 화면(촬영 지시서 진행 등)이라 ""를 돌려주고, 그때는 지금처럼 늘 다시 그린다. */
+  function genViewSignature(gen) {
+    var g = gen || {};
+    if (!g.status || g.status === "none" || g.stale) return "";
+    function finalOf(final) {
+      var f = final || {};
+      return [f.status || "", String(f.videoUrl || "").split("#")[0].split("?")[0]];
+    }
+    var cells = (g.units && g.units.length) ? g.units : (g.segments || []);
+    return JSON.stringify([
+      g.status,
+      cells.map(function (cell) {
+        var w = (cell || {}).webtoon || {};
+        var r = (cell || {}).real || {};
+        return [w.status || "", w.failureKind || "", r.status || "", r.failureKind || ""];
+      }),
+      finalOf(g.finalWebtoon),
+      finalOf(g.finalReal),
+      g.realRun ? { n: g.realRun.n == null ? null : g.realRun.n } : null,
+      Array.isArray(g.realHistory) ? g.realHistory.length : 0,
+      g.selected || null
+    ]);
+  }
+
+  /* 폴링 응답(state.plan 을 새 값으로 바꾸고 decidePlanStep 을 지난 뒤)이 지금 그린 ⑤와 같은 상태인가.
+     마지막으로 그린 화면이 ⑤ 결과 화면이고(state.genViewSig 가 비어 있지 않다), 지금 단계도 ⑤이며 서명이 같을 때만 true. */
+  function genPollUnchanged() {
+    return state.planStep === 5 && !!state.genViewSig && genViewSignature((state.plan || {}).gen) === state.genViewSig;
+  }
+
   /* input 일부를 저장(PUT /input). 성공하면 plan 을 갱신한다(다시 그리기는 호출자 선택). */
   function putInput(patch) {
     var pid = state.projectId;
@@ -2055,6 +2099,8 @@
     if (!host || !state.mounted) return;
     schedulePlanPoll();
     clear(host);
+    // ⑤를 그리면 그 gen 상태 서명을 둔다(폴링이 같은 상태를 다시 그리지 않게, loadPlan). ⑤가 아니면 비운다.
+    state.genViewSig = state.planStep === 5 ? genViewSignature((state.plan || {}).gen) : "";
 
     var head = el("div", "vnew-plan-head");
     head.appendChild(el("h1", "vnew-h1", "영상만들기_신규"));
@@ -4135,7 +4181,7 @@
       takeLead.appendChild(el("span", null, "웹툰 그림체로 " + takeSecs + "초를 한 번에 만듭니다 (480p 초안)."));
       bodyWrap.appendChild(takeLead);
       bodyWrap.appendChild(
-        el("p", "vnew-hint", "테이크 " + ((est.takes || []).length) + "개로 만듭니다. 실사는 건너뜁니다 — 기본 모델로 따로 만들 수 있습니다.")
+        el("p", "vnew-hint", takePlanHintText("confirm", (est.takes || []).length, takeRealEnabledOf(gen, plan)))
       );
     } else {
       bodyWrap.appendChild(
@@ -5966,7 +6012,7 @@
       bTitle.appendChild(el("span", "vnew-badge vnew-beta-badge", "BETA"));
       banner.appendChild(bTitle);
       banner.appendChild(
-        el("p", "vnew-hint", "웹툰 그림체로 " + Math.round(takeSecs0) + "초를 한 번에 만듭니다 (480p 초안). 실사는 건너뜁니다.")
+        el("p", "vnew-hint", takePlanHintText("start", Math.round(takeSecs0), takeRealEnabledOf(plan.gen, plan)))
       );
       host.appendChild(banner);
       // 장면 의상·목소리 표(설계자 2026-10-26, 064).
@@ -6058,7 +6104,8 @@
       failed: "영상 생성에 실패했습니다.",
       cancelled: "영상 생성을 취소했습니다."
     };
-    statusBar.appendChild(el("p", "vnew-gen-status-text", statusText[gen.status] || gen.status));
+    // 통 테이크 웹툰만 끝났고 실사 회차가 없으면(실사 열을 그릴 때) 안내를 바꾼다(vnew-live-fx C.11, takeStatusText).
+    statusBar.appendChild(el("p", "vnew-gen-status-text", takeStatusText(gen) || statusText[gen.status] || gen.status));
     if (running) {
       var track = el("div", "vnew-progress-track");
       track.appendChild(el("div", "vnew-progress-fill"));
@@ -6108,7 +6155,7 @@
       takeBanner.appendChild(takeTitle);
       var takeSecs = Math.round(takeTotalSeconds(gen));
       takeBanner.appendChild(
-        el("p", "vnew-hint", "웹툰 그림체로 " + takeSecs + "초를 한 번에 만듭니다 (480p 초안). 실사는 건너뜁니다 — 기본 모델로 따로 만들 수 있습니다.")
+        el("p", "vnew-hint", takePlanHintText("result", takeSecs, takeRealEnabledOf(gen, plan)))
       );
       host.appendChild(takeBanner);
     }
@@ -6123,7 +6170,7 @@
 
     // --- 타임라인: 통 테이크(테이크 행) · 컷 단위 · 옛 구간 ---
     if (gen.mode === "previz-take") {
-      host.appendChild(takeTimeline(gen.units || [], showError));
+      host.appendChild(takeTimeline(gen.units || [], showError, gen));
     } else if (gen.units && gen.units.length) {
       host.appendChild(cutTimeline(gen.units, showError));
     } else {
@@ -6246,8 +6293,9 @@
   }
 
   /* 통 테이크 타임라인(설계자 2026-10-26, ⑤): 테이크마다 한 줄 — 컷 범위·초,
-     프리비즈 미리보기(테이크 녹화)·웹툰 결과 칸·실사 칸("건너뜀"). 보낸 프롬프트 접이식. */
-  function takeTimeline(units, showError) {
+     프리비즈 미리보기(테이크 녹화)·웹툰 결과 칸·실사 칸("건너뜀"). 보낸 프롬프트 접이식.
+     gen(선택, vnew-live-fx C.11): 실사 회차(gen.realRun)가 있으면 실사 칸을 실제 상태로 그린다(takeRow). */
+  function takeTimeline(units, showError, gen) {
     var section = el("section", "panel vnew-seg-timeline");
     section.appendChild(el("h2", "vnew-sec-title", "테이크별 진행"));
     if (!units.length) {
@@ -6259,13 +6307,13 @@
     );
     var list = el("div", "vnew-seg-rows");
     units.forEach(function (unit, index) {
-      list.appendChild(takeRow(unit, index, showError));
+      list.appendChild(takeRow(unit, index, showError, gen));
     });
     section.appendChild(list);
     return section;
   }
 
-  function takeRow(unit, index, showError) {
+  function takeRow(unit, index, showError, gen) {
     var row = el("div", "vnew-seg-row");
     var meta = el("div", "vnew-seg-meta");
     meta.appendChild(el("span", "vnew-seg-no", "테이크 " + (index + 1)));
@@ -6286,6 +6334,12 @@
     cells.appendChild(previzPreviewCell(unit));
     // 웹툰 결과 칸.
     cells.appendChild(cutCell(unit, { key: "webtoon", title: "웹툰 그림체" }, showError));
+    // 실사 회차(gen.realRun)가 있으면 실사 칸도 실제 상태(배지·영상·실패 문구·다시 시도)로 그린다(vnew-live-fx RC9.2).
+    if (gen && gen.realRun) {
+      cells.appendChild(cutCell(unit, { key: "real", title: "실사" }, showError));
+      row.appendChild(cells);
+      return row;
+    }
     // 실사 칸은 "건너뜀" 안내만.
     var realCell = el("div", "vnew-seg-cell");
     var realHead = el("div", "vnew-seg-cell-head");
@@ -6501,6 +6555,29 @@
           });
       });
       cell.appendChild(retry);
+      // 소리 검사 거절(failureKind "audio", vnew-live-fx RC6)이면 그 칸만 소리 없이(generate_audio false) 다시 만든다.
+      // 웹툰·실사 모두이고 VNEW_TAKE_REAL 과 상관없이 보인다(결함 수정, R0.3 예외).
+      if (v.status === "failed" && v.failureKind === "audio") {
+        var silent = el("button", "outline-button vnew-seg-retry vnew-seg-silent", "소리 없이 다시 만들기");
+        silent.type = "button";
+        silent.addEventListener("click", function () {
+          silent.disabled = true;
+          retry.disabled = true;
+          api("/api/vnew/p/" + encodeURIComponent(state.projectId) + "/generate/retry", {
+            method: "POST",
+            body: JSON.stringify({ segId: unit.id, variant: variant.key, audio: false })
+          })
+            .then(function () {
+              loadPlan(false);
+            })
+            .catch(function (err) {
+              silent.disabled = false;
+              retry.disabled = false;
+              if (showError) showError("다시 시도하지 못했습니다: " + errMessage(err));
+            });
+        });
+        cell.appendChild(silent);
+      }
     }
 
     // 보낸 지시서 보기(접이식) — promptEn 이 있으면.
@@ -6518,10 +6595,17 @@
   /* 맨 위 결과 두 열: finalReal · finalWebtoon. 둘 다 done 이면 각 열 아래 [이 영상으로 사운드 편집]. */
   function finalResults(gen, showError) {
     var section = el("section", "vnew-final-grid");
+    // 통 테이크(vnew-live-fx 묶음 C, design §C.11): 실사 열은 takeRealColumn(take 이고 realEnabled 또는 realRun 일 때),
+    // 웹툰 열은 done 이고 gen 이 진행 중이 아니면 [이걸로 고르기], 두 final 이 done 이면 아래에 나란히 보기(takeCompare).
+    var isTake = gen.mode === "previz-take";
     var bothReady =
-      (gen.finalReal || {}).status === "done" && (gen.finalWebtoon || {}).status === "done";
+      !isTake && (gen.finalReal || {}).status === "done" && (gen.finalWebtoon || {}).status === "done";
 
     VARIANTS.forEach(function (meta) {
+      if (isTake && meta.key === "real" && takeRealShown(gen)) {
+        section.appendChild(takeRealColumn(gen, showError));
+        return;
+      }
       var final = (meta.key === "real" ? gen.finalReal : gen.finalWebtoon) || {};
       var col = el("div", "vnew-final-col");
       col.appendChild(el("h2", "vnew-variant-title", meta.title));
@@ -6555,6 +6639,8 @@
               });
           });
           col.appendChild(pick);
+        } else if (isTake && meta.key === "webtoon" && gen.status !== "running") {
+          col.appendChild(takePickButton("webtoon", showError));
         }
       } else if (final.status === "failed") {
         col.appendChild(el("p", "login-error", final.error || "이어 붙이기에 실패했습니다."));
@@ -6571,6 +6657,473 @@
       }
       section.appendChild(col);
     });
+    if (isTake) {
+      var compare = takeCompare(gen);
+      if (compare) section.appendChild(compare);
+    }
+    return section;
+  }
+
+  /* ---- 통 테이크 실사 버전(vnew-live-fx 묶음 C, RC5·RC9 · design §C.11) ----
+
+     ⑤ take gen 결과의 실사 열·확인창·나란히 보기. 서버 gen_view 의 realEnabled·realRun·realHistory·realEstimate·
+     canStartReal·realBlock 을 그대로 쓴다. 실사 열은 take 이면서 (realEnabled 또는 realRun) 일 때만 그린다. 설정을 껐고
+     회차가 없으면 지금 화면("건너뜀")이고, 회차를 시작한 뒤 설정을 꺼도 그 결과는 보인다(R0.5).
+     확인창에는 금액 숫자를 보인다(결정 1). 409 CostMismatch 면 계획을 다시 읽어 새 금액을 확인창에 보이고, 다시 눌러
+     새 금액으로 확인해야 보낸다(캐스팅 화면과 같은 방식). 영상 src 는 응답의 presigned URL 만 쓰고, 글은 모두
+     textContent(el)로 넣는다. 아래 순수 함수와 DOM 조립은 검사 lr-n·lr-o 가 node 가짜 DOM 으로 실행한다. */
+  var TAKE_REAL_LEAD = "같은 프리비즈 녹화로 실사 버전을 만들 수 있습니다. 웹툰 결과는 그대로 남습니다.";
+  var TAKE_REAL_DONE_TEXT = "웹툰 영상이 준비됐습니다. 실사 버전을 만들거나 웹툰을 골라 사운드로 넘어가세요.";
+  var TAKE_REAL_HISTORY_STATUS = { done: "완료", partial: "일부 실패", failed: "실패", cancelled: "취소됨" };
+
+  /* 실사 열을 그리는가: take 이면서 설정 켬(realEnabled) 또는 이미 시작한 회차(realRun)가 있을 때. */
+  function takeRealShown(gen) {
+    var g = gen || {};
+    return g.mode === "previz-take" && (g.realEnabled === true || !!g.realRun);
+  }
+
+  function takeRealUsdText(value) {
+    var usd = Number(value);
+    return "$" + (isFinite(usd) && usd > 0 ? usd : 0).toFixed(2);
+  }
+
+  function takeRealSecondsText(value) {
+    var secs = Number(value);
+    return (isFinite(secs) && secs > 0 ? Math.round(secs * 10) / 10 : 0) + "초";
+  }
+
+  /* [실사 버전 만들기 ($X)] — 회차가 이미 있으면 [실사 버전 다시 만들기 ($X)]. 금액은 서버 realEstimate.usd. */
+  function takeRealStartLabel(gen) {
+    var g = gen || {};
+    return (g.realRun ? "실사 버전 다시 만들기 (" : "실사 버전 만들기 (") + takeRealUsdText((g.realEstimate || {}).usd) + ")";
+  }
+
+  function takeRealConfirmText(est) {
+    var e = est || {};
+    var takes = Number(e.takes);
+    takes = isFinite(takes) && takes > 0 ? Math.floor(takes) : 0;
+    return "같은 프리비즈 녹화로 실사 버전을 만듭니다. 테이크 " + takes + "개 · " + takeRealSecondsText(e.seconds) + " · " +
+      String(e.resolution || "480p") + " 초안 · 예상 비용 " + takeRealUsdText(e.usd) + ". 웹툰 결과는 그대로 남습니다.";
+  }
+
+  function takeRealCostChangedText(est) {
+    return "금액이 바뀌었습니다. 새 금액은 " + takeRealUsdText((est || {}).usd) + "입니다. 다시 누르면 새 금액으로 확인합니다.";
+  }
+
+  /* 테이크 실사 칸 세기: total·completed·failed·cancelled·active(queued·preparing·submitted). */
+  function takeRealCounts(gen) {
+    var units = Array.isArray((gen || {}).units) ? gen.units : [];
+    var counts = { total: units.length, completed: 0, failed: 0, cancelled: 0, active: 0 };
+    units.forEach(function (unit) {
+      var status = ((unit || {}).real || {}).status;
+      if (status === "completed") counts.completed += 1;
+      else if (status === "failed") counts.failed += 1;
+      else if (status === "cancelled") counts.cancelled += 1;
+      else if (status === "queued" || status === "preparing" || status === "submitted") counts.active += 1;
+    });
+    return counts;
+  }
+
+  /* 실사 열 상태: none(회차 없음) · running(만드는 중·이어 붙이는 중) · done · failed · cancelled. */
+  function takeRealState(gen) {
+    var g = gen || {};
+    if (!g.realRun) return "none";
+    var final = g.finalReal || {};
+    if (final.status === "done") return "done";
+    if (final.status === "failed") return "failed";
+    var counts = takeRealCounts(g);
+    if (g.status === "running" && (counts.active > 0 || counts.completed === counts.total)) return "running";
+    return counts.cancelled > 0 && counts.failed === 0 ? "cancelled" : "failed";
+  }
+
+  /* 진행: 끝난(completed) 테이크 / 전체 테이크. */
+  function takeRealProgress(gen) {
+    var counts = takeRealCounts(gen);
+    return {
+      done: counts.completed,
+      total: counts.total,
+      text: "실사 버전을 만드는 중… (" + counts.completed + "/" + counts.total + ")"
+    };
+  }
+
+  /* failed·cancelled 문구. 칸별 다시 시도·소리 없이 다시 만들기는 아래 테이크 행(cutCell)에 있다. */
+  function takeRealFailedText(gen) {
+    var g = gen || {};
+    var final = g.finalReal || {};
+    if (final.status === "failed") return final.error || "실사 테이크를 이어 붙이지 못했습니다.";
+    var counts = takeRealCounts(g);
+    if (counts.cancelled > 0 && counts.failed === 0) {
+      return "실사 버전 만들기를 취소했습니다. 아래 테이크 행에서 다시 시도할 수 있습니다.";
+    }
+    // 실패 칸 없이 끝난 회차 = 30분 넘게 진행이 없어 보기에서 멈춤(partial)으로 본 경우(_reconcile_gen_stale).
+    if (counts.failed === 0) return "실사 버전 만들기가 멈췄습니다. 다시 만들어 주세요.";
+    return "실사 테이크 " + counts.failed + "개를 만들지 못했습니다. 아래 테이크 행에서 다시 시도할 수 있습니다.";
+  }
+
+  /* 이전 회차 한 줄: "2회차 · 완료 · 소리 없음". */
+  function takeRealHistoryLabel(item) {
+    var it = item || {};
+    var n = Number(it.n);
+    var parts = [(isFinite(n) && n > 0 ? Math.floor(n) : 0) + "회차", TAKE_REAL_HISTORY_STATUS[it.status] || "기록"];
+    if (it.audio === false) parts.push("소리 없음");
+    return parts.join(" · ");
+  }
+
+  /* 상태 띠: take 웹툰이 done 이고 실사 회차가 없으면(실사 열을 그릴 때) 안내 문구, 그 밖에는 ""(기존 문구를 쓴다). */
+  function takeStatusText(gen) {
+    var g = gen || {};
+    return g.status === "done" && !g.realRun && takeRealShown(g) ? TAKE_REAL_DONE_TEXT : "";
+  }
+
+  /* 통 테이크 안내의 실사 한 줄(095 피드백 1, 2026-10-30): 생성 확인창 · ⑤ 시작 화면 배너 · ⑤ 결과 화면 배너.
+     실사 버전 설정을 아는 값은 gen.realEnabled(gen_view) → plan.features.takeReal(design §2 의 키) 순으로 boolean 일 때만 쓰고,
+     둘 다 없으면 null 이다. 지금 서버는 gen 이 없으면({status:"none", estimate}) realEnabled 를 보내지 않고 features 에는
+     fx 만 있어, 첫 시작 화면·첫 확인창은 null 이다. */
+  var TAKE_PLAN_SKIP_TEXT = "실사는 건너뜁니다";
+  var TAKE_PLAN_LATER_TEXT = "실사는 웹툰이 끝난 뒤 따로 만듭니다";
+
+  function takeRealEnabledOf(gen, plan) {
+    var g = gen || {};
+    if (typeof g.realEnabled === "boolean") return g.realEnabled;
+    var features = (plan || {}).features || {};
+    return typeof features.takeReal === "boolean" ? features.takeReal : null;
+  }
+
+  /* where: "confirm"(생성 확인창, amount = 테이크 수) · "start"(⑤ 시작 화면 배너, amount = 초) · 그 밖은 ⑤ 결과 화면 배너(초).
+     enabled true → 웹툰이 끝나면 같은 녹화로 실사 버전을 만들 수 있다는 문구, false → 지금 문구 그대로,
+     null(모름) → 지금 문구에서 TAKE_PLAN_SKIP_TEXT 만 TAKE_PLAN_LATER_TEXT 로 바꾼다. */
+  function takePlanHintText(where, amount, enabled) {
+    var lead = where === "confirm"
+      ? "테이크 " + amount + "개로 만듭니다. "
+      : "웹툰 그림체로 " + amount + "초를 한 번에 만듭니다 (480p 초안). ";
+    if (enabled === true) {
+      return lead + (where === "confirm"
+        ? "웹툰이 끝나면 같은 프리비즈 녹화로 실사 버전을 따로 만들 수 있습니다."
+        : "웹툰이 끝나면 같은 녹화로 실사 버전을 만들 수 있습니다.");
+    }
+    return lead + (enabled === false ? TAKE_PLAN_SKIP_TEXT : TAKE_PLAN_LATER_TEXT) +
+      (where === "start" ? "." : " — 기본 모델로 따로 만들 수 있습니다.");
+  }
+
+  /* [이걸로 고르기] → POST /select. 받은 plan 으로 ⑥을 바로 그린다(loadPlan 을 거치면 decidePlanStep 이 partial gen 을
+     ⑤로 되돌린다 — 실사가 실패해 partial 이어도 웹툰을 고를 수 있어야 한다, RC5.1). */
+  function takePickButton(variant, showError) {
+    var pick = el("button", "primary-button vnew-pick-btn", "이걸로 고르기");
+    pick.type = "button";
+    pick.addEventListener("click", function () {
+      pick.disabled = true;
+      api("/api/vnew/p/" + encodeURIComponent(state.projectId) + "/select", {
+        method: "POST",
+        body: JSON.stringify({ variant: variant })
+      })
+        .then(function (payload) {
+          state.plan = (payload && payload.plan) || state.plan;
+          state.planStep = 6;
+          renderPlan();
+        })
+        .catch(function (err) {
+          pick.disabled = false;
+          if (showError) showError("고르지 못했습니다: " + errMessage(err));
+        });
+    });
+    return pick;
+  }
+
+  /* 실사 열: 회차 없음(안내 + 시작 버튼 또는 realBlock) · 진행(막대) · done(영상·내려받기·고르기) · failed·cancelled(문구),
+     끝난 상태에서는 [실사 버전 다시 만들기 ($X)](canStartReal), 아래에 접기 "이전 실사 보기 (n)". */
+  function takeRealColumn(gen, showError) {
+    var g = gen || {};
+    var col = el("div", "vnew-final-col vnew-real-col");
+    col.appendChild(el("h2", "vnew-variant-title", "실사"));
+    var stateName = takeRealState(g);
+    var final = g.finalReal || {};
+    if (stateName === "none") {
+      col.appendChild(el("p", "vnew-hint vnew-real-lead", TAKE_REAL_LEAD));
+    } else if (stateName === "running") {
+      var progress = takeRealProgress(g);
+      var bar = el("div", "vnew-real-progress");
+      bar.appendChild(el("p", "vnew-progress-label", progress.text));
+      var track = el("div", "vnew-progress-track");
+      var fill = el("div", "vnew-real-progress-fill");
+      fill.style.width = Math.max(5, progress.total ? Math.round((100 * progress.done) / progress.total) : 0) + "%";
+      track.appendChild(fill);
+      bar.appendChild(track);
+      col.appendChild(bar);
+    } else if (stateName === "done") {
+      if (final.videoUrl) {
+        var video = el("video", "vnew-final-player");
+        video.src = final.videoUrl;
+        video.controls = true;
+        video.setAttribute("playsinline", "");
+        col.appendChild(video);
+        var tools = el("div", "vnew-final-tools");
+        tools.appendChild(downloadLink(final.videoUrl, "내려받기"));
+        col.appendChild(tools);
+      } else {
+        col.appendChild(el("p", "vnew-hint vnew-real-error", "영상을 불러오지 못했습니다."));
+      }
+      if (g.status !== "running") col.appendChild(takePickButton("real", showError));
+    } else {
+      col.appendChild(
+        el("p", (stateName === "cancelled" ? "vnew-hint" : "login-error") + " vnew-real-error", takeRealFailedText(g))
+      );
+    }
+    if (stateName !== "running") {
+      if (g.canStartReal) {
+        var startBtn = el(
+          "button",
+          (stateName === "none" ? "primary-button" : "outline-button") + " vnew-real-start",
+          takeRealStartLabel(g)
+        );
+        startBtn.type = "button";
+        startBtn.addEventListener("click", function () {
+          openRealConfirm(g, showError);
+        });
+        col.appendChild(startBtn);
+      } else if (stateName === "none") {
+        col.appendChild(el("p", "vnew-hint vnew-real-block", g.realBlock || "지금은 실사 버전을 만들 수 없습니다."));
+      }
+    }
+    var history = takeRealHistory(g);
+    if (history) col.appendChild(history);
+    return col;
+  }
+
+  /* 접기 "이전 실사 보기 (n)": realHistory(최대 3, 최근 것부터). 영상은 finalUrl(presigned)만, 누를 때까지 받지 않는다. */
+  function takeRealHistory(gen) {
+    var items = (Array.isArray((gen || {}).realHistory) ? gen.realHistory : []).filter(function (item) {
+      return !!item && typeof item === "object";
+    });
+    if (!items.length) return null;
+    var details = el("details", "vnew-real-history");
+    details.appendChild(el("summary", null, "이전 실사 보기 (" + items.length + ")"));
+    items.slice().reverse().forEach(function (item) {
+      var box = el("div", "vnew-real-history-item");
+      box.appendChild(el("p", "vnew-real-history-label", takeRealHistoryLabel(item)));
+      if (item.finalUrl) {
+        var video = el("video", "vnew-final-player");
+        video.src = item.finalUrl;
+        video.controls = true;
+        video.preload = "none";
+        video.setAttribute("playsinline", "");
+        box.appendChild(video);
+      } else {
+        box.appendChild(el("p", "vnew-hint", "완성된 영상이 없습니다."));
+      }
+      details.appendChild(box);
+    });
+    return details;
+  }
+
+  /* 확인창: 테이크 수·초·해상도·금액 숫자 + "소리도 만들기"(기본 켬) → POST /generate/real {confirmUsd, audio}.
+     409 CostMismatch(운영에서도 type 은 남는다) → GET /plan 으로 새 금액을 읽어 확인창 글을 바꾸고, 다시 누를 때 새 금액으로
+     보낸다. 다시 읽은 gen 이 시작할 수 없으면(설정 끔·진행 중 등) 창을 닫고 화면을 다시 그린다(realBlock 이 보인다). */
+  function openRealConfirm(gen, showError) {
+    var est = (gen && gen.realEstimate) || {};
+    var pid = state.projectId;
+    var scrim = el("div", "vnew-modal-scrim");
+    var modal = el("div", "vnew-modal vnew-real-confirm");
+    var head = el("div", "vnew-modal-head");
+    head.appendChild(el("h3", null, "실사 버전 만들기"));
+    var close = el("button", "icon-button", "×");
+    close.type = "button";
+    close.addEventListener("click", closeModal);
+    head.appendChild(close);
+    modal.appendChild(head);
+
+    var bodyWrap = el("div", "vnew-modal-body");
+    var lead = el("p", "vnew-real-confirm-text", takeRealConfirmText(est));
+    bodyWrap.appendChild(lead);
+    if (gen && gen.realRun) {
+      bodyWrap.appendChild(el("p", "vnew-hint", "지금 실사 결과는 '이전 실사 보기'로 남습니다."));
+    }
+    var audioLabel = el("label", "vnew-real-audio");
+    var audioBox = el("input");
+    audioBox.type = "checkbox";
+    audioBox.checked = true;
+    audioLabel.appendChild(audioBox);
+    audioLabel.appendChild(el("span", null, "소리도 만들기"));
+    bodyWrap.appendChild(audioLabel);
+    var message = planError("");
+    bodyWrap.appendChild(message);
+    function showMessage(text) {
+      message.textContent = text;
+      message.style.display = "";
+    }
+
+    var actions = el("div", "vnew-modal-actions");
+    var cancelBtn = el("button", "outline-button", "취소");
+    cancelBtn.type = "button";
+    cancelBtn.addEventListener("click", closeModal);
+    var okBtn = el("button", "primary-button", "만들기 시작");
+    okBtn.type = "button";
+    function setBusy(busy) {
+      okBtn.disabled = busy;
+      cancelBtn.disabled = busy;
+    }
+
+    function rereadEstimate() {
+      return api("/api/vnew/p/" + encodeURIComponent(pid) + "/plan")
+        .then(function (fresh) {
+          if (!state.mounted || state.projectId !== pid) {
+            closeModal();
+            return;
+          }
+          var next = (fresh && fresh.gen) || {};
+          state.plan = fresh || state.plan;
+          renderPlan();
+          if (!next.canStartReal) {
+            closeModal();
+            return;
+          }
+          est = next.realEstimate || {};
+          lead.textContent = takeRealConfirmText(est);
+          setBusy(false);
+          showMessage(takeRealCostChangedText(est));
+        })
+        .catch(function (err) {
+          setBusy(false);
+          showMessage("새 금액을 불러오지 못했습니다: " + errMessage(err));
+        });
+    }
+
+    okBtn.addEventListener("click", function () {
+      setBusy(true);
+      message.style.display = "none";
+      api("/api/vnew/p/" + encodeURIComponent(pid) + "/generate/real", {
+        method: "POST",
+        body: JSON.stringify({ confirmUsd: Number(est.usd) || 0, audio: audioBox.checked === true })
+      })
+        .then(function (payload) {
+          closeModal();
+          if (!state.mounted || state.projectId !== pid) return;
+          state.plan = (payload && payload.plan) || state.plan;
+          loadPlan(false);
+        })
+        .catch(function (err) {
+          if (err && err.type === "CostMismatch") return rereadEstimate();
+          setBusy(false);
+          showMessage("실사 버전을 시작하지 못했습니다: " + errMessage(err));
+        });
+    });
+    actions.appendChild(cancelBtn);
+    actions.appendChild(okBtn);
+    bodyWrap.appendChild(actions);
+
+    modal.appendChild(bodyWrap);
+    scrim.appendChild(modal);
+    scrim.addEventListener("click", function (event) {
+      if (event.target === scrim) closeModal();
+    });
+    document.body.appendChild(scrim);
+
+    function closeModal() {
+      if (scrim.parentNode) scrim.parentNode.removeChild(scrim);
+    }
+    return scrim;
+  }
+
+  /* 나란히 보기 — 같이 재생·멈춤·시간 맞추기·소리 고르기(순수 동작, 검사 lr-n 이 가짜 video 로 실행한다). */
+  function takeCompareSoundLabel(which) {
+    return which === "real" ? "소리: 실사" : "소리: 웹툰";
+  }
+
+  /* 소리는 한쪽만: which 가 "real" 이면 실사, 그 밖에는 웹툰(기본). */
+  function takeCompareSound(webVideo, realVideo, which) {
+    webVideo.muted = which === "real";
+    realVideo.muted = which !== "real";
+  }
+
+  /* 한쪽(src)을 옮기면(seeked) 다른 쪽(dst)을 같은 시간으로. 맞추려고 옮긴 쪽의 seeked 는 한 번 건너뛴다(되부름 막기).
+     0.05초 안이면 옮기지 않는다. 옮겼으면 true. */
+  function takeCompareFollow(guard, src, dst) {
+    if (guard.skip === src) {
+      guard.skip = null;
+      return false;
+    }
+    var time = Number(src.currentTime) || 0;
+    if (Math.abs((Number(dst.currentTime) || 0) - time) < 0.05) return false;
+    guard.skip = dst;
+    dst.currentTime = time;
+    return true;
+  }
+
+  /* [같이 재생]: 둘 다 0초로 되감고 재생. play() 거절(자동 재생 정책 등)은 삼킨다. */
+  function takeComparePlay(guard, webVideo, realVideo) {
+    guard.skip = null;
+    [webVideo, realVideo].forEach(function (video) {
+      video.currentTime = 0;
+      var played = video.play();
+      if (played && typeof played.catch === "function") played.catch(function () {});
+    });
+  }
+
+  function takeComparePause(webVideo, realVideo) {
+    webVideo.pause();
+    realVideo.pause();
+  }
+
+  /* 두 final 이 done 이면 웹툰·실사를 나란히 둔다(RC5.2). 아니면 null. 결과 격자(vnew-final-grid)의 한 줄 전체를 쓴다. */
+  function takeCompare(gen) {
+    var g = gen || {};
+    var web = g.finalWebtoon || {};
+    var real = g.finalReal || {};
+    if (web.status !== "done" || real.status !== "done" || !web.videoUrl || !real.videoUrl) return null;
+    var section = el("section", "panel vnew-take-compare");
+    section.appendChild(el("h2", "vnew-sec-title", "나란히 보기"));
+    section.appendChild(
+      el("p", "vnew-hint", "웹툰과 실사를 같은 시간으로 맞춰 봅니다. 한쪽을 옮기면 다른 쪽도 따라갑니다. 소리는 한쪽만 납니다.")
+    );
+    var row = el("div", "vnew-take-compare-row");
+    function player(title, url) {
+      var item = el("div", "vnew-take-compare-item");
+      item.appendChild(el("h3", "vnew-variant-title", title));
+      var video = el("video", "vnew-final-player vnew-take-compare-video");
+      video.src = url;
+      video.controls = true;
+      video.preload = "metadata";
+      video.setAttribute("playsinline", "");
+      item.appendChild(video);
+      row.appendChild(item);
+      return video;
+    }
+    var webVideo = player("웹툰 그림체", web.videoUrl);
+    var realVideo = player("실사", real.videoUrl);
+    section.appendChild(row);
+
+    var guard = { skip: null };
+    var sound = "webtoon";
+    takeCompareSound(webVideo, realVideo, sound);
+    webVideo.addEventListener("seeked", function () {
+      takeCompareFollow(guard, webVideo, realVideo);
+    });
+    realVideo.addEventListener("seeked", function () {
+      takeCompareFollow(guard, realVideo, webVideo);
+    });
+
+    var tools = el("div", "vnew-take-compare-tools");
+    var playBtn = el("button", "primary-button vnew-take-compare-play", "같이 재생");
+    playBtn.type = "button";
+    playBtn.addEventListener("click", function () {
+      takeComparePlay(guard, webVideo, realVideo);
+    });
+    var pauseBtn = el("button", "outline-button vnew-take-compare-pause", "멈춤");
+    pauseBtn.type = "button";
+    pauseBtn.addEventListener("click", function () {
+      takeComparePause(webVideo, realVideo);
+    });
+    var soundBtn = el("button", "outline-button vnew-take-compare-sound", takeCompareSoundLabel(sound));
+    soundBtn.type = "button";
+    soundBtn.title = "누르면 소리를 다른 영상으로 바꿉니다";
+    soundBtn.addEventListener("click", function () {
+      sound = sound === "real" ? "webtoon" : "real";
+      takeCompareSound(webVideo, realVideo, sound);
+      soundBtn.textContent = takeCompareSoundLabel(sound);
+    });
+    tools.appendChild(playBtn);
+    tools.appendChild(pauseBtn);
+    tools.appendChild(soundBtn);
+    section.appendChild(tools);
     return section;
   }
 

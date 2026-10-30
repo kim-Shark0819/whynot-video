@@ -66,6 +66,12 @@ USER_FACING_KINDS = {
     "BadLook",
     "NoConfirmUsd",
     "NoCandidateId",
+    # vnew-live-fx C2(2026-10-30): 통 테이크 실사 버전 거절 문구. 던지는 곳(vnew/generate.py · vnew/routes.py)이 모두 고정
+    # 한국어 문구다. CharacterRealMissing·FalKeyMissing·NoConfirmUsd 는 이미 있다. CostMismatch 는 B와 같은 이유로 넣지 않는다.
+    "TakeRealDisabled",
+    "RealNotReady",
+    "RealRunning",
+    "RealPromptWebtoon",
 }
 
 

@@ -5,6 +5,7 @@
 """
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from typing import Callable
 
@@ -818,6 +819,33 @@ def create_blueprint(deps: VnewDependencies) -> Blueprint:
         except Exception as exc:  # noqa: BLE001
             return _fail(exc)
 
+    # vnew-live-fx C.2: 웹툰 통 테이크가 끝난 gen 에서 같은 프리비즈 녹화로 실사 버전(회차)을 시작한다.
+    # 설정(VNEW_TAKE_REAL)이 꺼져 있으면 프로젝트를 보기 전에 404 TakeRealDisabled(새 라우트가 없는 것과 같다, R0.3).
+    @bp.post("/p/<pid>/generate/real")
+    @deps.require_auth
+    def plan_generate_real(pid: str):
+        try:
+            from . import generate  # noqa: PLC0415
+
+            generate._require_take_real()  # noqa: SLF001
+            owner = _project_for(pid, write=True)
+            payload = request.get_json(silent=True)
+            payload = payload if isinstance(payload, dict) else {}
+            confirm = payload.get("confirmUsd")
+            # 숫자(문자열 숫자 포함)만 받는다. 없거나 bool·NaN·무한이면 400(고정 문구, USER_FACING_KINDS).
+            try:
+                confirm_usd = float("nan") if isinstance(confirm, bool) else float(confirm)
+            except (TypeError, ValueError):
+                confirm_usd = float("nan")
+            if not math.isfinite(confirm_usd):
+                raise VpocError("vnew.generate.real", "NoConfirmUsd", "확인 금액(confirmUsd)이 필요합니다.", 400)
+            audio = payload.get("audio") if isinstance(payload.get("audio"), bool) else None
+            run = generate.start_real(owner, pid, confirm_usd, audio=audio)
+            data, _ = plan_mod.load_plan(owner, pid)
+            return jsonify({"ok": True, "run": run, "plan": plan_mod.plan_view(owner, pid, data)}), 202
+        except Exception as exc:  # noqa: BLE001
+            return _fail(exc)
+
     @bp.post("/p/<pid>/generate/retry")
     @deps.require_auth
     def plan_generate_retry(pid: str):
@@ -830,7 +858,9 @@ def create_blueprint(deps: VnewDependencies) -> Blueprint:
             if not seg_id:
                 raise VpocError("vnew.generate", "NoSegId", "구간 id(segId)가 필요합니다.", 400)
             variant = str(payload.get("variant") or "real")
-            generate.retry_segment(owner, pid, seg_id, variant)
+            # vnew-live-fx C.6: "소리 없이 다시 만들기"는 audio:false. bool 일 때만 넘긴다(그 밖은 칸 설정 그대로).
+            audio = payload.get("audio") if isinstance(payload.get("audio"), bool) else None
+            generate.retry_segment(owner, pid, seg_id, variant, audio=audio)
             data, _ = plan_mod.load_plan(owner, pid)
             return jsonify({"ok": True, "plan": plan_mod.plan_view(owner, pid, data)}), 202
         except Exception as exc:  # noqa: BLE001

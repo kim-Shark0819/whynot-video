@@ -205,9 +205,9 @@ vnew가 재사용하는 것: `vpoc.llm`·`images`·`store.STORE`·`ark`·`fal`·
 - 단가(`_previz_price_row`): unit `seconds`는 그 초당 단가, 기본 모델은 단가를 모르면 `VNEW_PREVIZ_EDIT_USD_PER_S`. 토큰 단가는 전송 해상도를 아는 통 테이크 모델에만 `vpoc settings.shot_usd(id, VNEW_TAKE_RESOLUTION, 1)`과 `priceResolution`을 준다(`_previz_send_resolution`). 통 테이크는 그 해상도를 본문 `resolution`에 늘 명시해 보내고(`generate.py:2918`), 견적·원장(`_take_usd`)도 같은 값이다. 컷 단위 토큰 모델은 `resolution`을 보내지 않아 "단가 미정"이다.
 - 화면: `vnew.js` `previzPriceText`가 `$0.206/초(480p)`(목록)·`초당 $0.206(480p)`(설명 줄)을 만든다.
 
-#### 3.6.1 기호·실사 캐스팅·실사 버전(vnew-live-fx)이 닿는 코드 경로 (2026-10-30 조사, 구현 전 · 묶음 A·B 구현 결과는 각 표 아래)
+#### 3.6.1 기호·실사 캐스팅·실사 버전(vnew-live-fx)이 닿는 코드 경로 (2026-10-30 조사, 구현 전 · 묶음 A·B·C 구현 결과는 각 표 아래)
 
-스펙은 `.kiro/specs/vnew-live-fx/`다. 아래 표는 **구현 전 지금 코드**를 적는다. 줄 번호는 2026-10-30 작업 트리 기준이다. "참고 구현"은 외부 저장소 `ottlseo/video-vibecode` 사본(읽기 전용)이고, 비교는 `.kiro/handoff/logs/087.log` 끝 보고서에 있다. 묶음 A(기호·분위기)와 묶음 B(실사 캐스팅)는 같은 날 구현했다(아래 「A 구현 결과」·「B 구현 결과」). C 표는 아직 구현 전이다.
+스펙은 `.kiro/specs/vnew-live-fx/`다. 아래 표는 **구현 전 지금 코드**를 적는다. 줄 번호는 2026-10-30 작업 트리 기준이다. "참고 구현"은 외부 저장소 `ottlseo/video-vibecode` 사본(읽기 전용)이고, 비교는 `.kiro/handoff/logs/087.log` 끝 보고서에 있다. 묶음 A(기호·분위기), 묶음 B(실사 캐스팅), 묶음 C(통 테이크 실사 버전)는 같은 날 구현했다(아래 「A 구현 결과」·「B 구현 결과」·「C 구현 결과」).
 
 **A. 기호·분위기·묘사 규칙(③ 콘티 → ④ 프리비즈 카드 → 영상 프롬프트)**
 
@@ -313,13 +313,49 @@ B의 남은 위험(design §7):
 | `routes.py:714-769` | cast-notes·generate·generate/retry·select. 실사 버전 라우트가 없다 |
 | `vnew.js:5407` `renderGenStep`, `:5649` `takeRow`, `:5844` `cutCell`, `:5900` `finalResults`, `:3736` `openGenerateConfirm` | take 행의 실사 칸은 "건너뜀" 고정. 고르기 버튼은 두 final이 모두 done일 때만 보인다. 생성 확인창은 금액 숫자를 보이지 않는다(설계자 2026-10-20) |
 
-**조사 중 찾은 지금 코드의 문제**(1~4는 vnew-live-fx 묶음 C에서 함께 고친다)
+**조사 중 찾은 지금 코드의 문제**(1~4는 vnew-live-fx 묶음 C에서 함께 고쳤다. 상태는 2026-10-30 C3 기준)
 
-1. `_fail_variant`: previz-take에서 real 칸이 실패하면 gen이 partial이 되고 `_drive`가 멈춘다. 지금은 real 칸이 늘 skipped라 드러나지 않는다.
-2. `_gen_stale`이 `createdAt`만 본다. 30분 지난 gen에서 [다시 시도]를 누르면 화면이 곧바로 partial로 보이고, 새 생성이 진행 중인 gen을 덮을 수 있다.
-3. `vpoc/fal.rejection`이 소리 검사 거절과 영상 내용 거절을 같은 문구로 바꿔, 화면이 "소리 없이 다시 만들기"를 고를 근거가 없다.
-4. take gen 화면에는 고르기 버튼이 없다(`finalResults`가 두 final done을 요구하는데 finalReal이 skipped다).
-5. `_gen_previz_stale`은 previz-take를 늘 false로 본다(프리비즈를 다시 녹화해도 take gen이 stale로 보이지 않는다). 이번 스펙 범위 밖이고 기록만 한다.
+1. `_fail_variant`: previz-take에서 real 칸이 실패하면 gen이 partial이 되고 `_drive`가 멈춘다. 지금은 real 칸이 늘 skipped라 드러나지 않는다. → **고침(C1)**: previz·previz-take는 실사 칸 하나가 실패해도 running을 유지하고, 진행할 칸이 없을 때 partial이 된다(lr-h). `VNEW_TAKE_REAL`과 상관없다(lr-o).
+2. `_gen_stale`이 `createdAt`만 본다. 30분 지난 gen에서 [다시 시도]를 누르면 화면이 곧바로 partial로 보이고, 새 생성이 진행 중인 gen을 덮을 수 있다. → **고침(C1)**: 실사 회차 시작·다시 시도가 `gen.activeSince`를 두고 `_gen_stale`이 그 값을 먼저 본다(lr-i·lr-o).
+3. `vpoc/fal.rejection`이 소리 검사 거절과 영상 내용 거절을 같은 문구로 바꿔, 화면이 "소리 없이 다시 만들기"를 고를 근거가 없다. → **고침(C1·C3)**: `fal.poll`이 `failureKind:"audio"`와 안내 문구를 돌려주고 칸에 저장한다. 화면 `cutCell`이 그 칸에 [소리 없이 다시 만들기]를 보인다(웹툰·실사, 설정을 꺼도, lr-g·lr-n·lr-o).
+4. take gen 화면에는 고르기 버튼이 없다(`finalResults`가 두 final done을 요구하는데 finalReal이 skipped다). → **고침(C2·C3)**: 서버 `select_variant`는 previz-take에서 "gen이 진행 중이 아니고 그 final이 done"이면 고르고(lr-k), 화면 웹툰 열에 [이걸로 고르기]가 있다(설정을 꺼도, lr-n·lr-o).
+5. `_gen_previz_stale`은 previz-take를 늘 false로 본다(프리비즈를 다시 녹화해도 take gen이 stale로 보이지 않는다). 이번 스펙 범위 밖이고 기록만 한다. → **남음**.
+
+**C 구현 결과(2026-10-30, 작업 C1~C3, `VNEW_TAKE_REAL` 기본 true)** — 줄 번호는 C3 뒤 작업 트리 기준이다.
+
+| 단계 | 위치 | 동작 |
+|---|---|---|
+| 소리 거절(C1) | `vpoc/fal.py:1331` `_REJECT_AUDIO_MSG`, `:1337` `_is_audio_rejection`, `:1343` `rejection`, `:1360` `poll` | 원문에 audio와 sensitive가 둘 다 있으면 kind `audio`(likeness 다음, sensitive 앞). 거절 4xx·status 오류·결과 error 세 경로에서 `failureKind:"audio"`와 안내 문구. 소리 거절이 아니면 결과 dict가 C 이전과 같다(pf-b) |
+| 칸 실패·다시 시도(C1) | `generate.py:6110` `_fail_variant`(`kind`), `:6141` `_audio_kind`, `:3737` `_do_poll_previz`, `:5635` `retry_segment`(`audio`), `:5956` `_gen_stale`, `routes.py:849` retry 본문 `audio`(bool만) | 칸 `failureKind` 저장·다시 시도 때 지움, `audio:false`면 그 칸만 `generate_audio:false`. previz-take 다시 시도는 실사 회차(`realRun`)가 있으면 실사 칸도 된다. `activeSince` |
+| 시작(C2) | `routes.py:824` `POST /p/<pid>/generate/real` → `generate.py:1096` `start_real`(`:1007` `real_estimate`, `:1026` `_real_ready_error`, `:1041` `_real_missing_names`) | 끔 404 `TakeRealDisabled`(프로젝트를 보기 전), 400 `NoConfirmUsd`, 409 `RealNotReady`·`RealRunning`·`CostMismatch`·`CharacterRealMissing`·`FalKeyMissing`. 성공하면 이전 회차를 `realHistory`(최대 3)로, 칸마다 real queued(`audio`), `finalReal` waiting(`n`), `realRun`, `activeSince`, running, 고른 실사 비움. 로그 `vnew.gen.real_start` |
+| 제출(C2) | `generate.py:3479` `_do_submit_take`(real 경로), `:3272` `_take_payload(variant)`, `:1663` `_take_location_jpeg(variant)`, `:2735` `_take_prompt(variant)`(`:2694` `REAL_TAKE_STYLE`…, `:2708` `_real_action`, `:2726` `_assert_no_webtoon`), `:3249` `_real_look`·`:3261` `_real_appearance`, `:3391` `_submit_take(audio)` | 같은 녹화(@Video1) + 인물마다 캐스팅 사진(없으면 실사 정면) + 실사 장소 뷰, 패널 없음. 실사 STYLE·AVOID·rule_replace, 기호는 실사 표현, 그림 낱말 제거, "webtoon"이 남으면 제출·원장 0. 외형은 옷 조각을 뺀 외모 조각(093 D3, PM 수용) |
+| 병합·고르기(C2) | `generate.py:5205` `_do_concat`(`final-real-r{n}.mp4`), `:5746` `select_variant` | 회차마다 다른 파일. previz-take는 gen이 진행 중이 아니고 그 final이 done이면 고른다 |
+| 보기(C2·C3) | `generate.py:5774` `gen_view` | `realRun`·`realHistory`(`finalUrl` presigned)·`realEstimate`·`canStartReal`·`realBlock`, 칸 `failureKind`·`audio`, `finalReal.n`, **`realEnabled`**(`:5944`, C3 — `VNEW_TAKE_REAL` 값, PM 결정 (가)) |
+| 화면(C3) | `vnew.js:6550` `finalResults`(take 분기), 실사 버전 구역 `:6629-`(`takeRealShown`·문구 함수·`takePickButton` `:6732`·`takeRealColumn` `:6756`·`takeRealHistory` `:6815`·`openRealConfirm` `:6843`·`takeCompare*` `:6961-`·`takeCompare` `:6989`), `takeTimeline` `:6252`·`takeRow` `:6270`(gen 인자), `cutCell` `:6472`(소리 없이 다시), `renderGenStep` `:6026`(상태 띠 `takeStatusText`); `vnew.css` `vnew-real-*`·`vnew-take-compare*`(`:2171-`) | 아래 「실사 버전 화면」 |
+
+실사 버전 화면(⑤ 통 테이크 gen):
+- 실사 열은 take 이면서 `gen.realEnabled` 또는 `gen.realRun`이 있을 때 그린다. 설정을 껐고 회차가 없으면 지금 화면("통 테이크(베타)는 웹툰만 만듭니다 — …", 테이크 행 "건너뜀")이다. 회차를 시작한 뒤 설정을 꺼도 그 결과는 보인다(R0.5).
+- 회차 없음: "같은 프리비즈 녹화로 실사 버전을 만들 수 있습니다. 웹툰 결과는 그대로 남습니다." + [실사 버전 만들기 ($X.XX)](`canStartReal`일 때). 아니면 `realBlock` 문구(예 "웹툰 통 테이크가 끝난 뒤에 실사 버전을 만들 수 있습니다.").
+- 확인창 "실사 버전 만들기": "같은 프리비즈 녹화로 실사 버전을 만듭니다. 테이크 N개 · M초 · 480p 초안 · 예상 비용 $X.XX. 웹툰 결과는 그대로 남습니다." + 체크 "소리도 만들기"(기본 켬) + [취소]·[만들기 시작] → `POST /generate/real {confirmUsd, audio}`. 다시 만들 때는 "지금 실사 결과는 '이전 실사 보기'로 남습니다."를 더 보인다. 409 `CostMismatch`(운영에서도 `type`은 남는다)면 `GET /plan`으로 새 금액을 읽어 확인창 글을 바꾸고 "금액이 바뀌었습니다. 새 금액은 $X.XX입니다. 다시 누르면 새 금액으로 확인합니다."를 보인다. 이때는 보내지 않고, 다시 눌러야 새 금액으로 보낸다(캐스팅 화면과 같은 방식). 다시 읽은 gen이 시작할 수 없으면 창을 닫고 화면을 다시 그린다.
+- 진행: 막대 + "실사 버전을 만드는 중… (완료 테이크/전체)". 폴링은 지금 gen 폴링이다(gen running → 실사 칸이 대기·준비면 3초, 조회 중이면 5초).
+- done: 영상·[내려받기]·[이걸로 고르기](gen이 진행 중이 아닐 때)·[실사 버전 다시 만들기 ($X.XX)](`canStartReal`). failed: "실사 테이크 n개를 만들지 못했습니다. 아래 테이크 행에서 다시 시도할 수 있습니다." 또는 병합 실패 문구. cancelled: "실사 버전 만들기를 취소했습니다. …".
+- 접기 "이전 실사 보기 (n)": 최근 회차부터 "n회차 · 완료/일부 실패/실패/취소됨 · 소리 없음"과 영상(`finalUrl`, 누를 때까지 받지 않음 `preload="none"`).
+- 웹툰 열: done이고 gen이 진행 중이 아니면 [이걸로 고르기](설정과 상관없이, 문제 4). 고르면 받은 plan으로 ⑥을 바로 그린다(`loadPlan`의 `decidePlanStep`이 partial gen을 ⑤로 되돌리지 않게).
+- 나란히 보기(두 final done): 웹툰·실사 영상(`preload="metadata"`), [같이 재생](둘 다 0초부터), [멈춤](둘 다), 한쪽을 옮기면 다른 쪽을 같은 시간으로(되부름은 한 번 건너뛰고 0.05초 안은 옮기지 않는다), [소리: 웹툰]↔[소리: 실사](기본 웹툰 켬·실사 음소거).
+- 테이크 행 실사 칸: 회차가 있으면 웹툰 칸과 같은 `cutCell`(배지·영상·실패 문구·[실사 다시]·보낸 지시서). 소리 거절 칸(`failureKind:"audio"`)에는 [소리 없이 다시 만들기](`POST /generate/retry {segId, variant, audio:false}`)가 웹툰·실사 모두, 설정을 꺼도 보인다.
+- 상태 띠: take 웹툰이 done이고 실사 회차가 없으면(실사 열을 그릴 때) "웹툰 영상이 준비됐습니다. 실사 버전을 만들거나 웹툰을 골라 사운드로 넘어가세요."
+- 글은 모두 `textContent`(`el`)로 넣고, 영상 `src`·내려받기 `href`는 응답의 presigned URL만 쓴다(lr-n이 `<img onerror>` 문구와 가짜 DOM의 innerHTML 0회를 본다).
+
+끔(`VNEW_TAKE_REAL=false`)이면 `POST /generate/real`이 404 `TakeRealDisabled`, `gen_view.realEnabled`가 false라 회차가 없는 gen은 C 이전 화면이다. 진행 중인 회차는 끝까지 가고(드라이버는 설정을 보지 않는다) 그 결과는 화면에 보인다. 소리 거절 처리([소리 없이 다시 만들기] 포함)와 결함 수정 1~4는 끔에서도 그대로다(R0.3 예외, lr-o).
+
+**사용자가 개발계에서 써 보는 순서**(C 배포 뒤, 유료 단계는 설계자 승인 뒤)
+
+1. ③ 콘티: 콘티를 만들고 [기호·분위기 채우기 (빈 컷 n개 · 영어 옮기기 m개)] → 확인창 금액(약 $X) 확인 → 칩·분위기를 고친다. 기호·분위기만 고친 저장은 프리비즈 승인을 풀지 않는다(VA-1).
+2. 캐릭터 메이커: 인물마다 상세의 「실사 캐스팅」에서 느낌·성별·외모 문장을 확인하고 [실사 캐스팅 뽑기 (2장 · $0.08)] → 사진을 [이 사진으로] 고른다. 고르지 않으면 실사 정면을 쓴다(VB-1).
+3. ④ 프리비즈: 설계 → 승인 → 녹화를 마친다(지금과 같다).
+4. ⑤ 영상: 통 테이크 모델(Seedance 2.5 reference-to-video)로 [영상 만들기] → 웹툰 통 테이크가 끝날 때까지 기다린다(VA-2). 상태 띠가 "웹툰 영상이 준비됐습니다. …"로 바뀐다.
+5. 실사 열 [실사 버전 만들기 ($X.XX)] → 확인창의 테이크 수·초·금액과 "소리도 만들기"를 확인하고 [만들기 시작] → 진행 막대(완료/전체)를 본다(VC-1, 480p 15초 ≈ $3.08). 소리 거절이 나오면 그 테이크 행의 [소리 없이 다시 만들기](VC-3).
+6. 실사가 끝나면 아래 「나란히 보기」에서 [같이 재생]·한쪽 시간 옮기기·[소리: 웹툰/실사]로 비교하고, 원하는 열의 [이걸로 고르기] → ⑥ 사운드. 다시 만들면(VC-2) 이전 결과는 "이전 실사 보기"에 남는다.
 
 ### 3.7 `stitcher.py`
 
@@ -373,7 +409,7 @@ B의 남은 위험(design §7):
 등록 조건: `VIDEO_GEN_ENABLED and VPOC2_ENABLED`(`server.py:6986`), 블루프린트 내부에서도 404(`vpoc2/routes.py:70-73`). 전부 `require_auth`.
 `/meta`·`/runs` (GET), `/runs` (POST), `/runs/<id>` (GET), `/runs/<id>/input`·`interpretation`·`prompts/<shot>` (PUT), `/runs/<id>/characters/<c>/confirm` (POST), `/runs/<id>/run/<action>` (POST: interpret·draw·prepare·generate·retry·stitch), `/runs/<id>/back` (POST), `/runs/<id>/review` (PUT), `/reviews` (GET)(`vpoc2/routes.py:76-152`). 목 모드 전용 `/_local/<bucket>/<key>`(`:155-165`).
 
-### 4.4 `/api/vnew` (블루프린트 `vnew`, 45개)
+### 4.4 `/api/vnew` (블루프린트 `vnew`, 50개 — vnew-live-fx 5개 포함)
 
 전부 `require_auth`. 계획 API(`/p/<pid>/...`)는 추가로 프로젝트 권한 + 트랙 `video_new` 확인(`vnew/routes.py:260-282`).
 
@@ -385,6 +421,7 @@ B의 남은 위험(design §7):
 | 장소 | `/p/<pid>/locations/<lid>/build`, `/locations/build-all` (POST), `/locations/<lid>` (PUT), `/locations/<lid>/photos` (POST), `/photos/<id>` (PUT·DELETE·GET) | `:435-529` |
 | 프리비즈 ④ | `/p/<pid>/previz/design`·`approve`·`brief` (POST), `/previz/scene` (PUT), `/previz/recordings/<seg>`·`/frames`·`/finish` (POST), `/previz/texture`·`panel` (GET) | `:555-690` |
 | 생성 ⑤ | `/p/<pid>/cast-notes`, `/generate`, `/generate/retry`, `/select` (POST) | `:714-769` |
+| vnew-live-fx(2026-10-30, 5개 추가 → 50개) | A `/p/<pid>/conti/fx` (POST, `VNEW_FX`), B `/characters/<id>/casting` (PUT)·`/casting/draw`·`/casting/choose` (POST, `VNEW_CASTING`), C `/p/<pid>/generate/real` (POST, `VNEW_TAKE_REAL`). 설정을 끄면 404(프로젝트를 보기 전). retry 본문에 `audio`(bool, C1) | `:243-290`, `:467`, `:824-847`(C3 뒤 줄 번호) |
 
 ### 4.5 `VNEW_ENABLED=false`일 때 `/api/vnew`가 정말 없는가 — 코드 확인 결과
 
@@ -572,6 +609,7 @@ vpoc·vnew의 Bedrock 도구 호출은 전부 `vpoc.llm._converse`(`vpoc/llm.py:
 | `VNEW_FX_MAX_PANELS` | `vnew/settings.py:166`(`_int`), `plan._fx_blocks`·`_fx_estimate_usd` | 20 | 키 없음(코드 기본) | — | — |
 | `VNEW_CASTING` | `vnew/settings.py:171`(`_bool`), `casting.require_enabled`·`view`, `characters._analyze_tool`·`_analyze_system`·`analyze_sources`, `generate._char_entries`, 화면 `detail.casting.enabled` | true | true | — | —(VNEW 꺼짐이라 영향 없음) |
 | `VNEW_CASTING_MODEL`·`_USD`·`_COUNT`·`_SIZE`·`_STALL_S`·`_POLL_MAX_S` | `vnew/settings.py:173-180`, `casting.py` | Seedream 4.5 t2i · 0.04 · 2(1~4) · 1920x2560 · 600 · 900 | 키 없음(코드 기본) | — | — |
+| `VNEW_TAKE_REAL` | `vnew/settings.py:186`(`_bool`), `generate._require_take_real`(`start_real`·`POST /generate/real`)·`_real_block_text`·`gen_view.realEnabled`, 화면 `takeRealShown` | true | true | — | —(VNEW 꺼짐이라 영향 없음) |
 
 `VNEW_PREVIZ_COLLISION`(084 작업 1, 2026-10-28)은 앱 env(`k8s/workloads.yaml.tmpl`의 `VNEW_ENABLED` 바로 뒤)와 base(`deploy/config.env.example`의 `VNEW_ENABLED` 뒤)에 배선돼 있다. false면 보정·앉을 자리(`sit`)가 없고 엉덩이 0.5(지금 동작)다. 설계는 시작 때 읽은 값으로 끝낸다. 되돌림 배선 검사 `PARITY_ENV_KEYS`(rw-a~c)에 들어 있다.
 
@@ -580,6 +618,8 @@ vpoc·vnew의 Bedrock 도구 호출은 전부 `vpoc.llm._converse`(`vpoc/llm.py:
 `VNEW_FX`(vnew-live-fx 묶음 A, 2026-10-30)는 템플릿·base 모두 `VNEW_PREVIZ_SUPPORT` 바로 뒤에 배선돼 있고 `PARITY_ENV_KEYS`에 들어 있다(rw-a~c, fx-m). 되돌리기는 `config.<target>.env`에 `VNEW_FX=false` 한 줄이다. false면 `POST /conti/fx`가 404, 콘티 만들기에 채우기 호출이 없고, `update_conti`가 지금처럼 늘 승인을 풀며, 통 테이크·컷 단위 프롬프트와 분석·의상 읽기 SYSTEM이 구현 전과 글자 하나 다르지 않다(fx-i sha256). 화면은 `plan_view.features.fx`로 칩·버튼·④ 한 줄을 숨긴다. 이미 저장된 컷 필드(`fx`·`fxSuggest`·`fxDrawn`·`moodKo`·`moodEn`)와 `plan.fxFill`은 지우지 않는다. 채우기 스레드는 시작 때, 프롬프트는 제출 때 설정을 읽는다(진행 중인 채우기는 끝까지 간다). `VNEW_FX_MAX_PANELS`는 코드 기본값만 쓴다.
 
 `VNEW_CASTING`(vnew-live-fx 묶음 B, 2026-10-30)은 템플릿·base 모두 `VNEW_FX` 바로 뒤에 배선돼 있고 `PARITY_ENV_KEYS`에 들어 있다(rw-a~c, cast-m). 되돌리기는 `config.<target>.env`에 `VNEW_CASTING=false` 한 줄이다. false면 캐스팅 라우트 3개가 404 `CastingDisabled`, 상세 `casting`이 `{enabled:false}`(화면 칸·뽑는 중 폴링 없음), 분석 도구·SYSTEM이 B 이전과 같고(cast-d sha256), `generate._char_entries`에 `castingKey`가 없다(cast-k). 이미 저장된 `char.casting`은 지우지 않고, 진행 중인 뽑기는 끝까지 간다(뽑기 스레드는 시작 때 설정을 읽는다). 나머지 `VNEW_CASTING_*`는 코드 기본값만 쓴다.
+
+`VNEW_TAKE_REAL`(vnew-live-fx 묶음 C, 2026-10-30)은 템플릿·base 모두 `VNEW_CASTING` 바로 뒤에 배선돼 있고 `PARITY_ENV_KEYS`에 들어 있다(rw-a~c, lr-o). 되돌리기는 `config.<target>.env`에 `VNEW_TAKE_REAL=false` 한 줄이다. false면 `POST /generate/real`이 프로젝트를 보기 전에 404 `TakeRealDisabled`, `gen_view.realEnabled`가 false(`realBlock` "실사 버전 기능이 꺼져 있습니다.")라 실사 회차가 없는 gen은 C 이전 화면("건너뜀")이다. 이미 시작한 회차는 드라이버가 끝까지 진행하고(드라이버·제출은 설정을 보지 않는다) 결과는 화면에 보인다. 소리 거절 처리([소리 없이 다시 만들기])와 결함 수정(`_fail_variant`·`_gen_stale` `activeSince`·take 웹툰 고르기)은 설정과 상관없다(R0.3 예외). 저장된 `realRun`·`realHistory`·`units[].real`·`final-real-r{n}.mp4`는 지우지 않는다. **코드 이미지를 C 이전으로 되돌릴 때**는 진행 중인 실사 회차를 먼저 취소한다(옛 `_do_submit_take`는 실사 칸을 제출하지 않고 돌아가 preparing·queued를 30분까지 오간다, 093 운영성 리뷰).
 
 073 새 키 5개(위 `VPOC_ARK_SEEDANCE_ENABLED`~`VPOC_FAL_SEEDANCE_TAG_STYLE`)는 앱 env(`k8s/workloads.yaml.tmpl:298-311`)와 base(`deploy/config.env.example:368-392`)에 배선돼 있어 오버레이 한 줄로 바꿀 수 있다. 템플릿이 env를 늘 설정하므로 base 값이 실제 기본값이다. 빈 값의 뜻: `FAMILY` 빈 값은 계열 라우팅 끔(070 동작), `PROMPT_MAX_OVERRIDES` 빈 값은 덮어쓰기 없음(caps·2,500), `TAG_STYLE` 빈 값·틀린 값은 `at`(design.md §6).
 
@@ -753,9 +793,9 @@ flowchart LR
 
 ## 10. 테스트·검증 도구
 
-### 10.1 `tools/check_vpoc.py`(CI 유일 검사기, 22,670줄)
+### 10.1 `tools/check_vpoc.py`(CI 유일 검사기, 24,832줄)
 
-`main()`이 아래 56개를 순서대로 부른다(`check_vpoc.py:22600-`). 실패가 하나라도 있으면 종료 코드 1. 외부 호출은 모듈 래퍼를 monkeypatch 하고 S3는 메모리 저장소로 바꾼다(예: `:892` "메모리 S3", `:916`, `:1216`, `:1930`). 새 기본값(`VNEW_FX` 켬)에서 기대값이 달라지는 기존 검사 3개(`check_vnew_plan`·`check_vnew_locations`·`check_vnew_previz`)는 `main()`의 부르는 줄에서 `_run_fx_off(...)`(`_pin_vnew(VNEW_FX=False)`)로, `VNEW_CASTING` 켬에서 달라지는 `check_vnew_fx_prompt` 1개는 `_run_casting_off(...)`(`:22594`)로 끔 고정한다. 본문·기대값은 그대로다.
+`main()`이 아래 58개를 순서대로 부른다(`check_vpoc.py:24760-`). 실패가 하나라도 있으면 종료 코드 1. 외부 호출은 모듈 래퍼를 monkeypatch 하고 S3는 메모리 저장소로 바꾼다(예: `:892` "메모리 S3", `:916`, `:1216`, `:1930`). 새 기본값(`VNEW_FX` 켬)에서 기대값이 달라지는 기존 검사 3개(`check_vnew_plan`·`check_vnew_locations`·`check_vnew_previz`)는 `main()`의 부르는 줄에서 `_run_fx_off(...)`(`_pin_vnew(VNEW_FX=False)`)로, `VNEW_CASTING` 켬에서 달라지는 `check_vnew_fx_prompt` 1개는 `_run_casting_off(...)`(`:24754`)로 끔 고정한다. 본문·기대값은 그대로다.
 
 | 접두어 | 검사 함수 | 대상 |
 |---|---|---|
@@ -769,6 +809,7 @@ flowchart LR
 | vnew previz 받침 | `check_previz_support`(sr-a~m, 2026-10-29) | `previz_support` 전 함수, `previz_grammar` emit_shot `supports`·SYSTEM·`normalize_grammar`·`GRAMMAR_VERSION`, `previz._read_grammars` 캐시 판 올림·`_design_prompt` 받침 줄(끔 = 변경 전 sha256)·`run_design` 받침 맞춤·`fit.support`, `previz_schema` 컷 인물 `support`, `previz_collision.solve_legs` `feet`, `vnew.js` `previzSupportText`(node 실행)·`vnew.css`, 배선. test3 실측 장면 + Astra 1m 가로대 → 윗면 0.561m. sr-m은 test3 실제 패널 읽기 3종(몸·받침 화면 밖)이 자세·소품을 바꾸지 않는지 본다 |
 | vnew 기호·분위기 | `check_vnew_fx`(fx-a~g·fx-m·fx-n 저장 쪽), `check_vnew_fx_prompt`(fx-h~k·fx-n 프롬프트 쪽), `check_vnew_fx_screen`(fx-l), 2026-10-30 | `vnew/fx.py` 전 함수, `plan` 저장 규칙·채우기 호출(가짜 `vnew.conti.fx`)·작업·`plan_view`, `POST /conti/fx`(별도 Flask 앱), 배선, `generate._take_prompt`·`_cut_prompt`(끔 = 변경 전 sha256 5종 `_FX_PROMPT_SHA_OFF`, 켬 바이트·단계 출력)·`_cast_notes_system`, `characters._analyze_system`, `vnew.js` 기호 구역(순수 함수·DOM 조립을 node 가짜 DOM으로 실행)·`vnew.css`, 운영 오류 문구(`USER_FACING_KINDS`). 고정 입력은 기존 take 검사 값(`_fx_take_fixture`·`_fx_cut_fixture`) |
 | vnew 실사 캐스팅 | `check_vnew_casting`(cast-a~m, `:21336`, 2026-10-30) | `vnew/casting.py` 전 함수(문장·성별·뽑기·이어하기·고르기·보기, 가짜 fal 큐·내려받기·원장·스레드), `characters` 분석 도구·SYSTEM(끔 = 변경 전 sha256)·`genderEn`·`casting_key`·`_casting_detail`, 캐스팅 라우트 3개(별도 Flask 앱), 배선. cast-k: `generate._char_entries.castingKey`·`_real_front_key`(고름·안 고름·끔), 캐스팅을 골라도 컷 단위 Kling payload 2종이 그대로(결정 4). cast-l: `vnew.js` 캐스팅 구역(문구 함수·`castingSection`·`schedulePoll`)을 node 가짜 DOM으로 실행(`_CAST_SCREEN_NODE_HARNESS`·`_cast_screen_problems`)·`vnew.css`·`node --check`·운영 문구 9종(`USER_FACING_KINDS`) |
+| vnew 통 테이크 실사 버전 | `check_vnew_take_real`(lr-a~m, `:23104`), `check_vnew_take_real_screen`(lr-n·lr-o, `:24490`), 2026-10-30 | lr-a~m: `start_real`·`POST /generate/real`·실사 payload·프롬프트(웹툰 sha256 그대로 `_LR_TAKE_SHA_ON`)·드라이버·병합·소리 거절(`vpoc.fal.poll`)·`_fail_variant`·`_gen_stale`·재시작·취소·`select`·`gen_view`·세마포어(하네스 `_LrEnv`: 가짜 fal 제출·조회·취소·concat·원장·캐릭터, urlopen 막음). lr-n: `vnew.js` ⑤ 결과·실사 열·확인창·나란히 보기·테이크 행·`cutCell` 소리 없이 다시·`schedulePlanPoll`을 잘라(`_LR_SCREEN_SLICES`) node 가짜 DOM으로 실행(`_LR_SCREEN_NODE_HARNESS`·`_lr_screen_problems`), 배선·`vnew.css`·`node --check`. lr-o: 설정·배선, `_LrEnv`의 실제 `gen_view`(끔·소리 거절·켬·회차 중 끔)를 화면 함수에 넣고 화면이 만든 요청 본문을 Flask 라우트에 그대로 보낸다 |
 
 ### 10.2 기타 도구
 

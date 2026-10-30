@@ -1326,10 +1326,22 @@ _REJECT_LIKENESS_MSG = (
 _REJECT_SENSITIVE_MSG = (
     "fal이 결과 영상에 민감한 내용이 있다고 판단해 거절했습니다. 장면 설명을 바꿔 다시 만들어 주세요."
 )
+# vnew-live-fx C.6: 소리 검사 거절("Output audio has sensitive content."). 영상 내용 거절과 문구를 나눠 화면이
+# '소리 없이 다시 만들기'를 보이게 한다. vpoc ②도 같은 문구를 받는다(결정 8).
+_REJECT_AUDIO_MSG = (
+    "fal이 결과 영상의 소리(대사·효과음)에 민감한 내용이 있다고 판단해 거절했습니다. "
+    "'소리 없이 다시 만들기'로 다시 만들 수 있습니다."
+)
+
+
+def _is_audio_rejection(text) -> bool:
+    """원문에 audio 와 sensitive 가 둘 다 있으면 소리 검사 거절로 본다(fal 문구가 바뀌어도 두 낱말만 본다)."""
+    low = str(text or "").lower()
+    return "sensitive" in low and "audio" in low
 
 
 def rejection(detail: str, http: str = "") -> tuple[str, str]:
-    """fal 거절 본문 → (종류, 사용자 문구). 종류는 likeness · sensitive · other(design.md §13.3).
+    """fal 거절 본문 → (종류, 사용자 문구). 종류는 likeness · audio · sensitive · other(design.md §13.3, vnew-live-fx C.6).
 
     문구에는 영어 원문 'real person' 이 없다 — vnew `_user_facing_error` 를 지나도 바뀌지 않는다.
     other 는 원문 요지(error_gist, 200자 — URL 쿼리·data URI·키 제거)를 붙인다.
@@ -1337,6 +1349,8 @@ def rejection(detail: str, http: str = "") -> tuple[str, str]:
     low = str(detail or "").lower()
     if "likenesses of real people" in low or "real person" in low:
         return "likeness", _REJECT_LIKENESS_MSG
+    if _is_audio_rejection(low):
+        return "audio", _REJECT_AUDIO_MSG
     if "sensitive content" in low:
         return "sensitive", _REJECT_SENSITIVE_MSG
     gist = error_gist(detail, 200) or str(http or "").strip() or "알 수 없는 오류"
@@ -1358,6 +1372,10 @@ def poll(invocation_arn: str, output_prefix: str) -> dict:
     if raw_status != "COMPLETED":
         # 알 수 없는 상태나 오류. status 응답의 error 를 원문 그대로 싣는다.
         message = _error_detail(json.dumps(status_result, ensure_ascii=False)) or raw_status
+        if _is_audio_rejection(message):
+            # vnew-live-fx C.6: 소리 검사 거절이면 원문 대신 안내 문구와 failureKind. 그 밖은 지금 dict 그대로.
+            log.info("vpoc.fal.rejected request=%s kind=audio http=-", request_id)
+            return {"status": "Failed", "failureMessage": _REJECT_AUDIO_MSG, "usage": None, "failureKind": "audio"}
         return {"status": "Failed", "failureMessage": message or "상태가 비어 있습니다.", "usage": None}
 
     # 완료 — 결과 본문을 받는다.
@@ -1375,8 +1393,13 @@ def poll(invocation_arn: str, output_prefix: str) -> dict:
             kind,
             exc.kind[len("HTTP"):],
         )
+        if kind == "audio":
+            return {"status": "Failed", "failureMessage": message, "usage": None, "failureKind": "audio"}
         return {"status": "Failed", "failureMessage": message, "usage": None}
     if isinstance(result, dict) and result.get("error"):
+        if _is_audio_rejection(result.get("error")):
+            log.info("vpoc.fal.rejected request=%s kind=audio http=-", request_id)
+            return {"status": "Failed", "failureMessage": _REJECT_AUDIO_MSG, "usage": None, "failureKind": "audio"}
         return {
             "status": "Failed",
             "failureMessage": str(result.get("error"))[:500],

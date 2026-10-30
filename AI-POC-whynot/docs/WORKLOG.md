@@ -617,3 +617,196 @@
   4. 거절 요지는 fal 원문(영어)이라 한국어 문구 뒤에 영어가 붙는다(예: "(fal: Image has sensitive content.)").
   5. 091 남은 이슈 1(참고 구현 원문 없음)·4(제출 직후 파드가 죽으면 1건 과금 가능, 재시작 뒤 최대 10분 "만드는 중")는 그대로다.
   6. VB-1(남·여 캐스팅 2장씩, $0.16)·VB-2(뽑는 중 재시작)는 개발 배포 뒤 설계자 승인으로 한다.
+
+### vnew-live-fx 묶음 C — C1·C2 소리 거절·기존 결함, 실사 회차 시작·제출·병합 (Kiro, claude-opus-5.5)
+- **범위**: tasks.md C1·C2만 했다. C3(화면 `vnew.js`·`vnew.css`, lr-n·lr-o, `docs/ANALYSIS.md`)는 하지 않았다. 커밋·push 하지 않았다. 사용자 데이터·참고 구현 폴더는 읽지 않았다.
+- **바꾼 것**
+  - `vpoc/fal.py`: `_REJECT_AUDIO_MSG`(design 원문), `_is_audio_rejection`(신규, audio+sensitive 두 낱말), `rejection`(likeness → audio → sensitive 순서), `poll`(거절 4xx·status 오류·결과 error 세 경로에서 소리 거절이면 `failureKind:"audio"`·안내 문구, 그 밖의 dict 는 그대로).
+  - `vnew/generate.py`
+    - C1: `_fail_variant`(previz-take 실사 실패가 gen 을 partial 로 바꾸지 않음, `kind` 인자 → `failureKind` 저장·지움), `_audio_kind`(신규), `_gen_stale`(`activeSince` 우선), `_do_poll_previz`(Failed → `kind`), `retry_segment`(`audio` 인자, previz-take 는 `realRun` 이 있을 때 실사, `failureKind`·error 비움, `activeSince`), `_submit_take`(`audio` 인자).
+    - C2: `final_real_run_key`, `REAL_HISTORY_MAX`, `_require_take_real`, `real_estimate`, `_real_ready_error`, `_real_missing_names`, `_real_run_summary`, `_empty_real_state`, `start_real`, `_real_block_text`, `REAL_TAKE_STYLE`·`REAL_TAKE_RULE_REPLACE`·`REAL_TAKE_AVOID`, `_real_action`, `_with_real_expressions`, `_assert_no_webtoon`, `_take_prompt(variant)`, `_real_look`, `_real_appearance`, `_take_payload(variant)`, `_take_location_jpeg(variant)`, `_do_submit_take`(실사 경로·검사 단계 `check`·실사 draftId 는 칸에), `_do_concat`(회차 키·n), `select_variant`(previz-take 조건), `gen_view`(`realRun`·`realHistory`·`realEstimate`·`canStartReal`·`realBlock`·칸 `failureKind`·`audio`·`finalReal.n`).
+  - `vnew/routes.py`: `POST /p/<pid>/generate/real`(신규), retry 본문 `audio`(bool 만).
+  - `vnew/settings.py`: `VNEW_TAKE_REAL`(기본 true). `k8s/workloads.yaml.tmpl`·`deploy/config.env.example`: `VNEW_CASTING` 바로 뒤, 되돌리기 주석.
+  - `vpoc/errors.py`: `USER_FACING_KINDS` 에 `TakeRealDisabled`·`RealNotReady`·`RealRunning`·`RealPromptWebtoon`.
+  - `tools/check_vpoc.py`: `_LR_TAKE_SHA_ON`(lr-e 기준값, 코드 변경 전에 잼), `check_vnew_take_real`(lr-a~m)과 하네스 `_LrEnv`·`_LrStore`·`_LrSem`·`_lr_char`, 상수 `_LR_*`, `PARITY_ENV_KEYS` 에 `VNEW_TAKE_REAL`, `main()` 끝에서 호출.
+- **결정**
+  - D1 — 소리 거절은 원문에 audio 와 sensitive 가 둘 다 있을 때만 본다(`_is_audio_rejection`). likeness 판정이 먼저다. 로그는 거절 4xx 경로 `vpoc.fal.rejected request= kind=audio http=422`, status·결과 error 경로 `http=-`(원문 없음). 대안: 정확한 문구 일치(기각 — fal 문구가 조금만 바뀌어도 버튼이 사라진다).
+  - D2 — `retry_segment` 의 `activeSince` 는 옛 순차 모드 다시 시도에도 둔다(design C.10 은 모드를 가리지 않는다. 30분 지난 옛 gen 도 같은 결함이 있다). previz-take 실사 다시 시도는 `finalReal` 을 `waiting` + 지금 회차 `n` 으로 둔다.
+  - D3 — **실사 외형(design 과 다름, 확인 필요)**: design 은 `casting.lookEn`(없으면 `look_sentence`)을 `_short_appearance(…, 170)` 하라고 했지만, `look_sentence` 는 옷까지 쉼표로 이은 한 문장이라 `_short_appearance`(문장 단위로 옷 낱말 문장을 버림)를 지나면 늘 빈 값이 된다. `_real_appearance` 를 두어 쉼표 조각마다 `_short_appearance` 의 옷 판정을 빌려 옷 조각만 빼고, `strip_drawing_words` 뒤 단어 경계 170자로 자른다. 예: "Korean man in his late 20s, short black anime-style hair, sharp eyes, wearing a black dress shirt" → "Korean man in his late 20s, short black style hair, sharp eyes". 문장은 `characters.load_char` 로 다시 읽어 `casting.current_look`(캐스팅 켬)·`auto_look`(끔)으로 만든다(실사 제출 1회에 인물당 char.json 1회 더 읽음). 대안: design 그대로(기각 — 외형이 늘 비어 사진만 남는다), `_char_entries` 에 문장 추가(기각 — B 함수·결정 4 범위를 넓힌다).
+  - D4 — `start_real` 의 인물 확인은 charId 가 있는 배우만 본다. charId 없는 엑스트라는 웹툰 테이크도 사진 없이 보내므로 막지 않는다. 사진 없는 인물의 ASSETS 문장에는 "(photo)"·COSTUME 대체 문장을 넣지 않는다.
+  - D5 — 실사 회차(`realRun`)가 없는데 실사 칸이 선점되면(옛 데이터·수동 수정) 제출하지 않고 "실사 회차가 없어 제출하지 않았습니다."로 실패시킨다. design("있을 때만 진행")대로 그냥 돌아가면 칸이 preparing 으로 남아 300초마다 다시 선점된다.
+  - D6 — 실사 `draft_id` 는 칸(`unit.real.draftId`)에 둔다. 웹툰 테이크의 `unit.draftId` 를 덮어쓰지 않는다(구현 중 발견).
+  - D7 — 실사 프롬프트: FX 조각이 없으므로 `fxShort` 단계를 넣지 않는다. 줄이기 단계를 더할지는 실사 표현(배경 기호만이면 빈 값)·분위기로 판단한다. 최소형에서 연기를 남기는 후보는 실사 표현을 함께 남긴다. 그림 낱말 제거는 외형·의상·목소리·연기·분위기·HARMONY 에 한다(목소리는 design 목록 밖이지만 같은 이유로 더했다). 웹툰 경로는 호출·로그·글자가 지금과 같다(lr-e sha256 4종).
+  - D8 — 로그: 웹툰 로그 형식은 그대로 두고 실사만 꼬리표를 붙인다. `vnew.gen.take_prompt variant=real bytes= steps=`, `vnew.gen.take_submit … ms= variant=real`, `vnew.gen.take_submit_failed … stage=check err=… variant=real`, `vnew.gen.real_start pid= n= takes= usd= audio=on|off`. 실사 `final_copy`·`final_concat` 은 기존 `variant=real` 로그를 쓴다.
+  - D9 — 라우트는 `VNEW_TAKE_REAL` 을 프로젝트를 보기 전에 본다(fx·캐스팅과 같다). `confirmUsd` 는 숫자·숫자 문자열만 받고 bool·None·NaN·무한은 400 `NoConfirmUsd`(기존 ⑤ 생성 라우트는 `float("abc")` 가 500 이다 — 바꾸지 않았다). 금액은 원장 기록용이고 생성을 막지 않는다(결정, 기존과 같다).
+  - D10 — `USER_FACING_KINDS` 에 4종을 더했다. 던지는 곳이 모두 고정 문구다(lr-a 가 ast 로 확인). `CharacterRealMissing`·`FalKeyMissing`·`NoConfirmUsd` 는 이미 있다. `CostMismatch` 는 B 와 같은 이유로 넣지 않았다(화면이 보낸 금액이 문구에 들어간다).
+  - D11 — `realHistory` 상태: finalReal done → done, 취소된 칸 → cancelled, 병합 실패·모든 칸 실패 → failed, 그 밖 → partial. `finalKey` 는 done 일 때만. 오래된 것부터 버린다(최대 3, S3 파일은 지우지 않는다).
+  - D12 — `gen_view.realBlock` 은 시작 때와 같은 순서로 이유를 고른다(설정 끔 → 회차 상태 → fal 키 → 인물 사진). 인물 확인은 take gen 이 끝났고 진행 중이 아닐 때만 캐릭터를 읽는다(GET /plan 1회에 char.json 인물 수만큼 더, `plan_view` 가 이미 같은 수를 읽는다). 확인이 예외를 내면 "" + 경고 로그(보기는 깨지지 않고 시작 때 다시 본다).
+- **기존 검사 고정·기대값**: 없음. 기존 검사 기대값을 바꾸지 않았고 새 끔 고정도 없다. pf-a~f·fx-i(sha256 5종)·tk-a~f·cast-a~m 이 그대로 통과한다.
+- **확인**
+  - `python -m py_compile`(fal·errors·generate·routes·settings·check_vpoc) 통과. `python -X utf8 tools/check_vpoc.py` 전부 통과: ok 57줄(이전 56 + lr 1), FAIL·WARN 0. `[ok  ]` 줄에 lr-a~m 이 모두 있다. rw-a 는 템플릿 env 15개다(이전 14 + VNEW_TAKE_REAL).
+  - lr-e: 웹툰 take 프롬프트 sha256 4종(6컷 기호없음 3,901B·보통 3,874B·최악 3,875B·12컷 최악 3,627B)을 `variant` 인자를 더하기 전에 재서 상수로 두었고, 기본값·`variant="webtoon"` 둘 다 같다.
+  - 실사 프롬프트(lr-d, 6컷·12컷은 fx-h 와 같은 고정 입력): 1테이크 27초 3,203B 단계 없음 · 6컷 보통 3,959B · 6컷 최악 3,941B(둘 다 `…audioShort,moodDrop,bodyShort`) · 12컷 최악 3,569B(`…bodyShort,action55,minimalTimeline`) · 12컷 기호없음 3,928B(`…minimalTimeline,motionHarmonyShort`). 모두 "webtoon" 0·≤4,000B·모든 타임스탬프.
+  - lr-c: 실사 본문 이미지·영상이 모두 `data:` 이고, 본문에서 data URI 를 지우면 http·`users/`·`rec/`·서명 URL 이 없다. 실사 @Video1 이 웹툰 테이크 본문의 것과 바이트까지 같다.
+  - 변형 검사 28개(실제 파일을 한 군데씩 바꾸고 `check_vnew_take_real` 실행 → 원래 바이트로 되돌림, sha256 확인): 27개를 잡았다. 놓친 1개는 retry 라우트의 bool 거르기를 뺀 것인데, `retry_segment` 가 같은 거르기를 한 번 더 해서 동작이 같다(동등 변형).
+  - 바뀐 줄 커버리지(`coverage run --source=app\src tools/check_vpoc.py`, coverage 7.17, C 이전 사본과 difflib): 실행 대상 298줄 중 298줄(100%). `fal.py` 14/14, `generate.py` 258/258, `routes.py` 25/25, `settings.py` 1/1, `errors.py` 0/0(집합 리터럴은 바뀌지 않은 첫 줄이 문장이다).
+  - 실제 fal·Bedrock 호출 0회: lr 그룹은 fal 제출·조회·취소·urlopen·LLM 을 모두 가짜·막음으로 두고 urlopen 0·LLM 0 을 스스로 확인한다(제출 30건·조회 58건 모두 가짜). boto3 API·urlopen 을 막고 기록하는 전체 실행: 새 트리·C 이전 트리 모두 s3.GetObject 시도 394·가격 조회 GET 61·같은 2개 검사 실패(`check_vnew_generate`·`check_vnew_shot_brief`, A·B 때와 같음)이고 bedrock 시도는 0이다. lr 그룹만 막고 돌리면 0·0이다.
+  - 공백만 바뀐 줄 0(`check_vpoc.py`·`generate.py` 포함 바뀐 .py 전부), 지운 함수·클래스 정의 0, 바뀐 9개 파일 CRLF 0.
+- **3단계 리뷰**
+  - 보안
+    - 외부 전송: 실사 본문의 인물 사진·장소 뷰는 `_fit_ref`(1024px) 바이트를 `_submit_take` 가 data URI 로 바꾸고, 녹화는 `_video_data_uri` 다. presigned·S3 URL 을 fal 에 보내는 경로가 없다(lr-c). `realHistory[].finalUrl` 은 브라우저용 presigned 이고 모델로 가지 않는다.
+    - 입력 검증: 라우트는 `_project_for(write=True)`(쓰기 권한·트랙). `confirmUsd` 는 유한한 숫자만, `audio` 는 bool 만 받는다. 금액은 서버가 다시 계산한다.
+    - 프롬프트 주입: 새로 프롬프트에 들어가는 사용자 글은 캐스팅 외모 문장(저장 때 `clean_text` 300자, 줄바꿈 없음)이고, `strip_drawing_words`·쉼표 조각 처리는 줄을 만들지 않는다. 남은 "webtoon" 은 `_assert_no_webtoon` 이 제출 전에 막는다(칸 failed·제출 0·원장 0, lr-d).
+    - 로그: 프롬프트·URL·키를 남기지 않는다(바이트·단계·회차 번호·금액·예외 종류만). 소리 거절 원문도 남기지 않는다.
+    - 발견: 없음(문구 4종은 고정 문자열이라 운영에서도 보이게 했다, D10).
+  - 성능(512Mi)
+    - 실사 준비(녹화 받기·이어붙이기·참고 이미지·base64·본문)는 웹툰과 같은 `_PREPARE_SEM`(1) 안에서 한 칸씩 한다. 같은 순회의 실사+웹툰 제출 합은 `VNEW_GEN_PARALLEL`(2)을 넘지 않는다(lr-m: 대기 3칸 → 첫 순회 2건, 모든 제출이 세마포어를 잡은 채, 최대 동시 1). 실사 참고 이미지는 인물 수 + 장소 1장이라 웹툰(+패널 3장)보다 적다.
+    - 외부 호출: 실사 회차 1번 = 테이크 수만큼 제출 + 5초마다 조회. 의상 읽기(LLM)는 웹툰 때 캐시라 0회다(lr-f). 실사 제출 1회에 인물당 char.json 1회, take gen 이 끝난 상태의 GET /plan 1회에 char.json 인물 수만큼 S3 읽기가 더 든다(D3·D12).
+    - 발견: 없음. 실사 프롬프트 6컷 보통은 3,959B 로 분위기가 빠진다(moodDrop, 남은 이슈 4).
+  - 운영성
+    - 되돌리기: `config.<target>.env` 에 `VNEW_TAKE_REAL=false` 한 줄. 시작만 404 이고, 진행 중 회차는 끝까지 간다(lr-j 에서 끈 채 드라이버가 done 까지 감). 소리 거절 안내·소리 없이 다시·결함 수정은 끈 상태에서도 그대로다(lr-g 를 끈 채 실행).
+    - 재시작: gen 이 running 이면 `GET /plan` 의 `ensure_driver` 가 드라이버를 살린다. preparing 300초 → queued → 다시 제출 1회, submitted 는 조회를 잇는다(lr-j). 취소는 실사 칸만 cancelled 이고 웹툰은 그대로이며, 다음 회차 기록에 cancelled 로 남는다.
+    - 진행 중 작업 회귀: 배포 때 진행 중인 웹툰 take gen 의 실사 칸은 skipped 그대로다. `activeSince` 가 없는 옛 gen 은 createdAt 으로 본다. `gen_view` 는 키만 늘었다.
+    - 발견·조치: 회차 없는 실사 칸의 무한 재선점(D5), 실사 draft_id 가 웹툰 draft_id 를 덮어씀(D6) → 고쳤다. 코드 이미지를 C 이전으로 되돌리면 진행 중 실사 칸은 옛 `_do_submit_take` 가 그냥 돌아가 preparing·queued 를 30분(GEN_STALL_S)까지 오간다 → 이미지 되돌리기 전에 진행 중 실사 회차를 취소한다(운영 계획, 남은 이슈 3).
+- **남은 이슈**
+  1. **`plan_view.features.takeReal` 을 더하지 않았다.** design §2 는 C1 이 더한다고 했지만 C 파일 목록(design §9·tasks C1·C3)에 `plan.py` 가 없고, 기존 fx-g 가 `features == {"fx": True}` 를 글자째 비교한다(B 도 `casting` 을 더하지 않았다). C3 화면은 (가) `gen.canStartReal`·`gen.realBlock`("실사 버전 기능이 꺼져 있습니다.")·`gen.realRun` 으로 판단하거나 (나) C3 파일 목록에 `plan.py` 를 넣고 켬일 때만 키를 두며 fx-g 를 부르는 줄에서 `VNEW_TAKE_REAL=False` 로 고정한다. Claude 결정이 필요하다.
+  2. 실사 외형 처리(D3)가 design 문장과 다르다. 확인이 필요하다.
+  3. 코드 이미지 되돌리기 때 진행 중 실사 회차는 먼저 취소해야 한다(운영성 리뷰).
+  4. 실사 6컷 보통(3,959B)은 분위기가 빠지고 묘사 규칙이 짧은 형이 된다. 12컷은 최소형이다(웹툰과 같은 경향). 개발계 `vnew.gen.take_prompt variant=real … steps=` 로 본다.
+  5. `strip_drawing_words` 가 낱말만 지워 "black dress shirt drawn in manga style" → "black dress shirt in style" 처럼 어색한 조각이 남을 수 있다(A1 함수, 범위 밖).
+  6. 실사 사진 참고가 Seedance likeness 거절에 걸릴 수 있다(design §7). VC-1 에서 본다. 금액 예: 480p 15초 $3.08, 30초 $6.17(`VNEW_TAKE_TOKEN_UNIT_PRICE` 0.0214).
+  7. 기존 ⑤ 생성 라우트의 `confirmUsd` 가 숫자가 아니면 500 이다(범위 밖, 바꾸지 않았다).
+  8. C3(화면·lr-n·lr-o·ANALYSIS.md)는 다음 실행이다.
+
+### vnew-live-fx 묶음 B 피드백 — 자동 외모 문장(`look_sentence`)이 실제 분석 문장 꼴에서 깨지는 5가지 (Kiro, claude-opus-5.5)
+- **범위**: `vnew/casting.py`의 `look_sentence`와 보조 함수·정규식, `tools/check_vpoc.py` cast-b, 이 기록만 바꿨다. `base_text`·프리셋 문구(cast-a 원문 고정), 뽑기·이어하기·라우트·화면, 묶음 C 코드는 바꾸지 않았다. 사용자 데이터·참고 구현 폴더는 읽지 않았다. 커밋하지 않았다.
+- **원인**: 기존 `look_sentence`는 외모와 기본 복장을 `", wearing "`으로 먼저 이은 뒤 한 덩어리로 다뤘다.
+  1. 주어 찾기가 "He is a middle-aged man"의 man 앞 "He is"를 형용사로 넣었다("a He is Korean man").
+  2. 글 속 나이는 "in his 20s" 꼴만 봤다("in his twenties"가 남아 나이가 두 번).
+  3. 기본 복장의 "He wears …"·"while his shoes are not visible"을 그대로 붙였다.
+  4. 눈 색 정규식은 "색 + eyes"가 바로 붙은 꼴만 봤다("light gray-blue almond-shaped eyes"·"with tiny near-black irises"가 남음).
+  5. 300자를 문장 끝에서 단어 경계로 잘라 뒤쪽의 머리·옷이 반쪽으로 잘리거나 빠졌다.
+- **바꾼 것**(`casting.py`, 지운 함수 없음)
+  - `look_sentence` 본문: 외모(`_look_text`)·기본 복장(`_outfit_text`)을 따로 정리 → 나이 → 머리말(`_look_head`) → 성별 낱말·dyed → 300자가 넘으면 `_fit_look`.
+  - 새 함수: `_strip_lead_verbs`·`_drop_pieces`·`_strip_eye_colors`·`_look_text`·`_outfit_text`·`_text_age`·`_look_head`·`_piece_rank`·`_look_pieces`·`_join_pieces`·`_clip_tail`·`_fit_look`.
+  - 정규식: `_EYE_COLOR`를 `_COLOR`·`_TONE`·`_COLOR_WORD`·`_EYE_NOUN`·`_EYE_STOP`·`_EYES_OF_COLOR`·`_COLOR_EYED`·`_IRIS_PIECE`로 바꿨다. `_TEXT_AGE`에 낱말 나이(twenties …)를, `_PREFIX_AGE`에 "N-year-old"를 더했다. 새로 `_TEXT_AGE_WORDS`·`_HEAD_NOUN`·`_LEAD_SUBJECT`·`_LEAD_WEAR`·`_OUTFIT_VERB`·`_HAS`·`_NOT_SHOWN`·`_PIECE_SEP`·`_LOOK_SPLIT`·`_OUTFIT_SPLIT`·`_CLAUSE_HEAD`·`_ARTICLE_HEAD`·`_ADJ_TAIL`·`_PIECE_RANKS`·`_DANGLING`을 두었다.
+  - `check_vpoc.py`: 모듈 상수 `_CAST_LOOK_FEEDBACK`(합성 5개: 남 3·여 1·모름 1)·`_CAST_LOOK_RULES`(규칙별 28경우), cast-b 조건 검사, `check_vnew_casting` 설명·통과 문구.
+- **결정**
+  - D1 — 외모와 기본 복장을 따로 정리한 뒤 잇는다. 대안: 이은 한 문장에서 처리(기각 — 복장 앞 동사와 외모 속 "wearing"을 구분할 수 없고, 조각 나누기에서 외모·옷 경계를 잃는다).
+  - D2 — 문장 첫머리 "He is / She is / They are / He has / She has / They have / He's / This man is"를 뺀다. has·have는 with로 바꾼다(주어 뒤 "… in his twenties has fair skin" → "… with fair skin"). 외모 문장 속 "He wears …"는 "wearing …", 기본 복장 앞의 "He wears / She is wearing / They wear / is dressed in"은 지운다.
+  - D3 — 나이: descriptionKo 나이가 있으면 글 속 나이 낱말("in his twenties"·"in her late 30s"·middle-aged·young adult·"25-year-old")을 모두 뺀다. **descriptionKo에 나이가 없으면** 글 속 "in his twenties"를 "in his 20s"로 바꿔 머리말에 한 번만 쓴다(10대는 D3 원칙대로 "early 20s"). 요구 2의 "나이 표현이 두 번 나오면 안 된다"를 나이 없는 캐릭터에도 지키려는 것이다. 피드백 요구 1의 예시 "a young adult Korean man in his 20s with …"는 요구 2(young adult도 뺀다)와 부딪혀 요구 2를 따랐다(결과 "a Korean man in his 20s with …").
+  - D4 — 머리말 명사에 person·guy·lady·gentleman을 더했다(`_HEAD_NOUN`). "They are a slim person …"이 "a Korean person …, a slim person …"으로 겹치지 않는다. 성별 정하기(`_SUBJECT`·`auto_gender`)는 그대로다.
+  - D5 — 눈 색: 눈 명사 앞 같은 명사구(쉼표·with·and·관사·소유격·-ing 낱말에서 멈춤, 최대 5낱말)에서 색 낱말과 그 앞 톤 낱말(light·pale·near …)만 지운다. "dark eyes"의 dark는 색이 뒤따를 때만 뺀다. "blue-eyed"·"eyes of deep blue"도 뺀다. irises·pupils는 with·and 조각이나 혼자 선 조각을 통째로 뺀다. 대안: 기존 정규식에 낱말 조합 추가(기각 — 색과 눈 사이에 끼는 모양 낱말 조합을 다 적을 수 없다).
+  - D6 — 기본 복장의 꼬리: "not visible/shown/seen/pictured", "out of frame/view", "no visible", "cropped out"이 든 조각만 뺀다("while/but …" 앞에서도 나눈다). "no tie"는 옷 정보라 남긴다. 목록 끝 "and …" 조각이 빠지면 남은 마지막 항목에 and를 다시 붙인다.
+  - D7 — 300자: 300자 이하이면 다시 잇지 않는다(기존 cast-b 기대값 13개가 글자까지 그대로). 넘으면 쉼표·세미콜론·", and"·관사 앞 " and "로 조각을 나누고 옷은 " with " 앞에서도 나눈다. 빼는 순서는 몸 세부 → 피부 → 옷 두 번째 이후 → 코·턱·눈썹(분류 안 된 조각도 여기) → 체격·키 → 안경·수염 → 얼굴형이고, 같은 순위는 뒤 조각부터 뺀다. 머리말·머리·눈 모양·옷 첫 항목은 남긴다. "facial hair"는 머리가 아니라 수염으로 본다. "a broad-shouldered, solid build" 같은 등위 형용사는 한 조각이다. 다시 이을 때 원래 목록에 and가 있었으면 남은 마지막 항목 앞에 and를 둔다.
+  - D8 — 남기는 조각만으로도 넘치면 가장 긴 조각을 넘친 만큼(한 번에 최대 절반) 단어 경계에서 줄인다. 조각마다 앞부분이 남고 끝의 옷 첫 항목이 통째로 잘려 나가지 않는다. 그래도 넘치면 전체를 단어 경계에서 자른다. 끝에 매달린 with·without·or·and·of·관사·소유격·쉼표는 지운다. 대안: 문장 끝에서 자르기(기각 — 옷 첫 항목이 사라진다, 이번 피드백 #2·#3).
+- **기존 검사**: cast-a~m 기대값을 하나도 바꾸지 않았다. 동작 변경 1건은 기존 기대값이 없는 경우다. "A man." + 복장은 전에 "a Korean man, wearing a suit"였고 지금은 "a Korean man wearing a suit"다(외모 나머지가 비면 쉼표를 넣지 않는다).
+- **확인**
+  - `python -m py_compile`(casting·check_vpoc) 통과. `python -X utf8 -m coverage run --source=app\src tools/check_vpoc.py` 전부 통과: ok 57줄, FAIL·WARN 0.
+  - 합성 5개 결과 글자 수: #1 259 · #2 289 · #3 293 · 여 285 · 모름 296. 모두 He is·She is·They are·wearing He/She/They·" has " 0회, 나이 표현 1회, 머리 조각 통째, 눈 색·irises·pupils 0회, 옷 첫 항목 있음, 끝 매달린 낱말 없음. `auto_look`·`current_look`(보기 때 계산)도 같은 문장이다. 사용자가 고친 문장은 그대로다.
+  - 새 cast-b를 원본 사본 `casting.py`로 돌리면 52줄이 실패한다(합성 5개 전부와 규칙 경우). 새 코드에서는 0줄이다.
+  - 변형 검사 17개(메모리에서 `casting.py` 소스를 한 군데씩 바꿔 `check_vnew_casting` 실행, 파일은 그대로): 17개 모두 cast-b가 잡았다. 예: has → with 빼기, 주어+동사 빼기, 옷 동사 빼기, 보이지 않음 꼬리, 주어 뒤 나이 낱말, 글 속 나이, 눈동자 조각, 섞인 눈 색, 같은 순위 순서, 순위 무시, 옷 첫 항목도 뺌, 매달린 낱말, 마지막 and, 등위 형용사, facial hair, 남기는 조각 줄이기, 옛 단어 경계 자르기.
+  - 바뀐 줄 커버리지(coverage 7.17, 원본 사본과 difflib): `casting.py` 실행 대상 219줄 중 219줄(100%). 파일 전체에서 안 탄 5줄은 이번 변경 밖(B 때와 같은 `_sleep`·`_spawn` 예외·`_poll_slot` `except _ClaimLost`)이다.
+  - 실제 fal·Bedrock 호출 0회: urlopen·socket 연결·boto3 client를 막고 기록하는 실행에서 `check_vnew_casting`의 시도가 urlopen 0·socket 0·boto3 0이다. 바뀐 함수는 순수 함수다.
+  - 바뀐 3개 파일 CR 0, 공백만 바뀐 줄 0, 지운 함수·클래스 정의 0(원본 사본과 비교).
+- **3단계 리뷰**
+  - 보안: 입력은 분석 결과 글이고 `clean_text`(제어 문자·줄바꿈 → 한 칸, 600·400자)를 그대로 지난다. 새 외부 호출·로그·저장이 없다. 정규식 역추적은 악성 입력으로 쟀다("with " 120번, ", a" 200번, 합성 색 25번 이은 낱말, 톤 낱말 110개, "-" 600자, "while not visible" 25번). 한 번 호출 최대 25ms다. fal에 가는 글은 지금처럼 cast_prompt ≤1500자 한 줄이다. 발견: 없음.
+  - 성능(512Mi): 순수 문자열 처리다. 실제 꼴 #2 한 번에 약 1ms다(1000번 977ms). 조각 빼기 루프는 조각 수만큼 다시 잇는다(최악 200조각 25ms). 보기·실사 제출 때 캐릭터마다 한 번이고 메모리 증가는 없다. 발견: 없음.
+  - 운영성: 설정 플래그는 없다. 고치지 않은 자동 문장은 저장되지 않고 보기 때 계산되므로 배포하면 기존 캐릭터도 바로 바뀐다. 되돌리기는 이미지 되돌리기다. 진행 중 뽑기는 시작 때 저장한 `casting.prompt`를 쓰므로 영향이 없다. 묶음 C 실사 테이크(`_real_appearance`)는 쉼표 조각을 그대로 받으므로 문장 모양이 같고 lr-a~m이 그대로 통과한다. 발견·조치: 남기는 조각만으로 넘칠 때 처음 구현(전체를 단어 경계에서 자름)은 옷 첫 항목을 잘라냈다 → 가장 긴 조각부터 줄이도록 고쳤다(D8).
+- **남은 이슈**
+  1. 머리색 "dyed" 판정은 그대로다. "chestnut-brown"·"ash-gray"(나이 30대)도 dyed가 붙는다(합성 여·모름). 짙은 갈색·검정·나이 든 회색만 자연색으로 본다.
+  2. 외모 문장 속 옷("…, wearing round glasses")과 기본 복장이 함께 있으면 "wearing"이 두 번 나온다(전과 같다).
+  3. "This man is tall with short hair" → "a Korean man, tall with short hair"처럼 주어 뒤 is 문장은 쉼표 조각으로 남는다(요구 범위 밖).
+  4. 조각 분류는 낱말 목록으로 한다. 목록에 없는 조각(흉터·문신 외의 새 낱말)은 코·턱·눈썹 순위로 빠진다.
+  5. 개발 데이터 3개 캐릭터에서 화면의 자동 문장이 바뀌었는지는 배포 뒤 읽기 전용으로 확인해야 한다(이번에는 사용자 데이터를 읽지 않았다).
+
+### vnew-live-fx 묶음 C — C3 실사 버전 화면·나란히 보기·소리 없이 다시·문서·리뷰 (Kiro, claude-opus-5.5)
+- **범위**: tasks.md C3만 했다. `plan.py`·fx 검사 기대값·`vpoc/fal.py`·캐스팅 서버 코드는 바꾸지 않았다. `generate.py`는 `gen_view`의 `realEnabled` 한 줄만 더했다. 커밋하지 않았다. 사용자 데이터·참고 구현 폴더는 읽지 않았다.
+- **PM 결정(093 남은 이슈) 반영**
+  - 이슈 1 → (가)를 고쳐서 썼다: `gen_view.realEnabled = bool(VNEW_TAKE_REAL)`. 화면은 previz-take이면서 `realEnabled` 또는 `realRun`이 있을 때 실사 열을 그린다. 시작 버튼은 `canStartReal`일 때만, 아니면 `realBlock` 문구. 끔 + 회차 없음은 지금 화면("건너뜀")이다.
+  - 이슈 2 → 093 D3(실사 외형 = 옷 조각을 뺀 외모 조각)을 받아들였다. 코드는 그대로다.
+  - 이슈 5(`strip_drawing_words` 어색한 조각)는 범위 밖이라 남은 이슈로 둔다.
+- **바꾼 것**
+  - `frontend/public/vnew.js`
+    - 새 구역 "통 테이크 실사 버전"(`finalResults` 바로 뒤): 상수 `TAKE_REAL_LEAD`·`TAKE_REAL_DONE_TEXT`·`TAKE_REAL_HISTORY_STATUS`, 순수 함수 `takeRealShown`·`takeRealUsdText`·`takeRealSecondsText`·`takeRealStartLabel`·`takeRealConfirmText`·`takeRealCostChangedText`·`takeRealCounts`·`takeRealState`·`takeRealProgress`·`takeRealFailedText`·`takeRealHistoryLabel`·`takeStatusText`·`takeCompareSoundLabel`·`takeCompareSound`·`takeCompareFollow`·`takeComparePlay`·`takeComparePause`, DOM `takePickButton`·`takeRealColumn`·`takeRealHistory`·`openRealConfirm`·`takeCompare`.
+    - 기존 함수: `finalResults`(take 분기: 실사 열·웹툰 [이걸로 고르기]·나란히 보기), `takeTimeline`·`takeRow`(선택 인자 `gen`, 실사 회차가 있으면 실사 칸 = `cutCell`), `cutCell`([소리 없이 다시 만들기]), `renderGenStep`(상태 띠 `takeStatusText`, `takeTimeline`에 gen).
+  - `frontend/public/vnew.css`: `vnew-real-*`(lead·block·error·start·progress·progress-fill·history·history-item·history-label·confirm-text·audio), `vnew-take-compare*`(전체 줄·row·item·tools, 좁은 화면 1열).
+  - `app/src/vnew/generate.py`: `gen_view` 반환에 `"realEnabled": bool(vnew_settings.VNEW_TAKE_REAL)` 한 줄.
+  - `tools/check_vpoc.py`: `check_vnew_take_real_screen`(lr-n·lr-o, `main()` 끝), 상수 `_LR_SCREEN_SLICES`·`_LR_SCREEN_BLOCK`·`_LR_SCREEN_CSS`·`_LR_SCREEN_WIRING`·`_LR_TAKE_DONE_TEXT`·`_LR_SKIP_NOTE`·`_LR_SCREEN_NODE_HARNESS`·`_LR_SCREEN_NODE_CASES`·`_LR_SCREEN_NODE_SERVER_CASES`, 도우미 `_lr_screen_code`·`_lr_run_node`·`_lr_screen_problems`. 기존 검사 본문은 바꾸지 않았다.
+  - 문서: `docs/ANALYSIS.md`(§3.6.1 머리·「C 구현 결과」·실사 버전 화면·"문제" 목록 상태·사용자가 써 보는 순서, §4.4 vnew 라우트 50개, §7.1 `VNEW_TAKE_REAL`, §10.1 58개·실사 버전 행), 이 기록, tasks.md C3 체크.
+- **결정**
+  - D1 — 웹툰 열 [이걸로 고르기]는 설정과 상관없이 보인다(previz-take에서 웹툰 final이 done이고 gen이 진행 중이 아닐 때). ANALYSIS §3.6.1 문제 4(take gen에서 사운드로 갈 버튼이 없다)를 고치는 것이라 R0.3 예외(결함 수정)와 같이 다뤘다. 끔 + 회차 없음에서 바뀌는 것은 이 버튼 하나이고 실사 열·테이크 행·상태 띠는 지금 그대로다. 대안: 끔이면 버튼도 숨김(기각 — take gen이 ⑥으로 갈 길이 계속 없다).
+  - D2 — [이걸로 고르기]는 `POST /select` 응답의 plan으로 ⑥을 바로 그린다(`renderPlan`). `loadPlan`을 거치면 `decidePlanStep`이 partial gen을 ⑤로 되돌려, 실사가 실패한 gen에서 웹툰을 고르고도 ⑤에 남는다(RC5.1). 기존 컷 단위 [이 영상으로 사운드 편집]은 그대로 둔다.
+  - D3 — design에 없는 [실사 버전 다시 만들기 ($X)]를 done·failed·cancelled에서 `canStartReal`일 때 둔다. VC-2(같은 gen 실사 다시 만들기)를 화면에서 하려면 필요하다. 이때 확인창에 "지금 실사 결과는 '이전 실사 보기'로 남습니다."를 더한다. 금액·문구 원문은 design 그대로다.
+  - D4 — 409 `CostMismatch`: 확인창 안에서 `GET /plan`으로 새 금액을 읽어 확인창 글을 바꾸고 "금액이 바뀌었습니다. 새 금액은 $X.XX입니다. 다시 누르면 새 금액으로 확인합니다."를 보인다. 보내지 않고, 사용자가 [만들기 시작]을 다시 눌러야 새 금액으로 보낸다(캐스팅 D6과 같은 방식). 다시 읽은 gen이 시작할 수 없으면(설정 끔·진행 중) 창을 닫고 화면을 다시 그려 `realBlock`이 보이게 한다. 응답이 오기 전에 다른 프로젝트로 옮겼으면 창만 닫는다.
+  - D5 — 실사 열 상태(`takeRealState`): finalReal done → done, finalReal failed → failed, gen running이고 진행할 칸이 있거나 모든 칸이 끝났으면(병합 대기) → running, 취소 칸만 있으면 cancelled, 그 밖 failed. 리뷰 중 고침: 실패 칸이 0인데 끝난 회차(30분 넘게 진행이 없어 보기에서 partial로 본 경우)는 "실사 테이크 0개를 만들지 못했습니다"가 되어 "실사 버전 만들기가 멈췄습니다. 다시 만들어 주세요."로 바꿨다.
+  - D6 — 나란히 보기 동기화는 `seeked`만 따른다. 한쪽이 옮겨지면 다른 쪽을 같은 시간으로 두고, 맞추려고 옮긴 쪽의 `seeked`는 한 번 건너뛴다. 0.05초 안이면 옮기지 않는다. 재생 중에는 맞추는 동안 원래 쪽이 앞으로 가 있어, 건너뛰지 않으면 되부름이 원래 쪽을 되감는다(변형 검사가 처음에 이 경우를 놓쳐 검사에 재생 중 어긋남을 넣었다). [같이 재생]은 둘 다 0초로 되감고 `play()`, 거절(자동 재생 정책)은 삼킨다. 대안: `timeupdate`마다 맞춤(기각 — 재생 중 계속 seek 해 끊긴다).
+  - D7 — 영상 `preload`: 나란히 보기는 `metadata`, 이전 실사는 `none`(누를 때까지 받지 않음). 결과 열은 지금 값(지정 없음) 그대로다.
+  - D8 — 상태 띠 새 문구는 실사 열을 그릴 때(`takeRealShown`)만 쓴다. 끔 + 회차 없음은 지금 문구다.
+  - D9 — 테이크 행 실사 칸은 `takeRow` 안에서 회차가 있을 때 먼저 돌아가는 분기로 넣어 기존 "건너뜀" 블록의 들여쓰기를 바꾸지 않았다. `takeTimeline`·`takeRow`의 `gen`은 선택 인자라 없으면 지금과 같다.
+  - D10 — [소리 없이 다시 만들기]는 칸이 failed이고 `failureKind === "audio"`일 때만 [다시] 옆에 둔다. 누르면 [다시]도 막아 두 번 제출되지 않게 한다. 웹툰·실사·설정 끔 모두 같다.
+- **기존 검사 고정·기대값**: 없음. 기존 검사 기대값을 바꾸지 않았고 새 끔 고정도 없다. cast-a~m·fx-a~n·lr-a~m이 그대로 통과한다.
+- **확인**
+  - `node --check frontend/public/vnew.js` rc 0, `python -m py_compile`(generate·check_vpoc) 통과. `python -X utf8 tools/check_vpoc.py` 전부 통과: ok 58줄(이전 57 + lr 화면 1), FAIL·WARN 0.
+  - lr-n: 문구 함수 10종 결과와 DOM(회차 없음·시작 못 함·끔·진행 2종·done·이전 실사·실패·취소·병합 실패·영상 주소 없음·진행 중 done, 확인창 9경우, 나란히 보기 동작 6단계, 고르기 3경우, 테이크 행 7경우, 폴링 5경우)을 node 가짜 DOM에서 실행해 textContent·클래스·요청 본문을 design 문구와 비교한다. `<img onerror>` 문구가 글자 그대로 남고 innerHTML 0회, 영상 src 4종이 모두 응답 presigned URL이다.
+  - lr-o: `_LrEnv`(가짜 fal·S3·원장)에서 실제 `gen_view` 4종(끔·끔 소리 거절·켬 27초·회차 중 끔)을 만들어 같은 화면 함수에 넣고, 화면이 만든 요청 2건(`/generate/retry {audio:false}`, `/generate/real {confirmUsd, audio:true}`)을 Flask 라우트에 그대로 보냈다. 끔 → 시작 404 `TakeRealDisabled`·`realEnabled` false·회차 없음·화면은 지금 그대로, 소리 거절 다시 만들기 본문 `generate_audio:false`·done, take 웹툰 고르기 200·`_gen_stale` activeSince·`_fail_variant` running 유지, 켬 → 화면 금액($5.55)으로 202, 회차 중 끔 → done까지 가고 실사 결과·나란히 보기가 보인다. urlopen 0·Bedrock 0.
+  - 변형 검사 26개(실제 파일을 한 군데씩 바꾸고 `check_vnew_take_real_screen` 실행 → 원래 바이트로 되돌림, sha256 확인): 26개 모두 잡았다. 예: 확인창 금액 빠짐, 소리 기본 끔, audio 안 보냄, CostMismatch 뒤 바로 보냄·다시 읽기 없음, realEnabled·realRun 무시, 되부름 막기 없음, 되감기 없음, play 거절 안 삼킴, 소리 둘 다, innerHTML, presigned가 아닌 src, 소리 없이 audio·조건 빠짐, takeRow에 gen 안 넘김, 상태 띠, 웹툰 고르기 없음, 고르기 뒤 loadPlan, 진행 중 고르기, realBlock 숨김, 이전 실사 순서, 진행 문구, 나란히 보기 조건, CSS, `realEnabled` 상수.
+  - 바뀐 줄 커버리지(C1~C3, `coverage run --data-file=%TEMP%\kiro_c3\cov.data --source=app\src tools/check_vpoc.py`, coverage 7.17, C 이전 사본 `C:\dev\ai\_bak_vnew_c12`와 difflib): 실행 대상 298줄 중 298줄(100%). `fal.py` 14/14, `generate.py` 258/258, `routes.py` 25/25, `settings.py` 1/1, `errors.py` 0/0. C3의 `realEnabled` 줄은 `return {…}` 문장의 일부라 coverage가 따로 세지 않는다(그 문장은 실행됨, lr-o가 켬·끔 값을 본다). JS는 coverage.py 밖이고 lr-n·lr-o가 새 함수 전부를 node로 실행한다.
+  - 위생(C3 이전 사본 대비): `check_vpoc.py`·`vnew.js`·`vnew.css`·`generate.py`·문서 공백만 바뀐 줄 0, 지운 Python·JS 정의 0, CRLF 0. `check_vpoc.py`는 C 이전 사본 대비도 공백만 0·지운 정의 0. 저장소 안 `.coverage` 부산물 없음(데이터는 `%TEMP%\kiro_c3`).
+- **3단계 리뷰**
+  - 보안
+    - 화면 글은 모두 `el()`(textContent)로 넣고 속성은 고정 문구(`title`)뿐이다. 서버 문구(`realBlock`·실패 문구·오류)는 글자로만 들어간다(lr-n `<img onerror>`). 영상 `src`·내려받기 `href`는 응답의 presigned URL만 쓴다. 경로의 프로젝트 id는 `encodeURIComponent`.
+    - 요청 본문은 `confirmUsd`(서버 `realEstimate.usd`)·`audio`(bool)·`segId`·`variant`뿐이다. 서버가 숫자·bool만 받고 금액을 다시 계산한다(C2, lr-a). `realEnabled`는 설정 bool이라 새로 드러나는 값이 없다.
+    - 발견: 없음.
+  - 성능(512Mi, 두 영상 동시 재생)
+    - 서버: 상수 한 줄이다. 새 S3·LLM·fal 호출이 없다. 실사 회차 중 `GET /plan`은 `_real_block_text`가 진행 중 판정에서 먼저 돌아가 캐릭터를 읽지 않는다.
+    - 영상은 브라우저가 S3 presigned URL에서 바로 받는다. 앱 파드를 지나지 않으므로 두 영상을 같이 재생해도 512Mi와 상관없다. 브라우저 쪽은 결과 열 2개 + 나란히 보기 2개(`metadata`) + 이전 실사 ≤3개(`none`)다. 동기화는 `seeked` 때만 일해 프레임마다 도는 일이 없다.
+    - 발견(조치 안 함, 남은 이슈 2): 실사 회차 중에는 기존 gen 폴링(3·5초)이 ⑤ 화면 전체를 다시 그린다. 그때 웹툰 열 영상도 새 presigned URL로 다시 만들어져, 회차 중 웹툰을 보던 재생이 끊기고 폴링마다 영상 앞부분 요청이 한 번 더 간다. 컷 단위 진행 중 화면과 같은 기존 방식이다.
+  - 운영성
+    - 재시작: 화면 상태는 모두 `GET /plan`에서 온다. 진행 중 폴링이 `ensure_driver`를 부르므로 파드가 재시작돼도 이어 간다(C2 lr-j). 화면은 진행 막대(완료/전체)로 그 상태를 보인다.
+    - 되돌리기: `VNEW_TAKE_REAL=false` 한 줄이면 시작 404, `realEnabled` false, 회차 없는 gen은 C 이전 화면이다(lr-o). 진행 중 회차는 끝까지 가고 결과는 보인다. 프런트 이미지만 C3 이전으로 되돌려도 서버 필드가 늘었을 뿐이라 깨지지 않는다(실사 칸은 "건너뜀"으로 보이고, 두 final이 done이면 옛 [이 영상으로 사운드 편집]이 보인다). 서버만 C 이전으로 되돌리면 `realEnabled`·`realRun`이 없어 새 화면은 지금 화면 + 웹툰 [이걸로 고르기]가 되고, 옛 `select_variant`도 done gen에서 웹툰을 고른다.
+    - 진행 중 작업: 배포 때 웹툰만 끝난 take gen은 회차 없음 → [실사 버전 만들기 ($X)]가 보인다. 캐시는 CI 태그(`ASSET_VERSION`)로 새 `vnew.js`를 받는다.
+    - 로그: C3은 서버 로그를 더하지 않는다. 시작·제출·거절 로그는 C1·C2 그대로다(`vnew.gen.real_start`, `vpoc.fal.rejected … kind=audio`).
+    - 발견·조치: 실패 칸 없이 멈춘 회차의 문구(D5), 고른 뒤 ⑤에 남는 문제(D2) → 고쳤다.
+- **남은 이슈**
+  1. ⑤ 통 테이크 안내 배너(`renderGenStep`·`renderGenStart`)와 생성 확인창·테이크 행 안내는 여전히 "실사는 건너뜁니다 — 기본 모델로 따로 만들 수 있습니다."다. C3 수정 범위(상태 띠 문구) 밖이라 두었다. 실사 버전과 어긋나므로 문구 결정이 필요하다(예: "실사 버전은 웹툰이 끝난 뒤 따로 만들 수 있습니다.").
+  2. 실사 회차 중 폴링이 화면 전체를 다시 그려 웹툰 재생이 끊기고 영상 요청이 폴링마다 한 번 더 간다(성능 리뷰). 대안: 결과 칸이 그대로면 다시 그리지 않기, 또는 진행 중에는 결과 영상을 `preload="none"`.
+  3. 실사가 실패한(partial) gen에서 웹툰을 고른 뒤 페이지를 새로 열면 `decidePlanStep`이 partial이라 ⑤를 연다(기존 규칙, 단계 막대로 ⑥에 갈 수 있다).
+  4. `strip_drawing_words`의 어색한 조각(093 이슈 5), `_gen_previz_stale`의 previz-take 판정(문제 5)은 범위 밖이다.
+  5. 확인창 "480p 초안"은 `realEstimate.resolution`과 "초안"을 쓴다. `VNEW_TAKE_DRAFT`를 끄면 "초안"이 맞지 않는다(웹툰 확인창과 같은 한계).
+  6. 컷 단위(Kling) 칸도 `failureKind:"audio"`가 오면 [소리 없이 다시 만들기]가 보인다(스펙대로). Kling edit 본문에는 소리 필드가 없어 같은 설정으로 다시 만든다. 지금까지 실측된 적은 없다.
+  7. presigned URL은 1시간이라 나란히 보기 화면을 1시간 넘게 열어 두면 영상이 열리지 않는다(기존과 같다, 새로 열면 된다).
+  8. 배포 뒤 확인 VC-1(실사 1회 ≈ $3.08)·VC-2(다시 만들기)·VC-3(소리 거절 시)은 설계자 승인 뒤 개발계에서 한다. 코드 이미지를 C 이전으로 되돌릴 때는 진행 중인 실사 회차를 먼저 취소한다(093 운영성).
+
+### vnew-live-fx 묶음 C 피드백(095) — C3 남은 이슈 1·2: 통 테이크 안내의 실사 문구, 실사 회차 중 폴링이 ⑤를 다시 그리는 문제 (Kiro, claude-opus-5.5)
+
+- **범위**: `frontend/public/vnew.js`, `tools/check_vpoc.py`(lr-n·lr-o 보강), 이 기록만 바꿨다. 서버 코드·다른 검사 기대값·`vnew.css`·`ANALYSIS.md`는 그대로다. 사용자 데이터를 읽지 않았고 커밋하지 않았다. C3 남은 이슈 3~8은 그대로 둔다.
+- **바꾼 것**(`vnew.js`, 지운 함수 없음)
+  - 새 함수: `takeRealEnabledOf(gen, plan)`·`takePlanHintText(where, amount, enabled)`(상수 `TAKE_PLAN_SKIP_TEXT`·`TAKE_PLAN_LATER_TEXT`, 실사 버전 구역 `takeStatusText` 뒤), `genViewSignature(gen)`·`genPollUnchanged()`(`genBusyFast` 뒤).
+  - 고친 함수: `openGenerateConfirm`·`renderGenStart`·`renderGenStep`(안내 한 줄씩 `takePlanHintText`로), `loadPlan(first, fromPoll)`(폴링이면 건너뛰기, 처음 열기·불러오기 실패 때 서명 비움), `schedulePlanPoll`(타이머가 `loadPlan(false, true)`), `renderPlan`(⑤를 그릴 때 서명을 둔다). `state.genViewSig` 필드를 더했다.
+- **결정**
+  - D1 — 문구 판단 값: `gen.realEnabled`(boolean) → `plan.features.takeReal`(boolean, design §2에 적힌 키지만 서버는 아직 `fx`만 보낸다) → 둘 다 없으면 모름. 견적(`estimate`)에는 설정 값이 없다. 지금 서버에서 값이 있는 곳은 gen이 있는 화면(결과 화면·[새로 영상 만들기] 확인창·stale gen 시작 화면)이다. gen이 없는 첫 시작 화면·첫 확인창은 모름이고, 이때는 지금 문구에서 "실사는 건너뜁니다"만 "실사는 웹툰이 끝난 뒤 따로 만듭니다"로 바꾼다(095 지시의 "끝내 없으면"). 대안: 모름을 끔(지금 문구)으로 — 기각(지시 첫 문단 괄호와 둘째 문단이 겹치는데, 값이 없을 때의 규칙은 둘째 문단이 더 구체적이다). 모름을 켬(설정 기본값 true)으로 — 기각(화면이 확인한 값이 아니다). 서버에 `features.takeReal` 더하기 — 기각(서버 수정 금지, 남은 이슈 1).
+  - D2 — 끔 문구는 C3 글 그대로다. 세 곳이 서로 다르다: 확인창·결과 화면 배너에는 "— 기본 모델로 따로 만들 수 있습니다." 꼬리가 있고, 시작 화면 배너는 "실사는 건너뜁니다."로 끝난다. 모름 문구도 이 꼬리를 그대로 둔다(지시대로 그 부분만 바꿈). "실사는 건너뜁니다" 글은 상수 한 곳에만 둔다(lr-n이 1번인지 본다).
+  - D3 — 서명 필드: `gen.status`, 칸별 `[webtoon.status, webtoon.failureKind, real.status, real.failureKind]`, `finalWebtoon`·`finalReal`의 `[status, key]`, `realRun`(있으면 `{n}`, 없으면 null), `realHistory` 길이, `selected`. 칸은 `units`, 비면 `segments`(옛 gen, `genBusyFast`와 같은 규칙)다. 서버가 final의 key를 보내지 않아 `videoUrl`에서 `?`·`#` 뒤를 뺀 경로(S3 객체 키)를 key로 쓴다. presigned 서명·`previzUrl`·`costUsd`·`attempt`·`promptEn`·`error`·`realRun.startedAt`은 넣지 않는다. `realRun`은 처음에 n 값만 넣었는데, 리뷰에서 "회차 있음(n 없음)"과 "회차 없음"이 같은 서명이 되는 것을 찾아 `{n}`으로 바꿨다.
+  - D4 — gen이 없거나(none) stale이면 서명이 ""이고 지금처럼 늘 다시 그린다. 시작 화면의 촬영 지시서 진행 카드는 폴링으로 바뀌어야 한다.
+  - D5 — 비교 기준은 직전 응답이 아니라 **마지막으로 그린 ⑤의 서명**(`state.genViewSig`)이다. `renderPlan`이 ⑤일 때만 두고(⑤가 아니면 ""), `loadPlan(true)`의 "불러오는 중…"과 불러오기 실패 화면에서 비운다. 대안: 직전 `state.plan`과 비교 — 기각(버튼 응답의 `payload.plan`이나 이번 건너뛰기처럼 그리지 않고 `state.plan`만 바뀌는 길이 있어 화면과 데이터가 어긋날 수 있다).
+  - D6 — 건너뛰기는 폴링 타이머(`schedulePlanPoll` → `loadPlan(false, true)`)에서만 하고, `decidePlanStep` 뒤에도 ⑤이며 그린 ⑤ 서명이 있을 때만 한다. 버튼 뒤 `loadPlan(false)`와 처음 열기는 늘 다시 그린다. 건너뛸 때도 `state.plan`은 새 값이고, `renderPlan` 대신 `schedulePlanPoll()`을 불러 폴링 간격(3·5초) 규칙이 그대로다.
+- **기존 검사 고정·기대값**: 없음. lr-a~o·cast-a~m·fx-a~n 기대값을 바꾸지 않았다. lr-n 하네스의 가짜 `loadPlan(first)`는 첫 인자만 기록하므로 폴링 기대값 `["false"]`가 그대로다.
+- **검사 보강**(`check_vpoc.py`: 새 상수·함수를 더하고, `check_vnew_take_real_screen`에는 호출·준비 줄만 끼워 넣었다)
+  - lr-n: 배선 6곳(`_LR_095_WIRING`)과 "실사는 건너뜁니다" 상수 1곳을 본다. node 실행 ①: `takeRealEnabledOf` 7경우, `takePlanHintText` 켬·끔·모름 × 세 곳(글자째). 실제 `renderGenStep`·`renderGenStart`·`openGenerateConfirm`을 가짜 DOM에서 그려 시작 화면 5경우(gen 없음 모름·features 켬·끔·stale gen 켬·끔)와 결과 화면 2경우(realEnabled 켬, realEnabled 끔이 features 켬보다 먼저)의 배너·확인창 글. `genViewSignature`: URL 서명만 바뀐 두 plan은 같음, 필드 13개 각각 다름, failureKind 2쌍·realRun 있음/없음 다름, 넣지 않은 필드 3개는 같음, 시작 화면 4경우 "", 옛 segments. `genPollUnchanged` 6경우. node 실행 ②: 실제 `loadPlan`·`decidePlanStep`·`schedulePlanPoll`·`renderPlan`을 가짜 타이머·api로 돌린 10경우(처음 열기, URL만 바뀐 폴링 0번, 상태가 바뀐 폴링 1번, 버튼 뒤 1번, ④ 뒤 폴링, 같은 상태 폴링 2번 0번, 실패 뒤 폴링, 시작 화면 폴링, 회차 끝 폴링 멈춤, 다시 열기 뒤 늦은 응답)의 다시 그린 횟수·화면 노드·`state.plan`·폴링 타이머.
+  - lr-o: 실제 GET /plan 3종(gen 없는 새 계획 → 모름, 끔 → 지금 문구, 켬 → 새 문구)을 같은 화면 함수에 넣어 배너·확인창 글을 본다. gen 없는 GET /plan에 `realEnabled`·`features.takeReal`이 없다는 전제도 본다. 조회마다 서명이 바뀌는 가짜 presign(`?X-Amz-Signature=sN`)으로 실제 `gen_view`를 웹툰 끝·실사 회차 중(POST /generate/real 202)·회차 끝(드라이버)에서 두 번씩 본다. 두 번 본 보기가 URL 서명만 다르다는 것을 확인한 뒤, 서명이 같고 단계가 바뀌면 다르다는 것을 본다.
+- **확인**
+  - `node --check frontend/public/vnew.js` rc 0. `python -X utf8 tools/check_vpoc.py` 전부 통과: ok 58줄(C3와 같은 수 — 보강은 lr 화면 묶음 안), FAIL·WARN 0, lr-a~o·cast-a~m·fx-a~n 모두 ok.
+  - 변형 검사 23개(`vnew.js` 사본을 `%TEMP%`에 두고 모듈의 `PUBLIC`만 바꿔 `check_vnew_take_real_screen` 실행, 저장소 파일은 그대로): 23개 모두 잡았다. 배선 바늘로 먼저 잡힌 6개(폴링 표시 무시·fromPoll 안 넘김·⑤ 아니어도 서명·확인창/시작 배너가 gen 안 봄·결과 배너 꼴)는 배선 줄을 빼고 다시 세어 동작 검사만으로도 6개 모두 잡혔다. 예: 서명에 전체 URL, key·failureKind·realRun·realHistory·selected 빠짐, realRun 있음·없음 같게, 시작 화면도 서명, 실패·처음 열기 때 서명 안 비움, 건너뛸 때 폴링 안 다시 걸기, 단계 무시, features 무시, boolean 아닌 값, 모름 → 지금 문구, 켬 문구, segments 무시.
+  - 커버리지(coverage 7.17, 데이터 `%TEMP%\c3fix_bak\cov95.data`, 시작 전 사본과 difflib): `check_vpoc.py` 새 줄 중 실행 대상 131줄 중 114줄(87.0%). 안 탄 17줄은 모두 실패 때만 타는 `problems.append`·`bad.append`·`return`이다. JS는 coverage.py 밖이고, 새·바뀐 JS 함수 7개와 고친 화면 함수 3개를 lr-n·lr-o가 node로 실행한다.
+  - 위생(시작 전 사본 대비): 세 파일 공백만 바뀐 줄 0, 지운 JS·Python 정의 0, CR 0. 저장소 안 `.coverage`·새 `__pycache__` 없음(검사는 바이트코드를 쓰지 않게 돌렸고 데이터는 `%TEMP%`).
+- **3단계 리뷰**
+  - 보안: 새 글은 상수와 숫자(테이크 수·초)뿐이고 `el()`(textContent)로 넣는다. 서명은 비교에만 쓰고 DOM·요청에 넣지 않는다. 새 요청·저장·로그가 없다. 발견: 없음.
+  - 성능: 서버 변경이 없고 `GET /plan` 횟수·간격이 그대로다. 서명은 칸 수만큼의 짧은 배열을 `JSON.stringify` 한 번(그릴 때 한 번 더) 한다. 같은 상태 폴링에서는 ⑤ DOM과 `<video>`를 다시 만들지 않는다. 그래서 회차 중 웹툰 재생이 끊기지 않고, 폴링마다 가던 영상 앞부분 요청이 없어진다(C3 성능 리뷰의 발견). presigned URL(1시간): 폴링 중에는 gen이 30분(`GEN_STALL_S`) 안에 상태가 바뀌어 다시 그리므로 화면의 URL이 1시간을 넘기지 않는다. 폴링이 멈춘 뒤는 C3 남은 이슈 7과 같다. 발견: 없음.
+  - 운영성: 설정 플래그는 없다. 되돌리기는 프런트 이미지 되돌리기다(서버 변경 없음). 진행 중 회차·재시작: 서버 상태는 그대로이고, 화면을 새로 열면(`loadPlan(true)`) 서명을 비우고 다시 그린다. 바뀐 동작: ⑤ 오류 줄의 버튼 실패 문구가 다음 폴링에 지워지지 않고 상태가 바뀔 때까지 남는다. 발견·조치: `realRun` 있음/없음이 같은 서명이 될 수 있었다 → `{n}`으로 고쳤다(D3). 코멘트에 "실사는 건너뜁니다"를 그대로 적어 상수 1곳 검사가 2번을 셌다 → 코멘트를 상수 이름으로 바꿨다.
+- **남은 이슈**
+  1. gen이 없는 첫 시작 화면·첫 확인창은 설정 값을 모른다(모름 문구). `plan_view.features`에 `takeReal`(design §2)을 더하면 화면은 이미 그 값을 쓴다(서버 한 줄, 이번 범위 밖).
+  2. 서명에 없는 값은 상태가 바뀔 때까지 화면에 늦게 보인다: `realEnabled`(폴링 중 설정을 바꿔 다시 배포한 경우), 같은 status 안에서 바뀐 `error`·`promptEn`, `canStartReal`·`realBlock`. 지금 흐름에서는 status가 바뀔 때 함께 바뀐다.
+  3. 그린 뒤 버튼이 붙잡은 값(`openRealConfirm`의 `realEstimate`, 칸 `unit.id`)은 그릴 때 값이다. `state.plan`을 읽는 버튼(`openGenerateConfirm` 등)은 새 값을 쓴다. 금액이 달라지면 기존 409 `CostMismatch` 흐름이 새 금액을 읽는다.
+  4. 지시의 "테이크 행 안내"는 줄 번호(6112)와 문구로 보아 ⑤ 결과 화면 배너로 읽었다. 실제 테이크 행(`takeRow`) 실사 칸의 "건너뜀" + "통 테이크(베타)는 웹툰만 만듭니다 — 실사는 기본 모델로 따로 만들 수 있습니다."는 그대로다. 실사 버전이 켜져 있고 회차가 없을 때 이 글이 보인다.
+  5. `ANALYSIS.md` §3.6 「실사 버전 화면」에 이번 폴링 규칙·안내 문구를 적지 않았다(수정 범위 밖). 다음 문서 갱신 때 더한다.
