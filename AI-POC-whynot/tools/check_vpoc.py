@@ -11837,6 +11837,21 @@ PARITY_ENV_KEYS = [
     "VNEW_CASTING",
     # vnew-live-fx 묶음 C(R0.2): 통 테이크 실사 버전.
     "VNEW_TAKE_REAL",
+    # char-fidelity(R0.1): 캐릭터 충실도·3D 옆모습.
+    "VNEW_CHAR_FIDELITY",
+    "VNEW_3D_SIDE_VIEWS",
+    # char-fidelity T2b(R8.1): 3D 공급자(Tripo H3.1)·되돌리기(VNEW_3D_PROVIDER=hunyuan).
+    "VNEW_3D_PROVIDER",
+    "VNEW_3D_TRIPO_ENDPOINT",
+    "VNEW_3D_TRIPO_SINGLE_ENDPOINT",
+    "VNEW_3D_TRIPO_FACE_LIMIT",
+    "VNEW_3D_TRIPO_TEXTURE_QUALITY",
+    "VNEW_3D_TRIPO_GEOMETRY_QUALITY",
+    "VNEW_3D_TRIPO_INPUT_SQUARE",
+    "VNEW_3D_TRIPO_MULTIVIEW",
+    "VNEW_3D_TRIPO_YAW_DEG",
+    "VNEW_3D_TRIPO_USD",
+    "VNEW_3D_SIDE_SWAP",
 ]
 PARITY_FACE = "fal:bytedance/seedance-2.5/image-to-video"
 PARITY_PARTNER = "fal:bytedance/seedance-2.5/reference-to-video"
@@ -12718,8 +12733,9 @@ def check_fal_parity_rollback() -> None:
 
     (rw-a) PARITY_ENV_KEYS 마다 k8s/workloads.yaml.tmpl 에 `- name: <키>` + `value: "${<키>}"`.
     (rw-b) deploy/config.env.example 에 `<키>=` 줄. 플래그 기본 false(작업 4 뒤 TAG_STYLE 기본 at).
-    (rw-c) render.py: example + prod/dev 오버레이 → add_derived → render_text 예외 없음, 값 "false".
-           오버레이에 true 를 더하면 "true"(되돌리기 경로).
+    (rw-c) render.py: example + prod/dev 오버레이 → add_derived → render_text 예외 없음, 값 prod "true"·dev "false"
+           (2026-10-30 사용자 결정: 운영은 BytePlus Seedance 와 fal Seedance 를 둘 다 쓴다). 오버레이에 true 를 더하면 "true"
+           (되돌리기 경로). 운영 렌더의 VNEW_ENABLED 는 "true"(env·runtime-config, 같은 날 사용자 결정 "켠다").
     """
     import importlib.util  # noqa: PLC0415
     import inspect  # noqa: PLC0415
@@ -12785,7 +12801,10 @@ def check_fal_parity_rollback() -> None:
             overlay_path = ROOT / "deploy" / f"config.{target}.env"
             try:
                 overlay = render.load_config(overlay_path)
-                for extra, want in (({}, "false"), ({flag: "true"}, "true")):
+                # 2026-10-30 사용자 결정("seedance도 사용할 수 있고 fal seedance도 사용할 수 있게 해라"): 운영 오버레이가 true 를 둔다
+                # (BytePlus·fal Seedance 둘 다 ②에). 개발은 지금처럼 false(fal 만). "+true" 되돌리기 경로는 그대로다.
+                rendered_flag = "true" if target == "prod" else "false"
+                for extra, want in (({}, rendered_flag), ({flag: "true"}, "true")):
                     layer = {**overlay, **extra}
                     unknown = sorted(set(layer) - set(base))
                     if unknown:
@@ -12814,6 +12833,11 @@ def check_fal_parity_rollback() -> None:
                         bad.append(f"(rw-c) {target}: 렌더된 VPOC_POLL_GIVEUP_S 값이 ['1800'] 이 아닙니다: {giveup}")
                     if "${" in text:
                         bad.append(f"(rw-c) {target}: 렌더 결과에 치환되지 않은 변수가 남았습니다")
+                    if target == "prod" and not extra and (_rendered_env_values(text, "VNEW_ENABLED") != ["true"]
+                                                           or "vnewEnabled: true }" not in text):
+                        # 2026-10-30 사용자 결정(운영 vnew "켠다"): 앱 env 와 화면 runtime-config 가 함께 켜진다.
+                        bad.append(f"(rw-c) prod: 렌더된 VNEW_ENABLED 가 'true' 가 아닙니다: "
+                                   f"{_rendered_env_values(text, 'VNEW_ENABLED')}")
             except (Exception, SystemExit) as exc:  # noqa: BLE001 — render.py 는 SystemExit 로 실패를 알린다.
                 bad.append(f"(rw-c) {target}: 렌더 실패: {type(exc).__name__} {safe(exc)}")
     except (Exception, SystemExit) as exc:  # noqa: BLE001
@@ -12825,7 +12849,7 @@ def check_fal_parity_rollback() -> None:
         ok(
             "fal-seedance-parity 되돌리기 배선 검사 (rw-a)템플릿 env "
             f"{len(PARITY_ENV_KEYS)}개 (rw-b)config.env.example 기본값 "
-            "(rw-c)render.py prod·dev 렌더 false·오버레이 true"
+            "(rw-c)render.py 렌더 prod true·dev false·오버레이 true·prod VNEW_ENABLED true"
         )
 PARITY_KLING = "fal:fal-ai/kling-video/v3/pro/image-to-video"
 
@@ -25530,6 +25554,3835 @@ def check_vnew_take_real_screen() -> None:
             print(f"       lr 화면: {line}")
 
 
+# ---------------------------------------------------------------- char-fidelity(2026-10-30)
+#
+# 스펙 .kiro/specs/char-fidelity(requirements R0~R7, design §17). 묶음 T1 = 분석·좌우 계산·참고 순서·프롬프트·사진 속 옷.
+# 외부 호출(Bedrock·Seedream·fal·원장)은 모두 _CfFakes 가짜다(유료 0회). 저장소는 _FakeCharStore(메모리)다.
+
+# 업로드 그림 바이트. 분석 블록·Seedream 참고에만 지나가고 디코드하지 않는다(이름표 src0…로 순서를 본다).
+_CF_SRC = tuple(f"cf-src-{i}".encode("ascii") for i in range(8))
+
+# cf-b 지문을 잴 때 고정하는 설정. 환경변수가 무엇이든 같은 값으로 잰다(코드를 바꾸기 전과 뒤가 같은 조건).
+_CF_PINS = dict(
+    VNEW_FX=True, VNEW_CASTING=True, ASTRA_MODEL="cf-astra", ANALYZE_FALLBACK_MODEL="cf-fallback",
+    PEOPLE_COUNT_MODEL="cf-people", OUTFIT_CHECK_MODEL="cf-outfit", HUNYUAN_ENDPOINT="fal-ai/hunyuan3d-v3/image-to-3d",
+    HUNYUAN_FACE_COUNT=60000, HUNYUAN_ENABLE_PBR=False, MODEL_INPUT_SQUARE=64, MAX_ANALYSIS_IMAGES=6,
+    MAX_REFERENCE_IMAGES=4, SHEET_SIZE="2560x1440", FRONT_SIZE="1440x2560", BACK_SIZE="1440x2560",
+    OUTFIT_SHEET_RETRY=1, MAX_OUTFITS=12, MAX_RESUBMITS=2, LOST_AFTER=8, POLL_INTERVAL_S=0, POLL_MAX_S=900,
+    VNEW_CASTING_COUNT=2, VNEW_CASTING_USD=0.04,
+)
+
+# 분석 가짜 응답(옛 모양 — 충실 필드 없음). 끔 지문·끔 빌드에 쓴다.
+_CF_OLD_PAYLOAD = {
+    "nameGuess": "여의준",
+    "descriptionKo": "20대 남성. 짧은 검은 머리에 마른 체형.",
+    "appearanceEn": "A young Korean man in his 20s with short black hair and a slim build.",
+    "styleEn": "Thin sketchy pencil-like lines with soft pastel flat coloring.",
+    "baseOutfitEn": "white crew-neck T-shirt, loose light-wash jeans, white sneakers, round wristwatch with a brown strap on the left wrist",
+    "outfitEn": "white crew-neck T-shirt, loose light-wash jeans, white sneakers, round wristwatch with a brown strap on the left wrist",
+    "outfitLayersEn": [
+        {"labelKo": "오버셔츠", "promptEn": "an open pale sage-green overshirt"},
+        {"labelKo": "후드티", "promptEn": "a light blue hoodie"},
+    ],
+    "altOutfitsEn": ["a black suit"],
+    "expressionsKo": ["무표정", "미소"],
+    "extraEn": "",
+    "genderEn": "male",
+}
+
+# 프롬프트 지문용 고정 분석(옛 분석 — fidelity 표시 없음).
+_CF_PROMPT_ANALYSIS = {
+    "appearanceEn": "A young Korean man in his 20s with short black hair and a slim build.",
+    "styleEn": "Thin sketchy pencil-like lines with soft pastel flat coloring.",
+    "baseOutfitEn": "white crew-neck T-shirt, loose light-wash jeans, white sneakers",
+    "outfitEn": "white crew-neck T-shirt, loose light-wash jeans, white sneakers",
+    "extraEn": "",
+}
+
+
+def _cf_sha(value) -> str:
+    """cf 지문. 글이면 UTF-8 그대로, 그 밖은 json(키 순서 그대로 — 순서도 본다)."""
+    import hashlib as _hashlib  # noqa: PLC0415
+
+    text = value if isinstance(value, str) else json.dumps(value, ensure_ascii=False, default=repr)
+    return _hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def _cf_jpeg(n: int, width: int = 12, height: int = 20) -> bytes:
+    """호출마다 색이 다른 작은 JPEG(가짜 Seedream 결과). 바이트가 달라 이름표로 참고 순서를 본다."""
+    import io as _io  # noqa: PLC0415
+
+    from PIL import Image  # noqa: PLC0415
+
+    buffer = _io.BytesIO()
+    color = ((n * 37 + 11) % 256, (n * 71 + 40) % 256, (n * 113 + 80) % 256)
+    Image.new("RGB", (width, height), color).save(buffer, format="JPEG", quality=90)
+    return buffer.getvalue()
+
+
+class _CfSyncThread:
+    """threading.Thread 대신: start() 에서 target 을 바로 돌린다(검사 순서를 고정한다)."""
+
+    def __init__(self, group=None, target=None, name=None, args=(), kwargs=None, *, daemon=None):
+        self._target = target
+        self._args = tuple(args or ())
+        self._kwargs = dict(kwargs or {})
+        self.name = name
+
+    def start(self) -> None:
+        if self._target is not None:
+            self._target(*self._args, **self._kwargs)
+
+    def join(self, timeout=None) -> None:
+        return None
+
+    def is_alive(self) -> bool:
+        return False
+
+
+class _CfFakes:
+    """char-fidelity 검사 하네스. with 안에서 characters 의 외부 호출을 가짜로 바꾸고 순서대로 기록한다(나오면 되돌린다).
+
+    - vpoc.llm._converse: 도구 이름별 가짜(emit_character → payload, emit_people_count → people,
+      emit_outfit_consistency → consistent, emit_outfit_prompt → "EN"). 그 밖의 도구는 예외(가짜가 아닌 호출 막음).
+    - characters._seedream: 호출마다 색이 다른 작은 JPEG. 참고 그림은 바이트로 이름표(src0…·img0…)를 붙인다.
+    - characters._fal_request·_fetch_url: 바로 완료. vpoc.ledger.charge: 기록만. threading.Thread: start() 에서 바로 실행.
+    """
+
+    def __init__(self, charmod, *, payload=None, analyze_fail=(), people=1, consistent=True, store=None) -> None:
+        self.charmod = charmod
+        self.payload = payload if payload is not None else _CF_OLD_PAYLOAD
+        self.analyze_fail = set(analyze_fail)
+        self.people = people
+        self.consistent = consistent
+        self.store = store if store is not None else _FakeCharStore()
+        self.trace: list = []
+        self.seedream: list[dict] = []
+        self.llm: list[dict] = []
+        self.fal: list[tuple] = []
+        self.ledger: list[list] = []
+        self.labels: dict[bytes, str] = {data: f"src{i}" for i, data in enumerate(_CF_SRC)}
+        self._saved: dict = {}
+
+    def label(self, data) -> str:
+        return self.labels.get(bytes(data), f"?{len(data)}")
+
+    def blocks(self, blocks) -> list:
+        out: list = []
+        for block in blocks or []:
+            if "text" in block:
+                out.append(["text", block["text"]])
+            elif "image" in block:
+                out.append(["image", (block["image"] or {}).get("format"), self.label(block["image"]["source"]["bytes"])])
+            else:
+                out.append(["other", sorted(block)])
+        return out
+
+    def _converse(self, **kw):
+        import copy as _copy  # noqa: PLC0415
+
+        tool = kw.get("tool") or {}
+        name = tool.get("name")
+        self.llm.append(kw)
+        self.trace.append([
+            "llm", kw.get("where"), kw.get("model"), kw.get("max_tokens"), name, _cf_sha(kw.get("system_text") or ""),
+            _cf_sha(json.dumps(tool, sort_keys=True, ensure_ascii=False)), self.blocks(kw.get("blocks")),
+        ])
+        usage = {"model": kw.get("model")}
+        if name == "emit_character":
+            if kw.get("model") in self.analyze_fail:
+                raise RuntimeError("가짜 분석 실패")
+            return _copy.deepcopy(self.payload), usage
+        if name == "emit_people_count":
+            return {"people": self.people}, usage
+        if name == "emit_outfit_consistency":
+            return {"consistent": self.consistent, "problems": [] if self.consistent else ["back view adds a black jacket"]}, usage
+        if name == "emit_outfit_prompt":
+            return {"promptEn": "EN"}, usage
+        raise RuntimeError(f"예상치 못한 LLM 도구(가짜): {name}")
+
+    def _seedream(self, prompt, references, *, size):
+        n = len(self.seedream)
+        image = _cf_jpeg(n)
+        self.labels[image] = f"img{n}"
+        refs = [self.label(ref) for ref in references or []]
+        self.seedream.append({"prompt": prompt, "refs": refs, "size": size, "image": image})
+        self.trace.append(["seedream", size, _cf_sha(prompt), refs])
+        return image
+
+    def _fal(self, method, url, payload=None):
+        body = payload or {}
+        self.fal.append((method, url, body))
+        self.trace.append(["fal", method, url, list(body)])
+        if method == "POST":
+            return {"request_id": f"cfreq{len(self.fal)}"}
+        if url.endswith("/status"):
+            return {"status": "COMPLETED"}
+        return {"model_glb": {"url": "https://fal.media/files/cf/model.glb"},
+                "thumbnail": {"url": "https://fal.media/files/cf/thumb.png"}}
+
+    def _fetch(self, url):
+        self.trace.append(["fetch", url])
+        return b"glTF-cf" if url.endswith(".glb") else b"png-cf"
+
+    def _charge(self, key, **kw):
+        # 키 = vnew-{char}-{variant}-{kind}-{hex}. char id·hex 는 매번 달라 variant-kind 만 남긴다(금액은 보지 않는다).
+        parts = str(key).split("-")
+        entry = ["ledger", kw.get("kind"), "-".join(parts[2:-1]), kw.get("units")]
+        self.ledger.append(entry)
+        self.trace.append(entry)
+        return {"spentUsd": 0.0, "capUsd": None}
+
+    def __enter__(self) -> "_CfFakes":
+        from src.vpoc import llm as vpoc_llm  # noqa: PLC0415
+
+        c = self.charmod
+        self._saved = {
+            "STORE": c.STORE, "_seedream": c._seedream, "_fal_request": c._fal_request, "_fetch_url": c._fetch_url,
+            "converse": vpoc_llm._converse, "charge": c.vpoc_ledger.charge, "Thread": c.threading.Thread,  # noqa: SLF001
+            "sleep": c.time.sleep,
+        }
+        c.STORE = self.store
+        c._seedream = self._seedream
+        c._fal_request = self._fal
+        c._fetch_url = self._fetch
+        vpoc_llm._converse = self._converse  # noqa: SLF001
+        c.vpoc_ledger.charge = self._charge
+        c.threading.Thread = _CfSyncThread
+        c.time.sleep = lambda *_a, **_k: None
+        return self
+
+    def __exit__(self, *exc) -> bool:
+        from src.vpoc import llm as vpoc_llm  # noqa: PLC0415
+
+        c = self.charmod
+        s = self._saved
+        c.STORE = s["STORE"]
+        c._seedream = s["_seedream"]
+        c._fal_request = s["_fal_request"]
+        c._fetch_url = s["_fetch_url"]
+        vpoc_llm._converse = s["converse"]  # noqa: SLF001
+        c.vpoc_ledger.charge = s["charge"]
+        c.threading.Thread = s["Thread"]
+        c.time.sleep = s["sleep"]
+        return False
+
+
+def _cf_seed_char(fakes: "_CfFakes", char_id: str, n_sources: int, **extra) -> dict:
+    """가짜 저장소에 캐릭터(draft, 업로드 n_sources 장)를 바로 쓴다(updatedAt 고정 — save_char 를 거치지 않는다)."""
+    c = fakes.charmod
+    char = {
+        "id": char_id, "name": "cf", "createdAt": "2026-10-30T00:00:00Z", "updatedAt": "2026-10-30T00:00:00Z",
+        "status": "draft", "sources": [], "analysis": {}, "extraPromptKo": "",
+        "variants": {v: c._empty_variant() for v in c.settings.VARIANTS}, "version": 0, "costumes": [], "outfits": [],
+    }
+    for i in range(n_sources):
+        file_id = f"f_cf{i}"
+        char["sources"].append({"fileId": file_id, "name": f"{i}.jpg", "width": 100, "height": 100})
+        fakes.store.blobs[c.source_key("tester", char_id, file_id)] = _CF_SRC[i]
+    char.update(extra)
+    fakes.store.json[c.char_key("tester", char_id)] = (char, "etag-seed")
+    return char
+
+
+def _cf_old_char(char_id: str = "char_cf_old") -> dict:
+    """새 필드가 없는 옛 캐릭터(두 그림체 ready, 추가 복장 auto 1벌). cf-b detail_view 지문용."""
+    root = f"users/tester/characters/{char_id}"
+    variants = {}
+    for v in ("webtoon", "real"):
+        variants[v] = {
+            "status": "ready", "sheetKey": f"{root}/{v}/v1/sheet.jpg", "frontKey": f"{root}/{v}/v1/front.jpg",
+            "backKey": f"{root}/{v}/v1/back.jpg", "warning": "",
+            "model3d": {"status": "ready", "requestArn": "fal/requests/fal-ai/hunyuan3d-v3/image-to-3d/req_old",
+                        "glbKey": f"{root}/{v}/v1/model.glb", "thumbKey": f"{root}/{v}/v1/thumb.png", "error": "", "resubmits": 0},
+            "error": "", "heartbeatAt": "2026-10-20T00:10:00Z", "resumeCount": 0, "claim": "", "claimedAt": "",
+        }
+    return {
+        "id": char_id, "name": "옛 캐릭터", "createdAt": "2026-10-20T00:00:00Z", "updatedAt": "2026-10-20T00:20:00Z",
+        "status": "ready", "buildStartedAt": "2026-10-20T00:00:00Z",
+        "sources": [{"fileId": "f_old0", "name": "a.jpg", "width": 100, "height": 100},
+                    {"fileId": "f_old1", "name": "b.jpg", "width": 80, "height": 120}],
+        "analysis": {
+            "nameGuess": "옛", "descriptionKo": "20대 남성.", "appearanceEn": "A young Korean man with short black hair.",
+            "styleEn": "Soft pastel lines.", "outfitEn": "white T-shirt, jeans, sneakers", "baseOutfitEn": "white T-shirt, jeans, sneakers",
+            "outfitLayersEn": [{"labelKo": "후드티", "promptEn": "a light blue hoodie"}], "altOutfitsEn": [],
+            "expressionsKo": ["미소"], "extraEn": "", "model": "cf-fallback",
+        },
+        "extraPromptKo": "", "variants": variants, "version": 1, "costumes": [],
+        "outfits": [{"id": "o_old1", "labelKo": "후드티", "promptEn": "a light blue hoodie", "source": "auto",
+                     "variants": {v: {"status": "ready", "frontKey": f"{root}/outfits/o_old1/{v}/front.jpg",
+                                      "backKey": f"{root}/outfits/o_old1/{v}/back.jpg", "error": ""} for v in variants}}],
+    }
+
+
+def _cf_new_char(char_id: str = "char_cf_new") -> dict:
+    """T1~T2b 새 필드가 있는 캐릭터(cf-r·cf-s 상세 응답용). _cf_old_char 에 다음을 더한다.
+
+    - 분석: 충실 분석(기준 사진 = 업로드 2번째 f_old1, 소품 시계 오른쪽 손목).
+    - webtoon: 옆모습 두 장(leftKey·rightKey), Tripo 3D 요청(model3d.endpoint 다시점).
+    - real: 왼쪽 옆모습은 3D 에서 뺌(leftKey ""), 오른쪽만 있음. Hunyuan 요청(endpoint 없음).
+    - 추가 복장: 사진 속 옷(kind photo) 1벌을 맨 앞에, 사용자 복장(user) 1벌을 맨 뒤에.
+    """
+    char = _cf_old_char(char_id)
+    root = f"users/tester/characters/{char_id}"
+    char["sources"].append({"fileId": "f_old2", "name": "c.jpg", "width": 90, "height": 160})
+    char["analysis"].update(
+        fidelity=1, baseSourceIndex=1, baseSourceFileId="f_old1", baseWhereEn="",
+        sidedItems=[{"itemEn": _CF_WATCH, "labelKo": "시계", "partEn": "wrist", "side": "right",
+                     "votes": {"left": 0, "right": 2}, "seenIn": [0, 1]}],
+        baseOutfitRawEn="white T-shirt, jeans, sneakers, a wristwatch",
+    )
+    web, real = char["variants"]["webtoon"], char["variants"]["real"]
+    web.update(leftKey=f"{root}/webtoon/v1/left.jpg", rightKey=f"{root}/webtoon/v1/right.jpg",
+               viewCheck={"sheet": "ok", "front": "ok", "back": "ok", "left": "ok", "right": "flipped"})
+    web["model3d"].update(requestArn=f"fal/requests/{_TR_MULTI}/req_new", endpoint=_TR_MULTI)
+    real.update(leftKey="", rightKey=f"{root}/real/v1/right.jpg", viewCheck={"left": "dropped", "right": "ok"})
+    ready = {v: {"status": "ready", "frontKey": f"{root}/outfits/o_photo/{v}/front.jpg",
+                 "backKey": f"{root}/outfits/o_photo/{v}/back.jpg", "error": ""} for v in ("webtoon", "real")}
+    char["outfits"].insert(0, {"id": "o_photo", "labelKo": "검은 정장", "promptEn": "a black suit with a white shirt",
+                               "source": "auto", "kind": "photo", "sourceFileId": "f_old1", "whereEn": "large bottom figure",
+                               "sidedItems": [], "variants": ready})
+    char["outfits"].append({"id": "o_user", "labelKo": "빨간 코트", "promptEn": "a long red coat", "source": "user",
+                            "variants": {v: {"status": "queued", "frontKey": "", "backKey": "", "error": ""}
+                                         for v in ("webtoon", "real")}})
+    return char
+
+
+def _cf_detail_of(charmod, char: dict, **flags) -> dict:
+    """메모리 저장소에 char 를 두고 detail_view 결과(JSON 왕복)를 준다. flags 는 _pin_vnew 값(외부 호출 없음)."""
+    with _pin_vnew(**flags), _CfFakes(charmod) as fakes:
+        fakes.store.json[charmod.char_key("tester", char["id"])] = (json.loads(json.dumps(char)), "etag-detail")
+        return json.loads(json.dumps(charmod.detail_view("tester", char["id"]), ensure_ascii=False))
+
+
+def _cf_llm_view(fakes: "_CfFakes", kw: dict) -> dict:
+    """LLM 호출 인자를 지문으로 쓸 모양(이미지는 이름표, 도구는 키 정렬)."""
+    return {
+        "system": kw.get("system_text"), "tool": json.loads(json.dumps(kw.get("tool"), sort_keys=True)),
+        "max_tokens": kw.get("max_tokens"), "where": kw.get("where"), "model": kw.get("model"),
+        "blocks": fakes.blocks(kw.get("blocks")),
+    }
+
+
+def _cf_off_fingerprints() -> dict[str, str]:
+    """두 설정 끔(=코드를 바꾸기 전) 지문 sha256. design §17 cf-b·tasks T1 "먼저" 목록.
+
+    코드를 바꾸기 전에 이 함수로 잰 값이 _CF_OFF_SHA 다. cf-b 는 두 설정을 끈 채 다시 재어 같은지 본다.
+    """
+    sys.path.insert(0, str(ROOT / "app"))
+    from src.vnew import characters as charmod  # noqa: PLC0415
+
+    out: dict[str, str] = {}
+    with _pin_vnew(**_CF_PINS):
+        # 1) 분석 SYSTEM·도구 — 기본 설정(FX·캐스팅 켬)과 캐스팅 끔.
+        out["analyzeSystem"] = _cf_sha(charmod._analyze_system())
+        out["analyzeTool"] = _cf_sha(json.dumps(charmod._analyze_tool(), sort_keys=True, ensure_ascii=False))
+        with _pin_vnew(VNEW_CASTING=False):
+            out["analyzeSystemCastingOff"] = _cf_sha(charmod._analyze_system())
+            out["analyzeToolCastingOff"] = _cf_sha(json.dumps(charmod._analyze_tool(), sort_keys=True, ensure_ascii=False))
+        with _CfFakes(charmod) as fakes:
+            # 2) _analyze 가 보내는 인자(SYSTEM·도구·max_tokens·where·model).
+            charmod._analyze([{"text": "cf"}], model="cf-astra")
+            out["analyzeCall"] = _cf_sha(_cf_llm_view(fakes, fakes.llm[-1]))
+            with _pin_vnew(VNEW_CASTING=False):
+                charmod._analyze([{"text": "cf"}], model="cf-astra")
+                out["analyzeCallCastingOff"] = _cf_sha(_cf_llm_view(fakes, fakes.llm[-1]))
+            # 3) 분석 블록(글·이미지 순서)과 결과 dict — 업로드 7장(분석은 앞 6장), 추가 요청 없음·있음.
+            char = _cf_seed_char(fakes, "char_cf_blocks", 7)
+            result = charmod.analyze_sources("tester", char)
+            out["analyzeBlocks"] = _cf_sha(fakes.blocks(fakes.llm[-1]["blocks"]))
+            out["analyzeResult"] = _cf_sha(result)
+            char["extraPromptKo"] = "표정은 무표정으로"
+            result = charmod.analyze_sources("tester", char)
+            out["analyzeBlocksExtra"] = _cf_sha(fakes.blocks(fakes.llm[-1]["blocks"]))
+            out["analyzeResultExtra"] = _cf_sha(result)
+            # 4) 사람 수·복장 검사 호출 인자.
+            charmod._count_people(_CF_SRC[0])
+            out["peopleCall"] = _cf_sha(_cf_llm_view(fakes, fakes.llm[-1]))
+            charmod._check_outfit_consistency(_CF_SRC[1], _CF_PROMPT_ANALYSIS["baseOutfitEn"])
+            out["outfitCall"] = _cf_sha(_cf_llm_view(fakes, fakes.llm[-1]))
+            # 5) 고정 바이트 submit_3d 본문(키 순서 포함).
+            charmod.submit_3d(b"cf-front-square", b"cf-back-square")
+            method, url, body = fakes.fal[-1]
+            out["submit3d"] = _cf_sha({"method": method, "url": url, "body": body})
+        # 6) 시트·정면·후면(웹툰·실사 × 추가 요청 없음·있음), 추가 복장 정면·후면(웹툰·실사).
+        for extra in ("", "Keep a calm, expressionless face."):
+            analysis = dict(_CF_PROMPT_ANALYSIS, extraEn=extra)
+            tag = "Extra" if extra else ""
+            for variant in ("webtoon", "real"):
+                out[f"sheet.{variant}{tag}"] = _cf_sha(charmod._sheet_prompt(variant, analysis))
+                out[f"front.{variant}{tag}"] = _cf_sha(charmod._front_prompt(variant, analysis))
+                out[f"back.{variant}{tag}"] = _cf_sha(charmod._back_prompt(variant, analysis))
+        for variant in ("webtoon", "real"):
+            for view in ("front", "back"):
+                prompt = charmod._outfit_prompt(variant, _CF_PROMPT_ANALYSIS, "a light blue hoodie", view)
+                out[f"outfit.{variant}.{view}"] = _cf_sha(prompt)
+        # 7) 옛 캐릭터 detail_view 전체 JSON(쓰기 없음 — updatedAt 그대로).
+        with _CfFakes(charmod) as fakes:
+            fakes.store.json[charmod.char_key("tester", "char_cf_old")] = (_cf_old_char(), "etag-old")
+            out["detailOld"] = _cf_sha(charmod.detail_view("tester", "char_cf_old"))
+        # 8) 가짜 빌드(업로드 5장 → 참고 4장) + 사진 속 옷 자리(auto 후보 1벌 그리기): 외부 호출 순서·인자와 저장 키 집합.
+        with _CfFakes(charmod) as fakes:
+            _cf_seed_char(fakes, "char_cf_build", 5)
+            charmod.start_build("tester", "char_cf_build")
+            built, _ = charmod.load_char("tester", "char_cf_build")
+            charmod.start_build_outfit("tester", "char_cf_build", built["outfits"][0]["id"])
+            built, _ = charmod.load_char("tester", "char_cf_build")
+            out["buildTrace"] = _cf_sha(fakes.trace)
+            out["buildKeys"] = _cf_sha({
+                "analysis": sorted(built["analysis"]),
+                "variants": {v: sorted(built["variants"][v]) for v in sorted(built["variants"])},
+                "model3d": {v: sorted(built["variants"][v]["model3d"]) for v in sorted(built["variants"])},
+                "outfits": [sorted(o) for o in built["outfits"]],
+                "outfitVariants": [{v: sorted(o["variants"][v]) for v in sorted(o["variants"])} for o in built["outfits"]],
+            })
+    return out
+
+
+# cf-b 기준값: 코드를 바꾸기 **전**(2026-10-30, char-fidelity T1 시작 전 작업 트리)에 _cf_off_fingerprints() 로 잰 sha256.
+# 두 설정(VNEW_CHAR_FIDELITY·VNEW_3D_SIDE_VIEWS)을 끄면 지금과 바이트 단위로 같아야 한다(R0.2). 두 번 재어 같은 값이었다.
+_CF_OFF_SHA = {
+    "analyzeSystem": "aa5808f3996e79304953585e5ebe2ea756a1b026783e2933c9d3495755bdd887",
+    "analyzeTool": "62e584da50846f197428b39b72e4942b314d00e9866ad22b80fab947f0d0600f",
+    "analyzeSystemCastingOff": "b668cc773ac780eeb2016ce20057ab13435be7fce53ccbf14071f34963ea83e9",
+    "analyzeToolCastingOff": "a92d3534328a3ebf788bc9b934a1c8101ae96b0d3d4e81a7401000f27cc9ba57",
+    "analyzeCall": "9b9e575641605950c3074931b69f37de41db7db395cf2590585e12e4b9a80118",
+    "analyzeCallCastingOff": "cc346f7d9ef026a5441144225d7380aab56be7aff35744ec6d4e4ed4cb9b8813",
+    "analyzeBlocks": "41118cd1f8702c55b722e9af58fafc10807562817d42890ef02705729fe40133",
+    "analyzeResult": "0fa209ebef4d8a9fba495d825ac34580bc043fc60174d9b7eb499e38e43d428d",
+    "analyzeBlocksExtra": "54312b18123a61bc008919cc1ad00f03c6feaed0ba0c2a127e97ea3a93d0c762",
+    "analyzeResultExtra": "0fa209ebef4d8a9fba495d825ac34580bc043fc60174d9b7eb499e38e43d428d",
+    "peopleCall": "0545b890f230c075302f012336194a90c9512ac6debcb762c882bb853e1b5dde",
+    "outfitCall": "e82aa0adc35707353f8e8c1a78a3c1e0f4c9e847e10346386841f53534ccff4e",
+    "submit3d": "2ff1b1ceb5b25aadc93c022c165763d147b985e46db343432fa058afaf8582ba",
+    "sheet.webtoon": "a5facc1af6e598e2adae0d0e25675df1852132808005954b9cfb31bebf46260d",
+    "front.webtoon": "a889a0048a99169bc686f3f6ffdb20cadae6cd129b4ccd73fd807b71e01db9f8",
+    "back.webtoon": "dfd02efa85dc182f8f4487fb8e3ff9ec976a2d9731797e06ee716cb21ad45a24",
+    "sheet.real": "44c59d78a1acf42e7318b883474bd0524658ba49ccdf4a6d585a8f4a9a64df22",
+    "front.real": "d2e2245988408d47e66cd1e982be037a2f5e06d8f22232917603b8aaa47d28e8",
+    "back.real": "a0fbfecf69b58930e61ed5f00791a88fcc29254e7f5e4118f1a1d851ec110968",
+    "sheet.webtoonExtra": "ff4c05ad059b99edc55a2f1c73c38e89a813fa920fba533806d079c6e2d79537",
+    "front.webtoonExtra": "59b48eb298e2876ed08d0ff1103d4664665ec854d04b8d6f64b270eca19d0989",
+    "back.webtoonExtra": "cca5b099fdab3df6e5b2b69a5c852ce4f5ab72fea7b39ceeb09e5b8edd1f5148",
+    "sheet.realExtra": "4716c42372e7cd336a4fcb4f341921e02920781fec084ff0c9988f12ea3d018e",
+    "front.realExtra": "2fda0e6179f71d4367de0496ab4839f4cb5398d31a43892d679bd0e76a8646e8",
+    "back.realExtra": "6bd6ad0a6b5a0db5d45fc920d491bc5b83430634ba3302db73b3db254b75de9c",
+    "outfit.webtoon.front": "03c9ce34dbdeda151bb061da2ca5e0eeed0a162f69eb69bf088bc89b7b9a7202",
+    "outfit.webtoon.back": "e8bf62c51a40f79df2328c4fb0f32a0e56bd44c639bbb4e59aaaf7f3a53c5dd1",
+    "outfit.real.front": "d2e1d8a9b6e5386071368fffcb0b3ffab40df9d589f94031e8297acc3f7982ae",
+    "outfit.real.back": "1eb3c9e7c4ad6eeb3c168dc4257997ffb4a21a6c57ce9fc06fb492ae984db430",
+    "detailOld": "d4f1a977a93bc0cb12c39239f07c7b15c855295353199fd9391ec9b6c3dd58a2",
+    "buildTrace": "8f36c6867cb5c31ecaa7629587bbc20b4caee9b41f96979892221a97e6c70af7",
+    "buildKeys": "d43c5c325f757635bb9290a8b990d83f26c59cb7a4c609d8358e1c465915292b",
+}
+
+# cf-g: 충실 SYSTEM(design §4.1 원문) sha256. 설계 문서의 원문과 글자째 같은 것을 확인하고 잰 값이다.
+_CF_SYSTEM_FIDELITY_SHA = "6d53b8b4040752f8294cc74fb14a6663df21cd6232eb4e4f405609177908305f"
+# cf-g: 충실 SYSTEM 에 반드시 있어야 하는 문장(R2.2 화면 기준·좌우 금지, R1.1·R1.2 기준 사진·겹옷 유지).
+_CF_SYSTEM_MUST = (
+    "Each image follows a text label 'Image N:'; images are numbered from 0 in the order given.",
+    "Do NOT convert it to the character's own left or right; report only what you see on the picture.",
+    "Never write left or right in baseOutfitEn or outfitLayersEn; put every item that is on one side only in sidedItemsEn.",
+    "keep every layer (do not remove a jacket, overshirt, coat, cardigan or hoodie), do not mix in clothes from other images",
+    "baseSourceIndex is the number of the ONE image where the character's outfit is shown most clearly and completely",
+)
+# cf-i·cf-f: design 원문(설계 문서에서 옮겨 적었다 — 구현 상수·결과와 글자째 같아야 한다).
+_CF_ROTATION_DESIGN = (
+    "Five full-body views of the same person side by side on a plain white background, turning in place toward the LEFT "
+    "of the image in 45° steps, from left to right: 1 FRONT, facing the viewer; 2 THREE-QUARTER FRONT, body and face "
+    "turned 45° toward the left of the image; 3 SIDE PROFILE facing the left edge of the image; 4 THREE-QUARTER BACK, "
+    "turned 135°: mostly the back shows and the head turns to the upper left so only the cheek and ear outline are "
+    "visible; 5 BACK, seen from directly behind. All five figures the same size, feet on one ground line, evenly spaced, "
+    "the same relaxed standing pose."
+)
+_CF_ONE_F_DESIGN = (
+    "Draw exactly ONE person — only ONE single person in the image, no extra figures, no duplicates, no background "
+    "characters. Every view wears exactly the outfit described above and nothing else. No jacket, coat or extra layer "
+    "unless listed."
+)
+_CF_SOURCE_DESIGN = (
+    "Copy the clothes exactly as drawn on {who} in Image {n}: the same garments and layers, colours, fit, how each piece "
+    "is worn, rips or patterns and where they are, shoes and accessories."
+)
+_CF_SIDE_DESIGN = {
+    "front": "The {item} is on {pron} {S} {P} only — in this front view it appears on the {O} side of the image; {pron} {O} {P} "
+             "has nothing like it; never on both {PP}.",
+    "back": "The {item} is on {pron} {S} {P} only — in this back view it appears on the {S} side of the image; {pron} {O} {P} "
+            "has nothing like it; never on both {PP}.",
+    ("left", "left"): "The {item} is on {pron} LEFT {P}, the {P} nearest the viewer in this left side view — show it clearly "
+                      "there; the far {P} has nothing like it; never on both {PP}.",
+    ("left", "right"): "The {item} is on {pron} RIGHT {P}, the far {P} in this left side view — it is hidden behind the body or "
+                       "barely visible; the near {P} closest to the viewer has nothing like it; never on both {PP}.",
+    ("right", "right"): "The {item} is on {pron} RIGHT {P}, the {P} nearest the viewer in this right side view — show it clearly "
+                        "there; the far {P} has nothing like it; never on both {PP}.",
+    ("right", "left"): "The {item} is on {pron} LEFT {P}, the far {P} in this right side view — it is hidden behind the body or "
+                       "barely visible; the near {P} closest to the viewer has nothing like it; never on both {PP}.",
+    "sheet": "The {item} is on {pron} {S} {P} only — in the front figure it appears on the {O} side of the image and in the back "
+             "figure on the {S} side of the image; never on both {PP}.",
+}
+_CF_WATCH = "round pale-faced wristwatch with a brown leather strap"
+_CF_YEOUIJUN_FRONT = (
+    "The round pale-faced wristwatch with a brown leather strap is on his RIGHT wrist only — in this front view it appears "
+    "on the LEFT side of the image; his LEFT wrist has nothing like it; never on both wrists."
+)
+_CF_YEOUIJUN_TAIL = "Worn on one side only: round pale-faced wristwatch with a brown leather strap on the RIGHT wrist only."
+_CF_WEBTOON_STYLE_TAIL = (
+    "Match the drawing style of the reference images exactly — same line quality, coloring and shading. Do NOT redraw "
+    "in a generic anime or glossy webtoon style."
+)
+_CF_REAL_STYLE = "Real photograph, natural skin texture, soft studio lighting."
+_CF_RAW_OUTFIT = (
+    "white crew-neck T-shirt under an open pale sage-green overshirt with sleeves rolled to the elbow, loose light-wash "
+    "straight jeans, white low-top sneakers and a round wristwatch with a brown strap on the left wrist"
+)
+# 충실 분석 가짜 응답(여의준 꼴): 기준 사진 Image 2, 시계는 정면 그림 화면 왼쪽(→ 캐릭터 오른쪽)·후면 그림 화면 오른쪽(→ 오른쪽),
+# 귀걸이는 1:1 동률(버림). 사진 속 옷: Image 3(시계가 보인 그림)·틀린 번호 9·빈 promptEn.
+_CF_FID_PAYLOAD = {
+    **{k: v for k, v in _CF_OLD_PAYLOAD.items() if k not in ("baseOutfitEn", "outfitEn", "outfitLayersEn")},
+    "baseOutfitEn": _CF_RAW_OUTFIT,
+    "outfitEn": _CF_RAW_OUTFIT,
+    "baseSourceIndex": 2,
+    "baseWhereEn": "large\nbottom figure",
+    "outfitLayersEn": [
+        {"labelKo": "검은 정장", "promptEn": "black two-button suit jacket over a white dress shirt, black slacks, black loafers "
+         "and a wristwatch on the left wrist", "sourceIndex": 3, "whereEn": "large bottom figure"},
+        {"labelKo": "후드티", "promptEn": "light blue hoodie, grey sweatpants, white sneakers", "sourceIndex": 9, "whereEn": ""},
+        {"labelKo": "빈", "promptEn": "   ", "sourceIndex": 1},
+    ],
+    "sidedItemsEn": [
+        {"itemEn": _CF_WATCH, "labelKo": "시계", "partEn": "wrist",
+         "sightings": [{"sourceIndex": 2, "imageSide": "left", "facing": "toward"},
+                       {"sourceIndex": 3, "imageSide": "right", "facing": "away"}]},
+        {"itemEn": "silver stud earring", "labelKo": "귀걸이", "partEn": "ear",
+         "sightings": [{"sourceIndex": 1, "imageSide": "left", "facing": "toward"},
+                       {"sourceIndex": 0, "imageSide": "right", "facing": "toward"}]},
+    ],
+}
+
+
+# ---------------------------------------------------------------- char-fidelity T2(그림 검사·시트 검사·옆모습·3D·이어 만들기)
+#
+# 묶음 T2 검사(cf-e·cf-f 고칠 문장·cf-j·cf-k·cf-m·cf-n·cf-o·cf-p·cf-q)가 쓰는 하네스·design 원문.
+
+# cf-o·cf-p 기준값: 코드를 바꾸기 **전**(2026-10-30, char-fidelity T2 시작 전 작업 트리 = 커밋 5f8d891)에 _cf_3d_old_fingerprints()
+# 로 두 번 잰 sha256(두 번 같은 값). 옆모습 키가 없는 옛 variant 의 3D 본문·재제출 본문은 설정과 상관없이, 이어 만들기 호출은
+# 끔이면(또는 3D 요청이 이미 있으면) 지금과 같아야 한다(R0.2·R4.5·R4.7).
+_CF_3D_OLD_SHA = {
+    "retry3dSubmit": "ad5f72a90ceaa230f0f65b62f7acb2b137bcc2cc0aa0e41e4284d8fe7ca32e1d",
+    "retry3dResubmit": "ad5f72a90ceaa230f0f65b62f7acb2b137bcc2cc0aa0e41e4284d8fe7ca32e1d",
+    "build3dSubmit": "ad5f72a90ceaa230f0f65b62f7acb2b137bcc2cc0aa0e41e4284d8fe7ca32e1d",
+    "build3dPosts": "080a9ed428559ef602668b4c00f114f1a11c3f6b02a435f0bdc154578e4d7f22",
+    "resumeImagesTrace": "0b205f308eee47a89abc760e6892c5324ca36ace03a2737d615066b38dc1d5d0",
+    "resumeArnTrace": "e7ddc7eb89d010b7e781ecb456d1e49ecd1cc6ea758cd473d28b769dc6c3fe57",
+}
+
+
+def _cf_3d_old_fingerprints() -> dict[str, str]:
+    """옛 variant(옆모습 키 없음) 3D 제출 본문·이어 만들기 호출 sha256(cf-o·cf-p). 코드를 바꾸기 **전**(T2 시작 전)에 잰 값이
+    _CF_3D_OLD_SHA 다. 끔 경로와 옆모습이 없는 variant 는 지금과 바이트 단위로 같아야 한다(R0.2·R4.5).
+
+    - retry3dSubmit·retry3dResubmit: run_retry3d(이전 요청 없음) 새 제출 본문과, 조회가 unavailable 8회면 다시 낸 본문.
+    - build3dSubmit: _build_3d_from_images(정면·후면만) 제출 본문.
+    - resumeImagesTrace: 그림 3개가 있고 3D 요청이 없는 variant 를 run_resume_variant 로 이어 만든 외부 호출 순서·인자.
+    - resumeArnTrace: 3D 요청이 이미 있는 variant 를 이어 만든 외부 호출 순서·인자(조회만).
+    고정 바이트(_cf_jpeg 101~103)로 만든 정사각 data URI 라 같은 Pillow 에서 늘 같은 값이다.
+    """
+    sys.path.insert(0, str(ROOT / "app"))
+    from src.vnew import characters as charmod  # noqa: PLC0415
+    from src.vpoc.errors import VpocError as _VpocError  # noqa: PLC0415
+
+    out: dict[str, str] = {}
+    front, back, sheet = _cf_jpeg(101, 16, 24), _cf_jpeg(102, 16, 24), _cf_jpeg(103, 24, 16)
+
+    def seed_images(fakes, cid: str, **model3d) -> dict:
+        root = f"users/tester/characters/{cid}/webtoon/v1"
+        old = charmod._empty_variant()
+        old.update(status="model3d", sheetKey=f"{root}/sheet.jpg", frontKey=f"{root}/front.jpg", backKey=f"{root}/back.jpg",
+                   claim="cf-tok", claimedAt=charmod.now_iso(), heartbeatAt=charmod.now_iso())
+        old["model3d"].update(model3d)
+        _cf_seed_char(fakes, cid, 2, version=1, status="building", analysis=dict(_CF_PROMPT_ANALYSIS),
+                      variants={"webtoon": old, "real": charmod._empty_variant()})
+        fakes.store.blobs[old["frontKey"]] = front
+        fakes.store.blobs[old["backKey"]] = back
+        fakes.store.blobs[old["sheetKey"]] = sheet
+        return old
+
+    with _pin_vnew(**_CF_PINS):
+        with _CfFakes(charmod) as fakes:
+            seed_images(fakes, "char_cf_o_old")
+            lost = {"left": 8}
+            plain_fal = charmod._fal_request
+
+            def lossy_fal(method, url, payload=None):
+                if method == "GET" and url.endswith("/status") and lost["left"] > 0:
+                    lost["left"] -= 1
+                    fakes.fal.append((method, url, {}))
+                    raise _VpocError("vnew.fal", "HTTP503", "Downstream service unavailable", 503)
+                return plain_fal(method, url, payload)
+
+            charmod._fal_request = lossy_fal
+            charmod.run_retry3d("tester", "char_cf_o_old", "webtoon", 1, "")
+            posts = [[method, url, body] for method, url, body in fakes.fal if method == "POST"]
+            out["retry3dSubmit"] = _cf_sha(posts[0] if posts else None)
+            out["retry3dResubmit"] = _cf_sha(posts[1] if len(posts) > 1 else None)
+        with _CfFakes(charmod) as fakes:
+            _cf_seed_char(fakes, "char_cf_o_old2", 1, version=1, status="building")
+            charmod._build_3d_from_images("tester", "char_cf_o_old2", "webtoon", 1, front, back, "")
+            posts = [[method, url, body] for method, url, body in fakes.fal if method == "POST"]
+            out["build3dSubmit"] = _cf_sha(posts[0] if posts else None)
+            out["build3dPosts"] = _cf_sha([len(posts)])
+        with _CfFakes(charmod) as fakes:
+            seed_images(fakes, "char_cf_o_resume")
+            charmod.run_resume_variant("tester", "char_cf_o_resume", "webtoon", 1, "cf-tok")
+            out["resumeImagesTrace"] = _cf_sha(fakes.trace)
+        with _CfFakes(charmod) as fakes:
+            seed_images(fakes, "char_cf_o_arn", status="submitted",
+                        requestArn="fal/requests/fal-ai/hunyuan3d-v3/image-to-3d/req_prior")
+            charmod.run_resume_variant("tester", "char_cf_o_arn", "webtoon", 1, "cf-tok")
+            out["resumeArnTrace"] = _cf_sha(fakes.trace)
+    return out
+
+
+def _cf_halves(n: int, width: int = 32, height: int = 24) -> bytes:
+    """왼쪽 반·오른쪽 반 색이 다른 JPEG(T2 가짜 Seedream, 반전 확인용). 16px 경계·색 줄임 없음이라 두 색이 거의 섞이지 않는다.
+
+    왼쪽 빨강 0~99, 오른쪽 빨강 160~249 라 반전했는지 픽셀로 가린다. 호출 번호 n 마다 바이트가 다르다.
+    """
+    import io as _io  # noqa: PLC0415
+
+    from PIL import Image  # noqa: PLC0415
+
+    image = Image.new("RGB", (width, height), ((n * 7) % 100, (n * 13) % 256, (n * 29) % 256))
+    image.paste(Image.new("RGB", (width // 2, height), (160 + (n * 11) % 90, (n * 17 + 100) % 256, (n * 31 + 50) % 256)),
+                (width // 2, 0))
+    buffer = _io.BytesIO()
+    image.save(buffer, format="JPEG", quality=95, subsampling=0)
+    return buffer.getvalue()
+
+
+def _cf_mirror_ok(original: bytes, stored: bytes) -> bool:
+    """stored 가 original 을 좌우로 뒤집은 그림인가(픽셀 비교, 가운데 경계 4px 빼고 JPEG 오차 24 이내). 대칭 그림이면 거짓."""
+    import io as _io  # noqa: PLC0415
+
+    from PIL import Image  # noqa: PLC0415
+
+    with Image.open(_io.BytesIO(original)) as a, Image.open(_io.BytesIO(stored)) as b:
+        a, b = a.convert("RGB"), b.convert("RGB")
+        if a.size != b.size:
+            return False
+        w, h = a.size
+        if abs(a.getpixel((1, h // 2))[0] - a.getpixel((w - 2, h // 2))[0]) < 60:
+            return False
+        for x in range(w):
+            if abs(x - w // 2) <= 2:
+                continue
+            for y in range(0, h, 4):
+                pa, pb = a.getpixel((x, y)), b.getpixel((w - 1 - x, y))
+                if max(abs(pa[k] - pb[k]) for k in range(3)) > 24:
+                    return False
+    return True
+
+
+# 맞는 응답에서 소품이 보이는 쪽(design §5.6 표에서 옮겨 적었다): (보기, 캐릭터 쪽) → seen.
+_CF_GOOD_SEEN = {("front", "right"): "left", ("front", "left"): "right", ("back", "right"): "right", ("back", "left"): "left",
+                 ("left", "right"): "far", ("left", "left"): "near", ("right", "right"): "near", ("right", "left"): "far"}
+_CF_SHEET_GOOD_VIEWS = ("front", "three-quarter front", "side", "three-quarter back", "back")
+_CF_SHEET_GOOD_FACES = ("center", "left", "left", "left", "hidden")
+
+
+def _cf_sheet_answer(views=_CF_SHEET_GOOD_VIEWS, faces=_CF_SHEET_GOOD_FACES, consistent=True, problems=()) -> dict:
+    """가짜 시트 검사 응답(기본 = 다섯 인물 순서 그대로·복장 같음)."""
+    return {"figures": [{"view": v, "faceSide": f} for v, f in zip(views, faces)], "consistent": consistent,
+            "problems": list(problems)}
+
+
+def _cf_view_answer(view: str, seen=(), *, people=1, facing=None, lettering=False) -> dict:
+    """가짜 그림 검사 응답. seen 은 소품 번호 순 보이는 쪽."""
+    return {"people": people, "facing": view if facing is None else facing, "lettering": lettering,
+            "items": [{"index": i, "seen": s} for i, s in enumerate(seen)]}
+
+
+class _CfFakesT2(_CfFakes):
+    """T2 하네스: _CfFakes + 그림 검사(emit_view_check)·시트 검사(emit_sheet_check) 가짜, 두 색 그림, Seedream hook.
+
+    - view_script[view]: 그 보기 검사에 앞에서부터 하나씩 쓰는 응답(dict 그대로 · 예외는 올림 · "good" 이나 빈 목록은 맞는 응답).
+      보기는 그 그림을 만든 Seedream 프롬프트로 안다(LEFT SIDE view → left · RIGHT SIDE view → right · BACK view → back · 그 밖 front).
+    - sheet_script: 시트 검사 응답(같은 규칙, 맞는 응답 = _cf_sheet_answer()). items: 맞는 응답을 만들 정한 소품.
+    - on_seedream(n, prompt): Seedream 호출마다 그림을 만들기 전에 부른다(선점 뺏기·가짜 시계). seedream[k]["raw"] 는 참고 바이트.
+    """
+
+    def __init__(self, charmod, **kw) -> None:
+        super().__init__(charmod, **kw)
+        self.view_script: dict[str, list] = {"front": [], "back": [], "left": [], "right": []}
+        self.sheet_script: list = []
+        self.items: list[dict] = []
+        self.on_seedream = None
+        self.prompt_of: dict[bytes, str] = {}
+        self.checked: list[str] = []
+
+    def _seedream(self, prompt, references, *, size):
+        n = len(self.seedream)
+        if self.on_seedream is not None:
+            self.on_seedream(n, prompt)
+        image = _cf_halves(n)
+        self.labels[image] = f"img{n}"
+        self.prompt_of[image] = prompt
+        refs = [self.label(ref) for ref in references or []]
+        self.seedream.append({"prompt": prompt, "refs": refs, "size": size, "image": image, "raw": list(references or [])})
+        self.trace.append(["seedream", size, _cf_sha(prompt), refs])
+        return image
+
+    def view_of(self, image) -> str:
+        prompt = self.prompt_of.get(bytes(image), "")
+        if "LEFT SIDE view" in prompt:
+            return "left"
+        if "RIGHT SIDE view" in prompt:
+            return "right"
+        return "back" if "BACK view" in prompt else "front"
+
+    def _converse(self, **kw):
+        import copy as _copy  # noqa: PLC0415
+
+        tool = kw.get("tool") or {}
+        name = tool.get("name")
+        if name not in ("emit_view_check", "emit_sheet_check"):
+            return super()._converse(**kw)
+        self.llm.append(kw)
+        self.trace.append([
+            "llm", kw.get("where"), kw.get("model"), kw.get("max_tokens"), name, _cf_sha(kw.get("system_text") or ""),
+            _cf_sha(json.dumps(tool, sort_keys=True, ensure_ascii=False)), self.blocks(kw.get("blocks")),
+        ])
+        if name == "emit_view_check":
+            view = self.view_of(kw["blocks"][1]["image"]["source"]["bytes"])
+            self.checked.append(view)
+            queue = self.view_script.setdefault(view, [])
+            answer = queue.pop(0) if queue else "good"
+            if isinstance(answer, str):
+                answer = _cf_view_answer(view, [_CF_GOOD_SEEN[(view, item["side"])] for item in self.items])
+        else:
+            self.checked.append("sheet")
+            answer = self.sheet_script.pop(0) if self.sheet_script else "good"
+            if isinstance(answer, str):
+                answer = _cf_sheet_answer()
+        if isinstance(answer, BaseException):
+            raise answer
+        return _copy.deepcopy(answer), {"model": kw.get("model")}
+
+    def names(self) -> list[str]:
+        """LLM 도구 이름 순서."""
+        return [(kw.get("tool") or {}).get("name") for kw in self.llm]
+
+
+# design §7.1·§7.3·§5.8 원문(설계 문서에서 옮겨 적었다 — 구현 상수·결과와 글자째 같아야 한다).
+_CF_VIEW_HEAD_DESIGN = (
+    "You check ONE generated character image. people is the number of distinct people drawn. facing is where the person "
+    "faces: 'front' (toward the viewer), 'back' (we see the back of the head and body), 'left' (side profile with the face "
+    "pointing to the LEFT edge of the picture), 'right' (side profile with the face pointing to the RIGHT edge of the "
+    "picture) or 'other'. lettering is true when the clothes or accessories show readable letters or numbers."
+)
+_CF_VIEW_FLAT_DESIGN = (
+    " For each listed item give seen: 'left' when it appears on the viewer's left of the person's body midline, 'right' when "
+    "on the viewer's right, 'both' when it appears on both sides, 'none' when you cannot see it. Report only what you see on "
+    "the picture; do not think about the person's own left or right."
+)
+_CF_VIEW_SIDE_DESIGN = (
+    " For each listed item give seen: 'near' when it is on the arm or side of the body closest to the viewer, 'far' when it is "
+    "visible only on the far side behind the body, 'both' when it appears on both sides, 'none' when you cannot see it."
+)
+_CF_VIEW_TAIL_DESIGN = " Answer only by calling the emit_view_check tool exactly once."
+_CF_SHEET_SYSTEM_DESIGN = (
+    "You check a character turnaround reference sheet. List every full-body figure from left to right in figures. view is "
+    "'front' (faces the viewer), 'three-quarter front' (turned about 45°, the face still mostly visible), 'side' (exact side "
+    "profile), 'three-quarter back' (turned about 135°, mostly the back, only a cheek or ear outline of the face), 'back' "
+    "(seen from directly behind) or 'other'. faceSide is the edge of the PICTURE the face or the front of the body points "
+    "toward as you look at it: 'left', 'right', 'center' when it faces the viewer, 'hidden' when it faces away. The character "
+    "must also wear ONE single base outfit in EVERY view (front, side, back). Compare what you see against the required base "
+    "outfit given by the user. Set consistent=false if any view adds or swaps a garment (an extra jacket, coat, cardigan or "
+    "hoodie, a different colour, a different top or bottom) so the views do not all match the base outfit; otherwise "
+    "consistent=true. Do not judge which side small accessories are on. In problems, list each mismatch as a short English "
+    "phrase (e.g. 'back view adds a black jacket'). Answer only by calling the emit_sheet_check tool exactly once."
+)
+_CF_FACING_FIX_DESIGN = {
+    "front": " Fix: the person must face the viewer directly (front view).",
+    "back": " Fix: show the person from directly behind (back view); the face must not be visible.",
+    "left": " Fix: exact side profile with the face pointing to the LEFT edge of the image and the person's LEFT side toward the "
+            "viewer.",
+    "right": " Fix: exact side profile with the face pointing to the RIGHT edge of the image and the person's RIGHT side toward "
+             "the viewer.",
+}
+_CF_SHEET_DESC_DESIGN = (
+    "a FRONT view facing the viewer",
+    "a THREE-QUARTER FRONT view turned 45° toward the left of the image",
+    "a SIDE PROFILE facing the left edge of the image",
+    "a THREE-QUARTER BACK view turned 135°, mostly the back, head turned to the upper left so only the cheek and ear outline show",
+    "a BACK view from directly behind",
+)
+_CF_WARN_DESIGN = {
+    "people": "정면/후면에 여러 사람이 보일 수 있습니다", "item": "소품 위치가 다를 수 있습니다",
+    "facing": "정면/후면 방향이 다를 수 있습니다", "sheetOutfit": "복장이 면마다 다를 수 있습니다",
+    "sheetRotation": "시트의 도는 순서가 어색할 수 있습니다",
+}
+_CF_FID_ANALYSIS = {
+    "appearanceEn": "A young Korean man in his 20s with short black hair.", "styleEn": "Soft pastel lines.",
+    "baseOutfitEn": "white tee, jeans. " + _CF_YEOUIJUN_TAIL, "outfitEn": "white tee, jeans. " + _CF_YEOUIJUN_TAIL,
+    "extraEn": "Keep a calm face.", "fidelity": 1, "baseSourceIndex": 1, "baseSourceFileId": "f_cf1", "baseWhereEn": "",
+    "sidedItems": [{"itemEn": _CF_WATCH, "labelKo": "시계", "partEn": "wrist", "side": "right",
+                    "votes": {"left": 0, "right": 1}, "seenIn": [1]}],
+    "genderEn": "male", "nameGuess": "여의준", "descriptionKo": "20대 남성.", "outfitLayersEn": [], "altOutfitsEn": [],
+    "expressionsKo": [], "model": "cf-fallback",
+}
+
+
+class _CfEnv:
+    """T2 검사 본문이 T1 검사 함수의 공용 값(bad·report·expect·logs·모듈·설정 묶음)을 쓰게 하는 묶음."""
+
+    def __init__(self, **values) -> None:
+        self.__dict__.update(values)
+
+
+def _cf_t2_bodies(env: "_CfEnv") -> list:
+    """char-fidelity T2 검사 본문 [(이름, 함수)]. check_vnew_char_fidelity 가 T1 과 같은 틀(run·mark)로 돈다.
+
+    (cf-e) 기대값·반전·관찰값 정리 표 (cf-f2) 고칠 문장·warning 원문 (cf-j) 정면·후면 그림 검사 흐름 (cf-k) 시트 검사 흐름·길이 예산
+    (cf-m) 켬 빌드 순서·참고·원장·키·3D 본문·호출 수 상한 (cf-n) 옆모습 반전·제외·확인 안 됨·소품 없음
+    (cf-o) 3D 재제출·retry3d·옛 본문 sha256 (cf-p) 이어 만들기 (cf-q) 선점·하트비트·keepalive
+    """
+    import base64 as _b64  # noqa: PLC0415
+    import copy as _copy  # noqa: PLC0415
+    import io as _io  # noqa: PLC0415
+
+    from PIL import Image as _Image  # noqa: PLC0415
+
+    cfm, charmod = env.cfm, env.charmod
+    bad, report, expect, logs = env.bad, env.report, env.expect, env.logs
+    on, off, watch = env.on, env.off, env.watch
+    from src.vpoc.errors import VpocError as _VpocError  # noqa: PLC0415
+
+    items1 = [dict(watch)]
+    seen_flat = ["left", "right", "both", "none"]
+    seen_side = ["near", "far", "both", "none"]
+    item_text = "Items to check: 0) " + _CF_WATCH + " (wrist)"
+    fix_wrong_front = (" Fix: the " + _CF_WATCH + " was on the wrong wrist; it must be on his RIGHT wrist, which is on the LEFT "
+                       "side of the image in this view.")
+
+    def tool_names(fakes, start: int = 0) -> list:
+        return [(kw.get("tool") or {}).get("name") for kw in fakes.llm[start:]]
+
+    def posts(fakes, start: int = 0) -> list:
+        return [body for method, _url, body in fakes.fal[start:] if method == "POST"]
+
+    def square_uri(jpeg: bytes) -> str:
+        return charmod._data_uri(charmod._square_pad(jpeg, charmod.settings.MODEL_INPUT_SQUARE))
+
+    def seed_images(fakes, cid: str, *, analysis=None, n_sources: int = 3, sides: dict | None = None, **vfields) -> dict:
+        """그림 3개(+옆모습)가 저장된 variant(webtoon) 캐릭터. sides = {left: (status, bytes|None)}."""
+        root = f"users/tester/characters/{cid}/webtoon/v1"
+        v = charmod._empty_variant()
+        v.update(status="model3d", sheetKey=f"{root}/sheet.jpg", frontKey=f"{root}/front.jpg", backKey=f"{root}/back.jpg",
+                 claim="tokP", claimedAt=charmod.now_iso(), heartbeatAt=charmod.now_iso())
+        for side, (status, data) in (sides or {}).items():
+            v.setdefault("viewCheck", {})[side] = status
+            v[f"{side}Key"] = f"{root}/{side}.jpg" if data is not None else ""
+            if data is not None and data != b"missing":
+                fakes.store.blobs[f"{root}/{side}.jpg"] = data
+        model3d = vfields.pop("model3d", {})
+        v.update(vfields)
+        v["model3d"].update(model3d)
+        a = _copy.deepcopy(_CF_FID_ANALYSIS if analysis is None else analysis)
+        _cf_seed_char(fakes, cid, n_sources, version=1, status="building", analysis=a,
+                      variants={"webtoon": v, "real": charmod._empty_variant()})
+        for name, n in (("front", 201), ("back", 202), ("sheet", 203)):
+            data = _cf_halves(n)
+            fakes.store.blobs[v[f"{name}Key"]] = data
+            fakes.labels[data] = name
+        return v
+
+    # ------------------------------------------------------------------ (cf-e) 기대값·반전·정리 표
+    def cf_e() -> None:
+        expect("cf-e", [cfm.expected_facing(v) for v in ("front", "back", "left", "right", "sheet", "x")],
+               ["front", "back", "left", "right", "", ""], "expected_facing")
+        table = {
+            ("front", "right", "wrist"): {"left"}, ("front", "left", "wrist"): {"right"},
+            ("back", "right", "wrist"): {"right"}, ("back", "left", "wrist"): {"left"},
+            ("left", "right", "wrist"): {"far", "none"}, ("left", "left", "wrist"): {"near"},
+            ("right", "right", "wrist"): {"near"}, ("right", "left", "wrist"): {"far", "none"},
+            ("front", "right", "eye"): {"left"}, ("front", "left", "eye"): {"right"},
+            ("back", "right", "eye"): {"right", "none"}, ("back", "left", "eye"): {"left", "none"},
+            ("left", "right", "eye"): {"far", "none"}, ("left", "left", "eye"): {"near"},
+            ("right", "right", "eye"): {"near"}, ("right", "left", "eye"): {"far", "none"},
+            ("back", "right", "cheek"): {"right", "none"},
+        }
+        for (view, side, part), want in table.items():
+            expect("cf-e", set(cfm.expected_seen(view, side, part)), want, f"expected_seen({view}, {side}, {part})")
+        expect("cf-e", [set(cfm.expected_seen("front", "up", "wrist")), set(cfm.expected_seen("left", None, "wrist")),
+                        set(cfm.expected_seen("sheet", "left", "wrist"))],
+               [set(seen_flat), set(seen_side), set(seen_flat)], "틀린 쪽·시트 → 검사하지 않는다(모든 값 허용)")
+        if any("both" in cfm.expected_seen(v, s, p) for v in ("front", "back", "left", "right") for s in ("left", "right")
+               for p in ("wrist", "eye")):
+            bad.append("(cf-e) both 가 허용된 보기가 있습니다(design §5.6: 어느 보기에서도 틀린 값)")
+        expect("cf-e", [list(cfm.seen_values(v)) for v in ("front", "back", "left", "right", "sheet")],
+               [seen_flat, seen_flat, seen_side, seen_side, seen_flat], "seen_values")
+        nvo = cfm.normalize_view_obs
+        expect("cf-e", [nvo(None, "front", 1), nvo("x", "front", 1), nvo([], "front", 1)], [None, None, None],
+               "dict 아닌 응답 → None")
+        got = nvo({"people": "2", "facing": "Front ", "lettering": "true",
+                   "items": [{"index": 0, "seen": "LEFT"}, {"index": 0, "seen": "both"}, {"index": 5, "seen": "left"},
+                             {"index": True, "seen": "left"}, {"index": "1", "seen": "near"}, "x",
+                             {"index": 1, "seen": "right"}]}, "front", 2)
+        expect("cf-e", got, {"people": 2, "facing": "front", "lettering": False, "items": {0: "both", 1: "right"}},
+               "정면 관찰값 정리(숫자 글자·대소문자·뒤 값이 이김·범위 밖·bool·열거값 밖·lettering 글자)")
+        got = nvo({"people": True, "facing": "sideways", "lettering": True,
+                   "items": [{"index": 0, "seen": "left"}, {"index": 0, "seen": "far"}]}, "left", 1)
+        expect("cf-e", got, {"people": None, "facing": "other", "lettering": True, "items": {0: "far"}},
+               "옆모습 관찰값(near·far 만, bool 사람 수 → None, 틀린 방향 → other)")
+        expect("cf-e", nvo({"people": 1.0, "items": "x"}, "back", 1),
+               {"people": None, "facing": "other", "lettering": False, "items": {}}, "float 사람 수·items 목록 아님")
+        vm = cfm.view_mismatches
+        eye = [dict(watch, partEn="eye")]
+        expect("cf-e", [vm({"people": 1, "facing": "front", "items": {0: "left"}}, "front", items1),
+                        vm({"people": 2, "facing": "back", "items": {0: "both"}}, "front", items1),
+                        vm({"people": None, "facing": "front", "items": {}}, "front", items1),
+                        vm({"people": 1, "facing": "back", "items": {}}, "back", eye),
+                        vm({"people": 1, "facing": "back", "items": {}}, "back", items1),
+                        vm({"people": 1, "facing": "left", "items": {0: "near"}}, "left", items1),
+                        vm({"people": 1, "facing": "left", "items": {}}, "left", items1),
+                        vm({"people": 1, "facing": "right", "items": {0: "far"}}, "right", items1),
+                        vm({"people": 0, "facing": "right", "items": {0: "near"}}, "right", items1),
+                        vm({"people": 1, "facing": "front", "items": {}}, "front", [])],
+               [[], [("people", 2), ("facing", "back"), ("item", 0, "both")], [("item", 0, "none")], [],
+                [("item", 0, "none")], [("item", 0, "near")], [], [("item", 0, "far")], [("people", 0)], []],
+               "view_mismatches(사람 수 모르면 건너뜀·없는 소품 = none·후면 눈 none 허용·옆모습 먼 쪽 none 허용)")
+        fo = cfm.flip_observation
+        raw = {"people": 1, "facing": "front", "items": {0: "right", 1: "both", 2: "none"}}
+        expect("cf-e", fo(raw, "front"), {"people": 1, "facing": "front", "items": {0: "left", 1: "both", 2: "none"}},
+               "정면 반전(left↔right, both·none 그대로)")
+        expect("cf-e", raw["items"], {0: "right", 1: "both", 2: "none"}, "반전이 원래 관찰값을 바꾸면 안 됩니다")
+        expect("cf-e", [fo({"facing": "right", "items": {0: "far"}}, "left"), fo({"facing": "other", "items": {0: "near"}}, "right"),
+                        fo({"facing": "back", "items": {0: "left"}}, "back")],
+               [{"facing": "left", "items": {0: "far"}}, {"facing": "other", "items": {0: "near"}},
+                {"facing": "back", "items": {0: "right"}}], "옆모습 반전은 방향만, 후면은 소품만")
+        cf = cfm.can_flip
+        swapped = {"people": 1, "facing": "front", "lettering": False, "items": {0: "right"}}
+        expect("cf-e", [cf(swapped, "front", items1), cf(dict(swapped, people=2), "front", items1),
+                        cf(dict(swapped, people=None), "front", items1), cf(dict(swapped, people=True), "front", items1),
+                        cf(dict(swapped, lettering=True), "front", items1), cf(dict(swapped, items={0: "left"}), "front", items1),
+                        cf(dict(swapped, items={0: "both"}), "front", items1), cf(dict(swapped, facing="back"), "front", items1)],
+               [True, False, False, False, False, False, False, False], "can_flip(정면 좌우 뒤바뀜만 참)")
+        mirror_left = {"people": 1, "facing": "right", "lettering": False, "items": {0: "far"}}
+        correct_right = {"people": 1, "facing": "right", "lettering": False, "items": {0: "near"}}
+        expect("cf-e", [cf(mirror_left, "left", items1), cf(correct_right, "left", items1),
+                        cf({"people": 1, "facing": "right", "lettering": False, "items": {}}, "left", [])],
+               [True, False, True], "옆모습 반전 예(design §5.7: 거울상 → 참, 올바른 오른쪽 보기 → 거짓, 소품 없이 방향만)")
+        nso = cfm.normalize_sheet_obs
+        expect("cf-e", [nso(None), nso([]), nso("x")], [None, None, None], "dict 아닌 시트 응답 → None")
+        got = nso({"figures": [{"view": "FRONT", "faceSide": "Center"}, {"view": "3/4", "faceSide": "up"}, "x"]
+                   + [{"view": "back", "faceSide": "hidden"}] * 7, "consistent": "true",
+                   "problems": ["a\nb", "", 3, "x" * 300] + ["p"] * 10})
+        expect("cf-e", (len(got["figures"]), got["figures"][:3], got["consistent"], got["problems"][:2], len(got["problems"])),
+               (8, [{"view": "front", "faceSide": "center"}, {"view": "other", "faceSide": "hidden"},
+                    {"view": "other", "faceSide": "hidden"}], True, ["a b", "x" * 120], 5),
+               "시트 관찰값 정리(앞 8개·열거값 밖 other/hidden·dict 아님도 자리 지킴·문제 120자 5개)")
+        expect("cf-e", [nso({"figures": "x", "consistent": 1}), nso({"consistent": False, "problems": "x"})],
+               [{"figures": [], "consistent": False, "problems": []}, {"figures": [], "consistent": False, "problems": []}],
+               "figures·problems 목록 아님, consistent 1 은 참이 아님")
+        sm = cfm.sheet_mismatches
+        expect("cf-e", [sm(nso(_cf_sheet_answer())),
+                        sm(nso(_cf_sheet_answer(views=("front", "three-quarter front", "side", "back", "back")))),
+                        sm(nso(_cf_sheet_answer(faces=("center", "right", "left", "left", "hidden")))),
+                        sm(nso(_cf_sheet_answer(faces=("left", "left", "left", "left", "center")))),
+                        sm(nso(_cf_sheet_answer(views=_CF_SHEET_GOOD_VIEWS[:4], faces=_CF_SHEET_GOOD_FACES[:4],
+                                                consistent=False))),
+                        sm({"figures": []}), sm(nso(_cf_sheet_answer(consistent=False)))],
+               [[], [("figure", 4, "back", "left")], [("figure", 2, "three-quarter front", "right")], [],
+                [("count", 4), ("outfit",)], [("count", 0), ("outfit",)], [("outfit",)]],
+               "sheet_mismatches(4번째 back·2번째 얼굴 오른쪽·1·5번째 얼굴은 보지 않음·인물 수·복장)")
+        expect("cf-e", [cfm.sheet_figures_text(nso(_cf_sheet_answer())), cfm.sheet_figures_text(None),
+                        cfm.sheet_figures_text({"figures": []})], ["front,3qf,side,3qb,back", "-", "-"], "시트 로그 약어")
+        expect("cf-e", list(charmod._SHEET_TOOL["inputSchema"]["json"]["properties"]["figures"]["items"]["properties"]["view"]["enum"]),
+               ["front", "three-quarter front", "side", "three-quarter back", "back", "other"], "시트 도구 view enum(design §7.3)")
+        expect("cf-e", list(charmod._view_tool("left")["inputSchema"]["json"]["properties"]["facing"]["enum"]),
+               ["front", "back", "left", "right", "other"], "그림 검사 도구 facing enum(design §7.1)")
+
+    # ------------------------------------------------------------------ (cf-f2) 고칠 문장·warning
+    def cf_f2() -> None:
+        vft = cfm.view_fix_text
+        expect("cf-f", vft([("people", 2)], "front", items1, "his"), " Only one person. Remove the extra figures.",
+               "사람 수 고칠 문장(지금 _gen_checked 문장)")
+        for view in ("front", "back", "left", "right"):
+            expect("cf-f", vft([("facing", "other")], view, items1, "his"), _CF_FACING_FIX_DESIGN[view], f"방향 고칠 문장 {view}")
+        for view, x, wrong in (("front", "LEFT", "right"), ("back", "RIGHT", "left")):
+            expect("cf-f", vft([("item", 0, "both")], view, items1, "his"),
+                   f" Fix: the {_CF_WATCH} was drawn on both wrists; keep it only on his RIGHT wrist ({x} side of the image) "
+                   "and remove it from the other wrist.", f"{view} 소품 both")
+            expect("cf-f", vft([("item", 0, "none")], view, items1, "his"),
+                   f" Fix: the {_CF_WATCH} is missing; draw it on his RIGHT wrist ({x} side of the image).", f"{view} 소품 none")
+            expect("cf-f", vft([("item", 0, wrong)], view, items1, "his"),
+                   f" Fix: the {_CF_WATCH} was on the wrong wrist; it must be on his RIGHT wrist, which is on the {x} side of "
+                   "the image in this view.", f"{view} 소품 반대쪽")
+        expect("cf-f", vft([("item", 0, "right")], "front", items1, "his"), fix_wrong_front, "T1 cf-i 고칠 문장 예와 같다")
+        near = f" Fix: the {_CF_WATCH} must be clearly visible on the wrist nearest the viewer."
+        far = f" Fix: the {_CF_WATCH} must not be on the near wrist; it is on the far wrist, hidden behind the body."
+        both = f" Fix: the {_CF_WATCH} must be on one wrist only, never on both."
+        expect("cf-f", [vft([("item", 0, "far")], "right", items1, "her"), vft([("item", 0, "none")], "right", items1, "her"),
+                        vft([("item", 0, "near")], "left", items1, "her"), vft([("item", 0, "both")], "left", items1, "her"),
+                        vft([("item", 0, "both")], "right", items1, "her")],
+               [near, near, far, both, both], "옆모습 소품 고칠 문장(가까운 쪽·먼 쪽·both)")
+        ear = {"itemEn": "stud", "partEn": "ear", "side": "left"}
+        got = vft([("item", 1, "none"), ("item", 0, "both"), ("facing", "back"), ("people", 3)], "front", [watch, ear], "their")
+        want = (" Only one person. Remove the extra figures." + _CF_FACING_FIX_DESIGN["front"]
+                + f" Fix: the {_CF_WATCH} was drawn on both wrists; keep it only on their RIGHT wrist (LEFT side of the image) "
+                "and remove it from the other wrist. Fix: the stud is missing; draw it on their LEFT ear (RIGHT side of the image).")
+        expect("cf-f", got, want, "고칠 문장 순서(사람 수 → 방향 → 소품 번호 순)")
+        chest = {"itemEn": "logo", "partEn": "chest", "side": "left"}
+        expect("cf-f", vft([("item", 0, "none")], "front", [chest], "his"),
+               " Fix: the logo is missing; draw it on his LEFT side of the chest (RIGHT side of the image).", "가슴 부위 낱말")
+        expect("cf-f", [vft([("item", 5, "none")], "front", items1, "his"),
+                        vft([("item", 0, "none")], "front", [{"itemEn": "x", "partEn": "knee", "side": "left"}], "his"),
+                        vft([("item", 0, "none")], "sheet", items1, "his"), vft([("facing", "x")], "sheet", items1, "his"),
+                        vft([], "front", items1, "his"), vft(None, "front", items1, "his")],
+               [""] * 6, "틀린 번호·부위·보기 → \"\"")
+        sft = cfm.sheet_fix_text
+        expect("cf-f", sft([("count", 4)]), " Fix: draw exactly five full-body figures in one row.", "인물 수 고칠 문장")
+        for k in range(1, 6):
+            expect("cf-f", sft([("figure", k, "back", "hidden")]),
+                   f" Fix figure {k} (counting from the left): it must be {_CF_SHEET_DESC_DESIGN[k - 1]} — it was drawn as a "
+                   "back view.", f"시트 {k}번째 고칠 문장")
+        expect("cf-f", [sft([("figure", 3, "side", "right")]), sft([("figure", 2, "other", "center")]),
+                        sft([("figure", 2, "three-quarter front", "left"), ("outfit",), ("figure", 9, "x", "y")]), sft(None)],
+               [" Fix figure 3 (counting from the left): it must be " + _CF_SHEET_DESC_DESIGN[2] + " — it was drawn as a side "
+                "view facing the right of the image.",
+                " Fix figure 2 (counting from the left): it must be " + _CF_SHEET_DESC_DESIGN[1] + " — it was drawn as an other "
+                "view.",
+                " Fix figure 2 (counting from the left): it must be " + _CF_SHEET_DESC_DESIGN[1] + " — it was drawn as a "
+                "three-quarter front view facing the left of the image.", ""],
+               "시트 {got}(얼굴 쪽·관사)·복장·틀린 번호")
+        expect("cf-f", list(cfm.SHEET_DESC), list(_CF_SHEET_DESC_DESIGN), "SHEET_DESC = design §5.8")
+        vw, sw = cfm.view_warnings, cfm.side_warnings
+        w = _CF_WARN_DESIGN
+        expect("cf-f", [vw([("facing", "back"), ("item", 0, "none"), ("people", 2)], "front"), vw([("item", 0, "none")], "back"),
+                        vw([], "front"), vw([("facing", "right")], "left"), vw([("item", 0, "near")], "right")],
+               [[w["people"], w["item"], w["facing"]], [w["item"]], [], ["옆모습(왼쪽)이 맞지 않아 3D 에 넣지 않았습니다"],
+                ["옆모습(오른쪽)이 맞지 않아 3D 에 넣지 않았습니다"]], "view_warnings(design §7.5)")
+        expect("cf-f", [sw({"left": "dropped", "right": "dropped"}), sw({"left": "unchecked", "right": "dropped"}),
+                        sw({"left": "unchecked", "right": "unchecked"}), sw({"left": "ok", "right": "flipped"}), sw({}), sw(None)],
+               [["옆모습(왼쪽·오른쪽)이 맞지 않아 3D 에 넣지 않았습니다"],
+                ["옆모습(오른쪽)이 맞지 않아 3D 에 넣지 않았습니다", "옆모습(왼쪽)을 확인하지 못해 3D 에 넣지 않았습니다"],
+                ["옆모습(왼쪽·오른쪽)을 확인하지 못해 3D 에 넣지 않았습니다"], [], [], []], "side_warnings(같은 이유면 한 문구)")
+        expect("cf-f", cfm.merge_warnings(["a", "b"], ["b", ""], None, ["c", "a"]), ["a", "b", "c"], "merge_warnings")
+        expect("cf-f", [cfm.WARN_PEOPLE, cfm.WARN_ITEM, cfm.WARN_FACING, cfm.WARN_SHEET_OUTFIT, cfm.WARN_SHEET_ROTATION],
+               [w["people"], w["item"], w["facing"], w["sheetOutfit"], w["sheetRotation"]], "warning 문구 = design §7.5")
+        report.append("cf-f: 고칠 문장 원문(방향 4·소품 정면/후면 6·옆모습 3·시트 5인물·인물 수)·warning 7종")
+
+    # ------------------------------------------------------------------ (cf-j) 정면·후면 그림 검사
+    def cf_j() -> None:
+        calls = {"guard": 0, "beat": 0}
+        prompts = {"front": "FRONT TEST.", "back": "BACK view TEST.", "left": "LEFT SIDE view TEST.", "right": "RIGHT SIDE view TEST."}
+
+        def guard() -> None:
+            calls["guard"] += 1
+
+        def beat() -> None:
+            calls["beat"] += 1
+
+        with _pin_vnew(**on), _CfFakesT2(charmod) as fakes:
+            fakes.items = items1
+
+            def run(view, *answers, items=items1):
+                fakes.view_script[view] = list(answers)
+                s0, l0 = len(fakes.seedream), len(fakes.llm)
+                calls.update(guard=0, beat=0)
+                logs.clear()
+                result = charmod._gen_view_checked(
+                    lambda fix: prompts[view] + fix, [_CF_SRC[0]], size="1440x2560", view=view, items=items, pron="his",
+                    guard=guard, beat=beat, log_ctx=("char_j", "webtoon"))
+                return (result, fakes.seedream[s0:], fakes.llm[l0:], dict(calls), logs.messages("vnew.char.view_check"),
+                        logs.messages("vnew.view_check.failed"))
+
+            wrong = _cf_view_answer("front", ["right"])
+            r, sd, llm, c, lines, _f = run("front")
+            expect("cf-j", (r["status"], r["draws"], r["warnings"], r["jpeg"] == sd[0]["image"], len(llm), c),
+                   ("ok", 1, [], True, 1, {"guard": 1, "beat": 1}), "맞음 → 재생성 0")
+            expect("cf-j", lines, ["vnew.char.view_check char=char_j variant=webtoon view=front status=ok draws=1 people=1 "
+                                   "facing=front items=0:left"], "그림 검사 로그 1줄(열거값만)")
+            view_kw = llm[0]
+            expect("cf-j", (view_kw["system_text"], view_kw["max_tokens"], view_kw["where"], view_kw["model"],
+                            fakes.blocks(view_kw["blocks"])),
+                   (_CF_VIEW_HEAD_DESIGN + _CF_VIEW_FLAT_DESIGN + _CF_VIEW_TAIL_DESIGN, 500, "vnew.view_check", "cf-people",
+                    [["text", item_text], ["image", "jpeg", "img0"]]), "그림 검사 호출(SYSTEM·max_tokens·where·모델·블록)")
+            tool = view_kw["tool"]["inputSchema"]["json"]
+            expect("cf-j", (view_kw["tool"]["name"], tool["required"], tool["properties"]["items"]["items"]["properties"]["seen"]["enum"],
+                            sorted(tool["properties"])),
+                   ("emit_view_check", ["people", "facing", "items"], seen_flat, ["facing", "items", "lettering", "people"]),
+                   "그림 검사 도구(design §7.1)")
+            r, sd, llm, c, lines, _f = run("front", wrong, "good")
+            expect("cf-j", (r["status"], r["draws"], r["jpeg"] == sd[1]["image"], len(llm), c, sd[1]["prompt"]),
+                   ("fixed", 2, True, 2, {"guard": 2, "beat": 2}, prompts["front"] + fix_wrong_front),
+                   "틀림 → 고칠 문장 붙여 1회 재생성 → fixed")
+            r, sd, llm, c, lines, _f = run("front", wrong, wrong)
+            if not (r["status"] == "flipped" and r["draws"] == 2 and len(llm) == 2 and _cf_mirror_ok(sd[1]["image"], r["jpeg"])
+                    and r["warnings"] == [] and lines[-1].endswith("status=flipped draws=2 people=1 facing=front items=0:left")):
+                bad.append(f"(cf-j) 좌우만 뒤바뀐 정면이 반전(픽셀)·검사 2회·로그 flipped 가 아닙니다: {r['status']} {len(llm)} {lines}")
+            r, sd, llm, c, lines, _f = run("front", wrong, _cf_view_answer("front", ["right"], lettering=True))
+            expect("cf-j", (r["status"], r["jpeg"] == sd[1]["image"], r["warnings"]), ("warned", True, [_CF_WARN_DESIGN["item"]]),
+                   "읽히는 글자 → 반전하지 않고 warning")
+            r, sd, llm, c, lines, _f = run("front", _cf_view_answer("front", ["both"]), _cf_view_answer("front", ["both"]))
+            expect("cf-j", (r["status"], r["warnings"], r["jpeg"] == sd[1]["image"]), ("warned", [_CF_WARN_DESIGN["item"]], True),
+                   "계속 both → warned")
+            r, sd, llm, c, lines, _f = run("back", _cf_view_answer("back", ["right"], people=2),
+                                           _cf_view_answer("back", ["right"], people=2))
+            expect("cf-j", (r["status"], r["warnings"], sd[1]["prompt"]),
+                   ("warned", [_CF_WARN_DESIGN["people"]], prompts["back"] + " Only one person. Remove the extra figures."),
+                   "후면 사람 2 → 사람 수 고칠 문장·warning")
+            r, sd, llm, c, lines, _f = run("back", _cf_view_answer("back", ["right"], facing="front"), "good")
+            expect("cf-j", (r["status"], sd[1]["prompt"]), ("fixed", prompts["back"] + _CF_FACING_FIX_DESIGN["back"]),
+                   "후면 방향 → 방향 고칠 문장")
+            r, sd, llm, c, lines, _f = run("back", _cf_view_answer("back", [], facing="front"),
+                                           _cf_view_answer("back", ["right"], facing="front"))
+            expect("cf-j", (r["status"], r["warnings"]), ("warned", [_CF_WARN_DESIGN["facing"]]),
+                   "방향은 반전으로 못 고친다 → warned(방향 warning 만)")
+            r, sd, llm, c, lines, failed = run("front", RuntimeError("가짜 검사 실패"))
+            expect("cf-j", (r["status"], r["draws"], r["jpeg"] == sd[0]["image"], r["warnings"], c, len(failed)),
+                   ("unchecked", 1, True, [], {"guard": 1, "beat": 1}, 1), "검사 None → 그 그림·warning 없음·재생성 0")
+            if not lines or "people=- facing=- items=-" not in lines[-1]:
+                bad.append(f"(cf-j) 검사 실패 로그가 다릅니다: {lines}")
+            r, sd, llm, c, lines, _f = run("front", wrong, RuntimeError("가짜 검사 실패"))
+            expect("cf-j", (r["status"], r["draws"], r["jpeg"] == sd[1]["image"], r["warnings"]), ("unchecked", 2, True, []),
+                   "다시 그린 그림 검사 None → 다시 그린 그림·warning 없음")
+            r, sd, llm, c, lines, failed = run("front", ["dict 아닌 응답"])
+            expect("cf-j", (r["status"], failed), ("unchecked", ["vnew.view_check.failed err=bad_payload"]),
+                   "dict 아닌 검사 응답 → unchecked·로그")
+
+        # 빌드 수준: 소품 있음 → 그림당 emit_view_check 1회·_count_people 0회, 정면 반전 → 저장·후면 참고도 반전 그림.
+        def build(flags, payload, *, view_script=None, sides=False):
+            with _pin_vnew(**dict(flags, VNEW_3D_SIDE_VIEWS=sides)), _CfFakesT2(charmod, payload=payload) as fakes:
+                fakes.items = items1
+                fakes.view_script.update(_copy.deepcopy(view_script or {}))
+                _cf_seed_char(fakes, "char_cf_j", 5)
+                charmod.start_build("tester", "char_cf_j")
+                built, _ = charmod.load_char("tester", "char_cf_j")
+                return fakes, built
+
+        fakes, built = build(on, _CF_FID_PAYLOAD)
+        names = tool_names(fakes)
+        expect("cf-j", names, ["emit_character"] + ["emit_sheet_check", "emit_view_check", "emit_view_check"] * 2,
+               "소품 있음 빌드(옆모습 끔): 시트 검사 1 + 그림 검사 2, 사람 수·복장 검사 0")
+        expect("cf-j", [built["variants"][v].get("viewCheck") for v in ("webtoon", "real")],
+               [{"sheet": "ok", "front": "ok", "back": "ok"}] * 2, "viewCheck(옆모습 끔)")
+        expect("cf-j", [e[2] for e in fakes.ledger], ["webtoon-sheet", "webtoon-front", "webtoon-back", "webtoon-3d", "real-sheet",
+                                                       "real-front", "real-back", "real-3d"], "원장(재생성 없음)")
+        fakes, built = build(on, _CF_FID_PAYLOAD, view_script={"front": [_cf_view_answer("front", ["right"])] * 2})
+        stored_front = fakes.store.blobs[built["variants"]["webtoon"]["frontKey"]]
+        back_call = fakes.seedream[3]
+        if not (_cf_mirror_ok(fakes.seedream[2]["image"], stored_front) and back_call["raw"][0] == stored_front
+                and built["variants"]["webtoon"]["viewCheck"]["front"] == "flipped"):
+            bad.append("(cf-j) 반전한 정면이 저장·후면 참고(첫 장)·viewCheck flipped 가 아닙니다")
+        expect("cf-j", [e[2] for e in fakes.ledger][:4], ["webtoon-sheet", "webtoon-front", "webtoon-front-retry", "webtoon-back"],
+               "다시 그린 정면 원장 front-retry(Claude 결정 1)")
+        # 소품 없음: 사람 수 검사 호출 수·인자가 끔과 같다, emit_view_check 0회(정면·후면).
+        no_items = {k: v for k, v in _CF_FID_PAYLOAD.items() if k != "sidedItemsEn"}
+        fakes_on, _b = build(on, no_items)
+        fakes_off, _b = build(off, no_items)
+        people_on = [_cf_llm_view(fakes_on, kw) for kw in fakes_on.llm if kw["tool"]["name"] == "emit_people_count"]
+        people_off = [_cf_llm_view(fakes_off, kw) for kw in fakes_off.llm if kw["tool"]["name"] == "emit_people_count"]
+        expect("cf-j", (len(people_on), people_on == people_off, tool_names(fakes_on).count("emit_view_check")), (4, True, 0),
+               "소품 없음: _count_people 4회(그림체 2 × 정면·후면)·인자 = 끔, emit_view_check 0회")
+        fakes_side, _b = build(on, no_items, sides=True)
+        expect("cf-j", ([v for v in fakes_side.checked if v != "sheet"], tool_names(fakes_side).count("emit_people_count")),
+               (["left", "right"] * 2, 4), "소품 없음 + 옆모습 켬: 그림 검사는 옆모습에만")
+
+    # ------------------------------------------------------------------ (cf-k) 시트 검사
+    def cf_k() -> None:
+        calls = {"guard": 0, "beat": 0}
+
+        def guard() -> None:
+            calls["guard"] += 1
+
+        def beat() -> None:
+            calls["beat"] += 1
+
+        fig4 = _cf_sheet_answer(views=("front", "three-quarter front", "side", "back", "back"),
+                                faces=("center", "left", "left", "hidden", "hidden"))
+        outfit_bad = _cf_sheet_answer(consistent=False, problems=["back view adds a black jacket"])
+        both_bad = _cf_sheet_answer(views=("front", "three-quarter front", "side", "back", "back"),
+                                    faces=("center", "left", "left", "hidden", "hidden"), consistent=False,
+                                    problems=["back view adds a black jacket"])
+        fix4 = (" Fix figure 4 (counting from the left): it must be " + _CF_SHEET_DESC_DESIGN[3] + " — it was drawn as a back "
+                "view.")
+        with _pin_vnew(**on), _CfFakesT2(charmod) as fakes:
+            an = _copy.deepcopy(_CF_FID_ANALYSIS)
+            base = charmod._base_outfit(an)
+
+            def run(*answers, analysis=an, retry=1):
+                fakes.sheet_script = list(answers)
+                s0, l0 = len(fakes.seedream), len(fakes.llm)
+                calls.update(guard=0, beat=0)
+                logs.clear()
+                with _pin_vnew(OUTFIT_SHEET_RETRY=retry):
+                    result = charmod._gen_sheet_fidelity("webtoon", analysis, [_CF_SRC[0]], size="2560x1440", source_no=1,
+                                                         guard=guard, beat=beat, log_ctx=("char_k", "webtoon"))
+                return (result, fakes.seedream[s0:], fakes.llm[l0:], dict(calls), logs.messages("vnew.char.sheet_check"),
+                        logs.messages("vnew.char_prompt.clipped"))
+
+            first = charmod._fidelity_prompt("sheet", "webtoon", an, source_no=1)
+            r, sd, llm, c, lines, _cl = run()
+            expect("cf-k", (r["status"], r["draws"], r["warnings"], [kw["tool"]["name"] for kw in llm], sd[0]["prompt"], c),
+                   ("ok", 1, [], ["emit_sheet_check"], first, {"guard": 0, "beat": 1}), "맞음 → 시트 검사 1회·복장 검사 0회")
+            expect("cf-k", lines, ["vnew.char.sheet_check char=char_k variant=webtoon status=ok draws=1 "
+                                   "figures=front,3qf,side,3qb,back outfit=ok"], "시트 검사 로그")
+            kw = llm[0]
+            expect("cf-k", (kw["system_text"], kw["max_tokens"], kw["where"], kw["model"], fakes.blocks(kw["blocks"])),
+                   (_CF_SHEET_SYSTEM_DESIGN, 600, "vnew.sheet_check", "cf-outfit",
+                    [["text", "The required base outfit is: " + base + " Does every view in this turnaround sheet wear exactly "
+                      "this base outfit and nothing else (no extra jacket/coat/layer, no swapped garment)? Also list every "
+                      "figure from left to right."], ["image", "jpeg", fakes.label(sd[0]["image"])]]),
+                   "시트 검사 호출(SYSTEM 원문·600·where·모델·블록)")
+            schema = kw["tool"]["inputSchema"]["json"]
+            expect("cf-k", (kw["tool"]["name"], schema["required"], schema["properties"]["figures"]["items"]["required"],
+                            schema["properties"]["figures"]["items"]["properties"]["faceSide"]["enum"]),
+                   ("emit_sheet_check", ["figures", "consistent"], ["view", "faceSide"], ["left", "right", "center", "hidden"]),
+                   "시트 검사 도구(design §7.3)")
+            r, sd, llm, c, lines, _cl = run(fig4, "good")
+            expect("cf-k", (r["status"], r["draws"], sd[1]["prompt"], c),
+                   ("fixed", 2, charmod._fidelity_prompt("sheet", "webtoon", an, source_no=1, fix=fix4), {"guard": 1, "beat": 2}),
+                   "4번째가 back → 'Fix figure 4' 붙여 1회 재생성(길이 예산 안의 FIX 자리)")
+            r, sd, llm, c, lines, _cl = run(fig4, fig4)
+            expect("cf-k", (r["status"], r["draws"], r["warnings"]), ("warned", 2, [_CF_WARN_DESIGN["sheetRotation"]]),
+                   "계속 틀린 회전 → warning '시트의 도는 순서가 어색할 수 있습니다'")
+            r, sd, llm, c, lines, _cl = run(outfit_bad, outfit_bad)
+            outfit_fix = (" Fix these so every view wears the base outfit only: back view adds a black jacket. Make EVERY view "
+                          f"wear exactly this same base outfit and nothing else: {base.rstrip('.')}.")
+            expect("cf-k", (r["status"], r["warnings"], sd[1]["prompt"]),
+                   ("warned", [_CF_WARN_DESIGN["sheetOutfit"]],
+                    charmod._fidelity_prompt("sheet", "webtoon", an, source_no=1, fix=outfit_fix)),
+                   "복장 불일치 → 지금 복장 고칠 문장(자리가 있으면 기본 복장 글 포함)·지금 warning")
+            r, sd, llm, c, lines, _cl = run(both_bad, both_bad)
+            expect("cf-k", r["warnings"], [_CF_WARN_DESIGN["sheetOutfit"], _CF_WARN_DESIGN["sheetRotation"]], "복장·회전 둘 다 warning")
+            if not sd[1]["prompt"].count("Fix figure 4") == 1 or "Fix these so every view" not in sd[1]["prompt"]:
+                bad.append("(cf-k) 회전·복장이 둘 다 틀렸는데 고칠 문장이 둘 다 들어가지 않았습니다")
+            four = _cf_sheet_answer(views=_CF_SHEET_GOOD_VIEWS[:4], faces=_CF_SHEET_GOOD_FACES[:4])
+            r, sd, llm, c, lines, _cl = run(four, "good")
+            if " Fix: draw exactly five full-body figures in one row." not in sd[1]["prompt"] or r["status"] != "fixed":
+                bad.append("(cf-k) 인물 수 4 → 다섯 인물 고칠 문장이 아닙니다")
+            empty = dict(an, baseOutfitEn="", outfitEn="")
+            r, sd, llm, c, lines, _cl = run(_cf_sheet_answer(consistent=False), analysis=empty)
+            expect("cf-k", (r["status"], fakes.blocks(llm[0]["blocks"])[0]),
+                   ("ok", ["text", "No base outfit is given: set consistent=true. List every figure from left to right."]),
+                   "기본 복장 빔 → 회전만(복장은 맞다고 본다)")
+            r, sd, llm, c, lines, _cl = run(fig4, retry=0)
+            expect("cf-k", (r["status"], r["draws"], c["guard"]), ("warned", 1, 0), "OUTFIT_SHEET_RETRY=0 → 다시 그리지 않음")
+            r, sd, llm, c, lines, _cl = run(fig4, fig4, "good", retry=2)
+            expect("cf-k", (r["status"], r["draws"]), ("fixed", 3), "OUTFIT_SHEET_RETRY=2 → 세 번째에 통과")
+            r, sd, llm, c, lines, _cl = run(fig4, fig4, fig4, retry=2)
+            expect("cf-k", (r["status"], r["draws"]), ("warned", 3), "OUTFIT_SHEET_RETRY=2 → 3장 뒤 warning")
+            r, sd, llm, c, lines, _cl = run(RuntimeError("가짜 시트 검사 실패"))
+            expect("cf-k", (r["status"], r["draws"], r["warnings"]), ("unchecked", 1, []), "검사 None → 그대로·재생성 0")
+            if not lines or not lines[-1].endswith("status=unchecked draws=1 figures=- outfit=-"):
+                bad.append(f"(cf-k) 검사 실패 시트 로그가 다릅니다: {lines}")
+            r, sd, llm, c, lines, _cl = run(fig4, RuntimeError("가짜 시트 검사 실패"))
+            expect("cf-k", (r["status"], r["draws"], r["jpeg"] == sd[1]["image"]), ("unchecked", 2, True),
+                   "다시 그린 시트 검사 None → 그 시트")
+            r, sd, llm, c, lines, _cl = run(["bad payload"])
+            expect("cf-k", r["status"], "unchecked", "dict 아닌 시트 응답 → unchecked")
+            # Claude 결정 4: 여의준 수준(외모 200·스타일 300·복장 500자) + 추가 요청에서 4번째 + 복장 불일치로 다시 그린 시트 ≤ 2,900자.
+            words = lambda tag, n: " ".join(f"{tag}{k}" for k in range(n))  # noqa: E731
+            yeo = dict(an, appearanceEn=words("a", 52), styleEn=words("s", 77), extraEn="Keep a calm face.",
+                       baseOutfitEn=words("o", 122) + ". " + _CF_YEOUIJUN_TAIL)
+            yeo["outfitEn"] = yeo["baseOutfitEn"]
+            r, sd, llm, c, lines, clipped = run(both_bad, "good", analysis=yeo)
+            redraw = sd[1]["prompt"]
+            old_way = sd[0]["prompt"] + fix4 + _sheet_old_fix(charmod._base_outfit(yeo))
+            compact = " Make EVERY view wear exactly this same base outfit and nothing else."
+            if len(redraw) > 2900 or clipped or fix4.strip() not in redraw or compact not in redraw \
+                    or "back view adds a black jacket" not in redraw or _CF_WEBTOON_STYLE_TAIL not in redraw \
+                    or not redraw.endswith("Keep a calm face.") or _CF_ROTATION_DESIGN not in redraw:
+                bad.append(f"(cf-k) 다시 그린 시트 프롬프트가 2,900자 안에서 FIX·그림체·추가 요청을 지키지 않습니다: {len(redraw)}자 "
+                           f"잘림 로그 {clipped}")
+            if len(old_way) <= 3000:
+                bad.append(f"(cf-k) 전제: T1 방식(예산 뒤에 붙임)이면 3,000자를 넘어야 합니다: {len(old_way)}")
+            report.append(f"cf-k: 다시 그린 시트(여의준 수준·4번째·복장) {len(redraw)}자 ≤ 2,900 (T1 방식이면 {len(old_way)}자)")
+
+    # ------------------------------------------------------------------ (cf-m) 켬 빌드
+    def cf_m() -> None:
+        def build(view_script=None, sheet_script=None):
+            with _pin_vnew(**on), _CfFakesT2(charmod, payload=_CF_FID_PAYLOAD) as fakes:
+                fakes.items = items1
+                fakes.view_script.update(_copy.deepcopy(view_script or {}))
+                fakes.sheet_script = _copy.deepcopy(sheet_script or [])
+                _cf_seed_char(fakes, "char_cf_m", 5)
+                charmod.start_build("tester", "char_cf_m")
+                built, _ = charmod.load_char("tester", "char_cf_m")
+                return fakes, built
+
+        fakes, built = build()
+        sizes = [s["size"] for s in fakes.seedream]
+        expect("cf-m", sizes, (["2560x1440"] + ["1440x2560"] * 4) * 2, "Seedream 크기(시트·정면·후면·왼쪽·오른쪽 × 2)")
+        kinds = []
+        for s in fakes.seedream:
+            p = s["prompt"]
+            kinds.append("left" if "LEFT SIDE view" in p else "right" if "RIGHT SIDE view" in p else "back" if "BACK view" in p
+                         else "sheet" if "turnaround" in p else "front")
+        expect("cf-m", kinds, ["sheet", "front", "back", "left", "right"] * 2, "Seedream 순서")
+        expect("cf-m", [fakes.seedream[i]["refs"] for i in (3, 4, 8, 9)],
+               [["img1", "img2", "img0", "src2"]] * 2 + [["img6", "img7", "img5", "src2"]] * 2,
+               "옆모습 참고 [정면, 후면, 시트, 기준 사진]")
+        source4 = _CF_SOURCE_DESIGN.format(who="the large bottom figure", n=4)
+        if not all(source4 in fakes.seedream[i]["prompt"] for i in (3, 4, 8, 9)):
+            bad.append("(cf-m) 옆모습 프롬프트에 기준 사진 Image 4 옷 그대로 문장이 없습니다")
+        expect("cf-m", (tool_names(fakes), fakes.checked),
+               (["emit_character"] + (["emit_sheet_check"] + ["emit_view_check"] * 4) * 2,
+                ["sheet", "front", "back", "left", "right"] * 2), "검사 호출 순서(시트 1·그림 4, 사람 수·복장 0)")
+        expect("cf-m", [e[2] for e in fakes.ledger],
+               [f"{v}-{k}" for v in ("webtoon", "real") for k in ("sheet", "front", "back", "left", "right", "3d")],
+               "원장 종류 left·right(R4.4)")
+        for variant, base_index in (("webtoon", 3), ("real", 8)):
+            v = built["variants"][variant]
+            want_keys = (charmod.left_key("tester", "char_cf_m", variant, 1), charmod.right_key("tester", "char_cf_m", variant, 1))
+            expect("cf-m", (v["status"], v.get("leftKey"), v.get("rightKey"), v.get("viewCheck"), v.get("warning")),
+                   ("ready", *want_keys, {"sheet": "ok", "front": "ok", "back": "ok", "left": "ok", "right": "ok"}, ""),
+                   f"{variant} 키·viewCheck")
+            if want_keys[0] != f"users/tester/characters/char_cf_m/{variant}/v1/left.jpg" \
+                    or fakes.store.blobs.get(want_keys[0]) != fakes.seedream[base_index]["image"] \
+                    or fakes.store.blobs.get(want_keys[1]) != fakes.seedream[base_index + 1]["image"]:
+                bad.append(f"(cf-m) {variant} 옆모습 저장 키·바이트가 다릅니다")
+        bodies = posts(fakes)
+        expect("cf-m", [list(b) for b in bodies],
+               [["input_image_url", "back_image_url", "enable_pbr", "face_count", "left_image_url", "right_image_url"]] * 2,
+               "3D 본문 키 6개")
+        expect("cf-m", [bodies[0]["left_image_url"], bodies[0]["right_image_url"], bodies[1]["left_image_url"]],
+               [square_uri(fakes.seedream[3]["image"]), square_uri(fakes.seedream[4]["image"]),
+                square_uri(fakes.seedream[8]["image"])], "옆모습 data URI = 정사각 패딩(정면·후면과 같은 크기)")
+        with _Image.open(_io.BytesIO(_b64.b64decode(bodies[0]["left_image_url"].split(",", 1)[1]))) as image:
+            expect("cf-m", image.size, (64, 64), "옆모습 정사각 크기 = MODEL_INPUT_SQUARE")
+        per = (len(fakes.seedream) / 2, (len(fakes.llm) - 1) / 2)
+        # 최악: 모든 그림이 다시 그려도 틀리고 반전도 안 된다.
+        worst_view = {v: [_cf_view_answer(v, ["both"])] * 4 for v in ("front", "back", "left", "right")}
+        worst_sheet = [_cf_sheet_answer(views=("front", "three-quarter front", "side", "back", "back"))] * 4
+        fakes, built = build(worst_view, worst_sheet)
+        per_worst = (len(fakes.seedream) / 2, (len(fakes.llm) - 1) / 2)
+        expect("cf-m", (per, per_worst), ((5, 5), (10, 10)), "variant당 Seedream·검사 LLM(보통 5/5, 최악 10/10, R7 상한)")
+        expect("cf-m", [e[2] for e in fakes.ledger][:11],
+               ["webtoon-sheet", "webtoon-sheet-retry", "webtoon-front", "webtoon-front-retry", "webtoon-back",
+                "webtoon-back-retry", "webtoon-left", "webtoon-left-retry", "webtoon-right", "webtoon-right-retry", "webtoon-3d"],
+               "최악 원장(다시 그린 장 '{kind}-retry', Claude 결정 1)")
+        v = built["variants"]["webtoon"]
+        expect("cf-m", (v.get("leftKey"), v.get("rightKey"), v.get("viewCheck"), v.get("warning"), list(posts(fakes)[0])),
+               ("", "", {"sheet": "warned", "front": "warned", "back": "warned", "left": "dropped", "right": "dropped"},
+                " / ".join([_CF_WARN_DESIGN["sheetRotation"], _CF_WARN_DESIGN["item"],
+                            "옆모습(왼쪽·오른쪽)이 맞지 않아 3D 에 넣지 않았습니다"]),
+                ["input_image_url", "back_image_url", "enable_pbr", "face_count"]),
+               "최악: 옆모습 둘 다 제외 → 3D 본문 지금 그대로·warning")
+        report.append(f"cf-m: variant당 Seedream/검사 LLM 보통 {per[0]:.0f}/{per[1]:.0f} · 최악 {per_worst[0]:.0f}/{per_worst[1]:.0f} "
+                      f"(빌드 1회 최악 {len(fakes.seedream)}/{len(fakes.llm) - 1})")
+
+    # ------------------------------------------------------------------ (cf-n) 옆모습 대체 경로
+    def cf_n() -> None:
+        mirror_left = _cf_view_answer("left", ["far"], facing="right")
+        correct_right = _cf_view_answer("left", ["near"], facing="right")
+        with _pin_vnew(**on), _CfFakesT2(charmod) as fakes:
+            fakes.items = items1
+
+            def draw(cid, *, left=(), right=(), analysis=None, base_first=True, base_ref=_CF_SRC[1]):
+                v = seed_images(fakes, cid, analysis=analysis)
+                fakes.view_script["left"] = list(left)
+                fakes.view_script["right"] = list(right)
+                s0, l0, g0 = len(fakes.seedream), len(fakes.llm), len(fakes.ledger)
+                front, back, sheet = (fakes.store.blobs[v[k]] for k in ("frontKey", "backKey", "sheetKey"))
+                out = charmod._draw_side_views("tester", cid, "webtoon", 1, analysis or _CF_FID_ANALYSIS, front, back, sheet,
+                                               base_ref, base_first=base_first, token="tokP", need=("left", "right"))
+                after, _ = charmod.load_char("tester", cid)
+                return out, fakes.seedream[s0:], fakes.llm[l0:], [e[2] for e in fakes.ledger[g0:]], after["variants"]["webtoon"]
+
+            out, sd, llm, ledger, v = draw("char_cf_n1", left=[mirror_left, mirror_left])
+            if not (out["left"]["status"] == "flipped" and _cf_mirror_ok(sd[1]["image"], fakes.store.blobs[v["leftKey"]])
+                    and v["viewCheck"] == {"left": "flipped", "right": "ok"} and len(llm) == 3):
+                bad.append(f"(cf-n) 거울상 왼쪽 옆모습이 반전(픽셀)·검사 3회·viewCheck 가 아닙니다: {out['left']['status']} "
+                           f"{v.get('viewCheck')} {len(llm)}")
+            expect("cf-n", (ledger, sd[0]["refs"], v["rightKey"], _CF_FACING_FIX_DESIGN["left"].strip() in sd[1]["prompt"]),
+                   (["webtoon-left", "webtoon-left-retry", "webtoon-right"], ["front", "back", "sheet", "src1"],
+                    charmod.right_key("tester", "char_cf_n1", "webtoon", 1), True), "반전 원장·참고·오른쪽 키·방향 고칠 문장")
+            out, sd, llm, ledger, v = draw("char_cf_n2", left=[correct_right, correct_right])
+            expect("cf-n", (out["left"]["status"], out["left"]["jpeg"], v["leftKey"], v["viewCheck"]["left"],
+                            charmod.left_key("tester", "char_cf_n2", "webtoon", 1) in fakes.store.blobs, out["left"]["warnings"]),
+                   ("dropped", None, "", "dropped", False, ["옆모습(왼쪽)이 맞지 않아 3D 에 넣지 않았습니다"]),
+                   "반전해도 안 맞음(가까운 쪽) → dropped·키 \"\"·저장 없음")
+            expect("cf-n", ledger, ["webtoon-left", "webtoon-left-retry", "webtoon-right"], "3D 에서 뺀 그림도 원장(R4.4)")
+            out, sd, llm, ledger, v = draw("char_cf_n3", left=[RuntimeError("가짜 검사 실패")])
+            expect("cf-n", (out["left"]["status"], out["left"]["jpeg"], out["left"]["draws"], v["leftKey"], ledger,
+                            out["left"]["warnings"]),
+                   ("unchecked", None, 1, "", ["webtoon-left", "webtoon-right"], ["옆모습(왼쪽)을 확인하지 못해 3D 에 넣지 않았습니다"]),
+                   "검사 None → unchecked·3D 제외(결정 S5)")
+            old = {k: v for k, v in _CF_FID_ANALYSIS.items() if k not in ("fidelity", "sidedItems")}
+            out, sd, llm, ledger, v = draw("char_cf_n4", left=[_cf_view_answer("left", [], facing="front"), "good"],
+                                           analysis=old, base_first=False, base_ref=None)
+            expect("cf-n", (out["left"]["status"], fakes.blocks(llm[0]["blocks"])[0], [s["refs"] for s in sd][0]),
+                   ("fixed", ["text", "No items to check; return an empty items list."], ["front", "back", "sheet"]),
+                   "소품 없음 → 사람 수·방향만, 기준 사진 없음 → 참고 3장")
+            if "Image 4" in sd[0]["prompt"] or "never on both" in sd[0]["prompt"] or _CF_FACING_FIX_DESIGN["left"].strip() not in sd[1]["prompt"]:
+                bad.append("(cf-n) 옛 분석 옆모습 프롬프트에 SOURCE·좌우 문장이 있거나 방향 고칠 문장이 없습니다")
+            kw = llm[0]
+            expect("cf-n", (kw["system_text"], kw["tool"]["inputSchema"]["json"]["properties"]["items"]["items"]["properties"]["seen"]["enum"]),
+                   (_CF_VIEW_HEAD_DESIGN + _CF_VIEW_SIDE_DESIGN + _CF_VIEW_TAIL_DESIGN, seen_side), "옆모습 검사 SYSTEM·seen enum")
+            v6 = seed_images(fakes, "char_cf_n6")
+            s0 = len(fakes.seedream)
+            out6 = charmod._draw_side_views("tester", "char_cf_n6", "webtoon", 1, _CF_FID_ANALYSIS, b"f", b"b", b"s", None,
+                                            base_first=False, token="tokP", need=("up", "right"))
+            expect("cf-n", (sorted(out6), len(fakes.seedream) - s0, bool(v6)), (["right"], 1, True), "모르는 쪽 이름은 건너뛴다")
+            # 빌드 수준: 왼쪽만 제외 → 3D 본문에 오른쪽만, warning.
+            v = seed_images(fakes, "char_cf_n5")
+            fakes.view_script.update({"left": [correct_right, correct_right], "right": []})
+            p0 = len(fakes.fal)
+            charmod._build_variant("tester", "char_cf_n5", "webtoon", 1, _copy.deepcopy(_CF_FID_ANALYSIS), [_CF_SRC[1], _CF_SRC[0]],
+                                   "tokP", base_first=True)
+            after, _ = charmod.load_char("tester", "char_cf_n5")
+            av = after["variants"]["webtoon"]
+            expect("cf-n", (list(posts(fakes, p0)[0]), av["status"], av["warning"], av["leftKey"]),
+                   (["input_image_url", "back_image_url", "enable_pbr", "face_count", "right_image_url"], "ready",
+                    "옆모습(왼쪽)이 맞지 않아 3D 에 넣지 않았습니다", ""), "왼쪽 제외 → 3D 본문에 오른쪽만·warning")
+
+    # ------------------------------------------------------------------ (cf-o) 3D 재제출·retry3d·옛 본문
+    def cf_o() -> None:
+        for label, flags, keys in (("켬", on, ("retry3dSubmit", "retry3dResubmit", "build3dSubmit", "build3dPosts", "resumeArnTrace")),
+                                   ("끔", off, tuple(_CF_3D_OLD_SHA)), ("옆모습만 켬", dict(VNEW_CHAR_FIDELITY=False, VNEW_3D_SIDE_VIEWS=True),
+                                                                      ("retry3dSubmit", "retry3dResubmit", "build3dSubmit"))):
+            with _pin_vnew(**flags):
+                got = _cf_3d_old_fingerprints()
+            diff = [k for k in keys if got.get(k) != _CF_3D_OLD_SHA[k]]
+            if diff:
+                bad.append(f"(cf-o) {label}: 옛 variant 3D 본문·이어 만들기 지문이 구현 전과 다릅니다: {diff}")
+        expect("cf-o", charmod._HUNYUAN_SIDE_FIELDS, {"left": "left_image_url", "right": "right_image_url"}, "옆모습 필드 이름")
+        left_b, right_b = _cf_halves(301), _cf_halves(302)
+        with _pin_vnew(**on), _CfFakesT2(charmod) as fakes:
+            lost = {"left": 0}
+            plain_fal = charmod._fal_request
+
+            def lossy_fal(method, url, payload=None):
+                if method == "GET" and url.endswith("/status") and lost["left"] > 0:
+                    lost["left"] -= 1
+                    raise _VpocError("vnew.fal", "HTTP503", "Downstream service unavailable", 503)
+                return plain_fal(method, url, payload)
+
+            charmod._fal_request = lossy_fal
+            # 1) retry3d 새 제출 + unavailable 8회 → 재제출 본문이 같은 네 장.
+            seed_images(fakes, "char_cf_o1", sides={"left": ("ok", left_b), "right": ("flipped", right_b)})
+            lost["left"] = 8
+            p0 = len(fakes.fal)
+            charmod.run_retry3d("tester", "char_cf_o1", "webtoon", 1, "")
+            bodies = posts(fakes, p0)
+            expect("cf-o", (len(bodies), bodies[0] == bodies[-1] if bodies else False, list(bodies[0]) if bodies else [],
+                            bodies[0].get("left_image_url") == square_uri(left_b) if bodies else False,
+                            bodies[0].get("right_image_url") == square_uri(right_b) if bodies else False),
+                   (2, True, ["input_image_url", "back_image_url", "enable_pbr", "face_count", "left_image_url", "right_image_url"],
+                    True, True), "retry3d: 저장된 옆모습 함께 제출·재제출 본문 같음")
+            # 2) _build_3d_from_images(옆모습 있음) + unavailable 8회 → 재제출 본문도 같은 묶음.
+            _cf_seed_char(fakes, "char_cf_o2", 1, version=1, status="building")
+            lost["left"] = 8
+            p0 = len(fakes.fal)
+            charmod._build_3d_from_images("tester", "char_cf_o2", "webtoon", 1, _cf_halves(303), _cf_halves(304), "",
+                                          left=left_b, right=None)
+            bodies = posts(fakes, p0)
+            expect("cf-o", (len(bodies), bodies[0] == bodies[1] if len(bodies) == 2 else False, list(bodies[0])[-1]),
+                   (2, True, "left_image_url"), "빌드 3D 재제출 본문 = 처음(왼쪽만)")
+            # 3) 이전 요청 COMPLETED → 제출 0회, 저장된 옆모습이 있어도.
+            seed_images(fakes, "char_cf_o3", sides={"left": ("ok", left_b)},
+                        model3d={"status": "submitted", "requestArn": "fal/requests/fal-ai/hunyuan3d-v3/image-to-3d/req_old"})
+            p0 = len(fakes.fal)
+            charmod.run_retry3d("tester", "char_cf_o3", "webtoon", 1, "")
+            done, _ = charmod.load_char("tester", "char_cf_o3")
+            expect("cf-o", (len(posts(fakes, p0)), done["variants"]["webtoon"]["model3d"]["status"]), (0, "ready"),
+                   "retry3d 이전 요청 재사용(제출 0)")
+            # 4) 옆모습 설정 끔 → 저장된 옆모습을 보내지 않는다.
+            seed_images(fakes, "char_cf_o4", sides={"left": ("ok", left_b), "right": ("ok", right_b)})
+            p0 = len(fakes.fal)
+            with _pin_vnew(VNEW_3D_SIDE_VIEWS=False):
+                charmod.run_retry3d("tester", "char_cf_o4", "webtoon", 1, "")
+            expect("cf-o", [list(b) for b in posts(fakes, p0)], [["input_image_url", "back_image_url", "enable_pbr", "face_count"]],
+                   "VNEW_3D_SIDE_VIEWS=False → 정면·후면만")
+            # 5) 옆모습 읽기 실패 → 그 쪽만 빼고 로그.
+            seed_images(fakes, "char_cf_o5", sides={"left": ("ok", b"missing"), "right": ("ok", right_b)})
+            p0 = len(fakes.fal)
+            logs.clear()
+            charmod.run_retry3d("tester", "char_cf_o5", "webtoon", 1, "")
+            expect("cf-o", ([list(b)[-1] for b in posts(fakes, p0)], logs.messages("side_missing")),
+                   (["right_image_url"], ["vnew.retry3d.side_missing char=char_cf_o5 variant=webtoon view=left err=KeyError"]),
+                   "옆모습 읽기 실패 → 그 쪽만 뺀다·로그(키 없음)")
+            body = {}
+
+            def capture(method, url, payload=None):
+                body.update(payload or {})
+                return {"request_id": "cfx"}
+
+            charmod._fal_request = capture
+            charmod.submit_3d(b"f", b"b", right_square=b"r")
+            expect("cf-o", list(body), ["input_image_url", "back_image_url", "enable_pbr", "face_count", "right_image_url"],
+                   "submit_3d 오른쪽만")
+
+    # ------------------------------------------------------------------ (cf-p) 이어 만들기
+    def cf_p() -> None:
+        expect("cf-p", [charmod._needs_side_views(v) for v in (
+            {}, {"viewCheck": {"left": "ok"}}, {"viewCheck": {"left": "ok", "right": "dropped"}},
+            {"model3d": {"requestArn": "fal/requests/x/y"}}, {"model3d": {"status": "ready"}}, {"viewCheck": "x"})],
+            [True, True, False, False, False, True], "_needs_side_views")
+        left_b = _cf_halves(401)
+        with _pin_vnew(**on), _CfFakesT2(charmod) as fakes:
+            fakes.items = items1
+
+            def resume(cid):
+                s0, l0, p0, g0 = len(fakes.seedream), len(fakes.llm), len(fakes.fal), len(fakes.ledger)
+                logs.clear()
+                charmod.run_resume_variant("tester", cid, "webtoon", 1, "tokP")
+                after, _ = charmod.load_char("tester", cid)
+                return (fakes.seedream[s0:], fakes.llm[l0:], posts(fakes, p0), [e[2] for e in fakes.ledger[g0:]],
+                        after["variants"]["webtoon"])
+
+            seed_images(fakes, "char_cf_p1")
+            sd, llm, bodies, ledger, v = resume("char_cf_p1")
+            expect("cf-p", ([s["refs"] for s in sd], len(llm), ledger, [list(b)[-2:] for b in bodies], v["status"], v["viewCheck"],
+                            v["claim"]),
+                   ([["front", "back", "sheet", "src1"]] * 2, 2, ["webtoon-left", "webtoon-right", "webtoon-3d"],
+                    [["left_image_url", "right_image_url"]], "ready", {"left": "ok", "right": "ok"}, ""),
+                   "그림 3개·옆모습 없음·3D 요청 없음 → 옆모습만(Seedream 2·검사 2) → 3D·선점 해제")
+            if not all(_CF_SOURCE_DESIGN.format(who="the character", n=4) in s["prompt"] for s in sd):
+                bad.append("(cf-p) 이어 만든 옆모습에 기준 사진 Image 4 문장이 없습니다(_reference_jpegs·base_first)")
+            seed_images(fakes, "char_cf_p2", sides={"left": ("ok", left_b)})
+            sd, llm, bodies, ledger, v = resume("char_cf_p2")
+            expect("cf-p", ([("RIGHT SIDE view" in s["prompt"]) for s in sd], len(llm), bodies[0].get("left_image_url") == square_uri(left_b),
+                            v["viewCheck"]),
+                   ([True], 1, True, {"left": "ok", "right": "ok"}), "왼쪽만 끝남 → 오른쪽만 그리고 저장된 왼쪽을 3D 에")
+            seed_images(fakes, "char_cf_p3", sides={"left": ("dropped", None)}, warning="복장이 면마다 다를 수 있습니다")
+            sd, llm, bodies, ledger, v = resume("char_cf_p3")
+            expect("cf-p", (len(sd), list(bodies[0])[-1], v["warning"]),
+                   (1, "right_image_url", "복장이 면마다 다를 수 있습니다 / 옆모습(왼쪽)이 맞지 않아 3D 에 넣지 않았습니다"),
+                   "재시작 전에 뺀 왼쪽 → 오른쪽만·기존 warning 유지 + 옆모습 warning")
+            seed_images(fakes, "char_cf_p4", sides={"left": ("ok", b"missing")})
+            sd, llm, bodies, ledger, v = resume("char_cf_p4")
+            expect("cf-p", (len(sd), list(bodies[0])[-1], logs.messages("side_missing")),
+                   (1, "right_image_url", ["vnew.resume.side_missing char=char_cf_p4 variant=webtoon view=left err=KeyError"]),
+                   "저장된 왼쪽을 못 읽으면 그 쪽만 빼고 3D")
+            seed_images(fakes, "char_cf_p5", sides={"left": ("ok", left_b), "right": ("dropped", None)})
+            sd, llm, bodies, ledger, v = resume("char_cf_p5")
+            expect("cf-p", (len(sd), len(llm), list(bodies[0])[-1]), (0, 0, "left_image_url"),
+                   "옆모습 결과 둘 다 있음·3D 요청 없음 → 그리지 않고 3D(저장된 왼쪽)")
+            # 그림이 덜 됨 → 처음부터(_reference_jpegs·base_first).
+            seed_images(fakes, "char_cf_p6", backKey="")
+            sd, llm, bodies, ledger, v = resume("char_cf_p6")
+            expect("cf-p", (len(sd), sd[0]["refs"], v["status"]), (5, ["src1", "src0", "src2"], "ready"),
+                   "그림 덜 됨 → 처음부터 다섯 장(기준 사진 먼저)")
+        with _pin_vnew(**on):
+            got_on = _cf_3d_old_fingerprints()
+        with _pin_vnew(**off):
+            got_off = _cf_3d_old_fingerprints()
+        expect("cf-p", (got_on["resumeArnTrace"], got_off["resumeArnTrace"], got_off["resumeImagesTrace"]),
+               (_CF_3D_OLD_SHA["resumeArnTrace"],) * 2 + (_CF_3D_OLD_SHA["resumeImagesTrace"],),
+               "3D 요청이 이미 있음 → 조회만(그리기 0), 끔 → 지금 호출 그대로(구현 전 sha256)")
+        if got_on["resumeImagesTrace"] == _CF_3D_OLD_SHA["resumeImagesTrace"]:
+            bad.append("(cf-p) 켬인데 옛 variant 이어 만들기가 옆모습을 그리지 않았습니다(R4.7)")
+
+    # ------------------------------------------------------------------ (cf-q) 선점·하트비트·keepalive
+    def cf_q() -> None:
+        saved = {"beat": charmod._touch_heartbeat, "guard": charmod._guard_submit_claim}
+        try:
+            with _pin_vnew(**on), _CfFakesT2(charmod) as fakes:
+                fakes.items = items1
+
+                def traced_beat(owner, char_id, variant):
+                    fakes.trace.append(["beat", variant])
+                    saved["beat"](owner, char_id, variant)
+
+                def traced_guard(owner, char_id, variant, token):
+                    fakes.trace.append(["guard", variant])
+                    saved["guard"](owner, char_id, variant, token)
+
+                charmod._touch_heartbeat = traced_beat
+                charmod._guard_submit_claim = traced_guard
+                # 1) 하트비트·선점 확인: 켬 빌드에서 Seedream·3D 제출마다 직전 선점 확인, 그림마다 뒤에 하트비트.
+                fakes.view_script.update({"left": [_cf_view_answer("left", ["near"])], "front": [_cf_view_answer("front", ["both"])]})
+                _cf_seed_char(fakes, "char_cf_q1", 5)
+                fakes.payload = _CF_FID_PAYLOAD
+                t0 = len(fakes.trace)
+                charmod.start_build("tester", "char_cf_q1")
+                trace = [e[0] if e[0] != "fal" else f"fal-{e[1]}" for e in fakes.trace[t0:] if e[0] in ("seedream", "beat", "guard", "fal")]
+                unguarded = unbeaten = 0
+                last = ""
+                for i, entry in enumerate(trace):
+                    if entry in ("seedream", "fal-POST"):
+                        if last != "guard":
+                            unguarded += 1
+                        if entry == "seedream" and "beat" not in trace[i + 1: i + 2]:
+                            unbeaten += 1
+                    if entry in ("seedream", "guard", "fal-POST"):
+                        last = entry
+                expect("cf-q", (trace.count("seedream"), unguarded, unbeaten), (12, 0, 0),
+                       "Seedream(재생성 포함)·3D 제출마다 직전 선점 확인, 그림마다 바로 뒤 하트비트")
+                # 2) 선점을 뺏으면 다음 유료 호출 0회·상태 그대로(접는다). steal = 몇 번째(0부터) Seedream 직전에 뺏는지.
+                wrong_left = [_cf_view_answer("left", ["near"])] * 2
+                wrong_sheet = [_cf_sheet_answer(views=("front",) * 5)]
+                cases = (
+                    {"label": "시트 재생성 직전", "steal": 0, "sheet": wrong_sheet, "left": [], "draws": 1, "status": "images",
+                     "viewLeft": None},
+                    {"label": "왼쪽 옆모습 재생성 직전", "steal": 3, "sheet": [], "left": wrong_left, "draws": 4,
+                     "status": "images", "viewLeft": None},
+                    {"label": "오른쪽 옆모습 직전", "steal": 3, "sheet": [], "left": [], "draws": 4, "status": "images",
+                     "viewLeft": "ok"},
+                    {"label": "3D 제출 직전", "steal": 4, "sheet": [], "left": [], "draws": 5, "status": "model3d",
+                     "viewLeft": "ok"},
+                )
+                for k, case in enumerate(cases):
+                    cid = f"char_cf_q2_{k}"
+                    v = charmod._empty_variant()
+                    v.update(status="images", claim="tokQ", claimedAt=charmod.now_iso(), heartbeatAt=charmod.now_iso())
+                    _cf_seed_char(fakes, cid, 3, version=1, status="building", analysis=_copy.deepcopy(_CF_FID_ANALYSIS),
+                                  variants={"webtoon": v, "real": charmod._empty_variant()})
+                    fakes.view_script.update({"left": list(case["left"]), "right": [], "front": [], "back": []})
+                    fakes.sheet_script = list(case["sheet"])
+                    s0, p0 = len(fakes.seedream), len(fakes.fal)
+
+                    def steal(n, prompt, _cid=cid, _at=case["steal"], _s0=s0):
+                        if n - _s0 == _at:
+                            charmod.mutate_char("tester", _cid, lambda d: d["variants"]["webtoon"].update(claim="other"))
+
+                    fakes.on_seedream = steal
+                    logs.clear()
+                    charmod._build_variant("tester", cid, "webtoon", 1, _copy.deepcopy(_CF_FID_ANALYSIS), [_CF_SRC[1]], "tokQ",
+                                           base_first=True)
+                    fakes.on_seedream = None
+                    after, _ = charmod.load_char("tester", cid)
+                    av = after["variants"]["webtoon"]
+                    expect("cf-q", (len(fakes.seedream) - s0, len(posts(fakes, p0)), av["status"],
+                                    (av.get("viewCheck") or {}).get("left"), av["claim"],
+                                    len(logs.messages("vnew.build_variant_claim_lost"))),
+                           (case["draws"], 0, case["status"], case["viewLeft"], "other", 1),
+                           f"선점 뺏김({case['label']}) → 다음 유료 호출 0회·상태 그대로·조용히 접음")
+        finally:
+            charmod._touch_heartbeat = saved["beat"]
+            charmod._guard_submit_claim = saved["guard"]
+        # 3) 대기 variant keepalive: 앞 variant(webtoon) 옆모습까지 그리는 동안 가짜 시계가 20분 흘러도 real 이 끊긴 것으로 보이지 않는다.
+        from datetime import datetime as _RealDT  # noqa: PLC0415
+        from datetime import timedelta as _td  # noqa: PLC0415
+        from datetime import timezone as _tz  # noqa: PLC0415
+
+        clock = {"t": _RealDT.now(_tz.utc)}
+
+        class _FakeDT(_RealDT):
+            @classmethod
+            def now(cls, tz=None):
+                return clock["t"] if tz is not None else clock["t"].replace(tzinfo=None)
+
+        saved_time = {"now_iso": charmod.now_iso, "datetime": charmod.datetime}
+        stale_seen: list[bool] = []
+        started = clock["t"]
+        try:
+            charmod.now_iso = lambda: clock["t"].strftime("%Y-%m-%dT%H:%M:%SZ")
+            charmod.datetime = _FakeDT
+            with _pin_vnew(**dict(on, VARIANT_STALL_S=600, CLAIM_STALL_S=600)), _CfFakesT2(charmod, payload=_CF_FID_PAYLOAD) as fakes:
+                fakes.items = items1
+                _cf_seed_char(fakes, "char_cf_q3", 5)
+
+                def tick(n, prompt):
+                    if n < 5:  # webtoon 의 시트·정면·후면·왼쪽·오른쪽
+                        clock["t"] = clock["t"] + _td(minutes=4)
+                        now_char, _ = charmod.load_char("tester", "char_cf_q3")
+                        stale_seen.append(charmod._variant_stale(now_char, "real"))
+
+                fakes.on_seedream = tick
+                charmod.start_build("tester", "char_cf_q3")
+                done, _ = charmod.load_char("tester", "char_cf_q3")
+        finally:
+            charmod.now_iso = saved_time["now_iso"]
+            charmod.datetime = saved_time["datetime"]
+        elapsed = (clock["t"] - started).total_seconds() / 60
+        expect("cf-q", (stale_seen, done["variants"]["real"]["resumeCount"], done["variants"]["real"]["status"], elapsed >= 20),
+               ([False] * 5, 0, "ready", True), "대기 variant keepalive(가짜 시계 20분, 옆모습 그리는 동안에도 갱신)")
+
+    return [("cf-e", cf_e), ("cf-f2", cf_f2), ("cf-j", cf_j), ("cf-k", cf_k), ("cf-m", cf_m), ("cf-n", cf_n), ("cf-o", cf_o),
+            ("cf-p", cf_p), ("cf-q", cf_q)]
+
+
+def _sheet_old_fix(base_outfit: str) -> str:
+    """T1 방식(_gen_sheet_checked 가 예산 뒤에 붙이던) 복장 고칠 문장 — cf-k 가 결정 4 전후 길이를 비교한다."""
+    return (" Fix these so every view wears the base outfit only: back view adds a black jacket."
+            f" Make EVERY view wear exactly this same base outfit and nothing else: {base_outfit}.")
+
+
+def check_vnew_char_fidelity() -> None:
+    """char-fidelity 묶음 T1 — 분석·좌우 계산·참고 순서·프롬프트·사진 속 옷(R0~R3·R6, design §2·§4~§6·§8·§9).
+
+    외부 호출은 모두 가짜다(_CfFakes·_guard_real_llm). Seedream·fal·urlopen 원래 함수는 막는 함수로 바꿔 0회를 센다.
+    (cf-a) 설정 2개 기본 true·_bool 읽기·PARITY_ENV_KEYS·템플릿·base 자리와 되돌리기 주석(렌더는 rw-a~c), char_fidelity import
+    (cf-b) 두 설정 끔 지문 32개 = 구현 전 sha256(_CF_OFF_SHA), 끔 _analyze_tool() 같은 객체·max_tokens 1200,
+           VNEW_CHAR_FIDELITY 만 끔(옆모습 켬) → 분석·프롬프트·검사 호출·3D 본문 지문 그대로
+    (cf-c) character_side 표 6칸, resolve_sided_items 다수결·동률·0:0·범위 밖·bool·숫자 글자·틀린 열거값·중복·좌우 낱말·
+           제어 문자·길이·6개/8개 상한, 여의준 입력 → right
+    (cf-d) strip_side_words 5규칙·다른 부위 그대로, apply_sides 원문·멱등·소품 없음 → 꼬리만 뗌·버린 소품 그대로, photo_layers
+    (cf-f) side_sentence 보기 5종 × 쪽 2 × 대명사 3 원문(design §5.5)·부위 2종, pronoun, side_sentences, 틀린 입력 ""
+    (cf-g) 켬 analyze_sources: 블록 "Image N:", 도구 새 필드·required·원본 도구 그대로, SYSTEM 원문, max_tokens 2000,
+           저장 analysis, 틀린 번호 → None·"", 로그 1줄(번호·개수만), 끔 → 지금 키
+    (cf-h) reference_order·_reference_jpegs, run_build·run_resume_variant·run_rebuild_variant 가짜 Seedream 참고 순서(켬·끔)
+    (cf-i) 켬 프롬프트 원문(시트·정면·후면·옆모습 × 웹툰·실사), SOURCE 번호 1·2·3·4, 기준 없음·옛 분석, SIDED·FIX 자리,
+           길이 예산 단계 0~4(≤2,900자·SIDED·FIX·EXTRA 남음·로그), 옆모습만 켬, _outfit_prompt 좌우 문장
+    (cf-l) 사진 속 옷: sync_auto_outfits kind·sourceFileId·whereEn·sidedItems·중복·상한·옛 분석·끔, run_build_outfit photo
+           참고·프롬프트(원본 있음·목록에 없음·읽기 실패·기본 후면 없음), user·옛 후보 덧입힘 + 좌우 문장, 끔 덧입힘
+    T2(그림 검사·시트 검사·옆모습·3D·재제출·이어 만들기, design §7·§10) 본문은 _cf_t2_bodies 에 있다:
+    (cf-e) 기대값·반전·관찰값 정리 표 (cf-f2) 고칠 문장·warning 원문 (cf-j) 정면·후면 그림 검사 (cf-k) 시트 검사·다시 그린 시트
+    ≤ 2,900자(Claude 결정 4) (cf-m) 켬 빌드 순서·참고·원장·키·3D 본문·호출 수 상한 (cf-n) 옆모습 반전·제외 (cf-o) 3D 재제출·
+    retry3d·옛 본문 sha256 (cf-p) 이어 만들기 (cf-q) 선점·하트비트·keepalive
+    T3(상세 응답, design §11.1):
+    (cf-r) 옛 캐릭터 + 두 설정 끔 상세 JSON = 구현 전 sha256, 켬은 features 만 더해짐, leftUrl·rightUrl(키 있을 때만)·
+           model3d.endpoint(저장된 문자열만)·추가 복장 kind, 서명 실패 "", 켬 Tripo 빌드 → 라우트 상세·다른 사용자 404
+    """
+    sys.path.insert(0, str(ROOT / "app"))
+    import ast as _ast  # noqa: PLC0415
+    import copy as _copy  # noqa: PLC0415
+    import traceback as _tb  # noqa: PLC0415
+    import urllib.request as _ureq  # noqa: PLC0415
+
+    from src.vnew import char_fidelity as cfm  # noqa: PLC0415
+    from src.vnew import characters as charmod  # noqa: PLC0415
+    from src.vnew import settings as vset  # noqa: PLC0415
+    from src.vpoc import fal as vpoc_fal  # noqa: PLC0415
+    from src.vpoc import seedream as vpoc_seedream  # noqa: PLC0415
+
+    bad: list[str] = []
+    seen: set[str] = set()
+    report: list[str] = []
+    blocked: list[str] = []
+    on = dict(VNEW_CHAR_FIDELITY=True, VNEW_3D_SIDE_VIEWS=True)
+    off = dict(VNEW_CHAR_FIDELITY=False, VNEW_3D_SIDE_VIEWS=False)
+    watch = {"itemEn": _CF_WATCH, "labelKo": "시계", "partEn": "wrist", "side": "right"}
+
+    def block(label: str):
+        def _blocked(*_args, **_kwargs):
+            blocked.append(label)
+            raise RuntimeError(f"가짜가 아닌 외부 호출({label})")
+        return _blocked
+
+    def run(name: str, body) -> None:
+        try:
+            body()
+            seen.add(name)
+        except Exception as exc:  # noqa: BLE001
+            bad.append(f"({name}) 검사 중 예외: {exc!r}\n{_tb.format_exc()[:2500]}")
+
+    def expect(name: str, got, want, what: str) -> None:
+        if got != want:
+            bad.append(f"({name}) {what}\n      결과 {got!r}\n      기대 {want!r}")
+
+    # ------------------------------------------------------------------ (cf-a) 설정·배선
+    def cf_a() -> None:
+        settings_text = (APP_SRC / "vnew" / "settings.py").read_text(encoding="utf-8")
+        template = (ROOT / "k8s" / "workloads.yaml.tmpl").read_text(encoding="utf-8")
+        base_env = (ROOT / "deploy" / "config.env.example").read_text(encoding="utf-8")
+        keys = ("VNEW_CHAR_FIDELITY", "VNEW_3D_SIDE_VIEWS")
+        for key in keys:
+            if not re.search(rf'^{key} = _bool\("{key}", True\)$', settings_text, re.M):
+                bad.append(f"(cf-a) settings.py 에 {key} = _bool(\"{key}\", True) 가 없습니다")
+            if key not in PARITY_ENV_KEYS:
+                bad.append(f"(cf-a) PARITY_ENV_KEYS 에 {key} 가 없습니다(rw-a~c 가 보지 않습니다)")
+            if f"되돌리기: config.<target>.env 에 {key}=false" not in base_env:
+                bad.append(f"(cf-a) config.env.example 에 {key} 되돌리기 주석이 없습니다")
+            if not re.search(rf"^{key}=true$", base_env, re.M):
+                bad.append(f"(cf-a) config.env.example 의 {key} 기본값이 true 가 아닙니다")
+            saved_env = os.environ.get(key)
+            try:
+                got = []
+                for raw in ("", "false", "0", "TRUE", "on", "nope"):
+                    os.environ[key] = raw
+                    got.append(vset._bool(key, True))  # noqa: SLF001
+                expect("cf-a", got, [True, False, False, True, True, False], f"{key} 환경변수 읽기(_bool)가 다릅니다")
+            finally:
+                if saved_env is None:
+                    os.environ.pop(key, None)
+                else:
+                    os.environ[key] = saved_env
+        names = re.findall(r"^\s*-\s+name:\s+(\S+)\s*$", template, re.M)
+        at = names.index("VNEW_TAKE_REAL") if "VNEW_TAKE_REAL" in names else -1
+        expect("cf-a", names[at + 1: at + 3] if at >= 0 else [], list(keys), "템플릿에서 두 설정이 VNEW_TAKE_REAL 바로 뒤가 아닙니다")
+        base_keys = re.findall(r"^([A-Z0-9_]+)=", base_env, re.M)
+        at = base_keys.index("VNEW_TAKE_REAL") if "VNEW_TAKE_REAL" in base_keys else -1
+        expect("cf-a", base_keys[at + 1: at + 3] if at >= 0 else [], list(keys), "base 에서 두 설정이 VNEW_TAKE_REAL 바로 뒤가 아닙니다")
+        # char_fidelity.py 는 순수 함수: 네트워크·S3·LLM·settings import 가 없다(tasks T1 완료 조건).
+        tree = _ast.parse((APP_SRC / "vnew" / "char_fidelity.py").read_text(encoding="utf-8"))
+        imported = set()
+        for node in _ast.walk(tree):
+            if isinstance(node, _ast.Import):
+                imported.update(alias.name for alias in node.names)
+            elif isinstance(node, _ast.ImportFrom):
+                imported.add(("." * node.level) + (node.module or ""))
+        expect("cf-a", sorted(imported), ["__future__", "re"], "char_fidelity.py 의 import 가 re 외에 있습니다")
+
+    # ------------------------------------------------------------------ (cf-b) 끔 = 구현 전 바이트
+    def cf_b() -> None:
+        with _pin_vnew(**off):
+            got = _cf_off_fingerprints()
+            with _pin_vnew(VNEW_CASTING=False):
+                same_tool = charmod._analyze_tool() is charmod._ANALYZE_TOOL
+            with _CfFakes(charmod) as fakes:
+                charmod._analyze([{"text": "cf"}], model="cf-astra")
+                max_tokens = fakes.llm[-1]["max_tokens"]
+        diff = sorted(k for k in set(got) | set(_CF_OFF_SHA) if got.get(k) != _CF_OFF_SHA.get(k))
+        if diff:
+            bad.append(f"(cf-b) 두 설정 끔 지문이 구현 전과 다릅니다: {diff}")
+        if not same_tool:
+            bad.append("(cf-b) 캐스팅·충실 끔에서 _analyze_tool() 이 원본 _ANALYZE_TOOL 객체가 아닙니다")
+        if _cf_sha(json.dumps(charmod._ANALYZE_TOOL, sort_keys=True, ensure_ascii=False)) != _CF_OFF_SHA["analyzeToolCastingOff"]:
+            bad.append("(cf-b) 원본 _ANALYZE_TOOL 상수가 바뀌었습니다")
+        expect("cf-b", max_tokens, 1200, "끔 분석 max_tokens 가 1200 이 아닙니다")
+        # 옆모습만 켬: R4(T2)·R5(T3) 가 바꾸는 빌드·상세 지문을 뺀 나머지가 그대로다(R0.3).
+        with _pin_vnew(VNEW_CHAR_FIDELITY=False, VNEW_3D_SIDE_VIEWS=True):
+            got_side = _cf_off_fingerprints()
+        diff_side = sorted(k for k in _CF_OFF_SHA if not k.startswith(("build", "detail")) and got_side.get(k) != _CF_OFF_SHA[k])
+        if diff_side:
+            bad.append(f"(cf-b) VNEW_CHAR_FIDELITY 만 끔인데 분석·프롬프트 지문이 다릅니다: {diff_side}")
+        report.append(f"cf-b: 끔 지문 {len(_CF_OFF_SHA)}개 = 구현 전 sha256 · 옆모습만 켬 {len([k for k in _CF_OFF_SHA if not k.startswith(('build', 'detail'))])}개 같음")
+
+    # ------------------------------------------------------------------ (cf-c) 캐릭터 쪽 계산
+    def cf_c() -> None:
+        table = {("left", "toward"): "right", ("right", "toward"): "left", ("left", "away"): "left",
+                 ("right", "away"): "right", ("left", "unclear"): "", ("right", "unclear"): ""}
+        for (side, facing), want in table.items():
+            expect("cf-c", cfm.character_side(side, facing), want, f"character_side({side}, {facing})")
+        expect("cf-c", [cfm.character_side("center", "toward"), cfm.character_side("left", "sideways")], ["", ""],
+               "틀린 열거값 character_side")
+        resolve = cfm.resolve_sided_items
+
+        def item(name, part, *sightings, label="라벨"):
+            return {"itemEn": name, "labelKo": label, "partEn": part,
+                    "sightings": [{"sourceIndex": i, "imageSide": s, "facing": f} for i, s, f in sightings]}
+
+        expect("cf-c", resolve([item(_CF_WATCH, "wrist", (0, "left", "toward"), label="시계")], 4),
+               [{"itemEn": _CF_WATCH, "labelKo": "시계", "partEn": "wrist", "side": "right",
+                 "votes": {"left": 0, "right": 1}, "seenIn": [0]}], "여의준 입력(정면 전신 화면 왼쪽)")
+        got = resolve([item("watch", "wrist", (0, "left", "toward"), (1, "left", "toward"), (2, "left", "away"))], 3)
+        expect("cf-c", [(g["side"], g["votes"], g["seenIn"]) for g in got], [("right", {"left": 1, "right": 2}, [0, 1, 2])],
+               "다수결 2:1")
+        expect("cf-c", resolve([item("watch", "wrist", (0, "left", "toward"), (1, "left", "away"))], 2), [], "동률 1:1 → 버림")
+        expect("cf-c", resolve([item("watch", "wrist", (0, "left", "unclear"), (1, "right", "unclear"))], 2), [],
+               "unclear 만(0:0) → 버림")
+        got = resolve([item("watch", "wrist", (5, "left", "toward"), (-1, "left", "toward"), (True, "left", "toward"),
+                            (1.0, "left", "toward"), (None, "left", "toward"), ("1", "right", "away"))], 3)
+        expect("cf-c", [(g["side"], g["votes"], g["seenIn"]) for g in got], [("right", {"left": 0, "right": 1}, [1])],
+               "범위 밖·음수·bool·float·None 번호는 버리고 숫자 글자는 쓴다")
+        got = resolve([item("watch", "wrist", (0, "center", "toward"), (0, "left", "sideways"), (1, " LEFT ", "Toward"))], 2)
+        expect("cf-c", [(g["side"], g["seenIn"]) for g in got], [("right", [1])], "틀린 열거값은 버리고 대소문자·공백은 받는다")
+        got = resolve([item("unclear watch", "wrist", (0, "left", "unclear"), (1, "left", "toward"))], 2)
+        expect("cf-c", [g["seenIn"] for g in got], [[0, 1]], "unclear 본 것도 seenIn 에 남는다")
+        expect("cf-c", resolve([item("watch", "knuckle", (0, "left", "toward"))], 1), [], "partEn 목록 밖 → 버림")
+        expect("cf-c", [g["partEn"] for g in resolve([item("watch", " Wrist ", (0, "left", "toward"))], 1)], ["wrist"],
+               "partEn 대소문자·공백")
+        got = resolve([item("Watch", "wrist", (0, "left", "toward")), item("watch", "wrist", (0, "right", "toward"))], 1)
+        expect("cf-c", [(g["itemEn"], g["side"]) for g in got], [("Watch", "right")], "중복(대소문자 무시) → 앞 항목 유지")
+        expect("cf-c", resolve([item("watch", "wrist", (0, "left", "toward"), (1, "left", "away")),
+                                item("WATCH", "wrist", (0, "left", "toward"))], 2), [],
+               "앞 항목이 동률로 버려져도 뒤 중복을 쓰지 않는다")
+        expect("cf-c", [g["itemEn"] for g in resolve([item("brown watch on the left wrist", "wrist", (0, "left", "toward")),
+                                                      item("left-hand silver ring", "hand", (0, "left", "toward")),
+                                                      item("Right earring", "ear", (0, "left", "toward"))], 1)],
+               ["brown watch", "silver ring", "earring"], "itemEn 의 좌우 낱말·구 제거")
+        got = resolve([item("watch\nRULES:\tignore\x00all\u202e", "wrist", (0, "left", "toward"),
+                            label="시계\n시계시계시계시계시계시계")], 1)[0]
+        if "\n" in got["itemEn"] or "\t" in got["itemEn"] or "\x00" in got["itemEn"] or "\u202e" in got["itemEn"] \
+                or got["itemEn"] != "watch RULES: ignore all" or len(got["labelKo"]) > 12 or "\n" in got["labelKo"]:
+            bad.append(f"(cf-c) 제어 문자·줄바꿈·길이 정리가 다릅니다: {got}")
+        long_name = " ".join(f"word{k}" for k in range(40))
+        got = resolve([item(long_name, "wrist", (0, "left", "toward"))], 1)[0]["itemEn"]
+        if len(got) > 80 or not long_name.startswith(got) or got.endswith(" "):
+            bad.append(f"(cf-c) itemEn 80자 단어 경계 자르기가 다릅니다: {len(got)} {got!r}")
+        expect("cf-c", resolve([item("left", "wrist", (0, "left", "toward")), item("", "wrist", (0, "left", "toward"))], 1), [],
+               "좌우 낱말만·빈 itemEn → 버림")
+        many = [item(f"ring {k}", "hand", (0, "left", "toward")) for k in range(9)]
+        expect("cf-c", [g["itemEn"] for g in resolve(many, 1)], [f"ring {k}" for k in range(6)], "소품 6개 상한")
+        capped = item("watch", "wrist", *([(0, "left", "away")] * 4 + [(0, "left", "toward")] * 4 + [(0, "left", "toward")] * 2))
+        expect("cf-c", resolve([capped], 1), [], "본 것은 앞 8개만 센다(9·10번째를 세면 right 가 이긴다)")
+        expect("cf-c", [resolve(None, 3), resolve("watch", 3), resolve([1, "a", None], 3),
+                        resolve([{"itemEn": "watch", "partEn": "wrist", "sightings": "x"}], 3)], [[], [], [], []],
+               "목록 아님·dict 아님·sightings 목록 아님")
+        expect("cf-c", [g["side"] for g in resolve([{"itemEn": "watch", "partEn": "wrist", "sightings": [
+            "x", None, {"sourceIndex": 0, "imageSide": "left", "facing": "toward"}]}], 1)], ["right"],
+               "dict 아닌 본 것은 건너뛴다")
+        expect("cf-c", [cfm.pick_index(v, 3) for v in (0, 2, 3, -1, True, False, "2", " 1 ", "1.0", 1.0, None, "x")],
+               [0, 2, None, None, None, None, 2, 1, None, None, None, None], "pick_index")
+
+    # ------------------------------------------------------------------ (cf-d) 기본 복장 좌우 다시 쓰기
+    def cf_d() -> None:
+        strip = cfm.strip_side_words
+        cases = [
+            ("white sneakers and a round wristwatch with a brown strap on the left wrist", {"wrist"},
+             "white sneakers and a round wristwatch with a brown strap"),
+            ("a watch worn on his right wrist, black jeans", {"wrist"}, "a watch, black jeans"),
+            ("a watch around her left wrists and a cap", {"wrist"}, "a watch and a cap"),
+            ("a left-wrist watch", {"wrist"}, "a wrist watch"),
+            ("a watch on the wrist (left), jeans", {"wrist"}, "a watch on the wrist, jeans"),
+            ("a silver ring on the left ring finger", {"hand"}, "a silver ring"),
+            ("a band on the right-hand wrist", {"wrist"}, "a band"),
+            ("a small logo on the left side of the chest", {"chest"}, "a small logo"),
+            ("short black hair parted on the left", {"hair"}, "short black hair parted to one side"),
+            ("short black hair with a left parting", {"hair"}, "short black hair with a side parting"),
+            ("a logo on the left chest and a watch on the right wrist", {"wrist"}, "a logo on the left chest and a watch"),
+            ("a logo on the left chest", {"wrist"}, "a logo on the left chest"),
+            ("a watch on the left wrist", set(), "a watch on the left wrist"),
+            ("", {"wrist"}, ""),
+        ]
+        for text, parts, want in cases:
+            expect("cf-d", strip(text, parts), want, f"strip_side_words({text!r}, {sorted(parts)})")
+        apply = cfm.apply_sides
+        raw = _CF_RAW_OUTFIT + "."
+        got = apply(raw, [watch])
+        want = ("white crew-neck T-shirt under an open pale sage-green overshirt with sleeves rolled to the elbow, loose "
+                "light-wash straight jeans, white low-top sneakers and a round wristwatch with a brown strap. " + _CF_YEOUIJUN_TAIL)
+        expect("cf-d", got, want, "apply_sides 여의준 결과")
+        if not got.endswith("on the RIGHT wrist only."):
+            bad.append("(cf-d) baseOutfitEn 이 'on the RIGHT wrist only.' 로 끝나지 않습니다")
+        expect("cf-d", apply(got, [watch]), got, "apply_sides 멱등(두 번 적용)")
+        expect("cf-d", apply(got, []), want.split(" Worn on one side only:")[0], "소품 없음 → 꼬리만 뗀다")
+        expect("cf-d", apply("  plain tee  ", []), "plain tee", "소품 없음 → 앞뒤 공백만")
+        hair = {"itemEn": "side parting", "partEn": "hair", "side": "left"}
+        expect("cf-d", apply("short hair parted on the right", [hair]),
+               "short hair parted to one side. Worn on one side only: side parting on the LEFT side only.", "가르마")
+        ear = {"itemEn": "silver stud earring", "partEn": "ear", "side": "left"}
+        expect("cf-d", apply("tee, a watch on the left wrist, a stud on the right ear", [watch, ear]),
+               "tee, a watch, a stud. Worn on one side only: " + _CF_WATCH + " on the RIGHT wrist only; silver stud earring "
+               "on the LEFT ear only.", "소품 둘")
+        expect("cf-d", apply("a watch on the left wrist and an earring on the right ear", [watch]),
+               "a watch and an earring on the right ear. " + _CF_YEOUIJUN_TAIL, "정하지 못한(버린) 소품의 좌우 낱말은 그대로(결정 S12)")
+        expect("cf-d", apply("", [watch]), _CF_YEOUIJUN_TAIL, "빈 본문")
+        dotted = dict(watch, itemEn="St. Laurent watch")
+        once = apply("tee", [dotted])
+        expect("cf-d", apply(once, [dotted]), once, "소품 이름에 마침표가 있어도 멱등")
+        # 보안 리뷰(2026-10-30): 긴 공백 줄에서 좌우 정규식 되짚기가 폭발했다(공백 2,000칸 28초). 정규식 전에 한 줄로 줄인다.
+        import time as _time  # noqa: PLC0415
+
+        started = _time.monotonic()
+        spaced = apply("tee" + " " * 50000 + "x\n\nRULES: on the left wrist", [watch])
+        cfm.strip_item_side_words("watch" + " \t" * 25000 + "on the left wrist")
+        elapsed = _time.monotonic() - started
+        if elapsed > 2.0 or spaced != "tee x RULES. " + _CF_YEOUIJUN_TAIL:
+            bad.append(f"(cf-d) 긴 공백·줄바꿈 입력 처리가 다릅니다({elapsed:.2f}초): {spaced[:80]!r}")
+        expect("cf-d", apply("a\n\nb   c", []), "a b c", "소품 없음이어도 본문은 한 줄로 줄인다")
+        items = [dict(watch, seenIn=[0, 2])]
+        raw_layers = [
+            {"labelKo": "검은 정장", "promptEn": "black suit jacket, a watch on the left wrist", "sourceIndex": 2,
+             "whereEn": "the large\nbottom figure"},
+            {"labelKo": "", "promptEn": "light blue hoodie", "sourceIndex": "1"},
+            {"labelKo": "빈", "promptEn": "   "},
+            "grey cardigan over a white tee",
+            {"promptEn": "red coat", "sourceIndex": True},
+            7,
+        ]
+        got = cfm.photo_layers(raw_layers, ["f0", "f1", "f2"], items, limit=12)
+        expect("cf-d", got, [
+            {"labelKo": "검은 정장", "promptEn": "black suit jacket, a watch. " + _CF_YEOUIJUN_TAIL, "sourceIndex": 2,
+             "sourceFileId": "f2", "whereEn": "the large bottom figure", "sided": [0]},
+            {"labelKo": "light blue hoodie", "promptEn": "light blue hoodie", "sourceIndex": 1, "sourceFileId": "f1",
+             "whereEn": "", "sided": []},
+            {"labelKo": "grey cardigan over a white tee", "promptEn": "grey cardigan over a white tee", "sourceIndex": None,
+             "sourceFileId": "", "whereEn": "", "sided": []},
+            {"labelKo": "red coat", "promptEn": "red coat", "sourceIndex": None, "sourceFileId": "", "whereEn": "", "sided": []},
+        ], "photo_layers(그 그림에서 본 소품만 좌우 다시 쓰기·번호·fileId·빈 promptEn 버림)")
+        expect("cf-d", [len(cfm.photo_layers(raw_layers, ["f0", "f1", "f2"], items, limit=2)), cfm.photo_layers(None, [], [])],
+               [2, []], "photo_layers 상한·목록 아님")
+        long_prompt = cfm.photo_layers([{"promptEn": "x " * 400}], [], [])[0]["promptEn"]
+        if len(long_prompt) > 400:
+            bad.append(f"(cf-d) 사진 속 옷 promptEn 이 400자를 넘습니다: {len(long_prompt)}")
+        expect("cf-d", [cfm.clip_words("abc def", 0), cfm.clip_words("abcdefgh", 4), cfm.clip_words("ab, cd ef", 5),
+                        cfm.clip_words("ab cd", 9), cfm.clean_line(None, 9), cfm.clean_line(" a\n\nb ", 9)],
+               ["", "abcd", "ab", "ab cd", "", "a b"], "clip_words·clean_line 경계")
+
+    # ------------------------------------------------------------------ (cf-f) 그림별 좌우 문장
+    def cf_f() -> None:
+        for gender, want in (("male", "his"), ("female", "her"), ("unknown", "their"), ("", "their"), (None, "their"),
+                             ("robot", "their")):
+            expect("cf-f", cfm.pronoun(gender), want, f"pronoun({gender!r})")
+        count = 0
+        for part, singular, plural in (("wrist", "wrist", "wrists"), ("chest", "side of the chest", "sides of the chest")):
+            for side in ("left", "right"):
+                other = "right" if side == "left" else "left"
+                for pron in ("his", "her", "their"):
+                    entry = {"itemEn": "silver bracelet", "partEn": part, "side": side}
+                    fill = dict(item="silver bracelet", pron=pron, S=side.upper(), O=other.upper(), P=singular, PP=plural)
+                    for view in ("front", "back", "sheet"):
+                        expect("cf-f", cfm.side_sentence(entry, view, pron), _CF_SIDE_DESIGN[view].format(**fill),
+                               f"side_sentence({part}, {side}, {view}, {pron})")
+                        count += 1
+                    for view in ("left", "right"):
+                        expect("cf-f", cfm.side_sentence(entry, view, pron), _CF_SIDE_DESIGN[(view, side)].format(**fill),
+                               f"side_sentence({part}, {side}, {view}, {pron})")
+                        count += 1
+        expect("cf-f", cfm.side_sentence(watch, "front", "his"), _CF_YEOUIJUN_FRONT, "여의준 정면 문장(design §5.5 예)")
+        ear = {"itemEn": "stud", "partEn": "ear", "side": "left"}
+        expect("cf-f", cfm.side_sentences([watch, ear], "front", "his"),
+               _CF_YEOUIJUN_FRONT + " " + cfm.side_sentence(ear, "front", "his"), "side_sentences 한 칸으로 잇기")
+        expect("cf-f", [cfm.side_sentences([], "front", "his"), cfm.side_sentence(dict(watch, side="up"), "front", "his"),
+                        cfm.side_sentence(dict(watch, partEn="knee"), "front", "his"), cfm.side_sentence(watch, "top", "his"),
+                        cfm.side_sentence(dict(watch, itemEn=""), "front", "his"), cfm.side_sentence("watch", "front", "his")],
+               [""] * 6, "틀린 입력 → \"\"")
+        report.append(f"cf-f: side_sentence 원문 {count}경우(보기 5 × 쪽 2 × 대명사 3 × 부위 2)")
+
+    # ------------------------------------------------------------------ (cf-g) 켬 분석
+    def cf_g() -> None:
+        with _pin_vnew(**on), _CfFakes(charmod, payload=_CF_FID_PAYLOAD) as fakes:
+            char = _cf_seed_char(fakes, "char_cf_g", 7)
+            logs.clear()
+            analysis = charmod.analyze_sources("tester", char)
+            call = fakes.llm[-1]
+            blocks = fakes.blocks(call["blocks"])
+            log_lines = logs.messages("vnew.char.analysis_fidelity")
+            all_logs = " ".join(logs.messages())
+            char["extraPromptKo"] = "표정은 무표정으로"
+            charmod.analyze_sources("tester", char)
+            blocks_extra = fakes.blocks(fakes.llm[-1]["blocks"])
+            with _pin_vnew(VNEW_CHAR_FIDELITY=False):
+                char["extraPromptKo"] = ""
+                off_analysis = charmod.analyze_sources("tester", char)
+                off_blocks = fakes.blocks(fakes.llm[-1]["blocks"])
+            with _pin_vnew(VNEW_FX=False, VNEW_CASTING=False):
+                system_plain = charmod._analyze_system()
+                tool_no_casting = charmod._analyze_tool()
+            index_results = []
+            for value in (9, -1, True, "x", None, 2.0, "3"):
+                fakes.payload = dict(_CF_FID_PAYLOAD, baseSourceIndex=value)
+                got = charmod.analyze_sources("tester", char)
+                index_results.append((got["baseSourceIndex"], got["baseSourceFileId"]))
+            fakes.payload = {k: v for k, v in _CF_FID_PAYLOAD.items() if k != "sidedItemsEn"}
+            no_items = charmod.analyze_sources("tester", char)
+        want_blocks = [off_blocks[0]]
+        for i in range(6):
+            want_blocks += [["text", f"Image {i}:"], ["image", "jpeg", f"src{i}"]]
+        expect("cf-g", blocks, want_blocks, "켬 분석 블록(안내 글 + 그림마다 'Image N:', 앞 6장)")
+        expect("cf-g", blocks_extra[:2], [want_blocks[0], ["text", "사용자 추가 요청(이 지시를 extraEn 영어 한 줄로 바꿔 주세요): "
+                                                         "표정은 무표정으로"]], "켬 + 추가 요청 블록 앞 두 글")
+        expect("cf-g", blocks_extra[2:], want_blocks[1:], "켬 + 추가 요청 블록 그림 부분")
+        expect("cf-g", [b for b in blocks if not (b[0] == "text" and re.fullmatch(r"Image \d+:", b[1]))], off_blocks,
+               "번호 글을 빼면 끔 블록과 같아야 합니다")
+        tool = call["tool"]
+        schema = tool["inputSchema"]["json"]
+        props = schema["properties"]
+        expect("cf-g", schema["required"], ["descriptionKo", "appearanceEn", "baseOutfitEn", "baseSourceIndex"], "도구 required")
+        for name in ("baseSourceIndex", "baseWhereEn", "sidedItemsEn", "outfitLayersEn"):
+            expect("cf-g", props.get(name), charmod._ANALYZE_FIDELITY_FIELDS[name], f"도구 {name}")
+        expect("cf-g", sorted(props["outfitLayersEn"]["items"]["properties"]), ["labelKo", "promptEn", "sourceIndex", "whereEn"],
+               "outfitLayersEn 항목 필드")
+        expect("cf-g", props["sidedItemsEn"]["items"]["properties"]["partEn"]["enum"],
+               ["wrist", "hand", "arm", "shoulder", "ear", "eye", "cheek", "chest", "hip", "leg", "ankle", "foot", "hair"],
+               "partEn enum(design §4.3)")
+        if "genderEn" not in props:
+            bad.append("(cf-g) 켬(캐스팅 켬) 도구에 genderEn 이 없습니다")
+        if _cf_sha(json.dumps(charmod._ANALYZE_TOOL, sort_keys=True, ensure_ascii=False)) != _CF_OFF_SHA["analyzeToolCastingOff"]:
+            bad.append("(cf-g) 켬 도구를 만들면서 원본 _ANALYZE_TOOL 이 바뀌었습니다")
+        expect("cf-g", call["system_text"], charmod._ANALYZE_SYSTEM_FIDELITY + charmod._ANALYZE_DETAIL_RULE
+               + charmod._ANALYZE_GENDER_RULE, "켬 SYSTEM = 충실 SYSTEM + 묘사 규칙 + 성별 문장")
+        expect("cf-g", system_plain, charmod._ANALYZE_SYSTEM_FIDELITY, "FX·캐스팅 끔 SYSTEM = 충실 SYSTEM")
+        props_nc = tool_no_casting["inputSchema"]["json"]["properties"]
+        if tool_no_casting is charmod._ANALYZE_TOOL or "genderEn" in props_nc or "sidedItemsEn" not in props_nc \
+                or "baseSourceIndex" not in tool_no_casting["inputSchema"]["json"]["required"]:
+            bad.append("(cf-g) 충실 켬·캐스팅 끔 도구가 사본 + 충실 필드(genderEn 없음)가 아닙니다")
+        expect("cf-g", _cf_sha(charmod._ANALYZE_SYSTEM_FIDELITY), _CF_SYSTEM_FIDELITY_SHA, "충실 SYSTEM 원문 sha256")
+        for sentence in _CF_SYSTEM_MUST:
+            if sentence not in charmod._ANALYZE_SYSTEM_FIDELITY:
+                bad.append(f"(cf-g) 충실 SYSTEM 에 필요한 문장이 없습니다: {sentence[:60]}")
+        expect("cf-g", call["max_tokens"], 2000, "켬 분석 max_tokens")
+        want_outfit = ("white crew-neck T-shirt under an open pale sage-green overshirt with sleeves rolled to the elbow, loose "
+                       "light-wash straight jeans, white low-top sneakers and a round wristwatch with a brown strap. "
+                       + _CF_YEOUIJUN_TAIL)
+        expect("cf-g", {k: analysis.get(k) for k in ("fidelity", "baseSourceIndex", "baseSourceFileId", "baseWhereEn",
+                                                     "baseOutfitRawEn", "baseOutfitEn", "outfitEn", "genderEn")},
+               {"fidelity": 1, "baseSourceIndex": 2, "baseSourceFileId": "f_cf2", "baseWhereEn": "large bottom figure",
+                "baseOutfitRawEn": _CF_RAW_OUTFIT, "baseOutfitEn": want_outfit, "outfitEn": want_outfit, "genderEn": "male"},
+               "켬 저장 analysis")
+        expect("cf-g", analysis.get("sidedItems"), [{"itemEn": _CF_WATCH, "labelKo": "시계", "partEn": "wrist", "side": "right",
+                                                     "votes": {"left": 0, "right": 2}, "seenIn": [2, 3]}],
+               "sidedItems(시계 right, 귀걸이 동률 버림)")
+        expect("cf-g", analysis.get("outfitLayersEn"), [
+            {"labelKo": "검은 정장", "promptEn": "black two-button suit jacket over a white dress shirt, black slacks, black loafers "
+             "and a wristwatch. " + _CF_YEOUIJUN_TAIL, "sourceIndex": 3, "sourceFileId": "f_cf3",
+             "whereEn": "large bottom figure", "sided": [0]},
+            {"labelKo": "후드티", "promptEn": "light blue hoodie, grey sweatpants, white sneakers", "sourceIndex": None,
+             "sourceFileId": "", "whereEn": "", "sided": []},
+        ], "사진 속 옷 outfitLayersEn")
+        expect("cf-g", index_results, [(None, "")] * 6 + [(3, "f_cf3")], "baseSourceIndex 9·-1·True·'x'·None·2.0 → None, '3' → 3")
+        expect("cf-g", (no_items["sidedItems"], no_items["baseOutfitEn"], no_items["baseOutfitRawEn"]),
+               ([], _CF_RAW_OUTFIT, _CF_RAW_OUTFIT), "소품 없음 → 기본 복장 그대로")
+        expect("cf-g", log_lines, ["vnew.char.analysis_fidelity base=2 sided=1 dropped=1 layers=2"], "분석 로그 1줄")
+        if "wristwatch" in all_logs or "earring" in all_logs or "sage" in all_logs:
+            bad.append("(cf-g) 로그에 모델이 쓴 글이 남았습니다")
+        new_keys = {"fidelity", "baseSourceIndex", "baseSourceFileId", "baseWhereEn", "sidedItems", "baseOutfitRawEn"}
+        expect("cf-g", sorted(set(analysis) - set(off_analysis)), sorted(new_keys), "켬에서만 더해지는 분석 키")
+        if any(b[0] == "text" and b[1].startswith("Image ") for b in off_blocks) or set(off_analysis) & new_keys:
+            bad.append("(cf-g) 끔 분석에 번호 글·새 키가 있습니다")
+
+    # ------------------------------------------------------------------ (cf-h) 참고 순서
+    def cf_h() -> None:
+        order = cfm.reference_order
+        ids = ["f0", "f1", "f2", "f3", "f4"]
+        expect("cf-h", [order(ids, "f2", 4), order(ids, "f4", 4), order(ids, "f9", 4), order(ids, "", 4), order(ids, "f2", 0),
+                        order([], "f0", 4), order(ids, "f0", 10)],
+               [(["f2", "f0", "f1", "f3"], True), (["f4", "f0", "f1", "f2"], True), (ids[:4], False), (ids[:4], False),
+                ([], False), ([], False), (ids, True)], "reference_order")
+        with _pin_vnew(**on), _CfFakes(charmod) as fakes:
+            char = _cf_seed_char(fakes, "char_cf_h", 5)
+            fid = {"fidelity": 1, "baseSourceFileId": "f_cf4"}
+
+            def labels(analysis, the_char=char):
+                refs, first = charmod._reference_jpegs("tester", the_char, analysis)
+                return [fakes.label(r) for r in refs], first
+
+            expect("cf-h", labels(fid), (["src4", "src0", "src1", "src2"], True), "_reference_jpegs 기준 사진(5번째) 먼저")
+            expect("cf-h", labels({"baseSourceFileId": "f_cf4"}), (["src0", "src1", "src2", "src3"], False), "옛 분석 → 업로드 순")
+            expect("cf-h", labels({"fidelity": True, "baseSourceFileId": "f_cf4"}), (["src0", "src1", "src2", "src3"], False),
+                   "fidelity True(bool) 는 충실 분석이 아니다")
+            expect("cf-h", labels(dict(fid, baseSourceFileId="")), (["src0", "src1", "src2", "src3"], False), "기준 없음 → 업로드 순")
+            expect("cf-h", labels(fid, dict(char, sources=char["sources"][:4])), (["src0", "src1", "src2", "src3"], False),
+                   "기준 사진을 지웠으면 업로드 순")
+            with _pin_vnew(VNEW_CHAR_FIDELITY=False):
+                expect("cf-h", labels(fid), (["src0", "src1", "src2", "src3"], False), "끔 → 업로드 순")
+
+        def build_refs(flags) -> tuple[list, list]:
+            with _pin_vnew(**flags), _CfFakes(charmod, payload=dict(_CF_FID_PAYLOAD, baseSourceIndex=4)) as fakes:
+                _cf_seed_char(fakes, "char_cf_hb", 5)
+                charmod.start_build("tester", "char_cf_hb")
+                built, _ = charmod.load_char("tester", "char_cf_hb")
+                runs = [[(s["refs"], s["prompt"]) for s in fakes.seedream]]
+                analysis = built["analysis"]
+                for runner, token in ((charmod.run_resume_variant, "cf-tok"), (charmod.run_rebuild_variant, "")):
+                    cid = f"char_cf_h_{runner.__name__}"
+                    fresh = charmod._empty_variant()
+                    fresh.update(status="images", claim=token, claimedAt=charmod.now_iso(), heartbeatAt=charmod.now_iso())
+                    _cf_seed_char(fakes, cid, 5, analysis=_copy.deepcopy(analysis), version=1, status="building",
+                                  variants={"webtoon": fresh, "real": charmod._empty_variant()})
+                    before = len(fakes.seedream)
+                    runner("tester", cid, "webtoon", 1, token)
+                    runs.append([(s["refs"], s["prompt"]) for s in fakes.seedream[before:]])
+                return runs, [built["variants"][v]["status"] for v in ("webtoon", "real")]
+
+        runs_on, status_on = build_refs(on)
+        expect("cf-h", status_on, ["ready", "ready"], "켬 빌드 상태")
+        names = ("run_build", "run_resume_variant", "run_rebuild_variant")
+        for name, calls in zip(names, runs_on):
+            sheet_refs, front_refs, back_refs = calls[0][0], calls[1][0], calls[2][0]
+            if sheet_refs != ["src4", "src0", "src1", "src2"] or front_refs[1:] != ["src4", "src0", "src1"] \
+                    or back_refs[2:] != ["src4", "src0"] or not front_refs[0].startswith("img") or len(back_refs) != 4:
+                bad.append(f"(cf-h) {name} 켬 참고 순서가 기준 사진 먼저가 아닙니다: {sheet_refs} / {front_refs} / {back_refs}")
+            for (refs, prompt), n in zip(calls[:3], (1, 2, 3)):
+                if _CF_SOURCE_DESIGN.format(who="the large bottom figure", n=n) not in prompt:
+                    bad.append(f"(cf-h) {name} 켬 프롬프트에 기준 사진 Image {n} 옷 그대로 문장이 없습니다")
+        runs_off, _status = build_refs(off)
+        for name, calls in zip(names, runs_off):
+            if calls[0][0] != ["src0", "src1", "src2", "src3"] or calls[1][0][1:] != ["src0", "src1", "src2"] \
+                    or calls[2][0][2:] != ["src0", "src1"]:
+                bad.append(f"(cf-h) {name} 끔 참고 순서가 업로드 순이 아닙니다: {calls[0][0]} / {calls[1][0]} / {calls[2][0]}")
+            if any("Copy the clothes" in prompt for _refs, prompt in calls):
+                bad.append(f"(cf-h) {name} 끔 프롬프트에 옷 그대로 문장이 있습니다")
+        report.append(f"cf-h: 켬 시트 참고 {runs_on[0][0][0]} · 끔 {runs_off[0][0][0]} (세 경로 같음)")
+
+    # ------------------------------------------------------------------ (cf-i) 켬 프롬프트
+    def cf_i() -> None:
+        outfit = _CF_RAW_OUTFIT + ". " + _CF_YEOUIJUN_TAIL
+        an = {"appearanceEn": "A young Korean man in his 20s with short black hair.", "styleEn": "Soft pastel lines.",
+              "baseOutfitEn": outfit, "outfitEn": outfit, "extraEn": "Keep a calm face.", "fidelity": 1,
+              "baseWhereEn": "the large bottom figure", "baseSourceFileId": "f_cf2", "sidedItems": [dict(watch)],
+              "genderEn": "male"}
+        who = f"The character: {an['appearanceEn']} Wearing: {outfit}"
+        style = an["styleEn"] + " " + _CF_WEBTOON_STYLE_TAIL
+        stand = ("Standing straight in a relaxed A-pose facing the camera, whole body from head to shoes visible, centered, "
+                 "plain white background, no shadow.")
+        back_mid = ("Back view of the same single person, same outfit, standing straight in a relaxed A-pose, whole body from "
+                    "head to shoes visible, centered, plain white background, no shadow.")
+
+        def src(n):
+            return _CF_SOURCE_DESIGN.format(who="the large bottom figure", n=n)
+
+        def sided(view):
+            return cfm.side_sentence(watch, view, "his")
+
+        def side_mid(near, far):
+            return ("Same person, same outfit and the same relaxed A-pose as the front view in Image 1, seen exactly from the "
+                    f"side: the {near} arm, shoulder and leg are nearest to us and the {far} arm is mostly hidden behind the "
+                    "body. Whole body from head to shoes visible, centered, plain white background, no shadow.")
+
+        extra = an["extraEn"]
+        want = {
+            ("sheet", "webtoon"): ["Character turnaround reference sheet.", who, _CF_ROTATION_DESIGN,
+                                   "Same person, same outfit in every view.", _CF_ONE_F_DESIGN, src(1), sided("sheet"), style,
+                                   "No text, no speech bubbles, no labels.", extra],
+            ("sheet", "real"): ["Photorealistic live-action character turnaround reference sheet of a real Korean actor playing "
+                                "the character from the reference images.", who, _CF_ROTATION_DESIGN,
+                                "Same person, same outfit in every view.", _CF_ONE_F_DESIGN, src(1), sided("sheet"),
+                                _CF_REAL_STYLE, "No text, no labels.", extra],
+            ("front", "webtoon"): ["Single full-body front view.", who, stand, _CF_ONE_F_DESIGN, src(2), sided("front"), style,
+                                   "No text.", extra],
+            ("front", "real"): ["Single full-body front view photograph of a real Korean actor playing the character.", who,
+                                stand, _CF_ONE_F_DESIGN, src(2), sided("front"), _CF_REAL_STYLE, "No text.", extra],
+            ("back", "webtoon"): ["Single full-body BACK view of the same single person as in the reference images, seen from "
+                                  "directly behind.", who, back_mid, _CF_ONE_F_DESIGN, src(3), sided("back"), style,
+                                  "No text.", extra],
+            ("back", "real"): ["Single full-body BACK view photograph of the same real Korean actor as in the reference "
+                               "images, seen from directly behind.", who, back_mid, _CF_ONE_F_DESIGN, src(3), sided("back"),
+                               _CF_REAL_STYLE, "No text.", extra],
+        }
+        with _pin_vnew(**on):
+            for (kind, variant), pieces in want.items():
+                n = {"sheet": 1, "front": 2, "back": 3}[kind]
+                expect("cf-i", charmod._fidelity_prompt(kind, variant, an, source_no=n), " ".join(pieces),
+                       f"켬 {kind}·{variant} 프롬프트 원문(design §6.2·§6.3)")
+            sides = {
+                ("left", "webtoon"): ["Single full-body LEFT SIDE view of the same single person as in the reference images: "
+                                      "exact side profile, the person's LEFT side faces the camera and the face points to the "
+                                      "LEFT edge of the image.", who, side_mid("left", "right"), _CF_ONE_F_DESIGN, src(4),
+                                      sided("left"), style, "No text.", extra],
+                ("right", "real"): ["Single full-body RIGHT SIDE view photograph of the same real Korean actor as in the "
+                                    "reference images: exact side profile, the person's RIGHT side faces the camera and the face "
+                                    "points to the RIGHT edge of the image.", who, side_mid("right", "left"), _CF_ONE_F_DESIGN,
+                                    src(4), sided("right"), _CF_REAL_STYLE, "No text.", extra],
+            }
+            for (side, variant), pieces in sides.items():
+                expect("cf-i", charmod._side_prompt(side, variant, an, source_no=4), " ".join(pieces),
+                       f"옆모습 {side}·{variant} 원문(design §6.4)")
+            fix = " Fix: the person must face the viewer directly (front view)."
+            pieces = list(want[("front", "webtoon")])
+            pieces.insert(6, fix.strip())
+            expect("cf-i", charmod._fidelity_prompt("front", "webtoon", an, source_no=2, fix=fix), " ".join(pieces),
+                   "고칠 문장은 좌우 문장 뒤·그림체 앞")
+            if charmod._ONE_PERSON_F != _CF_ONE_F_DESIGN or charmod._SHEET_ROTATION != _CF_ROTATION_DESIGN:
+                bad.append("(cf-i) ONE_F·ROTATION 상수가 design 원문과 다릅니다")
+            for kind, fn in (("sheet", charmod._sheet_prompt), ("front", charmod._front_prompt), ("back", charmod._back_prompt)):
+                for variant in ("webtoon", "real"):
+                    got = fn(variant, an)
+                    expect("cf-i", got, charmod._fidelity_prompt(kind, variant, an), f"켬 _{kind}_prompt = _fidelity_prompt")
+                    if "Copy the clothes" in got:
+                        bad.append(f"(cf-i) source_no 없는 {kind} 프롬프트에 옷 그대로 문장이 있습니다")
+            if "on the character in Image 1:" not in charmod._fidelity_prompt("sheet", "webtoon", dict(an, baseWhereEn=""),
+                                                                               source_no=1):
+                bad.append("(cf-i) baseWhereEn 이 비면 'the character' 여야 합니다")
+            old = {k: v for k, v in an.items() if k not in ("fidelity",)}
+            old.update(baseOutfitEn=_CF_RAW_OUTFIT, outfitEn=_CF_RAW_OUTFIT)
+            old_sheet = charmod._fidelity_prompt("sheet", "webtoon", old, source_no=1)
+            if "Copy the clothes" in old_sheet or "never on both" in old_sheet or _CF_ROTATION_DESIGN not in old_sheet:
+                bad.append("(cf-i) 옛 분석은 SOURCE·좌우 문장 없이 회전 문장만 있어야 합니다(결정 S4)")
+            # _outfit_prompt: 덧입힘 문장 바로 뒤 좌우 문장(켬·충실 분석), 옛 분석은 끔과 같다.
+            for view in ("front", "back"):
+                got = charmod._outfit_prompt("webtoon", an, "a long red coat", view)
+                if f" plus a long red coat. {sided(view)} Standing straight" not in got:
+                    bad.append(f"(cf-i) 켬 추가 복장 {view} 프롬프트에 좌우 문장이 덧입힘 뒤에 없습니다")
+                with _pin_vnew(VNEW_CHAR_FIDELITY=False):
+                    off_text = charmod._outfit_prompt("webtoon", old, "a long red coat", view)
+                expect("cf-i", charmod._outfit_prompt("webtoon", old, "a long red coat", view), off_text,
+                       f"옛 분석 추가 복장 {view} 은 끔과 같아야 합니다")
+            # 옆모습만 켬(VNEW_CHAR_FIDELITY 끔): SOURCE·좌우 문장 없음, ONE_F 대신 지금 _one_person_outfit.
+            with _pin_vnew(VNEW_CHAR_FIDELITY=False, VNEW_3D_SIDE_VIEWS=True):
+                side_only = charmod._side_prompt("left", "webtoon", an, source_no=4)
+            if "Copy the clothes" in side_only or "never on both" in side_only \
+                    or charmod._one_person_outfit(an) not in side_only or _CF_ONE_F_DESIGN in side_only:
+                bad.append("(cf-i) 옆모습만 켬 프롬프트가 design §6.4(SOURCE·SIDED 없음, _one_person_outfit)와 다릅니다")
+            # 길이 예산(design §6.6): 단계 0~4.
+            fix_long = (" Fix: the " + _CF_WATCH + " was on the wrong wrist; it must be on his RIGHT wrist, which is on the LEFT "
+                        "side of the image in this view.")
+            words = lambda tag, n: " ".join(f"{tag}{k}" for k in range(n))  # noqa: E731
+            yeo = dict(an, appearanceEn=words("a", 52), styleEn=words("s", 77), baseOutfitEn=words("o", 122) + ". " + _CF_YEOUIJUN_TAIL)
+            cases = [
+                ("여의준 수준(외모 200·스타일 300·복장 500자, 고칠 문장 없음)", yeo, "", 0),
+                ("단계1", dict(an, styleEn=words("s", 330)), fix_long, 1),
+                ("단계2", dict(an, styleEn=words("s", 330), appearanceEn=words("a", 400)), fix_long, 2),
+                ("단계3", dict(an, styleEn=words("s", 330), appearanceEn=words("a", 330),
+                             baseOutfitEn=words("o", 400) + ". " + _CF_YEOUIJUN_TAIL), fix_long, 3),
+                ("단계4", dict(an, styleEn=words("s", 330), appearanceEn=words("a", 330),
+                             baseOutfitEn=words("o", 400) + ". " + _CF_YEOUIJUN_TAIL, extraEn=words("e", 450)), fix_long, 4),
+            ]
+            sizes = []
+            for label, case, case_fix, want_step in cases:
+                case["outfitEn"] = case["baseOutfitEn"]
+                logs.clear()
+                got = charmod._fidelity_prompt("sheet", "webtoon", case, source_no=1, fix=case_fix)
+                clipped = logs.messages("vnew.char_prompt.clipped")
+                body = case["baseOutfitEn"].split(". Worn")[0]
+                step = 4 if clipped else 0 if case["styleEn"] in got else 1 if case["appearanceEn"] in got else 2 if body in got else 3
+                sizes.append(f"{label} {len(got)}자")
+                if len(got) > 2900:
+                    bad.append(f"(cf-i) {label} 프롬프트가 2,900자를 넘습니다: {len(got)}")
+                expect("cf-i", step, want_step, f"{label} 줄인 단계")
+                if want_step < 4:
+                    if sided("sheet") not in got or (case_fix and case_fix.strip() not in got) or not got.endswith(case["extraEn"]) \
+                            or _CF_ROTATION_DESIGN not in got or src(1) not in got or _CF_YEOUIJUN_TAIL not in got:
+                        bad.append(f"(cf-i) {label} 에서 줄이면 안 되는 조각(SIDED·FIX·EXTRA·ROTATION·SOURCE·꼬리)이 빠졌습니다")
+                    if clipped:
+                        bad.append(f"(cf-i) {label} 에서 잘림 로그가 남았습니다")
+                elif len(clipped) != 1 or not re.fullmatch(r"vnew\.char_prompt\.clipped kind=sheet variant=webtoon len=\d+", clipped[0]) \
+                        or int(clipped[0].rsplit("=", 1)[1]) <= 2900:
+                    bad.append(f"(cf-i) {label} 잘림 로그가 다릅니다: {clipped}")
+            report.append("cf-i 길이 예산(시트·고칠 문장 포함): " + " · ".join(sizes))
+
+    # ------------------------------------------------------------------ (cf-l) 사진 속 옷
+    def cf_l() -> None:
+        with _pin_vnew(**on), _CfFakes(charmod, payload=_CF_FID_PAYLOAD) as fakes:
+            _cf_seed_char(fakes, "char_cf_l", 5)
+            charmod.start_build("tester", "char_cf_l")
+            built, _ = charmod.load_char("tester", "char_cf_l")
+            outfits = built["outfits"]
+            expect("cf-l", [{k: o.get(k) for k in ("labelKo", "source", "kind", "sourceFileId", "whereEn", "sidedItems")}
+                            for o in outfits],
+                   [{"labelKo": "검은 정장", "source": "auto", "kind": "photo", "sourceFileId": "f_cf3",
+                     "whereEn": "large bottom figure",
+                     "sidedItems": [{"itemEn": _CF_WATCH, "labelKo": "시계", "partEn": "wrist", "side": "right"}]},
+                    {"labelKo": "후드티", "source": "auto", "kind": "photo", "sourceFileId": "", "whereEn": "",
+                     "sidedItems": []}], "sync_auto_outfits 사진 속 옷 후보")
+            expect("cf-l", sorted(outfits[0]), ["id", "kind", "labelKo", "promptEn", "sidedItems", "source", "sourceFileId",
+                                                "variants", "whereEn"], "사진 속 옷 dict 키")
+            charmod.sync_auto_outfits("tester", "char_cf_l", built["analysis"])
+            again, _ = charmod.load_char("tester", "char_cf_l")
+            expect("cf-l", len(again["outfits"]), 2, "같은 promptEn 은 다시 넣지 않는다")
+            # 원본 있음: 웹툰·실사 정면 [기본 정면, 원본], 후면 [방금 정면, 원본, 기본 후면].
+            base_front = {v: fakes.label(fakes.store.blobs[built["variants"][v]["frontKey"]]) for v in ("webtoon", "real")}
+            base_back = {v: fakes.label(fakes.store.blobs[built["variants"][v]["backKey"]]) for v in ("webtoon", "real")}
+
+            def draw(outfit_id):
+                before, ledger_before = len(fakes.seedream), len(fakes.ledger)
+                logs.clear()
+                charmod.run_build_outfit("tester", "char_cf_l", outfit_id)
+                return fakes.seedream[before:], fakes.ledger[ledger_before:], logs.messages("vnew.build_outfit.source_missing")
+
+            calls, ledger, missing = draw(outfits[0]["id"])
+            expect("cf-l", [c["refs"] for c in calls],
+                   [[base_front["webtoon"], "src3"], [fakes.label(calls[0]["image"]), "src3", base_back["webtoon"]],
+                    [base_front["real"], "src3"], [fakes.label(calls[2]["image"]), "src3", base_back["real"]]],
+                   "사진 속 옷 참고(정면 [기본 정면, 원본] · 후면 [정면, 원본, 기본 후면])")
+            expect("cf-l", [e[2] for e in ledger], ["webtoon-outfit-front", "webtoon-outfit-back", "real-outfit-front",
+                                                   "real-outfit-back"], "사진 속 옷 원장 종류")
+            prompt_en = outfits[0]["promptEn"]
+            wear = prompt_en.rstrip(".")
+            o_front = cfm.side_sentence(watch, "front", "his")
+            o_back = cfm.side_sentence(watch, "back", "his")
+            want_front = " ".join([
+                "Single full-body front view of the same single person as in Image 1.",
+                "The character: " + _CF_FID_PAYLOAD["appearanceEn"],
+                f"Instead of the base outfit, this person wears this whole outfit exactly as drawn on the large bottom figure in "
+                f"Image 2: {wear}. Copy the garments and layers, colours, fit, how each piece is worn, rips or patterns and where "
+                "they are, shoes and accessories.", o_front,
+                "Standing straight in a relaxed A-pose facing the camera, whole body from head to shoes visible, centered, plain "
+                "white background, no shadow.", "Draw exactly ONE person, no extra figures.",
+                _CF_FID_PAYLOAD["styleEn"] + " " + _CF_WEBTOON_STYLE_TAIL, "No text."])
+            want_back = " ".join([
+                f"Single full-body BACK view of the same single person as in Image 1, seen from directly behind, wearing the same "
+                f"outfit as in Image 1: {wear}.", "The outfit is drawn on the large bottom figure in Image 2.",
+                "Image 3 shows the same person from behind in other clothes; use it only for the hair and body, not for the "
+                "clothes.", o_back,
+                "Standing straight in a relaxed A-pose, whole body from head to shoes visible, centered, plain white background, "
+                "no shadow.", "Draw exactly ONE person, no extra figures.",
+                _CF_FID_PAYLOAD["styleEn"] + " " + _CF_WEBTOON_STYLE_TAIL, "No text."])
+            expect("cf-l", calls[0]["prompt"], want_front, "사진 속 옷 웹툰 정면 원문(design §6.5)")
+            expect("cf-l", calls[1]["prompt"], want_back, "사진 속 옷 웹툰 후면 원문(design §6.5)")
+            if not calls[2]["prompt"].startswith("Single full-body front view photograph of the same real Korean actor as in "
+                                                 "Image 1.") or not calls[2]["prompt"].endswith(_CF_REAL_STYLE + " No text.") \
+                    or not calls[3]["prompt"].startswith("Single full-body BACK view photograph of the same real Korean actor as "
+                                                         "in Image 1, seen from directly behind, wearing the same outfit") \
+                    or "plus " in calls[2]["prompt"]:
+                bad.append("(cf-l) 사진 속 옷 실사 머리말·끝 문구가 design §6.5 와 다릅니다")
+            if missing:
+                bad.append(f"(cf-l) 원본이 있는데 source_missing 로그가 남았습니다: {missing}")
+            after, _ = charmod.load_char("tester", "char_cf_l")
+            o_after = next(o for o in after["outfits"] if o["id"] == outfits[0]["id"])
+            expect("cf-l", [o_after["variants"][v]["status"] for v in ("webtoon", "real")], ["ready", "ready"], "사진 속 옷 결과")
+            # 원본이 목록에 없음(sourceFileId "") → 원본 없이, 번호를 당긴다.
+            calls, _ledger, missing = draw(outfits[1]["id"])
+            expect("cf-l", [len(c["refs"]) for c in calls], [1, 2, 1, 2], "원본 없음 → 정면 [기본 정면] · 후면 [정면, 기본 후면]")
+            if "this person wears this whole outfit: light blue hoodie, grey sweatpants, white sneakers." not in calls[0]["prompt"] \
+                    or "Copy the garments" in calls[0]["prompt"] or "The outfit is drawn on" in calls[1]["prompt"] \
+                    or "Image 2 shows the same person from behind" not in calls[1]["prompt"]:
+                bad.append("(cf-l) 원본 없는 사진 속 옷 프롬프트가 design §6.5 와 다릅니다")
+            expect("cf-l", missing, [f"vnew.build_outfit.source_missing char=char_cf_l outfit={outfits[1]['id']} err=not_in_sources"],
+                   "원본이 목록에 없을 때 로그(번호·종류만)")
+            # 목록에는 있지만 읽기 실패 + 기본 후면 없음.
+            def broken(data):
+                target = next(o for o in data["outfits"] if o["id"] == outfits[1]["id"])
+                target["sourceFileId"] = "f_cf1"
+                data["variants"]["webtoon"]["backKey"] = ""
+
+            charmod.mutate_char("tester", "char_cf_l", broken)
+            fakes.store.blobs.pop(charmod.source_key("tester", "char_cf_l", "f_cf1"))
+            calls, _ledger, missing = draw(outfits[1]["id"])
+            expect("cf-l", [len(c["refs"]) for c in calls], [1, 1, 1, 2], "읽기 실패·웹툰 기본 후면 없음 → 원본 없이")
+            if "Image 2 shows" in calls[1]["prompt"] or "Image 3 shows" in calls[1]["prompt"]:
+                bad.append("(cf-l) 기본 후면이 없는데 후면 안내 문장이 있습니다")
+            expect("cf-l", missing, [f"vnew.build_outfit.source_missing char=char_cf_l outfit={outfits[1]['id']} err=KeyError"],
+                   "읽기 실패 로그(예외 종류만)")
+            # 기본 후면 없음 + 원본 있음 → 후면 [정면, 원본] 번호 2, 기본 후면 문장 없음.
+            fakes.store.blobs[charmod.source_key("tester", "char_cf_l", "f_cf1")] = _CF_SRC[1]
+            calls, _ledger, _missing = draw(outfits[1]["id"])
+            expect("cf-l", [c["refs"][1:] for c in calls[:2]], [["src1"], ["src1"]], "기본 후면 없음 + 원본 → [정면, 원본]")
+            if "Image 3 shows" in calls[1]["prompt"] or "The outfit is drawn on the character in Image 2." not in calls[1]["prompt"]:
+                bad.append("(cf-l) 기본 후면 없는 사진 속 옷 후면 프롬프트가 다릅니다")
+            # 업로드 목록에서 지운 그림(S3 파일은 남음) → 원본으로 쓰지 않는다(R1.9 "지운 그림").
+            charmod.remove_source("tester", "char_cf_l", "f_cf3")
+            calls, _ledger, missing = draw(outfits[0]["id"])
+            expect("cf-l", ([len(c["refs"]) for c in calls], any("src3" in c["refs"] for c in calls)), ([1, 1, 1, 2], False),
+                   "목록에서 지운 원본 그림은 참고에 넣지 않는다")
+            expect("cf-l", missing, [f"vnew.build_outfit.source_missing char=char_cf_l outfit={outfits[0]['id']} err=not_in_sources"],
+                   "지운 그림 로그")
+            # 사용자 복장(user)·옛 후보(kind 없음): 덧입힘 + 좌우 문장(충실 분석).
+            user = charmod._empty_outfit("빨간 코트", "a long red coat", "user")
+            legacy = charmod._empty_outfit("후드", "a light blue hoodie", "auto")
+            charmod.mutate_char("tester", "char_cf_l", lambda d: d["outfits"].extend([user, legacy]))
+            for outfit in (user, legacy):
+                calls, _ledger, _missing = draw(outfit["id"])
+                if f" plus {outfit['promptEn']}. {o_front} Standing straight" not in calls[0]["prompt"] \
+                        or f" plus {outfit['promptEn']}. " not in calls[1]["prompt"] or len(calls[0]["refs"]) != 1 \
+                        or "Instead of the base outfit" in calls[0]["prompt"]:
+                    bad.append(f"(cf-l) {outfit['source']} 추가 복장이 덧입힘 + 좌우 문장이 아닙니다")
+            # 끔: kind photo 여도 지금처럼 덧입힘.
+            with _pin_vnew(VNEW_CHAR_FIDELITY=False):
+                calls, _ledger, _missing = draw(outfits[0]["id"])
+            if any("Instead of the base outfit" in c["prompt"] or "never on both" in c["prompt"] for c in calls) \
+                    or [len(c["refs"]) for c in calls] != [1, 1, 1, 2] or " plus " not in calls[0]["prompt"]:
+                bad.append("(cf-l) 끔인데 사진 속 옷을 지금 방식(덧입힘)으로 그리지 않았습니다")
+            # 상한·옛 분석·끔: kind 없음.
+            with _pin_vnew(MAX_OUTFITS=1):
+                _cf_seed_char(fakes, "char_cf_l2", 5)
+                charmod.sync_auto_outfits("tester", "char_cf_l2", built["analysis"])
+                capped, _ = charmod.load_char("tester", "char_cf_l2")
+            expect("cf-l", [o.get("kind") for o in capped["outfits"]], ["photo"], "MAX_OUTFITS 상한")
+            old_analysis = {k: v for k, v in built["analysis"].items() if k != "fidelity"}
+            for index, (label, flags, analysis) in enumerate((("옛 분석", on, old_analysis), ("끔", off, built["analysis"]))):
+                cid = f"char_cf_l3_{index}"
+                _cf_seed_char(fakes, cid, 5)
+                with _pin_vnew(**flags):
+                    charmod.sync_auto_outfits("tester", cid, analysis)
+                got, _ = charmod.load_char("tester", cid)
+                expect("cf-l", [sorted(o) for o in got["outfits"]], [["id", "labelKo", "promptEn", "source", "variants"]] * 2,
+                       f"{label} 후보는 지금 키 그대로(kind 없음)")
+            fields = charmod._photo_outfit_fields({
+                "outfitLayersEn": [{"labelKo": "a", "promptEn": "p", "sided": [0, True, 5, "0", 1]}, "str layer", {"promptEn": " "},
+                                   {"promptEn": "q", "sided": "x", "whereEn": "big\nfigure"}],
+                "sidedItems": [dict(watch, votes={}, seenIn=[0]), {"itemEn": "", "partEn": "wrist", "side": "left"}],
+            })
+            expect("cf-l", fields, [
+                {"kind": "photo", "sourceFileId": "", "whereEn": "", "sidedItems": [dict(watch)]},
+                {"kind": "photo", "sourceFileId": "", "whereEn": "", "sidedItems": []},
+                {"kind": "photo", "sourceFileId": "", "whereEn": "big figure", "sidedItems": []},
+            ], "_photo_outfit_fields(틀린 순번·모양 틀린 소품 버림, 문자열 후보)")
+
+    # ------------------------------------------------------------------ (cf-r) 상세 응답(design §11.1, R4.9·R5.1, T2b 이름표)
+    def cf_r() -> None:
+        from flask import Flask  # noqa: PLC0415
+
+        from src import vnew as vnew_pkg  # noqa: PLC0415
+
+        side_on = dict(VNEW_CHAR_FIDELITY=False, VNEW_3D_SIDE_VIEWS=True)
+        fid_on = dict(VNEW_CHAR_FIDELITY=True, VNEW_3D_SIDE_VIEWS=False)
+        # 옛 캐릭터(새 필드 없음) + 두 설정 끔 → 상세 JSON 이 구현 전과 같다(T1 시작 전에 잰 _CF_OFF_SHA["detailOld"]).
+        with _pin_vnew(**off), _CfFakes(charmod) as fakes:
+            fakes.store.json[charmod.char_key("tester", "char_cf_old")] = (_cf_old_char(), "etag-old")
+            old_off = charmod.detail_view("tester", "char_cf_old")
+        expect("cf-r", (_cf_sha(old_off), "features" in old_off), (_CF_OFF_SHA["detailOld"], False),
+               "옛 캐릭터 + 두 설정 끔 상세 JSON sha256 = 구현 전, features 없음")
+        # 하나라도 켬 → features 만 더해진다(맨 뒤). 옛 데이터라 leftUrl·rightUrl·endpoint·kind 는 없다.
+        for flags, want in ((on, {"charFidelity": True, "sideViews": True}), (fid_on, {"charFidelity": True, "sideViews": False}),
+                            (side_on, {"charFidelity": False, "sideViews": True})):
+            got = _cf_detail_of(charmod, _cf_old_char(), **flags)
+            rest = {k: v for k, v in got.items() if k != "features"}
+            expect("cf-r", (list(got)[-1], got.get("features"), _cf_sha(rest)), ("features", want, _CF_OFF_SHA["detailOld"]),
+                   f"옛 캐릭터 + {want} → features 만 더해짐")
+        # 새 필드: leftUrl·rightUrl 은 키가 있을 때만(설정과 상관없이, R4.9), endpoint 는 저장된 문자열일 때만, kind 는 저장돼 있을 때만.
+        sign = "https://signed.example/users/tester/characters/char_cf_new/{}?e=3600"
+        for flags in (on, off):
+            got = _cf_detail_of(charmod, _cf_new_char(), **flags)
+            web, real = got["variants"]["webtoon"], got["variants"]["real"]
+            expect("cf-r", (web.get("leftUrl"), web.get("rightUrl"), "leftUrl" in real, real.get("rightUrl")),
+                   (sign.format("webtoon/v1/left.jpg"), sign.format("webtoon/v1/right.jpg"), False, sign.format("real/v1/right.jpg")),
+                   f"{flags} leftUrl·rightUrl(키 있을 때만, 3D 에서 뺀 쪽 없음)")
+            expect("cf-r", (web["model3d"].get("endpoint"), "endpoint" in real["model3d"], sorted(web["model3d"])),
+                   (_TR_MULTI, False, ["endpoint", "error", "hasGlb", "status", "thumbUrl"]), f"{flags} model3d.endpoint(Tripo 만)")
+            expect("cf-r", [(o["id"], o.get("kind"), sorted(o)) for o in got["outfits"]],
+                   [("o_photo", "photo", ["id", "kind", "labelKo", "promptEn", "source", "variants"]),
+                    ("o_old1", None, ["id", "labelKo", "promptEn", "source", "variants"]),
+                    ("o_user", None, ["id", "labelKo", "promptEn", "source", "variants"])], f"{flags} 추가 복장 kind")
+            expect("cf-r", got.get("features"), {"charFidelity": True, "sideViews": True} if flags is on else None,
+                   f"{flags} features")
+            if any(k in got["outfits"][0] for k in ("sourceFileId", "whereEn", "sidedItems")):
+                bad.append("(cf-r) 추가 복장 응답에 kind 밖의 사진 속 옷 저장 필드가 나갔습니다")
+        # endpoint 가 문자열이 아니거나 빈 값이면 두지 않는다. 키는 있지만 서명이 실패하면 "" (화면은 빈 url 을 그리지 않는다).
+        odd = _cf_new_char()
+        odd["variants"]["webtoon"]["model3d"]["endpoint"] = 123
+        odd["variants"]["real"]["model3d"]["endpoint"] = ""
+        got = _cf_detail_of(charmod, odd, **on)
+        expect("cf-r", ["endpoint" in got["variants"][v]["model3d"] for v in ("webtoon", "real")], [False, False],
+               "문자열이 아닌·빈 endpoint 는 응답에 없음")
+        with _pin_vnew(**on), _CfFakes(charmod) as fakes:
+            fakes.store.json[charmod.char_key("tester", "char_cf_new")] = (_cf_new_char(), "etag-new")
+            signer = fakes.store.presign
+
+            def failing(key, **kw):
+                if key.endswith("/left.jpg"):
+                    raise RuntimeError("presign down")
+                return signer(key, **kw)
+
+            fakes.store.presign = failing
+            logs.clear()
+            got = charmod.detail_view("tester", "char_cf_new")
+        expect("cf-r", (got["variants"]["webtoon"]["leftUrl"], len(logs.messages("vnew.presign_failed key=users/tester/characters/"
+                                                                                  "char_cf_new/webtoon/v1/left.jpg"))),
+               ("", 1), "서명 실패 → leftUrl \"\" + 경고 1줄(지금 _presign 규칙)")
+        # 통합: 켬 + Tripo 로 실제 빌드 → GET /api/vnew/characters/<id>(라우트·저장소·드라이버, 외부만 가짜) → 다른 사용자 404.
+        with _pin_vnew(**_TR_PINS), _TrFakes(charmod, payload=_CF_FID_PAYLOAD) as fakes:
+            fakes.items = [dict(watch)]
+            _cf_seed_char(fakes, "char_cf_r", 5)
+            charmod.start_build("tester", "char_cf_r")
+            owner = {"name": "tester"}
+            app = Flask(__name__)
+            app.register_blueprint(vnew_pkg.create_blueprint(vnew_pkg.VnewDependencies(
+                require_auth=lambda handler: handler, current_owner=lambda: owner["name"])))
+            client = app.test_client()
+            resp = client.get("/api/vnew/characters/char_cf_r")
+            data = resp.get_json() or {}
+            owner["name"] = "other"
+            other = client.get("/api/vnew/characters/char_cf_r")
+            want_urls = {v: [f"https://signed.example/{key}?e=3600" for key in (charmod.left_key("tester", "char_cf_r", v, 1),
+                                                                                 charmod.right_key("tester", "char_cf_r", v, 1))]
+                         for v in ("webtoon", "real")}
+        variants = data.get("variants") or {}
+        expect("cf-r", (resp.status_code, {v: [variants.get(v, {}).get("leftUrl"), variants.get(v, {}).get("rightUrl")]
+                                           for v in ("webtoon", "real")},
+                        [variants.get(v, {}).get("model3d", {}).get("endpoint") for v in ("webtoon", "real")],
+                        data.get("features"), other.status_code),
+               (200, want_urls, [_TR_MULTI] * 2, {"charFidelity": True, "sideViews": True}, 404),
+               "켬 빌드(Tripo) → 라우트 상세 leftUrl·rightUrl·endpoint·features, 다른 사용자 404")
+        report.append("cf-r: 옛 캐릭터 + 두 설정 끔 상세 sha256 = 구현 전 · 켬은 features 만 더해짐 · 라우트 통합(Tripo 빌드)")
+
+    real_llm: list[str] = []
+    saved_ext = {"seedream": vpoc_seedream.generate_safe, "fal": vpoc_fal._request, "urlopen": _ureq.urlopen}  # noqa: SLF001
+    vpoc_seedream.generate_safe = block("seedream")
+    vpoc_fal._request = block("fal")  # noqa: SLF001
+    _ureq.urlopen = block("urlopen")
+    logs = _LogCapture()
+    t2_bodies = _cf_t2_bodies(_CfEnv(cfm=cfm, charmod=charmod, bad=bad, report=report, expect=expect, logs=logs, on=on, off=off,
+                                     watch=watch))
+    t2_names = [name for name, _body in t2_bodies]
+    try:
+        with _guard_real_llm() as real_llm, logs, _pin_vnew(**_CF_PINS):
+            for name, body in [("cf-a", cf_a), ("cf-b", cf_b), ("cf-c", cf_c), ("cf-d", cf_d), ("cf-f", cf_f), ("cf-g", cf_g),
+                               ("cf-h", cf_h), ("cf-i", cf_i), ("cf-l", cf_l)] + t2_bodies + [("cf-r", cf_r)]:
+                run(name, body)
+            real_llm = list(real_llm)
+    except Exception as exc:  # noqa: BLE001
+        bad.append("char-fidelity 검사 준비 중 예외: " + repr(exc) + "\n" + _tb.format_exc()[:2000])
+    finally:
+        vpoc_seedream.generate_safe = saved_ext["seedream"]
+        vpoc_fal._request = saved_ext["fal"]  # noqa: SLF001
+        _ureq.urlopen = saved_ext["urlopen"]
+    if real_llm:
+        bad.append(f"가짜가 아닌 LLM 호출이 있었습니다: {real_llm}")
+    if blocked:
+        bad.append(f"가짜가 아닌 Seedream·fal·urlopen 호출이 있었습니다: {blocked}")
+    missing_marks = [n for n in ["cf-a", "cf-b", "cf-c", "cf-d", "cf-f", "cf-g", "cf-h", "cf-i", "cf-l"] + t2_names + ["cf-r"]
+                     if n not in seen]
+    if missing_marks and not bad:
+        bad.append(f"끝까지 돌지 않은 검사: {missing_marks}")
+    if bad:
+        fail("char-fidelity T1·T2·T3 검사 실패\n" + "\n".join(f"  {item}" for item in bad))
+    else:
+        ok(
+            "char-fidelity T1 검사 (cf-a)설정 2개 기본 true·배선·되돌리기 주석·순수 모듈 (cf-b)두 설정 끔 = 구현 전 sha256 32개 "
+            "(cf-c)화면 쪽 → 캐릭터 쪽·다수결·동률·정리·상한·여의준 right (cf-d)좌우 낱말 지우기 5규칙·꼬리 멱등·사진 속 옷 "
+            "(cf-f)좌우 문장 원문 (cf-g)Image N:·도구·SYSTEM·max_tokens 2000·저장·로그 (cf-h)기준 사진 먼저(세 경로) "
+            "(cf-i)프롬프트 원문·SOURCE 1·2·3·4·길이 예산 (cf-l)사진 속 옷 kind photo·참고·원문·덧입힘 유지 · T2 "
+            "(cf-e)기대값·반전 표 (cf-f2)고칠 문장·warning 원문 (cf-j)정면·후면 검사 1회·반전 픽셀·소품 없음 = 지금 "
+            "(cf-k)시트 검사 1회·Fix figure·재생성 ≤2,900자 (cf-m)빌드 순서·원장 retry·키·3D 6키·호출 상한 "
+            "(cf-n)옆모습 반전·제외·확인 안 됨 (cf-o)재제출 같은 묶음·옛 본문 sha256 (cf-p)이어 만들기 옆모습만 "
+            "(cf-q)선점 뺏김 유료 0회·하트비트·keepalive · T3 (cf-r)상세 끔 sha256 = 구현 전·leftUrl·rightUrl·endpoint·kind·features·라우트"
+        )
+        for line in report:
+            print(f"       cf: {line}")
+
+
+# ---------------------------------------------------------------- char-fidelity T2b(3D 공급자 Tripo H3.1, 2026-10-30)
+#
+# 지시서 .kiro/handoff/100-char-3d-tripo.md · requirements R8 · design §19. 외부 호출(fal·원장·다운로드)은 모두 가짜다(유료 0회).
+
+
+def _tr_hunyuan_fingerprints(extra_pins: dict | None = None) -> dict[str, str]:
+    """Hunyuan 경로 3D 지문 sha256(tr-n). 코드를 바꾸기 **전**(T2 끝 작업 트리)에 잰 값이 _TR_HUNYUAN_SHA 다.
+
+    T2 의 cf-o 고정(_CF_3D_OLD_SHA)은 옆모습이 없는 본문만 본다. 여기서는 옆모습이 있는 본문·잃은 요청 재제출·조회 주소·원장
+    인자(model·usd)·저장된 model3d·옮긴 파일까지 본다. 시작 전 코드의 함수 모양(인자)만 써서 바꾼 뒤에도 같은 호출로 잰다.
+    extra_pins: 바꾼 뒤에는 VNEW_3D_PROVIDER="hunyuan" 을 넘긴다(시작 전 코드에는 그 설정이 없다).
+    """
+    sys.path.insert(0, str(ROOT / "app"))
+    from src.vnew import characters as charmod  # noqa: PLC0415
+    from src.vpoc.errors import VpocError as _VpocError  # noqa: PLC0415
+
+    out: dict[str, str] = {}
+    front, back, left, right = _cf_halves(301), _cf_halves(302), _cf_halves(303), _cf_halves(304)
+    pins = dict(_CF_PINS, VNEW_CHAR_FIDELITY=True, VNEW_3D_SIDE_VIEWS=True, MODEL3D_USD=0.675, **(extra_pins or {}))
+
+    def ledger_into(records: list):
+        def charge(key, **kw):
+            records.append([kw.get("kind"), kw.get("model"), kw.get("usd"), kw.get("units"), "-".join(str(key).split("-")[2:-1])])
+            return {"spentUsd": 0.0, "capUsd": None}
+        return charge
+
+    def lossy(fakes, n: int):
+        left_n = {"n": n}
+        plain = charmod._fal_request
+
+        def fal(method, url, payload=None):
+            if method == "GET" and url.endswith("/status") and left_n["n"] > 0:
+                left_n["n"] -= 1
+                fakes.fal.append((method, url, {}))
+                raise _VpocError("vnew.fal", "HTTP503", "Downstream service unavailable", 503)
+            return plain(method, url, payload)
+        return fal
+
+    def calls(fakes) -> list:
+        return [[method, url, body] for method, url, body in fakes.fal]
+
+    def model3d(fakes, cid: str) -> dict:
+        char, _ = charmod.load_char("tester", cid)
+        return char["variants"]["webtoon"]["model3d"]
+
+    def blobs(fakes, cid: str) -> dict:
+        prefix = f"users/tester/characters/{cid}/"
+        return {k: _cf_sha(repr(v)) for k, v in sorted(fakes.store.blobs.items())
+                if k.startswith(prefix) and k.endswith(("/model.glb", "/thumb.png"))}
+
+    with _pin_vnew(**pins):
+        side = charmod.settings.MODEL_INPUT_SQUARE
+        fsq, bsq, lsq, rsq = (charmod._square_pad(x, side) for x in (front, back, left, right))
+        with _CfFakes(charmod) as fakes:
+            charmod.submit_3d(fsq, bsq)
+            charmod.submit_3d(fsq, bsq, left_square=lsq, right_square=rsq)
+            charmod.submit_3d(fsq, bsq, right_square=rsq)
+            charmod.submit_3d(fsq, bsq, left_square=lsq)
+            got = calls(fakes)
+            out["submit2"], out["submit4"], out["submit3r"], out["submit3l"] = (_cf_sha(c) for c in got)
+            state = charmod.poll_3d("fal/requests/fal-ai/hunyuan3d-v3/image-to-3d/req_poll")
+            out["poll"] = _cf_sha([state, calls(fakes)[4:]])
+        # 새 빌드 3D(옆모습 둘): 잃은 요청 8회 → 재제출 → 완료 → 옮기기.
+        with _CfFakes(charmod) as fakes:
+            records: list = []
+            charmod.vpoc_ledger.charge = ledger_into(records)
+            _cf_seed_char(fakes, "char_tr_h_build", 1, version=1, status="building")
+            charmod._fal_request = lossy(fakes, 8)
+            charmod._build_3d_from_images("tester", "char_tr_h_build", "webtoon", 1, front, back, "", left=left, right=right)
+            out["buildCalls"] = _cf_sha(calls(fakes))
+            out["buildLedger"] = _cf_sha(records)
+            out["buildModel3d"] = _cf_sha(model3d(fakes, "char_tr_h_build"))
+            out["buildBlobs"] = _cf_sha(blobs(fakes, "char_tr_h_build"))
+        # 3D만 다시: 저장된 옆모습 둘 + 이전 Hunyuan 요청(잃음 8회) → 같은 묶음 재제출 → 완료.
+        with _CfFakes(charmod) as fakes:
+            records = []
+            charmod.vpoc_ledger.charge = ledger_into(records)
+            root = "users/tester/characters/char_tr_h_retry/webtoon/v1"
+            v = charmod._empty_variant()
+            v.update(status="model3d", sheetKey=f"{root}/sheet.jpg", frontKey=f"{root}/front.jpg", backKey=f"{root}/back.jpg",
+                     leftKey=f"{root}/left.jpg", rightKey=f"{root}/right.jpg", viewCheck={"left": "ok", "right": "flipped"})
+            v["model3d"].update(status="submitted", requestArn="fal/requests/fal-ai/hunyuan3d-v3/image-to-3d/req_prior")
+            _cf_seed_char(fakes, "char_tr_h_retry", 1, version=1, status="building",
+                          variants={"webtoon": v, "real": charmod._empty_variant()})
+            for name, data in (("front", front), ("back", back), ("left", left), ("right", right), ("sheet", front)):
+                fakes.store.blobs[f"{root}/{name}.jpg"] = data
+            charmod._fal_request = lossy(fakes, 8)
+            charmod.run_retry3d("tester", "char_tr_h_retry", "webtoon", 1, "")
+            out["retryCalls"] = _cf_sha(calls(fakes))
+            out["retryLedger"] = _cf_sha(records)
+            out["retryModel3d"] = _cf_sha(model3d(fakes, "char_tr_h_retry"))
+            out["retryBlobs"] = _cf_sha(blobs(fakes, "char_tr_h_retry"))
+        # 옮기기만(Hunyuan 응답 모양): 받은 GLB 그대로·썸네일 png.
+        with _CfFakes(charmod) as fakes:
+            _cf_seed_char(fakes, "char_tr_h_copy", 1, version=1, status="building")
+            charmod._copy_3d_result("tester", "char_tr_h_copy", "webtoon", 1,
+                                    {"status": "Completed", "glbUrl": "https://fal.media/files/cf/model.glb",
+                                     "thumbUrl": "https://fal.media/files/cf/thumb.png"})
+            out["copyModel3d"] = _cf_sha(model3d(fakes, "char_tr_h_copy"))
+            out["copyBlobs"] = _cf_sha(blobs(fakes, "char_tr_h_copy"))
+            out["copyTrace"] = _cf_sha(fakes.trace)
+    return out
+
+
+# tr-n 기준값: 코드를 바꾸기 **전**(2026-10-30, T2b 시작 전 작업 트리 = T2 끝)에 _tr_hunyuan_fingerprints() 로 두 번 잰 sha256
+# (두 번 같은 값). VNEW_3D_PROVIDER=hunyuan 이면 본문·조회 주소·원장·저장·옮긴 파일이 바이트까지 같아야 한다(R8.2).
+_TR_HUNYUAN_SHA = {
+    "submit2": "f5d88b6675cf48b75bc2a1a4260d53093888dfb666f4eb863b0f6af327e8a417",
+    "submit4": "52d3fa71917bc24a45cd9dca78ec83df750b8212f69856c9c2a677bd326b5a14",
+    "submit3r": "0d32e7ebaa0385de3f49c313ee3e7cd769f64a399c30aac077cdddd8b13397e7",
+    "submit3l": "2e186b82c872412bbe1cd2bdc0a5b8286abb388ab9fecc8ff7eadd98a1b367ef",
+    "poll": "c9032270291eea580872be34a9c0d5bb3fea9f72b970e6e73fc55cac00f64b54",
+    "buildCalls": "354ae44c8d0226e3722263865e75efc5c20a5800142a8842f2cf407336d5e097",
+    "buildLedger": "e6f0308ef76757d797dedf264cdf02e24097effe1d401e8d7703f606dc8c6fbf",
+    "buildModel3d": "15512b15a5a3617dc5c57805976b94f68392083cb25656ff8ce4d572fd079d09",
+    "buildBlobs": "67cde5b19a87554f28dc21bc83888cc122298e368b3cc5c6c835ea0b2b539345",
+    "retryCalls": "c36088d639de26fae60c0f4be79dd0b7da9f8b1bd45b54a57fa6369297954caf",
+    "retryLedger": "6a8e938d173fca1100fe8d067f527bd9c2ed3e20d023dac578fa7d54f2859152",
+    "retryModel3d": "c9419632477cdcef3de11a9fbb8c0c32cecf400f3fe0ea41925f995391a71ad5",
+    "retryBlobs": "20e1da2f7ff30cb826f0b5501b3882aa9fc3e953955870697bf984bf2722091c",
+    "copyModel3d": "d02546cd4bc0c7aa2bef684ea83e6c8e0812d5f870392d365580d543d57e077c",
+    "copyBlobs": "d7113a0f5a1f76399311ad32196c412e12e3421bce23c4e08dc8bd1ab7f5db95",
+    "copyTrace": "7b58bb10cc04941d07e0fc0127426fb56a31aa06cc53a1ae39bbaf5f65fcbb54",
+}
+
+# 결정 1 표(지시서 100)의 설정 11개 — 순서도 표 순서다(템플릿·base 자리 검사).
+_TR_KEYS = (
+    "VNEW_3D_PROVIDER", "VNEW_3D_TRIPO_ENDPOINT", "VNEW_3D_TRIPO_SINGLE_ENDPOINT", "VNEW_3D_TRIPO_FACE_LIMIT",
+    "VNEW_3D_TRIPO_TEXTURE_QUALITY", "VNEW_3D_TRIPO_GEOMETRY_QUALITY", "VNEW_3D_TRIPO_INPUT_SQUARE", "VNEW_3D_TRIPO_MULTIVIEW",
+    "VNEW_3D_TRIPO_YAW_DEG", "VNEW_3D_TRIPO_USD", "VNEW_3D_SIDE_SWAP",
+)
+# 코드 기본값(설정 모듈 값)과 base·렌더 글자 값.
+_TR_DEFAULTS = {
+    "VNEW_3D_PROVIDER": "tripo", "VNEW_3D_TRIPO_ENDPOINT": "tripo3d/h3.1/multiview-to-3d",
+    "VNEW_3D_TRIPO_SINGLE_ENDPOINT": "tripo3d/h3.1/image-to-3d", "VNEW_3D_TRIPO_FACE_LIMIT": 300000,
+    "VNEW_3D_TRIPO_TEXTURE_QUALITY": "detailed", "VNEW_3D_TRIPO_GEOMETRY_QUALITY": "detailed",
+    "VNEW_3D_TRIPO_INPUT_SQUARE": 2048, "VNEW_3D_TRIPO_MULTIVIEW": True, "VNEW_3D_TRIPO_YAW_DEG": -90.0,
+    "VNEW_3D_TRIPO_USD": 0.60, "VNEW_3D_SIDE_SWAP": False,
+}
+_TR_BASE_TEXT = {
+    "VNEW_3D_PROVIDER": "tripo", "VNEW_3D_TRIPO_ENDPOINT": "tripo3d/h3.1/multiview-to-3d",
+    "VNEW_3D_TRIPO_SINGLE_ENDPOINT": "tripo3d/h3.1/image-to-3d", "VNEW_3D_TRIPO_FACE_LIMIT": "300000",
+    "VNEW_3D_TRIPO_TEXTURE_QUALITY": "detailed", "VNEW_3D_TRIPO_GEOMETRY_QUALITY": "detailed",
+    "VNEW_3D_TRIPO_INPUT_SQUARE": "2048", "VNEW_3D_TRIPO_MULTIVIEW": "true", "VNEW_3D_TRIPO_YAW_DEG": "-90",
+    "VNEW_3D_TRIPO_USD": "0.60", "VNEW_3D_SIDE_SWAP": "false",
+}
+# Tripo 검사 고정 설정(환경변수와 상관없이 같은 값). 정사각은 빠르게 96(2048 은 tr-d 에서 따로 본다), Hunyuan 은 64.
+_TR_PINS = dict(
+    _CF_PINS, VNEW_CHAR_FIDELITY=True, VNEW_3D_SIDE_VIEWS=True, MODEL3D_USD=0.675,
+    **dict(_TR_DEFAULTS, VNEW_3D_TRIPO_INPUT_SQUARE=96),
+)
+_TR_MULTI = "tripo3d/h3.1/multiview-to-3d"
+_TR_SINGLE = "tripo3d/h3.1/image-to-3d"
+_TR_GLB_URL = "https://v3.fal.media/files/tr/tripo_model.glb"
+_TR_RENDER_URL = "https://v3.fal.media/files/tr/tripo_render.png"
+
+
+def _tr_tripo_response() -> dict:
+    """Tripo H3.1 실제 응답 모양(Claude 실측 2026-10-30): model_mesh·model_urls·rendered_image·task_id(thumbnail 없음)."""
+    return {
+        "model_mesh": {"url": _TR_GLB_URL, "content_type": "model/gltf-binary", "file_size": 12582912},
+        "model_urls": {"glb": _TR_GLB_URL, "fbx": None, "base_model": None, "pbr_model": None},
+        "rendered_image": {"url": _TR_RENDER_URL},
+        "task_id": "tr-task-1",
+    }
+
+
+def _tr_gltf() -> dict:
+    """검사용 glTF: 기본 scene 루트 3개(회전 없음 · rotation+translation+scale+자식 · matrix, 같은 번호 한 번 더), 자식 1개,
+    다른 scene 의 루트 1개."""
+    import math as _math  # noqa: PLC0415
+
+    half = _math.sqrt(0.5)
+    return {
+        "asset": {"version": "2.0", "generator": "tr-check"},
+        "scene": 0,
+        "scenes": [{"nodes": [0, 1, 2, 0]}, {"nodes": [4]}],
+        "nodes": [
+            {"mesh": 0, "name": "plain"},
+            {"name": "rotated", "rotation": [0.0, 0.0, half, half], "translation": [1.0, 2.0, 3.0], "scale": [2.0, 2.0, 2.0],
+             "children": [3]},
+            {"name": "matrix", "matrix": [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 5, 0, 0, 1]},
+            {"name": "child", "rotation": [0.0, 0.5, 0.0, _math.sqrt(0.75)]},
+            {"name": "other-scene"},
+        ],
+        "meshes": [{"primitives": []}],
+        "buffers": [{"byteLength": 10}],
+    }
+
+
+def _tr_glb(gltf: dict | None = None, bin_bytes: bytes | None = bytes(range(1, 11)), extra: tuple = (),
+            json_bytes: bytes | None = None, first_kind: int = 0x4E4F534A) -> bytes:
+    """검사용 GLB(JSON + BIN + 그 밖 청크). BIN 은 일부러 10바이트(4바이트 정렬 아님)라 다시 묶을 때 0 채움을 본다."""
+    import struct as _struct  # noqa: PLC0415
+
+    text = json_bytes if json_bytes is not None else json.dumps(gltf if gltf is not None else _tr_gltf()).encode("utf-8")
+    text += b" " * (-len(text) % 4)
+    body = _struct.pack("<II", len(text), first_kind) + text
+    if bin_bytes is not None:
+        body += _struct.pack("<II", len(bin_bytes), 0x004E4942) + bin_bytes
+    for kind, data in extra:
+        body += _struct.pack("<II", len(data), kind) + data
+    return _struct.pack("<4sII", b"glTF", 2, 12 + len(body)) + body
+
+
+def _tr_parse_glb(data: bytes) -> tuple[dict, list, int]:
+    """검사 쪽 GLB 파서(구현과 따로): (gltf, [(kind, 길이 필드, 내용)], 헤더 길이)."""
+    import struct as _struct  # noqa: PLC0415
+
+    magic, version, total = _struct.unpack_from("<4sII", data, 0)
+    if magic != b"glTF" or version != 2:
+        raise ValueError("not glb")
+    chunks, offset = [], 12
+    while offset < total:
+        length, kind = _struct.unpack_from("<II", data, offset)
+        chunks.append((kind, length, bytes(data[offset + 8: offset + 8 + length])))
+        offset += 8 + length
+    return json.loads(chunks[0][2].decode("utf-8")), chunks, total
+
+
+def _tr_qrot(q, v) -> tuple:
+    """쿼터니언 (x, y, z, w) 로 점 v 를 돌린다(v' = q v q⁻¹)."""
+    x, y, z, w = q
+    tx, ty, tz = 2 * (y * v[2] - z * v[1]), 2 * (z * v[0] - x * v[2]), 2 * (x * v[1] - y * v[0])
+    return (v[0] + w * tx + (y * tz - z * ty), v[1] + w * ty + (z * tx - x * tz), v[2] + w * tz + (x * ty - y * tx))
+
+
+def _tr_close(a, b, tol: float = 1e-9) -> bool:
+    return len(a) == len(b) and all(abs(float(x) - float(y)) <= tol for x, y in zip(a, b))
+
+
+class _TrFakes(_CfFakesT2):
+    """T2b 하네스: _CfFakesT2 + Tripo 결과 모양·진짜 GLB 다운로드·원장 model/usd 기록·잃은 요청.
+
+    - fal 결과 GET: 주소에 /tripo3d/ 가 있으면 self.tripo_response(기본 Claude 실측 모양), 아니면 Hunyuan 모양(_CfFakes 그대로).
+    - 상태 GET: self.lost 번(또는 lost_forever 면 늘) 503 "Downstream service unavailable"(잃은 요청 신호).
+    - _fetch_url: .glb 면 self.glb(기본 _tr_glb()), 그 밖은 png 자리 바이트.
+    - 원장: self.charges 에 [kind, model, usd, units, variant-kind] 도 남긴다.
+    """
+
+    def __init__(self, charmod, **kw) -> None:
+        super().__init__(charmod, **kw)
+        self.glb = _tr_glb()
+        self.tripo_response = _tr_tripo_response()
+        self.charges: list[list] = []
+        self.lost = 0
+        self.lost_forever = False
+
+    def _fal(self, method, url, payload=None):
+        from src.vpoc.errors import VpocError as _VpocError  # noqa: PLC0415
+
+        if method == "GET" and url.endswith("/status") and (self.lost_forever or self.lost > 0):
+            self.lost -= 1
+            self.fal.append((method, url, {}))
+            raise _VpocError("vnew.fal", "HTTP503", "Downstream service unavailable", 503)
+        result = super()._fal(method, url, payload)
+        if method == "GET" and not url.endswith("/status") and "/tripo3d/" in url:
+            return json.loads(json.dumps(self.tripo_response))
+        return result
+
+    def _fetch(self, url):
+        self.trace.append(["fetch", url])
+        return self.glb if str(url).split("?")[0].endswith(".glb") else b"png-tr"
+
+    def _charge(self, key, **kw):
+        parts = str(key).split("-")
+        self.charges.append([kw.get("kind"), kw.get("model"), kw.get("usd"), kw.get("units"), "-".join(parts[2:-1])])
+        return super()._charge(key, **kw)
+
+    def posts(self, start: int = 0) -> list:
+        return [(url, body) for method, url, body in self.fal[start:] if method == "POST"]
+
+    def gets(self, start: int = 0) -> list:
+        return [url for method, url, _body in self.fal[start:] if method == "GET"]
+
+
+def _tr_seed_images(fakes, cid: str, *, sides: dict | None = None, model3d: dict | None = None, analysis=None,
+                    view_check: dict | None = None) -> dict:
+    """그림 3개(+옆모습)가 저장된 webtoon variant 캐릭터. sides = {left: bytes}. 그림 바이트는 _cf_halves(501~505)."""
+    c = fakes.charmod
+    root = f"users/tester/characters/{cid}/webtoon/v1"
+    v = c._empty_variant()
+    v.update(status="model3d", sheetKey=f"{root}/sheet.jpg", frontKey=f"{root}/front.jpg", backKey=f"{root}/back.jpg",
+             claim="tokT", claimedAt=c.now_iso(), heartbeatAt=c.now_iso())
+    images = {"front": _cf_halves(501), "back": _cf_halves(502), "sheet": _cf_halves(503)}
+    for side, data in (sides or {}).items():
+        v[f"{side}Key"] = f"{root}/{side}.jpg"
+        images[side] = data
+    if view_check is not None:
+        v["viewCheck"] = dict(view_check)
+    v["model3d"].update(model3d or {})
+    _cf_seed_char(fakes, cid, 2, version=1, status="building",
+                  analysis=json.loads(json.dumps(_CF_FID_ANALYSIS if analysis is None else analysis)),
+                  variants={"webtoon": v, "real": c._empty_variant()})
+    for name, data in images.items():
+        fakes.store.blobs[f"{root}/{name}.jpg"] = data
+        fakes.labels[data] = name
+    return images
+
+
+def check_vnew_3d_tripo() -> None:
+    """char-fidelity T2b — 캐릭터 3D 공급자 Tripo H3.1(지시서 100, requirements R8, design §19). 외부 호출은 모두 가짜다(유료 0회).
+
+    (tr-a) 설정 11개: 코드 기본값·settings.py 읽기 줄·가격 근거 주석, 틀린 값 → 기본값 + 경고 1줄씩(하위 프로세스), 맞는 값 그대로
+    (tr-b) 템플릿·base 자리(VNEW_3D_SIDE_VIEWS 바로 뒤, 표 순서)·base 값·되돌리기 주석·PARITY_ENV_KEYS·render.py 렌더 값(dev·prod),
+           오버레이 VNEW_3D_PROVIDER=hunyuan 한 줄 → 렌더 hunyuan
+    (tr-c) Tripo 본문: 4장·3장(오른쪽 없음)·단일(왼쪽 없음·옆모습 없음)·SIDE_SWAP 3경우·다시점 끔·빈 바이트 자리 0·data URI 만·
+           공통 값·키 순서·PBR·enable_safety_checker 없음·requestArn = 실제 endpoint, provider None → 설정, request_id 없음 → 502
+    (tr-d) 정사각 2048(Tripo)·64(Hunyuan MODEL_INPUT_SQUARE)·흰 패딩, endpoint·arn·조회 주소(tripo3d/h3.1)·model3d.endpoint
+           (다시점·단일, Hunyuan 은 키 없음), _3d_squares·_provider_of·_3d_provider
+    (tr-e) Tripo 응답 모양 → glbUrl(model_mesh.url)·thumbUrl(rendered_image.url), .png 아닌 그림, thumbnail 우선, 둘 다 없음 → .png 찾기
+    (tr-f) _orient_glb: 루트 회전 합성(없음·rotation+translation·matrix)·같은 루트 한 번·자식·다른 scene 그대로, +X → +Z 숫자
+           (쿼터니언·행렬·월드 점), 다시 파싱·BIN 같음·4바이트 정렬(JSON 공백·BIN 0)·그 밖 청크 그대로·scene 없음 → 0,
+           틀린 바이트 18종 → 그 자리의 ValueError
+    (tr-g) _copy_3d_result: Tripo arn → 돌린 GLB·로그 1줄, 틀린 GLB → 받은 바이트 그대로·경고 1줄·ready, Hunyuan arn·arn 없음·
+           YAW 0 → 받은 바이트 그대로·로그 0
+    (tr-h) 원장: Tripo 0.60·model = 실제 endpoint(다시점·단일), 잃은 요청 재제출도 1건씩, Hunyuan 지금대로, 원장 실패 → 경고 1줄,
+           _charge_3d 인자 그대로
+    (tr-i) 잃은 요청 재제출: 빌드는 같은 공급자·같은 본문, retry3d 이전 요청의 공급자로(Hunyuan → Tripo 설정·Tripo → Hunyuan 설정),
+           재제출 한도를 함께 셈(제출 최대 1 + MAX_RESUBMITS), 되돌린 뒤 남은 endpoint 지움
+    (tr-j) Tripo 경로: retry3d(저장된 옆모습 4장·옆모습 끔 단일·이전 Tripo 요청 완료 → 제출 0·회전), 진행 중 Hunyuan 요청(배포 전)을
+           Hunyuan 주소로 조회·완료, 이어 만들기(3D만·옆모습만 그리고 3D), 켬 빌드 두 그림체(T2 옆모습) → 다시점 4장·회전·원장
+    (tr-k) VNEW_3D_PROVIDER=hunyuan → 본문·조회·원장·저장·옮긴 파일 sha256 16개 = 시작 전(_TR_HUNYUAN_SHA)
+    (tr-l) 512Mi: 12MB GLB 회전의 메모리 최고점(tracemalloc) ≤ GLB 크기 + 1MB, 결과 크기, 걸린 시간
+    """
+    sys.path.insert(0, str(ROOT / "app"))
+    import base64 as _b64  # noqa: PLC0415
+    import importlib.util as _ilu  # noqa: PLC0415
+    import inspect as _inspect  # noqa: PLC0415
+    import io as _io  # noqa: PLC0415
+    import math as _math  # noqa: PLC0415
+    import struct as _struct  # noqa: PLC0415
+    import time as _time  # noqa: PLC0415
+    import traceback as _tb  # noqa: PLC0415
+    import tracemalloc as _tracemalloc  # noqa: PLC0415
+    import urllib.request as _ureq  # noqa: PLC0415
+
+    from PIL import Image as _Image  # noqa: PLC0415
+
+    from src.vnew import characters as charmod  # noqa: PLC0415
+    from src.vnew import settings as vset  # noqa: PLC0415
+    from src.vpoc import fal as vpoc_fal  # noqa: PLC0415
+    from src.vpoc import seedream as vpoc_seedream  # noqa: PLC0415
+
+    bad: list[str] = []
+    seen: set[str] = set()
+    report: list[str] = []
+    blocked: list[str] = []
+    queue = charmod.vpoc_settings.FAL_QUEUE_URL
+    uri = charmod._data_uri
+    common = {"texture": True, "pbr": False, "texture_quality": "detailed", "geometry_quality": "detailed",
+              "orientation": "align_image", "face_limit": 300000}
+    hunyuan_keys = ["input_image_url", "back_image_url", "enable_pbr", "face_count"]
+    watch = {"itemEn": _CF_WATCH, "labelKo": "시계", "partEn": "wrist", "side": "right"}
+    logs = _LogCapture()
+
+    def block(label: str):
+        def _blocked(*_args, **_kwargs):
+            blocked.append(label)
+            raise RuntimeError(f"가짜가 아닌 외부 호출({label})")
+        return _blocked
+
+    def run(name: str, body) -> None:
+        try:
+            body()
+            seen.add(name)
+        except Exception as exc:  # noqa: BLE001
+            bad.append(f"({name}) 검사 중 예외: {exc!r}\n{_tb.format_exc()[:2500]}")
+
+    def expect(name: str, got, want, what: str) -> None:
+        if got != want:
+            bad.append(f"({name}) {what}\n      결과 {got!r}\n      기대 {want!r}")
+
+    def size_of(data_uri: str) -> tuple:
+        with _Image.open(_io.BytesIO(_b64.b64decode(data_uri.split(",", 1)[1]))) as image:
+            return image.format, image.size, image.convert("RGB").getpixel((0, 0))
+
+    def model3d(cid: str) -> dict:
+        char, _ = charmod.load_char("tester", cid)
+        return char["variants"]["webtoon"]["model3d"]
+
+    # ------------------------------------------------------------------ (tr-a) 설정
+    def tr_a() -> None:
+        settings_text = (APP_SRC / "vnew" / "settings.py").read_text(encoding="utf-8")
+        for key in _TR_KEYS:
+            if not re.search(rf'^{key} = _checked_\w+\(\s*"{key}", ', settings_text, re.M):
+                bad.append(f"(tr-a) settings.py 에 {key} 를 검사하는 읽기(_checked_*) 줄이 없습니다")
+        if "fal 가격표(2026-10-30 Claude 확인) HD 텍스처 $0.40 + detailed 형상 $0.20 = $0.60" not in settings_text:
+            bad.append("(tr-a) VNEW_3D_TRIPO_USD 근거 주석(fal 가격표 2026-10-30)이 없습니다")
+
+        def load(extra: dict) -> tuple[dict, list[str]]:
+            env = {k: v for k, v in os.environ.items() if not k.startswith("VNEW_3D_")}
+            env.update(extra)
+            env["PYTHONIOENCODING"] = "utf-8"
+            code = ("import json, sys; sys.path.insert(0, %r); from src.vnew import settings as s; "
+                    "print(json.dumps({k: getattr(s, k) for k in %r}))") % (str(ROOT / "app"), list(_TR_KEYS))
+            result = subprocess.run([sys.executable, "-X", "utf8", "-c", code], capture_output=True, text=True, env=env,
+                                    encoding="utf-8")
+            if result.returncode != 0:
+                raise RuntimeError(f"settings 하위 프로세스 실패: {result.stderr[-800:]}")
+            warned = [line for line in result.stderr.splitlines() if "vnew.settings.invalid" in line]
+            return json.loads(result.stdout.strip().splitlines()[-1]), warned
+
+        got, warned = load({})
+        expect("tr-a", (got, warned), (_TR_DEFAULTS, []), "env 없음 → 결정 1 표 기본값·경고 0")
+        good = {"VNEW_3D_PROVIDER": " HUNYUAN ", "VNEW_3D_TRIPO_ENDPOINT": "tripo3d/h3.2/multiview-to-3d",
+                "VNEW_3D_TRIPO_SINGLE_ENDPOINT": "tripo3d/h3.2/image-to-3d", "VNEW_3D_TRIPO_FACE_LIMIT": "500000",
+                "VNEW_3D_TRIPO_TEXTURE_QUALITY": "standard", "VNEW_3D_TRIPO_GEOMETRY_QUALITY": "STANDARD",
+                "VNEW_3D_TRIPO_INPUT_SQUARE": "1536", "VNEW_3D_TRIPO_MULTIVIEW": "off", "VNEW_3D_TRIPO_YAW_DEG": "90",
+                "VNEW_3D_TRIPO_USD": "0.5", "VNEW_3D_SIDE_SWAP": "yes"}
+        got, warned = load(good)
+        expect("tr-a", (got, warned), ({
+            "VNEW_3D_PROVIDER": "hunyuan", "VNEW_3D_TRIPO_ENDPOINT": "tripo3d/h3.2/multiview-to-3d",
+            "VNEW_3D_TRIPO_SINGLE_ENDPOINT": "tripo3d/h3.2/image-to-3d", "VNEW_3D_TRIPO_FACE_LIMIT": 500000,
+            "VNEW_3D_TRIPO_TEXTURE_QUALITY": "standard", "VNEW_3D_TRIPO_GEOMETRY_QUALITY": "standard",
+            "VNEW_3D_TRIPO_INPUT_SQUARE": 1536, "VNEW_3D_TRIPO_MULTIVIEW": False, "VNEW_3D_TRIPO_YAW_DEG": 90.0,
+            "VNEW_3D_TRIPO_USD": 0.5, "VNEW_3D_SIDE_SWAP": True}, []), "맞는 값 → 그대로 읽음·경고 0")
+        wrong = {"VNEW_3D_PROVIDER": "meshy", "VNEW_3D_TRIPO_ENDPOINT": "fal-ai/hunyuan3d-v3/image-to-3d",
+                 "VNEW_3D_TRIPO_SINGLE_ENDPOINT": "tripo3d/../image-to-3d", "VNEW_3D_TRIPO_FACE_LIMIT": "3e5",
+                 "VNEW_3D_TRIPO_TEXTURE_QUALITY": "HD", "VNEW_3D_TRIPO_GEOMETRY_QUALITY": "ultra",
+                 "VNEW_3D_TRIPO_INPUT_SQUARE": "100", "VNEW_3D_TRIPO_MULTIVIEW": "maybe", "VNEW_3D_TRIPO_YAW_DEG": "nan",
+                 "VNEW_3D_TRIPO_USD": "-1", "VNEW_3D_SIDE_SWAP": "2"}
+        got, warned = load(wrong)
+        expect("tr-a", got, _TR_DEFAULTS, "틀린 값 → 기본값")
+        expect("tr-a", sorted(re.search(r"key=(\S+)", line).group(1) for line in warned), sorted(_TR_KEYS),
+               "틀린 값마다 경고 vnew.settings.invalid 1줄")
+        more = {"VNEW_3D_TRIPO_ENDPOINT": "tripo3d/h3.1", "VNEW_3D_TRIPO_SINGLE_ENDPOINT": "tripo3d/h3.1/x?y=1",
+                "VNEW_3D_TRIPO_FACE_LIMIT": "2000000", "VNEW_3D_TRIPO_INPUT_SQUARE": "8192", "VNEW_3D_TRIPO_YAW_DEG": "720",
+                "VNEW_3D_TRIPO_USD": "inf"}
+        got, warned = load(more)
+        expect("tr-a", ({k: got[k] for k in more}, len(warned)), ({k: _TR_DEFAULTS[k] for k in more}, len(more)),
+               "두 마디 endpoint·쿼리 글자·범위 밖 숫자·inf → 기본값 + 경고")
+        expect("tr-a", [vset._checked_choice("TR_UNSET_KEY", "tripo", ("tripo",)), vset._checked_bool("TR_UNSET_KEY", True)],  # noqa: SLF001
+               ["tripo", True], "설정 없음 → 기본값(경고 없음)")
+        # 같은 읽기 함수를 이 프로세스에서도 부른다(값마다 결과·경고 수).
+        tmp = "VNEW_TR_TMP_KEY"
+        saved_env = os.environ.get(tmp)
+        table = [
+            (vset._checked_choice, ("tripo", ("tripo", "hunyuan")),  # noqa: SLF001
+             [("", "tripo", 0), (" Hunyuan ", "hunyuan", 0), ("meshy", "tripo", 1)]),
+            (vset._checked_int, (300000, 10000, 1000000),  # noqa: SLF001
+             [("", 300000, 0), ("500000", 500000, 0), ("abc", 300000, 1), ("1", 300000, 1), ("1000001", 300000, 1)]),
+            (vset._checked_float, (-90.0, -360.0, 360.0),  # noqa: SLF001
+             [("", -90.0, 0), ("90", 90.0, 0), ("x", -90.0, 1), ("nan", -90.0, 1), ("-inf", -90.0, 1), ("361", -90.0, 1)]),
+            (vset._checked_bool, (True,), [("", True, 0), ("off", False, 0), ("YES", True, 0), ("0", False, 0), ("maybe", True, 1)]),  # noqa: SLF001
+            (vset._checked_tripo_endpoint, (_TR_SINGLE,),  # noqa: SLF001
+             [("", _TR_SINGLE, 0), ("tripo3d/h3.2/image-to-3d", "tripo3d/h3.2/image-to-3d", 0), ("fal-ai/x/y", _TR_SINGLE, 1),
+              ("tripo3d/H3.1/x", _TR_SINGLE, 1)]),
+        ]
+        try:
+            for fn, args, rows in table:
+                for raw, want, warns in rows:
+                    os.environ[tmp] = raw
+                    logs.clear()
+                    got_value = fn(tmp, *args)
+                    expect("tr-a", (got_value, len(logs.messages("vnew.settings.invalid", logging.WARNING))), (want, warns),
+                           f"{fn.__name__}({raw!r})")
+        finally:
+            if saved_env is None:
+                os.environ.pop(tmp, None)
+            else:
+                os.environ[tmp] = saved_env
+
+    # ------------------------------------------------------------------ (tr-b) 템플릿·base 자리·렌더
+    def tr_b() -> None:
+        template_path = ROOT / "k8s" / "workloads.yaml.tmpl"
+        example_path = ROOT / "deploy" / "config.env.example"
+        template = template_path.read_text(encoding="utf-8")
+        base_env = example_path.read_text(encoding="utf-8")
+        names = re.findall(r"^\s*-\s+name:\s+(\S+)\s*$", template, re.M)
+        at = names.index("VNEW_3D_SIDE_VIEWS") if "VNEW_3D_SIDE_VIEWS" in names else -1
+        expect("tr-b", names[at + 1: at + 1 + len(_TR_KEYS)] if at >= 0 else [], list(_TR_KEYS),
+               "템플릿 자리(VNEW_3D_SIDE_VIEWS 바로 뒤, 표 순서)")
+        for key in _TR_KEYS:
+            if not re.search(r"^\s*-\s+name:\s+" + key + r"\s*\n\s*value:\s*\"\$\{" + key + r"\}\"\s*$", template, re.M):
+                bad.append(f"(tr-b) 템플릿에 '- name: {key}' + 'value: \"${{{key}}}\"' 가 없습니다")
+        base_keys = re.findall(r"^([A-Z0-9_]+)=", base_env, re.M)
+        at = base_keys.index("VNEW_3D_SIDE_VIEWS") if "VNEW_3D_SIDE_VIEWS" in base_keys else -1
+        expect("tr-b", base_keys[at + 1: at + 1 + len(_TR_KEYS)] if at >= 0 else [], list(_TR_KEYS), "base 자리")
+        expect("tr-b", {k: re.findall(rf"^{k}=(.*)$", base_env, re.M) for k in _TR_KEYS},
+               {k: [v] for k, v in _TR_BASE_TEXT.items()}, "base 값 = 결정 1 표 기본값(한 번씩)")
+        for text in ("되돌리기: config.<target>.env 에 VNEW_3D_PROVIDER=hunyuan", "fal 가격표 2026-10-30",
+                     "config.<target>.env 에 VNEW_3D_SIDE_SWAP=true"):
+            if text not in base_env:
+                bad.append(f"(tr-b) config.env.example 에 주석 {text!r} 가 없습니다")
+        missing = [k for k in _TR_KEYS if k not in PARITY_ENV_KEYS]
+        if missing:
+            bad.append(f"(tr-b) PARITY_ENV_KEYS 에 없는 키(rw-a~c 가 보지 않음): {missing}")
+        spec = _ilu.spec_from_file_location("_tr_deploy_render", ROOT / "deploy" / "render.py")
+        render = _ilu.module_from_spec(spec)
+        spec.loader.exec_module(render)  # type: ignore[union-attr]
+        base = render.load_config(example_path)
+        for target in ("prod", "dev"):
+            overlay = render.load_config(ROOT / "deploy" / f"config.{target}.env")
+            for extra, want in (({}, _TR_BASE_TEXT), ({"VNEW_3D_PROVIDER": "hunyuan"}, dict(_TR_BASE_TEXT, VNEW_3D_PROVIDER="hunyuan"))):
+                values = render.add_derived({**base, **overlay, **extra})
+                text = render.render_text(template, values, str(template_path.relative_to(ROOT)))
+                expect("tr-b", {k: _rendered_env_values(text, k) for k in _TR_KEYS}, {k: [v] for k, v in want.items()},
+                       f"{target}{' + VNEW_3D_PROVIDER=hunyuan' if extra else ''} 렌더 값")
+
+    # ------------------------------------------------------------------ (tr-c) Tripo 본문
+    def tr_c() -> None:
+        F, B, L, R = b"tr-front", b"tr-back", b"tr-left", b"tr-right"  # noqa: N806
+        multi = lambda *views: {"image_urls": [uri(v) for v in views], **common}  # noqa: E731
+        single = {"image_url": uri(F), **common}
+        cases = [
+            ("4장", {}, (L, R), _TR_MULTI, multi(F, L, B, R)),
+            ("3장(오른쪽 없음)", {}, (L, None), _TR_MULTI, multi(F, L, B)),
+            ("단일(왼쪽 없음, 오른쪽만)", {}, (None, R), _TR_SINGLE, single),
+            ("단일(옆모습 없음)", {}, (None, None), _TR_SINGLE, single),
+            ("SIDE_SWAP 4장", {"VNEW_3D_SIDE_SWAP": True}, (L, R), _TR_MULTI, multi(F, R, B, L)),
+            ("SIDE_SWAP 오른쪽만 → 다시점 3장", {"VNEW_3D_SIDE_SWAP": True}, (None, R), _TR_MULTI, multi(F, R, B)),
+            ("SIDE_SWAP 왼쪽만 → 단일", {"VNEW_3D_SIDE_SWAP": True}, (L, None), _TR_SINGLE, single),
+            ("다시점 끔", {"VNEW_3D_TRIPO_MULTIVIEW": False}, (L, R), _TR_SINGLE, single),
+            ("빈 바이트 왼쪽·오른쪽", {}, (b"", b""), _TR_SINGLE, single),
+            ("빈 바이트 오른쪽", {}, (L, b""), _TR_MULTI, multi(F, L, B)),
+            ("PBR 켬", {"HUNYUAN_ENABLE_PBR": True}, (L, R), _TR_MULTI, dict(multi(F, L, B, R), pbr=True)),
+        ]
+        with _TrFakes(charmod) as fakes:
+            for label, pins, (left, right), endpoint, body in cases:
+                with _pin_vnew(**pins):
+                    arn = charmod.submit_3d(F, B, left_square=left, right_square=right, provider="tripo")
+                method, url, sent = fakes.fal[-1]
+                expect("tr-c", (method, url, sent, list(sent)), ("POST", f"{queue}/{endpoint}", body, list(body)),
+                       f"{label}: endpoint·본문·키 순서")
+                expect("tr-c", arn, f"{charmod.ARN_PREFIX}{endpoint}/cfreq{len(fakes.fal)}", f"{label}: requestArn = 실제 endpoint")
+                images = sent.get("image_urls") if "image_urls" in sent else [sent.get("image_url")]
+                if any(not isinstance(u, str) or not u.startswith("data:image/jpeg;base64,") or len(u) <= 23 for u in images):
+                    bad.append(f"(tr-c) {label}: 빈 자리·None·data URI 가 아닌 그림이 있습니다: {images}")
+                dumped = json.dumps(sent)
+                if "http" in dumped or "X-Amz" in dumped or "enable_safety_checker" in sent:
+                    bad.append(f"(tr-c) {label}: 본문에 URL·서명·enable_safety_checker 가 있습니다")
+            expect("tr-c", charmod._tripo_request(F, B, L, R), (_TR_MULTI, multi(F, L, B, R)), "_tripo_request 순수 함수(같은 입력 같은 값)")
+            for provider, want_url, want_keys in (("hunyuan", f"{queue}/{charmod.settings.HUNYUAN_ENDPOINT}", hunyuan_keys),
+                                                  ("tripo", f"{queue}/{_TR_SINGLE}", list(single))):
+                with _pin_vnew(VNEW_3D_PROVIDER=provider):
+                    charmod.submit_3d(F, B)
+                expect("tr-c", (fakes.fal[-1][1], list(fakes.fal[-1][2])), (want_url, want_keys), f"provider None → 설정 {provider}")
+            with _pin_vnew(VNEW_3D_PROVIDER="weird"):
+                expect("tr-c", charmod._3d_provider(), "tripo", "모르는 설정 값 → tripo(설정 모듈이 이미 기본값으로 바꾼다)")
+            plain_fal = charmod._fal_request
+            charmod._fal_request = lambda method, url, payload=None: {"status": "IN_QUEUE"}
+            try:
+                charmod.submit_3d(F, B, provider="tripo")
+                bad.append("(tr-c) request_id 없는 응답인데 예외가 없습니다")
+            except Exception as exc:  # noqa: BLE001
+                expect("tr-c", (getattr(exc, "kind", ""), getattr(exc, "status", None)), ("NoRequestId", 502),
+                       "request_id 없는 응답 → NoRequestId 502(Hunyuan 과 같은 오류)")
+            finally:
+                charmod._fal_request = plain_fal
+        report.append(f"tr-c: 본문 {len(cases)}경우 · 빈 자리 0 · data URI 만 · enable_safety_checker 없음")
+
+    # ------------------------------------------------------------------ (tr-d) 정사각·endpoint·arn·조회 주소
+    def tr_d() -> None:
+        front, back, left, right = (_cf_halves(410 + i, 36, 64) for i in range(4))
+        with _pin_vnew(VNEW_3D_TRIPO_INPUT_SQUARE=2048), _TrFakes(charmod) as fakes:
+            _cf_seed_char(fakes, "char_tr_d", 1, version=1, status="building")
+            charmod._build_3d_from_images("tester", "char_tr_d", "webtoon", 1, front, back, "", left=left, right=right)
+            (url, body), = fakes.posts()
+            expect("tr-d", [size_of(u) for u in body["image_urls"]], [("JPEG", (2048, 2048), (255, 255, 255))] * 4,
+                   "Tripo 정사각 2048·JPEG·흰 패딩(4장)")
+            expect("tr-d", body["image_urls"], [uri(charmod._square_pad(x, 2048)) for x in (front, left, back, right)],
+                   "image_urls = [정면, 왼쪽, 후면, 오른쪽] 정사각")
+            m3d = model3d("char_tr_d")
+            expect("tr-d", (url, m3d["requestArn"], m3d.get("endpoint"), m3d["status"], fakes.gets()),
+                   (f"{queue}/{_TR_MULTI}", f"fal/requests/{_TR_MULTI}/cfreq1", _TR_MULTI, "ready",
+                    [f"{queue}/tripo3d/h3.1/requests/cfreq1/status", f"{queue}/tripo3d/h3.1/requests/cfreq1"]),
+                   "다시점 endpoint·arn·model3d.endpoint·조회 주소(앱 ID tripo3d/h3.1)")
+        with _pin_vnew(**_TR_PINS), _TrFakes(charmod) as fakes:
+            _cf_seed_char(fakes, "char_tr_d2", 1, version=1, status="building")
+            charmod._build_3d_from_images("tester", "char_tr_d2", "webtoon", 1, front, back, "")
+            (url, body), = fakes.posts()
+            m3d = model3d("char_tr_d2")
+            expect("tr-d", (url, list(body), size_of(body["image_url"])[1], m3d["requestArn"], m3d.get("endpoint"), fakes.gets()),
+                   (f"{queue}/{_TR_SINGLE}", ["image_url"] + list(common), (96, 96), f"fal/requests/{_TR_SINGLE}/cfreq1", _TR_SINGLE,
+                    [f"{queue}/tripo3d/h3.1/requests/cfreq1/status", f"{queue}/tripo3d/h3.1/requests/cfreq1"]),
+                   "단일 endpoint·arn·조회 주소(같은 앱 ID)·model3d.endpoint")
+        with _pin_vnew(**dict(_TR_PINS, VNEW_3D_PROVIDER="hunyuan")), _TrFakes(charmod) as fakes:
+            _cf_seed_char(fakes, "char_tr_d3", 1, version=1, status="building")
+            charmod._build_3d_from_images("tester", "char_tr_d3", "webtoon", 1, front, back, "", left=left, right=right)
+            (url, body), = fakes.posts()
+            expect("tr-d", (url, [size_of(body[k])[1] for k in ("input_image_url", "left_image_url")], "endpoint" in model3d("char_tr_d3")),
+                   (f"{queue}/fal-ai/hunyuan3d-v3/image-to-3d", [(64, 64)] * 2, False),
+                   "Hunyuan 정사각 = MODEL_INPUT_SQUARE·model3d.endpoint 없음")
+        with _pin_vnew(**_TR_PINS):
+            squares = charmod._3d_squares(front, back, None, right, provider="tripo")
+            hsq = charmod._3d_squares(front, back, provider="hunyuan")
+        expect("tr-d", ([_Image.open(_io.BytesIO(s)).size if s else s for s in squares], [_Image.open(_io.BytesIO(s)).size if s else s for s in hsq]),
+               ([(96, 96), (96, 96), None, (96, 96)], [(64, 64), (64, 64), None, None]), "_3d_squares 공급자별 한 변·없는 옆모습 None")
+        expect("tr-d", [charmod._provider_of(a) for a in (f"fal/requests/{_TR_SINGLE}/x", f"fal/requests/{_TR_MULTI}/x",
+                                                          "fal/requests/fal-ai/hunyuan3d-v3/image-to-3d/x", "", None, "tripo3d/h3.1/x")],
+               ["tripo", "tripo", "hunyuan", "hunyuan", "hunyuan", "hunyuan"], "_provider_of(arn endpoint)")
+        expect("tr-d", [charmod._queue_app(_TR_MULTI), charmod._queue_app(_TR_SINGLE)], ["tripo3d/h3.1"] * 2, "_queue_app")
+
+    # ------------------------------------------------------------------ (tr-e) Tripo 응답 → glbUrl·thumbUrl
+    def tr_e() -> None:
+        with _TrFakes(charmod) as fakes:
+            arn = f"fal/requests/{_TR_MULTI}/req_e"
+            expect("tr-e", charmod.poll_3d(arn), {"status": "Completed", "glbUrl": _TR_GLB_URL, "thumbUrl": _TR_RENDER_URL},
+                   "Tripo 실제 응답 모양 → model_mesh.url·rendered_image.url")
+            fakes.tripo_response = dict(_tr_tripo_response(), rendered_image={"url": "https://v3.fal.media/files/tr/preview.webp"})
+            expect("tr-e", charmod.poll_3d(arn)["thumbUrl"], "https://v3.fal.media/files/tr/preview.webp",
+                   "rendered_image.url 은 .png 가 아니어도 쓴다")
+            fakes.tripo_response = dict(_tr_tripo_response(), thumbnail={"url": "https://v3.fal.media/files/tr/thumb.png"})
+            expect("tr-e", charmod.poll_3d(arn)["thumbUrl"], "https://v3.fal.media/files/tr/thumb.png", "thumbnail.url 이 있으면 우선")
+            fakes.tripo_response = {k: v for k, v in _tr_tripo_response().items() if k != "rendered_image"}
+            fakes.tripo_response["extra"] = {"preview": "https://v3.fal.media/files/tr/other.png"}
+            expect("tr-e", charmod.poll_3d(arn)["thumbUrl"], "https://v3.fal.media/files/tr/other.png", "둘 다 없으면 지금처럼 .png 찾기")
+            expect("tr-e", charmod.poll_3d("fal/requests/fal-ai/hunyuan3d-v3/image-to-3d/req_h"),
+                   {"status": "Completed", "glbUrl": "https://fal.media/files/cf/model.glb", "thumbUrl": "https://fal.media/files/cf/thumb.png"},
+                   "Hunyuan 응답 모양 그대로")
+
+    # ------------------------------------------------------------------ (tr-f) _orient_glb
+    def tr_f() -> None:
+        original = _tr_glb(extra=((0x12345678, b"ext!"),))
+        out = charmod._orient_glb(original, -90.0)
+        gltf, chunks, total = _tr_parse_glb(out)
+        _orig_gltf, orig_chunks, _ = _tr_parse_glb(original)
+        expect("tr-f", (total, len(out), total % 4, [length % 4 for _k, length, _d in chunks], [k for k, _l, _d in chunks]),
+               (len(out), len(out), 0, [0, 0, 0], [0x4E4F534A, 0x004E4942, 0x12345678]), "다시 파싱되는 GLB·헤더 길이·4바이트 정렬·청크 순서")
+        json_chunk = chunks[0][2]
+        expect("tr-f", (json_chunk.rstrip(b" ") == json_chunk.rstrip(b" \x00"), json.loads(json_chunk) == gltf),
+               (True, True), "JSON 청크는 공백으로 채운다")
+        expect("tr-f", (chunks[1][2], chunks[2][2]), (orig_chunks[1][2] + b"\x00\x00", orig_chunks[2][2]),
+               "BIN 바이트 그대로 + 0 채움(10 → 12)·그 밖 청크 그대로")
+        half = _math.sqrt(0.5)
+        nodes = gltf["nodes"]
+        if not _tr_close(nodes[0]["rotation"], [0.0, -half, 0.0, half]):
+            bad.append(f"(tr-f) 회전 없던 루트 → q_yaw (0, -0.7071, 0, 0.7071) 이 아닙니다: {nodes[0].get('rotation')}")
+        expect("tr-f", [_tr_close(_tr_qrot(nodes[0]["rotation"], (1, 0, 0)), (0, 0, 1)),
+                        _tr_close(_tr_qrot(nodes[1]["rotation"], (0, -1, 0)), (0, 0, 1)),
+                        _tr_close(nodes[1]["translation"], [-3.0, 2.0, 1.0]), nodes[1]["scale"], nodes[1]["children"]],
+               [True, True, True, [2.0, 2.0, 2.0], [3]],
+               "+X → +Z: 루트(회전 없음)·rotation 합성(R_z90 이 +X 로 보낸 점 → +Z)·translation = R·t·scale·children 그대로")
+        # 월드 점: 새 TRS 로 옮긴 점 = R_y(-90)·(옛 TRS 로 옮긴 점).
+        p = (1.0, 1.0, 1.0)
+        old_world = [a + b for a, b in zip(_tr_qrot([0.0, 0.0, half, half], tuple(2 * x for x in p)), (1.0, 2.0, 3.0))]
+        new_world = [a + b for a, b in zip(_tr_qrot(nodes[1]["rotation"], tuple(2 * x for x in p)), nodes[1]["translation"])]
+        expect("tr-f", _tr_close(new_world, [-old_world[2], old_world[1], old_world[0]]), True, "TRS 노드 월드 점 = R·(옛 월드 점)")
+        m = nodes[2]["matrix"]
+        point = [sum(m[c * 4 + r] * v for c, v in enumerate((1.0, 0.0, 0.0, 1.0))) for r in range(4)]
+        expect("tr-f", (m, point), ([0, 0, 1, 0, 0, 1, 0, 0, -1, 0, 0, 0, 0, 0, 5, 1], [0, 0, 6, 1]),
+               "matrix 루트: R·M, 점 (1,0,0) → (0,0,6)")
+        expect("tr-f", (nodes[3], nodes[4], {k: v for k, v in gltf.items() if k != "nodes"}),
+               (_tr_gltf()["nodes"][3], _tr_gltf()["nodes"][4], {k: v for k, v in _tr_gltf().items() if k != "nodes"}),
+               "자식·다른 scene 노드·그 밖 JSON 그대로(루트 0 은 한 번만 돌림)")
+        no_scene = {k: v for k, v in _tr_gltf().items() if k != "scene"}
+        g2, _c2, _t2 = _tr_parse_glb(charmod._orient_glb(_tr_glb(no_scene, bin_bytes=None), -90.0))
+        expect("tr-f", (_tr_close(g2["nodes"][0]["rotation"], [0.0, -half, 0.0, half]), g2["nodes"][4], len(_c2)),
+               (True, {"name": "other-scene"}, 1), "scene 키 없음 → scenes[0]·BIN 없는 GLB")
+        g3, _c3, _t3 = _tr_parse_glb(charmod._orient_glb(_tr_glb(), 180.0))
+        expect("tr-f", _tr_close(_tr_qrot(g3["nodes"][0]["rotation"], (1, 0, 0)), (-1, 0, 0)), True, "180° 도 숫자로 맞다")
+        valid = _tr_glb()
+        bads = {
+            "빈 바이트": b"",
+            "magic 아님": b"GLTF" + valid[4:],
+            "version 1": valid[:4] + _struct.pack("<I", 1) + valid[8:],
+            "헤더 길이 다름": valid + b"\x00\x00\x00\x00",
+            "청크 머리 잘림": valid[:8] + _struct.pack("<I", len(valid) + 4) + valid[12:] + b"\x00\x00\x00\x00",
+            "청크 잘림": _struct.pack("<4sII", b"glTF", 2, 24) + _struct.pack("<II", 64, 0x4E4F534A) + b"{}  ",
+            "첫 청크 BIN": _tr_glb(first_kind=0x004E4942),
+            "JSON 아님": _tr_glb(json_bytes=b"{not json"),
+            "깊은 JSON": _tr_glb(json_bytes=b"[" * 100000 + b"]" * 100000),
+            "scenes 없음": _tr_glb({"nodes": [{}]}),
+            "scene 범위 밖": _tr_glb(dict(_tr_gltf(), scene=5)),
+            "scene bool": _tr_glb(dict(_tr_gltf(), scene=True)),
+            "루트 없음": _tr_glb(dict(_tr_gltf(), scenes=[{"nodes": []}])),
+            "루트 범위 밖": _tr_glb(dict(_tr_gltf(), scenes=[{"nodes": [9]}])),
+            "루트가 객체 아님": _tr_glb(dict(_tr_gltf(), nodes=[5], scenes=[{"nodes": [0]}])),
+            "rotation 3개": _tr_glb(dict(_tr_gltf(), nodes=[{"rotation": [0, 0, 1]}], scenes=[{"nodes": [0]}])),
+            "matrix 글자": _tr_glb(dict(_tr_gltf(), nodes=[{"matrix": ["1"] * 16}], scenes=[{"nodes": [0]}])),
+            "글자열 입력": "glTF",
+        }
+        raised = {}
+        for label, data in bads.items():
+            try:
+                charmod._orient_glb(data, -90.0)
+                raised[label] = "돌려줌"
+            except ValueError as exc:
+                raised[label] = str(exc)
+            except Exception as exc:  # noqa: BLE001
+                raised[label] = type(exc).__name__
+        want_messages = {
+            "빈 바이트": "not a GLB (magic)", "magic 아님": "not a GLB (magic)", "version 1": "bad GLB header version=1",
+            "헤더 길이 다름": "bad GLB header version=2 length=", "청크 머리 잘림": "truncated GLB chunk header",
+            "청크 잘림": "truncated GLB chunk", "첫 청크 BIN": "first GLB chunk is not JSON", "JSON 아님": "Expecting",
+            "깊은 JSON": "bad GLB: RecursionError",
+            "scenes 없음": "GLB has no scenes/nodes", "scene 범위 밖": "GLB default scene out of range",
+            "scene bool": "GLB has no scenes/nodes", "루트 없음": "GLB default scene has no root nodes",
+            "루트 범위 밖": "GLB root node out of range", "루트가 객체 아님": "GLB root node is not an object",
+            "rotation 3개": "rotation must be 4 numbers", "matrix 글자": "matrix has a non-number", "글자열 입력": "bad GLB: TypeError",
+        }
+        got_messages = {label: want_messages[label] if raised[label].startswith(want_messages[label])
+                        and (label != "청크 잘림" or raised[label] == want_messages[label]) else raised[label] for label in bads}
+        expect("tr-f", got_messages, want_messages, "틀린 바이트 → 그 자리의 ValueError(호출한 쪽이 원본 저장)")
+        report.append(f"tr-f: 루트 3종 회전·+X→+Z·BIN 같음·정렬 · 틀린 바이트 {len(bads)}종 ValueError")
+
+    # ------------------------------------------------------------------ (tr-g) _copy_3d_result 회전·실패 원본
+    def tr_g() -> None:
+        state = {"status": "Completed", "glbUrl": _TR_GLB_URL, "thumbUrl": _TR_RENDER_URL}
+        cases = [
+            ("Tripo", {}, f"fal/requests/{_TR_MULTI}/r1", None, "oriented", 1, 0),
+            ("Tripo 틀린 GLB", {}, f"fal/requests/{_TR_SINGLE}/r2", b"glTF-cf", "raw", 0, 1),
+            ("Hunyuan", {}, "fal/requests/fal-ai/hunyuan3d-v3/image-to-3d/r3", None, "raw", 0, 0),
+            ("arn 없음", {}, "", None, "raw", 0, 0),
+            ("YAW 0", {"VNEW_3D_TRIPO_YAW_DEG": 0.0}, f"fal/requests/{_TR_MULTI}/r4", None, "raw", 0, 0),
+        ]
+        for n, (label, pins, arn, glb, want, infos, warns) in enumerate(cases):
+            with _pin_vnew(**dict(_TR_PINS, **pins)), _TrFakes(charmod) as fakes:
+                if glb is not None:
+                    fakes.glb = glb
+                cid = f"char_tr_g{n}"
+                _cf_seed_char(fakes, cid, 1, version=1, status="building")
+                logs.clear()
+                charmod._copy_3d_result("tester", cid, "webtoon", 1, state, request_arn=arn)
+                stored = fakes.store.blobs[charmod.model_glb_key("tester", cid, "webtoon", 1)]
+                expected = charmod._orient_glb(fakes.glb, -90.0) if want == "oriented" else fakes.glb
+                m3d = model3d(cid)
+                got_logs = (len(logs.messages("vnew.3d.oriented", logging.INFO)), len(logs.messages("vnew.3d.orient_failed", logging.WARNING)))
+                expect("tr-g", (stored == expected, m3d["status"], m3d["thumbKey"].endswith("/thumb.png"), got_logs),
+                       (True, "ready", True, (infos, warns)), f"{label}: 저장 GLB·ready·썸네일·로그")
+        failed = [m for m in logs.messages("vnew.3d.orient_failed")]
+        if any("glTF-cf" in m or "http" in m for m in failed):
+            bad.append("(tr-g) 회전 실패 로그에 받은 바이트·URL 이 들어갑니다")
+
+    # ------------------------------------------------------------------ (tr-h) 원장
+    def tr_h() -> None:
+        front, back, left = _cf_halves(420), _cf_halves(421), _cf_halves(422)
+        with _pin_vnew(**_TR_PINS), _TrFakes(charmod) as fakes:
+            _cf_seed_char(fakes, "char_tr_h1", 1, version=1, status="building")
+            charmod._build_3d_from_images("tester", "char_tr_h1", "webtoon", 1, front, back, "", left=left)
+            _cf_seed_char(fakes, "char_tr_h2", 1, version=1, status="building")
+            charmod._build_3d_from_images("tester", "char_tr_h2", "webtoon", 1, front, back, "")
+            fakes.lost = 8
+            _cf_seed_char(fakes, "char_tr_h3", 1, version=1, status="building")
+            charmod._build_3d_from_images("tester", "char_tr_h3", "webtoon", 1, front, back, "", left=left)
+            expect("tr-h", fakes.charges, [["model3d", _TR_MULTI, 0.60, 1, "webtoon-3d"], ["model3d", _TR_SINGLE, 0.60, 1, "webtoon-3d"],
+                                           ["model3d", _TR_MULTI, 0.60, 1, "webtoon-3d"], ["model3d", _TR_MULTI, 0.60, 1, "webtoon-3d"]],
+                   "Tripo 원장 0.60·model = 실제 endpoint(다시점·단일)·재제출도 1건")
+        with _pin_vnew(**dict(_TR_PINS, VNEW_3D_PROVIDER="hunyuan")), _TrFakes(charmod) as fakes:
+            _cf_seed_char(fakes, "char_tr_h4", 1, version=1, status="building")
+            charmod._build_3d_from_images("tester", "char_tr_h4", "webtoon", 1, front, back, "", left=left)
+            expect("tr-h", fakes.charges, [["model3d", "fal-ai/hunyuan3d-v3/image-to-3d", 0.675, 1, "webtoon-3d"]], "Hunyuan 원장 지금대로")
+            charmod.vpoc_ledger.charge = block("ledger-down")
+            logs.clear()
+            charmod._charge_3d_request("tester", "char_tr_h4", "webtoon", f"fal/requests/{_TR_MULTI}/x")
+            expect("tr-h", len(logs.messages("vnew.ledger.3d_failed", logging.WARNING)), 1, "Tripo 원장 실패 → 경고 1줄·빌드 계속")
+            blocked.remove("ledger-down")
+        expect("tr-h", list(_inspect.signature(charmod._charge_3d).parameters), ["owner", "char_id", "variant"],
+               "_charge_3d 인자 그대로(기존 검사 (v) 의 원장 세기 래퍼)")
+
+    # ------------------------------------------------------------------ (tr-i) 잃은 요청 재제출 같은 공급자·그림
+    def tr_i() -> None:
+        front, back, left, right = _cf_halves(430), _cf_halves(431), _cf_halves(432), _cf_halves(433)
+        with _pin_vnew(**_TR_PINS), _TrFakes(charmod) as fakes:
+            fakes.lost = 8
+            _cf_seed_char(fakes, "char_tr_i1", 1, version=1, status="building")
+            charmod._build_3d_from_images("tester", "char_tr_i1", "webtoon", 1, front, back, "", left=left, right=right)
+            posts = fakes.posts()
+            m3d = model3d("char_tr_i1")
+            expect("tr-i", (len(posts), posts[0] == posts[1] if len(posts) == 2 else None, m3d["resubmits"], m3d["requestArn"],
+                            m3d.get("endpoint"), m3d["status"]),
+                   (2, True, 1, f"fal/requests/{_TR_MULTI}/cfreq10", _TR_MULTI, "ready"), "빌드 재제출 = 같은 endpoint·같은 본문(4장)")
+        # retry3d: 이전 요청이 Hunyuan(배포 전), 설정 Tripo → 잃은 요청은 Hunyuan 으로 같은 그림을 다시 낸다.
+        hunyuan_arn = "fal/requests/fal-ai/hunyuan3d-v3/image-to-3d/req_prior"
+        for label, pins, prior, want_url, want_keys, rotated, want_charge in (
+            ("Hunyuan 이전 요청·Tripo 설정", {}, hunyuan_arn, f"{queue}/fal-ai/hunyuan3d-v3/image-to-3d",
+             hunyuan_keys + ["left_image_url", "right_image_url"], False, ["model3d", "fal-ai/hunyuan3d-v3/image-to-3d", 0.675, 1, "webtoon-3d"]),
+            ("Tripo 이전 요청·Hunyuan 설정", {"VNEW_3D_PROVIDER": "hunyuan"}, f"fal/requests/{_TR_MULTI}/req_prior", f"{queue}/{_TR_MULTI}",
+             ["image_urls"] + list(common), True, ["model3d", _TR_MULTI, 0.60, 1, "webtoon-3d"]),
+        ):
+            with _pin_vnew(**dict(_TR_PINS, **pins)), _TrFakes(charmod) as fakes:
+                images = _tr_seed_images(fakes, "char_tr_i2", sides={"left": left, "right": right},
+                                         model3d={"status": "submitted", "requestArn": prior})
+                fakes.lost = 8
+                charmod.run_retry3d("tester", "char_tr_i2", "webtoon", 1, "")
+                posts = fakes.posts()
+                m3d = model3d("char_tr_i2")
+                stored = fakes.store.blobs.get(charmod.model_glb_key("tester", "char_tr_i2", "webtoon", 1))
+                side = 96 if rotated else 64
+                sq = [uri(charmod._square_pad(images[k], side)) for k in ("front", "left", "back", "right")]
+                body = posts[0][1] if posts else {}
+                sent = body.get("image_urls") or [body.get(k) for k in ("input_image_url", "left_image_url", "back_image_url", "right_image_url")]
+                expect("tr-i", (len(posts), posts[0][0] if posts else "", list(body), sent == sq, m3d["status"], m3d.get("endpoint"),
+                                stored == (charmod._orient_glb(fakes.glb, -90.0) if rotated else fakes.glb), fakes.charges),
+                       (1, want_url, want_keys, True, "ready", _TR_MULTI if rotated else None, True, [want_charge]),
+                       f"{label}: 재제출 = 이전 요청 공급자·같은 그림(정사각 그 공급자 규칙)·회전·endpoint·원장")
+        # 재제출 한도는 두 콜백이 함께 센다: 이전(Hunyuan) 재제출 2 + 새 제출(Tripo) 1 = 3건(T2 와 같은 상한).
+        with _pin_vnew(**_TR_PINS), _TrFakes(charmod) as fakes:
+            _tr_seed_images(fakes, "char_tr_i3", sides={"left": left}, model3d={"status": "submitted", "requestArn": hunyuan_arn})
+            fakes.lost_forever = True
+            charmod.run_retry3d("tester", "char_tr_i3", "webtoon", 1, "")
+            char, _ = charmod.load_char("tester", "char_tr_i3")
+            expect("tr-i", ([u for u, _b in fakes.posts()], [c[1] for c in fakes.charges], char["variants"]["webtoon"]["status"]),
+                   ([f"{queue}/fal-ai/hunyuan3d-v3/image-to-3d"] * 2 + [f"{queue}/{_TR_MULTI}"],
+                    ["fal-ai/hunyuan3d-v3/image-to-3d"] * 2 + [_TR_MULTI], "failed"),
+                   "재제출 한도 함께 셈(Hunyuan 2 + Tripo 새 제출 1, 그 뒤 재제출 0)")
+        # 되돌린 뒤: 남은 Tripo endpoint 는 새 Hunyuan 요청에서 지운다.
+        with _pin_vnew(**dict(_TR_PINS, VNEW_3D_PROVIDER="hunyuan")), _TrFakes(charmod) as fakes:
+            _tr_seed_images(fakes, "char_tr_i4", model3d={"status": "failed", "requestArn": "", "endpoint": _TR_MULTI})
+            charmod.run_retry3d("tester", "char_tr_i4", "webtoon", 1, "")
+            m3d = model3d("char_tr_i4")
+            expect("tr-i", ("endpoint" in m3d, m3d["requestArn"].startswith("fal/requests/fal-ai/hunyuan3d-v3/"), m3d["status"]),
+                   (False, True, "ready"), "Hunyuan 으로 되돌린 뒤 새 요청 → 남은 endpoint 지움")
+
+    # ------------------------------------------------------------------ (tr-j) retry3d·이어 만들기·켬 빌드 Tripo 경로
+    def tr_j() -> None:
+        left, right = _cf_halves(440), _cf_halves(441)
+        with _pin_vnew(**_TR_PINS), _TrFakes(charmod) as fakes:
+            images = _tr_seed_images(fakes, "char_tr_j1", sides={"left": left, "right": right})
+            charmod.run_retry3d("tester", "char_tr_j1", "webtoon", 1, "")
+            (url, body), = fakes.posts()
+            m3d = model3d("char_tr_j1")
+            stored = fakes.store.blobs[charmod.model_glb_key("tester", "char_tr_j1", "webtoon", 1)]
+            expect("tr-j", (url, body["image_urls"], m3d.get("endpoint"), m3d["status"], stored == charmod._orient_glb(fakes.glb, -90.0),
+                            fakes.charges),
+                   (f"{queue}/{_TR_MULTI}", [uri(charmod._square_pad(images[k], 96)) for k in ("front", "left", "back", "right")],
+                    _TR_MULTI, "ready", True, [["model3d", _TR_MULTI, 0.60, 1, "webtoon-3d"]]),
+                   "retry3d: 저장된 옆모습 → 다시점 4장·회전·원장")
+        with _pin_vnew(**dict(_TR_PINS, VNEW_3D_SIDE_VIEWS=False)), _TrFakes(charmod) as fakes:
+            _tr_seed_images(fakes, "char_tr_j2", sides={"left": left, "right": right})
+            charmod.run_retry3d("tester", "char_tr_j2", "webtoon", 1, "")
+            expect("tr-j", [(u, list(b)) for u, b in fakes.posts()], [(f"{queue}/{_TR_SINGLE}", ["image_url"] + list(common))],
+                   "retry3d 옆모습 끔 → 단일(정면만)")
+        with _pin_vnew(**_TR_PINS), _TrFakes(charmod) as fakes:
+            _tr_seed_images(fakes, "char_tr_j3", model3d={"status": "submitted", "requestArn": f"fal/requests/{_TR_SINGLE}/req_done"})
+            charmod.run_retry3d("tester", "char_tr_j3", "webtoon", 1, "")
+            stored = fakes.store.blobs[charmod.model_glb_key("tester", "char_tr_j3", "webtoon", 1)]
+            expect("tr-j", (len(fakes.posts()), fakes.gets(), stored == charmod._orient_glb(fakes.glb, -90.0), model3d("char_tr_j3")["status"]),
+                   (0, [f"{queue}/tripo3d/h3.1/requests/req_done/status", f"{queue}/tripo3d/h3.1/requests/req_done"], True, "ready"),
+                   "retry3d 이전 Tripo 요청 완료 → 제출 0·조회 주소·회전")
+        # 배포 전에 낸 Hunyuan 요청(진행 중)을 새 코드(설정 Tripo)의 이어 만들기가 Hunyuan 주소로 조회·완료한다(회전 0·제출 0·원장 0).
+        with _pin_vnew(**_TR_PINS), _TrFakes(charmod) as fakes:
+            _tr_seed_images(fakes, "char_tr_j7", model3d={"status": "submitted",
+                                                          "requestArn": "fal/requests/fal-ai/hunyuan3d-v3/image-to-3d/req_inflight"})
+            charmod.run_resume_variant("tester", "char_tr_j7", "webtoon", 1, "tokT")
+            stored = fakes.store.blobs.get(charmod.model_glb_key("tester", "char_tr_j7", "webtoon", 1))
+            m3d = model3d("char_tr_j7")
+            expect("tr-j", (len(fakes.posts()), fakes.gets(), stored == fakes.glb, "endpoint" in m3d, m3d["status"], fakes.charges,
+                            len(fakes.seedream)),
+                   (0, [f"{queue}/fal-ai/hunyuan3d-v3/requests/req_inflight/status", f"{queue}/fal-ai/hunyuan3d-v3/requests/req_inflight"],
+                    True, False, "ready", [], 0),
+                   "진행 중 Hunyuan 요청(배포 전) → Hunyuan 주소로 조회·완료·회전 없음·endpoint 없음")
+        # 이어 만들기: 그림 3개·옆모습 결과 있음·3D 요청 없음 → 3D 만(retry3d 경로).
+        with _pin_vnew(**_TR_PINS), _TrFakes(charmod) as fakes:
+            _tr_seed_images(fakes, "char_tr_j4", sides={"left": left}, view_check={"left": "ok", "right": "dropped"})
+            charmod.run_resume_variant("tester", "char_tr_j4", "webtoon", 1, "tokT")
+            expect("tr-j", ([(u, len(b.get("image_urls", []))) for u, b in fakes.posts()], len(fakes.seedream), model3d("char_tr_j4").get("endpoint")),
+                   ([(f"{queue}/{_TR_MULTI}", 3)], 0, _TR_MULTI), "이어 만들기 3D 만 → Tripo 다시점 3장(오른쪽 없음)")
+        # 이어 만들기: 옆모습 결과 없음·3D 요청 없음 → 옆모습만 그리고(T2) Tripo 다시점 4장.
+        with _pin_vnew(**_TR_PINS), _TrFakes(charmod) as fakes:
+            fakes.items = [dict(watch)]
+            _tr_seed_images(fakes, "char_tr_j5")
+            charmod.run_resume_variant("tester", "char_tr_j5", "webtoon", 1, "tokT")
+            posts = fakes.posts()
+            drawn = [s["image"] for s in fakes.seedream]
+            expect("tr-j", (len(drawn), [u for u, _b in posts], posts[0][1]["image_urls"][1::2] if posts else None,
+                            model3d("char_tr_j5")["status"]),
+                   (2, [f"{queue}/{_TR_MULTI}"], [uri(charmod._square_pad(drawn[0], 96)), uri(charmod._square_pad(drawn[1], 96))], "ready"),
+                   "이어 만들기 옆모습만 그리고 → 다시점(왼쪽·오른쪽 = 방금 그린 옆모습)")
+        # 켬 빌드(T2 옆모습 경로) 두 그림체 → 다시점 4장씩·회전·원장.
+        with _pin_vnew(**_TR_PINS), _TrFakes(charmod, payload=_CF_FID_PAYLOAD) as fakes:
+            fakes.items = [dict(watch)]
+            _cf_seed_char(fakes, "char_tr_j6", 5)
+            charmod.start_build("tester", "char_tr_j6")
+            built, _ = charmod.load_char("tester", "char_tr_j6")
+            posts = fakes.posts()
+            glbs = [fakes.store.blobs.get(charmod.model_glb_key("tester", "char_tr_j6", v, 1)) for v in ("webtoon", "real")]
+            expect("tr-j", ([u for u, _b in posts], [len(b["image_urls"]) for _u, b in posts],
+                            [built["variants"][v]["model3d"].get("endpoint") for v in ("webtoon", "real")],
+                            [g == charmod._orient_glb(fakes.glb, -90.0) for g in glbs], [c for c in fakes.charges if c[0] == "model3d"]),
+                   ([f"{queue}/{_TR_MULTI}"] * 2, [4, 4], [_TR_MULTI] * 2, [True, True],
+                    [["model3d", _TR_MULTI, 0.60, 1, "webtoon-3d"], ["model3d", _TR_MULTI, 0.60, 1, "real-3d"]]),
+                   "켬 빌드(옆모습) → 두 그림체 Tripo 다시점 4장·회전·원장")
+
+    # ------------------------------------------------------------------ (tr-k) Hunyuan = 시작 전 바이트
+    def tr_k() -> None:
+        got = _tr_hunyuan_fingerprints({"VNEW_3D_PROVIDER": "hunyuan"})
+        diff = sorted(k for k in set(got) | set(_TR_HUNYUAN_SHA) if got.get(k) != _TR_HUNYUAN_SHA.get(k))
+        if diff:
+            bad.append(f"(tr-k) VNEW_3D_PROVIDER=hunyuan 지문이 시작 전과 다릅니다: {diff}")
+        report.append(f"tr-k: Hunyuan 지문 {len(_TR_HUNYUAN_SHA)}개 = 시작 전 sha256")
+
+    # ------------------------------------------------------------------ (tr-l) 12MB GLB 메모리
+    def tr_l() -> None:
+        glb = _tr_glb(bin_bytes=bytes(12 * 1024 * 1024))
+        _tracemalloc.start()
+        try:
+            started = _time.perf_counter()
+            out = charmod._orient_glb(glb, -90.0)
+            took = _time.perf_counter() - started
+            _current, peak = _tracemalloc.get_traced_memory()
+        finally:
+            _tracemalloc.stop()
+        if peak > len(glb) + 1024 * 1024:
+            bad.append(f"(tr-l) 12MB GLB 회전의 메모리 최고점이 GLB 크기 + 1MB 를 넘습니다: {peak} > {len(glb)}")
+        expect("tr-l", (len(out) - len(glb)) in range(0, 64), True, "결과 크기 ≈ 입력(JSON 차이·BIN 0 채움만)")
+        report.append(f"tr-l: 12MB GLB 회전 메모리 최고점 {peak / 1048576:.1f}MB(입력 {len(glb) / 1048576:.1f}MB) · {took * 1000:.0f}ms")
+
+    saved_ext = {"seedream": vpoc_seedream.generate_safe, "fal": vpoc_fal._request, "urlopen": _ureq.urlopen}  # noqa: SLF001
+    vpoc_seedream.generate_safe = block("seedream")
+    vpoc_fal._request = block("fal")  # noqa: SLF001
+    _ureq.urlopen = block("urlopen")
+    names = ["tr-a", "tr-b", "tr-c", "tr-d", "tr-e", "tr-f", "tr-g", "tr-h", "tr-i", "tr-j", "tr-k", "tr-l"]
+    bodies = [tr_a, tr_b, tr_c, tr_d, tr_e, tr_f, tr_g, tr_h, tr_i, tr_j, tr_k, tr_l]
+    real_llm: list[str] = []
+    try:
+        with _guard_real_llm() as real_llm, logs, _pin_vnew(**_TR_PINS):
+            for name, body in zip(names, bodies):
+                run(name, body)
+            real_llm = list(real_llm)
+    except Exception as exc:  # noqa: BLE001
+        bad.append("T2b 검사 준비 중 예외: " + repr(exc) + "\n" + _tb.format_exc()[:2000])
+    finally:
+        vpoc_seedream.generate_safe = saved_ext["seedream"]
+        vpoc_fal._request = saved_ext["fal"]  # noqa: SLF001
+        _ureq.urlopen = saved_ext["urlopen"]
+    if real_llm:
+        bad.append(f"가짜가 아닌 LLM 호출이 있었습니다: {real_llm}")
+    if blocked:
+        bad.append(f"가짜가 아닌 Seedream·fal·urlopen 호출이 있었습니다: {blocked}")
+    missing = [n for n in names if n not in seen]
+    if missing and not bad:
+        bad.append(f"끝까지 돌지 않은 검사: {missing}")
+    if bad:
+        fail("char-fidelity T2b(Tripo 3D) 검사 실패\n" + "\n".join(f"  {item}" for item in bad))
+    else:
+        ok(
+            "char-fidelity T2b(Tripo 3D) 검사 (tr-a)설정 11개 기본값·틀린 값 → 기본값 + 경고 (tr-b)템플릿·base 자리·렌더·되돌리기 한 줄 "
+            "(tr-c)본문 4장·3장·단일·SIDE_SWAP·다시점 끔·빈 자리 0·data URI 만 (tr-d)정사각 2048·endpoint·arn·조회 주소 "
+            "(tr-e)Tripo 응답 → glb·썸네일 (tr-f)_orient_glb 루트 회전·+X→+Z·BIN 같음·정렬·틀린 바이트 "
+            "(tr-g)옮기기 회전·실패 원본·Hunyuan 그대로 (tr-h)원장 0.60·endpoint (tr-i)잃은 요청 같은 공급자·한도 함께 "
+            "(tr-j)retry3d·이어 만들기·켬 빌드 Tripo·진행 중 Hunyuan 요청 완료 (tr-k)Hunyuan sha256 = 시작 전 (tr-l)12MB GLB 메모리"
+        )
+        for line in report:
+            print(f"       tr: {line}")
+
+
+# ---------------------------------------------------------------- char-fidelity T3 화면(cf-s, 2026-10-30)
+#
+# design §11.2·§11.3·§17 cf-s. vnew.js 를 잘라(_CF_SCREEN_SLICES) node 가짜 DOM(_CAST_SCREEN_NODE_HARNESS 그대로 + 아래 대역)으로
+# 돌린다. 상세 응답은 Python 이 실제 detail_view(메모리 저장소)로 만들어 넣는다(서버 응답 → 화면). 외부 호출 없음.
+
+# (이름, 시작 표지, 끝 표지). pure 는 T3 에 새로 생긴 구역이라 구현 전 vnew.js 에는 없다(기준값을 잴 때만 빼고 돈다).
+_CF_SCREEN_SLICES = (
+    ("el", "  function el(tag, className, text)", "  function token()"),
+    ("pure", "  /* ---- 캐릭터 충실도 표시(char-fidelity T3", "  function renderDetail(host, detail) {"),
+    ("renderDetail", "  function renderDetail(host, detail) {", "  /* ---- 업로드 영역 ---- */"),
+    ("variantColumn", "  function variantColumn(host, detail, meta) {", "  /* ---- 실사 캐스팅(vnew-live-fx 묶음 B"),
+    ("outfits", "  /* ---- 추가 복장 섹션 ---- */", "  function addOutfitForm(host, detail) {"),
+)
+
+# 잘라 오지 않는 이웃 함수의 대역과 DOM 직렬화. 대역은 구현 전·뒤가 같으므로 화면 비교에 영향이 없다.
+_CF_SCREEN_NODE_STUBS = r"""
+Object.defineProperty(FakeNode.prototype, "childNodes", { get: function () { return this.children; } });
+var VARIANTS = [{ key: "real", title: "실사" }, { key: "webtoon", title: "웹툰 그림체" }];
+function statusLabel(value) { return String(value || ""); }
+function backRow(host) { return el("div", "vnew-detail-head"); }
+function uploadSection(host, detail) { return el("section", "cf-stub-upload"); }
+function buildSection(host, detail) { return el("section", "cf-stub-build"); }
+function castingSection(host, detail) { return null; }
+function variantStatusRow(host, detail, meta, v) { return el("div", "cf-stub-status", String((v || {}).status || "")); }
+function viewer3d(host, detail, meta, v, model3d) { return el("div", "vnew-3d", "3d " + String((model3d || {}).status || "")); }
+function addOutfitForm(host, detail) { return el("div", "cf-stub-add-outfit"); }
+var SER_KEYS = ["className", "_text", "src", "alt", "type", "title", "id", "value", "maxLength", "placeholder"];
+function ser(node) {
+  var o = { t: node.tagName };
+  SER_KEYS.forEach(function (k) { if (node[k] !== undefined && node[k] !== "") o[k] = node[k]; });
+  if (node.disabled) o.disabled = true;
+  if (Object.keys(node.style || {}).length) o.style = node.style;
+  if (Object.keys(node.attrs || {}).length) o.attrs = node.attrs;
+  if ((node.children || []).length) o.c = node.children.map(ser);
+  return o;
+}
+function renderOf(detail) { var host = new FakeNode("div"); renderDetail(host, detail); return host; }
+"""
+
+# 구현 전 vnew.js 로도 도는 부분(옛 캐릭터 + 두 설정 끔 화면 DOM).
+_CF_SCREEN_NODE_OLD_CASES = r"""
+out.oldScreen = ser(renderOf(SERVER.oldOff));
+"""
+
+_CF_SCREEN_NODE_CASES = r"""
+var evil = "<img src=x onerror=alert(1)>";
+var srcs = [{ fileId: "f_a" }, { fileId: "f_b" }, { fileId: "f_c" }];
+var watch = { itemEn: "round wristwatch", labelKo: "시계", partEn: "wrist", side: "right" };
+function onDetail(extra) {
+  var d = { features: { charFidelity: true, sideViews: true }, sources: srcs, analysis: {} };
+  Object.keys(extra || {}).forEach(function (k) { d[k] = extra[k]; });
+  return d;
+}
+var offFid = { features: { charFidelity: false, sideViews: true } };
+out.tables = { part: CHAR_PART_KO, side: CHAR_SIDE_KO, endpoint: CHAR_3D_ENDPOINT_LABEL };
+out.lines = [
+  analysisFidelityLines(onDetail({ analysis: { baseSourceFileId: "f_b",
+    sidedItems: [watch, { itemEn: "silver hoop earring", labelKo: "", partEn: "ear", side: "left" }] } })),
+  analysisFidelityLines(onDetail({ analysis: { baseSourceFileId: "f_gone", sidedItems: [watch] } })),
+  analysisFidelityLines(onDetail({ analysis: { baseSourceFileId: "f_a", sidedItems: [] } })),
+  analysisFidelityLines(onDetail({ analysis: { sidedItems: [{ itemEn: "x", partEn: "wrist", side: "unclear" },
+    { itemEn: " ", labelKo: "", partEn: "ear", side: "left" }, null, "str", { labelKo: "반지", partEn: "tail", side: "right" },
+    { labelKo: "팔찌", partEn: "wrist", side: "__proto__" }, { labelKo: "목걸이", partEn: "constructor", side: "constructor" },
+    { labelKo: "핀", partEn: "", side: "left" }] } })),
+  analysisFidelityLines({ features: { charFidelity: false, sideViews: true }, sources: srcs,
+    analysis: { baseSourceFileId: "f_b", sidedItems: [watch] } }),
+  analysisFidelityLines({ sources: srcs, analysis: { baseSourceFileId: "f_b", sidedItems: [watch] } }),
+  analysisFidelityLines(onDetail({ sources: "x", analysis: { baseSourceFileId: 1, sidedItems: "x" } })),
+  analysisFidelityLines(onDetail({ analysis: null })),
+  analysisFidelityLines(null)
+];
+out.pairs = [
+  variantViewPairs({ frontUrl: "f", backUrl: "b", leftUrl: "l", rightUrl: "r", sheetUrl: "s" }),
+  variantViewPairs({ frontUrl: "f", rightUrl: "r", leftUrl: "" }),
+  variantViewPairs({}),
+  variantViewPairs(null)
+];
+out.badges = [
+  outfitBadgeText({ kind: "photo", source: "auto" }, onDetail()),
+  outfitBadgeText({ kind: "photo", source: "auto" }, offFid),
+  outfitBadgeText({ kind: "photo", source: "auto" }, {}),
+  outfitBadgeText({ source: "auto" }, onDetail()),
+  outfitBadgeText({ source: "user" }, onDetail()),
+  outfitBadgeText({ kind: "other", source: "user" }, onDetail()),
+  outfitBadgeText(null, null)
+];
+out.hints = [outfitsHintText(onDetail()), outfitsHintText(offFid), outfitsHintText(null)];
+out.labels = [
+  model3dEndpointLabel({ endpoint: "tripo3d/h3.1/multiview-to-3d" }), model3dEndpointLabel({ endpoint: "tripo3d/h3.1/image-to-3d" }),
+  model3dEndpointLabel({ endpoint: "fal-ai/hunyuan3d-v3/image-to-3d" }), model3dEndpointLabel({ endpoint: "tripo3d/h9.9/image-to-3d" }),
+  model3dEndpointLabel({ endpoint: "" }), model3dEndpointLabel({ endpoint: 7 }), model3dEndpointLabel({ endpoint: "constructor" }),
+  model3dEndpointLabel({ endpoint: "__proto__" }), model3dEndpointLabel({}), model3dEndpointLabel(null)
+];
+function rowsOf(host) {
+  return byClass(host, "vnew-analysis-meta").map(function (p) { return [p.children[0].textContent, p.children[1].textContent]; });
+}
+function colsOf(host) {
+  return byClass(host, "vnew-variant-col").map(function (col) {
+    return {
+      title: byTag(col, "h2")[0].textContent,
+      order: col.children.map(function (n) { return n.className; }),
+      smalls: byClass(col, "vnew-sheet-small").map(function (f) {
+        var img = byTag(f, "img")[0];
+        return [byTag(f, "figcaption")[0].textContent, img.src, img.alt];
+      }),
+      endpoint: byClass(col, "vnew-3d-endpoint").map(function (n) { return n.textContent; })
+    };
+  });
+}
+function outfitsOf(host) {
+  var sec = byClass(host, "vnew-outfits")[0];
+  return {
+    hint: byClass(sec, "vnew-hint")[0].textContent,
+    badges: byClass(sec, "vnew-outfit-card").map(function (card) {
+      return [byClass(card, "vnew-outfit-name")[0].textContent,
+              byClass(card, "vnew-outfit-badge").map(function (b) { return b.textContent; })];
+    })
+  };
+}
+function viewOf(detail) { var h = renderOf(detail); return { rows: rowsOf(h), cols: colsOf(h), outfits: outfitsOf(h) }; }
+out.newOn = viewOf(SERVER.newOn);
+out.newOff = viewOf(SERVER.newOff);
+out.oldOnView = viewOf(SERVER.oldOn);
+out.oldOn = ser(renderOf(SERVER.oldOn));
+// 왼쪽 그림을 누르면 지금처럼 크게 본다.
+lightbox.length = 0;
+var clickHost = renderOf(SERVER.newOn);
+var leftFigs = byClass(clickHost, "vnew-sheet-small").filter(function (f) { return byTag(f, "figcaption")[0].textContent === "왼쪽"; });
+byTag(leftFigs[0], "img")[0].fire("click");
+out.lightbox = lightbox.slice();
+// 세 DOM 자리(+안내·이름표)가 순수 함수를 부르는지: 바꿔 끼워 센다.
+var spy = { lines: 0, pairs: 0, endpoint: 0, badge: 0, hint: 0 };
+var saved = [analysisFidelityLines, variantViewPairs, model3dEndpointLabel, outfitBadgeText, outfitsHintText];
+analysisFidelityLines = function (d) { spy.lines += 1; return saved[0](d); };
+variantViewPairs = function (v) { spy.pairs += 1; return saved[1](v); };
+model3dEndpointLabel = function (m) { spy.endpoint += 1; return saved[2](m); };
+outfitBadgeText = function (o, d) { spy.badge += 1; return saved[3](o, d); };
+outfitsHintText = function (d) { spy.hint += 1; return saved[4](d); };
+renderOf(SERVER.newOn);
+analysisFidelityLines = saved[0]; variantViewPairs = saved[1]; model3dEndpointLabel = saved[2];
+outfitBadgeText = saved[3]; outfitsHintText = saved[4];
+out.spy = spy;
+// 모델·사용자 글은 textContent 로만 들어간다(위험한 글이 글자 그대로 남는다).
+var evilHost = renderOf(onDetail({ id: "e", name: "e", status: "ready", version: 1,
+  analysis: { descriptionKo: "d", baseSourceFileId: "f_a", sidedItems: [{ labelKo: evil, partEn: "wrist", side: "left" }] },
+  variants: {}, outfits: [{ id: "o", labelKo: evil, promptEn: evil, source: "auto", kind: "photo", variants: {} }] }));
+out.evil = [rowsOf(evilHost), byClass(evilHost, "vnew-outfit-name").map(function (n) { return n.textContent; })];
+out.innerHTML = innerHTMLUsed;
+console.log(JSON.stringify(out));
+"""
+
+# cf-s 기준값: 코드를 바꾸기 **전**(char-fidelity T3 시작 전 vnew.js 사본)에 _cf_screen_script(…, full=False) 로 옛 캐릭터 +
+# 두 설정 끔 상세(_cf_old_char, detail_view)를 renderDetail 에 넣어 잰 DOM 직렬화 sha256. 두 번 재어 같은 값이었다.
+_CF_SCREEN_OLD_SHA = "a8ec4effb5856244c6c17583dedc66cde466c51c64979f55572e5e69bd56d0cb"
+
+_CF_HINT_OLD = "기본 복장 위에 더 입히는 옷차림(예: 정장 자켓)을 따로 만듭니다. 3D 는 기본 복장 하나만 만듭니다."
+_CF_HINT_FIDELITY = (
+    "사진 속 다른 옷차림(사진 속 옷)은 그 사진 그대로, 직접 넣은 옷은 기본 복장 위에 더 입혀 그립니다. 3D 는 기본 복장 하나만 만듭니다."
+)
+
+
+def _cf_screen_details(charmod) -> dict:
+    """cf-s 가 화면에 넣는 실제 상세 응답(detail_view, 메모리 저장소): 옛·새 캐릭터 × 두 설정 켬·끔."""
+    on = dict(VNEW_CHAR_FIDELITY=True, VNEW_3D_SIDE_VIEWS=True)
+    off = dict(VNEW_CHAR_FIDELITY=False, VNEW_3D_SIDE_VIEWS=False)
+    with _pin_vnew(**_CF_PINS):
+        return {
+            "oldOff": _cf_detail_of(charmod, _cf_old_char(), **off),
+            "oldOn": _cf_detail_of(charmod, _cf_old_char(), **on),
+            "newOn": _cf_detail_of(charmod, _cf_new_char(), **on),
+            "newOff": _cf_detail_of(charmod, _cf_new_char(), **off),
+        }
+
+
+def _cf_screen_script(vjs: str, details: dict, *, full: bool = True) -> str:
+    """vnew.js 구역(_CF_SCREEN_SLICES) + 하네스 + 상세 응답으로 node 스크립트를 만든다. full=False 는 옛 화면만(기준값 재기)."""
+    parts: list[str] = []
+    for name, start, end in _CF_SCREEN_SLICES:
+        at = vjs.find(start)
+        until = vjs.find(end, at + 1) if at >= 0 else -1
+        if at < 0 or until < 0:
+            if name == "pure" and not full:
+                continue
+            raise ValueError(f"vnew.js 구역을 찾지 못했습니다: {name}")
+        parts.append(vjs[at:until])
+    head = _CAST_SCREEN_NODE_HARNESS + "var SERVER = " + json.dumps(details, ensure_ascii=False) + ";\n" + _CF_SCREEN_NODE_STUBS
+    tail = _CF_SCREEN_NODE_OLD_CASES + (_CF_SCREEN_NODE_CASES if full else "console.log(JSON.stringify(out));\n")
+    return head + "".join(parts) + tail
+
+
+def _cf_run_node(node: str, script: str) -> dict:
+    """node 로 스크립트를 돌려 마지막 줄 JSON 을 준다(임시 폴더는 지운다)."""
+    tmp_dir = tempfile.mkdtemp(prefix="cf_s_")
+    try:
+        path = Path(tmp_dir) / "cf_screen.js"
+        path.write_text(script, encoding="utf-8")
+        result = subprocess.run([node, str(path)], capture_output=True, text=True, encoding="utf-8", timeout=60)
+    finally:
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+    if result.returncode != 0:
+        raise RuntimeError("node 실행 실패: " + (result.stderr or "").strip()[:600])
+    return json.loads((result.stdout or "").strip().splitlines()[-1])
+
+
+def check_vnew_char_fidelity_screen() -> None:
+    """char-fidelity T3 — 캐릭터 상세 화면(design §11.2·§11.3, R5.2~R5.5, T2b 3D 이름표). 외부 호출 없음.
+
+    (cf-s) vnew.js 순수 함수 analysisFidelityLines(기준 N번째·소품 줄·지운 그림·끔 []·표 밖 값)·variantViewPairs·outfitBadgeText·
+           outfitsHintText(안내 2종)·model3dEndpointLabel(고정 표·모르는 값 ""), 표 3개 = char_fidelity.PARTS·SIDE_KO·3D endpoint 기본값.
+           DOM 자리(renderDetail 분석 카드·variantColumn 작은 그림·이름표·outfitsSection 안내·outfitCard 배지)를 node 가짜 DOM 으로
+           실행하고, 상세는 실제 detail_view 응답(옛·새 캐릭터 × 켬·끔)을 넣는다. 옛 캐릭터 + 끔 화면 DOM = 구현 전 sha256, 켬은
+           안내 문장만 다름, 자리마다 함수를 부름(바꿔 끼워 셈), 그림 src = 응답 presigned URL, innerHTML 0, 배선 문자열,
+           node --check, vnew.css flex-wrap·이름표 클래스
+    """
+    sys.path.insert(0, str(ROOT / "app"))
+    import traceback as _tb  # noqa: PLC0415
+
+    from src.vnew import char_fidelity as cfm  # noqa: PLC0415
+    from src.vnew import characters as charmod  # noqa: PLC0415
+
+    bad: list[str] = []
+    seen: set[str] = set()
+    report: list[str] = []
+
+    def expect(got, want, what: str) -> None:
+        if got != want:
+            bad.append(f"(cf-s) {what}\n      결과 {got!r}\n      기대 {want!r}")
+
+    def cf_s() -> None:
+        vjs = (PUBLIC / "vnew.js").read_text(encoding="utf-8")
+        css = (PUBLIC / "vnew.css").read_text(encoding="utf-8")
+        slices: dict[str, str] = {}
+        for name, start, end in _CF_SCREEN_SLICES:
+            at = vjs.find(start)
+            until = vjs.find(end, at + 1) if at >= 0 else -1
+            if at < 0 or until < 0 or vjs.count(start) != 1:
+                bad.append(f"(cf-s) vnew.js 구역 {name} 을 한 번 찾지 못했습니다")
+            else:
+                slices[name] = vjs[at:until]
+        for name in ("pure", "renderDetail", "variantColumn", "outfits"):
+            if "innerHTML" in slices.get(name, "") or "insertAdjacentHTML" in slices.get(name, ""):
+                bad.append(f"(cf-s) {name} 구역이 textContent(el) 가 아닌 방식으로 글을 넣습니다")
+        wiring = {
+            "renderDetail 분석 카드": ("renderDetail", "      analysisFidelityLines(detail).forEach(function (line) {"),
+            "variantColumn 작은 그림": ("variantColumn", "    variantViewPairs(v).forEach(function (pair) {"),
+            "variantColumn 3D 이름표": ("variantColumn", "    var endpointLabel = model3dEndpointLabel(model3d);\n"
+                                                         "    if (endpointLabel) column.appendChild(el(\"p\", \"vnew-3d-endpoint\", endpointLabel));"),
+            "outfitCard 배지": ("outfits", "    var badge = outfitBadgeText(outfit, detail);"),
+            "outfitsSection 안내": ("outfits", "        outfitsHintText(detail)\n"),
+        }
+        for what, (name, needle) in wiring.items():
+            if slices.get(name, "").count(needle) != 1:
+                bad.append(f"(cf-s) vnew.js 배선이 없습니다: {what}")
+        render_js = slices.get("renderDetail", "")
+        if not 0 <= render_js.find('"기본 복장"') < render_js.find("analysisFidelityLines(detail)") < render_js.find('"표정"'):
+            bad.append("(cf-s) 분석 카드 새 줄이 '기본 복장' 줄 다음·'표정' 줄 앞이 아닙니다")
+        smalls_css = re.search(r"^\.vnew-sheet-smalls \{([^}]*)\}", css, re.M)
+        if not smalls_css or "  flex-wrap: wrap;" not in smalls_css.group(1).split("\n"):
+            bad.append("(cf-s) vnew.css .vnew-sheet-smalls 에 flex-wrap: wrap; 이 없습니다")
+        if not re.search(r"^\.vnew-3d-endpoint \{[^}]*font-size: 12px;", css, re.M):
+            bad.append("(cf-s) vnew.css 에 .vnew-3d-endpoint(작은 글씨) 가 없습니다")
+        node = shutil.which("node")
+        if not node:
+            warn("node 가 없어 cf-s 화면 함수 실행을 건너뜁니다 (E16)")
+            return
+        checked = subprocess.run([node, "--check", str(PUBLIC / "vnew.js")], capture_output=True, text=True, encoding="utf-8")
+        if checked.returncode != 0:
+            bad.append(f"(cf-s) node --check vnew.js 실패: {(checked.stderr or '').strip()[:300]}")
+        with _guard_real_llm() as real_llm:
+            details = _cf_screen_details(charmod)
+            real_llm = list(real_llm)
+        if real_llm:
+            bad.append(f"(cf-s) 상세 응답을 만들다 가짜가 아닌 LLM 호출이 있었습니다: {real_llm}")
+        got = _cf_run_node(node, _cf_screen_script(vjs, details))
+
+        # 표 = 서버 값(부위 한국어·좌우·3D endpoint 기본값).
+        expect(got["tables"]["part"], {key: value[2] for key, value in cfm.PARTS.items()}, "CHAR_PART_KO = char_fidelity.PARTS 한국어")
+        expect(got["tables"]["side"], dict(cfm.SIDE_KO), "CHAR_SIDE_KO = char_fidelity.SIDE_KO")
+        expect(got["tables"]["endpoint"], {_TR_DEFAULTS["VNEW_3D_TRIPO_ENDPOINT"]: "Tripo H3.1",
+                                           _TR_DEFAULTS["VNEW_3D_TRIPO_SINGLE_ENDPOINT"]: "Tripo H3.1",
+                                           _CF_PINS["HUNYUAN_ENDPOINT"]: "Hunyuan3D v3"}, "3D 이름표 고정 표")
+        # 순수 함수.
+        base2 = {"label": "기준 사진", "text": "2번째"}
+        expect(got["lines"], [
+            [base2, {"label": "소품", "text": "시계 — 오른쪽 손목, silver hoop earring — 왼쪽 귀"}],
+            [{"label": "소품", "text": "시계 — 오른쪽 손목"}],
+            [{"label": "기준 사진", "text": "1번째"}],
+            [{"label": "소품", "text": "반지 — 오른쪽 tail, 핀 — 왼쪽"}],
+            [], [], [], [], [],
+        ], "analysisFidelityLines(기준 N번째·소품·지운 그림·빈 소품·표 밖 쪽·끔·features 없음·틀린 모양)")
+        pair = {"frontUrl": "정면", "backUrl": "후면", "leftUrl": "왼쪽", "rightUrl": "오른쪽"}
+        expect(got["pairs"], [[[k, pair[k]] for k in ("frontUrl", "backUrl", "leftUrl", "rightUrl")],
+                              [["frontUrl", "정면"], ["rightUrl", "오른쪽"]], [], []], "variantViewPairs(있는 것만·순서)")
+        expect(got["badges"], ["사진 속 옷", "후보", "후보", "후보", "", "", ""], "outfitBadgeText")
+        expect(got["hints"], [_CF_HINT_FIDELITY, _CF_HINT_OLD, _CF_HINT_OLD], "추가 복장 안내 2종(design §11.3 원문)")
+        expect(got["labels"], ["3D: Tripo H3.1", "3D: Tripo H3.1", "3D: Hunyuan3D v3"] + [""] * 7,
+               "model3dEndpointLabel(고정 표·모르는 값·표 밖 이름 \"\")")
+
+        # 옛 캐릭터: 끔 화면 DOM = 구현 전, 켬은 추가 복장 안내 문장만 다르다.
+        old_screen_sha = _cf_sha(got["oldScreen"])
+        expect(old_screen_sha, _CF_SCREEN_OLD_SHA, "옛 캐릭터 + 두 설정 끔 화면 DOM sha256 = 구현 전")
+        old_on = json.dumps(got["oldOn"], ensure_ascii=False)
+        expect((_CF_HINT_FIDELITY in old_on, old_on.replace(_CF_HINT_FIDELITY, _CF_HINT_OLD)),
+               (True, json.dumps(got["oldScreen"], ensure_ascii=False)), "옛 캐릭터 켬 화면 = 끔 화면 + 안내 문장만 바뀜")
+        expect(got["oldOnView"]["rows"], [["그림체", "Soft pastel lines."], ["대표 옷차림", "white T-shirt, jeans, sneakers"],
+                                          ["기본 복장", "white T-shirt, jeans, sneakers"], ["표정", "미소"]], "옛 캐릭터 켬 분석 카드(새 줄 없음)")
+
+        # 새 캐릭터(실제 detail_view 응답): 분석 두 줄, 작은 그림 = 응답 URL, 이름표, 배지, 안내.
+        server = details["newOn"]["variants"]
+
+        def smalls(variant: str, title: str, names) -> list:
+            keys = {"정면": "frontUrl", "후면": "backUrl", "왼쪽": "leftUrl", "오른쪽": "rightUrl"}
+            return [[n, server[variant][keys[n]], f"{title} {n}"] for n in names]
+
+        cols = [
+            {"title": "실사", "order": ["vnew-variant-title", "cf-stub-status", "vnew-3d", "vnew-sheets"],
+             "smalls": smalls("real", "실사", ("정면", "후면", "오른쪽")), "endpoint": []},
+            {"title": "웹툰 그림체", "order": ["vnew-variant-title", "cf-stub-status", "vnew-3d", "vnew-3d-endpoint", "vnew-sheets"],
+             "smalls": smalls("webtoon", "웹툰 그림체", ("정면", "후면", "왼쪽", "오른쪽")), "endpoint": ["3D: Tripo H3.1"]},
+        ]
+        rows_off = [["그림체", "Soft pastel lines."], ["대표 옷차림", "white T-shirt, jeans, sneakers"],
+                    ["기본 복장", "white T-shirt, jeans, sneakers"], ["표정", "미소"]]
+        rows_on = rows_off[:3] + [["기준 사진", "2번째"], ["소품", "시계 — 오른쪽 손목"]] + rows_off[3:]
+        expect(got["newOn"], {"rows": rows_on, "cols": cols, "outfits": {
+            "hint": _CF_HINT_FIDELITY, "badges": [["검은 정장", ["사진 속 옷"]], ["후드티", ["후보"]], ["빨간 코트", []]]}},
+               "새 캐릭터 켬: 분석 두 줄·작은 그림 4/3장(응답 URL)·이름표·배지·안내")
+        expect(got["newOff"], {"rows": rows_off, "cols": cols, "outfits": {
+            "hint": _CF_HINT_OLD, "badges": [["검은 정장", ["후보"]], ["후드티", ["후보"]], ["빨간 코트", []]]}},
+               "새 캐릭터 끔: 분석 새 줄 없음·옆모습·이름표는 응답대로·배지 후보·지금 안내")
+        expect(got["lightbox"], [[server["webtoon"]["leftUrl"], "웹툰 그림체 왼쪽"]], "왼쪽 그림 누르기 → 크게 보기(응답 URL)")
+        expect(got["spy"], {"lines": 1, "pairs": 2, "endpoint": 2, "badge": 3, "hint": 1},
+               "DOM 자리가 순수 함수를 부름(분석 카드 1·작은 그림 2·이름표 2·배지 3·안내 1)")
+        evil = "<img src=x onerror=alert(1)>"
+        expect(got["evil"], [[["기준 사진", "1번째"], ["소품", evil + " — 왼쪽 손목"]], [evil]], "위험한 글은 글자 그대로(textContent)")
+        expect(got["innerHTML"], False, "innerHTML 을 쓰지 않는다")
+        report.append(f"cf-s: 옛 캐릭터 끔 화면 DOM sha256 {old_screen_sha[:12]} = 구현 전 · 켬은 안내 문장만 · 새 캐릭터 켬 분석 2줄·"
+                      "작은 그림 4/3장·이름표 'Tripo H3.1'·배지 '사진 속 옷'")
+
+    try:
+        cf_s()
+        seen.add("cf-s")
+    except Exception as exc:  # noqa: BLE001
+        bad.append(f"(cf-s) 검사 중 예외: {exc!r}\n{_tb.format_exc()[:2500]}")
+    if "cf-s" not in seen and not bad:
+        bad.append("끝까지 돌지 않은 검사: ['cf-s']")
+    if bad:
+        fail("char-fidelity T3 화면 검사 실패\n" + "\n".join(f"  {item}" for item in bad))
+    else:
+        ok(
+            "char-fidelity T3 화면 검사 (cf-s)analysisFidelityLines·variantViewPairs·outfitBadgeText·안내 2종·3D 이름표 고정 표, "
+            "DOM 자리 4곳(node 가짜 DOM·실제 detail_view 응답), 옛 화면 = 구현 전 sha256, innerHTML 0, node --check, vnew.css"
+        )
+        for line in report:
+            print(f"       cf: {line}")
+
+
 # vnew-live-fx A(Claude 결정 9, 2026-10-30 검토): 새 기본값(VNEW_FX 켬)에서 기대값이 달라지는 기존 검사는 **부르는 줄에서**
 # 끔으로 고정한다(검사 본문·기대값·들여쓰기는 그대로). 이유:
 #   check_vnew_plan·check_vnew_locations — 켬이면 POST /conti 가 기호·분위기 채우기(가짜가 아닌 LLM)를 부른다.
@@ -25549,6 +29402,27 @@ def _run_casting_off(check) -> None:
         check()
 
 
+# char-fidelity(R0.6, design §17): 새 기본값(VNEW_CHAR_FIDELITY·VNEW_3D_SIDE_VIEWS 켬)에서 기대값이 달라지는 기존 검사도 부르는 줄에서
+# 끔으로 고정한다(검사 본문·기대값·들여쓰기는 그대로). 이유:
+#   check_vnew_characters — 켬이면 분석 SYSTEM·도구·블록·시트·정면·후면·추가 복장 프롬프트가 바뀐다((m)(ab)(af) 등).
+#   check_vnew_fx_prompt — (fx-k) 가 분석 SYSTEM 을 "_ANALYZE_SYSTEM + 묘사 규칙"과 글자째 비교한다.
+#   check_vnew_casting — (cast-d) 가 켬 SYSTEM = _ANALYZE_SYSTEM + 규칙 + 성별 문장, 끔 도구 = 원본 객체를 본다.
+def _run_char_fidelity_off(check) -> None:
+    """`check()` 를 VNEW_CHAR_FIDELITY=False·VNEW_3D_SIDE_VIEWS=False 로 부르고 설정을 되돌린다."""
+    with _pin_vnew(VNEW_CHAR_FIDELITY=False, VNEW_3D_SIDE_VIEWS=False):
+        check()
+
+
+# char-fidelity T2b(지시서 100): 새 기본값(VNEW_3D_PROVIDER=tripo)에서 기대값이 달라지는 기존 검사도 부르는 줄에서 hunyuan 으로
+# 고정한다(검사 본문·기대값·들여쓰기는 그대로). 이유:
+#   check_vnew_characters — 3D 제출 본문 키·data URI·조회 주소·원장 수를 Hunyuan 본문 기준으로 본다.
+#   check_vnew_char_fidelity — cf-b(submit3d·buildTrace)·cf-m(3D 본문 키 6개)·cf-o(옛 본문 sha256)·cf-p 가 Hunyuan 본문을 본다.
+def _run_3d_hunyuan(check) -> None:
+    """`check()` 를 VNEW_3D_PROVIDER="hunyuan" 으로 부르고 설정을 되돌린다."""
+    with _pin_vnew(VNEW_3D_PROVIDER="hunyuan"):
+        check()
+
+
 def main() -> int:
     print("== vpoc1 check ==")
     check_compileall()
@@ -25564,7 +29438,7 @@ def main() -> int:
     check_cancel()
     check_dual()
     check_vnew()
-    check_vnew_characters()
+    _run_3d_hunyuan(lambda: _run_char_fidelity_off(check_vnew_characters))
     _run_fx_off(check_vnew_plan)
     _run_fx_off(check_vnew_locations)
     check_vnew_generate()
@@ -25604,11 +29478,14 @@ def main() -> int:
     check_previz_collision()
     check_previz_support()
     check_vnew_fx()
-    _run_casting_off(check_vnew_fx_prompt)
+    _run_char_fidelity_off(lambda: _run_casting_off(check_vnew_fx_prompt))
     check_vnew_fx_screen()
-    check_vnew_casting()
+    _run_char_fidelity_off(check_vnew_casting)
     check_vnew_take_real()
     check_vnew_take_real_screen()
+    _run_3d_hunyuan(check_vnew_char_fidelity)
+    check_vnew_3d_tripo()
+    check_vnew_char_fidelity_screen()
     print()
     if warnings:
         print(f"경고 {len(warnings)}건")

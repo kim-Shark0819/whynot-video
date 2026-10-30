@@ -1,6 +1,7 @@
 # 운영 배포 계획: Seedance fal 경유 전환 (073 fal-seedance-parity 반영 main → 운영)
 
-> 상태: **보류 — 설계자 지시(2026-10-27) "아직 운영배포는 하지 마라". 다시 지시가 있을 때까지 어떤 단계도 실행하지 않는다.** 이 문서는 계획이며, 승인 전에는 아무 단계도 실행하지 않는다(이번 주 원칙 7번).
+> 상태(2026-10-30 갱신): **단계 1(안전 모드 = BytePlus 유지)·단계 2(fal 등록) 사용자 승인(2026-10-30). 단계 3(BytePlus 제외)은 승인되지 않았고 하지 않는다.** 사용자 원문: "앞으로 추가로 운영에도 같이 배포를 진행해라", "seedance도 사용할 수 있고 fal seedance도 사용할 수 있게 해라". 단계 1의 `VPOC_ARK_SEEDANCE_ENABLED=true` 줄은 char-fidelity T3 커밋의 `deploy/config.prod.env`에 들어 있고, 같은 커밋이 운영 vnew도 켠다(`VNEW_ENABLED=true`, 같은 날 사용자 결정 "켠다" — 실행 순서·확인·되돌리기는 `docs/plans/2026-10-30-prod-vnew-enable.md`). 실행은 Claude가 한다(이번 주 원칙 7번 — Kiro는 계획만 쓴다).
+> 이전 상태: 보류 — 설계자 지시(2026-10-27) "아직 운영배포는 하지 마라". 2026-10-30 위 사용자 결정으로 풀렸다.
 > 개정 2026-10-27: 072 리뷰(O-1·O-2·O-3·O-10)와 스펙 `.kiro/specs/fal-seedance-parity/` 구현(작업 1~6)에 맞춰 design.md §9의 두 단계 순서(안전 모드 배포 → 등록 → 전환)로 고쳤다.
 > 이전 판(main `0271fdb0` 기준 한 번에 배포·배포 후 등록)은 쓰지 않는다. 진행 중 BytePlus 회차 실패(O-1), 플래그 되돌리기 불가(O-3), 등록 공백 동안 Luma 대체(O-2) 때문이다.
 > 관련: WORKLOG 2026-10-26·2026-10-27, 리뷰 보고서 `docs/reviews/2026-10-26-prod-release-review.md`, design.md §8·§9, tasks.md "설계자 승인 후 유료 검증".
@@ -9,11 +10,12 @@
 설계자 지시: "운영과 개발에 fal.ai의 seedance를 사용하도록 활성하고 기존 seedance는 제외".
 - 개발: 073 main 병합 시 자동 배포된다(단계 0).
 - 운영: 코드 배포(안전 모드) → fal 모델 2개 등록 → 플래그 전환, 세 번으로 나눠 켠다. 각 단계는 따로 승인받는다.
+- 2026-10-30 사용자 결정: 단계 1·2만 한다(등록은 `draft/complete`를 더해 3개). 단계 3(BytePlus 제외)은 하지 않는다. 운영 ②에는 BytePlus Seedance와 "Seedance 2.5 (fal)"이 함께 남는다.
 
 ## 2. 무엇이 바뀌나
-| 구분 | 지금 운영(`prod-ae21dc13`, 2026-10-20) | 단계 1 뒤(안전 모드) | 단계 3 뒤(전환) |
+| 구분 | 지금 운영(`prod-ae21dc13`, 2026-10-20) | 단계 1 뒤(안전 모드) | 단계 3 뒤(전환 — **승인되지 않음, 하지 않음**) |
 |---|---|---|---|
-| 이미지 | `ci-ae21dc13` | `ci-41ab5f0e` | 같음 |
+| 이미지 | `ci-ae21dc13` | 이번 main 커밋의 `ci-<sha>` | 같음 |
 | ② 모델 목록 | Luma + BytePlus Seedance 2.0/2.5 + 등록된 fal | 지금과 같다(`VPOC_ARK_SEEDANCE_ENABLED=true`) | Luma + 등록된 fal. "Seedance 2.5 (fal)" 하나(i2v·r2v 짝). BytePlus 없음 |
 | 옛 Seedance 저장 계획 | BytePlus로 생성 | BytePlus로 생성 | ②에서 "Seedance 2.5 (fal)"로 보이고 E6 안내. 로그 `vpoc.model.resolved reason=ark_disabled` |
 | 진행 중 BytePlus 회차 | — | BytePlus로 끝난다 | BytePlus로 끝난다(R1, 재생성 포함, 회차 금액 `regenUsd`) |
@@ -24,9 +26,9 @@
 - fal 모델 해제(`DELETE /api/vpoc/fal/models/<id>`)는 관리자 전용이다(비관리자 403 `AdminOnly`, E3). 등록은 그대로 누구나.
 - 금지 목록(`*seedance*2*fast*`)을 고를 때·제출 때도 다시 본다. 미등록 fal 회차는 Luma로 몰래 만들지 않고 failed(E5).
 - 웹툰 변환(dual) 프롬프트: 패널만 그림체 기준, 실사 인물 그림은 identity only, 패널 0장이면 2D 웹툰 앵커.
-- 프런트: `index.html`이 `vnew-previz.js`(three.js)를 더는 싣지 않는다. `app.js`가 `vnewEnabled`일 때만 동적 import한다. 운영은 `VNEW_ENABLED=false`라 three.js를 내려받지 않는다. Dockerfile이 `vnew-previz.js` 버전 쿼리도 치환한다.
-- `stitcher.py`의 `threads`(vnew 전용, 운영에서 쓰이지 않음)는 인코더에도 걸린다. 기본(None)은 명령이 그대로다.
-- `vnew/*`: 운영 `VNEW_ENABLED=false`라 꺼진 상태 그대로다.
+- 프런트: `index.html`이 `vnew-previz.js`(three.js)를 더는 싣지 않는다. `app.js`가 `vnewEnabled`일 때만 동적 import한다. Dockerfile이 `vnew-previz.js` 버전 쿼리도 치환한다. **같은 커밋으로 운영 `VNEW_ENABLED=true`가 되므로 운영도 앱을 처음 읽을 때 three.js를 받는다**(비동기, `docs/plans/2026-10-30-prod-vnew-enable.md`).
+- `stitcher.py`의 `threads`(vnew 전용)는 인코더에도 걸린다. 기본(None)은 명령이 그대로다.
+- `vnew/*`: 운영 `VNEW_ENABLED=true`로 켜진다(2026-10-30 사용자 결정). 영향·되돌리기는 vnew 계획서에 있다.
 
 ## 3. 사전 확인 (단계 1 전에 전부 충족)
 
@@ -40,12 +42,12 @@
 > - 남은 확인: 렌더 값(단계 1 커밋 때), 실행 직전 30분 운영 작업 없음.
 - [x] 073 main(`41ab5f0e`)에서 check_vpoc 전부 통과(CI `check:whynot` success, 로컬 `python -X utf8 tools/check_vpoc.py` 재실행 통과). 새 그룹 ip·rw·fr·du·rz·pm·ai·ad·ns·ml·vl·st·vm·pf 포함.
 - [x] fal 거절 샷이 failed로 끝난다(R15, 작업 7). 그 커밋이 `41ab5f0e`에 들어 있고 검사 pf-a~f가 통과한다. 개발계에서 거절된 샷(예: V-2)이 `submitted`에 남지 않고 ④에 한국어 거절 문구로 보인다(무료, 로그 `vpoc.fal.rejected`로 확인). 070 이전부터 운영의 모든 fal 모델에 있던 결함이라 단계 1 전에 필요하다.
-- [ ] 렌더 값에 `VPOC_POLL_GIVEUP_S="1800"`이 있다(R15.8).
+- [x] 렌더 값에 `VPOC_POLL_GIVEUP_S="1800"`이 있다(R15.8). (Kiro 2026-10-30, 로컬 `render.py` 렌더 + 검사 rw-c)
 - [x] 바뀐 코드 커버리지 80% 이상(Claude `coverage run tools/check_vpoc.py`).
-- [x] ECR `whynot-app`·`whynot-frontend`에 `ci-41ab5f0e`가 있다. 롤백용 `prod-ae21dc13`도 있다.
-- [ ] 렌더 값(`config.env.example` + `config.prod.env`, 검사 rw-c와 같은 방식):
-  - `VNEW_ENABLED=false`, `VPOC_MODEL_PICKER_ENABLED=true`, `VPOC_RAW_ERRORS=false`.
-  - 단계 1 커밋에서 `VPOC_ARK_SEEDANCE_ENABLED="true"`.
+- [x] ECR `whynot-app`·`whynot-frontend`에 `ci-41ab5f0e`가 있다. 롤백용 `prod-ae21dc13`도 있다. (2026-10-27 기준. 실제 배포 이미지는 이번 main 커밋의 `ci-<sha>`라 그 태그가 있는지 단계 1 직전에 다시 본다)
+- [x] 렌더 값(`config.env.example` + `config.prod.env`, 검사 rw-c와 같은 방식, Kiro 2026-10-30 로컬 렌더):
+  - `VNEW_ENABLED="true"`(2026-10-30 사용자 결정, vnew 계획서), `VPOC_MODEL_PICKER_ENABLED="true"`, `VPOC_RAW_ERRORS="false"`.
+  - `VPOC_ARK_SEEDANCE_ENABLED="true"`(char-fidelity T3 커밋).
   - 나머지 새 키는 base 값: `VPOC_FAL_SEEDANCE_FAMILY=bytedance/seedance-2.5/image-to-video=bytedance/seedance-2.5/reference-to-video`, `VPOC_FAL_SEEDANCE_MAX_S=15`, `VPOC_FAL_PROMPT_MAX_OVERRIDES=bytedance/seedance-2.5/*=4000`, `VPOC_FAL_SEEDANCE_TAG_STYLE=at`.
 - [x] 개발(단계 0): 개발 레지스트리에 i2v·r2v 둘 다 있고, 무료 확인 목록(6절)을 통과했다.
 - [x] 072 리뷰 "운영 배포 전 필수"가 0건이다: O-1(작업 1 `_submit_block_reason`), O-3(작업 1~4 템플릿·base 배선), O-2(이 계획의 두 단계 순서)로 해소했는지 확인한다.
@@ -54,31 +56,34 @@
 
 ## 4. 실행 단계 (단계마다 설계자 승인 후, 실행은 Claude)
 
-### 단계 1. 운영 배포(안전 모드) — 승인 필요
-1. `deploy/config.prod.env`에 `VPOC_ARK_SEEDANCE_ENABLED=true` 한 줄을 넣은 커밋을 main에 병합한다(MR).
+### 단계 1. 운영 배포(안전 모드) — 사용자 승인 2026-10-30
+1. `deploy/config.prod.env`에 `VPOC_ARK_SEEDANCE_ENABLED=true` 한 줄을 넣은 커밋을 main에 병합한다(MR). char-fidelity T3 커밋이 이 줄과 운영 vnew 켬(`VNEW_ENABLED=true`)을 함께 넣었다.
 2. 그 파이프라인의 수동 job `deploy:whynot:prod`를 실행한다.
    - job이 이미지에 `prod-<sha>` 보호 태그를 달고 `awstech/ai-deploy` `whynot/prod/*`에 커밋한다.
 3. 클러스터 안 ArgoCD 앱 `whynot-prod`의 자동 동기화와 롤아웃 완료를 기다린다.
 4. 확인(읽기 전용, 유료 호출 없음):
-   - `https://whynot.meta-clouds.com/api/health`의 `build.imageTag`가 `ci-41ab5f0e`다.
+   - `https://whynot.meta-clouds.com/api/health`의 `build.imageTag`가 이번 main 커밋의 `ci-<sha>`다.
    - ② 목록이 지금 운영과 같다(BytePlus 2개 + 등록된 fal).
    - 진행 중 BytePlus 회차가 있으면 계속 제출·조회된다.
-   - 프런트 첫 화면이 `vnew-previz.js`·`three.module.min.js`를 요청하지 않는다(브라우저 네트워크 탭).
+   - 운영 vnew를 함께 켜므로 첫 화면이 `vnew-previz.js`·`three.module.min.js`를 한 번 비동기로 요청한다(브라우저 네트워크 탭). 첫 화면 그리기가 그 요청을 기다리지 않는지 본다. vnew 확인 목록은 vnew 계획서 5절이다.
    - 비관리자 계정으로 fal 모델 해제를 시도하면 403과 E3이 보인다.
    - 앱 로그에 `vpoc.error`가 늘지 않는다(10분).
 
-### 단계 2. fal 모델 등록 — 승인 필요(단계 1 확인 뒤)
-- 등록할 것: `bytedance/seedance-2.5/image-to-video`, `bytedance/seedance-2.5/reference-to-video` 둘 다(얼굴은 짝까지 등록돼야 고를 수 있다, R2.2).
+### 단계 2. fal 모델 등록 — 사용자 승인 2026-10-30(단계 1 확인 뒤)
+- 등록할 것(3개):
+  - `bytedance/seedance-2.5/image-to-video`, `bytedance/seedance-2.5/reference-to-video` 둘 다(얼굴은 짝까지 등록돼야 고를 수 있다, R2.2).
+  - `bytedance/seedance-2.5/draft/complete`: vnew 통 테이크 초안 경로에 쓰인다. 개발 레지스트리에 있다(Claude 확인 2026-10-30). 코드에 이 이름이 박혀 있지 않으므로 등록 뒤 개발 레지스트리 항목과 caps·단가가 같은지 본다.
 - 방법은 둘 중 하나다.
   - (가) 설계자 승인 뒤 Claude가 운영 앱 파드 안에서 `fal.register(endpoint)`를 두 번 실행한다. fal 스키마·단가 조회만 하며 과금이 없다.
   - (나) 설계자가 관리자 계정으로 운영 화면 "fal에서 모델 가져오기"에서 등록한다. Claude는 운영 계정 비밀번호를 입력하지 않는다.
 - 확인(`GET /api/vpoc/fal/models`):
-  - 둘 다 `available`.
-  - caps: `durations` 4..30 · `resolutions` 480p/720p/1080p · i2v `endImageField=end_image_url` · r2v `referenceImagesField=image_urls` · 둘 다 `audioField=generate_audio` · `pricing` 채워짐(`1000 tokens`, 0.0214).
+  - 셋 다 `available`.
+  - caps(i2v·r2v): `durations` 4..30 · `resolutions` 480p/720p/1080p · i2v `endImageField=end_image_url` · r2v `referenceImagesField=image_urls` · 둘 다 `audioField=generate_audio` · `pricing` 채워짐(`1000 tokens`, 0.0214). `draft/complete`는 개발 레지스트리 항목과 같다.
   - 금지 패턴(`*seedance*2*fast*`) 항목이 있으면 목록에 사용 불가로 보인다.
-- 참고: 단계 2~3 사이에는 플래그가 true라 ②에 BytePlus와 "Seedance 2.5 (fal)"이 함께 보인다. 옛 저장값 치환은 일어나지 않는다.
+- 참고: 플래그가 true라 ②에 BytePlus와 "Seedance 2.5 (fal)"이 함께 보인다. 옛 저장값 치환은 일어나지 않는다. 2026-10-30 사용자 결정으로 이 상태가 최종이다(단계 3 안 함).
 
-### 단계 3. 전환 — 승인 필요(선행 조건 충족 뒤)
+### 단계 3. 전환 — **승인되지 않음, 하지 않는다**(2026-10-30)
+- 사용자 결정은 BytePlus Seedance와 fal Seedance를 둘 다 쓰는 것이다("seedance도 사용할 수 있고 fal seedance도 사용할 수 있게 해라"). 아래는 나중에 다시 지시가 있을 때를 위한 기록이다.
 - 선행 조건: 개발계 유료 검증 **V-2·V-3·V-6**(약 $4.37, 설계자 승인 2026-10-26)이 끝나 결과가 기록돼 있다. 실패 항목은 tasks.md "실패하면" 칸의 조치를 먼저 반영한다.
   - V-2 실패 → `VPOC_FAL_SEEDANCE_TAG_STYLE=plain`을 단계 3 커밋에 함께 넣는다(config만).
   - V-3 실패 → 키 장면 방식을 r2v 참고로 바꾸는 안을 검토한다(코드 변경, 이 계획 보류).
@@ -108,12 +113,12 @@
 | 전체 | `awstech/ai-deploy` `whynot/prod` 이번 커밋 revert(이미지 `prod-ae21dc13`) | 10/20 운영 상태. ArgoCD 자동 동기화 | 레지스트리 항목은 남는다(무해). 필요하면 관리자가 해제 |
 
 ## 6. 무료 확인 목록(운영·개발 공통, 유료 호출 없음)
-- 옛 Seedance 저장 계획의 ②에서 "Seedance 2.5 (fal)"이 선택되어 있고 E6 안내가 보인다(단계 3 뒤).
+- 옛 Seedance 저장 계획의 ②에서 "Seedance 2.5 (fal)"이 선택되어 있고 E6 안내가 보인다(단계 3 뒤 — 2026-10-30 결정으로 단계 3을 하지 않으므로 운영에서는 해당 없음).
 - ③ 화질 기본 720p, 선택지 480/720/1080p. 샷 길이 선택지 4~15초. ③ 저장도 같은 범위로 받는다.
 - ③ 미리보기 문장에 `@Image1…`이 있고, 번호 수가 참고 이미지 수와 같다.
 - `plan_view` 금액이 토큰식(720p 10초 ≈ $4.62)과 맞는다.
 - 비관리자 계정으로 해제하면 403과 E3이 보인다.
-- 첫 화면이 three.js를 내려받지 않는다(운영). 개발(vnew 켜짐)은 ④ 프리비즈가 열린다.
+- 첫 화면 그리기가 three.js를 기다리지 않는다(운영은 vnew 켬 뒤 three.js를 비동기로 받는다). 개발·운영 모두 ④ 프리비즈가 열린다.
 - 앱 로그에 `vpoc.error`가 늘지 않는다.
 
 ## 7. 영향과 위험
@@ -123,6 +128,6 @@
 - 비용: 배포·등록·무료 확인에는 유료 생성 호출이 없다. 유료 검증 V-2·V-3·V-6은 개발계에서 약 $4.37.
 
 ## 8. 승인
-- [ ] 단계 1(안전 모드 배포) 설계자 승인: ____ (날짜·방법)
-- [ ] 단계 2(등록, 방법 가/나) 설계자 승인: ____
-- [ ] 단계 3(전환) 설계자 승인: ____ (V-2·V-3·V-6 결과 확인 후)
+- [x] 단계 1(안전 모드 배포 = BytePlus 유지) 사용자 승인: 2026-10-30, 대화 지시. 원문 "앞으로 추가로 운영에도 같이 배포를 진행해라", "seedance도 사용할 수 있고 fal seedance도 사용할 수 있게 해라".
+- [x] 단계 2(등록 3개: i2v·r2v·`draft/complete`, 방법 가/나) 사용자 승인: 2026-10-30, 같은 지시.
+- [ ] 단계 3(전환 = BytePlus 제외): **승인되지 않음. 하지 않는다.** 위 원문은 BytePlus와 fal을 둘 다 쓰라는 결정이다.

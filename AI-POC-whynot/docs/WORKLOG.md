@@ -860,3 +860,312 @@
   4. 옷 판정은 낱말 목록이다. `_short_appearance` 판정은 부분 문자열이라 "a button nose"가 옷으로 빠진다. 옷 뒤 "a silver nose ring"은 코 낱말 때문에 남는다.
   5. 같은 꼴의 기존 문제: 나이가 있을 때 머리말 앞 "old-fashioned"는 old만 빠진다(`_PREFIX_AGE`, 실제 분석 문장에서 본 적 없음).
   6. 배포 뒤 개발 데이터에서 그 캐릭터의 자동 문장과 실사 테이크 ASSETS 외형을 읽기 전용으로 다시 확인해야 한다.
+
+### char-fidelity 스펙 — 회전 시트·한쪽 소품 좌우·사진 그대로의 기본 복장 (Kiro, claude-opus-5.5, 스펙만)
+- **배경**: 설계자가 개발계 캐릭터 "여의준"(`admin/char_20261030_a7b69d`) 결과에서 세 가지를 고쳐 달라고 했다(지시서 `.kiro/handoff/097-char-fidelity-spec.md`). Claude가 개발 데이터를 읽기 전용으로 본 원인은 다음과 같다.
+  1. 시트 4번째가 3/4 후면이 아니라 후면이었다.
+  2. 분석이 화면 왼쪽 손목의 시계를 "left wrist"로 썼고, 3D는 반대 손목에도 줄을 만들었다.
+  3. 기본 복장 규칙("겹옷을 모두 뺀 기본 한 벌")과 덧입힘 추가 복장 때문에 사진 속 옷과 다른 조합이 나왔다.
+- **이번 실행**: `.kiro/specs/char-fidelity/`(requirements·design·tasks), `docs/ANALYSIS.md` §3.6.2(캐릭터 메이커 지금 흐름과 변경 지점), 이 기록만 썼다. 앱 코드·검사 코드·매니페스트는 바꾸지 않았다. git·네트워크·유료 API를 쓰지 않았고 사용자 데이터를 읽지 않았다.
+- **PM 결정(Claude, 사용자 답 반영)**: D0 설정 2개(`VNEW_CHAR_FIDELITY`·`VNEW_3D_SIDE_VIEWS`, 둘 다 끄면 바이트 동일), D1 기준 사진 한 장의 옷 그대로, D2 소품 좌우는 화면 기준으로 받고 코드가 계산·그림마다 문장·검사·1회 재생성·반전·옆모습 제외, D3 45°씩 도는 시트·회전 검사, D4 Hunyuan3D에 옆모습 두 장, D5 화면, D6 마이그레이션 없음. 사용자 답(그대로): "좀 더 명확하게 나타낼 수 있는 의상으로 정한다. 정하는 의상은 첨부되는 사진 속 의상을 기반으로 하면 된다."
+- **설계에서 구체화·변경한 점**(requirements 「설계에서 PM 결정을 구체화하거나 바꾼 점」 S1~S12)
+  - S1 `sidedItemsEn`을 소품마다 `sightings` 목록으로 묶고 `labelKo`·`partEn`(부위 열거값)을 더했다.
+    - 근거: 글자 비교로 같은 소품을 묶으면 놓친다. 부위가 있어야 "RIGHT wrist" 문장과 "오른쪽 손목" 화면 줄을 만든다.
+    - 대안: PM의 납작한 목록 + itemEn 소문자 비교(기각 — 모델이 그림마다 이름을 다르게 쓰면 다수결이 갈린다).
+  - S2 "첫 참고 그림" 대신 기준 사진의 실제 참고 번호(시트 1·정면 2·후면 3·옆 4)를 쓴다.
+    - 근거: 정면·후면 참고 맨 앞은 시트·정면이다(`_build_variant`).
+    - 대안: 정면·후면 참고 순서를 바꿔 기준 사진을 맨 앞에(기각 — 시트·정면을 첫 참고로 둔 것은 인물 일관성 때문이고, 바꾸면 끔 상태와 다른 동작이 늘어난다).
+  - S3 번호와 함께 `baseSourceFileId`·`sourceFileId`·`baseWhereEn`을 저장한다(업로드 삭제·여러 인물 그림 대비).
+  - S4 R1·R2 프롬프트 조각은 충실 분석(`fidelity: 1`)에만 넣는다. 회전 문장·옆모습은 설정 켬이면 옛 분석에도 넣는다.
+    - 근거: 옛 `baseOutfitEn`은 겹옷을 뺀 옷이라 "기준 사진 그대로"와 부딪힌다.
+  - S5 검사가 모델 오류로 실패한 옆모습도 3D에서 뺀다. S6 그림에 글자가 있으면 반전하지 않는다. S7 옆모습 먼 쪽·후면 눈/볼은 "안 보임"도 맞다고 본다.
+  - S8 Seedream 3,000자 자르기 때문에 켬 프롬프트를 2,900자 안으로 맞춘다. 줄이는 순서는 styleEn → appearanceEn → 기본 복장 본문이다. 좌우·고칠 문장·회전·추가 요청은 줄이지 않는다.
+  - S9 분석 `max_tokens` 1,200 → 2,000(켬).
+  - S10 옆모습은 차례로 그린다.
+    - 근거: 줄어드는 시간이 variant당 약 1.5분뿐이다. 선점·하트비트·원장 흐름이 단순하다. ARK 동시 호출을 늘리지 않는다.
+    - 대안: 스레드 2개 병렬(기각), webtoon·real variant 병렬(범위 밖, 더 크게 줄일 수 있다).
+  - S11 추가 복장 안내 문장도 켬일 때 바꾼다.
+  - S12 버린 소품(동률·unclear)의 좌우 낱말은 지우지 않는다.
+  - 순수 함수는 새 파일 `vnew/char_fidelity.py`에 둔다(`fx.py`와 같은 방식). `characters.py`가 이미 약 2,450줄이고, 표 경우가 많아 따로 검사하기 쉽다.
+- **작업 나누기**(tasks.md): T1 분석·좌우·참고 순서·프롬프트·사진 속 옷(큼), T2 그림·시트 검사·옆모습·3D·재제출·이어 만들기(큼), T3 상세 응답·화면·문서·리뷰(중간). 검사 그룹은 `cf-a`~`cf-s`다. 새 기본값 때문에 `check_vnew_characters`·`check_vnew_fx_prompt`·`check_vnew_casting`을 부르는 줄에서 끔으로 고정한다. 개발 배포는 T3 뒤 한 번이다(VD-0~3).
+- **예상 비용 변화**: variant당 Seedream 보통 +2장($0.08), 최대 +4장($0.16). 검사 LLM 보통 +2회, 최대 +4회. 캐릭터(두 그림체) 빌드 보통 13분 → 19분.
+- **확인**: 스펙 3개 파일과 이 문서 두 곳만 썼다. 앱 코드(`app/`·`frontend/`·`tools/`·`k8s/`·`deploy/`)는 읽기만 했다. design의 함수·필드 이름은 `characters.py`·`settings.py`·`casting.py`·`vpoc/seedream.py`·`vpoc/llm.py`·`vnew.js`·`check_vpoc.py`를 읽고 맞췄다.
+- **정하지 못한 점(Claude 결정 필요, design §16)**
+  1. 다시 그린 그림의 원장 기록(지금도 안 남는다. 재생성이 늘면 최대 variant당 $0.16이 원장에 없다).
+  2. 최악 빌드 38분 > `BUILD_STALL_S` 30분(선점 확인이 이중 과금은 막는다).
+  3. Hunyuan3D v3 단가가 옆모습 입력으로 바뀌는지(네트워크 금지로 확인 못 함, VD-0).
+- **남은 이슈**: 검사 모델이 화면 좌우를 잘못 읽을 위험(VD-1에서 확인). `outfitEn`이 길어져 컷 단위 Kling 프롬프트 줄이기가 잦아질 수 있음. "on the left"처럼 부위 낱말 없는 좌우 표현은 지우지 못함. 시트·사진 속 옷 그림은 소품 좌우를 검사하지 않음.
+
+### char-fidelity 묶음 T1 — 분석·좌우 계산·참고 순서·프롬프트·사진 속 옷 (Kiro, claude-opus-5.5)
+- **범위**: tasks.md T1만 했다(지시서 `.kiro/handoff/098-char-fidelity-t1.md`). T2(그림·시트 검사, 옆모습, 3D, 재제출, 이어 만들기 옆모습)와 T3(상세 응답·화면·`docs/ANALYSIS.md`)는 하지 않았다. 커밋·push 하지 않았다. git·aws·kubectl·네트워크·유료 API를 쓰지 않았고 사용자 데이터는 읽지 않았다.
+- **Claude 결정(design §16)**: 1 다시 그린 그림 원장 (나), 2 `BUILD_STALL_S` (가) 그대로, 3 Hunyuan3D 단가 $0.675. 셋 다 T2 할 일이라 이번에는 코드에 넣지 않았다.
+- **먼저 한 일**: 코드를 바꾸기 전에 `_cf_off_fingerprints()`로 두 설정 끔 지문 32개를 재어 `_CF_OFF_SHA`에 적었다(두 번 재어 같았다). 대상은 분석 SYSTEM·도구(기본·캐스팅 끔), `_analyze` 인자(max_tokens 포함), 분석 블록·결과(추가 요청 없음·있음), 사람 수·복장 검사 호출 인자, 고정 바이트 `submit_3d` 본문, 시트·정면·후면 프롬프트 12개, 추가 복장 프롬프트 4개, 옛 캐릭터 `detail_view` JSON, 가짜 빌드 + 추가 복장 그리기의 외부 호출 순서·인자(`buildTrace`)와 저장 키 집합(`buildKeys`)이다.
+- **바꾼 것**
+  - `vnew/char_fidelity.py`(신규, import 는 `re`뿐): `PARTS`·`SIDES`·`VIEWS`·`FACINGS`·`BACK_MAY_HIDE`·`MAX_ITEMS`·`MAX_SIGHTINGS`·`SHEET_VIEWS`·`SHEET_FACE_LEFT`, `clean_line`·`_one_line`·`clip_words`·`pick_index`·`strip_item_side_words`·`character_side`·`resolve_sided_items`·`strip_side_words`·`apply_sides`·`photo_layers`·`reference_order`·`pronoun`·`side_sentence`·`side_sentences`.
+  - `vnew/settings.py`: `VNEW_CHAR_FIDELITY`·`VNEW_3D_SIDE_VIEWS`(둘 다 기본 true, `VNEW_TAKE_REAL` 바로 뒤). `VNEW_3D_SIDE_VIEWS`는 T1 코드에서 아직 읽지 않는다(T2).
+  - `vnew/characters.py`
+    - §4: `_ANALYZE_SYSTEM_FIDELITY`·`_PART_ENUM`·`_ANALYZE_FIDELITY_FIELDS`·`_ANALYZE_MAX_TOKENS_FIDELITY`(2000), `_analyze`(max_tokens), `_analyze_system`, `_analyze_tool`, `analyze_sources`(켬이면 그림마다 `Image N:` 글), `_with_fidelity`(신규).
+    - §6: `_SHEET_ROTATION`·`_ONE_PERSON_F`·`_PROMPT_MAX`(2900), `_is_fidelity_analysis`·`_valid_sided_item`·`_sided_items`·`_pronoun_of`·`_figure_ref`·`_source_clause`·`_join`·`_clip_outfit_body`·`_budget_prompt`·`_fidelity_prompt`·`_side_prompt`·`_photo_outfit_prompt`(신규), `_sheet_prompt`·`_front_prompt`·`_back_prompt`(켬이면 `_fidelity_prompt`), `_outfit_prompt`(켬 + 충실 분석 소품이면 덧입힘 뒤 좌우 문장).
+    - §8: `_reference_jpegs`(신규). `run_build`·`run_resume_variant`·`run_rebuild_variant`의 참고 반복문 자리를 이 도우미로 바꾸고 `base_first`를 넘긴다.
+    - `_build_variant`: `base_first` 인자, 켬이면 시트·정면·후면 프롬프트를 `_fidelity_prompt(source_no=1·2·3)`로 만든다. 검사 함수(`_gen_checked`·`_gen_sheet_checked`·`_count_people`·`_check_outfit_consistency`)는 지금 그대로다.
+    - §9: `sync_auto_outfits`(켬 + 충실 분석이면 `kind:"photo"`·`sourceFileId`·`whereEn`·`sidedItems`), `_photo_outfit_fields`(신규), `run_build_outfit`(photo 경로), `_photo_outfit_source`(신규).
+  - `k8s/workloads.yaml.tmpl`·`deploy/config.env.example`: env 2개(design §2 원문, `VNEW_TAKE_REAL` 바로 뒤, 되돌리기 주석).
+  - `tools/check_vpoc.py`: `PARITY_ENV_KEYS`에 두 키, 하네스 `_CfFakes`·`_CfSyncThread`·`_cf_seed_char`·`_cf_old_char`·`_cf_llm_view`·`_cf_sha`·`_cf_jpeg`, `_cf_off_fingerprints`·`_CF_OFF_SHA`, design 원문 상수 `_CF_*`, `check_vnew_char_fidelity`(cf-a·b·c·d·f·g·h·i·l), `_run_char_fidelity_off`, `main()` 고정 3줄과 새 그룹 호출.
+- **결정(design 과 다르거나 design 이 정하지 않은 점)**
+  - D1 — `_gen_sheet_checked`에 선택 인자 `prompt`를 더했다(design §18 목록 밖). `_build_variant`가 기준 사진 번호(Image 1)를 넣은 시트 프롬프트를 지금 검사 함수에 넘기려면 필요하다. 없으면 지금처럼 `_sheet_prompt`라 끔 바이트가 같다(cf-b). 대안: 시트만 SOURCE 없이 두고 T2 `_gen_sheet_fidelity`로 넘기기(기각 — T1 할 일 "시트·정면·후면 프롬프트를 `_fidelity_prompt`로" 와 R1.6을 못 지킨다).
+  - D2 — **보안 리뷰 조치**: `apply_sides`·`strip_side_words`·`strip_item_side_words`가 정규식 전에 글을 한 줄로 줄인다(`_one_line`). 실측: 공백 2,000칸에 28초, 4,000칸 274초, 8,000칸 2,362초(되짚기 폭발). 고친 뒤 200,000자 0.4초 이내. 그래서 켬 `baseOutfitEn`은 소품이 없어도 줄바꿈·연속 공백이 한 칸이 된다(design 은 꼬리만 뗀다고 했다).
+  - D3 — 꼬리 정규식은 `[^.]*\.` 대신 글 끝까지(`.*\Z`) 뗀다. 소품 이름에 마침표가 있어도(예: "St. Laurent watch") 두 번 적용한 결과가 같다.
+  - D4 — 가르마 규칙 4·5를 규칙 1~3보다 먼저 적용한다. 규칙 2가 "left parting"을 "parting"으로 먼저 바꾸면 "side parting"이 되지 않는다.
+  - D5 — 사진 속 옷 원본은 S3 읽기 실패뿐 아니라 업로드 목록에 없는 그림도 쓰지 않는다. `remove_source`는 S3 파일을 지우지 않아 "지운 그림"이 읽기로는 잡히지 않는다(변형 검사로 찾은 빈칸, cf-l). 로그는 `vnew.build_outfit.source_missing char= outfit= err=not_in_sources|{예외 종류}`(메시지·키 없음).
+  - D6 — `photo_layers`에 `limit` 키워드 인자를 더했다(`char_fidelity`는 settings 를 import 하지 않는다. `_with_fidelity`가 `MAX_OUTFITS`를 넘긴다). 사진 속 옷 `labelKo`는 한 줄 60자(사용자 복장 이름 상한과 같다), 비면 promptEn 앞 60자.
+  - D7 — 로그 `dropped`는 "모델이 준 소품 수 − 정한 소품 수"다(design 은 "버린 수"만 정했다).
+  - D8 — `SHEET_FACE_LEFT`·`FACINGS` 상수도 이번에 두었다(design §5.1 목록. T2 함수가 쓴다).
+  - D9 — 켬 길이 예산 실측(시트, 단계 1~4는 고칠 문장 171자 포함): 여의준 수준(외모 200·스타일 300·복장 500자, 고칠 문장 없음) 2,678자 단계 0 · 단계 1 2,319자 · 단계 2 2,464자 · 단계 3 2,700자 · 단계 4 2,900자(잘림 로그). design 추정(약 2,700자)과 맞다.
+- **기존 검사 고정(부르는 줄에서만, 본문·기대값·들여쓰기 그대로)**: `check_vnew_characters`, `check_vnew_fx_prompt`(기존 캐스팅 끔 고정 안쪽), `check_vnew_casting`. 셋 다 고정 없이 돌리면 실패하는 것을 확인했다((af) 추가 복장 이미지 0장, (fx-k) SYSTEM, (cast-d) SYSTEM). 그 밖에 깨진 검사는 없다.
+- **확인**
+  - `python -m py_compile`(characters·char_fidelity·settings·check_vpoc) 통과. `python -X utf8 tools/check_vpoc.py` 전부 통과: ok 59줄(이전 58 + cf 1), FAIL·WARN 0. rw-a 는 템플릿 env 17개다(이전 15 + 2).
+  - cf-b: 두 설정 끔 지문 32개가 구현 전 sha256 과 같다. `VNEW_CHAR_FIDELITY`만 끔(옆모습 켬)에서도 빌드·상세를 뺀 29개가 같다.
+  - 여의준 입력: `sidedItems[0].side == "right"`, `baseOutfitEn`이 "… on the RIGHT wrist only."로 끝난다(cf-c·cf-d·cf-g).
+  - 구현 상수(충실 SYSTEM·ROTATION·ONE_F·도구 필드·부위 enum)를 design.md 원문과 글자째 비교해 같았다(임시 스크립트, 저장소 밖).
+  - 변형 검사 17개(소스 한 곳을 바꿔 새 프로세스에서 cf 그룹 실행): 17개 모두 잡았다. 처음 돌렸을 때 "목록에서 지운 원본" 1개를 놓쳐 검사를 더했다(D5).
+  - 바뀐 줄 커버리지(`coverage run --source=app/src tools/check_vpoc.py`, coverage 7.17, 시작 전 사본과 difflib): 실행문 396줄 중 396줄(100%). `characters.py` 218/218, `char_fidelity.py` 176/176, `settings.py` 2/2. coverage 데이터는 저장소 밖에 두고 지웠다.
+  - 실제 외부 호출 0회: cf 그룹은 LLM(`_guard_real_llm`)·Seedream·fal·urlopen 원래 함수를 막고 0회를 스스로 확인한다. botocore `_make_api_call`·urlopen 을 막고 기록한 cf 그룹 실행에서 boto3 0회·urlopen 0회였다.
+  - 공백만 바뀐 줄 0, 줄 끝 공백 0, 지운 함수·클래스 정의 0, 바뀐 7개 파일 CRLF 0, 저장소 안 `.coverage` 0.
+- **3단계 리뷰**
+  - 보안
+    - 비밀값: 새 비밀값·키 없음. 로그는 번호·개수·종류·길이만(`vnew.char.analysis_fidelity base= sided= dropped= layers=`, `vnew.char_prompt.clipped kind= variant= len=`, `source_missing … err=예외 종류`). cf-g가 로그에 모델 글이 없음을 본다.
+    - 입력 검증: 모델 글은 한 줄로 줄이고 자른다(itemEn 80·labelKo 12·whereEn/baseWhereEn 60·사진 속 옷 promptEn 400·이름 60). 열거값은 목록 밖을 버리고 번호는 bool·음수·범위 밖·소수를 버린다(cf-c).
+    - 경로 주입: `sourceFileId`·`baseSourceFileId`는 모델 글이 아니라 서버의 업로드 목록에서 번호로 고른다. 원본을 읽기 전에 지금 업로드 목록에 있는지도 본다(D5).
+    - 외부 전송: 새 외부 호출이 없다. 사진 속 옷 원본은 지금 참고 그림처럼 Seedream 본문 base64 로만 간다.
+    - 발견·조치: 좌우 정규식 되짚기 폭발(D2) → 고침, cf-d 회귀 검사(5만 칸 2초 안).
+  - 성능(512Mi)
+    - 메모리: 참고 그림 수는 그대로(최대 4장). 사진 속 옷은 원본 1장을 한 번 읽어 Seedream 요청마다 1장 더 보낸다(정면 2장·후면 3장).
+    - 외부 호출: T1은 Seedream·LLM 호출을 늘리지 않는다(사진 속 옷 Seedream 4·LLM 0, R7). 분석 max_tokens 1,200 → 2,000(켬)으로 응답이 몇 초 길어질 수 있다. 타임아웃은 바꾸지 않았다.
+    - CPU: 예산 맞추기는 프롬프트를 최대 4번 만든다(문자열 연산). 정규식은 D2 뒤 선형이다.
+    - 발견: 켬 시트 프롬프트(약 2,700자)에 지금 `_gen_sheet_checked` 재생성 문장(problems + 기본 복장 전문)이 붙으면 3,000자를 넘어 끝이 잘릴 수 있다(남은 이슈 1).
+  - 운영성
+    - 되돌리기: `config.<target>.env`에 `VNEW_CHAR_FIDELITY=false` 한 줄 + 재배포. 끄면 지금과 바이트 단위로 같다(cf-b). 저장된 새 필드는 지우지 않는다.
+    - 진행 중 작업: 배포 전에 분석한 캐릭터를 이어 만들면(옛 분석) 참고 순서는 업로드 순, SOURCE·좌우 문장 없음, 회전 문장·ONE_F 는 들어간다(결정 S4, cf-h·cf-i). 새 코드가 만든 분석을 옛 코드 이미지가 읽어도 오류는 없다(`outfitLayersEn`의 새 키는 `_parse_outfit_layers`가 무시하고, `baseOutfitEn` 꼬리 문장은 그대로 프롬프트에 들어간다. photo 후보는 덧입힘으로 그린다).
+    - 재시작 뒤 이어하기: T1은 새 진행 상태를 만들지 않는다. 지금 이어 만들기 규칙 그대로다.
+    - 발견: 없음.
+- **남은 이슈**
+  1. 켬 시트 재생성 프롬프트 길이: 지금 `_gen_sheet_checked`가 붙이는 고칠 문장(모델 problems 를 정리 없이 잇고 기본 복장 전문을 다시 붙인다)이 예산 밖이라 3,000자를 넘을 수 있다. T2 `_gen_sheet_fidelity`(FIX 자리, problems 120자 × 5)로 바뀌면 풀린다.
+  2. `VNEW_3D_SIDE_VIEWS`는 아직 효과가 없다(T2). 템플릿·base 주석은 T2 뒤 동작을 적었다. 개발 배포는 T3 뒤 한 번이다.
+  3. 정하지 못한 소품(동률·unclear)의 좌우 낱말은 기본 복장 본문에 남는다(결정 S12). "on the left"처럼 부위 낱말 없는 좌우 표현도 지우지 못한다.
+  4. 켬 기본 복장 본문의 소품 언급(예: "and a round wristwatch with a brown strap")은 남고, 꼬리 문장이 쪽을 정한다. 개발계 VD-1 그림에서 확인한다.
+  5. `docs/ANALYSIS.md` 갱신(§3.6.2 구현 결과·§7.1 설정 표·§10.1 검사 목록)은 T3 이다.
+
+### char-fidelity 묶음 T2 — 그림 검사·시트 검사·옆모습·3D·재제출·이어 만들기 (Kiro, claude-opus-5.5)
+- **범위**: tasks.md T2만 했다(지시서 `.kiro/handoff/099-char-fidelity-t2.md`). T3(상세 응답·화면·`docs/ANALYSIS.md`)는 하지 않았다. 커밋·push 하지 않았다. git·aws·kubectl·네트워크·유료 API를 쓰지 않았고 사용자 데이터는 읽지 않았다. 3D 공급자는 Hunyuan3D v3 그대로다.
+- **Claude 결정 반영(099)**
+  1. 다시 그린 그림 원장 (나): `_gen_view_checked`·`_gen_sheet_fidelity`가 돌려준 `draws`만큼 `_charge_draws`로 남긴다. 첫 장은 지금 종류, 다시 그린 장은 `{kind}-retry`(sheet·front·back·left·right). 끔·`_gen_checked` 경로는 1건(지금 원장, cf-b `buildTrace` 같음).
+  2. `BUILD_STALL_S` 그대로.
+  3. `MODEL3D_USD` 기본값 0.375 → 0.675, 주석에 fal 가격표 근거(Normal $0.375 + multi-view +$0.15 + custom face count +$0.15). 이 값으로 깨진 기존 검사는 없었다(전체 검사 통과). 그래서 env 0.375 고정을 넣은 검사도 없다.
+  4. 켬 시트 재생성: `_gen_sheet_fidelity`가 고칠 문장을 `_fidelity_prompt(fix=…)`로 넣어 `_budget_prompt`(2,900자) 안에 둔다. cf-k가 여의준 수준 입력(외모 200·스타일 300·복장 500자 + 추가 요청)에서 4번째 인물 + 복장 불일치로 다시 그린 프롬프트를 잰다: 2,876자, 잘림 로그 0, FIX·그림체·추가 요청·회전 문장 남음. T1 방식(예산 뒤에 붙임)이면 3,631자였다.
+- **먼저 한 일**: 코드를 바꾸기 전에 `_cf_3d_old_fingerprints()`로 옛 variant(옆모습 키 없음)의 3D 제출·재제출 본문, `_build_3d_from_images` 본문, 이어 만들기 호출 순서(그림 3개·3D 요청 없음 / 3D 요청 있음)를 재어 `_CF_3D_OLD_SHA` 6개로 적었다(두 번 재어 같았다). 시작 전 사본은 저장소 밖에 복사했다(HEAD 3475a7f = 5f8d891 + 지시서 커밋).
+- **바꾼 것**
+  - `vnew/char_fidelity.py`(import 는 그대로 `re`뿐): `SEEN_FLAT`·`SEEN_SIDE`·`VIEW_FACINGS`·`SHEET_VIEW_VALUES`·`SHEET_FACE_SIDES`·`SIDE_KO`·`MAX_PROBLEMS`·`SHEET_DESC`·`WARN_*`, `seen_values`·`expected_facing`·`expected_seen`·`normalize_view_obs`·`view_mismatches`·`flip_observation`·`can_flip`·`view_fix_text`·`normalize_sheet_obs`·`sheet_mismatches`·`sheet_fix_text`·`sheet_figures_text`·`view_warnings`·`side_warnings`·`merge_warnings`.
+  - `vnew/characters.py`
+    - §7: `_VIEW_CHECK_MAX_TOKENS`(500)·`_SHEET_CHECK_MAX_TOKENS`(600)·`_VIEW_SYSTEM_HEAD`·`_VIEW_ITEMS_FLAT`·`_VIEW_ITEMS_SIDE`·`_VIEW_SYSTEM_TAIL`·`_SHEET_TOOL`·`_SHEET_SYSTEM`(design 원문), `_view_tool`·`_view_system`·`_inspect_view`·`_inspect_sheet`·`_mirror_jpeg`·`_gen_view_checked`·`_sheet_outfit_fix`·`_gen_sheet_fidelity`(신규). PIL import 에 `ImageOps`.
+    - §10: `left_key`·`right_key`·`_HUNYUAN_SIDE_FIELDS`·`_charge_draws`·`_set_variant_checked`·`_set_view_check`·`_draw_side_views`·`_stored_side_view`·`_needs_side_views`·`_resume_side_views`(신규), `submit_3d`(`left_square`·`right_square`)·`_make_3d_resubmit`(`left_sq`·`right_sq`)·`_build_3d_from_images`(`left`·`right`)·`_build_variant`(검사·옆모습 흐름)·`run_retry3d`(저장된 옆모습)·`run_resume_variant`(옆모습만 이어 그리기).
+  - `vnew/settings.py`: `MODEL3D_USD` 기본값·주석(결정 3)만.
+  - `tools/check_vpoc.py`: `_CF_3D_OLD_SHA`·`_cf_3d_old_fingerprints`, 하네스 `_CfFakesT2`(그림·시트 검사 가짜, 왼쪽·오른쪽 반 색이 다른 그림, Seedream hook)·`_cf_halves`·`_cf_mirror_ok`·`_cf_view_answer`·`_cf_sheet_answer`·`_CfEnv`·`_sheet_old_fix`, design 원문 상수, `_cf_t2_bodies`(cf-e·cf-f2·cf-j·cf-k·cf-m·cf-n·cf-o·cf-p·cf-q). `check_vnew_char_fidelity`는 T1 본문 뒤에 T2 본문을 같은 틀로 돌린다(docstring·실행 목록·끝까지 돈 검사 목록·ok 문구만 바꿨다).
+- **결정(design 과 다르거나 design 이 정하지 않은 점)**
+  - E1 — 시트 복장 고칠 문장의 끝 "…nothing else: {기본 복장}." 은 첫 프롬프트에 남은 자리(2,900 − 첫 프롬프트 길이 − 1)에 들어갈 때만 기본 복장 글을 붙인다. 넘치면 기본 복장 글 반복만 뺀 "…nothing else." 를 쓴다. 기본 복장은 이미 WHO 에 있고, 반복 때문에 예산이 넘치면 끝의 그림체·추가 요청이 잘린다(T1 ONE_F 가 옷 글 반복을 뺀 것과 같은 이유). 짧은 분석은 지금 문장 그대로다(cf-k). 끝 마침표는 한 번 떼고 붙인다("only.." 방지).
+  - E2 — `_gen_sheet_fidelity`는 첫 시트를 그린 뒤에도 하트비트를 찍는다(design 은 재생성 뒤만). 그림마다 하트비트(R4.8)와 맞춘다.
+  - E3 — `viewCheck.front`·`back`은 그림 검사(`_gen_view_checked`, 정한 소품 있음)로 검사했을 때만 쓴다. 소품이 없어 지금 사람 수 검사(`_gen_checked`)를 쓰면 ok·fixed·unchecked 를 가릴 수 없어 쓰지 않는다. `viewCheck.sheet`는 켬이면 늘 쓴다.
+  - E4 — `_resume_side_views`의 warning 은 저장된 warning + 옆모습 결과 전체(재시작 전에 끝낸 쪽 포함)로 다시 만든다. 옆모습 warning 은 마지막 `model3d` patch 에서만 저장되므로, 왼쪽을 뺀 뒤 끊기면 그 문구가 사라지기 때문이다(cf-p).
+  - E5 — 저장된 옆모습을 못 읽으면 `vnew.{retry3d|resume}.side_missing char= variant= view= err=예외 종류`를 남기고 그 쪽만 뺀다(design 표에는 retry3d 만 있다).
+  - E6 — design §18 목록 밖 도우미: `_view_system`·`_charge_draws`·`_sheet_outfit_fix`·`_set_variant_checked`·`_stored_side_view`, `_build_variant` 안 `plain_prompt`·`checked_view`, char_fidelity 의 `seen_values`·`_count`·`_item_fix`·`_drawn_as`·`sheet_figures_text`·`side_warnings`·`merge_warnings`. `plain_prompt`는 지금 정면·후면 줄을 들여쓰기만 바꿔 옮기지 않으려고(공백만 바뀐 줄 0) 두었다.
+  - E7 — `normalize_sheet_obs`는 dict 가 아닌 인물 항목을 other·hidden 으로 두어 자리를 지킨다(빼면 인물 수가 줄어 엉뚱한 "다섯 인물" 고칠 문장이 된다). `consistent`는 True 또는 "true" 만 참이다. 기본 복장이 빌 때 consistent=true 는 `_inspect_sheet`에서 정한다.
+  - E8 — 시트 고칠 문장 `{got}`의 관사는 모음이면 "an"("an other view"), 얼굴 쪽은 left·right 일 때만 붙인다(center 는 "facing the center" 가 어색하다).
+  - E9 — `_inspect_view`·`_inspect_sheet`는 응답이 dict 가 아니면 `failed err=bad_payload`를 남기고 None 이다.
+- **기존 검사 고정**: 새로 고정한 검사는 없다. T1 에서 고정한 `check_vnew_characters`·`check_vnew_fx_prompt`·`check_vnew_casting` 세 줄은 그대로 두 설정 끔이다. 결정 3(0.675) 때문에 고친 검사도 없다.
+- **확인**
+  - `python -m py_compile`(characters·char_fidelity·settings·check_vpoc) 통과. `python -X utf8 tools/check_vpoc.py` 전부 통과: ok 59줄, FAIL·WARN 0(약 83초).
+  - cf-b(T1 끔 지문 32개) 그대로. cf-o: 옛 variant 3D 본문·재제출 본문·`_build_3d_from_images` 본문이 켬·끔·옆모습만 켬에서 구현 전 sha256 과 같다. cf-p: 끔 이어 만들기 호출과 3D 요청이 있는 이어 만들기 호출(켬·끔)이 구현 전 sha256 과 같다.
+  - cf-j: 소품 없음 → `_count_people` 4회(그림체 2 × 정면·후면), 인자가 끔과 같고 정면·후면 `emit_view_check` 0회.
+  - cf-m: variant당 Seedream/검사 LLM 보통 5/5, 최악 10/10, 빌드 1회 최악 20/20(R7 상한).
+  - cf-n·cf-j: 반전 그림은 픽셀 비교로 좌우가 뒤집혔다(왼쪽 반·오른쪽 반 색이 다른 가짜 그림). 반전으로도 안 맞는 옆모습은 키 ""·저장 없음·3D 본문에 없다.
+  - cf-q: 선점을 뺏으면(시트 재생성 직전·왼쪽 재생성 직전·오른쪽 직전·3D 제출 직전) 다음 Seedream·3D 제출 0회, 상태 그대로, `vnew.build_variant_claim_lost` 1줄. 켬 빌드에서 Seedream 12회·3D 제출 2회 모두 직전에 선점 확인, 그림마다 바로 뒤 하트비트. 가짜 시계 20분 동안 대기 variant 가 끊긴 것으로 보이지 않았다.
+  - 변형 검사 10개(char_fidelity·characters 함수를 바꿔 끼워 cf 그룹 실행): 10개 모두 잡았다.
+  - 바뀐 줄 커버리지(`coverage run --source=app/src tools/check_vpoc.py`, coverage 7.17, 시작 전 사본과 difflib): 실행문 496줄 중 496줄(100%). `characters.py` 308/308, `char_fidelity.py` 187/187, `settings.py` 1/1. coverage 데이터는 저장소 밖(`%TEMP%`)에 두었다.
+  - 실제 외부 호출 0회: cf 그룹이 LLM·Seedream·fal·urlopen 원래 함수를 막고 스스로 센다. botocore `_make_api_call`·urlopen·socket 연결을 막고 기록한 cf 그룹 실행에서도 0회였다.
+  - 공백만 바뀐 줄 0, 줄 끝 공백 0, 지운 함수·클래스 정의 0, 바뀐 6개 파일(tasks.md 포함) CR 0, 저장소 안 `.coverage` 0.
+- **3단계 리뷰**
+  - 보안
+    - 비밀값: 새 비밀값·키 없음. 새 로그(`vnew.char.view_check`·`vnew.char.sheet_check`·`*.failed`·`*.side_missing`)는 상태·개수·열거값·예외 종류만 남긴다. 소품 글·프롬프트·S3 키·URL 없음.
+    - 입력 검증: 검사 응답은 열거값 밖을 버리고(facing → other, view → other, faceSide → hidden), 번호는 범위·bool 을 검사하고, 사람 수는 정수·숫자 글자만, lettering 은 True 만 참이다(cf-e). 모델 `problems`는 한 줄 120자 × 5개로 줄여 Seedream 고칠 문장에 넣는다. 지금 끔 경로(`_gen_sheet_checked`)는 정리 없이 넣는다(바꾸지 않았다).
+    - 외부 전송: 옆모습은 fal 본문 data URI(정사각 패딩)로만, 검사는 Bedrock 바이트 블록으로만 보낸다. 서명 URL 을 보내지 않는다. 결과는 `users/{owner}/characters/{id}/{variant}/v{n}/left.jpg`·`right.jpg`(IRSA `users/*` 안).
+    - 경로: 옆모습 키는 서버가 `_variant_dir`로 만든다. 읽을 때도 서버가 쓴 `leftKey`·`rightKey`만 읽는다(지금 `frontKey`와 같은 신뢰 수준).
+    - 반전: Seedream 결과(1440x2560 이하)만 디코드한다. 사용자 업로드는 뒤집지 않는다.
+    - 발견·조치: 조치할 것 없음.
+  - 성능(512Mi)
+    - 메모리: variant 빌드가 더 쥐는 것은 옆모습 JPEG 2장(장당 약 0.5~1MB), 정사각 2장(장당 약 0.1~0.3MB), 3D 본문 data URI 2개(정사각의 1.37배)와 그 JSON 직렬화 사본이다. 3D 본문은 data URI 4개(약 0.6~1.6MB)와 직렬화 사본을 합쳐 제출 순간 몇 MB 다. 재제출 콜백이 정사각 4장(약 1MB 안)을 폴링 동안(최대 15분) 쥔다. 반전은 그림 1장을 디코드해 RGB 2벌(약 11MB씩)을 잠깐 쓴다. 빌드 하나에 수십 MB 안쪽이고, variant 는 차례로 돈다.
+    - 발견·조치: `_resume_side_views`가 `_reference_jpegs`로 읽은 업로드 4장을 3D 폴링 내내 쥐고 있었다 → 기준 사진 1장만 남기고 바로 놓는다(`del refs`). 업로드 3장 읽기(S3 GET)는 이어 만들기 경로에서만 남는다(남은 이슈 6).
+    - 외부 호출: R7 상한(cf-m). 정면·후면 그림 검사의 첫 그림은 바깥 선점 확인 + 안쪽 선점 확인으로 char.json 읽기가 1번 더 있다(그림 1장 60~100초에 비해 작다). 옆모습마다 쓰기 3번(하트비트·viewCheck·하트비트). 타임아웃은 바꾸지 않았다.
+    - 시간: variant당 보통 약 +3분, 최악 빌드 약 38분(결정 2로 `BUILD_STALL_S` 그대로).
+  - 운영성
+    - 되돌리기: `VNEW_3D_SIDE_VIEWS=false`면 옆모습을 그리지 않고, 저장된 옆모습도 retry3d·이어 만들기에서 보내지 않는다(cf-o). `VNEW_CHAR_FIDELITY=false`면 시트·정면·후면 검사가 지금 함수다. 둘 다 끄면 호출·원장·본문이 지금과 같다(cf-b·cf-o·cf-p). 단가는 `VNEW_3D_USD=0.375` 한 줄로 되돌린다.
+    - 진행 중 작업: T1 이미지로 만들던 variant 를 T2 가 이어 만들면, 그림 3개가 있고 3D 요청이 없을 때 옆모습만 그리고 3D 로 간다(R4.7, 옛 분석이면 SOURCE·좌우 문장 없음). 3D 요청이 있으면 조회만 한다. 옛 코드 이미지로 되돌리면 `leftKey`·`viewCheck`를 읽지 않을 뿐 오류가 없다.
+    - 재시작 뒤 이어하기: 옆모습 하나를 끝낼 때마다 `viewCheck`·키를 저장해 남은 쪽만 그린다. 그리는 동안 variant 는 `images`라 끊기면 자동 이어 만들기 대상이다(cf-p).
+    - 발견·조치: 왼쪽을 3D 에서 뺀 뒤 끊기면 이어 만들기에서 그 warning 이 사라지는 문제를 설계 중 찾아 결과 전체로 다시 만들게 했다(E4).
+- **남은 이슈**
+  1. 원장은 `_gen_*`이 돌려준 뒤 남긴다. 선점 뺏김·재생성 Seedream 실패·파드 종료로 도중에 끊기면 이미 그린 그림이 원장에 없다(지금 `_gen_checked`와 같은 방식). 소품 없는 정면·후면(`_gen_checked`)의 재생성도 결정 1 범위 밖이라 1건만 남는다.
+  2. 시트 재생성 고칠 문장이 길면(틀린 인물 둘 이상 + 복장 problems 여러 개) 여의준 수준 입력에서 2,900자를 넘어 단계 4(끝 자름·로그)로 갈 수 있다. 실측 여유는 인물 하나 + problem 하나에서 24자다.
+  3. 시트 4번째(3/4 후면) 인물은 얼굴 쪽이 left 여야 맞다고 본다(design). 검사 모델이 hidden 으로 답하면 맞는 시트도 다시 그린다. VD-1 로그 `vnew.char.sheet_check figures=`로 확인한다.
+  4. 옆모습 Seedream 이 실패하면(필터 등) variant 전체가 failed 다(design §12). 정면·후면은 남아 있어 3D 만 다시(옆모습 키가 있으면 함께)로 복구한다.
+  5. `deploy/config.env.example`의 단가 주석이 아직 `VNEW_3D_USD=0.375`다(T2 범위 밖). `docs/ANALYSIS.md` 갱신과 함께 T3 에서 고친다.
+  6. `_resume_side_views`는 design 대로 `_reference_jpegs`를 불러 업로드를 최대 4장 읽고 1장만 쓴다(이어 만들기 경로의 S3 GET 3번).
+  7. Hunyuan3D `left_image_url`·`right_image_url` 좌우 규칙은 개발계 VD-1 GLB 렌더로 확인한다(반대면 `_HUNYUAN_SIDE_FIELDS` 한 줄).
+
+### char-fidelity 묶음 T2b — 캐릭터 3D 공급자 Tripo H3.1: 얼굴 일그러짐 개선 (Kiro, claude-opus-5.5)
+- **범위**: 지시서 `.kiro/handoff/100-char-3d-tripo.md`. 스펙 보강(requirements R8·design §19·tasks T2b)과 구현을 함께 했다. T3(화면 이름표·`docs/ANALYSIS.md`)는 하지 않았다. 커밋·push 하지 않았다. git·aws·kubectl·네트워크·유료 API를 쓰지 않았고 사용자 데이터는 읽지 않았다.
+- **사용자 지시(2026-10-30, 원문)**: "캐릭터 만들기에서 3D 모델링 할 때 얼굴이 일그러져서 제대로 보이지 않는 상태로 보이고 있다. 이 부분도 개선을 할 수 있도록 진행해라."
+- **원인(Claude 확인, 개발계 여의준 `admin/char_20261030_a7b69d` 정면·후면 그대로)**: 입력이 1024 정사각이라 얼굴이 약 150px, `face_count` 60000이라 머리에 약 8천 면. 웹툰은 눈 위 앞머리가 덩어리로 굳어 한쪽 눈을 덮고, 실사는 얼굴 질감이 부어 보이고 이음선이 있다.
+- **모델 비교(Claude, 같은 입력)**
+
+  | 모델 | 결과 |
+  |---|---|
+  | Hunyuan3D v3, 2048 입력 + 50만 면 | 굴곡은 매끄러워졌지만 앞머리 덩어리와 부은 얼굴은 그대로 |
+  | Hunyuan 3.1 Pro | 조금 나음 |
+  | Rodin Gen-2 | 얼굴이 일그러짐 |
+  | Meshy 6 | 얼굴은 괜찮지만 3만 면에 2K 텍스처 |
+  | **Tripo H3.1**(`texture_quality`·`geometry_quality` detailed) | **두 그림체 모두 사진과 가장 가깝다.** 웹툰은 두 눈과 그림체가 살고, 실사도 얼굴이 사진과 비슷하다 |
+
+  - Tripo 추가 확인: `face_limit` 300000이면 GLB 약 12MB·얼굴 품질 그대로(제한 없음 190만 면·58MB). fal은 `image_urls`의 빈 문자열 자리를 "Failed to download the file"로 거절한다. 정면이 +X(`orientation: align_image`도 같음), 화면 model-viewer는 +Z가 정면. 시계는 입력 그림과 같은 쪽 손목에만 있었고(옛 입력은 왼손목) 반대쪽에 없는 줄이 생기지 않았다. −90° 회전 뒤 +Z 정면·좌우 반전 없음을 Claude가 렌더로 확인했다.
+  - 가격(fal 표 2026-10-30): HD 텍스처 $0.40 + detailed 형상 $0.20 = 1건 $0.60(지금 Hunyuan $0.675보다 싸다).
+- **결정(Claude 결정 1~8)과 반영**
+  1. 설정 11개(`VNEW_3D_PROVIDER` 기본 `tripo` 외): `vnew/settings.py`의 새 읽기 함수 `_checked_choice`·`_checked_int`·`_checked_float`·`_checked_bool`·`_checked_tripo_endpoint`(틀린 값 → 기본값 + 경고 `vnew.settings.invalid` 1줄), 템플릿·base(`VNEW_3D_SIDE_VIEWS` 바로 뒤), `PARITY_ENV_KEYS`.
+  2. `submit_3d(provider=…)`: hunyuan이면 T2 본문 그대로(시작 전 sha256 16개로 고정, tr-k). 요청 꼬리는 `_post_3d`로 옮겼다(동작 같음).
+  3. Tripo 본문 `_tripo_request`: 공통 값 6개, 다시점 [front, left, back(, right)]·SIDE_SWAP·단일, 빈 자리·None 0, data URI만, `enable_safety_checker` 없음. 정사각 `_3d_squares`(Tripo 2048, Hunyuan `MODEL_INPUT_SQUARE`). arn = 실제 endpoint, 조회 주소 `tripo3d/h3.1`.
+  4. 재제출·이어 만들기: `_make_3d_resubmit(provider, counter)`·`_build_3d_from_images`·`run_retry3d`가 같은 분기 함수를 쓴다. 잃은 요청 재제출은 처음 제출과 같은 공급자·정사각. `run_retry3d`가 조회하는 이전 요청의 공급자가 설정과 다르면 그 요청의 재제출은 이전 공급자로 하고, 한도는 함께 센다.
+  5. `_copy_3d_result(request_arn=)`: Tripo arn·YAW≠0이면 `_orient_glb`(순수 함수: 기본 scene 루트 노드에 Y축 회전을 앞에서 곱하고, JSON 공백·BIN 0 으로 4바이트 정렬, BIN 바이트 그대로). 틀린 GLB → 경고 `vnew.3d.orient_failed` + 받은 GLB 저장.
+  6. 썸네일: `thumbnail.url` → `rendered_image.url`(새 줄) → 첫 `.png`.
+  7. 원장: Tripo `VNEW_3D_TRIPO_USD`·model = 실제 endpoint(`_charge_tripo_3d`), Hunyuan은 지금 `_charge_3d` 그대로. 재제출도 1건씩.
+  8. `model3d.endpoint`: Tripo 요청에만 저장(아래 E1).
+- **먼저 한 일**: 코드를 바꾸기 전에 `_tr_hunyuan_fingerprints()`로 Hunyuan 경로 16개(옆모습 있는 본문 4종·조회·`_build_3d_from_images` 잃은 요청 재제출의 호출·원장 인자·`model3d`·옮긴 파일, `run_retry3d` 같은 4종, `_copy_3d_result` 3종)를 두 번 재어 같은 값을 `_TR_HUNYUAN_SHA`로 적었다. 시작 전 사본은 저장소 밖(`%TEMP%`)에 두었다.
+- **바꾼 것**
+  - `vnew/settings.py`: import `logging`·`math`·`re`, `log`, `_invalid`·`_checked_*`·`_TRIPO_ENDPOINT_RE`·`_TRIPO_QUALITIES`, 설정 11개(근거 주석 포함). 기존 `_int`·`_float`·`_bool`·설정은 그대로.
+  - `vnew/characters.py`: import `math`·`struct`. 새 `_TRIPO_PREFIX`·`_3d_provider`·`_is_tripo_endpoint`·`_provider_of`·`_3d_squares`·`_tripo_request`·`_post_3d`·`_charge_tripo_3d`·`_charge_3d_request`·`_note_3d_endpoint`·`_set_variant_3d_request`·`_GLB_MAGIC`·`_GLB_CHUNK_JSON`·`_snap`·`_glb_numbers`·`_yaw_node`·`_orient_glb`. 바꾼 `submit_3d`·`poll_3d`·`_make_3d_resubmit`·`_build_3d_from_images`·`_copy_3d_result`·`run_retry3d`.
+  - `k8s/workloads.yaml.tmpl`·`deploy/config.env.example`: env 11개, 되돌리기 주석.
+  - `tools/check_vpoc.py`: `check_vnew_3d_tripo`(tr-a~l), 하네스 `_TrFakes`(Tripo 응답 모양·진짜 GLB·원장 model/usd·잃은 요청), `_tr_*` 도우미·`_TR_*` 상수, `_tr_hunyuan_fingerprints`·`_TR_HUNYUAN_SHA`, `_run_3d_hunyuan`, `PARITY_ENV_KEYS` 11개, `main()`.
+  - `.kiro/specs/char-fidelity/`: requirements R8(+ 결정 반영 위치 표 한 줄), design §19, tasks T2b(+ VD-4).
+- **결정(지시서와 다르거나 지시서가 정하지 않은 점)**
+  - E1 — `model3d.endpoint`는 Tripo 요청에만 저장하고, Hunyuan 요청을 저장할 때는 남은 값을 지운다. cf-b `buildKeys`(T1 고정)가 hunyuan 빌드의 `model3d` 키 집합을 보므로 Hunyuan에도 키를 더하면 T1 고정이 깨진다. T3 이름표에서 Hunyuan 표시가 필요하면 `requestArn`에서 endpoint를 뽑을 수 있다.
+  - E2 — `_orient_glb`는 로그 없는 순수 함수로 두고 틀린 GLB면 `ValueError`(18종, 너무 깊은 JSON의 `RecursionError` 포함)를 올린다. 원본 저장·경고는 `_copy_3d_result`가 한다.
+  - E3 — 루트 노드의 `translation`도 R·t로 돌린다. 노드 변환 전체를 앞에서 곱한 것과 같게 하려면 필요하다(지시서는 rotation·matrix만 적었다).
+  - E4 — `_charge_3d`는 인자까지 그대로 두고 `_charge_3d_request`가 나눈다. 기존 검사 (v)가 `_charge_3d`를 인자 3개 래퍼로 바꿔 끼워 원장 수를 센다(검사 본문 수정 금지).
+  - E5 — `VNEW_3D_SIDE_SWAP`은 Tripo 본문에만 쓴다. Hunyuan 좌우는 T2 `_HUNYUAN_SIDE_FIELDS` 한 줄 그대로다(hunyuan 바이트 같음 조건).
+  - E6 — 틀린 값의 기준: FACE_LIMIT 10000~1000000(GLB 약 30MB 이하), INPUT_SQUARE 512~4096, YAW −360~360, USD 0~10, endpoint `^tripo3d(/[a-z0-9][a-z0-9._-]*){2,}$`. 경고 줄의 값은 40자까지만 쓴다.
+  - E7 — `run_retry3d`의 교차 공급자 재제출 콜백과 `counter` 공유(결정 4 "같은 공급자·그림"의 구체화). 한 번의 retry3d 제출은 T2처럼 최대 1 + `MAX_RESUBMITS`건.
+  - E8 — Tripo 단일이어도 `_3d_squares`가 후면 정사각을 만든다(분기를 `_tripo_request` 하나에 둔다). 2048 정사각 1장 CPU·0.1~0.5MB.
+- **기존 검사 고정**(`main()` 호출 줄만, 본문·기대값 그대로): `check_vnew_characters` → `_run_3d_hunyuan(lambda: _run_char_fidelity_off(check_vnew_characters))`, `check_vnew_char_fidelity` → `_run_3d_hunyuan(check_vnew_char_fidelity)`. 고정 전 tripo 기본값에서 (b)(v)·cf-b(`submit3d`·`buildTrace`·`buildKeys`)·cf-m·cf-n·cf-o·cf-p가 깨졌다. 그 밖의 기존 검사는 그대로 통과했다.
+- **확인**
+  - `python -m py_compile`(characters·settings·check_vpoc) 통과. `python -X utf8 tools/check_vpoc.py` 전부 통과: ok 60줄(T2 59줄 + tr 1줄), FAIL·WARN 0(약 90~110초). cf-b 32개·cf-o·cf-p(T1·T2 sha256) 그대로, tr-k Hunyuan 지문 16개 = 시작 전.
+  - 바뀐 줄 커버리지(`coverage run --data-file=%TEMP%\… --source=app/src tools/check_vpoc.py`, coverage 7.17, 시작 전 사본과 difflib): 실행문 241줄 중 241줄(100%). `characters.py` 172/172, `settings.py` 69/69.
+  - 변형 검사 18개(`characters.py`를 메모리에서만 바꿔 tr 그룹 실행: SIDE_SWAP 무시·순서·translation·Hunyuan 회전·원장·교차 공급자·endpoint 지우기·rendered_image·정사각·쿼터니언 곱 순서·BIN 0 채움·재제출 provider·빈 바이트·한도·matrix 곱 순서·JSON 채움·orientation·단일 endpoint): 18개 모두 잡았다.
+  - 실제 외부 호출 0회: tr 그룹이 LLM(`_guard_real_llm`)·Seedream·fal·urlopen 원래 함수를 막고 센다.
+  - 줄 끝 LF(바뀐 9개 파일 CR 0), 공백만 바뀐 줄 0, 줄 끝 공백 0, 지운 함수·클래스 정의 0, 저장소 안 `.coverage` 0.
+- **3단계 리뷰**
+  - 보안
+    - 외부 전송: Tripo 본문의 그림은 모두 `_data_uri`다. tr-c가 11경우 모두 `image_url(s)`가 `data:image/jpeg;base64,`로 시작하고 본문 JSON에 `http`·`X-Amz`가 없음을 본다. 외부 저장소 업로드·presigned URL 없음.
+    - 입력 검증: endpoint 설정은 정규식으로 `tripo3d/…` 경로 글자만 받는다(`..`·`?`·대문자 거절, tr-a). fal이 준 GLB는 길이·청크·scene·노드 번호·숫자 배열을 검사하고, 틀리면 저장만 원본으로 한다(파일 경로·명령 없음).
+    - 비밀값·로그: 새 비밀값 없음. `vnew.settings.invalid`는 비밀이 아닌 3D 설정 키와 값 40자(`%r`), `vnew.3d.orient_failed`는 우리 예외 문구만(바이트·URL 없음, tr-g).
+    - 권한: 새 라우트 없음. 저장 위치는 지금과 같은 `users/{owner}/characters/…/model.glb`.
+    - 발견·조치: 너무 깊은 JSON이 `RecursionError`로 `_orient_glb` 계약(`ValueError`) 밖으로 나가던 것을 찾아 `ValueError`로 감쌌다(호출한 쪽은 원래도 `Exception`으로 받아 원본을 저장했다). tr-f에 "깊은 JSON" 경우를 더했다.
+  - 성능(512Mi)
+    - GLB: 받은 12MB + 돌린 12MB가 잠깐 함께 있다. `_orient_glb`는 BIN을 `memoryview`로 넘겨 결과 한 벌만 만든다. tr-l 12MB GLB 메모리 최고점 12.0MB(입력 12.0MB), 3~10ms. FACE_LIMIT 상한 100만 면(약 30MB)에서도 60MB 안이다.
+    - 정사각: 2048² RGB 캔버스 약 12.6MB + 원본 디코드 약 11MB를 한 장씩 차례로 쓴다. 합성 그림(1440×2560)으로 잰 data URI는 장당 0.16~0.69MB, 4장 본문 0.63~2.76MB(1024일 때 0.24~0.60MB). 재제출 콜백이 폴링 동안 정사각 4장(최대 약 2MB)을 쥔다. `run_retry3d`는 저장된 옆모습 원본을 정사각을 만든 뒤 놓는다(`del stored`).
+    - 외부 호출 수·타임아웃은 그대로다(3D 제출 1 + 재제출 ≤ 2, 조회 5초·최대 15분, 다운로드 300초). 교차 공급자에서도 제출 합계는 3건(tr-i).
+    - 발견·조치: 조치할 것 없음(본문 크기 한도는 남은 이슈 2).
+  - 운영성
+    - 되돌리기: `config.<target>.env`에 `VNEW_3D_PROVIDER=hunyuan` 한 줄 → 렌더 `"hunyuan"`(tr-b) → T2 본문·원장·저장 바이트 그대로(tr-k). 회전만 끄기 `VNEW_3D_TRIPO_YAW_DEG=0`, 다시점만 끄기 `VNEW_3D_TRIPO_MULTIVIEW=false`, 좌우 반대 `VNEW_3D_SIDE_SWAP=true`.
+    - 진행 중 작업: 배포 전에 낸 Hunyuan 요청은 공급자 설정이 아니라 arn endpoint로 판단해 Hunyuan 주소로 조회·완료하고 돌리지 않는다(tr-j). 잃은 요청이면 Hunyuan 본문으로 다시 낸다(tr-i). 반대로 hunyuan으로 되돌린 뒤 남은 Tripo 요청도 Tripo로 이어 가고 돌린다(tr-i).
+    - 재시작 뒤 이어하기: 3D 요청이 있으면 `run_resume_variant` → `run_retry3d`가 arn으로 이어 간다(지금과 같음). 옆모습만 이어 그리는 경로도 Tripo 다시점으로 간다(tr-j).
+    - 로그: `vnew.3d.oriented`(info)·`vnew.3d.orient_failed`(경고)·`vnew.settings.invalid`(경고). 원장 실패는 지금처럼 `vnew.ledger.3d_failed`(tr-h).
+    - 코드 이미지 되돌리기: 옛 코드도 `_queue_app`으로 Tripo 요청을 조회할 수 있지만 GLB를 돌리지 않고(정면이 옆으로 보임) Hunyuan 단가로 원장을 남긴다. 이미지를 되돌릴 때는 `VNEW_3D_PROVIDER=hunyuan`으로 먼저 바꾸고 진행 중 Tripo 요청이 끝난 뒤 되돌린다.
+    - 발견·조치: 공급자를 되돌린 뒤 새 Hunyuan 요청에 옛 Tripo `endpoint`가 남는 문제를 설계 중 찾아 새 요청을 저장할 때 지우게 했다(`_note_3d_endpoint`, tr-i).
+- **남은 이슈**
+  1. Tripo 정면 방향(−90°)·좌우 자리는 Claude가 말한 사실(+X 정면, left = 인물 자신의 왼쪽)과 수학으로만 확인했다. 개발계 VD-4(tasks)로 확인한다.
+  2. fal 요청 본문 크기 한도를 확인하지 못했다(네트워크 금지). 2048 정사각 4장이면 합성 그림 기준 최대 약 2.8MB다. 거절되면 `VNEW_3D_TRIPO_INPUT_SQUARE=1536` 한 줄.
+  3. Tripo 처리 시간을 확인하지 못했다. 조회 상한 15분(`VNEW_3D_POLL_MAX_S`)은 그대로다.
+  4. 왼쪽 옆모습이 3D에서 빠지면 Tripo 순서 규칙상 [front, back]을 보낼 수 없어 단일(정면만)이다. 후면 정보가 빠진다.
+  5. T3 이름표: Hunyuan 요청에는 `model3d.endpoint`가 없다(E1). `requestArn`으로 정할지 T3에서 정한다.
+  6. 썸네일은 지금처럼 `image/png`로 저장한다. `rendered_image`가 png가 아니면 content-type이 틀린다(Claude 실측은 png).
+  7. 루트 노드에 애니메이션이 걸린 GLB면 회전이 덮일 수 있다(Tripo 결과는 정적 메시로 본다).
+  8. `docs/ANALYSIS.md`(Tripo 전환·설정·되돌리기)와 `config.env.example` 주석 `VNEW_3D_USD=0.375`는 T3에서 고친다.
+
+
+### char-fidelity 묶음 T3 — 상세 응답·화면·3D 이름표·문서, 운영 설정(vnew 켬·Seedance 두 경로) (Kiro, claude-opus-5.5)
+- **범위**: 지시서 `.kiro/handoff/101-char-fidelity-t3.md`. tasks.md T3 전부와 운영 설정·계획 문서를 했다. 커밋·push 하지 않았다. git·aws·kubectl·네트워크·유료 API를 쓰지 않았고 사용자 데이터를 읽지 않았다. 배포는 계획만 썼다.
+- **사용자 결정(2026-10-30, 원문)**: "앞으로 추가로 운영에도 같이 배포를 진행해라", 운영 vnew "켠다", "seedance도 사용할 수 있고 fal seedance도 사용할 수 있게 해라".
+- **먼저 한 일**: 바꿀 파일 전부의 시작 전 사본을 저장소 밖(`%TEMP%`)에 두었다. 시작 전 전체 검사는 전부 통과(ok 60줄, 88초). 화면 기준값 `_CF_SCREEN_OLD_SHA`는 시작 전 `vnew.js` 사본으로 옛 캐릭터 + 두 설정 끔 상세를 `renderDetail`에 넣어 두 번 재어 같은 값을 적었다. 상세 응답 기준값은 T1 시작 전에 잰 `_CF_OFF_SHA["detailOld"]`를 그대로 쓴다.
+- **바꾼 것**
+  - `vnew/characters.py`: `detail_view`(variant `leftUrl`·`rightUrl`은 키가 있을 때만, `model3d.endpoint`는 저장된 문자열일 때만, 맨 위 `features{charFidelity, sideViews}`는 두 설정 중 하나라도 켜져 있을 때만), `_outfits_view`(저장된 `kind`가 있을 때만). 다른 함수는 바꾸지 않았다.
+  - `frontend/public/vnew.js`
+    - 새 순수 구역(`renderDetail` 바로 앞): `CHAR_PART_KO`·`CHAR_SIDE_KO`·`CHAR_3D_ENDPOINT_LABEL`·`CHAR_VIEW_PAIRS`·`OUTFITS_HINT`·`OUTFITS_HINT_FIDELITY`, `charTableValue`·`charFidelityOn`·`analysisFidelityLines`·`variantViewPairs`·`outfitBadgeText`·`outfitsHintText`·`model3dEndpointLabel`.
+    - DOM: `renderDetail`(분석 카드 "기본 복장" 줄 다음에 새 줄), `variantColumn`(작은 그림 = `variantViewPairs`, 3D 보기 바로 아래 이름표 `p.vnew-3d-endpoint`), `outfitsSection`(안내 = `outfitsHintText`), `outfitCard`(배지 = `outfitBadgeText`).
+  - `frontend/public/vnew.css`: `.vnew-sheet-smalls`에 `flex-wrap: wrap;`, 새 `.vnew-3d-endpoint`(12px, 흐린 글씨).
+  - `deploy/config.prod.env`: `VNEW_ENABLED=false` → `true`, `FAL_SECRET_NAME` 줄 다음에 주석 1줄 + `VPOC_ARK_SEEDANCE_ENABLED=true`. BOM·LF 그대로, 다른 줄은 그대로. `config.dev.env`는 바꾸지 않았다.
+  - `tools/check_vpoc.py`
+    - `check_vnew_char_fidelity`에 cf-r(실행 목록·끝까지 돈 검사 목록·docstring·ok 문구도). 도우미 `_cf_new_char`·`_cf_detail_of`.
+    - 새 `check_vnew_char_fidelity_screen`(cf-s)와 `_CF_SCREEN_SLICES`·`_CF_SCREEN_NODE_STUBS`·`_CF_SCREEN_NODE_OLD_CASES`·`_CF_SCREEN_NODE_CASES`·`_CF_SCREEN_OLD_SHA`·`_CF_HINT_*`·`_cf_screen_details`·`_cf_screen_script`·`_cf_run_node`. `main()` 끝에서 부른다.
+    - `check_fal_parity_rollback`(rw-c) 기대값(아래).
+  - 문서: `docs/ANALYSIS.md`(머리 갱신 줄, §1, §2.2·§2.3 표, §3.6.2 「구현 결과」 표·「3D 공급자 Tripo H3.1 전환」, §5.4, §6.2, §6.3, §7.1 표·설명, §8.5, §9.1, §10.1, R-21, §12), `docs/plans/2026-10-26-prod-deploy-fal-seedance.md`(상태·§1·§2·§3·단계 1·2·3·§6·§8), 새 `docs/plans/2026-10-30-prod-vnew-enable.md`, `.kiro/specs/char-fidelity/tasks.md` T3 체크.
+- **바꾼 기존 검사 기대값(사용자 결정 때문)**: `check_fal_parity_rollback`(rw-c). 렌더 `VPOC_ARK_SEEDANCE_ENABLED`가 prod `"true"`, dev `"false"`다(전에는 둘 다 `"false"`). "+true" 되돌리기 경로는 그대로다. 운영 렌더 `VNEW_ENABLED`가 env·runtime-config 모두 `"true"`인지도 본다. 코드보다 먼저 고친 검사가 운영 오버레이를 바꾸기 전에 실패하는 것을 확인했다. 다른 기존 검사의 기대값은 바꾸지 않았다.
+- **기존 검사 고정**: T3에서 새로 고정한 검사는 없다. T1(`_run_char_fidelity_off` 3줄)·T2b(`_run_3d_hunyuan` 2줄) 고정은 그대로다. 운영 오버레이를 바꾼 뒤에도 다른 렌더 검사(lt-i·sr-l·fx-m·cast-m·tr-b)는 그대로 통과했다.
+- **결정(design·지시서와 다르거나 정하지 않은 점)**
+  - E1 — 3D 이름표는 `model3d.endpoint`만 쓴다. Hunyuan 요청은 endpoint를 저장하지 않으므로(T2b E1) 이름표가 없다. `requestArn`에서 뽑으면 옛 데이터의 상세 JSON이 바뀌어 cf-r 고정과 "옛 데이터는 지금 화면 그대로"가 깨진다. 고정 표에는 `fal-ai/hunyuan3d-v3/image-to-3d` → "Hunyuan3D v3"도 넣어 두었다(endpoint가 저장될 때를 위해).
+  - E2 — 이름표 표·부위·좌우 표는 `charTableValue`(표 자신의 키만)로 읽는다. `constructor`·`__proto__` 같은 이름이 함수 글을 화면에 내지 않게 한다.
+  - E3 — `analysisFidelityLines`는 이름(labelKo·itemEn)이 비면 그 소품을 빼고, 부위가 비면 끝 공백을 지운다. 표에 없는 부위는 원문 그대로다(design `CHAR_PART_KO[partEn] || partEn`).
+  - E4 — 이름표·`leftUrl`·`rightUrl`은 설정이 아니라 저장값으로 보인다(R4.9, design §14 "이미 저장한 옆모습은 화면에만 보인다"). `features`가 바꾸는 것은 분석 카드 새 줄·"사진 속 옷" 배지·안내 문장뿐이다.
+  - E5 — 이름표는 `viewer3d`가 아니라 `variantColumn`이 3D 보기 바로 뒤에 단다(`viewer3d`를 바꾸지 않는다).
+  - E6 — cf-s는 design보다 넓다. 실제 `detail_view` 응답(옛·새 캐릭터 × 켬·끔)을 화면에 넣고, 옛 캐릭터 + 끔 화면 DOM sha256을 구현 전 값과 비교하고, DOM 자리가 순수 함수를 부르는지 함수를 바꿔 끼워 센다.
+  - E7 — cf-r에 라우트 통합을 더했다. 켬 + Tripo 가짜로 실제 빌드한 뒤 `GET /api/vnew/characters/<id>`(Flask 블루프린트)가 두 그림체의 `leftUrl`·`rightUrl`·`endpoint`·`features`를 주고, 다른 사용자는 404다.
+  - E8 — design §18은 `deploy/config.{dev,prod}.env`를 바꾸지 않는다고 적었다. 2026-10-30 사용자 결정(지시서 101 B)에 따라 prod만 두 줄 바꿨다.
+- **확인**
+  - `node --check frontend/public/vnew.js` 통과. `python -X utf8 tools/check_vpoc.py` 전부 통과: ok 61줄(T2b 60줄 + cf-s 1줄), FAIL·WARN 0(약 92초).
+  - cf-r: 옛 캐릭터 + 두 설정 끔 상세 JSON sha256 = 구현 전(`d4f1a977…`). 켬 3조합은 맨 뒤에 `features`만 더해지고 나머지 sha256이 같다.
+  - cf-s: 옛 캐릭터 + 끔 화면 DOM sha256 = 구현 전(`a8ec4eff…`). 켬은 추가 복장 안내 문장만 다르다.
+  - 바뀐 줄 커버리지(`coverage run --data-file=%TEMP%\… --source=app/src tools/check_vpoc.py`, coverage 7.17, 시작 전 사본과 difflib)
+
+    | 기준 | 파일 | 바뀐 실행문 | 덮음 |
+    |---|---|---|---|
+    | T1~T3·T2b 누적(T1 시작 전 사본) | `characters.py` | 696 | 696 |
+    | | `settings.py` | 72 | 72 |
+    | | `char_fidelity.py`(T1 신규, 전부) | 363 | 363 |
+    | | 합계 | 1,131 | 1,131 (100%) |
+    | T3 만(T3 시작 전 사본) | `characters.py` | 11 | 11 (100%) |
+
+  - JS는 cf-s가 덮는 함수 목록으로 갈음한다: T3에서 새로 만들거나 바꾼 JS 17개(상수 6 `CHAR_PART_KO`·`CHAR_SIDE_KO`·`CHAR_3D_ENDPOINT_LABEL`·`CHAR_VIEW_PAIRS`·`OUTFITS_HINT`·`OUTFITS_HINT_FIDELITY`, 순수 함수 7 `charTableValue`·`charFidelityOn`·`analysisFidelityLines`·`variantViewPairs`·`outfitBadgeText`·`outfitsHintText`·`model3dEndpointLabel`, DOM 함수 4 `renderDetail`·`variantColumn`·`outfitsSection`·`outfitCard`)를 cf-s가 node로 모두 실행한다.
+  - 변형 검사 17개(`vnew.js`·`vnew.css`는 임시 폴더 사본, `characters.py`는 메모리에서만 바꿔 cf-r·cf-s 실행): 좌우 순서·배지 설정 무시·기준 번호 0부터·표 밖 이름 허용·안내 고정·이름표 늘 붙임·이름표 innerHTML·features 없이 줄·지운 그림 기준·그림 클릭 없음·flex-wrap 없음·이름표 클래스 없음·features 늘 둠·빈 키 leftUrl·endpoint 문자열 검사 없음·kind 안 줌·features 값 뒤바뀜. 17개 모두 잡았다.
+  - 렌더 값(로컬 `render.py`, 메모리에서만): prod `VNEW_ENABLED="true"`·runtime-config `vnewEnabled: true`·`VPOC_ARK_SEEDANCE_ENABLED="true"`·`VPOC_RAW_ERRORS="false"`·`VPOC_POLL_GIVEUP_S="1800"`·`STORY_DEV_ENABLED="true"`·`APP_MEM_LIMIT=8Gi`, dev `VPOC_ARK_SEEDANCE_ENABLED="false"`.
+  - 실제 외부 호출 0회: cf-r은 기존 cf 그룹의 막기(LLM·Seedream·fal·urlopen) 안에서 돌고, cf-s는 상세 응답을 `_guard_real_llm` 안 메모리 저장소로 만든다(LLM 0회 확인).
+  - 줄 끝 LF(바뀐 10개 파일 CR 0), `config.prod.env` BOM 그대로, 공백만 바뀐 줄 0, 새 줄 끝 공백 0, 지운 함수·클래스·JS 함수·CSS 선택자 0, 저장소 안 `.coverage` 등 부산물 0. 수정 금지 파일(`vnew/generate.py`·`plan.py`·`casting.py`·`routes.py`·`vpoc/*`·`config.dev.env`·`.gitlab-ci.yml`·`k8s/*`)은 바뀌지 않았다.
+- **3단계 리뷰**
+  - 보안
+    - 화면: 새 글은 모두 `el()`(`textContent`)로 넣는다. 그림 `src`는 응답의 presigned URL뿐이다. 모델이 쓴 소품 이름(서버에서 `clean_line` 12·80자)도 글자 그대로 보인다(cf-s 위험한 글 경우). 표는 자신의 키만 읽는다(E2).
+    - 응답: `leftUrl`·`rightUrl`은 서버가 쓴 키의 1시간 presigned URL이다. `endpoint`는 정규식으로 검사한 설정에서 나온 저장값이고 문자열일 때만 준다. 사진 속 옷의 `sourceFileId`·`whereEn`·`sidedItems`는 응답에 넣지 않는다(cf-r). 소유자 규칙은 그대로다(다른 사용자 404, cf-r).
+    - 운영 첫 켬: `/api/vnew` 라우트 50개가 모두 `@deps.require_auth` 뒤에 있다(routes.py를 읽어 확인). 새 IAM·Secret이 필요 없다(Claude 사전 확인: S3 `users/*`, fal·ARK 키, Bedrock 중개 역할). 새 문서·설정 줄에 계정 ID·비밀값이 없다(12자리 숫자 검사 0건).
+    - 발견·조치: 표 조회가 `constructor`로 함수 글을 낼 수 있는 점을 설계 중 찾아 `charTableValue`로 막았다(변형 검사 "표 밖 이름 허용"이 잡는다).
+  - 성능
+    - 512Mi(개발): 상세 조회마다 presign이 variant당 최대 2번 늘고(boto3 로컬 서명, 네트워크 없음), 응답이 URL 두 개만큼(약 1KB) 커진다. 화면 함수는 상세 한 번에 목록 몇 개를 돈다. 메모리·외부 호출 수·타임아웃 변화는 없다.
+    - 운영 첫 켬: 운영 앱 한도는 8Gi다. 첫 화면이 `vnew-previz.js`·three.js(약 735KB, 압축 전)를 비동기로 받는다. `app.js`의 동적 import라 첫 화면 그리기를 막지 않고, 배포 태그가 같으면 30일 immutable 캐시를 쓴다.
+    - 발견·조치: 조치할 것 없음(three.js 다운로드는 계획서 6절·R-21에 영향으로 적었다).
+  - 운영성
+    - 설정 되돌리기: `VNEW_CHAR_FIDELITY=false`·`VNEW_3D_SIDE_VIEWS=false`면 `features`가 빠지고 화면은 지금 문장·배지다. 저장된 옆모습·이름표는 저장값이라 계속 보인다(E4). `VNEW_3D_PROVIDER=hunyuan`이면 다음 새 요청부터 endpoint를 지우므로 이름표가 없다. 운영 vnew는 `VNEW_ENABLED=false` 한 줄 + 운영 job으로 끈다(저장 데이터는 남는다).
+    - 진행 중 빌드: 옆모습을 하나 끝낼 때마다 키가 저장되므로 폴링(5초) 중에 작은 그림이 하나씩 늘어난다. 3D 제출 때 endpoint가 저장되므로 "3D 모델을 준비하고 있습니다…" 아래에 이름표가 먼저 보인다. 상세 조회의 `reconcile_stale`(이어 만들기 시작)은 바꾸지 않았다.
+    - 재시작 뒤 이어 만들기: T3는 상세 응답·화면만 바꿔 이어 만들기 경로가 같다(cf-p·tr-j 그대로 통과).
+    - 섞인 버전(롤링 배포 중): 새 화면 + 옛 API는 `features` 등이 없어 지금 화면이고, 옛 화면 + 새 API는 새 키를 읽지 않는다. 오류가 없다.
+    - 운영 첫 켬: 운영 사용자 전체의 메뉴가 바뀐다("영상" → "영상만들기_기존", "영상만들기_신규"·"캐릭터 만들기" 추가). **"스토리" 만들기 버튼이 숨는다**(`applyVnewToggles`, 운영 `STORY_DEV_ENABLED="true"` 렌더 확인). 기존 스토리 프로젝트는 그대로 열린다. 새 유료 기능(캐릭터 1명 약 $1.2, Tripo 3D $0.60 × 2 포함)이 비용 상한 없이 열린다. 운영은 지금까지 `/api/vnew`가 없었으므로 이어 갈 vnew 작업이 없다(추정).
+    - 발견·조치: `config.prod.env`의 VNEW 주석 3줄("운영은 꺼진 채로 둔다")이 새 값과 맞지 않는다. 지시("다른 줄은 건드리지 않는다")대로 두고 남은 이슈 1과 계획서 6절에 적었다. "스토리" 버튼 숨김은 지시서에 없던 영향이라 계획서·R-21에 적었다.
+- **남은 이슈**
+  1. `config.prod.env`의 VNEW 주석 3줄이 `VNEW_ENABLED=true`와 맞지 않는다. 커밋 때 고칠지 Claude가 정한다.
+  2. 운영에서 vnew를 켜면 "스토리" 만들기 버튼이 숨는다(기존 vnew 토글 동작). 운영 사용자가 스토리 새 프로젝트를 만들 길이 없어진다. 의도와 다르면 배포 전에 정해야 한다.
+  3. Hunyuan 이름표("3D: Hunyuan3D v3")는 지금 데이터로는 보이지 않는다(E1). 필요하면 (가) Hunyuan 요청에도 endpoint 저장(T1 cf-b `buildKeys` 고정 갱신 필요), (나) 상세에서 `requestArn`으로 뽑기(cf-r 고정·옛 화면 변경) 중 정한다.
+  4. `VNEW_3D_TRIPO_ENDPOINT`를 표에 없는 Tripo endpoint로 바꾸면 이름표 표에 한 줄을 더하기 전까지 이름표가 없다.
+  5. `bytedance/seedance-2.5/draft/complete`는 코드에 이름이 없다. 등록 대상은 Claude 확인(통 테이크 초안 경로·개발 레지스트리에 있음)을 따랐다.
+  6. `deploy/config.env.example`의 단가 주석 `VNEW_3D_USD=0.375`(T2·T2b 남은 이슈)는 이번 범위(허용 파일) 밖이라 그대로다.
+  7. design §18의 "바꾸지 않는 파일: `deploy/config.{dev,prod}.env`" 문장은 고치지 않았다(이번 허용 범위는 tasks.md T3 체크뿐).
+  8. 개발 유료 확인 VD-1~VD-4(tasks 「배포 뒤 확인」)와 운영 유료 확인은 승인 뒤 Claude가 한다.

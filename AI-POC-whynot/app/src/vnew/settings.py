@@ -6,9 +6,14 @@ vpoc.settings 를 재사용하되(모델·버킷·키), 캐릭터 만들기 전�
 
 from __future__ import annotations
 
+import logging
+import math
 import os
+import re
 
 from ..vpoc import settings as vpoc_settings
+
+log = logging.getLogger("vpoc")
 
 
 def _float(name: str, default: float) -> float:
@@ -30,6 +35,79 @@ def _bool(name: str, default: bool) -> bool:
     if not raw:
         return default
     return raw in ("1", "true", "yes", "on")
+
+
+# --- 값을 검사하는 읽기(char-fidelity T2b, 2026-10-30). 틀린 값이면 기본값을 쓰고 경고 로그 1줄을 남긴다. ---
+# 위 _int·_float·_bool 은 그대로 둔다(기존 설정은 지금처럼 조용히 기본값). 아래 함수는 3D 공급자 설정만 쓴다.
+
+
+def _invalid(name: str, raw: str, default) -> None:
+    """틀린 설정값 경고 1줄. 비밀값이 아닌 3D 공급자 설정만 이 함수를 쓴다(값은 40자까지만 남긴다)."""
+    log.warning("vnew.settings.invalid key=%s value=%r default=%r", name, raw[:40], default)
+
+
+def _checked_choice(name: str, default: str, allowed: tuple[str, ...]) -> str:
+    raw = os.getenv(name, "").strip()
+    if not raw:
+        return default
+    if raw.lower() in allowed:
+        return raw.lower()
+    _invalid(name, raw, default)
+    return default
+
+
+def _checked_int(name: str, default: int, low: int, high: int) -> int:
+    raw = os.getenv(name, "").strip()
+    if not raw:
+        return default
+    try:
+        value = int(raw)
+    except ValueError:
+        value = None
+    if value is None or not low <= value <= high:
+        _invalid(name, raw, default)
+        return default
+    return value
+
+
+def _checked_float(name: str, default: float, low: float, high: float) -> float:
+    raw = os.getenv(name, "").strip()
+    if not raw:
+        return default
+    try:
+        value = float(raw)
+    except ValueError:
+        value = None
+    if value is None or not math.isfinite(value) or not low <= value <= high:
+        _invalid(name, raw, default)
+        return default
+    return value
+
+
+def _checked_bool(name: str, default: bool) -> bool:
+    raw = os.getenv(name, "").strip().lower()
+    if not raw:
+        return default
+    if raw in ("1", "true", "yes", "on"):
+        return True
+    if raw in ("0", "false", "no", "off"):
+        return False
+    _invalid(name, raw, default)
+    return default
+
+
+# Tripo endpoint_id 는 "tripo3d/<버전>/<작업>" 꼴만 받는다. 큐 조회 주소(앞 두 마디)·결과 회전·원장이 이 접두사로 Tripo 를 가린다.
+_TRIPO_ENDPOINT_RE = re.compile(r"^tripo3d(/[a-z0-9][a-z0-9._-]*){2,}$")
+
+
+def _checked_tripo_endpoint(name: str, default: str) -> str:
+    raw = os.getenv(name, "").strip()
+    if not raw:
+        return default
+    if _TRIPO_ENDPOINT_RE.match(raw):
+        return raw
+    _invalid(name, raw, default)
+    return default
 
 
 # --- 재사용(vpoc.settings 를 그대로 본다) ---
@@ -79,7 +157,9 @@ MAX_RESUBMITS = _int("VNEW_3D_MAX_RESUBMITS", 2)
 
 # --- 단가(원장) ---
 SEEDREAM_USD = _float("VNEW_SEEDREAM_USD", 0.04)  # Seedream 장당
-MODEL3D_USD = _float("VNEW_3D_USD", 0.375)  # 3D 1건당
+# 3D 1건당. fal 가격표(2026-10-30 Claude 확인): Hunyuan3D v3 Normal $0.375 + multi-view images +$0.15 + custom face count
+# +$0.15 = $0.675. 지금 후면 그림(back_image_url)과 face_count 를 이미 보내므로 실제 단가가 $0.675 다. 옆모습을 더해도 같다.
+MODEL3D_USD = _float("VNEW_3D_USD", 0.675)
 
 # --- 입력/진행 ---
 MAX_SOURCES = _int("VNEW_MAX_SOURCES", 8)  # 업로드 웹툰 이미지 최대 장수
@@ -184,6 +264,42 @@ VNEW_CASTING_POLL_MAX_S = _int("VNEW_CASTING_POLL_MAX_S", 900)
 # 회차는 드라이버가 끝까지 진행한다. 소리 검사 거절 안내·"소리 없이 다시 만들기"·기존 결함 수정(C.6·C.10)은 이 설정과
 # 상관없이 적용한다. 저장된 realRun·realHistory 는 지우지 않는다.
 VNEW_TAKE_REAL = _bool("VNEW_TAKE_REAL", True)
+
+# 캐릭터 충실도(char-fidelity, 2026-10-30). 켜면 분석이 기준 사진 한 장의 옷을 그대로 기본 복장으로 쓰고, 한쪽 소품의 좌우를
+# 화면 기준으로 받아 코드가 캐릭터 좌우로 바꾼다. 시트는 화면 왼쪽으로 45°씩 도는 다섯 인물로 그리고, 정면·후면·시트를 검사한다.
+# false 면 지금 동작(분석 SYSTEM·도구·프롬프트·검사 그대로). 저장된 새 필드는 지우지 않는다.
+VNEW_CHAR_FIDELITY = _bool("VNEW_CHAR_FIDELITY", True)
+# 3D 옆모습(char-fidelity D4). 켜면 variant 마다 왼쪽·오른쪽 옆모습을 그려 Hunyuan3D 에 left/right_image_url 로 보낸다.
+# false 면 정면·후면만 보낸다(지금 동작).
+VNEW_3D_SIDE_VIEWS = _bool("VNEW_3D_SIDE_VIEWS", True)
+
+# 3D 공급자(char-fidelity T2b, 2026-10-30). 기본 tripo(fal Tripo H3.1). Claude 비교(여의준 정면·후면 그대로): Hunyuan3D v3 는
+# 2048 입력 + 50만 면에서도 앞머리 덩어리·부은 얼굴이 그대로였고, Tripo H3.1(texture·geometry detailed)이 두 그림체 모두 사진과
+# 가장 가까웠다. 되돌리기: config.<target>.env 에 VNEW_3D_PROVIDER=hunyuan (T2 본문·원장 그대로). 진행 중 요청은 공급자 설정이
+# 아니라 requestArn 의 endpoint 로 조회·회전·재제출한다. 아래 값이 틀리면 기본값을 쓰고 경고 로그 vnew.settings.invalid 1줄.
+VNEW_3D_PROVIDER = _checked_choice("VNEW_3D_PROVIDER", "tripo", ("tripo", "hunyuan"))
+# 다시점(정면·왼쪽·후면[·오른쪽]) / 단일(정면만) endpoint_id. 큐 조회 주소는 앞 두 마디(tripo3d/h3.1)다.
+VNEW_3D_TRIPO_ENDPOINT = _checked_tripo_endpoint("VNEW_3D_TRIPO_ENDPOINT", "tripo3d/h3.1/multiview-to-3d")
+VNEW_3D_TRIPO_SINGLE_ENDPOINT = _checked_tripo_endpoint(
+    "VNEW_3D_TRIPO_SINGLE_ENDPOINT", "tripo3d/h3.1/image-to-3d"
+)
+# 면 수 상한. 300000 이면 GLB 약 12MB·얼굴 품질 그대로, 제한하지 않으면 190만 면·58MB(Claude 실측 2026-10-30).
+# 범위 10000~1000000(GLB 약 30MB 이하 — 512Mi 앱이 옮기며 두 벌을 쥔다).
+VNEW_3D_TRIPO_FACE_LIMIT = _checked_int("VNEW_3D_TRIPO_FACE_LIMIT", 300000, 10000, 1000000)
+_TRIPO_QUALITIES = ("standard", "detailed")
+VNEW_3D_TRIPO_TEXTURE_QUALITY = _checked_choice("VNEW_3D_TRIPO_TEXTURE_QUALITY", "detailed", _TRIPO_QUALITIES)
+VNEW_3D_TRIPO_GEOMETRY_QUALITY = _checked_choice("VNEW_3D_TRIPO_GEOMETRY_QUALITY", "detailed", _TRIPO_QUALITIES)
+# Tripo 입력 정사각 한 변(흰 배경 패딩). 1024 면 얼굴이 약 150px 라 2048 로 둔다. Hunyuan 은 MODEL_INPUT_SQUARE 그대로.
+VNEW_3D_TRIPO_INPUT_SQUARE = _checked_int("VNEW_3D_TRIPO_INPUT_SQUARE", 2048, 512, 4096)
+# false 면 옆모습이 있어도 단일(정면만) endpoint 로 보낸다.
+VNEW_3D_TRIPO_MULTIVIEW = _checked_bool("VNEW_3D_TRIPO_MULTIVIEW", True)
+# Tripo 결과는 정면이 +X 를 본다(orientation align_image 도 같음). 옮길 때 루트 노드를 Y축으로 이만큼 돌려 정면을 +Z(화면
+# model-viewer 정면)로 맞춘다. -90° 는 +X → +Z. 0 이면 돌리지 않는다.
+VNEW_3D_TRIPO_YAW_DEG = _checked_float("VNEW_3D_TRIPO_YAW_DEG", -90.0, -360.0, 360.0)
+# Tripo 1건 단가. 근거: fal 가격표(2026-10-30 Claude 확인) HD 텍스처 $0.40 + detailed 형상 $0.20 = $0.60.
+VNEW_3D_TRIPO_USD = _checked_float("VNEW_3D_TRIPO_USD", 0.60, 0.0, 10.0)
+# Tripo 다시점의 왼쪽·오른쪽 자리를 바꿔 넣는다. 개발계 확인에서 GLB 좌우가 반대로 나오면 켠다(Hunyuan 은 _HUNYUAN_SIDE_FIELDS).
+VNEW_3D_SIDE_SWAP = _checked_bool("VNEW_3D_SIDE_SWAP", False)
 
 # --- ⑤ 촬영 지시서(shot brief) (설계자 2026-10-22) ---
 # 프리비즈 승인 직후, 장소마다 1회 호출해 그 장소 컷들의 "촬영 전문 언어" 지시서를 쓴다. 작성 모델은
