@@ -810,3 +810,53 @@
   3. 그린 뒤 버튼이 붙잡은 값(`openRealConfirm`의 `realEstimate`, 칸 `unit.id`)은 그릴 때 값이다. `state.plan`을 읽는 버튼(`openGenerateConfirm` 등)은 새 값을 쓴다. 금액이 달라지면 기존 409 `CostMismatch` 흐름이 새 금액을 읽는다.
   4. 지시의 "테이크 행 안내"는 줄 번호(6112)와 문구로 보아 ⑤ 결과 화면 배너로 읽었다. 실제 테이크 행(`takeRow`) 실사 칸의 "건너뜀" + "통 테이크(베타)는 웹툰만 만듭니다 — 실사는 기본 모델로 따로 만들 수 있습니다."는 그대로다. 실사 버전이 켜져 있고 회차가 없을 때 이 글이 보인다.
   5. `ANALYSIS.md` §3.6 「실사 버전 화면」에 이번 폴링 규칙·안내 문구를 적지 않았다(수정 범위 밖). 다음 문서 갱신 때 더한다.
+
+
+### vnew-live-fx 묶음 C 피드백 — 실사 외모 문장 2건: 캐스팅 "with" 빠짐, 실사 테이크 외형 중간 잘림 (Kiro, claude-opus-5.5)
+
+- **범위**: `app/src/vnew/casting.py`(조각 잇기·줄이기, 나이 꼴 정규식 2개), `app/src/vnew/generate.py`의 `_real_appearance`, `tools/check_vpoc.py`(cast-b·lr-d), 이 기록만 바꿨다. 웹툰 경로(`_short_appearance`·웹툰 take 프롬프트)·프리셋 문구·화면은 그대로다. 사용자 데이터를 읽지 않았고 git·네트워크·유료 API를 쓰지 않았다. 커밋하지 않았다.
+- **원인**
+  1. 캐스팅(재현 1): `_strip_lead_verbs`가 "… in his thirties has pale …"의 has를 with로 바꾼다. 이 with는 `_fit_look`에서 첫 조각의 앞 이음(`look_lead`)이 된다. 그런데 "appearing"이 나이(`_TEXT_AGE`)와 함께 빠지지 않아 머리말 뒤가 " appearing with pale warm-toned skin"이 되었다. 그래서 앞 이음이 빈칸(" ")이 되고 with는 첫 조각 안에 들어갔다. 300자 줄이기에서 첫 조각(피부 순위)이 빠지자 with와 appearing이 함께 사라지고, 다음 명사구가 빈칸으로 머리말에 붙었다("a Korean man in his 30s an angular …").
+  2. 실사 외형(재현 2): `_real_appearance`가 쉼표 조각 중 옷 조각만 빼고 `generate._clip_words`(단어 경계 + 마침표)로 170자를 잘랐다. 그래서 끝의 머리 조각이 "… over his."로 잘렸다. 같은 이유로 "hair tied …"(옷 낱말 tie를 품음) 머리 조각과 그 앞 머리말이 통째로 빠지기도 했다(합성 여 f1: 전 결과 "large doe eyes, …, without glasses").
+- **바꾼 것**(지운 정의 없음)
+  - `casting.py`
+    - `_join_pieces`: 앞 이음이 빈칸 하나이고 첫 항목이 명사구이면 " with "로 잇는다. 명사구 조건은 원래 첫 조각이 아니거나(앞 조각이 빠짐) 관사·소유격으로 시작하는 항목이다.
+    - 새 함수 `fit_appearance(text, limit, is_outfit=None)`·`_split_head`·`_is_hair_piece`(`_fit_look` 바로 뒤).
+    - 정규식: `_TEXT_AGE`에 나이 앞 appearing·looking·seeming·"who appears/looks/seems"(+ "to be")를 더했다. `_PREFIX_AGE`는 "-looking" 꼬리까지 뺀다. 새로 `_HAIR_WORDS`·`_HAIR_PIECE`·`_NOUN_LEAD`·`_HEAD_AGE`를 두었다. `_PIECE_RANKS` 남기는 줄은 `_HAIR_WORDS`로 다시 썼다(같은 정규식).
+  - `generate.py` `_real_appearance`: `vnew_casting.fit_appearance(strip_drawing_words(look), limit, is_outfit=<_short_appearance 옷 판정>)` 한 줄로 바꿨다.
+  - `check_vpoc.py`
+    - 상수: `_LOOK_FIX_*`(재현 1 입력·결과·옛 결과), `_CAST_LOOK_FEEDBACK["m4"]`, `_CAST_LOOK_RULES` 7경우, `_LR_APPEARANCE_REAL1`·`_LR_APPEARANCE_CASES`(7경우), `_LOOK_NO_WITH`·`_LR_OUTFIT_WORDS`·`_LR_APPEARANCE_HEAD`.
+    - 도우미 `_lr_appearance_problems`, cast-b·lr-d 검사 블록, `check_vnew_casting`·`check_vnew_take_real` 설명과 통과 문구.
+- **결정**
+  - D1 — with 규칙은 `_join_pieces`에 둔다. 그래서 캐스팅(`_fit_look`)과 실사 외형(`fit_appearance`)이 같은 규칙을 쓴다. 원래 첫 조각이 남아 있고 관사로 시작하지 않으면 원문 이음을 그대로 둔다("a Korean man of average height with …"·"named Jun with …"는 명사구가 아니다). 대안: 나이 정규식만 고침(기각 — "A man named Jun with fair skin, …"처럼 빈칸 이음 뒤 첫 조각이 빠지는 다른 꼴이 그대로 깨진다, cast-b namedDrop·poseDrop). 대안: 머리말 뒤 첫 항목에 늘 with(기각 — 위 비명사구가 "with of average height"가 된다).
+  - D2 — 나이 꼴: appearing·looking·seeming과 "who appears/looks/seems"(+ "to be")는 나이와 함께 지운다. 붙임표 뒤 looking("youthful-looking")은 지우지 않는다. 점검 중 "A young-looking man in his thirties" → "a -looking Korean man"(기존 `_PREFIX_AGE`가 young만 지움)을 찾아 "-looking" 꼬리까지 빼도록 고쳤다. 피드백의 "나이 꼴도 확인한다"에 들어가는 같은 종류라 범위 안으로 보았다. 영향은 나이가 있고 머리말 앞에 "{나이 낱말}-looking"이 있는 문장뿐이다.
+  - D3 — 실사 외형 줄이기는 `casting.fit_appearance`(공개 함수)에 두고, 옷 판정은 generate가 넘긴다(`_short_appearance` 판정 그대로, casting이 generate를 가져오지 않음). 대안: `_fit_look`에 limit 인자(기각 — `_fit_look`은 옷 첫 항목을 남기고 눈을 머리와 같은 순위로 둔다. 실사 외형은 옷을 빼고 머리를 눈보다 오래 남겨야 한다. cast-b 기대값이 걸린 함수라 건드리지 않았다).
+  - D4 — 옷 조각은 셋이다. "wearing/dressed …" 조각, 옷 판정이 참인 조각, 옷 조각 뒤에 오는 조각 중 코·턱·눈썹 이상 순위 낱말(코·체격·안경·얼굴·머리·눈)이 없는 조각이다. 마지막 규칙은 낱말 목록에 없는 "a white pocket square"·"black ankle socks"·"a shoulder bag"을 잡는다. 머리·눈 조각은 옷 판정으로 빼지 않는다("hair tied …"). and는 남은 외모 항목만으로 다시 센다(옷 목록의 ", and a tie"가 외모 마지막 항목에 and를 붙이지 않게).
+  - D5 — 빼는 순서는 `_PIECE_RANKS` 순서(같은 순위는 뒤 조각부터) 다음에 눈 조각(뒤부터)이다. 머리말·머리 조각은 끝까지 남긴다. 그래도 넘치면 `_clip_tail`(단어 경계, 매달린 낱말 지움, 마침표 없음)로 자른다. 재현 2 첫 입력은 순위대로 안경 → 얼굴형이 빠졌다. 캐스팅 순위가 눈 모양을 얼굴형보다 오래 남기기 때문이다.
+  - D6 — 늘 조각을 다시 잇는다. 문장 사이 마침표는 쉼표로 본다("Short black hair. He wears a suit." → 옷 문장이 조각으로 빠진다). 그림 낱말은 줄이기 전에 지운다(전에는 이은 뒤 지워 170자를 그림 낱말이 든 글로 셌다). 저장된 옛 문장("… 30s an angular …")도 실사 외형에서는 with가 들어간다.
+- **기존 검사 고정·기대값**: 바꾸지 않았다. cast-a~m·fx-a~n·lr-a~o 기대값과 lr-e(웹툰 take sha256 4종)·fx-i(끔 sha256 5종)가 그대로 통과한다. cast-b의 기존 13·5·28경우 결과도 글자까지 같다.
+- **새 결과**
+  - 재현 1(241자): `a Korean man in his 30s with an angular clean-shaven face, narrow dark eyes beneath sharply slanted brows, and short charcoal hair swept back with loose strands over his forehead, without glasses, wearing an open-collar ivory button-up shirt`. 나이 꼴 "who appears to be"·"looking to be", descriptionKo 나이 있음·없음 6가지가 모두 같은 문장이다. 기본 복장의 "rolled cuffs," 뒤는 피드백에서 "…"로 생략돼 검사 상수에 임의 값(charcoal tailored trousers, black leather loafers)을 넣었다. 결과에는 첫 항목만 남아 이 값에 기대지 않는다.
+  - 재현 2 입력 1(147자): `a Korean man in his 30s with narrow dark eyes beneath sharply slanted brows and short charcoal hair swept back with loose strands over his forehead`
+  - 재현 2 입력 2(154자): `a Korean man in his 20s with tousled short dyed pale-blond hair with long parted bangs and flyaway strands, almond-shaped eyes, and a slender angular face`
+- **확인**
+  - `python -B -X utf8 tools/check_vpoc.py` 전부 통과: ok 58줄, FAIL·WARN 0.
+  - 옛 코드(백업 `casting.py`·`_real_appearance`를 메모리에서 넣고 cast-b·lr 검사 실행): 43줄 실패. m4 2줄, 규칙 6경우, with 빠진 이음·appearing 13줄(나이 꼴 결과 줄 포함), fit_appearance 2경우, lr-d 실사 외형 5경우(19줄)와 통합 1이다. 새 코드는 0줄이다.
+  - 변형 검사 14개(메모리에서 한 군데씩 바꿈, 파일은 그대로): 14개 모두 잡았다. 바꾼 곳은 with 규칙·appearing·관사 첫 조각·-looking·눈 먼저 빼기·옷 뒤 목록·머리 조각 옷 판정 제외·and 다시 세기·문장 마침표·머리말 없을 때 이음·머리말 나이·순위·generate의 옷 판정 넘기기·그림 낱말 지우기다.
+  - 검사가 덮는 것
+    - cast-b m4·규칙 7경우: `look_sentence` → `_TEXT_AGE`(appearing·who appears to be·looking to be)·`_PREFIX_AGE`(-looking)·`_fit_look` → `_join_pieces` with 분기(앞 조각이 빠짐).
+    - fit_appearance 14경우: `_split_head`(머리말 있음·없음·나이), 옷 판정 3갈래, `_is_hair_piece`, 순위·눈 순서, `_NOUN_LEAD` 분기, `_clip_tail` 마지막 자르기, 빈 입력.
+    - lr-d 7경우 + 통합 1: `generate._real_appearance` → `strip_drawing_words` → `fit_appearance` → `_short_appearance` 옷 판정. 통합은 가짜 저장소 캐릭터 → `_real_look` → `current_look`/`auto_look` → `look_sentence` → `_real_appearance`다.
+  - 바뀐 줄 커버리지(`coverage run --data-file=%TEMP%\kiro_look_fix\cov.data --source=app/src,tools`, 시작 전 사본과 difflib): `casting.py` 실행 대상 41/41(100%), `generate.py` 1/1(100%), `check_vpoc.py` 62/68(91.2%). 안 탄 6줄은 실패 때만 타는 `bad.append`다.
+  - 위생(시작 전 사본 대비): 네 파일 CR 0, 공백만 바뀐 줄 0, 지운 함수·클래스 정의 0. 저장소 안 `.coverage` 없음(데이터는 `%TEMP%\kiro_look_fix`).
+- **3단계 리뷰**
+  - 보안: 입력은 분석 결과 글이나 사용자가 고친 외모 문장이다. 새 저장·로그·외부 호출이 없다. fal에 가는 글은 지금처럼 cast_prompt ≤1500자와 실사 프롬프트 ≤4000B다. 정규식 역추적은 악성 입력으로 쟀다("appearing " 200번, "who appears to be " 100번, ", a" 200번, " and the nose" 150번, "wearing a coat, " 100번, 2000자 한 조각). `look_sentence` 최대 9.7ms, `_real_appearance` 최대 10.9ms다. 발견: 없음.
+  - 성능(512Mi): 순수 문자열 처리다. 실제 꼴 입력 2로 `_real_appearance` 1000번에 223ms다. 실사 테이크 제출 때 인물마다 한 번이다. 외부 호출 횟수는 그대로다. 발견: 없음.
+  - 운영성: 설정 플래그는 없다. 되돌리기는 이미지 되돌리기다. 고치지 않은 자동 문장은 보기 때 계산되어 배포하면 바로 바뀐다. 진행 중 캐스팅 뽑기는 시작 때 저장한 `casting.prompt`를 쓴다. 이미 제출된 실사 테이크는 영향이 없고, 배포 뒤 제출하거나 다시 시도하는 테이크부터 새 외형을 쓴다. 실사 외형 끝 마침표는 없어졌지만 ASSETS가 원래 `rstrip('.')`을 해 프롬프트 모양은 같다. 발견·조치: f1의 "hair tied …"가 옷 판정에 걸려 머리말·머리 조각이 통째로 빠지는 것을 찾았다 → 머리·눈 조각은 옷 판정에서 뺐다(D4). "young-looking"의 반쪽 낱말 → D2.
+- **남은 이슈**
+  1. 프롬프트가 예산을 넘을 때의 ASSETS 줄이기(`_take_prompt`의 `appearance_limit` 170 → 100, `_clip_words`)는 여전히 단어 경계 + 마침표로 자른다. 웹툰과 같이 쓰는 단계라 이번 범위(`_real_appearance`만) 밖이다. 이번 개발 점검의 실사 프롬프트는 3,888B로, 100자 단계까지 갔는지는 단계 로그(`steps=`)로 확인해야 한다.
+  2. 머리말 + 머리 조각만으로 limit를 넘으면 `_clip_tail`이 머리 조각을 단어 경계에서 자른다. 매달린 낱말은 없지만 반쪽 조각이 남는다. 실제 꼴의 머리 조각은 90자 안쪽이다.
+  3. 관사 없는 " and "("narrow eyes … and short black hair")는 나누지 않아 눈과 머리가 한 조각이다. 이 조각은 머리 조각으로 남고 눈만 따로 뺄 수 없다.
+  4. 옷 판정은 낱말 목록이다. `_short_appearance` 판정은 부분 문자열이라 "a button nose"가 옷으로 빠진다. 옷 뒤 "a silver nose ring"은 코 낱말 때문에 남는다.
+  5. 같은 꼴의 기존 문제: 나이가 있을 때 머리말 앞 "old-fashioned"는 old만 빠진다(`_PREFIX_AGE`, 실제 분석 문장에서 본 적 없음).
+  6. 배포 뒤 개발 데이터에서 그 캐릭터의 자동 문장과 실사 테이크 ASSETS 외형을 읽기 전용으로 다시 확인해야 한다.

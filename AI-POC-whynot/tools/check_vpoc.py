@@ -21136,7 +21136,125 @@ _CAST_LOOK_RULES = {
     # "facial hair" 는 머리 조각이 아니라 수염(안경·수염 순위)이라 300자를 넘으면 빠진다.
     "facialHair": (("A man with short black hair, without glasses or facial hair.", "", "male", "a " + "very " * 45 + "long coat"),
                    "a Korean man with short black hair, wearing a " + "very " * 45 + "long coat"),
+    # (2026-10-30 피드백 2) 나이 앞 appearing·"who appears to be"·looking 은 나이와 함께 빠진다.
+    "appearingAge": (("An adult man appearing in his thirties has short black hair.", "", "male", ""),
+                     "a Korean man in his 30s with short black hair"),
+    "appearsToBe": (("A man who appears to be in his forties has short black hair.", "40대", "male", ""),
+                    "a Korean man in his 40s with short black hair"),
+    "lookingToBe": (("A man looking to be in his late twenties, short black hair.", "", "male", ""),
+                    "a Korean man in his late 20s, short black hair"),
+    "youngLooking": (("A young-looking man in his thirties with short black hair.", "", "male", ""),
+                     "a Korean man in his 30s with short black hair"),
+    "goodLooking": (("A good-looking man in his thirties with short black hair.", "", "male", ""),
+                    "a good-looking Korean man in his 30s with short black hair"),
+    # (같은 피드백) 머리말 바로 뒤(빈칸)의 첫 조각이 300자 줄이기에서 빠지면 다음 명사구 앞에 with 를 붙인다.
+    "namedDrop": (("A man named Jun with fair skin, a long neck, short black hair, narrow eyes.", "", "male",
+                   "a " + "very " * 43 + "long coat"),
+                  "a Korean man with short black hair, narrow eyes, wearing a " + "very " * 43 + "long coat"),
+    "poseDrop": (("A man in a relaxed pose with fair skin, a strong jaw, and short black hair.", "", "male",
+                  "a " + "very " * 40 + "long coat"),
+                 "a Korean man with a strong jaw and short black hair, wearing a " + "very " * 40 + "long coat"),
 }
+
+# cast-b·lr-d(2026-10-30 피드백 2, 묶음 C 개발 읽기 점검): 재현 1 — look_sentence 에서 "with" 가 빠졌다(has → with 뒤 첫 조각
+# 피부가 300자 줄이기에서 빠지며 with 도 사라짐, "appearing" 나이 꼴). 기본 복장의 "rolled cuffs," 뒤는 피드백의 "…" 자리를 채운 값이다.
+_LOOK_FIX_APP = (
+    "An adult man appearing in his thirties has pale warm-toned skin, a tall muscular build with exceptionally broad shoulders "
+    "and long legs, an angular clean-shaven face, a straight prominent nose, narrow dark eyes beneath sharply slanted brows, and "
+    "short charcoal hair swept back with loose strands over his forehead, without glasses."
+)
+_LOOK_FIX_OUTFIT = (
+    "He wears an open-collar ivory button-up shirt with rolled cuffs, charcoal tailored trousers, and black leather loafers."
+)
+_LOOK_FIX_HAIR = "short charcoal hair swept back with loose strands over his forehead"
+_LOOK_FIX_SENTENCE = (
+    "a Korean man in his 30s with an angular clean-shaven face, narrow dark eyes beneath sharply slanted brows, and short "
+    "charcoal hair swept back with loose strands over his forehead, without glasses, wearing an open-collar ivory button-up shirt"
+)
+# 바뀌기 전 결과(with 빠짐). 사용자가 이 문장을 저장했으면 실사 외형이 with 를 다시 넣는다(lr-d).
+_LOOK_FIX_BROKEN = (
+    "a Korean man in his 30s an angular clean-shaven face, narrow dark eyes beneath sharply slanted brows, and short charcoal "
+    "hair swept back with loose strands over his forehead, without glasses, wearing an open-collar ivory button-up shirt"
+)
+# 재현 1 을 실제 분석 꼴 검사(cast-b)에도 넣는다(결과 전문·≤300·나이 1번·머리 조각 통째·옷 첫 항목·auto_look/current_look 같음).
+_CAST_LOOK_FEEDBACK["m4"] = (_LOOK_FIX_APP, "", "male", _LOOK_FIX_OUTFIT, _LOOK_FIX_SENTENCE, _LOOK_FIX_HAIR,
+                             "wearing an open-collar ivory button-up shirt")
+# lr-d 재현 2: 실사 테이크 외형(_real_appearance, 170자). (입력, 결과, 통째로 남아야 할 머리 조각).
+# 셋째는 다른 실제 꼴(피드백 원문), 넷째는 머리 조각에 "tied"(옷 낱말 tie 를 품음)가 있는 꼴 — 전에는 머리말·머리 조각이 통째로 빠졌다.
+_LR_APPEARANCE_REAL1 = (
+    "a Korean man in his 30s with narrow dark eyes beneath sharply slanted brows and short charcoal hair swept back with loose "
+    "strands over his forehead"
+)
+_LR_APPEARANCE_CASES = (
+    (_LOOK_FIX_SENTENCE, _LR_APPEARANCE_REAL1, _LOOK_FIX_HAIR),
+    (_LOOK_FIX_BROKEN, _LR_APPEARANCE_REAL1, _LOOK_FIX_HAIR),
+    ("a Korean man in his 20s with tousled short dyed pale-blond hair with long parted bangs and flyaway strands, almond-shaped "
+     "eyes, a slender angular face, a straight nose, and a tall lean build with long limbs, without glasses or facial hair, "
+     "wearing a loose ivory open-collar button-up shirt",
+     "a Korean man in his 20s with tousled short dyed pale-blond hair with long parted bangs and flyaway strands, almond-shaped "
+     "eyes, and a slender angular face",
+     "tousled short dyed pale-blond hair with long parted bangs and flyaway strands"),
+    (_CAST_LOOK_FEEDBACK["f1"][4],
+     "a Korean woman in her late 20s with long wavy dyed chestnut-brown hair tied in a low ponytail with loose face-framing "
+     "strands, large doe eyes, and a soft oval face",
+     _CAST_LOOK_FEEDBACK["f1"][5]),
+    # 옷 낱말로만 옷 조각인 것(wearing 없음)·사용자가 고친 여러 문장("He wears …")·그림 낱말은 줄이기 전에 지운다.
+    ("a Korean man in his 30s with short black hair, narrow eyes, a navy blazer over a white shirt",
+     "a Korean man in his 30s with short black hair, narrow eyes", "short black hair"),
+    ("A Korean man in his 30s with short black hair. He wears a navy suit.", "A Korean man in his 30s with short black hair",
+     "short black hair"),
+    ("a Korean man in his 20s with short black anime-style hair, sharp eyes, wearing a black dress shirt",
+     "a Korean man in his 20s with short black style hair, sharp eyes", "short black style hair"),
+)
+# 머리말 "… Korean {명사} {나이}" 바로 뒤가 with·without·wearing·쉼표·끝이 아니면 with 가 빠진 이음이다.
+_LOOK_NO_WITH = re.compile(
+    r"\bKorean\s+(?:man|woman|person|boy|girl)(?:\s+in\s+(?:his|her|their)\s+(?:(?:early|mid|late)\s+)?\d0s)?"
+    r"(?!\s+(?:with|without|wearing|in\s+(?:his|her|their))\b|,|$)",
+    re.IGNORECASE,
+)
+_LR_OUTFIT_WORDS = re.compile(
+    r"\b(?:wear\w*|dressed|outfit|shirts?|trousers|slacks|jackets?|coats?|suits?|ties?|dress|shoes?|sleeves?|collars?|"
+    r"open-collar|button-up|buttons?|hoodies?|uniforms?|clothes|clothing|pants|skirts?|sweaters?|blazers?|jeans|scarf|vests?|"
+    r"robes?|cuffs|loafers|cardigan|camisole)\b",
+    re.IGNORECASE,
+)
+_LR_APPEARANCE_HEAD = re.compile(
+    r"^.*?\bKorean\s+(?:man|woman|person|boy|girl)(?:\s+in\s+(?:his|her|their)\s+(?:(?:early|mid|late)\s+)?\d0s)?", re.IGNORECASE,
+)
+
+
+def _lr_appearance_problems(look: str, got: str, want: str, hair: str, limit: int = 170) -> list[str]:
+    """실사 외형(_real_appearance) 확인: 결과 상수·≤limit·머리 조각 통째·옷 낱말 없음·매달린 끝 없음·with 빠진 이음 없음·반쪽 조각 없음.
+
+    반쪽 조각: 입력을 쉼표(", and")·문장 끝으로 나눈 조각(머리말·앞 with·그림 낱말 뺌) 중 결과에 있는 것을 지우면 이음 낱말(쉼표·
+    with·and)만 남아야 한다.
+    """
+    problems = []
+    if got != want:
+        problems.append(f"결과 {got!r} != {want!r}")
+    if len(got) > limit:
+        problems.append(f"{len(got)}자")
+    if hair not in got:
+        problems.append(f"머리 조각이 온전하지 않음 {hair!r}")
+    if _LR_OUTFIT_WORDS.search(got):
+        problems.append(f"옷 낱말 {_LR_OUTFIT_WORDS.findall(got)}")
+    if re.search(r"(?:\b(?:with|or|and|of|over|his|her|their)|[,.;:])$", got, re.IGNORECASE):
+        problems.append(f"매달린 끝 {got[-20:]!r}")
+    if _LOOK_NO_WITH.search(got):
+        problems.append(f"with 가 빠진 명사구 이음 {got[:60]!r}")
+    head = _LR_APPEARANCE_HEAD.match(look)
+    head_got = _LR_APPEARANCE_HEAD.match(got)
+    if not head or not head_got or head.group(0) != head_got.group(0):
+        problems.append("머리말이 입력과 다름")
+    else:
+        body = re.sub(r"\b(?:anime|webtoon|manga)-", "", look[head.end():], flags=re.IGNORECASE)
+        pieces = [re.sub(r"^(?:with\s+)", "", part.strip()) for part in re.split(r"[,.]\s*(?:and\s+)?", body)]
+        leftover = got[head_got.end():]
+        for piece in sorted((p for p in pieces if p and p in got), key=len, reverse=True):
+            leftover = leftover.replace(piece, " ")
+        if not re.fullmatch(r"[\s,]*(?:(?:with|and)\b[\s,]*)*", leftover):
+            problems.append(f"반쪽 조각 {leftover.strip()!r}")
+    return problems
 
 # cast-l: vnew.js 캐스팅 칸을 node 로 돌리는 가짜 DOM·api·window(fx-l 하네스와 같은 방식, 외부 호출 없음).
 _CAST_SCREEN_NODE_HARNESS = r"""
@@ -21469,6 +21587,9 @@ def check_vnew_casting() -> None:
              실제 분석 꼴 5개(He is·… has·She is·They are·He wears·보이지 않음 꼬리·합성 눈 색·irises — 결과 상수·≤300·나이 1번·
              머리 조각 통째·옷 첫 항목·매달린 끝 없음·auto_look/current_look 같음), 규칙별 28경우, 조각 단위 300자·남기는 조각이
              넘칠 때 자르기, 고친 문장 그대로
+             (2026-10-30 피드백 2) 재현 1(m4, 결과 전문)·나이 꼴(appearing·who appears to be·looking to be·-looking)·머리말 뒤 첫 조각이
+             빠진 명사구(namedDrop·poseDrop) 규칙 7경우, 모든 결과에 with 빠진 이음·appearing 없음, fit_appearance 14경우(옷 조각과 그 뒤
+             옷 목록·and 다시 세기·순위·눈보다 머리·머리 조각은 옷 판정 제외·관사 첫 조각 with·문장 마침표·머리말 없음·머리 조각만으로 넘침)
     (cast-c) pattern_warning 경우·문구
     (cast-d) resolve_gender 순서(사용자 → genderEn → 주어 → unknown, 옛 캐릭터 genderEn 없음), normalize_gender,
              분석 도구 스키마·SYSTEM 켬/끔(끔 = 변경 전 sha256), _analyze 가 보낸 도구·SYSTEM, analyze_sources genderEn 켬/끔
@@ -21708,6 +21829,50 @@ def check_vnew_casting() -> None:
                 got = castmod.look_sentence(*args)
                 if got != want or len(got) > 300 or dangling.search(got):
                     bad.append(f"(cast-b) look_sentence 규칙 {name}: {got!r} != {want!r}")
+            # (cast-b, 2026-10-30 피드백 2) 머리말 바로 뒤가 with·without·wearing·쉼표가 아닌 명사구 이음("a Korean man in his 30s an
+            # angular face")과 나이 앞 appearing 이 어떤 결과에도 없다: 위 기대값 전부 + 재현 1 의 나이 꼴 3개 × 나이 있음·없음.
+            all_b = list(got_b.values()) + [castmod.look_sentence(*value[:4]) for value in _CAST_LOOK_FEEDBACK.values()] \
+                + [castmod.look_sentence(*args) for args, _ in _CAST_LOOK_RULES.values()]
+            for word in ("appearing", "who appears to be", "looking to be"):
+                for desc in ("", "30대 남성"):
+                    all_b.append(castmod.look_sentence(_LOOK_FIX_APP.replace("appearing", word), desc, "male", _LOOK_FIX_OUTFIT))
+            for text in all_b:
+                if _LOOK_NO_WITH.search(text) or re.search(r"\b(?:appearing|appears|seeming)\b|\blooking\s+to\b", text, re.IGNORECASE):
+                    bad.append(f"(cast-b) with 가 빠진 명사구 이음이나 나이 앞 appearing 이 남았습니다: {text[:90]!r}")
+            if all_b[-6:] != [_LOOK_FIX_SENTENCE] * 6:
+                bad.append(f"(cast-b) 재현 1 의 나이 꼴(appearing·who appears to be·looking to be) 결과가 다릅니다: {all_b[-6:]}")
+            # (cast-b, 같은 피드백) fit_appearance(실사 테이크 외형이 쓰는 조각 규칙): 옷 조각과 그 뒤 옷 목록 빼기, 머리 조각을 눈 조각보다
+            # 오래 남기기, 머리·눈 조각은 옷 판정으로 빼지 않기, 관사로 시작하는 첫 조각·옷이 빠진 첫 자리에 with.
+            fit = castmod.fit_appearance
+            fit_cases = {
+                "articleLead": (("a Korean man in his 30s an angular face, short black hair, wearing a coat", 170, None),
+                                "a Korean man in his 30s with an angular face, short black hair"),
+                "outfitFirst": (("a Korean man wearing a coat, short black hair", 170, None), "a Korean man with short black hair"),
+                "outfitTail": (("a Korean man with short black hair, wearing a dark gray suit with matching trousers, a pale pink dress "
+                                "shirt, a black tie, and a white pocket square", 170, None), "a Korean man with short black hair"),
+                "outfitBody": (("a Korean woman with long hair, a long neck, wearing a cream cardigan, black ankle socks, a shoulder "
+                                "bag, and a strong jaw", 170, None), "a Korean woman with long hair, a long neck, and a strong jaw"),
+                "outfitAnd": (("a Korean man with short black hair, narrow eyes, wearing a suit, a shirt, and a tie", 170, None),
+                              "a Korean man with short black hair, narrow eyes"),
+                "eyesBeforeHair": (("a Korean man with narrow eyes, a strong jaw, and short black hair swept back", 50, None),
+                                   "a Korean man with short black hair swept back"),
+                "rankOrder": (("a Korean man with fair skin, short black hair, an angular face", 55, None),
+                              "a Korean man with short black hair, an angular face"),
+                "sentences": (("Short black hair. He wears a suit.", 170, lambda piece: "wear" in piece), "Short black hair"),
+                "hairTied": (("a Korean man with long hair tied in a low ponytail, a button nose, wearing a coat", 170,
+                              lambda piece: "tie" in piece or "button" in piece), "a Korean man with long hair tied in a low ponytail"),
+                "headOnly": (("a Korean man wearing a suit", 170, None), "a Korean man"),
+                "empty": (("", 170, None), ""),
+                "noHead": (("short black hair, a long neck", 20, None), "short black hair"),
+                "noHeadDrop": (("fair skin, short black hair", 16, None), "short black hair"),
+            }
+            for name, (args, want) in fit_cases.items():
+                if fit(*args) != want:
+                    bad.append(f"(cast-b) fit_appearance {name}: {fit(*args)!r} != {want!r}")
+            long_fit = fit("a Korean man with " + "long " * 40 + "hair over his forehead", 80)
+            if len(long_fit) > 80 or not long_fit.startswith("a Korean man with long long") or dangling.search(long_fit) \
+                    or re.search(r"\b(?:over|his)$", long_fit):
+                bad.append(f"(cast-b) 머리 조각만으로 넘치는 fit_appearance 자르기가 다릅니다: {long_fit!r}")
             # 사용자가 고친 문장은 그대로 쓴다(prompt_look 정리만 지난다).
             edited_b = {"analysis": {"appearanceEn": _CAST_LOOK_FEEDBACK["m1"][0]},
                         "casting": {"lookEn": "He is tall, with gray-blue eyes", "lookEdited": True}}
@@ -22769,7 +22934,7 @@ def check_vnew_casting() -> None:
         ok(
             "vnew-live-fx 실사 캐스팅 검사 (cast-a)male 프리셋 = 참고 구현 원문·성별 낱말·He/She/They·female·unknown 에 male·He is·his 없음·"
             f"webtoon 0({prompt_count}문장) (cast-b)외모 문장·나이·dyed·표정·눈 색·300자·실제 분석 꼴 {len(_CAST_LOOK_FEEDBACK)}개·"
-            f"규칙 {len(_CAST_LOOK_RULES)}경우·조각 단위 줄이기 (cast-c)무늬 위치 경고 "
+            f"규칙 {len(_CAST_LOOK_RULES)}경우·조각 단위 줄이기·with 이음·실사 외형 조각 규칙 (cast-c)무늬 위치 경고 "
             "(cast-d)성별 순서·분석 도구·SYSTEM 켬/끔(끔 = 변경 전 sha256)·genderEn 저장 (cast-e)start_draw 오류 7종·drawing·history 12·"
             "chosen 유지 (cast-f)run_draw 본문 3키·S3 JPEG≤1536·원장 2건 (cast-g)칸별 실패·과금 0 (cast-h)이어하기 queued 제출 0·900초 "
             "(cast-i)choose (cast-j)라우트 3개·끔 404·상세 보기 (cast-k)castingKey·_real_front_key(고름·안 고름·끔)·컷 단위 Kling payload "
@@ -23112,6 +23277,9 @@ def check_vnew_take_real() -> None:
            웹툰과 같은 @Video1·본문 키·URL·S3 키 없음
     (lr-d) 실사 프롬프트: STYLE 원문(결정 7)·"webtoon" 0·실사 표현(배경 기호 없음)·그림 낱말 제거·rule_replace·AVOID·≤4000B·
            모든 타임스탬프·로그 variant=real bytes= steps=, 6컷 보통·최악·12컷 최악, 검사에 걸리면 failed·제출 0·원장 0
+           (2026-10-30 피드백 2) 실사 외형 _real_appearance 7경우(재현 2 두 입력·with 빠진 옛 문장·"tied" 머리·옷 낱말만·여러 문장·
+           그림 낱말): 결과 상수·≤170·머리 조각 통째·옷 낱말 0·매달린 끝 0·with 빠진 이음 0·반쪽 조각 0, 분석 문장 → _real_look →
+           실사 외형 통합 1, 확인 함수가 옛 결과를 잡음
     (lr-e) 웹툰 take 프롬프트 sha256(켬) = variant 인자 전(기본·"webtoon" 둘 다), 웹툰 본문 키 그대로
     (lr-f) 드라이버: 실사 제출(generate_audio 기본)·완료·테이크 1개 복사·2개 이어붙이기·finalReal done·n·gen done·웹툰 그대로·
            원장 = _take_usd·의상 읽기 LLM 0회
@@ -23804,6 +23972,27 @@ def check_vnew_take_real() -> None:
                     or not logs.messages("vnew.gen.real_look_unreadable char=no-such err=VpocError") \
                     or genmod._real_appearance("wearing a black dress shirt, navy tie") != "":  # noqa: SLF001
                 bad.append("(lr-c) 못 읽는 캐릭터·옷만 있는 외모 문장의 실사 외형이 빈 값이 아닙니다")
+            # (lr-d, 2026-10-30 피드백 2) 재현 2: 실사 외형 170자 — 옷 조각을 빼고 캐스팅과 같은 조각 규칙으로 줄인다(머리 조각 통째).
+            for look_d, want_d, hair_d in _LR_APPEARANCE_CASES:
+                got_d = genmod._real_appearance(look_d)  # noqa: SLF001
+                bad.extend(f"(lr-d) 실사 외형 {look_d[:36]!r}…: {item}"
+                           for item in _lr_appearance_problems(look_d, got_d, want_d, hair_d))
+            # 확인 함수 자체: 피드백의 옛 결과(170자 단어 경계 + 마침표)와 옷·머리말이 틀린 결과를 넣으면 항목마다 잡는다.
+            old_got_d = ("a Korean man in his 30s an angular clean-shaven face, narrow dark eyes beneath sharply slanted brows, and "
+                         "short charcoal hair swept back with loose strands over his.")
+            kinds_d = [[item.split(" ")[0] for item in _lr_appearance_problems(look, got, _LR_APPEARANCE_REAL1, _LOOK_FIX_HAIR)]
+                       for look, got in ((_LOOK_FIX_BROKEN, old_got_d),
+                                         (_LOOK_FIX_SENTENCE, "short hair, wearing a " + "long " * 40 + "coat"))]
+            if kinds_d != [["결과", "머리", "매달린", "with", "반쪽"], ["결과", "226자", "머리", "옷", "머리말이"]]:
+                bad.append(f"(lr-d) 실사 외형 확인 함수가 옛 결과·틀린 결과를 잡지 못합니다: {kinds_d}")
+            # 통합: 분석 문장(재현 1, 나이 없는 descriptionKo) → _real_look(가짜 저장소·current_look/auto_look·look_sentence) → 실사 외형.
+            env.chars["ch3"] = _lr_char("ch3", "씨", "male", _LOOK_FIX_APP, _LOOK_FIX_OUTFIT)
+            env.chars["ch3"]["analysis"]["descriptionKo"] = "회사원"
+            look_3 = genmod._real_look(owner, "ch3")  # noqa: SLF001
+            appearance_3 = genmod._real_appearance(look_3)  # noqa: SLF001
+            env.chars.pop("ch3")
+            if look_3 != _LOOK_FIX_SENTENCE or appearance_3 != _LR_APPEARANCE_REAL1:
+                bad.append(f"(lr-d) 분석 문장 → 실사 외모 문장 → 실사 외형이 다릅니다: {look_3!r} → {appearance_3!r}")
 
             def boom(*_a, **_k):
                 raise RuntimeError("보기 실패(검사)")
@@ -23879,7 +24068,8 @@ def check_vnew_take_real() -> None:
         ok(
             "vnew-live-fx 통 테이크 실사 버전 검사 (lr-a)시작 조건 404·400·409 6종·성공 저장 모양·드라이버·운영 문구 "
             "(lr-b)5회차 realHistory 3·final-real-r{n}·이전 파일 (lr-c)인물 사진·실사 장소·data URI·같은 @Video1 "
-            "(lr-d)STYLE 원문·webtoon 0·실사 표현·그림 낱말·≤4000B·타임스탬프·로그·걸리면 제출·원장 0 (lr-e)웹툰 sha256 4종 그대로 "
+            "(lr-d)STYLE 원문·webtoon 0·실사 표현·그림 낱말·≤4000B·타임스탬프·로그·걸리면 제출·원장 0·실사 외형 조각 단위 170자 "
+            "(lr-e)웹툰 sha256 4종 그대로 "
             "(lr-f)완료·복사·이어붙이기·웹툰 그대로·원장 (lr-g)소리 거절 3경로·pf-b 그대로·소리 없이 다시(웹툰·실사·끔) "
             "(lr-h)_fail_variant (lr-i)_gen_stale activeSince (lr-j)재시작·취소 (lr-k)select (lr-l)gen_view "
             "(lr-m)_PREPARE_SEM·동시 상한"
