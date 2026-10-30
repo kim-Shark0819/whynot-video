@@ -2928,7 +2928,8 @@ def _take_prompt(plan: dict, take: dict, *, cast: list[dict], panel_nos: list[in
             roman = _disp_name(ko)
             color = member.get("colorName") or "grey"
             appearance = (
-                _clip(_txt(member.get("appearance")), state["appearance_limit"])
+                # 실사는 줄일 때도 조각 단위(머리 조각 유지, 중간 잘림 없음), 웹툰은 지금 그대로(단어 경계).
+                (vnew_casting.fit_appearance if real else _clip)(_txt(member.get("appearance")), state["appearance_limit"])
                 if state["appearance_limit"] > 0 else ""
             )
             front_no = member.get("frontNo")
@@ -3259,14 +3260,15 @@ def _real_look(owner: str, char_id: str) -> str:
 
 
 def _real_appearance(look: str, limit: int = 170) -> str:
-    """실사 외모 문장 → ASSETS 외형(얼굴·머리, ≤limit자). 쉼표 조각 중 옷 낱말이 든 조각을 빼고 그림 낱말을 지운다.
+    """실사 외모 문장 → ASSETS 외형(얼굴·머리, ≤limit자). 그림 낱말을 지우고 옷 조각을 뺀 뒤 조각 단위로 줄인다.
 
     look_sentence 는 옷까지 한 문장이라 _short_appearance(문장 단위)를 그대로 쓰면 늘 빈 값이 된다. 조각마다
     _short_appearance 의 옷 판정을 빌린다(옷 낱말이 있으면 그 조각의 요약이 빈 값). 옷은 COSTUME 이 맡는다.
+    2026-10-30 피드백: 170자에 맞출 때 캐스팅과 같은 조각 규칙(vnew_casting.fit_appearance — 순위·잇기)을 쓴다. 머리 조각을
+    끝까지 남기고 덜 중요한 조각부터 뺀다(전에는 단어 경계에서 잘라 "… over his." 처럼 반쪽 조각이 남았다).
     """
-    pieces = [piece.strip() for piece in str(look or "").split(",")]
-    kept = [piece for piece in pieces if piece and _short_appearance(piece, 1000)]
-    return _clip_words(vnew_fx.strip_drawing_words(", ".join(kept)), limit)
+    return vnew_casting.fit_appearance(vnew_fx.strip_drawing_words(look), limit,
+                                       is_outfit=lambda piece: not _short_appearance(piece, 1000))
 
 
 def _take_payload(owner: str, pid: str, plan: dict, take: dict, caps: dict, variant: str = "webtoon") -> dict:

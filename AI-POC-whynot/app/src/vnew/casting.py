@@ -223,8 +223,9 @@ _HAIR_BASES = {
 _OLD_WORDS = re.compile(r"\b(?:elderly|old|older|aged|graying|greying|salt-and-pepper|wrinkled)\b", re.IGNORECASE)
 # 머리 앞 수식어로 보지 않는 낱말(주어 앞 형용사 정리용).
 _PREFIX_DROP = re.compile(r"\b(?:a|an|the|one|korean|east\s+asian|asian)\b", re.IGNORECASE)
-_PREFIX_AGE = re.compile(
-    r"\b(?:young|youthful|middle-aged|elderly|old|older|teenage|adult|aged|mature|\d{1,2}[- ]years?[- ]old)\b", re.IGNORECASE,
+_PREFIX_AGE = re.compile(  # "young-looking"·"youthful-looking" 은 붙임표 꼬리까지 뺀다("a -looking Korean man" 이 되지 않게)
+    r"\b(?:young|youthful|middle-aged|elderly|old|older|teenage|adult|aged|mature|\d{1,2}[- ]years?[- ]old)(?:-looking)?\b",
+    re.IGNORECASE,
 )
 _PREFIX_GENDER = re.compile(r"\b(?:fe)?male\b", re.IGNORECASE)
 # 글 속 나이("in his twenties"·"in her late 30s"). 2026-10-30 피드백: 낱말 나이(twenties …)도 본다.
@@ -232,8 +233,11 @@ _AGE_DECADE_WORDS = {
     "teens": 10, "twenties": 20, "thirties": 30, "forties": 40, "fifties": 50, "sixties": 60, "seventies": 70,
     "eighties": 80, "nineties": 90,
 }
+# 나이 앞 "appearing"·"looking"·"who appears to be" 도 나이와 함께 뺀다(2026-10-30 피드백: "An adult man appearing in his
+# thirties has …" 에 appearing 이 남지 않게). "youthful-looking" 의 looking 은 붙임표 뒤라 남긴다.
 _TEXT_AGE = re.compile(
-    r"\s*\b(?:aged\s+)?in\s+(?:his|her|their)\s+(?:(early|mid|late)[- ])?(\d0s|teens|twenties|thirties|forties|fifties|"
+    r"\s*\b(?:(?<![\w-])(?:who\s+(?:appears|looks|seems)|appearing|looking|seeming)(?:\s+to\s+be)?\s+)?"
+    r"(?:aged\s+)?in\s+(?:his|her|their)\s+(?:(early|mid|late)[- ])?(\d0s|teens|twenties|thirties|forties|fifties|"
     r"sixties|seventies|eighties|nineties)\b",
     re.IGNORECASE,
 )
@@ -280,10 +284,11 @@ _ADJ_TAIL = re.compile(r"(?:ed|ish|ful|ous|ic|al|ive|less|tall|slim|lean|broad|t
 # 빼는 순서(작을수록 먼저 빠짐): 몸 세부 → 피부 → 옷 두 번째 이후 → 코·턱·눈썹(그 밖 조각도 여기) → 체격·키 → 안경·수염 → 얼굴형.
 # 끝까지 남기는 것(_RANK_KEEP): 주어(나이)·머리·눈 모양·옷 첫 항목.
 _RANK_BODY, _RANK_SKIN, _RANK_OUTFIT, _RANK_FEATURE, _RANK_BUILD, _RANK_GLASSES, _RANK_FACE, _RANK_KEEP = 1, 2, 3, 4, 5, 6, 7, 99
+# 머리 조각 낱말. 실사 테이크 외형(fit_appearance)은 남기는 조각 중 머리 조각을 눈 조각보다 오래 남긴다.
+_HAIR_WORDS = r"hair|bangs|fringe|ponytail|pigtails|braids?|buns?|curls|locks|strands|hairstyle|haircut|undercut|mohawk|bald"
+_HAIR_PIECE = re.compile(rf"\b(?:{_HAIR_WORDS})\b", re.IGNORECASE)
 _PIECE_RANKS = (  # 위에서부터 처음 맞는 줄의 순위(더 오래 남는 쪽을 먼저 본다)
-    (_RANK_KEEP, re.compile(
-        r"\b(?:hair|bangs|fringe|ponytail|pigtails|braids?|buns?|curls|locks|strands|hairstyle|haircut|undercut|mohawk|"
-        r"bald|eyes?|eyelids?|eyelashes|lashes)\b", re.IGNORECASE)),
+    (_RANK_KEEP, re.compile(rf"\b(?:{_HAIR_WORDS}|eyes?|eyelids?|eyelashes|lashes)\b", re.IGNORECASE)),
     (_RANK_FACE, re.compile(r"\b(?:face|features|cheekbones|visage)\b", re.IGNORECASE)),
     (_RANK_GLASSES, re.compile(
         r"\b(?:glasses|spectacles|eyeglasses|sunglasses|monocle|beard|mustache|moustache|stubble|goatee|clean-shaven|"
@@ -305,6 +310,10 @@ _DANGLING = re.compile(
     r"while|wearing))$",
     re.IGNORECASE,
 )
+# 관사·소유격으로 시작하는 조각은 명사구다. 머리말 바로 뒤에 빈칸으로 붙으면 with 가 빠진 것이다(_join_pieces).
+_NOUN_LEAD = re.compile(r"^(?:an?|the|his|her|their)\s", re.IGNORECASE)
+# 외모 문장 머리말 끝의 나이("a Korean man in his 30s"). fit_appearance 가 머리말을 나눌 때 쓴다.
+_HEAD_AGE = re.compile(r"\s+in\s+(?:his|her|their)\s+(?:(?:early|mid|late)[- ])?\d0s\b", re.IGNORECASE)
 _STRANDS = " with realistic hair strands"
 
 
@@ -578,7 +587,11 @@ def _look_pieces(text: str, outfit: bool, start: int) -> dict:
 
 
 def _join_pieces(group: dict, lead: str, force_lead: bool = False) -> str:
-    """남은 조각을 다시 잇는다. 첫 조각은 lead, 목록 항목은 쉼표, 원래 and 가 있었으면 마지막 항목 앞에 and."""
+    """남은 조각을 다시 잇는다. 첫 조각은 lead, 목록 항목은 쉼표, 원래 and 가 있었으면 마지막 항목 앞에 and.
+
+    lead 가 빈칸 하나(" ")인데 첫 항목이 명사구이면 " with " 로 잇는다(2026-10-30 피드백: 원래 첫 조각이 빠져 목록 항목이
+    머리말 바로 뒤에 오거나, 관사·소유격으로 시작하는 항목 — "a Korean man in his 30s an angular face" 가 되지 않게).
+    """
     kept = [piece for piece in group["pieces"] if not piece["drop"]]
     items = [piece for piece in kept if piece["kind"] == "item"]
     last = items[-1] if group["and"] and len(items) >= 2 else None
@@ -587,6 +600,8 @@ def _join_pieces(group: dict, lead: str, force_lead: bool = False) -> str:
         sep = ", "
         if index == 0:
             sep = lead if force_lead or piece["kind"] == "item" else (", " if lead.startswith(",") else " ")
+            if sep == " " and piece["kind"] == "item" and (piece is not group["pieces"][0] or _NOUN_LEAD.match(piece["body"])):
+                sep = " with "
         elif piece["kind"] == "attached":
             sep = " "
         elif piece is last:
@@ -641,6 +656,61 @@ def _fit_look(head: str, rest: str, outfit: str) -> str:
         longest["body"] = clipped
         text = render()
     return text if len(text) <= LOOK_MAX else _clip_tail(text, LOOK_MAX)
+
+
+def _split_head(text: str) -> tuple[str, str]:
+    """외모 문장 → (머리말 "… Korean man in his 30s", 나머지). 앞 6낱말 안(쉼표·마침표 없이)에 주어 명사가 없으면 ("", 글)."""
+    found = _HEAD_NOUN.search(text)
+    if not found or len(text[: found.start()].split()) > 6 or re.search(r"[,;.]", text[: found.start()]):
+        return "", text
+    age = _HEAD_AGE.match(text, found.end())
+    end = age.end() if age else found.end()
+    return text[:end], text[end:]
+
+
+def _is_hair_piece(body: str) -> bool:
+    return bool(_HAIR_PIECE.search(re.sub(r"\bfacial\s+hair\b", "beard", body, flags=re.IGNORECASE)))
+
+
+def fit_appearance(text, limit: int, is_outfit=None) -> str:
+    """외모 문장(look_sentence 꼴 "머리말 + 조각 + , wearing …" 또는 사용자가 고친 문장) → 옷을 뺀 얼굴·머리 문장(≤limit자).
+
+    실사 테이크 ASSETS 외형(generate._real_appearance)이 쓴다. 조각 나누기·순위·잇기는 _fit_look 과 같다(_look_pieces·
+    _piece_rank·_join_pieces). 문장 사이 마침표는 쉼표로 본다. 끝 마침표 없음.
+    - 옷 조각: "wearing/dressed …" 조각, is_outfit(조각)이 참인 조각(머리·눈 조각은 이것으로 빼지 않는다 — "hair tied …"),
+      옷 조각 뒤의 조각 중 코·턱·눈썹 순위 이상 낱말(체격·안경·얼굴·머리·눈 포함)이 없는 조각("a white pocket square"·
+      "black ankle socks"). and 는 남은 외모 항목만으로 다시 센다.
+    - 줄이기: _PIECE_RANKS 순서(같은 순위는 뒤 조각부터) → 눈 조각(뒤부터). 머리말·머리 조각은 끝까지 남긴다. 그래도 넘치면
+      단어 경계에서 자르고 매달린 낱말을 지운다(_clip_tail).
+    남은 조각이 없으면 머리말만, 머리말도 없으면 "".
+    """
+    text = _tidy(re.sub(r"\.\s+(?=\S)", ", ", str(text or "")).rstrip(" ."))
+    head, rest = _split_head(text)
+    lead = re.match(r"\s*(,|with\b)?\s*", rest, re.IGNORECASE)
+    token = (lead.group(1) or "").lower()
+    look_lead = " with " if token == "with" else (", " if token == "," else (" " if head else ""))
+    group = _look_pieces(rest[lead.end():], False, 0)
+    worn = False
+    for piece in group["pieces"]:
+        rank = _piece_rank(piece["body"])
+        if rank == _RANK_OUTFIT or (worn and (rank or 0) < _RANK_FEATURE) \
+                or (rank != _RANK_KEEP and is_outfit is not None and is_outfit(piece["body"])):
+            piece["drop"] = worn = True
+    group["and"] = any(piece["and"] for piece in group["pieces"] if piece["kind"] == "item" and not piece["drop"])
+
+    def render() -> str:
+        return _tidy(head + _join_pieces(group, look_lead))
+
+    text = render()
+    kept = [piece for piece in group["pieces"] if not piece["drop"]]
+    order = sorted((p for p in kept if p["rank"] < _RANK_KEEP), key=lambda p: (p["rank"], -p["index"]))
+    order += [p for p in reversed(kept) if p["rank"] >= _RANK_KEEP and not _is_hair_piece(p["body"])]
+    for piece in order:
+        if len(text) <= limit:
+            break
+        piece["drop"] = True
+        text = render()
+    return text if len(text) <= limit else _clip_tail(text, limit)
 
 
 def look_sentence(appearance_en, desc_ko, gender, outfit_en="") -> str:
