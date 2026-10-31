@@ -1611,3 +1611,81 @@
     3. 운영 문구 표의 `BadBlType`과 `genre_bl`의 `roles`·`fits`·`list_types`는 이제 앱 코드에서 쓰는 곳이 없다(bl-a만 본다). 지울지는 승인이 필요하다. bl 그룹 안의 103 검사 도우미 `err_of`도 쓰는 곳이 없지만 지운 정의를 부르지 않아 두었다.
     4. 저장된 `blRole`·`blType`과 `_empty_casting` 기본값은 그대로다(D22).
     5. 104 남은 이슈 4~6(female 지정 + 유형, 공·수 유형 함께, 먼 부정)은 그대로다.
+
+### 지시서 105 — 운영 503: frontend·app 파드를 ALB가 쓰는 AZ에만 띄운다 `POD_ZONES` (Kiro, claude-opus-5.5)
+- **범위**: `.kiro/handoff/105-pod-zone-pin.md`. 스펙 `.kiro/specs/pod-zone-pin/`(requirements R1~R6·design D1~D9·tasks 1~5)을 먼저 쓰고 같은 실행에서 구현·검사까지 했다. 커밋·push 하지 않았다. git·aws·kubectl·네트워크·유료 API를 쓰지 않았다. 클러스터 상태는 지시서가 준 사실만 썼다.
+- **먼저 한 일**: 바꿀 파일과 수정 금지 파일 10개의 시작 전 사본, 변경 전 렌더 결과(dev·prod 템플릿 18개씩, 메모리 렌더)를 저장소 밖(`%TEMP%\pz105`)에 두었다. 시작 전 전체 검사는 전부 통과(ok 63줄, FAIL·WARN 0, 94초).
+- **원인**: 2026-10-31 운영 배포(ci-4d408e98) 직후 `https://whynot.meta-clouds.com/`이 약 7분 503이었다. 운영 ALB `whynot-prod-alb`는 2a·2c 서브넷만 쓴다(2b는 10/02 EIP 한도로 뺐다). Ingress가 `target-type: ip`라 ALB는 자기 AZ의 파드만 대상으로 쓴다. 운영 노드는 2a·2b 두 대이고 2c 노드는 없는데, 두 Deployment에는 노드 제약이 없어(hostname 분산 `ScheduleAnyway`만) 새 frontend 파드 2개가 모두 2b 노드에 놓였다. 그 파드는 `Target.NotInUse`라 `/` 대상이 0이 됐다. `/api/health`는 2a의 app 파드가 받아 200이라 놓치기 쉬웠다. `config.prod.env`의 "Safe because both target groups have all their healthy targets in 2c" 주석은 지금 사실과 달랐다.
+- **결정**(design D1~D9)
+  - D1 — 렌더러(`deploy/render.py`)를 고치지 않는다. 템플릿은 흐름 목록 `values: [${POD_ZONES}]`, 설정값은 따옴표·공백 없는 쉼표 목록이다. 렌더 결과 `values: [ap-northeast-2a,ap-northeast-2c]`는 YAML 문자열 2개 목록이다(PyYAML로 확인). 이유: `render.py`는 `PLATFORM_FILES.txt`의 플랫폼 파일이라 고객 디렉터리에서 직접 고치지 않는 규칙이고(반입 뒤 한 번도 안 바뀜), 새 파생값이 없으니 다른 템플릿 결과가 그대로다. 렌더러가 값 형식을 보지 않는 빈틈(빈 값이면 `values: []` → ArgoCD 동기화 실패, 끝 쉼표는 YAML이 조용히 받음)은 CI `check:whynot`의 새 검사 pz-b가 build·deploy 앞에서 막는다(`needs` 사슬).
+  - D2 — 필수(`requiredDuringScheduling…`) 제약. 맞는 노드가 없으면 Pending이고 `maxUnavailable: 0`이라 롤링이 멈출 뿐 옛 파드가 계속 받는다.
+  - D3 — 두 Deployment 파드 spec의 `topologySpreadConstraints` 바로 앞에 주석 + affinity 8줄. 분산 블록은 글자 그대로 둔다.
+  - D4 — `POD_ZONES`는 두 파일 모두 `PUBLIC_SUBNET_IDS` 바로 다음 키(둘이 짝이다). base `ap-northeast-2a,ap-northeast-2b,ap-northeast-2c`(개발 ALB 2a·2b·2c), prod `ap-northeast-2a,ap-northeast-2c`. `config.dev.env`는 그대로다.
+  - D5 — prod 서브넷 주석은 영어 블록이라 영어로 고쳤다(target-type ip·`Target.NotInUse`·2c 노드 없음·10/31 503·2b를 다시 넣으면 같은 변경에서 `POD_ZONES`에 2b). EIP 경고 줄과 문서 참조 줄은 그대로. BOM·LF·끝 두 줄(ob-d 기대값) 유지.
+  - D8 — prod `PUBLIC_SUBNET_IDS` 개수 = `POD_ZONES` 개수(ALB는 AZ마다 서브넷 1개)를 검사한다. 2b 서브넷만 되살리면 CI가 실패해 같은 변경에서 `POD_ZONES`를 고치게 한다.
+  - D9 — `docs/dev-migration/eip-quota-analysis.md`는 이 저장소에 없어 만들지 않았다. 같은 안내는 `config.prod.env` 주석과 pz-a가 맡는다.
+- **검토한 대안**
+  - (가) 렌더러 파생값 `POD_ZONES_FLOW`(항목마다 따옴표 + 렌더할 때 형식 검사): 실패가 렌더 단계에서 더 일찍 나지만 플랫폼 파일을 고친다. 거절.
+  - (나) 렌더러가 여러 줄 블록 목록을 만든다: 렌더러가 템플릿 들여쓰기를 알아야 한다. 거절.
+  - (다) 설정값을 `"ap-northeast-2a", "ap-northeast-2c"`로: config의 "따옴표 없이" 규칙과 어긋난다. 거절.
+  - (라) `preferred…`(점수만): 2a가 꽉 차거나 죽으면 2b로 가서 다시 NotInUse. 거절.
+  - (마) Ingress `target-type: instance`(kube-proxy가 다른 AZ 파드로 넘김)·ALB에 2b 다시 넣기·2c 노드 추가: Ingress 수정 금지·AWS 자원 불변(사용자 결정). 남은 이슈에 근본 대안으로 적었다.
+- **바꾼 것**
+  - `k8s/workloads.yaml.tmpl`: frontend(주석 2줄)·app(주석 1줄) 파드 spec에 affinity 8줄씩. 추가 19줄, 지운 줄 0.
+  - `deploy/config.env.example`: `PUBLIC_SUBNET_IDS` 뒤 주석 5줄 + `POD_ZONES=…2a,…2b,…2c`.
+  - `deploy/config.prod.env`: 서브넷 주석 6줄 → 12줄(사실대로), `PUBLIC_SUBNET_IDS` 뒤 주석 3줄 + `POD_ZONES=…2a,…2c`.
+  - `tools/check_vpoc.py`: 새 상수 `_PZ_PROD_ZONES`·`_PZ_BASE_ZONES`·`_PZ_ZONE_RE`·`_PZ_AFFINITY_BLOCK`·`_PZ_CI_GREP`·`_PZ_BAD_VALUES`·`_PZ_GOOD_VALUES`, 새 함수 `_pz_zone_problems`·`_pz_spread_block`·`_pz_parent_path`·`_pz_flow_items`·`_pz_ci_hits`·`_pz_affinity_obj`·`_pz_has_key`·`check_pod_zones`, `main()` 끝 호출 한 줄.
+  - `.kiro/specs/pod-zone-pin/`(새 3파일), `docs/ANALYSIS.md`(머리 줄, §7.4 행, §8.3 항목, 새 §8.7, §10.1, §11 R-22), 이 항목.
+- **렌더 결과**(prod, frontend·app 같은 블록. dev는 `values: [ap-northeast-2a,ap-northeast-2b,ap-northeast-2c]`)
+
+  ```yaml
+        affinity:
+          nodeAffinity:
+            requiredDuringSchedulingIgnoredDuringExecution:
+              nodeSelectorTerms:
+                - matchExpressions:
+                    - key: topology.kubernetes.io/zone
+                      operator: In
+                      values: [ap-northeast-2a,ap-northeast-2c]
+        topologySpreadConstraints:
+  ```
+
+- **검사(새 그룹 `check_pod_zones`, 어떤 검사가 무엇을 덮는지)**
+
+  | 검사 | 덮는 것 |
+  |---|---|
+  | pz-a | base·prod `POD_ZONES=` 줄(값·`render.load_config` 값·`PUBLIC_SUBNET_IDS` 다음 키·주석의 `PUBLIC_SUBNET_IDS`·`503`·BOM·CR), prod 서브넷 주석(옛 "Safe because" 없음·`POD_ZONES`·`Target.NotInUse`·no 2c node·`ap-northeast-2b`·EIP 경고 줄), prod 서브넷 수 = 영역 수, dev 오버레이에 키 없음. 함수 `comment_above` |
+  | pz-b | `_pz_zone_problems` 전 분기(빈 값·빈 항목·공백·꼴·중복·통과): base·prod 값 문제 0, 나쁜 값 20개의 첫 분류, 좋은 값 3개 |
+  | pz-c | 템플릿 `${POD_ZONES}`·`values: [${POD_ZONES}]`·8줄 블록 각 2번, 블록 자리(들여쓰기·바로 뒤 분산·바로 앞 주석), 문서 kind 순서·affinity는 두 Deployment에만, 분산 블록 2개 글자 그대로(`_pz_spread_block`) |
+  | pz-d | `render.add_derived`·`render_text`로 prod·dev의 k8s 템플릿 5개를 렌더(base에 없는 오버레이 키 거절 분기 포함). Deployment마다 affinity 1개·부모 경로 `spec/template/spec`(`_pz_parent_path`)·블록 글자·`values` 목록(`_pz_flow_items`)·바로 뒤 분산, 다른 문서·다른 k8s 결과에 affinity 없음. PyYAML이 있으면 `safe_load_all`로 affinity·분산 dict와 다른 문서의 affinity 키(`_pz_affinity_obj`·`_pz_has_key`) |
+  | pz-e | 저장소 밖 임시 트리에서 CI와 같게(`IMAGE_TAG`만 바꾼 `config.env`) `render.py --target prod|dev` CLI: 종료 0·파일 prod 4·dev 3·CI 미치환 판정 0줄(`_pz_ci_hits`, 판정 자체도 6줄 표본으로)·태그·CLI 결과 = 메모리 렌더(바이트). 음성: base에서 `POD_ZONES`를 빼면 prod는 오버레이 키 검사, dev는 없는 변수로 실패(문구까지). `.gitlab-ci.yml` grep 3줄이 두 벌 그대로. 저장소의 `deploy/rendered`·`deploy/config.env` 존재 여부 전후 같음 |
+
+- **확인**
+  - `python -X utf8 tools/check_vpoc.py` 전부 통과: ok 64줄(기존 63줄은 글자까지 그대로 + pz 한 줄), FAIL·WARN 0, 96초. pz 그룹 단독 1.2~1.5초.
+  - PyYAML을 숨긴 실행(CI와 같은 조건)도 통과("PyYAML 없음: 글자 블록·자리·값").
+  - `python deploy/render.py --target dev`·`--target prod`(저장소 안, CI처럼 `config.env` = example + `IMAGE_TAG=ci-pz105local`): 둘 다 종료 0, 템플릿 18개, CI 미치환 판정 dev 3파일·prod 4파일 0줄, 태그 있음. 끝나고 `deploy/config.env`·`deploy/rendered/`를 지웠다(시작 전에도 없었다).
+  - 변경 전·후 렌더 비교(dev·prod 각 18개): `workloads.yaml` 밖 17개는 바이트 같음. `workloads.yaml`은 추가 2묶음 19줄, 지운 줄 0.
+  - 커버리지(coverage 7.17, `%TEMP%\pz105\cov.data`, 시작 전 사본과 difflib): `check_vpoc.py`의 바뀐 실행문 232개 중 통과 실행 215개(92.7%). 못 간 17개는 실패 분기(예: `bad.append`, 렌더 실패 `except`, `fail`)이고 변형 검사 실행과 합치면 232개(100%). `render.py`는 바꾸지 않았다(파일 전체 54%, CLI `main`은 하위 프로세스라 측정 밖).
+  - 변형 검사 50개(저장소 밖 `%TEMP%\pz105\mutate.py`, 변형마다 새 임시 트리, 판정 함수는 모듈 속성 바꿔치기): 템플릿 16(블록 삭제 2·NotIn·region 키·preferred·값 고정·대괄호 없음·securityContext 아래·분산 DoNotSchedule·분산 삭제·Service에 affinity·주석 삭제·분산 뒤로·조건 추가·따옴표 한 덩어리·분산 이름), 설정 20(prod 2b 추가·빈 값·공백·중복·끝 쉼표·줄 삭제, base 줄 삭제·기본값 2a,2c·대문자·CRLF, dev 오버레이에 키, 2b 서브넷만 되살림, 옛 문구 되살림, BOM 삭제, CRLF, 줄 자리, 2e 오타, 2b 안내 삭제, base 주석 삭제, 2c 노드 문구 삭제), CI 기준 1, 렌더러 4(값 비움·CRLF 출력·없는 변수 허용·오버레이 키 검사 끔), 판정 함수 6(중복·공백·[a-z]·빈 항목·빈 값·search), CI 판정 1, 실패 경로 2(prod 설정 줄 형식 오류 → "읽지 못했습니다"·값 생략, `.gitlab-ci.yml` 없음 → 그 묶음만 예외·나머지 계속·"모든 묶음" 단언). 48개는 검사 단언으로, 실패 경로 2개는 의도한 경로로 잡혔다. 놓친 것 0. PyYAML을 숨겨도 48개 모두 잡힌다. 처음 돌렸을 때 3개가 샜다: base 키 삭제에서 메모리 렌더의 `SystemExit`가 검사 밖으로 나갔고(묶음 루프·메모리 렌더가 `SystemExit`도 받게 고침), CRLF 출력은 `read_text`가 줄 끝을 바꿔 못 봤고(바이트로 읽게 고침), 없는 변수 허용은 prod 음성이 오버레이 키 검사에서 먼저 멈춰 못 봤다(dev 음성 추가).
+  - 줄 끝: 바뀐 파일 모두 CR 0, `config.prod.env`만 BOM(원래대로). 공백만 바뀐 줄 0, 새 줄 끝 공백 0, 지운 함수 정의 0(AST 비교). 시작 뒤 바뀌거나 생긴 파일(mtime 기준)은 위 6개, 스펙 3개, 이 실행 로그 `.kiro/handoff/logs/105.log`뿐이고 `__pycache__` 변화도 없다. 수정 금지 파일(`render.py`·`config.dev.env`·`ingress.yaml.tmpl`·`.gitlab-ci.yml`)은 시작 전 사본과 바이트가 같고 `app/`·`frontend/`에는 바뀐 파일이 없다(`whynot-20261029`는 이 작업 트리에 없다).
+- **바꾼 기존 검사 기대값**: 없다. 기존 렌더 검사(rw-c·lt-i·ob-d·ob-h·tr·sr·fx·cast·bl-g)는 base를 그대로 읽어 `POD_ZONES`가 함께 들어가고 기대값은 그대로 통과한다.
+- **3단계 리뷰**
+  - 보안
+    - 새 값은 AZ 이름뿐이고 비밀값·새 계정 ID가 없다(서브넷 ID는 원래 주석에 있던 것). 설정 파일은 이미 이미지·IAM 역할을 정하는 신뢰 경계 안이다. 렌더러가 값을 그대로 넣지만 값은 한 줄이라(`load_config`) 줄바꿈으로 다른 키를 만들 수 없고 흐름 목록 안 내용만 바뀐다. pz-b가 그 내용을 `ap-northeast-2[a-d]` 항목으로만 허용한다.
+    - 검사의 하위 프로세스는 `sys.executable` + 고정 인자 목록(shell 없음), 저장소 밖 임시 폴더, 네트워크 없음. 렌더러 오류 문구에 설정 원문 줄이 섞이면 `safe`가 값을 빼고 출력한다(변형 E01로 확인).
+    - RBAC·IAM·securityContext는 그대로다. 발견·조치: 없음.
+  - 성능
+    - 운영은 frontend·app 파드가 모두 2a 노드(m6i.2xlarge, 8 vCPU·32GiB) 한 대에 놓인다. 요청 합계는 두 Deployment가 함께 롤링할 때 최대 1.8 vCPU·3.4GiB(app 500m/1Gi × 3 + frontend 100m/128Mi × 3)다. 지시서 기준 기존 요청 CPU 11%·메모리 5%에 더해도 여유가 크다. 메모리 limit 합계는 평상시 16.5GiB, 롤링 중 최대 24.75GiB로 노드 메모리 안이다. 다만 app 두 개가 같은 노드에서 동시에 이어 붙이기(ffmpeg)를 하면 CPU limit(4 × 2)이 노드 8 vCPU를 나눠 쓴다(요청은 보장).
+    - 앱 코드·외부 호출 변화 없음. 검사기 시간 +1.5초(94 → 96초). 발견·조치: 없음.
+  - 운영성
+    - 맞는 노드가 없으면 파드 이벤트에 "didn't match Pod's node affinity/selector"가 남고 롤링은 멈춘다(옛 파드가 계속 받는다). 검사 실패 문구는 결과·기대를 함께 보인다.
+    - 되돌리기: 이전 커밋으로 운영 job, 또는 `config.prod.env`의 `POD_ZONES`에 AZ를 더하는 커밋. 진행 중 작업은 매 배포의 롤링과 같다(이번 변경이 더하는 재시작은 없다).
+    - **2a 노드 1대가 죽으면**: frontend·app이 모두 Pending이 되어 `/`와 `/api`가 함께 503이다. 2b 노드로는 옮기지 않는다(옮겨도 NotInUse라 변경 전과 결과가 같다). 노드 교체 때 새 노드가 2b에 생겨도 같다. 대안: 노드 그룹에 2c 서브넷을 넣어 2c 노드를 두거나, EIP 한도를 늘려 ALB에 2b를 다시 넣고 `POD_ZONES`에 2b를 더한다.
+    - 운영 배포 후에는 `/api/health`만이 아니라 `/`(화면)도 확인한다. 발견·조치: ANALYSIS §8.7에 확인 절차를 적었다.
+- **남은 이슈**
+  1. 운영 ALB 뒤 파드가 2a 노드 한 대에 모두 놓인다(단일 장애점, 변경 전부터의 위험). 2c 노드 또는 ALB 2b 복귀가 필요하다(AWS 자원 변경이라 결정 필요).
+  2. ALB 대상 상태를 파드 준비에 묶는 pod readiness gate(네임스페이스 라벨 `elbv2.k8s.aws/pod-readiness-gate-inject`)가 없다. 있었다면 이번 롤링은 503 대신 멈췄을 것이다. 네임스페이스는 ArgoCD가 만들어 운영 변경이다.
+  3. `config.prod.env`가 가리키는 `docs/dev-migration/eip-quota-analysis.md`가 이 저장소에 없다(참조만 남아 있다).
+  4. 개발 노드의 AZ는 확인하지 않았다. 개발 노드가 2a·2b·2c 밖(2d)에 있으면 그 노드에는 더 놓이지 않는다(개발 ALB도 2d를 쓰지 않으므로 그곳 파드는 원래 대상으로 쓰이지 않는다).
+  5. CI 검사 이미지에 PyYAML이 없어 pz-d의 YAML 파싱 부분은 로컬에서만 돈다. CI는 글자 블록·자리·값으로 본다.
+  6. 렌더러는 값 형식을 보지 않는다. CI 밖에서 손으로 렌더하면 나쁜 값도 렌더된다(배포 경로는 CI뿐이라 `check:whynot`이 막는다).

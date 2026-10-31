@@ -45,6 +45,16 @@ spec:
       securityContext:
         seccompProfile:
           type: RuntimeDefault
+      # 2026-10-31 운영 503: ALB(target-type ip)는 자기 서브넷 AZ 의 파드만 대상으로 쓴다. 새 frontend 파드가
+      # 모두 ALB 에 없는 AZ(2b) 노드에 놓여 대상이 0 이 됐다. 그래서 POD_ZONES(= ALB 서브넷 AZ) 안에만 띄운다.
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+              - matchExpressions:
+                  - key: topology.kubernetes.io/zone
+                    operator: In
+                    values: [${POD_ZONES}]
       topologySpreadConstraints:
         - maxSkew: 1
           topologyKey: kubernetes.io/hostname
@@ -159,6 +169,15 @@ spec:
       securityContext:
         seccompProfile:
           type: RuntimeDefault
+      # frontend 와 같은 이유(2026-10-31 운영 503). /api 도 ALB 뒤라 POD_ZONES(= ALB 서브넷 AZ) 안에만 띄운다.
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+              - matchExpressions:
+                  - key: topology.kubernetes.io/zone
+                    operator: In
+                    values: [${POD_ZONES}]
       topologySpreadConstraints:
         - maxSkew: 1
           topologyKey: kubernetes.io/hostname

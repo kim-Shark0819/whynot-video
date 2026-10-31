@@ -31485,6 +31485,396 @@ def _run_bl_look_off(check) -> None:
         check()
 
 
+# ---------------------------------------------------------------- 파드 영역 고정(pod-zone-pin, 지시서 105)
+#
+# 2026-10-31 운영 503: 운영 ALB(target-type ip)는 2a·2c 서브넷만 쓰는데 새 frontend 파드 2개가 모두 2b 노드에 놓여
+# ALB 대상이 0(Target.NotInUse)이 됐다. frontend·app Deployment 에 topology.kubernetes.io/zone In POD_ZONES 필수
+# nodeAffinity 를 건다. render.py 는 값 형식을 보지 않으므로(플랫폼 파일이라 고치지 않는다) 값 형식은 이 검사가 막는다
+# (.kiro/specs/pod-zone-pin/design.md D1·D6~D8).
+
+_PZ_PROD_ZONES = ["ap-northeast-2a", "ap-northeast-2c"]
+_PZ_BASE_ZONES = ["ap-northeast-2a", "ap-northeast-2b", "ap-northeast-2c"]
+_PZ_ZONE_RE = re.compile(r"ap-northeast-2[a-d]")
+_PZ_AFFINITY_BLOCK = (
+    "      affinity:\n"
+    "        nodeAffinity:\n"
+    "          requiredDuringSchedulingIgnoredDuringExecution:\n"
+    "            nodeSelectorTerms:\n"
+    "              - matchExpressions:\n"
+    "                  - key: topology.kubernetes.io/zone\n"
+    "                    operator: In\n"
+    "                    values: [{values}]\n"
+)
+# .gitlab-ci.yml 의 미치환 검사 3줄(deploy:whynot:prod·dev 두 벌, 줄 끝 이어 쓰기 `\` 는 뺐다). _pz_ci_hits 가 같은 판정을 흉내 낸다.
+_PZ_CI_GREP = (
+    r"""hits=$(grep -nE '\$\{[A-Z0-9_]+\}|<[^>]*>' "$out/$f.yaml" """,
+    r"""| grep -vE ':[[:space:]]*#' """,
+    r"""| grep -vE 'https?://|\.svc|width|<[a-z]+ ') || true""",
+)
+# 값 판정 자체를 확인하는 나쁜 값(값, 기대 첫 분류)과 좋은 값.
+_PZ_BAD_VALUES = (
+    ("", "빈 값"), (None, "빈 값"), (",", "빈 항목"), ("ap-northeast-2a,", "빈 항목"), (",ap-northeast-2a", "빈 항목"),
+    ("ap-northeast-2a,,ap-northeast-2c", "빈 항목"), ("ap-northeast-2a, ap-northeast-2c", "공백"),
+    ("ap-northeast-2a,\tap-northeast-2c", "공백"), (" ap-northeast-2a", "공백"), ("ap-northeast-2a ", "공백"),
+    ("ap-northeast-2a ap-northeast-2c", "공백"), ("ap-northeast-2a,ap-northeast-2a", "중복"),
+    ("ap-northeast-2a,ap-northeast-2c,ap-northeast-2a", "중복"), ("ap-northeast-2e", "꼴"), ("AP-NORTHEAST-2A", "꼴"),
+    ("ap-northeast-2", "꼴"), ("ap-northeast-1a", "꼴"), ("ap-northeast-2a;ap-northeast-2c", "꼴"),
+    ('"ap-northeast-2a"', "꼴"), ("[ap-northeast-2a]", "꼴"),
+)
+_PZ_GOOD_VALUES = ("ap-northeast-2a", "ap-northeast-2d", "ap-northeast-2a,ap-northeast-2b,ap-northeast-2c,ap-northeast-2d")
+
+
+def _pz_zone_problems(raw) -> list[str]:
+    """POD_ZONES 값의 문제 목록. 각 문제의 앞 낱말이 분류다: 빈 값 · 빈 항목 · 공백 · 꼴 · 중복. 문제가 없으면 []."""
+    if not isinstance(raw, str) or raw == "":
+        return ["빈 값"]
+    problems: list[str] = []
+    seen: set[str] = set()
+    for index, item in enumerate(raw.split(","), 1):
+        if item == "":
+            problems.append(f"빈 항목: {index}번째")
+        elif any(ch.isspace() for ch in item):
+            problems.append(f"공백: {index}번째 {item!r}")
+        elif not _PZ_ZONE_RE.fullmatch(item):
+            problems.append(f"꼴: {index}번째 {item!r} 가 ap-northeast-2[a-d] 가 아님")
+        elif item in seen:
+            problems.append(f"중복: {index}번째 {item!r}")
+        seen.add(item)
+    return problems
+
+
+def _pz_spread_block(name: str) -> str:
+    """두 Deployment 의 topologySpreadConstraints 블록(변경 전 글자 그대로). name 은 템플릿 변수나 렌더된 이름."""
+    return (
+        "      topologySpreadConstraints:\n"
+        "        - maxSkew: 1\n"
+        "          topologyKey: kubernetes.io/hostname\n"
+        "          whenUnsatisfiable: ScheduleAnyway\n"
+        "          labelSelector:\n"
+        "            matchLabels:\n"
+        f"              app.kubernetes.io/name: {name}\n"
+    )
+
+
+def _pz_parent_path(lines: list[str], index: int) -> list[str]:
+    """lines[index] 의 키와 그 위 부모 키들(들여쓰기가 줄어드는 줄)을 뿌리부터. 목록 표시 '- ' 와 주석·빈 줄은 건너뛴다."""
+    def key_of(line: str) -> str:
+        return line.strip().removeprefix("- ").split(":", 1)[0].strip()
+
+    def indent_of(line: str) -> int:
+        return len(line) - len(line.lstrip(" "))
+
+    path = [key_of(lines[index])]
+    depth = indent_of(lines[index])
+    for line in reversed(lines[:index]):
+        body = line.strip()
+        if not body or body.startswith("#") or indent_of(line) >= depth:
+            continue
+        path.append(key_of(line))
+        depth = indent_of(line)
+        if depth == 0:
+            break
+    return path[::-1]
+
+
+def _pz_flow_items(line: str) -> list[str] | None:
+    """렌더된 `values: [a,b]` 한 줄의 흐름 목록 항목. 따옴표·괄호·주석이 섞였거나 꼴이 다르면 None."""
+    match = re.fullmatch(r" {20}values: \[([^\[\]{}\"'#]*)\]", line)
+    if not match:
+        return None
+    inner = match.group(1)
+    return [] if inner == "" else inner.split(",")
+
+
+def _pz_ci_hits(text: str) -> list[str]:
+    """.gitlab-ci.yml 미치환 검사와 같은 판정. grep -n 출력처럼 `줄번호:내용` 으로 걸린 줄을 돌려준다.
+
+    grep -nE '\\$\\{[A-Z0-9_]+\\}|<[^>]*>' | grep -vE ':[[:space:]]*#' | grep -vE 'https?://|\\.svc|width|<[a-z]+ '
+    """
+    hits: list[str] = []
+    for number, line in enumerate(text.split("\n"), 1):
+        shown = f"{number}:{line}"
+        if not re.search(r"\$\{[A-Z0-9_]+\}|<[^>]*>", line):
+            continue
+        if re.search(r":\s*#", shown) or re.search(r"https?://|\.svc|width|<[a-z]+ ", shown):
+            continue
+        hits.append(shown)
+    return hits
+
+
+def _pz_affinity_obj(zones: list[str]) -> dict:
+    return {"nodeAffinity": {"requiredDuringSchedulingIgnoredDuringExecution": {"nodeSelectorTerms": [
+        {"matchExpressions": [{"key": "topology.kubernetes.io/zone", "operator": "In", "values": list(zones)}]}]}}}
+
+
+def _pz_has_key(obj, key: str) -> bool:
+    if isinstance(obj, dict):
+        return key in obj or any(_pz_has_key(value, key) for value in obj.values())
+    if isinstance(obj, list):
+        return any(_pz_has_key(value, key) for value in obj)
+    return False
+
+
+def check_pod_zones() -> None:
+    """지시서 105(pod-zone-pin) — frontend·app 파드를 ALB 서브넷 AZ(POD_ZONES) 안에만 띄운다. 외부 호출 없음.
+
+    (pz-a) 설정 줄: base·prod 에 POD_ZONES= 한 줄씩(값 = 기대 목록, 줄 원문 = load_config 값), 키 순서에서 PUBLIC_SUBNET_IDS
+           바로 다음, dev 오버레이에 키 없음, 주석(base·prod POD_ZONES 위: PUBLIC_SUBNET_IDS·503 / prod 서브넷 위: "Safe because"
+           없음·POD_ZONES·Target.NotInUse·no 2c node·ap-northeast-2b·EIP 경고 줄 그대로), prod 서브넷 수 = 영역 수,
+           prod BOM·CR 0, base BOM 없음·CR 0
+    (pz-b) 값 판정 _pz_zone_problems: base·prod 값 문제 0, 나쁜 값 20개가 기대한 첫 분류로 걸리고 좋은 값 3개는 통과
+    (pz-c) 템플릿: ${POD_ZONES} 2번(둘 다 values: [${POD_ZONES}]), affinity 8줄 블록 2번(바로 뒤 topologySpreadConstraints,
+           바로 앞 주석에 2026-10-31·503), 문서 kind 순서·affinity 는 두 Deployment 에만, topologySpread 두 블록 글자 그대로
+    (pz-d) render.py(파일 쓰지 않음) prod·dev: 두 Deployment 마다 affinity 1개·경로 spec/template/spec·블록 글자·values 목록·
+           바로 뒤 topologySpread, 다른 문서·k8s 렌더 결과에 affinity 없음. PyYAML 이 있으면 safe_load_all 로 dict 비교
+    (pz-e) 저장소 밖 임시 트리에서 CI 와 같게 render.py --target prod|dev(CLI): 종료 0·파일 prod 4·dev 3·CI 미치환 판정 0줄·태그·
+           CLI workloads = 메모리 렌더(바이트), base 에서 POD_ZONES 를 빼면 prod(오버레이 키 검사)·dev(없는 변수) 둘 다 실패,
+           .gitlab-ci.yml grep 기준 그대로, 저장소에 산출물 안 남김
+    """
+    import importlib.util  # noqa: PLC0415
+
+    bad: list[str] = []
+    seen: list[str] = []
+    root, repo = ROOT, REPO
+    example_path = root / "deploy" / "config.env.example"
+    prod_path = root / "deploy" / "config.prod.env"
+    template_path = root / "k8s" / "workloads.yaml.tmpl"
+
+    def expect(group: str, got, want, what: str) -> None:
+        if got != want:
+            bad.append(f"({group}) {what}\n      결과 {got!r}\n      기대 {want!r}")
+
+    def safe(exc: BaseException) -> str:
+        # render.py 의 KEY=VALUE 형식 오류 문구는 원문 줄(값)을 담는다 — 값은 출력하지 않는다.
+        text = str(exc)
+        return "설정 줄 형식 오류(값 생략)" if "KEY=VALUE" in text else text[:300]
+
+    try:
+        spec = importlib.util.spec_from_file_location("_pz_deploy_render", root / "deploy" / "render.py")
+        render = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(render)  # type: ignore[union-attr]
+        base = render.load_config(example_path)
+        overlays = {t: render.load_config(root / "deploy" / f"config.{t}.env") for t in ("prod", "dev")}
+    except (Exception, SystemExit) as exc:  # noqa: BLE001 — render.py 는 SystemExit 로 실패를 알린다.
+        fail(f"pod-zone-pin 검사: render.py·설정을 읽지 못했습니다: {type(exc).__name__} {safe(exc)}")
+        return
+    yaml_mod = None
+    if importlib.util.find_spec("yaml") is not None:
+        import yaml as yaml_mod  # noqa: PLC0415
+    names = [base.get("FRONTEND_DEPLOYMENT_NAME"), base.get("APP_SERVICE_ACCOUNT")]
+
+    def comment_above(lines: list[str], key: str) -> str:
+        at = next((i for i, line in enumerate(lines) if line.startswith(key + "=")), None)
+        if at is None:
+            return ""
+        out: list[str] = []
+        for line in reversed(lines[:at]):
+            if not line.startswith("#"):
+                break
+            out.append(line)
+        return "\n".join(reversed(out))
+
+    def pz_a() -> None:
+        for label, path, want, loaded in (("base", example_path, _PZ_BASE_ZONES, base),
+                                          ("prod", prod_path, _PZ_PROD_ZONES, overlays["prod"])):
+            data = path.read_bytes()
+            text = data.decode("utf-8-sig")
+            lines = text.split("\n")
+            keys = re.findall(r"^([A-Z0-9_]+)=", text, re.M)
+            at = keys.index("PUBLIC_SUBNET_IDS") if "PUBLIC_SUBNET_IDS" in keys else -1
+            above = comment_above(lines, "POD_ZONES")
+            expect("pz-a", [re.findall(r"^POD_ZONES=(.*)$", text, re.M), loaded.get("POD_ZONES"),
+                            keys[at + 1] if 0 <= at < len(keys) - 1 else None,
+                            "PUBLIC_SUBNET_IDS" in above, "503" in above, data[:3] == b"\xef\xbb\xbf", data.count(b"\r")],
+                   [[",".join(want)], ",".join(want), "POD_ZONES", True, True, label == "prod", 0],
+                   f"{label}: POD_ZONES 줄·load_config 값·PUBLIC_SUBNET_IDS 다음 키·주석(PUBLIC_SUBNET_IDS·503)·BOM·CR")
+        prod_text = prod_path.read_bytes().decode("utf-8-sig")
+        subnet_note = comment_above(prod_text.split("\n"), "PUBLIC_SUBNET_IDS")
+        merged = {**base, **overlays["prod"]}
+        expect("pz-a", ["Safe because" in prod_text, "POD_ZONES" in subnet_note, "Target.NotInUse" in subnet_note,
+                        "no 2c node" in subnet_note, "ap-northeast-2b" in subnet_note,
+                        "# Do not add 2b back without checking the EIP headroom first." in subnet_note.split("\n"),
+                        len(merged.get("PUBLIC_SUBNET_IDS", "").split(",")), len(merged.get("POD_ZONES", "").split(","))],
+               [False, True, True, True, True, True, len(_PZ_PROD_ZONES), len(_PZ_PROD_ZONES)],
+               "prod: 옛 'Safe because' 없음·서브넷 주석(POD_ZONES·NotInUse·no 2c node·2b 다시 넣기·EIP 경고)·서브넷 수 = 영역 수")
+        dev_text = (root / "deploy" / "config.dev.env").read_text(encoding="utf-8-sig")
+        expect("pz-a", ["POD_ZONES" in overlays["dev"], "POD_ZONES" in dev_text], [False, False],
+               "dev 오버레이에 POD_ZONES 없음(개발은 base 값)")
+        seen.append("pz-a")
+
+    def pz_b() -> None:
+        expect("pz-b", [_pz_zone_problems(base.get("POD_ZONES")), _pz_zone_problems(overlays["prod"].get("POD_ZONES"))],
+               [[], []], "base·prod POD_ZONES 값 문제 0")
+        got = {repr(value): (_pz_zone_problems(value) or ["(없음)"])[0].split(":", 1)[0] for value, _ in _PZ_BAD_VALUES}
+        expect("pz-b", got, {repr(value): kind for value, kind in _PZ_BAD_VALUES}, "나쁜 값의 첫 분류")
+        expect("pz-b", [_pz_zone_problems(value) for value in _PZ_GOOD_VALUES], [[]] * len(_PZ_GOOD_VALUES), "좋은 값 통과")
+        seen.append("pz-b")
+
+    def pz_c() -> None:
+        template = template_path.read_text(encoding="utf-8")
+        lines = template.split("\n")
+        expect("pz-c", [template.count("${POD_ZONES}"), template.count("values: [${POD_ZONES}]"),
+                        template.count(_PZ_AFFINITY_BLOCK.format(values="${POD_ZONES}"))], [2, 2, 2],
+               "템플릿 ${POD_ZONES} 2번·values: [${POD_ZONES}] 2번·affinity 8줄 블록 2번")
+        starts = [i for i, line in enumerate(lines) if line.strip() == "affinity:"]
+        places = []
+        for i in starts:
+            notes = []
+            for line in reversed(lines[:i]):
+                if not line.startswith("      # "):
+                    break
+                notes.append(line)
+            note = " ".join(notes)
+            places.append([lines[i] == "      affinity:", lines[i + 8] if i + 8 < len(lines) else None,
+                           "2026-10-31" in note, "503" in note])
+        expect("pz-c", places, [[True, "      topologySpreadConstraints:", True, True]] * 2,
+               "affinity 자리: 파드 spec 들여쓰기·바로 뒤 topologySpreadConstraints·바로 앞 주석(2026-10-31·503)")
+        docs = template.split("\n---\n")
+        kinds = [(re.findall(r"^kind: (\S+)$", doc, re.M) or ["?"])[0] for doc in docs]
+        expect("pz-c", [kinds, ["affinity" in doc for doc in docs],
+                        [docs[1].count(_pz_spread_block("${FRONTEND_DEPLOYMENT_NAME}")) if len(docs) > 1 else 0,
+                         docs[3].count(_pz_spread_block("${APP_SERVICE_ACCOUNT}")) if len(docs) > 3 else 0]],
+               [["ConfigMap", "Deployment", "Service", "Deployment", "Service"], [False, True, False, True, False], [1, 1]],
+               "문서 kind 순서·affinity 는 두 Deployment 에만·topologySpread 두 블록 글자 그대로")
+        seen.append("pz-c")
+
+    def pz_d() -> None:
+        notes: list[str] = []
+        for target, want in (("prod", _PZ_PROD_ZONES), ("dev", _PZ_BASE_ZONES)):
+            layer = overlays[target]
+            unknown = sorted(set(layer) - set(base))
+            if unknown:
+                # CI(load_config_chain)는 base 에 없는 키를 거절한다. 키 이름만 적는다.
+                bad.append(f"(pz-d) {target}: 오버레이에 base 에 없는 키 {unknown}")
+                continue
+            try:
+                values = render.add_derived({**base, **layer})
+                texts = {path.name: render.render_text(path.read_text(encoding="utf-8"), values, str(path.relative_to(root)))
+                         for path in sorted((root / "k8s").glob("*.tmpl"))}
+            except (Exception, SystemExit) as exc:  # noqa: BLE001
+                bad.append(f"(pz-d) {target}: 렌더 실패: {type(exc).__name__} {safe(exc)}")
+                continue
+            work = texts.get("workloads.yaml.tmpl", "")
+            docs = work.split("\n---\n")
+            deployments = {}
+            for doc in docs:
+                if re.search(r"^kind: Deployment$", doc, re.M):
+                    deployments[(re.findall(r"^  name: (\S+)$", doc, re.M) or ["?"])[0]] = doc
+            expect("pz-d", sorted(deployments), sorted(names), f"{target}: Deployment 이름")
+            block = _PZ_AFFINITY_BLOCK.format(values=",".join(want))
+            for name in names:
+                lines = deployments.get(name, "").split("\n")
+                at = [i for i, line in enumerate(lines) if line.strip() == "affinity:"]
+                first = at[0] if at else -1
+                got = {
+                    "count": len(at),
+                    "path": _pz_parent_path(lines, first) if at else None,
+                    "block": block in deployments.get(name, ""),
+                    "values": _pz_flow_items(lines[first + 7]) if at and first + 7 < len(lines) else None,
+                    "next": lines[first + 8] if at and first + 8 < len(lines) else None,
+                    "spread": _pz_spread_block(name) in deployments.get(name, ""),
+                }
+                expect("pz-d", got, {"count": 1, "path": ["spec", "template", "spec", "affinity"], "block": True,
+                                     "values": want, "next": "      topologySpreadConstraints:", "spread": True},
+                       f"{target} {name}: affinity 개수·경로·블록 글자·values·바로 뒤·topologySpread")
+            others = [doc for doc in docs if not re.search(r"^kind: Deployment$", doc, re.M)]
+            expect("pz-d", [["affinity" in doc for doc in others],
+                            sorted(n for n, t in texts.items() if n != "workloads.yaml.tmpl" and "affinity" in t)],
+                   [[False] * 3, []], f"{target}: 다른 문서(ConfigMap·Service)·다른 k8s 렌더 결과에 affinity 없음")
+            if yaml_mod is not None:
+                loaded = [doc for doc in yaml_mod.safe_load_all(work) if doc]
+                by_name = {doc["metadata"]["name"]: doc for doc in loaded if doc.get("kind") == "Deployment"}
+                pods = {name: by_name.get(name, {}).get("spec", {}).get("template", {}).get("spec", {}) for name in names}
+                expect("pz-d", {name: [pod.get("affinity"), pod.get("topologySpreadConstraints")] for name, pod in pods.items()},
+                       {name: [_pz_affinity_obj(want), [{"maxSkew": 1, "topologyKey": "kubernetes.io/hostname",
+                                                         "whenUnsatisfiable": "ScheduleAnyway",
+                                                         "labelSelector": {"matchLabels": {"app.kubernetes.io/name": name}}}]]
+                        for name in names}, f"{target}: YAML 파싱 affinity·topologySpreadConstraints")
+                other_files = [t for n, t in texts.items() if n != "workloads.yaml.tmpl"]
+                expect("pz-d", [_pz_has_key(doc, "affinity") for doc in loaded if doc.get("kind") != "Deployment"]
+                       + [_pz_has_key(list(yaml_mod.safe_load_all(t)), "affinity") for t in other_files],
+                       [False] * (len(loaded) - len(by_name) + len(other_files)),
+                       f"{target}: YAML 파싱 다른 문서·다른 k8s 렌더 결과에 affinity 키 없음")
+            notes.append(target)
+        if notes == ["prod", "dev"]:
+            seen.append("pz-d")
+
+    def pz_e() -> None:
+        ci_text = (repo / ".gitlab-ci.yml").read_text(encoding="utf-8")
+        expect("pz-e", [ci_text.count(line) for line in _PZ_CI_GREP], [2, 2, 2],
+               ".gitlab-ci.yml 미치환 grep 3줄이 두 벌(prod·dev) 그대로(_pz_ci_hits 가 흉내 내는 기준)")
+        expect("pz-e", [_pz_ci_hits("a: ${X}\nb: <tag>\n  # ${Y}\nc: https://x/<y>\nd: <img width=1>\ne: <a href>"),
+                        _pz_ci_hits("values: [ap-northeast-2a,ap-northeast-2c]\n")],
+               [["1:a: ${X}", "2:b: <tag>"], []], "_pz_ci_hits 판정(걸림 2·주석·허용 패턴·영역 목록)")
+        before = [(root / "deploy" / "rendered").exists(), (root / "deploy" / "config.env").exists()]
+        tag = "ci-pz105check"
+        example_text = example_path.read_text(encoding="utf-8")
+        # CI: sed "s/^IMAGE_TAG=.*/IMAGE_TAG=$IMAGE_TAG/" config.env.example > config.env
+        ci_config = re.sub(r"^IMAGE_TAG=.*$", f"IMAGE_TAG={tag}", example_text, flags=re.M)
+        with tempfile.TemporaryDirectory(prefix="pz105_render_") as tmp:
+            tree = Path(tmp)
+            for name in ("k8s", "k8s-gpu", "infra"):
+                shutil.copytree(root / name, tree / name)
+            (tree / "deploy").mkdir()
+            for name in ("render.py", "config.dev.env", "config.prod.env"):
+                shutil.copy2(root / "deploy" / name, tree / "deploy" / name)
+            config_path = tree / "deploy" / "config.env"
+
+            def run(target: str) -> subprocess.CompletedProcess:
+                return subprocess.run([sys.executable, "-X", "utf8", str(tree / "deploy" / "render.py"), "--target", target],
+                                      capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=120)
+
+            config_path.write_text(ci_config, encoding="utf-8", newline="\n")
+            template = template_path.read_text(encoding="utf-8")
+            for target, files in (("prod", ["service-account", "model-catalog", "workloads", "ingress"]),
+                                  ("dev", ["service-account", "model-catalog", "workloads"])):
+                result = run(target)
+                out = tree / "deploy" / "rendered" / "k8s"
+                present = [f for f in files if (out / f"{f}.yaml").is_file()]
+                # 바이트 그대로 읽는다(줄 끝이 바뀌어도 보이게).
+                texts = {f: (out / f"{f}.yaml").read_bytes().decode("utf-8") for f in present}
+                hits = {f: _pz_ci_hits(text) for f, text in texts.items()}
+                work = texts.get("workloads", "")
+                try:
+                    memory = render.render_text(template, render.add_derived({**render.load_config(config_path), **overlays[target]}),
+                                                "k8s/workloads.yaml.tmpl")
+                except (Exception, SystemExit) as exc:  # noqa: BLE001
+                    memory = f"메모리 렌더 실패: {type(exc).__name__} {safe(exc)}"
+                expect("pz-e", {"rc": result.returncode, "err": safe(Exception(result.stderr.strip()))[-300:],
+                                "files": present, "hits": {f: h for f, h in hits.items() if h}, "tag": f":{tag}" in work,
+                                "same": work == memory},
+                       {"rc": 0, "err": "", "files": files, "hits": {}, "tag": True, "same": True},
+                       f"{target}: CLI 렌더(종료·파일·CI 미치환 판정·태그·메모리 렌더와 바이트 같음)")
+            # 음성: base 에 POD_ZONES 가 없으면 CI 배포 job 이 렌더 단계에서 멈춘다. prod 는 오버레이 키 검사
+            # (load_config_chain), dev 는 오버레이에 키가 없어 템플릿 치환(render_text)에서 실패한다.
+            config_path.write_text(re.sub(r"^POD_ZONES=.*\n", "", ci_config, flags=re.M), encoding="utf-8", newline="\n")
+            negative = {target: run(target) for target in ("prod", "dev")}
+            # 템플릿 경로는 OS 구분자로 찍힌다(Windows 는 k8s\workloads…). 비교 전에 / 로 맞춘다.
+            expect("pz-e", {t: [r.returncode != 0, r.stderr.strip().replace("\\", "/")[-200:]] for t, r in negative.items()},
+                   {"prod": [True, "config.prod.env: config.env 에 없는 키 ['POD_ZONES']. 오버레이는 기존 키를 덮어쓰기만 한다."],
+                    "dev": [True, "k8s/workloads.yaml.tmpl: config.env에 없는 변수 ['POD_ZONES']"]},
+                   "base 에서 POD_ZONES 를 빼면 render.py 실패(prod 오버레이 키 검사·dev 없는 변수)")
+        expect("pz-e", [(root / "deploy" / "rendered").exists(), (root / "deploy" / "config.env").exists()], before,
+               "저장소의 deploy/rendered·deploy/config.env 존재 여부가 검사 전후로 같다")
+        seen.append("pz-e")
+
+    for group in (pz_a, pz_b, pz_c, pz_d, pz_e):
+        try:
+            group()
+        except (Exception, SystemExit) as exc:  # noqa: BLE001 — 한 묶음의 예외(render.py 의 SystemExit 포함)가 나머지를 막지 않게 한다.
+            bad.append(f"({group.__name__.replace('_', '-')}) 검사 중 예외: {type(exc).__name__} {safe(exc)}")
+    expect("pz", seen, ["pz-a", "pz-b", "pz-c", "pz-d", "pz-e"], "모든 묶음이 끝까지 돌았다")
+    if bad:
+        fail("pod-zone-pin 파드 영역 검사 실패\n" + "\n".join(f"  {item}" for item in bad))
+        return
+    how = f"PyYAML {getattr(yaml_mod, '__version__', '?')} 파싱 + 글자 블록" if yaml_mod is not None else "PyYAML 없음: 글자 블록·자리·값"
+    ok(
+        "pod-zone-pin 파드 영역 검사 (pz-a)설정 줄·주석·서브넷 수 (pz-b)값 판정 "
+        f"(pz-c)템플릿 affinity 2곳 (pz-d)렌더 prod [2a,2c]·dev [2a,2b,2c] frontend·app({how}) "
+        "(pz-e)CLI 렌더 prod 4·dev 3파일 CI 미치환 0줄·POD_ZONES 없으면 실패"
+    )
+
+
 def main() -> int:
     print("== vpoc1 check ==")
     check_compileall()
@@ -31550,6 +31940,7 @@ def main() -> int:
     check_vnew_char_fidelity_screen()
     check_vnew_outfit_button()
     check_vnew_bl_look()
+    check_pod_zones()
     print()
     if warnings:
         print(f"경고 {len(warnings)}건")

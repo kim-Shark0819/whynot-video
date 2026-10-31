@@ -10,6 +10,7 @@
 > 갱신 2026-10-31(103 피드백): BL 분류를 형태(겹치면 뺀다)·인상(늘 더한다)으로 나눔, 운영 문구 `BadBlType`(§3.6, §3.6.1 B, §10.1).
 > 갱신 2026-10-31(지시서 104): BL 유형의 근거를 화면 선택에서 사용자가 쓴 캐릭터 설명(`extraPromptKo`)으로 바꿈. 캐스팅 보기 BL 필드는 `blDetected`·`blHintsEn`(§3.6, §3.6.1 B, §7.1, §10.1).
 > 갱신 2026-10-31(104 피드백): 찾기에 앞 경계·뒤쪽 제외, 부르는 곳이 없던 103 정의 지움, `VNEW_BL_LOOK` 주석(§3.6.1 B, §7.1, §10.1).
+> 갱신 2026-10-31(지시서 105): 운영 503 원인(frontend 파드가 ALB에 없는 AZ 노드에 놓임)과 조치 `POD_ZONES` 영역 제약(§7.4, §8.3, §8.7, §10.1, R-22).
 
 ---
 
@@ -796,8 +797,9 @@ vpoc·vnew의 Bedrock 도구 호출은 전부 `vpoc.llm._converse`(`vpoc/llm.py:
 | `APP_CPU/MEM_LIMIT` | 500m / **512Mi** | 4 / 8Gi |
 | `FRONTEND_*` | 50m·64Mi / 200m·128Mi | 100m·128Mi / 500m·256Mi |
 | `PRESTOP_SLEEP_S` / `TERMINATION_GRACE_S` | 15 / 45 | — |
+| `POD_ZONES`(frontend·app nodeAffinity, 2026-10-31) | `ap-northeast-2a,ap-northeast-2b,ap-northeast-2c` | `ap-northeast-2a,ap-northeast-2c` |
 
-근거: `deploy/config.env.example`, `deploy/config.prod.env`. dev 오버레이는 자원 키를 덮어쓰지 않는다.
+근거: `deploy/config.env.example`, `deploy/config.prod.env`. dev 오버레이는 자원 키를 덮어쓰지 않는다. `POD_ZONES`는 ALB 서브넷 AZ와 같아야 한다(§8.7).
 
 ### 7.5 매니페스트에 있지만 코드가 읽지 않는 값
 
@@ -860,6 +862,7 @@ flowchart LR
 1. `config.env`(CI에서는 `config.env.example`을 복사하고 `IMAGE_TAG`만 바꿈) 읽기 → `config.<target>.env` 덮어쓰기. 오버레이에만 있는 키는 실패(`render.py:68-90`).
 2. 파생값: `ECR_REGISTRY`(← `ECR_ACCOUNT_ID` 없으면 `AWS_ACCOUNT_ID`), `APP_IMAGE`, `FRONTEND_IMAGE`, `IAM_APP_ROLE_ARN`, TLS 리스너(인증서 있으면 443 + 도메인 있으면 ssl-redirect), 영상 버킷 ARN 대체 등(`:93-200`).
 3. `k8s/`, `k8s-gpu/`, `infra/`의 `*.tmpl`을 `${VAR}` 치환. 값 없는 변수가 있으면 실패(`:206-219`). 결과는 `deploy/rendered/`.
+4. `POD_ZONES`(2026-10-31)는 파생값 없이 그대로 치환된다. 템플릿이 `values: [${POD_ZONES}]`로 감싸 YAML 흐름 목록이 된다. 렌더러는 값 형식을 보지 않으므로(`render.py`는 플랫폼 파일이라 고치지 않았다) 빈 값·빈 항목·공백·중복·꼴은 `check_pod_zones`(pz-b)가 CI `check:whynot`에서 막는다. base에 키가 없으면 prod는 오버레이 키 검사, dev는 없는 변수로 렌더가 실패한다.
 
 ### 8.4 ai-deploy·ArgoCD
 
@@ -885,6 +888,14 @@ flowchart LR
 - `k8s-gpu/`·`video-worker/`: Wan 2.2 상주 GPU 워커(SQS). `render.py:142-151` 주석대로 GPU 대상에만 별도 적용하는 구조이고, CI는 이 결과를 ai-deploy에 쓰지 않는다. `ECR_VIDEO_GEN_REPO`·`VIDEO_GEN_TAG`는 빈 값(`config.env.example`).
 - `terraform/`: "Hub 계정 전용" root 모음(`terraform/README.md:1-3`) — 고객 계정 인프라 IaC는 이 저장소에 없다(미확인: 다른 저장소 여부).
 - `deploy/*.ps1`(start/stop/schedules/backup/bastion/preflight/deploy), `infra/build-deploy.sh`, `infra/verify-*.sh.tmpl`: 허브 계정·배스천 시절 도구. 고객 계정에는 배스천이 없다(`config.prod.env` `BASTION_INSTANCE_ID=` 주석).
+
+### 8.7 ALB 영역과 파드 영역(2026-10-31 운영 503, 지시서 105)
+
+- **원인**: Ingress가 `target-type: ip`라(`k8s/ingress.yaml.tmpl:12`) ALB는 자기 서브넷 AZ에 있는 파드만 대상으로 쓰고, 다른 AZ의 파드는 `Target.NotInUse`로 뺀다. 운영 ALB `whynot-prod-alb`는 2a·2c 서브넷만 쓴다(2b는 2026-10-02 EIP 한도로 뺐다, `config.prod.env` `PUBLIC_SUBNET_IDS` 주석). 운영 노드는 2a 1대·2b 1대이고 2c 노드는 없다. 두 Deployment에 노드 제약이 없어(hostname 분산 `ScheduleAnyway`만) 2026-10-31 배포(ci-4d408e98)의 새 frontend 파드 2개가 모두 2b 노드에 놓였고, `/`가 약 7분 503이었다. 같은 때 `/api/health`는 2a의 app 파드가 받아 200이었다.
+- **조치**: `k8s/workloads.yaml.tmpl`의 frontend·app 파드 spec에 필수 nodeAffinity `topology.kubernetes.io/zone In POD_ZONES`를 넣었다. `POD_ZONES`는 운영 `ap-northeast-2a,ap-northeast-2c`, base(개발) `ap-northeast-2a,ap-northeast-2b,ap-northeast-2c`(개발 ALB `whynot-dev-alb`는 2a·2b·2c)다. 맞는 노드가 없으면 파드는 Pending이고 롤링은 멈춘다(`maxUnavailable: 0`이라 옛 파드가 계속 받는다). `check_pod_zones`(§10.1)가 값·자리·렌더 결과와 운영 서브넷 수 = 영역 수를 본다.
+- **규칙**: ALB 서브넷을 바꾸면 `POD_ZONES`도 같은 변경에서 바꾼다. 2b를 ALB에 다시 넣으면 `POD_ZONES`에 `ap-northeast-2b`를 더한다.
+- **운영 배포 후 `/api/health`만이 아니라 `/`(화면)도 200인지 확인한다.** 두 경로는 서로 다른 파드(app·frontend)가 받는다.
+- **남은 위험**: 지금 운영의 ALB 뒤 파드는 2a 노드 한 대에 모두 놓인다. 그 노드가 죽거나 교체되며 새 노드가 2b에 생기면 `/`와 `/api`가 함께 503이다(변경 전에도 같은 결과였다). 2c 노드를 두거나 ALB에 2b를 다시 넣어야 풀린다(R-22).
 
 ---
 
@@ -926,9 +937,9 @@ flowchart LR
 
 ## 10. 테스트·검증 도구
 
-### 10.1 `tools/check_vpoc.py`(CI 유일 검사기, 31,204줄 — 2026-10-31)
+### 10.1 `tools/check_vpoc.py`(CI 유일 검사기, 31,955줄 — 2026-10-31 지시서 105 뒤)
 
-`main()`이 아래 63개를 순서대로 부른다(`check_vpoc.py` 끝 `def main`, 2026-10-31 지시서 103의 `check_vnew_bl_look`까지). 실패가 하나라도 있으면 종료 코드 1. 외부 호출은 모듈 래퍼를 monkeypatch 하고 S3는 메모리 저장소로 바꾼다(예: `:892` "메모리 S3", `:916`, `:1216`, `:1930`). 새 기본값(`VNEW_FX` 켬)에서 기대값이 달라지는 기존 검사 3개(`check_vnew_plan`·`check_vnew_locations`·`check_vnew_previz`)는 `main()`의 부르는 줄에서 `_run_fx_off(...)`(`_pin_vnew(VNEW_FX=False)`)로, `VNEW_CASTING` 켬에서 달라지는 `check_vnew_fx_prompt` 1개는 `_run_casting_off(...)`로 끔 고정한다. 본문·기대값은 그대로다.
+`main()`이 아래 64개를 순서대로 부른다(`check_vpoc.py` 끝 `def main`, 2026-10-31 지시서 105의 `check_pod_zones`까지). 실패가 하나라도 있으면 종료 코드 1. 외부 호출은 모듈 래퍼를 monkeypatch 하고 S3는 메모리 저장소로 바꾼다(예: `:892` "메모리 S3", `:916`, `:1216`, `:1930`). 새 기본값(`VNEW_FX` 켬)에서 기대값이 달라지는 기존 검사 3개(`check_vnew_plan`·`check_vnew_locations`·`check_vnew_previz`)는 `main()`의 부르는 줄에서 `_run_fx_off(...)`(`_pin_vnew(VNEW_FX=False)`)로, `VNEW_CASTING` 켬에서 달라지는 `check_vnew_fx_prompt` 1개는 `_run_casting_off(...)`로 끔 고정한다. 본문·기대값은 그대로다.
 
 char-fidelity 새 기본값 때문에 `main()` 호출 줄에서만 고정한 기존 검사(본문·기대값 그대로):
 
@@ -958,6 +969,7 @@ T3에서 새로 고정한 기존 검사는 없다. 기대값을 바꾼 기존 �
 | vnew 3D 공급자 | `check_vnew_3d_tripo`(tr-a~l), 2026-10-30 | `settings._checked_*`·설정 11개(하위 프로세스), 배선·렌더, `_tripo_request`·`submit_3d`·`_3d_squares`·`poll_3d`·`_orient_glb`(진짜 GLB)·`_copy_3d_result`·원장·재제출·`run_retry3d`·이어 만들기, Hunyuan 지문 16개 = 시작 전(`_TR_HUNYUAN_SHA`), 12MB GLB 회전 메모리. 하네스 `_TrFakes` |
 | 되돌리기 배선 | `check_fal_parity_rollback`(rw-a~c) | `PARITY_ENV_KEYS`(29개, 2026-10-31 `VNEW_BL_LOOK` 추가)의 템플릿·base 배선, `render.py` prod·dev 렌더. 운영 `VPOC_ARK_SEEDANCE_ENABLED`·`VNEW_ENABLED`는 `"true"`, 개발 `VPOC_ARK_SEEDANCE_ENABLED`는 `"false"`(2026-10-30 사용자 결정), 오버레이 `true` 한 줄 되돌리기 경로 |
 | vnew BL 참고 외모 | `check_vnew_bl_look`(bl-a~l), 2026-10-31 | `vnew/genre_bl.py` 전 함수(유형 표·분류 판정·그림 우선, 104 `detect_types`·`known_types`·`merged_pieces`), `casting` `cast_prompt`·`_cast_text`·`_hint_sentence`(유형 없음 = 옛 식 5,148문장, 유형 있음 216문장, 1500자 상한·두 유형), `_bl_types_now`·`view`·`start_draw`·`update_settings`(Flask PUT·draw, 메모리 저장소: BL 요청 무시·103 저장값 무시·설명 근거·로그 `bl=`), 103 함수·문구 상수가 없음(AST), `VNEW_BL_LOOK` 끔·설정 읽기(하위 프로세스)·배선·렌더·세 파일 주석, `vnew.js` BL 한 줄(node 가짜 DOM, 실제 `view`·상세 라우트 응답, 103 꼴 응답에서 선택 없음, 다시 만들기 = 진짜 `buildSection`·`refreshDetail` + 실제 POST `/build`·GET 상세, 지운 103 화면 함수·CSS 선택자가 없음), bl-j 운영 문구 `BadBlType`(표에 남김, 던지는 곳 0), bl-k 찾기 57경우·이름 × 부정·앞 경계·뒤쪽 제외 13 × 31꼴·꽃수 창 경계, bl-l 두 유형 합치기. 103 피드백에서 bl-b 기대값을 형태·인상 규칙으로, 104에서 bl-f~j를 다시 썼고 104 피드백에서 bl-f·g·i·j·k를 고쳤다 |
+| 파드 영역 | `check_pod_zones`(pz-a~e), 2026-10-31 지시서 105 | `POD_ZONES` 설정 줄(base·prod 값·자리·주석·prod 서브넷 수 = 영역 수·dev 오버레이에 없음), 값 판정 `_pz_zone_problems`(빈 값·빈 항목·공백·꼴·중복), 템플릿 affinity 8줄 블록 2곳·자리·분산 블록 그대로, `render.py` 메모리 렌더 prod `[2a,2c]`·dev `[2a,2b,2c]`(PyYAML이 있으면 dict 비교, CI는 글자 블록), 저장소 밖 임시 트리에서 CLI `render.py --target prod|dev` + CI 미치환 grep 판정 0줄·`POD_ZONES` 없으면 실패. 기존 검사 기대값은 바꾸지 않았다 |
 
 ### 10.2 기타 도구
 
@@ -999,6 +1011,7 @@ T3에서 새로 고정한 기존 검사는 없다. 기대값을 바꾼 기존 �
 | R-19 | vpoc `create_blueprint`가 등록 시점에 `ledger.seed()`로 S3를 읽고 쓴다(실패는 경고). 파드 기동마다 실행 | `vpoc/routes.py:157-161` | 기동 부작용 |
 | R-20 | ArgoCD Application·dev ingress·운영 ECR 정책이 저장소 밖에 있다. 이름도 문서마다 다르다(`argocd-whynot` vs `whynot-dev`) | `.gitlab-ci.yml:28-29`, `CLAUDE.md` 배포 절 | 추적성 |
 | R-21 | 운영 vnew를 처음 켠다(2026-10-30 사용자 결정, 배포 전). 켜는 순간 운영 사용자 전체의 화면이 바뀐다: 만들기·트랙 고르기 창의 "영상" → "영상만들기_기존", "영상만들기_신규" 버튼, 메뉴 "캐릭터 만들기"가 생기고 **"스토리" 버튼이 숨는다**(기존 스토리 프로젝트는 목록·열기 그대로). 앱을 처음 읽을 때 `vnew-previz.js`·three.js(약 735KB)를 비동기로 받는다. 새 유료 기능(캐릭터 1명 약 $1.2, Tripo 3D $0.60 × 2 포함)이 로그인한 운영 사용자 누구에게나 열린다. 비용 상한은 없다(2026-09-23 사용자 결정, 원장 기록만 — `check_no_budget_cap`) | `app.js:18-30`·`:100-111`·`applyVnewToggles`, `config.prod.env`, `docs/plans/2026-10-30-prod-vnew-enable.md` | 화면·비용·운영 |
+| R-22 | 운영 ALB(2a·2c) 뒤 frontend·app 파드가 2a 노드 한 대에 모두 놓인다(2c 노드 없음, 2b는 `POD_ZONES` 밖). 그 노드가 죽거나 교체되며 새 노드가 2b에 생기면 파드가 Pending이라 `/`·`/api`가 함께 503이다. 변경 전에도 2b로 가서 `Target.NotInUse`였으므로 위험이 새로 생긴 것은 아니다. 파드 readiness gate(ALB 대상 상태)도 없다 | §8.7, `deploy/config.prod.env` `PUBLIC_SUBNET_IDS`·`POD_ZONES`, `k8s/workloads.yaml.tmpl` affinity | 가용성(2c 노드 또는 ALB 2b 복귀 결정 필요) |
 
 ---
 
