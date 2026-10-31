@@ -248,9 +248,9 @@ def create_blueprint(deps: VnewDependencies) -> Blueprint:
             owner = _owner()
             payload = request.get_json(silent=True)
             payload = payload if isinstance(payload, dict) else {}
+            # blRole·blType(지시서 103 화면 선택값)은 넘기지 않는다(지시서 104 — 옛 화면이 보내도 무시, 400 없음).
             view = casting.update_settings(
                 owner, char_id, preset=payload.get("preset"), gender=payload.get("gender"), look_en=payload.get("lookEn"),
-                bl_role=payload.get("blRole"), bl_type=payload.get("blType"),
             )
             return jsonify({"casting": view})
         except Exception as exc:  # noqa: BLE001
@@ -265,10 +265,10 @@ def create_blueprint(deps: VnewDependencies) -> Blueprint:
             payload = request.get_json(silent=True)
             payload = payload if isinstance(payload, dict) else {}
             confirm = casting.parse_confirm_usd(payload.get("confirmUsd"))
+            # blRole·blType 은 넘기지 않는다(지시서 104). BL 유형은 캐릭터 설명(extraPromptKo)에서 서버가 찾는다.
             view = casting.start_draw(
                 owner, char_id, confirm,
                 preset=payload.get("preset"), gender=payload.get("gender"), look_en=payload.get("lookEn"),
-                bl_role=payload.get("blRole"), bl_type=payload.get("blType"),
             )
             return jsonify({"casting": view}), 202
         except Exception as exc:  # noqa: BLE001

@@ -262,8 +262,8 @@ VNEW_CASTING_SIZE = os.getenv("VNEW_CASTING_SIZE", "1920x2560")  # 세로 초상
 VNEW_CASTING_STALL_S = _int("VNEW_CASTING_STALL_S", 600)
 # 뽑기 시작부터 이 시간이 지나면 남은 칸을 실패로 끝낸다.
 VNEW_CASTING_POLL_MAX_S = _int("VNEW_CASTING_POLL_MAX_S", 900)
-# BL 역할·유형 참고 외모(지시서 103, 2026-10-31). 켜면 캐스팅 칸에 BL 역할·유형 고르기가 생기고, 유형이 있으면 캐스팅 문장 끝에
-# 참고 외모 한 문장(genre_bl)을 더한다. false 면 지금 동작(보기에 BL 필드 없음·문장 그대로·요청 값 무시). 저장값은 지우지 않는다.
+# BL 유형 참고 외모(지시서 103·104, 2026-10-31). 켜면 캐릭터 설명(추가 요청, extraPromptKo)에 적힌 BL 유형(떡대공 등)을 캐스팅 문장
+# 끝에 참고 문장(genre_bl)으로 더한다. false 면 지금 동작(보기에 BL 필드 없음·문장 그대로). 저장값은 지우지 않는다.
 VNEW_BL_LOOK = _bool("VNEW_BL_LOOK", True)
 
 # 통 테이크 실사 버전(vnew-live-fx 묶음 C, 2026-10-30). 켜면 웹툰 통 테이크가 끝난 gen 에서 같은 프리비즈 녹화로

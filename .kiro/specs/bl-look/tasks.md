@@ -56,3 +56,46 @@
   - **완료 조건**: 공통 1~4.
 
 - [x] 9. 문서·리뷰 — `docs/WORKLOG.md` 103 항목에 이어 쓰기, `docs/ANALYSIS.md`, `.kiro/steering/genre-bl.md`, 이 스펙. 3단계 리뷰·커버리지.
+
+---
+
+## 지시서 104(2026-10-31) — BL 유형은 사용자가 쓴 캐릭터 설명에 적었을 때만
+
+> 요구사항 R9~R12, 설계 D18~D27·§9. 공통 규칙·완료 조건은 위와 같다(새 그룹 줄에 bl-a~l).
+
+- [x] 10. 찾기·합치기 (R9, design D19~D21·§9.1)
+  - **수정 파일**: `app/src/vnew/genre_bl.py`(`NEGATIONS`·`NEGATION_WINDOW`·`DETECT_MAX`·`_NAME_TO_ID`·`_NAME_RE`, `detect_types`·`known_types`·`_piece_categories`·`merged_pieces`, `hint_pieces`·`look_hints` 유형 목록)
+  - **검사**: bl-k, bl-l, bl-a·bl-b 그대로
+  - **완료 조건**: 공통 1~4. 유형 하나의 결과가 103과 같다(bl-b·bl-d 기대값 그대로).
+
+- [x] 11. 캐스팅·라우트 (R10, design D18·D22~D24·D26·§9.2·§9.3)
+  - **수정 파일**: `app/src/vnew/casting.py`(`_bl_types_now`, `cast_prompt`·`_cast_text`, `_apply_settings`·`update_settings`·`start_draw`, `view`, docstring·주석), `app/src/vnew/routes.py`
+  - **검사**: bl-c·bl-e·bl-f·bl-g·bl-h·bl-j, cast-j(키 집합만 `blDetected`·`blHintsEn`), cast-a~m·cf-*·rw-* 그대로
+  - **완료 조건**: 공통 1~4. 설명에 유형이 없으면 문장이 103 이전과 같다.
+
+- [x] 12. 화면 (R11, design D25·§9.4)
+  - **수정 파일**: `frontend/public/vnew.js`(`castingBlLine`·상수 2개, `castingSection`, 주석), `frontend/public/vnew.css`
+  - **검사**: bl-i, cast-l·cf-s 그대로
+  - **완료 조건**: 공통 1~4.
+
+- [x] 13. 지침·문서 (R12)
+  - **수정 파일**: `.kiro/steering/genre-bl.md`, `docs/WORKLOG.md`(104 항목), `docs/ANALYSIS.md`, 이 스펙
+  - **완료 조건**: 줄 끝 LF.
+
+- [x] 14. 리뷰·커버리지·변형 검사
+  - 보안 → 성능 → 운영성 리뷰, `coverage run`(저장소 밖 data-file)로 바뀐 서버 줄 80% 이상, 변형 검사(저장소 밖 스크립트) 갱신.
+
+---
+
+## 104 피드백(2026-10-31, Claude 결정) — 남은 이슈 1·2·3
+
+> 요구사항 R9.8~R9.10·R13·R14, 설계 D28~D32·§10. 공통 규칙·완료 조건은 위와 같다. 지운 정의 = §10.2 표뿐이어야 한다(공통 완료 조건 4의 예외, Claude 승인).
+
+- [x] 15. 앞 경계·뒤쪽 제외 (R9.8~R9.10, design D28~D30·§10.1)
+  - **수정 파일**: `app/src/vnew/genre_bl.py`
+  - **검사**: bl-k(예 추가·기대값 "떡대공원" → 없음), bl-f·bl-h·bl-i 그대로
+- [x] 16. 103 정의 지우기 (R13, design D31·§10.2)
+  - **수정 파일**: `app/src/vnew/casting.py`, `frontend/public/vnew.js`, `frontend/public/vnew.css`, `tools/check_vpoc.py`(bl-f·bl-i·bl-j)
+- [x] 17. `VNEW_BL_LOOK` 주석 (R14, design D32)
+  - **수정 파일**: `app/src/vnew/settings.py`, `deploy/config.env.example`, `k8s/workloads.yaml.tmpl`(주석만), `tools/check_vpoc.py`(bl-g)
+- [x] 18. 문서·리뷰 — WORKLOG 104 항목에 이어 쓰기, ANALYSIS, 이 스펙. 3단계 리뷰·커버리지·변형 검사.

@@ -1477,3 +1477,137 @@
     3. 프리셋 문구와 인상 조각이 엇갈릴 수 있다: 아이돌풍 "slim V-line face"·"calm expression"과 떡대공 "a firm square jawline"·츤데레공 "an aloof expression". 프리셋은 판정에 넣지 않는다(D2, 103과 같음).
     4. 103 남은 이슈 2·5·6·7(미리보기 줄 기준, female + 유형, male 지정 + 중립 낱말, 유료 확인)은 그대로다.
 - 2026-10-31 Claude 리뷰: 떡대공 인상 조각 2개 추가 승인. 미인수 남은 이슈 2는 인상 조각을 "strikingly handsome, delicate and refined masculine features"로 바꿔 해결(형태가 모두 겹쳐도 masculine 유지).
+
+### 지시서 104 — BL 유형은 사용자가 캐릭터 설명에 적었을 때만 반영 (Kiro, claude-opus-5.5)
+- **범위**: `.kiro/handoff/104-bl-from-description.md`. 스펙 `.kiro/specs/bl-look/`에 R9~R12·D18~D27·§9·tasks 10~14를 먼저 더하고 같은 실행에서 구현·검사까지 했다. 커밋·push 하지 않았다. git·aws·kubectl·네트워크·유료 API를 쓰지 않았고 사용자 데이터를 읽지 않았다.
+- **먼저 한 일**: 바꿀 파일 12개의 시작 전 사본과 저장소 파일 목록(시각 포함)을 저장소 밖(`%TEMP%\kiro104_baseline`)에 두었다. 시작 전 전체 검사는 전부 통과(ok 63줄, FAIL·WARN 0, 89초).
+- **배경**: 103(커밋 89d5a34, 개발·운영 배포)은 캐스팅 패널의 "BL 역할 / 유형" 선택으로 참고 문장을 더했다. 사용자 지시(2026-10-31): "이런 BL 요소는 사용자가 해당 캐릭터에 대한 설명에 떡대공이다 이런 식으로 넣는다면 그때 반영을 하도록 해라." 근거를 사용자가 쓴 캐릭터 설명(`char.extraPromptKo`, 캐릭터 만들기의 추가 요청 칸)으로 바꾼다.
+- **결정**(design D18~D27)
+  - D18 — 근거는 `char.extraPromptKo` 하나다. `analysis.descriptionKo`(LLM 글)·`appearanceEn`·외모 문장·저장된 `blRole`·`blType`은 보지 않는다.
+  - D19 — 찾기: 표 label을 "/"로 나눈 이름 13개를 붙은 꼴 그대로 부분 문자열로 찾는다(앞 경계 없음, 뒤에는 조사·서술어 허용). 부정은 이름 끝 바로 뒤 0~5번째 글자(6자, 공백 포함)에서 "아님"·"아니"·"말고"가 **시작**되면이다. "6자 안에 오면"을 "시작하면"으로 읽어 "떡대공은 절대 아님"(아님이 5번째에서 시작)도 부정으로 본다. 나온 순서·중복 없이 최대 2개. 부정된 자리 뒤에 같은 이름이 부정 없이 다시 나오면 찾는다.
+  - D20 — 합치기: 앞 유형 조각을 표 순서대로 모두 넣고, 뒤 유형 조각은 그 분류를 앞 유형이 이미 가졌으면 뺀다(형태 조각은 글이 담은 형태 분류까지 — 무심공 "a lean, tall build"는 체격·키). 판정은 표 기준이고 그 뒤 그림 우선을 한 번 적용한다. 그래서 앞 유형 조각이 그림 때문에 빠져도 뒤 유형이 그 자리를 채우지 않는다. 1500자 줄이기는 끝(뒤 유형 조각)부터다.
+  - D21 — `cast_prompt`·`_cast_text`·`hint_pieces`·`look_hints`의 유형 인자는 id 하나 또는 id 목록이다(`known_types`). 넷째 인자 기본값 `""`는 그대로라 103 호출·검사가 그대로 돈다.
+  - D22 — 103 저장값은 읽지도 지우지도 않는다. `_empty_casting` 기본값도 그대로다. 103 함수(`_bl_checked`·`_apply_bl`·`_bl_state`·`_bl_type_now`, 화면 `castingBlOn`·`castingBlTypeOptions`·`castingBlTypeFits`·`castingBlFields`)와 CSS 선택자는 quality-week 9에 따라 남겼다. 부르는 곳은 없다.
+  - D23 — 라우트는 `blRole`·`blType`을 넘기지 않고 `update_settings`·`start_draw`·`_apply_settings`에서 BL 키워드를 뺐다. 옛 화면이 보내도 무시된다(PUT 200·draw 202).
+  - D24 — 보기(켬) 끝에 `blDetected`(`[{id, label}]`, label은 표 그대로)·`blHintsEn` 두 키. 끔이면 BL 키가 없다(103 끔과 같다).
+  - D25 — 화면: 선택을 없애고 성별 칸 바로 뒤에 읽기 전용 한 줄을 둔다. 찾음 `p.vnew-casting-bl-found`(13px) "캐릭터 설명에서 찾은 BL 유형: 떡대공 — 참고로 더해지는 외모 설명(영어): …", 못 찾음 `p.vnew-hint.vnew-casting-bl-guide`(12px) "캐릭터 설명에 '떡대공'처럼 BL 유형을 적으면 실사 사진에 참고로 반영됩니다." 화면은 `blDetected`만 보므로 롤링 배포 중 103 꼴 응답이 와도 선택이 다시 생기지 않는다.
+  - D26 — 로그 `bl=` 끝말은 찾은 id를 `+`로 이은 값(예 `bl=musim_gong+ttokdae_gong`), 없으면 `-`.
+  - D27 — 검사 기대값: cast-j 키 집합은 19개 + `blDetected`·`blHintsEn`. `_run_bl_look_off(check_vnew_char_fidelity)`는 그대로 둔다.
+- **검토한 대안**
+  - (가) 화면 선택을 남기고 설명도 근거로 더하기: 두 근거가 부딪친다. 지시와 다르다. 거절.
+  - (나) LLM으로 설명에서 유형 분류: 비결정적이고 비용·지연이 생긴다. 사용자가 쓴 낱말 그대로라는 지시와도 다르다. 거절.
+  - (다) 이름 앞 경계(앞 글자가 한글이 아님)를 요구: "형광공장"·"광공업"의 광공 오탐은 막지만 흔한 말 "집착광공"을 놓친다. 하지 않았다(남은 이슈 1).
+  - (라) 합칠 때 그림으로 빠진 앞 유형 자리를 뒤 유형이 채우기: 정보는 늘지만 사용자가 앞에 쓴 유형의 뜻과 어긋난다(무심공 + 떡대공에서 그림이 "slim"이면 떡대공 "broad shoulders…"가 들어온다). 거절.
+  - (마) 103 함수·화면 함수 지우기: quality-week 9 위반. 남기고 남은 이슈 2에 적었다.
+- **바꾼 것**
+  - `app/src/vnew/genre_bl.py`: 새 `NEGATIONS`·`NEGATION_WINDOW`·`DETECT_MAX`·`_NAME_TO_ID`·`_NAME_RE`·`_NEGATION_SPAN`, 새 `_negated`·`detect_types`·`known_types`·`_piece_categories`·`merged_pieces`, `hint_pieces`·`look_hints`(유형 목록, 인자 이름 `bl_types`), 모듈 docstring 한 단락. import는 그대로 `re`뿐.
+  - `app/src/vnew/casting.py`: 새 `_bl_types_now`, `cast_prompt`·`_cast_text`(인자 `bl_types`, `known_types`), `_apply_settings`·`update_settings`·`start_draw`(BL 키워드·`_apply_bl` 호출·뽑기 전 `_bl_checked`를 뺌, 회차 문장 `_bl_types_now(data)`, 로그 `"+".join(...) or "-"`), `view`(BL 필드 2개), 103 함수 구역 주석, 모듈 docstring 3줄.
+  - `app/src/vnew/routes.py`: PUT·draw에서 BL 전달 두 줄을 빼고 주석 한 줄씩.
+  - `frontend/public/vnew.js`: 새 `castingBlLine`·상수 2개(`CASTING_BL_FOUND_LEAD`·`CASTING_BL_GUIDE`), `castingSection`(`blOn`·`form.blRole`·`blType`·`castingBlFields` 호출과 저장·뽑기 본문의 BL 두 곳을 빼고 성별 칸 뒤 한 줄), BL 주석. `vnew.css`: 새 `.vnew-casting-bl-found`·`.vnew-casting-bl-guide`, 103 선택자 주석.
+  - `tools/check_vpoc.py`: bl 그룹 docstring·`seed_char(extra=)`·bl-c(목록 4종)·bl-e(두 유형)·bl-f·bl-g(끔 부분)·bl-h·bl-i·bl-j(라우트 부분) 다시 씀, 새 bl-k·bl-l, `_BL_VIEW_KEYS`(2개)·`_BL_OLD_VIEW_KEYS`·`_BL_DESC_TTOKDAE`·`_BL_GUIDE`·`_BL_FOUND_LEAD`·`_BL_HINT_LEAD`·`_BL_NAMES`·`_BL_DETECT_CASES`, `_BL_SCREEN_NODE_CASES`·`_bl_screen_problems` 다시 씀, cast-j 키 집합, `_run_bl_look_off` 주석.
+  - `.kiro/steering/genre-bl.md`(한 줄), `.kiro/specs/bl-look/`(R9~R12·D18~D27·§9·tasks 10~14), `docs/ANALYSIS.md`(머리 줄, §3.6 모듈 표 2행, §3.6.1 보기 행·운영 문구 단락·BL 표(근거·합치기 행 추가, 문장·설정 저장·뽑기 문장·보기·화면 행), §7.1 행·단락, §10.1 고정 표·기대값 단락·검사 행).
+- **검사(바뀐 bl 그룹, 어떤 검사가 어떤 함수·분기를 덮는지)**
+
+  | 검사 | 덮는 것 |
+  |---|---|
+  | bl-c | `known_types`의 글·목록·그 밖의 값 분기(`[]`·`["zz"]`·`("",)`·`[None, 대문자]`), `_cast_text` 유형 없음 경로 = 옛 식 5,148문장 |
+  | bl-e | `_cast_text` 줄이기 루프의 두 유형 경로(뒤 유형 조각부터 뺌) |
+  | bl-f | `update_settings`·`start_draw`·`_apply_settings` 서명(BL 인자 없음), routes.py 소스(전달 없음), casting.py AST(103 저장값을 읽는 함수 = `_empty_casting` + 103 함수뿐), 남긴 103 함수 동작(`_apply_bl` 12경우·`_bl_state`·`_bl_type_now`), 실제 Flask PUT 6건(BL 값 여러 꼴 → 200·저장값 그대로·보기에 103 키 없음), draw(틀린 금액 → 409 CostMismatch·저장 불변, 맞는 금액 → 202·회차 문장 = 103 이전 식·로그 `bl=-`), 설명 "떡대공이다. 후드티 말고 베이지 셔츠로" → 회차 문장 끝 참고 문장·`blDetected`·로그 `bl=ttokdae_gong`, 두 유형 → `bl=musim_gong+ttokdae_gong` |
+  | bl-g | `_bl_types_now`의 끔 분기, 끔 보기 키 19개·PUT·draw·회차 문장 옛 식·`bl=-`, 다시 켜면 설명에서 찾음·103 저장값 그대로. 설정·배선·렌더 검사는 103 그대로 |
+  | bl-h | `view` 켬 분기(키 = 끔 + 2개·끝 순서·103 키 없음), 근거가 아닌 곳 9경우(descriptionKo·appearanceEn·고친 외모 문장·103 저장값·None·숫자·목록·dict·역할 낱말·부정), `_bl_types_now(None·글)`, 두 유형 label·참고 문장, 보기 성별 = 뽑기 성별, 고친 외모 문장 그림 우선·PUT의 BL 값 저장 안 됨, generate.py가 BL을 읽지 않음 |
+  | bl-i | node 가짜 DOM. `castingBlLine` 순수 결과 8경우(null·빈 것·배열 아님·빈 배열·찾음·참고 문장 없음·이상한 항목·이름 없음), 실제 `view` 응답(찾음·두 유형·못 찾음(103 저장값)·뽑는 중·만드는 중)의 폼 자식 순서·선택 1개(성별)·103 칸 0·줄 글·class, 103 꼴 응답과 끔: 선택·줄 0·본문 그대로, 저장·뽑기·되돌리기 본문 키(BL 없음), 위험한 글, innerHTML 0, CSS(안내 12px·찾음 13px), `node --check`, 남긴 103 화면 함수 동작. 다시 만들기: 진짜 `buildSection`(다시 만들기 → 추가 요청 → 확인)이 보낸 POST `/build` 본문 = 파이썬이 실제 라우트로 보낸 본문(빌드 스레드는 기록기), 진짜 `refreshDetail`이 실제 GET 상세로 다시 그려 줄이 안내 → "떡대공 — 참고 …" → ("떡대공 아님"으로 다시 만들면) 안내. 화면 본문을 실제 PUT·draw에 보내 보기·회차 문장 |
+  | bl-j | `USER_FACING_KINDS`의 `BadBlType` 한 줄(남김), 던지는 곳 4곳 = 103 함수의 고정 문구 상수 둘(AST), `RAW_ERRORS=false` 봉투 문구, 실제 PUT에 모르는 BL 값 3건 → 200 |
+  | bl-k | `detect_types` 전 분기·`_negated`: 이름 표 13개·상수, 33경우(지시 예 7·붙은 꼴·"떡대공원"·띄어 쓴 꼴·집착광공·중복·부정 7·줄바꿈·역할 낱말만 4·글 아닌 값 4), 이름마다 "…이다"·"…, " 2꼴, 이름 × 부정 낱말 39경우, 창 경계 8경우(0~5번째 = 부정, 6·7번째 = 찾음), 결과가 새 목록 |
+  | bl-l | `merged_pieces`·`_piece_categories`·`known_types`·`hint_pieces`·`look_hints` 목록: 무심공 + 떡대공(자세만 더함)·떡대공 + 무심공(몸가짐만)·미인수 + 다정공(같은 유형 안 얼굴 인상 2조각 유지), 모르는 id·중복, 유형 하나 = 표 12종, 그림 "slim" 뒤 앞 유형 자리를 뒤 유형이 채우지 않음, 두 유형 `cast_prompt` 전문(771자), `["ttokdae_gong"]` = 103 떡대공 전문 |
+
+  bl-a·bl-b·bl-d는 기대값을 바꾸지 않고 그대로 통과한다(유형 하나의 결과가 103과 같다는 증거).
+- **확인**
+  - `node --check frontend/public/vnew.js` 통과. `python -X utf8 tools/check_vpoc.py` 전부 통과: ok 63줄(bl 그룹 한 줄에 bl-a~l), FAIL·WARN 0(약 90초).
+  - 바뀐 서버 줄 커버리지(coverage 7.17, `--data-file=%TEMP%\kiro104_baseline\cov104.data`, 시작 전 사본과 difflib): 실행문 70줄 중 70줄(100%). `genre_bl.py` 54/54(파일 전체 100%), `casting.py` 16/16(파일 전체 99.4%), `routes.py`는 바뀐 줄이 주석·인자 줄이라 실행문 0줄(그 호출문은 실행됨).
+  - 변형 검사 56개(저장소 밖 `kiro104_mut.py`, 파이썬은 모듈을 바꾼 소스로 다시 실행, 화면·배선은 임시 사본 트리): 찾기 9(부정 없음·창 안에 통째로만·창 8자·최대 3·중복·표 순서·label 안 나눔·띄어 쓴 꼴 허용·글 아닌 값 str 변환), 합치기 6(뒤 유형 우선·제외 없음·단 분류만·known 중복·글을 글자로·유형 없음에 조각), 103 규칙 회귀 5, 캐스팅 16(descriptionKo 읽음·저장 blType 읽음·끔 무시·보기 103 키·로그 쉼표·로그 첫 유형만·회차 문장 유형 없음·label = id·보기 성별 unknown·male 강제 없음·중립 낱말·상한 무시·"and" 없음·유형 하나만·끔에도 보기 필드·PUT이 blType 저장), 라우트 2(PUT·draw 전달 되살림), 화면 11(늘 안내·저장 본문 BL·뽑기 본문 BL·103 선택 되살림·참고 문장 없음·안내 큰 글씨·끔에 줄·innerHTML·label 대신 id·" / " 잇기·줄 자리 옮김), CSS 2, 배선 3, 운영 문구 2. 56개 모두 검사 단언으로 잡았고(예외로 잡힌 것 0) 변형 없는 실행은 통과한다. 처음 돌렸을 때 K8(띄어 쓴 꼴)은 변형이 덜 만들어져 예외로만 잡혀 두 자리 변형으로 다시 썼다.
+  - 성능 측정(저장소 밖): `detect_types` 최악 입력(부정 반복 500자) 1회 0.055ms, 5,000자 0.014ms. `merged_pieces` 두 유형 0.081ms, `_cast_text` 두 유형 0.29ms. 보기 BL 필드 JSON 255바이트(103의 `blTypes` 목록이 빠져 약 3.6KB에서 줄었다). 가장 긴 두 유형 참고 문장 309자 → 캐스팅 문장 최장 약 1,170자(1500자 안).
+  - 실제 외부 호출 0회: `casting._fal_request`·`_fetch_url`·`characters._fal_request`·`vpoc.fal._request`를 막고 `_guard_real_llm`으로 Bedrock 0회, 뽑기 스레드·빌드 스레드는 기록기로 바꿨다.
+  - 줄 끝 LF(바뀐 파일 12개 CR 0, BOM 없음), 공백만 바뀐 줄 0, 새 줄 끝 공백 0, 지운 정의 0(파이썬 AST·JS 함수·CSS 선택자 비교, 검사 파일의 도우미 `apply`·`type_opts`도 남김), 저장소 안 새 파일 0. 시각만 바뀐 파일은 `.gitignore` 대상 `__pycache__` 3개와 실행 로그 `.kiro/handoff/logs/104.log`뿐이다. 수정 금지·범위 밖 파일(`characters.py`·`generate.py`·`config.dev.env`·`config.prod.env`·`.gitlab-ci.yml`·`settings.py`·`config.env.example`·`workloads.yaml.tmpl`·`vpoc/errors.py`)은 바뀌지 않았다(`whynot-20261029`는 이 작업 트리에 없다).
+- **바꾼 기존 검사 기대값**
+  - cast-j `want_keys`: BL 5개(`blRole`·`blType`·`blRoles`·`blTypes`·`blHintsEn`) → 2개(`blDetected`·`blHintsEn`). 이유: 지시서 104가 보기에서 103 키를 빼고 `blDetected`를 두라고 했다.
+  - bl-f·bl-h·bl-i·bl-j의 103 기대값(PUT·draw의 BL 400, 저장된 역할·유형이 회차 문장에 쓰임, 보기 5개 키, 화면 선택·미리보기 숨김·본문의 BL 키, 라우트의 `BadBlType` 문구): 지시로 없어진 동작이라 104 기대값으로 바꿨다. 103 함수 자체의 동작(20경우 중 12경우)은 남긴 정의를 직접 불러 계속 본다.
+  - 그 밖의 기존 검사 기대값은 바꾸지 않았다(cast-a~m·cf-*·rw-*·ob-*·lr-* 그대로. cast-l·cf-s는 BL 필드가 없는 상세라 줄이 없다).
+- **3단계 리뷰**
+  - 보안
+    - 사용자 글은 판정에만 쓴다. 모델에 가는 영어는 여전히 표의 고정 조각뿐이라 설명 글이 캐스팅 문장에 섞이지 않는다(프롬프트 끼워 넣기 경로 없음). `detect_types`는 글이 아니면 `[]`이고 정규식은 이름 13개의 이스케이프 리터럴 묶음이다.
+    - 화면 글은 `el`(textContent)로만 넣는다. 위험한 글을 label·참고 문장에 넣어도 글자 그대로다(bl-i). 권한·저장 경로(`require_auth`, `users/{owner}/…`)는 그대로다.
+    - 발견·조치: 없음. `BadBlType` 문구는 표에 남았고 지금은 던지는 경로가 없다(bl-j).
+  - 성능(앱 파드 512Mi)
+    - 상세 GET(뽑는 중·만드는 중 5초 폴링)마다 `detect_types` 1회(0.06ms 이하)와 두 유형 합치기가 더해진다. 보기 BL 필드는 3.6KB → 255바이트로 줄었다. 새 스레드·락·외부 호출이 없고 fal 요청 수·금액은 같다.
+    - 발견·조치: 없음.
+  - 운영성
+    - 로그: `vnew.casting.draw_start … bl=<id+id 또는 ->`. 400 `BadBlType`은 더 나오지 않는다.
+    - 되돌리기: `config.<target>.env`에 `VNEW_BL_LOOK=false` 한 줄(보기·문장이 103 끔과 같다). 화면 선택으로 되돌리기는 이미지 되돌리기(103 저장값이 남아 있어 그대로 쓰인다).
+    - 진행 중 작업·재시작: 회차 문장은 시작 때 한 번 만들어 저장한다. 진행 중 뽑기·이어하기는 그 문장을 쓴다.
+    - 섞인 버전(롤링): 옛 파드(103)는 저장된 `blType`으로 문장을 만들고 103 키를 준다. 새 화면은 `blDetected`가 없으면 줄을 그리지 않는다(bl-i 103 꼴 응답). 옛 화면이 새 파드에 BL 값을 보내도 무시된다(bl-f). 오류 없음.
+    - 발견·조치: 103 남은 이슈 2(미리보기 줄이 저장된 외모 문장 기준)는 그대로다(남은 이슈 4).
+- **남은 이슈**
+  1. 앞 경계를 보지 않아 유형 이름이 다른 낱말 안에 있으면 찾는다: "꽃수를 놓은 셔츠"(꽃 자수)의 꽃수, "광공업"·"형광공장"의 광공, "떡대공원"의 떡대공. 추가 요청 칸은 그림 요청("후드티 말고 …")을 적는 곳이라 "꽃수"(자수)가 들어올 수 있다. 막으려면 이름별 예외 낱말("꽃수를 놓"·"꽃수가 놓") 또는 앞 경계 규칙이 필요하다(앞 경계는 "집착광공"을 놓친다). 결정이 필요하다.
+  2. 103 함수 4개(`_bl_checked`·`_apply_bl`·`_bl_state`·`_bl_type_now`)·화면 함수 4개·CSS 선택자 4개를 quality-week 9에 따라 남겼다. 부르는 곳이 없다. 지우려면 승인이 필요하다. 저장된 `blRole`·`blType`도 그대로 남아 있다.
+  3. `vnew/settings.py`·`deploy/config.env.example`·`k8s/workloads.yaml.tmpl`의 103 주석("BL 역할·유형을 고르면")이 이제 맞지 않는다. 이번 범위 밖이라 두었다.
+  4. 103 남은 이슈 2·5·6·7(미리보기 줄은 저장된 외모 문장 기준, female + 유형, male 지정 + 중립 낱말, 유료 확인)은 그대로다. female 지정 + 설명의 유형이면 "She has … masculine …"이 된다.
+  5. 같은 캐릭터에 공 유형과 수 유형을 함께 적으면("떡대공 미인수") 둘 다 합친다. 역할이 다른 두 유형의 짝은 보지 않는다(지시에 규칙이 없다).
+  6. 부정 판정은 이름 바로 뒤 6자만 본다. "떡대공 같은 느낌은 전혀 아님"처럼 먼 부정은 찾은 것으로 본다(지시 규칙 그대로).
+- **피드백(같은 날, Claude): 104 남은 이슈 1·2·3을 고친다.** 104 결과는 확인됐고 커밋 전이다. 같은 작업 트리에서 이어서 했고, 104 직후 사본(바꿀 파일 16개)과 파일 목록을 `%TEMP%\kiro104f_baseline`에 두었다. 스펙에 R9.8~R9.10·R13·R14, design D28~D32·§10, tasks 15~18을 먼저 더했다.
+  - 결정(Claude): 앞 경계(이름 바로 앞 글자가 한글 음절이면 찾지 않음, 예외 접두어 "집착"), 뒤쪽 제외(모든 이름은 바로 뒤 첫 글자 "원"·"업", 꽃수는 뒤 6자 안의 "놓"·"자수"·"무늬"·"장식"·"프린트"·"패턴"·"그림"), 부르는 곳이 없는 103 정의 지우기(승인), `VNEW_BL_LOOK` 주석 고치기.
+  - 결정(Kiro)
+    - G1 — 앞 경계는 한글 음절(U+AC00~U+D7A3)만 막는다. 자모("ㅋㅋ떡대공")·한자·이모지 뒤는 공백·문장부호·숫자·영문과 같이 찾는다. 지시의 규칙 문장이 "한글 음절이면 찾지 않는다"이고, 허용 목록으로 읽으면 "ㅋㅋ떡대공이다"를 놓친다(D28).
+    - G2 — 바로 앞이 "집착"으로 끝나면 그 앞 글자는 보지 않는다. "초집착광공"도 찾는다(D28, 변형 F5가 이 판단을 고정).
+    - G3 — "원"·"업"은 바로 뒤 첫 글자만 본다(지시 "바로 뒤 첫 글자로 붙는 경우"). 그래서 "떡대공인데 원래"·"떡대공 업무"는 찾고 "떡대공업무"는 뺀다(D29).
+    - G4 — "수원 출신 무심수아"는 무심수를 찾는다. "수원"은 유형 이름이 아니라 아무것도 내지 않고, "무심수" 뒤의 "아"는 이름과 조사를 구별하지 않는다는 지시대로 찾는 쪽에 두었다. 지시는 이 예를 "찾지 않음"에 넣었지만 바로 아래 줄이 "찾는 쪽으로 두고 남은 이슈에 적는다"라서 그 줄을 따랐다(bl-k에 이 판단을 고정, 남은 이슈 1).
+    - G5 — 지운 103 함수만 쓰던 문구 상수 `_MSG_BAD_BL`·`_MSG_BL_MISMATCH`(casting.py)와 `CASTING_BL_NO_TYPE`(vnew.js)도 함께 지웠다. 함수 정의가 아니라 승인 목록에 이름이 없지만, 남기면 쓰는 곳 없는 문구가 된다(D31). `vpoc/errors.py`의 `BadBlType`(지시서 104 "표에서 지우지 않는다"), `genre_bl`의 `roles`·`fits`·`list_types`(승인 목록 밖, bl-a가 본다), 저장된 `blRole`·`blType`과 `_empty_casting` 기본값은 남겼다.
+    - G6 — 세 파일 주석은 줄 수·값·자리·base의 되돌리기 문구를 그대로 두고 뜻만 바꿨다(D32). 배선 검사(bl-g·rw-a~c·ob-h)의 기대값은 그대로다.
+  - 검토한 대안
+    - (가) 앞 경계를 허용 목록(공백·문장부호·숫자·영문만)으로: 자모·한자 뒤를 놓친다. 하지 않았다(G1).
+    - (나) "원"·"업"도 6자 창으로: "떡대공인데 원래 착하다"·"떡대공이고 업무"를 놓친다. 지시 문장("바로 뒤 첫 글자")과도 다르다.
+    - (다) 조사 표로 "무심수아"(이름)와 "무심수인"(조사)을 구별: 서술어 활용까지 표가 커진다. 지시대로 하지 않았다.
+    - (라) 지운 함수의 상수를 남기기: 쓰는 곳 없는 문구가 남는다. 지웠다(G5).
+  - 지운 정의(104 직후 사본과 AST·함수·선택자 비교)
+    - `app/src/vnew/casting.py`: 함수 `_bl_checked`·`_apply_bl`·`_bl_state`·`_bl_type_now`, 상수 `_MSG_BAD_BL`·`_MSG_BL_MISMATCH`, 그 구역 머리 주석(104 기준으로 다시 씀).
+    - `frontend/public/vnew.js`: 함수 `castingBlOn`·`castingBlTypeOptions`·`castingBlTypeFits`·`castingBlFields`(안의 `fillTypes`·`showHint` 포함), 상수 `CASTING_BL_NO_TYPE`.
+    - `frontend/public/vnew.css`: `.vnew-casting-row`, `.vnew-casting-bl-role`·`.vnew-casting-bl-type`, `.vnew-casting-bl-hint`.
+    - `tools/check_vpoc.py`(지운 정의를 직접 부르던 부분만): bl-f의 103 함수 동작 12경우와 도우미 `apply`, bl-i의 남긴 103 화면 함수 실행(`kept103`)과 `_bl_screen_problems`의 도우미 `type_opts`. bl-j의 던지는 곳 기대값(103 함수 4곳 → 0곳).
+    - 104에서 새로 만든(커밋 전) `genre_bl._NEGATION_SPAN`도 지웠다. `_starts_within`이 낱말 길이로 창 끝을 정해 필요 없다.
+    - 그 밖에 지운 정의는 없다(hygiene: 승인 목록과 정확히 같음).
+  - 바꾼 것
+    - `app/src/vnew/genre_bl.py`: 새 `_HANGUL_SYLLABLE`·`_PREFIX_OK`·`_NEXT_BLOCK`·`_AFTER_BLOCK`, 새 `_starts_within`·`_front_ok`·`_excluded_after`, `_negated`(`_starts_within`로), `detect_types`(자리마다 앞 경계·뒤쪽 제외), 찾기 구역 주석.
+    - `app/src/vnew/casting.py`: 위 지운 정의, BL 구역 머리 주석.
+    - `frontend/public/vnew.js`·`vnew.css`: 위 지운 정의, BL 주석 한 줄.
+    - `app/src/vnew/settings.py`(주석 2줄)·`deploy/config.env.example`(주석 3줄)·`k8s/workloads.yaml.tmpl`(주석 1줄): "캐릭터 설명(추가 요청)에 적힌 BL 유형을 참고 문장으로 더한다". 값·자리·줄 수 그대로.
+    - `tools/check_vpoc.py`: bl-f(AST: 103 함수·상수가 없고 "blRole"·"blType"을 쓰는 함수는 `_empty_casting`뿐), bl-g(세 주석), bl-i(지운 화면 함수·상수·CSS 선택자가 없음), bl-j(던지는 곳 0, 봉투는 고정 문구 글자로), bl-k(`_BL_DETECT_CASES` 24경우 추가·"떡대공원" 기대값 변경, 표 3개, 이름 13 × 31꼴, 꽃수 창 경계 8경우), docstring·보고 줄.
+    - `.kiro/specs/bl-look/`(R9.8~R9.10·R13·R14, D28~D32·§10, tasks 15~18), `docs/ANALYSIS.md`(머리 줄, 운영 문구 단락, BL 표 근거·합치기·설정 저장·뽑기 문장·보기·화면 행 줄 번호와 내용, §7.1 단락, §10.1 검사 행).
+  - 검사(바뀐 것, 어떤 검사가 어떤 함수·분기를 덮는지)
+
+    | 검사 | 덮는 것 |
+    |---|---|
+    | bl-k | `_front_ok` 세 분기(글 처음·한글 음절 아님·`_PREFIX_OK`)와 거절, `_excluded_after` 세 분기(`_NEXT_BLOCK` 첫 글자·`_negated`·`_AFTER_BLOCK`), `_starts_within` 창 경계. 지시 예 9개(꽃수를 놓은 셔츠·꽃수 무늬 넥타이·광공업·떡대공원 → 없음, 수원 출신 무심수아 → 무심수(G4), 집착광공이다·그는 꽃수다·(떡대공)·떡대공,무심공 → 찾음)와 형광공장·개떡대공·떡대공무심공·초집착광공·ㅋㅋ떡대공이다·BL떡대공·1.떡대공·수원 출신·떡대수원·떡대공업무·떡대공 업무·떡대공인데 원래·떡대공이고 줄무늬·꽃수인데 … 그림·무심수다·무심수인. 이름 13개 × 31꼴(한글 음절 앞 2·"원"·"업" 4 → 없음, 집착·공백·괄호·숫자·영문·자모·가운뎃점 앞·" 원래"·"이고 업무"·조사 2 → 찾음, 꽃수 낱말 7개 × 2꼴 → 꽃수만 없음), 꽃수 창 경계(0~5번째 = 뺌, 6·7번째 = 찾음), 표 3개 값 |
+    | bl-f | casting.py AST: 103 함수·상수 6개가 정의·사용 모두 없고 모듈 속성도 없음, "blRole"·"blType" 글자를 쓰는 함수는 `_empty_casting`뿐. PUT·draw·설명 근거는 104 그대로 |
+    | bl-g | 세 파일 `VNEW_BL_LOOK` 주석 줄(settings 2·base 3·템플릿 1)이 모두 주석이고 "캐릭터 설명"·"BL 유형"·"참고 문장"이 있고 "고르"·"역할·유형"이 없음. 배선·렌더는 그대로 |
+    | bl-i | vnew.js에 지운 함수 4개·상수 1개 이름이 없고 vnew.css에 지운 선택자 4개가 없음. 화면 동작은 104 그대로(103 꼴 응답에서도 선택 0) |
+    | bl-j | `app/src` 전체 AST에서 "BadBlType"을 인자로 받는 호출 0, 표 한 줄, `RAW_ERRORS=false` 봉투 문구, 라우트 200 |
+
+  - 확인
+    - `node --check frontend/public/vnew.js` 통과. `python -X utf8 tools/check_vpoc.py` 전부 통과: ok 63줄(bl 그룹 한 줄에 bl-a~l), FAIL·WARN 0(87초).
+    - 바뀐 서버 줄 커버리지(coverage 7.17, `--data-file=%TEMP%\kiro104f_baseline\covf.data`, 104 직후 사본과 difflib): 실행문 15줄 중 15줄(100%). `genre_bl.py` 15/15(파일 전체 100%), `casting.py`·`settings.py`는 바뀐 줄이 주석이라 실행문 0줄(casting.py 파일 전체 99.4%, 못 간 5줄은 이번에 바꾸지 않은 `_sleep`·`_spawn`·`_poll_slot`).
+    - 변형 검사 54개(저장소 밖 `kiro104f_mut.py`. 파이썬 변형은 모듈을 다시 실행하고 바뀐 소스를 임시 트리에도 써서 AST 검사도 보게 했다): 찾기 9, 앞 경계 6(경계 없음·접두어 없음·자모를 음절로·영문 등 모든 글자를 막음·접두어 앞까지 다시 봄·두 글자 앞), 뒤쪽 제외 7(원·업 없음·원·업을 창 전체로·업 없음·꽃수 낱말 없음·꽃수 낱말을 모든 이름에·낱말 하나 빠짐·바로 뒤만), 합치기·그림 우선 회귀 7, 캐스팅 회귀 6, 지운 정의 되살림 8(서버 함수·상수·던지는 곳·화면 선택·화면 함수·화면 상수·CSS 2), 라우트 1, 주석 4(settings·base·템플릿 옛 문구·base 줄 합침), 배선 3, 운영 문구 표 1, 화면 2. 54개 모두 검사 단언으로 잡았고(예외로 잡힌 것 0) 변형 없는 실행은 통과한다.
+    - 성능(저장소 밖): `detect_types` 최악 입력(꽃수 제외 반복 500자) 1회 0.23ms, 부정 반복 0.094ms, 한글 앞 이름 반복 0.12ms, 5,000자 0.015ms.
+    - 줄 끝 LF(바뀐 파일 CR 0, BOM 없음), 공백만 바뀐 줄 0, 새 줄 끝 공백 0, 지운 정의 = 위 목록과 정확히 같음, 저장소 안 새 파일 0. 시각만 바뀐 파일은 `.gitignore` 대상 `__pycache__` 3개와 실행 로그 `.kiro/handoff/logs/104b.log`뿐이다. 수정 금지 파일(`characters.py`·`generate.py`·`config.dev.env`·`config.prod.env`·`.gitlab-ci.yml`·`vpoc/errors.py`)과 `routes.py`는 바뀌지 않았다.
+  - 바꾼 기존 검사 기대값
+    - bl-k "떡대공원": `["ttokdae_gong"]` → `[]`. 이유: Claude 결정 뒤쪽 제외("원"이 바로 뒤 첫 글자).
+    - bl-j 던지는 곳: casting.py 고정 문구 상수 둘 × 4곳 → 0곳. 이유: 던지던 103 함수를 지웠다(승인).
+    - bl-f의 103 함수 동작 12경우와 bl-i의 103 화면 함수 실행은 지운 정의를 직접 불러 뺐다. 그 밖의 기존 검사 기대값(cast-a~m·cf-*·rw-*·ob-*·lr-*·bl-a~e·bl-h·bl-l)은 그대로다.
+  - 3단계 리뷰
+    - 보안: 찾기는 여전히 판정에만 쓰고 모델에 가는 영어는 고정 표 조각뿐이다. 새 정규식은 한 글자 범위 하나이고, 앞 경계·뒤쪽 제외는 `str.find`·`endswith`의 고정 낱말 비교다. 운영 문구 표에 남은 `BadBlType`은 던지는 곳이 없어 사용자에게 보일 일이 없다. 발견·조치: 없음.
+    - 성능: 자리마다 비교가 몇 번 늘었고 최악 입력 0.23ms(설명은 500자 상한). 지운 코드만큼 vnew.js가 3,680바이트 줄었다. 외부 호출·메모리 변화 없음. 발견·조치: 없음.
+    - 운영성: 같은 설명이라도 이번 판정으로 결과가 바뀔 수 있는 꼴은 "한글 음절 + 이름"(예 "개떡대공", "떡대공무심공"의 무심공)과 이름 바로 뒤 "원"·"업", 꽃수 + 자수 낱말뿐이다. 진행 중 뽑기는 시작 때 만든 문장을 쓰므로 영향이 없다. 되돌리기는 그대로 `VNEW_BL_LOOK=false` 한 줄이고, 103 화면 선택으로 되돌리려면 이제 103 이미지로 되돌려야 한다(지운 함수가 없어 설정으로는 안 된다). 발견·조치: 없음.
+  - 남은 이슈(이번)
+    1. 뒤에 한글이 붙으면 이름과 조사를 구별하지 않아 찾는다(G4): "무심수아"(사람 이름)·"꽃수진"도 찾는다. 반대로 "꽃수인데 그림체는 …"처럼 꽃수 뒤 6자 안에 "그림"·"패턴"이 오면 꽃수가 빠진다.
+    2. 앞 경계 때문에 붙여 쓴 두 유형("떡대공무심공")은 앞 유형만 찾는다. "개떡대공"처럼 꾸밈말을 붙여 쓴 꼴도 뺀다.
+    3. 운영 문구 표의 `BadBlType`과 `genre_bl`의 `roles`·`fits`·`list_types`는 이제 앱 코드에서 쓰는 곳이 없다(bl-a만 본다). 지울지는 승인이 필요하다. bl 그룹 안의 103 검사 도우미 `err_of`도 쓰는 곳이 없지만 지운 정의를 부르지 않아 두었다.
+    4. 저장된 `blRole`·`blType`과 `_empty_casting` 기본값은 그대로다(D22).
+    5. 104 남은 이슈 4~6(female 지정 + 유형, 공·수 유형 함께, 먼 부정)은 그대로다.

@@ -11,6 +11,10 @@
   - 인상 분류(얼굴 인상·눈빛·표정·자세·몸가짐): 늘 더한다. look_sentence 가 표정 조각을 이미 지우므로 그림 사실과 부딪치지 않는다.
 - 머리카락·옷·나이·피부색 조각은 두지 않는다(그림이 정한다).
 
+유형의 근거(지시서 104, 2026-10-31): 사용자 지시 "이런 BL 요소는 사용자가 해당 캐릭터에 대한 설명에 떡대공이다 이런 식으로
+넣는다면 그때 반영을 하도록 해라." 그래서 casting 은 사용자가 쓴 캐릭터 설명(char.extraPromptKo)에서 detect_types 로 찾은 유형만
+쓴다(화면에서 고르는 칸은 없다). 유형이 둘이면 merged_pieces 가 조각을 합친다(같은 분류는 앞의 유형이 이긴다).
+
 이 모듈은 순수 함수와 표만 갖는다. 아무것도 저장하지 않고 외부 호출이 없다.
 
 ## 옛 지식에서 옮긴 것
@@ -336,22 +340,129 @@ def look_categories(look_en) -> set[str]:
     return {cat for cat in FORM_CATEGORIES if _CATEGORY_RE[cat].search(text)}
 
 
-def hint_pieces(bl_type, look_en) -> list[str]:
-    """그 유형의 조각(표 순서). 인상 조각은 늘 넣고, 형태 조각은 외모 문장에 같은 형태 분류가 없을 때만 넣는다(그림 우선).
+def hint_pieces(bl_types, look_en) -> list[str]:
+    """그 유형(id 하나 또는 id 목록, 지시서 104)의 조각(표 순서, 여러 유형이면 merged_pieces 순서). 인상 조각은 늘 넣고, 형태 조각은
+    외모 문장에 같은 형태 분류가 없을 때만 넣는다(그림 우선).
 
     형태 조각의 분류 = 단 분류 ∪ 조각 글이 스스로 담은 형태 분류(design D3: "a lean, tall build" 는 그림의 "short stature" 와
     부딪힌다). 모르는 유형이면 [].
     """
-    if not is_type(bl_type):
+    pairs = merged_pieces(bl_types)
+    if not pairs:
         return []
     taken = look_categories(look_en)
     out = []
-    for cat, text in TYPES[bl_type]["lookEn"]:
+    for cat, text in pairs:
         if cat in IMPRESSION_CATEGORIES or not ({cat} | look_categories(text)) & taken:
             out.append(text)
     return out
 
 
-def look_hints(bl_type, look_en) -> str:
+def look_hints(bl_types, look_en) -> str:
     """hint_pieces 를 ", " 로 이은 영어. 모르는 유형이거나 남는 조각이 없으면 ""."""
-    return ", ".join(hint_pieces(bl_type, look_en))
+    return ", ".join(hint_pieces(bl_types, look_en))
+
+
+# --------------------------------------------------------------------------- 캐릭터 설명에서 찾기(지시서 104, design D19·D28~D30)
+#
+# 이름은 표 label 을 "/" 로 나눈 13개다(광공 / 집착공 → 광공·집착공). 붙어 있는 꼴 그대로 찾는다("떡대공이다"·"떡대공, 무심공" 은
+# 찾고 "떡대 공원" 은 찾지 않는다). 뒤에 조사·서술어가 붙어도 된다("무심수다"·"무심수인", 이름 "무심수아" 와 구별하지 않는다 — D30).
+# 앞 경계(104 피드백, D28): 이름 바로 앞 글자가 한글 음절이면 찾지 않는다("형광공장"·"개떡대공"). 글 처음·공백·문장부호·숫자·영문 등
+# 한글 음절이 아닌 글자 뒤에서만 찾는다. 바로 앞이 _PREFIX_OK 낱말로 끝나면 경계로 친다("집착광공" → 광공).
+# 뒤쪽 제외(104 피드백, D29): 이름 바로 뒤 첫 글자가 "원"·"업"이면(공원·수원·공업·수업) 찾지 않는다. 꽃수는 이름 끝 바로 뒤 6자 안에서
+# 자수·무늬 낱말이 시작되면 찾지 않는다("꽃수를 놓은 셔츠", "꽃수 무늬 넥타이").
+# 부정(D19): 이름 끝 바로 뒤 0~5번째 글자(공백 포함 6자)에서 부정 낱말이 시작되면 그 자리는 찾지 않은 것으로 본다("떡대공 아님",
+# "떡대공이 아니라", "떡대공 말고", "떡대공은 절대 아님").
+NEGATIONS = ("아님", "아니", "말고")
+NEGATION_WINDOW = 6
+DETECT_MAX = 2
+_NAME_TO_ID: dict[str, str] = {
+    name.strip(): type_id for type_id, item in TYPES.items() for name in item["label"].split("/") if name.strip()
+}
+_NAME_RE = re.compile("|".join(re.escape(name) for name in sorted(_NAME_TO_ID, key=len, reverse=True)))
+_HANGUL_SYLLABLE = re.compile("[\uac00-\ud7a3]")
+_PREFIX_OK = ("집착",)
+_NEXT_BLOCK = ("원", "업")
+_AFTER_BLOCK: dict[str, tuple[str, ...]] = {"kkotsu": ("놓", "자수", "무늬", "장식", "프린트", "패턴", "그림")}
+
+
+def _starts_within(text: str, end: int, words) -> bool:
+    """이름이 text[:end] 에서 끝날 때, 바로 뒤 0~NEGATION_WINDOW-1 번째 글자에서 words 중 하나가 시작되는가."""
+    return any(text.find(word, end, end + NEGATION_WINDOW - 1 + len(word)) >= 0 for word in words)
+
+
+def _negated(text: str, end: int) -> bool:
+    """이름이 text[:end] 에서 끝날 때, 바로 뒤 NEGATION_WINDOW 자 안에서 부정 낱말이 시작되는가."""
+    return _starts_within(text, end, NEGATIONS)
+
+
+def _front_ok(text: str, start: int) -> bool:
+    """이름이 text[start:] 에서 시작할 때 앞 경계인가: 글 처음, 바로 앞 글자가 한글 음절이 아님, 또는 바로 앞이 _PREFIX_OK 로 끝남."""
+    if start == 0 or not _HANGUL_SYLLABLE.match(text[start - 1]):
+        return True
+    return any(text.endswith(prefix, 0, start) for prefix in _PREFIX_OK)
+
+
+def _excluded_after(text: str, end: int, type_id: str) -> bool:
+    """이름 뒤 때문에 그 자리를 빼는가: 바로 뒤 첫 글자가 _NEXT_BLOCK, 부정, 그 유형의 _AFTER_BLOCK 낱말."""
+    return text[end:end + 1] in _NEXT_BLOCK or _negated(text, end) or _starts_within(text, end, _AFTER_BLOCK.get(type_id, ()))
+
+
+def detect_types(text_ko) -> list[str]:
+    """사용자가 쓴 캐릭터 설명(한국어)에 적힌 유형 id. 나온 자리 순서대로, 중복 없이, 최대 DETECT_MAX 개.
+
+    앞 경계가 아니거나(한글 음절 뒤) 뒤쪽 제외·부정에 걸린 자리는 건너뛴다(같은 유형이 다른 자리에서 다시 나오면 찾는다).
+    역할 낱말(공·수)만 있으면 []. 글이 아니거나 비면 [].
+    """
+    if not isinstance(text_ko, str) or not text_ko:
+        return []
+    found: list[str] = []
+    for match in _NAME_RE.finditer(text_ko):
+        type_id = _NAME_TO_ID[match.group(0)]
+        if not _front_ok(text_ko, match.start()) or _excluded_after(text_ko, match.end(), type_id):
+            continue
+        if type_id not in found:
+            found.append(type_id)
+            if len(found) >= DETECT_MAX:
+                break
+    return found
+
+
+def known_types(bl_types) -> list[str]:
+    """유형 id 하나(글) 또는 id 목록(list·tuple) → 아는 id 만, 순서대로 중복 없이. 그 밖의 값은 []."""
+    if isinstance(bl_types, str):
+        items = [bl_types]
+    elif isinstance(bl_types, (list, tuple)):
+        items = list(bl_types)
+    else:
+        items = []
+    out: list[str] = []
+    for item in items:
+        if is_type(item) and item not in out:
+            out.append(item)
+    return out
+
+
+def _piece_categories(cat: str, text: str) -> set[str]:
+    """조각이 차지하는 분류. 형태 조각은 단 분류 ∪ 글이 스스로 담은 형태 분류(design D3), 인상 조각은 단 분류만."""
+    return {cat} if cat in IMPRESSION_CATEGORIES else {cat} | look_categories(text)
+
+
+def merged_pieces(bl_types) -> list[tuple[str, str]]:
+    """여러 유형의 (분류, 조각)을 합친다(지시서 104, design D20). 유형이 하나면 그 표 그대로다.
+
+    앞 유형의 조각은 표 순서대로 모두 넣는다. 뒤 유형의 조각은 그 분류를 앞 유형이 이미 가졌으면 뺀다(같은 분류는 앞의 유형이
+    이긴다). 판정은 표 기준이다(그림으로 빼기 전) — 앞 유형 조각이 그림 때문에 빠져도 뒤 유형이 그 자리를 채우지 않는다.
+    """
+    out: list[tuple[str, str]] = []
+    claimed: set[str] = set()
+    for type_id in known_types(bl_types):
+        own: set[str] = set()
+        for cat, text in TYPES[type_id]["lookEn"]:
+            cats = _piece_categories(cat, text)
+            if cats & claimed:
+                continue
+            out.append((cat, text))
+            own |= cats
+        claimed |= own
+    return out
