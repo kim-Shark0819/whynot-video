@@ -11852,6 +11852,8 @@ PARITY_ENV_KEYS = [
     "VNEW_3D_TRIPO_YAW_DEG",
     "VNEW_3D_TRIPO_USD",
     "VNEW_3D_SIDE_SWAP",
+    # 지시서 103: BL 역할·유형 참고 외모.
+    "VNEW_BL_LOOK",
 ]
 PARITY_FACE = "fal:bytedance/seedance-2.5/image-to-video"
 PARITY_PARTNER = "fal:bytedance/seedance-2.5/reference-to-video"
@@ -22546,6 +22548,8 @@ def check_vnew_casting() -> None:
             view_j = detail_j.get("casting") or {}
             want_keys = {"enabled", "preset", "presets", "gender", "genderAuto", "lookEn", "lookAuto", "lookEdited", "patternWarning",
                          "status", "error", "slots", "unitUsd", "count", "totalUsd", "candidates", "history", "chosen", "chosenUrl"}
+            # 지시서 103(VNEW_BL_LOOK 기본 켬): 보기 끝에 BL 5개 키가 더해진다. 끔이면 위 19개 그대로다(bl-g).
+            want_keys |= {"blRole", "blType", "blRoles", "blTypes", "blHintsEn"}
             if status != 200 or set(view_j) != want_keys or view_j["totalUsd"] != 0.08 or view_j["unitUsd"] != 0.04 or view_j["count"] != 2 \
                     or view_j["genderAuto"] != "female" or view_j["gender"] != "female" or view_j["status"] != "drawing" \
                     or view_j["presets"] != [{"key": "idol", "label": "아이돌풍"}, {"key": "real", "label": "현실 배우풍"}] \
@@ -30175,6 +30179,1005 @@ def check_vnew_outfit_button() -> None:
             print(f"       ob: {line}")
 
 
+# ---------------------------------------------------------------- 지시서 103 — BL 역할·유형 참고 외모(bl-, 2026-10-31)
+#
+# bl-a: 옛 저장소 BL 모듈 TAGS 10종의 id·label·desc(글자 그대로 옮겨야 한다)와 역할(지시서 「공·수」 묶음). 새 2종은 떡대공·무심공.
+_BL_OLD_TAGS = {
+    "gwanggong": ("광공 / 집착공", "집착 강함, 거칠고 폭력적 면모, 큰 신장·체격"),
+    "tsundere_gong": ("츤데레공", "겉은 차갑고 속은 다정"),
+    "dajeong_gong": ("다정공", "따뜻하고 배려"),
+    "minyu_su": ("미인수", "아름다운 외모의 수"),
+    "kkotsu": ("꽃수", "여성적으로 예쁘고 작은 체격"),
+    "ttokdaesu": ("떡대수", "큰 체격의 수"),
+    "musim_su": ("무심수", "감정 표현이 적음"),
+    "neungryeok_su": ("능력수", "능력이 뛰어나 스스로 해결"),
+    "gullim_su": ("굴림수", "환경이나 공 때문에 어려운 상황"),
+    "yeonha_su": ("연하수", "공보다 연하"),
+}
+_BL_TOP_IDS = ["gwanggong", "tsundere_gong", "dajeong_gong", "ttokdae_gong", "musim_gong"]
+_BL_BOTTOM_IDS = ["minyu_su", "kkotsu", "ttokdaesu", "musim_su", "neungryeok_su", "gullim_su", "yeonha_su"]
+# 영어 금지 낱말: 은어 · 성적·노출 · 폭력 · 미성년 · (그림이 정하는) 머리·옷·나이·피부색.
+_BL_SLANG = re.compile(r"\b(?:gong|su|seme|uke|top|bottom|bl|boys?'?\s*love|yaoi|bara)\b", re.IGNORECASE)
+_BL_ADULT_ONLY = re.compile(
+    r"\b(?:sexy|seductive|sensual|erotic|nude|naked|shirtless|topless|bare|lingerie|cleavage|provocative|lustful|aroused|kiss\w*|"
+    r"bed|intimate|violent|violence|blood\w*|wound\w*|bruis\w*|weapon\w*|knife|gun|injur\w*|threat\w*|menacing|brutal|aggressive|"
+    r"rage|kill\w*|fight\w*|punch\w*|chok\w*|strangl\w*|scars?|scarred|cruel|sadistic|young|youthful|teen\w*|boy\w*|girl\w*|"
+    r"child\w*|kids?|student|school\w*|minor|underage)\b",
+    re.IGNORECASE,
+)
+_BL_NOT_LOOK = re.compile(
+    r"\b(?:hair\w*|bangs|wear|wears|wearing|worn|shirt|suit|jacket|coat|dress|clothes|clothing|outfit|uniform|\d+s|years?|old|aged|age|"
+    r"twenties|thirties|fair|pale|tan|tanned|olive|ivory|porcelain|dark-skinned|light-skinned|skin\s+tone)\b",
+    re.IGNORECASE,
+)
+_BL_MASCULINE = re.compile(r"\b(?:masculine|man|male|men)\b", re.IGNORECASE)
+_BL_LOOK_30S = "a Korean man in his 30s with short black hair"
+_BL_TTOKDAE_SENTENCE = (
+    "He has broad shoulders and a solid, muscular build, a tall frame, a firm square jawline, a rugged, masculine look, deep-set eyes, "
+    "a steady gaze, a calm, confident expression, and an upright, imposing posture."
+)
+# bl-b(103 피드백, Claude 결정): 분류 9종(형태 4 = 겹치면 뺀다, 인상 5 = 늘 더한다). 실제 분석 꼴 6개에 떡대공을 골랐을 때 남는 조각
+# 평균이 이 값 이상이어야 한다.
+_BL_FORM = ("build", "height", "faceShape", "eyeShape")
+_BL_IMPRESSION = ("faceImpression", "gaze", "expression", "posture", "grooming")
+_BL_TTOKDAE_MIN_AVG = 4.0
+_BL_VIEW_KEYS = {"blRole", "blType", "blRoles", "blTypes", "blHintsEn"}
+
+# bl-i: 캐스팅 칸 BL 고르기(node 가짜 DOM). SERVER 는 Python 이 실제 casting.view 로 만든 보기다(_CAST_SCREEN_NODE_HARNESS 그대로).
+_BL_SCREEN_NODE_CASES = r"""
+var evil = "<img src=x onerror=alert(1)>";
+function detailOf(cast, extra) {
+  var d = { id: "ch 1", status: "ready", casting: cast };
+  Object.keys(extra || {}).forEach(function (k) { d[k] = extra[k]; });
+  return d;
+}
+function sel(section, cls) { var w = byClass(section, cls)[0]; return w ? byTag(w, "select")[0] : null; }
+function blView(section) {
+  var row = byClass(section, "vnew-casting-row");
+  var roleWrap = byClass(section, "vnew-casting-bl-role")[0], typeWrap = byClass(section, "vnew-casting-bl-type")[0];
+  var hint = byClass(section, "vnew-casting-bl-hint")[0];
+  var role = sel(section, "vnew-casting-bl-role"), type = sel(section, "vnew-casting-bl-type");
+  return {
+    form: byClass(section, "vnew-casting-form")[0].children.map(function (n) { return n.className; }),
+    row: row.map(function (r) { return r.children.map(function (n) { return n.className; }); }),
+    selects: byTag(section, "select").length,
+    firstSelect: byTag(section, "select")[0].children.map(function (o) { return o.value; }),
+    labels: [roleWrap ? roleWrap.children[0].textContent : null, typeWrap ? typeWrap.children[0].textContent : null],
+    roleOptions: roleWrap ? byTag(roleWrap, "option").map(function (o) { return [o.value, o.textContent]; }) : [],
+    role: role ? [role.value, role.disabled] : null,
+    typeOptions: typeWrap ? byTag(typeWrap, "option").map(function (o) { return [o.value, o.textContent, o.title]; }) : [],
+    type: type ? [type.value, type.disabled, typeWrap.style.display] : null,
+    hint: hint ? [hint.textContent, hint.style.display, hint.className] : null
+  };
+}
+async function run() {
+  var on = SERVER.on.casting;
+  out.pure = {
+    on: [castingBlOn(on), castingBlOn(SERVER.off.casting), castingBlOn(null), castingBlOn({ blRoles: [], blTypes: "x" })],
+    types: ["", "top", "bottom", "reversible", "zz"].map(function (r) {
+      return castingBlTypeOptions(on, r).map(function (o) { return o.value; });
+    }),
+    titles: castingBlTypeOptions(on, "top").map(function (o) { return [o.label, o.title]; }),
+    odd: castingBlTypeOptions({ blTypes: [null, { id: "" }, { id: "x", role: "top" }, { id: "y", role: "bottom", label: "", desc: null }] },
+      "reversible"),
+    noList: castingBlTypeOptions(null, "top"),
+    fits: [castingBlTypeFits(on, "top", "ttokdae_gong"), castingBlTypeFits(on, "bottom", "ttokdae_gong"),
+           castingBlTypeFits(on, "", ""), castingBlTypeFits(on, "", "kkotsu"), castingBlTypeFits(on, "reversible", "kkotsu")],
+    hint: [castingBlHintText({ blHintsEn: "He has a tall frame." }), castingBlHintText({ blHintsEn: "" }), castingBlHintText(null)]
+  };
+  var host = new FakeNode("div");
+  // 켬 · 고른 값 없음 → 역할 바꾸기(공 → 떡대공 → 리버서블 → 수 → 꽃수) → 저장 → 없음 → 뽑기
+  reset();
+  var s1 = castingSection(host, detailOf(on));
+  out.on0 = blView(s1);
+  var role1 = sel(s1, "vnew-casting-bl-role");
+  role1.value = "top"; role1.fire("change");
+  out.onTop = blView(s1);
+  var type1 = sel(s1, "vnew-casting-bl-type");
+  type1.value = "ttokdae_gong"; type1.fire("change");
+  out.onPick = blView(s1);
+  role1.value = "reversible"; role1.fire("change");
+  out.onRev = blView(s1);
+  role1.value = "bottom"; role1.fire("change");
+  out.onBottom = blView(s1);
+  type1.value = "kkotsu"; type1.fire("change");
+  byText(s1, "button", "저장").fire("click"); await tick();
+  out.save = calls.slice();
+  reset();
+  role1.value = "top"; role1.fire("change");
+  type1.value = "ttokdae_gong"; type1.fire("change");
+  confirmAnswers = [true]; byClass(s1, "vnew-casting-draw")[0].fire("click"); await tick();
+  out.drawPick = calls.slice();
+  reset();
+  role1.value = ""; role1.fire("change");
+  out.onNone = blView(s1);
+  confirmAnswers = [true]; byClass(s1, "vnew-casting-draw")[0].fire("click"); await tick();
+  out.drawNone = calls.slice();
+  // 저장된 값(떡대공) + 서버 참고 설명: 보임 → 유형을 바꾸면 숨김 → 되돌리면 다시 보임. 되돌리기 버튼도 BL 을 보낸다.
+  reset();
+  var s2 = castingSection(host, detailOf(SERVER.saved.casting));
+  out.saved = blView(s2);
+  var type2 = sel(s2, "vnew-casting-bl-type");
+  type2.value = ""; type2.fire("change");
+  out.savedChanged = blView(s2).hint;
+  type2.value = "ttokdae_gong"; type2.fire("change");
+  out.savedBack = blView(s2).hint;
+  var role2 = sel(s2, "vnew-casting-bl-role");
+  role2.value = "reversible"; role2.fire("change");
+  out.savedRole = [blView(s2).hint, blView(s2).type];
+  byText(s2, "button", "분석 문장으로 되돌리기").fire("click"); await tick();
+  out.revert = calls.slice();
+  // 저장된 역할만(수, 유형 없음) · 참고 설명 없음(외모 문장이 모든 분류를 말함)
+  out.bottomOnly = blView(castingSection(host, detailOf(SERVER.bottomOnly.casting)));
+  out.noHint = blView(castingSection(host, detailOf(SERVER.noHint.casting)));
+  // 뽑는 중 · 캐릭터를 만드는 중: 두 선택 막힘
+  out.drawing = blView(castingSection(host, detailOf(SERVER.drawing.casting)));
+  out.building = blView(castingSection(host, detailOf(SERVER.saved.casting, { status: "building" })));
+  // 끔(필드 없음): 칸 없음 · 본문에 blRole·blType 없음
+  reset();
+  var s3 = castingSection(host, detailOf(SERVER.off.casting));
+  out.off = blView(s3);
+  byText(s3, "button", "저장").fire("click"); await tick();
+  confirmAnswers = [true]; byClass(s3, "vnew-casting-draw")[0].fire("click"); await tick();
+  out.offCalls = calls.slice();
+  // 위험한 글은 글자 그대로(textContent·속성)
+  var evilCast = JSON.parse(JSON.stringify(on));
+  evilCast.blTypes[0].label = evil; evilCast.blTypes[0].desc = evil; evilCast.blRoles[1].label = evil;
+  evilCast.blHintsEn = evil; evilCast.blRole = "top"; evilCast.blType = evilCast.blTypes[0].id;
+  out.evil = blView(castingSection(host, detailOf(evilCast)));
+  out.innerHTML = innerHTMLUsed;
+  console.log(JSON.stringify(out));
+}
+run().catch(function (e) { console.error((e && e.stack) || String(e)); process.exit(1); });
+"""
+
+
+def check_vnew_bl_look() -> None:
+    """지시서 103 — 실사 캐스팅 외모 문장에 BL 역할·유형 참고 설명(bl-look R1~R6). 외부 호출은 모두 가짜다(fal·Bedrock 0회).
+
+    (bl-a) genre_bl 유형 표: 12종(옛 TAGS 10종 id·label·desc 글자 그대로 + 떡대공·무심공)·역할 묶음·분류 9종(형태 4·인상 5)만·
+           한 유형 350자 이하·금지 낱말(은어·성적·폭력·미성년·머리·옷·나이·색) 0·수 유형 masculine/man·형태 조각은 자기 형태 분류로만
+           읽힘·인상 조각은 형태 분류로 읽히지 않음(모양 사실을 몰래 넣지 않음)·미인수 피부 조각 "a clean, clear complexion"·
+           roles·list_types 모양·fits 표·모듈에 저장·외부 호출 없음·모르는 유형 ""
+    (bl-b) look_categories(형태만)·hint_pieces·look_hints(103 피드백): "slim" → 떡대공 build 빠짐(그림 우선), 형태 4종마다 그 분류 조각만
+           빠짐, 인상 낱말(표정·자세·몸가짐·눈빛·얼굴 인상)이 있어도 아무것도 안 빠짐, design D3(short stature → 무심공 "a lean, tall build"),
+           D4 오탐 막기(thin lips·short black hair·tall boots·frown lines·glasses·warm-toned skin·chin-length·slim-fit·long hair·hooded
+           jacket·piercing eyes·a sharp nose), 같은 명사구 창(long hair, a calm face·a slim build and narrow eyes), 실제 분석 꼴 6개의
+           분류·떡대공·무심공·미인수 조각과 떡대공 평균 ≥ 4
+    (bl-c) 유형 없음 = 지금: 프리셋 3 × 성별 6 × 외모 문장 27개 × 유형 값 6종(없음·""·모르는 값·None·숫자·대문자)에서 cast_prompt =
+           옛 식(프리셋 + 주어 + 외모 + 눈 색, ≤1500), 참고 문장 "", _CAST_IDOL_MALE 원문 + He is …
+    (bl-d) 유형 있음: 떡대공·무심공·미인수 × 프리셋 2 × 성별 4 × 외모 문장 8개 — 참고 문장 붙음·은어 0·금지 낱말 0·"man"·≤1500·
+           문장 = 옛 식 + " " + 참고 문장, unknown·"" → male(프리셋·He is·person→man·their→his), female 지정 → female 유지·"She has",
+           전문 고정값 1개, _hint_sentence 1·2·3조각·They
+    (bl-e) 1500자 상한: PROMPT_MAX 를 줄이면 조각이 끝에서부터 빠지고, 다 빠지면 참고 문장 없이 옛 식 그대로 자름
+    (bl-f) 설정: _apply_settings 16경우(정리·모르는 역할·유형·글 아님·짝 불일치·리버서블·역할 비움·역할만·유형만·깨진 저장값)와 문구,
+           Flask PUT·draw(형식 먼저 400·CostMismatch 보다 먼저·짝은 저장 역할과)·뽑기 문장 끝 참고 문장·로그 bl=
+    (bl-g) VNEW_BL_LOOK 끔: 보기 키 = 지금 19개, 저장값이 있어도 뽑기 문장 = 옛 식, BL 요청 무시(400 없음·저장 없음), 설정 읽기
+           (하위 프로세스 6값)·settings 줄·템플릿·base(되돌리기 주석)·PARITY_ENV_KEYS·오버레이 없음·render dev/prod "true"·+false
+    (bl-h) 보기: 켬 키 = 지금 + 5개, blRoles·blTypes 값, 깨진 저장값 "", blHintsEn = 뽑기 문장 끝, 고친 외모 문장·lookEdited 그대로,
+           auto_look·current_look 은 BL 과 무관, generate.py 는 BL 을 읽지 않음
+    (bl-i) 화면(node 가짜 DOM, 실제 view 응답): 순수 함수 5개, 역할 바꾸면 유형 목록·title·맞지 않는 유형 비움·없음이면 유형 칸 숨김,
+           미리보기 줄 보임·숨김·바꾸면 숨김, 저장·뽑기·되돌리기 본문 blRole·blType(lookEn 규칙 그대로), 잠금 2종, 끔이면 칸 없음·본문
+           그대로, 위험한 글 글자 그대로·innerHTML 0, 화면 본문 → 실제 라우트 → 저장 → 보기, CSS, node --check
+    (bl-j) 운영 문구(103 피드백): USER_FACING_KINDS 에 BadBlType 한 줄, 던지는 곳 4곳이 모두 casting.py 고정 문구 상수 둘,
+           RAW_ERRORS=false 봉투·실제 라우트(모르는 역할·유형·짝 불일치)가 고정 문구 그대로·type BadBlType
+    """
+    sys.path.insert(0, str(ROOT / "app"))
+    import ast as _ast  # noqa: PLC0415
+    import importlib.util as _ilu  # noqa: PLC0415
+    import inspect as _inspect  # noqa: PLC0415
+    import json as _json  # noqa: PLC0415
+    import traceback as _tb  # noqa: PLC0415
+
+    from flask import Flask  # noqa: PLC0415
+
+    from src import vnew  # noqa: PLC0415
+    from src.vnew import casting as castmod  # noqa: PLC0415
+    from src.vnew import characters as charmod  # noqa: PLC0415
+    from src.vnew import generate as genmod  # noqa: PLC0415
+    from src.vnew import genre_bl as blmod  # noqa: PLC0415
+    from src.vnew import settings as vset  # noqa: PLC0415
+    from src.vpoc import fal as vpoc_fal  # noqa: PLC0415
+    from src.vpoc import settings as vpoc_settings  # noqa: PLC0415
+    from src.vpoc.errors import VpocError, now_iso  # noqa: PLC0415
+
+    bad: list[str] = []
+    seen: set[str] = set()
+    report: list[str] = []
+    owner = "tester"
+    fake_store = _FakeCharStore()
+    stray: list[str] = []
+    spawned: list[tuple] = []
+    saved = {
+        "STORE": charmod.STORE, "cast_fal": castmod._fal_request, "cast_fetch": castmod._fetch_url,  # noqa: SLF001
+        "cast_spawn": castmod._spawn, "char_fal": charmod._fal_request, "vpoc_request": vpoc_fal._request,  # noqa: SLF001
+        "fal_key": vpoc_settings.FAL_KEY, "prompt_max": castmod.PROMPT_MAX,
+    }
+
+    def stray_call(name):
+        def blocked(*_a, **_k):
+            stray.append(name)
+            raise RuntimeError(f"쓰면 안 되는 호출: {name}")
+        return blocked
+
+    def err_of(func) -> str:
+        try:
+            func()
+        except VpocError as exc:
+            return f"{exc.status}:{exc.kind}:{exc.message}"
+        return ""
+
+    def old_prompt(look, preset, gender) -> str:
+        """이 기능 전 cast_prompt 본문(design §1)을 그대로 다시 쓴 기준 식."""
+        g = castmod._gender(gender)  # noqa: SLF001
+        words = castmod._WORDS[g]  # noqa: SLF001
+        text_look = castmod.prompt_look(look, g) or f"a Korean {words['noun']}"
+        return f"{castmod.base_text(preset, g)} {words['subj']} {text_look}, with dark brown eyes."[:1500]
+
+    analysis = {
+        "nameGuess": "준", "descriptionKo": "30대 남성.", "appearanceEn": "A Korean man in his thirties with short black hair.",
+        "styleEn": "Thin lines.", "baseOutfitEn": "", "outfitEn": "", "outfitLayersEn": [], "altOutfitsEn": [],
+        "expressionsKo": [], "extraEn": "", "model": "m", "genderEn": "male",
+    }
+
+    def seed_char(cid, *, casting=None, analysis_=None):
+        char = charmod.new_char("준")
+        char["id"] = cid
+        char["analysis"] = dict(analysis) if analysis_ is None else analysis_
+        char["version"] = 1
+        char["status"] = "ready"
+        if casting is not None:
+            char["casting"] = casting
+        charmod.save_char(owner, cid, char)
+        return char
+
+    def load_c(cid):
+        return charmod.load_char(owner, cid)[0]
+
+    logs = _LogCapture()
+    try:
+        charmod.STORE = fake_store
+        castmod._fal_request = stray_call("casting._fal_request")  # noqa: SLF001
+        castmod._fetch_url = stray_call("casting._fetch_url")  # noqa: SLF001
+        castmod._spawn = lambda o, c, t: spawned.append((o, c, t))  # noqa: SLF001
+        charmod._fal_request = stray_call("characters._fal_request")  # noqa: SLF001
+        vpoc_fal._request = stray_call("vpoc.fal._request")  # noqa: SLF001
+        vpoc_settings.FAL_KEY = "test-fal-key"
+        with _guard_real_llm() as real_calls, logs, _pin_vnew(VNEW_CASTING=True, VNEW_BL_LOOK=True, VNEW_CASTING_COUNT=2,
+                                                             VNEW_CASTING_USD=0.04):
+            # ================= (bl-a) 유형 표 =================
+            types = blmod.TYPES
+            if list(types) != ["gwanggong", "tsundere_gong", "dajeong_gong", "ttokdae_gong", "musim_gong"] + _BL_BOTTOM_IDS:
+                bad.append(f"(bl-a) 유형 id·순서가 다릅니다: {list(types)}")
+            for type_id, (label, desc) in _BL_OLD_TAGS.items():
+                if (types.get(type_id) or {}).get("label") != label or (types.get(type_id) or {}).get("desc") != desc:
+                    bad.append(f"(bl-a) 옛 TAGS {type_id} 의 label·desc 가 글자 그대로가 아닙니다")
+            if [types[t]["label"] for t in ("ttokdae_gong", "musim_gong")] != ["떡대공", "무심공"] \
+                    or not all(re.search(r"[가-힣]", types[t]["desc"]) for t in ("ttokdae_gong", "musim_gong")):
+                bad.append("(bl-a) 새 유형 떡대공·무심공의 label·desc 가 다릅니다")
+            if [t for t in types if types[t]["role"] == "top"] != _BL_TOP_IDS \
+                    or [t for t in types if types[t]["role"] == "bottom"] != _BL_BOTTOM_IDS:
+                bad.append("(bl-a) 공·수 묶음이 지시서와 다릅니다")
+            if blmod.ROLES != ("", "top", "bottom", "reversible") or blmod.roles() != [
+                    {"key": "", "label": "없음"}, {"key": "top", "label": "공"}, {"key": "bottom", "label": "수"},
+                    {"key": "reversible", "label": "리버서블"}]:
+                bad.append(f"(bl-a) 역할 표가 다릅니다: {blmod.roles()}")
+            pieces_n = 0
+            for type_id, item in types.items():
+                pairs = item["lookEn"]
+                joined = ", ".join(text for _c, text in pairs)
+                pieces_n += len(pairs)
+                if set(item) != {"role", "label", "desc", "lookEn"} or not pairs:
+                    bad.append(f"(bl-a) {type_id} 키·조각이 다릅니다: {sorted(item)}")
+                if any(cat not in blmod.CATEGORIES for cat, _t in pairs) or len(joined) > 350 or blmod.LOOK_EN_MAX != 350:
+                    bad.append(f"(bl-a) {type_id} 분류가 9종 밖이거나 {len(joined)}자(>350)입니다")
+                for cat, text in pairs:
+                    found = [rx.pattern[:20] for rx in (_BL_SLANG, _BL_ADULT_ONLY, _BL_NOT_LOOK) if rx.search(text)]
+                    if found or re.search(rf"\b{castmod._COLOR_RE}\b", text, re.IGNORECASE) or re.search(r"[가-힣]", text) \
+                            or text != text.strip() or not re.match(r"^(?:a|an)\s|^[a-z]", text):  # noqa: SLF001
+                        bad.append(f"(bl-a) {type_id} 조각에 금지 낱말·색·한글·모양 문제: {text!r} {found}")
+                    own = blmod.look_categories(text)
+                    # 형태 조각: 자기 분류로 읽혀야 외모 문장에 같은 글이 있을 때 겹친다. 둘 이상이면 체격·키 묶음("a lean, tall build")만.
+                    if cat in _BL_FORM and (cat not in own or (own - {cat} and own != {"build", "height"})):
+                        bad.append(f"(bl-a) {type_id} 형태 조각이 자기 분류({cat})로만 읽히지 않습니다: {text!r} {sorted(own)}")
+                    # 인상 조각: 늘 더하므로 모양 사실이 없어야 한다(그림과 부딪칠 수 있는 글을 몰래 넣지 않는다).
+                    if cat in _BL_IMPRESSION and own:
+                        bad.append(f"(bl-a) {type_id} 인상 조각이 형태 분류 {sorted(own)} 로 읽힙니다: {text!r}")
+                if item["role"] == "bottom" and not _BL_MASCULINE.search(joined):
+                    bad.append(f"(bl-a) 수 유형 {type_id} 에 masculine·man 계열 낱말이 없습니다")
+            if any(not re.search(r"\bmasculine\b", ", ".join(t for _c, t in types[k]["lookEn"])) for k in ("minyu_su", "kkotsu")):
+                bad.append("(bl-a) 미인수·꽃수에 masculine 이 없습니다")
+            if (blmod.FORM_CATEGORIES, blmod.IMPRESSION_CATEGORIES, blmod.CATEGORIES) != (_BL_FORM, _BL_IMPRESSION, _BL_FORM + _BL_IMPRESSION) \
+                    or any(cat not in blmod.CATEGORIES for v in types.values() for cat, _t in v["lookEn"]):
+                bad.append(f"(bl-a) 분류 표가 형태 4·인상 5 가 아닙니다: {blmod.CATEGORIES}")
+            # 103 피드백: 미인수 피부 조각은 현실 배우풍 프리셋의 피부 결 문구와 부딪치지 않는 낱말이다.
+            if ("faceImpression", "a clean, clear complexion") not in types["minyu_su"]["lookEn"] \
+                    or any("smooth skin" in t or "clear, smooth" in t for v in types.values() for _c, t in v["lookEn"]):
+                bad.append("(bl-a) 미인수 피부 조각이 'a clean, clear complexion' 이 아닙니다")
+            # 섞인 조각을 나눴다(떡대공 눈 모양 + 눈빛, 미인수 속눈썹·눈은 눈 모양 하나).
+            if ("eyeShape", "deep-set eyes") not in types["ttokdae_gong"]["lookEn"] \
+                    or ("gaze", "a steady gaze") not in types["ttokdae_gong"]["lookEn"] \
+                    or ("eyeShape", "long lashes and clear eyes") not in types["minyu_su"]["lookEn"]:
+                bad.append("(bl-a) 떡대공 눈 조각이 눈 모양·눈빛 둘로 나뉘지 않았거나 미인수 눈 모양 조각이 다릅니다")
+            want_list = [{"id": k, "role": v["role"], "label": v["label"], "desc": v["desc"],
+                          "lookEn": ", ".join(t for _c, t in v["lookEn"])} for k, v in types.items()]
+            if blmod.list_types() != want_list or blmod.list_types() is blmod.list_types():
+                bad.append("(bl-a) list_types 모양이 다릅니다")
+            fits_got = [blmod.fits(t, r) for t, r in (("", ""), ("", "top"), ("ttokdae_gong", "top"), ("ttokdae_gong", "bottom"),
+                                                      ("ttokdae_gong", "reversible"), ("kkotsu", "reversible"), ("kkotsu", ""),
+                                                      ("zz", "reversible"), (None, "top"), ("kkotsu", "bottom"), ("kkotsu", 5))]
+            if fits_got != [True, True, True, False, True, True, False, False, False, True, False] \
+                    or [blmod.is_type(v) for v in ("musim_gong", "MUSIM_GONG", "", None, 3)] != [True, False, False, False, False]:
+                bad.append(f"(bl-a) fits·is_type 가 다릅니다: {fits_got}")
+            if [blmod.look_hints(v, "x") for v in ("zz", None, 7, "")] != ["", "", "", ""] or blmod.hint_pieces("zz", "x") != [] \
+                    or blmod.look_categories(None) != set() or blmod.look_categories(42) != set():
+                bad.append("(bl-a) 모르는 유형·글 아닌 외모 문장이 \"\"·빈 집합이 아닙니다")
+            bl_src = (APP_SRC / "vnew" / "genre_bl.py").read_text(encoding="utf-8")
+            bl_tree = _ast.parse(bl_src)
+            imports = sorted({alias.name for node in _ast.walk(bl_tree) if isinstance(node, (_ast.Import, _ast.ImportFrom))
+                              for alias in node.names} | {node.module for node in _ast.walk(bl_tree)
+                                                          if isinstance(node, _ast.ImportFrom) and node.module})
+            if imports != ["__future__", "annotations", "re"] or re.search(r"\bopen\(|STORE|boto|urllib|requests|write_json", bl_src) \
+                    or "scene_video" in bl_src:
+                bad.append(f"(bl-a) genre_bl 이 저장·외부 호출을 하거나 옛 식별자를 씁니다: {imports}")
+            report.append(f"bl-a: 유형 {len(types)}종·조각 {pieces_n}개 · 한 유형 최장 "
+                          f"{max(len(', '.join(t for _c, t in v['lookEn'])) for v in types.values())}자 · 금지 낱말 0")
+            seen.add("bl-a")
+
+            # ================= (bl-b) 분류 판정·그림 우선 =================
+            hp = blmod.hint_pieces
+            ttok = [t for _c, t in types["ttokdae_gong"]["lookEn"]]
+            if hp("ttokdae_gong", "a slim Korean man") != ttok[1:] \
+                    or blmod.look_hints("ttokdae_gong", "a slim Korean man") != ", ".join(ttok[1:]):
+                bad.append(f"(bl-b) 외모 문장의 slim 이 떡대공 build 조각을 빼지 않습니다: {hp('ttokdae_gong', 'a slim Korean man')}")
+            per_cat = {
+                "build": "a Korean man with a stocky build", "height": "a tall Korean man",
+                "faceShape": "a Korean man with an angular face", "eyeShape": "a Korean man with narrow eyes",
+            }
+
+            def keep_form(cat_taken: set, cat: str, piece: str) -> bool:
+                return cat in _BL_IMPRESSION or not (({cat} | blmod.look_categories(piece)) & cat_taken)
+
+            for cat, look in per_cat.items():
+                if blmod.look_categories(look) != {cat}:
+                    bad.append(f"(bl-b) {look!r} 의 분류가 {{{cat}}} 가 아닙니다: {blmod.look_categories(look)}")
+                for type_id, item in types.items():
+                    want = [t for c, t in item["lookEn"] if keep_form({cat}, c, t)]
+                    if hp(type_id, look) != want:
+                        bad.append(f"(bl-b) {type_id} + {cat} 외모: {hp(type_id, look)} != {want}")
+            # 인상 낱말은 판정하지 않는다: 표정·자세·몸가짐·눈빛·얼굴 인상이 외모 문장에 있어도 조각이 하나도 빠지지 않는다.
+            impression_looks = [
+                "a Korean man with a stern expression", "a Korean man with a slouched posture", "a Korean man with a neat beard",
+                "a Korean man with piercing eyes and an intense gaze", "a Korean man with a cool, handsome face",
+                "a Korean man with clear skin", "a Korean man with a calm, unreadable face", "a Korean man, clean-shaven, tousled",
+            ]
+            for look in impression_looks:
+                if blmod.look_categories(look) != set() or any(hp(t, look) != [x for _c, x in v["lookEn"]] for t, v in types.items()):
+                    bad.append(f"(bl-b) 인상 낱말 외모 {look!r} 가 조각을 뺍니다: {sorted(blmod.look_categories(look))}")
+            musim = [t for _c, t in types["musim_gong"]["lookEn"]]
+            mi = [t for _c, t in types["minyu_su"]["lookEn"]]
+            gw = [t for _c, t in types["gwanggong"]["lookEn"]]
+            ts = [t for _c, t in types["tsundere_gong"]["lookEn"]]
+
+            def without(pieces: list, *drop: str) -> list:
+                return [p for p in pieces if p not in drop]
+
+            concrete = [
+                (("musim_gong", "a Korean man of short stature"), musim[1:]),  # D3: "a lean, tall build" 는 키도 말한다
+                (("musim_gong", "a short, slim Korean man"), musim[1:]),
+                (("minyu_su", "a Korean man with an angular face"), mi),  # 미인수 얼굴 조각은 모두 인상이다
+                (("minyu_su", "a Korean man with large doe eyes"), without(mi, "long lashes and clear eyes")),
+                (("gwanggong", "a Korean man with tall boots and a long coat"), gw),
+                (("ttokdae_gong", "a Korean man with thin lips and short black hair"), ttok),
+                (("ttokdae_gong", "a Korean man with a slender angular face, short hair, a man"), without(ttok, "a firm square jawline")),
+                (("ttokdae_gong", "a Korean man with frown lines, thin black-rimmed round glasses"), ttok),
+                (("ttokdae_gong", "a Korean man with pale warm-toned skin, chin-length hair, slim-fit trousers"), ttok),
+                (("ttokdae_gong", "a Korean man, his hair is short, a very short crew cut"), ttok),
+                (("ttokdae_gong", "He is short"), without(ttok, "a tall frame")),
+                (("ttokdae_gong", "a tall, muscular Korean man with an angular clean-shaven face, narrow half-lidded eyes"),
+                 without(ttok, ttok[0], "a tall frame", "a firm square jawline", "deep-set eyes")),
+                (("ttokdae_gong", "a Korean man with narrow shoulders"), ttok[1:]),
+                (("ttokdae_gong", "a Korean man with long hair, a calm face, a sharp nose, piercing eyes"), ttok),
+                (("ttokdae_gong", "a Korean man in a hooded jacket with high cheekbones"), without(ttok, "a firm square jawline")),
+                (("ttokdae_gong", "a slim build and narrow eyes"), without(ttok, ttok[0], "deep-set eyes")),
+                (("ttokdae_gong", "a slim build and a calm face"), ttok[1:]),
+                (("tsundere_gong", "a Korean man with almond-shaped eyes and a square-jawed face"),
+                 without(ts, "well-defined features", "sharp eyes")),
+                (("ttokdae_gong", ""), ttok),
+            ]
+            for (type_id, look), want in concrete:
+                if hp(type_id, look) != want:
+                    bad.append(f"(bl-b) {type_id} + {look!r}: {hp(type_id, look)} != {want}")
+            # 실제 분석 꼴(cast-b 결과 문장, 캐스팅 문장에 들어가는 prompt_look 그대로): 형태 분류와 떡대공·무심공·미인수 조각
+            ttok_imp = [t for c, t in types["ttokdae_gong"]["lookEn"] if c in _BL_IMPRESSION]
+            musim_imp = [t for c, t in types["musim_gong"]["lookEn"] if c in _BL_IMPRESSION]
+            mi_imp = [t for c, t in types["minyu_su"]["lookEn"] if c in _BL_IMPRESSION]
+            all_form = {"build", "height", "faceShape", "eyeShape"}
+            real_want = {
+                "m1": ({"build", "faceShape"}, without(ttok, ttok[0], "a firm square jawline"),
+                       without(musim, "a lean, tall build", "sharply defined features"), without(mi, mi[0])),
+                "m2": (all_form, ttok_imp, musim_imp, mi_imp),
+                "m3": (all_form, ttok_imp, musim_imp, mi_imp),
+                "f1": (all_form, ttok_imp, musim_imp, mi_imp),
+                "u1": ({"build", "faceShape", "height"}, without(ttok, ttok[0], "a tall frame", "a firm square jawline"),
+                       without(musim, "a lean, tall build", "sharply defined features"), without(mi, mi[0])),
+                "m4": ({"faceShape", "eyeShape"}, without(ttok, "a firm square jawline", "deep-set eyes"),
+                       without(musim, "sharply defined features", "half-lidded eyes"), without(mi, "long lashes and clear eyes")),
+            }
+            counts: dict[str, list[int]] = {"ttokdae_gong": [], "musim_gong": [], "minyu_su": []}
+            for name, (cats, want_t, want_s, want_m) in real_want.items():
+                app_en, _desc, gender_b = _CAST_LOOK_FEEDBACK[name][:3]
+                look = castmod.prompt_look(_CAST_LOOK_FEEDBACK[name][4], gender_b)
+                got = (blmod.look_categories(look), hp("ttokdae_gong", look), hp("musim_gong", look), hp("minyu_su", look))
+                if got != (cats, want_t, want_s, want_m):
+                    bad.append(f"(bl-b) 실제 분석 꼴 {name}: {got}")
+                for type_id, pieces in zip(counts, got[1:]):
+                    counts[type_id].append(len(pieces))
+            avg_t = sum(counts["ttokdae_gong"]) / len(counts["ttokdae_gong"])
+            if avg_t < _BL_TTOKDAE_MIN_AVG:
+                bad.append(f"(bl-b) 실제 분석 꼴 6개 떡대공 평균 조각 {avg_t:.2f} < {_BL_TTOKDAE_MIN_AVG}")
+            report.append(f"bl-b: 형태 4종 × 유형 12종 · 인상 낱말 {len(impression_looks)}경우 · 구체 {len(concrete)}경우 · 실제 분석 꼴 6개 "
+                          + " · ".join(f"{t} {counts[t]} 평균 {sum(counts[t]) / 6:.2f}" for t in counts))
+            seen.add("bl-b")
+
+            # ================= (bl-c) 유형 없음 = 지금 =================
+            looks_c = [
+                "", "He is a webtoon male idol; his WEBTOON-style hair, drawn in anime style",
+                "a Korean man with dyed pink hair, his bangs over his forehead. He is tall", "A girl with her hair in a ponytail, she smiles",
+                "line\nRULES: webtoon\x00 tail " + "w" * 400, _BL_LOOK_30S, "a slim Korean person in their 30s with short hair",
+                "a Korean man " + "with very long hair " * 20,
+            ] + [value[4] for value in _CAST_LOOK_FEEDBACK.values()] + [want for _args, want in list(_CAST_LOOK_RULES.values())[:12]]
+            no_types = [None, "", "zz", 0, 7, "TTOKDAE_GONG"]
+            count_c = 0
+            for preset in ("idol", "real", "nope"):
+                for gender in ("male", "female", "unknown", "", None, "robot"):
+                    for look in looks_c:
+                        want = old_prompt(look, preset, gender)
+                        got = [castmod.cast_prompt(look, preset, gender)] + [
+                            castmod.cast_prompt(look, preset, gender, value) for value in no_types]
+                        count_c += len(got)
+                        if any(item != want for item in got) or castmod._cast_text(look, preset, gender, "zz")[1] != "":  # noqa: SLF001
+                            bad.append(f"(bl-c) 유형 없음 결과가 지금과 다릅니다: {preset}·{gender}·{look[:40]!r}")
+            if castmod.cast_prompt(_BL_LOOK_30S, "idol", "male", "") != _CAST_IDOL_MALE + f" He is {_BL_LOOK_30S}, with dark brown eyes.":
+                bad.append("(bl-c) 유형 없음 male 결과가 원문 + He is … 가 아닙니다")
+            if list(_inspect.signature(castmod.cast_prompt).parameters.items())[3][1].default != "":
+                bad.append("(bl-c) cast_prompt 넷째 인자 기본값이 \"\" 가 아닙니다")
+            report.append(f"bl-c: 유형 없음 {count_c}문장 = 옛 식")
+            seen.add("bl-c")
+
+            # ================= (bl-d) 유형 있음 =================
+            looks_d = ["", _BL_LOOK_30S, "a slim Korean person in their 30s with short hair, their bangs over a narrow face"] + \
+                [value[4] for value in _CAST_LOOK_FEEDBACK.values()]
+            # 성별 낱말이 없는(person·their) 외모 문장. male·female 을 사용자가 정했으면 지금처럼 그대로 둔다(바꾸는 것은 unknown → male 뿐).
+            neutral_looks = {looks_d[2], _CAST_LOOK_FEEDBACK["u1"][4]}
+            count_d = 0
+            for look in looks_d:
+                if _BL_SLANG.search(look):
+                    bad.append(f"(bl-d) 시험 외모 문장에 은어가 있습니다(시험 준비 오류): {look!r}")
+            for type_id in ("ttokdae_gong", "musim_gong", "minyu_su"):
+                for preset in ("idol", "real"):
+                    for gender in ("male", "unknown", "", "female"):
+                        for look in looks_d:
+                            text, sentence = castmod._cast_text(look, preset, gender, type_id)  # noqa: SLF001
+                            count_d += 1
+                            g_eff = "female" if gender == "female" else "male"
+                            forced = gender in ("unknown", "")
+                            base_look = castmod.prompt_look(look, g_eff)
+                            if forced:
+                                base_look = castmod._sub_words(base_look, castmod._NEUTRAL_TO_MALE)  # noqa: SLF001
+                            base_look = base_look or f"a Korean {castmod._WORDS[g_eff]['noun']}"  # noqa: SLF001
+                            head = f"{castmod.base_text(preset, g_eff)} {castmod._WORDS[g_eff]['subj']} {base_look}, with dark brown eyes."  # noqa: SLF001
+                            pieces = hp(type_id, base_look)
+                            problems = []
+                            if castmod.cast_prompt(look, preset, gender, type_id) != text:
+                                problems.append("cast_prompt != _cast_text")
+                            if not pieces or not sentence or text != f"{head} {sentence}":
+                                problems.append(f"문장 = 옛 식 + 참고 문장이 아님 {text[-160:]!r}")
+                            if sentence and not sentence.startswith("She has " if g_eff == "female" else "He has "):
+                                problems.append(f"참고 문장 주어 {sentence[:12]!r}")
+                            if sentence and sentence != castmod._hint_sentence(pieces, g_eff):  # noqa: SLF001
+                                problems.append("참고 문장이 조각과 다름")
+                            if _BL_SLANG.search(text) or _BL_ADULT_ONLY.search(sentence) or len(text) > 1500 or "\n" in text:
+                                problems.append(f"은어·금지 낱말·길이 {len(text)}")
+                            gendered = forced or look not in neutral_looks
+                            tail = text[len(castmod.base_text(preset, g_eff)):]  # 아이돌풍 프리셋은 "a real person" 을 담는다
+                            if g_eff == "male" and gendered and (not re.search(r"\bman\b", text)
+                                                                 or re.search(r"\b(?:person|their|They)\b", tail)):
+                                problems.append("male 낱말이 아님")
+                            if g_eff == "female" and (" He is " in text or (gendered and not re.search(r"\bwoman\b", text))):
+                                problems.append("female 이 유지되지 않음")
+                            if problems:
+                                bad.append(f"(bl-d) {type_id}·{preset}·{gender!r}·{look[:30]!r}: {problems}")
+            full = castmod.cast_prompt(_BL_LOOK_30S, "idol", "male", "ttokdae_gong")
+            if full != _CAST_IDOL_MALE + f" He is {_BL_LOOK_30S}, with dark brown eyes. " + _BL_TTOKDAE_SENTENCE \
+                    or castmod.cast_prompt(_BL_LOOK_30S, "idol", "unknown", "ttokdae_gong") != full:
+                bad.append(f"(bl-d) 떡대공 전문이 고정값과 다릅니다: {full[-260:]!r}")
+            unknown_look = castmod.cast_prompt(_CAST_LOOK_FEEDBACK["u1"][4], "real", "unknown", "musim_gong")
+            if " He is a slim Korean man in his 30s with short dyed ash-gray hair" not in unknown_look \
+                    or not unknown_look.startswith(castmod.base_text("real", "male")):
+                bad.append(f"(bl-d) unknown 외모 문장의 person·their 가 male 낱말로 바뀌지 않았습니다: {unknown_look[500:640]!r}")
+            sentences = [castmod._hint_sentence(p, g) for p, g in (  # noqa: SLF001
+                (["a tall frame"], "male"), (["a tall frame", "neat grooming"], "female"), (["a", "b", "c"], "male"),
+                (["a tall frame"], "unknown"), (["a tall frame"], None))]
+            if sentences != ["He has a tall frame.", "She has a tall frame and neat grooming.", "He has a, b, and c.",
+                             "They have a tall frame.", "They have a tall frame."]:
+                bad.append(f"(bl-d) _hint_sentence 꼴이 다릅니다: {sentences}")
+            report.append(f"bl-d: 유형 있음 {count_d}문장 · 떡대공 전문 {len(full)}자")
+            seen.add("bl-d")
+
+            # ================= (bl-e) 1500자 상한 =================
+            head_len = len(old_prompt(_BL_LOOK_30S, "idol", "male"))
+            try:
+                castmod.PROMPT_MAX = head_len + 1 + len(_BL_TTOKDAE_SENTENCE) - 1
+                one_less = castmod._cast_text(_BL_LOOK_30S, "idol", "male", "ttokdae_gong")  # noqa: SLF001
+                castmod.PROMPT_MAX = head_len + 1 + len("He has broad shoulders and a solid, muscular build.")
+                only_one = castmod._cast_text(_BL_LOOK_30S, "idol", "male", "ttokdae_gong")  # noqa: SLF001
+                castmod.PROMPT_MAX = head_len + 20
+                none_fit = castmod._cast_text(_BL_LOOK_30S, "idol", "male", "ttokdae_gong")  # noqa: SLF001
+                castmod.PROMPT_MAX = head_len - 30
+                cut = castmod._cast_text(_BL_LOOK_30S, "idol", "male", "ttokdae_gong")  # noqa: SLF001
+            finally:
+                castmod.PROMPT_MAX = saved["prompt_max"]
+            want_one_less = "He has " + ", ".join(ttok[:-2]) + ", and " + ttok[-2] + "."
+            if one_less[1] != want_one_less or len(one_less[0]) > head_len + 1 + len(_BL_TTOKDAE_SENTENCE) - 1 \
+                    or only_one[1] != "He has broad shoulders and a solid, muscular build." \
+                    or none_fit != (old_prompt(_BL_LOOK_30S, "idol", "male"), "") \
+                    or cut != (old_prompt(_BL_LOOK_30S, "idol", "male")[:head_len - 30], ""):
+                bad.append(f"(bl-e) 상한 넘침 처리가 다릅니다: {one_less[1]!r} {only_one[1]!r} {none_fit[1]!r} {len(cut[0])}")
+            if castmod.PROMPT_MAX != 1500:
+                bad.append("(bl-e) PROMPT_MAX 가 1500 으로 돌아오지 않았습니다")
+            seen.add("bl-e")
+
+            # ================= (bl-f) 설정 저장·라우트·뽑기 =================
+            role_msg = type_msg = castmod._MSG_BAD_BL  # noqa: SLF001 — 103 피드백: 모르는 역할·유형은 한 문구
+            pair_msg = castmod._MSG_BL_MISMATCH  # noqa: SLF001
+            if (role_msg, pair_msg) != ("알 수 없는 BL 역할·유형입니다.",
+                                        "BL 유형이 역할과 맞지 않습니다(공 유형은 공·리버서블, 수 유형은 수·리버서블에서 고릅니다)."):
+                bad.append(f"(bl-f) BadBlType 문구가 다릅니다: {role_msg!r} {pair_msg!r}")
+
+            def apply(stored, role=None, btype=None):
+                cast = dict(stored)
+                err = err_of(lambda: castmod._apply_settings(cast, None, None, None, "check.bl", bl_role=role, bl_type=btype))  # noqa: SLF001
+                return err or (cast.get("blRole"), cast.get("blType"))
+
+            empty = {"blRole": "", "blType": ""}
+            top_t = {"blRole": "top", "blType": "ttokdae_gong"}
+            cases_f = [
+                ((empty, "top", "ttokdae_gong"), ("top", "ttokdae_gong")),
+                ((empty, " TOP ", " TtokDae_Gong "), ("top", "ttokdae_gong")),
+                ((empty, "zz", None), f"400:BadBlType:{role_msg}"),
+                ((empty, 1, None), f"400:BadBlType:{role_msg}"),
+                ((empty, None, "zz"), f"400:BadBlType:{type_msg}"),
+                ((empty, None, ["kkotsu"]), f"400:BadBlType:{type_msg}"),
+                ((empty, "top", "kkotsu"), f"400:BadBlType:{pair_msg}"),
+                ((empty, "reversible", "kkotsu"), ("reversible", "kkotsu")),
+                ((empty, "reversible", "gwanggong"), ("reversible", "gwanggong")),
+                ((top_t, "", None), ("", "")),
+                ((top_t, "", "ttokdae_gong"), f"400:BadBlType:{pair_msg}"),
+                ((top_t, "bottom", None), ("bottom", "")),
+                ((top_t, "reversible", None), ("reversible", "ttokdae_gong")),
+                ((top_t, None, "musim_gong"), ("top", "musim_gong")),
+                ((top_t, None, "kkotsu"), f"400:BadBlType:{pair_msg}"),
+                ((empty, None, "kkotsu"), f"400:BadBlType:{pair_msg}"),
+                ((top_t, None, ""), ("top", "")),
+                ((top_t, None, None), ("top", "ttokdae_gong")),
+                (({"blRole": 5, "blType": ["x"]}, "top", None), ("top", "")),
+                (({"blRole": "zz", "blType": "kkotsu"}, None, "kkotsu"), f"400:BadBlType:{pair_msg}"),
+            ]
+            for (stored, role, btype), want in cases_f:
+                if apply(stored, role, btype) != want:
+                    bad.append(f"(bl-f) _apply_settings {stored}·{role!r}·{btype!r}: {apply(stored, role, btype)} != {want}")
+            # 라우트(Flask, 실제 vnew 블루프린트 + 메모리 저장소)
+            app = Flask("bl_f")
+            app.register_blueprint(vnew.create_blueprint(vnew.VnewDependencies(require_auth=lambda handler: handler,
+                                                                               current_owner=lambda: owner)))
+            client = app.test_client()
+
+            def call(method, path, body=None):
+                resp = client.open(path, method=method, json=body)
+                data = resp.get_json(silent=True) or {}
+                kind = str(((data.get("error") or {}) if isinstance(data, dict) else {}).get("type") or "")
+                return resp.status_code, data, kind
+
+            cid = "char_bl_f"
+            seed_char(cid)
+            url = f"/api/vnew/characters/{cid}/casting"
+            got_f = [call("PUT", url, body)[0:3:2] for body in (
+                {"blRole": "zz"}, {"blType": "zz"}, {"blRole": "top", "blType": "kkotsu"}, {"blType": "ttokdae_gong"},
+                {"blRole": 3}, {"blRole": "top", "blType": "ttokdae_gong"}, {"blType": "musim_gong"}, {"blRole": "bottom"},
+                {"blRole": "reversible", "blType": "ttokdae_gong"}, {"blRole": ""})]
+            if got_f != [(400, "BadBlType")] * 5 + [(200, "")] * 5:
+                bad.append(f"(bl-f) PUT /casting BL 오류 코드가 다릅니다: {got_f}")
+            stored = load_c(cid).get("casting") or {}
+            if (stored.get("blRole"), stored.get("blType")) != ("", "") or stored.get("preset") != "idol" or stored.get("lookEdited"):
+                bad.append(f"(bl-f) PUT 뒤 저장값이 다릅니다: {stored.get('blRole')!r} {stored.get('blType')!r}")
+            status, data, _k = call("PUT", url, {"preset": "real", "gender": "male", "blRole": "top", "blType": "ttokdae_gong"})
+            put_view = data.get("casting") or {}
+            want_hint = castmod._cast_text(castmod.current_look(load_c(cid)), "real", "male", "ttokdae_gong")[1]  # noqa: SLF001
+            if status != 200 or (put_view.get("blRole"), put_view.get("blType")) != ("top", "ttokdae_gong") \
+                    or put_view.get("blHintsEn") != want_hint or not want_hint.startswith("He has "):
+                bad.append(f"(bl-f) PUT 응답 보기의 BL 값이 다릅니다: {put_view.get('blRole')} {put_view.get('blHintsEn')!r}")
+            # 뽑기: 형식 오류는 금액 확인보다 먼저 400, 유형만 오면 저장된 역할(top)과 짝, 짝이 맞지 않으면 400(저장·스레드 없음)
+            spawned.clear()
+            before = _json.dumps(load_c(cid), sort_keys=True)
+            got_draw = [call("POST", url + "/draw", body)[0:3:2] for body in (
+                {"confirmUsd": 9.99, "blRole": "zz"}, {"confirmUsd": 9.99, "blType": "zz"},
+                {"confirmUsd": 9.99, "blRole": "top", "blType": "kkotsu"}, {"confirmUsd": 0.08, "blType": "kkotsu"},
+                {"confirmUsd": 9.99, "blType": "musim_gong"})]
+            if got_draw != [(400, "BadBlType")] * 4 + [(409, "CostMismatch")] or spawned \
+                    or _json.dumps(load_c(cid), sort_keys=True) != before:
+                bad.append(f"(bl-f) POST /draw BL 오류 순서·저장 불변이 다릅니다: {got_draw} {len(spawned)}")
+            logs.clear()
+            status, data, _k = call("POST", url + "/draw", {"confirmUsd": 0.08, "blType": "musim_gong"})
+            cast_now = load_c(cid).get("casting") or {}
+            draw_view = data.get("casting") or {}
+            prompt = cast_now.get("prompt") or ""
+            hint_now = draw_view.get("blHintsEn") or ""
+            if status != 202 or len(spawned) != 1 or cast_now.get("blType") != "musim_gong" or not hint_now \
+                    or prompt != f"{old_prompt(castmod.current_look(load_c(cid)), 'real', 'male')} {hint_now}" \
+                    or logs.messages("vnew.casting.draw_start") != [
+                        f"vnew.casting.draw_start cid={cid} round=1 slots=2 usd=0.08 preset=real gender=male bl=musim_gong"]:
+                bad.append(f"(bl-f) 뽑기 문장 끝 참고 문장·로그가 다릅니다: {status} {prompt[-120:]!r} {logs.messages('draw_start')}")
+            # 유형 없음 뽑기 → 문장 = 옛 식, 로그 bl=-
+            cid0 = "char_bl_f0"
+            seed_char(cid0)
+            logs.clear()
+            call("POST", f"/api/vnew/characters/{cid0}/casting/draw", {"confirmUsd": 0.08, "blRole": "bottom", "blType": ""})
+            c0 = load_c(cid0).get("casting") or {}
+            if c0.get("prompt") != old_prompt(castmod.current_look(load_c(cid0)), "idol", "male") or c0.get("blRole") != "bottom" \
+                    or not (logs.messages("vnew.casting.draw_start") or [""])[0].endswith(" bl=-"):
+                bad.append(f"(bl-f) 유형 없는 뽑기 문장·로그가 다릅니다: {c0.get('prompt', '')[-80:]!r}")
+            report.append(f"bl-f: _apply_settings {len(cases_f)}경우 · PUT {len(got_f) + 1}건 · draw {len(got_draw) + 2}건 · 로그 bl=")
+            seen.add("bl-f")
+
+            # ================= (bl-h) 보기 =================
+            view_on = castmod.view(load_c(cid))
+            with _pin_vnew(VNEW_BL_LOOK=False):
+                view_off = castmod.view(load_c(cid))
+            if set(view_on) != set(view_off) | _BL_VIEW_KEYS or list(view_on)[-5:] != ["blRole", "blType", "blRoles", "blTypes", "blHintsEn"] \
+                    or {k: v for k, v in view_on.items() if k not in _BL_VIEW_KEYS} != view_off:
+                bad.append(f"(bl-h) 켬 보기 = 끔 보기 + BL 5개(끝)가 아닙니다: {sorted(set(view_on) ^ set(view_off))}")
+            if view_on.get("blRoles") != blmod.roles() or view_on.get("blTypes") != blmod.list_types() \
+                    or (view_on.get("blRole"), view_on.get("blType")) != ("top", "musim_gong") \
+                    or not prompt.endswith(" " + view_on.get("blHintsEn", "-")):
+                bad.append("(bl-h) 보기 blRoles·blTypes·blHintsEn(= 뽑기 문장 끝)이 다릅니다")
+            broken = []
+            for cast_b in ({"blRole": 5, "blType": "kkotsu"}, {"blRole": "zz", "blType": "kkotsu"}, {"blRole": "top", "blType": "kkotsu"},
+                           {"blRole": "top", "blType": ["x"]}, {"blRole": "", "blType": "ttokdae_gong"}, "x", None):
+                char_b = {"analysis": dict(analysis), "casting": cast_b}
+                v = castmod.view(char_b)
+                broken.append((v["blRole"], v["blType"], v["blHintsEn"]))
+            if broken != [("", "", "")] * 2 + [("top", "", "")] * 2 + [("", "", "")] * 3:
+                bad.append(f"(bl-h) 깨진 저장값 보기가 다릅니다: {broken}")
+            # 보기의 참고 문장은 뽑기와 같은 성별로(분석 female → "She has", 사용자 male → "He has")
+            char_fem = {"analysis": dict(analysis, genderEn="female", appearanceEn="A Korean woman with long hair."),
+                        "casting": {"blRole": "top", "blType": "ttokdae_gong"}}
+            char_fem_m = {"analysis": char_fem["analysis"], "casting": {"blRole": "top", "blType": "ttokdae_gong", "gender": "male"}}
+            fem_hints = (castmod.view(char_fem)["blHintsEn"], castmod.view(char_fem_m)["blHintsEn"])
+            want_fem = castmod._cast_text(castmod.current_look(char_fem), "idol", "female", "ttokdae_gong")[1]  # noqa: SLF001
+            if fem_hints != (want_fem, want_fem.replace("She has ", "He has ", 1)) or not want_fem.startswith("She has "):
+                bad.append(f"(bl-h) 보기 참고 문장의 성별이 뽑기(resolve_gender)와 다릅니다: {fem_hints}")
+            # 고친 외모 문장은 그대로, 자동 외모 문장·current_look 은 BL 과 무관
+            cid_h = "char_bl_h"
+            seed_char(cid_h)
+            auto_before = castmod.auto_look(load_c(cid_h))
+            status, data, _k = call("PUT", f"/api/vnew/characters/{cid_h}/casting",
+                                    {"lookEn": "a slim Korean man with long hair", "blRole": "top", "blType": "ttokdae_gong"})
+            view_h = data.get("casting") or {}
+            if status != 200 or view_h.get("lookEn") != "a slim Korean man with long hair" or view_h.get("lookEdited") is not True \
+                    or view_h.get("lookAuto") != auto_before or castmod.auto_look(load_c(cid_h)) != auto_before \
+                    or view_h.get("blHintsEn") != castmod._hint_sentence(ttok[1:], "male"):  # noqa: SLF001
+                bad.append(f"(bl-h) 고친 외모 문장·자동 문장·그림 우선 보기가 다릅니다: {view_h.get('blHintsEn')!r}")
+            with _pin_vnew(VNEW_BL_LOOK=False):
+                if castmod.current_look(load_c(cid_h)) != "a slim Korean man with long hair" or castmod.auto_look(load_c(cid_h)) != auto_before:
+                    bad.append("(bl-h) 끔에서 외모 문장이 달라졌습니다")
+            gen_src = (APP_SRC / "vnew" / "generate.py").read_text(encoding="utf-8")
+            if re.search(r"genre_bl|blType|blRole|bl_type|VNEW_BL_LOOK", gen_src) or "_real_appearance" not in gen_src:
+                bad.append("(bl-h) generate.py 가 BL 값을 읽습니다(영상 쪽은 바꾸지 않는다)")
+            seen.add("bl-h")
+
+            # ================= (bl-g) VNEW_BL_LOOK 끔 =================
+            with _pin_vnew(VNEW_BL_LOOK=False):
+                cid_g = "char_bl_g"
+                seed_char(cid_g, casting={"blRole": "top", "blType": "ttokdae_gong"})
+                view_g = castmod.view(load_c(cid_g))
+                want_off_keys = {"enabled", "preset", "presets", "gender", "genderAuto", "lookEn", "lookAuto", "lookEdited",
+                                 "patternWarning", "status", "error", "slots", "unitUsd", "count", "totalUsd", "candidates", "history",
+                                 "chosen", "chosenUrl"}
+                put_g = call("PUT", f"/api/vnew/characters/{cid_g}/casting", {"blRole": "zz", "blType": "kkotsu", "preset": "real"})
+                stored_g = load_c(cid_g).get("casting") or {}
+                spawned.clear()
+                logs.clear()
+                draw_g = call("POST", f"/api/vnew/characters/{cid_g}/casting/draw", {"confirmUsd": 0.08, "blRole": "zz", "blType": 5})
+                stored_g2 = load_c(cid_g).get("casting") or {}
+                if set(view_g) != want_off_keys or put_g[0] != 200 or set(put_g[1].get("casting") or {}) != want_off_keys \
+                        or (stored_g.get("blRole"), stored_g.get("blType"), stored_g.get("preset")) != ("top", "ttokdae_gong", "real") \
+                        or draw_g[0] != 202 or len(spawned) != 1 \
+                        or stored_g2.get("prompt") != old_prompt(castmod.current_look(load_c(cid_g)), "real", "male") \
+                        or not (logs.messages("vnew.casting.draw_start") or [""])[0].endswith(" bl=-") \
+                        or castmod._bl_type_now(stored_g2) != "":  # noqa: SLF001
+                    bad.append(f"(bl-g) 끔 동작이 지금과 다릅니다: {sorted(set(view_g) ^ want_off_keys)} {put_g[0:3:2]} {draw_g[0:3:2]}")
+            with _pin_vnew(VNEW_BL_LOOK=True):
+                if castmod._bl_type_now(stored_g2) != "ttokdae_gong":  # noqa: SLF001
+                    bad.append("(bl-g) 끔에서 저장값을 지웠습니다(켜면 다시 쓰여야 한다)")
+            # 설정 읽기(하위 프로세스, 실제 모듈은 그대로)·배선·렌더
+            settings_text = (APP_SRC / "vnew" / "settings.py").read_text(encoding="utf-8")
+            if len(re.findall(r'^VNEW_BL_LOOK = _bool\("VNEW_BL_LOOK", True\)$', settings_text, re.M)) != 1:
+                bad.append("(bl-g) settings.py 에 VNEW_BL_LOOK 기본 true(_bool) 한 줄이 없습니다")
+            raws = ["", "false", "0", "true", "no", "abc"]
+            code = ("import importlib, json, os, sys; sys.path.insert(0, %r); from src.vnew import settings as s; out = []\n"
+                    "for raw in %r:\n"
+                    "    os.environ['VNEW_BL_LOOK'] = raw\n"
+                    "    out.append(importlib.reload(s).VNEW_BL_LOOK)\n"
+                    "print(json.dumps(out))\n") % (str(ROOT / "app"), raws)
+            env = {k: v for k, v in os.environ.items() if k != "VNEW_BL_LOOK"}
+            env["PYTHONIOENCODING"] = "utf-8"
+            result = subprocess.run([sys.executable, "-X", "utf8", "-c", code], capture_output=True, text=True, env=env, encoding="utf-8")
+            probe = _json.loads(result.stdout.strip().splitlines()[-1]) if result.returncode == 0 else result.stderr[-300:]
+            if probe != [True, False, False, True, False, False]:
+                bad.append(f"(bl-g) VNEW_BL_LOOK 읽기(없음·false·0·true·no·글자)가 다릅니다: {probe}")
+            template_path = ROOT / "k8s" / "workloads.yaml.tmpl"
+            example_path = ROOT / "deploy" / "config.env.example"
+            template = template_path.read_text(encoding="utf-8")
+            example = example_path.read_text(encoding="utf-8")
+            names = re.findall(r"^\s*-\s+name:\s+(\S+)\s*$", template, re.M)
+            at = names.index("VNEW_OUTFIT_STALL_S") if "VNEW_OUTFIT_STALL_S" in names else -1
+            pair = re.findall(r"^\s*-\s+name:\s+VNEW_BL_LOOK\s*\n\s*value:\s*\"\$\{VNEW_BL_LOOK\}\"\s*$", template, re.M)
+            e_lines = example.splitlines()
+            e_at = next((i for i, line in enumerate(e_lines) if line.startswith("VNEW_BL_LOOK=")), -1)
+            e_prev = next((i for i, line in enumerate(e_lines) if line == "VNEW_OUTFIT_STALL_S=1200"), -1)
+            between = e_lines[e_prev + 1:e_at] if 0 <= e_prev < e_at else []
+            if len(pair) != 1 or template.count("${VNEW_BL_LOOK}") != 1 or at < 0 or names[at + 1:at + 2] != ["VNEW_BL_LOOK"]:
+                bad.append("(bl-g) 템플릿 앱 env 에 VNEW_BL_LOOK 한 쌍(VNEW_OUTFIT_STALL_S 바로 뒤)이 없습니다")
+            if e_at < 0 or e_lines[e_at] != "VNEW_BL_LOOK=true" or example.count("\nVNEW_BL_LOOK=") != 1 or not between \
+                    or any(not line.startswith("#") for line in between) or "VNEW_BL_LOOK=false" not in "\n".join(between):
+                bad.append("(bl-g) config.env.example 에 VNEW_OUTFIT_STALL_S 바로 뒤 true·되돌리기 주석이 없습니다")
+            if "VNEW_BL_LOOK" not in PARITY_ENV_KEYS:
+                bad.append("(bl-g) PARITY_ENV_KEYS 에 VNEW_BL_LOOK 이 없습니다(rw-a~c 가 보지 않습니다)")
+            for target in ("dev", "prod"):
+                if re.search(r"^VNEW_BL_LOOK", (ROOT / "deploy" / f"config.{target}.env").read_text(encoding="utf-8"), re.M):
+                    bad.append(f"(bl-g) config.{target}.env 를 바꿨습니다(이번 범위 밖)")
+            try:
+                spec = _ilu.spec_from_file_location("_bl_deploy_render", ROOT / "deploy" / "render.py")
+                render = _ilu.module_from_spec(spec)
+                spec.loader.exec_module(render)  # type: ignore[union-attr]
+                base_cfg = render.load_config(example_path)
+                rendered = []
+                for target in ("dev", "prod"):
+                    overlay = render.load_config(ROOT / "deploy" / f"config.{target}.env")
+                    for extra in ({}, {"VNEW_BL_LOOK": "false"}):
+                        values = render.add_derived({**base_cfg, **overlay, **extra})
+                        text = render.render_text(template, values, str(template_path.relative_to(ROOT)))
+                        rendered.append(_rendered_env_values(text, "VNEW_BL_LOOK"))
+                if rendered != [["true"], ["false"], ["true"], ["false"]]:
+                    bad.append(f"(bl-g) 렌더 값(dev·dev+false·prod·prod+false)이 다릅니다: {rendered}")
+            except (Exception, SystemExit) as exc:  # noqa: BLE001 — render.py 는 SystemExit 로 실패를 알린다.
+                bad.append(f"(bl-g) 렌더 실패: {type(exc).__name__}")
+            seen.add("bl-g")
+
+            # ================= (bl-i) 화면 =================
+            vjs = (PUBLIC / "vnew.js").read_text(encoding="utf-8")
+            css = (PUBLIC / "vnew.css").read_text(encoding="utf-8")
+            c_start, c_end = vjs.find("  /* ---- 실사 캐스팅(vnew-live-fx 묶음 B"), vjs.find("  /* ---- 추가 복장 섹션 ---- */")
+            el_start, el_end = vjs.find("  function el(tag, className, text)"), vjs.find("  function token()")
+            p_start, p_end = vjs.find("  function schedulePoll(host, detail)"), vjs.find("  function backRow(host)")
+            for cls in (".vnew-casting-row", ".vnew-casting-bl-role", ".vnew-casting-bl-type", ".vnew-casting-bl-hint"):
+                if not re.search(r"^" + re.escape(cls) + r"(?: \{|,)", css, re.M):
+                    bad.append(f"(bl-i) vnew.css 에 {cls} 가 없습니다")
+            node = shutil.which("node")
+            node_got: dict = {}
+            if min(c_start, c_end, el_start, el_end, p_start, p_end) < 0:
+                bad.append("(bl-i) vnew.js 캐스팅 구역·el·schedulePoll 을 찾지 못했습니다")
+            elif "innerHTML" in vjs[c_start:c_end]:
+                bad.append("(bl-i) 캐스팅 구역이 innerHTML 을 씁니다")
+            elif not node:
+                warn("node 가 없어 bl-i 화면 실행을 건너뜁니다 (E16)")
+            else:
+                # 화면에 넣는 실제 보기(메모리 저장소의 캐릭터 → casting.view, JSON 왕복)
+                seed_char("char_bl_i_on")
+                seed_char("char_bl_i_saved", casting={"blRole": "top", "blType": "ttokdae_gong", "lookEdited": True,
+                                                      "lookEn": "a Korean man with short black hair"})
+                seed_char("char_bl_i_bottom", casting={"blRole": "bottom", "blType": ""})
+                seed_char("char_bl_i_nohint", casting={"blRole": "top", "blType": ""})
+                seed_char("char_bl_i_drawing", casting={"blRole": "top", "blType": "musim_gong", "status": "drawing",
+                                                        "heartbeatAt": now_iso(), "startedAt": now_iso(),
+                                                        "slots": [{"slot": 0, "status": "queued"}]})
+                server: dict = {}
+                for name, cid_i in (("on", "char_bl_i_on"), ("saved", "char_bl_i_saved"), ("bottomOnly", "char_bl_i_bottom"),
+                                    ("noHint", "char_bl_i_nohint"), ("drawing", "char_bl_i_drawing")):
+                    server[name] = {"casting": _json.loads(_json.dumps(castmod.view(load_c(cid_i))))}
+                with _pin_vnew(VNEW_BL_LOOK=False):
+                    server["off"] = {"casting": _json.loads(_json.dumps(castmod.view(load_c("char_bl_i_on"))))}
+                script = (_CAST_SCREEN_NODE_HARNESS + "var SERVER = " + _json.dumps(server, ensure_ascii=False) + ";\n"
+                          + vjs[el_start:el_end] + vjs[p_start:p_end] + vjs[c_start:c_end] + _BL_SCREEN_NODE_CASES)
+                tmp_dir = tempfile.mkdtemp(prefix="bl_i_")
+                try:
+                    path = Path(tmp_dir) / "bl_screen.js"
+                    path.write_text(script, encoding="utf-8")
+                    result = subprocess.run([node, str(path)], capture_output=True, text=True, encoding="utf-8", timeout=60)
+                finally:
+                    shutil.rmtree(tmp_dir, ignore_errors=True)
+                if result.returncode != 0:
+                    bad.append(f"(bl-i) node 실행 실패: {(result.stderr or '').strip()[:600]}")
+                else:
+                    node_got = _json.loads((result.stdout or "").strip().splitlines()[-1])
+                checked = subprocess.run([node, "--check", str(PUBLIC / "vnew.js")], capture_output=True, text=True, encoding="utf-8")
+                if checked.returncode != 0:
+                    bad.append(f"(bl-i) node --check vnew.js 실패: {(checked.stderr or '').strip()[:300]}")
+                if node_got:
+                    bad.extend(_bl_screen_problems(node_got, server, types))
+                    # 화면이 만든 본문을 실제 라우트에 그대로 보낸다 → 저장 → 보기
+                    base_i = "/api/vnew/characters/char_bl_i_on/casting"
+                    put_body = (node_got.get("save") or [[None, None, {}]])[0][2]
+                    status, data, _k = call("PUT", base_i, put_body)
+                    v_i = data.get("casting") or {}
+                    if status != 200 or (v_i.get("blRole"), v_i.get("blType")) != ("bottom", "kkotsu") or not v_i.get("blHintsEn"):
+                        bad.append(f"(bl-i) 화면 저장 본문 → 라우트 → 보기가 다릅니다: {status} {put_body}")
+                    spawned.clear()
+                    draw_body = (node_got.get("drawPick") or [[None, None, {}]])[0][2]
+                    status, data, _k = call("POST", base_i + "/draw", draw_body)
+                    c_i = load_c("char_bl_i_on").get("casting") or {}
+                    if status != 202 or len(spawned) != 1 or (c_i.get("blRole"), c_i.get("blType")) != ("top", "ttokdae_gong") \
+                            or not c_i.get("prompt", "").endswith(" " + ((data.get("casting") or {}).get("blHintsEn") or "-")):
+                        bad.append(f"(bl-i) 화면 뽑기 본문 → 라우트 → 회차 문장이 다릅니다: {status} {draw_body}")
+            seen.add("bl-i")
+
+            # ================= (bl-j) 운영 문구 BadBlType(103 피드백) =================
+            from src.vpoc import errors as vpoc_errors  # noqa: PLC0415
+
+            errors_text = (APP_SRC / "vpoc" / "errors.py").read_text(encoding="utf-8")
+            if "BadBlType" not in vpoc_errors.USER_FACING_KINDS or errors_text.count('    "BadBlType",\n') != 1:
+                bad.append("(bl-j) USER_FACING_KINDS 에 BadBlType 이 한 줄로 없습니다")
+            # 던지는 곳은 모두 casting.py 의 고정 문자열 상수 둘(_MSG_BAD_BL·_MSG_BL_MISMATCH)이다(사용자 입력·f-string 없음).
+            sites: list[str] = []
+            for py_path in sorted(APP_SRC.rglob("*.py")):
+                tree_j = _ast.parse(py_path.read_text(encoding="utf-8"))
+                consts = {node.targets[0].id: node.value.value for node in tree_j.body
+                          if isinstance(node, _ast.Assign) and len(node.targets) == 1 and isinstance(node.targets[0], _ast.Name)
+                          and isinstance(node.value, _ast.Constant) and isinstance(node.value.value, str)}
+                for node in _ast.walk(tree_j):
+                    if isinstance(node, _ast.Call) and isinstance(node.func, _ast.Name) and node.func.id == "VpocError" \
+                            and len(node.args) >= 3 and isinstance(node.args[1], _ast.Constant) and node.args[1].value == "BadBlType":
+                        msg = node.args[2]
+                        value = msg.value if isinstance(msg, _ast.Constant) else consts.get(msg.id) if isinstance(msg, _ast.Name) else None
+                        sites.append(f"{py_path.name}:{value if isinstance(value, str) else 'dynamic'}")
+            want_sites = sorted([f"casting.py:{castmod._MSG_BAD_BL}"] * 2 + [f"casting.py:{castmod._MSG_BL_MISMATCH}"] * 2)  # noqa: SLF001
+            if sorted(sites) != want_sites:
+                bad.append(f"(bl-j) BadBlType 을 던지는 곳이 고정 문구 상수 둘이 아닙니다: {sorted(sites)}")
+            # 운영(RAW_ERRORS=false) 봉투와 실제 라우트: 고정 문구가 그대로, type 은 BadBlType.
+            saved_raw = vpoc_settings.RAW_ERRORS
+            vpoc_settings.RAW_ERRORS = False
+            try:
+                logging.disable(logging.CRITICAL)
+                env_j = vpoc_errors.envelope("vnew", VpocError("vnew.casting", "BadBlType", castmod._MSG_BAD_BL, 400))  # noqa: SLF001
+                prod = [call("PUT", url, body) for body in ({"blRole": "zz"}, {"blType": "zz"}, {"blRole": "", "blType": "kkotsu"})]
+            finally:
+                logging.disable(logging.NOTSET)
+                vpoc_settings.RAW_ERRORS = saved_raw
+            prod_got = [(s, k, ((d.get("error") or {}).get("message"))) for s, d, k in prod]
+            if env_j["message"] != "알 수 없는 BL 역할·유형입니다." or env_j["type"] != "BadBlType" \
+                    or prod_got != [(400, "BadBlType", "알 수 없는 BL 역할·유형입니다.")] * 2 + [(400, "BadBlType", castmod._MSG_BL_MISMATCH)]:  # noqa: SLF001
+                bad.append(f"(bl-j) 운영 봉투·라우트 문구가 다릅니다: {env_j['message']!r} {prod_got}")
+            seen.add("bl-j")
+
+            if stray:
+                bad.append(f"쓰면 안 되는 경로가 불렸습니다: {sorted(set(stray))}")
+            if real_calls:
+                bad.append(f"(guard) 가짜가 아닌 LLM 호출이 있었습니다: {real_calls}")
+    except Exception as exc:  # noqa: BLE001
+        bad.append(f"검사 중 예외: {type(exc).__name__} {str(exc)[:200]}\n{_tb.format_exc()[-1500:]}")
+    finally:
+        charmod.STORE = saved["STORE"]
+        castmod._fal_request = saved["cast_fal"]  # noqa: SLF001
+        castmod._fetch_url = saved["cast_fetch"]  # noqa: SLF001
+        castmod._spawn = saved["cast_spawn"]  # noqa: SLF001
+        charmod._fal_request = saved["char_fal"]  # noqa: SLF001
+        vpoc_fal._request = saved["vpoc_request"]  # noqa: SLF001
+        vpoc_settings.FAL_KEY = saved["fal_key"]
+        castmod.PROMPT_MAX = saved["prompt_max"]
+        with castmod._CAST_LOCK:  # noqa: SLF001
+            castmod._CAST_RUNNING.clear()  # noqa: SLF001
+
+    expected = ["bl-a", "bl-b", "bl-c", "bl-d", "bl-e", "bl-f", "bl-g", "bl-h", "bl-i", "bl-j"]
+    missing = [item for item in expected if item not in seen]
+    if missing and not bad:
+        bad.append(f"끝까지 돌지 않은 검사: {missing}")
+    if bad:
+        fail("BL 역할·유형 참고 외모 검사 실패\n" + "\n".join(f"  {item}" for item in bad))
+    else:
+        ok(
+            "BL 역할·유형 참고 외모 검사 (bl-a)유형 표 12종·분류 형태 4·인상 5·옛 TAGS 그대로·금지 낱말 0 "
+            "(bl-b)형태만 그림 우선·인상 늘 더함·오탐 막기·분석 꼴 떡대공 평균 ≥ 4 "
+            "(bl-c)유형 없음 = 지금 (bl-d)유형 있음 참고 문장·male/female (bl-e)1500자 상한 (bl-f)설정 400·라우트·뽑기 문장·로그 "
+            "(bl-g)VNEW_BL_LOOK 끔·배선·렌더 (bl-h)보기 5개 키·blHintsEn = 뽑기 문장 끝 (bl-i)화면 node·화면 본문 → 라우트"
+            " (bl-j)운영 문구 BadBlType"
+        )
+        for line in report:
+            print(f"       bl: {line}")
+
+
+def _bl_screen_problems(got: dict, server: dict, types: dict) -> list[str]:
+    """bl-i node 결과(_BL_SCREEN_NODE_CASES)를 bl-look R6·design §7 과 비교해 문제 목록을 돌려준다."""
+    problems: list[str] = []
+    base = "/api/vnew/characters/ch%201/casting"
+    top = [t for t, v in types.items() if v["role"] == "top"]
+    bottom = [t for t, v in types.items() if v["role"] == "bottom"]
+    want_pure = {
+        "on": [True, False, False, False],
+        "types": [[""], [""] + top, [""] + bottom, [""] + list(types), [""]],
+        "titles": [["유형 없음", ""]] + [[types[t]["label"], types[t]["desc"]] for t in top],
+        "odd": [{"value": "", "label": "유형 없음", "title": ""}, {"value": "x", "label": "x", "title": ""},
+                {"value": "y", "label": "y", "title": ""}],
+        "noList": [{"value": "", "label": "유형 없음", "title": ""}],
+        "fits": [True, False, True, False, True],
+        "hint": ["참고로 더해지는 외모 설명(영어): He has a tall frame.", "", ""],
+    }
+    if got.get("pure") != want_pure:
+        problems.append(f"(bl-i) 순수 함수 결과가 다릅니다: {got.get('pure')}")
+    form_on = ["vnew-casting-presets", "vnew-casting-row", "vnew-hint vnew-casting-bl-hint", "vnew-field vnew-casting-look",
+               "vnew-casting-btns"]
+    row_on = [["vnew-field vnew-casting-gender", "vnew-field vnew-casting-bl-role", "vnew-field vnew-casting-bl-type"]]
+    role_opts = [["", "없음"], ["top", "공"], ["bottom", "수"], ["reversible", "리버서블"]]
+
+    def type_opts(ids):
+        return [["", "유형 없음", ""]] + [[t, types[t]["label"], types[t]["desc"]] for t in ids]
+
+    def want(role, btype, opts, hint_text, hint_shown, *, locked=False):
+        return {
+            "form": form_on, "row": row_on, "selects": 3, "firstSelect": ["", "male", "female", "unknown"], "labels": ["BL 역할", "유형"],
+            "roleOptions": role_opts, "role": [role, locked], "typeOptions": type_opts(opts),
+            "type": [btype, locked, "" if role else "none"],
+            "hint": [hint_text, "" if hint_shown else "none", "vnew-hint vnew-casting-bl-hint"],
+        }
+
+    saved_hint = "참고로 더해지는 외모 설명(영어): " + server["saved"]["casting"]["blHintsEn"]
+    checks = {
+        "on0": want("", "", [], "", False),
+        "onTop": want("top", "", top, "", False),
+        "onPick": want("top", "ttokdae_gong", top, "", False),
+        "onRev": want("reversible", "ttokdae_gong", list(types), "", False),
+        "onBottom": want("bottom", "", bottom, "", False),
+        "onNone": want("", "", [], "", False),
+        "saved": want("top", "ttokdae_gong", top, saved_hint, True),
+        "bottomOnly": want("bottom", "", bottom, "", False),
+        "noHint": want("top", "", top, "", False),
+        "drawing": want("top", "musim_gong", top, "참고로 더해지는 외모 설명(영어): " + server["drawing"]["casting"]["blHintsEn"], True,
+                        locked=True),
+    }
+    for name, value in checks.items():
+        if got.get(name) != value:
+            problems.append(f"(bl-i) {name} 화면이 다릅니다: {got.get(name)!r} != {value!r}")
+    building = got.get("building") or {}
+    if building.get("role") != ["top", True] or (building.get("type") or [0, 0])[1] is not True:
+        problems.append(f"(bl-i) 캐릭터를 만드는 중 BL 선택이 막히지 않았습니다: {building}")
+    if server["noHint"]["casting"]["blHintsEn"] != "" or not server["saved"]["casting"]["blHintsEn"]:
+        problems.append("(bl-i) 시험 보기 준비가 다릅니다(noHint 는 참고 문장 없음, saved 는 있음)")
+    if got.get("savedChanged") != [saved_hint, "none", "vnew-hint vnew-casting-bl-hint"] \
+            or got.get("savedBack") != [saved_hint, "", "vnew-hint vnew-casting-bl-hint"] \
+            or got.get("savedRole") != [[saved_hint, "none", "vnew-hint vnew-casting-bl-hint"], ["ttokdae_gong", False, ""]]:
+        problems.append(f"(bl-i) 미리보기 줄이 바꾸면 숨고 되돌리면 보이지 않습니다: {got.get('savedChanged')} {got.get('savedBack')}")
+    on_body = {"preset": "idol", "gender": ""}
+    if got.get("save") != [["PUT", base, dict(on_body, blRole="bottom", blType="kkotsu")]] \
+            or got.get("drawPick") != [["POST", base + "/draw", dict(on_body, confirmUsd=0.08, blRole="top", blType="ttokdae_gong")]] \
+            or got.get("drawNone") != [["POST", base + "/draw", dict(on_body, confirmUsd=0.08, blRole="", blType="")]] \
+            or got.get("revert") != [["PUT", base, dict(on_body, blRole="reversible", blType="ttokdae_gong", lookEn="")]]:
+        problems.append(f"(bl-i) 저장·뽑기·되돌리기 본문 blRole·blType 이 다릅니다: {got.get('save')} {got.get('drawPick')} {got.get('revert')}")
+    off = got.get("off") or {}
+    if off.get("row") != [] or off.get("selects") != 1 or off.get("role") is not None or off.get("hint") is not None \
+            or off.get("form") != ["vnew-casting-presets", "vnew-field vnew-casting-gender", "vnew-field vnew-casting-look",
+                                   "vnew-casting-btns"] \
+            or got.get("offCalls") != [["PUT", base, on_body], ["POST", base + "/draw", dict(on_body, confirmUsd=0.08)]]:
+        problems.append(f"(bl-i) 끔 화면·본문이 지금과 다릅니다: {off} {got.get('offCalls')}")
+    evil = "<img src=x onerror=alert(1)>"
+    ev = got.get("evil") or {}
+    if (ev.get("roleOptions") or [[0, 0], [0, 0]])[1] != ["top", evil] or (ev.get("typeOptions") or [0, [0, 0, 0]])[1] != \
+            [list(types)[0], evil, evil] or (ev.get("hint") or [""])[0] != "참고로 더해지는 외모 설명(영어): " + evil:
+        problems.append(f"(bl-i) 위험한 글이 글자 그대로 들어가지 않았습니다: {ev}")
+    if got.get("innerHTML") is not False:
+        problems.append("(bl-i) 화면 조립 중 innerHTML 을 썼습니다")
+    return problems
+
+
 # vnew-live-fx A(Claude 결정 9, 2026-10-30 검토): 새 기본값(VNEW_FX 켬)에서 기대값이 달라지는 기존 검사는 **부르는 줄에서**
 # 끔으로 고정한다(검사 본문·기대값·들여쓰기는 그대로). 이유:
 #   check_vnew_plan·check_vnew_locations — 켬이면 POST /conti 가 기호·분위기 채우기(가짜가 아닌 LLM)를 부른다.
@@ -30212,6 +31215,16 @@ def _run_char_fidelity_off(check) -> None:
 def _run_3d_hunyuan(check) -> None:
     """`check()` 를 VNEW_3D_PROVIDER="hunyuan" 으로 부르고 설정을 되돌린다."""
     with _pin_vnew(VNEW_3D_PROVIDER="hunyuan"):
+        check()
+
+
+# 지시서 103(bl-look design D12): 새 기본값(VNEW_BL_LOOK 켬)에서 기대값이 달라지는 기존 검사도 부르는 줄에서 끔으로 고정한다
+# (검사 본문·기대값·들여쓰기는 그대로). 이유:
+#   check_vnew_char_fidelity — cf-b·cf-r 이 옛 캐릭터 상세 JSON(casting 보기 포함) sha256 을 구현 전 값(_CF_OFF_SHA["detailOld"])과
+#   비교한다. 켬이면 casting 보기 끝에 BL 5개 키가 더해진다(bl-g 가 끔 = 지금 키, bl-h 가 켬 = 지금 키 + 5개를 본다).
+def _run_bl_look_off(check) -> None:
+    """`check()` 를 VNEW_BL_LOOK=False 로 부르고 설정을 되돌린다."""
+    with _pin_vnew(VNEW_BL_LOOK=False):
         check()
 
 
@@ -30275,10 +31288,11 @@ def main() -> int:
     _run_char_fidelity_off(check_vnew_casting)
     check_vnew_take_real()
     check_vnew_take_real_screen()
-    _run_3d_hunyuan(check_vnew_char_fidelity)
+    _run_3d_hunyuan(lambda: _run_bl_look_off(check_vnew_char_fidelity))
     check_vnew_3d_tripo()
     check_vnew_char_fidelity_screen()
     check_vnew_outfit_button()
+    check_vnew_bl_look()
     print()
     if warnings:
         print(f"경고 {len(warnings)}건")

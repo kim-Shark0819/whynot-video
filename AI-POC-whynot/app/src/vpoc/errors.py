@@ -72,6 +72,9 @@ USER_FACING_KINDS = {
     "RealNotReady",
     "RealRunning",
     "RealPromptWebtoon",
+    # 지시서 103 피드백(2026-10-31): 캐스팅 BL 역할·유형 거절. 던지는 곳(vnew/casting.py)은 고정 문구 둘뿐이다
+    # ("알 수 없는 BL 역할·유형입니다." · 역할과 유형이 맞지 않는다는 문구, 사용자 입력을 되풀이하지 않음).
+    "BadBlType",
 }
 
 
