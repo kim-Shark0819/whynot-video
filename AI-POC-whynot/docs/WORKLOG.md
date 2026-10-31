@@ -1296,3 +1296,184 @@
     3. 102 남은 이슈 3·4(다시 만들기 때 이전 그림이 사라짐, 지운 auto 후보가 다시 생김)는 그대로다.
     4. 멈춘 복장은 자동으로 이어 그리지 않는다. 사용자가 다시 눌러야 한다.
     5. 이미지 안의 기본 `frontend/public/runtime-config.js`에는 `vnewHideStory`가 없다(102 남은 이슈 6, 영향 없음).
+
+
+
+## 2026-10-31
+
+### 지시서 103 — 실사 캐스팅 외모 문장에 BL 역할·유형 참고 설명 (Kiro, claude-opus-5.5)
+- **범위**: `.kiro/handoff/103-bl-look-hints.md`. 스펙 `.kiro/specs/bl-look/`(requirements·design·tasks)을 먼저 쓰고 같은 실행에서 구현·검사까지 했다. 커밋·push 하지 않았다. git·aws·kubectl·네트워크·유료 API를 쓰지 않았고 사용자 데이터를 읽지 않았다. 옛 저장소(`C:\dev\ai\AI-POC-whynot`, BL 모듈·steering)는 읽기만 했다.
+- **먼저 한 일**: 바꿀 파일과 수정 금지 파일 13개의 시작 전 사본을 저장소 밖(`%TEMP%`)에 두었다. 앞 실행(`logs/103.log`)은 읽기 도중 사용 한도로 멈췄고, 그때 사본과 지금 파일이 바이트까지 같아 아무것도 바뀌지 않았음을 확인했다. 시작 전 전체 검사는 전부 통과(ok 62줄, FAIL·WARN 0, 75초).
+- **원인·배경**: 사용자 요청(2026-10-31)은 실사 캐릭터 외모 문장에 예전에 학습시킨 BL 장르 지식(공/수, 떡대공·무심공·미인수 같은 유형)을 적용하는 것이다. 단서는 "참고만 하는 것이다. 외모 프롬프트를 고도화하고 정보를 많이 주기 위함이다."다. 지금 캐스팅 문장(`cast_prompt`)은 그림 분석으로 만든 외모 문장(≤300자)만 쓰고, 1500자 상한까지 약 640자가 빈다. 그림이 말해 주지 않는 체격·키 느낌·얼굴 인상·눈빛·자세·몸가짐이 비어 있다.
+- **결정**(design.md D1~D12)
+  - D1 — 참고 문장은 캐스팅 문장 끝에만 더한다: `… with dark brown eyes. He has A, B, and C.` 300자 외모 문장(`look_sentence`·`lookEn`·사용자가 고친 문장)과 영상 쪽(`_real_appearance`)은 바꾸지 않는다.
+  - D2·D3·D4 — 그림 우선: 외모 문장(`prompt_look` 결과)에 같은 분류가 있으면 그 조각을 뺀다. 분류는 낱말 표로 판정한다. 체격·키 조각은 글이 스스로 담은 체격·키도 본다("a lean, tall build"는 그림의 "short stature"와 부딪힌다). 체격·키 낱말 뒤 세 낱말 안에 얼굴·머리·피부·옷 명사가 오면 체격·키가 아니다("thin lips", "a slender angular face", "warm-toned skin", "tall boots", "thin black-rimmed round glasses"). "short"는 키 명사가 뒤따르거나 "is short"일 때만 키다("short black hair"는 아님). 프리셋 문구는 판정에 넣지 않는다(늘 face·expression을 담는다).
+  - D5 — 조각마다 관사를 넣어 "He has" 뒤에 바로 읽히게 했다. 지시서 예시의 "tall frame"·"firm square jawline"은 "a tall frame"·"a firm square jawline"이다. 미인수 조각 순서는 체격을 맨 앞에 두었다(D7).
+  - D6 — 유형이 있고 성별이 unknown이면 male: 프리셋·주어가 male이고, 외모 문장의 person→man·people→men·their→his·them→him·themselves→himself·theirs→his. `align_gender(male)`은 중립 낱말을 바꾸지 않아 "He is a Korean person in their 30s"가 되기 때문이다. female 지정은 그대로 두고 참고 문장만 "She has …"로 더한다.
+  - D7 — 1500자를 넘으면 조각을 끝에서부터 뺀다(표 순서: 체격·키 → 얼굴·눈 → 표정·자세·몸가짐). 지금 길이로는 넘지 않는다(외모 300자 + 가장 긴 참고 문장 199자에서 1,036자).
+  - D8 — 화면 미리보기 줄은 서버 `blHintsEn`만 보이고, 화면에서 고른 값이 저장값과 다르면 숨긴다. 분류 판정을 화면에 다시 쓰지 않는다.
+  - D9 — 역할만 바꾸면 맞지 않는 저장 유형은 비운다(400 아님). 유형만 보내면 저장된 역할과 비교한다. 역할 `""` + 유형은 400. 뽑기는 BL 형식을 금액 확인보다 먼저 본다.
+  - D10 — `VNEW_BL_LOOK` 끔이면 요청의 BL 값을 보지도 저장하지도 않는다(400 없음). 저장값은 지우지 않는다.
+  - D11 — 400은 kind 하나 `BadBlType`, 문구 3종(역할·유형·짝)은 고정 문자열이다.
+  - D12 — 기존 검사: `check_vnew_casting`은 켬(기본) 그대로 돌린다. cast-a~m 전 그룹이 켬 + 유형 없음에서 지금 기대값 그대로 지나가는 것이 "유형 없음 = 지금과 같다"의 증거다. cast-j의 보기 키 집합에만 BL 5개를 더했다. `check_vnew_char_fidelity`는 부르는 줄에서 `_run_bl_look_off`로 끔 고정했다(cf-b·cf-r의 상세 JSON sha256은 구현 전에 잰 값이다. Claude 결정 9와 같은 방식).
+  - 옛 desc는 글자 그대로 옮겼다. 광공 desc의 "폭력적 면모"는 화면 title(한국어 설명)에만 나오고 영어 조각에는 "imposing presence"까지만 쓴다.
+- **검토한 대안**
+  - (가) 300자 외모 문장에 유형 낱말을 섞기: 300자 줄이기에서 그림 사실(머리·옷)이 먼저 밀려나고 사용자가 고친 문장과 섞인다. 거절.
+  - (나) LLM으로 유형과 그림 분석을 합쳐 외모를 다시 쓰기: 비용·지연이 생기고 결정적이지 않으며 그림 사실을 바꿀 수 있다. 거절(규칙은 서버가 결정론적으로).
+  - (다) 영상 프롬프트(통 테이크·실사 테이크 외형)에도 더하기: 지시 범위 밖이고 통 테이크 4,000바이트 예산에 닿는다. 하지 않았다.
+  - (라) 분류 판정을 명사구 파서로: 오탐은 줄지만 규칙이 커진다. 낱말 표 + 짧은 예외(D4)로 실제 분석 꼴 6개와 오탐 사례 13개를 검사로 고정했다.
+  - (마) 채택: 캐스팅 문장 끝 참고 문장 한 개, 그림이 말한 분류는 뺀다.
+- **유형 표**(`genre_bl.TYPES`, 영어 조각 전체)
+
+  | 유형(id) | 역할 | desc(화면 title) | 영어 조각(분류) | 이은 길이 |
+  |---|---|---|---|---|
+  | 광공 / 집착공 (`gwanggong`) | 공 | 집착 강함, 거칠고 폭력적 면모, 큰 신장·체격 | 키 "a tall frame" · 체격 "a broad-shouldered, powerful build" · 얼굴 "sharp, striking features" · 눈 "an intense, unwavering gaze" · 자세 "an upright stance with an imposing presence" | 148자 |
+  | 츤데레공 (`tsundere_gong`) | 공 | 겉은 차갑고 속은 다정 | 얼굴 "cool, well-defined features" · 눈 "sharp eyes with a slightly averted gaze" · 표정 "an aloof expression with a hint of softness" · 자세 "a relaxed yet guarded posture" | 144자 |
+  | 다정공 (`dajeong_gong`) | 공 | 따뜻하고 배려 | 얼굴 "warm, kind features" · 눈 "soft, attentive eyes" · 표정 "a gentle, warm expression" · 자세 "a relaxed, open posture" · 몸가짐 "neat, clean grooming" | 115자 |
+  | 떡대공 (`ttokdae_gong`, 새) | 공 | 큰 키와 넓은 어깨, 건장한 체격의 공 | 체격 "broad shoulders and a solid, muscular build" · 키 "a tall frame" · 얼굴 "a firm square jawline" · 눈 "steady, deep-set eyes" · 자세 "an upright, imposing posture" | 133자 |
+  | 무심공 (`musim_gong`, 새) | 공 | 감정 표현이 적고 무심한 태도의 공 | 체격 "a lean, tall build" · 얼굴 "cool, sharply defined features" · 눈 "a half-lidded, indifferent gaze" · 표정 "a calm, unreadable face" · 몸가짐 "neat, minimal grooming" | 132자 |
+  | 미인수 (`minyu_su`) | 수 | 아름다운 외모의 수 | 체격 "a slim yet clearly masculine adult build" · 얼굴 "strikingly handsome, delicate and refined features" · 얼굴 "clear, smooth skin" · 눈 "long lashes and clear eyes" · 표정 "a gentle, composed expression" | 171자 |
+  | 꽃수 (`kkotsu`) | 수 | 여성적으로 예쁘고 작은 체격 | 체격 "a slender, lightly built adult man's frame" · 키 "a modest height" · 얼굴 "soft, delicate features on a clearly masculine face" · 눈 "large, clear eyes" · 표정 "a shy, gentle expression" · 자세 "a slightly reserved posture" | 186자 |
+  | 떡대수 (`ttokdaesu`) | 수 | 큰 체격의 수 | 체격 "broad shoulders and a sturdy, muscular adult man's build" · 키 "a tall frame" · 얼굴 "strong, masculine features" · 눈 "calm, gentle eyes" · 표정 "a soft, slightly shy expression" · 자세 "a relaxed, unassuming posture" | 181자 |
+  | 무심수 (`musim_su`) | 수 | 감정 표현이 적음 | 얼굴 "calm, clean-cut masculine features" · 눈 "a quiet, indifferent gaze" · 표정 "a calm, unreadable expression" · 자세 "a still, composed posture" · 몸가짐 "neat, understated grooming" | 147자 |
+  | 능력수 (`neungryeok_su`) | 수 | 능력이 뛰어나 스스로 해결 | 얼굴 "sharp, intelligent masculine features" · 눈 "focused, confident eyes" · 표정 "a composed, self-assured expression" · 자세 "an upright, confident posture" · 몸가짐 "a polished, well-groomed appearance" | 167자 |
+  | 굴림수 (`gullim_su`) | 수 | 환경이나 공 때문에 어려운 상황 | 체격 "a lean adult man's build" · 얼굴 "a tired yet handsome masculine face" · 눈 "weary, guarded eyes" · 표정 "a subdued, patient expression" · 자세 "a slightly withdrawn posture" | 143자 |
+  | 연하수 (`yeonha_su`) | 수 | 공보다 연하 | 얼굴 "fresh, bright features on a clearly adult male face" · 눈 "bright, lively eyes" · 표정 "an earnest, open expression" · 자세 "an energetic, open posture" · 몸가짐 "clean, natural grooming" | 154자 |
+
+  예: 분석 외모 "a Korean man in his 30s with short black hair" + 떡대공 → 캐스팅 문장 끝 "He has broad shoulders and a solid, muscular build, a tall frame, a firm square jawline, steady, deep-set eyes, and an upright, imposing posture." 실제 분석 꼴 m3("a tall, muscular … angular clean-shaven face … narrow half-lidded eyes …") + 떡대공 → "He has an upright, imposing posture."만 남는다(그림이 체격·키·얼굴·눈을 말함).
+- **바꾼 것**
+  - `app/src/vnew/genre_bl.py`(새): `ROLES`·`CATEGORIES`·`LOOK_EN_MAX`·`TYPES`, `roles`·`is_type`·`fits`·`list_types`·`look_categories`·`hint_pieces`·`look_hints`, 낱말 표 `_CATEGORY_RE`·`_NOT_BODY`. import는 `re`뿐.
+  - `app/src/vnew/casting.py`: `cast_prompt`(넷째 인자 `bl_type=""`, 본문은 `_cast_text`로), 새 `_cast_text`·`_hint_sentence`·`_NEUTRAL_TO_MALE`·`_HINT_SUBJECT`, `_empty_casting`(`blRole`·`blType`), `_apply_settings`(키워드 `bl_role`·`bl_type`, 끝에서 `_apply_bl`), 새 `_bl_checked`·`_apply_bl`·`_bl_state`·`_bl_type_now`·문구 3개, `update_settings`·`start_draw`(키워드, 뽑기 전 형식 확인, 회차 문장, 로그 ` bl=`), `view`(켬이면 BL 5개 키), 모듈 docstring 3줄.
+  - `app/src/vnew/routes.py`: PUT·draw에서 `blRole`·`blType` 전달만.
+  - `app/src/vnew/settings.py`: `VNEW_BL_LOOK = _bool("VNEW_BL_LOOK", True)`(주석 2줄).
+  - `deploy/config.env.example`: `VNEW_OUTFIT_STALL_S=1200` 뒤 주석 3줄 + `VNEW_BL_LOOK=true`. `k8s/workloads.yaml.tmpl`: 앱 env `VNEW_OUTFIT_STALL_S` 쌍 뒤 주석 1줄 + 한 쌍(`VNEW_CASTING` 바로 뒤에 두면 lr-o·cf-a·cast-m이 보는 자리 순서가 바뀐다).
+  - `frontend/public/vnew.js` 캐스팅 구역: 새 `castingBlOn`·`castingBlTypeOptions`·`castingBlTypeFits`·`castingBlHintText`·`castingBlFields`, 상수 2개. `castingSection`은 `form.blRole`·`blType`, 성별 칸 붙이기(켬이면 BL 줄과 참고 줄), 저장·뽑기 본문 두 곳. `vnew.css`: `.vnew-casting-row`·`.vnew-casting-bl-role`·`.vnew-casting-bl-type`·`.vnew-casting-bl-hint`.
+  - `tools/check_vpoc.py`: 새 `check_vnew_bl_look`(bl-a~i)·`_bl_screen_problems`·`_BL_*` 상수·`_BL_SCREEN_NODE_CASES`(cast-l 하네스 `_CAST_SCREEN_NODE_HARNESS` 그대로 씀), `_run_bl_look_off`, `PARITY_ENV_KEYS`에 `VNEW_BL_LOOK`, cast-j 키 집합, `main()` 두 줄.
+  - `.kiro/steering/genre-bl.md`(새, 저장소 루트): 옛 규칙 + "외모는 참고만, 그림 사실 우선" 한 줄, 유형 목록에 떡대공·무심공. fileMatch `**/app/src/vnew/genre_bl.py`·`**/app/src/vnew/casting.py`.
+  - `docs/ANALYSIS.md`: 머리 갱신 줄, §3.6 모듈 표(`genre_bl.py`·`casting.py`), §3.6.1 B 보기 행 + 「BL 역할·유형 참고 외모」 표, §7.1 `VNEW_BL_LOOK` 행·단락, §10.1 검사 수·고정 표·기대값 변경·새 그룹 행.
+- **검사(새 그룹 `check_vnew_bl_look`)**
+
+  | 검사 | 덮는 것 |
+  |---|---|
+  | bl-a | `TYPES` 12종·순서, 옛 TAGS 10종 label·desc 글자 그대로, 공 5·수 7 묶음, `roles`·`list_types`·`fits`(11경우)·`is_type`, 조각 61개 모두: 분류 7종 안·한 유형 ≤350자·은어(gong·su·seme·uke·top·bottom·BL·boys love…)·성적·폭력·미성년 낱말·머리·옷·나이·피부색·색 낱말 0·한글 0, 조각이 자기 분류로 읽힘(외모 문장에 같은 글이 있으면 겹치지 않음), 수 유형 masculine/man 낱말·미인수·꽃수 masculine, 모듈 import `re`뿐·저장·외부 호출·옛 식별자 0, 모르는 유형 `""` |
+  | bl-b | `look_categories`·`hint_pieces`·`look_hints`: "slim" → 떡대공 build 빠짐, 분류 7종 × 유형 12종(그 분류 조각만 빠짐), 구체 13경우(D3 short stature·"a short, slim", D4 오탐 막기 7종, "He is short", 모든 분류, 빈 문장), 실제 분석 꼴 6개(cast-b 결과 문장)의 분류·떡대공·미인수 조각 |
+  | bl-c | 유형 없음 = 지금: 프리셋 3 × 성별 6 × 외모 문장 26개 × 유형 값 7종(인자 없음·None·""·"zz"·0·7·대문자) = 3,276문장이 옛 식(프리셋 + 주어 + 외모 + 눈 색, ≤1500)과 같음, 참고 문장 `""`, `_CAST_IDOL_MALE` 원문 + He is …, 넷째 인자 기본값 `""` |
+  | bl-d | 떡대공·무심공·미인수 × 프리셋 2 × 성별 4(male·unknown·""·female) × 외모 문장 9개 = 216문장: 문장 = 옛 식 + " " + 참고 문장, 참고 문장 = `_hint_sentence(조각)`, 은어 0·금지 낱말 0·≤1500·줄바꿈 0, unknown·"" → male(프리셋·He is·person→man·their→his, "man" 있음), female → female·"She has", 떡대공 전문 고정값(720자), `_hint_sentence` 1·2·3조각·They |
+  | bl-e | `PROMPT_MAX`를 줄여 조각 하나 빠짐·하나만 남음·다 빠짐(참고 문장 없이 옛 식)·옛 식보다 짧음(옛 식 그대로 자름), 끝나면 1500 |
+  | bl-f | `_apply_settings` 20경우(정리·모르는 역할·글 아닌 역할·모르는 유형·글 아닌 유형·짝 불일치·리버서블 2·역할 비움·역할 비움 + 유형·역할만 바꿈 2·유형만 3·유형 ""·None·깨진 저장값 2)와 문구, Flask PUT 11건(400 5·200 6, 저장값), POST draw 7건(형식 400이 CostMismatch보다 먼저·유형만 짝 400·저장 불변·스레드 0, 202 → 회차 문장 끝 참고 문장·로그 `bl=musim_gong`, 유형 없음 → 옛 식·`bl=-`) |
+  | bl-g | 끔: 보기 키 = 지금 19개(PUT 응답도), BL 요청 무시(PUT 200·draw 202, 저장값 그대로), 회차 문장 = 옛 식·로그 `bl=-`, 다시 켜면 저장값 사용. settings 한 줄, 하위 프로세스 읽기(없음·false·0·true·no·글자 → T·F·F·T·F·F), 템플릿 한 쌍(`VNEW_OUTFIT_STALL_S` 바로 뒤), base true·되돌리기 주석, `PARITY_ENV_KEYS`, dev·prod 오버레이 키 없음, 렌더 dev·prod `"true"`·+false `"false"` |
+  | bl-h | 켬 보기 = 끔 보기 + BL 5개(끝, 나머지 값 같음), `blRoles`·`blTypes` 값, `blHintsEn` = 회차 문장 끝, 깨진 저장값 7종 `""`, 보기 성별 = 뽑기 성별(분석 female → "She has", 사용자 male → "He has"), 고친 외모 문장·lookEdited·lookAuto 그대로·그림 우선("slim" → build 빠짐), 끔에서도 외모 문장 같음, `generate.py`가 BL을 읽지 않음 |
+  | bl-i | node 가짜 DOM(cast-l 하네스), 화면 입력은 실제 `casting.view` 응답 6종(켬·저장값·수만·참고 없음·뽑는 중·끔): 순수 함수 5개(목록·title·이상한 모양·짝), 폼 자식 순서·한 줄(성별·역할·유형), 역할 바꾸기 공 → 떡대공 → 리버서블(유지) → 수(비움) → 꽃수 → 저장 본문, 뽑기 본문 2종, 없음이면 유형 칸 숨김, 미리보기 줄 보임 → 바꾸면 숨김 → 되돌리면 보임, 되돌리기 본문, 잠금 2종(뽑는 중·만드는 중), 끔 화면·본문 지금 그대로, 위험한 글 글자 그대로·innerHTML 0, CSS 4개, `node --check`. 화면 저장·뽑기 본문을 실제 Flask 라우트에 그대로 보내 저장·보기·회차 문장까지 확인 |
+
+- **확인**
+  - `node --check frontend/public/vnew.js` 통과. `python -X utf8 tools/check_vpoc.py` 전부 통과: ok 63줄(시작 전 62 + bl 1), FAIL·WARN 0(약 81초).
+  - 바뀐 서버 줄 커버리지(`python -m coverage run --data-file=%TEMP%\… --source=app/src tools/check_vpoc.py`, coverage 7.17, 시작 전 사본과 difflib): 실행문 128줄 중 128줄(100%). `casting.py` 82/82, `genre_bl.py` 45/45, `settings.py` 1/1. `routes.py`는 바뀐 줄이 여러 줄 호출의 인자 줄이라 실행문 0줄이고, 그 호출문(251·268)은 실행됐다.
+  - JS 실행 범위(node `NODE_V8_COVERAGE`, bl-i 스크립트): `castingBlOn`·`castingBlTypeOptions`·`castingBlTypeFits`·`castingBlHintText` 실행 안 된 블록 0, `castingBlFields`는 1개(역할 라벨이 빠진 응답의 `|| ""`). `castingSection`의 BL 줄은 모두 실행됐고, 실행 안 된 블록 28개는 이번에 바꾸지 않은 곳이다(사진·오류·금액 다시 읽기 등, cast-l이 덮는다).
+  - 변형 검사 39개(저장소 밖 스크립트, 파이썬은 모듈을 바꾼 소스로 다시 실행, 화면·배선은 임시 사본 트리): 유형 없음에 참고 문장, male 강제 없음, 중립 낱말 그대로, 상한 무시, 역할 비워도 유형 남음, 유형 짝 안 봄, 끔인데 BL 처리, 끔인데 저장 유형 사용, 끔인데 보기 필드, 회차 문장에 유형 없음, 뽑기 형식 먼저 안 봄, 보기 짝 안 봄, "and" 없는 나열, 보기 성별 unknown 고정, D3·D4 없음, short 늘 키, 조각에 은어, 수 유형 masculine 없음, 옛 desc 바뀜, fits 역할 무시, 350자 넘음, 라우트 PUT·draw 전달 없음, 화면 미리보기 늘 보임·본문 BL 없음 2·유형 비우기 없음·유형 거르기 없음·늘 켬·잠금 없음·title 없음·유형 칸 늘 보임·innerHTML, CSS 없음, 템플릿 env 없음, base false, 되돌리기 주석 없음, 코드 기본 false. 39개 모두 잡았고 지금 코드는 통과한다. 처음 돌렸을 때 놓친 2개(보기 성별, `fits`의 군더더기 조건)는 검사를 더하고(bl-h 성별) `fits`를 한 줄로 줄였다.
+  - 성능 측정(저장소 밖): `hint_pieces` 최악 입력(300자 반복 낱말 11종 × 유형 12) 1회 약 0.21ms, `_cast_text` 1회 약 0.16ms, 보기 BL 필드 JSON 약 3.4KB.
+  - 실제 외부 호출 0회: `casting._fal_request`·`_fetch_url`·`characters._fal_request`·`vpoc.fal._request`를 막고(불리면 실패) `_guard_real_llm`으로 Bedrock 0회, 뽑기 스레드는 띄우지 않는다(`_spawn` 기록기).
+  - 줄 끝 LF(바뀐·새 파일 15개 CR 0, BOM 없음. 이 WORKLOG는 편집 도구가 덧붙일 때 파일 전체를 CRLF로 써서 LF로 되돌렸고, 되돌린 뒤 diff는 추가 106줄뿐이다), 공백만 바뀐 줄 0(처음엔 `formBox.appendChild(genderWrap);`이 else 블록으로 들어가 들여쓰기만 바뀌어 고쳤다), 새 줄 끝 공백 0, 지운 정의 0(파이썬 AST·JS 함수·CSS 선택자 비교), 저장소 안 부산물 0(coverage data는 `%TEMP%`). 수정 금지 파일(`config.dev.env`·`config.prod.env`·`generate.py`·`.gitlab-ci.yml`·`whynot-20261029`·옛 저장소)은 바뀌지 않았다.
+- **바꾼 기존 검사 기대값**
+  - cast-j `want_keys`(상세 casting 보기 키 집합)에 `blRole`·`blType`·`blRoles`·`blTypes`·`blHintsEn`을 더했다. 이유: `VNEW_BL_LOOK` 기본 켬에서 보기 끝에 5개 키가 붙는다(R4). 끔이면 원래 19개 그대로인지는 bl-g가 본다. 나머지 cast-a~m 기대값(문장·보기 값·화면 DOM·요청 본문)은 그대로 켬 상태에서 통과한다.
+  - 기대값은 그대로 두고 부르는 줄에서 고정: `_run_3d_hunyuan(lambda: _run_bl_look_off(check_vnew_char_fidelity))`. cf-b(`detailOld`)·cf-r이 옛 캐릭터 상세 JSON 전체(casting 보기 포함) sha256을 구현 전 값과 비교한다. 켬이면 casting 보기에 5개 키가 붙어 지문이 달라진다.
+  - cf-s 옛 화면 DOM sha256(`a8ec4eff…`)·cast-l(캐스팅 화면 DOM·요청 본문)·rw-a~c·ob-h는 기대값 그대로 통과한다. cf-s는 `castingSection`을 대역으로 바꿔 BL 칸이 닿지 않고, cast-l은 BL 필드가 없는 상세라 끔 화면과 같다.
+- **3단계 리뷰**
+  - 보안
+    - 입력 검증: `blRole`·`blType`은 고정 표의 값만 받는다(글 아님·모르는 값 400). 저장값도 읽을 때 다시 표로 거른다(`_bl_state`). 그래서 사용자가 BL 칸으로 넣을 수 있는 글은 없고, 모델에 가는 영어는 표의 고정 조각뿐이다(프롬프트 끼워 넣기 경로 없음).
+    - 오류 문구는 고정 문자열이고 입력을 되풀이하지 않는다. 권한·저장 경로(`require_auth`, `users/{owner}/characters/…`)는 그대로다.
+    - 화면은 `el`(textContent)과 속성(`option.value`·`title`)만 쓴다. 위험한 글(`<img onerror>`)을 라벨·desc·참고 문장에 넣어도 글자 그대로다(bl-i).
+    - 외부 전송: fal 본문은 그대로 `{prompt, num_images, image_size}`이고 prompt에 고정 영어 한 문장이 더해질 뿐이다. 콘텐츠 등급: 조각에 성적·노출·폭력·미성년 낱말 0(bl-a). 비밀값·계정 정보 없음.
+    - 발견·조치: 역할만 바꿀 때 저장 유형이 글이 아닌 깨진 값이면 비우지 않던 경로를 검사로 찾아 고쳤다(`_apply_bl` isinstance). `BadBlType`이 운영 문구 표(`vpoc/errors.py` `USER_FACING_KINDS`)에 없어 운영에서는 "처리 중 오류가 발생했습니다 (코드: BadBlType)"로 보인다. 화면은 맞는 값만 보내 사용자가 볼 일은 없다. `errors.py`가 허용 파일 밖이라 남은 이슈 1에 적었다.
+  - 성능(앱 파드 512Mi)
+    - 표는 조각 61개(수 KB)로 메모리 변화가 사실상 없다. 새 스레드·락·외부 호출이 없다. 정규식은 반복 상한이 있는 lookahead({0,3}·{0,2})라 되돌아가기 폭주가 없고 입력은 300자로 잘린다(최악 입력 0.21ms).
+    - 상세 GET(뽑는 중 5초 폴링)마다 보기에 약 3.4KB가 더해지고 계산이 약 0.2ms 는다. fal 요청 수·금액은 같다(Seedream 장당 금액, 문장 길이와 무관).
+    - 발견·조치: 없음.
+  - 운영성
+    - 로그: `vnew.casting.draw_start … gender=… bl=<유형 또는 ->`(끝에 필드 하나 더함. 이 줄을 읽는 다른 코드·문서는 없다 — 저장소 검색). 400은 `vpoc.error … BadBlType`.
+    - 되돌리기: `config.<target>.env`에 `VNEW_BL_LOOK=false` 한 줄 + 배포 job. 끄면 보기·화면·문장이 이 기능 전과 같고 저장값은 남는다. 코드 되돌리기는 이미지 되돌리기.
+    - 진행 중 작업·재시작: 회차 문장은 시작 때 한 번 만들어 저장하므로 진행 중 뽑기·이어하기(`reconcile`·`run_draw`)는 설정·배포와 상관없이 그 문장을 쓴다.
+    - 섞인 버전(롤링): 옛 파드는 `blRole`·`blType`을 넘기지 않아 무시한다(PUT 200·저장 안 됨). 옛 파드가 casting을 다시 써도 `_casting_of`가 모르는 키를 그대로 두어 BL 저장값이 지워지지 않는다. 옛 화면은 BL을 보내지 않고 새 보기의 추가 키를 무시한다. 오류 없음.
+    - 발견·조치: 없음.
+- **남은 이슈**
+  1. `BadBlType`이 `vpoc/errors.py` `USER_FACING_KINDS`에 없다(허용 파일 밖). 운영에서 API를 직접 부르면 고정 문구 대신 코드만 보인다. 한 줄 추가로 끝난다.
+  2. 미리보기 줄은 저장된 외모 문장 기준이다. 외모 문장 칸을 고치고 저장하지 않으면 줄이 그대로 남는다(뽑기는 고친 문장으로 서버가 다시 계산한다). 역할·유형을 바꾼 경우만 숨긴다(D8).
+  3. 분석 외모 문장은 거의 늘 얼굴(face)·눈(eyes)을 말해서, 실제로는 얼굴·눈 조각이 자주 빠지고 체격·키·표정·자세·몸가짐이 주로 남는다(실제 분석 꼴 6개에 떡대공을 고르면 m2·m3·f1은 자세 한 조각, u1은 눈·자세 두 조각, m1·m4는 세 조각). 그림 우선 규칙대로지만, 정보를 더 주려면 분류를 "얼굴 모양"과 "얼굴 인상"으로 나누는 결정이 필요하다.
+  4. 미인수 "clear, smooth skin"은 현실 배우풍 프리셋의 "natural skin texture with pores and slight imperfections"와 결이 다르다. 프리셋 문구는 판정에 넣지 않는다(D2).
+  5. 유형 + 사용자가 정한 female은 지시대로 그대로 두어 "She has … masculine …" 문장이 나온다. BL 유형을 고르고 성별을 여로 둔 경우 화면 경고가 없다.
+  6. 유형 + 성별 male을 사용자가 직접 정했고 고친 외모 문장에 person·their가 있으면 지금처럼 그대로 둔다(D6은 unknown → male만 바꾼다).
+  7. 실제 Seedream 사진에서 참고 문장이 체격·인상에 얼마나 반영되는지는 유료 확인(개발계 뽑기 1회 $0.08)이 필요하다. Claude가 승인 뒤 한다.
+- **피드백(같은 날, Claude): 103 남은 이슈 1·3·4를 고친다.** 103 결과는 확인됐고 커밋 전이다. 같은 작업 트리에서 이어서 했고, 103 직후 사본(15개 파일 + 스펙·steering 4개)을 `%TEMP%`에 두었다. 시작 전 트리는 103 마지막 전체 검사(전부 통과) 때와 같았다(파일 시각 기준, 그 뒤 생긴 것은 지시서 C-bl-look-hints-fix1.md\와 로그뿐).
+  - 원인(남은 이슈 3): 103 규칙은 외모 문장에 얼굴·눈 낱말만 있어도 그 분류 조각을 모두 뺐다. 분석 외모 문장은 거의 늘 얼굴·눈을 말해서 실제 분석 꼴 6개에 떡대공을 고르면 남는 조각이 [3, 1, 1, 1, 2, 3](평균 1.83개, 무심공 1.83·미인수 1.50)이었다. 목적("정보를 많이 주기")과 맞지 않았다.
+  - 결정(Claude): 그림 우선은 그림이 실제로 보여 주는 **형태** 사실과 부딪칠 때만 뺀다. 형태 4분류(`build`·`height`·`faceShape`·`eyeShape`)는 겹치면 빼고, 인상 5분류(`faceImpression`·`gaze`·`expression`·`posture`·`grooming`)는 늘 더한다.
+  - 결정(Kiro, design D13~D17)
+    - F1 — 섞인 조각을 나눴다(D14). 떡대공 "steady, deep-set eyes" → "deep-set eyes" + "a steady gaze"(지시 예시). 같은 방식으로 광공 "sharp, striking features", 츤데레공 "cool, well-defined features"·"sharp eyes with a slightly averted gaze", 무심공 "cool, sharply defined features"·"a half-lidded, indifferent gaze", 꽃수 "large, clear eyes", 떡대수 "strong, masculine features", 능력수 "sharp, intelligent masculine features"를 형태 + 인상 둘로 나눴다. 모양 낱말이 없는 얼굴·눈 조각("warm, kind features", "soft, attentive eyes" 등)은 글은 그대로 두고 분류 이름만 인상·눈빛으로 바꿨다. 미인수 "long lashes and clear eyes"는 지시대로 eyeShape 하나다.
+    - F2 — 떡대공에 인상 조각 둘을 더했다: "a rugged, masculine look"(faceImpression), "a calm, confident expression"(expression)(D15). 나누기만 하면 떡대공 인상 조각이 눈빛·자세 2개라 평균이 2.83개로 목표(4개 이상)에 못 미쳤다. 하나만 더하면 3.83개(변형 N11이 확인), 둘이면 4.83개다. 지시 범위(나누기)를 넘는 글 추가라 여기에 적는다.
+    - F3 — 형태 판정 낱말 표(D16): 얼굴 모양은 턱·턱선·광대(`chin-length`는 머리 길이라 뺌)·"…-faced"·"face/bone structure", 그리고 얼굴형 낱말(angular·oval·round·square·narrow·slender·sharp·strong·defined …)이 **같은 명사구**에서 face·features 앞에 올 때다. 눈 모양은 눈꺼풀·속눈썹·"…-eyed", 그리고 눈 모양 낱말(narrow·almond·large·deep-set·hooded·half-lidded·sharp·doe …)이 같은 명사구에서 eyes 앞에 올 때다. 같은 명사구 = 세 낱말 안, 관사·전치사·접속사·다른 명사(`_PHRASE_STOP`)를 넘지 않음("long hair, a calm face"의 long은 얼굴형이 아니다). 코·입술·눈썹은 유형 조각이 말하지 않는 부위라 보지 않는다. "piercing eyes"·"calm, gentle eyes"는 눈빛이라 보지 않는다. "hooded"는 옷(hooded jacket)에도 쓰여 eyes 앞에서만 본다. 103의 face·eyes·expression·posture·grooming 낱말 표는 지웠다(이 모듈은 103에서 새로 만든 커밋 전 파일이다).
+    - F4 — 103 결함 하나를 함께 고쳤다: 체격·키 낱말 뒤 창(`_NOT_BODY`)이 "and"를 넘어 "a slim build and narrow eyes"의 slim·build를 체격이 아니라고 읽었다. 창이 관사·전치사·접속사(`_JOIN_STOP`)를 넘지 않게 했다(변형 N1이 확인).
+    - F5 — 인상 조각은 늘 더하므로 모양 사실이 없어야 한다. bl-a가 인상 조각이 형태 분류로 읽히지 않는지, 형태 조각이 자기 형태 분류로만 읽히는지(체격·키 묶음 "a lean, tall build"만 둘) 본다.
+    - F6 — 미인수 "clear, smooth skin" → "a clean, clear complexion"(faceImpression, 남은 이슈 4). 피부 결 낱말이 없어 현실 배우풍 프리셋 "natural skin texture with pores and slight imperfections"와 부딪치지 않는다.
+    - F7 — 운영 문구(남은 이슈 1): `vpoc/errors.py` `USER_FACING_KINDS`에 `BadBlType` 한 줄(이번만 허용). 모르는 역할·유형 문구는 둘이었는데 지시 문구 "알 수 없는 BL 역할·유형입니다." 하나(`casting._MSG_BAD_BL`)로 합쳤다. 짝 불일치 문구는 그대로다. 둘 다 고정 문자열이고 입력을 되풀이하지 않는다. 기존 errors 관련 검사((d)·ad-a·cast-l·lr-a)는 kind가 표에 있는지만 보고 표 전체를 고정하지 않아 기대값을 바꾸지 않았다.
+  - 검토한 대안
+    - (가) 인상도 겹치면 빼되 낱말을 좁히기: 표정은 `look_sentence`가 지우고 시선·인상 낱말은 그림 사실이 아니다. 규칙만 커진다.
+    - (나) 떡대공 평균을 올리려고 형태 판정을 느슨하게(예: 얼굴형 낱말만 보고 턱 낱말은 안 봄): 그림 사실과 부딪치는 조각이 남는다(m3 "a strong jaw" + "a firm square jawline").
+    - (다) 채택: 형태·인상 분류 + 섞인 조각 나누기 + 떡대공 인상 조각 2개.
+  - 새 유형 표(형태 = 겹치면 뺀다, 인상 = 늘 더한다)
+
+  | 유형(id) | 역할 | 형태 조각(겹치면 뺀다) | 인상 조각(늘 더한다) | 이은 길이 |
+  |---|---|---|---|---|
+  | 광공 / 집착공 (`gwanggong`) | 공 | 키 "a tall frame" · 체격 "a broad-shouldered, powerful build" · 얼굴 모양 "sharp features" | 얼굴 인상 "striking good looks" · 눈빛 "an intense, unwavering gaze" · 자세 "an upright stance with an imposing presence" | 159자 |
+  | 츤데레공 (`tsundere_gong`) | 공 | 얼굴 모양 "well-defined features" · 눈 모양 "sharp eyes" | 얼굴 인상 "a cool, reserved look" · 눈빛 "a slightly averted gaze" · 표정 "an aloof expression with a hint of softness" · 자세 "a relaxed yet guarded posture" | 157자 |
+  | 다정공 (`dajeong_gong`) | 공 | — | 얼굴 인상 "warm, kind features" · 눈빛 "soft, attentive eyes" · 표정 "a gentle, warm expression" · 자세 "a relaxed, open posture" · 몸가짐 "neat, clean grooming" | 115자 |
+  | 떡대공 (`ttokdae_gong`) | 공 | 체격 "broad shoulders and a solid, muscular build" · 키 "a tall frame" · 얼굴 모양 "a firm square jawline" · 눈 모양 "deep-set eyes" | 얼굴 인상 "a rugged, masculine look" · 눈빛 "a steady gaze" · 표정 "a calm, confident expression" · 자세 "an upright, imposing posture" | 196자 |
+  | 무심공 (`musim_gong`) | 공 | 체격 "a lean, tall build" · 얼굴 모양 "sharply defined features" · 눈 모양 "half-lidded eyes" | 얼굴 인상 "a cool, detached air" · 눈빛 "an indifferent gaze" · 표정 "a calm, unreadable face" · 몸가짐 "neat, minimal grooming" | 154자 |
+  | 미인수 (`minyu_su`) | 수 | 체격 "a slim yet clearly masculine adult build" · 눈 모양 "long lashes and clear eyes" | 얼굴 인상 "strikingly handsome, delicate and refined masculine features" · 얼굴 인상 "a clean, clear complexion" · 표정 "a gentle, composed expression" | 178자 |
+  | 꽃수 (`kkotsu`) | 수 | 체격 "a slender, lightly built adult man's frame" · 키 "a modest height" · 눈 모양 "large eyes" | 얼굴 인상 "soft, delicate features on a clearly masculine face" · 눈빛 "a clear gaze" · 표정 "a shy, gentle expression" · 자세 "a slightly reserved posture" | 193자 |
+  | 떡대수 (`ttokdaesu`) | 수 | 체격 "broad shoulders and a sturdy, muscular adult man's build" · 키 "a tall frame" · 얼굴 모양 "strong features" | 얼굴 인상 "a good-natured, masculine look" · 눈빛 "calm, gentle eyes" · 표정 "a soft, slightly shy expression" · 자세 "a relaxed, unassuming posture" | 202자 |
+  | 무심수 (`musim_su`) | 수 | — | 얼굴 인상 "calm, clean-cut masculine features" · 눈빛 "a quiet, indifferent gaze" · 표정 "a calm, unreadable expression" · 자세 "a still, composed posture" · 몸가짐 "neat, understated grooming" | 147자 |
+  | 능력수 (`neungryeok_su`) | 수 | 얼굴 모양 "sharp features" | 얼굴 인상 "an intelligent, masculine look" · 눈빛 "focused, confident eyes" · 표정 "a composed, self-assured expression" · 자세 "an upright, confident posture" · 몸가짐 "a polished, well-groomed appearance" | 176자 |
+  | 굴림수 (`gullim_su`) | 수 | 체격 "a lean adult man's build" | 얼굴 인상 "a tired yet handsome masculine face" · 눈빛 "weary, guarded eyes" · 표정 "a subdued, patient expression" · 자세 "a slightly withdrawn posture" | 143자 |
+  | 연하수 (`yeonha_su`) | 수 | — | 얼굴 인상 "fresh, bright features on a clearly adult male face" · 눈빛 "bright, lively eyes" · 표정 "an earnest, open expression" · 자세 "an energetic, open posture" · 몸가짐 "clean, natural grooming" | 154자 |
+
+  - 실제 분석 꼴 6개(cast-b `_CAST_LOOK_FEEDBACK` 결과 문장, 캐스팅 문장에 들어가는 `prompt_look` 그대로)에서 남는 조각(남음/전체)
+
+  | 분석 꼴 | 외모 문장의 형태 분류 | 떡대공 | 무심공 | 미인수 |
+  |---|---|---|---|---|
+  | m1 | 체격·얼굴 모양 | 6/8 | 5/7 | 4/5 |
+  | m2 | 체격·키·얼굴 모양·눈 모양 | 4/8 | 4/7 | 3/5 |
+  | m3 | 체격·키·얼굴 모양·눈 모양 | 4/8 | 4/7 | 3/5 |
+  | f1 | 체격·키·얼굴 모양·눈 모양 | 4/8 | 4/7 | 3/5 |
+  | u1 | 체격·키·얼굴 모양 | 5/8 | 5/7 | 4/5 |
+  | m4 | 얼굴 모양·눈 모양 | 6/8 | 5/7 | 4/5 |
+  | 평균 | | 4.83 | 4.50 | 3.50 |
+
+    103 처음 규칙의 평균은 떡대공 1.83·무심공 1.83·미인수 1.50이었다. 미인수는 인상 조각이 3개라 형태가 모두 겹치면 3개다.
+  - 바꾼 것
+    - `app/src/vnew/genre_bl.py`: `FORM_CATEGORIES`·`IMPRESSION_CATEGORIES`·`CATEGORIES`, `TYPES`(이름표·나눈 조각·떡대공 2조각·미인수 피부), 형태 판정 `_CATEGORY_RE`(build·height·faceShape·eyeShape)·`_JOIN_STOP`·`_PHRASE_STOP`·`_before`·`_FACE_SHAPE_WORDS`·`_EYE_SHAPE_WORDS`, `_NOT_BODY`(접속사를 넘지 않음), `look_categories`(형태만)·`hint_pieces`(인상은 늘), 모듈 docstring. `_BODY_CATEGORIES`는 쓰는 곳이 없어 지웠다(103 새 파일의 커밋 전 상수).
+    - `app/src/vnew/casting.py`: `_MSG_BAD_BL_ROLE`·`_MSG_BAD_BL_TYPE` → `_MSG_BAD_BL`(103 새 상수, 커밋 전), `_bl_checked` 두 줄, 주석 2줄.
+    - `app/src/vpoc/errors.py`: `USER_FACING_KINDS`에 `"BadBlType"`과 주석 2줄.
+    - `tools/check_vpoc.py`: bl-a(분류 9종·형태·인상 읽힘·나눈 조각·complexion), bl-b(새 규칙 기대값 전체·인상 낱말 8경우·구체 19경우·분석 꼴 6개 × 3유형·떡대공 평균 ≥ 4), bl-d·bl-e(떡대공 8조각), bl-f(문구 둘), bl-h(고친 외모 문장 기대값), bl-i(참고 문장 없는 상세 = 유형 없음), 새 bl-j, `_BL_FORM`·`_BL_IMPRESSION`·`_BL_TTOKDAE_MIN_AVG`·`_BL_TTOKDAE_SENTENCE`.
+    - `.kiro/steering/genre-bl.md`(외모 참고 한 줄을 형태·인상 규칙으로), `.kiro/specs/bl-look/`(R1.6·R1.8·R1.9·R8, design D3·D11·D13~D17·§3 표·§8, tasks 6~9), `docs/ANALYSIS.md`(머리 줄, §3.6 모듈 표, §3.6.1 그림 우선·설정 저장 행·운영 문구 단락, §10.1).
+  - 바꾼 기대값: 모두 103에서 새로 만든(커밋 전) bl 검사다. bl-b 전체(분류 표·그림 우선 경우·실제 분석 꼴), bl-d `_BL_TTOKDAE_SENTENCE`(떡대공 8조각, 783자 문장), bl-e "하나 뺀" 문장, bl-f 문구, bl-h 고친 외모 문장의 참고 문장, bl-i noHint 상세(유형이 있으면 인상 조각이 늘 남아 참고 문장이 비지 않으므로, 비는 경우를 "역할만 있고 유형 없음"으로 바꿨다). 그 밖의 기존 검사 기대값은 바꾸지 않았다(cast-a~m·cf-*·rw-*·ob-*·lr-* 그대로).
+  - 검사(바뀐 것)
+
+    | 검사 | 덮는 것 |
+    |---|---|
+    | bl-a | 분류 표 = 형태 4·인상 5, 조각 72개 모두 9분류 안·한 유형 ≤350자(최장 202자)·금지 낱말 0, 형태 조각은 자기 형태 분류로만 읽힘, 인상 조각은 형태 분류 없음, 떡대공 눈 조각이 둘로 나뉨·미인수 eyeShape 하나, 미인수 complexion·"smooth skin" 0 |
+    | bl-b | 형태 4종 × 유형 12종(그 분류 형태 조각만 빠짐), 인상 낱말 8경우(표정·자세·몸가짐·눈빛·얼굴 인상·피부·면도 — 아무것도 안 빠짐), 구체 19경우(D3·D4·같은 명사구 창·hooded jacket·chin-length·piercing eyes·a sharp nose·high cheekbones·almond-shaped·square-jawed), 실제 분석 꼴 6개 × 떡대공·무심공·미인수 조각 전부, 떡대공 평균 ≥ 4 |
+    | bl-j | `USER_FACING_KINDS`에 `BadBlType` 한 줄, `BadBlType`을 던지는 곳 4곳(AST, `app/src` 전체)이 casting.py 고정 문구 상수 둘, `RAW_ERRORS=false` 봉투와 실제 Flask PUT 3건(모르는 역할·유형 → 지시 문구, 짝 불일치 → 짝 문구)이 고정 문구 그대로·type `BadBlType` |
+
+  - 확인
+    - `node --check frontend/public/vnew.js` 통과. `python -X utf8 tools/check_vpoc.py` 전부 통과: ok 63줄(bl 그룹 한 줄에 bl-a~j), FAIL·WARN 0(약 86초).
+    - 바뀐 서버 줄 커버리지(coverage 7.17, `--data-file=%TEMP%\…`, 103 직후 사본과 difflib): 실행문 15줄 중 15줄(100%). `genre_bl.py` 12/12, `casting.py` 3/3, `errors.py`는 바뀐 줄이 집합 글자라 실행문 0줄. `genre_bl.py` 전체도 51/51.
+    - 변형 검사 53개(103의 39개 + 이번 14개): 이번 것은 접속사를 넘는 창(N1), 명사구 막음 없음(N2), chin-length(N3), hooded 어디서나(N4), eyes면 늘 눈 모양(N5), face면 늘 얼굴 모양(N6), 인상도 뺌(N7), 옛 피부 조각(N8), 떡대공 눈 안 나눔(N9), 인상 조각에 모양 사실(N10), 떡대공 추가 조각 하나 없음(N11 — 평균 3.83), errors 표에 없음(E1), 옛 문구(E2), 문구에 입력 되풀이(E3). 53개 모두 잡았고 지금 코드는 통과한다. 103의 D3 변형(G1)은 새 식에 맞춰 다시 썼다.
+    - 줄 끝 LF(바뀐 파일 CR 0 — 이번에는 WORKLOG를 파이썬으로 이어 써서 CRLF가 생기지 않았다), 공백만 바뀐 줄 0, 새 줄 끝 공백 0, 저장소 안 부산물 0. 103 이전(커밋된) 정의는 지운 것이 없다(103 이전 사본과 AST 비교). 지운 \_BODY_CATEGORIES\·\_MSG_BAD_BL_ROLE\·\_MSG_BAD_BL_TYPE\는 103에서 새로 만든 커밋 전 상수다. 수정 금지 파일과 화면·설정 파일(vnew.js·vnew.css·routes.py·settings.py·템플릿·base)은 바뀌지 않았다.
+  - 3단계 리뷰
+    - 보안: 모델에 가는 영어는 여전히 고정 표 조각뿐이다(사용자 입력 없음). 인상 조각은 늘 더해지므로 bl-a가 인상 조각에 모양 사실·은어·성적·폭력·미성년 낱말이 없음을 본다. `BadBlType` 문구는 고정 문자열이고 운영에서 보여도 입력·키·URL이 섞이지 않는다(bl-j AST). 발견·조치: 없음.
+    - 성능: 판정 정규식은 반복 상한이 있는 창(세 낱말)이고 입력은 300자다. 최악 입력(반복 낱말 300자) `look_categories` 1회 약 0.28ms, `hint_pieces` 1회 약 0.28ms. 참고 문장이 길어져 캐스팅 문장 최장 1,052자(1500자 상한 안), 보기 BL 필드 약 3.6KB. 외부 호출·금액 변화 없음. 발견·조치: 없음.
+    - 운영성: 되돌리기는 그대로 `VNEW_BL_LOOK=false` 한 줄이다. 진행 중 뽑기는 시작 때 만든 문장을 쓴다(이 변경 전 문장). 운영에서 API로 모르는 BL 값을 보내면 이제 "알 수 없는 BL 역할·유형입니다."가 보인다(로그 `vpoc.error … BadBlType`은 그대로). 발견·조치: F4(접속사를 넘는 창)를 고쳤다.
+  - 남은 이슈(이번)
+    1. 몸가짐(grooming)도 지시대로 늘 더한다. 그림이 "messy undercut"(u1)처럼 흐트러진 머리를 말해도 무심공 "neat, minimal grooming"이 붙는다. 머리 모양은 그림이 이기지만(외모 문장에 남는다) 문장 안에서 결이 엇갈릴 수 있다.
+    2. 수 유형의 masculine 낱말이 형태 조각에만 있는 유형이 있다(미인수 build). 형태가 모두 겹치면(m2·m3·f1) 참고 문장에 masculine이 없다. 주어 "He is a Korean man …"은 늘 있다. 인상 조각에 넣을지는 글 결정이 필요하다.
+    3. 프리셋 문구와 인상 조각이 엇갈릴 수 있다: 아이돌풍 "slim V-line face"·"calm expression"과 떡대공 "a firm square jawline"·츤데레공 "an aloof expression". 프리셋은 판정에 넣지 않는다(D2, 103과 같음).
+    4. 103 남은 이슈 2·5·6·7(미리보기 줄 기준, female + 유형, male 지정 + 중립 낱말, 유료 확인)은 그대로다.
+- 2026-10-31 Claude 리뷰: 떡대공 인상 조각 2개 추가 승인. 미인수 남은 이슈 2는 인상 조각을 "strikingly handsome, delicate and refined masculine features"로 바꿔 해결(형태가 모두 겹쳐도 masculine 유지).

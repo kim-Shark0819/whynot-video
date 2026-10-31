@@ -249,7 +249,8 @@ def create_blueprint(deps: VnewDependencies) -> Blueprint:
             payload = request.get_json(silent=True)
             payload = payload if isinstance(payload, dict) else {}
             view = casting.update_settings(
-                owner, char_id, preset=payload.get("preset"), gender=payload.get("gender"), look_en=payload.get("lookEn")
+                owner, char_id, preset=payload.get("preset"), gender=payload.get("gender"), look_en=payload.get("lookEn"),
+                bl_role=payload.get("blRole"), bl_type=payload.get("blType"),
             )
             return jsonify({"casting": view})
         except Exception as exc:  # noqa: BLE001
@@ -267,6 +268,7 @@ def create_blueprint(deps: VnewDependencies) -> Blueprint:
             view = casting.start_draw(
                 owner, char_id, confirm,
                 preset=payload.get("preset"), gender=payload.get("gender"), look_en=payload.get("lookEn"),
+                bl_role=payload.get("blRole"), bl_type=payload.get("blType"),
             )
             return jsonify({"casting": view}), 202
         except Exception as exc:  # noqa: BLE001

@@ -2060,6 +2060,25 @@ textarea.vnew-field-input {
   max-width: 240px;
 }
 
+/* 성별 + BL 역할·유형 한 줄(지시서 103). BL 끔이면 이 줄이 없고 성별 칸만 있다. */
+.vnew-casting-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: 12px;
+}
+
+.vnew-casting-bl-role,
+.vnew-casting-bl-type {
+  max-width: 240px;
+}
+
+.vnew-casting-bl-hint {
+  margin: 0;
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+
 .vnew-casting-look-text {
   width: 100%;
 }
