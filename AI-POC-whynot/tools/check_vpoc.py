@@ -31491,6 +31491,9 @@ def _run_bl_look_off(check) -> None:
 # ALB 대상이 0(Target.NotInUse)이 됐다. frontend·app Deployment 에 topology.kubernetes.io/zone In POD_ZONES 필수
 # nodeAffinity 를 건다. render.py 는 값 형식을 보지 않으므로(플랫폼 파일이라 고치지 않는다) 값 형식은 이 검사가 막는다
 # (.kiro/specs/pod-zone-pin/design.md D1·D6~D8).
+# 지시서 106(같은 날): 2c 노드를 더한 뒤 rollout restart 에서 새 파드 4개가 모두 2c 노드에 놓였다. 두 Deployment 의
+# topologySpreadConstraints 에 영역 분산(zone, maxSkew 1, DoNotSchedule, matchLabelKeys pod-template-hash)을 더한다
+# (design.md D10~D15, 검사 pz-f~h).
 
 _PZ_PROD_ZONES = ["ap-northeast-2a", "ap-northeast-2c"]
 _PZ_BASE_ZONES = ["ap-northeast-2a", "ap-northeast-2b", "ap-northeast-2c"]
@@ -31522,6 +31525,12 @@ _PZ_BAD_VALUES = (
     ('"ap-northeast-2a"', "꼴"), ("[ap-northeast-2a]", "꼴"),
 )
 _PZ_GOOD_VALUES = ("ap-northeast-2a", "ap-northeast-2d", "ap-northeast-2a,ap-northeast-2b,ap-northeast-2c,ap-northeast-2d")
+# 지시서 106: 롤링 분석(design.md D13)의 전제. 바뀌면 pz-f·pz-g 가 알려 분석을 다시 보게 한다.
+_PZ_ROLLING = ("  replicas: 2\n  strategy:\n    type: RollingUpdate\n    rollingUpdate:\n      maxUnavailable: 0\n"
+               "      maxSurge: 1\n")
+# 영역 규칙 앞 주석에 있어야 하는 낱말(두 Deployment 모두, frontend 는 _PZ_ZONE_NOTE_FRONT 도).
+_PZ_ZONE_NOTE_WORDS = ("nodeAffinityPolicy", "Honor", "POD_ZONES", "2b")
+_PZ_ZONE_NOTE_FRONT = ("pod-template-hash", "ScheduleAnyway", "nodeTaintsPolicy", "Pending")
 
 
 def _pz_zone_problems(raw) -> list[str]:
@@ -31554,6 +31563,54 @@ def _pz_spread_block(name: str) -> str:
         "            matchLabels:\n"
         f"              app.kubernetes.io/name: {name}\n"
     )
+
+
+def _pz_zone_spread_block(name: str) -> str:
+    """두 Deployment 의 영역 분산 규칙(지시서 106, 8줄). hostname 규칙 다음 목록 항목이다. 앞 주석 줄은 넣지 않는다."""
+    return (
+        "        - maxSkew: 1\n"
+        "          topologyKey: topology.kubernetes.io/zone\n"
+        "          whenUnsatisfiable: DoNotSchedule\n"
+        "          labelSelector:\n"
+        "            matchLabels:\n"
+        f"              app.kubernetes.io/name: {name}\n"
+        "          matchLabelKeys:\n"
+        "            - pod-template-hash\n"
+    )
+
+
+def _pz_host_spread_obj(name: str) -> dict:
+    return {"maxSkew": 1, "topologyKey": "kubernetes.io/hostname", "whenUnsatisfiable": "ScheduleAnyway",
+            "labelSelector": {"matchLabels": {"app.kubernetes.io/name": name}}}
+
+
+def _pz_zone_spread_obj(name: str) -> dict:
+    # nodeAffinityPolicy·nodeTaintsPolicy·minDomains 키가 없다(기본값 Honor·Ignore·1). dict 비교라 키가 더해지면 걸린다.
+    return {"maxSkew": 1, "topologyKey": "topology.kubernetes.io/zone", "whenUnsatisfiable": "DoNotSchedule",
+            "labelSelector": {"matchLabels": {"app.kubernetes.io/name": name}}, "matchLabelKeys": ["pod-template-hash"]}
+
+
+def _pz_zone_rule_place(doc: str, name: str) -> dict:
+    """Deployment 문서 하나에서 영역 규칙의 자리(지시서 106).
+
+    host·zone = hostname 블록(_pz_spread_block)·영역 규칙(_pz_zone_spread_block) 개수. 둘 다 1개이고 영역 규칙이 뒤에 있으면
+    comments = 둘 사이 줄이 1줄 이상이고 모두 8칸 주석인지, next = 영역 규칙 바로 뒤 줄, note = 사이 주석 원문. 아니면 None·"".
+    """
+    host, zone = _pz_spread_block(name), _pz_zone_spread_block(name)
+    place = {"host": doc.count(host), "zone": doc.count(zone), "comments": None, "next": None, "note": ""}
+    if place["host"] == 1 and place["zone"] == 1:
+        end, at = doc.index(host) + len(host), doc.index(zone)
+        if at >= end:
+            between = doc[end:at].split("\n")[:-1]
+            place["comments"] = bool(between) and all(line.startswith("        # ") for line in between)
+            place["note"] = "\n".join(between)
+            place["next"] = doc[at + len(zone):].split("\n", 1)[0]
+    return place
+
+
+def _pz_flat_note(text: str) -> str:
+    """주석 여러 줄을 한 줄로(줄마다 앞의 공백·# 를 떼고 공백 하나로 잇는다). 줄을 넘는 문구도 찾을 수 있게 한다."""
+    return " ".join(line.strip().lstrip("#").strip() for line in text.split("\n") if line.strip())
 
 
 def _pz_parent_path(lines: list[str], index: int) -> list[str]:
@@ -31620,8 +31677,8 @@ def check_pod_zones() -> None:
 
     (pz-a) 설정 줄: base·prod 에 POD_ZONES= 한 줄씩(값 = 기대 목록, 줄 원문 = load_config 값), 키 순서에서 PUBLIC_SUBNET_IDS
            바로 다음, dev 오버레이에 키 없음, 주석(base·prod POD_ZONES 위: PUBLIC_SUBNET_IDS·503 / prod 서브넷 위: "Safe because"
-           없음·POD_ZONES·Target.NotInUse·no 2c node·ap-northeast-2b·EIP 경고 줄 그대로), prod 서브넷 수 = 영역 수,
-           prod BOM·CR 0, base BOM 없음·CR 0
+           없음·POD_ZONES·Target.NotInUse·"no 2c node" 없음(106 에서 2c 노드가 생겼다)·ap-northeast-2b·EIP 경고 줄 그대로),
+           prod 서브넷 수 = 영역 수, prod BOM·CR 0, base BOM 없음·CR 0
     (pz-b) 값 판정 _pz_zone_problems: base·prod 값 문제 0, 나쁜 값 20개가 기대한 첫 분류로 걸리고 좋은 값 3개는 통과
     (pz-c) 템플릿: ${POD_ZONES} 2번(둘 다 values: [${POD_ZONES}]), affinity 8줄 블록 2번(바로 뒤 topologySpreadConstraints,
            바로 앞 주석에 2026-10-31·503), 문서 kind 순서·affinity 는 두 Deployment 에만, topologySpread 두 블록 글자 그대로
@@ -31630,6 +31687,15 @@ def check_pod_zones() -> None:
     (pz-e) 저장소 밖 임시 트리에서 CI 와 같게 render.py --target prod|dev(CLI): 종료 0·파일 prod 4·dev 3·CI 미치환 판정 0줄·태그·
            CLI workloads = 메모리 렌더(바이트), base 에서 POD_ZONES 를 빼면 prod(오버레이 키 검사)·dev(없는 변수) 둘 다 실패,
            .gitlab-ci.yml grep 기준 그대로, 저장소에 산출물 안 남김
+    지시서 106(영역 분산):
+    (pz-f) 템플릿: 두 Deployment 마다 hostname 블록 1개 바로 뒤(사이는 8칸 주석 줄만)에 영역 규칙 8줄 1개, 바로 뒤 containers,
+           주석 낱말(nodeAffinityPolicy·Honor·POD_ZONES·2b, frontend 는 pod-template-hash·ScheduleAnyway·nodeTaintsPolicy·Pending),
+           파일 전체 topologyKey zone·DoNotSchedule·ScheduleAnyway·matchLabelKeys 각 2번, nodeAffinityPolicy·nodeTaintsPolicy·
+           minDomains 키 없음, 롤링 전제(replicas 2·maxUnavailable 0·maxSurge 1). _pz_zone_rule_place 자체도 표본 6개로 확인
+    (pz-g) render.py 메모리 렌더 prod·dev: 두 Deployment 마다 영역 규칙 자리·부모 경로 spec/template/spec/topologySpreadConstraints·
+           topologySpreadConstraints 1개·롤링 전제, POD_ZONES 서로 다른 영역 2개 이상. PyYAML 이 있으면 분산 목록 dict =
+           [hostname, zone]·selector·파드 라벨 이름·replicas·strategy
+    (pz-h) 주석 사실: prod 서브넷·POD_ZONES 주석에 옛 문구 없음·노드 2a·2b·2c 한 대씩·영역 분산, base POD_ZONES 주석에 영역 분산
     """
     import importlib.util  # noqa: PLC0415
 
@@ -31695,8 +31761,8 @@ def check_pod_zones() -> None:
                         "no 2c node" in subnet_note, "ap-northeast-2b" in subnet_note,
                         "# Do not add 2b back without checking the EIP headroom first." in subnet_note.split("\n"),
                         len(merged.get("PUBLIC_SUBNET_IDS", "").split(",")), len(merged.get("POD_ZONES", "").split(","))],
-               [False, True, True, True, True, True, len(_PZ_PROD_ZONES), len(_PZ_PROD_ZONES)],
-               "prod: 옛 'Safe because' 없음·서브넷 주석(POD_ZONES·NotInUse·no 2c node·2b 다시 넣기·EIP 경고)·서브넷 수 = 영역 수")
+               [False, True, True, False, True, True, len(_PZ_PROD_ZONES), len(_PZ_PROD_ZONES)],
+               "prod: 옛 'Safe because' 없음·서브넷 주석(POD_ZONES·NotInUse·'no 2c node' 없음·2b 다시 넣기·EIP 경고)·서브넷 수 = 영역 수")
         dev_text = (root / "deploy" / "config.dev.env").read_text(encoding="utf-8-sig")
         expect("pz-a", ["POD_ZONES" in overlays["dev"], "POD_ZONES" in dev_text], [False, False],
                "dev 오버레이에 POD_ZONES 없음(개발은 base 값)")
@@ -31786,9 +31852,7 @@ def check_pod_zones() -> None:
                 by_name = {doc["metadata"]["name"]: doc for doc in loaded if doc.get("kind") == "Deployment"}
                 pods = {name: by_name.get(name, {}).get("spec", {}).get("template", {}).get("spec", {}) for name in names}
                 expect("pz-d", {name: [pod.get("affinity"), pod.get("topologySpreadConstraints")] for name, pod in pods.items()},
-                       {name: [_pz_affinity_obj(want), [{"maxSkew": 1, "topologyKey": "kubernetes.io/hostname",
-                                                         "whenUnsatisfiable": "ScheduleAnyway",
-                                                         "labelSelector": {"matchLabels": {"app.kubernetes.io/name": name}}}]]
+                       {name: [_pz_affinity_obj(want), [_pz_host_spread_obj(name), _pz_zone_spread_obj(name)]]
                         for name in names}, f"{target}: YAML 파싱 affinity·topologySpreadConstraints")
                 other_files = [t for n, t in texts.items() if n != "workloads.yaml.tmpl"]
                 expect("pz-d", [_pz_has_key(doc, "affinity") for doc in loaded if doc.get("kind") != "Deployment"]
@@ -31858,12 +31922,110 @@ def check_pod_zones() -> None:
                "저장소의 deploy/rendered·deploy/config.env 존재 여부가 검사 전후로 같다")
         seen.append("pz-e")
 
-    for group in (pz_a, pz_b, pz_c, pz_d, pz_e):
+    def pz_f() -> None:
+        template = template_path.read_text(encoding="utf-8")
+        docs = template.split("\n---\n")
+        places, notes, rolling = [], [], []
+        for index, var in ((1, "${FRONTEND_DEPLOYMENT_NAME}"), (3, "${APP_SERVICE_ACCOUNT}")):
+            doc = docs[index] if len(docs) > index else ""
+            place = _pz_zone_rule_place(doc, var)
+            notes.append(_pz_flat_note(place.pop("note")))
+            places.append(place)
+            rolling.append(_PZ_ROLLING in doc)
+        want = {"host": 1, "zone": 1, "comments": True, "next": "      containers:"}
+        expect("pz-f", places, [want, want],
+               "템플릿 frontend·app: hostname 블록 1개 바로 뒤(사이는 8칸 주석 줄만)에 영역 규칙 8줄 1개·바로 뒤 containers")
+        words = [_PZ_ZONE_NOTE_WORDS + _PZ_ZONE_NOTE_FRONT, _PZ_ZONE_NOTE_WORDS]
+        expect("pz-f", [[word in note for word in group] for note, group in zip(notes, words)],
+               [[True] * len(group) for group in words],
+               "영역 규칙 주석 낱말(frontend·app: " + "·".join(_PZ_ZONE_NOTE_WORDS) + ", frontend 더: "
+               + "·".join(_PZ_ZONE_NOTE_FRONT) + ")")
+        expect("pz-f", [template.count("topologyKey: topology.kubernetes.io/zone"), template.count("whenUnsatisfiable: DoNotSchedule"),
+                        template.count("whenUnsatisfiable: ScheduleAnyway"), template.count("matchLabelKeys:"),
+                        re.findall(r"^\s*(?:- )?(nodeAffinityPolicy|nodeTaintsPolicy|minDomains)\s*:", template, re.M), rolling],
+               [2, 2, 2, 2, [], [True, True]],
+               "파일 전체: zone·DoNotSchedule·ScheduleAnyway·matchLabelKeys 각 2번, 정책 키 없음(기본 Honor·Ignore·1), 롤링 전제 2곳")
+        # _pz_zone_rule_place 자체: 맞음·주석 없음·주석 아닌 줄·순서 뒤집힘·규칙 없음·규칙 두 번.
+        host, zone, note, tail = _pz_spread_block("N"), _pz_zone_spread_block("N"), "        # 영역\n", "      containers:\n"
+        samples = [host + note + zone + tail, host + zone + tail, host + "        - maxSkew: 2\n" + zone + tail,
+                   zone + note + host + tail, host + note + tail, host + note + zone + zone + tail]
+        expect("pz-f", [_pz_zone_rule_place(sample, "N") for sample in samples], [
+            {"host": 1, "zone": 1, "comments": True, "next": "      containers:", "note": "        # 영역"},
+            {"host": 1, "zone": 1, "comments": False, "next": "      containers:", "note": ""},
+            {"host": 1, "zone": 1, "comments": False, "next": "      containers:", "note": "        - maxSkew: 2"},
+            {"host": 1, "zone": 1, "comments": None, "next": None, "note": ""},
+            {"host": 1, "zone": 0, "comments": None, "next": None, "note": ""},
+            {"host": 1, "zone": 2, "comments": None, "next": None, "note": ""}], "_pz_zone_rule_place 표본 6개")
+        seen.append("pz-f")
+
+    def pz_g() -> None:
+        done: list[str] = []
+        template = template_path.read_text(encoding="utf-8")
+        for target in ("prod", "dev"):
+            merged = {**base, **overlays[target]}
+            try:
+                work = render.render_text(template, render.add_derived(merged), "k8s/workloads.yaml.tmpl")
+            except (Exception, SystemExit) as exc:  # noqa: BLE001
+                bad.append(f"(pz-g) {target}: 렌더 실패: {type(exc).__name__} {safe(exc)}")
+                continue
+            deployments = {}
+            for doc in work.split("\n---\n"):
+                if re.search(r"^kind: Deployment$", doc, re.M):
+                    deployments[(re.findall(r"^  name: (\S+)$", doc, re.M) or ["?"])[0]] = doc
+            got = {}
+            for name in names:
+                doc = deployments.get(name, "")
+                lines = doc.split("\n")
+                place = _pz_zone_rule_place(doc, name)
+                del place["note"]
+                items = [i for i, line in enumerate(lines) if line == "        - maxSkew: 1"]
+                got[name] = {**place, "lists": doc.count("\n      topologySpreadConstraints:\n"),
+                             "path": _pz_parent_path(lines, items[1]) if len(items) == 2 else None, "rolling": _PZ_ROLLING in doc}
+            expect("pz-g", got, {name: {"host": 1, "zone": 1, "comments": True, "next": "      containers:", "lists": 1,
+                                        "path": ["spec", "template", "spec", "topologySpreadConstraints", "maxSkew"],
+                                        "rolling": True} for name in names},
+                   f"{target} frontend·app: 영역 규칙 자리·부모 경로·분산 목록 1개·롤링 전제")
+            zones = merged.get("POD_ZONES", "").split(",")
+            expect("pz-g", len(set(zones)) >= 2, True, f"{target}: POD_ZONES 에 서로 다른 영역 2개 이상(파드 2개가 다른 영역에 놓일 자리)")
+            if yaml_mod is not None:
+                by_name = {doc["metadata"]["name"]: doc for doc in yaml_mod.safe_load_all(work) if doc and doc.get("kind") == "Deployment"}
+                parsed = {}
+                for name in names:
+                    spec_ = by_name.get(name, {}).get("spec", {})
+                    pod = spec_.get("template", {})
+                    parsed[name] = {"spread": pod.get("spec", {}).get("topologySpreadConstraints"),
+                                    "names": [spec_.get("selector", {}).get("matchLabels", {}).get("app.kubernetes.io/name"),
+                                              pod.get("metadata", {}).get("labels", {}).get("app.kubernetes.io/name")],
+                                    "replicas": spec_.get("replicas"), "strategy": spec_.get("strategy")}
+                expect("pz-g", parsed, {name: {"spread": [_pz_host_spread_obj(name), _pz_zone_spread_obj(name)], "names": [name, name],
+                                               "replicas": 2, "strategy": {"type": "RollingUpdate",
+                                                                           "rollingUpdate": {"maxUnavailable": 0, "maxSurge": 1}}}
+                                        for name in names},
+                       f"{target}: YAML 파싱 분산 목록 [hostname, zone]·selector·파드 라벨 이름·replicas·strategy")
+            done.append(target)
+        if done == ["prod", "dev"]:
+            seen.append("pz-g")
+
+    def pz_h() -> None:
+        prod_lines = prod_path.read_bytes().decode("utf-8-sig").split("\n")
+        base_lines = example_path.read_text(encoding="utf-8").split("\n")
+        subnet = _pz_flat_note(comment_above(prod_lines, "PUBLIC_SUBNET_IDS"))
+        prod_zone = _pz_flat_note(comment_above(prod_lines, "POD_ZONES"))
+        base_zone = _pz_flat_note(comment_above(base_lines, "POD_ZONES"))
+        expect("pz-h", {"prod 서브넷": [phrase in subnet for phrase in ("only pods on the 2a node can serve", "one each in 2a, 2b and 2c",
+                                                                      "zone spread rule", "different zones")],
+                        "prod POD_ZONES": [phrase in prod_zone for phrase in ("2c 노드가 없", "2a·2b·2c 한 대씩", "영역 분산")],
+                        "base POD_ZONES": ["영역 분산" in base_zone]},
+               {"prod 서브넷": [False, True, True, True], "prod POD_ZONES": [False, True, True], "base POD_ZONES": [True]},
+               "주석 사실(2026-10-31 노드 2a·2b·2c 한 대씩·영역 분산, 옛 '2a 노드만'·'2c 노드가 없' 문구 없음)")
+        seen.append("pz-h")
+
+    for group in (pz_a, pz_b, pz_c, pz_d, pz_e, pz_f, pz_g, pz_h):
         try:
             group()
         except (Exception, SystemExit) as exc:  # noqa: BLE001 — 한 묶음의 예외(render.py 의 SystemExit 포함)가 나머지를 막지 않게 한다.
             bad.append(f"({group.__name__.replace('_', '-')}) 검사 중 예외: {type(exc).__name__} {safe(exc)}")
-    expect("pz", seen, ["pz-a", "pz-b", "pz-c", "pz-d", "pz-e"], "모든 묶음이 끝까지 돌았다")
+    expect("pz", seen, ["pz-a", "pz-b", "pz-c", "pz-d", "pz-e", "pz-f", "pz-g", "pz-h"], "모든 묶음이 끝까지 돌았다")
     if bad:
         fail("pod-zone-pin 파드 영역 검사 실패\n" + "\n".join(f"  {item}" for item in bad))
         return
@@ -31871,7 +32033,8 @@ def check_pod_zones() -> None:
     ok(
         "pod-zone-pin 파드 영역 검사 (pz-a)설정 줄·주석·서브넷 수 (pz-b)값 판정 "
         f"(pz-c)템플릿 affinity 2곳 (pz-d)렌더 prod [2a,2c]·dev [2a,2b,2c] frontend·app({how}) "
-        "(pz-e)CLI 렌더 prod 4·dev 3파일 CI 미치환 0줄·POD_ZONES 없으면 실패"
+        "(pz-e)CLI 렌더 prod 4·dev 3파일 CI 미치환 0줄·POD_ZONES 없으면 실패 "
+        "(pz-f)템플릿 영역 분산 2곳·주석·롤링 전제 (pz-g)렌더 prod·dev 분산 [hostname, zone] (pz-h)주석 사실(노드 2a·2b·2c)"
     )
 
 

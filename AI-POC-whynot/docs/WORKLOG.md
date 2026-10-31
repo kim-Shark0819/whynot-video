@@ -1689,3 +1689,80 @@
   4. 개발 노드의 AZ는 확인하지 않았다. 개발 노드가 2a·2b·2c 밖(2d)에 있으면 그 노드에는 더 놓이지 않는다(개발 ALB도 2d를 쓰지 않으므로 그곳 파드는 원래 대상으로 쓰이지 않는다).
   5. CI 검사 이미지에 PyYAML이 없어 pz-d의 YAML 파싱 부분은 로컬에서만 돈다. CI는 글자 블록·자리·값으로 본다.
   6. 렌더러는 값 형식을 보지 않는다. CI 밖에서 손으로 렌더하면 나쁜 값도 렌더된다(배포 경로는 CI뿐이라 `check:whynot`이 막는다).
+
+### 지시서 106 — frontend·app 파드를 영역(AZ)마다 고르게 나눈다: 영역 분산 `topologySpreadConstraints` (Kiro, claude-opus-5.5)
+- **범위**: `.kiro/handoff/106-zone-spread.md`. 스펙 `.kiro/specs/pod-zone-pin/`에 106 절(requirements R7~R11·design D10~D19·tasks 6~10)을 더하고 같은 실행에서 구현·검사까지 했다. 커밋·push 하지 않았다. git·aws·kubectl·네트워크·유료 API를 쓰지 않았다. 클러스터 상태는 지시서가 준 사실만 썼다.
+- **먼저 한 일**: 바꿀 파일 9개와 수정 금지 파일 4개의 시작 전 사본, 변경 전 렌더(dev·prod 템플릿 18개씩, 메모리), 저장소 파일 mtime을 저장소 밖(`%TEMP%\pz106`)에 두었다. 시작 전 전체 검사는 전부 통과(ok 64줄, FAIL·WARN 0).
+- **사실(지시서)**: 2026-10-31 사용자 지시로 운영·개발 노드그룹에 2c 노드를 더해 노드는 운영 2a·2b·2c, 개발 2a·2b·2c 각 1대다. 그 뒤 운영 rollout restart에서 새 파드 4개가 모두 2c 노드에 놓였다. 분산 규칙이 hostname·`ScheduleAnyway`(점수만)뿐이고 이름 라벨만 보아 롤링 중 옛 파드까지 셌기 때문이다. Claude가 파드를 손으로 지워 2a·2c 하나씩으로 맞췄다.
+- **결정**(design D10~D17)
+  - D10 — 두 Deployment `topologySpreadConstraints`에서 hostname 항목 바로 뒤에 영역 항목(`topology.kubernetes.io/zone`, `maxSkew: 1`, `DoNotSchedule`, 이름 라벨 + `matchLabelKeys: [pod-template-hash]`)을 더했다. hostname 7줄 블록은 글자 그대로라 105 검사의 글자 비교가 그대로 맞는다. 스케줄러는 목록 순서와 무관하다.
+  - D11 — `matchLabelKeys: [pod-template-hash]`로 같은 리비전 파드만 센다. 롤링 중 옛 ReplicaSet 파드를 세지 않는다.
+  - D12 — `nodeAffinityPolicy`·`nodeTaintsPolicy`·`minDomains`를 적지 않는다(기본 Honor·Ignore·1). Honor라 운영 2b 노드(`POD_ZONES` 밖)는 영역 계산에서 빠진다. Ignore였다면 2a·2c 중 하나를 못 쓸 때 2b가 "0개" 도메인으로 남아 두 번째 파드가 Pending이었을 것이다. 템플릿 주석(frontend 5줄, app 1줄)에 이 점을 적었다.
+  - D13 — 롤링(`replicas 2`·`maxSurge 1`·`maxUnavailable 0`)은 막히지 않는다: 첫 새 파드는 어디든, 두 번째 새 파드는 다른 영역으로 간다. 옛 파드를 세지 않으므로 옛 배치가 막지 않는다. 다른 영역 노드가 자원 부족·cordon·NotReady면 두 번째 파드가 Pending이고 롤링이 멈춘다(옛 1 + 새 1이 받는다, 600초 뒤 ProgressDeadlineExceeded).
+  - D14 — 영역 하나가 없어질 때: 노드 객체가 없어지면 그 영역은 도메인에서 빠져 남은 영역에 2개가 뜬다(문서 "Known limitations", 확신 높음). 노드 객체가 NotReady·cordon으로 남으면 `nodeTaintsPolicy` 기본 Ignore라 그 영역을 계속 세어, 쫓겨난 파드를 대신할 파드는 Pending이고 남은 1개가 받는다(필드 의미 확신 높음, "종료 중 파드는 세지 않는다"는 스케줄러 구현 기억이라 중간). 지시서 문장("남은 영역에 2개")은 앞 경우에만 맞다. EKS에서 노드 객체가 지워지기까지의 시간은 미확인.
+  - D16 — `config.prod.env` 서브넷 주석(영어)과 `POD_ZONES` 주석(한국어)의 "2c 노드 없음" 문장을 지금 사실로 고쳤다. 값·키 순서·BOM·LF·끝 두 줄은 그대로다(`render.load_config` 결과가 시작 전과 같음). base `POD_ZONES` 주석에 영역 분산 한 줄을 더했다.
+- **검토한 대안**(D17)
+  - (가) 영역 규칙 `ScheduleAnyway`: 점수만이라 쏠림을 못 막는다. 거절.
+  - (나) 필수 `podAntiAffinity`(영역마다 1개): `replicas`를 늘리면 바로 Pending이고, 리비전을 구분하지 않으면 surge 파드가 Pending이다. 거절.
+  - (다) `nodeTaintsPolicy: Honor`: NotReady·cordon 노드를 빼 D14의 Pending을 없애지만 노드 교체·drain 중 한 영역으로 몰리고 지시서 값 밖이다. 남은 이슈로 사용자 결정에 둔다.
+  - (라) `minDomains: 2`: 영역 하나만 쓸 수 있을 때 Pending. 목표와 반대. 거절.
+  - (마) hostname 규칙에도 `matchLabelKeys`, (바) 규칙을 끄는 설정 플래그: 지시서 밖. 하지 않았다.
+- **바꾼 것**
+  - `k8s/workloads.yaml.tmpl`: frontend·app 분산 목록에 주석 + 영역 항목 8줄씩. 추가 22줄, 지운 줄 0.
+  - `deploy/config.prod.env`(주석만): 서브넷 주석 6줄 → 8줄, `POD_ZONES` 주석 3줄 → 3줄. `deploy/config.env.example`(주석만): 1줄 추가.
+  - `tools/check_vpoc.py`: 새 상수 `_PZ_ROLLING`·`_PZ_ZONE_NOTE_WORDS`·`_PZ_ZONE_NOTE_FRONT`, 새 함수 `_pz_zone_spread_block`·`_pz_host_spread_obj`·`_pz_zone_spread_obj`·`_pz_zone_rule_place`·`_pz_flat_note`, `check_pod_zones` 안 `pz_f`·`pz_g`·`pz_h`와 묶음 루프·"모든 묶음" 목록·docstring·ok 줄, pz-a·pz-d 기대값(아래). difflib 기준 추가 173줄·지운 줄 10(지운 줄은 모두 같은 자리에서 고쳐 쓴 줄).
+  - `.kiro/specs/pod-zone-pin/` 세 파일 끝에 106 절. `docs/ANALYSIS.md`(머리 줄, §7.4 행·근거, §8.7 원인 줄 "사고 당시"·남은 위험, 새 §8.8, §10.1 줄 수·pz 행, R-22), 이 항목.
+- **렌더 결과**(prod frontend 분산 블록. app은 이름 `whynot-app`·주석 1줄, dev도 같은 블록)
+
+  ```yaml
+        topologySpreadConstraints:
+          - maxSkew: 1
+            topologyKey: kubernetes.io/hostname
+            whenUnsatisfiable: ScheduleAnyway
+            labelSelector:
+              matchLabels:
+                app.kubernetes.io/name: whynot-frontend
+          # 영역 분산(지시서 106, 2026-10-31): … (주석 5줄)
+          - maxSkew: 1
+            topologyKey: topology.kubernetes.io/zone
+            whenUnsatisfiable: DoNotSchedule
+            labelSelector:
+              matchLabels:
+                app.kubernetes.io/name: whynot-frontend
+            matchLabelKeys:
+              - pod-template-hash
+  ```
+
+- **검사(어떤 검사가 무엇을 덮는지)**
+
+  | 검사 | 덮는 것 |
+  |---|---|
+  | pz-f | 템플릿 두 Deployment 문서마다 `_pz_zone_rule_place`(hostname 블록 1개·영역 블록 1개·순서·사이 줄이 8칸 주석 1줄 이상·바로 뒤 `containers`), 주석 낱말(`_PZ_ZONE_NOTE_WORDS`·frontend `_PZ_ZONE_NOTE_FRONT`, `_pz_flat_note`), 파일 전체 zone·DoNotSchedule·ScheduleAnyway·matchLabelKeys 각 2번, 정책 키 0, 롤링 전제 `_PZ_ROLLING` 2곳. `_pz_zone_rule_place`의 모든 분기를 표본 6개(맞음·주석 없음·주석 아닌 줄·순서 뒤집힘·규칙 없음·두 번)로 |
+  | pz-g | prod·dev 메모리 렌더(`add_derived`·`render_text`, 렌더 실패 분기 포함): Deployment마다 영역 규칙 자리·영역 항목 부모 경로 `spec/template/spec/topologySpreadConstraints`(`_pz_parent_path`)·분산 목록 1개·롤링 전제, `POD_ZONES` 서로 다른 영역 2개 이상. PyYAML이 있으면 분산 목록 = `[_pz_host_spread_obj, _pz_zone_spread_obj]`·selector·파드 라벨 이름·`replicas`·`strategy` dict |
+  | pz-h | prod 서브넷 주석(옛 "only pods on the 2a node can serve" 없음, "one each in 2a, 2b and 2c"·"zone spread rule"·"different zones" 있음), prod `POD_ZONES` 주석("2c 노드가 없" 없음, "2a·2b·2c 한 대씩"·"영역 분산"), base `POD_ZONES` 주석("영역 분산") |
+  | pz-a(바뀜) | 서브넷 주석의 "no 2c node"를 없음으로 기대 |
+  | pz-d(바뀜) | YAML 분산 목록 기대값 `[hostname]` → `[hostname, zone]` |
+
+- **확인**
+  - `python -X utf8 tools/check_vpoc.py` 전부 통과: ok 64줄, FAIL·WARN 0, 97초. 기존 63줄은 시작 전 트리(저장소 밖 사본)에서 돌린 시작 전 검사기의 출력과 글자까지 같고, pz 줄만 길어졌다. pz 그룹 단독 1.4~1.6초. PyYAML을 숨긴 실행(CI 조건)도 통과.
+  - `python deploy/render.py --target dev`·`--target prod`(저장소 안, CI처럼 `config.env` = example + `IMAGE_TAG=ci-pz106local`): 둘 다 종료 0(템플릿 미해결 변수 0), 템플릿 18개, CI 미치환 판정 dev 3파일·prod 4파일 0줄, 태그 있음, 영역 규칙 2곳. 렌더 트리 전체에 남은 `${VAR}`는 그대로 복사되는 `infra/build-deploy.sh` 주석 1줄뿐이다(템플릿 아님, CI가 쓰지 않음, 원래부터). 끝나고 `deploy/config.env`·`deploy/rendered/`를 지웠다(시작 전에도 없었다).
+  - 변경 전·후 렌더 비교(dev·prod 각 18개): `workloads.yaml` 밖 17개는 바이트 같음. `workloads.yaml`은 추가 22줄, 지운 줄 0.
+  - 커버리지(coverage 7.17, 전체 검사기 `coverage run`, 시작 전 사본과 difflib): `check_vpoc.py`의 바뀐 실행문 87개 중 84개(96.6%). 못 간 3개는 pz-g 렌더 실패 `except` 분기이고 변형 검사 실행과 합치면 87개(100%).
+  - 변형 검사 87개(저장소 밖 `%TEMP%\pz106\mutate106.py`, 변형마다 새 임시 트리, 판정·도우미 함수는 모듈 속성 바꿔치기): 105 변형 49개(서브넷 주석이 바뀐 C18은 새 글자로 맞추고, "(there is no 2c node)" 삭제였던 C20은 H01 되살림으로 바꿨다) + 106 새 변형 38개 — 영역 규칙 23(삭제 2·ScheduleAnyway·maxSkew 2·region·hostname 키·matchLabelKeys 삭제·다른 키·이름 바꿈·nodeAffinityPolicy Ignore·nodeTaintsPolicy Honor·minDomains·hostname 앞으로·주석 삭제·Honor 설명 삭제·hostname DoNotSchedule·hostname 삭제·두 번·키 겹침(API 거절 꼴)·들여쓰기·선택자 좁힘·2b 설명 삭제·NotReady 설명 삭제), 롤링 전제 3(maxSurge 2·maxUnavailable 1·replicas 3), 주석 7(옛 문구 되살림 3·새 사실 삭제 4), 설정 2(prod·base 한 영역), 도우미 3(`_pz_zone_rule_place` 주석 판정 끔·순서 안 봄, `_pz_zone_spread_block` 느슨하게). 모두 검사 단언으로 잡혔다. PyYAML이 있을 때 T10·T13(105)·Z20은 YAML이 깨져 pz-d 파싱 예외도 함께 나고(단언은 pz-c·pz-f·pz-g가 냄), E02는 의도한 예외 경로다. PyYAML을 숨기면 86개가 단언만으로, E02가 예외 경로로 잡힌다. 놓친 것 0.
+  - 줄 끝: 바뀐 파일 모두 CR 0, `config.prod.env`만 BOM(원래대로). 공백만 바뀐 줄 0, 새 줄 끝 공백 0, 지운 함수 정의 0(AST 비교). 스펙 세 파일은 `insert` 도구가 CR을 넣어 LF로 되돌렸고, 원래 부분은 시작 전 사본과 바이트가 같다. 시작 뒤 바뀐 파일(mtime·크기)은 위 9개와 실행 로그 `.kiro/handoff/logs/106.log`뿐이고 새 파일 0이다. 수정 금지 파일(`render.py`·`config.dev.env`·`ingress.yaml.tmpl`·`.gitlab-ci.yml`)은 바이트가 같고 `app/`·`frontend/`에는 바뀐 파일이 없다(`whynot-20261029`는 이 작업 트리에 없다).
+- **바꾼 기존 검사 기대값**: pz-a "no 2c node" 있음 → 없음(지시서 요구 4로 문장을 고쳤다), pz-d YAML 분산 목록 `[hostname]` → `[hostname, zone]`(요구 1로 항목을 더했다). 다른 기대값은 그대로다.
+- **3단계 리뷰**
+  - 보안: 바뀐 것은 스케줄링 규칙·주석·검사뿐이다. 새 설정 입력이 없고 템플릿의 새 줄은 상수와 기존 이름 변수뿐이다. 비밀값·새 계정 ID 없음. RBAC·IAM·securityContext 그대로. 검사기 새 코드는 파일 읽기와 메모리 렌더뿐(하위 프로세스·네트워크 추가 없음). 발견·조치: 없음.
+  - 성능: 스케줄러 계산은 노드 3대 × 분산 항목 2개라 무시할 만하다. 앱 코드·메모리(512Mi)·외부 호출 변화 없음. 평상시 운영 노드 2a·2c에 app 1·frontend 1씩, 롤링 중 노드당 요청 최대 1.2 vCPU·2.25GiB(m6i.2xlarge). 검사기 pz 그룹 1.4~1.6초(105: 1.2~1.5초), 전체 97초. 발견·조치: 없음.
+  - 운영성
+    - 발견 1: 지시서의 "노드가 없어지면 남은 영역에 2개"는 노드 객체가 없어질 때만 맞다. 노드가 NotReady·cordon으로 남으면 두 번째 파드는 Pending이다(그동안 1개가 받는다). 조치: design D14·ANALYSIS §8.8·템플릿 주석에 적고, `nodeTaintsPolicy: Honor`를 남은 이슈로 두었다.
+    - 발견 2: `config.prod.env`의 한국어 `POD_ZONES` 주석도 "2c 노드가 없어 … 모두 2a 노드에 뜬다"로 옛 사실이었다. 조치: 같이 고치고 pz-h로 고정했다.
+    - 막힐 때 신호: Pending 파드 이벤트(분산 제약 불일치), 롤링 멈춤(옛 파드가 받는다), 600초 뒤 ProgressDeadlineExceeded. 검사 실패 문구는 결과·기대를 함께 보인다.
+    - 되돌리기: 템플릿 커밋을 되돌린 파이프라인으로 운영 job. 설정 플래그는 두지 않았다. 진행 중 작업은 매 배포의 롤링과 같다(이 변경이 더하는 재시작은 없다).
+- **남은 이슈**
+  1. 영역 노드가 NotReady·cordon으로 남는 동안 쫓겨난 파드를 대신할 파드가 Pending이라 용량이 절반이다. `nodeTaintsPolicy: Honor`를 더할지는 사용자 결정이다(D17 (다)).
+  2. 영역이 돌아와도 파드를 다시 나누지 않는다(descheduler 없음). 다음 배포까지 한 영역에 2개일 수 있다.
+  3. EKS에서 인스턴스가 사라진 뒤 노드 객체가 지워지기까지의 시간, 영역 장애 때 노드그룹이 인스턴스를 바꾸는지는 확인하지 않았다(D14 경우 A·B의 갈림).
+  4. 105 남은 이슈 2(pod readiness gate 없음)·3(`docs/dev-migration/eip-quota-analysis.md` 없음)·5(CI에 PyYAML 없음 — pz-d·pz-g의 YAML 부분은 로컬에서만 돈다)는 그대로다. 105 남은 이슈 1(2a 노드 한 대)은 2c 노드 추가와 이 변경으로 풀렸다.
+  5. `docs/구조분석.md:204`(2026-09-03 문서)의 "앱·프론트는 topologySpreadConstraints로 2a/2c 노드에 분산한다"는 그때 기준 글이라 고치지 않았다(범위 밖).
+  6. 운영 반영 확인(Deployment마다 파드 영역, Pending 0, `/`·`/api/health` 200)은 배포 뒤 운영자가 한다(design D18, 계획만).

@@ -62,6 +62,19 @@ spec:
           labelSelector:
             matchLabels:
               app.kubernetes.io/name: ${FRONTEND_DEPLOYMENT_NAME}
+        # 영역 분산(지시서 106, 2026-10-31): 2c 노드를 더한 뒤 rollout restart 에서 새 파드가 모두 2c 노드에 놓였다. 위 hostname
+        # 규칙은 권고(ScheduleAnyway)이고 롤링 중 옛 파드까지 센다. 그래서 영역마다 고르게 나누는 필수 규칙을 더하고,
+        # matchLabelKeys(pod-template-hash)로 같은 리비전 파드만 센다. nodeAffinityPolicy 기본값(Honor)이라 위 affinity(POD_ZONES)
+        # 밖 영역(운영 2b)의 노드는 세지 않는다. 노드 객체가 하나도 없는 영역도 세지 않으므로 그때는 남은 영역에 2개가 뜬다.
+        # NotReady·cordon 노드가 남아 있는 영역은 센다(nodeTaintsPolicy 기본 Ignore). 그때 새 파드 하나는 Pending 일 수 있다(ANALYSIS §8.8).
+        - maxSkew: 1
+          topologyKey: topology.kubernetes.io/zone
+          whenUnsatisfiable: DoNotSchedule
+          labelSelector:
+            matchLabels:
+              app.kubernetes.io/name: ${FRONTEND_DEPLOYMENT_NAME}
+          matchLabelKeys:
+            - pod-template-hash
       containers:
         - name: frontend
           image: ${FRONTEND_IMAGE}
@@ -185,6 +198,15 @@ spec:
           labelSelector:
             matchLabels:
               app.kubernetes.io/name: ${APP_SERVICE_ACCOUNT}
+        # frontend 와 같은 영역 분산(지시서 106). nodeAffinityPolicy 기본값(Honor)이라 POD_ZONES 밖 영역(운영 2b)의 노드는 세지 않는다.
+        - maxSkew: 1
+          topologyKey: topology.kubernetes.io/zone
+          whenUnsatisfiable: DoNotSchedule
+          labelSelector:
+            matchLabels:
+              app.kubernetes.io/name: ${APP_SERVICE_ACCOUNT}
+          matchLabelKeys:
+            - pod-template-hash
       containers:
         - name: app
           image: ${APP_IMAGE}
