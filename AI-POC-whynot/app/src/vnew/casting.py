@@ -11,8 +11,9 @@
   - 뽑기(B2): 상태는 char.json 의 casting 에 둔다. fal 큐에 칸마다 1장씩 **글만** 제출하고(본문 정확히
     {prompt, num_images, image_size}), 결과를 우리 버킷 users/{owner}/characters/{id}/casting/ 에 JPEG 로 옮긴다.
     외부 호출은 _fal_request · _fetch_url 두 래퍼만 쓴다(검사가 가짜로 바꿔 끼운다).
-  - BL 역할·유형(지시서 103, VNEW_BL_LOOK): casting.blRole·blType 을 두고, 유형이 있으면 캐스팅 문장 끝에 genre_bl 의 참고
-    외모 문장 하나를 더한다. 외모 문장(그림 사실)에 이미 있는 분류는 빠진다. 300자 외모 문장과 영상 쪽은 바꾸지 않는다.
+  - BL 유형(지시서 103·104, VNEW_BL_LOOK): 사용자가 쓴 캐릭터 설명(char.extraPromptKo)에 유형 이름(떡대공 등)이 있으면 캐스팅 문장
+    끝에 genre_bl 의 참고 외모 문장 하나를 더한다(104 — 화면 선택값 casting.blRole·blType 은 읽지 않는다). 외모 문장(그림 사실)에
+    이미 있는 형태 분류는 빠진다. 300자 외모 문장과 영상 쪽은 바꾸지 않는다.
 """
 
 from __future__ import annotations
@@ -787,19 +788,20 @@ def prompt_look(look_en, gender) -> str:
     return text
 
 
-def cast_prompt(look_en, preset, gender, bl_type="") -> str:
+def cast_prompt(look_en, preset, gender, bl_types="") -> str:
     """프리셋 문구 + " {He is|She is|They are} {외모}, with dark brown eyes." (≤1500자).
 
-    bl_type(BL 유형 id, 지시서 103)이 있으면 끝에 참고 문장 " He has …." 을 더한다(_cast_text). 없거나 모르는 값이면 결과가
-    이 기능 전과 한 글자도 같다.
+    bl_types(BL 유형 id 하나 또는 id 목록, 지시서 103·104)가 있으면 끝에 참고 문장 " He has …." 을 더한다(_cast_text). 없거나
+    모르는 값이면 결과가 이 기능 전과 한 글자도 같다.
     """
-    return _cast_text(look_en, preset, gender, bl_type)[0]
+    return _cast_text(look_en, preset, gender, bl_types)[0]
 
 
-# ================================================================ BL 역할·유형 참고 문장(지시서 103, 2026-10-31)
+# ================================================================ BL 유형 참고 문장(지시서 103·104, 2026-10-31)
 #
-# 유형 조각(genre_bl.hint_pieces)을 외모 뒤 한 문장 "He has A, B, and C." 로 더한다. 외모 문장(그림 사실)에 이미 있는 분류의
+# 유형 조각(genre_bl.hint_pieces)을 외모 뒤 한 문장 "He has A, B, and C." 로 더한다. 외모 문장(그림 사실)에 이미 있는 형태 분류의
 # 조각은 빠진다(그림 우선). 외모 문장(look_sentence·lookEn)과 영상 쪽은 바꾸지 않는다 — 캐스팅 문장에만 더한다.
+# 유형은 사용자가 쓴 캐릭터 설명(char.extraPromptKo)에서 찾는다(_bl_types_now, 지시서 104).
 
 # 유형이 있고 성별이 unknown 이면 male 로 쓴다(steering genre-bl: 두 인물 모두 man). align_gender(male) 은 중립 낱말을
 # 바꾸지 않으므로 외모 문장의 person·their 등도 male 낱말로 바꾼다(design D6).
@@ -818,14 +820,16 @@ def _hint_sentence(pieces: list[str], gender) -> str:
     return f"{_HINT_SUBJECT[_gender(gender)]} {body}."
 
 
-def _cast_text(look_en, preset, gender, bl_type="") -> tuple[str, str]:
+def _cast_text(look_en, preset, gender, bl_types="") -> tuple[str, str]:
     """(캐스팅 문장, 더한 참고 문장). 유형이 없거나 모르는 값이면 참고 문장은 "" 이고 문장은 이 기능 전 cast_prompt 와 같다.
 
-    참고 문장을 더해 PROMPT_MAX 를 넘으면 조각을 끝에서부터 뺀다(design D7). 다 빼도 넘으면 참고 문장 없이 지금처럼 자른다.
+    bl_types 는 유형 id 하나 또는 id 목록이다(지시서 104: 설명에서 찾은 최대 2개, 같은 분류는 앞의 유형이 이긴다 —
+    genre_bl.merged_pieces). 참고 문장을 더해 PROMPT_MAX 를 넘으면 조각을 끝에서부터 뺀다(design D7). 다 빼도 넘으면 참고 문장
+    없이 지금처럼 자른다.
     """
     gender = _gender(gender)
-    typed = genre_bl.is_type(bl_type)
-    forced = typed and gender == "unknown"
+    types = genre_bl.known_types(bl_types)
+    forced = bool(types) and gender == "unknown"
     if forced:
         gender = "male"
     words = _WORDS[gender]
@@ -834,7 +838,7 @@ def _cast_text(look_en, preset, gender, bl_type="") -> tuple[str, str]:
         look = _sub_words(look, _NEUTRAL_TO_MALE)
     look = look or f"a Korean {words['noun']}"
     text = f"{base_text(preset, gender)} {words['subj']} {look}, with dark brown eyes."
-    pieces = genre_bl.hint_pieces(bl_type, look)
+    pieces = genre_bl.hint_pieces(types, look)
     sentence = ""
     while pieces:
         sentence = _hint_sentence(pieces, gender)
@@ -985,8 +989,11 @@ def _image_size() -> tuple[int, int]:
     return 1920, 2560
 
 
-def _apply_settings(cast: dict, preset, gender, look_en, where: str, bl_role=None, bl_type=None) -> None:
-    """들어온 값만 정리해 casting 에 둔다(None 이면 그대로). 400 BadPreset·BadGender·BadLook·BadBlType."""
+def _apply_settings(cast: dict, preset, gender, look_en, where: str) -> None:
+    """들어온 값만 정리해 casting 에 둔다(None 이면 그대로). 400 BadPreset·BadGender·BadLook.
+
+    BL 역할·유형(103 화면 선택값)은 받지 않는다(지시서 104 — 유형은 캐릭터 설명에서 찾는다, _bl_types_now).
+    """
     if preset is not None:
         key = preset.strip().lower() if isinstance(preset, str) else None
         if key not in _BASES:
@@ -1005,64 +1012,22 @@ def _apply_settings(cast: dict, preset, gender, look_en, where: str, bl_role=Non
         # 빈 값이면 자동 문장으로 되돌린다(참고 구현 set_look 과 같다).
         cast["lookEn"] = text
         cast["lookEdited"] = bool(text)
-    _apply_bl(cast, bl_role, bl_type, where)
 
 
-# ---------------------------------------------------------------- BL 역할·유형 저장값(지시서 103)
-
-# 운영(RAW_ERRORS=false)에서도 그대로 보이는 고정 문구다(vpoc/errors.py USER_FACING_KINDS 의 BadBlType, 103 피드백). 사용자 입력을
-# 되풀이하지 않는다. 모르는 역할·유형은 한 문구, 역할과 유형의 짝이 틀린 경우만 따로 알린다.
-_MSG_BAD_BL = "알 수 없는 BL 역할·유형입니다."
-_MSG_BL_MISMATCH = "BL 유형이 역할과 맞지 않습니다(공 유형은 공·리버서블, 수 유형은 수·리버서블에서 고릅니다)."
+# ---------------------------------------------------------------- BL 유형(지시서 104)
+#
+# 유형은 사용자가 쓴 캐릭터 설명(char.extraPromptKo)에서만 찾는다. 103 의 화면 선택값(casting.blRole·blType)은 읽지도 지우지도 않는다
+# (design D22). 그 값을 다루던 103 함수와 문구 상수는 104 피드백(Claude 승인)으로 지웠다(design D31).
 
 
-def _bl_checked(bl_role, bl_type, where: str) -> tuple:
-    """BL 역할·유형 형식만 본다(None 은 None 그대로). 글이 아니거나 모르는 값이면 400 BadBlType, 둘 다 왔으면 짝도 본다."""
-    role = btype = None
-    if bl_role is not None:
-        role = bl_role.strip().lower() if isinstance(bl_role, str) else None
-        if role not in genre_bl.ROLES:
-            raise VpocError(where, "BadBlType", _MSG_BAD_BL, 400)
-    if bl_type is not None:
-        btype = bl_type.strip().lower() if isinstance(bl_type, str) else None
-        if btype != "" and not genre_bl.is_type(btype):
-            raise VpocError(where, "BadBlType", _MSG_BAD_BL, 400)
-    if role is not None and btype is not None and not genre_bl.fits(btype, role):
-        raise VpocError(where, "BadBlType", _MSG_BL_MISMATCH, 400)
-    return role, btype
+def _bl_types_now(char) -> list[str]:
+    """뽑기 문장·보기에 쓸 BL 유형(지시서 104, design D18): 사용자가 쓴 캐릭터 설명(char.extraPromptKo)에서 찾은 유형 id(최대 2개).
 
-
-def _apply_bl(cast: dict, bl_role, bl_type, where: str) -> None:
-    """BL 역할·유형을 casting 에 둔다(design D9). VNEW_BL_LOOK 끔이면 보지도 저장하지도 않는다(D10, 저장값은 그대로).
-
-    역할을 바꾸면 새 역할과 맞지 않는 저장 유형은 비운다(역할 "" 이면 유형도 ""). 유형은 (요청 또는 저장된) 역할과 짝이어야 한다.
+    analysis.descriptionKo(LLM 이 쓴 글)·외모 문장·저장된 blRole·blType 은 보지 않는다. VNEW_BL_LOOK 끔이면 [].
     """
-    if not settings.VNEW_BL_LOOK:
-        return
-    role, btype = _bl_checked(bl_role, bl_type, where)
-    if role is not None:
-        cast["blRole"] = role
-        stored = cast.get("blType")
-        if not (isinstance(stored, str) and genre_bl.fits(stored, role)):
-            cast["blType"] = ""
-    if btype is not None:
-        current = cast.get("blRole") if isinstance(cast.get("blRole"), str) else ""
-        if not genre_bl.fits(btype, current):
-            raise VpocError(where, "BadBlType", _MSG_BL_MISMATCH, 400)
-        cast["blType"] = btype
-
-
-def _bl_state(cast: dict) -> tuple[str, str]:
-    """저장된 (역할, 유형). 글이 아니거나 모르는 값, 역할과 맞지 않는 유형은 ""(깨진 저장값 보기)."""
-    role = cast.get("blRole") if isinstance(cast.get("blRole"), str) else ""
-    role = role if role in genre_bl.ROLES else ""
-    bl_type = cast.get("blType") if isinstance(cast.get("blType"), str) else ""
-    return role, (bl_type if role and genre_bl.fits(bl_type, role) else "")
-
-
-def _bl_type_now(cast: dict) -> str:
-    """뽑기 문장에 쓸 BL 유형. VNEW_BL_LOOK 끔이면 저장값이 있어도 ""(R5.2)."""
-    return _bl_state(cast)[1] if settings.VNEW_BL_LOOK else ""
+    if not settings.VNEW_BL_LOOK or not isinstance(char, dict):
+        return []
+    return genre_bl.detect_types(char.get("extraPromptKo"))
 
 
 def auto_look(char) -> str:
@@ -1121,32 +1086,33 @@ def _prompt_preset(prompt: str) -> str:
 # ---------------------------------------------------------------- 공개 동작
 
 
-def update_settings(owner: str, cid: str, *, preset=None, gender=None, look_en=None, bl_role=None, bl_type=None) -> dict:
-    """느낌·성별·외모 문장·BL 역할·유형 저장(PUT /casting). 빈 외모 문장은 자동 문장으로 되돌린다. 캐스팅 보기를 돌려준다."""
+def update_settings(owner: str, cid: str, *, preset=None, gender=None, look_en=None) -> dict:
+    """느낌·성별·외모 문장 저장(PUT /casting). 빈 외모 문장은 자동 문장으로 되돌린다. 캐스팅 보기를 돌려준다.
+
+    BL 역할·유형은 받지 않는다(지시서 104 — 라우트가 넘기지 않는다. 저장된 103 값은 그대로 둔다).
+    """
     where = "vnew.casting"
     require_enabled(where)
 
     def mutator(data: dict) -> None:
-        _apply_settings(_ensure(data), preset, gender, look_en, where, bl_role=bl_role, bl_type=bl_type)
+        _apply_settings(_ensure(data), preset, gender, look_en, where)
 
     char, _ = characters.mutate_char(owner, cid, mutator)
     return view(char)
 
 
-def start_draw(owner: str, cid: str, confirm_usd: float, *, preset=None, gender=None, look_en=None, bl_role=None,
-               bl_type=None) -> dict:
+def start_draw(owner: str, cid: str, confirm_usd: float, *, preset=None, gender=None, look_en=None) -> dict:
     """뽑기 시작(POST /casting/draw). 404 CastingDisabled · 409 FalKeyMissing·CostMismatch·CastingRunning·NoLook · 400 형식.
 
     이전 후보는 history 로 옮기고(최신 먼저 12개), 고른 사진(chosen)은 그대로 둔다(결정 5). 캐스팅 보기를 돌려준다.
-    BL 유형(지시서 103)이 있으면 회차 문장 끝에 참고 문장을 더한다(VNEW_BL_LOOK 끔이면 더하지 않는다).
+    사용자가 쓴 캐릭터 설명(extraPromptKo)에 BL 유형 이름이 있으면 회차 문장 끝에 참고 문장을 더한다(지시서 104,
+    VNEW_BL_LOOK 끔이면 더하지 않는다).
     """
     where = "vnew.casting.draw"
     require_enabled(where)
     if not vpoc_settings.FAL_KEY:
         raise VpocError(where, "FalKeyMissing", "fal API 키가 설정되지 않았습니다.", 409)
     _apply_settings(_empty_casting(), preset, gender, look_en, where)  # 형식만 먼저 본다
-    if settings.VNEW_BL_LOOK:
-        _bl_checked(bl_role, bl_type, where)  # BL 형식도 먼저 본다(유형만 왔을 때 저장된 역할과의 짝은 아래 mutator 가 본다)
     slots = count()
     expected = total_usd()
     shown = round(float(confirm_usd), 2)
@@ -1159,7 +1125,7 @@ def start_draw(owner: str, cid: str, confirm_usd: float, *, preset=None, gender=
         if cast.get("status") == "drawing":
             # 멈춘 뽑기는 조회 때 이어하기가 끝낸다(시작부터 최대 VNEW_CASTING_POLL_MAX_S).
             raise VpocError(where, "CastingRunning", "이미 실사 캐스팅 사진을 만들고 있습니다.", 409)
-        _apply_settings(cast, preset, gender, look_en, where, bl_role=bl_role, bl_type=bl_type)
+        _apply_settings(cast, preset, gender, look_en, where)
         look = current_look(data)
         if not look:
             raise VpocError(where, "NoLook", "먼저 캐릭터를 만들어 분석해 주세요.", 409)
@@ -1173,7 +1139,7 @@ def start_draw(owner: str, cid: str, confirm_usd: float, *, preset=None, gender=
         ]
         cast.update(
             status="drawing", error="", usd=expected, claim=token, claimedAt=now, startedAt=now, heartbeatAt=now,
-            prompt=cast_prompt(look, cast["preset"], gender_now, _bl_type_now(cast)),
+            prompt=cast_prompt(look, cast["preset"], gender_now, _bl_types_now(data)),
         )
 
     char, _ = characters.mutate_char(owner, cid, mutator)
@@ -1181,7 +1147,7 @@ def start_draw(owner: str, cid: str, confirm_usd: float, *, preset=None, gender=
     log.info(
         "vnew.casting.draw_start cid=%s round=%d slots=%d usd=%.2f preset=%s gender=%s bl=%s",
         cid, int(cast.get("round") or 0), slots, expected, cast.get("preset"), resolve_gender(cast, char.get("analysis")),
-        _bl_type_now(cast) or "-",
+        "+".join(_bl_types_now(char)) or "-",
     )
     _spawn(owner, cid, token)
     return view(char)
@@ -1227,8 +1193,9 @@ def _photo(item: dict) -> dict:
 def view(char) -> dict:
     """캐릭터 상세의 casting 보기(design §B.4). 설정이 꺼져 있으면 {enabled: false}.
 
-    VNEW_BL_LOOK 켬이면 끝에 blRole·blType·blRoles·blTypes·blHintsEn(지금 외모 문장·느낌·성별로 뽑기 문장에 더해질 참고 문장)을
-    더한다(지시서 103). 끔이면 이 기능 전과 키가 같다.
+    VNEW_BL_LOOK 켬이면 끝에 blDetected([{id, label}] — 사용자가 쓴 캐릭터 설명에서 찾은 BL 유형)·blHintsEn(지금 외모 문장·느낌·
+    성별로 뽑기 문장에 더해질 참고 문장)을 더한다(지시서 104, 103 의 blRole·blType·blRoles·blTypes 는 없앴다). 끔이면 이 기능 전과
+    키가 같다.
     """
     if not settings.VNEW_CASTING:
         return {"enabled": False}
@@ -1262,10 +1229,10 @@ def view(char) -> dict:
         "chosenUrl": characters._presign(chosen_key(char)),  # noqa: SLF001
     }
     if settings.VNEW_BL_LOOK:
-        role, bl_type = _bl_state(cast)
+        bl_types = _bl_types_now(char)
         out.update(
-            blRole=role, blType=bl_type, blRoles=genre_bl.roles(), blTypes=genre_bl.list_types(),
-            blHintsEn=_cast_text(look, cast.get("preset"), resolve_gender(cast, analysis), bl_type)[1],
+            blDetected=[{"id": type_id, "label": genre_bl.TYPES[type_id]["label"]} for type_id in bl_types],
+            blHintsEn=_cast_text(look, cast.get("preset"), resolve_gender(cast, analysis), bl_types)[1],
         )
     return out
 

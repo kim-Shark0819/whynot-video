@@ -1151,99 +1151,33 @@
     return "";
   }
 
-  /* BL 역할·유형(지시서 103, VNEW_BL_LOOK). 상세 casting 에 blRoles·blTypes 가 있을 때만 성별 칸 옆에 둔다(끔이면 지금 화면).
-     고른 유형의 참고 외모 문장은 서버가 정한다(blHintsEn, 외모 문장에 이미 있는 분류는 빠짐). 화면은 그 글을 보이기만 한다. */
+  /* BL 유형(지시서 103·104, VNEW_BL_LOOK). 104부터 화면에서 고르지 않는다. 서버가 사용자가 쓴 캐릭터 설명(추가 요청,
+     extraPromptKo)에서 찾은 유형(blDetected)과 참고 외모 문장(blHintsEn)을 주고, 화면은 읽기 전용 한 줄로 보이기만 한다
+     (castingBlLine). 103 고르기 함수는 104 피드백(Claude 승인)으로 지웠다. */
   var CASTING_BL_HINT_LEAD = "참고로 더해지는 외모 설명(영어): ";
-  var CASTING_BL_NO_TYPE = "유형 없음";
-
-  function castingBlOn(cast) {
-    var c = cast || {};
-    return Array.isArray(c.blRoles) && Array.isArray(c.blTypes);
-  }
-
-  /* 역할에 맞는 유형 고르기: 맨 앞 "유형 없음", 공 → 공 유형, 수 → 수 유형, 리버서블 → 전부, 없음 → 유형 없음만. title = desc. */
-  function castingBlTypeOptions(cast, role) {
-    var types = Array.isArray((cast || {}).blTypes) ? cast.blTypes : [];
-    var list = [{ value: "", label: CASTING_BL_NO_TYPE, title: "" }];
-    if (!role) return list;
-    types.forEach(function (item) {
-      if (!item || !item.id || (role !== "reversible" && item.role !== role)) return;
-      list.push({ value: String(item.id), label: String(item.label || item.id), title: String(item.desc || "") });
-    });
-    return list;
-  }
-
-  function castingBlTypeFits(cast, role, typeId) {
-    return castingBlTypeOptions(cast, role).some(function (opt) {
-      return opt.value === typeId;
-    });
-  }
+  var CASTING_BL_FOUND_LEAD = "캐릭터 설명에서 찾은 BL 유형: ";
+  var CASTING_BL_GUIDE = "캐릭터 설명에 '떡대공'처럼 BL 유형을 적으면 실사 사진에 참고로 반영됩니다.";
 
   function castingBlHintText(cast) {
     var text = String((cast || {}).blHintsEn || "");
     return text ? CASTING_BL_HINT_LEAD + text : "";
   }
 
-  /* 성별 칸 + "BL 역할"·"유형" 한 줄([row])과 그 아래 참고 설명 한 줄([hint]). 고르면 form.blRole·form.blType 이 바뀐다.
-     역할을 바꾸면 유형 목록을 다시 채우고 맞지 않는 유형은 비운다. 참고 설명은 저장된 값과 같을 때만 보인다(바꾸면 저장·뽑기 뒤
-     서버가 다시 계산한다). */
-  function castingBlFields(cast, form, lock, genderWrap) {
-    var saved = { role: form.blRole, type: form.blType };
-    var row = el("div", "vnew-casting-row");
-    row.appendChild(genderWrap);
-
-    var roleWrap = el("label", "vnew-field vnew-casting-bl-role");
-    roleWrap.appendChild(el("span", "vnew-field-label", "BL 역할"));
-    var roleSelect = el("select", "vnew-field-input");
-    cast.blRoles.forEach(function (item) {
-      var option = el("option", null, String((item && item.label) || ""));
-      option.value = String((item && item.key) || "");
-      roleSelect.appendChild(option);
+  /* 읽기 전용 BL 한 줄(지시서 104). blDetected 가 배열이 아니면(VNEW_BL_LOOK 끔) null — 줄이 없다.
+     찾았으면 {found: true, text: "캐릭터 설명에서 찾은 BL 유형: 떡대공 — 참고로 더해지는 외모 설명(영어): …"}(참고 문장이 비면
+     앞부분만, 유형이 둘이면 ", " 로 잇는다), 못 찾았으면 {found: false, text: 안내}. */
+  function castingBlLine(cast) {
+    var c = cast || {};
+    if (!Array.isArray(c.blDetected)) return null;
+    var labels = [];
+    c.blDetected.forEach(function (item) {
+      var label = item ? String(item.label || item.id || "") : "";
+      if (label) labels.push(label);
     });
-    roleSelect.value = form.blRole;
-    roleSelect.disabled = !!lock;
-    roleWrap.appendChild(roleSelect);
-    row.appendChild(roleWrap);
-
-    var typeWrap = el("label", "vnew-field vnew-casting-bl-type");
-    typeWrap.appendChild(el("span", "vnew-field-label", "유형"));
-    var typeSelect = el("select", "vnew-field-input");
-    typeSelect.disabled = !!lock;
-    typeWrap.appendChild(typeSelect);
-    row.appendChild(typeWrap);
-
-    var hint = el("p", "vnew-hint vnew-casting-bl-hint", castingBlHintText(cast));
-
-    function fillTypes() {
-      while (typeSelect.firstChild) typeSelect.removeChild(typeSelect.firstChild);
-      castingBlTypeOptions(cast, form.blRole).forEach(function (opt) {
-        var option = el("option", null, opt.label);
-        option.value = opt.value;
-        if (opt.title) option.title = opt.title;
-        typeSelect.appendChild(option);
-      });
-      typeSelect.value = form.blType;
-      typeWrap.style.display = form.blRole ? "" : "none";
-    }
-
-    function showHint() {
-      var same = form.blRole === saved.role && form.blType === saved.type;
-      hint.style.display = same && hint.textContent ? "" : "none";
-    }
-
-    roleSelect.addEventListener("change", function () {
-      form.blRole = roleSelect.value;
-      if (!castingBlTypeFits(cast, form.blRole, form.blType)) form.blType = "";
-      fillTypes();
-      showHint();
-    });
-    typeSelect.addEventListener("change", function () {
-      form.blType = typeSelect.value;
-      showHint();
-    });
-    fillTypes();
-    showHint();
-    return [row, hint];
+    if (!labels.length) return { found: false, text: CASTING_BL_GUIDE };
+    var text = CASTING_BL_FOUND_LEAD + labels.join(", ");
+    var hint = castingBlHintText(c);
+    return { found: true, text: hint ? text + " — " + hint : text };
   }
 
   function castingSection(host, detail) {
@@ -1254,11 +1188,6 @@
     var lock = castingLockText(detail);
     var price = { count: cast.count, totalUsd: cast.totalUsd };
     var form = { preset: cast.preset || "idol", gender: cast.gender || "" };
-    var blOn = castingBlOn(cast);
-    if (blOn) {
-      form.blRole = String(cast.blRole || "");
-      form.blType = String(cast.blType || "");
-    }
     var loadedLook = String(cast.lookEn || "");
 
     var section = el("section", "panel vnew-casting");
@@ -1310,10 +1239,12 @@
       form.gender = select.value;
     });
     genderWrap.appendChild(select);
-    // BL 켬이면 성별 칸을 BL 역할·유형과 한 줄에 두고 그 아래 참고 설명 한 줄(지시서 103). 끔이면 성별 칸만(지금 화면).
-    (blOn ? castingBlFields(cast, form, lock, genderWrap) : [genderWrap]).forEach(function (node) {
-      formBox.appendChild(node);
-    });
+    formBox.appendChild(genderWrap);
+    // BL 유형 한 줄(지시서 104, 읽기 전용): 캐릭터 설명에서 찾았으면 유형·참고 외모 설명, 못 찾았으면 작은 안내. 끔이면 없다.
+    var blLine = castingBlLine(cast);
+    if (blLine) {
+      formBox.appendChild(el("p", blLine.found ? "vnew-casting-bl-found" : "vnew-hint vnew-casting-bl-guide", blLine.text));
+    }
 
     var lookWrap = el("label", "vnew-field vnew-casting-look");
     lookWrap.appendChild(el("span", "vnew-field-label", "외모 문장 (영어, 300자 이하)"));
@@ -1359,10 +1290,6 @@
     // 저장(PUT). lookValue 가 null 이면 외모 문장은 보내지 않는다(고치지 않은 자동 문장을 "고친 문장"으로 굳히지 않게).
     function save(lookValue) {
       var body = { preset: form.preset, gender: form.gender };
-      if (blOn) {
-        body.blRole = form.blRole;
-        body.blType = form.blType;
-      }
       if (lookValue !== null) body.lookEn = lookValue;
       saveBtn.disabled = true;
       revertBtn.disabled = true;
@@ -1420,10 +1347,6 @@
     drawBtn.addEventListener("click", function () {
       if (!window.confirm(castingConfirmText(price))) return;
       var body = { confirmUsd: Number(price.totalUsd), preset: form.preset, gender: form.gender };
-      if (blOn) {
-        body.blRole = form.blRole;
-        body.blType = form.blType;
-      }
       if (lookChanged()) body.lookEn = textarea.value;
       drawBtn.disabled = true;
       message.style.display = "none";

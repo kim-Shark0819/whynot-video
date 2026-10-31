@@ -2,6 +2,9 @@
 
 > 요구사항 `requirements.md`(R1~R8). 경로는 `AI-POC-whynot/` 아래다. 2026-10-31 103 피드백(Claude 결정)으로 D3·D11 을 바꾸고
 > D13~D17 을 더했다(분류를 형태·인상으로 나눔, 미인수 피부 조각, 운영 문구 `BadBlType`).
+> 2026-10-31 지시서 104(R9~R12): 근거를 사용자가 쓴 캐릭터 설명(`char.extraPromptKo`)으로 바꿨다. D18~D27 과 §9 를 더했다.
+> §4·§5·§7 의 103 표는 기록으로 남기고, 104 에서 바뀐 것은 §9 가 정본이다.
+> 2026-10-31 104 피드백(Claude 결정, R9.8~R9.10·R13·R14): D28~D32 와 §10 을 더했다. D22 의 "103 정의를 남긴다"는 D31 로 바뀌었다.
 
 ## 1. 지금 흐름(2026-10-31 코드 확인)
 
@@ -41,6 +44,21 @@
 | D16 | 형태 판정 낱말 표: 얼굴 모양 = 턱·턱선·광대·"…-faced"·얼굴형 낱말이 같은 명사구에서 face·features 앞, 눈 모양 = 눈꺼풀·속눈썹·"…-eyed"·눈 모양 낱말이 같은 명사구에서 eyes 앞. 같은 명사구 = 세 낱말 안, 관사·전치사·접속사·다른 명사를 넘지 않음 | "long hair, a calm face"의 long, "a slim build and narrow eyes"의 slim 이 모양으로 잡히지 않게. 코·입술·눈썹은 유형 조각이 말하지 않는 부위라 보지 않는다. "piercing eyes"·"calm, gentle eyes"는 눈빛이라 보지 않는다. "hooded"는 옷에도 쓰여 eyes 앞에서만, "chin-length"는 머리 길이 |
 | D17 | 미인수 피부 조각 "clear, smooth skin" → "a clean, clear complexion"(faceImpression), `vpoc/errors.py` `USER_FACING_KINDS`에 `BadBlType` | 103 남은 이슈 4·1. 현실 배우풍 프리셋 "natural skin texture with pores and slight imperfections"와 부딪치지 않는 낱말. errors.py는 이번만 허용받았다 |
 | D12 | 기존 검사: `check_vnew_casting`은 켬(기본) 그대로 돌리고 cast-j 보기 키 집합 기대값에 BL 5개를 더한다. `check_vnew_char_fidelity`는 부르는 줄에서 `VNEW_BL_LOOK` 끔으로 고정한다 | cast 전 그룹이 켬 + 유형 없음에서 지금 기대값 그대로 지나가는 것이 "유형 없음 = 지금과 같다"의 증거다. cf-r·cf-b의 상세 JSON sha256(`detailOld`)은 구현 전에 잰 값이라 끔 고정이 맞다(Claude 결정 9와 같은 방식) |
+| D18 | (104) 근거는 `char.extraPromptKo` 하나다. `analysis.descriptionKo`·`appearanceEn`·외모 문장·저장된 `blRole`·`blType`은 보지 않는다 | 사용자 지시(2026-10-31) "설명에 떡대공이다 이런 식으로 넣는다면 그때 반영". `descriptionKo`는 LLM이 쓴 글이라 사용자가 적지 않은 유형이 들어갈 수 있다. 대안: 화면 선택 유지 + 설명 추가(두 근거가 부딪친다 — 거절), LLM으로 설명을 분류(비결정·비용 — 거절) |
+| D19 | (104) 찾기: 이름 13개(label을 "/"로 나눔)를 붙은 꼴 그대로 부분 문자열로 찾는다. 앞 경계는 보지 않고 뒤에는 무엇이 붙어도 된다. 부정은 이름 끝 바로 뒤 0~5번째 글자(6자, 공백 포함)에서 "아님"·"아니"·"말고"가 **시작**되면이다. 나온 자리 순서, 중복 없이 최대 2개. 같은 유형이 한 자리에서 부정돼도 다른 자리에서 부정 없이 나오면 찾는다 | 지시 그대로. "6자 안에 오면"을 "시작하면"으로 읽어 "떡대공은 절대 아님"(아님이 5번째에서 시작)도 부정이다. 앞 경계를 요구하면 "형광공장"·"광공업"의 광공은 막지만 "집착광공"(흔한 말)을 놓친다 — 요구하지 않는다(남은 이슈에 오탐 예). NFC 정규화·띄어 쓴 꼴("떡대 공")은 보지 않는다 |
+| D20 | (104) 합치기 `merged_pieces(types)`: 앞 유형의 조각을 표 순서대로 모두 넣고, 뒤 유형 조각은 그 분류가 앞 유형에 이미 있으면 뺀다. 형태 조각의 분류는 D3처럼 글이 담은 형태 분류까지 본다("a lean, tall build"는 체격·키). 판정은 표 기준(그림으로 빼기 전)이다. 그 뒤 그림 우선(`hint_pieces`)을 한 번 적용한다 | "같은 분류는 앞의 유형이 이긴다". 앞 유형 조각이 그림 때문에 빠져도 뒤 유형이 그 자리를 채우지 않는다 — 사용자가 앞에 쓴 유형의 뜻을 지킨다(무심공 + 떡대공에서 그림이 "slim"이면 떡대공 체격이 들어오지 않는다). 순서는 앞 유형 → 뒤 유형이라 1500자 줄이기(D7)는 뒤 유형 조각부터 뺀다. 유형이 하나면 103과 같다 |
+| D21 | (104) `cast_prompt`·`_cast_text`·`hint_pieces`·`look_hints`의 유형 인자는 id 하나(글) 또는 id 목록이다(`known_types`가 아는 id만 순서대로 중복 없이 고른다). 넷째 인자 기본값은 그대로 `""` | 103 호출(글 하나)과 검사(bl-c·bl-d)가 그대로 돈다. 인자 이름은 `bl_types`로 바꿨다(키워드로 부르는 곳 없음) |
+| D22 | (104) 저장된 `blRole`·`blType`은 읽지도 지우지도 않는다. `_empty_casting`의 기본값 `""`도 그대로 둔다. 103 함수 `_bl_checked`·`_apply_bl`·`_bl_state`·`_bl_type_now`, 화면 함수 `castingBlOn`·`castingBlTypeOptions`·`castingBlTypeFits`·`castingBlFields`, CSS `.vnew-casting-row`·`-bl-role`·`-bl-type`·`-bl-hint`는 지우지 않는다(부르는 곳 없음) | quality-week 9 "기존 함수 정의를 지우지 않는다"(103은 커밋 89d5a34로 배포됐다). 저장 모양을 바꾸지 않아 103 파드와 섞여도 안전하다. 지울지는 따로 승인받는다(남은 이슈) |
+| D23 | (104) 라우트는 `blRole`·`blType`을 넘기지 않고, `update_settings`·`start_draw`·`_apply_settings`에서 BL 키워드를 뺐다. 옛 화면이 보내도 모르는 키라 무시된다(400 없음) | 지시 "더 받지 않는다. 와도 무시". 함수에 키워드를 남겨 두고 버리는 대안은 읽는 사람에게 받는 것처럼 보여 뺐다 |
+| D24 | (104) 보기 켬: 끝에 `blDetected`(`[{id, label}]`, label은 표 label 그대로 — 광공은 "광공 / 집착공")와 `blHintsEn` 두 키. 끔이면 BL 키 없음(103 끔과 같다) | 화면이 판정을 다시 하지 않게(D8) 서버가 찾은 결과와 참고 문장을 준다. 이름만 주는 대안은 화면이 id→이름 표를 따로 가져야 한다 |
+| D25 | (104) 화면 한 줄: `blDetected`가 배열이면 성별 칸 바로 뒤(103 BL 줄 자리). 찾음 `p.vnew-casting-bl-found`(13px), 못 찾음 `p.vnew-hint.vnew-casting-bl-guide`(12px). 읽기 전용이라 잠금이 없다. 서버 응답이 103 꼴이어도 선택을 그리지 않는다 | 지시 문구 그대로("—"는 지시 예시의 글자). 롤링 배포 중 옛 파드 응답이 와도 선택이 다시 생기지 않게 화면은 `blDetected`만 본다 |
+| D26 | (104) 로그 `bl=` 끝말은 찾은 id를 `+`로 이은 값, 없으면 `-` | 지시 그대로. 이 줄을 읽는 코드·문서는 없다(103 저장소 검색) |
+| D27 | (104) 검사 기대값: cast-j 보기 키 집합 = 지금 19개 + `blDetected`·`blHintsEn`. `_run_bl_look_off(check_vnew_char_fidelity)`는 그대로(켬이면 보기에 2개 키가 붙어 cf-b·cf-r 지문이 달라진다). bl-f·bl-g·bl-h·bl-i·bl-j를 다시 쓰고 bl-k(찾기)·bl-l(합치기)을 더한다 | 103 기대값 중 화면 선택·400은 지시로 없어진 동작이다 |
+| D28 | (104 피드백) 앞 경계: 이름 바로 앞 한 글자가 한글 음절(U+AC00~U+D7A3)이면 찾지 않는다. 그 밖의 글자(공백·문장부호·숫자·영문, 그리고 자모 "ㅋ"·한자·이모지)는 경계로 본다. 앞 글이 `_PREFIX_OK`("집착")로 끝나면 경계로 친다(그 앞 글자는 보지 않는다 — "초집착광공"도 찾는다) | Claude 결정 "이름 바로 앞 글자가 한글 음절이면 찾지 않는다". 허용 목록(공백·문장부호·숫자·영문만)으로 읽는 대안은 "ㅋㅋ떡대공이다"를 놓친다. 규칙 문장이 음절만 말하므로 음절만 막는다. 접두어 앞까지 다시 보는 대안은 규칙이 커지고 "초집착광공"을 놓친다 |
+| D29 | (104 피드백) 뒤쪽 제외: 모든 이름은 바로 뒤 첫 글자가 "원"·"업"이면 뺀다(창 없음 — "떡대공인데 원래"는 찾는다). 꽃수만 이름 끝 바로 뒤 0~5번째 글자에서 "놓"·"자수"·"무늬"·"장식"·"프린트"·"패턴"·"그림"이 시작되면 뺀다(부정과 같은 창, D19). 뺀 자리는 부정처럼 건너뛰고, 같은 이름이 다른 자리에서 다시 나오면 찾는다 | Claude 결정. "원"·"업"을 창 전체로 보면 "떡대공인데 원래"·"떡대공이고 업무"를 놓친다. 꽃수 낱말을 모든 이름에 쓰면 "떡대공이고 줄무늬 셔츠"를 놓친다 |
+| D30 | (104 피드백) 뒤에 한글이 더 붙어도 찾는다("무심수아"·"무심수인"·"무심수다"). 이름과 조사를 구별하지 않는다 | Claude 결정 "찾는 쪽으로 둔다". 조사 표로 구별하는 대안은 서술어 활용("무심수였다", "무심수라서")까지 표가 커진다 |
+| D31 | (104 피드백, Claude 승인) 부르는 곳이 없는 103 정의를 지운다: 서버 `_bl_checked`·`_apply_bl`·`_bl_state`·`_bl_type_now`, 화면 `castingBlOn`·`castingBlTypeOptions`·`castingBlTypeFits`·`castingBlFields`, CSS `.vnew-casting-row`·`.vnew-casting-bl-role`·`.vnew-casting-bl-type`·`.vnew-casting-bl-hint`. 이 정의만 쓰던 상수 `_MSG_BAD_BL`·`_MSG_BL_MISMATCH`·`CASTING_BL_NO_TYPE`도 지운다. `vpoc/errors.py`의 `BadBlType`(지시서 104 "표에서 지우지 않는다"), `genre_bl`의 `roles`·`fits`·`list_types`(승인 목록 밖, bl-a가 본다), 저장값·`_empty_casting` 기본값은 남긴다 | 상수를 남기면 쓰는 곳 없는 문구가 남는다. 상수는 함수 정의가 아니지만 그 함수만 쓰던 값이라 함께 지운다(결과 보고에 적는다) |
+| D32 | (104 피드백) 세 파일의 `VNEW_BL_LOOK` 주석만 고친다. 줄 수·자리·값·base 되돌리기 문구는 그대로다. bl-g가 세 주석이 "캐릭터 설명"을 말하고 "고르" 낱말이 없는지 본다 | 배선 검사(bl-g·rw-a~c·ob-h)는 자리·값만 보므로 기대값이 바뀌지 않는다 |
 
 ## 3. 모듈 `genre_bl.py`
 
@@ -142,3 +160,94 @@ CSS: `.vnew-casting-row`(flex·wrap), `.vnew-casting-bl-role`·`.vnew-casting-bl
 | bl-h | 보기: 5개 키·깨진 저장값·`blHintsEn` = 뽑기 문장 끝, 사용자가 고친 외모 문장 그대로, `auto_look`·`current_look`·`generate` 무관 |
 | bl-i | 화면(node 가짜 DOM, 실제 `view` 응답): 역할 바꾸면 유형 목록·title, 유형 칸 숨김, 미리보기 줄 보임·숨김·바꾸면 숨김, 저장·뽑기 payload에 blRole·blType, 끔이면 칸 없음, 잠금, innerHTML 0, CSS, `node --check` |
 | bl-j | 운영 문구(103 피드백): `USER_FACING_KINDS`에 `BadBlType` 한 줄, 던지는 곳 4곳이 모두 casting.py 고정 문구 상수 둘, `RAW_ERRORS=false` 봉투·실제 라우트가 고정 문구 그대로 |
+
+## 9. 지시서 104 — 캐릭터 설명에서 찾기(정본)
+
+### 9.1 `genre_bl.py`(더함)
+
+```python
+NEGATIONS = ("아님", "아니", "말고")
+NEGATION_WINDOW = 6          # 이름 끝 바로 뒤 0~5번째 글자에서 부정 낱말이 시작되면 그 자리는 찾지 않음(D19)
+DETECT_MAX = 2
+_NAME_TO_ID: dict[str, str]  # label 을 "/" 로 나눈 이름 13개 → id
+def detect_types(text_ko) -> list[str]              # 나온 순서·중복 없이·최대 2개. 글이 아니면 []
+def known_types(bl_types) -> list[str]              # 글 하나 또는 목록 → 아는 id 만(순서·중복 없이)
+def merged_pieces(bl_types) -> list[tuple[str, str]]  # 같은 분류는 앞 유형이 이김(D20). 유형 하나면 표 그대로
+def hint_pieces(bl_types, look_en) -> list[str]     # merged_pieces 에 그림 우선(103 규칙)
+def look_hints(bl_types, look_en) -> str
+```
+
+### 9.2 `casting.py`
+
+| 함수 | 바뀜 |
+|---|---|
+| 새 `_bl_types_now(char)` | 끔이면 `[]`, 켬이면 `genre_bl.detect_types(char.extraPromptKo)`(글이 아니면 `[]`) |
+| `cast_prompt(look, preset, gender, bl_types="")`·`_cast_text` | 유형 인자가 글 하나 또는 목록(`known_types`). 유형이 있고 unknown 이면 male(D6 그대로) |
+| `_apply_settings(cast, preset, gender, look_en, where)` | BL 키워드·`_apply_bl` 호출을 뺐다 |
+| `update_settings`·`start_draw` | BL 키워드를 뺐다. 뽑기 전 BL 형식 확인(`_bl_checked`)을 뺐다. 회차 문장은 `_bl_types_now(data)`, 로그 `bl=` 은 `"+".join(...) or "-"` |
+| `view` | 켬이면 끝에 `blDetected`·`blHintsEn` |
+| `_bl_checked`·`_apply_bl`·`_bl_state`·`_bl_type_now`·`_MSG_BAD_BL`·`_MSG_BL_MISMATCH`·`_empty_casting` | 그대로(D22, 부르는 곳 없음) |
+
+### 9.3 `routes.py`
+
+PUT `/casting`·POST `/casting/draw`에서 `bl_role=…, bl_type=…` 줄을 빼고 주석 한 줄(옛 화면이 보내도 무시).
+
+### 9.4 화면 `vnew.js`·`vnew.css`
+
+| 함수 | 동작 |
+|---|---|
+| 새 `castingBlLine(cast)` | `blDetected`가 배열이 아니면 `null`. 이름(label, 없으면 id)이 하나도 없으면 `{found:false, text:안내}`. 있으면 `{found:true, text:"캐릭터 설명에서 찾은 BL 유형: " + 이름들(", ") + (" — " + castingBlHintText)}` |
+| `castingSection` | `blOn`·`form.blRole`·`form.blType`·`castingBlFields` 호출과 저장·뽑기 본문의 BL 두 곳을 뺐다. 성별 칸 뒤에 `castingBlLine` 한 줄 |
+| `castingBlHintText` | 그대로(새 줄이 부른다) |
+
+CSS: 새 `.vnew-casting-bl-found`(13px, 글자색), `.vnew-casting-bl-guide`(12px). 103 선택자는 그대로(주석만 "104부터 쓰지 않음").
+
+### 9.5 검사(`check_vnew_bl_look`, 104)
+
+| 검사 | 덮는 것 |
+|---|---|
+| bl-c | 유형 값에 목록 4종(`[]`·`["zz"]`·`("",)`·`[None]`)을 더해 유형 없음 = 옛 식 |
+| bl-e | 두 유형 합친 문장도 끝에서부터 뺀다(뒤 유형 조각이 먼저 빠짐) |
+| bl-f | 함수 인자에 BL 없음·라우트 소스에 blRole·blType 없음, 103 저장값이 있는 캐릭터에 PUT 6건(BL 값 여러 꼴) → 200·저장값 그대로, draw(BL 값 + 틀린 금액 → 409 CostMismatch, BL 값 + 맞는 금액 → 202·회차 문장 = 옛 식·저장값 그대로·로그 `bl=-`), 설명에 떡대공 → 회차 문장 끝 참고 문장·보기 `blDetected`·로그 `bl=ttokdae_gong`, 두 유형 → `bl=musim_gong+ttokdae_gong`, 정적 검사(저장값을 읽는 함수는 `_empty_casting`과 103 함수뿐) |
+| bl-g | 끔: 보기 키 19개, 설명에 유형·저장값이 있어도 문장 그대로·로그 `bl=-`, BL 요청 무시, 다시 켜면 설명에서 찾음. 설정·배선·렌더는 103 그대로 |
+| bl-h | 켬 보기 = 끔 보기 + `blDetected`·`blHintsEn`(끝), 103 키 없음, 근거는 extraPromptKo 뿐(descriptionKo·appearanceEn·lookEn·저장 blType 에 이름이 있어도 `[]`), 깨진 extraPromptKo, 두 유형 보기, 보기 성별 = 뽑기 성별, 고친 외모 문장 그림 우선, `generate.py`가 BL을 읽지 않음 |
+| bl-i | node 가짜 DOM: `castingBlLine` 순수 결과, 실제 `view` 응답(찾음·두 유형·못 찾음(103 저장값 있음)·뽑는 중·만드는 중·끔)과 103 꼴 응답에서 선택 0·한 줄 글·class, 저장·뽑기·되돌리기 본문 키(BL 없음), 끔 화면 = 103 끔, 위험한 글, innerHTML 0, CSS(가이드 12px), `node --check`. 다시 만들기: 진짜 `buildSection`이 보낸 본문 = 파이썬이 실제 라우트 POST `/build`(스레드 대역)로 보낸 본문, 진짜 `refreshDetail`이 실제 GET 상세로 다시 그리면 줄이 안내 → 떡대공 → (떡대공 아님) 안내 |
+| bl-j | 표에 `BadBlType` 한 줄 그대로, 던지는 곳은 103 함수 4곳(고정 문구 상수 둘), `RAW_ERRORS=false` 봉투 문구, 실제 라우트에 모르는 BL 값 → 200(이제 400 없음) |
+| bl-k | `detect_types`: 이름 표 13개, 지시 예 6개(떡대공이다·무심공이고 떡대공·떡대공 아님·떡대 공원·3개·빈 글/None), 이름마다 "…이다", 부정 3낱말·창 경계(5번째 시작 = 부정, 6번째 = 찾음), 다시 나온 자리, 역할 낱말만, 집착광공, 중복, 글 아닌 값 |
+| bl-l | `merged_pieces`·`hint_pieces`·`look_hints` 목록: 무심공 + 떡대공·떡대공 + 무심공·미인수 + 다정공 전문, 유형 하나 = 표, 모르는 id 건너뜀, 그림 우선 뒤 앞 유형 자리를 뒤 유형이 채우지 않음, 두 유형 `cast_prompt` 전문 |
+
+## 10. 104 피드백 — 앞 경계·뒤쪽 제외·103 정의 정리(정본)
+
+### 10.1 `genre_bl.py`
+
+```python
+_HANGUL_SYLLABLE = re.compile(r"[\uac00-\ud7a3]")
+_PREFIX_OK = ("집착",)                    # 이름 바로 앞이 이 낱말로 끝나면 앞 경계로 친다(D28)
+_NEXT_BLOCK = ("원", "업")                # 모든 이름: 바로 뒤 첫 글자(공원·수원·공업·수업, D29)
+_AFTER_BLOCK = {"kkotsu": ("놓", "자수", "무늬", "장식", "프린트", "패턴", "그림")}  # 이름 끝 뒤 창 안에서 시작(D29)
+def _starts_within(text, end, words) -> bool  # 이름 끝 바로 뒤 0~NEGATION_WINDOW-1 번째 글자에서 words 중 하나가 시작하는가
+def _negated(text, end) -> bool               # _starts_within(text, end, NEGATIONS)
+def _front_ok(text, start) -> bool            # 글 처음·한글 음절 아님·_PREFIX_OK 로 끝남
+def _excluded_after(text, end, type_id) -> bool  # _NEXT_BLOCK 첫 글자 · 부정 · _AFTER_BLOCK[type_id]
+```
+
+`detect_types`는 자리마다 `_front_ok`와 `_excluded_after`를 보고 하나라도 걸리면 건너뛴다. `_NEGATION_SPAN`은 `_starts_within`이
+낱말 길이로 창 끝을 정하므로 지웠다(104 새 상수, 커밋 전).
+
+### 10.2 지우는 정의(D31)
+
+| 파일 | 지움 | 남김 |
+|---|---|---|
+| `casting.py` | `_MSG_BAD_BL`·`_MSG_BL_MISMATCH`·`_bl_checked`·`_apply_bl`·`_bl_state`·`_bl_type_now`, 그 구역 주석 | `_bl_types_now`(구역 머리를 104 기준으로), `_empty_casting` 기본값 |
+| `vnew.js` | `CASTING_BL_NO_TYPE`·`castingBlOn`·`castingBlTypeOptions`·`castingBlTypeFits`·`castingBlFields` | `CASTING_BL_HINT_LEAD`·`castingBlHintText`·`castingBlLine` |
+| `vnew.css` | `.vnew-casting-row`·`.vnew-casting-bl-role`·`.vnew-casting-bl-type`·`.vnew-casting-bl-hint` | `.vnew-casting-bl-found`·`.vnew-casting-bl-guide` |
+
+### 10.3 검사
+
+| 검사 | 바뀜 |
+|---|---|
+| bl-f | 103 함수 동작 12경우를 뺐다(지운 정의를 직접 불렀다). AST: 103 함수·상수가 casting.py 에 없고, "blRole"·"blType" 글자를 쓰는 함수는 `_empty_casting` 뿐 |
+| bl-g | 세 파일 `VNEW_BL_LOOK` 주석이 "캐릭터 설명"을 말하고 "고르" 낱말이 없음, 주석 줄 수 그대로(base 3줄·settings 2줄·템플릿 1줄) |
+| bl-i | 남긴 103 화면 함수 실행을 뺐다. vnew.js 에 지운 함수·상수 이름이 없고 vnew.css 에 지운 선택자가 없음 |
+| bl-j | `BadBlType`은 표에 한 줄 그대로, `app/src` 에 던지는 곳 0(AST), `RAW_ERRORS=false` 봉투가 고정 문구를 그대로 보임, 라우트는 BL 값에 200 |
+| bl-k | 앞 경계·뒤쪽 제외 예(지시 9개 + 형광공장·ㅋㅋ·영문·숫자 뒤·떡대수원·"떡대공인데 원래"·"떡대공이고 줄무늬"·조사 꼴), 꽃수 제외 낱말 7개 × 꼴, 꽃수 창 경계 8경우, 모든 이름 × "원"·"업"·한글 앞 글자·"집착" 앞 |
