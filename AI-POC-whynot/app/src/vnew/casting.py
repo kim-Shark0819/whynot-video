@@ -17,6 +17,9 @@
   - 실사 사진 지키기(지시서 107, 2026-11-01): 캐스팅 문장 맨 끝에 사진 고정 문장(photo_anchor)을 늘 붙인다. VNEW_CAST_PHOTO_CHECK
     켬이면 결과 사진마다 저장 전에 비전 LLM 1회(_photo_check)로 실사인지 묻고, 그림체면 그 사진을 버리고(S3 저장 없음, 원장 1건)
     같은 칸을 같은 문장으로 두 번까지 다시 제출한다(칸 redraws, 지시서 108). 두 번째로 다시 뽑은 사진도 그림체면 그 칸만 실패(NotPhoto).
+  - 아이돌풍 모델(지시서 109, 2026-11-01): 아이돌풍(preset idol)은 VNEW_CASTING_IDOL_MODEL(기본 FLUX.2 [pro])로, 현실 배우풍은
+    지금처럼 VNEW_CASTING_MODEL(Seedream)로 뽑는다(preset_choice). 본문은 두 모델 모두 같은 3키다. start_draw 가 고른 모델·장당
+    금액·크기를 회차(casting.model·unitUsd·imageSize)에 남기고, 뽑기·다시 제출·이어 조회는 그 값을 쓴다(_round_choice).
 """
 
 from __future__ import annotations
@@ -925,6 +928,8 @@ def _fit_cast_head(preset, gender: str, look: str, budget: int) -> str:
 # 같은 요청을 다시 받아도 같은 S3 키·같은 원장 키라 두 번 계상하지 않는다. fal 이 결과를 주지 않은 칸은 과금하지 않는다.
 # 그림체로 버린 사진(지시서 107)도 fal 이 만든 1장이라 같은 키 규칙으로 1건 남긴다(S3 에는 두지 않는다). 다시 뽑은 요청은 새 요청 id
 # 라 새 키다 — 원장 건수 = 결과 사진을 받은 fal 요청 수.
+# 원장 금액은 회차에 남긴 장당 금액(unitUsd), 모델은 그 요청의 endpoint(requestArn)다. 아이돌풍 FLUX.2 [pro] 회차는 장당 $0.075,
+# 현실 배우풍·되돌린 아이돌풍·109 전 회차는 Seedream 장당 VNEW_CASTING_USD(지시서 109).
 
 _CAST_RUNNING: set[tuple[str, str]] = set()
 _CAST_LOCK = threading.Lock()
@@ -1045,18 +1050,73 @@ def count() -> int:
     return max(1, min(4, int(settings.VNEW_CASTING_COUNT)))
 
 
-def total_usd() -> float:
-    """뽑기 1회 금액 = 장당 VNEW_CASTING_USD × 장 수(소수 2자리, 결정 1)."""
-    return round(count() * float(settings.VNEW_CASTING_USD), 2)
+def total_usd(preset=None) -> float:
+    """뽑기 1회 금액 = 장당 금액 × 장 수(소수 2자리, 결정 1).
+
+    preset 을 주면 그 프리셋의 장당 금액(preset_choice, 지시서 109), 없으면 지금처럼 장당 VNEW_CASTING_USD.
+    """
+    unit = float(settings.VNEW_CASTING_USD) if preset is None else preset_choice(preset)[1]
+    return round(count() * unit, 2)
 
 
-def _image_size() -> tuple[int, int]:
-    found = re.fullmatch(r"\s*(\d{3,4})\s*[xX]\s*(\d{3,4})\s*", str(settings.VNEW_CASTING_SIZE or ""))
+def _parse_size(value, default: tuple[int, int]) -> tuple[int, int]:
+    """"WxH"(3~4자리, 각 256~4096) → (W, H). 꼴이 틀리면 default."""
+    found = re.fullmatch(r"\s*(\d{3,4})\s*[xX]\s*(\d{3,4})\s*", str(value or ""))
     if found:
         width, height = int(found.group(1)), int(found.group(2))
         if 256 <= width <= 4096 and 256 <= height <= 4096:
             return width, height
-    return 1920, 2560
+    return default
+
+
+def _image_size() -> tuple[int, int]:
+    return _parse_size(settings.VNEW_CASTING_SIZE, (1920, 2560))
+
+
+def preset_choice(preset) -> tuple[str, float, tuple[int, int]]:
+    """프리셋별 (모델, 장당 금액, 크기)(지시서 109).
+
+    아이돌풍은 VNEW_CASTING_IDOL_MODEL·VNEW_CASTING_IDOL_USD·VNEW_CASTING_IDOL_SIZE, 현실 배우풍은 지금 값(VNEW_CASTING_MODEL·
+    VNEW_CASTING_USD·VNEW_CASTING_SIZE). VNEW_CASTING_IDOL_MODEL 이 빈 값이면(되돌리기) 아이돌풍도 지금 값 셋을 쓴다.
+    """
+    idol_model = str(settings.VNEW_CASTING_IDOL_MODEL or "").strip()
+    if preset_of(preset) == "idol" and idol_model:
+        return idol_model, float(settings.VNEW_CASTING_IDOL_USD), _parse_size(settings.VNEW_CASTING_IDOL_SIZE, (1760, 2352))
+    return settings.VNEW_CASTING_MODEL, float(settings.VNEW_CASTING_USD), _image_size()
+
+
+def _round_choice(cast: dict) -> tuple[str, float, tuple[int, int]]:
+    """이 회차의 (모델, 장당 금액, 크기). start_draw 가 회차에 남긴 값을 쓴다(지시서 109 — 설정이 바뀌어도 한 회차 안에서 섞이지 않게).
+
+    남긴 모델·장당 금액이 없거나 꼴이 틀린 회차(109 전에 시작한 107·108 회차)는 지금처럼 VNEW_CASTING_MODEL·VNEW_CASTING_USD·
+    VNEW_CASTING_SIZE 를 쓴다. 크기만 꼴이 틀리면 VNEW_CASTING_SIZE.
+    """
+    model = cast.get("model")
+    unit = cast.get("unitUsd")
+    if isinstance(model, str) and model.strip() and isinstance(unit, (int, float)) and not isinstance(unit, bool) \
+            and math.isfinite(unit) and unit >= 0:
+        return model.strip(), float(unit), _parse_size(cast.get("imageSize"), _image_size())
+    return settings.VNEW_CASTING_MODEL, float(settings.VNEW_CASTING_USD), _image_size()
+
+
+def _preset_items() -> list[dict]:
+    """보기의 presets. 아이돌풍 모델이 켜져 있으면(지시서 109) 항목마다 unitUsd·totalUsd 를 더한다(화면이 느낌을 바꾸면 금액을 바꾼다).
+
+    VNEW_CASTING_IDOL_MODEL 이 빈 값이면(되돌리기) 두 프리셋 금액이 같으므로 108 과 같은 {key, label} 만 둔다.
+    """
+    items = [dict(item) for item in PRESETS]
+    if str(settings.VNEW_CASTING_IDOL_MODEL or "").strip():
+        for item in items:
+            item.update(unitUsd=preset_choice(item["key"])[1], totalUsd=total_usd(item["key"]))
+    return items
+
+
+def _check_cost(where: str, preset, shown: float) -> float:
+    """화면 확인 금액(shown)이 그 프리셋 총액(장당 × 장 수)과 같은지. 다르면 409 CostMismatch. 서버 총액을 돌려준다."""
+    expected = total_usd(preset)
+    if shown != expected:
+        raise VpocError(where, "CostMismatch", f"금액이 서버 계산과 다릅니다. 서버 {expected} USD, 화면 {shown} USD.", 409)
+    return expected
 
 
 def _apply_settings(cast: dict, preset, gender, look_en, where: str) -> None:
@@ -1177,6 +1237,7 @@ def start_draw(owner: str, cid: str, confirm_usd: float, *, preset=None, gender=
     이전 후보는 history 로 옮기고(최신 먼저 12개), 고른 사진(chosen)은 그대로 둔다(결정 5). 캐스팅 보기를 돌려준다.
     사용자가 쓴 캐릭터 설명(extraPromptKo)에 BL 유형 이름이 있으면 회차 문장 끝에 참고 문장을 더한다(지시서 104,
     VNEW_BL_LOOK 끔이면 더하지 않는다).
+    확인 금액(confirm_usd)은 고른 느낌(preset, 없으면 저장된 느낌)의 총액이어야 하고, 고른 모델·장당 금액·크기를 회차에 남긴다(지시서 109).
     """
     where = "vnew.casting.draw"
     require_enabled(where)
@@ -1184,14 +1245,18 @@ def start_draw(owner: str, cid: str, confirm_usd: float, *, preset=None, gender=
         raise VpocError(where, "FalKeyMissing", "fal API 키가 설정되지 않았습니다.", 409)
     _apply_settings(_empty_casting(), preset, gender, look_en, where)  # 형식만 먼저 본다
     slots = count()
-    expected = total_usd()
     shown = round(float(confirm_usd), 2)
-    if shown != expected:
-        raise VpocError(where, "CostMismatch", f"금액이 서버 계산과 다릅니다. 서버 {expected} USD, 화면 {shown} USD.", 409)
+    if preset is not None:
+        # 확인 금액 = 고른 프리셋의 총액(지시서 109). 화면은 늘 느낌을 보내므로 캐릭터를 읽기 전에 본다(지금 순서).
+        _check_cost(where, preset, shown)
     token = secrets.token_hex(6)
+    picked = {}
 
     def mutator(data: dict) -> None:
         cast = _ensure(data)
+        if preset is None:
+            # 느낌을 보내지 않은 요청은 저장된 느낌의 총액과 맞아야 한다(지시서 109).
+            _check_cost(where, cast.get("preset"), shown)
         if cast.get("status") == "drawing":
             # 멈춘 뽑기는 조회 때 이어하기가 끝낸다(시작부터 최대 VNEW_CASTING_POLL_MAX_S).
             raise VpocError(where, "CastingRunning", "이미 실사 캐스팅 사진을 만들고 있습니다.", 409)
@@ -1200,6 +1265,9 @@ def start_draw(owner: str, cid: str, confirm_usd: float, *, preset=None, gender=
         if not look:
             raise VpocError(where, "NoLook", "먼저 캐릭터를 만들어 분석해 주세요.", 409)
         gender_now = resolve_gender(cast, data.get("analysis"))
+        # 이 회차의 모델·장당 금액·크기(지시서 109). 뽑기·다시 제출·이어 조회는 설정 대신 이 값을 쓴다(_round_choice).
+        model, unit_usd, size = preset_choice(cast["preset"])
+        picked["usd"] = total_usd(cast["preset"])
         now = now_iso()
         cast["history"] = _trim_history(cast["candidates"] + cast["history"], str(cast.get("chosen") or ""))
         cast["candidates"] = []
@@ -1208,15 +1276,16 @@ def start_draw(owner: str, cid: str, confirm_usd: float, *, preset=None, gender=
             {"slot": index, "status": "queued", "requestArn": "", "candidateId": "", "error": ""} for index in range(slots)
         ]
         cast.update(
-            status="drawing", error="", usd=expected, claim=token, claimedAt=now, startedAt=now, heartbeatAt=now,
+            status="drawing", error="", usd=picked["usd"], claim=token, claimedAt=now, startedAt=now, heartbeatAt=now,
             prompt=cast_prompt(look, cast["preset"], gender_now, _bl_types_now(data)),
+            model=model, unitUsd=unit_usd, imageSize=f"{size[0]}x{size[1]}",
         )
 
     char, _ = characters.mutate_char(owner, cid, mutator)
     cast = _casting_of(char)
     log.info(
         "vnew.casting.draw_start cid=%s round=%d slots=%d usd=%.2f preset=%s gender=%s bl=%s",
-        cid, int(cast.get("round") or 0), slots, expected, cast.get("preset"), resolve_gender(cast, char.get("analysis")),
+        cid, int(cast.get("round") or 0), slots, picked["usd"], cast.get("preset"), resolve_gender(cast, char.get("analysis")),
         "+".join(_bl_types_now(char)) or "-",
     )
     _spawn(owner, cid, token)
@@ -1266,6 +1335,8 @@ def view(char) -> dict:
     VNEW_BL_LOOK 켬이면 끝에 blDetected([{id, label}] — 사용자가 쓴 캐릭터 설명에서 찾은 BL 유형)·blHintsEn(지금 외모 문장·느낌·
     성별로 뽑기 문장에 더해질 참고 문장)을 더한다(지시서 104, 103 의 blRole·blType·blRoles·blTypes 는 없앴다). 끔이면 이 기능 전과
     키가 같다. VNEW_CAST_PHOTO_CHECK 켬이면 맨 끝에 photoCheckNote(다시 뽑기 비용 안내 한 줄, 지시서 107)를 더한다.
+    unitUsd·totalUsd 는 지금 고른 느낌의 금액이다. 아이돌풍 모델이 켜져 있으면 presets 항목마다 unitUsd·totalUsd 를 더한다(지시서 109,
+    화면이 느낌을 바꾸면 금액을 바꾼다. 되돌리기 = 108 과 같은 보기).
     """
     if not settings.VNEW_CASTING:
         return {"enabled": False}
@@ -1274,10 +1345,11 @@ def view(char) -> dict:
     look = current_look(char)
     gender = str(cast.get("gender") or "") if isinstance(cast.get("gender"), str) else ""
     status = cast.get("status") if cast.get("status") in STATUSES else "none"
+    preset = preset_of(cast.get("preset"))
     out = {
         "enabled": True,
-        "preset": preset_of(cast.get("preset")),
-        "presets": [dict(item) for item in PRESETS],
+        "preset": preset,
+        "presets": _preset_items(),
         "gender": gender if gender in GENDERS else "",
         "genderAuto": auto_gender(analysis),
         "lookEn": look,
@@ -1290,9 +1362,9 @@ def view(char) -> dict:
             {"slot": int(slot.get("slot") or 0), "status": str(slot.get("status") or ""), "error": str(slot.get("error") or "")}
             for slot in cast["slots"]
         ],
-        "unitUsd": float(settings.VNEW_CASTING_USD),
+        "unitUsd": preset_choice(preset)[1],
         "count": count(),
-        "totalUsd": total_usd(),
+        "totalUsd": total_usd(preset),
         "candidates": [_photo(item) for item in cast["candidates"]],
         "history": [_photo(item) for item in cast["history"]],
         "chosen": str(cast.get("chosen") or ""),
@@ -1425,7 +1497,7 @@ def _submit_slot(owner: str, cid: str, token: str, index: int, prompt: str, mode
         return
     arn = f"{vpoc_fal.ARN_PREFIX}{model}/{request_id}"
     _mutate_cast(owner, cid, token, lambda cast: _set_slot(cast, index, status="submitted", requestArn=arn))
-    log.info("vnew.casting.submitted cid=%s slot=%d request=%s", cid, index, request_id)
+    log.info("vnew.casting.submitted cid=%s slot=%d request=%s model=%s", cid, index, request_id, model)
 
 
 def _image_url(result) -> str:
@@ -1660,14 +1732,12 @@ def _finish(owner: str, cid: str, token: str, *, timed_out: bool = False) -> Non
 def run_draw(owner: str, cid: str, token: str) -> None:
     """뽑기 스레드: queued 칸 제출 → submitted 칸 조회(5초 간격) → 모두 끝나거나 POLL_MAX 가 지나면 끝내기.
 
-    설정은 시작 때 한 번 읽는다. claim 을 잃으면(다른 실행이 이어받음) 쓰지 않고 접는다. 뜻밖의 예외는 상태를 그대로 두고
+    설정은 시작 때 한 번 읽는다. 모델·장당 금액·크기는 설정이 아니라 회차에 남긴 값(_round_choice, 지시서 109)이라 재시작 뒤 이어받아도
+    같다. claim 을 잃으면(다른 실행이 이어받음) 쓰지 않고 접는다. 뜻밖의 예외는 상태를 그대로 두고
     끝낸다 — 하트비트가 멈추면 조회 이어하기가 제출한 칸을 다시 조회하고, POLL_MAX 가 끝을 보장한다.
     """
     started = time.time()
     _mark(owner, cid)
-    model = settings.VNEW_CASTING_MODEL
-    unit_usd = float(settings.VNEW_CASTING_USD)
-    size = _image_size()
     poll_max = int(settings.VNEW_CASTING_POLL_MAX_S)
     interval = max(0, int(settings.POLL_INTERVAL_S))
     photo_check = bool(settings.VNEW_CAST_PHOTO_CHECK)  # 지시서 107. 다른 설정처럼 이 실행이 시작할 때 한 번 읽는다
@@ -1677,6 +1747,7 @@ def run_draw(owner: str, cid: str, token: str) -> None:
             if _expired(cast, poll_max):
                 _finish(owner, cid, token, timed_out=True)
                 return
+            model, unit_usd, size = _round_choice(cast)
             for slot in cast["slots"]:
                 if slot.get("status") == "queued":
                     _submit_slot(owner, cid, token, int(slot.get("slot") or 0), str(cast.get("prompt") or ""), model, size)

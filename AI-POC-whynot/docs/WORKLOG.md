@@ -1885,3 +1885,59 @@
   3. 시작 900초 상한에 걸린 submitted 칸은 fal이 사진을 만들어도 원장에 남지 않는다(106부터 있는 동작). 다시 뽑기가 늘어 칸이 상한 가까이 갈 가능성이 조금 커진다.
   4. fal Seedream 4.5 한 장 생성 시간 실측이 저장소에 없다. D14의 "걸리지 않는다"는 추정이다.
   5. 전체 검사 중 진짜 `vnew-resume-*` 스레드를 띄우는 그룹은 이제 `check_vnew_characters`(2개)뿐이다(스레드 시작을 감싸 센 결과). 이어 만들기 자체를 보는 그룹이라 이번에 건드리지 않았다.
+
+### 지시서 109 — 아이돌풍 실사 캐스팅만 FLUX.2 [pro]로 `VNEW_CASTING_IDOL_MODEL` (Kiro, claude-opus-5.5)
+
+- **범위**: `.kiro/handoff/109-cast-idol-flux.md`. 새 스펙 `.kiro/specs/cast-idol-model/`(requirements R1~R9, design D1~D12·§3 비용·§4 검사, tasks 1~8)을 쓰고 같은 실행에서 구현·검사까지 했다. 커밋·push 하지 않았다. git·aws·kubectl·네트워크·유료 API를 쓰지 않았다. 사용자 데이터는 읽지 않았다.
+- **먼저 한 일**: 바꿀 9개 파일의 시작 전 사본과 저장소 파일 목록(경로·mtime)을 저장소 밖(`%TEMP%\cim-orig`)에 두었다. 시작 전 전체 검사는 전부 통과.
+- **사실(지시서)**: 107·108 뒤에도 아이돌풍은 Seedream 4.5에서 그림체가 많다(운영 1회 4장 중 3장 그림체·한 칸 실패, 개발 비교 6장 중 1장 실사). 현실 배우풍은 Seedream 10장 중 10장 실사. Claude 모델 비교(같은 범건우 아이돌풍 문장, 모델당 6장, 비전 검사): Seedream 1/6, `fal-ai/flux-2-pro`·`flux-2-max`·`flux-pro/v1.1-ultra`(raw)·`nano-banana-pro`·`kling-image/v3/text-to-image`·`z-image/turbo` 모두 6/6. FLUX.2 [pro]를 고른 이유는 실사 품질·떡대 체격·아이돌 얼굴이고, 다른 모델은 체격이 마르거나(nano-banana-pro·ultra·z-image) 해상도가 낮거나(kling 880×1168) 비싸다(max). FLUX.2 [pro]는 같은 3키 본문으로 동작하고 결과가 `images[0].url`이다. 1920×2560 요청 → 1760×2352. 가격은 첫 1MP $0.03 + 1MP마다 $0.015(올림) → 1760×2352(3.95MP → 4MP) $0.075.
+- **결정**(사용자 2026-11-01 방안 나, design §2)
+  - D1·D2 설정: `VNEW_CASTING_IDOL_MODEL`(기본 `fal-ai/flux-2-pro`, env가 없을 때만 기본, 빈 값 = 되돌리기 — 아이돌풍도 `VNEW_CASTING_MODEL`·`_USD`·`_SIZE`), `VNEW_CASTING_IDOL_USD`(0.075, `_checked_float` 0~10, 틀리면 기본 + 경고), `VNEW_CASTING_IDOL_SIZE`(1760x2352, `_image_size`와 같은 규칙). 모델 키만 앱 env·base(값 = 코드 기본)·`PARITY_ENV_KEYS`에 배선했다. 되돌리기 한 줄이 파드 env까지 가려면 템플릿 `${…}`가 있어야 하고, 빈 값이면 금액·크기도 함께 돌아가므로 두 키는 다른 `VNEW_CASTING_*`처럼 코드 기본이다.
+  - D3 `preset_choice(preset)` → (모델, 장당, 크기). `total_usd(preset=None)`(없으면 지금처럼 `VNEW_CASTING_USD`).
+  - D4 회차 기록: `start_draw`가 회차 문장·칸과 같은 조건부 쓰기로 `casting.model`·`unitUsd`·`imageSize`를 남긴다. `run_draw`는 순회마다 `_round_choice(cast)`로 꺼내 제출·다시 제출·원장에 쓴다(시작 때 설정에서 읽던 세 줄을 뺐다). 조회 주소는 지금처럼 `requestArn` endpoint. 기록이 없는 옛 회차·꼴 틀린 기록은 Seedream 값(D6).
+  - D5 금액 확인: `_check_cost`를 두 자리에서 부른다. 느낌을 보낸 요청(화면)은 캐릭터를 읽기 전에(지금 순서), 느낌이 없는 요청은 mutate 안에서 저장된 느낌으로(`CastingRunning`보다 먼저). 409 문구·꼴은 그대로.
+  - D7 보기: `unitUsd`·`totalUsd`는 지금 느낌 기준. 모델 키가 켜져 있으면 `presets[]`에 `unitUsd`·`totalUsd`를 더하고, 되돌리면 108과 같은 `{key, label}`만 둬 보기 전체가 108과 같다.
+  - D10 화면: `castingPresetPrice`(서버가 `presets[].totalUsd`를 주면 그 값, 아니면 `totalUsd`), 라디오 change·409 다시 읽기에서 `price`를 다시 구한다.
+  - 그대로 둔 것: 캐스팅 문장·사진 고정 문장·BL 규칙(genre-bl)·사진 검사(두 모델 모두 적용)·다시 뽑기 2회·원장 키 규칙·`reconcile`·`_stale`·`_expired`·`draw_start` 로그 꼴·`vnew.css`.
+- **검토한 대안**(design D11): 다른 비교 모델(기각, 지시서 이유), 두 프리셋 모두 FLUX.2 [pro](현실 배우풍 10/10·$0.04, 기각), 금액·크기 키도 배선(되돌리기에 필요 없음·B 규칙, 기각), 크기에서 MP 공식으로 금액 계산(가격표가 바뀌면 공식도, 기각), 회차 기록 없이 회차 문장의 프리셋으로 지금 설정 읽기(설정이 바뀌면 섞임, 기각), 모델만 기록(되돌린 파드가 이어받으면 원장 $0.04·크기 1920×2560, 기각), `_empty_casting`에 기록 키(모든 캐릭터 저장값이 바뀜, 기각), 보기 `presets` 금액 늘 붙이기(되돌린 보기가 108과 달라지고 sha256 검사 기대값 변경, 기각), 금액 확인 한 자리(화면 경로 거절 순서 바뀜, 기각), 총액 센트 올림(B 결정 1, 기각 → 남은 이슈), 두 모델 id가 같으면 되돌리기로 보기(규칙이 하나 더, 기각).
+- **바꾼 것**
+  - `app/src/vnew/casting.py`(+91 −20, 지운 정의 0): 새 `_parse_size`·`preset_choice`·`_round_choice`·`_preset_items`·`_check_cost`, `total_usd(preset=None)`, `_image_size`(→ `_parse_size`), `start_draw`(금액 확인 2곳·회차 기록), `view`(`presets`·`unitUsd`·`totalUsd`·docstring), `_submit_slot` 로그 `model=`, `run_draw`(`_round_choice`), 모듈 docstring·과금 주석.
+  - `app/src/vnew/settings.py`(+14 −2): 키 3개·주석, `_checked_*` 쓰임 주석 2곳.
+  - `frontend/public/vnew.js`(+21 −3): `castingPresetPrice`, `castingSection`의 `priceSource`·`price`·라디오 change·`rereadPrice`. `vnew.css`는 그대로.
+  - `deploy/config.env.example`(+9 −3): `VNEW_CASTING_IDOL_MODEL=fal-ai/flux-2-pro`(`VNEW_CAST_PHOTO_CHECK=true` 바로 뒤, 되돌리기 주석), `VNEW_CASTING`·`VNEW_CAST_PHOTO_CHECK` 주석의 장당 금액. `k8s/workloads.yaml.tmpl`(+4): 앱 env 한 쌍·주석 2줄.
+  - `tools/check_vpoc.py`(+748 −6, 지운 정의 0): `PARITY_ENV_KEYS`, cast-m 정규식 2곳, `_run_cast_idol_off`, `_CIM_*`, `check_vnew_cast_idol_model`(cim-a~h), `main()`.
+  - `.kiro/specs/cast-idol-model/` 세 파일, `docs/ANALYSIS.md`(머리 줄·§3.6 모듈 표·§3.6.1 B 뽑기·보기 행·캐스팅 화면·「아이돌풍 모델」 절·§6.2·§7.1 표·문단·§10.1), 이 항목.
+- **검사(어떤 검사가 무엇을 덮는지)**
+
+  | 검사 | 덮는 것 |
+  |---|---|
+  | cim-a | `settings` 세 키(하위 프로세스: 없음·빈 값·공백·덮어쓰기, 금액 0.1·" 0.2 "·빈 값·abc·nan·inf·-1·11 → 경고 5줄, 크기), settings.py 자리·주석, `preset_choice` 아이돌풍·대소문자·None·현실·되돌리기(""·"  ")·덮어쓰기 분기, `_parse_size` 6꼴(범위 밖·꼴 틀림·빈 값), `total_usd` preset 없음·있음 × 장 수 2·1·3·4 |
+  | cim-b | 템플릿 env 한 쌍·자리·주석·금액·크기 키 없음, base 값 = 코드 기본·되돌리기 주석·자리, `PARITY_ENV_KEYS` 자리, `config.<target>.env` 그대로, render dev·prod `fal-ai/flux-2-pro`·빈 값 오버레이 `""`, 빈 값 파드 하위 프로세스(`preset_choice`·`total_usd`·`_preset_items` 되돌리기 분기) |
+  | cim-c | `start_draw`의 `_check_cost` 두 자리(느낌 보냄 4경우·느낌 없음 + 저장 느낌 4경우·느낌이 저장값을 이김 2경우·되돌리기 2경우), 409 문구·409면 저장·스레드·제출 0, 회차 기록 3키·`usd` 7종, Flask `POST /casting/draw` 409 `CostMismatch`·202·응답 `totalUsd` |
+  | cim-d | `run_draw` → `_submit_slot`(주소·본문 정확히 3키·1760×2352·URL·data URI 0·로그 `model=`·비밀 없음)·`_poll_slot`(조회 주소 `fal-ai/flux-2-pro/requests/…`)·`_charge`(키·모델·0.075)·`_photo_check` 2회, 현실 배우풍 Seedream·1920×2560·0.04, 되돌리기 아이돌풍 Seedream·0.04·기록 |
+  | cim-e | `_photo_passes` 다시 뽑기·NotPhoto 분기의 원장 금액·모델(아이돌풍 2 × 0.075·3 × 0.075, 현실 2 × 0.04), 다시 제출 본문 같음, S3 저장 수 |
+  | cim-f | `_round_choice` 기록 분기(회차 도중 설정 6개 바꿈 → 제출 3·원장 3 모두 FLUX.2 [pro]·0.075·1760×2352), `reconcile` → `run_draw` 재시작(되돌린 설정에서 조회·다시 제출·원장이 기록 값), 옛 회차 분기(기록 없음 → Seedream·0.04·1920×2560, `redraws` 1 → 2), 꼴 틀린 기록 11꼴(빈 모델·공백·숫자 모델·bool·글·nan·inf·음수·크기만 틀림) |
+  | cim-g | `view`·`_preset_items` 켬·끔 분기(아이돌풍·현실·장 수 4), 되돌린 보기 = 108 식, 키 순서·나머지 값, Flask 상세 |
+  | cim-h | `castingPresetPrice` 9꼴(글 금액·Infinity·배열 아님·null), `castingSection` 느낌 라디오·확인창·`confirmUsd`·되돌린 보기·409 다시 읽기 뒤 라디오(node 가짜 DOM, 서버 `view` 4개 그대로), 화면이 보낸 본문 4개 → Flask 뽑기 202·기록 모델, `innerHTML` 0, `node --check` |
+
+- **기대값을 바꾼 검사와 이유**: cast-m 하나다. "템플릿·base에 `VNEW_CASTING_` 키가 없다" 정규식에서 `VNEW_CASTING_IDOL_MODEL`만 뺐다(`VNEW_CASTING_(?!IDOL_MODEL\b)`, base는 `^VNEW_CASTING_(?!IDOL_MODEL=)`). 되돌리기 한 줄을 위해 배선해야 하는 키이고(PARITY), 나머지 세부 키는 여전히 없어야 한다(템플릿 주석에도 그 이름을 쓰지 않았다). 새 기본값에서 기대값이 달라지는 기존 검사 4개(`check_vnew_casting`·`check_vnew_char_fidelity`·`check_vnew_bl_look`·`check_vnew_cast_photo_guard`)는 기대값을 바꾸지 않고 `main()`의 부르는 줄에서 `_run_cast_idol_off`(되돌리기 = 108 동작)로 감쌌다(103·107과 같은 규칙, 이유는 design D9 표).
+- **확인**
+  - `node --check frontend/public/vnew.js` 통과.
+  - `python -X utf8 tools/check_vpoc.py` 전부 통과: ok 66줄(시작 전 65 + cim), FAIL·WARN 0, 81~83초(문서까지 고친 뒤 마지막 실행 81초).
+  - 커버리지(coverage 7.17, 전체 검사기 `coverage run --source=app/src/vnew`, 데이터는 저장소 밖, 시작 전 사본과 difflib): 바뀐 서버 실행문 43개 중 43개(100%) — `casting.py` 40/40, `settings.py` 3/3. 둘레 함수 `start_draw` 36/36, `run_draw` 32/32, `view` 16/16, `_submit_slot` 14/14, `reconcile` 25/25, `_photo_passes` 19/19, 새 함수 5개 모두 100%.
+  - 변형 검사 41개(저장소 파일을 한 곳씩 틀리게 고쳐 `check_vnew_cast_idol_model`만 돌리고 바이트째 되돌림): `casting.py` 27(아이돌풍·현실 바꿈, 빈 값 되돌리기 무시, 아이돌풍 크기·금액·크기 기본, `total_usd` 프리셋 무시, 금액 확인 두 자리 각각 없앰·기본 느낌으로, 회차 모델·금액·크기·usd 기록, `run_draw`가 설정을 읽음, 옛 회차가 지금 프리셋, bool·inf·음수 금액, 기록 크기 무시, `presets` 금액 늘·안 붙임, 보기 `unitUsd`·`totalUsd`, 로그 `model=` 없음, 본문 키 하나 더, 크기 범위, 금액 비교 `>`), `settings.py` 6(공백 안 지움, 빈 값 = 기본, `_float`, 금액·크기·모델 기본), `vnew.js` 6(라디오가 금액 안 바꿈, `presets` 안 봄, 글·무한대 금액 받음, 다시 읽은 보기 안 씀, 다른 느낌 금액), 배선 2(템플릿 env 없음, base 빈 값). 모두 잡혔다(놓친 것 0). 같은 뜻이 되는 변형(처음 `price`를 `totalUsd`로: 서버 `totalUsd`가 고른 느낌 금액이라 처음 화면은 같다)은 세지 않았다.
+  - 유료 호출 0: cim은 fal(`casting._fal_request`·`_fetch_url`)·`vpoc.llm._converse`·원장을 가짜로, `characters._fal_request`·`vpoc.fal._request`·`characters.run_resume_variant`를 막고 호출 0을 본다.
+  - 줄 끝·부산물: 바뀐 코드·설정 6개(`casting.py`·`settings.py`·`vnew.js`·`check_vpoc.py`·`config.env.example`·`workloads.yaml.tmpl`)와 문서 2개, 새 스펙 3개 모두 CR 0(시작 전도 0)·BOM 없음·끝 줄바꿈 있음, 공백만 바뀐 줄 0, 새 줄 끝 공백 0, 지운 함수 정의 0(AST·JS). 새 파일은 스펙 3개뿐. 시작 뒤 바뀐 저장소 파일은 위 파일과 실행 로그 `.kiro/handoff/logs/109.log`, 검사기 `compileall`이 다시 쓴 `app/src/vnew/__pycache__/casting·settings.cpython-311.pyc`(원래 있던 파일, `.gitignore`)뿐이다. 수정 금지 파일(`generate.py`·`genre_bl.py`·`config.*.env`·`.gitlab-ci.yml`·`app/src/vpoc/`)은 mtime이 그대로다.
+- **3단계 리뷰**
+  - 보안: 비밀값 추가 없음(fal 키는 지금처럼 `vpoc.fal._request`만 다룬다. 로그 `model=`은 설정값이고 cim-d가 로그에 키가 없는지 본다). 사용자는 모델·금액·크기를 정할 수 없다(라우트는 preset·gender·lookEn만 넘기고 preset은 `_apply_settings`가 400으로 거른다, `confirmUsd`는 `parse_confirm_usd`가 유한한 수만). 회차 기록은 서버만 쓰고 `_round_choice`가 꼴을 본다. 모델 id는 `{FAL_QUEUE_URL}/{model}` 경로에 들어가지만 `VNEW_CASTING_MODEL`과 같은 운영자 설정이고 호스트는 고정이다. 외부 전송: FLUX.2 [pro]에도 Seedream과 같은 3키(글만, 이미지·URL 없음)를 fal 큐로 보낸다. 글에는 지금처럼 사용자가 쓴 외모 문장이 들어간다. fal이 FLUX.2 [pro] 요청을 안에서 다른 회사(Black Forest Labs)로 넘기는지는 확인하지 않았다(미확인, 남은 이슈). 발견: 금액 키를 `_float`로 읽으면 nan·inf·음수를 받아 확인 금액이 늘 어긋난다 → `_checked_float`(0~10, 경고)로 막았다(cim-a, 변형 S3).
+  - 성능(512Mi): 결과 4.1MP(1760×2352) 디코드는 Seedream 4.9MP보다 작고 `_PHOTO_SEM`(한 장씩) 그대로라 메모리 봉우리가 늘지 않는다. 동시성·시간 제한(`_FETCH_TIMEOUT_S` 120초, 900초·600초 상한)은 그대로다. 외부 호출은 제출마다 같고(fal POST 1·조회·결과·내려받기·검사 LLM 1), 그림체가 줄면 아이돌풍 제출 수가 준다. 비용: 아이돌풍 1회(2장) 사진 **$0.15**(그림체 없을 때) + 검사 약 $0.01, 최악 $0.45. 108 Seedream 아이돌풍 평균은 칸당 제출 1 + p + p²라 p = 0.5(108 가정) 2장 $0.14·칸 실패 12.5%, 운영 관측 p = 0.75 $0.185·42%, 개발 비교 p = 0.83 $0.20·58%. 성공 후보 1장당 FLUX.2 [pro] $0.075, Seedream $0.08~0.24. 발견: 장 수가 홀수면 아이돌풍 표시 총액이 반 센트 작다(1장 $0.07) → 기본 2장은 정확해 그대로 두고 남은 이슈로.
+  - 운영성: 로그 `vnew.casting.submitted … model=`로 어느 모델로 냈는지 칸마다 보인다(`draw_start` 꼴은 그대로, bl-f). 되돌리기는 `config.<target>.env`에 `VNEW_CASTING_IDOL_MODEL=` 한 줄이고 보기·화면이 108과 같아진다(cim-b·cim-g). 진행 중 회차는 회차 기록으로 끝까지 같은 모델이고, 재시작 뒤 이어하기도 같다(cim-f). 배포 전에 시작한 회차(기록 없음)는 Seedream으로 끝난다(cim-f). 발견: 코드를 108로 되돌리는 중에 진행 중 FLUX.2 [pro] 회차를 108 파드가 이어받으면 다시 제출이 Seedream, 원장이 $0.04가 된다 → 절차로 막는다(먼저 설정 되돌리기, 진행 중 회차가 끝난 뒤 최대 900초 기다려 코드 되돌리기). design D12·ANALYSIS에 적었다.
+- **운영 반영 계획(실행하지 않음)**: 커밋 뒤 개발 main 병합 → CI → 개발 ArgoCD. 개발에서 범건우 아이돌풍 1회(2장, $0.15)로 화면 금액($0.15)·확인창·원장 2 × 0.075·로그 `model=fal-ai/flux-2-pro`·결과 크기를 보고, 현실 배우풍 1회로 $0.08·Seedream을 본다. 운영은 수동 job `deploy:whynot:prod`. 되돌리기는 위 설정 한 줄.
+- **남은 이슈**
+  1. 1760×2352를 직접 요청한 결과 크기와 금액은 실측하지 않았다(실측은 1920×2560 요청 → 1760×2352). 개발 1회에서 확인한다.
+  2. FLUX.2 [pro]의 그림체 비율은 6장 표본(0/6)뿐이다. 단측 95% 상한은 약 39%(추정)라 다시 뽑기 비용·NotPhoto 빈도를 로그로 본다.
+  3. FLUX.2 [pro] 한 장 생성 시간 실측이 없다(108 D14의 900초 판단은 추정).
+  4. `VNEW_CASTING_COUNT`가 홀수면 아이돌풍 표시 총액이 반 센트 작다(1장 $0.07·3장 $0.22, 원장은 장당 $0.075). 기본 2장은 정확하다.
+  5. fal이 FLUX.2 [pro] 요청을 안에서 다른 회사로 넘기는지(데이터 처리 범위) 확인하지 않았다.
+  6. 코드 되돌리기(108 이미지) 때는 운영 절차(설정 먼저·진행 중 회차 끝난 뒤)가 필요하다(위 운영성).
+  7. 409 `CostMismatch` 안내 문구가 보인 뒤 느낌을 바꾸면 버튼 금액은 바뀌지만 안내 문구는 그대로 남는다(확인창 금액은 맞다).

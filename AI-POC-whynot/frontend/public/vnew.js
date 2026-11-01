@@ -1114,6 +1114,17 @@
       "입니다. 다시 누르면 새 금액으로 확인합니다.";
   }
 
+  /* 느낌별 금액(지시서 109): 서버가 presets[].totalUsd 를 주면 그 느낌의 금액, 주지 않으면(옛 서버·되돌림) 지금처럼 totalUsd.
+     돌려주는 {count, totalUsd} 가 버튼 글·확인창·confirmUsd 에 그대로 쓰인다. */
+  function castingPresetPrice(cast, presetKey) {
+    var c = cast || {};
+    var total = c.totalUsd;
+    (Array.isArray(c.presets) ? c.presets : []).forEach(function (item) {
+      if (item && item.key === presetKey && typeof item.totalUsd === "number" && isFinite(item.totalUsd)) total = item.totalUsd;
+    });
+    return { count: c.count, totalUsd: total };
+  }
+
   /* 진행: 끝난 칸(ready·failed) / 전체 칸. */
   function castingProgress(cast) {
     var c = cast || {};
@@ -1186,8 +1197,10 @@
     var base = "/api/vnew/characters/" + encodeURIComponent(detail.id) + "/casting";
     var drawing = cast.status === "drawing";
     var lock = castingLockText(detail);
-    var price = { count: cast.count, totalUsd: cast.totalUsd };
     var form = { preset: cast.preset || "idol", gender: cast.gender || "" };
+    // 금액은 고른 느낌을 따른다(지시서 109). priceSource 는 금액을 읽을 보기(409 CostMismatch 뒤에는 다시 읽은 보기).
+    var priceSource = cast;
+    var price = castingPresetPrice(priceSource, form.preset);
     var loadedLook = String(cast.lookEn || "");
 
     var section = el("section", "panel vnew-casting");
@@ -1217,7 +1230,11 @@
       radio.checked = item.key === form.preset;
       radio.disabled = !!lock;
       radio.addEventListener("change", function () {
-        if (radio.checked) form.preset = item.key;
+        if (!radio.checked) return;
+        form.preset = item.key;
+        // 느낌을 바꾸면 버튼 금액·확인창·confirmUsd 도 그 느낌 금액으로(지시서 109). 옛 서버면 같은 totalUsd 그대로.
+        price = castingPresetPrice(priceSource, form.preset);
+        drawBtn.textContent = castingDrawLabel(price);
       });
       label.appendChild(radio);
       label.appendChild(el("span", null, item.label));
@@ -1315,7 +1332,8 @@
             refreshDetail(host, false);
             return;
           }
-          price = { count: next.count, totalUsd: next.totalUsd };
+          priceSource = next;
+          price = castingPresetPrice(priceSource, form.preset);
           drawBtn.textContent = castingDrawLabel(price);
           updateButtons();
           showMessage(castingCostChangedText(price));

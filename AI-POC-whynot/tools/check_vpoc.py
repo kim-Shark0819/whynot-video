@@ -11856,6 +11856,8 @@ PARITY_ENV_KEYS = [
     "VNEW_BL_LOOK",
     # 지시서 107: 실사 사진 검사·그림체 다시 뽑기.
     "VNEW_CAST_PHOTO_CHECK",
+    # 지시서 109: 아이돌풍 실사 캐스팅 모델(빈 값 = 되돌리기, Seedream).
+    "VNEW_CASTING_IDOL_MODEL",
 ]
 PARITY_FACE = "fal:bytedance/seedance-2.5/image-to-video"
 PARITY_PARTNER = "fal:bytedance/seedance-2.5/reference-to-video"
@@ -22911,16 +22913,19 @@ def check_vnew_casting() -> None:
             t_lines = template.splitlines()
             t_fx = next((i for i, line in enumerate(t_lines) if line.strip() == "- name: VNEW_FX"), -1)
             t_cast = next((i for i, line in enumerate(t_lines) if line.strip() == f"- name: {key}"), -1)
+            # 지시서 109: 아이돌풍 모델 키(VNEW_CASTING_IDOL_MODEL)만은 config 한 줄 되돌리기(빈 값)를 위해 템플릿·base 에 배선한다(PARITY,
+            # cim-b). 나머지 VNEW_CASTING_* 세부 키(모델·장당 금액·장 수·크기·아이돌풍 금액·크기)는 여전히 코드 기본이라 없어야 한다.
             if t_fx < 0 or t_cast < 0 or t_lines[t_fx + 1].strip() != 'value: "${VNEW_FX}"' \
                     or any(not line.strip().startswith("#") for line in t_lines[t_fx + 2:t_cast]) \
-                    or t_lines[t_cast + 1].strip() != f'value: "${{{key}}}"' or re.search(r"VNEW_CASTING_", template):
+                    or t_lines[t_cast + 1].strip() != f'value: "${{{key}}}"' or re.search(r"VNEW_CASTING_(?!IDOL_MODEL\b)", template):
                 bad.append("(cast-m) 템플릿에서 VNEW_CASTING 이 VNEW_FX 바로 뒤가 아니거나 코드 기본 키가 들어갔습니다")
             e_lines = example.splitlines()
             e_fx = next((i for i, line in enumerate(e_lines) if line == "VNEW_FX=true"), -1)
             e_cast = next((i for i, line in enumerate(e_lines) if line.startswith(f"{key}=")), -1)
             between = e_lines[e_fx + 1:e_cast] if 0 <= e_fx < e_cast else []
             if e_fx < 0 or e_cast < 0 or e_lines[e_cast] != f"{key}=true" or not between or any(not line.startswith("#") for line in between) \
-                    or f"{key}=false" not in "\n".join(between) or example.count(f"\n{key}=") != 1 or re.search(r"^VNEW_CASTING_", example, re.M):
+                    or f"{key}=false" not in "\n".join(between) or example.count(f"\n{key}=") != 1 \
+                    or re.search(r"^VNEW_CASTING_(?!IDOL_MODEL=)", example, re.M):
                 bad.append("(cast-m) config.env.example 에 VNEW_FX 바로 뒤 true·되돌리기 주석이 없습니다")
             if key not in PARITY_ENV_KEYS or PARITY_ENV_KEYS.index(key) != PARITY_ENV_KEYS.index("VNEW_FX") + 1:
                 bad.append("(cast-m) PARITY_ENV_KEYS 에 VNEW_FX 바로 뒤로 없습니다")
@@ -32442,6 +32447,742 @@ def _run_cast_photo_off(check) -> None:
         check()
 
 
+# 지시서 109(cast-idol-model design D9): 새 기본값(아이돌풍 = FLUX.2 [pro], 장당 $0.075)에서 기대값이 달라지는 기존 검사도 부르는 줄에서
+# 되돌리기 값(VNEW_CASTING_IDOL_MODEL 빈 값 = 108 동작)으로 고정한다(검사 본문·기대값·들여쓰기는 그대로). 이유:
+#   check_vnew_casting — cast-e 가 기본 느낌(아이돌풍) 확인 금액 0.08 로 뽑기를 시작하고, cast-f 가 Seedream 본문·장당 0.04 원장을 본다.
+#   check_vnew_char_fidelity — cf-b·cf-r 이 옛 캐릭터 상세 JSON(casting 보기 포함) sha256 을 구현 전 값과 비교한다(켬이면 presets 금액·
+#                              아이돌풍 totalUsd 가 바뀐다).
+#   check_vnew_bl_look — bl-f 가 아이돌풍 뽑기를 확인 금액 0.08 로 시작하고, bl-i 가 화면 confirmUsd 0.08 을 본다.
+#   check_vnew_cast_photo_guard — cpg-e~h 가 아이돌풍 뽑기를 장당 0.04(확인 금액 0.04 × 장 수)·Seedream 으로 본다.
+# 켬 동작(아이돌풍 FLUX.2 [pro]·금액·회차 기록·화면 금액)은 cim-a~h 가 본다.
+def _run_cast_idol_off(check) -> None:
+    """`check()` 를 VNEW_CASTING_IDOL_MODEL="" (되돌리기 = 108 동작)로 부르고 설정을 되돌린다."""
+    with _pin_vnew(VNEW_CASTING_IDOL_MODEL=""):
+        check()
+
+
+# ---------------------------------------------------------------- 지시서 109 아이돌풍 캐스팅 모델(cast-idol-model)
+#
+# 아이돌풍(preset idol)만 fal FLUX.2 [pro] 로 뽑고 현실 배우풍은 Seedream 4.5 그대로다(.kiro/specs/cast-idol-model).
+# 외부 호출은 모두 가짜다: fal 큐(casting._fal_request·_fetch_url), 사진 검사 LLM(vpoc.llm._converse), 원장(vpoc.ledger.charge),
+# S3(_FakeCharStore). 라우트·저장소 조건부 쓰기·뽑기 스레드 본문(run_draw)·reconcile 은 실제 코드 경로다.
+_CIM_FLUX = "fal-ai/flux-2-pro"
+_CIM_SEEDREAM = "fal-ai/bytedance/seedream/v4.5/text-to-image"
+_CIM_FLUX_SIZE = {"width": 1760, "height": 2352}
+_CIM_SEEDREAM_SIZE = {"width": 1920, "height": 2560}
+
+# cim-h: vnew.js 캐스팅 칸(node 가짜 DOM, _CAST_SCREEN_NODE_HARNESS 그대로). ON·ON_REAL·ON4·OFF 는 서버 casting.view 가 만든 실제 보기다.
+_CIM_SCREEN_NODE_CASES = r"""
+function detailOf(cast) { return { id: "ch 1", status: "ready", casting: cast }; }
+function drawOf(section) { return byClass(section, "vnew-casting-draw")[0]; }
+function msgOf(section) { var m = byClass(section, "vnew-casting-msg")[0]; return [m.textContent, m.style.display]; }
+function pick(section, key) {
+  byTag(section, "input").forEach(function (n) { if (n.type === "radio") n.checked = n.value === key; });
+  byTag(section, "input").filter(function (n) { return n.type === "radio" && n.value === key; })[0].fire("change");
+}
+async function drawNow(section) {
+  reset(); confirmAnswers = [true]; drawOf(section).fire("click"); await tick();
+  return [confirms.slice(), calls.slice()];
+}
+async function run() {
+  var odd = { count: 2, totalUsd: 0.08, presets: [{ key: "idol", totalUsd: "0.15" }, { key: "real", totalUsd: Infinity }, null] };
+  out.pure = [castingPresetPrice(ON, "idol"), castingPresetPrice(ON, "real"), castingPresetPrice(ON, "zz"),
+              castingPresetPrice(OFF, "idol"), castingPresetPrice(OFF, "real"), castingPresetPrice(odd, "idol"),
+              castingPresetPrice(odd, "real"), castingPresetPrice({ count: 2, totalUsd: 0.08, presets: "x" }, "idol"),
+              castingPresetPrice(null, "idol")];
+  var host = new FakeNode("div");
+  var s = castingSection(host, detailOf(ON));
+  out.onStart = drawOf(s).textContent;
+  pick(s, "real");
+  out.onReal = drawOf(s).textContent;
+  out.onRealDraw = await drawNow(s);
+  pick(s, "idol");
+  out.onIdol = drawOf(s).textContent;
+  out.onIdolDraw = await drawNow(s);
+  out.onRealStart = drawOf(castingSection(host, detailOf(ON_REAL))).textContent;
+  var so = castingSection(host, detailOf(OFF));
+  out.offStart = drawOf(so).textContent;
+  pick(so, "real");
+  out.offReal = drawOf(so).textContent;
+  out.offRealDraw = await drawNow(so);
+  // 409 CostMismatch → 상세를 다시 읽어(장 수 4) 고른 느낌 금액을 보이고, 그 뒤 느낌을 바꾸면 다시 읽은 금액을 쓴다.
+  var sc = castingSection(host, detailOf(ON));
+  reset();
+  apiPlan = [{ err: { type: "CostMismatch", status: 409, message: "x" } }, { ok: detailOf(ON4) }];
+  confirmAnswers = [true]; drawOf(sc).fire("click"); await tick(); await tick();
+  out.mismatch = [confirms.slice(), calls.slice(), drawOf(sc).textContent, msgOf(sc)];
+  pick(sc, "real");
+  out.mismatchReal = drawOf(sc).textContent;
+  out.mismatchRealDraw = await drawNow(sc);
+  out.innerHTML = innerHTMLUsed;
+  console.log(JSON.stringify(out));
+}
+run().catch(function (e) { console.error((e && e.stack) || String(e)); process.exit(1); });
+"""
+
+
+def check_vnew_cast_idol_model() -> None:
+    """지시서 109 — 아이돌풍 실사 캐스팅만 FLUX.2 [pro] 로(.kiro/specs/cast-idol-model). 외부 호출은 모두 가짜다.
+
+    (cim-a) 설정: 하위 프로세스에서 VNEW_CASTING_IDOL_MODEL(없음 → fal-ai/flux-2-pro, 빈 값·공백 → "" 되돌리기, 앞뒤 공백 정리)·
+            VNEW_CASTING_IDOL_USD(없음·빈 값 0.075, 0.1·" 0.2 ", 틀린 값 5꼴 → 0.075 + 경고 5줄)·VNEW_CASTING_IDOL_SIZE(1760x2352·덮어쓰기),
+            preset_choice 표(아이돌풍 FLUX.2 [pro]·0.075·1760x2352, 현실 배우풍·모르는 값 Seedream·0.04·1920x2560, 되돌리기 → 아이돌풍도 Seedream
+            셋, 크기 꼴 틀림 → 1760x2352), total_usd(없음 0.08·아이돌풍 0.15·현실 0.08·장 수 1·3·4)
+    (cim-b) 배선: 템플릿 앱 env(VNEW_CAST_PHOTO_CHECK 바로 뒤·주석 2줄·금액·크기 키 없음)·base(= 코드 기본, 되돌리기 주석, VNEW_CAST_PHOTO_CHECK
+            바로 뒤)·PARITY_ENV_KEYS·config.<target>.env 그대로·render dev/prod fal-ai/flux-2-pro·+빈 값 오버레이 "" → 하위 프로세스 되돌리기
+    (cim-c) 확인 금액: 느낌 보냄(아이돌풍 0.08 → 409·0.15 → 시작, 현실 0.15 → 409·0.08 → 시작), 느낌 안 보냄(저장된 느낌 기준), 되돌리기
+            (아이돌풍 0.08 시작·0.15 → 409), 409 면 저장·제출·스레드 0, 문구에 서버 금액, Flask 뽑기 409 CostMismatch·202, 회차 기록 3키·usd
+    (cim-d) run_draw: 아이돌풍 → fal POST 주소 FLUX.2 [pro]·본문 정확히 3키(1760x2352, 회차 문장, URL·data URI 0)·조회 주소·원장(모델·0.075·키)·
+            사진 검사 칸마다 1회·로그 submitted model=(비밀 없음), 현실 배우풍 → Seedream·1920x2560·0.04, 되돌리기 → 아이돌풍도 Seedream·0.04
+    (cim-e) 다시 뽑기 원장: 아이돌풍 그림체 → 실사(원장 2 × 0.075 FLUX·제출 2 같은 본문), 그림체 ×3(NotPhoto·원장 3·저장 0), 현실 배우풍 그림체 →
+            실사(원장 2 × 0.04 Seedream)
+    (cim-f) 회차 고정: 회차 중 설정을 모두 바꿔도 FLUX.2 [pro]·0.075·1760x2352(다시 제출 포함), 재시작(되돌린 설정에서 reconcile → 이어 조회·
+            다시 제출 FLUX.2 [pro]), 기록 없는 옛 회차(아이돌풍) → Seedream·0.04·1920x2560, _round_choice 꼴 틀린 기록 11꼴
+    (cim-g) 보기: presets[].unitUsd·totalUsd·unitUsd·totalUsd = 고른 느낌, 키 순서·나머지 값 = 되돌리기 보기, 되돌리기 보기 = 108 식, 장 수 4,
+            Flask 상세
+    (cim-h) 화면: castingPresetPrice 9꼴, 캐스팅 칸(node 가짜 DOM, 서버 보기 그대로): 느낌 바꾸면 버튼·확인창·confirmUsd 가 그 느낌 금액,
+            되돌리기 보기는 totalUsd 그대로, 409 뒤 다시 읽은 금액, 화면이 보낸 본문을 Flask 뽑기에 그대로 보내 202·회차 모델, innerHTML 0,
+            node --check
+    """
+    sys.path.insert(0, str(ROOT / "app"))
+    import copy as _copy  # noqa: PLC0415
+    import hashlib as _hashlib  # noqa: PLC0415
+    import importlib.util as _ilu  # noqa: PLC0415
+    import io as _io  # noqa: PLC0415
+    import json as _json  # noqa: PLC0415
+    import traceback as _tb  # noqa: PLC0415
+    from datetime import datetime as _dt, timedelta as _td, timezone as _tz  # noqa: PLC0415
+
+    from flask import Flask  # noqa: PLC0415
+    from PIL import Image as _Image  # noqa: PLC0415
+
+    from src import vnew  # noqa: PLC0415
+    from src.vnew import casting as castmod  # noqa: PLC0415
+    from src.vnew import characters as charmod  # noqa: PLC0415
+    from src.vnew import settings as vset  # noqa: PLC0415
+    from src.vpoc import fal as vpoc_fal  # noqa: PLC0415
+    from src.vpoc import llm as vpoc_llm  # noqa: PLC0415
+    from src.vpoc import settings as vpoc_settings  # noqa: PLC0415
+    from src.vpoc.errors import VpocError  # noqa: PLC0415
+
+    bad: list[str] = []
+    seen: set[str] = set()
+    report: list[str] = []
+    owner = "tester"
+    fake_store = _FakeCharStore()
+    puts: list[str] = []
+    store_put = fake_store.put_bytes
+
+    def put_bytes(key, body, content_type, *, bucket=""):
+        puts.append(key)
+        store_put(key, body, content_type, bucket=bucket)
+
+    fake_store.put_bytes = put_bytes
+    saved = {
+        "STORE": charmod.STORE, "cast_fal": castmod._fal_request, "cast_fetch": castmod._fetch_url,  # noqa: SLF001
+        "cast_spawn": castmod._spawn, "cast_sleep": castmod._sleep, "charge": castmod.vpoc_ledger.charge,  # noqa: SLF001
+        "converse": vpoc_llm._converse, "char_fal": charmod._fal_request, "vpoc_request": vpoc_fal._request,  # noqa: SLF001
+        "fal_key": vpoc_settings.FAL_KEY, "resume_variant": charmod.run_resume_variant,
+    }
+    stray: list[str] = []
+
+    def stray_call(name):
+        def blocked(*_a, **_k):
+            stray.append(name)
+            raise RuntimeError(f"쓰면 안 되는 호출: {name}")
+        return blocked
+
+    # ---- 가짜 fal: 제출마다 plan 에서 판정(photo·drawing)을 꺼내 요청 id 에 붙인다. 결과 사진 색 = 그 판정 색.
+    plan: list[str] = []
+    by_rid: dict[str, str] = {}
+    post_seq = {"n": 0}
+    fal_calls: list[tuple] = []
+
+    def fake_fal(method, url, payload=None):
+        fal_calls.append((method, url, _copy.deepcopy(payload)))
+        if method == "POST":
+            post_seq["n"] += 1
+            rid = f"cim-{post_seq['n']}"
+            by_rid[rid] = plan.pop(0) if plan else "photo"
+            return {"request_id": rid}
+        rid = url.split("/requests/", 1)[1].split("/", 1)[0]
+        if url.endswith("/status"):
+            return {"status": "COMPLETED"}
+        return {"images": [{"url": f"https://fal.media/files/cim/{rid}.png"}]}
+
+    photos: dict[str, bytes] = {}
+    for name in ("photo", "drawing"):
+        buffer = _io.BytesIO()
+        _Image.new("RGB", (440, 588), _CPG_COLORS[name]).save(buffer, format="JPEG")
+        photos[name] = buffer.getvalue()
+
+    def fake_fetch(url):
+        rid = url.rsplit("/", 1)[1].split(".", 1)[0]
+        return photos[by_rid.get(rid, "photo")]
+
+    llm_calls: list[tuple[str, str]] = []
+
+    def fake_converse(*, system_text, blocks, tool, max_tokens, where, model=""):
+        with _Image.open(_io.BytesIO(blocks[1]["image"]["source"]["bytes"])) as image:
+            pixel = image.convert("RGB").getpixel((image.size[0] // 2, image.size[1] // 2))
+        name = min(("photo", "drawing"), key=lambda key: sum((a - b) ** 2 for a, b in zip(_CPG_COLORS[key], pixel)))
+        llm_calls.append((where, name))
+        usage = {"inputTokens": 1, "outputTokens": 1, "model": model}
+        if name == "drawing":
+            return {"photo": False, "style": "webtoon"}, usage
+        return {"photo": True, "style": "photo"}, usage
+
+    ledger: list[dict] = []
+
+    def fake_charge(key, **kwargs):
+        ledger.append({"key": key, **kwargs})
+        return {"spentUsd": 0.0, "capUsd": None}
+
+    spawned: list[tuple] = []
+    sleeps: list[float] = []
+    analysis = {
+        "nameGuess": "건우", "descriptionKo": "20대 남성 아이돌.",
+        "appearanceEn": "He is a tall, broad-shouldered Korean man in his 20s with short black hair.",
+        "styleEn": "Clean lines.", "baseOutfitEn": "A black suit with a white shirt.", "outfitEn": "",
+        "outfitLayersEn": [], "altOutfitsEn": [], "expressionsKo": [], "extraEn": "", "model": "m", "genderEn": "male",
+    }
+    queue = vpoc_settings.FAL_QUEUE_URL
+    legacy = (_CIM_SEEDREAM, 0.04, (1920, 2560))
+
+    def iso_ago(seconds: float) -> str:
+        return (_dt.now(_tz.utc) - _td(seconds=seconds)).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    def seed_char(cid, *, casting=None):
+        char = charmod.new_char("건우")
+        char["id"] = cid
+        char["analysis"] = dict(analysis)
+        char["version"] = 1
+        char["status"] = "ready"
+        for variant in char["variants"].values():
+            variant["status"] = "ready"  # 다 만든 캐릭터(상세 조회가 variant 이어 만들기를 띄우지 않게, 108 과 같다)
+        if casting is not None:
+            char["casting"] = casting
+        charmod.save_char(owner, cid, char)
+        return char
+
+    def load_c(cid):
+        return charmod.load_char(owner, cid)[0]
+
+    def cand(rid: str) -> str:
+        return "k_" + _hashlib.sha256(rid.encode("utf-8")).hexdigest()[:10]
+
+    def posts():
+        return [call for call in fal_calls if call[0] == "POST"]
+
+    def gets():
+        return [call[1] for call in fal_calls if call[0] == "GET"]
+
+    def rows():
+        return [(item["model"], item["usd"]) for item in ledger]
+
+    def body_of(prompt, size):
+        return {"prompt": prompt, "num_images": 1, "image_size": dict(size)}
+
+    def bodies_ok(prompt, model, size) -> bool:
+        return bool(posts()) and all(
+            url == f"{queue}/{model}" and body == body_of(prompt, size) and list(body) == ["prompt", "num_images", "image_size"]
+            and "https://" not in _json.dumps(body) and "data:" not in _json.dumps(body)
+            for _method, url, body in posts())
+
+    def ledger_ok(cid, model, usd) -> bool:
+        keys = [item["key"] for item in ledger]
+        return bool(ledger) and len(set(keys)) == len(keys) and all(
+            item["key"].startswith(f"vnew-cast-{cid}-k_") and item["kind"] == "image" and item["model"] == model and item["units"] == 1
+            and item["usd"] == usd and item["user"] == owner and item["project_id"] == cid and item["plan_id"] == "casting"
+            for item in ledger)
+
+    logs = _LogCapture()
+
+    def clear():
+        for box in (plan, fal_calls, ledger, llm_calls, spawned, puts, sleeps):
+            box.clear()
+        logs.clear()
+
+    def err_of(func) -> str:
+        try:
+            func()
+        except VpocError as exc:
+            return f"{exc.status}:{exc.kind}"
+        return ""
+
+    def draw(cid, verdicts, *, preset, count=2):
+        seed_char(cid)
+        clear()
+        plan.extend(verdicts)
+        with _pin_vnew(VNEW_CASTING_COUNT=count):
+            castmod.start_draw(owner, cid, {"idol": 0.15, "real": 0.08}[preset] * count / 2, preset=preset)
+            castmod.run_draw(owner, cid, spawned[-1][2])
+        return load_c(cid)["casting"]
+
+    def drawing_state(slots, *, preset="idol", record=None):
+        state = {"preset": preset, "gender": "", "lookEn": "", "lookEdited": False, "status": "drawing", "error": "", "round": 1,
+                 "usd": 0.15, "startedAt": iso_ago(700), "heartbeatAt": iso_ago(700), "claim": "tok_old", "claimedAt": iso_ago(700),
+                 "prompt": castmod.cast_prompt("a Korean man", preset, "male"), "slots": slots, "candidates": [], "history": [],
+                 "chosen": ""}
+        state.update(record or {})
+        return state
+
+    flux_record = {"model": _CIM_FLUX, "unitUsd": 0.075, "imageSize": "1760x2352"}
+
+    try:
+        charmod.STORE = fake_store
+        castmod._fal_request = fake_fal  # noqa: SLF001
+        castmod._fetch_url = fake_fetch  # noqa: SLF001
+        castmod._spawn = lambda o, c, t: spawned.append((o, c, t))  # noqa: SLF001
+        castmod._sleep = sleeps.append  # noqa: SLF001
+        castmod.vpoc_ledger.charge = fake_charge
+        vpoc_llm._converse = fake_converse  # noqa: SLF001
+        charmod._fal_request = stray_call("characters._fal_request")  # noqa: SLF001
+        vpoc_fal._request = stray_call("vpoc.fal._request")  # noqa: SLF001
+        charmod.run_resume_variant = stray_call("characters.run_resume_variant")
+        vpoc_settings.FAL_KEY = "test-fal-key"
+        pins = {"VNEW_CASTING": True, "VNEW_CAST_PHOTO_CHECK": True, "VNEW_BL_LOOK": True, "VNEW_CASTING_COUNT": 2,
+                "VNEW_CASTING_MODEL": _CIM_SEEDREAM, "VNEW_CASTING_USD": 0.04, "VNEW_CASTING_SIZE": "1920x2560",
+                "VNEW_CASTING_IDOL_MODEL": _CIM_FLUX, "VNEW_CASTING_IDOL_USD": 0.075, "VNEW_CASTING_IDOL_SIZE": "1760x2352"}
+        with logs, _pin_vnew(**pins):
+            # ================= (cim-a) 설정·프리셋별 선택 =================
+            settings_text = (APP_SRC / "vnew" / "settings.py").read_text(encoding="utf-8")
+            s_lines = settings_text.splitlines()
+            at_size = next((i for i, line in enumerate(s_lines) if line.startswith("VNEW_CASTING_SIZE = ")), -1)
+            at_keys = [next((i for i, line in enumerate(s_lines) if line.startswith(f"{key} = ")), -1)
+                       for key in ("VNEW_CASTING_IDOL_MODEL", "VNEW_CASTING_IDOL_USD", "VNEW_CASTING_IDOL_SIZE")]
+            if at_size < 0 or not at_size < at_keys[0] < at_keys[1] < at_keys[2] or at_keys[2] - at_size > 14 \
+                    or any(settings_text.count(f"\n{key} = ") != 1 for key in ("VNEW_CASTING_IDOL_MODEL", "VNEW_CASTING_IDOL_USD",
+                                                                                "VNEW_CASTING_IDOL_SIZE")) \
+                    or not s_lines[at_keys[0] - 1].startswith("#") or "VNEW_CASTING_IDOL_MODEL=" not in "\n".join(s_lines[at_size:at_keys[0]]):
+                bad.append("(cim-a) settings.py 의 아이돌풍 설정 3줄(VNEW_CASTING_SIZE 바로 뒤, 되돌리기 주석)이 다릅니다")
+            code = ("import importlib, json, os, sys; sys.path.insert(0, %r); from src.vnew import settings as s\n"
+                    "def probe():\n"
+                    "    m = importlib.reload(s)\n"
+                    "    return [m.VNEW_CASTING_IDOL_MODEL, m.VNEW_CASTING_IDOL_USD, m.VNEW_CASTING_IDOL_SIZE]\n"
+                    "out = [probe()]\n"
+                    "for raw in ['', '   ', ' fal-ai/x/y ']:\n"
+                    "    os.environ['VNEW_CASTING_IDOL_MODEL'] = raw\n"
+                    "    out.append(probe()[0])\n"
+                    "os.environ.pop('VNEW_CASTING_IDOL_MODEL')\n"
+                    "for raw in ['0.1', ' 0.2 ', '', 'abc', 'nan', 'inf', '-1', '11']:\n"
+                    "    os.environ['VNEW_CASTING_IDOL_USD'] = raw\n"
+                    "    out.append(probe()[1])\n"
+                    "os.environ.pop('VNEW_CASTING_IDOL_USD')\n"
+                    "os.environ['VNEW_CASTING_IDOL_SIZE'] = '1024x1536'\n"
+                    "out.append(probe()[2])\n"
+                    "print(json.dumps(out))\n") % (str(ROOT / "app"),)
+            env = {k: v for k, v in os.environ.items() if not k.startswith("VNEW_CASTING")}
+            env["PYTHONIOENCODING"] = "utf-8"
+            env["PYTHONDONTWRITEBYTECODE"] = "1"
+            result = subprocess.run([sys.executable, "-X", "utf8", "-c", code], capture_output=True, text=True, env=env, encoding="utf-8")
+            probe = _json.loads(result.stdout.strip().splitlines()[-1]) if result.returncode == 0 else result.stderr[-300:]
+            warned = [line for line in (result.stderr or "").splitlines() if "vnew.settings.invalid key=VNEW_CASTING_IDOL_USD" in line]
+            want_probe = [[_CIM_FLUX, 0.075, "1760x2352"], "", "", "fal-ai/x/y", 0.1, 0.2, 0.075, 0.075, 0.075, 0.075, 0.075, 0.075,
+                          "1024x1536"]
+            if probe != want_probe or len(warned) != 5:
+                bad.append(f"(cim-a) 설정 읽기(기본·빈 값 되돌리기·금액 틀린 값 경고·크기)가 다릅니다: {probe} 경고 {len(warned)}")
+            choice_cases = {
+                "idol": (_CIM_FLUX, 0.075, (1760, 2352)), " IDOL ": (_CIM_FLUX, 0.075, (1760, 2352)), None: (_CIM_FLUX, 0.075, (1760, 2352)),
+                "real": legacy, "REAL": legacy,
+            }
+            got_choice = {key: castmod.preset_choice(key) for key in choice_cases}
+            with _pin_vnew(VNEW_CASTING_IDOL_MODEL=""):
+                off_choice = [castmod.preset_choice(key) for key in ("idol", "real")]
+            with _pin_vnew(VNEW_CASTING_IDOL_MODEL="  "):
+                off_choice.append(castmod.preset_choice("idol"))
+            with _pin_vnew(VNEW_CASTING_IDOL_MODEL=" fal-ai/x/y "):
+                off_choice.append(castmod.preset_choice("idol"))
+            sizes = []
+            for raw in ("1024x1536", "99999x1", "", "200x300", "abc"):
+                with _pin_vnew(VNEW_CASTING_IDOL_SIZE=raw):
+                    sizes.append(castmod.preset_choice("idol")[2])
+            with _pin_vnew(VNEW_CASTING_SIZE="1024x1536"):
+                sizes.append(castmod.preset_choice("real")[2])
+            totals = [castmod.total_usd(), castmod.total_usd("idol"), castmod.total_usd("real"), castmod.total_usd("zz")]
+            for n in (1, 3, 4):
+                with _pin_vnew(VNEW_CASTING_COUNT=n):
+                    totals.extend([castmod.total_usd("idol"), castmod.total_usd("real")])
+            if got_choice != choice_cases or off_choice != [legacy, legacy, legacy, ("fal-ai/x/y", 0.075, (1760, 2352))] \
+                    or sizes != [(1024, 1536), (1760, 2352), (1760, 2352), (1760, 2352), (1760, 2352), (1024, 1536)] \
+                    or totals != [0.08, 0.15, 0.08, 0.15, 0.07, 0.04, 0.22, 0.12, 0.3, 0.16]:
+                bad.append(f"(cim-a) preset_choice·total_usd 표가 다릅니다: {got_choice} {off_choice} {sizes} {totals}")
+            report.append(f"cim-a: 설정 하위 프로세스 {len(want_probe)}값·경고 {len(warned)}줄 · 총액(장 수 2·1·3·4) {totals}")
+            seen.add("cim-a")
+
+            # ================= (cim-b) 배선(템플릿·base·PARITY·렌더) =================
+            key = "VNEW_CASTING_IDOL_MODEL"
+            template_path = ROOT / "k8s" / "workloads.yaml.tmpl"
+            example_path = ROOT / "deploy" / "config.env.example"
+            template = template_path.read_text(encoding="utf-8")
+            example = example_path.read_text(encoding="utf-8")
+            t_lines = template.splitlines()
+            t_at = next((i for i, line in enumerate(t_lines) if line.strip() == f"- name: {key}"), -1)
+            if t_at < 3 or template.count("${" + key + "}") != 1 or t_lines[t_at + 1].strip() != 'value: "${' + key + '}"' \
+                    or t_lines[t_at - 3].strip() != 'value: "${VNEW_CAST_PHOTO_CHECK}"' \
+                    or any(not line.lstrip().startswith("#") for line in t_lines[t_at - 2:t_at]) \
+                    or re.search(r"VNEW_CASTING_IDOL_(?:USD|SIZE)\b(?!\()", "\n".join(line for line in t_lines if not line.lstrip().startswith("#"))):
+                bad.append("(cim-b) 템플릿 앱 env 에 VNEW_CASTING_IDOL_MODEL 한 쌍(VNEW_CAST_PHOTO_CHECK 바로 뒤, 주석 2줄)이 없거나 금액·크기 키가 있습니다")
+            e_lines = example.splitlines()
+            e_prev = next((i for i, line in enumerate(e_lines) if line == "VNEW_CAST_PHOTO_CHECK=true"), -1)
+            e_at = next((i for i, line in enumerate(e_lines) if line.startswith(f"{key}=")), -1)
+            between = e_lines[e_prev + 1:e_at] if 0 <= e_prev < e_at else []
+            if e_at < 0 or e_lines[e_at] != f"{key}={_CIM_FLUX}" or example.count(f"\n{key}=") != 1 or not between \
+                    or any(not line.startswith("#") for line in between) or f"{key}= " not in "\n".join(between) \
+                    or re.search(r"^VNEW_CASTING_IDOL_(?:USD|SIZE)=", example, re.M) or probe[0][0] != e_lines[e_at].split("=", 1)[1]:
+                bad.append("(cim-b) config.env.example 에 VNEW_CAST_PHOTO_CHECK 바로 뒤 코드 기본값·되돌리기 주석이 없거나 금액·크기 줄이 있습니다")
+            if key not in PARITY_ENV_KEYS or PARITY_ENV_KEYS.index(key) != PARITY_ENV_KEYS.index("VNEW_CAST_PHOTO_CHECK") + 1:
+                bad.append("(cim-b) PARITY_ENV_KEYS 에 VNEW_CAST_PHOTO_CHECK 바로 뒤로 없습니다(rw-a~c 가 보지 않습니다)")
+            for target in ("dev", "prod"):
+                if re.search(r"^VNEW_CASTING_IDOL", (ROOT / "deploy" / f"config.{target}.env").read_text(encoding="utf-8"), re.M):
+                    bad.append(f"(cim-b) config.{target}.env 를 바꿨습니다(이번 범위 밖)")
+            rendered = []
+            try:
+                spec = _ilu.spec_from_file_location("_cim_deploy_render", ROOT / "deploy" / "render.py")
+                render = _ilu.module_from_spec(spec)
+                spec.loader.exec_module(render)  # type: ignore[union-attr]
+                base_cfg = render.load_config(example_path)
+                for target in ("dev", "prod"):
+                    overlay = render.load_config(ROOT / "deploy" / f"config.{target}.env")
+                    for extra in ({}, {key: ""}):
+                        values = render.add_derived({**base_cfg, **overlay, **extra})
+                        text = render.render_text(template, values, str(template_path.relative_to(ROOT)))
+                        rendered.append(_rendered_env_values(text, key))
+            except (Exception, SystemExit) as exc:  # noqa: BLE001 — render.py 는 SystemExit 로 실패를 알린다.
+                rendered.append(f"렌더 실패: {type(exc).__name__}")
+            # 렌더된 빈 값(되돌리기)이 파드 env 로 들어가면: 아이돌풍도 Seedream 모델·장당 금액·크기
+            code_off = ("import json, sys; sys.path.insert(0, %r); from src.vnew import casting as c, settings as s\n"
+                        "print(json.dumps([s.VNEW_CASTING_IDOL_MODEL, c.preset_choice('idol'), c.total_usd('idol'), "
+                        "[sorted(p) for p in c._preset_items()]]))\n") % (str(ROOT / "app"),)
+            env_off = dict(env, VNEW_CASTING_IDOL_MODEL="")
+            result = subprocess.run([sys.executable, "-X", "utf8", "-c", code_off], capture_output=True, text=True, env=env_off, encoding="utf-8")
+            off_probe = _json.loads(result.stdout.strip().splitlines()[-1]) if result.returncode == 0 else result.stderr[-300:]
+            if rendered != [[_CIM_FLUX], [""], [_CIM_FLUX], [""]] \
+                    or off_probe != ["", [_CIM_SEEDREAM, 0.04, [1920, 2560]], 0.08, [["key", "label"], ["key", "label"]]]:
+                bad.append(f"(cim-b) 렌더(dev·prod·+빈 값)·되돌린 파드 설정이 다릅니다: {rendered} {off_probe}")
+            report.append(f"cim-b: 렌더 dev·prod {rendered[0]}·빈 값 오버레이 {rendered[1]} → 아이돌풍 {off_probe[1] if isinstance(off_probe, list) else '?'}")
+            seen.add("cim-b")
+
+            # ================= (cim-c) 확인 금액·회차 기록 =================
+            cid = "char_cim_cost"
+            got_c = []
+            records = []
+            for preset_arg, stored, confirm in (("idol", None, 0.08), ("idol", None, 0.15), ("real", None, 0.15), ("real", None, 0.08),
+                                                (None, "real", 0.15), (None, "real", 0.08), (None, "idol", 0.08), (None, "idol", 0.15),
+                                                ("real", "idol", 0.08), ("idol", "real", 0.15)):
+                seed_char(cid, casting=None if stored is None else {**castmod._empty_casting(), "preset": stored})  # noqa: SLF001
+                before = _json.dumps(load_c(cid), sort_keys=True)
+                clear()
+                got_c.append(err_of(lambda: castmod.start_draw(owner, cid, confirm, preset=preset_arg)))
+                if got_c[-1]:
+                    if _json.dumps(load_c(cid), sort_keys=True) != before or spawned or posts():
+                        bad.append(f"(cim-c) 409 인데 저장·스레드·제출이 생겼습니다: {preset_arg} {stored} {confirm}")
+                else:
+                    cast = load_c(cid)["casting"]
+                    records.append((cast["preset"], cast["usd"], cast.get("model"), cast.get("unitUsd"), cast.get("imageSize"), len(spawned)))
+            with _pin_vnew(VNEW_CASTING_IDOL_MODEL=""):
+                for confirm in (0.15, 0.08):
+                    seed_char(cid)
+                    clear()
+                    got_c.append(err_of(lambda: castmod.start_draw(owner, cid, confirm, preset="idol")))
+                cast = load_c(cid)["casting"]
+                records.append((cast["preset"], cast["usd"], cast.get("model"), cast.get("unitUsd"), cast.get("imageSize"), len(spawned)))
+            seed_char(cid)
+            try:
+                castmod.start_draw(owner, cid, 0.08, preset="idol")
+                message = ""
+            except VpocError as exc:
+                message = exc.message
+            want_c = ["409:CostMismatch", "", "409:CostMismatch", "", "409:CostMismatch", "", "409:CostMismatch", "", "", "",
+                      "409:CostMismatch", ""]
+            want_records = [("idol", 0.15, _CIM_FLUX, 0.075, "1760x2352", 1), ("real", 0.08, _CIM_SEEDREAM, 0.04, "1920x2560", 1),
+                            ("real", 0.08, _CIM_SEEDREAM, 0.04, "1920x2560", 1), ("idol", 0.15, _CIM_FLUX, 0.075, "1760x2352", 1),
+                            ("real", 0.08, _CIM_SEEDREAM, 0.04, "1920x2560", 1), ("idol", 0.15, _CIM_FLUX, 0.075, "1760x2352", 1),
+                            ("idol", 0.08, _CIM_SEEDREAM, 0.04, "1920x2560", 1)]
+            if got_c != want_c or records != want_records or "서버 0.15 USD" not in message or "화면 0.08 USD" not in message:
+                bad.append(f"(cim-c) 확인 금액 검사·회차 기록이 다릅니다: {got_c} {records} {message!r}")
+            app = Flask("cim_c")
+            app.register_blueprint(vnew.create_blueprint(vnew.VnewDependencies(require_auth=lambda handler: handler,
+                                                                               current_owner=lambda: owner)))
+            client = app.test_client()
+            seed_char(cid)
+            clear()
+            resp_bad = client.post(f"/api/vnew/characters/{cid}/casting/draw", json={"confirmUsd": 0.08, "preset": "idol"})
+            body_bad = resp_bad.get_json(silent=True) or {}
+            resp_ok = client.post(f"/api/vnew/characters/{cid}/casting/draw", json={"confirmUsd": 0.15, "preset": "idol"})
+            body_ok = (resp_ok.get_json(silent=True) or {}).get("casting") or {}
+            if resp_bad.status_code != 409 or "CostMismatch" not in _json.dumps(body_bad) or resp_ok.status_code != 202 \
+                    or body_ok.get("totalUsd") != 0.15 or body_ok.get("status") != "drawing" or len(spawned) != 1 \
+                    or load_c(cid)["casting"].get("model") != _CIM_FLUX:
+                bad.append(f"(cim-c) Flask 뽑기 409·202 가 다릅니다: {resp_bad.status_code} {body_bad} {resp_ok.status_code} {body_ok.get('totalUsd')}")
+            seen.add("cim-c")
+
+            # ================= (cim-d) run_draw: 제출 본문·주소·원장·검사·로그 =================
+            got_d = {}
+            cid = "char_cim_idol"
+            cast = draw(cid, ["photo", "photo"], preset="idol")
+            submitted = logs.messages("vnew.casting.submitted")
+            got_d["idol"] = (cast["status"], len(cast["candidates"]), rows(), len(posts()), len(llm_calls), len(puts))
+            if not bodies_ok(cast["prompt"], _CIM_FLUX, _CIM_FLUX_SIZE) or not ledger_ok(cid, _CIM_FLUX, 0.075) \
+                    or got_d["idol"] != ("ready", 2, [(_CIM_FLUX, 0.075)] * 2, 2, 2, 2) \
+                    or sorted(gets()) != sorted([f"{queue}/{_CIM_FLUX}/requests/{rid}{tail}" for rid in ("cim-1", "cim-2")
+                                                 for tail in ("/status", "")]) \
+                    or sorted(item["key"] for item in ledger) != sorted(f"vnew-cast-{cid}-{cand(rid)}" for rid in ("cim-1", "cim-2")) \
+                    or submitted != [f"vnew.casting.submitted cid={cid} slot={n} request=cim-{n + 1} model={_CIM_FLUX}" for n in (0, 1)] \
+                    or any("test-fal-key" in line for line in logs.messages("")) \
+                    or [where for where, _name in llm_calls] != ["vnew.cast_photo_check"] * 2:
+                bad.append(f"(cim-d) 아이돌풍 뽑기(FLUX.2 [pro] 본문·주소·원장·검사·로그)가 다릅니다: {got_d['idol']} {posts()[:1]} {submitted}")
+            post_seq["n"] = 0
+            cid = "char_cim_real"
+            cast = draw(cid, ["photo", "photo"], preset="real")
+            got_d["real"] = (cast["status"], len(cast["candidates"]), rows(), len(posts()), len(llm_calls))
+            if not bodies_ok(cast["prompt"], _CIM_SEEDREAM, _CIM_SEEDREAM_SIZE) or not ledger_ok(cid, _CIM_SEEDREAM, 0.04) \
+                    or got_d["real"] != ("ready", 2, [(_CIM_SEEDREAM, 0.04)] * 2, 2, 2) \
+                    or any(not url.startswith(f"{queue}/fal-ai/bytedance/requests/") for url in gets()) \
+                    or logs.messages("vnew.casting.submitted")[:1] != [f"vnew.casting.submitted cid={cid} slot=0 request=cim-1 model={_CIM_SEEDREAM}"]:
+                bad.append(f"(cim-d) 현실 배우풍 뽑기(Seedream 본문·원장 0.04)가 다릅니다: {got_d['real']} {posts()[:1]}")
+            with _pin_vnew(VNEW_CASTING_IDOL_MODEL=""):
+                cid = "char_cim_idol_off"
+                with _pin_vnew(VNEW_CASTING_COUNT=2):
+                    seed_char(cid)
+                    clear()
+                    plan.extend(["photo", "photo"])
+                    castmod.start_draw(owner, cid, 0.08, preset="idol")
+                    castmod.run_draw(owner, cid, spawned[-1][2])
+                cast = load_c(cid)["casting"]
+            got_d["off"] = (cast["status"], cast["preset"], cast["usd"], cast.get("model"), rows())
+            if not bodies_ok(cast["prompt"], _CIM_SEEDREAM, _CIM_SEEDREAM_SIZE) or not ledger_ok(cid, _CIM_SEEDREAM, 0.04) \
+                    or got_d["off"] != ("ready", "idol", 0.08, _CIM_SEEDREAM, [(_CIM_SEEDREAM, 0.04)] * 2) \
+                    or not cast["prompt"].startswith(castmod.base_text("idol", "male")):
+                bad.append(f"(cim-d) 되돌리기(빈 값)에서 아이돌풍이 Seedream·0.04 가 아닙니다: {got_d['off']}")
+            report.append(f"cim-d: 아이돌풍 {got_d['idol'][2][:1]}×{len(got_d['idol'][2])} · 현실 {got_d['real'][2][:1]}×{len(got_d['real'][2])} · "
+                          f"되돌리기 아이돌풍 {got_d['off'][4][:1]}×{len(got_d['off'][4])}")
+            seen.add("cim-d")
+
+            # ================= (cim-e) 다시 뽑기·버린 장 원장 =================
+            got_e = {}
+            for name, verdicts, preset, count, want in (
+                ("idol_redraw", ["drawing", "photo"], "idol", 2, ("ready", 1, [(_CIM_FLUX, 0.075)] * 2, 2, 1)),
+                ("idol_notphoto", ["drawing"] * 3, "idol", 2, ("failed", 0, [(_CIM_FLUX, 0.075)] * 3, 3, 0)),
+                ("real_redraw", ["drawing", "photo"], "real", 2, ("ready", 1, [(_CIM_SEEDREAM, 0.04)] * 2, 2, 1)),
+            ):
+                cid = f"char_cim_{name}"
+                post_seq["n"] = 0
+                seed_char(cid)
+                clear()
+                plan.extend(verdicts)
+                with _pin_vnew(VNEW_CASTING_COUNT=1):
+                    total = castmod.total_usd(preset)
+                    castmod.start_draw(owner, cid, total, preset=preset)
+                    castmod.run_draw(owner, cid, spawned[-1][2])
+                cast = load_c(cid)["casting"]
+                got_e[name] = (cast["status"], len(cast["candidates"]), rows(), len(posts()), len(puts))
+                model, size, usd = (_CIM_FLUX, _CIM_FLUX_SIZE, 0.075) if preset == "idol" else (_CIM_SEEDREAM, _CIM_SEEDREAM_SIZE, 0.04)
+                if got_e[name] != want or not bodies_ok(cast["prompt"], model, size) or not ledger_ok(cid, model, usd) \
+                        or len(llm_calls) != len(verdicts) or cast.get("unitUsd") != usd \
+                        or (name == "idol_notphoto" and "그림체" not in cast["slots"][0].get("error", "")):
+                    bad.append(f"(cim-e) {name}: 다시 뽑기·버린 장 원장이 회차 금액·모델이 아닙니다: {got_e[name]} {cast['slots']}")
+            report.append("cim-e: " + " · ".join(f"{name} {value[0]}·원장 {len(value[2])}×{value[2][0][1]}" for name, value in got_e.items()))
+            seen.add("cim-e")
+
+            # ================= (cim-f) 회차 고정·재시작·옛 회차 =================
+            # (1) 회차 중 설정을 모두 바꿔도(되돌리기 + 금액·크기·Seedream 모델까지) 이 회차는 남긴 값 그대로(다시 제출 포함)
+            cid = "char_cim_switch"
+            post_seq["n"] = 0
+            seed_char(cid)
+            clear()
+            plan.extend(["drawing", "photo", "photo"])
+            castmod.start_draw(owner, cid, 0.15, preset="idol")
+            with _pin_vnew(VNEW_CASTING_IDOL_MODEL="", VNEW_CASTING_IDOL_USD=0.2, VNEW_CASTING_IDOL_SIZE="1024x1024",
+                           VNEW_CASTING_MODEL="fal-ai/other/model", VNEW_CASTING_USD=0.05, VNEW_CASTING_SIZE="1024x1024"):
+                castmod.run_draw(owner, cid, spawned[-1][2])
+            cast = load_c(cid)["casting"]
+            switch = (cast["status"], len(cast["candidates"]), rows(), len(posts()), cast.get("model"), cast.get("unitUsd"), cast["usd"])
+            if switch != ("ready", 2, [(_CIM_FLUX, 0.075)] * 3, 3, _CIM_FLUX, 0.075, 0.15) \
+                    or not bodies_ok(cast["prompt"], _CIM_FLUX, _CIM_FLUX_SIZE) or not ledger_ok(cid, _CIM_FLUX, 0.075):
+                bad.append(f"(cim-f) 회차 중 설정을 바꾸자 모델·금액·크기가 섞였습니다: {switch} {[call[1] for call in posts()]}")
+            # (2) 재시작: FLUX.2 [pro] 회차(submitted)를 되돌린 설정에서 reconcile → 이어 조회 → 그림체 → 다시 제출도 FLUX.2 [pro]
+            cid = "char_cim_resume"
+            seed_char(cid, casting=drawing_state([{"slot": 0, "status": "submitted", "requestArn": f"fal/requests/{_CIM_FLUX}/cim-old-1",
+                                                   "candidateId": "", "error": ""}], record=flux_record))
+            by_rid["cim-old-1"] = "drawing"
+            post_seq["n"] = 0
+            clear()
+            plan.append("photo")
+            with _pin_vnew(VNEW_CASTING_IDOL_MODEL="", VNEW_CASTING_USD=0.05):
+                castmod.reconcile(owner, cid, load_c(cid))
+                token = spawned[-1][2] if spawned else ""
+                castmod.run_draw(owner, cid, token)
+            cast = load_c(cid)["casting"]
+            resume = (cast["status"], len(cast["candidates"]), rows(), len(posts()), cast["slots"][0].get("redraws"), len(spawned))
+            if resume != ("ready", 1, [(_CIM_FLUX, 0.075)] * 2, 1, 1, 1) or not bodies_ok(cast["prompt"], _CIM_FLUX, _CIM_FLUX_SIZE) \
+                    or gets()[:1] != [f"{queue}/{_CIM_FLUX}/requests/cim-old-1/status"] or not ledger_ok(cid, _CIM_FLUX, 0.075) \
+                    or sorted(item["key"] for item in ledger) != sorted(f"vnew-cast-{cid}-{cand(rid)}" for rid in ("cim-old-1", "cim-1")):
+                bad.append(f"(cim-f) 재시작 뒤 이어 조회·다시 제출이 회차 모델(FLUX.2 [pro])이 아닙니다: {resume} {gets()[:1]}")
+            # (3) 기록 없는 옛 회차(107·108 진행 중, 아이돌풍): 지금 설정(아이돌풍 FLUX.2 [pro])과 상관없이 Seedream·0.04·1920x2560
+            cid = "char_cim_old"
+            seed_char(cid, casting=drawing_state([{"slot": 0, "status": "submitted", "requestArn": f"fal/requests/{_CIM_SEEDREAM}/cim-old-2",
+                                                   "candidateId": "", "error": "", "redraws": 1}]))
+            by_rid["cim-old-2"] = "drawing"
+            post_seq["n"] = 0
+            clear()
+            plan.append("photo")
+            castmod.reconcile(owner, cid, load_c(cid))
+            castmod.run_draw(owner, cid, spawned[-1][2] if spawned else "")
+            cast = load_c(cid)["casting"]
+            old = (cast["status"], len(cast["candidates"]), rows(), len(posts()), cast["slots"][0].get("redraws"), "model" in cast)
+            if old != ("ready", 1, [(_CIM_SEEDREAM, 0.04)] * 2, 1, 2, False) or not bodies_ok(cast["prompt"], _CIM_SEEDREAM, _CIM_SEEDREAM_SIZE) \
+                    or gets()[:1] != [f"{queue}/fal-ai/bytedance/requests/cim-old-2/status"] or not ledger_ok(cid, _CIM_SEEDREAM, 0.04):
+                bad.append(f"(cim-f) 기록 없는 옛 회차가 Seedream·0.04 가 아닙니다: {old} {[call[1] for call in posts()]}")
+            # (4) 꼴이 틀린 기록 → 지금처럼(Seedream 셋). 모델·금액이 맞으면 크기만 VNEW_CASTING_SIZE 로.
+            odd_records = [
+                ({}, legacy), ({"model": "", "unitUsd": 0.075}, legacy), ({"model": "   ", "unitUsd": 0.075}, legacy),
+                ({"model": 5, "unitUsd": 0.075}, legacy), ({"model": _CIM_FLUX, "unitUsd": True}, legacy),
+                ({"model": _CIM_FLUX, "unitUsd": "0.075"}, legacy), ({"model": _CIM_FLUX, "unitUsd": float("nan")}, legacy),
+                ({"model": _CIM_FLUX, "unitUsd": float("inf")}, legacy), ({"model": _CIM_FLUX, "unitUsd": -0.01}, legacy),
+                ({"model": f" {_CIM_FLUX} ", "unitUsd": 0.075, "imageSize": "1760x2352"}, (_CIM_FLUX, 0.075, (1760, 2352))),
+                ({"model": _CIM_FLUX, "unitUsd": 0, "imageSize": "bad"}, (_CIM_FLUX, 0.0, (1920, 2560))),
+            ]
+            odd_got = [castmod._round_choice(record) for record, _want in odd_records]  # noqa: SLF001
+            if odd_got != [want for _record, want in odd_records]:
+                bad.append(f"(cim-f) _round_choice 꼴 틀린 기록이 다릅니다: {odd_got}")
+            report.append(f"cim-f: 설정 바꿈 {switch[2][:1]}×{len(switch[2])} · 재시작 {resume[2][:1]}×{len(resume[2])} · "
+                          f"옛 회차 {old[2][:1]}×{len(old[2])} · 꼴 틀린 기록 {len(odd_records)}꼴")
+            seen.add("cim-f")
+
+            # ================= (cim-g) 보기 =================
+            cid = "char_cim_view"
+            seed_char(cid)
+            v_on = castmod.view(load_c(cid))
+            seed_char(cid, casting={**castmod._empty_casting(), "preset": "real"})  # noqa: SLF001
+            v_real = castmod.view(load_c(cid))
+            with _pin_vnew(VNEW_CASTING_COUNT=4):
+                seed_char(cid)
+                v_four = castmod.view(load_c(cid))
+            seed_char(cid)
+            with _pin_vnew(VNEW_CASTING_IDOL_MODEL=""):
+                v_off = castmod.view(load_c(cid))
+            presets_on = [{"key": "idol", "label": "아이돌풍", "unitUsd": 0.075, "totalUsd": 0.15},
+                          {"key": "real", "label": "현실 배우풍", "unitUsd": 0.04, "totalUsd": 0.08}]
+            money = ("presets", "unitUsd", "totalUsd")
+            if v_on.get("presets") != presets_on or (v_on.get("unitUsd"), v_on.get("totalUsd"), v_on.get("count")) != (0.075, 0.15, 2) \
+                    or v_real.get("presets") != presets_on or (v_real.get("unitUsd"), v_real.get("totalUsd")) != (0.04, 0.08) \
+                    or [p.get("totalUsd") for p in v_four.get("presets", [])] != [0.3, 0.16] or v_four.get("totalUsd") != 0.3 \
+                    or v_off.get("presets") != [dict(item) for item in castmod.PRESETS] \
+                    or (v_off.get("unitUsd"), v_off.get("totalUsd")) != (0.04, 0.08) or list(v_on) != list(v_off) \
+                    or {k: v for k, v in v_on.items() if k not in money} != {k: v for k, v in v_off.items() if k not in money}:
+                bad.append(f"(cim-g) 보기 금액이 다릅니다: {v_on.get('presets')} {v_on.get('totalUsd')} {v_real.get('totalUsd')} "
+                           f"{v_four.get('totalUsd')} {v_off.get('presets')}")
+            resp = client.get(f"/api/vnew/characters/{cid}")
+            detail_cast = (resp.get_json(silent=True) or {}).get("casting") or {}
+            if resp.status_code != 200 or detail_cast.get("presets") != presets_on or detail_cast.get("totalUsd") != 0.15:
+                bad.append(f"(cim-g) Flask 상세의 casting 금액이 다릅니다: {resp.status_code} {detail_cast.get('presets')}")
+            seen.add("cim-g")
+
+            # ================= (cim-h) 화면(vnew.js, node 가짜 DOM) =================
+            vjs = (PUBLIC / "vnew.js").read_text(encoding="utf-8")
+            c_start, c_end = vjs.find("  /* ---- 실사 캐스팅(vnew-live-fx 묶음 B"), vjs.find("  /* ---- 추가 복장 섹션 ---- */")
+            el_start, el_end = vjs.find("  function el(tag, className, text)"), vjs.find("  function token()")
+            p_start, p_end = vjs.find("  function schedulePoll(host, detail)"), vjs.find("  function backRow(host)")
+            node = shutil.which("node")
+            node_got: dict = {}
+            if min(c_start, c_end, el_start, el_end, p_start, p_end) < 0 or "function castingPresetPrice(" not in vjs[c_start:c_end]:
+                bad.append("(cim-h) vnew.js 캐스팅 구역·castingPresetPrice 를 찾지 못했습니다")
+            elif not node:
+                warn("node 가 없어 cim-h 화면 실행을 건너뜁니다 (E16)")
+            else:
+                section_js = vjs[c_start:c_end]
+                if "innerHTML" in section_js or "insertAdjacentHTML" in section_js:
+                    bad.append("(cim-h) 캐스팅 구역이 textContent(el) 가 아닌 방식으로 글을 넣습니다")
+                seed_char(cid, casting={**castmod._empty_casting(), "preset": "real"})  # noqa: SLF001
+                v_on_real = castmod.view(load_c(cid))
+                servers = {"ON": v_on, "ON_REAL": v_on_real, "ON4": v_four, "OFF": v_off}
+                head = "".join(f"var {name} = {_json.dumps(value, ensure_ascii=False)};\n" for name, value in servers.items())
+                script = _CAST_SCREEN_NODE_HARNESS + vjs[el_start:el_end] + vjs[p_start:p_end] + section_js + head + _CIM_SCREEN_NODE_CASES
+                tmp_dir = tempfile.mkdtemp(prefix="cim_h_")
+                try:
+                    path = Path(tmp_dir) / "cim_screen.js"
+                    path.write_text(script, encoding="utf-8")
+                    result = subprocess.run([node, str(path)], capture_output=True, text=True, encoding="utf-8", timeout=60)
+                finally:
+                    shutil.rmtree(tmp_dir, ignore_errors=True)
+                if result.returncode != 0:
+                    bad.append(f"(cim-h) node 실행 실패: {(result.stderr or '').strip()[:600]}")
+                else:
+                    node_got = _json.loads((result.stdout or "").strip().splitlines()[-1])
+                base = "/api/vnew/characters/ch%201/casting"
+
+                def label(n, usd):
+                    return f"실사 캐스팅 뽑기 ({n}장 · ${usd:.2f})"
+
+                def drew(n, usd, preset):
+                    return [[f"실사 캐스팅 사진 {n}장을 만듭니다. 예상 비용 ${usd:.2f}입니다. 계속할까요?"],
+                            [["POST", f"{base}/draw", {"confirmUsd": usd, "preset": preset, "gender": ""}]]]
+
+                want_h = {
+                    "pure": [{"count": 2, "totalUsd": 0.15}, {"count": 2, "totalUsd": 0.08}, {"count": 2, "totalUsd": 0.15},
+                             {"count": 2, "totalUsd": 0.08}, {"count": 2, "totalUsd": 0.08}, {"count": 2, "totalUsd": 0.08},
+                             {"count": 2, "totalUsd": 0.08}, {"count": 2, "totalUsd": 0.08}, {}],
+                    "onStart": label(2, 0.15), "onReal": label(2, 0.08), "onRealDraw": drew(2, 0.08, "real"),
+                    "onIdol": label(2, 0.15), "onIdolDraw": drew(2, 0.15, "idol"), "onRealStart": label(2, 0.08),
+                    "offStart": label(2, 0.08), "offReal": label(2, 0.08), "offRealDraw": drew(2, 0.08, "real"),
+                    "mismatch": [[drew(2, 0.15, "idol")[0][0]], [drew(2, 0.15, "idol")[1][0], ["GET", "/api/vnew/characters/ch%201", None]],
+                                 label(4, 0.3), ["금액이 바뀌었습니다. 새 금액은 $0.30입니다. 다시 누르면 새 금액으로 확인합니다.", ""]],
+                    "mismatchReal": label(4, 0.16), "mismatchRealDraw": drew(4, 0.16, "real"), "innerHTML": False,
+                }
+                if node_got and node_got != want_h:
+                    diff = sorted(name for name in set(want_h) | set(node_got) if want_h.get(name) != node_got.get(name))
+                    bad.append(f"(cim-h) 화면 금액이 다릅니다: {diff} " + "; ".join(f"{name}={node_got.get(name)!r}" for name in diff[:4]))
+                # 화면이 보낸 본문(느낌별 confirmUsd)을 실제 라우트에 그대로 보내면 받아들이고 그 느낌의 모델을 회차에 남긴다.
+                replay = []
+                for name, count in (("onRealDraw", 2), ("onIdolDraw", 2), ("offRealDraw", 2), ("mismatchRealDraw", 4)):
+                    sent = ((node_got.get(name) or [[], []])[1] or [[None, None, {}]])[0][2]
+                    seed_char(cid)
+                    clear()
+                    with _pin_vnew(VNEW_CASTING_COUNT=count, **({"VNEW_CASTING_IDOL_MODEL": ""} if name == "offRealDraw" else {})):
+                        resp = client.post(f"/api/vnew/characters/{cid}/casting/draw", json=sent)
+                    replay.append((name, resp.status_code, load_c(cid)["casting"].get("model")))
+                if node_got and replay != [("onRealDraw", 202, _CIM_SEEDREAM), ("onIdolDraw", 202, _CIM_FLUX),
+                                           ("offRealDraw", 202, _CIM_SEEDREAM), ("mismatchRealDraw", 202, _CIM_SEEDREAM)]:
+                    bad.append(f"(cim-h) 화면이 보낸 confirmUsd 를 서버가 받지 않았습니다: {replay}")
+                checked = subprocess.run([node, "--check", str(PUBLIC / "vnew.js")], capture_output=True, text=True, encoding="utf-8")
+                if checked.returncode != 0:
+                    bad.append(f"(cim-h) node --check vnew.js 실패: {(checked.stderr or '').strip()[:300]}")
+                report.append(f"cim-h: 화면 {len(want_h)}항목 · 화면 본문 → 라우트 {[(n, s) for n, s, _m in replay]}")
+            seen.add("cim-h")
+    except Exception as exc:  # noqa: BLE001
+        bad.append(f"검사 중 예외: {type(exc).__name__} {str(exc)[:200]}\n{_tb.format_exc()[-1500:]}")
+    finally:
+        charmod.STORE = saved["STORE"]
+        castmod._fal_request = saved["cast_fal"]  # noqa: SLF001
+        castmod._fetch_url = saved["cast_fetch"]  # noqa: SLF001
+        castmod._spawn = saved["cast_spawn"]  # noqa: SLF001
+        castmod._sleep = saved["cast_sleep"]  # noqa: SLF001
+        castmod.vpoc_ledger.charge = saved["charge"]
+        vpoc_llm._converse = saved["converse"]  # noqa: SLF001
+        charmod._fal_request = saved["char_fal"]  # noqa: SLF001
+        vpoc_fal._request = saved["vpoc_request"]  # noqa: SLF001
+        charmod.run_resume_variant = saved["resume_variant"]
+        vpoc_settings.FAL_KEY = saved["fal_key"]
+        with castmod._CAST_LOCK:  # noqa: SLF001
+            castmod._CAST_RUNNING.clear()  # noqa: SLF001
+    if stray:
+        bad.append(f"쓰면 안 되는 호출: {sorted(set(stray))}")
+    expected = [f"cim-{c}" for c in "abcdefgh"]
+    missing = [item for item in expected if item not in seen]
+    if missing and not bad:
+        bad.append(f"끝까지 돌지 않은 검사: {missing}")
+    if bad:
+        fail("지시서 109 아이돌풍 캐스팅 모델 검사 실패\n" + "\n".join(f"  {item}" for item in bad))
+    else:
+        ok(
+            "지시서 109 아이돌풍 캐스팅 모델 검사 (cim-a)설정·preset_choice·총액 (cim-b)템플릿·base·PARITY·렌더·빈 값 되돌리기 "
+            "(cim-c)확인 금액 = 고른 느낌 총액·409·회차 기록 (cim-d)FLUX.2 [pro] 본문 3키·원장 0.075·Seedream 0.04·되돌리기 "
+            "(cim-e)다시 뽑기·버린 장 원장 (cim-f)회차 고정·재시작·옛 회차 Seedream (cim-g)보기 presets 금액 (cim-h)화면 느낌별 금액·confirmUsd"
+            + "".join(f"\n       cim: {line}" for line in report)
+        )
+
+
 # ---------------------------------------------------------------- 파드 영역 고정(pod-zone-pin, 지시서 105)
 #
 # 2026-10-31 운영 503: 운영 ALB(target-type ip)는 2a·2c 서브넷만 쓰는데 새 frontend 파드 2개가 모두 2b 노드에 놓여
@@ -33052,15 +33793,16 @@ def main() -> int:
     check_vnew_fx()
     _run_char_fidelity_off(lambda: _run_casting_off(check_vnew_fx_prompt))
     check_vnew_fx_screen()
-    _run_cast_photo_off(lambda: _run_char_fidelity_off(check_vnew_casting))
+    _run_cast_photo_off(lambda: _run_cast_idol_off(lambda: _run_char_fidelity_off(check_vnew_casting)))
     check_vnew_take_real()
     check_vnew_take_real_screen()
-    _run_cast_photo_off(lambda: _run_3d_hunyuan(lambda: _run_bl_look_off(check_vnew_char_fidelity)))
+    _run_cast_photo_off(lambda: _run_cast_idol_off(lambda: _run_3d_hunyuan(lambda: _run_bl_look_off(check_vnew_char_fidelity))))
     check_vnew_3d_tripo()
     check_vnew_char_fidelity_screen()
     check_vnew_outfit_button()
-    _run_cast_photo_off(check_vnew_bl_look)
-    check_vnew_cast_photo_guard()
+    _run_cast_photo_off(lambda: _run_cast_idol_off(check_vnew_bl_look))
+    _run_cast_idol_off(check_vnew_cast_photo_guard)
+    check_vnew_cast_idol_model()
     check_pod_zones()
     print()
     if warnings:
