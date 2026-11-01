@@ -14,6 +14,9 @@
   - BL 유형(지시서 103·104, VNEW_BL_LOOK): 사용자가 쓴 캐릭터 설명(char.extraPromptKo)에 유형 이름(떡대공 등)이 있으면 캐스팅 문장
     끝에 genre_bl 의 참고 외모 문장 하나를 더한다(104 — 화면 선택값 casting.blRole·blType 은 읽지 않는다). 외모 문장(그림 사실)에
     이미 있는 형태 분류는 빠진다. 300자 외모 문장과 영상 쪽은 바꾸지 않는다.
+  - 실사 사진 지키기(지시서 107, 2026-11-01): 캐스팅 문장 맨 끝에 사진 고정 문장(photo_anchor)을 늘 붙인다. VNEW_CAST_PHOTO_CHECK
+    켬이면 결과 사진마다 저장 전에 비전 LLM 1회(_photo_check)로 실사인지 묻고, 그림체면 그 사진을 버리고(S3 저장 없음, 원장 1건)
+    같은 칸을 같은 문장으로 한 번만 다시 제출한다(칸 redraws). 다시 뽑은 사진도 그림체면 그 칸만 실패(NotPhoto).
 """
 
 from __future__ import annotations
@@ -35,6 +38,7 @@ from PIL import Image
 
 from ..vpoc import fal as vpoc_fal
 from ..vpoc import ledger as vpoc_ledger
+from ..vpoc import llm as vpoc_llm
 from ..vpoc import settings as vpoc_settings
 from ..vpoc.errors import VpocError, error_gist, now_iso
 from . import characters
@@ -75,6 +79,14 @@ _BASES = {"idol": _IDOL, "real": _REAL}
 LOOK_MAX = 300
 # 이번 회차 실제 문장 상한(design §B.1 prompt ≤1500).
 PROMPT_MAX = 1500
+# 사진 고정 문장(지시서 107, cast-photo-guard design D1). 두 프리셋 모두 캐스팅 문장 맨 끝에 붙인다(VNEW_CAST_PHOTO_CHECK 와 상관없이).
+# 문장 앞부분에만 있던 사진 단서를 긴 외모·BL 문장 뒤에 한 번 더 둔다. 1500자를 넘으면 참고 문장 → 외모 순으로 줄이고 이 문장은
+# 자르지 않는다(_cast_text). "webtoon"·"manga" 는 넣지 않는다 — 캐스팅 문장에 그림 낱말 webtoon 을 남기지 않는 B1 규칙(cast-a)이고,
+# 금지하려는 그림체 이름을 끝에 두면 오히려 그쪽으로 끌 수 있다. "painting" 은 아이돌풍 프리셋의 "not a painting" 과 같은 낱말이다.
+# {noun} 은 성별 낱말 표의 명사(man·woman·person)다 — 문장 끝에 성 중립 "person" 이 와서 BL 남성 인물이 흐려지지 않게(steering genre-bl).
+PHOTO_ANCHOR = (
+    "A real photograph of a real {noun} taken with a camera; not a drawing, illustration, anime, cartoon, painting or 3D render."
+)
 
 
 def preset_of(value) -> str:
@@ -97,6 +109,11 @@ def _gender(value) -> str:
 def base_text(preset, gender) -> str:
     """프리셋 문구(성별 낱말 표 적용). male 이면 참고 구현 원문과 같다."""
     return _BASES[preset_of(preset)].format(**_WORDS[_gender(gender)])
+
+
+def photo_anchor(gender) -> str:
+    """사진 고정 문장(지시서 107). 명사만 성별 낱말 표를 따른다(male man · female woman · 그 밖 person)."""
+    return PHOTO_ANCHOR.format(noun=_WORDS[_gender(gender)]["noun"])
 
 
 # ================================================================ 성별 정하기
@@ -355,9 +372,38 @@ def align_gender(text, gender) -> str:
         if re.search(r"\bthey (?:is|has|was)\b", out, re.IGNORECASE) else out
 
 
+# 지시서 107: webtoon 분석 문장에서 자주 오는데 fx.strip_drawing_words 표에 없는 그림체 낱말(cast-photo-guard design D2). 캐스팅 외모
+# 문장(_no_drawing)에서만 지운다. 낱말 경계로만 맞춘다 — "stylish"·"styled"·"comical"·"flat cap"·"neckline"·"digital watch" 는 남는다.
+# 그림 방식 명사구(_STYLE_HEAD: "manhwa style"·"line art"·"cel shading"·"digital painting" …)가 구의 끝이면(뒤가 문장부호·끝·접속사·전치사)
+# 앞 전치사구 "in/with/and/using (+ 관사)(+ 꾸밈말 2개까지)" 또는 관사째 지운다("drawn in a clean manhwa style" 에 "in a clean" 이,
+# "…, a digital artwork" 에 "a" 가 남지 않게). 뒤에 명사가 오면("line art details") 낱말만 지운다. 지운 자리의 "a, …" 는 "a …" 로.
+_STYLE_HEAD = (
+    r"(?:man(?:hwa|hua)|comic(?:-book)?s?|chibi|art|drawing)[- ]style[sd]?|line[- ]?art|cel[- ]?shading"
+    r"|digital[- ](?:painting|artwork|art|illustration)|flat[- ]shading|flat[- ]colou?rs"
+)
+_STYLE_PHRASE = re.compile(
+    rf"\b(?:(?:in|with|and|using)\s+(?:(?:an?|the)\s+)?(?:[a-z]+(?:-[a-z]+)?\s+){{0,2}}?|(?:an?|the)\s+)(?:{_STYLE_HEAD})\b"
+    r"(?=\s*(?:[,.;:]|$|\b(?:and|or|with|in|on|of|while|but)\b))",
+    re.IGNORECASE,
+)
+_STYLE_WORDS = re.compile(
+    rf"\b(?:{_STYLE_HEAD}|man(?:hwa|hua)|comic-books?|comics?|chibi|cel[- ]?shaded|styli[sz]ed|semi[- ]realistic|2d"
+    r"|flat[- ]shaded|flat[- ]colou?red|sketch(?:ed|y)?)\b",
+    re.IGNORECASE,
+)
+_ARTICLE_COMMA = re.compile(r"\b(an?|the)\s*(?:,\s*)+(?=[A-Za-z])", re.IGNORECASE)
+
+
 def _no_drawing(text) -> str:
-    """그림 낱말을 지운다(fx.strip_drawing_words). 'webtoon-style' 은 '-style' 까지, 그래도 'webtoon' 조각이 남으면(webtoonish 등) 그 조각도 지운다."""
-    out = re.sub(r"\b(?:web-?toons?|anime|manga|cartoons?|illustrat\w*|drawn)[- ]style\b", " ", str(text or ""),
+    """그림 낱말을 지운다(fx.strip_drawing_words). 'webtoon-style' 은 '-style' 까지, 그래도 'webtoon' 조각이 남으면(webtoonish 등) 그 조각도 지운다.
+
+    지시서 107: 먼저 _STYLE_PHRASE·_STYLE_WORDS(manhwa·cel-shaded·line art·digital painting·stylized 등)를 지운다. 맞는 낱말이 없으면
+    결과가 107 전과 같다.
+    """
+    out = str(text or "")
+    if _STYLE_WORDS.search(out):
+        out = _ARTICLE_COMMA.sub(r"\1 ", _STYLE_WORDS.sub(" ", _STYLE_PHRASE.sub(" ", out)))
+    out = re.sub(r"\b(?:web-?toons?|anime|manga|cartoons?|illustrat\w*|drawn)[- ]style\b", " ", out,
                  flags=re.IGNORECASE)
     out = strip_drawing_words(out)
     if re.search(r"web-?toon", out, re.IGNORECASE):
@@ -789,10 +835,10 @@ def prompt_look(look_en, gender) -> str:
 
 
 def cast_prompt(look_en, preset, gender, bl_types="") -> str:
-    """프리셋 문구 + " {He is|She is|They are} {외모}, with dark brown eyes." (≤1500자).
+    """프리셋 문구 + " {He is|She is|They are} {외모}, with dark brown eyes." + " " + photo_anchor(성별) (≤1500자).
 
-    bl_types(BL 유형 id 하나 또는 id 목록, 지시서 103·104)가 있으면 끝에 참고 문장 " He has …." 을 더한다(_cast_text). 없거나
-    모르는 값이면 결과가 이 기능 전과 한 글자도 같다.
+    bl_types(BL 유형 id 하나 또는 id 목록, 지시서 103·104)가 있으면 눈 색 문장 뒤에 참고 문장 " He has …." 을 더한다(_cast_text).
+    없거나 모르는 값이면 참고 문장이 없다. 사진 고정 문장(지시서 107)은 늘 맨 끝이다.
     """
     return _cast_text(look_en, preset, gender, bl_types)[0]
 
@@ -821,11 +867,12 @@ def _hint_sentence(pieces: list[str], gender) -> str:
 
 
 def _cast_text(look_en, preset, gender, bl_types="") -> tuple[str, str]:
-    """(캐스팅 문장, 더한 참고 문장). 유형이 없거나 모르는 값이면 참고 문장은 "" 이고 문장은 이 기능 전 cast_prompt 와 같다.
+    """(캐스팅 문장, 더한 참고 문장). 유형이 없거나 모르는 값이면 참고 문장은 "" 이다.
 
     bl_types 는 유형 id 하나 또는 id 목록이다(지시서 104: 설명에서 찾은 최대 2개, 같은 분류는 앞의 유형이 이긴다 —
-    genre_bl.merged_pieces). 참고 문장을 더해 PROMPT_MAX 를 넘으면 조각을 끝에서부터 뺀다(design D7). 다 빼도 넘으면 참고 문장
-    없이 지금처럼 자른다.
+    genre_bl.merged_pieces). 문장 끝은 늘 " " + photo_anchor(성별)이다(지시서 107, 유형 + unknown 이면 male 로 바꾼 뒤의 성별). PROMPT_MAX
+    에서 그 몫을 뺀 예산을 넘으면 참고 문장 조각을 끝에서부터 빼고(design D7), 다 빼도 넘으면 외모를 단어 경계에서 줄인다(_fit_cast_head).
+    사진 고정 문장은 자르지 않는다.
     """
     gender = _gender(gender)
     types = genre_bl.known_types(bl_types)
@@ -838,17 +885,33 @@ def _cast_text(look_en, preset, gender, bl_types="") -> tuple[str, str]:
         look = _sub_words(look, _NEUTRAL_TO_MALE)
     look = look or f"a Korean {words['noun']}"
     text = f"{base_text(preset, gender)} {words['subj']} {look}, with dark brown eyes."
+    anchor = photo_anchor(gender)
+    budget = PROMPT_MAX - len(anchor) - 1
     pieces = genre_bl.hint_pieces(types, look)
     sentence = ""
     while pieces:
         sentence = _hint_sentence(pieces, gender)
-        if len(text) + 1 + len(sentence) <= PROMPT_MAX:
+        if len(text) + 1 + len(sentence) <= budget:
             break
         pieces = pieces[:-1]
         sentence = ""
     if sentence:
         text = f"{text} {sentence}"
-    return text[:PROMPT_MAX], sentence
+    if len(text) > budget:
+        text = _fit_cast_head(preset, gender, look, budget)
+    return (f"{text} {anchor}" if text else anchor[:PROMPT_MAX]), sentence
+
+
+def _fit_cast_head(preset, gender: str, look: str, budget: int) -> str:
+    """참고 문장 없이도 budget 을 넘을 때(지시서 107): 프리셋 문구·주어·", with dark brown eyes." 는 두고 외모만 단어 경계에서 줄인다
+    (_clip_tail — 끝에 매달린 with·and·쉼표를 지운다). 외모 자리가 없으면 앞에서부터 budget 자(107 전 자르기와 같은 꼴)."""
+    head = f"{base_text(preset, gender)} {_WORDS[gender]['subj']} "
+    tail = ", with dark brown eyes."
+    room = budget - len(head) - len(tail)
+    clipped = _clip_tail(look, room) if room > 0 else ""
+    if clipped:
+        return head + clipped + tail
+    return (head + look + tail)[:max(0, budget)].rstrip()
 
 
 
@@ -860,6 +923,8 @@ def _cast_text(look_en, preset, gender, bl_types="") -> tuple[str, str]:
 #
 # 과금: 만든 사진 1장마다 원장 1건(키 vnew-cast-{cid}-{후보 id}). 후보 id 는 fal 요청 id 에서 정해지므로, 파드가 죽어
 # 같은 요청을 다시 받아도 같은 S3 키·같은 원장 키라 두 번 계상하지 않는다. fal 이 결과를 주지 않은 칸은 과금하지 않는다.
+# 그림체로 버린 사진(지시서 107)도 fal 이 만든 1장이라 같은 키 규칙으로 1건 남긴다(S3 에는 두지 않는다). 다시 뽑은 요청은 새 요청 id
+# 라 새 키다 — 원장 건수 = 결과 사진을 받은 fal 요청 수.
 
 _CAST_RUNNING: set[tuple[str, str]] = set()
 _CAST_LOCK = threading.Lock()
@@ -883,6 +948,11 @@ _MSG_BAD_IMAGE = "받은 사진을 읽지 못했습니다."
 # 대신 캐스팅용 문구를 쓴다. fal 거절 상세는 error_gist(URL 쿼리·data URI·키 제거, 120자)를 지나 괄호로 붙인다.
 _MSG_REJECTED = "fal이 이 캐스팅 문장을 거절했습니다. 외모 문장을 바꿔 다시 뽑아 주세요."
 _REJECT_GIST_MAX = 120
+# 실사 사진 검사(지시서 107). 다시 뽑은 사진도 그림체인 칸의 문구, 보기 안내 한 줄(VNEW_CAST_PHOTO_CHECK 켬일 때만 보기에 둔다).
+_MSG_NOT_PHOTO = "실사 사진이 아니라 그림체로 나와 이 칸을 버렸습니다. 다시 뽑아 주세요."
+_MSG_PHOTO_NOTE = "그림체로 나온 칸은 한 번 다시 뽑으며 그 비용이 더해질 수 있습니다."
+# 칸마다 다시 제출하는 최대 횟수(지시서 107: 한 번만). 칸의 redraws 에 남겨 재시작 뒤에도 넘지 않는다.
+_REDRAW_MAX = 1
 
 
 class _ClaimLost(Exception):
@@ -1195,7 +1265,7 @@ def view(char) -> dict:
 
     VNEW_BL_LOOK 켬이면 끝에 blDetected([{id, label}] — 사용자가 쓴 캐릭터 설명에서 찾은 BL 유형)·blHintsEn(지금 외모 문장·느낌·
     성별로 뽑기 문장에 더해질 참고 문장)을 더한다(지시서 104, 103 의 blRole·blType·blRoles·blTypes 는 없앴다). 끔이면 이 기능 전과
-    키가 같다.
+    키가 같다. VNEW_CAST_PHOTO_CHECK 켬이면 맨 끝에 photoCheckNote(다시 뽑기 비용 안내 한 줄, 지시서 107)를 더한다.
     """
     if not settings.VNEW_CASTING:
         return {"enabled": False}
@@ -1234,6 +1304,9 @@ def view(char) -> dict:
             blDetected=[{"id": type_id, "label": genre_bl.TYPES[type_id]["label"]} for type_id in bl_types],
             blHintsEn=_cast_text(look, cast.get("preset"), resolve_gender(cast, analysis), bl_types)[1],
         )
+    if settings.VNEW_CAST_PHOTO_CHECK:
+        # 지시서 107(design D9): 총비용(totalUsd)은 그대로 두고, 드물게 더해지는 다시 뽑기 비용을 한 줄로 알린다. 끔이면 키가 없다.
+        out["photoCheckNote"] = _MSG_PHOTO_NOTE
     return out
 
 
@@ -1397,8 +1470,117 @@ def _charge(owner: str, cid: str, cand_id: str, model: str, usd: float) -> None:
         log.warning("vnew.casting.ledger_failed cid=%s err=%s", cid, error_gist(str(exc), 200))
 
 
-def _poll_slot(owner: str, cid: str, token: str, slot: dict, unit_usd: float) -> None:
-    """제출한 칸 하나 조회. 진행 중·일시 오류면 그대로(다음 순회), 완료면 사진을 옮기고 원장 1건, 거절·결과 없음이면 실패."""
+# ---------------------------------------------------------------- 실사 사진 검사(지시서 107, cast-photo-guard design §3)
+#
+# characters._count_people·_inspect_view 와 같은 꼴(vpoc.llm._converse + 도구 1개). 사진 1장 = LLM 1회. 모델은 보이는 것(실사인지·
+# 그림 종류)만 적고, 버릴지·다시 뽑을지는 _photo_passes 가 정한다. 모델 오류·도구 미사용·모양이 틀리면 None(사진을 버리지 않는다).
+
+_PHOTO_CHECK_MAX_TOKENS = 400  # 5.x 모델이 도구 앞에 글을 쓰면 120 은 잘렸다(_count_people 과 같은 값)
+_PHOTO_CHECK_MAX_PX = 1024  # 검사에 보낼 긴 변. 저장 JPEG(1536)를 줄여 이미지 입력 토큰을 약 절반으로
+_PHOTO_STYLES = ("photo", "illustration", "webtoon", "anime", "cartoon", "painting", "3d-render", "other")
+_PHOTO_TOOL = {
+    "name": "emit_photo_check",
+    "description": "Judge whether one image is a real camera photograph of a real person or a drawn or rendered picture.",
+    "inputSchema": {
+        "json": {
+            "type": "object",
+            "properties": {
+                "photo": {"type": "boolean"},
+                "style": {"type": "string", "enum": list(_PHOTO_STYLES)},
+            },
+            "required": ["photo", "style"],
+        }
+    },
+}
+_PHOTO_SYSTEM = (
+    "You check ONE generated portrait. photo is true only when it is a real photograph of a real person taken with a camera "
+    "(real skin texture, real hair strands, camera lighting). photo is false when it is a drawing, illustration, webtoon or "
+    "comic art, anime, cartoon, digital painting or 3D render, even when it is detailed or semi-realistic. style names what you "
+    "see: 'photo', 'illustration', 'webtoon', 'anime', 'cartoon', 'painting', '3d-render' or 'other'. "
+    "Answer only by calling the emit_photo_check tool exactly once."
+)
+_PHOTO_PROMPT = "Is this image a real photograph of a real person, or a drawing / illustration / webtoon / anime / 3D render?"
+
+
+def _check_jpeg(jpeg: bytes) -> bytes:
+    """검사에 보낼 JPEG: 긴 변이 _PHOTO_CHECK_MAX_PX 이하면 그대로, 넘으면 줄여 q85 로 다시 인코딩한다(메모리에서만)."""
+    with Image.open(io.BytesIO(jpeg)) as image:
+        if max(image.size) <= _PHOTO_CHECK_MAX_PX:
+            return jpeg
+        rgb = image.convert("RGB")
+    rgb.thumbnail((_PHOTO_CHECK_MAX_PX, _PHOTO_CHECK_MAX_PX))
+    buffer = io.BytesIO()
+    rgb.save(buffer, format="JPEG", quality=85)
+    return buffer.getvalue()
+
+
+def _photo_check(jpeg: bytes) -> dict | None:
+    """결과 사진 1장이 실사 사진인지 비전 LLM 1회로 묻는다. {photo: bool, style: _PHOTO_STYLES 중 하나}, 못 정하면 None.
+
+    photo 는 bool 또는 글 "true"·"false" 만 받는다. 모르는 style 은 "other". 로그에는 오류 요지 200자만 남긴다(사진·문장 없음).
+    줄이기(디코드)는 받기와 같은 _PHOTO_SEM 안에서 한 장씩 하고(512Mi 봉우리 그대로), LLM 호출은 그 밖에서 한다.
+    """
+    try:
+        with _PHOTO_SEM:
+            small = _check_jpeg(jpeg)
+        blocks = [{"text": _PHOTO_PROMPT}, {"image": {"format": "jpeg", "source": {"bytes": small}}}]
+        payload, _usage = vpoc_llm._converse(  # noqa: SLF001 — 공개 래퍼가 없어 내부 함수를 쓴다(characters 검사와 같다)
+            system_text=_PHOTO_SYSTEM,
+            blocks=blocks,
+            tool=_PHOTO_TOOL,
+            max_tokens=_PHOTO_CHECK_MAX_TOKENS,
+            where="vnew.cast_photo_check",
+            model=settings.VNEW_CAST_PHOTO_CHECK_MODEL,
+        )
+    except Exception as exc:  # noqa: BLE001
+        log.warning("vnew.cast.photo_check_failed err=%s", error_gist(str(exc), 200) or type(exc).__name__)
+        return None
+    raw = payload.get("photo") if isinstance(payload, dict) else None
+    if isinstance(raw, str) and raw.strip().lower() in ("true", "false"):
+        raw = raw.strip().lower() == "true"
+    if not isinstance(raw, bool):
+        log.warning("vnew.cast.photo_check_failed err=bad_payload")
+        return None
+    style = str(payload.get("style") or "").strip().lower()
+    return {"photo": raw, "style": style if style in _PHOTO_STYLES else "other"}
+
+
+def _photo_passes(owner: str, cid: str, token: str, slot: dict, cand_id: str, model: str, unit_usd: float,
+                  jpeg: bytes) -> bool:
+    """받은 사진을 후보로 넣어도 되는지(design §3.2). 실사이거나 검사가 None(fail-open, 경고 로그)이면 True.
+
+    그림체면 그 사진은 메모리에서만 쓰고 버린다(S3 저장 없음). 이미 fal 이 만든 1장이라 원장에는 같은 키 규칙(후보 id)으로 1건 남긴다.
+    그 칸의 다시 제출이 _REDRAW_MAX 보다 적으면 같은 문장으로 다시 제출하도록 queued 로 되돌리고(redraws + 1), 아니면 그 칸만
+    실패(NotPhoto)로 끝낸다. 다른 칸은 건드리지 않는다.
+    """
+    index = int(slot.get("slot") or 0)
+    redraws = int(slot.get("redraws") or 0)
+    check = _photo_check(jpeg)
+    if check is None:
+        log.warning("vnew.cast.photo_check slot=%d photo=none style=- redraw=%d cid=%s", index, min(redraws, 1), cid)
+        return True
+    log.log(logging.INFO if check["photo"] else logging.WARNING, "vnew.cast.photo_check slot=%d photo=%s style=%s redraw=%d cid=%s",
+            index, str(check["photo"]).lower(), check["style"], min(redraws, 1), cid)
+    if check["photo"]:
+        return True
+    _charge(owner, cid, cand_id, model, unit_usd)
+    if redraws >= _REDRAW_MAX:
+        _fail_slot(owner, cid, token, index, _MSG_NOT_PHOTO, "NotPhoto")
+        return False
+
+    def again(cast: dict) -> None:
+        _set_slot(cast, index, status="queued", requestArn="", candidateId="", error="", redraws=redraws + 1)
+
+    _mutate_cast(owner, cid, token, again)
+    log.info("vnew.cast.redraw cid=%s slot=%d redraws=%d", cid, index, redraws + 1)
+    return False
+
+
+def _poll_slot(owner: str, cid: str, token: str, slot: dict, unit_usd: float, *, photo_check: bool = False) -> None:
+    """제출한 칸 하나 조회. 진행 중·일시 오류면 그대로(다음 순회), 완료면 사진을 옮기고 원장 1건, 거절·결과 없음이면 실패.
+
+    photo_check(VNEW_CAST_PHOTO_CHECK, 지시서 107)가 참이면 저장 전에 _photo_passes 를 지난다. 거짓이면 107 전과 같다.
+    """
     index = int(slot.get("slot") or 0)
     endpoint, request_id = vpoc_fal._parse_arn(str(slot.get("requestArn") or ""))  # noqa: SLF001
     if not endpoint or not _REQUEST_ID.fullmatch(request_id):
@@ -1431,6 +1613,8 @@ def _poll_slot(owner: str, cid: str, token: str, slot: dict, unit_usd: float) ->
         _fail_slot(owner, cid, token, index, _slot_error(exc), getattr(exc, "kind", type(exc).__name__))
         return
     cand_id = "k_" + hashlib.sha256(request_id.encode("utf-8")).hexdigest()[:10]
+    if photo_check and not _photo_passes(owner, cid, token, slot, cand_id, endpoint, unit_usd, jpeg):
+        return
     key = characters.casting_key(owner, cid, cand_id)
     characters.STORE.put_bytes(key, jpeg, "image/jpeg")
     _charge(owner, cid, cand_id, endpoint, unit_usd)
@@ -1486,6 +1670,7 @@ def run_draw(owner: str, cid: str, token: str) -> None:
     size = _image_size()
     poll_max = int(settings.VNEW_CASTING_POLL_MAX_S)
     interval = max(0, int(settings.POLL_INTERVAL_S))
+    photo_check = bool(settings.VNEW_CAST_PHOTO_CHECK)  # 지시서 107. 다른 설정처럼 이 실행이 시작할 때 한 번 읽는다
     try:
         while True:
             cast = _load_cast(owner, cid, token)
@@ -1498,7 +1683,7 @@ def run_draw(owner: str, cid: str, token: str) -> None:
             cast = _load_cast(owner, cid, token)
             for slot in cast["slots"]:
                 if slot.get("status") == "submitted":
-                    _poll_slot(owner, cid, token, slot, unit_usd)
+                    _poll_slot(owner, cid, token, slot, unit_usd, photo_check=photo_check)
             cast = _load_cast(owner, cid, token)
             if not any(slot.get("status") in ("queued", "submitted") for slot in cast["slots"]):
                 _finish(owner, cid, token)

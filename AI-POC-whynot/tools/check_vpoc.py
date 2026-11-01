@@ -11854,6 +11854,8 @@ PARITY_ENV_KEYS = [
     "VNEW_3D_SIDE_SWAP",
     # 지시서 103: BL 역할·유형 참고 외모.
     "VNEW_BL_LOOK",
+    # 지시서 107: 실사 사진 검사·그림체 다시 뽑기.
+    "VNEW_CAST_PHOTO_CHECK",
 ]
 PARITY_FACE = "fal:bytedance/seedance-2.5/image-to-video"
 PARITY_PARTNER = "fal:bytedance/seedance-2.5/reference-to-video"
@@ -21025,6 +21027,20 @@ _CAST_REAL_MALE = (
     "no illustration, fully clothed, not a model photoshoot. Clothing and its pattern exactly as described, "
     "including where the pattern is."
 )
+# 지시서 107(cast-photo-guard design D1): 캐스팅 문장 맨 끝 사진 고정 문장. 두 프리셋·BL 유무·설정과 상관없이 늘 붙는다. {noun} 은 성별
+# 낱말 표의 명사(male man · female woman · unknown person). cast-a·cast-b·bl-c~l 의 문장 기대값은 이 문장으로 끝난다(107 에서 바뀐 기대값,
+# cpg-a 가 글자를 고정한다).
+_CPG_ANCHOR = (
+    "A real photograph of a real {noun} taken with a camera; not a drawing, illustration, anime, cartoon, painting or 3D render."
+)
+_CPG_NOUNS = {"male": "man", "female": "woman", "unknown": "person"}
+
+
+def _cpg_anchor(gender: str = "male") -> str:
+    """성별(male·female·unknown, 그 밖은 unknown)의 사진 고정 문장 기대값."""
+    return _CPG_ANCHOR.format(noun=_CPG_NOUNS.get(gender, "person"))
+
+
 # cast-d: design §B.2 성별 문장 원문, 변경 전(2026-10-30, 묶음 A 커밋 뒤) 분석 도구 JSON·SYSTEM(VNEW_FX 켬) sha256.
 _CAST_GENDER_RULE_DESIGN = (
     " genderEn is the character's gender as drawn: male, female or unknown (unknown when the drawings do not make it clear)."
@@ -21729,7 +21745,7 @@ def check_vnew_casting() -> None:
                     or [p["label"] for p in castmod.PRESETS] != ["아이돌풍", "현실 배우풍"]:
                 bad.append("(cast-a) 모르는 프리셋·성별 기본값 또는 프리셋 라벨이 다릅니다")
             male_prompt = castmod.cast_prompt("a Korean man in his 30s with short black hair", "idol", "male")
-            if male_prompt != _CAST_IDOL_MALE + " He is a Korean man in his 30s with short black hair, with dark brown eyes.":
+            if male_prompt != _CAST_IDOL_MALE + " He is a Korean man in his 30s with short black hair, with dark brown eyes. " + _cpg_anchor("male"):
                 bad.append(f"(cast-a) male cast_prompt 가 원문 + He is … 가 아닙니다: {male_prompt[-120:]}")
             subjects = {"male": " He is ", "female": " She is ", "unknown": " They are "}
             evil_looks = [
@@ -21755,7 +21771,7 @@ def check_vnew_casting() -> None:
                         text = castmod.cast_prompt(look, preset, gender)
                         prompt_count += 1
                         if not text.startswith(castmod.base_text(preset, gender) + subjects[gender]) \
-                                or not text.endswith(", with dark brown eyes.") or "\n" in text or len(text) > 1500:
+                                or not text.endswith(", with dark brown eyes. " + _cpg_anchor(gender)) or "\n" in text or len(text) > 1500:
                             bad.append(f"(cast-a) {preset}·{gender} cast_prompt 모양이 다릅니다: {text[-100:]!r}")
                         if "webtoon" in text.lower():
                             bad.append(f"(cast-a) cast_prompt 에 webtoon 이 남았습니다: {text[-160:]!r}")
@@ -21840,7 +21856,7 @@ def check_vnew_casting() -> None:
                     problems.append(f"옷 첫 항목 없음 {top!r}")
                 if dangling.search(got):
                     problems.append(f"매달린 끝 {got[-20:]!r}")
-                if not prompt.endswith(", with dark brown eyes.") or prompt.count("dark brown") != 1:
+                if not prompt.endswith(", with dark brown eyes. " + _cpg_anchor(gender)) or prompt.count("dark brown") != 1:
                     problems.append(f"cast_prompt 눈 색 {prompt[-80:]!r}")
                 if gender != "male" and re.search(r"\b(?:he|his|him|male)\b", got, re.IGNORECASE):
                     problems.append("남성 낱말이 남음")
@@ -30497,12 +30513,20 @@ def check_vnew_bl_look() -> None:
             return f"{exc.status}:{exc.kind}:{exc.message}"
         return ""
 
-    def old_prompt(look, preset, gender) -> str:
-        """이 기능 전 cast_prompt 본문(design §1)을 그대로 다시 쓴 기준 식."""
+    def old_head(look, preset, gender) -> str:
+        """이 기능 전 cast_prompt 본문(design §1)을 그대로 다시 쓴 기준 식(사진 고정 문장 앞까지)."""
         g = castmod._gender(gender)  # noqa: SLF001
         words = castmod._WORDS[g]  # noqa: SLF001
         text_look = castmod.prompt_look(look, g) or f"a Korean {words['noun']}"
         return f"{castmod.base_text(preset, g)} {words['subj']} {text_look}, with dark brown eyes."[:1500]
+
+    def anchored(text: str, gender="male") -> str:
+        """지시서 107: 캐스팅 문장은 늘 " " + 사진 고정 문장(성별 명사)으로 끝난다(BL 유무와 상관없이)."""
+        return f"{text} {_cpg_anchor(castmod._gender(gender))}"  # noqa: SLF001
+
+    def old_prompt(look, preset, gender) -> str:
+        """이 기능 전 기준 식 + 지시서 107 사진 고정 문장."""
+        return anchored(old_head(look, preset, gender), gender)
 
     analysis = {
         "nameGuess": "준", "descriptionKo": "30대 남성.", "appearanceEn": "A Korean man in his thirties with short black hair.",
@@ -30786,10 +30810,10 @@ def check_vnew_bl_look() -> None:
                     or blmod.known_types("ttokdae_gong") != ["ttokdae_gong"] or blmod.known_types({"ttokdae_gong": 1}) != []:
                 bad.append(f"(bl-l) 두 유형 그림 우선·known_types 가 다릅니다: {slim_two}")
             two_text = castmod.cast_prompt(_BL_LOOK_30S, "idol", "male", ["musim_gong", "ttokdae_gong"])
-            if two_text != old_prompt(_BL_LOOK_30S, "idol", "male") + " " + castmod._hint_sentence(  # noqa: SLF001
-                    [t for _c, t in musim_post], "male") \
+            if two_text != anchored(old_head(_BL_LOOK_30S, "idol", "male") + " " + castmod._hint_sentence(  # noqa: SLF001
+                    [t for _c, t in musim_post], "male")) \
                     or castmod.cast_prompt(_BL_LOOK_30S, "idol", "male", ["ttokdae_gong"]) \
-                    != _CAST_IDOL_MALE + f" He is {_BL_LOOK_30S}, with dark brown eyes. " + _BL_TTOKDAE_SENTENCE:
+                    != anchored(_CAST_IDOL_MALE + f" He is {_BL_LOOK_30S}, with dark brown eyes. " + _BL_TTOKDAE_SENTENCE):
                 bad.append(f"(bl-l) 두 유형 cast_prompt 가 다릅니다: {two_text[-240:]!r}")
             report.append(f"bl-l: 합치기 {len(merge_cases)}경우 · 유형 하나 = 표 {len(types)}종 · 두 유형 문장 {len(two_text)}자")
             seen.add("bl-l")
@@ -30812,7 +30836,7 @@ def check_vnew_bl_look() -> None:
                         count_c += len(got)
                         if any(item != want for item in got) or castmod._cast_text(look, preset, gender, "zz")[1] != "":  # noqa: SLF001
                             bad.append(f"(bl-c) 유형 없음 결과가 지금과 다릅니다: {preset}·{gender}·{look[:40]!r}")
-            if castmod.cast_prompt(_BL_LOOK_30S, "idol", "male", "") != _CAST_IDOL_MALE + f" He is {_BL_LOOK_30S}, with dark brown eyes.":
+            if castmod.cast_prompt(_BL_LOOK_30S, "idol", "male", "") != anchored(_CAST_IDOL_MALE + f" He is {_BL_LOOK_30S}, with dark brown eyes."):
                 bad.append("(bl-c) 유형 없음 male 결과가 원문 + He is … 가 아닙니다")
             if list(_inspect.signature(castmod.cast_prompt).parameters.items())[3][1].default != "":
                 bad.append("(bl-c) cast_prompt 넷째 인자 기본값이 \"\" 가 아닙니다")
@@ -30845,7 +30869,7 @@ def check_vnew_bl_look() -> None:
                             problems = []
                             if castmod.cast_prompt(look, preset, gender, type_id) != text:
                                 problems.append("cast_prompt != _cast_text")
-                            if not pieces or not sentence or text != f"{head} {sentence}":
+                            if not pieces or not sentence or text != anchored(f"{head} {sentence}", g_eff):
                                 problems.append(f"문장 = 옛 식 + 참고 문장이 아님 {text[-160:]!r}")
                             if sentence and not sentence.startswith("She has " if g_eff == "female" else "He has "):
                                 problems.append(f"참고 문장 주어 {sentence[:12]!r}")
@@ -30863,7 +30887,7 @@ def check_vnew_bl_look() -> None:
                             if problems:
                                 bad.append(f"(bl-d) {type_id}·{preset}·{gender!r}·{look[:30]!r}: {problems}")
             full = castmod.cast_prompt(_BL_LOOK_30S, "idol", "male", "ttokdae_gong")
-            if full != _CAST_IDOL_MALE + f" He is {_BL_LOOK_30S}, with dark brown eyes. " + _BL_TTOKDAE_SENTENCE \
+            if full != anchored(_CAST_IDOL_MALE + f" He is {_BL_LOOK_30S}, with dark brown eyes. " + _BL_TTOKDAE_SENTENCE) \
                     or castmod.cast_prompt(_BL_LOOK_30S, "idol", "unknown", "ttokdae_gong") != full:
                 bad.append(f"(bl-d) 떡대공 전문이 고정값과 다릅니다: {full[-260:]!r}")
             unknown_look = castmod.cast_prompt(_CAST_LOOK_FEEDBACK["u1"][4], "real", "unknown", "musim_gong")
@@ -30902,10 +30926,13 @@ def check_vnew_bl_look() -> None:
                     or two_less != castmod._hint_sentence(musim_all, "male"):  # noqa: SLF001
                 bad.append(f"(bl-e) 두 유형 문장의 끝에서부터 빼기가 다릅니다: {two_less!r}")
             want_one_less = "He has " + ", ".join(ttok[:-2]) + ", and " + ttok[-2] + "."
+            # 지시서 107(cast-photo-guard D3): 참고 문장을 다 빼도 넘치면 외모를 단어 경계에서 줄이고 프리셋·주어·눈 색·사진 고정 문장은
+            # 남긴다(107 전 기대값: 옛 식을 앞에서부터 head_len - 30 자로 자름).
+            want_cut = anchored(_CAST_IDOL_MALE + " He is a Korean man, with dark brown eyes.")
             if one_less[1] != want_one_less or len(one_less[0]) > head_len + 1 + len(_BL_TTOKDAE_SENTENCE) - 1 \
                     or only_one[1] != "He has broad shoulders and a solid, muscular build." \
                     or none_fit != (old_prompt(_BL_LOOK_30S, "idol", "male"), "") \
-                    or cut != (old_prompt(_BL_LOOK_30S, "idol", "male")[:head_len - 30], ""):
+                    or cut != (want_cut, "") or len(cut[0]) > head_len - 30:
                 bad.append(f"(bl-e) 상한 넘침 처리가 다릅니다: {one_less[1]!r} {only_one[1]!r} {none_fit[1]!r} {len(cut[0])}")
             if castmod.PROMPT_MAX != 1500:
                 bad.append("(bl-e) PROMPT_MAX 가 1500 으로 돌아오지 않았습니다")
@@ -30987,7 +31014,7 @@ def check_vnew_bl_look() -> None:
             want_hint_d = castmod._hint_sentence(hp("ttokdae_gong", look_d), "male")  # noqa: SLF001
             prompt = cast_d.get("prompt") or ""
             if status != 202 or len(spawned) != 1 \
-                    or prompt != f"{old_prompt(castmod.current_look(load_c(cid_d)), 'idol', 'male')} {want_hint_d}" \
+                    or prompt != anchored(f"{old_head(castmod.current_look(load_c(cid_d)), 'idol', 'male')} {want_hint_d}") \
                     or view_d.get("blDetected") != [{"id": "ttokdae_gong", "label": "떡대공"}] or view_d.get("blHintsEn") != want_hint_d \
                     or logs.messages("vnew.casting.draw_start") != [
                         f"vnew.casting.draw_start cid={cid_d} round=1 slots=2 usd=0.08 preset=idol gender=male bl=ttokdae_gong"]:
@@ -31000,7 +31027,7 @@ def check_vnew_bl_look() -> None:
             status2 = call("POST", f"/api/vnew/characters/{cid_2}/casting/draw", {"confirmUsd": 0.08})[0]
             look_2 = castmod.prompt_look(castmod.current_look(load_c(cid_2)), "male")
             want_two = castmod._hint_sentence(hp(["musim_gong", "ttokdae_gong"], look_2), "male")  # noqa: SLF001
-            if status2 != 202 or not ((load_c(cid_2).get("casting") or {}).get("prompt") or "").endswith(" " + want_two) \
+            if status2 != 202 or not ((load_c(cid_2).get("casting") or {}).get("prompt") or "").endswith(" " + anchored(want_two)) \
                     or not (logs.messages("vnew.casting.draw_start") or [""])[0].endswith(" bl=musim_gong+ttokdae_gong"):
                 bad.append(f"(bl-f) 두 유형 뽑기 문장·로그가 다릅니다: {status2} {logs.messages('draw_start')}")
             report.append(f"bl-f: PUT {len(put_bodies)}건(BL 값 무시·저장값 그대로) · draw 4건(CostMismatch·저장값 무시 bl=-·"
@@ -31015,7 +31042,7 @@ def check_vnew_bl_look() -> None:
                     or {k: v for k, v in view_on.items() if k not in _BL_VIEW_KEYS} != view_off or set(view_on) & _BL_OLD_VIEW_KEYS:
                 bad.append(f"(bl-h) 켬 보기 = 끔 보기 + blDetected·blHintsEn(끝)이 아닙니다: {sorted(set(view_on) ^ set(view_off))}")
             if view_on.get("blDetected") != [{"id": "ttokdae_gong", "label": "떡대공"}] or not view_on.get("blHintsEn") \
-                    or not prompt.endswith(" " + view_on.get("blHintsEn", "-")):
+                    or not prompt.endswith(" " + anchored(view_on.get("blHintsEn", "-"))):
                 bad.append("(bl-h) 보기 blDetected·blHintsEn(= 뽑기 문장 끝)이 다릅니다")
             # 근거는 char.extraPromptKo 뿐: LLM 글(descriptionKo)·appearanceEn·고친 외모 문장·103 저장값에 유형 이름이 있어도, 설명이 글이
             # 아니거나 역할 낱말·부정뿐이어도 찾지 않는다.
@@ -31287,7 +31314,7 @@ def check_vnew_bl_look() -> None:
                     status, data, _k = call("POST", base_i + "/draw", draw_body)
                     c_i = load_c("char_bl_i_found").get("casting") or {}
                     if status != 202 or len(spawned) != 1 \
-                            or not c_i.get("prompt", "").endswith(" " + ((data.get("casting") or {}).get("blHintsEn") or "-")):
+                            or not c_i.get("prompt", "").endswith(" " + anchored((data.get("casting") or {}).get("blHintsEn") or "-")):
                         bad.append(f"(bl-i) 화면 뽑기 본문 → 라우트 → 회차 문장이 다릅니다: {status} {draw_body}")
             seen.add("bl-i")
 
@@ -31434,6 +31461,836 @@ def _bl_screen_problems(got: dict, server: dict, rebuild_text: str) -> list[str]
     return problems
 
 
+# ---------------------------------------------------------------- 지시서 107 — 실사 캐스팅에서 그림체 결과 막기(cpg-a~h)
+#
+# 스펙 .kiro/specs/cast-photo-guard/. 외부 호출은 모두 가짜다: fal(casting._fal_request·_fetch_url), 검사 LLM(vpoc.llm._converse),
+# 원장(vpoc.ledger.charge), S3(_FakeCharStore). 실제 fal·Bedrock·S3 호출 0.
+
+_CPG_NOT_PHOTO = "실사 사진이 아니라 그림체로 나와 이 칸을 버렸습니다. 다시 뽑아 주세요."
+_CPG_NOTE = "그림체로 나온 칸은 한 번 다시 뽑으며 그 비용이 더해질 수 있습니다."
+# 가짜 fal 이 요청마다 정한 결과 사진 색. 가짜 검사 LLM 은 실제로 받은 사진 가운데 색으로 판정한다(검사에 간 바이트를 본다).
+#   photo 실사 · drawing 그림체(webtoon) · anime 글자 "false" · error 모델 오류 · bad 도구 입력에 photo 없음 · steal 검사 중 다른 파드가 claim 을 가져감
+_CPG_COLORS = {
+    "photo": (200, 180, 160), "drawing": (20, 200, 40), "anime": (240, 240, 20), "error": (10, 10, 200), "bad": (200, 10, 10),
+    "steal": (120, 0, 120),
+}
+# 지시서 107 이 _no_drawing 에 더한 그림체 낱말(design D2). 결과에 남으면 안 된다.
+_CPG_ADDED_WORDS = re.compile(
+    r"\b(?:man(?:hwa|hua)|comics?|comic-books?|chibi|cel[- ]?shad(?:ed|ing)|line[- ]?art|digital[- ](?:painting|artwork|art|"
+    r"illustration)|styli[sz]ed|semi[- ]realistic|2d|flat[- ]shad(?:ed|ing)|flat[- ]colou?r(?:s|ed)?|sketch(?:ed|y)?|art[- ]style|"
+    r"drawing[- ]style)\b",
+    re.IGNORECASE,
+)
+# _no_drawing 입력 → 결과(design D2 표). 명사구 끝이면 앞 전치사구·관사째, 꾸밈말이면 낱말만 지운다.
+_CPG_STYLE_CASES = (
+    ("a stylized young man with short black hair", "a young man with short black hair"),
+    ("a man drawn in a clean manhwa style with thin line art and soft cel shading", "a man"),
+    ("a semi-realistic Korean man with short hair", "a Korean man with short hair"),
+    ("a cel-shaded man with black hair", "a man with black hair"),
+    ("a chibi-style boy with pink hair", "a boy with pink hair"),
+    ("a Korean man, digital painting, with short hair", "a Korean man, with short hair"),
+    ("a 2D comic-book hero with spiky hair", "a hero with spiky hair"),
+    ("a man in flat colors with short hair", "a man with short hair"),
+    ("a manhua-styled man with long hair", "a man with long hair"),
+    ("a stylised woman in an art style with long hair", "a woman with long hair"),
+    ("a man in a soft drawing style with a black coat", "a man with a black coat"),
+    ("a Manhwa man with short hair, digital art", "a man with short hair"),
+    ("a man in digital illustration with black hair", "a man with black hair"),
+    ("a comics hero, 2d", "a hero"),
+    ("a flat-shaded man with sketchy black hair", "a man with black hair"),
+    ("a man with short hair in lineart, a digital artwork", "a man with short hair"),
+    ("a man with short hair, comic lines", "a man with short hair, lines"),
+    ("a STYLIZED Korean man with Line-Art eyes", "a Korean man with eyes"),
+    ("a stylized, manhwa-style sharp jaw", "a sharp jaw"),
+)
+# 지우면 안 되는 낱말(낱말 경계): stylish·styled·comical·flat cap·digital watch·neckline·hairline·jawline·painted·sketchbook·art·realistic.
+_CPG_KEEP = ("a stylish man with styled hair, a comical grin, a flat cap, a digital watch, a deep neckline, a high hairline, "
+             "a sharp jawline, painted nails, a sketchbook, an art teacher's coat and a realistic tattoo")
+_CPG_SLOT_KEYS_106 = {"slot", "status", "requestArn", "candidateId", "error"}
+
+_CPG_SCREEN_NODE_CASES = r"""
+var presets = [{ key: "idol", label: "아이돌풍" }, { key: "real", label: "현실 배우풍" }];
+var evil = "<img src=x onerror=alert(1)>";
+function detailOf(castExtra) {
+  var cast = { enabled: true, preset: "idol", presets: presets, gender: "", genderAuto: "male",
+    lookEn: "a Korean man with short black hair", lookAuto: "a Korean man with short black hair", lookEdited: false,
+    patternWarning: "", status: "ready", error: "", slots: [], unitUsd: 0.04, count: 2, totalUsd: 0.08,
+    candidates: [], history: [], chosen: "", chosenUrl: "" };
+  Object.keys(castExtra || {}).forEach(function (k) { cast[k] = castExtra[k]; });
+  return { id: "ch 1", status: "ready", casting: cast };
+}
+function noteOf(section) {
+  return byClass(section, "vnew-casting-redraw-note").map(function (n) { return [n.tagName, n.className, n.textContent]; });
+}
+function order(section) { return section.children.map(function (n) { return n.className; }); }
+async function run() {
+  var host = new FakeNode("div");
+  var on = castingSection(host, detailOf({ photoCheckNote: NOTE }));
+  var off = castingSection(host, detailOf({}));
+  out.on = noteOf(on);
+  out.off = noteOf(off);
+  out.empty = noteOf(castingSection(host, detailOf({ photoCheckNote: "" })));
+  out.evil = noteOf(castingSection(host, detailOf({ photoCheckNote: evil })));
+  out.drawing = noteOf(castingSection(host, detailOf({ photoCheckNote: NOTE, status: "drawing", slots: [{ slot: 0, status: "queued", error: "" }] })));
+  out.onOrder = order(on);
+  out.offOrder = order(off);
+  out.draw = [byClass(on, "vnew-casting-draw")[0].textContent, byClass(off, "vnew-casting-draw")[0].textContent];
+  out.innerHTML = innerHTMLUsed;
+  console.log(JSON.stringify(out));
+}
+run().catch(function (e) { console.error((e && e.stack) || String(e)); process.exit(1); });
+"""
+
+
+def check_vnew_cast_photo_guard() -> None:
+    """지시서 107 — 실사 캐스팅에서 그림체(웹툰·일러스트) 결과 막기(.kiro/specs/cast-photo-guard). 외부 호출은 모두 가짜다.
+
+    (cpg-a) 사진 고정 문장: PHOTO_ANCHOR 글자 고정·webtoon 없음, 두 프리셋 × 성별 3 × BL(없음·하나·둘) × 외모 6 에서 문장 = 107 전 식
+            (+ 참고 문장) + " " + 고정 문장(한 번)·≤1500·cast_prompt = _cast_text·설정 켬/끔 같음, 운영 최대(유형 144쌍 × 프리셋 2, 긴 외모)
+            에서 참고 문장을 줄이지 않음, 긴 외모(LOOK_MAX 를 늘려 1500 초과)·PROMPT_MAX 줄이기 5경우: 참고 문장 조각 → 외모 단어 경계 순으로
+            줄고 프리셋·주어·눈 색·고정 문장은 남음, 아주 작은 상한·고정 문장보다 작은 상한
+    (cpg-b) _no_drawing 더한 낱말 19경우(결과 고정·더한 낱말 0)·지우면 안 되는 낱말·더한 낱말이 없으면 107 전 구현과 같음(외모 문장 표본)·
+            look_sentence·prompt_look 경로
+    (cpg-c) 설정·배선: VNEW_CAST_PHOTO_CHECK(_bool, 기본 true, 하위 프로세스 6값)·VNEW_CAST_PHOTO_CHECK_MODEL(기본 = PEOPLE_COUNT_MODEL·
+            덮어쓰기·빈 값), 템플릿(VNEW_BL_LOOK 바로 뒤·주석·모델 키 없음)·base(되돌리기 주석)·PARITY_ENV_KEYS·config.<target>.env 그대로·
+            render dev/prod true·+false
+    (cpg-d) _photo_check: 질문 글·사진(긴 변 ≤1024, 작은 사진은 그대로)·도구 emit_photo_check 스키마·모델 설정·where·max_tokens,
+            응답 10꼴(bool·글 true/false·모르는 style → other·photo 없음·"maybe"·숫자·dict 아님 → None), 모델 오류·깨진 사진 → None·경고(비밀 없음)
+    (cpg-e) run_draw(가짜 fal·가짜 검사 LLM·메모리 S3·가짜 원장): 실사 → 후보 1·원장 1·제출 1, 그림체 → 실사 → 후보 1·원장 2·제출 2(같은 본문),
+            그림체 → 그림체 → NotPhoto 문구·원장 2·저장 0·failed, 검사 오류·모양 틀림 → 후보로 넣음·경고, 그림체 → 검사 오류, 글 "false",
+            두 칸(한 칸 그림체 → 그림체 + 다른 칸 실사) → 다른 칸 그대로, 버린 사진은 S3 put 0, 원장 키·필드, 로그 꼴·수준
+    (cpg-f) 재시작·상태 기계: 다시 제출한 칸(submitted·redraws 1)을 reconcile → 세 번째 제출 0·NotPhoto, 다시 제출 대기(queued·redraws 1)를
+            reconcile → 중단 실패·제출 0, 900초 지남 → 시간 초과·제출 0·검사 0, 검사 중 claim 을 잃음 → 원장만(같은 키)·칸 그대로 → 이어받은
+            실행이 같은 요청을 다시 보고 다시 뽑기
+    (cpg-g) 끔: 검사 호출 0·그림체 사진도 후보·원장 1·칸 키 = 106·photo_check 로그 0, 두 칸
+    (cpg-h) 보기·라우트·화면: 켬 보기 = 끔 보기 + photoCheckNote(끝)·totalUsd 같음·캐스팅 끔 {enabled:false}, Flask 상세·뽑기 202·회차 문장 끝,
+            vnew.js 안내 줄(node 가짜 DOM: 뽑기 버튼 바로 뒤·작은 글씨 class·끔·빈 값이면 없음·위험한 글 글자 그대로·innerHTML 0)·CSS 12px·node --check
+    """
+    sys.path.insert(0, str(ROOT / "app"))
+    import copy as _copy  # noqa: PLC0415
+    import hashlib as _hashlib  # noqa: PLC0415
+    import importlib.util as _ilu  # noqa: PLC0415
+    import io as _io  # noqa: PLC0415
+    import json as _json  # noqa: PLC0415
+    import traceback as _tb  # noqa: PLC0415
+    from datetime import datetime as _dt, timedelta as _td, timezone as _tz  # noqa: PLC0415
+
+    from flask import Flask  # noqa: PLC0415
+    from PIL import Image as _Image  # noqa: PLC0415
+
+    from src import vnew  # noqa: PLC0415
+    from src.vnew import casting as castmod  # noqa: PLC0415
+    from src.vnew import characters as charmod  # noqa: PLC0415
+    from src.vnew import genre_bl as blmod  # noqa: PLC0415
+    from src.vnew import settings as vset  # noqa: PLC0415
+    from src.vnew.fx import strip_drawing_words  # noqa: PLC0415
+    from src.vpoc import fal as vpoc_fal  # noqa: PLC0415
+    from src.vpoc import llm as vpoc_llm  # noqa: PLC0415
+    from src.vpoc import settings as vpoc_settings  # noqa: PLC0415
+
+    bad: list[str] = []
+    seen: set[str] = set()
+    report: list[str] = []
+    owner = "tester"
+    fake_store = _FakeCharStore()
+    puts: list[tuple[str, bytes]] = []
+    store_put = fake_store.put_bytes
+
+    def put_bytes(key, body, content_type, *, bucket=""):
+        puts.append((key, body))
+        store_put(key, body, content_type, bucket=bucket)
+
+    fake_store.put_bytes = put_bytes
+    saved = {
+        "STORE": charmod.STORE, "cast_fal": castmod._fal_request, "cast_fetch": castmod._fetch_url,  # noqa: SLF001
+        "cast_spawn": castmod._spawn, "cast_sleep": castmod._sleep, "charge": castmod.vpoc_ledger.charge,  # noqa: SLF001
+        "converse": vpoc_llm._converse, "char_fal": charmod._fal_request, "vpoc_request": vpoc_fal._request,  # noqa: SLF001
+        "fal_key": vpoc_settings.FAL_KEY, "prompt_max": castmod.PROMPT_MAX, "look_max": castmod.LOOK_MAX,
+    }
+    stray: list[str] = []
+
+    def stray_call(name):
+        def blocked(*_a, **_k):
+            stray.append(name)
+            raise RuntimeError(f"쓰면 안 되는 호출: {name}")
+        return blocked
+
+    # ---- 가짜 fal: 제출마다 plan 에서 판정 이름을 꺼내 요청 id 에 붙인다. 결과 사진 색 = 그 판정 색.
+    plan: list[str] = []
+    by_rid: dict[str, str] = {}
+    made: list[str] = []
+    post_seq = {"n": 0}
+    fal_calls: list[tuple] = []
+
+    def fake_fal(method, url, payload=None):
+        fal_calls.append((method, url, _copy.deepcopy(payload)))
+        if method == "POST":
+            post_seq["n"] += 1
+            rid = f"cpg-{post_seq['n']}"
+            by_rid[rid] = plan.pop(0) if plan else "photo"
+            made.append(rid)
+            return {"request_id": rid}
+        rid = url.split("/requests/", 1)[1].split("/", 1)[0]
+        if url.endswith("/status"):
+            return {"status": "COMPLETED"}
+        return {"images": [{"url": f"https://fal.media/files/cpg/{rid}.png"}]}
+
+    photos: dict[str, bytes] = {}
+    for name, color in _CPG_COLORS.items():
+        buffer = _io.BytesIO()
+        _Image.new("RGB", (1920, 2560), color).save(buffer, format="JPEG")
+        photos[name] = buffer.getvalue()
+
+    def fake_fetch(url):
+        rid = url.rsplit("/", 1)[1].split(".", 1)[0]
+        return photos[by_rid.get(rid, "photo")]
+
+    def verdict_of(jpeg: bytes) -> tuple[str, tuple[int, int]]:
+        with _Image.open(_io.BytesIO(jpeg)) as image:
+            size = image.size
+            pixel = image.convert("RGB").getpixel((size[0] // 2, size[1] // 2))
+        name = min(_CPG_COLORS, key=lambda key: sum((a - b) ** 2 for a, b in zip(_CPG_COLORS[key], pixel)))
+        return name, size
+
+    llm_calls: list[dict] = []
+    steal_box = {"cid": "", "claim": ""}
+
+    def fake_converse(*, system_text, blocks, tool, max_tokens, where, model=""):
+        name, size = verdict_of(blocks[1]["image"]["source"]["bytes"])
+        llm_calls.append({"where": where, "model": model, "size": size, "verdict": name, "tool": _copy.deepcopy(tool),
+                          "maxTokens": max_tokens, "text": blocks[0].get("text"), "system": system_text,
+                          "keys": [sorted(block) for block in blocks], "format": blocks[1]["image"].get("format")})
+        usage = {"inputTokens": 1, "outputTokens": 1, "model": model}
+        if name == "error":
+            raise RuntimeError("ThrottlingException https://bedrock.example/x?X-Amz-Signature=SECRET key=test-fal-key")
+        if name == "bad":
+            return {"style": "photo"}, usage
+        if name == "anime":
+            return {"photo": "false", "style": "Anime"}, usage
+        if name == "steal" and steal_box["cid"]:
+            def take(data):
+                data["casting"]["claim"] = steal_box["claim"]
+            charmod.mutate_char(owner, steal_box["cid"], take)
+            steal_box["cid"] = ""
+        if name in ("drawing", "steal"):
+            return {"photo": False, "style": "webtoon"}, usage
+        return {"photo": True, "style": "photo"}, usage
+
+    ledger: list[dict] = []
+
+    def fake_charge(key, **kwargs):
+        ledger.append({"key": key, **kwargs})
+        return {"spentUsd": 0.0, "capUsd": None}
+
+    spawned: list[tuple] = []
+    sleeps: list[float] = []
+    analysis = {
+        "nameGuess": "건우", "descriptionKo": "30대 남성.",
+        "appearanceEn": "He is a tall, muscular Korean man in his 30s with short black hair and a stylized, manhwa-style sharp jaw.",
+        "styleEn": "Clean manhwa line art.", "baseOutfitEn": "A black suit with a white shirt.", "outfitEn": "",
+        "outfitLayersEn": [], "altOutfitsEn": [], "expressionsKo": [], "extraEn": "", "model": "m", "genderEn": "male",
+    }
+
+    def iso_ago(seconds: float) -> str:
+        return (_dt.now(_tz.utc) - _td(seconds=seconds)).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    def seed_char(cid, *, casting=None, extra=None):
+        char = charmod.new_char("건우")
+        char["id"] = cid
+        char["analysis"] = dict(analysis)
+        char["version"] = 1
+        char["status"] = "ready"
+        if casting is not None:
+            char["casting"] = casting
+        if extra is not None:
+            char["extraPromptKo"] = extra
+        charmod.save_char(owner, cid, char)
+        return char
+
+    def load_c(cid):
+        return charmod.load_char(owner, cid)[0]
+
+    def cand(rid: str) -> str:
+        return "k_" + _hashlib.sha256(rid.encode("utf-8")).hexdigest()[:10]
+
+    def blobs(cid):
+        return sorted(key for key in fake_store.blobs if key.startswith(f"users/{owner}/characters/{cid}/casting/"))
+
+    def posts():
+        return [call for call in fal_calls if call[0] == "POST"]
+
+    def keys():
+        return [call["key"] for call in ledger]
+
+    logs = _LogCapture()
+
+    def clear():
+        for box in (plan, made, fal_calls, ledger, llm_calls, spawned, puts, sleeps):
+            box.clear()
+        logs.clear()
+
+    def draw(cid, verdicts, *, count=1, extra=None):
+        seed_char(cid, extra=extra)
+        clear()
+        plan.extend(verdicts)
+        with _pin_vnew(VNEW_CASTING_COUNT=count):
+            castmod.start_draw(owner, cid, round(0.04 * count, 2))
+            castmod.run_draw(owner, cid, spawned[-1][2])
+        return load_c(cid)["casting"]
+
+    def state(slots, *, started, beat, claim="tok_old"):
+        return {"preset": "idol", "gender": "", "lookEn": "", "lookEdited": False, "status": "drawing", "error": "", "round": 1,
+                "usd": 0.04, "startedAt": started, "heartbeatAt": beat, "claim": claim, "claimedAt": started,
+                "prompt": castmod.cast_prompt("a Korean man", "idol", "male"), "slots": slots, "candidates": [], "history": [],
+                "chosen": ""}
+
+    def old_no_drawing(text) -> str:
+        """107 전 _no_drawing(casting.py) 을 그대로 다시 쓴 기준 식."""
+        out = re.sub(r"\b(?:web-?toons?|anime|manga|cartoons?|illustrat\w*|drawn)[- ]style\b", " ", str(text or ""), flags=re.IGNORECASE)
+        out = strip_drawing_words(out)
+        if re.search(r"web-?toon", out, re.IGNORECASE):
+            out = re.sub(r"[\w-]*web-?toon[\w-]*", " ", out, flags=re.IGNORECASE)
+            out = strip_drawing_words(out)
+        return out
+
+    model = vset.VNEW_CASTING_MODEL
+    tail_eyes = ", with dark brown eyes."
+    try:
+        charmod.STORE = fake_store
+        castmod._fal_request = fake_fal  # noqa: SLF001
+        castmod._fetch_url = fake_fetch  # noqa: SLF001
+        castmod._spawn = lambda o, c, t: spawned.append((o, c, t))  # noqa: SLF001
+        castmod._sleep = sleeps.append  # noqa: SLF001
+        castmod.vpoc_ledger.charge = fake_charge
+        vpoc_llm._converse = fake_converse  # noqa: SLF001
+        charmod._fal_request = stray_call("characters._fal_request")  # noqa: SLF001
+        vpoc_fal._request = stray_call("vpoc.fal._request")  # noqa: SLF001
+        vpoc_settings.FAL_KEY = "test-fal-key"
+        with logs, _pin_vnew(VNEW_CASTING=True, VNEW_CAST_PHOTO_CHECK=True, VNEW_BL_LOOK=True):
+            # ================= (cpg-a) 사진 고정 문장 =================
+            anchor_m = _cpg_anchor("male")
+            if castmod.PHOTO_ANCHOR != _CPG_ANCHOR or "webtoon" in _CPG_ANCHOR.lower() or "manga" in _CPG_ANCHOR.lower() \
+                    or len(anchor_m) > 160 or not _CPG_ANCHOR.endswith(".") \
+                    or [castmod.photo_anchor(g) for g in ("male", "female", "unknown", "", None, "robot")] \
+                    != [_cpg_anchor(g) for g in ("male", "female", "unknown", "unknown", "unknown", "unknown")]:
+                bad.append(f"(cpg-a) 사진 고정 문장이 설계(D1)와 다릅니다: {castmod.PHOTO_ANCHOR!r}")
+            looks_a = ["", _BL_LOOK_30S, "a Korean woman in her late 20s with long dyed ash-blonde wavy hair", "a slim Korean person in their 30s",
+                       ("very long hair " * 400).strip(), "a stylized webtoon man drawn in a clean manhwa style with short black hair"]
+            types_a = ["", "ttokdae_gong", ["musim_gong", "ttokdae_gong"]]
+            count_a = 0
+            max_a = 0
+            for preset in ("idol", "real"):
+                for gender in ("male", "female", "unknown"):
+                    for look in looks_a:
+                        for bl_value in types_a:
+                            text, sentence = castmod._cast_text(look, preset, gender, bl_value)  # noqa: SLF001
+                            count_a += 1
+                            max_a = max(max_a, len(text))
+                            forced = bool(bl_value) and gender == "unknown"
+                            g_eff = "male" if forced else gender
+                            base_look = castmod.prompt_look(look, g_eff)
+                            if forced:
+                                base_look = castmod._sub_words(base_look, castmod._NEUTRAL_TO_MALE)  # noqa: SLF001
+                            base_look = base_look or f"a Korean {castmod._WORDS[g_eff]['noun']}"  # noqa: SLF001
+                            head = f"{castmod.base_text(preset, g_eff)} {castmod._WORDS[g_eff]['subj']} {base_look}{tail_eyes}"  # noqa: SLF001
+                            anchor_g = _cpg_anchor(g_eff)
+                            want = f"{head} {sentence} {anchor_g}" if sentence else f"{head} {anchor_g}"
+                            problems = []
+                            if text != want or not text.endswith(" " + anchor_g) or text.count(anchor_g) != 1:
+                                problems.append(f"문장 = 107 전 식 + 고정 문장이 아님 {text[-200:]!r}")
+                            if len(text) > 1500 or "\n" in text or re.search(r"webtoon|manhwa|\bdrawn\b", text, re.IGNORECASE):
+                                problems.append(f"길이·줄바꿈·그림 낱말 {len(text)}")
+                            if bool(bl_value) != bool(sentence) or castmod.cast_prompt(look, preset, gender, bl_value) != text:
+                                problems.append("참고 문장 유무·cast_prompt 가 다름")
+                            with _pin_vnew(VNEW_CAST_PHOTO_CHECK=False):
+                                if castmod.cast_prompt(look, preset, gender, bl_value) != text:
+                                    problems.append("설정 끔에서 문장이 다름(고정 문장은 늘 붙어야 함)")
+                            if problems:
+                                bad.append(f"(cpg-a) {preset}·{gender}·{str(bl_value)[:30]}·{look[:30]!r}: {problems}")
+            # 운영 상한(1500)에서는 참고 문장을 줄이지 않는다: 유형 144쌍 × 프리셋 2 × 성별 3, 300자 외모(+ strands)
+            castmod.PROMPT_MAX = 10 ** 6
+            full_hints = {(a, b, p, g): castmod._cast_text("a Korean man with dyed " + "x" * 300, p, g, [a, b])[1]  # noqa: SLF001
+                          for a in blmod.TYPES for b in blmod.TYPES for p in ("idol", "real") for g in ("male", "female", "unknown")}
+            castmod.PROMPT_MAX = saved["prompt_max"]
+            prod_max = 0
+            for (a, b, p, g), hint in full_hints.items():
+                text, sentence = castmod._cast_text("a Korean man with dyed " + "x" * 300, p, g, [a, b])  # noqa: SLF001
+                prod_max = max(prod_max, len(text))
+                if sentence != hint or not text.endswith(" " + _cpg_anchor("female" if g == "female" else "male")) or len(text) > 1500:
+                    bad.append(f"(cpg-a) 운영 상한에서 참고 문장이 줄었거나 고정 문장이 없습니다: {a}+{b}·{p}·{g} {len(text)}")
+                    break
+            # 긴 외모: LOOK_MAX 를 늘려 실제 상한 1500 을 넘긴다 → 참고 문장이 먼저 빠지고 외모를 단어 경계에서 줄인다
+            long_look = "a Korean man in his 30s with " + ", ".join(f"feature{n} detail" for n in range(220))
+            try:
+                castmod.LOOK_MAX = 3000
+                long_out = [castmod._cast_text(long_look, "idol", "male", value) for value in ("", "ttokdae_gong")]  # noqa: SLF001
+                long_pl = castmod.prompt_look(long_look, "male")
+            finally:
+                castmod.LOOK_MAX = saved["look_max"]
+            head_idol = castmod.base_text("idol", "male") + " He is "
+            for text, sentence in long_out:
+                look_part = text[len(head_idol):-len(tail_eyes + " " + anchor_m)]
+                if len(text) > 1500 or len(text) < 1500 - 30 or sentence or "He has" in text \
+                        or not text.startswith(head_idol + "a Korean man in his 30s with feature0 detail") \
+                        or not text.endswith(tail_eyes + " " + anchor_m) or not long_pl.startswith(look_part) \
+                        or long_pl[len(look_part):len(look_part) + 1] not in (" ", ",") or look_part.endswith((",", " with", " and")):
+                    bad.append(f"(cpg-a) 1500자를 넘는 긴 외모에서 끝 문장·줄이는 순서가 다릅니다: {len(text)} {text[-180:]!r}")
+            # PROMPT_MAX 줄이기(두 프리셋): (1) 조각 하나 빠짐 (2) 참고 문장 없음 (3) 외모 단어 경계 (4) 앞에서 자름 (5) 고정 문장보다 작음
+            shrink = {}
+            for preset in ("idol", "real"):
+                base = castmod.base_text(preset, "male")
+                head = f"{base} He is {_BL_LOOK_30S}{tail_eyes}"
+                full_sentence = castmod._cast_text(_BL_LOOK_30S, preset, "male", "ttokdae_gong")[1]  # noqa: SLF001
+                limits = [len(head) + 1 + len(full_sentence) + 1 + len(anchor_m) - 1, len(head) + 1 + len(anchor_m),
+                          len(head) + 1 + len(anchor_m) - 20, 300, 100]
+                got_s = []
+                try:
+                    for limit in limits:
+                        castmod.PROMPT_MAX = limit
+                        got_s.append(castmod._cast_text(_BL_LOOK_30S, preset, "male", "ttokdae_gong"))  # noqa: SLF001
+                finally:
+                    castmod.PROMPT_MAX = saved["prompt_max"]
+                one, none, clipped, tiny, small = got_s
+                pieces = blmod.hint_pieces(["ttokdae_gong"], _BL_LOOK_30S)
+                problems = []
+                if one[1] != castmod._hint_sentence(pieces[:-1], "male") or one[0] != f"{head} {one[1]} {anchor_m}" \
+                        or len(one[0]) > limits[0]:  # noqa: SLF001
+                    problems.append(f"(1) 조각 하나 빼기 {one[1]!r}")
+                if none != (f"{head} {anchor_m}", ""):
+                    problems.append(f"(2) 참고 문장 빼기 {none[0][-160:]!r}")
+                if clipped != (f"{base} He is a Korean man in his 30s{tail_eyes} {anchor_m}", "") or len(clipped[0]) > limits[2]:
+                    problems.append(f"(3) 외모 단어 경계 {clipped[0][-200:]!r}")
+                if tiny[1] or not tiny[0].endswith(" " + anchor_m) or len(tiny[0]) > 300 or not tiny[0].startswith(base[:150]) \
+                        or tiny[0][: -len(anchor_m) - 1] != base[: 300 - len(anchor_m) - 1].rstrip():
+                    problems.append(f"(4) 앞에서 자르기 {len(tiny[0])} {tiny[0][:60]!r}")
+                if small != (anchor_m[:100], ""):
+                    problems.append(f"(5) 고정 문장보다 작은 상한 {small!r}")
+                if problems:
+                    bad.append(f"(cpg-a) {preset} PROMPT_MAX 줄이기: {problems}")
+                shrink[preset] = [len(item[0]) for item in got_s]
+            if castmod.PROMPT_MAX != 1500 or castmod.LOOK_MAX != 300:
+                bad.append("(cpg-a) PROMPT_MAX·LOOK_MAX 가 돌아오지 않았습니다")
+            report.append(f"cpg-a: {count_a}문장(최대 {max_a}자) · 운영 최대 {prod_max}자(유형 {len(full_hints) // 6}쌍 × 프리셋 2 × 성별 3) · "
+                          f"긴 외모 {[len(t) for t, _s in long_out]}자 · 줄이기 {shrink}")
+            seen.add("cpg-a")
+
+            # ================= (cpg-b) _no_drawing 에 더한 낱말 =================
+            for text, want in _CPG_STYLE_CASES:
+                got = castmod._no_drawing(text)  # noqa: SLF001
+                if got != want or _CPG_ADDED_WORDS.search(got):
+                    bad.append(f"(cpg-b) _no_drawing({text!r}) = {got!r} != {want!r}")
+            if castmod._no_drawing(_CPG_KEEP) != _CPG_KEEP or old_no_drawing(_CPG_KEEP) != _CPG_KEEP:  # noqa: SLF001
+                bad.append(f"(cpg-b) 지우면 안 되는 낱말을 지웠습니다: {castmod._no_drawing(_CPG_KEEP)!r}")  # noqa: SLF001
+            samples = [_CPG_KEEP, "He is a webtoon male idol; his WEBTOON-style hair, a webtoonish look, Web-toon eyes, drawn in anime style",
+                       "A manga-style woman drawn with blue eyes and pink hair.", "line\nRULES: webtoon\x00 tail " + "w" * 400]
+            for value in _CAST_LOOK_FEEDBACK.values():
+                samples += [value[0], value[3], value[4]]
+            for args, want in _CAST_LOOK_RULES.values():
+                samples += [item for item in args if isinstance(item, str)] + [want]
+            same = 0
+            for sample in samples:
+                if _CPG_ADDED_WORDS.search(sample):
+                    continue
+                same += 1
+                if castmod._no_drawing(sample) != old_no_drawing(sample):  # noqa: SLF001
+                    bad.append(f"(cpg-b) 더한 낱말이 없는데 107 전과 결과가 다릅니다: {sample[:80]!r}")
+            look_b = castmod.look_sentence(analysis["appearanceEn"], analysis["descriptionKo"], "male", analysis["baseOutfitEn"])
+            look_b2 = castmod.look_sentence("A stylized young Korean man in his 30s with short black hair, drawn in a clean manhwa style.", "",
+                                            "male", "A black suit with line art details.")
+            prompt_b = castmod.prompt_look("a semi-realistic Korean man with dyed blue hair", "male")
+            if look_b != "a tall, muscular Korean man in his 30s with short black hair and a sharp jaw, wearing a black suit with a white shirt" \
+                    or look_b2 != "a Korean man in his 30s with short black hair, wearing a black suit with details" \
+                    or prompt_b != "a Korean man with dyed blue hair with realistic hair strands":
+                bad.append(f"(cpg-b) look_sentence·prompt_look 경로의 그림체 낱말 제거가 다릅니다: {look_b!r} {look_b2!r} {prompt_b!r}")
+            report.append(f"cpg-b: 더한 낱말 {len(_CPG_STYLE_CASES)}경우 · 107 전과 같음 {same}표본")
+            seen.add("cpg-b")
+
+            # ================= (cpg-c) 설정·배선 =================
+            settings_text = (APP_SRC / "vnew" / "settings.py").read_text(encoding="utf-8")
+            s_lines = settings_text.splitlines()
+            s_at = next((i for i, line in enumerate(s_lines) if line == 'VNEW_CAST_PHOTO_CHECK = _bool("VNEW_CAST_PHOTO_CHECK", True)'), -1)
+            if settings_text.count("\nVNEW_CAST_PHOTO_CHECK = ") != 1 or s_at < 4 \
+                    or any(not line.startswith("#") for line in s_lines[s_at - 4:s_at]) or "false" not in " ".join(s_lines[s_at - 4:s_at]) \
+                    or s_lines[s_at - 5] != 'VNEW_BL_LOOK = _bool("VNEW_BL_LOOK", True)' \
+                    or s_lines[s_at + 2] != 'VNEW_CAST_PHOTO_CHECK_MODEL = os.getenv("VNEW_CAST_PHOTO_CHECK_MODEL", "").strip() or PEOPLE_COUNT_MODEL':
+                bad.append("(cpg-c) settings.py 의 VNEW_CAST_PHOTO_CHECK(_bool 기본 true, 주석 4줄, VNEW_BL_LOOK 바로 뒤)·모델 줄이 다릅니다")
+            raws = ["", "false", "0", "true", "no", "abc"]
+            code = ("import importlib, json, os, sys; sys.path.insert(0, %r); from src.vnew import settings as s; out = []\n"
+                    "for raw in %r:\n"
+                    "    os.environ['VNEW_CAST_PHOTO_CHECK'] = raw\n"
+                    "    out.append(importlib.reload(s).VNEW_CAST_PHOTO_CHECK)\n"
+                    "os.environ.pop('VNEW_CAST_PHOTO_CHECK')\n"
+                    "models = [importlib.reload(s).VNEW_CAST_PHOTO_CHECK_MODEL == s.PEOPLE_COUNT_MODEL]\n"
+                    "os.environ['VNEW_CAST_PHOTO_CHECK_MODEL'] = 'model-x'\n"
+                    "models.append(importlib.reload(s).VNEW_CAST_PHOTO_CHECK_MODEL)\n"
+                    "os.environ['VNEW_CAST_PHOTO_CHECK_MODEL'] = '   '\n"
+                    "os.environ['VNEW_PEOPLE_COUNT_MODEL'] = 'people-y'\n"
+                    "models.append(importlib.reload(s).VNEW_CAST_PHOTO_CHECK_MODEL)\n"
+                    "print(json.dumps([out, models]))\n") % (str(ROOT / "app"), raws)
+            env = {k: v for k, v in os.environ.items() if k not in ("VNEW_CAST_PHOTO_CHECK", "VNEW_CAST_PHOTO_CHECK_MODEL",
+                                                                     "VNEW_PEOPLE_COUNT_MODEL")}
+            env["PYTHONIOENCODING"] = "utf-8"
+            env["PYTHONDONTWRITEBYTECODE"] = "1"
+            result = subprocess.run([sys.executable, "-X", "utf8", "-c", code], capture_output=True, text=True, env=env, encoding="utf-8")
+            probe = _json.loads(result.stdout.strip().splitlines()[-1]) if result.returncode == 0 else result.stderr[-300:]
+            if probe != [[True, False, False, True, False, False], [True, "model-x", "people-y"]]:
+                bad.append(f"(cpg-c) 설정 읽기(없음·false·0·true·no·글자 / 모델 기본·덮어쓰기·빈 값)가 다릅니다: {probe}")
+            if vset.VNEW_CAST_PHOTO_CHECK_MODEL != vset.PEOPLE_COUNT_MODEL and not os.getenv("VNEW_CAST_PHOTO_CHECK_MODEL"):
+                bad.append("(cpg-c) 검사 모델 기본값이 그림 1장 검사 모델(PEOPLE_COUNT_MODEL)과 다릅니다")
+            key = "VNEW_CAST_PHOTO_CHECK"
+            template_path = ROOT / "k8s" / "workloads.yaml.tmpl"
+            example_path = ROOT / "deploy" / "config.env.example"
+            template = template_path.read_text(encoding="utf-8")
+            example = example_path.read_text(encoding="utf-8")
+            names = re.findall(r"^\s*-\s+name:\s+(\S+)\s*$", template, re.M)
+            at = names.index("VNEW_BL_LOOK") if "VNEW_BL_LOOK" in names else -1
+            pair = re.findall(r"^\s*-\s+name:\s+VNEW_CAST_PHOTO_CHECK\s*\n\s*value:\s*\"\$\{VNEW_CAST_PHOTO_CHECK\}\"\s*$", template, re.M)
+            t_lines = template.splitlines()
+            t_at = next((i for i, line in enumerate(t_lines) if line.strip() == f"- name: {key}"), -1)
+            t_note = t_lines[t_at - 2:t_at] if t_at >= 2 else []
+            if len(pair) != 1 or template.count("${" + key + "}") != 1 or at < 0 or names[at + 1:at + 2] != [key] \
+                    or "VNEW_CAST_PHOTO_CHECK_MODEL" in names or "${VNEW_CAST_PHOTO_CHECK_MODEL}" in template \
+                    or len(t_note) != 2 or any(not line.lstrip().startswith("#") for line in t_note) \
+                    or t_lines[t_at - 3].strip() != 'value: "${VNEW_BL_LOOK}"':
+                bad.append("(cpg-c) 템플릿 앱 env 에 VNEW_CAST_PHOTO_CHECK 한 쌍(VNEW_BL_LOOK 바로 뒤, 주석 2줄, 모델 키 없음)이 없습니다")
+            e_lines = example.splitlines()
+            e_prev = next((i for i, line in enumerate(e_lines) if line == "VNEW_BL_LOOK=true"), -1)
+            e_at = next((i for i, line in enumerate(e_lines) if line.startswith(f"{key}=")), -1)
+            between = e_lines[e_prev + 1:e_at] if 0 <= e_prev < e_at else []
+            if e_at < 0 or e_lines[e_at] != f"{key}=true" or example.count(f"\n{key}=") != 1 or not between \
+                    or any(not line.startswith("#") for line in between) or f"{key}=false" not in "\n".join(between) \
+                    or re.search(r"^VNEW_CAST_PHOTO_CHECK_MODEL=", example, re.M):
+                bad.append("(cpg-c) config.env.example 에 VNEW_BL_LOOK 바로 뒤 true·되돌리기 주석이 없거나 모델 키 줄이 있습니다")
+            if key not in PARITY_ENV_KEYS or PARITY_ENV_KEYS.index(key) != PARITY_ENV_KEYS.index("VNEW_BL_LOOK") + 1:
+                bad.append("(cpg-c) PARITY_ENV_KEYS 에 VNEW_BL_LOOK 바로 뒤로 없습니다(rw-a~c 가 보지 않습니다)")
+            for target in ("dev", "prod"):
+                if re.search(r"^VNEW_CAST_PHOTO", (ROOT / "deploy" / f"config.{target}.env").read_text(encoding="utf-8"), re.M):
+                    bad.append(f"(cpg-c) config.{target}.env 를 바꿨습니다(이번 범위 밖)")
+            rendered = []
+            try:
+                spec = _ilu.spec_from_file_location("_cpg_deploy_render", ROOT / "deploy" / "render.py")
+                render = _ilu.module_from_spec(spec)
+                spec.loader.exec_module(render)  # type: ignore[union-attr]
+                base_cfg = render.load_config(example_path)
+                for target in ("dev", "prod"):
+                    overlay = render.load_config(ROOT / "deploy" / f"config.{target}.env")
+                    for extra in ({}, {key: "false"}):
+                        values = render.add_derived({**base_cfg, **overlay, **extra})
+                        text = render.render_text(template, values, str(template_path.relative_to(ROOT)))
+                        rendered.append(_rendered_env_values(text, key))
+            except (Exception, SystemExit) as exc:  # noqa: BLE001 — render.py 는 SystemExit 로 실패를 알린다.
+                rendered.append(f"렌더 실패: {type(exc).__name__}")
+            if rendered != [["true"], ["false"], ["true"], ["false"]]:
+                bad.append(f"(cpg-c) 렌더 dev·prod 값이 true(+false 오버레이 false)가 아닙니다: {rendered}")
+            seen.add("cpg-c")
+
+            # ================= (cpg-d) _photo_check 단위 =================
+            llm_calls.clear()
+            stored = castmod._to_jpeg(photos["photo"])  # noqa: SLF001 — 저장 JPEG 1152x1536
+            small = _tiny_jpeg(600, 800)
+            with _pin_vnew(VNEW_CAST_PHOTO_CHECK_MODEL="model-x"):
+                got_d = castmod._photo_check(stored)  # noqa: SLF001
+            call_d = llm_calls[-1] if llm_calls else {}
+            tool_d = call_d.get("tool") or {}
+            schema_d = (tool_d.get("inputSchema") or {}).get("json") or {}
+            if got_d != {"photo": True, "style": "photo"} or call_d.get("where") != "vnew.cast_photo_check" or call_d.get("model") != "model-x" \
+                    or call_d.get("size") != (768, 1024) or call_d.get("maxTokens") != 400 or tool_d.get("name") != "emit_photo_check" \
+                    or schema_d.get("properties") != {"photo": {"type": "boolean"}, "style": {"type": "string", "enum": [
+                        "photo", "illustration", "webtoon", "anime", "cartoon", "painting", "3d-render", "other"]}} \
+                    or schema_d.get("required") != ["photo", "style"] or call_d.get("keys") != [["text"], ["image"]] \
+                    or call_d.get("format") != "jpeg" or "real photograph of a real person" not in (call_d.get("text") or "") \
+                    or "drawing / illustration / webtoon / anime / 3D render" not in (call_d.get("text") or "") \
+                    or "emit_photo_check" not in (call_d.get("system") or ""):
+                bad.append(f"(cpg-d) 검사 호출(질문·사진 크기·도구·모델·where·max_tokens)이 다릅니다: {got_d} "
+                           f"{ {k: v for k, v in call_d.items() if k not in ('tool', 'system')} }")
+            if castmod._check_jpeg(small) is not small:  # noqa: SLF001
+                bad.append("(cpg-d) 긴 변 1024 이하 사진을 다시 인코딩했습니다")
+            variants = [
+                ({"photo": True, "style": "photo"}, {"photo": True, "style": "photo"}),
+                ({"photo": "false", "style": " Webtoon "}, {"photo": False, "style": "webtoon"}),
+                ({"photo": " TRUE ", "style": "3d-render"}, {"photo": True, "style": "3d-render"}),
+                ({"photo": False, "style": "manhwa"}, {"photo": False, "style": "other"}),
+                ({"photo": False}, {"photo": False, "style": "other"}),
+                ({"style": "photo"}, None), ({"photo": "maybe", "style": "photo"}, None), ({"photo": 1, "style": "photo"}, None),
+                (["photo"], None), (None, None),
+            ]
+            got_v = []
+            for payload, _want in variants:
+                vpoc_llm._converse = lambda payload=payload, **_kw: (payload, {})  # noqa: SLF001
+                got_v.append(castmod._photo_check(small))  # noqa: SLF001
+            vpoc_llm._converse = fake_converse  # noqa: SLF001
+            if got_v != [want for _payload, want in variants]:
+                bad.append(f"(cpg-d) 검사 응답 꼴 처리가 다릅니다: {got_v}")
+            logs.clear()
+            llm_calls.clear()
+            err_d = castmod._photo_check(castmod._to_jpeg(photos["error"]))  # noqa: SLF001
+            broken_d = castmod._photo_check(b"not a jpeg")  # noqa: SLF001
+            warn_d = logs.messages("vnew.cast.photo_check_failed err=", level=logging.WARNING)
+            if err_d is not None or broken_d is not None or len(warn_d) != 2 or len(llm_calls) != 1 \
+                    or any(word in " ".join(warn_d) for word in ("SECRET", "test-fal-key", "X-Amz-Signature")) \
+                    or "ThrottlingException" not in warn_d[0]:
+                bad.append(f"(cpg-d) 모델 오류·깨진 사진이 None·경고(비밀 없음)가 아닙니다: {err_d} {broken_d} {warn_d}")
+            if len(logs.messages("vnew.cast.photo_check_failed err=bad_payload")) != 0:
+                bad.append("(cpg-d) 오류 경고에 bad_payload 가 섞였습니다")
+            seen.add("cpg-d")
+
+            # ================= (cpg-e) run_draw: 결과 검사와 1회 다시 뽑기 =================
+            cid = "char_cpg_real"
+            cast = draw(cid, ["photo"])
+            want_slot = {"slot": 0, "status": "ready", "requestArn": f"fal/requests/{model}/{made[0]}", "candidateId": cand(made[0]),
+                         "error": ""}
+            if cast["status"] != "ready" or [item["id"] for item in cast["candidates"]] != [cand(made[0])] or cast["slots"] != [want_slot] \
+                    or keys() != [f"vnew-cast-{cid}-{cand(made[0])}"] or len(posts()) != 1 or len(llm_calls) != 1 or len(blobs(cid)) != 1 \
+                    or not cast["prompt"].endswith(" " + anchor_m) or posts()[0][2]["prompt"] != cast["prompt"] \
+                    or not logs.messages(f"vnew.cast.photo_check slot=0 photo=true style=photo redraw=0 cid={cid}", level=logging.INFO):
+                bad.append(f"(cpg-e) 실사 → 후보 1·원장 1·제출 1 이 아닙니다: {cast['slots']} {keys()} {len(posts())}")
+            cid = "char_cpg_redraw"
+            cast = draw(cid, ["drawing", "photo"])
+            p_e = posts()
+            want_slot = {"slot": 0, "status": "ready", "requestArn": f"fal/requests/{model}/{made[1]}" if len(made) > 1 else "",
+                         "candidateId": cand(made[1]) if len(made) > 1 else "", "error": "", "redraws": 1}
+            if cast["status"] != "ready" or cast["error"] or len(made) != 2 or [item["id"] for item in cast["candidates"]] != [cand(made[1])] \
+                    or cast["chosen"] != cand(made[1]) or cast["slots"] != [want_slot] or len(p_e) != 2 or p_e[0][1:] != p_e[1][1:] \
+                    or set(p_e[1][2]) != {"prompt", "num_images", "image_size"} or p_e[1][2]["prompt"] != cast["prompt"] \
+                    or keys() != [f"vnew-cast-{cid}-{cand(rid)}" for rid in made] or len(llm_calls) != 2 \
+                    or [call["verdict"] for call in llm_calls] != ["drawing", "photo"] \
+                    or any(call["usd"] != 0.04 or call["kind"] != "image" or call["model"] != model or call["units"] != 1
+                           or call["user"] != owner or call["project_id"] != cid or call["plan_id"] != "casting" for call in ledger) \
+                    or blobs(cid) != [charmod.casting_key(owner, cid, cand(made[1]))] or len(puts) != 1 \
+                    or any(verdict_of(body)[0] != "photo" for _key, body in puts) or sleeps != [5] \
+                    or not logs.messages(f"vnew.cast.photo_check slot=0 photo=false style=webtoon redraw=0 cid={cid}", level=logging.WARNING) \
+                    or not logs.messages(f"vnew.cast.photo_check slot=0 photo=true style=photo redraw=1 cid={cid}", level=logging.INFO) \
+                    or len(logs.messages(f"vnew.cast.redraw cid={cid} slot=0 redraws=1")) != 1:
+                bad.append(f"(cpg-e) 그림체 → 실사가 후보 1·원장 2·제출 2(같은 본문)가 아닙니다: {cast['slots']} {keys()} {len(p_e)} {sleeps}")
+            cid = "char_cpg_twice"
+            cast = draw(cid, ["drawing", "drawing"])
+            if cast["status"] != "failed" or cast["candidates"] or cast["chosen"] or len(posts()) != 2 or len(made) != 2 \
+                    or cast["slots"] != [{"slot": 0, "status": "failed", "requestArn": f"fal/requests/{model}/{made[1]}", "candidateId": "",
+                                          "error": _CPG_NOT_PHOTO, "redraws": 1}] \
+                    or castmod._MSG_NOT_PHOTO != _CPG_NOT_PHOTO or cast["error"] != f"사진 1장 중 1장을 만들지 못했습니다: {_CPG_NOT_PHOTO}" \
+                    or keys() != [f"vnew-cast-{cid}-{cand(rid)}" for rid in made] or puts or blobs(cid) or len(llm_calls) != 2 \
+                    or len(logs.messages(f"vnew.casting.slot_failed cid={cid} slot=0 kind=NotPhoto", level=logging.WARNING)) != 1 \
+                    or not logs.messages(f"vnew.cast.photo_check slot=0 photo=false style=webtoon redraw=1 cid={cid}"):  # noqa: SLF001
+                bad.append(f"(cpg-e) 그림체 → 그림체가 NotPhoto·원장 2·저장 0 이 아닙니다: {cast['status']} {cast['slots']} {keys()} {len(puts)}")
+            fail_open = {}
+            for name, verdicts in (("error", ["error"]), ("bad", ["bad"]), ("redrawError", ["drawing", "error"])):
+                cid = f"char_cpg_open_{name}"
+                cast = draw(cid, verdicts)
+                last = made[-1] if made else ""
+                redraw_flag = 1 if len(verdicts) > 1 else 0
+                fail_open[name] = (cast["status"], len(cast["candidates"]), len(keys()), len(posts()), len(blobs(cid)))
+                if cast["status"] != "ready" or [item["id"] for item in cast["candidates"]] != [cand(last)] or len(keys()) != len(verdicts) \
+                        or len(posts()) != len(verdicts) or blobs(cid) != [charmod.casting_key(owner, cid, cand(last))] \
+                        or any(verdict_of(body)[0] != verdicts[-1] for _key, body in puts) or len(puts) != 1 \
+                        or len(logs.messages(f"vnew.cast.photo_check slot=0 photo=none style=- redraw={redraw_flag} cid={cid}",
+                                             level=logging.WARNING)) != 1 \
+                        or len(logs.messages("vnew.cast.photo_check_failed err=", level=logging.WARNING)) != 1 \
+                        or (name == "bad") != bool(logs.messages("vnew.cast.photo_check_failed err=bad_payload")):
+                    bad.append(f"(cpg-e) 검사 {name} 이 사진을 버리지 않고 후보로 넣는(fail-open) 경고가 아닙니다: {fail_open[name]} {cast['slots']}")
+            cid = "char_cpg_anime"
+            cast = draw(cid, ["anime", "photo"])
+            if [item["id"] for item in cast["candidates"]] != [cand(made[1])] or len(keys()) != 2 or cast["slots"][0].get("redraws") != 1 \
+                    or not logs.messages(f"vnew.cast.photo_check slot=0 photo=false style=anime redraw=0 cid={cid}"):
+                bad.append(f"(cpg-e) 검사 글자 \"false\"(anime)가 그림체로 처리되지 않았습니다: {cast['slots']}")
+            # 두 칸: 칸 0 그림체 → 그림체(실패), 칸 1 실사 → 칸 1 그대로
+            cid = "char_cpg_two"
+            cast = draw(cid, ["drawing", "photo", "drawing"], count=2)
+            if len(made) != 3 or cast["status"] != "ready" or [item["id"] for item in cast["candidates"]] != [cand(made[1])] \
+                    or cast["slots"][1] != {"slot": 1, "status": "ready", "requestArn": f"fal/requests/{model}/{made[1]}",
+                                            "candidateId": cand(made[1]), "error": ""} \
+                    or cast["slots"][0] != {"slot": 0, "status": "failed", "requestArn": f"fal/requests/{model}/{made[2]}", "candidateId": "",
+                                            "error": _CPG_NOT_PHOTO, "redraws": 1} \
+                    or keys() != [f"vnew-cast-{cid}-{cand(rid)}" for rid in made] or len(posts()) != 3 \
+                    or blobs(cid) != [charmod.casting_key(owner, cid, cand(made[1]))] or cast["chosen"] != cand(made[1]) \
+                    or cast["error"] != f"사진 2장 중 1장을 만들지 못했습니다: {_CPG_NOT_PHOTO}":
+                bad.append(f"(cpg-e) 한 칸 그림체가 다른 칸에 영향을 줬습니다: {cast['slots']} {keys()}")
+            # 버린 그림체 사진은 S3 put 0: 위 모든 경우의 put 은 이번 경우만 보지만, 저장소 전체에서도 초록(그림체) 사진이 없다
+            green = [key for key, body in fake_store.blobs.items() if "/casting/" in key and verdict_of(body)[0] in ("drawing", "anime")]
+            if green:
+                bad.append(f"(cpg-e) 버린 그림체 사진이 S3 에 저장됐습니다: {green}")
+            report.append(f"cpg-e: 검사 실패 경우 {fail_open}")
+            seen.add("cpg-e")
+
+            # ================= (cpg-f) 재시작·상태 기계 =================
+            cid = "char_cpg_resume"
+            by_rid["cpg-old1"] = "drawing"
+            seed_char(cid, casting=state([{"slot": 0, "status": "submitted", "requestArn": f"fal/requests/{model}/cpg-old1", "candidateId": "",
+                                           "error": "", "redraws": 1}], started=iso_ago(660), beat=iso_ago(660)))
+            clear()
+            charmod.detail_view(owner, cid)
+            cast_r = load_c(cid)["casting"]
+            if spawned != [(owner, cid, cast_r["claim"])] or cast_r["claim"] == "tok_old" or cast_r["slots"][0]["status"] != "submitted" \
+                    or fal_calls:
+                bad.append(f"(cpg-f) 다시 제출한 칸의 이어하기가 새 claim·스레드 1·조회 0 이 아닙니다: {spawned} {cast_r['slots']}")
+            castmod.run_draw(owner, cid, cast_r["claim"])
+            cast_r2 = load_c(cid)["casting"]
+            if posts() or len(llm_calls) != 1 or keys() != [f"vnew-cast-{cid}-{cand('cpg-old1')}"] or puts or cast_r2["status"] != "failed" \
+                    or cast_r2["slots"][0].get("error") != _CPG_NOT_PHOTO or cast_r2["slots"][0].get("redraws") != 1:
+                bad.append(f"(cpg-f) 재시작 뒤 세 번째 제출이 생겼거나 NotPhoto 가 아닙니다: posts={len(posts())} {cast_r2['slots']}")
+            cid = "char_cpg_resume_q"
+            seed_char(cid, casting=state([{"slot": 0, "status": "queued", "requestArn": "", "candidateId": "", "error": "", "redraws": 1}],
+                                         started=iso_ago(660), beat=iso_ago(660)))
+            clear()
+            charmod.detail_view(owner, cid)
+            cast_q = load_c(cid)["casting"]
+            if spawned:
+                castmod.run_draw(owner, cid, spawned[-1][2])
+            cast_q2 = load_c(cid)["casting"]
+            if len(spawned) != 1 or cast_q["slots"][0]["status"] != "failed" or cast_q["slots"][0]["error"] != castmod._MSG_ABORTED \
+                    or posts() or llm_calls or ledger or cast_q2["status"] != "failed" or cast_q2["slots"][0].get("redraws") != 1:  # noqa: SLF001
+                bad.append(f"(cpg-f) 다시 제출 대기 칸의 이어하기가 중단 실패·제출 0 이 아닙니다: {cast_q2['slots']} {len(posts())}")
+            cid = "char_cpg_expired"
+            seed_char(cid, casting=state([{"slot": 0, "status": "queued", "requestArn": "", "candidateId": "", "error": "", "redraws": 1}],
+                                         started=iso_ago(1000), beat=iso_ago(5), claim="tok_t"))
+            clear()
+            castmod.run_draw(owner, cid, "tok_t")
+            cast_t = load_c(cid)["casting"]
+            if fal_calls or llm_calls or ledger or cast_t["status"] != "failed" or cast_t["slots"][0]["error"] != castmod._MSG_TIMEOUT:  # noqa: SLF001
+                bad.append(f"(cpg-f) 900초 지난 다시 뽑기 대기 칸이 시간 초과·제출 0 이 아닙니다: {cast_t['slots']}")
+            # 검사 중 다른 파드가 claim 을 가져감: 원장만 남고(같은 키) 칸은 그대로 → 이어받은 실행이 같은 요청을 다시 보고 다시 뽑는다
+            cid = "char_cpg_steal"
+            seed_char(cid)
+            clear()
+            plan.extend(["steal"])
+            with _pin_vnew(VNEW_CASTING_COUNT=1):
+                castmod.start_draw(owner, cid, 0.04)
+                steal_box.update(cid=cid, claim="tok_other")
+                castmod.run_draw(owner, cid, spawned[-1][2])
+                cast_s = load_c(cid)["casting"]
+                first_keys = keys()
+                by_rid[made[0]] = "drawing"
+                plan.extend(["photo"])
+                castmod.run_draw(owner, cid, "tok_other")
+            cast_s2 = load_c(cid)["casting"]
+            key0 = f"vnew-cast-{cid}-{cand(made[0])}"
+            if first_keys != [key0] or cast_s["claim"] != "tok_other" or cast_s["slots"][0]["status"] != "submitted" \
+                    or "redraws" in cast_s["slots"][0] or not logs.messages(f"vnew.casting.claim_lost cid={cid}") \
+                    or len(made) != 2 or keys() != [key0, key0, f"vnew-cast-{cid}-{cand(made[1])}"] or cast_s2["status"] != "ready" \
+                    or [item["id"] for item in cast_s2["candidates"]] != [cand(made[1])] or cast_s2["slots"][0].get("redraws") != 1 \
+                    or len(puts) != 1:
+                bad.append(f"(cpg-f) 검사 중 claim 을 잃은 경우가 원장 같은 키·칸 그대로·이어받아 다시 뽑기가 아닙니다: {first_keys} {keys()} "
+                           f"{cast_s2['slots']}")
+            seen.add("cpg-f")
+
+            # ================= (cpg-g) 끔 = 106 =================
+            with _pin_vnew(VNEW_CAST_PHOTO_CHECK=False):
+                cid = "char_cpg_off"
+                cast = draw(cid, ["drawing"])
+                off_one = (len(llm_calls), keys(), len(posts()), [set(slot) for slot in cast["slots"]])
+                if llm_calls or keys() != [f"vnew-cast-{cid}-{cand(made[0])}"] or len(posts()) != 1 or cast["status"] != "ready" \
+                        or [item["id"] for item in cast["candidates"]] != [cand(made[0])] or set(cast["slots"][0]) != _CPG_SLOT_KEYS_106 \
+                        or [verdict_of(body)[0] for _key, body in puts] != ["drawing"] or logs.messages("vnew.cast.") \
+                        or "photoCheckNote" in castmod.view(load_c(cid)):
+                    bad.append(f"(cpg-g) 끔에서 검사·다시 뽑기가 생겼습니다: {off_one}")
+                cid = "char_cpg_off_two"
+                cast = draw(cid, ["drawing", "drawing"], count=2)
+                if llm_calls or len(keys()) != 2 or len(posts()) != 2 or len(cast["candidates"]) != 2 \
+                        or any(set(slot) != _CPG_SLOT_KEYS_106 for slot in cast["slots"]):
+                    bad.append(f"(cpg-g) 끔 두 칸이 106 과 다릅니다: {cast['slots']} {len(llm_calls)}")
+            seen.add("cpg-g")
+
+            # ================= (cpg-h) 보기·라우트·화면 =================
+            cid = "char_cpg_view"
+            seed_char(cid)
+            v_on = castmod.view(load_c(cid))
+            with _pin_vnew(VNEW_CAST_PHOTO_CHECK=False):
+                v_off = castmod.view(load_c(cid))
+            with _pin_vnew(VNEW_CASTING=False):
+                v_dis = castmod.view(load_c(cid))
+            if list(v_on)[-1:] != ["photoCheckNote"] or v_on.get("photoCheckNote") != _CPG_NOTE \
+                    or {k: v for k, v in v_on.items() if k != "photoCheckNote"} != v_off or "photoCheckNote" in v_off \
+                    or v_on["totalUsd"] != castmod.total_usd() or v_off["totalUsd"] != castmod.total_usd() or v_dis != {"enabled": False} \
+                    or castmod._MSG_PHOTO_NOTE != _CPG_NOTE:  # noqa: SLF001
+                bad.append(f"(cpg-h) 보기 photoCheckNote(켬 끝·끔 없음)·totalUsd 가 다릅니다: {sorted(set(v_on) ^ set(v_off))}")
+            app = Flask("cpg_h")
+            app.register_blueprint(vnew.create_blueprint(vnew.VnewDependencies(require_auth=lambda handler: handler,
+                                                                               current_owner=lambda: owner)))
+            client = app.test_client()
+            got_h = []
+            for flag in (True, False):
+                with _pin_vnew(VNEW_CAST_PHOTO_CHECK=flag):
+                    resp = client.get(f"/api/vnew/characters/{cid}")
+                    got_h.append((resp.status_code, ((resp.get_json(silent=True) or {}).get("casting") or {}).get("photoCheckNote")))
+            clear()
+            resp = client.post(f"/api/vnew/characters/{cid}/casting/draw", json={"confirmUsd": castmod.total_usd()})
+            stored_h = load_c(cid)["casting"]
+            if got_h != [(200, _CPG_NOTE), (200, None)] or resp.status_code != 202 or len(spawned) != 1 \
+                    or not stored_h.get("prompt", "").endswith(tail_eyes + " " + anchor_m) \
+                    or ((resp.get_json(silent=True) or {}).get("casting") or {}).get("photoCheckNote") != _CPG_NOTE:
+                bad.append(f"(cpg-h) 라우트 상세·뽑기가 다릅니다: {got_h} {resp.status_code} {stored_h.get('prompt', '')[-80:]!r}")
+            vjs = (PUBLIC / "vnew.js").read_text(encoding="utf-8")
+            css = (PUBLIC / "vnew.css").read_text(encoding="utf-8")
+            css_rule = re.search(r"^\.vnew-casting-redraw-note \{\n(.*?)\n\}", css, re.M | re.S)
+            if not css_rule or "font-size: 12px;" not in css_rule.group(1):
+                bad.append("(cpg-h) vnew.css 에 .vnew-casting-redraw-note(12px)가 없습니다")
+            c_start, c_end = vjs.find("  /* ---- 실사 캐스팅(vnew-live-fx 묶음 B"), vjs.find("  /* ---- 추가 복장 섹션 ---- */")
+            el_start, el_end = vjs.find("  function el(tag, className, text)"), vjs.find("  function token()")
+            p_start, p_end = vjs.find("  function schedulePoll(host, detail)"), vjs.find("  function backRow(host)")
+            node = shutil.which("node")
+            if min(c_start, c_end, el_start, el_end, p_start, p_end) < 0:
+                bad.append("(cpg-h) vnew.js 캐스팅 구역·el·schedulePoll 을 찾지 못했습니다")
+            elif not node:
+                warn("node 가 없어 cpg-h 화면 실행을 건너뜁니다 (E16)")
+            else:
+                section_js = vjs[c_start:c_end]
+                cases = "var NOTE = " + _json.dumps(_CPG_NOTE, ensure_ascii=False) + ";\n" + _CPG_SCREEN_NODE_CASES
+                script = _CAST_SCREEN_NODE_HARNESS + vjs[el_start:el_end] + vjs[p_start:p_end] + section_js + cases
+                tmp_dir = tempfile.mkdtemp(prefix="cpg_h_")
+                try:
+                    path = Path(tmp_dir) / "cpg_screen.js"
+                    path.write_text(script, encoding="utf-8")
+                    result = subprocess.run([node, str(path)], capture_output=True, text=True, encoding="utf-8", timeout=60)
+                finally:
+                    shutil.rmtree(tmp_dir, ignore_errors=True)
+                node_got = _json.loads((result.stdout or "").strip().splitlines()[-1]) if result.returncode == 0 else {}
+                note_cls = "vnew-hint vnew-casting-redraw-note"
+                off_order = node_got.get("offOrder") or []
+                at_draw = off_order.index("primary-button vnew-casting-draw") if "primary-button vnew-casting-draw" in off_order else -1
+                want_order = off_order[:at_draw + 1] + [note_cls] + off_order[at_draw + 1:] if at_draw >= 0 else ["?"]
+                if result.returncode != 0 or node_got.get("on") != [["p", note_cls, _CPG_NOTE]] or node_got.get("off") != [] \
+                        or node_got.get("empty") != [] or node_got.get("evil") != [["p", note_cls, "<img src=x onerror=alert(1)>"]] \
+                        or node_got.get("drawing") != [["p", note_cls, _CPG_NOTE]] or node_got.get("onOrder") != want_order \
+                        or off_order[at_draw + 1:at_draw + 2] != ["login-error vnew-casting-msg"] \
+                        or node_got.get("draw") != ["실사 캐스팅 뽑기 (2장 · $0.08)"] * 2 or node_got.get("innerHTML") is not False:
+                    bad.append(f"(cpg-h) 화면 안내 줄이 다릅니다: rc={result.returncode} {(result.stderr or '')[:300]} {node_got}")
+                checked = subprocess.run([node, "--check", str(PUBLIC / "vnew.js")], capture_output=True, text=True, encoding="utf-8")
+                if checked.returncode != 0:
+                    bad.append(f"(cpg-h) node --check vnew.js 실패: {(checked.stderr or '').strip()[:300]}")
+            seen.add("cpg-h")
+    except Exception as exc:  # noqa: BLE001
+        bad.append(f"검사 중 예외: {type(exc).__name__} {str(exc)[:200]}\n{_tb.format_exc()[-1500:]}")
+    finally:
+        charmod.STORE = saved["STORE"]
+        castmod._fal_request = saved["cast_fal"]  # noqa: SLF001
+        castmod._fetch_url = saved["cast_fetch"]  # noqa: SLF001
+        castmod._spawn = saved["cast_spawn"]  # noqa: SLF001
+        castmod._sleep = saved["cast_sleep"]  # noqa: SLF001
+        castmod.vpoc_ledger.charge = saved["charge"]
+        vpoc_llm._converse = saved["converse"]  # noqa: SLF001
+        charmod._fal_request = saved["char_fal"]  # noqa: SLF001
+        vpoc_fal._request = saved["vpoc_request"]  # noqa: SLF001
+        vpoc_settings.FAL_KEY = saved["fal_key"]
+        castmod.PROMPT_MAX = saved["prompt_max"]
+        castmod.LOOK_MAX = saved["look_max"]
+        with castmod._CAST_LOCK:  # noqa: SLF001
+            castmod._CAST_RUNNING.clear()  # noqa: SLF001
+    if stray:
+        bad.append(f"쓰면 안 되는 호출: {sorted(set(stray))}")
+    expected = [f"cpg-{c}" for c in "abcdefgh"]
+    missing = [item for item in expected if item not in seen]
+    if missing and not bad:
+        bad.append(f"끝까지 돌지 않은 검사: {missing}")
+    if bad:
+        fail("지시서 107 실사 캐스팅 그림체 막기 검사 실패\n" + "\n".join(f"  {item}" for item in bad))
+    else:
+        ok(
+            "지시서 107 실사 캐스팅 그림체 막기 검사 (cpg-a)사진 고정 문장 끝·1500자 줄이는 순서·설정과 무관 (cpg-b)그림체 낱말 더함·107 전과 같음 "
+            "(cpg-c)VNEW_CAST_PHOTO_CHECK 배선·모델 기본 (cpg-d)_photo_check 호출·응답 꼴·fail-open (cpg-e)실사·그림체→실사·그림체→그림체·"
+            "검사 None·두 칸·S3 put 0·원장 (cpg-f)재시작 세 번째 제출 0·queued·900초·claim 잃음 (cpg-g)끔 = 106 (cpg-h)보기·라우트·화면 한 줄"
+            + "".join(f"\n       cpg: {line}" for line in report)
+        )
+
+
 # vnew-live-fx A(Claude 결정 9, 2026-10-30 검토): 새 기본값(VNEW_FX 켬)에서 기대값이 달라지는 기존 검사는 **부르는 줄에서**
 # 끔으로 고정한다(검사 본문·기대값·들여쓰기는 그대로). 이유:
 #   check_vnew_plan·check_vnew_locations — 켬이면 POST /conti 가 기호·분위기 채우기(가짜가 아닌 LLM)를 부른다.
@@ -31482,6 +32339,19 @@ def _run_3d_hunyuan(check) -> None:
 def _run_bl_look_off(check) -> None:
     """`check()` 를 VNEW_BL_LOOK=False 로 부르고 설정을 되돌린다."""
     with _pin_vnew(VNEW_BL_LOOK=False):
+        check()
+
+
+# 지시서 107(cast-photo-guard design D11): 새 기본값(VNEW_CAST_PHOTO_CHECK 켬)에서 기대값이 달라지는 기존 검사도 부르는 줄에서 끔으로
+# 고정한다(검사 본문·들여쓰기는 그대로. 끔 = 106 동작을 이 검사들이 그대로 본다). 이유:
+#   check_vnew_casting — cast-f~h 의 run_draw 가 결과 사진마다 검사 LLM 을 부른다((guard) 가 가짜가 아닌 LLM 호출을 잡는다),
+#                         cast-j 가 상세 casting 보기 키를 design §B.4 와 글자째 비교한다(켬이면 photoCheckNote 가 붙는다).
+#   check_vnew_bl_look — bl-g·bl-h 가 보기 키(끔 = 19개, 켬 = 지금 + blDetected·blHintsEn 이 끝)를 본다.
+#   check_vnew_char_fidelity — cf-b·cf-r 이 옛 캐릭터 상세 JSON(casting 보기 포함) sha256 을 구현 전 값과 비교한다.
+# 사진 고정 문장(요구 1)은 설정과 상관없이 붙으므로 위 검사의 문장 기대값은 107 에서 바꿨다(_CPG_ANCHOR). 켬 동작은 cpg-a~h 가 본다.
+def _run_cast_photo_off(check) -> None:
+    """`check()` 를 VNEW_CAST_PHOTO_CHECK=False 로 부르고 설정을 되돌린다."""
+    with _pin_vnew(VNEW_CAST_PHOTO_CHECK=False):
         check()
 
 
@@ -32095,14 +32965,15 @@ def main() -> int:
     check_vnew_fx()
     _run_char_fidelity_off(lambda: _run_casting_off(check_vnew_fx_prompt))
     check_vnew_fx_screen()
-    _run_char_fidelity_off(check_vnew_casting)
+    _run_cast_photo_off(lambda: _run_char_fidelity_off(check_vnew_casting))
     check_vnew_take_real()
     check_vnew_take_real_screen()
-    _run_3d_hunyuan(lambda: _run_bl_look_off(check_vnew_char_fidelity))
+    _run_cast_photo_off(lambda: _run_3d_hunyuan(lambda: _run_bl_look_off(check_vnew_char_fidelity)))
     check_vnew_3d_tripo()
     check_vnew_char_fidelity_screen()
     check_vnew_outfit_button()
-    check_vnew_bl_look()
+    _run_cast_photo_off(check_vnew_bl_look)
+    check_vnew_cast_photo_guard()
     check_pod_zones()
     print()
     if warnings:

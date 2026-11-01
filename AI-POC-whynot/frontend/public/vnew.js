@@ -1273,6 +1273,8 @@
     var drawBtn = el("button", "primary-button vnew-casting-draw", castingDrawLabel(price));
     drawBtn.type = "button";
     section.appendChild(drawBtn);
+    // 그림체 다시 뽑기 비용 안내(지시서 107). 서버가 실사 사진 검사를 켰을 때만 photoCheckNote 를 보낸다(작은 글씨 한 줄).
+    if (cast.photoCheckNote) section.appendChild(el("p", "vnew-hint vnew-casting-redraw-note", String(cast.photoCheckNote)));
     section.appendChild(message);
 
     function lookChanged() {

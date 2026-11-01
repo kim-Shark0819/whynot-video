@@ -1766,3 +1766,74 @@
   4. 105 남은 이슈 2(pod readiness gate 없음)·3(`docs/dev-migration/eip-quota-analysis.md` 없음)·5(CI에 PyYAML 없음 — pz-d·pz-g의 YAML 부분은 로컬에서만 돈다)는 그대로다. 105 남은 이슈 1(2a 노드 한 대)은 2c 노드 추가와 이 변경으로 풀렸다.
   5. `docs/구조분석.md:204`(2026-09-03 문서)의 "앱·프론트는 topologySpreadConstraints로 2a/2c 노드에 분산한다"는 그때 기준 글이라 고치지 않았다(범위 밖).
   6. 운영 반영 확인(Deployment마다 파드 영역, Pending 0, `/`·`/api/health` 200)은 배포 뒤 운영자가 한다(design D18, 계획만).
+
+
+## 2026-11-01
+
+### 지시서 107 — 실사 캐스팅에서 그림체(웹툰·일러스트) 결과 막기: 사진 고정 문장·그림체 낱말·결과 검사와 1회 다시 뽑기 `VNEW_CAST_PHOTO_CHECK` (Kiro, claude-opus-5.5)
+- **범위**: `.kiro/handoff/107-cast-photo-guard.md`. 스펙 `.kiro/specs/cast-photo-guard/`(requirements R1~R10·design D1~D11·tasks 1~7)를 쓰고 같은 실행에서 구현·검사까지 했다. 커밋·push 하지 않았다. git·aws·kubectl·네트워크·유료 API를 쓰지 않았다. 사용자 데이터는 읽지 않았다(지시서에 적힌 문장 조각만 썼다).
+- **먼저 한 일**: 바꿀 파일과 수정 금지 파일(`generate.py`·`genre_bl.py`·`config.*.env`·`.gitlab-ci.yml` 등 15개)의 시작 전 사본과 저장소 파일 목록(크기·mtime)을 저장소 밖(`%TEMP%\cpg107`)에 두었다. 시작 전 전체 검사는 전부 통과(ok 64줄, FAIL·WARN 0, 96초).
+- **사실(지시서)**: 2026-11-01 운영 실사 캐스팅(범건우, 아이돌풍, 떡대공) 1회에서 후보 2장 중 1장이 웹툰 일러스트처럼 나왔다. 캐스팅은 Seedream 4.5 t2i에 글만 보낸다(본문 3키, RB3.1). 사진 단서는 문장 앞(프리셋)에만 있고 뒤에 웹툰 분석에서 온 긴 외모·BL 문장이 온다.
+- **결정**(design)
+  - D1 사진 고정 문장: `A real photograph of a real {noun} taken with a camera; not a drawing, illustration, anime, cartoon, painting or 3D render.` `{noun}`은 성별 낱말 표의 명사(man·woman·person, BL 유형 + unknown은 male로 바꾼 뒤). 두 프리셋 모두 맨 끝(BL 참고 문장 뒤), 설정과 상관없이 늘. 지시서 예문과 다른 점 셋: "webtoon"을 뺐다(B1 규칙 "캐스팅 문장에 webtoon 없음"·cast-a, 막으려는 그림체 이름을 끝에 두면 그쪽으로 끌 수 있다), "painting"을 더했다(프리셋 "not a painting"과 같은 낱말, 반실사 디지털 페인팅이 흔한 실패 꼴), 명사를 성별에 맞췄다(예문의 "person"이면 남성 문장 끝이 성 중립이 된다 — steering genre-bl, 구현 중 bl-d가 잡았다).
+  - D2 외모 문장 그림체 낱말(`_no_drawing` 앞 단계, `fx.strip_drawing_words`는 그대로): manhwa·manhua·comic·comics·comic-book·chibi(각 "-style(d)" 꼴 포함)·art style·drawing style·cel-shaded/cel shading·line art/line-art/lineart·digital painting/art/artwork/illustration·stylized/stylised·semi-realistic·2D·flat-shaded/flat shading/flat colors/flat-colored·sketch/sketched/sketchy. 명사구가 구의 끝이면 앞 전치사구째 지우고("drawn in a clean manhwa style" → 없음, 낱말만 지우면 "in a clean"이 남았다), 지운 자리 "a, …"는 "a …"로. 더한 낱말이 없는 글은 107 전과 같다.
+  - D3 1500자: 예산 = 상한 − 고정 문장 몫. 넘치면 BL 참고 문장 조각(끝에서부터) → 외모 단어 경계(`_fit_cast_head`) 순. 프리셋·주어·눈 색·고정 문장은 남는다. 운영 최대 1,270자라 실제로는 줄지 않는다.
+  - D4~D6 검사: `casting._photo_check`(`characters.py`는 바꾸지 않았다). `vpoc.llm._converse` + 도구 `emit_photo_check {photo: bool, style: enum 8개}`, where `vnew.cast_photo_check`, max_tokens 400, 모델 `VNEW_CAST_PHOTO_CHECK_MODEL`(기본 = `VNEW_PEOPLE_COUNT_MODEL` 값, 지금 Fable 5.1, 코드 기본). 저장 JPEG(1536)를 1024로 줄여 보낸다(`_PHOTO_SEM` 안에서 디코드, LLM은 밖). photo는 bool·글 "true"/"false"만, style은 열거값만(로그에 그대로 남으므로). None이면 사진을 쓰고 경고(fail-open).
+  - D7 칸 흐름: 그림체 + `redraws` 0 → 원장 1건 → 칸을 queued(`requestArn ""`, `redraws` 1)로 되돌려 다음 순회의 기존 `_submit_slot`이 같은 회차 문장으로 제출(본문 3키 그대로). 그림체 + `redraws` 1 → 원장 1건 → 그 칸만 failed "실사 사진이 아니라 그림체로 나와 이 칸을 버렸습니다. 다시 뽑아 주세요."(kind NotPhoto). 버린 사진은 메모리에서만 쓰고 S3에 두지 않는다. 다시 뽑지 않은 칸에는 `redraws` 키가 없다(106 칸 키 그대로). `reconcile`·`_stale`·`_expired`는 그대로이고 다시 뽑기 대기 칸에도 같게 적용한다.
+  - D8 원장: 키 규칙 그대로 `vnew-cast-{cid}-{후보 id}`(요청 id sha256). 버린 사진도 같은 규칙으로 1건 → 원장 건수 = 결과 사진을 받은 fal 요청 수. 같은 요청은 재처리해도 1건. 상태를 바꾸기 전에 남긴다(claim을 잃어도 이어받은 실행이 같은 키로 남겨 이중 계상 없음). 10/30 char-fidelity "다시 그린 장도 원장"과 같은 뜻이고, `-retry` 접미사는 쓰지 않았다(같은 요청이 두 키로 남을 수 있다). 검사 LLM 비용은 기존 그림 검사처럼 원장에 없다.
+  - D9 안내 한 줄: 둔다. 확인받은 금액(`confirmUsd`) 밖에서 칸당 $0.04가 더해질 수 있어서다. 켬이면 `view()` 끝에 `photoCheckNote`, 화면은 뽑기 버튼 바로 아래 12px 한 줄. `totalUsd`·확인창 문구는 그대로.
+  - D11 설정: `VNEW_CAST_PHOTO_CHECK`(기본 true)를 settings·base(`VNEW_BL_LOOK` 바로 뒤, 되돌리기 주석)·템플릿 앱 env(같은 자리)·`PARITY_ENV_KEYS`에. 모델 키는 기존 캐스팅·검사 모델 키처럼 코드 기본이라 템플릿에 넣지 않고 주석에 적었다(템플릿에 넣으면 base에 모델 id를 글자로 적어야 해서 "그림 검사 모델을 따라간다"가 끊긴다). 진행 중 뽑기는 시작 때 읽은 값.
+- **검토한 대안**: fal 본문에 negative_prompt 등 더하기(RB3.1·cast-m을 깨고 스키마 확인 불가, 기각), 예문 그대로 "webtoon" 넣기(D1, 기각), 프리셋 앞에도 사진 문장(프리셋 바뀜, 기각), 검사를 `characters.py` 공용 함수로(범위가 커짐, 기각), 늘 2장 뽑아 고르기(비용 2배, 기각), `_poll_slot` 안에서 바로 다시 제출(제출 경로 둘, 기각), fail-closed(지시서와 반대, 기각), 원장 키 접미사(D8, 기각), 안내 없음·확인 금액 2배(D9, 기각), 1536 그대로 검사(토큰 약 2배, 기각).
+- **바꾼 것**
+  - `app/src/vnew/casting.py`: 상수 `PHOTO_ANCHOR`·`_STYLE_HEAD`·`_STYLE_PHRASE`·`_STYLE_WORDS`·`_ARTICLE_COMMA`·`_MSG_NOT_PHOTO`·`_MSG_PHOTO_NOTE`·`_REDRAW_MAX`·`_PHOTO_CHECK_MAX_TOKENS`·`_PHOTO_CHECK_MAX_PX`·`_PHOTO_STYLES`·`_PHOTO_TOOL`·`_PHOTO_SYSTEM`·`_PHOTO_PROMPT`, 새 함수 `photo_anchor`·`_fit_cast_head`·`_check_jpeg`·`_photo_check`·`_photo_passes`, 고친 함수 `_no_drawing`(앞 단계)·`_cast_text`(예산·고정 문장·외모 줄이기)·`cast_prompt`(docstring)·`view`(끝 `photoCheckNote`)·`_poll_slot`(키워드 `photo_check`)·`run_draw`(설정 1회 읽기), `vpoc.llm` import. 추가 199줄·지운 줄 14(모두 같은 자리에서 고쳐 쓴 줄).
+  - `app/src/vnew/settings.py`: `VNEW_CAST_PHOTO_CHECK`·`VNEW_CAST_PHOTO_CHECK_MODEL`(+7줄). `deploy/config.env.example`(+5줄), `k8s/workloads.yaml.tmpl`(+4줄). `frontend/public/vnew.js`(+2줄, `castingSection`), `vnew.css`(+6줄).
+  - `tools/check_vpoc.py`: 새 그룹 `check_vnew_cast_photo_guard`(cpg-a~h)와 상수 `_CPG_*`·`_cpg_anchor`·`_CPG_SCREEN_NODE_CASES`, `_run_cast_photo_off`, `PARITY_ENV_KEYS` 1개, `main()` 배선, 기존 기대값(아래). 추가 890줄·지운 줄 19(고쳐 쓴 줄), 지운 함수 정의 0.
+  - `.kiro/specs/cast-photo-guard/` 세 파일(새로), `docs/ANALYSIS.md`(머리 줄·§3.6 모듈 표·§3.6.1 B 보기 행·새 「실사 사진 검사·그림체 다시 뽑기」 절·§6.1.1·§7.1·§10.1), 이 항목.
+- **검사(어떤 검사가 무엇을 덮는지)**
+
+  | 검사 | 덮는 것 |
+  |---|---|
+  | cpg-a | `PHOTO_ANCHOR`·`photo_anchor`(성별 6값), `_cast_text`·`cast_prompt`: 두 프리셋 × 성별 3 × BL(없음·하나·둘) × 외모 6 = 108문장이 107 전 식(+ 참고 문장) + " " + 고정 문장(한 번)·≤1500·설정 켬/끔 같음, 운영 최대 1,270자(유형 144쌍 × 프리셋 2 × 성별 3, 참고 문장 줄지 않음), 긴 외모(`LOOK_MAX` 3000 → 1,495자: 참고 문장 빠짐·외모 단어 경계·눈 색·고정 문장 남음), `PROMPT_MAX` 줄이기 5경우(조각 하나·참고 문장 없음·외모 단어 경계·앞에서 자르기·고정 문장보다 작은 상한) — `_fit_cast_head` 세 분기 |
+  | cpg-b | `_no_drawing` 더한 낱말 19경우(결과 고정, `_STYLE_PHRASE`·`_STYLE_WORDS`·`_ARTICLE_COMMA` 분기), 남길 낱말 12개, 더한 낱말이 없는 표본 197개 = 107 전 구현(테스트 안 기준 식), `look_sentence`·`prompt_look` 경로 |
+  | cpg-c | settings 줄·주석·자리, 하위 프로세스 설정 읽기(없음·false·0·true·no·글자 / 모델 기본·덮어쓰기·빈 값 → `VNEW_PEOPLE_COUNT_MODEL`), 템플릿 한 쌍(`VNEW_BL_LOOK` 바로 뒤·주석 2줄·모델 키 없음), base(true·되돌리기 주석·모델 키 줄 없음), `PARITY_ENV_KEYS` 자리, `config.<target>.env` 그대로, render dev·prod true·+false |
+  | cpg-d | `_photo_check`·`_check_jpeg`: 질문 글·사진 768×1024·도구 이름·스키마·required·모델 설정·where·max_tokens, 1024 이하 사진은 같은 바이트, 응답 10꼴(bool·"false"·" TRUE "·모르는 style → other·style 없음·photo 없음·"maybe"·숫자·list·None), 모델 오류(비밀 없는 경고)·깨진 사진 → None |
+  | cpg-e | `run_draw`→`_poll_slot`→`_photo_passes`(가짜 fal·가짜 `_converse`가 받은 사진 색으로 판정·메모리 S3·가짜 원장): 실사(후보 1·원장 1·제출 1·칸 키 106), 그림체 → 실사(후보 1·원장 2·제출 2 같은 본문·`redraws` 1·쉼 5초 1번·S3 1장), 그림체 → 그림체(NotPhoto 문구·원장 2·S3 0·failed·오류 요약), 검사 오류·모양 틀림·그림체 → 오류(fail-open·경고 `photo=none`·`photo_check_failed`), 글 "false"(anime), 두 칸(다른 칸 그대로), 저장소 전체에 그림체 사진 0, 원장 필드, 로그 꼴·수준 |
+  | cpg-f | 재개: submitted·`redraws` 1을 `detail_view`→`reconcile`로 이어받음 → 제출 0(세 번째 제출 없음)·NotPhoto, queued·`redraws` 1 → 중단 실패·제출 0, 900초 → 시간 초과·조회 0·검사 0, 검사 중 claim을 잃음 → 원장 1건·칸 그대로·`claim_lost` → 이어받은 실행이 같은 요청 → 같은 키 원장·다시 뽑기 |
+  | cpg-g | 끔: 검사 호출 0·그림체 사진도 후보·원장 1·칸 키 = 106·`vnew.cast.` 로그 0·보기에 `photoCheckNote` 없음, 두 칸 |
+  | cpg-h | `view` 켬 = 끔 + `photoCheckNote`(끝)·`totalUsd` 같음·캐스팅 끔 `{enabled:false}`, Flask 상세(켬·끔)·뽑기 202·회차 문장 끝, `vnew.js` `castingSection` node 가짜 DOM(뽑기 버튼 바로 뒤·class·끔/빈 값 없음·`<img onerror>` 글자 그대로·뽑는 중·innerHTML 0), CSS 12px, `node --check` |
+
+- **바꾼 기존 검사 기대값(사진 고정 문장이 늘 붙어서, 요구 1)**: cast-a(male 전문, 84문장 끝 = 눈 색 + 고정 문장), cast-b(실제 분석 꼴 문장 끝), bl 기준 식 `old_prompt`를 `old_head` + `anchored`로 나눔, bl-c(male 전문), bl-d(조립 식·떡대공 전문), bl-e("다 빼도 넘침": 앞에서 자르기 → `… He is a Korean man, with dark brown eyes. <고정 문장>`), bl-f(회차 문장 2곳), bl-h·bl-i(문장 끝 = 참고 문장 + 고정 문장), bl-l(두 유형 전문). 모두 12곳이고 다른 기대값은 그대로다.
+- **끔 고정한 기존 검사(새 기본값 켬에서 기대값이 달라짐, 본문·기대값 그대로)**: `check_vnew_casting`(cast-f~h `run_draw`가 검사 LLM을 부름·cast-j 보기 키), `check_vnew_bl_look`(bl-g·bl-h 보기 키), `check_vnew_char_fidelity`(cf-b·cf-r 옛 상세 sha256)를 `_run_cast_photo_off`로 감쌌다. 이 세 검사가 끔 = 106을 본다.
+- **확인**
+  - `python -X utf8 tools/check_vpoc.py` 전부 통과: ok 65줄, FAIL·WARN 0, 100초. 기존 63줄은 시작 전 출력과 글자까지 같고, rw 줄만 "템플릿 env 29개 → 30개"로 바뀌었다. cpg 단독 3.4~4.4초.
+  - `node --check frontend/public/vnew.js` 통과(cpg-h·cast-l·`check_js`).
+  - 커버리지(coverage 7.17, 전체 검사기 `coverage run --source=app/src`, 시작 전 사본과 difflib): 바뀐 서버 실행문 89개 중 89개(100%) — `casting.py` 87/87, `settings.py` 2/2.
+  - 변형 검사 42개(저장소 밖 임시 트리, 변형마다 원본으로 되돌리고 한 군데만 바꿔 cpg·관련 cast·bl·rw 실행): 고정 문장 9(없음·앞에·예산·참고 문장 먼저·앞에서 자름·눈 색·명사·BL 성별·webtoon), 그림체 낱말 4(단계 없음·명사구·관사 쉼표·stylish), 검사·다시 뽑기·원장 18(원장 없음·2번·0번·redraws 안 남김·fail-closed·S3 저장·설정 늘 켬/끔·참거짓·style·크기·모델·오류 → 실사·원장 키·같은 요청 다시 조회·실패 문구·로그 redraw·kind), 재개 1(reconcile가 대기 칸을 둠), 보기 2, 설정·배선 4, 화면 4(버튼 앞·innerHTML·늘 보임·CSS). 모두 잡혔다(놓친 것 0).
+  - 유료 호출 0: cpg는 fal 래퍼·`_fetch_url`·`vpoc.llm._converse`·원장을 가짜로, `characters._fal_request`·`vpoc.fal._request`를 막고 호출 0을 본다. 기존 검사의 Bedrock guard(`_guard_real_llm`)도 그대로 통과한다. 기존 `check_vnew_generate`·`check_vnew_shot_brief`의 무료 가격 조회 GET은 이번에 바꾸지 않았다.
+  - 줄 끝: 바뀐 파일·새 스펙 세 파일 모두 CR 0, BOM 없음(`config.prod.env`만 BOM, 바꾸지 않음). 이 항목을 붙일 때 편집 도구(insert)가 `WORKLOG.md` 전체를 CRLF로 바꿔 LF로 되돌렸다(원래 부분은 시작 전 사본과 바이트가 같고 끝에 71줄만 더해졌다). 공백만 바뀐 줄 0, 새 줄 끝 공백 0, 지운 함수 정의 0(AST). 시작 뒤 바뀐 저장소 파일은 위 파일과 실행 로그 `.kiro/handoff/logs/107.log`, 검사기의 `compileall`이 다시 쓴 `app/src/vnew/__pycache__/casting·settings.cpython-311.pyc`(원래 있던 파일, `.gitignore`)뿐이다. 새 파일은 스펙 세 개뿐이다. 수정 금지 파일은 바이트가 같다.
+- **3단계 리뷰**
+  - 보안
+    - 검사에 보내는 것은 고정 질문 글과 우리가 만든 결과 사진뿐이다(사용자 외모 문장·캐릭터 설명은 보내지 않는다). 사진은 기존 그림 검사와 같은 Bedrock 경로(Fable 5.1 broker)로 간다. 나쁜 그림이 검사를 속여도 결과는 107 전과 같다(fail-open).
+    - fal 본문은 다시 제출도 기존 `_submit_slot`이라 정확히 3키다(cpg-e가 두 본문이 같은지 본다, cast-m 그대로).
+    - 발견 1: 모델이 준 style 글을 로그에 그대로 쓰면 줄바꿈·임의 글이 들어갈 수 있다 → 열거값 8개로 묶고 모르는 값은 "other"(조치, cpg-d). 발견 2: 모델 예외 문구에 URL·키가 섞일 수 있다 → `error_gist`(URL 쿼리·data URI·fal 키 제거, 200자)(조치, cpg-d가 서명 쿼리·키가 없는지 본다).
+    - 버린 사진은 S3에 쓰지 않는다(cpg-e: put 0, 저장소 전체 그림체 사진 0). 화면 안내는 `textContent`(cpg-h).
+  - 성능(512Mi)
+    - 칸당 검사 지연: Bedrock 비전 1회 약 2~6초(추정, 저장소에 그림 검사 실측 없음 — 운영 `vpoc.call where=vnew.cast_photo_check ms=`로 잰다), 줄이기 수십 ms. 칸을 차례로 조회하므로 2장 뽑기가 약 4~12초 늘어난다. 다시 뽑기가 생기면 fal 생성 1회 + 5초 쉼 + 검사 1회가 더 든다.
+    - 비용 추정: 검사 1회 입력 약 1.3K토큰(이미지 768×1024 ÷ 750 ≈ 1,050 + SYSTEM·질문·도구 ≈ 250) + 출력 20~200토큰 → 텍스트 기본 단가($3/M·$15/M)로 약 $0.004~0.007, 2장 뽑기 1회 약 $0.01(사진 $0.08의 약 12~18%). 1024로 줄이지 않으면 이미지 토큰이 약 2,360이라 약 2배다. 다시 뽑기는 칸당 최대 $0.04 1회.
+    - 메모리: 검사용 디코드(1152×1536 RGB ≈ 5.3MB + 768×1024 ≈ 2.4MB)를 받기와 같은 `_PHOTO_SEM` 안에서 한다. 발견: 처음에는 세마포어 밖에서 디코드했다 → 프로세스 전체 한 장씩 규칙(봉우리 ≈ 25MB + 15MB)이 깨질 수 있어 안으로 옮겼다(조치). LLM 호출은 세마포어 밖이라 다른 캐릭터의 받기를 막지 않는다.
+    - 외부 호출: 칸마다 LLM 1회(다시 뽑으면 2회), fal 제출은 칸마다 최대 2회. S3 쓰기는 다시 뽑기 때 1번 더(칸을 queued로).
+    - 발견: 검사 호출이 재시도로 길어져 하트비트 600초를 넘기면 다른 파드가 이어받는다 → 이 실행은 다음 쓰기에서 접고 원장은 같은 키라 이중 계상이 없다(cpg-f claim 잃음 경우). 조치 없음(설계로 안전).
+  - 운영성
+    - 로그: `vnew.cast.photo_check slot= photo=true|false|none style= redraw=0|1 cid=`(실사 INFO, 그 밖 WARNING), `vnew.cast.photo_check_failed err=`, `vnew.cast.redraw cid= slot= redraws=1`, 실패 칸 `vnew.casting.slot_failed … kind=NotPhoto`. 사진·문장·비밀값 없음.
+    - 되돌리기: `config.<target>.env`에 `VNEW_CAST_PHOTO_CHECK=false` 한 줄(검사·다시 뽑기·안내 없음, 106). 사진 고정 문장·그림체 낱말은 지시서대로 설정과 무관해 코드 되돌리기가 필요하다.
+    - 진행 중 작업: 배포 전에 시작한 회차는 저장된 문장(고정 문장 없음)을 그대로 쓰고, 재시작 뒤 이어받으면 그 실행의 설정으로 검사한다. 롤링 중 옛 파드가 이어받으면 `redraws`를 모르지만 queued 칸은 실패로 두므로 추가 과금이 없다.
+    - 재시작: `redraws`가 칸에 남아 두 번 이상 다시 뽑지 않는다(cpg-f).
+    - 발견 1: 예문의 "person"이 남성·BL 문장 끝을 성 중립으로 만들었다(bl-d가 남성 문장 뒤쪽 person을 잡음) → 성별 명사로(조치, D1). 발견 2: 그림 방식 명사구를 낱말만 지우면 "in a clean with thin and soft" 같은 조각이 남았다 → 전치사구째·관사째 지우기, "a, …" 정리(조치, D2·cpg-b).
+- **남은 이슈**
+  1. 효과·오판정률은 실측하지 않았다(유료 금지). 개발 배포 뒤 설계자 승인으로 같은 캐릭터를 몇 회 뽑아 그림체 비율·`photo=false` 빈도·검사 지연을 본다(1회 2장 $0.08 + 검사 약 $0.01, 다시 뽑기 때 칸당 $0.04).
+  2. Seedream 4.5가 고정 문장의 부정문(not a drawing …)을 어떻게 읽는지 확인하지 않았다.
+  3. 검사 LLM 비용은 원장에 남지 않는다(기존 그림 검사와 같다). 남기려면 `charge_text` 배선이 필요하다.
+  4. `VNEW_CAST_PHOTO_CHECK_MODEL`은 템플릿에 없어 운영에서 바꾸려면 템플릿 env 추가가 필요하다(기존 검사 모델 키와 같다).
+  5. 그림체 낱말을 낱말만 지우는 꼴은 "comic lines" → "lines"처럼 어색한 조각이 남을 수 있다(그림 낱말은 남지 않는다).
+  6. 자동 외모 문장을 쓰는 실사 테이크 외형(`generate._real_appearance` → `current_look`)에도 더한 낱말 제거가 적용된다. 실사 영상에서 그림 낱말을 빼는 목적과 같은 방향이고 `generate.py`는 바꾸지 않았다.
+  7. 화면 안내는 늘 보인다(켬일 때). 실제로 다시 뽑았는지는 칸 상태로만 알 수 있고 화면에 "다시 뽑는 중" 표시는 없다(지시서 범위 밖).
