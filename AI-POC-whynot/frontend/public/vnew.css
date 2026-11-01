@@ -2101,6 +2101,12 @@ textarea.vnew-field-input {
   margin-top: 12px;
 }
 
+/* 그림체 다시 뽑기 비용 안내(지시서 107). 뽑기 버튼 바로 아래 작은 글씨 한 줄. */
+.vnew-casting-redraw-note {
+  margin: 6px 0 0;
+  font-size: 12px;
+}
+
 .vnew-casting-msg,
 .vnew-casting-error {
   margin: 8px 0 0;

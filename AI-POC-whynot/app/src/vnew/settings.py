@@ -265,6 +265,13 @@ VNEW_CASTING_POLL_MAX_S = _int("VNEW_CASTING_POLL_MAX_S", 900)
 # BL 유형 참고 외모(지시서 103·104, 2026-10-31). 켜면 캐릭터 설명(추가 요청, extraPromptKo)에 적힌 BL 유형(떡대공 등)을 캐스팅 문장
 # 끝에 참고 문장(genre_bl)으로 더한다. false 면 지금 동작(보기에 BL 필드 없음·문장 그대로). 저장값은 지우지 않는다.
 VNEW_BL_LOOK = _bool("VNEW_BL_LOOK", True)
+# 실사 사진 검사(지시서 107, 2026-11-01). 켜면 캐스팅 결과 사진마다 저장 전에 비전 LLM 1회로 실사 사진인지 묻고, 그림체(웹툰·일러스트·
+# 애니·3D)면 그 사진을 버리고(S3 저장 없음, 원장에는 남김) 같은 칸을 같은 문장으로 한 번만 다시 뽑는다. 다시 뽑은 사진도 그림체면 그 칸만
+# 실패다. 검사 모델이 오류를 내면 사진을 그대로 쓴다. false 면 지금 동작(검사·다시 뽑기·보기 안내 없음). 캐스팅 문장 끝 사진 고정 문장은
+# 이 설정과 상관없이 늘 붙는다. 진행 중 뽑기는 그 실행이 시작할 때 읽은 값을 쓴다.
+VNEW_CAST_PHOTO_CHECK = _bool("VNEW_CAST_PHOTO_CHECK", True)
+# 검사 모델(코드 기본, 템플릿에 넣지 않는다). 기본 = 그림 1장 검사(char-fidelity 그림 검사·사람 수)의 PEOPLE_COUNT_MODEL.
+VNEW_CAST_PHOTO_CHECK_MODEL = os.getenv("VNEW_CAST_PHOTO_CHECK_MODEL", "").strip() or PEOPLE_COUNT_MODEL
 
 # 통 테이크 실사 버전(vnew-live-fx 묶음 C, 2026-10-30). 켜면 웹툰 통 테이크가 끝난 gen 에서 같은 프리비즈 녹화로
 # 실사 버전(회차)을 만들 수 있다(POST /generate/real). false 면 그 시작만 404(TakeRealDisabled)이고, 이미 시작한 실사

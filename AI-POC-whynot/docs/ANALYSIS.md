@@ -12,6 +12,7 @@
 > 갱신 2026-10-31(104 피드백): 찾기에 앞 경계·뒤쪽 제외, 부르는 곳이 없던 103 정의 지움, `VNEW_BL_LOOK` 주석(§3.6.1 B, §7.1, §10.1).
 > 갱신 2026-10-31(지시서 105): 운영 503 원인(frontend 파드가 ALB에 없는 AZ 노드에 놓임)과 조치 `POD_ZONES` 영역 제약(§7.4, §8.3, §8.7, §10.1, R-22).
 > 갱신 2026-10-31(지시서 106): 노드 구성(운영·개발 2a·2b·2c 각 1대)과 frontend·app 영역 분산 `topologySpreadConstraints`(zone, DoNotSchedule, `matchLabelKeys`), 영역 하나가 없어질 때 동작(§7.4, §8.7, §8.8, §10.1, R-22).
+> 갱신 2026-11-01(지시서 107): 실사 캐스팅 그림체 막기 — 캐스팅 문장 끝 사진 고정 문장, 외모 문장 그림체 낱말 더하기, 결과 사진 검사(LLM 1회)·그림체 칸 1회 다시 뽑기·원장, `VNEW_CAST_PHOTO_CHECK`(§3.6, §3.6.1 B, §6.1.1, §7.1, §10.1).
 
 ---
 
@@ -187,7 +188,7 @@ flowchart LR
 | `char_fidelity.py` | 캐릭터 충실도(char-fidelity, 2026-10-30, 순수 함수 — import 는 `re` 뿐). 화면 쪽 → 캐릭터 쪽 좌우 계산·다수결, 기본 복장 좌우 낱말 지우기·꼬리, 좌우 문장·고칠 문장 원문, 그림·시트 검사 기대값·반전 규칙·warning 문구. `characters.py`가 부른다 |
 | `plan.py` | ①입력 ②대본 ③콘티. `plan.json` 하나가 프로젝트 상태의 단일 원본. task 스레드(`:1393`). 공용 `plan.task` 단계는 script·conti·fxFill(`_TASK_STEPS` `:60`) |
 | `fx.py` | ③ 만화 기호·분위기(vnew-live-fx 묶음 A, 2026-10-30, 순수 함수 — 네트워크·S3·LLM 없음). 기호 5종 열거값·문장(참고 구현 원문)·짧은 형·실사 표현·화면 라벨, 컷 필드 정리(`normalize_cut_fx`), 채우기 대상(`fill_targets`)·합치기(`merge_fill`)·3컷 한도(`apply_cap`)·금액 추정(`estimate_usd`), 프롬프트 문장(`sentences`). `plan.py`(저장·채우기)·`generate.py`(프롬프트)가 읽는다. `VNEW_FX`로 끈다 |
-| `casting.py` | 캐릭터 실사 캐스팅(vnew-live-fx 묶음 B, 2026-10-30). 캐스팅 문장·성별(순수 함수)과 뽑기 상태(`char.casting`)·fal 큐 제출·조회(글만, 래퍼 `_fal_request`·`_fetch_url`)·이어하기·고르기·상세 보기. `characters.py`(상세·키)·`routes.py`(라우트 3개)·`generate.py`(`_char_entries.castingKey`)가 읽는다. `VNEW_CASTING`으로 끈다. 사용자가 쓴 캐릭터 설명(`char.extraPromptKo`)에 BL 유형 이름(떡대공 등)이 있으면 캐스팅 문장 끝에 `genre_bl` 참고 외모 한 문장을 더한다(지시서 103·104, `VNEW_BL_LOOK`. 104부터 화면 선택값 `casting.blRole`·`blType`은 읽지 않는다) |
+| `casting.py` | 캐릭터 실사 캐스팅(vnew-live-fx 묶음 B, 2026-10-30). 캐스팅 문장·성별(순수 함수)과 뽑기 상태(`char.casting`)·fal 큐 제출·조회(글만, 래퍼 `_fal_request`·`_fetch_url`)·이어하기·고르기·상세 보기. `characters.py`(상세·키)·`routes.py`(라우트 3개)·`generate.py`(`_char_entries.castingKey`)가 읽는다. `VNEW_CASTING`으로 끈다. 사용자가 쓴 캐릭터 설명(`char.extraPromptKo`)에 BL 유형 이름(떡대공 등)이 있으면 캐스팅 문장 끝에 `genre_bl` 참고 외모 한 문장을 더한다(지시서 103·104, `VNEW_BL_LOOK`. 104부터 화면 선택값 `casting.blRole`·`blType`은 읽지 않는다). 지시서 107부터 캐스팅 문장 맨 끝에 사진 고정 문장을 늘 붙이고, `VNEW_CAST_PHOTO_CHECK` 켬이면 결과 사진마다 비전 LLM 1회로 실사인지 보고 그림체 칸을 한 번 다시 뽑는다(아래 「실사 사진 검사」) |
 | `genre_bl.py` | BL 역할(공·수·리버서블)·유형 12종 → 실사 캐스팅 외모 참고 조각(지시서 103, 2026-10-31, 순수 함수 — import 는 `re` 뿐, 저장·외부 호출 없음). 조각마다 분류를 단다: 형태(체격·키·얼굴 모양·눈 모양)는 외모 문장에 같은 분류가 있으면 빼고(그림 우선), 인상(얼굴 인상·눈빛·표정·자세·몸가짐)은 늘 더한다(`hint_pieces`·`look_hints`, 103 피드백). 104: 사용자가 쓴 캐릭터 설명에서 유형 이름을 찾고(`detect_types`, 붙은 꼴·부정 제외·최대 2개), 두 유형은 같은 분류에서 앞 유형이 이기게 합친다(`merged_pieces`). `casting.py`가 부른다 |
 | `locations.py` / `location_views.py` | ③ 장소 4면 시트, 참고 사진. `ThreadPoolExecutor(VIEW_WORKERS)`(`:1848`), task 스레드(`:2846`) |
 | `previz*.py` | ④ 프리비즈 3D 장면 설계(Astra), 카메라 문법·토릭 계산(`previz_camera`, `previz_grammar`), 일치도(`previz_fit`), 스키마. task 스레드(`previz.py:2858`) |
@@ -275,7 +276,7 @@ vnew가 재사용하는 것: `vpoc.llm`·`images`·`store.STORE`·`ark`·`fal`·
 | 뽑기 | `routes.py:257` `POST …/casting/draw` → `casting.py:625` `start_draw` → 스레드 `:982` `run_draw`(`:847` `_submit_slot` · `:906` `_poll_slot` · `:956` `_finish`) | 확인 금액(`confirmUsd`)이 장 수 × `VNEW_CASTING_USD`와 다르면 409 `CostMismatch`. 진행 중이면 409 `CastingRunning`. fal 큐에 칸마다 **글만** 제출(본문 `{prompt, num_images, image_size}`), 결과는 `users/{owner}/characters/{id}/casting/`에 JPEG(긴 변 1536)로 옮기고 사진마다 원장 1건. 이전 후보는 `history`(12개)로 옮기고 고른 사진(`chosen`)은 유지(결정 5). 4xx 거절 칸 문구는 캐스팅용(`:427` `_MSG_REJECTED` + `error_gist` 요지, B3) |
 | 이어하기 | `casting.py:766` `reconcile`(`characters.py:2406` `_casting_detail`이 상세 조회 때 부른다) | 하트비트가 `VNEW_CASTING_STALL_S`(600초)보다 오래됐고 이 파드에서 돌지 않으면 새 claim으로 제출한 칸만 조회한다. 제출하지 않은 칸은 실패로 둔다(다시 과금하지 않음). 시작부터 900초면 남은 칸 실패 |
 | 고르기 | `routes.py:274` `POST …/casting/choose` → `casting.py:685` `choose` | 후보·이전 후보 id 또는 ""(고르기 풀기 = 실사 정면) |
-| 보기 | `casting.py:711` `view`(상세 `casting`) | `{enabled, preset, presets, gender, genderAuto, lookEn, lookAuto, lookEdited, patternWarning, status, error, slots, unitUsd, count, totalUsd, candidates, history, chosen, chosenUrl}`. 사진은 presigned URL(브라우저 표시용). 끔이면 `{enabled:false}`. `VNEW_BL_LOOK` 켬이면 끝에 `blDetected`(`[{id, label}]`, 사용자가 쓴 캐릭터 설명에서 찾은 BL 유형)·`blHintsEn`(뽑기 문장에 더해질 참고 문장) 2개가 더 붙는다(지시서 104. 103의 `blRole, blType, blRoles, blTypes`는 없앴다, 아래 「BL 역할·유형 참고 외모」) |
+| 보기 | `casting.py:711` `view`(상세 `casting`) | `{enabled, preset, presets, gender, genderAuto, lookEn, lookAuto, lookEdited, patternWarning, status, error, slots, unitUsd, count, totalUsd, candidates, history, chosen, chosenUrl}`. 사진은 presigned URL(브라우저 표시용). 끔이면 `{enabled:false}`. `VNEW_BL_LOOK` 켬이면 끝에 `blDetected`(`[{id, label}]`, 사용자가 쓴 캐릭터 설명에서 찾은 BL 유형)·`blHintsEn`(뽑기 문장에 더해질 참고 문장) 2개가 더 붙는다(지시서 104. 103의 `blRole, blType, blRoles, blTypes`는 없앴다, 아래 「BL 역할·유형 참고 외모」). `VNEW_CAST_PHOTO_CHECK` 켬이면 맨 끝에 `photoCheckNote`(다시 뽑기 비용 안내 한 줄, 지시서 107, 아래 「실사 사진 검사」) |
 | 영상에 쓰기(B3) | `generate.py:794` `_char_entries`, `:833` `_casting_key_of`, `:842` `_real_front_key` | 켬이면 항목에 `castingKey`(= `casting.chosen_key`, 없거나 저장값이 깨지면 "")를 더한다. 끔이면 키가 없어 B 이전과 키·값이 같다. `_real_front_key`는 `castingKey`가 있으면 그것, 없으면 `realFrontKey`. **이번에는 정의와 검사만 있고 부르는 곳이 없다**(묶음 C 통 테이크 실사가 부른다) |
 | 화면(B3) | `vnew.js:963-` 캐스팅 구역(순수 문구 함수 + `:1052` `castingSection`), `renderDetail`(`:539`, 실사·웹툰 열 다음·추가 복장 앞), `schedulePoll`(`:440`, 뽑는 중에도 5초마다); `vnew.css` `vnew-casting-*` | 아래 「캐스팅 화면」 |
 
@@ -319,6 +320,21 @@ B의 남은 위험(design §7):
 | 화면 | `vnew.js:1169` `castingBlLine`(+ `:1161` `castingBlHintText`), `:1183` `castingSection`; `vnew.css` `.vnew-casting-bl-found`(13px)·`.vnew-casting-bl-guide`(12px) | 104: 선택 없음. 성별 칸 바로 뒤 읽기 전용 한 줄: 찾았으면 "캐릭터 설명에서 찾은 BL 유형: 떡대공 — 참고로 더해지는 외모 설명(영어): …", 못 찾았으면 작은 안내 "캐릭터 설명에 '떡대공'처럼 BL 유형을 적으면 실사 사진에 참고로 반영됩니다.", `blDetected`가 없으면(끔·103 꼴 응답) 줄 없음. 저장·뽑기 본문에 BL 키 없음. 추가 요청을 고쳐 다시 만들면 상세를 다시 받아 서버가 새 설명으로 다시 계산한 줄을 보인다. 103 함수 `castingBlOn`·`castingBlTypeOptions`·`castingBlTypeFits`·`castingBlFields`·상수 `CASTING_BL_NO_TYPE`와 CSS `.vnew-casting-row`·`-bl-role`·`-bl-type`·`-bl-hint`는 104 피드백(Claude 승인)으로 지웠다 |
 
 300자 외모 문장(`look_sentence`·`auto_look`·`current_look`·사용자가 고친 문장)과 영상 쪽(`generate.py` `_real_appearance` 등)은 바꾸지 않았다. 끔(`VNEW_BL_LOOK=false`)이면 보기 키가 지금 19개 그대로, 설명에 유형이 있어도(저장된 103 값이 있어도) 뽑기 문장은 지금 식이다. 검사는 `check_vnew_bl_look`(bl-a~l)이다.
+
+**실사 사진 검사·그림체 다시 뽑기(지시서 107, 2026-11-01, `VNEW_CAST_PHOTO_CHECK` 기본 true)** — 스펙 `.kiro/specs/cast-photo-guard/`. 계기: 같은 날 운영 실사 캐스팅(범건우, 아이돌풍, 떡대공) 1회에서 후보 2장 중 1장이 웹툰 일러스트처럼 나왔다. fal에는 지금처럼 글만 보낸다(본문 `{prompt, num_images, image_size}`, RB3.1). 줄 번호는 2026-11-01 작업 트리 기준이다.
+
+| 단계 | 위치 | 동작 |
+|---|---|---|
+| 문장 끝(늘) | `casting.py:87` `PHOTO_ANCHOR`·`:114` `photo_anchor`, `:869` `_cast_text`·`:905` `_fit_cast_head` | 두 프리셋 모두 캐스팅 문장 맨 끝(BL 참고 문장 뒤)에 "A real photograph of a real {man\|woman\|person} taken with a camera; not a drawing, illustration, anime, cartoon, painting or 3D render."를 붙인다. 명사는 성별 낱말 표, "webtoon"은 넣지 않는다(B1 규칙). 설정과 상관없다. 1500자 예산에서 고정 문장 몫을 먼저 빼고, 넘치면 BL 참고 문장 조각 → 외모(단어 경계) 순으로 줄인다. 운영 최대 1,270자라 실제로는 줄지 않는다 |
+| 외모 그림체 낱말(늘) | `casting.py:380-394` `_STYLE_HEAD`·`_STYLE_PHRASE`·`_STYLE_WORDS`·`_ARTICLE_COMMA`, `:397` `_no_drawing` | 기존 낱말(webtoon·anime·manga·cartoon·illustrat*·drawn) 앞에 manhwa·manhua·comic(s)·comic-book·chibi·art/drawing style·cel-shaded/cel shading·line art/lineart·digital painting/art/artwork/illustration·stylized/stylised·semi-realistic·2D·flat-shaded/flat shading/flat colors·sketch(ed/y)를 지운다. 명사구가 구의 끝이면 앞 전치사구째("drawn in a clean manhwa style" → 없음). 더한 낱말이 없는 글은 107 전과 같다. 자동 외모 문장을 쓰는 실사 테이크 외형(`generate._real_appearance`)에도 같이 적용된다 |
+| 검사 | `casting.py:1517` `_photo_check`(`:1505` `_check_jpeg`, `:1481` `_PHOTO_TOOL`, `:1495` `_PHOTO_SYSTEM`) | 결과 JPEG(긴 변 1536)를 긴 변 1024로 줄여(`_PHOTO_SEM` 안) `vpoc.llm._converse` 1회(where `vnew.cast_photo_check`, 모델 `VNEW_CAST_PHOTO_CHECK_MODEL` = 기본 `VNEW_PEOPLE_COUNT_MODEL` = Fable 5.1, max_tokens 400). 도구 `emit_photo_check {photo: bool, style: enum}`. 오류·도구 미사용·모양 틀림이면 None |
+| 판정·다시 뽑기 | `casting.py:1548` `_photo_passes`, `:1579` `_poll_slot(photo_check=)`, `:1660` `run_draw`(설정을 시작 때 1회 읽음) | 실사 또는 None(경고) → 지금처럼 S3 저장 → 원장 → ready. 그림체 → S3에 두지 않고 원장 1건 → 그 칸의 `redraws`가 0이면 queued(`redraws` 1, 다음 순회의 `_submit_slot`이 같은 회차 문장으로 다시 제출), 1이면 그 칸만 failed "실사 사진이 아니라 그림체로 나와 이 칸을 버렸습니다. 다시 뽑아 주세요." |
+| 재개 | `casting.py:1333` `reconcile`(그대로) | 다시 제출한 칸(submitted·redraws 1)을 이어받으면 조회만 하고 세 번째로 제출하지 않는다. 다시 제출 직전에 멈춘 칸(queued·redraws 1)은 지금 규칙대로 "중단돼 제출하지 않았습니다." `_stale`(600초)·`_expired`(900초) 그대로 |
+| 원장 | `casting.py:1463` `_charge`(그대로) | 키 `vnew-cast-{cid}-{후보 id}`(요청 id sha256). 버린 사진도 같은 규칙으로 1건 → 원장 건수 = 결과 사진을 받은 fal 요청 수(그림체 → 실사·그림체 → 그림체 모두 2건). 같은 요청을 재시작 뒤 다시 받아도 1건. 검사 LLM 비용은 기존 그림 검사처럼 원장에 남기지 않는다 |
+| 보기·화면 | `casting.py:1263` `view`(끝 `photoCheckNote`), `vnew.js:1276-1277`, `vnew.css:2105` `.vnew-casting-redraw-note`(12px) | 켬이면 뽑기 버튼 바로 아래 작은 글씨 "그림체로 나온 칸은 한 번 다시 뽑으며 그 비용이 더해질 수 있습니다." `totalUsd`·확인창 금액은 그대로 |
+| 로그 | `_photo_passes`, `_fail_slot` | `vnew.cast.photo_check slot= photo=true\|false\|none style= redraw=0\|1 cid=`(실사 INFO, 그 밖 WARNING), `vnew.cast.photo_check_failed err=`, `vnew.cast.redraw cid= slot= redraws=1`, 실패 칸 `vnew.casting.slot_failed … kind=NotPhoto`, 검사 지연·토큰은 `vpoc.call where=vnew.cast_photo_check ms= in= out=` |
+
+비용(추정, 실측 아님): 검사 1회 입력 약 1.3K토큰(이미지 약 1,050) + 출력 20~200토큰 → 텍스트 기본 단가($3/M·$15/M, `vpoc/settings.py:384-385`)로 약 $0.004~0.007, 2장 뽑기 1회 약 $0.01. 지연은 칸당 약 2~6초(추정). 다시 뽑기는 칸당 최대 $0.04 1회(2장 뽑기 최대 $0.16). 끔(`VNEW_CAST_PHOTO_CHECK=false`)이면 검사·다시 뽑기·`photoCheckNote`가 없고 칸 저장값·보기 키가 106과 같다. 사진 고정 문장·그림체 낱말은 끔에서도 그대로라 되돌리려면 코드 되돌리기가 필요하다. 검사는 `check_vnew_cast_photo_guard`(cpg-a~h)다.
 
 **C. 통 테이크 실사 버전(⑤)**
 
@@ -636,6 +652,7 @@ vpoc·vnew의 Bedrock 도구 호출은 전부 `vpoc.llm._converse`(`vpoc/llm.py:
 | vnew 캐릭터 분석 | `vnew.analyze` | GPT-6 Astra | Fable 5.1 | 1200(4096) | `vnew/characters.py:415`, `:533` |
 | vnew 캐릭터 사람 수 | `vnew.count_people` | Fable 5.1(`VNEW_PEOPLE_COUNT_MODEL`) | — | **400**(1600) | `vnew/characters.py:620` |
 | vnew 캐릭터 복장 일관성 | `vnew.outfit_check` | Fable 5.1(`VNEW_OUTFIT_CHECK_MODEL`) | — | 300(1200) | `vnew/characters.py:689` |
+| vnew 실사 캐스팅 사진 검사(2026-11-01 지시서 107) | `vnew.cast_photo_check` | Fable 5.1(`VNEW_CAST_PHOTO_CHECK_MODEL`, 기본 = `VNEW_PEOPLE_COUNT_MODEL`) | — | 400(1600) | `vnew/casting.py:1517` |
 | vnew 추가 복장 번역 | `vnew.outfit_translate` | GPT-6 Astra | Fable 5.1 | 200(800) | `vnew/characters.py:2113` |
 | vnew ② 대본 | `vnew.script` | Fable 5.1 | — | 8000(없음) | `vnew/plan.py:617`, `:1332-1335` |
 | vnew ③ 콘티 | `vnew.conti` | Fable 5.1 | — | 8000(없음) | `vnew/plan.py:629`, `:1338-1341` |
@@ -730,6 +747,10 @@ vpoc·vnew의 Bedrock 도구 호출은 전부 `vpoc.llm._converse`(`vpoc/llm.py:
 | `VNEW_3D_TRIPO_*`(9개)·`VNEW_3D_SIDE_SWAP` | `vnew/settings.py`(`_checked_*`), `characters._tripo_request`·`_3d_squares`·`_charge_tripo_3d`·`_copy_3d_result` | §3.6.2 「3D 공급자 Tripo H3.1 전환」 목록 | 코드 기본과 같음 | — | — |
 | `VNEW_OUTFIT_STALL_S` | `vnew/settings.py`(`OUTFIT_STALL_S`, `max(60, _int)`), `characters._outfit_variant_stalled`(`start_build_outfit`·`_outfits_view`) | 1200(60 아래는 60) | 1200 | — | — |
 | `VNEW_BL_LOOK` | `vnew/settings.py:267`(`_bool`), `casting._bl_types_now`(`start_draw` 회차 문장·로그, `view`), 화면 `detail.casting.blDetected` 유무 | true | true | — | —(base 값. 운영 VNEW 켬 배포부터 적용) |
+| `VNEW_CAST_PHOTO_CHECK` | `vnew/settings.py:272`(`_bool`), `casting.run_draw`(시작 때 1회 → `_poll_slot`)·`view`(`photoCheckNote`), 화면 안내 한 줄 | true | true | — | —(base 값. 운영 VNEW 켬 배포부터 적용) |
+| `VNEW_CAST_PHOTO_CHECK_MODEL` | `vnew/settings.py:274`, `casting._photo_check` | `VNEW_PEOPLE_COUNT_MODEL` 값(지금 Fable 5.1, 빈 값도 기본) | 키 없음(코드 기본) | — | — |
+
+`VNEW_CAST_PHOTO_CHECK`(지시서 107, 2026-11-01)는 앱 env(`k8s/workloads.yaml.tmpl`의 `VNEW_BL_LOOK` 바로 뒤)와 base(같은 자리, 되돌리기 주석)에 배선돼 있고 `PARITY_ENV_KEYS`에 들어 있다(rw-a~c, cpg-c). 되돌리기는 `config.<target>.env`에 `VNEW_CAST_PHOTO_CHECK=false` 한 줄이다. false면 결과 사진 검사·그림체 칸 다시 뽑기·보기 `photoCheckNote`가 없어 106 동작이다. 캐스팅 문장 끝 사진 고정 문장과 외모 문장 그림체 낱말 제거는 설정과 상관없이 적용한다(지시서). 진행 중 뽑기는 그 실행이 시작할 때 읽은 값을 쓴다. 검사 모델 키는 기존 검사 모델 키처럼 코드 기본이라 템플릿에 없다(템플릿·base 주석에 적었다).
 
 `VNEW_BL_LOOK`(지시서 103, 2026-10-31)은 앱 env(`k8s/workloads.yaml.tmpl`의 `VNEW_OUTFIT_STALL_S` 바로 뒤)와 base(같은 자리, 되돌리기 주석)에 배선돼 있고 `PARITY_ENV_KEYS`에 들어 있다(rw-a~c, bl-g). 되돌리기는 `config.<target>.env`에 `VNEW_BL_LOOK=false` 한 줄이다. false면 캐스팅 보기에 BL 키(104: `blDetected`·`blHintsEn`)가 없어 화면에 BL 줄이 없고, 캐릭터 설명에 유형 이름이 있어도 뽑기 문장에 참고 문장을 더하지 않는다. 요청의 `blRole`·`blType`은 104부터 켬·끔 모두 무시한다(400 없음). 저장값(설명·103 값)은 지우지 않아 다시 켜면 설명에서 다시 찾는다. 진행 중 뽑기는 시작 때 만든 문장을 그대로 쓴다. 비용은 바뀌지 않는다(Seedream 장당 금액, 문장 길이와 무관). 104 피드백에서 `settings.py`·base·템플릿의 주석을 "캐릭터 설명(추가 요청)에 적힌 BL 유형을 참고 문장으로 더한다"는 뜻으로 고쳤다(값·자리·줄 수 그대로, bl-g).
 
@@ -953,9 +974,9 @@ flowchart LR
 
 ## 10. 테스트·검증 도구
 
-### 10.1 `tools/check_vpoc.py`(CI 유일 검사기, 32,118줄 — 2026-10-31 지시서 106 뒤)
+### 10.1 `tools/check_vpoc.py`(CI 유일 검사기, 32,989줄 — 2026-11-01 지시서 107 뒤)
 
-`main()`이 아래 64개를 순서대로 부른다(`check_vpoc.py` 끝 `def main`, 2026-10-31 지시서 105의 `check_pod_zones`까지). 실패가 하나라도 있으면 종료 코드 1. 외부 호출은 모듈 래퍼를 monkeypatch 하고 S3는 메모리 저장소로 바꾼다(예: `:892` "메모리 S3", `:916`, `:1216`, `:1930`). 새 기본값(`VNEW_FX` 켬)에서 기대값이 달라지는 기존 검사 3개(`check_vnew_plan`·`check_vnew_locations`·`check_vnew_previz`)는 `main()`의 부르는 줄에서 `_run_fx_off(...)`(`_pin_vnew(VNEW_FX=False)`)로, `VNEW_CASTING` 켬에서 달라지는 `check_vnew_fx_prompt` 1개는 `_run_casting_off(...)`로 끔 고정한다. 본문·기대값은 그대로다.
+`main()`이 아래 65개를 순서대로 부른다(`check_vpoc.py` 끝 `def main`, 마지막은 지시서 105의 `check_pod_zones`, 2026-11-01 지시서 107의 `check_vnew_cast_photo_guard`는 그 바로 앞). 실패가 하나라도 있으면 종료 코드 1. 외부 호출은 모듈 래퍼를 monkeypatch 하고 S3는 메모리 저장소로 바꾼다(예: `:892` "메모리 S3", `:916`, `:1216`, `:1930`). 새 기본값(`VNEW_FX` 켬)에서 기대값이 달라지는 기존 검사 3개(`check_vnew_plan`·`check_vnew_locations`·`check_vnew_previz`)는 `main()`의 부르는 줄에서 `_run_fx_off(...)`(`_pin_vnew(VNEW_FX=False)`)로, `VNEW_CASTING` 켬에서 달라지는 `check_vnew_fx_prompt` 1개는 `_run_casting_off(...)`로 끔 고정한다. 본문·기대값은 그대로다.
 
 char-fidelity 새 기본값 때문에 `main()` 호출 줄에서만 고정한 기존 검사(본문·기대값 그대로):
 
@@ -963,10 +984,11 @@ char-fidelity 새 기본값 때문에 `main()` 호출 줄에서만 고정한 기
 |---|---|---|
 | `check_vnew_characters` | `_run_3d_hunyuan(lambda: _run_char_fidelity_off(check_vnew_characters))` | T1: 켬이면 분석·프롬프트·검사 함수가 바뀐다. T2b: tripo면 3D 본문·조회 주소·원장 수가 Hunyuan 기준과 다르다 |
 | `check_vnew_fx_prompt` | `_run_char_fidelity_off(lambda: _run_casting_off(check_vnew_fx_prompt))` | T1: fx-k가 분석 SYSTEM을 `_ANALYZE_SYSTEM` + 규칙과 글자째 비교한다 |
-| `check_vnew_casting` | `_run_char_fidelity_off(check_vnew_casting)` | T1: cast-d가 끔 도구 = 원본 객체·SYSTEM sha256을 본다 |
-| `check_vnew_char_fidelity` | `_run_3d_hunyuan(lambda: _run_bl_look_off(check_vnew_char_fidelity))` | T2b: cf-b·cf-m·cf-o·cf-p가 Hunyuan 본문을 본다. 지시서 103: cf-b·cf-r이 옛 캐릭터 상세 JSON(casting 보기 포함) sha256을 구현 전 값과 비교한다(켬이면 BL 키가 붙는다 — 103은 5개, 104부터 `blDetected`·`blHintsEn` 2개) |
+| `check_vnew_casting` | `_run_cast_photo_off(lambda: _run_char_fidelity_off(check_vnew_casting))` | T1: cast-d가 끔 도구 = 원본 객체·SYSTEM sha256을 본다. 지시서 107: 켬이면 cast-f~h의 `run_draw`가 결과 사진마다 검사 LLM을 부르고(가짜가 아닌 LLM 호출 guard), cast-j의 상세 보기 키에 `photoCheckNote`가 붙는다 |
+| `check_vnew_char_fidelity` | `_run_cast_photo_off(lambda: _run_3d_hunyuan(lambda: _run_bl_look_off(check_vnew_char_fidelity)))` | T2b: cf-b·cf-m·cf-o·cf-p가 Hunyuan 본문을 본다. 지시서 103: cf-b·cf-r이 옛 캐릭터 상세 JSON(casting 보기 포함) sha256을 구현 전 값과 비교한다(켬이면 BL 키가 붙는다 — 103은 5개, 104부터 `blDetected`·`blHintsEn` 2개). 지시서 107: 같은 sha256에 `photoCheckNote`가 붙지 않게 |
+| `check_vnew_bl_look` | `_run_cast_photo_off(check_vnew_bl_look)` | 지시서 107: bl-g(끔 보기 키 19개)·bl-h(켬 = 지금 + `blDetected`·`blHintsEn`이 끝)가 보기 키를 본다 |
 
-T3에서 새로 고정한 기존 검사는 없다. 기대값을 바꾼 기존 검사는 `check_fal_parity_rollback`(rw-c) 하나다: 2026-10-30 사용자 결정으로 운영 렌더 `VPOC_ARK_SEEDANCE_ENABLED`가 `"true"`(개발 `"false"`), 운영 `VNEW_ENABLED`가 `"true"`다. 지시서 103에서는 cast-j의 상세 casting 보기 키 집합에 BL 5개를 더했다(켬 기본값, 끔 19개는 bl-g가 본다). 지시서 104에서 그 5개를 `blDetected`·`blHintsEn` 2개로 바꿨다(보기에서 103 키를 없앴다).
+T3에서 새로 고정한 기존 검사는 없다. 기대값을 바꾼 기존 검사는 `check_fal_parity_rollback`(rw-c) 하나다: 2026-10-30 사용자 결정으로 운영 렌더 `VPOC_ARK_SEEDANCE_ENABLED`가 `"true"`(개발 `"false"`), 운영 `VNEW_ENABLED`가 `"true"`다. 지시서 103에서는 cast-j의 상세 casting 보기 키 집합에 BL 5개를 더했다(켬 기본값, 끔 19개는 bl-g가 본다). 지시서 104에서 그 5개를 `blDetected`·`blHintsEn` 2개로 바꿨다(보기에서 103 키를 없앴다). 지시서 107에서는 사진 고정 문장이 늘 붙어 캐스팅 문장 기대값 12곳을 바꿨다(cast-a 2·cast-b 1·bl-c 1·bl-d 2·bl-e 1·bl-f 2·bl-h 1·bl-i 1·bl-l 1, bl 기준 식 `old_prompt`는 `old_head` + `anchored`로 나눔, 공용 `_cpg_anchor`). bl-e의 "다 빼도 넘침"은 앞에서 자르기 → 외모 단어 경계 줄이기로 바뀌었다.
 
 | 접두어 | 검사 함수 | 대상 |
 |---|---|---|
@@ -983,8 +1005,9 @@ T3에서 새로 고정한 기존 검사는 없다. 기대값을 바꾼 기존 �
 | vnew 통 테이크 실사 버전 | `check_vnew_take_real`(lr-a~m, `:23104`), `check_vnew_take_real_screen`(lr-n·lr-o, `:24490`), 2026-10-30 | lr-a~m: `start_real`·`POST /generate/real`·실사 payload·프롬프트(웹툰 sha256 그대로 `_LR_TAKE_SHA_ON`)·드라이버·병합·소리 거절(`vpoc.fal.poll`)·`_fail_variant`·`_gen_stale`·재시작·취소·`select`·`gen_view`·세마포어(하네스 `_LrEnv`: 가짜 fal 제출·조회·취소·concat·원장·캐릭터, urlopen 막음). lr-n: `vnew.js` ⑤ 결과·실사 열·확인창·나란히 보기·테이크 행·`cutCell` 소리 없이 다시·`schedulePlanPoll`을 잘라(`_LR_SCREEN_SLICES`) node 가짜 DOM으로 실행(`_LR_SCREEN_NODE_HARNESS`·`_lr_screen_problems`), 배선·`vnew.css`·`node --check`. lr-o: 설정·배선, `_LrEnv`의 실제 `gen_view`(끔·소리 거절·켬·회차 중 끔)를 화면 함수에 넣고 화면이 만든 요청 본문을 Flask 라우트에 그대로 보낸다 |
 | vnew 캐릭터 충실도 | `check_vnew_char_fidelity`(cf-a~r), `check_vnew_char_fidelity_screen`(cf-s), 2026-10-30 | `vnew/char_fidelity.py` 전 함수. `characters`의 분석·좌우·참고 순서·프롬프트·길이 예산·사진 속 옷(T1), 그림·시트 검사·반전·옆모습·3D 본문·재제출·이어 만들기·선점(T2), `detail_view`·`_outfits_view`(cf-r: 끔 = 구현 전 sha256, 켬 Tripo 빌드 → 라우트 상세·다른 사용자 404). 끔 지문 `_CF_OFF_SHA` 32개·`_CF_3D_OLD_SHA`는 구현 전에 잰 값이다. 하네스 `_CfFakes`·`_CfFakesT2`(가짜 LLM·Seedream·fal·원장, 동기 스레드). cf-s: `vnew.js` 캐릭터 충실도 순수 함수와 DOM 4곳을 잘라(`_CF_SCREEN_SLICES`) node 가짜 DOM으로 실행하고 실제 `detail_view` 응답을 넣는다. 옛 캐릭터 + 끔 화면 DOM = 구현 전 sha256(`_CF_SCREEN_OLD_SHA`) |
 | vnew 3D 공급자 | `check_vnew_3d_tripo`(tr-a~l), 2026-10-30 | `settings._checked_*`·설정 11개(하위 프로세스), 배선·렌더, `_tripo_request`·`submit_3d`·`_3d_squares`·`poll_3d`·`_orient_glb`(진짜 GLB)·`_copy_3d_result`·원장·재제출·`run_retry3d`·이어 만들기, Hunyuan 지문 16개 = 시작 전(`_TR_HUNYUAN_SHA`), 12MB GLB 회전 메모리. 하네스 `_TrFakes` |
-| 되돌리기 배선 | `check_fal_parity_rollback`(rw-a~c) | `PARITY_ENV_KEYS`(29개, 2026-10-31 `VNEW_BL_LOOK` 추가)의 템플릿·base 배선, `render.py` prod·dev 렌더. 운영 `VPOC_ARK_SEEDANCE_ENABLED`·`VNEW_ENABLED`는 `"true"`, 개발 `VPOC_ARK_SEEDANCE_ENABLED`는 `"false"`(2026-10-30 사용자 결정), 오버레이 `true` 한 줄 되돌리기 경로 |
+| 되돌리기 배선 | `check_fal_parity_rollback`(rw-a~c) | `PARITY_ENV_KEYS`(30개, 2026-10-31 `VNEW_BL_LOOK`·2026-11-01 `VNEW_CAST_PHOTO_CHECK` 추가)의 템플릿·base 배선, `render.py` prod·dev 렌더. 운영 `VPOC_ARK_SEEDANCE_ENABLED`·`VNEW_ENABLED`는 `"true"`, 개발 `VPOC_ARK_SEEDANCE_ENABLED`는 `"false"`(2026-10-30 사용자 결정), 오버레이 `true` 한 줄 되돌리기 경로 |
 | vnew BL 참고 외모 | `check_vnew_bl_look`(bl-a~l), 2026-10-31 | `vnew/genre_bl.py` 전 함수(유형 표·분류 판정·그림 우선, 104 `detect_types`·`known_types`·`merged_pieces`), `casting` `cast_prompt`·`_cast_text`·`_hint_sentence`(유형 없음 = 옛 식 5,148문장, 유형 있음 216문장, 1500자 상한·두 유형), `_bl_types_now`·`view`·`start_draw`·`update_settings`(Flask PUT·draw, 메모리 저장소: BL 요청 무시·103 저장값 무시·설명 근거·로그 `bl=`), 103 함수·문구 상수가 없음(AST), `VNEW_BL_LOOK` 끔·설정 읽기(하위 프로세스)·배선·렌더·세 파일 주석, `vnew.js` BL 한 줄(node 가짜 DOM, 실제 `view`·상세 라우트 응답, 103 꼴 응답에서 선택 없음, 다시 만들기 = 진짜 `buildSection`·`refreshDetail` + 실제 POST `/build`·GET 상세, 지운 103 화면 함수·CSS 선택자가 없음), bl-j 운영 문구 `BadBlType`(표에 남김, 던지는 곳 0), bl-k 찾기 57경우·이름 × 부정·앞 경계·뒤쪽 제외 13 × 31꼴·꽃수 창 경계, bl-l 두 유형 합치기. 103 피드백에서 bl-b 기대값을 형태·인상 규칙으로, 104에서 bl-f~j를 다시 썼고 104 피드백에서 bl-f·g·i·j·k를 고쳤다 |
+| vnew 캐스팅 그림체 막기 | `check_vnew_cast_photo_guard`(cpg-a~h), 2026-11-01 지시서 107 | `casting` 사진 고정 문장(`photo_anchor`, 두 프리셋 × 성별 × BL 108문장 = 107 전 식 + 고정 문장, 운영 최대 길이, 긴 외모·상한 줄이기 순서), `_no_drawing` 더한 낱말 19경우·남길 낱말·107 전과 같음 197표본, 설정·배선(하위 프로세스·렌더), `_photo_check`(호출 꼴·응답 10꼴·오류), `run_draw`(가짜 fal·가짜 검사 LLM·메모리 S3·가짜 원장: 실사·그림체 → 실사·그림체 → 그림체·검사 None 3종·두 칸·S3 put 0·원장 키), 재개(`reconcile` 세 번째 제출 0·queued·900초·claim 잃음), 끔 = 106, `view`·Flask 상세·뽑기, `vnew.js` 안내 한 줄(node 가짜 DOM)·CSS. 공용 `_cpg_anchor`(기존 cast·bl 기대값도 씀) |
 | 파드 영역 | `check_pod_zones`(pz-a~h), 2026-10-31 지시서 105·106 | `POD_ZONES` 설정 줄(base·prod 값·자리·주석·prod 서브넷 수 = 영역 수·dev 오버레이에 없음), 값 판정 `_pz_zone_problems`(빈 값·빈 항목·공백·꼴·중복), 템플릿 affinity 8줄 블록 2곳·자리·분산 블록 그대로, `render.py` 메모리 렌더 prod `[2a,2c]`·dev `[2a,2b,2c]`(PyYAML이 있으면 dict 비교, CI는 글자 블록), 저장소 밖 임시 트리에서 CLI `render.py --target prod|dev` + CI 미치환 grep 판정 0줄·`POD_ZONES` 없으면 실패. 106: pz-f 템플릿 영역 분산 항목 자리(hostname 항목 바로 뒤)·주석 낱말·정책 키 없음·롤링 전제(replicas 2·maxUnavailable 0·maxSurge 1)·`_pz_zone_rule_place` 표본, pz-g prod·dev 렌더 분산 목록 [hostname, zone]·부모 경로·selector 이름, pz-h 설정 주석 사실(노드 2a·2b·2c 한 대씩). 105는 기존 검사 기대값을 바꾸지 않았고, 106은 pz-a "no 2c node"(있음 → 없음)와 pz-d 분산 목록(hostname → hostname·zone)을 바꿨다 |
 
 ### 10.2 기타 도구
