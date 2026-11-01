@@ -1202,6 +1202,31 @@
     return { found: true, text: hint ? text + " — " + hint : text };
   }
 
+  /* 지시서 113: 캐릭터 설명의 인터넷 외모 용어를 웹 검색으로 풀이해 캐스팅 문장에 더한 조각(서버 termsApplied, 켬일 때만 온다).
+     사용자가 해석이 틀렸는지 볼 수 있게 용어마다 "설명의 '꽃미남'을 'a …' · 'b …'으로 해석했어요" 한 줄. 조사 을/를은 용어 끝 한글 음절의
+     받침을 따르고, 한글이 아니면 "을(를)". 글이 아닌 항목·빈 조각은 건너뛴다(끔·옛 서버면 키가 없어 줄이 없다). */
+  function castingObjectParticle(word) {
+    var text = String(word || "");
+    var code = text.charCodeAt(text.length - 1);
+    if (code >= 0xac00 && code <= 0xd7a3) return (code - 0xac00) % 28 ? "을" : "를";
+    return "을(를)";
+  }
+
+  function castingTermLines(cast) {
+    var items = Array.isArray((cast || {}).termsApplied) ? cast.termsApplied : [];
+    var lines = [];
+    items.forEach(function (item) {
+      var term = item && typeof item.term === "string" ? item.term : "";
+      var pieces = (item && Array.isArray(item.pieces) ? item.pieces : []).filter(function (piece) {
+        return typeof piece === "string" && piece;
+      });
+      if (!term || !pieces.length) return;
+      lines.push("설명의 '" + term + "'" + castingObjectParticle(term) + " " +
+        pieces.map(function (piece) { return "'" + piece + "'"; }).join(" · ") + "으로 해석했어요");
+    });
+    return lines;
+  }
+
   function castingSection(host, detail) {
     var cast = (detail && detail.casting) || {};
     if (!cast.enabled) return null;
@@ -1273,6 +1298,10 @@
     if (blLine) {
       formBox.appendChild(el("p", blLine.found ? "vnew-casting-bl-found" : "vnew-hint vnew-casting-bl-guide", blLine.text));
     }
+    // 웹 검색 용어 풀이(지시서 113, 읽기 전용): 용어마다 작은 글씨 한 줄. termsApplied 가 없거나 비면 줄이 없다.
+    castingTermLines(cast).forEach(function (text) {
+      formBox.appendChild(el("p", "vnew-hint vnew-casting-term-note", text));
+    });
 
     var lookWrap = el("label", "vnew-field vnew-casting-look");
     lookWrap.appendChild(el("span", "vnew-field-label", "외모 문장 (영어, 300자 이하)"));

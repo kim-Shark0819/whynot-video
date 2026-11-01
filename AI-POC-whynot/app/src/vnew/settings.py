@@ -284,6 +284,22 @@ VNEW_BL_LOOK = _bool("VNEW_BL_LOOK", True)
 VNEW_CAST_PHOTO_CHECK = _bool("VNEW_CAST_PHOTO_CHECK", True)
 # 검사 모델(코드 기본, 템플릿에 넣지 않는다). 기본 = 그림 1장 검사(char-fidelity 그림 검사·사람 수)의 PEOPLE_COUNT_MODEL.
 VNEW_CAST_PHOTO_CHECK_MODEL = os.getenv("VNEW_CAST_PHOTO_CHECK_MODEL", "").strip() or PEOPLE_COUNT_MODEL
+# 인터넷 외모 용어 웹 검색 풀이(지시서 113, 2026-11-02, term_search.py). 켜고 Brave Search API 키(아래)도 있으면, 실사 캐스팅 뽑기 스레드가 첫 제출
+# 전에 캐릭터 설명(extraPromptKo)에서 코드 표에 없는 외모·체격·인상 인터넷 용어(꽃미남·두부상 등, 최대 3개)를 LLM 으로 뽑고, 용어마다 Brave 웹 검색
+# 1회(질의는 용어 하나뿐)·해석 LLM 1회로 영어 외모 조각을 만들어 캐스팅 문장의 참고 문장 끝에 붙인다. 결과는 사용자별 용어 캐시(S3 글, 30일)와
+# 캐릭터 casting.termSearch 에 둔다. false 이거나 키가 없으면 지금 동작(검색·LLM 0, 문장·보기 그대로). 저장된 결과는 지우지 않는다(끔이면 읽지 않는다).
+VNEW_TERM_SEARCH = _bool("VNEW_TERM_SEARCH", False)
+# 용어 뽑기·해석 LLM. 빈 값이면 그림 검사 모델(PEOPLE_COUNT_MODEL, 실사 사진 검사 모델의 기본과 같다).
+VNEW_TERM_MODEL = os.getenv("VNEW_TERM_MODEL", "").strip() or PEOPLE_COUNT_MODEL
+# Brave Search API 키의 env 이름(이름만 둔다). 값은 k8s Secret(BRAVE_SECRET_NAME 의 brave-search-api-key)에서 env 로 들어오고, 코드·로그·설정 파일에
+# 쓰지 않는다. 값은 모듈 상수로 두지 않고 쓸 때마다 brave_search_api_key() 로 읽는다(설정 덤프·repr 에 남지 않게).
+BRAVE_SEARCH_API_KEY_ENV = "BRAVE_SEARCH_API_KEY"
+
+
+def brave_search_api_key() -> str:
+    """Brave Search API 키 값(env BRAVE_SEARCH_API_KEY, 앞뒤 빈칸 지움). 없으면 "". 로그에 남기지 않는다."""
+    return os.getenv(BRAVE_SEARCH_API_KEY_ENV, "").strip()
+
 
 # 통 테이크 실사 버전(vnew-live-fx 묶음 C, 2026-10-30). 켜면 웹툰 통 테이크가 끝난 gen 에서 같은 프리비즈 녹화로
 # 실사 버전(회차)을 만들 수 있다(POST /generate/real). false 면 그 시작만 404(TakeRealDisabled)이고, 이미 시작한 실사

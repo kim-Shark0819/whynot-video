@@ -2073,6 +2073,13 @@ textarea.vnew-field-input {
   font-size: 12px;
 }
 
+/* 웹 검색 용어 풀이 한 줄(지시서 113, 읽기 전용). BL·외모 용어 줄 아래 작은 글씨. 영어 조각이 길어도 줄을 넘기지 않게 끊는다. */
+.vnew-casting-term-note {
+  margin: 0;
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+
 .vnew-casting-look-text {
   width: 100%;
 }
