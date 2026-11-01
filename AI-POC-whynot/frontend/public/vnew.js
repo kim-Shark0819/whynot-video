@@ -2069,6 +2069,11 @@
      ④ 프리비즈는 콘티가 ready 면, ⑤ 영상은 프리비즈 녹화가 모두 끝나면(previz.recordedAll),
      ⑥ 사운드는 gen.selected 가 있으면 열린다(설계자 2026-10-21).
      ⑦ 편집은 gen.selected 가 있고 서버가 편집 재료가 있다고 줄 때(gen.edit.available, VNEW_EDIT 켬) 열린다(지시서 111). */
+  function editAvailable() {
+    var gen = (state.plan || {}).gen || {};
+    return !!(gen.edit && gen.edit.available === true);
+  }
+
   function maxReachableStep() {
     var plan = state.plan || {};
     var conti = plan.conti || {};
@@ -2099,11 +2104,12 @@
       item.appendChild(el("span", "vnew-plan-step-mark", step[0]));
       item.appendChild(el("span", "vnew-plan-step-text", step[1]));
       // 갈 수 있는 단계까지만 활성화. 그 뒤 단계는 아직 안내만(is-soon).
-      var canGo = stepNo <= maxStep;
+      // ⑦ 편집은 영상 선택 없이도(부분 성공 gen) 서버가 재료가 있다고 주면 연다(dev 화면 확인 2026-11-02).
+      var canGo = stepNo <= maxStep || (stepNo === 7 && editAvailable());
       if (!canGo) item.classList.add("is-soon");
       item.addEventListener("click", function () {
         if (stepNo === state.planStep) return;
-        if (stepNo <= maxStep) {
+        if (stepNo <= maxStep || (stepNo === 7 && editAvailable())) {
           if (state.planStep === 7) editLeave(); // ⑦ 을 떠나면 남은 저장을 보내고 재생·키를 멈춘다
           state.planStep = stepNo;
           renderPlan();
