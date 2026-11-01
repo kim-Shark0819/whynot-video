@@ -1941,3 +1941,87 @@
   5. fal이 FLUX.2 [pro] 요청을 안에서 다른 회사로 넘기는지(데이터 처리 범위) 확인하지 않았다.
   6. 코드 되돌리기(108 이미지) 때는 운영 절차(설정 먼저·진행 중 회차 끝난 뒤)가 필요하다(위 운영성).
   7. 409 `CostMismatch` 안내 문구가 보인 뒤 느낌을 바꾸면 버튼 금액은 바뀌지만 안내 문구는 그대로 남는다(확인창 금액은 맞다).
+
+### 지시서 110 — vnew 마지막 단계 ⑦ 편집(영상 편집 타임라인) 1부: 분석·스펙·서버 `VNEW_EDIT` (Kiro, claude-opus-5.5)
+
+- **범위**: 사용자 지시(2026-11-01) "⑥ 사운드 뒤에 Filmora·CapCut 같은 편집 단계". 새 스펙 `.kiro/specs/vnew-edit-timeline/`(requirements R1~R9·design D1~D14·§4 API·§5 화면 설계·tasks 1~9)을 쓰고 같은 실행에서 서버 구현·검사까지 했다. 화면(`vnew.js`)은 지시서 111이다(design §5를 따른다). 커밋·push 하지 않았다. git·aws·kubectl·네트워크·유료 API를 쓰지 않았다(로컬 ffmpeg만 검사용). 사용자 데이터는 읽지 않았다.
+- **먼저 한 일**: 바꿀 파일 10개와 수정 금지 파일 5개(`config.dev.env`·`casting.py`·`genre_bl.py`·`.gitlab-ci.yml`·`vnew.js`)의 시작 전 사본, 저장소 파일 목록(크기·mtime)을 저장소 밖(`%TEMP%\edt110`)에 두었다. 시작 전 전체 검사 전부 통과(ok 66줄, FAIL·WARN 0, 99초). 검사·커버리지·변형 실행은 모두 `PYTHONPYCACHEPREFIX`(저장소 밖)로 돌려 저장소 `__pycache__`를 건드리지 않았다.
+- **분석 결론**(`docs/ANALYSIS.md` §3.6.3)
+  - 편집 재료: 컷 단위(`previz`)는 `units[i].<그림체>.outputKey`(컷 하나 = 결과 하나)가 "컷 하나 = 클립 하나"에 가장 맞다. 3초로 채워 만든 컷은 `origSeconds`까지(⑤ `_do_concat`과 같은 끝). 통 테이크(`previz-take`)는 테이크 결과(컷 여러 개)를 녹화 컷 경계로 나눈 클립으로 시작하고, 다시 녹화했거나 결과 길이가 녹화 합과 0.5초·10% 넘게 다르면 통째 1개. 옛 순차 모드는 구간마다. 컷 결과가 없고 합친 영상(`final-*.mp4`)만 있으면 그것 1개를 클립으로 넣고 사용자가 나눈다. 통 테이크 실사는 지난 회차(`realHistory`) 결과도 허용한다(새 회차가 칸을 비워도 저장 문서가 깨지지 않게). `clipKey`·녹화·시작 장면은 재료가 아니다.
+  - 실사·웹툰: 문서 하나에 그림체 하나(지시서 "gen마다 1개"). 처음은 `gen.selected`, 바꾸면 그 그림체 기본 문서로 시작(저장본이 바뀐다, 화면 실행 취소로 되돌림). 허용 목록은 그 그림체 결과만.
+  - ⑥ 사운드는 화면 토글뿐이라 저장 결과가 없다 → `audio[]`는 비워 둔다. 클립 소리는 원본마다 잰다(통 테이크는 `generate_audio` 기본 켬).
+  - 영상 전달: ⑤·⑥은 presigned GET(영상 버킷, 1시간). 버킷에 CORS가 없어 화면이 영상 바이트를 캔버스·Web Audio로 읽을 수 없다 → 썸네일은 서버 필름스트립 JPEG(presigned), 파형은 서버 피크 JSON(처음 요청 때 만들고 S3 캐시).
+  - stitcher: `ffmpeg_path`·`_run`·`_threads_args`만 재사용. `trim`은 `-an`(소리를 버림), `concat`은 클립마다 `ffmpeg -i` + 실패 시 다시 인코딩이라 쓰지 않았다. 새 함수 5개를 파일 끝에만 더했다.
+- **결정**(design §2)
+  - D1·D2 재료·기본 문서(위). D3 클립 사이 간격 없음(예시 간격은 자르기 표시, 내보내기 단순, 필요하면 `gapBefore`로 넓힘).
+  - D4 저장: `{gen 루트}/edit.json`(메인 버킷, `plan.json`과 따로 — 잦은 저장이 plan ETag를 흔들지 않게). 기준 `etag`(첫 저장 "") 또는 `version`, 다르면 409 `EditChanged`. 쓰기는 조건부(첫 저장 If-None-Match, 그 뒤 If-Match)라 읽기와 쓰기 사이 다른 저장도 409.
+  - D5·D6 필름스트립(높이 72, 1초 간격, 칸 120 상한)·파형(1초 20개, 8kHz 모노 PCM 파일을 800바이트씩 읽음)을 한 번에(원본 한 번 받기 + ffmpeg 2번), `{mid}-strip.jpg`·`{mid}-film.json`. mid = `m` + sha256(키) 앞 16자.
+  - D7 길이 캐시 `edit-media/index.json`(성공만 남김), GET은 기본 문서 재료·저장 문서가 쓰는 재료만, 한 번에 20초 예산(`probing`).
+  - D8 내보내기: 클립마다 `edit_segment`(trim 프레임 정확 → fps → 비율 지켜 줄이고 검은 여백 → tpad → 정확히 N장, 같은 구간 PCM을 N/fps초로 정확히) → `edit_join`(concat 스트림 복사 + PCM → AAC 192k). 크기·fps = 첫 클립 원본(1920×1080 안, fps는 48000을 나누는 정수, 아니면 24). 프레임은 누적 반올림(클립 200개도 전체 = 문서 합 한 프레임 안). 시작은 반 프레임 당겨 가장 가까운 프레임. 소리 끈 클립·소리 없는 원본은 무음, 전부 없으면 영상만.
+  - D9 상태 `edit-export.json`(문서와 따로), 시작 때 클립 사본, 같은 문서(그림체·원본·구간·소리 해시)로 진행 중이면 새로 시작 안 함, 다른 문서면 409 `ExportRunning`. claim·하트비트(클립 사이 5초·기다리는 동안 30초)·300초 끊김 → 처음부터 다시(시도 3번)·한 번 시도 1200초. 결과 영상 버킷 `final-edit-{n}.mp4`, 지난 결과 3개 기록.
+  - D10 메모리: S3 스트리밍(boto3 한 스레드·8MB), 임시 디렉터리 파일 단위, 원본은 마지막 쓰임 뒤 지움, 프로세스당 내보내기 1·재료 ffmpeg 1, 클립 인코딩은 ⑤ 준비 세마포어 안, `-threads 1`·리눅스 `nice -n 10`.
+  - D11 저장·내보내기 바디 256KB(413). D12 `VNEW_EDIT`(코드·base true, 운영 overlay false). D13 로그.
+- **검토한 대안**(design D14): 문서를 `plan.json` 안에(ETag 경합, 기각), 그림체마다 문서(지시서 1개, 기각), `trim`+`concat`(소리 버림·섞인 원본 다시 인코딩, 기각), concat 필터 한 번(디코더 200개, 기각), 클립마다 AAC(21ms 단위로 길이가 밀림, 기각), 화면 캔버스·Web Audio(CORS, 기각), 같은 출처 내려받기 라우트(512Mi가 영상 중계, 기각), done 문서 다시 내보내기 막기(지시서는 진행 중만, 기각), 이어받기 때 끝난 클립 건너뛰기(임시 파일이 파드와 함께 사라짐, 기각), worker 사이 flock(보류 → 남은 이슈).
+- **바꾼 것**
+  - `app/src/vnew/edit.py`(새, 1,240줄): 키 규칙·외부 호출 래퍼(`_download`·`_upload`·`_probe_file`·`_film_file`·`_export_segment`·`_export_join`·`_spawn_export`)·재료(`_material_items`·`_default_group`·`_describe`·`_take_spans`·`_default_clips`·`summary`)·길이 캐시(`_ensure_meta`)·검증(`_clean_clips`)·보기·저장(`edit_view`·`save_doc`)·필름(`media_view`)·내보내기(`start_export`·`reconcile_export`·`_beat`·`_finish`·`run_export`·`_export_geometry`·`_clip_frames`).
+  - `app/src/vnew/routes.py`(+76): 라우트 4개와 `_edit_body`. `settings.py`(+6): `VNEW_EDIT`와 주석. `generate.py`(+7 −1): `gen_view` `return {` → `view = {`, 켬이면 끝에 `edit` 요약.
+  - `app/src/stitcher.py`(+284, 끝에만): `probe_media`·`edit_segment`·`edit_join`·`filmstrip_jpeg`·`audio_peaks`·`_edit_nice`·`_edit_run`·`_fit_pcm`·`EDIT_*`. 지시서 110 전 18,844바이트는 그대로(sha256 검사).
+  - `deploy/config.env.example`(+5)·`k8s/workloads.yaml.tmpl`(+3)·`deploy/config.prod.env`(+2, `VNEW_ENABLED=true` 바로 뒤, BOM·끝 두 줄 그대로).
+  - `tools/check_vpoc.py`(+1,484, 지운 줄 0): `PARITY_ENV_KEYS`, `_EdtStore`·`_EdtEnv`·`_edt_*`·`check_vnew_edit`(edt-a~l), `main()`.
+  - 스펙 세 파일(새), `docs/ANALYSIS.md`(머리 줄·§2.3·§3.6 모듈 표·새 §3.6.3·§3.7·§4.4·§7.1·§9.1·§9.2·§10.1), 이 항목.
+- **검사(어떤 검사가 무엇을 덮는지)**
+
+  | 검사 | 덮는 것 |
+  |---|---|
+  | edt-a | `settings.VNEW_EDIT`(하위 프로세스: 없음·빈 값·true·false·0·no·글자), 템플릿 한 쌍 자리·주석, base true·되돌리기 주석·자리, `PARITY_ENV_KEYS` 자리, 운영 overlay false(BOM·LF·끝 줄 `VNEW_HIDE_STORY=false`), dev overlay 없음, render dev true·prod false·prod+true |
+  | edt-b | `_material_items`(컷·테이크·구간·합친 영상·회차 기록·같은/빈 키·꼴 틀린 칸·완료 전 칸·units 꼴), `_default_group`, `_describe`(이름), `_take_spans`(경계 3개·비례 10.04초·다시 녹화·14초·칸 없음·길이 0·녹화 수·컷 순서·컷 하나), `_default_clips`(채운 컷 1.5초·클립 한도), `edit_view`(그림체: selected·인자·저장본·웹툰 먼저·400, 저장본과 다른 그림체 = 기본 문서 + 저장본 etag·version, `NoMaterials` 409·`NoGen` 404·`BadGen` 409, `invalidClips` notAllowed·outOfRange + 내보내기 400), `_presign` 실패·빈 키 |
+  | edt-c | PUT 거절 25경우(다른 그림체·다른 프로젝트·경로 꼴·숫자 키, 글자·bool·없는 시간, in<0·out>길이·0.04 미만·in>out, 201개·303초, id 꼴·41자·겹침, 클립 꼴, muted, audio 있음·꼴, variant, clips 꼴, 기준 없음·etag 숫자·version bool) + JSON NaN·Infinity·−Infinity, 413 3경우(길이 아는 PUT·POST, chunked), 성공 저장(길이 +0.0005 자름·label 제어 문자·40자·기본 밖 재료·정수 시간), `SourceUnreadable` 409 |
+  | edt-d | 첫 저장 etag ""·version 1, 같은 기준 409, etag 기준·옛 etag 409, version 기준·옛 version 409, 읽기 뒤 다른 저장(If-Match) 409, 첫 저장끼리(If-None-Match) 409·먼저 저장한 문서 남음, 다른 저장 오류 그대로(502 SlowDown), 그림체 바꿔 저장 |
+  | edt-e | 프로젝트 없음 404, 읽기 403(GET·media), 쓰기 403(PUT·POST, GET은 됨), 트랙 403, 끔 네 라우트 404 `EditDisabled`·프로젝트 조회 0, mid 꼴·모르는 mid 404, 다른 그림체 재료 필름 200 |
+  | edt-f | 로컬 ffmpeg 실측: 실제 원본 3개(25fps 소리·24fps 무음·48kHz 소리) 길이·소리·크기·fps, 4클립(끈 클립·무음 원본 포함) 내보내기 길이 5.96초 ≈ 문서 합 5.97초(±0.1)·149프레임·소리·320×180·25fps·임시 정리, 필름스트립 3칸 128×72(JPEG 384×72)·피크 약 60개·무음 원본 피크 0 |
+  | edt-g | POST 202·queued·n 1·스레드 1·사본, 같은 문서 다시 → 새로 시작 안 함, 소리만 바꾼 문서 409·id/이름만 바꾼 문서는 같음, 다른 문서 409, 저장 전·etag 다름·없음 409, 실행(가짜 ffmpeg): done·결과 키·길이·소리·진행·claim 비움, 프레임 36·36·48·24·fps 24·1280×720·반 프레임 당김·소리 결정·⑤ 세마포어 안, 원본 한 번 받기·마지막 쓰임 뒤 지움·PCM 길이·임시 정리, 결과 영상 버킷 `video/mp4`·GET URL·`matchesDoc`, 다시 내보내기 n 2·기록 3개, 빈 타임라인 409, 클립 실패(문구에 경로·원문 없음·로그 단계), 시간 상한, 사본 검사(남의 키·빈 목록)·못 읽는 결과, `_export_geometry` 4경우·`_clip_frames` 200클립 |
+  | edt-h | 하트비트 끊김 → 새 claim·attempts 2·스레드·끝까지, 최근 하트비트·이 프로세스 실행 중 → 그대로, 3번째 → failed, 사이에 다른 실행이 잡음, claim 잃음 → 결과·상태 안 씀, 실패를 쓰려는데 claim 잃음·상태 쓰기 실패, 기다리는 동안 queued 하트비트 → 끝까지, `_spawn_export`·`_alive_here`, 보기의 이어받기 실패 |
+  | edt-i | 길이 재기: 처음 3·두 번째 0·index 한 번 읽기·문서가 쓰는 재료만 1 더, 못 읽은 재료 문구·캐시 안 함·다시 받음·영상 버킷, 예산(하나씩·probing), `_merge_index` 충돌 넘어감, `_mutate_json` 충돌 두 번 뒤 성공·다섯 번 409·다른 오류 그대로, 필름 처음 만듦·두 번째 0회·한 번 읽기·원본 다른 캐시 다시·긴 원본 3초 간격 84칸·못 읽는 원본 409·파형 실패 |
+  | edt-j | `probe_media` 읽기·못 읽음·시간 초과·없는 파일, `edit_segment` 명령 리스트·PCM 채움·자름·무음·threads None·값 검사 6·원본 없음·실패, `edit_join` 명령(소리·영상만)·목록 파일 지움·이스케이프·빈 조각·없는 소리·실패, `filmstrip_jpeg` 명령·값 검사·원본 없음·실패, `audio_peaks` 계산(400샘플마다 최대 절댓값·홀수 바이트)·간격 검사·실패·원본 없음, nice 앞붙임·시간 초과 문구, 지시서 110 전 부분 sha256 |
+  | edt-k | 실제 `Store` + 가짜 boto3 클라이언트: `download_fileobj`·`upload_fileobj`, `use_threads` false·8MB 조각, SSE AES256·ContentType, 버킷별 리전 |
+  | edt-l | `gen_view` 켬 끝 키 `edit`·끔 그 키만 없음·재료 없음·gen 없음·진행 중 회차, `summary` 꼴 틀림·예외, `vnew.edit` 로그에 S3 키·URL 없음, urlopen 0 |
+
+- **기대값을 바꾼 기존 검사**: 없다. 기본값(`VNEW_EDIT` 켬)에서 `gen_view` 끝에 `edit`이 붙어도 기존 66개가 그대로 통과했다(고정 래퍼도 더하지 않았다). rw 줄의 "템플릿 env" 수만 31개 → 32개.
+- **확인**
+  - `python -X utf8 tools/check_vpoc.py` 전부 통과: ok 67줄(66 + edt), FAIL·WARN 0, 102초. 기존 66줄은 `VNEW_EDIT`를 `PARITY_ENV_KEYS`에 넣은 뒤 출력과 글자까지 같다. edt 단독 4.1~4.4초.
+  - 커버리지(coverage 7.17, 전체 검사기 `coverage run --source=app/src`, 데이터는 저장소 밖, 시작 전 사본과 difflib): 바뀐 서버 실행문 1,032개 중 1,025개(99.3%) — `edit.py` 807/807, `routes.py` 56/56, `settings.py` 1/1, `generate.py` 5/5, `stitcher.py` 156/163(못 한 7줄: 리눅스 `nice` 찾기 2·`os.unlink` 실패 무시 4·빅엔디언 바이트 바꾸기 1 — 윈도 개발 PC에서 닿지 않는 방어 분기).
+  - 변형 검사 88개(저장소 밖 사본 트리, 변형마다 한 군데만 바꿔 `check_vnew_edit`만 실행 후 원본으로): `edit.py` 65(검증 11·재료·기본 문서 9·저장 5·내보내기 21·캐시 7·보기·배선 12), `stitcher.py` 12(프레임 수·PCM·trim·잇기 다시 인코딩·음수 피크·fps 소수·소리·fps 검사·nice·필름 간격·samples·기존 `trim` 기본값), `routes.py` 6, `settings.py`·`generate.py` 각 1, 설정 파일 3. 모두 잡혔다(놓친 것 0). 처음 실행에서 5개가 살아남았다 → 2개는 같은 뜻의 중복 코드(기본 재료 묶음의 합친 영상 분기, 바디 길이 미리 보기)라 코드를 줄였고, 3개는 검사가 모자라(완료 전 칸에 키가 있는 경우, 캐시가 있을 때 index·필름 json 읽기 수) 검사를 더했다.
+  - 유료 호출 0: 외부는 S3(메모리 저장소)·ffmpeg 래퍼(가짜, edt-f·edt-i 일부는 로컬 ffmpeg 7.1)·fal 가격 조회(가짜)뿐이고 urlopen은 막아 0회를 본다. 라우트·`edit.py`·plan 저장·내보내기 스레드 본체는 실제 코드 경로다.
+  - 줄 끝·부산물: 바뀐 10개 파일과 새 4개 파일 모두 CR 0·끝 줄바꿈 있음, BOM은 `config.prod.env`만(시작 전과 같음). 공백만 바뀐 줄 0, 새 줄 끝 공백 0, 지운 함수 정의 0(AST). 수정 금지 5개 파일은 바이트가 같다. 시작 뒤 바뀐 저장소 파일은 위 파일과 실행 로그 `.kiro/handoff/logs/110.log`뿐이고 새 파일은 스펙 3개·`edit.py`뿐이다(`__pycache__` 변화 0, `.coverage` 등 0). 실행 중에 생긴 `.kiro/handoff/112-*.md`·`113-*.md`는 이 작업이 만든 파일이 아니다(건드리지 않았다).
+- **3단계 리뷰**
+  - 보안
+    - sourceKey 허용 목록: PUT·내보내기 시작 때 서버가 gen에서 만든 목록과 글자가 같아야 한다(다른 그림체·다른 프로젝트·경로 꼴 400, edt-c). 내보내기 스레드는 사본 키가 `users/{owner}/video/{pid}/`로 시작하는지 한 번 더 본다(edt-g). 필름 라우트는 키를 받지 않고 mid(정규식)를 재료 목록에서 찾는다.
+    - 경로 주입: S3 키는 서버 값(owner 접두사·존재하는 pid·정규식 `_GEN_ID_RE`로 본 genId — 꼴이 틀리면 409 `BadGen`·mid·정수 n)으로만, 로컬 파일은 임시 디렉터리 안 고정 이름(edt-b).
+    - ffmpeg 인자 주입: 리스트 실행(셸 없음), 사용자 값은 검증한 유한 숫자만(`{:.3f}`·정수), 필터 문자열은 숫자로만 조립, `label`은 ffmpeg·로그에 가지 않는다. concat 목록은 우리 임시 경로만·작은따옴표 이스케이프(edt-j).
+    - presigned URL: 1시간(⑤·⑥과 같다), GET마다 새로 서명·저장하지 않음. 영상은 영상 버킷 `video/mp4`, 필름스트립은 메인 버킷 `image/jpeg`(edt-b·i에서 버킷·형식까지 본다).
+    - 발견: 앱 전체 `MAX_CONTENT_LENGTH`가 영상 업로드용 100MB라 편집 PUT 바디를 100MB까지 파싱할 수 있었다 → 256KB(413). chunked 바디는 werkzeug가 예외 없이 잘라 길이로 판단한다(조치, edt-c 3경우).
+    - 로그·오류: `vnew.edit.*` 로그에 S3 키·URL이 없다(edt-l), 실패 문구는 단계별 고정 문구(ffmpeg 원문·임시 경로는 로그에만, `error_gist`). 외부 전송 없음, 비밀값 추가 없음.
+  - 성능(dev 파드 512Mi·CPU 0.5, gunicorn worker 2 × thread 4)
+    - 메모리: ffmpeg 실측(로컬 `-benchmark` maxrss) 720p 클립 인코딩 ≈ 142MB(⑤ 컷 자르기 `stitcher.trim` 141MB와 같음), 필름스트립 ≈ 61MB, 파형 ≈ 34MB. 영상 바이트는 메모리에 모으지 않는다(S3 스트리밍 8MB, PCM·조각은 파일). 발견: 같은 worker에서 ⑤ 준비(trim)와 ⑦ 인코딩이 겹치면 ffmpeg 두 개(≈280MB)가 된다 → 클립 인코딩을 ⑤ 준비 세마포어(1칸) 안에서 클립마다 잡고 놓는다(조치, edt-g `semHeld`). ⑤는 클립 하나 인코딩 시간(수 초)만 기다린다.
+    - 동시성: 프로세스당 내보내기 1·재료 ffmpeg 1, 같은 gen 길이 재기는 잠금 하나. worker가 2개라 파드 안 동시 내보내기는 2개까지(남은 이슈 3).
+    - 외부 호출: GET은 plan·문서·내보내기 상태·index 읽기 4번(+ 처음만 재료마다 받기·ffmpeg -i), PUT은 plan·index·문서 읽기 + 쓰기 1, 필름 첫 요청은 받기 1·ffmpeg 2·쓰기 2(그 뒤 읽기 1), 내보내기는 원본마다 받기 1번·하트비트 쓰기 5초에 한 번 이하.
+    - 시간: ffmpeg 호출마다 600초, 한 번 시도 1200초, GET 길이 재기 20초 예산. 로컬 실측 720p 8초 인코딩 1.3초(1코어), dev 0.5코어는 4~6배로 본다(추정 — dev에서 `vnew.edit.export_done ms=`로 잰다). 300초 상한 문서면 약 4~6분.
+    - CPU: `-threads 1` + 리눅스 `nice -n 10`(같은 파드 API 응답을 덜 막는다).
+  - 운영성
+    - 로그(design D13): `saved`·`probe`·`film`·`export_start`·`export_done ms= rss_mb=`·`export_failed stage= clip=`·`export_resume`·`export_abandoned`·`export_claim_lost`·`export_state_failed`·보조 실패 4종.
+    - 설정·되돌리기: `config.<target>.env`에 `VNEW_EDIT=false` 한 줄(라우트 404·⑦ 없음). 운영은 이미 false. 숫자 한도는 `edit.py` 상수.
+    - 진행 중 작업: 끈 뒤에도 진행 중 내보내기 스레드는 끝까지 한다. 저장 문서·결과·캐시는 gen 루트 아래 남고 다른 기능이 읽지 않는다. 새 gen을 만들면 새 문서로 시작한다(옛 gen 문서는 남는다).
+    - 재시작 뒤 이어하기: 하트비트 300초 끊김이면 GET /edit(또는 내보내기 시작) 때 새 claim으로 처음부터(시도 3번), 그 뒤 failed 문구. 기다리는 동안도 하트비트라 다른 파드가 가로채지 않는다(edt-h).
+    - 발견(구현 중, 검사가 잡음): 끝 상태를 쓰는 `_finish`가 `claim=""`를 키워드로 넘겨 `_beat`의 위치 인자 `claim`과 겹쳐 TypeError가 났고, 내보내기가 running에 남았다 → `_beat` 인자 이름을 `token`으로(조치, edt-g). 발견: 회차 기록 `units`가 목록이 아니면 재료 모으기가 예외였다 → 목록일 때만(조치, edt-b).
+- **운영 반영 계획(실행하지 않음)**: Claude 검토·커밋 → 개발 main 병합 → CI → ArgoCD(dev는 base true). 지시서 111 화면 뒤 dev에서 ⑤까지 끝난 프로젝트로 ⑦ GET(재료·기본 문서)·필름스트립·두 탭 저장 409·내보내기(로그 `export_done ms= rss_mb=`, 파드 메모리)를 본다. 운영은 이번에 켜지 않는다(`config.prod.env` `VNEW_EDIT=false`). 켤 때 그 줄을 지우고 수동 job `deploy:whynot:prod`.
+- **111(화면)에 넘길 사항**: design §4(응답 모양)·§5(단계 막대 ⑦은 `gen.edit`이 있을 때만, `gen.selected && gen.edit.available`이면 갈 수 있음, 레이아웃·조작·단축키·실행 취소 100단계·0.8초 디바운스 저장·409 다시 불러오기·`probing` 대기·필름은 하나씩 차례로·CSS 배경으로 칸 자르기·내보내기 3초 폴링·`textContent`만). 오류 kind 목록은 design §4.2·§4.3.
+- **남은 이슈**
+  1. 운영을 켜기 전에 편집 오류 kind를 `vpoc/errors.py` `USER_FACING_KINDS`에 넣을지 정한다(이번 범위 밖 파일). 운영 `VPOC_RAW_ERRORS=false`라 지금은 "처리 중 오류(코드: …)"로 보인다. dev는 문구 그대로다.
+  2. 컷 단위(Kling O3 edit) 결과에 소리가 있는지 실측하지 않았다(추정 없음 → 서버가 원본마다 잰다).
+  3. gunicorn worker 2개라 파드 안 동시 내보내기는 2개까지다(최악 ffmpeg 2개 ≈ 280MB + 앱). 사용자가 적은 dev에서는 드물다고 본다. 필요하면 `/tmp` 파일 잠금(flock)으로 파드당 하나로 줄인다.
+  4. dev 0.5코어에서 내보내기 시간·`nice` 효과는 실측하지 않았다(추정). 첫 dev 확인에서 로그로 잰다.
+  5. 내려받기 URL은 재생 URL과 같은 presigned다(⑤·⑥과 같다). 다른 출처라 `<a download>`가 무시돼 새 탭에서 재생될 수 있다. 바로 내려받기가 필요하면 presign에 `ResponseContentDisposition`을 더하는 저장소 함수가 필요하다(`vpoc/store.py`, 범위 밖).
+  6. 이어받기는 처음부터 다시 한다(임시 파일이 파드와 함께 사라진다). 내보내기 취소는 없다.
+  7. 통 테이크 컷 경계는 녹화 타이밍에 비례한 추정이다. 모델이 타이밍을 바꾸면 경계가 조금 어긋난다(사용자가 끝을 끌어 맞춘다, 처음 상태로 되돌리기 가능).
+  8. `CLAUDE.md`는 `stitcher.py`를 고치지 않는 플랫폼 파일로 적고 있다. 이번에는 지시서가 "새 함수 추가만"을 허락해 파일 끝에만 더했다(`PLATFORM_FILES.txt`에는 없는 파일, 기존 부분 sha256 그대로).
+  9. `stitcher.py` 새 함수의 방어 분기 7줄(리눅스 `nice` 찾기·`unlink` 실패·빅엔디언)은 윈도 개발 PC 검사에서 닿지 않는다. CI(리눅스)에서는 `nice` 분기가 돈다.
