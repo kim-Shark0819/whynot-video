@@ -35787,17 +35787,17 @@ def check_vnew_edit() -> None:
         prod_text = prod_bytes.decode("utf-8-sig")
         expect("edt-a", [prod_bytes[:3] == b"\xef\xbb\xbf", prod_bytes.count(b"\r"), re.findall(r"^VNEW_EDIT=(.*)$", prod_text, re.M),
                          prod_text.splitlines()[-1], "VNEW_EDIT" in (ROOT / "deploy" / "config.dev.env").read_text(encoding="utf-8")],
-               [True, 0, ["false"], "VNEW_HIDE_STORY=false", False], "운영 overlay false 한 줄(BOM·LF·끝 줄 그대로)·dev overlay 없음")
+               [True, 0, ["true"], "VNEW_HIDE_STORY=false", False], "운영 overlay true 한 줄(2026-11-02 사용자 승인)(BOM·LF·끝 줄 그대로)·dev overlay 없음")
         spec = importlib.util.spec_from_file_location("_edt_deploy_render", ROOT / "deploy" / "render.py")
         render = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(render)  # type: ignore[union-attr]
         base = render.load_config(ROOT / "deploy" / "config.env.example")
         rendered = []
-        for target, extra in (("dev", {}), ("prod", {}), ("prod", {"VNEW_EDIT": "true"})):
+        for target, extra in (("dev", {}), ("prod", {}), ("prod", {"VNEW_EDIT": "false"})):
             layer = {**render.load_config(ROOT / "deploy" / f"config.{target}.env"), **extra}
             text = render.render_text(template, render.add_derived({**base, **layer}), "k8s/workloads.yaml.tmpl")
             rendered.append(_rendered_env_values(text, "VNEW_EDIT"))
-        expect("edt-a", rendered, [["true"], ["false"], ["true"]], "렌더 dev true·prod false·prod+true(되돌리기 경로)")
+        expect("edt-a", rendered, [["true"], ["true"], ["false"]], "렌더 dev true·prod true·prod+false(되돌리기 경로)")
 
     # ================= 나머지(가짜 환경) =================
     try:
