@@ -2038,22 +2038,30 @@
 
   /* 어느 단계까지 갈 수 있는가. ①②③은 콘티 ready 까지의 규칙을 따르고(기존),
      ④ 프리비즈는 콘티가 ready 면, ⑤ 영상은 프리비즈 녹화가 모두 끝나면(previz.recordedAll),
-     ⑥ 사운드는 gen.selected 가 있으면 열린다(설계자 2026-10-21). */
+     ⑥ 사운드는 gen.selected 가 있으면 열린다(설계자 2026-10-21).
+     ⑦ 편집은 gen.selected 가 있고 서버가 편집 재료가 있다고 줄 때(gen.edit.available, VNEW_EDIT 켬) 열린다(지시서 111). */
   function maxReachableStep() {
     var plan = state.plan || {};
     var conti = plan.conti || {};
     var previz = plan.previz || {};
     var gen = plan.gen || {};
+    if (gen.selected && gen.edit && gen.edit.available === true) return 7;
     if (gen.selected) return 6;
     if (previz.recordedAll) return 5;
     if (conti.status === "ready" && (conti.cuts || []).length) return 4;
     return 3;
   }
 
+  /* 단계 막대 목록. ⑦ 편집은 서버가 gen.edit 을 줄 때만(설정 VNEW_EDIT 켬, design §5.1) 보인다. */
+  function planStepList() {
+    var gen = (state.plan || {}).gen || {};
+    return gen.edit && typeof gen.edit === "object" ? PLAN_STEPS.concat([["⑦", "편집"]]) : PLAN_STEPS;
+  }
+
   function planStepBar() {
     var bar = el("nav", "vnew-plan-steps");
     var maxStep = maxReachableStep();
-    PLAN_STEPS.forEach(function (step, index) {
+    planStepList().forEach(function (step, index) {
       var stepNo = index + 1;
       var item = el("button", "vnew-plan-step");
       item.type = "button";
@@ -2067,6 +2075,7 @@
       item.addEventListener("click", function () {
         if (stepNo === state.planStep) return;
         if (stepNo <= maxStep) {
+          if (state.planStep === 7) editLeave(); // ⑦ 을 떠나면 남은 저장을 보내고 재생·키를 멈춘다
           state.planStep = stepNo;
           renderPlan();
         }
@@ -2150,8 +2159,8 @@
       state.planStep = task.name === "conti" || task.name === "fxFill" ? 3 : 2;
       return;
     }
-    // 사용자가 이미 단계를 골랐으면(1~6) 그대로 둔다(단, 갈 수 없는 단계면 되돌린다).
-    if (state.planStep >= 1 && state.planStep <= 6) {
+    // 사용자가 이미 단계를 골랐으면(1~7) 그대로 둔다(단, 갈 수 없는 단계면 되돌린다).
+    if (state.planStep >= 1 && state.planStep <= 7) {
       var maxStep = maxReachableStep();
       if (state.planStep > maxStep) state.planStep = maxStep;
       return;
@@ -2176,6 +2185,8 @@
      3초, 그 밖에는 5초 간격(설계자 2026-10-20). */
   function schedulePlanPoll() {
     stopPlanPolling();
+    // ⑦ 편집은 계획을 다시 불러오지 않는다(다시 그리면 편집 화면이 처음부터 그려진다). ⑦ 은 자기 GET /edit 만 부른다.
+    if (state.planStep === 7) return;
     var plan = state.plan || {};
     var task = plan.task || {};
     var previz = plan.previz || {};
@@ -2297,6 +2308,8 @@
       renderPrevizStep(body);
     } else if (state.planStep === 5) {
       renderGenStep(body);
+    } else if (state.planStep === 7) {
+      renderEditStep(body);
     } else {
       renderSoundStep(body);
     }
@@ -7515,6 +7528,17 @@
     if (final.status === "done" && final.videoUrl) {
       playerTools.appendChild(downloadLink(final.videoUrl, "영상 내려받기"));
     }
+    // ⑦ 편집으로(지시서 111): 서버가 편집 재료가 있다고 줄 때만(gen.edit.available, VNEW_EDIT 켬).
+    if (gen.edit && gen.edit.available === true) {
+      var toEdit = el("button", "primary-button vnew-sound-to-edit", "⑦ 편집으로");
+      toEdit.type = "button";
+      toEdit.title = "컷을 타임라인에 놓고 자르기·순서·소리를 고쳐 mp4 로 내보냅니다";
+      toEdit.addEventListener("click", function () {
+        state.planStep = 7;
+        renderPlan();
+      });
+      playerTools.appendChild(toEdit);
+    }
     playerSec.appendChild(playerTools);
     host.appendChild(playerSec);
 
@@ -7587,6 +7611,1993 @@
     return section;
   }
 
+  /* ================================================================ ⑦ 편집(영상 편집 타임라인, 지시서 111)
+
+     ⑤ 결과 영상을 클립으로 늘어놓고 자르기·끝 끌기·순서·삭제·소리 끄기를 고친다. 서버 /api/vnew/p/<pid>/edit*(edit.py,
+     design §4)를 그대로 쓴다. 미리보기는 <video> 2개를 번갈아 쓰고(다음 클립을 미리 불러 둔다), 썸네일은 서버 필름스트립
+     JPEG 를 CSS 배경으로 잘라 그리고(버킷 CORS 가 없어 캔버스에 그리지 않는다), 파형은 서버 피크 배열을 SVG 막대로 그린다.
+     편집은 실행 취소 100단계, 바뀐 뒤 0.8초 디바운스로 PUT(한 번에 하나), 409 EditChanged 면 다시 불러온다.
+     글은 모두 textContent(el), CSS 클래스는 vnew-edit- 접두사. edit* 순수 함수는 DOM 없이 검사한다(check_vpoc edu-*). */
+
+  var EDIT_SAVE_MS = 800; // 바뀐 뒤 저장(PUT)까지 디바운스
+  var EDIT_PROBE_RETRY_MS = 1000; // probing(서버가 영상 길이를 재는 중)이면 다시 불러오는 간격
+  var EDIT_PROBE_MAX_TRIES = 90; // 1.5분 넘게 probing 이면 멈추고 안내한다
+  var EDIT_EXPORT_POLL_MS = 3000; // 내보내기 queued·running 동안 상태 다시 읽기
+  var EDIT_UNDO_MAX = 100; // 실행 취소 단계
+  var EDIT_MIN_PPS = 20; // 확대 하한(px/초)
+  var EDIT_MAX_PPS = 400; // 확대 상한(px/초)
+  var EDIT_DEFAULT_FPS = 24; // 재료 fps 를 모를 때의 한 프레임
+  var EDIT_MIN_CLIP_S = 0.04; // 서버 MIN_CLIP_S(GET limits.minClipSeconds 가 있으면 그 값)
+  var EDIT_THUMB_H = 48; // 영상 트랙 썸네일 높이(px). vnew.css .vnew-edit-clip 높이와 같다
+  var EDIT_TAIL_PX = 120; // 타임라인 끝 뒤 여백(놓을 자리·끝의 재생헤드)
+  var EDIT_DRAG_PX = 6; // 클립 몸통을 이만큼 움직여야 순서 바꾸기(그보다 적으면 누르기 = 고르기)
+  var EDIT_MEDIA_TTL_MS = 50 * 60 * 1000; // 필름스트립 presigned(1시간)가 끝나기 전에 다시 받는다
+  var EDIT_URL_RETRY_MS = 15000; // 영상 오류(서명 만료 등)로 주소를 다시 받는 최소 간격
+  var EDIT_HELP_KEY = "vnew-edit-help-closed"; // 도움말 닫음(localStorage)
+  var EDIT_HELP_TEXT = "재생헤드를 옮기고 ✂ 또는 S로 자르고, 클립 끝을 끌어 길이를 줄이세요.";
+  var EDIT_CHANGED_TEXT = "다른 곳에서 바뀌어 다시 불러왔습니다.";
+  var EDIT_VARIANT_LABEL = { real: "실사", webtoon: "웹툰" };
+  var EDIT_SVG_NS = "http://www.w3.org/2000/svg";
+  // 눈금 [큰 눈금 간격(초), 작은 눈금 간격(초)]. 큰 눈금 사이가 64px 이상인 첫 간격을 쓴다(editTickStep).
+  var EDIT_TICKS = [[1, 0.25], [2, 0.5], [5, 1], [10, 2]];
+  var editCtx = null; // 지금 열린 ⑦ 화면(editNewCtx). 떠나면 null
+
+  /* ---- 순수 함수(DOM 없음) ---- */
+
+  function editRound3(value) {
+    return Math.round(Number(value) * 1000) / 1000;
+  }
+
+  function editClipLen(clip) {
+    return Math.max(0, Number(clip.out) - Number(clip.in));
+  }
+
+  function editCloneClip(clip) {
+    var copy = {
+      id: String(clip.id),
+      sourceKey: String(clip.sourceKey),
+      in: Number(clip.in),
+      out: Number(clip.out),
+      muted: clip.muted === true
+    };
+    if (typeof clip.label === "string" && clip.label) copy.label = clip.label;
+    return copy;
+  }
+
+  function editCloneClips(clips) {
+    return (Array.isArray(clips) ? clips : [])
+      .filter(function (clip) {
+        return clip && typeof clip === "object";
+      })
+      .map(editCloneClip);
+  }
+
+  /* 클립마다 타임라인 시작 시각(초)과 전체 길이. 클립은 붙어 있다(간격 없음, design D3). */
+  function editStarts(clips) {
+    var starts = [];
+    var total = 0;
+    (clips || []).forEach(function (clip) {
+      starts.push(total);
+      total += editClipLen(clip);
+    });
+    return { starts: starts, total: total };
+  }
+
+  /* 타임라인 시각 t → {index, clip, start, local(클립 안 초), source(원본 초)}. 경계는 뒤 클립(시작 포함·끝 제외),
+     전체 길이 이상은 마지막 클립의 끝, 0 미만은 0. 클립이 없으면 null. */
+  function editLocate(clips, t) {
+    var list = clips || [];
+    if (!list.length) return null;
+    var info = editStarts(list);
+    var time = Math.max(0, Number(t) || 0);
+    for (var i = 0; i < list.length; i++) {
+      var len = editClipLen(list[i]);
+      if (time < info.starts[i] + len - 1e-9 || i === list.length - 1) {
+        var local = Math.min(Math.max(0, time - info.starts[i]), len);
+        return { index: i, clip: list[i], start: info.starts[i], local: local, source: editRound3(Number(list[i].in) + local) };
+      }
+    }
+    return null;
+  }
+
+  /* 프레임 격자(fps, 모르면 24)에 맞춘 초(밀리초 반올림). */
+  function editSnap(value, fps) {
+    var f = Number(fps) > 0 ? Number(fps) : EDIT_DEFAULT_FPS;
+    return editRound3(Math.round(Number(value) * f) / f);
+  }
+
+  /* 재생헤드 t 에서 클립을 둘로 나눈다(같은 원본. 왼쪽은 id·이름·소리 그대로, 오른쪽은 newId·같은 이름·같은 소리).
+     나눔점은 원본 fps 프레임에 맞추고, 두 쪽 모두 minLen(0.04초와 한 프레임 중 큰 값) 이상이어야 한다.
+     반환 {clips, index(오른쪽 조각 번호)}, 못 나누면 null. */
+  function editSplit(clips, t, newId, fps, minLen) {
+    var loc = editLocate(clips, t);
+    if (!loc) return null;
+    var f = Number(fps) > 0 ? Number(fps) : EDIT_DEFAULT_FPS;
+    var min = Math.max(Number(minLen) || EDIT_MIN_CLIP_S, 1 / f) - 1e-6;
+    var cut = editSnap(loc.source, f);
+    var clip = loc.clip;
+    if (cut - Number(clip.in) < min || Number(clip.out) - cut < min) return null;
+    var left = editCloneClip(clip);
+    var right = editCloneClip(clip);
+    left.out = cut;
+    right.in = cut;
+    right.id = String(newId);
+    var next = clips.slice();
+    next.splice(loc.index, 1, left, right);
+    return { clips: next, index: loc.index + 1 };
+  }
+
+  /* 클립 끝 끌기: edge("in"|"out")를 value(원본 초)로 옮긴 사본. 원본 0~duration 안, 길이 minLen(0.04초와 한 프레임 중
+     큰 값) 이상, fps 프레임 격자에 맞춘다. out 이 원본 끝 반 프레임 안이면 원본 끝 그대로(원본 길이는 격자 밖일 수 있다).
+     duration 을 모르면(0) 위 한도 없이. 더 줄일 수 없으면 원래 값 그대로의 사본. */
+  function editTrimClip(clip, edge, value, duration, fps, minLen) {
+    var f = Number(fps) > 0 ? Number(fps) : EDIT_DEFAULT_FPS;
+    var min = Math.max(Number(minLen) || EDIT_MIN_CLIP_S, 1 / f);
+    var dur = Number(duration) > 0 ? Number(duration) : 0;
+    var start = Number(clip.in);
+    var end = Number(clip.out);
+    var next = editCloneClip(clip);
+    var v = Math.round(Number(value) * f) / f;
+    if (!isFinite(v)) return next;
+    if (edge === "in") {
+      var hi = end - min;
+      if (v > hi) v = Math.floor(hi * f + 1e-6) / f;
+      if (v < 0) v = 0;
+      if (end - v < min - 1e-6) return next;
+      next.in = editRound3(v);
+    } else {
+      if (dur && v >= dur - 0.5 / f) v = dur;
+      var lo = start + min;
+      if (v < lo) v = Math.ceil(lo * f - 1e-6) / f;
+      if (dur && v > dur) v = dur;
+      if (v - start < min - 1e-6) return next;
+      next.out = editRound3(v);
+    }
+    return next;
+  }
+
+  function editRemove(clips, index) {
+    var next = (clips || []).slice();
+    if (index >= 0 && index < next.length) next.splice(index, 1);
+    return next;
+  }
+
+  /* from 번째 클립을 to 자리(0~길이, 그 번호 앞)로 옮긴 순서. */
+  function editMove(clips, from, to) {
+    var next = (clips || []).slice();
+    if (from < 0 || from >= next.length) return next;
+    var target = Math.max(0, Math.min(next.length, Number(to) || 0));
+    var item = next.splice(from, 1)[0];
+    if (target > from) target -= 1;
+    next.splice(target, 0, item);
+    return next;
+  }
+
+  /* 끌어 놓을 자리: 타임라인 x(px)에서 가장 가까운 클립 경계 번호(0~길이). */
+  function editDropIndex(clips, x, pps) {
+    var info = editStarts(clips);
+    var best = 0;
+    var bestGap = Infinity;
+    for (var k = 0; k <= info.starts.length; k++) {
+      var at = (k < info.starts.length ? info.starts[k] : info.total) * pps;
+      var gap = Math.abs(at - x);
+      if (gap < bestGap) {
+        best = k;
+        bestGap = gap;
+      }
+    }
+    return best;
+  }
+
+  /* 실행 취소 스택(design §5.5): {undo, redo}. 하나 쌓으면 다시 실행 스택을 비운다. 100단계를 넘으면 오래된 것부터 버린다. */
+  function editSnapshotOf(variant, clips) {
+    return { variant: variant, clips: editCloneClips(clips) };
+  }
+
+  function editHistPush(hist, snapshot) {
+    hist.undo.push(snapshot);
+    while (hist.undo.length > EDIT_UNDO_MAX) hist.undo.shift();
+    hist.redo.length = 0;
+  }
+
+  function editUndo(hist, current) {
+    if (!hist.undo.length) return null;
+    hist.redo.push(current);
+    return hist.undo.pop();
+  }
+
+  function editRedo(hist, current) {
+    if (!hist.redo.length) return null;
+    hist.undo.push(current);
+    while (hist.undo.length > EDIT_UNDO_MAX) hist.undo.shift();
+    return hist.redo.pop();
+  }
+
+  function editClampPps(pps) {
+    var p = Number(pps);
+    if (!(p > 0)) p = EDIT_MIN_PPS;
+    return Math.max(EDIT_MIN_PPS, Math.min(EDIT_MAX_PPS, p));
+  }
+
+  /* 기본 확대: 전체가 타임라인 너비에 들어가게(20~400px/초). 너비를 모르면 100. */
+  function editFitPps(total, width) {
+    var w = (Number(width) || 0) - 24;
+    if (!(total > 0) || !(w > 0)) return 100;
+    return editClampPps(Math.floor(w / total));
+  }
+
+  /* 확대 슬라이더(0~1000) ↔ px/초. 로그 눈금이라 낮은 확대에서도 고르게 움직인다. */
+  function editSliderOf(pps) {
+    return Math.round((1000 * Math.log(editClampPps(pps) / EDIT_MIN_PPS)) / Math.log(EDIT_MAX_PPS / EDIT_MIN_PPS));
+  }
+
+  function editPpsOf(slider) {
+    var v = Math.max(0, Math.min(1000, Number(slider) || 0));
+    return Math.round(EDIT_MIN_PPS * Math.pow(EDIT_MAX_PPS / EDIT_MIN_PPS, v / 1000) * 10) / 10;
+  }
+
+  /* 눈금 간격: 확대에 따라 큰 눈금 1·2·5·10초(사이 64px 이상인 첫 값), 작은 눈금은 그 사이(8px 미만이면 0 = 안 그림). */
+  function editTickStep(pps) {
+    var p = Number(pps) || EDIT_MIN_PPS;
+    var pick = EDIT_TICKS[EDIT_TICKS.length - 1];
+    for (var i = 0; i < EDIT_TICKS.length; i++) {
+      if (EDIT_TICKS[i][0] * p >= 64) {
+        pick = EDIT_TICKS[i];
+        break;
+      }
+    }
+    return { major: pick[0], minor: pick[1] * p >= 8 ? pick[1] : 0 };
+  }
+
+  function editPad2(n) {
+    return (n < 10 ? "0" : "") + n;
+  }
+
+  /* 초 → "mm:ss.cc"(재생 시각). withCs 가 false 면 "mm:ss"(눈금 글). */
+  function editTimeText(seconds, withCs) {
+    var all = Math.floor(Math.max(0, Number(seconds) || 0) * 100 + 1e-6);
+    var text = editPad2(Math.floor(all / 6000)) + ":" + editPad2(Math.floor((all % 6000) / 100));
+    return withCs === false ? text : text + "." + editPad2(all % 100);
+  }
+
+  /* 필름스트립 칸 나누기(design D5). strip {tiles, interval, tileWidth, tileHeight}(media 응답)으로 클립 [in, out] 을 높이
+     cellH 칸으로 채운다. 칸마다 그 칸 가운데 시각의 타일(원본 초 ÷ interval)을 background-position 으로 보인다.
+     반환 {bgWidth, bgHeight, cells:[{left, width, x}]}, 꼴이 틀리면 null. 칸 수는 클립 너비 ÷ 칸 너비라, 타임라인 전체
+     칸 수는 클립 수가 아니라 전체 너비로 정해진다(300초 × 400px/초 ≈ 1,400칸). */
+  function editStripCells(clip, strip, pps, cellH) {
+    var s = strip || {};
+    var tiles = Math.floor(Number(s.tiles) || 0);
+    var interval = Number(s.interval) || 0;
+    var tw = Number(s.tileWidth) || 0;
+    var th = Number(s.tileHeight) || 0;
+    var h = Number(cellH) > 0 ? Number(cellH) : EDIT_THUMB_H;
+    if (tiles < 1 || interval <= 0 || tw <= 0 || th <= 0 || !(Number(pps) > 0)) return null;
+    var cw = Math.max(8, Math.round(((tw * h) / th) * 10) / 10);
+    var width = editClipLen(clip) * pps;
+    var cells = [];
+    for (var x = 0; x < width - 0.5 && cells.length < 2000; x += cw) {
+      var w = Math.min(cw, width - x);
+      var at = Number(clip.in) + (x + w / 2) / pps;
+      var tile = Math.max(0, Math.min(tiles - 1, Math.floor(at / interval + 1e-9)));
+      cells.push({ left: Math.round(x * 10) / 10, width: Math.round(w * 10) / 10, x: -Math.round(tile * cw * 10) / 10 });
+    }
+    return { bgWidth: Math.round(tiles * cw * 10) / 10, bgHeight: h, cells: cells };
+  }
+
+  /* 파형 SVG 길(path d, design D6). peaks {perSecond, values(0~1)} 의 [in, out] 부분을 가운데 기준 막대로, viewBox 0 0 n 100.
+     반환 {n, d}, 값이 없으면 null. 화면은 preserveAspectRatio none 으로 클립 너비에 늘린다(확대가 바뀌어도 길은 그대로). */
+  function editPeakPath(clip, peaks) {
+    var p = peaks || {};
+    var values = Array.isArray(p.values) ? p.values : [];
+    var per = Number(p.perSecond) || 0;
+    if (!values.length || per <= 0) return null;
+    var i0 = Math.max(0, Math.floor(Number(clip.in) * per + 1e-9));
+    var i1 = Math.min(values.length, Math.ceil(Number(clip.out) * per - 1e-9));
+    if (i1 <= i0) return null;
+    var parts = [];
+    for (var i = i0; i < i1; i++) {
+      var v = Math.max(0, Math.min(1, Number(values[i]) || 0));
+      var bar = Math.max(2, Math.round(v * 96));
+      parts.push("M" + (i - i0) + " " + (100 - bar) / 2 + "h0.8v" + bar + "h-0.8z");
+    }
+    return { n: i1 - i0, d: parts.join("") };
+  }
+
+  /* 단축키(design §5.4) → 동작 이름(없으면 ""). 입력칸 초점·Alt 는 부르는 쪽이 거른다.
+     글자 키는 code 도 본다(한글 자판에서 S 는 key "ㄴ", M 은 "ㅡ"). Ctrl 과 같은 자리의 Cmd(mod)도 같다. */
+  function editKeyAction(key, code, mod, shift) {
+    var k = String(key || "");
+    var c = String(code || "");
+    if (mod) {
+      if (c === "KeyZ" || k === "z" || k === "Z") return shift ? "redo" : "undo";
+      if (c === "KeyY" || k === "y" || k === "Y") return "redo";
+      if (c === "KeyB" || k === "b" || k === "B") return "split";
+      return "";
+    }
+    if (k === " " || c === "Space") return "play";
+    if (k === "ArrowLeft") return shift ? "secBack" : "frameBack";
+    if (k === "ArrowRight") return shift ? "secFwd" : "frameFwd";
+    if (k === "Home") return "home";
+    if (k === "End") return "end";
+    if (c === "KeyS" || k === "s" || k === "S") return "split";
+    if (k === "Delete" || k === "Backspace") return "delete";
+    if (c === "KeyM" || k === "m" || k === "M") return "mute";
+    if (k === "+" || k === "=" || c === "NumpadAdd") return "zoomIn";
+    if (k === "-" || k === "_" || c === "NumpadSubtract") return "zoomOut";
+    return "";
+  }
+
+  /* PUT /edit 바디(design §4.2). 클립은 서버가 받는 키만. */
+  function editSaveBody(etag, variant, clips) {
+    return { etag: String(etag || ""), variant: variant, clips: editCloneClips(clips), audio: [] };
+  }
+
+  /* 보이는 시간 [lo, hi] 와 겹치는 클립의 재료 mid 먼저(타임라인 순서), 그다음 나머지. 같은 mid 는 한 번(design §5.6). */
+  function editMediaOrder(clips, midOf, lo, hi) {
+    var list = clips || [];
+    var info = editStarts(list);
+    var out = [];
+    var seen = {};
+    function add(clip) {
+      var mid = midOf(clip.sourceKey);
+      if (mid && !seen[mid]) {
+        seen[mid] = true;
+        out.push(mid);
+      }
+    }
+    list.forEach(function (clip, i) {
+      var a = info.starts[i];
+      if (a + editClipLen(clip) > lo && a < hi) add(clip);
+    });
+    list.forEach(add);
+    return out;
+  }
+
+  /* 내보내기 상태 한 줄(design §5.2 아래 줄). */
+  function editExportText(ex) {
+    var e = ex || {};
+    var status = e.status || "none";
+    if (status === "queued") return "대기 중 — 앞의 내보내기가 끝나면 시작합니다.";
+    if (status === "running") {
+      var p = e.progress || {};
+      return "만드는 중 " + (Number(p.done) || 0) + "/" + (Number(p.total) || 0);
+    }
+    if (status === "done") return "끝 — " + editTimeText(e.seconds) + (e.hasAudio === false ? " · 소리 없음" : "");
+    if (status === "failed") return "실패 — " + (e.error || "내보내지 못했습니다.");
+    return "아직 내보낸 영상이 없습니다. [내보내기]를 누르면 지금 편집대로 mp4 하나를 만듭니다.";
+  }
+
+  /* CSS url("…") 안에 넣을 주소. 따옴표·역슬래시·줄바꿈을 %로 바꿔 선언 밖으로 나가지 않게 한다. */
+  function editCssUrl(url) {
+    return String(url || "").replace(/["\\\n\r\f]/g, function (ch) {
+      return encodeURIComponent(ch);
+    });
+  }
+
+  function editNewId(clips) {
+    var used = {};
+    (clips || []).forEach(function (clip) {
+      used[clip.id] = true;
+    });
+    var id = "";
+    do {
+      id = "c" + Date.now().toString(36) + Math.floor(Math.random() * 1679616).toString(36);
+    } while (used[id]);
+    return id;
+  }
+
+  /* ---- 화면 상태 ---- */
+
+  function editPath(ctx) {
+    return "/api/vnew/p/" + encodeURIComponent(ctx.pid) + "/edit";
+  }
+
+  /* 이 ⑦ 화면이 아직 보이는가. 단계를 옮기거나 프로젝트를 떠나면 false(타이머·키·재생이 스스로 멈춘다). */
+  function editAlive(ctx) {
+    return !!ctx && ctx.alive && editCtx === ctx && state.mounted && state.planStep === 7 && state.projectId === ctx.pid;
+  }
+
+  function editRaf(fn) {
+    if (typeof window.requestAnimationFrame === "function") return window.requestAnimationFrame(fn);
+    return window.setTimeout(fn, 16);
+  }
+
+  function editCancelRaf(id) {
+    if (!id) return;
+    if (typeof window.cancelAnimationFrame === "function") window.cancelAnimationFrame(id);
+    else window.clearTimeout(id);
+  }
+
+  function editConfirm(message) {
+    try {
+      return window.confirm(message);
+    } catch (error) {
+      return true;
+    }
+  }
+
+  function editHelpClosed() {
+    try {
+      return window.localStorage.getItem(EDIT_HELP_KEY) === "1";
+    } catch (error) {
+      return false;
+    }
+  }
+
+  function editRememberHelp() {
+    try {
+      window.localStorage.setItem(EDIT_HELP_KEY, "1");
+    } catch (error) {
+      /* 저장 못 해도 이번 화면에서는 닫힌다 */
+    }
+  }
+
+  function editNewCtx() {
+    var ctx = {
+      pid: state.projectId,
+      alive: true,
+      root: el("section", "vnew-edit"),
+      dom: {},
+      variant: "",
+      variants: [],
+      clips: [],
+      etag: "",
+      saved: false,
+      defaults: {},
+      matList: {},
+      materials: {},
+      limits: {},
+      invalidIds: {},
+      media: {},
+      mediaQueue: [],
+      mediaBusy: false,
+      hist: { undo: [], redo: [] },
+      rev: 0,
+      savedRev: 0,
+      saving: false,
+      saveAgain: false,
+      saveTimer: 0,
+      saveFailed: false,
+      saveWaiters: [],
+      busy: false,
+      exporting: false,
+      sel: -1,
+      t: 0,
+      pps: 0,
+      playing: false,
+      raf: 0,
+      zoomRaf: 0,
+      zoomPending: 0,
+      vids: [],
+      cur: 0,
+      curIndex: -1,
+      clipEls: [],
+      exportState: { status: "none" },
+      exportHistory: [],
+      exportSig: "",
+      exportTimer: 0,
+      probeTimer: 0,
+      urlRetryAt: 0,
+      drag: null,
+      notice: ""
+    };
+    ctx.onKey = function (event) {
+      editOnKey(ctx, event);
+    };
+    return ctx;
+  }
+
+  function editLimit(ctx, key, fallback) {
+    var value = Number((ctx.limits || {})[key]);
+    return value > 0 ? value : fallback;
+  }
+
+  function editMinLen(ctx) {
+    return editLimit(ctx, "minClipSeconds", EDIT_MIN_CLIP_S);
+  }
+
+  function editFpsOf(ctx, clip) {
+    var fps = Number((ctx.materials[(clip || {}).sourceKey] || {}).fps);
+    return fps > 0 ? fps : EDIT_DEFAULT_FPS;
+  }
+
+  function editUrlOf(ctx, sourceKey) {
+    return String((ctx.materials[sourceKey] || {}).videoUrl || "");
+  }
+
+  /* ⑦ 단계 그리기(renderPlan). 이전 ⑦ 화면이 있으면 먼저 정리한다(남은 저장은 보낸다). */
+  function renderEditStep(host) {
+    editLeave();
+    var ctx = editNewCtx();
+    editCtx = ctx;
+    host.appendChild(ctx.root);
+    editShowWait(ctx, "편집 문서를 불러오는 중…");
+    document.addEventListener("keydown", ctx.onKey);
+    editLoad(ctx, "", "");
+  }
+
+  /* ⑦ 을 떠날 때(단계 이동·unmount·다시 그리기): 재생·타이머·키를 멈추고, 남은 저장이 있으면 한 번 보낸다(design §5.5). */
+  function editLeave() {
+    var ctx = editCtx;
+    if (!ctx) return;
+    editCtx = null;
+    ctx.alive = false;
+    editPause(ctx);
+    editCancelRaf(ctx.zoomRaf);
+    ctx.zoomRaf = 0;
+    if (ctx.probeTimer) window.clearTimeout(ctx.probeTimer);
+    if (ctx.exportTimer) window.clearTimeout(ctx.exportTimer);
+    ctx.probeTimer = 0;
+    ctx.exportTimer = 0;
+    document.removeEventListener("keydown", ctx.onKey);
+    if (ctx.drag && ctx.drag.cleanup) ctx.drag.cleanup();
+    ctx.drag = null;
+    ctx.vids.forEach(function (video) {
+      try {
+        video.pause();
+        video.removeAttribute("src");
+        video.load();
+      } catch (error) {
+        /* 이미 떨어진 요소 */
+      }
+    });
+    if (ctx.saveTimer || ctx.rev !== ctx.savedRev) editFlushSave(ctx);
+  }
+
+  /* GET /edit(?variant=). probing(길이 재는 중)이면 1초 뒤 다시 부르고(onWait 로 안내), 다 읽은 보기를 준다. */
+  function editFetchView(ctx, variant, onWait) {
+    var url = editPath(ctx) + (variant ? "?variant=" + encodeURIComponent(variant) : "");
+    var tries = 0;
+    return new Promise(function (resolve, reject) {
+      function once() {
+        ctx.probeTimer = 0;
+        if (!editAlive(ctx)) {
+          reject({ left: true, message: "" });
+          return;
+        }
+        api(url).then(function (view) {
+          if (!view || view.probing !== true) {
+            resolve(view || {});
+            return;
+          }
+          tries += 1;
+          if (tries >= EDIT_PROBE_MAX_TRIES) {
+            reject({ message: "영상 길이를 다 읽지 못했습니다. 잠시 뒤 다시 열어 주세요." });
+            return;
+          }
+          if (onWait) onWait(view);
+          ctx.probeTimer = window.setTimeout(once, EDIT_PROBE_RETRY_MS);
+        }, reject);
+      }
+      once();
+    });
+  }
+
+  /* 처음 열기·다시 불러오기(409). notice 는 다 그린 뒤 머리 아래 한 줄. */
+  function editLoad(ctx, variant, notice) {
+    ctx.busy = true;
+    editFetchView(ctx, variant, function () {
+      editShowWait(ctx, "영상 길이를 읽는 중…");
+    })
+      .then(function (view) {
+        ctx.busy = false;
+        if (!editAlive(ctx)) return;
+        editApplyView(ctx, view);
+        ctx.notice = notice || "";
+        editBuild(ctx);
+      })
+      .catch(function (err) {
+        ctx.busy = false;
+        if (!editAlive(ctx) || (err && err.left)) return;
+        editShowLoadError(ctx, err);
+      });
+  }
+
+  /* 받은 보기를 상태에 넣는다. 실행 취소 스택·저장 차례는 새로 시작한다(재생헤드·확대는 둔다). */
+  function editApplyView(ctx, view) {
+    var variant = view.variant === "real" ? "real" : "webtoon";
+    ctx.variant = variant;
+    ctx.variants = Array.isArray(view.variants) ? view.variants : [];
+    ctx.clips = editCloneClips((view.doc || {}).clips);
+    ctx.etag = String(view.etag || "");
+    ctx.saved = view.saved === true;
+    ctx.defaults[variant] = editCloneClips(view.defaultClips);
+    ctx.limits = view.limits || {};
+    ctx.invalidIds = {};
+    (Array.isArray(view.invalidClips) ? view.invalidClips : []).forEach(function (item) {
+      if (item && item.id) ctx.invalidIds[String(item.id)] = String(item.reason || "notAllowed");
+    });
+    editAbsorbMaterials(ctx, view);
+    ctx.exportState = view.export || { status: "none" };
+    ctx.exportHistory = Array.isArray(view.exportHistory) ? view.exportHistory : [];
+    ctx.exportSig = "";
+    if (ctx.saveTimer) window.clearTimeout(ctx.saveTimer);
+    ctx.saveTimer = 0;
+    ctx.hist = { undo: [], redo: [] };
+    ctx.rev = 0;
+    ctx.savedRev = 0;
+    ctx.saveFailed = false;
+    ctx.saveAgain = false;
+    ctx.sel = -1;
+  }
+
+  /* 재료(그림체별 목록 + 원본 키별 정보). 두 그림체를 오가도 앞 그림체 재료 주소·길이를 남긴다(실행 취소로 돌아올 때). */
+  function editAbsorbMaterials(ctx, view) {
+    var list = (Array.isArray(view.materials) ? view.materials : []).filter(function (m) {
+      return m && typeof m.sourceKey === "string" && m.sourceKey;
+    });
+    ctx.matList[view.variant === "real" ? "real" : "webtoon"] = list;
+    list.forEach(function (m) {
+      var old = ctx.materials[m.sourceKey] || {};
+      var merged = {};
+      Object.keys(m).forEach(function (key) {
+        merged[key] = m[key];
+      });
+      if (!(Number(merged.duration) > 0) && Number(old.duration) > 0) {
+        merged.duration = old.duration;
+        merged.fps = old.fps;
+        merged.hasAudio = old.hasAudio;
+      }
+      ctx.materials[m.sourceKey] = merged;
+    });
+  }
+
+  function editShowWait(ctx, text) {
+    clear(ctx.root);
+    ctx.dom = {};
+    ctx.clipEls = [];
+    var wait = el("div", "vnew-edit-wait");
+    wait.appendChild(el("span", "vnew-prog-spinner", ""));
+    wait.appendChild(el("span", "vnew-hint", text));
+    ctx.root.appendChild(wait);
+  }
+
+  function editShowLoadError(ctx, err) {
+    clear(ctx.root);
+    ctx.dom = {};
+    ctx.clipEls = [];
+    ctx.root.appendChild(el("h2", "vnew-sec-title", "편집"));
+    var message = err && err.type === "EditDisabled" ? "영상 편집 기능이 꺼져 있습니다." : errMessage(err);
+    ctx.root.appendChild(planError("편집을 열지 못했습니다: " + message));
+    var retry = el("button", "outline-button", "다시 시도");
+    retry.type = "button";
+    retry.addEventListener("click", function () {
+      if (!editAlive(ctx)) return;
+      editShowWait(ctx, "편집 문서를 불러오는 중…");
+      editLoad(ctx, "", "");
+    });
+    ctx.root.appendChild(retry);
+  }
+
+  function editShowError(ctx, message) {
+    var node = ctx.dom.error;
+    if (!node) return;
+    node.textContent = message || "";
+    node.style.display = message ? "" : "none";
+  }
+
+  function editNote(ctx, message) {
+    var node = ctx.dom.notice;
+    ctx.notice = message || "";
+    if (!node) return;
+    node.textContent = ctx.notice;
+    node.style.display = ctx.notice ? "" : "none";
+  }
+
+  /* 도구 버튼: 아이콘 + 이름 + 단축키 표기, title·aria-label 에도 단축키(지시서 111 사용 편의). */
+  function editToolButton(icon, label, keys, title, onClick) {
+    var btn = el("button", "vnew-edit-tool");
+    btn.type = "button";
+    btn.appendChild(el("span", "vnew-edit-tool-icon", icon));
+    btn._label = el("span", "vnew-edit-tool-text", label);
+    btn.appendChild(btn._label);
+    if (keys) btn.appendChild(el("span", "vnew-edit-key", keys));
+    editToolTitle(btn, title, keys);
+    btn._keys = keys;
+    btn.addEventListener("click", onClick);
+    return btn;
+  }
+
+  function editToolTitle(btn, title, keys) {
+    btn.title = title + (keys ? " (" + keys + ")" : "");
+    btn.setAttribute("aria-label", btn.title);
+  }
+
+  /* ---- 화면 만들기(design §5.2) ---- */
+
+  function editBuild(ctx) {
+    var root = ctx.root;
+    clear(root);
+    var d = (ctx.dom = {});
+    ctx.clipEls = [];
+
+    // 머리: 제목 · 그림체 · 저장 상태 · [내보내기]
+    var head = el("div", "vnew-edit-head");
+    head.appendChild(el("h2", "vnew-sec-title vnew-edit-title", "편집"));
+    d.variantBox = el("div", "vnew-edit-variants");
+    head.appendChild(d.variantBox);
+    d.saveBox = el("div", "vnew-edit-save");
+    head.appendChild(d.saveBox);
+    d.exportBtn = el("button", "primary-button vnew-edit-export-btn", "내보내기");
+    d.exportBtn.type = "button";
+    d.exportBtn.title = "지금 편집대로 mp4 하나를 만듭니다(저장이 남았으면 먼저 저장)";
+    d.exportBtn.addEventListener("click", function () {
+      editExport(ctx);
+    });
+    head.appendChild(d.exportBtn);
+    root.appendChild(head);
+    d.error = planError("");
+    root.appendChild(d.error);
+    d.notice = el("p", "vnew-hint vnew-edit-notice", "");
+    root.appendChild(d.notice);
+    editNote(ctx, ctx.notice);
+
+    // 미리보기: 16:9 상자(<video> 2개) + 재생 줄
+    var player = el("div", "vnew-edit-player");
+    var screen = el("div", "vnew-edit-screen");
+    ctx.vids = [editMakeVideo(ctx, 0), editMakeVideo(ctx, 1)];
+    ctx.cur = 0;
+    screen.appendChild(ctx.vids[0]);
+    screen.appendChild(ctx.vids[1]);
+    d.empty = el("p", "vnew-edit-empty", "클립이 없습니다. ⟲ 처음 상태로 되돌리거나 아래 재료에서 넣어 주세요.");
+    screen.appendChild(d.empty);
+    player.appendChild(screen);
+    var transport = el("div", "vnew-edit-transport");
+    transport.appendChild(editToolButton("⏮", "처음", "Home", "처음으로", function () {
+      editDo(ctx, "home");
+    }));
+    transport.appendChild(editToolButton("◀|", "한 프레임 뒤", "←", "한 프레임 뒤로(Shift: 1초)", function () {
+      editDo(ctx, "frameBack");
+    }));
+    d.btnPlay = editToolButton("▶", "재생", "Space", "재생", function () {
+      editDo(ctx, "play");
+    });
+    d.btnPlay.classList.add("is-play");
+    transport.appendChild(d.btnPlay);
+    transport.appendChild(editToolButton("|▶", "한 프레임 앞", "→", "한 프레임 앞으로(Shift: 1초)", function () {
+      editDo(ctx, "frameFwd");
+    }));
+    transport.appendChild(editToolButton("⏭", "끝", "End", "끝으로", function () {
+      editDo(ctx, "end");
+    }));
+    d.time = el("span", "vnew-edit-time", "");
+    transport.appendChild(d.time);
+    player.appendChild(transport);
+    root.appendChild(player);
+
+    // 도구줄: 실행 취소 · 다시 실행 · 삭제 · 자르기 · 소리 끄기 · 처음 상태로 · 확대/축소
+    var tools = el("div", "vnew-edit-tools");
+    d.btnUndo = editToolButton("↶", "실행 취소", "Ctrl+Z", "실행 취소", function () {
+      editDo(ctx, "undo");
+    });
+    d.btnRedo = editToolButton("↷", "다시 실행", "Ctrl+Shift+Z", "다시 실행(Ctrl+Y 도 됩니다)", function () {
+      editDo(ctx, "redo");
+    });
+    d.btnDelete = editToolButton("🗑", "삭제", "Delete", "고른 클립 삭제", function () {
+      editDo(ctx, "delete");
+    });
+    d.btnSplit = editToolButton("✂", "자르기", "S", "재생헤드에서 자르기(Ctrl+B 도 됩니다)", function () {
+      editDo(ctx, "split");
+    });
+    d.btnMute = editToolButton("🔇", "소리 끄기", "M", "고른 클립 소리 끄기", function () {
+      editDo(ctx, "mute");
+    });
+    d.btnReset = editToolButton("⟲", "처음 상태로", "", "처음 상태(기본 문서)로 되돌리기 — 실행 취소로 돌아올 수 있습니다", function () {
+      editDo(ctx, "reset");
+    });
+    [d.btnUndo, d.btnRedo, d.btnDelete, d.btnSplit, d.btnMute, d.btnReset].forEach(function (btn) {
+      tools.appendChild(btn);
+    });
+    var zoomWrap = el("label", "vnew-edit-zoom");
+    zoomWrap.title = "확대/축소(+ / −)";
+    zoomWrap.appendChild(el("span", "vnew-edit-tool-icon", "🔍"));
+    zoomWrap.appendChild(el("span", "vnew-edit-tool-text", "확대"));
+    d.zoom = el("input", "vnew-edit-zoom-range");
+    d.zoom.type = "range";
+    d.zoom.min = "0";
+    d.zoom.max = "1000";
+    d.zoom.step = "1";
+    d.zoom.setAttribute("aria-label", "확대/축소(+ / −)");
+    d.zoom.addEventListener("input", function () {
+      editZoomFromSlider(ctx);
+    });
+    zoomWrap.appendChild(d.zoom);
+    zoomWrap.appendChild(el("span", "vnew-edit-key", "+/−"));
+    tools.appendChild(zoomWrap);
+    root.appendChild(tools);
+
+    // 처음 들어오면 한 줄 도움말(닫으면 다시 보이지 않는다)
+    if (!editHelpClosed()) {
+      var help = el("p", "vnew-edit-help");
+      help.appendChild(el("span", "vnew-edit-help-text", EDIT_HELP_TEXT));
+      var close = el("button", "vnew-edit-help-close", "×");
+      close.type = "button";
+      close.title = "도움말 닫기";
+      close.setAttribute("aria-label", "도움말 닫기");
+      close.addEventListener("click", function () {
+        editRememberHelp();
+        if (help.parentNode) help.parentNode.removeChild(help);
+      });
+      help.appendChild(close);
+      d.help = help;
+      root.appendChild(help);
+    }
+
+    // 타임라인: 왼쪽 이름 칸 + 가로 스크롤 영역(눈금자 · 영상 · 소리 · 재생헤드)
+    var tl = el("div", "vnew-edit-tl");
+    var labels = el("div", "vnew-edit-labels");
+    labels.appendChild(el("span", "vnew-edit-label is-ruler", ""));
+    labels.appendChild(el("span", "vnew-edit-label is-video", "영상"));
+    labels.appendChild(el("span", "vnew-edit-label is-audio", "소리"));
+    tl.appendChild(labels);
+    d.scroller = el("div", "vnew-edit-scroll");
+    d.content = el("div", "vnew-edit-content");
+    d.ruler = el("div", "vnew-edit-ruler");
+    d.ruler.title = "누르거나 끌어서 재생헤드 옮기기";
+    d.vtrack = el("div", "vnew-edit-track is-video");
+    d.atrack = el("div", "vnew-edit-track is-audio");
+    d.head = el("div", "vnew-edit-playhead");
+    d.handle = el("button", "vnew-edit-handle", "✂");
+    d.handle.type = "button";
+    d.handle.title = "재생헤드 — 끌어서 옮기고, 누르면 이 자리에서 자르기 (S)";
+    d.handle.setAttribute("aria-label", d.handle.title);
+    d.head.appendChild(d.handle);
+    d.drop = el("div", "vnew-edit-drop");
+    d.drop.style.display = "none";
+    [d.ruler, d.vtrack, d.atrack, d.head, d.drop].forEach(function (node) {
+      d.content.appendChild(node);
+    });
+    d.scroller.appendChild(d.content);
+    tl.appendChild(d.scroller);
+    root.appendChild(tl);
+    d.ruler.addEventListener("pointerdown", function (event) {
+      editRulerPointer(ctx, event);
+    });
+    d.handle.addEventListener("pointerdown", function (event) {
+      editHandlePointer(ctx, event);
+    });
+    d.handle.addEventListener("click", function (event) {
+      // 키보드(Enter·Space)로 누른 click 만(detail 0). 마우스·터치 누르기는 pointerup 에서 자른다.
+      if (event && event.detail === 0) editDo(ctx, "split");
+    });
+    d.scroller.addEventListener("pointerdown", function () {
+      if (editAlive(ctx) && !ctx.busy) editSelect(ctx, -1);
+    });
+    d.scroller.addEventListener("scroll", function () {
+      editOnScroll(ctx);
+    });
+
+    // 재료(눌러 넣기) · 내보내기 상태
+    d.bin = el("div", "vnew-edit-bin");
+    root.appendChild(d.bin);
+    d.exportBox = el("section", "vnew-edit-export");
+    root.appendChild(d.exportBox);
+
+    if (!ctx.pps) ctx.pps = editFitPps(editStarts(ctx.clips).total, d.scroller.clientWidth);
+    d.zoom.value = String(editSliderOf(ctx.pps));
+    editRenderVariants(ctx);
+    editRenderSave(ctx);
+    editRenderTimeline(ctx);
+    editRenderBin(ctx);
+    editRenderExport(ctx);
+    editSeek(ctx, ctx.t);
+    editRenderPlayButton(ctx);
+    editScheduleExportPoll(ctx);
+  }
+
+  function editMakeVideo(ctx, slot) {
+    var video = el("video", "vnew-edit-video" + (slot === 0 ? " is-active" : ""));
+    video.preload = "auto";
+    video.setAttribute("playsinline", "");
+    video.addEventListener("error", function () {
+      editOnVideoError(ctx, slot);
+    });
+    return video;
+  }
+
+  function editRenderVariants(ctx) {
+    var box = ctx.dom.variantBox;
+    if (!box) return;
+    clear(box);
+    ctx.variants.forEach(function (item) {
+      if (!item || !EDIT_VARIANT_LABEL[item.key]) return;
+      var btn = el("button", "vnew-edit-variant" + (item.key === ctx.variant ? " is-on" : ""), item.label || EDIT_VARIANT_LABEL[item.key]);
+      btn.type = "button";
+      btn.disabled = item.available !== true;
+      btn.title = item.available === true ? EDIT_VARIANT_LABEL[item.key] + " 영상으로 편집" : "아직 " + EDIT_VARIANT_LABEL[item.key] + " 영상이 없습니다";
+      btn.addEventListener("click", function () {
+        editSwitchVariant(ctx, item.key);
+      });
+      box.appendChild(btn);
+    });
+  }
+
+  /* 저장 상태: 저장 전 · 저장 중… · 저장됨 · [저장 실패 — 다시]. */
+  function editSaveStateOf(ctx) {
+    if (ctx.saveFailed) return "failed";
+    if (ctx.saving || ctx.saveTimer || ctx.rev !== ctx.savedRev) return "saving";
+    return ctx.saved ? "saved" : "draft";
+  }
+
+  function editRenderSave(ctx) {
+    var box = ctx.dom.saveBox;
+    if (!box) return;
+    var kind = editSaveStateOf(ctx);
+    clear(box);
+    box.className = "vnew-edit-save is-" + kind;
+    if (kind === "failed") {
+      var retry = el("button", "outline-button vnew-edit-save-retry", "저장 실패 — 다시");
+      retry.type = "button";
+      retry.addEventListener("click", function () {
+        editFlushSave(ctx);
+      });
+      box.appendChild(retry);
+      return;
+    }
+    box.textContent = kind === "saving" ? "저장 중…" : kind === "saved" ? "저장됨" : "저장 전";
+  }
+
+  function editRenderPlayButton(ctx) {
+    var btn = ctx.dom.btnPlay;
+    if (!btn) return;
+    var icon = btn.children[0];
+    if (icon) icon.textContent = ctx.playing ? "❚❚" : "▶";
+    if (btn._label) btn._label.textContent = ctx.playing ? "멈춤" : "재생";
+    editToolTitle(btn, ctx.playing ? "멈춤" : "재생", "Space");
+    btn.disabled = !ctx.clips.length;
+  }
+
+  function editRenderTools(ctx) {
+    var d = ctx.dom;
+    if (!d.btnUndo) return;
+    var has = ctx.sel >= 0 && ctx.sel < ctx.clips.length;
+    var muted = has && ctx.clips[ctx.sel].muted === true;
+    d.btnUndo.disabled = !ctx.hist.undo.length;
+    d.btnRedo.disabled = !ctx.hist.redo.length;
+    d.btnDelete.disabled = !has;
+    d.btnMute.disabled = !has;
+    d.btnSplit.disabled = !ctx.clips.length;
+    d.btnReset.disabled = !(ctx.defaults[ctx.variant] || []).length;
+    d.btnMute._label.textContent = muted ? "소리 켜기" : "소리 끄기";
+    editToolTitle(d.btnMute, muted ? "고른 클립 소리 켜기" : "고른 클립 소리 끄기", "M");
+    d.exportBtn.disabled = ctx.exporting || !ctx.clips.length;
+    editRenderPlayButton(ctx);
+  }
+
+  /* ---- 타임라인 그리기 ---- */
+
+  function editRenderTimeline(ctx) {
+    var d = ctx.dom;
+    if (!d.content) return;
+    var info = editStarts(ctx.clips);
+    var width = Math.ceil(info.total * ctx.pps) + EDIT_TAIL_PX;
+    d.content.style.width = width + "px";
+    editRenderRuler(ctx, width);
+    clear(d.vtrack);
+    clear(d.atrack);
+    ctx.clipEls = [];
+    ctx.clips.forEach(function (clip, index) {
+      var parts = editClipBoxes(ctx, index);
+      d.vtrack.appendChild(parts.box);
+      d.atrack.appendChild(parts.abox);
+      ctx.clipEls.push(parts);
+    });
+    if (!ctx.clips.length) d.vtrack.appendChild(el("p", "vnew-edit-track-empty", "클립이 없습니다"));
+    editPlaceHead(ctx);
+    editRenderTools(ctx);
+    editQueueMedia(ctx);
+  }
+
+  function editRenderRuler(ctx, width) {
+    var ruler = ctx.dom.ruler;
+    clear(ruler);
+    var step = editTickStep(ctx.pps);
+    var unit = step.minor || step.major;
+    var count = Math.floor(width / ctx.pps / unit + 1e-6);
+    for (var k = 0; k <= count; k++) {
+      var at = k * unit;
+      var major = Math.abs(at / step.major - Math.round(at / step.major)) < 1e-6;
+      var tick = el("span", "vnew-edit-tick" + (major ? " is-major" : ""));
+      tick.style.left = Math.round(at * ctx.pps * 10) / 10 + "px";
+      if (major) tick.appendChild(el("span", "vnew-edit-tick-label", editTimeText(at, false)));
+      ruler.appendChild(tick);
+    }
+  }
+
+  /* 클립 하나의 영상 상자(썸네일·이름·양 끝 손잡이)와 소리 상자. 너비 = (out − in) × px/초(경계 2px 틈은 CSS 테두리). */
+  function editClipBoxes(ctx, index) {
+    var box = el("div", "vnew-edit-clip");
+    box.setAttribute("data-index", String(index));
+    var thumbs = el("div", "vnew-edit-thumbs");
+    var name = el("span", "vnew-edit-clip-label", "");
+    var inEdge = el("div", "vnew-edit-edge is-in");
+    var outEdge = el("div", "vnew-edit-edge is-out");
+    inEdge.title = "끌어서 시작 자르기";
+    outEdge.title = "끌어서 끝 자르기";
+    box.appendChild(thumbs);
+    box.appendChild(name);
+    box.appendChild(inEdge);
+    box.appendChild(outEdge);
+    var abox = el("div", "vnew-edit-aclip");
+    var parts = { index: index, box: box, thumbs: thumbs, name: name, inEdge: inEdge, outEdge: outEdge, abox: abox };
+    editPaintClip(ctx, parts, ctx.clips[index]);
+    box.addEventListener("pointerdown", function (event) {
+      editClipPointer(ctx, parts, event);
+    });
+    inEdge.addEventListener("pointerdown", function (event) {
+      editEdgePointer(ctx, parts, "in", event);
+    });
+    outEdge.addEventListener("pointerdown", function (event) {
+      editEdgePointer(ctx, parts, "out", event);
+    });
+    abox.addEventListener("click", function () {
+      if (editAlive(ctx) && !ctx.busy) editSelect(ctx, parts.index);
+    });
+    return parts;
+  }
+
+  /* 클립 상자 내용을 지금 값(clip)으로 다시 칠한다(끄는 동안·필름을 받은 뒤에도 같은 요소를 고친다). */
+  function editPaintClip(ctx, parts, clip) {
+    var mat = ctx.materials[clip.sourceKey] || {};
+    var len = editClipLen(clip);
+    var width = Math.max(1, len * ctx.pps);
+    var invalid = ctx.invalidIds[clip.id];
+    var selected = parts.index === ctx.sel;
+    parts.box.className =
+      "vnew-edit-clip" + (selected ? " is-selected" : "") + (invalid ? " is-invalid" : "") + (width < 28 ? " is-narrow" : "");
+    parts.box.style.width = width + "px";
+    var name = clip.label || mat.label || "클립";
+    parts.box.title = name + " · " + len.toFixed(2) + "초" + (invalid ? " — 이 클립의 원본을 지금 쓸 수 없습니다(지우거나 바꿔 주세요)" : "");
+    parts.name.textContent = name + " · " + len.toFixed(1) + "초";
+    clear(parts.thumbs);
+    var media = ctx.media[mat.mid] || {};
+    var strip = media.status === "done" && media.data ? media.data.strip : null;
+    var layout = strip && strip.url ? editStripCells(clip, strip, ctx.pps, EDIT_THUMB_H) : null;
+    if (layout) {
+      var image = 'url("' + editCssUrl(strip.url) + '")';
+      layout.cells.forEach(function (cell) {
+        var tile = el("span", "vnew-edit-thumb");
+        tile.style.left = cell.left + "px";
+        tile.style.width = cell.width + "px";
+        tile.style.backgroundImage = image;
+        tile.style.backgroundSize = layout.bgWidth + "px " + layout.bgHeight + "px";
+        tile.style.backgroundPosition = cell.x + "px 0";
+        parts.thumbs.appendChild(tile);
+      });
+    }
+    var abox = parts.abox;
+    clear(abox);
+    abox.style.width = width + "px";
+    var peaks = media.status === "done" && media.data ? media.data.peaks : null;
+    var kind = clip.muted === true ? "is-muted" : mat.hasAudio === false ? "is-silent" : "";
+    var path = kind ? null : editPeakPath(clip, peaks);
+    if (!kind && !path) kind = media.status === "done" ? "is-silent" : "is-loading";
+    abox.className = "vnew-edit-aclip" + (kind ? " " + kind : "") + (selected ? " is-selected" : "");
+    abox.title = clip.muted === true ? "소리 끔" : mat.hasAudio === false || kind === "is-silent" ? "소리 없음" : "소리";
+    if (clip.muted === true) abox.appendChild(el("span", "vnew-edit-aclip-icon", "🔇"));
+    if (path && typeof document.createElementNS === "function") {
+      var svg = document.createElementNS(EDIT_SVG_NS, "svg");
+      svg.setAttribute("class", "vnew-edit-wave");
+      svg.setAttribute("viewBox", "0 0 " + path.n + " 100");
+      svg.setAttribute("preserveAspectRatio", "none");
+      svg.setAttribute("aria-hidden", "true");
+      var line = document.createElementNS(EDIT_SVG_NS, "path");
+      line.setAttribute("d", path.d);
+      svg.appendChild(line);
+      abox.appendChild(svg);
+    }
+  }
+
+  function editPlaceHead(ctx) {
+    var d = ctx.dom;
+    var total = editStarts(ctx.clips).total;
+    if (d.head) d.head.style.left = Math.round(ctx.t * ctx.pps * 10) / 10 + "px";
+    if (d.time) d.time.textContent = editTimeText(ctx.t) + " / " + editTimeText(total);
+  }
+
+  function editSelect(ctx, index) {
+    ctx.sel = index >= 0 && index < ctx.clips.length ? index : -1;
+    ctx.clipEls.forEach(function (parts) {
+      var method = parts.index === ctx.sel ? "add" : "remove";
+      parts.box.classList[method]("is-selected");
+      parts.abox.classList[method]("is-selected");
+    });
+    editRenderTools(ctx);
+  }
+
+  function editShowDrop(ctx, index) {
+    var drop = ctx.dom.drop;
+    if (!drop) return;
+    if (index < 0) {
+      drop.style.display = "none";
+      return;
+    }
+    var info = editStarts(ctx.clips);
+    var at = index < info.starts.length ? info.starts[index] : info.total;
+    drop.style.left = Math.round(at * ctx.pps * 10) / 10 + "px";
+    drop.style.display = "";
+  }
+
+  /* 화면 x(포인터) → 타임라인 안 x(px). 내용 상자의 화면 위치가 스크롤을 반영한다. */
+  function editContentX(ctx, event) {
+    var content = ctx.dom.content;
+    var rect = content && content.getBoundingClientRect ? content.getBoundingClientRect() : { left: 0 };
+    return (Number(event.clientX) || 0) - (Number(rect.left) || 0);
+  }
+
+  /* 끄는 동안 포인터가 스크롤 영역 양 끝 32px 안이면 그쪽으로 조금씩 스크롤한다. */
+  function editAutoScroll(ctx, event) {
+    var sc = ctx.dom.scroller;
+    if (!sc || !sc.getBoundingClientRect) return;
+    var rect = sc.getBoundingClientRect();
+    var x = Number(event.clientX) || 0;
+    if (x < rect.left + 32) sc.scrollLeft = Math.max(0, (sc.scrollLeft || 0) - 16);
+    else if (x > rect.right - 32) sc.scrollLeft = (sc.scrollLeft || 0) + 16;
+  }
+
+  function editFollowHead(ctx) {
+    var sc = ctx.dom.scroller;
+    if (!sc || !sc.clientWidth) return;
+    var x = ctx.t * ctx.pps;
+    var left = sc.scrollLeft || 0;
+    if (x < left || x > left + sc.clientWidth - 24) sc.scrollLeft = Math.max(0, x - sc.clientWidth * 0.2);
+  }
+
+  function editOnScroll(ctx) {
+    if (!editAlive(ctx) || ctx.scrollQueued) return;
+    ctx.scrollQueued = true;
+    editRaf(function () {
+      ctx.scrollQueued = false;
+      if (editAlive(ctx)) editQueueMedia(ctx);
+    });
+  }
+
+  /* ---- 끌기(포인터 이벤트: 마우스·터치 같은 길) ---- */
+
+  function editPointerOk(ctx, event) {
+    if (!editAlive(ctx) || ctx.busy || ctx.drag) return false;
+    return !(event.pointerType === "mouse" && event.button !== undefined && event.button !== 0);
+  }
+
+  /* 누른 요소에 포인터를 붙잡고(setPointerCapture) 움직임을 타임라인 x 차이(px, 자동 스크롤 포함)로 알린다.
+     threshold px 넘게 움직여야 끌기(moved). 끝나면 end(dx, moved, cancelled). */
+  function editTrack(ctx, target, event, handlers) {
+    var start = editContentX(ctx, event);
+    var pointerId = event.pointerId;
+    var drag = { dx: 0, moved: false, cleanup: null };
+    try {
+      if (target.setPointerCapture && pointerId !== undefined) target.setPointerCapture(pointerId);
+    } catch (error) {
+      /* 붙잡기를 못 해도 같은 요소 위에서는 된다 */
+    }
+    function move(ev) {
+      if (ev.preventDefault) ev.preventDefault();
+      editAutoScroll(ctx, ev);
+      drag.dx = editContentX(ctx, ev) - start;
+      if (!drag.moved && Math.abs(drag.dx) >= (handlers.threshold || 0)) drag.moved = true;
+      if (drag.moved && handlers.move) handlers.move(drag.dx, ev);
+    }
+    function finish(cancelled) {
+      cleanup();
+      if (handlers.end) handlers.end(drag.dx, drag.moved && !cancelled, cancelled);
+    }
+    function up() {
+      finish(false);
+    }
+    function cancel() {
+      finish(true);
+    }
+    function cleanup() {
+      target.removeEventListener("pointermove", move);
+      target.removeEventListener("pointerup", up);
+      target.removeEventListener("pointercancel", cancel);
+      try {
+        if (target.releasePointerCapture && pointerId !== undefined) target.releasePointerCapture(pointerId);
+      } catch (error) {
+        /* 이미 놓였다 */
+      }
+      if (ctx.drag === drag) ctx.drag = null;
+    }
+    drag.cleanup = cleanup;
+    target.addEventListener("pointermove", move);
+    target.addEventListener("pointerup", up);
+    target.addEventListener("pointercancel", cancel);
+    ctx.drag = drag;
+    return drag;
+  }
+
+  /* 클립 몸통: 누르면 고르기, 끌면 순서 바꾸기(놓을 자리 세로선). */
+  function editClipPointer(ctx, parts, event) {
+    if (!editPointerOk(ctx, event)) return;
+    if (event.stopPropagation) event.stopPropagation();
+    if (event.preventDefault) event.preventDefault();
+    var from = parts.index;
+    var drop = -1;
+    editSelect(ctx, from);
+    editTrack(ctx, parts.box, event, {
+      threshold: EDIT_DRAG_PX,
+      move: function (dx, ev) {
+        if (ctx.playing) editPause(ctx);
+        parts.box.classList.add("is-dragging");
+        drop = editDropIndex(ctx.clips, editContentX(ctx, ev), ctx.pps);
+        editShowDrop(ctx, drop);
+      },
+      end: function (dx, moved) {
+        editShowDrop(ctx, -1);
+        parts.box.classList.remove("is-dragging");
+        if (!moved || drop < 0 || drop === from || drop === from + 1) return;
+        editCommit(ctx, editMove(ctx.clips, from, drop), { sel: drop > from ? drop - 1 : drop });
+      }
+    });
+  }
+
+  /* 클립 끝 손잡이: in/out 조정(원본 안·0.04초 이상·원본 fps 프레임). 끄는 동안 미리보기가 그 끝 프레임을 보인다. */
+  function editEdgePointer(ctx, parts, edge, event) {
+    if (!editPointerOk(ctx, event)) return;
+    if (event.stopPropagation) event.stopPropagation();
+    if (event.preventDefault) event.preventDefault();
+    var index = parts.index;
+    var orig = editCloneClip(ctx.clips[index]);
+    var before = editSnapshotOf(ctx.variant, ctx.clips);
+    var mat = ctx.materials[orig.sourceKey] || {};
+    var fps = editFpsOf(ctx, orig);
+    editPause(ctx);
+    editSelect(ctx, index);
+    editTrack(ctx, edge === "in" ? parts.inEdge : parts.outEdge, event, {
+      threshold: 1,
+      move: function (dx) {
+        var base = edge === "in" ? orig.in : orig.out;
+        var next = editTrimClip(orig, edge, base + dx / ctx.pps, mat.duration, fps, editMinLen(ctx));
+        ctx.clips[index] = next;
+        editPaintClip(ctx, parts, next);
+        ctx.dom.content.style.width = Math.ceil(editStarts(ctx.clips).total * ctx.pps) + EDIT_TAIL_PX + "px";
+        editTrimPreview(ctx, next, edge, fps);
+      },
+      end: function (dx, moved, cancelled) {
+        var cur = ctx.clips[index];
+        if (cancelled || (cur.in === orig.in && cur.out === orig.out)) {
+          ctx.clips[index] = orig;
+          editPaintClip(ctx, parts, orig);
+          editSeek(ctx, ctx.t);
+          return;
+        }
+        editCommit(ctx, ctx.clips.slice(), { before: before, sel: index });
+      }
+    });
+  }
+
+  function editTrimPreview(ctx, clip, edge, fps) {
+    var video = ctx.vids[ctx.cur];
+    if (!video) return;
+    editSetSrc(video, editUrlOf(ctx, clip.sourceKey));
+    editSetTime(video, edge === "in" ? clip.in : Math.max(clip.in, clip.out - 1 / fps));
+  }
+
+  /* 눈금자 누르기·끌기: 그 시각으로 재생헤드(재생 중이면 계속 재생). */
+  function editRulerPointer(ctx, event) {
+    if (!editPointerOk(ctx, event)) return;
+    if (event.stopPropagation) event.stopPropagation();
+    if (event.preventDefault) event.preventDefault();
+    var start = editContentX(ctx, event);
+    editSeek(ctx, start / ctx.pps);
+    editTrack(ctx, ctx.dom.ruler, event, {
+      threshold: 0,
+      move: function (dx) {
+        editSeek(ctx, (start + dx) / ctx.pps);
+      }
+    });
+  }
+
+  /* 재생헤드 손잡이(가위): 끌면 옮기고, 움직이지 않고 떼면 그 자리에서 자르기. */
+  function editHandlePointer(ctx, event) {
+    if (!editPointerOk(ctx, event)) return;
+    if (event.stopPropagation) event.stopPropagation();
+    if (event.preventDefault) event.preventDefault();
+    var startT = ctx.t;
+    editTrack(ctx, ctx.dom.handle, event, {
+      threshold: 4,
+      move: function (dx) {
+        editSeek(ctx, startT + dx / ctx.pps);
+      },
+      end: function (dx, moved, cancelled) {
+        if (!moved && !cancelled) editDo(ctx, "split");
+      }
+    });
+  }
+
+  /* ---- 미리보기 재생(<video> 2개 번갈아, design §5.3 재생) ---- */
+
+  function editSetSrc(video, url) {
+    if (video._src === url) return;
+    video._src = url;
+    video.src = url;
+  }
+
+  function editSetTime(video, seconds) {
+    try {
+      video.currentTime = Math.max(0, Number(seconds) || 0);
+    } catch (error) {
+      /* 아직 불러오기 전 — 불러온 뒤 그 자리로 간다 */
+    }
+  }
+
+  function editPlayVideo(video) {
+    try {
+      var promise = video.play();
+      if (promise && typeof promise.catch === "function") {
+        promise.catch(function () {
+          /* 자동 재생 거절·바꿔 끼우기로 끊김 — 다음 조작에서 다시 */
+        });
+      }
+    } catch (error) {
+      /* 재생할 수 없는 요소 */
+    }
+  }
+
+  function editContiguous(ctx, a, b) {
+    return a.sourceKey === b.sourceKey && Math.abs(Number(b.in) - Number(a.out)) < 0.5 / editFpsOf(ctx, a);
+  }
+
+  /* 타임라인 t 로 옮긴다: 그 클립 원본을 지금 <video> 에 두고 원본 시각을 맞춘다. 끝(전체 길이)이면 마지막 프레임. */
+  function editSeek(ctx, t) {
+    var total = editStarts(ctx.clips).total;
+    ctx.t = Math.max(0, Math.min(total, Number(t) || 0));
+    editPlaceHead(ctx);
+    var loc = editLocate(ctx.clips, ctx.t);
+    if (ctx.dom.empty) ctx.dom.empty.style.display = loc ? "none" : "";
+    var video = ctx.vids[ctx.cur];
+    if (!loc || !video) {
+      ctx.curIndex = -1;
+      return;
+    }
+    editSetSrc(video, editUrlOf(ctx, loc.clip.sourceKey));
+    video.muted = loc.clip.muted === true;
+    var at = loc.source;
+    if (ctx.t >= total - 1e-6) at = Math.max(Number(loc.clip.in), Number(loc.clip.out) - 1 / editFpsOf(ctx, loc.clip));
+    editSetTime(video, at);
+    ctx.curIndex = loc.index;
+    editPreloadNext(ctx);
+    if (ctx.playing) editPlayVideo(video);
+  }
+
+  /* 다음 클립이 다른 원본(또는 같은 원본의 떨어진 구간)이면 숨은 <video> 에 미리 불러 둔다. */
+  function editPreloadNext(ctx) {
+    var clip = ctx.clips[ctx.curIndex];
+    var next = ctx.clips[ctx.curIndex + 1];
+    var other = ctx.vids[1 - ctx.cur];
+    if (!clip || !next || !other || editContiguous(ctx, clip, next)) return;
+    editSetSrc(other, editUrlOf(ctx, next.sourceKey));
+    other.muted = true;
+    editSetTime(other, next.in);
+  }
+
+  function editAdvance(ctx, index) {
+    var prev = ctx.clips[index - 1];
+    var next = ctx.clips[index];
+    var video = ctx.vids[ctx.cur];
+    ctx.curIndex = index;
+    ctx.t = editStarts(ctx.clips).starts[index];
+    if (prev && editContiguous(ctx, prev, next)) {
+      video.muted = next.muted === true;
+    } else {
+      var other = ctx.vids[1 - ctx.cur];
+      editSetSrc(other, editUrlOf(ctx, next.sourceKey));
+      if (Math.abs((Number(other.currentTime) || 0) - Number(next.in)) > 0.02) editSetTime(other, next.in);
+      other.muted = next.muted === true;
+      editPlayVideo(other);
+      try {
+        video.pause();
+      } catch (error) {
+        /* 무시 */
+      }
+      video.classList.remove("is-active");
+      other.classList.add("is-active");
+      ctx.cur = 1 - ctx.cur;
+    }
+    editPreloadNext(ctx);
+    editPlaceHead(ctx);
+  }
+
+  function editTick(ctx) {
+    ctx.raf = 0;
+    if (!ctx.playing) return;
+    if (!editAlive(ctx)) {
+      editPause(ctx);
+      return;
+    }
+    var clip = ctx.clips[ctx.curIndex];
+    var video = ctx.vids[ctx.cur];
+    if (!clip || !video) {
+      editPause(ctx);
+      return;
+    }
+    var now = Number(video.currentTime) || 0;
+    if (now >= Number(clip.out) - 0.5 / editFpsOf(ctx, clip) || video.ended) {
+      if (ctx.curIndex + 1 >= ctx.clips.length) {
+        ctx.t = editStarts(ctx.clips).total;
+        editPause(ctx);
+        editPlaceHead(ctx);
+        return;
+      }
+      editAdvance(ctx, ctx.curIndex + 1);
+    } else {
+      ctx.t = editStarts(ctx.clips).starts[ctx.curIndex] + Math.max(0, now - Number(clip.in));
+      editPlaceHead(ctx);
+    }
+    editFollowHead(ctx);
+    ctx.raf = editRaf(function () {
+      editTick(ctx);
+    });
+  }
+
+  function editPlay(ctx) {
+    if (!ctx.clips.length || !ctx.vids.length) return;
+    if (ctx.t >= editStarts(ctx.clips).total - 0.01) ctx.t = 0;
+    ctx.playing = true;
+    editSeek(ctx, ctx.t);
+    editRenderPlayButton(ctx);
+    editCancelRaf(ctx.raf);
+    ctx.raf = editRaf(function () {
+      editTick(ctx);
+    });
+  }
+
+  function editPause(ctx) {
+    ctx.playing = false;
+    editCancelRaf(ctx.raf);
+    ctx.raf = 0;
+    ctx.vids.forEach(function (video) {
+      try {
+        video.pause();
+      } catch (error) {
+        /* 무시 */
+      }
+    });
+    editRenderPlayButton(ctx);
+  }
+
+  function editStep(ctx, dir, seconds) {
+    editPause(ctx);
+    var loc = editLocate(ctx.clips, ctx.t);
+    var step = seconds || 1 / (loc ? editFpsOf(ctx, loc.clip) : EDIT_DEFAULT_FPS);
+    editSeek(ctx, ctx.t + dir * step);
+  }
+
+  /* 영상 오류(presigned 만료 등): GET 을 다시 불러 주소만 바꾸고 같은 시각에서 잇는다(15초에 한 번까지). */
+  function editOnVideoError(ctx, slot) {
+    var video = ctx.vids[slot];
+    if (!editAlive(ctx) || !video || !video._src) return;
+    var now = Date.now();
+    if (now - ctx.urlRetryAt < EDIT_URL_RETRY_MS) return;
+    ctx.urlRetryAt = now;
+    api(editPath(ctx) + "?variant=" + encodeURIComponent(ctx.variant))
+      .then(function (view) {
+        if (!editAlive(ctx)) return;
+        editAbsorbMaterials(ctx, view || {});
+        ctx.vids.forEach(function (v) {
+          v._src = "";
+        });
+        editSeek(ctx, ctx.t);
+      })
+      .catch(function () {
+        /* 다음 오류 때 다시 */
+      });
+  }
+
+  /* ---- 확대/축소 ---- */
+
+  /* 재생헤드의 화면 위치를 그대로 두고 확대를 바꾼다(design §5.3). fromSlider 면 슬라이더 값은 건드리지 않는다. */
+  function editSetZoom(ctx, pps, fromSlider) {
+    var next = editClampPps(pps);
+    if (Math.abs(next - ctx.pps) < 0.05) return;
+    var sc = ctx.dom.scroller;
+    var anchor = ctx.t * ctx.pps - (sc ? sc.scrollLeft || 0 : 0);
+    ctx.pps = next;
+    if (!fromSlider && ctx.dom.zoom) ctx.dom.zoom.value = String(editSliderOf(next));
+    editRenderTimeline(ctx);
+    if (sc) sc.scrollLeft = Math.max(0, ctx.t * next - anchor);
+  }
+
+  /* 슬라이더를 끄는 동안은 한 화면 그리기에 한 번만 다시 그린다(requestAnimationFrame). */
+  function editZoomFromSlider(ctx) {
+    if (!editAlive(ctx) || !ctx.dom.zoom) return;
+    ctx.zoomPending = editPpsOf(ctx.dom.zoom.value);
+    if (ctx.zoomRaf) return;
+    ctx.zoomRaf = editRaf(function () {
+      ctx.zoomRaf = 0;
+      if (editAlive(ctx)) editSetZoom(ctx, ctx.zoomPending, true);
+    });
+  }
+
+  /* ---- 필름스트립·파형(하나씩 차례로, design §5.6) ---- */
+
+  function editQueueMedia(ctx) {
+    var sc = ctx.dom.scroller;
+    var lo = sc ? (sc.scrollLeft || 0) / ctx.pps : 0;
+    var hi = sc && sc.clientWidth ? lo + sc.clientWidth / ctx.pps : Infinity;
+    var now = Date.now();
+    ctx.mediaQueue = editMediaOrder(
+      ctx.clips,
+      function (key) {
+        return String((ctx.materials[key] || {}).mid || "");
+      },
+      lo,
+      hi
+    ).filter(function (mid) {
+      var item = ctx.media[mid];
+      return !item || (item.status === "done" && now - (item.at || 0) > EDIT_MEDIA_TTL_MS);
+    });
+    editPumpMedia(ctx);
+  }
+
+  function editPumpMedia(ctx) {
+    if (ctx.mediaBusy || !editAlive(ctx)) return;
+    var mid = ctx.mediaQueue.shift();
+    if (!mid) return;
+    ctx.mediaBusy = true;
+    var keep = ctx.media[mid];
+    ctx.media[mid] = { status: "loading", data: keep ? keep.data : null };
+    api(editPath(ctx) + "/media/" + encodeURIComponent(mid))
+      .then(function (data) {
+        ctx.media[mid] = { status: "done", data: data || {}, at: Date.now() };
+        editMediaFacts(ctx, mid, data || {});
+      })
+      .catch(function () {
+        ctx.media[mid] = { status: "failed", data: null };
+      })
+      .then(function () {
+        ctx.mediaBusy = false;
+        if (!editAlive(ctx)) return;
+        ctx.clipEls.forEach(function (parts) {
+          var clip = ctx.clips[parts.index];
+          if (clip && (ctx.materials[clip.sourceKey] || {}).mid === mid) editPaintClip(ctx, parts, clip);
+        });
+        editPumpMedia(ctx);
+      });
+  }
+
+  /* 필름 응답의 길이·소리를 그 재료 정보에 채운다(기본 밖 재료는 GET 이 길이를 아직 안 잰다). */
+  function editMediaFacts(ctx, mid, data) {
+    Object.keys(ctx.materials).forEach(function (key) {
+      var mat = ctx.materials[key];
+      if (mat.mid !== mid) return;
+      if (!(Number(mat.duration) > 0) && Number(data.duration) > 0) mat.duration = Number(data.duration);
+      if (typeof data.hasAudio === "boolean" && typeof mat.hasAudio !== "boolean") mat.hasAudio = data.hasAudio;
+    });
+  }
+
+  /* ---- 편집 동작 ---- */
+
+  function editDo(ctx, action) {
+    if (!editAlive(ctx) || ctx.busy) return;
+    if (action === "play") {
+      if (ctx.playing) editPause(ctx);
+      else editPlay(ctx);
+    } else if (action === "frameBack") {
+      editStep(ctx, -1, 0);
+    } else if (action === "frameFwd") {
+      editStep(ctx, 1, 0);
+    } else if (action === "secBack") {
+      editStep(ctx, -1, 1);
+    } else if (action === "secFwd") {
+      editStep(ctx, 1, 1);
+    } else if (action === "home") {
+      editPause(ctx);
+      editSeek(ctx, 0);
+    } else if (action === "end") {
+      editPause(ctx);
+      editSeek(ctx, editStarts(ctx.clips).total);
+    } else if (action === "split") {
+      editSplitHere(ctx);
+    } else if (action === "delete") {
+      if (ctx.sel >= 0 && ctx.sel < ctx.clips.length) editCommit(ctx, editRemove(ctx.clips, ctx.sel), { sel: -1 });
+    } else if (action === "mute") {
+      if (ctx.sel >= 0 && ctx.sel < ctx.clips.length) {
+        var next = editCloneClips(ctx.clips);
+        next[ctx.sel].muted = !next[ctx.sel].muted;
+        editCommit(ctx, next, {});
+      }
+    } else if (action === "undo" || action === "redo") {
+      editUndoRedo(ctx, action === "redo");
+    } else if (action === "zoomIn") {
+      editSetZoom(ctx, ctx.pps * 1.25);
+    } else if (action === "zoomOut") {
+      editSetZoom(ctx, ctx.pps / 1.25);
+    } else if (action === "reset") {
+      if ((ctx.defaults[ctx.variant] || []).length) editCommit(ctx, editCloneClips(ctx.defaults[ctx.variant]), { sel: -1 });
+    }
+  }
+
+  function editOnKey(ctx, event) {
+    if (!editAlive(ctx)) {
+      if (editCtx === ctx) editLeave();
+      else document.removeEventListener("keydown", ctx.onKey);
+      return;
+    }
+    if (!event || event.defaultPrevented || event.altKey) return;
+    var target = event.target || {};
+    var tag = String(target.tagName || "").toLowerCase();
+    if (tag === "input" || tag === "textarea" || tag === "select" || target.isContentEditable) return;
+    var action = editKeyAction(event.key, event.code, event.ctrlKey || event.metaKey, event.shiftKey);
+    if (!action) return;
+    if (event.preventDefault) event.preventDefault();
+    editDo(ctx, action);
+  }
+
+  /* 끝난 변경 하나(design §5.5): 바뀌기 전 상태를 쌓고(다시 실행 스택은 비움) 다시 그린 뒤 저장을 건다. */
+  function editCommit(ctx, clips, opts) {
+    var o = opts || {};
+    editHistPush(ctx.hist, o.before || editSnapshotOf(ctx.variant, ctx.clips));
+    ctx.clips = clips;
+    if (o.variant) ctx.variant = o.variant;
+    if (o.sel !== undefined) ctx.sel = o.sel;
+    editChanged(ctx);
+  }
+
+  function editChanged(ctx) {
+    ctx.rev += 1;
+    if (ctx.sel >= ctx.clips.length) ctx.sel = -1;
+    editNote(ctx, "");
+    editRenderVariants(ctx);
+    editRenderTimeline(ctx);
+    editRenderBin(ctx);
+    editSeek(ctx, ctx.t);
+    editScheduleSave(ctx);
+  }
+
+  function editUndoRedo(ctx, redo) {
+    var current = editSnapshotOf(ctx.variant, ctx.clips);
+    var snap = redo ? editRedo(ctx.hist, current) : editUndo(ctx.hist, current);
+    if (!snap) return;
+    ctx.clips = editCloneClips(snap.clips);
+    ctx.variant = snap.variant;
+    ctx.sel = -1;
+    editChanged(ctx);
+  }
+
+  function editSplitHere(ctx) {
+    var loc = editLocate(ctx.clips, ctx.t);
+    if (!loc) return;
+    var max = editLimit(ctx, "maxClips", 200);
+    if (ctx.clips.length >= max) {
+      editNote(ctx, "클립은 " + max + "개까지 둘 수 있습니다.");
+      return;
+    }
+    var result = editSplit(ctx.clips, ctx.t, editNewId(ctx.clips), editFpsOf(ctx, loc.clip), editMinLen(ctx));
+    if (!result) {
+      editNote(ctx, "클립 끝에 너무 가까워 자를 수 없습니다. 재생헤드를 조금 옮겨 주세요.");
+      return;
+    }
+    editCommit(ctx, result.clips, { sel: result.index });
+  }
+
+  /* 그림체 바꾸기(design §5.3): 확인 → GET ?variant= → 그 문서로 바꾸고 저장(실행 취소로 되돌릴 수 있다). */
+  function editSwitchVariant(ctx, variant) {
+    if (!editAlive(ctx) || ctx.busy || variant === ctx.variant) return;
+    var label = EDIT_VARIANT_LABEL[variant] || variant;
+    if (!editConfirm("지금 편집을 " + label + " 기본 문서로 바꿉니다. 실행 취소로 되돌릴 수 있습니다.")) return;
+    editPause(ctx);
+    ctx.busy = true;
+    editNote(ctx, label + " 영상을 불러오는 중…");
+    editFetchView(ctx, variant, function () {
+      editNote(ctx, "영상 길이를 읽는 중…");
+    })
+      .then(function (view) {
+        ctx.busy = false;
+        if (!editAlive(ctx)) return;
+        editAbsorbMaterials(ctx, view);
+        ctx.defaults[variant] = editCloneClips(view.defaultClips);
+        ctx.limits = view.limits || ctx.limits;
+        ctx.invalidIds = {};
+        editCommit(ctx, editCloneClips((view.doc || {}).clips), { variant: variant, sel: -1 });
+      })
+      .catch(function (err) {
+        ctx.busy = false;
+        if (!editAlive(ctx) || (err && err.left)) return;
+        editNote(ctx, "");
+        editShowError(ctx, "그림체를 바꾸지 못했습니다: " + errMessage(err));
+      });
+  }
+
+  /* 재료 넣기: 재생헤드가 있는 클립 뒤에(없으면 끝에) 그 영상 전체(기본 문서에 그 원본 클립이 하나면 그 구간)를 넣는다.
+     길이를 아직 안 잰 재료는 필름 요청이 먼저 잰다. */
+  function editInsertMaterial(ctx, sourceKey, button) {
+    if (!editAlive(ctx) || ctx.busy) return;
+    var mat = ctx.materials[sourceKey];
+    if (!mat) return;
+    function place() {
+      var duration = Number(mat.duration) || 0;
+      var maxClips = editLimit(ctx, "maxClips", 200);
+      var maxTotal = editLimit(ctx, "maxTotalSeconds", 300);
+      if (!(duration > 0)) {
+        editNote(ctx, "이 영상의 길이를 읽지 못했습니다. 잠시 뒤 다시 눌러 주세요.");
+        return;
+      }
+      if (ctx.clips.length >= maxClips) {
+        editNote(ctx, "클립은 " + maxClips + "개까지 둘 수 있습니다.");
+        return;
+      }
+      var same = (ctx.defaults[ctx.variant] || []).filter(function (c) {
+        return c.sourceKey === sourceKey;
+      });
+      var start = same.length === 1 ? Number(same[0].in) : 0;
+      var end = same.length === 1 ? Number(same[0].out) : duration;
+      end = Math.min(end, start + maxTotal - editStarts(ctx.clips).total);
+      if (end - start < editMinLen(ctx)) {
+        editNote(ctx, "타임라인 전체 길이는 " + maxTotal + "초까지입니다.");
+        return;
+      }
+      var loc = editLocate(ctx.clips, ctx.t);
+      var at = loc ? loc.index + 1 : ctx.clips.length;
+      var clip = { id: editNewId(ctx.clips), sourceKey: sourceKey, in: editRound3(start), out: editRound3(end), muted: false };
+      if (mat.label) clip.label = String(mat.label).slice(0, 40);
+      var next = ctx.clips.slice();
+      next.splice(at, 0, clip);
+      ctx.t = editStarts(next).starts[at];
+      editCommit(ctx, next, { sel: at });
+    }
+    if (Number(mat.duration) > 0) {
+      place();
+      return;
+    }
+    button.disabled = true;
+    editNote(ctx, "영상 길이를 읽는 중…");
+    api(editPath(ctx) + "/media/" + encodeURIComponent(String(mat.mid || "")))
+      .then(function (data) {
+        button.disabled = false;
+        if (!editAlive(ctx)) return;
+        ctx.media[mat.mid] = { status: "done", data: data || {}, at: Date.now() };
+        editMediaFacts(ctx, mat.mid, data || {});
+        editNote(ctx, "");
+        place();
+      })
+      .catch(function (err) {
+        button.disabled = false;
+        if (editAlive(ctx)) editNote(ctx, "넣지 못했습니다: " + errMessage(err));
+      });
+  }
+
+  function editRenderBin(ctx) {
+    var bin = ctx.dom.bin;
+    if (!bin) return;
+    clear(bin);
+    var list = ctx.matList[ctx.variant] || [];
+    if (!list.length) return;
+    var head = el("div", "vnew-edit-bin-head");
+    head.appendChild(el("span", "vnew-edit-bin-title", "재료"));
+    head.appendChild(el("span", "vnew-hint", "누르면 재생헤드가 있는 클립 뒤에 넣습니다."));
+    bin.appendChild(head);
+    var row = el("div", "vnew-edit-bin-list");
+    list.forEach(function (item) {
+      var mat = ctx.materials[item.sourceKey] || item;
+      var duration = Number(mat.duration);
+      var btn = el("button", "outline-button vnew-edit-bin-item", "＋ " + (mat.label || "영상") + (duration > 0 ? " · " + duration.toFixed(1) + "초" : ""));
+      btn.type = "button";
+      btn.title = "이 영상을 타임라인에 넣기";
+      btn.addEventListener("click", function () {
+        editInsertMaterial(ctx, item.sourceKey, btn);
+      });
+      row.appendChild(btn);
+    });
+    bin.appendChild(row);
+  }
+
+  /* ---- 저장(design §5.5: 0.8초 디바운스, 한 번에 하나, 409 다시 불러오기) ---- */
+
+  function editScheduleSave(ctx) {
+    if (ctx.saveTimer) window.clearTimeout(ctx.saveTimer);
+    ctx.saveTimer = window.setTimeout(function () {
+      ctx.saveTimer = 0;
+      editFlushSave(ctx);
+    }, EDIT_SAVE_MS);
+    editRenderSave(ctx);
+  }
+
+  function editSettleSave(ctx, err) {
+    var waiters = ctx.saveWaiters;
+    ctx.saveWaiters = [];
+    waiters.forEach(function (pair) {
+      if (err) pair[1](err);
+      else pair[0]();
+    });
+  }
+
+  /* 남은 변경을 지금 PUT 한다. 보내는 중이면 끝난 뒤 마지막 상태로 한 번 더(saveAgain). 화면을 떠난 뒤에도 보낸다. */
+  function editFlushSave(ctx) {
+    if (ctx.saveTimer) {
+      window.clearTimeout(ctx.saveTimer);
+      ctx.saveTimer = 0;
+    }
+    if (ctx.saving) {
+      ctx.saveAgain = true;
+      return;
+    }
+    if (ctx.rev === ctx.savedRev && ctx.saved && !ctx.saveFailed) {
+      editRenderSave(ctx);
+      editSettleSave(ctx, null);
+      return;
+    }
+    var rev = ctx.rev;
+    ctx.saving = true;
+    ctx.saveAgain = false;
+    editRenderSave(ctx);
+    api(editPath(ctx), { method: "PUT", body: JSON.stringify(editSaveBody(ctx.etag, ctx.variant, ctx.clips)) })
+      .then(function (res) {
+        ctx.saving = false;
+        ctx.saveFailed = false;
+        ctx.etag = String((res && res.etag) || "");
+        ctx.saved = true;
+        ctx.savedRev = rev;
+        if (ctx.exportState && ctx.exportState.status && ctx.exportState.status !== "none" && ctx.rev > 0) {
+          ctx.exportState.matchesDoc = false;
+        }
+        if (ctx.saveAgain || ctx.rev !== ctx.savedRev) {
+          editFlushSave(ctx);
+          return;
+        }
+        editRenderSave(ctx);
+        editRenderExport(ctx);
+        editSettleSave(ctx, null);
+      })
+      .catch(function (err) {
+        ctx.saving = false;
+        if (err && err.type === "EditChanged") {
+          err.handled = true;
+          editSettleSave(ctx, err);
+          if (editAlive(ctx)) {
+            editPause(ctx);
+            editShowWait(ctx, "다른 곳에서 바뀐 편집을 다시 불러오는 중…");
+            editLoad(ctx, "", EDIT_CHANGED_TEXT);
+          }
+          return;
+        }
+        ctx.saveFailed = true;
+        editRenderSave(ctx);
+        if (editAlive(ctx)) editShowError(ctx, "저장하지 못했습니다: " + errMessage(err));
+        editSettleSave(ctx, err);
+      });
+  }
+
+  /* 저장이 다 끝나면(남은 변경 없음) 풀리는 약속. 저장 안 된 기본 문서면 그대로 PUT 한다(design §5.5 내보내기 앞). */
+  function editEnsureSaved(ctx) {
+    return new Promise(function (resolve, reject) {
+      if (!ctx.saving && !ctx.saveTimer && ctx.rev === ctx.savedRev && ctx.saved && !ctx.saveFailed) {
+        resolve();
+        return;
+      }
+      ctx.saveWaiters.push([resolve, reject]);
+      editFlushSave(ctx);
+    });
+  }
+
+  /* ---- 내보내기 ---- */
+
+  function editExport(ctx) {
+    if (!editAlive(ctx) || ctx.busy || ctx.exporting || !ctx.clips.length) return;
+    ctx.exporting = true;
+    editRenderTools(ctx);
+    editShowError(ctx, "");
+    editPause(ctx);
+    editEnsureSaved(ctx)
+      .then(function () {
+        return api(editPath(ctx) + "/export", { method: "POST", body: JSON.stringify({ etag: ctx.etag }) });
+      })
+      .then(function (res) {
+        ctx.exporting = false;
+        if (!editAlive(ctx)) return;
+        ctx.exportState = (res && res.export) || { status: "none" };
+        editRenderTools(ctx);
+        editRenderExport(ctx);
+        editScheduleExportPoll(ctx);
+      })
+      .catch(function (err) {
+        ctx.exporting = false;
+        if (!editAlive(ctx) || (err && err.handled)) return;
+        editRenderTools(ctx);
+        if (err && err.type === "EditChanged") {
+          editShowWait(ctx, "다른 곳에서 바뀐 편집을 다시 불러오는 중…");
+          editLoad(ctx, "", EDIT_CHANGED_TEXT);
+          return;
+        }
+        editShowError(ctx, "내보내지 못했습니다: " + errMessage(err));
+      });
+  }
+
+  /* 내보내기 queued·running 이면 3초마다 GET — 편집 화면은 다시 그리지 않고 아래 상태만 바꾼다(design §5.6). */
+  function editScheduleExportPoll(ctx) {
+    if (ctx.exportTimer) window.clearTimeout(ctx.exportTimer);
+    ctx.exportTimer = 0;
+    var status = (ctx.exportState || {}).status;
+    if (status !== "queued" && status !== "running") return;
+    ctx.exportTimer = window.setTimeout(function () {
+      ctx.exportTimer = 0;
+      if (!editAlive(ctx)) return;
+      api(editPath(ctx) + "?variant=" + encodeURIComponent(ctx.variant))
+        .then(function (view) {
+          if (!editAlive(ctx)) return;
+          ctx.exportState = (view && view.export) || { status: "none" };
+          ctx.exportHistory = Array.isArray((view || {}).exportHistory) ? view.exportHistory : [];
+          editRenderExport(ctx);
+          editScheduleExportPoll(ctx);
+        })
+        .catch(function () {
+          if (editAlive(ctx)) editScheduleExportPoll(ctx);
+        });
+    }, EDIT_EXPORT_POLL_MS);
+  }
+
+  /* 내보내기 상태 서명: 바뀐 것이 없으면 다시 그리지 않는다(결과 영상 재생이 끊기지 않게). 주소는 ?·# 앞 경로만. */
+  function editExportSig(ctx) {
+    var e = ctx.exportState || {};
+    function path(url) {
+      return String(url || "").split("#")[0].split("?")[0];
+    }
+    return JSON.stringify([
+      e.status || "none", e.n || 0, (e.progress || {}).done || 0, (e.progress || {}).total || 0, e.matchesDoc !== false,
+      e.error || "", path(e.videoUrl), ctx.exportHistory.map(function (h) {
+        return [(h || {}).n, (h || {}).status, path((h || {}).videoUrl)];
+      })
+    ]);
+  }
+
+  function editRenderExport(ctx) {
+    var box = ctx.dom.exportBox;
+    if (!box) return;
+    var sig = editExportSig(ctx);
+    if (sig === ctx.exportSig) return;
+    ctx.exportSig = sig;
+    clear(box);
+    var ex = ctx.exportState || { status: "none" };
+    var status = ex.status || "none";
+    box.appendChild(el("h3", "vnew-edit-export-title", "내보내기"));
+    box.appendChild(el("p", "vnew-edit-export-status is-" + status, editExportText(ex)));
+    if (status === "queued" || status === "running") {
+      var progress = ex.progress || {};
+      var total = Number(progress.total) || 0;
+      var bar = el("div", "vnew-edit-export-bar");
+      var fill = el("div", "vnew-edit-export-fill");
+      fill.style.width = (total > 0 ? Math.round(((Number(progress.done) || 0) / total) * 100) : 0) + "%";
+      bar.appendChild(fill);
+      box.appendChild(bar);
+    }
+    if (status !== "none" && status !== "failed" && ex.matchesDoc === false) {
+      box.appendChild(el("p", "vnew-hint vnew-edit-export-stale", "편집이 바뀌었습니다 — 다시 내보내기"));
+    }
+    if (status === "done" && ex.videoUrl) {
+      var video = el("video", "vnew-edit-export-video");
+      video.src = ex.videoUrl;
+      video.controls = true;
+      video.preload = "metadata";
+      video.setAttribute("playsinline", "");
+      box.appendChild(video);
+      var tools = el("div", "vnew-edit-export-tools");
+      tools.appendChild(downloadLink(ex.downloadUrl || ex.videoUrl, "내려받기 (edit-" + (ex.n || 1) + ".mp4)"));
+      box.appendChild(tools);
+    }
+    var history = ctx.exportHistory.filter(function (h) {
+      return h && h.status === "done" && h.videoUrl;
+    });
+    if (history.length) {
+      var details = el("details", "vnew-edit-export-history");
+      details.appendChild(el("summary", null, "지난 결과 (" + history.length + ")"));
+      history
+        .slice()
+        .reverse()
+        .forEach(function (h) {
+          var item = el("div", "vnew-edit-export-item");
+          item.appendChild(el("span", "vnew-edit-export-item-name", h.n + "번 · " + editTimeText(h.seconds)));
+          var play = el("a", "outline-button vnew-edit-export-link", "재생");
+          play.href = h.videoUrl;
+          play.setAttribute("target", "_blank");
+          play.setAttribute("rel", "noopener");
+          item.appendChild(play);
+          item.appendChild(downloadLink(h.downloadUrl || h.videoUrl, "내려받기"));
+          details.appendChild(item);
+        });
+      box.appendChild(details);
+    }
+  }
+
   /* ---------------------------------------------------------------- 전역 */
 
   window.vnew = {
@@ -7608,6 +9619,7 @@
       renderList(byId(CHARACTERS_ROOT_ID));
     },
     unmount: function () {
+      editLeave(); // ⑦ 편집: 남은 저장을 보내고 재생·타이머·키를 멈춘다(state.mounted 를 내리기 전에)
       state.mounted = false;
       stopPolling();
       stopPlanPolling();

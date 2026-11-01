@@ -75,6 +75,34 @@ USER_FACING_KINDS = {
     # 지시서 103 피드백(2026-10-31): 캐스팅 BL 역할·유형 거절. 던지는 곳(vnew/casting.py)은 고정 문구 둘뿐이다
     # ("알 수 없는 BL 역할·유형입니다." · 역할과 유형이 맞지 않는다는 문구, 사용자 입력을 되풀이하지 않음).
     "BadBlType",
+    # 지시서 111(2026-11-02): ⑦ 편집 거절 문구. 던지는 곳(vnew/edit.py · vnew/routes.py _edit_body)이 모두 고정 한국어 문구이고,
+    # 문구에 들어가는 값은 서버 값뿐이다(몇 번째 클립·잰 원본 길이·한도 상수·그림체 이름, 사용자 글·키·URL 없음).
+    # BadVariant·NoGen 은 characters.py·generate.py·routes.py 의 같은 kind 고정 문구("알 수 없는 그림체입니다." 등)에도 적용된다.
+    "EditDisabled",
+    "NoGen",
+    "BadGen",
+    "BadVariant",
+    "NoMaterials",
+    "NoEtag",
+    "BadAudio",
+    "AudioTrackUnsupported",
+    "BadClips",
+    "TooManyClips",
+    "BadClip",
+    "BadClipId",
+    "DuplicateClipId",
+    "SourceNotAllowed",
+    "SourceUnreadable",
+    "BadClipTime",
+    "BadClipRange",
+    "BadClipMuted",
+    "TooLong",
+    "EditChanged",
+    "EditNotSaved",
+    "EmptyTimeline",
+    "ExportRunning",
+    "MediaNotFound",
+    "BodyTooLarge",
 }
 
 

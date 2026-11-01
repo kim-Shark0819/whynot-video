@@ -3513,3 +3513,668 @@ textarea.vnew-field-input {
     grid-template-columns: repeat(2, 1fr);
   }
 }
+
+/* ================================================================ ⑦ 편집(영상 편집 타임라인, 지시서 111)
+
+   위 미리보기 · 도구줄 · 눈금자 + 영상·소리 트랙(가로 스크롤) · 재료 · 내보내기. 가로로 넘치는 것은 타임라인
+   (.vnew-edit-scroll) 하나뿐이고 페이지는 넘치지 않는다(격자 칸 min-width: 0). 끄는 요소는 touch-action: none 이라
+   포인터 이벤트로 마우스·터치가 같이 된다(소리 트랙은 손가락으로 가로 스크롤). 높이 26·56·40px 은 왼쪽 이름 칸과 같다. */
+
+.vnew-edit {
+  display: grid;
+  gap: 12px;
+  min-width: 0;
+}
+
+.vnew-edit-wait {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 24px 12px;
+}
+
+.vnew-edit-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px 14px;
+}
+
+.vnew-edit-title {
+  margin: 0;
+}
+
+.vnew-edit-variants {
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.vnew-edit-variant {
+  padding: 5px 12px;
+  border: 1px solid var(--line, #e5e7eb);
+  border-radius: 999px;
+  background: var(--surface, #ffffff);
+  color: var(--text-muted, #6b7280);
+  font: inherit;
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.vnew-edit-variant.is-on {
+  border-color: var(--accent, #cb3208);
+  color: var(--accent, #cb3208);
+  background: var(--accent-soft, #fff4ee);
+  font-weight: 600;
+}
+
+.vnew-edit-variant:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
+.vnew-edit-save {
+  margin-left: auto;
+  font-size: 13px;
+  color: var(--text-muted, #6b7280);
+}
+
+.vnew-edit-save.is-saved {
+  color: var(--success, #15803d);
+}
+
+.vnew-edit-save-retry {
+  color: var(--danger, #b91c1c);
+}
+
+.vnew-edit-export-btn {
+  padding: 8px 18px;
+  white-space: nowrap;
+}
+
+.vnew-edit-notice {
+  margin: 0;
+}
+
+/* ---- 미리보기 ---- */
+
+.vnew-edit-player {
+  display: grid;
+  gap: 8px;
+  min-width: 0;
+}
+
+.vnew-edit-screen {
+  position: relative;
+  width: 100%;
+  max-width: 960px;
+  margin: 0 auto;
+  aspect-ratio: 16 / 9;
+  border-radius: 12px;
+  background: #0b0d10;
+  overflow: hidden;
+}
+
+.vnew-edit-video {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  opacity: 0;
+}
+
+.vnew-edit-video.is-active {
+  opacity: 1;
+}
+
+.vnew-edit-empty {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  margin: 0;
+  padding: 16px;
+  color: #d1d5db;
+  font-size: 14px;
+  text-align: center;
+}
+
+.vnew-edit-transport {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+}
+
+.vnew-edit-time {
+  min-width: 150px;
+  font-size: 13px;
+  font-variant-numeric: tabular-nums;
+  text-align: center;
+}
+
+/* ---- 도구줄 · 도움말 ---- */
+
+.vnew-edit-tools {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  padding: 6px;
+  border: 1px solid var(--line, #e5e7eb);
+  border-radius: 10px;
+  background: var(--surface-muted, #f9fafb);
+}
+
+.vnew-edit-tool {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  min-height: 34px;
+  padding: 0 10px;
+  border: 1px solid var(--line, #e5e7eb);
+  border-radius: 8px;
+  background: var(--surface, #ffffff);
+  color: var(--text, #1b1d21);
+  font: inherit;
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.vnew-edit-tool:hover:not(:disabled) {
+  border-color: var(--accent, #cb3208);
+}
+
+.vnew-edit-tool:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+.vnew-edit-tool.is-play {
+  min-width: 92px;
+  justify-content: center;
+}
+
+.vnew-edit-tool-icon {
+  font-size: 15px;
+  line-height: 1;
+}
+
+.vnew-edit-key {
+  padding: 1px 5px;
+  border: 1px solid var(--line, #e5e7eb);
+  border-radius: 4px;
+  background: var(--surface-muted, #f3f4f6);
+  color: var(--text-muted, #6b7280);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 11px;
+  line-height: 16px;
+}
+
+.vnew-edit-zoom {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin-left: auto;
+  font-size: 13px;
+  color: var(--text-muted, #6b7280);
+}
+
+.vnew-edit-zoom-range {
+  width: 160px;
+}
+
+.vnew-edit-help {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0;
+  padding: 8px 12px;
+  border-left: 3px solid var(--accent, #cb3208);
+  border-radius: 8px;
+  background: var(--accent-soft, #fff4ee);
+  font-size: 13px;
+}
+
+.vnew-edit-help-text {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.vnew-edit-help-close {
+  margin-left: auto;
+  padding: 0 8px;
+  border: 0;
+  background: transparent;
+  color: var(--text-muted, #6b7280);
+  font-size: 18px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+/* ---- 타임라인(가로 스크롤은 여기만) ---- */
+
+.vnew-edit-tl {
+  display: grid;
+  grid-template-columns: 44px minmax(0, 1fr);
+  min-width: 0;
+  border: 1px solid var(--line, #e5e7eb);
+  border-radius: 10px;
+  background: var(--surface, #ffffff);
+  overflow: hidden;
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+.vnew-edit-labels {
+  display: grid;
+  grid-template-rows: 26px 56px 40px;
+  border-right: 1px solid var(--line, #e5e7eb);
+  background: var(--surface-muted, #f9fafb);
+  color: var(--text-muted, #6b7280);
+  font-size: 11px;
+}
+
+.vnew-edit-label {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.vnew-edit-scroll {
+  position: relative;
+  min-width: 0;
+  overflow-x: auto;
+  overflow-y: hidden;
+  -webkit-overflow-scrolling: touch;
+  /* 안쪽 타임라인 너비(최대 300초 × 400px)가 바깥 칸의 최소 너비 계산에 끼지 않게(페이지 가로 넘침 막기). */
+  contain: inline-size;
+}
+
+.vnew-edit-content {
+  position: relative;
+  min-width: 100%;
+}
+
+.vnew-edit-ruler {
+  position: relative;
+  height: 26px;
+  box-sizing: border-box;
+  border-bottom: 1px solid var(--line, #e5e7eb);
+  cursor: pointer;
+  touch-action: none;
+}
+
+.vnew-edit-tick {
+  position: absolute;
+  bottom: 0;
+  width: 1px;
+  height: 6px;
+  background: #c4c8cf;
+}
+
+.vnew-edit-tick.is-major {
+  height: 12px;
+  background: #9aa0a8;
+}
+
+.vnew-edit-tick-label {
+  position: absolute;
+  bottom: 12px;
+  left: 3px;
+  color: var(--text-muted, #6b7280);
+  font-size: 10px;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.vnew-edit-track {
+  display: flex;
+  align-items: center;
+  box-sizing: border-box;
+}
+
+.vnew-edit-track.is-video {
+  height: 56px;
+}
+
+.vnew-edit-track.is-audio {
+  height: 40px;
+  border-top: 1px dashed var(--line, #e5e7eb);
+}
+
+.vnew-edit-track-empty {
+  margin: 0;
+  padding: 0 12px;
+  color: var(--text-muted, #6b7280);
+  font-size: 13px;
+}
+
+/* 클립 경계 2px 틈은 오른쪽 테두리(상자 너비 안, 시간 ↔ px 계산이 어긋나지 않는다). 고름 표시는 outline(자리 차지 없음). */
+.vnew-edit-clip {
+  position: relative;
+  flex: 0 0 auto;
+  height: 48px;
+  box-sizing: border-box;
+  border-right: 2px solid var(--surface, #ffffff);
+  border-radius: 6px;
+  background: #d9dde3;
+  overflow: hidden;
+  cursor: grab;
+  touch-action: none;
+}
+
+.vnew-edit-clip.is-selected {
+  outline: 2px solid var(--accent, #cb3208);
+  outline-offset: -2px;
+  z-index: 2;
+}
+
+.vnew-edit-clip.is-invalid {
+  outline: 2px dashed var(--danger, #b91c1c);
+  outline-offset: -2px;
+}
+
+.vnew-edit-clip.is-dragging {
+  opacity: 0.6;
+  cursor: grabbing;
+}
+
+.vnew-edit-thumbs {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+}
+
+.vnew-edit-thumb {
+  position: absolute;
+  top: 0;
+  height: 48px;
+  background-repeat: no-repeat;
+}
+
+.vnew-edit-clip-label {
+  position: absolute;
+  left: 6px;
+  bottom: 3px;
+  max-width: calc(100% - 16px);
+  padding: 0 4px;
+  border-radius: 3px;
+  background: rgba(17, 24, 39, 0.6);
+  color: #ffffff;
+  font-size: 11px;
+  line-height: 16px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  pointer-events: none;
+}
+
+.vnew-edit-clip.is-narrow .vnew-edit-clip-label {
+  display: none;
+}
+
+.vnew-edit-edge {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  z-index: 1;
+  width: 10px;
+  cursor: ew-resize;
+  touch-action: none;
+}
+
+.vnew-edit-edge.is-in {
+  left: 0;
+}
+
+.vnew-edit-edge.is-out {
+  right: 0;
+}
+
+.vnew-edit-clip.is-selected .vnew-edit-edge {
+  background: rgba(203, 50, 8, 0.55);
+}
+
+.vnew-edit-clip.is-narrow .vnew-edit-edge {
+  width: 35%;
+}
+
+.vnew-edit-aclip {
+  position: relative;
+  flex: 0 0 auto;
+  height: 28px;
+  box-sizing: border-box;
+  border-right: 2px solid var(--surface, #ffffff);
+  border-radius: 4px;
+  background: #e7efff;
+  color: #4f7bd6;
+  overflow: hidden;
+  touch-action: pan-x;
+}
+
+.vnew-edit-aclip.is-selected {
+  outline: 2px solid var(--accent, #cb3208);
+  outline-offset: -2px;
+}
+
+.vnew-edit-aclip.is-muted,
+.vnew-edit-aclip.is-silent,
+.vnew-edit-aclip.is-loading {
+  background: #eef0f3 linear-gradient(transparent 13px, #c4c8cf 13px, #c4c8cf 15px, transparent 15px);
+  color: #9ca3af;
+}
+
+.vnew-edit-aclip-icon {
+  position: absolute;
+  top: 6px;
+  left: 4px;
+  font-size: 12px;
+  line-height: 1;
+}
+
+.vnew-edit-wave {
+  display: block;
+  width: 100%;
+  height: 100%;
+  fill: currentColor;
+}
+
+.vnew-edit-playhead {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  z-index: 5;
+  width: 0;
+  margin-left: -1px;
+  border-left: 2px solid #ef4444;
+  pointer-events: none;
+}
+
+.vnew-edit-handle {
+  position: absolute;
+  top: 1px;
+  left: -12px;
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  border: 0;
+  border-radius: 6px;
+  background: #ef4444;
+  color: #ffffff;
+  font-size: 12px;
+  line-height: 22px;
+  cursor: grab;
+  pointer-events: auto;
+  touch-action: none;
+}
+
+.vnew-edit-drop {
+  position: absolute;
+  top: 26px;
+  bottom: 0;
+  z-index: 6;
+  width: 0;
+  margin-left: -1px;
+  border-left: 3px solid var(--accent, #cb3208);
+  pointer-events: none;
+}
+
+/* ---- 재료 · 내보내기 ---- */
+
+.vnew-edit-bin {
+  display: grid;
+  gap: 6px;
+}
+
+.vnew-edit-bin-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 8px;
+}
+
+.vnew-edit-bin-title {
+  font-size: 14px;
+  font-weight: 700;
+}
+
+.vnew-edit-bin-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.vnew-edit-bin-item {
+  font-size: 13px;
+}
+
+.vnew-edit-export {
+  display: grid;
+  gap: 8px;
+  padding: 12px;
+  border: 1px solid var(--line, #e5e7eb);
+  border-radius: 12px;
+  background: var(--surface, #ffffff);
+}
+
+.vnew-edit-export-title {
+  margin: 0;
+  font-size: 15px;
+}
+
+.vnew-edit-export-status {
+  margin: 0;
+  font-size: 14px;
+}
+
+.vnew-edit-export-status.is-done {
+  color: var(--success, #15803d);
+}
+
+.vnew-edit-export-status.is-failed {
+  color: var(--danger, #b91c1c);
+}
+
+.vnew-edit-export-bar {
+  height: 6px;
+  border-radius: 999px;
+  background: var(--surface-muted, #eceef1);
+  overflow: hidden;
+}
+
+.vnew-edit-export-fill {
+  height: 100%;
+  background: var(--accent, #cb3208);
+  transition: width 0.3s;
+}
+
+.vnew-edit-export-stale {
+  margin: 0;
+}
+
+.vnew-edit-export-video {
+  width: 100%;
+  max-width: 640px;
+  max-height: 360px;
+  border-radius: 8px;
+  background: #000000;
+}
+
+.vnew-edit-export-tools {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.vnew-edit-export-history summary {
+  cursor: pointer;
+  font-size: 13px;
+  color: var(--text-muted, #6b7280);
+}
+
+.vnew-edit-export-item {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 0;
+}
+
+.vnew-edit-export-item-name {
+  font-size: 13px;
+  font-variant-numeric: tabular-nums;
+}
+
+.vnew-edit-export-link {
+  font-size: 13px;
+}
+
+/* ---- ⑦ 좁은 화면(≤768px): 버튼 이름을 숨기고(아이콘·단축키·툴팁은 남음) 확대 막대를 한 줄로 ---- */
+
+@media (max-width: 768px) {
+  .vnew-edit-tool-text {
+    display: none;
+  }
+
+  .vnew-edit-tool {
+    min-height: 36px;
+    padding: 0 8px;
+  }
+
+  .vnew-edit-tool.is-play {
+    min-width: 0;
+  }
+
+  .vnew-edit-time {
+    order: -1;
+    width: 100%;
+    min-width: 0;
+  }
+
+  .vnew-edit-save {
+    margin-left: 0;
+  }
+
+  .vnew-edit-zoom {
+    width: 100%;
+    margin-left: 0;
+  }
+
+  .vnew-edit-zoom-range {
+    flex: 1 1 auto;
+    width: auto;
+    min-width: 0;
+  }
+
+  .vnew-edit-tl {
+    grid-template-columns: 30px minmax(0, 1fr);
+  }
+
+  .vnew-edit-labels {
+    font-size: 10px;
+  }
+}
