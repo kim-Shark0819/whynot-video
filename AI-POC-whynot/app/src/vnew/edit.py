@@ -14,7 +14,8 @@
   edit-media/{mid}-strip.jpg · edit-media/{mid}-film.json(필름스트립·파형 피크, 처음 요청 때 한 번 만든다).
   내보낸 결과는 영상 버킷 {gen 루트}/final-edit-{n}.mp4.
 외부 호출 래퍼(검사가 가짜로 바꾼다): _download · _upload · _probe_file · _film_file · _export_segment · _export_join ·
-_spawn_export. STORE 는 vpoc.store.STORE 다(검사가 모듈 변수로 바꾼다).
+_spawn_export. 파드 안 내보내기 잠금 파일: _pod_lock_try · _pod_lock_release(지시서 111). STORE 는 vpoc.store.STORE 다
+(검사가 모듈 변수로 바꾼다).
 """
 
 from __future__ import annotations
@@ -34,6 +35,15 @@ import time
 from datetime import datetime, timezone
 
 from boto3.s3.transfer import TransferConfig
+
+try:  # 파드 안 내보내기 잠금(리눅스·CI). 윈도 개발 PC 는 msvcrt.
+    import fcntl as _fcntl
+except ImportError:
+    _fcntl = None
+try:
+    import msvcrt as _msvcrt
+except ImportError:
+    _msvcrt = None
 
 from .. import stitcher
 from ..vpoc import settings as vpoc_settings
@@ -91,6 +101,12 @@ _TRANSFER = TransferConfig(
 # 프로세스당 동시에 하나씩만: 재료 내려받기·ffmpeg(길이 재기·필름스트립), 내보내기.
 _MEDIA_SEM = threading.BoundedSemaphore(1)
 _EXPORT_SEM = threading.BoundedSemaphore(1)
+# 파드당 내보내기 하나(지시서 111): gunicorn worker(프로세스) 2개가 각자 _EXPORT_SEM 을 가지므로, 같은 컨테이너의 임시
+# 디렉터리에 있는 잠금 파일을 함께 잡는다(리눅스 flock, 윈도 msvcrt — 프로세스가 죽으면 OS 가 푼다). 컨테이너마다 /tmp 가
+# 따로라 다른 파드와는 나누지 않는다. 잠금을 기다리는 동안 상태는 queued 그대로, EXPORT_WAIT_BEAT_S 마다 하트비트.
+EXPORT_LOCK_NAME = "vnew-edit-export.lock"
+EXPORT_LOCK_POLL_S = 2.0  # 잠금이 풀렸는지 다시 보는 간격
+EXPORT_LOCK_WAIT_MAX_S = 3600  # 이보다 오래 기다리면 failed(앞 내보내기 한 번 시도 상한 1200초 + ffmpeg 600초보다 넉넉히)
 _locks: dict[str, threading.Lock] = {}
 _locks_guard = threading.Lock()
 _export_threads: dict[str, threading.Thread] = {}
@@ -103,6 +119,10 @@ class _ClaimLost(Exception):
 
 class _ExportTimeout(Exception):
     """한 번 시도의 시간 상한(EXPORT_MAX_S)을 넘었다."""
+
+
+class _PodBusy(Exception):
+    """파드 안 다른 내보내기가 EXPORT_LOCK_WAIT_MAX_S 넘게 끝나지 않았다."""
 
 
 # ================================================================ 키 규칙
@@ -227,6 +247,49 @@ def _alive_here(claim: str) -> bool:
         return bool(thread is not None and thread.is_alive())
 
 
+def _pod_lock_path() -> str:
+    return os.path.join(tempfile.gettempdir(), EXPORT_LOCK_NAME)
+
+
+def _pod_lock_try() -> tuple[bool, object]:
+    """파드 안 내보내기 잠금을 기다리지 않고 잡아 본다. 반환 (잡았는가, 손잡이).
+
+    잡으면 (True, 열린 파일) — 끝나면 _pod_lock_release. 다른 프로세스(또는 다른 손잡이)가 잡고 있으면 (False, None).
+    잠금 파일을 열 수 없으면 (True, None)이고 파일 잠금 기능이 없는 OS 면 잠그지 않은 (True, 파일)이다 — 그때는 프로세스
+    세마포어만으로 진행한다(잠금 때문에 내보내기가 멈추지 않게).
+    """
+    try:
+        handle = open(_pod_lock_path(), "a+b")  # noqa: SIM115 — 잡은 동안 열어 둔다(닫으면 풀린다)
+    except OSError as exc:
+        log.warning("vnew.edit.export_lock_unavailable err=%s", type(exc).__name__)
+        return True, None
+    try:
+        if _fcntl is not None:
+            _fcntl.flock(handle.fileno(), _fcntl.LOCK_EX | _fcntl.LOCK_NB)
+        elif _msvcrt is not None:
+            handle.seek(0)
+            _msvcrt.locking(handle.fileno(), _msvcrt.LK_NBLCK, 1)
+    except OSError:
+        handle.close()
+        return False, None
+    return True, handle
+
+
+def _pod_lock_release(handle) -> None:
+    if handle is None:
+        return
+    try:
+        if _fcntl is not None:
+            _fcntl.flock(handle.fileno(), _fcntl.LOCK_UN)
+        elif _msvcrt is not None:
+            handle.seek(0)
+            _msvcrt.locking(handle.fileno(), _msvcrt.LK_UNLCK, 1)
+    except OSError as exc:
+        log.warning("vnew.edit.export_lock_release_failed err=%s", type(exc).__name__)
+    finally:
+        handle.close()
+
+
 # ================================================================ 작은 도구
 
 
@@ -265,6 +328,42 @@ def _presign(key: str, *, bucket: str = "", content_type: str = "") -> str:
 
 def _presign_video(key: str) -> str:
     return _presign(key, bucket=vpoc_settings.VIDEO_BUCKET, content_type="video/mp4")
+
+
+def _download_name(n) -> str:
+    """내려받기 파일 이름 edit-<n>.mp4(n 은 서버가 매긴 정수). 꼴이 틀리면 edit.mp4."""
+    number = n if isinstance(n, int) and not isinstance(n, bool) else 0
+    return f"edit-{number}.mp4" if number > 0 else "edit.mp4"
+
+
+def _presign_download(key: str, n) -> str:
+    """결과 영상 내려받기 URL(지시서 111): 영상 버킷 presigned 1시간 + 응답 헤더 Content-Disposition attachment.
+
+    재생 URL(_presign_video)은 그대로 둔다. vpoc store.presign 은 ResponseContentType 하나만 받으므로(공용 파일이라 고치지
+    않는다) 실제 저장소면 같은 버킷·리전 규칙으로 직접 서명한다. 검사용 저장소(Store 가 아님)는 재생 URL 과 같다.
+    파일 이름은 서버 정수 n 으로만 만든다(사용자 글이 헤더에 들어가지 않는다). 실패하면 "" (보기는 실패하지 않는다).
+    """
+    if not key:
+        return ""
+    store = STORE
+    if not isinstance(store, vpoc_store.Store):
+        return _presign_video(key)
+    try:
+        target = vpoc_settings.VIDEO_BUCKET or store.main_bucket
+        region = store.video_region if target == store.video_bucket else store.main_region
+        return vpoc_store.s3_client(region).generate_presigned_url(
+            "get_object",
+            Params={
+                "Bucket": target,
+                "Key": key,
+                "ResponseContentType": "video/mp4",
+                "ResponseContentDisposition": f'attachment; filename="{_download_name(n)}"',
+            },
+            ExpiresIn=URL_EXPIRES_S,
+        )
+    except Exception as exc:  # noqa: BLE001 — 보기는 실패하지 않는다.
+        log.warning("vnew.edit.presign_failed err=%s", type(exc).__name__)
+        return ""
 
 
 def _total(clips: list[dict]) -> float:
@@ -719,7 +818,9 @@ def _export_out(current: dict | None, doc_hash: str) -> dict:
     current = current if isinstance(current, dict) else {}
     if not current:
         return {"status": "none"}
-    url = _presign_video(str(current.get("key") or "")) if current.get("status") == "done" else ""
+    done = current.get("status") == "done"
+    url = _presign_video(str(current.get("key") or "")) if done else ""
+    download = _presign_download(str(current.get("key") or ""), current.get("n")) if done else ""
     return {
         "status": current.get("status"),
         "n": current.get("n"),
@@ -736,7 +837,7 @@ def _export_out(current: dict | None, doc_hash: str) -> dict:
         "hasAudio": current.get("hasAudio"),
         "error": current.get("error") or "",
         "videoUrl": url,
-        "downloadUrl": url,
+        "downloadUrl": download,
     }
 
 
@@ -807,7 +908,8 @@ def edit_view(owner: str, pid: str, variant: str | None = None) -> dict:
         "limits": {"maxClips": MAX_CLIPS, "maxTotalSeconds": MAX_TOTAL_S, "minClipSeconds": MIN_CLIP_S},
         "export": _export_out(state.get("current"), doc_hash),
         "exportHistory": [
-            {**_history_item(h), "videoUrl": _presign_video(str(h.get("key") or "")) if h.get("status") == "done" else ""}
+            {**_history_item(h), "videoUrl": _presign_video(str(h.get("key") or "")) if h.get("status") == "done" else "",
+             "downloadUrl": _presign_download(str(h.get("key") or ""), h.get("n")) if h.get("status") == "done" else ""}
             for h in (state.get("history") or []) if isinstance(h, dict)
         ],
     }
@@ -1108,6 +1210,30 @@ def _append_file(target: str, source: str) -> None:
         shutil.copyfileobj(src, out, 1 << 20)
 
 
+def _wait_pod_lock(owner: str, pid: str, gen_id: str, n: int, claim: str):
+    """파드 안 다른 worker 의 내보내기가 끝나기를 queued 그대로 기다린다(지시서 111). 반환 _pod_lock_try 의 손잡이.
+
+    EXPORT_LOCK_POLL_S 마다 다시 잡아 보고, EXPORT_WAIT_BEAT_S 마다 하트비트(claim 확인 — 다른 실행이 이어받았으면
+    _ClaimLost)를 쓴다. 차례는 먼저 잡는 쪽이다(엄밀한 줄 순서는 아니다). EXPORT_LOCK_WAIT_MAX_S 넘게 못 잡으면 _PodBusy.
+    """
+    locked, handle = _pod_lock_try()
+    if locked:
+        return handle
+    log.info("vnew.edit.export_wait pid=%s gen=%s n=%d reason=pod", pid, gen_id, n)
+    started = last_beat = time.monotonic()
+    while True:
+        time.sleep(EXPORT_LOCK_POLL_S)
+        locked, handle = _pod_lock_try()
+        if locked:
+            return handle
+        now = time.monotonic()
+        if now - started > EXPORT_LOCK_WAIT_MAX_S:
+            raise _PodBusy()
+        if now - last_beat >= EXPORT_WAIT_BEAT_S:
+            _beat(owner, pid, gen_id, claim)
+            last_beat = now
+
+
 _STAGE_MESSAGES = {
     "wait": "내보내기를 시작하지 못했습니다.",
     "probe": "원본 영상을 읽지 못했습니다.",
@@ -1121,10 +1247,12 @@ _STAGE_MESSAGES = {
 def run_export(owner: str, pid: str, gen_id: str, n: int, claim: str) -> None:
     """내보내기 스레드 본체. 임시 디렉터리에서 클립마다 다시 인코딩 → 잇기 → 영상 버킷에 올린다. 끝나면 임시 파일을 지운다.
 
-    프로세스당 한 번에 하나(_EXPORT_SEM). 기다리는 동안·클립 사이에 하트비트를 쓰고 claim 을 확인한다(이어받긴 실행이
-    있으면 결과를 쓰지 않고 끝낸다). 원본은 처음 쓰일 때 내려받고 마지막으로 쓰인 뒤 지운다. 시간 상한 EXPORT_MAX_S.
+    프로세스당 한 번에 하나(_EXPORT_SEM), 파드당 한 번에 하나(잠금 파일, _wait_pod_lock). 기다리는 동안·클립 사이에 하트비트를
+    쓰고 claim 을 확인한다(이어받긴 실행이 있으면 결과를 쓰지 않고 끝낸다). 원본은 처음 쓰일 때 내려받고 마지막으로 쓰인 뒤
+    지운다. 시간 상한 EXPORT_MAX_S(잠금을 기다린 시간은 빼고 잰다).
     """
     acquired = False
+    pod_handle = None
     stage = "wait"
     clip_no = 0
     started = time.monotonic()
@@ -1132,6 +1260,7 @@ def run_export(owner: str, pid: str, gen_id: str, n: int, claim: str) -> None:
         while not _EXPORT_SEM.acquire(timeout=EXPORT_WAIT_BEAT_S):
             _beat(owner, pid, gen_id, claim)
         acquired = True
+        pod_handle = _wait_pod_lock(owner, pid, gen_id, n, claim)
         current = _beat(owner, pid, gen_id, claim, status="running", startedAt=now_iso(), error="")
         attempt_started = time.monotonic()
         clips = [c for c in current.get("clips") or [] if isinstance(c, dict)]
@@ -1220,6 +1349,8 @@ def run_export(owner: str, pid: str, gen_id: str, n: int, claim: str) -> None:
     except Exception as exc:  # noqa: BLE001
         if isinstance(exc, _ExportTimeout):
             message = f"내보내기가 {EXPORT_MAX_S // 60}분을 넘어 멈췄습니다. 클립을 줄여 다시 내보내 주세요."
+        elif isinstance(exc, _PodBusy):
+            message = "앞의 내보내기가 끝나지 않아 시작하지 못했습니다. 잠시 뒤 다시 내보내 주세요."
         elif isinstance(exc, VpocError):
             message = exc.message
         else:
@@ -1235,5 +1366,6 @@ def run_export(owner: str, pid: str, gen_id: str, n: int, claim: str) -> None:
         except Exception as write_exc:  # noqa: BLE001
             log.warning("vnew.edit.export_state_failed pid=%s n=%d err=%s", pid, n, type(write_exc).__name__)
     finally:
+        _pod_lock_release(pod_handle)
         if acquired:
             _EXPORT_SEM.release()

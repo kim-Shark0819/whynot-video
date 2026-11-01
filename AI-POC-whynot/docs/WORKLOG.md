@@ -2095,3 +2095,91 @@
   8. 떡대만 되돌리는 설정은 없다(`VNEW_BL_LOOK`을 끄면 BL 참고 문장도 꺼진다).
   9. 113 대비: `TERMS`는 정적 표다. 검색해 풀이한 용어(캐시)를 같은 꼴로 어떻게 합칠지(런타임 조회 함수 등)는 113 설계에서 정한다. "이미 아는 용어"는 `web_terms.names()`와 `genre_bl` 이름 13개다.
   10. 지시서 "기존 캐스팅 제출 로그"를 `draw_start`로 읽었다. 칸마다 `vnew.casting.submitted`에도 필요하면 회차에 physique를 남겨야 한다.
+
+### 지시서 111 — vnew ⑦ 편집(영상 편집 타임라인) 2부: 화면·서버 보완 (Kiro, claude-opus-5.5)
+
+- **범위**: `.kiro/handoff/111-edit-timeline-ui.md`. 스펙 `.kiro/specs/vnew-edit-timeline/`에 111 몫(requirements R10~R12, design §8, tasks 9~14)을 더하고 같은 실행에서 구현·검사까지 했다. 화면은 design §5를 따르고 바꾼 점은 design §8.3에 이유와 함께 적었다. 커밋·push 하지 않았다. git·aws·kubectl·네트워크·유료 API를 쓰지 않았다(허용 명령 python·node만).
+- **먼저 한 일**: 바꿀 파일 10개 시작 전 사본, 저장소 파일 목록(크기·mtime·sha1), 저장소 `__pycache__` 83개 사본을 저장소 밖(`%TEMP%\kiro111`)에 두었다. 시작 전 전체 검사 전부 통과(ok 68줄, FAIL·WARN 0, 96초). 그 뒤 검사·커버리지·변형 실행은 모두 `PYTHONPYCACHEPREFIX`(저장소 밖)로 돌렸다.
+- **결정**(design §8)
+  - 화면 구조(§8.2): `vnew.js` 끝(전역 앞)에 ⑦ 구역 하나. 순수 함수(`editLocate`·`editSplit`·`editTrimClip`·`editMove`·실행 취소 스택·`editTickStep`·`editStripCells`·`editPeakPath`·`editKeyAction` 등)와 화면 상태 하나(`editCtx`)로 나눴다. 클립은 flex 줄의 상자(너비 = 길이 × px/초, 경계 2px 틈은 테두리)라 끝을 끄는 동안 그 상자만 고치면 뒤 클립이 따라온다. 썸네일은 필름스트립 JPEG를 CSS 배경 칸으로, 파형은 피크 배열을 SVG 막대 길(`preserveAspectRatio none`)로 그린다(버킷 CORS 없음, 캔버스 안 씀).
+  - §5에서 바꾸거나 더한 점(§8.3): 재료 줄(눌러 넣기, 사용자 "컷을 넣고"), 「저장 전」 상태, ⑦ 에서 계획 폴링 멈춤, `downloadUrl` 따로, 자르기 왼쪽 조각 id 유지, 삭제 뒤 고름 풀기, 가위 손잡이 끌기/떼기, 끝 끌기 취소는 되돌림, 한글 자판 `event.code`, 도움말 닫음 기억, probing 90번 상한, `contain: inline-size`, 소리 트랙 `touch-action: pan-x`.
+  - D15 내려받기: `_presign_download`가 실제 Store면 재생 URL과 같은 버킷·리전으로 `ResponseContentDisposition=attachment; filename="edit-<n>.mp4"`를 붙여 직접 서명한다(`vpoc/store.py` `presign`은 그 인자가 없는 공용 파일이라 고치지 않음). 파일 이름은 서버 정수 n 으로만.
+  - D16 운영 문구: 편집 kind 25개를 `USER_FACING_KINDS`에. 던지는 곳은 모두 고정 문구 + 서버 값(번호·잰 길이·한도·그림체 이름). `BadVariant`·`NoGen`은 캐릭터·⑤의 같은 kind 고정 문구에도 적용된다.
+  - D17 파드당 내보내기 하나: `_EXPORT_SEM`(프로세스) 다음에 컨테이너 임시 폴더 잠금 파일(`fcntl.flock` / 윈도 `msvcrt.locking`)을 잡는다. 못 잡으면 queued 그대로 2초마다 다시·30초마다 하트비트, 3600초 넘으면 failed, 잠금 파일을 못 열면 잠금 없이 진행(경고).
+- **검토한 대안**: 캔버스 썸네일·Web Audio(CORS, 기각), 클립을 절대 위치로 그리기(끝 끌기마다 뒤 클립 전부 옮김, 기각 → flex), 눈금·썸네일을 보이는 구간만 그리기(가상화 — 지금 수치로는 이르다, 남은 이슈), 새 모달 컴포넌트(기존 `window.confirm`과 같게, 기각), `store.presign`에 인자(공용 파일, 기각), 같은 출처 내려받기 라우트(파드가 영상 중계, 기각), S3 잠금·worker 1개·내보내기 전용 파드(기각, design §8.4), ⑦ 에서도 계획 폴링 두고 다시 그리기만 막기(`loadPlan` 수정이 095 검사 구역을 건드림, 기각 → `schedulePlanPoll` 한 줄).
+- **바꾼 것**
+  - `frontend/public/vnew.js`(+2,012줄, 지운 함수 0): ⑦ 구역 새로(`:7614-9600`, 함수 114개). 기존 함수: `maxReachableStep`(⑦ 한 줄)·새 `planStepList`·`planStepBar`(목록·⑦ 떠날 때 `editLeave`)·`decidePlanStep`(1~7)·`schedulePlanPoll`(⑦ 이면 안 함)·`renderPlan`(⑦ 분기)·`renderSoundStep`([⑦ 편집으로])·`unmount`(`editLeave`).
+  - `frontend/public/vnew.css`(+665줄): 파일 끝 ⑦ 구역(768px 이하 포함). 기존 규칙 그대로.
+  - `app/src/vnew/edit.py`(+132줄): `_download_name`·`_presign_download`·`_export_out`/`exportHistory` `downloadUrl`, `fcntl`·`msvcrt` 가져오기·`EXPORT_LOCK_*`·`_PodBusy`·`_pod_lock_path`·`_pod_lock_try`·`_pod_lock_release`·`_wait_pod_lock`·`run_export`(잠금 잡기·문구·놓기)·머리 주석.
+  - `app/src/vpoc/errors.py`(+28줄, `USER_FACING_KINDS` 안만): 편집 kind 25개와 주석.
+  - `tools/check_vpoc.py`(+1,707줄, 지운 줄 0): `_EdtEnv` 잠금 파일 자리(초기화 1줄·검사 임시 폴더 3줄·정리 2줄), 새 `_EDU_*`·`_edu_code`·`_edu_css_block`·`_edu_ctl_problems`·`check_vnew_edit_ui`(edu-a~k), `main()`.
+  - 스펙 세 파일(요구사항 2부·설계 §8·작업 9~14·§4.1 `downloadUrl`·D14 한 줄·§7 3번), `docs/ANALYSIS.md`(머리 줄·§2.3·§3.6 표·§3.6.3 7 「화면·서버 보완」·§4.4·§5.1·§10.1), 이 항목. `index.html`은 빌드가 `__ASSET_VERSION__`을 바꾸므로 그대로.
+- **검사(어떤 검사가 무엇을 덮는지)**
+
+  | 검사 | 덮는 것 |
+  |---|---|
+  | edu-a | `node --check vnew.js`, `vnew.js` 전체 innerHTML·outerHTML·insertAdjacentHTML·document.write 0, 자를 구역 표시 하나씩, ⑦ 배선 9곳 한 번씩 |
+  | edu-b | 순수 함수 29묶음(node): `editLocate`(경계 뒤 클립·끝·0 미만·글자)·`editSplit`(24·25·60fps 프레임·양쪽 최소 길이·경계·빈 목록)·`editTrimClip` 15경우(in/out 프레임·원본 끝 반 프레임·최소 길이·duration 모름·NaN·더 못 줄임·id·이름 유지)·`editRemove`·`editMove` 8·`editDropIndex`·실행 취소 스택(105 → 100·다시 실행 비움·깊은 사본·다시 실행도 100)·`editTickStep` 8·`editFitPps`·`editClampPps`·슬라이더 왕복·`editTimeText`·`editStripCells`·`editPeakPath`·`editKeyAction` 30·`editSaveBody`·`editMediaOrder`·`editExportText`·`editCssUrl`·`editNewId`·`editCloneClips` |
+  | edu-c | `planStepList`·`maxReachableStep`·`planStepBar`(is-soon·누르기·⑦ 떠날 때 `editLeave`)·`decidePlanStep`·`schedulePlanPoll`(⑦ 0)·`renderPlan` 분기·`renderSoundStep` 버튼 |
+  | edu-d | 실제 GET 응답: probing → 1초 뒤 다시, 레이아웃 순서, 도구 11개 title·단축키·aria-label, 도움말(도구줄 바로 아래·닫기 기억), 클립 너비·눈금·시각, 필름 하나씩(진행 중 겹치지 않음)·CSS 배경·SVG |
+  | edu-e | 0.8초 디바운스·한 번에 하나(진행 중 변경은 끝난 뒤 새 etag 로)·실행 취소/다시 실행 저장·409 다시 불러오기(스택 비움·안내·`invalidClips` 표시)·그 밖 실패 [다시]·떠날 때 남은 저장·늦은 키 무시 |
+  | edu-f | 끝 끌기(터치·붙잡기·프레임·미리보기·취소·오른쪽 버튼)·순서 바꾸기·가위 손잡이·눈금자 끌기·버튼 배선 13개·단축키 무시 조건·재생(미리 불러 두기·바꿔 끼우기·이어진 조각은 그대로·끝·한 프레임·Shift 1초·영상 오류 → 주소 다시)·확대·그림체 바꾸기(취소·실패·흐린 버튼)·재료 넣기·한도·내보내기(저장 먼저·폴링·폴링 실패 다시·downloadUrl·지난 결과·같은 상태 다시 그리지 않음·편집 바뀜·409 ExportRunning·409 EditChanged 다시 불러오기)·불러오기 실패·필름 실패·다시 그리기 비용 |
+  | edu-g | 실제 GET /edit(웹툰·실사)·필름 → 화면 → 화면이 만든 PUT 바디 17개를 실제 라우트로(etag만 실제 값) 모두 200·클립 그대로, POST 202 → done·downloadUrl |
+  | edu-h | `_download_name` 8꼴, `_presign_download`(빈 키·검사용 저장소·실제 Store + 가짜 서명기 Params·리전·1시간·실패·영상 버킷 설정 없음), `_export_out`, GET `exportHistory[].downloadUrl` |
+  | edu-i | 25개 한 줄씩·던지는 곳 AST·운영 봉투(편집 kind 그대로·그 밖 가림)·실제 라우트 400 문구 |
+  | edu-j | 기본 잠금 자리, 다른 프로세스(실제 OS 잠금) → 못 잡음·queued 하트비트·`export_wait`·풀리면 done, 두 손잡이, 파일 못 엶, 가짜 fcntl·msvcrt·둘 다 없음·놓기 실패, `_PodBusy` failed·로그 stage=wait, 기다리는 동안 claim 잃음, 실패해도 놓음 |
+  | edu-k | ⑦ 클래스 모두 정의, 넘침 막기·`contain`·touch-action·틈 규칙 14, 768px 4, `overflow-x`는 `.vnew-edit-scroll` 하나, 고정 너비 ≤ 960px, LF·끝 줄바꿈 |
+
+- **기대값을 바꾼 기존 검사**: 없다. `_EdtEnv`가 잠금 파일을 검사 임시 폴더에 두게 했다(edt-g·h의 `run_export`가 시스템 임시 폴더에 잠금 파일을 남기지 않게). 화면 변경 뒤에도 lr-n·095 폴링 검사(`renderPlan`·`schedulePlanPoll`·`decidePlanStep` 구역)가 그대로 통과한다.
+- **확인**
+  - `node --check frontend/public/vnew.js` 통과.
+  - `python -X utf8 tools/check_vpoc.py` 전부 통과: ok 69줄(68 + edu), FAIL·WARN 0, 94~98초. edu 단독 약 8초.
+  - 커버리지(coverage 7.17, 전체 검사기 `coverage run --include=…/vnew/edit.py,…/vpoc/errors.py`, 데이터는 저장소 밖, 시작 전 사본과 difflib): 서버 보완 실행문 83개 중 81개(97.6%). 못 한 2줄은 `import msvcrt` 실패 분기(윈도 개발 PC에서는 닿지 않고 CI 리눅스에서 닿는다). `errors.py`의 바뀐 28줄은 집합 리터럴 안이라 실행문 0(가져올 때 실행, edu-i가 값으로 본다). `edit.py` 파일 전체 887/889.
+  - 화면 커버리지(참고, node V8 블록 커버리지로 edu-b·d·e·f 스크립트): ⑦ 구역 함수 114/114 호출, 코드 줄 1,471/1,498(98.2%). 남은 줄은 rAF·confirm·localStorage 없는 브라우저 대비, probing 90번 상한, 클립 0개 재생 같은 방어 분기다.
+  - 변형 검사 76개(저장소 밖 사본 트리, 한 군데씩 바꿔 `check_vnew_edit`·`check_vnew_edit_ui`만 돌리고 되돌림): `edit.py` 24(파일 이름·attachment·ContentType·리전·만료·검사용 저장소·서명 실패·재생과 같은 URL·지난 결과·잠금 파일 못 엶·LOCK_NB·바이트 수·바쁨을 잡음으로·LOCK_UN·닫기·`_PodBusy`·하트비트·잠금 안 잡기·안 놓기·문구·로그·처음 잡기·UNLCK), `errors.py` 4, `vnew.js` 43(디바운스·한 번에 하나·409·스택 상한·다시 실행 비움·프레임 맞춤·반 프레임 끝·자르기 최소·경계·이동·눈금·한글 자판·입력칸·⑦ 목록·available·폴링·떠날 때 저장·필름 겹침·CSS url·내보내기 저장 먼저·running 폴링·downloadUrl·확대 기준·취소 되돌림·오른쪽 버튼·active 바꾸기·⑥ 버튼·1~7·URL 재시도 간격·타일·마지막 클립·저장 안 된 기본 문서·회색 칸·도움말·손잡이 click·이어진 조각·버튼 배선·invalid·폴링 실패·필름 실패·409 다시 불러오기·흐린 버튼), `vnew.css` 5 — 모두 잡혔다. 첫 실행(69개)에서 3개가 살아남았다(필름 요청 겹침, 저장 안 된 기본 문서 내보내기, 가위 손잡이 마우스 click 이중 자르기) → 검사를 더했다. 하나는 패턴이 틀려 고쳐 다시 돌렸고, 원본 끝 반 프레임 맞춤은 돌리기 전에 검사가 모자란 것을 보고 경우를 더했다. 하트비트를 빼는 변형은 검사가 멈췄다 → claim 잃음 검사에 2초 상한을 둬 2초 안에 실패하게 했다. 그 뒤 화면 커버리지에서 찾은 빈 곳(이어진 조각 재생·버튼 배선·쓸 수 없는 클립 표시·폴링 실패·필름 실패·내보내기 409 다시 불러오기·흐린 그림체 버튼)에 검사와 변형 7개를 더했고, 흐린 버튼 변형이 처음에 살아남아 검사를 더했다.
+  - 유료 호출 0: 화면은 가짜 api, 서버는 `_EdtEnv`(메모리 저장소·가짜 ffmpeg·fal 가격·urlopen 막음)와 가짜 S3 서명기. 파드 잠금만 실제 OS 잠금(저장소 밖 임시 폴더)과 잠금을 쥐는 python 하위 프로세스.
+  - 줄 끝·부산물: 바뀐 10개 파일 모두 CR 0·BOM 없음·끝 줄바꿈 있음(시작 전과 같음), 공백만 바뀐 줄 0, 지운 함수 정의 0(Python AST·JS 함수 이름). 수정 금지 파일(`generate.py`·`routes.py`·`casting.py`·`genre_bl.py`·`stitcher.py`·`deploy/config.*.env`·`.gitlab-ci.yml`)은 바이트가 같다. 저장소 안 새 파일 0, `__pycache__`·`.coverage` 변화 0. 구현 중 edt 검사가 시스템 임시 폴더에 만든 `vnew-edit-export.lock` 하나는 지웠고 `_EdtEnv`를 고쳐 다시 생기지 않는다. 변형 검사에서 잠금을 놓지 않는 변형·멈춘 변형이 시스템 임시 폴더에 남긴 잠금 폴더 6개(`edt-lock-*`·`edu-lock-*`)도 지웠다(정상 실행은 남기지 않음을 다시 확인). 실행 로그 `.kiro/handoff/logs/111.log`는 이 실행 도구가 쓴다.
+- **3단계 리뷰**
+  - 보안
+    - 글: 모두 `textContent`(edu-a 정적 0 + 가짜 DOM 감시). 서버 문구도 textContent로 보인다.
+    - CSS 배경 URL: presigned 주소의 `"`·`\`·줄바꿈을 %로 바꿔(`editCssUrl`) 선언 밖으로 나가지 않는다(edu-b·d).
+    - `Content-Disposition` 파일 이름은 서버 정수 n 으로만 만든다(헤더에 사용자 글이 들어가지 않는다, edu-h). 서명은 로컬 계산이고 외부로 나가는 데이터가 없다. 비밀값 추가 없음.
+    - `USER_FACING_KINDS`: 던지는 곳을 AST로 본다(고정 문구·서버 값만, edu-i). 다른 kind(`PreconditionFailed` 등)는 지금처럼 가린다.
+    - 입력: 화면은 서버가 준 재료 키만 쓰고 프레임·한도 안으로 맞추지만, 서버가 다시 검증한다(화면 바디를 실제 라우트로 보내 확인, edu-g).
+    - 잠금 파일: 컨테이너 `/tmp` 고정 이름, `a+b`로 열기만 하고 쓰지 않는다. 같은 컨테이너의 다른 사용자가 심볼릭 링크를 미리 둘 수 있다면 그 대상에 빈 파일이 생길 수 있다 — 앱 컨테이너는 사용자 하나라 받아들였다(남은 이슈).
+    - 발견: 없음(위 조치는 구현 때 넣었다).
+  - 성능(dev 파드 512Mi·CPU 0.5, 브라우저)
+    - 다시 그리기: 클립 100개·400px/초(300초)에서 한 번에 노드 3,737개(썸네일 칸 1,500·눈금 1,202·클립 상자 500·소리 상자 100·파형 SVG 134), node 가짜 DOM 2.4~4ms. 썸네일 칸 수는 너비(120,120px ÷ 85.3px)로 정해진다. 다시 그리는 때는 끝난 편집·확대(슬라이더는 rAF로 한 화면에 한 번)·필름 도착(그 재료 클립만)이다. 끝을 끄는 동안은 그 클립만(노드 15개), 재생은 재생헤드·시각 글만. 브라우저 실측은 하지 못했다(남은 이슈).
+    - 메모리(브라우저): 실행 취소 100단계 × 클립 ≤200개 사본(최악 약 3MB), 필름 응답(피크 1초 20개), `<video>` 2개 preload.
+    - 외부 호출: 열 때 GET 1번(probing 이면 1초마다, 90번까지), 필름 GET 재료마다 1번(한 번에 하나, 50분 뒤 다시), PUT은 0.8초 디바운스·한 번에 하나, 내보내기 폴링은 queued·running 동안 3초, 영상 오류 GET 15초에 한 번까지. ⑦ 에서는 `/plan` 폴링을 걸지 않는다(전에는 ⑤ 밖에서 5초마다 다시 그렸다).
+    - 서버: 파드당 내보내기 하나라 최악 ffmpeg 인코딩 1개(≈142MB, 전에는 worker 2개 × 1). 잠금 기다림은 2초마다 파일 열기 1번·30초마다 하트비트 쓰기 1번. 기다린 시간은 시도 상한(1200초)에서 뺀다.
+    - 발견: ⑦ 에서 계획 폴링이 화면을 5초마다 처음부터 그릴 수 있었다(실사 회차 진행 중) → `schedulePlanPoll` ⑦ 제외(조치, edu-c). 발견: 눈금자 테두리로 높이가 27px이 돼 이름 칸(26px)과 1px 어긋남 → `box-sizing: border-box`(조치).
+  - 운영성
+    - 로그: `vnew.edit.export_wait … reason=pod`(기다림 시작 1줄), `vnew.edit.export_lock_unavailable`·`export_lock_release_failed`(경고), `_PodBusy`는 `export_failed stage=wait`와 사용자 문구. 기존 `presign_failed`를 내려받기 서명에도 쓴다(키 없음).
+    - 되돌리기: `config.<target>.env`의 `VNEW_EDIT=false`(라우트 404·`gen.edit` 없음 → 단계 막대에 ⑦ 없음·⑥ 버튼 없음). 화면만 되돌리려면 `vnew.js`·`vnew.css` 되돌리기. 운영은 이미 false.
+    - 롤링 배포: 새 화면 + 옛 서버면 `downloadUrl`이 재생 URL과 같고 지난 결과에 `downloadUrl`이 없어 화면이 재생 URL로 대신한다(`h.downloadUrl || h.videoUrl`). 옛 화면에는 ⑦ 이 없다.
+    - 재시작·이어하기: 내보내기는 110과 같다(하트비트 300초 → 이어받기). 잠금을 기다리는 내보내기도 하트비트해서 다른 파드가 가로채지 않는다. 프로세스가 죽으면 OS가 잠금을 푼다. 화면은 단계 이동·unmount 때 남은 저장을 바로 보낸다(탭 닫기는 남은 이슈).
+    - 발견: edt 검사의 `run_export`가 시스템 임시 폴더에 잠금 파일을 만들었다 → `_EdtEnv`가 검사 임시 폴더를 쓰게(조치). 발견: CSS를 덧붙일 때 도구가 이음새에 CRLF 한 줄을 넣었다 → 바이트로 지우고 edu-k에 CR 검사(조치).
+- **dev에서 손으로 확인할 순서**(배포 뒤, dev는 base `VNEW_EDIT=true`)
+  1. ⑦ 이 열리는 프로젝트: 트랙 video_new, ⑤ 영상 생성에서 결과가 하나 이상 completed(컷 결과·테이크 결과 또는 done 합친 영상)이고 ⑤에서 [이걸로 고르기]를 눌러 `gen.selected`가 있는 프로젝트. 이때 `GET /api/vnew/p/<pid>/plan`의 `gen.edit.available`이 true다. `gen.selected`가 없으면 ⑦은 막대에 흐리게만 보인다. 처음 열면 ⑥ 사운드가 열리므로 [⑦ 편집으로] 또는 막대 ⑦.
+  2. 처음 열기: "영상 길이를 읽는 중…" 뒤 화면, 도구줄 아래 도움말 한 줄(× 로 닫고 새로고침해도 안 보임), 필름스트립·파형이 하나씩 채워지는지.
+  3. 재생·클립 경계(끊김 정도)·한 프레임(← →)·Home/End, S(한글 자판에서도)·가위 손잡이로 자르기, 클립 끝 끌기(미리보기가 끝 프레임), 몸통 끌어 순서, Delete·M·Ctrl+Z·Ctrl+Shift+Z, ⟲ 처음 상태로, 재료에서 [＋ 합친 영상].
+  4. 창 너비 1280px에서 확대를 최대로 → 타임라인만 가로 스크롤하고 페이지에는 가로 스크롤이 없는지. 개발자 도구 기기 모드 768px 이하·터치로 끝 끌기·순서·소리 트랙 밀어 스크롤.
+  5. 두 탭에서 같은 프로젝트 ⑦ → 한쪽에서 고친 뒤 다른 쪽에서 고치면 "다른 곳에서 바뀌어 다시 불러왔습니다".
+  6. [내보내기] → 대기·만드는 중 n/N → 끝: 재생, [내려받기 (edit-n.mp4)]가 새 탭 재생이 아니라 파일로 받아지는지. 로그 `vnew.edit.export_done ms= rss_mb=`·파드 메모리.
+  7. 두 탭(같은 파드에 붙으면)에서 서로 다른 프로젝트를 동시에 내보내기 → 하나는 "대기 중"으로 기다렸다가 이어서 끝나는지, 로그 `vnew.edit.export_wait reason=pod`.
+  8. 실사 결과가 있는 통 테이크 프로젝트에서 그림체 [실사] → 확인창 → 실사 문서, Ctrl+Z로 웹툰으로.
+  9. 크롬 Performance 패널로 클립이 많은 문서에서 확대 슬라이더를 끌 때 프레임 시간.
+- **운영 반영 계획(실행하지 않음)**: Claude 검토·커밋 → 개발 main 병합 → CI(`check:whynot`) → ECR → ai-deploy `whynot/dev` → ArgoCD. 위 dev 확인 뒤 운영을 켤 때 `config.prod.env`의 `VNEW_EDIT=false` 줄을 지우거나 true로 바꾸고 수동 job `deploy:whynot:prod`(이번에는 하지 않는다).
+- **110 남은 이슈 처리**: 1(편집 kind `USER_FACING_KINDS`) — 했다(D16). 3(파드 안 동시 내보내기 2개) — 파드당 하나(D17). 5(내려받기 URL) — `downloadUrl` attachment(D15). 나머지(2·4·6·7·8·9)는 그대로다.
+- **남은 이슈**
+  1. 실제 브라우저에서 보지 못했다(배치·1280px 가로 스크롤·768px·터치·재생 끊김·Performance). 위 dev 확인 순서로 본다.
+  2. 탭을 닫거나 새로고침하면 마지막 0.8초 안의 변경은 저장되지 않을 수 있다(`pagehide` + `keepalive` 저장은 넣지 않았다).
+  3. 300초 × 400px/초에서 다시 그리기 노드 3,737개. 브라우저에서 무거우면 눈금·썸네일을 보이는 구간만 그린다(가상화).
+  4. 미리보기는 다른 원본으로 바꿔 끼울 때 브라우저 디코딩 때문에 짧게 끊길 수 있다(다음 클립을 미리 불러 둔다). 내보낸 결과는 끊김이 없다.
+  5. 파드 잠금의 차례는 먼저 잡는 쪽이다(엄밀한 줄 순서 아님). 파드가 2개면 클러스터 전체로는 동시에 2개다.
+  6. 잠금 파일은 `/tmp` 고정 이름이다(컨테이너 사용자 하나 전제, 보안 리뷰).
+  7. 재료 줄(눌러 넣기)은 §5에 없던 기능이다(사용자 "컷을 넣고"). 빼거나 줄이려면 `editRenderBin`·`editInsertMaterial`만 빼면 된다(Claude 검토).
+  8. `BadVariant`·`NoGen`을 `USER_FACING_KINDS`에 넣어 캐릭터·⑤의 같은 kind 고정 문구("알 수 없는 그림체입니다." 등)도 운영에서 보인다(의도, 사용자 입력 없음).
+  9. 확대 슬라이더는 로그 눈금(20~400px/초)이다. 선형을 원하면 `editSliderOf`·`editPpsOf`만 바꾼다.
+  10. `edit.py`의 `import msvcrt` 실패 2줄은 윈도 검사에서 닿지 않는다(CI 리눅스에서 닿는다). 110 남은 이슈 9(stitcher 방어 분기)는 그대로다.
