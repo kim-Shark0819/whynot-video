@@ -38,11 +38,12 @@ def _bool(name: str, default: bool) -> bool:
 
 
 # --- 값을 검사하는 읽기(char-fidelity T2b, 2026-10-30). 틀린 값이면 기본값을 쓰고 경고 로그 1줄을 남긴다. ---
-# 위 _int·_float·_bool 은 그대로 둔다(기존 설정은 지금처럼 조용히 기본값). 아래 함수는 3D 공급자 설정만 쓴다.
+# 위 _int·_float·_bool 은 그대로 둔다(기존 설정은 지금처럼 조용히 기본값). 아래 함수는 3D 공급자 설정과 아이돌풍 캐스팅 장당 금액
+# (VNEW_CASTING_IDOL_USD, 지시서 109)만 쓴다.
 
 
 def _invalid(name: str, raw: str, default) -> None:
-    """틀린 설정값 경고 1줄. 비밀값이 아닌 3D 공급자 설정만 이 함수를 쓴다(값은 40자까지만 남긴다)."""
+    """틀린 설정값 경고 1줄. 비밀값이 아닌 3D 공급자·캐스팅 금액 설정만 이 함수를 쓴다(값은 40자까지만 남긴다)."""
     log.warning("vnew.settings.invalid key=%s value=%r default=%r", name, raw[:40], default)
 
 
@@ -258,6 +259,17 @@ VNEW_CASTING_MODEL = os.getenv("VNEW_CASTING_MODEL", "fal-ai/bytedance/seedream/
 VNEW_CASTING_USD = _float("VNEW_CASTING_USD", 0.04)  # 장당(fal 가격 2026-10-26)
 VNEW_CASTING_COUNT = max(1, min(4, _int("VNEW_CASTING_COUNT", 2)))  # 1~4로 자른다
 VNEW_CASTING_SIZE = os.getenv("VNEW_CASTING_SIZE", "1920x2560")  # 세로 초상, 스키마 최소 1920
+# 아이돌풍 실사 캐스팅 모델(지시서 109, 2026-11-01). 아이돌풍(preset idol)만 이 fal 모델로 뽑는다. 개발 비교(같은 아이돌풍 문장, 모델당
+# 6장)에서 Seedream 4.5 는 6장 중 1장, FLUX.2 [pro] 는 6장 중 6장이 실사였다. 현실 배우풍은 위 VNEW_CASTING_MODEL(Seedream) 그대로다.
+# 빈 값이면 아이돌풍도 VNEW_CASTING_MODEL·VNEW_CASTING_USD·VNEW_CASTING_SIZE 를 쓴다(되돌리기: config.<target>.env 에
+# VNEW_CASTING_IDOL_MODEL= 빈 값 한 줄). 그래서 템플릿·base 에 배선하고, 다른 설정과 달리 빈 값이 기본값이 아니라 "되돌리기"다
+# (env 가 없을 때만 기본값). 진행 중 회차는 시작 때 남긴 모델·장당 금액·크기를 쓴다(casting._round_choice).
+VNEW_CASTING_IDOL_MODEL = os.getenv("VNEW_CASTING_IDOL_MODEL", "fal-ai/flux-2-pro").strip()
+# 아래 둘은 코드 기본(템플릿에 넣지 않는다). 장당 금액: fal 가격 첫 1MP $0.03 + 그 뒤 1MP 마다 $0.015(MP 올림), 1760x2352 = 3.95MP → 4MP
+# = $0.075. 틀린 값(숫자 아님·0 미만·10 초과)이면 기본값 + 경고 1줄. 크기: 1920x2560 을 요청하면 1760x2352 로 나왔다(Claude 실측
+# 2026-11-01). 꼴은 VNEW_CASTING_SIZE 와 같은 규칙(casting._parse_size), 틀리면 1760x2352.
+VNEW_CASTING_IDOL_USD = _checked_float("VNEW_CASTING_IDOL_USD", 0.075, 0.0, 10.0)
+VNEW_CASTING_IDOL_SIZE = os.getenv("VNEW_CASTING_IDOL_SIZE", "1760x2352")
 # 뽑기 하트비트가 이 시간보다 오래됐고 이 파드에서 돌지 않으면 이어 조회한다(제출 전 칸은 실패로 끝낸다).
 VNEW_CASTING_STALL_S = _int("VNEW_CASTING_STALL_S", 600)
 # 뽑기 시작부터 이 시간이 지나면 남은 칸을 실패로 끝낸다.
