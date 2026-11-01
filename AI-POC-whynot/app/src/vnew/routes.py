@@ -883,4 +883,80 @@ def create_blueprint(deps: VnewDependencies) -> Blueprint:
         except Exception as exc:  # noqa: BLE001
             return _fail(exc)
 
+    # ------------------------------------------------------------ ⑦ 편집(영상 편집 타임라인, 지시서 110)
+    #
+    # ⑤ 결과 영상을 클립으로 늘어놓은 편집 문서(gen 마다 1개) 보기·저장·내보내기와 재료 필름스트립·파형. edit.py 가 맡는다.
+    # 설정(VNEW_EDIT)이 꺼져 있으면 프로젝트를 보기 전에 404 EditDisabled(새 라우트가 없는 것과 같다).
+    # 보기·재료는 읽기 권한, 저장·내보내기는 쓰기 권한(프로젝트 소유자). 저장 경로의 주인은 프로젝트 소유자다.
+
+    @bp.get("/p/<pid>/edit")
+    @deps.require_auth
+    def edit_get(pid: str):
+        try:
+            from . import edit  # noqa: PLC0415
+
+            edit.require_enabled("vnew.edit")
+            owner = _project_for(pid, write=False)
+            variant = request.args.get("variant")
+            return jsonify(edit.edit_view(owner, pid, variant))
+        except Exception as exc:  # noqa: BLE001
+            return _fail(exc)
+
+    def _edit_body(where: str) -> dict:
+        """편집 저장·내보내기 바디(JSON). 앱 전체 한도(영상 업로드용 100MB) 대신 edit.MAX_BODY_BYTES 까지만 읽는다(413)."""
+        from werkzeug.exceptions import RequestEntityTooLarge  # noqa: PLC0415
+
+        from . import edit  # noqa: PLC0415
+
+        too_large = VpocError(where, "BodyTooLarge", "편집 문서가 너무 큽니다.", 413)
+        # 한도 + 1바이트까지만 읽는다. 길이를 아는 요청이 그보다 크면 werkzeug 가 RequestEntityTooLarge 를 내고, 길이를 모르는
+        # 요청(chunked)은 거기서 잘린다. 어느 쪽이든 한도를 넘으면 413.
+        request.max_content_length = edit.MAX_BODY_BYTES + 1
+        try:
+            data = request.get_data(cache=True)
+        except RequestEntityTooLarge:
+            raise too_large from None
+        if len(data) > edit.MAX_BODY_BYTES:
+            raise too_large
+        payload = request.get_json(silent=True)
+        return payload if isinstance(payload, dict) else {}
+
+    @bp.put("/p/<pid>/edit")
+    @deps.require_auth
+    def edit_put(pid: str):
+        try:
+            from . import edit  # noqa: PLC0415
+
+            edit.require_enabled("vnew.edit.save")
+            owner = _project_for(pid, write=True)
+            return jsonify(edit.save_doc(owner, pid, _edit_body("vnew.edit.save")))
+        except Exception as exc:  # noqa: BLE001
+            return _fail(exc)
+
+    @bp.post("/p/<pid>/edit/export")
+    @deps.require_auth
+    def edit_export(pid: str):
+        try:
+            from . import edit  # noqa: PLC0415
+
+            edit.require_enabled("vnew.edit.export")
+            owner = _project_for(pid, write=True)
+            payload = _edit_body("vnew.edit.export")
+            result = edit.start_export(owner, pid, payload.get("etag"))
+            return jsonify({"ok": True, **result}), 202
+        except Exception as exc:  # noqa: BLE001
+            return _fail(exc)
+
+    @bp.get("/p/<pid>/edit/media/<mid>")
+    @deps.require_auth
+    def edit_media(pid: str, mid: str):
+        try:
+            from . import edit  # noqa: PLC0415
+
+            edit.require_enabled("vnew.edit.media")
+            owner = _project_for(pid, write=False)
+            return jsonify(edit.media_view(owner, pid, mid))
+        except Exception as exc:  # noqa: BLE001
+            return _fail(exc)
+
     return bp

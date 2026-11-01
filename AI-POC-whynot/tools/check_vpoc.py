@@ -11858,6 +11858,8 @@ PARITY_ENV_KEYS = [
     "VNEW_CAST_PHOTO_CHECK",
     # 지시서 109: 아이돌풍 실사 캐스팅 모델(빈 값 = 되돌리기, Seedream).
     "VNEW_CASTING_IDOL_MODEL",
+    # 지시서 110: ⑦ 편집 타임라인(운영 overlay false).
+    "VNEW_EDIT",
 ]
 PARITY_FACE = "fal:bytedance/seedance-2.5/image-to-video"
 PARITY_PARTNER = "fal:bytedance/seedance-2.5/reference-to-video"
@@ -33370,6 +33372,1487 @@ def _pz_has_key(obj, key: str) -> bool:
     return False
 
 
+# ---------------------------------------------------------------- 지시서 110 — ⑦ 편집 타임라인(edt-a~l)
+#
+# 외부 호출은 S3(메모리 저장소 _EdtStore — 조건부 쓰기 흉내)·ffmpeg 래퍼(가짜, edt-f·edt-i 일부는 로컬 ffmpeg 실측)·fal 가격
+# 조회(가짜)·urlopen(호출되면 기록 후 예외)뿐이다. 라우트·edit.py·plan 저장·내보내기 스레드 본체는 실제 코드 경로다. 유료 API 0.
+
+_EDT_OWNER = "tester"
+# 지시서 110 전 stitcher.py 전체(18,844바이트)의 sha256. 새 함수는 그 뒤에만 붙였다(기존 함수 동작 그대로, edt-j).
+_EDT_STITCHER_SHA = "df398d126b677fbe7851f1d6fab3bd564253728c1e10a2c0d3cf8a65c1926dcc"
+_EDT_STITCHER_MARK = "\n\n\n# ================================================================ ⑦ 편집"
+
+
+class _EdtStore(_FakeCharStore):
+    """메모리 저장소 + S3 조건부 쓰기 흉내(If-None-Match·If-Match → PreconditionFailed). 버킷·읽기·쓰기를 센다."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.puts: list[tuple[str, str, str]] = []
+        self.gets: list[tuple[str, str]] = []
+        self.json_writes: list[str] = []
+        self.read_hooks: dict[str, object] = {}
+        self.fail_writes: dict[str, object] = {}
+        self.reads: list[str] = []
+
+    def _conflict(self):
+        from src.vpoc.errors import VpocError  # noqa: PLC0415
+
+        return VpocError("store.write_json", "PreconditionFailed", "다른 탭이나 작업이 같은 계획을 먼저 저장했습니다.", 409)
+
+    def read_json(self, key: str):
+        self.reads.append(key)
+        result = super().read_json(key)
+        hook = self.read_hooks.pop(key, None)
+        if hook:
+            hook()
+        return result
+
+    def write_json(self, key: str, data: dict, *, etag: str = "", create_only: bool = False) -> str:
+        failure = self.fail_writes.get(key)
+        if failure is not None:
+            if isinstance(failure, list):
+                if failure:
+                    raise failure.pop(0)
+            else:
+                raise failure
+        current = self.json.get(key)
+        if create_only and current is not None:
+            raise self._conflict()
+        if etag and (current is None or current[1] != etag):
+            raise self._conflict()
+        self.json_writes.append(key)
+        return super().write_json(key, data, etag=etag, create_only=create_only)
+
+    def put_bytes(self, key: str, body: bytes, content_type: str, *, bucket: str = "") -> None:
+        self.puts.append((key, bucket, content_type))
+        super().put_bytes(key, body, content_type, bucket=bucket)
+
+    def get_bytes(self, key: str, *, bucket: str = "") -> bytes:
+        self.gets.append((key, bucket))
+        return super().get_bytes(key, bucket=bucket)
+
+    def presign(self, key: str, *, bucket: str = "", content_type: str = "", expires: int = 3600) -> str:
+        return f"https://signed.example/{key}?e={expires}&b={bucket}&t={content_type}"
+
+
+def _edt_key(pid: str, name: str) -> str:
+    return f"users/{_EDT_OWNER}/video/{pid}/vpoc1/plans/vnew-g1/shots/g1/{name}/output.mp4"
+
+
+def _edt_fake(dur: float, *, audio: bool = True, w: int = 1280, h: int = 720, fps: float = 24) -> bytes:
+    return f"FAKE:dur={dur};audio={int(audio)};w={w};h={h};fps={fps}".encode()
+
+
+class _EdtThread:
+    def is_alive(self) -> bool:
+        return True
+
+
+class _EdtEnv:
+    """check_vnew_edit 하네스. with 안에서 저장소·ffmpeg 래퍼·가격 조회를 가짜로 바꾸고, 나오면 모두 되돌린다."""
+
+    def __init__(self) -> None:
+        self.owner = _EDT_OWNER
+        self.store = _EdtStore()
+        self.probes: list[str] = []
+        self.films: list[dict] = []
+        self.segments: list[dict] = []
+        self.joins: list[dict] = []
+        self.spawned: list[tuple] = []
+        self.inline = False
+        self.real = False
+        self.fail_clip = 0
+        self.on_segment = None
+        self.join_garbage = False
+        self.urlopen_calls: list[str] = []
+        self.project = {"owner": _EDT_OWNER, "track": "video_new"}
+        self.missing_project = False
+        self.can_read = True
+        self.can_write = True
+        self.project_calls: list[str] = []
+        self._saved: list = []
+
+    def set(self, obj, name: str, value) -> None:
+        self._saved.append((obj, name, getattr(obj, name)))
+        setattr(obj, name, value)
+
+    def __enter__(self) -> "_EdtEnv":
+        import urllib.request as _urlrequest  # noqa: PLC0415
+
+        sys.path.insert(0, str(ROOT / "app"))
+        from src import stitcher as stitchmod  # noqa: PLC0415
+        from src.vnew import edit as editmod  # noqa: PLC0415
+        from src.vnew import generate as genmod  # noqa: PLC0415
+        from src.vnew import plan as planmod  # noqa: PLC0415
+        from src.vpoc import fal as falmod  # noqa: PLC0415
+        from src.vpoc import settings as vpoc_set  # noqa: PLC0415
+
+        self.editmod, self.genmod, self.planmod, self.stitchmod = editmod, genmod, planmod, stitchmod
+        self.orig = {name: getattr(editmod, name) for name in
+                     ("_probe_file", "_film_file", "_export_segment", "_export_join", "_spawn_export")}
+        self._threads = dict(editmod._export_threads)  # noqa: SLF001
+        for module in (editmod, genmod, planmod):
+            self.set(module, "STORE", self.store)
+        self.set(falmod, "pricing", lambda *a, **k: None)
+        self.set(falmod, "pricing_for", lambda *a, **k: None)
+        self.set(falmod, "find", lambda *a, **k: None)
+        self.set(_urlrequest, "urlopen", self._urlopen)
+        self.set(vpoc_set, "VIDEO_BUCKET", "edt-video-bucket")
+        self.set(editmod, "_probe_file", self._probe)
+        self.set(editmod, "_film_file", self._film)
+        self.set(editmod, "_export_segment", self._segment)
+        self.set(editmod, "_export_join", self._join)
+        self.set(editmod, "_spawn_export", self._spawn)
+        self.sem = _LrSem()
+        self.set(genmod, "_PREPARE_SEM", self.sem)
+        return self
+
+    def __exit__(self, *_exc) -> bool:
+        for obj, name, value in reversed(self._saved):
+            setattr(obj, name, value)
+        self._saved.clear()
+        self.editmod._export_threads.clear()  # noqa: SLF001
+        self.editmod._export_threads.update(self._threads)  # noqa: SLF001
+        return False
+
+    # ---- 가짜 외부 호출 ----
+    def _urlopen(self, *args, **kwargs):
+        self.urlopen_calls.append(str(args[0] if args else ""))
+        raise RuntimeError("검사에서 urlopen 이 호출됐습니다")
+
+    def _probe(self, path: str) -> dict:
+        with open(path, "rb") as handle:
+            head = handle.read(120)
+        self.probes.append(head.decode("latin-1")[:60])
+        if head.startswith(b"FAKE:"):
+            fields = dict(part.split("=", 1) for part in head[5:].decode().split(";"))
+            return {"duration": float(fields["dur"]), "hasAudio": fields["audio"] == "1", "width": int(fields["w"]),
+                    "height": int(fields["h"]), "fps": float(fields["fps"])}
+        if self.real:
+            return self.orig["_probe_file"](path)
+        return {"duration": 0.0, "width": 0, "height": 0, "fps": 0.0, "hasAudio": False}
+
+    def _film(self, path, workdir, *, interval, tiles, has_audio):
+        if self.real:
+            return self.orig["_film_file"](path, workdir, interval=interval, tiles=tiles, has_audio=has_audio)
+        self.films.append({"interval": interval, "tiles": tiles, "hasAudio": has_audio})
+        strip = os.path.join(workdir, "strip.jpg")
+        with open(strip, "wb") as handle:
+            handle.write(_tiny_jpeg(128 * tiles, 72))
+        return {"stripPath": strip, "tileWidth": 128, "tileHeight": 72,
+                "peaks": [0.25] * int(tiles * 20) if has_audio else []}
+
+    def _segment(self, source_path, video_out, **kwargs):
+        if self.real:
+            return self.orig["_export_segment"](source_path, video_out, **kwargs)
+        number = len(self.segments) + 1
+        if self.on_segment:
+            self.on_segment(number)
+        if self.fail_clip == number:
+            raise self.stitchmod.StitchError("boom /tmp/vnew-edit-export-x/src-001.mp4")
+        with open(source_path, "rb") as handle:
+            content = handle.read(80)
+        self.segments.append({"source": os.path.basename(source_path), "content": content, "semHeld": self.sem.held,
+                              "files": sorted(os.listdir(os.path.dirname(video_out))), **kwargs})
+        with open(video_out, "wb") as handle:
+            handle.write(b"SEG")
+        if kwargs.get("audio_out"):
+            with open(kwargs["audio_out"], "wb") as handle:
+                handle.write(b"\0" * (kwargs["frames"] * 48000 // kwargs["fps"] * 4))
+        return {"video": video_out, "audio": kwargs.get("audio_out") or "", "frames": kwargs["frames"]}
+
+    def _join(self, segments, output_path, *, audio_path):
+        if self.real:
+            return self.orig["_export_join"](segments, output_path, audio_path=audio_path)
+        recent = self.segments[-len(segments):]
+        frames = sum(s["frames"] for s in recent)
+        fps = recent[-1]["fps"]
+        audio_bytes = os.path.getsize(audio_path) if audio_path else 0
+        self.joins.append({"count": len(segments), "exist": all(os.path.exists(s) for s in segments),
+                           "audioBytes": audio_bytes, "frames": frames})
+        with open(output_path, "wb") as handle:
+            handle.write(b"garbage" if self.join_garbage else _edt_fake(frames / fps, audio=bool(audio_path), w=recent[-1]["width"],
+                                                                         h=recent[-1]["height"], fps=fps))
+        return output_path
+
+    def _spawn(self, owner, pid, gen_id, n, claim):
+        self.spawned.append((owner, pid, gen_id, n, claim))
+        if self.inline:
+            self.editmod.run_export(owner, pid, gen_id, n, claim)
+
+    # ---- 계획·라우트 ----
+    def client(self):
+        from flask import Flask  # noqa: PLC0415
+
+        from src import vnew  # noqa: PLC0415
+
+        def get_project(pid):
+            self.project_calls.append(pid)
+            return None if self.missing_project else {"id": pid, **self.project}
+
+        app = Flask(__name__)
+        app.register_blueprint(vnew.create_blueprint(vnew.VnewDependencies(
+            require_auth=lambda handler: handler, current_owner=lambda: self.owner, get_project=get_project,
+            can_read_project=lambda proj: self.can_read, can_write_project=lambda proj: self.can_write,
+            project_owner_prefix=lambda name: name,
+        )))
+        return app.test_client()
+
+    def save_plan(self, pid: str, plan: dict) -> None:
+        self.planmod.save_plan(self.owner, pid, plan)
+
+    def plan(self, pid: str) -> dict:
+        return self.planmod.load_plan(self.owner, pid)[0]
+
+    def export_state(self, pid: str, gen_id: str = "g1") -> dict:
+        data, _ = self.store.read_json(self.editmod.export_state_key(self.owner, pid, gen_id))
+        return data or {}
+
+    def set_export(self, pid: str, mutate, gen_id: str = "g1") -> None:
+        key = self.editmod.export_state_key(self.owner, pid, gen_id)
+        data, _ = self.store.read_json(key)
+        mutate(data)
+        _FakeCharStore.write_json(self.store, key, data)
+
+
+def _edt_cell(status: str, key: str = "", **extra) -> dict:
+    return {"status": status, "outputKey": key, "attempt": 1, "invocationArn": "", "error": "", "claim": "", **extra}
+
+
+def _edt_cut_plan(env: _EdtEnv, pid: str, *, selected="webtoon", blobs: dict | None = None) -> dict:
+    """컷 단위(previz) gen: 컷 3개. 웹툰 3개 완료(c2 는 3초로 채움 origSeconds 1.5, c3 소리 없음), 실사 2개 완료·1개 실패."""
+    planmod = env.planmod
+    plan = planmod.new_plan()
+    cuts = [{"id": "c1", "no": 1, "seconds": 3}, {"id": "c2", "no": 2, "seconds": 2}, {"id": "c3", "no": 3, "seconds": 3}]
+    plan["conti"] = {"status": "ready", "cuts": cuts, "segments": [{"id": "s1", "cutIds": ["c1", "c2", "c3"], "seconds": 8}]}
+    units = [
+        {"id": "c1", "cutId": "c1", "recSegId": "s1", "seconds": 3.0,
+         "real": _edt_cell("completed", _edt_key(pid, "c1-real-1")), "webtoon": _edt_cell("completed", _edt_key(pid, "c1-webtoon-1"))},
+        {"id": "c2", "cutId": "c2", "recSegId": "s1", "seconds": 1.5,
+         "real": _edt_cell("completed", _edt_key(pid, "c2-real-1"), padded=True, origSeconds=1.5),
+         "webtoon": _edt_cell("completed", _edt_key(pid, "c2-webtoon-1"), padded=True, origSeconds=1.5)},
+        {"id": "c3", "cutId": "c3", "recSegId": "s1", "seconds": 3.0,
+         "real": _edt_cell("failed"), "webtoon": _edt_cell("completed", _edt_key(pid, "c3-webtoon-1"))},
+    ]
+    final_web = f"users/{_EDT_OWNER}/video/{pid}/vnew/gen/g1/final-webtoon.mp4"
+    plan["gen"] = {
+        "genId": "g1", "mode": "previz", "status": "partial", "videoModel": "", "createdAt": "2026-11-01T00:00:00Z",
+        "previzRevision": 0, "units": units, "segments": [],
+        "finalReal": {"status": "failed", "key": "", "error": "x"},
+        "finalWebtoon": {"status": "done", "key": final_web, "error": ""}, "selected": selected, "costUsd": 0.0,
+    }
+    default_blobs = {
+        _edt_key(pid, "c1-webtoon-1"): _edt_fake(3.0), _edt_key(pid, "c2-webtoon-1"): _edt_fake(3.0),
+        _edt_key(pid, "c3-webtoon-1"): _edt_fake(3.0, audio=False), final_web: _edt_fake(7.5),
+        _edt_key(pid, "c1-real-1"): _edt_fake(3.0), _edt_key(pid, "c2-real-1"): _edt_fake(3.0),
+    }
+    env.store.blobs.update(default_blobs if blobs is None else blobs)
+    env.save_plan(pid, plan)
+    return plan
+
+
+def _edt_take_plan(env: _EdtEnv, pid: str, *, web_dur=10.0, rerecorded=False, real_running=False) -> dict:
+    """통 테이크 gen: 녹화 s1(컷 1·2, 6초)·s2(컷 3, 4초) = 테이크 1개 10초. 웹툰 완료, 실사 2회차(1회차 기록 있음)."""
+    planmod = env.planmod
+    plan = planmod.new_plan()
+    cuts = [{"id": "c1", "no": 1, "seconds": 3}, {"id": "c2", "no": 2, "seconds": 3}, {"id": "c3", "no": 3, "seconds": 4}]
+    plan["conti"] = {"status": "ready", "cuts": cuts, "segments": [{"id": "s1", "cutIds": ["c1", "c2"], "seconds": 6},
+                                                                  {"id": "s2", "cutIds": ["c3"], "seconds": 4}]}
+    plan["previz"]["recordings"] = {
+        "s1": {"status": "ready", "key": "rec/s1.mp4", "seconds": 6.0},
+        "s2": {"status": "ready", "key": "rec/s2-new.mp4" if rerecorded else "rec/s2.mp4", "seconds": 4.0},
+    }
+    web, real = _edt_key(pid, "take1-webtoon-1"), _edt_key(pid, "take1-real-2")
+    old_real, old_final = _edt_key(pid, "take1-real-1"), f"users/{_EDT_OWNER}/video/{pid}/vnew/gen/g1/final-real-r1.mp4"
+    plan["gen"] = {
+        "genId": "g1", "mode": "previz-take", "status": "running" if real_running else "done", "createdAt": "2026-11-01T00:00:00Z",
+        "units": [{"id": "take1", "cutIds": ["c1", "c2", "c3"], "recKeys": ["rec/s1.mp4", "rec/s2.mp4"], "recSegIds": ["s1", "s2"],
+                   "seconds": 10.0, "startCutNo": 1, "endCutNo": 3,
+                   "real": _edt_cell("queued") if real_running else _edt_cell("completed", real),
+                   "webtoon": _edt_cell("completed", web)}],
+        "segments": [],
+        "finalReal": {"status": "waiting" if real_running else "done", "key": "" if real_running else
+                      f"users/{_EDT_OWNER}/video/{pid}/vnew/gen/g1/final-real-r2.mp4", "error": "", "n": 2},
+        "finalWebtoon": {"status": "done", "key": f"users/{_EDT_OWNER}/video/{pid}/vnew/gen/g1/final-webtoon.mp4", "error": ""},
+        "realRun": {"n": 2}, "selected": None, "costUsd": 0.0,
+        "realHistory": [{"n": 1, "status": "done", "finalKey": old_final, "audio": True,
+                         "units": [{"id": "take1", "status": "completed", "outputKey": old_real, "error": ""}]}],
+    }
+    env.store.blobs.update({web: _edt_fake(web_dur), real: _edt_fake(10.0), old_real: _edt_fake(10.0), old_final: _edt_fake(10.0)})
+    env.save_plan(pid, plan)
+    return plan
+
+
+def check_vnew_edit() -> None:
+    """지시서 110 — ⑦ 편집(영상 편집 타임라인) 서버(edit.py·라우트 4개·gen_view 요약·stitcher 새 함수·배선). 유료 호출 0.
+
+    (edt-a) 설정·배선: VNEW_EDIT 기본 true(_bool, 하위 프로세스 7값)·settings 줄·템플릿 env(VNEW_CASTING_IDOL_MODEL 바로 뒤)·
+            base(true·되돌리기 주석·자리)·PARITY_ENV_KEYS·운영 overlay false(BOM·LF·끝 두 줄 그대로)·dev overlay 없음·
+            render dev true·prod false·prod+true
+    (edt-b) 재료·기본 문서: 컷 단위(웹툰 3·채운 컷 끝 1.5·실사 실패 칸 빠짐)·통 테이크(컷 경계 3개·다시 녹화/길이 다름 → 통째 1개·
+            실사 회차 기록 허용·진행 중 회차면 지난 회차로)·옛 순차(구간)·합친 영상만(1개)·재료 없음 409·gen 없음 404·
+            그림체 고르기(인자·저장본·selected·웹툰 먼저·400)·저장본과 다른 그림체(saved false·etag·version)·이름(label)
+    (edt-c) 검증(PUT 400): 허용 밖 키(다른 그림체·다른 프로젝트·경로 꼴)·NaN·Infinity·글자·bool·in<0·out>길이·0.04 미만·길이
+            +0.0005 는 자름·201개·303초·id 꼴·겹침·muted·label 정리·audio·variant·etag/version 없음·clips 꼴·원본 못 읽음 409·
+            바디 256KB 넘음 413(길이를 아는 바디·모르는 바디)
+    (edt-d) 저장·409: 첫 저장 etag ""·version 1, 같은 기준 다시 409, 새 etag·옛 etag 409, version 기준, 읽기와 쓰기 사이 다른 저장
+            (조건부 쓰기) 409, GET 이 저장본·etag 를 준다
+    (edt-e) 권한·플래그: 프로젝트 없음 404·읽기 403·쓰기 403(GET 은 읽기로 된다)·트랙 403·끔이면 네 라우트 404 EditDisabled
+            (프로젝트 조회 0)·mid 꼴·모르는 mid 404·다른 그림체 재료는 됨
+    (edt-f) 내보내기 실측(로컬 ffmpeg, 없으면 경고 후 건너뜀): 자르기·잇기 길이 = 문서 합 ±0.1초·프레임 수·소리·크기·fps,
+            필름스트립 칸·높이 72·파형 피크 수·소리 없는 원본 피크 0, 임시 디렉터리 남지 않음
+    (edt-g) 내보내기 상태(가짜 ffmpeg): queued → running → done·진행·결과 키(영상 버킷)·GET videoUrl·matchesDoc, 같은 문서 다시
+            누름 → 새로 시작 안 함, 다른 문서 409 ExportRunning, 저장 안 함·etag 다름·빈 타임라인 409, 시작 때 사본, 원본 1번 받기·
+            마지막 쓰임 뒤 지움, 프레임 배분·반 프레임 당김·소리 결정·클립 인코딩은 ⑤ 준비 세마포어 안, 실패 문구(파일 경로 없음)·
+            시간 상한·사본 검사(남의 키·빈 목록)·못 읽는 결과, 다시 내보내기 n·기록 3개
+    (edt-h) 이어받기: 하트비트 끊김 → 새 claim·attempts 2·스레드·끝까지, 최근 하트비트·이 프로세스 실행 중 → 그대로, 3번째 →
+            failed, claim 잃음 → 결과 안 씀, 순서 기다리는 동안 하트비트
+    (edt-i) 캐시: 길이 재기 두 번째 0회·문서가 쓰는 재료만 더 잼·실패는 캐시 안 함(다시 잼)·시간 예산(probing)·필름스트립·파형
+            두 번째 0회(generated false)·원본이 다른 캐시는 다시 만듦
+    (edt-j) stitcher 새 함수(가짜 _run): probe_media 읽기·edit_segment 명령·검증·PCM 길이 맞춤·edit_join 명령·filmstrip_jpeg·
+            audio_peaks 계산·nice 앞붙임·시간 초과, 지시서 110 전 stitcher.py 부분 sha256 그대로
+    (edt-k) S3 스트리밍 래퍼(실제 Store + 가짜 클라이언트): download_fileobj·upload_fileobj·한 스레드 TransferConfig·SSE·
+            ContentType·리전
+    (edt-l) gen_view 요약(켬 끝 키·끔 없음·재료 없음)·로그 꼴(S3 키·URL 없음)·fal 가격·urlopen 호출 0
+    """
+    sys.path.insert(0, str(ROOT / "app"))
+    import datetime as _dt  # noqa: PLC0415
+    import hashlib as _hashlib  # noqa: PLC0415
+    import importlib.util  # noqa: PLC0415
+    import threading as _threading  # noqa: PLC0415
+    import time as _time  # noqa: PLC0415
+    import traceback as _tb  # noqa: PLC0415
+
+    bad: list[str] = []
+    seen: set[str] = set()
+    report: list[str] = []
+    logs = _LogCapture()
+    owner = _EDT_OWNER
+
+    def expect(group: str, got, want, what: str) -> None:
+        seen.add(group)
+        if got != want:
+            bad.append(f"({group}) {what}\n      결과 {got!r}\n      기대 {want!r}")
+
+    def err_of(resp) -> tuple[int, str]:
+        body = (resp.get_json(silent=True) or {}).get("error") or {}
+        return resp.status_code, str(body.get("type") or "")
+
+    def iso_ago(seconds: float) -> str:
+        moment = _dt.datetime.now(_dt.timezone.utc) - _dt.timedelta(seconds=seconds)
+        return moment.strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    all_logs: list[str] = []
+
+    def drain() -> None:
+        all_logs.extend(r.getMessage() for r in logs.records)
+        logs.clear()
+
+    def temp_dirs(prefix: str) -> set[str]:
+        root = tempfile.gettempdir()
+        return {name for name in os.listdir(root) if name.startswith(prefix)}
+
+    # ================= (edt-a) 설정·배선 =================
+    def edt_a() -> None:
+        settings_src = (ROOT / "app" / "src" / "vnew" / "settings.py").read_text(encoding="utf-8")
+        expect("edt-a", settings_src.count('VNEW_EDIT = _bool("VNEW_EDIT", True)'), 1, "settings.py 에 VNEW_EDIT(_bool 기본 true) 한 줄")
+        code = (
+            "import importlib, os, sys\n"
+            f"sys.path.insert(0, {str(ROOT / 'app')!r})\n"
+            "from src.vnew import settings as s\n"
+            "out = []\n"
+            "for raw in (None, '', 'true', 'false', '0', 'no', 'garbage'):\n"
+            "    os.environ.pop('VNEW_EDIT', None)\n"
+            "    if raw is not None:\n"
+            "        os.environ['VNEW_EDIT'] = raw\n"
+            "    out.append(repr(importlib.reload(s).VNEW_EDIT))\n"
+            "print('|'.join(out))\n"
+        )
+        env = {k: v for k, v in os.environ.items() if k != "VNEW_EDIT"}
+        env["PYTHONIOENCODING"] = "utf-8"
+        env["PYTHONDONTWRITEBYTECODE"] = "1"
+        result = subprocess.run([sys.executable, "-X", "utf8", "-c", code], capture_output=True, text=True, env=env, encoding="utf-8")
+        lines_out = (result.stdout or "").strip().splitlines()
+        got = lines_out[-1].split("|") if lines_out else [(result.stderr or "")[-200:]]
+        expect("edt-a", got, ["True", "True", "True", "False", "False", "False", "False"], "하위 프로세스 VNEW_EDIT 읽기(없음·빈 값·true·false·0·no·글자)")
+        template = (ROOT / "k8s" / "workloads.yaml.tmpl").read_text(encoding="utf-8")
+        pair = re.search(r"- name: VNEW_CASTING_IDOL_MODEL\n\s*value: \"\$\{VNEW_CASTING_IDOL_MODEL\}\"\n(\s*#[^\n]*\n)"
+                         r"\s*- name: VNEW_EDIT\n\s*value: \"\$\{VNEW_EDIT\}\"\n", template)
+        expect("edt-a", [bool(pair), template.count("${VNEW_EDIT}")], [True, 1], "템플릿 앱 env 한 쌍(VNEW_CASTING_IDOL_MODEL 바로 뒤, 주석 1줄)")
+        example = (ROOT / "deploy" / "config.env.example").read_text(encoding="utf-8")
+        lines = example.splitlines()
+        at = lines.index("VNEW_EDIT=true") if "VNEW_EDIT=true" in lines else -1
+        comment = "\n".join(lines[at - 4:at]) if at > 4 else ""
+        expect("edt-a", [re.findall(r"^VNEW_EDIT=(.*)$", example, re.M), "VNEW_EDIT=false" in comment, "config.<target>.env" in comment,
+                         lines[at - 5] if at > 5 else ""],
+               [["true"], True, True, "VNEW_CASTING_IDOL_MODEL=fal-ai/flux-2-pro"], "base: true 한 줄·되돌리기 주석·VNEW_CASTING_IDOL_MODEL 바로 뒤")
+        expect("edt-a", ["VNEW_EDIT" in PARITY_ENV_KEYS,
+                         PARITY_ENV_KEYS.index("VNEW_EDIT") == PARITY_ENV_KEYS.index("VNEW_CASTING_IDOL_MODEL") + 1],
+               [True, True], "PARITY_ENV_KEYS 에 VNEW_CASTING_IDOL_MODEL 바로 뒤로")
+        prod_bytes = (ROOT / "deploy" / "config.prod.env").read_bytes()
+        prod_text = prod_bytes.decode("utf-8-sig")
+        expect("edt-a", [prod_bytes[:3] == b"\xef\xbb\xbf", prod_bytes.count(b"\r"), re.findall(r"^VNEW_EDIT=(.*)$", prod_text, re.M),
+                         prod_text.splitlines()[-1], "VNEW_EDIT" in (ROOT / "deploy" / "config.dev.env").read_text(encoding="utf-8")],
+               [True, 0, ["false"], "VNEW_HIDE_STORY=false", False], "운영 overlay false 한 줄(BOM·LF·끝 줄 그대로)·dev overlay 없음")
+        spec = importlib.util.spec_from_file_location("_edt_deploy_render", ROOT / "deploy" / "render.py")
+        render = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(render)  # type: ignore[union-attr]
+        base = render.load_config(ROOT / "deploy" / "config.env.example")
+        rendered = []
+        for target, extra in (("dev", {}), ("prod", {}), ("prod", {"VNEW_EDIT": "true"})):
+            layer = {**render.load_config(ROOT / "deploy" / f"config.{target}.env"), **extra}
+            text = render.render_text(template, render.add_derived({**base, **layer}), "k8s/workloads.yaml.tmpl")
+            rendered.append(_rendered_env_values(text, "VNEW_EDIT"))
+        expect("edt-a", rendered, [["true"], ["false"], ["true"]], "렌더 dev true·prod false·prod+true(되돌리기 경로)")
+
+    # ================= 나머지(가짜 환경) =================
+    try:
+        edt_a()
+    except Exception as exc:  # noqa: BLE001
+        bad.append("(edt-a) 예외: " + repr(exc) + "\n" + _tb.format_exc()[:1200])
+
+    try:
+        with logs, _EdtEnv() as env, _pin_vnew(VNEW_EDIT=True):
+            edit, genmod, stitchmod = env.editmod, env.genmod, env.stitchmod
+            client = env.client()
+
+            def get(pid: str, **params):
+                query = "&".join(f"{k}={v}" for k, v in params.items())
+                return client.get(f"/api/vnew/p/{pid}/edit" + (f"?{query}" if query else ""))
+
+            def put(pid: str, body):
+                if isinstance(body, str):
+                    return client.put(f"/api/vnew/p/{pid}/edit", data=body, content_type="application/json")
+                return client.put(f"/api/vnew/p/{pid}/edit", json=body)
+
+            def post(pid: str, body):
+                return client.post(f"/api/vnew/p/{pid}/edit/export", json=body)
+
+            def clips_of(view: dict) -> list[tuple]:
+                return [(c["sourceKey"].split("/shots/g1/")[-1].split("/")[0] if "/shots/" in c["sourceKey"] else
+                         c["sourceKey"].rsplit("/", 1)[-1], c["in"], c["out"], c.get("label", "")) for c in view["doc"]["clips"]]
+
+            # ================= (edt-b) 재료·기본 문서 =================
+            _edt_cut_plan(env, "prj_edt_cut")
+            resp = get("prj_edt_cut")
+            view = resp.get_json() or {}
+            expect("edt-b", [resp.status_code, view.get("variant"), view.get("saved"), view.get("etag"), view.get("probing"),
+                             view["doc"]["version"] if view.get("doc") else None],
+                   [200, "webtoon", False, "", False, 0], "컷 단위 GET: 웹툰(selected)·저장 전 기본 문서·etag 없음")
+            expect("edt-b", clips_of(view), [("c1-webtoon-1", 0.0, 3.0, "컷 1"), ("c2-webtoon-1", 0.0, 1.5, "컷 2"),
+                                             ("c3-webtoon-1", 0.0, 3.0, "컷 3")],
+                   "컷 단위 웹툰 기본 문서: 컷 3개·채운 컷 끝 = origSeconds 1.5")
+            mats = {m["label"]: m for m in view.get("materials") or []}
+            expect("edt-b", sorted(mats), ["컷 1", "컷 2", "컷 3", "합친 영상"], "웹툰 재료 = 컷 3 + 합친 영상")
+            expect("edt-b", [mats["컷 3"]["hasAudio"], mats["컷 1"]["duration"], mats["합친 영상"]["inDefault"],
+                             mats["합친 영상"]["duration"], mats["컷 1"]["videoUrl"].startswith("https://signed.example/users/"),
+                             mats["컷 1"]["videoUrl"].endswith("?e=3600&b=edt-video-bucket&t=video/mp4"), mats["컷 1"]["mid"] == edit.media_id(mats["컷 1"]["sourceKey"]),
+                             view["totalSeconds"], view["limits"], view["export"], view["exportHistory"], view["invalidClips"]],
+                   [False, 3.0, False, None, True, True, True, 7.5, {"maxClips": 200, "maxTotalSeconds": 300.0, "minClipSeconds": 0.04},
+                    {"status": "none"}, [], []],
+                   "재료 소리·길이·기본 밖 재료는 길이를 아직 안 잼·presigned 1시간·mid·전체 길이·한도·내보내기 없음")
+            expect("edt-b", [(v["key"], v["available"], v["materials"]) for v in view["variants"]],
+                   [("real", True, 2), ("webtoon", True, 4)], "그림체별 재료 수(실사 실패 칸·실패한 합친 영상 빠짐)")
+            real_view = get("prj_edt_cut", variant="real").get_json() or {}
+            expect("edt-b", clips_of(real_view), [("c1-real-1", 0.0, 3.0, "컷 1"), ("c2-real-1", 0.0, 1.5, "컷 2")],
+                   "실사 기본 문서: 완료 컷 2개")
+            _edt_cut_plan(env, "prj_edt_sel", selected="real")
+            expect("edt-b", (get("prj_edt_sel").get_json() or {}).get("variant"), "real", "selected 가 실사면 실사부터")
+            expect("edt-b", err_of(get("prj_edt_cut", variant="anime")), (400, "BadVariant"), "모르는 그림체 400")
+
+            _edt_take_plan(env, "prj_edt_take")
+            take_view = get("prj_edt_take").get_json() or {}
+            expect("edt-b", [take_view.get("variant"), clips_of(take_view)],
+                   ["webtoon", [("take1-webtoon-1", 0.0, 3.0, "컷 1"), ("take1-webtoon-1", 3.0, 6.0, "컷 2"),
+                                ("take1-webtoon-1", 6.0, 10.0, "컷 3")]],
+                   "통 테이크 웹툰 기본 문서: 녹화 컷 경계 3개(같은 원본)")
+            _edt_take_plan(env, "prj_edt_take2", web_dur=10.04)
+            expect("edt-b", clips_of(get("prj_edt_take2").get_json() or {}),
+                   [("take1-webtoon-1", 0.0, 3.012, "컷 1"), ("take1-webtoon-1", 3.012, 6.024, "컷 2"),
+                    ("take1-webtoon-1", 6.024, 10.04, "컷 3")], "결과 길이가 조금 다르면 비례로 늘인다")
+            _edt_take_plan(env, "prj_edt_take3", rerecorded=True)
+            _edt_take_plan(env, "prj_edt_take4", web_dur=14.0)
+            expect("edt-b", [clips_of(get("prj_edt_take3").get_json() or {}), clips_of(get("prj_edt_take4").get_json() or {})],
+                   [[("take1-webtoon-1", 0.0, 10.0, "테이크 1 · 컷 1–3")], [("take1-webtoon-1", 0.0, 14.0, "테이크 1 · 컷 1–3")]],
+                   "다시 녹화했거나 결과 길이가 많이 다르면 테이크 통째 1개")
+            take_real = get("prj_edt_take", variant="real").get_json() or {}
+            expect("edt-b", [clips_of(take_real)[0][0], len(take_real["doc"]["clips"]),
+                             sorted(m["group"] for m in take_real["materials"]),
+                             [m["label"] for m in take_real["materials"] if m["group"] == "r1"]],
+                   ["take1-real-2", 3, ["current", "final", "r1", "r1-final"], ["실사 1회차 · 테이크 1 · 컷 1–3"]],
+                   "통 테이크 실사: 지금 회차 기본·지난 회차 결과도 재료")
+            _edt_take_plan(env, "prj_edt_take5", real_running=True)
+            running_real = get("prj_edt_take5", variant="real").get_json() or {}
+            expect("edt-b", [c[0] for c in clips_of(running_real)], ["take1-real-1"] * 3, "새 회차 진행 중이면 지난 회차 결과로 시작")
+
+            seg_plan = env.planmod.new_plan()
+            seg_plan["gen"] = {"genId": "g1", "status": "done", "createdAt": "2026-11-01T00:00:00Z",
+                               "segments": [{"id": "s1", "real": _edt_cell("completed", _edt_key("prj_edt_seg", "s1-r")),
+                                             "webtoon": _edt_cell("completed", _edt_key("prj_edt_seg", "s1-w"))},
+                                            {"id": "s2", "real": _edt_cell("completed", _edt_key("prj_edt_seg", "s2-r")),
+                                             "webtoon": _edt_cell("completed", _edt_key("prj_edt_seg", "s2-w"))}],
+                               "finalReal": {"status": "done", "key": "users/tester/video/prj_edt_seg/f-r.mp4"},
+                               "finalWebtoon": {"status": "waiting", "key": ""}, "selected": "real"}
+            env.store.blobs.update({_edt_key("prj_edt_seg", name): _edt_fake(5.0) for name in ("s1-r", "s1-w", "s2-r", "s2-w")})
+            env.save_plan("prj_edt_seg", seg_plan)
+            expect("edt-b", clips_of(get("prj_edt_seg").get_json() or {}),
+                   [("s1-r", 0.0, 5.0, "구간 1"), ("s2-r", 0.0, 5.0, "구간 2")], "옛 순차 모드: 구간 클립")
+
+            final_plan = env.planmod.new_plan()
+            final_key = "users/tester/video/prj_edt_final/vnew/gen/g1/final-webtoon.mp4"
+            final_plan["gen"] = {"genId": "g1", "mode": "previz", "status": "done", "units": [], "segments": [],
+                                 "finalReal": {"status": "waiting", "key": ""},
+                                 "finalWebtoon": {"status": "done", "key": final_key}, "selected": "webtoon"}
+            env.store.blobs[final_key] = _edt_fake(8.0)
+            env.save_plan("prj_edt_final", final_plan)
+            expect("edt-b", clips_of(get("prj_edt_final").get_json() or {}), [("final-webtoon.mp4", 0.0, 8.0, "합친 영상")],
+                   "컷 클립 없이 합친 영상만: 클립 1개")
+
+            none_plan = env.planmod.new_plan()
+            none_plan["gen"] = {"genId": "g1", "mode": "previz", "status": "running",
+                                "units": [{"id": "c1", "real": _edt_cell("queued"), "webtoon": _edt_cell("submitted")}],
+                                "finalReal": {"status": "waiting"}, "finalWebtoon": {"status": "waiting"}}
+            env.save_plan("prj_edt_none", none_plan)
+            env.save_plan("prj_edt_nogen", env.planmod.new_plan())
+            bad_gen = env.planmod.new_plan()
+            bad_gen["gen"] = {"genId": "../g1", "status": "done"}
+            env.save_plan("prj_edt_badgen", bad_gen)
+            expect("edt-b", [err_of(get("prj_edt_none")), err_of(get("prj_edt_nogen")), err_of(get("prj_edt_badgen"))],
+                   [(409, "NoMaterials"), (404, "NoGen"), (409, "BadGen")], "재료 없음 409·gen 없음 404·genId 꼴 409")
+            report.append(f"edt-b 기본 문서 7경우·그림체 고르기 4경우")
+
+            # ================= (edt-c) 검증 =================
+            _edt_cut_plan(env, "prj_edt_val")
+            val_view = get("prj_edt_val").get_json() or {}
+            keys = {m["label"]: m["sourceKey"] for m in val_view["materials"]}
+            c1, c3, fw = keys["컷 1"], keys["컷 3"], keys["합친 영상"]
+
+            def body(clips, **extra):
+                return {"etag": "", "variant": "webtoon", "clips": clips, **extra}
+
+            def clip(**fields):
+                return {"id": "a1", "sourceKey": c1, "in": 0.0, "out": 1.0, **fields}
+
+            cases = [
+                ("다른 그림체 재료", body([clip(sourceKey=_edt_key("prj_edt_val", "c1-real-1"))]), (400, "SourceNotAllowed")),
+                ("다른 프로젝트 키", body([clip(sourceKey=_edt_key("prj_other", "c1-webtoon-1"))]), (400, "SourceNotAllowed")),
+                ("경로 꼴 키", body([clip(sourceKey=c1 + "/../../x.mp4")]), (400, "SourceNotAllowed")),
+                ("키가 숫자", body([clip(sourceKey=5)]), (400, "SourceNotAllowed")),
+                ("in 글자", body([clip(**{"in": "0.5"})]), (400, "BadClipTime")),
+                ("out bool", body([clip(out=True)]), (400, "BadClipTime")),
+                ("out 없음", body([{"id": "a1", "sourceKey": c1, "in": 0}]), (400, "BadClipTime")),
+                ("in < 0", body([clip(**{"in": -0.1})]), (400, "BadClipRange")),
+                ("out > 길이", body([clip(out=3.002)]), (400, "BadClipRange")),
+                ("0.04 미만", body([clip(**{"in": 1.0, "out": 1.03})]), (400, "BadClipRange")),
+                ("in > out", body([clip(**{"in": 2.0, "out": 1.0})]), (400, "BadClipRange")),
+                ("201개", body([clip(id=f"k{i}") for i in range(201)]), (400, "TooManyClips")),
+                ("303초", body([clip(id=f"k{i}", out=3.0) for i in range(101)]), (400, "TooLong")),
+                ("id 꼴", body([clip(id="a b")]), (400, "BadClipId")),
+                ("id 41자", body([clip(id="a" * 41)]), (400, "BadClipId")),
+                ("id 겹침", body([clip(), clip()]), (400, "DuplicateClipId")),
+                ("클립 꼴", body(["x"]), (400, "BadClip")),
+                ("muted 글자", body([clip(muted="yes")]), (400, "BadClipMuted")),
+                ("audio 있음", body([clip()], audio=[{"key": "x"}]), (400, "AudioTrackUnsupported")),
+                ("audio 꼴", body([clip()], audio="x"), (400, "BadAudio")),
+                ("variant", body([clip()], variant="anime"), (400, "BadVariant")),
+                ("clips 꼴", body("x"), (400, "BadClips")),
+                ("기준 없음", {"variant": "webtoon", "clips": []}, (400, "NoEtag")),
+                ("etag 숫자", {"etag": 5, "variant": "webtoon", "clips": []}, (400, "NoEtag")),
+                ("version bool", {"version": True, "variant": "webtoon", "clips": []}, (400, "NoEtag")),
+            ]
+            got_cases = [(name, err_of(put("prj_edt_val", payload))) for name, payload, _ in cases]
+            expect("edt-c", got_cases, [(name, want) for name, _, want in cases], "PUT 검증 거절 25경우")
+            for literal in ("NaN", "Infinity", "-Infinity"):
+                raw = json.dumps(body([clip()])).replace('"out": 1.0', f'"out": {literal}')
+                expect("edt-c", err_of(put("prj_edt_val", raw)), (400, "BadClipTime"), f"JSON {literal} → 400")
+            import io as _io  # noqa: PLC0415
+
+            huge = '{"etag": "", "variant": "webtoon", "clips": [], "pad": "' + "x" * (300 * 1024) + '"}'
+            chunked = client.put("/api/vnew/p/prj_edt_val/edit", input_stream=_io.BytesIO(huge.encode()),
+                                 content_type="application/json", headers={"Transfer-Encoding": "chunked"},
+                                 environ_overrides={"wsgi.input_terminated": True})
+            expect("edt-c", [err_of(put("prj_edt_val", huge)), err_of(client.post("/api/vnew/p/prj_edt_val/edit/export", data=huge,
+                                                                                  content_type="application/json")), err_of(chunked)],
+                   [(413, "BodyTooLarge")] * 3, "바디 256KB 넘음 413(길이를 모르는 바디도 그만큼만 읽는다)")
+            ok_resp = put("prj_edt_val", body([clip(out=3.0005, label="  컷\n하나\x07" + "가" * 60, muted=True),
+                                               clip(id="b-2_", sourceKey=fw, **{"in": 7, "out": 7.5})]))
+            saved = (ok_resp.get_json() or {}).get("doc") or {}
+            expect("edt-c", [ok_resp.status_code, [(c["in"], c["out"], c["muted"], c.get("label")) for c in saved.get("clips") or []],
+                             saved.get("audio"), saved.get("version")],
+                   [200, [(0.0, 3.0, True, "컷하나" + "가" * 37), (7.0, 7.5, False, None)], [], 1],
+                   "길이 +0.0005 는 원본 길이로 자름·label 제어 문자 빼고 40자·합친 영상(기본 밖 재료)도 됨·정수 시간")
+            env.store.blobs.pop(_edt_key("prj_edt_val", "c2-webtoon-1"), None)
+            index_key = edit.media_index_key(owner, "prj_edt_val", "g1")
+            index = env.store.json[index_key][0]
+            index["items"].pop(edit.media_id(keys["컷 2"]), None)
+            _FakeCharStore.write_json(env.store, index_key, index)
+            expect("edt-c", err_of(put("prj_edt_val", {"etag": (ok_resp.get_json() or {}).get("etag"), "variant": "webtoon",
+                                                        "clips": [clip(sourceKey=keys["컷 2"])]})),
+                   (409, "SourceUnreadable"), "원본을 못 읽은 재료 409(다음에 다시 잰다)")
+
+            # ================= (edt-d) 저장·409 =================
+            _edt_cut_plan(env, "prj_edt_save")
+            sv = get("prj_edt_save").get_json() or {}
+            doc_clips = sv["doc"]["clips"]
+            first = put("prj_edt_save", {"etag": "", "variant": "webtoon", "clips": doc_clips})
+            e1 = (first.get_json() or {}).get("etag")
+            again = put("prj_edt_save", {"etag": "", "variant": "webtoon", "clips": doc_clips})
+            second = put("prj_edt_save", {"etag": e1, "variant": "webtoon", "clips": doc_clips[:2]})
+            e2 = (second.get_json() or {}).get("etag")
+            stale = put("prj_edt_save", {"etag": e1, "variant": "webtoon", "clips": doc_clips})
+            by_version = put("prj_edt_save", {"version": 2, "variant": "webtoon", "clips": doc_clips[:1]})
+            by_old_version = put("prj_edt_save", {"version": 2, "variant": "webtoon", "clips": doc_clips})
+            expect("edt-d", [first.status_code, (first.get_json() or {}).get("doc", {}).get("version"), bool(e1), err_of(again),
+                             second.status_code, (second.get_json() or {}).get("doc", {}).get("version"), e2 != e1, err_of(stale),
+                             by_version.status_code, (by_version.get_json() or {}).get("doc", {}).get("version"), err_of(by_old_version)],
+                   [200, 1, True, (409, "EditChanged"), 200, 2, True, (409, "EditChanged"), 200, 3, (409, "EditChanged")],
+                   "첫 저장·같은 기준 409·etag 기준·옛 etag 409·version 기준·옛 version 409")
+            e3 = (by_version.get_json() or {}).get("etag")
+            doc_key = edit.doc_key(owner, "prj_edt_save", "g1")
+
+            def sneak() -> None:
+                current, _etag = _FakeCharStore.read_json(env.store, doc_key)
+                env.store.write_json(doc_key, {**current, "version": 99}, etag=_etag)
+
+            env.store.read_hooks[doc_key] = sneak
+            raced = put("prj_edt_save", {"etag": e3, "variant": "webtoon", "clips": doc_clips})
+            after = get("prj_edt_save").get_json() or {}
+            expect("edt-d", [err_of(raced), after["doc"]["version"], after["saved"], after["etag"] != e3],
+                   [(409, "EditChanged"), 99, True, True], "읽은 뒤 다른 저장이 끼면 조건부 쓰기 409·GET 은 저장본·새 etag")
+            _edt_cut_plan(env, "prj_edt_first")
+            fdoc_key = edit.doc_key(owner, "prj_edt_first", "g1")
+            first_clips = (get("prj_edt_first").get_json() or {})["doc"]["clips"]
+            env.store.read_hooks[fdoc_key] = lambda: _FakeCharStore.write_json(env.store, fdoc_key, {
+                "version": 1, "variant": "webtoon", "updatedAt": "", "clips": [], "audio": []})
+            expect("edt-d", [err_of(put("prj_edt_first", {"etag": "", "variant": "webtoon", "clips": first_clips})),
+                             env.store.json[fdoc_key][0]["clips"]], [(409, "EditChanged"), []],
+                   "첫 저장끼리 겹치면 나중 것은 If-None-Match 로 409(먼저 저장한 문서가 남는다)")
+            other = get("prj_edt_save", variant="real").get_json() or {}
+            expect("edt-d", [other["saved"], other["etag"] == after["etag"], other["doc"]["version"], other["doc"]["variant"]],
+                   [False, True, 99, "real"], "저장본과 다른 그림체: 기본 문서·저장본 etag·version(PUT 하면 바뀐다)")
+            switched = put("prj_edt_save", {"etag": other["etag"], "variant": "real", "clips": other["doc"]["clips"]})
+            expect("edt-d", [switched.status_code, (get("prj_edt_save").get_json() or {}).get("variant")], [200, "real"],
+                   "그림체 바꿔 저장 → 다음 GET 은 그 그림체")
+
+            # ================= (edt-e) 권한·플래그 =================
+            _edt_cut_plan(env, "prj_edt_perm")
+            mid = (get("prj_edt_perm").get_json() or {})["materials"][0]["mid"]
+            env.missing_project = True
+            expect("edt-e", err_of(get("prj_edt_perm")), (404, "NotFound"), "프로젝트 없음 404")
+            env.missing_project = False
+            env.can_read = False
+            expect("edt-e", [err_of(get("prj_edt_perm")), err_of(client.get(f"/api/vnew/p/prj_edt_perm/edit/media/{mid}"))],
+                   [(403, "Forbidden"), (403, "Forbidden")], "읽기 권한 없음 403(남의 프로젝트)")
+            env.can_read, env.can_write = True, False
+            expect("edt-e", [get("prj_edt_perm").status_code, err_of(put("prj_edt_perm", {"etag": "", "variant": "webtoon", "clips": []})),
+                             err_of(post("prj_edt_perm", {"etag": ""}))],
+                   [200, (403, "Forbidden"), (403, "Forbidden")], "쓰기 권한 없음: GET 은 됨·PUT·POST 403")
+            env.can_write = True
+            env.project = {"owner": owner, "track": "video"}
+            expect("edt-e", err_of(get("prj_edt_perm")), (403, "TrackMismatch"), "영상만들기_신규가 아닌 프로젝트 403")
+            env.project = {"owner": owner, "track": "video_new"}
+            with _pin_vnew(VNEW_EDIT=False):
+                env.project_calls.clear()
+                off = [err_of(get("prj_edt_perm")), err_of(put("prj_edt_perm", {"etag": ""})), err_of(post("prj_edt_perm", {"etag": ""})),
+                       err_of(client.get(f"/api/vnew/p/prj_edt_perm/edit/media/{mid}"))]
+                expect("edt-e", [off, env.project_calls], [[(404, "EditDisabled")] * 4, []], "끔: 네 라우트 404 EditDisabled·프로젝트 조회 0")
+            media_cases = [err_of(client.get("/api/vnew/p/prj_edt_perm/edit/media/mZZ")),
+                           err_of(client.get("/api/vnew/p/prj_edt_perm/edit/media/m0000000000000000"))]
+            expect("edt-e", media_cases, [(404, "MediaNotFound"), (404, "MediaNotFound")], "mid 꼴·모르는 mid 404")
+            real_mid = edit.media_id(_edt_key("prj_edt_perm", "c1-real-1"))
+            expect("edt-e", client.get(f"/api/vnew/p/prj_edt_perm/edit/media/{real_mid}").status_code, 200,
+                   "다른 그림체 재료의 필름스트립도 된다(같은 gen)")
+
+            # ================= (edt-i) 캐시 =================
+            _edt_cut_plan(env, "prj_edt_cache")
+            env.probes.clear()
+            get("prj_edt_cache")
+            first_probes = len(env.probes)
+            index_key_cache = edit.media_index_key(owner, "prj_edt_cache", "g1")
+            env.store.reads.clear()
+            get("prj_edt_cache")
+            index_reads = env.store.reads.count(index_key_cache)
+            get("prj_edt_cache", variant="webtoon")
+            second_probes = len(env.probes) - first_probes
+            cv = get("prj_edt_cache").get_json() or {}
+            final_mat = next(m for m in cv["materials"] if m["kind"] == "final")
+            put("prj_edt_cache", {"etag": "", "variant": "webtoon", "clips": cv["doc"]["clips"] + [
+                {"id": "fz", "sourceKey": final_mat["sourceKey"], "in": 0, "out": 1}]})
+            third_probes = len(env.probes) - first_probes
+            get("prj_edt_cache")
+            index_items = env.store.json[edit.media_index_key(owner, "prj_edt_cache", "g1")][0]["items"]
+            expect("edt-i", index_reads, 1, "캐시가 다 있으면 길이 캐시를 한 번만 읽는다(잠금·다시 읽기 없음)")
+            expect("edt-i", [first_probes, second_probes, third_probes, len(env.probes) - first_probes, len(index_items),
+                             sorted(v["sourceKey"].rsplit("/", 2)[-2] for v in index_items.values())],
+                   [3, 0, 1, 1, 4, ["c1-webtoon-1", "c2-webtoon-1", "c3-webtoon-1", "g1"]],
+                   "길이 재기: 처음 기본 재료 3·두 번째 0·문서가 쓰는 재료만 1 더·저장 4개")
+            blobs = {_edt_key("prj_edt_pf", "c1-webtoon-1"): _edt_fake(3.0), _edt_key("prj_edt_pf", "c2-webtoon-1"): b"not-a-video"}
+            _edt_cut_plan(env, "prj_edt_pf", blobs=blobs)
+            env.store.gets.clear()
+            pf = get("prj_edt_pf").get_json() or {}
+            pf_errors = sorted((m["label"], m["probeError"]) for m in pf["materials"] if m["probeError"])
+            get("prj_edt_pf")
+            c3_gets = [g for g in env.store.gets if g[0].endswith("c3-webtoon-1/output.mp4")]
+            expect("edt-i", [[c[3] for c in clips_of(pf)], pf_errors, len(c3_gets), c3_gets[0][1] if c3_gets else "",
+                             len(env.store.json[edit.media_index_key(owner, "prj_edt_pf", "g1")][0]["items"])],
+                   [["컷 1"], [("컷 2", "원본 영상 길이를 읽지 못했습니다."), ("컷 3", "원본 영상을 받지 못했습니다.")], 2,
+                    "edt-video-bucket", 1],
+                   "못 읽은 재료: 기본 문서에서 빠짐·문구·캐시 안 함(다음 GET 이 다시 받음)·영상 버킷")
+            _edt_cut_plan(env, "prj_edt_budget")
+            env.set(edit, "PROBE_BUDGET_S", -1.0)
+            env.probes.clear()
+            steps = []
+            for _ in range(4):
+                bv = get("prj_edt_budget").get_json() or {}
+                steps.append((bv["probing"], len(bv["doc"]["clips"]), len(env.probes)))
+            env.set(edit, "PROBE_BUDGET_S", 20.0)
+            expect("edt-i", steps, [(True, 0, 1), (True, 0, 2), (False, 3, 3), (False, 3, 3)],
+                   "시간 예산을 넘기면 하나씩 재고 probing true(기본 문서는 다 잰 뒤)")
+            env.films.clear()
+            mid_c1 = edit.media_id(_edt_key("prj_edt_cache", "c1-webtoon-1"))
+            m1 = client.get(f"/api/vnew/p/prj_edt_cache/edit/media/{mid_c1}").get_json() or {}
+            env.store.reads.clear()
+            m2 = client.get(f"/api/vnew/p/prj_edt_cache/edit/media/{mid_c1}").get_json() or {}
+            film_reads = env.store.reads.count(edit.film_key(owner, "prj_edt_cache", "g1", mid_c1))
+            mid_c3 = edit.media_id(_edt_key("prj_edt_cache", "c3-webtoon-1"))
+            m3 = client.get(f"/api/vnew/p/prj_edt_cache/edit/media/{mid_c3}").get_json() or {}
+            strip = edit.strip_key(owner, "prj_edt_cache", "g1", mid_c1)
+            expect("edt-i", film_reads, 1, "필름스트립 캐시가 있으면 한 번만 읽는다")
+            expect("edt-i", [m1.get("generated"), m2.get("generated"), len(env.films), env.films[0] if env.films else None,
+                             m1.get("strip", {}).get("url"), m1.get("strip", {}).get("tileHeight"), len(m1.get("peaks", {}).get("values") or []),
+                             m1.get("peaks", {}).get("perSecond"), m3.get("hasAudio"), m3.get("peaks", {}).get("values"),
+                             [p for p in env.store.puts if p[0] == strip]],
+                   [True, False, 2, {"interval": 1.0, "tiles": 3, "hasAudio": True}, f"https://signed.example/{strip}?e=3600&b=&t=image/jpeg", 72, 60,
+                    20, False, [], [(strip, "", "image/jpeg")]],
+                   "필름스트립·파형: 처음 만듦·두 번째 저장본(0회)·1초 간격 3칸·소리 없으면 피크 0·메인 버킷 JPEG")
+            film_json = edit.film_key(owner, "prj_edt_cache", "g1", mid_c1)
+            cached = env.store.json[film_json][0]
+            _FakeCharStore.write_json(env.store, film_json, {**cached, "sourceKey": "users/tester/other.mp4"})
+            m4 = client.get(f"/api/vnew/p/prj_edt_cache/edit/media/{mid_c1}").get_json() or {}
+            expect("edt-i", [m4.get("generated"), len(env.films)], [True, 3], "원본이 다른 캐시는 다시 만든다")
+            long_key = _edt_key("prj_edt_long", "c1-webtoon-1")
+            _edt_cut_plan(env, "prj_edt_long", blobs={long_key: _edt_fake(250.0)})
+            client.get(f"/api/vnew/p/prj_edt_long/edit/media/{edit.media_id(long_key)}")
+            expect("edt-i", env.films[-1], {"interval": 3.0, "tiles": 84, "hasAudio": True}, "긴 원본: 칸 120 안(3초 간격 84칸)")
+
+            # ================= (edt-g) 내보내기 상태(가짜 ffmpeg) =================
+            _edt_cut_plan(env, "prj_edt_exp")
+            ev = get("prj_edt_exp").get_json() or {}
+            ek = {m["label"]: m["sourceKey"] for m in ev["materials"]}
+            exp_clips = [
+                {"id": "x1", "sourceKey": ek["컷 1"], "in": 0.5, "out": 2.0},
+                {"id": "x2", "sourceKey": ek["컷 2"], "in": 0.0, "out": 1.5, "muted": True},
+                {"id": "x3", "sourceKey": ek["컷 3"], "in": 1.0, "out": 3.0},
+                {"id": "x4", "sourceKey": ek["컷 1"], "in": 2.0, "out": 3.0},
+            ]
+            expect("edt-g", err_of(post("prj_edt_exp", {"etag": ""})), (409, "EditNotSaved"), "저장 전 내보내기 409")
+            s1 = put("prj_edt_exp", {"etag": "", "variant": "webtoon", "clips": exp_clips}).get_json() or {}
+            expect("edt-g", [err_of(post("prj_edt_exp", {"etag": "nope"})), err_of(post("prj_edt_exp", {}))],
+                   [(409, "EditChanged"), (409, "EditChanged")], "etag 다름·없음 409")
+            env.spawned.clear()
+            r1 = post("prj_edt_exp", {"etag": s1["etag"]})
+            r1_body = r1.get_json() or {}
+            state = env.export_state("prj_edt_exp")
+            cur = state.get("current") or {}
+            expect("edt-g", [r1.status_code, r1_body.get("started"), r1_body.get("export", {}).get("status"), cur.get("n"),
+                             cur.get("status"), cur.get("attempts"), len(env.spawned), env.spawned[0][3:] == (1, cur.get("claim")),
+                             [c["id"] for c in cur.get("clips") or []], cur.get("seconds"), cur.get("progress")],
+                   [202, True, "queued", 1, "queued", 1, 1, True, ["x1", "x2", "x3", "x4"], 6.0, {"done": 0, "total": 4}],
+                   "POST: 202·queued·n 1·스레드 1·문서 사본")
+            r2 = post("prj_edt_exp", {"etag": s1["etag"]})
+            expect("edt-g", [r2.status_code, (r2.get_json() or {}).get("started"), (r2.get_json() or {}).get("export", {}).get("n"),
+                             len(env.spawned)], [202, False, 1, 1], "같은 문서로 진행 중이면 새로 시작하지 않는다")
+            muted_only = [dict(c, muted=not c.get("muted")) if c["id"] == "x1" else c for c in exp_clips]
+            s1m = put("prj_edt_exp", {"etag": s1["etag"], "variant": "webtoon", "clips": muted_only}).get_json() or {}
+            muted_post = err_of(post("prj_edt_exp", {"etag": s1m["etag"]}))
+            renamed = [dict(c, id=c["id"] + "r", label="이름만") for c in exp_clips]
+            s1r = put("prj_edt_exp", {"etag": s1m["etag"], "variant": "webtoon", "clips": renamed}).get_json() or {}
+            renamed_post = post("prj_edt_exp", {"etag": s1r["etag"]})
+            expect("edt-g", [muted_post, renamed_post.status_code, (renamed_post.get_json() or {}).get("started"), len(env.spawned)],
+                   [(409, "ExportRunning"), 202, False, 1],
+                   "소리 끄기만 바꿔도 다른 문서(409)·클립 id·이름만 바꾼 문서는 같은 문서(새로 시작 안 함)")
+            s1 = s1r
+            s2 = put("prj_edt_exp", {"etag": s1["etag"], "variant": "webtoon", "clips": exp_clips[:2]}).get_json() or {}
+            expect("edt-g", err_of(post("prj_edt_exp", {"etag": s2["etag"]})), (409, "ExportRunning"), "다른 문서로 진행 중이면 409")
+            before_tmp = temp_dirs("vnew-edit-export-")
+            env.store.gets.clear()
+            env.segments.clear()
+            drain()
+            edit.run_export(owner, "prj_edt_exp", "g1", 1, cur["claim"])
+            done = env.export_state("prj_edt_exp").get("current") or {}
+            seg = env.segments
+            expect("edt-g", [done.get("status"), done.get("key"), done.get("seconds"), done.get("hasAudio"), done.get("progress"),
+                             done.get("claim"), bool(done.get("startedAt")), bool(done.get("finishedAt")), done.get("error")],
+                   ["done", edit.export_key(owner, "prj_edt_exp", "g1", 1), 6.0, True, {"done": 4, "total": 4}, "", True, True, ""],
+                   "내보내기 done·결과 키·길이·소리·진행·claim 비움")
+            expect("edt-g", [[s["semHeld"] for s in seg], env.sem.held], [[1, 1, 1, 1], 0],
+                   "클립 인코딩은 ⑤ 준비 세마포어 안에서(클립마다 잡고 놓는다)")
+            expect("edt-g", [[s["frames"] for s in seg], [s["fps"] for s in seg][:1], [(s["width"], s["height"]) for s in seg][:1],
+                             [round(s["start_sec"], 6) for s in seg], [s["audio_from_source"] for s in seg],
+                             [s["content"][:20] for s in seg][:1], [bool(s["audio_out"]) for s in seg]],
+                   [[36, 36, 48, 24], [24], [(1280, 720)], [round(0.5 - 0.5 / 24, 6), 0.0, round(1.0 - 0.5 / 24, 6), round(2.0 - 0.5 / 24, 6)],
+                    [True, False, False, True], [_edt_fake(3.0)[:20]], [True] * 4],
+                   "클립 프레임 배분·첫 원본 크기·fps·반 프레임 당김·소리(끈 클립·소리 없는 원본은 무음)")
+            gets = [g[0].split("/shots/g1/")[-1].split("/")[0] for g in env.store.gets]
+            expect("edt-g", [gets, [s["files"] for s in seg][3], env.joins[-1]["count"], env.joins[-1]["exist"],
+                             env.joins[-1]["audioBytes"], temp_dirs("vnew-edit-export-") - before_tmp],
+                   [["c1-webtoon-1", "c2-webtoon-1", "c3-webtoon-1"], ["audio.raw", "seg-000.mp4", "seg-001.mp4", "seg-002.mp4", "src-000.mp4"],
+                    4, True, 144 * 2000 * 4, set()],
+                   "원본은 한 번만 받고 마지막 쓰임 뒤 지움·소리 PCM 길이 = 144프레임·임시 디렉터리 정리")
+            put_out = [p for p in env.store.puts if p[0] == edit.export_key(owner, "prj_edt_exp", "g1", 1)]
+            ev2 = get("prj_edt_exp").get_json() or {}
+            expect("edt-g", [put_out, ev2["export"]["status"], ev2["export"]["videoUrl"].endswith("final-edit-1.mp4?e=3600&b=edt-video-bucket&t=video/mp4"),
+                             ev2["export"]["downloadUrl"] == ev2["export"]["videoUrl"], ev2["export"]["matchesDoc"],
+                             ev2["export"]["docVersion"]],
+                   [[(edit.export_key(owner, "prj_edt_exp", "g1", 1), "edt-video-bucket", "video/mp4")], "done", True, True, False, 1],
+                   "결과는 영상 버킷 video/mp4·GET 재생·내려받기 URL·사본(1판) ≠ 지금 문서(2판)")
+            env.inline = True
+            r3 = post("prj_edt_exp", {"etag": s2["etag"]})
+            ev3 = get("prj_edt_exp").get_json() or {}
+            expect("edt-g", [r3.status_code, ev3["export"]["n"], ev3["export"]["status"], ev3["export"]["matchesDoc"],
+                             [h["n"] for h in ev3["exportHistory"]], ev3["exportHistory"][0]["videoUrl"].split("?")[0].endswith("final-edit-1.mp4")],
+                   [202, 2, "done", True, [1], True], "다시 내보내기: n 2·지난 결과 기록·지금 문서와 같음")
+            for _ in range(3):
+                env.store.json.pop(edit.doc_key(owner, "prj_edt_exp", "g1"), None)
+                sx = put("prj_edt_exp", {"etag": "", "variant": "webtoon", "clips": exp_clips[:1]}).get_json() or {}
+                post("prj_edt_exp", {"etag": sx["etag"]})
+            expect("edt-g", [h["n"] for h in env.export_state("prj_edt_exp")["history"]], [2, 3, 4],
+                   "지난 결과는 3개까지")
+            env.inline = False
+            empty = put("prj_edt_exp", {"etag": sx["etag"], "variant": "webtoon", "clips": []}).get_json() or {}
+            expect("edt-g", err_of(post("prj_edt_exp", {"etag": empty["etag"]})), (409, "EmptyTimeline"), "빈 타임라인 409")
+
+            _edt_cut_plan(env, "prj_edt_fail")
+            fk = {m["label"]: m["sourceKey"] for m in (get("prj_edt_fail").get_json() or {})["materials"]}
+            sf = put("prj_edt_fail", {"etag": "", "variant": "webtoon", "clips": [
+                {"id": "a", "sourceKey": fk["컷 1"], "in": 0, "out": 1}, {"id": "b", "sourceKey": fk["컷 3"], "in": 0, "out": 1}]}).get_json()
+            env.fail_clip, env.inline = 2, True
+            before_tmp = temp_dirs("vnew-edit-export-")
+            env.segments.clear()
+            drain()
+            post("prj_edt_fail", {"etag": sf["etag"]})
+            failed = env.export_state("prj_edt_fail").get("current") or {}
+            fail_logs = logs.messages("vnew.edit.export_failed")
+            expect("edt-g", [failed.get("status"), failed.get("error"), failed.get("claim"), bool(failed.get("finishedAt")),
+                             [p for p in env.store.puts if "final-edit" in p[0] and "prj_edt_fail" in p[0]],
+                             len(fail_logs), "stage=clip clip=2" in (fail_logs or [""])[0], temp_dirs("vnew-edit-export-") - before_tmp],
+                   ["failed", "2번째 클립을 자르지 못했습니다.", "", True, [], 1, True, set()],
+                   "클립 실패: failed·사용자 문구(경로·원문 없음)·결과 안 올림·로그 단계·임시 디렉터리 정리")
+            env.fail_clip = 0
+            env.set(edit, "EXPORT_MAX_S", -1)
+            sf2 = put("prj_edt_fail", {"etag": sf["etag"], "variant": "webtoon", "clips": [
+                {"id": "a", "sourceKey": fk["컷 1"], "in": 0, "out": 2}]}).get_json()
+            post("prj_edt_fail", {"etag": sf2["etag"]})
+            expect("edt-g", [env.export_state("prj_edt_fail")["current"]["status"], "분을 넘어" in env.export_state("prj_edt_fail")["current"]["error"]],
+                   ["failed", True], "시간 상한을 넘으면 failed")
+            env.set(edit, "EXPORT_MAX_S", 1200)
+            env.inline = False
+            geo = [edit._export_geometry(m) for m in ({"width": 3840, "height": 2160, "fps": 29.97}, {"width": 1080, "height": 1920, "fps": 23.976},  # noqa: SLF001
+                                                       {"width": 0, "height": 0, "fps": 0}, {"width": 853, "height": 480, "fps": 33})]
+            frames = edit._clip_frames([{"in": 0, "out": 0.05}] * 200, 24)  # noqa: SLF001
+            expect("edt-g", [geo, sum(frames), min(frames), edit._clip_frames([{"in": 0, "out": 0.01}], 25)],  # noqa: SLF001
+                   [[(1920, 1080, 30), (608, 1080, 24), (1280, 720, 24), (852, 480, 24)], 240, 1, [1]],
+                   "크기 1920×1080 안·짝수·fps 고르기·200클립 프레임 합 = 문서 합·최소 1장")
+
+            # ================= (edt-h) 이어받기 =================
+            _edt_cut_plan(env, "prj_edt_res")
+            rk = {m["label"]: m["sourceKey"] for m in (get("prj_edt_res").get_json() or {})["materials"]}
+            sr = put("prj_edt_res", {"etag": "", "variant": "webtoon", "clips": [{"id": "a", "sourceKey": rk["컷 1"], "in": 0, "out": 2}]}).get_json()
+            post("prj_edt_res", {"etag": sr["etag"]})
+            env.set_export("prj_edt_res", lambda d: d["current"].update(status="running", claim="dead", heartbeatAt=iso_ago(600)))
+            env.spawned.clear()
+            drain()
+            get("prj_edt_res")
+            resumed = env.export_state("prj_edt_res")["current"]
+            expect("edt-h", [resumed["status"], resumed["attempts"], resumed["claim"] != "dead", len(env.spawned),
+                             env.spawned[0][4] == resumed["claim"] if env.spawned else False, len(logs.messages("vnew.edit.export_resume"))],
+                   ["queued", 2, True, 1, True, 1], "하트비트 끊김 → 새 claim·attempts 2·스레드 1")
+            edit.run_export(owner, "prj_edt_res", "g1", resumed["n"], resumed["claim"])
+            expect("edt-h", env.export_state("prj_edt_res")["current"]["status"], "done", "이어받은 실행이 끝까지")
+            for label, heartbeat, claim, attempts, alive in (("최근 하트비트", iso_ago(60), "c-fresh", 1, False),
+                                                              ("이 프로세스 실행 중", iso_ago(900), "c-alive", 1, True)):
+                env.set_export("prj_edt_res", lambda d, hb=heartbeat, cl=claim, at=attempts: d["current"].update(
+                    status="running", claim=cl, heartbeatAt=hb, attempts=at))
+                if alive:
+                    edit._export_threads[claim] = _EdtThread()  # noqa: SLF001
+                env.spawned.clear()
+                get("prj_edt_res")
+                expect("edt-h", [env.export_state("prj_edt_res")["current"]["claim"], len(env.spawned)], [claim, 0], f"{label}이면 그대로")
+            env.set_export("prj_edt_res", lambda d: d["current"].update(status="queued", claim="c3", heartbeatAt=iso_ago(900), attempts=3))
+            drain()
+            get("prj_edt_res")
+            gave_up = env.export_state("prj_edt_res")["current"]
+            expect("edt-h", [gave_up["status"], gave_up["error"], gave_up["claim"], len(env.spawned), len(logs.messages("vnew.edit.export_abandoned"))],
+                   ["failed", "내보내기가 여러 번 중단돼 멈췄습니다. 다시 내보내 주세요.", "", 0, 1], "세 번째 시도까지 끊기면 failed")
+            sr2 = put("prj_edt_res", {"etag": sr["etag"], "variant": "webtoon", "clips": [
+                {"id": "a", "sourceKey": rk["컷 1"], "in": 0, "out": 1}, {"id": "b", "sourceKey": rk["컷 2"], "in": 0, "out": 1}]}).get_json()
+            post("prj_edt_res", {"etag": sr2["etag"]})
+            lost = env.export_state("prj_edt_res")["current"]
+
+            def steal(number: int) -> None:
+                if number == 2:
+                    env.set_export("prj_edt_res", lambda d: d["current"].update(claim="thief"))
+
+            env.on_segment = steal
+            env.segments.clear()
+            puts_before = len(env.store.puts)
+            drain()
+            edit.run_export(owner, "prj_edt_res", "g1", lost["n"], lost["claim"])
+            env.on_segment = None
+            after_lost = env.export_state("prj_edt_res")["current"]
+            expect("edt-h", [after_lost["claim"], after_lost["status"], len(env.store.puts) - puts_before,
+                             len(logs.messages("vnew.edit.export_claim_lost")), len(logs.messages("vnew.edit.export_failed"))],
+                   ["thief", "running", 0, 1, 0], "다른 실행이 이어받으면 결과·상태를 쓰지 않고 끝낸다")
+            env.set_export("prj_edt_res", lambda d: d["current"].update(status="queued", claim="waiter", heartbeatAt=iso_ago(1)))
+            env.set(edit, "EXPORT_WAIT_BEAT_S", 0.05)
+            state_key = edit.export_state_key(owner, "prj_edt_res", "g1")
+            edit._EXPORT_SEM.acquire()  # noqa: SLF001
+            try:
+                writes_before = env.store.json_writes.count(state_key)
+                worker = _threading.Thread(target=edit.run_export, args=(owner, "prj_edt_res", "g1", lost["n"], "waiter"), daemon=True)
+                worker.start()
+                _time.sleep(0.4)
+                waiting = [env.export_state("prj_edt_res")["current"]["status"], env.store.json_writes.count(state_key) - writes_before >= 2]
+            finally:
+                edit._EXPORT_SEM.release()  # noqa: SLF001
+            worker.join(10)
+            env.set(edit, "EXPORT_WAIT_BEAT_S", 30.0)
+            expect("edt-h", [waiting, worker.is_alive(), env.export_state("prj_edt_res")["current"]["status"]],
+                   [["queued", True], False, "done"], "순서를 기다리는 동안 queued 로 하트비트·풀리면 끝까지")
+
+            # ================= (edt-f) 내보내기·필름스트립 실측(로컬 ffmpeg) =================
+            try:
+                ffmpeg = stitchmod.ffmpeg_path()
+            except stitchmod.StitchError:
+                ffmpeg = ""
+            if not ffmpeg:
+                warn("(edt-f) 로컬 ffmpeg 가 없어 실측 내보내기·필름스트립 검사를 건너뜁니다(가짜 ffmpeg 검사는 했습니다).")
+            else:
+                workdir = tempfile.mkdtemp(prefix="edt-f-")
+                try:
+                    def make(name: str, args: list[str]) -> bytes:
+                        path = os.path.join(workdir, name)
+                        result = subprocess.run([ffmpeg, "-y", "-hide_banner", "-loglevel", "error", *args, path], capture_output=True)
+                        if result.returncode != 0:
+                            raise RuntimeError(result.stderr.decode("utf-8", "replace")[:300])
+                        with open(path, "rb") as handle:
+                            return handle.read()
+
+                    src_a = make("a.mp4", ["-f", "lavfi", "-i", "testsrc=size=320x180:rate=25", "-f", "lavfi", "-i",
+                                           "sine=frequency=440:sample_rate=44100", "-t", "3", "-c:v", "libx264", "-pix_fmt",
+                                           "yuv420p", "-c:a", "aac", "-ac", "1"])
+                    src_b = make("b.mp4", ["-f", "lavfi", "-i", "testsrc2=size=480x270:rate=24", "-t", "2.5", "-c:v", "libx264",
+                                           "-pix_fmt", "yuv420p"])
+                    src_c = make("c.mp4", ["-f", "lavfi", "-i", "testsrc=size=320x180:rate=25", "-f", "lavfi", "-i",
+                                           "sine=frequency=880:sample_rate=48000", "-t", "2", "-c:v", "libx264", "-pix_fmt",
+                                           "yuv420p", "-c:a", "aac"])
+                    pid_f = "prj_edt_real"
+                    _edt_cut_plan(env, pid_f, blobs={_edt_key(pid_f, "c1-webtoon-1"): src_a, _edt_key(pid_f, "c2-webtoon-1"): src_b,
+                                                     _edt_key(pid_f, "c3-webtoon-1"): src_c})
+                    env.real, env.inline = True, True
+                    rv = get(pid_f).get_json() or {}
+                    rmat = {m["label"]: m for m in rv["materials"]}
+                    expect("edt-f", [[(round(m["duration"], 1), m["hasAudio"], m["width"], m["height"], m["fps"]) for m in
+                                      (rmat["컷 1"], rmat["컷 2"], rmat["컷 3"])], clips_of(rv)[1][1:3]],
+                           [[(3.0, True, 320, 180, 25.0), (2.5, False, 480, 270, 24.0), (2.0, True, 320, 180, 25.0)], (0.0, 1.5)],
+                           "실제 원본 길이·소리·크기·fps(ffmpeg -i 한 번)")
+                    real_clips = [
+                        {"id": "r1", "sourceKey": rmat["컷 1"]["sourceKey"], "in": 0.5, "out": 2.0},
+                        {"id": "r2", "sourceKey": rmat["컷 2"]["sourceKey"], "in": 0.2, "out": 1.47},
+                        {"id": "r3", "sourceKey": rmat["컷 1"]["sourceKey"], "in": 1.0, "out": 2.2, "muted": True},
+                        {"id": "r4", "sourceKey": rmat["컷 3"]["sourceKey"], "in": 0.0, "out": 2.0},
+                    ]
+                    want_seconds = round(sum(c["out"] - c["in"] for c in real_clips), 3)
+                    rs = put(pid_f, {"etag": "", "variant": "webtoon", "clips": real_clips}).get_json() or {}
+                    before_tmp = temp_dirs("vnew-edit-export-")
+                    started = _time.monotonic()
+                    post(pid_f, {"etag": rs["etag"]})
+                    elapsed = _time.monotonic() - started
+                    result = env.export_state(pid_f).get("current") or {}
+                    out_path = os.path.join(workdir, "out.mp4")
+                    with open(out_path, "wb") as handle:
+                        handle.write(env.store.blobs.get(edit.export_key(owner, pid_f, "g1", 1), b""))
+                    info = stitchmod.probe_media(out_path)
+                    counted = subprocess.run([ffmpeg, "-hide_banner", "-i", out_path, "-map", "0:v:0", "-f", "null", "-"],
+                                             capture_output=True).stderr.decode("utf-8", "replace")
+                    frame_lines = re.findall(r"frame=\s*(\d+)", counted)
+                    expect("edt-f", [result.get("status"), result.get("error"), abs(info["duration"] - want_seconds) <= 0.1,
+                                     abs(float(result.get("seconds") or 0) - want_seconds) <= 0.1, info["hasAudio"],
+                                     (info["width"], info["height"], info["fps"]), int(frame_lines[-1]) if frame_lines else -1,
+                                     temp_dirs("vnew-edit-export-") - before_tmp],
+                           ["done", "", True, True, True, (320, 180, 25.0), round(want_seconds * 25), set()],
+                           f"실측 내보내기: 길이 {info['duration']} ≈ 문서 합 {want_seconds}(±0.1)·소리·첫 원본 크기·fps·프레임 수·임시 정리")
+                    fa = client.get(f"/api/vnew/p/{pid_f}/edit/media/{rmat['컷 1']['mid']}").get_json() or {}
+                    fb = client.get(f"/api/vnew/p/{pid_f}/edit/media/{rmat['컷 2']['mid']}").get_json() or {}
+                    strip_bytes = env.store.blobs.get(edit.strip_key(owner, pid_f, "g1", rmat["컷 1"]["mid"]), b"")
+                    from PIL import Image  # noqa: PLC0415
+                    import io as _io  # noqa: PLC0415
+
+                    with Image.open(_io.BytesIO(strip_bytes)) as image:
+                        strip_size = image.size
+                    peaks_a = fa.get("peaks", {}).get("values") or []
+                    expect("edt-f", [fa.get("generated"), fa["strip"]["tiles"], fa["strip"]["tileHeight"], fa["strip"]["tileWidth"],
+                                     strip_size, 58 <= len(peaks_a) <= 62, 0.05 < max(peaks_a or [0]) < 0.5,
+                                     fb.get("hasAudio"), fb["peaks"]["values"], fb["strip"]["tiles"]],
+                           [True, 3, 72, 128, (384, 72), True, True, False, [], 3],
+                           "실측 필름스트립 3칸 128×72·파형 피크 약 60개·소리 없는 원본 피크 0")
+                    report.append(f"edt-f 실측 내보내기 4클립 {want_seconds}초 → {info['duration']}초 {elapsed:.1f}초 걸림")
+                finally:
+                    env.real, env.inline = False, False
+                    shutil.rmtree(workdir, ignore_errors=True)
+
+
+            # ================= 경계(직접 호출) =================
+            tp = env.plan("prj_edt_take")
+            unit = tp["gen"]["units"][0]
+            spans = [edit._take_spans(tp, None, 10.0), edit._take_spans(tp, unit, 0.0),  # noqa: SLF001
+                     edit._take_spans(tp, {**unit, "recKeys": ["rec/s1.mp4"]}, 10.0),  # noqa: SLF001
+                     edit._take_spans(tp, {**unit, "cutIds": ["c1", "c3", "c2"]}, 10.0),  # noqa: SLF001
+                     edit._take_spans(tp, {**unit, "recSegIds": ["s2"], "recKeys": ["rec/s2.mp4"], "cutIds": ["c3"]}, 4.0)]  # noqa: SLF001
+            expect("edt-b", spans, [None] * 5, "테이크 경계를 믿지 않는 경우: 칸 없음·길이 0·녹화 수 다름·컷 순서 다름·컷 하나")
+            expect("edt-b", edit._default_group([]), [], "재료가 없으면 기본 재료도 없다")  # noqa: SLF001
+            dup_gen = {"genId": "g1", "mode": "previz", "units": [
+                5, {"id": "u1", "webtoon": {"status": "completed", "outputKey": "k1"}},
+                {"id": "u2", "webtoon": {"status": "completed", "outputKey": "k1"}},
+                {"id": "u3", "webtoon": {"status": "completed", "outputKey": ""}},
+                {"id": "u4", "webtoon": {"status": "submitted", "outputKey": "k4"}}], "finalWebtoon": {"status": "done", "key": "k1"}}
+            hist_gen = {"mode": "previz-take", "units": [{"id": "take1", "cutIds": ["c1"], "real": {"status": "queued"}}],
+                        "realHistory": [{"n": "x"}, {"n": 2, "finalKey": "", "units": [
+                            5, {"id": "take1", "status": "failed", "outputKey": "kf"},
+                            {"id": "take1", "status": "completed", "outputKey": "k2"}]}]}
+            expect("edt-b", [[m["sourceKey"] for m in edit._material_items(dup_gen, "webtoon")],  # noqa: SLF001
+                             [(m["sourceKey"], m["group"], m["cutIds"]) for m in edit._material_items(hist_gen, "real")]],  # noqa: SLF001
+                   [["k1"], [("k2", "r2", ["c1"])]], "같은 키·빈 키·꼴 틀린 칸·완료 전 칸은 한 번만·빼기, 회차 기록 n 꼴·칸 꼴·실패 칸")
+            expect("edt-b", edit._material_items({"mode": "previz-take", "units": [{"id": "t"}], "realHistory": [{"n": 1, "units": 5}]}, "real"),  # noqa: SLF001
+                   [], "회차 기록 units 꼴이 틀리면 건너뛴다")
+            saved_items = edit._material_items  # noqa: SLF001
+            env.set(edit, "_material_items", lambda *a: (_ for _ in ()).throw(RuntimeError("x")))
+            summary_broken = edit.summary({"units": []})
+            env.set(edit, "_material_items", saved_items)
+            expect("edt-l", summary_broken, {"available": False, "variants": []}, "재료를 읽다 예외가 나도 요약은 실패하지 않는다")
+            env.set(edit, "MAX_CLIPS", 2)
+            expect("edt-b", len((get("prj_edt_cut").get_json() or {})["defaultClips"]), 2, "기본 문서도 클립 한도에서 멈춘다")
+            env.set(edit, "MAX_CLIPS", 200)
+
+            _edt_cut_plan(env, "prj_edt_inv")
+            iv = get("prj_edt_inv").get_json() or {}
+            put("prj_edt_inv", {"etag": "", "variant": "webtoon", "clips": iv["doc"]["clips"]})
+            plan_i = env.plan("prj_edt_inv")
+            plan_i["gen"]["units"][2]["webtoon"] = _edt_cell("queued")
+            env.save_plan("prj_edt_inv", plan_i)
+            ik = edit.media_index_key(owner, "prj_edt_inv", "g1")
+            idx = env.store.json[ik][0]
+            idx["items"][edit.media_id(_edt_key("prj_edt_inv", "c1-webtoon-1"))]["duration"] = 2.0
+            _FakeCharStore.write_json(env.store, ik, idx)
+            dk = edit.doc_key(owner, "prj_edt_inv", "g1")
+            stored = env.store.json[dk][0]
+            stored["clips"].append("junk")
+            _FakeCharStore.write_json(env.store, dk, stored)
+            gv = get("prj_edt_inv").get_json() or {}
+            expect("edt-b", [gv["invalidClips"], err_of(post("prj_edt_inv", {"etag": gv["etag"]}))],
+                   [[{"id": "c1", "reason": "outOfRange"}, {"id": "c3", "reason": "notAllowed"}], (400, "BadClipRange")],
+                   "저장 뒤 재료가 바뀐 문서: 쓸 수 없는 클립을 알리고 내보내기는 거절(저장값 그대로)")
+
+            saved_reconcile = edit.reconcile_export
+            env.set(edit, "reconcile_export", lambda *a: (_ for _ in ()).throw(RuntimeError("x")))
+            drain()
+            reconciled = get("prj_edt_cut").status_code
+            env.set(edit, "reconcile_export", saved_reconcile)
+            expect("edt-h", [reconciled, len(logs.messages("vnew.edit.reconcile_failed"))], [200, 1], "이어받기 확인이 실패해도 보기는 산다")
+            from src.vpoc.errors import VpocError as _VpocError  # noqa: PLC0415
+
+            env.store.fail_writes[edit.doc_key(owner, "prj_edt_inv", "g1")] = [_VpocError("store", "SlowDown", "느림", 503)]
+            expect("edt-d", err_of(put("prj_edt_inv", {"etag": gv["etag"], "variant": "webtoon", "clips": []})), (502, "SlowDown"),
+                   "조건부 쓰기 충돌이 아닌 저장 오류는 그대로 올린다")
+            mk = "users/tester/edt-mutate.json"
+            conflict = env.store._conflict()  # noqa: SLF001
+            env.store.fail_writes[mk] = [conflict, conflict]
+            first_ok = edit._mutate_json(mk, lambda d: {"v": 1})  # noqa: SLF001
+            env.store.fail_writes[mk] = conflict
+            try:
+                edit._mutate_json(mk, lambda d: {"v": 2})  # noqa: SLF001
+                exhausted = ""
+            except _VpocError as exc:
+                exhausted = exc.kind
+            env.store.fail_writes[mk] = _VpocError("store", "AccessDenied", "x", 403)
+            try:
+                edit._mutate_json(mk, lambda d: {"v": 3})  # noqa: SLF001
+                other_kind = ""
+            except _VpocError as exc:
+                other_kind = exc.kind
+            env.store.fail_writes[edit.media_index_key(owner, "prj_edt_mi", "g1")] = conflict
+            drain()
+            edit._merge_index(owner, "prj_edt_mi", "g1", {"m1": {"sourceKey": "k"}})  # noqa: SLF001
+            env.store.fail_writes.clear()
+            expect("edt-i", [first_ok, exhausted, other_kind, len(logs.messages("vnew.edit.index_write_failed"))],
+                   [{"v": 1}, "PreconditionFailed", "AccessDenied", 1],
+                   "읽고-고치고-쓰기: 충돌 두 번 뒤 성공·다섯 번이면 409·다른 오류는 그대로·길이 캐시는 실패해도 넘어간다")
+            saved_presign = env.store.presign
+            env.store.presign = lambda *a, **k: (_ for _ in ()).throw(RuntimeError("sign"))
+            presigned = [edit._presign(""), edit._presign("users/tester/x.mp4")]  # noqa: SLF001
+            env.store.presign = saved_presign
+            expect("edt-b", presigned, ["", ""], "presign 실패·빈 키는 빈 URL(보기는 산다)")
+            pf_mid = edit.media_id(_edt_key("prj_edt_pf", "c2-webtoon-1"))
+            expect("edt-i", err_of(client.get(f"/api/vnew/p/prj_edt_pf/edit/media/{pf_mid}")), (409, "SourceUnreadable"),
+                   "길이를 못 읽는 원본은 필름스트립 409")
+            film_dir = tempfile.mkdtemp(prefix="edt-film-")
+            saved_film_fns = (stitchmod.filmstrip_jpeg, stitchmod.audio_peaks)
+            try:
+                env.set(stitchmod, "filmstrip_jpeg", lambda path, strip, **kw: open(strip, "wb").write(_tiny_jpeg(384, 72)))
+                env.set(stitchmod, "audio_peaks", lambda *a, **k: (_ for _ in ()).throw(stitchmod.StitchError("peaks")))
+                drain()
+                film = env.orig["_film_file"](os.path.join(film_dir, "x.mp4"), film_dir, interval=1.0, tiles=3, has_audio=True)
+            finally:
+                shutil.rmtree(film_dir, ignore_errors=True)
+                env.set(stitchmod, "filmstrip_jpeg", saved_film_fns[0])
+                env.set(stitchmod, "audio_peaks", saved_film_fns[1])
+            expect("edt-i", [film["tileWidth"], film["tileHeight"], film["peaks"], len(logs.messages("vnew.edit.peaks_failed"))],
+                   [128, 72, [], 1], "파형을 못 만들면 피크 없이 필름스트립만(경고 1줄)")
+
+            ran: list[tuple] = []
+            real_run = edit.run_export
+            env.set(edit, "run_export", lambda *a: ran.append(a))
+            env.orig["_spawn_export"](owner, "prj_x", "g1", 7, "claimA")
+            edit._export_threads["claimA"].join(5)  # noqa: SLF001
+            alive_after = edit._alive_here("claimA")  # noqa: SLF001
+            env.orig["_spawn_export"](owner, "prj_x", "g1", 8, "claimB")
+            edit._export_threads["claimB"].join(5)  # noqa: SLF001
+            expect("edt-h", [ran, alive_after, "claimA" in edit._export_threads, edit._alive_here("")],  # noqa: SLF001
+                   [[(owner, "prj_x", "g1", 7, "claimA"), (owner, "prj_x", "g1", 8, "claimB")], False, False, False],
+                   "스레드: claim 마다 하나·끝난 스레드는 다음 시작 때 정리·살아 있는지 claim 으로 본다")
+            env.set(edit, "run_export", real_run)
+
+            _edt_cut_plan(env, "prj_edt_rx")
+            env.save_plan("prj_edt_rx", env.plan("prj_edt_rx"))
+            state_rx = edit.export_state_key(owner, "prj_edt_rx", "g1")
+
+            def run_state(clips, **extra) -> dict:
+                _FakeCharStore.write_json(env.store, state_rx, {"v": 1, "n": 1, "history": [], "current": {
+                    "n": 1, "status": "queued", "claim": "rx", "clips": clips, "attempts": 1, "heartbeatAt": iso_ago(1), **extra}})
+                edit.run_export(owner, "prj_edt_rx", "g1", 1, "rx")
+                return env.export_state("prj_edt_rx")["current"]
+
+            rx_key = _edt_key("prj_edt_rx", "c1-webtoon-1")
+            env.store.blobs["users/other/video/x/output.mp4"] = _edt_fake(3.0)
+            foreign = run_state([{"id": "a", "sourceKey": "users/other/video/x/output.mp4", "in": 0, "out": 1}])
+            empty_rx = run_state([])
+            env.join_garbage = True
+            garbage = run_state([{"id": "a", "sourceKey": rx_key, "in": 0, "out": 1}])
+            env.join_garbage = False
+            env.segments.clear()
+            env.fail_clip = 1
+            env.on_segment = lambda number: env.set_export("prj_edt_rx", lambda d: d["current"].update(claim="thief2"))
+            drain()
+            stolen = run_state([{"id": "a", "sourceKey": rx_key, "in": 0, "out": 1}])
+            stolen_logs = len(logs.messages("vnew.edit.export_failed"))
+            env.segments.clear()
+            env.on_segment = lambda number: env.store.fail_writes.__setitem__(state_rx, RuntimeError("s3 down"))
+            drain()
+            run_state([{"id": "a", "sourceKey": rx_key, "in": 0, "out": 1}])
+            env.store.fail_writes.clear()
+            env.on_segment, env.fail_clip = None, 0
+            expect("edt-g", [(foreign["status"], foreign["error"]), (empty_rx["status"], empty_rx["error"]),
+                             (garbage["status"], garbage["error"]), (stolen["status"], stolen["claim"]), stolen_logs,
+                             len(logs.messages("vnew.edit.export_state_failed"))],
+                   [("failed", "원본 영상을 읽지 못했습니다."), ("failed", "타임라인에 클립이 없습니다."),
+                    ("failed", "영상을 이어 붙이지 못했습니다."), ("running", "thief2"), 1, 1],
+                   "사본 검사(남의 키·빈 목록)·못 읽는 결과·실패를 쓰려는데 claim 잃음·상태 쓰기 실패")
+            _FakeCharStore.write_json(env.store, state_rx, {"v": 1, "n": 1, "history": [], "current": {
+                "n": 1, "status": "running", "claim": "r1", "clips": [], "attempts": 1, "heartbeatAt": iso_ago(900)}})
+            env.store.read_hooks[state_rx] = lambda: env.set_export("prj_edt_rx", lambda d: d["current"].update(claim="r2"))
+            env.spawned.clear()
+            raced_reconcile = edit.reconcile_export(owner, "prj_edt_rx", "g1")
+            expect("edt-h", [raced_reconcile, len(env.spawned), env.export_state("prj_edt_rx")["current"]["claim"]], [False, 0, "r2"],
+                   "이어받으려는 사이 다른 실행이 잡으면 그대로 둔다")
+
+            # ================= (edt-l) gen_view 요약·로그 =================
+            cut_plan = env.plan("prj_edt_cut")
+            view_on = genmod.gen_view(owner, "prj_edt_cut", cut_plan)
+            with _pin_vnew(VNEW_EDIT=False):
+                view_off = genmod.gen_view(owner, "prj_edt_cut", cut_plan)
+            none_view = genmod.gen_view(owner, "prj_edt_none", env.plan("prj_edt_none"))
+            nogen_view = genmod.gen_view(owner, "prj_edt_nogen", env.plan("prj_edt_nogen"))
+            take5 = genmod.gen_view(owner, "prj_edt_take5", env.plan("prj_edt_take5"))
+            expect("edt-l", [list(view_on)[-1], view_on.get("edit"), "edit" in view_off,
+                             {k: v for k, v in view_on.items() if k != "edit"} == view_off, none_view.get("edit"), "edit" in nogen_view,
+                             take5.get("edit")],
+                   ["edit", {"available": True, "variants": ["real", "webtoon"]}, False, True,
+                    {"available": False, "variants": []}, False, {"available": True, "variants": ["real", "webtoon"]}],
+                   "gen_view: 켬이면 끝에 edit 요약·끔이면 그 키만 없음·재료 없음·gen 없음·진행 중 회차(지난 회차 재료)")
+            expect("edt-l", [edit.summary({"units": "x"}), edit.summary(None), edit._material_items({}, "anime")],  # noqa: SLF001
+                   [{"available": False, "variants": []}, {"available": False, "variants": []}, []], "꼴 틀린 gen 은 재료 없음")
+            drain()
+            edit_logs = [m for m in all_logs if m.startswith("vnew.edit.")]
+            leaky = [m for m in edit_logs if "users/" in m or "https://" in m or "signed" in m]
+            expect("edt-l", [leaky, env.urlopen_calls, len(edit_logs) > 20], [[], [], True], "vnew.edit 로그에 S3 키·URL 없음·urlopen 0")
+
+            # ================= (edt-k) S3 스트리밍 래퍼 =================
+            from src.vpoc import store as store_mod  # noqa: PLC0415
+
+            calls: list[tuple] = []
+
+            class _Client:
+                def download_fileobj(self, bucket, key, handle, Config=None):  # noqa: N803
+                    calls.append(("down", bucket, key, Config.use_threads, Config.max_concurrency))
+                    handle.write(b"STREAMED")
+
+                def upload_fileobj(self, handle, bucket, key, ExtraArgs=None, Config=None):  # noqa: N803
+                    calls.append(("up", bucket, key, handle.read(), ExtraArgs, Config.use_threads, Config.multipart_chunksize))
+
+            regions: list[str] = []
+            real_store = store_mod.Store()
+            real_store.main_bucket, real_store.main_region = "mb", "ap-northeast-2"
+            real_store.video_bucket, real_store.video_region = "vb", "us-west-2"
+            env.set(edit, "STORE", real_store)
+            env.set(edit.vpoc_store, "s3_client", lambda region: regions.append(region) or _Client())
+            kdir = tempfile.mkdtemp(prefix="edt-k-")
+            try:
+                path = os.path.join(kdir, "x.mp4")
+                size = edit._download("users/tester/a.mp4", path, bucket="vb")  # noqa: SLF001
+                with open(path, "wb") as handle:
+                    handle.write(b"UPLOAD")
+                edit._upload(path, "users/tester/b.mp4", bucket="vb", content_type="video/mp4")  # noqa: SLF001
+                edit._download("users/tester/c.jpg", path, bucket="")  # noqa: SLF001
+            finally:
+                shutil.rmtree(kdir, ignore_errors=True)
+            expect("edt-k", [size, calls, regions],
+                   [8, [("down", "vb", "users/tester/a.mp4", False, 1),
+                        ("up", "vb", "users/tester/b.mp4", b"UPLOAD", {"ContentType": "video/mp4", "ServerSideEncryption": "AES256"},
+                         False, 8 * 1024 * 1024),
+                        ("down", "mb", "users/tester/c.jpg", False, 1)], ["us-west-2", "us-west-2", "ap-northeast-2"]],
+                   "실제 Store: boto3 스트리밍(한 스레드·8MB 조각)·SSE·ContentType·버킷별 리전")
+    except Exception as exc:  # noqa: BLE001
+        bad.append("edit 검사 중 예외: " + repr(exc) + "\n" + _tb.format_exc()[:2500])
+
+    # ================= (edt-j) stitcher 새 함수(가짜 _run) =================
+    try:
+        from src import stitcher  # noqa: PLC0415
+
+        original = (ROOT / "app" / "src" / "stitcher.py").read_text(encoding="utf-8")
+        cut = original.find(_EDT_STITCHER_MARK)
+        expect("edt-j", [cut > 0, _hashlib.sha256((original[:cut + 1] if cut > 0 else "").encode("utf-8")).hexdigest()],
+               [True, _EDT_STITCHER_SHA], "지시서 110 전 stitcher.py 부분이 바이트까지 같다(새 함수는 뒤에만)")
+        saved = {name: getattr(stitcher, name) for name in ("_run", "ffmpeg_path", "_edit_nice")}
+        commands: list[list[str]] = []
+        state = {"stderr": "", "rc": 0, "pcm": b"", "timeout": False}
+        jdir = tempfile.mkdtemp(prefix="edt-j-")
+
+        def fake_run(command):
+            commands.append(list(command))
+            if state["timeout"]:
+                raise subprocess.TimeoutExpired(command, 1)
+            for index, arg in enumerate(command):
+                if index and command[index - 1] != "-i" and str(arg).endswith((".mp4", ".jpg", ".raw")) and state["rc"] == 0:
+                    with open(arg, "wb") as handle:
+                        handle.write(state["pcm"] if arg.endswith(".raw") else b"OUT")
+            return subprocess.CompletedProcess(command, state["rc"], stdout=b"", stderr=state["stderr"].encode())
+
+        try:
+            stitcher._run = fake_run  # noqa: SLF001
+            stitcher.ffmpeg_path = lambda: "/fake/ffmpeg"
+            stitcher._edit_nice = lambda: []  # noqa: SLF001
+            src = os.path.join(jdir, "src.mp4")
+            with open(src, "wb") as handle:
+                handle.write(b"SRC")
+            state["stderr"] = ("Input #0, mov,mp4, from 'x':\n  Duration: 00:01:03.04, start: 0.000000, bitrate: 100 kb/s\n"
+                               "  Stream #0:0[0x1](und): Video: h264 (High) (avc1 / 0x31637661), yuv420p(progressive), 1280x720 "
+                               "[SAR 1:1 DAR 16:9], 33 kb/s, 23.98 fps, 24 tbr, 12800 tbn (default)\n"
+                               "  Stream #0:1[0x2](und): Audio: aac (LC) (mp4a / 0x6134706D), 44100 Hz, mono, fltp\n")
+            probed = stitcher.probe_media(src)
+            state["stderr"] = "garbage"
+            probed_bad = stitcher.probe_media(src)
+            state["timeout"] = True
+            probed_timeout = stitcher.probe_media(src)
+            state["timeout"] = False
+            expect("edt-j", [probed, probed_bad["duration"], probed_timeout["duration"], stitcher.probe_media(os.path.join(jdir, "none.mp4"))],
+                   [{"duration": 63.04, "width": 1280, "height": 720, "fps": 23.98, "hasAudio": True}, 0.0, 0.0,
+                    {"duration": 0.0, "width": 0, "height": 0, "fps": 0.0, "hasAudio": False}],
+                   "probe_media: 길이·크기(코덱 16진 무시)·fps·소리, 못 읽음·시간 초과·없는 파일 0")
+            vout, aout = os.path.join(jdir, "seg.mp4"), os.path.join(jdir, "seg.raw")
+            commands.clear()
+            state["stderr"], state["pcm"] = "", b"\x01" * 100
+            result = stitcher.edit_segment(src, vout, start_sec=0.47916, frames=36, fps=24, width=1280, height=720,
+                                           audio_out=aout, audio_from_source=True)
+            vf = ("trim=start=0.479,setpts=PTS-STARTPTS,fps=24,scale=1280:720:force_original_aspect_ratio=decrease,"
+                  "pad=1280:720:(ow-iw)/2:(oh-ih)/2:color=black,setsar=1,format=yuv420p,tpad=stop_mode=clone:stop_duration=1")
+            want_cmd = ["/fake/ffmpeg", "-y", "-hide_banner", "-loglevel", "error", "-threads", "1", "-i", src, "-map", "0:v:0", "-vf", vf,
+                        "-frames:v", "36", "-an", "-c:v", "libx264", "-preset", "veryfast", "-crf", "20", "-threads", "1",
+                        "-pix_fmt", "yuv420p", vout, "-map", "0:a:0", "-vn", "-af", "atrim=start=0.479,asetpts=PTS-STARTPTS",
+                        "-t", "1.500000", "-ac", "2", "-ar", "48000", "-c:a", "pcm_s16le", "-f", "s16le", aout]
+            with open(aout, "rb") as handle:
+                pcm = handle.read()
+            expect("edt-j", [commands, result["samples"], len(pcm), pcm[:100] == b"\x01" * 100, set(pcm[100:])],
+                   [[want_cmd], 72000, 288000, True, {0}], "edit_segment 명령(영상+PCM 한 번에)·짧은 PCM 은 무음으로 채움")
+            state["pcm"] = b"\x02" * 400000
+            stitcher.edit_segment(src, vout, start_sec=0, frames=36, fps=24, width=1280, height=720, audio_out=aout, audio_from_source=True)
+            long_size = os.path.getsize(aout)
+            commands.clear()
+            stitcher.edit_segment(src, vout, start_sec=0, frames=25, fps=25, width=320, height=180, audio_out=aout, audio_from_source=False)
+            with open(aout, "rb") as handle:
+                silent = handle.read()
+            no_audio_cmd = commands[-1]
+            commands.clear()
+            stitcher.edit_segment(src, vout, start_sec=0, frames=25, fps=25, width=320, height=180, threads=None)
+            expect("edt-j", [long_size, len(silent), set(silent), "-map" in no_audio_cmd[no_audio_cmd.index(vout):],
+                             "-threads" in commands[-1]],
+                   [288000, 192000, {0}, False, False], "긴 PCM 은 자름·소리 끔은 무음 파일만(ffmpeg 소리 출력 없음)·threads None")
+            bad_args = []
+            for kwargs in ({"frames": 0}, {"fps": 23}, {"width": 321}, {"height": 1}, {"start_sec": -1}, {"start_sec": float("nan")}):
+                try:
+                    stitcher.edit_segment(src, vout, **{"start_sec": 0, "frames": 10, "fps": 24, "width": 320, "height": 180, **kwargs})
+                    bad_args.append("통과")
+                except stitcher.StitchError as exc:
+                    bad_args.append(str(exc))
+            for call in (lambda: stitcher.edit_segment(os.path.join(jdir, "none.mp4"), vout, start_sec=0, frames=1, fps=24, width=2, height=2),):
+                try:
+                    call()
+                    bad_args.append("통과")
+                except stitcher.StitchError as exc:
+                    bad_args.append(str(exc))
+            state["rc"], state["stderr"] = 1, "x264 boom"
+            try:
+                stitcher.edit_segment(src, os.path.join(jdir, "fail.mp4"), start_sec=0, frames=1, fps=24, width=2, height=2)
+                bad_args.append("통과")
+            except stitcher.StitchError as exc:
+                bad_args.append(str(exc).split("(")[0])
+            state["rc"], state["stderr"] = 0, ""
+            expect("edt-j", bad_args, ["편집 구간 값이 올바르지 않습니다."] * 6 + ["자를 클립이 없습니다.", "클립을 편집하지 못했습니다"],
+                   "edit_segment 값 검사 6경우·원본 없음·ffmpeg 실패")
+            seg2 = os.path.join(jdir, "it's.mp4")
+            with open(seg2, "wb") as handle:
+                handle.write(b"S")
+            out = os.path.join(jdir, "joined.mp4")
+            commands.clear()
+            stitcher.edit_join([vout, seg2], out, audio_path=aout)
+            stitcher.edit_join([vout], out)
+            join_errors = []
+            for args in (([], out, ""), ([os.path.join(jdir, "none.mp4")], out, ""), ([vout], out, os.path.join(jdir, "none.raw"))):
+                try:
+                    stitcher.edit_join(args[0], args[1], audio_path=args[2])
+                    join_errors.append("통과")
+                except stitcher.StitchError as exc:
+                    join_errors.append(str(exc))
+            expect("edt-j", [commands[0][:11], commands[0][11:], commands[1][11:], os.path.exists(out + ".txt"), join_errors],
+                   [["/fake/ffmpeg", "-y", "-hide_banner", "-loglevel", "error", "-f", "concat", "-safe", "0", "-i", out + ".txt"],
+                    ["-f", "s16le", "-ar", "48000", "-ac", "2", "-i", aout, "-map", "0:v:0", "-map", "1:a:0", "-c:v", "copy",
+                     "-c:a", "aac", "-b:a", "192k", "-movflags", "+faststart", out],
+                    ["-map", "0:v:0", "-c:v", "copy", "-movflags", "+faststart", out], False,
+                    ["이어 붙일 편집 조각이 없습니다."] * 2 + ["편집 소리 파일이 없습니다."]],
+                   "edit_join: concat 스트림 복사 + PCM → AAC 192k·영상만·목록 파일 지움·빈 조각·없는 소리")
+            listing = []
+            saved_unlink = os.unlink
+
+            def keep_list(path):
+                if str(path).endswith(".txt"):
+                    with open(path, encoding="utf-8") as handle:
+                        listing.append(handle.read())
+                saved_unlink(path)
+
+            os.unlink = keep_list
+            try:
+                stitcher.edit_join([seg2], out)
+            finally:
+                os.unlink = saved_unlink
+            expect("edt-j", listing, [f"file '{seg2.replace(chr(39), chr(39) + chr(92) + chr(39) + chr(39))}'\n"], "목록 파일 작은따옴표 이스케이프")
+            commands.clear()
+            strip = os.path.join(jdir, "strip.jpg")
+            stitcher.filmstrip_jpeg(src, strip, interval=2.5, tiles=4, tile_height=72)
+            film_errors = []
+            for kwargs in ({"interval": 0}, {"interval": float("inf")}, {"tiles": 0}, {"tiles": 501}, {"tile_height": 15}, {"tile_height": 73}):
+                try:
+                    stitcher.filmstrip_jpeg(src, strip, **{"interval": 1.0, "tiles": 3, **kwargs})
+                    film_errors.append("통과")
+                except stitcher.StitchError as exc:
+                    film_errors.append(str(exc))
+            try:
+                stitcher.filmstrip_jpeg(os.path.join(jdir, "none.mp4"), strip, interval=1.0, tiles=1)
+                film_errors.append("통과")
+            except stitcher.StitchError as exc:
+                film_errors.append(str(exc))
+            state["rc"] = 1
+            for call in (lambda: stitcher.filmstrip_jpeg(src, os.path.join(jdir, "f2.jpg"), interval=1.0, tiles=1),
+                         lambda: stitcher.edit_join([vout], os.path.join(jdir, "j2.mp4"))):
+                try:
+                    call()
+                    film_errors.append("통과")
+                except stitcher.StitchError as exc:
+                    film_errors.append(str(exc).split(":")[0])
+            state["rc"] = 0
+            expect("edt-j", film_errors[6:], ["필름스트립을 만들 영상이 없습니다.", "필름스트립을 만들지 못했습니다", "편집 영상을 이어 붙이지 못했습니다"],
+                   "filmstrip_jpeg 원본 없음·ffmpeg 실패, edit_join ffmpeg 실패")
+            film_errors = film_errors[:6]
+            expect("edt-j", [commands[0], film_errors],
+                   [["/fake/ffmpeg", "-y", "-hide_banner", "-loglevel", "error", "-threads", "1", "-i", src, "-map", "0:v:0", "-an",
+                     "-vf", "fps=1/2.500,scale=-2:72,tile=4x1", "-frames:v", "1", "-q:v", "5", strip], ["필름스트립 값이 올바르지 않습니다."] * 6],
+                   "filmstrip_jpeg 명령·값 검사")
+            import array as _array  # noqa: PLC0415
+
+            loud = _array.array("h", [16384, -8192] * 200 + [0] * 400 + [-32768] * 400 + [100] * 1)
+            if sys.byteorder == "big":
+                loud.byteswap()
+            state["pcm"] = loud.tobytes() + b"\x05"
+            commands.clear()
+            peaks = stitcher.audio_peaks(src, jdir, per_second=20)
+            peak_errors = []
+            for per in (0, 7):
+                try:
+                    stitcher.audio_peaks(src, jdir, per_second=per)
+                    peak_errors.append("통과")
+                except stitcher.StitchError as exc:
+                    peak_errors.append(str(exc))
+            state["rc"] = 1
+            try:
+                stitcher.audio_peaks(src, jdir)
+                peak_errors.append("통과")
+            except stitcher.StitchError as exc:
+                peak_errors.append(str(exc).split(":")[0])
+            state["rc"] = 0
+            try:
+                stitcher.audio_peaks(os.path.join(jdir, "none.mp4"), jdir)
+                peak_errors.append("통과")
+            except stitcher.StitchError as exc:
+                peak_errors.append(str(exc))
+            expect("edt-j", peak_errors[3:], ["파형을 만들 영상이 없습니다."], "audio_peaks 원본 없음")
+            peak_errors = peak_errors[:3]
+            expect("edt-j", [peaks, commands[0][-12:], os.path.exists(os.path.join(jdir, "peaks.raw")), peak_errors],
+                   [[0.5, 0.0, 1.0, 0.003], ["-i", src, "-map", "0:a:0", "-vn", "-ac", "1", "-ar", "8000", "-c:a", "pcm_s16le", "-f",
+                                              "s16le", os.path.join(jdir, "peaks.raw")][-12:], False,
+                    ["파형 피크 간격이 올바르지 않습니다."] * 2 + ["파형을 만들지 못했습니다"]],
+                   "audio_peaks: 400샘플(1/20초)마다 최대 절댓값/32768·raw 지움·간격 검사·실패")
+            stitcher._edit_nice = lambda: ["nice", "-n", "10"]  # noqa: SLF001
+            commands.clear()
+            stitcher.filmstrip_jpeg(src, strip, interval=1.0, tiles=1)
+            state["timeout"] = True
+            try:
+                stitcher.filmstrip_jpeg(src, strip, interval=1.0, tiles=1)
+                timeout_msg = "통과"
+            except stitcher.StitchError as exc:
+                timeout_msg = str(exc)
+            state["timeout"] = False
+            nice_now = saved["_edit_nice"]()
+            expect("edt-j", [commands[0][:4], timeout_msg, (nice_now == []) if os.name != "posix" else (nice_now == [] or nice_now[1:] == ["-n", "10"])],
+                   [["nice", "-n", "10", "/fake/ffmpeg"], "영상 편집 처리 시간이 너무 오래 걸렸습니다.", True],
+                   "리눅스 nice 10 앞붙임·시간 초과 문구·윈도는 nice 없음")
+        finally:
+            for name, value in saved.items():
+                setattr(stitcher, name, value)
+            shutil.rmtree(jdir, ignore_errors=True)
+    except Exception as exc:  # noqa: BLE001
+        bad.append("stitcher 새 함수 검사 중 예외: " + repr(exc) + "\n" + _tb.format_exc()[:2000])
+
+    missing = sorted({f"edt-{c}" for c in "abcdefghijkl"} - seen)
+    if missing:
+        bad.append(f"돌지 않은 묶음: {missing}")
+    if bad:
+        fail("vnew ⑦ 편집(edt) 검사 실패\n" + "\n".join(f"  {item}" for item in bad))
+    else:
+        ok("vnew ⑦ 편집 타임라인(지시서 110) 검사 (edt-a)설정·배선·운영 false (edt-b)재료·기본 문서(컷·테이크 경계·옛 구간·합친 영상) "
+           "(edt-c)검증 400 28경우·413 3경우 (edt-d)저장·조건부 쓰기 409 (edt-e)권한·끔 404 (edt-f)ffmpeg 실측 길이±0.1초·필름스트립 "
+           "(edt-g)내보내기 상태·중복 시작·실패·시간 상한 (edt-h)이어받기·claim·대기 하트비트 (edt-i)캐시 두 번째 0회 "
+           "(edt-j)stitcher 새 함수·기존 부분 그대로 (edt-k)S3 스트리밍 (edt-l)gen_view 요약·로그" + "".join(f"\n       {r}" for r in report))
+
+
 def check_pod_zones() -> None:
     """지시서 105(pod-zone-pin) — frontend·app 파드를 ALB 서브넷 AZ(POD_ZONES) 안에만 띄운다. 외부 호출 없음.
 
@@ -33803,6 +35286,7 @@ def main() -> int:
     _run_cast_photo_off(lambda: _run_cast_idol_off(check_vnew_bl_look))
     _run_cast_idol_off(check_vnew_cast_photo_guard)
     check_vnew_cast_idol_model()
+    check_vnew_edit()
     check_pod_zones()
     print()
     if warnings:

@@ -291,6 +291,12 @@ VNEW_CAST_PHOTO_CHECK_MODEL = os.getenv("VNEW_CAST_PHOTO_CHECK_MODEL", "").strip
 # 상관없이 적용한다. 저장된 realRun·realHistory 는 지우지 않는다.
 VNEW_TAKE_REAL = _bool("VNEW_TAKE_REAL", True)
 
+# ⑦ 편집 — 영상 편집 타임라인(지시서 110, 2026-11-01). 켜면 ⑤에서 만든 영상(컷·테이크 결과)을 클립으로 늘어놓고 자르기·나누기·
+# 순서·소리 끄기를 고친 편집 문서를 gen 마다 저장하고, 서버 ffmpeg 로 mp4 하나로 내보낸다(유료 생성 API 호출 없음, edit.py).
+# false 면 편집 라우트 4개가 404(EditDisabled)이고 gen 보기에 edit 요약이 없다(⑦ 단계가 보이지 않는다). 진행 중 내보내기는
+# 끝까지 하고, 저장된 편집 문서·결과 영상은 지우지 않는다. 템플릿·base 에 배선한다(운영 overlay 는 false).
+VNEW_EDIT = _bool("VNEW_EDIT", True)
+
 # 캐릭터 충실도(char-fidelity, 2026-10-30). 켜면 분석이 기준 사진 한 장의 옷을 그대로 기본 복장으로 쓰고, 한쪽 소품의 좌우를
 # 화면 기준으로 받아 코드가 캐릭터 좌우로 바꾼다. 시트는 화면 왼쪽으로 45°씩 도는 다섯 인물로 그리고, 정면·후면·시트를 검사한다.
 # false 면 지금 동작(분석 SYSTEM·도구·프롬프트·검사 그대로). 저장된 새 필드는 지우지 않는다.

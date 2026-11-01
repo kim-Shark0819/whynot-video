@@ -15,6 +15,7 @@
 > 갱신 2026-11-01(지시서 107): 실사 캐스팅 그림체 막기 — 캐스팅 문장 끝 사진 고정 문장, 외모 문장 그림체 낱말 더하기, 결과 사진 검사(LLM 1회)·그림체 칸 1회 다시 뽑기·원장, `VNEW_CAST_PHOTO_CHECK`(§3.6, §3.6.1 B, §6.1.1, §7.1, §10.1).
 > 갱신 2026-11-01(지시서 108): 그림체 칸 다시 뽑기를 칸당 최대 2회로(`casting._REDRAW_MAX` 2)·안내 문구 "최대 두 번"·로그 `redraw=0|1|2`, 칸 하나 최악 사진 $0.04 × 3(§3.6, §3.6.1 B, §10.1).
 > 갱신 2026-11-01(지시서 109): 아이돌풍 실사 캐스팅만 fal FLUX.2 [pro](`fal-ai/flux-2-pro`, 1760×2352, 장당 $0.075) — 프리셋별 모델·금액(`preset_choice`)·회차 기록(`casting.model`·`unitUsd`·`imageSize`)·보기 `presets[]` 금액·화면 느낌별 금액, `VNEW_CASTING_IDOL_MODEL`(빈 값 = 되돌리기)(§3.6, §3.6.1 B, §6.2, §7.1, §10.1).
+> 갱신 2026-11-01(지시서 110): vnew 마지막 단계 ⑦ 편집(영상 편집 타임라인) 1부 서버 — 편집 재료 분석·`vnew/edit.py`(편집 문서·재료 허용 목록·필름스트립·파형·ffmpeg 내보내기)·라우트 4개·`gen_view.edit`·stitcher 새 함수 5개·`VNEW_EDIT`(운영 false)(§2.3, §3.6, §3.6.3, §3.7, §4.4, §7.1, §9.1, §9.2, §10.1). 화면은 지시서 111.
 
 ---
 
@@ -109,7 +110,7 @@ flowchart LR
 | `roles/` (7파일) | 약 1,460 | 스토리 역할(writer·vision·validator·bible·character_sheet·_json) |
 | `vpoc/` (14파일) | 약 10,100 | 영상만들기_기존(vpoc1) — routes 4,645 · fal 1,295 · llm 1,202 · regen 793 · ark 553 · store 422 · settings 412 · compose 357 · video 268 · images 265 · ledger 243 · seedream 141 · errors 108 |
 | `vpoc2/` (13파일) | 약 2,200 | 영상 vpoc2 — service 749 · llm 297 · store 289 · compose 192 · routes 167 · mock 146 외 |
-| `vnew/` (16파일) | 약 21,600 | 영상만들기_신규 — generate 5,485 · locations 2,903 · previz 2,875 · characters 2,387 · plan 1,644 · previz_camera 1,063 · routes 784 · shot_brief 593 · previz_schema 586 · location_views 376 · previz_fit 347 · previz_grammar 345 · settings 216 · prompts 183 · imaging 132 |
+| `vnew/` (16파일) | 약 21,600 | 영상만들기_신규 — generate 5,485 · locations 2,903 · previz 2,875 · characters 2,387 · plan 1,644 · previz_camera 1,063 · routes 784 · shot_brief 593 · previz_schema 586 · location_views 376 · previz_fit 347 · previz_grammar 345 · settings 216 · prompts 183 · imaging 132. 2026-11-01 지시서 110에서 `edit.py` 1,240줄(⑦ 편집)을 더했다 |
 | `fixtures/` | 1 | 빈 패키지 |
 
 ---
@@ -198,6 +199,7 @@ flowchart LR
 | `previz_support.py` | ④ 받침 판단(previz-support-reasoning, 2026-10-29, 순수 함수). 패널 읽기(`previz_grammar.read_cut`, emit_shot `supports[]`)가 인물마다 받침과 닿는 몸이 그려졌는지(`seen`: visible·partial·hidden) → 자세 → 받침 물체 → 정체·보통 크기 → 서 있는 사람 기준 윗면 높이(`heightCue`) → 앉는 방식 → 발을 읽고, 이 모듈이 정리(`normalize_supports`)·높이 환산(`support_height_m`, 키 대비 비율 표)·설계 프롬프트 `[받침 판단]` 줄(`prompt_line`)·서버 맞춤(`apply_supports`: 컷 인물 자세·앉을 소품 `sitOn`·소품 윗면 높이 = 같은 소품 읽기 중앙값)을 맡는다. 서버 맞춤은 `seen`이 visible·partial인 읽기만 쓴다(hidden·모르는 값은 `support`만 붙이고 `status:"hidden"`, 2026-10-29 Claude 실측 뒤 필수 수정 A). `run_design`이 `_apply_gestures` 다음·보정 1차 전에 부르고 `fit[cut].support`에 저장. 읽기 캐시는 `panelGrammar[cut].v = 2`(옛 캐시는 1회 다시 읽어 `supports`만 채움). 발 위치가 dangling이면 `solve_legs` 목표 각도 0°. `VNEW_PREVIZ_SUPPORT`로 끈다 |
 | `shot_brief.py` | 프리비즈 승인 후 장소별 촬영 지시서 |
 | `generate.py` | ⑤ 영상 생성 드라이버(아래) |
+| `edit.py` | ⑦ 편집(지시서 110, 2026-11-01). 편집 문서(EDL, gen마다 `edit.json` 1개, 조건부 쓰기 409)·재료 허용 목록(그 gen 그 그림체 결과 영상만, `_material_items`)·기본 문서(컷 결과 → 합친 영상 → 지난 실사 회차, 통 테이크는 녹화 컷 경계로 나눔)·길이 캐시·필름스트립·파형(lazy, S3 캐시)·ffmpeg 내보내기 스레드(claim·하트비트·이어받기·시간 상한, 결과 `final-edit-{n}.mp4`). 유료 API 호출 없음. `routes.py` 라우트 4개·`generate.gen_view`(`edit` 요약)가 읽는다. `VNEW_EDIT`로 끈다(아래 §3.6.3) |
 | `imaging.py`, `prompts.py` | 이미지 보조, 프롬프트 |
 
 vnew가 재사용하는 것: `vpoc.llm`·`images`·`store.STORE`·`ark`·`fal`·`seedream`·`video`·`ledger`·`settings`, `stitcher`, `project_tracks`(`vnew/generate.py:31-45`, `vnew/plan.py:21-26`, `vnew/routes.py:11-15`). 프런트 `vnew.js`도 fal 모델 등록에 `/api/vpoc/fal/*`를 부른다(`vnew.js:2255`, `:2280`, `:2370`) — **vnew의 fal 모델 고르기는 vpoc 블루프린트와 `VPOC_MODEL_PICKER_ENABLED`가 켜져 있어야 동작한다.**
@@ -513,11 +515,64 @@ B의 남은 위험(design §7):
 - **되돌리기: `config.<target>.env`에 `VNEW_3D_PROVIDER=hunyuan` 한 줄 + 재배포.** 다음 새 요청부터 T2 Hunyuan 본문·원장이다(tr-k). 회전만 끄기는 `VNEW_3D_TRIPO_YAW_DEG=0`, 다시점만 끄기는 `VNEW_3D_TRIPO_MULTIVIEW=false`, 좌우가 반대면 `VNEW_3D_SIDE_SWAP=true`, 본문 크기 거절이면 `VNEW_3D_TRIPO_INPUT_SQUARE=1536`.
 - 확인 남음: 정면 방향(−90°)과 좌우 자리는 개발계 VD-4(tasks)로 확인한다.
 
+#### 3.6.3 ⑦ 편집 단계 — 편집 재료·영상 전달·재사용 함수 (2026-11-01 지시서 110 조사·구현)
+
+스펙은 `.kiro/specs/vnew-edit-timeline/`다. 아래 1~5는 구현 전 코드를 읽은 결과다(줄 번호는 구현 뒤 작업 트리, `generate.py` 줄은 `gen_view` 끝 6줄을 더하기 전과 같다).
+
+**1. ⑤ 결과 영상(`vnew/generate.py`)**
+
+| gen 모드 | 칸(작업) | 칸 결과 | 합친 영상 |
+|---|---|---|---|
+| 컷 단위 `previz`(`_new_previz_gen` :413, Kling O3 edit) | `units[]` = 컷 하나(`_previz_units` :661 — 녹화 안 `startSec`·`endSec`) | `units[i].real`·`webtoon`이 completed면 `outputKey`(영상 버킷 `video_output_prefix(…, "vnew-{gen}", "{컷}-{그림체}", attempt, gen)/output.mp4`, `_do_poll_previz` :3739). 3초 미만 컷은 3초로 채워 제출하고(`_cut_clip` :1593) `padded`·`origSeconds`를 남긴다 | `finalReal`·`finalWebtoon` `{status, key}` = 영상 버킷 `{gen 루트}/final-real.mp4`·`final-webtoon.mp4`(`_do_concat` :5207, 채운 컷은 원래 길이로 잘라 잇는다) |
+| 통 테이크 `previz-take`(`_new_take_gen` :564, Seedance r2v) | `units[]` = 테이크(녹화 구간을 ≤30초로 묶음, `_take_units` :496 — `cutIds`·`recKeys`·`recSegIds`·`seconds`) | 테이크 통째 영상(컷 여러 개, 요청 길이 `round(seconds)`, `_take_duration_value` :3374). 실사는 회차(`realRun.n`)마다 칸을 queued로 되돌리고(`start_real` :1096), 지난 회차는 `realHistory`(최대 3, 칸 `outputKey`·`finalKey`, `_real_run_summary` :1058) | 웹툰 `final-webtoon.mp4`, 실사 회차 `final-real-r{n}.mp4`(테이크가 하나면 결과 복사) |
+| 옛 순차(mode 없음, `_new_gen` :346) | `segments[]` = 구간(i2v) | `segments[i].real`·`webtoon`의 `outputKey` | 같은 `final-*.mp4` |
+
+- `clipKey`(`gen_view` :5866)는 프리비즈 미리보기용(녹화에서 그 컷만 자른 클립)이라 생성 결과가 아니다. 녹화·시작 장면 이미지도 편집 재료가 아니다.
+- `gen_view`(:5776)는 칸마다 `videoUrl`(영상 버킷 presigned 1시간, `_presign` :6070)과 `finalReal`·`finalWebtoon.videoUrl`·`selected`를 준다. 칸의 S3 키(`outputKey`)는 보기에 없다.
+- 다시 만들기(`retry_segment` :5637)는 칸의 `outputKey`를 비우고 합친 영상을 waiting으로 되돌린다(파일은 지우지 않는다).
+
+**2. 결론 — 편집 재료와 실사·웹툰**
+
+- "컷 하나 = 클립 하나"에 가장 맞는 재료는 컷 단위 칸 결과다. 통 테이크는 테이크 결과를 녹화 컷 경계(`_previz_units`를 테이크 녹화 순서로 이어 결과 길이에 비례)로 나눈 클립(같은 원본, 구간만 다름)으로 시작하고, 다시 녹화했거나 결과 길이가 녹화 합과 0.5초·10% 넘게 다르면 테이크 통째 1개다. 컷 클립이 없고 합친 영상만 있으면 합친 영상 1개를 클립 1개로 넣고 사용자가 나눈다.
+- 실사·웹툰: 편집 문서 하나에 그림체 하나. 처음은 `gen.selected`(없으면 웹툰 → 실사 중 재료가 있는 것), 바꾸면 그 그림체 기본 문서로 시작한다. 허용 목록은 그 그림체 결과만이라 섞지 않는다. 통 테이크 실사는 지난 회차 결과도 허용한다(새 회차가 칸을 비워도 저장 문서가 깨지지 않게).
+- 표·경계 규칙은 스펙 design D1·D2, API 모양은 design §4다.
+
+**3. ⑥ 사운드와 클립 소리**
+
+- ⑥은 화면뿐이다(`vnew.js` `renderSoundStep` :7451 — 고른 영상 플레이어, 저장하지 않는 소리 토글, 읽기 전용 대사 목록). 서버 라우트·저장 결과가 없다 → 편집 문서 `audio[]`는 비워 둔다(사운드 결과가 생기면 별도 트랙).
+- 클립 소리: 통 테이크는 `generate_audio`(기본 켬, `VNEW_TAKE_AUDIO`)로 효과음·립싱크가 들어간다. `_has_audio_stream`(:270)은 합친 결과의 소리 유무를 로그로만 남긴다. 컷 단위 Kling edit은 녹화 소리를 보내지 않는다(추정 — 결과 파일 실측 없음). 편집은 원본마다 소리 유무를 잰다(`probe_media`).
+
+**4. 영상 바이트를 화면에 주는 방식**
+
+- ⑤·⑥은 presigned GET URL(영상 버킷, `ResponseContentType video/mp4`, 1시간)을 `<video src>`·내려받기 링크(`downloadLink` :6140)에 쓴다. 조회마다 새로 서명하고 저장하지 않는다.
+- 버킷에 CORS가 없다(`vnew.js:244`, `locations.py:2646`). 텍스처·사진·패널은 같은 출처 API를 Authorization fetch → blob URL로 받는다. 영상은 크기 때문에 그렇게 하지 않는다.
+- → 편집 화면도 재생·내보내기 결과는 presigned. 화면이 영상 바이트를 읽을 수 없으므로 썸네일·파형은 서버가 만든다(필름스트립 JPEG presigned + 파형 피크 JSON, 처음 요청 때 한 번 만들고 S3 캐시).
+
+**5. `stitcher` 재사용**
+
+- 쓴다: `ffmpeg_path`, `_run`(타임아웃 `STITCH_TIMEOUT_SECONDS`), `_threads_args`.
+- 쓰지 않는다: `trim`(`-an`이라 소리를 버린다), `concat`(클립마다 `ffmpeg -i`로 소리를 보고, 스트림 복사가 실패하면 다시 인코딩 — 크기·fps가 섞인 원본이면 다시 인코딩), `probe_duration`·`probe_height`(새 `probe_media`가 한 번에 길이·크기·fps·소리), `last_frame_jpeg`·`pad_to_seconds`·`scale_to_min_height`·`prepare_for_anime`(⑤ 제출용).
+- 새 함수(파일 끝에만, 기존 함수 그대로 — 검사 edt-j가 지시서 110 전 부분 sha256을 본다): `probe_media`·`edit_segment`(클립 하나 = 정해진 크기·fps·프레임 수 영상 + 같은 길이 PCM)·`edit_join`(concat 스트림 복사 + PCM → AAC)·`filmstrip_jpeg`·`audio_peaks`.
+
+**6. 구현 결과(2026-11-01, 서버만)**
+
+| 항목 | 내용 |
+|---|---|
+| 저장(메인 버킷, gen 루트 아래) | `edit.json`(문서 `{version, variant, updatedAt, clips[{id, sourceKey, in, out, muted, label?}], audio[]}`) · `edit-export.json`(내보내기 `{n, current, history≤3}`) · `edit-media/index.json`(길이·소리·크기·fps) · `edit-media/{mid}-strip.jpg`·`{mid}-film.json` |
+| 결과(영상 버킷) | `{gen 루트}/final-edit-{n}.mp4` |
+| 라우트 | `GET·PUT /p/<pid>/edit`, `POST /p/<pid>/edit/export`, `GET /p/<pid>/edit/media/<mid>`(§4.4) |
+| 검증 | 허용 목록 밖 키 400, 유한 숫자만, 0 ≤ in, out ≤ 원본 길이, 0.04초 이상, 클립 200개·전체 300초, 바디 256KB(413), 남의 프로젝트는 `_project_for` |
+| 내보내기 | 클립마다 trim(프레임 정확)·같은 크기/fps 다시 인코딩·PCM 길이 맞춤 → concat 스트림 복사 + AAC. 실측 4클립 5.97초 → 5.96초. 프로세스당 하나, 클립 인코딩은 ⑤ 준비 세마포어 안, 하트비트·claim·이어받기(300초 끊김, 시도 3번), 한 번 시도 1200초 |
+| 메모리 | S3 스트리밍(8MB·한 스레드), 임시 디렉터리 파일 단위, 원본은 마지막 쓰임 뒤 지움. ffmpeg 실측 maxrss: 720p 클립 인코딩 ≈ 142MB(⑤ `trim`과 같음), 필름스트립 ≈ 61MB, 파형 ≈ 34MB |
+| 플래그 | `VNEW_EDIT`(코드·base true, 운영 overlay false). 끄면 라우트 404 `EditDisabled`, `gen_view`에 `edit` 없음 |
+| gen 보기 | 켬이면 `gen_view` 끝에 `edit: {available, variants}`(S3 읽기 없음) |
+
 ### 3.7 `stitcher.py`
 
 - ffmpeg는 `imageio-ffmpeg` 휠의 정적 바이너리(`FFMPEG_BINARY` 우선, 없으면 PATH)(`stitcher.py:35-48`). 모든 실행에 `STITCH_TIMEOUT_SECONDS`(기본 600초) timeout(`:51-58`).
 - 함수: `concat`(`:117`), `trim`(`:178`, `threads` 인자로 `-threads 1` 가능), `last_frame_jpeg`(`:218`), `probe_duration`(`:252`), `prepare_for_anime`(`:329`, Kling edit 입력 규격 3~15초·높이 ≥720으로 맞춤).
 - 호출: `vpoc/routes.py` `stitch`, `vnew/generate.py`(`_concat`·`_last_frame`·`_prepare_anime` 래퍼), `server.py`(롱테이크).
+- ⑦ 편집 함수(2026-11-01 지시서 110, 파일 끝 `:406-688`, `vnew/edit.py`만 쓴다): `probe_media`(`:438`, ffmpeg -i 한 번 → 길이·크기·fps·소리), `edit_segment`(`:489`), `edit_join`(`:568`), `filmstrip_jpeg`(`:608`), `audio_peaks`(`:640`), 도우미 `_edit_nice`(리눅스 `nice -n 10`)·`_edit_run`(시간 초과 → `StitchError`)·`_fit_pcm`. 그 위 기존 함수는 바이트까지 그대로다(§3.6.3 5).
 
 ---
 
@@ -565,7 +620,7 @@ B의 남은 위험(design §7):
 등록 조건: `VIDEO_GEN_ENABLED and VPOC2_ENABLED`(`server.py:6986`), 블루프린트 내부에서도 404(`vpoc2/routes.py:70-73`). 전부 `require_auth`.
 `/meta`·`/runs` (GET), `/runs` (POST), `/runs/<id>` (GET), `/runs/<id>/input`·`interpretation`·`prompts/<shot>` (PUT), `/runs/<id>/characters/<c>/confirm` (POST), `/runs/<id>/run/<action>` (POST: interpret·draw·prepare·generate·retry·stitch), `/runs/<id>/back` (POST), `/runs/<id>/review` (PUT), `/reviews` (GET)(`vpoc2/routes.py:76-152`). 목 모드 전용 `/_local/<bucket>/<key>`(`:155-165`).
 
-### 4.4 `/api/vnew` (블루프린트 `vnew`, 50개 — vnew-live-fx 5개 포함)
+### 4.4 `/api/vnew` (블루프린트 `vnew`, 54개 — vnew-live-fx 5개·⑦ 편집 4개 포함)
 
 전부 `require_auth`. 계획 API(`/p/<pid>/...`)는 추가로 프로젝트 권한 + 트랙 `video_new` 확인(`vnew/routes.py:260-282`).
 
@@ -578,6 +633,7 @@ B의 남은 위험(design §7):
 | 프리비즈 ④ | `/p/<pid>/previz/design`·`approve`·`brief` (POST), `/previz/scene` (PUT), `/previz/recordings/<seg>`·`/frames`·`/finish` (POST), `/previz/texture`·`panel` (GET) | `:555-690` |
 | 생성 ⑤ | `/p/<pid>/cast-notes`, `/generate`, `/generate/retry`, `/select` (POST) | `:714-769` |
 | vnew-live-fx(2026-10-30, 5개 추가 → 50개) | A `/p/<pid>/conti/fx` (POST, `VNEW_FX`), B `/characters/<id>/casting` (PUT)·`/casting/draw`·`/casting/choose` (POST, `VNEW_CASTING`), C `/p/<pid>/generate/real` (POST, `VNEW_TAKE_REAL`). 설정을 끄면 404(프로젝트를 보기 전). retry 본문에 `audio`(bool, C1) | `:243-290`, `:467`, `:824-847`(C3 뒤 줄 번호) |
+| ⑦ 편집(2026-11-01 지시서 110, 4개 추가 → 54개) | `/p/<pid>/edit` (GET 읽기·PUT 쓰기), `/p/<pid>/edit/export` (POST 쓰기, 202), `/p/<pid>/edit/media/<mid>` (GET 읽기). `VNEW_EDIT` 끔이면 404 `EditDisabled`(프로젝트를 보기 전). 저장·내보내기 바디 256KB(`_edit_body`). 응답 모양은 `.kiro/specs/vnew-edit-timeline/design.md` §4 | `vnew/routes.py:886-959` |
 
 ### 4.5 `VNEW_ENABLED=false`일 때 `/api/vnew`가 정말 없는가 — 코드 확인 결과
 
@@ -778,6 +834,9 @@ vpoc·vnew의 Bedrock 도구 호출은 전부 `vpoc.llm._converse`(`vpoc/llm.py:
 | `VNEW_CAST_PHOTO_CHECK_MODEL` | `vnew/settings.py:286`, `casting._photo_check` | `VNEW_PEOPLE_COUNT_MODEL` 값(지금 Fable 5.1, 빈 값도 기본) | 키 없음(코드 기본) | — | — |
 | `VNEW_CASTING_IDOL_MODEL` | `vnew/settings.py:267`(`os.getenv(…, 기본).strip()` — env 없을 때만 기본, 빈 값 = 되돌리기), `casting.preset_choice`·`_preset_items` | `fal-ai/flux-2-pro` | `fal-ai/flux-2-pro` | — | —(base 값. 되돌릴 때만 빈 값) |
 | `VNEW_CASTING_IDOL_USD`·`_SIZE` | `vnew/settings.py:271`(`_checked_float` 0~10)·`:272`, `casting.preset_choice` | 0.075 · 1760x2352 | 키 없음(코드 기본) | — | — |
+| `VNEW_EDIT` | `vnew/settings.py:298`(`_bool`), `edit.require_enabled`(라우트 4개)·`generate.gen_view`(`edit` 요약) | true | true | — | **false**(2026-11-01 지시서 110: 운영은 켜지 않는다, 배포 전) |
+
+`VNEW_EDIT`(지시서 110, 2026-11-01)는 앱 env(`k8s/workloads.yaml.tmpl`의 `VNEW_CASTING_IDOL_MODEL` 바로 뒤)와 base(같은 자리, 되돌리기 주석)에 배선돼 있고 `PARITY_ENV_KEYS`에 들어 있다(rw-a~c, edt-a). 운영 overlay(`config.prod.env`의 `VNEW_ENABLED=true` 바로 뒤)는 false다. false면 ⑦ 편집 라우트 4개가 프로젝트를 보기 전에 404 `EditDisabled`, `gen_view`에 `edit` 키가 없다(화면에 ⑦ 없음). 진행 중 내보내기는 끝까지 하고, 저장된 편집 문서·결과 영상은 지우지 않는다. 숫자 한도(클립 200개·300초·내보내기 1200초 등)는 `edit.py` 상수다(설정 키 없음).
 
 `VNEW_CASTING_IDOL_MODEL`(지시서 109, 2026-11-01)은 앱 env(`k8s/workloads.yaml.tmpl`의 `VNEW_CAST_PHOTO_CHECK` 바로 뒤)와 base(같은 자리, 값 = 코드 기본, 되돌리기 주석)에 배선돼 있고 `PARITY_ENV_KEYS`에 들어 있다(rw-a~c, cim-b). 아이돌풍 실사 캐스팅만 이 모델로 뽑는다. 되돌리기는 `config.<target>.env`에 `VNEW_CASTING_IDOL_MODEL=`(빈 값) 한 줄이고, 그러면 아이돌풍도 `VNEW_CASTING_MODEL`·`VNEW_CASTING_USD`·`VNEW_CASTING_SIZE`를 쓰며 캐스팅 보기가 108과 같다. 다른 키와 달리 빈 값이 기본값이 아니라 되돌리기다(템플릿이 env를 늘 넣으므로 base 값이 실제 기본). 장당 금액·크기 키는 코드 기본이다. 진행 중 회차는 시작 때 회차에 남긴 모델·장당·크기를 쓴다(재시작 뒤에도). 자세한 동작은 §3.6.1 B 「아이돌풍 모델」이다.
 
@@ -989,11 +1048,12 @@ flowchart LR
 | `users/{owner}/video/{pid}/vnew/plan.json` | **vnew 프로젝트 단일 원본** | `vnew/plan.py:64-68` |
 | `users/{owner}/video/{pid}/vnew/uploads/{f}.jpg`, `locations/…`, `previz/{rev}/{seg}.mp4`, `previz/{rev}/frames/{seg}/` | vnew 입력·장소·프리비즈 녹화 | `vnew/plan.py:72`, `vnew/previz.py:185-204` |
 | `users/{owner}/video/{pid}/vnew/gen/{gen}/opening.jpg`, `{seg}-firstframe.jpg`, `final-real.mp4`, `final-webtoon.mp4` | vnew ⑤ 산출물 | `vnew/generate.py:107-124` |
+| `users/{owner}/video/{pid}/vnew/gen/{gen}/edit.json`, `edit-export.json`, `edit-media/index.json`, `edit-media/{mid}-strip.jpg`, `edit-media/{mid}-film.json` | vnew ⑦ 편집 문서·내보내기 상태·재료 길이 캐시·필름스트립·파형(지시서 110) | `vnew/edit.py:111-141` |
 
 ### 9.2 S3 영상 버킷(us-west-2)
 
 - vpoc1 출력: `users/{owner}/video/{pid}/vpoc1/plans/{plan}/shots/{gen}/{shot}-{n}/…`(`vpoc/store.py:146-151`), 애니 변환은 그 옆 `…/anime`(`vpoc/routes.py:139-147`).
-- vnew 출력: 같은 함수로 `plan_id = vnew-{gen}`(`vnew/generate.py:127-129`).
+- vnew 출력: 같은 함수로 `plan_id = vnew-{gen}`(`vnew/generate.py:127-129`). ⑦ 편집 결과는 `users/{owner}/video/{pid}/vnew/gen/{gen}/final-edit-{n}.mp4`(`vnew/edit.py:135`, 스트리밍 올리기·SSE AES256).
 - vpoc2 출력: `users/{owner}/video/_vpoc2/{run}/shots/{shot}-{n}/`(`vpoc2/store.py:10`).
 - 수명 주기: 저장소의 `infra/s3-lifecycle.json`은 미완료 multipart 1일, `_build/` 1일만 정의. 실제 버킷 설정은 미확인(`config.prod.env` 주석: "users/ 자동 삭제 규칙 없음").
 
@@ -1005,9 +1065,9 @@ flowchart LR
 
 ## 10. 테스트·검증 도구
 
-### 10.1 `tools/check_vpoc.py`(CI 유일 검사기, 33,818줄 — 2026-11-01 지시서 109 뒤)
+### 10.1 `tools/check_vpoc.py`(CI 유일 검사기, 35,302줄 — 2026-11-01 지시서 110 뒤)
 
-`main()`이 아래 66개를 순서대로 부른다(`check_vpoc.py` 끝 `def main`, 마지막은 지시서 105의 `check_pod_zones`, 2026-11-01 지시서 107의 `check_vnew_cast_photo_guard`와 지시서 109의 `check_vnew_cast_idol_model`은 그 바로 앞). 실패가 하나라도 있으면 종료 코드 1. 외부 호출은 모듈 래퍼를 monkeypatch 하고 S3는 메모리 저장소로 바꾼다(예: `:892` "메모리 S3", `:916`, `:1216`, `:1930`). 새 기본값(`VNEW_FX` 켬)에서 기대값이 달라지는 기존 검사 3개(`check_vnew_plan`·`check_vnew_locations`·`check_vnew_previz`)는 `main()`의 부르는 줄에서 `_run_fx_off(...)`(`_pin_vnew(VNEW_FX=False)`)로, `VNEW_CASTING` 켬에서 달라지는 `check_vnew_fx_prompt` 1개는 `_run_casting_off(...)`로 끔 고정한다. 본문·기대값은 그대로다.
+`main()`이 아래 67개를 순서대로 부른다(`check_vpoc.py` 끝 `def main`, 마지막은 지시서 105의 `check_pod_zones`, 2026-11-01 지시서 107의 `check_vnew_cast_photo_guard`·지시서 109의 `check_vnew_cast_idol_model`·지시서 110의 `check_vnew_edit`은 그 바로 앞). 실패가 하나라도 있으면 종료 코드 1. 외부 호출은 모듈 래퍼를 monkeypatch 하고 S3는 메모리 저장소로 바꾼다(예: `:892` "메모리 S3", `:916`, `:1216`, `:1930`). 새 기본값(`VNEW_FX` 켬)에서 기대값이 달라지는 기존 검사 3개(`check_vnew_plan`·`check_vnew_locations`·`check_vnew_previz`)는 `main()`의 부르는 줄에서 `_run_fx_off(...)`(`_pin_vnew(VNEW_FX=False)`)로, `VNEW_CASTING` 켬에서 달라지는 `check_vnew_fx_prompt` 1개는 `_run_casting_off(...)`로 끔 고정한다. 본문·기대값은 그대로다. 지시서 110(`VNEW_EDIT` 켬 → `gen_view` 끝에 `edit`)은 기존 검사의 기대값·고정을 바꾸지 않았다(전부 그대로 통과).
 
 char-fidelity 새 기본값 때문에 `main()` 호출 줄에서만 고정한 기존 검사(본문·기대값 그대로):
 
@@ -1039,10 +1099,11 @@ T3에서 새로 고정한 기존 검사는 없다. 기대값을 바꾼 기존 �
 | vnew 통 테이크 실사 버전 | `check_vnew_take_real`(lr-a~m, `:23104`), `check_vnew_take_real_screen`(lr-n·lr-o, `:24490`), 2026-10-30 | lr-a~m: `start_real`·`POST /generate/real`·실사 payload·프롬프트(웹툰 sha256 그대로 `_LR_TAKE_SHA_ON`)·드라이버·병합·소리 거절(`vpoc.fal.poll`)·`_fail_variant`·`_gen_stale`·재시작·취소·`select`·`gen_view`·세마포어(하네스 `_LrEnv`: 가짜 fal 제출·조회·취소·concat·원장·캐릭터, urlopen 막음). lr-n: `vnew.js` ⑤ 결과·실사 열·확인창·나란히 보기·테이크 행·`cutCell` 소리 없이 다시·`schedulePlanPoll`을 잘라(`_LR_SCREEN_SLICES`) node 가짜 DOM으로 실행(`_LR_SCREEN_NODE_HARNESS`·`_lr_screen_problems`), 배선·`vnew.css`·`node --check`. lr-o: 설정·배선, `_LrEnv`의 실제 `gen_view`(끔·소리 거절·켬·회차 중 끔)를 화면 함수에 넣고 화면이 만든 요청 본문을 Flask 라우트에 그대로 보낸다 |
 | vnew 캐릭터 충실도 | `check_vnew_char_fidelity`(cf-a~r), `check_vnew_char_fidelity_screen`(cf-s), 2026-10-30 | `vnew/char_fidelity.py` 전 함수. `characters`의 분석·좌우·참고 순서·프롬프트·길이 예산·사진 속 옷(T1), 그림·시트 검사·반전·옆모습·3D 본문·재제출·이어 만들기·선점(T2), `detail_view`·`_outfits_view`(cf-r: 끔 = 구현 전 sha256, 켬 Tripo 빌드 → 라우트 상세·다른 사용자 404). 끔 지문 `_CF_OFF_SHA` 32개·`_CF_3D_OLD_SHA`는 구현 전에 잰 값이다. 하네스 `_CfFakes`·`_CfFakesT2`(가짜 LLM·Seedream·fal·원장, 동기 스레드). cf-s: `vnew.js` 캐릭터 충실도 순수 함수와 DOM 4곳을 잘라(`_CF_SCREEN_SLICES`) node 가짜 DOM으로 실행하고 실제 `detail_view` 응답을 넣는다. 옛 캐릭터 + 끔 화면 DOM = 구현 전 sha256(`_CF_SCREEN_OLD_SHA`) |
 | vnew 3D 공급자 | `check_vnew_3d_tripo`(tr-a~l), 2026-10-30 | `settings._checked_*`·설정 11개(하위 프로세스), 배선·렌더, `_tripo_request`·`submit_3d`·`_3d_squares`·`poll_3d`·`_orient_glb`(진짜 GLB)·`_copy_3d_result`·원장·재제출·`run_retry3d`·이어 만들기, Hunyuan 지문 16개 = 시작 전(`_TR_HUNYUAN_SHA`), 12MB GLB 회전 메모리. 하네스 `_TrFakes` |
-| 되돌리기 배선 | `check_fal_parity_rollback`(rw-a~c) | `PARITY_ENV_KEYS`(31개, 2026-10-31 `VNEW_BL_LOOK`·2026-11-01 `VNEW_CAST_PHOTO_CHECK`·`VNEW_CASTING_IDOL_MODEL` 추가)의 템플릿·base 배선, `render.py` prod·dev 렌더. 운영 `VPOC_ARK_SEEDANCE_ENABLED`·`VNEW_ENABLED`는 `"true"`, 개발 `VPOC_ARK_SEEDANCE_ENABLED`는 `"false"`(2026-10-30 사용자 결정), 오버레이 `true` 한 줄 되돌리기 경로 |
+| 되돌리기 배선 | `check_fal_parity_rollback`(rw-a~c) | `PARITY_ENV_KEYS`(32개, 2026-10-31 `VNEW_BL_LOOK`·2026-11-01 `VNEW_CAST_PHOTO_CHECK`·`VNEW_CASTING_IDOL_MODEL`·`VNEW_EDIT` 추가)의 템플릿·base 배선, `render.py` prod·dev 렌더. 운영 `VPOC_ARK_SEEDANCE_ENABLED`·`VNEW_ENABLED`는 `"true"`, 개발 `VPOC_ARK_SEEDANCE_ENABLED`는 `"false"`(2026-10-30 사용자 결정), 오버레이 `true` 한 줄 되돌리기 경로 |
 | vnew BL 참고 외모 | `check_vnew_bl_look`(bl-a~l), 2026-10-31 | `vnew/genre_bl.py` 전 함수(유형 표·분류 판정·그림 우선, 104 `detect_types`·`known_types`·`merged_pieces`), `casting` `cast_prompt`·`_cast_text`·`_hint_sentence`(유형 없음 = 옛 식 5,148문장, 유형 있음 216문장, 1500자 상한·두 유형), `_bl_types_now`·`view`·`start_draw`·`update_settings`(Flask PUT·draw, 메모리 저장소: BL 요청 무시·103 저장값 무시·설명 근거·로그 `bl=`), 103 함수·문구 상수가 없음(AST), `VNEW_BL_LOOK` 끔·설정 읽기(하위 프로세스)·배선·렌더·세 파일 주석, `vnew.js` BL 한 줄(node 가짜 DOM, 실제 `view`·상세 라우트 응답, 103 꼴 응답에서 선택 없음, 다시 만들기 = 진짜 `buildSection`·`refreshDetail` + 실제 POST `/build`·GET 상세, 지운 103 화면 함수·CSS 선택자가 없음), bl-j 운영 문구 `BadBlType`(표에 남김, 던지는 곳 0), bl-k 찾기 57경우·이름 × 부정·앞 경계·뒤쪽 제외 13 × 31꼴·꽃수 창 경계, bl-l 두 유형 합치기. 103 피드백에서 bl-b 기대값을 형태·인상 규칙으로, 104에서 bl-f~j를 다시 썼고 104 피드백에서 bl-f·g·i·j·k를 고쳤다 |
 | vnew 캐스팅 그림체 막기 | `check_vnew_cast_photo_guard`(cpg-a~h), 2026-11-01 지시서 107 | `casting` 사진 고정 문장(`photo_anchor`, 두 프리셋 × 성별 × BL 108문장 = 107 전 식 + 고정 문장, 운영 최대 길이, 긴 외모·상한 줄이기 순서), `_no_drawing` 더한 낱말 19경우·남길 낱말·107 전과 같음 197표본, 설정·배선(하위 프로세스·렌더), `_photo_check`(호출 꼴·응답 10꼴·오류), `run_draw`(가짜 fal·가짜 검사 LLM·메모리 S3·가짜 원장: 실사·그림체 → 실사·그림체 ×2 → 실사(원장 3)·그림체 ×3 → NotPhoto(원장 3·저장 0·제출 3·시작 시각 그대로)·검사 None 4종·로그 redraw 0·1·2·두 칸·S3 put 0·원장 키), 재개(`reconcile` redraws 2 → 네 번째 제출 0, redraws 1 → 세 번째 제출 1·queued·900초·claim 잃음), 끔 = 106, `view`·Flask 상세·뽑기, `vnew.js` 안내 한 줄(node 가짜 DOM)·CSS. 공용 `_cpg_anchor`(기존 cast·bl 기대값도 씀). 108: 시드 캐릭터의 variant를 ready로 두고 `characters.run_resume_variant`를 막아 둔다(상세 조회가 진짜 이어 만들기 스레드를 띄우지 않게) |
 | vnew 아이돌풍 캐스팅 모델 | `check_vnew_cast_idol_model`(cim-a~h), 2026-11-01 지시서 109 | `settings` 아이돌풍 키 3개(하위 프로세스 13값·경고), `casting.preset_choice`·`_parse_size`·`total_usd`·`_check_cost`·`_round_choice`·`_preset_items`·`start_draw` 회차 기록·`run_draw`·`view`, 템플릿·base·`PARITY_ENV_KEYS`·렌더(+빈 값 오버레이 → 하위 프로세스 되돌리기), `run_draw`(가짜 fal·가짜 검사 LLM·메모리 S3·가짜 원장: 아이돌풍 FLUX.2 [pro] 본문 3키·1760×2352·원장 0.075, 현실 배우풍 Seedream 0.04, 되돌리기, 다시 뽑기·NotPhoto 원장, 회차 도중 설정 바꿈, 재시작 `reconcile`, 기록 없는 옛 회차), Flask 뽑기 409·202·상세, `vnew.js` `castingPresetPrice`·느낌 라디오·409 다시 읽기(node 가짜 DOM에 실제 서버 보기를 넣고, 화면이 보낸 본문을 라우트에 그대로 보냄) |
+| vnew ⑦ 편집 타임라인 | `check_vnew_edit`(edt-a~l), 2026-11-01 지시서 110 | `vnew/edit.py` 전 함수(커버리지 100%), 라우트 4개(별도 Flask 앱·권한·끔 404·바디 413), `gen_view.edit`, stitcher 새 함수 5개(가짜 `_run` 명령·지시서 110 전 부분 sha256) + 로컬 ffmpeg 실측(내보내기 길이 = 문서 합 ±0.1초·프레임 수·소리·필름스트립·파형, ffmpeg 없으면 경고 후 건너뜀), 배선·렌더·운영 overlay false. 하네스 `_EdtEnv`(메모리 저장소 `_EdtStore` — 조건부 쓰기 흉내·읽기 수, 가짜 ffmpeg 래퍼·스레드, fal 가격·urlopen 막음, ⑤ 준비 세마포어 `_LrSem`), 계획 `_edt_cut_plan`·`_edt_take_plan`. 유료 호출 0 |
 | 파드 영역 | `check_pod_zones`(pz-a~h), 2026-10-31 지시서 105·106 | `POD_ZONES` 설정 줄(base·prod 값·자리·주석·prod 서브넷 수 = 영역 수·dev 오버레이에 없음), 값 판정 `_pz_zone_problems`(빈 값·빈 항목·공백·꼴·중복), 템플릿 affinity 8줄 블록 2곳·자리·분산 블록 그대로, `render.py` 메모리 렌더 prod `[2a,2c]`·dev `[2a,2b,2c]`(PyYAML이 있으면 dict 비교, CI는 글자 블록), 저장소 밖 임시 트리에서 CLI `render.py --target prod|dev` + CI 미치환 grep 판정 0줄·`POD_ZONES` 없으면 실패. 106: pz-f 템플릿 영역 분산 항목 자리(hostname 항목 바로 뒤)·주석 낱말·정책 키 없음·롤링 전제(replicas 2·maxUnavailable 0·maxSurge 1)·`_pz_zone_rule_place` 표본, pz-g prod·dev 렌더 분산 목록 [hostname, zone]·부모 경로·selector 이름, pz-h 설정 주석 사실(노드 2a·2b·2c 한 대씩). 105는 기존 검사 기대값을 바꾸지 않았고, 106은 pz-a "no 2c node"(있음 → 없음)와 pz-d 분산 목록(hostname → hostname·zone)을 바꿨다 |
 
 ### 10.2 기타 도구

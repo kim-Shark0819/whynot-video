@@ -5904,7 +5904,7 @@ def gen_view(owner: str, pid: str, plan: dict) -> dict | None:
             ],
         })
     real_block = _real_block_text(owner, plan, gen) if is_take else ""
-    return {
+    view = {
         "genId": gen.get("genId"),
         "mode": mode,
         "status": gen.get("status"),
@@ -5945,6 +5945,12 @@ def gen_view(owner: str, pid: str, plan: dict) -> dict | None:
         "realBlock": real_block,
         "realEnabled": bool(vnew_settings.VNEW_TAKE_REAL),  # vnew-live-fx C3: 화면이 실사 열을 그릴지(끔 + 회차 없음이면 지금 화면)
     }
+    # ⑦ 편집(지시서 110): 켜져 있으면 끝에 요약 {available, variants}(S3 를 읽지 않는다). 꺼져 있으면 키가 없다(⑦ 단계 없음).
+    if vnew_settings.VNEW_EDIT:
+        from . import edit as vnew_edit  # noqa: PLC0415 — edit 이 generate 를 import 한다(순환 피함).
+
+        view["edit"] = vnew_edit.summary(gen)
+    return view
 
 
 def _reconcile_gen_stale(gen: dict) -> dict:

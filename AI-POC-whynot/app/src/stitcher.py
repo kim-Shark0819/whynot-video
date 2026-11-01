@@ -401,3 +401,287 @@ def pad_to_seconds(source_path: str, output_path: str, *, target_sec: float, thr
         raise StitchError(f"영상 길이를 채우지 못했습니다(→{target:.2f}s): {detail}")
     logger.info("Pad to %.2fs bytes=%s", target, os.path.getsize(output_path))
     return output_path
+
+
+# ================================================================ ⑦ 편집(지시서 110, 2026-11-01)
+#
+# 아래 함수는 vnew ⑦ 편집(app/src/vnew/edit.py)만 쓴다. 위 함수들의 동작은 바꾸지 않았다.
+# - 클립마다 ffmpeg 한 번(edit_segment): 정해진 크기·fps·프레임 수로 다시 인코딩한 영상(소리 없음)과, 정확히 같은 길이의
+#   원시 PCM(48kHz 스테레오 s16le). 조각들의 코덱 설정이 모두 같아 이어 붙이기(edit_join)는 스트림 복사이고, 소리는 PCM 을
+#   이은 뒤 한 번만 AAC 로 인코딩한다. 그래서 클립 경계마다 영상·소리 길이가 프레임 단위로 맞고(밀림 없음), 클립이 많아도
+#   전체 길이가 편집 문서의 합과 한 프레임 안에서 맞는다.
+# - 파일 단위로만 다룬다(영상 바이트를 메모리에 모으지 않는다). ffmpeg 는 -threads 1, 리눅스면 nice 10 으로 띄워
+#   같은 파드의 API 응답을 덜 막는다.
+
+EDIT_AUDIO_RATE = 48000  # 편집 내보내기 소리 샘플레이트(Hz). 아래 fps 의 한 프레임이 정수 샘플이 된다.
+EDIT_AUDIO_BYTES_PER_SAMPLE = 4  # s16le 스테레오 = 2바이트 × 2채널
+EDIT_FPS_CHOICES = (12, 15, 16, 20, 24, 25, 30, 40, 48, 50, 60)  # 48000 을 나누어떨어지게 하는 fps
+EDIT_PEAKS_RATE = 8000  # 파형 피크를 셀 때 디코드하는 샘플레이트(모노)
+
+
+def _edit_nice() -> list[str]:
+    """리눅스(nice 가 있으면)에서 ffmpeg 를 nice 10 으로 띄운다. 그 밖(윈도 개발 PC 등)은 빈 리스트."""
+    if os.name != "posix":
+        return []
+    found = shutil.which("nice")
+    return [found, "-n", "10"] if found else []
+
+
+def _edit_run(command: list[str]) -> subprocess.CompletedProcess:
+    """편집용 ffmpeg 실행. 시간 초과(STITCH_TIMEOUT_SECONDS)면 StitchError."""
+    try:
+        return _run(_edit_nice() + command)
+    except subprocess.TimeoutExpired:
+        raise StitchError("영상 편집 처리 시간이 너무 오래 걸렸습니다.")
+
+
+def probe_media(path: str) -> dict:
+    """영상 한 개의 길이·화면 크기·fps·소리 유무(지시서 110). ffprobe 없이 ffmpeg -i 출력을 한 번 읽는다.
+
+    반환 {"duration": 초, "width", "height", "fps", "hasAudio"}. 못 읽으면 duration 0 이다(호출자가 그 재료를 못 쓰는 것으로 본다).
+    """
+    import re
+
+    info = {"duration": 0.0, "width": 0, "height": 0, "fps": 0.0, "hasAudio": False}
+    if not path or not os.path.exists(path):
+        return info
+    try:
+        binary = ffmpeg_path()
+        result = _run([binary, "-hide_banner", "-i", path])
+    except (StitchError, subprocess.TimeoutExpired):
+        return info
+    text = result.stderr.decode("utf-8", errors="replace")
+    match = re.search(r"Duration:\s*(\d+):(\d+):(\d+(?:\.\d+)?)", text)
+    if match:
+        info["duration"] = int(match.group(1)) * 3600 + int(match.group(2)) * 60 + float(match.group(3))
+    for line in text.splitlines():
+        if "Stream #" not in line:
+            continue
+        if "Video:" in line and not info["width"]:
+            size = re.search(r"(?<![\d])(\d{2,5})x(\d{2,5})(?![\d])", line)
+            if size:
+                info["width"] = int(size.group(1))
+                info["height"] = int(size.group(2))
+            rate = re.search(r"(\d+(?:\.\d+)?) fps", line)
+            if rate:
+                info["fps"] = float(rate.group(1))
+        elif "Audio:" in line:
+            info["hasAudio"] = True
+    return info
+
+
+def _fit_pcm(path: str, size: int) -> None:
+    """원시 PCM 파일을 정확히 size 바이트로 맞춘다(길면 자르고, 짧거나 없으면 0 = 무음으로 채운다). 1MB 씩 쓴다."""
+    current = os.path.getsize(path) if os.path.exists(path) else 0
+    with open(path, "r+b" if os.path.exists(path) else "wb") as handle:
+        if current > size:
+            handle.truncate(size)
+            return
+        handle.seek(0, os.SEEK_END)
+        remaining = size - current
+        zeros = b"\0" * min(remaining, 1 << 20)
+        while remaining > 0:
+            step = min(remaining, len(zeros))
+            handle.write(zeros[:step])
+            remaining -= step
+
+
+def edit_segment(
+    source_path: str,
+    video_out: str,
+    *,
+    start_sec: float,
+    frames: int,
+    fps: int,
+    width: int,
+    height: int,
+    audio_out: str = "",
+    audio_from_source: bool = False,
+    threads: int | None = 1,
+) -> dict:
+    """편집 내보내기의 클립 한 개(지시서 110). 원본의 start_sec 부터 frames 장을 width×height·fps 로 다시 인코딩한다.
+
+    - 영상: trim(프레임 정확) → fps → 비율을 지켜 줄이고 남는 곳은 검은 여백 → 원본 끝이 모자라면 마지막 프레임 복제 →
+      정확히 frames 장. 소리 트랙은 넣지 않는다.
+    - 소리(audio_out 이 있을 때): audio_from_source 면 같은 구간을 48kHz 스테레오 s16le 원시 PCM 으로, 아니면 무음.
+      어느 쪽이든 길이를 정확히 frames/fps 초(샘플 = frames × 48000 / fps)로 맞춘다(남으면 자르고 모자라면 무음).
+    반환 {"video": video_out, "audio": audio_out 또는 "", "frames": frames, "samples": 샘플 수}.
+    """
+    import math
+
+    if not source_path or not os.path.exists(source_path):
+        raise StitchError("자를 클립이 없습니다.")
+    frames = int(frames)
+    fps = int(fps)
+    width = int(width)
+    height = int(height)
+    start = float(start_sec or 0.0)
+    if (
+        frames < 1
+        or fps not in EDIT_FPS_CHOICES
+        or width < 2
+        or height < 2
+        or width % 2
+        or height % 2
+        or not math.isfinite(start)
+        or start < 0
+    ):
+        raise StitchError("편집 구간 값이 올바르지 않습니다.")
+    seconds = frames / fps
+    samples = frames * EDIT_AUDIO_RATE // fps
+    binary = ffmpeg_path()
+    video_filter = (
+        f"trim=start={start:.3f},setpts=PTS-STARTPTS,fps={fps},"
+        f"scale={width}:{height}:force_original_aspect_ratio=decrease,"
+        f"pad={width}:{height}:(ow-iw)/2:(oh-ih)/2:color=black,setsar=1,format=yuv420p,"
+        "tpad=stop_mode=clone:stop_duration=1"
+    )
+    command = [
+        binary, "-y", "-hide_banner", "-loglevel", "error",
+        *_threads_args(threads),
+        "-i", source_path,
+        "-map", "0:v:0", "-vf", video_filter, "-frames:v", str(frames), "-an",
+        "-c:v", "libx264", "-preset", "veryfast", "-crf", "20",
+        *_threads_args(threads),
+        "-pix_fmt", "yuv420p", video_out,
+    ]
+    pcm_from_source = bool(audio_out) and bool(audio_from_source)
+    if pcm_from_source:
+        command += [
+            "-map", "0:a:0", "-vn", "-af", f"atrim=start={start:.3f},asetpts=PTS-STARTPTS",
+            "-t", f"{seconds:.6f}", "-ac", "2", "-ar", str(EDIT_AUDIO_RATE),
+            "-c:a", "pcm_s16le", "-f", "s16le", audio_out,
+        ]
+    result = _edit_run(command)
+    if result.returncode != 0 or not os.path.exists(video_out) or not os.path.getsize(video_out):
+        detail = result.stderr.decode("utf-8", errors="replace")[:300]
+        raise StitchError(f"클립을 편집하지 못했습니다({start:.2f}s, {frames}프레임): {detail}")
+    if audio_out:
+        if not pcm_from_source and os.path.exists(audio_out):
+            os.unlink(audio_out)
+        _fit_pcm(audio_out, samples * EDIT_AUDIO_BYTES_PER_SAMPLE)
+    logger.info("Edit segment start=%.3fs frames=%d fps=%d size=%dx%d audio=%s", start, frames, fps, width, height,
+                "source" if pcm_from_source else ("silence" if audio_out else "none"))
+    return {"video": video_out, "audio": audio_out or "", "frames": frames, "samples": samples if audio_out else 0}
+
+
+def edit_join(segment_paths: list[str], output_path: str, *, audio_path: str = "") -> str:
+    """edit_segment 조각들을 순서대로 이어(스트림 복사) mp4 하나로 쓴다(지시서 110).
+
+    audio_path(edit_segment 들이 쓴 원시 PCM 을 이은 파일)가 있으면 AAC 192k 로 넣고, 없으면 영상만 둔다.
+    조각이 하나라도 비었으면 StitchError.
+    """
+    if not segment_paths or any(not path or not os.path.exists(path) or not os.path.getsize(path) for path in segment_paths):
+        raise StitchError("이어 붙일 편집 조각이 없습니다.")
+    if audio_path and not os.path.exists(audio_path):
+        raise StitchError("편집 소리 파일이 없습니다.")
+    binary = ffmpeg_path()
+    list_path = output_path + ".txt"
+    with open(list_path, "w", encoding="utf-8") as listing:
+        for path in segment_paths:
+            # concat demuxer 형식. 경로의 작은따옴표는 이스케이프해야 한다(concat 과 같다).
+            escaped = path.replace("'", "'\\''")
+            listing.write(f"file '{escaped}'\n")
+    command = [binary, "-y", "-hide_banner", "-loglevel", "error", "-f", "concat", "-safe", "0", "-i", list_path]
+    if audio_path:
+        command += [
+            "-f", "s16le", "-ar", str(EDIT_AUDIO_RATE), "-ac", "2", "-i", audio_path,
+            "-map", "0:v:0", "-map", "1:a:0", "-c:v", "copy", "-c:a", "aac", "-b:a", "192k",
+        ]
+    else:
+        command += ["-map", "0:v:0", "-c:v", "copy"]
+    command += ["-movflags", "+faststart", output_path]
+    try:
+        result = _edit_run(command)
+    finally:
+        try:
+            os.unlink(list_path)
+        except OSError:
+            pass
+    if result.returncode != 0 or not os.path.exists(output_path) or not os.path.getsize(output_path):
+        detail = result.stderr.decode("utf-8", errors="replace")[:300]
+        raise StitchError(f"편집 영상을 이어 붙이지 못했습니다: {detail}")
+    logger.info("Edit join segments=%d audio=%s bytes=%s", len(segment_paths), bool(audio_path), os.path.getsize(output_path))
+    return output_path
+
+
+def filmstrip_jpeg(
+    source_path: str, output_path: str, *, interval: float, tiles: int, tile_height: int = 72, threads: int | None = 1,
+) -> str:
+    """필름스트립(지시서 110). 영상에서 interval 초마다 한 장씩 tiles 장을 높이 tile_height 로 줄여 가로 한 줄 JPEG 로 쓴다.
+
+    영상이 짧아 장이 모자라면 남는 칸은 ffmpeg tile 이 검게 채운다. 실패하면 StitchError.
+    """
+    import math
+
+    if not source_path or not os.path.exists(source_path):
+        raise StitchError("필름스트립을 만들 영상이 없습니다.")
+    interval = float(interval)
+    tiles = int(tiles)
+    tile_height = int(tile_height)
+    if not math.isfinite(interval) or interval <= 0 or not 1 <= tiles <= 500 or not 16 <= tile_height <= 360 or tile_height % 2:
+        raise StitchError("필름스트립 값이 올바르지 않습니다.")
+    binary = ffmpeg_path()
+    command = [
+        binary, "-y", "-hide_banner", "-loglevel", "error",
+        *_threads_args(threads),
+        "-i", source_path,
+        "-map", "0:v:0", "-an",
+        "-vf", f"fps=1/{interval:.3f},scale=-2:{tile_height},tile={tiles}x1",
+        "-frames:v", "1", "-q:v", "5", output_path,
+    ]
+    result = _edit_run(command)
+    if result.returncode != 0 or not os.path.exists(output_path) or not os.path.getsize(output_path):
+        detail = result.stderr.decode("utf-8", errors="replace")[:300]
+        raise StitchError(f"필름스트립을 만들지 못했습니다: {detail}")
+    return output_path
+
+
+def audio_peaks(source_path: str, workdir: str, *, per_second: int = 20, threads: int | None = 1) -> list[float]:
+    """소리 파형 피크(지시서 110). 1초에 per_second 개, 값은 그 구간 최대 절댓값 / 32768(0~1, 소수 3자리).
+
+    소리를 8kHz 모노 원시 PCM 파일로 풀고(workdir 안) 구간마다 읽어 센다(전부를 메모리에 올리지 않는다).
+    소리 스트림이 없거나 못 풀면 StitchError(호출자가 소리 유무를 먼저 본다).
+    """
+    import array
+    import sys
+
+    per_second = int(per_second)
+    if per_second < 1 or EDIT_PEAKS_RATE % per_second:
+        raise StitchError("파형 피크 간격이 올바르지 않습니다.")
+    if not source_path or not os.path.exists(source_path):
+        raise StitchError("파형을 만들 영상이 없습니다.")
+    binary = ffmpeg_path()
+    raw_path = os.path.join(workdir, "peaks.raw")
+    command = [
+        binary, "-y", "-hide_banner", "-loglevel", "error",
+        *_threads_args(threads),
+        "-i", source_path,
+        "-map", "0:a:0", "-vn", "-ac", "1", "-ar", str(EDIT_PEAKS_RATE), "-c:a", "pcm_s16le", "-f", "s16le", raw_path,
+    ]
+    result = _edit_run(command)
+    if result.returncode != 0 or not os.path.exists(raw_path):
+        detail = result.stderr.decode("utf-8", errors="replace")[:300]
+        raise StitchError(f"파형을 만들지 못했습니다: {detail}")
+    block_bytes = (EDIT_PEAKS_RATE // per_second) * 2
+    peaks: list[float] = []
+    try:
+        with open(raw_path, "rb") as handle:
+            while True:
+                block = handle.read(block_bytes)
+                if len(block) < 2:
+                    break
+                if len(block) % 2:
+                    block = block[:-1]
+                samples = array.array("h")
+                samples.frombytes(block)
+                if sys.byteorder == "big":
+                    samples.byteswap()
+                peak = max(max(samples), -min(samples))
+                peaks.append(round(min(1.0, peak / 32768.0), 3))
+    finally:
+        try:
+            os.unlink(raw_path)
+        except OSError:
+            pass
+    return peaks

@@ -338,6 +338,9 @@ spec:
             # 장당 금액·크기는 코드 기본(app/src/vnew/settings.py)이라 여기에 넣지 않는다.
             - name: VNEW_CASTING_IDOL_MODEL
               value: "${VNEW_CASTING_IDOL_MODEL}"
+            # ⑦ 편집 타임라인(지시서 110). 기본 true. false 면 편집 라우트 404·gen 보기에 edit 요약 없음(진행 중 내보내기는 끝까지).
+            - name: VNEW_EDIT
+              value: "${VNEW_EDIT}"
             # --- vpoc1 영상 기능 (PRD 6.8) ---
             # VIDEO_GEN_ENABLED 가 꺼진 배포에서는 이 값과 무관하게 라우트가 없다.
             - name: VPOC_ENABLED
