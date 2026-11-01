@@ -20,6 +20,11 @@
   - 아이돌풍 모델(지시서 109, 2026-11-01): 아이돌풍(preset idol)은 VNEW_CASTING_IDOL_MODEL(기본 FLUX.2 [pro])로, 현실 배우풍은
     지금처럼 VNEW_CASTING_MODEL(Seedream)로 뽑는다(preset_choice). 본문은 두 모델 모두 같은 3키다. start_draw 가 고른 모델·장당
     금액·크기를 회차(casting.model·unitUsd·imageSize)에 남기고, 뽑기·다시 제출·이어 조회는 그 값을 쓴다(_round_choice).
+  - 떡대 체격(지시서 112, 2026-11-01, VNEW_BL_LOOK 을 따른다): 캐릭터 설명에 떡대공·떡대수(genre_bl.TYPE_TERMS) 또는 "떡대"만
+    (genre_bl.detect_terms) 있으면 web_terms 의 떡대 체격 조각을 참고 문장 맨 앞에 늘 넣고(그림 우선·1500자 줄이기에서 사진 고정 문장
+    다음으로 마지막까지 남김), 외모 문장의 부딪히는 체격 낱말(slim·slender …)을 캐스팅 문장에서만 빼고(web_terms.strip_conflicts),
+    프리셋 구도를 허리 위로 바꾼다(base_text physique — 아이돌풍 "slim V-line face" 뺌). 떡대가 없으면 문장은 112 전과 글자까지 같다.
+    공·수는 포지션이라 외모를 더하지 않는다.
 """
 
 from __future__ import annotations
@@ -47,6 +52,7 @@ from ..vpoc.errors import VpocError, error_gist, now_iso
 from . import characters
 from . import genre_bl
 from . import settings
+from . import web_terms
 from .fx import clean_text, strip_drawing_words
 
 log = logging.getLogger("vpoc")
@@ -78,6 +84,15 @@ PRESETS = (
 )
 DEFAULT_PRESET = "idol"
 _BASES = {"idol": _IDOL, "real": _REAL}
+# 지시서 112(design D4): 몸 용어(떡대)가 있으면 체격이 보이게 프리셋 문구 일부만 바꾼다(성별 낱말을 채우기 전 글에서 바꾼다). 떡대가 없으면
+# 프리셋 문구는 그대로다. 구도는 어깨·위팔(이두·삼두)·가슴이 다 들어오는 허리 위. "upper arms" 라 현실 배우풍 "hands not visible" 과
+# 부딪히지 않는다. 아이돌풍 "slim V-line face" 는 체격과 부딪혀 빼기만 한다(떡대는 얼굴을 정하지 않는다 — 얼굴은 외모 문장이 정한다).
+# "fully clothed"·"Clothing and its pattern exactly as described" 는 그대로 둔다(옷 맞음새를 덧붙이면 설명한 옷과 부딪힐 수 있다).
+PHYSIQUE_FRAMING = "waist-up framing with the shoulders, upper arms and chest fully in frame"
+_PHYSIQUE_SWAPS = {
+    "idol": (("slim V-line face, ", ""), ("chest-up framing", PHYSIQUE_FRAMING)),
+    "real": (("chest-up framing", PHYSIQUE_FRAMING),),
+}
 # 외모 문장 상한(참고 구현 vpoc/live_service.py:294 LOOK_MAX, design §B.1 "≤300").
 LOOK_MAX = 300
 # 이번 회차 실제 문장 상한(design §B.1 prompt ≤1500).
@@ -109,9 +124,17 @@ def _gender(value) -> str:
     return key if key in GENDERS else "unknown"
 
 
-def base_text(preset, gender) -> str:
-    """프리셋 문구(성별 낱말 표 적용). male 이면 참고 구현 원문과 같다."""
-    return _BASES[preset_of(preset)].format(**_WORDS[_gender(gender)])
+def base_text(preset, gender, physique="") -> str:
+    """프리셋 문구(성별 낱말 표 적용). male 이면 참고 구현 원문과 같다.
+
+    physique(몸 용어 id, 지시서 112 — 예 "ttokdae")가 있으면 그 프리셋의 _PHYSIQUE_SWAPS 를 적용한다(허리 위 구도, 아이돌풍 V라인 뺌).
+    """
+    key = preset_of(preset)
+    template = _BASES[key]
+    if physique:
+        for old, new in _PHYSIQUE_SWAPS[key]:
+            template = template.replace(old, new)
+    return template.format(**_WORDS[_gender(gender)])
 
 
 def photo_anchor(gender) -> str:
@@ -837,13 +860,14 @@ def prompt_look(look_en, gender) -> str:
     return text
 
 
-def cast_prompt(look_en, preset, gender, bl_types="") -> str:
+def cast_prompt(look_en, preset, gender, bl_types="", terms=()) -> str:
     """프리셋 문구 + " {He is|She is|They are} {외모}, with dark brown eyes." + " " + photo_anchor(성별) (≤1500자).
 
     bl_types(BL 유형 id 하나 또는 id 목록, 지시서 103·104)가 있으면 눈 색 문장 뒤에 참고 문장 " He has …." 을 더한다(_cast_text).
     없거나 모르는 값이면 참고 문장이 없다. 사진 고정 문장(지시서 107)은 늘 맨 끝이다.
+    terms(일반 외모 용어 id 하나 또는 목록, 지시서 112 — 설명에서 따로 찾은 "떡대")는 _cast_text 를 본다.
     """
-    return _cast_text(look_en, preset, gender, bl_types)[0]
+    return _cast_text(look_en, preset, gender, bl_types, terms)[0]
 
 
 # ================================================================ BL 유형 참고 문장(지시서 103·104, 2026-10-31)
@@ -851,8 +875,9 @@ def cast_prompt(look_en, preset, gender, bl_types="") -> str:
 # 유형 조각(genre_bl.hint_pieces)을 외모 뒤 한 문장 "He has A, B, and C." 로 더한다. 외모 문장(그림 사실)에 이미 있는 형태 분류의
 # 조각은 빠진다(그림 우선). 외모 문장(look_sentence·lookEn)과 영상 쪽은 바꾸지 않는다 — 캐스팅 문장에만 더한다.
 # 유형은 사용자가 쓴 캐릭터 설명(char.extraPromptKo)에서 찾는다(_bl_types_now, 지시서 104).
+# 지시서 112: 일반 외모 용어(web_terms — 떡대)도 같은 문장 맨 앞에 더한다(_term_ids·_terms_now). 그 조각은 그림 우선에서 빠지지 않는다.
 
-# 유형이 있고 성별이 unknown 이면 male 로 쓴다(steering genre-bl: 두 인물 모두 man). align_gender(male) 은 중립 낱말을
+# 유형(112 부터 일반 외모 용어도)이 있고 성별이 unknown 이면 male 로 쓴다(steering genre-bl: 두 인물 모두 man). align_gender(male) 은 중립 낱말을
 # 바꾸지 않으므로 외모 문장의 person·their 등도 male 낱말로 바꾼다(design D6).
 _NEUTRAL_TO_MALE = {"person": "man", "people": "men", "their": "his", "theirs": "his", "them": "him", "themselves": "himself"}
 _HINT_SUBJECT = {"male": "He has", "female": "She has", "unknown": "They have"}
@@ -869,46 +894,77 @@ def _hint_sentence(pieces: list[str], gender) -> str:
     return f"{_HINT_SUBJECT[_gender(gender)]} {body}."
 
 
-def _cast_text(look_en, preset, gender, bl_types="") -> tuple[str, str]:
-    """(캐스팅 문장, 더한 참고 문장). 유형이 없거나 모르는 값이면 참고 문장은 "" 이다.
+def _term_ids(bl_types, terms) -> list[str]:
+    """이 문장에 쓸 일반 외모 용어(지시서 112): 유형이 뜻하는 용어(genre_bl.TYPE_TERMS — 떡대공·떡대수) + 설명에서 따로 찾은 용어, 중복 없이."""
+    return web_terms.known_terms(genre_bl.type_terms(bl_types) + web_terms.known_terms(terms))
+
+
+def _cast_text(look_en, preset, gender, bl_types="", terms=()) -> tuple[str, str]:
+    """(캐스팅 문장, 더한 참고 문장). 유형·용어가 없거나 모르는 값이면 참고 문장은 "" 이다.
 
     bl_types 는 유형 id 하나 또는 id 목록이다(지시서 104: 설명에서 찾은 최대 2개, 같은 분류는 앞의 유형이 이긴다 —
     genre_bl.merged_pieces). 문장 끝은 늘 " " + photo_anchor(성별)이다(지시서 107, 유형 + unknown 이면 male 로 바꾼 뒤의 성별). PROMPT_MAX
     에서 그 몫을 뺀 예산을 넘으면 참고 문장 조각을 끝에서부터 빼고(design D7), 다 빼도 넘으면 외모를 단어 경계에서 줄인다(_fit_cast_head).
     사진 고정 문장은 자르지 않는다.
+
+    terms(지시서 112): 유형이 뜻하는 용어(떡대공·떡대수 → 떡대)와 합친 일반 외모 용어(_term_ids). 있으면 그 조각(떡대 체격)을 참고 문장
+    맨 앞에 늘 넣는다(genre_bl.hint_pieces forced — 그림 우선에서 빠지지 않음). 성별 unknown 이면 유형과 같이 male. 몸 용어면 외모 문장의
+    부딪히는 체격 낱말을 빼고(web_terms.strip_conflicts, 이 문장에서만) 프리셋 구도를 바꾼다(base_text physique). 1500자를 넘으면 다른
+    조각 → 외모(단어 경계) 순으로 줄이고 체격 조각은 사진 고정 문장 다음으로 마지막까지 남긴다(_fit_physique). 용어가 없으면 112 전과 같다.
     """
     gender = _gender(gender)
     types = genre_bl.known_types(bl_types)
-    forced = bool(types) and gender == "unknown"
+    term_ids = _term_ids(types, terms)
+    physique = web_terms.physique_of(term_ids)
+    forced = bool(types or term_ids) and gender == "unknown"
     if forced:
         gender = "male"
     words = _WORDS[gender]
     look = prompt_look(look_en, gender)
     if forced:
         look = _sub_words(look, _NEUTRAL_TO_MALE)
+    if physique:
+        look = _tidy(web_terms.strip_conflicts(look, term_ids))
     look = look or f"a Korean {words['noun']}"
-    text = f"{base_text(preset, gender)} {words['subj']} {look}, with dark brown eyes."
+    text = f"{base_text(preset, gender, physique)} {words['subj']} {look}, with dark brown eyes."
     anchor = photo_anchor(gender)
     budget = PROMPT_MAX - len(anchor) - 1
-    pieces = genre_bl.hint_pieces(types, look)
+    fixed = web_terms.term_pieces(term_ids)
+    pieces = genre_bl.hint_pieces(types, look, forced=fixed)
     sentence = ""
     while pieces:
         sentence = _hint_sentence(pieces, gender)
-        if len(text) + 1 + len(sentence) <= budget:
+        if len(text) + 1 + len(sentence) <= budget or len(pieces) <= len(fixed):
             break
         pieces = pieces[:-1]
         sentence = ""
-    if sentence:
+    if sentence and len(text) + 1 + len(sentence) > budget:
+        text, sentence = _fit_physique(preset, gender, look, budget, sentence, physique)
+    elif sentence:
         text = f"{text} {sentence}"
     if len(text) > budget:
-        text = _fit_cast_head(preset, gender, look, budget)
+        text = _fit_cast_head(preset, gender, look, budget, physique)
     return (f"{text} {anchor}" if text else anchor[:PROMPT_MAX]), sentence
 
 
-def _fit_cast_head(preset, gender: str, look: str, budget: int) -> str:
+def _fit_physique(preset, gender: str, look: str, budget: int, sentence: str, physique: str) -> tuple[str, str]:
+    """체격 조각만 남은 참고 문장(sentence)을 붙여도 budget 을 넘을 때(지시서 112): 체격 문장을 두고 그 앞(프리셋·주어·외모·눈 색)을 줄인다.
+
+    외모를 단어 경계에서 먼저 줄이고(_fit_cast_head), 그래도 자리가 없으면 체격 문장만, 체격 문장도 넘치면 체격 문장을 빼고 107 꼴로 줄인다.
+    """
+    room = budget - 1 - len(sentence)
+    if room > 0:
+        return f"{_fit_cast_head(preset, gender, look, room, physique)} {sentence}", sentence
+    if len(sentence) <= budget:
+        return sentence, sentence
+    return _fit_cast_head(preset, gender, look, budget, physique), ""
+
+
+def _fit_cast_head(preset, gender: str, look: str, budget: int, physique: str = "") -> str:
     """참고 문장 없이도 budget 을 넘을 때(지시서 107): 프리셋 문구·주어·", with dark brown eyes." 는 두고 외모만 단어 경계에서 줄인다
-    (_clip_tail — 끝에 매달린 with·and·쉼표를 지운다). 외모 자리가 없으면 앞에서부터 budget 자(107 전 자르기와 같은 꼴)."""
-    head = f"{base_text(preset, gender)} {_WORDS[gender]['subj']} "
+    (_clip_tail — 끝에 매달린 with·and·쉼표를 지운다). 외모 자리가 없으면 앞에서부터 budget 자(107 전 자르기와 같은 꼴).
+    physique(지시서 112)는 base_text 에 그대로 넘긴다."""
+    head = f"{base_text(preset, gender, physique)} {_WORDS[gender]['subj']} "
     tail = ", with dark brown eyes."
     room = budget - len(head) - len(tail)
     clipped = _clip_tail(look, room) if room > 0 else ""
@@ -1160,6 +1216,16 @@ def _bl_types_now(char) -> list[str]:
     return genre_bl.detect_types(char.get("extraPromptKo"))
 
 
+def _terms_now(char) -> list[str]:
+    """뽑기 문장·보기에 쓸 일반 외모 용어(지시서 112, design D6): 사용자가 쓴 캐릭터 설명에서 유형 이름 밖에 따로 적힌 용어 id("떡대"만).
+
+    근거·끔 규칙은 _bl_types_now 와 같다(extraPromptKo 만, VNEW_BL_LOOK 끔이면 []). 찾은 유형이 이미 뜻하는 용어(떡대공 → 떡대)는 없다.
+    """
+    if not settings.VNEW_BL_LOOK or not isinstance(char, dict):
+        return []
+    return genre_bl.detect_terms(char.get("extraPromptKo"))
+
+
 def auto_look(char) -> str:
     """분석 appearanceEn + 기본 복장 + descriptionKo 나이로 만든 자동 외모 문장. 분석이 없으면 ""."""
     analysis = (char.get("analysis") if isinstance(char, dict) else None) or {}
@@ -1236,7 +1302,7 @@ def start_draw(owner: str, cid: str, confirm_usd: float, *, preset=None, gender=
 
     이전 후보는 history 로 옮기고(최신 먼저 12개), 고른 사진(chosen)은 그대로 둔다(결정 5). 캐스팅 보기를 돌려준다.
     사용자가 쓴 캐릭터 설명(extraPromptKo)에 BL 유형 이름이 있으면 회차 문장 끝에 참고 문장을 더한다(지시서 104,
-    VNEW_BL_LOOK 끔이면 더하지 않는다).
+    VNEW_BL_LOOK 끔이면 더하지 않는다). 떡대(떡대공·떡대수·"떡대"만)면 체격 조각·허리 위 구도가 붙고 로그 physique=ttokdae(지시서 112).
     확인 금액(confirm_usd)은 고른 느낌(preset, 없으면 저장된 느낌)의 총액이어야 하고, 고른 모델·장당 금액·크기를 회차에 남긴다(지시서 109).
     """
     where = "vnew.casting.draw"
@@ -1277,16 +1343,17 @@ def start_draw(owner: str, cid: str, confirm_usd: float, *, preset=None, gender=
         ]
         cast.update(
             status="drawing", error="", usd=picked["usd"], claim=token, claimedAt=now, startedAt=now, heartbeatAt=now,
-            prompt=cast_prompt(look, cast["preset"], gender_now, _bl_types_now(data)),
+            prompt=cast_prompt(look, cast["preset"], gender_now, _bl_types_now(data), _terms_now(data)),
             model=model, unitUsd=unit_usd, imageSize=f"{size[0]}x{size[1]}",
         )
 
     char, _ = characters.mutate_char(owner, cid, mutator)
     cast = _casting_of(char)
+    bl_types = _bl_types_now(char)
     log.info(
-        "vnew.casting.draw_start cid=%s round=%d slots=%d usd=%.2f preset=%s gender=%s bl=%s",
+        "vnew.casting.draw_start cid=%s round=%d slots=%d usd=%.2f preset=%s gender=%s bl=%s physique=%s",
         cid, int(cast.get("round") or 0), slots, picked["usd"], cast.get("preset"), resolve_gender(cast, char.get("analysis")),
-        "+".join(_bl_types_now(char)) or "-",
+        "+".join(bl_types) or "-", web_terms.physique_of(_term_ids(bl_types, _terms_now(char))) or "-",
     )
     _spawn(owner, cid, token)
     return view(char)
@@ -1333,7 +1400,8 @@ def view(char) -> dict:
     """캐릭터 상세의 casting 보기(design §B.4). 설정이 꺼져 있으면 {enabled: false}.
 
     VNEW_BL_LOOK 켬이면 끝에 blDetected([{id, label}] — 사용자가 쓴 캐릭터 설명에서 찾은 BL 유형)·blHintsEn(지금 외모 문장·느낌·
-    성별로 뽑기 문장에 더해질 참고 문장)을 더한다(지시서 104, 103 의 blRole·blType·blRoles·blTypes 는 없앴다). 끔이면 이 기능 전과
+    성별로 뽑기 문장에 더해질 참고 문장)을 더한다(지시서 104, 103 의 blRole·blType·blRoles·blTypes 는 없앴다). 설명에 유형 이름 밖의
+    "떡대"가 있으면 그 뒤에 termsDetected([{id, label}], 지시서 112)를 더한다(없으면 키가 없다). 끔이면 이 기능 전과
     키가 같다. VNEW_CAST_PHOTO_CHECK 켬이면 맨 끝에 photoCheckNote(다시 뽑기 비용 안내 한 줄, 지시서 107)를 더한다.
     unitUsd·totalUsd 는 지금 고른 느낌의 금액이다. 아이돌풍 모델이 켜져 있으면 presets 항목마다 unitUsd·totalUsd 를 더한다(지시서 109,
     화면이 느낌을 바꾸면 금액을 바꾼다. 되돌리기 = 108 과 같은 보기).
@@ -1372,10 +1440,15 @@ def view(char) -> dict:
     }
     if settings.VNEW_BL_LOOK:
         bl_types = _bl_types_now(char)
+        terms = _terms_now(char)
         out.update(
             blDetected=[{"id": type_id, "label": genre_bl.TYPES[type_id]["label"]} for type_id in bl_types],
-            blHintsEn=_cast_text(look, cast.get("preset"), resolve_gender(cast, analysis), bl_types)[1],
+            blHintsEn=_cast_text(look, cast.get("preset"), resolve_gender(cast, analysis), bl_types, terms)[1],
         )
+        if terms:
+            # 지시서 112(design D7): 설명에서 유형 이름 밖에 따로 찾은 일반 외모 용어("떡대"만). 찾았을 때만 둔다 — 떡대가 없으면 보기는
+            # 112 전과 같다. 떡대공·떡대수의 떡대는 blDetected 가 보인다.
+            out["termsDetected"] = [{"id": term_id, "label": web_terms.TERMS[term_id]["label"]} for term_id in terms]
     if settings.VNEW_CAST_PHOTO_CHECK:
         # 지시서 107(design D9): 총비용(totalUsd)은 그대로 두고, 드물게 더해지는 다시 뽑기 비용을 한 줄로 알린다. 끔이면 키가 없다.
         out["photoCheckNote"] = _MSG_PHOTO_NOTE

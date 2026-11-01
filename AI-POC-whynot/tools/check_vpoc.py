@@ -30235,15 +30235,31 @@ _BL_NOT_LOOK = re.compile(
 )
 _BL_MASCULINE = re.compile(r"\b(?:masculine|man|male|men)\b", re.IGNORECASE)
 _BL_LOOK_30S = "a Korean man in his 30s with short black hair"
-_BL_TTOKDAE_SENTENCE = (
-    "He has broad shoulders and a solid, muscular build, a tall frame, a firm square jawline, a rugged, masculine look, deep-set eyes, "
-    "a steady gaze, a calm, confident expression, and an upright, imposing posture."
+# 지시서 112(cast-ttokdae design D2·D4): 떡대 체격 조각과 떡대가 있을 때의 프리셋 문구(male) 고정값. 떡대공 참고 문장은 이 조각 하나다
+# (103 의 얼굴·눈·인상 조각 6개와 키 조각은 공에서 나온 외모라 뺐다 — bl-a·bl-d·bl-l 기대값을 이 값으로 바꿨다).
+_TTK_BUILD = (
+    "a big, powerfully built muscular masculine body with very broad shoulders, a thick neck, a wide muscular back, "
+    "a broad, thick chest and thick muscular arms"
 )
-# bl-b(103 피드백, Claude 결정): 분류 9종(형태 4 = 겹치면 뺀다, 인상 5 = 늘 더한다). 실제 분석 꼴 6개에 떡대공을 골랐을 때 남는 조각
-# 평균이 이 값 이상이어야 한다.
+_TTK_IDOL_MALE = (
+    "Official profile photo of a male K-pop idol, adult Korean man in his 20s, real photograph of a real person, "
+    "photorealistic, clear skin with natural skin texture (lightly retouched), subtle idol makeup, "
+    "glossy styled hair, calm expression, facing the camera, waist-up framing with the shoulders, upper arms and chest fully in "
+    "frame, soft studio lighting, plain light background, full frame, no border, no illustration, no anime, not a painting, "
+    "fully clothed. Clothing and its pattern exactly as described, including where the pattern is."
+)
+_TTK_REAL_MALE = (
+    "Unretouched photo of a Korean actor on a K-drama set, natural East Asian facial features, dark brown eyes, "
+    "natural skin texture with pores and slight imperfections, no heavy makeup, soft natural light, calm neutral "
+    "expression, facing the camera, waist-up framing with the shoulders, upper arms and chest fully in frame, hands not visible, "
+    "plain background, full frame, no border, no illustration, fully clothed, not a model photoshoot. Clothing and its pattern "
+    "exactly as described, including where the pattern is."
+)
+_BL_TTOKDAE_SENTENCE = f"He has {_TTK_BUILD}."
+# bl-b(103 피드백, Claude 결정): 분류 9종(형태 4 = 겹치면 뺀다, 인상 5 = 늘 더한다). 지시서 112: 떡대공 조각은 체격 하나라 103 피드백의
+# "실제 분석 꼴 6개 떡대공 평균 4개 이상" 은 없앴다. 대신 캐스팅 문장(casting._cast_text)에는 6개 모두 떡대 체격 조각이 있어야 한다.
 _BL_FORM = ("build", "height", "faceShape", "eyeShape")
 _BL_IMPRESSION = ("faceImpression", "gaze", "expression", "posture", "grooming")
-_BL_TTOKDAE_MIN_AVG = 4.0
 _BL_VIEW_KEYS = {"blDetected", "blHintsEn"}  # 지시서 104: 보기 끝 BL 2개 키(103 의 blRole·blType·blRoles·blTypes 는 없앴다)
 _BL_OLD_VIEW_KEYS = {"blRole", "blType", "blRoles", "blTypes"}
 # 지시서 104: 사용자가 쓴 캐릭터 설명(char.extraPromptKo). 떡대공 + 유형 이름이 아닌 다른 요청("말고" 가 이름에서 멀다).
@@ -30442,19 +30458,19 @@ def check_vnew_bl_look() -> None:
            빠짐, 인상 낱말(표정·자세·몸가짐·눈빛·얼굴 인상)이 있어도 아무것도 안 빠짐, design D3(short stature → 무심공 "a lean, tall build"),
            D4 오탐 막기(thin lips·short black hair·tall boots·frown lines·glasses·warm-toned skin·chin-length·slim-fit·long hair·hooded
            jacket·piercing eyes·a sharp nose), 같은 명사구 창(long hair, a calm face·a slim build and narrow eyes), 실제 분석 꼴 6개의
-           분류·떡대공·무심공·미인수 조각과 떡대공 평균 ≥ 4
+           분류·떡대공·무심공·미인수 조각, 6개 모두 떡대공 캐스팅 문장에 떡대 체격(지시서 112 — 103 피드백의 평균 ≥ 4 대신)
     (bl-c) 유형 없음 = 지금: 프리셋 3 × 성별 6 × 외모 문장 27개 × 유형 값 6종(없음·""·모르는 값·None·숫자·대문자)에서 cast_prompt =
            옛 식(프리셋 + 주어 + 외모 + 눈 색, ≤1500), 참고 문장 "", _CAST_IDOL_MALE 원문 + He is …
     (bl-d) 유형 있음: 떡대공·무심공·미인수 × 프리셋 2 × 성별 4 × 외모 문장 8개 — 참고 문장 붙음·은어 0·금지 낱말 0·"man"·≤1500·
            문장 = 옛 식 + " " + 참고 문장, unknown·"" → male(프리셋·He is·person→man·their→his), female 지정 → female 유지·"She has",
            전문 고정값 1개, _hint_sentence 1·2·3조각·They
     (bl-e) 1500자 상한: PROMPT_MAX 를 줄이면 조각이 끝에서부터 빠지고, 다 빠지면 참고 문장 없이 옛 식 그대로 자름. 두 유형 문장도
-           끝(뒤 유형이 더한 조각)부터 뺀다(104)
+           끝(뒤 유형이 더한 조각)부터 뺀다(104). 지시서 112 부터 예시 유형은 광공(떡대공은 체격이 마지막까지 남는다 — ttk-e)
     (bl-f) 지시서 104: update_settings·start_draw·_apply_settings 에 BL 인자 없음·routes.py 가 넘기지 않음·103 함수·문구 상수가 casting.py
            에 없고(104 피드백 D31) "blRole"·"blType" 을 쓰는 함수는 _empty_casting 뿐(AST), 103 저장값이 있는 캐릭터에 PUT 6건(BL 값
            여러 꼴) → 200·저장값 그대로·보기에 103 키 없음,
-           draw(BL 값 + 틀린 금액 → 409 CostMismatch, 맞는 금액 → 202·문장 = 103 이전 식·로그 bl=-), 설명에 떡대공 → 회차 문장 끝 참고 문장·
-           보기 blDetected·로그 bl=ttokdae_gong, 두 유형 → bl=musim_gong+ttokdae_gong
+           draw(BL 값 + 틀린 금액 → 409 CostMismatch, 맞는 금액 → 202·문장 = 103 이전 식·로그 bl=- physique=-), 설명에 떡대공 → 회차 문장
+           = 허리 위 구도 + 떡대 체격(112)·보기 blDetected·로그 bl=ttokdae_gong physique=ttokdae, 두 유형 → bl=musim_gong+ttokdae_gong
     (bl-g) VNEW_BL_LOOK 끔: 보기 키 = 지금 19개, 설명·저장값이 있어도 뽑기 문장 = 옛 식·bl=-, BL 요청 무시(저장 없음), 다시 켜면 설명에서
            찾음·저장값 그대로, 설정 읽기(하위 프로세스 6값)·settings 줄·템플릿·base(되돌리기 주석)·PARITY_ENV_KEYS·오버레이 없음·
            render dev/prod "true"·+false, 세 파일 VNEW_BL_LOOK 주석 = 캐릭터 설명 기준·줄 수 그대로(104 피드백 D32)
@@ -30490,6 +30506,7 @@ def check_vnew_bl_look() -> None:
     from src.vnew import generate as genmod  # noqa: PLC0415
     from src.vnew import genre_bl as blmod  # noqa: PLC0415
     from src.vnew import settings as vset  # noqa: PLC0415
+    from src.vnew import web_terms as termmod  # noqa: PLC0415
     from src.vpoc import fal as vpoc_fal  # noqa: PLC0415
     from src.vpoc import settings as vpoc_settings  # noqa: PLC0415
     from src.vpoc.errors import VpocError, now_iso  # noqa: PLC0415
@@ -30617,11 +30634,12 @@ def check_vnew_bl_look() -> None:
             if ("faceImpression", "a clean, clear complexion") not in types["minyu_su"]["lookEn"] \
                     or any("smooth skin" in t or "clear, smooth" in t for v in types.values() for _c, t in v["lookEn"]):
                 bad.append("(bl-a) 미인수 피부 조각이 'a clean, clear complexion' 이 아닙니다")
-            # 섞인 조각을 나눴다(떡대공 눈 모양 + 눈빛, 미인수 속눈썹·눈은 눈 모양 하나).
-            if ("eyeShape", "deep-set eyes") not in types["ttokdae_gong"]["lookEn"] \
-                    or ("gaze", "a steady gaze") not in types["ttokdae_gong"]["lookEn"] \
+            # 섞인 조각을 나눴다(미인수 속눈썹·눈은 눈 모양 하나). 지시서 112: 떡대공 눈 모양·눈빛 조각은 공에서 나온 얼굴 조각이라 뺐고,
+            # 떡대공·떡대수는 web_terms 떡대 체격 조각 하나(같은 표 객체)만 쓴다.
+            ttok_pairs = (("build", _TTK_BUILD),)
+            if types["ttokdae_gong"]["lookEn"] != ttok_pairs or types["ttokdaesu"]["lookEn"] is not types["ttokdae_gong"]["lookEn"] \
                     or ("eyeShape", "long lashes and clear eyes") not in types["minyu_su"]["lookEn"]:
-                bad.append("(bl-a) 떡대공 눈 조각이 눈 모양·눈빛 둘로 나뉘지 않았거나 미인수 눈 모양 조각이 다릅니다")
+                bad.append("(bl-a) 떡대공·떡대수가 떡대 체격 조각 하나가 아니거나 미인수 눈 모양 조각이 다릅니다")
             want_list = [{"id": k, "role": v["role"], "label": v["label"], "desc": v["desc"],
                           "lookEn": ", ".join(t for _c, t in v["lookEn"])} for k, v in types.items()]
             if blmod.list_types() != want_list or blmod.list_types() is blmod.list_types():
@@ -30640,7 +30658,9 @@ def check_vnew_bl_look() -> None:
             imports = sorted({alias.name for node in _ast.walk(bl_tree) if isinstance(node, (_ast.Import, _ast.ImportFrom))
                               for alias in node.names} | {node.module for node in _ast.walk(bl_tree)
                                                           if isinstance(node, _ast.ImportFrom) and node.module})
-            if imports != ["__future__", "annotations", "re"] or re.search(r"\bopen\(|STORE|boto|urllib|requests|write_json", bl_src) \
+            # 지시서 112: genre_bl 은 떡대 체격 정의를 일반 용어 모듈 web_terms 에서 가져온다(그 모듈도 re 뿐·저장·외부 호출 없음, ttk-a).
+            if imports != ["__future__", "annotations", "re", "web_terms"] \
+                    or re.search(r"\bopen\(|STORE|boto|urllib|requests|write_json", bl_src) \
                     or "scene_video" in bl_src:
                 bad.append(f"(bl-a) genre_bl 이 저장·외부 호출을 하거나 옛 식별자를 씁니다: {imports}")
             report.append(f"bl-a: 유형 {len(types)}종·조각 {pieces_n}개 · 한 유형 최장 "
@@ -30736,11 +30756,15 @@ def check_vnew_bl_look() -> None:
                     bad.append(f"(bl-b) 실제 분석 꼴 {name}: {got}")
                 for type_id, pieces in zip(counts, got[1:]):
                     counts[type_id].append(len(pieces))
-            avg_t = sum(counts["ttokdae_gong"]) / len(counts["ttokdae_gong"])
-            if avg_t < _BL_TTOKDAE_MIN_AVG:
-                bad.append(f"(bl-b) 실제 분석 꼴 6개 떡대공 평균 조각 {avg_t:.2f} < {_BL_TTOKDAE_MIN_AVG}")
+            # 지시서 112: 그림 우선(hint_pieces, forced 없음)에서는 체격 낱말이 있는 꼴(m1·m2·m3·f1·u1)에서 떡대 체격이 빠지지만, 캐스팅 문장에는
+            # 늘 들어간다(사용자가 설명에 떡대를 직접 적었다 — forced). 103 피드백의 평균 4개 기준은 떡대공 조각이 체격 하나라 없앴다.
+            ttk_cast = {name: castmod._cast_text(_CAST_LOOK_FEEDBACK[name][4], "idol", _CAST_LOOK_FEEDBACK[name][2],  # noqa: SLF001
+                                                 "ttokdae_gong")[1] for name in real_want}
+            if any(not re.match(rf"(?:He has|She has|They have) {re.escape(_TTK_BUILD)}[.,]", s) for s in ttk_cast.values()):
+                bad.append(f"(bl-b) 실제 분석 꼴의 떡대공 캐스팅 참고 문장에 떡대 체격이 없습니다: {ttk_cast}")
             report.append(f"bl-b: 형태 4종 × 유형 12종 · 인상 낱말 {len(impression_looks)}경우 · 구체 {len(concrete)}경우 · 실제 분석 꼴 6개 "
-                          + " · ".join(f"{t} {counts[t]} 평균 {sum(counts[t]) / 6:.2f}" for t in counts))
+                          + " · ".join(f"{t} {counts[t]} 평균 {sum(counts[t]) / 6:.2f}" for t in counts)
+                          + f" · 캐스팅 문장 떡대 체격 {sum(_TTK_BUILD in s for s in ttk_cast.values())}/6")
             seen.add("bl-b")
 
             # ================= (bl-k) 캐릭터 설명에서 유형 찾기(지시서 104) =================
@@ -30791,12 +30815,17 @@ def check_vnew_bl_look() -> None:
             # ================= (bl-l) 두 유형 합치기(같은 분류는 앞의 유형이 이긴다, 지시서 104) =================
             mp = blmod.merged_pieces
             pairs_of = {t: list(v["lookEn"]) for t, v in types.items()}
-            musim_post = pairs_of["musim_gong"] + [("posture", "an upright, imposing posture")]
+            # 지시서 112: 떡대공 조각은 떡대 체격 하나(build)라 무심공 뒤에서는 더하는 조각이 없고, 앞에서는 무심공 체격("a lean, tall build")을
+            # 막는다. "뒤 유형은 비어 있는 분류만 더한다" 는 무심공 + 광공(자세 하나)으로 계속 본다. casting 의 떡대 forced 는 ttk-c 가 본다.
+            musim_post = list(pairs_of["musim_gong"])
+            musim_no_build = [p for p in pairs_of["musim_gong"] if p[0] != "build"]
             merge_cases = [
-                # 무심공(체격 조각 "a lean, tall build" 는 키도 차지한다) + 떡대공 → 떡대공은 자세 하나만 더한다
+                # 무심공(체격 조각 "a lean, tall build" 는 키도 차지한다) + 떡대공 → 떡대공(체격)은 더하지 않는다
                 (["musim_gong", "ttokdae_gong"], musim_post),
-                # 떡대공 + 무심공 → 무심공은 몸가짐 하나만 더한다
-                (["ttokdae_gong", "musim_gong"], pairs_of["ttokdae_gong"] + [("grooming", "neat, minimal grooming")]),
+                # 떡대공 + 무심공 → 무심공은 체격 조각만 빠진다
+                (["ttokdae_gong", "musim_gong"], pairs_of["ttokdae_gong"] + musim_no_build),
+                # 무심공 + 광공 → 광공은 자세 하나만 더한다(104 의 "무심공 + 떡대공" 경우가 보던 동작)
+                (["musim_gong", "gwanggong"], musim_post + [("posture", "an upright stance with an imposing presence")]),
                 # 미인수(얼굴 인상 2조각은 같은 유형 안이라 그대로) + 다정공 → 눈빛·자세·몸가짐
                 (["minyu_su", "dajeong_gong"], pairs_of["minyu_su"] + [p for p in pairs_of["dajeong_gong"]
                                                                       if p[0] in ("gaze", "posture", "grooming")]),
@@ -30817,10 +30846,11 @@ def check_vnew_bl_look() -> None:
                     or blmod.known_types("ttokdae_gong") != ["ttokdae_gong"] or blmod.known_types({"ttokdae_gong": 1}) != []:
                 bad.append(f"(bl-l) 두 유형 그림 우선·known_types 가 다릅니다: {slim_two}")
             two_text = castmod.cast_prompt(_BL_LOOK_30S, "idol", "male", ["musim_gong", "ttokdae_gong"])
-            if two_text != anchored(old_head(_BL_LOOK_30S, "idol", "male") + " " + castmod._hint_sentence(  # noqa: SLF001
-                    [t for _c, t in musim_post], "male")) \
+            # 지시서 112: 떡대가 있으면 프리셋 구도가 바뀌고(_TTK_IDOL_MALE) 떡대 체격이 참고 문장 맨 앞에 온다(무심공 체격은 빠진다).
+            if two_text != anchored(_TTK_IDOL_MALE + f" He is {_BL_LOOK_30S}, with dark brown eyes. " + castmod._hint_sentence(  # noqa: SLF001
+                    [_TTK_BUILD] + [t for _c, t in musim_no_build], "male")) \
                     or castmod.cast_prompt(_BL_LOOK_30S, "idol", "male", ["ttokdae_gong"]) \
-                    != anchored(_CAST_IDOL_MALE + f" He is {_BL_LOOK_30S}, with dark brown eyes. " + _BL_TTOKDAE_SENTENCE):
+                    != anchored(_TTK_IDOL_MALE + f" He is {_BL_LOOK_30S}, with dark brown eyes. " + _BL_TTOKDAE_SENTENCE):
                 bad.append(f"(bl-l) 두 유형 cast_prompt 가 다릅니다: {two_text[-240:]!r}")
             report.append(f"bl-l: 합치기 {len(merge_cases)}경우 · 유형 하나 = 표 {len(types)}종 · 두 유형 문장 {len(two_text)}자")
             seen.add("bl-l")
@@ -30860,6 +30890,8 @@ def check_vnew_bl_look() -> None:
                 if _BL_SLANG.search(look):
                     bad.append(f"(bl-d) 시험 외모 문장에 은어가 있습니다(시험 준비 오류): {look!r}")
             for type_id in ("ttokdae_gong", "musim_gong", "minyu_su"):
+                # 지시서 112: 떡대공이면 떡대 체격(forced)·부딪히는 체격 낱말 빼기·허리 위 구도가 붙는다(전문 고정값은 아래와 ttk-c).
+                phys = "ttokdae" if type_id == "ttokdae_gong" else ""
                 for preset in ("idol", "real"):
                     for gender in ("male", "unknown", "", "female"):
                         for look in looks_d:
@@ -30870,9 +30902,11 @@ def check_vnew_bl_look() -> None:
                             base_look = castmod.prompt_look(look, g_eff)
                             if forced:
                                 base_look = castmod._sub_words(base_look, castmod._NEUTRAL_TO_MALE)  # noqa: SLF001
+                            if phys:
+                                base_look = castmod._tidy(termmod.strip_conflicts(base_look, [phys]))  # noqa: SLF001
                             base_look = base_look or f"a Korean {castmod._WORDS[g_eff]['noun']}"  # noqa: SLF001
-                            head = f"{castmod.base_text(preset, g_eff)} {castmod._WORDS[g_eff]['subj']} {base_look}, with dark brown eyes."  # noqa: SLF001
-                            pieces = hp(type_id, base_look)
+                            head = f"{castmod.base_text(preset, g_eff, phys)} {castmod._WORDS[g_eff]['subj']} {base_look}, with dark brown eyes."  # noqa: SLF001
+                            pieces = hp(type_id, base_look, forced=[("build", _TTK_BUILD)] if phys else ())
                             problems = []
                             if castmod.cast_prompt(look, preset, gender, type_id) != text:
                                 problems.append("cast_prompt != _cast_text")
@@ -30885,7 +30919,7 @@ def check_vnew_bl_look() -> None:
                             if _BL_SLANG.search(text) or _BL_ADULT_ONLY.search(sentence) or len(text) > 1500 or "\n" in text:
                                 problems.append(f"은어·금지 낱말·길이 {len(text)}")
                             gendered = forced or look not in neutral_looks
-                            tail = text[len(castmod.base_text(preset, g_eff)):]  # 아이돌풍 프리셋은 "a real person" 을 담는다
+                            tail = text[len(castmod.base_text(preset, g_eff, phys)):]  # 아이돌풍 프리셋은 "a real person" 을 담는다
                             if g_eff == "male" and gendered and (not re.search(r"\bman\b", text)
                                                                  or re.search(r"\b(?:person|their|They)\b", tail)):
                                 problems.append("male 낱말이 아님")
@@ -30894,7 +30928,7 @@ def check_vnew_bl_look() -> None:
                             if problems:
                                 bad.append(f"(bl-d) {type_id}·{preset}·{gender!r}·{look[:30]!r}: {problems}")
             full = castmod.cast_prompt(_BL_LOOK_30S, "idol", "male", "ttokdae_gong")
-            if full != anchored(_CAST_IDOL_MALE + f" He is {_BL_LOOK_30S}, with dark brown eyes. " + _BL_TTOKDAE_SENTENCE) \
+            if full != anchored(_TTK_IDOL_MALE + f" He is {_BL_LOOK_30S}, with dark brown eyes. " + _BL_TTOKDAE_SENTENCE) \
                     or castmod.cast_prompt(_BL_LOOK_30S, "idol", "unknown", "ttokdae_gong") != full:
                 bad.append(f"(bl-d) 떡대공 전문이 고정값과 다릅니다: {full[-260:]!r}")
             unknown_look = castmod.cast_prompt(_CAST_LOOK_FEEDBACK["u1"][4], "real", "unknown", "musim_gong")
@@ -30911,33 +30945,37 @@ def check_vnew_bl_look() -> None:
             seen.add("bl-d")
 
             # ================= (bl-e) 1500자 상한 =================
+            # 지시서 112: 떡대공은 떡대 체격 조각 하나뿐이고 그 조각은 마지막까지 남는다(ttk-e). "조각을 끝에서부터 뺀다" 는 떡대와 무관한 광공
+            # (조각 6개)으로 본다(103~107 은 떡대공으로 봤다 — 같은 동작, 예시 유형만 바꿨다).
+            gw = [t for _c, t in types["gwanggong"]["lookEn"]]
+            gw_sentence = castmod._hint_sentence(gw, "male")  # noqa: SLF001
             head_len = len(old_prompt(_BL_LOOK_30S, "idol", "male"))
             try:
-                castmod.PROMPT_MAX = head_len + 1 + len(_BL_TTOKDAE_SENTENCE) - 1
-                one_less = castmod._cast_text(_BL_LOOK_30S, "idol", "male", "ttokdae_gong")  # noqa: SLF001
-                castmod.PROMPT_MAX = head_len + 1 + len("He has broad shoulders and a solid, muscular build.")
-                only_one = castmod._cast_text(_BL_LOOK_30S, "idol", "male", "ttokdae_gong")  # noqa: SLF001
+                castmod.PROMPT_MAX = head_len + 1 + len(gw_sentence) - 1
+                one_less = castmod._cast_text(_BL_LOOK_30S, "idol", "male", "gwanggong")  # noqa: SLF001
+                castmod.PROMPT_MAX = head_len + 1 + len(f"He has {gw[0]}.")
+                only_one = castmod._cast_text(_BL_LOOK_30S, "idol", "male", "gwanggong")  # noqa: SLF001
                 castmod.PROMPT_MAX = head_len + 20
-                none_fit = castmod._cast_text(_BL_LOOK_30S, "idol", "male", "ttokdae_gong")  # noqa: SLF001
+                none_fit = castmod._cast_text(_BL_LOOK_30S, "idol", "male", "gwanggong")  # noqa: SLF001
                 castmod.PROMPT_MAX = head_len - 30
-                cut = castmod._cast_text(_BL_LOOK_30S, "idol", "male", "ttokdae_gong")  # noqa: SLF001
-                # 104: 두 유형을 합친 문장도 끝에서부터 뺀다(뒤 유형이 더한 조각 — 무심공 + 떡대공의 떡대공 자세 — 가 먼저 빠진다)
+                cut = castmod._cast_text(_BL_LOOK_30S, "idol", "male", "gwanggong")  # noqa: SLF001
+                # 104: 두 유형을 합친 문장도 끝에서부터 뺀다(뒤 유형이 더한 조각 — 무심공 + 광공의 광공 자세 — 가 먼저 빠진다)
                 castmod.PROMPT_MAX = saved["prompt_max"]
-                two_full = castmod._cast_text(_BL_LOOK_30S, "idol", "male", ["musim_gong", "ttokdae_gong"])[1]  # noqa: SLF001
+                two_full = castmod._cast_text(_BL_LOOK_30S, "idol", "male", ["musim_gong", "gwanggong"])[1]  # noqa: SLF001
                 castmod.PROMPT_MAX = head_len + len(two_full)
-                two_less = castmod._cast_text(_BL_LOOK_30S, "idol", "male", ["musim_gong", "ttokdae_gong"])[1]  # noqa: SLF001
+                two_less = castmod._cast_text(_BL_LOOK_30S, "idol", "male", ["musim_gong", "gwanggong"])[1]  # noqa: SLF001
             finally:
                 castmod.PROMPT_MAX = saved["prompt_max"]
             musim_all = [t for _c, t in types["musim_gong"]["lookEn"]]
-            if two_full != castmod._hint_sentence(musim_all + ["an upright, imposing posture"], "male") \
+            if two_full != castmod._hint_sentence(musim_all + ["an upright stance with an imposing presence"], "male") \
                     or two_less != castmod._hint_sentence(musim_all, "male"):  # noqa: SLF001
                 bad.append(f"(bl-e) 두 유형 문장의 끝에서부터 빼기가 다릅니다: {two_less!r}")
-            want_one_less = "He has " + ", ".join(ttok[:-2]) + ", and " + ttok[-2] + "."
+            want_one_less = "He has " + ", ".join(gw[:-2]) + ", and " + gw[-2] + "."
             # 지시서 107(cast-photo-guard D3): 참고 문장을 다 빼도 넘치면 외모를 단어 경계에서 줄이고 프리셋·주어·눈 색·사진 고정 문장은
             # 남긴다(107 전 기대값: 옛 식을 앞에서부터 head_len - 30 자로 자름).
             want_cut = anchored(_CAST_IDOL_MALE + " He is a Korean man, with dark brown eyes.")
-            if one_less[1] != want_one_less or len(one_less[0]) > head_len + 1 + len(_BL_TTOKDAE_SENTENCE) - 1 \
-                    or only_one[1] != "He has broad shoulders and a solid, muscular build." \
+            if one_less[1] != want_one_less or len(one_less[0]) > head_len + 1 + len(gw_sentence) - 1 \
+                    or only_one[1] != f"He has {gw[0]}." \
                     or none_fit != (old_prompt(_BL_LOOK_30S, "idol", "male"), "") \
                     or cut != (want_cut, "") or len(cut[0]) > head_len - 30:
                 bad.append(f"(bl-e) 상한 넘침 처리가 다릅니다: {one_less[1]!r} {only_one[1]!r} {none_fit[1]!r} {len(cut[0])}")
@@ -31006,10 +31044,11 @@ def check_vnew_bl_look() -> None:
                     or (cast_now.get("blRole"), cast_now.get("blType")) != ("top", "ttokdae_gong") \
                     or cast_now.get("prompt") != old_prompt(castmod.current_look(load_c(cid)), "real", "male") \
                     or logs.messages("vnew.casting.draw_start") != [
-                        f"vnew.casting.draw_start cid={cid} round=1 slots=2 usd=0.08 preset=real gender=male bl=-"]:
+                        f"vnew.casting.draw_start cid={cid} round=1 slots=2 usd=0.08 preset=real gender=male bl=- physique=-"]:
                 bad.append(f"(bl-f) 뽑기가 BL 값을 무시하지 않거나 저장값을 씁니다: {cost_got} {status} "
                            f"{cast_now.get('prompt', '')[-80:]!r} {logs.messages('draw_start')}")
-            # 설명에 떡대공 → 회차 문장 끝 참고 문장 · 보기 blDetected · 로그 bl=ttokdae_gong
+            # 설명에 떡대공 → 회차 문장 끝 참고 문장 · 보기 blDetected · 로그 bl=ttokdae_gong. 지시서 112: 떡대공이면 떡대 체격 하나·허리 위
+            # 구도(_TTK_IDOL_MALE)·로그 끝 physique=ttokdae(112 전 기대값: 103 식 프리셋 + 조각 8개 문장, 로그 끝 bl=ttokdae_gong).
             cid_d = "char_bl_f_desc"
             seed_char(cid_d, extra=_BL_DESC_TTOKDAE)
             spawned.clear()
@@ -31018,27 +31057,30 @@ def check_vnew_bl_look() -> None:
             cast_d = load_c(cid_d).get("casting") or {}
             view_d = data.get("casting") or {}
             look_d = castmod.prompt_look(castmod.current_look(load_c(cid_d)), "male")
-            want_hint_d = castmod._hint_sentence(hp("ttokdae_gong", look_d), "male")  # noqa: SLF001
+            want_hint_d = castmod._hint_sentence(hp("ttokdae_gong", look_d, forced=[("build", _TTK_BUILD)]), "male")  # noqa: SLF001
             prompt = cast_d.get("prompt") or ""
-            if status != 202 or len(spawned) != 1 \
-                    or prompt != anchored(f"{old_head(castmod.current_look(load_c(cid_d)), 'idol', 'male')} {want_hint_d}") \
+            if status != 202 or len(spawned) != 1 or want_hint_d != _BL_TTOKDAE_SENTENCE \
+                    or prompt != anchored(f"{_TTK_IDOL_MALE} He is {look_d}, with dark brown eyes. {want_hint_d}") \
                     or view_d.get("blDetected") != [{"id": "ttokdae_gong", "label": "떡대공"}] or view_d.get("blHintsEn") != want_hint_d \
-                    or logs.messages("vnew.casting.draw_start") != [
-                        f"vnew.casting.draw_start cid={cid_d} round=1 slots=2 usd=0.08 preset=idol gender=male bl=ttokdae_gong"]:
+                    or "termsDetected" in view_d or logs.messages("vnew.casting.draw_start") != [
+                        f"vnew.casting.draw_start cid={cid_d} round=1 slots=2 usd=0.08 preset=idol gender=male bl=ttokdae_gong "
+                        "physique=ttokdae"]:
                 bad.append(f"(bl-f) 설명의 떡대공이 뽑기 문장·보기·로그에 반영되지 않았습니다: {status} {prompt[-160:]!r} "
                            f"{view_d.get('blDetected')} {logs.messages('draw_start')}")
-            # 설명에 두 유형 → 로그 bl=musim_gong+ttokdae_gong, 회차 문장 끝 = 합친 조각(같은 분류는 앞의 유형)
+            # 설명에 두 유형 → 로그 bl=musim_gong+ttokdae_gong, 회차 문장 끝 = 합친 조각(같은 분류는 앞의 유형. 112: 떡대 체격은 맨 앞 forced)
             cid_2 = "char_bl_f_two"
             seed_char(cid_2, extra="무심공이고 떡대공")
             logs.clear()
             status2 = call("POST", f"/api/vnew/characters/{cid_2}/casting/draw", {"confirmUsd": 0.08})[0]
             look_2 = castmod.prompt_look(castmod.current_look(load_c(cid_2)), "male")
-            want_two = castmod._hint_sentence(hp(["musim_gong", "ttokdae_gong"], look_2), "male")  # noqa: SLF001
+            want_two = castmod._hint_sentence(hp(["musim_gong", "ttokdae_gong"], look_2, forced=[("build", _TTK_BUILD)]), "male")  # noqa: SLF001
             if status2 != 202 or not ((load_c(cid_2).get("casting") or {}).get("prompt") or "").endswith(" " + anchored(want_two)) \
-                    or not (logs.messages("vnew.casting.draw_start") or [""])[0].endswith(" bl=musim_gong+ttokdae_gong"):
+                    or not want_two.startswith(_BL_TTOKDAE_SENTENCE[:-1] + ", ") \
+                    or not (logs.messages("vnew.casting.draw_start") or [""])[0].endswith(" bl=musim_gong+ttokdae_gong physique=ttokdae"):
                 bad.append(f"(bl-f) 두 유형 뽑기 문장·로그가 다릅니다: {status2} {logs.messages('draw_start')}")
-            report.append(f"bl-f: PUT {len(put_bodies)}건(BL 값 무시·저장값 그대로) · draw 4건(CostMismatch·저장값 무시 bl=-·"
-                          "설명 떡대공 bl=ttokdae_gong·두 유형 bl=musim_gong+ttokdae_gong) · 103 함수·상수 없음·저장값 읽는 함수 = _empty_casting 뿐")
+            report.append(f"bl-f: PUT {len(put_bodies)}건(BL 값 무시·저장값 그대로) · draw 4건(CostMismatch·저장값 무시 bl=- physique=-·"
+                          "설명 떡대공 bl=ttokdae_gong physique=ttokdae·두 유형 bl=musim_gong+ttokdae_gong) · 103 함수·상수 없음·"
+                          "저장값 읽는 함수 = _empty_casting 뿐")
             seen.add("bl-f")
 
             # ================= (bl-h) 보기(지시서 104: blDetected·blHintsEn) =================
@@ -31086,9 +31128,11 @@ def check_vnew_bl_look() -> None:
                                     {"lookEn": "a slim Korean man with long hair", "blRole": "top", "blType": "ttokdae_gong"})
             view_h = data.get("casting") or {}
             stored_h = load_c(cid_h).get("casting") or {}
+            # 지시서 112: 고친 외모 문장의 "slim" 은 그대로 두고(lookEn) 캐스팅 문장에서만 뺀다. 떡대 체격은 그림 우선에서 빠지지 않는다
+            # (112 전 기대값: slim 때문에 떡대공 build 조각이 빠진 나머지 7조각).
             if status != 200 or view_h.get("lookEn") != "a slim Korean man with long hair" or view_h.get("lookEdited") is not True \
                     or view_h.get("lookAuto") != auto_before or castmod.auto_look(load_c(cid_h)) != auto_before \
-                    or view_h.get("blHintsEn") != castmod._hint_sentence(ttok[1:], "male") \
+                    or view_h.get("blHintsEn") != _BL_TTOKDAE_SENTENCE \
                     or (stored_h.get("blRole"), stored_h.get("blType")) != ("", ""):  # noqa: SLF001
                 bad.append(f"(bl-h) 고친 외모 문장·자동 문장·그림 우선 보기가 다릅니다: {view_h.get('blHintsEn')!r}")
             with _pin_vnew(VNEW_BL_LOOK=False):
@@ -31118,7 +31162,7 @@ def check_vnew_bl_look() -> None:
                         or (stored_g.get("blRole"), stored_g.get("blType"), stored_g.get("preset")) != ("top", "ttokdae_gong", "real") \
                         or draw_g[0] != 202 or len(spawned) != 1 \
                         or stored_g2.get("prompt") != old_prompt(castmod.current_look(load_c(cid_g)), "real", "male") \
-                        or not (logs.messages("vnew.casting.draw_start") or [""])[0].endswith(" bl=-") \
+                        or not (logs.messages("vnew.casting.draw_start") or [""])[0].endswith(" bl=- physique=-") \
                         or castmod._bl_types_now(load_c(cid_g)) != []:  # noqa: SLF001
                     bad.append(f"(bl-g) 끔 동작이 지금과 다릅니다: {sorted(set(view_g) ^ want_off_keys)} {put_g[0:3:2]} {draw_g[0:3:2]}")
             with _pin_vnew(VNEW_BL_LOOK=True):
@@ -31385,7 +31429,7 @@ def check_vnew_bl_look() -> None:
     else:
         ok(
             "BL 유형 참고 외모 검사 (bl-a)유형 표 12종·분류 형태 4·인상 5·옛 TAGS 그대로·금지 낱말 0 "
-            "(bl-b)형태만 그림 우선·인상 늘 더함·오탐 막기·분석 꼴 떡대공 평균 ≥ 4 "
+            "(bl-b)형태만 그림 우선·인상 늘 더함·오탐 막기·분석 꼴 떡대공 캐스팅 문장 떡대 체격 6/6 "
             "(bl-c)유형 없음 = 지금 (bl-d)유형 있음 참고 문장·male/female (bl-e)1500자 상한 (bl-f)BL 요청 무시·설명 근거·뽑기 문장·로그 "
             "(bl-g)VNEW_BL_LOOK 끔·배선·렌더 (bl-h)보기 blDetected·blHintsEn·근거는 extraPromptKo 뿐 (bl-i)화면 선택 없음·읽기 전용 줄·"
             "다시 만들기 뒤 새 값 (bl-j)운영 문구 BadBlType (bl-k)설명에서 찾기·부정 (bl-l)두 유형 합치기"
@@ -31792,7 +31836,9 @@ def check_vnew_cast_photo_guard() -> None:
                 bad.append(f"(cpg-a) 사진 고정 문장이 설계(D1)와 다릅니다: {castmod.PHOTO_ANCHOR!r}")
             looks_a = ["", _BL_LOOK_30S, "a Korean woman in her late 20s with long dyed ash-blonde wavy hair", "a slim Korean person in their 30s",
                        ("very long hair " * 400).strip(), "a stylized webtoon man drawn in a clean manhwa style with short black hair"]
-            types_a = ["", "ttokdae_gong", ["musim_gong", "ttokdae_gong"]]
+            # 지시서 112: 떡대공은 프리셋 구도·외모 체격 낱말을 바꾸므로 107 전 식과 다르다. 고정 문장·줄이는 순서는 떡대와 무관한 광공으로
+            # 보고(107~111 은 떡대공으로 봤다 — 예시 유형만 바꿨다), 떡대가 있을 때의 고정 문장·줄이는 순서는 ttk-c·ttk-e 가 본다.
+            types_a = ["", "gwanggong", ["musim_gong", "gwanggong"]]
             count_a = 0
             max_a = 0
             for preset in ("idol", "real"):
@@ -31839,7 +31885,7 @@ def check_vnew_cast_photo_guard() -> None:
             long_look = "a Korean man in his 30s with " + ", ".join(f"feature{n} detail" for n in range(220))
             try:
                 castmod.LOOK_MAX = 3000
-                long_out = [castmod._cast_text(long_look, "idol", "male", value) for value in ("", "ttokdae_gong")]  # noqa: SLF001
+                long_out = [castmod._cast_text(long_look, "idol", "male", value) for value in ("", "gwanggong")]  # noqa: SLF001
                 long_pl = castmod.prompt_look(long_look, "male")
             finally:
                 castmod.LOOK_MAX = saved["look_max"]
@@ -31856,18 +31902,18 @@ def check_vnew_cast_photo_guard() -> None:
             for preset in ("idol", "real"):
                 base = castmod.base_text(preset, "male")
                 head = f"{base} He is {_BL_LOOK_30S}{tail_eyes}"
-                full_sentence = castmod._cast_text(_BL_LOOK_30S, preset, "male", "ttokdae_gong")[1]  # noqa: SLF001
+                full_sentence = castmod._cast_text(_BL_LOOK_30S, preset, "male", "gwanggong")[1]  # noqa: SLF001
                 limits = [len(head) + 1 + len(full_sentence) + 1 + len(anchor_m) - 1, len(head) + 1 + len(anchor_m),
                           len(head) + 1 + len(anchor_m) - 20, 300, 100]
                 got_s = []
                 try:
                     for limit in limits:
                         castmod.PROMPT_MAX = limit
-                        got_s.append(castmod._cast_text(_BL_LOOK_30S, preset, "male", "ttokdae_gong"))  # noqa: SLF001
+                        got_s.append(castmod._cast_text(_BL_LOOK_30S, preset, "male", "gwanggong"))  # noqa: SLF001
                 finally:
                     castmod.PROMPT_MAX = saved["prompt_max"]
                 one, none, clipped, tiny, small = got_s
-                pieces = blmod.hint_pieces(["ttokdae_gong"], _BL_LOOK_30S)
+                pieces = blmod.hint_pieces(["gwanggong"], _BL_LOOK_30S)
                 problems = []
                 if one[1] != castmod._hint_sentence(pieces[:-1], "male") or one[0] != f"{head} {one[1]} {anchor_m}" \
                         or len(one[0]) > limits[0]:  # noqa: SLF001
@@ -33182,6 +33228,662 @@ def check_vnew_cast_idol_model() -> None:
             "(cim-c)확인 금액 = 고른 느낌 총액·409·회차 기록 (cim-d)FLUX.2 [pro] 본문 3키·원장 0.075·Seedream 0.04·되돌리기 "
             "(cim-e)다시 뽑기·버린 장 원장 (cim-f)회차 고정·재시작·옛 회차 Seedream (cim-g)보기 presets 금액 (cim-h)화면 느낌별 금액·confirmUsd"
             + "".join(f"\n       cim: {line}" for line in report)
+        )
+
+
+# ---------------------------------------------------------------- 지시서 112 — 떡대 = 체격, 공·수 = 포지션(ttk-a~g, 2026-11-01)
+#
+# 스펙 .kiro/specs/cast-ttokdae/. 떡대 체격 조각은 web_terms(일반 인터넷 외모 용어)에 한 번만 두고 떡대공·떡대수·"떡대"만이 같이 쓴다.
+# 외부 호출은 모두 가짜다: fal(casting._fal_request·_fetch_url), LLM(_guard_real_llm), S3(_FakeCharStore). 유료 호출 0.
+
+# ttk-a: 112 전 떡대공·떡대수 조각 가운데 공·수에서 나온 얼굴·표정·인상·키 조각과 112 전 체격 조각(모두 뺐다).
+_TTK_REMOVED = {
+    "ttokdae_gong": ("broad shoulders and a solid, muscular build", "a tall frame", "a firm square jawline", "a rugged, masculine look",
+                     "deep-set eyes", "a steady gaze", "a calm, confident expression", "an upright, imposing posture"),
+    "ttokdaesu": ("broad shoulders and a sturdy, muscular adult man's build", "a tall frame", "strong features",
+                  "a good-natured, masculine look", "calm, gentle eyes", "a soft, slightly shy expression",
+                  "a relaxed, unassuming posture"),
+}
+# ttk-a: 사용자 참고 사진 2장의 공통 특징 → 떡대 체격 조각 안의 영어(design D2 대응표). 조각은 이 여섯 구를 이은 것과 같아야 한다.
+_TTK_FEATURES = (
+    ("보디빌더처럼 크고 묵직한 근육형 몸(비만 아님)", "a big, powerfully built muscular masculine body"),
+    ("매우 넓은 어깨", "very broad shoulders"),
+    ("두꺼운 목", "a thick neck"),
+    ("넓고 근육이 두드러진 등", "a wide muscular back"),
+    ("두툼한 가슴", "a broad, thick chest"),
+    ("두꺼운 팔(이두·삼두)", "thick muscular arms"),
+)
+_TTK_FAT = re.compile(
+    r"\b(?:fat|fatty|chubby|heavy|heavily|heavy-set|heavyset|plump|stocky|bulky|portly|overweight|obese|chunky|belly|paunch|rotund|"
+    r"husky|thickset|beefy|burly|pudgy|flabby)\b", re.IGNORECASE,
+)
+_TTK_FACE = re.compile(
+    r"\b(?:face|facial|jaw\w*|chin|cheek\w*|eyes?|gaze|stare|expression|smile|look|looks|features|posture|stance|presence|handsome|"
+    r"rugged|gentle|shy|calm|confident|tall|height)\b", re.IGNORECASE,
+)
+_TTK_FRAMING = "waist-up framing with the shoulders, upper arms and chest fully in frame"
+_TTK_LOOK_OPS = "a tall, muscular Korean man in his 30s with short black hair"  # 운영 범건우 꼴(외모 문장에 체격·키 분류가 있다)
+# ttk-b: strip_conflicts(외모, ["ttokdae"]) 입력 → 결과(design D5). 몸이 아닌 낱말("thin lips"·"slim-fit"·얼굴·눈·옷)은 그대로.
+_TTK_KEEP_LOOK = ("a Korean man with thin lips, slim-fit trousers, a slender angular face, thin black-rimmed glasses, narrow eyes and "
+                  "a slim tie")
+_TTK_STRIP_CASES = (
+    ("a slim Korean man in his 30s with short black hair", "a Korean man in his 30s with short black hair"),
+    ("a tall, slender Korean man in his 30s with short black hair", "a tall Korean man in his 30s with short black hair"),
+    ("a slender, tall Korean man", "a tall Korean man"),
+    ("a tall and slim Korean man", "a tall Korean man"),
+    ("a slim and tall Korean man", "a tall Korean man"),
+    ("a tall and slender build", "a tall build"),
+    ("a Korean man with a slender build and short hair", "a Korean man with short hair"),
+    ("a Korean man with a lean, athletic build", "a Korean man with an athletic build"),
+    ("a Korean man with a slim build, short black hair", "a Korean man with short black hair"),
+    ("a Korean man with short hair and narrow shoulders", "a Korean man with short hair"),
+    ("a Korean man with a muscular chest and thin arms", "a Korean man with a muscular chest"),
+    ("a Korean man, a lean frame, short hair", "a Korean man, short hair"),
+    ("a Korean man of average build with short hair", "a Korean man with short hair"),
+    ("a Korean man with a slim yet muscular build", "a Korean man with a muscular build"),
+    ("a lightly built Korean man", "a Korean man"),
+    ("a slightly-built, small-framed Korean man", "a Korean man"),
+    ("a slim-built man", "a man"),
+    ("an ultra-slim Korean man", "a Korean man"),
+    ("A Slim Korean man", "A Korean man"),
+    ("A lean, athletic Korean man", "An athletic Korean man"),
+    ("a slim build, short hair", "short hair"),
+    ("a 30-year-old, slim Korean man", "a 30-year-old Korean man"),
+    ("a petite Korean woman with a small mole on her chest", "a Korean woman with a small mole on her chest"),
+    ("a Korean man with a slender neck and a thin necklace", "a Korean man with a thin necklace"),
+    ("a slim build", ""),
+    (_TTK_KEEP_LOOK, _TTK_KEEP_LOOK),
+    ("a Korean man with skinny jeans and wiry hair", "a Korean man with skinny jeans and wiry hair"),
+    (_TTK_LOOK_OPS, _TTK_LOOK_OPS),
+    ("He is slim", "He is slim"),  # 서술어 꼴은 보지 않는다(design D5 한계)
+    ("", ""),
+)
+# ttk-d: (캐릭터 설명, detect_types, detect_terms). 앞 경계(D28)·부정(D19)은 유형과 같고 뒤쪽 제외(D29)는 쓰지 않는다.
+_TTK_DETECT_CASES = (
+    ("떡대 있는 남자", [], ["ttokdae"]),
+    ("떡대가 좋다", [], ["ttokdae"]),
+    ("떡대가 좋은 남자", [], ["ttokdae"]),
+    ("떡대남", [], ["ttokdae"]),
+    ("ㅋㅋ떡대", [], ["ttokdae"]),
+    ("(떡대)", [], ["ttokdae"]),
+    ("BL떡대 1.떡대", [], ["ttokdae"]),
+    ("떡대 공원에서", [], ["ttokdae"]),  # 띄어 쓴 "떡대 공" 은 유형 이름이 아니다 — 떡대(체격)만
+    ("무심공인데 떡대가 좋은", ["musim_gong"], ["ttokdae"]),
+    ("떡대공 말고 그냥 떡대만", [], ["ttokdae"]),
+    ("떡대 아님. 사실 떡대가 좋다", [], ["ttokdae"]),
+    ("집착떡대", [], ["ttokdae"]),  # 앞이 "집착" 으로 끝나면 경계(D28 _PREFIX_OK 그대로)
+    ("개떡대", [], []),
+    ("떡대 아님", [], []),
+    ("떡대 말고 마른 체형", [], []),
+    ("떡대가 아니라 마른 체형", [], []),
+    ("떡대는 아니고", [], []),
+    ("떡대아님", [], []),
+    ("떡대공이다", ["ttokdae_gong"], []),  # 유형 감지가 이긴다(중복으로 붙이지 않는다)
+    ("떡대수다", ["ttokdaesu"], []),
+    ("떡대공 아님", [], []),  # 유형 이름 자리 안 — 떡대도 아님
+    ("떡대공원", [], []),
+    ("떡대공이고 떡대가 좋은", ["ttokdae_gong"], []),
+    ("떡대수인데 떡대 최고", ["ttokdaesu"], []),
+    ("", [], []), (None, [], []), (5, [], []), (["떡대"], [], []),
+)
+_TTK_TERM_LEAD = "캐릭터 설명에서 찾은 외모 용어: "
+
+_TTK_SCREEN_NODE_CASES = r"""
+function detailOf(cast) { return { id: "ch 1", status: "ready", casting: cast }; }
+function lineOf(section) {
+  var found = byClass(section, "vnew-casting-bl-found"), guide = byClass(section, "vnew-casting-bl-guide");
+  var line = found[0] || guide[0] || null;
+  return { lines: found.length + guide.length, line: line ? [line.tagName, line.className, line.textContent] : null };
+}
+async function run() {
+  out.pure = [
+    castingBlLine({ blDetected: [], termsDetected: [{ id: "ttokdae", label: "떡대" }], blHintsEn: "He has a big body." }),
+    castingBlLine({ blDetected: [], termsDetected: [{ id: "ttokdae", label: "떡대" }], blHintsEn: "" }),
+    castingBlLine({ blDetected: [{ id: "musim_gong", label: "무심공" }], termsDetected: [{ id: "ttokdae", label: "떡대" }], blHintsEn: "He has a." }),
+    castingBlLine({ blDetected: [], termsDetected: [null, {}, { id: "ttokdae" }] }),
+    castingBlLine({ blDetected: [], termsDetected: "x" }),
+    castingBlLine({ blDetected: [], termsDetected: [] }),
+    castingBlLine({ termsDetected: [{ id: "ttokdae", label: "떡대" }] }),
+    castingBlLine({ blDetected: [{ id: "ttokdae_gong", label: "떡대공" }], blHintsEn: "He has a big body." })
+  ];
+  var host = new FakeNode("div");
+  out.term = lineOf(castingSection(host, detailOf(SERVER.term.casting)));
+  out.mixed = lineOf(castingSection(host, detailOf(SERVER.mixed.casting)));
+  out.gong = lineOf(castingSection(host, detailOf(SERVER.gong.casting)));
+  out.none = lineOf(castingSection(host, detailOf(SERVER.none.casting)));
+  var evilCast = JSON.parse(JSON.stringify(SERVER.term.casting));
+  evilCast.termsDetected[0].label = "<img src=x onerror=alert(1)>";
+  out.evil = lineOf(castingSection(host, detailOf(evilCast)));
+  out.innerHTML = innerHTMLUsed;
+  console.log(JSON.stringify(out));
+}
+run().catch(function (e) { console.error((e && e.stack) || String(e)); process.exit(1); });
+"""
+
+
+def check_vnew_cast_ttokdae() -> None:
+    """지시서 112 — 실사 캐스팅에서 "떡대" 를 체격으로, "공·수" 를 포지션으로만 해석한다(.kiro/specs/cast-ttokdae). 외부 호출은 모두 가짜다.
+
+    (ttk-a) web_terms 표: 떡대 하나(label·kind·조각·부딪히는 낱말), 조각 = 참고 사진 특징 6구(design D2), 비만·얼굴·키·은어·성적 낱말 0,
+            형태 분류 build 하나, 떡대공·떡대수 = 같은 조각 객체 하나뿐(112 전 공·수 조각 15개 없음), TYPE_TERMS·type_terms, known_terms·
+            is_term·names·term_pieces·physique_of 꼴, web_terms import 는 re 뿐·저장·외부 호출 없음, genre_bl 머리 주석의 공·수 원칙
+    (ttk-b) strip_conflicts 30경우(꾸밈말·목록 항목·관사·몸 명사구·of·붙임표·대소문자·몸이 아닌 낱말 그대로), 몸 용어 아님·글 아님
+    (ttk-c) 문장: 떡대공·떡대수·"떡대"만·없음 × 프리셋 2 × 성별 3 × 외모 문장 11 — 떡대 체격·공수 조각 0·구도(허리 위·V라인 없음)·사진
+            고정 문장 끝·부딪히는 낱말 0·≤1500, 없음 = 112 전 식(바이트), 보고용 두 전문 고정값, 운영 범건우 회귀(체격·키 분류가 있어도 체격),
+            base_text 고정값·빠짐없이 바뀜·physique 없으면 그대로, terms 인자 꼴, 무심공 + 떡대(무심공 체격 빠짐)
+    (ttk-d) detect_terms 28경우·부정 창 경계 8경우·detect_types 그대로
+    (ttk-e) 1500자 상한: PROMPT_MAX 줄이기 7경우(다른 조각 → 외모 단어 경계 → 프리셋 → 체격 문장 순)·긴 외모(LOOK_MAX 3000)·운영 최대
+    (ttk-f) 라우트: 설명 7종 × 뽑기(회차 문장·로그 physique=·보기 termsDetected 자리·키), 고친 외모 문장 slim(원본 그대로·문장에서 빠짐),
+            VNEW_BL_LOOK 끔 = 112 전, fal 제출 본문 3키·회차 문장 그대로, generate.py·characters.py 는 떡대를 읽지 않음
+    (ttk-g) 화면(node 가짜 DOM, 실제 view 응답): castingBlLine 용어 줄 8꼴·castingSection 줄(용어만·유형 + 용어·유형만·없음)·위험한 글·
+            innerHTML 0·node --check
+    """
+    sys.path.insert(0, str(ROOT / "app"))
+    import ast as _ast  # noqa: PLC0415
+    import json as _json  # noqa: PLC0415
+    import traceback as _tb  # noqa: PLC0415
+
+    from flask import Flask  # noqa: PLC0415
+
+    from src import vnew  # noqa: PLC0415
+    from src.vnew import casting as castmod  # noqa: PLC0415
+    from src.vnew import characters as charmod  # noqa: PLC0415
+    from src.vnew import genre_bl as blmod  # noqa: PLC0415
+    from src.vnew import web_terms as termmod  # noqa: PLC0415
+    from src.vpoc import fal as vpoc_fal  # noqa: PLC0415
+    from src.vpoc import settings as vpoc_settings  # noqa: PLC0415
+
+    bad: list[str] = []
+    seen: set[str] = set()
+    report: list[str] = []
+    owner = "tester"
+    fake_store = _FakeCharStore()
+    stray: list[str] = []
+    spawned: list[tuple] = []
+    saved = {
+        "STORE": charmod.STORE, "cast_fal": castmod._fal_request, "cast_fetch": castmod._fetch_url,  # noqa: SLF001
+        "cast_spawn": castmod._spawn, "char_fal": charmod._fal_request, "vpoc_request": vpoc_fal._request,  # noqa: SLF001
+        "fal_key": vpoc_settings.FAL_KEY, "prompt_max": castmod.PROMPT_MAX, "look_max": castmod.LOOK_MAX,
+    }
+
+    def stray_call(name):
+        def blocked(*_a, **_k):
+            stray.append(name)
+            raise RuntimeError(f"쓰면 안 되는 호출: {name}")
+        return blocked
+
+    def old_head(look, preset, gender) -> str:
+        """112 전 cast_prompt 본문(유형 없음, 사진 고정 문장 앞까지)을 그대로 다시 쓴 기준 식(bl-c 의 old_head 와 같다)."""
+        g = castmod._gender(gender)  # noqa: SLF001
+        words = castmod._WORDS[g]  # noqa: SLF001
+        text_look = castmod.prompt_look(look, g) or f"a Korean {words['noun']}"
+        return f"{castmod._BASES[castmod.preset_of(preset)].format(**words)} {words['subj']} {text_look}, with dark brown eyes."  # noqa: SLF001
+
+    analysis = {
+        "nameGuess": "건우", "descriptionKo": "30대 남성.", "appearanceEn": "A tall, muscular Korean man in his thirties with short black hair.",
+        "styleEn": "Thin lines.", "baseOutfitEn": "", "outfitEn": "", "outfitLayersEn": [], "altOutfitsEn": [],
+        "expressionsKo": [], "extraEn": "", "model": "m", "genderEn": "male",
+    }
+
+    def seed_char(cid, *, extra=None, analysis_=None, casting=None):
+        char = charmod.new_char("건우")
+        char["id"] = cid
+        char["analysis"] = dict(analysis) if analysis_ is None else analysis_
+        char["version"] = 1
+        char["status"] = "ready"
+        if casting is not None:
+            char["casting"] = casting
+        if extra is not None:
+            char["extraPromptKo"] = extra
+        charmod.save_char(owner, cid, char)
+        return char
+
+    def load_c(cid):
+        return charmod.load_char(owner, cid)[0]
+
+    build_sentence = {"male": f"He has {_TTK_BUILD}", "female": f"She has {_TTK_BUILD}"}
+    removed_all = sorted({piece for pieces in _TTK_REMOVED.values() for piece in pieces})
+    logs = _LogCapture()
+    try:
+        charmod.STORE = fake_store
+        castmod._fal_request = stray_call("casting._fal_request")  # noqa: SLF001
+        castmod._fetch_url = stray_call("casting._fetch_url")  # noqa: SLF001
+        castmod._spawn = lambda o, c, t: spawned.append((o, c, t))  # noqa: SLF001
+        charmod._fal_request = stray_call("characters._fal_request")  # noqa: SLF001
+        vpoc_fal._request = stray_call("vpoc.fal._request")  # noqa: SLF001
+        vpoc_settings.FAL_KEY = "test-fal-key"
+        with _guard_real_llm() as real_calls, logs, _pin_vnew(VNEW_CASTING=True, VNEW_BL_LOOK=True, VNEW_CASTING_COUNT=2):
+            # ================= (ttk-a) 떡대 정의(web_terms)·떡대공·떡대수 =================
+            terms = termmod.TERMS
+            item = terms.get("ttokdae") or {}
+            joined = ", ".join(english for _ko, english in _TTK_FEATURES[:-1]) + " and " + _TTK_FEATURES[-1][1]
+            joined = joined.replace("masculine body, very broad shoulders", "masculine body with very broad shoulders")
+            if list(terms) != ["ttokdae"] or (termmod.TTOKDAE, termmod.PHYSIQUE) != ("ttokdae", "physique") \
+                    or item.get("label") != "떡대" or item.get("kind") != "physique" or item.get("lookEn") != (("build", _TTK_BUILD),) \
+                    or termmod.TTOKDAE_BUILD != _TTK_BUILD or _TTK_BUILD != joined or len(_TTK_BUILD) > blmod.LOOK_EN_MAX:
+                bad.append(f"(ttk-a) 떡대 표·조각이 설계(D2)와 다릅니다: {item.get('lookEn')!r}")
+            problems_a = [rx.pattern[:24] for rx in (_TTK_FAT, _TTK_FACE, _BL_SLANG, _BL_ADULT_ONLY, _BL_NOT_LOOK) if rx.search(_TTK_BUILD)]
+            if problems_a or blmod.look_categories(_TTK_BUILD) != {"build"} or not _BL_MASCULINE.search(_TTK_BUILD) \
+                    or re.search(rf"\b{castmod._COLOR_RE}\b", _TTK_BUILD, re.IGNORECASE):  # noqa: SLF001
+                bad.append(f"(ttk-a) 떡대 체격 조각에 비만·얼굴·키·은어·성적·색 낱말이 있거나 체격(build)으로만 읽히지 않습니다: {problems_a}")
+            types = blmod.TYPES
+            for type_id, removed in _TTK_REMOVED.items():
+                texts = [text for _cat, text in types[type_id]["lookEn"]]
+                if types[type_id]["lookEn"] is not item.get("lookEn") or texts != [_TTK_BUILD] or set(texts) & set(removed) \
+                        or blmod.TYPE_TERMS.get(type_id) != ("ttokdae",):
+                    bad.append(f"(ttk-a) {type_id} 가 떡대 체격 하나(web_terms 같은 객체)가 아닙니다: {texts}")
+            other_pieces = {text for type_id, value in types.items() if type_id not in _TTK_REMOVED for _cat, text in value["lookEn"]}
+            if set(blmod.TYPE_TERMS) != set(_TTK_REMOVED) or (other_pieces & set(removed_all)) - {"a tall frame"}:
+                bad.append(f"(ttk-a) TYPE_TERMS 가 떡대공·떡대수뿐이 아니거나 뺀 조각이 다른 유형에 남았습니다: {sorted(blmod.TYPE_TERMS)}")
+            tt = blmod.type_terms
+            tt_got = [tt(v) for v in ("ttokdae_gong", ["ttokdae_gong", "ttokdaesu"], ["musim_gong", "ttokdaesu"], "musim_gong", "zz", None,
+                                       [], ["zz", "ttokdae_gong", 3])]
+            if tt_got != [["ttokdae"], ["ttokdae"], ["ttokdae"], [], [], [], [], ["ttokdae"]]:
+                bad.append(f"(ttk-a) type_terms 가 다릅니다: {tt_got}")
+            kt = termmod.known_terms
+            kt_got = [kt(v) for v in ("ttokdae", ["ttokdae", "ttokdae"], ("zz", "ttokdae"), "TTOKDAE", None, 5, {"ttokdae": 1}, [], [None, 3])]
+            if kt_got != [["ttokdae"], ["ttokdae"], ["ttokdae"], [], [], [], [], [], []] \
+                    or [termmod.is_term(v) for v in ("ttokdae", "zz", None, 3)] != [True, False, False, False] \
+                    or termmod.names() != {"떡대": "ttokdae"} \
+                    or termmod.term_pieces(["ttokdae", "ttokdae"]) != [("build", _TTK_BUILD)] or termmod.term_pieces("zz") != [] \
+                    or [termmod.physique_of(v) for v in ("ttokdae", ["ttokdae"], [], "zz", None)] != ["ttokdae", "ttokdae", "", "", ""]:
+                bad.append(f"(ttk-a) known_terms·is_term·names·term_pieces·physique_of 가 다릅니다: {kt_got}")
+            term_src = (APP_SRC / "vnew" / "web_terms.py").read_text(encoding="utf-8")
+            term_tree = _ast.parse(term_src)
+            imports = sorted({alias.name for node in _ast.walk(term_tree) if isinstance(node, (_ast.Import, _ast.ImportFrom))
+                              for alias in node.names} | {node.module for node in _ast.walk(term_tree)
+                                                          if isinstance(node, _ast.ImportFrom) and node.module})
+            if imports != ["__future__", "annotations", "re"] or re.search(r"\bopen\(|STORE|boto|urllib|requests|write_json", term_src):
+                bad.append(f"(ttk-a) web_terms 가 re 밖을 쓰거나 저장·외부 호출·BL 모듈을 씁니다: {imports}")
+            bl_doc = _ast.get_docstring(_ast.parse((APP_SRC / "vnew" / "genre_bl.py").read_text(encoding="utf-8"))) or ""
+            if "공/수 접미사 자체는 외모를 더하지 않는다" not in bl_doc or "web_terms" not in bl_doc:
+                bad.append("(ttk-a) genre_bl 머리 주석에 공·수 해석 원칙(공/수 접미사는 외모를 더하지 않는다)이 없습니다")
+            report.append(f"ttk-a: 떡대 체격 {len(_TTK_BUILD)}자 · 참고 사진 특징 {len(_TTK_FEATURES)}구 · 뺀 공·수 조각 "
+                          f"{sum(len(v) for v in _TTK_REMOVED.values())}개(떡대공 8·떡대수 7)")
+            seen.add("ttk-a")
+
+            # ================= (ttk-b) 부딪히는 체격 낱말 빼기 =================
+            strip = termmod.strip_conflicts
+            wrong_b = [(text, strip(text, ["ttokdae"]), want) for text, want in _TTK_STRIP_CASES if strip(text, ["ttokdae"]) != want]
+            if wrong_b:
+                bad.append(f"(ttk-b) strip_conflicts 결과가 다릅니다: {wrong_b}")
+            untouched = [strip(text, value) for text, _w in _TTK_STRIP_CASES[:3] for value in ([], "zz", None, ["zz"])]
+            if untouched != [text for text, _w in _TTK_STRIP_CASES[:3] for _v in range(4)] or strip(None, ["ttokdae"]) != "" \
+                    or strip(5, "ttokdae") != "" or strip("a slim man", "ttokdae") != "a man" or set(termmod._CONFLICT_RE) != {"ttokdae"}:  # noqa: SLF001
+                bad.append(f"(ttk-b) 몸 용어가 아니거나 글이 아닌 값을 다르게 다룹니다: {untouched[:3]}")
+            report.append(f"ttk-b: strip_conflicts {len(_TTK_STRIP_CASES)}경우 · 용어 없음 12경우")
+            seen.add("ttk-b")
+
+            # ================= (ttk-c) 캐스팅 문장 =================
+            cases_c = {"떡대공": ("ttokdae_gong", ()), "떡대수": ("ttokdaesu", ()), "떡대만": ("", ("ttokdae",)), "없음": ("", ())}
+            looks_c = [_TTK_LOOK_OPS, _BL_LOOK_30S, "a slim Korean man in his 30s with a slender build and short black hair",
+                       "a tall, slender Korean person in their 30s with short hair", ""] + [v[4] for v in _CAST_LOOK_FEEDBACK.values()]
+            count_c = 0
+            max_c = 0
+            for name, (type_id, term_ids) in cases_c.items():
+                for preset in ("idol", "real"):
+                    for gender in ("male", "unknown", "female"):
+                        g_eff = "female" if gender == "female" else "male"
+                        anchor = _cpg_anchor(g_eff if name != "없음" else gender)
+                        for look in looks_c:
+                            text, sentence = castmod._cast_text(look, preset, gender, type_id, term_ids)  # noqa: SLF001
+                            count_c += 1
+                            max_c = max(max_c, len(text))
+                            problems = []
+                            if castmod.cast_prompt(look, preset, gender, type_id, term_ids) != text:
+                                problems.append("cast_prompt != _cast_text")
+                            if not text.endswith(" " + anchor) or text.count(anchor) != 1 or len(text) > 1500 or "\n" in text:
+                                problems.append("사진 고정 문장 끝·길이")
+                            if name == "없음":
+                                if text != f"{old_head(look, preset, gender)} {anchor}" or sentence or "chest-up framing" not in text \
+                                        or _TTK_FRAMING in text or _TTK_BUILD in text:
+                                    problems.append("떡대 없음이 112 전 식과 다름")
+                            else:
+                                body = text[len(castmod.base_text(preset, g_eff, "ttokdae")):]
+                                if not text.startswith(castmod.base_text(preset, g_eff, "ttokdae")) or _TTK_FRAMING not in text \
+                                        or "chest-up framing" in text or "V-line" in text:
+                                    problems.append("구도가 바뀌지 않음")
+                                if sentence != build_sentence[g_eff] + "." or not text.endswith(f" {sentence} {anchor}"):
+                                    problems.append(f"떡대 체격 문장이 아님 {sentence[:60]!r}")
+                                if any(piece in sentence for piece in removed_all):
+                                    problems.append("공·수 조각이 남음")
+                                if termmod._CONFLICT_RE["ttokdae"].search(body):  # noqa: SLF001
+                                    problems.append("부딪히는 체격 낱말이 남음")
+                                if g_eff == "male" and (" He is " not in text
+                                                        or (gender == "unknown" and re.search(r"\b(?:person|their)\b", body))):
+                                    problems.append("male 이 아님")
+                                if g_eff == "female" and " She is " not in text:
+                                    problems.append("female 이 유지되지 않음")
+                            if problems:
+                                bad.append(f"(ttk-c) {name}·{preset}·{gender}·{look[:30]!r}: {problems}")
+            # 보고용 두 전문(지시서 완료 조건): 아이돌풍 + 떡대공, 현실 배우풍 + "떡대"만(외모 = 운영 범건우 꼴)
+            want_idol = f"{_TTK_IDOL_MALE} He is {_TTK_LOOK_OPS}, with dark brown eyes. {_BL_TTOKDAE_SENTENCE} {_cpg_anchor('male')}"
+            want_real = f"{_TTK_REAL_MALE} He is {_TTK_LOOK_OPS}, with dark brown eyes. {_BL_TTOKDAE_SENTENCE} {_cpg_anchor('male')}"
+            got_idol = castmod.cast_prompt(_TTK_LOOK_OPS, "idol", "male", ["ttokdae_gong"])
+            got_real = castmod.cast_prompt(_TTK_LOOK_OPS, "real", "male", [], ["ttokdae"])
+            if got_idol != want_idol or got_real != want_real or castmod.cast_prompt(_TTK_LOOK_OPS, "idol", "male", "ttokdaesu") != want_idol \
+                    or castmod.cast_prompt(_TTK_LOOK_OPS, "idol", "unknown", "", "ttokdae") != want_idol:
+                bad.append(f"(ttk-c) 보고용 전문이 고정값과 다릅니다: {got_idol[-300:]!r} {got_real[-300:]!r}")
+            # 운영 범건우 회귀: 외모 문장에 체격·키 분류가 있어도(그림 우선이면 빠진다) 캐스팅 문장에는 체격이 남는다
+            if blmod.look_categories(_TTK_LOOK_OPS) != {"build", "height"} or blmod.hint_pieces("ttokdae_gong", _TTK_LOOK_OPS) != [] \
+                    or _TTK_BUILD not in got_idol:
+                bad.append("(ttk-c) 운영 범건우 꼴(tall, muscular)에서 떡대 체격이 빠집니다")
+            # 프리셋 문구: 떡대 없음 = 112 전(모든 프리셋·성별), 떡대 = 고정값(male)·바꿀 글이 프리셋에 실제로 있다
+            base_old = [castmod._BASES[castmod.preset_of(p)].format(**castmod._WORDS[castmod._gender(g)])  # noqa: SLF001
+                        for p in ("idol", "real", "zz") for g in ("male", "female", "unknown", "")]
+            base_now = [castmod.base_text(p, g) for p in ("idol", "real", "zz") for g in ("male", "female", "unknown", "")]
+            base_empty = [castmod.base_text(p, g, "") for p in ("idol", "real", "zz") for g in ("male", "female", "unknown", "")]
+            phys_all = [castmod.base_text(p, g, "ttokdae") for p in ("idol", "real") for g in ("male", "female", "unknown")]
+            swaps_ok = all(old in castmod._BASES[key] for key, pairs in castmod._PHYSIQUE_SWAPS.items() for old, _new in pairs)  # noqa: SLF001
+            if base_now != base_old or base_empty != base_old or castmod.base_text("idol", "male") != _CAST_IDOL_MALE \
+                    or castmod.base_text("real", "male") != _CAST_REAL_MALE \
+                    or castmod.base_text("idol", "male", "ttokdae") != _TTK_IDOL_MALE \
+                    or castmod.base_text("real", "male", "ttokdae") != _TTK_REAL_MALE or not swaps_ok \
+                    or castmod.PHYSIQUE_FRAMING != _TTK_FRAMING \
+                    or any("chest-up" in t or "V-line" in t or _TTK_FRAMING not in t or "fully clothed" not in t
+                           or "Clothing and its pattern exactly as described" not in t for t in phys_all) \
+                    or "hands not visible" not in castmod.base_text("real", "male", "ttokdae"):
+                bad.append("(ttk-c) 프리셋 문구가 떡대 없음 = 112 전·떡대 = 허리 위 구도가 아닙니다")
+            # terms 인자 꼴: 글 하나·목록·튜플은 같고, 모르는 값은 떡대 없음과 같다
+            same_terms = {castmod.cast_prompt(_BL_LOOK_30S, "real", "male", "", v) for v in ("ttokdae", ["ttokdae"], ("ttokdae",),
+                                                                                          ["zz", "ttokdae", "ttokdae"])}
+            no_terms = {castmod.cast_prompt(_BL_LOOK_30S, "real", "male", "", v) for v in ((), "", None, 5, ["zz"], "TTOKDAE")}
+            if len(same_terms) != 1 or no_terms != {castmod.cast_prompt(_BL_LOOK_30S, "real", "male")} \
+                    or _TTK_BUILD not in next(iter(same_terms)):
+                bad.append(f"(ttk-c) terms 인자 꼴에 따라 문장이 다릅니다: {len(same_terms)} {len(no_terms)}")
+            # 무심공 + 떡대(설명 "무심공인데 떡대가 좋은"): 떡대 체격이 맨 앞, 무심공 체격("a lean, tall build")은 빠진다
+            mixed = castmod._cast_text(_BL_LOOK_30S, "idol", "male", ["musim_gong"], ["ttokdae"])[1]  # noqa: SLF001
+            musim_rest = [t for c, t in types["musim_gong"]["lookEn"] if c != "build"]
+            if mixed != castmod._hint_sentence([_TTK_BUILD] + musim_rest, "male") or "lean" in mixed:  # noqa: SLF001
+                bad.append(f"(ttk-c) 무심공 + 떡대 참고 문장이 다릅니다: {mixed!r}")
+            report.append(f"ttk-c: {count_c}문장(최대 {max_c}자) · 보고 전문 {len(got_idol)}·{len(got_real)}자")
+            seen.add("ttk-c")
+
+            # ================= (ttk-d) "떡대"만 써도 찾는다 =================
+            wrong_d = [(text, blmod.detect_types(text), blmod.detect_terms(text)) for text, want_t, want_w in _TTK_DETECT_CASES
+                       if (blmod.detect_types(text), blmod.detect_terms(text)) != (want_t, want_w)]
+            edge_d = [blmod.detect_terms("떡대" + "가" * pad + "아님") for pad in range(0, 8)]
+            if wrong_d or edge_d != [[]] * 6 + [["ttokdae"]] * 2 or blmod._TERM_NAME_TO_ID != {"떡대": "ttokdae"} \
+                    or blmod.detect_terms("떡대남") is blmod.detect_terms("떡대남"):  # noqa: SLF001
+                bad.append(f"(ttk-d) detect_terms 결과가 다릅니다: {wrong_d} 창 {edge_d}")
+            report.append(f"ttk-d: 찾기 {len(_TTK_DETECT_CASES)}경우 · 부정 창 경계 8경우")
+            seen.add("ttk-d")
+
+            # ================= (ttk-e) 1500자 상한(떡대 체격은 사진 고정 문장 다음으로 마지막까지) =================
+            anchor_m = _cpg_anchor("male")
+            two = ["musim_gong", "ttokdae_gong"]
+            head_e = f"{_TTK_IDOL_MALE} He is {_BL_LOOK_30S}, with dark brown eyes."
+            full_e = castmod._cast_text(_BL_LOOK_30S, "idol", "male", two)  # noqa: SLF001
+            pieces_e = blmod.hint_pieces(two, _BL_LOOK_30S, forced=[("build", _TTK_BUILD)])
+            limits = [len(full_e[0]) - 1, len(head_e) + 1 + len(_BL_TTOKDAE_SENTENCE) + 1 + len(anchor_m),
+                      len(head_e) + 1 + len(_BL_TTOKDAE_SENTENCE) + 1 + len(anchor_m) - 20,
+                      len(_BL_TTOKDAE_SENTENCE) + 1 + len(anchor_m) + 10, len(_BL_TTOKDAE_SENTENCE) + 1 + len(anchor_m),
+                      len(_BL_TTOKDAE_SENTENCE) + len(anchor_m), 100]
+            got_e = []
+            try:
+                for limit in limits:
+                    castmod.PROMPT_MAX = limit
+                    got_e.append(castmod._cast_text(_BL_LOOK_30S, "idol", "male", two))  # noqa: SLF001
+            finally:
+                castmod.PROMPT_MAX = saved["prompt_max"]
+            front = f"{_TTK_IDOL_MALE} He is {_BL_LOOK_30S}, with dark brown eyes."
+            want_e = [
+                (f"{head_e} {castmod._hint_sentence(pieces_e[:-1], 'male')} {anchor_m}", castmod._hint_sentence(pieces_e[:-1], "male")),  # noqa: SLF001
+                (f"{head_e} {_BL_TTOKDAE_SENTENCE} {anchor_m}", _BL_TTOKDAE_SENTENCE),
+                (f"{_TTK_IDOL_MALE} He is a Korean man in his 30s, with dark brown eyes. {_BL_TTOKDAE_SENTENCE} {anchor_m}",
+                 _BL_TTOKDAE_SENTENCE),
+                (f"{front[:9].rstrip()} {_BL_TTOKDAE_SENTENCE} {anchor_m}", _BL_TTOKDAE_SENTENCE),
+                (f"{_BL_TTOKDAE_SENTENCE} {anchor_m}", _BL_TTOKDAE_SENTENCE),
+                (f"{front[:len(_BL_TTOKDAE_SENTENCE) - 1].rstrip()} {anchor_m}", ""),
+                (anchor_m[:100], ""),
+            ]
+            if pieces_e[0] != _TTK_BUILD or len(pieces_e) != 7 or full_e[1] != castmod._hint_sentence(pieces_e, "male"):  # noqa: SLF001
+                bad.append(f"(ttk-e) 두 유형 기준 문장 준비가 다릅니다: {pieces_e[:2]}")
+            for limit, got, want in zip(limits, got_e, want_e):
+                if got != want or len(got[0]) > limit:
+                    bad.append(f"(ttk-e) PROMPT_MAX {limit}: {got[0][-200:]!r} {got[1][:40]!r} != {want[0][-200:]!r}")
+            long_look = "a slim Korean man in his 30s with " + ", ".join(f"feature{n} detail" for n in range(220))
+            try:
+                castmod.LOOK_MAX = 3000
+                long_e = [castmod._cast_text(long_look, preset, "male", value, terms_v)  # noqa: SLF001
+                          for preset in ("idol", "real") for value, terms_v in (("ttokdae_gong", ()), ("", ("ttokdae",)))]
+            finally:
+                castmod.LOOK_MAX = saved["look_max"]
+            for (text, sentence), preset in zip(long_e, ("idol", "idol", "real", "real")):
+                if len(text) > 1500 or len(text) < 1500 - 30 or sentence != _BL_TTOKDAE_SENTENCE \
+                        or not text.endswith(f", with dark brown eyes. {_BL_TTOKDAE_SENTENCE} {anchor_m}") \
+                        or not text.startswith(castmod.base_text(preset, "male", "ttokdae") + " He is a Korean man in his 30s with feature0 detail") \
+                        or "slim" in text:
+                    bad.append(f"(ttk-e) 긴 외모 + 떡대에서 외모를 먼저 줄이지 않았습니다: {len(text)} {text[-200:]!r}")
+            castmod.PROMPT_MAX = 10 ** 6
+            try:
+                full_hints = {(a, w, p, g): castmod._cast_text("a slim Korean man with dyed " + "x" * 300, p, g, [a], w)[1]  # noqa: SLF001
+                              for a in blmod.TYPES for w in ((), ("ttokdae",)) for p in ("idol", "real") for g in ("male", "female", "unknown")}
+            finally:
+                castmod.PROMPT_MAX = saved["prompt_max"]
+            prod_max = 0
+            for (a, w, p, g), hint in full_hints.items():
+                text, sentence = castmod._cast_text("a slim Korean man with dyed " + "x" * 300, p, g, [a], w)  # noqa: SLF001
+                prod_max = max(prod_max, len(text))
+                phys = bool(w) or a in blmod.TYPE_TERMS
+                if sentence != hint or len(text) > 1500 or phys != (_TTK_BUILD in sentence):
+                    bad.append(f"(ttk-e) 운영 상한에서 참고 문장이 줄었거나 떡대 체격이 다릅니다: {a}·{w}·{p}·{g} {len(text)}")
+                    break
+            if castmod.PROMPT_MAX != 1500 or castmod.LOOK_MAX != 300:
+                bad.append("(ttk-e) PROMPT_MAX·LOOK_MAX 가 돌아오지 않았습니다")
+            report.append(f"ttk-e: 줄이기 {[len(t) for t, _s in got_e]}자 · 긴 외모 {[len(t) for t, _s in long_e]}자 · 운영 최대 {prod_max}자"
+                          f"({len(full_hints)}경우)")
+            seen.add("ttk-e")
+
+            # ================= (ttk-f) 라우트·뽑기·보기·로그·fal 본문 =================
+            app = Flask("ttk_f")
+            app.register_blueprint(vnew.create_blueprint(vnew.VnewDependencies(require_auth=lambda handler: handler,
+                                                                               current_owner=lambda: owner)))
+            client = app.test_client()
+
+            def call(method, path, body=None):
+                resp = client.open(path, method=method, json=body)
+                data = resp.get_json(silent=True) or {}
+                kind = str(((data.get("error") or {}) if isinstance(data, dict) else {}).get("type") or "")
+                return resp.status_code, data, kind
+
+            descs = {
+                "gong": ("떡대공이다", "ttokdae_gong", "ttokdae", None),
+                "su": ("떡대수", "ttokdaesu", "ttokdae", None),
+                "term": ("떡대 있는 남자", "-", "ttokdae", [{"id": "ttokdae", "label": "떡대"}]),
+                "mixed": ("무심공인데 떡대가 좋은", "musim_gong", "ttokdae", [{"id": "ttokdae", "label": "떡대"}]),
+                "none": ("후드티 말고 베이지 셔츠로", "-", "-", None),
+                "neg": ("떡대 아님", "-", "-", None),
+                "front": ("개떡대", "-", "-", None),
+            }
+            look_f = castmod.auto_look({"analysis": analysis})
+            for name, (desc, bl_log, phys_log, terms_view) in descs.items():
+                for preset in ("idol", "real"):
+                    cid = f"char_ttk_{name}_{preset}"
+                    seed_char(cid, extra=desc)
+                    spawned.clear()
+                    logs.clear()
+                    status, data, _k = call("POST", f"/api/vnew/characters/{cid}/casting/draw",
+                                            {"confirmUsd": castmod.total_usd(preset), "preset": preset})
+                    cast = load_c(cid).get("casting") or {}
+                    view = data.get("casting") or {}
+                    prompt = str(cast.get("prompt") or "")
+                    keys = list(castmod.view(load_c(cid)))  # 라우트 JSON 은 키를 정렬하므로 자리는 view 로 본다
+                    problems = []
+                    if status != 202 or len(spawned) != 1:
+                        problems.append(f"뽑기 {status}")
+                    if logs.messages("vnew.casting.draw_start") != [
+                            f"vnew.casting.draw_start cid={cid} round=1 slots=2 usd={castmod.total_usd(preset):.2f} preset={preset} "
+                            f"gender=male bl={bl_log} physique={phys_log}"]:
+                        problems.append(f"로그 {logs.messages('draw_start')}")
+                    if phys_log == "ttokdae":
+                        if not prompt.startswith(castmod.base_text(preset, "male", "ttokdae")) \
+                                or not prompt.endswith(" " + _cpg_anchor("male")) or _TTK_BUILD not in prompt:
+                            problems.append("떡대 회차 문장이 아님")
+                    elif prompt != f"{old_head(look_f, preset, 'male')} {_cpg_anchor('male')}":
+                        problems.append("떡대 없음 회차 문장이 112 전 식과 다름")
+                    if view.get("blHintsEn") != castmod._cast_text(look_f, preset, "male", blmod.detect_types(desc),  # noqa: SLF001
+                                                                    blmod.detect_terms(desc))[1] \
+                            or not prompt.endswith(" " + _cpg_anchor("male")) \
+                            or (view.get("blHintsEn") and not prompt.endswith(f" {view.get('blHintsEn')} {_cpg_anchor('male')}")):
+                        problems.append("보기 참고 문장 = 회차 문장 끝이 아님")
+                    if terms_view is None:
+                        if "termsDetected" in view:
+                            problems.append("termsDetected 가 있음")
+                    elif view.get("termsDetected") != terms_view or keys[keys.index("blHintsEn") + 1:keys.index("blHintsEn") + 2] \
+                            != ["termsDetected"]:
+                        problems.append(f"termsDetected 자리·값 {keys[-4:]}")
+                    if problems:
+                        bad.append(f"(ttk-f) {name}·{preset}: {problems}")
+            # 떡대 없는 보기의 키는 112 전과 같다(마지막 BL 2개 키 뒤에 새 키 없음)
+            view_none = castmod.view(load_c("char_ttk_none_idol"))
+            if "termsDetected" in view_none or [k for k in view_none if k in ("blDetected", "blHintsEn", "termsDetected")] \
+                    != ["blDetected", "blHintsEn"]:
+                bad.append(f"(ttk-f) 떡대 없는 보기 키가 112 전과 다릅니다: {list(view_none)[-4:]}")
+            # 고친 외모 문장에 slim·slender build → 원본(lookEn·보기)은 그대로, 회차 문장에서만 빠진다
+            cid_s = "char_ttk_slim"
+            seed_char(cid_s, extra="떡대 있는 남자")
+            slim_look = "a slim Korean man in his 30s with a slender build and short black hair"
+            put = call("PUT", f"/api/vnew/characters/{cid_s}/casting", {"lookEn": slim_look, "preset": "real"})
+            draw = call("POST", f"/api/vnew/characters/{cid_s}/casting/draw", {"confirmUsd": castmod.total_usd("real"), "preset": "real"})
+            cast_s = load_c(cid_s).get("casting") or {}
+            if put[0] != 200 or draw[0] != 202 or cast_s.get("lookEn") != slim_look or (draw[1].get("casting") or {}).get("lookEn") != slim_look \
+                    or castmod.current_look(load_c(cid_s)) != slim_look \
+                    or cast_s.get("prompt") != f"{_TTK_REAL_MALE} He is a Korean man in his 30s with short black hair, with dark brown eyes. " \
+                    f"{_BL_TTOKDAE_SENTENCE} {_cpg_anchor('male')}":
+                bad.append(f"(ttk-f) slim·slender build 처리가 다릅니다: {cast_s.get('lookEn')!r} {str(cast_s.get('prompt'))[-260:]!r}")
+            # VNEW_BL_LOOK 끔: "떡대"만 있어도 112 전과 같다(문장·로그 physique=-·보기 키). 떡대공 끔은 bl-g 가 본다.
+            with _pin_vnew(VNEW_BL_LOOK=False):
+                cid_o = "char_ttk_off"
+                seed_char(cid_o, extra="떡대 있는 남자")
+                logs.clear()
+                off = call("POST", f"/api/vnew/characters/{cid_o}/casting/draw", {"confirmUsd": castmod.total_usd("idol"), "preset": "idol"})
+                cast_o = load_c(cid_o).get("casting") or {}
+                if off[0] != 202 or cast_o.get("prompt") != f"{old_head(look_f, 'idol', 'male')} {_cpg_anchor('male')}" \
+                        or not (logs.messages("vnew.casting.draw_start") or [""])[0].endswith(" bl=- physique=-") \
+                        or {"blDetected", "blHintsEn", "termsDetected"} & set(off[1].get("casting") or {}) \
+                        or castmod._terms_now(load_c(cid_o)) != []:  # noqa: SLF001
+                    bad.append(f"(ttk-f) VNEW_BL_LOOK 끔 동작이 112 전과 다릅니다: {off[0]} {logs.messages('draw_start')}")
+            if castmod._terms_now(None) != [] or castmod._terms_now({"extraPromptKo": 5}) != [] \
+                    or castmod._terms_now({"analysis": {"descriptionKo": "떡대"}, "extraPromptKo": ""}) != []:  # noqa: SLF001
+                bad.append("(ttk-f) _terms_now 가 extraPromptKo 밖에서 떡대를 찾습니다")
+            # fal 제출 본문: 떡대 회차도 정확히 {prompt, num_images, image_size}, prompt = 회차 문장(이미지·URL 없음)
+            posted: list = []
+
+            def fake_submit(method, url, payload=None):
+                posted.append((method, url, payload))
+                return {"request_id": "req-ttk-1"}
+
+            castmod._fal_request = fake_submit  # noqa: SLF001
+            try:
+                cast_g = load_c("char_ttk_gong_idol").get("casting") or {}
+                model, _unit, size = castmod._round_choice(cast_g)  # noqa: SLF001
+                castmod._submit_slot(owner, "char_ttk_gong_idol", cast_g.get("claim"), 0, cast_g.get("prompt"), model, size)  # noqa: SLF001
+            finally:
+                castmod._fal_request = stray_call("casting._fal_request")  # noqa: SLF001
+            body = posted[0][2] if posted else {}
+            if len(posted) != 1 or set(body) != {"prompt", "num_images", "image_size"} or body.get("prompt") != cast_g.get("prompt") \
+                    or _TTK_BUILD not in body.get("prompt", "") or re.search(r"https?://|data:image", _json.dumps(body)):
+                bad.append(f"(ttk-f) 떡대 회차의 fal 본문이 3키·회차 문장이 아닙니다: {sorted(body)}")
+            # 영상 쪽·웹툰 외모 문장 쪽은 떡대를 읽지 않는다
+            for path_f in ("generate.py", "characters.py"):
+                src_f = (APP_SRC / "vnew" / path_f).read_text(encoding="utf-8")
+                if re.search(r"web_terms|detect_terms|termsDetected|physique|떡대|ttokdae", src_f):
+                    bad.append(f"(ttk-f) {path_f} 가 떡대·일반 용어를 읽습니다(영상·웹툰 외모 문장은 바꾸지 않는다)")
+            report.append(f"ttk-f: 설명 {len(descs)}종 × 프리셋 2 뽑기 · slim 원본 그대로 · 끔 = 112 전 · fal 본문 {sorted(body)}")
+            seen.add("ttk-f")
+
+            # ================= (ttk-g) 화면 한 줄(node 가짜 DOM) =================
+            vjs = (PUBLIC / "vnew.js").read_text(encoding="utf-8")
+            c_start, c_end = vjs.find("  /* ---- 실사 캐스팅(vnew-live-fx 묶음 B"), vjs.find("  /* ---- 추가 복장 섹션 ---- */")
+            el_start, el_end = vjs.find("  function el(tag, className, text)"), vjs.find("  function token()")
+            p_start, p_end = vjs.find("  function schedulePoll(host, detail)"), vjs.find("  function backRow(host)")
+            node = shutil.which("node")
+            node_got: dict = {}
+            if min(c_start, c_end, el_start, el_end, p_start, p_end) < 0 or "innerHTML" in vjs[c_start:c_end] \
+                    or vjs[c_start:c_end].count("CASTING_TERM_FOUND_LEAD = \"" + _TTK_TERM_LEAD + "\"") != 1:
+                bad.append("(ttk-g) vnew.js 캐스팅 구역·용어 줄 문구를 찾지 못했거나 innerHTML 을 씁니다")
+            elif not node:
+                warn("node 가 없어 ttk-g 화면 실행을 건너뜁니다 (E16)")
+            else:
+                server = {name: {"casting": _json.loads(_json.dumps(castmod.view(load_c(f"char_ttk_{name}_idol"))))}
+                          for name in ("term", "mixed", "gong", "none")}
+                script = (_CAST_SCREEN_NODE_HARNESS + "var SERVER = " + _json.dumps(server, ensure_ascii=False) + ";\n"
+                          + vjs[el_start:el_end] + vjs[p_start:p_end] + vjs[c_start:c_end] + _TTK_SCREEN_NODE_CASES)
+                tmp_dir = tempfile.mkdtemp(prefix="ttk_g_")
+                try:
+                    path = Path(tmp_dir) / "ttk_screen.js"
+                    path.write_text(script, encoding="utf-8")
+                    result = subprocess.run([node, str(path)], capture_output=True, text=True, encoding="utf-8", timeout=60)
+                finally:
+                    shutil.rmtree(tmp_dir, ignore_errors=True)
+                if result.returncode != 0:
+                    bad.append(f"(ttk-g) node 실행 실패: {(result.stderr or '').strip()[:600]}")
+                else:
+                    node_got = _json.loads((result.stdout or "").strip().splitlines()[-1])
+                checked = subprocess.run([node, "--check", str(PUBLIC / "vnew.js")], capture_output=True, text=True, encoding="utf-8")
+                if checked.returncode != 0:
+                    bad.append(f"(ttk-g) node --check vnew.js 실패: {(checked.stderr or '').strip()[:300]}")
+                if node_got:
+                    hint = _BL_HINT_LEAD
+                    want_pure = [
+                        {"found": True, "text": _TTK_TERM_LEAD + "떡대 — " + hint + "He has a big body."},
+                        {"found": True, "text": _TTK_TERM_LEAD + "떡대"},
+                        {"found": True, "text": _BL_FOUND_LEAD + "무심공 · 외모 용어: 떡대 — " + hint + "He has a."},
+                        {"found": True, "text": _TTK_TERM_LEAD + "ttokdae"},
+                        {"found": False, "text": _BL_GUIDE}, {"found": False, "text": _BL_GUIDE}, None,
+                        {"found": True, "text": _BL_FOUND_LEAD + "떡대공 — " + hint + "He has a big body."},
+                    ]
+                    term_hint, mixed_hint = server["term"]["casting"]["blHintsEn"], server["mixed"]["casting"]["blHintsEn"]
+                    want_lines = {
+                        "term": ["p", "vnew-casting-bl-found", _TTK_TERM_LEAD + "떡대 — " + hint + term_hint],
+                        "mixed": ["p", "vnew-casting-bl-found", _BL_FOUND_LEAD + "무심공 · 외모 용어: 떡대 — " + hint + mixed_hint],
+                        "gong": ["p", "vnew-casting-bl-found",
+                                 _BL_FOUND_LEAD + "떡대공 — " + hint + server["gong"]["casting"]["blHintsEn"]],
+                        "none": ["p", "vnew-hint vnew-casting-bl-guide", _BL_GUIDE],
+                        "evil": ["p", "vnew-casting-bl-found", _TTK_TERM_LEAD + "<img src=x onerror=alert(1)> — " + hint + term_hint],
+                    }
+                    if node_got.get("pure") != want_pure:
+                        bad.append(f"(ttk-g) castingBlLine 용어 줄이 다릅니다: {node_got.get('pure')}")
+                    for name, line in want_lines.items():
+                        if node_got.get(name) != {"lines": 1, "line": line}:
+                            bad.append(f"(ttk-g) {name} 화면 줄이 다릅니다: {node_got.get(name)} != {line}")
+                    if node_got.get("innerHTML") is not False or not term_hint.startswith(build_sentence["male"]):
+                        bad.append("(ttk-g) innerHTML 을 썼거나 용어 줄 참고 문장이 떡대 체격이 아닙니다")
+            seen.add("ttk-g")
+
+            if stray:
+                bad.append(f"쓰면 안 되는 경로가 불렸습니다: {sorted(set(stray))}")
+            if real_calls:
+                bad.append(f"(guard) 가짜가 아닌 LLM 호출이 있었습니다: {real_calls}")
+    except Exception as exc:  # noqa: BLE001
+        bad.append(f"검사 중 예외: {type(exc).__name__} {str(exc)[:200]}\n{_tb.format_exc()[-1500:]}")
+    finally:
+        charmod.STORE = saved["STORE"]
+        castmod._fal_request = saved["cast_fal"]  # noqa: SLF001
+        castmod._fetch_url = saved["cast_fetch"]  # noqa: SLF001
+        castmod._spawn = saved["cast_spawn"]  # noqa: SLF001
+        charmod._fal_request = saved["char_fal"]  # noqa: SLF001
+        vpoc_fal._request = saved["vpoc_request"]  # noqa: SLF001
+        vpoc_settings.FAL_KEY = saved["fal_key"]
+        castmod.PROMPT_MAX = saved["prompt_max"]
+        castmod.LOOK_MAX = saved["look_max"]
+        with castmod._CAST_LOCK:  # noqa: SLF001
+            castmod._CAST_RUNNING.clear()  # noqa: SLF001
+
+    expected = [f"ttk-{c}" for c in "abcdefg"]
+    missing = [item for item in expected if item not in seen]
+    if missing and not bad:
+        bad.append(f"끝까지 돌지 않은 검사: {missing}")
+    if bad:
+        fail("지시서 112 떡대 체격 검사 실패\n" + "\n".join(f"  {item}" for item in bad))
+    else:
+        ok(
+            "지시서 112 떡대 체격 검사 (ttk-a)떡대 정의 web_terms·참고 사진 6구·떡대공·떡대수 = 체격 하나·공수 조각 0 "
+            "(ttk-b)부딪히는 체격 낱말 빼기 (ttk-c)문장 떡대 체격·허리 위 구도·고정 문장 끝·없음 = 112 전·운영 범건우 회귀 "
+            "(ttk-d)\"떡대\"만 찾기·경계·부정 (ttk-e)1500자 체격 마지막까지 (ttk-f)라우트·로그 physique=·보기 termsDetected·fal 3키 "
+            "(ttk-g)화면 용어 줄"
+            + "".join(f"\n       ttk: {line}" for line in report)
         )
 
 
@@ -35286,6 +35988,7 @@ def main() -> int:
     _run_cast_photo_off(lambda: _run_cast_idol_off(check_vnew_bl_look))
     _run_cast_idol_off(check_vnew_cast_photo_guard)
     check_vnew_cast_idol_model()
+    check_vnew_cast_ttokdae()
     check_vnew_edit()
     check_pod_zones()
     print()

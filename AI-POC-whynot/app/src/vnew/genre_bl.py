@@ -17,6 +17,15 @@
 
 이 모듈은 순수 함수와 표만 갖는다. 아무것도 저장하지 않고 외부 호출이 없다.
 
+## 공·수 해석 원칙(지시서 112, 2026-11-01)
+
+사용자 지시: "공·수는 BL 속 단순 포지션이다. 떡대공 = 떡대(체격) + 공(포지션)." 그래서
+- **공/수 접미사 자체는 외모를 더하지 않는다.** 유형 조각은 유형 이름 앞부분(떡대·미인·꽃 …)이 외모를 뜻할 때 그 뜻만 옮긴다.
+- 떡대는 BL 용어가 아니라 일반 인터넷 용어다. 정의(체격 조각)는 web_terms.TERMS["ttokdae"] 한 곳에 두고, 떡대공·떡대수는 그 조각
+  하나만 가져다 쓴다(TYPE_TERMS). 사용자가 직접 쓴 체격이라 casting 은 그 조각을 그림 우선에서 빼지 않는다(hint_pieces 의 forced).
+- 설명에 "떡대"만 있어도(떡대 있는 남자·떡대남) detect_terms 가 찾는다. 이때 BL 유형(역할)은 정하지 않는다.
+- 다른 유형(광공·무심공 …)의 조각은 112 에서 바꾸지 않았다(공·수에서 나온 듯한 조각 목록은 WORKLOG 112 남은 이슈).
+
 ## 옛 지식에서 옮긴 것
 
 옛 저장소(이 저장소 밖 `C:/dev/ai/AI-POC-whynot`, 읽기만)의 BL 장르 모듈 TAGS 10종(id·label·desc 그대로)과 옛 steering
@@ -35,6 +44,8 @@
 from __future__ import annotations
 
 import re
+
+from . import web_terms
 
 # --------------------------------------------------------------------------- 역할
 ROLE_NONE = ""
@@ -102,17 +113,9 @@ TYPES: dict[str, dict] = {
     "ttokdae_gong": {
         "role": ROLE_TOP,
         "label": "떡대공",
-        "desc": "큰 키와 넓은 어깨, 건장한 체격의 공",
-        "lookEn": (
-            ("build", "broad shoulders and a solid, muscular build"),
-            ("height", "a tall frame"),
-            ("faceShape", "a firm square jawline"),
-            ("faceImpression", "a rugged, masculine look"),
-            ("eyeShape", "deep-set eyes"),
-            ("gaze", "a steady gaze"),
-            ("expression", "a calm, confident expression"),
-            ("posture", "an upright, imposing posture"),
-        ),
+        "desc": "크고 넓적하며 건장한 몸집(떡대)의 공",
+        # 지시서 112: 떡대(체격) + 공(포지션, 외모 없음). 조각은 web_terms 떡대 체격 하나뿐이다.
+        "lookEn": web_terms.TERMS[web_terms.TTOKDAE]["lookEn"],
     },
     "musim_gong": {
         "role": ROLE_TOP,
@@ -159,15 +162,8 @@ TYPES: dict[str, dict] = {
         "role": ROLE_BOTTOM,
         "label": "떡대수",
         "desc": "큰 체격의 수",
-        "lookEn": (
-            ("build", "broad shoulders and a sturdy, muscular adult man's build"),
-            ("height", "a tall frame"),
-            ("faceShape", "strong features"),
-            ("faceImpression", "a good-natured, masculine look"),
-            ("gaze", "calm, gentle eyes"),
-            ("expression", "a soft, slightly shy expression"),
-            ("posture", "a relaxed, unassuming posture"),
-        ),
+        # 지시서 112: 떡대(체격) + 수(포지션, 외모 없음). 떡대공과 같은 조각 하나뿐이다(떡대는 공·수와 관계없이 같은 몸).
+        "lookEn": web_terms.TERMS[web_terms.TTOKDAE]["lookEn"],
     },
     "musim_su": {
         "role": ROLE_BOTTOM,
@@ -219,6 +215,20 @@ TYPES: dict[str, dict] = {
         ),
     },
 }
+
+# 지시서 112: 유형 이름 앞부분이 뜻하는 일반 인터넷 외모 용어(web_terms). 떡대공·떡대수 = 떡대(체격) + 공·수(포지션). casting 은 이 용어의
+# 조각을 그림 우선에서 빼지 않고(forced), 몸 용어면 구도를 바꾸고 부딪히는 체격 낱말을 뺀다.
+TYPE_TERMS: dict[str, tuple[str, ...]] = {"ttokdae_gong": (web_terms.TTOKDAE,), "ttokdaesu": (web_terms.TTOKDAE,)}
+
+
+def type_terms(bl_types) -> list[str]:
+    """유형들(id 하나 또는 목록)이 뜻하는 일반 용어 id. 유형 순서대로, 중복 없이."""
+    out: list[str] = []
+    for type_id in known_types(bl_types):
+        for term_id in TYPE_TERMS.get(type_id, ()):
+            if term_id not in out:
+                out.append(term_id)
+    return out
 
 # --------------------------------------------------------------------------- 형태 판정 낱말 표(design §3)
 #
@@ -340,20 +350,25 @@ def look_categories(look_en) -> set[str]:
     return {cat for cat in FORM_CATEGORIES if _CATEGORY_RE[cat].search(text)}
 
 
-def hint_pieces(bl_types, look_en) -> list[str]:
+def hint_pieces(bl_types, look_en, forced=()) -> list[str]:
     """그 유형(id 하나 또는 id 목록, 지시서 104)의 조각(표 순서, 여러 유형이면 merged_pieces 순서). 인상 조각은 늘 넣고, 형태 조각은
     외모 문장에 같은 형태 분류가 없을 때만 넣는다(그림 우선).
 
     형태 조각의 분류 = 단 분류 ∪ 조각 글이 스스로 담은 형태 분류(design D3: "a lean, tall build" 는 그림의 "short stature" 와
     부딪힌다). 모르는 유형이면 [].
+
+    forced(지시서 112): 사용자가 설명에 직접 쓴 일반 용어 조각((분류, 영어) 목록, casting 이 web_terms 에서 준다 — 떡대 체격). 맨 앞에
+    두고 그림 우선에서 빼지 않는다. 그 분류는 유형 조각보다 먼저 차지한다(merged_pieces). 비면 지금과 같다.
     """
-    pairs = merged_pieces(bl_types)
+    forced = tuple(forced)
+    pairs = merged_pieces(bl_types, forced)
     if not pairs:
         return []
     taken = look_categories(look_en)
+    keep = len(forced)
     out = []
-    for cat, text in pairs:
-        if cat in IMPRESSION_CATEGORIES or not ({cat} | look_categories(text)) & taken:
+    for index, (cat, text) in enumerate(pairs):
+        if index < keep or cat in IMPRESSION_CATEGORIES or not ({cat} | look_categories(text)) & taken:
             out.append(text)
     return out
 
@@ -428,6 +443,41 @@ def detect_types(text_ko) -> list[str]:
     return found
 
 
+# --------------------------------------------------------------------------- 일반 인터넷 외모 용어 찾기(지시서 112, design D6)
+#
+# 이름은 web_terms.TERMS 의 label(지금은 "떡대")이다. 앞 경계(D28)·부정(D19)은 유형 이름과 같은 함수(_front_ok·_negated)를 쓴다.
+# 뒤쪽 제외(D29 "원"·"업"·꽃수 낱말)는 공·수로 끝나는 유형 이름(공원·수업)을 위한 규칙이라 쓰지 않는다("떡대남"·"떡대가 좋은" 찾음).
+# 유형 이름 자리(떡대공·떡대수 — 찾았든 부정·제외로 뺐든)와 겹치는 자리는 유형 찾기가 맡는다("떡대공 아님" 은 떡대도 아님).
+# 찾은 유형이 이미 뜻하는 용어(TYPE_TERMS)는 다시 내지 않는다("떡대공이고 떡대가 좋다" → 유형만).
+_TERM_NAME_TO_ID: dict[str, str] = web_terms.names()
+# "떡대 없는"·"떡대가 없다"는 용어가 없다는 뜻이라 찾지 않는다(바로 뒤 조사 하나까지만 본다, 112 검토).
+_TERM_ABSENT_RE = re.compile(r"\s*(?:이|가|은|는|도)?\s*없")
+_TERM_RE = re.compile("|".join(re.escape(name) for name in sorted(_TERM_NAME_TO_ID, key=len, reverse=True)))
+
+
+def detect_terms(text_ko) -> list[str]:
+    """사용자가 쓴 캐릭터 설명(한국어)에 적힌 일반 외모 용어 id(web_terms). 나온 자리 순서대로, 중복 없이. BL 유형은 정하지 않는다.
+
+    앞 경계가 아니거나(한글 음절 뒤 — "개떡대") 부정(이름 끝 바로 뒤 6자 안 "아님"·"아니"·"말고")이거나 유형 이름 자리 안이면 그 자리를
+    건너뛴다. 글이 아니거나 비면 [].
+    """
+    if not isinstance(text_ko, str) or not text_ko:
+        return []
+    spans = [match.span() for match in _NAME_RE.finditer(text_ko)]
+    implied = set(type_terms(detect_types(text_ko)))
+    found: list[str] = []
+    for match in _TERM_RE.finditer(text_ko):
+        start, end = match.span()
+        if any(start < span_end and span_start < end for span_start, span_end in spans):
+            continue
+        if not _front_ok(text_ko, start) or _negated(text_ko, end) or _TERM_ABSENT_RE.match(text_ko, end):
+            continue
+        term_id = _TERM_NAME_TO_ID[match.group(0)]
+        if term_id not in implied and term_id not in found:
+            found.append(term_id)
+    return found
+
+
 def known_types(bl_types) -> list[str]:
     """유형 id 하나(글) 또는 id 목록(list·tuple) → 아는 id 만, 순서대로 중복 없이. 그 밖의 값은 []."""
     if isinstance(bl_types, str):
@@ -448,14 +498,19 @@ def _piece_categories(cat: str, text: str) -> set[str]:
     return {cat} if cat in IMPRESSION_CATEGORIES else {cat} | look_categories(text)
 
 
-def merged_pieces(bl_types) -> list[tuple[str, str]]:
+def merged_pieces(bl_types, forced=()) -> list[tuple[str, str]]:
     """여러 유형의 (분류, 조각)을 합친다(지시서 104, design D20). 유형이 하나면 그 표 그대로다.
 
     앞 유형의 조각은 표 순서대로 모두 넣는다. 뒤 유형의 조각은 그 분류를 앞 유형이 이미 가졌으면 뺀다(같은 분류는 앞의 유형이
     이긴다). 판정은 표 기준이다(그림으로 빼기 전) — 앞 유형 조각이 그림 때문에 빠져도 뒤 유형이 그 자리를 채우지 않는다.
+
+    forced(지시서 112, hint_pieces 참고)는 모든 유형보다 앞이다. 그 조각을 맨 앞에 그대로 두고 그 분류를 먼저 차지한다(떡대 체격이 있으면
+    떡대공의 같은 조각·무심공 "a lean, tall build" 는 빠진다). 비면 지금과 같다.
     """
-    out: list[tuple[str, str]] = []
+    out: list[tuple[str, str]] = [(cat, text) for cat, text in forced]
     claimed: set[str] = set()
+    for cat, text in out:
+        claimed |= _piece_categories(cat, text)
     for type_id in known_types(bl_types):
         own: set[str] = set()
         for cat, text in TYPES[type_id]["lookEn"]:
