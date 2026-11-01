@@ -2025,3 +2025,73 @@
   7. 통 테이크 컷 경계는 녹화 타이밍에 비례한 추정이다. 모델이 타이밍을 바꾸면 경계가 조금 어긋난다(사용자가 끝을 끌어 맞춘다, 처음 상태로 되돌리기 가능).
   8. `CLAUDE.md`는 `stitcher.py`를 고치지 않는 플랫폼 파일로 적고 있다. 이번에는 지시서가 "새 함수 추가만"을 허락해 파일 끝에만 더했다(`PLATFORM_FILES.txt`에는 없는 파일, 기존 부분 sha256 그대로).
   9. `stitcher.py` 새 함수의 방어 분기 7줄(리눅스 `nice` 찾기·`unlink` 실패·빅엔디언)은 윈도 개발 PC 검사에서 닿지 않는다. CI(리눅스)에서는 `nice` 분기가 돈다.
+
+## 2026-11-02
+
+### 지시서 112 — 실사 캐스팅에서 "떡대"는 체격, "공·수"는 포지션으로만 (Kiro, claude-opus-5.5)
+
+- **범위**: `.kiro/handoff/112-cast-ttokdae-physique.md`. 새 스펙 `.kiro/specs/cast-ttokdae/`(requirements R1~R8, design D1~D15·§3 문장 예·§4 검사·§5 비용, tasks 1~7)을 쓰고 같은 실행에서 구현·검사까지 했다. 커밋·push 하지 않았다. git·aws·kubectl·네트워크·유료 API를 쓰지 않았다. 사용자 데이터는 읽지 않았다.
+- **먼저 한 일**: 바꿀 파일 6개와 수정 금지 파일 10개의 시작 전 사본, 저장소 파일 목록(크기·mtime)을 저장소 밖(`%TEMP%\ttk112`)에 두었다. 시작 전 전체 검사 전부 통과(ok 67줄, FAIL·WARN 0, 82초). 그 뒤 검사·커버리지·변형 실행은 모두 `PYTHONPYCACHEPREFIX`(저장소 밖)로 돌렸다.
+- **사실(지시서·사용자 지시 2026-11-01)**: 떡대는 인터넷 용어로 체격과 비슷한 말(주로 남성의 크고 넓적하며 건장한 몸집), 공·수는 BL 속 단순 포지션, 떡대공 = 떡대(체격) + 공(포지션)을 실사 이미지에만 더한다. 보충 지시: BL이 주가 되면 안 되고 떡대는 일반 인터넷 용어다. 참고 사진 2장 공통: 매우 넓은 어깨·두꺼운 목·넓고 근육이 두드러진 등·두꺼운 팔(이두·삼두)·두툼한 가슴, 보디빌더처럼 크고 묵직한 근육형(비만 아님), 얼굴·표정은 특정하지 않음. 112 전 문제: 떡대공 조각의 얼굴·인상 조각 6개, 그림 우선이 "tall, muscular" 외모에서 체격 조각을 뺌(운영 범건우), `chest-up framing`·아이돌풍 `slim V-line face`.
+- **결정**(design §2)
+  - D1 정의 자리: 새 잎 모듈 `vnew/web_terms.py`(`TERMS` — 지금 떡대 하나, import `re` 뿐). `genre_bl`이 가져다 쓴다. 113이 같은 표를 쓴다.
+  - D2 떡대 체격 조각(155자, build): "a big, powerfully built muscular masculine body with very broad shoulders, a thick neck, a wide muscular back, a broad, thick chest and thick muscular arms". 참고 사진 특징 6가지와 1:1(대응표는 design D2·ANALYSIS). "heavily"는 heavy-set(뚱뚱함)으로 읽힐 수 있어 "powerfully"로 바꿨고, "masculine"은 steering 수 유형 규칙 때문이다(떡대수도 이 조각 하나).
+  - D3 떡대공·떡대수: 두 유형 모두 이 조각 하나(같은 객체, `TYPE_TERMS`). 뺀 조각은 아래 「뺀 공·수 조각」. 키("a tall frame")도 뺐다(떡대는 몸집이고 키는 그림이 정한다, 허리 위 사진에서 거의 보이지 않는다). 떡대공 desc(103에서 Kiro가 쓴 화면 문구) → "크고 넓적하며 건장한 몸집(떡대)의 공". `genre_bl.py` 머리 주석에 "공/수 접미사 자체는 외모를 더하지 않는다".
+  - D4 구도: 떡대가 있을 때만 두 프리셋 `chest-up framing` → `waist-up framing with the shoulders, upper arms and chest fully in frame`, 아이돌풍 `slim V-line face, `는 빼기만 한다(떡대는 얼굴을 정하지 않는다). `fully clothed`·옷 문장 그대로, 옷 맞음새 문구는 더하지 않았다(설명한 옷과 부딪히거나 비침으로 읽힐 수 있다). 떡대가 없으면 프리셋 바이트 그대로.
+  - D5 부딪히는 체격 낱말: 캐스팅 문장에서만, 사람·몸 명사 앞 같은 명사구일 때만 구 단위로 뺀다(`web_terms.strip_conflicts`, 낱말 30개 — slim·slender·lean·skinny·petite·thin·slight·lanky·wiry·willowy·frail·scrawny·delicate·gaunt·bony·small·narrow·average·medium·small-framed·narrow-shouldered·slim-built·lightly built 등). "thin lips"·"slim-fit"·"a slender angular face"·"narrow eyes"는 그대로. 원본 `lookEn`은 그대로.
+  - D6 "떡대"만: `genre_bl.detect_terms`(`detect_types` 바로 뒤). 앞 경계·부정은 유형과 같은 함수(`_front_ok`·`_negated`), 뒤쪽 제외("원"·"업")는 쓰지 않음, 유형 이름 자리 안은 건너뜀("떡대공 아님"은 떡대도 아님), 찾은 유형이 이미 뜻하면 다시 내지 않음.
+  - D7 보기: "떡대"만 찾았을 때만 `termsDetected`(없으면 키가 없어 보기가 112 전과 같다). 화면 줄 "캐릭터 설명에서 찾은 외모 용어: 떡대 — 참고로 더해지는 외모 설명(영어): …"(`blDetected`에 넣으면 "BL 유형: 떡대"로 보여 넣지 않았다).
+  - D8 1500자: 다른 참고 조각(끝부터) → 외모(단어 경계) → 프리셋 순, 떡대 체격 문장은 사진 고정 문장 다음으로 마지막까지(`_fit_physique`).
+  - D9 설정: 새 키 없이 `VNEW_BL_LOOK`을 따른다(끔 = 112 전). D10 로그: `vnew.casting.draw_start … bl=… physique=ttokdae|-`(지시서 "캐스팅 제출 로그"를 bl=이 있는 회차 시작 줄로 읽었다). D11 `genre_bl.hint_pieces`·`merged_pieces`의 `forced`(사용자가 쓴 용어 조각은 그림 우선에서 빠지지 않고 같은 분류를 먼저 차지). D12 떡대 + unknown → male, female 지정은 그대로.
+- **뺀 공·수 조각**: 떡대공 — a firm square jawline · a rugged, masculine look · deep-set eyes · a steady gaze · a calm, confident expression · an upright, imposing posture(그리고 체격 "broad shoulders and a solid, muscular build"는 떡대 체격으로 바꿈, "a tall frame" 뺌). 떡대수 — strong features · a good-natured, masculine look · calm, gentle eyes · a soft, slightly shy expression · a relaxed, unassuming posture(체격 "broad shoulders and a sturdy, muscular adult man's build"는 떡대 체격으로 바꿈, "a tall frame" 뺌).
+- **검토한 대안**(design D14): `genre_bl.TYPES` 안 정의(보충 지시로 기각), `casting.py` 안 표(순환 import·113, 기각), 찾기도 `web_terms`에(규칙 두 벌·순환, 기각), 그림 우선 그대로 두고 외모만 고치기(범건우 회귀가 안 풀림, 기각), 떡대만의 특수 분기(일반 규칙 `forced`가 113에도 맞음, 기각), `blDetected`에 떡대(화면이 BL 유형으로 보임, 기각), `termsDetected` 늘 두기(기존 보기 기대값·지문이 바뀜, 기각), 키 조각 남기기·V라인 대신 얼굴 낱말·옷 맞음새 문구(기각), LLM 다시 쓰기(기각), 부정 낱말에 "없"(지시서가 D19 그대로를 요구 — 보류, 남은 이슈), 새 설정 키(범위 밖, 기각), 로그를 `submitted`에(회차 저장 필요, 기각).
+- **바꾼 것**
+  - `app/src/vnew/web_terms.py`(새 파일, 206줄): `TERMS`·`TTOKDAE_BUILD`·`_TTOKDAE_CONFLICTS`, `is_term`·`names`·`known_terms`·`term_pieces`·`physique_of`, `strip_conflicts`(+ `_conflict_re`·`_fix_article`·`_drop_bare`·`_modifiers_only`).
+  - `app/src/vnew/genre_bl.py`(+79 −26, 지운 정의 0): 머리 주석 원칙, `web_terms` import, 떡대공·떡대수 조각·떡대공 desc, `TYPE_TERMS`·`type_terms`, `hint_pieces`·`merged_pieces`의 `forced`, `detect_terms`.
+  - `app/src/vnew/casting.py`(+96 −23, 지운 정의 0): docstring, `PHYSIQUE_FRAMING`·`_PHYSIQUE_SWAPS`, `base_text(physique)`, `cast_prompt(terms)`, `_term_ids`, `_cast_text(terms)`, `_fit_physique`, `_fit_cast_head(physique)`, `_terms_now`, `start_draw`(회차 문장·로그), `view`(`blHintsEn`·`termsDetected`), 주석.
+  - `frontend/public/vnew.js`(+14 −3): `CASTING_TERM_FOUND_LEAD`·`CASTING_TERM_AFTER_BL`, `castingBlLine`이 `termsDetected`를 본다(없으면 104와 같다). `vnew.css`는 그대로.
+  - `tools/check_vpoc.py`(+766 −63, 지운 함수 정의 0): `_TTK_BUILD`·`_TTK_IDOL_MALE`·`_TTK_REAL_MALE`, `_BL_TTOKDAE_SENTENCE`(새 값), `_BL_TTOKDAE_MIN_AVG` 지움(아래 기대값), bl·cpg 기대값, 새 `check_vnew_cast_ttokdae`(ttk-a~g)·`_TTK_*`, `main()`.
+  - `.kiro/specs/cast-ttokdae/` 세 파일, `docs/ANALYSIS.md`(머리 줄·§3.6 모듈 표(`casting`·`genre_bl`·새 `web_terms` 행)·§3.6.1 B 「떡대 = 체격, 공·수 = 포지션」 절(원칙·참고 사진 특징표·단계 표)·BL 표 두 행·§10.1 줄 수·개수·행·기대값 문단), 이 항목.
+- **검사(어떤 검사가 무엇을 덮는지)**
+
+  | 검사 | 덮는 것 |
+  |---|---|
+  | ttk-a | `web_terms` 표(떡대 하나·label·kind·조각·부딪히는 낱말)·조각 = 참고 사진 6구 이음·비만·얼굴·키·은어·성적·색 낱말 0·`look_categories` = `{build}`·masculine, 떡대공·떡대수 = 같은 조각 객체·뺀 조각 15개 없음·다른 유형에 남지 않음, `type_terms` 8꼴, `known_terms` 9꼴(중복·모르는 값·글 아님)·`is_term`·`names`·`term_pieces`(중복 합침)·`physique_of`, `web_terms` import = re 뿐·저장·외부 호출 없음, `genre_bl` 머리 주석 원칙 |
+  | ttk-b | `strip_conflicts` 30경우 — `_conflict_re`(같은 명사구 창·붙임표·앞 머리말·두 낱말), 뒤 나눔·앞 나눔(`_modifiers_only` 참·거짓)·그 밖 세 분기, `_fix_article`(바꿈·대문자·그대로), `_drop_bare`(with + 꼬리·나눔째·글 처음 + 꼬리·글 처음), 몸이 아닌 낱말 그대로·서술어 한계, 용어 아님·글 아님 |
+  | ttk-c | `_cast_text` 떡대공·떡대수·"떡대"만·없음 × 프리셋 2 × 성별 3 × 외모 11 = 264문장(체격 문장·공수 조각 0·허리 위·V라인 없음·고정 문장 끝·부딪히는 낱말 0·≤1500·male 강제·female 유지, 없음 = 112 전 식), 보고 전문 2개 고정값(아이돌풍 + 떡대공 912자, 현실 배우풍 + "떡대"만 889자, 떡대수·unknown 같음), 운영 범건우 회귀(그림 우선이면 빠지는 꼴에서도 체격), `base_text` 프리셋 3 × 성별 4 = 112 전·physique 고정값 2·바꿀 글이 원문에 있음, `terms` 인자 10꼴, 무심공 + 떡대 |
+  | ttk-d | `detect_terms`·`detect_types` 28경우(찾음 12·안 찾음 12·글 아님 4), 부정 창 경계 8경우, 이름 표 |
+  | ttk-e | `_cast_text` 줄이기 루프의 체격 멈춤·`_fit_physique` 세 분기(자리 있음·체격 문장만·체격 문장도 빼기)·`_fit_cast_head(physique)`, PROMPT_MAX 7단계, 긴 외모(LOOK_MAX 3000) × 프리셋 2 × 떡대공·용어(외모 먼저 줄이고 slim 빠짐), 운영 최대 144경우 1,339자 |
+  | ttk-f | 실제 vnew 블루프린트(Flask, 메모리 저장소): `POST /casting/draw` 설명 7종(떡대공·떡대수·떡대만·무심공 + 떡대·없음·부정·앞 경계) × 프리셋 2 → `start_draw` 회차 문장·로그 `physique=`·보기 `blHintsEn` = 문장 끝·`termsDetected` 값·자리(`view`), 떡대 없는 보기 키, `PUT /casting` slim·slender build → 원본 그대로·문장 전문, `VNEW_BL_LOOK` 끔(`_terms_now` 끔 분기), `_terms_now` 근거, `_submit_slot` fal 본문 3키·회차 문장, `generate.py`·`characters.py`가 떡대를 읽지 않음 |
+  | ttk-g | node 가짜 DOM(cast-l 하네스): `castingBlLine` 8꼴(용어만·참고 문장 없음·유형 + 용어·label 없음·배열 아님·빈 배열·끔·유형만), 실제 `view` 응답 4개로 `castingSection` 줄·위험한 글 textContent·`innerHTML` 0·`node --check` |
+
+- **기대값을 바꾼 기존 검사와 이유**(design D13)
+  - bl-a: 떡대공 눈 조각 둘(deep-set eyes·a steady gaze) 확인 → 떡대공·떡대수 = 떡대 체격 하나(같은 객체). genre_bl import 목록에 `web_terms`. 이유: 공에서 나온 눈 조각을 뺐고, 정의를 일반 용어 모듈에서 가져온다.
+  - bl-b: "실제 분석 꼴 6개 떡대공 평균 조각 ≥ 4"(103 피드백, `_BL_TTOKDAE_MIN_AVG`)를 지우고 "6개 모두 떡대공 캐스팅 참고 문장이 떡대 체격으로 시작"으로. 이유: 떡대공 조각이 하나라 평균 기준이 뜻이 없고, 사용자 의도(체격이 늘 들어감)를 봐야 한다. 그림 우선만 부를 때(forced 없음)의 기존 구체 경우 19개는 그대로 통과한다.
+  - bl-d: 떡대공 기대 식에 physique 프리셋·부딪히는 낱말 빼기·forced를 넣고 떡대공 전문 고정값을 `_TTK_IDOL_MALE` + 떡대 체격 문장으로. bl-l: 무심공 + 떡대공 합치기(무심공 + 자세 → 무심공 그대로), 떡대공 + 무심공(떡대 체격 + 무심공 체격 뺌), 두 유형 전문, 무심공 + 광공(자세 하나) 경우를 더함. bl-f: 떡대공 회차 문장(허리 위 + 체격 문장). bl-h: 고친 외모 "a slim …" + 떡대공 `blHintsEn` = 7조각 → 떡대 체격 문장(R2.1, 보기 `lookEn`은 "a slim …" 그대로임을 함께 본다). 이유: 떡대공 조각·구도가 바뀌었다.
+  - bl-f·bl-g 로그 3줄: 끝에 ` physique=-`·` physique=ttokdae`. 이유: R5.
+  - bl-e·cpg-a: 예시 유형 떡대공 → 광공(조각 6개), 두 유형 무심공 + 떡대공 → 무심공 + 광공. 이유: 두 검사의 기준 식은 "프리셋 그대로·참고 조각이 먼저 빠진다"(103~107)인데 떡대는 구도가 바뀌고 체격이 마지막까지 남는다. 같은 동작을 떡대와 무관한 유형으로 계속 보고, 떡대 경우는 ttk-c·ttk-e가 본다.
+  - cast·cim·cf·cast-l·bl-c(유형 없음 5,148문장)·bl-i·bl-k는 그대로 통과(떡대가 없으면 문장·보기가 112 전과 같다).
+- **확인**
+  - `node --check frontend/public/vnew.js` 통과.
+  - `python -X utf8 tools/check_vpoc.py` 전부 통과: ok 68줄(시작 전 67 + ttk), FAIL·WARN 0, 90~92초(문서까지 고친 뒤 마지막 실행 90초).
+  - 커버리지(coverage 7.17, 전체 검사기 `coverage run --source=app/src/vnew`, 데이터는 저장소 밖, 시작 전 사본과 difflib): 바뀐 서버 실행문 183개 중 183개(100%) — `casting.py` 48/48, `genre_bl.py` 38/38, `web_terms.py` 97/97(새 파일 전체). 파일 전체 `genre_bl.py` 141/141, `casting.py` 1033/1038. 가지(ttk·bl만 `--branch`): `genre_bl.py` 52/52, `web_terms.py` 33/34 — 닿지 않은 하나는 `term_pieces`의 "같은 조각이 이미 있음" 분기(용어가 하나뿐이라 지금은 닿을 수 없다).
+  - 변형 검사 45개(저장소 파일을 한 곳씩 틀리게 고쳐 `check_vnew_cast_ttokdae`·`check_vnew_bl_look`만 돌리고 바이트째 되돌림): `casting.py` 19(V라인·구도 문구·physique 무시·현실 배우풍 구도·용어만 male 강제·부딪히는 낱말·forced·체격도 끝에서 뺌·체격 문장 버림·자리 경계·`_fit_physique`/`_fit_cast_head` 구도·설명 용어·유형 용어·뽑기 문장·로그·`termsDetected` 늘·보기 참고 문장·`_terms_now` 끔), `genre_bl.py` 9(떡대수 용어·forced 그림 우선·forced 분류·유형 이름 자리·유형이 뜻하는 용어·부정·앞 경계·떡대공 키 되살림·떡대수 옛 조각), `web_terms.py` 14(heavily·slender 빠짐·yet/but·꾸밈말 판정·관사·몸 명사구·of·physique_of·명사구 창·shoulders·붙임표 경계·앞 머리말·중복·with 꼬리), `vnew.js` 3(머리말·`termsDetected` 무시·유형 + 용어 잇기) — 모두 잡힘.
+  - 유료 호출 0: ttk는 `casting._fal_request`·`_fetch_url`·`characters._fal_request`·`vpoc.fal._request`를 막고(fal 본문은 가짜 하나로 받음), LLM은 `_guard_real_llm`, S3는 `_FakeCharStore`.
+  - 줄 끝·부산물: 바뀐 6개 파일·새 4개 파일 모두 CR 0(시작 전도 0)·BOM 없음·끝 줄바꿈 있음, 공백만 바뀐 줄 0, 새 줄 끝 공백 0, 지운 함수 정의 0(AST·JS). 수정 금지 10개 파일(`edit.py`·`generate.py`·`routes.py`·`stitcher.py`·`config.dev.env`·`config.prod.env`·`.gitlab-ci.yml`·`characters.py`·`settings.py`·`vnew.css`)은 바이트가 같다. 저장소 안 새 파일은 `web_terms.py`·스펙 3개뿐이고 `__pycache__`·`.coverage` 변화 0.
+- **3단계 리뷰**
+  - 보안: 비밀값 추가 없음. 외부로 나가는 데이터는 지금과 같은 fal 캐스팅 문장 하나이고(본문 3키, ttk-f), 떡대일 때 영어 체격·구도 문구만 더해진다. 캐릭터 설명 원문(한국어)은 보내지 않는다(찾은 결과를 정해 둔 영어 조각으로만 바꾼다). 입력 검증: `extraPromptKo`·`lookEn`(≤300자)은 정규식으로만 읽는다. 정규식 비용을 일부러 나쁜 입력으로 쟀다 — 외모 300자 최악 6ms(낱말이 다 빠지는 "slim slim … man"), 설명 2,000자 0.3ms, 문장 하나 1ms. 빼기 루프는 매번 글이 짧아져 끝난다. 화면은 `textContent`만(ttk-g 위험한 글). 로그에는 id(`ttokdae`)만 남고 사용자 글은 없다. 권한·경로·명령 주입 지점 없음.
+  - 성능(512Mi): 외부 호출 수·횟수·타임아웃 그대로(fal 제출·사진 검사 LLM 수 같음), 메모리 변화 없음, 큰 파일 처리 없음. 캐스팅 문장은 떡대일 때 아이돌풍 +202자(710 → 912)·현실 배우풍 +220자(669 → 889)이고 장당 금액과 무관하다.
+  - 운영성: 로그 `draw_start … physique=ttokdae|-`로 떡대 적용 회차가 보인다. 되돌리기는 `config.<target>.env`의 `VNEW_BL_LOOK=false`(BL 참고 문장도 함께 꺼짐) 또는 코드 되돌리기다. 진행 중 회차는 시작 때 만든 회차 문장(`cast.prompt`)을 끝까지 쓰므로 배포 전 회차·재시작 뒤 이어받기는 112 전 문장 그대로다. 롤링 배포: 옛 파드 보기에는 `termsDetected`가 없어 새 화면도 104 줄을 그리고, 옛 화면은 모르는 키를 무시한다.
+  - 발견·조치: (1) 구현 중 수동 확인에서 "short hair and narrow shoulders"가 "short hair shoulders"가 됐다(and가 꾸밈말을 잇는지 목록 항목을 잇는지 구별 못 함) → 앞 조각이 관사·꾸밈말뿐일 때만 앞 나눔째 빼게(`_modifiers_only`). "of average build"가 "of build"로 남음 → 몸 명사구 앞 나눔에 of. (2) 변형 검사 첫 회차에서 `_terms_now` 끔 무시(C17)와 붙임표 경계(W11)를 못 잡았다 → ttk-f 끔 경우를 "떡대"만 설명으로 바꾸고, "an ultra-slim Korean man" 경우를 더하면서 앞 붙임표 머리말 꼴도 빼게 코드를 보강했다(W14 더함, 45/45). (3) 라우트 JSON은 키를 정렬해 보기 키 자리를 볼 수 없었다 → 자리는 `casting.view`로 본다.
+- **운영 반영 계획(실행하지 않음)**: Claude 검토·커밋 → 개발 main 병합 → CI → 개발 ArgoCD. 개발에서 범건우(설명 "떡대공") 아이돌풍 1회(FLUX.2 [pro] 2장, $0.15)와 "떡대"만 설명 캐릭터 현실 배우풍 1회(Seedream 2장, $0.08)로 로그 `physique=ttokdae`·화면 줄·사진의 허리 위 구도·체격(넓은 어깨·두꺼운 목·팔)·비만으로 나오지 않는지·사진 검사 통과를 본다. 운영은 수동 job `deploy:whynot:prod`.
+- **남은 이슈**
+  1. 다른 유형에서 공·수 때문에 붙은 듯한 조각(바꾸지 않음, Claude 결정 필요): 광공 — "an upright stance with an imposing presence"(공의 위압)·"striking good looks"(공 미형 관습), 츤데레공 — "well-defined features"·"sharp eyes"(츤데레는 성격이라 얼굴 모양을 정하지 않음), 무심공 — "a lean, tall build"·"sharply defined features"(무심은 태도), 미인수 — "a slim yet clearly masculine adult build"의 slim(수 = 작은 쪽 관습)·"a gentle, composed expression", 꽃수 — "a shy, gentle expression"·"a slightly reserved posture"(수 = 수동 관습. 작은 체격·큰 눈은 옛 TAGS desc "여성적으로 예쁘고 작은 체격"이 근거), 굴림수 — "a lean adult man's build"(굴림은 처지). 광공 체격·키는 옛 TAGS desc "큰 신장·체격"이 근거라 넣지 않았다. 다정공·무심수·연하수는 이름 앞부분에서 나온 조각뿐으로 보이고, 능력수 "sharp features"는 출처가 분명하지 않다.
+  2. 수 유형 조각의 masculine·adult man 낱말은 steering 규칙(여성 체형 드리프트 방지)이다. "공/수는 외모를 더하지 않는다" 원칙과 함께 둘지 정해야 한다(떡대 조각의 masculine도 이 규칙 때문이다).
+  3. "떡대 없는 남자"·"떡대가 없다"는 부정 낱말("아님"·"아니"·"말고")에 없어 떡대를 적용한다. 지시서대로 D19를 그대로 따랐다. 용어 부정에 "없"을 더하면 고쳐진다.
+  4. 서술어 꼴 체격("He is slim", "His build is slender.")은 빼지 않는다(분석 외모 문장은 명사구 꼴이라 드물다. 사용자가 고친 문장에서 생길 수 있다).
+  5. 사용자가 female을 정하고 떡대를 쓰면 "She has a big, powerfully built muscular masculine body …"가 된다.
+  6. 허리 위 구도에서 얼굴이 작아져, 고른 캐스팅 사진을 영상 쪽 정면 참고로 쓸 때 영향이 있을 수 있다. 체격이 실제로 보이는지와 "thick"이 살집으로 읽히는지도 실측하지 않았다(유료 금지) — 개발 1회에서 본다.
+  7. 못 찾았을 때 안내 문구는 지금도 BL 중심이다("캐릭터 설명에 '떡대공'처럼 BL 유형을 적으면 …"). 113에서 일반 용어 안내로 바꿀지 정한다.
+  8. 떡대만 되돌리는 설정은 없다(`VNEW_BL_LOOK`을 끄면 BL 참고 문장도 꺼진다).
+  9. 113 대비: `TERMS`는 정적 표다. 검색해 풀이한 용어(캐시)를 같은 꼴로 어떻게 합칠지(런타임 조회 함수 등)는 113 설계에서 정한다. "이미 아는 용어"는 `web_terms.names()`와 `genre_bl` 이름 13개다.
+  10. 지시서 "기존 캐스팅 제출 로그"를 `draw_start`로 읽었다. 칸마다 `vnew.casting.submitted`에도 필요하면 회차에 physique를 남겨야 한다.

@@ -1168,6 +1168,9 @@
   var CASTING_BL_HINT_LEAD = "참고로 더해지는 외모 설명(영어): ";
   var CASTING_BL_FOUND_LEAD = "캐릭터 설명에서 찾은 BL 유형: ";
   var CASTING_BL_GUIDE = "캐릭터 설명에 '떡대공'처럼 BL 유형을 적으면 실사 사진에 참고로 반영됩니다.";
+  // 지시서 112: 설명에서 유형 이름 밖에 따로 찾은 일반 외모 용어(서버 termsDetected, 지금은 "떡대"만).
+  var CASTING_TERM_FOUND_LEAD = "캐릭터 설명에서 찾은 외모 용어: ";
+  var CASTING_TERM_AFTER_BL = " · 외모 용어: ";
 
   function castingBlHintText(cast) {
     var text = String((cast || {}).blHintsEn || "");
@@ -1176,7 +1179,9 @@
 
   /* 읽기 전용 BL 한 줄(지시서 104). blDetected 가 배열이 아니면(VNEW_BL_LOOK 끔) null — 줄이 없다.
      찾았으면 {found: true, text: "캐릭터 설명에서 찾은 BL 유형: 떡대공 — 참고로 더해지는 외모 설명(영어): …"}(참고 문장이 비면
-     앞부분만, 유형이 둘이면 ", " 로 잇는다), 못 찾았으면 {found: false, text: 안내}. */
+     앞부분만, 유형이 둘이면 ", " 로 잇는다), 못 찾았으면 {found: false, text: 안내}.
+     지시서 112: termsDetected 가 있으면 "캐릭터 설명에서 찾은 외모 용어: 떡대"(유형도 있으면 "… BL 유형: 무심공 · 외모 용어: 떡대")로
+     찾은 줄이 된다. termsDetected 가 없으면(떡대 없음·112 전 서버) 104 와 같다. */
   function castingBlLine(cast) {
     var c = cast || {};
     if (!Array.isArray(c.blDetected)) return null;
@@ -1185,8 +1190,14 @@
       var label = item ? String(item.label || item.id || "") : "";
       if (label) labels.push(label);
     });
-    if (!labels.length) return { found: false, text: CASTING_BL_GUIDE };
-    var text = CASTING_BL_FOUND_LEAD + labels.join(", ");
+    var terms = [];
+    (Array.isArray(c.termsDetected) ? c.termsDetected : []).forEach(function (item) {
+      var term = item ? String(item.label || item.id || "") : "";
+      if (term) terms.push(term);
+    });
+    if (!labels.length && !terms.length) return { found: false, text: CASTING_BL_GUIDE };
+    var text = labels.length ? CASTING_BL_FOUND_LEAD + labels.join(", ") : "";
+    if (terms.length) text += (labels.length ? CASTING_TERM_AFTER_BL : CASTING_TERM_FOUND_LEAD) + terms.join(", ");
     var hint = castingBlHintText(c);
     return { found: true, text: hint ? text + " — " + hint : text };
   }
