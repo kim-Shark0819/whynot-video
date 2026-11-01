@@ -31467,7 +31467,8 @@ def _bl_screen_problems(got: dict, server: dict, rebuild_text: str) -> list[str]
 # 원장(vpoc.ledger.charge), S3(_FakeCharStore). 실제 fal·Bedrock·S3 호출 0.
 
 _CPG_NOT_PHOTO = "실사 사진이 아니라 그림체로 나와 이 칸을 버렸습니다. 다시 뽑아 주세요."
-_CPG_NOTE = "그림체로 나온 칸은 한 번 다시 뽑으며 그 비용이 더해질 수 있습니다."
+# 지시서 108: 다시 뽑기가 칸당 두 번까지라 안내 문구가 바뀌었다(107 은 "한 번 다시 뽑으며").
+_CPG_NOTE = "그림체로 나온 칸은 최대 두 번 다시 뽑으며 그 비용이 더해질 수 있습니다."
 # 가짜 fal 이 요청마다 정한 결과 사진 색. 가짜 검사 LLM 은 실제로 받은 사진 가운데 색으로 판정한다(검사에 간 바이트를 본다).
 #   photo 실사 · drawing 그림체(webtoon) · anime 글자 "false" · error 모델 오류 · bad 도구 입력에 photo 없음 · steal 검사 중 다른 파드가 claim 을 가져감
 _CPG_COLORS = {
@@ -31557,9 +31558,11 @@ def check_vnew_cast_photo_guard() -> None:
     (cpg-d) _photo_check: 질문 글·사진(긴 변 ≤1024, 작은 사진은 그대로)·도구 emit_photo_check 스키마·모델 설정·where·max_tokens,
             응답 10꼴(bool·글 true/false·모르는 style → other·photo 없음·"maybe"·숫자·dict 아님 → None), 모델 오류·깨진 사진 → None·경고(비밀 없음)
     (cpg-e) run_draw(가짜 fal·가짜 검사 LLM·메모리 S3·가짜 원장): 실사 → 후보 1·원장 1·제출 1, 그림체 → 실사 → 후보 1·원장 2·제출 2(같은 본문),
-            그림체 → 그림체 → NotPhoto 문구·원장 2·저장 0·failed, 검사 오류·모양 틀림 → 후보로 넣음·경고, 그림체 → 검사 오류, 글 "false",
-            두 칸(한 칸 그림체 → 그림체 + 다른 칸 실사) → 다른 칸 그대로, 버린 사진은 S3 put 0, 원장 키·필드, 로그 꼴·수준
-    (cpg-f) 재시작·상태 기계: 다시 제출한 칸(submitted·redraws 1)을 reconcile → 세 번째 제출 0·NotPhoto, 다시 제출 대기(queued·redraws 1)를
+            그림체 → 그림체 → 실사 → 후보 1·원장 3·제출 3(후보 id·원장 키 셋 다 다름, 지시서 108), 그림체 ×3 → NotPhoto 문구·원장 3·저장 0·
+            제출 3·failed·로그 redraw 0·1·2·시작 시각 그대로(108), 검사 오류·모양 틀림 → 후보로 넣음·경고, 그림체 → 검사 오류, 그림체 ×2 → 검사
+            오류(redraw=2), 글 "false", 두 칸(한 칸 그림체 ×3 + 다른 칸 실사) → 다른 칸 그대로, 버린 사진은 S3 put 0, 원장 키·필드, 로그 꼴·수준
+    (cpg-f) 재시작·상태 기계: 두 번 다시 제출한 칸(submitted·redraws 2)을 reconcile → 네 번째 제출 0·NotPhoto(108), 한 번 다시 제출한 칸
+            (submitted·redraws 1) → 세 번째 제출 1·redraws 2(108), 다시 제출 대기(queued·redraws 1·2)를
             reconcile → 중단 실패·제출 0, 900초 지남 → 시간 초과·제출 0·검사 0, 검사 중 claim 을 잃음 → 원장만(같은 키)·칸 그대로 → 이어받은
             실행이 같은 요청을 다시 보고 다시 뽑기
     (cpg-g) 끔: 검사 호출 0·그림체 사진도 후보·원장 1·칸 키 = 106·photo_check 로그 0, 두 칸
@@ -31606,6 +31609,7 @@ def check_vnew_cast_photo_guard() -> None:
         "cast_spawn": castmod._spawn, "cast_sleep": castmod._sleep, "charge": castmod.vpoc_ledger.charge,  # noqa: SLF001
         "converse": vpoc_llm._converse, "char_fal": charmod._fal_request, "vpoc_request": vpoc_fal._request,  # noqa: SLF001
         "fal_key": vpoc_settings.FAL_KEY, "prompt_max": castmod.PROMPT_MAX, "look_max": castmod.LOOK_MAX,
+        "resume_variant": charmod.run_resume_variant,
     }
     stray: list[str] = []
 
@@ -31700,6 +31704,10 @@ def check_vnew_cast_photo_guard() -> None:
         char["analysis"] = dict(analysis)
         char["version"] = 1
         char["status"] = "ready"
+        # 다 만든 캐릭터로 둔다(지시서 108 검사 중 발견): variant 가 queued·하트비트 없음이면 상세 조회(detail_view)의
+        # reconcile_stale 가 끊긴 variant 로 보고 진짜 이어 만들기 스레드(run_resume_variant)를 띄워 같은 캐릭터를 함께 고쳤다.
+        for variant in char["variants"].values():
+            variant["status"] = "ready"
         if casting is not None:
             char["casting"] = casting
         if extra is not None:
@@ -31765,6 +31773,7 @@ def check_vnew_cast_photo_guard() -> None:
         vpoc_llm._converse = fake_converse  # noqa: SLF001
         charmod._fal_request = stray_call("characters._fal_request")  # noqa: SLF001
         vpoc_fal._request = stray_call("vpoc.fal._request")  # noqa: SLF001
+        charmod.run_resume_variant = stray_call("characters.run_resume_variant")  # 108: 캐릭터 이어 만들기 스레드 0
         vpoc_settings.FAL_KEY = "test-fal-key"
         with logs, _pin_vnew(VNEW_CASTING=True, VNEW_CAST_PHOTO_CHECK=True, VNEW_BL_LOOK=True):
             # ================= (cpg-a) 사진 고정 문장 =================
@@ -32034,7 +32043,7 @@ def check_vnew_cast_photo_guard() -> None:
                 bad.append("(cpg-d) 오류 경고에 bad_payload 가 섞였습니다")
             seen.add("cpg-d")
 
-            # ================= (cpg-e) run_draw: 결과 검사와 1회 다시 뽑기 =================
+            # ================= (cpg-e) run_draw: 결과 검사와 두 번까지 다시 뽑기(지시서 108) =================
             cid = "char_cpg_real"
             cast = draw(cid, ["photo"])
             want_slot = {"slot": 0, "status": "ready", "requestArn": f"fal/requests/{model}/{made[0]}", "candidateId": cand(made[0]),
@@ -32062,22 +32071,62 @@ def check_vnew_cast_photo_guard() -> None:
                     or not logs.messages(f"vnew.cast.photo_check slot=0 photo=true style=photo redraw=1 cid={cid}", level=logging.INFO) \
                     or len(logs.messages(f"vnew.cast.redraw cid={cid} slot=0 redraws=1")) != 1:
                 bad.append(f"(cpg-e) 그림체 → 실사가 후보 1·원장 2·제출 2(같은 본문)가 아닙니다: {cast['slots']} {keys()} {len(p_e)} {sleeps}")
+            # 지시서 108: 다시 뽑기는 칸당 두 번까지. 그림체 → 그림체 → 실사: 후보 1·원장 3·제출 3, 후보 id·원장 키는 제출마다 새로 난다
             cid = "char_cpg_twice"
-            cast = draw(cid, ["drawing", "drawing"])
-            if cast["status"] != "failed" or cast["candidates"] or cast["chosen"] or len(posts()) != 2 or len(made) != 2 \
-                    or cast["slots"] != [{"slot": 0, "status": "failed", "requestArn": f"fal/requests/{model}/{made[1]}", "candidateId": "",
-                                          "error": _CPG_NOT_PHOTO, "redraws": 1}] \
+            cast = draw(cid, ["drawing", "drawing", "photo"])
+            p_t = posts()
+            if len(made) != 3 or len(set(made)) != 3 or cast["status"] != "ready" or cast["error"] \
+                    or [item["id"] for item in cast["candidates"]] != [cand(made[2])] or cast["chosen"] != cand(made[2]) \
+                    or cast["slots"] != [{"slot": 0, "status": "ready", "requestArn": f"fal/requests/{model}/{made[2]}",
+                                          "candidateId": cand(made[2]), "error": "", "redraws": 2}] \
+                    or len(p_t) != 3 or any(call[1:] != p_t[0][1:] for call in p_t) or p_t[2][2]["prompt"] != cast["prompt"] \
+                    or keys() != [f"vnew-cast-{cid}-{cand(rid)}" for rid in made] or len(set(keys())) != 3 \
+                    or len({cand(rid) for rid in made}) != 3 or [call["verdict"] for call in llm_calls] != ["drawing", "drawing", "photo"] \
+                    or blobs(cid) != [charmod.casting_key(owner, cid, cand(made[2]))] or len(puts) != 1 \
+                    or any(verdict_of(body)[0] != "photo" for _key, body in puts) or sleeps != [5, 5] \
+                    or not logs.messages(f"vnew.cast.photo_check slot=0 photo=false style=webtoon redraw=0 cid={cid}", level=logging.WARNING) \
+                    or not logs.messages(f"vnew.cast.photo_check slot=0 photo=false style=webtoon redraw=1 cid={cid}", level=logging.WARNING) \
+                    or not logs.messages(f"vnew.cast.photo_check slot=0 photo=true style=photo redraw=2 cid={cid}", level=logging.INFO) \
+                    or [len(logs.messages(f"vnew.cast.redraw cid={cid} slot=0 redraws={n}")) for n in (1, 2, 3)] != [1, 1, 0] \
+                    or logs.messages(f"vnew.casting.slot_failed cid={cid}"):
+                bad.append(f"(cpg-e) 그림체 → 그림체 → 실사가 후보 1·원장 3·제출 3 이 아닙니다: {cast['status']} {cast['slots']} {keys()} "
+                           f"{len(p_t)} {sleeps}")
+            twice_photo = (len(cast["candidates"]), len(keys()), len(p_t), len(puts))
+            # 그림체 ×3: 두 번 다시 뽑고도 그림체 → NotPhoto·원장 3·저장 0·제출 3. 시간 기준(시작 시각)은 다시 뽑기에서 새로 잡지 않는다
+            cid = "char_cpg_thrice"
+            seed_char(cid)
+            clear()
+            plan.extend(["drawing", "drawing", "drawing"])
+            backdated = iso_ago(300)
+
+            def backdate(data):
+                data["casting"]["startedAt"] = backdated
+
+            with _pin_vnew(VNEW_CASTING_COUNT=1):
+                castmod.start_draw(owner, cid, 0.04)
+                charmod.mutate_char(owner, cid, backdate)
+                castmod.run_draw(owner, cid, spawned[-1][2])
+            cast = load_c(cid)["casting"]
+            if len(made) != 3 or cast["status"] != "failed" or cast["candidates"] or cast["chosen"] or len(posts()) != 3 \
+                    or cast["slots"] != [{"slot": 0, "status": "failed", "requestArn": f"fal/requests/{model}/{made[2]}", "candidateId": "",
+                                          "error": _CPG_NOT_PHOTO, "redraws": 2}] \
                     or castmod._MSG_NOT_PHOTO != _CPG_NOT_PHOTO or cast["error"] != f"사진 1장 중 1장을 만들지 못했습니다: {_CPG_NOT_PHOTO}" \
-                    or keys() != [f"vnew-cast-{cid}-{cand(rid)}" for rid in made] or puts or blobs(cid) or len(llm_calls) != 2 \
+                    or keys() != [f"vnew-cast-{cid}-{cand(rid)}" for rid in made] or len(set(keys())) != 3 or puts or blobs(cid) \
+                    or len(llm_calls) != 3 or sleeps != [5, 5] or cast["startedAt"] != backdated \
                     or len(logs.messages(f"vnew.casting.slot_failed cid={cid} slot=0 kind=NotPhoto", level=logging.WARNING)) != 1 \
-                    or not logs.messages(f"vnew.cast.photo_check slot=0 photo=false style=webtoon redraw=1 cid={cid}"):  # noqa: SLF001
-                bad.append(f"(cpg-e) 그림체 → 그림체가 NotPhoto·원장 2·저장 0 이 아닙니다: {cast['status']} {cast['slots']} {keys()} {len(puts)}")
+                    or [len(logs.messages(f"vnew.cast.photo_check slot=0 photo=false style=webtoon redraw={n} cid={cid}", level=logging.WARNING))
+                        for n in (0, 1, 2)] != [1, 1, 1] \
+                    or [len(logs.messages(f"vnew.cast.redraw cid={cid} slot=0 redraws={n}")) for n in (1, 2, 3)] != [1, 1, 0]:  # noqa: SLF001
+                bad.append(f"(cpg-e) 그림체 ×3 이 NotPhoto·원장 3·저장 0·제출 3 이 아닙니다: {cast['status']} {cast['slots']} {keys()} "
+                           f"{len(puts)} {cast['startedAt']!r}")
+            thrice = (cast["status"], len(keys()), len(posts()), len(puts))
             fail_open = {}
-            for name, verdicts in (("error", ["error"]), ("bad", ["bad"]), ("redrawError", ["drawing", "error"])):
+            for name, verdicts in (("error", ["error"]), ("bad", ["bad"]), ("redrawError", ["drawing", "error"]),
+                                   ("redraw2Error", ["drawing", "drawing", "error"])):
                 cid = f"char_cpg_open_{name}"
                 cast = draw(cid, verdicts)
                 last = made[-1] if made else ""
-                redraw_flag = 1 if len(verdicts) > 1 else 0
+                redraw_flag = len(verdicts) - 1  # 지시서 108: 로그 redraw 는 실제 다시 뽑기 횟수(0·1·2)
                 fail_open[name] = (cast["status"], len(cast["candidates"]), len(keys()), len(posts()), len(blobs(cid)))
                 if cast["status"] != "ready" or [item["id"] for item in cast["candidates"]] != [cand(last)] or len(keys()) != len(verdicts) \
                         or len(posts()) != len(verdicts) or blobs(cid) != [charmod.casting_key(owner, cid, cand(last))] \
@@ -32092,15 +32141,15 @@ def check_vnew_cast_photo_guard() -> None:
             if [item["id"] for item in cast["candidates"]] != [cand(made[1])] or len(keys()) != 2 or cast["slots"][0].get("redraws") != 1 \
                     or not logs.messages(f"vnew.cast.photo_check slot=0 photo=false style=anime redraw=0 cid={cid}"):
                 bad.append(f"(cpg-e) 검사 글자 \"false\"(anime)가 그림체로 처리되지 않았습니다: {cast['slots']}")
-            # 두 칸: 칸 0 그림체 → 그림체(실패), 칸 1 실사 → 칸 1 그대로
+            # 두 칸: 칸 0 그림체 ×3(실패), 칸 1 실사 → 칸 1 그대로(108: 칸 0 이 실패하려면 그림체가 세 번 나와야 한다)
             cid = "char_cpg_two"
-            cast = draw(cid, ["drawing", "photo", "drawing"], count=2)
-            if len(made) != 3 or cast["status"] != "ready" or [item["id"] for item in cast["candidates"]] != [cand(made[1])] \
+            cast = draw(cid, ["drawing", "photo", "drawing", "drawing"], count=2)
+            if len(made) != 4 or cast["status"] != "ready" or [item["id"] for item in cast["candidates"]] != [cand(made[1])] \
                     or cast["slots"][1] != {"slot": 1, "status": "ready", "requestArn": f"fal/requests/{model}/{made[1]}",
                                             "candidateId": cand(made[1]), "error": ""} \
-                    or cast["slots"][0] != {"slot": 0, "status": "failed", "requestArn": f"fal/requests/{model}/{made[2]}", "candidateId": "",
-                                            "error": _CPG_NOT_PHOTO, "redraws": 1} \
-                    or keys() != [f"vnew-cast-{cid}-{cand(rid)}" for rid in made] or len(posts()) != 3 \
+                    or cast["slots"][0] != {"slot": 0, "status": "failed", "requestArn": f"fal/requests/{model}/{made[3]}", "candidateId": "",
+                                            "error": _CPG_NOT_PHOTO, "redraws": 2} \
+                    or keys() != [f"vnew-cast-{cid}-{cand(rid)}" for rid in made] or len(posts()) != 4 \
                     or blobs(cid) != [charmod.casting_key(owner, cid, cand(made[1]))] or cast["chosen"] != cand(made[1]) \
                     or cast["error"] != f"사진 2장 중 1장을 만들지 못했습니다: {_CPG_NOT_PHOTO}":
                 bad.append(f"(cpg-e) 한 칸 그림체가 다른 칸에 영향을 줬습니다: {cast['slots']} {keys()}")
@@ -32108,14 +32157,16 @@ def check_vnew_cast_photo_guard() -> None:
             green = [key for key, body in fake_store.blobs.items() if "/casting/" in key and verdict_of(body)[0] in ("drawing", "anime")]
             if green:
                 bad.append(f"(cpg-e) 버린 그림체 사진이 S3 에 저장됐습니다: {green}")
-            report.append(f"cpg-e: 검사 실패 경우 {fail_open}")
+            report.append(f"cpg-e: 검사 실패 경우 {fail_open} · 그림체 ×2 → 실사(후보·원장·제출·저장) {twice_photo} · "
+                          f"그림체 ×3(상태·원장·제출·저장) {thrice}")
             seen.add("cpg-e")
 
             # ================= (cpg-f) 재시작·상태 기계 =================
+            # 지시서 108: 두 번 다시 제출한 칸(submitted·redraws 2)을 이어받으면 조회만 하고 네 번째로 제출하지 않는다
             cid = "char_cpg_resume"
             by_rid["cpg-old1"] = "drawing"
             seed_char(cid, casting=state([{"slot": 0, "status": "submitted", "requestArn": f"fal/requests/{model}/cpg-old1", "candidateId": "",
-                                           "error": "", "redraws": 1}], started=iso_ago(660), beat=iso_ago(660)))
+                                           "error": "", "redraws": 2}], started=iso_ago(660), beat=iso_ago(660)))
             clear()
             charmod.detail_view(owner, cid)
             cast_r = load_c(cid)["casting"]
@@ -32125,8 +32176,28 @@ def check_vnew_cast_photo_guard() -> None:
             castmod.run_draw(owner, cid, cast_r["claim"])
             cast_r2 = load_c(cid)["casting"]
             if posts() or len(llm_calls) != 1 or keys() != [f"vnew-cast-{cid}-{cand('cpg-old1')}"] or puts or cast_r2["status"] != "failed" \
-                    or cast_r2["slots"][0].get("error") != _CPG_NOT_PHOTO or cast_r2["slots"][0].get("redraws") != 1:
-                bad.append(f"(cpg-f) 재시작 뒤 세 번째 제출이 생겼거나 NotPhoto 가 아닙니다: posts={len(posts())} {cast_r2['slots']}")
+                    or cast_r2["slots"][0].get("error") != _CPG_NOT_PHOTO or cast_r2["slots"][0].get("redraws") != 2 \
+                    or len(logs.messages(f"vnew.cast.photo_check slot=0 photo=false style=webtoon redraw=2 cid={cid}")) != 1 \
+                    or logs.messages("vnew.cast.redraw "):
+                bad.append(f"(cpg-f) 재시작 뒤 네 번째 제출이 생겼거나 NotPhoto 가 아닙니다: posts={len(posts())} {cast_r2['slots']}")
+            # 한 번 다시 제출한 칸(submitted·redraws 1)을 이어받아 그림체면 세 번째 제출이 한 번 생긴다(redraws 2, 108 두 번까지)
+            cid = "char_cpg_resume1"
+            by_rid["cpg-old2"] = "drawing"
+            seed_char(cid, casting=state([{"slot": 0, "status": "submitted", "requestArn": f"fal/requests/{model}/cpg-old2", "candidateId": "",
+                                           "error": "", "redraws": 1}], started=iso_ago(660), beat=iso_ago(660)))
+            clear()
+            plan.extend(["photo"])
+            charmod.detail_view(owner, cid)
+            if spawned:
+                castmod.run_draw(owner, cid, spawned[-1][2])
+            cast_r3 = load_c(cid)["casting"]
+            if len(spawned) != 1 or len(made) != 1 or len(posts()) != 1 or len(llm_calls) != 2 or cast_r3["status"] != "ready" \
+                    or keys() != [f"vnew-cast-{cid}-{cand('cpg-old2')}", f"vnew-cast-{cid}-{cand(made[0])}"] \
+                    or cast_r3["slots"] != [{"slot": 0, "status": "ready", "requestArn": f"fal/requests/{model}/{made[0]}",
+                                             "candidateId": cand(made[0]), "error": "", "redraws": 2}] \
+                    or len(logs.messages(f"vnew.cast.redraw cid={cid} slot=0 redraws=2")) != 1 \
+                    or len(logs.messages(f"vnew.cast.photo_check slot=0 photo=true style=photo redraw=2 cid={cid}")) != 1:
+                bad.append(f"(cpg-f) 한 번 다시 제출한 칸의 이어하기가 세 번째 제출 1·redraws 2 가 아닙니다: posts={len(posts())} {cast_r3['slots']}")
             cid = "char_cpg_resume_q"
             seed_char(cid, casting=state([{"slot": 0, "status": "queued", "requestArn": "", "candidateId": "", "error": "", "redraws": 1}],
                                          started=iso_ago(660), beat=iso_ago(660)))
@@ -32139,6 +32210,20 @@ def check_vnew_cast_photo_guard() -> None:
             if len(spawned) != 1 or cast_q["slots"][0]["status"] != "failed" or cast_q["slots"][0]["error"] != castmod._MSG_ABORTED \
                     or posts() or llm_calls or ledger or cast_q2["status"] != "failed" or cast_q2["slots"][0].get("redraws") != 1:  # noqa: SLF001
                 bad.append(f"(cpg-f) 다시 제출 대기 칸의 이어하기가 중단 실패·제출 0 이 아닙니다: {cast_q2['slots']} {len(posts())}")
+            # 108: 두 번째 다시 제출 직전에 멈춘 칸(queued·redraws 2)도 같은 규칙이다(중단 실패·제출 0)
+            cid = "char_cpg_resume_q2"
+            seed_char(cid, casting=state([{"slot": 0, "status": "queued", "requestArn": "", "candidateId": "", "error": "", "redraws": 2}],
+                                         started=iso_ago(660), beat=iso_ago(660)))
+            clear()
+            charmod.detail_view(owner, cid)
+            cast_q3 = load_c(cid)["casting"]
+            if spawned:
+                castmod.run_draw(owner, cid, spawned[-1][2])
+            cast_q4 = load_c(cid)["casting"]
+            if len(spawned) != 1 or cast_q3["slots"][0]["status"] != "failed" or cast_q3["slots"][0]["error"] != castmod._MSG_ABORTED \
+                    or posts() or llm_calls or ledger or cast_q4["status"] != "failed" or cast_q4["slots"][0].get("redraws") != 2:  # noqa: SLF001
+                bad.append(f"(cpg-f) 두 번째 다시 제출 대기 칸(redraws 2)의 이어하기가 중단 실패·제출 0 이 아닙니다: "
+                           f"{cast_q4['slots']} {len(posts())}")
             cid = "char_cpg_expired"
             seed_char(cid, casting=state([{"slot": 0, "status": "queued", "requestArn": "", "candidateId": "", "error": "", "redraws": 1}],
                                          started=iso_ago(1000), beat=iso_ago(5), claim="tok_t"))
@@ -32269,6 +32354,7 @@ def check_vnew_cast_photo_guard() -> None:
         vpoc_llm._converse = saved["converse"]  # noqa: SLF001
         charmod._fal_request = saved["char_fal"]  # noqa: SLF001
         vpoc_fal._request = saved["vpoc_request"]  # noqa: SLF001
+        charmod.run_resume_variant = saved["resume_variant"]
         vpoc_settings.FAL_KEY = saved["fal_key"]
         castmod.PROMPT_MAX = saved["prompt_max"]
         castmod.LOOK_MAX = saved["look_max"]
@@ -32285,8 +32371,9 @@ def check_vnew_cast_photo_guard() -> None:
     else:
         ok(
             "지시서 107 실사 캐스팅 그림체 막기 검사 (cpg-a)사진 고정 문장 끝·1500자 줄이는 순서·설정과 무관 (cpg-b)그림체 낱말 더함·107 전과 같음 "
-            "(cpg-c)VNEW_CAST_PHOTO_CHECK 배선·모델 기본 (cpg-d)_photo_check 호출·응답 꼴·fail-open (cpg-e)실사·그림체→실사·그림체→그림체·"
-            "검사 None·두 칸·S3 put 0·원장 (cpg-f)재시작 세 번째 제출 0·queued·900초·claim 잃음 (cpg-g)끔 = 106 (cpg-h)보기·라우트·화면 한 줄"
+            "(cpg-c)VNEW_CAST_PHOTO_CHECK 배선·모델 기본 (cpg-d)_photo_check 호출·응답 꼴·fail-open (cpg-e)실사·그림체→실사·그림체×2→실사·"
+            "그림체×3(NotPhoto)·로그 redraw 0·1·2·검사 None·두 칸·S3 put 0·원장 (cpg-f)재시작 네 번째 제출 0·세 번째 제출 1·queued·900초·claim 잃음 "
+            "(cpg-g)끔 = 106 (cpg-h)보기·라우트·화면 한 줄"
             + "".join(f"\n       cpg: {line}" for line in report)
         )
 

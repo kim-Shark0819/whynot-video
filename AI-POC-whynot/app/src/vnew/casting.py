@@ -16,7 +16,7 @@
     이미 있는 형태 분류는 빠진다. 300자 외모 문장과 영상 쪽은 바꾸지 않는다.
   - 실사 사진 지키기(지시서 107, 2026-11-01): 캐스팅 문장 맨 끝에 사진 고정 문장(photo_anchor)을 늘 붙인다. VNEW_CAST_PHOTO_CHECK
     켬이면 결과 사진마다 저장 전에 비전 LLM 1회(_photo_check)로 실사인지 묻고, 그림체면 그 사진을 버리고(S3 저장 없음, 원장 1건)
-    같은 칸을 같은 문장으로 한 번만 다시 제출한다(칸 redraws). 다시 뽑은 사진도 그림체면 그 칸만 실패(NotPhoto).
+    같은 칸을 같은 문장으로 두 번까지 다시 제출한다(칸 redraws, 지시서 108). 두 번째로 다시 뽑은 사진도 그림체면 그 칸만 실패(NotPhoto).
 """
 
 from __future__ import annotations
@@ -950,9 +950,9 @@ _MSG_REJECTED = "fal이 이 캐스팅 문장을 거절했습니다. 외모 문�
 _REJECT_GIST_MAX = 120
 # 실사 사진 검사(지시서 107). 다시 뽑은 사진도 그림체인 칸의 문구, 보기 안내 한 줄(VNEW_CAST_PHOTO_CHECK 켬일 때만 보기에 둔다).
 _MSG_NOT_PHOTO = "실사 사진이 아니라 그림체로 나와 이 칸을 버렸습니다. 다시 뽑아 주세요."
-_MSG_PHOTO_NOTE = "그림체로 나온 칸은 한 번 다시 뽑으며 그 비용이 더해질 수 있습니다."
-# 칸마다 다시 제출하는 최대 횟수(지시서 107: 한 번만). 칸의 redraws 에 남겨 재시작 뒤에도 넘지 않는다.
-_REDRAW_MAX = 1
+_MSG_PHOTO_NOTE = "그림체로 나온 칸은 최대 두 번 다시 뽑으며 그 비용이 더해질 수 있습니다."
+# 칸마다 다시 제출하는 최대 횟수(지시서 108: 두 번까지). 칸의 redraws 에 남겨 재시작 뒤에도 넘지 않는다.
+_REDRAW_MAX = 2
 
 
 class _ClaimLost(Exception):
@@ -1557,10 +1557,10 @@ def _photo_passes(owner: str, cid: str, token: str, slot: dict, cand_id: str, mo
     redraws = int(slot.get("redraws") or 0)
     check = _photo_check(jpeg)
     if check is None:
-        log.warning("vnew.cast.photo_check slot=%d photo=none style=- redraw=%d cid=%s", index, min(redraws, 1), cid)
+        log.warning("vnew.cast.photo_check slot=%d photo=none style=- redraw=%d cid=%s", index, redraws, cid)
         return True
     log.log(logging.INFO if check["photo"] else logging.WARNING, "vnew.cast.photo_check slot=%d photo=%s style=%s redraw=%d cid=%s",
-            index, str(check["photo"]).lower(), check["style"], min(redraws, 1), cid)
+            index, str(check["photo"]).lower(), check["style"], redraws, cid)
     if check["photo"]:
         return True
     _charge(owner, cid, cand_id, model, unit_usd)

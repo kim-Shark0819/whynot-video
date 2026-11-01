@@ -1837,3 +1837,51 @@
   5. 그림체 낱말을 낱말만 지우는 꼴은 "comic lines" → "lines"처럼 어색한 조각이 남을 수 있다(그림 낱말은 남지 않는다).
   6. 자동 외모 문장을 쓰는 실사 테이크 외형(`generate._real_appearance` → `current_look`)에도 더한 낱말 제거가 적용된다. 실사 영상에서 그림 낱말을 빼는 목적과 같은 방향이고 `generate.py`는 바꾸지 않았다.
   7. 화면 안내는 늘 보인다(켬일 때). 실제로 다시 뽑았는지는 칸 상태로만 알 수 있고 화면에 "다시 뽑는 중" 표시는 없다(지시서 범위 밖).
+
+### 지시서 108 — 실사 캐스팅 그림체 다시 뽑기를 칸당 최대 2회로 (Kiro, claude-opus-5.5)
+- **범위**: `.kiro/handoff/108-cast-redraw-two.md`. 스펙 `.kiro/specs/cast-photo-guard/`에 108 변경(requirements R11과 R4.2·R4.3·R5.1·R7.1·R8.1·R9.2의 "108" 표시, design §8 D12~D15, tasks 8~10)을 더하고 같은 실행에서 구현·검사까지 했다. 커밋·push 하지 않았다. git·aws·kubectl·네트워크·유료 API를 쓰지 않았다. 사용자 데이터는 읽지 않았다.
+- **먼저 한 일**: 바꿀 파일과 수정 금지 파일(`settings.py`·`generate.py`·`genre_bl.py`·`config.dev/prod.env`·`vnew.js`·`vnew.css`·`.gitlab-ci.yml`)의 시작 전 사본과 저장소 파일 목록(크기·mtime)을 저장소 밖(`%TEMP%\cpg108`)에 두었다. 시작 전 전체 검사는 전부 통과(ok 65줄, FAIL·WARN 0, 83초).
+- **사실(지시서)**: 107(커밋 83a03b0, ci-cecf5366, 개발·운영 반영)은 그림체 칸을 1회 다시 뽑고(`_REDRAW_MAX = 1`), 두 번 다 그림체면 NotPhoto다. 개발 실험(범건우, 아이돌풍)에서 아이돌풍 문장은 약 50%가 그림체였다. 1회로는 칸 실패가 약 0.5² = 25%다.
+- **결정**(사용자 2026-11-01, design §8)
+  - `_REDRAW_MAX` 1 → 2(주석 "지시서 108: 두 번까지"). 칸 흐름: 제출 1 → 그림체 → 다시 제출(`redraws` 1) → 그림체 → 다시 제출(`redraws` 2) → 그림체 → NotPhoto. 어느 제출이든 실사(또는 검사 None)면 그 즉시 후보다. 칸 실패는 약 0.5³ ≈ 12.5%로 본다(추정).
+  - 안내 문구 `_MSG_PHOTO_NOTE` = "그림체로 나온 칸은 최대 두 번 다시 뽑으며 그 비용이 더해질 수 있습니다."
+  - 로그 `vnew.cast.photo_check … redraw=` 값은 `min(redraws, 1)` → `redraws`(실제 횟수 0·1·2, 실사·그림체·검사 None 세 줄 모두).
+  - D12 원장: 키 규칙 그대로(`vnew-cast-{cid}-{후보 id}`, 후보 id = sha256(fal 요청 id) 앞 10자). 다시 제출은 기존 `_submit_slot`이 fal에 새 POST를 보내 새 요청 id를 받고, 다시 뽑을 때 칸의 `requestArn`·`candidateId`를 비운다. 그래서 제출 3회 = 후보 id 3개 = 원장 키 3개이고 겹치지 않는다. 최악이면 칸 하나에 원장 3건·제출 3회·S3 저장 0. 같은 키는 같은 요청을 다시 처리할 때만 나오고 원장이 한 번만 계상한다.
+  - D13 재시작: `reconcile` 그대로. submitted·`redraws` 2 → 조회 → 그림체면 NotPhoto(네 번째 제출 없음). submitted·`redraws` 1 → 그림체면 세 번째 제출 1회. queued(`redraws` 무엇이든) → "중단돼 제출하지 않았습니다."
+  - D14 시간 상한(확인, 동작 그대로): `_expired`(900초)는 뽑기 시작 `startedAt` 기준이고 다시 뽑을 때 새로 잡지 않는다. `_stale`(600초)은 순회마다 갱신하는 하트비트 기준이라 다시 뽑기와 상관없다. 칸 하나 최악 ≈ fal 생성 3회 + 검사 3회 + 약 25초(다시 제출 대기 2 × 5초 + 조회 간격 올림). 900초에 걸리려면 fal 한 장이 약 285초(1칸)·279초(기본 2칸)·267초(4칸)를 넘어야 한다. fal 생성 시간은 저장소에 실측이 없어 보통 수십 초로 보면(추정) 정상 흐름은 걸리지 않는다. 걸리면 지금처럼 남은 칸만 "시간 안에 사진을 받지 못했습니다."로 끝나고 다른 칸 후보는 남는다.
+  - 그대로 둔 것: `_MSG_NOT_PHOTO`, `VNEW_CAST_PHOTO_CHECK`, 검사 모델, 캐스팅 문장, `reconcile`·`_stale`·`_expired`·`VNEW_CASTING_POLL_MAX_S`, `totalUsd`·`confirmUsd`, 보기 키.
+- **검토한 대안**: 다시 뽑기 횟수 설정 키(지시서가 플래그를 바꾸지 말라고 함·배선이 늘어남, 기각), 다시 뽑을 때 `startedAt` 새로 잡기(지시서 `_expired` 그대로·회차 끝 보장이 약해짐, 기각), 마지막 시도에서 문장 바꾸기(프롬프트 그대로, 기각), 로그 redraw를 그대로 두고 새 키(지시서, 기각).
+- **바꾼 것**
+  - `app/src/vnew/casting.py`(+6 −6, 모두 같은 자리에서 고친 줄): `_MSG_PHOTO_NOTE`(:953), `_REDRAW_MAX`·주석(:954-955), `_photo_passes` 로그 두 줄(:1560·:1563), 모듈 docstring(:19). 함수 정의·흐름 코드는 그대로다.
+  - `deploy/config.env.example`(:310)·`k8s/workloads.yaml.tmpl`(:333): 주석 "한 번 다시 뽑는다" → "두 번까지 다시 뽑는다"(주석만, 값·자리 그대로. cpg-c·rw·pz 그대로 통과).
+  - `tools/check_vpoc.py`(+113 −26, 지운 함수 정의 0): `_CPG_NOTE`, cpg-e·cpg-f 경우, docstring·ok 줄, cpg 시드 캐릭터 variant ready·`characters.run_resume_variant` 막기(아래 발견 1).
+  - `.kiro/specs/cast-photo-guard/` 세 파일, `docs/ANALYSIS.md`(머리 줄·§3.6 모듈 표·§3.6.1 B 「실사 사진 검사」 판정·재개·원장·보기·로그 행과 비용 문단·§10.1 줄 수·기대값 문단·cpg 행), 이 항목.
+- **검사(어떤 검사가 무엇을 덮는지, 108에서 바꾼 것만)**
+
+  | 검사 | 덮는 것 |
+  |---|---|
+  | cpg-e 그림체 → 그림체 → 실사(새) | `_photo_passes`의 `redraws < _REDRAW_MAX` 분기 두 번과 실사 분기: ready·후보 1(세 번째 요청)·원장 3(키 서로 다름)·요청 id 3개·후보 id 3개·제출 3(같은 본문 3키)·S3 1장·`redraws` 2·쉼 5초 2번·로그 redraw 0(false)·1(false)·2(true INFO)·`vnew.cast.redraw` redraws 1·2 각 1번·`slot_failed` 0 |
+  | cpg-e 그림체 ×3(새) | `redraws >= _REDRAW_MAX` 분기: failed·NotPhoto 문구·오류 요약·원장 3(서로 다름)·S3 0·제출 3·검사 3·`redraws` 2·로그 redraw 0·1·2(WARNING)·`slot_failed kind=NotPhoto` 1번·시작 시각(300초 전으로 당겨 둠) 그대로 |
+  | cpg-e 검사 None | 오류·모양 틀림·그림체 → 오류에 그림체 ×2 → 오류(새, `photo=none … redraw=2`)를 더함. 로그 기대값을 실제 횟수(`len - 1`)로 |
+  | cpg-e 두 칸 | 칸 0 그림체 ×3 → failed·`redraws` 2·네 번째 요청, 칸 1 실사 그대로·원장 4·제출 4 |
+  | cpg-f 재개 | submitted·`redraws` 2 → `reconcile` → 제출 0·NotPhoto·`redraw=2`·`vnew.cast.redraw` 0, submitted·`redraws` 1(새) → 세 번째 제출 1·ready·`redraws` 2, queued·`redraws` 1·2(2는 새) → 중단 실패·제출 0 |
+  | cpg-h | `photoCheckNote`·`_MSG_PHOTO_NOTE` = 새 문구(보기·Flask 상세·뽑기 응답·node 가짜 DOM) |
+
+- **기대값을 바꾼 검사와 이유**(모두 cpg 안, 다른 검사 기대값은 그대로): (1) cpg-e "그림체 → 그림체 → NotPhoto·원장 2" — 108에서 두 번째 그림체 뒤에 한 번 더 다시 뽑으므로 성립하지 않는다. 그림체 ×2 → 실사와 그림체 ×3으로 바꿨다. (2) cpg-e 두 칸 — 칸 0이 실패하려면 그림체가 세 번 나와야 해서 판정 하나를 더했다(칸 1 기대값 그대로). (3) cpg-e 검사 None `redraw_flag` — 로그가 실제 횟수라 `1 if len > 1 else 0` → `len - 1`. (4) cpg-f "redraws 1 → 세 번째 제출 0" — 108에서는 세 번째 제출이 정상이라 redraws 2 → 네 번째 제출 0으로 바꾸고 redraws 1 경우를 따로 더했다. (5) cpg-h `_CPG_NOTE` — 새 안내 문구. 실사 1회·그림체 → 실사·글 "false"·S3 put 0·claim 잃음·900초·끔(cpg-g)·cpg-a~d는 그대로다.
+- **확인**
+  - `python -X utf8 tools/check_vpoc.py` 전부 통과: ok 65줄, FAIL·WARN 0, 79초(문서까지 고친 뒤 마지막 실행). 시작 전 출력과 비교해 cpg 두 줄(ok 줄 설명·cpg-e 보고)만 바뀌고 다른 64줄은 글자까지 같다.
+  - 커버리지(coverage 7.17, 전체 검사기 `coverage run --source=app/src`, 데이터는 저장소 밖, 시작 전 사본과 difflib): 바뀐 서버 실행문 4개 중 4개(100%) — `:953`·`:955`·`:1560`·`:1562`. 둘레 함수 `_photo_passes` 19/19, `run_draw` 32/32, `reconcile` 25/25.
+  - 변형 검사 15개(저장소 밖 사본 트리, 변형마다 한 군데만 바꿔 cpg 실행): `_REDRAW_MAX` 1·3, 비교 `>`(= 상한 3), 실사·그림체 로그 `min(redraws, 1)`·`redraws + 1`·0, 검사 None 로그 `min(redraws, 1)`·0, 안내 문구 107, `redraws + 2`, 읽은 `redraws`를 1로 자름, 버린 사진 원장 없음, 다시 뽑을 때 `startedAt` 새로, 107 `casting.py` 그대로, 검사기 시드 고침 뺌. 모두 잡혔다(놓친 것 0). `_REDRAW_MAX` 3은 cpg-e(그림체 ×3 → ready)와 cpg-f(네 번째 제출) 둘 다 잡는다.
+  - 유료 호출 0: cpg는 fal·`_fetch_url`·`vpoc.llm._converse`·원장을 가짜로, `characters._fal_request`·`vpoc.fal._request`·`characters.run_resume_variant`를 막고 호출 0을 본다.
+  - 줄 끝·부산물: 바뀐 9개 파일 CR 0(시작 전도 0)·BOM 없음·끝 줄바꿈 있음, 공백만 바뀐 줄 0(같은 묶음·파일 전체 둘 다), 새 줄 끝 공백 0, 지운 함수 정의 0(AST). 수정 금지 8개 파일은 바이트가 같다. 새 파일 0. 시작 뒤 바뀐 저장소 파일은 위 9개와 실행 로그 `.kiro/handoff/logs/108.log`, 검사기의 `compileall`이 다시 쓴 `app/src/vnew/__pycache__/casting.cpython-311.pyc`(원래 있던 파일, `.gitignore`)뿐이다.
+- **3단계 리뷰**
+  - 보안: 외부로 보내는 것은 그대로다(fal 본문 3키, 검사에는 고정 질문과 결과 사진만). 다시 제출도 기존 `_submit_slot`이라 claim 확인 뒤 같은 회차 문장만 보낸다(cpg-e가 세 본문이 같은지 본다). 로그 `redraw`는 서버가 센 정수라 주입 여지가 없다. 발견 없음.
+  - 성능(512Mi): 메모리·동시성은 그대로다(검사용 디코드는 `_PHOTO_SEM` 안에서 한 장씩, 다시 뽑기는 순회 수만 늘린다). 칸당 최악 지연: fal 생성 3회 + 검사 3회(약 2~6초씩, 추정) + 약 25초. 107보다 1차례(fal 생성 + 검사 + 약 5~10초) 늘어난다. 칸당 최악 비용: 사진 $0.04 × 3 = $0.12 + 검사 약 $0.012~0.021. 2장 뽑기 최악 사진 $0.24(확인 금액 $0.08의 3배), 4장 $0.48. 그림체 50%면 칸당 기대 제출 1.75회(약 $0.07). 외부 호출: 칸마다 fal 제출 최대 3회·검사 LLM 최대 3회·S3 칸 쓰기 다시 뽑기마다 1번. 발견: 시작 900초 상한은 다시 뽑기에서 새로 잡지 않아 fal이 한 장에 약 4분 30초 넘게 밀리면 마지막 칸이 시간 초과로 끝날 수 있다 → 지시서대로 동작은 그대로 두고 design D14에 조건을 적었다.
+  - 운영성: 로그 `redraw=0|1|2`로 몇 번째 사진이 그림체였는지 바로 보인다. `vnew.cast.redraw … redraws=2`와 `kind=NotPhoto` 빈도로 효과를 잰다. 되돌리기는 `_REDRAW_MAX` 한 줄(코드)이고, 검사 전체 끄기는 지금처럼 `VNEW_CAST_PHOTO_CHECK=false` 한 줄이다. 진행 중 작업: 배포 전에 시작한 회차를 108 파드가 이어받으면 두 번까지 다시 뽑는다(그 회차 화면은 "한 번" 안내). 107 파드가 108 칸(`redraws` 1)을 이어받으면 더 다시 뽑지 않는다(덜 과금하는 쪽). 재시작 뒤 이어하기는 칸의 `redraws`로 상한을 지킨다(cpg-f).
+  - 발견 1(검사기, 조치함): coverage로 전체 검사를 돌릴 때 cpg-f 재개 경우가 한 번 실패했다(칸 submitted 그대로·제출 0, 고치기 전 coverage 전체 실행 2번 중 1번). cpg 시드 캐릭터의 variant가 queued·하트비트 없음이라 `detail_view` → `reconcile_stale`가 진짜 `run_resume_variant` 스레드를 띄웠고(스레드 이름·로그로 확인, 107부터), 그 스레드가 같은 캐릭터를 고쳤다. 메모리 저장소는 etag 조건부 쓰기를 흉내 내지 않아 늦은 쓰기가 reconcile의 새 claim을 덮은 것으로 본다. 운영 S3는 조건부 쓰기라 서버 결함은 아니다. 스레드는 ARK 키가 없어 Seedream 호출 전에 실패했지만 키가 있는 환경이면 유료 호출이 될 수 있었다. 조치: 시드 캐릭터 variant를 ready로 두고, cpg 동안 `run_resume_variant`를 막아 다시 생기면 "쓰면 안 되는 호출"로 잡는다. 고친 뒤 coverage 전체 실행 2번·일반 전체 실행 2번 모두 통과.
+- **남은 이슈**
+  1. `app/src/vnew/settings.py:269` 주석에 "같은 칸을 같은 문장으로 한 번만 다시 뽑는다"가 남는다. 이번 고칠 목록에 없어 바꾸지 않았다(다음 변경 때 "두 번까지"로).
+  2. 효과(그림체 비율·칸 실패 약 12%)는 실측하지 않았다(유료 금지). 개발 배포 뒤 `redraw=2`·`kind=NotPhoto` 빈도와 칸 시간(`vnew.casting.run_end ms=`)을 본다.
+  3. 시작 900초 상한에 걸린 submitted 칸은 fal이 사진을 만들어도 원장에 남지 않는다(106부터 있는 동작). 다시 뽑기가 늘어 칸이 상한 가까이 갈 가능성이 조금 커진다.
+  4. fal Seedream 4.5 한 장 생성 시간 실측이 저장소에 없다. D14의 "걸리지 않는다"는 추정이다.
+  5. 전체 검사 중 진짜 `vnew-resume-*` 스레드를 띄우는 그룹은 이제 `check_vnew_characters`(2개)뿐이다(스레드 시작을 감싸 센 결과). 이어 만들기 자체를 보는 그룹이라 이번에 건드리지 않았다.
