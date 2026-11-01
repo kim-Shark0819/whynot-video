@@ -2183,3 +2183,80 @@
   8. `BadVariant`·`NoGen`을 `USER_FACING_KINDS`에 넣어 캐릭터·⑤의 같은 kind 고정 문구("알 수 없는 그림체입니다." 등)도 운영에서 보인다(의도, 사용자 입력 없음).
   9. 확대 슬라이더는 로그 눈금(20~400px/초)이다. 선형을 원하면 `editSliderOf`·`editPpsOf`만 바꾼다.
   10. `edit.py`의 `import msvcrt` 실패 2줄은 윈도 검사에서 닿지 않는다(CI 리눅스에서 닿는다). 110 남은 이슈 9(stitcher 방어 분기)는 그대로다.
+
+### 지시서 113 — 캐릭터 설명의 모르는 외모 용어를 웹 검색으로 풀어 실사 캐스팅에 쓴다 `VNEW_TERM_SEARCH` (Kiro, claude-opus-5.5)
+
+- **범위**: `.kiro/handoff/113-cast-term-search.md`. 새 스펙 `.kiro/specs/cast-term-search/`(requirements R1~R10, design D1~D13·§2 흐름·§4 검사·§5 비용, tasks 1~6)을 쓰고 같은 실행에서 구현·검사까지 했다. 112(떡대)가 먼저 들어가 있다. 커밋·push 하지 않았다. git·aws·kubectl·네트워크·유료 API를 쓰지 않았다(실제 Brave·Bedrock·fal 호출 0). 사용자 데이터는 읽지 않았다. 비밀값은 쓰지 않았다(검사는 가짜 키 글자만).
+- **먼저 한 일**: 저장소 파일 805개 sha256 목록과 바꿀 파일 12개의 시작 전 사본을 저장소 밖(`%TEMP%\k113`)에 두었다. 시작 전 전체 검사 전부 통과(ok 69줄, FAIL·WARN 0, 99초). 그 뒤 검사·커버리지·변형 실행은 모두 `PYTHONPYCACHEPREFIX`(저장소 밖)로 돌렸다.
+- **사실(지시서·사용자 지시 2026-11-01)**: 모르는 용어는 인터넷 검색 API(예: Brave)로 자료를 가져와 풀이한다. 대상은 일반 인터넷 외모 용어·신조어 전반이고 BL 용어는 사용자가 입력했을 때 참고만 한다. 외모·체격·인상만 사진 묘사로, 포지션·성격·관계 뜻은 더하지 않는다. 키는 아직 없다 — 키가 Secret으로 들어오기 전까지 꺼진 채 동작해야 한다.
+- **결정**(design §3)
+  - D1 자리: 새 모듈 `vnew/term_search.py`. 잎 모듈 `web_terms`(112, import `re` 뿐)와 그 정적 표 `TERMS`는 바꾸지 않았다 — 검색 풀이는 사용자별 자료라 프로세스 전역 표에 넣으면 사용자끼리 섞인다. 같은 꼴(분류, 영어 조각)로 캐스팅 문장에 넣는다(112 남은 이슈 9의 답). 저장소는 casting이 인자로 넘긴다(`characters` import 없음).
+  - D2 시점: 뽑기 스레드(`run_draw`) 첫 제출 전 한 번(`casting._refresh_terms`). 뽑기 요청은 기다리지 않는다(202 그대로). 켬이 아니면 바로 돌아오고, queued 칸이 없거나(이어받은 실행) 캐릭터 기록이 지금 설명의 것이면 하지 않는다. 풀이 뒤 claim을 쥔 조건부 쓰기로 기록을 저장하고 회차 문장을 다시 만든다(프리셋은 회차 문장에서 — 회차 모델과 맞게). 풀이 한 번 120초 상한(`REFRESH_BUDGET_S`)·용어마다 하트비트(리뷰에서 더함, 아래). 실패는 모두 fail-open.
+  - D3 저장: 캐릭터 기록 `char.casting.termSearch`(`{v, descHash, at, terms: [{term, pieces, ok, at}]}`, 켬으로 풀이한 뒤에만 생김) + 사용자별 용어 캐시 `users/{owner}/characters/_term-cache/{sha256 앞 32자}.json`(`{v, term, pieces, results, at}`, 글만, 30일). 읽을 때 꼴·용어·날짜·조각을 다시 검사하고 틀리면 다시 검색해 덮어쓴다. 전역 캐시(`users/_system/…`)는 캐시 오염(한 사용자 설명의 외부 글 풀이가 다른 사용자 문장에)이 생겨 기각.
+  - D4 뽑기: LLM 1회(`vnew.cast_term_extract`, `VNEW_TERM_MODEL` = 기본 그림 검사 모델, 300토큰). 지시문은 일반 인터넷 외모 용어 기준이고 BL을 말하지 않는다. 서버 거르기 `clean_terms`: 설명 안에 그대로 있는 2~20자(한글·영문·숫자·붙임표, 빈칸 하나까지), 아는 용어(유형 이름 13·떡대)를 품거나 그 안에 듦·캐릭터 이름(성 뺀 이름 포함)을 품음 → 뺌, 최대 3개.
+  - D5 검색: `GET https://api.search.brave.com/res/v1/web/search?q="<용어>" 뜻&count=5&safesearch=strict&result_filter=web`, 머리 `X-Subscription-Token`. 넘겨주기 안 따름(`_NoRedirect`)·응답 호스트 확인·5초(받기 끝까지)·512KB·시작 간격 1.1초(요금제 한도를 몰라 초당 1건이어도 429가 나지 않게). 제목·요약 상위 5개(120·300자, HTML 지움). 실패 이유는 경고에만, 캐시 안 함. 빈 결과는 조각 []로 캐시.
+  - D6 해석: LLM 1회(`vnew.cast_term_look`, 400토큰). 검색 결과는 자료(그 안의 지시를 따르지 않음), 포지션·성격·관계 버림, 늘 옷 입은 사람, 옷·머리·피부색·나이·인종·성별은 쓰지 않음, 불확실하면 빈 목록. 서버 거르기 `clean_pieces`: "He has"·마침표 지움, 영문 글자·숫자·빈칸·쉼표·붙임표·작은따옴표·괄호만, ≤120자, 금지 낱말(성적·노출·미성년·폭력·은어·그림체·그림이 정하는 것·성별) 없음, 최대 2개.
+  - D7 문장: `_cast_parts`(112 `_cast_text` 본문 + 해석 조각, `_cast_text`·`cast_prompt`는 그 앞 값) — 떡대 체격 → BL 조각 → 해석 조각 한 문장. 형태 조각은 그림 우선, 떡대 분류(build)와 겹치면 뺌, 같은 글 뺌, 인상은 늘. BL 조각과는 분류로 겨루지 않는다(BL 우대 없음). 끝에서부터 줄여 1500자에서 해석 조각이 가장 먼저 빠지고 떡대·사진 고정 문장은 남는다. 성별·구도·프리셋은 바꾸지 않는다.
+  - D8 보기·화면: 켬이면 `termsApplied: [{term, pieces}]`(실제로 들어가는 조각, 없으면 []), 화면 BL 줄 아래 용어마다 "설명의 '<용어>'를/을 '<조각>' · '<조각>'으로 해석했어요"(조사는 받침으로, 12px, textContent만). D9 로그 `vnew.cast.term term= source=cache|search|skip pieces=`와 경고 6종(질의·주소·키 없음). D10 설정·Secret(아래). D11 실패 표.
+- **검토한 대안**(design D2·D12): `start_draw`에서 바로 풀기(요청이 수 초~수십 초 막힘, gunicorn 60초·ALB 60초 — 기각), 보기 때 풀기(상세 열 때마다 비용 — 기각), `characters.py`에서 설명 저장 때(수정 금지 — 기각), 해석을 용어 여럿 한 번에(실패가 번짐·용어별 캐시와 안 맞음 — 기각), 사전 표만(용어가 계속 늘어남 — 기각), 페이지 본문·요약 API(지시서 — 기각), 해석 조각을 그림 우선에서도 늘(검색 풀이는 추정 — 기각), BL 조각과 같은 분류면 해석 조각 빼기(BL 우대 — 기각), 실패도 짧게 캐시(일시 오류가 남음 — 기각), 회차 `termsPending`·"찾는 중" 화면(지시서 밖 — 보류), 원장에 LLM·검색 비용(107과 같게 남기지 않음, Brave 단가 확인 뒤 — 보류), 못 찾았을 때 안내 문구 바꾸기(화면은 한 줄 범위 — 보류), base에 `BRAVE_SEARCH_API_KEY=` 빈 줄(값을 적을 자리처럼 보임 — 기각, Secret 이름 줄 `BRAVE_SECRET_NAME`만).
+- **바꾼 것**
+  - `app/src/vnew/term_search.py`(새 파일, 570줄): 상한 상수·`active`·`known_names`·`desc_hash`, `extract`·`clean_terms`·`_name_variants`, `search`·`search_url`·`query_of`·`_http_get`·`_NoRedirect`·`_OPENER`·`_pace`·`_results`·`_clip`, `interpret`·`clean_pieces`·`_BANNED`, `cache_key`·`cache_get`·`cache_put`·`_fresh`, `applied_terms`·`needs_refresh`·`refresh`·`_resolve`·`_record_terms`, 래퍼 `_converse`·`_sleep`·`_clock`·`_gist`.
+  - `app/src/vnew/casting.py`(+138줄, 지운 정의 0): docstring, `term_search` import, `cast_prompt(searched=)`, `_cast_text(searched=)`(본문을 새 `_cast_parts`로 옮기고 앞 두 값을 돌려줌), 새 `_cast_parts`·`_searched_pieces`·`_searched_now`·`_char_names`·`_refresh_terms`·`_refresh_terms_once`, `start_draw`(회차 문장에 `_searched_now`), `view`(`termsApplied`), `run_draw`(첫 순회 전 `_refresh_terms`).
+  - `app/src/vnew/settings.py`(+16줄): `VNEW_TERM_SEARCH`(`_bool` 기본 false)·`VNEW_TERM_MODEL`(빈 값 = `PEOPLE_COUNT_MODEL`)·`BRAVE_SEARCH_API_KEY_ENV`(이름만)·`brave_search_api_key()`(부를 때마다 env, 값을 모듈 상수로 두지 않음).
+  - `frontend/public/vnew.js`(+29줄): `castingObjectParticle`·`castingTermLines`, `castingSection` BL 줄 다음 용어 줄. `vnew.css`(+7줄): `.vnew-casting-term-note`(12px).
+  - `deploy/config.env.example`(+10줄, `VNEW_EDIT=true` 바로 뒤): `VNEW_TERM_SEARCH=false`·`VNEW_TERM_MODEL=`·`BRAVE_SECRET_NAME=brave-search-api-key`와 켜기·되돌리기 주석. `k8s/workloads.yaml.tmpl`(+15줄, `VNEW_EDIT` 바로 뒤): 값 쌍 2와 `BRAVE_SEARCH_API_KEY` `secretKeyRef {name: ${BRAVE_SECRET_NAME}, key: brave-search-api-key, optional: true}`(주석에 `${`·꺾쇠 없음). `config.dev.env`·`config.prod.env`는 그대로.
+  - `tools/check_vpoc.py`(+1,286줄, 지운 줄 0): `PARITY_ENV_KEYS` 두 키, 새 `check_vnew_cast_term_search`(term-a~j)·`_TERM_*`·`_TermResp`·`_TermOpener`·`_term_brave_body`·`_term_particle`·`now_iso_test`·`term_of_url`·`blmod_hint`·`stray_call_quiet`, `main()`.
+  - `.kiro/specs/cast-term-search/` 세 파일, `docs/ANALYSIS.md`(머리 줄·§3.6 표(`casting` 행·새 `term_search` 행)·§3.6.1 B 「인터넷 외모 용어 웹 검색 풀이」(흐름 표·외부 전송 표·비용)·§6.1.1 LLM 표·§6.4 Secret 표·새 §6.6 Brave·§7.1 세 행과 배선 문단·§9.1 캐시 키·§10.1 줄 수·개수·PARITY 34개·새 행), 새 `docs/plans/2026-11-02-brave-search-key.md`(키 발급·Secret 등록·켜기·확인·끄기, 값은 `<KEY>`), 이 항목.
+- **검사(어떤 검사가 무엇을 덮는지)**
+
+  | 검사 | 덮는 것 |
+  |---|---|
+  | term-a | `settings` 세 줄·키 값 상수 없음(AST), 하위 프로세스(플래그 6값·모델 기본·덮어쓰기·빈 값·`VNEW_PEOPLE_COUNT_MODEL` 따름·키는 부를 때마다 읽고 빈칸 지움), 템플릿 `VNEW_EDIT` 바로 뒤 3개·값 쌍 2·Secret ref 블록·주석, base 3줄·키 값 줄 없음, `PARITY_ENV_KEYS` 자리, dev·prod overlay 그대로, `render.py` dev·prod × (그대로·+true) 렌더 값·ref·미치환 0·CI 미치환 판정 0 |
+  | term-b | 끔 3꼴(플래그 꺼짐 + 키·켬 + 키 없음·켬 + 빈 키)에서 `active` 거짓, 실제 `start_draw` → `run_draw`(가짜 fal): `_refresh_terms` 끔 분기·`_searched_now` 끔 분기, 회차 문장·fal 본문 = 112 고정값(아이돌풍 + 떡대공·현실 배우풍 + 용어만), 저장된 기록이 있어도 끔이면 문장·보기에 없음·기록 그대로, 열기 0·LLM 0·term 로그 0 |
+  | term-c | Flask `POST /casting/draw` → `run_draw`: `extract`·`search`·`_http_get`·`_pace`·`_results`·`interpret`·`cache_put`·`refresh`·`_resolve`·`_refresh_terms_once`(저장·다시 만듦)·`_cast_parts`(떡대 → BL → 해석 전문), LLM 호출 꼴(where·모델·도구·토큰·입력 글), 캐시 파일 3개 5키, 캐릭터 기록, 로그 5줄, `view` `termsApplied`·`blHintsEn`·자리, `GET` 상세, 같은 설명 다시(`needs_refresh` 거짓 → 외부 0, `start_draw`가 기록으로), 다른 캐릭터(`cache_get` 맞음 → source=cache·HTTP 0), 다른 사용자(키가 사용자별 → HTTP 1), 검색 간격 1.1초 × 2 |
+  | term-d | 나쁜 용어 14개(이름·이름 포함·긴 글·설명에 없음·아는 용어 포함·아는 용어 안·숫자·None·따옴표·중복) → `clean_terms`·`_name_variants`, 보낸 주소(스킴·호스트·경로·매개변수 4개 정확히)·방법·timeout 5·머리 3개, 주소·머리에 설명 다른 부분·이름 0, `_NoRedirect.redirect_request`·원래 `_OPENER` 손잡이, 지시문(BL 없음·자료·옷) |
+  | term-e | `_http_get`·`search` 실패 15꼴(TimeoutError·URLError(timeout)·429·401·403·500·URLError 연결·OSError·512KB 넘침·느린 받기(가짜 시계)·JSON 아님·배열·UTF-8 아님·302·다른 호스트)과 no_key, 빈 결과 2꼴, `interpret` 오류·모양 2꼴·빈 목록, `_resolve` 4꼴(skip·캐시 안 함 / 빈 결과 캐시·해석 0 / 해석 None skip / 외모 아님 캐시), 흐름: 실패 용어 ok false·칸 제출·상태 ready → 다음 뽑기는 뽑기 0·실패 용어만 검색, `extract` 실패·모양 틀림 → 기록 없음·112 문장 |
+  | term-f | 상한 상수, `term_search` import 목록, `clean_terms` 27경우, `clean_pieces` 29경우, `_results` 5개·120·300·HTML·꼴 틀림, `_cast_parts` PROMPT_MAX 180단계(해석 → BL 순 단조·떡대·고정 문장·`applied`), 운영 크기(외모 300자 + 두 유형 + 용어 3 × 120자 2개), `_searched_pieces` 9경우(그림 우선·인상 늘·떡대 분류·중복·BL 같은 글·꼴 틀린 항목·글 아님), 성별 unknown·female, `cast_prompt`·`_cast_text` = `_cast_parts` |
+  | term-g | 가짜 키 글자가 모든 로그(검사 중 모은 줄 전부)·메모리 저장소 JSON 전부·보기 JSON에 없음, 오류 문구 속 키 → `***`(`_gist`)·URL 쿼리 지움, 질의 원문·Brave 주소·머리 이름이 로그에 없음, `vnew.cast.term` 꼴 정규식 |
+  | term-h | `cache_key` 꼴·사용자별·빈칸 정리, `cache_get` 16꼴(29.9일·앞 0.5일 맞음, 30.1일·앞 2일·날짜 아님·v·용어·한글·금지·121자·3개·글·리스트·없음 → 없음), 읽기·쓰기 실패 경고, 오염된 캐시 → 다시 검색해 덮어씀, `applied_terms` 7꼴·`needs_refresh` 8꼴, 30일 지난 기록·캐시 → 그 용어만 다시(뽑기 0) |
+  | term-i | node 가짜 DOM(cast-l 하네스): `castingObjectParticle` 6꼴(받침 있음·없음·영문·빈 값·null), `castingTermLines` 5꼴, 실제 `view` 응답 3개(켬·BL 끔 + 켬·끔)로 `castingSection` 줄·자리(BL 줄 바로 아래, BL 끔이면 성별 바로 아래)·class, 위험한 글 textContent, innerHTML 0, CSS 12px 규칙, `node --check` |
+  | term-j | `_refresh_terms` 이어받기(queued 없음)·claim 다름, 풀이 중(뽑기 LLM) claim 잃음 → 하트비트에서 멈춤·검색 0·제출 0, 해석 중(마지막 하트비트 뒤) claim 잃음 → 저장 때 claim 다시 봄, 풀이 예외(`refresh` 실패)·캐릭터 저장 실패 → 경고·112 문장 제출, 빈 설명, BL 끔 + 켬, 뽑기 중 느낌 바꿈 → 회차 프리셋, 풀이 중 queued 칸 사라짐 → 기록만, `REFRESH_BUDGET_S` 넘김 → ok false·경고·하트비트 2회, `_pace`(가짜 시계), `_char_names`, 빈 설명 `extract`, 키 없는 `_gist`, 실제 `_clock`·`_sleep` |
+
+- **기대값을 바꾼 기존 검사**: 없다(기본 끔이라 기존 cast·cpg·cim·bl·ttk·cf 지문 그대로). `PARITY_ENV_KEYS`에 두 키를 더해 rw-a~c가 함께 본다.
+- **확인**
+  - `node --check frontend/public/vnew.js` 통과.
+  - `python -X utf8 tools/check_vpoc.py` 전부 통과: ok 70줄(시작 전 69 + term), FAIL·WARN 0, 96~100초. term 단독 약 2초.
+  - 커버리지(coverage 7.17 `--branch`, 전체 검사기 `coverage run --include=casting.py,settings.py,term_search.py`, 데이터는 저장소 밖, 시작 전 사본과 difflib): 바뀐 서버 실행문 441개 중 441개(100%) — `term_search.py` 348/348(가지 102/102), `casting.py` 바뀐 줄 88/88, `settings.py` 5/5. `casting.py`의 가지 미달 4개(:458·:528·:547·:1850)는 이번에 바꾸지 않은 줄이다.
+  - 변형 검사 84개(저장소 밖 사본 트리에서 한 곳씩 바꿔 `check_vnew_cast_term_search`만 돌리고 되돌림): `term_search.py` 49(켬 판정 2·상한 6·질의·safesearch·넘겨주기·호스트·크기·받기 시간·HTTP 이유 3·간격 2·설명 안·아는 용어·이름·성 뺀 이름·빈칸·조각 문자·금지 낱말 2·He has·캐시 용어·날짜·조각 다시 거르기·전역 캐시·실패 캐시 2·30일·실패 다시 풀기 3·지문 정리·키 가림·제목 상한·HTML·머리·지시문 BL·모델·토큰·빈 결과 해석·기록 30일·시간 상한·하트비트), `casting.py` 21(안 붙임·BL 앞·그림 우선·떡대 분류·중복·applied·보기 늘·끔 기록 사용·시작 문장·풀이 안 부름·queued·ClaimLost 삼킴·저장 때 claim·프리셋·예외 안 잡음·성별·이름·needs_refresh·저장 안 함·조각 다시 거르기·하트비트), `settings.py` 3, `vnew.js` 6, `vnew.css` 1, 템플릿 2, base 2 — 모두 잡혔다. 첫 실행(81개)에서 2개(검색 간격이 `search`에 묶였는지·성 뺀 이름 변형)가 살아남아 검사를 더했다. 리뷰에서 하트비트·시간 상한을 더한 뒤 다시 돌렸을 때 1개(마지막 하트비트 뒤 claim 잃음 → 저장 때 claim 확인)가 살아남아 해석 중 claim 잃음 경우를 더했다(84/84).
+  - 유료·네트워크 호출 0: Brave는 `term_search._OPENER`를 가짜 열기 객체로, LLM은 `_guard_real_llm` 안에서 where별 가짜로, fal은 `casting._fal_request`·`_fetch_url` 가짜, `characters._fal_request`·`vpoc.fal._request`·`characters.run_resume_variant`는 막음, 원장 가짜, S3는 `_FakeCharStore`.
+  - 줄 끝·부산물: 바뀐 9개 파일·새 5개 파일 모두 CR 0·BOM 없음·끝 줄바꿈 있음, 공백만 바뀐 줄 0, 새 줄 끝 공백 0, 지운 정의 0(Python AST·JS 함수·CSS 선택자). 수정 금지 파일(`edit.py`·`generate.py`·`routes.py`·`stitcher.py`·`characters.py`·`genre_bl.py`·`web_terms.py`·`config.dev.env`·`config.prod.env`·`.gitlab-ci.yml`)은 시작 전 sha256과 같다(`whynot-20261029`는 이 작업 트리에 없다). 저장소 안 새 파일은 `term_search.py`·스펙 3개·계획서 1개뿐이고 `__pycache__`·`.coverage` 변화 0. 시작 뒤 바뀐 그 밖의 파일은 이 실행 도구가 쓰는 `.kiro/handoff/logs/113.log`뿐이다.
+- **3단계 리뷰**
+  - 보안
+    - 외부 전송 최소화: Brave에는 질의 `"<용어>" 뜻`(사용자 설명 안 20자 이하 조각) + 고정 매개변수 + 키 머리만 간다. 설명 다른 부분·이름·id·이미지는 가지 않는다(term-d). `clean_terms`가 설명 밖 글·긴 글·이름을 막는다 — LLM이 설명 문장을 통째로 내도 나가지 않는다.
+    - SSRF: 호스트·경로 상수, 사용자 글은 `q` 값(`urlencode`)으로만, 넘겨주기 안 따름, 응답 `geturl()` 호스트 확인(term-d·e).
+    - 응답 크기·시간: 512KB·5초(받기 끝까지, 64KB씩 시계 확인)(term-e). JSON만 읽고 페이지 본문·이미지를 받지 않는다.
+    - 캐시 오염: 사용자별 캐시, 읽을 때 꼴·용어·날짜·조각을 다시 거르고 틀리면 덮어씀, 캐릭터 기록 조각도 쓸 때마다 다시 거름(term-h). 검색 요약(외부 글)이 프롬프트 주입을 해도 결과는 영문 ≤2개 × 120자·금지 낱말 없음으로 제한되고 그 사용자 문장에만 들어가며 화면에 보인다.
+    - 비밀: 키는 Secret → env, 값은 쓸 때만 읽고 모듈 상수·로그·저장소·보기에 없다(term-a·g). 오류 요지에서 키 값을 `***`로 가린다. base·템플릿에 값 줄이 없다.
+    - 화면: textContent만(term-i). 로그의 용어는 문자 제한(줄바꿈 없음)이라 로그 주입이 없다.
+    - 발견: 없음(위 조치는 구현 때 넣었다).
+  - 성능(512Mi·CPU 0.5)
+    - 외부 호출: 끔 0. 켬은 설명이 바뀐 첫 뽑기에 LLM 1 + n, Brave n(n ≤ 3), 같은 설명 다시·같은 사용자 같은 용어는 0. 요청 지연 0(백그라운드). 보기는 char.json만 읽는다(추가 S3·네트워크 0).
+    - 메모리: 응답 ≤512KB × 한 번에 하나(스레드가 용어를 차례로), 해석 입력 ≈2KB, 캐시·기록 1KB 안팎.
+    - 발견: LLM 한 번이 모델 체인·재시도로 길어질 수 있고(`VPOC_READ_TIMEOUT_S` 300) 풀이 중에는 하트비트가 없어, 오래 걸리면 다른 파드가 멈춘 뽑기(600초)로 보고 이어받아 queued 칸을 실패로 끝낼 수 있었다 → 조치: 풀이 한 번 120초 상한(넘으면 남은 용어는 다음 뽑기에)과 용어마다 하트비트(claim을 잃었으면 거기서 멈춤)(term-j). LLM 한 번 자체는 끊을 수 없어 최악은 120초 + LLM 한 번이다(남은 이슈).
+  - 운영성
+    - 로그: `vnew.cast.term term= source= pieces=`(용어마다), `term_extract found=`, `term_prompt cid= terms= pieces= chars=`, 경고 6종(`term_search_failed reason=`·`term_look_failed`·`term_extract_failed`·`term_cache_failed op=`·`term_budget`·`term_refresh_failed`). 질의·주소·키 없음.
+    - 설정·되돌리기: 기본 꺼짐(base false, overlay 그대로). 켜기 = Secret 등록 + `config.<target>.env`에 `VNEW_TERM_SEARCH=true`, 끄기 = 그 줄 지우기 또는 Secret 지우기 + 다시 시작. 저장된 기록·캐시는 지우지 않고 끔이면 읽지 않는다.
+    - 진행 중 회차·재시작: 배포 전 회차는 기록이 없어 그대로. 풀이 중 파드가 죽으면 이어받기가 queued 칸을 실패로 끝내므로(지금 규칙) 풀이를 다시 하지 않는다. 롤링 배포: 옛 파드는 `termSearch` 키를 모르고 그대로 둔다(`_casting_of` 보존), 옛 화면은 `termsApplied`를 무시하고 새 화면 + 옛 서버면 줄이 없다.
+    - 발견: CI 미치환 판정 흉내(`_pz_ci_hits`)가 렌더 결과의 이미지 태그 자리표시(base `IMAGE_TAG`)에 걸렸다 → 검사에서도 CI처럼 `IMAGE_TAG`를 바꿔 렌더한다(조치, term-a). 화면 안내 문구가 BL 중심인 것은 그대로다(남은 이슈).
+- **운영 반영 계획(실행하지 않음)**: Claude 검토·커밋 → 개발 main 병합 → CI → 개발 ArgoCD(꺼진 채라 동작 변화 없음). 사용자가 Brave 키를 발급하면 `docs/plans/2026-11-02-brave-search-key.md` 순서로 개발 Secret 등록 → `config.dev.env`에 `VNEW_TERM_SEARCH=true` → 개발 확인(로그·화면 줄·다시 뽑기 cache) → 운영 Secret·overlay·수동 job `deploy:whynot:prod`.
+- **키 등록 순서(값 없이)**: Brave Search API 대시보드에서 키 발급(요금제·한도 확인 필요) → `kubectl -n whynot create secret generic brave-search-api-key --from-literal=brave-search-api-key='<KEY>'`(또는 `--from-file`) → 키 이름만 확인 → `kubectl -n whynot rollout restart deployment/whynot-app` → overlay에 `VNEW_TERM_SEARCH=true` 커밋·배포. 상세는 계획서.
+- **남은 이슈**
+  1. Brave 요금·초당·월 한도는 확인 필요(조사하지 않았다). 응답 꼴(`web.results[].title/description`)·매개변수(`count`·`safesearch`·`result_filter`)·머리(`X-Subscription-Token`)는 공개 문서 기준이고 실제 호출로 확인하지 않았다 — 키 등록 뒤 개발 1회로 본다(틀리면 `reason=http422`·`bad_json`·결과 0).
+  2. 해석이 틀렸을 때 사용자가 고치거나 그 용어를 무시하게 하는 기능은 없다(화면 한 줄로 보이기만 한다). 사용자 캐시 30일 동안 같은 풀이가 쓰인다 — 지금은 캐시 파일을 지우는 수밖에 없다.
+  3. 해석 조각의 실제 사진 효과(인상 조각이 얼굴에 반영되는지·형태 조각이 그림과 부딪히는지)는 실측하지 않았다(유료 금지).
+  4. 풀이는 첫 제출 전에 한다. 처음 뽑기의 보기(202 응답)에는 아직 `termsApplied`가 없고 다음 폴링(5초)에 보인다. 최악 지연은 120초 + LLM 한 번(모델 체인)이다.
+  5. 금지 낱말 표는 넓게 잡았다(young·youthful·boy·hair·skin·pale·man·masculine 등). "동안"·"상남자"처럼 그 낱말이 핵심인 풀이는 조각이 비거나 줄 수 있다(빈 결과도 30일 캐시).
+  6. 같은 사용자의 두 뽑기가 같은 용어를 동시에 풀면 검색이 두 번 날 수 있다(마지막 쓰기가 이김, 해롭지 않다). 파드 2개면 검색 간격은 파드마다다.
+  7. 원장에는 LLM·Brave 비용을 남기지 않는다(107 사진 검사와 같다). Brave 단가가 정해지면 원장 기록을 정한다.
+  8. 못 찾았을 때 안내 문구("'떡대공'처럼 BL 유형을 적으면")는 여전히 BL 중심이다(112 남은 이슈 7, 화면 범위가 한 줄이라 그대로).
+  9. 뽑기 지시문의 예시 용어(꽃미남·냉미남 …)가 LLM을 그쪽으로 끌 수 있다. 설명에 없는 글은 서버가 버리므로 안전 문제는 아니다.

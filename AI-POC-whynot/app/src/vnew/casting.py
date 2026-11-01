@@ -25,6 +25,10 @@
     다음으로 마지막까지 남김), 외모 문장의 부딪히는 체격 낱말(slim·slender …)을 캐스팅 문장에서만 빼고(web_terms.strip_conflicts),
     프리셋 구도를 허리 위로 바꾼다(base_text physique — 아이돌풍 "slim V-line face" 뺌). 떡대가 없으면 문장은 112 전과 글자까지 같다.
     공·수는 포지션이라 외모를 더하지 않는다.
+  - 인터넷 외모 용어 웹 검색 풀이(지시서 113, 2026-11-02, term_search, VNEW_TERM_SEARCH + Brave 키): 뽑기 스레드(run_draw)가 첫 제출 전에
+    한 번(_refresh_terms) 캐릭터 설명의 모르는 외모 용어를 뽑아(설명이 바뀐 경우만) 용어마다 검색·해석하고(사용자별 캐시 30일), 캐릭터
+    casting.termSearch 에 남긴 뒤 회차 문장을 다시 만든다. 해석 조각은 참고 문장 끝(떡대 체격 → BL 조각 다음)에 붙고 1500자에서 가장 먼저
+    줄어든다(_cast_parts). 보기에는 termsApplied 를 더한다. 끔이거나 키가 없으면 112 와 같다(외부 호출 0). 실패는 그 용어만 빼고 계속한다.
 """
 
 from __future__ import annotations
@@ -52,6 +56,7 @@ from ..vpoc.errors import VpocError, error_gist, now_iso
 from . import characters
 from . import genre_bl
 from . import settings
+from . import term_search
 from . import web_terms
 from .fx import clean_text, strip_drawing_words
 
@@ -860,14 +865,15 @@ def prompt_look(look_en, gender) -> str:
     return text
 
 
-def cast_prompt(look_en, preset, gender, bl_types="", terms=()) -> str:
+def cast_prompt(look_en, preset, gender, bl_types="", terms=(), searched=()) -> str:
     """프리셋 문구 + " {He is|She is|They are} {외모}, with dark brown eyes." + " " + photo_anchor(성별) (≤1500자).
 
     bl_types(BL 유형 id 하나 또는 id 목록, 지시서 103·104)가 있으면 눈 색 문장 뒤에 참고 문장 " He has …." 을 더한다(_cast_text).
     없거나 모르는 값이면 참고 문장이 없다. 사진 고정 문장(지시서 107)은 늘 맨 끝이다.
     terms(일반 외모 용어 id 하나 또는 목록, 지시서 112 — 설명에서 따로 찾은 "떡대")는 _cast_text 를 본다.
+    searched(지시서 113 — [(용어, [영어 조각, …]), …], 웹 검색으로 풀이한 용어)는 _cast_parts 를 본다. 비면 112 와 같다.
     """
-    return _cast_text(look_en, preset, gender, bl_types, terms)[0]
+    return _cast_parts(look_en, preset, gender, bl_types, terms, searched)[0]
 
 
 # ================================================================ BL 유형 참고 문장(지시서 103·104, 2026-10-31)
@@ -899,7 +905,7 @@ def _term_ids(bl_types, terms) -> list[str]:
     return web_terms.known_terms(genre_bl.type_terms(bl_types) + web_terms.known_terms(terms))
 
 
-def _cast_text(look_en, preset, gender, bl_types="", terms=()) -> tuple[str, str]:
+def _cast_text(look_en, preset, gender, bl_types="", terms=(), searched=()) -> tuple[str, str]:
     """(캐스팅 문장, 더한 참고 문장). 유형·용어가 없거나 모르는 값이면 참고 문장은 "" 이다.
 
     bl_types 는 유형 id 하나 또는 id 목록이다(지시서 104: 설명에서 찾은 최대 2개, 같은 분류는 앞의 유형이 이긴다 —
@@ -911,6 +917,18 @@ def _cast_text(look_en, preset, gender, bl_types="", terms=()) -> tuple[str, str
     맨 앞에 늘 넣는다(genre_bl.hint_pieces forced — 그림 우선에서 빠지지 않음). 성별 unknown 이면 유형과 같이 male. 몸 용어면 외모 문장의
     부딪히는 체격 낱말을 빼고(web_terms.strip_conflicts, 이 문장에서만) 프리셋 구도를 바꾼다(base_text physique). 1500자를 넘으면 다른
     조각 → 외모(단어 경계) 순으로 줄이고 체격 조각은 사진 고정 문장 다음으로 마지막까지 남긴다(_fit_physique). 용어가 없으면 112 전과 같다.
+
+    searched(지시서 113)는 _cast_parts 를 본다. 이 함수는 그 앞 두 값이다.
+    """
+    return _cast_parts(look_en, preset, gender, bl_types, terms, searched)[:2]
+
+
+def _cast_parts(look_en, preset, gender, bl_types="", terms=(), searched=()) -> tuple[str, str, list[dict]]:
+    """(캐스팅 문장, 더한 참고 문장, 실제로 들어간 해석 조각 [{term, pieces}]) — _cast_text 본문(지시서 107·112) + 지시서 113 해석 조각.
+
+    searched([(용어, [영어 조각, …]), …], term_search.applied_terms)의 조각을 참고 문장 끝(떡대 체격 → BL 유형 조각 다음)에 붙인다
+    (_searched_pieces — 그림 우선·떡대 분류·중복은 뺀다). 줄이기는 끝에서부터라 1500자를 넘으면 해석 조각이 가장 먼저 빠지고, 떡대 체격·사진 고정
+    문장은 112 대로 마지막까지 남는다. 해석 조각은 성별·구도·프리셋 문구를 바꾸지 않는다. searched 가 비면 앞 두 값은 112 와 글자까지 같고 셋째는 [].
     """
     gender = _gender(gender)
     types = genre_bl.known_types(bl_types)
@@ -931,6 +949,9 @@ def _cast_text(look_en, preset, gender, bl_types="", terms=()) -> tuple[str, str
     budget = PROMPT_MAX - len(anchor) - 1
     fixed = web_terms.term_pieces(term_ids)
     pieces = genre_bl.hint_pieces(types, look, forced=fixed)
+    base_count = len(pieces)
+    extra = _searched_pieces(searched, look, fixed, pieces)
+    pieces = pieces + [piece for _term, piece in extra]
     sentence = ""
     while pieces:
         sentence = _hint_sentence(pieces, gender)
@@ -944,7 +965,40 @@ def _cast_text(look_en, preset, gender, bl_types="", terms=()) -> tuple[str, str
         text = f"{text} {sentence}"
     if len(text) > budget:
         text = _fit_cast_head(preset, gender, look, budget, physique)
-    return (f"{text} {anchor}" if text else anchor[:PROMPT_MAX]), sentence
+    applied: list[dict] = []
+    for term, piece in (extra[:max(0, len(pieces) - base_count)] if sentence else []):
+        if applied and applied[-1]["term"] == term:
+            applied[-1]["pieces"].append(piece)
+        else:
+            applied.append({"term": term, "pieces": [piece]})
+    return (f"{text} {anchor}" if text else anchor[:PROMPT_MAX]), sentence, applied
+
+
+def _searched_pieces(searched, look: str, fixed, existing) -> list[tuple[str, str]]:
+    """해석 조각(지시서 113, design D7) → 참고 문장 끝에 붙일 (용어, 조각) 목록(용어 순서, 용어 안 순서).
+
+    뺀다: 형태 분류(genre_bl.look_categories)가 외모 문장의 형태 분류와 겹치는 조각(그림 우선, steering genre-bl), 떡대 체격(fixed)의 분류와 겹치는
+    조각(사용자가 정한 떡대가 이긴다), 앞 조각과 같은 글. 인상 조각(형태 분류 없음)은 늘 넣는다. BL 유형 조각과는 분류로 겨루지 않는다(BL 을
+    우대하지 않는다). 조각은 term_search.clean_pieces 를 다시 지난다. 꼴이 틀린 항목은 건너뛴다.
+    """
+    if not isinstance(searched, (list, tuple)) or not searched:
+        return []
+    taken = genre_bl.look_categories(look)
+    claimed: set[str] = set()
+    for cat, piece in fixed:
+        claimed |= {cat} | genre_bl.look_categories(piece)
+    seen = set(existing)
+    out: list[tuple[str, str]] = []
+    for entry in searched:
+        if not isinstance(entry, (list, tuple)) or len(entry) != 2 or not isinstance(entry[0], str) or not entry[0]:
+            continue
+        for piece in term_search.clean_pieces(entry[1]):
+            cats = genre_bl.look_categories(piece)
+            if piece in seen or cats & taken or cats & claimed:
+                continue
+            seen.add(piece)
+            out.append((entry[0], piece))
+    return out
 
 
 def _fit_physique(preset, gender: str, look: str, budget: int, sentence: str, physique: str) -> tuple[str, str]:
@@ -1226,6 +1280,21 @@ def _terms_now(char) -> list[str]:
     return genre_bl.detect_terms(char.get("extraPromptKo"))
 
 
+def _searched_now(char) -> list[tuple[str, list[str]]]:
+    """뽑기 문장·보기에 쓸 웹 검색 해석 조각(지시서 113, design D7): 켬(term_search.active)일 때 캐릭터 기록(casting.termSearch)이 지금 캐릭터 설명의
+    것이면 그 (용어, 조각). 끔·기록 없음·설명이 바뀜이면 [](112 와 같다). VNEW_BL_LOOK 과는 따로다(일반 용어 기능). 네트워크·S3 없음."""
+    if not isinstance(char, dict) or not term_search.active():
+        return []
+    cast = char.get("casting") if isinstance(char.get("casting"), dict) else {}
+    return term_search.applied_terms(cast.get("termSearch"), char.get("extraPromptKo"))
+
+
+def _char_names(char) -> list[str]:
+    """용어 뽑기에서 뺄 캐릭터 이름(지시서 113 — 검색 질의에 이름이 나가지 않게): 캐릭터 이름·분석 이름 추정."""
+    analysis = char.get("analysis") if isinstance(char.get("analysis"), dict) else {}
+    return [name for name in (char.get("name"), analysis.get("nameGuess")) if isinstance(name, str) and name.strip()]
+
+
 def auto_look(char) -> str:
     """분석 appearanceEn + 기본 복장 + descriptionKo 나이로 만든 자동 외모 문장. 분석이 없으면 ""."""
     analysis = (char.get("analysis") if isinstance(char, dict) else None) or {}
@@ -1303,6 +1372,8 @@ def start_draw(owner: str, cid: str, confirm_usd: float, *, preset=None, gender=
     이전 후보는 history 로 옮기고(최신 먼저 12개), 고른 사진(chosen)은 그대로 둔다(결정 5). 캐스팅 보기를 돌려준다.
     사용자가 쓴 캐릭터 설명(extraPromptKo)에 BL 유형 이름이 있으면 회차 문장 끝에 참고 문장을 더한다(지시서 104,
     VNEW_BL_LOOK 끔이면 더하지 않는다). 떡대(떡대공·떡대수·"떡대"만)면 체격 조각·허리 위 구도가 붙고 로그 physique=ttokdae(지시서 112).
+    지시서 113 켬이면 캐릭터 기록(casting.termSearch)이 지금 설명의 것일 때 그 해석 조각도 붙는다. 설명이 바뀌었으면 뽑기 스레드가 첫 제출 전에
+    풀어 회차 문장을 다시 만든다(_refresh_terms — 이 요청은 기다리지 않는다).
     확인 금액(confirm_usd)은 고른 느낌(preset, 없으면 저장된 느낌)의 총액이어야 하고, 고른 모델·장당 금액·크기를 회차에 남긴다(지시서 109).
     """
     where = "vnew.casting.draw"
@@ -1343,7 +1414,7 @@ def start_draw(owner: str, cid: str, confirm_usd: float, *, preset=None, gender=
         ]
         cast.update(
             status="drawing", error="", usd=picked["usd"], claim=token, claimedAt=now, startedAt=now, heartbeatAt=now,
-            prompt=cast_prompt(look, cast["preset"], gender_now, _bl_types_now(data), _terms_now(data)),
+            prompt=cast_prompt(look, cast["preset"], gender_now, _bl_types_now(data), _terms_now(data), _searched_now(data)),
             model=model, unitUsd=unit_usd, imageSize=f"{size[0]}x{size[1]}",
         )
 
@@ -1402,7 +1473,8 @@ def view(char) -> dict:
     VNEW_BL_LOOK 켬이면 끝에 blDetected([{id, label}] — 사용자가 쓴 캐릭터 설명에서 찾은 BL 유형)·blHintsEn(지금 외모 문장·느낌·
     성별로 뽑기 문장에 더해질 참고 문장)을 더한다(지시서 104, 103 의 blRole·blType·blRoles·blTypes 는 없앴다). 설명에 유형 이름 밖의
     "떡대"가 있으면 그 뒤에 termsDetected([{id, label}], 지시서 112)를 더한다(없으면 키가 없다). 끔이면 이 기능 전과
-    키가 같다. VNEW_CAST_PHOTO_CHECK 켬이면 맨 끝에 photoCheckNote(다시 뽑기 비용 안내 한 줄, 지시서 107)를 더한다.
+    키가 같다. 지시서 113 켬(VNEW_TERM_SEARCH + Brave 키)이면 그 뒤에 termsApplied([{term, pieces}] — 웹 검색으로 풀이해 지금 캐스팅 문장에
+    들어가는 해석 조각, 없으면 [])를 더한다(끔이면 키가 없다). VNEW_CAST_PHOTO_CHECK 켬이면 맨 끝에 photoCheckNote(다시 뽑기 비용 안내 한 줄, 지시서 107)를 더한다.
     unitUsd·totalUsd 는 지금 고른 느낌의 금액이다. 아이돌풍 모델이 켜져 있으면 presets 항목마다 unitUsd·totalUsd 를 더한다(지시서 109,
     화면이 느낌을 바꾸면 금액을 바꾼다. 되돌리기 = 108 과 같은 보기).
     """
@@ -1438,17 +1510,27 @@ def view(char) -> dict:
         "chosen": str(cast.get("chosen") or ""),
         "chosenUrl": characters._presign(chosen_key(char)),  # noqa: SLF001
     }
+    searching = term_search.active()
+    searched = _searched_now(char) if searching else []
+    parts = None
     if settings.VNEW_BL_LOOK:
         bl_types = _bl_types_now(char)
         terms = _terms_now(char)
+        parts = _cast_parts(look, cast.get("preset"), resolve_gender(cast, analysis), bl_types, terms, searched)
         out.update(
             blDetected=[{"id": type_id, "label": genre_bl.TYPES[type_id]["label"]} for type_id in bl_types],
-            blHintsEn=_cast_text(look, cast.get("preset"), resolve_gender(cast, analysis), bl_types, terms)[1],
+            blHintsEn=parts[1],
         )
         if terms:
             # 지시서 112(design D7): 설명에서 유형 이름 밖에 따로 찾은 일반 외모 용어("떡대"만). 찾았을 때만 둔다 — 떡대가 없으면 보기는
             # 112 전과 같다. 떡대공·떡대수의 떡대는 blDetected 가 보인다.
             out["termsDetected"] = [{"id": term_id, "label": web_terms.TERMS[term_id]["label"]} for term_id in terms]
+    if searching:
+        # 지시서 113(design D8): 웹 검색으로 풀이해 지금 캐스팅 문장에 실제로 들어가는 해석 조각(그림 우선·1500자 줄이기 뒤). 켬일 때만 둔다
+        # (없으면 []) — 끔이면 키가 없어 보기는 112 와 같다. 회차 문장과 같은 _cast_parts 결과라 blHintsEn 과 맞는다.
+        if parts is None:
+            parts = _cast_parts(look, cast.get("preset"), resolve_gender(cast, analysis), (), (), searched)
+        out["termsApplied"] = parts[2]
     if settings.VNEW_CAST_PHOTO_CHECK:
         # 지시서 107(design D9): 총비용(totalUsd)은 그대로 두고, 드물게 더해지는 다시 뽑기 비용을 한 줄로 알린다. 끔이면 키가 없다.
         out["photoCheckNote"] = _MSG_PHOTO_NOTE
@@ -1802,12 +1884,67 @@ def _finish(owner: str, cid: str, token: str, *, timed_out: bool = False) -> Non
              cid, "ready" if ready else "failed", ready, failed, str(timed_out).lower())
 
 
+def _refresh_terms(owner: str, cid: str, token: str) -> None:
+    """지시서 113(design D2): 첫 제출 전에 캐릭터 설명의 모르는 외모 용어를 풀어 캐릭터 기록·회차 문장에 넣는다. 끔이면 바로 돌아온다.
+
+    실패는 모두 fail-open 이다 — 경고 한 줄을 남기고 start_draw 가 만든 회차 문장으로 제출한다. claim 을 잃으면 _ClaimLost(run_draw 가 접는다).
+    """
+    if not term_search.active():
+        return
+    try:
+        _refresh_terms_once(owner, cid, token)
+    except _ClaimLost:
+        raise
+    except Exception as exc:  # noqa: BLE001 — 풀이가 뽑기를 막지 않는다
+        log.warning("vnew.cast.term_refresh_failed cid=%s err=%s", cid, term_search._gist(exc))  # noqa: SLF001
+
+
+def _refresh_terms_once(owner: str, cid: str, token: str) -> None:
+    """_refresh_terms 본문. queued 칸이 없거나(이어받은 실행) 캐릭터 기록이 지금 설명의 것이면 하지 않는다. 풀이(외부 호출)는 저장소 잠금 밖에서
+    하고(용어를 풀기 전마다 하트비트 — claim 을 잃으면 거기서 멈춘다), 결과는 claim 을 쥔 조건부 쓰기로 저장한다. queued 칸이 남아 있으면 회차
+    문장을 지금 값으로 다시 만든다(프리셋은 회차 문장에서 읽어 회차 모델과 맞춘다)."""
+    char, _ = characters.load_char(owner, cid)
+    cast = _casting_of(char)
+    if cast.get("claim") != token or cast.get("status") != "drawing":
+        raise _ClaimLost()
+    if not any(slot.get("status") == "queued" for slot in cast["slots"]):
+        return
+    desc = char.get("extraPromptKo")
+    if not term_search.needs_refresh(cast.get("termSearch"), desc):
+        return
+    record = term_search.refresh(cast.get("termSearch"), desc, store=characters.STORE, owner=owner, names=_char_names(char),
+                                 beat=lambda: _mutate_cast(owner, cid, token, lambda _cast: None))
+    if record is None:
+        return
+    out: dict = {}
+
+    def mutator(data: dict) -> None:
+        current = _ensure(data)
+        if current.get("claim") != token or current.get("status") != "drawing":
+            raise _ClaimLost()
+        current["heartbeatAt"] = now_iso()
+        current["termSearch"] = record
+        look = current_look(data)
+        if look and any(slot.get("status") == "queued" for slot in current["slots"]):
+            text, _sentence, applied = _cast_parts(
+                look, _prompt_preset(current.get("prompt")), resolve_gender(current, data.get("analysis")), _bl_types_now(data),
+                _terms_now(data), _searched_now(data),
+            )
+            current["prompt"] = text
+            out.update(terms=len(applied), pieces=sum(len(item["pieces"]) for item in applied), chars=len(text))
+
+    characters.mutate_char(owner, cid, mutator)
+    if out:
+        log.info("vnew.cast.term_prompt cid=%s terms=%d pieces=%d chars=%d", cid, out["terms"], out["pieces"], out["chars"])
+
+
 def run_draw(owner: str, cid: str, token: str) -> None:
     """뽑기 스레드: queued 칸 제출 → submitted 칸 조회(5초 간격) → 모두 끝나거나 POLL_MAX 가 지나면 끝내기.
 
     설정은 시작 때 한 번 읽는다. 모델·장당 금액·크기는 설정이 아니라 회차에 남긴 값(_round_choice, 지시서 109)이라 재시작 뒤 이어받아도
     같다. claim 을 잃으면(다른 실행이 이어받음) 쓰지 않고 접는다. 뜻밖의 예외는 상태를 그대로 두고
     끝낸다 — 하트비트가 멈추면 조회 이어하기가 제출한 칸을 다시 조회하고, POLL_MAX 가 끝을 보장한다.
+    지시서 113: 첫 순회 전에 _refresh_terms 를 한 번 부른다(켬이고 설명이 바뀌었을 때만 용어를 풀어 회차 문장을 다시 만든다, fail-open).
     """
     started = time.time()
     _mark(owner, cid)
@@ -1815,6 +1952,7 @@ def run_draw(owner: str, cid: str, token: str) -> None:
     interval = max(0, int(settings.POLL_INTERVAL_S))
     photo_check = bool(settings.VNEW_CAST_PHOTO_CHECK)  # 지시서 107. 다른 설정처럼 이 실행이 시작할 때 한 번 읽는다
     try:
+        _refresh_terms(owner, cid, token)  # 지시서 113: 켬이고 설명이 바뀌었을 때만, 첫 제출 전에 한 번(끔이면 바로 돌아온다)
         while True:
             cast = _load_cast(owner, cid, token)
             if _expired(cast, poll_max):

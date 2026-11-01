@@ -341,6 +341,21 @@ spec:
             # ⑦ 편집 타임라인(지시서 110). 기본 true. false 면 편집 라우트 404·gen 보기에 edit 요약 없음(진행 중 내보내기는 끝까지).
             - name: VNEW_EDIT
               value: "${VNEW_EDIT}"
+            # 인터넷 외모 용어 웹 검색 풀이(지시서 113). 기본 false. 켜고 아래 Brave 키도 있으면 캐스팅 뽑기 스레드가 설명의 모르는 외모 용어를 검색·해석해
+            # 캐스팅 문장에 붙인다(질의는 용어 하나뿐). false 이거나 키가 없으면 지금 동작.
+            - name: VNEW_TERM_SEARCH
+              value: "${VNEW_TERM_SEARCH}"
+            # 용어 뽑기·해석 LLM. 빈 값이면 코드 기본(VNEW_PEOPLE_COUNT_MODEL, 그림 검사 모델).
+            - name: VNEW_TERM_MODEL
+              value: "${VNEW_TERM_MODEL}"
+            # Brave Search API 키(지시서 113). FAL_KEY 와 같은 모양 — 아직 Secret 이 없으면 optional 이라 파드는 그대로 뜨고 검색을 건너뛴다.
+            # 키 값은 Secret 에만 있다(렌더 결과·이 파일·로그에 없다).
+            - name: BRAVE_SEARCH_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: ${BRAVE_SECRET_NAME}
+                  key: brave-search-api-key
+                  optional: true
             # --- vpoc1 영상 기능 (PRD 6.8) ---
             # VIDEO_GEN_ENABLED 가 꺼진 배포에서는 이 값과 무관하게 라우트가 없다.
             - name: VPOC_ENABLED
