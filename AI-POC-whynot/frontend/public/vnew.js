@@ -9716,6 +9716,7 @@
       });
       var start = same.length === 1 ? Number(same[0].in) : 0;
       var end = same.length === 1 ? Number(same[0].out) : duration;
+      if (same.length !== 1 && mat.group === "retake" && Number((mat.retake || {}).trimTo) > 0) end = Math.min(end, Number(mat.retake.trimTo)); // 지시서 116 보완 1: 자른 버전은 그 길이까지
       end = Math.min(end, start + maxTotal - editStarts(ctx.clips).total);
       if (end - start < editMinLen(ctx)) {
         editNote(ctx, "타임라인 전체 길이는 " + maxTotal + "초까지입니다.");
@@ -9766,6 +9767,7 @@
     list.forEach(function (item) {
       var mat = ctx.materials[item.sourceKey] || item;
       var duration = Number(mat.duration);
+      if (mat.group === "retake" && Number((mat.retake || {}).trimTo) > 0 && duration > 0) duration = Math.min(duration, Number(mat.retake.trimTo)); // 지시서 116 보완 1
       var btn = el("button", "outline-button vnew-edit-bin-item", "＋ " + (mat.label || "영상") + (duration > 0 ? " · " + duration.toFixed(1) + "초" : ""));
       btn.type = "button";
       btn.title = "이 영상을 타임라인에 넣기";
@@ -10251,6 +10253,9 @@
     editPause(ctx);
     editFixClose(ctx);
     var fix = { mid: mid, clipId: clipId || "", view: null, timer: 0, busy: false, draftShown: "", refreshing: false, open: true, dom: {} };
+    fix.model = ""; // 지시서 116 보완 1: 고른 영상 모델(보기가 오면 원래 모델·초안 모델로 채운다)·범위·고른 클립 구간(원본 일부일 때만)
+    fix.scope = "";
+    fix.clip = editFixClipFor(ctx, fix.clipId);
     ctx.fix = fix;
     editFixBuild(ctx, fix);
     editFixNote(fix, "불러오는 중…");
@@ -10312,6 +10317,7 @@
     right.appendChild(el("h4", "vnew-edit-fix-label", "이전 프롬프트"));
     d.prev = el("div", "vnew-edit-fix-prev");
     right.appendChild(d.prev);
+    editFixBuildSetup(ctx, fix, right); // 지시서 116 보완 1: 범위·영상 모델
     d.request = el("textarea", "vnew-edit-fix-input");
     d.request.rows = 3;
     d.request.setAttribute("maxlength", "500");
@@ -10363,7 +10369,7 @@
   }
 
   function editFixLoad(ctx, fix) {
-    api(editFixPath(ctx, fix))
+    api(editFixViewPath(ctx, fix))
       .then(function (view) {
         if (!editFixAlive(ctx, fix)) return;
         editFixApply(ctx, fix, view || {});
@@ -10378,6 +10384,7 @@
   function editFixApply(ctx, fix, view) {
     var before = fix.view;
     fix.view = view;
+    editFixAdopt(fix); // 지시서 116 보완 1: 범위·모델 기본값(구간을 못 받았으면 원본 칸 전체로)
     editFixPaint(ctx, fix, before);
     editFixSchedule(ctx, fix);
   }
@@ -10392,7 +10399,7 @@
     fix.timer = window.setTimeout(function () {
       fix.timer = 0;
       if (!editFixAlive(ctx, fix)) return;
-      api(editFixPath(ctx, fix))
+      api(editFixViewPath(ctx, fix))
         .then(function (view) {
           if (editFixAlive(ctx, fix)) editFixApply(ctx, fix, view || {});
         })
@@ -10431,6 +10438,7 @@
     editFixNote(fix, v.canRetake === false ? v.block || "이 칸은 AI로 고칠 수 없습니다." : "");
     editFixPaintVersions(ctx, fix);
     editFixPaintPrev(fix);
+    editFixPaintSetup(ctx, fix); // 지시서 116 보완 1
     editFixPaintDraft(fix);
     editFixPaintRun(fix);
     var drafting = !!(v.draft && v.draft.status === "running");
@@ -10467,12 +10475,15 @@
     (Array.isArray(v.versions) ? v.versions : []).forEach(function (ver) {
       var row = el("div", "vnew-edit-fix-version" + (ver.n === v.n ? " is-current" : ""));
       row.appendChild(el("span", "vnew-edit-fix-version-name", editFixVerName(ver) + " · " + (EDIT_FIX_STATUS[ver.status] || ver.status || "없음")));
+      var meta = editFixVersionMeta(v, ver); // 지시서 116 보완 1: 다른 모델·구간 버전
+      if (meta) row.appendChild(el("span", "vnew-edit-fix-version-meta", meta));
       if (ver.status === "completed" && ver.sourceKey) {
         var known = !!ctx.materials[ver.sourceKey];
         var swap = el("button", "outline-button vnew-edit-fix-swap", "바꾸기");
         swap.type = "button";
         swap.disabled = !known;
-        swap.title = (fix.clipId ? "고른 클립" : "타임라인에서 이 칸의 클립") + "을 " + editFixVerTo(ver) + " 바꿉니다(구간·속도는 길이 안에서 유지)";
+        swap.title = ver.range ? editFixSwapTitle(fix, ver) :
+          (fix.clipId ? "고른 클립" : "타임라인에서 이 칸의 클립") + "을 " + editFixVerTo(ver) + " 바꿉니다(구간·속도는 길이 안에서 유지)";
         swap.addEventListener("click", function () {
           editFixSwap(ctx, fix, ver, swap);
         });
@@ -10515,7 +10526,8 @@
       return;
     }
     d.draftStatus.textContent = "새 프롬프트 — v" + (dr.baseN || 1) + "에서 고침 · " +
-      (Number(dr.framesUsed) > 0 ? "결과 프레임 " + dr.framesUsed + "장을 봤습니다" : "결과 프레임을 읽지 못해 이전 프롬프트·콘티만 봤습니다");
+      (Number(dr.framesUsed) > 0 ? "결과 프레임 " + dr.framesUsed + "장을 봤습니다" : "결과 프레임을 읽지 못해 이전 프롬프트·콘티만 봤습니다") +
+      editFixDraftSuffix(dr); // 지시서 116 보완 1: 다른 모델·구간이면 그 모델·구간
     d.result.textContent = dr.resultKo ? "지금 결과: " + dr.resultKo : "";
     clear(d.changes);
     (Array.isArray(dr.changesKo) ? dr.changesKo : []).forEach(function (text) {
@@ -10525,9 +10537,8 @@
       d.newPrompt.value = String(dr.prompt || "");
       fix.draftShown = dr.id;
     }
-    var est = v.estimate || {};
-    d.cost.textContent = "예상 비용 " + editFixMoney(est.usd) + " — 같은 모델(" + (est.model || "") + ")·같은 길이 " + (Number(est.seconds) || 0) + "초" +
-      (est.resolution ? " · " + est.resolution : "") + ". 원래 결과는 그대로 남습니다.";
+    var cur = editFixPlanOf(v, fix.model, fix.scope); // 지시서 116 보완 1: 고른 모델·범위의 견적(원래 모델·원본 칸 전체면 116 글자 그대로)
+    d.cost.textContent = editFixCostText(v, cur.row, cur.plan);
     editFixMeter(fix);
   }
 
@@ -10536,7 +10547,7 @@
     var v = fix.view || {};
     var d = fix.dom;
     var dr = v.draft || {};
-    var max = Number((v.limits || {}).promptMaxBytes) || 0;
+    var max = editFixMaxBytes(fix); // 지시서 116 보완 1: 고른 모델의 상한(같은 경로면 116 limits)
     var text = String(d.newPrompt.value || "");
     var bytes = editFixBytes(text);
     var over = max > 0 && bytes > max;
@@ -10550,10 +10561,11 @@
       d.problems.appendChild(el("li", null, String(problem)));
     });
     if (edited) d.problems.appendChild(el("li", "vnew-edit-fix-edited", "직접 고친 프롬프트는 제출할 때 서버가 참고 표시·항목·길이를 다시 검사합니다."));
-    var est = v.estimate || {};
+    var matches = dr.status !== "done" || editFixDraftMatches(v, fix); // 지시서 116 보완 1: 초안은 모델·범위에 묶인다
+    if (!matches) d.problems.appendChild(el("li", "vnew-edit-fix-mismatch", "모델이나 범위가 새 프롬프트를 만들 때와 다릅니다. [새 프롬프트 다시 만들기]를 눌러 주세요."));
     d.submit.textContent = (editFixNextN(v) === Number(((v.versions || []).slice(-1)[0] || {}).n) ? "다시 시도" : "다시 만들기") +
-      " (" + editFixMoney(est.usd) + ")";
-    d.submit.disabled = fix.busy || !!v.live || dr.status !== "done" || !text.trim() || over;
+      " (" + editFixMoney(editFixUsd(fix)) + ")";
+    d.submit.disabled = fix.busy || !!v.live || dr.status !== "done" || !text.trim() || over || !matches;
   }
 
   function editFixPaintRun(fix) {
@@ -10585,7 +10597,7 @@
     fix.busy = true;
     d.make.disabled = true;
     editFixNote(fix, "");
-    api(editFixPath(ctx, fix) + "/preview", { method: "POST", body: JSON.stringify({ requestKo: request, extraKo: String(d.extra.value || "").trim() }) })
+    api(editFixPath(ctx, fix) + "/preview", { method: "POST", body: JSON.stringify(editFixBody(fix, fix.view, { requestKo: request, extraKo: String(d.extra.value || "").trim() })) })
       .then(function (res) {
         fix.busy = false;
         if (editFixAlive(ctx, fix)) editFixApply(ctx, fix, (res && res.retake) || fix.view || {});
@@ -10602,18 +10614,17 @@
     if (!editFixAlive(ctx, fix) || fix.busy) return;
     var v = fix.view || {};
     var dr = v.draft || {};
-    var est = v.estimate || {};
+    var cur = editFixPlanOf(v, fix.model, fix.scope); // 지시서 116 보완 1: 고른 모델·범위(같은 경로면 116 확인창·바디 그대로)
     var prompt = String(fix.dom.newPrompt.value || "").trim();
-    if (dr.status !== "done" || !prompt) return;
+    if (dr.status !== "done" || !prompt || !editFixDraftMatches(v, fix)) return;
     var next = editFixNextN(v);
-    if (!editConfirm("v" + next + "를 같은 모델(" + (est.model || "") + ")·같은 길이로 다시 만듭니다. 예상 비용 " + editFixMoney(est.usd) +
-      ". 원래 결과는 그대로 남습니다.")) return;
+    if (!editConfirm(editFixConfirmText(v, cur.row, cur.plan, next, fix.scope === "range" ? v.range : null))) return;
     fix.busy = true;
     fix.dom.submit.disabled = true;
     editFixNote(fix, "");
     api(editFixPath(ctx, fix), {
       method: "POST",
-      body: JSON.stringify({ prompt: prompt, requestKo: String(dr.requestKo || ""), extraKo: String(dr.extraKo || ""), confirmUsd: Number(est.usd) || 0, draftId: String(dr.id || "") })
+      body: JSON.stringify(editFixBody(fix, v, { prompt: prompt, requestKo: String(dr.requestKo || ""), extraKo: String(dr.extraKo || ""), confirmUsd: Number(editFixUsd(fix)) || 0, draftId: String(dr.id || "") }))
     })
       .then(function (res) {
         fix.busy = false;
@@ -10643,10 +10654,14 @@
       var labels = versions.map(function (x) {
         return x.label;
       });
-      var res = editSwapSource(ctx.clips, fix.clipId ? [fix.clipId] : null, keys, ver.sourceKey, Number(mat.duration), editMinLen(ctx),
+      var ranged = editFixRanged(ctx, versions, ver); // 지시서 116 보완 1: 구간 버전이 끼면 녹화 시간으로 옮긴다
+      var res = ranged ? editFixRangeSwap(ctx.clips, fix.clipId ? [fix.clipId] : null, versions, v.kind, v.cellSeconds, editFixDurations(ctx, versions), ver,
+        editMinLen(ctx), mat.label || ver.label, labels.concat(versions.map(function (x) { return (ctx.materials[x.sourceKey] || {}).label; }))) :
+        editSwapSource(ctx.clips, fix.clipId ? [fix.clipId] : null, keys, ver.sourceKey, Number(mat.duration), editMinLen(ctx),
         mat.label || ver.label, labels);
       if (!res.changed) {
-        editFixNote(fix, res.skipped ? "이 버전 길이 안에 들어가지 않는 클립이라 바꾸지 않았습니다." :
+        editFixNote(fix, res.outside ? "고른 클립이 " + editFixVerName(ver) + " 구간(" + editFixSecs((ver.range || {}).start) + "–" + editFixSecs((ver.range || {}).end) +
+          "초) 밖이라 바꾸지 않았습니다." : res.skipped ? "이 버전 길이 안에 들어가지 않는 클립이라 바꾸지 않았습니다." :
           "타임라인에 바꿀 이 칸의 클립이 없습니다. [재료에 추가]로 넣어 주세요.");
         return;
       }
@@ -10672,6 +10687,400 @@
         button.disabled = false;
         if (editFixAlive(ctx, fix)) editFixNote(fix, "영상 길이를 읽지 못했습니다: " + errMessage(err));
       });
+  }
+
+  /* ---------------------------------------------------------------- ⑦ AI로 고치기 — 모델·구간(지시서 116 보완 1)
+
+     패널 「설정」: 범위(원본 칸 전체 | 이 구간만 — 고른 클립이 원본의 일부일 때만)와 영상 모델(서버 보기 models 중 그 범위에서 쓸 수 있는 것,
+     기본 = 초안의 모델 또는 원래 모델). 모델을 바꾸면 서버가 미리 넣은 모델 × 범위 견적으로 비용·길이·상한을 다시 그린다(서버를 부르지 않는다).
+     구간을 처음 고르면 ?in=&out=(원본 시간)으로 보기를 다시 받고, 그 뒤 조회도 같은 주소다. 원래 모델·원본 칸 전체면 116 글자·바디 그대로다.
+     구간 버전이 낀 [바꾸기]는 editFixRangeSwap(녹화 시간으로 옮김), 그 밖은 116 editSwapSource. 검사는 check_vpoc rtk-s. */
+
+  var EDIT_FIX_FORMATS = {
+    reference: "참고 영상·이미지(@Video1·@Image N)",
+    elements: "인물 요소(@Video1·@Element N)",
+    images: "이미지 목록(@Video1·Image N)",
+    none: "참고 이미지 없음"
+  };
+
+  /* 초 글자(소수 한 자리): 7.5 → "7.5", 15 → "15.0". */
+  function editFixSecs(value) {
+    return (Math.round((Number(value) || 0) * 10) / 10).toFixed(1);
+  }
+
+  /* 고른 클립이 원본의 일부면 {in, out}(원본 시간), 아니면 null. 원본 길이 = 잰 길이와 자를 길이(trimTo) 중 짧은 것. */
+  function editFixClipPart(clip, duration, trimTo) {
+    if (!clip) return null;
+    var a = Number(clip.in) || 0;
+    var b = Number(clip.out) || 0;
+    var dur = Number(duration) || 0;
+    var trim = Number(trimTo) || 0;
+    var extent = trim > 0 && dur > 0 ? Math.min(trim, dur) : trim > 0 ? trim : dur;
+    if (!(b > a) || !(extent > 0)) return null;
+    if (a <= 0.1 && b >= extent - 0.1) return null;
+    return { in: editRound3(a), out: editRound3(Math.min(b, extent)) };
+  }
+
+  /* 보기의 모델 줄과 그 범위의 견적. 없으면 {row: null, plan: null}. */
+  function editFixPlanOf(view, model, scope) {
+    var rows = view && Array.isArray(view.models) ? view.models : [];
+    for (var i = 0; i < rows.length; i++) {
+      if (rows[i] && rows[i].id === model) return { row: rows[i], plan: rows[i][scope] || null };
+    }
+    return { row: null, plan: null };
+  }
+
+  /* 원본 시간 → 칸 녹화 시간 {o, s, e}(서버 retake._time_map 과 같은 규칙): 구간 버전 (구간 시작, 1, 자를 길이) · 자를 길이가 있는 원본
+     (0, 1, 자를 길이) · 통 테이크 v1·자르지 않은 버전 (0, 칸 길이 ÷ 결과 길이, 결과 길이) · 그 밖 (0, 1, 결과 길이). */
+  function editFixTimeMap(ver, kind, cellSeconds, duration) {
+    var v = ver || {};
+    var dur = Number(duration) || 0;
+    var trim = Number(v.trimTo) || 0;
+    var r = v.range;
+    if (r && Number(r.end) > Number(r.start)) return { o: Number(r.start), s: 1, e: trim > 0 ? trim : Number(r.end) - Number(r.start) };
+    if (trim > 0) return { o: 0, s: 1, e: dur > 0 ? Math.min(trim, dur) : trim };
+    var cell = Number(cellSeconds) || 0;
+    if (kind === "take" && dur > 0 && cell > 0) return { o: 0, s: cell / dur, e: dur };
+    return { o: 0, s: 1, e: dur > 0 ? dur : cell };
+  }
+
+  /* 구간 버전이 낀 [바꾸기](순수). 대상 = 원본이 versions(그 칸 v1·버전)의 원본인 클립(ids 가 있으면 그 중). 클립 in·out 을 녹화 시간으로
+     옮긴 뒤 새 버전 시간으로 바꾼다. 새 버전이 구간이면 클립의 녹화 시간이 그 구간 안(±0.06초)일 때만 바꾸고 밖이면 outside 로 센다.
+     속도·소리 끔·id 는 그대로, 이름은 116 규칙(비었거나 oldLabels 에 든 이름일 때만 newLabel). 반환 {clips, changed, skipped, outside}. */
+  function editFixRangeSwap(clips, ids, versions, kind, cellSeconds, durations, newVer, minLen, newLabel, oldLabels) {
+    var byKey = {};
+    (versions || []).forEach(function (x) {
+      if (x && x.sourceKey) byKey[x.sourceKey] = x;
+    });
+    var idSet = null;
+    if (ids && ids.length) {
+      idSet = {};
+      ids.forEach(function (id) {
+        idSet[id] = true;
+      });
+    }
+    var nv = newVer || {};
+    var durs = durations || {};
+    var nm = editFixTimeMap(nv, kind, cellSeconds, durs[nv.sourceKey]);
+    var lo = nm.o;
+    var hi = nm.o + nm.e * nm.s;
+    var changed = 0;
+    var skipped = 0;
+    var outside = 0;
+    var out = editCloneClips(clips).map(function (clip) {
+      var src = byKey[clip.sourceKey];
+      if (!src || (idSet && !idSet[clip.id]) || clip.sourceKey === nv.sourceKey) return clip;
+      var sm = editFixTimeMap(src, kind, cellSeconds, durs[clip.sourceKey]);
+      var r0 = sm.o + Number(clip.in) * sm.s;
+      var r1 = sm.o + Number(clip.out) * sm.s;
+      if (nv.range && (r0 < lo - 0.06 || r1 > hi + 0.06)) {
+        outside += 1;
+        return clip;
+      }
+      var a = Math.max(0, Math.min(nm.e, (r0 - nm.o) / nm.s));
+      var b = Math.max(0, Math.min(nm.e, (r1 - nm.o) / nm.s));
+      if (!(nm.e > 0) || b - a < editMinSource(minLen, editSpeedOf(clip)) - 1e-9) {
+        skipped += 1;
+        return clip;
+      }
+      var next = editCloneClip(clip);
+      next.sourceKey = nv.sourceKey;
+      next.in = editRound3(a);
+      next.out = editRound3(b);
+      if (newLabel && (!clip.label || (oldLabels || []).indexOf(clip.label) >= 0)) next.label = String(newLabel).slice(0, 40);
+      changed += 1;
+      return next;
+    });
+    return { clips: out, changed: changed, skipped: skipped, outside: outside };
+  }
+
+  /* 모델 상자 한 줄: "이름 · 원래 모델 · $x"(단가 정보가 없어 기본 단가로 계산했으면 " · 기본 단가"). */
+  function editFixModelOption(row, plan) {
+    var r = row || {};
+    var p = plan || {};
+    return String(r.label || r.id || "영상 모델") + (r.original ? " · 원래 모델" : "") + " · " + editFixMoney(p.usd) + (p.priceKnown === false ? " · 기본 단가" : "");
+  }
+
+  /* 모델 길이 선택지 글자: 이어진 4~30 은 "4~30", 그 밖은 "4·8·12". */
+  function editFixDurText(list) {
+    var d = Array.isArray(list) ? list : [];
+    if (d.length > 3 && Number(d[d.length - 1]) - Number(d[0]) + 1 === d.length) return d[0] + "~" + d[d.length - 1];
+    return d.join("·");
+  }
+
+  /* 정보 줄: 형식 · 길이(모델 길이 선택지 → 보낼 길이·자를 길이) · 해상도 · 예상 금액 · 프롬프트 상한 · 기본 단가 안내 · 형식이 바뀌면 옮긴다는 안내. */
+  function editFixPlanText(view, row, plan) {
+    var r = row || {};
+    var p = plan || {};
+    var parts = ["형식: " + (EDIT_FIX_FORMATS[r.format] || String(r.format || ""))];
+    if (p.same) parts.push("원래와 같은 길이 " + editFixSecs(p.seconds) + "초");
+    else {
+      var durs = Array.isArray(p.durations) && p.durations.length ? "이 모델 길이 " + editFixDurText(p.durations) + "초 중 " : "";
+      var cut = Number(p.trimTo) > 0 && Number(p.sentSeconds) > Number(p.trimTo) + 0.05;
+      parts.push(durs + editFixSecs(p.sentSeconds) + "초로 만들고 " + (cut ? editFixSecs(p.trimTo) + "초로 잘라 씀" : "그대로 씀"));
+    }
+    if (p.resolution) parts.push(String(p.resolution));
+    parts.push("예상 " + editFixMoney(p.usd));
+    parts.push("프롬프트 " + editFixComma(p.maxBytes) + "바이트까지");
+    if (p.priceKnown === false) parts.push("단가 정보가 없어 기본 단가로 계산");
+    var orig = editFixPlanOf(view, (view || {}).defaultModel, "full").row;
+    if (!p.same && orig && r.format !== orig.format) parts.push("원래 모델과 형식이 달라 새 프롬프트를 이 모델 형식으로 옮깁니다");
+    return parts.join(" · ");
+  }
+
+  /* 비용 줄. 같은 경로(원래 모델·원본 칸 전체)는 116 글자 그대로. */
+  function editFixCostText(view, row, plan) {
+    var v = view || {};
+    var r = row || {};
+    var p = plan;
+    if (!p || p.same) {
+      var est = v.estimate || {};
+      return "예상 비용 " + editFixMoney(est.usd) + " — 같은 모델(" + (est.model || "") + ")·같은 길이 " + (Number(est.seconds) || 0) + "초" +
+        (est.resolution ? " · " + est.resolution : "") + ". 원래 결과는 그대로 남습니다.";
+    }
+    var cut = Number(p.trimTo) > 0 && Number(p.sentSeconds) > Number(p.trimTo) + 0.05;
+    return "예상 비용 " + editFixMoney(p.usd) + " — " + (r.label || r.id || "") + "(" + (r.id || "") + ") · " + editFixSecs(p.sentSeconds) + "초" +
+      (cut ? "(" + editFixSecs(p.trimTo) + "초로 잘라 씀)" : "") + (p.resolution ? " · " + p.resolution : "") + ". 원래 결과는 그대로 남습니다.";
+  }
+
+  /* 제출 확인창. 같은 경로는 116 글자 그대로. */
+  function editFixConfirmText(view, row, plan, next, range) {
+    var v = view || {};
+    var r = row || {};
+    var p = plan;
+    if (!p || p.same) {
+      var est = v.estimate || {};
+      return "v" + next + "를 같은 모델(" + (est.model || "") + ")·같은 길이로 다시 만듭니다. 예상 비용 " + editFixMoney(est.usd) + ". 원래 결과는 그대로 남습니다.";
+    }
+    var what = range ? "구간 " + editFixSecs(range.start) + "–" + editFixSecs(range.end) + "초만" : "원본 칸 전체를";
+    return "v" + next + "를 " + (r.label || r.id || "") + "(으)로 " + what + " 다시 만듭니다. 예상 비용 " + editFixMoney(p.usd) + ". 원래 결과는 그대로 남습니다.";
+  }
+
+  /* 고른 견적의 금액·바이트 상한(견적이 없거나 같은 경로면 116 estimate·limits). */
+  function editFixUsd(fix) {
+    var v = (fix || {}).view || {};
+    var p = editFixPlanOf(v, fix.model, fix.scope).plan;
+    return p && p.ok ? p.usd : (v.estimate || {}).usd;
+  }
+
+  function editFixMaxBytes(fix) {
+    var v = (fix || {}).view || {};
+    var p = editFixPlanOf(v, fix.model, fix.scope).plan;
+    return p && p.ok && !p.same ? Number(p.maxBytes) || 0 : Number((v.limits || {}).promptMaxBytes) || 0;
+  }
+
+  /* 초안이 지금 고른 모델·범위(구간 밀리초까지)로 만든 것인가(116 초안은 원래 모델·원본 칸 전체). */
+  function editFixDraftMatches(view, fix) {
+    var v = view || {};
+    var dr = v.draft || {};
+    if ((dr.model || v.defaultModel || "") !== (fix.model || v.defaultModel || "") || (dr.scope || "full") !== (fix.scope || "full")) return false;
+    if ((dr.scope || "full") !== "range") return true;
+    var a = dr.range || {};
+    var b = v.range || {};
+    return Math.abs((Number(a.start) || 0) - (Number(b.start) || 0)) < 0.0005 && Math.abs((Number(a.end) || 0) - (Number(b.end) || 0)) < 0.0005;
+  }
+
+  /* 미리보기·제출 바디: base + 고른 모델(원래와 다를 때)·범위(구간이면 scope·in·out). 원래 모델·원본 칸 전체는 116 바디 그대로. */
+  function editFixBody(fix, view, base) {
+    var v = view || {};
+    var body = {};
+    Object.keys(base || {}).forEach(function (k) {
+      body[k] = base[k];
+    });
+    if (fix.model && fix.model !== v.defaultModel) body.model = fix.model;
+    if (fix.scope === "range") {
+      body.scope = "range";
+      if (fix.clip) {
+        body.in = fix.clip.in;
+        body.out = fix.clip.out;
+      }
+    }
+    return body;
+  }
+
+  /* 초안 상태 줄 꼬리: 새 길 초안이면 " · 모델 이름 · 구간 a–b초". */
+  function editFixDraftSuffix(dr) {
+    var d = dr || {};
+    if (d.format !== "template") return "";
+    return " · " + (d.modelLabel || d.model || "") + (d.range ? " · 구간 " + editFixSecs(d.range.start) + "–" + editFixSecs(d.range.end) + "초" : "");
+  }
+
+  /* 버전 줄 덧붙임: 원래 모델이 아니면 모델 이름, 구간 버전이면 구간. 둘 다 아니면 "". */
+  function editFixVersionMeta(view, ver) {
+    var v = ver || {};
+    var parts = [];
+    if (v.model && v.model !== (view || {}).defaultModel) parts.push(String(v.modelLabel || v.model));
+    if (v.range) parts.push("구간 " + editFixSecs(v.range.start) + "–" + editFixSecs(v.range.end) + "초");
+    return parts.join(" · ");
+  }
+
+  function editFixSwapTitle(fix, ver) {
+    var r = (ver || {}).range || {};
+    return (fix.clipId ? "고른 클립" : "타임라인에서 이 구간 안의 클립") + "을 " + editFixVerTo(ver) + " 바꿉니다(녹화 " + editFixSecs(r.start) + "–" +
+      editFixSecs(r.end) + "초 자리, 속도는 그대로)";
+  }
+
+  /* 구간 버전이 끼는가: 새 버전이 구간이거나, 타임라인에 그 칸 구간 버전 클립이 있다(되돌리기). */
+  function editFixRanged(ctx, versions, ver) {
+    if (ver && ver.range) return true;
+    return (versions || []).some(function (x) {
+      return !!(x && x.range) && ctx.clips.some(function (c) {
+        return c.sourceKey === x.sourceKey;
+      });
+    });
+  }
+
+  function editFixDurations(ctx, versions) {
+    var out = {};
+    (versions || []).forEach(function (x) {
+      if (x && x.sourceKey) out[x.sourceKey] = Number((ctx.materials[x.sourceKey] || {}).duration) || 0;
+    });
+    return out;
+  }
+
+  /* 패널을 고른 클립에서 열었으면 그 클립이 원본의 일부인지(일부면 {in, out}). */
+  function editFixClipFor(ctx, clipId) {
+    if (!clipId) return null;
+    var clip = ctx.clips.filter(function (c) {
+      return c.id === clipId;
+    })[0];
+    var mat = clip ? ctx.materials[clip.sourceKey] || {} : {};
+    return clip ? editFixClipPart(clip, mat.duration, (mat.retake || {}).trimTo) : null;
+  }
+
+  function editFixViewPath(ctx, fix) {
+    var path = editFixPath(ctx, fix);
+    if (fix.scope === "range" && fix.clip) path += "?in=" + encodeURIComponent(String(fix.clip.in)) + "&out=" + encodeURIComponent(String(fix.clip.out));
+    return path;
+  }
+
+  /* 보기가 올 때 범위·모델 기본값. 구간을 기다리던 중 보기에 구간이 없으면(서버가 거절) 원본 칸 전체로 돌리고 이유를 남긴다. 고른 모델을 그
+     범위에서 쓸 수 없으면 원래 모델, 그것도 안 되면 쓸 수 있는 첫 모델. */
+  function editFixAdopt(fix) {
+    var v = fix.view || {};
+    var scopes = Array.isArray(v.scopes) && v.scopes.length ? v.scopes : ["full"];
+    if (fix.rangeWait) {
+      fix.rangeWait = false;
+      fix.scopeNote = v.range ? "" : v.rangeNote || "이 클립 구간은 따로 고칠 수 없습니다.";
+    }
+    if (!fix.scope || scopes.indexOf(fix.scope) < 0) fix.scope = scopes.indexOf("full") >= 0 ? "full" : "range";
+    var dr = v.draft || null;
+    if (!fix.model) fix.model = (dr && dr.model) || v.defaultModel || "";
+    var cur = editFixPlanOf(v, fix.model, fix.scope);
+    if (cur.plan && cur.plan.ok) return;
+    var usable = (Array.isArray(v.models) ? v.models : []).filter(function (m) {
+      return m && m[fix.scope] && m[fix.scope].ok;
+    });
+    var orig = usable.filter(function (m) {
+      return m.id === v.defaultModel;
+    })[0];
+    if (orig || usable[0]) fix.model = (orig || usable[0]).id;
+  }
+
+  /* 범위 바꾸기: 구간을 처음 고르면 ?in=&out= 로 보기를 다시 받는다(그동안 정보 줄에 "불러오는 중"). */
+  function editFixSetScope(ctx, fix, scope) {
+    if (!editFixAlive(ctx, fix) || fix.scope === scope) return;
+    fix.scope = scope;
+    fix.scopeNote = "";
+    if (scope === "range" && !(fix.view || {}).range) {
+      fix.rangeWait = true;
+      editFixPaintSetup(ctx, fix);
+      editFixLoad(ctx, fix);
+      return;
+    }
+    editFixAdopt(fix);
+    editFixPaint(ctx, fix, fix.view);
+  }
+
+  function editFixScopeItem(ctx, fix, parent, value, text) {
+    var label = el("label", "vnew-edit-fix-scope-item");
+    var input = el("input", null);
+    input.type = "radio";
+    input.name = "vnew-edit-fix-scope";
+    input.value = value;
+    input.addEventListener("change", function () {
+      if (input.checked) editFixSetScope(ctx, fix, value);
+    });
+    var span = el("span", null, text);
+    label.appendChild(input);
+    label.appendChild(span);
+    label.radio = input;
+    label.text = span;
+    parent.appendChild(label);
+    return label;
+  }
+
+  /* 「설정」 뼈대(한 번): 범위 라디오 두 개·영상 모델 상자·정보 줄·뺀 모델 한 줄. */
+  function editFixBuildSetup(ctx, fix, parent) {
+    var d = fix.dom;
+    d.setup = el("div", "vnew-edit-fix-setup");
+    d.scope = el("div", "vnew-edit-fix-scope");
+    d.scope.setAttribute("role", "radiogroup");
+    d.scope.setAttribute("aria-label", "다시 만들 범위");
+    d.scopeFull = editFixScopeItem(ctx, fix, d.scope, "full", "원본 칸 전체");
+    d.scopeRange = editFixScopeItem(ctx, fix, d.scope, "range", "이 구간만 다시 만들기");
+    d.setup.appendChild(d.scope);
+    d.scopeNote = el("p", "vnew-hint vnew-edit-fix-scope-note", "");
+    d.scopeNote.style.display = "none";
+    d.setup.appendChild(d.scopeNote);
+    d.model = el("select", "vnew-edit-fix-input vnew-edit-fix-model");
+    d.model.setAttribute("aria-label", "영상 모델");
+    d.model.addEventListener("change", function () {
+      fix.model = String(d.model.value || "");
+      editFixPaintSetup(ctx, fix);
+      editFixPaintDraft(fix);
+    });
+    d.setup.appendChild(editFixLabeled("영상 모델", d.model));
+    d.modelInfo = el("p", "vnew-edit-fix-model-info", "");
+    d.setup.appendChild(d.modelInfo);
+    d.modelHidden = el("p", "vnew-edit-fix-hidden", "");
+    d.modelHidden.style.display = "none";
+    d.setup.appendChild(d.modelHidden);
+    parent.appendChild(d.setup);
+  }
+
+  function editFixPaintSetup(ctx, fix) {
+    var v = fix.view || {};
+    var d = fix.dom;
+    if (!d.setup) return;
+    var scopes = Array.isArray(v.scopes) && v.scopes.length ? v.scopes : ["full"];
+    var hasRange = !!fix.clip || scopes.indexOf("range") >= 0;
+    d.scope.style.display = hasRange ? "" : "none";
+    d.scopeFull.style.display = scopes.indexOf("full") >= 0 ? "" : "none";
+    d.scopeFull.radio.checked = fix.scope !== "range";
+    d.scopeRange.radio.checked = fix.scope === "range";
+    d.scopeFull.text.textContent = "원본 칸 전체" + (Number(v.cellSeconds) > 0 ? " (0.0–" + editFixSecs(v.cellSeconds) + "초)" : "");
+    var r = v.range;
+    var nos = r && Array.isArray(r.cuts) ? r.cuts.map(function (c) {
+      return c.no;
+    }).filter(function (n) {
+      return n !== null && n !== undefined;
+    }) : [];
+    d.scopeRange.text.textContent = "이 구간만 다시 만들기" + (r ? " (" + editFixSecs(r.start) + "–" + editFixSecs(r.end) + "초" +
+      (nos.length ? " · 컷 " + (nos.length > 1 ? nos[0] + "–" + nos[nos.length - 1] : nos[0]) : "") + ")" : fix.clip ? " (클립 " + editFixSecs(fix.clip.in) + "–" +
+      editFixSecs(fix.clip.out) + "초)" : "");
+    d.scopeNote.textContent = fix.scopeNote || "";
+    d.scopeNote.style.display = fix.scopeNote ? "" : "none";
+    clear(d.model);
+    var rows = (Array.isArray(v.models) ? v.models : []).filter(function (m) {
+      return m && m[fix.scope] && m[fix.scope].ok;
+    });
+    rows.forEach(function (m) {
+      var option = el("option", null, editFixModelOption(m, m[fix.scope]));
+      option.value = m.id;
+      if (m.id === fix.model) option.selected = true;
+      d.model.appendChild(option);
+    });
+    d.model.value = fix.model || "";
+    d.model.disabled = rows.length < 2 || v.canRetake !== true || !!fix.rangeWait;
+    var cur = editFixPlanOf(v, fix.model, fix.scope);
+    d.modelInfo.textContent = fix.rangeWait ? "구간 정보를 불러오는 중…" : cur.plan && cur.plan.ok ? editFixPlanText(v, cur.row, cur.plan) : "";
+    var hidden = Array.isArray(v.modelsHidden) ? v.modelsHidden : [];
+    d.modelHidden.style.display = hidden.length ? "" : "none";
+    d.modelHidden.textContent = hidden.length ? "이 칸에 쓸 수 없는 모델 " + hidden.length + "개는 목록에서 뺐습니다." : "";
+    d.modelHidden.title = hidden.map(function (h) {
+      return String(h.label || h.id || "") + ": " + String(h.reason || "");
+    }).join("\n");
   }
 
   /* ---------------------------------------------------------------- 전역 */

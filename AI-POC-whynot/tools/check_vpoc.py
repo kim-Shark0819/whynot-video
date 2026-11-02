@@ -41693,8 +41693,8 @@ def check_vnew_edit_retake() -> None:
                                   ".vnew-edit-fix-version.is-current {") if sel not in section]
         expect("rtk-k", [start > 0, 0 < js_start < js_end, sorted(used - defined), states, "overflow-x" in section, max(widths or [0]) <= 960,
                          css.endswith("}\n"), "\r" in css, "\r" in vjs, vjs.count("⑦ AI로 고치기(지시서 116)"), len(used)],
-               [True, True, [], [], False, True, True, False, False, 1, 40],
-               "CSS 116 구역: 화면이 쓰는 클래스 40개 정의·가로 스크롤 없음·고정 너비 960px 이하·LF·끝 줄바꿈, JS 소구역 표시 하나")
+               [True, True, [], [], False, True, True, False, False, 1, 49],
+               "CSS 116 구역: 화면이 쓰는 클래스 49개(116 40 + 보완 1 9) 정의·가로 스크롤 없음·고정 너비 960px 이하·LF·끝 줄바꿈, JS 소구역 표시 하나")
     except Exception as exc:  # noqa: BLE001
         bad.append("(rtk-k) 예외: " + repr(exc) + "\n" + _tb.format_exc()[:1200])
 
@@ -42075,6 +42075,1256 @@ def _rtk_ui_problems(got: dict, server: dict) -> list[str]:
     return problems
 
 
+# ---------------------------------------------------------------- 지시서 116 보완 1 — ⑦ AI로 고치기 모델 고르기·클립 구간(rtk-n~u)
+#
+# _RtkEnv 위에 가짜 fal 등록 목록(경로·형식·길이 enum·해상도·단가·참고 수가 다른 모델)을 얹어 실제 retake·generate 경로를 돌린다. 영상 클립 자르기
+# (_cut_clip)·채우기(_pad_clip)는 받은 구간·길이를 적는 가짜, LLM·조회·스레드는 116 가짜 그대로다. 화면은 _EDU_NODE_HARNESS + ⑦ 구역을 node 로 돌린다.
+# rtk-u 만 로컬 ffmpeg 로 _pad_clip 을 실측한다(없으면 경고). 유료 API 0.
+
+_RTK1_FAST = "fal-ai/rtk/take-fast"  # 참고 영상 경로 · 길이 [5, 10] · 초당 $0.10
+_RTK1_T720 = "fal-ai/rtk/take-720"  # 참고 영상 경로 · 4~15초 · 720p·1080p 만 · 토큰 단가
+_RTK1_NORES = "fal-ai/rtk/take-nores"  # 참고 영상 경로 · 540p 만(원장 공식에 없음)
+_RTK1_PRO = "fal-ai/rtk/edit-pro"  # 영상 편집 · 인물 요소 · 초당 $0.28 · 프롬프트 2,000
+_RTK1_IMG2 = "fal-ai/rtk/edit-images"  # 영상 편집 · 이미지 목록 2장
+_RTK1_IMG4 = "fal-ai/rtk/edit-images4"  # 영상 편집 · 이미지 목록 4장 · 단가 모름
+_RTK1_NOVID = "fal-ai/rtk/no-video"  # 영상 입력 없음(프리비즈 미지원)
+_RTK1_UNAV = "fal-ai/rtk/unavail"  # 채울 수 없는 필수 입력
+_RTK1_NEW_KINDS = ("RetakeBadModel", "RetakeBadRange")
+
+
+def _rtk1_registry() -> dict:
+    """가짜 fal 등록 목록(endpoint → 항목). 원래 통 테이크 모델(_LR_ENDPOINT)과 보완 1 후보."""
+
+    def item(endpoint: str, label: str, caps: dict, pricing) -> dict:
+        return {"id": "fal:" + endpoint, "endpointId": endpoint, "label": label, "category": "video-to-video",
+                "caps": {"previzCapable": True, "available": True, **caps}, "pricing": pricing}
+
+    tokens = {"unit": "1000 tokens", "unitPrice": 0.0214}
+    edit_caps = {"videoField": "video_url", "keepAudioField": "keep_audio", "durations": [5], "sendDuration": False}
+    take_caps = {"videoListField": "video_urls", "imageListField": "image_urls"}
+    return {
+        _LR_ENDPOINT: item(_LR_ENDPOINT, "Seedance 2.5 r2v", dict(_LR_CAPS), tokens),
+        _RTK1_FAST: item(_RTK1_FAST, "Take Fast", {**take_caps, "imageListMax": 4, "durations": [5, 10]}, {"unit": "seconds", "unitPrice": 0.10}),
+        _RTK1_T720: item(_RTK1_T720, "Take 720", {**take_caps, "imageListMax": 10, "durations": list(range(4, 16)), "durationAsString": True,
+                                                  "resolutions": ["720p", "1080p"], "resolutionValues": {"720p": "720P", "1080p": "1080P"},
+                                                  "generateAudioField": "generate_audio"}, tokens),
+        _RTK1_NORES: item(_RTK1_NORES, "Take NoRes", {**take_caps, "durations": list(range(4, 31)), "resolutions": ["540p"]}, tokens),
+        _RTK1_PRO: item(_RTK1_PRO, "Edit Pro", {**edit_caps, "elementsField": "elements", "imageListField": "image_urls", "promptMaxLength": 2000},
+                        {"unit": "seconds", "unitPrice": 0.28}),
+        _RTK1_IMG2: item(_RTK1_IMG2, "Edit Images", {**edit_caps, "imageListField": "image_urls", "imageListMax": 2},
+                         {"unit": "seconds", "unitPrice": 0.2}),
+        _RTK1_IMG4: item(_RTK1_IMG4, "Edit Images 4", {**edit_caps, "imageListField": "image_urls", "imageListMax": 4}, None),
+        _RTK1_NOVID: item(_RTK1_NOVID, "Image To Video", {"previzCapable": False, "startImageField": "image_url"}, None),
+        _RTK1_UNAV: item(_RTK1_UNAV, "Unavailable", {**edit_caps, "elementsField": "elements", "available": False,
+                                                     "reason": "채울 수 없는 필수 입력: foo"}, None),
+    }
+
+
+class _Rtk1Env(_RtkEnv):
+    """check_vnew_edit_retake_models 하네스(_RtkEnv + 가짜 fal 등록 목록·단가, 받은 구간을 적는 _cut_clip·_pad_clip)."""
+
+    def __init__(self, owner: str = _RTK_OWNER) -> None:
+        super().__init__(owner)
+        self.registry = _rtk1_registry()
+        self.cut_calls: list[tuple] = []
+        self.pad_calls: list[tuple] = []
+        self.registered_error: BaseException | None = None
+
+    def __enter__(self) -> "_Rtk1Env":
+        super().__enter__()
+        fal = self.genmod.vpoc_fal
+        self.set(fal, "find", self._find)
+        self.set(fal, "registered", self._registered)
+        self.set(fal, "pricing_for", lambda model: self._price(str(model).split(":", 1)[-1]))
+        self.set(fal, "pricing", self._price)
+        self.set(self.genmod, "_cut_clip", self._cut)
+        self.set(self.genmod, "_pad_clip", self._pad)
+        return self
+
+    def _find(self, model):
+        import copy as _copy  # noqa: PLC0415
+
+        found = self.registry.get(str(model).split(":", 1)[-1])
+        return _copy.deepcopy(found) if found else None
+
+    def _registered(self):
+        import copy as _copy  # noqa: PLC0415
+
+        if self.registered_error is not None:
+            raise self.registered_error
+        return [_copy.deepcopy(v) for v in self.registry.values()]
+
+    def _price(self, endpoint):
+        found = self.registry.get(str(endpoint))
+        return dict(found["pricing"]) if found and found.get("pricing") else None
+
+    def _cut(self, video_mp4: bytes, unit: dict) -> dict:
+        start, end = float(unit.get("startSec") or 0.0), float(unit.get("endSec") or 0.0)
+        seconds = round(max(0.0, end - start), 3)
+        self.cut_calls.append((bytes(video_mp4)[:40], round(start, 3), round(end, 3)))
+        return {"bytes": b"CLIP:" + f"{start:g}-{end:g}".encode(), "origSeconds": seconds, "sentSeconds": max(3.0, seconds),
+                "padded": seconds < 3.0}
+
+    def _pad(self, video_mp4: bytes, seconds: float) -> bytes:
+        self.pad_calls.append((bytes(video_mp4)[:40], float(seconds)))
+        return b"PAD:" + bytes(video_mp4) + f"@{float(seconds):g}".encode()
+
+
+def check_vnew_edit_retake_models() -> None:
+    """지시서 116 보완 1 — ⑦ AI로 고치기에서 모델 고르기·클립 구간만 고치기. 유료 호출 0.
+
+    (rtk-n) 모델 목록: 원래 모델 첫 줄·① 원천(plan.previz_models) 순서·뺀 모델 이유(길이 enum·해상도·참고 수·프리비즈 미지원·쓸 수 없음), 통 테이크·
+            구간·실사·컷 칸마다 목록, 경로·형식·참고 수, 등록 밖 원래 모델, 목록을 못 읽으면 원래 모델만
+    (rtk-o) 견적·confirmUsd: 모델 × 범위 금액(토큰·초당·기본 단가)·보낼 길이(올림)·자를 길이·해상도·상한, same = 116 estimate, 고른 모델 기준
+            409 CostMismatch, 400 RetakeBadModel·RetakeBadRange 꼴, 초안과 모델·범위 다르면 409 RetakeNoDraft
+    (rtk-p) 형식: 테이크 → 인물 요소 모델 본보기(@Element)·LLM 시스템 문구·블록, 이전 형식 그대로인 응답 → 문제(고른 모델 형식 기준)·제출 400, 컷 → 참고 영상
+            모델(STYLE·@Image)·이미지 목록(Image N) 본보기, check_prompt against
+    (rtk-q) 고른 모델로 제출: endpoint·본문 키·영상 입력·duration·resolution 표기·원장 금액·기록 model·params·버전 필드·재료 trimTo, 본보기가 바뀌면 실패
+            (제출 0), 스레드에서 모델을 못 쓰면 실패, resubmit_model 거절 꼴, 원장 실패 경고
+    (rtk-r) 구간: 보기 구간(비례·1:1·구간 버전)·구간 안 컷·틀린 구간 이유·LLM <range>·콘티·프레임 시각·올림·채움·자르기·재료 이름·구간 버전 기준 범위·
+            컷 칸 구간(녹화 안 시각)·짧은 구간 3초 과금
+    (rtk-s) 화면(node, 실제 서버 응답): 범위 라디오·모델 상자·정보 줄·뺀 모델, 모델 바꾸면 비용·버튼·확인창, 미리보기·제출 바디, 초안과 다르면 막힘,
+            구간 [바꾸기]·되돌리기·[재료에 추가] 길이, 순수 함수
+    (rtk-t) CSS 보완 1 구역·USER_FACING 새 kind 2개·던지는 곳 문구(AST)·끔이면 GET /edit 에 새 표식 없음
+    (rtk-u) 로컬 ffmpeg: _pad_clip 실제 mp4 길이·임시 폴더 0
+    """
+    sys.path.insert(0, str(ROOT / "app"))
+    import ast as _ast  # noqa: PLC0415
+    import base64 as _b64  # noqa: PLC0415
+    import traceback as _tb  # noqa: PLC0415
+
+    bad: list[str] = []
+    seen: set[str] = set()
+    report: list[str] = []
+    logs = _LogCapture()
+    owner = _RTK_OWNER
+    node = shutil.which("node")
+    server: dict = {}
+
+    def expect(group: str, got, want, what: str) -> None:
+        seen.add(group)
+        if got != want:
+            bad.append(f"({group}) {what}\n      결과 {got!r}\n      기대 {want!r}")
+
+    def err_of(resp) -> tuple[int, str, str]:
+        body = (resp.get_json(silent=True) or {}).get("error") or {}
+        return resp.status_code, str(body.get("type") or ""), str(body.get("message") or "")
+
+    saved_tempdir = tempfile.tempdir
+    private_tmp = tempfile.mkdtemp(prefix="rtk1-tmp-")
+    tempfile.tempdir = private_tmp
+
+    try:
+        with _guard_real_llm() as real_calls, logs, _Rtk1Env(owner) as env, _pin_vnew(
+                VNEW_FX=True, VNEW_CASTING=True, VNEW_TAKE_REAL=True, VNEW_GEN_PARALLEL=2, POLL_INTERVAL_S=0, VNEW_TAKE_AUDIO=True,
+                VNEW_TAKE_RESOLUTION="480p", VNEW_PREPARE_STALE_S=300, VNEW_EDIT=True, VNEW_EDIT_RETAKE=True):
+            genmod, rt, edit, planmod = env.genmod, env.rtmod, env.editmod, env.planmod
+            from src.vpoc import errors as vpoc_errors  # noqa: PLC0415
+            from src.vpoc import settings as vpoc_set  # noqa: PLC0415
+            from src.vpoc.errors import VpocError  # noqa: PLC0415
+
+            client = env.client()
+            kl = genmod.vnew_settings.VNEW_PREVIZ_EDIT_MODEL
+            lr = _LR_ENDPOINT
+
+            def edit_get(pid: str, **params):
+                query = "&".join(f"{k}={v}" for k, v in params.items())
+                return client.get(f"/api/vnew/p/{pid}/edit" + (f"?{query}" if query else ""))
+
+            def rv_get(pid: str, mid: str, **query):
+                tail = "&".join(f"{k}={v}" for k, v in query.items())
+                return client.get(f"/api/vnew/p/{pid}/edit/retake/{mid}" + (f"?{tail}" if tail else ""))
+
+            def preview(pid: str, mid: str, body):
+                return client.post(f"/api/vnew/p/{pid}/edit/retake/{mid}/preview", json=body)
+
+            def submit(pid: str, mid: str, body):
+                return client.post(f"/api/vnew/p/{pid}/edit/retake/{mid}", json=body)
+
+            def mats(pid: str, **params) -> list[dict]:
+                return (edit_get(pid, **params).get_json() or {}).get("materials") or []
+
+            def mid_of(pid: str, label: str, **params) -> str:
+                return next((m["mid"] for m in mats(pid, **params) if m["label"] == label), "")
+
+            def rid_of(arn: str) -> str:
+                return str(arn or "").rsplit("/", 1)[-1]
+
+            def request_of(arn: str) -> dict:
+                return next((q for q in env.requests if q["rid"] == rid_of(arn)), {})
+
+            def row_of(view: dict, model: str) -> dict:
+                return next((m for m in view.get("models") or [] if m["id"] == model), {})
+
+            def plan_brief(plan_c) -> tuple | None:
+                if not plan_c:
+                    return None
+                return (plan_c.get("ok"), plan_c.get("usd"), plan_c.get("sentSeconds"), plan_c.get("trimTo"), plan_c.get("maxBytes"),
+                        plan_c.get("resolution"), plan_c.get("same"), plan_c.get("priceKnown"))
+
+            def draft_of(resp) -> dict:
+                return ((resp.get_json() or {}).get("retake") or {}).get("draft") or {}
+
+            def template(pid: str, model: str, *, cell: str = "take1", variant: str = "webtoon", span=None, cut_ids=None) -> str:
+                return genmod.retake_template(owner, pid, str(env.gen(pid)["genId"]), variant=variant, cell_id=cell, model=model, span=span,
+                                              cut_ids=cut_ids)["prompt"]
+
+            def data_bytes(uri: str) -> bytes:
+                return _b64.b64decode(str(uri).split(",", 1)[1])
+
+            # ================= (rtk-n) 모델 목록 =================
+            pid_t = "prj_rtk1_t"
+            env.take_done(client, pid_t)
+            label_t = "테이크 1 · 컷 1–2"
+            mid_t = mid_of(pid_t, label_t)
+            rv_t = rv_get(pid_t, mid_t).get_json() or {}
+            listed = {str(r["id"]).split(":", 1)[-1]: r for r in planmod.previz_models()}
+            expect("rtk-n", [[m["id"] for m in rv_t.get("models") or []], [(h["id"], h["reason"]) for h in rv_t.get("modelsHidden") or []],
+                             rv_t.get("defaultModel"), rv_t.get("scopes"), rv_t.get("range"), rv_t.get("rangeNote"), rv_t.get("cellSeconds"),
+                             [m["label"] for m in rv_t.get("models") or []] == [listed[m]["label"] for m in (lr, kl, _RTK1_T720, _RTK1_PRO, _RTK1_IMG4)]],
+                   [[lr, kl, _RTK1_T720, _RTK1_PRO, _RTK1_IMG4],
+                    [(_RTK1_FAST, "이 모델은 최대 10초까지 만듭니다(필요 15초)."), (_RTK1_NORES, "이 모델의 해상도를 정할 수 없습니다."),
+                     (_RTK1_IMG2, "이 칸 인물 2명의 참고 이미지를 다 받지 못합니다(최대 1장)."),
+                     (_RTK1_NOVID, "프리비즈 미지원(영상 입력을 받지 않는 모델)"), (_RTK1_UNAV, "채울 수 없는 필수 입력: foo")],
+                    lr, ["full"], None, "", 15.0, True],
+                   "통 테이크 칸(15초·인물 2): 원래 모델 첫 줄 + ① 원천 순서, 길이 enum·해상도·참고 수·프리비즈 미지원·쓸 수 없음은 이유와 함께 뺌")
+            expect("rtk-n", [(m["id"], m["original"], m["path"], m["format"], m["refLimit"], plan_brief(m["full"]), m["range"])
+                             for m in rv_t.get("models") or []],
+                   [(lr, True, "take", "reference", 10, (True, 3.08, 12.0, None, 4000, "480p", True, True), None),
+                    (kl, False, "cut", "elements", 3, (True, 2.1, 15.0, 15.0, 2500, "", False, True), None),
+                    (_RTK1_T720, False, "take", "reference", 10, (True, 6.93, 15.0, 15.0, 4000, "720p", False, True), None),
+                    (_RTK1_PRO, False, "cut", "elements", 3, (True, 4.2, 15.0, 15.0, 2000, "", False, True), None),
+                    (_RTK1_IMG4, False, "cut", "images", 3, (True, 2.1, 15.0, 15.0, 2500, "", False, False), None)],
+                   "모델마다 경로·형식·참고 수·원본 칸 전체 견적(same = 116 estimate·⑤ duration 12, Kling $0.14×15, 720p 토큰, 초당 $0.28, 단가 모름 → 기본)")
+            rv_tr = rv_get(pid_t, mid_t, **{"in": "7.5", "out": "15"}).get_json() or {}
+            expect("rtk-n", [rv_tr.get("scopes"), rv_tr.get("range"), [m["id"] for m in rv_tr.get("models") or []],
+                             [(m["id"], plan_brief(m["range"]), (m["range"] or {}).get("durations")) for m in rv_tr.get("models") or []],
+                             plan_brief(row_of(rv_tr, _RTK1_FAST).get("full"))[:1], row_of(rv_tr, _RTK1_FAST).get("full", {}).get("reason")],
+                   [["full", "range"], {"in": 7.5, "out": 15.0, "start": 7.5, "end": 15.0, "seconds": 7.5, "cutIds": ["c2"],
+                                        "cuts": [{"cutId": "c2", "no": 2, "start": 0.0, "end": 7.5}]},
+                    [lr, kl, _RTK1_FAST, _RTK1_T720, _RTK1_PRO, _RTK1_IMG4],
+                    [(lr, (True, 1.64, 8.0, 7.5, 4000, "480p", False, True), [4, 8, 12, 30]), (kl, (True, 1.05, 7.5, 7.5, 2500, "", False, True), []),
+                     (_RTK1_FAST, (True, 1.0, 10.0, 7.5, 4000, "480p", False, True), [5, 10]),
+                     (_RTK1_T720, (True, 3.7, 8.0, 7.5, 4000, "720p", False, True), list(range(4, 16))),
+                     (_RTK1_PRO, (True, 2.1, 7.5, 7.5, 2000, "", False, True), []), (_RTK1_IMG4, (True, 1.05, 7.5, 7.5, 2500, "", False, False), [])],
+                    (False,), "이 모델은 최대 10초까지 만듭니다(필요 15초)."],
+                   "고른 클립 7.5–15초(원본 시간 → 녹화 시간, 컷 2): 구간 견적(올림 8초·자를 길이 7.5), 길이 enum 이 짧던 모델도 구간에서는 보임")
+            # 실사 칸(실사 회차): 이미지 목록 2장 모델은 그림체 자리가 없어 보인다
+            resp_real = client.post(f"/api/vnew/p/{pid_t}/generate/real", json={"confirmUsd": genmod.real_estimate(env.gen(pid_t))["usd"]})
+            env.drive(pid_t)
+            mid_tr = next((m["mid"] for m in mats(pid_t, variant="real") if m["label"] == label_t and m["group"] == "current"), "")
+            rv_real = rv_get(pid_t, mid_tr).get_json() or {}
+            saved_accept = genmod._model_accepts_real_start  # noqa: SLF001
+            genmod._model_accepts_real_start = lambda model: model != _RTK1_PRO  # noqa: SLF001
+            try:
+                rv_real_no = rv_get(pid_t, mid_tr).get_json() or {}
+            finally:
+                genmod._model_accepts_real_start = saved_accept  # noqa: SLF001
+            expect("rtk-n", [resp_real.status_code, [m["id"] for m in rv_real.get("models") or []], row_of(rv_real, _RTK1_IMG2).get("refLimit"),
+                             [(h["id"], h["reason"]) for h in rv_real_no.get("modelsHidden") or [] if h["id"] == _RTK1_PRO]],
+                   [202, [lr, kl, _RTK1_T720, _RTK1_PRO, _RTK1_IMG2, _RTK1_IMG4], 2, [(_RTK1_PRO, "실사 인물 사진을 받지 않는 모델입니다.")]],
+                   "실사 칸: 이미지 목록 2장 모델 보임(그림체 자리 없음), 실사 인물을 받지 않는 모델은 이유와 함께 뺌")
+            # 컷 칸(컷 단위, 원래 Kling): 참고 영상 모델도 컷 하나를 만들 수 있다(올림)
+            pid_c = "prj_rtk1_c"
+            env.take_done(client, pid_c, cut_mode=True)
+            mid_c1 = mid_of(pid_c, "컷 1")
+            mid_c2 = mid_of(pid_c, "컷 2")
+            rv_c = rv_get(pid_c, mid_c1).get_json() or {}
+            expect("rtk-n", [[(m["id"], m["path"], m["format"], plan_brief(m["full"])) for m in rv_c.get("models") or []],
+                             [h["id"] for h in rv_c.get("modelsHidden") or []]],
+                   [[(kl, "cut", "elements", (True, 1.05, 7.5, None, 2500, "", True, True)),
+                     (lr, "take", "reference", (True, 1.64, 8.0, 7.5, 4000, "480p", False, True)),
+                     (_RTK1_FAST, "take", "reference", (True, 1.0, 10.0, 7.5, 4000, "480p", False, True)),
+                     (_RTK1_T720, "take", "reference", (True, 3.7, 8.0, 7.5, 4000, "720p", False, True)),
+                     (_RTK1_PRO, "cut", "elements", (True, 2.1, 7.5, 7.5, 2000, "", False, True)),
+                     (_RTK1_IMG4, "cut", "images", (True, 1.05, 7.5, 7.5, 2500, "", False, False))],
+                    [_RTK1_NORES, _RTK1_IMG2, _RTK1_NOVID, _RTK1_UNAV]],
+                   "컷 칸(7.5초, 원래 Kling): 참고 영상 모델 3개(길이 올림 8·10초)·영상 편집 모델, 같은 걸러내기")
+            # 등록 밖 원래 모델·목록 읽기 실패
+            pid_g = "prj_rtk1_gone"
+            env.take_done(client, pid_g, cut_mode=True)
+            env.mutate_gen(pid_g, lambda g: g.update(videoModel="fal-ai/rtk/gone"))
+            mid_g = mid_of(pid_g, "컷 1")
+            rv_g = rv_get(pid_g, mid_g).get_json() or {}
+            env.registered_error = RuntimeError("registry down")
+            logs.clear()
+            rv_fail = rv_get(pid_t, mid_t).get_json() or {}
+            env.registered_error = None
+            expect("rtk-n", [[(m["id"], m["label"], m["original"], m["path"]) for m in rv_g.get("models") or []][:1],
+                             [m["id"] for m in rv_fail.get("models") or []], len(logs.messages("vnew.retake.models_failed", level=logging.WARNING)),
+                             rv_fail.get("modelsHidden")],
+                   [[("fal-ai/rtk/gone", "fal-ai/rtk/gone", True, "cut")], [lr], 1, []],
+                   "등록에서 빠진 원래 모델도 첫 줄(이름 = endpoint), 목록을 못 읽으면 원래 모델만(경고 1줄)")
+            report.append(f"rtk-n: 테이크 {len(rv_t.get('models') or [])}개/뺌 {len(rv_t.get('modelsHidden') or [])}개 · 구간 {len(rv_tr.get('models') or [])}개 · "
+                          f"컷 {len(rv_c.get('models') or [])}개")
+
+            # ================= (rtk-o)·(rtk-p)·(rtk-q) 다른 모델(인물 요소)로 원본 칸 전체 =================
+            gen_t = str(env.gen(pid_t)["genId"])
+            base_t = env.gen(pid_t)["units"][0]["webtoon"]["promptEn"]
+            tmpl_kl = template(pid_t, kl)
+            env.llm_reply = lambda system, blocks: _rtk_reply(tmpl_kl, "Re-render this single shot", "Re-render this whole take")
+            env.llm_calls.clear()
+            r_pk = preview(pid_t, mid_t, {"requestKo": "Kling 으로", "model": "fal:" + kl})
+            d_kl = draft_of(r_pk)
+            call = env.llm_calls[0] if env.llm_calls else {"blocks": [], "system": ""}
+            texts = [b.get("text") for b in call["blocks"] if "text" in b]
+            refs_kl = sorted(rt._refs(tmpl_kl), key=rt._ref_sort)  # noqa: SLF001
+            expect("rtk-p", [r_pk.status_code, d_kl.get("status"), d_kl.get("model"), d_kl.get("modelLabel"), d_kl.get("scope"), d_kl.get("format"),
+                             d_kl.get("path"), (d_kl.get("plan") or {}).get("usd"), d_kl.get("maxBytes"), d_kl.get("problems"),
+                             d_kl.get("prompt") == tmpl_kl.replace("Re-render this single shot", "Re-render this whole take"),
+                             refs_kl, "@Image2" in tmpl_kl],
+                   [202, "done", kl, listed[kl]["label"], "full", "template", "cut", 2.1, 2500, [], True,
+                    ["@Element1", "@Element2", "@Image1", "@Video1"], False],
+                   "테이크 → 인물 요소 모델(Kling): 초안 = 본보기 형식(@Element·@Image1·@Video1)·고른 모델·견적 사본·문제 0")
+            expect("rtk-p", [texts[0] == "<previous_prompt>\n" + base_t + "\n</previous_prompt>" if texts else None,
+                             (texts[1] if len(texts) > 1 else "").startswith("<target_format>\nVideo model: " + kl +
+                                                                               "\nFormat: video edit with character elements"),
+                             tmpl_kl in (texts[1] if len(texts) > 1 else ""), (texts[2] if len(texts) > 2 else "").startswith("<storyboard>"),
+                             "1. Write the new prompt in the format of <target_format> (video edit with character elements (@Video1, @Element N, "
+                             "style @Image1)): the same section labels in the same order (" + ", ".join(rt._labels(tmpl_kl)) + ")" in call["system"],  # noqa: SLF001
+                             "exactly its reference tags (@Element1, @Element2, @Image1, @Video1)" in call["system"],
+                             "4. The prompt must be at most 2500 UTF-8 bytes." in call["system"], "<range>" in call["system"],
+                             "never use the word 'webtoon'" in call["system"]],
+                   [True, True, True, True, True, True, True, False, False],
+                   "새 길 LLM: 이전 프롬프트 그대로 → <target_format>(모델·형식·본보기) → 콘티, 시스템 문구에 본보기 항목·참고 표시·고른 모델 상한")
+            # 이전 형식 그대로인 응답 → 문제(고른 모델 형식 기준), 그대로 제출하면 400
+            env.llm_reply = {"resultKo": "", "promptEn": base_t, "changesKo": []}
+            d_old = draft_of(preview(pid_t, mid_t, {"requestKo": "그대로", "model": kl}))
+            lost = [n for n in rt._labels(tmpl_kl) if n not in rt._labels(base_t)]  # noqa: SLF001
+            expect("rtk-p", [d_old.get("problems"), err_of(submit(pid_t, mid_t, {"prompt": base_t, "requestKo": "그대로", "confirmUsd": 2.1,
+                                                                             "draftId": d_old.get("id"), "model": kl}))[:2]],
+                   [[f"새 프롬프트가 {len(base_t.encode()):,}바이트입니다. 2,500바이트 안으로 줄여 주세요.",
+                     "참고 표시(@Video·@Image·@Element)가 고른 모델 형식과 다릅니다(빠짐 @Element1, @Element2 · 새로 생김 @Image2, @Image3, @Image4).",
+                     "고른 모델 형식의 항목이 빠졌습니다: " + ", ".join(lost) + "."], (400, "RetakePromptInvalid")],
+                   "이전(Seedance) 형식 그대로인 새 프롬프트: 고른 모델 상한(2,500)·형식 기준 문제 3개·제출 400")
+            # 견적·confirmUsd·바디 거절
+            env.llm_reply = lambda system, blocks: _rtk_reply(tmpl_kl, "Re-render this single shot", "Re-render this whole take")
+            d_kl = draft_of(preview(pid_t, mid_t, {"requestKo": "Kling 으로", "model": kl}))
+            ok_kl = {"prompt": d_kl.get("prompt"), "requestKo": "Kling 으로", "confirmUsd": 2.1, "draftId": d_kl.get("id"), "model": kl}
+            requests0 = len(env.requests)
+            bodies = [
+                ({**ok_kl, "confirmUsd": 3.08}, (409, "CostMismatch", "금액이 서버 계산과 다릅니다. 서버 2.1 USD, 화면 3.08 USD.")),
+                ({k: v for k, v in ok_kl.items() if k != "model"},
+                 (409, "RetakeNoDraft", "모델이나 범위가 새 프롬프트를 만들 때와 다릅니다. [새 프롬프트 다시 만들기]를 눌러 주세요.")),
+                ({**ok_kl, "model": _RTK1_T720, "confirmUsd": 6.93},
+                 (409, "RetakeNoDraft", "모델이나 범위가 새 프롬프트를 만들 때와 다릅니다. [새 프롬프트 다시 만들기]를 눌러 주세요.")),
+                ({**ok_kl, "draftId": "dnope"}, (409, "RetakeNoDraft", "먼저 [새 프롬프트 만들기]로 새 프롬프트를 확인해 주세요.")),
+                ({**ok_kl, "model": "fal-ai/nope"}, (400, "RetakeBadModel", "이 칸에 쓸 수 없는 영상 모델입니다. 목록에서 다시 골라 주세요.")),
+                ({**ok_kl, "model": _RTK1_FAST}, (400, "RetakeBadModel", "이 칸에 쓸 수 없는 영상 모델입니다. 목록에서 다시 골라 주세요.")),
+                ({**ok_kl, "model": 5}, (400, "RetakeBadModel", "이 칸에 쓸 수 없는 영상 모델입니다. 목록에서 다시 골라 주세요.")),
+                ({**ok_kl, "model": "fal:a b"}, (400, "RetakeBadModel", "이 칸에 쓸 수 없는 영상 모델입니다. 목록에서 다시 골라 주세요.")),
+                ({**ok_kl, "scope": "part"}, (400, "RetakeBadRange", "다시 만들 구간이 올바르지 않습니다. 타임라인에서 클립을 다시 골라 주세요.")),
+                ({**ok_kl, "scope": "range"}, (400, "RetakeBadRange", "다시 만들 구간이 올바르지 않습니다. 타임라인에서 클립을 다시 골라 주세요.")),
+                ({**ok_kl, "scope": "range", "in": 0, "out": 99}, (400, "RetakeBadRange", "다시 만들 구간이 올바르지 않습니다. 타임라인에서 클립을 다시 골라 주세요.")),
+            ]
+            expect("rtk-o", [[err_of(submit(pid_t, mid_t, body)) for body, _w in bodies], len(env.requests) - requests0],
+                   [[w for _b, w in bodies], 0],
+                   "제출 거절: 고른 모델 견적과 다른 confirmUsd 409·초안과 모델 다름 409·초안 id 다름 409·없는/못 쓰는/글 아닌/빈칸 모델 400·범위 꼴 400 — 제출 0")
+            expect("rtk-o", [err_of(preview(pid_t, mid_t, {"requestKo": "x", "model": "fal-ai/nope"}))[:2],
+                             err_of(preview(pid_t, mid_t, {"requestKo": "x", "scope": "range", "in": "a", "out": 3}))[:2]],
+                   [(400, "RetakeBadModel"), (400, "RetakeBadRange")], "미리보기도 모델·구간을 서버 목록과 대조(400)")
+            # 성공: Kling 으로 원본 칸 전체
+            ledger0, cut0 = len(env.ledger), len(env.cut_calls)
+            r_ok = submit(pid_t, mid_t, ok_kl)
+            req = env.requests[-1] if len(env.requests) > requests0 else {}
+            pay = req.get("payload") or {}
+            v2 = (env.state(pid_t)["cells"].get("webtoon:take1") or {}).get("versions") or [{}]
+            v2 = v2[-1]
+            rec = (env.log(pid_t).get("webtoon:take1") or [{}])[-1]
+            expect("rtk-q", [r_ok.status_code, len(env.requests) - requests0, req.get("url", "").endswith("/" + kl), sorted(pay),
+                             data_bytes(pay.get("video_url", "a,")) if pay.get("video_url") else b"", env.cut_calls[cut0:], len(pay.get("elements") or []),
+                             len(pay.get("image_urls") or []), pay.get("keep_audio"), pay.get("prompt") == ok_kl["prompt"], env.pad_calls,
+                             [(e.get("kind"), e.get("usd"), e.get("model"), e.get("units")) for e in env.ledger[ledger0:]]],
+                   [202, 1, True, ["elements", "image_urls", "keep_audio", "prompt", "video_url"], b"CLIP:0-15",
+                    [(f"PREVIZ-REC-s1".encode(), 0.0, 15.0)], 2, 1, False, True, [], [("video", 2.1, kl, 15.0)]],
+                   "Kling 으로 제출: Kling endpoint·영상 편집 본문(이어붙인 녹화를 0–15초 클립으로)·인물 요소 2·그림체 1·원장 $0.14×15")
+            expect("rtk-q", [(v2.get("n"), v2.get("status"), v2.get("model"), v2.get("modelLabel"), v2.get("scope"), v2.get("range"), v2.get("path"),
+                              v2.get("format"), v2.get("trimTo"), v2.get("sentSeconds"), v2.get("billedSeconds"), v2.get("usd"), v2.get("formatRefs")),
+                             "/take1-webtoon-rt2-1/" in v2.get("outputKey", ""),
+                             (rec.get("source"), rec.get("model"), rec.get("version"), rec.get("status"),
+                              {k: (rec.get("params") or {}).get(k) for k in ("cellSeconds", "rangeStart", "rangeEnd", "trimTo", "keepAudio", "seconds")})],
+                   [(2, "completed", kl, listed[kl]["label"], "full", None, "cut", "template", 15.0, 15.0, 15.0, 2.1, refs_kl), True,
+                    ("retake", kl, 2, "completed", {"cellSeconds": 15.0, "rangeStart": None, "rangeEnd": None, "trimTo": 15.0, "keepAudio": False,
+                                                    "seconds": 15.0})],
+                   "버전·기록에 고른 모델: 버전(model·modelLabel·scope·path·format·trimTo·길이·금액·본보기 참고), 기록(source retake·model·params 구간 칸)")
+            view_q = edit_get(pid_t).get_json() or {}
+            mat_v2 = next((m for m in view_q.get("materials") or [] if m["label"] == label_t + " v2"), {})
+            rv_v2 = rv_get(pid_t, mid_t).get_json() or {}
+            row_v2 = next((v for v in rv_v2.get("versions") or [] if v["n"] == 2), {})
+            row_v1 = next((v for v in rv_v2.get("versions") or [] if v["n"] == 1), {})
+            expect("rtk-q", [mat_v2.get("retake"), (row_v2.get("model"), row_v2.get("modelLabel"), row_v2.get("scope"), row_v2.get("range"),
+                                                     row_v2.get("trimTo"), row_v2.get("label")),
+                             (row_v1.get("model"), row_v1.get("scope"), row_v1.get("range"), row_v1.get("trimTo"), row_v1.get("cutIds"))],
+                   [{"can": True, "n": 2, "cellKey": "webtoon:take1", "running": False, "reason": "", "trimTo": 15.0},
+                    (kl, listed[kl]["label"], "full", None, 15.0, label_t + " v2"), (lr, "full", None, None, ["c1", "c2"])],
+                   "재료 표식 trimTo·패널 버전 줄(모델·범위·자를 길이·재료 이름), v1 줄은 원래 모델")
+            # v2(다른 형식 버전)를 기준으로 원래 모델·원본 칸 전체 → 새 길(본보기)
+            rv_from_v2 = rv_get(pid_t, mid_of(pid_t, label_t + " v2")).get_json() or {}
+            expect("rtk-o", [plan_brief(row_of(rv_from_v2, lr).get("full")), rv_from_v2.get("scopes")],
+                   [(True, 6.17, 30.0, 15.0, 4000, "480p", False, True), ["full"]],
+                   "다른 형식 버전(v2, Kling)이 기준이면 원래 모델도 새 길(본보기·올림: enum 4·8·12·30 에서 15초 → 30초 채움·자르기 $6.17, 116 의 12초 규칙 아님)")
+            # 참고 영상 경로 다른 모델(720p 만): 해상도 표기·duration 문자열·generate_audio, 녹화 그대로(채움 없음)
+            tmpl_720 = template(pid_t, _RTK1_T720)
+            env.llm_reply = {"resultKo": "", "promptEn": tmpl_720, "changesKo": []}
+            d_720 = draft_of(preview(pid_t, mid_t, {"requestKo": "720p", "model": _RTK1_T720}))
+            ledger1, requests1 = len(env.ledger), len(env.requests)
+            r_720 = submit(pid_t, mid_t, {"prompt": tmpl_720, "requestKo": "720p", "confirmUsd": 6.93, "draftId": d_720.get("id"), "model": _RTK1_T720})
+            p720 = (env.requests[-1].get("payload") or {}) if len(env.requests) > requests1 else {}
+            expect("rtk-q", [r_720.status_code, sorted(p720), p720.get("resolution"), p720.get("duration"), p720.get("generate_audio"),
+                             [data_bytes(u) for u in p720.get("video_urls") or []], [(e.get("usd"), e.get("model")) for e in env.ledger[ledger1:]]],
+                   [202, ["aspect_ratio", "duration", "generate_audio", "image_urls", "prompt", "resolution", "video_urls"], "720P", "15", True,
+                    [b"PREVIZ-REC-s1"], [(6.9336, _RTK1_T720)]],
+                   "참고 영상 경로 다른 모델: 스키마 해상도 표기(720P)·duration \"15\"·소리, 녹화 그대로, 원장 720p 토큰 금액")
+            # 본보기가 바뀌면(그 사이 캐릭터 연결이 빠짐) 제출하지 않고 실패
+            env.llm_reply = lambda system, blocks: _rtk_reply(tmpl_kl, "Re-render this single shot", "Re-render it")
+            d_fc = draft_of(preview(pid_t, mid_t, {"requestKo": "다시", "model": kl}))
+
+            def drop_char(plan):
+                plan["previz"]["scenes"][0]["actors"][1]["charId"] = ""
+
+            def put_char(plan):
+                plan["previz"]["scenes"][0]["actors"][1]["charId"] = "ch2"
+
+            planmod.mutate_plan(owner, pid_t, drop_char)
+            requests2 = len(env.requests)
+            submit(pid_t, mid_t, {"prompt": d_fc.get("prompt"), "requestKo": "다시", "confirmUsd": 2.1, "draftId": d_fc.get("id"), "model": kl})
+            planmod.mutate_plan(owner, pid_t, put_char)
+            v_fc = env.state(pid_t)["cells"]["webtoon:take1"]["versions"][-1]
+            expect("rtk-q", [(v_fc.get("status"), v_fc.get("error")), len(env.requests) - requests2],
+                   [("failed", genmod.RETAKE_FORMAT_CHANGED_TEXT), 0], "본보기 참고 표시가 초안 때와 다르면 제출하지 않고 실패(제출 0)")
+
+            # 스레드에서 모델을 못 쓰게 됨(등록 목록 변경) → 실패·제출 0, resubmit_model 거절 꼴, 원장 실패
+            def queue_version(pid: str, key: str, version: dict) -> None:
+                gid = str(env.gen(pid)["genId"])
+                k = rt.retakes_key(owner, pid, gid)
+                data, _ = env.store.read_json(k)
+                data = rt._normalized(data)  # noqa: SLF001
+                cell = data["cells"].setdefault(key, {"versions": [], "draft": None})
+                cell["versions"] = [v for v in cell["versions"] if v.get("n") != version["n"]] + [version]
+                _FakeCharStore.write_json(env.store, k, data)
+
+            queue_version(pid_t, "webtoon:take1", {"n": 9, "status": "queued", "claim": "cg", "heartbeatAt": _rtk_iso_ago(1), "attempt": 1,
+                                                   "prompt": "p", "format": "template", "model": _RTK1_FAST, "scope": "full"})
+            requests3 = len(env.requests)
+            rt.run_retake(owner, pid_t, gen_t, "webtoon:take1", 9, "cg")
+            v_gone = next(v for v in env.state(pid_t)["cells"]["webtoon:take1"]["versions"] if v["n"] == 9)
+
+            def rs(**kw):
+                args = {"variant": "webtoon", "cell_id": "take1", "prompt": "p", "tag": "rt9", "model": kl, **kw}
+                gid = args.pop("gen_id", gen_t)
+                try:
+                    genmod.resubmit_model(owner, args.pop("pid", pid_t), gid, **args)
+                    return ("ok", "")
+                except VpocError as exc:
+                    return (exc.kind, exc.message)
+
+            rs_cases = [rs(gen_id="gWRONG"), rs(variant="anime"), rs(cell_id="take9"), rs(variant="real", prompt="a webtoon look", model=lr)]
+            env.mutate_gen(pid_g, lambda g: g["units"][0].update(recordingKey=""))
+            rs_cases.append(rs(pid=pid_g, gen_id=str(env.gen(pid_g)["genId"]), cell_id="c1", model=lr))
+            env.mutate_gen(pid_t, lambda g: g["units"][0].update(recKeys=[]))
+            rs_cases.append(rs())
+            env.mutate_gen(pid_t, lambda g: g["units"][0].update(recKeys=[f"rec/{pid_t}/s1.mp4"]))
+            led_x = len(env.ledger)
+            genmod._charge_retake(owner, pid_t, gen_t, {}, kl, 5, 1.0)  # noqa: SLF001
+            saved_charge = genmod.vpoc_ledger.charge
+            genmod.vpoc_ledger.charge = lambda *a, **k: (_ for _ in ()).throw(RuntimeError("ledger down"))
+            logs.clear()
+            try:
+                genmod._charge_retake(owner, pid_t, gen_t, {"clientRequestToken": "t1"}, kl, 5, 1.0)  # noqa: SLF001
+            finally:
+                genmod.vpoc_ledger.charge = saved_charge
+            try:
+                genmod._assert_no_webtoon("webtoon")  # noqa: SLF001
+                webtoon_msg = ""
+            except VpocError as exc:
+                webtoon_msg = exc.message
+            expect("rtk-q", [(v_gone.get("status"), v_gone.get("error")), len(env.requests) - requests3, rs_cases, len(env.ledger) - led_x,
+                             len(logs.messages("vnew.gen.charge_retake_failed", level=logging.WARNING))],
+                   [("failed", genmod.RETAKE_MODEL_GONE_TEXT), 0,
+                    [("RetakeGenChanged", "영상 생성 기록이 바뀌었습니다. ⑦ 편집을 다시 열어 주세요."), ("RetakeNotTarget", "이 영상은 AI로 고칠 수 없습니다."),
+                     ("RetakeNotTarget", "고칠 칸을 찾을 수 없습니다."), ("RealPromptWebtoon", webtoon_msg), ("NoRecording", "컷 녹화가 없습니다."),
+                     ("NoRecording", "테이크 녹화가 없습니다.")], 0, 1],
+                   "스레드에서 고른 모델을 못 쓰면 실패(제출 0)·resubmit_model 거절 꼴(gen·그림체·칸·실사 webtoon·녹화 없음)·원장 토큰 없음 0건·실패 경고")
+            report.append(f"rtk-q: Kling·720p 제출 · 원장 {env.ledger[ledger0].get('usd') if len(env.ledger) > ledger0 else None}")
+
+            # ================= (rtk-r) 구간 =================
+            pid_u = "prj_rtk1_u"
+            env.take_done(client, pid_u)
+            gen_u = str(env.gen(pid_u)["genId"])
+            mid_u = mid_of(pid_u, label_t)
+            server["webT"] = edit_get(pid_u).get_json() or {}
+            server["rvT"] = rv_get(pid_u, mid_u).get_json() or {}
+            server["rvTR"] = rv_get(pid_u, mid_u, **{"in": "7.5", "out": "15"}).get_json() or {}
+            base_u = env.gen(pid_u)["units"][0]["webtoon"]["promptEn"]
+            span_u = {"start": 7.5, "end": 15.0}
+            tmpl_r = template(pid_u, lr, span=span_u, cut_ids=["c2"])
+            env.llm_reply = lambda system, blocks: _rtk_reply(tmpl_r, "Kim leans forward", "Kim sits back")
+            env.llm_calls.clear()
+            env.grabs.clear()
+            r_pr = preview(pid_u, mid_u, {"requestKo": "뒤로 앉게", "scope": "range", "in": 7.5, "out": 15})
+            d_r = draft_of(r_pr)
+            call = env.llm_calls[0] if env.llm_calls else {"blocks": [], "system": ""}
+            texts = [b.get("text") for b in call["blocks"] if "text" in b]
+            expect("rtk-r", [r_pr.status_code, d_r.get("status"), d_r.get("scope"), d_r.get("format"), d_r.get("model"), d_r.get("range"),
+                             (d_r.get("plan") or {}).get("usd"), (d_r.get("plan") or {}).get("sentSeconds"), d_r.get("problems")],
+                   [202, "done", "range", "template", lr, {"in": 7.5, "out": 15.0, "start": 7.5, "end": 15.0, "seconds": 7.5, "cutIds": ["c2"],
+                                                           "cuts": [{"cutId": "c2", "no": 2, "start": 0.0, "end": 7.5}]}, 1.64, 8.0, []],
+                   "구간 미리보기: 초안 범위 range·구간·원래 모델 새 길(본보기)·견적 올림 8초 $1.64")
+            expect("rtk-r", [texts[2] if len(texts) > 2 else None, "컷 2 (7초)" in (texts[3] if len(texts) > 3 else ""),
+                             "컷 1 (" in (texts[3] if len(texts) > 3 else ""), env.grabs,
+                             "6. Describe only what happens inside <range>. The new video is 7.5s long: write every time in the prompt from 0s to 7.5s "
+                             "of the new video and leave out what happens outside the range." in call["system"],
+                             " <range> says which part of the shot to re-render." in call["system"], "TIMELINE" in tmpl_r, "@Image" in tmpl_r],
+                   ["<range>\nRe-render only 7.5-15.0s of the current shot. The new video is 7.5s long; the model renders 8s and the extra tail is "
+                    "cut.\nCuts in this range (time in the new video): cut 2 at 0.0-7.5s.\n</range>", True, False, [8.75, 11.25, 13.75], True, True,
+                    True, True],
+                   "LLM: <range>(녹화 시각·새 영상 길이·보낼 길이·구간 안 컷)·콘티는 구간 안 컷만·프레임은 구간 안 3장·시스템 문구 규칙 6")
+            server["rvDR"] = rv_get(pid_u, mid_u, **{"in": "7.5", "out": "15"}).get_json() or {}
+            ledger2, requests4, cut1, pad1 = len(env.ledger), len(env.requests), len(env.cut_calls), len(env.pad_calls)
+            env.inline_rt = False
+            server["rvLiveR"] = (submit(pid_u, mid_u, {"prompt": d_r.get("prompt"), "requestKo": "뒤로 앉게", "confirmUsd": 1.64, "draftId": d_r.get("id"),
+                                                       "scope": "range", "in": 7.5, "out": 15}).get_json() or {}).get("retake") or {}
+            job = env.rt_spawned[-1]
+            rt.run_retake(*job[1])
+            env.inline_rt = True
+            p_r = (env.requests[-1].get("payload") or {}) if len(env.requests) > requests4 else {}
+            v_r = env.state(pid_u)["cells"]["webtoon:take1"]["versions"][-1]
+            rec_r = (env.log(pid_u).get("webtoon:take1") or [{}])[-1]
+            expect("rtk-r", [env.cut_calls[cut1:], env.pad_calls[pad1:], [data_bytes(u) for u in p_r.get("video_urls") or []], p_r.get("duration"),
+                             [(e.get("usd"), e.get("units")) for e in env.ledger[ledger2:]],
+                             (v_r.get("status"), v_r.get("scope"), v_r.get("range", {}).get("start"), v_r.get("range", {}).get("end"), v_r.get("cutIds"),
+                              v_r.get("trimTo"), v_r.get("sentSeconds"), v_r.get("usd")),
+                             {k: (rec_r.get("params") or {}).get(k) for k in ("rangeStart", "rangeEnd", "trimTo", "seconds", "duration")}],
+                   [[(b"PREVIZ-REC-s1", 7.5, 15.0)], [(b"CLIP:7.5-15", 8.0)], [b"PAD:CLIP:7.5-15@8"], "8", [(1.6448, 8.0)],
+                    ("completed", "range", 7.5, 15.0, ["c2"], 7.5, 8.0, 1.64),
+                    {"rangeStart": 7.5, "rangeEnd": 15.0, "trimTo": 7.5, "seconds": 8.0, "duration": "8"}],
+                   "구간 제출: 녹화 7.5–15초 클립 → 8초까지 채움 → duration \"8\"·원장 8초 토큰, 버전 구간·컷 2·자를 길이 7.5, 기록 params")
+            view_r = edit_get(pid_u).get_json() or {}
+            mat_r = next((m for m in view_r.get("materials") or [] if m.get("group") == "retake"), {})
+            server["webV2R"] = view_r
+            server["rvV2R"] = rv_get(pid_u, mid_u, **{"in": "7.5", "out": "15"}).get_json() or {}
+            server["rvV2Rfull"] = rv_get(pid_u, mid_u).get_json() or {}
+            expect("rtk-r", [mat_r.get("label"), mat_r.get("retake"), [m["label"] for m in view_r.get("materials") or []],
+                             next((v.get("label") for v in server["rvV2Rfull"].get("versions") or [] if v.get("n") == 2), None)],
+                   ["테이크 1 · 컷 2 v2", {"can": True, "n": 2, "cellKey": "webtoon:take1", "running": False, "reason": "", "trimTo": 7.5,
+                                           "range": {"start": 7.5, "end": 15.0}},
+                    [label_t, "테이크 1 · 컷 2 v2", "합친 영상"], "테이크 1 · 컷 2 v2"],
+                   "구간 버전 재료: 이름(구간 컷 번호 + v2, 패널 버전 줄도 같은 이름)·표식 trimTo 7.5·range, 그 칸 v1 바로 뒤")
+            # 구간 안 컷에만 나오는 인물로 참고 이미지를 고른다(컷 2 에는 에이만): 구간 견적의 참고 수·본보기·보낸 이미지 3장
+            pid_v = "prj_rtk1_v"
+            env.take_done(client, pid_v)
+
+            def only_a1(plan):
+                for entry in plan["previz"]["scenes"][0]["timeline"]:
+                    if entry["cutId"] == "c2":
+                        entry["actors"] = [{"id": "a1"}]
+
+            planmod.mutate_plan(owner, pid_v, only_a1)
+            mid_v = mid_of(pid_v, label_t)
+            rv_v = rv_get(pid_v, mid_v, **{"in": "7.5", "out": "15"}).get_json() or {}
+            tmpl_v = template(pid_v, lr, span={"start": 7.5, "end": 15.0}, cut_ids=["c2"])
+            env.llm_reply = {"resultKo": "", "promptEn": tmpl_v, "changesKo": []}
+            d_v = draft_of(preview(pid_v, mid_v, {"requestKo": "에이만", "scope": "range", "in": 7.5, "out": 15}))
+            requests7 = len(env.requests)
+            submit(pid_v, mid_v, {"prompt": tmpl_v, "requestKo": "에이만", "confirmUsd": 1.64, "draftId": d_v.get("id"), "scope": "range", "in": 7.5,
+                                  "out": 15})
+            p_v = (env.requests[-1].get("payload") or {}) if len(env.requests) > requests7 else {}
+            v_v = env.state(pid_v)["cells"]["webtoon:take1"]["versions"][-1]
+            expect("rtk-r", [(row_of(rv_v, _RTK1_IMG2).get("full") or {}).get("ok"), (row_of(rv_v, _RTK1_IMG2).get("range") or {}).get("ok"),
+                             sorted(rt._refs(tmpl_v), key=rt._ref_sort), d_v.get("formatRefs") if "formatRefs" in d_v else "(보기에 없음)",  # noqa: SLF001
+                             len(p_v.get("image_urls") or []), v_v.get("status")],
+                   [False, True, ["@Image1", "@Image2", "@Image3", "@Video1"], "(보기에 없음)", 3, "completed"],
+                   "구간(컷 2 — 에이만): 참고 수는 구간 인물로(이미지 목록 2장 모델이 구간에서만 보임)·본보기 @Image 3개·보낸 이미지 3장(정면 1·패널·장소)")
+            # 5초 구간(5–10초, 컷 1·2 걸침): 올림 8초(⑤ 반올림 규칙이면 4초), 5초 클립을 8초로 채움
+            tmpl_v5 = template(pid_v, lr, span={"start": 5.0, "end": 10.0}, cut_ids=["c1", "c2"])
+            env.llm_reply = {"resultKo": "", "promptEn": tmpl_v5, "changesKo": []}
+            d_v5 = draft_of(preview(pid_v, mid_v, {"requestKo": "5초", "scope": "range", "in": 5, "out": 10}))
+            requests8, pad8 = len(env.requests), len(env.pad_calls)
+            submit(pid_v, mid_v, {"prompt": tmpl_v5, "requestKo": "5초", "confirmUsd": 1.64, "draftId": d_v5.get("id"), "scope": "range", "in": 5,
+                                  "out": 10})
+            p_v5 = (env.requests[-1].get("payload") or {}) if len(env.requests) > requests8 else {}
+            expect("rtk-r", [(d_v5.get("range") or {}).get("cutIds"), [c["start"] for c in (d_v5.get("range") or {}).get("cuts") or []],
+                             p_v5.get("duration"), env.pad_calls[pad8:], len(p_v5.get("image_urls") or [])],
+                   [["c1", "c2"], [0.0, 2.5], "8", [(b"CLIP:5-10", 8.0)], 4],
+                   "5초 구간(컷 1·2 걸침): 구간 안 컷 둘·새 영상 안 시각, duration 올림 \"8\"(⑤ 규칙이면 4)·8초 채움·참고 4장(두 인물)")
+            # 구간 버전을 기준으로: 범위는 구간뿐, 클립이 구간 안 일부면 그 안
+            mid_r2 = mat_r.get("mid") or ""
+            rv_r2 = rv_get(pid_u, mid_r2).get_json() or {}
+            rv_r2c = rv_get(pid_u, mid_r2, **{"in": "0", "out": "3"}).get_json() or {}
+            expect("rtk-r", [rv_r2.get("scopes"), rv_r2.get("range"), row_of(rv_r2, lr).get("full", {}).get("reason"),
+                             (rv_r2c.get("range") or {}).get("start"), (rv_r2c.get("range") or {}).get("end"), (rv_r2c.get("range") or {}).get("cuts"),
+                             err_of(preview(pid_u, mid_r2, {"requestKo": "x", "scope": "full"}))[:2]],
+                   [["range"], {"in": 0.0, "out": 7.5, "start": 7.5, "end": 15.0, "seconds": 7.5, "cutIds": ["c2"],
+                                "cuts": [{"cutId": "c2", "no": 2, "start": 0.0, "end": 7.5}]}, "구간 버전은 그 구간만 다시 만들 수 있습니다.",
+                    7.5, 10.5, [{"cutId": "c2", "no": 2, "start": 0.0, "end": 3.0}], (400, "RetakeBadRange")],
+                   "구간 버전 기준: 범위 range 뿐(구간 전체, 클립 0–3초 → 녹화 7.5–10.5초), 원본 칸 전체는 이유와 함께 막힘(400)")
+            # 틀린 구간·짧은 구간·칸 전체·비례(결과 길이 ≠ 녹화 길이)
+            notes = [rv_get(pid_u, mid_u, **q).get_json() or {} for q in ({"in": "x", "out": "3"}, {"in": "0", "out": "99"}, {"in": "3", "out": "3.5"},
+                                                                         {"in": "0", "out": "15"}, {"in": "-1", "out": "3"})]
+            target_u = rt._target(planmod.load_plan(owner, pid_u)[0], env.gen(pid_u), mid_u, env.state(pid_u))  # noqa: SLF001
+            scaled, _note = rt._range_of(env.plan(pid_u), target_u, None, 15.0, 12.0, 6, 12)  # noqa: SLF001
+            expect("rtk-r", [[(n.get("range"), n.get("rangeNote"), n.get("scopes")) for n in notes], (scaled or {}).get("start"),
+                             (scaled or {}).get("end"), (scaled or {}).get("cutIds")],
+                   [[(None, rt.RANGE_NOTES["bad"], ["full"]), (None, rt.RANGE_NOTES["bad"], ["full"]), (None, rt.RANGE_NOTES["short"], ["full"]),
+                     (None, rt.RANGE_NOTES["whole"], ["full"]), (None, rt.RANGE_NOTES["bad"], ["full"])], 7.5, 15.0, ["c2"]],
+                   "보기는 거절하지 않고 구간 없음 + 이유(글자·원본 밖·1초 미만·칸 전체·음수), 결과 12초·녹화 15초면 비례(6–12초 → 7.5–15초)")
+            # 녹화 구간 둘(길이가 다름): 컷 경계는 녹화 실측(콘티 비례 아님), 길이 캐시의 결과 길이로 비례(GET), 초안과 구간이 다르면 409
+            two_plan = {"conti": {"segments": [{"id": "s1", "cutIds": ["c1"]}, {"id": "s2", "cutIds": ["c2"]}],
+                                  "cuts": [{"id": "c1", "seconds": 7}, {"id": "c2", "seconds": 7}]},
+                        "previz": {"recordings": {"s1": {"key": "k1", "seconds": 10}, "s2": {"key": "k2", "seconds": 4}}}}
+            spans_two = rt._cell_spans(two_plan, {"seconds": 14.0, "cutIds": ["c1", "c2"], "recSegIds": ["s1", "s2"]}, "take")  # noqa: SLF001
+            index_key = edit.media_index_key(owner, pid_u, gen_u)
+
+            def set_duration(seconds: float):
+                def fn(data):
+                    data = data if isinstance(data, dict) else {"v": 1, "items": {}}
+                    data.setdefault("items", {}).setdefault(mid_u, {})["duration"] = seconds
+                    return data
+                return fn
+
+            edit._mutate_json(index_key, set_duration(12.0))  # noqa: SLF001
+            rv_scaled = rv_get(pid_u, mid_u, **{"in": "6", "out": "12"}).get_json() or {}
+            edit._mutate_json(index_key, set_duration(15.0))  # noqa: SLF001
+            other_range = err_of(submit(pid_u, mid_u, {"prompt": d_r.get("prompt"), "requestKo": "뒤로 앉게", "confirmUsd": 1.64, "draftId": d_r.get("id"),
+                                                       "scope": "range", "in": 5, "out": 15}))
+            expect("rtk-r", [spans_two, (rv_scaled.get("range") or {}).get("start"), (rv_scaled.get("range") or {}).get("end"), other_range],
+                   [[(0.0, 10.0, "c1"), (10.0, 14.0, "c2")], 7.5, 15.0,
+                    (409, "RetakeNoDraft", "모델이나 범위가 새 프롬프트를 만들 때와 다릅니다. [새 프롬프트 다시 만들기]를 눌러 주세요.")],
+                   "녹화 길이가 다른 구간 둘의 컷 경계(10·4초), 보기는 ⑦ 길이 캐시의 결과 길이로 비례(12초 → 6–12 = 녹화 7.5–15), 초안과 구간이 다른 제출 409")
+            # 컷 칸 구간: 녹화 안 시각(컷 시작 + 구간), 영상 편집 경로는 채우지 않음, 짧은 구간 3초 과금
+            tmpl_c = template(pid_c, kl, cell="c2")
+            env.llm_reply = {"resultKo": "", "promptEn": tmpl_c, "changesKo": []}
+            d_c = draft_of(preview(pid_c, mid_c2, {"requestKo": "구간", "scope": "range", "in": 1, "out": 5}))
+            ledger3, cut2, pad2 = len(env.ledger), len(env.cut_calls), len(env.pad_calls)
+            r_c = submit(pid_c, mid_c2, {"prompt": tmpl_c, "requestKo": "구간", "confirmUsd": 0.56, "draftId": d_c.get("id"), "scope": "range",
+                                         "in": 1, "out": 5})
+            v_c = env.state(pid_c)["cells"]["webtoon:c2"]["versions"][-1]
+            rec_c2 = (env.log(pid_c).get("webtoon:c2") or [{}])[-1]
+            rv_short = rv_get(pid_c, mid_c1, **{"in": "1", "out": "3"}).get_json() or {}
+            expect("rtk-r", [(d_c.get("range") or {}).get("start"), (d_c.get("range") or {}).get("end"), r_c.status_code, env.cut_calls[cut2:],
+                             env.pad_calls[pad2:], [(e.get("usd"), e.get("units")) for e in env.ledger[ledger3:]], (v_c.get("trimTo"), v_c.get("path")),
+                             plan_brief(row_of(rv_short, kl).get("range")),
+                             {k: (rec_c2.get("params") or {}).get(k) for k in ("startSec", "endSec", "rangeStart", "rangeEnd", "seconds", "cellSeconds")}],
+                   [1.0, 5.0, 202, [(b"PREVIZ-REC-s1", 8.5, 12.5)], [], [(0.56, 4.0)], (4.0, "cut"),
+                    (True, 0.42, 3.0, 2.0, 2500, "", False, True),
+                    {"startSec": 8.5, "endSec": 12.5, "rangeStart": 1.0, "rangeEnd": 5.0, "seconds": 4.0, "cellSeconds": 7.5}],
+                   "컷 칸 구간: 녹화 8.5–12.5초(컷 2 시작 7.5 + 1–5초) 클립·채움 없음·원장 4초·기록 녹화 안 시각, 2초 구간은 3초 과금·자를 길이 2")
+            report.append(f"rtk-r: 구간 7.5–15초 → 8초 채움 · 컷 칸 4초 · 이유 {len(notes)}꼴")
+
+            # ================= 보강: 작은 도우미·경계(rtk-p·rtk-q·rtk-r) =================
+            plan_u = env.plan(pid_u)
+            cell_u = env.gen(pid_u)["units"][0]
+            odd_cell = {**cell_u, "recSegIds": ["sX"]}
+            flat_plan = json.loads(json.dumps(plan_u))
+            for cut in flat_plan["conti"]["cuts"]:
+                cut["seconds"] = 0
+            saved_index = edit._read_index
+            edit._read_index = lambda *a, **k: (_ for _ in ()).throw(RuntimeError("s3 down"))  # noqa: SLF001
+            logs.clear()
+            try:
+                dur_fail = rt._source_duration(owner, pid_u, gen_u, mid_u)  # noqa: SLF001
+            finally:
+                edit._read_index = saved_index  # noqa: SLF001
+            dur_warn = len(logs.messages("vnew.retake.index_failed", level=logging.WARNING))
+            saved_models = planmod.previz_models
+            planmod.previz_models = lambda: [{"id": "fal:" + kl, "label": "first", "available": True, "previzCapable": True},
+                                             {"id": "fal:" + kl, "label": "dup", "available": True, "previzCapable": True}, "junk"]
+            try:
+                dup_rows = [m["label"] for m in (rv_get(pid_u, mid_u).get_json() or {}).get("models") or []]
+            finally:
+                planmod.previz_models = saved_models
+            expect("rtk-r", [[rt._frame_times(10.0, (12, 14)), rt._frame_times(0, (2, 3)), rt._frame_times(4.0, (1, 2.6))],  # noqa: SLF001
+                             [rt._num_in(v) for v in (True, "1" * 40, "abc", float("inf"), "2.5", 3)],  # noqa: SLF001
+                             [rt._valid_range(v) for v in (None, {"start": 2, "end": 1}, {"start": "a", "end": 3}, {"start": 1, "end": 2})],  # noqa: SLF001
+                             [rt._time_map(*a) for a in ((3.0, None, "cut", 7.5, 5.0), (3.0, None, "cut", 7.5, 0), (None, {"start": 2, "end": 5}, "take", 15, 8),  # noqa: SLF001
+                                                         (None, None, "take", 15.0, 12.0), (None, None, "cut", 7.5, 0))],
+                             rt._cell_spans(plan_u, odd_cell, "take"), rt._cell_spans(flat_plan, odd_cell, "take"),  # noqa: SLF001
+                             rt._cell_spans(plan_u, {"seconds": 4.0}, "cut"), dur_fail, dur_warn,  # noqa: SLF001
+                             [rt._ref_limit("cut", {"videoField": "v"}, "webtoon"), rt._format_of("cut", {"videoField": "v"})], dup_rows[1:],  # noqa: SLF001
+                             [rt._endpoint_of(v) for v in ("fal:a/b", "a/b", "", "x" * 301, "a\tb")],  # noqa: SLF001
+                             rt._flag_extra({"trimTo": 0, "range": {"start": 1, "end": 1}})],  # noqa: SLF001
+                   [[[10.0], [2.5], [1.4, 2.2]], [None, None, None, None, 2.5, 3.0], [None, None, None, {"start": 1, "end": 2}],
+                    [(0.0, 1.0, 3.0), (0.0, 1.0, 3.0), (2, 1.0, 3.0), (0.0, 1.25, 12.0), (0.0, 1.0, 7.5)],
+                    [(0.0, 7.5, "c1"), (7.5, 15.0, "c2")], [(0.0, 7.5, "c1"), (7.5, 15.0, "c2")], [], None, 1, [0, "none"], ["first"],
+                    ["a/b", "a/b", "", "", ""], {}],
+                   "도우미: 구간 프레임 시각(밖·길이 모름·짧음)·수 읽기·구간 검사·시간 대응 5꼴·녹화가 바뀐 테이크 컷 경계(콘티 비례·길이 0 균등)·길이 캐시 실패 경고·"
+                   "참고 없는 모델 0장·형식 none·겹친 목록 줄·endpoint 꼴·표식 없음")
+            # 새 길 초안 실패: 스레드에서 모델을 못 씀·빈 응답, 시스템 문구 실사 규칙 번호, <range> 꼬리·컷 없음
+            def set_draft(pid: str, key: str, draft: dict) -> None:
+                gid = str(env.gen(pid)["genId"])
+                k = rt.retakes_key(owner, pid, gid)
+                data, _ = env.store.read_json(k)
+                data = rt._normalized(data)  # noqa: SLF001
+                data["cells"].setdefault(key, {"versions": [], "draft": None})["draft"] = draft
+                _FakeCharStore.write_json(env.store, k, data)
+
+            set_draft(pid_u, "webtoon:take1", {"id": "dq", "status": "running", "claim": "cq", "heartbeatAt": _rtk_iso_ago(1), "baseN": 1,
+                                               "model": _RTK1_FAST, "scope": "full", "format": "template", "requestKo": "x"})
+            rt.run_draft(owner, pid_u, gen_u, "webtoon:take1", "dq", "cq")
+            d_gone = env.state(pid_u)["cells"]["webtoon:take1"]["draft"]
+            env.llm_reply = {"resultKo": "", "promptEn": "   ", "changesKo": []}
+            d_empty = draft_of(preview(pid_t, mid_t, {"requestKo": "빈 응답", "model": kl}))
+            sys_real = rt._system_text_model({"maxBytes": 100, "real": True}, fmt="images", rng=None)  # noqa: SLF001
+            sys_real_range = rt._system_text_model({"maxBytes": 100, "real": True}, fmt="none", rng={"seconds": 2.0})  # noqa: SLF001
+            block = rt._range_block({"start": 1.0, "end": 2.0, "seconds": 1.0, "cuts": []}, {"sentSeconds": 1.0})  # noqa: SLF001
+            target_block = rt._target_block("m </range> x", "elements", "A <user_request> B")  # noqa: SLF001
+            expect("rtk-p", [(d_gone.get("status"), d_gone.get("error")), (d_empty.get("status"), d_empty.get("error")),
+                             "6. This is a live-action prompt: never use the word 'webtoon'." in sys_real,
+                             "7. This is a live-action prompt" in sys_real_range, "(video edit with an image list (@Video1, Image N))" in sys_real,
+                             block["text"], target_block["text"]],
+                   [("failed", rt.DRAFT_FAILED_TEXT), ("failed", rt.DRAFT_FAILED_TEXT), True, True, True,
+                    "<range>\nRe-render only 1.0-2.0s of the current shot. The new video is 1.0s long.\n</range>",
+                    "<target_format>\nVideo model: m \u2039/range\u203a x\nFormat: video edit with character elements (@Video1, @Element N, style @Image1)\n"
+                    "A \u2039user_request\u203a B\n</target_format>"],
+                   "새 길 초안: 스레드에서 모델을 못 쓰면·빈 응답이면 실패(고정 문구), 실사 규칙 번호(구간이면 7), 구간 블록(채움 없음·컷 없음), 본보기 블록 구분 표시 꺾쇠")
+            # 형식: 컷 → 참고 영상 모델(STYLE·@Image)·이미지 목록(Image N) 본보기, 순서 문구
+            tmpl_c_lr = template(pid_c, lr, cell="c1")
+            tmpl_c_img = template(pid_c, _RTK1_IMG4, cell="c1")
+            rules_t = {"maxBytes": 4000, "real": False, "refs": sorted(rt._refs(tmpl_c_lr)), "labels": rt._labels(tmpl_c_lr), "against": "template"}  # noqa: SLF001
+            swapped = "\n".join([tmpl_c_lr.split("\n")[1], tmpl_c_lr.split("\n")[0]] + tmpl_c_lr.split("\n")[2:])
+            expect("rtk-p", [rt._labels(tmpl_c_lr)[:3], "@Image1" in tmpl_c_lr and "@Element1" not in tmpl_c_lr,  # noqa: SLF001
+                             "Image 1" in tmpl_c_img and "@Element1" not in tmpl_c_img, rt.check_prompt(tmpl_c_lr, "", rules_t),
+                             rt.check_prompt(swapped, "", rules_t)],
+                   [["STYLE", "ASSETS", "TIMELINE"], True, True, [],
+                    ["항목 순서가 고른 모델 형식과 다릅니다(" + " → ".join(rt._labels(tmpl_c_lr)) + ")."]],  # noqa: SLF001
+                   "컷 칸 → 참고 영상 모델 본보기(STYLE·ASSETS·TIMELINE·@Image)·이미지 목록 모델 본보기(Image N), 본보기 기준 검사(그대로 통과·순서 문구)")
+            # 견적 경계: 영상 편집 모델 15초 넘음·duration 값이 글자, 본보기 확인 없이 resubmit_model(제출 1)
+            env.registry[_RTK1_FAST]["caps"]["durations"] = [5, "x", 10]
+            plan_x = genmod.retake_plan(env.gen(pid_t), model=_RTK1_FAST, path="take", seconds=6, original=False)
+            env.registry[_RTK1_FAST]["caps"]["durations"] = [5, 10]
+            plan_long = genmod.retake_plan(env.gen(pid_t), model=_RTK1_PRO, path="cut", seconds=16, original=False)
+            requests5 = len(env.requests)
+            sent_x = genmod.resubmit_model(owner, pid_c, str(env.gen(pid_c)["genId"]), variant="webtoon", cell_id="c1", prompt=tmpl_c_img,
+                                           tag="rt7", model=_RTK1_IMG4)
+            req_x = env.requests[-1] if len(env.requests) > requests5 else {}
+            expect("rtk-q", [(plan_x["ok"], plan_x["durations"], plan_x["sentSeconds"]), (plan_long["ok"], plan_long["reason"]), len(env.requests) - requests5,
+                             sorted(req_x.get("payload") or {}), len((req_x.get("payload") or {}).get("image_urls") or []), sent_x.get("trimTo"),
+                             "/c1-webtoon-rt7-1/" in sent_x.get("outputPrefix", "") + "/"],
+                   [(True, [5, 10], 10.0), (False, "이 모델은 영상을 15초까지 받습니다(필요 16초)."), 1, ["image_urls", "keep_audio", "prompt", "video_url"],
+                    3, 7.5, True],
+                   "견적 경계(duration 글자 값 건너뜀·영상 편집 15초 넘음), 이미지 목록 모델 제출 본문(elements 없음·이미지 3장 = 인물 2 + 그림체 1)")
+            # 조건부 쓰기 안에서 초안이 바뀐 경우(다른 요청이 그 사이 초안을 새로 만듭) → 409
+            env.llm_reply = {"resultKo": "", "promptEn": tmpl_c_img, "changesKo": []}
+            d_img = draft_of(preview(pid_c, mid_c1, {"requestKo": "이미지 목록", "model": _RTK1_IMG4}))
+            base_c1 = env.gen(pid_c)["units"][0]["webtoon"]["promptEn"]
+            saved_rules = rt._submit_rules
+            rt._submit_rules = lambda pick, gen, target, state, draft_id: (rt._rules(gen, target), rt.estimate(gen, target["cell"]))  # noqa: SLF001
+            try:
+                race = err_of(submit(pid_c, mid_c1, {"prompt": base_c1, "requestKo": "이미지 목록", "confirmUsd": 1.05, "draftId": d_img.get("id")}))
+            finally:
+                rt._submit_rules = saved_rules
+            expect("rtk-o", race, (409, "RetakeNoDraft", "모델이나 범위가 새 프롬프트를 만들 때와 다릅니다. [새 프롬프트 다시 만들기]를 눌러 주세요."),
+                   "조건부 쓰기 안에서도 초안의 모델·범위를 다시 대조(409)")
+            # 등록에서 빠진 원래 통 테이크 모델(caps 없음): 경로는 칸 종류(take), same 견적의 보낼 길이는 ⑤ 규칙(14.6초 → 15)
+            pid_gt = "prj_rtk1_gonetake"
+            env.take_done(client, pid_gt)
+            env.mutate_gen(pid_gt, lambda g: (g.update(videoModel="fal-ai/rtk/gone-take"), g["units"][0].update(seconds=14.6)))
+            rv_gt = rv_get(pid_gt, mid_of(pid_gt, label_t)).get_json() or {}
+            first_gt = (rv_gt.get("models") or [{}])[0]
+            # 해상도·duration enum 경계, _choose 의 견적 ok 지킴(보인 모델이라도 그 범위 견적이 안 되면 400)
+            env.registry["fal-ai/rtk/take-odd"] = {"id": "fal:fal-ai/rtk/take-odd", "endpointId": "fal-ai/rtk/take-odd", "label": "Odd",
+                                                   "caps": {"previzCapable": True, "available": True, "videoListField": "video_urls",
+                                                            "durations": [3, 5, 40]}, "pricing": None}
+            plan_odd = genmod.retake_plan(env.gen(pid_t), model="fal-ai/rtk/take-odd", path="take", seconds=2, original=False)
+            plan_odd_long = genmod.retake_plan(env.gen(pid_t), model="fal-ai/rtk/take-odd", path="take", seconds=35, original=False)
+            del env.registry["fal-ai/rtk/take-odd"]
+            saved_setup = rt._setup  # noqa: SLF001
+
+            def fake_setup(*a, **k):
+                out = saved_setup(*a, **k)
+                for m in out["models"]:
+                    m["full"] = dict(m["full"], ok=False)
+                return out
+
+            rt._setup = fake_setup  # noqa: SLF001
+            try:
+                guard = err_of(preview(pid_t, mid_t, {"requestKo": "x"}))[:2]
+            finally:
+                rt._setup = saved_setup  # noqa: SLF001
+            expect("rtk-o", [(first_gt.get("id"), first_gt.get("path"), first_gt.get("format"), (first_gt.get("full") or {}).get("same"),
+                              (first_gt.get("full") or {}).get("sentSeconds")),
+                             [genmod._retake_resolution({}, "540p"), genmod._retake_resolution({"resolutions": ["540P"]}, "540p"),  # noqa: SLF001
+                              genmod._retake_resolution({"resolutions": ["720p"]}, "")],  # noqa: SLF001
+                             (plan_odd["durations"], plan_odd["sentSeconds"]), (plan_odd_long["ok"], plan_odd_long["reason"]), guard],
+                   [("fal-ai/rtk/gone-take", "take", "reference", True, 15.0), [None, None, ("720p", "720p")], ([5], 5.0),
+                    (False, "이 모델은 최대 5초까지 만듭니다(필요 35초)."), (400, "RetakeBadModel")],
+                   "등록 밖 원래 통 테이크 모델은 칸 종류 경로·⑤ 길이 규칙, 원장 공식에 없는 해상도(540p)는 못 고름, duration 4~30 밖 값(3·40) 뺌, "
+                   "_choose 는 보인 모델이라도 그 범위 견적이 안 되면 400")
+            # 컷 칸 → 참고 영상 모델(Seedance): 컷 클립을 8초까지 채워 video_urls, duration "8", 원장 8초 토큰, 기록 model
+            env.llm_reply = {"resultKo": "", "promptEn": tmpl_c_lr, "changesKo": []}
+            d_clr = draft_of(preview(pid_c, mid_c1, {"requestKo": "참고 영상 모델로", "model": lr}))
+            ledger4, requests6, cut3, pad3 = len(env.ledger), len(env.requests), len(env.cut_calls), len(env.pad_calls)
+            r_clr = submit(pid_c, mid_c1, {"prompt": tmpl_c_lr, "requestKo": "참고 영상 모델로", "confirmUsd": 1.64, "draftId": d_clr.get("id"), "model": lr})
+            p_clr = (env.requests[-1].get("payload") or {}) if len(env.requests) > requests6 else {}
+            rec_clr = (env.log(pid_c).get("webtoon:c1") or [{}])[-1]
+            expect("rtk-q", [r_clr.status_code, env.requests[-1].get("url", "").endswith("/" + lr) if len(env.requests) > requests6 else False,
+                             env.cut_calls[cut3:], env.pad_calls[pad3:], [data_bytes(u) for u in p_clr.get("video_urls") or []], p_clr.get("duration"),
+                             p_clr.get("task"), len(p_clr.get("image_urls") or []), [(e.get("usd"), e.get("model")) for e in env.ledger[ledger4:]],
+                             (rec_clr.get("model"), rec_clr.get("mode"), (rec_clr.get("params") or {}).get("trimTo"))],
+                   [202, True, [(b"PREVIZ-REC-s1", 0.0, 7.5)], [(b"CLIP:0-7.5", 8.0)], [b"PAD:CLIP:0-7.5@8"], "8", "reference", 4,
+                    [(1.6448, lr)], (lr, "previz", 7.5)],
+                   "컷 칸을 참고 영상 모델로: 컷 0–7.5초 클립 → 8초 채움·duration \"8\"·task reference·참고 4장(인물·패널·장소), 원장 8초 토큰, 기록 model·trimTo")
+
+            # ================= (rtk-s) 화면 준비: 실제 서버 응답 =================
+            env.llm_reply = lambda system, blocks: _rtk_reply(tmpl_kl, "Re-render this single shot", "Re-render this whole take")
+            pid_s = "prj_rtk1_s"
+            env.take_done(client, pid_s)
+            mid_s = mid_of(pid_s, label_t)
+            server["webS"] = edit_get(pid_s).get_json() or {}
+            server["rvS"] = rv_get(pid_s, mid_s).get_json() or {}
+            env.inline_rt = False
+            server["rvSRun"] = (preview(pid_s, mid_s, {"requestKo": "Kling 으로", "model": kl}).get_json() or {}).get("retake") or {}
+            job = env.rt_spawned[-1]
+            rt.run_draft(*job[1])
+            env.inline_rt = True
+            server["rvSDone"] = rv_get(pid_s, mid_s).get_json() or {}
+            server["klLabel"] = listed[kl]["label"]
+            server["lrLabel"] = listed[lr]["label"]
+            server["label"] = label_t
+            server["kl"] = kl
+            server["lr"] = lr
+            server["v2RKey"] = mat_r.get("sourceKey") or ""
+            server["v2RMid"] = mat_r.get("mid") or ""
+            expect("rtk-s", [server["rvSDone"].get("draft", {}).get("status"), server["rvSDone"].get("draft", {}).get("model"), bool(server["v2RKey"]),
+                             (server["rvTR"].get("range") or {}).get("start")],
+                   ["done", kl, True, 7.5], "준비: 화면에 넣을 실제 서버 응답(Kling 초안·구간 보기·구간 v2)")
+
+            # ================= (rtk-t) USER_FACING·문구·끔 =================
+            errors_text = (APP_SRC / "vpoc" / "errors.py").read_text(encoding="utf-8")
+            env.set(vpoc_set, "RAW_ERRORS", False)
+            logging.disable(logging.CRITICAL)
+            try:
+                shown = {k: vpoc_errors.envelope("vnew", VpocError("vnew.retake", k, f"{k} 고정 문구", 400))["message"] for k in _RTK1_NEW_KINDS}
+            finally:
+                logging.disable(logging.NOTSET)
+                env.set(vpoc_set, "RAW_ERRORS", True)
+            consts: dict[str, set[str]] = {}
+            unsafe: list[str] = []
+            thrown: dict[str, int] = {}
+            for path in (APP_SRC / "vnew" / "retake.py", APP_SRC / "vnew" / "generate.py"):
+                tree = _ast.parse(path.read_text(encoding="utf-8"))
+                consts[path.name] = {t.id for n in tree.body if isinstance(n, _ast.Assign) and isinstance(n.value, _ast.Constant)
+                                     and isinstance(n.value.value, str) for t in n.targets if isinstance(t, _ast.Name)}
+                for call_node in (n for n in _ast.walk(tree) if isinstance(n, _ast.Call)):
+                    if not (isinstance(call_node.func, _ast.Name) and call_node.func.id == "VpocError") or len(call_node.args) < 3:
+                        continue
+                    kind_arg, msg_arg = call_node.args[1], call_node.args[2]
+                    if not (isinstance(kind_arg, _ast.Constant) and kind_arg.value in _RTK1_NEW_KINDS + ("RetakeFormatChanged",)):
+                        continue
+                    thrown[kind_arg.value] = thrown.get(kind_arg.value, 0) + 1
+                    if isinstance(msg_arg, _ast.Constant) and isinstance(msg_arg.value, str):
+                        continue
+                    if isinstance(msg_arg, _ast.Name) and msg_arg.id in consts[path.name]:
+                        continue
+                    if isinstance(msg_arg, _ast.Attribute) and isinstance(msg_arg.value, _ast.Name) and msg_arg.value.id == "generate" \
+                            and msg_arg.attr in {t for t in ("RETAKE_MODEL_GONE_TEXT", "RETAKE_FORMAT_CHANGED_TEXT")}:
+                        continue
+                    unsafe.append(f"{kind_arg.value} {path.name}:{call_node.lineno}")
+            with _pin_vnew(VNEW_EDIT_RETAKE=False):
+                off_view = edit_get(pid_u).get_json() or {}
+                off_rv = err_of(rv_get(pid_u, mid_u, **{"in": "7.5", "out": "15"}))[:2]
+            expect("rtk-t", [[k for k in _RTK1_NEW_KINDS if k not in vpoc_errors.USER_FACING_KINDS or errors_text.count(f'    "{k}",\n') != 1],
+                             [k for k in _RTK1_NEW_KINDS if shown[k] != f"{k} 고정 문구"], unsafe, sorted(thrown),
+                             "RetakeFormatChanged" in vpoc_errors.USER_FACING_KINDS,
+                             [m["label"] for m in off_view.get("materials") or []], [m for m in off_view.get("materials") or [] if "retake" in m], off_rv],
+                   [[], [], [], ["RetakeBadModel", "RetakeBadRange", "RetakeFormatChanged"], False, [label_t, "합친 영상"], [], (404, "RetakeDisabled")],
+                   "새 kind 2개 한 줄씩·운영 문구 그대로·던지는 곳 문구 고정(글자·모듈 글자 상수), 스레드 전용 RetakeFormatChanged 는 화면 kind 아님, "
+                   "끔이면 구간 버전 재료·표식 없음·보기 404")
+            expect("rtk-n", real_calls, [], "실제 LLM 호출 0(가짜 _rewrite·_read_cast_notes 만)")
+            expect("rtk-n", env.urlopen_calls, [], "urlopen 0")
+            _ = (_b64, gen_u)
+    except Exception as exc:  # noqa: BLE001
+        bad.append("(rtk 보완 1 서버) 예외: " + repr(exc) + "\n" + _tb.format_exc()[:3000])
+
+    # ================= (rtk-s) 화면(node) =================
+    vjs = (PUBLIC / "vnew.js").read_text(encoding="utf-8")
+    css = (PUBLIC / "vnew.css").read_text(encoding="utf-8")
+    code_s, problems_s = _edu_code(vjs, _EDU_SLICES)
+    bad.extend(p.replace("(edu-a)", "(rtk-s)") for p in problems_s)
+    if node and not problems_s and server.get("rvV2R"):
+        got, err = _lr_run_node(node, "var SERVER = " + json.dumps(server, ensure_ascii=False) + ";\n" + _EDU_NODE_HARNESS + code_s +
+                                _RTK1_NODE_UI, "rtk1_s_")
+        if err:
+            bad.append(f"(rtk-s) node 실행 실패: {err}")
+        else:
+            bad.extend(_rtk1_ui_problems(got, server))
+            seen.add("rtk-s")
+            report.append(f"rtk-s: 화면 묶음 {len(got)}개 · 순수 함수 {len(got.get('pure') or {})}꼴")
+    elif not node:
+        warn("node 가 없어 rtk-s(화면)를 건너뜁니다")
+
+    # ================= (rtk-t) CSS 보완 1 구역 =================
+    try:
+        start = css.find("/* ================================================================ ⑦ 편집 — AI로 고치기 보완 1: 모델·구간(지시서 116 보완 1) */")
+        section = css[start:] if start >= 0 else ""
+        js_start = vjs.find("  /* ---------------------------------------------------------------- ⑦ AI로 고치기 — 모델·구간(지시서 116 보완 1)")
+        js_end = vjs.find("  /* ---------------------------------------------------------------- 전역 */")
+        fix1_classes = {"vnew-edit-fix-setup", "vnew-edit-fix-scope", "vnew-edit-fix-scope-item", "vnew-edit-fix-scope-note", "vnew-edit-fix-model",
+                        "vnew-edit-fix-model-info", "vnew-edit-fix-hidden", "vnew-edit-fix-version-meta", "vnew-edit-fix-mismatch"}
+        used = set(re.findall(r"vnew-edit-[a-z0-9-]+", vjs[vjs.find("⑦ AI로 고치기(지시서 116)"):js_end]))
+        defined = set(re.findall(r"\.(vnew-edit-[a-z0-9-]+)", section))
+        widths = [int(w) for w in re.findall(r"(?<![-\w])(?:min-|max-)?width: (\d+)px", section)]
+        expect("rtk-t", [start > 0, 0 < js_start < js_end, sorted(fix1_classes - used), sorted(fix1_classes - defined), "overflow-x" in section,
+                         max(widths or [0]) <= 960, css.endswith("}\n"), "\r" in css, vjs.count("⑦ AI로 고치기 — 모델·구간(지시서 116 보완 1)")],
+               [True, True, [], [], False, True, True, False, 1],
+               "CSS 보완 1 구역: 화면이 쓰는 새 클래스 9개 정의·가로 스크롤 없음·960px 이하·LF·끝 줄바꿈, JS 소구역 표시 하나")
+    except Exception as exc:  # noqa: BLE001
+        bad.append("(rtk-t) 예외: " + repr(exc) + "\n" + _tb.format_exc()[:1200])
+
+    # ================= (rtk-u) 로컬 ffmpeg: 채우기 =================
+    try:
+        from src import stitcher as _stitch  # noqa: PLC0415
+        from src.vnew import generate as _gen_real  # noqa: PLC0415
+
+        try:
+            binary = _stitch.ffmpeg_path()
+        except Exception:  # noqa: BLE001
+            binary = ""
+        if not binary:
+            warn("ffmpeg 가 없어 rtk-u(채우기 실측)를 건너뜁니다")
+        else:
+            work = tempfile.mkdtemp(prefix="rtk1-ffmpeg-")
+            try:
+                mp4 = os.path.join(work, "t.mp4")
+                subprocess.run([binary, "-hide_banner", "-loglevel", "error", "-f", "lavfi", "-i", "testsrc=duration=2:size=320x240:rate=24",
+                                "-pix_fmt", "yuv420p", "-c:v", "libx264", mp4], check=True, capture_output=True, timeout=120)
+                with open(mp4, "rb") as handle:
+                    raw = handle.read()
+                before = {n for n in os.listdir(tempfile.gettempdir()) if n.startswith("vnew-retake-pad-")}
+                padded = _gen_real._pad_clip(raw, 4.0)  # noqa: SLF001
+                after = {n for n in os.listdir(tempfile.gettempdir()) if n.startswith("vnew-retake-pad-")}
+                out_path = os.path.join(work, "p.mp4")
+                with open(out_path, "wb") as handle:
+                    handle.write(padded)
+                seconds = _stitch.probe_duration(out_path)
+                same = _gen_real._pad_clip(padded, 3.0)  # noqa: SLF001 — 이미 길면 그대로 복사
+                expect("rtk-u", [round(seconds or 0, 1), after - before, same == padded],
+                       [4.0, set(), True], "로컬 ffmpeg: 2초 mp4 → 4초(마지막 프레임 채움)·이미 길면 그대로·임시 폴더 0")
+                report.append(f"rtk-u: ffmpeg {os.path.basename(binary)} · 2초 → {seconds:.2f}초")
+            finally:
+                shutil.rmtree(work, ignore_errors=True)
+    except Exception as exc:  # noqa: BLE001
+        bad.append("(rtk-u) 예외: " + repr(exc) + "\n" + _tb.format_exc()[:1200])
+
+    tempfile.tempdir = saved_tempdir
+    leftover = os.listdir(private_tmp) if os.path.isdir(private_tmp) else []
+    shutil.rmtree(private_tmp, ignore_errors=True)
+    expect("rtk-t", leftover, [], "이 검사가 쓴 임시 폴더에 남은 것 없음")
+    expected_groups = {f"rtk-{c}" for c in "nopqrt"} | ({"rtk-s"} if node else set()) | ({"rtk-u"} if _rtk_ffmpeg_found() else set())
+    missing_groups = sorted(expected_groups - seen)
+    if missing_groups:
+        bad.append(f"돌지 않은 묶음: {missing_groups}")
+    if bad:
+        fail("vnew ⑦ AI로 고치기 보완 1(rtk-n~u) 검사 실패\n" + "\n".join(f"  {item}" for item in bad))
+    else:
+        ok("vnew ⑦ AI로 고치기 보완 1(지시서 116 보완 1) 검사 (rtk-n)모델 목록 (rtk-o)견적·confirmUsd (rtk-p)형식 (rtk-q)고른 모델 제출 "
+           "(rtk-r)구간 (rtk-s)화면 (rtk-t)문구·끔 (rtk-u)ffmpeg 채움" + "".join(f"\n       {r}" for r in report))
+
+
+
+# rtk-s: ⑦ 화면 + AI로 고치기 패널 보완 1(실제 서버 응답 SERVER). 가짜 api 는 줄 세운 응답(push)을 먼저 준다.
+_RTK1_NODE_UI = r"""
+var P = "/api/vnew/p/p%201/edit";
+var S = SERVER;
+var queue = {};
+function push(method, path, res) { var k = method + " " + path; (queue[k] = queue[k] || []).push(res); }
+handlers.push(function (m, p) {
+  var k = m + " " + p;
+  if (queue[k] && queue[k].length) return queue[k].shift();
+  if (m === "GET" && p.indexOf(P + "/media/") === 0) {
+    return { ok: { mid: decodeURIComponent(p.split("/media/")[1]), duration: 15, hasAudio: true,
+                   strip: { url: "", tiles: 0, interval: 1, tileWidth: 1, tileHeight: 1 }, peaks: { perSecond: 20, values: [] }, generated: false } };
+  }
+  if (m === "PUT" && p === P) return { ok: { doc: { version: 1 }, etag: "e1", saved: true, totalSeconds: 0 } };
+});
+function txt(node, cls) { var n = node ? byClass(node, cls)[0] : null; return n ? n.textContent : null; }
+function texts(node, cls) { return byClass(node, cls).map(function (n) { return n.textContent; }); }
+function opts(sel) { return byTag(sel, "option").map(function (o) { return [o.value, o.textContent]; }); }
+function C(id, key, a, b, extra) {
+  var c = { id: id, sourceKey: key, in: a, out: b, muted: false };
+  Object.keys(extra || {}).forEach(function (k) { c[k] = extra[k]; });
+  return c;
+}
+function gets(prefix) { return calls.filter(function (c) { return c[0] === "GET" && c[1].indexOf(prefix) === 0; }).map(function (c) { return c[1]; }); }
+function lastPost(path) { var l = calls.filter(function (c) { return c[0] === "POST" && c[1] === path; }); return l.length ? l[l.length - 1][2] : null; }
+async function run() {
+  // ===== A. 모델 고르기: 고른 클립(컷 2 = 원본 7.5–15초)에서 열기
+  var host = new FakeNode("div");
+  push("GET", P, { ok: clone(S.webS) });
+  renderEditStep(host);
+  await settle();
+  var ctx = editCtx;
+  var root = ctx.root;
+  editSelect(ctx, 1);
+  var mid = S.rvS.mid;
+  push("GET", P + "/retake/" + mid, { ok: clone(S.rvS) });
+  byClass(root, "vnew-edit-fix-sel")[0].fire("click");
+  await settle();
+  var fx = ctx.fix;
+  var d = fx.dom;
+  out.setup = { clip: fx.clip, scope: fx.scope, model: fx.model, scopeShown: d.scope.style.display, fullText: d.scopeFull.text.textContent,
+                rangeText: d.scopeRange.text.textContent, checked: [d.scopeFull.radio.checked, d.scopeRange.radio.checked], options: opts(d.model),
+                disabled: d.model.disabled, value: d.model.value, info: d.modelInfo.textContent,
+                hidden: [d.modelHidden.style.display, d.modelHidden.textContent, d.modelHidden.title.split("\n").length], gets: gets(P + "/retake/") };
+  d.model.value = S.kl;
+  d.model.fire("change");
+  out.klInfo = [fx.model, d.modelInfo.textContent];
+  d.request.value = "Kling 으로";
+  push("POST", P + "/retake/" + mid + "/preview", { ok: { ok: true, retake: clone(S.rvSRun) } });
+  d.make.fire("click");
+  await settle();
+  push("GET", P + "/retake/" + mid, { ok: clone(S.rvSDone) });
+  fire(2000);
+  await settle();
+  out.klDone = { body: lastPost(P + "/retake/" + mid + "/preview"), status: d.draftStatus.textContent, cost: d.cost.textContent,
+                 submit: [d.submit.textContent, d.submit.disabled], meter: d.meter.textContent, mismatch: byClass(d.problems, "vnew-edit-fix-mismatch").length,
+                 model: fx.model };
+  d.model.value = S.lr;
+  d.model.fire("change");
+  out.klBack = { cost: d.cost.textContent, mismatch: texts(d.problems, "vnew-edit-fix-mismatch"), submit: [d.submit.textContent, d.submit.disabled],
+                 meter: d.meter.textContent.split(" / ")[1] };
+  confirms.length = 0;
+  var postsBefore = calls.filter(function (c) { return c[0] === "POST"; }).length;
+  editFixSubmit(ctx, fx);
+  await settle();
+  out.klBlocked = [confirms.length, calls.filter(function (c) { return c[0] === "POST"; }).length - postsBefore];
+  d.model.value = S.kl;
+  d.model.fire("change");
+  push("POST", P + "/retake/" + mid, { ok: { ok: true, retake: clone(S.rvSDone) } });
+  confirms.length = 0;
+  d.submit.fire("click");
+  await settle();
+  out.klSubmit = { confirm: confirms.slice(), body: lastPost(P + "/retake/" + mid) };
+  var refused = clone(S.rvS);
+  refused.rangeNote = "고른 클립 구간을 읽지 못했습니다. 원본 칸 전체로 고칠 수 있습니다.";
+  push("GET", P + "/retake/" + mid + "?in=7.5&out=15", { ok: refused });
+  d.scopeRange.radio.checked = true;
+  d.scopeRange.radio.fire("change");
+  var waitInfo = [d.modelInfo.textContent, d.model.disabled];
+  await settle();
+  out.rangeRefused = { wait: waitInfo, scope: fx.scope, note: [d.scopeNote.style.display, d.scopeNote.textContent], checked: d.scopeFull.radio.checked,
+                       gets: gets(P + "/retake/" + mid + "?") };
+  editFixClose(ctx);
+  push("GET", P + "/retake/" + mid, { ok: clone(S.rvSDone) });
+  byClass(root, "vnew-edit-fix-open")[0].fire("click");
+  await settle();
+  out.reopen = [ctx.fix.model, ctx.fix.dom.model.value, ctx.fix.clip, ctx.fix.dom.scope.style.display, ctx.fix.dom.submit.disabled];
+  editFixClose(ctx);
+  editLeave();
+
+  // ===== B. 구간: 컷 2 클립 → 이 구간만 → 새 프롬프트 → 제출 → 완성 → [바꾸기]·되돌리기·[재료에 추가]
+  host = new FakeNode("div");
+  push("GET", P, { ok: clone(S.webT) });
+  renderEditStep(host);
+  await settle();
+  ctx = editCtx;
+  root = ctx.root;
+  editSelect(ctx, 1);
+  mid = S.rvT.mid;
+  push("GET", P + "/retake/" + mid, { ok: clone(S.rvT) });
+  byClass(root, "vnew-edit-fix-sel")[0].fire("click");
+  await settle();
+  fx = ctx.fix;
+  d = fx.dom;
+  push("GET", P + "/retake/" + mid + "?in=7.5&out=15", { ok: clone(S.rvTR) });
+  d.scopeRange.radio.checked = true;
+  d.scopeRange.radio.fire("change");
+  await settle();
+  out.range = { scope: fx.scope, model: fx.model, rangeText: d.scopeRange.text.textContent, options: opts(d.model).map(function (o) { return o[0]; }),
+                info: d.modelInfo.textContent, checked: [d.scopeFull.radio.checked, d.scopeRange.radio.checked] };
+  d.request.value = "뒤로 앉게";
+  push("POST", P + "/retake/" + mid + "/preview", { ok: { ok: true, retake: clone(S.rvDR) } });
+  d.make.fire("click");
+  await settle();
+  out.rangeDraft = { body: lastPost(P + "/retake/" + mid + "/preview"), status: d.draftStatus.textContent, cost: d.cost.textContent,
+                     submit: [d.submit.textContent, d.submit.disabled], mismatch: byClass(d.problems, "vnew-edit-fix-mismatch").length };
+  push("POST", P + "/retake/" + mid, { ok: { ok: true, retake: clone(S.rvLiveR) } });
+  confirms.length = 0;
+  d.submit.fire("click");
+  await settle();
+  out.rangeSubmit = { confirm: confirms.slice(), body: lastPost(P + "/retake/" + mid), pending: pending(5000) };
+  push("GET", P + "/retake/" + mid + "?in=7.5&out=15", { ok: clone(S.rvV2R) });
+  push("GET", P + "?variant=webtoon", { ok: clone(S.webV2R) });
+  fire(5000);
+  await settle();
+  var rows = byClass(d.versions, "vnew-edit-fix-version");
+  out.rangeDone = { rows: rows.map(function (r) { return [txt(r, "vnew-edit-fix-version-name"), txt(r, "vnew-edit-fix-version-meta"),
+                    byClass(r, "vnew-edit-fix-swap").map(function (b) { return [b.disabled, b.title]; })]; }),
+                    bin: texts(root, "vnew-edit-bin-item").slice(0, 2) };
+  var undo0 = ctx.hist.undo.length;
+  byClass(rows[1], "vnew-edit-fix-swap")[0].fire("click");
+  await settle();
+  out.swapRange = { clips: ctx.clips.map(function (c) { return [c.sourceKey === S.v2RKey, c.in, c.out, c.label || ""]; }), note: d.note.textContent,
+                    undo: ctx.hist.undo.length - undo0 };
+  rows = byClass(d.versions, "vnew-edit-fix-version");
+  byClass(rows[0], "vnew-edit-fix-swap")[0].fire("click");
+  await settle();
+  out.revertRange = { clips: ctx.clips.map(function (c) { return [c.sourceKey === S.v2RKey, c.in, c.out, c.label || ""]; }), note: d.note.textContent };
+  rows = byClass(d.versions, "vnew-edit-fix-version");
+  var n0 = ctx.clips.length;
+  byClass(rows[1], "vnew-edit-fix-add")[0].fire("click");
+  await settle();
+  out.addRange = [ctx.clips.length - n0, ctx.clips.filter(function (c) { return c.sourceKey === S.v2RKey; }).map(function (c) { return [c.in, c.out]; }),
+                  texts(root, "vnew-edit-bin-item")[1]];
+  editDo(ctx, "undo");
+  editFixClose(ctx);
+  editSelect(ctx, 0);
+  push("GET", P + "/retake/" + mid, { ok: clone(S.rvV2Rfull) });
+  byClass(root, "vnew-edit-fix-sel")[0].fire("click");
+  await settle();
+  fx = ctx.fix;
+  d = fx.dom;
+  rows = byClass(d.versions, "vnew-edit-fix-version");
+  byClass(rows[1], "vnew-edit-fix-swap")[0].fire("click");
+  await settle();
+  out.outside = { clips: ctx.clips.map(function (c) { return c.sourceKey === S.v2RKey; }), note: d.note.textContent, clip: fx.clip };
+  editFixClose(ctx);
+  editLeave();
+
+  // ===== 순수 함수
+  var vers = [{ sourceKey: "k1" }, { sourceKey: "kr", range: { start: 7.5, end: 15 }, trimTo: 7.5 }, { sourceKey: "kf", trimTo: 15 }];
+  var clips = [C("a", "k1", 0, 7.5, { label: "컷 1" }), C("b", "k1", 7.5, 15, { speed: 2, label: "테이크 1" }), C("c", "kz", 0, 3), C("t", "k1", 14.98, 15)];
+  function rs(r) { return [r.changed, r.skipped, r.outside, r.clips.map(function (c) { return [c.id, c.sourceKey, c.in, c.out, editSpeedOf(c), c.label || ""]; })]; }
+  var into = editFixRangeSwap(clips, null, vers, "take", 15, { k1: 15, kr: 8 }, vers[1], 0.04, "테이크 1 v2", ["테이크 1"]);
+  var back = editFixRangeSwap(into.clips, null, vers, "take", 15, { k1: 12, kr: 8 }, vers[0], 0.04, "테이크 1", ["테이크 1 v2"]);
+  out.pure = {
+    into: rs(into), back: rs(back),
+    ids: rs(editFixRangeSwap(clips, ["a"], vers, "take", 15, { k1: 15 }, vers[1], 0.04, "N", [])).slice(0, 3),
+    full: rs(editFixRangeSwap([C("x", "kr", 1, 4)], null, vers, "take", 15, { kf: 15 }, vers[2], 0.04, "N", [])),
+    none: rs(editFixRangeSwap(clips, null, [], "take", 15, {}, vers[1], 0.04, "N", [])).slice(0, 3),
+    map: [editFixTimeMap({ range: { start: 2, end: 5 }, trimTo: 3 }, "take", 15, 8), editFixTimeMap({ range: { start: 2, end: 5 } }, "take", 15, 8),
+          editFixTimeMap({ trimTo: 3 }, "cut", 7.5, 5), editFixTimeMap({ trimTo: 3 }, "cut", 7.5, 2), editFixTimeMap({}, "take", 15, 12),
+          editFixTimeMap({}, "cut", 7.5, 0), editFixTimeMap(null, "take", 0, 0)],
+    part: [editFixClipPart(C("p", "k", 0, 7.5), 15, 0), editFixClipPart(C("p", "k", 0, 15), 15, 0), editFixClipPart(C("p", "k", 0.05, 14.95), 15, 0),
+           editFixClipPart(C("p", "k", 0, 2), 3, 2), editFixClipPart(C("p", "k", 0, 1.5), 3, 2), editFixClipPart(null, 3, 0),
+           editFixClipPart(C("p", "k", 3, 3), 15, 0), editFixClipPart(C("p", "k", 0, 4), 0, 0), editFixClipPart(C("p", "k", 1, 4), 0, 5)],
+    dur: [editFixDurText([4, 8, 12, 30]), editFixDurText([4, 5, 6, 7, 8]), editFixDurText([5, 10]), editFixDurText(null)],
+    secs: [editFixSecs(7.5), editFixSecs(15), editFixSecs(null), editFixSecs(2.04)],
+    option: [editFixModelOption({ label: "A", original: true }, { usd: 1.5 }), editFixModelOption({ id: "b" }, { usd: 2.1, priceKnown: false }), editFixModelOption(null, null)],
+    matches: [editFixDraftMatches({ draft: {}, defaultModel: "m" }, { model: "m", scope: "full" }), editFixDraftMatches({ draft: { model: "k" }, defaultModel: "m" }, { model: "m", scope: "full" }),
+              editFixDraftMatches({ draft: { scope: "range", range: { start: 1, end: 2 } }, defaultModel: "m", range: { start: 1, end: 2 } }, { model: "m", scope: "range" }),
+              editFixDraftMatches({ draft: { scope: "range", range: { start: 1, end: 2 } }, defaultModel: "m", range: { start: 1, end: 2.5 } }, { model: "m", scope: "range" }),
+              editFixDraftMatches({ draft: {}, defaultModel: "m" }, { model: "m", scope: "range" })],
+    body: [editFixBody({ model: "m", scope: "full" }, { defaultModel: "m" }, { a: 1 }), editFixBody({ model: "k", scope: "full" }, { defaultModel: "m" }, { a: 1 }),
+           editFixBody({ model: "m", scope: "range", clip: { in: 1, out: 4 } }, { defaultModel: "m" }, {}), editFixBody({ model: "", scope: "range", clip: null }, {}, {})],
+    meta: [editFixVersionMeta({ defaultModel: "m" }, { model: "m" }), editFixVersionMeta({ defaultModel: "m" }, { model: "k", modelLabel: "K" }),
+           editFixVersionMeta({ defaultModel: "m" }, { model: "m", range: { start: 1, end: 2.5 } }), editFixVersionMeta({ defaultModel: "m" }, { model: "k" })],
+    suffix: [editFixDraftSuffix({ format: "same" }), editFixDraftSuffix({ format: "template", model: "k" }),
+             editFixDraftSuffix({ format: "template", modelLabel: "K", range: { start: 1, end: 2 } }), editFixDraftSuffix(null)],
+    plan: [editFixPlanText({ defaultModel: "m", models: [{ id: "m", format: "reference" }] }, { id: "m", format: "reference" }, { same: true, seconds: 15, resolution: "480p", maxBytes: 4000 }),
+           editFixPlanText({ defaultModel: "m", models: [{ id: "m", format: "reference" }] }, { id: "k", format: "elements" }, { sentSeconds: 3, trimTo: 2, maxBytes: 2500, priceKnown: false }),
+           editFixPlanText({}, { id: "k", format: "odd" }, { sentSeconds: 8, trimTo: 8, durations: [5, 8], maxBytes: 100 })],
+    cost: [editFixCostText({ estimate: { usd: 3.084, model: "m", seconds: 15, resolution: "480p" } }, null, null),
+           editFixCostText({}, { id: "k", label: "K" }, { usd: 0.42, sentSeconds: 3, trimTo: 2 }), editFixCostText({}, { id: "k" }, { usd: 1, sentSeconds: 4, trimTo: 4, resolution: "720p" })],
+    confirm: [editFixConfirmText({ estimate: { usd: 1, model: "m" } }, null, { same: true }, 3, null), editFixConfirmText({}, { id: "k" }, { usd: 1 }, 2, null),
+              editFixConfirmText({}, { label: "K" }, { usd: 1 }, 4, { start: 1, end: 2 })]
+  };
+  out.innerHTML = innerHTMLUsed;
+  console.log(JSON.stringify(out));
+}
+run().catch(function (e) { console.error(String((e && e.stack) || e)); process.exit(1); });
+"""
+
+
+def _rtk1_ui_problems(got: dict, server: dict) -> list[str]:
+    """rtk-s node 결과를 design D26 동작과 비교한다."""
+    problems: list[str] = []
+    kl, lr, kl_label, lr_label = server["kl"], server["lr"], server["klLabel"], server["lrLabel"]
+    edit_url = "/api/vnew/p/p%201/edit"
+
+    def want(value, expected, what: str) -> None:
+        if value != expected:
+            problems.append(f"(rtk-s) {what}\n      결과 {value!r}\n      기대 {expected!r}")
+
+    def option(m: dict, scope: str) -> list:
+        p = m[scope]
+        return [m["id"], m["label"] + (" · 원래 모델" if m["original"] else "") + f" · ${p['usd']:.2f}" + (" · 기본 단가" if p["priceKnown"] is False else "")]
+
+    rv_s = server["rvS"]
+    want(got.get("setup"), {
+        "clip": {"in": 7.5, "out": 15}, "scope": "full", "model": lr, "scopeShown": "", "fullText": "원본 칸 전체 (0.0–15.0초)",
+        "rangeText": "이 구간만 다시 만들기 (클립 7.5–15.0초)", "checked": [True, False], "options": [option(m, "full") for m in rv_s["models"]],
+        "disabled": False, "value": lr, "info": "형식: 참고 영상·이미지(@Video1·@Image N) · 원래와 같은 길이 15.0초 · 480p · 예상 $3.08 · 프롬프트 4,000바이트까지",
+        "hidden": ["", "이 칸에 쓸 수 없는 모델 5개는 목록에서 뺐습니다.", 5], "gets": [edit_url + "/retake/" + rv_s["mid"]]},
+        "고른 클립(원본 일부)에서 연 패널: 범위 라디오(원본 칸 전체 고름)·모델 상자(원래 모델 첫 줄·금액·기본 단가)·정보 줄·뺀 모델 5개, 첫 GET 은 116 주소")
+    want(got.get("klInfo"), [kl, "형식: 인물 요소(@Video1·@Element N) · 15.0초로 만들고 그대로 씀 · 예상 $2.10 · 프롬프트 2,500바이트까지 · 원래 모델과 형식이 달라 새 프롬프트를 "
+                             "이 모델 형식으로 옮깁니다"], "모델을 Kling 으로 바꾸면 정보 줄(형식·길이·상한·형식 옮김 안내)을 서버 견적으로 다시 그림")
+    draft = (server["rvSDone"].get("draft") or {})
+    want(got.get("klDone"), {"body": {"requestKo": "Kling 으로", "extraKo": "", "model": kl},
+                             "status": "새 프롬프트 — v1에서 고침 · 결과 프레임 3장을 봤습니다 · " + kl_label,
+                             "cost": f"예상 비용 $2.10 — {kl_label}({kl}) · 15.0초. 원래 결과는 그대로 남습니다.", "submit": ["다시 만들기 ($2.10)", False],
+                             "meter": f"{len(str(draft.get('prompt') or '').encode()):,} / 2,500바이트", "mismatch": 0, "model": kl},
+         "Kling 초안: 미리보기 바디 model·상태 줄 모델·비용 줄·[다시 만들기 ($2.10)]·바이트 상한 2,500")
+    want(got.get("klBack"), {"cost": f"예상 비용 $3.08 — 같은 모델({lr})·같은 길이 15초 · 480p. 원래 결과는 그대로 남습니다.",
+                             "mismatch": ["모델이나 범위가 새 프롬프트를 만들 때와 다릅니다. [새 프롬프트 다시 만들기]를 눌러 주세요."],
+                             "submit": ["다시 만들기 ($3.08)", True], "meter": "4,000바이트"},
+         "원래 모델로 되돌리면: 116 비용 줄·상한, 초안과 달라 안내 + 제출 막힘")
+    want(got.get("klBlocked"), [0, 0], "초안과 모델이 다르면 제출 함수도 확인창·요청 0")
+    want(got.get("klSubmit"), {"confirm": [f"v2를 {kl_label}(으)로 원본 칸 전체를 다시 만듭니다. 예상 비용 $2.10. 원래 결과는 그대로 남습니다."],
+                               "body": {"prompt": draft.get("prompt"), "requestKo": "Kling 으로", "extraKo": "", "confirmUsd": 2.1, "draftId": draft.get("id"),
+                                        "model": kl}},
+         "Kling 제출: 확인창(모델·범위·금액)·바디(model·confirmUsd = 고른 모델 견적)")
+    want(got.get("rangeRefused"), {"wait": ["구간 정보를 불러오는 중…", True], "scope": "full",
+                                   "note": ["", "고른 클립 구간을 읽지 못했습니다. 원본 칸 전체로 고칠 수 있습니다."], "checked": True,
+                                   "gets": [edit_url + "/retake/" + rv_s["mid"] + "?in=7.5&out=15"]},
+         "구간을 고르면 ?in=&out= 로 다시 받고(기다리는 동안 안내·상자 잠김), 서버가 구간을 주지 않으면 원본 칸 전체로 돌리고 이유")
+    want(got.get("reopen"), [kl, kl, None, "none", False], "Kling 초안이 있는 칸을 재료 줄에서 다시 열면 모델 상자 = 초안 모델(제출 가능), 고른 클립 없음 → 범위 줄 없음")
+    rv_tr = server["rvTR"]
+    want(got.get("range"), {"scope": "range", "model": lr, "rangeText": "이 구간만 다시 만들기 (7.5–15.0초 · 컷 2)",
+                            "options": [m["id"] for m in rv_tr["models"] if (m.get("range") or {}).get("ok")],
+                            "info": "형식: 참고 영상·이미지(@Video1·@Image N) · 이 모델 길이 4·8·12·30초 중 8.0초로 만들고 7.5초로 잘라 씀 · 480p · 예상 $1.64 · 프롬프트 "
+                                    "4,000바이트까지", "checked": [False, True]},
+         "이 구간만: 라디오 글(녹화 시각·컷 번호)·구간에서 쓸 수 있는 모델·길이 선택지 → 올림·자를 길이")
+    dr_r = (server["rvDR"].get("draft") or {})
+    want(got.get("rangeDraft"), {"body": {"requestKo": "뒤로 앉게", "extraKo": "", "scope": "range", "in": 7.5, "out": 15},
+                                 "status": "새 프롬프트 — v1에서 고침 · 결과 프레임 3장을 봤습니다 · " + lr_label + " · 구간 7.5–15.0초",
+                                 "cost": f"예상 비용 $1.64 — {lr_label}({lr}) · 8.0초(7.5초로 잘라 씀) · 480p. 원래 결과는 그대로 남습니다.",
+                                 "submit": ["다시 만들기 ($1.64)", False], "mismatch": 0},
+         "구간 초안: 미리보기 바디 scope·in·out(원래 모델이라 model 없음)·상태 줄 구간·비용 줄 올림·자르기")
+    want(got.get("rangeSubmit"), {"confirm": [f"v2를 {lr_label}(으)로 구간 7.5–15.0초만 다시 만듭니다. 예상 비용 $1.64. 원래 결과는 그대로 남습니다."],
+                                  "body": {"prompt": dr_r.get("prompt"), "requestKo": "뒤로 앉게", "extraKo": "", "confirmUsd": 1.64, "draftId": dr_r.get("id"),
+                                           "scope": "range", "in": 7.5, "out": 15}, "pending": 1},
+         "구간 제출: 확인창(구간)·바디(confirmUsd 1.64·scope·in·out)·5초 조회")
+    want(got.get("rangeDone"), {"rows": [["v1 원본 · 완성", None, [[False, "고른 클립을 v1 원본으로 바꿉니다(구간·속도는 길이 안에서 유지)"]]],
+                                         ["v2 · 완성", "구간 7.5–15.0초", [[False, "고른 클립을 v2로 바꿉니다(녹화 7.5–15.0초 자리, 속도는 그대로)"]]]],
+                                "bin": ["＋ " + server["label"] + " · 15.0초", "＋ 테이크 1 · 컷 2 v2"]},
+         "완성: 버전 줄 구간 덧붙임·구간 [바꾸기] 안내, 재료 줄에 「테이크 1 · 컷 2 v2」(v1 바로 뒤)")
+    want(got.get("swapRange"), {"clips": [[False, 0, 7.5, "컷 1"], [True, 0, 7.5, "컷 2"]],
+                                "note": "타임라인 클립 1개를 v2로 바꿨습니다. 다른 버전의 [바꾸기]로 되돌릴 수 있습니다.", "undo": 1},
+         "구간 v2 [바꾸기]: 고른 클립(컷 2, 녹화 7.5–15초)만 v2 0–7.5초로, 컷 1·다른 클립 그대로, 실행 취소 한 단계")
+    want(got.get("revertRange"), {"clips": [[False, 0, 7.5, "컷 1"], [False, 7.5, 15, "컷 2"]],
+                                  "note": "타임라인 클립 1개를 v1 원본으로 바꿨습니다. 다른 버전의 [바꾸기]로 되돌릴 수 있습니다."},
+         "v1 [바꾸기] = 되돌리기: 원래 in·out(7.5–15초)으로")
+    want(got.get("addRange"), [1, [[0, 7.5]], "＋ 테이크 1 · 컷 2 v2 · 7.5초"], "구간 v2 [재료에 추가]: 0–7.5초(자를 길이)만, 재료 줄 길이도 7.5초")
+    want(got.get("outside"), {"clips": [False, False], "note": "고른 클립이 v2 구간(7.5–15.0초) 밖이라 바꾸지 않았습니다.", "clip": {"in": 0, "out": 7.5}},
+         "구간 밖 클립(컷 1)에서 연 패널의 구간 v2 [바꾸기]는 그대로 두고 안내")
+    pure = got.get("pure") or {}
+    want(pure, {
+        "into": [1, 1, 1, [["a", "k1", 0, 7.5, 1, "컷 1"], ["b", "kr", 0, 7.5, 2, "테이크 1 v2"], ["c", "kz", 0, 3, 1, ""], ["t", "k1", 14.98, 15, 1, ""]]],
+        "back": [1, 0, 0, [["a", "k1", 0, 7.5, 1, "컷 1"], ["b", "k1", 6, 12, 2, "테이크 1"], ["c", "kz", 0, 3, 1, ""], ["t", "k1", 14.98, 15, 1, ""]]],
+        "ids": [0, 0, 1], "full": [1, 0, 0, [["x", "kf", 8.5, 11.5, 1, "N"]]], "none": [0, 0, 0],
+        "map": [{"o": 2, "s": 1, "e": 3}, {"o": 2, "s": 1, "e": 3}, {"o": 0, "s": 1, "e": 3}, {"o": 0, "s": 1, "e": 2}, {"o": 0, "s": 1.25, "e": 12},
+                {"o": 0, "s": 1, "e": 7.5}, {"o": 0, "s": 1, "e": 0}],
+        "part": [{"in": 0, "out": 7.5}, None, None, None, {"in": 0, "out": 1.5}, None, None, None, {"in": 1, "out": 4}],
+        "dur": ["4·8·12·30", "4~8", "5·10", ""], "secs": ["7.5", "15.0", "0.0", "2.0"],
+        "option": ["A · 원래 모델 · $1.50", "b · $2.10 · 기본 단가", "영상 모델 · $0.00"],
+        "matches": [True, False, True, False, False],
+        "body": [{"a": 1}, {"a": 1, "model": "k"}, {"scope": "range", "in": 1, "out": 4}, {"scope": "range"}],
+        "meta": ["", "K", "구간 1.0–2.5초", "k"], "suffix": ["", " · k", " · K · 구간 1.0–2.0초", ""],
+        "plan": ["형식: 참고 영상·이미지(@Video1·@Image N) · 원래와 같은 길이 15.0초 · 480p · 예상 $0.00 · 프롬프트 4,000바이트까지",
+                 "형식: 인물 요소(@Video1·@Element N) · 3.0초로 만들고 2.0초로 잘라 씀 · 예상 $0.00 · 프롬프트 2,500바이트까지 · 단가 정보가 없어 기본 단가로 계산 · "
+                 "원래 모델과 형식이 달라 새 프롬프트를 이 모델 형식으로 옮깁니다",
+                 "형식: odd · 이 모델 길이 5·8초 중 8.0초로 만들고 그대로 씀 · 예상 $0.00 · 프롬프트 100바이트까지"],
+        "cost": ["예상 비용 $3.08 — 같은 모델(m)·같은 길이 15초 · 480p. 원래 결과는 그대로 남습니다.",
+                 "예상 비용 $0.42 — K(k) · 3.0초(2.0초로 잘라 씀). 원래 결과는 그대로 남습니다.", "예상 비용 $1.00 — k(k) · 4.0초 · 720p. 원래 결과는 그대로 남습니다."],
+        "confirm": ["v3를 같은 모델(m)·같은 길이로 다시 만듭니다. 예상 비용 $1.00. 원래 결과는 그대로 남습니다.",
+                    "v2를 k(으)로 원본 칸 전체를 다시 만듭니다. 예상 비용 $1.00. 원래 결과는 그대로 남습니다.",
+                    "v4를 K(으)로 구간 1.0–2.0초만 다시 만듭니다. 예상 비용 $1.00. 원래 결과는 그대로 남습니다."],
+    }, "순수 함수: editFixRangeSwap(구간 안만·밖 셈·되돌리기 비례·ids·자른 버전·대상 없음)·editFixTimeMap 7꼴·editFixClipPart 9꼴·길이 선택지·초·모델 줄·"
+       "초안 대조·바디·버전 덧붙임·초안 꼬리·정보 줄·비용 줄·확인창")
+    want(got.get("innerHTML"), False, "가짜 DOM 에서 innerHTML·outerHTML·insertAdjacentHTML 0")
+    return problems
+
 def main() -> int:
     print("== vpoc1 check ==")
     check_compileall()
@@ -42149,6 +43399,7 @@ def main() -> int:
     check_vnew_edit_ui()
     check_vnew_edit_retime()
     check_vnew_edit_retake()
+    check_vnew_edit_retake_models()
     check_pod_zones()
     print()
     if warnings:
