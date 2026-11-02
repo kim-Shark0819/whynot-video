@@ -80,3 +80,10 @@
 
 - [x] 20. 최대 대기 Kling 75분·그 밖 30분(문구 분 수). 시간 초과 → `timedOut`·arn·접두사 보존(옛 상태는 문구로 판별). 패널 보기에서 대상 버전에 fal 조회 1번(스레드, 60초 간격, 제출 뒤 24시간 안) → Completed면 기존 완료 경로로 completed, 그 밖은 그대로. 새 제출 0.
   - 완료 조건: `node --check`, rtk-x 4꼴, 변형 1회 잡힘, 기존 기대값 그대로, 전체 검사 1회 "전부 통과".
+
+## 보완 4b — fal "Generation timeout"(504)은 끝난 실패(지시서 116 보완 4b, 2026-11-03)
+
+> dev 실측: 되살리기 조회에서 status COMPLETED인데 결과 GET이 `HTTP504 Generation timeout`이었다(결과 영상 없음). `retake.py`만 바꾼다(`_terminal_fal_error`, `run_recover`, `_poll_until_done`).
+
+- [x] 21. `HTTP504` + "Generation timeout"이면 끝난 실패다. 되살리기는 failed·`timedOut` 지움·새 문구·`recover_gone`, 폴링은 재시도 없이 failed·`job_failed kind=gen_timeout`. 다른 VpocError는 그대로.
+  - 완료 조건: rtk-x 이어서 4꼴(되살리기 504·502, 폴링 504·502), 기존 기대값 그대로, 전체 검사 "전부 통과".

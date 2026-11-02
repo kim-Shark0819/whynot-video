@@ -96,6 +96,7 @@ SUBMIT_FAILED_TEXT = "다시 만들기를 제출하지 못했습니다. 다시 �
 POLL_FAILED_TEXT = "결과를 확인하지 못했습니다. 다시 시도해 주세요."
 POLL_TIMEOUT_TEXT = f"결과를 {POLL_MAX_S // 60}분 넘게 받지 못했습니다. 다시 시도해 주세요."
 _TIMEOUT_TEXT_RE = re.compile(r"^결과를 \d+분 넘게 받지 못했습니다")  # 보완 4: 옛 상태(timedOut 표시 없음)의 시간 초과 문구
+GEN_TIMEOUT_TEXT = "모델 쪽에서 영상 생성 시간이 초과되어 결과가 없습니다. 다시 시도해 주세요."  # 보완 4b: fal HTTP504 Generation timeout
 URL_TEXT = "[주소 생략]"
 
 _CONTROL_RE = re.compile(r"[\x00-\x08\x0b-\x1f\x7f]")
@@ -208,6 +209,11 @@ def _grab_frame(path: str, at: float) -> bytes | None:
 def _poll(invocation_arn: str, output_prefix: str) -> dict:
     """fal 조회(완료면 결과를 우리 버킷 {prefix}/{요청 id}/output.mp4 로 옮긴다 — vpoc.fal.poll)."""
     return vpoc_fal.poll(invocation_arn, output_prefix)
+
+
+def _terminal_fal_error(exc: BaseException) -> bool:
+    """보완 4b: fal 이 생성 시간 초과로 끝낸 작업(status COMPLETED·결과 GET HTTP504 "Generation timeout") — 결과 영상이 없어 다시 묻지 않는다."""
+    return isinstance(exc, VpocError) and exc.kind == "HTTP504" and "generation timeout" in str(exc.message or "").lower()
 
 
 def _spawn(target, args: tuple, name: str) -> None:
@@ -589,14 +595,24 @@ def recover_timed_out(owner: str, pid: str, gen_id: str, key: str, state: dict) 
 
 def run_recover(owner: str, pid: str, gen_id: str, key: str, n: int, claim: str) -> None:
     """되살리기 스레드: fal 조회 1번(새 제출 0). Completed → 기존 완료 경로(_find_output_key·_finish completed·log_result)로 completed.
-    InProgress·Failed·예외 → 그대로 둔다(다음 보기에서 60초 뒤 다시 묻는다). 다시 만들기 제출이 claim 을 가져가면 결과를 쓰지 않는다."""
+    InProgress·Failed·예외 → 그대로 둔다(다음 보기에서 60초 뒤 다시 묻는다). 다시 만들기 제출이 claim 을 가져가면 결과를 쓰지 않는다.
+    보완 4b: fal HTTP504 "Generation timeout"(_terminal_fal_error)은 결과가 없으므로 failed·timedOut 해제(더 묻지 않음)."""
     try:
         version = _find_version(read_state(owner, pid, gen_id), key, n) or {}
         if version.get("claim") != claim or not _timed_out(version):
             return
         arn = str(version.get("invocationArn") or "")
         prefix = str(version.get("outputPrefix") or "")
-        result = _poll(arn, prefix) or {}
+        try:
+            result = _poll(arn, prefix) or {}
+        except Exception as exc:  # noqa: BLE001 — 끝난 실패만 여기서 닫고 나머지는 아래 except 로
+            if not _terminal_fal_error(exc):
+                raise
+            _finish(owner, pid, gen_id, key, n, claim, statuses=("failed",), status="failed", error=GEN_TIMEOUT_TEXT,
+                    failureKind="", timedOut=False)
+            log_result(owner, pid, gen_id, key, arn, "failed", error=GEN_TIMEOUT_TEXT, recovered=True)
+            log.warning("vnew.retake.recover_gone pid=%s gen=%s cell=%s n=%d kind=gen_timeout", pid, gen_id, key, n)
+            return
         status = str(result.get("status") or "")
         if status != "Completed":
             log.info("vnew.retake.recover_pending pid=%s gen=%s cell=%s n=%d status=%s", pid, gen_id, key, n, status or "-")
@@ -1449,6 +1465,11 @@ def _poll_until_done(owner: str, pid: str, gen_id: str, key: str, n: int, claim:
             result = _poll(arn, prefix) or {}
             errors = 0
         except Exception as exc:  # noqa: BLE001 — 일시 오류는 다시 조회한다(5번 연속이면 실패).
+            if _terminal_fal_error(exc):  # 보완 4b: 생성 시간 초과로 끝난 작업 → 재시도 없이 failed(timedOut 없음 — 되살릴 결과가 없다)
+                _finish(owner, pid, gen_id, key, n, claim, status="failed", error=GEN_TIMEOUT_TEXT)
+                log_result(owner, pid, gen_id, key, arn, "failed", error=GEN_TIMEOUT_TEXT)
+                log.warning("vnew.retake.job_failed pid=%s gen=%s cell=%s n=%d kind=gen_timeout", pid, gen_id, key, n)
+                return
             errors += 1
             log.warning("vnew.retake.poll_error pid=%s gen=%s cell=%s n=%d errors=%d err=%s", pid, gen_id, key, n, errors,
                         type(exc).__name__)

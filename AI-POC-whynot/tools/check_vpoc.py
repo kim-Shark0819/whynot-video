@@ -42728,6 +42728,47 @@ def check_vnew_edit_retake_models() -> None:
                              len(env.requests) - req_x],
                    [(0, True, False), (1, "completed", out_x), [True, True, False], False, True, 0],
                    "보완 4: 24시간 지나면 조회 0·안내 없음, 옛 상태(시간 초과 문구) → 되살림, 다른 실패·arn 없음 → 대상 아님, 화면 안내")
+            # 보완 4b: fal HTTP504 "Generation timeout" = 끝난 실패 — 되살리기는 failed·timedOut 해제·기록 failed·다음 보기 조회 0,
+            # 폴링은 재시도 없이 failed(timedOut 없음), 다른 VpocError(HTTP502)는 지금 그대로
+            gto = VpocError("fal.result", "HTTP504", '{"detail":"Generation Timeout"}', 502)
+            e502 = VpocError("fal.result", "HTTP502", '{"detail":"Generation timeout"}', 502)
+            rec_x = {"source": "retake", "variant": "webtoon", "cellId": "take1", "invocationArn": arn_x, "prompt": "p", "version": 2}
+            rt.log_submit(owner, pid_x, gen_x, dict(rec_x))
+            rt.log_result(owner, pid_x, gen_x, key_x, arn_x, "failed", error=kl_text)
+            put_x(status="failed", claim="", error=kl_text, timedOut=True, submittedAt=_rtk_iso_ago(3 * 3600))
+            logs.clear()
+            n_g, _ = view_x([gto])
+            v_g = v_x()
+            log_g = dict((env.log(pid_x).get(key_x) or [{}])[-1])
+            n_g2, row_g2 = view_x([{"status": "Completed"}])
+            gone_g = len(logs.messages("vnew.retake.recover_gone", level=logging.WARNING))
+            put_x(status="failed", claim="", error=kl_text, timedOut=True, submittedAt=_rtk_iso_ago(3 * 3600))
+            n_g5, _ = view_x([e502])
+            v_g5 = v_x()
+            rt.log_submit(owner, pid_x, gen_x, dict(rec_x))
+            put_x(submittedAt=_rtk_iso_ago(60))
+            logs.clear()
+            env.poll_script = [gto, {"status": "Completed"}]
+            rt.run_retake(owner, pid_x, gen_x, key_x, 2, "cx")
+            left_p, v_gp = len(env.poll_script), v_x()
+            log_gp = dict((env.log(pid_x).get(key_x) or [{}])[-1])
+            job_gp = [m.endswith("kind=gen_timeout") for m in logs.messages("vnew.retake.job_failed", level=logging.WARNING)]
+            put_x(submittedAt=_rtk_iso_ago(60))
+            env.poll_script = [e502, {"status": "Completed"}]
+            rt.run_retake(owner, pid_x, gen_x, key_x, 2, "cx")
+            left_p5, v_gp5 = len(env.poll_script), v_x()
+            env.poll_script = []
+            expect("rtk-x", [(n_g, v_g["status"], v_g["error"], v_g.get("timedOut"), v_g["claim"]), (log_g.get("status"), log_g.get("error")),
+                             (n_g2, row_g2.get("recovering"), row_g2.get("timedOut")), gone_g,
+                             (n_g5, v_g5["status"], v_g5["error"], v_g5.get("timedOut")),
+                             (left_p, v_gp["status"], v_gp["error"], v_gp.get("timedOut")), (log_gp.get("status"), log_gp.get("error")), job_gp,
+                             (left_p5, v_gp5["status"]), len(env.requests) - req_x],
+                   [(1, "failed", rt.GEN_TIMEOUT_TEXT, False, ""), ("failed", rt.GEN_TIMEOUT_TEXT), (0, False, False), 1,
+                    (1, "failed", kl_text, True),
+                    (1, "failed", rt.GEN_TIMEOUT_TEXT, None), ("failed", rt.GEN_TIMEOUT_TEXT), [True],
+                    (0, "completed"), 0],
+                   "보완 4b: HTTP504 Generation timeout → 되살리기 failed·timedOut 해제·기록 failed·recover_gone·다음 보기 조회 0, "
+                   "폴링 조회 1번에 failed(timedOut 없음)·job_failed kind=gen_timeout, HTTP502 는 그대로, 새 제출 0")
             report.append(f"rtk-x: 되살리기 조회 {n_c + n_p + n_f + n_e + n_o}번 · 새 제출 {len(env.requests) - req_x}")
             # 견적·confirmUsd·바디 거절
             env.llm_reply = lambda system, blocks: _rtk_reply(tmpl_kl, "Re-render this single shot", "Re-render this whole take")
