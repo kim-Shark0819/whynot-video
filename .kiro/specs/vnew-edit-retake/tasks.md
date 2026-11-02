@@ -73,3 +73,10 @@
 
 - [x] 19. 판정: 상한 안·문제 수 늘지 않음, 또는 바이트 초과를 뺀 문제 수 늘지 않고 바이트 줄어듦. 줄이기 최대 2번(2번째 목표 0.75, 원장 `-shrink2`), 실패·예외면 그때까지의 가장 좋은 결과. 문구에 지금·상한·최소 줄일 바이트, 영어 수식어·반복부터, 한국어 한 글자 3바이트. 로그 `vnew.retake.shrink_try`.
   - 완료 조건: rtk-w 보완 3b 4꼴, 판정 변경으로 바뀐 기대값만 고침, 전체 검사 1회 "전부 통과".
+
+## 보완 4 — 시간 초과 결과 되살리기(지시서 116 보완 4, 2026-11-03)
+
+> dev 실측: Kling O3 v3가 30분 상한(`vnew.retake.timeout`)에서 failed가 됐지만 fal 상태는 COMPLETED였다. `retake.py`(`_poll_max_s`·`_poll_timeout_text`·`_timed_out`·`_recoverable`·`_recover_due`·`recover_timed_out`·`run_recover`, `_beat`·`_finish` statuses, `log_result` recovered, `_poll_until_done`·`retake_view`·`_version_out`·`submit`)와 `vnew.js` 안내 한 줄만 바꾼다.
+
+- [x] 20. 최대 대기 Kling 75분·그 밖 30분(문구 분 수). 시간 초과 → `timedOut`·arn·접두사 보존(옛 상태는 문구로 판별). 패널 보기에서 대상 버전에 fal 조회 1번(스레드, 60초 간격, 제출 뒤 24시간 안) → Completed면 기존 완료 경로로 completed, 그 밖은 그대로. 새 제출 0.
+  - 완료 조건: `node --check`, rtk-x 4꼴, 변형 1회 잡힘, 기존 기대값 그대로, 전체 검사 1회 "전부 통과".

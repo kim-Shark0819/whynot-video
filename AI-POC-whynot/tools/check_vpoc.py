@@ -42296,6 +42296,8 @@ def check_vnew_edit_retake_models() -> None:
     (rtk-t) CSS 보완 1 구역·USER_FACING 새 kind 2개·던지는 곳 문구(AST)·끔이면 GET /edit 에 새 표식 없음
     (rtk-u) 로컬 ffmpeg: _pad_clip 실제 mp4 길이·임시 폴더 0
     (rtk-w) 보완 3: 바이트 초과 초안 → 같은 모델에 줄이기 1번(두 경로)·더 나음 판정·원장 -shrink 줄·shrunk·두 번째 예외는 처음 것·화면 안내
+    (rtk-x) 보완 4: 최대 대기 Kling 75분·그 밖 30분, 시간 초과 버전(timedOut·옛 문구) → 패널 보기에서 조회 1번(60초 간격·24시간 안)·Completed 면
+            completed, InProgress·Failed·예외 그대로, 새 제출 0, 화면 안내
     """
     sys.path.insert(0, str(ROOT / "app"))
     import ast as _ast  # noqa: PLC0415
@@ -42623,6 +42625,110 @@ def check_vnew_edit_retake_models() -> None:
                              'dr.shrunk ? " · 길이 상한에 맞게 한 번 줄였습니다" : ""' in (PUBLIC / "vnew.js").read_text(encoding="utf-8")],
                    [True, True, True], "실사 줄이기 문구 webtoon 금지·참고 표시 목록 없으면 괄호 없음, 화면 초안 줄에 줄였다는 안내")
             report.append(f"rtk-w: 줄이기 {len(over_kl.encode())}B → {len(ok_kl_w.encode())}B · 판정 {len(better)}꼴")
+
+            # ================= (rtk-x) 보완 4: 시간 초과 버전 되살리기(조회만, 제출 0) =================
+            pid_x = "prj_rtk1_x"
+            env.take_done(client, pid_x)
+            mid_x = mid_of(pid_x, label_t)
+            gen_x = str(env.gen(pid_x)["genId"])
+            key_x = "webtoon:take1"
+            arn_x = "fal/requests/" + kl + "/rqX1"
+            pre_x = "users/tester/video/prj_rtk1_x/x/take1-webtoon-rt2-1"
+            out_x = pre_x + "/rqX1/output.mp4"
+            kl_text = "결과를 75분 넘게 받지 못했습니다. 다시 시도해 주세요."
+
+            def put_x(**fields) -> None:
+                version = {"n": 2, "status": "submitted", "claim": "cx", "heartbeatAt": _rtk_iso_ago(5), "invocationArn": arn_x,
+                           "outputPrefix": pre_x, "submittedAt": _rtk_iso_ago(60), "prompt": "p", "attempt": 1, "model": kl, **fields}
+                env.set_state(pid_x, lambda data: data["cells"].__setitem__(key_x, {"versions": [version], "draft": None}))
+
+            def v_x() -> dict:
+                return dict(env.state(pid_x)["cells"][key_x]["versions"][0])
+
+            def view_x(script) -> tuple[int, dict]:
+                """패널 보기 1번(스레드는 바로 실행). (fal 조회 수, 보기의 v2 줄)."""
+                env.poll_script = list(script)
+                before = len(env.poll_script)
+                body = rv_get(pid_x, mid_x).get_json() or {}
+                used = before - len(env.poll_script)
+                env.poll_script = []
+                return used, next((r for r in body.get("versions") or [] if r.get("n") == 2), {})
+
+            def age_recover(seconds: float) -> None:
+                env.set_state(pid_x, lambda data: data["cells"][key_x]["versions"][0].__setitem__("recoverAt", _rtk_iso_ago(seconds)))
+
+            req_x = len(env.requests)
+            # 최대 대기: Kling 31분 → 계속 기다려 완료 · Seedance 31분 → 30분 문구 · Kling 76분 → 75분 문구·timedOut·arn·접두사 보존
+            put_x(submittedAt=_rtk_iso_ago(1900))
+            env.poll_script = [{"status": "Completed"}]
+            rt.run_retake(owner, pid_x, gen_x, key_x, 2, "cx")
+            v_k31 = v_x()
+            put_x(submittedAt=_rtk_iso_ago(1900), model=lr, invocationArn="fal/requests/" + lr + "/rqX1")
+            rt.run_retake(owner, pid_x, gen_x, key_x, 2, "cx")
+            v_s31 = v_x()
+            rt.log_submit(owner, pid_x, gen_x, {"source": "retake", "variant": "webtoon", "cellId": "take1", "invocationArn": arn_x,
+                                                "prompt": "p", "version": 2})
+            put_x(submittedAt=_rtk_iso_ago(4600))
+            env.poll_script = []
+            rt.run_retake(owner, pid_x, gen_x, key_x, 2, "cx")
+            v_k76 = v_x()
+            log_k76 = dict((env.log(pid_x).get(key_x) or [{}])[-1])
+            expect("rtk-x", [rt._poll_max_s(kl), rt._poll_max_s(lr), rt._poll_max_s(""),  # noqa: SLF001
+                             (v_k31["status"], v_k31["outputKey"] == out_x),
+                             (v_s31["status"], v_s31["error"], v_s31.get("timedOut")),
+                             (v_k76["status"], v_k76["error"], v_k76.get("timedOut"), v_k76["invocationArn"], v_k76["outputPrefix"]),
+                             (log_k76.get("status"), log_k76.get("error"))],
+                   [4500, 1800, 1800, ("completed", True), ("failed", rt.POLL_TIMEOUT_TEXT, True),
+                    ("failed", kl_text, True, arn_x, pre_x), ("failed", kl_text)],
+                   "보완 4: Kling 75분·Seedance·그 밖 30분, Kling 31분은 계속 기다려 완료, 시간 초과 → 분 수 문구·timedOut·arn·접두사 보존")
+            # timedOut 버전 + Completed → 보기 1번에 조회 1번 → completed(outputKey·기록 completed·로그 recovered), 다음 보기는 조회 0
+            logs.clear()
+            n_c, row_c = view_x([{"status": "Completed"}, {"status": "Completed"}])
+            v_c = v_x()
+            log_c = dict((env.log(pid_x).get(key_x) or [{}])[-1])
+            n_c2, row_c2 = view_x([{"status": "Completed"}])
+            expect("rtk-x", [n_c, (row_c.get("timedOut"), row_c.get("recovering")),
+                             (v_c["status"], v_c["outputKey"], v_c.get("timedOut"), v_c["error"], v_c["claim"]),
+                             (log_c.get("status"), log_c.get("outputKey"), log_c.get("error")),
+                             len(logs.messages("vnew.retake.recovered", level=logging.INFO)),
+                             (n_c2, row_c2.get("status"), row_c2.get("sourceKey"), bool(row_c2.get("mid")), row_c2.get("recovering")),
+                             len(env.requests) - req_x],
+                   [1, (True, True), ("completed", out_x, False, "", ""), ("completed", out_x, ""), 1, (0, "completed", out_x, True, False), 0],
+                   "보완 4: timedOut + Completed → 조회 1번·completed·outputKey·기록 completed·recovered 로그·다음 보기 조회 0·새 제출 0")
+            # InProgress·Failed·예외 → 그대로, 60초 안 다시 보면 조회 0
+            put_x(status="failed", claim="", error=kl_text, timedOut=True, submittedAt=_rtk_iso_ago(5000))
+            n_p, row_p = view_x([{"status": "InProgress"}])
+            v_p = v_x()
+            n_p2, _ = view_x([{"status": "Completed"}])
+            age_recover(61)
+            n_f, _ = view_x([{"status": "Failed", "failureMessage": "boom"}])
+            v_f = v_x()
+            age_recover(61)
+            logs.clear()
+            n_e, _ = view_x([RuntimeError("down https://fal.example/x")])
+            v_e = v_x()
+            warn_e = logs.messages("vnew.retake.recover_failed", level=logging.WARNING)
+            expect("rtk-x", [(n_p, row_p.get("recovering"), v_p["status"], v_p["error"], v_p.get("timedOut"), bool(v_p.get("recoverAt"))),
+                             n_p2, (n_f, v_f["status"], v_f["error"], v_f.get("timedOut")), (n_e, v_e["status"], v_e.get("timedOut")),
+                             [m.endswith("err=RuntimeError") and "https" not in m for m in warn_e], len(env.requests) - req_x],
+                   [(1, True, "failed", kl_text, True, True), 0, (1, "failed", kl_text, True), (1, "failed", True), [True], 0],
+                   "보완 4: InProgress·Failed·예외 → 그대로(예외 이름만 로그), 60초 안 다시 보면 조회 0, 새 제출 0")
+            # 24시간 지남 → 조회 0·안내 없음, 옛 상태(timedOut 없음·시간 초과 문구) → 대상·completed, 다른 실패·arn 없음 → 대상 아님
+            put_x(status="failed", claim="", error=kl_text, timedOut=True, submittedAt=_rtk_iso_ago(25 * 3600))
+            n_24, row_24 = view_x([{"status": "Completed"}])
+            put_x(status="failed", claim="", error=rt.POLL_TIMEOUT_TEXT, submittedAt=_rtk_iso_ago(3 * 3600))
+            n_o, _ = view_x([{"status": "Completed"}])
+            v_o = v_x()
+            js_x = (PUBLIC / "vnew.js").read_text(encoding="utf-8")
+            expect("rtk-x", [(n_24, row_24.get("timedOut"), row_24.get("recovering")), (n_o, v_o["status"], v_o["outputKey"]),
+                             [rt._timed_out({"status": "failed", "invocationArn": arn_x, "error": e}) for e in  # noqa: SLF001
+                              (rt.POLL_TIMEOUT_TEXT, kl_text, rt.POLL_FAILED_TEXT)],
+                             rt._timed_out({"status": "failed", "invocationArn": "", "timedOut": True}),  # noqa: SLF001
+                             'ver.status === "failed" && ver.recovering' in js_x and "결과를 다시 확인하는 중입니다." in js_x,
+                             len(env.requests) - req_x],
+                   [(0, True, False), (1, "completed", out_x), [True, True, False], False, True, 0],
+                   "보완 4: 24시간 지나면 조회 0·안내 없음, 옛 상태(시간 초과 문구) → 되살림, 다른 실패·arn 없음 → 대상 아님, 화면 안내")
+            report.append(f"rtk-x: 되살리기 조회 {n_c + n_p + n_f + n_e + n_o}번 · 새 제출 {len(env.requests) - req_x}")
             # 견적·confirmUsd·바디 거절
             env.llm_reply = lambda system, blocks: _rtk_reply(tmpl_kl, "Re-render this single shot", "Re-render this whole take")
             d_kl = draft_of(preview(pid_t, mid_t, {"requestKo": "Kling 으로", "model": kl}))
@@ -43236,7 +43342,7 @@ def check_vnew_edit_retake_models() -> None:
     leftover = os.listdir(private_tmp) if os.path.isdir(private_tmp) else []
     shutil.rmtree(private_tmp, ignore_errors=True)
     expect("rtk-t", leftover, [], "이 검사가 쓴 임시 폴더에 남은 것 없음")
-    expected_groups = {f"rtk-{c}" for c in "nopqrtw"} | ({"rtk-s"} if node else set()) | ({"rtk-u"} if _rtk_ffmpeg_found() else set())
+    expected_groups = {f"rtk-{c}" for c in "nopqrtwx"} | ({"rtk-s"} if node else set()) | ({"rtk-u"} if _rtk_ffmpeg_found() else set())
     missing_groups = sorted(expected_groups - seen)
     if missing_groups:
         bad.append(f"돌지 않은 묶음: {missing_groups}")
@@ -43244,7 +43350,8 @@ def check_vnew_edit_retake_models() -> None:
         fail("vnew ⑦ AI로 고치기 보완 1(rtk-n~u) 검사 실패\n" + "\n".join(f"  {item}" for item in bad))
     else:
         ok("vnew ⑦ AI로 고치기 보완 1(지시서 116 보완 1) 검사 (rtk-n)모델 목록 (rtk-o)견적·confirmUsd (rtk-p)형식 (rtk-q)고른 모델 제출 "
-           "(rtk-r)구간 (rtk-s)화면 (rtk-t)문구·끔 (rtk-u)ffmpeg 채움 (rtk-w)초과 초안 줄이기(보완 3)" + "".join(f"\n       {r}" for r in report))
+           "(rtk-r)구간 (rtk-s)화면 (rtk-t)문구·끔 (rtk-u)ffmpeg 채움 (rtk-w)초과 초안 줄이기(보완 3) (rtk-x)시간 초과 되살리기(보완 4)"
+           + "".join(f"\n       {r}" for r in report))
 
 
 

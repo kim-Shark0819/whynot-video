@@ -10508,6 +10508,10 @@
         row.appendChild(swap);
         row.appendChild(add);
         if (!known) editFixRefreshMaterials(ctx, fix);
+      } else if (ver.status === "failed" && ver.recovering) {
+        // 지시서 116 보완 4: 시간 초과 버전 — 서버가 패널을 열 때마다 결과를 다시 묻는다(새 제출 없음)
+        row.appendChild(el("span", "vnew-edit-fix-error", "결과를 다시 확인하는 중입니다. 잠시 뒤 [다시 불러오기]를 눌러 주세요."));
+        d.reload.style.display = "";
       } else if (ver.status === "failed" && ver.error) {
         row.appendChild(el("span", "vnew-edit-fix-error", ver.error));
       }

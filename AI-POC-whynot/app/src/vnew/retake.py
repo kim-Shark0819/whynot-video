@@ -75,7 +75,10 @@ DRAFT_STALL_S = 300  # 초안 running 하트비트가 이보다 오래되고 이
 PREPARE_STALL_S = 900  # queued·preparing(제출 전) — 녹화 받기·본문 보내기가 길 수 있다. 끊기면 failed(두 번 제출 방지)
 POLL_STALL_S = 180  # submitted — 조회는 5초마다 하트비트. 끊기면 새 claim 으로 조회를 이어간다(비용 0)
 POLL_MAX_S = 1800  # 제출 뒤 이 시간이 지나도 끝나지 않으면 failed
+POLL_MAX_KLING_S = 4500  # 보완 4: fal Kling 계열(endpoint 에 kling)은 75분(dev 실측 — 30분 넘어 COMPLETED)
 POLL_ERRORS_MAX = 5  # 조회 오류가 연속 이만큼이면 failed
+RECOVER_GAP_S = 60  # 보완 4: 시간 초과 버전 되살리기 조회 — 버전마다 최소 이 간격
+RECOVER_WINDOW_S = 24 * 3600  # 보완 4: 제출 뒤 이 시간이 지나면 되살리기 조회를 하지 않는다
 _LIVE = ("queued", "preparing", "submitted")
 
 NOT_TARGET = {
@@ -92,6 +95,7 @@ SUBMIT_INTERRUPTED_TEXT = "다시 만들기를 제출하는 중 멈췄습니다.
 SUBMIT_FAILED_TEXT = "다시 만들기를 제출하지 못했습니다. 다시 시도해 주세요."
 POLL_FAILED_TEXT = "결과를 확인하지 못했습니다. 다시 시도해 주세요."
 POLL_TIMEOUT_TEXT = f"결과를 {POLL_MAX_S // 60}분 넘게 받지 못했습니다. 다시 시도해 주세요."
+_TIMEOUT_TEXT_RE = re.compile(r"^결과를 \d+분 넘게 받지 못했습니다")  # 보완 4: 옛 상태(timedOut 표시 없음)의 시간 초과 문구
 URL_TEXT = "[주소 생략]"
 
 _CONTROL_RE = re.compile(r"[\x00-\x08\x0b-\x1f\x7f]")
@@ -363,18 +367,21 @@ def log_submit(owner: str, pid: str, gen_id: str, record: dict) -> str:
 
 
 def log_result(owner: str, pid: str, gen_id: str, key: str, arn: str, status: str, *, output_key: str = "",
-               error: str = "") -> bool:
-    """같은 invocationArn 의 마지막 submitted 기록을 completed(+outputKey)·failed(+오류 요지)로. 찾으면 True."""
+               error: str = "", recovered: bool = False) -> bool:
+    """같은 invocationArn 의 마지막 submitted 기록을 completed(+outputKey)·failed(+오류 요지)로. 찾으면 True.
+
+    보완 4: recovered 면(시간 초과 뒤 되살리기) 그 시간 초과로 failed 가 된 기록도 고친다."""
     if status not in ("completed", "failed") or not arn:
         return False
     box: dict = {}
+    allowed = ("submitted", "failed") if recovered else ("submitted",)
 
     def mutate(data):
         cells = (data or {}).get("cells") if isinstance((data or {}).get("cells"), dict) else None
         if not cells:
             return None
         for item in reversed([r for r in cells.get(key) or [] if isinstance(r, dict)]):
-            if item.get("invocationArn") == arn and item.get("status") == "submitted":
+            if item.get("invocationArn") == arn and item.get("status") in allowed:
                 item.update(status=status, outputKey=_safe_key(output_key) if status == "completed" else "",
                             error=_clean_text(error, 300) if status == "failed" else "", finishedAt=now_iso())
                 box["done"] = True
@@ -510,6 +517,99 @@ def reconcile_state(owner: str, pid: str, gen_id: str, state: dict | None = None
         log.warning("vnew.retake.resume pid=%s gen=%s cell=%s n=%d", pid, gen_id, key, n)
         _spawn(run_retake, (owner, pid, gen_id, key, n, claim), f"vnew-retake-{pid}-{n}")
     return result
+
+
+# ---------------------------------------------------------------- 보완 4: 시간 초과 버전 되살리기(조회만, 새 제출 0)
+
+
+def _poll_max_s(endpoint) -> int:
+    """제출 뒤 최대 대기(초). fal Kling 계열(endpoint·arn 에 kling)은 POLL_MAX_KLING_S(75분), 그 밖은 POLL_MAX_S(30분)."""
+    return POLL_MAX_KLING_S if "kling" in str(endpoint or "").lower() else POLL_MAX_S
+
+
+def _poll_timeout_text(limit_s: int) -> str:
+    return f"결과를 {int(limit_s) // 60}분 넘게 받지 못했습니다. 다시 시도해 주세요."
+
+
+def _timed_out(version: dict) -> bool:
+    """시간 초과로 failed 가 된 버전(invocationArn 있음). 옛 상태는 timedOut 표시가 없어 시간 초과 문구로 본다."""
+    if (version or {}).get("status") != "failed" or not version.get("invocationArn"):
+        return False
+    return bool(version.get("timedOut")) or bool(_TIMEOUT_TEXT_RE.match(str(version.get("error") or "")))
+
+
+def _recoverable(version: dict, now: datetime) -> bool:
+    """되살리기 대상: 시간 초과 버전이고 제출 뒤 RECOVER_WINDOW_S(24시간) 안(제출 시각을 모르면 묻지 않는다)."""
+    if not _timed_out(version):
+        return False
+    age = _age(version.get("submittedAt"), now)
+    return age is not None and age <= RECOVER_WINDOW_S
+
+
+def _recover_due(version: dict, now: datetime) -> bool:
+    """지금 조회할 차례: 되살리기 대상이고 마지막 조회(recoverAt) 뒤 RECOVER_GAP_S(60초)가 지났다."""
+    if not _recoverable(version, now):
+        return False
+    last = _age(version.get("recoverAt"), now)
+    return last is None or last >= RECOVER_GAP_S
+
+
+def recover_timed_out(owner: str, pid: str, gen_id: str, key: str, state: dict) -> dict:
+    """패널 보기(retake_view)에서 그 칸의 시간 초과 버전 하나(최근 것)를 fal 에 한 번 묻는다. 반환 지금 상태.
+
+    조건부 쓰기로 recoverAt·claim 을 먼저 남기고(프로세스 둘이 함께 봐도 한쪽만 묻는다) 조회는 스레드(run_recover)에서 한다 —
+    Completed 면 vpoc.fal.poll 이 결과 영상을 받아 버킷에 올리므로 보기 응답을 기다리게 하지 않는다. 실패해도 보기는 그대로 준다.
+    """
+    now = datetime.now(timezone.utc)
+    versions = ((state.get("cells") or {}).get(key) or {}).get("versions") or []
+    if not any(_recover_due(v, now) for v in versions):
+        return state
+    box: dict = {}
+
+    def mutate(data):
+        box.clear()
+        for version in reversed(((data["cells"].get(key) or {}).get("versions")) or []):
+            if _recover_due(version, now):
+                claim = secrets.token_hex(8)
+                version.update(timedOut=True, recoverAt=now_iso(), claim=claim)
+                box.update(n=int(version.get("n") or 0), claim=claim)
+                return data
+        return None
+
+    try:
+        result = _mutate_state(owner, pid, gen_id, mutate)
+    except Exception as exc:  # noqa: BLE001 — 되살리기는 보기의 덤이다(다음 보기에서 다시 본다).
+        log.warning("vnew.retake.recover_failed pid=%s gen=%s cell=%s stage=claim err=%s", pid, gen_id, key, type(exc).__name__)
+        return state
+    if box:
+        log.info("vnew.retake.recover_check pid=%s gen=%s cell=%s n=%d", pid, gen_id, key, box["n"])
+        _spawn(run_recover, (owner, pid, gen_id, key, box["n"], box["claim"]), f"vnew-retake-recover-{pid}-{box['n']}")
+    return result
+
+
+def run_recover(owner: str, pid: str, gen_id: str, key: str, n: int, claim: str) -> None:
+    """되살리기 스레드: fal 조회 1번(새 제출 0). Completed → 기존 완료 경로(_find_output_key·_finish completed·log_result)로 completed.
+    InProgress·Failed·예외 → 그대로 둔다(다음 보기에서 60초 뒤 다시 묻는다). 다시 만들기 제출이 claim 을 가져가면 결과를 쓰지 않는다."""
+    try:
+        version = _find_version(read_state(owner, pid, gen_id), key, n) or {}
+        if version.get("claim") != claim or not _timed_out(version):
+            return
+        arn = str(version.get("invocationArn") or "")
+        prefix = str(version.get("outputPrefix") or "")
+        result = _poll(arn, prefix) or {}
+        status = str(result.get("status") or "")
+        if status != "Completed":
+            log.info("vnew.retake.recover_pending pid=%s gen=%s cell=%s n=%d status=%s", pid, gen_id, key, n, status or "-")
+            return
+        output_key = generate._find_output_key(prefix, arn)  # noqa: SLF001
+        _finish(owner, pid, gen_id, key, n, claim, statuses=("failed",), status="completed", outputKey=output_key, error="",
+                failureKind="", timedOut=False)
+        log_result(owner, pid, gen_id, key, arn, "completed", output_key=output_key, recovered=True)
+        log.info("vnew.retake.recovered pid=%s gen=%s cell=%s n=%d mid=%s", pid, gen_id, key, n, edit.media_id(output_key))
+    except _ClaimLost:
+        log.info("vnew.retake.recover_claim_lost pid=%s gen=%s cell=%s n=%d", pid, gen_id, key, n)
+    except Exception as exc:  # noqa: BLE001 — 오류 원문에는 주소가 섞일 수 있다 → 이름만
+        log.warning("vnew.retake.recover_failed pid=%s gen=%s cell=%s n=%d err=%s", pid, gen_id, key, n, type(exc).__name__)
 
 
 # ================================================================ 3. 재료 · 대상
@@ -799,6 +899,7 @@ def _version_out(target: dict, version: dict) -> dict:
         "requestKo": version.get("requestKo") or "", "fromN": version.get("fromN"), "usd": version.get("usd"),
         "createdAt": version.get("createdAt") or "", "submittedAt": version.get("submittedAt") or "",
         "finishedAt": version.get("finishedAt") or "",
+        "timedOut": _timed_out(version), "recovering": _recoverable(version, datetime.now(timezone.utc)),  # 보완 4
     }
 
 
@@ -844,6 +945,7 @@ def retake_view(owner: str, pid: str, mid: str, clip_in=None, clip_out=None) -> 
     plan, gen, gen_id = edit._load_gen(owner, pid)  # noqa: SLF001
     state = reconcile_state(owner, pid, gen_id)
     target = _target(plan, gen, mid, state)
+    state = recover_timed_out(owner, pid, gen_id, target["cellKey"], state)  # 보완 4: 시간 초과 버전 조회 1번(스레드)
     setup = _setup(owner, pid, plan, gen, gen_id, target, state, clip_in, clip_out)
     return _view_with(gen, gen_id, target, state, read_log(owner, pid, gen_id), setup)
 
@@ -1256,6 +1358,7 @@ def submit(owner: str, pid: str, mid: str, payload) -> dict:
             "extraKo": extra_ko, "fromN": target["n"], "fromKey": target["sourceKey"], "draftId": draft_id, "usd": est["usd"],
             "model": est["model"], "seconds": est["seconds"], "resolution": est["resolution"], "invocationArn": "",
             "outputPrefix": "", "outputKey": "", "error": "", "failureKind": "", "logId": "",
+            "timedOut": False, "recoverAt": "",  # 보완 4: 같은 번호로 다시 내면 되살리기 대상이 아니다
         })
         version.update(pick["version"])  # 보완 1: 고른 모델·범위·구간·형식·길이
         box.update(n=version["n"], attempt=attempt)
@@ -1270,13 +1373,14 @@ def submit(owner: str, pid: str, mid: str, payload) -> dict:
     return _view_with(gen, gen_id, target, read_state(owner, pid, gen_id), log_cells, pick["setup"])
 
 
-def _beat(owner: str, pid: str, gen_id: str, key: str, n: int, token: str, **fields) -> dict:
-    """버전 claim 이 token 그대로이고 진행 중이면 하트비트(+ fields)를 쓰고 버전 사본을 준다. 아니면 _ClaimLost."""
+def _beat(owner: str, pid: str, gen_id: str, key: str, n: int, token: str, *, statuses: tuple = _LIVE, **fields) -> dict:
+    """버전 claim 이 token 그대로이고 진행 중이면 하트비트(+ fields)를 쓰고 버전 사본을 준다. 아니면 _ClaimLost.
+    보완 4: statuses 로 허용 상태를 바꾼다(되살리기는 failed 버전을 completed 로)."""
     box: dict = {}
 
     def mutate(data):
         version = _find_version(data, key, n)
-        if not version or version.get("claim") != token or version.get("status") not in _LIVE:
+        if not version or version.get("claim") != token or version.get("status") not in statuses:
             raise _ClaimLost()
         version.update(fields)
         version["heartbeatAt"] = now_iso()
@@ -1287,9 +1391,9 @@ def _beat(owner: str, pid: str, gen_id: str, key: str, n: int, token: str, **fie
     return box["version"]
 
 
-def _finish(owner: str, pid: str, gen_id: str, key: str, n: int, token: str, **fields) -> None:
+def _finish(owner: str, pid: str, gen_id: str, key: str, n: int, token: str, *, statuses: tuple = _LIVE, **fields) -> None:
     """끝 상태(completed·failed)를 쓰고 claim 을 비운다(claim 이 token 그대로일 때만)."""
-    _beat(owner, pid, gen_id, key, n, token, claim="", finishedAt=now_iso(), **fields)
+    _beat(owner, pid, gen_id, key, n, token, statuses=statuses, claim="", finishedAt=now_iso(), **fields)
 
 
 def run_retake(owner: str, pid: str, gen_id: str, key: str, n: int, claim: str) -> None:
@@ -1331,12 +1435,15 @@ def _poll_until_done(owner: str, pid: str, gen_id: str, key: str, n: int, claim:
         raise VpocError("vnew.retake", "RetakeNoJob", SUBMIT_FAILED_TEXT, 409)
     submitted = _parse(version.get("submittedAt")) or datetime.now(timezone.utc)
     interval = max(0.0, float(vnew_settings.POLL_INTERVAL_S or 5))
+    limit = _poll_max_s(version.get("model") or arn)  # 보완 4: Kling 75분 · 그 밖 30분
     errors = 0
     while True:
-        if (datetime.now(timezone.utc) - submitted).total_seconds() > POLL_MAX_S:
-            _finish(owner, pid, gen_id, key, n, claim, status="failed", error=POLL_TIMEOUT_TEXT)
-            log_result(owner, pid, gen_id, key, arn, "failed", error=POLL_TIMEOUT_TEXT)
-            log.warning("vnew.retake.timeout pid=%s gen=%s cell=%s n=%d", pid, gen_id, key, n)
+        if (datetime.now(timezone.utc) - submitted).total_seconds() > limit:
+            text = _poll_timeout_text(limit)
+            # 보완 4: timedOut + invocationArn·outputPrefix 를 남긴다 → 패널 보기에서 조회만 다시 해 되살린다(recover_timed_out)
+            _finish(owner, pid, gen_id, key, n, claim, status="failed", error=text, timedOut=True, recoverAt="")
+            log_result(owner, pid, gen_id, key, arn, "failed", error=text)
+            log.warning("vnew.retake.timeout pid=%s gen=%s cell=%s n=%d limit_s=%d", pid, gen_id, key, n, limit)
             return
         try:
             result = _poll(arn, prefix) or {}
