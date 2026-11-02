@@ -5778,7 +5778,13 @@ def gen_view(owner: str, pid: str, plan: dict) -> dict | None:
     gen = plan.get("gen")
     est = estimate(plan)
     if not gen:
-        return {"status": "none", "estimate": est}
+        view = {"status": "none", "estimate": est}
+        # ⑦ 편집(지시서 115): 켜져 있으면 gen 이 없어도 요약(잠긴 ⑦ 칩과 이유)을 둔다. 꺼져 있으면 키가 없다.
+        if vnew_settings.VNEW_EDIT:
+            from . import edit as vnew_edit  # noqa: PLC0415 — edit 이 generate 를 import 한다(순환 피함).
+
+            view["edit"] = vnew_edit.summary(gen)
+        return view
 
     gen = _reconcile_gen_stale(gen)
 

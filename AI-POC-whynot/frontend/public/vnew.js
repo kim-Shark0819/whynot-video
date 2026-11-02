@@ -2074,6 +2074,26 @@
     return !!(gen.edit && gen.edit.available === true);
   }
 
+  /* 잠긴 ⑦ 칩의 이유(지시서 115): 서버 gen.edit.reason(gen 이 없어도 온다), 없으면 기본 문구. */
+  var EDIT_LOCK_TEXT = "⑤에서 영상을 먼저 만들면 편집할 수 있습니다.";
+
+  function editLockReason() {
+    var edit = ((state.plan || {}).gen || {}).edit || {};
+    return typeof edit.reason === "string" && edit.reason ? edit.reason : EDIT_LOCK_TEXT;
+  }
+
+  /* 단계 막대 아래 한 줄 안내(잠긴 칩을 눌렀을 때, 지시서 115). 막대 끝에 처음 한 번 붙이고 다음부터 글만 바꾼다. */
+  function planStepNote(bar, text) {
+    var note = bar._note;
+    if (!note) {
+      note = el("p", "vnew-hint vnew-plan-step-note", "");
+      note.setAttribute("role", "status");
+      bar._note = note;
+      bar.appendChild(note);
+    }
+    note.textContent = text;
+  }
+
   function maxReachableStep() {
     var plan = state.plan || {};
     var conti = plan.conti || {};
@@ -2106,13 +2126,21 @@
       // 갈 수 있는 단계까지만 활성화. 그 뒤 단계는 아직 안내만(is-soon).
       // ⑦ 편집은 영상 선택 없이도(부분 성공 gen) 서버가 재료가 있다고 주면 연다(dev 화면 확인 2026-11-02).
       var canGo = stepNo <= maxStep || (stepNo === 7 && editAvailable());
-      if (!canGo) item.classList.add("is-soon");
+      // 지금 보고 있는 칩은 흐리지 않는다(⑦ 에 있는 동안 재료가 없어져도, 지시서 115).
+      if (!canGo && stepNo !== state.planStep) item.classList.add("is-soon");
+      // 잠긴 ⑦ 은 이유를 title 로 보이고, 누르면 막대 아래 한 줄로 보인다(지시서 115).
+      if (stepNo === 7 && !canGo) {
+        item.title = editLockReason();
+        item.setAttribute("aria-disabled", "true");
+      }
       item.addEventListener("click", function () {
         if (stepNo === state.planStep) return;
         if (stepNo <= maxStep || (stepNo === 7 && editAvailable())) {
           if (state.planStep === 7) editLeave(); // ⑦ 을 떠나면 남은 저장을 보내고 재생·키를 멈춘다
           state.planStep = stepNo;
           renderPlan();
+        } else if (stepNo === 7) {
+          planStepNote(bar, editLockReason());
         }
       });
       bar.appendChild(item);
@@ -2148,7 +2176,12 @@
       .then(function (plan) {
         if (!state.mounted || state.projectId !== pid) return;
         state.plan = plan;
+        var editOpen = editOpenFor(pid);
         decidePlanStep();
+        // ⑦ 편집이 열려 있으면(지시서 115) 처음 불러오기가 아닌 응답으로 다시 그리지 않는다 — ⑦ 이 ⑤ 로 밀려나거나 처음부터
+        // 그려져 실행 취소·재생헤드를 잃지 않게(⑦ 은 자기 GET /edit 만 부른다). 단계가 바뀌었으면 남은 저장을 먼저 보낸다.
+        if (editOpen && !first && state.planStep === 7) return;
+        if (editOpen && !first) editLeave();
         // ⑤ 폴링: 상태 서명이 지금 그린 ⑤와 같으면 다시 그리지 않고 폴링만 다시 건다(재생 중인 영상이 끊기지 않게).
         // state.plan 은 위에서 새 값으로 바꿨다(다음 버튼 동작이 새 데이터를 쓴다).
         if (fromPoll === true && genPollUnchanged()) {
@@ -2179,6 +2212,9 @@
     var task = plan.task || {};
     var previz = plan.previz || {};
     var gen = plan.gen || {};
+    // ⑦ 편집에 있으면(서버가 gen.edit 을 주는 동안) 그대로 둔다(지시서 115). 폴링·다시 불러오기로 gen 이 진행 중·partial 이
+    // 되거나(실사 회차 시작·다시 만들기), gen.selected 가 비거나, 재료가 없어져도 ⑤ 로 밀려나지 않는다 — ⑦ 화면이 안내한다.
+    if (state.planStep === 7 && gen.edit && typeof gen.edit === "object") return;
     // 영상 생성이 진행 중(running)이면 ⑤를 보여 준다.
     if (gen.status === "running" || gen.status === "partial") {
       state.planStep = 5;
@@ -7652,7 +7688,9 @@
      design §4)를 그대로 쓴다. 미리보기는 <video> 2개를 번갈아 쓰고(다음 클립을 미리 불러 둔다), 썸네일은 서버 필름스트립
      JPEG 를 CSS 배경으로 잘라 그리고(버킷 CORS 가 없어 캔버스에 그리지 않는다), 파형은 서버 피크 배열을 SVG 막대로 그린다.
      편집은 실행 취소 100단계, 바뀐 뒤 0.8초 디바운스로 PUT(한 번에 하나), 409 EditChanged 면 다시 불러온다.
-     글은 모두 textContent(el), CSS 클래스는 vnew-edit- 접두사. edit* 순수 함수는 DOM 없이 검사한다(check_vpoc edu-*). */
+     글은 모두 textContent(el), CSS 클래스는 vnew-edit- 접두사. edit* 순수 함수는 DOM 없이 검사한다(check_vpoc edu-*).
+     지시서 115: 양 끝 끌기로 원본 처음·끝까지 늘이기, 클립 속도(0.5~2×, 타임라인 길이 = 원본 구간 ÷ 속도, 미리보기 playbackRate)·
+     길이(초) 입력·[ ] 1프레임 다듬기, 재료가 없어지면 안내(editShowGone). 검사는 check_vpoc ert-*. */
 
   var EDIT_SAVE_MS = 800; // 바뀐 뒤 저장(PUT)까지 디바운스
   var EDIT_PROBE_RETRY_MS = 1000; // probing(서버가 영상 길이를 재는 중)이면 다시 불러오는 간격
@@ -7669,8 +7707,12 @@
   var EDIT_MEDIA_TTL_MS = 50 * 60 * 1000; // 필름스트립 presigned(1시간)가 끝나기 전에 다시 받는다
   var EDIT_URL_RETRY_MS = 15000; // 영상 오류(서명 만료 등)로 주소를 다시 받는 최소 간격
   var EDIT_HELP_KEY = "vnew-edit-help-closed"; // 도움말 닫음(localStorage)
-  var EDIT_HELP_TEXT = "재생헤드를 옮기고 ✂ 또는 S로 자르고, 클립 끝을 끌어 길이를 줄이세요.";
+  var EDIT_HELP_TEXT = "재생헤드를 옮기고 ✂ 또는 S로 자르고, 클립 양 끝을 끌어 줄이거나 원본 길이까지 늘이세요. 고른 클립은 속도·길이(초)로도 바꿀 수 있습니다.";
   var EDIT_CHANGED_TEXT = "다른 곳에서 바뀌어 다시 불러왔습니다.";
+  var EDIT_GONE_TEXT = "편집할 영상이 아직 없습니다. ⑤에서 영상을 먼저 만들어 주세요."; // 서버 문구가 없을 때(지시서 115)
+  var EDIT_SPEEDS = [0.5, 0.75, 1, 1.25, 1.5, 2]; // 클립 속도(지시서 115, 서버 edit.SPEEDS 와 같다)
+  // 단축키 [ ]·Shift+[ ] 동작 → [끝(edge), 방향](지시서 115): out 앞(줄이기)·out 뒤(늘이기)·in 앞(늘이기)·in 뒤(줄이기)
+  var EDIT_NUDGES = { outEarlier: ["out", -1], outLater: ["out", 1], inEarlier: ["in", -1], inLater: ["in", 1] };
   var EDIT_VARIANT_LABEL = { real: "실사", webtoon: "웹툰" };
   var EDIT_SVG_NS = "http://www.w3.org/2000/svg";
   // 눈금 [큰 눈금 간격(초), 작은 눈금 간격(초)]. 큰 눈금 사이가 64px 이상인 첫 간격을 쓴다(editTickStep).
@@ -7683,8 +7725,26 @@
     return Math.round(Number(value) * 1000) / 1000;
   }
 
-  function editClipLen(clip) {
+  /* 클립 속도(지시서 115): 허용 목록(EDIT_SPEEDS) 안이면 그 값, 아니면(없음 포함) 1. */
+  function editSpeedOf(clip) {
+    var speed = Number((clip || {}).speed);
+    return EDIT_SPEEDS.indexOf(speed) >= 0 ? speed : 1;
+  }
+
+  /* 원본 구간 길이(초) = out − in. */
+  function editSourceLen(clip) {
     return Math.max(0, Number(clip.out) - Number(clip.in));
+  }
+
+  /* 타임라인에서 차지하는 길이(초) = 원본 구간 ÷ 속도(지시서 115). 너비·눈금·재생헤드·자르기가 모두 이 값을 쓴다. */
+  function editClipLen(clip) {
+    return editSourceLen(clip) / editSpeedOf(clip);
+  }
+
+  /* 원본 구간의 최소 길이: 타임라인 길이와 원본 구간이 둘 다 minLen 이상(빠른 클립은 원본이 더 길어야 한다). 한 프레임은 editTrimClip 이 본다. */
+  function editMinSource(minLen, speed) {
+    var min = Number(minLen) || EDIT_MIN_CLIP_S;
+    return Math.max(min, min * (Number(speed) || 1));
   }
 
   function editCloneClip(clip) {
@@ -7696,6 +7756,8 @@
       muted: clip.muted === true
     };
     if (typeof clip.label === "string" && clip.label) copy.label = clip.label;
+    var speed = editSpeedOf(clip);
+    if (speed !== 1) copy.speed = speed; // 1 은 보내지 않는다(서버도 저장하지 않는다)
     return copy;
   }
 
@@ -7718,7 +7780,7 @@
     return { starts: starts, total: total };
   }
 
-  /* 타임라인 시각 t → {index, clip, start, local(클립 안 초), source(원본 초)}. 경계는 뒤 클립(시작 포함·끝 제외),
+  /* 타임라인 시각 t → {index, clip, start, local(클립 안 타임라인 초), source(원본 초 = in + local × 속도)}. 경계는 뒤 클립(시작 포함·끝 제외),
      전체 길이 이상은 마지막 클립의 끝, 0 미만은 0. 클립이 없으면 null. */
   function editLocate(clips, t) {
     var list = clips || [];
@@ -7729,7 +7791,7 @@
       var len = editClipLen(list[i]);
       if (time < info.starts[i] + len - 1e-9 || i === list.length - 1) {
         var local = Math.min(Math.max(0, time - info.starts[i]), len);
-        return { index: i, clip: list[i], start: info.starts[i], local: local, source: editRound3(Number(list[i].in) + local) };
+        return { index: i, clip: list[i], start: info.starts[i], local: local, source: editRound3(Number(list[i].in) + local * editSpeedOf(list[i])) };
       }
     }
     return null;
@@ -7789,6 +7851,74 @@
       next.out = editRound3(v);
     }
     return next;
+  }
+
+  /* 속도 바꾸기(지시서 115): speed 는 EDIT_SPEEDS 중 하나. in·out 은 그대로라 타임라인 길이 = 원본 구간 ÷ speed.
+     타임라인 길이가 minLen 보다 짧아지거나 speed 가 목록 밖이면 null. */
+  function editSetSpeed(clip, speed, minLen) {
+    var s = Number(speed);
+    if (EDIT_SPEEDS.indexOf(s) < 0) return null;
+    var next = editCloneClip(clip);
+    if (s === 1) delete next.speed;
+    else next.speed = s;
+    if (editClipLen(next) < (Number(minLen) || EDIT_MIN_CLIP_S) - 1e-6) return null;
+    return next;
+  }
+
+  /* 길이 직접 입력(지시서 115, design D23): 타임라인 길이를 seconds 초로 맞춘 {clip, note}. 숫자가 아니거나 0 이하면 null.
+     - 지금 속도로 원본 안(in + 길이 × speed ≤ 원본 길이)이면 out 만 바꾼다(원본 fps 프레임에 맞춤).
+     - 원본보다 길면 지금보다 낮은 허용 속도 중 맞는 가장 큰 값으로 낮춘다.
+     - 0.5× 로도 모자라면 0.5× · 원본 끝까지(가장 길게)로 맞추고 안내한다.
+     minLen(0.04초)보다 짧으면 minLen 으로. 원본 길이를 모르면(0) 지금 out 을 원본 끝으로 본다. */
+  function editRetime(clip, seconds, duration, fps, minLen) {
+    var f = Number(fps) > 0 ? Number(fps) : EDIT_DEFAULT_FPS;
+    var want = Number(seconds);
+    if (!isFinite(want) || !(want > 0)) return null;
+    var min = Number(minLen) || EDIT_MIN_CLIP_S;
+    var start = Number(clip.in);
+    var end = Number(clip.out);
+    var dur = Number(duration) > 0 ? Number(duration) : end;
+    var avail = Math.max(0, dur - start);
+    var note = "";
+    if (want < min) {
+      want = min;
+      note = "가장 짧은 길이(" + min + "초)로 맞췄습니다.";
+    }
+    var speed = editSpeedOf(clip);
+    var tol = 0.5 / f;
+    if (want * speed > avail + tol) {
+      var lower = EDIT_SPEEDS.filter(function (s) {
+        return s < speed && want * s <= avail + tol;
+      });
+      if (lower.length) {
+        speed = lower[lower.length - 1];
+        note = "원본이 모자라 속도를 " + speed + "×로 낮췄습니다.";
+      } else {
+        speed = EDIT_SPEEDS[0];
+        want = avail / speed;
+        note = "원본 끝까지 " + speed + "×로 늘려도 " + want.toFixed(2) + "초까지입니다. " + want.toFixed(2) + "초로 맞췄습니다.";
+      }
+    }
+    var out = Math.round((start + want * speed) * f) / f;
+    if (out > dur || dur - out < tol) out = dur;
+    var lo = start + Math.max(editMinSource(min, speed), 1 / f);
+    if (out < lo - 1e-6) out = Math.min(dur, Math.ceil(lo * f - 1e-6) / f);
+    // 원본 범위를 벗어난 클립(시작이 원본 끝 가까이·뒤)은 맞출 수 없다 — 바꾸지 않는다
+    if ((out - start) / speed < min - 1e-6 || out - start < 1 / f - 1e-6) return null;
+    var next = editCloneClip(clip);
+    next.out = editRound3(out);
+    if (speed === 1) delete next.speed;
+    else next.speed = speed;
+    return { clip: next, note: note };
+  }
+
+  /* 단축키 [ ]·Shift+[ ](지시서 115): edge("in"|"out")를 원본 fps 한 프레임 dir(−1 앞·+1 뒤)만큼. 원본 0~duration 안,
+     최소 길이 안에서(editTrimClip 규칙). 원본 길이를 모르면 끝은 지금보다 늘리지 않는다. 못 움직이면 같은 값의 사본. */
+  function editNudge(clip, edge, dir, duration, fps, minLen) {
+    var f = Number(fps) > 0 ? Number(fps) : EDIT_DEFAULT_FPS;
+    var base = edge === "in" ? Number(clip.in) : Number(clip.out);
+    var dur = Number(duration) > 0 ? Number(duration) : edge === "out" ? Number(clip.out) : 0;
+    return editTrimClip(clip, edge, base + (dir < 0 ? -1 : 1) / f, dur, f, editMinSource(minLen, editSpeedOf(clip)));
   }
 
   function editRemove(clips, index) {
@@ -7909,10 +8039,11 @@
     if (tiles < 1 || interval <= 0 || tw <= 0 || th <= 0 || !(Number(pps) > 0)) return null;
     var cw = Math.max(8, Math.round(((tw * h) / th) * 10) / 10);
     var width = editClipLen(clip) * pps;
+    var speed = editSpeedOf(clip);
     var cells = [];
     for (var x = 0; x < width - 0.5 && cells.length < 2000; x += cw) {
       var w = Math.min(cw, width - x);
-      var at = Number(clip.in) + (x + w / 2) / pps;
+      var at = Number(clip.in) + ((x + w / 2) / pps) * speed; // 칸 가운데의 원본 시각(속도 반영, 지시서 115)
       var tile = Math.max(0, Math.min(tiles - 1, Math.floor(at / interval + 1e-9)));
       cells.push({ left: Math.round(x * 10) / 10, width: Math.round(w * 10) / 10, x: -Math.round(tile * cw * 10) / 10 });
     }
@@ -7959,6 +8090,9 @@
     if (c === "KeyM" || k === "m" || k === "M") return "mute";
     if (k === "+" || k === "=" || c === "NumpadAdd") return "zoomIn";
     if (k === "-" || k === "_" || c === "NumpadSubtract") return "zoomOut";
+    // 고른 클립 1프레임 다듬기(지시서 115): [ ] 는 끝, Shift 는 시작. 괄호는 한글 자판에서도 같은 글자다.
+    if (c === "BracketLeft" || k === "[" || k === "{") return shift || k === "{" ? "inEarlier" : "outEarlier";
+    if (c === "BracketRight" || k === "]" || k === "}") return shift || k === "}" ? "inLater" : "outLater";
     return "";
   }
 
@@ -8030,6 +8164,11 @@
   /* 이 ⑦ 화면이 아직 보이는가. 단계를 옮기거나 프로젝트를 떠나면 false(타이머·키·재생이 스스로 멈춘다). */
   function editAlive(ctx) {
     return !!ctx && ctx.alive && editCtx === ctx && state.mounted && state.planStep === 7 && state.projectId === ctx.pid;
+  }
+
+  /* 이 프로젝트의 ⑦ 화면이 열려 있는가(단계 값과 상관없이, loadPlan 이 응답 전후로 본다 — 지시서 115). */
+  function editOpenFor(pid) {
+    return !!editCtx && editCtx.alive && editCtx.pid === pid;
   }
 
   function editRaf(fn) {
@@ -8224,7 +8363,8 @@
       .catch(function (err) {
         ctx.busy = false;
         if (!editAlive(ctx) || (err && err.left)) return;
-        editShowLoadError(ctx, err);
+        if (editGoneKind(err)) editShowGone(ctx, err);
+        else editShowLoadError(ctx, err);
       });
   }
 
@@ -8302,6 +8442,44 @@
       editLoad(ctx, "", "");
     });
     ctx.root.appendChild(retry);
+  }
+
+  /* 재료가 없어진 오류인가(지시서 115): 409 NoMaterials(그림체 영상 없음)·404 NoGen(gen 없음). */
+  function editGoneKind(err) {
+    return !!err && (err.type === "NoMaterials" || err.type === "NoGen");
+  }
+
+  /* 재료가 없을 때: 오류 줄이 아니라 안내 문구(서버 문구)와 [다시 시도]·[⑤ 영상으로]. ⑦ 칩과 화면은 그대로다(지시서 115). */
+  function editShowGone(ctx, err) {
+    editPause(ctx);
+    if (ctx.exportTimer) window.clearTimeout(ctx.exportTimer);
+    ctx.exportTimer = 0;
+    clear(ctx.root);
+    ctx.dom = {};
+    ctx.clipEls = [];
+    ctx.root.appendChild(el("h2", "vnew-sec-title", "편집"));
+    var box = el("div", "vnew-edit-gone");
+    box.appendChild(el("p", "vnew-hint vnew-edit-gone-text", (err && err.message) || EDIT_GONE_TEXT));
+    var row = el("div", "vnew-edit-gone-tools");
+    var retry = el("button", "outline-button", "다시 시도");
+    retry.type = "button";
+    retry.addEventListener("click", function () {
+      if (!editAlive(ctx)) return;
+      editShowWait(ctx, "편집 문서를 불러오는 중…");
+      editLoad(ctx, "", "");
+    });
+    var back = el("button", "outline-button", "⑤ 영상으로");
+    back.type = "button";
+    back.addEventListener("click", function () {
+      if (!editAlive(ctx)) return;
+      editLeave();
+      state.planStep = 5;
+      renderPlan();
+    });
+    row.appendChild(retry);
+    row.appendChild(back);
+    box.appendChild(row);
+    ctx.root.appendChild(box);
   }
 
   function editShowError(ctx, message) {
@@ -8423,6 +8601,7 @@
     [d.btnUndo, d.btnRedo, d.btnDelete, d.btnSplit, d.btnMute, d.btnReset].forEach(function (btn) {
       tools.appendChild(btn);
     });
+    tools.appendChild(editRetimeBox(ctx));
     var zoomWrap = el("label", "vnew-edit-zoom");
     zoomWrap.title = "확대/축소(+ / −)";
     zoomWrap.appendChild(el("span", "vnew-edit-tool-icon", "🔍"));
@@ -8530,6 +8709,63 @@
     return video;
   }
 
+  /* 도구줄의 고른 클립 속도·길이(지시서 115, design D23). 속도 0.5~2×, 길이(초)는 Enter·칸 떠남에 맞추고 Esc 는 되돌린다. */
+  function editRetimeBox(ctx) {
+    var d = ctx.dom;
+    var box = el("div", "vnew-edit-retime");
+    var speedField = el("label", "vnew-edit-field");
+    speedField.appendChild(el("span", "vnew-edit-field-text", "속도"));
+    d.speed = el("select", "vnew-edit-speed");
+    EDIT_SPEEDS.forEach(function (speed) {
+      var option = el("option", null, speed + "×");
+      option.value = String(speed);
+      d.speed.appendChild(option);
+    });
+    d.speed.title = "고른 클립 속도 — 0.5×는 2배로 늘고 2×는 반으로 줄어듭니다(소리 높이는 그대로)";
+    d.speed.setAttribute("aria-label", d.speed.title);
+    d.speed.addEventListener("change", function () {
+      editApplySpeed(ctx, d.speed.value);
+    });
+    speedField.appendChild(d.speed);
+    var lenField = el("label", "vnew-edit-field");
+    lenField.appendChild(el("span", "vnew-edit-field-text", "길이(초)"));
+    d.len = el("input", "vnew-edit-len");
+    d.len.type = "number";
+    d.len.min = String(EDIT_MIN_CLIP_S);
+    d.len.step = "0.01";
+    d.len.setAttribute("inputmode", "decimal");
+    d.len.title = "고른 클립 길이(초) — 원본 안이면 끝을 옮기고, 원본보다 길면 속도를 낮춰 맞춥니다(0.5×까지). [ ] 는 끝, Shift+[ ] 는 시작을 1프레임씩";
+    d.len.setAttribute("aria-label", d.len.title);
+    d.len.addEventListener("change", function () {
+      editApplyLength(ctx, d.len.value);
+    });
+    d.len.addEventListener("keydown", function (event) {
+      if (!event) return;
+      if (event.key === "Enter") {
+        if (event.preventDefault) event.preventDefault();
+        editApplyLength(ctx, d.len.value);
+      } else if (event.key === "Escape") {
+        if (event.preventDefault) event.preventDefault();
+        editRenderRetime(ctx, true);
+      }
+    });
+    lenField.appendChild(d.len);
+    box.appendChild(speedField);
+    box.appendChild(lenField);
+    return box;
+  }
+
+  /* 속도·길이 칸을 고른 클립 값으로(없으면 비활성). 길이 칸에 초점이 있으면(입력 중) force 일 때만 값을 덮는다. */
+  function editRenderRetime(ctx, force) {
+    var d = ctx.dom;
+    if (!d.speed || !d.len) return;
+    var clip = ctx.sel >= 0 && ctx.sel < ctx.clips.length ? ctx.clips[ctx.sel] : null;
+    d.speed.disabled = !clip || ctx.busy;
+    d.len.disabled = !clip || ctx.busy;
+    d.speed.value = String(clip ? editSpeedOf(clip) : 1);
+    if (force || document.activeElement !== d.len) d.len.value = clip ? editClipLen(clip).toFixed(2) : "";
+  }
+
   function editRenderVariants(ctx) {
     var box = ctx.dom.variantBox;
     if (!box) return;
@@ -8596,6 +8832,7 @@
     d.btnMute._label.textContent = muted ? "소리 켜기" : "소리 끄기";
     editToolTitle(d.btnMute, muted ? "고른 클립 소리 켜기" : "고른 클립 소리 끄기", "M");
     d.exportBtn.disabled = ctx.exporting || !ctx.clips.length;
+    editRenderRetime(ctx, false);
     editRenderPlayButton(ctx);
   }
 
@@ -8647,8 +8884,8 @@
     var name = el("span", "vnew-edit-clip-label", "");
     var inEdge = el("div", "vnew-edit-edge is-in");
     var outEdge = el("div", "vnew-edit-edge is-out");
-    inEdge.title = "끌어서 시작 자르기";
-    outEdge.title = "끌어서 끝 자르기";
+    inEdge.title = "끌어서 시작 줄이기·늘이기(원본 처음까지, Shift+[ ])";
+    outEdge.title = "끌어서 끝 줄이기·늘이기(원본 끝까지, [ ])";
     box.appendChild(thumbs);
     box.appendChild(name);
     box.appendChild(inEdge);
@@ -8678,12 +8915,15 @@
     var width = Math.max(1, len * ctx.pps);
     var invalid = ctx.invalidIds[clip.id];
     var selected = parts.index === ctx.sel;
+    var speed = editSpeedOf(clip);
     parts.box.className =
-      "vnew-edit-clip" + (selected ? " is-selected" : "") + (invalid ? " is-invalid" : "") + (width < 28 ? " is-narrow" : "");
+      "vnew-edit-clip" + (selected ? " is-selected" : "") + (invalid ? " is-invalid" : "") + (width < 28 ? " is-narrow" : "") +
+      (speed !== 1 ? " is-speed" : "");
     parts.box.style.width = width + "px";
     var name = clip.label || mat.label || "클립";
-    parts.box.title = name + " · " + len.toFixed(2) + "초" + (invalid ? " — 이 클립의 원본을 지금 쓸 수 없습니다(지우거나 바꿔 주세요)" : "");
-    parts.name.textContent = name + " · " + len.toFixed(1) + "초";
+    parts.box.title = name + " · " + len.toFixed(2) + "초" + (speed !== 1 ? " (" + speed + "× 속도)" : "") +
+      (invalid ? " — 이 클립의 원본을 지금 쓸 수 없습니다(지우거나 바꿔 주세요)" : "");
+    parts.name.textContent = name + " · " + len.toFixed(1) + "초" + (speed !== 1 ? " · " + speed + "×" : "");
     clear(parts.thumbs);
     var media = ctx.media[mat.mid] || {};
     var strip = media.status === "done" && media.data ? media.data.strip : null;
@@ -8866,7 +9106,9 @@
     });
   }
 
-  /* 클립 끝 손잡이: in/out 조정(원본 안·0.04초 이상·원본 fps 프레임). 끄는 동안 미리보기가 그 끝 프레임을 보인다. */
+  /* 클립 끝 손잡이: in/out 조정(원본 안·0.04초 이상·원본 fps 프레임). 끄는 동안 미리보기가 그 끝 프레임을 보인다.
+     줄이기와 함께 원본 처음(0)·끝(재료 길이)까지 늘이기도 된다. 속도가 있으면 원본 변화 = 끈 거리 ÷ px/초 × 속도이고,
+     재료 길이를 모르면 끝은 지금 out 보다 늘리지 않는다(지시서 115). */
   function editEdgePointer(ctx, parts, edge, event) {
     if (!editPointerOk(ctx, event)) return;
     if (event.stopPropagation) event.stopPropagation();
@@ -8876,13 +9118,16 @@
     var before = editSnapshotOf(ctx.variant, ctx.clips);
     var mat = ctx.materials[orig.sourceKey] || {};
     var fps = editFpsOf(ctx, orig);
+    var speed = editSpeedOf(orig);
+    var dur = Number(mat.duration) > 0 ? Number(mat.duration) : edge === "out" ? orig.out : 0;
+    var minSource = editMinSource(editMinLen(ctx), speed);
     editPause(ctx);
     editSelect(ctx, index);
     editTrack(ctx, edge === "in" ? parts.inEdge : parts.outEdge, event, {
       threshold: 1,
       move: function (dx) {
         var base = edge === "in" ? orig.in : orig.out;
-        var next = editTrimClip(orig, edge, base + dx / ctx.pps, mat.duration, fps, editMinLen(ctx));
+        var next = editTrimClip(orig, edge, base + (dx * speed) / ctx.pps, dur, fps, minSource);
         ctx.clips[index] = next;
         editPaintClip(ctx, parts, next);
         ctx.dom.content.style.width = Math.ceil(editStarts(ctx.clips).total * ctx.pps) + EDIT_TAIL_PX + "px";
@@ -8956,6 +9201,19 @@
     }
   }
 
+  /* 클립 속도를 미리보기 <video> 에(지시서 115). 소스를 바꾸면 브라우저가 playbackRate 를 defaultPlaybackRate 로 되돌리므로
+     둘 다 둔다. preservesPitch(브라우저 기본 true)로 소리 높이는 그대로다(내보내기 atempo 와 같다). */
+  function editSetRate(video, clip) {
+    var speed = editSpeedOf(clip);
+    try {
+      if (video.defaultPlaybackRate !== speed) video.defaultPlaybackRate = speed;
+      if (video.playbackRate !== speed) video.playbackRate = speed;
+      video.preservesPitch = true;
+    } catch (error) {
+      /* 이 속도를 못 내는 브라우저 — 1× 로 보인다(내보내기는 서버가 맞춘다) */
+    }
+  }
+
   function editPlayVideo(video) {
     try {
       var promise = video.play();
@@ -8987,6 +9245,7 @@
     }
     editSetSrc(video, editUrlOf(ctx, loc.clip.sourceKey));
     video.muted = loc.clip.muted === true;
+    editSetRate(video, loc.clip);
     var at = loc.source;
     if (ctx.t >= total - 1e-6) at = Math.max(Number(loc.clip.in), Number(loc.clip.out) - 1 / editFpsOf(ctx, loc.clip));
     editSetTime(video, at);
@@ -9003,6 +9262,7 @@
     if (!clip || !next || !other || editContiguous(ctx, clip, next)) return;
     editSetSrc(other, editUrlOf(ctx, next.sourceKey));
     other.muted = true;
+    editSetRate(other, next);
     editSetTime(other, next.in);
   }
 
@@ -9014,11 +9274,13 @@
     ctx.t = editStarts(ctx.clips).starts[index];
     if (prev && editContiguous(ctx, prev, next)) {
       video.muted = next.muted === true;
+      editSetRate(video, next); // 이어진 같은 원본이어도 속도가 다를 수 있다
     } else {
       var other = ctx.vids[1 - ctx.cur];
       editSetSrc(other, editUrlOf(ctx, next.sourceKey));
       if (Math.abs((Number(other.currentTime) || 0) - Number(next.in)) > 0.02) editSetTime(other, next.in);
       other.muted = next.muted === true;
+      editSetRate(other, next);
       editPlayVideo(other);
       try {
         video.pause();
@@ -9056,7 +9318,8 @@
       }
       editAdvance(ctx, ctx.curIndex + 1);
     } else {
-      ctx.t = editStarts(ctx.clips).starts[ctx.curIndex] + Math.max(0, now - Number(clip.in));
+      // 타임라인 시각 = 클립 시작 + (원본 시각 − in) ÷ 속도(지시서 115)
+      ctx.t = editStarts(ctx.clips).starts[ctx.curIndex] + Math.max(0, now - Number(clip.in)) / editSpeedOf(clip);
       editPlaceHead(ctx);
     }
     editFollowHead(ctx);
@@ -9240,6 +9503,8 @@
       editSetZoom(ctx, ctx.pps / 1.25);
     } else if (action === "reset") {
       if ((ctx.defaults[ctx.variant] || []).length) editCommit(ctx, editCloneClips(ctx.defaults[ctx.variant]), { sel: -1 });
+    } else if (Object.prototype.hasOwnProperty.call(EDIT_NUDGES, action)) {
+      editNudgeSel(ctx, EDIT_NUDGES[action][0], EDIT_NUDGES[action][1]);
     }
   }
 
@@ -9298,12 +9563,95 @@
       editNote(ctx, "클립은 " + max + "개까지 둘 수 있습니다.");
       return;
     }
-    var result = editSplit(ctx.clips, ctx.t, editNewId(ctx.clips), editFpsOf(ctx, loc.clip), editMinLen(ctx));
+    var result = editSplit(ctx.clips, ctx.t, editNewId(ctx.clips), editFpsOf(ctx, loc.clip),
+      editMinSource(editMinLen(ctx), editSpeedOf(loc.clip)));
     if (!result) {
       editNote(ctx, "클립 끝에 너무 가까워 자를 수 없습니다. 재생헤드를 조금 옮겨 주세요.");
       return;
     }
     editCommit(ctx, result.clips, { sel: result.index });
+  }
+
+  /* 고른 클립을 next 로 바꾸면 전체 길이 한도(maxTotalSeconds) 안인가. 넘으면 안내하고 false(지시서 115). */
+  function editFitsTotal(ctx, clip, next) {
+    var max = editLimit(ctx, "maxTotalSeconds", 300);
+    var total = editStarts(ctx.clips).total - editClipLen(clip) + editClipLen(next);
+    if (total <= max + 1e-6) return true;
+    editNote(ctx, "타임라인 전체 길이는 " + max + "초까지입니다.");
+    editRenderRetime(ctx, true);
+    return false;
+  }
+
+  function editSelected(ctx) {
+    return ctx.sel >= 0 && ctx.sel < ctx.clips.length ? ctx.clips[ctx.sel] : null;
+  }
+
+  function editReplaceSel(ctx, next) {
+    var clips = ctx.clips.slice();
+    clips[ctx.sel] = next;
+    editCommit(ctx, clips, { sel: ctx.sel });
+  }
+
+  /* 도구줄 [속도](지시서 115): 고른 클립 속도를 바꾼다(in·out 그대로, 타임라인 길이 = 원본 구간 ÷ 속도). */
+  function editApplySpeed(ctx, value) {
+    var clip = editSelected(ctx);
+    if (!editAlive(ctx) || ctx.busy || !clip) return;
+    var speed = Number(value);
+    var next = editSetSpeed(clip, speed, editMinLen(ctx));
+    if (!next) {
+      if (EDIT_SPEEDS.indexOf(speed) >= 0) editNote(ctx, "이 클립은 너무 짧아 " + speed + "×로 바꿀 수 없습니다. 먼저 늘려 주세요.");
+      editRenderRetime(ctx, true);
+      return;
+    }
+    if (editSpeedOf(next) === editSpeedOf(clip) || !editFitsTotal(ctx, clip, next)) return;
+    editReplaceSel(ctx, next);
+  }
+
+  /* 도구줄 "길이(초)"(지시서 115, editRetime): 원본 안이면 끝을, 모자라면 속도를 낮춰 맞추고 안내 한 줄. 같은 결과면 저장하지 않는다. */
+  function editApplyLength(ctx, raw) {
+    var clip = editSelected(ctx);
+    if (!editAlive(ctx) || ctx.busy || !clip) return;
+    var text = String(raw === undefined || raw === null ? "" : raw).trim().replace(",", ".");
+    var mat = ctx.materials[clip.sourceKey] || {};
+    var value = text ? Number(text) : NaN;
+    var number = isFinite(value) && value > 0;
+    var result = number ? editRetime(clip, value, mat.duration, editFpsOf(ctx, clip), editMinLen(ctx)) : null;
+    if (!result) {
+      editNote(ctx, number ? "이 클립은 원본 범위를 벗어나 길이를 바꿀 수 없습니다." : "길이는 초 단위 숫자로 넣어 주세요(예: 2.5).");
+      editRenderRetime(ctx, true);
+      return;
+    }
+    var next = result.clip;
+    if (next.in === clip.in && next.out === clip.out && editSpeedOf(next) === editSpeedOf(clip)) {
+      editNote(ctx, result.note);
+      editRenderRetime(ctx, true);
+      return;
+    }
+    if (!editFitsTotal(ctx, clip, next)) return;
+    editReplaceSel(ctx, next);
+    editNote(ctx, result.note);
+    editRenderRetime(ctx, true);
+  }
+
+  /* 단축키 [ ]·Shift+[ ](지시서 115): 고른 클립 끝·시작을 원본 fps 한 프레임. 미리보기는 바뀐 끝 프레임을 보인다. */
+  function editNudgeSel(ctx, edge, dir) {
+    var clip = editSelected(ctx);
+    if (!clip) {
+      editNote(ctx, "먼저 클립을 골라 주세요.");
+      return;
+    }
+    var mat = ctx.materials[clip.sourceKey] || {};
+    var fps = editFpsOf(ctx, clip);
+    var next = editNudge(clip, edge, dir, mat.duration, fps, editMinLen(ctx));
+    if (next.in === clip.in && next.out === clip.out) {
+      var longer = (edge === "out") === (dir > 0);
+      editNote(ctx, longer ? (edge === "out" ? "원본 끝입니다." : "원본 처음입니다.") : "더 줄일 수 없습니다.");
+      return;
+    }
+    if (!editFitsTotal(ctx, clip, next)) return;
+    editPause(ctx);
+    editReplaceSel(ctx, next);
+    editTrimPreview(ctx, next, edge, fps);
   }
 
   /* 그림체 바꾸기(design §5.3): 확인 → GET ?variant= → 그 문서로 바꾸고 저장(실행 취소로 되돌릴 수 있다). */
@@ -9555,8 +9903,11 @@
           editRenderExport(ctx);
           editScheduleExportPoll(ctx);
         })
-        .catch(function () {
-          if (editAlive(ctx)) editScheduleExportPoll(ctx);
+        .catch(function (err) {
+          if (!editAlive(ctx)) return;
+          // 재료가 없어졌으면(gen 다시 만들기 등) 같은 실패를 되풀이하지 않고 안내로 바꾼다(지시서 115).
+          if (editGoneKind(err)) editShowGone(ctx, err);
+          else editScheduleExportPoll(ctx);
         });
     }, EDIT_EXPORT_POLL_MS);
   }

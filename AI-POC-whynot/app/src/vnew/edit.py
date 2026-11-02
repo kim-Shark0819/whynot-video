@@ -16,6 +16,8 @@
 외부 호출 래퍼(검사가 가짜로 바꾼다): _download · _upload · _probe_file · _film_file · _export_segment · _export_join ·
 _spawn_export. 파드 안 내보내기 잠금 파일: _pod_lock_try · _pod_lock_release(지시서 111). STORE 는 vpoc.store.STORE 다
 (검사가 모듈 변수로 바꾼다).
+지시서 115: 클립 속도 speed(SPEEDS, 없으면 1 — 1 은 저장하지 않는다). 타임라인 길이 = (out − in) / speed(_clip_seconds).
+재료가 없을 때 요약에 잠김 이유(summary → reason, gen 이 없어도 gen_view 가 부른다).
 """
 
 from __future__ import annotations
@@ -66,6 +68,16 @@ MAX_CLIPS = 200
 MAX_TOTAL_S = 300.0
 MIN_CLIP_S = 0.04  # 25fps 한 프레임
 MAX_LABEL_LEN = 40
+# 클립 속도(지시서 115). 0.5× 는 2배로 늘고 2× 는 반으로 준다. 내보내기는 ffmpeg setpts·atempo 한 번(0.5~2)이다.
+SPEEDS = stitcher.EDIT_SPEED_CHOICES
+# 재료가 없을 때 gen_view 요약의 잠김 이유(지시서 115, 화면 ⑦ 칩의 title·안내). 키는 _lock_reason 이 고른다.
+LOCK_REASONS = {
+    "none": "⑤에서 영상을 먼저 만들면 편집할 수 있습니다.",
+    "running": "⑤에서 영상을 만드는 중입니다. 컷이 하나라도 완성되면 편집할 수 있습니다.",
+    "cancelled": "영상 만들기가 취소됐습니다. ⑤에서 다시 만들면 편집할 수 있습니다.",
+    "failed": "영상을 만들지 못했습니다. ⑤에서 다시 만들면 편집할 수 있습니다.",
+    "other": "편집할 영상이 아직 없습니다. ⑤에서 영상을 먼저 만들면 편집할 수 있습니다.",
+}
 # 저장·내보내기 요청 바디 상한(앱 전체 한도는 영상 업로드용 100MB). 클립 200개 문서는 약 70KB 다.
 MAX_BODY_BYTES = 256 * 1024
 _TIME_EPS = 0.001  # 원본 길이와 비교할 때 허용하는 반올림 오차(초)
@@ -366,8 +378,19 @@ def _presign_download(key: str, n) -> str:
         return ""
 
 
+def _speed_of(clip) -> float:
+    """클립 속도(지시서 115). 없거나 허용 목록(SPEEDS) 밖이면 1."""
+    value = _num(clip.get("speed")) if isinstance(clip, dict) else None
+    return value if value in SPEEDS else 1.0
+
+
+def _clip_seconds(clip: dict) -> float:
+    """클립이 타임라인에서 차지하는 길이(초) = 원본 구간(out − in) ÷ 속도."""
+    return (float(clip.get("out") or 0) - float(clip.get("in") or 0)) / _speed_of(clip)
+
+
 def _total(clips: list[dict]) -> float:
-    return round(sum(float(c.get("out") or 0) - float(c.get("in") or 0) for c in clips if isinstance(c, dict)), 3)
+    return round(sum(_clip_seconds(c) for c in clips if isinstance(c, dict)), 3)
 
 
 def _changed(where: str) -> VpocError:
@@ -585,13 +608,28 @@ def _default_clips(plan: dict, gen: dict, items: list[dict], meta: dict[str, dic
     return clips
 
 
-def summary(gen: dict) -> dict:
-    """gen_view 의 편집 단계 요약(S3 를 읽지 않는다). {available, variants: 재료가 있는 그림체}."""
+def summary(gen: dict | None) -> dict:
+    """gen_view 의 편집 단계 요약(S3 를 읽지 않는다). {available, variants: 재료가 있는 그림체}.
+
+    재료가 없으면 한국어 reason 을 더한다(지시서 115 — 화면이 잠긴 ⑦ 칩의 title·안내로 보인다). gen 이 없어도(None) 부른다.
+    재료가 있으면 reason 키가 없다(지시서 110 보기 그대로).
+    """
     try:
         variants = [v for v in VARIANTS if _material_items(gen, v)]
     except Exception:  # noqa: BLE001 — 보기는 실패하지 않는다.
         variants = []
-    return {"available": bool(variants), "variants": variants}
+    out = {"available": bool(variants), "variants": variants}
+    if not variants:
+        out["reason"] = _lock_reason(gen)
+    return out
+
+
+def _lock_reason(gen) -> str:
+    """재료가 없을 때 ⑦ 이 잠긴 이유(LOCK_REASONS): gen 없음 · 만드는 중 · 취소 · 실패 · 그 밖."""
+    if not isinstance(gen, dict) or not gen:
+        return LOCK_REASONS["none"]
+    status = str(gen.get("status") or "")
+    return LOCK_REASONS[status] if status in ("running", "cancelled", "failed") else LOCK_REASONS["other"]
 
 
 # ================================================================ 길이 재기(probe) 캐시
@@ -701,8 +739,10 @@ def _clean_clips(raw, allowed: set[str], durations: dict[str, float | None], whe
     - id: 영문·숫자·_·- 1~40자, 문서 안에서 겹치지 않는다.
     - sourceKey: 이 gen 그 그림체의 재료(allowed)만. 원본 길이를 못 읽었으면 409 SourceUnreadable.
     - in·out: 유한한 JSON 숫자(bool·글자 아님), 밀리초로 반올림, 0 ≤ in, out ≤ 원본 길이, out − in ≥ 0.04.
+    - speed(지시서 115): 없거나 null 이면 1, 있으면 SPEEDS 중 하나(JSON 숫자). 타임라인 길이((out − in) / speed)도 0.04 이상.
+      1 이면 저장하지 않는다(속도를 안 쓴 문서는 115 전 모양 그대로).
     - muted: 없으면 false, 있으면 bool. label: 글자면 제어 문자를 빼고 40자, 그 밖은 버린다.
-    - 전체 길이 ≤ MAX_TOTAL_S.
+    - 전체 길이(타임라인 길이 합) ≤ MAX_TOTAL_S.
     """
     raw = _check_clip_list(raw, where)
     clips: list[dict] = []
@@ -728,20 +768,28 @@ def _clean_clips(raw, allowed: set[str], durations: dict[str, float | None], whe
         if start is None or end is None:
             raise VpocError(where, "BadClipTime", f"{number}번째 클립의 시작·끝 시간이 올바르지 않습니다.", 400)
         start, end = round(start, 3), round(end, 3)
+        raw_speed = clip.get("speed")
+        speed = 1.0 if raw_speed is None else _num(raw_speed)
+        if speed not in SPEEDS:
+            raise VpocError(where, "BadClip", f"{number}번째 클립의 속도(speed)는 0.5·0.75·1·1.25·1.5·2 중 하나여야 합니다.", 400)
         if start < 0 or end > duration + _TIME_EPS or end - start < MIN_CLIP_S - 1e-9:
             raise VpocError(where, "BadClipRange",
                             f"{number}번째 클립 구간은 원본 길이({duration:.2f}초) 안에서 {MIN_CLIP_S}초 이상이어야 합니다.", 400)
         end = min(end, round(duration, 3))
+        if speed != 1 and (end - start) / speed < MIN_CLIP_S - 1e-9:
+            raise VpocError(where, "BadClipRange", f"{number}번째 클립은 속도를 반영한 길이가 {MIN_CLIP_S}초 이상이어야 합니다.", 400)
         muted = clip.get("muted", False)
         if not isinstance(muted, bool):
             raise VpocError(where, "BadClipMuted", f"{number}번째 클립의 소리 끄기(muted) 값이 올바르지 않습니다.", 400)
         item = {"id": clip_id, "sourceKey": source, "in": start, "out": end, "muted": muted}
+        if speed != 1:
+            item["speed"] = speed
         label = clip.get("label")
         if isinstance(label, str):
             label = _CONTROL_RE.sub("", label).strip()[:MAX_LABEL_LEN]
             if label:
                 item["label"] = label
-        total += end - start
+        total += (end - start) / speed
         clips.append(item)
     if total > MAX_TOTAL_S + 1e-6:
         raise VpocError(where, "TooLong", f"타임라인 전체 길이는 {MAX_TOTAL_S:.0f}초까지입니다.", 400)
@@ -749,8 +797,17 @@ def _clean_clips(raw, allowed: set[str], durations: dict[str, float | None], whe
 
 
 def _doc_hash(variant: str, clips: list[dict]) -> str:
-    """내보내기 결과를 정하는 값만(그림체·원본·구간·소리)의 sha256. 클립 id·이름은 넣지 않는다."""
-    body = [{"sourceKey": c["sourceKey"], "in": c["in"], "out": c["out"], "muted": bool(c.get("muted"))} for c in clips]
+    """내보내기 결과를 정하는 값만(그림체·원본·구간·소리·속도)의 sha256. 클립 id·이름은 넣지 않는다.
+
+    속도는 1 이 아닐 때만 넣는다(지시서 115 — 속도를 안 쓴 문서·진행 중 내보내기의 해시가 115 전과 같다).
+    """
+    body = []
+    for c in clips:
+        item = {"sourceKey": c["sourceKey"], "in": c["in"], "out": c["out"], "muted": bool(c.get("muted"))}
+        speed = _speed_of(c)
+        if speed != 1:
+            item["speed"] = speed
+        body.append(item)
     text = json.dumps({"variant": variant, "clips": body}, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
@@ -1193,12 +1250,15 @@ def _export_geometry(first: dict) -> tuple[int, int, int]:
 
 
 def _clip_frames(clips: list[dict], fps: int) -> list[int]:
-    """클립별 프레임 수. 누적 시간을 반올림해 나눠 클립이 많아도 전체가 문서 합과 한 프레임 안에서 맞는다(최소 1장)."""
+    """클립별 프레임 수. 누적 시간을 반올림해 나눠 클립이 많아도 전체가 문서 합과 한 프레임 안에서 맞는다(최소 1장).
+
+    시간은 타임라인 길이(속도 반영, 지시서 115)다.
+    """
     frames: list[int] = []
     clock = 0.0
     placed = 0
     for clip in clips:
-        clock += float(clip["out"]) - float(clip["in"])
+        clock += _clip_seconds(clip)
         count = max(1, int(round(clock * fps)) - placed)
         frames.append(count)
         placed += count
@@ -1310,6 +1370,7 @@ def run_export(owner: str, pid: str, gen_id: str, n: int, claim: str) -> None:
                         path, seg_video, start_sec=start, frames=frames[index], fps=fps, width=width, height=height,
                         audio_out=seg_audio,
                         audio_from_source=bool(audio_path) and not clip.get("muted") and bool(info.get("hasAudio")),
+                        speed=_speed_of(clip),  # 지시서 115: 영상 setpts·소리 atempo(1 이면 115 전 명령 그대로)
                     )
                 finally:
                     generate._PREPARE_SEM.release()  # noqa: SLF001

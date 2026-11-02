@@ -417,6 +417,8 @@ EDIT_AUDIO_RATE = 48000  # 편집 내보내기 소리 샘플레이트(Hz). 아�
 EDIT_AUDIO_BYTES_PER_SAMPLE = 4  # s16le 스테레오 = 2바이트 × 2채널
 EDIT_FPS_CHOICES = (12, 15, 16, 20, 24, 25, 30, 40, 48, 50, 60)  # 48000 을 나누어떨어지게 하는 fps
 EDIT_PEAKS_RATE = 8000  # 파형 피크를 셀 때 디코드하는 샘플레이트(모노)
+# 편집 클립 속도(지시서 115). 영상 setpts·소리 atempo(피치 유지)로 늘이고 줄인다. atempo 한 번이 받는 범위(0.5~2) 안이다.
+EDIT_SPEED_CHOICES = (0.5, 0.75, 1.0, 1.25, 1.5, 2.0)
 
 
 def _edit_nice() -> list[str]:
@@ -497,6 +499,7 @@ def edit_segment(
     height: int,
     audio_out: str = "",
     audio_from_source: bool = False,
+    speed: float = 1.0,
     threads: int | None = 1,
 ) -> dict:
     """편집 내보내기의 클립 한 개(지시서 110). 원본의 start_sec 부터 frames 장을 width×height·fps 로 다시 인코딩한다.
@@ -505,6 +508,8 @@ def edit_segment(
       정확히 frames 장. 소리 트랙은 넣지 않는다.
     - 소리(audio_out 이 있을 때): audio_from_source 면 같은 구간을 48kHz 스테레오 s16le 원시 PCM 으로, 아니면 무음.
       어느 쪽이든 길이를 정확히 frames/fps 초(샘플 = frames × 48000 / fps)로 맞춘다(남으면 자르고 모자라면 무음).
+    - speed(지시서 115, EDIT_SPEED_CHOICES): 영상 setpts=(PTS-STARTPTS)/speed, 소리 atempo=speed(피치 유지). 0.5 면 원본
+      1초가 2초가 되고 2 면 원본 2초가 1초가 된다. frames·PCM 길이 규칙은 그대로다. 1 이면 명령이 115 전과 같다.
     반환 {"video": video_out, "audio": audio_out 또는 "", "frames": frames, "samples": 샘플 수}.
     """
     import math
@@ -516,6 +521,7 @@ def edit_segment(
     width = int(width)
     height = int(height)
     start = float(start_sec or 0.0)
+    speed = float(speed) if isinstance(speed, (int, float)) and not isinstance(speed, bool) else 0.0
     if (
         frames < 1
         or fps not in EDIT_FPS_CHOICES
@@ -525,13 +531,17 @@ def edit_segment(
         or height % 2
         or not math.isfinite(start)
         or start < 0
+        or speed not in EDIT_SPEED_CHOICES
     ):
         raise StitchError("편집 구간 값이 올바르지 않습니다.")
     seconds = frames / fps
     samples = frames * EDIT_AUDIO_RATE // fps
     binary = ffmpeg_path()
+    retimed = speed != 1.0
     video_filter = (
-        f"trim=start={start:.3f},setpts=PTS-STARTPTS,fps={fps},"
+        f"trim=start={start:.3f},"
+        + (f"setpts=(PTS-STARTPTS)/{speed:g}," if retimed else "setpts=PTS-STARTPTS,")
+        + f"fps={fps},"
         f"scale={width}:{height}:force_original_aspect_ratio=decrease,"
         f"pad={width}:{height}:(ow-iw)/2:(oh-ih)/2:color=black,setsar=1,format=yuv420p,"
         "tpad=stop_mode=clone:stop_duration=1"
@@ -547,8 +557,9 @@ def edit_segment(
     ]
     pcm_from_source = bool(audio_out) and bool(audio_from_source)
     if pcm_from_source:
+        audio_filter = f"atrim=start={start:.3f},asetpts=PTS-STARTPTS" + (f",atempo={speed:g}" if retimed else "")
         command += [
-            "-map", "0:a:0", "-vn", "-af", f"atrim=start={start:.3f},asetpts=PTS-STARTPTS",
+            "-map", "0:a:0", "-vn", "-af", audio_filter,
             "-t", f"{seconds:.6f}", "-ac", "2", "-ar", str(EDIT_AUDIO_RATE),
             "-c:a", "pcm_s16le", "-f", "s16le", audio_out,
         ]
@@ -560,8 +571,8 @@ def edit_segment(
         if not pcm_from_source and os.path.exists(audio_out):
             os.unlink(audio_out)
         _fit_pcm(audio_out, samples * EDIT_AUDIO_BYTES_PER_SAMPLE)
-    logger.info("Edit segment start=%.3fs frames=%d fps=%d size=%dx%d audio=%s", start, frames, fps, width, height,
-                "source" if pcm_from_source else ("silence" if audio_out else "none"))
+    logger.info("Edit segment start=%.3fs frames=%d fps=%d size=%dx%d audio=%s speed=%g", start, frames, fps, width, height,
+                "source" if pcm_from_source else ("silence" if audio_out else "none"), speed)
     return {"video": video_out, "audio": audio_out or "", "frames": frames, "samples": samples if audio_out else 0}
 
 
