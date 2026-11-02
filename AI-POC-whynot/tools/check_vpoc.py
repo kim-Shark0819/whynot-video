@@ -21535,7 +21535,7 @@ def _cast_screen_problems(got: dict) -> list[str]:
     changed = "금액이 바뀌었습니다. 새 금액은 $0.12입니다. 다시 누르면 새 금액으로 확인합니다."
     lock_draw = "사진을 만드는 동안에는 느낌·성별·외모 문장을 바꿀 수 없습니다."
     lock_build = "캐릭터를 만드는 동안에는 실사 캐스팅을 쓸 수 없습니다."
-    using_none = "실사 버전에 쓰는 사진: 실사 정면 (캐스팅 사진을 고르지 않았습니다)"
+    using_none = "실사 버전에 쓰는 사진: 실사 정면 (기본 · 캐스팅 사진은 [이 사진으로]를 눌러야 쓰입니다)"  # 지시서 114 문구
     genders = ["남", "여", "모름"]
     want_pure = {
         "options": [["자동(분석: 여)"] + genders, ["자동(분석: 모름)"] + genders, ["자동(분석: 모름)"] + genders],
@@ -21648,7 +21648,7 @@ def check_vnew_casting() -> None:
              칸 2 queued·round·usd·claim·스레드 1·prompt = cast_prompt, 다시 → 409 CastingRunning, history 이동(최신 먼저 12·chosen 남김)·
              chosen 유지(결정 5)·lookEdited·update_settings 되돌리기, 캐릭터 status·variants 그대로
     (cast-f) run_draw(가짜 fal): 제출 2건·본문 키 정확히 {prompt, num_images, image_size}·큐 주소, 진행 중 → 5초 쉼, S3 users/{owner}/
-             characters/{cid}/casting/ JPEG ≤1536 2장, 원장 2건 $0.04(키·모델·사용자), ready·첫 후보 선택·claim 해제, 다시 돌려도 0건
+             characters/{cid}/casting/ JPEG ≤1536 2장, 원장 2건 $0.04(키·모델·사용자), ready·chosen 빈 값(지시서 114)·claim 해제, 다시 돌려도 0건
     (cast-g) 한 칸 422 거절(문구) + 503 일시 오류 뒤 완료 → 후보 1·ready·오류 요약·원장 1, 두 칸 실패 → failed·원장 0, 요청 ID 없음·
              이상한 ID·FAILED·http 결과·읽을 수 없는 사진·내려받기 일시 오류·뜻밖의 예외 → 그 칸만, 프리셋 = 회차 문장
     (cast-h) 이어하기: 오래된 하트비트·submitted 1·queued 1 → queued 는 failed(제출 0)·새 claim·스레드 1, 이어 조회 → 결과·원장 1,
@@ -22287,11 +22287,12 @@ def check_vnew_casting() -> None:
                     or any(call["kind"] != "image" or call["usd"] != 0.04 or call["units"] != 1 or call["model"] != model
                            or call["user"] != owner or call["project_id"] != cid_f for call in ledger_calls):
                 bad.append(f"(cast-f) 원장이 사진 2장 × $0.04 가 아닙니다: {ledger_calls}")
-            if cast_f["status"] != "ready" or cast_f["error"] or len(cand_ids) != 2 or cast_f["chosen"] != cand_ids[0] or cast_f["claim"] \
+            # 지시서 114: 뽑기가 끝나도 첫 후보를 고르지 않는다(chosen 빈 값 = 실사 정면). 전에는 cand_ids[0] 이었다.
+            if cast_f["status"] != "ready" or cast_f["error"] or len(cand_ids) != 2 or cast_f["chosen"] != "" or cast_f["claim"] \
                     or [s["status"] for s in cast_f["slots"]] != ["ready", "ready"] \
                     or sorted(s["candidateId"] for s in cast_f["slots"]) != sorted(cand_ids) \
                     or any(item["preset"] != "idol" or item["round"] != 1 for item in cast_f["candidates"]):
-                bad.append(f"(cast-f) 끝난 저장본이 ready·후보 2·첫 후보 선택·claim 해제가 아닙니다: {cast_f['status']} {cast_f['slots']}")
+                bad.append(f"(cast-f) 끝난 저장본이 ready·후보 2·chosen 빈 값·claim 해제가 아닙니다: {cast_f['status']} {cast_f['slots']}")
             if sleeps != [5, 5] or any(not url.startswith("https://fal.media/") for url in fetched) or len(fetched) != 2:
                 bad.append(f"(cast-f) 진행 중 쉼(5초)·내려받기 주소가 다릅니다: {sleeps} {fetched}")
             if frozen(char_f) != before_f or castmod._running(owner, cid_f):  # noqa: SLF001
@@ -22317,7 +22318,7 @@ def check_vnew_casting() -> None:
             if cast_g["status"] != "ready" or len(cast_g["candidates"]) != 1 or len(ledger_calls) != 1 \
                     or [s["status"] for s in cast_g["slots"]] != ["failed", "ready"] or cast_g["slots"][0]["error"] != reject_msg \
                     or cast_g["error"] != f"사진 2장 중 1장을 만들지 못했습니다: {reject_msg}"[:300] \
-                    or cast_g["candidates"][0]["preset"] != "real" or cast_g["chosen"] != cast_g["candidates"][0]["id"]:
+                    or cast_g["candidates"][0]["preset"] != "real" or cast_g["chosen"] != "":  # 지시서 114: 첫 후보를 고르지 않는다
                 bad.append(f"(cast-g) 한 칸 거절·한 칸 일시 오류 뒤 완료가 다릅니다: {cast_g['status']} {cast_g['slots']} {cast_g['error']}")
             cid_g2 = "char_cast_g2"
             seed_char(cid_g2)
@@ -22582,8 +22583,8 @@ def check_vnew_casting() -> None:
             view_f = detail_f.get("casting") or {}
             urls_f = [item["url"] for item in view_f.get("candidates") or []]
             if len(urls_f) != 2 or any(not url.startswith(f"https://signed.example/users/{owner}/characters/{cid_f}/casting/k_") for url in urls_f) \
-                    or view_f.get("chosenUrl") != urls_f[0] or view_f.get("status") != "ready":
-                bad.append(f"(cast-j) 후보 사진이 presigned 주소가 아닙니다: {urls_f}")
+                    or view_f.get("chosenUrl") != "" or view_f.get("status") != "ready":  # 지시서 114: 고르지 않았으니 chosenUrl 빈 값
+                bad.append(f"(cast-j) 후보 사진이 presigned 주소가 아니거나 chosenUrl 이 빈 값이 아닙니다: {urls_f} {view_f.get('chosenUrl')!r}")
             with _pin_vnew(VNEW_CASTING=False):
                 off_j = [call("PUT", base_url, {"preset": "idol"})[0:3:2], call("POST", base_url + "/draw", {"confirmUsd": 0.08})[0:3:2],
                          call("POST", base_url + "/choose", {"candidateId": ""})[0:3:2]]
@@ -30070,17 +30071,17 @@ def check_vnew_outfit_button() -> None:
         prod_bytes = (ROOT / "deploy" / "config.prod.env").read_bytes()
         expect("ob-d", [prod_bytes[:3] == b"\xef\xbb\xbf", prod_bytes.count(b"\r"),
                         prod_bytes.decode("utf-8-sig").splitlines()[-2:]],
-               [True, 0, ["# 2026-10-30, 운영은 스토리 만들기를 유지: vnew 를 켜도 만들기 창의 story 버튼을 숨기지 않는다(base 기본 true = 숨김).",
-                          "VNEW_HIDE_STORY=false"]], "config.prod.env BOM·LF·끝 두 줄(주석 + VNEW_HIDE_STORY=false)")
+               [True, 0, ["# 2026-11-02 사용자 지시: 운영도 개발과 같이 만들기 창의 스토리 개발을 숨긴다(이미 있는 스토리 프로젝트·데이터는 그대로). 되돌리기는 false + 운영 job.",
+                          "VNEW_HIDE_STORY=true"]], "config.prod.env BOM·LF·끝 두 줄(주석 + VNEW_HIDE_STORY=true, 2026-11-02)")
         try:
             spec = importlib.util.spec_from_file_location("_vpoc_deploy_render_ob", ROOT / "deploy" / "render.py")
             render = importlib.util.module_from_spec(spec)
             spec.loader.exec_module(render)  # type: ignore[union-attr]
             base = render.load_config(example_path)
             overlays = {t: render.load_config(ROOT / "deploy" / f"config.{t}.env") for t in ("prod", "dev")}
-            expect("ob-d", [overlays["prod"].get("VNEW_HIDE_STORY"), "VNEW_HIDE_STORY" in overlays["dev"]], ["false", False],
-                   "오버레이: prod false · dev 없음(base true)")
-            for target, extra, want in (("prod", {}, "false"), ("dev", {}, "true"), ("prod", {"VNEW_HIDE_STORY": "true"}, "true")):
+            expect("ob-d", [overlays["prod"].get("VNEW_HIDE_STORY"), "VNEW_HIDE_STORY" in overlays["dev"]], ["true", False],
+                   "오버레이: prod true(2026-11-02) · dev 없음(base true)")
+            for target, extra, want in (("prod", {}, "true"), ("dev", {}, "true"), ("prod", {"VNEW_HIDE_STORY": "false"}, "false")):
                 layer = {**overlays[target], **extra}
                 label = target + ("+true" if extra else "")
                 unknown = sorted(set(layer) - set(base))
@@ -30129,7 +30130,7 @@ def check_vnew_outfit_button() -> None:
         on_rest = {"vnew": [False, False], "video": [["영상만들기_기존", "지금 쓰는 영상 기능"]] * 2, "nav": False, "unknown": []}
         off_rest = {"vnew": [True, True], "video": [["영상 개발로 진행", "웹툰 컷 → 영상"]] * 2, "nav": True, "unknown": []}
         want = {
-            "renderProd": dict(on_rest, hideStory=False, story=[False, False]),
+            "renderProd": dict(on_rest, hideStory=True, story=[True, True]),  # 2026-11-02 운영도 스토리 숨김
             "renderDev": dict(on_rest, hideStory=True, story=[True, True]),
             "true": dict(on_rest, hideStory=True, story=[True, True]),
             "missing": dict(on_rest, hideStory=True, story=[True, True]),
@@ -32109,13 +32110,14 @@ def check_vnew_cast_photo_guard() -> None:
                     or not cast["prompt"].endswith(" " + anchor_m) or posts()[0][2]["prompt"] != cast["prompt"] \
                     or not logs.messages(f"vnew.cast.photo_check slot=0 photo=true style=photo redraw=0 cid={cid}", level=logging.INFO):
                 bad.append(f"(cpg-e) 실사 → 후보 1·원장 1·제출 1 이 아닙니다: {cast['slots']} {keys()} {len(posts())}")
+            # 지시서 114: 아래 경우 모두 뽑기가 끝나도 chosen 은 빈 값이다(전에는 첫 후보였다 — 실사 버전 기본 = 실사 정면)
             cid = "char_cpg_redraw"
             cast = draw(cid, ["drawing", "photo"])
             p_e = posts()
             want_slot = {"slot": 0, "status": "ready", "requestArn": f"fal/requests/{model}/{made[1]}" if len(made) > 1 else "",
                          "candidateId": cand(made[1]) if len(made) > 1 else "", "error": "", "redraws": 1}
             if cast["status"] != "ready" or cast["error"] or len(made) != 2 or [item["id"] for item in cast["candidates"]] != [cand(made[1])] \
-                    or cast["chosen"] != cand(made[1]) or cast["slots"] != [want_slot] or len(p_e) != 2 or p_e[0][1:] != p_e[1][1:] \
+                    or cast["chosen"] != "" or cast["slots"] != [want_slot] or len(p_e) != 2 or p_e[0][1:] != p_e[1][1:] \
                     or set(p_e[1][2]) != {"prompt", "num_images", "image_size"} or p_e[1][2]["prompt"] != cast["prompt"] \
                     or keys() != [f"vnew-cast-{cid}-{cand(rid)}" for rid in made] or len(llm_calls) != 2 \
                     or [call["verdict"] for call in llm_calls] != ["drawing", "photo"] \
@@ -32132,7 +32134,7 @@ def check_vnew_cast_photo_guard() -> None:
             cast = draw(cid, ["drawing", "drawing", "photo"])
             p_t = posts()
             if len(made) != 3 or len(set(made)) != 3 or cast["status"] != "ready" or cast["error"] \
-                    or [item["id"] for item in cast["candidates"]] != [cand(made[2])] or cast["chosen"] != cand(made[2]) \
+                    or [item["id"] for item in cast["candidates"]] != [cand(made[2])] or cast["chosen"] != "" \
                     or cast["slots"] != [{"slot": 0, "status": "ready", "requestArn": f"fal/requests/{model}/{made[2]}",
                                           "candidateId": cand(made[2]), "error": "", "redraws": 2}] \
                     or len(p_t) != 3 or any(call[1:] != p_t[0][1:] for call in p_t) or p_t[2][2]["prompt"] != cast["prompt"] \
@@ -32206,7 +32208,7 @@ def check_vnew_cast_photo_guard() -> None:
                     or cast["slots"][0] != {"slot": 0, "status": "failed", "requestArn": f"fal/requests/{model}/{made[3]}", "candidateId": "",
                                             "error": _CPG_NOT_PHOTO, "redraws": 2} \
                     or keys() != [f"vnew-cast-{cid}-{cand(rid)}" for rid in made] or len(posts()) != 4 \
-                    or blobs(cid) != [charmod.casting_key(owner, cid, cand(made[1]))] or cast["chosen"] != cand(made[1]) \
+                    or blobs(cid) != [charmod.casting_key(owner, cid, cand(made[1]))] or cast["chosen"] != "" \
                     or cast["error"] != f"사진 2장 중 1장을 만들지 못했습니다: {_CPG_NOT_PHOTO}":
                 bad.append(f"(cpg-e) 한 칸 그림체가 다른 칸에 영향을 줬습니다: {cast['slots']} {keys()}")
             # 버린 그림체 사진은 S3 put 0: 위 모든 경우의 put 은 이번 경우만 보지만, 저장소 전체에서도 초록(그림체) 사진이 없다
@@ -35172,6 +35174,468 @@ def stray_call_quiet(name: str):
     return failing
 
 
+# ---------------------------------------------------------------- 지시서 114 — 실사 캐스팅 기본 = 실사 정면(cast-default-front, cdf-)
+#
+# 스펙 .kiro/specs/cast-default-front/. 뽑기가 끝나도 첫 후보를 chosen 에 넣지 않는다(빈 값 = 실사 버전은 실사 정면). 사용자가
+# [이 사진으로](POST …/casting/choose)를 눌러야만 캐스팅 사진이 쓰인다. 저장된 chosen 은 고치지 않는다(이행 코드 없음).
+# 외부 호출은 모두 가짜다: fal(casting._fal_request·_fetch_url), 원장(ledger.charge), S3(_FakeCharStore), LLM 은 _guard_real_llm 이 막는다.
+# 라우트(Flask)·저장소 조건부 쓰기·run_draw·_finish·reconcile·choose·view·generate._char_entries·_real_front_key 는 실제 코드 경로다.
+
+_CDF_USING_FRONT = "실사 버전에 쓰는 사진: 실사 정면 (기본 · 캐스팅 사진은 [이 사진으로]를 눌러야 쓰입니다)"
+_CDF_USING_CHOSEN = "실사 버전에 쓰는 사진: 고른 캐스팅 사진"
+
+# cdf-f: vnew.js 캐스팅 칸(node 가짜 DOM, _CAST_SCREEN_NODE_HARNESS 그대로). SERVER 는 라우트 GET 상세의 실제 casting 보기다.
+_CDF_SCREEN_NODE_CASES = r"""
+function detailOf(cast) { return { id: "ch 1", status: "ready", casting: cast }; }
+function shape(section) {
+  return {
+    using: byClass(section, "vnew-casting-using").map(function (n) { return n.textContent; }),
+    front: byClass(section, "vnew-casting-front").map(function (n) { return n.textContent; }),
+    picks: byClass(section, "vnew-casting-pick").length,
+    badges: byClass(section, "vnew-casting-badge").length,
+    chosenFigs: byClass(section, "is-chosen").length
+  };
+}
+async function run() {
+  out.pure = [castingUsingText({}), castingUsingText({ chosen: "" }), castingUsingText(null), castingUsingText({ chosen: "k_x" })];
+  var host = new FakeNode("div");
+  out.done = shape(castingSection(host, detailOf(SERVER.done)));
+  out.picked = shape(castingSection(host, detailOf(SERVER.picked)));
+  out.front = shape(castingSection(host, detailOf(SERVER.front)));
+  reset();
+  var s1 = castingSection(host, detailOf(SERVER.done));
+  var pick1 = byClass(s1, "vnew-casting-pick")[1];
+  if (pick1) { pick1.fire("click"); await tick(); }
+  out.pickCall = [calls.slice(), refreshed.slice()];
+  reset();
+  var s2 = castingSection(host, detailOf(SERVER.picked));
+  var front2 = byClass(s2, "vnew-casting-front")[0];
+  if (front2) { front2.fire("click"); await tick(); }
+  out.frontCall = [calls.slice(), refreshed.slice()];
+  out.innerHTML = innerHTMLUsed;
+  console.log(JSON.stringify(out));
+}
+run().catch(function (e) { console.error((e && e.stack) || String(e)); process.exit(1); });
+"""
+
+
+def _cdf_chosen_writers(source: str) -> list[str]:
+    """casting.py 에서 저장값 chosen 을 쓰는 곳(x["chosen"] = …, x.update(chosen=…), x.setdefault("chosen", …))이 있는 최상위 함수 이름들.
+
+    _empty_casting 의 기본값(dict 리터럴)과 view 의 보기 dict 는 쓰기가 아니라 세지 않는다. 지시서 114 뒤에는 ["choose"] 하나여야 한다.
+    """
+    import ast as _ast  # noqa: PLC0415
+
+    found: list[str] = []
+    for top in _ast.parse(source).body:
+        if not isinstance(top, (_ast.FunctionDef, _ast.AsyncFunctionDef)):
+            continue
+        for node in _ast.walk(top):
+            targets = []
+            if isinstance(node, _ast.Assign):
+                targets = node.targets
+            elif isinstance(node, (_ast.AugAssign, _ast.AnnAssign)):
+                targets = [node.target]
+            hit = any(isinstance(t, _ast.Subscript) and isinstance(t.slice, _ast.Constant) and t.slice.value == "chosen" for t in targets)
+            if isinstance(node, _ast.Call) and isinstance(node.func, _ast.Attribute):
+                if node.func.attr == "update" and any(k.arg == "chosen" for k in node.keywords):
+                    hit = True
+                if node.func.attr == "setdefault" and node.args and isinstance(node.args[0], _ast.Constant) \
+                        and node.args[0].value == "chosen":
+                    hit = True
+            if hit:
+                found.append(top.name)
+    return found
+
+
+def check_vnew_cast_default_front() -> None:
+    """지시서 114 — 실사 캐스팅을 뽑아도 기본은 "실사 정면"(.kiro/specs/cast-default-front). 외부 호출은 모두 가짜다.
+
+    (cdf-a) 뽑기가 끝난 뒤 chosen 빈 값: 라우트 POST /casting/draw → run_draw(가짜 fal) 2장 ready·한 칸 거절(ready 1)·두 칸 거절(failed)·
+            시간 초과(GET 상세 → reconcile 이어받기 → _finish(timed_out)) 모두 저장 chosen ""·보기 chosen·chosenUrl ""·
+            _char_entries castingKey ""·_real_front_key = 실사 정면 키, 끝 로그 그대로
+    (cdf-b) 미리 고른 사진이 있으면 그대로: 고른 사진(k_old, 이번 후보·이전 사진) 있는 캐릭터를 다시 뽑기 → 끝난 뒤 chosen 그대로·history 에 남음·
+            castingKey = 그 사진 키
+    (cdf-c) [이 사진으로] 뒤: POST /choose 두 번째 후보 → chosen·chosenUrl·castingKey·_real_front_key = 그 사진, 다시 뽑아도 그대로
+    (cdf-d) [실사 정면 쓰기] 뒤: POST /choose "" → chosen·chosenUrl·castingKey 빈 값·_real_front_key = 실사 정면, 다시 뽑아도 빈 값
+    (cdf-e) 이행 없음: 자동 선택 시절 저장본(chosen = 첫 후보)·없는 id 를 가리키는 저장본 → GET 상세·뽑기 뒤에도 chosen 그대로,
+            casting.py 에서 chosen 을 쓰는 함수는 choose 하나(AST)
+    (cdf-f) 화면(node 가짜 DOM, 실제 GET 상세 보기): castingUsingText 4꼴, 뽑기 끝(고름 없음)·[실사 정면 쓰기] 뒤 → 기본 문구·[실사 정면 쓰기]
+            없음·후보마다 [이 사진으로]·배지 0, 고른 뒤 → 고른 문구·[실사 정면 쓰기]·배지 1, 두 버튼 → choose 본문, innerHTML 0, node --check
+    """
+    sys.path.insert(0, str(ROOT / "app"))
+    import json as _json  # noqa: PLC0415
+    import traceback as _tb  # noqa: PLC0415
+    from datetime import datetime as _dt, timedelta as _td, timezone as _tz  # noqa: PLC0415
+
+    from flask import Flask  # noqa: PLC0415
+
+    from src import vnew  # noqa: PLC0415
+    from src.vnew import casting as castmod  # noqa: PLC0415
+    from src.vnew import characters as charmod  # noqa: PLC0415
+    from src.vnew import generate as genmod  # noqa: PLC0415
+    from src.vnew import settings as vset  # noqa: PLC0415
+    from src.vpoc import fal as vpoc_fal  # noqa: PLC0415
+    from src.vpoc import settings as vpoc_settings  # noqa: PLC0415
+    from src.vpoc.errors import VpocError  # noqa: PLC0415
+
+    bad: list[str] = []
+    seen: set[str] = set()
+    report: list[str] = []
+    owner = "tester"
+    fake_store = _FakeCharStore()
+    stray: list[str] = []
+    spawned: list[tuple] = []
+    saved = {
+        "STORE": charmod.STORE, "cast_fal": castmod._fal_request, "cast_fetch": castmod._fetch_url,  # noqa: SLF001
+        "cast_spawn": castmod._spawn, "cast_sleep": castmod._sleep, "charge": castmod.vpoc_ledger.charge,  # noqa: SLF001
+        "char_fal": charmod._fal_request, "vpoc_request": vpoc_fal._request, "fal_key": vpoc_settings.FAL_KEY,  # noqa: SLF001
+        "resume_variant": charmod.run_resume_variant,
+    }
+
+    def stray_call(name):
+        def blocked(*_a, **_k):
+            stray.append(name)
+            raise RuntimeError(f"쓰면 안 되는 호출: {name}")
+        return blocked
+
+    # ---- 가짜 fal: 제출마다 post_plan 에서 "ok"(기본)·"reject"(422 거절)를 꺼낸다. 상태는 늘 COMPLETED, 결과는 https 사진 하나.
+    post_plan: list[str] = []
+    posts: list[dict] = []
+    seq = {"n": 0}
+
+    def fake_fal(method, url, payload=None):
+        if method == "POST":
+            posts.append(payload)
+            if (post_plan.pop(0) if post_plan else "ok") == "reject":
+                raise VpocError("vnew.casting", "HTTP422", "Unprocessable Entity: prompt rejected", 502)
+            seq["n"] += 1
+            return {"request_id": f"cdf-{seq['n']}"}
+        if url.endswith("/status"):
+            return {"status": "COMPLETED"}
+        rid = url.split("/requests/", 1)[1].split("/", 1)[0]
+        return {"images": [{"url": f"https://fal.media/files/cdf/{rid}.jpg"}]}
+
+    tiny = _tiny_jpeg(64, 64)
+    ledger: list[str] = []
+
+    def fake_charge(key, **_kwargs):
+        ledger.append(key)
+        return {"spentUsd": 0.0, "capUsd": None}
+
+    analysis = {
+        "nameGuess": "건우", "descriptionKo": "30대 남성.", "appearanceEn": "A tall Korean man in his thirties with short black hair.",
+        "styleEn": "Thin lines.", "baseOutfitEn": "", "outfitEn": "", "outfitLayersEn": [], "altOutfitsEn": [],
+        "expressionsKo": [], "extraEn": "", "model": "m", "genderEn": "male",
+    }
+
+    def front_key(cid) -> str:
+        return f"users/{owner}/characters/{cid}/real/v1/front.jpg"
+
+    def seed_char(cid, casting=None):
+        char = charmod.new_char("범건우")
+        char["id"] = cid
+        char["analysis"] = dict(analysis)
+        char["version"] = 1
+        char["status"] = "ready"
+        for name, variant in char["variants"].items():
+            variant.update(status="ready", frontKey=f"users/{owner}/characters/{cid}/{name}/v1/front.jpg")
+        if casting is not None:
+            char["casting"] = casting
+        charmod.save_char(owner, cid, char)
+        return char
+
+    def load_c(cid):
+        return charmod.load_char(owner, cid)[0]
+
+    def iso_ago(seconds: float) -> str:
+        return (_dt.now(_tz.utc) - _td(seconds=seconds)).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    def ready_cast(chosen, candidates, history=()):
+        """끝난 회차 저장본(자동 선택 시절·고른 뒤 꼴). 사진 키는 이 사용자·캐릭터 casting/ 아래."""
+        return {"preset": "real", "gender": "", "lookEn": "", "lookEdited": False, "status": "ready", "error": "", "round": 1,
+                "usd": 0.08, "startedAt": iso_ago(2000), "heartbeatAt": iso_ago(2000), "claim": "", "claimedAt": "", "prompt": "P",
+                "slots": [], "candidates": list(candidates), "history": list(history), "chosen": chosen}
+
+    def photo(cid, cand_id, round_no=1):
+        key = charmod.casting_key(owner, cid, cand_id)
+        fake_store.blobs[key] = tiny
+        return {"id": cand_id, "key": key, "preset": "real", "round": round_no, "createdAt": "t"}
+
+    def entry_of(cid) -> dict:
+        entries = genmod._char_entries(owner, {"characters": [{"charId": cid, "roleName": "건우"}]})  # noqa: SLF001
+        return entries[0] if entries else {}
+
+    def uses(cid) -> tuple[str, str]:
+        """(_char_entries castingKey, _real_front_key) — 통 테이크 실사 버전이 실제로 쓰는 인물 사진 키."""
+        entry = entry_of(cid)
+        return str(entry.get("castingKey")), genmod._real_front_key(entry)  # noqa: SLF001
+
+    logs = _LogCapture()
+    try:
+        charmod.STORE = fake_store
+        castmod._fal_request = fake_fal  # noqa: SLF001
+        castmod._fetch_url = lambda _url: tiny  # noqa: SLF001
+        castmod._spawn = lambda o, c, t: spawned.append((o, c, t))  # noqa: SLF001
+        castmod._sleep = lambda _s: None  # noqa: SLF001
+        castmod.vpoc_ledger.charge = fake_charge
+        charmod._fal_request = stray_call("characters._fal_request")  # noqa: SLF001
+        vpoc_fal._request = stray_call("vpoc.fal._request")  # noqa: SLF001
+        charmod.run_resume_variant = stray_call("characters.run_resume_variant")
+        vpoc_settings.FAL_KEY = "test-fal-key"
+        with _guard_real_llm() as real_calls, logs, _pin_vnew(VNEW_CASTING=True, VNEW_CAST_PHOTO_CHECK=False, VNEW_TERM_SEARCH=False,
+                                                              VNEW_CASTING_COUNT=2):
+            app = Flask("cdf")
+            app.register_blueprint(vnew.create_blueprint(vnew.VnewDependencies(require_auth=lambda handler: handler,
+                                                                               current_owner=lambda: owner)))
+            client = app.test_client()
+
+            def call(method, path, body=None):
+                resp = client.open(path, method=method, json=body)
+                data = resp.get_json(silent=True) or {}
+                kind = str(((data.get("error") or {}) if isinstance(data, dict) else {}).get("type") or "")
+                return resp.status_code, data, kind
+
+            def detail_cast(cid) -> dict:
+                status, data, _kind = call("GET", f"/api/vnew/characters/{cid}")
+                return (data.get("casting") or {}) if status == 200 else {"status": f"HTTP{status}"}
+
+            def draw(cid, plan=()) -> tuple[int, dict]:
+                """라우트로 뽑기를 시작하고 뽑기 스레드 본문(run_draw)을 이 자리에서 끝까지 돌린다. (시작 HTTP 상태, 끝난 저장 casting)."""
+                spawned.clear()
+                post_plan[:] = list(plan)
+                status, _data, _kind = call("POST", f"/api/vnew/characters/{cid}/casting/draw",
+                                            {"confirmUsd": castmod.total_usd("real"), "preset": "real"})
+                if status == 202 and len(spawned) == 1:
+                    castmod.run_draw(owner, cid, spawned[-1][2])
+                return status, load_c(cid).get("casting") or {}
+
+            def choose(cid, cand_id) -> int:
+                return call("POST", f"/api/vnew/characters/{cid}/casting/choose", {"candidateId": cand_id})[0]
+
+            # ================= (cdf-a) 뽑기가 끝난 뒤 chosen 빈 값 =================
+            cid_a = "char_cdf_a"
+            seed_char(cid_a)
+            logs.clear()
+            status_a, cast_a = draw(cid_a)
+            view_a = detail_cast(cid_a)
+            ids_a = [item.get("id") for item in cast_a.get("candidates") or []]
+            if status_a != 202 or cast_a.get("status") != "ready" or len(ids_a) != 2 or cast_a.get("chosen") != "" \
+                    or view_a.get("chosen") != "" or view_a.get("chosenUrl") != "" or [p.get("id") for p in view_a.get("candidates") or []] != ids_a \
+                    or uses(cid_a) != ("", front_key(cid_a)) or len(ledger) != 2:
+                bad.append(f"(cdf-a) 2장 뽑기가 끝난 뒤 chosen 이 빈 값·실사 정면이 아닙니다: {status_a} {cast_a.get('status')} "
+                           f"{cast_a.get('chosen')!r} {view_a.get('chosenUrl')!r} {uses(cid_a)}")
+            if logs.messages("vnew.casting.done") != [f"vnew.casting.done cid={cid_a} status=ready ready=2 failed=0 timeout=false"]:
+                bad.append(f"(cdf-a) 끝 로그가 바뀌었습니다: {logs.messages('vnew.casting.done')}")
+            cid_a1 = "char_cdf_a_one"
+            seed_char(cid_a1)
+            _st, cast_a1 = draw(cid_a1, ["reject", "ok"])
+            if cast_a1.get("status") != "ready" or len(cast_a1.get("candidates") or []) != 1 or cast_a1.get("chosen") != "" \
+                    or [s.get("status") for s in cast_a1.get("slots") or []] != ["failed", "ready"] or uses(cid_a1) != ("", front_key(cid_a1)):
+                bad.append(f"(cdf-a) 한 칸 거절 뒤(후보 1) chosen 이 빈 값이 아닙니다: {cast_a1.get('status')} {cast_a1.get('chosen')!r}")
+            cid_a0 = "char_cdf_a_none"
+            seed_char(cid_a0)
+            _st, cast_a0 = draw(cid_a0, ["reject", "reject"])
+            if cast_a0.get("status") != "failed" or cast_a0.get("candidates") or cast_a0.get("chosen") != "" \
+                    or uses(cid_a0) != ("", front_key(cid_a0)):
+                bad.append(f"(cdf-a) 두 칸 거절 뒤 failed·chosen 빈 값이 아닙니다: {cast_a0.get('status')} {cast_a0.get('chosen')!r}")
+            # 시간 초과: 오래 멈춘 회차(칸 0 ready + 후보 1, 칸 1 submitted) → GET 상세가 이어받고 → run_draw 가 _finish(timed_out=True)
+            cid_t = "char_cdf_timeout"
+            done_t = photo(cid_t, "k_t0")
+            stuck = ready_cast("", [done_t])
+            stuck.update(status="drawing", startedAt=iso_ago(int(vset.VNEW_CASTING_POLL_MAX_S) + 100),
+                         heartbeatAt=iso_ago(int(vset.VNEW_CASTING_STALL_S) + 100), claim="tok_old", claimedAt=iso_ago(2000),
+                         slots=[{"slot": 0, "status": "ready", "requestArn": "", "candidateId": "k_t0", "error": ""},
+                                {"slot": 1, "status": "submitted", "requestArn": f"{vpoc_fal.ARN_PREFIX}{vset.VNEW_CASTING_MODEL}/cdf-t1",
+                                 "candidateId": "", "error": ""}])
+            seed_char(cid_t, casting=stuck)
+            spawned.clear()
+            logs.clear()
+            view_t0 = detail_cast(cid_t)
+            if len(spawned) == 1:
+                castmod.run_draw(owner, cid_t, spawned[-1][2])
+            cast_t = load_c(cid_t).get("casting") or {}
+            if view_t0.get("status") != "drawing" or len(spawned) != 1 or cast_t.get("status") != "ready" or cast_t.get("chosen") != "" \
+                    or [s.get("status") for s in cast_t.get("slots") or []] != ["ready", "failed"] \
+                    or (cast_t.get("slots") or [{}, {}])[1].get("error") != castmod._MSG_TIMEOUT \
+                    or logs.messages("vnew.casting.done") != [f"vnew.casting.done cid={cid_t} status=ready ready=1 failed=1 timeout=true"] \
+                    or uses(cid_t) != ("", front_key(cid_t)):  # noqa: SLF001
+                bad.append(f"(cdf-a) 시간 초과로 끝난 회차의 chosen 이 빈 값이 아닙니다: {view_t0.get('status')} {len(spawned)} "
+                           f"{cast_t.get('status')} {cast_t.get('chosen')!r} {logs.messages('vnew.casting.done')}")
+            chosen_a = [cast_a.get("chosen"), cast_a1.get("chosen"), cast_a0.get("chosen"), cast_t.get("chosen")]
+            report.append(f"cdf-a: 뽑기 끝 2장·1장·0장(failed)·시간 초과 → chosen {chosen_a} · 실사 버전 사진 = 실사 정면 키")
+            seen.add("cdf-a")
+
+            # ================= (cdf-b) 미리 고른 사진이 있으면 그대로 =================
+            got_b = []
+            for name, in_history in (("cand", False), ("hist", True)):
+                cid_b = f"char_cdf_b_{name}"
+                old = photo(cid_b, "k_old")
+                other = photo(cid_b, "k_other")
+                seed_char(cid_b, casting=ready_cast("k_old", [other] if in_history else [old, other], [old] if in_history else []))
+                _st, cast_b = draw(cid_b)
+                hist_ids = [item.get("id") for item in cast_b.get("history") or []]
+                view_b = detail_cast(cid_b)
+                got_b.append((cast_b.get("chosen"), "k_old" in hist_ids, uses(cid_b)))
+                if cast_b.get("status") != "ready" or cast_b.get("chosen") != "k_old" or "k_old" not in hist_ids \
+                        or len(cast_b.get("candidates") or []) != 2 or view_b.get("chosen") != "k_old" \
+                        or view_b.get("chosenUrl") != f"https://signed.example/{old['key']}?e=3600" or uses(cid_b) != (old["key"], old["key"]):
+                    bad.append(f"(cdf-b) 미리 고른 사진({name})이 뽑기 뒤 그대로가 아닙니다: {cast_b.get('chosen')!r} {hist_ids} {uses(cid_b)}")
+            report.append(f"cdf-b: 고른 사진(이번 후보·이전 사진) 다시 뽑기 → (chosen, history 에 있음, 쓰는 키) {got_b}")
+            seen.add("cdf-b")
+
+            # ================= (cdf-c) [이 사진으로] 뒤에는 그 사진 =================
+            server_views = {"done": view_a}
+            pick_c = ids_a[1] if len(ids_a) == 2 else ""
+            key_c = charmod.casting_key(owner, cid_a, pick_c)
+            status_c = choose(cid_a, pick_c)
+            view_c = detail_cast(cid_a)
+            server_views["picked"] = view_c
+            uses_c = uses(cid_a)
+            if status_c != 200 or (load_c(cid_a).get("casting") or {}).get("chosen") != pick_c or view_c.get("chosen") != pick_c \
+                    or view_c.get("chosenUrl") != f"https://signed.example/{key_c}?e=3600" or uses_c != (key_c, key_c):
+                bad.append(f"(cdf-c) [이 사진으로] 뒤 chosen·쓰는 사진이 그 사진이 아닙니다: {status_c} {view_c.get('chosen')!r} {uses_c}")
+            _st, cast_c2 = draw(cid_a)
+            if cast_c2.get("status") != "ready" or cast_c2.get("chosen") != pick_c or uses(cid_a) != (key_c, key_c) \
+                    or pick_c not in [item.get("id") for item in cast_c2.get("history") or []]:
+                bad.append(f"(cdf-c) 고른 뒤 다시 뽑으면 chosen 이 그 사진으로 남지 않습니다: {cast_c2.get('chosen')!r}")
+            report.append(f"cdf-c: [이 사진으로] {status_c} → chosen = 두 번째 후보 · 다시 뽑아도 그대로 · 쓰는 키 = 캐스팅 사진")
+            seen.add("cdf-c")
+
+            # ================= (cdf-d) [실사 정면 쓰기] 뒤에는 빈 값 =================
+            status_d = choose(cid_a, "")
+            view_d = detail_cast(cid_a)
+            server_views["front"] = view_d
+            if status_d != 200 or (load_c(cid_a).get("casting") or {}).get("chosen") != "" or view_d.get("chosen") != "" \
+                    or view_d.get("chosenUrl") != "" or uses(cid_a) != ("", front_key(cid_a)):
+                bad.append(f"(cdf-d) [실사 정면 쓰기] 뒤 chosen 이 빈 값·실사 정면이 아닙니다: {status_d} {view_d.get('chosen')!r} {uses(cid_a)}")
+            _st, cast_d2 = draw(cid_a)
+            if cast_d2.get("status") != "ready" or cast_d2.get("chosen") != "" or uses(cid_a) != ("", front_key(cid_a)):
+                bad.append(f"(cdf-d) 실사 정면으로 되돌린 뒤 다시 뽑으면 chosen 이 빈 값으로 남지 않습니다: {cast_d2.get('chosen')!r}")
+            report.append(f"cdf-d: [실사 정면 쓰기] {status_d} → chosen '' · 다시 뽑아도 '' · 쓰는 키 = 실사 정면")
+            seen.add("cdf-d")
+
+            # ================= (cdf-e) 저장된 데이터는 고치지 않는다(이행 없음) =================
+            cid_e = "char_cdf_old_auto"
+            first_e, second_e = photo(cid_e, "k_first"), photo(cid_e, "k_second")
+            seed_char(cid_e, casting=ready_cast("k_first", [first_e, second_e]))  # 114 전 자동 선택이 남긴 꼴
+            before_e = _json.dumps(load_c(cid_e).get("casting"), sort_keys=True, ensure_ascii=False)
+            view_e = detail_cast(cid_e)
+            after_get = _json.dumps(load_c(cid_e).get("casting"), sort_keys=True, ensure_ascii=False)
+            _st, cast_e2 = draw(cid_e)
+            cid_g = "char_cdf_gone"
+            seed_char(cid_g, casting=ready_cast("k_gone", [photo(cid_g, "k_here")]))  # 없는 id 를 가리키는 저장값
+            view_g = detail_cast(cid_g)
+            _st, cast_g2 = draw(cid_g)
+            if after_get != before_e or view_e.get("chosen") != "k_first" or cast_e2.get("chosen") != "k_first" \
+                    or uses(cid_e) != (first_e["key"], first_e["key"]):
+                bad.append(f"(cdf-e) 자동 선택 시절 저장본의 chosen 이 바뀌었습니다: {view_e.get('chosen')!r} {cast_e2.get('chosen')!r}")
+            if view_g.get("chosen") != "k_gone" or view_g.get("chosenUrl") != "" or cast_g2.get("chosen") != "k_gone" \
+                    or uses(cid_g) != ("", front_key(cid_g)):
+                bad.append(f"(cdf-e) 없는 사진을 가리키는 저장값을 고쳤거나 실사 정면을 쓰지 않습니다: {cast_g2.get('chosen')!r} {uses(cid_g)}")
+            writers = _cdf_chosen_writers((APP_SRC / "vnew" / "casting.py").read_text(encoding="utf-8"))
+            if writers != ["choose"]:
+                bad.append(f"(cdf-e) casting.py 에서 chosen 을 쓰는 함수가 choose 하나가 아닙니다(자동 선택·이행 코드): {writers}")
+            probe = ("def _finish(c):\n    if not c.get('chosen'):\n        c['chosen'] = 'x'\n"
+                     "def a(c):\n    c.update(chosen='y')\n"
+                     "def b(c):\n    c.setdefault('chosen', 'z')\n"
+                     "def ok_(c):\n    return {'chosen': c['chosen']}\n")
+            if _cdf_chosen_writers(probe) != ["_finish", "a", "b"]:
+                bad.append(f"(cdf-e) chosen 쓰기 찾기(AST)가 세 꼴을 찾지 못합니다: {_cdf_chosen_writers(probe)}")
+            report.append(f"cdf-e: 옛 저장본 chosen k_first·없는 id k_gone 그대로(GET·뽑기 뒤) · chosen 을 쓰는 함수 {writers}")
+            seen.add("cdf-e")
+
+            # ================= (cdf-f) 화면 문구·버튼(node 가짜 DOM) =================
+            vjs = (PUBLIC / "vnew.js").read_text(encoding="utf-8")
+            c_start, c_end = vjs.find("  /* ---- 실사 캐스팅(vnew-live-fx 묶음 B"), vjs.find("  /* ---- 추가 복장 섹션 ---- */")
+            el_start, el_end = vjs.find("  function el(tag, className, text)"), vjs.find("  function token()")
+            p_start, p_end = vjs.find("  function schedulePoll(host, detail)"), vjs.find("  function backRow(host)")
+            node = shutil.which("node")
+            node_got: dict = {}
+            if min(c_start, c_end, el_start, el_end, p_start, p_end) < 0:
+                bad.append("(cdf-f) vnew.js 캐스팅 구역·el·schedulePoll 을 찾지 못했습니다")
+            elif not node:
+                warn("node 가 없어 cdf-f 화면 실행을 건너뜁니다 (E16)")
+            if c_start >= 0 and ("innerHTML" in vjs[c_start:c_end] or vjs[c_start:c_end].count('"' + _CDF_USING_FRONT + '"') != 1):
+                bad.append("(cdf-f) vnew.js 캐스팅 구역에 기본 문구가 한 번 있지 않거나 innerHTML 을 씁니다")
+            if min(c_start, c_end, el_start, el_end, p_start, p_end) >= 0 and node:
+                script = (_CAST_SCREEN_NODE_HARNESS + "var SERVER = " + _json.dumps(server_views, ensure_ascii=False) + ";\n"
+                          + vjs[el_start:el_end] + vjs[p_start:p_end] + vjs[c_start:c_end] + _CDF_SCREEN_NODE_CASES)
+                tmp_dir = tempfile.mkdtemp(prefix="cdf_f_")
+                try:
+                    path = Path(tmp_dir) / "cdf_screen.js"
+                    path.write_text(script, encoding="utf-8")
+                    result = subprocess.run([node, str(path)], capture_output=True, text=True, encoding="utf-8", timeout=60)
+                finally:
+                    shutil.rmtree(tmp_dir, ignore_errors=True)
+                if result.returncode != 0:
+                    bad.append(f"(cdf-f) node 실행 실패: {(result.stderr or '').strip()[:600]}")
+                else:
+                    node_got = _json.loads((result.stdout or "").strip().splitlines()[-1])
+                checked = subprocess.run([node, "--check", str(PUBLIC / "vnew.js")], capture_output=True, text=True, encoding="utf-8")
+                if checked.returncode != 0:
+                    bad.append(f"(cdf-f) node --check vnew.js 실패: {(checked.stderr or '').strip()[:300]}")
+            if node_got:
+                choose_url = "/api/vnew/characters/ch%201/casting/choose"
+
+                def plain(view) -> dict:
+                    """고른 사진이 없는 칸: 기본 문구·[실사 정면 쓰기] 없음·사진(후보 + 이전 사진)마다 [이 사진으로]·배지 0."""
+                    photos = len(view.get("candidates") or []) + len(view.get("history") or [])
+                    return {"using": [_CDF_USING_FRONT], "front": [], "picks": photos, "badges": 0, "chosenFigs": 0}
+
+                want_f = {
+                    "pure": [_CDF_USING_FRONT, _CDF_USING_FRONT, _CDF_USING_FRONT, _CDF_USING_CHOSEN],
+                    "done": plain(server_views["done"]),
+                    "picked": {"using": [_CDF_USING_CHOSEN + "실사 정면 쓰기"], "front": ["실사 정면 쓰기"], "picks": 1, "badges": 1,
+                               "chosenFigs": 1},
+                    "front": plain(server_views["front"]),
+                    "pickCall": [[["POST", choose_url, {"candidateId": pick_c}]], ["false"]],
+                    "frontCall": [[["POST", choose_url, {"candidateId": ""}]], ["false"]],
+                    "innerHTML": False,
+                }
+                if want_f["done"]["picks"] != 2 or want_f["front"]["picks"] != 4:
+                    bad.append(f"(cdf-f) 화면에 넣을 보기의 사진 수가 다릅니다: {want_f['done']} {want_f['front']}")
+                for key, value in want_f.items():
+                    if node_got.get(key) != value:
+                        bad.append(f"(cdf-f) 화면 {key} 가 다릅니다: {node_got.get(key)!r} != {value!r}")
+            report.append(f"cdf-f: 화면 기본 문구 \"{_CDF_USING_FRONT}\" · 뽑기 끝 [이 사진으로] {(node_got.get('done') or {}).get('picks')}개·"
+                          f"배지 {(node_got.get('done') or {}).get('badges')}")
+            seen.add("cdf-f")
+
+            if stray:
+                bad.append(f"쓰면 안 되는 경로가 불렸습니다: {sorted(set(stray))}")
+            if real_calls:
+                bad.append(f"(guard) 가짜가 아닌 LLM 호출이 있었습니다: {real_calls}")
+    except Exception as exc:  # noqa: BLE001
+        bad.append(f"검사 중 예외: {type(exc).__name__} {str(exc)[:200]}\n{_tb.format_exc()[-1500:]}")
+    finally:
+        charmod.STORE = saved["STORE"]
+        castmod._fal_request = saved["cast_fal"]  # noqa: SLF001
+        castmod._fetch_url = saved["cast_fetch"]  # noqa: SLF001
+        castmod._spawn = saved["cast_spawn"]  # noqa: SLF001
+        castmod._sleep = saved["cast_sleep"]  # noqa: SLF001
+        castmod.vpoc_ledger.charge = saved["charge"]
+        charmod._fal_request = saved["char_fal"]  # noqa: SLF001
+        vpoc_fal._request = saved["vpoc_request"]  # noqa: SLF001
+        vpoc_settings.FAL_KEY = saved["fal_key"]
+        charmod.run_resume_variant = saved["resume_variant"]
+        with castmod._CAST_LOCK:  # noqa: SLF001
+            castmod._CAST_RUNNING.clear()  # noqa: SLF001
+
+    expected = [f"cdf-{c}" for c in "abcdef"]
+    missing = [item for item in expected if item not in seen]
+    if missing and not bad:
+        bad.append(f"끝까지 돌지 않은 검사: {missing}")
+    if bad:
+        fail("지시서 114 실사 캐스팅 기본 = 실사 정면 검사 실패\n" + "\n".join(f"  {item}" for item in bad))
+    else:
+        ok(
+            "지시서 114 실사 캐스팅 기본 = 실사 정면 검사 (cdf-a)뽑기 끝 chosen 빈 값(2장·1장·failed·시간 초과) (cdf-b)미리 고른 사진 그대로 "
+            "(cdf-c)[이 사진으로] 뒤 그 사진 (cdf-d)[실사 정면 쓰기] 뒤 빈 값 (cdf-e)저장값 이행 없음·chosen 쓰기는 choose 뿐 (cdf-f)화면 기본 문구"
+            + "".join(f"\n       cdf: {line}" for line in report)
+        )
+
+
 # ---------------------------------------------------------------- 파드 영역 고정(pod-zone-pin, 지시서 105)
 #
 # 2026-10-31 운영 503: 운영 ALB(target-type ip)는 2a·2c 서브넷만 쓰는데 새 frontend 파드 2개가 모두 2b 노드에 놓여
@@ -35787,7 +36251,7 @@ def check_vnew_edit() -> None:
         prod_text = prod_bytes.decode("utf-8-sig")
         expect("edt-a", [prod_bytes[:3] == b"\xef\xbb\xbf", prod_bytes.count(b"\r"), re.findall(r"^VNEW_EDIT=(.*)$", prod_text, re.M),
                          prod_text.splitlines()[-1], "VNEW_EDIT" in (ROOT / "deploy" / "config.dev.env").read_text(encoding="utf-8")],
-               [True, 0, ["true"], "VNEW_HIDE_STORY=false", False], "운영 overlay true 한 줄(2026-11-02 사용자 승인)(BOM·LF·끝 줄 그대로)·dev overlay 없음")
+               [True, 0, ["true"], "VNEW_HIDE_STORY=true", False], "운영 overlay true 한 줄(2026-11-02 사용자 승인)(BOM·LF·끝 줄 그대로)·dev overlay 없음")
         spec = importlib.util.spec_from_file_location("_edt_deploy_render", ROOT / "deploy" / "render.py")
         render = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(render)  # type: ignore[union-attr]
@@ -38981,6 +39445,7 @@ def main() -> int:
     check_vnew_cast_idol_model()
     check_vnew_cast_ttokdae()
     check_vnew_cast_term_search()
+    check_vnew_cast_default_front()
     check_vnew_edit()
     check_vnew_edit_ui()
     check_pod_zones()
