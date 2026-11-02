@@ -9552,6 +9552,7 @@
     editRenderVariants(ctx);
     editRenderTimeline(ctx);
     editRenderBin(ctx);
+    if (ctx.fix && editFixAlive(ctx, ctx.fix)) editFixPaintVersions(ctx, ctx.fix); // 지시서 116 보완 2: 타임라인 사용 중 표시
     editSeek(ctx, ctx.t);
     editScheduleSave(ctx);
   }
@@ -10434,7 +10435,10 @@
     var v = fix.view || {};
     var d = fix.dom;
     d.title.textContent = "AI로 고치기 — " + (v.label || "영상");
-    if (!before && v.videoUrl) d.video.src = String(v.videoUrl);
+    if (!before && v.videoUrl) {
+      d.video.src = String(v.videoUrl);
+      fix.previewMid = String(v.mid || ""); // 지시서 116 보완 2: 처음 미리보기 = 패널을 연 기준 버전
+    }
     editFixNote(fix, v.canRetake === false ? v.block || "이 칸은 AI로 고칠 수 없습니다." : "");
     editFixPaintVersions(ctx, fix);
     editFixPaintPrev(fix);
@@ -10472,9 +10476,16 @@
     var v = fix.view || {};
     var d = fix.dom;
     clear(d.versions);
-    (Array.isArray(v.versions) ? v.versions : []).forEach(function (ver) {
-      var row = el("div", "vnew-edit-fix-version" + (ver.n === v.n ? " is-current" : ""));
-      row.appendChild(el("span", "vnew-edit-fix-version-name", editFixVerName(ver) + " · " + (EDIT_FIX_STATUS[ver.status] || ver.status || "없음")));
+    d.picks = {};
+    var list = Array.isArray(v.versions) ? v.versions : [];
+    var use = editFixInUse(ctx.clips, list); // 지시서 116 보완 2: 지금 편집 문서가 쓰는 버전
+    list.forEach(function (ver) {
+      var row = el("div", "vnew-edit-fix-version" + editFixRowState(v, ver, use, fix.previewMid));
+      var name = el("span", "vnew-edit-fix-version-name", editFixVerName(ver) + " · " + (EDIT_FIX_STATUS[ver.status] || ver.status || "없음"));
+      row.appendChild(name);
+      editFixPickable(ctx, fix, ver, name); // 지시서 116 보완 2: 이름을 누르면(Enter·Space) 미리보기
+      var badge = editFixUseBadge(use, ver);
+      if (badge) row.appendChild(badge);
       var meta = editFixVersionMeta(v, ver); // 지시서 116 보완 1: 다른 모델·구간 버전
       if (meta) row.appendChild(el("span", "vnew-edit-fix-version-meta", meta));
       if (ver.status === "completed" && ver.sourceKey) {
@@ -11081,6 +11092,98 @@
     d.modelHidden.title = hidden.map(function (h) {
       return String(h.label || h.id || "") + ": " + String(h.reason || "");
     }).join("\n");
+  }
+
+  /* ---------------------------------------------------------------- ⑦ AI로 고치기 — 버전 미리보기·타임라인 사용 표시(지시서 116 보완 2)
+
+     버전 줄 이름을 누르면(Enter·Space 도) 그 버전 영상을 패널 미리보기에서 재생하고 그 줄에 is-previewing 을 단다. 완성된 버전만 누를 수 있고
+     (진행 중·실패는 상태 글만), 주소는 패널을 연 버전이면 보기 videoUrl, 그 밖은 재료 videoUrl(GET /edit 이 이미 준다 — 서버 변경 없음).
+     is-current 는 "지금 편집 문서(타임라인)가 쓰는 버전"이고 배지 「타임라인 사용 중」을 붙인다(여러 버전에 걸치면 각각). 패널을 연 기준 버전은
+     is-base 다. 사용 중 표시는 editChanged(바꾸기·되돌리기·실행 취소/다시 실행)와 패널 다시 그리기(다시 불러오기·조회) 때 다시 센다.
+     검사는 check_vpoc rtk-v. */
+
+  /* 그 칸 버전 원본 → 지금 클립 중 그 원본을 쓰는 클립 수(순수). 버전 원본이 아닌 클립은 세지 않는다. */
+  function editFixInUse(clips, versions) {
+    var use = {};
+    (versions || []).forEach(function (x) {
+      if (x && x.sourceKey) use[x.sourceKey] = 0;
+    });
+    (clips || []).forEach(function (c) {
+      if (c && Object.prototype.hasOwnProperty.call(use, c.sourceKey)) use[c.sourceKey] += 1;
+    });
+    return use;
+  }
+
+  /* 버전 줄 상태 클래스(순수): 타임라인 사용 중 is-current · 패널을 연 기준 버전 is-base · 미리보기 중 is-previewing. */
+  function editFixRowState(view, ver, use, previewMid) {
+    var x = ver || {};
+    var out = "";
+    if (x.sourceKey && (use || {})[x.sourceKey] > 0) out += " is-current";
+    if (x.n !== undefined && x.n !== null && x.n === (view || {}).n) out += " is-base";
+    if (previewMid && x.mid === previewMid) out += " is-previewing";
+    return out;
+  }
+
+  /* 미리보기 주소: 완성된 버전만. 패널을 연 버전은 보기 videoUrl, 그 밖은 재료 videoUrl(재료를 아직 못 받았으면 ""). */
+  function editFixVersionUrl(ctx, view, ver) {
+    var x = ver || {};
+    var v = view || {};
+    if (x.status !== "completed" || !x.sourceKey) return "";
+    if (x.mid && x.mid === v.mid && v.videoUrl) return String(v.videoUrl);
+    return String(((ctx.materials || {})[x.sourceKey] || {}).videoUrl || "");
+  }
+
+  function editFixUseBadge(use, ver) {
+    var count = (use || {})[(ver || {}).sourceKey] || 0;
+    if (!(count > 0)) return null;
+    var badge = el("span", "vnew-badge", "타임라인 사용 중" + (count > 1 ? " · 클립 " + count + "개" : ""));
+    badge.title = "지금 타임라인에서 이 버전을 쓰는 클립 " + count + "개";
+    return badge;
+  }
+
+  /* 이름 칸을 누를 수 있게(미리보기 주소가 있을 때만): role=button·tabindex·aria-pressed, 클릭·Enter·Space. */
+  function editFixPickable(ctx, fix, ver, name) {
+    var base = ver.n === (fix.view || {}).n ? " (이 패널을 연 기준 버전)" : "";
+    var url = editFixVersionUrl(ctx, fix.view, ver);
+    if (!url) {
+      if (base) name.title = editFixVerName(ver) + base;
+      return;
+    }
+    var on = !!fix.previewMid && ver.mid === fix.previewMid;
+    name.setAttribute("role", "button");
+    name.setAttribute("tabindex", "0");
+    name.setAttribute("aria-pressed", on ? "true" : "false");
+    name.title = (on ? "미리보기 중" : "눌러서 미리보기") + " — " + editFixVerName(ver) + base;
+    name.addEventListener("click", function () {
+      editFixShowVersion(ctx, fix, ver);
+    });
+    name.addEventListener("keydown", function (event) {
+      var k = event && event.key;
+      if (k !== "Enter" && k !== " " && k !== "Spacebar") return;
+      if (event.preventDefault) event.preventDefault();
+      editFixShowVersion(ctx, fix, ver);
+    });
+    if (ver.mid) fix.dom.picks[ver.mid] = name;
+  }
+
+  /* 고른 버전을 미리보기에서 재생할 준비(주소가 바뀔 때만 src 를 바꾼다)·줄 다시 그리기·키보드 초점 되돌리기. */
+  function editFixShowVersion(ctx, fix, ver) {
+    if (!editFixAlive(ctx, fix)) return;
+    var url = editFixVersionUrl(ctx, fix.view, ver);
+    if (!url) return;
+    var video = fix.dom.video;
+    if (fix.previewMid !== ver.mid || video.src !== url) {
+      try {
+        video.pause();
+      } catch (error) {
+        /* 이미 떨어진 요소 */
+      }
+      video.src = url;
+    }
+    fix.previewMid = String(ver.mid || "");
+    editFixPaintVersions(ctx, fix);
+    var again = (fix.dom.picks || {})[fix.previewMid];
+    if (again && typeof again.focus === "function") again.focus();
   }
 
   /* ---------------------------------------------------------------- 전역 */
