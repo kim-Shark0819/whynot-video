@@ -2312,3 +2312,90 @@
   2. `castingUsingText`는 `chosen`만 본다. 깨진 저장값(없는 사진 id)이면 화면 "고른 캐스팅 사진"과 서버의 실사 정면이 어긋난다. `chosenUrl`로 판단하면 고쳐진다(이번 범위 밖).
   3. `docs/ANALYSIS.md` §10.1의 검사 개수(70개)·줄 수는 지시서 범위("캐스팅 절 한 줄")에 따라 고치지 않았다. 지금 `main()`은 71개를 부른다.
   4. 실제 브라우저에서 문구 줄바꿈·폭을 보지 않았다(문구가 전보다 14자 길다).
+
+
+### 지시서 115 — ⑦ 편집이 늘 보이게, 컷 늘이기·줄이기·속도 (Kiro, claude-opus-5.5)
+
+- **범위**: `.kiro/handoff/115-edit-step-visible-and-retime.md`(사용자 지시 2026-11-02 "일부 프로젝트에서 ⑦ 편집 단계가 아예 안 보인다", "특정 컷을 늘이거나 줄일 수 있어야 한다"). 스펙 `.kiro/specs/vnew-edit-timeline/`에 115 몫(requirements 3부 R13~R16, design §9, tasks 15~21)을 더하고 같은 실행에서 구현·검사까지 했다. 커밋·push 하지 않았다. git·aws·kubectl·네트워크·유료 API를 쓰지 않았다(python·node·로컬 ffmpeg만). 비밀값을 쓰지 않았다.
+- **먼저 한 일**: 바꿀 파일 11개 시작 전 사본·저장소 파일 목록(크기·sha1)·줄 끝 상태(모두 LF·BOM 없음)를 저장소 밖(`%TEMP%\k115`)에 두었다. 시작 전 전체 검사 전부 통과(ok 71줄, FAIL·WARN 0, 252초). 그 뒤 검사·커버리지·변형 실행은 모두 `PYTHONPYCACHEPREFIX`(저장소 밖)로 돌렸다.
+- **원인(⑦ 이 안 보임)**: `generate.gen_view`는 gen이 없으면 `{status: "none", estimate}`를 바로 돌려줘(이른 return) `gen.edit`가 없었다. `vnew.js` `planStepList`는 `gen.edit`가 있을 때만 ⑦ 칩을 그린다 → ⑤ 영상을 아직 안 만든 프로젝트(dev 08b3ef09·2a106e18·d17fad89, prod 75e36d60)에는 ⑦ 칩이 아예 없었다. 취소·실패·재료 없는 gen에서는 칩이 보이지만 잠겨 있고 이유가 없었다(눌러도 아무 일 없음).
+- **A-3에서 찾은 경우(⑦ 에서 밀려나거나 화면이 바뀜)**
+  1. ⑤가 폴링하는 동안(생성·실사 회차 진행, 3~5초) ⑦ 칩을 누른 직후 이미 나간 `/plan` 응답이 도착 → `loadPlan` → `decidePlanStep`이 gen running·partial이면 5 → `renderPlan`이 ⑦을 ⑤로 바꿨다(`editLeave` 없이). 실사 회차 시작(`generate.start_real`)과 다시 만들기(`retry_segment`)가 둘 다 `gen.status = "running"`으로 두므로 "실사 회차를 기다리며 웹툰 결과로 편집"하는 흐름에서 생긴다.
+  2. 부분 성공 gen(`gen.selected` 없음 — ⑦은 `editAvailable`로 열림)에서 `/plan` 응답이 오면 `decidePlanStep`의 되돌리기(`planStep > maxReachableStep()`, 5·6)로 밀려났다.
+  3. ⑤ 버튼 콜백(실사 시작·다시 만들기 등)이 끝나 `loadPlan(false)`를 부를 때 이미 ⑦이면 1·2와 같이 밀려나거나, ⑦을 처음부터 다시 그려 실행 취소·재생헤드를 잃었다.
+  4. ⑦이 열린 동안 gen 새로 만들기(새 genId)·다시 만들기(그 칸 `outputKey` 비움)로 재료가 없어지면 GET /edit 409 `NoMaterials`·404 `NoGen`이 "편집을 열지 못했습니다: …" 오류로 보였고, 내보내기 폴링은 3초마다 같은 실패를 되풀이했다.
+  - ⑦에 있는 동안의 계획 폴링 자체는 111에서 이미 막혀 있었다(`schedulePlanPoll`).
+- **결정**(design §9.3)
+  - D18 gen 없음 보기: `gen_view` 이른 return 한 곳만 고쳤다(1줄 → 같은 `if not gen:` 안 7줄, 끝 블록과 같은 지연 import). 켬이면 `edit = summary(gen)`, 끔이면 키 없음. `summary`는 재료가 없으면 `reason`(gen 없음·만드는 중·취소·실패·그 밖 5문구, `edit.LOCK_REASONS`), 재료가 있으면 지금처럼 `{available, variants}`.
+  - D19 잠긴 ⑦ 칩: `is-soon` + title·`aria-disabled`(`editLockReason`, 서버 `reason` → 없으면 "⑤에서 영상을 먼저 만들면 편집할 수 있습니다."), 누르면 막대 아래 한 줄(`planStepNote`, `role=status`, 두 번 눌러도 한 줄). 지금 보고 있는 칩은 흐리지 않는다.
+  - D20 ⑦ 머무르기: `decidePlanStep` 맨 앞에서 7이고 `gen.edit`가 있으면 그대로. `loadPlan`은 ⑦ 화면이 열려 있으면(`editOpenFor`) 처음 불러오기가 아닌 응답에 다시 그리지 않고, 단계가 바뀌면 `editLeave`(남은 저장 PUT) 뒤 그린다. ⑦은 `NoMaterials`·`NoGen`이면 `editShowGone`(서버 문구 + [다시 시도]·[⑤ 영상으로], 내보내기 폴링 멈춤).
+  - D21 클립 속도: `speed` ∈ {0.5, 0.75, 1, 1.25, 1.5, 2}(`stitcher.EDIT_SPEED_CHOICES` 한 곳 → `edit.SPEEDS`, 화면 `EDIT_SPEEDS`). 타임라인 길이 = (out − in) / speed. 1은 저장·`_doc_hash`에 넣지 않는다(옛 문서 모양·해시·`matchesDoc` 그대로). 서버 검증은 목록만(없음·null = 1, bool·글자·NaN·목록 밖 → 400 `BadClip` — 새 kind는 `vpoc/errors.py`가 범위 밖이라 운영에서 문구가 가려져 기존 kind를 썼다). 속도 반영 길이 0.04초 미만은 400 `BadClipRange` "N번째 클립은 속도를 반영한 길이가 0.04초 이상이어야 합니다."(원본 구간 검사 줄은 110 그대로 두고 따로 — 처음에 한 조건으로 합쳤다가 speed 1의 원본 끝 반올림 경우가 미세하게 바뀔 수 있어 나눴다). `TooLong`·`totalSeconds`·`_clip_frames`는 타임라인 길이.
+  - D22 내보내기: `edit_segment(speed)` 영상 `setpts=(PTS-STARTPTS)/speed`, 소리 `atrim…,asetpts…,atempo=speed`(피치 유지, 0.5~2라 한 번). 프레임 수·`-t`·PCM 길이 규칙 그대로. speed 1이면 명령 바이트 그대로(edt-j·ert-g). `run_export`가 클립마다 `speed=_speed_of(clip)`.
+  - D23 화면: 끝 끌기 원본 변화 = dx / pps × speed, 길이를 모르면 끝은 지금 out까지. 도구줄 [속도] select·"길이(초)" number 칸(`editRetimeBox`). 길이 = 지금 속도로 원본 안이면 out, 원본보다 길면 낮은 허용 속도 중 맞는 가장 큰 값, 0.5×로도 모자라면 0.5× 원본 끝까지 + 안내. `[` `]`·`Shift+[` `]` 1프레임(`editNudge`, 미리보기가 바뀐 끝 프레임). 미리보기 `editSetRate`(`playbackRate`·`defaultPlaybackRate`·`preservesPitch`). 자르기는 두 조각 같은 속도, 빠른 클립은 타임라인 최소 길이로 거절. 도움말 문구를 바꿨다(R14.8).
+- **검토한 대안**(design D18~D24): 화면 기본 문구만(서버가 상태를 앎, 기각), `reason` 늘 두기(1부 보기 기대값 변화, 기각), `gen_view` 재구성(범위 밖), `window.alert`·`disabled` 칩(흐름 막음·터치에서 이유 못 봄, 기각), ⑦에서도 계획 폴링 + 다시 그리기만 막기(111과 같은 이유로 기각), 진행 중 gen이면 ⑦ 막기(실사 회차 중 편집 흐름을 막음, 기각), 요청 취소(AbortController — 공용 `api` 수정, 기각), 타임라인 길이 따로 저장(어긋남, 기각), speed 늘 저장(옛 해시 변화, 기각), 연속 속도(지시서 목록 밖, 기각), 새 kind `BadClipSpeed`(운영 가림, 기각), 길이 입력이 늘 속도를 바꿈·in을 당겨 맞춤(지시서 순서와 다름, 기각), `[` `]`를 재생헤드까지 다듬기(보류), 서버 속도 프록시 미리보기(비용, 기각).
+- **바꾼 것**
+  - `app/src/vnew/generate.py`(+7 −1): `gen_view` 이른 return 한 곳(`:5780-5787`). 다른 줄은 바이트까지 같다(ert-a가 블록 글자를 본다).
+  - `app/src/vnew/edit.py`(+71 −10, 지운 정의 0): `SPEEDS`·`LOCK_REASONS`, 새 `_speed_of`·`_clip_seconds`·`_lock_reason`, 고침 `_total`·`summary`·`_clean_clips`·`_doc_hash`·`_clip_frames`·`run_export`(속도 넘김)·머리 주석.
+  - `app/src/stitcher.py`(+15 −4, 110 덧붙임 구역만): `EDIT_SPEED_CHOICES`, `edit_segment(speed=1.0)`. 110 전 부분 sha256 그대로(edt-j).
+  - `frontend/public/vnew.js`(+370 −19, 지운 함수 0, 새 함수 20): 단계 막대(`EDIT_LOCK_TEXT`·`editLockReason`·`planStepNote`·`planStepBar`)·`loadPlan`·`decidePlanStep`, ⑦ 구역(`EDIT_SPEEDS`·`EDIT_NUDGES`·`EDIT_GONE_TEXT`·도움말, 순수 `editSpeedOf`·`editSourceLen`·`editMinSource`·`editSetSpeed`·`editRetime`·`editNudge`, 고침 `editClipLen`·`editCloneClip`·`editLocate`·`editStripCells`·`editKeyAction`, 화면 `editOpenFor`·`editGoneKind`·`editShowGone`·`editLoad`·`editRetimeBox`·`editRenderRetime`·`editRenderTools`·`editClipBoxes`·`editPaintClip`·`editEdgePointer`·`editSetRate`·`editSeek`·`editPreloadNext`·`editAdvance`·`editTick`·`editDo`·`editSplitHere`·`editFitsTotal`·`editSelected`·`editReplaceSel`·`editApplySpeed`·`editApplyLength`·`editNudgeSel`·`editScheduleExportPoll`).
+  - `frontend/public/vnew.css`(+93): 파일 끝 115 구역(막대 안내 줄·안내 상자·속도·길이 칸·끝 손잡이 hover·속도 클립 표시·768px).
+  - `tools/check_vpoc.py`(+1,033 −10, 지운 정의 0): 새 `_ERT_*`·`_ert_steps_problems`·`_ert_ops_problems`·`check_vnew_edit_retime`(ert-a~i)·`main()`, 아래 기대값 4곳·095 하네스 가짜 두 줄.
+  - 스펙 세 파일, `docs/ANALYSIS.md`(머리 줄·§3.6 `edit.py` 행·§3.6.3 6 저장 꼴·§3.6.3 8 새 절·§3.7·§9.1·§10.1), 이 항목.
+- **새 조작과 단축키**: 클립 양 끝 끌기(줄이기·원본 처음/끝까지 늘이기, 마우스를 올리면 손잡이가 보임), 도구줄 [속도] 0.5×·0.75×·1×·1.25×·1.5×·2×, "길이(초)" 칸(Enter·칸 떠남 적용, Esc 되돌림), `[`·`]` 고른 클립 끝 1프레임 앞(줄이기)·뒤(늘이기), `Shift+[`·`Shift+]` 시작 1프레임 앞(늘이기)·뒤(줄이기). 잠긴 ⑦ 칩은 title·누르면 막대 아래 한 줄.
+- **검사(어떤 검사가 무엇을 덮는지)**
+
+  | 검사 | 덮는 것 |
+  |---|---|
+  | ert-a | `summary`·`_lock_reason` 8꼴, 재료 있으면 `reason` 없음, `gen_view` gen 없음 켬(`edit`)·끔(키 없음)·취소 gen, 실제 GET /plan 켬·끔, 이른 return 블록 글자·`summary(gen)` 두 곳 |
+  | ert-b | node(실제 /plan 응답): ⑦ 칩 보임·`is-soon`·title·`aria-disabled`·누르면 한 줄(두 번 눌러도 한 줄)·기본 문구·편집 끔이면 ⑥까지·⑦에 있으면 흐리지 않음·열림 |
+  | ert-c | node(실제 `loadPlan`·`decidePlanStep`·`renderPlan`): `decide` 10경우, ⑦ 열린 동안 폴링 진행 중·콜백 partial·재료 없음 응답에 같은 ⑦ 화면·GET /edit 0, 편집 꺼짐 응답이면 남은 저장 PUT 뒤 닫기, 처음 불러오기는 새로 그림, 열기 409 `NoMaterials` 안내·[다시 시도]·[⑤ 영상으로], 내보내기 폴링 404 `NoGen` 안내·폴링 멈춤, 문구 없는 NoGen 기본 안내, 그 밖 오류는 오류 줄 |
+  | ert-d | 순수 함수 16묶음: `editSpeedOf`·`editClipLen`·`editSourceLen`·`editMinSource`·`editLocate`·`editStripCells` 속도·`editSetSpeed`·`editRetime` 12경우 + 거절 7·`editNudge` 12·`editKeyAction` 괄호 10·`editCloneClip`·`editSaveBody`·`editSplit` 속도·2× 최소 |
+  | ert-e | node(실제 GET /edit): 끝 끌기(끝 원본 끝까지·시작 줄이기 → 원본 처음까지·끝 줄이기 → 원본 끝까지·길이 모르면 늘리지 않음), 속도 0.5×(너비·이름·title·전체 시각·실행 취소/다시 실행·PUT speed), 재생(`playbackRate`·`defaultPlaybackRate`·`preservesPitch`·원본 1초 = 타임라인 2초·다음 클립 속도), 속도 클립 끝 끌기, 길이 입력(Enter·change 한 번·초점 중 덮지 않음·0.5× 상한 안내·속도 그대로 끝·쉼표·글자·빈 값·Esc·원본 밖 클립·최소), 너무 짧은 클립 2× 거절, `[` `]`(미리보기 끝 프레임·원본 끝·처음·더 줄일 수 없음·입력칸 무시·고른 클립 없음), 자르기(속도 그대로·이어진 조각 속도 바꿈·2× 최소), 한도 안내, PUT 바디, 409 다시 불러오기 |
+  | ert-f | 실제 라우트: 허용 속도 저장·1·null·없음 저장 안 함·`totalSeconds` 19.2, 거절 9꼴(400 `BadClip` 고정 문구), 속도 반영 최소 길이 400·통과, `TooLong` 타임라인 합, `_doc_hash` 하위 호환·`_speed_of`·`_clip_seconds`·`_total`, 속도만 다른 문서 409 `ExportRunning`·id만 다른 같은 속도 문서 `started false`, 옛 문서(speed 없음) 보기·내보내기 speed 1·프레임 그대로 |
+  | ert-g | `run_export` → `_export_segment` speed [0.5, 2, 1]·프레임 [144, 18, 48]·결과 8.75초, `edit_segment` 가짜 `_run` 명령 8경우(setpts·atempo·`-frames:v`·`-t`), speed 없음 = 115 전 명령 전체 리스트, 무음 클립 소리 필터 없음, 허용 밖 7꼴 `StitchError` |
+  | ert-h | 로컬 ffmpeg(`stitcher.ffmpeg_path()` — imageio-ffmpeg 7.1) 실제 내보내기 3번: 길이·영상 프레임 수·소리 길이 ±1프레임·크기·fps |
+  | ert-i | ert-e가 만든 PUT 바디 5개를 실제 라우트에 차례로(etag만 실제 값) → 모두 200·클립(speed 포함) 그대로, CSS 115 구역(새 클래스 9개 정의·속도 클립·hover 손잡이·가로 스크롤 없음·LF) |
+
+- **기대값을 바꾼 기존 검사와 이유**: edt-l(gen 없음 보기에 `edit`가 생김·재료 없음 요약 3곳에 `reason` — R13.1·R13.2), edu-c `decide`(⑦에서 재료 없음 selNo·진행 중 gen 응답 6·5 → 7 — R13.4), edu-d 도움말 문구(R14.8), edu-f `loadFail.noMat`(오류 줄 → 안내 문구 — R13.4, 다음 [다시 시도] 흐름은 그대로). `_LR_095_POLL_HARNESS`에 `editOpenFor`·`editLeave` 가짜 두 줄(⑦ 구역을 자르지 않는 하네스라 새 이름이 없다, 기대값 그대로). edu-a 배선 검사(`if (state.planStep === 7) return;` 한 번)에 걸리지 않게 `loadPlan` 새 줄을 다른 꼴로 썼다.
+- **확인**
+  - `node --check frontend/public/vnew.js` 통과.
+  - `python -X utf8 tools/check_vpoc.py` 전부 통과: ok 72줄(시작 전 71 + ert), FAIL·WARN 0, 110초. ert 단독 6~9초.
+  - ffmpeg 실측 길이(ert-h): 0.5×(원본 0.5~2.5초) 기대 4.000초 → 4.000초·96프레임·소리 4.010초, 2×(원본 0~2초) 기대 1.000초 → 1.000초·24프레임·소리 1.000초, 0.5×+1×+2× 기대 6.000초 → 6.000초·144프레임·소리 6.010초. 모두 ±1프레임(0.042초) 안이다(소리 +0.010초는 AAC 앞뒤 여백).
+  - 커버리지(coverage 7.17, 전체 검사기 `coverage run --include=edit.py,stitcher.py,generate.py`, 데이터는 저장소 밖, 시작 전 사본과 difflib): 바뀐 서버 실행문 45개 중 45개(100%) — `edit.py` 35/35, `stitcher.py` 5/5, `generate.py` 5/5. 가지(`--branch`, edt·ert만): 바뀐 줄 `edit.py` 14/14, `generate.py` 2/2(`stitcher.py`의 바뀐 곳은 조건식이라 가지 0). `edit.py` 파일 전체 916/918(남은 2줄은 윈도에서 닿지 않는 `import msvcrt` 실패 분기, 111과 같음).
+  - 화면 커버리지(참고, node V8 블록 커버리지, ert node 실행 세 개만): 115에서 만들거나 고친 함수 40개 모두 호출됨. ert만으로 닿지 않은 블록은 방어용 `|| {}`·기존 분기(다른 단축키·필름 칸, edu가 덮음)뿐이고, 115 분기 중 처음에 빠졌던 셋(더 줄일 수 없음 안내·빈 길이 입력·문구 없는 안내)은 검사를 더해 덮었다.
+  - 변형 검사 76개(저장소 밖 사본 트리, 한 군데씩 바꿔 ert를 돌리고 살아남으면 edt·edu·lr도 돌린 뒤 바이트째 되돌림): 서버 23(`edit.py` 16·`generate.py` 2·`stitcher.py` 5), `vnew.js` 50, `vnew.css` 3 — 모두 잡혔다(75개는 ert, 도움말 옛 문구 1개는 edu-d). 처음에 살아남은 것: 빠른 클립 자르기 최소 길이(J18) → 2× 클립 끝 가까이 자르기 검사를 더함, 입력 중 값 덮기(J39) → 초점 흉내 검사를 더함(돌리기 전에 모자람을 봄), CSS `.vnew-edit-len` 지우기 → 묶음 선택자에도 있어 같은 뜻 변형이라 한 곳에만 있는 `.vnew-edit-field-text`로 바꿈. 원본 밖 클립 길이 입력(J47·J48)은 구현을 보강하며 검사와 함께 더했다.
+  - 유료 호출 0: 화면은 가짜 api, 서버는 `_EdtEnv`(메모리 저장소·가짜 ffmpeg 래퍼·fal 가격·urlopen 막음). ert-h만 로컬 ffmpeg(저장소 밖 임시 폴더).
+  - 줄 끝·부산물: 바뀐 11개 파일 모두 CR 0·BOM 없음·끝 줄바꿈 있음(시작 전과 같음). 편집 도구가 덧붙일 때 CRLF를 넣어 매번 LF로 되돌렸다. 공백만 바뀐 줄 0, 새 줄 끝 공백 0, 지운 함수 정의 0(Python AST·JS 함수 이름). 저장소 안 새 파일 0, `__pycache__`·`.coverage` 변화 0. 수정 금지(`deploy/`·`k8s/`·`.gitlab-ci.yml`·`casting.py`·`term_search.py`·`whynot-20261029`)와 `routes.py`·`vpoc/errors.py`는 바이트가 같다. `.kiro/handoff/logs/115.log`는 이 실행 도구가 쓴다.
+- **3단계 리뷰**
+  - 보안
+    - 새 입력 `speed`는 서버가 허용 목록(6값)과 JSON 숫자만 받는다(bool·글자·NaN·배열·객체 거절, ert-f). ffmpeg 필터에는 목록 안 값만 `{speed:g}`로 들어가고(명령은 리스트, 셸 없음) `edit_segment`도 목록을 다시 본다(ert-g 7꼴).
+    - 길이 입력은 `Number()`로만 읽고 화면 글은 모두 `textContent`·`title`(edu-a innerHTML 0, ert 실행 중 0). 잠김 이유·안내 문구는 서버 상수 또는 서버 오류 문구(이미 운영 공개 kind)다.
+    - 새 오류 문구 두 개는 몇 번째 클립·한도 상수만 넣는다(edu-i AST 통과). 새 라우트·외부 전송·비밀값 없음. gen 없음 보기는 S3를 읽지 않는다.
+    - 발견: 없음.
+  - 성능(dev 파드 512Mi·CPU 0.5)
+    - 서버 호출 수·S3 읽기/쓰기·타임아웃 변화 없음. gen 없음 보기의 요약은 상수 시간.
+    - 내보내기: 720p 클립 인코딩 maxrss 속도 1·0.5·2 모두 142MB(로컬 `-benchmark`, 110 실측과 같음), 시간 0.61~0.76초/4초. 인코딩 비용은 출력(타임라인) 길이에, 디코딩은 원본 구간에 비례한다. 전체 상한 300초가 타임라인 합이라 0.5× 클립도 그만큼 센다. 2×는 원본 구간을 2배 디코딩하지만 원본 길이를 넘지 않는다.
+    - 화면: 속도 1 클립의 다시 그리기 노드 수는 그대로(edu-f 성능 기대값 3,737·끝 끌기 15 통과). 도구줄 칸 두 개는 화면을 만들 때 한 번. ⑦에서 늦게 온 `/plan` 응답으로 ⑦을 처음부터 다시 그리던 일이 없어졌다.
+    - 발견: 없음.
+  - 운영성
+    - 로그: `stitcher` "Edit segment … speed=" 한 칸을 더했다. 서버 로그 꼴(`vnew.edit.*`)은 그대로이고 `saved`·`export_start`의 `seconds`는 타임라인 길이다.
+    - 되돌리기: `config.<target>.env`의 `VNEW_EDIT=false`(⑦ 전체, 운영은 이미 false). 속도만 되돌리는 설정은 없다. 코드를 되돌리면 저장된 `speed`는 무시돼 1×로 내보내진다(길이가 달라짐).
+    - 진행 중 작업: 배포 전 내보내기 사본에는 `speed`가 없어 1×로 그대로 끝난다. 재시작 뒤 이어받기는 상태의 클립 사본(`speed` 포함)을 다시 쓴다. 속도를 쓰지 않은 문서는 해시가 같아 `matchesDoc`·중복 시작 판단이 그대로다(ert-f).
+    - 롤링 배포: 새 화면 + 옛 서버면 옛 서버가 `speed`를 버리고 저장한다(그 사이 화면은 속도를 보이지만 다시 불러오면 1×). 옛 화면 + 새 서버는 `speed`를 보내지 않아 그대로다.
+    - 발견: 처음 구현에서 원본 구간·속도 최소 길이를 한 조건으로 합쳤다 → speed 1에서 원본 끝 반올림 경우가 미세하게 바뀔 수 있어 110 줄은 그대로 두고 속도 조건을 따로(문구도 따로) 두었다(조치, ert-f). 길이 입력이 원본 밖 클립(시작이 원본 끝 뒤)에 맞지 않는 out을 만들 수 있었다 → `editRetime`이 null, 화면 안내(조치, ert-d·ert-e).
+- **dev에서 손으로 확인할 순서**(배포 뒤, dev는 base `VNEW_EDIT=true`)
+  1. ⑤ 영상을 아직 안 만든 프로젝트(08b3ef09 등): 단계 막대에 ⑦이 흐리게 보이고, 마우스를 올리면 "⑤에서 영상을 먼저 만들면 편집할 수 있습니다.", 누르면 막대 아래 같은 한 줄. 취소·실패 gen이면 그 이유 문구.
+  2. 통 테이크 프로젝트에서 ⑤ [실사 시작] 직후 ⑦ 칩을 눌러 편집 → 5~10초 기다려도 ⑦이 ⑤로 바뀌지 않는지(이전 증상), 실행 취소가 남는지.
+  3. 클립 양 끝을 끌어 줄였다가 다시 원본 길이까지 늘이기(끝·처음), 마우스를 올리면 손잡이가 보이는지.
+  4. 클립을 고르고 [속도] 0.5×·2× → 너비·"· 0.5×" 표시·미리보기 재생 속도(소리 높이 그대로), "길이(초)"에 원본보다 긴 값 → 속도가 낮아지고 안내 한 줄, `[` `]`·`Shift+[` `]`(한글 자판에서도), Ctrl+Z.
+  5. [내보내기] → 결과 길이가 타임라인 합(머리 시각 표시)과 같은지, 0.5× 구간 소리가 늘어지되 높이가 그대로인지. 로그 `Edit segment … speed=0.5`.
+  6. 다른 탭에서 ⑤ [다시 만들기]로 재료를 없앤 뒤 ⑦ 탭에서 [다시 시도]·내보내기 폴링 → 안내 문구와 [⑤ 영상으로].
+- **운영 반영 계획(실행하지 않음)**: Claude 검토·커밋 → 개발 main 병합 → CI(`check:whynot`) → ECR → ai-deploy `whynot/dev` → ArgoCD. 위 dev 확인 뒤 운영을 켤 때는 `config.prod.env`의 `VNEW_EDIT=false`를 바꾸고 수동 job `deploy:whynot:prod`(이번에는 하지 않는다). 운영은 지금 끔이라 gen 없음 보기에도 `edit`가 없다(prod 75e36d60은 켤 때부터 ⑦이 보인다).
+- **남은 이슈**
+  1. 실제 브라우저에서 보지 못했다(도구줄 줄바꿈·768px·`playbackRate` 0.5×/2× 재생 끊김·`preservesPitch` 지원). 위 dev 확인 순서로 본다.
+  2. 도움말 한 줄은 문구만 바꿨고 닫음 기억 키(`vnew-edit-help-closed`)는 그대로다. 이미 닫은 사용자는 새 문구를 보지 못한다(키를 바꾸면 다시 보인다 — Claude 결정).
+  3. 미리보기에서 같은 원본의 이어진 조각 사이 속도가 바뀌면 같은 `<video>`의 `playbackRate`만 바꾼다. 브라우저에 따라 그 순간 소리가 짧게 튈 수 있다(내보내기에는 없다).
+  4. 길이 입력은 out만 옮기고 원본이 모자라면 속도를 낮춘다(지시서 순서). 시작(in)을 앞으로 당겨 늘이는 선택지는 없다(앞 끝 끌기·`Shift+[`로 한다).
+  5. `[` `]`는 1프레임씩이다. CapCut처럼 재생헤드까지 한 번에 다듬기(Q·W)는 없다.
+  6. 롤링 배포 동안(새 화면 + 옛 파드) 속도 저장이 1×로 떨어질 수 있다(위 운영성). 배포가 끝난 뒤 다시 고르면 된다.
+  7. 속도 반영 최소 길이 문구가 원본 구간 문구와 다르다(`BadClipRange` 같은 kind, 문구 둘). 화면은 최소 길이를 미리 막아 정상 경로에서는 보이지 않는다.

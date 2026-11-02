@@ -24991,6 +24991,9 @@ function stopPlanPolling() {
   }
 }
 function maxReachableStep() { return 6; }
+// 지시서 115: loadPlan 이 ⑦ 화면이 열려 있는지 본다. 이 하네스는 ⑦ 구역을 자르지 않으므로 늘 닫힘(기대값 그대로).
+function editOpenFor() { return false; }
+function editLeave() {}
 function planStepBar() { var n = new FakeNode("nav"); n.className = "stub-stepbar"; return n; }
 function errMessage(e) { return (e && e.message) || "?"; }
 function stepStub(step) {
@@ -36887,7 +36890,8 @@ def check_vnew_edit() -> None:
             env.set(edit, "_material_items", lambda *a: (_ for _ in ()).throw(RuntimeError("x")))
             summary_broken = edit.summary({"units": []})
             env.set(edit, "_material_items", saved_items)
-            expect("edt-l", summary_broken, {"available": False, "variants": []}, "재료를 읽다 예외가 나도 요약은 실패하지 않는다")
+            expect("edt-l", summary_broken, {"available": False, "variants": [], "reason": edit.LOCK_REASONS["other"]},
+                   "재료를 읽다 예외가 나도 요약은 실패하지 않는다(지시서 115: 잠김 이유 '그 밖')")
             env.set(edit, "MAX_CLIPS", 2)
             expect("edt-b", len((get("prj_edt_cut").get_json() or {})["defaultClips"]), 2, "기본 문서도 클립 한도에서 멈춘다")
             env.set(edit, "MAX_CLIPS", 200)
@@ -37032,13 +37036,17 @@ def check_vnew_edit() -> None:
             nogen_view = genmod.gen_view(owner, "prj_edt_nogen", env.plan("prj_edt_nogen"))
             take5 = genmod.gen_view(owner, "prj_edt_take5", env.plan("prj_edt_take5"))
             expect("edt-l", [list(view_on)[-1], view_on.get("edit"), "edit" in view_off,
-                             {k: v for k, v in view_on.items() if k != "edit"} == view_off, none_view.get("edit"), "edit" in nogen_view,
+                             {k: v for k, v in view_on.items() if k != "edit"} == view_off, none_view.get("edit"), nogen_view.get("edit"),
                              take5.get("edit")],
                    ["edit", {"available": True, "variants": ["real", "webtoon"]}, False, True,
-                    {"available": False, "variants": []}, False, {"available": True, "variants": ["real", "webtoon"]}],
-                   "gen_view: 켬이면 끝에 edit 요약·끔이면 그 키만 없음·재료 없음·gen 없음·진행 중 회차(지난 회차 재료)")
+                    {"available": False, "variants": [], "reason": edit.LOCK_REASONS["running"]},
+                    {"available": False, "variants": [], "reason": edit.LOCK_REASONS["none"]},
+                    {"available": True, "variants": ["real", "webtoon"]}],
+                   "gen_view: 켬이면 끝에 edit 요약·끔이면 그 키만 없음·재료 없음(만드는 중 이유)·gen 없음도 edit(지시서 115)·"
+                   "진행 중 회차(지난 회차 재료)")
             expect("edt-l", [edit.summary({"units": "x"}), edit.summary(None), edit._material_items({}, "anime")],  # noqa: SLF001
-                   [{"available": False, "variants": []}, {"available": False, "variants": []}, []], "꼴 틀린 gen 은 재료 없음")
+                   [{"available": False, "variants": [], "reason": edit.LOCK_REASONS["other"]},
+                    {"available": False, "variants": [], "reason": edit.LOCK_REASONS["none"]}, []], "꼴 틀린 gen 은 재료 없음")
             drain()
             edit_logs = [m for m in all_logs if m.startswith("vnew.edit.")]
             leaky = [m for m in edit_logs if "users/" in m or "https://" in m or "signed" in m]
@@ -38099,7 +38107,7 @@ async function run() {
   getQueue.push({ err: { type: "NoMaterials", status: 409, message: "편집할 웹툰 영상이 아직 없습니다. ⑤에서 영상을 먼저 만들어 주세요." } });
   byText(r2, "button", "다시 시도").fire("click");
   await settle();
-  var noMat = byClass(rootOf(host2), "vnew-plan-error")[0].textContent;
+  var noMat = (byClass(rootOf(host2), "vnew-edit-gone-text")[0] || byClass(rootOf(host2), "vnew-plan-error")[0] || {}).textContent;
   // 필름 요청 하나가 실패해도(회색 그대로) 다음 재료를 이어 받는다
   var failMid = S.web.materials[1].mid, failedOnce = false;
   handlers.unshift(function (m, p) {
@@ -38392,7 +38400,8 @@ _EDU_STEPS_WANT = {
             "noEdit": _EDU_BAR6 + [["⑥사운드", "is-current"]],
             "at7": _EDU_BAR6 + [["⑥사운드", "is-done"], ["⑦편집", "is-current"]]},
     "click": {"go7": [7, [7], []], "same": [7, 1], "back6": [6, 6, [7]], "blocked": [6, 0]},
-    "decide": [7, 6, 6, 6, 6, 5],
+    # 지시서 115(R13.4): ⑦ 에 있으면 재료 없음(selNo)·진행 중 gen 응답에도 7 을 지킨다(6·5 → 7). gen.edit 이 없으면 지금처럼 되돌린다.
+    "decide": [7, 7, 6, 6, 6, 7],
     "poll": [0, 1, 1, 0],
     "pollTask": 0,
     "render": {"r7": [[7], "", 1], "r6": 6},
@@ -38434,8 +38443,9 @@ def _edu_ctl_problems(got: dict, server: dict) -> list[str]:
     want("edu-d", b.get("tools"), _EDU_TOOLS_WANT, "재생·도구 버튼: 아이콘·이름·단축키 표기·title(단축키 포함)·aria-label·처음 비활성")
     want("edu-d", [b.get("zoom"), b.get("handle"), b.get("help"), b.get("helpAfterTools")],
          [["확대/축소(+ / −)", "537", "range"], ["✂", "재생헤드 — 끌어서 옮기고, 누르면 이 자리에서 자르기 (S)"],
-          ["재생헤드를 옮기고 ✂ 또는 S로 자르고, 클립 끝을 끌어 길이를 줄이세요."], True],
-         "확대 슬라이더(로그 눈금 100px/초 = 537)·가위 손잡이·도구줄 바로 아래 한 줄 도움말")
+          ["재생헤드를 옮기고 ✂ 또는 S로 자르고, 클립 양 끝을 끌어 줄이거나 원본 길이까지 늘이세요. 고른 클립은 속도·길이(초)로도 바꿀 수 있습니다."],
+          True],
+         "확대 슬라이더(로그 눈금 100px/초 = 537)·가위 손잡이·도구줄 바로 아래 한 줄 도움말(지시서 115 문구)")
     want("edu-d", b.get("order"), ["vnew-edit-head", "login-error vnew-plan-error", "vnew-hint vnew-edit-notice", "vnew-edit-player",
                                    "vnew-edit-tools", "vnew-edit-help", "vnew-edit-tl", "vnew-edit-bin", "vnew-edit-export"],
          "레이아웃(design §5.2): 머리 · 미리보기 · 도구줄 · 도움말 · 타임라인 · 재료 · 내보내기")
@@ -38536,7 +38546,7 @@ def _edu_ctl_problems(got: dict, server: dict) -> list[str]:
         "내보내기: 남은 저장 먼저 → POST {etag} → 3초 폴링(아래 줄만) → 재생·내려받기(downloadUrl)·지난 결과, 같은 상태면 다시 그리지 않음, "
         "편집이 바뀌면 안내, 409 문구")
     want("edu-f", got.get("loadFail"), {"disabled": "편집을 열지 못했습니다: 영상 편집 기능이 꺼져 있습니다.",
-                                        "noMat": "편집을 열지 못했습니다: 편집할 웹툰 영상이 아직 없습니다. ⑤에서 영상을 먼저 만들어 주세요.",
+                                        "noMat": "편집할 웹툰 영상이 아직 없습니다. ⑤에서 영상을 먼저 만들어 주세요.",
                                         "recovered": 3, "mediaFail": ["failed", "done", True], "firstExport": [1, "", 3, True, True]},
          "불러오기 실패(끔·재료 없음) 문구·[다시 시도], 필름 하나 실패해도 다음 재료를 받음, 저장 안 된 기본 문서는 내보내기 전에 그대로 PUT")
     perf = got.get("perf") or {}
@@ -39010,6 +39020,1018 @@ def check_vnew_edit_ui() -> None:
            "(edu-k)CSS 넘침·768px" + "".join(f"\n       {r}" for r in report))
 
 
+# ---------------------------------------------------------------- 지시서 115 — ⑦ 늘 보이기 · 컷 늘이기/줄이기 · 속도(ert-*)
+#
+# 화면은 실제 vnew.js 구역(단계 막대·loadPlan·decidePlanStep·renderPlan·⑦ 구역)을 잘라 가짜 DOM·api·타이머로 돌린다(edu 하네스 재사용).
+# 서버는 _EdtEnv(메모리 저장소·가짜 ffmpeg 래퍼) + 실제 라우트, ert-h 만 로컬 ffmpeg 로 실제 내보내기를 한다. 유료 호출 0.
+_ERT_SLICES = (
+    ("  function el(tag, className, text)", "  function token()"),
+    ("  var PLAN_STEPS = [", "  var PLAN_POLL_MS = 3000;"),
+    ("  /* ---------------------------------------------------------------- 단계 막대 */", "  /* 공통 오류 줄(서버 envelope message). */"),
+    ("  /* 공통 오류 줄(서버 envelope message). */", "  /* input 일부를 저장(PUT /input)."),
+    ("  function renderPlan() {", "  /* ================================================================ ① 입력 */"),
+    ("  /* 영상 내려받기 링크(presigned URL).", "  /* ⑤ 시작 화면(촬영 지시서 카드"),
+    _EDU_SECTION,
+)
+_ERT_GONE_NOMAT = "편집할 웹툰 영상이 아직 없습니다. ⑤에서 영상을 먼저 만들어 주세요."
+_ERT_GONE_NOGEN = "영상 생성 기록이 없습니다. ⑤에서 영상을 먼저 만들어 주세요."
+_ERT_SPEED_MSG = "1번째 클립의 속도(speed)는 0.5·0.75·1·1.25·1.5·2 중 하나여야 합니다."
+# generate.gen_view 이른 return(R13.1): 이 블록만 바뀌었다(ert-a 가 글자 그대로 본다).
+_ERT_EARLY_RETURN = (
+    "    if not gen:\n"
+    "        view = {\"status\": \"none\", \"estimate\": est}\n"
+    "        # ⑦ 편집(지시서 115): 켜져 있으면 gen 이 없어도 요약(잠긴 ⑦ 칩과 이유)을 둔다. 꺼져 있으면 키가 없다.\n"
+    "        if vnew_settings.VNEW_EDIT:\n"
+    "            from . import edit as vnew_edit  # noqa: PLC0415 — edit 이 generate 를 import 한다(순환 피함).\n"
+    "\n"
+    "            view[\"edit\"] = vnew_edit.summary(gen)\n"
+    "        return view\n"
+    "\n"
+)
+# ⑦ 구역 새 CSS 클래스(115 구역에 정의돼야 한다, ert-i).
+_ERT_CSS_CLASSES = ("vnew-edit-gone", "vnew-edit-gone-text", "vnew-edit-gone-tools", "vnew-edit-retime", "vnew-edit-field",
+                    "vnew-edit-field-text", "vnew-edit-speed", "vnew-edit-len", "vnew-plan-step-note")
+
+# 하네스(_EDU_NODE_HARNESS) + 잘라 온 구역 뒤에 붙는 공통 가짜. SERVER(실제 GET /plan·/edit 응답)는 검사가 앞에 붙인다.
+_ERT_NODE_STUBS = r"""
+var PLAN_POLL_MS = 3001, GEN_POLL_FAST_MS = 3002, GEN_POLL_SLOW_MS = 5003;
+var host = new FakeNode("div");
+var renders = [];
+function planHost() { return host; }
+function stopPlanPolling() { if (state.planPollTimer) { window.clearTimeout(state.planPollTimer); state.planPollTimer = 0; } }
+function stepStub(n) { return function (body) { renders.push(n); body.appendChild(new FakeNode("stub-" + n)); }; }
+var renderInputStep = stepStub(1), renderScriptStep = stepStub(2), renderContiStep = stepStub(3),
+    renderPrevizStep = stepStub(4), renderGenStep = stepStub(5), renderSoundStep = stepStub(6);
+var P = "/api/vnew/p/p%201";
+var S = SERVER;
+var editQueue = [], planQueue = [], putPlan = [], putN = 0, mediaHold = true;
+handlers.push(function (m, p) {
+  if (m === "GET" && (p === P + "/edit" || p.indexOf(P + "/edit?") === 0)) return editQueue.length ? editQueue.shift() : { ok: clone(S.web) };
+});
+handlers.push(function (m, p) {
+  if (m === "GET" && p.indexOf(P + "/edit/media/") === 0) return mediaHold ? "hold" : { err: { message: "no film" } };
+});
+handlers.push(function (m, p) { if (m === "GET" && p === P + "/plan") return planQueue.length ? planQueue.shift() : undefined; });
+handlers.push(function (m, p) {
+  if (m === "PUT" && p === P + "/edit") {
+    if (putPlan.length) return putPlan.shift();
+    putN += 1;
+    return { ok: { doc: { version: putN }, etag: "e" + putN, saved: true, totalSeconds: 0 } };
+  }
+});
+function puts() { return calls.filter(function (c) { return c[0] === "PUT"; }); }
+function editGets() { return calls.filter(function (c) { return c[0] === "GET" && c[1].indexOf(P + "/edit") === 0 && c[1].indexOf("/media/") < 0; }).length; }
+function withGen(plan, patch) {
+  var p = clone(plan);
+  var g = p.gen || {};
+  Object.keys(patch).forEach(function (k) { if (patch[k] === null && k === "edit") delete g[k]; else g[k] = patch[k]; });
+  p.gen = g;
+  return p;
+}
+function pd(node, x, extra) {
+  var ev = { clientX: x, pointerId: 7, pointerType: "mouse", button: 0 };
+  Object.keys(extra || {}).forEach(function (k) { ev[k] = extra[k]; });
+  return node.fire("pointerdown", ev);
+}
+function C(id, key, a, b, extra) {
+  var c = { id: id, sourceKey: key, in: a, out: b, muted: false };
+  Object.keys(extra || {}).forEach(function (k) { c[k] = extra[k]; });
+  return c;
+}
+function textOf(node, cls) { var n = byClass(node, cls)[0]; return n ? n.textContent : null; }
+"""
+
+# ert-b·c: 단계 막대·decidePlanStep·loadPlan(⑦ 머무르기)·⑦ 안내.
+_ERT_NODE_STEPS = r"""
+function chips(bar) {
+  return bar.children.filter(function (b) { return b.tagName === "BUTTON"; }).map(function (b) {
+    return [b.textContent, b.className.replace("vnew-plan-step", "").trim(), b.title || "", b.attrs["aria-disabled"] || ""];
+  });
+}
+function barOf(plan, step) { state.plan = plan; state.planStep = step; return planStepBar(); }
+function decide(plan, step) { state.plan = plan; state.planStep = step; decidePlanStep(); return state.planStep; }
+async function run() {
+  // ================= (ert-b) 단계 막대: gen 없음에도 ⑦ 칩·잠김 이유 =================
+  var b1 = barOf(clone(S.plans.none), 1);
+  var before = chips(b1);
+  b1.children[6].fire("click");
+  var note1 = byClass(b1, "vnew-plan-step-note").map(function (n) { return [n.textContent, n.attrs.role, n.className]; });
+  b1.children[6].fire("click");
+  out.bar = {
+    count: before.length, last2: before.slice(5), clicked: [state.planStep, renders.length, note1, byClass(b1, "vnew-plan-step-note").length],
+    noReason: chips(barOf(withGen(S.plans.none, { edit: { available: false, variants: [] } }), 1))[6],
+    off: chips(barOf(clone(S.plans.noneOff), 1)).length,
+    at7: chips(barOf(withGen(S.plans.cut, { edit: { available: false, variants: [], reason: "R" } }), 7))[6],
+    open: chips(barOf(clone(S.plans.cut), 6))[6]
+  };
+  var noSel = withGen(S.plans.cut, { selected: null });
+  out.decide = [
+    decide(withGen(S.plans.cut, { status: "running" }), 7), decide(withGen(S.plans.cut, { status: "partial", selected: null }), 7),
+    decide(withGen(S.plans.cut, { edit: { available: false, variants: [], reason: "x" } }), 7), decide(withGen(S.plans.cut, { edit: null }), 7),
+    decide(withGen(S.plans.cut, { status: "running" }), 5), decide(withGen(S.plans.cut, { status: "running" }), 6),
+    decide(clone(S.plans.none), 0), decide(clone(S.plans.none), 7), decide(noSel, 7), decide(clone(S.plans.cut), 0)
+  ];
+
+  // ================= (ert-c) ⑦ 에 있는 동안 계획이 바뀌어도 ⑦ 그대로 =================
+  state.plan = clone(S.plans.cut); state.planStep = 6; renders.length = 0;
+  renderPlan();
+  byClass(host, "vnew-plan-steps")[0].children[6].fire("click");
+  await settle();
+  var ctx = editCtx;
+  var root0 = byClass(host, "vnew-edit")[0];
+  var opened = [state.planStep, !!ctx, renders.slice(), byClass(root0, "vnew-edit-clip").length, editGets()];
+  async function respond(plan, fromPoll, first) {
+    planQueue.push({ ok: plan });
+    var g0 = editGets();
+    loadPlan(!!first, fromPoll);
+    await settle();
+    return [state.planStep, editCtx === ctx, byClass(host, "vnew-edit")[0] === root0, ((state.plan || {}).gen || {}).status, renders.slice(),
+            editGets() - g0, ctx.alive];
+  }
+  var running = await respond(withGen(S.plans.cut, { status: "running" }), true);
+  var partial = await respond(withGen(S.plans.cut, { status: "partial", selected: null }), false);
+  var gone = await respond(withGen(S.plans.cut, { edit: { available: false, variants: [], reason: "R" } }), false);
+  // 편집이 꺼진 응답(gen.edit 없음): 남은 저장을 먼저 보내고 갈 수 있는 단계로
+  ctx.sel = 0;
+  key("m", "KeyM");
+  var pendingBefore = pending(800), putsBefore = puts().length;
+  planQueue.push({ ok: withGen(S.plans.cut, { edit: null }) });
+  loadPlan(false);
+  await settle();
+  var lastPut = (puts().slice(-1)[0] || [0, 0, {}])[2] || {};
+  var off = [state.planStep, editCtx === null, ctx.alive, puts().length - putsBefore, pending(800), renders.slice(-1)[0], pendingBefore,
+             ((lastPut.clips || [])[0] || {}).muted];
+  // 처음 불러오기(loadPlan(true))는 ⑦ 을 새로 그린다
+  state.plan = clone(S.plans.cut); state.planStep = 7; renderPlan();
+  await settle();
+  var ctxA = editCtx;
+  planQueue.push({ ok: withGen(S.plans.cut, { status: "running" }) });
+  loadPlan(true);
+  await settle();
+  var first = [state.planStep, !!editCtx && editCtx !== ctxA, ctxA.alive];
+  out.stay = { opened: opened, running: running, partial: partial, gone: gone, off: off, first: first };
+
+  // ⑦ 안내: 열기 NoMaterials → 안내·[다시 시도] → 열림, 내보내기 폴링 NoGen → 안내·폴링 멈춤, [⑤ 영상으로], 그 밖 오류는 오류 줄
+  editLeave();
+  state.plan = clone(S.plans.cut); state.planStep = 7;
+  var h2 = new FakeNode("div");
+  editQueue.push({ err: { type: "NoMaterials", status: 409, message: S.goneNoMat } });
+  renderEditStep(h2);
+  await settle();
+  var r2 = h2.children[0];
+  var g1 = [textOf(r2, "vnew-edit-gone-text"), byClass(r2, "vnew-plan-error").length, byTag(r2, "button").map(function (b) { return b.textContent; }),
+            textOf(r2, "vnew-sec-title"), byClass(r2, "vnew-edit-gone").length];
+  editQueue.push({ ok: clone(S.web) });
+  var retryBtn = byText(r2, "button", "다시 시도");
+  if (retryBtn) retryBtn.fire("click");
+  await settle();
+  var reopened = [byClass(r2, "vnew-edit-clip").length, byClass(r2, "vnew-edit-gone").length];
+  editLeave();
+  var h3 = new FakeNode("div");
+  var queued = clone(S.web);
+  queued.export = { status: "queued", n: 1, progress: { done: 0, total: 3 } };
+  editQueue.push({ ok: queued });
+  renderEditStep(h3);
+  await settle();
+  var pollBefore = pending(3000);
+  editQueue.push({ err: { type: "NoGen", status: 404, message: S.goneNoGen } });
+  fire(3000);
+  await settle();
+  var r3 = h3.children[0];
+  var g2 = [pollBefore, textOf(r3, "vnew-edit-gone-text"), pending(3000), byClass(r3, "vnew-edit-clip").length];
+  renders.length = 0;
+  var backBtn = byText(r3, "button", "⑤ 영상으로");
+  if (backBtn) backBtn.fire("click");
+  var back = [state.planStep, editCtx === null, renders.slice()];
+  state.planStep = 7;
+  var h4 = new FakeNode("div");
+  editQueue.push({ err: { type: "Forbidden", status: 403, message: "권한이 없습니다." } });
+  renderEditStep(h4);
+  await settle();
+  var other = [textOf(h4.children[0], "vnew-plan-error"), byClass(h4.children[0], "vnew-edit-gone").length];
+  editLeave();
+  var h5 = new FakeNode("div");
+  editQueue.push({ err: { type: "NoGen", status: 404 } });
+  renderEditStep(h5);
+  await settle();
+  other.push(textOf(h5.children[0], "vnew-edit-gone-text"));
+  editLeave();
+  out.gone = { open: g1, reopened: reopened, poll: g2, back: back, other: other };
+  out.innerHTML = innerHTMLUsed;
+  console.log(JSON.stringify(out));
+}
+run().catch(function (e) { console.error(String((e && e.stack) || e)); process.exit(1); });
+"""
+
+# ert-d: 순수 함수(속도·길이·1프레임·단축키). 기대값은 _ERT_PURE_WANT.
+_ERT_NODE_PURE = r"""
+async function run() {
+  var p = {};
+  p.speedOf = [{ speed: 0.5 }, { speed: 2 }, {}, { speed: 3 }, { speed: "1.5" }, { speed: true }, null, { speed: 0.75 }].map(editSpeedOf);
+  p.len = [C("a", "k", 1, 3, { speed: 0.5 }), C("b", "k", 1, 3, { speed: 2 }), C("c", "k", 1, 3, { speed: 0.75 }), C("d", "k", 1, 3), C("e", "k", 3, 1)]
+    .map(function (c) { return [r3(editClipLen(c)), r3(editSourceLen(c))]; });
+  p.minSource = [editMinSource(0.04, 2), editMinSource(0.04, 0.5), editMinSource(0, 1), r3(editMinSource(0.04, 1.5))];
+  var sc = [C("a", "k1", 0, 2, { speed: 0.5 }), C("b", "k2", 1, 3, { speed: 2 })];
+  p.starts = editStarts(sc);
+  p.locate = [0, 1, 3.5, 4, 4.5, 5, 6].map(function (t) { var l = editLocate(sc, t); return [l.index, r3(l.start), r3(l.local), l.source]; });
+  var strip = { tiles: 3, interval: 1, tileWidth: 128, tileHeight: 72 };
+  p.strip = [editStripCells(C("s", "k", 0, 3, { speed: 2 }), strip, 100, 48),
+             editStripCells(C("s", "k", 0, 1, { speed: 0.5 }), strip, 100, 48).cells.map(function (c) { return c.x; })];
+  p.setSpeed = [editSetSpeed(C("a", "k", 1, 3), 0.5, 0.04), editSetSpeed(C("b", "k", 1, 3, { speed: 2 }), 1, 0.04),
+                editSetSpeed(C("c", "k", 0, 0.05), 2, 0.04), editSetSpeed(C("d", "k", 0, 0.08), 2, 0.04), editSetSpeed(C("e", "k", 1, 3), 3, 0.04),
+                editSetSpeed(C("f", "k", 1, 3), "x", 0.04)];
+  function rt(clip, s, dur, fps) {
+    var r = editRetime(clip, s, dur, fps, 0.04);
+    return r ? [r.clip.in, r.clip.out, editSpeedOf(r.clip), r.note, "speed" in r.clip] : null;
+  }
+  var base = C("r", "k", 1, 3);
+  var fast = C("q", "k", 1, 3, { speed: 2 });
+  p.retime = [rt(base, 1.5, 10, 24), rt(base, 5, 10, 24), rt(base, 12, 10, 24), rt(base, 15, 10, 24), rt(base, 20, 10, 24), rt(base, 0.01, 10, 24),
+              rt(fast, 1.5, 10, 24), rt(fast, 5, 10, 24), rt(base, 3, 0, 24), rt(C("o", "k", 0.5, 2), 1.234, 10, 25), rt(base, 8.98, 9.99, 24),
+              rt(base, 2, 10, 0)];
+  p.retimeBad = [rt(base, NaN, 10, 24), rt(base, 0, 10, 24), rt(base, -1, 10, 24), rt(base, Infinity, 10, 24), rt(base, "abc", 10, 24),
+                 rt(C("x", "k", 5, 6), 2, 3, 24), rt(C("y", "k", 2.99, 3), 1, 3, 24)];
+  p.retimeKeeps = (function () { var r = editRetime(C("w", "k", 0, 3, { label: "L", muted: true }), 2, 3, 24, 0.04).clip; return [r.id, r.label, r.muted]; })();
+  function ng(clip, edge, dir, dur, fps) { var n = editNudge(clip, edge, dir, dur, fps, 0.04); return [n.in, n.out]; }
+  p.nudge = [ng(base, "out", -1, 10, 24), ng(base, "out", 1, 10, 24), ng(base, "in", -1, 10, 24), ng(base, "in", 1, 10, 24),
+             ng(C("e", "k", 1, 10), "out", 1, 10, 24), ng(C("z", "k", 0, 3), "in", -1, 10, 24), ng(base, "out", 1, 0, 24),
+             ng(C("t", "k", 1, 1.042), "out", -1, 10, 24), ng(C("f", "k", 1, 1.125, { speed: 2 }), "out", -1, 10, 24),
+             ng(C("g", "k", 1, 1.083, { speed: 2 }), "out", -1, 10, 24), ng(base, "out", -1, 10, 0), ng(base, "in", 1, 0, 24)];
+  p.keys = [["[", "BracketLeft"], ["]", "BracketRight"], ["{", "BracketLeft", false, true], ["}", "BracketRight", false, true], ["[", "", false, true],
+            ["", "BracketLeft"], ["[", "BracketLeft", true], ["]", "BracketRight", true], ["{", ""], ["}", ""]]
+    .map(function (k) { return editKeyAction(k[0], k[1], !!k[2], !!k[3]); });
+  p.clone = [editCloneClip(C("a", "k", 0, 1, { speed: 0.5 })), editCloneClip(C("b", "k", 0, 1, { speed: 1 })), editCloneClip(C("c", "k", 0, 1, { speed: 3 })),
+             editCloneClip(C("d", "k", 0, 1, { speed: "2" }))];
+  p.saveBody = editSaveBody("e1", "webtoon", [C("a", "k", 0, 1, { speed: 2, label: "L" })]);
+  var s1 = editSplit([C("a", "k", 0, 3, { speed: 0.5 })], 1.0, "n", 24, editMinSource(0.04, 0.5));
+  p.split = [s1.index, s1.clips.map(function (c) { return [c.id, c.in, c.out, c.speed]; })];
+  var fastClip = [C("a", "k", 0, 0.2, { speed: 2 })];
+  var s2 = editSplit(fastClip, 0.05, "n", 24, editMinSource(0.04, 2));
+  p.splitFast = [editSplit(fastClip, 0.02, "n", 24, editMinSource(0.04, 2)), s2 && s2.clips.map(function (c) { return [c.in, c.out, c.speed]; })];
+  out.pure = p;
+  out.innerHTML = innerHTMLUsed;
+  console.log(JSON.stringify(out));
+}
+run().catch(function (e) { console.error(String((e && e.stack) || e)); process.exit(1); });
+"""
+
+# ert-e: ⑦ 화면 조작(실제 GET /edit 응답). 바디는 ert-i 가 실제 라우트에 보낸다.
+_ERT_NODE_OPS = r"""
+async function run() {
+  state.plan = clone(S.plans.cut); state.planStep = 7;
+  var h1 = new FakeNode("div");
+  renderEditStep(h1);
+  await settle();
+  var ctx = editCtx;
+  function root() { return h1.children[0]; }
+  function boxes() { return byClass(root(), "vnew-edit-clip"); }
+  function edge(i, which) { return byClass(boxes()[i], "vnew-edit-edge " + (which === "in" ? "is-in" : "is-out"))[0]; }
+  function drag(i, which, x0, x1) { var e = edge(i, which); pd(e, x0); e.fire("pointermove", { clientX: x1 }); e.fire("pointerup", {}); }
+  function now(i) { var c = ctx.clips[i]; return [c.in, c.out, c.speed || 1]; }
+  function note() { return byClass(root(), "vnew-edit-notice")[0].textContent; }
+  var sp = byClass(root(), "vnew-edit-speed")[0], len = byClass(root(), "vnew-edit-len")[0];
+  var u0 = ctx.hist.undo.length;
+  out.fields = [sp.disabled, len.disabled, sp.value, len.value, sp.children.map(function (o) { return [o.value, o.textContent]; }), len.type, len.min,
+                len.step, len.attrs.inputmode, sp.title, len.title, sp.attrs["aria-label"] === sp.title, len.attrs["aria-label"] === len.title,
+                byClass(root(), "vnew-edit-retime")[0].parentNode === byClass(root(), "vnew-edit-tools")[0],
+                byClass(root(), "vnew-edit-field-text").map(function (n) { return n.textContent; })];
+  out.titles = [edge(0, "in").title, edge(0, "out").title];
+
+  // ================= 끝 끌기: 줄이기 · 원본 처음·끝까지 늘이기 · 길이 모름 =================
+  drag(1, "out", 300, 500);
+  var extendOut = [now(1), boxes()[1].style.width];
+  drag(0, "in", 0, 50);
+  var shrinkIn = now(0);
+  drag(0, "in", 0, -100);
+  var extendIn = now(0);
+  drag(0, "out", 300, 100);
+  var shrinkOut = now(0);
+  drag(0, "out", 100, 400);
+  var extendOut0 = now(0);
+  var key0 = ctx.clips[0].sourceKey, keep = ctx.materials[key0].duration;
+  ctx.materials[key0].duration = null;
+  drag(0, "out", 300, 400);
+  var unknownLonger = now(0);
+  drag(0, "out", 300, 250);
+  var unknownShorter = now(0);
+  ctx.materials[key0].duration = keep;
+  key("z", "KeyZ", { ctrlKey: true });
+  out.edges = { extendOut: extendOut, shrinkIn: shrinkIn, extendIn: extendIn, shrinkOut: shrinkOut, extendOut0: extendOut0,
+                unknownLonger: unknownLonger, unknownShorter: unknownShorter, afterUndo: now(0), undo: ctx.hist.undo.length - u0,
+                timer: pending(800), puts: puts().length };
+  fire(800);
+  await settle();
+
+  // ================= 속도: 고르기 · 너비 · 실행 취소/다시 실행 · 재생 playbackRate =================
+  editSelect(ctx, 0);
+  var selFields = [sp.disabled, len.disabled, sp.value, len.value];
+  sp.value = "0.5";
+  sp.fire("change");
+  var b0 = boxes()[0];
+  var sped = [now(0), b0.style.width, textOf(b0, "vnew-edit-clip-label"), b0.className, b0.title, len.value, sp.value,
+              textOf(root(), "vnew-edit-time"), pending(800), puts().length];
+  key("z", "KeyZ", { ctrlKey: true });
+  var undone = [now(0), boxes()[0].style.width, boxes()[0].className];
+  key("y", "KeyY", { ctrlKey: true });
+  var redone = now(0);
+  fire(800);
+  await settle();
+  var putSped = puts().slice(-1)[0][2].clips.map(function (c) { return c.speed === undefined ? 1 : c.speed; });
+  key("Home", "Home");
+  var vA = ctx.vids[ctx.cur], vB = ctx.vids[1 - ctx.cur];
+  key(" ", "Space");
+  var rate = [vA.playbackRate, vA.defaultPlaybackRate, vA.preservesPitch, vB.playbackRate];
+  vA._time = 1.0;
+  flushRafOnce();
+  var tAt = r3(ctx.t);
+  vA._time = ctx.clips[0].out;
+  flushRafOnce();
+  var adv = [ctx.curIndex, ctx.vids[ctx.cur] === vB, vB.playbackRate, r3(ctx.t)];
+  key(" ", "Space");
+  out.speed = { selFields: selFields, sped: sped, undone: undone, redone: redone, putSped: putSped, rate: rate, tAt: tAt, adv: adv };
+
+  // 속도 클립 끝 끌기: 100px = 타임라인 1초 = 원본 0.5초
+  editSelect(ctx, 0);
+  drag(0, "out", 600, 500);
+  out.speedDrag = [now(0), boxes()[0].style.width];
+
+  // ================= 길이(초) 입력 =================
+  editSelect(ctx, 2);
+  var u1 = ctx.hist.undo.length;
+  len.value = "2";
+  var ev = len.fire("keydown", { key: "Enter" });
+  len.fire("change");
+  var l1 = [now(2), ctx.hist.undo.length - u1, !!ev.defaultPrevented, len.value, note()];
+  // 입력 중(초점)에는 다른 그리기가 값을 덮지 않고, 적용 뒤(force)에는 덮는다
+  document.activeElement = len;
+  len.value = "7";
+  editRenderTools(ctx);
+  var focusKeep = len.value;
+  editRenderRetime(ctx, true);
+  var focus = [focusKeep, len.value];
+  document.activeElement = null;
+  len.value = "10"; len.fire("change");
+  var l2 = [now(2), len.value, note()];
+  len.value = "4"; len.fire("change");
+  var l3 = [now(2), len.value, note()];
+  len.value = "1,5"; len.fire("change");
+  var l4 = [now(2), len.value];
+  var u2 = ctx.hist.undo.length;
+  len.value = "abc"; len.fire("change");
+  var l5 = [now(2), note(), ctx.hist.undo.length - u2, len.value];
+  len.value = ""; len.fire("change");
+  var l5b = [now(2), note(), ctx.hist.undo.length - u2];
+  len.value = "9"; len.fire("keydown", { key: "Escape" });
+  var l6 = [len.value, now(2)];
+  var key2 = ctx.clips[2].sourceKey, keep2 = ctx.materials[key2].duration;
+  ctx.materials[key2].duration = 0.01;
+  len.value = "2"; len.fire("change");
+  var l6b = [now(2), note()];
+  ctx.materials[key2].duration = keep2;
+  len.value = "0.01"; len.fire("change");
+  var l7 = [now(2), note(), len.value];
+  sp.value = "2"; sp.fire("change");
+  var refused = [now(2), note(), sp.value];
+  out.length = { l1: l1, focus: focus, l2: l2, l3: l3, l4: l4, l5: l5, l5b: l5b, l6: l6, l6b: l6b, l7: l7, refused: refused };
+  fire(800);
+  await settle();
+
+  // ================= 단축키 [ ] · Shift+[ ] =================
+  editSelect(ctx, 1);
+  key("[", "BracketLeft");
+  var vid = ctx.vids[ctx.cur];
+  var k1 = [now(1), vid.seeks.slice(-1)[0]];
+  key("]", "BracketRight");
+  var k2 = now(1);
+  key("]", "BracketRight");
+  var k3 = [now(1), note()];
+  key("{", "BracketLeft", { shiftKey: true });
+  var k4 = [now(1), note()];
+  key("}", "BracketRight", { shiftKey: true });
+  var k5 = [now(1), ctx.vids[ctx.cur].seeks.slice(-1)[0]];
+  key("{", "BracketLeft", { shiftKey: true });
+  var k6 = now(1);
+  var kin = key("[", "BracketLeft", { target: len });
+  var k7 = [now(1), !!kin.defaultPrevented];
+  editSelect(ctx, 2);
+  key("[", "BracketLeft");
+  var k9 = [now(2), note()];
+  editSelect(ctx, -1);
+  var kNone = key("[", "BracketLeft");
+  var k8 = [note(), !!kNone.defaultPrevented];
+  out.keys = { k1: k1, k2: k2, k3: k3, k4: k4, k5: k5, k6: k6, k7: k7, k8: k8, k9: k9, undoDepth: ctx.hist.undo.length - u0 };
+
+  // ================= 자르기(속도 그대로) · 이어진 조각 속도 바꿈 =================
+  editSeek(ctx, 1.0);
+  key("s", "KeyS");
+  var split = [ctx.clips.length, now(0), now(1), ctx.clips[0].sourceKey === ctx.clips[1].sourceKey];
+  editSelect(ctx, 1);
+  sp.value = "1";
+  sp.fire("change");
+  key("Home", "Home");
+  var v0 = ctx.vids[ctx.cur];
+  key(" ", "Space");
+  var r0 = v0.playbackRate;
+  v0._time = ctx.clips[0].out;
+  flushRafOnce();
+  var contiguous = [r0, ctx.curIndex, ctx.vids[ctx.cur] === v0, v0.playbackRate, v0.defaultPlaybackRate];
+  key(" ", "Space");
+  out.split = { split: split, contiguous: contiguous };
+  // 빠른(2×) 클립은 두 조각의 타임라인 길이가 최소 길이 이상이어야 자른다(원본 0.042초 @2× = 0.021초 → 거절)
+  editSelect(ctx, 0);
+  sp.value = "2";
+  sp.fire("change");
+  editSeek(ctx, 0.02);
+  var nSplit = ctx.clips.length;
+  key("s", "KeyS");
+  out.split.fast = [now(0), ctx.clips.length - nSplit, note()];
+  key("z", "KeyZ", { ctrlKey: true });
+
+  // ================= 한도: 전체 길이를 넘는 속도·길이는 안내만 =================
+  var keepLimits = ctx.limits;
+  var total = editStarts(ctx.clips).total;
+  ctx.limits = { maxClips: 200, maxTotalSeconds: r3(total + 0.5), minClipSeconds: 0.04 };
+  editSelect(ctx, 2);
+  var before = JSON.stringify(ctx.clips), uLim = ctx.hist.undo.length;
+  sp.value = "0.5"; sp.fire("change");
+  var lim1 = [note() === "타임라인 전체 길이는 " + r3(total + 0.5) + "초까지입니다.", JSON.stringify(ctx.clips) === before, sp.value];
+  len.value = "100"; len.fire("change");
+  var lim2 = [note() === "타임라인 전체 길이는 " + r3(total + 0.5) + "초까지입니다.", JSON.stringify(ctx.clips) === before, ctx.hist.undo.length - uLim];
+  ctx.limits = keepLimits;
+  out.limits = [lim1, lim2];
+
+  // ================= 저장 바디 · 409 다시 불러오기 =================
+  fire(800);
+  await settle();
+  var last = puts().slice(-1)[0][2];
+  out.body = [last.etag, last.variant, last.clips.map(function (c) { return [c.in, c.out, c.speed === undefined ? null : c.speed]; })];
+  putPlan.push({ err: { type: "EditChanged", status: 409, message: "다른 곳에서 편집 문서가 먼저 저장됐습니다. 다시 불러온 뒤 고쳐 주세요." } });
+  editQueue.push({ ok: clone(S.web) });
+  editSelect(ctx, 0);
+  sp.value = "1.25"; sp.fire("change");
+  fire(800);
+  await settle();
+  out.conflict = [ctx.hist.undo.length, ctx.hist.redo.length, ctx.clips.map(function (c) { return c.speed || 1; }), note()];
+  editLeave();
+  out.bodies = calls.filter(function (c) { return c[0] === "PUT"; }).map(function (c) { return c[2]; });
+  out.innerHTML = innerHTMLUsed;
+  console.log(JSON.stringify(out));
+}
+run().catch(function (e) { console.error(String((e && e.stack) || e)); process.exit(1); });
+"""
+
+_ERT_PURE_WANT = {
+    "speedOf": [0.5, 2, 1, 1, 1.5, 1, 1, 0.75],
+    "len": [[4, 2], [1, 2], [2.667, 2], [2, 2], [0, 0]],
+    "minSource": [0.08, 0.04, 0.04, 0.06],
+    "starts": {"starts": [0, 4], "total": 5},
+    "locate": [[0, 0, 0, 0], [0, 0, 1, 0.5], [0, 0, 3.5, 1.75], [1, 4, 0, 1], [1, 4, 0.5, 2], [1, 4, 1, 3], [1, 4, 1, 3]],
+    "strip": [{"bgWidth": 255.9, "bgHeight": 48, "cells": [{"left": 0, "width": 85.3, "x": 0}, {"left": 85.3, "width": 64.7, "x": -170.6}]},
+              [0, 0, 0]],
+    "setSpeed": [{"id": "a", "sourceKey": "k", "in": 1, "out": 3, "muted": False, "speed": 0.5},
+                 {"id": "b", "sourceKey": "k", "in": 1, "out": 3, "muted": False}, None,
+                 {"id": "d", "sourceKey": "k", "in": 0, "out": 0.08, "muted": False, "speed": 2}, None, None],
+    "retime": [[1, 2.5, 1, "", False], [1, 6, 1, "", False], [1, 10, 0.75, "원본이 모자라 속도를 0.75×로 낮췄습니다.", True],
+               [1, 8.5, 0.5, "원본이 모자라 속도를 0.5×로 낮췄습니다.", True],
+               [1, 10, 0.5, "원본 끝까지 0.5×로 늘려도 18.00초까지입니다. 18.00초로 맞췄습니다.", True],
+               [1, 1.042, 1, "가장 짧은 길이(0.04초)로 맞췄습니다.", False], [1, 4, 2, "", True],
+               [1, 8.5, 1.5, "원본이 모자라 속도를 1.5×로 낮췄습니다.", True], [1, 2.5, 0.5, "원본이 모자라 속도를 0.5×로 낮췄습니다.", True],
+               [0.5, 1.72, 1, "", False], [1, 9.99, 1, "", False], [1, 3, 1, "", False]],
+    "retimeBad": [None, None, None, None, None, None, None],
+    "retimeKeeps": ["w", "L", True],
+    "nudge": [[1, 2.958], [1, 3.042], [0.958, 3], [1.042, 3], [1, 10], [0, 3], [1, 3], [1, 1.042], [1, 1.083], [1, 1.083], [1, 2.958],
+              [1.042, 3]],
+    "keys": ["outEarlier", "outLater", "inEarlier", "inLater", "inEarlier", "outEarlier", "", "", "inEarlier", "inLater"],
+    "clone": [{"id": "a", "sourceKey": "k", "in": 0, "out": 1, "muted": False, "speed": 0.5},
+              {"id": "b", "sourceKey": "k", "in": 0, "out": 1, "muted": False}, {"id": "c", "sourceKey": "k", "in": 0, "out": 1, "muted": False},
+              {"id": "d", "sourceKey": "k", "in": 0, "out": 1, "muted": False, "speed": 2}],
+    "saveBody": {"etag": "e1", "variant": "webtoon", "clips": [{"id": "a", "sourceKey": "k", "in": 0, "out": 1, "muted": False, "label": "L",
+                                                                 "speed": 2}], "audio": []},
+    "split": [1, [["a", 0, 0.5, 0.5], ["n", 0.5, 3, 0.5]]],
+    "splitFast": [None, [[0, 0.083, 2], [0.083, 0.2, 2]]],
+}
+
+
+def _ert_steps_problems(got: dict, lock: dict) -> list[str]:
+    """ert-b·c node 결과(_ERT_NODE_STEPS)를 R13 동작과 비교한다. lock = edit.LOCK_REASONS."""
+    problems: list[str] = []
+
+    def want(group: str, value, expected, what: str) -> None:
+        if value != expected:
+            problems.append(f"({group}) {what}\n      결과 {value!r}\n      기대 {expected!r}")
+
+    bar = got.get("bar") or {}
+    want("ert-b", [bar.get("count"), bar.get("last2")],
+         [7, [["⑥사운드", "is-soon", "", ""], ["⑦편집", "is-soon", lock["none"], "true"]]],
+         "gen 없음(실제 GET /plan): ⑦ 칩이 보이고 잠김(is-soon)·title 이유·aria-disabled")
+    want("ert-b", bar.get("clicked"), [1, 0, [[lock["none"], "status", "vnew-hint vnew-plan-step-note"]], 1],
+         "잠긴 ⑦ 을 누르면 단계 그대로·다시 그리기 0·막대 아래 한 줄(role=status), 두 번 눌러도 한 줄")
+    want("ert-b", [bar.get("noReason"), bar.get("off"), bar.get("at7"), bar.get("open")],
+         [["⑦편집", "is-soon", "⑤에서 영상을 먼저 만들면 편집할 수 있습니다.", "true"], 6, ["⑦편집", "is-current", "R", "true"],
+          ["⑦편집", "", "", ""]],
+         "reason 이 없으면 기본 문구·편집 끔(gen.edit 없음)이면 ⑥ 까지·⑦ 에 있으면 흐리지 않음(이유 title)·갈 수 있으면 열림")
+    want("ert-c", got.get("decide"), [7, 7, 7, 5, 5, 5, 1, 7, 7, 5],
+         "decidePlanStep: ⑦ 에서 진행 중·partial·재료 없음·selected 없음이어도 7, gen.edit 이 없으면 지금 규칙(partial → 5), "
+         "⑤·⑥ 은 지금 규칙, 처음 열기 그대로")
+    stay = got.get("stay") or {}
+    want("ert-c", [stay.get("opened"), stay.get("running"), stay.get("partial"), stay.get("gone")],
+         [[7, True, [6], 3, 1], [7, True, True, "running", [6], 0, True], [7, True, True, "partial", [6], 0, True],
+          [7, True, True, "partial", [6], 0, True]],
+         "⑦ 이 열린 동안 /plan 응답(폴링 진행 중·콜백 partial selected 없음·재료 없음): 단계 7·같은 ⑦ 화면·다시 그리기 0·GET /edit 0")
+    want("ert-c", [stay.get("off"), stay.get("first")], [[5, True, False, 1, 0, 5, 1, True], [7, True, False]],
+         "편집 꺼짐 응답: editLeave 로 남은 저장(소리 끔)을 바로 PUT·⑦ 닫음·갈 수 있는 단계, 처음 불러오기는 ⑦ 을 새로 그림")
+    gone = got.get("gone") or {}
+    want("ert-c", [gone.get("open"), gone.get("reopened")],
+         [[_ERT_GONE_NOMAT, 0, ["다시 시도", "⑤ 영상으로"], "편집", 1], [3, 0]],
+         "열기 409 NoMaterials → 오류 줄 대신 안내(서버 문구)·[다시 시도]·[⑤ 영상으로], 다시 시도 → 편집 화면")
+    want("ert-c", [gone.get("poll"), gone.get("back"), gone.get("other")],
+         [[1, _ERT_GONE_NOGEN, 0, 0], [5, True, [5]],
+          ["편집을 열지 못했습니다: 권한이 없습니다.", 0, "편집할 영상이 아직 없습니다. ⑤에서 영상을 먼저 만들어 주세요."]],
+         "내보내기 폴링 404 NoGen → 안내·폴링 멈춤, [⑤ 영상으로] → ⑦ 닫고 ⑤, 그 밖 오류는 지금처럼 오류 줄, 문구 없는 NoGen 은 기본 안내")
+    want("ert-b", got.get("innerHTML"), False, "innerHTML 0")
+    return problems
+
+
+def _ert_ops_problems(got: dict) -> list[str]:
+    """ert-e node 결과(_ERT_NODE_OPS)를 R14 동작과 비교한다."""
+    problems: list[str] = []
+
+    def want(value, expected, what: str) -> None:
+        if value != expected:
+            problems.append(f"(ert-e) {what}\n      결과 {value!r}\n      기대 {expected!r}")
+
+    speeds = [["0.5", "0.5×"], ["0.75", "0.75×"], ["1", "1×"], ["1.25", "1.25×"], ["1.5", "1.5×"], ["2", "2×"]]
+    want(got.get("fields"), [True, True, "1", "", speeds, "number", "0.04", "0.01", "decimal",
+                             "고른 클립 속도 — 0.5×는 2배로 늘고 2×는 반으로 줄어듭니다(소리 높이는 그대로)",
+                             "고른 클립 길이(초) — 원본 안이면 끝을 옮기고, 원본보다 길면 속도를 낮춰 맞춥니다(0.5×까지). [ ] 는 끝, Shift+[ ] 는 시작을 1프레임씩",
+                             True, True, True, ["속도", "길이(초)"]],
+         "도구줄 속도·길이 칸: 고른 클립이 없으면 비활성·속도 6개·number 칸·title·aria-label")
+    want(got.get("titles"), ["끌어서 시작 줄이기·늘이기(원본 처음까지, Shift+[ ])", "끌어서 끝 줄이기·늘이기(원본 끝까지, [ ])"], "끝 손잡이 title")
+    want(got.get("edges"), {"extendOut": [[0, 3, 1], "300px"], "shrinkIn": [0.5, 3, 1], "extendIn": [0, 3, 1], "shrinkOut": [0, 1, 1],
+                            "extendOut0": [0, 3, 1], "unknownLonger": [0, 3, 1], "unknownShorter": [0, 2.5, 1], "afterUndo": [0, 3, 1],
+                            "undo": 5, "timer": 1, "puts": 0},
+         "끝 끌기: 끝을 원본 끝(3초)까지 늘이기·시작 줄이기 → 원본 처음까지·끝 줄이기 → 원본 끝까지, 길이 모르면 늘리지 않고 줄이기만, "
+         "실행 취소·0.8초 디바운스(바로 PUT 없음)")
+    sp = got.get("speed") or {}
+    want([sp.get("selFields"), sp.get("sped"), sp.get("undone"), sp.get("redone"), sp.get("putSped")],
+         [[False, False, "1", "3.00"],
+          [[0, 3, 0.5], "600px", "컷 1 · 6.0초 · 0.5×", "vnew-edit-clip is-selected is-speed", "컷 1 · 6.00초 (0.5× 속도)", "6.00", "0.5",
+           "00:00.00 / 00:12.00", 1, 1],
+          [[0, 3, 1], "300px", "vnew-edit-clip"], [0, 3, 0.5], [0.5, 1, 1]],
+         "속도 0.5×: 타임라인 길이 2배(너비·이름·title·전체 시각)·디바운스·실행 취소/다시 실행·PUT 바디 speed")
+    want([sp.get("rate"), sp.get("tAt"), sp.get("adv")], [[0.5, 0.5, True, 1], 2, [1, True, 1, 6]],
+         "미리보기: playbackRate·defaultPlaybackRate·preservesPitch, 원본 1초 = 타임라인 2초, 다음 클립은 그 속도로")
+    want(got.get("speedDrag"), [[0, 2.5, 0.5], "500px"], "속도 클립 끝 끌기: 100px(타임라인 1초) = 원본 0.5초")
+    ln = got.get("length") or {}
+    want(ln, {"l1": [[0, 2, 1], 1, True, "2.00", ""], "focus": ["7", "2.00"],
+              "l2": [[0, 3, 0.5], "6.00", "원본 끝까지 0.5×로 늘려도 6.00초까지입니다. 6.00초로 맞췄습니다."],
+              "l3": [[0, 2, 0.5], "4.00", ""], "l4": [[0, 0.75, 0.5], "1.50"],
+              "l5": [[0, 0.75, 0.5], "길이는 초 단위 숫자로 넣어 주세요(예: 2.5).", 0, "1.50"],
+              "l5b": [[0, 0.75, 0.5], "길이는 초 단위 숫자로 넣어 주세요(예: 2.5).", 0], "l6": ["1.50", [0, 0.75, 0.5]],
+              "l6b": [[0, 0.75, 0.5], "이 클립은 원본 범위를 벗어나 길이를 바꿀 수 없습니다."],
+              "l7": [[0, 0.042, 0.5], "가장 짧은 길이(0.04초)로 맞췄습니다.", "0.08"],
+              "refused": [[0, 0.042, 0.5], "이 클립은 너무 짧아 2×로 바꿀 수 없습니다. 먼저 늘려 주세요.", "0.5"]},
+         "길이 입력: 원본 안이면 끝(Enter·change 한 번), 원본보다 길면 0.5×·원본 끝까지와 안내, 속도 그대로 끝, 쉼표, 글자는 안내만, "
+         "Esc 되돌림, 최소 길이, 너무 짧은 클립은 2× 거절")
+    want(got.get("keys"), {"k1": [[0, 2.958, 1], 2.9163], "k2": [0, 3, 1], "k3": [[0, 3, 1], "원본 끝입니다."], "k4": [[0, 3, 1], "원본 처음입니다."],
+                           "k5": [[0.042, 3, 1], 0.042], "k6": [0, 3, 1], "k7": [[0, 3, 1], False], "k8": ["먼저 클립을 골라 주세요.", True],
+                           "k9": [[0, 0.042, 0.5], "더 줄일 수 없습니다."], "undoDepth": 16},
+         "[ ] 끝 1프레임(미리보기 끝 프레임)·원본 끝·Shift+[ ] 시작 1프레임·원본 처음·입력칸 초점 무시·고른 클립 없음 안내·더 줄일 수 없음")
+    sl = got.get("split") or {}
+    want(sl, {"split": [4, [0, 0.5, 0.5], [0.5, 2.5, 0.5], True], "contiguous": [0.5, 1, True, 1, 1],
+              "fast": [[0, 0.5, 2], 0, "클립 끝에 너무 가까워 자를 수 없습니다. 재생헤드를 조금 옮겨 주세요."]},
+         "속도 클립 자르기: 원본 시각 = in + 타임라인 × 속도, 두 조각 같은 속도, 이어진 같은 원본도 다음 조각 속도로, "
+         "2× 클립은 타임라인 최소 길이로 거절")
+    want(got.get("limits"), [[True, True, "1"], [True, True, 0]], "전체 길이 한도를 넘는 속도·길이는 안내만(바뀌지 않음)")
+    want(got.get("body"), ["e3", "webtoon", [[0, 0.5, 0.5], [0.5, 2.5, None], [0, 3, None], [0, 0.042, 0.5]]],
+         "PUT 바디: 1 이 아닌 속도만 speed")
+    want(got.get("conflict"), [0, 0, [1, 1, 1], "다른 곳에서 바뀌어 다시 불러왔습니다."], "속도 바꾼 저장이 409 EditChanged → 다시 불러오기·두 스택 비움")
+    want(got.get("innerHTML"), False, "innerHTML 0")
+    return problems
+
+
+def check_vnew_edit_retime() -> None:
+    """지시서 115 — ⑦ 편집 늘 보이기(gen 없음 보기·잠김 이유·⑦ 머무르기)와 컷 늘이기/줄이기·속도. 유료 호출 0.
+
+    (ert-a) 서버 요약: summary·_lock_reason 8꼴(없음·빈 dict·dict 아님·running·cancelled·failed·partial·done 재료 없음), 재료 있으면 reason 없음,
+            gen_view gen 없음 켬(edit)·끔(키 없음)·취소 gen, 실제 GET /plan 켬·끔, 이른 return 블록 글자 그대로
+    (ert-b) 단계 막대(node, 실제 /plan): ⑦ 칩 보임·잠김·title·aria·누르면 한 줄·기본 문구·편집 끔·⑦ 에 있으면 흐리지 않음·열림
+    (ert-c) ⑦ 머무르기(node, 실제 loadPlan·decidePlanStep·renderPlan): 진행 중·partial·재료 없음 응답에 ⑦ 그대로, 편집 꺼짐이면
+            남은 저장 뒤 닫기, 처음 불러오기, 열기·내보내기 폴링 NoMaterials·NoGen 안내·[다시 시도]·[⑤ 영상으로]·그 밖 오류
+    (ert-d) 순수 함수(node): editSpeedOf·editClipLen·editSourceLen·editMinSource·editLocate·editStripCells·editSetSpeed·editRetime·
+            editNudge·editKeyAction·editCloneClip·editSaveBody·editSplit 속도
+    (ert-e) 화면 조작(node, 실제 GET /edit): 앞·뒤 끌기 줄이기·원본까지 늘이기·길이 모름, 속도·재생 playbackRate, 길이 입력, [ ],
+            자르기, 한도, PUT 바디, 409
+    (ert-f) 서버 검증·저장(실제 라우트): speed 허용·null·1 저장 안 함·거절 9꼴·타임라인 최소·TooLong·totalSeconds·doc_hash 하위 호환·
+            속도만 바꾼 문서는 다른 내보내기·옛 문서(speed 없음) 그대로
+    (ert-g) 내보내기 인자: run_export → _export_segment speed·프레임 배분·결과 길이, edit_segment 명령 setpts·atempo(가짜 _run)·값 검사
+    (ert-h) 로컬 ffmpeg 실측: 0.5×·2× 클립 내보내기 길이 = 타임라인 합 ±1프레임·프레임 수·소리
+    (ert-i) 화면 바디 → 실제 라우트, CSS 115 구역
+    """
+    sys.path.insert(0, str(ROOT / "app"))
+    import hashlib as _hashlib  # noqa: PLC0415
+    import traceback as _tb  # noqa: PLC0415
+
+    bad: list[str] = []
+    seen: set[str] = set()
+    report: list[str] = []
+    logs = _LogCapture()
+    owner = _EDT_OWNER
+    node = shutil.which("node")
+
+    def expect(group: str, got, want, what: str) -> None:
+        seen.add(group)
+        if got != want:
+            bad.append(f"({group}) {what}\n      결과 {got!r}\n      기대 {want!r}")
+
+    def err_of(resp) -> tuple[int, str, str]:
+        body = (resp.get_json(silent=True) or {}).get("error") or {}
+        return resp.status_code, str(body.get("type") or ""), str(body.get("message") or "")
+
+    vjs = (PUBLIC / "vnew.js").read_text(encoding="utf-8")
+    css = (PUBLIC / "vnew.css").read_text(encoding="utf-8")
+    code, problems = _edu_code(vjs, _ERT_SLICES)
+    bad.extend(p.replace("(edu-a)", "(ert-b)") for p in problems)
+    ffmpeg_found = False
+
+    try:
+        with logs, _EdtEnv() as env, _pin_vnew(VNEW_EDIT=True):
+            edit, genmod, stitchmod = env.editmod, env.genmod, env.stitchmod
+            client = env.client()
+            lock = edit.LOCK_REASONS
+
+            def get(pid: str, **params):
+                query = "&".join(f"{k}={v}" for k, v in params.items())
+                return client.get(f"/api/vnew/p/{pid}/edit" + (f"?{query}" if query else ""))
+
+            def put(pid: str, body):
+                return client.put(f"/api/vnew/p/{pid}/edit", json=body)
+
+            def post(pid: str, body):
+                return client.post(f"/api/vnew/p/{pid}/edit/export", json=body)
+
+            # ================= (ert-a) 잠김 이유·gen 없음 보기 =================
+            reasons = [edit.summary(None), edit.summary({}), edit.summary("x"), edit.summary({"status": "running", "units": []}),
+                       edit.summary({"status": "cancelled"}), edit.summary({"status": "failed"}), edit.summary({"status": "partial"}),
+                       edit.summary({"status": "done", "segments": []})]
+            expect("ert-a", reasons, [{"available": False, "variants": [], "reason": lock[k]} for k in
+                                      ("none", "none", "none", "running", "cancelled", "failed", "other", "other")],
+                   "summary 잠김 이유: gen 없음(None·빈 dict·dict 아님)·만드는 중·취소·실패·그 밖")
+            _edt_cut_plan(env, "prj_ert_cut")
+            cut_view = genmod.gen_view(owner, "prj_ert_cut", env.plan("prj_ert_cut"))
+            env.save_plan("prj_ert_nogen", env.planmod.new_plan())
+            nogen_plan = env.plan("prj_ert_nogen")
+            v_on = genmod.gen_view(owner, "prj_ert_nogen", nogen_plan)
+            with _pin_vnew(VNEW_EDIT=False):
+                v_off = genmod.gen_view(owner, "prj_ert_nogen", nogen_plan)
+                plan_off = client.get("/api/vnew/p/prj_ert_nogen/plan").get_json() or {}
+            plan_on = client.get("/api/vnew/p/prj_ert_nogen/plan").get_json() or {}
+            cancelled = env.plan("prj_ert_cut")
+            for unit in cancelled["gen"]["units"]:
+                unit["webtoon"], unit["real"] = _edt_cell("cancelled"), _edt_cell("cancelled")
+            cancelled["gen"].update(status="cancelled", finalWebtoon={"status": "none", "key": "", "error": ""})
+            canc_view = genmod.gen_view(owner, "prj_ert_cut", cancelled)
+            expect("ert-a", [cut_view.get("edit"), sorted(v_on), v_on.get("edit"), sorted(v_off), canc_view.get("edit")],
+                   [{"available": True, "variants": ["real", "webtoon"]}, ["edit", "estimate", "status"],
+                    {"available": False, "variants": [], "reason": lock["none"]}, ["estimate", "status"],
+                    {"available": False, "variants": [], "reason": lock["cancelled"]}],
+                   "gen_view: 재료 있으면 reason 없음, gen 없음 켬이면 edit(이유)·끔이면 키 없음, 취소 gen 이유")
+            expect("ert-a", [(plan_on.get("gen") or {}).get("status"), (plan_on.get("gen") or {}).get("edit"),
+                             "edit" in (plan_off.get("gen") or {})],
+                   ["none", {"available": False, "variants": [], "reason": lock["none"]}, False], "실제 GET /plan(gen 없음): 켬이면 gen.edit·끔이면 없음")
+            gsrc = (APP_SRC / "vnew" / "generate.py").read_text(encoding="utf-8")
+            start = gsrc.index("def gen_view(")
+            block = gsrc[gsrc.index("    if not gen:\n", start):gsrc.index("    gen = _reconcile_gen_stale(gen)\n", start)]
+            expect("ert-a", [block, gsrc.count("vnew_edit.summary(gen)")], [_ERT_EARLY_RETURN, 2],
+                   "generate.gen_view 이른 return 한 곳만 바뀜(끝 블록과 같은 꼴)")
+
+            # ================= 화면(node) 준비: 실제 GET /plan·/edit·안내 문구(409 NoMaterials·404 NoGen) =================
+            _edt_cut_plan(env, "prj_ert_ui")
+            plan_cut = client.get("/api/vnew/p/prj_ert_ui/plan").get_json() or {}
+            web = get("prj_ert_ui").get_json() or {}
+            nomat_plan = env.planmod.new_plan()
+            nomat_plan["gen"] = {"genId": "g1", "mode": "previz", "status": "running",
+                                 "units": [{"id": "c1", "real": _edt_cell("queued"), "webtoon": _edt_cell("submitted")}],
+                                 "finalReal": {"status": "waiting"}, "finalWebtoon": {"status": "waiting"}}
+            env.save_plan("prj_ert_nomat", nomat_plan)
+            server = {"plans": {"none": plan_on, "noneOff": plan_off, "cut": plan_cut}, "web": web,
+                      "goneNoMat": err_of(get("prj_ert_nomat"))[2], "goneNoGen": err_of(get("prj_ert_nogen"))[2]}
+            expect("ert-c", [(plan_cut.get("gen") or {}).get("edit"), (plan_cut.get("gen") or {}).get("selected"), len(web["doc"]["clips"]),
+                             server["goneNoMat"], server["goneNoGen"]],
+                   [{"available": True, "variants": ["real", "webtoon"]}, "webtoon", 3, _ERT_GONE_NOMAT, _ERT_GONE_NOGEN],
+                   "준비: 실제 GET /plan(재료 있음)·/edit·재료 없음 409·gen 없음 404 문구")
+            ops_bodies: list[dict] = []
+            if node and not problems:
+                prefix = "var SERVER = " + json.dumps(server, ensure_ascii=False) + ";\n"
+                base = _EDU_NODE_HARNESS + code + _ERT_NODE_STUBS
+                for group, script, tag in (("ert-b", _ERT_NODE_STEPS, "ert_b_"), ("ert-d", _ERT_NODE_PURE, "ert_d_"),
+                                           ("ert-e", _ERT_NODE_OPS, "ert_e_")):
+                    got, err = _lr_run_node(node, prefix + base + script, tag)
+                    if err:
+                        bad.append(f"({group}) node 실행 실패: {err}")
+                        continue
+                    if group == "ert-b":
+                        seen.update({"ert-b", "ert-c"})
+                        bad.extend(_ert_steps_problems(got, lock))
+                    elif group == "ert-d":
+                        for name, want_value in _ERT_PURE_WANT.items():
+                            expect("ert-d", (got.get("pure") or {}).get(name), want_value, f"순수 함수 {name}")
+                        expect("ert-d", got.get("innerHTML"), False, "순수 함수 실행 중 innerHTML 0")
+                    else:
+                        seen.add("ert-e")
+                        bad.extend(_ert_ops_problems(got))
+                        ops_bodies = got.get("bodies") or []
+            elif not node:
+                warn("node 가 없어 ert-b~e 화면 실행을 건너뜁니다 (E16)")
+
+            # ================= (ert-i) 화면 바디 → 실제 라우트 =================
+            if ops_bodies:
+                etag = ""
+                statuses = []
+                for body in ops_bodies:
+                    sent = dict(body)
+                    sent["etag"] = etag
+                    resp = put("prj_ert_ui", sent)
+                    data = resp.get_json() or {}
+                    statuses.append(resp.status_code)
+                    if resp.status_code != 200:
+                        bad.append(f"(ert-i) 화면 PUT 바디를 서버가 거절했습니다: {resp.status_code} {data} ← {body['clips']}")
+                        continue
+                    etag = data.get("etag") or ""
+                    keys = ("id", "sourceKey", "in", "out", "muted", "label", "speed")
+                    if [{k: c.get(k) for k in keys} for c in data["doc"]["clips"]] != [{k: c.get(k) for k in keys} for c in body["clips"]]:
+                        bad.append(f"(ert-i) 서버가 화면 클립을 바꿔 저장했습니다: {body['clips']} → {data['doc']['clips']}")
+                speeds_sent = sorted({c["speed"] for b in ops_bodies for c in b["clips"] if "speed" in c})
+                expect("ert-i", [len(ops_bodies) >= 5, sorted(set(statuses)), speeds_sent], [True, [200], [0.5, 1.25]],
+                       "화면이 만든 PUT 바디(끝 끌기·속도·길이·[ ]·자르기)를 실제 라우트가 모두 받고 그대로 저장")
+                report.append(f"화면 PUT 바디 {len(ops_bodies)}개(속도 {speeds_sent}) → 실제 라우트 {sorted(set(statuses))}")
+
+            # ================= (ert-f) 서버 검증·저장 =================
+            pid = "prj_ert_save"
+            _edt_cut_plan(env, pid)
+            k = {m["label"]: m["sourceKey"] for m in (get(pid).get_json() or {})["materials"]}
+
+            def clip(cid: str, label: str, a: float, b: float, **extra) -> dict:
+                return {"id": cid, "sourceKey": k[label], "in": a, "out": b, **extra}
+
+            body = {"etag": "", "variant": "webtoon", "clips": [
+                clip("a", "컷 1", 0, 3, speed=0.5), clip("b", "컷 2", 0, 3, speed=0.75), clip("c", "컷 3", 0, 3, speed=1),
+                clip("d", "컷 1", 0, 1.5, speed=1.25), clip("e", "컷 2", 0, 3, speed=1.5), clip("f", "컷 3", 0, 2, speed=2),
+                clip("g", "컷 1", 0, 1, speed=None), clip("h", "컷 2", 0, 1)]}
+            r1 = put(pid, body)
+            d1 = r1.get_json() or {}
+            stored = env.store.json[edit.doc_key(owner, pid, "g1")][0]["clips"]
+            v1 = get(pid).get_json() or {}
+            expect("ert-f", [r1.status_code, [c.get("speed") for c in stored], ["speed" in c for c in stored], d1.get("totalSeconds"),
+                             v1.get("totalSeconds"), [c.get("speed") for c in v1["doc"]["clips"]]],
+                   [200, [0.5, 0.75, None, 1.25, 1.5, 2.0, None, None], [True, True, False, True, True, True, False, False], 19.2, 19.2,
+                    [0.5, 0.75, None, 1.25, 1.5, 2.0, None, None]],
+                   "허용 속도 5값 저장·1·null·없음은 저장 안 함·totalSeconds = Σ (out − in) / speed")
+            etag = d1.get("etag") or ""
+            rejected = []
+            for value in (True, "1", float("nan"), 0.6, 3, -1, 0, [1], {"x": 1}):
+                rejected.append(err_of(put(pid, {"etag": etag, "variant": "webtoon", "clips": [clip("a", "컷 1", 0, 1, speed=value)]})))
+            expect("ert-f", rejected, [(400, "BadClip", _ERT_SPEED_MSG)] * 9, "speed 거절 9꼴(bool·글자·NaN·목록 밖·0·배열·객체): 400 BadClip 고정 문구")
+            short = err_of(put(pid, {"etag": etag, "variant": "webtoon", "clips": [clip("a", "컷 1", 0, 0.06, speed=2)]}))
+            r_ok = put(pid, {"etag": etag, "variant": "webtoon", "clips": [clip("a", "컷 1", 0, 0.08, speed=2)]})
+            etag = (r_ok.get_json() or {}).get("etag") or ""
+            env.set(edit, "MAX_TOTAL_S", 5.0)
+            too_long = err_of(put(pid, {"etag": etag, "variant": "webtoon", "clips": [clip("a", "컷 1", 0, 3, speed=0.5)]}))
+            r_fit = put(pid, {"etag": etag, "variant": "webtoon", "clips": [clip("a", "컷 1", 0, 3, speed=2), clip("b", "컷 2", 0, 3, speed=1.5)]})
+            env.set(edit, "MAX_TOTAL_S", 300.0)
+            etag = (r_fit.get_json() or {}).get("etag") or ""
+            expect("ert-f", [short, r_ok.status_code, too_long[:2], r_fit.status_code, (r_fit.get_json() or {}).get("totalSeconds")],
+                   [(400, "BadClipRange", "1번째 클립은 속도를 반영한 길이가 0.04초 이상이어야 합니다."), 200, (400, "TooLong"), 200, 3.5],
+                   "타임라인 길이 0.04초 미만(원본 0.06 @2×) 400 속도 문구·0.08 @2× 통과, 전체 길이 상한은 타임라인 합(3초 @0.5× = 6 > 5)")
+            base_clip = {"sourceKey": "k", "in": 0.0, "out": 1.0, "muted": False}
+            old_hash = _hashlib.sha256(json.dumps({"variant": "webtoon", "clips": [base_clip]}, sort_keys=True,
+                                                  separators=(",", ":")).encode("utf-8")).hexdigest()
+            expect("ert-f", [edit._doc_hash("webtoon", [base_clip]) == old_hash,  # noqa: SLF001
+                             edit._doc_hash("webtoon", [{**base_clip, "speed": 1}]) == old_hash,  # noqa: SLF001
+                             edit._doc_hash("webtoon", [{**base_clip, "speed": 0.5}]) != old_hash,  # noqa: SLF001
+                             edit._doc_hash("webtoon", [{**base_clip, "speed": 7}]) == old_hash,  # noqa: SLF001
+                             edit._speed_of({"speed": 2}), edit._speed_of({"speed": "2"}), edit._speed_of({"speed": True}),  # noqa: SLF001
+                             edit._speed_of(None), edit._speed_of([]), edit._clip_seconds({"in": 1, "out": 3, "speed": 0.5}),  # noqa: SLF001
+                             edit._total([{"in": 0, "out": 3, "speed": 0.75}, "x", {"in": 0, "out": 1}])],  # noqa: SLF001
+                   [True, True, True, True, 2.0, 1.0, 1.0, 1.0, 1.0, 4.0, 5.0],
+                   "_doc_hash 하위 호환(speed 없음 = speed 1 = 115 전 해시, 0.5 는 다름, 목록 밖은 1)·_speed_of·_clip_seconds·_total")
+            # 속도만 바꾼 문서는 다른 내보내기(진행 중이면 409), 같은 속도 문서는 같은 내보내기
+            ra = put(pid, {"etag": etag, "variant": "webtoon", "clips": [clip("a", "컷 1", 0, 2, speed=0.5)]}).get_json() or {}
+            pa = post(pid, {"etag": ra.get("etag")})
+            rb = put(pid, {"etag": ra.get("etag"), "variant": "webtoon", "clips": [clip("a", "컷 1", 0, 2)]}).get_json() or {}
+            pb = err_of(post(pid, {"etag": rb.get("etag")}))
+            rc = put(pid, {"etag": rb.get("etag"), "variant": "webtoon", "clips": [clip("z", "컷 1", 0, 2, speed=0.5)]}).get_json() or {}
+            pc = post(pid, {"etag": rc.get("etag")}).get_json() or {}
+            cur = env.export_state(pid).get("current") or {}
+            expect("ert-f", [pa.status_code, (pa.get_json() or {}).get("export", {}).get("status"), pb[:2], pc.get("started"),
+                             cur.get("seconds"), [c.get("speed") for c in cur.get("clips") or []]],
+                   [202, "queued", (409, "ExportRunning"), False, 4.0, [0.5]],
+                   "내보내기: 속도만 다른 문서는 다른 문서(진행 중 409)·id 만 다른 같은 속도 문서는 같은 내보내기·사본 seconds 는 타임라인 길이")
+            env.set_export(pid, lambda d: d["current"].update(status="failed", claim=""))
+            # 옛 문서(speed 없음): GET·PUT 그대로, 내보내기는 speed 1
+            pid_old = "prj_ert_old"
+            _edt_cut_plan(env, pid_old)
+            ko = {m["label"]: m["sourceKey"] for m in (get(pid_old).get_json() or {})["materials"]}
+            old_doc = {"version": 4, "variant": "webtoon", "updatedAt": "2026-11-01T00:00:00Z", "audio": [],
+                       "clips": [{"id": "c1", "sourceKey": ko["컷 1"], "in": 0.0, "out": 3.0, "muted": False, "label": "컷 1"},
+                                 {"id": "c2", "sourceKey": ko["컷 2"], "in": 0.5, "out": 1.5, "muted": True}]}
+            _FakeCharStore.write_json(env.store, edit.doc_key(owner, pid_old, "g1"), old_doc)
+            vo = get(pid_old).get_json() or {}
+            env.segments.clear()
+            env.inline = True
+            po = post(pid_old, {"etag": vo.get("etag")})
+            env.inline = False
+            done_old = env.export_state(pid_old).get("current") or {}
+            expect("ert-f", [vo.get("saved"), vo["doc"]["clips"] == old_doc["clips"], vo.get("totalSeconds"), po.status_code,
+                             [s.get("speed") for s in env.segments], [s["frames"] for s in env.segments], done_old.get("status"),
+                             done_old.get("seconds")],
+                   [True, True, 4.0, 202, [1.0, 1.0], [72, 24], "done", 4.0],
+                   "옛 문서(speed 없음): 보기 그대로·합계·내보내기 speed 1·프레임 배분 115 전과 같음")
+
+            # ================= (ert-g) 내보내기 인자 =================
+            pid_e = "prj_ert_exp"
+            _edt_cut_plan(env, pid_e)
+            ke = {m["label"]: m["sourceKey"] for m in (get(pid_e).get_json() or {})["materials"]}
+            se = put(pid_e, {"etag": "", "variant": "webtoon", "clips": [
+                {"id": "a", "sourceKey": ke["컷 1"], "in": 0, "out": 3, "speed": 0.5},
+                {"id": "b", "sourceKey": ke["컷 2"], "in": 0, "out": 1.5, "speed": 2},
+                {"id": "c", "sourceKey": ke["컷 3"], "in": 1, "out": 3}]}).get_json() or {}
+            env.segments.clear()
+            env.inline = True
+            post(pid_e, {"etag": se.get("etag")})
+            env.inline = False
+            de = env.export_state(pid_e).get("current") or {}
+            seg = env.segments
+            expect("ert-g", [[s.get("speed") for s in seg], [s["frames"] for s in seg], [round(s["start_sec"], 6) for s in seg],
+                             env.joins[-1]["frames"] if env.joins else None, de.get("status"), de.get("seconds"), se.get("totalSeconds")],
+                   [[0.5, 2.0, 1.0], [144, 18, 48], [0.0, 0.0, round(1 - 0.5 / 24, 6)], 210, "done", 8.75, 8.75],
+                   "run_export: 클립마다 speed 를 넘기고 프레임은 타임라인 길이(6·0.75·2초 × 24fps)로 배분·결과 길이 = 타임라인 합")
+            saved_fns = {name: getattr(stitchmod, name) for name in ("_run", "ffmpeg_path", "_edit_nice")}
+            commands: list[list[str]] = []
+            gdir = tempfile.mkdtemp(prefix="ert-g-")
+
+            def fake_run(command):
+                commands.append(list(command))
+                for index, arg in enumerate(command):
+                    if index and command[index - 1] != "-i" and str(arg).endswith((".mp4", ".raw")):
+                        with open(arg, "wb") as handle:
+                            handle.write(b"OUT")
+                return subprocess.CompletedProcess(command, 0, stdout=b"", stderr=b"")
+
+            try:
+                stitchmod._run = fake_run  # noqa: SLF001
+                stitchmod.ffmpeg_path = lambda: "/fake/ffmpeg"
+                stitchmod._edit_nice = lambda: []  # noqa: SLF001
+                src = os.path.join(gdir, "src.mp4")
+                with open(src, "wb") as handle:
+                    handle.write(b"SRC")
+                vout, aout = os.path.join(gdir, "seg.mp4"), os.path.join(gdir, "seg.raw")
+                filters = []
+                for speed in (0.5, 0.75, 1.25, 1.5, 2.0, 2, 1.0, 1):
+                    commands.clear()
+                    stitchmod.edit_segment(src, vout, start_sec=0.47916, frames=36, fps=24, width=1280, height=720, audio_out=aout,
+                                           audio_from_source=True, speed=speed)
+                    cmd = commands[-1]
+                    filters.append([cmd[cmd.index("-vf") + 1].split(",")[1], cmd[cmd.index("-af") + 1], cmd[cmd.index("-frames:v") + 1],
+                                    cmd[cmd.index("-t") + 1]])
+                commands.clear()
+                stitchmod.edit_segment(src, vout, start_sec=0.47916, frames=36, fps=24, width=1280, height=720, audio_out=aout,
+                                       audio_from_source=True)
+                default_cmd = commands[-1]
+                commands.clear()
+                stitchmod.edit_segment(src, vout, start_sec=0, frames=24, fps=24, width=320, height=180, audio_out=aout,
+                                       audio_from_source=False, speed=0.5)
+                silent_cmd = commands[-1]
+                bad_speed = []
+                for value in (0.6, "2", True, float("nan"), None, 3, 0):
+                    try:
+                        stitchmod.edit_segment(src, vout, start_sec=0, frames=10, fps=24, width=320, height=180, speed=value)
+                        bad_speed.append("통과")
+                    except stitchmod.StitchError as exc:
+                        bad_speed.append(str(exc))
+            finally:
+                for name, value in saved_fns.items():
+                    setattr(stitchmod, name, value)
+                shutil.rmtree(gdir, ignore_errors=True)
+            vf1 = ("trim=start=0.479,setpts=PTS-STARTPTS,fps=24,scale=1280:720:force_original_aspect_ratio=decrease,"
+                   "pad=1280:720:(ow-iw)/2:(oh-ih)/2:color=black,setsar=1,format=yuv420p,tpad=stop_mode=clone:stop_duration=1")
+            want_default = ["/fake/ffmpeg", "-y", "-hide_banner", "-loglevel", "error", "-threads", "1", "-i", src, "-map", "0:v:0", "-vf", vf1,
+                            "-frames:v", "36", "-an", "-c:v", "libx264", "-preset", "veryfast", "-crf", "20", "-threads", "1",
+                            "-pix_fmt", "yuv420p", vout, "-map", "0:a:0", "-vn", "-af", "atrim=start=0.479,asetpts=PTS-STARTPTS",
+                            "-t", "1.500000", "-ac", "2", "-ar", "48000", "-c:a", "pcm_s16le", "-f", "s16le", aout]
+            at = "atrim=start=0.479,asetpts=PTS-STARTPTS"
+            expect("ert-g", filters,
+                   [["setpts=(PTS-STARTPTS)/0.5", at + ",atempo=0.5", "36", "1.500000"],
+                    ["setpts=(PTS-STARTPTS)/0.75", at + ",atempo=0.75", "36", "1.500000"],
+                    ["setpts=(PTS-STARTPTS)/1.25", at + ",atempo=1.25", "36", "1.500000"],
+                    ["setpts=(PTS-STARTPTS)/1.5", at + ",atempo=1.5", "36", "1.500000"],
+                    ["setpts=(PTS-STARTPTS)/2", at + ",atempo=2", "36", "1.500000"], ["setpts=(PTS-STARTPTS)/2", at + ",atempo=2", "36", "1.500000"],
+                    ["setpts=PTS-STARTPTS", at, "36", "1.500000"], ["setpts=PTS-STARTPTS", at, "36", "1.500000"]],
+                   "edit_segment: 영상 setpts=(PTS-STARTPTS)/speed·소리 atempo=speed, 프레임 수·소리 길이(-t)는 타임라인 그대로, 1 이면 글자 그대로")
+            expect("ert-g", [default_cmd == want_default, "-af" in silent_cmd, any("setpts=(PTS-STARTPTS)/0.5" in a for a in silent_cmd),
+                             bad_speed],
+                   [True, False, True, ["편집 구간 값이 올바르지 않습니다."] * 7],
+                   "speed 없음 = 115 전 명령 바이트 그대로·무음 클립은 소리 필터 없음·허용 밖 speed 7꼴 StitchError")
+
+            # ================= (ert-h) 로컬 ffmpeg 실측(0.5×·2×) =================
+            try:
+                ffmpeg = stitchmod.ffmpeg_path()
+            except stitchmod.StitchError:
+                ffmpeg = ""
+            if not ffmpeg:
+                warn("(ert-h) 로컬 ffmpeg 가 없어 0.5×·2× 실측 내보내기를 건너뜁니다(가짜 ffmpeg 검사는 했습니다).")
+            else:
+                ffmpeg_found = True
+                hdir = tempfile.mkdtemp(prefix="ert-h-")
+                try:
+                    def make(name: str, args: list[str]) -> bytes:
+                        path = os.path.join(hdir, name)
+                        result = subprocess.run([ffmpeg, "-y", "-hide_banner", "-loglevel", "error", *args, path], capture_output=True)
+                        if result.returncode != 0:
+                            raise RuntimeError(result.stderr.decode("utf-8", "replace")[:300])
+                        with open(path, "rb") as handle:
+                            return handle.read()
+
+                    src_a = make("a.mp4", ["-f", "lavfi", "-i", "testsrc2=size=320x180:rate=24", "-f", "lavfi", "-i",
+                                           "sine=frequency=440:sample_rate=44100", "-t", "4", "-c:v", "libx264", "-pix_fmt", "yuv420p",
+                                           "-c:a", "aac", "-ac", "1"])
+                    src_b = make("b.mp4", ["-f", "lavfi", "-i", "testsrc=size=320x180:rate=24", "-t", "3", "-c:v", "libx264", "-pix_fmt",
+                                           "yuv420p"])
+                    pid_h = "prj_ert_real"
+                    _edt_cut_plan(env, pid_h, blobs={_edt_key(pid_h, "c1-webtoon-1"): src_a, _edt_key(pid_h, "c2-webtoon-1"): src_b,
+                                                     _edt_key(pid_h, "c3-webtoon-1"): src_a})
+                    env.real, env.inline = True, True
+                    hv = get(pid_h).get_json() or {}
+                    hk = {m["label"]: m["sourceKey"] for m in hv["materials"]}
+                    cases = [
+                        ("0.5×", [{"id": "s", "sourceKey": hk["컷 1"], "in": 0.5, "out": 2.5, "speed": 0.5}], 4.0),
+                        ("2×", [{"id": "f", "sourceKey": hk["컷 1"], "in": 0.0, "out": 2.0, "speed": 2}], 1.0),
+                        ("0.5×+1×+2×", [{"id": "s", "sourceKey": hk["컷 1"], "in": 0.5, "out": 2.5, "speed": 0.5},
+                                        {"id": "n", "sourceKey": hk["컷 2"], "in": 0.0, "out": 1.0},
+                                        {"id": "f", "sourceKey": hk["컷 3"], "in": 0.0, "out": 2.0, "speed": 2}], 6.0),
+                    ]
+                    etag_h = ""
+                    measured = []
+                    frame = 1 / 24
+                    for n, (name, clips_h, want_s) in enumerate(cases, 1):
+                        saved_h = put(pid_h, {"etag": etag_h, "variant": "webtoon", "clips": clips_h}).get_json() or {}
+                        etag_h = saved_h.get("etag") or ""
+                        post(pid_h, {"etag": etag_h})
+                        current_h = env.export_state(pid_h).get("current") or {}
+                        out_path = os.path.join(hdir, f"out-{n}.mp4")
+                        with open(out_path, "wb") as handle:
+                            handle.write(env.store.blobs.get(edit.export_key(owner, pid_h, "g1", n), b""))
+                        info = stitchmod.probe_media(out_path)
+                        counted = subprocess.run([ffmpeg, "-hide_banner", "-i", out_path, "-map", "0:v:0", "-f", "null", "-"],
+                                                 capture_output=True).stderr.decode("utf-8", "replace")
+                        frames_v = int((re.findall(r"frame=\s*(\d+)", counted) or ["-1"])[-1])
+                        audio_run = subprocess.run([ffmpeg, "-hide_banner", "-i", out_path, "-map", "0:a:0", "-f", "null", "-"],
+                                                   capture_output=True).stderr.decode("utf-8", "replace")
+                        stamp = (re.findall(r"time=(\d+):(\d+):(\d+(?:\.\d+)?)", audio_run) or [("0", "0", "-1")])[-1]
+                        audio_s = int(stamp[0]) * 3600 + int(stamp[1]) * 60 + float(stamp[2])
+                        measured.append((name, want_s, info["duration"], frames_v, round(audio_s, 3)))
+                        expect("ert-h", [current_h.get("status"), current_h.get("error"), abs(info["duration"] - want_s) <= frame + 1e-3,
+                                         abs(frames_v - round(want_s * 24)) <= 1, abs(audio_s - want_s) <= frame + 1e-3, info["hasAudio"],
+                                         (info["width"], info["height"], info["fps"])],
+                               ["done", "", True, True, True, True, (320, 180, 24.0)],
+                               f"실측 {name}: 길이 {info['duration']}초·영상 {frames_v}프레임·소리 {audio_s}초 ≈ 타임라인 {want_s}초(±1프레임)")
+                    report.append("ert-h 실측(로컬 ffmpeg): " + ", ".join(
+                        f"{name} 기대 {want_s:.3f}초 → 길이 {dur:.3f}초·{frames}프레임·소리 {audio:.3f}초" for name, want_s, dur, frames, audio in measured))
+                finally:
+                    env.real, env.inline = False, False
+                    shutil.rmtree(hdir, ignore_errors=True)
+    except Exception as exc:  # noqa: BLE001
+        bad.append("(ert) 예외: " + repr(exc) + "\n" + _tb.format_exc()[:1500])
+
+    # ================= (ert-i) CSS 115 구역 =================
+    try:
+        start = css.find("/* ================================================================ ⑦ 편집 — 늘 보이기·늘이기/줄이기·속도(지시서 115) */")
+        section = css[start:] if start >= 0 else ""
+        defined = set(re.findall(r"\.(vnew-[a-z0-9-]+)", section))
+        used = set(re.findall(r"vnew-edit-[a-z0-9-]+", code))
+        expect("ert-i", [start > 0, sorted(set(_ERT_CSS_CLASSES) - defined), sorted(c for c in _ERT_CSS_CLASSES if c not in used and
+                                                                                c != "vnew-plan-step-note"),
+                         ".vnew-edit-clip.is-speed {" in section, ".vnew-edit-clip:hover:not(.is-selected) .vnew-edit-edge {" in section,
+                         "overflow-x" in section, css.endswith("}\n"), "\r" in css],
+               [True, [], [], True, True, False, True, False],
+               "CSS 115 구역: 새 클래스 정의·속도 클립 표시·끝 손잡이 hover·가로 스크롤 없음·LF·끝 줄바꿈")
+    except Exception as exc:  # noqa: BLE001
+        bad.append("(ert-i) 예외: " + repr(exc) + "\n" + _tb.format_exc()[:1200])
+
+    expected_groups = {f"ert-{c}" for c in ("abcdefgi" if node else "afgi")}
+    if ffmpeg_found:
+        expected_groups.add("ert-h")
+    missing = sorted(expected_groups - seen)
+    if missing:
+        bad.append(f"돌지 않은 묶음: {missing}")
+    if bad:
+        fail("vnew ⑦ 편집 늘 보이기·늘이기/줄이기·속도(ert) 검사 실패\n" + "\n".join(f"  {item}" for item in bad))
+    else:
+        ok("vnew ⑦ 편집 늘 보이기·늘이기/줄이기·속도(지시서 115) 검사 (ert-a)gen 없음 edit·잠김 이유 (ert-b)⑦ 칩 보임·잠김·이유 한 줄 "
+           "(ert-c)⑦ 머무르기·안내 (ert-d)순수 함수 " + str(len(_ERT_PURE_WANT)) + "묶음 (ert-e)앞·뒤 끌기·원본까지·속도·길이·[ ] "
+           "(ert-f)speed 검증·하위 호환 (ert-g)setpts·atempo (ert-h)0.5×·2× 실측 (ert-i)화면 바디·CSS" + "".join(f"\n       {r}" for r in report))
+
+
 def check_pod_zones() -> None:
     """지시서 105(pod-zone-pin) — frontend·app 파드를 ALB 서브넷 AZ(POD_ZONES) 안에만 띄운다. 외부 호출 없음.
 
@@ -39448,6 +40470,7 @@ def main() -> int:
     check_vnew_cast_default_front()
     check_vnew_edit()
     check_vnew_edit_ui()
+    check_vnew_edit_retime()
     check_pod_zones()
     print()
     if warnings:
