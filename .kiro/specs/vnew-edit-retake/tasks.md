@@ -58,3 +58,10 @@
   - `is-current` = 지금 편집 문서가 쓰는 버전 + 배지 「타임라인 사용 중」(여러 버전이면 각각), 패널을 연 기준 버전은 `is-base`. `editChanged`·패널 다시 그리기 때 다시 센다.
   - 완료 조건: `node --check`, rtk-v(새 node 묶음, rtk-j 뒤), 기존 rtk·edu·ert 기대값 그대로(rtk-k 클래스 수 49 그대로 — 새 `vnew-edit-` 클래스 없음, 배지는 공통 `vnew-badge`).
 - [x] 17. 전체 검사 1회·리뷰·WORKLOG 116-fix2.
+
+## 보완 3 — 바이트 초과 초안 줄이기 1회(지시서 116 보완 3, 2026-11-03)
+
+> dev 유료 시험(11-02): Kling O3 형식 초안 3,415B > 상한 2,500B. 서버 `retake.py`만 바꾼다(`_shrink_draft`·`_system_text_shrink`, `run_draft`·`_run_draft_model`·`_draft_out` 연결).
+
+- [x] 18. 초안 두 경로: 바이트 초과면 같은 모델에 줄이기 1번(초안·상한·참고 표시·항목 순서만, 프레임 0, `_rewrite` 같은 스키마), 더 나으면 씀, 원장 `vnew-retake-<id>-shrink`, `shrunk`·로그 `shrunk=`, 화면 안내 한 줄.
+  - 완료 조건: `node --check`, rtk-w(rtk-p 뒤), 변형 검사 3개 잡힘, 기존 기대값 그대로, 전체 검사 1회.

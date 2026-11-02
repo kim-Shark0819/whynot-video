@@ -42295,6 +42295,7 @@ def check_vnew_edit_retake_models() -> None:
             구간 [바꾸기]·되돌리기·[재료에 추가] 길이, 순수 함수
     (rtk-t) CSS 보완 1 구역·USER_FACING 새 kind 2개·던지는 곳 문구(AST)·끔이면 GET /edit 에 새 표식 없음
     (rtk-u) 로컬 ffmpeg: _pad_clip 실제 mp4 길이·임시 폴더 0
+    (rtk-w) 보완 3: 바이트 초과 초안 → 같은 모델에 줄이기 1번(두 경로)·더 나음 판정·원장 -shrink 줄·shrunk·두 번째 예외는 처음 것·화면 안내
     """
     sys.path.insert(0, str(ROOT / "app"))
     import ast as _ast  # noqa: PLC0415
@@ -42505,6 +42506,80 @@ def check_vnew_edit_retake_models() -> None:
                      "참고 표시(@Video·@Image·@Element)가 고른 모델 형식과 다릅니다(빠짐 @Element1, @Element2 · 새로 생김 @Image2, @Image3, @Image4).",
                      "고른 모델 형식의 항목이 빠졌습니다: " + ", ".join(lost) + "."], (400, "RetakePromptInvalid")],
                    "이전(Seedance) 형식 그대로인 새 프롬프트: 고른 모델 상한(2,500)·형식 기준 문제 3개·제출 400")
+            # ================= (rtk-w) 보완 3: 바이트 초과 초안 → 같은 모델에 줄이기 1번 =================
+            shrink_mark = "You shorten a video-generation prompt"
+
+            def two_step(first: str, second):
+                def reply(system, blocks):
+                    if shrink_mark not in system:
+                        return {"resultKo": "첫 결과", "promptEn": first, "changesKo": ["첫 변경"]}
+                    if isinstance(second, BaseException):
+                        raise second
+                    return {"resultKo": "", "promptEn": second, "changesKo": []}
+                return reply
+
+            def run_w(pid: str, mid: str, first: str, second, body: dict) -> tuple[dict, list[dict], list[dict]]:
+                env.llm_reply = two_step(first, second)
+                env.llm_calls.clear()
+                led_w = len(env.ledger)
+                drw = draft_of(preview(pid, mid, body))
+                return drw, list(env.llm_calls), env.ledger[led_w:]
+
+            ok_kl_w = tmpl_kl.replace("Re-render this single shot", "Re-render this whole take")
+            over_kl = ok_kl_w + " " + "z" * 2600
+            logs.clear()
+            d_w1, calls_w1, led_w1 = run_w(pid_t, mid_t, over_kl, ok_kl_w, {"requestKo": "Kling 으로", "model": kl})
+            sc = calls_w1[1] if len(calls_w1) > 1 else {"system": "", "blocks": []}
+            expect("rtk-w", [d_w1.get("status"), d_w1.get("prompt") == ok_kl_w, d_w1.get("problems"), d_w1.get("shrunk"), d_w1.get("resultKo"),
+                             d_w1.get("changesKo"), len(calls_w1), len(sc["blocks"]), [b for b in sc["blocks"] if "image" in b],
+                             (sc["blocks"][0].get("text") or "").startswith(f"Current length: {len(over_kl.encode())} bytes. Limit: 2500 bytes.\n"
+                                                                             "<current_draft>\n" + over_kl + "\n</current_draft>") if sc["blocks"] else None,
+                             [s in sc["system"] for s in ("at most 2500 UTF-8 bytes (aim for about 2250)", "(@Element1, @Element2, @Image1, @Video1)",
+                                                          " -> ".join(rt._labels(tmpl_kl)), "never use the word 'webtoon'")],  # noqa: SLF001
+                             sc.get("model") == genmod.vnew_settings.VNEW_RETAKE_MODEL,
+                             [e["key"] == "vnew-retake-" + str(d_w1.get("id")) + suffix for e, suffix in zip(led_w1, ("", "-shrink"))], len(led_w1),
+                             [m for m in logs.messages("vnew.retake.draft_done", level=logging.INFO) if "shrunk=True" in m and "path=cut" in m] != [],
+                             [m for m in logs.messages() if "Re-render this" in m]],
+                   ["done", True, [], True, "첫 결과", ["첫 변경"], 2, 1, [], True, [True, True, True, False], True, [True, True], 2, True, []],
+                   "모델 경로: 첫 초안 상한 초과 → 줄이기 1회(초안·상한만, 프레임 0, 시스템 = 상한·참고 표시·항목 순서) → 통과 결과·shrunk·"
+                   "결과 설명은 첫 호출 것·원장 2줄(-shrink)·로그 shrunk=True·프롬프트 없음")
+            over_t = base_t + " " + "z" * 4100
+            d_w2, calls_w2, led_w2 = run_w(pid_t, mid_t, over_t, base_t + " " + "z" * 4050, {"requestKo": "길게"})
+            d_w3, calls_w3, led_w3 = run_w(pid_t, mid_t, base_t, base_t, {"requestKo": "그대로"})
+            no_ref = base_t.replace("@Image4", "the room")
+            d_w4, calls_w4, _ = run_w(pid_t, mid_t, no_ref, base_t, {"requestKo": "방"})
+            logs.clear()
+            d_w5, calls_w5, led_w5 = run_w(pid_t, mid_t, over_t, RuntimeError("llm down " + base_t[:40]), {"requestKo": "길게"})
+            warn_w5 = logs.messages("vnew.retake.shrink_failed", level=logging.WARNING)
+            expect("rtk-w", [[(d.get("status"), d.get("prompt") == p, len(d.get("problems") or []), d.get("shrunk"), len(c), len(le))
+                              for d, p, c, le in ((d_w2, over_t, calls_w2, led_w2), (d_w3, base_t, calls_w3, led_w3),
+                                                  (d_w5, over_t, calls_w5, led_w5))],
+                             (d_w4.get("problems"), d_w4.get("shrunk"), len(calls_w4)),
+                             [m.endswith("err=RuntimeError:") for m in warn_w5], [m for m in logs.messages() if "llm down" in m]],
+                   [[("done", True, 1, False, 2, 2), ("done", True, 0, False, 1, 1), ("done", True, 1, False, 2, 1)],
+                    (["참고 표시(@Video·@Image·@Element)가 이전 프롬프트와 다릅니다(빠짐 @Image4)."], False, 1), [True], []],
+                   "기본 경로: 두 번째도 초과 → 처음 것·문제 남음·호출 2·원장 2, 상한 이내 → 호출 1·shrunk false, 바이트 외 문제만 → 다시 묻지 않음, "
+                   "두 번째 예외 → 처음 것으로 done·원장 1·경고는 예외 이름만")
+            # 더 나음 판정: 상한 안·문제 수 늘지 않음 / 문제·바이트 모두 줄어듦 — 아니면 처음 것
+            over_noref = no_ref + " " + "z" * 4100
+            better = [
+                (over_noref, no_ref, True, 1),  # 상한 안으로 + 문제 2 → 1
+                (over_noref, base_t + " " + "z" * 4050, True, 1),  # 아직 초과지만 참고 표시 되찾음(문제 2 → 1)·바이트 줄어듦
+                (over_t, no_ref + " https://example.com/a", False, 1),  # 상한 안이지만 문제 1 → 2(참고 표시·주소)
+                (over_noref, base_t + " " + "z" * 4200, False, 2),  # 문제는 줄었지만 바이트가 늘어남
+                (over_t, "  ", False, 1),  # 빈 응답
+            ]
+            got_b = []
+            for first, second, _w, _n in better:
+                d_b, c_b, _ = run_w(pid_t, mid_t, first, second, {"requestKo": "판정"})
+                got_b.append((d_b.get("shrunk"), len(d_b.get("problems") or []), len(c_b)))
+            expect("rtk-w", got_b, [(w, n, 2) for _f, _s, w, n in better],
+                   "더 나음 판정: 상한 안·문제 수 늘지 않음 → 씀, 초과지만 문제·바이트 모두 줄어듦 → 씀, 문제 늘어남·바이트 늘어남·빈 응답 → 처음 것")
+            sys_real = rt._system_text_shrink({"maxBytes": 4000, "real": True}, [], [])  # noqa: SLF001
+            expect("rtk-w", ["never use the word 'webtoon'" in sys_real, "reference tag exactly as written." in sys_real,
+                             'dr.shrunk ? " · 길이 상한에 맞게 한 번 줄였습니다" : ""' in (PUBLIC / "vnew.js").read_text(encoding="utf-8")],
+                   [True, True, True], "실사 줄이기 문구 webtoon 금지·참고 표시 목록 없으면 괄호 없음, 화면 초안 줄에 줄였다는 안내")
+            report.append(f"rtk-w: 줄이기 {len(over_kl.encode())}B → {len(ok_kl_w.encode())}B · 판정 {len(better)}꼴")
             # 견적·confirmUsd·바디 거절
             env.llm_reply = lambda system, blocks: _rtk_reply(tmpl_kl, "Re-render this single shot", "Re-render this whole take")
             d_kl = draft_of(preview(pid_t, mid_t, {"requestKo": "Kling 으로", "model": kl}))
@@ -43118,7 +43193,7 @@ def check_vnew_edit_retake_models() -> None:
     leftover = os.listdir(private_tmp) if os.path.isdir(private_tmp) else []
     shutil.rmtree(private_tmp, ignore_errors=True)
     expect("rtk-t", leftover, [], "이 검사가 쓴 임시 폴더에 남은 것 없음")
-    expected_groups = {f"rtk-{c}" for c in "nopqrt"} | ({"rtk-s"} if node else set()) | ({"rtk-u"} if _rtk_ffmpeg_found() else set())
+    expected_groups = {f"rtk-{c}" for c in "nopqrtw"} | ({"rtk-s"} if node else set()) | ({"rtk-u"} if _rtk_ffmpeg_found() else set())
     missing_groups = sorted(expected_groups - seen)
     if missing_groups:
         bad.append(f"돌지 않은 묶음: {missing_groups}")
@@ -43126,7 +43201,7 @@ def check_vnew_edit_retake_models() -> None:
         fail("vnew ⑦ AI로 고치기 보완 1(rtk-n~u) 검사 실패\n" + "\n".join(f"  {item}" for item in bad))
     else:
         ok("vnew ⑦ AI로 고치기 보완 1(지시서 116 보완 1) 검사 (rtk-n)모델 목록 (rtk-o)견적·confirmUsd (rtk-p)형식 (rtk-q)고른 모델 제출 "
-           "(rtk-r)구간 (rtk-s)화면 (rtk-t)문구·끔 (rtk-u)ffmpeg 채움" + "".join(f"\n       {r}" for r in report))
+           "(rtk-r)구간 (rtk-s)화면 (rtk-t)문구·끔 (rtk-u)ffmpeg 채움 (rtk-w)초과 초안 줄이기(보완 3)" + "".join(f"\n       {r}" for r in report))
 
 
 

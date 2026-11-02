@@ -10538,7 +10538,8 @@
     }
     d.draftStatus.textContent = "새 프롬프트 — v" + (dr.baseN || 1) + "에서 고침 · " +
       (Number(dr.framesUsed) > 0 ? "결과 프레임 " + dr.framesUsed + "장을 봤습니다" : "결과 프레임을 읽지 못해 이전 프롬프트·콘티만 봤습니다") +
-      editFixDraftSuffix(dr); // 지시서 116 보완 1: 다른 모델·구간이면 그 모델·구간
+      editFixDraftSuffix(dr) + // 지시서 116 보완 1: 다른 모델·구간이면 그 모델·구간
+      (dr.shrunk ? " · 길이 상한에 맞게 한 번 줄였습니다" : ""); // 지시서 116 보완 3: 서버가 바이트 초과 초안을 한 번 다시 줄임
     d.result.textContent = dr.resultKo ? "지금 결과: " + dr.resultKo : "";
     clear(d.changes);
     (Array.isArray(dr.changesKo) ? dr.changesKo : []).forEach(function (text) {
