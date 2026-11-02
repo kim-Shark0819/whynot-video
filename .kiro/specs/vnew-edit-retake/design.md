@@ -256,3 +256,164 @@ payload 함수 3개는 키로 읽은 바이트를 `_fit_ref`로 맞춰 목록에
 
 Claude 검토·커밋 → 개발 main 병합 → CI → ECR → ai-deploy `whynot/dev` → ArgoCD(dev 는 base `VNEW_EDIT_RETAKE=true`). 운영을 켤 때는 `config.prod.env`의
 `VNEW_EDIT_RETAKE=false`를 `true`로 바꾸고 수동 job `deploy:whynot:prod`. 되돌리기는 다시 `false`(라우트 404·버튼 없음·기록 쓰기 없음, 저장된 것은 그대로).
+
+
+---
+
+## 6. 보완 1 — 모델 고르기 · 클립 구간만 고치기(지시서 116 보완 1, 2026-11-02)
+
+`requirements.md` R11~R13 을 구현하는 방법. 116 동작(같은 경로)은 바이트 단위로 그대로 두고, 그 밖의 경우만 새 길(형식 본보기 + `resubmit_model`)로 보낸다.
+
+### 6.1 바꾸는 파일(116 표에 더함)
+
+| 파일 | 바꾸는 것 |
+|---|---|
+| `app/src/vnew/generate.py` | 파일 끝 새 구역 「⑦ AI로 고치기 보완 1」: `retake_path`·`_retake_resolution`·`_retake_price`·`retake_plan`·`_retake_cell`·`_retake_like`·`_retake_video`·`_pad_clip`·`_retake_payload`·`retake_template`·`_charge_retake`·`resubmit_model`. 기존 함수는 바꾸지 않는다 |
+| `app/src/vnew/retake.py` | 새 구역 「보완 1」(모델 목록·견적·구간·형식 본보기 LLM 문구), 기존 함수는 몇 줄씩: `check_prompt`(rules 의 refs·labels·against), `material_items`(버전 trimTo·cutIds·range), `material_flag`(trimTo·range 표식), `_target_of`(버전 기록·재료 이름 표), `_version_out`·`_draft_out`·`_view`(모델·범위 필드), `retake_view`(클립 in·out), `_frame_times`·`_result_frames`(구간), `start_preview`·`run_draft`·`submit`·`run_retake`(모델·범위 분기) |
+| `app/src/vnew/routes.py` | GET 보기 라우트가 `?in=&out=`를 넘긴다(한 줄) |
+| `app/src/vpoc/errors.py` | `USER_FACING_KINDS` 2줄(`RetakeBadModel`·`RetakeBadRange`) |
+| `frontend/public/vnew.js` | 116 소구역 끝에 「보완 1」 함수(모델 상자·범위·견적·구간 바꾸기), 116 함수 몇 줄씩(뼈대·보기 경로·초안·계기·제출·[바꾸기]·버전 줄), `editInsertMaterial`·`editRenderBin`(구간 버전 길이 한 줄씩) |
+| `frontend/public/vnew.css` | 파일 끝 116 보완 1 구역 |
+| `tools/check_vpoc.py` | `check_vnew_edit_retake_models`(rtk-n~u)·도우미·`main()`, rtk-k 클래스 수 기대값(40 → 49, 이유: 보완 1 클래스 9개가 같은 116 JS 소구역 범위 안에 있다) |
+
+수정 금지(`casting.py`·`term_search.py`·`.gitlab-ci.yml`·`whynot-20261029`)와 `stitcher.py`·`plan.py`·`vpoc/fal.py`는 건드리지 않는다.
+
+### 6.2 결정
+
+#### D18. 같은 경로(116)와 새 길을 나누는 기준
+
+`same = 고른 모델 == gen.videoModel and 범위 == full and (기준이 v1 or 기준 버전의 format != "template")`.
+same 이면 116 그대로다: 견적 `estimate(gen, cell)`, 규칙 `_rules`·이전 프롬프트, 초안 LLM 문구·블록 글자 그대로, 제출 `generate.resubmit_cell`, 원장
+`_charge_take`·`_charge_previz`. 그 밖은 새 길: 견적 `generate.retake_plan`, 규칙은 형식 본보기, 초안은 본보기·구간 블록을 더한 LLM 문구, 제출
+`generate.resubmit_model`, 원장 `_charge_retake`. 기준 버전이 다른 모델로 만든 것이면 원래 모델을 골라도 새 길이다(그 버전 프롬프트가 다른 형식이다).
+대안: 모두 새 길로(116 기대값·원장 금액이 바뀜, 기각), 모델이 같으면 늘 116(구간·다른 형식 기준에서 틀린 프롬프트가 나감, 기각).
+
+#### D19. 모델 목록과 걸러내기(R11.2~3)
+
+원천은 ① 과 같은 `plan_mod.previz_models()`(plan.py 는 바꾸지 않는다). 원래 모델을 첫 줄로 더하고(목록에 있으면 그 이름, 없으면 endpoint), 목록에서
+available·previzCapable 인 것만 후보로 둔다. 후보마다 경로(`generate.retake_path`: 원래 모델은 칸 종류, 그 밖은 caps `videoListField` 유무)를 정하고
+범위(full·range)마다 견적(`retake_plan`)을 만든다. 거르는 조건(원래 모델은 그림체·참고 수 검사 없음):
+
+| 조건 | 기준 | 이유 문구(고정 + 숫자) |
+|---|---|---|
+| 그림체 | 실사면 `_model_accepts_real_start` | 실사 인물 사진을 받지 않는 모델입니다. |
+| 참고 수 | 칸(구간)의 charId 있는 배우 수 ≤ `_ref_limit`(참고 영상 imageListMax · 인물 요소 실사 4/웹툰 3 · 이미지 목록 imageListMax(웹툰 −1) · 그 밖 0) | 이 칸 인물 n명의 참고 이미지를 다 받지 못합니다(최대 m장). |
+| 길이(참고 영상) | enum(4~30) 중 필요 길이 − 0.05 이상인 값 | 이 모델은 최대 n초까지 만듭니다(필요 x초). |
+| 길이(영상 편집) | 필요 길이 ≤ 15초(`stitcher.ANIME_MAX_SECONDS`) | 이 모델은 영상을 15초까지 받습니다(필요 x초). |
+| 해상도 | gen 해상도 또는 480p·720p·1080p 중 가장 낮은 지원값 | 이 모델의 해상도를 정할 수 없습니다. |
+| 구간 버전 기준의 full | — | 구간 버전은 그 구간만 다시 만들 수 있습니다. |
+
+두 범위 모두 못 쓰면 `modelsHidden`(id·이름·첫 이유)으로 보낸다. 같은 칸 종류가 아닌 경로도 막지 않는다 — 테이크 구간을 영상 편집 모델로, 컷을 참고 영상
+모델로 만들 수 있다(입력 영상만 다르게 준비한다, D22). 대안: 칸 종류와 같은 경로만(개발에서 테이크 칸 후보가 Seedance 하나뿐 — "모델을 고를 수
+있어야 한다"를 못 채움, 기각).
+
+#### D20. 견적(`generate.retake_plan`, R11.4)
+
+| 경로 | 보낼 길이 d | 과금 길이 | 금액 | 자를 길이 | 프롬프트 상한 |
+|---|---|---|---|---|---|
+| 참고 영상 | enum(4~30, enum 이 없으면 4~30 정수) 중 L − 0.05 이상 가장 작은 값(올림) | d | 단가 unit `1000 tokens` → `_take_usd(model, d, 해상도)`, `seconds` → 단가 × d, 모름 → `_take_usd`(기본 토큰 단가, priceKnown false) | L | `_take_prompt_budget(caps)` |
+| 영상 편집 | 입력 max(3, L)(채움) | max(3, L) | `_previz_model_unit_price(model)` × 과금 길이(⑤ 와 같다, 모르면 기본 단가·priceKnown false) | L | 원래 모델 2,500, 그 밖 min(2,500, caps.promptMaxLength) |
+
+L = 범위 길이(full 은 칸 길이). 금액은 소수 4자리, 화면·confirmUsd 는 2자리. same 은 116 `estimate`·`_rules` 를 그대로 쓴다. 해상도: 원래 모델은 gen 해상도,
+그 밖은 `_retake_resolution`(소문자 비교, 보낼 때는 스키마 원래 표기 `resolutionValues`). same 의 duration 은 ⑤ 규칙(반올림 뒤 그 이하 enum)이고 새 길은 올림이다
+— 실제 Seedance 2.5 enum(4~30 정수)에서는 정수 길이 칸에서 둘이 같고, 검사의 가짜 enum(4·8·12·30)에서는 15초가 ⑤ 12초 / 새 길 30초(채움·자르기)로 갈린다.
+새 길은 입력을 보낼 길이까지 채워 결과 시각이 녹화 시각과 1:1 이 되게 하므로(D22) 결과를 자를 길이로 잘라도 장면이 맞다. 대안: ⑤ 처럼 참고 영상 경로를 늘 토큰 공식으로(초당 단가 모델이
+틀린 금액, 기각), 단가 모름 모델은 빼기(① 은 "단가 미정"으로 고를 수 있어 목록이 달라짐, 보류 — 화면은 모델 줄에 "기본 단가", 정보 줄에 "단가 정보가 없어
+기본 단가로 계산"을 보인다. "단가 미정" 글자는 ① `previzPriceText` 한 곳만 쓴다는 기존 규칙(vq-g)을 지킨다).
+
+#### D21. 구간(R12.2)
+
+원본 시간 → 녹화 시간은 원본마다 `(offset, scale, extent)`(`_time_map`, 화면 `editFixTimeMap` 과 같은 규칙):
+구간 버전 `(range.start, 1, trimTo)` · trimTo 있는 원본(채운 컷 v1·보완 1 버전) `(0, 1, trimTo)` · 통 테이크 v1·116 버전 `(0, L / 결과 길이, 결과 길이)` · 그 밖 `(0, 1, 결과 길이)`.
+결과 길이는 ⑦ 길이 캐시(`edit._read_index`)에서 읽고 없으면 L. 구간 = [o + in·s, o + out·s] ∩ [0, L], 1초 이상, 구간 버전이 아닌 원본에서 양 끝 0.1초 안이면 구간 아님.
+구간 안 컷 = 칸의 녹화 컷 경계(`_cell_spans`: 테이크는 `generate._previz_units`를 녹화 구간 순서로 이은 값, 맞지 않으면 콘티 길이 비례, 컷 칸은 [0, L])와
+0.05초 넘게 겹치는 컷(새 영상 안 시각 포함). 보기(GET)는 `?in=&out=`(원본 시간)으로 받고 틀리면 `range: null`·`rangeNote`, 미리보기·제출은 400 `RetakeBadRange`.
+구간 버전 기준은 범위가 range 뿐이고, in·out 이 없으면 그 버전 구간 전체다.
+
+#### D22. 다시 제출(`generate.resubmit_model`, R11·R12)
+
+`_PREPARE_SEM` 안에서(⑤ 와 같은 메모리 규칙): 실사면 `_assert_no_webtoon` → 입력 영상(`_retake_video`) → payload(`_retake_payload`, `_RefTrace`) → 본보기 참고 표시 확인 →
+제출 → 세마포어 밖에서 원장 `_charge_retake`(작업 토큰 키, 견적 금액) · 기록(`source=retake`, model = 고른 모델, params 에 cellSeconds·rangeStart·rangeEnd·trimTo).
+
+| 칸 \ 경로 | 참고 영상(`_submit_take`) | 영상 편집(`_submit_previz_edit`) |
+|---|---|---|
+| 테이크 | full: 녹화 이어붙임 그대로 / range: `_cut_clip(이어붙임, 구간)` · d 까지 `_pad_clip` | `_cut_clip(이어붙임, full 또는 구간)`(3초 채움·720 높이) |
+| 컷 | `_cut_clip(녹화, 컷 시작 + 구간)` · d 까지 `_pad_clip` | `_cut_clip(녹화, 컷 시작 + 구간)` |
+
+payload 는 경로에 맞춘 칸 사본(`_retake_like`): 참고 영상 경로 {id·cutIds·recKeys·recSegIds·seconds} → `_take_payload`(실사 `variant="real"`), 영상 편집 경로
+{id·cutId·cutIds·recordingKey·startSec·endSec·seconds} → `_previz_payload(caps)`. cutIds = 구간 안 컷. payload 가 만든 프롬프트는 버리고 사용자 프롬프트를
+보낸다. 그 프롬프트의 참고 표시 집합이 초안의 본보기(`formatRefs`)와 다르면 409 `RetakeFormatChanged`(제출 0, 버전 실패 문구). 결과 접두사는 116 과 같다
+(`{cellId}-{variant}-rt{n}-{attempt}`). 대안: `resubmit_cell`에 인자 더하기(116 경로 글자가 바뀌고 분기가 섞임, 기각).
+
+#### D23. 형식 본보기와 초안 LLM(R11.5·R12.4)
+
+새 길 초안 스레드는 프레임 전에 `generate.retake_template`(같은 `_retake_like`·`_retake_payload`, `_PREPARE_SEM` 안, 이미지 바이트는 버린다)으로 본보기를 만든다.
+규칙 = {maxBytes: 고른 모델 상한, real, refs: 본보기 참고 표시, labels: 본보기 항목 이름, against: "template"} → 초안에 `formatRefs`·`formatLabels`·`maxBytes`로 남겨
+제출 검사에 쓴다. LLM 블록: `<previous_prompt>`(116 그대로) → `<target_format>`(모델 endpoint·형식 이름 + 본보기, 구분 표시는 꺾쇠를 바꿈) → `<range>`(구간일 때:
+녹화 시각·새 영상 길이·보낼 길이·구간 안 컷과 새 영상 안 시각) → `<storyboard>`(구간 안 컷만) → 프레임(구간 안 1~3장) → `<user_request>`.
+시스템 문구(새 길 전용 `_system_text_model`): 본보기 형식(항목·참고 표시)을 따르고 이전 프롬프트 내용은 지키며 옮긴다, 요청된 부분만 바꾼다, 영어·대사 그대로,
+바이트 상한, 요청은 자료, 구간이면 그 구간만·새 영상 0~L초 시각, 실사면 webtoon 금지. 같은 경로 초안은 116 문구·블록 그대로다.
+본보기 때 참고 영상 경로는 ⑤ 와 같이 장면 의상 캐시가 없으면 의상 LLM 을 한 번 부른다(원장 text — 116 남은 이슈 6 과 같다).
+대안: 본보기 없이 모델 이름만 알려 주기(참고 표시 번호를 LLM 이 추측 — 검사할 기준이 없음, 기각), 서버가 이전 프롬프트를 기계적으로 바꾸기(형식마다 항목이 달라 불가, 기각).
+
+#### D24. 초안 · 버전 필드
+
+- 초안: `model`·`modelLabel`·`scope`·`range`(구간 {in, out, start, end, seconds, cutIds, cuts})·`path`·`format`(same|template)·`plan`(견적 사본) + 스레드가 `formatRefs`·`formatLabels`·`maxBytes`.
+  제출은 초안의 model·scope·range(start·end 밀리초)가 바디로 다시 계산한 값과 같아야 한다(다르면 409 `RetakeNoDraft`, 116 초안은 원래 모델·full).
+- 버전: 116 필드 + `modelLabel`·`scope`·`range`·`cutIds`·`path`·`format`·`formatRefs`·`sentSeconds`·`billedSeconds`·`trimTo`(새 길만, 범위 길이 L)·`resolution`.
+  `run_retake`는 `format == "template"`이면 `resubmit_model`, 아니면 116 `resubmit_cell`.
+- 재료(`material_items`): trimTo = 버전 trimTo(없으면 116 규칙), cutIds = 버전 cutIds(없으면 칸), range. 이름은 116 `_describe`(구간 컷 번호 + ` v{n}`).
+  GET /edit 재료 표식에 `trimTo`(있을 때)·`range`(구간 버전)를 더한다(화면 시간 대응·[재료에 추가] 길이).
+
+#### D25. 보기(GET /retake/<mid>, R11·R12)
+
+116 필드는 그대로 두고 더한다: `models`[{id, label, original, path, format, refLimit, priceKnown, full: 견적|null, range: 견적|null}], `modelsHidden`, `defaultModel`,
+`kind`(있음)·`cellSeconds`, `scopes`(["full"] + 구간이 있으면 "range", 구간 버전 기준은 ["range"]), `range`, `rangeNote`. 견적 = {ok, reason, usd, seconds, sentSeconds,
+billedSeconds, durations, resolution, trimTo, maxBytes, same}. 버전 줄에 `model`·`modelLabel`·`scope`·`range`·`trimTo`·`cutIds`. 116 `estimate`·`limits`는 원래 모델·full 그대로.
+
+#### D26. 화면(R11·R12)
+
+- 패널 오른쪽 위 「설정」 묶음: 범위 라디오 두 개(고른 클립이 원본 일부일 때만 — 원본 시간 `in–out초`), 영상 모델 선택 상자(그 범위에서 쓸 수 있는 모델,
+  "이름 · 원래 모델 · $x"), 정보 줄(형식 · 길이 선택지 → 보낼 길이·자를 길이 · 해상도 · 예상 금액 · 프롬프트 상한 · 형식이 바뀌면 옮긴다는 안내 — 초안 전에도
+  모델을 바꾸면 바로 바뀐다), 뺀 모델 한 줄(title 에 이유).
+- 범위를 range 로 바꾸면 `?in=&out=`로 보기를 다시 받는다(그 뒤 조회도 같은 주소). 모델을 바꾸면 서버를 부르지 않고 보기의 견적으로 다시 그린다.
+- 미리보기·제출 바디: 원래 모델·full 이면 116 바디 그대로, 그 밖이면 `model`(다를 때)·`scope: "range"`·`in`·`out`를 더한다. 확인창·비용 줄·제출 버튼 금액·바이트 계기
+  상한은 고른 견적. 초안의 모델·범위가 지금 고른 것과 다르면 제출을 막고 안내(문제 줄).
+- [바꾸기]: 구간 버전이 끼면 `editFixRangeSwap`(순수 — 클립의 녹화 시간이 새 버전 구간 안이면 시간 대응으로 옮기고, 밖이면 그대로 셈), 아니면 116 `editSwapSource`.
+  v1 [바꾸기]가 구간 버전 클립을 원래 in·out 으로 되돌린다. [재료에 추가]·재료 줄 길이는 `retake.trimTo`까지.
+- 116 글자(비용 줄·확인창·초안 상태 줄·버전 이름)는 같은 경로에서 그대로다(rtk-j 기대값 그대로).
+
+#### D27. 권한·보안
+
+새 입력은 모두 서버가 다시 계산·대조한다: model 은 서버 목록의 id(글자 200자 안, `fal:` 접두사 허용)만, scope 는 두 값, in·out 은 유한한 JSON 숫자·원본 길이 안.
+본보기·구간 블록은 서버 값(빌더 출력·숫자·컷 번호)이고 구분 표시 꺾쇠를 바꾼다. 모델 endpoint 는 등록 목록 글자를 `_clean_text`로. 새 kind 문구는 고정 글자.
+
+#### D28. 성능
+
+보기마다 `previz_models()`(등록 목록 30초 캐시·단가 저장값) + 모델 × 2 견적(글자 계산) + 구간이면 길이 캐시 읽기 1번. 본보기는 초안마다 한 번(세마포어 안,
+참고 이미지 S3 읽기 ⑤ 와 같은 수). 다시 제출의 입력 영상: 녹화 이어붙임/클립 + 채움 ffmpeg 한 번(`-threads 1`, 임시 폴더, 바이트는 제출 뒤 바로 놓는다).
+
+#### D29. 검토한 대안(보완 1)
+
+화면에서 길이 enum 을 직접 고르기(늘 올림 값이 가장 싸고 결과를 잘라 쓰므로 고를 이유가 없음, 보류) · 구간 결과를 서버가 잘라 새 파일로 저장(⑦ 이 trimTo 로 자르면
+되고 S3 쓰기·ffmpeg 가 는다, 기각) · 범위를 바꿀 때마다 새 GET 대신 화면이 견적 계산(가격 공식 중복, 기각) · 초안을 모델과 무관하게 다시 쓰기(형식이 달라
+참고 표시가 틀림, 기각) · 다른 모델로 바꾸면 자동으로 새 프롬프트 만들기(LLM 비용이 묻지 않고 생김, 기각).
+
+### 6.3 API 더함
+
+- `GET …/edit/retake/<mid>?in=&out=` — 쿼리는 선택(원본 시간 초). 응답에 D25 필드.
+- `POST …/preview` {requestKo, extraKo?, model?, scope?, in?, out?} — 400 `RetakeBadModel`·`RetakeBadRange` 더함.
+- `POST …/retake/<mid>` {prompt, requestKo, extraKo?, confirmUsd, draftId, model?, scope?, in?, out?} — 400 `RetakeBadModel`·`RetakeBadRange`, 409 `RetakeNoDraft`(모델·범위 다름).
+
+### 6.4 검사(`check_vnew_edit_retake_models`, rtk-n~u)
+
+| 그룹 | 보는 것 |
+|---|---|
+| rtk-n | 모델 목록: 원래 모델 첫 줄·① 원천·뺀 모델 이유(그림체·참고 수·길이 enum·영상 편집 15초·해상도·쓸 수 없음), 테이크·컷·실사·구간마다 목록, 형식·경로 |
+| rtk-o | 견적: 모델·범위마다 금액·보낼 길이(올림)·과금·해상도·상한(토큰·초당·기본 단가), same 견적 = 116 estimate, confirmUsd 불일치 409·잘못된 모델 400 |
+| rtk-p | 형식: 테이크 → 인물 요소 모델(@Element)·컷 → 참고 영상 모델(@Image)·이미지 목록(Image N) 본보기·LLM 문구·초안 문제(고른 모델 형식 기준)·제출 400 |
+| rtk-q | 고른 모델로 제출: endpoint·본문 키·영상 입력·duration·resolution·원장 금액·기록 model·params·버전 필드·trimTo·재료, 초안과 모델·범위 다르면 409, 본보기 바뀜 → 실패·제출 0 |
+| rtk-r | 구간: 보기 구간(비례·1:1·구간 버전)·구간 안 컷·틀린 구간(GET 이유·POST 400)·LLM `<range>`·콘티·프레임 시각·올림·채움·자르기·재료 이름·구간 버전 기준 범위 |
+| rtk-s | 화면(node, 실제 서버 응답): 범위 라디오·모델 상자·정보 줄·모델 바꾸면 비용·버튼·확인창 금액, 미리보기·제출 바디, 초안과 다르면 막힘, 구간 [바꾸기]·되돌리기·[재료에 추가] 길이, 순수 함수 |
+| rtk-t | CSS 보완 1 구역·USER_FACING 새 kind 2개·던지는 곳 문구(AST)·끔이면 라우트 404 그대로 |
+| rtk-u | 로컬 ffmpeg: `_pad_clip` 실제 mp4 길이·임시 폴더 0 |

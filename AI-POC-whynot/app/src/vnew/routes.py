@@ -974,7 +974,7 @@ def create_blueprint(deps: VnewDependencies) -> Blueprint:
             edit.require_enabled("vnew.retake")
             retake.require_enabled("vnew.retake")
             owner = _project_for(pid, write=True)
-            return jsonify(retake.retake_view(owner, pid, mid))
+            return jsonify(retake.retake_view(owner, pid, mid, request.args.get("in"), request.args.get("out")))  # 보완 1: 고른 클립 구간
         except Exception as exc:  # noqa: BLE001
             return _fail(exc)
 

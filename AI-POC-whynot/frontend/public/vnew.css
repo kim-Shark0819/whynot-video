@@ -4573,3 +4573,66 @@ textarea.vnew-field-input {
     margin-left: 0;
   }
 }
+
+
+/* ================================================================ ⑦ 편집 — AI로 고치기 보완 1: 모델·구간(지시서 116 보완 1) */
+/* 패널 오른쪽 「설정」: 범위 라디오·영상 모델 상자·정보 줄·뺀 모델 한 줄, 버전 줄의 모델·구간 덧붙임, 초안이 고른 모델·범위와 다를 때의 안내.
+   가로로 넘치지 않는다(긴 글은 줄을 바꾼다). */
+
+.vnew-edit-fix-setup {
+  display: grid;
+  gap: 6px;
+  min-width: 0;
+  padding: 8px;
+  border: 1px solid var(--line, #e5e7eb);
+  border-radius: 8px;
+  background: var(--surface-muted, #f9fafb);
+}
+
+.vnew-edit-fix-scope {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 14px;
+  min-width: 0;
+}
+
+.vnew-edit-fix-scope-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  font-size: 13px;
+  cursor: pointer;
+  word-break: break-word;
+}
+
+.vnew-edit-fix-scope-note {
+  margin: 0;
+}
+
+.vnew-edit-fix-model {
+  resize: none;
+}
+
+.vnew-edit-fix-model-info,
+.vnew-edit-fix-hidden {
+  margin: 0;
+  font-size: 12px;
+  color: var(--text-muted, #6b7280);
+  word-break: break-word;
+}
+
+.vnew-edit-fix-hidden {
+  cursor: help;
+}
+
+.vnew-edit-fix-version-meta {
+  font-size: 12px;
+  color: var(--text-muted, #6b7280);
+  word-break: break-word;
+}
+
+.vnew-edit-fix-mismatch {
+  color: var(--danger, #b91c1c);
+  font-weight: 600;
+}

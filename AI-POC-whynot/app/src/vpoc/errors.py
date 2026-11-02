@@ -116,6 +116,9 @@ USER_FACING_KINDS = {
     "RetakePromptInvalid",
     "RetakeLimit",
     "RetakeGenChanged",
+    # 지시서 116 보완 1(2026-11-02): 모델 고르기·클립 구간. 고정 한국어 문구(retake.BAD_MODEL_TEXT·BAD_RANGE_TEXT, generate.RETAKE_MODEL_GONE_TEXT).
+    "RetakeBadModel",
+    "RetakeBadRange",
 }
 
 

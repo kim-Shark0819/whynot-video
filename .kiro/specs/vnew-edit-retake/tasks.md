@@ -29,3 +29,22 @@
     줄 끝 LF(운영 overlay BOM 그대로)·공백만 바뀐 줄 0·부산물 0(pyc 포함).
   - 결과: 전부 통과(ok 73줄, FAIL·WARN 0, 130초), 바뀐 서버 실행문 1,042/1,046(99.6%)·바뀐 줄 가지 289/304(95.1%), 변형 100개 모두 잡힘, 리뷰·문서는 WORKLOG 116.
 - [ ] 8. dev 손 확인(사용자, 배포 뒤): WORKLOG 116 「dev 확인 순서」. 이 실행에서는 하지 않는다(배포·브라우저 없음).
+
+
+## 보완 1 — 모델 고르기 · 클립 구간만 고치기(지시서 116 보완 1)
+
+> `requirements.md` R11~R13, `design.md` §6 기준. 같은 실행에서 스펙·구현·검사를 한다. 완료 조건이 통과한 작업만 체크한다.
+
+- [ ] 9. 스펙 보완(R11~R13, design §6, 이 목록)
+  - 완료 조건: 세 파일에 보완 1 절. 116 절은 그대로.
+- [ ] 10. 서버 — 견적·제출(generate.py 새 구역, design D20·D22)
+  - `retake_path`·`_retake_resolution`·`_retake_price`·`retake_plan`·`_retake_cell`·`_retake_like`·`_retake_video`·`_pad_clip`·`_retake_payload`·`retake_template`·`_charge_retake`·`resubmit_model`.
+  - 완료 조건: rtk-o·rtk-q·rtk-u, 기존 검사 그대로.
+- [ ] 11. 서버 — 모델 목록·구간·초안·제출(retake.py, routes.py, errors.py, design D18·D19·D21·D23~D25·D27)
+  - 완료 조건: rtk-n·rtk-p·rtk-q·rtk-r·rtk-t, rtk-a~m 그대로.
+- [ ] 12. 화면(vnew.js·vnew.css, design D26)
+  - 완료 조건: `node --check`, rtk-s·rtk-t, rtk-j·edu·ert 그대로(rtk-k 클래스 수만 새 값, 이유 보고).
+- [ ] 13. 검사기 배선·전체 검사·커버리지·변형 검사
+  - 완료 조건: `python -X utf8 tools/check_vpoc.py` "전부 통과", 바뀐 서버 실행문 커버리지 80% 이상, 변형 검사, 줄 끝 LF·공백만 바뀐 줄 0·부산물 0.
+- [ ] 14. 리뷰·문서: 보안 → 성능 → 운영성, WORKLOG 116-fix1, ANALYSIS ⑦ 9 표.
+- [ ] 15. dev 손 확인(사용자, 배포 뒤): WORKLOG 116-fix1 「dev 확인 순서」. 이 실행에서는 하지 않는다.
