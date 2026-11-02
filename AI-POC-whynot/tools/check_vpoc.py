@@ -42510,12 +42510,16 @@ def check_vnew_edit_retake_models() -> None:
             shrink_mark = "You shorten a video-generation prompt"
 
             def two_step(first: str, second):
+                shrink_n = [0]
+
                 def reply(system, blocks):
                     if shrink_mark not in system:
                         return {"resultKo": "첫 결과", "promptEn": first, "changesKo": ["첫 변경"]}
-                    if isinstance(second, BaseException):
-                        raise second
-                    return {"resultKo": "", "promptEn": second, "changesKo": []}
+                    shrink_n[0] += 1
+                    out = second[min(shrink_n[0], len(second)) - 1] if isinstance(second, tuple) else second  # 보완 3b: 튜플 = 줄이기 n번째 답
+                    if isinstance(out, BaseException):
+                        raise out
+                    return {"resultKo": "", "promptEn": out, "changesKo": []}
                 return reply
 
             def run_w(pid: str, mid: str, first: str, second, body: dict) -> tuple[dict, list[dict], list[dict]]:
@@ -42544,7 +42548,8 @@ def check_vnew_edit_retake_models() -> None:
                    "모델 경로: 첫 초안 상한 초과 → 줄이기 1회(초안·상한만, 프레임 0, 시스템 = 상한·참고 표시·항목 순서) → 통과 결과·shrunk·"
                    "결과 설명은 첫 호출 것·원장 2줄(-shrink)·로그 shrunk=True·프롬프트 없음")
             over_t = base_t + " " + "z" * 4100
-            d_w2, calls_w2, led_w2 = run_w(pid_t, mid_t, over_t, base_t + " " + "z" * 4050, {"requestKo": "길게"})
+            less_t = base_t + " " + "z" * 4050  # 보완 3b: 아직 초과지만 바이트만 줄어듦 → 씀(그다음 2번째는 같은 답 → 안 줄어 버림)
+            d_w2, calls_w2, led_w2 = run_w(pid_t, mid_t, over_t, less_t, {"requestKo": "길게"})
             d_w3, calls_w3, led_w3 = run_w(pid_t, mid_t, base_t, base_t, {"requestKo": "그대로"})
             no_ref = base_t.replace("@Image4", "the room")
             d_w4, calls_w4, _ = run_w(pid_t, mid_t, no_ref, base_t, {"requestKo": "방"})
@@ -42552,29 +42557,67 @@ def check_vnew_edit_retake_models() -> None:
             d_w5, calls_w5, led_w5 = run_w(pid_t, mid_t, over_t, RuntimeError("llm down " + base_t[:40]), {"requestKo": "길게"})
             warn_w5 = logs.messages("vnew.retake.shrink_failed", level=logging.WARNING)
             expect("rtk-w", [[(d.get("status"), d.get("prompt") == p, len(d.get("problems") or []), d.get("shrunk"), len(c), len(le))
-                              for d, p, c, le in ((d_w2, over_t, calls_w2, led_w2), (d_w3, base_t, calls_w3, led_w3),
+                              for d, p, c, le in ((d_w2, less_t, calls_w2, led_w2), (d_w3, base_t, calls_w3, led_w3),
                                                   (d_w5, over_t, calls_w5, led_w5))],
                              (d_w4.get("problems"), d_w4.get("shrunk"), len(calls_w4)),
                              [m.endswith("err=RuntimeError:") for m in warn_w5], [m for m in logs.messages() if "llm down" in m]],
-                   [[("done", True, 1, False, 2, 2), ("done", True, 0, False, 1, 1), ("done", True, 1, False, 2, 1)],
+                   [[("done", True, 1, True, 3, 3), ("done", True, 0, False, 1, 1), ("done", True, 1, False, 2, 1)],
                     (["참고 표시(@Video·@Image·@Element)가 이전 프롬프트와 다릅니다(빠짐 @Image4)."], False, 1), [True], []],
-                   "기본 경로: 두 번째도 초과 → 처음 것·문제 남음·호출 2·원장 2, 상한 이내 → 호출 1·shrunk false, 바이트 외 문제만 → 다시 묻지 않음, "
-                   "두 번째 예외 → 처음 것으로 done·원장 1·경고는 예외 이름만")
-            # 더 나음 판정: 상한 안·문제 수 늘지 않음 / 문제·바이트 모두 줄어듦 — 아니면 처음 것
+                   "기본 경로: 1번째 아직 초과지만 바이트 줄어듦 → 씀·2번째 안 줄어 버림(호출 3·원장 3), 상한 이내 → 호출 1·shrunk false, "
+                   "바이트 외 문제만 → 다시 묻지 않음, 두 번째 예외 → 처음 것으로 done·원장 1·경고는 예외 이름만")
+            # 더 나음 판정(보완 3b): 상한 안·문제 수 늘지 않음 / 바이트 초과를 뺀 문제 수 늘지 않고 바이트 줄어듦 — 아니면 처음 것
             over_noref = no_ref + " " + "z" * 4100
             better = [
-                (over_noref, no_ref, True, 1),  # 상한 안으로 + 문제 2 → 1
-                (over_noref, base_t + " " + "z" * 4050, True, 1),  # 아직 초과지만 참고 표시 되찾음(문제 2 → 1)·바이트 줄어듦
-                (over_t, no_ref + " https://example.com/a", False, 1),  # 상한 안이지만 문제 1 → 2(참고 표시·주소)
-                (over_noref, base_t + " " + "z" * 4200, False, 2),  # 문제는 줄었지만 바이트가 늘어남
-                (over_t, "  ", False, 1),  # 빈 응답
+                (over_noref, no_ref, True, 1, 2),  # 상한 안으로 + 문제 2 → 1
+                (over_noref, base_t + " " + "z" * 4050, True, 1, 3),  # 아직 초과지만 참고 표시 되찾음·바이트 줄어듦 → 씀, 2번째(같은 답) 버림
+                (over_t, no_ref + " https://example.com/a", False, 1, 2),  # 상한 안이지만 문제 1 → 2(참고 표시·주소)
+                (over_noref, base_t + " " + "z" * 4200, False, 2, 2),  # 문제는 줄었지만 바이트가 늘어남
+                (over_t, "  ", False, 1, 2),  # 빈 응답
             ]
             got_b = []
-            for first, second, _w, _n in better:
+            for first, second, _w, _n, _c in better:
                 d_b, c_b, _ = run_w(pid_t, mid_t, first, second, {"requestKo": "판정"})
                 got_b.append((d_b.get("shrunk"), len(d_b.get("problems") or []), len(c_b)))
-            expect("rtk-w", got_b, [(w, n, 2) for _f, _s, w, n in better],
-                   "더 나음 판정: 상한 안·문제 수 늘지 않음 → 씀, 초과지만 문제·바이트 모두 줄어듦 → 씀, 문제 늘어남·바이트 늘어남·빈 응답 → 처음 것")
+            expect("rtk-w", got_b, [(w, n, c) for _f, _s, w, n, c in better],
+                   "더 나음 판정: 상한 안·문제 수 늘지 않음 → 씀, 초과지만 바이트 외 문제 늘지 않고 바이트 줄어듦 → 씀(2번째 시도), "
+                   "문제 늘어남·바이트 늘어남·빈 응답 → 처음 것")
+            # ================= (rtk-w) 보완 3b: 줄이기 최대 2번·원장 -shrink2·shrink_try 로그 =================
+            def pad_to(text: str, size: int) -> str:
+                return text + " " + "z" * (size - len(text.encode()) - 1)
+
+            kl_2700, kl_2450 = pad_to(ok_kl_w, 2700), pad_to(ok_kl_w, 2450)  # Kling 본보기 자체가 2,425B → 상한 안 2번째는 2,450B
+            kl_2700_noref = pad_to(ok_kl_w.replace("@Element2", "the woman"), 2700)
+            logs.clear()
+            d_x1, calls_x1, led_x1 = run_w(pid_t, mid_t, over_kl, (kl_2700, kl_2450), {"requestKo": "두 번", "model": kl})
+            try_x1 = logs.messages("vnew.retake.shrink_try", level=logging.INFO)
+            sc2 = calls_x1[2] if len(calls_x1) > 2 else {"system": "", "blocks": []}
+            logs.clear()
+            d_x2, calls_x2, led_x2 = run_w(pid_t, mid_t, over_kl, (kl_2700, RuntimeError("down")), {"requestKo": "두 번", "model": kl})
+            warn_x2 = logs.messages("vnew.retake.shrink_failed", level=logging.WARNING)
+            d_x3, calls_x3, _ = run_w(pid_t, mid_t, over_kl, kl_2700_noref, {"requestKo": "참고", "model": kl})
+            logs.clear()
+            d_x4, calls_x4, led_x4 = run_w(pid_t, mid_t, over_kl, ok_kl_w, {"requestKo": "한 번", "model": kl})
+            try_x4 = logs.messages("vnew.retake.shrink_try", level=logging.INFO)
+            expect("rtk-w", [len(ok_kl_w.encode()) < 2450,
+                             (d_x1.get("prompt") == kl_2450, d_x1.get("problems"), d_x1.get("shrunk"), len(calls_x1),
+                              [e["key"] for e in led_x1] == ["vnew-retake-" + str(d_x1.get("id")) + s for s in ("", "-shrink", "-shrink2")],
+                              [m.split("cell=")[1].split(" ", 1)[1] for m in try_x1 if "cell=" in m],
+                              [s in sc2["system"] for s in ("at most 2500 UTF-8 bytes (aim for about 1875)",
+                                                            "It is now 2700 bytes, so cut at least 200 bytes (about 825 to reach the aim)",
+                                                            "each Korean character is 3 UTF-8 bytes")],
+                              [m for m in logs.messages() if "Re-render this" in m]),
+                             (d_x2.get("status"), d_x2.get("prompt") == kl_2700, len(d_x2.get("problems") or []), d_x2.get("shrunk"),
+                              len(calls_x2), len(led_x2), [m.endswith("n=2 err=RuntimeError:") for m in warn_x2]),
+                             (d_x3.get("prompt") == over_kl, d_x3.get("shrunk"), len(calls_x3)),
+                             (d_x4.get("shrunk"), len(calls_x4), len(led_x4), [m.split("cell=")[1].split(" ", 1)[1] for m in try_x4])],
+                   [True,
+                    (True, [], True, 3, True, ["n=1 from=%d to=2700 problems=1 kept=True" % len(over_kl.encode()),
+                                               "n=2 from=2700 to=2450 problems=0 kept=True"], [True, True, True], []),
+                    ("done", True, 1, True, 3, 2, [True]),
+                    (True, False, 2),
+                    (True, 2, 2, ["n=1 from=%d to=%d problems=0 kept=True" % (len(over_kl.encode()), len(ok_kl_w.encode()))])],
+                   "보완 3b: 2700B(초과·문제 1) → 씀 → 2450B → 씀(호출 3·원장 3줄 -shrink·-shrink2·로그 2줄·2번째 목표 0.75·줄일 바이트 숫자), "
+                   "2번째 예외 → 2700B 결과로 done, 참고 표시 빠짐 → 버림·2번째 없음, 1번째 상한 안 → 2번째 없음")
             sys_real = rt._system_text_shrink({"maxBytes": 4000, "real": True}, [], [])  # noqa: SLF001
             expect("rtk-w", ["never use the word 'webtoon'" in sys_real, "reference tag exactly as written." in sys_real,
                              'dr.shrunk ? " · 길이 상한에 맞게 한 번 줄였습니다" : ""' in (PUBLIC / "vnew.js").read_text(encoding="utf-8")],
