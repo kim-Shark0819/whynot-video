@@ -1859,7 +1859,11 @@ def _poll_slot(owner: str, cid: str, token: str, slot: dict, unit_usd: float, *,
 
 
 def _finish(owner: str, cid: str, token: str, *, timed_out: bool = False) -> None:
-    """끝내기: 남은 칸 실패(시간 초과) → ready(후보 ≥ 1) / failed, 오류 요약, 고른 사진이 없으면 첫 후보, claim 해제."""
+    """끝내기: 남은 칸 실패(시간 초과) → ready(후보 ≥ 1) / failed, 오류 요약, claim 해제.
+
+    고른 사진(chosen)은 건드리지 않는다(지시서 114): 비어 있으면 빈 값 그대로라 실사 버전은 실사 정면을 쓰고, 사용자가 [이 사진으로]
+    (choose)를 눌러야만 캐스팅 사진이 쓰인다. 전에는 고른 사진이 없으면 첫 후보를 넣었다. 저장된 chosen 은 고치지 않는다.
+    """
 
     def done(cast: dict) -> tuple[int, int]:
         for slot in cast["slots"]:
@@ -1873,8 +1877,6 @@ def _finish(owner: str, cid: str, token: str, *, timed_out: bool = False) -> Non
         if failed:
             first = str(failed[0].get("error") or _MSG_NO_IMAGE)
             cast["error"] = f"사진 {len(cast['slots'])}장 중 {len(failed)}장을 만들지 못했습니다: {first}"[:ERROR_MAX]
-        if not cast.get("chosen") and cast["candidates"]:
-            cast["chosen"] = cast["candidates"][0]["id"]
         cast["claim"] = ""
         cast["claimedAt"] = ""
         return ready, len(failed)

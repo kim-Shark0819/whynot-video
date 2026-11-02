@@ -2260,3 +2260,55 @@
   7. 원장에는 LLM·Brave 비용을 남기지 않는다(107 사진 검사와 같다). Brave 단가가 정해지면 원장 기록을 정한다.
   8. 못 찾았을 때 안내 문구("'떡대공'처럼 BL 유형을 적으면")는 여전히 BL 중심이다(112 남은 이슈 7, 화면 범위가 한 줄이라 그대로).
   9. 뽑기 지시문의 예시 용어(꽃미남·냉미남 …)가 LLM을 그쪽으로 끌 수 있다. 설명에 없는 글은 서버가 버리므로 안전 문제는 아니다.
+
+### 지시서 114 — 실사 캐스팅을 뽑아도 기본은 "실사 정면"(자동 선택 없앰) (Kiro, claude-opus-5.5)
+
+- **범위**: `.kiro/handoff/114-cast-default-real-front.md`. 새 스펙 `.kiro/specs/cast-default-front/`(requirements R1~R6, design D1~D6, tasks 1~5)을 짧게 쓰고 같은 실행에서 구현·검사까지 했다. 커밋·push 하지 않았다. git·aws·kubectl·네트워크·유료 API를 쓰지 않았다(허용 명령 python·node만). 사용자 데이터는 읽지 않았다.
+- **먼저 한 일**: 바꿀 파일·참고 파일 7개의 시작 전 사본과 저장소 파일 813개의 sha256 목록을 저장소 밖(`%TEMP%\cdf_backup`)에 두었다. 시작 전 전체 검사 전부 통과(ok 70줄, FAIL·WARN 0, 106초).
+- **사실**: 사용자 지시(2026-11-02) — 범건우는 캐스팅 사진보다 웹툰 정면을 그대로 실사로 바꾼 "실사 정면"이 낫다. 새 캐릭터도 기본은 실사 정면이다. 114 전에는 `casting._finish`가 고른 사진이 없으면 첫 후보 id를 `chosen`에 넣어, 뽑기만 해도 통 테이크 실사 버전이 캐스팅 사진을 썼다. `chosen`이 빈 값이면 실사 버전은 이미 실사 정면을 쓴다(`chosen_key` "" → `generate._real_front_key` → `realFrontKey`).
+- **결정**(design D1~D4)
+  - D1 `_finish`의 두 줄(`if not cast.get("chosen") and cast["candidates"]: cast["chosen"] = cast["candidates"][0]["id"]`)을 지우고 docstring에 이유를 적었다. 정상 끝·시간 초과 끝·조회 이어받기(`reconcile` → `run_draw`)가 모두 이 함수를 지나서 이 한 곳이면 된다. 로그 `vnew.casting.done …` 꼴은 그대로다.
+  - D2 이행 코드 없음. 저장된 `chosen`은 읽기(GET 상세·`reconcile`·`view`)와 다시 뽑기에서 그대로다. 114 전에 자동 선택된 캐릭터는 사용자가 [실사 정면 쓰기]를 누를 때까지 그 캐스팅 사진을 쓴다(남은 이슈 1).
+  - D3 다른 경로 조사(요구사항 4): `chosen_key`·`view`(`chosen`·`chosenUrl`)·`_trim_history`·`generate._casting_key_of`·`_real_front_key`·실사 시작 인물 확인(`generate.py:1051`)·통 테이크 실사 사진(`:3312`)·컷 단위 Kling 실사(`realFrontKey`만, 결정 4)·`characters._casting_detail`·`vnew.js` 캐스팅 칸을 읽었다. 모두 `chosen`만 보고 없으면 실사 정면(또는 표시 없음)이다. 첫 후보로 대신 쓰는 곳은 `_finish` 하나였고 고칠 곳은 더 없었다.
+  - D4 화면 문구(`vnew.js` `castingUsingText`, 고르지 않음 쪽 한 줄): "실사 버전에 쓰는 사진: 실사 정면 (기본 · 캐스팅 사진은 [이 사진으로]를 눌러야 쓰입니다)". 줄표 대신 화면의 다른 문구("2장 · $0.08", "아이돌풍 · 2회차")와 같은 가운뎃점을 썼다. 고른 사진이 있을 때 문구·[실사 정면 쓰기]는 그대로다.
+- **검토한 대안**(design D6): 뽑기 끝에 첫 후보를 "추천"으로 표시(범위 밖·고른 것처럼 보임, 기각), 114 전 자동 선택된 `chosen`을 비우는 이행(지시서 R2, 그리고 저장값만으로 사용자가 고른 값과 구별할 수 없음, 기각), 옛 동작 설정 플래그(`deploy/`·`k8s/` 수정 금지, 두 줄 되돌리기로 충분, 기각).
+- **바꾼 것**
+  - `app/src/vnew/casting.py`(+5 −3, 지운 정의 0): `_finish`의 자동 선택 두 줄 지움·docstring.
+  - `frontend/public/vnew.js`(+1 −1): `castingUsingText` 고르지 않음 문구.
+  - `tools/check_vpoc.py`(+475 −10, 지운 함수 정의 0): 기존 기대값 6곳과 주석(아래), 새 `_CDF_USING_FRONT`·`_CDF_USING_CHOSEN`·`_CDF_SCREEN_NODE_CASES`·`_cdf_chosen_writers`·`check_vnew_cast_default_front`(cdf-a~f), `main()`(`check_vnew_cast_term_search` 바로 뒤).
+  - `.kiro/specs/cast-default-front/` 세 파일, `docs/ANALYSIS.md` §3.6.1 B 구현 결과 표 「기본 사진(지시서 114)」 한 줄, 이 항목.
+- **검사(어떤 검사가 무엇을 덮는지)** — 라우트(Flask)·저장소 조건부 쓰기·`run_draw`·`_finish`·`reconcile`·`choose`·`view`·`generate._char_entries`·`_real_front_key`는 실제 코드, fal·원장·S3·LLM만 가짜다.
+
+  | 검사 | 덮는 것 |
+  |---|---|
+  | cdf-a | `POST /casting/draw` → `run_draw` → `_finish` 정상 끝 3꼴(2장 ready·한 칸 거절 ready 1·두 칸 거절 failed)과 시간 초과(GET 상세 → `reconcile` 이어받기 → `_finish(timed_out=True)`, 칸 1 시간 초과 문구): 저장 `chosen` ""·보기 `chosen`·`chosenUrl` ""·`_char_entries` `castingKey` ""·`_real_front_key` = 실사 정면 키·끝 로그 2꼴 그대로 |
+  | cdf-b | 고른 사진이 이번 후보·이전 사진인 두 저장본 → 다시 뽑기(`start_draw` 결정 5·`_trim_history`·`_finish`) 뒤 `chosen` 그대로·history에 남음·`chosenUrl`·쓰는 키 = 그 사진 |
+  | cdf-c | `POST /choose` 두 번째 후보 → 저장·보기·`chosen_key`·`_real_front_key` = 그 사진, 다시 뽑아도 그대로 |
+  | cdf-d | `POST /choose ""` → 저장·보기 빈 값·`chosenUrl` ""·실사 정면 키, 다시 뽑아도 빈 값 |
+  | cdf-e | 자동 선택 시절 저장본(`chosen` = 첫 후보): GET 상세 전후 casting 바이트 같음·다시 뽑아도 그대로·쓰는 키 = 그 사진, 없는 id를 가리키는 저장본: GET·뽑기 뒤 그대로·쓰는 키 = 실사 정면, `casting.py`에서 `chosen`을 쓰는 함수 = `choose` 하나(AST — `x["chosen"] =`·`update(chosen=)`·`setdefault("chosen")`, 탐지 자체 검사 3꼴) |
+  | cdf-f | node 가짜 DOM(cast-l 하네스) + 실제 GET 상세 보기 3개: `castingUsingText` 4꼴, 뽑기 끝·[실사 정면 쓰기] 뒤 = 기본 문구·[실사 정면 쓰기] 없음·사진마다 [이 사진으로]·배지 0, 고른 뒤 = 고른 문구·[실사 정면 쓰기]·배지 1, 두 버튼의 choose 본문·다시 그리기, 캐스팅 구역에 기본 문구 한 번·innerHTML 0, `node --check` |
+
+- **기대값을 바꾼 기존 검사와 이유**(모두 114 전 자동 선택을 기대했다)
+  - cast-f: 2장 뽑기 끝 `chosen` = 첫 후보 → "". 실패 문구 "첫 후보 선택" → "chosen 빈 값", docstring 한 줄.
+  - cast-g: 한 칸 거절 뒤 `chosen` = 남은 후보 → "".
+  - cast-j: cast-f 캐릭터의 GET 상세 `chosenUrl` = 첫 후보 presigned URL → "".
+  - cast-l: `using_none` 문구 → 새 문구(D4). 뽑는 중 화면도 같은 상수를 본다.
+  - cpg-e 세 곳(그림체 → 실사·그림체 ×2 → 실사·두 칸 중 한 칸): `chosen` = 남은 후보 → "".
+- **확인**
+  - `node --check frontend/public/vnew.js` 통과.
+  - `python -X utf8 tools/check_vpoc.py` 전부 통과: ok 71줄(시작 전 70 + cdf), FAIL·WARN 0, 98~159초. cdf 단독 약 1초.
+  - 커버리지(coverage 7.17 `--branch`, 전체 검사기, `--include=…/vnew/casting.py`, 데이터는 저장소 밖): 바뀐 줄은 docstring(실행문 아님)과 지운 두 줄이라 새 실행문이 0개다. 바뀐 함수 `_finish`는 실행문 18/18(100%)·가지 빠짐 0이고 cdf 단독으로도 18/18·가지 빠짐 0이다. 지운 자리 앞뒤 실행문(`cast["error"]`·`cast["claim"]`)도 실행됐다. 파일 전체 1,115/1,120. `vnew.js`의 바뀐 한 줄은 cdf-f·cast-l이 `castingUsingText` 두 갈래를 모두 값으로 본다.
+  - 변형 검사 22개(저장소 밖 사본 트리, 한 곳씩 바꿔 검사만 돌리고 되돌림): `casting.py` 14(자동 선택 되살림·마지막 후보·후보 하나일 때만·시간 초과일 때만·`update` 꼴, `_finish`가 비움, `start_draw`가 비움, `_casting_of` 이행 2꼴, `reconcile`이 비움, `choose`가 빈 값 무시, `chosen_key`·`view`가 첫 후보로 대신, `chosen_key`가 없는 id면 첫 후보), `generate.py` 2(`_casting_key_of` 첫 후보 키, `_real_front_key`가 실사 정면을 버림 — 저장소 파일은 고치지 않음), `vnew.js` 6(옛 문구, 판단을 `chosenUrl`로, [실사 정면 쓰기] 늘 보임, 첫 후보를 고른 것으로 보임, [이 사진으로]가 첫 사진을 보냄, "기본" 빠짐) — cdf 단독으로 22/22 잡힘. 기존 cast·cpg만으로는 18/22(시간 초과일 때만 자동 선택·`_finish`가 비움·없는 id 이행·`reconcile`이 비움을 못 잡음)라 cdf가 그 넷을 메운다. 첫 실행에서 화면 변형 하나(J04)가 기대값 비교가 아니라 node 예외로만 잡혀, 버튼이 없을 때 누르지 않게 고쳐 다시 돌렸다(22/22, 모두 기대값 비교로 잡힘).
+  - 유료 호출 0: fal은 `casting._fal_request`·`_fetch_url` 가짜, `characters._fal_request`·`vpoc.fal._request`·`characters.run_resume_variant`는 막음, LLM은 `_guard_real_llm`, 원장 가짜, S3는 `_FakeCharStore`.
+  - 줄 끝·부산물: 바뀐 5개 파일·새 3개 파일 모두 CR 0·BOM 없음·끝 줄바꿈 있음(시작 전도 CR 0), 공백만 바뀐 줄 0, 새 줄 끝 공백 0, 지운 정의 0(Python AST·JS 함수 이름). 수정 금지 파일(`deploy/`·`k8s/`·`.gitlab-ci.yml`·`edit.py`·`term_search.py`)은 시작 전 sha256과 같다(`whynot-20261029`는 이 작업 트리에 없다). 저장소 안 새 파일은 스펙 3개뿐이다. `__pycache__`는 검사기 첫 단계 `compileall`이 `casting.cpython-311.pyc`·`llm.cpython-311.pyc`를 다시 썼다(`-B`·`PYTHONDONTWRITEBYTECODE`를 무시한다) — 시작 전 소스와 mtime으로 다시 컴파일해 두 파일 모두 시작 전 sha256으로 되돌렸고, 마지막 전체 검사는 `PYTHONPYCACHEPREFIX`(저장소 밖)로 돌렸다. `.coverage` 0.
+  - 작업 중 다른 곳에서 바뀐 파일: `app/src/vpoc/llm.py`(09:48, `SSLError` import 한 줄과 `except` 튜플에 `SSLError`·주석 "끊긴 연결 재사용(운영 2026-11-02)"). 이 작업이 쓴 것이 아니다. 그 두 곳을 빼면 시작 때 sha256과 같음을 확인했고 건드리지 않았다. 위 전체 검사 통과는 이 변경이 들어간 상태다.
+- **3단계 리뷰**
+  - 보안: 비밀값·외부 전송·권한·입력 검증 변화 없음. 지운 것은 서버 안의 대입 하나다. `choose`의 id 확인(후보·이전 사진에 있어야 함, 없으면 404)은 그대로다. 화면 문구는 상수이고 `textContent`로 넣는다(cdf-f innerHTML 0). 발견 없음.
+  - 성능(512Mi): 외부 호출 수·타임아웃·메모리·저장 횟수 변화 없음(같은 `_mutate_cast` 한 번 안에서 대입이 빠졌을 뿐). 발견 없음.
+  - 운영성: 로그 꼴 그대로(`vnew.casting.done … timeout=`, cdf-a). 되돌리기는 두 줄 되돌리기(설정 플래그 없음). 배포 중 진행 중인 회차: 옛 파드가 끝내면 첫 후보가 들어가고 새 파드가 끝내면 빈 값이다. 어느 쪽이든 화면이 그 값을 보이고 [이 사진으로]·[실사 정면 쓰기]로 바꿀 수 있다. 재시작 뒤 이어받기(`reconcile`)도 같은 `_finish`를 지난다(cdf-a 시간 초과). 롤링 배포: 새 화면 + 옛 서버면 문구만 새것이고 동작은 옛것이다. 발견: 저장값 `chosen`이 없는 사진 id를 가리키면 화면은 "고른 캐스팅 사진"인데 서버는 실사 정면을 쓴다(114 전부터 있던 표시 어긋남, 정상 경로에서는 생기지 않는다 — 남은 이슈 2, 범위 밖이라 고치지 않음).
+- **운영 반영 계획(실행하지 않음)**: Claude 검토·커밋 → 개발 main 병합 → CI → 개발 ArgoCD. 개발에서 새 캐릭터로 뽑기 1회(현실 배우풍 2장 $0.08)를 하고 끝난 뒤 화면이 기본 문구·배지 0인지, 실사 버전 시작 로그·인물 사진이 실사 정면인지 본다. 운영은 수동 job `deploy:whynot:prod`.
+- **남은 이슈**
+  1. 114 전에 뽑아 자동 선택된 캐릭터(범건우 포함)는 저장된 `chosen` 그대로 캐스팅 사진을 쓴다(R2). 실사 정면으로 바꾸려면 그 캐릭터에서 [실사 정면 쓰기]를 한 번 눌러야 한다. 어느 캐릭터가 자동 선택이었는지는 저장값으로 알 수 없다.
+  2. `castingUsingText`는 `chosen`만 본다. 깨진 저장값(없는 사진 id)이면 화면 "고른 캐스팅 사진"과 서버의 실사 정면이 어긋난다. `chosenUrl`로 판단하면 고쳐진다(이번 범위 밖).
+  3. `docs/ANALYSIS.md` §10.1의 검사 개수(70개)·줄 수는 지시서 범위("캐스팅 절 한 줄")에 따라 고치지 않았다. 지금 `main()`은 71개를 부른다.
+  4. 실제 브라우저에서 문구 줄바꿈·폭을 보지 않았다(문구가 전보다 14자 길다).

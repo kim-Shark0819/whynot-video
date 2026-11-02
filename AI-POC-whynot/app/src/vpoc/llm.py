@@ -25,6 +25,7 @@ from botocore.exceptions import (
     ConnectionClosedError,
     EndpointConnectionError,
     ReadTimeoutError,
+    SSLError,
 )
 
 from . import compose, settings
@@ -495,7 +496,7 @@ def _converse(
                 ):
                     _DENIED[candidate] = time.time()
                 break  # 다음 모델로
-            except (ReadTimeoutError, ConnectionClosedError, EndpointConnectionError) as exc:
+            except (ReadTimeoutError, ConnectionClosedError, EndpointConnectionError, SSLError) as exc:  # SSLError: 끊긴 연결 재사용(운영 2026-11-02)
                 last = exc
                 log.warning("vpoc.call.retry where=%s model=%s err=%s", where, candidate, type(exc).__name__)
                 if transient_left:
