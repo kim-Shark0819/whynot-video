@@ -41677,6 +41677,11 @@ def check_vnew_edit_retake() -> None:
             bad.extend(_rtk_ui_problems(got, server))
             seen.add("rtk-j")
             report.append(f"rtk-j: 화면 묶음 {len(got)}개 · 순수 함수 {len(got.get('pure') or {})}꼴")
+            problems_v = _rtk2_ui_problems(got)
+            bad.extend(problems_v)
+            if "fix2" in got and "pure2" in got:
+                seen.add("rtk-v")
+                report.append(f"rtk-v: 버전 미리보기·사용 중 {len(got['fix2'])}단계 · 순수 함수 {len(got['pure2'])}꼴")
     elif not node:
         warn("node 가 없어 rtk-j(화면)를 건너뜁니다")
 
@@ -41756,7 +41761,7 @@ def check_vnew_edit_retake() -> None:
     leftover = os.listdir(private_tmp) if os.path.isdir(private_tmp) else []
     shutil.rmtree(private_tmp, ignore_errors=True)
     expect("rtk-k", leftover, [], "이 검사가 쓴 임시 폴더에 남은 것 없음(프레임·내려받기·ffmpeg 폴더)")
-    expected_groups = {f"rtk-{c}" for c in "abcdefghiklm"} | ({"rtk-j"} if node else set())
+    expected_groups = {f"rtk-{c}" for c in "abcdefghiklm"} | ({"rtk-j", "rtk-v"} if node else set())
     if not _rtk_ffmpeg_found():
         expected_groups.discard("rtk-m")
     missing_groups = sorted(expected_groups - seen)
@@ -41767,7 +41772,7 @@ def check_vnew_edit_retake() -> None:
     else:
         ok("vnew ⑦ AI로 고치기(지시서 116) 검사 (rtk-a)배선 (rtk-b)프롬프트 기록 (rtk-c)재구성 (rtk-d)미리보기·프레임 메모리 "
            "(rtk-e)제출·버전·claim (rtk-f)규칙 (rtk-g)이어받기 (rtk-h)라우트·권한·끔 (rtk-i)편집 통합 (rtk-j)화면 (rtk-k)CSS "
-           "(rtk-l)USER_FACING (rtk-m)ffmpeg 프레임" + "".join(f"\n       {r}" for r in report))
+           "(rtk-l)USER_FACING (rtk-m)ffmpeg 프레임 (rtk-v)버전 미리보기·사용 중(보완 2)" + "".join(f"\n       {r}" for r in report))
 
 
 def _rtk_ffmpeg_found() -> bool:
@@ -41963,6 +41968,72 @@ async function run() {
   var pendingBefore = pending(2000);
   editLeave();
   out.leave = [pendingBefore, pending(2000), pending(5000), fx.open];
+  // ===== (rtk-v) 보완 2: 버전 미리보기·타임라인 사용 중(v2 완성 뒤 ⑦ 을 새로 열고 재료 줄에서 패널)
+  push("GET", P, { ok: clone(S.webV2) });
+  renderEditStep(new FakeNode("div"));
+  await settle();
+  ctx = editCtx;
+  root = ctx.root;
+  push("GET", P + "/retake/" + mid, { ok: clone(S.rvV2) });
+  byClass(root, "vnew-edit-fix-open")[0].fire("click");
+  await settle();
+  fx = ctx.fix;
+  function vrows() {
+    return byClass(fx.dom.versions, "vnew-edit-fix-version").map(function (r) {
+      var n = byClass(r, "vnew-edit-fix-version-name")[0];
+      return [["is-current", "is-base", "is-previewing"].filter(function (c) { return r.classList.contains(c); }).join(" "), txt(r, "vnew-badge"),
+              n.attrs.role || "", n.attrs.tabindex || "", n.attrs["aria-pressed"] || ""];
+    });
+  }
+  function vname(i) { return byClass(fx.dom.versions, "vnew-edit-fix-version-name")[i]; }
+  function vswap(i) { byClass(byClass(fx.dom.versions, "vnew-edit-fix-version")[i], "vnew-edit-fix-swap")[0].fire("click"); }
+  var v2Url = String((ctx.materials[S.v2Key] || {}).videoUrl || "");
+  var v1Url = S.rvV2.videoUrl;
+  out.fix2 = { urls: [!!v2Url, !!v1Url, v2Url !== v1Url], open: [fx.dom.video.src === v1Url, vrows()] };
+  var pause0 = fx.dom.video.pauses;
+  vname(1).fire("click");
+  out.fix2.pick = [fx.dom.video.src === v2Url, fx.dom.video.pauses - pause0, vrows()];
+  vname(1).fire("click");
+  out.fix2.again = [fx.dom.video.src === v2Url, fx.dom.video.pauses - pause0];
+  var kEnter = vname(0).fire("keydown", { key: "Enter" });
+  out.fix2.enter = [fx.dom.video.src === v1Url, !!kEnter.defaultPrevented, vrows()[0][0]];
+  var kSpace = vname(1).fire("keydown", { key: " " });
+  var kOther = vname(0).fire("keydown", { key: "a" });
+  out.fix2.space = [fx.dom.video.src === v2Url, !!kSpace.defaultPrevented, !!kOther.defaultPrevented];
+  // 바꾸기 → v2 사용 중, 실행 취소 → v1, 다시 실행 → v2, v1 [바꾸기](되돌리기) → v1, 섞으면 둘 다
+  vswap(1);
+  await settle();
+  out.fix2.swap = vrows().map(function (r) { return r.slice(0, 2); });
+  editDo(ctx, "undo");
+  out.fix2.undo = vrows().map(function (r) { return r.slice(0, 2); });
+  editDo(ctx, "redo");
+  out.fix2.redo = vrows().map(function (r) { return r.slice(0, 2); });
+  vswap(0);
+  await settle();
+  out.fix2.revert = vrows().map(function (r) { return r.slice(0, 2); });
+  var mix = editCloneClips(ctx.clips);
+  mix[0].sourceKey = S.v2Key;
+  editCommit(ctx, mix, {});
+  out.fix2.mix = vrows().map(function (r) { return r.slice(0, 2); });
+  // 다시 불러오기: 미리보기(v2)는 그대로, 사용 중은 편집 문서대로. 실패 버전 줄은 누를 수 없다.
+  push("GET", P + "/retake/" + mid, { ok: clone(S.rvFailed) });
+  fx.dom.reload.fire("click");
+  await settle();
+  out.fix2.reload = [fx.dom.video.src === v2Url, vrows()];
+  vname(2).fire("click");
+  out.fix2.failedClick = fx.dom.video.src === v2Url;
+  editFixClose(ctx);
+  editLeave();
+  out.pure2 = {
+    inUse: editFixInUse([C("a", "k1", 0, 1), C("b", "k2", 0, 1), C("c", "k1", 1, 2), C("d", "kz", 0, 1), null],
+                        [{ sourceKey: "k1" }, { sourceKey: "k2" }, { sourceKey: "" }, { sourceKey: "k3" }]),
+    state: [editFixRowState({ n: 2 }, { n: 2, sourceKey: "k2", mid: "m2" }, { k2: 1 }, "m2"), editFixRowState({ n: 1 }, { n: 3, sourceKey: "", mid: "" }, {}, ""),
+            editFixRowState({ n: 1 }, { n: 1, sourceKey: "k1", mid: "m1" }, { k1: 0 }, "m2"), editFixRowState(null, null, null, "")],
+    url: [editFixVersionUrl({ materials: { k2: { videoUrl: "u2" } } }, { mid: "m1", videoUrl: "u1" }, { status: "completed", sourceKey: "k2", mid: "m2" }),
+          editFixVersionUrl({ materials: {} }, { mid: "m1", videoUrl: "u1" }, { status: "completed", sourceKey: "k1", mid: "m1" }),
+          editFixVersionUrl({ materials: { k3: { videoUrl: "u3" } } }, {}, { status: "submitted", sourceKey: "k3", mid: "m3" }),
+          editFixVersionUrl({ materials: {} }, {}, { status: "completed", sourceKey: "k4", mid: "m4" }), editFixVersionUrl({}, null, null)]
+  };
   // ===== 순수 함수
   var clips = [C("a", "k1", 0, 5), C("b", "k1", 5, 15, { speed: 2, label: "테이크 1" }), C("c", "k2", 0, 3), C("d", "k1", 14, 15)];
   function sw(r) { return [r.changed, r.skipped, r.clips.map(function (c) { return [c.id, c.sourceKey, c.in, c.out, editSpeedOf(c), c.label || ""]; })]; }
@@ -41990,6 +42061,43 @@ async function run() {
 }
 run().catch(function (e) { console.error(String((e && e.stack) || e)); process.exit(1); });
 """
+
+
+def _rtk2_ui_problems(got: dict) -> list[str]:
+    """rtk-v(지시서 116 보완 2) node 결과: 버전 줄 미리보기·키보드·타임라인 사용 중(바꾸기·실행 취소·다시 실행·되돌리기·섞임·다시 불러오기)."""
+    problems: list[str] = []
+
+    def want(value, expected, what: str) -> None:
+        if value != expected:
+            problems.append(f"(rtk-v) {what}\n      결과 {value!r}\n      기대 {expected!r}")
+
+    f2 = got.get("fix2") or {}
+    use1 = "타임라인 사용 중 · 클립 2개"  # ⑦ 기본 문서: 이 칸(테이크 1)의 클립 2개가 v1 원본을 쓴다
+    btn_on, btn_off = ["button", "0", "true"], ["button", "0", "false"]
+    want(f2.get("urls"), [True, True, True], "미리보기 주소: v2 = 재료 videoUrl, v1 = 보기 videoUrl, 둘이 다름")
+    want(f2.get("open"), [True, [["is-current is-base is-previewing", use1] + btn_on, ["", None] + btn_off]],
+         "처음: 미리보기 v1(패널을 연 기준), v1 줄 사용 중·기준·미리보기 중, v2 줄은 누를 수 있음")
+    want(f2.get("pick"), [True, 1, [["is-current is-base", use1] + btn_off, ["is-previewing", None] + btn_on]],
+         "v2 이름 클릭: 미리보기 src = v2(멈춘 뒤 바꿈), is-previewing·aria-pressed 가 v2 로")
+    want(f2.get("again"), [True, 1], "같은 버전을 다시 누르면 src 그대로(다시 멈추지 않음)")
+    want(f2.get("enter"), [True, True, "is-current is-base is-previewing"], "Enter: v1 미리보기·기본 동작 막음")
+    want(f2.get("space"), [True, True, False], "Space: v2 미리보기·기본 동작 막음, 다른 키는 그대로")
+    want(f2.get("swap"), [["is-base", None], ["is-current is-previewing", use1]], "v2 [바꾸기] 뒤: 사용 중이 v2 로(클립 2개)")
+    want(f2.get("undo"), [["is-current is-base", use1], ["is-previewing", None]], "실행 취소 뒤: 사용 중이 v1 로")
+    want(f2.get("redo"), [["is-base", None], ["is-current is-previewing", use1]], "다시 실행 뒤: 사용 중이 v2 로")
+    want(f2.get("revert"), [["is-current is-base", use1], ["is-previewing", None]], "v1 [바꾸기](되돌리기) 뒤: 사용 중이 v1 로")
+    want(f2.get("mix"), [["is-current is-base", "타임라인 사용 중"], ["is-current is-previewing", "타임라인 사용 중"]],
+         "클립이 두 버전에 걸치면 각 버전에 사용 중(클립 1개씩)")
+    want(f2.get("reload"), [True, [["is-current is-base", "타임라인 사용 중"] + btn_off, ["is-current is-previewing", "타임라인 사용 중"] + btn_on,
+                                   ["", None, "", "", ""]]],
+         "다시 불러오기: 미리보기 v2 그대로·사용 중은 편집 문서대로, 실패 v3 줄은 누를 수 없음(role·tabindex 없음)")
+    want(f2.get("failedClick"), True, "실패 버전 이름을 눌러도 미리보기 그대로")
+    want(got.get("pure2"), {
+        "inUse": {"k1": 2, "k2": 1, "k3": 0},
+        "state": [" is-current is-base is-previewing", "", " is-base", ""],
+        "url": ["u2", "u1", "", "", ""],
+    }, "순수: 버전 원본별 클립 수(버전 밖 원본·빈 키 무시)·줄 상태·미리보기 주소(완성만, 연 버전은 보기 주소, 재료 없으면 \"\")")
+    return problems
 
 
 def _rtk_ui_problems(got: dict, server: dict) -> list[str]:

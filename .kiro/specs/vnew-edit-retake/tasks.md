@@ -48,3 +48,13 @@
   - 완료 조건: `python -X utf8 tools/check_vpoc.py` "전부 통과", 바뀐 서버 실행문 커버리지 80% 이상, 변형 검사, 줄 끝 LF·공백만 바뀐 줄 0·부산물 0.
 - [ ] 14. 리뷰·문서: 보안 → 성능 → 운영성, WORKLOG 116-fix1, ANALYSIS ⑦ 9 표.
 - [ ] 15. dev 손 확인(사용자, 배포 뒤): WORKLOG 116-fix1 「dev 확인 순서」. 이 실행에서는 하지 않는다.
+
+## 보완 2 — 버전 미리보기 · 타임라인 사용 표시(지시서 116 보완 2, 2026-11-03)
+
+> dev 유료 시험(11-02) 화면 문제 두 가지: 미리보기가 늘 v1, `is-current`가 [바꾸기] 뒤에도 v1. 서버 변경 없음(재료 `videoUrl`·편집 문서 클립으로 화면에서 계산).
+
+- [x] 16. 화면(vnew.js 보완 2 소구역·`editFixPaintVersions`·`editFixPaint`·`editChanged`, vnew.css 보완 2 구역)
+  - 버전 이름(완성만)을 누르거나 Enter·Space → 미리보기 src 교체·`is-previewing`·`aria-pressed`. 진행 중·실패는 상태 글만.
+  - `is-current` = 지금 편집 문서가 쓰는 버전 + 배지 「타임라인 사용 중」(여러 버전이면 각각), 패널을 연 기준 버전은 `is-base`. `editChanged`·패널 다시 그리기 때 다시 센다.
+  - 완료 조건: `node --check`, rtk-v(새 node 묶음, rtk-j 뒤), 기존 rtk·edu·ert 기대값 그대로(rtk-k 클래스 수 49 그대로 — 새 `vnew-edit-` 클래스 없음, 배지는 공통 `vnew-badge`).
+- [x] 17. 전체 검사 1회·리뷰·WORKLOG 116-fix2.
