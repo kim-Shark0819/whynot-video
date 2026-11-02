@@ -3502,6 +3502,7 @@ def _do_submit_take(owner: str, pid: str, gen_id: str, index: int, variant: str,
     take_seconds = 0.0
     resolution = str(vnew_settings.VNEW_TAKE_RESOLUTION)
     prepared = False
+    log_ctx: dict = {}  # 지시서 116: 프롬프트 기록 한 줄의 재료(제출 직전에 채운다)
     _PREPARE_SEM.acquire()
     try:
         plan, _ = plan_mod.load_plan(owner, pid)
@@ -3528,8 +3529,10 @@ def _do_submit_take(owner: str, pid: str, gen_id: str, index: int, variant: str,
         video_mp4 = _stitch_recordings(rec_keys)
 
         stage = "payload"
+        trace = _RefTrace.start()  # 지시서 116: 이 스레드의 참고 이미지 읽기·맞춤을 따라간다(바이트는 붙잡지 않는다)
         built = _take_payload(owner, pid, plan, take, caps, variant="real") if real else _take_payload(
             owner, pid, plan, take, caps)
+        refs = trace.stop(built)
         prompt = built["prompt"]
         image_urls = built["imageUrls"]
         prompt_bytes = len(prompt.encode("utf-8"))
@@ -3538,6 +3541,9 @@ def _do_submit_take(owner: str, pid: str, gen_id: str, index: int, variant: str,
         if real:
             stage = "check"
             _assert_no_webtoon(prompt)
+        log_ctx = {"mode": "previz-take", "variant": variant, "cell_id": take_id, "index": index, "attempt": attempt,
+                   "run": (int((gen.get("realRun") or {}).get("n") or 0) or None) if real else None, "endpoint": endpoint,
+                   "params": _take_params(caps, take_seconds, resolution, audio_choice), "refs": refs, "video_keys": rec_keys}
 
         stage = "submit"
         result = _submit_take(
@@ -3564,6 +3570,8 @@ def _do_submit_take(owner: str, pid: str, gen_id: str, index: int, variant: str,
             "vnew.gen.take_submit_failed pid=%s take=%s stage=%s err=%s%s",
             pid, index, stage, _msg(exc), tag,
         )
+        if stage == "submit":  # 지시서 116: 본문을 보내다 실패한 시도도 기록한다(그 앞 단계는 제출이 아니다)
+            _log_attempt(owner, pid, gen_id, source="gen", result=None, prompt=prompt, status="failed", error=_msg(exc), **log_ctx)
         _fail_variant(owner, pid, gen_id, index, variant, claim, _msg(exc))
         return
     finally:
@@ -3573,6 +3581,7 @@ def _do_submit_take(owner: str, pid: str, gen_id: str, index: int, variant: str,
         return
 
     _charge_take(owner, pid, gen_id, result, take_seconds, resolution)
+    _log_attempt(owner, pid, gen_id, source="gen", result=result, prompt=prompt, **log_ctx)  # 지시서 116
 
     def mutator(data: dict) -> None:
         g = data.get("gen") or {}
@@ -3624,6 +3633,7 @@ def _do_submit_previz(owner: str, pid: str, gen_id: str, index: int, variant: st
     unit_seconds = 0.0
     clip_meta: dict = {}
     prepared = False  # 세마포어 안에서 제출까지 성공했는가.
+    log_ctx: dict = {}  # 지시서 116: 프롬프트 기록 한 줄의 재료(제출 직전에 채운다)
     # 통 테이크 모드(설계자 2026-10-26)는 전용 경로로 제출한다(참조 영상 통째 + 참조 이미지 순서).
     try:
         plan0, _ = plan_mod.load_plan(owner, pid)
@@ -3665,12 +3675,16 @@ def _do_submit_previz(owner: str, pid: str, gen_id: str, index: int, variant: st
         stage = "payload"
         endpoint = str(gen.get("videoModel") or vnew_settings.VNEW_PREVIZ_EDIT_MODEL)
         caps = _previz_caps(endpoint)
+        trace = _RefTrace.start()  # 지시서 116: 이 스레드의 참고 이미지 읽기·맞춤을 따라간다(바이트는 붙잡지 않는다)
         built = _previz_payload(owner, pid, plan, unit, variant, caps=caps)
+        refs = trace.stop(built)
         prompt = built["prompt"]
         elements = built["elements"]
         image_urls = built["imageUrls"]
         prompt_bytes = len(prompt.encode("utf-8"))
         prefix = _seg_output_prefix(owner, pid, gen_id, unit_id + "-" + variant, attempt)
+        log_ctx = {"mode": "previz", "variant": variant, "cell_id": unit_id, "index": index, "attempt": attempt, "run": None,
+                   "endpoint": endpoint, "params": _cut_params(unit, clip_meta, caps), "refs": refs, "video_keys": [rec_key]}
 
         # submit — 본문 직렬화·HTTP 제출(여기까지가 봉우리 메모리). 끝나면 큰 변수 참조를 끊는다.
         stage = "submit"
@@ -3701,6 +3715,8 @@ def _do_submit_previz(owner: str, pid: str, gen_id: str, index: int, variant: st
             "vnew.gen.submit_failed pid=%s cut=%s variant=%s stage=%s rss_mb=%.0f err=%s",
             pid, index, variant, stage, _rss_mb(), _msg(exc),
         )
+        if stage == "submit":  # 지시서 116: 본문을 보내다 실패한 시도도 기록한다(그 앞 단계는 제출이 아니다)
+            _log_attempt(owner, pid, gen_id, source="gen", result=None, prompt=prompt, status="failed", error=_msg(exc), **log_ctx)
         _fail_variant(owner, pid, gen_id, index, variant, claim, _msg(exc))
         return
     finally:
@@ -3711,6 +3727,7 @@ def _do_submit_previz(owner: str, pid: str, gen_id: str, index: int, variant: st
 
     # 제출 성공 → 금액 계상·결과 기록(세마포어 밖, 가볍다).
     _charge_previz(owner, pid, gen_id, result, max(PREVIZ_MIN_CLIP_S, unit_seconds))
+    _log_attempt(owner, pid, gen_id, source="gen", result=result, prompt=prompt, **log_ctx)  # 지시서 116
 
     def mutator(data: dict) -> None:
         g = data.get("gen") or {}
@@ -3752,6 +3769,7 @@ def _do_poll_previz(owner: str, pid: str, gen_id: str, index: int, variant: str,
             return
         if status != "Completed":
             message = poll_result.get("failureMessage") or "영상 생성 실패"
+            _log_result(owner, pid, gen_id, gen, index, variant, arn, "failed", error=message)  # 지시서 116
             # vnew-live-fx C.6: 소리 검사 거절이면 칸에 failureKind "audio"(화면이 '소리 없이 다시 만들기'를 보인다).
             _fail_variant(owner, pid, gen_id, index, variant, claim, message,
                           kind=str(poll_result.get("failureKind") or "") or _audio_kind(message))
@@ -3770,6 +3788,7 @@ def _do_poll_previz(owner: str, pid: str, gen_id: str, index: int, variant: str,
             s["claimedAt"] = ""
 
         _commit(owner, pid, mutator)
+        _log_result(owner, pid, gen_id, gen, index, variant, arn, "completed", output_key=output_key)  # 지시서 116
     except _Discard:
         return
     except Exception as exc:  # noqa: BLE001
@@ -4052,7 +4071,9 @@ def _fit_ref(jpeg: bytes) -> bytes:
     로 비율을 kling 허용 범위(0.4~2.5)에 맞춘 뒤 긴 변을 VNEW_REF_MAX_PX(기본 1024) 이하로 줄여
     JPEG q=85 로 다시 인코딩한다. base64·PIL 봉우리 메모리를 줄인다.
     """
-    return imaging.fit_and_downscale(jpeg, max_px=int(vnew_settings.VNEW_REF_MAX_PX or 0))
+    out = imaging.fit_and_downscale(jpeg, max_px=int(vnew_settings.VNEW_REF_MAX_PX or 0))
+    _ref_note_fit(jpeg, out)  # 지시서 116: _RefTrace 안이면 맞춘 바이트 → 원래 S3 키(기록용, 바이트는 붙잡지 않는다)
+    return out
 
 
 def _fit_b64(jpeg: bytes) -> str:
@@ -4064,9 +4085,11 @@ def _load_jpeg(key: str) -> bytes | None:
     if not key:
         return None
     try:
-        return STORE.get_bytes(key)
+        data = STORE.get_bytes(key)
     except Exception:  # noqa: BLE001
         return None
+    _ref_note_load(key, data)  # 지시서 116: _RefTrace 안이면 읽은 바이트 → S3 키(기록용)
+    return data
 
 
 def _seg_cut_ids(seg: dict) -> list[str]:
@@ -5552,9 +5575,12 @@ def _segment_panel_jpegs(owner: str, pid: str, plan: dict, seg: dict, limit: int
     out: list[bytes] = []
     for file_id in file_ids:
         try:
-            out.append(STORE.get_bytes(plan_mod.upload_key(owner, pid, file_id)))
+            key = plan_mod.upload_key(owner, pid, file_id)
+            data = STORE.get_bytes(key)
         except Exception:  # noqa: BLE001
             continue
+        _ref_note_load(key, data)  # 지시서 116: _RefTrace 안이면 읽은 바이트 → S3 키(기록용)
+        out.append(data)
     return out
 
 
@@ -6166,3 +6192,233 @@ def _msg(exc: BaseException) -> str:
 
 class _Discard(Exception):
     """늦게 온 결과(claim 불일치·회차 바뀜)를 버릴 때 mutate_plan 밖으로 빠져나오는 신호."""
+
+
+# ================================================================ ⑦ AI로 고치기 — 프롬프트 기록·다시 제출(지시서 116, 2026-11-02)
+#
+# 제출 지점(_do_submit_previz·_do_submit_take)과 조회 결과(_do_poll_previz)마다 기록 한 줄(_log_attempt·_log_result → retake.py,
+# {gen 루트}/prompts.json). 참고 이미지 S3 키는 payload 를 만드는 동안 같은 스레드에서만 따라간다: _load_jpeg·_segment_panel_jpegs 가 읽은
+# 바이트(id → 키)와 _fit_ref 가 맞춘 바이트(id → 원래 키)를 _RefTrace 에 적고, 실제로 보낸 elements·imageUrls 순서대로 키를 찾는다(바이트는
+# 붙잡지 않는다 — 정수 id 와 키 글자만). 기록은 VNEW_EDIT_RETAKE 가 켜져 있을 때만 쓰고, 기록 실패는 제출을 막지 않는다(경고 1줄).
+# resubmit_cell 은 ⑦ 다시 만들기를 그 칸의 원래 경로로 제출한다(칸 상태 gen.units 는 읽기만 한다).
+
+_REF_TRACE = threading.local()
+
+
+class _RefTrace:
+    """이 스레드의 참고 이미지 읽기·맞춤을 따라간다. with 블록 또는 start() … stop(built). refs(built) = 보낸 순서의 [{slot, key}].
+
+    start() 는 이 스레드의 앞 추적을 늘 바꿔 끼운다(payload 가 예외로 끝나 stop 을 못 불러도 다음 start 가 정리한다 — 남는 것은 정수 id·키
+    글자뿐이다). ⑤ 제출 함수는 들여쓰기를 바꾸지 않으려고 start/stop 을, resubmit_cell 은 with 를 쓴다.
+    """
+
+    def __init__(self) -> None:
+        self.loads: dict[int, str] = {}
+        self.fits: dict[int, str] = {}
+        self._prev = None
+
+    @classmethod
+    def start(cls) -> "_RefTrace":
+        box = cls()
+        _REF_TRACE.box = box
+        return box
+
+    def stop(self, built) -> list[dict]:
+        if getattr(_REF_TRACE, "box", None) is self:
+            _REF_TRACE.box = None
+        return self.refs(built)
+
+    def __enter__(self) -> "_RefTrace":
+        self._prev = getattr(_REF_TRACE, "box", None)
+        _REF_TRACE.box = self
+        return self
+
+    def __exit__(self, *_exc) -> bool:
+        _REF_TRACE.box = self._prev
+        return False
+
+    def refs(self, built) -> list[dict]:
+        """elements(정면 → 뒤) 다음 imageUrls 순서. 키를 모르는 바이트(검사 가짜 등)는 빈 키다."""
+        out: list[dict] = []
+        built = built if isinstance(built, dict) else {}
+        for number, element in enumerate(built.get("elements") or [], 1):
+            if not isinstance(element, dict):
+                continue
+            out.append({"slot": f"element{number}.front", "key": self.fits.get(id(element.get("frontal_image_url")), "")})
+            for ref_no, ref in enumerate(element.get("reference_image_urls") or [], 1):
+                out.append({"slot": f"element{number}.ref{ref_no}", "key": self.fits.get(id(ref), "")})
+        for number, image in enumerate(built.get("imageUrls") or [], 1):
+            out.append({"slot": f"image{number}", "key": self.fits.get(id(image), "")})
+        return out
+
+
+def _ref_note_load(key: str, data) -> None:
+    """_RefTrace 안이면 읽은 바이트의 id → S3 키(_load_jpeg·_segment_panel_jpegs). 밖이면 아무것도 하지 않는다."""
+    box = getattr(_REF_TRACE, "box", None)
+    if box is not None and data is not None:
+        box.loads[id(data)] = str(key or "")
+
+
+def _ref_note_fit(source, out) -> None:
+    """_RefTrace 안이면 맞춘 바이트의 id → 원래 바이트의 키(_fit_ref). 맞춤이 원본을 그대로 돌려주면 같은 id 다."""
+    box = getattr(_REF_TRACE, "box", None)
+    if box is not None and out is not None:
+        box.fits[id(out)] = box.loads.get(id(source), "")
+
+
+def _take_params(caps: dict | None, seconds: float, resolution: str, audio) -> dict:
+    """통 테이크 제출 본문의 매개변수(_submit_take 와 같은 규칙, 기록용). 프롬프트·영상·이미지는 넣지 않는다."""
+    caps = caps or {}
+    params: dict = {"seconds": round(float(seconds or 0), 3), "resolution": str(resolution), "aspectRatio": "16:9"}
+    duration_int = max(4, min(30, int(round(float(seconds or 4)))))
+    duration_value = _take_duration_value(caps, duration_int)
+    if duration_value is not None:
+        params["duration"] = str(duration_value) if bool(caps.get("durationAsString")) else duration_value
+    if caps.get("taskField"):
+        params["task"] = "reference"
+    if caps.get("generateAudioField"):
+        params["audio"] = bool(vnew_settings.VNEW_TAKE_AUDIO if audio is None else audio)
+    if caps.get("draftField"):
+        params["draft"] = bool(vnew_settings.VNEW_TAKE_DRAFT)
+    return params
+
+
+def _cut_params(unit: dict, clip_meta, caps: dict | None) -> dict:
+    """컷 단위 제출의 매개변수(_submit_previz_edit 와 같은 규칙, 기록용): 컷 길이·녹화 안 구간·보낸 길이·채움·keep_audio."""
+    caps = caps or {}
+    meta = clip_meta if isinstance(clip_meta, dict) else {}
+    params: dict = {
+        "seconds": round(float(unit.get("seconds") or 0), 3),
+        "startSec": round(float(unit.get("startSec") or 0), 3),
+        "endSec": round(float(unit.get("endSec") or 0), 3),
+        "sentSeconds": meta.get("sentSeconds"),
+        "origSeconds": meta.get("origSeconds"),
+        "padded": bool(meta.get("padded")),
+    }
+    if caps.get("keepAudioField") or not caps:
+        params["keepAudio"] = False
+    return params
+
+
+def _log_attempt(owner: str, pid: str, gen_id: str, *, source: str = "gen", mode: str = "", variant: str = "", cell_id: str = "",
+                 index: int = 0, attempt: int = 0, run=None, endpoint: str = "", params: dict | None = None,
+                 refs: list | None = None, video_keys: list | None = None, result: dict | None = None, prompt: str = "",
+                 version=None, status: str = "submitted", error: str = "") -> str:
+    """제출 한 번의 프롬프트 기록 한 줄(retake.log_submit). 끔이면 쓰지 않는다. 예외를 내지 않는다(경고 1줄). 반환 기록 id 또는 ""."""
+    if not vnew_settings.VNEW_EDIT_RETAKE or not mode:
+        return ""
+    try:
+        from . import retake as vnew_retake  # noqa: PLC0415 — retake 가 generate 를 import 한다(순환 피함).
+
+        result = result if isinstance(result, dict) else {}
+        provider = str(result.get("provider") or vpoc_settings.FAL_ID_PREFIX + str(endpoint or ""))
+        return vnew_retake.log_submit(owner, pid, gen_id, {
+            "source": source, "mode": mode, "variant": variant, "cellId": str(cell_id), "cellIndex": index,
+            "attempt": attempt, "run": run, "version": version, "provider": provider.split(":", 1)[0],
+            "model": str(endpoint or ""), "params": params or {}, "refs": refs or [], "videoKeys": video_keys or [],
+            "prompt": prompt, "invocationArn": str(result.get("invocationArn") or ""),
+            "outputPrefix": str(result.get("outputPrefix") or ""), "status": status, "error": error,
+        })
+    except Exception as exc:  # noqa: BLE001 — 기록은 영상 생성을 막지 않는다.
+        log.warning("vnew.gen.prompt_log_failed pid=%s cell=%s stage=submit err=%s", pid, cell_id, type(exc).__name__)
+        return ""
+
+
+def _log_result(owner: str, pid: str, gen_id: str, gen: dict, index: int, variant: str, arn: str, status: str, *,
+                output_key: str = "", error: str = "") -> None:
+    """조회가 끝난 칸의 기록(같은 invocationArn)을 completed·failed 로 고친다(retake.log_result). 끔이면 아무것도 하지 않는다."""
+    if not vnew_settings.VNEW_EDIT_RETAKE or not arn:
+        return
+    try:
+        from . import retake as vnew_retake  # noqa: PLC0415
+
+        cell = _previz_cells(gen)[index]
+        cell_id = str(cell.get("id") or cell.get("cutId") or index)
+        vnew_retake.log_result(owner, pid, gen_id, f"{variant}:{cell_id}", arn, status, output_key=output_key, error=error)
+    except Exception as exc:  # noqa: BLE001 — 기록은 영상 생성을 막지 않는다.
+        log.warning("vnew.gen.prompt_log_failed pid=%s cell=%s stage=result err=%s", pid, index, type(exc).__name__)
+
+
+def resubmit_cell(owner: str, pid: str, gen_id: str, *, variant: str, cell_id: str, prompt: str, tag: str,
+                  attempt: int = 1, version=None) -> dict:
+    """⑦ AI로 고치기: 칸 하나를 원래 경로(같은 모델·caps·녹화·참고 이미지 규칙·매개변수)로 새 프롬프트만 바꿔 제출한다.
+
+    통 테이크 = _stitch_recordings + _take_payload(실사는 variant="real" + _assert_no_webtoon) + _submit_take(칸 state.audio),
+    컷 단위 = _fetch_bytes(recordingKey) + _cut_clip + _previz_payload(caps) + _submit_previz_edit. payload 가 만든 프롬프트는 버린다.
+    준비~제출은 _PREPARE_SEM 안(⑤ 와 같은 메모리 규칙), 원장은 _charge_take·_charge_previz(작업 토큰 키, 한 번), 기록 source=retake.
+    결과 접두사는 "{cellId}-{variant}-{tag}"(예 take1-webtoon-rt2) + attempt 라 원래 결과와 겹치지 않는다. gen 상태는 바꾸지 않는다.
+    반환 {invocationArn, outputPrefix, provider, usd, logId}.
+    """
+    plan, _ = plan_mod.load_plan(owner, pid)
+    gen = plan.get("gen") or {}
+    if str(gen.get("genId") or "") != gen_id:
+        raise VpocError("vnew.retake", "RetakeGenChanged", "영상 생성 기록이 바뀌었습니다. ⑦ 편집을 다시 열어 주세요.", 409)
+    mode = str(gen.get("mode") or "")
+    if variant not in ("real", "webtoon") or mode not in ("previz", "previz-take"):
+        raise VpocError("vnew.retake", "RetakeNotTarget", "이 영상은 AI로 고칠 수 없습니다.", 409)
+    cells = _previz_cells(gen)
+    index = next((i for i, c in enumerate(cells) if str(c.get("id") or c.get("cutId") or i) == str(cell_id)), -1)
+    if index < 0:
+        raise VpocError("vnew.retake", "RetakeNotTarget", "고칠 칸을 찾을 수 없습니다.", 409)
+    cell = cells[index]
+    state = cell.get(variant) if isinstance(cell.get(variant), dict) else {}
+    take = mode == "previz-take"
+    real = variant == "real"
+    endpoint = str(gen.get("videoModel") or vnew_settings.VNEW_PREVIZ_EDIT_MODEL)
+    caps = _previz_caps(endpoint)
+    seconds = float(cell.get("seconds") or 0)
+    resolution = str(gen.get("resolution") or vnew_settings.VNEW_TAKE_RESOLUTION)
+    audio_choice = state.get("audio") if isinstance(state.get("audio"), bool) else None
+    run_n = (int((gen.get("realRun") or {}).get("n") or 0) or None) if take and real else None
+    attempt = max(1, int(attempt or 1))
+    prefix = _seg_output_prefix(owner, pid, gen_id, f"{cell_id}-{variant}-{tag}", attempt)
+    started = time.monotonic()
+    _PREPARE_SEM.acquire()
+    try:
+        if take:
+            video_keys = [str(k) for k in (cell.get("recKeys") or []) if k]
+            if not video_keys:
+                raise VpocError("vnew.generate", "NoRecording", "테이크 녹화가 없습니다.", 409)
+            if real:
+                _assert_no_webtoon(prompt)
+            video_mp4 = _stitch_recordings(video_keys)
+            with _RefTrace() as trace:
+                built = _take_payload(owner, pid, plan, cell, caps, variant="real") if real else _take_payload(
+                    owner, pid, plan, cell, caps)
+            refs = trace.refs(built)
+            params = _take_params(caps, seconds, resolution, audio_choice)
+            result = _submit_take(endpoint=endpoint, caps=caps, video_mp4=video_mp4, prompt=prompt, output_prefix=prefix,
+                                  image_urls=built["imageUrls"], seconds=seconds, resolution=resolution, audio=audio_choice)
+            del video_mp4
+        else:
+            rec_key = str(cell.get("recordingKey") or "")
+            if not rec_key:
+                raise VpocError("vnew.generate", "NoRecording", "컷 녹화가 없습니다.", 409)
+            video_keys = [rec_key]
+            video_mp4 = _fetch_bytes(rec_key, bucket=vpoc_settings.VIDEO_BUCKET)
+            clip = _cut_clip(video_mp4, cell)
+            del video_mp4
+            with _RefTrace() as trace:
+                built = _previz_payload(owner, pid, plan, cell, variant, caps=caps)
+            refs = trace.refs(built)
+            params = _cut_params(cell, clip, caps)
+            result = _submit_previz_edit(endpoint=endpoint, caps=caps, video_mp4=clip["bytes"], prompt=prompt,
+                                         output_prefix=prefix, elements=built["elements"], image_urls=built["imageUrls"])
+            del clip
+        del built
+    finally:
+        _PREPARE_SEM.release()
+    if take:
+        _charge_take(owner, pid, gen_id, result, seconds, resolution)
+        usd = _take_usd(endpoint, seconds, resolution)
+    else:
+        billed = max(PREVIZ_MIN_CLIP_S, seconds)
+        _charge_previz(owner, pid, gen_id, result, billed)
+        usd = round(_previz_model_unit_price(endpoint) * billed, 4)
+    log_id = _log_attempt(owner, pid, gen_id, source="retake", mode=mode, variant=variant, cell_id=str(cell_id), index=index,
+                          attempt=attempt, run=run_n, endpoint=endpoint, params=params, refs=refs, video_keys=video_keys,
+                          result=result, prompt=prompt, version=version)
+    log.info("vnew.gen.resubmit pid=%s cell=%s variant=%s tag=%s attempt=%d bytes=%d refs=%d ms=%d rss_mb=%.0f", pid, cell_id,
+             variant, tag, attempt, len(prompt.encode("utf-8")), len(refs), int((time.monotonic() - started) * 1000), _rss_mb())
+    return {"invocationArn": str(result.get("invocationArn") or ""), "outputPrefix": str(result.get("outputPrefix") or prefix),
+            "provider": str(result.get("provider") or ""), "usd": usd, "logId": log_id}

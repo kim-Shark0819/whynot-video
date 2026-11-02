@@ -18,6 +18,8 @@ _spawn_export. 파드 안 내보내기 잠금 파일: _pod_lock_try · _pod_lock
 (검사가 모듈 변수로 바꾼다).
 지시서 115: 클립 속도 speed(SPEEDS, 없으면 1 — 1 은 저장하지 않는다). 타임라인 길이 = (out − in) / speed(_clip_seconds).
 재료가 없을 때 요약에 잠김 이유(summary → reason, gen 이 없어도 gen_view 가 부른다).
+지시서 116: VNEW_EDIT_RETAKE 가 켜져 있으면 ⑦ AI로 고치기(retake.py)로 다시 만든 버전(v2…)도 재료다 — 그 칸 지금 결과 바로 뒤
+(_all_items, group "retake", 이름 끝 " v{n}"). 꺼져 있으면 _retake_state 가 None 이라 재료·보기가 지시서 115 와 같다.
 """
 
 from __future__ import annotations
@@ -513,6 +515,46 @@ def _default_group(items: list[dict]) -> list[dict]:
     return [m for m in items if m["group"] == items[0]["group"]]
 
 
+def _retake_state(owner: str, pid: str, gen_id: str) -> dict | None:
+    """⑦ AI로 고치기 상태(retakes.json, 지시서 116). 켬이면 정리된 상태(못 읽으면 빈 상태 + 경고), 끔이면 None(S3 를 읽지 않는다)."""
+    if not vnew_settings.VNEW_EDIT_RETAKE:
+        return None
+    from . import retake  # noqa: PLC0415 — retake 가 edit 를 import 한다(순환 피함).
+
+    try:
+        return retake.read_state(owner, pid, gen_id)
+    except Exception as exc:  # noqa: BLE001 — 보기·저장은 버전 없이 계속한다.
+        log.warning("vnew.edit.retake_state_failed pid=%s err=%s", pid, type(exc).__name__)
+        return {"v": 1, "cells": {}}
+
+
+def _all_items(gen: dict, variant: str, retakes: dict | None) -> list[dict]:
+    """재료 허용 목록 = _material_items + 다시 만든 버전(retake.material_items, 지시서 116). 버전은 그 칸 지금 결과(current) 바로 뒤에,
+    지금 결과가 없는 칸의 버전은 끝에 둔다. retakes 가 None(끔)이면 _material_items 그대로다. 첫 묶음(기본 문서)은 바뀌지 않는다."""
+    items = _material_items(gen, variant)
+    if retakes is None:
+        return items
+    from . import retake  # noqa: PLC0415
+
+    seen = {m["sourceKey"] for m in items}
+    by_cell: dict[str, list[dict]] = {}
+    for item in retake.material_items(gen, variant, retakes):
+        if item["sourceKey"] in seen:
+            continue
+        seen.add(item["sourceKey"])
+        by_cell.setdefault(item["cellId"], []).append(item)
+    if not by_cell:
+        return items
+    out: list[dict] = []
+    for item in items:
+        out.append(item)
+        if item["group"] == "current":
+            out.extend(by_cell.pop(item["cellId"], []))
+    for rest in by_cell.values():
+        out.extend(rest)
+    return out
+
+
 def _cut_numbers(plan: dict) -> dict[str, int]:
     cuts = ((plan or {}).get("conti") or {}).get("cuts") or []
     out: dict[str, int] = {}
@@ -538,6 +580,9 @@ def _describe(plan: dict, items: list[dict]) -> None:
             label = "합친 영상"
         if item.get("run") and item["group"] not in ("current", "final"):
             label = f"실사 {item['run']}회차 · " + label
+        if item.get("version"):  # 지시서 116: AI로 고쳐 다시 만든 버전(v2…)
+            suffix = f" v{item['version']}"
+            label = label[:MAX_LABEL_LEN - len(suffix)] + suffix
         item["label"] = label[:MAX_LABEL_LEN]
 
 
@@ -913,7 +958,10 @@ def edit_view(owner: str, pid: str, variant: str | None = None) -> dict:
     except Exception as exc:  # noqa: BLE001 — 보기는 실패하지 않는다(다음 조회가 다시 본다).
         log.warning("vnew.edit.reconcile_failed pid=%s err=%s", pid, type(exc).__name__)
     doc, etag = _saved_doc(owner, pid, gen_id)
-    available = {v: _material_items(gen, v) for v in VARIANTS}
+    retakes = _retake_state(owner, pid, gen_id)  # 지시서 116: 켬이면 다시 만든 버전(재료)·끊긴 다시 만들기 이어받기, 끔이면 None
+    if retakes is not None:
+        retakes = _retake_reconcile(owner, pid, gen_id, retakes)
+    available = {v: _all_items(gen, v, retakes) for v in VARIANTS}
     if variant:
         chosen = variant
     elif doc is not None:
@@ -945,7 +993,13 @@ def edit_view(owner: str, pid: str, variant: str | None = None) -> dict:
     doc_hash = _doc_hash(chosen, [{**c, "in": _num(c.get("in")) or 0.0, "out": _num(c.get("out")) or 0.0} for c in clean]) \
         if saved else ""
     default_mids = {m["mid"] for m in default_items}
-    return {
+    materials = [_material_out(m, meta.get(m["sourceKey"]), default_mids) for m in items]
+    if retakes is not None:  # 지시서 116: 재료마다 AI로 고치기 표식(프롬프트는 넣지 않는다 — 이 보기는 읽기 권한)
+        from . import retake  # noqa: PLC0415
+
+        for item, out in zip(items, materials):
+            out["retake"] = retake.material_flag(chosen, item, gen, retakes)
+    view = {
         "enabled": True,
         "genId": gen_id,
         "variant": chosen,
@@ -961,7 +1015,7 @@ def edit_view(owner: str, pid: str, variant: str | None = None) -> dict:
         "invalidClips": _invalid_clips(out_doc["clips"], allowed, meta) if saved else [],
         "probing": not complete,
         "totalSeconds": _total(out_doc["clips"]),
-        "materials": [_material_out(m, meta.get(m["sourceKey"]), default_mids) for m in items],
+        "materials": materials,
         "limits": {"maxClips": MAX_CLIPS, "maxTotalSeconds": MAX_TOTAL_S, "minClipSeconds": MIN_CLIP_S},
         "export": _export_out(state.get("current"), doc_hash),
         "exportHistory": [
@@ -970,6 +1024,20 @@ def edit_view(owner: str, pid: str, variant: str | None = None) -> dict:
             for h in (state.get("history") or []) if isinstance(h, dict)
         ],
     }
+    if retakes is not None:
+        view["retake"] = {"enabled": True}
+    return view
+
+
+def _retake_reconcile(owner: str, pid: str, gen_id: str, retakes: dict) -> dict:
+    """끊긴 다시 만들기·초안 이어받기(retake.reconcile_state, 지시서 116). 보기는 실패하지 않는다(그대로 돌려준다)."""
+    from . import retake  # noqa: PLC0415
+
+    try:
+        return retake.reconcile_state(owner, pid, gen_id, retakes)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("vnew.edit.retake_reconcile_failed pid=%s err=%s", pid, type(exc).__name__)
+        return retakes
 
 
 def save_doc(owner: str, pid: str, payload) -> dict:
@@ -997,7 +1065,7 @@ def save_doc(owner: str, pid: str, payload) -> dict:
         raise VpocError(where, "AudioTrackUnsupported", "사운드 트랙은 아직 넣을 수 없습니다(⑥ 사운드 결과가 없습니다).", 400)
     raw = _check_clip_list(payload.get("clips"), where)
     plan, gen, gen_id = _load_gen(owner, pid)
-    allowed = {m["sourceKey"] for m in _material_items(gen, variant)}
+    allowed = {m["sourceKey"] for m in _all_items(gen, variant, _retake_state(owner, pid, gen_id))}
     referenced = [c.get("sourceKey") for c in raw if isinstance(c, dict) and c.get("sourceKey") in allowed]
     meta, _ = _ensure_meta(owner, pid, gen_id, referenced)
     durations = {key: (meta.get(key) or {}).get("duration") for key in allowed}
@@ -1077,7 +1145,8 @@ def media_view(owner: str, pid: str, mid: str) -> dict:
     if not isinstance(mid, str) or not _MID_RE.match(mid):
         raise VpocError(where, "MediaNotFound", "편집 재료를 찾을 수 없습니다.", 404)
     _plan, gen, gen_id = _load_gen(owner, pid)
-    source = next((m["sourceKey"] for v in VARIANTS for m in _material_items(gen, v) if m["mid"] == mid), "")
+    retakes = _retake_state(owner, pid, gen_id)  # 지시서 116: 다시 만든 버전도 재료(끔이면 None)
+    source = next((m["sourceKey"] for v in VARIANTS for m in _all_items(gen, v, retakes) if m["mid"] == mid), "")
     if not source:
         raise VpocError(where, "MediaNotFound", "편집 재료를 찾을 수 없습니다.", 404)
     data, _ = _read_json(film_key(owner, pid, gen_id, mid))
@@ -1127,7 +1196,7 @@ def start_export(owner: str, pid: str, etag) -> dict:
     if not isinstance(etag, str) or etag != doc_etag:
         raise _changed(where)
     variant = doc["variant"]
-    allowed = {m["sourceKey"] for m in _material_items(gen, variant)}
+    allowed = {m["sourceKey"] for m in _all_items(gen, variant, _retake_state(owner, pid, gen_id))}
     referenced = [c.get("sourceKey") for c in doc["clips"] if isinstance(c, dict) and c.get("sourceKey") in allowed]
     meta, _ = _ensure_meta(owner, pid, gen_id, referenced)
     clips = _clean_clips(doc["clips"], allowed, {k: (meta.get(k) or {}).get("duration") for k in allowed}, where)

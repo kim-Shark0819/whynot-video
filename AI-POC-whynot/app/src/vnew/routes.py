@@ -959,4 +959,51 @@ def create_blueprint(deps: VnewDependencies) -> Blueprint:
         except Exception as exc:  # noqa: BLE001
             return _fail(exc)
 
+    # ------------------------------------------------------------ ⑦ AI로 고치기(지시서 116)
+    #
+    # ⑦ 재료(테이크·컷) 하나를 이전 프롬프트 + 결과 프레임 + 수정 요청으로 고쳐 같은 경로로 새 버전을 만든다. retake.py 가 맡는다.
+    # VNEW_EDIT·VNEW_EDIT_RETAKE 가 꺼져 있으면 프로젝트를 보기 전에 404(라우트가 없는 것과 같다). 프롬프트 기록·초안·비용이 보이므로
+    # 셋 다 프로젝트 소유자(쓰기 권한)만. 미리보기·제출은 202 + GET 조회(LLM·영상 모델은 백그라운드 스레드).
+
+    @bp.get("/p/<pid>/edit/retake/<mid>")
+    @deps.require_auth
+    def edit_retake_view(pid: str, mid: str):
+        try:
+            from . import edit, retake  # noqa: PLC0415
+
+            edit.require_enabled("vnew.retake")
+            retake.require_enabled("vnew.retake")
+            owner = _project_for(pid, write=True)
+            return jsonify(retake.retake_view(owner, pid, mid))
+        except Exception as exc:  # noqa: BLE001
+            return _fail(exc)
+
+    @bp.post("/p/<pid>/edit/retake/<mid>/preview")
+    @deps.require_auth
+    def edit_retake_preview(pid: str, mid: str):
+        try:
+            from . import edit, retake  # noqa: PLC0415
+
+            edit.require_enabled("vnew.retake.preview")
+            retake.require_enabled("vnew.retake.preview")
+            owner = _project_for(pid, write=True)
+            payload = _edit_body("vnew.retake.preview")
+            return jsonify({"ok": True, "retake": retake.start_preview(owner, pid, mid, payload)}), 202
+        except Exception as exc:  # noqa: BLE001
+            return _fail(exc)
+
+    @bp.post("/p/<pid>/edit/retake/<mid>")
+    @deps.require_auth
+    def edit_retake_submit(pid: str, mid: str):
+        try:
+            from . import edit, retake  # noqa: PLC0415
+
+            edit.require_enabled("vnew.retake.submit")
+            retake.require_enabled("vnew.retake.submit")
+            owner = _project_for(pid, write=True)
+            payload = _edit_body("vnew.retake.submit")
+            return jsonify({"ok": True, "retake": retake.submit(owner, pid, mid, payload)}), 202
+        except Exception as exc:  # noqa: BLE001
+            return _fail(exc)
+
     return bp

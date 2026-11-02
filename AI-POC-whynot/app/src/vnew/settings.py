@@ -312,6 +312,13 @@ VNEW_TAKE_REAL = _bool("VNEW_TAKE_REAL", True)
 # false 면 편집 라우트 4개가 404(EditDisabled)이고 gen 보기에 edit 요약이 없다(⑦ 단계가 보이지 않는다). 진행 중 내보내기는
 # 끝까지 하고, 저장된 편집 문서·결과 영상은 지우지 않는다. 템플릿·base 에 배선한다(운영 overlay 는 false).
 VNEW_EDIT = _bool("VNEW_EDIT", True)
+# ⑦ 편집 — AI로 고치기(지시서 116, 2026-11-02). 켜면 ⑤ 영상 제출마다 최종 프롬프트·모델·매개변수·참고 이미지 S3 키를 gen 폴더의
+# prompts.json 에 한 줄씩 남기고(retake.py), ⑦ 에서 테이크·컷 하나를 이전 프롬프트 + 결과 프레임 + 사용자 수정 요청으로 LLM 1회 고쳐
+# 같은 모델·같은 경로로 새 버전(v2…)을 만든다(유료, 확인 금액). false 면 새 라우트 3개가 404(RetakeDisabled)이고 ⑦ 화면에 버튼이 없으며
+# 기록을 쓰지 않는다. 진행 중 다시 만들기는 끝까지 하고, 저장된 기록·버전·결과 영상은 지우지 않는다. 템플릿·base 에 배선한다(운영 overlay false).
+VNEW_EDIT_RETAKE = _bool("VNEW_EDIT_RETAKE", True)
+# 새 프롬프트 만들기 LLM(코드 기본, 템플릿에 넣지 않는다). 빈 값이면 분석 모델(ANALYZE_FALLBACK_MODEL — 이미지를 읽는 상위 Claude 체인).
+VNEW_RETAKE_MODEL = os.getenv("VNEW_RETAKE_MODEL", "").strip() or ANALYZE_FALLBACK_MODEL
 
 # 캐릭터 충실도(char-fidelity, 2026-10-30). 켜면 분석이 기준 사진 한 장의 옷을 그대로 기본 복장으로 쓰고, 한쪽 소품의 좌우를
 # 화면 기준으로 받아 코드가 캐릭터 좌우로 바꾼다. 시트는 화면 왼쪽으로 45°씩 도는 다섯 인물로 그리고, 정면·후면·시트를 검사한다.

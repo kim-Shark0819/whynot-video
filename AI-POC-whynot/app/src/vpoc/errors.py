@@ -103,6 +103,19 @@ USER_FACING_KINDS = {
     "ExportRunning",
     "MediaNotFound",
     "BodyTooLarge",
+    # 지시서 116(2026-11-02): ⑦ AI로 고치기 거절 문구. 던지는 곳(vnew/retake.py · vnew/generate.py resubmit_cell)이 모두 고정 한국어 문구이고,
+    # 문구에 들어가는 값은 서버 값뿐이다(글자 수 상한·바이트 수·정규식으로 뽑은 참고 표시·항목 이름, 사용자 글·키·URL 없음).
+    # NoConfirmUsd·FalKeyMissing·MediaNotFound 는 이미 있다. CostMismatch 는 넣지 않는다(화면 금액이 문구에 들어간다 — 기존 규칙).
+    "RetakeDisabled",
+    "RetakeNotTarget",
+    "RetakeNoPrompt",
+    "RetakeBadRequest",
+    "RetakeDrafting",
+    "RetakeRunning",
+    "RetakeNoDraft",
+    "RetakePromptInvalid",
+    "RetakeLimit",
+    "RetakeGenChanged",
 }
 
 

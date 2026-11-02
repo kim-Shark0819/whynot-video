@@ -8253,7 +8253,9 @@
       probeTimer: 0,
       urlRetryAt: 0,
       drag: null,
-      notice: ""
+      notice: "",
+      fix: null, // 지시서 116: 열린 [AI로 고치기] 패널(editFixOpen). 닫으면 null
+      retakeOn: false // GET /edit 의 retake.enabled(VNEW_EDIT_RETAKE). false 면 AI로 고치기 버튼이 없다
     };
     ctx.onKey = function (event) {
       editOnKey(ctx, event);
@@ -8296,6 +8298,7 @@
     if (!ctx) return;
     editCtx = null;
     ctx.alive = false;
+    editFixStop(ctx); // 지시서 116: AI로 고치기 패널 조회 타이머·영상
     editPause(ctx);
     editCancelRaf(ctx.zoomRaf);
     ctx.zoomRaf = 0;
@@ -8378,6 +8381,7 @@
     ctx.saved = view.saved === true;
     ctx.defaults[variant] = editCloneClips(view.defaultClips);
     ctx.limits = view.limits || {};
+    ctx.retakeOn = !!(view.retake && view.retake.enabled === true); // 지시서 116
     ctx.invalidIds = {};
     (Array.isArray(view.invalidClips) ? view.invalidClips : []).forEach(function (item) {
       if (item && item.id) ctx.invalidIds[String(item.id)] = String(item.reason || "notAllowed");
@@ -8520,6 +8524,7 @@
 
   function editBuild(ctx) {
     var root = ctx.root;
+    editFixClose(ctx); // 지시서 116: 다시 그리면 열린 AI로 고치기 패널을 닫는다
     clear(root);
     var d = (ctx.dom = {});
     ctx.clipEls = [];
@@ -8834,6 +8839,7 @@
     d.exportBtn.disabled = ctx.exporting || !ctx.clips.length;
     editRenderRetime(ctx, false);
     editRenderPlayButton(ctx);
+    editFixRenderSel(ctx); // 지시서 116: [고른 클립 AI로 고치기] disabled·title 만(노드를 만들지 않는다)
   }
 
   /* ---- 타임라인 그리기 ---- */
@@ -9514,6 +9520,11 @@
       else document.removeEventListener("keydown", ctx.onKey);
       return;
     }
+    if (ctx.fix && ctx.fix.open) {
+      // 지시서 116: AI로 고치기 패널이 열린 동안 ⑦ 단축키는 쓰지 않는다(Esc 는 패널 닫기).
+      if (event && event.key === "Escape") editFixClose(ctx);
+      return;
+    }
     if (!event || event.defaultPrevented || event.altKey) return;
     var target = event.target || {};
     var tag = String(target.tagName || "").toLowerCase();
@@ -9749,6 +9760,7 @@
     var head = el("div", "vnew-edit-bin-head");
     head.appendChild(el("span", "vnew-edit-bin-title", "재료"));
     head.appendChild(el("span", "vnew-hint", "누르면 재생헤드가 있는 클립 뒤에 넣습니다."));
+    if (editFixOn(ctx)) head.appendChild(editFixSelButton(ctx)); // 지시서 116
     bin.appendChild(head);
     var row = el("div", "vnew-edit-bin-list");
     list.forEach(function (item) {
@@ -9760,6 +9772,15 @@
       btn.addEventListener("click", function () {
         editInsertMaterial(ctx, item.sourceKey, btn);
       });
+      // 지시서 116: 고칠 수 있는 테이크·컷이면 재료 버튼 옆에 [AI로 고치기](재료 버튼은 그대로, 둘을 한 묶음으로)
+      var fix = editFixOn(ctx) ? editFixBinButton(ctx, item, mat) : null;
+      if (fix) {
+        var cell = el("span", "vnew-edit-bin-cell");
+        cell.appendChild(btn);
+        cell.appendChild(fix);
+        row.appendChild(cell);
+        return;
+      }
       row.appendChild(btn);
     });
     bin.appendChild(row);
@@ -9982,6 +10003,675 @@
         });
       box.appendChild(details);
     }
+  }
+
+  /* ---------------------------------------------------------------- ⑦ AI로 고치기(지시서 116)
+
+     재료(테이크·컷) 하나를 이전 프롬프트 + 결과 영상 + 사용자 수정 요청으로 고쳐 같은 모델로 새 버전(v2…)을 만든다. 서버
+     /api/vnew/p/<pid>/edit/retake/<mid>(retake.py). 켬(GET /edit 의 retake.enabled)일 때만 재료 줄에 [AI로 고치기]·머리 줄에
+     [고른 클립 AI로 고치기]가 생긴다. 패널은 ⑦ 루트 안 고정 위치 대화상자이고, 처음 열 때 뼈대(영상·입력칸)를 한 번 만든 뒤 조회 때
+     바뀌는 칸만 다시 그린다(입력 중인 글·재생이 끊기지 않게). 새 프롬프트 만들기·다시 만들기는 202 + 조회(초안 2초·버전 5초).
+     [바꾸기]는 실행 취소 한 단계(editCommit)이고 v1 [바꾸기]가 되돌리기다. 패널이 열린 동안 ⑦ 단축키는 쓰지 않는다(Esc 는 닫기).
+     글은 모두 textContent·value. 검사는 check_vpoc rtk-j. */
+
+  var EDIT_FIX_DRAFT_POLL_MS = 2000; // 새 프롬프트 만드는 중 다시 읽기
+  var EDIT_FIX_RUN_POLL_MS = 5000; // 다시 만드는 중 다시 읽기(서버 조회 간격과 같다)
+  var EDIT_FIX_SOURCE = {
+    log: "기록",
+    reconstructed: "재구성 — 기록이 없던 영상이라 칸 상태의 마지막 프롬프트를 보입니다",
+    retake: "AI로 고친 버전의 프롬프트"
+  };
+  var EDIT_FIX_STATUS = {
+    queued: "대기 중",
+    preparing: "준비 중",
+    submitted: "만드는 중",
+    completed: "완성",
+    failed: "실패",
+    running: "만드는 중",
+    done: "완성"
+  };
+
+  /* ---- 순수 함수(DOM 없음) ---- */
+
+  /* UTF-8 바이트 수(서버 상한과 같은 단위). */
+  function editFixBytes(text) {
+    var s = String(text || "");
+    var n = 0;
+    for (var i = 0; i < s.length; i++) {
+      var c = s.charCodeAt(i);
+      if (c < 0x80) n += 1;
+      else if (c < 0x800) n += 2;
+      else if (c >= 0xd800 && c <= 0xdbff && i + 1 < s.length) {
+        n += 4;
+        i += 1;
+      } else n += 3;
+    }
+    return n;
+  }
+
+  /* 1234567 → "1,234,567"(바이트 계기·문구). */
+  function editFixComma(n) {
+    return String(Math.round(Number(n) || 0)).replace(/\B(?=(\d{3})+(?!\d))/g, ",");
+  }
+
+  function editFixMoney(usd) {
+    return "$" + (Number(usd) || 0).toFixed(2);
+  }
+
+  /* 버전 이름(v1 원본·v2…)과 조사(로·를 — 원본은 받침이 있어 으로·을). */
+  function editFixVerName(version) {
+    var v = version || {};
+    return v.original ? "v1 원본" : "v" + (v.n || "?");
+  }
+
+  function editFixVerTo(version) {
+    return editFixVerName(version) + ((version || {}).original ? "으로" : "로");
+  }
+
+  function editFixVerObj(version) {
+    return editFixVerName(version) + ((version || {}).original ? "을" : "를");
+  }
+
+  /* 버전 하나의 진행 줄 글. */
+  function editFixStatusText(version) {
+    var v = version || {};
+    var name = editFixVerName(v);
+    if (v.status === "failed") return name + " 실패 — " + (v.error || "다시 만들지 못했습니다.");
+    if (v.status === "completed") return name + " 완성 — [바꾸기]·[재료에 추가]로 타임라인에 쓸 수 있습니다.";
+    return name + " " + (EDIT_FIX_STATUS[v.status] || v.status || "") + (Number(v.attempt) > 1 ? " (" + v.attempt + "번째 시도)" : "") + "…";
+  }
+
+  /* 이전 시도 한 줄 머리(출처·시각·모델·상태·참고 수). */
+  function editFixAttemptMeta(attempt) {
+    var a = attempt || {};
+    var parts = [];
+    if (a.source === "retake") parts.push("v" + (a.version || "?") + " 다시 만들기" + (Number(a.attempt) > 1 ? " · " + a.attempt + "번째 시도" : ""));
+    else if (a.source === "reconstructed") parts.push("재구성(기록 없음)");
+    else parts.push((a.run ? "실사 " + a.run + "회차" : "⑤ 영상") + (a.attempt ? " · " + a.attempt + "번째 시도" : ""));
+    if (a.at) parts.push(String(a.at).replace("T", " ").replace("Z", ""));
+    if (a.model) parts.push(String(a.model));
+    if (a.status) parts.push(EDIT_FIX_STATUS[a.status] || String(a.status));
+    parts.push(a.refCount === null || a.refCount === undefined ? "참고 이미지 기록 없음" : "참고 이미지 " + a.refCount + "장");
+    if (a.truncated) parts.push("8KB 에서 잘림");
+    return parts.join(" · ");
+  }
+
+  /* 다음 다시 만들기 번호: 마지막 버전이 실패면 그 번호(같은 번호로 다시), 아니면 가장 큰 번호 + 1. */
+  function editFixNextN(view) {
+    var list = ((view || {}).versions || []).filter(function (v) {
+      return v && !v.original;
+    });
+    var last = list[list.length - 1];
+    if (last && last.status === "failed") return Number(last.n) || 2;
+    var top = 1;
+    list.forEach(function (v) {
+      if (Number(v.n) > top) top = Number(v.n);
+    });
+    return top + 1;
+  }
+
+  /* 타임라인 클립 원본을 같은 칸의 다른 버전(newKey)으로 바꾼다. 대상 = 원본이 keys(그 칸의 버전 원본들)에 든 클립, ids 가 있으면 그 중
+     그 클립만. in/out 은 새 길이(duration) 안으로 줄이고(속도 반영 최소 길이), 속도·소리 끔·id 는 그대로, 이름은 비었거나 oldLabels 에 든
+     이름(재료 이름)일 때만 newLabel. 이미 newKey 인 클립은 그대로. 반환 {clips, changed, skipped}(skipped = 길이 안에 못 넣은 클립). */
+  function editSwapSource(clips, ids, keys, newKey, duration, minLen, newLabel, oldLabels) {
+    var keySet = {};
+    (keys || []).forEach(function (k) {
+      if (k) keySet[k] = true;
+    });
+    var idSet = null;
+    if (ids && ids.length) {
+      idSet = {};
+      ids.forEach(function (id) {
+        idSet[id] = true;
+      });
+    }
+    var dur = Number(duration) || 0;
+    var changed = 0;
+    var skipped = 0;
+    var out = editCloneClips(clips).map(function (clip) {
+      if (!keySet[clip.sourceKey] || (idSet && !idSet[clip.id]) || clip.sourceKey === newKey) return clip;
+      var min = editMinSource(minLen, editSpeedOf(clip));
+      var end = Math.min(Number(clip.out), dur);
+      var start = Math.min(Number(clip.in), Math.max(0, end - min));
+      if (!(dur > 0) || end - start < min - 1e-9) {
+        skipped += 1;
+        return clip;
+      }
+      var next = editCloneClip(clip);
+      next.sourceKey = newKey;
+      next.in = editRound3(start);
+      next.out = editRound3(end);
+      if (newLabel && (!clip.label || (oldLabels || []).indexOf(clip.label) >= 0)) next.label = String(newLabel).slice(0, 40);
+      changed += 1;
+      return next;
+    });
+    return { clips: out, changed: changed, skipped: skipped };
+  }
+
+  /* ---- 재료 줄 · 머리 줄 버튼 ---- */
+
+  function editFixOn(ctx) {
+    return !!ctx && ctx.retakeOn === true;
+  }
+
+  /* 고른 클립의 재료(AI로 고칠 수 있을 때만). */
+  function editFixSelMat(ctx) {
+    var clip = editSelected(ctx);
+    if (!clip) return null;
+    var mat = ctx.materials[clip.sourceKey];
+    return mat && mat.retake && mat.retake.can === true ? mat : null;
+  }
+
+  /* [고른 클립 AI로 고치기]: disabled·title 만 바꾼다(editRenderTools 가 부른다 — 노드를 만들지 않는다). */
+  function editFixRenderSel(ctx) {
+    var btn = ctx.dom.fixSel;
+    if (!btn) return;
+    var mat = editFixSelMat(ctx);
+    btn.disabled = !mat || ctx.busy;
+    btn.title = mat ? "고른 클립(" + (mat.label || "영상") + ")을 AI로 고칩니다" : "타임라인에서 AI로 고칠 수 있는 테이크·컷 클립을 고르세요";
+    btn.setAttribute("aria-label", btn.title);
+  }
+
+  function editFixSelButton(ctx) {
+    var btn = el("button", "outline-button vnew-edit-fix-sel", "고른 클립 AI로 고치기");
+    btn.type = "button";
+    btn.addEventListener("click", function () {
+      var mat = editFixSelMat(ctx);
+      var clip = editSelected(ctx);
+      if (mat && clip) editFixOpen(ctx, String(mat.mid || ""), clip.id);
+    });
+    ctx.dom.fixSel = btn;
+    editFixRenderSel(ctx);
+    return btn;
+  }
+
+  /* 재료 하나의 [AI로 고치기]. 합친 영상·옛 구간·지난 실사 회차(서버 retake.n 없음)는 버튼이 없고, 기록이 없으면 흐림 + 이유. */
+  function editFixBinButton(ctx, item, mat) {
+    var info = (mat || {}).retake;
+    if (!info || !info.n) return null;
+    var name = mat.label || "영상";
+    var btn = el("button", "outline-button vnew-edit-fix-open", "AI로 고치기");
+    btn.type = "button";
+    btn.disabled = info.can !== true;
+    btn.title = info.can === true ? name + " — AI로 고쳐 새 버전 만들기" + (info.running ? " (지금 다시 만드는 중)" : "") : info.reason || "AI로 고칠 수 없습니다";
+    btn.setAttribute("aria-label", "AI로 고치기 — " + name);
+    btn.addEventListener("click", function () {
+      editFixOpen(ctx, String(mat.mid || item.mid || ""), "");
+    });
+    return btn;
+  }
+
+  /* ---- 패널 ---- */
+
+  function editFixPath(ctx, fix) {
+    return editPath(ctx) + "/retake/" + encodeURIComponent(fix.mid);
+  }
+
+  /* 이 패널이 아직 보이는가(⑦ 이 살아 있고 이 패널이 열려 있고 ⑦ 루트에 붙어 있다 — 다시 그리면 떨어져 조회가 멈춘다). */
+  function editFixAlive(ctx, fix) {
+    return editAlive(ctx) && ctx.fix === fix && fix.open && !!fix.dom.root && fix.dom.root.parentNode === ctx.root;
+  }
+
+  function editFixNote(fix, message) {
+    var node = fix.dom.note;
+    if (!node) return;
+    node.textContent = message || "";
+    node.style.display = message ? "" : "none";
+  }
+
+  /* 조회 타이머·영상을 멈춘다(패널은 남긴다 — editLeave 가 부른다). */
+  function editFixStop(ctx) {
+    var fix = ctx && ctx.fix;
+    if (!fix) return;
+    fix.open = false;
+    if (fix.timer) window.clearTimeout(fix.timer);
+    fix.timer = 0;
+    var video = fix.dom.video;
+    if (video) {
+      try {
+        video.pause();
+        video.removeAttribute("src");
+        video.load();
+      } catch (error) {
+        /* 이미 떨어진 요소 */
+      }
+    }
+  }
+
+  function editFixClose(ctx) {
+    var fix = ctx && ctx.fix;
+    if (!fix) return;
+    editFixStop(ctx);
+    if (fix.dom.root && fix.dom.root.parentNode) fix.dom.root.parentNode.removeChild(fix.dom.root);
+    ctx.fix = null;
+  }
+
+  function editFixOpen(ctx, mid, clipId) {
+    if (!editAlive(ctx) || ctx.busy || !mid) return;
+    editPause(ctx);
+    editFixClose(ctx);
+    var fix = { mid: mid, clipId: clipId || "", view: null, timer: 0, busy: false, draftShown: "", refreshing: false, open: true, dom: {} };
+    ctx.fix = fix;
+    editFixBuild(ctx, fix);
+    editFixNote(fix, "불러오는 중…");
+    editFixLoad(ctx, fix);
+  }
+
+  function editFixLabeled(text, field) {
+    var label = el("label", "vnew-edit-fix-field");
+    label.appendChild(el("span", "vnew-edit-fix-label", text));
+    label.appendChild(field);
+    return label;
+  }
+
+  /* 뼈대를 한 번 만든다(머리·안내·영상·버전·이전 프롬프트·입력·초안·진행 줄). 바뀌는 칸은 editFixPaint 가 채운다. */
+  function editFixBuild(ctx, fix) {
+    var d = fix.dom;
+    d.root = el("div", "vnew-edit-fix");
+    d.root.setAttribute("role", "dialog");
+    d.root.setAttribute("aria-modal", "true");
+    d.root.setAttribute("aria-label", "AI로 고치기");
+    var box = el("div", "vnew-edit-fix-box");
+    var head = el("div", "vnew-edit-fix-head");
+    d.title = el("h3", "vnew-edit-fix-title", "AI로 고치기");
+    head.appendChild(d.title);
+    var close = el("button", "vnew-edit-fix-close", "×");
+    close.type = "button";
+    close.title = "닫기 (Esc)";
+    close.setAttribute("aria-label", close.title);
+    close.addEventListener("click", function () {
+      editFixClose(ctx);
+    });
+    head.appendChild(close);
+    box.appendChild(head);
+    d.note = el("p", "vnew-hint vnew-edit-fix-note", "");
+    box.appendChild(d.note);
+    d.reload = el("button", "outline-button vnew-edit-fix-reload", "다시 불러오기");
+    d.reload.type = "button";
+    d.reload.style.display = "none";
+    d.reload.addEventListener("click", function () {
+      d.reload.style.display = "none";
+      editFixNote(fix, "불러오는 중…");
+      editFixLoad(ctx, fix);
+    });
+    box.appendChild(d.reload);
+
+    var body = el("div", "vnew-edit-fix-body");
+    var left = el("div", "vnew-edit-fix-col");
+    d.video = el("video", "vnew-edit-fix-video");
+    d.video.controls = true;
+    d.video.preload = "metadata";
+    d.video.setAttribute("playsinline", "");
+    left.appendChild(d.video);
+    left.appendChild(el("h4", "vnew-edit-fix-label", "버전"));
+    d.versions = el("div", "vnew-edit-fix-versions");
+    left.appendChild(d.versions);
+    body.appendChild(left);
+
+    var right = el("div", "vnew-edit-fix-col");
+    right.appendChild(el("h4", "vnew-edit-fix-label", "이전 프롬프트"));
+    d.prev = el("div", "vnew-edit-fix-prev");
+    right.appendChild(d.prev);
+    d.request = el("textarea", "vnew-edit-fix-input");
+    d.request.rows = 3;
+    d.request.setAttribute("maxlength", "500");
+    d.request.setAttribute("placeholder", "예: 2초쯤 남자가 웃지 않게, 손은 주머니에 넣은 채로");
+    right.appendChild(editFixLabeled("수정 사항(필수, 500자)", d.request));
+    d.extra = el("textarea", "vnew-edit-fix-input");
+    d.extra.rows = 2;
+    d.extra.setAttribute("maxlength", "500");
+    d.extra.setAttribute("placeholder", "예: 창밖 빛을 조금 더 따뜻하게");
+    right.appendChild(editFixLabeled("추가 프롬프트(선택, 500자)", d.extra));
+    d.make = el("button", "primary-button vnew-edit-fix-make", "새 프롬프트 만들기");
+    d.make.type = "button";
+    d.make.title = "이전 프롬프트·결과 영상 프레임·수정 사항으로 AI가 새 프롬프트를 씁니다(아직 다시 만들지 않습니다)";
+    d.make.addEventListener("click", function () {
+      editFixPreview(ctx, fix);
+    });
+    right.appendChild(d.make);
+
+    d.draft = el("div", "vnew-edit-fix-draft");
+    d.draft.style.display = "none";
+    d.draftStatus = el("p", "vnew-edit-fix-status", "");
+    d.result = el("p", "vnew-edit-fix-result", "");
+    d.changes = el("ul", "vnew-edit-fix-changes");
+    d.newPrompt = el("textarea", "vnew-edit-fix-input vnew-edit-fix-new");
+    d.newPrompt.rows = 10;
+    d.newPrompt.addEventListener("input", function () {
+      editFixMeter(fix);
+    });
+    d.meter = el("span", "vnew-edit-fix-meter", "");
+    d.problems = el("ul", "vnew-edit-fix-problems");
+    d.cost = el("p", "vnew-edit-fix-cost", "");
+    d.submit = el("button", "primary-button vnew-edit-fix-submit", "다시 만들기");
+    d.submit.type = "button";
+    d.submit.addEventListener("click", function () {
+      editFixSubmit(ctx, fix);
+    });
+    d.newField = editFixLabeled("새 프롬프트(제출 전에 고칠 수 있습니다)", d.newPrompt);
+    [d.draftStatus, d.result, d.changes, d.newField, d.meter, d.problems, d.cost, d.submit].forEach(function (node) {
+      d.draft.appendChild(node);
+    });
+    right.appendChild(d.draft);
+    d.run = el("p", "vnew-edit-fix-status vnew-edit-fix-run", "");
+    d.run.style.display = "none";
+    right.appendChild(d.run);
+    body.appendChild(right);
+    box.appendChild(body);
+    d.root.appendChild(box);
+    ctx.root.appendChild(d.root);
+  }
+
+  function editFixLoad(ctx, fix) {
+    api(editFixPath(ctx, fix))
+      .then(function (view) {
+        if (!editFixAlive(ctx, fix)) return;
+        editFixApply(ctx, fix, view || {});
+      })
+      .catch(function (err) {
+        if (!editFixAlive(ctx, fix)) return;
+        editFixNote(fix, "불러오지 못했습니다: " + errMessage(err));
+        fix.dom.reload.style.display = "";
+      });
+  }
+
+  function editFixApply(ctx, fix, view) {
+    var before = fix.view;
+    fix.view = view;
+    editFixPaint(ctx, fix, before);
+    editFixSchedule(ctx, fix);
+  }
+
+  /* 초안 running 이면 2초, 버전 진행 중이면 5초 뒤 다시 GET(실패면 같은 간격으로 다시 건다). 둘 다 아니면 멈춘다. */
+  function editFixSchedule(ctx, fix) {
+    if (fix.timer) window.clearTimeout(fix.timer);
+    fix.timer = 0;
+    var v = fix.view || {};
+    var ms = v.draft && v.draft.status === "running" ? EDIT_FIX_DRAFT_POLL_MS : v.live ? EDIT_FIX_RUN_POLL_MS : 0;
+    if (!ms) return;
+    fix.timer = window.setTimeout(function () {
+      fix.timer = 0;
+      if (!editFixAlive(ctx, fix)) return;
+      api(editFixPath(ctx, fix))
+        .then(function (view) {
+          if (editFixAlive(ctx, fix)) editFixApply(ctx, fix, view || {});
+        })
+        .catch(function () {
+          if (editFixAlive(ctx, fix)) editFixSchedule(ctx, fix);
+        });
+    }, ms);
+  }
+
+  /* 새 버전이 재료 목록에 아직 없으면 GET /edit?variant= 로 재료만 다시 받는다(편집 문서·실행 취소는 그대로). 완성된 버전을 그릴 때
+     editFixPaintVersions 가 부른다(한 번에 하나). */
+  function editFixRefreshMaterials(ctx, fix) {
+    if (fix.refreshing) return;
+    fix.refreshing = true;
+    api(editPath(ctx) + "?variant=" + encodeURIComponent(ctx.variant))
+      .then(function (view) {
+        fix.refreshing = false;
+        if (!editAlive(ctx)) return;
+        if (view && Array.isArray(view.materials)) {
+          editAbsorbMaterials(ctx, view);
+          ctx.retakeOn = !!(view.retake && view.retake.enabled === true);
+          editRenderBin(ctx);
+        }
+        if (editFixAlive(ctx, fix)) editFixPaintVersions(ctx, fix);
+      })
+      .catch(function () {
+        fix.refreshing = false;
+      });
+  }
+
+  function editFixPaint(ctx, fix, before) {
+    var v = fix.view || {};
+    var d = fix.dom;
+    d.title.textContent = "AI로 고치기 — " + (v.label || "영상");
+    if (!before && v.videoUrl) d.video.src = String(v.videoUrl);
+    editFixNote(fix, v.canRetake === false ? v.block || "이 칸은 AI로 고칠 수 없습니다." : "");
+    editFixPaintVersions(ctx, fix);
+    editFixPaintPrev(fix);
+    editFixPaintDraft(fix);
+    editFixPaintRun(fix);
+    var drafting = !!(v.draft && v.draft.status === "running");
+    d.make.disabled = v.canRetake !== true || fix.busy || drafting;
+    d.make.textContent = drafting ? "새 프롬프트를 만드는 중…" : v.draft ? "새 프롬프트 다시 만들기" : "새 프롬프트 만들기";
+    d.request.disabled = v.canRetake !== true;
+    d.extra.disabled = v.canRetake !== true;
+  }
+
+  function editFixPaintPrev(fix) {
+    var v = fix.view || {};
+    var d = fix.dom;
+    clear(d.prev);
+    var base = v.base;
+    d.prev.appendChild(el("span", "vnew-edit-fix-src", base ? EDIT_FIX_SOURCE[base.source] || String(base.source || "") : "기록 없음"));
+    d.prev.appendChild(el("pre", "vnew-edit-fix-prompt", base ? String(base.prompt || "") : "이 칸은 프롬프트 기록이 없습니다."));
+    var attempts = Array.isArray(v.attempts) ? v.attempts : [];
+    if (!attempts.length) return;
+    var details = el("details", "vnew-edit-fix-attempts");
+    details.appendChild(el("summary", null, "이전 시도 (" + attempts.length + ")"));
+    attempts.forEach(function (a) {
+      var item = el("div", "vnew-edit-fix-attempt");
+      item.appendChild(el("span", "vnew-edit-fix-meta", editFixAttemptMeta(a)));
+      item.appendChild(el("pre", "vnew-edit-fix-prompt", String(a.prompt || "")));
+      details.appendChild(item);
+    });
+    d.prev.appendChild(details);
+  }
+
+  function editFixPaintVersions(ctx, fix) {
+    var v = fix.view || {};
+    var d = fix.dom;
+    clear(d.versions);
+    (Array.isArray(v.versions) ? v.versions : []).forEach(function (ver) {
+      var row = el("div", "vnew-edit-fix-version" + (ver.n === v.n ? " is-current" : ""));
+      row.appendChild(el("span", "vnew-edit-fix-version-name", editFixVerName(ver) + " · " + (EDIT_FIX_STATUS[ver.status] || ver.status || "없음")));
+      if (ver.status === "completed" && ver.sourceKey) {
+        var known = !!ctx.materials[ver.sourceKey];
+        var swap = el("button", "outline-button vnew-edit-fix-swap", "바꾸기");
+        swap.type = "button";
+        swap.disabled = !known;
+        swap.title = (fix.clipId ? "고른 클립" : "타임라인에서 이 칸의 클립") + "을 " + editFixVerTo(ver) + " 바꿉니다(구간·속도는 길이 안에서 유지)";
+        swap.addEventListener("click", function () {
+          editFixSwap(ctx, fix, ver, swap);
+        });
+        var add = el("button", "outline-button vnew-edit-fix-add", "재료에 추가");
+        add.type = "button";
+        add.disabled = !known;
+        add.title = editFixVerObj(ver) + " 재생헤드가 있는 클립 뒤에 넣습니다";
+        add.addEventListener("click", function () {
+          if (ctx.materials[ver.sourceKey]) editInsertMaterial(ctx, ver.sourceKey, add);
+        });
+        row.appendChild(swap);
+        row.appendChild(add);
+        if (!known) editFixRefreshMaterials(ctx, fix);
+      } else if (ver.status === "failed" && ver.error) {
+        row.appendChild(el("span", "vnew-edit-fix-error", ver.error));
+      }
+      d.versions.appendChild(row);
+    });
+  }
+
+  function editFixPaintDraft(fix) {
+    var v = fix.view || {};
+    var d = fix.dom;
+    var dr = v.draft;
+    if (!dr) {
+      d.draft.style.display = "none";
+      return;
+    }
+    d.draft.style.display = "";
+    var done = dr.status === "done";
+    [d.result, d.changes, d.newField, d.meter, d.problems, d.cost, d.submit].forEach(function (node) {
+      node.style.display = done ? "" : "none";
+    });
+    if (dr.status === "running") {
+      d.draftStatus.textContent = "새 프롬프트를 만드는 중… (결과 영상 프레임과 이전 프롬프트를 보고 고칩니다)";
+      return;
+    }
+    if (!done) {
+      d.draftStatus.textContent = "실패 — " + (dr.error || "새 프롬프트를 만들지 못했습니다.");
+      return;
+    }
+    d.draftStatus.textContent = "새 프롬프트 — v" + (dr.baseN || 1) + "에서 고침 · " +
+      (Number(dr.framesUsed) > 0 ? "결과 프레임 " + dr.framesUsed + "장을 봤습니다" : "결과 프레임을 읽지 못해 이전 프롬프트·콘티만 봤습니다");
+    d.result.textContent = dr.resultKo ? "지금 결과: " + dr.resultKo : "";
+    clear(d.changes);
+    (Array.isArray(dr.changesKo) ? dr.changesKo : []).forEach(function (text) {
+      d.changes.appendChild(el("li", null, String(text)));
+    });
+    if (fix.draftShown !== dr.id) {
+      d.newPrompt.value = String(dr.prompt || "");
+      fix.draftShown = dr.id;
+    }
+    var est = v.estimate || {};
+    d.cost.textContent = "예상 비용 " + editFixMoney(est.usd) + " — 같은 모델(" + (est.model || "") + ")·같은 길이 " + (Number(est.seconds) || 0) + "초" +
+      (est.resolution ? " · " + est.resolution : "") + ". 원래 결과는 그대로 남습니다.";
+    editFixMeter(fix);
+  }
+
+  /* 바이트 계기·문제 목록·제출 버튼. 초안 그대로면 서버 문제 목록, 고쳤으면 길이만 미리 보고 나머지는 제출 때 서버가 다시 검사한다. */
+  function editFixMeter(fix) {
+    var v = fix.view || {};
+    var d = fix.dom;
+    var dr = v.draft || {};
+    var max = Number((v.limits || {}).promptMaxBytes) || 0;
+    var text = String(d.newPrompt.value || "");
+    var bytes = editFixBytes(text);
+    var over = max > 0 && bytes > max;
+    d.meter.textContent = editFixComma(bytes) + " / " + editFixComma(max) + "바이트";
+    d.meter.className = "vnew-edit-fix-meter" + (over ? " is-over" : "");
+    clear(d.problems);
+    var edited = text !== String(dr.prompt || "");
+    var list = edited ? (over ? ["새 프롬프트가 " + editFixComma(bytes) + "바이트입니다. " + editFixComma(max) + "바이트 안으로 줄여 주세요."] : []) :
+      (Array.isArray(dr.problems) ? dr.problems : []);
+    list.forEach(function (problem) {
+      d.problems.appendChild(el("li", null, String(problem)));
+    });
+    if (edited) d.problems.appendChild(el("li", "vnew-edit-fix-edited", "직접 고친 프롬프트는 제출할 때 서버가 참고 표시·항목·길이를 다시 검사합니다."));
+    var est = v.estimate || {};
+    d.submit.textContent = (editFixNextN(v) === Number(((v.versions || []).slice(-1)[0] || {}).n) ? "다시 시도" : "다시 만들기") +
+      " (" + editFixMoney(est.usd) + ")";
+    d.submit.disabled = fix.busy || !!v.live || dr.status !== "done" || !text.trim() || over;
+  }
+
+  function editFixPaintRun(fix) {
+    var v = fix.view || {};
+    var d = fix.dom;
+    var list = (Array.isArray(v.versions) ? v.versions : []).filter(function (x) {
+      return x && !x.original;
+    });
+    var target = v.live ? list.filter(function (x) {
+      return x.n === v.live.n;
+    })[0] || v.live : list[list.length - 1];
+    if (!target) {
+      d.run.style.display = "none";
+      return;
+    }
+    d.run.style.display = "";
+    d.run.className = "vnew-edit-fix-status vnew-edit-fix-run is-" + String(target.status || "");
+    d.run.textContent = editFixStatusText(target);
+  }
+
+  function editFixPreview(ctx, fix) {
+    if (!editFixAlive(ctx, fix) || fix.busy) return;
+    var d = fix.dom;
+    var request = String(d.request.value || "").trim();
+    if (!request) {
+      editFixNote(fix, "수정 사항을 적어 주세요.");
+      return;
+    }
+    fix.busy = true;
+    d.make.disabled = true;
+    editFixNote(fix, "");
+    api(editFixPath(ctx, fix) + "/preview", { method: "POST", body: JSON.stringify({ requestKo: request, extraKo: String(d.extra.value || "").trim() }) })
+      .then(function (res) {
+        fix.busy = false;
+        if (editFixAlive(ctx, fix)) editFixApply(ctx, fix, (res && res.retake) || fix.view || {});
+      })
+      .catch(function (err) {
+        fix.busy = false;
+        if (!editFixAlive(ctx, fix)) return;
+        editFixPaint(ctx, fix, fix.view);
+        editFixNote(fix, "새 프롬프트를 만들지 못했습니다: " + errMessage(err));
+      });
+  }
+
+  function editFixSubmit(ctx, fix) {
+    if (!editFixAlive(ctx, fix) || fix.busy) return;
+    var v = fix.view || {};
+    var dr = v.draft || {};
+    var est = v.estimate || {};
+    var prompt = String(fix.dom.newPrompt.value || "").trim();
+    if (dr.status !== "done" || !prompt) return;
+    var next = editFixNextN(v);
+    if (!editConfirm("v" + next + "를 같은 모델(" + (est.model || "") + ")·같은 길이로 다시 만듭니다. 예상 비용 " + editFixMoney(est.usd) +
+      ". 원래 결과는 그대로 남습니다.")) return;
+    fix.busy = true;
+    fix.dom.submit.disabled = true;
+    editFixNote(fix, "");
+    api(editFixPath(ctx, fix), {
+      method: "POST",
+      body: JSON.stringify({ prompt: prompt, requestKo: String(dr.requestKo || ""), extraKo: String(dr.extraKo || ""), confirmUsd: Number(est.usd) || 0, draftId: String(dr.id || "") })
+    })
+      .then(function (res) {
+        fix.busy = false;
+        if (!editFixAlive(ctx, fix)) return;
+        editFixApply(ctx, fix, (res && res.retake) || v);
+        editFixNote(fix, "v" + next + "를 만들기 시작했습니다. 끝나면 [바꾸기]·[재료에 추가]가 생깁니다.");
+      })
+      .catch(function (err) {
+        fix.busy = false;
+        if (!editFixAlive(ctx, fix)) return;
+        editFixPaint(ctx, fix, fix.view);
+        editFixNote(fix, "다시 만들지 못했습니다: " + errMessage(err));
+      });
+  }
+
+  /* [바꾸기]: 그 칸의 클립(패널을 고른 클립에서 열었으면 그 클립만) 원본을 이 버전으로. 길이를 모르면 /media 로 먼저 잰다. */
+  function editFixSwap(ctx, fix, ver, button) {
+    if (!editAlive(ctx) || ctx.busy) return;
+    var mat = ctx.materials[ver.sourceKey];
+    if (!mat) return;
+    function apply() {
+      var v = fix.view || {};
+      var versions = Array.isArray(v.versions) ? v.versions : [];
+      var keys = versions.map(function (x) {
+        return x.sourceKey;
+      });
+      var labels = versions.map(function (x) {
+        return x.label;
+      });
+      var res = editSwapSource(ctx.clips, fix.clipId ? [fix.clipId] : null, keys, ver.sourceKey, Number(mat.duration), editMinLen(ctx),
+        mat.label || ver.label, labels);
+      if (!res.changed) {
+        editFixNote(fix, res.skipped ? "이 버전 길이 안에 들어가지 않는 클립이라 바꾸지 않았습니다." :
+          "타임라인에 바꿀 이 칸의 클립이 없습니다. [재료에 추가]로 넣어 주세요.");
+        return;
+      }
+      editCommit(ctx, res.clips, {});
+      editFixNote(fix, "타임라인 클립 " + res.changed + "개를 " + editFixVerTo(ver) + " 바꿨습니다." +
+        (res.skipped ? " 길이가 맞지 않는 " + res.skipped + "개는 그대로 두었습니다." : "") + " 다른 버전의 [바꾸기]로 되돌릴 수 있습니다.");
+    }
+    if (Number(mat.duration) > 0) {
+      apply();
+      return;
+    }
+    button.disabled = true;
+    editFixNote(fix, "영상 길이를 읽는 중…");
+    api(editPath(ctx) + "/media/" + encodeURIComponent(String(mat.mid || "")))
+      .then(function (data) {
+        button.disabled = false;
+        if (!editAlive(ctx)) return;
+        ctx.media[mat.mid] = { status: "done", data: data || {}, at: Date.now() };
+        editMediaFacts(ctx, mat.mid, data || {});
+        apply();
+      })
+      .catch(function (err) {
+        button.disabled = false;
+        if (editFixAlive(ctx, fix)) editFixNote(fix, "영상 길이를 읽지 못했습니다: " + errMessage(err));
+      });
   }
 
   /* ---------------------------------------------------------------- 전역 */
