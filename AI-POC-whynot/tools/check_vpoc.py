@@ -42333,6 +42333,7 @@ def check_vnew_edit_retake_models() -> None:
     (rtk-u) 로컬 ffmpeg: _pad_clip 실제 mp4 길이·임시 폴더 0
     (rtk-w) 보완 3: 바이트 초과 초안 → 같은 모델에 줄이기 1번(두 경로)·더 나음 판정·원장 -shrink 줄·shrunk·두 번째 예외는 처음 것·화면 안내
             보완 5: 2번째 줄이기 문구에 직전 초과분·낮춘 목표, 그래도 넘으면 _trim_to_limit(LLM 0)·보호 조각·로그 shrink_trim·상한 안이면 자르기 0
+            보완 9: 줄이기 호출 model = VNEW_RETAKE_SHRINK_MODEL(기본 opus-5-5)·초안 호출 = VNEW_RETAKE_MODEL·원장 model·하위 프로세스 설정 읽기
     (rtk-x) 보완 4: 최대 대기 Kling 75분·그 밖 30분, 시간 초과 버전(timedOut·옛 문구) → 패널 보기에서 조회 1번(60초 간격·24시간 안)·Completed 면
             completed, InProgress·Failed·예외 그대로, 새 제출 0, 화면 안내
     """
@@ -42581,13 +42582,34 @@ def check_vnew_edit_retake_models() -> None:
                                                                              "<current_draft>\n" + over_kl + "\n</current_draft>") if sc["blocks"] else None,
                              [s in sc["system"] for s in ("at most 2500 UTF-8 bytes (aim for about 2250)", "(@Element1, @Element2, @Image1, @Video1)",
                                                           " -> ".join(rt._labels(tmpl_kl)), "never use the word 'webtoon'")],  # noqa: SLF001
-                             sc.get("model") == genmod.vnew_settings.VNEW_RETAKE_MODEL,
+                             sc.get("model") == genmod.vnew_settings.VNEW_RETAKE_SHRINK_MODEL,
                              [e["key"] == "vnew-retake-" + str(d_w1.get("id")) + suffix for e, suffix in zip(led_w1, ("", "-shrink"))], len(led_w1),
                              [m for m in logs.messages("vnew.retake.draft_done", level=logging.INFO) if "shrunk=True" in m and "path=cut" in m] != [],
                              [m for m in logs.messages() if "Re-render this" in m]],
                    ["done", True, [], True, "첫 결과", ["첫 변경"], 2, 1, [], True, [True, True, True, False], True, [True, True], 2, True, []],
                    "모델 경로: 첫 초안 상한 초과 → 줄이기 1회(초안·상한만, 프레임 0, 시스템 = 상한·참고 표시·항목 순서) → 통과 결과·shrunk·"
                    "결과 설명은 첫 호출 것·원장 2줄(-shrink)·로그 shrunk=True·프롬프트 없음")
+            # 보완 9: 줄이기 호출만 VNEW_RETAKE_SHRINK_MODEL(기본 Opus 5.5), 초안 호출은 VNEW_RETAKE_MODEL 그대로, 원장은 호출이 돌려준 usage.model
+            vs_w = genmod.vnew_settings
+            expect("rtk-w", [[(c.get("model"), c.get("shrink")) for c in calls_w1], [e.get("model") for e in led_w1],
+                             vs_w.VNEW_RETAKE_SHRINK_MODEL == "global.anthropic.claude-opus-5-5" or bool(os.getenv("VNEW_RETAKE_SHRINK_MODEL", "").strip()),
+                             vs_w.VNEW_RETAKE_SHRINK_MODEL != vs_w.VNEW_RETAKE_MODEL],
+                   [[(vs_w.VNEW_RETAKE_MODEL, False), (vs_w.VNEW_RETAKE_SHRINK_MODEL, True)],
+                    [vs_w.VNEW_RETAKE_MODEL, vs_w.VNEW_RETAKE_SHRINK_MODEL], True, True],
+                   "보완 9: 초안 호출 model = VNEW_RETAKE_MODEL·줄이기 호출 model = VNEW_RETAKE_SHRINK_MODEL(기본 opus-5-5, 둘이 달라 가린다)·원장 줄 model 도 각각")
+            code_w9 = ("import importlib, json, os, sys; sys.path.insert(0, %r); from src.vnew import settings as s; out = [s.VNEW_RETAKE_SHRINK_MODEL]\n"
+                       "os.environ['VNEW_RETAKE_SHRINK_MODEL'] = '   '\n"
+                       "out.append(importlib.reload(s).VNEW_RETAKE_SHRINK_MODEL)\n"
+                       "os.environ['VNEW_RETAKE_SHRINK_MODEL'] = ' shrink-x '\n"
+                       "out.append(importlib.reload(s).VNEW_RETAKE_SHRINK_MODEL)\n"
+                       "print(json.dumps(out))\n") % (str(ROOT / "app"),)
+            env_w9 = {k: v for k, v in os.environ.items() if k != "VNEW_RETAKE_SHRINK_MODEL"}
+            env_w9["PYTHONIOENCODING"] = "utf-8"
+            env_w9["PYTHONDONTWRITEBYTECODE"] = "1"
+            res_w9 = subprocess.run([sys.executable, "-X", "utf8", "-c", code_w9], capture_output=True, text=True, env=env_w9, encoding="utf-8")
+            probe_w9 = json.loads(res_w9.stdout.strip().splitlines()[-1]) if res_w9.returncode == 0 else res_w9.stderr[-300:]
+            expect("rtk-w", probe_w9, ["global.anthropic.claude-opus-5-5", "global.anthropic.claude-opus-5-5", "shrink-x"],
+                   "보완 9: 하위 프로세스 VNEW_RETAKE_SHRINK_MODEL 읽기(없음·빈 값 → opus-5-5, 다른 값 → 그 값)")
             over_t = base_t + " " + "z" * 4100
             less_t = base_t + " " + "z" * 4050  # 보완 3b: 아직 초과지만 바이트만 줄어듦 → 씀(그다음 2번째는 같은 답 → 안 줄어 버림)
             d_w2, calls_w2, led_w2 = run_w(pid_t, mid_t, over_t, less_t, {"requestKo": "길게"})

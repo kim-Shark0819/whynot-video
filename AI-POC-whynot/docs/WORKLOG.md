@@ -2568,3 +2568,6 @@
 
 ### 116 보완 8 — 2번째 LLM 줄이기 전에는 항상 자르기부터 (2026-11-03, 116-fix8)
 - `retake.py` `_shrink_draft`: `SHRINK_TRIM_FIRST`(0.10) 조건은 1번째 LLM 줄이기 전에만 보고, 2번째부터는 초과 비율과 상관없이 자르기부터 한다(dev ci-04cb9e97: 1번째 결과 +10.4%라 자르기를 건너뛰고 LLM 2번째 62초, 전체 163초. 같은 모양은 자르기로 0.002초). 상수·도구·문구·모델 순서·출력 한도·`tried` 캐시·로그 모양은 그대로다. 검사: rtk-w 보완 8 꼴(+17% → LLM 1번 → +10.4% → 자르기로 상한 안, 줄이기 호출 1·shrunk·after=1). 보완 5 흐름 꼴의 `kl_y1`은 이제 자르기로 끝나므로 MOTION을 시간 표기 조각으로 채우고 다른 자르기 줄의 ;·,·괄호를 없애 자를 조각이 거의 없게 바꿨다(2번째 문구의 직전 초과분 검사 유지, 자르기 1 → 2·로그 2줄). 검토한 대안: `SHRINK_TRIM_FIRST`를 올리는 것(상수 변경 금지라 제외). 진단 중 전체 검사를 1회 더 돌렸다(예산 초과).
+
+### 116 보완 9 — 줄이기 호출은 Opus 먼저 (2026-11-03, 116-fix9)
+- `settings.py`에 `VNEW_RETAKE_SHRINK_MODEL`(코드 기본 `global.anthropic.claude-opus-5-5`, 빈 값이면 기본값, 템플릿·배포 설정에 넣지 않음)을 두고 `retake.py` `_shrink_draft`의 LLM 줄이기만 이 모델로 부른다(dev 실측: Fable 5.1 52~90초·8,000토큰에서 잘림 1회, 같은 일을 Opus 5.5는 8.6초·1,086토큰). 초안 호출은 `VNEW_RETAKE_MODEL`, 대체 순서는 `_model_chain`, 원장은 usage.model 그대로다. 검사: rtk-w 초안·줄이기 호출 model·원장 model, 하위 프로세스 설정 읽기(없음·빈 값·다른 값). 기존 기대값 rtk-w 보완 3 줄이기 호출 model `VNEW_RETAKE_MODEL` → `VNEW_RETAKE_SHRINK_MODEL`. 검토한 대안: `VNEW_RETAKE_MODEL` 자체를 Opus로(초안 판단 모델이 바뀌어 제외).

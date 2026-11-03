@@ -1366,6 +1366,7 @@ def _shrink_draft(owner: str, pid: str, gen_id: str, key: str, draft_id: str, cl
     해 본다 — 상한 안이고 _shrink_better 를 통과하면 LLM 없이 끝, 아니면 기존처럼 LLM 줄이기. 같은 글은 두 번 자르지 않는다.
     shrink_try·shrink_trim 로그에 ms(그 단계 시간)·shrink_trim 에 after(그때까지의 LLM 줄이기 수).
     보완 8: SHRINK_TRIM_FIRST 비율 조건은 1번째 LLM 줄이기 전에만 본다. 2번째부터는 초과 비율과 상관없이 항상 자르기부터.
+    보완 9: LLM 줄이기 모델은 VNEW_RETAKE_SHRINK_MODEL(기본 Opus 5.5, 대체 순서는 vpoc.llm._model_chain). 초안 호출은 VNEW_RETAKE_MODEL 그대로.
     """
     max_bytes = int(rules["maxBytes"])
     if _bytes_of(prompt) <= max_bytes:
@@ -1409,7 +1410,7 @@ def _shrink_draft(owner: str, pid: str, gen_id: str, key: str, draft_id: str, cl
         try:
             over = size - max_bytes if n > 1 else 0  # 보완 5: 2번째부터 = 직전 결과가 넘은 바이트(그만큼 여유를 더 둔다)
             payload, usage = _rewrite(system_text=_system_text_shrink(rules, refs, labels, size=size, target=target, over=over),
-                                      blocks=[block], model=vnew_settings.VNEW_RETAKE_MODEL, shrink=True)
+                                      blocks=[block], model=vnew_settings.VNEW_RETAKE_SHRINK_MODEL, shrink=True)  # 보완 9: 줄이기는 Opus 먼저
             _charge_llm(owner, pid, gen_id, draft_id + suffix, usage)  # 원장은 같은 key 를 한 번만 계상한다 → 시도마다 별도 줄
             shrunk = _normalize_prompt((payload if isinstance(payload, dict) else {}).get("promptEn"))
         except Exception as exc:  # noqa: BLE001 — LLM 오류 원문에는 프롬프트가 섞일 수 있다 → 이름·kind 만
