@@ -59,6 +59,8 @@ _BRIEF_SYSTEM = (
     "the panel shows otherwise. Do not invent architecture (stairs, mezzanines, walls, ceilings) that "
     "is not in the location references. No meaningless camera shake or excessive rotation; keep each "
     "cut's camera as the previz cut. "
+    "For a dialogue line marked 속마음 (inner thought), write its deliveryEn as facial and eye acting only with the "
+    "mouth closed and lips not moving \u2014 never as speaking, shouting or whispering. "
     "Answer ONLY by calling emit_brief exactly once, writing every cut given to you."
 )
 
@@ -553,7 +555,9 @@ def _location_prompt(plan: dict, owner: str, name_en: str, loc: dict | None, cut
             if line.get("silent"):
                 lines.append(f"  dialogue: {line.get('speaker') or 'someone'} — (silent)")
             else:
-                lines.append(f"  dialogue: {line.get('speaker') or 'someone'}: \"{line.get('lineKo')}\"")
+                # 지시서 118a: 속마음 대사는 입 다문 채 목소리만(deliveryEn 은 표정·눈 연기로만 쓰게).
+                mark = " (속마음 — 입 다문 채 목소리만)" if gen_mod._is_thought(line) else ""
+                lines.append(f"  dialogue: {line.get('speaker') or 'someone'}: \"{line.get('lineKo')}\"{mark}")
 
     return "\n".join(lines)
 

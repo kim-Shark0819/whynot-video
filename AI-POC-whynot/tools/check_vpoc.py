@@ -20147,7 +20147,9 @@ def check_vnew_fx() -> None:
 # fx-i: 아래 sha256 은 A3 코드 변경 **전**(2026-10-30, 커밋 130e678 의 generate.py)에 이 입력으로 잰 값이다.
 # VNEW_FX=False 면 컷에 기호·분위기 필드가 있어도 글자 하나 다르지 않아야 한다.
 _FX_PROMPT_SHA_OFF = {
-    "take6": "47de4cc2f1254042b3eed253eb4228849b45cec3ae1c29c8f0ad13bd15b93010",
+    # 지시서 118a: take6 은 컷마다 대사 2줄(dialogueKo 에이/비)이라 모든 줄을 쓰고 뒤 컷 둘째 줄 5개를 뺀 값으로 다시 쟀다
+    # (c1 은 2줄). 옛 값 47de4cc2f1254042b3eed253eb4228849b45cec3ae1c29c8f0ad13bd15b93010. take12 는 둘째 줄을 다 빼 그대로다.
+    "take6": "66dcb00a0a9bb2169df602fcb2d297c23b1a096a0e3fa891099a0e9d670f2c6b",
     "take12": "f9c5c3e5e800f798a53c724253c66d0da25249b1207b01d67e68bb0c91381dd3",
     "cutWebtoon": "eee172c7b7f111c74ebf1dd60dabed4be3a90553a0b2f4517126b7d38112c2c9",
     "cutReal": "760182843167fee9f226b70c19d58e08c8c826e8fb5f26024b11f20e6df82ffc",
@@ -20329,7 +20331,9 @@ _FX_TAKE_MUST = {
 # (2026-10-30, 묶음 B 커밋 뒤 작업 트리)에 _fx_take_prompt 고정 입력(fx-h 와 같은 기호없음·보통·최악)으로 잰 값이다.
 # variant 기본값(webtoon)·variant="webtoon" 둘 다 글자 하나 다르지 않아야 한다. (이름, 컷 수, 초, 바이트, sha256)
 _LR_TAKE_SHA_ON = (
-    ("take6", 6, 18, 3901, "911839e77759d742f04a7899e0d04de8362bcaefc8c041f3c664e276249040d7"),
+    # 지시서 118a: take6(기호 없음)은 컷마다 대사 2줄이라 모든 줄 + lineDrop5 로 다시 쟀다
+    # (옛 값 3901B 911839e77759d742f04a7899e0d04de8362bcaefc8c041f3c664e276249040d7). 나머지는 둘째 줄이 다 빠져 그대로다.
+    ("take6", 6, 18, 3963, "6d498e39642c16ca63e6321070bfa892daca4f5247d61ba296435281085ecbc6"),
     ("take6normal", 6, 18, 3874, "a63f170889e044b685f94ef7c6304474139de13f96531d2f2a537e667150ee58"),
     ("take6worst", 6, 18, 3875, "aa4bc25cb3bfe611c79fe7d701a463616eeb573d93607be243e1890cbe2b6bdc"),
     ("take12worst", 12, 30, 3627, "024819e5ca722ee86653519ca546a5d70885ce1de0e38139d144c01ee015c62e"),
@@ -20452,8 +20456,9 @@ def check_vnew_fx_prompt() -> None:
             with _pin_vnew(VNEW_FX=False):
                 for label, n_cuts, seconds in (("6컷 끔", 6, 18), ("12컷 끔", 12, 30)):
                     runs[label] = take_run(n_cuts, seconds)
+            # 지시서 118a: 12컷은 컷마다 대사 2줄이라 최소형 앞에서 둘째 줄 12개를 뺀다(lineDrop12).
             full_order = ["styleTrim", "avoidShort", "voice40", "voiceDrop", "mood40", "appearance100", "costume110", "dialogue25",
-                          "audioShort", "moodDrop", "fxShort", "bodyShort", "action55", "minimalTimeline"]
+                          "audioShort", "moodDrop", "fxShort", "bodyShort", "action55", "lineDrop12", "minimalTimeline"]
             if [step for step in runs["12컷 최악"][2] if not step.startswith("motionHarmony")] != full_order:
                 bad.append(f"(fx-h) 큰 입력의 단계 순서가 다릅니다: {runs['12컷 최악'][2]}")
             for label in ("6컷 보통", "6컷 최악"):
@@ -44386,6 +44391,178 @@ def check_vnew_inner_voice() -> None:
            "(iv-d)프리비즈 speaking (iv-e)AI로 고치기 자르기·지침 (iv-f)화면")
 
 
+# 지시서 118a 이전 MOTION 문구(보통 대사·대사 없음은 글자 하나 다르지 않아야 한다).
+_IV2_MOTION_FULL = (
+    "MOTION: Animate living characters, not a moving still. The mannequins' head bobbing in "
+    "@Video1 only marks who speaks \u2014 do NOT copy it. Natural acting: breathing, blinks, eye "
+    "darts, micro-expressions that change with each line, mouth shapes matching the Korean "
+    "syllables, small nods or tilts on stressed words; hair strands and clothing react to every "
+    "movement; listeners stay still but alive. Body moves only where @Video1 has real blocking "
+    "(turn, reach, lean, walk) with anticipation and easing. Camera: follow @Video1's moves with "
+    "multi-plane parallax between foreground, characters and background; no jitter or looping "
+    "motion."
+)
+_IV2_MOTION_SHORT = (
+    "MOTION: @Video1's head bobbing only marks the speaker \u2014 do NOT copy it. Natural acting: "
+    "breathing, blinks, eye darts, expressions changing with the line, lip sync; hair and clothes "
+    "react to movement; move only where @Video1 shows blocking; parallax depth; no jitter."
+)
+
+
+def check_vnew_inner_voice_118a() -> None:
+    """지시서 118a — 속마음 남은 충돌(MOTION 문구·통 테이크 모든 대사·deliveryEn). 가짜 LLM·유료 호출 0.
+
+    (iv2-a) MOTION: _prompt_voices 판정, 컷·테이크 thought → mouth stays closed(lip sync·mouth shapes 없음)·mixed → lip sync only on
+            spoken·spoken/none → 지금 문구 그대로, 짧은 형 300B 안. 변형 1회: _prompt_voices 를 늘 "spoken" 으로 바꾸면 잡힌다
+    (iv2-b) 통 테이크: entries lines(뒤호환 첫 줄 필드 유지), spoken+thought 두 줄 각자 표시, 1줄 컷 그대로, 작은 상한에서 보통 뒤쪽 줄부터 빠지고
+            속마음 줄은 남음
+    (iv2-c) deliveryEn: 속마음 줄 뒤에 없음·spoken 줄에는 지금처럼
+    (iv2-d) 촬영 지시서: 가짜 _brief 에 넘긴 글에 속마음 표시·지침 1문장
+    (iv2-e) AI로 고치기: _trim_protected 가 mouth stays closed 조각을 지우지 않는다
+    """
+    sys.path.insert(0, str(ROOT / "app"))
+    import traceback as _tb  # noqa: PLC0415
+
+    bad: list[str] = []
+    seen: set[str] = set()
+
+    def expect(group: str, got, want, what: str) -> None:
+        seen.add(group)
+        if got != want:
+            bad.append(f"({group}) {what}\n      결과 {got!r}\n      기대 {want!r}")
+
+    try:
+        from src.vnew import generate as genmod  # noqa: PLC0415
+        from src.vnew import retake as rtmod  # noqa: PLC0415
+        from src.vnew import shot_brief as briefmod  # noqa: PLC0415
+
+        def iv_plan(entries: list[dict], brief: dict | None = None, n: int = 3) -> dict:
+            cuts = [{"id": f"c{i + 1}", "no": i + 1, "seconds": 4, "panels": [i], "dialogueKo": ""} for i in range(n)]
+            return {"conti": {"cuts": cuts}, "script": {"entries": entries},
+                    "previz": {"shotBrief": {"status": "ready", "cuts": brief or {}}}}
+
+        mixed = [{"id": "e1", "panels": [0], "speaker": "민지", "lineKo": "왜 저러지?", "voice": "thought"},
+                 {"id": "e2", "panels": [1], "speaker": "준호", "lineKo": "안녕", "voice": "spoken"},
+                 {"id": "e3", "panels": [1], "speaker": "민지", "lineKo": "설마", "voice": "thought"},
+                 {"id": "e4", "panels": [2], "speaker": "준호", "lineKo": "가자"}]
+        cast = [{"name": "민지", "colorName": "blue"}, {"name": "준호", "colorName": "red"}]
+        take = {"id": "t1", "cutIds": ["c1", "c2", "c3"], "seconds": 12}
+
+        def cut_prompt(plan: dict, cut: str) -> str:
+            return genmod._cut_prompt(plan, {"cutId": cut}, "webtoon", cast=cast, has_image_ref=False)  # noqa: SLF001
+
+        def take_prompt(plan: dict, **kw) -> str:
+            return genmod._take_prompt(plan, take, cast=cast, panel_nos=[1], location_no=None, **kw)  # noqa: SLF001
+
+        def block(prompt: str, name: str) -> str:
+            return next((ln for ln in prompt.split("\n") if ln.startswith(name + ":") or ln.startswith(name + " ")), "")
+
+        def lips(motion: str) -> list:
+            return ["lip sync" in motion, "mouth shapes matching" in motion, "mouth stays closed" in motion,
+                    "lip sync only on spoken" in motion]
+
+        # ================= (iv2-a) MOTION =================
+        plan_m = iv_plan(mixed)
+        plan_t = iv_plan([dict(e, voice="thought") for e in mixed])
+        plan_s = iv_plan([dict(e, voice="spoken") for e in mixed])
+        plan_n = iv_plan([])
+        pv = genmod._prompt_voices  # noqa: SLF001
+        got_a = [[pv(x) for x in ([], [{"thought": True}], [{"voice": "thought"}, {}], [{}, {"voice": "spoken"}], None)],
+                 lips(block(cut_prompt(plan_m, "c1"), "MOTION")), lips(block(take_prompt(plan_t), "MOTION")),
+                 lips(block(cut_prompt(plan_m, "c2"), "MOTION")), lips(block(take_prompt(plan_m), "MOTION")),
+                 [block(cut_prompt(p, c), "MOTION") == _IV2_MOTION_SHORT for p, c in ((plan_s, "c2"), (plan_m, "c3"), (plan_n, "c1"))],
+                 [block(take_prompt(p), "MOTION") == _IV2_MOTION_FULL for p in (plan_s, plan_n)],
+                 [genmod._motion_line(f) == genmod._motion_line(f, v) for f in (True, False) for v in ("spoken", "none")],  # noqa: SLF001
+                 max(len(genmod._motion_line(False, v).encode("utf-8")) for v in ("thought", "mixed")) <= 300]  # noqa: SLF001
+        expect("iv2-a", got_a,
+               [["none", "thought", "mixed", "spoken", "none"], [False, False, True, False], [False, False, True, False],
+                [True, False, True, True], [True, False, True, True], [True, True, True], [True, True], [True] * 4, True],
+               "판정·컷/테이크 thought → mouth stays closed(lip sync·mouth shapes 없음)·mixed → lip sync only on spoken·spoken/none 지금 문구·짧은 형 ≤300B")
+
+        # 변형 1회(새 판정 1곳): _prompt_voices 를 늘 "spoken" 으로 바꾸면 속마음 컷 MOTION 에 lip sync 가 돌아와 잡힌다.
+        orig_pv = genmod._prompt_voices  # noqa: SLF001
+        genmod._prompt_voices = lambda lines: "spoken"  # noqa: SLF001
+        try:
+            mutated = lips(block(cut_prompt(plan_m, "c1"), "MOTION"))
+        finally:
+            genmod._prompt_voices = orig_pv  # noqa: SLF001
+        expect("iv2-a", mutated == got_a[1], False, "변형(_prompt_voices 늘 spoken)이면 속마음 컷 MOTION 이 달라져 검사가 잡는다")
+
+        # ================= (iv2-b) 통 테이크 모든 대사 =================
+        entries = genmod._take_timeline_entries(plan_m, take)  # noqa: SLF001
+        tl = block(take_prompt(plan_m), "TIMELINE")
+        expect("iv2-b", [[e["lines"] for e in entries], [(e["speaker"], e["dialogue"], e.get("thought")) for e in entries],
+                         '4-8s MCU: ON SCREEN: no one; Junho (off-screen voice): "안녕"; Minji (inner voice-over, lips closed): "설마" 8-12s' in tl,
+                         '0-4s MCU: ON SCREEN: no one; Minji (inner voice-over, lips closed): "왜 저러지?" 4-8s' in tl,
+                         tl.endswith('8-12s MCU: ON SCREEN: no one; Junho (off-screen voice): "가자"')],
+               [[[{"speaker": "민지", "dialogue": "왜 저러지?", "thought": True}],
+                 [{"speaker": "준호", "dialogue": "안녕", "thought": False}, {"speaker": "민지", "dialogue": "설마", "thought": True}],
+                 [{"speaker": "준호", "dialogue": "가자", "thought": False}]],
+                [("민지", "왜 저러지?", True), ("준호", "안녕", None), ("준호", "가자", None)],
+                True, True, True],
+               "entries lines(빈 대사 제외·순서)·첫 줄 필드 뒤호환·한 컷 spoken+thought 두 줄 각자 표시·1줄 컷 그대로")
+        long_a = "오늘은 정말 할 말이 많아서 처음부터 끝까지 다 이야기해 줄게 잘 들어"
+        many = [{"id": "e1", "panels": [0], "speaker": "민지", "lineKo": "왜 저러지?", "voice": "thought"},
+                {"id": "e2", "panels": [1], "speaker": "준호", "lineKo": "하나 " + long_a},
+                {"id": "e3", "panels": [1], "speaker": "준호", "lineKo": "둘 " + long_a},
+                {"id": "e4", "panels": [1], "speaker": "민지", "lineKo": "설마 진짜로?", "voice": "thought"},
+                {"id": "e5", "panels": [1], "speaker": "준호", "lineKo": "셋 " + long_a},
+                {"id": "e6", "panels": [2], "speaker": "준호", "lineKo": "가자"}]
+        rows = []
+        with _pin_vnew(VNEW_FX=True):
+            for cap in (3000, 2900, 1400):
+                text = take_prompt(iv_plan(many), caps={"promptMaxLength": cap})
+                tl_s = block(text, "TIMELINE")
+                rows.append([genmod._utf8_len(text) <= genmod._take_prompt_budget({"promptMaxLength": cap}),  # noqa: SLF001
+                             all(s in text for s in ("0-4s", "4-8s", "8-12s")), tl_s.count("(inner voice-over, lips closed)"),
+                             [w for w in ("하나", "둘", "셋") if f'Junho (off-screen voice): "{w} ' in tl_s], 'Junho (off-screen voice): "가자"' in tl_s])
+        expect("iv2-b", rows, [[True, True, 2, ["하나", "둘"], True], [True, True, 2, ["하나"], True], [True, True, 2, [], True]],
+               "작은 상한: 보통 대사 뒤쪽 줄부터 하나씩 빠지고(3,000B 셋 → 2,900B 둘 → 1,400B 하나) 속마음 두 줄·1줄 컷·모든 컷은 남는다")
+
+        # ================= (iv2-c) deliveryEn =================
+        plan_d = iv_plan(mixed, {"c2": {"shotEn": "MCU.", "actionEn": "Junho waves.",
+                                        "dialogue": [{"speaker": "준호", "deliveryEn": "smiles warmly"},
+                                                     {"speaker": "민지", "deliveryEn": "says it loudly"}]}})
+        expect("iv2-c", block(cut_prompt(plan_d, "c2"), "DIALOGUE"),
+               'DIALOGUE: 준호 (Korean, lips move): "안녕" — smiles warmly. 민지 (inner thought, voice-over only — mouth stays closed, '
+               'lips do not move): "설마".',
+               "속마음 줄 뒤에는 deliveryEn 이 없고 spoken 줄에는 지금처럼 붙는다")
+
+        # ================= (iv2-d) 촬영 지시서 입력 =================
+        sent: list = []
+        orig_brief, orig_charge = briefmod._brief, briefmod._charge  # noqa: SLF001
+        briefmod._brief = lambda blocks, *, model: (sent.append(blocks) or {"sceneEn": "", "cuts": []}, {"model": model})  # noqa: SLF001
+        briefmod._charge = lambda *a, **k: None  # noqa: SLF001
+        try:
+            text = briefmod._location_prompt(plan_m, "tester", "A room", None, [{"cutId": c} for c in ("c1", "c2", "c3")])  # noqa: SLF001
+            briefmod._brief_location("tester", "p1", "plan1", [{"text": text}])  # noqa: SLF001
+        finally:
+            briefmod._brief, briefmod._charge = orig_brief, orig_charge  # noqa: SLF001
+        got_text = sent[0][0]["text"] if sent else ""
+        mark = " (속마음 — 입 다문 채 목소리만)"
+        expect("iv2-d", [got_text.count(mark), f'dialogue: 민지: "왜 저러지?"{mark}' in got_text, f'dialogue: 민지: "설마"{mark}' in got_text,
+                         'dialogue: 준호: "안녕"\n' in got_text, got_text.endswith('dialogue: 준호: "가자"'),
+                         "write its deliveryEn as facial and eye acting only with the mouth closed" in briefmod._BRIEF_SYSTEM],  # noqa: SLF001
+               [2, True, True, True, True, True], "가짜 LLM 에 넘긴 글: 속마음 줄만 표시(spoken 줄 그대로)·지침 1문장")
+
+        # ================= (iv2-e) AI로 고치기 보호 =================
+        expect("iv2-e", [rtmod._trim_protected(t, []) for t in (" mouth stays closed", "Mouth stays closed during it",  # noqa: SLF001
+                                                               " mouth opens wide")],
+               [True, True, False], "_trim_protected: mouth stays closed 조각 보호(입 벌림 조각은 아님)")
+    except Exception as exc:  # noqa: BLE001
+        bad.append("검사 중 예외: " + repr(exc) + "\n" + _tb.format_exc()[:1500])
+
+    missing = [g for g in ("iv2-a", "iv2-b", "iv2-c", "iv2-d", "iv2-e") if g not in seen]
+    if missing and not bad:
+        bad.append(f"검사하지 못한 묶음: {missing}")
+    if bad:
+        for item in bad:
+            fail("vnew 속마음 남은 충돌(지시서 118a) " + item)
+    else:
+        ok("vnew 속마음 남은 충돌(지시서 118a) 검사 (iv2-a)MOTION 문구·변형 1회 (iv2-b)통 테이크 모든 대사·줄 빼기 "
+           "(iv2-c)deliveryEn (iv2-d)촬영 지시서 입력 (iv2-e)AI로 고치기 보호")
+
+
 def main() -> int:
     print("== vpoc1 check ==")
     check_compileall()
@@ -44463,6 +44640,7 @@ def main() -> int:
     check_vnew_edit_retake_models()
     check_vnew_edit_retake_audio()
     check_vnew_inner_voice()
+    check_vnew_inner_voice_118a()
     check_pod_zones()
     print()
     if warnings:

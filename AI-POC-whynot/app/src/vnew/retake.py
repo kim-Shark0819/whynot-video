@@ -1251,7 +1251,7 @@ def _shrink_better(size: int, problems: list[str], new_size: int, new_problems: 
 
 
 # 지시서 117: 자르기(_trim_to_limit)가 지우지 않는 속마음 표시(inner thought·inner voice-over·lips closed). "dinner" 등은 제외.
-_INNER_VOICE_RE = re.compile(r"\binner\b|voice-over|lips closed", re.IGNORECASE)
+_INNER_VOICE_RE = re.compile(r"\binner\b|voice-over|lips closed|mouth stays closed", re.IGNORECASE)  # 118a: mouth stays closed
 
 
 def _trim_protected(text: str, refs) -> bool:
