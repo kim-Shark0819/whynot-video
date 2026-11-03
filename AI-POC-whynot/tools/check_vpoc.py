@@ -44191,6 +44191,201 @@ def check_vnew_edit_retake_audio() -> None:
            "(rta-d)edit_segment 명령 (rta-e)화면 소리 줄")
 
 
+_IV_SLICE = (("  /* ---- 속마음 대사(지시서 117) ----", "  /* ---- 속마음 대사 끝 ---- */"),)
+_IV_NODE = r"""
+var OUT = {};
+OUT.voice = [entryVoice(true), entryVoice(false)];
+OUT.is = [isThoughtEntry({ voice: "thought" }), isThoughtEntry({ voice: " Thought " }), isThoughtEntry({ thought: true }),
+          isThoughtEntry({ voice: "spoken" }), isThoughtEntry({}), isThoughtEntry(null)];
+var ents = [{ panels: [0], speaker: "민지", lineKo: "왜 저러지?", voice: "thought" }, { panels: [1], speaker: "준호", lineKo: "안녕" },
+            { panels: [1], speaker: "민지", lineKo: "설마", voice: "thought" }, { panels: [1], speaker: "민지", lineKo: "  ", voice: "thought" },
+            { panels: [2], speaker: "", lineKo: "흠", voice: "thought" }];
+OUT.conti = [contiThoughtSpeakers({ panels: [0, 1] }, ents), contiThoughtSpeakers({ panels: [1] }, ents),
+             contiThoughtSpeakers({ panels: [3] }, ents), contiThoughtSpeakers({ panels: [2] }, ents), contiThoughtSpeakers(null, ents)];
+console.log(JSON.stringify(OUT));
+"""
+
+
+def check_vnew_inner_voice() -> None:
+    """지시서 117 — 속마음 대사(꼬리 없는 둥근 말풍선)는 입을 움직이지 않고 목소리로만. 가짜 LLM·유료 호출 0.
+
+    (iv-a) 스키마·규칙: emit_script entries.voice enum, SCRIPT_SYSTEM 규칙 9(둥근·구름·점선 말풍선 → thought), is_thought 판정 꼴
+    (iv-b) 대본 정리·저장·콘티 입력: _normalize_script voice(thought 유지·없음/모름 → spoken), update_script 보존, _conti_prompt 표시
+    (iv-c) 프롬프트: 컷 단위 DIALOGUE(웹툰·실사) thought/섞임/spoken 그대로·줄이기 뒤 표시 유지, 통 테이크 TIMELINE inner 우선(off-screen 대신)·
+           RULES 문장·최소형, spoken 만이면 inner 없음. 변형 1회: _is_thought 를 거짓으로 바꾸면 표시가 사라져 잡힌다
+    (iv-d) 프리비즈: _mute_thought_speakers — thought 만 → speaking False, 섞이면 spoken 화자만 True, 같은 사람 둘 다 → 그대로
+    (iv-e) AI로 고치기: _trim_protected inner 조각 보호·dinner 는 아님, _trim_to_limit 가 RULES 의 inner 문장을 남김, 지침·콘티 글
+    (iv-f) 화면(node): entryVoice·isThoughtEntry·contiThoughtSpeakers, node --check
+    """
+    sys.path.insert(0, str(ROOT / "app"))
+    import traceback as _tb  # noqa: PLC0415
+
+    bad: list[str] = []
+    seen: set[str] = set()
+
+    def expect(group: str, got, want, what: str) -> None:
+        seen.add(group)
+        if got != want:
+            bad.append(f"({group}) {what}\n      결과 {got!r}\n      기대 {want!r}")
+
+    try:
+        from src.vnew import generate as genmod  # noqa: PLC0415
+        from src.vnew import plan as planmod  # noqa: PLC0415
+        from src.vnew import previz as pvmod  # noqa: PLC0415
+        from src.vnew import prompts as prmod  # noqa: PLC0415
+        from src.vnew import retake as rtmod  # noqa: PLC0415
+
+        # ================= (iv-a) 스키마·규칙·판정 =================
+        props = prmod.EMIT_SCRIPT["inputSchema"]["json"]["properties"]["entries"]["items"]["properties"]
+        rule = prmod.SCRIPT_SYSTEM
+        expect("iv-a", [props.get("voice"), "round or cloud-shaped speech bubble with no tail" in rule, "dotted bubble" in rule,
+                        'set voice to "thought"' in rule and "mouth stays closed" in rule and '"spoken" (the default)' in rule,
+                        [prmod.is_thought(e) for e in ({"voice": "thought"}, {"voice": " Thought "}, {"thought": True}, {"voice": "spoken"},
+                                                       {}, None, {"voice": "x"}, {"thought": "yes"})]],
+               [{"type": "string", "enum": ["spoken", "thought"]}, True, True, True, [True, True, True, False, False, False, False, False]],
+               "voice enum·규칙 9 문구·is_thought(thought·대소문자·thought True → 참, 나머지 거짓)")
+
+        # ================= (iv-b) 대본 정리·저장·콘티 입력 =================
+        norm = planmod._normalize_script({"setting": {"locationKo": "교실", "locationEn": "A classroom"}, "entries": [  # noqa: SLF001
+            {"id": "e1", "panels": [0], "speaker": "민지", "lineKo": "왜?", "voice": "thought"},
+            {"id": "e2", "panels": [1], "speaker": "준호", "lineKo": "안녕"},
+            {"id": "e3", "panels": [1], "speaker": "준호", "lineKo": "응", "voice": "whisper"}]})
+        saved: dict = {"script": {"setting": {}, "entries": []}, "revision": 1}
+        orig_mutate = planmod.mutate_plan
+
+        def fake_mutate(owner, pid, mutator, **kw):
+            mutator(saved)
+            return saved, None
+
+        planmod.mutate_plan = fake_mutate
+        try:
+            planmod.update_script("o", "p", {"entries": [{"id": "e1", "panels": [0], "lineKo": "왜?", "voice": "thought"},
+                                                        {"id": "e2", "panels": [1], "lineKo": "안녕"}]})
+        finally:
+            planmod.mutate_plan = orig_mutate
+        conti_in = planmod._conti_prompt(norm, 10, "", "")  # noqa: SLF001
+        old_lines = genmod._cut_lines({"script": {"entries": [{"panels": [0], "speaker": "민지", "lineKo": "왜?"}]}}, {"panels": [0]})  # noqa: SLF001
+        expect("iv-b", [[e.get("voice") for e in norm["entries"]], [e.get("voice") for e in saved["script"]["entries"]],
+                        conti_in.count("목소리=속마음(입 다문 채 목소리만)"), "대사=\"왜?\" / 목소리=속마음" in conti_in, old_lines],
+               [["thought", "spoken", "spoken"], ["thought", None], 1, True, [{"speaker": "민지", "lineKo": "왜?", "silent": False}]],
+               "정리 voice(thought 유지·없음/모름 → spoken)·저장 경로 보존·콘티 입력 표시 1줄·voice 없는 옛 대본은 spoken(키 없음)")
+
+        # ================= (iv-c) 프롬프트 =================
+        def iv_plan(entries: list[dict], brief: dict | None = None) -> dict:
+            cuts = [{"id": f"c{i + 1}", "no": i + 1, "seconds": 4, "panels": [i], "dialogueKo": ""} for i in range(3)]
+            return {"conti": {"cuts": cuts}, "script": {"entries": entries},
+                    "previz": {"shotBrief": {"status": "ready", "cuts": brief or {}}}}
+
+        mixed = [{"id": "e1", "panels": [0], "speaker": "민지", "lineKo": "왜 저러지?", "voice": "thought"},
+                 {"id": "e2", "panels": [1], "speaker": "준호", "lineKo": "안녕", "voice": "spoken"},
+                 {"id": "e3", "panels": [1], "speaker": "민지", "lineKo": "설마", "voice": "thought"},
+                 {"id": "e4", "panels": [2], "speaker": "준호", "lineKo": "가자"}]
+        cast = [{"name": "민지", "colorName": "blue"}, {"name": "준호", "colorName": "red"}]
+        th = '민지 (inner thought, voice-over only — mouth stays closed, lips do not move): "{}".'
+
+        def dlg(plan: dict, cut: str, variant: str) -> str:
+            prompt = genmod._cut_prompt(plan, {"cutId": cut}, variant, cast=cast, has_image_ref=False)  # noqa: SLF001
+            return next((ln for ln in prompt.split("\n") if ln.startswith("DIALOGUE:")), "")
+
+        plan_m = iv_plan(mixed)
+        got_c = [dlg(plan_m, c, v) for v in ("webtoon", "real") for c in ("c1", "c2", "c3")]
+        want_one = ["DIALOGUE: " + th.format("왜 저러지?"), 'DIALOGUE: 준호 (Korean, lips move): "안녕". ' + th.format("설마"),
+                    'DIALOGUE: 준호 (Korean, lips move): "가자".']
+        # 줄이기: 긴 지시서로 2,500바이트를 넘겨도 DIALOGUE 의 속마음 표시는 남는다(대사는 줄이기 대상이 아니다).
+        long_text = " ".join(["The wide room has tall windows, warm light and many shelves of old books."] * 30)
+        plan_long = iv_plan(mixed, {"c1": {"shotEn": "MCU.", "actionEn": "민지 looks down.", "moodEn": long_text, "backgroundEn": long_text,
+                                           "dialogue": [{"speaker": "민지", "deliveryEn": "quiet"}]}})
+        long_p = genmod._cut_prompt(plan_long, {"cutId": "c1"}, "webtoon", cast=cast, has_image_ref=False)  # noqa: SLF001
+        expect("iv-c", [got_c, "lips move" in got_c[0], "inner thought" in long_p and "mouth stays closed" in long_p,
+                        genmod._utf8_len(long_p) <= genmod.vnew_settings.PREVIZ_PROMPT_TARGET],  # noqa: SLF001
+               [want_one * 2, False, True, True],
+               "컷 DIALOGUE 웹툰·실사: thought → inner thought·mouth stays closed(lips move 없음)·섞임 각자·spoken 그대로·줄이기 뒤 유지")
+
+        take = {"id": "t1", "cutIds": ["c1", "c2", "c3"], "seconds": 12}
+        rule_add = " During an inner voice-over that person's mouth stays closed and the lips do not move; the line is still heard in their voice."
+        take_rows = []
+        for variant in ("webtoon", "real"):
+            full = genmod._take_prompt(plan_m, take, cast=cast, panel_nos=[1], location_no=None, variant=variant)  # noqa: SLF001
+            tiny = genmod._take_prompt(plan_m, take, cast=cast, panel_nos=[1], location_no=None, variant=variant,  # noqa: SLF001
+                                       caps={"promptMaxLength": 1400})
+            take_rows.append([prompt.count('Minji (inner voice-over, lips closed): "왜 저러지?"') for prompt in (full, tiny)]
+                             + [rule_add in full, rule_add in tiny, "Minji (off-screen voice)" in full, 'Junho (off-screen voice): "안녕"' in full])
+        spoken_only = [dict(e, voice="spoken") for e in mixed]
+        plain = genmod._take_prompt(iv_plan(spoken_only), take, cast=cast, panel_nos=[1], location_no=None)  # noqa: SLF001
+        plain_c1 = dlg(iv_plan(spoken_only), "c1", "webtoon")
+        expect("iv-c", [take_rows, "inner" in plain, "lips closed" in plain, plain_c1],
+               [[[1, 1, True, True, False, True]] * 2, False, False, 'DIALOGUE: 민지 (Korean, lips move): "왜 저러지?".'],
+               "통 테이크 웹툰·실사: TIMELINE inner 표기(화면 밖 표기보다 우선)·최소형(1,400B)에도 유지·RULES 문장, spoken 만이면 inner 없음")
+
+        # 변형 1회(새 판정 1곳): _is_thought 를 늘 거짓으로 바꾸면 위 검사가 잡는다(표시가 사라진다).
+        orig_is = genmod._is_thought  # noqa: SLF001
+        genmod._is_thought = lambda entry: False  # noqa: SLF001
+        try:
+            mutated = [dlg(plan_m, "c1", "webtoon"),
+                       "inner" in genmod._take_prompt(plan_m, take, cast=cast, panel_nos=[1], location_no=None)]  # noqa: SLF001
+        finally:
+            genmod._is_thought = orig_is  # noqa: SLF001
+        expect("iv-c", [mutated[0] == want_one[0], mutated[1]], [False, False], "변형(_is_thought 거짓)이면 표시가 사라져 검사가 잡는다")
+
+        # ================= (iv-d) 프리비즈 speaking =================
+        both = mixed + [{"id": "e5", "panels": [2], "speaker": "민지", "lineKo": "응", "voice": "spoken"},
+                        {"id": "e6", "panels": [2], "speaker": "민지", "lineKo": "진짜?", "voice": "thought"}]
+        scene = {"actors": [{"id": "a1", "name": "민지"}, {"id": "a2", "name": "준호"}],
+                 "timeline": [{"cutId": c, "actors": [{"id": "a1", "speaking": True}, {"id": "a2", "speaking": True}]} for c in ("c1", "c2", "c3")]
+                 + [{"cutId": "c9", "actors": [{"id": "a1", "speaking": True}]}]}
+        pvmod._mute_thought_speakers([scene], iv_plan(both))  # noqa: SLF001
+        pvmod._mute_thought_speakers([scene], None)  # noqa: SLF001
+        expect("iv-d", [[a["speaking"] for a in cut["actors"]] for cut in scene["timeline"]],
+               [[False, True], [False, True], [True, True], [True]],
+               "thought 만(c1 민지) → False·섞임(c2) spoken 화자만 True·같은 사람 spoken+thought(c3) → 그대로·콘티 없는 컷·plan 없음 → 그대로")
+
+        # ================= (iv-e) AI로 고치기 =================
+        rules_line = ("RULES: Reproduce @Video1 exactly, keep faces as in the sheet, keep props steady, keep light even, "
+                      "During an inner voice-over that person's mouth stays closed and the lips do not move; no extra people, no text")
+        trimmed, cut_n = rtmod._trim_to_limit("STYLE: anime.\n" + rules_line, 150, [], [])  # noqa: SLF001
+        sys_txt = rtmod._system_text({"maxBytes": 2500}, [], [])  # noqa: SLF001
+        sys_model = rtmod._system_text_model({"maxBytes": 2500}, fmt="take", rng=None)  # noqa: SLF001
+        conti_txt = rtmod._conti_text(plan_m, {"cutIds": ["c1", "c2"]})  # noqa: SLF001
+        marker = "Keep every inner-thought marker (inner thought / inner voice-over, mouth or lips closed) exactly as written."
+        expect("iv-e", [[rtmod._trim_protected(t, []) for t in ("inner voice-over, lips closed", " the lips do not move",  # noqa: SLF001
+                                                               "(inner thought, voice-over only — mouth stays closed)", " dinner table")],
+                        cut_n > 0, "inner voice-over that person's mouth stays closed" in trimmed, marker in sys_txt, marker in sys_model,
+                        "민지(속마음): 왜 저러지?" in conti_txt, "준호: 안녕" in conti_txt],
+               [[True, False, True, False], True, True, True, True, True, True],
+               "자르기 inner 조각 보호(dinner 아님)·RULES 의 inner 문장 남김·두 지침 문구·콘티 글 (속마음) 표시")
+    except Exception as exc:  # noqa: BLE001
+        bad.append("검사 중 예외: " + repr(exc) + "\n" + _tb.format_exc()[:1500])
+
+    # ================= (iv-f) 화면(node) =================
+    node = shutil.which("node")
+    vjs = (PUBLIC / "vnew.js").read_text(encoding="utf-8")
+    code, problems = _edu_code(vjs, _IV_SLICE)
+    bad.extend(p.replace("(edu-a)", "(iv-f)") for p in problems)
+    if "grid.appendChild(thoughtToggle(entry));" not in vjs or "contiThoughtSpeakers(cut, " not in vjs:
+        bad.append("(iv-f) 대본 줄 속마음 토글·콘티 속마음 표시 호출이 없습니다")
+    if node and not problems:
+        got, err = _lr_run_node(node, code + _IV_NODE, "iv_f_")
+        checked = subprocess.run([node, "--check", str(PUBLIC / "vnew.js")], capture_output=True, text=True, encoding="utf-8")
+        if err or checked.returncode != 0:
+            bad.append(f"(iv-f) node 실행·--check 실패: {err or checked.stderr.strip()[:400]}")
+        else:
+            expect("iv-f", got, {"voice": ["thought", "spoken"], "is": [True, True, True, False, False, False],
+                                 "conti": [["민지"], ["민지"], [], ["화자"], []]},
+                   "entryVoice·isThoughtEntry·contiThoughtSpeakers(겹침·빈 대사 제외·중복 없음·화자 없으면 '화자')")
+    elif not node:
+        warn("node 가 없어 iv-f(화면)를 건너뜁니다")
+
+    missing = [g for g in ("iv-a", "iv-b", "iv-c", "iv-d", "iv-e", "iv-f") if g not in seen]
+    if missing and not bad and node:
+        bad.append(f"검사하지 못한 묶음: {missing}")
+    if bad:
+        for item in bad:
+            fail("vnew 속마음 대사(지시서 117) " + item)
+    else:
+        ok("vnew 속마음 대사(지시서 117) 검사 (iv-a)스키마·규칙·판정 (iv-b)정리·저장·콘티 입력 (iv-c)컷·통 테이크 프롬프트·변형 1회 "
+           "(iv-d)프리비즈 speaking (iv-e)AI로 고치기 자르기·지침 (iv-f)화면")
+
+
 def main() -> int:
     print("== vpoc1 check ==")
     check_compileall()
@@ -44267,6 +44462,7 @@ def main() -> int:
     check_vnew_edit_retake()
     check_vnew_edit_retake_models()
     check_vnew_edit_retake_audio()
+    check_vnew_inner_voice()
     check_pod_zones()
     print()
     if warnings:

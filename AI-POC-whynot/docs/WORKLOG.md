@@ -2574,3 +2574,7 @@
 
 ### 116 보완 10 — 소리 없는 다시 만든 버전은 원본 소리 (2026-11-03, 116-fix10)
 - 운영 실측(Kling O3 구간 v2 `hasAudio False` → [바꾸기] 구간 무음·대사 빠짐)에 따라 `edit.py` `_audio_sources`가 버전(retake)·소리 없음·같은 칸 v1 소리 있음이면 v1 같은 녹화 시각(`retake._time_map`으로 버전 → 칸 → v1, 구간이면 range.start + in)을 재료 `audioFrom`으로 주고, 내보내기는 `stitcher.edit_segment`의 새 `audio_source`(두 번째 입력, 비면 명령 그대로)로 소리만 v1에서 같은 속도로 가져온다(muted·소리 있는 버전·저장 문서 그대로, 판정은 읽을 때). 화면은 소리 줄 파형만, 미리보기 재생 소리는 하지 않음. 검토한 대안: v1으로 `_export_segment`를 한 번 더(영상 인코딩 2배라 제외), 버전에 소리를 합쳐 저장(새 파일·기존 데이터 변경이라 제외). 검사 rta-a~e, 변형 1회(v1 소리 판정) 잡힘.
+
+### 117 — 속마음 대사(꼬리 없는 둥근 말풍선)는 입 다문 채 목소리로만 (2026-11-03, 117)
+- 대본 entries에 `voice`(spoken|thought, 없으면 spoken)를 두고 판정은 `prompts.is_thought` 한 곳에서 한다. 대사 귀속(`_cut_lines`)이 thought를 옮겨 컷 DIALOGUE `(inner thought, voice-over only — mouth stays closed, lips do not move)`, 통 테이크 TIMELINE `(inner voice-over, lips closed)`(화면 밖 표기보다 우선)·RULES 시선 문장(최소형에도 남는 필수 문장)에 붙고, 프리비즈는 thought만 있는 화자의 speaking을 끈다(`_mute_thought_speakers`). AI로 고치기 지침·자르기도 inner 표시를 지킨다. 대본 화면에 "속마음" 체크, 콘티 카드에 표시.
+- 검토한 대안: 콘티 컷에 thoughtSpeakers 저장(대본을 고치면 낡아 제외, 서버·화면 모두 대본 줄을 panels 겹침으로 읽는다). 검사 iv-a~f, 변형 1회(`_is_thought` 거짓) 잡힘.

@@ -3425,6 +3425,7 @@
         panels: [],
         speaker: "",
         lineKo: "",
+        voice: "spoken",
         situationKo: "",
         emotionKo: "",
         locationKo: "",
@@ -3436,6 +3437,44 @@
     section.appendChild(addBtn);
     return section;
   }
+
+  /* ---- 속마음 대사(지시서 117) ----
+     꼬리 없는 둥근 말풍선 = voice "thought"(입 다문 채 목소리만). 값이 없으면 spoken 으로 본다(서버 prompts.is_thought 와 같다). */
+  function entryVoice(checked) {
+    return checked ? "thought" : "spoken";
+  }
+
+  function isThoughtEntry(entry) {
+    return !!entry && (String(entry.voice || "").trim().toLowerCase() === "thought" || entry.thought === true);
+  }
+
+  /* 콘티 컷 panels 와 겹치는 대본 줄 중 속마음 대사의 화자 이름(겹침 규칙은 서버 generate._cut_lines 와 같다). */
+  function contiThoughtSpeakers(cut, entries) {
+    var mine = {};
+    ((cut && cut.panels) || []).forEach(function (p) { mine[String(p)] = true; });
+    var out = [];
+    (entries || []).forEach(function (entry) {
+      if (!isThoughtEntry(entry) || !String(entry.lineKo || "").trim()) return;
+      var hit = (entry.panels || []).some(function (p) { return mine[String(p)]; });
+      var name = String(entry.speaker || "").trim() || "화자";
+      if (hit && out.indexOf(name) < 0) out.push(name);
+    });
+    return out;
+  }
+
+  function thoughtToggle(entry) {
+    var wrap = el("label", "vnew-field vnew-thought-toggle");
+    var box = el("input", "");
+    box.type = "checkbox";
+    box.checked = isThoughtEntry(entry);
+    box.addEventListener("change", function () {
+      entry.voice = entryVoice(box.checked);
+    });
+    wrap.appendChild(box);
+    wrap.appendChild(el("span", "vnew-field-label", "속마음 (입 다문 채 목소리만)"));
+    return wrap;
+  }
+  /* ---- 속마음 대사 끝 ---- */
 
   function entryRow(entry, index, entries, showError) {
     var card = el("div", "vnew-entry-card");
@@ -3488,6 +3527,7 @@
     grid.appendChild(textField("화자", entry, "speaker", false));
     grid.appendChild(textField("장소", entry, "locationKo", false));
     grid.appendChild(textField("대사", entry, "lineKo", true));
+    grid.appendChild(thoughtToggle(entry));
     grid.appendChild(textField("상황", entry, "situationKo", true));
     grid.appendChild(textField("감정", entry, "emotionKo", false));
     card.appendChild(grid);
@@ -4655,6 +4695,8 @@
     grid.appendChild(textField("상황", cut, "situationKo", true));
     card.appendChild(grid);
     if (fxEnabled()) card.appendChild(fxRow(cut));
+    var thinkers = contiThoughtSpeakers(cut, (((state.plan || {}).script || {}).entries) || []);
+    if (thinkers.length) card.appendChild(el("p", "vnew-hint", "속마음: " + thinkers.join(", ") + " (입 다문 채 목소리만)"));
 
     // 인물 위치·동작
     var who = cut.characters || [];

@@ -18,6 +18,20 @@ from .fx import FX_KEYS
 
 # ================================================================ ② 대본(script)
 
+# 지시서 117: 대사 목소리 종류. spoken = 입을 움직여 말함(기본), thought = 속마음(입 다문 채 voice-over).
+VOICE_VALUES = ("spoken", "thought")
+
+
+def is_thought(entry) -> bool:
+    """대본 줄·대사 귀속 줄이 속마음(thought)인지. 판정은 이 함수 한 곳에서만 한다(지시서 117).
+
+    voice == "thought"(대소문자·공백 무시) 또는 thought is True 면 참. 값이 없거나 다른 값이면 spoken(거짓).
+    """
+    if not isinstance(entry, dict):
+        return False
+    return str(entry.get("voice") or "").strip().lower() == "thought" or entry.get("thought") is True
+
+
 EMIT_SCRIPT = {
     "name": "emit_script",
     "description": "Return the dialogue-and-situation log read straight from the webtoon panels.",
@@ -54,6 +68,9 @@ EMIT_SCRIPT = {
                             "speaker": {"type": "string"},
                             # 말풍선 대사를 정확히 옮긴다(OCR). 대사가 없으면 빈 문자열.
                             "lineKo": {"type": "string"},
+                            # 지시서 117: 꼬리 없는 둥근·구름·점선 말풍선 = thought(속마음, 입 다문 채 목소리만).
+                            # 꼬리가 화자를 가리키는 보통 말풍선 = spoken. 없으면 spoken 으로 읽는다(is_thought).
+                            "voice": {"type": "string", "enum": list(VOICE_VALUES)},
                             "situationKo": {"type": "string"},
                             "emotionKo": {"type": "string"},
                             # 이 대사·상황이 일어나는 장소(그 컷에 그려진 그대로). 웹툰이 장소를 바꾸지
@@ -107,7 +124,11 @@ Rules you must follow:
 7. Use the Korean role names the user gives you for speaker and character name (e.g. 김부장). Do not
    rename characters or invent names that are not in the panels or the given roster.
 8. Write Korean for every *Ko field and plain English for every *En field. No speech-bubble text inside
-   *En fields. Answer only with the emit_script tool."""
+   *En fields. Answer only with the emit_script tool.
+9. voice: a line in a round or cloud-shaped speech bubble with no tail, or in a dotted bubble, is the
+   character's inner thought: set voice to "thought" (heard as their voice, mouth stays closed). A normal
+   bubble whose tail points at the speaker is "spoken" (the default). Keep square narration boxes as you
+   handle them now."""
 
 
 # ================================================================ ③ 콘티(conti)

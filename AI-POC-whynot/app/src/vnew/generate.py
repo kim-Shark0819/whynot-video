@@ -51,6 +51,8 @@ from . import imaging
 from . import plan as plan_mod
 from . import previz_schema
 from . import settings as vnew_settings
+# 지시서 117: 속마음 대사 판정은 prompts.is_thought 한 곳(순수 모듈)에서만 한다.
+from .prompts import is_thought as _is_thought
 
 log = logging.getLogger("vpoc")
 
@@ -2621,10 +2623,12 @@ def _take_timeline_entries(plan: dict, take: dict) -> list[dict]:
         spoken = [ln for ln in lines if not ln.get("silent") and str(ln.get("lineKo") or "").strip()]
         speaker = ""
         dialogue = ""
+        thought = False
         if spoken:
             first = spoken[0]
             speaker = str(first.get("speaker") or "").strip() or "A character"
             dialogue = str(first.get("lineKo") or "").strip()
+            thought = _is_thought(first)
         eyelines = _cut_eyelines(plan, cut)
         names = [str(e.get("name") or "") for e in eyelines if e.get("name")]
         gaze_default = _gaze_is_default(eyelines, speaker, names)
@@ -2648,6 +2652,9 @@ def _take_timeline_entries(plan: dict, take: dict) -> list[dict]:
                 "moodEn": vnew_fx.clean_text(cut.get("moodEn"), vnew_fx.MOOD_EN_MAX) if fx_on else "",
             }
         )
+        if thought:
+            # 지시서 117: 첫 발화가 속마음이면 표시(spoken 이면 키 없음 — 지금 항목 모양 그대로).
+            entries[-1]["thought"] = True
     return entries
 
 
@@ -2868,6 +2875,9 @@ def _take_prompt(plan: dict, take: dict, *, cast: list[dict], panel_nos: list[in
     rule_eyes = (
         " Eyes: the on-screen speaker looks at the listener; an off-screen voice never appears on screen."
     )
+    if any(e.get("thought") for e in entries):
+        # 지시서 117: 속마음 대사가 있는 테이크만. rule_eyes 는 어떤 축약·최소형에서도 남는 필수 문장이라 여기 둔다.
+        rule_eyes += " During an inner voice-over that person's mouth stays closed and the lips do not move; the line is still heard in their voice."
     rule_extra = (
         " Do not add any person, action or scene. No mannequins remain. "
         "No text, no subtitles, no speech bubbles."
@@ -3025,7 +3035,10 @@ def _take_prompt(plan: dict, take: dict, *, cast: list[dict], panel_nos: list[in
         dialogue = _clip(str(entry.get("dialogue") or "").strip(), state["dialogue_limit"])
         if dialogue:
             who = speaker or "A character"
-            if off_speaker and off_speaker == speaker_ko:
+            if entry.get("thought"):
+                # 지시서 117: 속마음은 화면 밖 화자 표기보다 우선(입 다문 채 목소리만).
+                pieces.append(f'{who} (inner voice-over, lips closed): "{dialogue}"')
+            elif off_speaker and off_speaker == speaker_ko:
                 pieces.append(f'{who} (off-screen voice): "{dialogue}"')
             else:
                 pieces.append(f'{who}: "{dialogue}"')
@@ -3138,7 +3151,9 @@ def _take_prompt(plan: dict, take: dict, *, cast: list[dict], panel_nos: list[in
                 if dialogue:
                     who = _disp_name(speaker_ko) or "A character"
                     off = str(e.get("offScreenSpeaker") or "").strip()
-                    if off and off == speaker_ko:
+                    if e.get("thought"):
+                        bits.append(f'{who} (inner voice-over, lips closed): "{dialogue}"')
+                    elif off and off == speaker_ko:
                         bits.append(f'{who} (off-screen voice): "{dialogue}"')
                     else:
                         bits.append(f'{who}: "{dialogue}"')
@@ -3966,6 +3981,9 @@ def _cut_lines(plan: dict, cut: dict) -> list[dict]:
             line = str(entry.get("lineKo") or "").strip()
             silent = _blank_line(line)
             out.append({"speaker": speaker, "lineKo": "" if silent else line, "silent": silent})
+            if _is_thought(entry):
+                # 지시서 117: 속마음 대사(입 다문 채 목소리만). spoken 줄은 키를 더하지 않는다(지금 모양 그대로).
+                out[-1]["thought"] = True
         # 겹치는 entry 가 모두 빈 대사(speaker·lineKo 없음)면 컷 dialogueKo 로 보강한다(옛 대본 호환).
         if any((not o.get("silent")) or o.get("speaker") for o in out):
             return out
@@ -4482,7 +4500,8 @@ def _cut_prompt(plan: dict, seg: dict, variant: str, *, cast: list[dict], has_im
         for line in spoken:
             speaker = str(line.get("speaker") or "").strip()
             text = str(line.get("lineKo") or "").strip()
-            piece = f'{speaker or "A character"} (Korean, lips move): "{text}"'
+            piece = (f'{speaker or "A character"} (inner thought, voice-over only — mouth stays closed, lips do not move): "{text}"'
+                     if _is_thought(line) else f'{speaker or "A character"} (Korean, lips move): "{text}"')
             if with_delivery:
                 delivery = delivery_by_speaker.get(speaker, "")
                 if delivery:

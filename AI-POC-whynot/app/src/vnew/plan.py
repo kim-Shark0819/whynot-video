@@ -815,6 +815,8 @@ def _normalize_script(payload: dict) -> dict:
                 "panels": [int(p) for p in (item.get("panels") or []) if _is_int(p)],
                 "speaker": str(item.get("speaker") or ""),
                 "lineKo": str(item.get("lineKo") or ""),
+                # 지시서 117: 속마음(thought) / 보통 대사(spoken). 없거나 모르는 값이면 spoken.
+                "voice": "thought" if prompts.is_thought(item) else "spoken",
                 "situationKo": str(item.get("situationKo") or ""),
                 "emotionKo": str(item.get("emotionKo") or ""),
                 "locationKo": location_ko,
@@ -964,7 +966,8 @@ def _conti_prompt(script: dict, total_seconds: int, notes: str, roster: str) -> 
         lines.append(
             f"{index}. [panels {panels}] 장소={entry.get('locationEn', '')}"
             f" / 화자={entry.get('speaker', '')} / 대사=\"{entry.get('lineKo', '')}\""
-            f" / 상황={entry.get('situationKo', '')} / 감정={entry.get('emotionKo', '')}"
+            + (" / 목소리=속마음(입 다문 채 목소리만)" if prompts.is_thought(entry) else "")
+            + f" / 상황={entry.get('situationKo', '')} / 감정={entry.get('emotionKo', '')}"
             + (f" / 인물={chars}" if chars else "")
         )
     lines.extend(
