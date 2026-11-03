@@ -65,7 +65,7 @@ FRAMES_MAX = 3
 FRAME_HEIGHT = 480  # LLM 에 보낼 프레임 높이 상한(px)
 FRAME_TIMEOUT_S = 60
 CONTI_MAX_CHARS = 1500
-LLM_MAX_TOKENS = 3000
+DRAFT_MAX_TOKENS = 8000  # 보완 7: 초안 호출 출력 예산. dev 실측 2,828·2,687 토큰(옛 3000 근처, toolChoice auto 라 도구 밖 출력도 먹는다)
 SHRINK_TARGET = 0.9  # 보완 3: 바이트 초과 초안 줄이기 — 상한의 이만큼을 목표로 묻는다(여유)
 SHRINK_KEY_SUFFIX = "-shrink"  # 보완 3: 줄이기 호출 원장 key = vnew-retake-<draftId>-shrink(같은 key 는 한 번만 계상되므로 별도 줄)
 SHRINK_TARGET_2 = 0.75  # 보완 3b: 1번째도 넘으면 2번째 줄이기 목표(상한의 이만큼)
@@ -209,10 +209,11 @@ def require_enabled(where: str = "vnew.retake") -> None:
 def _rewrite(*, system_text: str, blocks: list[dict], model: str, shrink: bool = False) -> tuple[dict, dict]:
     """새 프롬프트 LLM 1회(vpoc.llm._converse, 도구 emit_retake_prompt). (payload, usage{..model}).
 
-    보완 6: shrink 면 줄이기 전용(도구 _SHRINK_TOOL = promptEn 만, 예산 SHRINK_MAX_TOKENS, where vnew.retake.shrink). 초안 호출은 그대로."""
+    보완 6: shrink 면 줄이기 전용(도구 _SHRINK_TOOL = promptEn 만, 예산 SHRINK_MAX_TOKENS, where vnew.retake.shrink). 초안 호출은 그대로.
+    보완 7: 초안 호출 예산은 DRAFT_MAX_TOKENS."""
     return vpoc_llm._converse(  # noqa: SLF001 — 공개 래퍼가 없어 내부 함수를 쓴다(cast notes·사진 검사와 같다)
         system_text=system_text, blocks=blocks, tool=_SHRINK_TOOL if shrink else _TOOL,
-        max_tokens=SHRINK_MAX_TOKENS if shrink else LLM_MAX_TOKENS, where="vnew.retake.shrink" if shrink else "vnew.retake.rewrite",
+        max_tokens=SHRINK_MAX_TOKENS if shrink else DRAFT_MAX_TOKENS, where="vnew.retake.shrink" if shrink else "vnew.retake.rewrite",
         model=model,
     )
 
