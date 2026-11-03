@@ -2578,3 +2578,7 @@
 ### 117 — 속마음 대사(꼬리 없는 둥근 말풍선)는 입 다문 채 목소리로만 (2026-11-03, 117)
 - 대본 entries에 `voice`(spoken|thought, 없으면 spoken)를 두고 판정은 `prompts.is_thought` 한 곳에서 한다. 대사 귀속(`_cut_lines`)이 thought를 옮겨 컷 DIALOGUE `(inner thought, voice-over only — mouth stays closed, lips do not move)`, 통 테이크 TIMELINE `(inner voice-over, lips closed)`(화면 밖 표기보다 우선)·RULES 시선 문장(최소형에도 남는 필수 문장)에 붙고, 프리비즈는 thought만 있는 화자의 speaking을 끈다(`_mute_thought_speakers`). AI로 고치기 지침·자르기도 inner 표시를 지킨다. 대본 화면에 "속마음" 체크, 콘티 카드에 표시.
 - 검토한 대안: 콘티 컷에 thoughtSpeakers 저장(대본을 고치면 낡아 제외, 서버·화면 모두 대본 줄을 panels 겹침으로 읽는다). 검사 iv-a~f, 변형 1회(`_is_thought` 거짓) 잡힘.
+
+### 118a — 속마음 남은 충돌 정리: MOTION 문구·통 테이크 모든 대사·deliveryEn (2026-11-03, 118a)
+- `_motion_line(full, voices)`(`_prompt_voices`: spoken|thought|mixed|none)가 속마음만이면 입 모양·lip sync 구절을 `mouth stays closed`로, 섞이면 `lip sync only on spoken lines`로 바꾼다(spoken·none은 글자 그대로). 통 테이크 항목에 `lines`(컷의 모든 대사)를 두고 줄마다 표기·글자 상한을 적용하며, 기존 단계(①~⑨)로도 넘치면 최소형 앞에서 보통 대사 뒤쪽 줄부터 뺀다(`lineDropN`, 컷마다 1줄·첫 속마음 줄은 남김). 속마음 줄에는 deliveryEn을 붙이지 않고, 촬영 지시서 입력·지침에 속마음 표시를, 자르기 보호에 `mouth stays closed`를 더했다.
+- 검토한 대안: 줄 빼기를 최소형 뒤에 두기(RULES 없는 assetsStripped로 먼저 떨어지고 6컷 보통이 MOTION 짧은 형이 돼 버렸다). 컷마다 2줄인 고정 입력의 기대값(fx-i·lr-e take6 sha, fx-h 12컷 단계 lineDrop12)을 다시 쟀다. 검사 iv2-a~e, 변형 1회(`_prompt_voices` 늘 spoken) 잡힘.

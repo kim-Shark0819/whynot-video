@@ -7,3 +7,4 @@
 - [x] 5. 프리비즈: `_mute_thought_speakers`(thought만 → speaking False)
 - [x] 6. AI로 고치기: 지침 2곳 inner 표시 유지, `_trim_protected` inner 보호, 콘티 글 (속마음)
 - [x] 7. 검사 `check_vnew_inner_voice` iv-a~f + 변형 1회, node --check, check_vpoc 전체 1회
+- [x] 8. 지시서 118a: MOTION voices(`_prompt_voices`)·통 테이크 lines·줄 빼기(lineDropN)·속마음 deliveryEn 없음·촬영 지시서 표시·`mouth stays closed` 보호, 검사 `check_vnew_inner_voice_118a` iv2-a~e + 변형 1회

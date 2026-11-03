@@ -2559,7 +2559,7 @@ def _harmony_line(plan: dict, full: bool) -> str:
     )
 
 
-def _motion_line(full: bool) -> str:
+def _motion_line(full: bool, voices: str = "spoken") -> str:
     """자연스러운 연기(MOTION) 한 줄(영어, 설계자 2026-10-26 재지시 v2).
 
     프리비즈의 '말하는 중' 머리 흔들림(speaking 플래그)은 화자 표시일 뿐이므로 따라 하지 말고,
@@ -2567,30 +2567,58 @@ def _motion_line(full: bool) -> str:
     숨·깜빡임·눈동자·대사별 표정)과 패럴랙스를 지시한다.
 
     full(통 테이크): 전체 지시. short(컷 단위 Kling, ≤300 바이트): 핵심만.
+
+    voices(지시서 118a): 그 범위(컷·테이크) 대사 줄의 목소리 — _prompt_voices 가 정한다.
+      "spoken"·"none"(기본): 지금 문구 그대로. "thought": 입 모양·립싱크 구절 → mouth stays closed(속마음 목소리만,
+      눈·얼굴 연기). "mixed": 립싱크는 보통 대사에만, 속마음 줄은 mouth stays closed.
     """
     if full:
+        lips = {
+            "thought": ("small nods or tilts on stressed words; mouth stays closed \u2014 the lines are inner voice-over; "
+                        "show the feeling with eyes and face only; "),
+            "mixed": ("small nods or tilts on stressed words; lip sync only on spoken lines; mouth stays closed during "
+                      "inner voice-over lines; "),
+        }.get(voices, "mouth shapes matching the Korean syllables, small nods or tilts on stressed words; ")
         return (
             "MOTION: Animate living characters, not a moving still. The mannequins' head bobbing in "
             "@Video1 only marks who speaks \u2014 do NOT copy it. Natural acting: breathing, blinks, eye "
-            "darts, micro-expressions that change with each line, mouth shapes matching the Korean "
-            "syllables, small nods or tilts on stressed words; hair strands and clothing react to every "
+            "darts, micro-expressions that change with each line, " + lips + "hair strands and clothing react to every "
             "movement; listeners stay still but alive. Body moves only where @Video1 has real blocking "
             "(turn, reach, lean, walk) with anticipation and easing. Camera: follow @Video1's moves with "
             "multi-plane parallax between foreground, characters and background; no jitter or looping "
             "motion."
         )
+    lips_short = {
+        # 300B 안에 들게 "expressions changing with the line, lip sync" 자리를 통째로 바꾼다.
+        "thought": "mouth stays closed, face and eyes act the inner voice-over",
+        "mixed": "lip sync only on spoken lines; mouth stays closed in inner voice-over",
+    }.get(voices, "expressions changing with the line, lip sync")
     return (
         "MOTION: @Video1's head bobbing only marks the speaker \u2014 do NOT copy it. Natural acting: "
-        "breathing, blinks, eye darts, expressions changing with the line, lip sync; hair and clothes "
+        "breathing, blinks, eye darts, " + lips_short + "; hair and clothes "
         "react to movement; move only where @Video1 shows blocking; parallax depth; no jitter."
     )
+
+
+def _prompt_voices(lines) -> str:
+    """대사 줄 목록의 목소리(지시서 118a): 없음 → "none", 모두 속마음 → "thought", 섞임 → "mixed", 그 밖 → "spoken".
+
+    줄은 _cut_lines 줄(thought 키) 또는 통 테이크 lines 항목({thought: bool}) — 판정은 prompts.is_thought 하나로 한다.
+    """
+    flags = [_is_thought(line) for line in lines or []]
+    if not flags:
+        return "none"
+    if all(flags):
+        return "thought"
+    return "mixed" if any(flags) else "spoken"
 
 
 def _take_timeline_entries(plan: dict, take: dict) -> list[dict]:
     """테이크 컷들의 타임라인 항목 목록(구조화, 설계자 2026-10-26, 컷 보존 수정).
 
-    컷마다 dict 를 돌려준다: {start, end, shot, onScreen, offScreenSpeaker, action, speaker, dialogue,
+    컷마다 dict 를 돌려준다: {start, end, shot, onScreen, offScreenSpeaker, action, speaker, dialogue, lines,
     eyelines, names, gazeDefault, gaze}. 조립·줄이기는 _take_prompt 가 맡는다(여기서는 자르지 않는다).
+    lines(지시서 118a) = 컷의 모든 대사 [{speaker, dialogue, thought}](빈 대사 제외, 순서 유지).
     시간 범위는 콘티 컷 seconds 를 누적해 만든다. shot 은 샷 약어(크기+각도, 렌즈·거리 숫자 없음)이고
     action 은 촬영 지시서(shotBrief) actionEn 앞 1문장. 대사는 _cut_lines 로 귀속한 첫 발화(화자·대사).
     onScreen 은 이 컷에 보이는 사람([{name,how}]), offScreenSpeaker 는 화면 밖 화자 이름이다(067).
@@ -2629,6 +2657,12 @@ def _take_timeline_entries(plan: dict, take: dict) -> list[dict]:
             speaker = str(first.get("speaker") or "").strip() or "A character"
             dialogue = str(first.get("lineKo") or "").strip()
             thought = _is_thought(first)
+        # 지시서 118a: 컷의 모든 대사 줄(빈 대사 제외, 순서 유지). speaker·dialogue·thought(첫 줄)는 뒤호환으로 둔다.
+        all_lines = [
+            {"speaker": str(ln.get("speaker") or "").strip() or "A character",
+             "dialogue": str(ln.get("lineKo") or "").strip(), "thought": _is_thought(ln)}
+            for ln in spoken
+        ]
         eyelines = _cut_eyelines(plan, cut)
         names = [str(e.get("name") or "") for e in eyelines if e.get("name")]
         gaze_default = _gaze_is_default(eyelines, speaker, names)
@@ -2644,6 +2678,7 @@ def _take_timeline_entries(plan: dict, take: dict) -> list[dict]:
                 "action": action_en,
                 "speaker": speaker,
                 "dialogue": dialogue,
+                "lines": all_lines,
                 "eyelines": eyelines,
                 "names": names,
                 "gazeDefault": gaze_default,
@@ -2677,6 +2712,8 @@ MOTION_MIN = (
     "MOTION: Living characters, not a panned or zoomed still; @Video1's head bobbing only marks the speaker, "
     "do NOT copy it; parallax depth, no jitter."
 )
+# 지시서 118a: 속마음이 있는 테이크(thought·mixed)의 최소형에서 MOTION_MIN 뒤에 붙이는 입 다묾 구절.
+MOTION_MIN_INNER = " Mouth stays closed during inner voice-over."
 # HARMONY 짧은 형 틀(≤ 160B): 시간대·빛 방향·색온도 고정, 시간대 떠내려감 금지, 접지 그림자. 장소 빛 문장은 뺀다.
 HARMONY_MIN = (
     "HARMONY: {tod} light; same light direction and color temperature on characters and background in every cut, "
@@ -2796,6 +2833,23 @@ def _take_prompt(plan: dict, take: dict, *, cast: list[dict], panel_nos: list[in
     real = variant == "real"
     entries = _take_timeline_entries(plan, take)
     all_stamps = [f"{e['start']}-{e['end']}s" for e in entries]
+    # 지시서 118a: 줄이기 마지막에 빼는 대사 줄 (항목 번호, 줄 번호). 비어 있으면 모든 줄을 쓴다.
+    dropped_lines: set[tuple[int, int]] = set()
+
+    def _all_entry_lines(entry: dict) -> list[dict]:
+        # lines 가 없는 항목(옛 모양)은 첫 대사 필드로 1줄을 만든다.
+        if "lines" in entry:
+            return list(entry.get("lines") or [])
+        if str(entry.get("dialogue") or "").strip():
+            return [{"speaker": entry.get("speaker"), "dialogue": entry.get("dialogue"), "thought": bool(entry.get("thought"))}]
+        return []
+
+    def _entry_lines(entry: dict) -> list[dict]:
+        idx = next((i for i, e in enumerate(entries) if e is entry), -1)
+        return [ln for j, ln in enumerate(_all_entry_lines(entry)) if (idx, j) not in dropped_lines]
+
+    take_lines = [ln for e in entries for ln in _all_entry_lines(e)]
+    take_voices = _prompt_voices(take_lines)
 
     # 이름 → 표기 매핑(로마자). 촬영 지시서/캐릭터의 영문 표기(nameEn/roman)가 있으면 그걸, 없으면
     # 간단 로마자 변환. ASSETS 는 "{한국 이름} ({로마자})" 로 소개하고, TIMELINE·gaze·화자는 로마자를 쓴다.
@@ -2875,8 +2929,9 @@ def _take_prompt(plan: dict, take: dict, *, cast: list[dict], panel_nos: list[in
     rule_eyes = (
         " Eyes: the on-screen speaker looks at the listener; an off-screen voice never appears on screen."
     )
-    if any(e.get("thought") for e in entries):
+    if take_voices in ("thought", "mixed"):
         # 지시서 117: 속마음 대사가 있는 테이크만. rule_eyes 는 어떤 축약·최소형에서도 남는 필수 문장이라 여기 둔다.
+        # 118a: 첫 줄만이 아니라 컷의 모든 줄(lines)로 판정한다.
         rule_eyes += " During an inner voice-over that person's mouth stays closed and the lips do not move; the line is still heard in their voice."
     rule_extra = (
         " Do not add any person, action or scene. No mannequins remain. "
@@ -2900,7 +2955,7 @@ def _take_prompt(plan: dict, take: dict, *, cast: list[dict], panel_nos: list[in
     # MOTION·HARMONY(설계자 2026-10-26 재지시 v2). 둘 다 지우지 않는 등급(고정 본문, full). MOTION 은
     # 마네킹 흔들림을 따라 하지 말고 살아 움직이는 2차 동작·패럴랙스를 하라고, HARMONY 는 인물·배경
     # 빛·색온도·접지 그림자를 맞추라고 지시한다. 통 테이크라 둘 다 full.
-    motion = _motion_line(True)
+    motion = _motion_line(True, take_voices)
     harmony = _harmony_line(plan, True)
     if real:
         harmony = vnew_fx.strip_drawing_words(harmony)  # 장소 빛 문장(lightEn)의 그림 낱말
@@ -3007,6 +3062,20 @@ def _take_prompt(plan: dict, take: dict, *, cast: list[dict], panel_nos: list[in
                 parts.append(name)
         return "ON SCREEN: " + ", ".join(parts)
 
+    def _line_piece(line: dict, off_speaker: str, limit: int) -> str:
+        # 대사 한 줄 표기(지시서 117·118a): 속마음 > 화면 밖 > 보통. 글자 상한은 줄마다 적용한다.
+        speaker_ko = str(line.get("speaker") or "").strip()
+        dialogue = _clip(str(line.get("dialogue") or "").strip(), limit)
+        if not dialogue:
+            return ""
+        who = _disp_name(speaker_ko) or "A character"
+        if line.get("thought"):
+            # 지시서 117: 속마음은 화면 밖 화자 표기보다 우선(입 다문 채 목소리만).
+            return f'{who} (inner voice-over, lips closed): "{dialogue}"'
+        if off_speaker and off_speaker == speaker_ko:
+            return f'{who} (off-screen voice): "{dialogue}"'
+        return f'{who}: "{dialogue}"'
+
     def _entry_text(entry: dict) -> str:
         # 형식: "{s}-{e}s {샷 약어}: ON SCREEN …; {연기}; {화자}: \"{대사}\"[; gaze …]".
         # ON SCREEN 줄을 컷 항목 맨 앞(타임스탬프·샷 뒤)에 둔다. 화면 밖 화자 대사는 "(off-screen voice)".
@@ -3029,19 +3098,12 @@ def _take_prompt(plan: dict, take: dict, *, cast: list[dict], panel_nos: list[in
         fx_texts = [] if real else vnew_fx.sentences(entry.get("fx"), short=state["fx_short"])
         if fx_texts:
             pieces.append("FX: " + (", " if state["fx_short"] else " / ").join(fx_texts))
-        speaker_ko = str(entry.get("speaker") or "").strip()
-        speaker = _disp_name(speaker_ko)
         off_speaker = str(entry.get("offScreenSpeaker") or "").strip()
-        dialogue = _clip(str(entry.get("dialogue") or "").strip(), state["dialogue_limit"])
-        if dialogue:
-            who = speaker or "A character"
-            if entry.get("thought"):
-                # 지시서 117: 속마음은 화면 밖 화자 표기보다 우선(입 다문 채 목소리만).
-                pieces.append(f'{who} (inner voice-over, lips closed): "{dialogue}"')
-            elif off_speaker and off_speaker == speaker_ko:
-                pieces.append(f'{who} (off-screen voice): "{dialogue}"')
-            else:
-                pieces.append(f'{who}: "{dialogue}"')
+        # 지시서 118a: 컷의 모든 대사 줄(lines)을 순서대로. 표기 규칙은 줄마다 속마음 > 화면 밖 > 보통.
+        for ln in _entry_lines(entry):
+            piece = _line_piece(ln, off_speaker, state["dialogue_limit"])
+            if piece:
+                pieces.append(piece)
         # gaze(시선)는 기본과 다른 예외 컷에서만.
         gaze = _clip(_entry_gaze(entry), state["gaze_limit"])
         if gaze:
@@ -3109,6 +3171,36 @@ def _take_prompt(plan: dict, take: dict, *, cast: list[dict], panel_nos: list[in
         applied.append(label)
         prompt = _assemble()
 
+    def _line_drop_order() -> list[tuple[int, int]]:
+        # 지시서 118a: 뺄 대사 줄 순서 — 보통 대사(뒤 컷·뒤 줄부터) 다음 속마음(같은 순서). 컷마다 1줄은 남기고,
+        # 속마음이 있는 컷은 첫 속마음 줄을, 없는 컷은 첫 줄을 남긴다(속마음 표시는 마지막까지 남는다).
+        spoken_order: list[tuple[int, int]] = []
+        thought_order: list[tuple[int, int]] = []
+        for i in range(len(entries) - 1, -1, -1):
+            cut_lines = _all_entry_lines(entries[i])
+            if len(cut_lines) < 2:
+                continue
+            first_thought = next((j for j, ln in enumerate(cut_lines) if ln.get("thought")), None)
+            first_spoken = next((j for j, ln in enumerate(cut_lines) if not ln.get("thought")), None)
+            for j in range(len(cut_lines) - 1, -1, -1):
+                if cut_lines[j].get("thought"):
+                    if j != first_thought:
+                        thought_order.append((i, j))
+                elif first_thought is not None or j != first_spoken:
+                    spoken_order.append((i, j))
+        return spoken_order + thought_order
+
+    # 지시서 118a: 기존 단계(①~⑨)로도 넘치면 대사 줄을 하나씩 뺀다 — 보통 대사 뒤쪽 줄 먼저, 속마음 줄은 마지막까지.
+    # 컷마다 1줄은 남는다. 줄이 1줄인 컷만이면 뺄 줄이 없어 지금과 같다. 최소형은 뺀 상태 그대로 재구성한다.
+    drop_order = _line_drop_order()
+    dropped_count = 0
+    while _utf8_len(prompt) > budget and dropped_count < len(drop_order):
+        dropped_lines.add(drop_order[dropped_count])
+        dropped_count += 1
+        prompt = _assemble()
+    if dropped_count:
+        applied.append(f"lineDrop{dropped_count}")
+
     # 모든 컷 타임스탬프가 남아 있는지 확인(assert 성격). 축소 단계로도 넘치거나 타임스탬프가 빠졌으면
     # TIMELINE 을 점점 더 최소형으로 바꿔 **모든 컷을 지킨다**. ASSETS 인물 문장은 모든 후보에 유지.
     def _all_present(text: str) -> bool:
@@ -3146,17 +3238,12 @@ def _take_prompt(plan: dict, take: dict, *, cast: list[dict], panel_nos: list[in
                     fx_short = vnew_fx.sentences(e.get("fx"), short=True)
                     if fx_short:
                         bits.append("FX: " + ", ".join(fx_short))
-                speaker_ko = str(e.get("speaker") or "").strip()
-                dialogue = _clip(str(e.get("dialogue") or "").strip(), 25)
-                if dialogue:
-                    who = _disp_name(speaker_ko) or "A character"
-                    off = str(e.get("offScreenSpeaker") or "").strip()
-                    if e.get("thought"):
-                        bits.append(f'{who} (inner voice-over, lips closed): "{dialogue}"')
-                    elif off and off == speaker_ko:
-                        bits.append(f'{who} (off-screen voice): "{dialogue}"')
-                    else:
-                        bits.append(f'{who}: "{dialogue}"')
+                off = str(e.get("offScreenSpeaker") or "").strip()
+                # 지시서 118a: 모든 줄, 줄마다 25자.
+                for ln in _entry_lines(e):
+                    piece = _line_piece(ln, off, 25)
+                    if piece:
+                        bits.append(piece)
                 gaze = _clip(_entry_gaze(e), 55)
                 if gaze:
                     bits.append(gaze)
@@ -3188,6 +3275,10 @@ def _take_prompt(plan: dict, take: dict, *, cast: list[dict], panel_nos: list[in
 
         def _join(blocks: list[str]) -> str:
             return "\n".join(b for b in blocks if b)
+
+        # 지시서 118a: 속마음이 있는 테이크는 RULES 가 없는 최소형(assetsStripped)에서 MOTION_MIN 뒤에 입 다묾 구절을
+        # 남긴다. RULES 가 있는 후보는 rule_eyes 가 이미 "mouth stays closed" 를 담아 붙이지 않는다(MOTION_MIN 은 그대로).
+        motion_min_inner = MOTION_MIN + (MOTION_MIN_INNER if take_voices in ("thought", "mixed") else "")
 
         # (머리 블록, 꼬리 블록). MOTION·HARMONY 를 넣으면 TIMELINE 과 RULES 사이(_assemble 순서와 같다).
         keep_action = [
@@ -3227,7 +3318,8 @@ def _take_prompt(plan: dict, take: dict, *, cast: list[dict], panel_nos: list[in
         if chosen is None and fx_on:
             saved_limits = (state["appearance_limit"], state["voice_limit"], state["costume_limit"])
             state["appearance_limit"], state["voice_limit"], state["costume_limit"] = 0, 0, 80
-            stripped_mh = _join([style_first, _assets(), _minimal_timeline(False, False)] + mh_short)
+            stripped_mh = _join([style_first, _assets(), _minimal_timeline(False, False), motion_min_inner,
+                                 _harmony_min(plan)])
             state["appearance_limit"], state["voice_limit"], state["costume_limit"] = saved_limits
             if _utf8_len(stripped_mh) <= budget and _all_present(stripped_mh):
                 chosen = stripped_mh
@@ -4502,7 +4594,8 @@ def _cut_prompt(plan: dict, seg: dict, variant: str, *, cast: list[dict], has_im
             text = str(line.get("lineKo") or "").strip()
             piece = (f'{speaker or "A character"} (inner thought, voice-over only — mouth stays closed, lips do not move): "{text}"'
                      if _is_thought(line) else f'{speaker or "A character"} (Korean, lips move): "{text}"')
-            if with_delivery:
+            if with_delivery and not _is_thought(line):
+                # 지시서 118a: 속마음 줄에는 deliveryEn 을 붙이지 않는다(옛 촬영 지시서는 말하기 연기를 적었다).
                 delivery = delivery_by_speaker.get(speaker, "")
                 if delivery:
                     piece += f" — {delivery}"
@@ -4557,7 +4650,8 @@ def _cut_prompt(plan: dict, seg: dict, variant: str, *, cast: list[dict], has_im
     # MOTION·HARMONY short(설계자 2026-10-26 재지시 v2). 컷 단위(Kling)에서도 마네킹 흔들림을 따라
     # 하지 말고 살아 움직이는 연기·2차 동작·패럴랙스를 하라고, 인물·배경 빛을 맞추라고 지시한다. 둘 다
     # **지우지 않는 등급** — 줄이기 단계에서 건드리지 않는다(기존 대사·gaze 등이 먼저 줄어든다).
-    motion_short = _motion_line(False)
+    # 지시서 118a: 이 컷 대사 줄의 목소리(속마음만·섞임이면 입 모양 구절을 바꾼다, spoken·none 은 지금 문구).
+    motion_short = _motion_line(False, _prompt_voices(spoken))
     harmony_short = _harmony_line(plan, False)
 
     def _setting_line(bg: str, scene_summary: str) -> str:
