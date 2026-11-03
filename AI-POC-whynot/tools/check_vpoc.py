@@ -41532,10 +41532,10 @@ def check_vnew_edit_retake() -> None:
                     0, 1, [], 1, [200, 200],
                     [("current", None), ("final", None), ("retake", 2)],
                     [{"slot": "element2.front", "key": ""}, {"slot": "element2.ref1", "key": ""}, {"slot": "image1", "key": ""}],
-                    ["emit_retake_prompt", 3000, "vnew.retake.rewrite", "mm", {"promptEn": "x"}], ["t1"], False],
+                    ["emit_retake_prompt", 8000, "vnew.retake.rewrite", "mm", {"promptEn": "x"}], ["t1"], False],
                    "도우미: 채운 컷 버전 trimTo·글자 n·실패·없는 칸 거름, 없는 칸·번호 거절, 재구성 매개변수(컷·실사 audio), 프레임 시각, 없는 컷, 실사 규칙 6, "
                    "버전 없음·깨진 칸, LLM 토큰 0·원장 실패 경고, 영상 없음 프레임 [], retakes.json·이어받기 실패에도 GET /edit 200, 지금 결과 없는 칸 버전·겹친 키, "
-                   "_RefTrace 깨진 element, _rewrite 인자(도구·3000·where·모델), _spawn 스레드·_sleep·_alive_here")
+                   "_RefTrace 깨진 element, _rewrite 인자(도구·8000(보완 7)·where·모델), _spawn 스레드·_sleep·_alive_here")
             # (rtk-b·e) "소리 없이 다시 만들기"(칸 audio false): 기록 매개변수 audio false, 다시 만들기 본문 generate_audio false. 짧은 컷 견적은 3초 과금
             genmod.retry_segment(owner, pid_b, "take1", "real", audio=False)
             env.drive(pid_b)
@@ -42767,10 +42767,19 @@ def check_vnew_edit_retake_models() -> None:
                              ["at most 4000 UTF-8 bytes. Aim for about 3400 bytes" in sys_d6, "each Korean character is 3 UTF-8 bytes" in sys_d6,
                               "at most 2500 UTF-8 bytes. Aim for about 2125 bytes" in sys_m6, "each Korean character is 3 UTF-8 bytes" in sys_m6],
                              ["emit_short_prompt exactly once" in sys_s6, "Write no text outside the tool call." in sys_s6, "resultKo" in sys_s6]],
-                   [("emit_short_prompt", ["promptEn"], ["promptEn"], 8000, "vnew.retake.shrink"), (True, 3000, "vnew.retake.rewrite"), 8000, False,
+                   [("emit_short_prompt", ["promptEn"], ["promptEn"], 8000, "vnew.retake.shrink"), (True, 8000, "vnew.retake.rewrite"), 8000, False,
                     [True, True, True, True], [True, True, False]],
-                   "보완 6: 줄이기 요청 = 도구 promptEn 하나·maxTokens SHRINK_MAX_TOKENS(잘림 재시도 예산이 더 크지 않음), 초안 호출 도구·3000 그대로, "
+                   "보완 6: 줄이기 요청 = 도구 promptEn 하나·maxTokens SHRINK_MAX_TOKENS(잘림 재시도 예산이 더 크지 않음), 초안 호출 도구 그대로·8000(보완 7), "
                    "초안 문구 상한·목표(0.85)·한국어 3바이트(두 경로), 줄이기 문구 도구 밖 글 금지")
+            # 보완 7: 초안 호출 실제 _request — maxTokens DRAFT_MAX_TOKENS(8000)·도구 emit_retake_prompt, 줄이기 요청은 그대로
+            req_d7 = rt.vpoc_llm._request("mm", "S", [{"text": "b"}], conv_z[1]["tool"], conv_z[1]["max_tokens"]) if len(conv_z) > 1 else {}  # noqa: SLF001
+            expect("rtk-w", [rt.DRAFT_MAX_TOKENS, (req_d7.get("inferenceConfig") or {}).get("maxTokens"),
+                             [t.get("toolSpec", {}).get("name") for t in (req_d7.get("toolConfig") or {}).get("tools") or []],
+                             (req_z.get("inferenceConfig") or {}).get("maxTokens"),
+                             [t.get("toolSpec", {}).get("name") for t in (req_z.get("toolConfig") or {}).get("tools") or []],
+                             hasattr(rt, "LLM_MAX_TOKENS")],
+                   [8000, 8000, ["emit_retake_prompt"], 8000, ["emit_short_prompt"], False],
+                   "보완 7: 초안 요청 maxTokens 8000·도구 emit_retake_prompt, 줄이기 요청 8000·emit_short_prompt 그대로, LLM_MAX_TOKENS 없음")
             kl_z5, kl_z30 = motion_pad(2625), motion_pad(3250)
             logs.clear()
             trim_n[0] = 0
