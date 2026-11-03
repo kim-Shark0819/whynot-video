@@ -1085,6 +1085,7 @@ def run_design(owner: str, pid: str, task_id: str) -> None:
         # 2.5) 외형(머리카락 색)·연기(gesture·gestureTarget)를 장면 인물·timeline 에 채운다.
         _apply_appearance(owner, scenes, chars)
         _apply_gestures(scenes, groups, grammar_by_cut, plan)
+        _mute_thought_speakers(scenes, plan)
 
         # 2.6) 받침 맞춤(previz-support-reasoning R5): 패널에서 읽은 받침 판단으로 컷 인물 자세·앉을 소품·소품 윗면
         # 높이를 맞춘다(보정 1차 전 — 1차가 이 sitOn·높이로 앉힌다). 사본에 적용하고 성공하면 바꾼다(실패하면 그대로).
@@ -1570,6 +1571,32 @@ def _apply_gestures(scenes: list[dict], groups: list[dict], grammar_by_cut: dict
                     continue
                 ca["gesture"] = "turn_head_to_other"
                 ca["gestureTarget"] = listener_id
+
+
+def _mute_thought_speakers(scenes: list[dict], plan: dict | None) -> None:
+    """지시서 117: 그 컷에서 속마음(thought) 대사만 있는 화자의 timeline actor speaking 을 끈다.
+
+    speaking(머리 끄덕임)은 '말하는 사람' 표시라 켜 두면 영상 모델이 입을 움직인다. 같은 컷에 그 사람의 spoken
+    대사가 있으면 지금 값(설계 LLM 이 준 값)을 그대로 둔다. 대사 귀속·속마음 판정은 generate._cut_lines 를 쓴다.
+    """
+    if not isinstance(plan, dict):
+        return
+    conti_cut_by_id = {str(c.get("id") or ""): c for c in (plan.get("conti") or {}).get("cuts") or [] if isinstance(c, dict)}
+    from . import generate as gen_mod  # noqa: PLC0415 — 순환 import 피하려고 함수 안에서
+    for scene in scenes or []:
+        name_by_id = {str(a.get("id") or ""): str(a.get("name") or "").strip() for a in scene.get("actors") or []}
+        for cut in scene.get("timeline") or []:
+            conti_cut = conti_cut_by_id.get(str(cut.get("cutId") or ""))
+            if not conti_cut:
+                continue
+            thought, spoken = set(), set()
+            for line in gen_mod._cut_lines(plan, conti_cut):  # noqa: SLF001
+                name = str(line.get("speaker") or "").strip()
+                if name and not line.get("silent"):
+                    (thought if line.get("thought") else spoken).add(name)
+            for ca in cut.get("actors") or []:
+                if name_by_id.get(str(ca.get("id") or ""), "") in (thought - spoken):
+                    ca["speaking"] = False
 
 
 def _place_cameras(owner, pid, scenes, groups, grammar_by_cut, overrides, *, task_id="") -> dict:
