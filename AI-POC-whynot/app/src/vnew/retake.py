@@ -1365,6 +1365,7 @@ def _shrink_draft(owner: str, pid: str, gen_id: str, key: str, draft_id: str, cl
     보완 6: 줄이기 호출은 전용 도구·예산(_rewrite shrink=True). LLM 줄이기마다 그 전에 초과가 상한 × SHRINK_TRIM_FIRST 이하면 자르기부터
     해 본다 — 상한 안이고 _shrink_better 를 통과하면 LLM 없이 끝, 아니면 기존처럼 LLM 줄이기. 같은 글은 두 번 자르지 않는다.
     shrink_try·shrink_trim 로그에 ms(그 단계 시간)·shrink_trim 에 after(그때까지의 LLM 줄이기 수).
+    보완 8: SHRINK_TRIM_FIRST 비율 조건은 1번째 LLM 줄이기 전에만 본다. 2번째부터는 초과 비율과 상관없이 항상 자르기부터.
     """
     max_bytes = int(rules["maxBytes"])
     if _bytes_of(prompt) <= max_bytes:
@@ -1394,7 +1395,8 @@ def _shrink_draft(owner: str, pid: str, gen_id: str, key: str, draft_id: str, cl
         size = _bytes_of(prompt)
         if size <= max_bytes:
             break
-        if size - max_bytes <= max_bytes * SHRINK_TRIM_FIRST:  # 보완 6: 작은 초과 → 자르기부터(상한 안이면 LLM 줄이기 0)
+        # 보완 6: 1번째 전에는 작은 초과일 때만, 보완 8: 2번째부터는 초과 비율과 상관없이 항상 자르기부터(상한 안이면 LLM 줄이기 생략)
+        if n > 1 or size - max_bytes <= max_bytes * SHRINK_TRIM_FIRST:
             trimmed, new_problems, kept = trim(prompt, problems)
             if kept and _bytes_of(trimmed) <= max_bytes:
                 prompt, problems, used = trimmed, new_problems, True
