@@ -40601,6 +40601,42 @@ def _rtk_reply(base: str, old: str, new: str, *, result: str = "남자가 화면
     return {"resultKo": result, "promptEn": base.replace(old, new), "changesKo": list(changes or ["웃음을 뺐습니다", ""])}
 
 
+_RTK_TRIM_MOTION = ("MOTION: Don't copy @Video1's head bobbing (speaker marker only). Restrained acting: breathing, blinks, small eye darts, "
+                    "smooth expression changes, accurate lip sync; no snaps, eased starts/stops; hair and clothes react softly; move only "
+                    "per @Video1's blocking; parallax; no jitter or warping.")
+_RTK_TRIM_HARMONY = ("HARMONY: bright, slightly warm daytime sun (noon–afternoon, not sunset); brighter exposure on faces and rooftop; same "
+                     "light direction and color temperature in both cuts; soft contact shadows; consistent scale; one palette.")
+_RTK_TRIM_DIALOGUE = ('DIALOGUE: 0–1.0s 여의준 (off-screen, never shown): "죄송해요…. 역시 불편하셨겠죠….", then 범건우 (Korean, lips move): '
+                      '"…아냐. 재밌네. 계속 해 봐.".')
+
+
+def _rtk_trim_cases(rt) -> list[tuple]:
+    """(rtk-w) 보완 5: _trim_to_limit 순수 검사 (결과, 기대, 설명) 목록 — 그룹 검사와 변형 검사가 같이 쓴다."""
+    out: list[tuple] = []
+    text = "\n".join([_RTK_TRIM_MOTION, _RTK_TRIM_HARMONY, _RTK_TRIM_DIALOGUE] * 3 + [_RTK_TRIM_MOTION, _RTK_TRIM_HARMONY])
+    got, cut = rt._trim_to_limit(text, 2500, ["@Video1"], ["MOTION", "HARMONY", "DIALOGUE"])  # noqa: SLF001
+
+    def keep(s: str) -> list:
+        return [rt._REF_RE.findall(s), re.findall(r"[가-힣]+", s), re.findall(r'"[^"\n]*"', s),  # noqa: SLF001
+                re.findall(r"\d[\d.]*–\d[\d.]*s", s), [line.split(":", 1)[0] for line in s.split("\n")]]
+
+    first = ("MOTION: Don't copy @Video1's head bobbing. Restrained acting: breathing, blinks, small eye darts, accurate lip sync; "
+             "move only per @Video1's blocking.")
+    out.append(([2600 <= len(text.encode()) < 2700, len(got.encode()) <= 2500, cut, keep(got) == keep(text),
+                 rt.check_prompt(got, text, {"maxBytes": 2500}), got.split("\n")[0], got.split("\n")[1:] == text.split("\n")[1:],
+                 re.findall(r"(?m)[;,][ \t]*[;,.]|  |[;,][ \t]*$", got)],
+                [True, True, 7, True, [], first, True, []],
+                "자르기: 실제 모양 2,6xxB → 2,500 안(괄호 먼저·뒤 조각부터·마침표 옮김·첫 줄에서 멈춤), 참고 표시·한글·대사·시간·항목 이름 그대로, 문제 0, "
+                "구두점·공백 겹침 0"))
+    guarded = 'MOTION: @Video1 blocking, 0–1.0s turn, "그래" line, 한국어 설명\nHARMONY: one palette'
+    small = 'STYLE: (soft look) film grain, @Image1 look\nSHOT: wide, low angle\nMOOD: 0–2s calm ("쉿"), quiet'
+    out.append(([rt._trim_to_limit(guarded, 20, [], []), rt._trim_to_limit(small, 10, [], []),  # noqa: SLF001
+                 rt._trim_to_limit(small, 10, [], ["SHOT"]), rt._trim_to_limit(small, 4000, [], [])],  # noqa: SLF001
+                [(guarded, 0), ('STYLE: @Image1 look\nSHOT: wide, low angle\nMOOD: 0–2s calm ("쉿")', 3), (small, 0), (small, 0)],
+                "자르기: 보호 조각·한 조각 줄만 → 원문·0, 괄호(맨 앞)·첫 조각·보호 괄호 건너뜀·줄마다 1조각 남김·목록 밖 줄(SHOT) 그대로, 상한 안 → 그대로"))
+    return out
+
+
 def _time_sleep(seconds: float) -> None:
     import time as _time  # noqa: PLC0415
 
@@ -42296,6 +42332,7 @@ def check_vnew_edit_retake_models() -> None:
     (rtk-t) CSS 보완 1 구역·USER_FACING 새 kind 2개·던지는 곳 문구(AST)·끔이면 GET /edit 에 새 표식 없음
     (rtk-u) 로컬 ffmpeg: _pad_clip 실제 mp4 길이·임시 폴더 0
     (rtk-w) 보완 3: 바이트 초과 초안 → 같은 모델에 줄이기 1번(두 경로)·더 나음 판정·원장 -shrink 줄·shrunk·두 번째 예외는 처음 것·화면 안내
+            보완 5: 2번째 줄이기 문구에 직전 초과분·낮춘 목표, 그래도 넘으면 _trim_to_limit(LLM 0)·보호 조각·로그 shrink_trim·상한 안이면 자르기 0
     (rtk-x) 보완 4: 최대 대기 Kling 75분·그 밖 30분, 시간 초과 버전(timedOut·옛 문구) → 패널 보기에서 조회 1번(60초 간격·24시간 안)·Completed 면
             completed, InProgress·Failed·예외 그대로, 새 제출 0, 화면 안내
     """
@@ -42499,6 +42536,8 @@ def check_vnew_edit_retake_models() -> None:
                    [True, True, True, True, True, True, True, False, False],
                    "새 길 LLM: 이전 프롬프트 그대로 → <target_format>(모델·형식·본보기) → 콘티, 시스템 문구에 본보기 항목·참고 표시·고른 모델 상한")
             # 이전 형식 그대로인 응답 → 문제(고른 모델 형식 기준), 그대로 제출하면 400
+            trim_real = rt._trim_to_limit  # noqa: SLF001 — 보완 5: 아래 보완 3·3b 검사는 LLM 줄이기 단계만 본다(자르기는 보완 5 검사에서 되돌려 본다)
+            env.set(rt, "_trim_to_limit", lambda prompt, *_a, **_k: (prompt, 0))
             env.llm_reply = {"resultKo": "", "promptEn": base_t, "changesKo": []}
             d_old = draft_of(preview(pid_t, mid_t, {"requestKo": "그대로", "model": kl}))
             lost = [n for n in rt._labels(tmpl_kl) if n not in rt._labels(base_t)]  # noqa: SLF001
@@ -42625,6 +42664,87 @@ def check_vnew_edit_retake_models() -> None:
                              'dr.shrunk ? " · 길이 상한에 맞게 한 번 줄였습니다" : ""' in (PUBLIC / "vnew.js").read_text(encoding="utf-8")],
                    [True, True, True], "실사 줄이기 문구 webtoon 금지·참고 표시 목록 없으면 괄호 없음, 화면 초안 줄에 줄였다는 안내")
             report.append(f"rtk-w: 줄이기 {len(over_kl.encode())}B → {len(ok_kl_w.encode())}B · 판정 {len(better)}꼴")
+            # ================= (rtk-w) 보완 5: 남은 초과를 숫자로 다시 지시·LLM 없이 규칙대로 자르기 =================
+            trim_n = [0]
+
+            def trim_count(*args, **kwargs):
+                trim_n[0] += 1
+                return trim_real(*args, **kwargs)
+
+            env.set(rt, "_trim_to_limit", trim_count)
+            for got_t, want_t, what_t in _rtk_trim_cases(rt):
+                expect("rtk-w", got_t, want_t, what_t)
+
+            def motion_pad(size: int) -> str:
+                head, tail = ok_kl_w.split("; no jitter.", 1)
+                filler = ""
+                while len((head + filler + "; no jitter." + tail).encode()) < size:
+                    filler += "; soft sway"
+                return head + filler + "; no jitter." + tail
+
+            kl_y0, kl_y1, kl_y2 = motion_pad(2900), motion_pad(2700), motion_pad(2600)
+            over_y1 = len(kl_y1.encode()) - 2500
+
+            def shrink_calls(calls: list[dict]) -> list[dict]:
+                return [c for c in calls if shrink_mark in c["system"]]
+
+            def trim_logs() -> list[str]:
+                return [m.split("cell=")[1].split(" ", 1)[1] for m in logs.messages("vnew.retake.shrink_trim", level=logging.INFO) if "cell=" in m]
+
+            def kept_lines(prompt: str) -> list[str]:
+                return [line for line in prompt.split("\n") if not line.startswith("MOTION:")]
+
+            logs.clear()
+            trim_n[0] = 0
+            d_y1, calls_y1, _ = run_w(pid_t, mid_t, kl_y0, (kl_y1, kl_y2), {"requestKo": "자르기", "model": kl})
+            y1_trim, y1_logs, y1_prompt = trim_n[0], trim_logs(), str(d_y1.get("prompt") or "")
+            sys_y = [c["system"] for c in shrink_calls(calls_y1)]
+            lower_y = int(2500 * rt.SHRINK_TARGET_2) - over_y1
+            logs.clear()
+            trim_n[0] = 0
+            d_y2, calls_y2, _ = run_w(pid_t, mid_t, kl_y0, RuntimeError("down"), {"requestKo": "실패", "model": kl})
+            y2_trim, y2_logs = trim_n[0], trim_logs()
+            trim_n[0] = 0
+            d_y3, calls_y3, _ = run_w(pid_t, mid_t, ok_kl_w, ok_kl_w, {"requestKo": "안", "model": kl})
+            y3_trim = trim_n[0]
+            expect("rtk-w", [ok_kl_w.count("; no jitter."), [len(t.encode()) > 2500 for t in (kl_y0, kl_y1, kl_y2)],
+                             (d_y1.get("status"), len(y1_prompt.encode()) <= 2500, d_y1.get("problems"), d_y1.get("shrunk"),
+                              len(shrink_calls(calls_y1)), len(calls_y1), y1_trim, kept_lines(y1_prompt) == kept_lines(ok_kl_w),
+                              y1_prompt.startswith("MOTION: @Video1's head bobbing only marks the speaker", y1_prompt.find("MOTION:"))),
+                             [len(y1_logs), (y1_logs or [""])[0].startswith(f"from={len(kl_y2.encode())} to={len(y1_prompt.encode())} cut="),
+                              (y1_logs or [""])[0].endswith(" problems=0 kept=True")],
+                             ["The last shortening" in s for s in sys_y],
+                             [f"came out {over_y1} bytes over the limit" in (sys_y[1:] or [""])[0],
+                              f"aim for about {lower_y} bytes instead, which means cutting at least {len(kl_y1.encode()) - lower_y} bytes" in
+                              (sys_y[1:] or [""])[0]],
+                             [m for m in logs.messages() if "soft sway" in m or "Re-render this" in m],
+                             (d_y2.get("status"), len(str(d_y2.get("prompt") or "").encode()) <= 2500, d_y2.get("problems"), d_y2.get("shrunk"),
+                              len(shrink_calls(calls_y2)), y2_trim, [s.endswith(" problems=0 kept=True") for s in y2_logs]),
+                             (d_y3.get("shrunk"), len(calls_y3), y3_trim)],
+                   [1, [True, True, True],
+                    ("done", True, [], True, 2, 3, 1, True, True),
+                    [1, True, True], [False, True], [True, True], [],
+                    ("done", True, [], True, 1, 1, [True]),
+                    (False, 1, 0)],
+                   "보완 5: 줄이기 2번 다 초과 → 2번째 문구에 직전 초과분·낮춘 목표 숫자 → 자르기(LLM 0)로 상한 안·문제 0·shrunk·MOTION 밖 줄 그대로·"
+                   "로그 shrink_trim 1줄(원문 0), 줄이기 호출 실패 → 자르기, 상한 안 초안 → 자르기 0")
+            # 보호 조각만 → 원문 그대로·kept=False(줄이기 호출은 실패로 둔다 — 자르기는 그래도 한다)
+            guarded_y = 'MOTION: @Video1 blocking, 0–1.0s turn, "그래" line, 한국어 설명\nHARMONY: one palette'
+            rules_y = {"maxBytes": 20}
+            saved_beat = rt._draft_beat  # noqa: SLF001
+            rt._draft_beat = lambda *_a, **_k: {}  # noqa: SLF001
+            env.llm_reply = two_step("", RuntimeError("down"))
+            logs.clear()
+            trim_n[0] = 0
+            try:
+                got_y4 = rt._shrink_draft(owner, "p", "g", "k", "d", "c", prompt=guarded_y,  # noqa: SLF001
+                                          problems=rt.check_prompt(guarded_y, guarded_y, rules_y), base_prompt=guarded_y, rules=rules_y)
+            finally:
+                rt._draft_beat = saved_beat  # noqa: SLF001
+            expect("rtk-w", [got_y4[0] == guarded_y, len(got_y4[1]), got_y4[2], trim_n[0], trim_logs()],
+                   [True, 1, False, 1, [f"from={len(guarded_y.encode())} to={len(guarded_y.encode())} cut=0 problems=1 kept=False"]],
+                   "보완 5: 보호 조각만 → 원문 그대로·shrunk false·로그 kept=False(호출 실패 뒤에도 자르기 단계)")
+            report.append(f"rtk-w 보완 5: 자르기 {len(kl_y2.encode())}B → {len(y1_prompt.encode())}B")
 
             # ================= (rtk-x) 보완 4: 시간 초과 버전 되살리기(조회만, 제출 0) =================
             pid_x = "prj_rtk1_x"

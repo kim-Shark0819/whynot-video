@@ -87,3 +87,10 @@
 
 - [x] 21. `HTTP504` + "Generation timeout"이면 끝난 실패다. 되살리기는 failed·`timedOut` 지움·새 문구·`recover_gone`, 폴링은 재시도 없이 failed·`job_failed kind=gen_timeout`. 다른 VpocError는 그대로.
   - 완료 조건: rtk-x 이어서 4꼴(되살리기 504·502, 폴링 504·502), 기존 기대값 그대로, 전체 검사 "전부 통과".
+
+## 보완 5 — 줄이기 뒤 남은 초과 자르기(지시서 116 보완 5, 2026-11-03)
+
+> dev 실측: Kling O3 "이 구간만"(4초) 초안이 줄이기 2번 뒤 2,619B(상한 2,500). `retake.py`만 바꾼다(`_system_text_shrink` `over`, `_shrink_draft`, 새 `_trim_protected`·`_trim_split`·`_trim_clean`·`_trim_once`·`_trim_to_limit`, 상수 `SHRINK_TRIM_LINES`).
+
+- [x] 22. 2번째 시도부터 직전 초과분·낮춘 목표(`상한 × target − 초과분`)를 숫자로. LLM 뒤(실패 포함)에도 넘으면 규칙대로 자르기(LLM 0, `_shrink_better` 통과 시만, `shrunk=True`, 로그 `shrink_trim`). 상한 안 초안은 자르기 0.
+  - 완료 조건: rtk-w 이어서 순수 2꼴·흐름 2꼴, 변형 1회 잡힘, 기존 기대값 그대로, 전체 검사 1회 "전부 통과".
