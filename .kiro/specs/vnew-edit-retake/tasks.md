@@ -127,3 +127,5 @@
 
 - [x] 27. `edit._audio_sources`(버전·소리 없음·v1 소리 있음 → {v1 키, offset, scale, end}, `retake._time_map` 재사용), GET /edit 재료 `audioFrom`, 내보내기 `audio_source`·`audio_start_sec`·`audio_end_sec`(같은 speed, local 재사용), `stitcher.edit_segment` 두 번째 입력, `vnew.js` `editAudioLane`.
   - 완료 조건: rta-a~e(구간 offset = range.start + in·소리 있는 v2·v1 소리 없음·muted·1.5×·명령·화면), `node --check`, 전체 검사 "전부 통과".
+- [x] 28. 지시서 118b B: ⑦ 미리보기 원본 소리 — 숨은 `ctx.audio`, `editAltAudioAt`(= max(0, offset + in×scale) + (원본 시각 − in), end 넘으면 멈춤, 내보내기와 같음), `editSyncAudio`를 seek·재생·멈춤·다음 클립·tick(0.15초 넘게 어긋나면 다시)에, audioFrom 클립은 화면 <video> 음소거.
+  - 완료 조건: iv3-d(3조합·end 넘음·소리 끔·없음), `node --check`, 전체 검사 " 전부 통과\.

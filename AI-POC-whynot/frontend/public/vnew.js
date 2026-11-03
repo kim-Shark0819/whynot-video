@@ -2176,6 +2176,9 @@
       .then(function (plan) {
         if (!state.mounted || state.projectId !== pid) return;
         state.plan = plan;
+        // 지시서 118b: 서버에 저장된 대본 서명(속마음 찾기 전 저장 여부). scriptSigOf 와 같은 꼴을 여기서 바로 만든다.
+        var savedScript = (plan || {}).script || {};
+        state.scriptSig = JSON.stringify({ setting: savedScript.setting || {}, entries: savedScript.entries || [] });
         var editOpen = editOpenFor(pid);
         decidePlanStep();
         // ⑦ 편집이 열려 있으면(지시서 115) 처음 불러오기가 아닌 응답으로 다시 그리지 않는다 — ⑦ 이 ⑤ 로 밀려나거나 처음부터
@@ -3575,6 +3578,12 @@
   }
 
   /* ② 저장 · 다시 정리 · 콘티 만들기 버튼 묶음. */
+  /* 대본 setting·entries 서명(지시서 118b). 화면에서 고친 뒤 저장하지 않았는지 비교한다. */
+  function scriptSigOf(script) {
+    var s = script || {};
+    return JSON.stringify({ setting: s.setting || {}, entries: s.entries || [] });
+  }
+
   function scriptActions(host, showError, hasScript) {
     var footer = el("div", "vnew-plan-footer");
 
@@ -3590,6 +3599,7 @@
         })
           .then(function (plan) {
             state.plan = plan;
+            state.scriptSig = scriptSigOf((plan || {}).script);
             renderPlan();
           })
           .catch(function (err) {
@@ -3621,6 +3631,59 @@
         });
     });
     footer.appendChild(redoBtn);
+
+    // 지시서 118b: [속마음 찾기] — 말풍선 모양만 다시 보고 줄마다 voice 만 고친다(서버 POST /script/voices, 백그라운드).
+    if (hasScript) {
+      var vplan = state.plan || {};
+      var vtask = vplan.task || {};
+      var vscan = (vplan.script || {}).voiceScan || {};
+      var vrunning = vtask.status === "running" && vtask.name === "voiceScan";
+      var voiceBtn = el("button", "outline-button", vrunning ? "속마음 찾는 중…" : "속마음 찾기");
+      voiceBtn.type = "button";
+      voiceBtn.disabled = vrunning || vtask.status === "running";
+      if (vrunning) redoBtn.disabled = true;
+      voiceBtn.addEventListener("click", function () {
+        var okConfirm = false;
+        try {
+          okConfirm = window.confirm("말풍선 모양을 다시 보고 속마음 표시만 고칩니다. 다른 내용은 그대로입니다.");
+        } catch (e) {
+          okConfirm = true;
+        }
+        if (!okConfirm) return;
+        voiceBtn.disabled = true;
+        redoBtn.disabled = true;
+        voiceBtn.textContent = "속마음 찾는 중…";
+        var base = "/api/vnew/p/" + encodeURIComponent(state.projectId) + "/script";
+        var script = (state.plan || {}).script || {};
+        // 저장하지 않은 화면 수정이 있으면 먼저 저장한다(다시 불러오면 사라지므로). 없으면 저장하지 않아 revision 이 그대로다.
+        var save = scriptSigOf(script) !== state.scriptSig
+          ? api(base, { method: "PUT", body: JSON.stringify({ setting: script.setting || {}, entries: script.entries || [] }) })
+          : Promise.resolve(null);
+        save
+          .then(function () {
+            return api(base + "/voices", { method: "POST" });
+          })
+          .then(function () {
+            loadPlan(false);
+          })
+          .catch(function (err) {
+            voiceBtn.disabled = false;
+            redoBtn.disabled = false;
+            voiceBtn.textContent = "속마음 찾기";
+            showError("속마음 찾기를 시작하지 못했습니다: " + errMessage(err));
+          });
+      });
+      footer.appendChild(voiceBtn);
+      if (!vrunning && vscan.status === "done") {
+        var thoughtN = ((vplan.script || {}).entries || []).filter(function (entry) {
+          return isThoughtEntry(entry) && String(entry.lineKo || "").trim();
+        }).length;
+        footer.appendChild(el("span", "vnew-hint", "속마음 " + thoughtN + "줄 표시" +
+          (Number(vscan.changed) > 0 ? " (바뀐 줄 " + Number(vscan.changed) + ")" : " (바뀐 줄 없음)")));
+      } else if (!vrunning && vscan.status === "failed") {
+        footer.appendChild(planError("속마음 찾기에 실패했습니다: " + (vscan.error || "알 수 없는 오류")));
+      }
+    }
 
     if (hasScript) {
       var contiBtn = el("button", "primary-button", "콘티 만들기");
@@ -8310,6 +8373,7 @@
       zoomRaf: 0,
       zoomPending: 0,
       vids: [],
+      audio: null, // 지시서 118b: 원본 소리 전용 숨은 <video>(editBuild)
       cur: 0,
       curIndex: -1,
       clipEls: [],
@@ -8385,6 +8449,16 @@
         /* 이미 떨어진 요소 */
       }
     });
+    if (ctx.audio) {
+      // 지시서 118b: 원본 소리 요소도 비운다
+      try {
+        ctx.audio.pause();
+        ctx.audio.removeAttribute("src");
+        ctx.audio.load();
+      } catch (error) {
+        /* 이미 떨어진 요소 */
+      }
+    }
     if (ctx.saveTimer || ctx.rev !== ctx.savedRev) editFlushSave(ctx);
   }
 
@@ -8624,6 +8698,14 @@
     ctx.cur = 0;
     screen.appendChild(ctx.vids[0]);
     screen.appendChild(ctx.vids[1]);
+    // 지시서 118b: 원본 소리 전용 숨은 <video>(소리 없는 다시 만든 버전 → 그 칸 v1 소리). 문서 안에 두어 다시 그리면 같이 멈춘다.
+    ctx.audio = document.createElement("video");
+    ctx.audio.preload = "auto";
+    ctx.audio.playsInline = true;
+    ctx.audio.hidden = true;
+    ctx.audio.style.display = "none";
+    ctx.audio.setAttribute("aria-hidden", "true");
+    screen.appendChild(ctx.audio);
     d.empty = el("p", "vnew-edit-empty", "클립이 없습니다. ⟲ 처음 상태로 되돌리거나 아래 재료에서 넣어 주세요.");
     screen.appendChild(d.empty);
     player.appendChild(screen);
@@ -9300,6 +9382,63 @@
     }
   }
 
+  /* ---- 미리보기 원본 소리(지시서 118b) ----
+     재료 audioFrom {sourceKey, mid, offset, scale, end}(서버 edit._audio_sources)이 있는 클립(소리 없는 다시 만든 버전)은
+     숨은 소리 요소(ctx.audio)로 그 칸 v1 소리를 낸다. 시각은 내보내기(edit._clip_audio + stitcher atrim·atempo)와 같다:
+     소리 시작 = max(0, offset + in × scale), 그 뒤로는 원본과 같은 빠르기로 흐른다 → 소리 시각 = 시작 + (원본 시각 − in).
+     end 를 넘으면(내보내기는 그 뒤 무음) null. 소리 끈 클립·audioFrom 없음도 null. */
+  function editAltAudioAt(from, clip, source) {
+    if (!from || typeof from !== "object" || !clip || clip.muted === true) return null;
+    var off = Number(from.offset) || 0;
+    var sc = Number(from.scale) > 0 ? Number(from.scale) : 1;
+    var cin = Number(clip.in) || 0;
+    var at = Math.max(0, off + cin * sc) + Math.max(0, (Number(source) || 0) - cin);
+    var end = Number(from.end);
+    if (end > 0 && at >= end) return null;
+    return Math.round(at * 1000) / 1000;
+  }
+  /* ---- 미리보기 원본 소리 끝 ---- */
+
+  var EDIT_AUDIO_DRIFT_S = 0.15; // 소리 요소가 이만큼 넘게 어긋나면 다시 맞춘다(editTick)
+
+  function editAltFrom(ctx, clip) {
+    var from = clip ? (ctx.materials[clip.sourceKey] || {}).audioFrom : null;
+    return from && typeof from === "object" && from.sourceKey ? from : null;
+  }
+
+  function editAudioStop(ctx) {
+    var audio = ctx.audio;
+    if (!audio) return;
+    try {
+      if (!audio.paused) audio.pause();
+    } catch (error) {
+      /* 무시 */
+    }
+  }
+
+  /* 지금 클립의 원본 소리를 ctx.audio 에 맞춘다(source = 화면 <video> 의 원본 시각). force 면 시각을 꼭 다시 둔다.
+     원본 소리를 내면 true(부르는 쪽이 화면 <video> 를 음소거), 아니면 소리 요소를 멈추고 false(지금 동작 그대로). */
+  function editSyncAudio(ctx, clip, source, force) {
+    var audio = ctx.audio;
+    var from = editAltFrom(ctx, clip);
+    var url = from ? editUrlOf(ctx, from.sourceKey) : "";
+    var at = audio && url ? editAltAudioAt(from, clip, source) : null;
+    if (at === null) {
+      editAudioStop(ctx);
+      return !!(audio && url && clip && clip.muted !== true); // end 넘음: 화면은 계속 음소거(내보내기도 무음)
+    }
+    editSetSrc(audio, url);
+    audio.muted = false;
+    editSetRate(audio, clip);
+    if (force || Math.abs((Number(audio.currentTime) || 0) - at) > EDIT_AUDIO_DRIFT_S) editSetTime(audio, at);
+    if (ctx.playing) {
+      if (audio.paused) editPlayVideo(audio);
+    } else {
+      editAudioStop(ctx);
+    }
+    return true;
+  }
+
   function editContiguous(ctx, a, b) {
     return a.sourceKey === b.sourceKey && Math.abs(Number(b.in) - Number(a.out)) < 0.5 / editFpsOf(ctx, a);
   }
@@ -9323,6 +9462,7 @@
     if (ctx.t >= total - 1e-6) at = Math.max(Number(loc.clip.in), Number(loc.clip.out) - 1 / editFpsOf(ctx, loc.clip));
     editSetTime(video, at);
     ctx.curIndex = loc.index;
+    if (editSyncAudio(ctx, loc.clip, at, true)) video.muted = true; // 지시서 118b: 원본 소리는 ctx.audio 가 낸다
     editPreloadNext(ctx);
     if (ctx.playing) editPlayVideo(video);
   }
@@ -9348,12 +9488,14 @@
     if (prev && editContiguous(ctx, prev, next)) {
       video.muted = next.muted === true;
       editSetRate(video, next); // 이어진 같은 원본이어도 속도가 다를 수 있다
+      if (editSyncAudio(ctx, next, Number(video.currentTime) || Number(next.in), false)) video.muted = true; // 지시서 118b
     } else {
       var other = ctx.vids[1 - ctx.cur];
       editSetSrc(other, editUrlOf(ctx, next.sourceKey));
       if (Math.abs((Number(other.currentTime) || 0) - Number(next.in)) > 0.02) editSetTime(other, next.in);
       other.muted = next.muted === true;
       editSetRate(other, next);
+      if (editSyncAudio(ctx, next, Number(next.in), true)) other.muted = true; // 지시서 118b
       editPlayVideo(other);
       try {
         video.pause();
@@ -9394,6 +9536,8 @@
       // 타임라인 시각 = 클립 시작 + (원본 시각 − in) ÷ 속도(지시서 115)
       ctx.t = editStarts(ctx.clips).starts[ctx.curIndex] + Math.max(0, now - Number(clip.in)) / editSpeedOf(clip);
       editPlaceHead(ctx);
+      // 지시서 118b: 원본 소리를 0.15초 넘게 어긋나면 다시 맞추고, end 를 넘으면 멈춘다
+      if (editSyncAudio(ctx, clip, now, false)) video.muted = true;
     }
     editFollowHead(ctx);
     ctx.raf = editRaf(function () {
@@ -9424,6 +9568,7 @@
         /* 무시 */
       }
     });
+    editAudioStop(ctx); // 지시서 118b: 원본 소리 요소도 함께
     editRenderPlayButton(ctx);
   }
 
@@ -9448,6 +9593,7 @@
         ctx.vids.forEach(function (v) {
           v._src = "";
         });
+        if (ctx.audio) ctx.audio._src = ""; // 지시서 118b: 원본 소리 주소도 새로
         editSeek(ctx, ctx.t);
       })
       .catch(function () {

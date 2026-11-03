@@ -431,6 +431,18 @@ def create_blueprint(deps: VnewDependencies) -> Blueprint:
         except Exception as exc:  # noqa: BLE001
             return _fail(exc)
 
+    @bp.post("/p/<pid>/script/voices")
+    @deps.require_auth
+    def plan_script_voices(pid: str):
+        """② [속마음 찾기](지시서 118b). 202 {ok, taskId}. 진행 중 작업·대사 없음이면 409."""
+        try:
+            owner = _project_for(pid, write=True)
+            plan_mod.load_or_create(owner, pid)
+            task_id = plan_mod.start_voice_scan(owner, pid)
+            return jsonify({"ok": True, "taskId": task_id}), 202
+        except Exception as exc:  # noqa: BLE001
+            return _fail(exc)
+
     @bp.post("/p/<pid>/conti")
     @deps.require_auth
     def plan_conti_run(pid: str):

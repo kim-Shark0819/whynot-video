@@ -637,6 +637,21 @@ def _analyze_conti(blocks: list[dict], *, model: str) -> tuple[dict, dict]:
     )
 
 
+def _analyze_voices(blocks: list[dict], *, model: str) -> tuple[dict, dict]:
+    """llm._converse 로 줄마다 spoken/thought 를 받는다(지시서 118b 속마음 찾기). (payload, usage{..model}).
+
+    대본 분석과 같은 모델 체인·max_tokens(잘림·실패면 _converse 가 다음 모델로 넘어간다).
+    """
+    return vpoc_llm._converse(  # noqa: SLF001
+        system_text=prompts.VOICES_SYSTEM,
+        blocks=blocks,
+        tool=prompts.EMIT_VOICES,
+        max_tokens=8000,
+        where="vnew.script.voices",
+        model=model,
+    )
+
+
 def _analyze_fx(blocks: list[dict], *, model: str) -> tuple[dict, dict]:
     """llm._converse 로 기호·분위기 JSON 을 받는다(vnew-live-fx A.3). (payload, usage{..model}).
 
@@ -851,6 +866,159 @@ def update_script(owner: str, pid: str, patch: dict) -> dict:
 
     updated, _ = mutate_plan(owner, pid, mutator)
     return updated
+
+
+# ================================================================ ② 속마음 찾기(지시서 118b)
+#
+# 이미 정리된 대본(117 전에는 모든 줄이 voice 없음 = spoken)에서 말풍선 모양만 다시 본다. 웹툰 타일은 대본 분석과 같은
+# ordered_tiles 로 보내고(저장 안 함), 줄 목록(id·panels·speaker·lineKo)을 글로 함께 보낸다. 저장은 id 가 맞는 줄의 voice 만
+# 바꾸고, 실제로 바뀐 줄이 있을 때만 revision·프리비즈 승인 해제를 한다. 상태는 script.voiceScan, 작업 자리는 plan.task
+# (name "voiceScan") 를 같이 써서 대본·콘티 작업과 겹치지 않고 늦게 온 결과는 task.id 로 버린다(run_script 와 같다).
+
+VOICE_SCAN_TASK = "voiceScan"
+
+
+def _has_line(entry) -> bool:
+    return isinstance(entry, dict) and bool(str(entry.get("lineKo") or "").strip())
+
+
+def _voices_prompt(lines: list[dict], total: int, picked: int) -> str:
+    """속마음 찾기 요청 글: 타일 수 + 대사가 있는 줄 목록(id · panels · speaker · lineKo)."""
+    rows = [
+        f"- id={entry.get('id')} | panels={list(entry.get('panels') or [])} | "
+        f"speaker={str(entry.get('speaker') or '').strip() or '(없음)'} | lineKo=\"{str(entry.get('lineKo') or '').strip()}\""
+        for entry in lines
+    ]
+    return (
+        f"다음은 웹툰 컷을 순서대로 자른 타일 {total}장 중 {picked}장입니다"
+        + (" (균등 선택, 순서 유지)." if picked != total else ".")
+        + "\n\n[대본 줄(id · panels · speaker · lineKo)]\n"
+        + "\n".join(rows)
+        + "\n\n줄마다 말풍선 모양만 보고 voice(spoken/thought)를 emit_voices 로 돌려 주세요. 다른 내용은 바꾸지 않습니다."
+    )
+
+
+def _voice_items(payload) -> dict[str, str]:
+    """emit_voices 출력 → {id: voice}. 문자열로 온 items·항목을 풀고, 모르는 voice·빈 id 는 버린다(같은 id 는 첫 값)."""
+    raw = _loads_if_str((payload or {}).get("items") if isinstance(payload, dict) else None)
+    out: dict[str, str] = {}
+    for item in raw if isinstance(raw, list) else []:
+        item = _loads_if_str(item)
+        if not isinstance(item, dict):
+            continue
+        entry_id = str(item.get("id") or "").strip()
+        voice = str(item.get("voice") or "").strip().lower()
+        if entry_id and voice in prompts.VOICE_VALUES and entry_id not in out:
+            out[entry_id] = voice
+    return out
+
+
+def apply_voices(entries: list, voices: dict[str, str]) -> int:
+    """id 가 맞고 대사가 있는 줄의 voice 만 바꾼다(제자리). 다른 필드·순서는 그대로. 실제로 바뀐 줄 수를 돌려준다."""
+    changed = 0
+    for entry in entries if isinstance(entries, list) else []:
+        if not _has_line(entry):
+            continue
+        voice = voices.get(str(entry.get("id") or ""))
+        if voice is None or voice == ("thought" if prompts.is_thought(entry) else "spoken"):
+            continue
+        entry["voice"] = voice
+        if voice == "spoken" and entry.get("thought") is True:
+            entry["thought"] = False  # is_thought 가 thought True 도 보므로 같이 내린다
+        changed += 1
+    return changed
+
+
+def _voice_scan_state(status: str, *, changed: int = 0, error: str = "", model: str = "") -> dict:
+    state = {"status": status, "error": error, "changed": int(changed), "at": now_iso()}
+    if model:
+        state["model"] = model
+    return state
+
+
+def start_voice_scan(owner: str, pid: str) -> str:
+    """[속마음 찾기] 시작. 진행 중인 작업이 있으면 409(속마음 찾기면 VoiceScanRunning), 대사 줄이 없으면 409 NoDialogue."""
+    new_id = secrets.token_hex(8)
+
+    def mutator(data: dict) -> None:
+        task = data.get("task") or _empty_task()
+        if task.get("status") == "running" and not _task_stale(task):
+            if task.get("name") == VOICE_SCAN_TASK:
+                raise VpocError("vnew.script.voices", "VoiceScanRunning", "이미 속마음을 찾는 중입니다.", 409)
+            raise VpocError("vnew.task", "TaskRunning", "이미 작업이 진행 중입니다.", 409)
+        script = data.get("script") or {}
+        if script.get("status") != "ready" or not any(_has_line(e) for e in (script.get("entries") or [])):
+            raise VpocError("vnew.script.voices", "NoDialogue", "속마음을 찾을 대사가 없습니다. 먼저 대본을 정리해 주세요.", 409)
+        data["task"] = {"name": VOICE_SCAN_TASK, "status": "running", "startedAt": now_iso(), "id": new_id}
+        script["voiceScan"] = _voice_scan_state("running")
+        data["script"] = script
+
+    mutate_plan(owner, pid, mutator)
+    _spawn(run_voice_scan, owner, pid, new_id, name=f"vnew-voices-{pid}")
+    return new_id
+
+
+def run_voice_scan(owner: str, pid: str, task_id: str) -> None:
+    """속마음 찾기(백그라운드 스레드). task.id 가 다르면(취소·재실행) 결과를 버린다."""
+    try:
+        plan, _ = load_plan(owner, pid)
+        inp = plan.get("input") or {}
+        lines = [e for e in ((plan.get("script") or {}).get("entries") or []) if _has_line(e)]
+        order = list(inp.get("order") or [])
+        tiles, total, picked = ordered_tiles(owner, pid, order) if order else ([], 0, 0)
+        if not tiles:
+            _fail_voice_scan(owner, pid, task_id, "분석할 이미지를 찾지 못했습니다.")
+            return
+        blocks: list[dict] = [{"text": _voices_prompt(lines, total, picked)}]
+        for jpeg in tiles:
+            blocks.append({"image": {"format": "jpeg", "source": {"bytes": jpeg}}})
+
+        payload, usage = _analyze_voices(blocks, model=_script_model())
+        model = str(usage.get("model") or _script_model())
+        _charge(owner, pid, plan.get("planId") or "", usage, model)
+        voices = _voice_items(payload)
+
+        def mutator(data: dict) -> int:
+            if (data.get("task") or {}).get("id") != task_id:
+                raise _Discard()
+            script = data.setdefault("script", {})
+            changed = apply_voices(script.get("entries") or [], voices)
+            if changed:
+                data["revision"] = int(data.get("revision") or 0) + 1
+                _unapprove_previz(data)
+            script["voiceScan"] = _voice_scan_state("done", changed=changed, model=model)
+            data["task"] = {
+                "name": VOICE_SCAN_TASK, "status": "done", "startedAt": (data.get("task") or {}).get("startedAt"), "id": None,
+            }
+            return changed
+
+        try:
+            _, changed = mutate_plan(owner, pid, mutator)
+        except _Discard:
+            log.info("vnew.voiceScan.discarded pid=%s task=%s", pid, task_id)
+            return
+        log.info("vnew.voiceScan.done pid=%s lines=%d answered=%d changed=%d model=%s",
+                 pid, len(lines), len(voices), changed, model)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("vnew.voiceScan.failed pid=%s err=%s", pid, str(exc)[:300])
+        message = exc.message if isinstance(exc, VpocError) else str(exc)[:300]
+        _fail_voice_scan(owner, pid, task_id, message)
+
+
+def _fail_voice_scan(owner: str, pid: str, task_id: str, message: str) -> None:
+    def mutator(data: dict) -> None:
+        if (data.get("task") or {}).get("id") != task_id:
+            raise _Discard()
+        script = data.setdefault("script", {})
+        script["voiceScan"] = _voice_scan_state("failed", error=message)
+        data["task"] = {
+            "name": VOICE_SCAN_TASK, "status": "error", "startedAt": (data.get("task") or {}).get("startedAt"), "id": None,
+        }
+
+    try:
+        mutate_plan(owner, pid, mutator)
+    except _Discard:
+        log.info("vnew.voiceScan.discarded_fail pid=%s task=%s", pid, task_id)
 
 
 # ================================================================ ③ 콘티(conti)
