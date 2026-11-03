@@ -44563,6 +44563,212 @@ def check_vnew_inner_voice_118a() -> None:
            "(iv2-c)deliveryEn (iv2-d)촬영 지시서 입력 (iv2-e)AI로 고치기 보호")
 
 
+_IV3_SLICE = (("  /* ---- 미리보기 원본 소리(지시서 118b) ----", "  /* ---- 미리보기 원본 소리 끝 ---- */"),)
+_IV3_NODE = r"""
+var OUT = {};
+var c0 = { in: 0, out: 4 }, c2 = { in: 2, out: 6 }, cm = { in: 2, out: 6, muted: true };
+OUT.at = [editAltAudioAt({ offset: 0, scale: 1, end: 10 }, c0, 2),
+          editAltAudioAt({ offset: 1.5, scale: 1, end: 10 }, c2, 3),
+          editAltAudioAt({ offset: 0.5, scale: 0.5, end: 10 }, c2, 2.5),
+          editAltAudioAt({ offset: 0, scale: 1, end: 4 }, c0, 3.9),
+          editAltAudioAt({ offset: 0, scale: 1, end: 4 }, c0, 4),
+          editAltAudioAt({ offset: 0, scale: 1, end: 4 }, c0, 5),
+          editAltAudioAt({ offset: 1, scale: 1, end: 10 }, cm, 3),
+          editAltAudioAt(null, c0, 1)];
+console.log(JSON.stringify(OUT));
+"""
+
+
+def check_vnew_voice_scan_118b() -> None:
+    """지시서 118b — 기존 대본 [속마음 찾기]·⑦ 미리보기 원본 소리. 가짜 LLM·가짜 저장소·유료 호출 0.
+
+    (iv3-a) 프롬프트: 규칙 9 문구 상수 1곳(VOICE_RULE)을 SCRIPT_SYSTEM·VOICES_SYSTEM 이 같이 씀, emit_voices enum, 새 경로
+    (iv3-b) start_voice_scan: running 중 두 번째 요청 409 VoiceScanRunning·다른 작업 409 TaskRunning·대사 없음 409 NoDialogue
+    (iv3-c) run_voice_scan: 1줄만 thought → 그 줄 voice 만(나머지 바이트 같음)·모르는 id·빈 대사 무시·changed 1·revision +1·승인 해제,
+            모델 입력에 entries 글·이미지 블록, 같은 값만 → changed 0·revision·승인 그대로, 늦은 결과(task id 다름) 버림.
+            변형 1회: apply_voices 가 지금 값과 같은지 보지 않으면 changed 0 검사가 잡는다
+    (iv3-d) 화면(node): editAltAudioAt offset/scale/in 3조합·end 넘음·소리 끔·audioFrom 없음, 버튼·확인 문구
+    """
+    sys.path.insert(0, str(ROOT / "app"))
+    import traceback as _tb  # noqa: PLC0415
+
+    bad: list[str] = []
+    seen: set[str] = set()
+
+    def expect(group: str, got, want, what: str) -> None:
+        seen.add(group)
+        if got != want:
+            bad.append(f"({group}) {what}\n      결과 {got!r}\n      기대 {want!r}")
+
+    try:
+        from src.vnew import plan as planmod  # noqa: PLC0415
+        from src.vnew import prompts as prmod  # noqa: PLC0415
+        from src.vpoc.errors import VpocError as _VErr  # noqa: PLC0415
+
+        # ================= (iv3-a) 프롬프트·경로 =================
+        enum = prmod.EMIT_VOICES["inputSchema"]["json"]["properties"]["items"]["items"]["properties"]["voice"]["enum"]
+        routes_src = (ROOT / "app" / "src" / "vnew" / "routes.py").read_text(encoding="utf-8")
+        expect("iv3-a", [prmod.SCRIPT_SYSTEM.endswith("9. voice: " + prmod.VOICE_RULE), ("2. voice: " + prmod.VOICE_RULE) in prmod.VOICES_SYSTEM,
+                         prmod.EMIT_VOICES["name"], enum, '@bp.post("/p/<pid>/script/voices")' in routes_src],
+               [True, True, "emit_voices", ["spoken", "thought"], True], "규칙 9 상수 공유·emit_voices·새 경로")
+
+        # 가짜 저장소: load_plan·mutate_plan 이 saved 를 읽고 고친다(mutator 예외는 그대로 위로).
+        def base_plan() -> dict:
+            return {"planId": "plan_x", "revision": 4, "input": {"order": ["f1"]}, "previz": {"approved": True},
+                    "task": {"name": "conti", "status": "done", "startedAt": None, "id": None},
+                    "script": {"status": "ready", "setting": {"locationKo": "교실"}, "entries": [
+                        {"id": "e1", "panels": [0], "speaker": "민지", "lineKo": "왜?", "situationKo": "본다", "characters": []},
+                        {"id": "e2", "panels": [1], "speaker": "준호", "lineKo": "설마…", "voice": "spoken", "emotionKo": "놀람"},
+                        {"id": "e3", "panels": [1], "speaker": "민지", "lineKo": "가자", "locationKo": "교실"},
+                        {"id": "e4", "panels": [2], "speaker": "", "lineKo": "  ", "situationKo": "문이 열린다"}]}}
+
+        saved: dict = {}
+        sent: list = []
+        reply: dict = {}
+        names = ("load_plan", "mutate_plan", "ordered_tiles", "_analyze_voices", "_charge", "_spawn")
+        orig = {n: getattr(planmod, n) for n in names}
+
+        def fake_mutate(owner, pid, mutator, **kw):
+            result = mutator(saved)
+            return saved, result
+
+        planmod.load_plan = lambda owner, pid: (saved, "etag")
+        planmod.mutate_plan = fake_mutate
+        planmod.ordered_tiles = lambda owner, pid, order: ([b"jpeg-1", b"jpeg-2"], 2, 2)
+        planmod._analyze_voices = lambda blocks, *, model: (sent.append(blocks) or reply["payload"], {"model": "m-x"})  # noqa: SLF001
+        planmod._charge = lambda *a, **kw: None  # noqa: SLF001
+        spawned: list = []
+        planmod._spawn = lambda func, owner, pid, task_id, *, name: spawned.append(task_id)  # noqa: SLF001
+
+        def run(payload: dict) -> tuple[str, dict]:
+            reply["payload"] = payload
+            tid = planmod.start_voice_scan("o", "p")
+            mid = dict(saved["script"]["voiceScan"])
+            planmod.run_voice_scan("o", "p", tid)
+            return tid, mid
+
+        def status_of(fn) -> list:
+            try:
+                fn()
+            except _VErr as exc:
+                return [exc.status, exc.kind]
+            return ["no error"]
+
+        try:
+            # ================= (iv3-b) 시작·409 =================
+            saved.clear()
+            saved.update(base_plan())
+            first = planmod.start_voice_scan("o", "p")
+            second = status_of(lambda: planmod.start_voice_scan("o", "p"))
+            saved["task"]["name"] = "script"
+            other = status_of(lambda: planmod.start_voice_scan("o", "p"))
+            saved.clear()
+            saved.update(base_plan())
+            saved["script"]["entries"] = [{"id": "e1", "lineKo": " "}]
+            empty = status_of(lambda: planmod.start_voice_scan("o", "p"))
+            expect("iv3-b", [bool(first), spawned == [first], second, other, empty],
+                   [True, True, [409, "VoiceScanRunning"], [409, "TaskRunning"], [409, "NoDialogue"]],
+                   "running 중 두 번째 409·다른 작업 진행 중 409·대사 없음 409, 첫 요청은 스레드 1개")
+
+            # ================= (iv3-c) 저장 규칙 =================
+            saved.clear()
+            saved.update(base_plan())
+            before = json.loads(json.dumps(saved["script"]["entries"], ensure_ascii=False))
+            _, mid = run({"items": [{"id": "e1", "voice": "spoken"}, {"id": "e2", "voice": "thought"}, {"id": "e3", "voice": "spoken"},
+                                    {"id": "e4", "voice": "thought"}, {"id": "e9", "voice": "thought"}, {"id": "e3", "voice": "thought"}]})
+            after = saved["script"]["entries"]
+            same_rest = [json.dumps(a, ensure_ascii=False) == json.dumps(b, ensure_ascii=False)
+                         for a, b in zip(before, after) if a["id"] != "e2"]
+            e2_rest = {k: v for k, v in after[1].items() if k != "voice"} == {k: v for k, v in before[1].items() if k != "voice"}
+            text = sent[-1][0].get("text", "") if sent else ""
+            images = [b for b in (sent[-1] if sent else []) if "image" in b]
+            scan = saved["script"]["voiceScan"]
+            expect("iv3-c", [mid["status"], [e["id"] for e in after], after[1]["voice"], same_rest, e2_rest, "voice" in after[0],
+                             scan["status"], scan["changed"], saved["revision"], saved["previz"]["approved"],
+                             saved["task"]["status"], saved["task"]["id"],
+                             ['id=e1' in text, 'lineKo="설마…"' in text, "speaker=준호" in text, "panels=[1]" in text, "id=e4" in text],
+                             [b["image"]["source"]["bytes"] for b in images]],
+                   ["running", ["e1", "e2", "e3", "e4"], "thought", [True, True, True], True, False,
+                    "done", 1, 5, False, "done", None, [True, True, True, True, False], [b"jpeg-1", b"jpeg-2"]],
+                   "1줄만 thought → 그 줄 voice 만(나머지 바이트 같음·순서 그대로)·모르는 id·빈 대사 무시·changed 1·revision +1·승인 해제·"
+                   "모델 입력 entries 글(빈 대사 줄 없음)·이미지 블록")
+
+            def same_values() -> list:
+                saved.clear()
+                saved.update(base_plan())
+                saved["script"]["entries"][1]["voice"] = "thought"
+                keep = json.dumps(saved["script"]["entries"], ensure_ascii=False)
+                run({"items": [{"id": "e1", "voice": "spoken"}, {"id": "e2", "voice": "thought"}, {"id": "e3", "voice": "spoken"}]})
+                return [saved["script"]["voiceScan"]["changed"], saved["revision"], saved["previz"]["approved"],
+                        json.dumps(saved["script"]["entries"], ensure_ascii=False) == keep]
+
+            expect("iv3-c", same_values(), [0, 4, True, True], "같은 값만 → changed 0·revision·승인·entries 그대로")
+
+            # 늦은 결과: run 사이에 task.id 가 바뀌면(취소·재실행) 버린다.
+            saved.clear()
+            saved.update(base_plan())
+            reply["payload"] = {"items": [{"id": "e1", "voice": "thought"}]}
+            tid = planmod.start_voice_scan("o", "p")
+            saved["task"]["id"] = "other"
+            planmod.run_voice_scan("o", "p", tid)
+            expect("iv3-c", ["voice" in saved["script"]["entries"][0], saved["revision"], saved["script"]["voiceScan"]["status"]],
+                   [False, 4, "running"], "늦은 결과(task id 다름)는 버린다")
+
+            # 변형 1회(새 판정 1곳): 지금 값과 같은지 보지 않으면 changed 0 검사가 잡는다.
+            orig_apply = planmod.apply_voices
+
+            def mutant(entries, voices):
+                n = 0
+                for entry in entries:
+                    if planmod._has_line(entry) and str(entry.get("id")) in voices:  # noqa: SLF001
+                        entry["voice"] = voices[str(entry.get("id"))]
+                        n += 1
+                return n
+
+            planmod.apply_voices = mutant
+            try:
+                caught = same_values() != [0, 4, True, True]
+            finally:
+                planmod.apply_voices = orig_apply
+            expect("iv3-c", caught, True, "변형(같은 값 비교 없음)이면 changed 0 검사가 잡는다")
+        finally:
+            for n, f in orig.items():
+                setattr(planmod, n, f)
+    except Exception as exc:  # noqa: BLE001
+        bad.append("검사 중 예외: " + repr(exc) + "\n" + _tb.format_exc()[:1500])
+
+    # ================= (iv3-d) 화면(node) =================
+    node = shutil.which("node")
+    vjs = (PUBLIC / "vnew.js").read_text(encoding="utf-8")
+    code, problems = _edu_code(vjs, _IV3_SLICE)
+    bad.extend(p.replace("(edu-a)", "(iv3-d)") for p in problems)
+    texts = ['"속마음 찾기"', '"속마음 찾는 중…"', '"말풍선 모양을 다시 보고 속마음 표시만 고칩니다. 다른 내용은 그대로입니다."',
+             '"/voices"', '"속마음 " + thoughtN + "줄 표시"', "if (editSyncAudio(ctx, loc.clip, at, true)) video.muted = true;",
+             "if (editSyncAudio(ctx, clip, now, false)) video.muted = true;", "editAudioStop(ctx); // 지시서 118b"]
+    missing_txt = [t for t in texts if t not in vjs]
+    if missing_txt:
+        bad.append(f"(iv3-d) vnew.js 에 문구·호출이 없습니다: {missing_txt}")
+    if node and not problems:
+        got, err = _lr_run_node(node, code + _IV3_NODE, "iv3_d_")
+        if err:
+            bad.append(f"(iv3-d) node 실행 실패: {err}")
+        else:
+            expect("iv3-d", got, {"at": [2, 4.5, 2, 3.9, None, None, None, None]},
+                   "editAltAudioAt: offset/scale/in 3조합(시작 = offset + in×scale, 그 뒤 원본 빠르기)·end 넘음 null·소리 끔·audioFrom 없음 null")
+    elif not node:
+        warn("node 가 없어 iv3-d(화면)를 건너뜁니다")
+
+    missing = [g for g in ("iv3-a", "iv3-b", "iv3-c", "iv3-d") if g not in seen]
+    if missing and not bad and node:
+        bad.append(f"검사하지 못한 묶음: {missing}")
+    if bad:
+        for item in bad:
+            fail("vnew 속마음 찾기·미리보기 원본 소리(지시서 118b) " + item)
+    else:
+        ok("vnew 속마음 찾기·미리보기 원본 소리(지시서 118b) 검사 (iv3-a)규칙 상수·경로 (iv3-b)409 (iv3-c)저장 규칙·모델 입력·늦은 결과·변형 1회 "
+           "(iv3-d)화면 소리 시각·문구")
+
+
 def main() -> int:
     print("== vpoc1 check ==")
     check_compileall()
@@ -44641,6 +44847,7 @@ def main() -> int:
     check_vnew_edit_retake_audio()
     check_vnew_inner_voice()
     check_vnew_inner_voice_118a()
+    check_vnew_voice_scan_118b()
     check_pod_zones()
     print()
     if warnings:

@@ -100,6 +100,13 @@ EMIT_SCRIPT = {
 }
 
 
+# 지시서 117 규칙 9(말풍선 모양 → voice) 문구. 대본 분석(SCRIPT_SYSTEM)과 속마음 찾기(VOICES_SYSTEM, 118b)가 이 한 곳을 같이 쓴다.
+VOICE_RULE = """a line in a round or cloud-shaped speech bubble with no tail, or in a dotted bubble, is the
+   character's inner thought: set voice to "thought" (heard as their voice, mouth stays closed). A normal
+   bubble whose tail points at the speaker is "spoken" (the default). Keep square narration boxes as you
+   handle them now."""
+
+
 SCRIPT_SYSTEM = """You are a drama scripter who transfers a Korean webtoon to screen EXACTLY as drawn.
 You are given the webtoon panels in story order (tiles cut from vertical strips). Read them and write a
 dialogue-and-situation log, cut by cut, by calling the emit_script tool exactly once.
@@ -125,10 +132,48 @@ Rules you must follow:
    rename characters or invent names that are not in the panels or the given roster.
 8. Write Korean for every *Ko field and plain English for every *En field. No speech-bubble text inside
    *En fields. Answer only with the emit_script tool.
-9. voice: a line in a round or cloud-shaped speech bubble with no tail, or in a dotted bubble, is the
-   character's inner thought: set voice to "thought" (heard as their voice, mouth stays closed). A normal
-   bubble whose tail points at the speaker is "spoken" (the default). Keep square narration boxes as you
-   handle them now."""
+9. voice: """ + VOICE_RULE
+
+
+# ================================================================ ② 속마음 찾기(지시서 118b)
+#
+# 이미 정리된 대본의 줄마다 spoken/thought 만 다시 판정한다. 다른 필드는 받지 않는다(plan.run_voice_scan 이 id 가 맞는 줄의
+# voice 만 바꾼다).
+
+EMIT_VOICES = {
+    "name": "emit_voices",
+    "description": "Return spoken/thought for each given script line, judged from the speech-bubble shapes in the panels.",
+    "inputSchema": {
+        "json": {
+            "type": "object",
+            "required": ["items"],
+            "properties": {
+                "items": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "required": ["id", "voice"],
+                        "properties": {
+                            "id": {"type": "string"},
+                            "voice": {"type": "string", "enum": list(VOICE_VALUES)},
+                        },
+                    },
+                }
+            },
+        }
+    },
+}
+
+
+VOICES_SYSTEM = """You check an existing Korean webtoon script against its panels. You are given the webtoon panels in
+story order (tiles cut from vertical strips) and the script lines (id, panels, speaker, lineKo). Call the
+emit_voices tool exactly once with one item per given line id whose bubble you can see.
+
+Rules you must follow:
+1. Find each line's speech bubble in the panels listed for it and look only at the bubble's shape.
+2. voice: """ + VOICE_RULE + """
+3. Use only the ids you are given. Do not add, drop, merge, rewrite or reorder lines; return only id and voice.
+4. If you cannot find the bubble for a line, leave that id out (its current voice stays)."""
 
 
 # ================================================================ ③ 콘티(conti)

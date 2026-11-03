@@ -2582,3 +2582,7 @@
 ### 118a — 속마음 남은 충돌 정리: MOTION 문구·통 테이크 모든 대사·deliveryEn (2026-11-03, 118a)
 - `_motion_line(full, voices)`(`_prompt_voices`: spoken|thought|mixed|none)가 속마음만이면 입 모양·lip sync 구절을 `mouth stays closed`로, 섞이면 `lip sync only on spoken lines`로 바꾼다(spoken·none은 글자 그대로). 통 테이크 항목에 `lines`(컷의 모든 대사)를 두고 줄마다 표기·글자 상한을 적용하며, 기존 단계(①~⑨)로도 넘치면 최소형 앞에서 보통 대사 뒤쪽 줄부터 뺀다(`lineDropN`, 컷마다 1줄·첫 속마음 줄은 남김). 속마음 줄에는 deliveryEn을 붙이지 않고, 촬영 지시서 입력·지침에 속마음 표시를, 자르기 보호에 `mouth stays closed`를 더했다.
 - 검토한 대안: 줄 빼기를 최소형 뒤에 두기(RULES 없는 assetsStripped로 먼저 떨어지고 6컷 보통이 MOTION 짧은 형이 돼 버렸다). 컷마다 2줄인 고정 입력의 기대값(fx-i·lr-e take6 sha, fx-h 12컷 단계 lineDrop12)을 다시 쟀다. 검사 iv2-a~e, 변형 1회(`_prompt_voices` 늘 spoken) 잡힘.
+
+### 118b — 기존 대본 속마음 찾기·⑦ 미리보기 원본 소리 (2026-11-03, 118b)
+- `POST /script/voices`(`start_voice_scan`/`run_voice_scan`, plan.task `voiceScan`·`script.voiceScan`): 타일+줄 목록을 `emit_voices`로 보내 id가 맞고 대사가 있는 줄의 voice만 바꾸고, 바뀐 줄이 있을 때만 revision·승인 해제. 규칙 9 문구는 `prompts.VOICE_RULE` 한 곳. 대안(대본 다시 정리)은 사용자 수정을 덮어써 제외.
+- 미리보기는 숨은 `ctx.audio`로 v1 소리를 낸다. 시각은 내보내기(`_clip_audio`+atrim·atempo)와 같게 `max(0, offset + in×scale) + (원본 시각 − in)`(지시서 식 `offset + (원본−in)×scale`은 in>0이면 내보내기와 달라 따르지 않음). 검사 iv3-a~d, 변형 1회(`apply_voices` 같은 값 비교 없음) 잡힘.
