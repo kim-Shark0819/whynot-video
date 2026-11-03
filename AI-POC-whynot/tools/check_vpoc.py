@@ -43926,6 +43926,271 @@ def _rtk1_ui_problems(got: dict, server: dict) -> list[str]:
     want(got.get("innerHTML"), False, "가짜 DOM 에서 innerHTML·outerHTML·insertAdjacentHTML 0")
     return problems
 
+_RTA_LANE_SLICE = (("  /* 파형 SVG 길(path d, design D6).", "  /* 단축키(design §5.4) → 동작 이름"),)
+_RTA_NODE = r"""
+var OUT = {};
+var peaks = { status: "done", data: { peaks: { perSecond: 10, values: [0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1] } } };
+var from = { sourceKey: "v1", mid: "m1", offset: 0.4, scale: 1, end: 1.5 };
+function brief(r) { return [r.kind, r.title, r.path ? r.path.n : null, r.from]; }
+OUT.from = brief(editAudioLane({ in: 0.1, out: 0.5 }, { hasAudio: false, audioFrom: from }, { status: "done", data: {} }, peaks));
+OUT.fromCut = brief(editAudioLane({ in: 0.5, out: 2 }, { hasAudio: false, audioFrom: from }, null, peaks));
+OUT.fromWait = brief(editAudioLane({ in: 0.1, out: 0.5 }, { hasAudio: false, audioFrom: from }, null, null));
+OUT.fromMuted = brief(editAudioLane({ in: 0.1, out: 0.5, muted: true }, { hasAudio: false, audioFrom: from }, null, peaks));
+OUT.silent = brief(editAudioLane({ in: 0.1, out: 0.5 }, { hasAudio: false }, { status: "done", data: {} }, null));
+OUT.sound = brief(editAudioLane({ in: 0.1, out: 0.5 }, { hasAudio: true }, peaks, null));
+OUT.loading = brief(editAudioLane({ in: 0.1, out: 0.5 }, { hasAudio: true }, { status: "loading" }, null));
+OUT.path = editAudioLane({ in: 0.1, out: 0.3 }, { audioFrom: from }, null, peaks).path.d ===
+  editPeakPath({ in: 0.5, out: 0.7 }, peaks.data.peaks).d;
+console.log(JSON.stringify(OUT));
+"""
+
+
+def check_vnew_edit_retake_audio() -> None:
+    """지시서 116 보완 10 — 소리 없는 다시 만든 버전은 그 칸 v1(지금 결과) 소리를 쓴다. 유료 호출 0(가짜 meta·가짜 ffmpeg).
+
+    (rta-a) _audio_sources·_clip_audio(순수): 구간 v2 offset = range.start·scale 1·end = v1 길이, 전체 v4 offset 0, v2 소리 있음·v1 소리 없음·
+            meta 모름 → 없음, 컷 칸 template trimTo(v1 채움 1.5초) → end 1.5·남은 소리 없으면 None, 비례 테이크 scale, muted → None
+    (rta-b) 재료 보기(edit_view): 구간 v2 audioFrom {v1 키·mid·offset 4·scale 1·end 10}, 소리 있는 v3 없음, v1 없음
+    (rta-c) 내보내기(가짜 _export_segment): v2 클립 audio_source = v1 내용·audio_start_sec = range.start + in·audio_end_sec·audio_from_source,
+            v1 클립은 지금 그대로(audio_source 없음), v1 내려받기 1번(local 재사용)·남은 파일 0, v2 하나뿐 → hasAudio true, muted → 무음·false,
+            속도 1.5 → speed 1.5·같은 시작, 소리 있는 v3 → 대체 없음, v1 도 소리 없음 → 대체 없음·false
+    (rta-d) stitcher.edit_segment(가짜 _run): audio_source → 두 번째 입력·-map 1:a:0·atrim start·end·atempo, 없으면 명령 그대로, 값 검사 4꼴
+    (rta-e) 화면(node): editAudioLane — audioFrom → is-silent 아님·"원본 소리 사용"·v1 파형 구간(end 에서 자름)·파형 없으면 표시만, muted·지금 꼴 그대로
+    """
+    sys.path.insert(0, str(ROOT / "app"))
+    import traceback as _tb  # noqa: PLC0415
+
+    bad: list[str] = []
+    seen: set[str] = set()
+    owner = _EDT_OWNER
+
+    def expect(group: str, got, want, what: str) -> None:
+        seen.add(group)
+        if got != want:
+            bad.append(f"({group}) {what}\n      결과 {got!r}\n      기대 {want!r}")
+
+    saved_tempdir = tempfile.tempdir
+    private_tmp = tempfile.mkdtemp(prefix="rta-tmp-")
+    tempfile.tempdir = private_tmp
+    try:
+        with _EdtEnv() as env, _pin_vnew(VNEW_EDIT=True, VNEW_EDIT_RETAKE=True):
+            edit = env.editmod
+            from src.vnew import retake as rt  # noqa: PLC0415
+
+            audio_seen: list[bytes] = []
+
+            def segment(source_path, video_out, **kwargs):
+                if kwargs.get("audio_source"):
+                    with open(kwargs["audio_source"], "rb") as handle:
+                        audio_seen.append(handle.read(40))
+                return env._segment(source_path, video_out, **kwargs)  # noqa: SLF001
+
+            env.set(edit, "_export_segment", segment)
+
+            def version(n: int, key: str, **extra) -> dict:
+                return {"n": n, "status": "completed", "outputKey": key, "scope": "full", "range": None, "trimTo": None, **extra}
+
+            def seed(pid: str, cell: str, versions: list[dict]) -> None:
+                _FakeCharStore.write_json(env.store, rt.retakes_key(owner, pid, "g1"),
+                                          {"v": 1, "cells": {f"webtoon:{cell}": {"versions": versions, "draft": None}}})
+
+            def save(pid: str, clips: list[dict]) -> dict:
+                view = edit.edit_view(owner, pid, "webtoon")
+                return edit.save_doc(owner, pid, {"etag": view.get("etag"), "variant": "webtoon", "clips": clips})
+
+            def export(pid: str) -> tuple[list[dict], dict]:
+                etag = edit.edit_view(owner, pid, "webtoon").get("etag")
+                env.segments.clear()
+                env.store.gets.clear()
+                env.inline = True
+                try:
+                    edit.start_export(owner, pid, etag)
+                finally:
+                    env.inline = False
+                return list(env.segments), env.export_state(pid).get("current") or {}
+
+            def brief(seg: dict) -> tuple:
+                return (seg["content"][:22].decode("latin-1"), seg.get("audio_from_source"), seg.get("audio_start_sec"),
+                        seg.get("audio_end_sec"), seg.get("speed"), "audio_source" in seg)
+
+            # ---- 준비: 통 테이크(웹툰 10초·소리 있음), v2 구간 4–8초(4.04초·소리 없음), v3 전체(소리 있음), v4 전체(소리 없음)
+            pid = "prj_rta_take"
+            _edt_take_plan(env, pid)
+            v1 = _edt_key(pid, "take1-webtoon-1")
+            v2, v3, v4 = (_edt_key(pid, f"take1-webtoon-rt{n}") for n in (2, 3, 4))
+            env.store.blobs.update({v2: _edt_fake(4.04, audio=False), v3: _edt_fake(10.0), v4: _edt_fake(10.0, audio=False)})
+            rng = {"in": 4.0, "out": 8.0, "start": 4.0, "end": 8.0, "seconds": 4.0, "cutIds": ["c2", "c3"], "cuts": []}
+            seed(pid, "take1", [version(2, v2, scope="range", range=rng), version(3, v3), version(4, v4)])
+
+            # ================= (rta-a) 순수 판정 =================
+            gen = env.plan(pid)["gen"]
+            items = edit._all_items(gen, "webtoon", rt.read_state(owner, pid, "g1"))  # noqa: SLF001
+            meta = {v1: {"duration": 10.0, "hasAudio": True}, v2: {"duration": 4.04, "hasAudio": False},
+                    v3: {"duration": 10.0, "hasAudio": True}, v4: {"duration": 10.0, "hasAudio": False}}
+            got = edit._audio_sources(gen, items, meta)  # noqa: SLF001
+            m1 = edit.media_id(v1)
+            no_v1 = edit._audio_sources(gen, items, {**meta, v1: {"duration": 10.0, "hasAudio": False}})  # noqa: SLF001
+            unknown = edit._audio_sources(gen, items, {**meta, v2: {"duration": None}, v4: {"duration": 10.0}})  # noqa: SLF001
+            prop = edit._audio_sources(gen, items, {**meta, v1: {"duration": 12.5, "hasAudio": True}})  # noqa: SLF001
+            spans = [edit._clip_audio(c, got.get(v2)) for c in ({"in": 0.5, "out": 3.5}, {"in": 0, "out": 4.04, "muted": True})]  # noqa: SLF001
+            expect("rta-a", [got.get(v2), got.get(v4), sorted(got), no_v1, sorted(unknown), prop.get(v2), spans],
+                   [{"sourceKey": v1, "mid": m1, "offset": 4.0, "scale": 1.0, "end": 10.0},
+                    {"sourceKey": v1, "mid": m1, "offset": 0.0, "scale": 1.0, "end": 10.0}, sorted([v2, v4]), {}, [],
+                    {"sourceKey": v1, "mid": m1, "offset": 5.0, "scale": 1.25, "end": 12.5}, [(4.5, 10.0), None]],
+                   "통 테이크: 구간 v2 offset = range.start·전체 v4 offset 0·v3(소리 있음) 없음, v1 소리 없음·meta 모름 → 없음, "
+                   "v1 이 칸보다 긴 비례(10초 칸·12.5초 결과) → offset = 4 × 1.25·scale 1.25, 클립 v1 구간(start = offset + in, end)·muted None")
+            pid_c = "prj_rta_cut"
+            _edt_cut_plan(env, pid_c)
+            c2v1, c2v2 = _edt_key(pid_c, "c2-webtoon-1"), _edt_key(pid_c, "c2-webtoon-rt2")
+            seed(pid_c, "c2", [version(2, c2v2, trimTo=2.0, format="template")])
+            gen_c = env.plan(pid_c)["gen"]
+            items_c = edit._all_items(gen_c, "webtoon", rt.read_state(owner, pid_c, "g1"))  # noqa: SLF001
+            got_c = edit._audio_sources(gen_c, items_c, {c2v1: {"duration": 3.0, "hasAudio": True},  # noqa: SLF001
+                                                         c2v2: {"duration": 2.0, "hasAudio": False}})
+            src_c = got_c.get(c2v2)
+            expect("rta-a", [src_c, edit._clip_audio({"in": 1.0, "out": 2.0}, src_c), edit._clip_audio({"in": 1.48, "out": 2.0}, src_c)],  # noqa: SLF001
+                   [{"sourceKey": c2v1, "mid": edit.media_id(c2v1), "offset": 0.0, "scale": 1.0, "end": 1.5}, (1.0, 1.5), None],
+                   "컷 칸 template 버전(trimTo 2초)·v1 채운 컷(원래 1.5초): 같은 칸 시각·짧은 쪽(1.5초)에 맞춤, 남은 소리가 없으면 None")
+
+            # ================= (rta-b) 재료 보기 =================
+            save(pid, [{"id": "a", "sourceKey": v1, "in": 0, "out": 4}, {"id": "b", "sourceKey": v2, "in": 0.5, "out": 3.5},
+                       {"id": "c", "sourceKey": v1, "in": 8, "out": 10}])
+            view = edit.edit_view(owner, pid, "webtoon")
+            mats = {m["sourceKey"]: m for m in view.get("materials") or []}
+            expect("rta-b", [mats.get(v2, {}).get("audioFrom"), mats.get(v2, {}).get("hasAudio"), "audioFrom" in mats.get(v3, {}),
+                             "audioFrom" in mats.get(v1, {}), [c.get("muted") for c in view["doc"]["clips"]]],
+                   [{"sourceKey": v1, "mid": m1, "offset": 4.0, "scale": 1.0, "end": 10.0}, False, False, False, [False, False, False]],
+                   "GET /edit 재료: 구간 v2 audioFrom(v1 키·offset = range.start 4·end 10), 소리 있는 v3·v1 은 없음, 문서는 그대로")
+
+            # ================= (rta-c) 내보내기 =================
+            segs, cur = export(pid)
+            v1_gets = [g for g in env.store.gets if g[0] == v1]
+            left = [n for n in os.listdir(private_tmp) if n.startswith("vnew-edit")]
+            expect("rta-c", [[brief(s) for s in segs], audio_seen[-1:], cur.get("status"), cur.get("hasAudio"), len(v1_gets), left],
+                   [[("FAKE:dur=10.0;audio=1;", True, None, None, 1.0, False), ("FAKE:dur=4.04;audio=0;", True, 4.5, 10.0, 1.0, True),
+                     ("FAKE:dur=10.0;audio=1;", True, None, None, 1.0, False)],
+                    [_edt_fake(10.0)[:40]], "done", True, 1, []],
+                   "v2 클립: 영상 v2·소리 v1(audio_start_sec = range.start 4 + in 0.5, 끝 10), v1 클립은 그대로, v1 내려받기 1번·임시 파일 0")
+            cases = []
+            for clips in ([{"id": "b", "sourceKey": v2, "in": 0.5, "out": 3.5}],
+                          [{"id": "b", "sourceKey": v2, "in": 0.5, "out": 3.5, "muted": True}],
+                          [{"id": "b", "sourceKey": v2, "in": 0.5, "out": 3.5, "speed": 1.5}],
+                          [{"id": "b", "sourceKey": v3, "in": 0.5, "out": 3.5}]):
+                save(pid, clips)
+                segs, cur = export(pid)
+                cases.append([[brief(s) for s in segs], cur.get("hasAudio"), bool(segs and segs[0].get("audio_out"))])
+            expect("rta-c", cases,
+                   [[[("FAKE:dur=4.04;audio=0;", True, 4.5, 10.0, 1.0, True)], True, True],
+                    [[("FAKE:dur=4.04;audio=0;", False, None, None, 1.0, False)], False, False],
+                    [[("FAKE:dur=4.04;audio=0;", True, 4.5, 10.0, 1.5, True)], True, True],
+                    [[("FAKE:dur=10.0;audio=1;", True, None, None, 1.0, False)], True, True]],
+                   "v2 하나뿐 → with_audio true·대체 소리, muted → 대체 없음·무음(false), 속도 1.5 → 소리도 speed 1.5·같은 시작, 소리 있는 v3 → 지금 그대로")
+            pid_s = "prj_rta_mute"
+            _edt_take_plan(env, pid_s)
+            s1, s2 = _edt_key(pid_s, "take1-webtoon-1"), _edt_key(pid_s, "take1-webtoon-rt2")
+            env.store.blobs.update({s1: _edt_fake(10.0, audio=False), s2: _edt_fake(4.04, audio=False)})
+            seed(pid_s, "take1", [version(2, s2, scope="range", range=rng)])
+            save(pid_s, [{"id": "b", "sourceKey": s2, "in": 0.5, "out": 3.5}])
+            mats_s = {m["sourceKey"]: m for m in edit.edit_view(owner, pid_s, "webtoon").get("materials") or []}
+            segs, cur = export(pid_s)
+            expect("rta-c", ["audioFrom" in mats_s.get(s2, {}), [brief(s) for s in segs], cur.get("hasAudio")],
+                   [False, [("FAKE:dur=4.04;audio=0;", False, None, None, 1.0, False)], False],
+                   "v1 도 소리 없음 → audioFrom 없음·무음·hasAudio false")
+    except Exception as exc:  # noqa: BLE001
+        bad.append("(rta-a~c) 예외: " + repr(exc) + "\n" + _tb.format_exc()[:1600])
+    finally:
+        tempfile.tempdir = saved_tempdir
+        shutil.rmtree(private_tmp, ignore_errors=True)
+
+    # ================= (rta-d) stitcher.edit_segment 명령 =================
+    try:
+        from src import stitcher as stitchmod  # noqa: PLC0415
+
+        saved_fns = {name: getattr(stitchmod, name) for name in ("_run", "ffmpeg_path", "_edit_nice")}
+        commands: list[list[str]] = []
+        gdir = tempfile.mkdtemp(prefix="rta-d-")
+
+        def fake_run(command):
+            commands.append(list(command))
+            for index, arg in enumerate(command):
+                if index and command[index - 1] != "-i" and str(arg).endswith((".mp4", ".raw")):
+                    with open(arg, "wb") as handle:
+                        handle.write(b"OUT")
+            return subprocess.CompletedProcess(command, 0, stdout=b"", stderr=b"")
+
+        try:
+            stitchmod._run = fake_run  # noqa: SLF001
+            stitchmod.ffmpeg_path = lambda: "/fake/ffmpeg"
+            stitchmod._edit_nice = lambda: []  # noqa: SLF001
+            src, alt = os.path.join(gdir, "src.mp4"), os.path.join(gdir, "v1.mp4")
+            for path in (src, alt):
+                with open(path, "wb") as handle:
+                    handle.write(b"SRC")
+            vout, aout = os.path.join(gdir, "seg.mp4"), os.path.join(gdir, "seg.raw")
+            base = dict(start_sec=0.47916, frames=36, fps=24, width=1280, height=720, audio_out=aout, audio_from_source=True)
+            stitchmod.edit_segment(src, vout, **base)
+            plain = commands[-1]
+            stitchmod.edit_segment(src, vout, **base, audio_source="", audio_start_sec=None)
+            plain2 = commands[-1]
+            stitchmod.edit_segment(src, vout, **base, speed=1.5, audio_source=alt, audio_start_sec=4.5, audio_end_sec=10.0)
+            fast = commands[-1]
+            stitchmod.edit_segment(src, vout, **base, audio_source=alt, audio_start_sec=4.5)
+            open_end = commands[-1]
+            stitchmod.edit_segment(src, vout, **{**base, "audio_from_source": False}, audio_source=alt, audio_start_sec=4.5)
+            silent = commands[-1]
+            bad_vals = []
+            for kwargs in ({"audio_source": os.path.join(gdir, "none.mp4"), "audio_start_sec": 1.0}, {"audio_source": alt},
+                           {"audio_source": alt, "audio_start_sec": 2.0, "audio_end_sec": 2.0},
+                           {"audio_source": alt, "audio_start_sec": float("nan")}):
+                try:
+                    stitchmod.edit_segment(src, vout, **base, **kwargs)
+                    bad_vals.append("통과")
+                except stitchmod.StitchError as exc:
+                    bad_vals.append(str(exc))
+            pcm = os.path.getsize(aout)
+        finally:
+            for name, value in saved_fns.items():
+                setattr(stitchmod, name, value)
+            shutil.rmtree(gdir, ignore_errors=True)
+        expect("rta-d", [plain2 == plain, fast[fast.index("-i") + 2:fast.index("-i") + 4], fast[fast.index("-map", 12) + 1],
+                         fast[fast.index("-af") + 1], fast[fast.index("-vf") + 1].split(",")[1], fast[fast.index("-t") + 1],
+                         open_end[open_end.index("-af") + 1], "-af" in silent, silent.count("-i"), plain.count("-i"), bad_vals, pcm],
+                   [True, ["-i", alt], "1:a:0", "atrim=start=4.500:end=10.000,asetpts=PTS-STARTPTS,atempo=1.5", "setpts=(PTS-STARTPTS)/1.5",
+                    "1.500000", "atrim=start=4.500,asetpts=PTS-STARTPTS", False, 1, 1, ["편집 구간 값이 올바르지 않습니다."] * 4, 288000],
+                   "edit_segment audio_source: 두 번째 입력·-map 1:a:0·atrim start·end·atempo·-t 그대로, 없거나 빈 값이면 명령 그대로, 무음이면 입력 하나, 값 검사 4꼴")
+    except Exception as exc:  # noqa: BLE001
+        bad.append("(rta-d) 예외: " + repr(exc) + "\n" + _tb.format_exc()[:1200])
+
+    # ================= (rta-e) 화면(node) =================
+    node = shutil.which("node")
+    vjs = (PUBLIC / "vnew.js").read_text(encoding="utf-8")
+    code_e, problems_e = _edu_code(vjs, _RTA_LANE_SLICE)
+    bad.extend(p.replace("(edu-a)", "(rta-e)") for p in problems_e)
+    if node and not problems_e:
+        got, err = _lr_run_node(node, code_e + _RTA_NODE, "rta_e_")
+        if err:
+            bad.append(f"(rta-e) node 실행 실패: {err}")
+        else:
+            expect("rta-e", got,
+                   {"from": ["", "원본 소리 사용", 4, True], "fromCut": ["", "원본 소리 사용", 6, True], "fromWait": ["", "원본 소리 사용", None, True],
+                    "fromMuted": ["is-muted", "소리 끔", None, False], "silent": ["is-silent", "소리 없음", None, False],
+                    "sound": ["", "소리", 4, False], "loading": ["is-loading", "소리", None, False], "path": True},
+                   "editAudioLane: audioFrom → is-silent 아님·제목·v1 파형 [offset + in, offset + out](end 1.5 에서 자름)·파형 없으면 표시만, "
+                   "muted·소리 없음·소리·불러오는 중은 지금 그대로")
+    elif not node:
+        warn("node 가 없어 rta-e(화면)를 건너뜁니다")
+
+    missing = [g for g in ("rta-a", "rta-b", "rta-c", "rta-d", "rta-e") if g not in seen]
+    if missing and not bad and node:
+        bad.append(f"검사하지 못한 묶음: {missing}")
+    if bad:
+        for item in bad:
+            fail("vnew ⑦ 원본 소리 대체(지시서 116 보완 10) " + item)
+    else:
+        ok("vnew ⑦ 원본 소리 대체(지시서 116 보완 10) 검사 (rta-a)판정 (rta-b)재료 audioFrom (rta-c)내보내기 소리 원천·offset·속도·muted "
+           "(rta-d)edit_segment 명령 (rta-e)화면 소리 줄")
+
+
 def main() -> int:
     print("== vpoc1 check ==")
     check_compileall()
@@ -44001,6 +44266,7 @@ def main() -> int:
     check_vnew_edit_retime()
     check_vnew_edit_retake()
     check_vnew_edit_retake_models()
+    check_vnew_edit_retake_audio()
     check_pod_zones()
     print()
     if warnings:

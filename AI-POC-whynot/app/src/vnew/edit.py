@@ -20,6 +20,7 @@ _spawn_export. 파드 안 내보내기 잠금 파일: _pod_lock_try · _pod_lock
 재료가 없을 때 요약에 잠김 이유(summary → reason, gen 이 없어도 gen_view 가 부른다).
 지시서 116: VNEW_EDIT_RETAKE 가 켜져 있으면 ⑦ AI로 고치기(retake.py)로 다시 만든 버전(v2…)도 재료다 — 그 칸 지금 결과 바로 뒤
 (_all_items, group "retake", 이름 끝 " v{n}"). 꺼져 있으면 _retake_state 가 None 이라 재료·보기가 지시서 115 와 같다.
+지시서 116 보완 10: 소리 없는 버전은 그 칸 v1 의 같은 녹화 시각 소리를 쓴다(_audio_sources — 재료 audioFrom·내보내기 audio_source).
 """
 
 from __future__ import annotations
@@ -555,6 +556,73 @@ def _all_items(gen: dict, variant: str, retakes: dict | None) -> list[dict]:
     return out
 
 
+def _audio_sources(gen: dict, items: list[dict], meta: dict[str, dict]) -> dict[str, dict]:
+    """소리 없는 다시 만든 버전의 대체 소리(지시서 116 보완 10). 반환 {버전 sourceKey: {sourceKey, mid, offset, scale, end}}.
+
+    조건: AI로 고치기 버전(group "retake")이고 meta hasAudio 가 False, 같은 칸 지금 결과(group "current", v1)의 hasAudio 가 True.
+    시각 대응은 retake._time_map(화면 editFixTimeMap 과 같은 규칙)으로 버전 시각 → 칸 녹화 시각 → v1 시각을 잇는다:
+    v1 시각 = offset + 버전 시각 × scale, offset = (버전 offset − v1 offset) ÷ v1 scale, scale = 버전 scale ÷ v1 scale.
+    구간 버전이고 v1 이 칸과 1:1 이면 offset = range.start, 전체 버전은 0. end = v1 에서 쓸 수 있는 끝(그 뒤는 무음).
+    저장값은 읽기만 한다(판정은 읽을 때마다 계산).
+    """
+    from . import retake  # noqa: PLC0415 — retake 가 edit 를 import 한다(순환 피함).
+
+    current = {m.get("cellId"): m for m in items if m.get("group") == "current"}
+    cells = retake._cell_index(gen)  # noqa: SLF001
+    out: dict[str, dict] = {}
+    for item in items:
+        if item.get("group") != "retake":
+            continue
+        own = meta.get(item["sourceKey"]) or {}
+        base = current.get(item.get("cellId"))
+        if own.get("hasAudio") is not False or not base:
+            continue
+        info = meta.get(base["sourceKey"]) or {}
+        if info.get("hasAudio") is not True:
+            continue
+        found = cells.get(str(item.get("cellId") or ""))
+        cell_seconds = float(((found[1] if found else {}) or {}).get("seconds") or 0.0)
+        kind = str(item.get("kind") or "")
+        off2, sc2, _ = retake._time_map(item.get("trimTo"), retake._valid_range(item.get("range")), kind, cell_seconds,  # noqa: SLF001
+                                        own.get("duration"))
+        off1, sc1, end1 = retake._time_map(base.get("trimTo"), None, kind, cell_seconds, info.get("duration"))  # noqa: SLF001
+        if sc1 <= 0 or sc2 <= 0 or end1 <= 0:
+            continue
+        offset = (off2 - off1) / sc1
+        if offset >= end1 - MIN_CLIP_S:
+            continue
+        out[item["sourceKey"]] = {"sourceKey": base["sourceKey"], "mid": base["mid"], "offset": round(offset, 3),
+                                  "scale": round(sc2 / sc1, 6), "end": round(end1, 3)}
+    return out
+
+
+def _clip_audio(clip: dict, source: dict | None) -> tuple[float, float] | None:
+    """클립 한 개의 대체 소리 구간 (v1 시작, v1 끝)(_audio_sources 한 항목). 소리 끈 클립·남은 소리가 없으면 None."""
+    if not source or clip.get("muted"):
+        return None
+    start = max(0.0, float(source["offset"]) + float(clip.get("in") or 0.0) * float(source["scale"]))
+    end = float(source["end"])
+    if start >= end - MIN_CLIP_S:
+        return None
+    return round(start, 3), round(end, 3)
+
+
+def _retake_meta(owner: str, pid: str, gen_id: str, items: list[dict], meta: dict[str, dict], *, probe: bool) -> dict[str, dict]:
+    """_audio_sources 에 넘길 meta: 버전과 그 칸 v1 중 meta 에 없는 것을 채운다(probe 면 _ensure_meta, 아니면 길이 캐시만)."""
+    cells = {m.get("cellId") for m in items if m.get("group") == "retake"}
+    keys = [m["sourceKey"] for m in items if m.get("cellId") in cells and m.get("group") in ("current", "retake")
+            and not isinstance((meta.get(m["sourceKey"]) or {}).get("hasAudio"), bool)]
+    if not keys:
+        return meta
+    if probe:
+        extra, _ = _ensure_meta(owner, pid, gen_id, keys)
+    else:
+        cached = _read_index(owner, pid, gen_id)
+        extra = {k: cached[media_id(k)] for k in keys
+                 if isinstance(cached.get(media_id(k)), dict) and cached[media_id(k)].get("sourceKey") == k}
+    return {**extra, **{k: v for k, v in meta.items() if isinstance((v or {}).get("hasAudio"), bool) or k not in extra}}
+
+
 def _cut_numbers(plan: dict) -> dict[str, int]:
     cuts = ((plan or {}).get("conti") or {}).get("cuts") or []
     out: dict[str, int] = {}
@@ -999,6 +1067,11 @@ def edit_view(owner: str, pid: str, variant: str | None = None) -> dict:
 
         for item, out in zip(items, materials):
             out["retake"] = retake.material_flag(chosen, item, gen, retakes)
+        # 지시서 116 보완 10: 소리 없는 버전은 그 칸 v1 소리를 쓴다(내보내기와 같은 _audio_sources). 새로 재지 않고 길이 캐시만 본다.
+        audio_from = _audio_sources(gen, items, _retake_meta(owner, pid, gen_id, items, meta, probe=False))
+        for item, out in zip(items, materials):
+            if item["sourceKey"] in audio_from:
+                out["audioFrom"] = dict(audio_from[item["sourceKey"]])
     view = {
         "enabled": True,
         "genId": gen_id,
@@ -1373,6 +1446,25 @@ _STAGE_MESSAGES = {
 }
 
 
+def _export_audio_from(owner: str, pid: str, gen_id: str, variant: str, clips: list[dict], meta: dict[str, dict]) -> dict[str, dict]:
+    """내보내기 클립 원본 중 소리를 v1 에서 가져올 것(_audio_sources, 지시서 116 보완 10). 소리 없는 원본이 없으면 아무것도 읽지 않는다.
+
+    gen 이 바뀌었으면(내보내기를 시작한 gen 이 아님) 대체하지 않는다. v1 길이·소리는 _ensure_meta(캐시 먼저)로 읽는다.
+    """
+    used = {c["sourceKey"] for c in clips if not c.get("muted")}
+    if variant not in VARIANTS or not any((meta.get(k) or {}).get("hasAudio") is False for k in used):
+        return {}
+    retakes = _retake_state(owner, pid, gen_id)
+    if retakes is None:
+        return {}
+    _plan, gen, now_gen = _load_gen(owner, pid)
+    if now_gen != gen_id:
+        return {}
+    items = [m for m in _all_items(gen, variant, retakes) if m.get("group") == "current" or m["sourceKey"] in used]
+    found = _audio_sources(gen, items, _retake_meta(owner, pid, gen_id, items, meta, probe=True))
+    return {k: v for k, v in found.items() if k in used}
+
+
 def run_export(owner: str, pid: str, gen_id: str, n: int, claim: str) -> None:
     """내보내기 스레드 본체. 임시 디렉터리에서 클립마다 다시 인코딩 → 잇기 → 영상 버킷에 올린다. 끝나면 임시 파일을 지운다.
 
@@ -1404,8 +1496,17 @@ def run_export(owner: str, pid: str, gen_id: str, n: int, claim: str) -> None:
             raise VpocError("vnew.edit.export", "EmptyTimeline", "타임라인에 클립이 없습니다.", 409)
         width, height, fps = _export_geometry(meta[clips[0]["sourceKey"]])
         frames = _clip_frames(clips, fps)
-        with_audio = any(not c.get("muted") and (meta.get(c["sourceKey"]) or {}).get("hasAudio") for c in clips)
-        last_use = {clip["sourceKey"]: index for index, clip in enumerate(clips)}
+        audio_from = _export_audio_from(owner, pid, gen_id, str(current.get("variant") or ""), clips, meta)
+        alt = [_clip_audio(c, audio_from.get(c["sourceKey"])) for c in clips]  # 지시서 116 보완 10: 클립별 대체 소리 (v1 시작, 끝)
+        with_audio = any(not c.get("muted") and ((meta.get(c["sourceKey"]) or {}).get("hasAudio") or alt[i] is not None)
+                         for i, c in enumerate(clips))
+        last_use: dict[str, int] = {}
+        for index, clip in enumerate(clips):
+            last_use[clip["sourceKey"]] = index
+            if alt[index] is not None:
+                last_use[audio_from[clip["sourceKey"]]["sourceKey"]] = index
+        if any(a is not None for a in alt):
+            log.info("vnew.edit.export_audio_from pid=%s gen=%s n=%d clips=%d", pid, gen_id, n, sum(a is not None for a in alt))
         with tempfile.TemporaryDirectory(prefix="vnew-edit-export-") as workdir:
             local: dict[str, str] = {}
             segments: list[str] = []
@@ -1425,6 +1526,16 @@ def run_export(owner: str, pid: str, gen_id: str, n: int, claim: str) -> None:
                     path = os.path.join(workdir, f"src-{index:03d}.mp4")
                     _download(source, path, bucket=vpoc_settings.VIDEO_BUCKET)
                     local[source] = path
+                extra: dict = {}
+                if audio_path and alt[index] is not None:
+                    a_key = audio_from[source]["sourceKey"]
+                    a_path = local.get(a_key)
+                    if a_path is None:
+                        stage = "download"
+                        a_path = os.path.join(workdir, f"src-{index:03d}a.mp4")
+                        _download(a_key, a_path, bucket=vpoc_settings.VIDEO_BUCKET)
+                        local[a_key] = a_path
+                    extra = {"audio_source": a_path, "audio_start_sec": alt[index][0], "audio_end_sec": alt[index][1]}
                 stage = "clip"
                 src_fps = _num(info.get("fps")) or float(fps)
                 # 가장 가까운 프레임부터: 밀리초 반올림으로 프레임 시각을 조금 넘긴 in 이 한 프레임을 건너뛰지 않게 반 프레임 당긴다.
@@ -1438,8 +1549,9 @@ def run_export(owner: str, pid: str, gen_id: str, n: int, claim: str) -> None:
                     _export_segment(
                         path, seg_video, start_sec=start, frames=frames[index], fps=fps, width=width, height=height,
                         audio_out=seg_audio,
-                        audio_from_source=bool(audio_path) and not clip.get("muted") and bool(info.get("hasAudio")),
+                        audio_from_source=bool(audio_path) and not clip.get("muted") and (bool(info.get("hasAudio")) or bool(extra)),
                         speed=_speed_of(clip),  # 지시서 115: 영상 setpts·소리 atempo(1 이면 115 전 명령 그대로)
+                        **extra,
                     )
                 finally:
                     generate._PREPARE_SEM.release()  # noqa: SLF001
@@ -1447,9 +1559,9 @@ def run_export(owner: str, pid: str, gen_id: str, n: int, claim: str) -> None:
                     _append_file(audio_path, seg_audio)
                     os.unlink(seg_audio)
                 segments.append(seg_video)
-                if last_use[source] == index:
-                    os.unlink(path)
-                    local.pop(source, None)
+                for used in dict.fromkeys([source] + ([audio_from[source]["sourceKey"]] if extra else [])):
+                    if last_use[used] == index and used in local:
+                        os.unlink(local.pop(used))
                 if time.monotonic() - last_beat >= EXPORT_HEARTBEAT_S or index == len(clips) - 1:
                     _beat(owner, pid, gen_id, claim, progress={"done": index + 1, "total": len(clips)})
                     last_beat = time.monotonic()

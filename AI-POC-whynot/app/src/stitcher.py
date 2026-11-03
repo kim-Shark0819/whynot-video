@@ -501,6 +501,9 @@ def edit_segment(
     audio_from_source: bool = False,
     speed: float = 1.0,
     threads: int | None = 1,
+    audio_source: str = "",
+    audio_start_sec: float | None = None,
+    audio_end_sec: float | None = None,
 ) -> dict:
     """편집 내보내기의 클립 한 개(지시서 110). 원본의 start_sec 부터 frames 장을 width×height·fps 로 다시 인코딩한다.
 
@@ -510,6 +513,8 @@ def edit_segment(
       어느 쪽이든 길이를 정확히 frames/fps 초(샘플 = frames × 48000 / fps)로 맞춘다(남으면 자르고 모자라면 무음).
     - speed(지시서 115, EDIT_SPEED_CHOICES): 영상 setpts=(PTS-STARTPTS)/speed, 소리 atempo=speed(피치 유지). 0.5 면 원본
       1초가 2초가 되고 2 면 원본 2초가 1초가 된다. frames·PCM 길이 규칙은 그대로다. 1 이면 명령이 115 전과 같다.
+    - audio_source(지시서 116 보완 10, 소리 없는 다시 만든 버전): 소리를 그 파일(두 번째 입력)의 audio_start_sec~audio_end_sec
+      (없으면 끝까지)에서 가져온다. atempo·길이 맞춤은 같다. 비어 있으면 명령이 이 보완 전과 같다.
     반환 {"video": video_out, "audio": audio_out 또는 "", "frames": frames, "samples": 샘플 수}.
     """
     import math
@@ -534,6 +539,18 @@ def edit_segment(
         or speed not in EDIT_SPEED_CHOICES
     ):
         raise StitchError("편집 구간 값이 올바르지 않습니다.")
+    pcm_from_source = bool(audio_out) and bool(audio_from_source)
+    alt_audio = pcm_from_source and bool(audio_source)
+    if alt_audio:
+        a_start = audio_start_sec if isinstance(audio_start_sec, (int, float)) and not isinstance(audio_start_sec, bool) else -1.0
+        a_end = audio_end_sec if isinstance(audio_end_sec, (int, float)) and not isinstance(audio_end_sec, bool) else None
+        if (
+            not os.path.exists(audio_source)
+            or not math.isfinite(a_start)
+            or a_start < 0
+            or (audio_end_sec is not None and (a_end is None or not math.isfinite(a_end) or a_end <= a_start))
+        ):
+            raise StitchError("편집 구간 값이 올바르지 않습니다.")
     seconds = frames / fps
     samples = frames * EDIT_AUDIO_RATE // fps
     binary = ffmpeg_path()
@@ -550,16 +567,20 @@ def edit_segment(
         binary, "-y", "-hide_banner", "-loglevel", "error",
         *_threads_args(threads),
         "-i", source_path,
+        *(["-i", audio_source] if alt_audio else []),
         "-map", "0:v:0", "-vf", video_filter, "-frames:v", str(frames), "-an",
         "-c:v", "libx264", "-preset", "veryfast", "-crf", "20",
         *_threads_args(threads),
         "-pix_fmt", "yuv420p", video_out,
     ]
-    pcm_from_source = bool(audio_out) and bool(audio_from_source)
     if pcm_from_source:
-        audio_filter = f"atrim=start={start:.3f},asetpts=PTS-STARTPTS" + (f",atempo={speed:g}" if retimed else "")
+        if alt_audio:
+            trim = f"atrim=start={float(a_start):.3f}" + (f":end={float(a_end):.3f}" if a_end is not None else "")
+        else:
+            trim = f"atrim=start={start:.3f}"
+        audio_filter = trim + ",asetpts=PTS-STARTPTS" + (f",atempo={speed:g}" if retimed else "")
         command += [
-            "-map", "0:a:0", "-vn", "-af", audio_filter,
+            "-map", "1:a:0" if alt_audio else "0:a:0", "-vn", "-af", audio_filter,
             "-t", f"{seconds:.6f}", "-ac", "2", "-ar", str(EDIT_AUDIO_RATE),
             "-c:a", "pcm_s16le", "-f", "s16le", audio_out,
         ]
