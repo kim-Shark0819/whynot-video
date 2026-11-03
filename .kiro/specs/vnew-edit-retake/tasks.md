@@ -121,3 +121,9 @@
 
 - [x] 26. `settings.py` `VNEW_RETAKE_SHRINK_MODEL`(기본 opus-5-5, 빈 값 = 기본, 코드 기본) 추가, `_shrink_draft`의 LLM 줄이기만 이 모델. 초안 호출·`_model_chain`·원장 그대로.
   - 완료 조건: rtk-w 줄이기 호출 model = `VNEW_RETAKE_SHRINK_MODEL`, 초안 호출 = `VNEW_RETAKE_MODEL`, 하위 프로세스 없음·빈 값 → opus-5-5·다른 값 → 그 값. 기존 기대값 1곳 바꿈, 전체 검사 "전부 통과".
+## 보완 10 — 소리 없는 다시 만든 버전은 원본 소리(지시서 116 보완 10, 2026-11-03)
+
+> 운영 실측: Kling O3 "이 구간만" v2(4.04초)는 프리비즈 녹화를 받아 `hasAudio: False`. [바꾸기]하면 그 구간 소리 줄·내보내기가 무음.
+
+- [x] 27. `edit._audio_sources`(버전·소리 없음·v1 소리 있음 → {v1 키, offset, scale, end}, `retake._time_map` 재사용), GET /edit 재료 `audioFrom`, 내보내기 `audio_source`·`audio_start_sec`·`audio_end_sec`(같은 speed, local 재사용), `stitcher.edit_segment` 두 번째 입력, `vnew.js` `editAudioLane`.
+  - 완료 조건: rta-a~e(구간 offset = range.start + in·소리 있는 v2·v1 소리 없음·muted·1.5×·명령·화면), `node --check`, 전체 검사 "전부 통과".

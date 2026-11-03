@@ -8069,6 +8069,31 @@
     return { n: i1 - i0, d: parts.join("") };
   }
 
+  /* 소리 줄 한 칸(지시서 116 보완 10). 반환 {kind, title, path, from}. 재료에 audioFrom(소리 없는 다시 만든 버전 → 그 칸 v1 소리,
+     서버 _audio_sources)이 있으면 is-silent 대신 v1 파형의 [offset + in × scale, offset + out × scale](end 까지)을 그리고,
+     v1 파형이 아직 없으면 소리 있음 표시만 한다. 소리 끈 클립은 지금처럼 is-muted. */
+  function editAudioLane(clip, mat, media, fromMedia) {
+    var m = media || {};
+    var info = mat || {};
+    var from = info.audioFrom && typeof info.audioFrom === "object" ? info.audioFrom : null;
+    if (clip.muted === true) return { kind: "is-muted", title: "소리 끔", path: null, from: false };
+    if (from) {
+      var f = fromMedia || {};
+      var off = Number(from.offset) || 0;
+      var sc = Number(from.scale) > 0 ? Number(from.scale) : 1;
+      var a = off + Number(clip.in) * sc;
+      var b = off + Number(clip.out) * sc;
+      if (Number(from.end) > 0) b = Math.min(b, Number(from.end));
+      var fpeaks = f.status === "done" && f.data ? f.data.peaks : null;
+      return { kind: "", title: "원본 소리 사용", path: b > a ? editPeakPath({ in: a, out: b }, fpeaks) : null, from: true };
+    }
+    var peaks = m.status === "done" && m.data ? m.data.peaks : null;
+    var kind = info.hasAudio === false ? "is-silent" : "";
+    var path = kind ? null : editPeakPath(clip, peaks);
+    if (!kind && !path) kind = m.status === "done" ? "is-silent" : "is-loading";
+    return { kind: kind, title: info.hasAudio === false || kind === "is-silent" ? "소리 없음" : "소리", path: path, from: false };
+  }
+
   /* 단축키(design §5.4) → 동작 이름(없으면 ""). 입력칸 초점·Alt 는 부르는 쪽이 거른다.
      글자 키는 code 도 본다(한글 자판에서 S 는 key "ㄴ", M 은 "ㅡ"). Ctrl 과 같은 자리의 Cmd(mod)도 같다. */
   function editKeyAction(key, code, mod, shift) {
@@ -8949,13 +8974,13 @@
     var abox = parts.abox;
     clear(abox);
     abox.style.width = width + "px";
-    var peaks = media.status === "done" && media.data ? media.data.peaks : null;
-    var kind = clip.muted === true ? "is-muted" : mat.hasAudio === false ? "is-silent" : "";
-    var path = kind ? null : editPeakPath(clip, peaks);
-    if (!kind && !path) kind = media.status === "done" ? "is-silent" : "is-loading";
+    var lane = editAudioLane(clip, mat, media, mat.audioFrom ? ctx.media[String(mat.audioFrom.mid || "")] : null);
+    var kind = lane.kind;
+    var path = lane.path;
     abox.className = "vnew-edit-aclip" + (kind ? " " + kind : "") + (selected ? " is-selected" : "");
-    abox.title = clip.muted === true ? "소리 끔" : mat.hasAudio === false || kind === "is-silent" ? "소리 없음" : "소리";
+    abox.title = lane.title;
     if (clip.muted === true) abox.appendChild(el("span", "vnew-edit-aclip-icon", "🔇"));
+    if (lane.from && !path) abox.appendChild(el("span", "vnew-edit-aclip-icon", "🔊"));
     if (path && typeof document.createElementNS === "function") {
       var svg = document.createElementNS(EDIT_SVG_NS, "svg");
       svg.setAttribute("class", "vnew-edit-wave");
@@ -9420,14 +9445,19 @@
     var lo = sc ? (sc.scrollLeft || 0) / ctx.pps : 0;
     var hi = sc && sc.clientWidth ? lo + sc.clientWidth / ctx.pps : Infinity;
     var now = Date.now();
-    ctx.mediaQueue = editMediaOrder(
+    var order = editMediaOrder(
       ctx.clips,
       function (key) {
         return String((ctx.materials[key] || {}).mid || "");
       },
       lo,
       hi
-    ).filter(function (mid) {
+    );
+    ctx.clips.forEach(function (clip) {
+      var from = (ctx.materials[clip.sourceKey] || {}).audioFrom; // 지시서 116 보완 10: 대체 소리의 v1 파형도 받는다
+      if (from && from.mid && order.indexOf(String(from.mid)) < 0) order.push(String(from.mid));
+    });
+    ctx.mediaQueue = order.filter(function (mid) {
       var item = ctx.media[mid];
       return !item || (item.status === "done" && now - (item.at || 0) > EDIT_MEDIA_TTL_MS);
     });
@@ -9454,7 +9484,8 @@
         if (!editAlive(ctx)) return;
         ctx.clipEls.forEach(function (parts) {
           var clip = ctx.clips[parts.index];
-          if (clip && (ctx.materials[clip.sourceKey] || {}).mid === mid) editPaintClip(ctx, parts, clip);
+          var cm = clip ? ctx.materials[clip.sourceKey] || {} : {};
+          if (clip && (cm.mid === mid || (cm.audioFrom && cm.audioFrom.mid === mid))) editPaintClip(ctx, parts, clip);
         });
         editPumpMedia(ctx);
       });
