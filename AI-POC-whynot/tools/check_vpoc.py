@@ -40752,13 +40752,13 @@ def check_vnew_edit_retake() -> None:
                "base: true 한 줄·되돌리기 주석 4줄·BRAVE_SECRET_NAME 바로 뒤·PARITY_ENV_KEYS 끝")
         prod_bytes = (ROOT / "deploy" / "config.prod.env").read_bytes()
         prod_lines = prod_bytes.decode("utf-8-sig").splitlines()
-        p_at = prod_lines.index("VNEW_EDIT_RETAKE=false") if "VNEW_EDIT_RETAKE=false" in prod_lines else -1
+        p_at = prod_lines.index("VNEW_EDIT_RETAKE=true") if "VNEW_EDIT_RETAKE=true" in prod_lines else -1  # 2026-11-03 사용자 승인: 운영 켬
         expect("rtk-a", [prod_bytes[:3] == b"\xef\xbb\xbf", prod_bytes.count(b"\r"),
                          re.findall(r"^VNEW_EDIT_RETAKE=(.*)$", prod_bytes.decode("utf-8-sig"), re.M), prod_lines[p_at - 2] if p_at > 2 else "",
                          prod_lines[p_at - 1].startswith("# ") and "116" in prod_lines[p_at - 1], prod_lines[-1],
                          "VNEW_EDIT_RETAKE" in (ROOT / "deploy" / "config.dev.env").read_text(encoding="utf-8")],
-               [True, 0, ["false"], "VNEW_EDIT=true", True, "VNEW_HIDE_STORY=true", False],
-               "운영 overlay false 한 줄(VNEW_EDIT 바로 뒤·주석, BOM·LF·끝 줄 그대로)·dev overlay 없음")
+               [True, 0, ["true"], "VNEW_EDIT=true", True, "VNEW_HIDE_STORY=true", False],
+               "운영 overlay true 한 줄(VNEW_EDIT 바로 뒤·주석, BOM·LF·끝 줄 그대로)·dev overlay 없음")
         spec = _ilu.spec_from_file_location("_rtk_deploy_render", ROOT / "deploy" / "render.py")
         render = _ilu.module_from_spec(spec)
         spec.loader.exec_module(render)  # type: ignore[union-attr]
@@ -40768,7 +40768,7 @@ def check_vnew_edit_retake() -> None:
             layer = {**render.load_config(ROOT / "deploy" / f"config.{target}.env"), **extra}
             text = render.render_text(template, render.add_derived({**base_cfg, **layer}), "k8s/workloads.yaml.tmpl")
             rendered.append(_rendered_env_values(text, "VNEW_EDIT_RETAKE"))
-        expect("rtk-a", rendered, [["true"], ["false"], ["true"]], "렌더 dev true·prod false·prod+true(켜기 경로)")
+        expect("rtk-a", rendered, [["true"], ["true"], ["true"]], "렌더 dev true·prod true(11-03 승인)·prod+true")
     except (Exception, SystemExit) as exc:  # noqa: BLE001
         bad.append("(rtk-a) 예외: " + repr(exc) + "\n" + _tb.format_exc()[:1500])
 
@@ -42675,14 +42675,20 @@ def check_vnew_edit_retake_models() -> None:
             for got_t, want_t, what_t in _rtk_trim_cases(rt):
                 expect("rtk-w", got_t, want_t, what_t)
 
-            def motion_pad(size: int) -> str:
+            def motion_pad(size: int, piece: str = "; soft sway") -> str:
                 head, tail = ok_kl_w.split("; no jitter.", 1)
                 filler = ""
                 while len((head + filler + "; no jitter." + tail).encode()) < size:
-                    filler += "; soft sway"
+                    filler += piece
                 return head + filler + "; no jitter." + tail
 
-            kl_y0, kl_y1, kl_y2 = motion_pad(2900), motion_pad(2800), motion_pad(2600)  # 보완 6: kl_y1 2700 → 2800(초과 12% — 10% 이하면 2번째 LLM 대신 자르기)
+            def guarded_only(text: str) -> str:
+                """보완 8: MOTION 밖 자르기 대상 줄의 ;·,·괄호를 공백으로 → 줄마다 1조각(자를 조각 없음). MOTION 은 보호 조각(시간 표기)으로 채운다."""
+                return "\n".join(name + ":" + re.sub(r"[;,()]", " ", body) if name in rt.SHRINK_TRIM_LINES and name != "MOTION" else line
+                                 for line in text.split("\n") for name, body in [(line.split(":", 1) + [""])[:2]])
+
+            # 보완 6: kl_y1 2700 → 2800(초과 12%). 보완 8: 2번째 LLM 전에는 항상 자르기 → kl_y1 을 보호 조각 위주로 바꿔 자르기로 못 끝나게
+            kl_y0, kl_y1, kl_y2 = motion_pad(2900), guarded_only(motion_pad(2800, "; 0.5s sway")), motion_pad(2600)
             over_y1 = len(kl_y1.encode()) - 2500
 
             def shrink_calls(calls: list[dict]) -> list[dict]:
@@ -42711,8 +42717,9 @@ def check_vnew_edit_retake_models() -> None:
                              (d_y1.get("status"), len(y1_prompt.encode()) <= 2500, d_y1.get("problems"), d_y1.get("shrunk"),
                               len(shrink_calls(calls_y1)), len(calls_y1), y1_trim, kept_lines(y1_prompt) == kept_lines(ok_kl_w),
                               y1_prompt.startswith("MOTION: @Video1's head bobbing only marks the speaker", y1_prompt.find("MOTION:"))),
-                             [len(y1_logs), (y1_logs or [""])[0].startswith(f"from={len(kl_y2.encode())} to={len(y1_prompt.encode())} cut="),
-                              (y1_logs or [""])[0].endswith(" problems=0 kept=True")],
+                             [len(y1_logs), (y1_logs or [""])[0].startswith(f"from={len(kl_y1.encode())} "),  # 보완 8: 2번째 LLM 전 자르기(못 끝냄)
+                              (y1_logs or [""])[-1].startswith(f"from={len(kl_y2.encode())} to={len(y1_prompt.encode())} cut="),
+                              (y1_logs or [""])[-1].endswith(" problems=0 kept=True")],
                              ["The last shortening" in s for s in sys_y],
                              [f"came out {over_y1} bytes over the limit" in (sys_y[1:] or [""])[0],
                               f"aim for about {lower_y} bytes instead, which means cutting at least {len(kl_y1.encode()) - lower_y} bytes" in
@@ -42722,8 +42729,8 @@ def check_vnew_edit_retake_models() -> None:
                               len(shrink_calls(calls_y2)), y2_trim, [s.endswith(" problems=0 kept=True") for s in y2_logs]),
                              (d_y3.get("shrunk"), len(calls_y3), y3_trim)],
                    [1, [True, True, True],
-                    ("done", True, [], True, 2, 3, 1, True, True),
-                    [1, True, True], [False, True], [True, True], [],
+                    ("done", True, [], True, 2, 3, 2, True, True),  # 보완 8: 자르기 1 → 2(2번째 LLM 전 + 끝)
+                    [2, True, True, True], [False, True], [True, True], [],
                     ("done", True, [], True, 1, 1, [True]),
                     (False, 1, 0)],
                    "보완 5: 줄이기 2번 다 초과 → 2번째 문구에 직전 초과분·낮춘 목표 숫자 → 자르기(LLM 0)로 상한 안·문제 0·shrunk·MOTION 밖 줄 그대로·"
@@ -42806,6 +42813,23 @@ def check_vnew_edit_retake_models() -> None:
                    "보완 6: 상한 +5% → LLM 줄이기 0·자르기로 상한 안·shrunk·원장 1줄, +30% → LLM 줄이기 1번(전용 호출) 뒤 남은 4% → 2번째 LLM 없이 "
                    "자르기·원장 2줄, 로그 shrink_try·shrink_trim 에 ms=·after=(원문 0)")
             report.append(f"rtk-w 보완 6: +5% LLM {len(shrink_calls(calls_z1))}번 · +30% LLM {len(shrink_calls(calls_z2))}번")
+            # ================= (rtk-w) 보완 8: 2번째 LLM 줄이기 전에는 초과 비율과 상관없이 자르기부터 =================
+            kl_a17, kl_a10 = motion_pad(2925), motion_pad(2761)  # dev 실측 모양: 초안 +17% → 1번째 줄이기 결과 +10.4%(꾸밈 조각)
+            logs.clear()
+            trim_n[0] = 0
+            d_a1, calls_a1, led_a1 = run_w(pid_t, mid_t, kl_a17, (kl_a10, RuntimeError("must not call")), {"requestKo": "보완 8", "model": kl})
+            a1_trim, a1_prompt = trim_n[0], str(d_a1.get("prompt") or "")
+            a1_logs = logs.messages("vnew.retake.shrink_trim", level=logging.INFO)
+            expect("rtk-w", [[len(kl_a17.encode()) - 2500 > 250, len(kl_a10.encode()) - 2500 > 250],
+                             (d_a1.get("status"), len(a1_prompt.encode()) <= 2500, d_a1.get("problems"), d_a1.get("shrunk"),
+                              len(shrink_calls(calls_a1)), len(led_a1), a1_trim, kept_lines(a1_prompt) == kept_lines(ok_kl_w),
+                              [" after=1 " in m and m.endswith(" problems=0 kept=True") for m in a1_logs]),
+                             logs.messages("vnew.retake.shrink_failed", level=logging.WARNING),
+                             [m for m in logs.messages() if "soft sway" in m or "must not call" in m]],
+                   [[True, True], ("done", True, [], True, 1, 2, 1, True, [True]), [], []],
+                   "보완 8: 초안 +17% → LLM 줄이기 1번 → +10.4%(SHRINK_TRIM_FIRST 초과) → 2번째 LLM 없이 자르기로 상한 안·shrunk·"
+                   "원장 2줄·MOTION 밖 줄 그대로·로그 shrink_trim after=1(원문 0)")
+            report.append(f"rtk-w 보완 8: +17% → +10.4% LLM {len(shrink_calls(calls_a1))}번 · {len(kl_a10.encode())}B → {len(a1_prompt.encode())}B")
 
             # ================= (rtk-x) 보완 4: 시간 초과 버전 되살리기(조회만, 제출 0) =================
             pid_x = "prj_rtk1_x"
