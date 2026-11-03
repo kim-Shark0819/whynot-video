@@ -40520,8 +40520,8 @@ class _RtkEnv(_LrEnv):
         self.grabs.append(at)
         return None if self.grab_none else _tiny_jpeg(64, 36)
 
-    def _rewrite(self, *, system_text: str, blocks: list[dict], model: str):
-        self.llm_calls.append({"system": system_text, "blocks": blocks, "model": model})
+    def _rewrite(self, *, system_text: str, blocks: list[dict], model: str, shrink: bool = False):
+        self.llm_calls.append({"system": system_text, "blocks": blocks, "model": model, "shrink": shrink})  # 보완 6: 줄이기 전용 호출 표시
         if self.llm_error is not None:
             raise self.llm_error
         reply = self.llm_reply(system_text, blocks) if callable(self.llm_reply) else self.llm_reply
@@ -42682,7 +42682,7 @@ def check_vnew_edit_retake_models() -> None:
                     filler += "; soft sway"
                 return head + filler + "; no jitter." + tail
 
-            kl_y0, kl_y1, kl_y2 = motion_pad(2900), motion_pad(2700), motion_pad(2600)
+            kl_y0, kl_y1, kl_y2 = motion_pad(2900), motion_pad(2800), motion_pad(2600)  # 보완 6: kl_y1 2700 → 2800(초과 12% — 10% 이하면 2번째 LLM 대신 자르기)
             over_y1 = len(kl_y1.encode()) - 2500
 
             def shrink_calls(calls: list[dict]) -> list[dict]:
@@ -42745,6 +42745,58 @@ def check_vnew_edit_retake_models() -> None:
                    [True, 1, False, 1, [f"from={len(guarded_y.encode())} to={len(guarded_y.encode())} cut=0 problems=1 kept=False"]],
                    "보완 5: 보호 조각만 → 원문 그대로·shrunk false·로그 kept=False(호출 실패 뒤에도 자르기 단계)")
             report.append(f"rtk-w 보완 5: 자르기 {len(kl_y2.encode())}B → {len(y1_prompt.encode())}B")
+            # ================= (rtk-w) 보완 6: 줄이기 전용 도구·예산, 초안 목표 바이트, 작은 초과는 자르기부터, 로그 ms =================
+            real_rw = next(value for obj, name, value in env._saved if obj is rt and name == "_rewrite")  # noqa: SLF001
+            conv_z: list[dict] = []
+            saved_conv_z = rt.vpoc_llm._converse  # noqa: SLF001
+            rt.vpoc_llm._converse = lambda **kwargs: (conv_z.append(kwargs) or ({"promptEn": "x"}, {"model": "m"}))  # noqa: SLF001
+            try:
+                real_rw(system_text="S", blocks=[{"text": "b"}], model="mm", shrink=True)
+                real_rw(system_text="S", blocks=[{"text": "b"}], model="mm")
+            finally:
+                rt.vpoc_llm._converse = saved_conv_z  # noqa: SLF001
+            req_z = rt.vpoc_llm._request("mm", "S", [{"text": "b"}], conv_z[0]["tool"], conv_z[0]["max_tokens"]) if conv_z else {}  # noqa: SLF001
+            schema_z = (((req_z.get("toolConfig") or {}).get("tools") or [{}])[0].get("toolSpec") or {}).get("inputSchema", {}).get("json", {})
+            sys_d6 = rt._system_text({"maxBytes": 4000}, [], [])  # noqa: SLF001
+            sys_m6 = rt._system_text_model({"maxBytes": 2500}, fmt="elements", rng=None)  # noqa: SLF001
+            sys_s6 = rt._system_text_shrink({"maxBytes": 2500}, [], [])  # noqa: SLF001
+            expect("rtk-w", [(conv_z[0]["tool"]["name"], sorted(schema_z.get("properties") or {}), schema_z.get("required"),
+                              (req_z.get("inferenceConfig") or {}).get("maxTokens"), conv_z[0]["where"]) if conv_z else None,
+                             (conv_z[1]["tool"] is rt._TOOL, conv_z[1]["max_tokens"], conv_z[1]["where"]) if len(conv_z) > 1 else None,  # noqa: SLF001
+                             rt.SHRINK_MAX_TOKENS, rt.vpoc_llm._trunc_budget(rt.SHRINK_MAX_TOKENS) > rt.SHRINK_MAX_TOKENS,  # noqa: SLF001
+                             ["at most 4000 UTF-8 bytes. Aim for about 3400 bytes" in sys_d6, "each Korean character is 3 UTF-8 bytes" in sys_d6,
+                              "at most 2500 UTF-8 bytes. Aim for about 2125 bytes" in sys_m6, "each Korean character is 3 UTF-8 bytes" in sys_m6],
+                             ["emit_short_prompt exactly once" in sys_s6, "Write no text outside the tool call." in sys_s6, "resultKo" in sys_s6]],
+                   [("emit_short_prompt", ["promptEn"], ["promptEn"], 8000, "vnew.retake.shrink"), (True, 3000, "vnew.retake.rewrite"), 8000, False,
+                    [True, True, True, True], [True, True, False]],
+                   "보완 6: 줄이기 요청 = 도구 promptEn 하나·maxTokens SHRINK_MAX_TOKENS(잘림 재시도 예산이 더 크지 않음), 초안 호출 도구·3000 그대로, "
+                   "초안 문구 상한·목표(0.85)·한국어 3바이트(두 경로), 줄이기 문구 도구 밖 글 금지")
+            kl_z5, kl_z30 = motion_pad(2625), motion_pad(3250)
+            logs.clear()
+            trim_n[0] = 0
+            d_z1, calls_z1, led_z1 = run_w(pid_t, mid_t, kl_z5, RuntimeError("must not call"), {"requestKo": "작은 초과", "model": kl})
+            z1_trim, z1_trim_logs = trim_n[0], logs.messages("vnew.retake.shrink_trim", level=logging.INFO)
+            logs.clear()
+            trim_n[0] = 0
+            d_z2, calls_z2, led_z2 = run_w(pid_t, mid_t, kl_z30, (kl_y2, RuntimeError("must not call")), {"requestKo": "큰 초과", "model": kl})
+            z2_trim, z2_trim_logs = trim_n[0], logs.messages("vnew.retake.shrink_trim", level=logging.INFO)
+            z2_try_logs = logs.messages("vnew.retake.shrink_try", level=logging.INFO)
+            expect("rtk-w", [[0 < len(kl_z5.encode()) - 2500 <= 250, len(kl_z30.encode()) - 2500 > 250, 0 < len(kl_y2.encode()) - 2500 <= 250],
+                             (d_z1.get("status"), len(str(d_z1.get("prompt") or "").encode()) <= 2500, d_z1.get("problems"), d_z1.get("shrunk"),
+                              len(shrink_calls(calls_z1)), len(calls_z1), [c["shrink"] for c in calls_z1], len(led_z1), z1_trim,
+                              [" after=0 " in m and " ms=" in m and m.endswith(" problems=0 kept=True") for m in z1_trim_logs]),
+                             (d_z2.get("status"), len(str(d_z2.get("prompt") or "").encode()) <= 2500, d_z2.get("problems"), d_z2.get("shrunk"),
+                              len(shrink_calls(calls_z2)), [c["shrink"] for c in calls_z2], len(led_z2), z2_trim,
+                              [" after=1 " in m and " ms=" in m and m.endswith(" problems=0 kept=True") for m in z2_trim_logs],
+                              [" ms=" in m and m.endswith(" kept=True") for m in z2_try_logs]),
+                             [m for m in logs.messages() if "soft sway" in m or "must not call" in m]],
+                   [[True, True, True],
+                    ("done", True, [], True, 0, 1, [False], 1, 1, [True]),
+                    ("done", True, [], True, 1, [False, True], 2, 1, [True], [True]),
+                    []],
+                   "보완 6: 상한 +5% → LLM 줄이기 0·자르기로 상한 안·shrunk·원장 1줄, +30% → LLM 줄이기 1번(전용 호출) 뒤 남은 4% → 2번째 LLM 없이 "
+                   "자르기·원장 2줄, 로그 shrink_try·shrink_trim 에 ms=·after=(원문 0)")
+            report.append(f"rtk-w 보완 6: +5% LLM {len(shrink_calls(calls_z1))}번 · +30% LLM {len(shrink_calls(calls_z2))}번")
 
             # ================= (rtk-x) 보완 4: 시간 초과 버전 되살리기(조회만, 제출 0) =================
             pid_x = "prj_rtk1_x"

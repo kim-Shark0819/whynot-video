@@ -94,3 +94,10 @@
 
 - [x] 22. 2번째 시도부터 직전 초과분·낮춘 목표(`상한 × target − 초과분`)를 숫자로. LLM 뒤(실패 포함)에도 넘으면 규칙대로 자르기(LLM 0, `_shrink_better` 통과 시만, `shrunk=True`, 로그 `shrink_trim`). 상한 안 초안은 자르기 0.
   - 완료 조건: rtk-w 이어서 순수 2꼴·흐름 2꼴, 변형 1회 잡힘, 기존 기대값 그대로, 전체 검사 1회 "전부 통과".
+
+## 보완 6 — 초안 만들기 시간 줄이기(지시서 116 보완 6, 2026-11-03)
+
+> dev 실측: Kling O3 구간 초안 287초 중 약 187초가 출력 한도(3,000·4,096)에서 잘린 줄이기 호출. Fable·Opus 5.5는 toolChoice auto(`LLM_NO_FORCED_TOOL`)라 도구 밖 출력도 예산을 먹는다. `retake.py`만 바꾼다(`_SHRINK_TOOL`·`SHRINK_MAX_TOKENS`·`SHRINK_TRIM_FIRST`·`DRAFT_TARGET`, `_rewrite` shrink, 새 `_draft_bytes_rule`, `_system_text`·`_system_text_model`·`_system_text_shrink`·`_shrink_draft`).
+
+- [x] 23. 줄이기 전용 도구(promptEn만)·예산 8,000·도구 밖 글 금지. 초안 문구에 상한·목표(× 0.85)·한국어 3바이트. LLM 줄이기 전에 초과 ≤ 상한 × 0.10이면 자르기부터(상한 안 + `_shrink_better` 통과 시 LLM 0). 로그 `shrink_try`·`shrink_trim`에 `ms=`.
+  - 완료 조건: rtk-w 이어서 4꼴(요청 모양·문구 숫자·+5%·+30%·로그), 기존 기대값 그대로(보완 5 흐름 꼴 입력 2,700B → 2,800B만, 이유는 WORKLOG), 전체 검사 1회 "전부 통과".
