@@ -319,6 +319,9 @@ VNEW_EDIT = _bool("VNEW_EDIT", True)
 VNEW_EDIT_RETAKE = _bool("VNEW_EDIT_RETAKE", True)
 # 새 프롬프트 만들기 LLM(코드 기본, 템플릿에 넣지 않는다). 빈 값이면 분석 모델(ANALYZE_FALLBACK_MODEL — 이미지를 읽는 상위 Claude 체인).
 VNEW_RETAKE_MODEL = os.getenv("VNEW_RETAKE_MODEL", "").strip() or ANALYZE_FALLBACK_MODEL
+# 줄이기(길이만 줄인다) LLM(보완 9, 코드 기본, 템플릿에 넣지 않는다). dev 실측(2026-11-03): Fable 5.1 52~90초·한 번은 8,000 토큰에서 잘림,
+# 바로 뒤 같은 일을 Opus 5.5 는 8.6초·1,086 토큰. 빈 값이면 기본값. 넘어가는 순서는 vpoc.llm._model_chain 그대로, 초안 호출은 위 모델 그대로.
+VNEW_RETAKE_SHRINK_MODEL = os.getenv("VNEW_RETAKE_SHRINK_MODEL", "").strip() or "global.anthropic.claude-opus-5-5"
 
 # 캐릭터 충실도(char-fidelity, 2026-10-30). 켜면 분석이 기준 사진 한 장의 옷을 그대로 기본 복장으로 쓰고, 한쪽 소품의 좌우를
 # 화면 기준으로 받아 코드가 캐릭터 좌우로 바꾼다. 시트는 화면 왼쪽으로 45°씩 도는 다섯 인물로 그리고, 정면·후면·시트를 검사한다.
