@@ -1019,4 +1019,54 @@ def create_blueprint(deps: VnewDependencies) -> Blueprint:
         except Exception as exc:  # noqa: BLE001
             return _fail(exc)
 
+    # ------------------------------------------------------------ ⑥ 사운드(작업 122)
+    #
+    # 대사마다 실제 말/속마음을 정하고(GET 이 처음 만든다·PUT 이 고친 값만 저장) 원래 소리의 속마음 구간에만 효과를 건 새 mp4 를
+    # 만든다(POST apply, 백그라운드·영상은 복사만). sound.py 가 맡는다. VNEW_SOUND 가 꺼져 있으면 프로젝트를 보기 전에 404.
+    # GET 도 문서를 만들고(쓰기) 원본을 내려받으므로 셋 다 프로젝트 소유자(쓰기 권한)만 — 그 밖 사용자에게는 404(있는지 감춘다).
+
+    def _sound_project(pid: str) -> str:
+        try:
+            return _project_for(pid, write=True)
+        except VpocError as exc:
+            if exc.kind == "Forbidden":
+                raise VpocError("vnew.sound", "NotFound", "프로젝트를 찾을 수 없습니다.", 404) from None
+            raise
+
+    @bp.get("/p/<pid>/sound")
+    @deps.require_auth
+    def sound_get(pid: str):
+        try:
+            from . import sound  # noqa: PLC0415
+
+            sound.require_enabled("vnew.sound")
+            owner = _sound_project(pid)
+            return jsonify(sound.sound_view(owner, pid, request.args.get("variant")))
+        except Exception as exc:  # noqa: BLE001
+            return _fail(exc)
+
+    @bp.put("/p/<pid>/sound")
+    @deps.require_auth
+    def sound_put(pid: str):
+        try:
+            from . import sound  # noqa: PLC0415
+
+            sound.require_enabled("vnew.sound.save")
+            owner = _sound_project(pid)
+            return jsonify(sound.save_lines(owner, pid, _edit_body("vnew.sound.save")))
+        except Exception as exc:  # noqa: BLE001
+            return _fail(exc)
+
+    @bp.post("/p/<pid>/sound/apply")
+    @deps.require_auth
+    def sound_apply(pid: str):
+        try:
+            from . import sound  # noqa: PLC0415
+
+            sound.require_enabled("vnew.sound.apply")
+            owner = _sound_project(pid)
+            return jsonify({"ok": True, **sound.start_apply(owner, pid, _edit_body("vnew.sound.apply"))}), 202
+        except Exception as exc:  # noqa: BLE001
+            return _fail(exc)
+
     return bp

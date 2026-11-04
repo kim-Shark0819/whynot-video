@@ -2599,6 +2599,9 @@ un_conti가 대본 글 뒤에 ordered_tiles 타일을 Panel N of M: 라벨(N 0�
 ### 124 — Seedream 그림을 BytePlus ARK 대신 fal로 (2026-11-04, 124)
 - BytePlus 쪽에서 ARK 키가 사라져("The API key doesn't exist") 공간·캐릭터 시트가 실패했다. 뿌리 `vpoc/seedream.py`에 VPOC_SEEDREAM_PROVIDER(기본 fal)를 두고 fal Seedream 4.5(참고 그림이 있으면 edit·image_urls 최대 10장, 없으면 text-to-image)를 vpoc.fal._request 큐로 부른다. 저장소에 Seedream 5 fal id가 없어 4.5를 쓴다. fal일 때 호출부 model(ARK id)은 무시하고, 장당 금액은 `seedream.unit_usd()`(fal 0.04)다.
 - 크기는 fal_image_size(총 픽셀 2560x1440~4096x4096, 한 변 4096, 비율 유지)로 맞추고 결과를 요청 크기 JPEG로 되돌린다. ark는 바디 그대로이고, 401·"API key doesn't exist"·AuthenticationError면 그 호출만 fal로 간다(경고 1줄, 키 없음). 대안(호출부 4곳을 각각 fal로)은 같은 뿌리를 네 번 고쳐야 해 쓰지 않았다. 검사 sf-a~h, 변형 1회 잡힘.
+### 122 — ⑥ 사운드: 대사마다 실제 말/속마음을 정해 소리에만 반영 (2026-11-04, 122)
+- 새 sound.py, 라우트 GET·PUT /p/<pid>/sound와 POST /sound/apply(소유자만, 그 밖 404), VNEW_SOUND(코드 기본 true). 원본은 ⑦ 최신 내보내기, 없으면 ⑤ 완성본이다. 구간은 estimate_spans 한 곳에서 정한다(컷 구간 → silencedetect 말소리 → 고르게 → 전체 나눔). 반영은 ffmpeg 1번이다. 영상은 -c:v copy, 소리는 속마음 구간에만 THOUGHT_FILTER(경계 20ms, 효과 세기는 256샘플 조각마다 계산)를 건다. 결과는 sound/<variant>/v<n>.mp4에 쓴다. plan은 쓰지 않는다.
+- 결과 소리는 AAC 대신 FLAC(s16)으로 쓴다. AAC로 다시 부호화하면 효과 밖 구간도 샘플이 바뀌어 원음 그대로를 보장할 수 없다(합성 4초 실측: 영상 md5 같음, 효과 밖 PCM 같음). 대가는 Safari 재생 미확인과 파일 크기 증가다. 소리 없는 원본 400은 운영에서도 문구가 보이도록 kind BadAudio로 낸다. 검사 snd-a~e, 변형 1회 잡힘.
 ### 125 — 공간 시트를 fal text-to-image로, 지시문·그림·검사를 동시에 (2026-11-04, 125)
 - 2분 공백 원인은 `_design_panels`다. 설계·사실·그림 단계가 저마다 업로드를 S3에서 다시 읽어 타일로 자르고 조각마다 사람 수 LLM(`vnew.count_people`)을 차례로 불렀다. 빌드당 1번 고르고(사람 수는 4개씩 동시) 설계·사실·검사가 같은 목록을 쓴다. 단계 시간은 `vnew.location.timing step=… ms=…`로 남긴다.
 - 그림은 참고 이미지 없이 VNEW_LOCATION_IMAGE_MODEL(기본 fal seedream v4.5 text-to-image, seedream.generate의 fal_model 인자)로 그리고, 원장은 fal 단가(VPOC_SEEDREAM_FAL_USD)다. 사진·패널은 설계·사실에서 Claude가 보고 글로만 간다. 같은 방이 되게 사실로 만든 공통 문장을 지시문 4개 앞에 붙이고, 지시문·그림·검사(+다시 그리기)는 LOCATION_WORKERS=4로 동시에 한다. 대안(edit 모델에 가이드만 참고로)은 사용자 지시(t2i)와 맞지 않아 쓰지 않았다. 검사 lf-a~g·lf-anchor·lf-timing·lf-gap.

@@ -7763,10 +7763,10 @@
     return cell;
   }
 
-  /* ================================================================ ⑤ 사운드 (베타)
+  /* ================================================================ ⑥ 사운드 (베타)
 
-     고른 영상(gen.selected) 플레이어는 고정. 대사 목록은 읽기 전용. 소리 토글은 화면 안에서만
-     muted 를 바꾼다(저장 안 함). [다른 영상 고르기] → ④. */
+     고른 영상(gen.selected)의 그림체로 대사마다 실제 말/속마음을 정하고 원래 소리에만 반영한다(작업 122, soundMount).
+     영상은 그대로다(서버가 영상 스트림을 복사만 한다). [다른 영상 고르기] → ⑤. */
 
   function renderSoundStep(host) {
     var plan = state.plan || {};
@@ -7796,22 +7796,12 @@
     var title = el("h2", "vnew-sec-title", "사운드");
     title.appendChild(el("span", "vnew-badge vnew-beta-badge", "BETA"));
     titleWrap.appendChild(title);
-    titleWrap.appendChild(el("p", "vnew-hint", "고른 영상(" + meta.title + ")에 소리를 입히는 단계입니다."));
+    titleWrap.appendChild(el("p", "vnew-hint", "고른 영상(" + meta.title + ")의 대사마다 실제 말과 속마음을 정해 소리에 반영하는 단계입니다."));
     head.appendChild(titleWrap);
     host.appendChild(head);
 
-    // --- 고른 영상 플레이어(고정) + [다른 영상 고르기] ---
+    // --- 도구: [다른 영상 고르기] [영상 내려받기] [⑦ 편집으로]. 원본·반영한 소리 플레이어는 아래 soundMount 가 그린다 ---
     var playerSec = el("section", "panel vnew-sound-player-sec");
-    var player = null;
-    if (final.status === "done" && final.videoUrl) {
-      player = el("video", "vnew-final-player vnew-sound-player");
-      player.src = final.videoUrl;
-      player.controls = true;
-      player.setAttribute("playsinline", "");
-      playerSec.appendChild(player);
-    } else {
-      playerSec.appendChild(el("p", "vnew-hint", "고른 영상을 불러오지 못했습니다."));
-    }
 
     var playerTools = el("div", "vnew-sound-tools");
     var reselect = el("button", "outline-button", "다른 영상 고르기");
@@ -7838,40 +7828,8 @@
     playerSec.appendChild(playerTools);
     host.appendChild(playerSec);
 
-    // --- 소리 설정(muted 토글, 저장 안 함) ---
-    var soundSec = el("section", "panel vnew-sound-settings");
-    soundSec.appendChild(el("h2", "vnew-sec-title", "소리 설정"));
-    soundSec.appendChild(
-      el("p", "vnew-hint", "지금은 이 화면에서만 바뀝니다(저장하지 않습니다).")
-    );
-    var toggle = el("div", "vnew-sound-toggle");
-    var onBtn = el("button", "outline-button is-on", "모델 원음 유지");
-    var muteBtn = el("button", "outline-button", "무음");
-    onBtn.type = "button";
-    muteBtn.type = "button";
-    function setMuted(muted) {
-      if (player) player.muted = muted;
-      if (muted) {
-        muteBtn.classList.add("is-on");
-        onBtn.classList.remove("is-on");
-      } else {
-        onBtn.classList.add("is-on");
-        muteBtn.classList.remove("is-on");
-      }
-    }
-    onBtn.addEventListener("click", function () {
-      setMuted(false);
-    });
-    muteBtn.addEventListener("click", function () {
-      setMuted(true);
-    });
-    toggle.appendChild(onBtn);
-    toggle.appendChild(muteBtn);
-    soundSec.appendChild(toggle);
-    host.appendChild(soundSec);
-
-    // --- 대사 목록(읽기 전용) ---
-    host.appendChild(dialogueList());
+    // --- 대사별 실제 말/속마음 · 구간 · [소리에 반영](작업 122) ---
+    soundMount(host, selected, final);
   }
 
   /* 대본 entries 의 화자·대사·컷 시간대를 읽기 전용으로. */
@@ -7905,6 +7863,437 @@
     });
     section.appendChild(list);
     return section;
+  }
+
+  /* ================================================================ ⑥ 사운드 — 대사별 실제 말/속마음(작업 122)
+
+     서버 /api/vnew/p/<pid>/sound(sound.py). GET 이 처음 문서를 만든다(voice = 대본 그대로, "자동"), PUT 은 바뀐 줄의 voice·start·end 만
+     보내고, POST /sound/apply 가 백그라운드로 속마음 줄 구간에만 소리 효과를 건 새 mp4 를 만든다(영상은 복사만). 반영 중이면
+     SOUND_POLL_MS 마다 GET(작업 상태·반영 기록만 바꾸고 고치던 줄은 그대로 둔다). 글은 모두 textContent(el). */
+
+  var SOUND_POLL_MS = 3000; // 반영 running 동안 상태 다시 읽기
+  var SOUND_HINT = "영상은 그대로 두고 소리만 바뀝니다. 속마음 줄은 속으로 울리는 목소리로 바뀝니다.";
+  var SOUND_NO_AUDIO = "이 영상에는 소리가 없어 바꿀 수 없습니다";
+  var SOUND_VOICES = [["spoken", "실제 말"], ["thought", "속마음"]];
+  // 서버 거절 kind → 화면 문구(운영에서 서버 문구가 감춰지는 새 kind 도 알아보게).
+  var SOUND_ERRORS = {
+    SoundRunning: "소리를 반영하는 중입니다. 끝난 뒤 다시 눌러 주세요.",
+    SoundChanged: "원본 영상이 바뀌었습니다. 다시 불러온 뒤 고쳐 주세요.",
+    SoundNotReady: "사운드 화면을 다시 불러와 주세요.",
+    NoSoundSource: "소리를 바꿀 영상이 아직 없습니다. ⑤에서 영상을 먼저 만들어 주세요.",
+    BadLineRange: "구간은 원본 길이 안에서 0.2초 이상이어야 합니다.",
+    BadLineTime: "시작·끝 시간이 올바르지 않습니다.",
+    BadLine: "고친 줄을 찾을 수 없습니다. 다시 불러온 뒤 고쳐 주세요.",
+    BadVoice: "목소리 종류가 올바르지 않습니다."
+  };
+  var soundCtx = null; // 지금 열린 ⑥ 사운드 화면. 다시 그리면 새 값으로 바뀌고 옛 화면의 타이머·응답은 버린다
+
+  function soundErrText(err) {
+    var kind = err && err.type;
+    return (kind && SOUND_ERRORS[kind]) || errMessage(err);
+  }
+
+  function soundClone(value) {
+    return JSON.parse(JSON.stringify(value || []));
+  }
+
+  /* 화면 줄과 저장된 줄을 견줘 바뀐 값(voice·start·end)만 담은 PUT 목록. 순수 함수(DOM 없음). */
+  function soundPatch(lines, saved) {
+    var byId = {};
+    (saved || []).forEach(function (item) {
+      if (item && item.id) byId[item.id] = item;
+    });
+    var out = [];
+    (lines || []).forEach(function (line) {
+      var before = line && byId[line.id];
+      if (!before) return;
+      var item = { id: line.id };
+      var changed = false;
+      ["voice", "start", "end"].forEach(function (key) {
+        if (line[key] !== before[key]) {
+          item[key] = line[key];
+          changed = true;
+        }
+      });
+      if (changed) out.push(item);
+    });
+    return out;
+  }
+
+  /* 칸에 적은 초 → 숫자(밀리초 반올림). 숫자가 아니면 null. */
+  function soundSeconds(text) {
+    var raw = String(text === undefined || text === null ? "" : text).trim();
+    if (!raw) return null;
+    var value = Number(raw);
+    if (!isFinite(value)) return null;
+    return Math.round(value * 1000) / 1000;
+  }
+
+  /* 보내기 전 구간 검사(서버와 같은 규칙: 0 ≤ 시작 < 끝 ≤ 원본 길이, 최소 길이). 맞으면 "". */
+  function soundRangeProblem(line, duration, minSeconds) {
+    if (line.start === null || line.end === null || line.start === undefined || line.end === undefined) {
+      return "시작·끝 시간을 숫자로 적어 주세요.";
+    }
+    if (line.start < 0 || line.end > duration + 0.001 || line.end - line.start < minSeconds - 1e-9) {
+      return "구간은 0초부터 " + duration.toFixed(2) + "초 안에서 " + minSeconds + "초 이상이어야 합니다.";
+    }
+    return "";
+  }
+
+  function soundPath() {
+    return "/api/vnew/p/" + encodeURIComponent(state.projectId) + "/sound";
+  }
+
+  function soundAlive(ctx) {
+    return soundCtx === ctx && !!state.mounted && state.planStep === 6;
+  }
+
+  function soundMount(host, variant, final) {
+    if (soundCtx && soundCtx.timer) window.clearTimeout(soundCtx.timer);
+    var ctx = {
+      root: el("section", "panel vnew-sound"), variant: variant, final: final || {}, view: null, saved: [], lines: [],
+      timer: 0, stopAt: null, busy: false, pickN: null, versionSig: "", player: null, resultBox: null, jobLine: null, applyBtn: null
+    };
+    soundCtx = ctx;
+    host.appendChild(ctx.root);
+    ctx.root.appendChild(el("p", "vnew-hint", "소리 정보를 불러오는 중…"));
+    soundLoad(ctx);
+  }
+
+  function soundLoad(ctx) {
+    api(soundPath() + "?variant=" + encodeURIComponent(ctx.variant))
+      .then(function (view) {
+        if (!soundAlive(ctx)) return;
+        ctx.view = view || {};
+        ctx.saved = soundClone(ctx.view.lines);
+        ctx.lines = soundClone(ctx.view.lines);
+        soundRender(ctx);
+        soundSchedule(ctx);
+      })
+      .catch(function (err) {
+        if (!soundAlive(ctx)) return;
+        clear(ctx.root);
+        if (err && err.type === "SoundDisabled") {
+          soundFallback(ctx);
+          return;
+        }
+        ctx.root.appendChild(planError("소리 정보를 불러오지 못했습니다: " + soundErrText(err)));
+        var retry = el("button", "outline-button", "다시 시도");
+        retry.type = "button";
+        retry.addEventListener("click", function () {
+          clear(ctx.root);
+          ctx.root.appendChild(el("p", "vnew-hint", "소리 정보를 불러오는 중…"));
+          soundLoad(ctx);
+        });
+        ctx.root.appendChild(retry);
+      });
+  }
+
+  /* VNEW_SOUND 가 꺼져 있으면(404 SoundDisabled) 예전처럼 고른 영상과 읽기 전용 대사 목록만 보인다. */
+  function soundFallback(ctx) {
+    var final = ctx.final || {};
+    if (final.status === "done" && final.videoUrl) {
+      var player = el("video", "vnew-final-player vnew-sound-player");
+      player.src = final.videoUrl;
+      player.controls = true;
+      player.setAttribute("playsinline", "");
+      ctx.root.appendChild(player);
+    } else {
+      ctx.root.appendChild(el("p", "vnew-hint", "고른 영상을 불러오지 못했습니다."));
+    }
+    ctx.root.appendChild(dialogueList());
+  }
+
+  function soundRender(ctx) {
+    var view = ctx.view || {};
+    var source = view.source || {};
+    clear(ctx.root);
+    ctx.root.appendChild(el("h2", "vnew-sec-title", "대사 소리"));
+    ctx.root.appendChild(el("p", "vnew-hint vnew-sound-lead", SOUND_HINT));
+
+    var players = el("div", "vnew-sound-players");
+    var sourceBox = el("div", "vnew-sound-pbox");
+    sourceBox.appendChild(el("h3", "vnew-sound-ptitle", "원본 · " + (source.label || "")));
+    var player = el("video", "vnew-sound-player");
+    player.controls = true;
+    player.preload = "metadata";
+    player.setAttribute("playsinline", "");
+    if (source.videoUrl) player.src = source.videoUrl;
+    // [▶ 이 구간 듣기]: 끝 시각에 멈춘다(사용자가 직접 재생하면 stopAt 이 없어 끝까지 간다).
+    player.addEventListener("timeupdate", function () {
+      if (ctx.stopAt !== null && player.currentTime >= ctx.stopAt) {
+        player.pause();
+        ctx.stopAt = null;
+      }
+    });
+    ctx.player = player;
+    sourceBox.appendChild(player);
+    players.appendChild(sourceBox);
+    ctx.resultBox = el("div", "vnew-sound-pbox");
+    players.appendChild(ctx.resultBox);
+    ctx.root.appendChild(players);
+    ctx.versionSig = "";
+    soundRenderResult(ctx);
+    if (!source.hasAudio) ctx.root.appendChild(el("p", "vnew-hint vnew-sound-noaudio", SOUND_NO_AUDIO));
+
+    ctx.root.appendChild(soundTable(ctx));
+
+    var actions = el("div", "vnew-sound-actions");
+    var applyBtn = el("button", "primary-button vnew-sound-apply", "소리에 반영");
+    applyBtn.type = "button";
+    applyBtn.title = "바꾼 내용을 저장한 뒤 속마음 줄 구간에만 소리 효과를 겁니다";
+    applyBtn.addEventListener("click", function () {
+      soundApply(ctx);
+    });
+    ctx.applyBtn = applyBtn;
+    actions.appendChild(applyBtn);
+    ctx.jobLine = el("p", "vnew-hint vnew-sound-job");
+    ctx.jobLine.setAttribute("role", "status");
+    actions.appendChild(ctx.jobLine);
+    ctx.root.appendChild(actions);
+    soundRenderJob(ctx);
+  }
+
+  /* "반영한 소리" 플레이어(고른 버전, 기본은 최신)·버전 고르기·내려받기. 버전 목록이 그대로면 다시 그리지 않는다(재생이 끊기지 않게). */
+  function soundRenderResult(ctx) {
+    var box = ctx.resultBox;
+    if (!box) return;
+    var versions = (ctx.view || {}).versions || [];
+    var sig = JSON.stringify([ctx.pickN, versions.map(function (v) {
+      return [v.n, v.currentSource];
+    })]);
+    if (sig === ctx.versionSig) return;
+    ctx.versionSig = sig;
+    clear(box);
+    box.appendChild(el("h3", "vnew-sound-ptitle", "반영한 소리"));
+    if (!versions.length) {
+      box.appendChild(el("p", "vnew-hint", "아직 반영한 소리가 없습니다. 아래에서 고친 뒤 [소리에 반영]을 누르세요."));
+      return;
+    }
+    var chosen = versions.filter(function (v) {
+      return v.n === ctx.pickN;
+    })[0] || versions[versions.length - 1];
+    var video = el("video", "vnew-sound-player");
+    video.controls = true;
+    video.preload = "metadata";
+    video.setAttribute("playsinline", "");
+    if (chosen.videoUrl) video.src = chosen.videoUrl;
+    box.appendChild(video);
+    var tools = el("div", "vnew-sound-vtools");
+    var select = el("select", "vnew-sound-version");
+    select.setAttribute("aria-label", "반영한 소리 버전");
+    versions.slice().reverse().forEach(function (v) {
+      var label = "v" + v.n + " · 속마음 " + (v.thoughtIds || []).length + "줄" + (v.currentSource ? "" : " · 이전 원본");
+      var option = el("option", "", label);
+      option.value = String(v.n);
+      if (v.n === chosen.n) option.selected = true;
+      select.appendChild(option);
+    });
+    select.addEventListener("change", function () {
+      ctx.pickN = Number(select.value);
+      soundRenderResult(ctx);
+    });
+    tools.appendChild(select);
+    if (chosen.videoUrl) tools.appendChild(downloadLink(chosen.videoUrl, "반영본 내려받기"));
+    box.appendChild(tools);
+  }
+
+  function soundTable(ctx) {
+    var wrap = el("div", "vnew-sound-table");
+    if (!ctx.lines.length) {
+      wrap.appendChild(el("p", "vnew-hint", "대본에 대사가 없습니다. ②에서 대사를 먼저 넣어 주세요."));
+      return wrap;
+    }
+    var head = el("div", "vnew-sound-row vnew-sound-row-head");
+    ["말하는 사람", "대사", "목소리", "시작(초)", "끝(초)", ""].forEach(function (text) {
+      head.appendChild(el("span", "vnew-sound-cell", text));
+    });
+    wrap.appendChild(head);
+    ctx.lines.forEach(function (line) {
+      wrap.appendChild(soundRow(ctx, line));
+    });
+    return wrap;
+  }
+
+  function soundRow(ctx, line) {
+    var row = el("div", "vnew-sound-row");
+    row.appendChild(el("span", "vnew-sound-cell vnew-sound-speaker", line.speaker || "(이름 없음)"));
+    row.appendChild(el("span", "vnew-sound-cell vnew-sound-line", line.lineKo || ""));
+    var voiceCell = el("span", "vnew-sound-cell vnew-sound-voice");
+    var toggle = el("div", "vnew-sound-toggle");
+    toggle.setAttribute("role", "group");
+    toggle.setAttribute("aria-label", "목소리 종류");
+    var autoTag = el("span", "vnew-badge vnew-sound-auto", "자동");
+    autoTag.title = "대본에서 처음 정한 값입니다";
+    var buttons = SOUND_VOICES.map(function (pair) {
+      var button = el("button", "outline-button vnew-sound-voice-btn", pair[1]);
+      button.type = "button";
+      button.addEventListener("click", function () {
+        if (line.voice === pair[0]) return;
+        line.voice = pair[0];
+        line.auto = false;
+        paint();
+      });
+      toggle.appendChild(button);
+      return [pair[0], button];
+    });
+    function paint() {
+      buttons.forEach(function (item) {
+        var on = line.voice === item[0];
+        if (on) item[1].classList.add("is-on");
+        else item[1].classList.remove("is-on");
+        item[1].setAttribute("aria-pressed", on ? "true" : "false");
+      });
+      autoTag.style.display = line.auto ? "" : "none";
+      if (line.voice === "thought") row.classList.add("is-thought");
+      else row.classList.remove("is-thought");
+    }
+    voiceCell.appendChild(toggle);
+    voiceCell.appendChild(autoTag);
+    row.appendChild(voiceCell);
+    ["start", "end"].forEach(function (field) {
+      var cell = el("span", "vnew-sound-cell");
+      var input = el("input", "vnew-sound-time");
+      input.type = "number";
+      input.step = "0.1";
+      input.min = "0";
+      input.value = line[field] === undefined || line[field] === null ? "" : String(line[field]);
+      input.setAttribute("aria-label", field === "start" ? "시작(초)" : "끝(초)");
+      input.addEventListener("change", function () {
+        line[field] = soundSeconds(input.value);
+        line.auto = false;
+        paint();
+      });
+      cell.appendChild(input);
+      row.appendChild(cell);
+    });
+    var listenCell = el("span", "vnew-sound-cell");
+    var listen = el("button", "outline-button vnew-sound-listen", "▶ 이 구간 듣기");
+    listen.type = "button";
+    listen.addEventListener("click", function () {
+      soundListen(ctx, line);
+    });
+    listenCell.appendChild(listen);
+    row.appendChild(listenCell);
+    paint();
+    return row;
+  }
+
+  /* 원본 플레이어로 그 줄 구간만 재생한다(끝에서 timeupdate 가 멈춘다). */
+  function soundListen(ctx, line) {
+    var player = ctx.player;
+    if (!player || line.start === null || line.end === null || !(line.end > line.start)) return;
+    ctx.stopAt = line.end;
+    try {
+      player.currentTime = line.start;
+    } catch (error) {
+      return;
+    }
+    var playing = player.play();
+    if (playing && playing.catch) playing.catch(function () {});
+  }
+
+  function soundJobText(ctx, text, bad) {
+    if (!ctx.jobLine) return;
+    ctx.jobLine.textContent = text;
+    if (bad) ctx.jobLine.classList.add("is-bad");
+    else ctx.jobLine.classList.remove("is-bad");
+  }
+
+  function soundRenderJob(ctx) {
+    var view = ctx.view || {};
+    var job = view.job || {};
+    var hasAudio = !!(view.source || {}).hasAudio;
+    if (ctx.applyBtn) ctx.applyBtn.disabled = ctx.busy || !hasAudio || job.status === "running";
+    if (job.status === "running") soundJobText(ctx, "소리를 반영하는 중… 영상은 그대로 두고 소리만 바꿉니다.", false);
+    else if (job.status === "done") soundJobText(ctx, "반영했습니다. 위 '반영한 소리'에서 들어 보세요.", false);
+    else if (job.status === "failed") soundJobText(ctx, "반영하지 못했습니다: " + (job.error || "알 수 없는 오류"), true);
+    else soundJobText(ctx, "", false);
+  }
+
+  /* [소리에 반영]: 구간 검사 → 바뀐 줄만 PUT → POST apply → 반영이 끝날 때까지 폴링. */
+  function soundApply(ctx) {
+    if (ctx.busy) return;
+    var view = ctx.view || {};
+    var duration = Number((view.source || {}).duration) || 0;
+    var minSeconds = Number((view.limits || {}).minLineSeconds) || 0.2;
+    for (var i = 0; i < ctx.lines.length; i++) {
+      var problem = soundRangeProblem(ctx.lines[i], duration, minSeconds);
+      if (problem) {
+        soundJobText(ctx, i + 1 + "번째 줄: " + problem, true);
+        return;
+      }
+    }
+    var patch = soundPatch(ctx.lines, ctx.saved);
+    ctx.busy = true;
+    if (ctx.applyBtn) ctx.applyBtn.disabled = true;
+    soundJobText(ctx, patch.length ? "고친 내용을 저장하는 중…" : "소리 반영을 시작하는 중…", false);
+    var save = patch.length
+      ? api(soundPath(), { method: "PUT", body: JSON.stringify({ variant: ctx.variant, lines: patch }) })
+      : Promise.resolve(null);
+    save
+      .then(function (saved) {
+        if (!soundAlive(ctx)) return null;
+        if (saved) {
+          ctx.saved = soundClone(saved.lines);
+          // 화면 줄 객체는 그대로 두고(행이 쥐고 있다) 서버 값(auto 포함)만 옮긴다.
+          var byId = {};
+          ctx.saved.forEach(function (item) {
+            byId[item.id] = item;
+          });
+          ctx.lines.forEach(function (line) {
+            var after = byId[line.id];
+            if (after) ["voice", "start", "end", "auto"].forEach(function (key) {
+              line[key] = after[key];
+            });
+          });
+        }
+        soundJobText(ctx, "소리 반영을 시작하는 중…", false);
+        return api(soundPath() + "/apply", { method: "POST", body: JSON.stringify({ variant: ctx.variant }) });
+      })
+      .then(function (result) {
+        if (!result || !soundAlive(ctx)) return;
+        ctx.busy = false;
+        ctx.view.job = result.job || { status: "running" };
+        soundRenderJob(ctx);
+        soundSchedule(ctx);
+      })
+      .catch(function (err) {
+        if (!soundAlive(ctx)) return;
+        ctx.busy = false;
+        if (err && err.type === "SoundRunning") {
+          ctx.view.job = { status: "running" };
+          soundRenderJob(ctx);
+          soundSchedule(ctx);
+          return;
+        }
+        soundRenderJob(ctx);
+        soundJobText(ctx, "반영하지 못했습니다: " + soundErrText(err), true);
+      });
+  }
+
+  /* 반영 running 이면 SOUND_POLL_MS 뒤 GET — 작업 상태·반영 기록만 바꾼다(고치던 줄은 그대로). */
+  function soundSchedule(ctx) {
+    if (ctx.timer) window.clearTimeout(ctx.timer);
+    ctx.timer = 0;
+    if (((ctx.view || {}).job || {}).status !== "running") return;
+    ctx.timer = window.setTimeout(function () {
+      ctx.timer = 0;
+      if (!soundAlive(ctx)) return;
+      api(soundPath() + "?variant=" + encodeURIComponent(ctx.variant))
+        .then(function (view) {
+          if (!soundAlive(ctx)) return;
+          ctx.view.job = (view || {}).job || {};
+          ctx.view.versions = (view || {}).versions || [];
+          if (ctx.view.job.status !== "running") ctx.pickN = null; // 끝나면 최신 버전을 보인다
+          soundRenderResult(ctx);
+          soundRenderJob(ctx);
+          soundSchedule(ctx);
+        })
+        .catch(function () {
+          if (soundAlive(ctx)) soundSchedule(ctx);
+        });
+    }, SOUND_POLL_MS);
   }
 
   /* ================================================================ ⑦ 편집(영상 편집 타임라인, 지시서 111)

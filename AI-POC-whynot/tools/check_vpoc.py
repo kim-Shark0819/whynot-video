@@ -38243,6 +38243,7 @@ function genBusyFast() { return false; }
 function genViewSignature() { return "sig"; }
 function loadPlan(first) { loads.push(first); }
 function dialogueList() { return new FakeNode("section"); }
+function soundMount() {} // 작업 122: ⑥ 대사 소리 패널(서버 GET)은 check_vnew_sound_122 가 본다
 function stub(n) { return function (body) { renders.push(n); body.appendChild(new FakeNode("stub-" + n)); }; }
 var renderInputStep = stub(1), renderScriptStep = stub(2), renderContiStep = stub(3), renderPrevizStep = stub(4), renderGenStep = stub(5);
 var realSound = renderSoundStep;
@@ -45847,6 +45848,329 @@ def check_seedream_fal_124() -> None:
            "(sf-e)필터 다시 쓰기 (sf-f)ark 인증 실패 fal 1회·키 없음 (sf-g)ark 바디 그대로 (sf-h)금액 unit_usd")
 
 
+def _snd_mp4(ffmpeg: str, path: str, *, audio: bool) -> None:
+    """작업 122 검사용 합성 mp4(4초, 160x120 색 영상 24fps). audio 면 440Hz 사인파를 0.5~1.5초·2.5~3.5초에만 낸다(나머지 무음)."""
+    command = [ffmpeg, "-y", "-hide_banner", "-loglevel", "error", "-f", "lavfi", "-i", "color=c=blue:s=160x120:r=24:d=4"]
+    if audio:
+        command += ["-f", "lavfi", "-i", "sine=frequency=440:sample_rate=48000:duration=4",
+                    "-af", "volume=enable='between(t,0,0.5)+between(t,1.5,2.5)+between(t,3.5,4)':volume=0",
+                    "-c:a", "aac", "-b:a", "128k", "-shortest"]
+    command += ["-c:v", "libx264", "-pix_fmt", "yuv420p", path]
+    result = subprocess.run(command, capture_output=True)
+    if result.returncode != 0:
+        raise RuntimeError("합성 mp4 를 만들지 못했습니다: " + result.stderr.decode("utf-8", errors="replace")[-300:])
+
+
+def _snd_video_md5(ffmpeg: str, path: str) -> str:
+    result = subprocess.run([ffmpeg, "-hide_banner", "-loglevel", "error", "-i", path, "-map", "0:v:0", "-c", "copy", "-f", "md5", "-"],
+                            capture_output=True)
+    return result.stdout.decode("utf-8", errors="replace").strip()
+
+
+def _snd_pcm(ffmpeg: str, path: str) -> bytes:
+    """소리 디코드(s16le 모노 48kHz)."""
+    return subprocess.run([ffmpeg, "-hide_banner", "-loglevel", "error", "-i", path, "-map", "0:a:0", "-f", "s16le", "-ac", "1",
+                           "-ar", "48000", "-"], capture_output=True).stdout
+
+
+_SND_NODE = r"""
+var saved = [{ id: "e1", voice: "spoken", start: 0.5, end: 1.5, auto: true }, { id: "e2", voice: "thought", start: 2.5, end: 3.5, auto: true },
+             { id: "e3", voice: "spoken", start: 3.6, end: 3.9, auto: true }];
+var lines = JSON.parse(JSON.stringify(saved));
+lines[0].voice = "thought"; lines[0].auto = false; lines[1].end = 3.4; lines.push({ id: "zz", voice: "thought", start: 0, end: 1 });
+console.log(JSON.stringify({ patch: soundPatch(lines, saved), none: soundPatch(saved, saved),
+  secs: [soundSeconds(" 1.23456 "), soundSeconds(""), soundSeconds("abc"), soundSeconds(null)],
+  range: [soundRangeProblem({ start: 0, end: 0.1 }, 4, 0.2) !== "", soundRangeProblem({ start: 0, end: 4.0005 }, 4, 0.2), soundRangeProblem({ start: null, end: 1 }, 4, 0.2) !== ""] }));
+"""
+
+
+def check_vnew_sound_122() -> None:
+    """작업 122 — ⑥ 사운드 실제 말/속마음(sound.py·라우트 3개·화면). 로컬 ffmpeg 실측 + 가짜 저장소, 유료 호출 0.
+
+    (snd-a) estimate_spans: 컷 구간 + 말소리 → 줄 배정(조각이 많으면 앞 줄부터 묶음)·말소리 없음 → 컷 고르게·컷 모름 → 전체 나눔·
+            컷 없는 줄 → 전체 자리·최소 길이. 변형 1회(말소리 무시 → 배정 검사가 잡는다)
+    (snd-b) GET 자동 생성(실제 ffmpeg silencedetect): voice = 대본 그대로·auto true·빈 대사 뺌·구간 ≈ 말소리, 두 번째 GET 은 새로 안 만듦
+    (snd-c) PUT: 범위 오류 400(끝 > 길이·0.2초 미만·음수)·바꾼 줄만 auto false·plan revision·대본·승인 그대로
+    (snd-d) apply(인라인 스레드, 실제 ffmpeg): 원본·결과 영상 md5 같음·길이 차 ≤ 0.05초·속마음 구간 소리 다름·실제 말 구간 PCM 같음·
+            새 키 sound/webtoon/v1.mp4(영상 버킷)·running 409·소리 없음 400(문구)·⑦ 내보내기가 생기면 원본이 내보내기로 바뀜
+            (고친 줄 voice 유지)·다른 사용자 404·끔 404·임시 폴더 남지 않음
+    (snd-e) 화면: 토글·반영 버튼·안내 문구·"저장하지 않습니다" 없음·⑥ 주석·사운드 구역 innerHTML 0, node: soundPatch·soundSeconds·soundRangeProblem
+    """
+    sys.path.insert(0, str(ROOT / "app"))
+    import traceback as _tb  # noqa: PLC0415
+
+    bad: list[str] = []
+    seen: set[str] = set()
+
+    def expect(group: str, got, want, what: str) -> None:
+        seen.add(group)
+        if got != want:
+            bad.append(f"({group}) {what}\n      결과 {got!r}\n      기대 {want!r}")
+
+    def near(a, b, tol: float = 0.05) -> bool:
+        return all(abs(x - y) <= tol for x, y in zip(a, b)) and len(a) == len(b)
+
+    try:
+        from src.vnew import sound as sndmod  # noqa: PLC0415
+
+        # ================= (snd-a) 구간 추정 =================
+        est = sndmod.estimate_spans
+        cuts = {"c1": (0.0, 4.0), "c2": (4.0, 8.0)}
+        speech = [(0.5, 1.5), (2.0, 3.0), (3.2, 3.6), (5.0, 6.0), (7.95, 8.0)]
+
+        def assign_case(fn) -> list:
+            return fn([{"cutId": "c1"}, {"cutId": "c1"}, {"cutId": "c2"}], cuts, speech, 8.0)
+
+        want_assign = [(0.5, 3.0), (3.2, 3.6), (5.0, 6.0)]
+        expect("snd-a", assign_case(est), want_assign, "컷 구간 + 말소리: c1 조각 3개 → 줄 2개(앞 줄 2조각)·c2 1조각(0.05초 조각 버림)")
+        expect("snd-a", est([{"cutId": "c1"}, {"cutId": "c1"}, {"cutId": "c2"}], cuts, [], 8.0), [(0.0, 2.0), (2.0, 4.0), (4.0, 8.0)],
+               "말소리 없음 → 컷 구간을 그 컷 줄 수로 고르게")
+        expect("snd-a", est([{"cutId": "c1"}, {"cutId": ""}, {}, {"cutId": "c9"}], None, speech, 8.0),
+               [(0.0, 2.0), (2.0, 4.0), (4.0, 6.0), (6.0, 8.0)], "컷 구간 모름 → 전체 길이를 줄 수로")
+        expect("snd-a", [est([{"cutId": "c1"}, {"cutId": "x"}], cuts, speech, 8.0), est([{"cutId": "c1"}] * 2, {"c1": (3.9, 4.0)}, [], 4.0), est([], cuts, speech, 8.0)],
+               [[(0.5, 3.6), (4.0, 8.0)], [(3.8, 4.0), (3.8, 4.0)], []],
+               "컷 없는 줄 → 전체 나눔 자리·조각이 줄보다 적으면 묶음·최소 0.2초(끝에 닿으면 시작을 당김)·줄 없음")
+        # 변형 1회(새 판정 1곳): 말소리를 보지 않으면 배정 검사가 잡는다.
+        mutant = lambda lines, cut_spans, _speech, duration: est(lines, cut_spans, [], duration)  # noqa: E731
+        expect("snd-a", assign_case(mutant) != want_assign, True, "변형(말소리 무시)이면 배정 검사가 잡는다")
+    except Exception as exc:  # noqa: BLE001
+        bad.append("(snd-a) 예외: " + repr(exc) + "\n" + _tb.format_exc()[:1500])
+
+    # ================= (snd-b~d) 라우트·실제 ffmpeg =================
+    ffmpeg = ""
+    try:
+        from src import stitcher as _stitch  # noqa: PLC0415
+
+        ffmpeg = _stitch.ffmpeg_path()
+    except Exception:  # noqa: BLE001
+        ffmpeg = ""
+    before_tmp = {n for n in os.listdir(tempfile.gettempdir()) if n.startswith("vnew-sound-")}
+    if not ffmpeg:
+        warn("ffmpeg 가 없어 snd-b~d(사운드 실측)를 건너뜁니다")
+    else:
+        work = tempfile.mkdtemp(prefix="snd122-")
+        try:
+            src_path, mute_path = os.path.join(work, "src.mp4"), os.path.join(work, "mute.mp4")
+            _snd_mp4(ffmpeg, src_path, audio=True)
+            _snd_mp4(ffmpeg, mute_path, audio=False)
+            with open(src_path, "rb") as handle:
+                src_bytes = handle.read()
+            with open(mute_path, "rb") as handle:
+                mute_bytes = handle.read()
+            with _EdtEnv() as env, _pin_vnew(VNEW_EDIT=True, VNEW_SOUND=True):
+                from src.vnew import sound as sndmod  # noqa: PLC0415
+
+                spawned: list = []
+                inline = {"on": True}
+
+                def fake_spawn(owner, pid, gen_id, variant, claim):
+                    spawned.append((pid, variant))
+                    if inline["on"]:
+                        sndmod.run_apply(owner, pid, gen_id, variant, claim)
+
+                env.set(sndmod, "_spawn_apply", fake_spawn)
+                client = env.client()
+
+                def make_plan(pid: str, blob: bytes) -> str:
+                    plan = env.planmod.new_plan()
+                    plan["revision"] = 7
+                    plan["previz"]["approved"] = True
+                    plan["script"] = {"status": "ready", "setting": {}, "entries": [
+                        {"id": "e1", "panels": [1], "speaker": "민지", "lineKo": "안녕", "voice": "spoken"},
+                        {"id": "e2", "panels": [2], "speaker": "준호", "lineKo": "설마…", "voice": "thought"},
+                        {"id": "e3", "panels": [2], "speaker": "", "lineKo": " … "}]}
+                    plan["conti"] = {"status": "ready", "segments": [{"id": "s1", "cutIds": ["c1", "c2"], "seconds": 4}],
+                                     "cuts": [{"id": "c1", "no": 1, "panels": [1], "seconds": 2}, {"id": "c2", "no": 2, "panels": [2], "seconds": 2}]}
+                    final_key = f"users/{_EDT_OWNER}/video/{pid}/vnew/gen/g1/final-webtoon.mp4"
+                    plan["gen"] = {
+                        "genId": "g1", "mode": "previz", "status": "done", "createdAt": "2026-11-04T00:00:00Z", "segments": [],
+                        "units": [{"id": c, "cutId": c, "recSegId": "s1", "seconds": 2.0,
+                                   "webtoon": _edt_cell("completed", _edt_key(pid, f"{c}-webtoon-1")), "real": _edt_cell("failed")}
+                                  for c in ("c1", "c2")],
+                        "finalWebtoon": {"status": "done", "key": final_key, "error": ""},
+                        "finalReal": {"status": "failed", "key": "", "error": "x"}, "selected": "webtoon", "costUsd": 0.0,
+                    }
+                    env.store.blobs.update({final_key: blob, _edt_key(pid, "c1-webtoon-1"): _edt_fake(2.0),
+                                            _edt_key(pid, "c2-webtoon-1"): _edt_fake(2.0)})
+                    env.save_plan(pid, plan)
+                    return final_key
+
+                def err_of(resp) -> list:
+                    body = (resp.get_json(silent=True) or {}).get("error") or {}
+                    return [resp.status_code, str(body.get("type") or "")]
+
+                def frozen(pid: str) -> str:
+                    plan = env.plan(pid)
+                    return json.dumps([plan.get("revision"), plan.get("script"), plan.get("previz", {}).get("approved")],
+                                      ensure_ascii=False, sort_keys=True)
+
+                url = "/api/vnew/p/prj_snd/sound"
+                make_plan("prj_snd", src_bytes)
+                plan_before = frozen("prj_snd")
+
+                # ---- (snd-b) GET 자동 생성 ----
+                resp = client.get(url)
+                view = resp.get_json() or {}
+                lines = view.get("lines") or []
+                expect("snd-b", [resp.status_code, view.get("variant"), (view.get("source") or {}).get("kind"),
+                                 (view.get("source") or {}).get("hasAudio"), [l["id"] for l in lines], [l["voice"] for l in lines],
+                                 [l["auto"] for l in lines], view.get("rebuilt"), view.get("versions"), (view.get("job") or {}).get("status")],
+                       [200, "webtoon", "final", True, ["e1", "e2"], ["spoken", "thought"], [True, True], True, [], "none"],
+                       "GET: ⑤ 완성본·voice = 대본 그대로·auto·빈 대사 뺌·반영 기록 없음")
+                expect("snd-b", [near([lines[0]["start"], lines[0]["end"], lines[1]["start"], lines[1]["end"]], [0.5, 1.5, 2.5, 3.5])
+                                 if len(lines) == 2 else lines, abs(((view.get("source") or {}).get("duration") or 0) - 4.0) <= 0.05],
+                       [True, True], "구간 = 컷 구간(c1 0~2·c2 2~4) 안 말소리(silencedetect)")
+                again = client.get(url).get_json() or {}
+                expect("snd-b", [again.get("rebuilt"), again.get("lines") == lines], [False, True], "두 번째 GET 은 다시 만들지 않는다")
+
+                # ---- (snd-c) PUT ----
+                put = lambda body: client.put(url, json={"variant": "webtoon", **body})  # noqa: E731
+                expect("snd-c", [err_of(put({"lines": [{"id": "e1", "end": 9}]})), err_of(put({"lines": [{"id": "e1", "start": 1.0, "end": 1.1}]})),
+                                 err_of(put({"lines": [{"id": "e1", "start": -1, "end": 1}]})), err_of(put({"lines": [{"id": "e9", "voice": "thought"}]})),
+                                 err_of(put({"lines": [{"id": "e1", "voice": "loud"}]}))],
+                       [[400, "BadLineRange"], [400, "BadLineRange"], [400, "BadLineRange"], [400, "BadLine"], [400, "BadVoice"]],
+                       "PUT 범위 오류 400(끝 > 길이·0.2초 미만·음수)·모르는 줄·모르는 voice")
+                resp = put({"lines": [{"id": "e1", "start": 0.6, "end": 1.4, "speaker": "<b>x</b>", "lineKo": "바꿈"}, {"id": "e2", "voice": "thought"}]})
+                saved_lines = (resp.get_json() or {}).get("lines") or []
+                expect("snd-c", [resp.status_code, [(l["id"], l["start"], l["end"], l["auto"], l["speaker"], l["lineKo"]) for l in saved_lines][:1],
+                                 [l["auto"] for l in saved_lines], frozen("prj_snd") == plan_before],
+                       [200, [("e1", 0.6, 1.4, False, "민지", "안녕")], [False, True], True],
+                       "바꾼 줄만 auto false(같은 값 줄은 그대로)·글 필드는 무시·plan revision·대본·승인 그대로")
+
+                # ---- (snd-d) apply ----
+                resp = client.post(url + "/apply", json={"variant": "webtoon"})
+                doc, _ = env.store.read_json(sndmod.doc_key(_EDT_OWNER, "prj_snd", "g1", "webtoon"))
+                versions = (doc or {}).get("versions") or []
+                out_key = sndmod.version_key(_EDT_OWNER, "prj_snd", "g1", "webtoon", 1)
+                expect("snd-d", [resp.status_code, ((doc or {}).get("job") or {}).get("status"), [v.get("key") for v in versions],
+                                 versions[0].get("thoughtIds") if versions else None, out_key.endswith("/vnew/gen/g1/sound/webtoon/v1.mp4"),
+                                 (out_key, "edt-video-bucket", "video/mp4") in env.store.puts, frozen("prj_snd") == plan_before],
+                       [202, "done", [out_key], ["e2"], True, True, True], "apply: 새 키 v1(영상 버킷)·속마음 줄 기록·plan 그대로")
+                if out_key in env.store.blobs:
+                    out_path = os.path.join(work, "out.mp4")
+                    with open(out_path, "wb") as handle:
+                        handle.write(env.store.blobs[out_key])
+                    md5_src, md5_out = _snd_video_md5(ffmpeg, src_path), _snd_video_md5(ffmpeg, out_path)
+                    d_src, d_out = _stitch.probe_media(src_path)["duration"], _stitch.probe_media(out_path)["duration"]
+                    pcm_a, pcm_b = _snd_pcm(ffmpeg, src_path), _snd_pcm(ffmpeg, out_path)
+
+                    def part(pcm: bytes, t0: float, t1: float) -> bytes:
+                        return pcm[int(t0 * 48000) * 2:int(t1 * 48000) * 2]
+
+                    import hashlib as _hl  # noqa: PLC0415
+
+                    thought = [l for l in doc["lines"] if l["id"] == "e2"][0]
+                    t0, t1 = thought["start"], thought["end"]
+                    expect("snd-d", [md5_src.startswith("MD5=") and md5_src == md5_out, abs(d_src - d_out) <= 0.05,
+                                     _hl.md5(part(pcm_a, t0 + 0.05, t1 - 0.05)).hexdigest() != _hl.md5(part(pcm_b, t0 + 0.05, t1 - 0.05)).hexdigest(),
+                                     part(pcm_a, 0.0, t0 - 0.001) == part(pcm_b, 0.0, t0 - 0.001), part(pcm_a, t1 + 0.001, 3.99) == part(pcm_b, t1 + 0.001, 3.99),
+                                     len(part(pcm_a, 0.0, t0 - 0.001)) > 0],
+                           [True, True, True, True, True, True],
+                           f"영상 md5 같음({md5_src} / {md5_out})·길이 차 ≤ 0.05초({d_src} / {d_out})·속마음 구간 소리 다름·그 밖 구간 PCM 같음")
+                    _SND_REPORT[:] = [md5_src, md5_out, f"{d_src:.3f}", f"{d_out:.3f}"]
+                else:
+                    bad.append("(snd-d) 반영 결과 영상이 저장되지 않았습니다: " + json.dumps((doc or {}).get("job"), ensure_ascii=False))
+
+                # running 409 · 소리 없음 400
+                def set_job(job: dict) -> None:
+                    key = sndmod.doc_key(_EDT_OWNER, "prj_snd", "g1", "webtoon")
+                    data, _ = env.store.read_json(key)
+                    data["job"] = job
+                    _FakeCharStore.write_json(env.store, key, data)
+
+                set_job({"status": "running", "error": "", "at": _snd_now(), "beatAt": _snd_now(), "claim": "other", "n": 2})
+                running = err_of(client.post(url + "/apply", json={"variant": "webtoon"}))
+                set_job({"status": "done", "error": "", "at": "", "n": 1})
+                make_plan("prj_mute", mute_bytes)
+                mute_view = client.get("/api/vnew/p/prj_mute/sound").get_json() or {}
+                mute_resp = client.post("/api/vnew/p/prj_mute/sound/apply", json={"variant": "webtoon"})
+                mute_err = (mute_resp.get_json(silent=True) or {}).get("error") or {}
+                expect("snd-d", [running, (mute_view.get("source") or {}).get("hasAudio"), [mute_resp.status_code, mute_err.get("message")]],
+                       [[409, "SoundRunning"], False, [400, "이 영상에는 소리가 없어 바꿀 수 없습니다"]], "running 409·소리 없는 원본 400(문구)")
+
+                # ⑦ 내보내기가 생기면 원본이 내보내기로 바뀐다(고친 줄 voice·auto 유지, 반영 기록은 이전 원본으로 남는다).
+                export_key = env.editmod.export_key(_EDT_OWNER, "prj_snd", "g1", 2)
+                env.store.blobs[export_key] = src_bytes
+                _FakeCharStore.write_json(env.store, env.editmod.export_state_key(_EDT_OWNER, "prj_snd", "g1"), {
+                    "v": 1, "n": 2, "history": [{"n": 1, "status": "done", "variant": "webtoon", "key": export_key + ".old"}],
+                    "current": {"n": 2, "status": "done", "variant": "webtoon", "key": export_key, "clips": [
+                        {"id": "c1", "sourceKey": _edt_key("prj_snd", "c1-webtoon-1"), "in": 0.0, "out": 2.0, "muted": False},
+                        {"id": "c2", "sourceKey": _edt_key("prj_snd", "c2-webtoon-1"), "in": 0.0, "out": 2.0, "muted": False}]}})
+                ex = client.get(url).get_json() or {}
+                ex_lines = ex.get("lines") or []
+                expect("snd-d", [(ex.get("source") or {}).get("kind"), (ex.get("source") or {}).get("label"), ex.get("rebuilt"),
+                                 [(l["voice"], l["auto"]) for l in ex_lines], [v.get("currentSource") for v in ex.get("versions") or []],
+                                 near([ex_lines[1]["start"], ex_lines[1]["end"]], [2.5, 3.5]) if len(ex_lines) == 2 else ex_lines],
+                       ["export", "⑦ 내보내기 2", True, [("spoken", False), ("thought", True)], [False], True],
+                       "⑦ 내보내기 우선(최신 n)·고친 줄 유지·내보내기 clips 로 컷 구간·이전 반영은 이전 원본")
+
+                # 다른 사용자(쓰기 권한 없음)·없는 프로젝트 404, 끔 404(프로젝트 조회 전)
+                env.can_write = False
+                other = [err_of(client.get(url)), err_of(client.put(url, json={"lines": []})), err_of(client.post(url + "/apply", json={}))]
+                env.can_read = False
+                other.append(err_of(client.get(url)))
+                env.can_write = env.can_read = True
+                env.missing_project = True
+                other.append(err_of(client.get(url)))
+                env.missing_project = False
+                calls = len(env.project_calls)
+                with _pin_vnew(VNEW_SOUND=False):
+                    off = err_of(client.get(url))
+                expect("snd-d", [other, off, len(env.project_calls) == calls, len(spawned)],
+                       [[[404, "NotFound"]] * 5, [404, "SoundDisabled"], True, 1], "다른 사용자·없는 프로젝트 404·끔 404(프로젝트 조회 0)·반영 스레드 1번")
+        except Exception as exc:  # noqa: BLE001
+            bad.append("(snd-b~d) 예외: " + repr(exc) + "\n" + _tb.format_exc()[:2000])
+        finally:
+            shutil.rmtree(work, ignore_errors=True)
+    after_tmp = {n for n in os.listdir(tempfile.gettempdir()) if n.startswith("vnew-sound-")}
+    if after_tmp - before_tmp:
+        bad.append(f"(snd-d) 임시 폴더가 남았습니다: {sorted(after_tmp - before_tmp)}")
+
+    # ================= (snd-e) 화면 =================
+    vjs = (PUBLIC / "vnew.js").read_text(encoding="utf-8")
+    start = vjs.find("  /* ================================================================ ⑥ 사운드 — 대사별 실제 말/속마음(작업 122)")
+    end = vjs.find("  /* ================================================================ ⑦ 편집(영상 편집 타임라인, 지시서 111)")
+    section = vjs[start:end] if 0 <= start < end else ""
+    texts = ['["spoken", "실제 말"], ["thought", "속마음"]', '"소리에 반영"', '"▶ 이 구간 듣기"', '"자동"', '"반영한 소리"',
+             '"영상은 그대로 두고 소리만 바뀝니다. 속마음 줄은 속으로 울리는 목소리로 바뀝니다."', 'soundPath() + "/apply"',
+             '"이 영상에는 소리가 없어 바꿀 수 없습니다"']
+    expect("snd-e", [[t for t in texts if t not in section], "저장하지 않습니다" in vjs, "⑤ 사운드" in vjs, "⑥ 사운드 (베타)" in vjs,
+                     [w for w in ("innerHTML", "insertAdjacentHTML", "outerHTML") if w in section], bool(section),
+                     "soundMount(host, selected, final);" in vjs],
+           [[], False, False, True, [], True, True], "토글·반영 버튼·안내 문구·저장 안 함 문구 없음·⑥ 주석·textContent 만(innerHTML 0)")
+    node = shutil.which("node")
+    code, problems = _edu_code(vjs, (("  /* 화면 줄과 저장된 줄을 견줘", "  function soundPath() {"),))
+    bad.extend(p.replace("(edu-a)", "(snd-e)") for p in problems)
+    if node and not problems:
+        got, err = _lr_run_node(node, code + _SND_NODE, "snd_e_")
+        if err:
+            bad.append(f"(snd-e) node 실행 실패: {err}")
+        else:
+            expect("snd-e", got, {"patch": [{"id": "e1", "voice": "thought"}, {"id": "e2", "end": 3.4}], "none": [],
+                                  "secs": [1.235, None, None, None], "range": [True, "", True]},
+                   "soundPatch(바뀐 값만·모르는 줄 뺌)·soundSeconds·soundRangeProblem")
+    elif not node:
+        warn("node 가 없어 snd-e(화면 순수 함수)를 건너뜁니다")
+
+    missing = [g for g in ("snd-a", "snd-b", "snd-c", "snd-d", "snd-e") if g not in seen]
+    if missing and not bad and ffmpeg and node:
+        bad.append(f"검사하지 못한 묶음: {missing}")
+    if bad:
+        for item in bad:
+            fail("vnew ⑥ 사운드 실제 말/속마음(작업 122) " + item)
+    else:
+        ok("vnew ⑥ 사운드 실제 말/속마음(작업 122) 검사 (snd-a)구간 추정 4규칙·변형 1회 (snd-b)GET 자동 생성 (snd-c)PUT 범위·auto·plan 그대로 "
+           f"(snd-d)영상 md5 같음 {' '.join(_SND_REPORT)}·소리 구간·409·400·내보내기 우선·404 (snd-e)화면")
+
+
+_SND_REPORT: list[str] = []
+
+
+def _snd_now() -> str:
+    sys.path.insert(0, str(ROOT / "app"))
+    from src.vpoc.errors import now_iso  # noqa: PLC0415
+
+    return now_iso()
 def check_vnew_location_fast_125() -> None:
     """작업 125 — 공간 시트를 fal text-to-image 로, 지시문·그림·검사를 동시에. 가짜 fal/LLM, 유료·네트워크 0.
 
@@ -46217,6 +46541,7 @@ def main() -> int:
     check_vnew_conti_images_120()
     check_vnew_take_both_123()
     check_seedream_fal_124()
+    check_vnew_sound_122()
     check_vnew_location_fast_125()
     check_pod_zones()
     print()

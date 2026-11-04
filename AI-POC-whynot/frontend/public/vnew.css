@@ -1888,7 +1888,7 @@ textarea.vnew-field-input {
   font-size: 13px;
 }
 
-/* ---- ⑤ 사운드(베타) ---- */
+/* ---- ⑥ 사운드(베타) ---- */
 
 .vnew-sound-head {
   margin-bottom: 4px;
@@ -1932,6 +1932,118 @@ textarea.vnew-field-input {
   border-color: var(--accent, #cb3208);
   color: var(--accent, #cb3208);
   background: var(--accent-soft, #fff4ee);
+}
+
+/* ---- ⑥ 사운드 — 대사별 실제 말/속마음(작업 122) ---- */
+
+.vnew-sound {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  min-width: 0;
+}
+
+.vnew-sound-players {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+  gap: 12px;
+}
+
+.vnew-sound-pbox {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-width: 0;
+}
+
+.vnew-sound-ptitle {
+  margin: 0;
+  font-size: 14px;
+}
+
+.vnew-sound-pbox video {
+  width: 100%;
+  max-height: 360px;
+  background: #000;
+}
+
+.vnew-sound-vtools {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+}
+
+.vnew-sound-table {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  overflow-x: auto;
+}
+
+.vnew-sound-row {
+  display: grid;
+  grid-template-columns: 110px minmax(160px, 1fr) 210px 84px 84px 130px;
+  gap: 8px;
+  align-items: center;
+  padding: 6px 4px;
+  border-bottom: 1px solid var(--line, #e6e1dc);
+  min-width: 820px;
+}
+
+.vnew-sound-row-head {
+  font-size: 12px;
+  color: var(--muted, #6b625a);
+}
+
+.vnew-sound-row.is-thought {
+  background: var(--accent-soft, #fff4ee);
+}
+
+.vnew-sound-speaker {
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+
+.vnew-sound-line {
+  overflow-wrap: anywhere;
+}
+
+.vnew-sound-voice {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+  flex-wrap: wrap;
+}
+
+.vnew-sound-voice .vnew-sound-toggle {
+  gap: 4px;
+}
+
+.vnew-sound-voice-btn {
+  font-size: 13px;
+  padding: 4px 10px;
+}
+
+.vnew-sound-time {
+  width: 76px;
+}
+
+.vnew-sound-listen {
+  font-size: 13px;
+  padding: 4px 8px;
+}
+
+.vnew-sound-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  align-items: center;
+}
+
+.vnew-sound-job.is-bad,
+.vnew-sound-noaudio {
+  color: var(--danger, #b42318);
 }
 
 /* ---- ⑤ 대사 목록(읽기 전용) ---- */
