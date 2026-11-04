@@ -855,9 +855,23 @@ def create_blueprint(deps: VnewDependencies) -> Blueprint:
             if not math.isfinite(confirm_usd):
                 raise VpocError("vnew.generate.real", "NoConfirmUsd", "확인 금액(confirmUsd)이 필요합니다.", 400)
             audio = payload.get("audio") if isinstance(payload.get("audio"), bool) else None
-            run = generate.start_real(owner, pid, confirm_usd, audio=audio)
+            # 작업 126: cast(선택) [{name, charId, look}] — 이 회차만 인물을 바꾼다(검증은 start_real, 400 BadCast).
+            run = generate.start_real(owner, pid, confirm_usd, audio=audio, cast=payload.get("cast"))
             data, _ = plan_mod.load_plan(owner, pid)
             return jsonify({"ok": True, "run": run, "plan": plan_mod.plan_view(owner, pid, data)}), 202
+        except Exception as exc:  # noqa: BLE001
+            return _fail(exc)
+
+    # 작업 126: [인물 바꿔 다시 만들기] 창 재료(이 회차 인물·소유자 캐릭터와 모습별 못 고르는 이유). 창을 열 때만 부른다.
+    @bp.get("/p/<pid>/generate/real/cast")
+    @deps.require_auth
+    def plan_generate_real_cast(pid: str):
+        try:
+            from . import generate  # noqa: PLC0415
+
+            generate._require_take_real()  # noqa: SLF001
+            owner = _project_for(pid, write=False)
+            return jsonify(generate.real_cast_options(owner, pid))
         except Exception as exc:  # noqa: BLE001
             return _fail(exc)
 
