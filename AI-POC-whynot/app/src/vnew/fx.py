@@ -6,6 +6,7 @@
   - 실사 표현은 참고 구현 vpoc/live.py:19-25 그대로다. 배경 기호는 빈 값이다.
   - 컷 필드: fx(적용 0~2) · fxSuggest(추천 0~2, 키가 있으면 채운 컷) · fxDrawn(패널에 그려진 기호 0~5) ·
     moodKo(60자) · moodEn(80자). 모르는 기호·중복은 버리고, 글은 제어 문자·줄바꿈을 한 칸으로 바꾼 뒤 자른다.
+  - 작업 127: fxWho({인물 표현 기호: [그 컷 인물 이름]}) — 기호를 누구에게 붙일지. 없으면(옛 컷) 지금 문장 그대로다.
 """
 
 from __future__ import annotations
@@ -49,8 +50,35 @@ FX_LABEL_KO = {
     "pink sparkle background": "분홍 반짝이 배경",
     "speed lines": "속도선",
 }
-FX_FIELDS = ("fx", "fxSuggest", "fxDrawn", "moodKo", "moodEn")
+FX_FIELDS = ("fx", "fxSuggest", "fxDrawn", "moodKo", "moodEn", "fxWho")
 FX_MAX, DRAWN_MAX, MOOD_KO_MAX, MOOD_EN_MAX, SUGGEST_CAP, FILL_MAX_CUTS = 2, 5, 60, 80, 3, 40
+
+# 작업 127: 인물 표현 기호(누구에게 붙는지 있다). 배경 기호(pink sparkle background·speed lines)는 대상이 없다.
+# 컷 필드 fxWho = {인물 표현 기호: [그 컷 인물 이름…]}. 이름은 컷 characters 안의 것만, 기호마다 FX_WHO_MAX 명.
+PERSON_FX = ("tear streams", "sweat drop", "blush lines")
+FX_WHO_MAX, FX_WHO_NAME_MAX = 4, 40
+# 대상이 있을 때 문장(웹툰 긴 형·짧은 형·실사). {who} = 대상 이름(로마자 등 부르는 쪽 규칙), 짧은 형은 부정 구절 없음.
+FX_WHO_SENTENCE = {
+    "tear streams": "Webtoon-style tear streams run down {who}'s cheeks only",
+    "sweat drop": "A single anime sweat drop beside {who}'s head only, not an anger mark",
+    "blush lines": "Pink webtoon blush lines on {who}'s cheeks only",
+}
+FX_WHO_SHORT = {
+    "tear streams": "tear streams on {who} only",
+    "sweat drop": "one sweat drop by {who} only, not an anger mark",
+    "blush lines": "pink blush lines on {who} only",
+}
+REAL_WHO = {
+    "tear streams": "tears run down {who}'s cheeks only",
+    "sweat drop": "a bead of sweat on {who}'s temple only",
+    "blush lines": "a faint natural flush on {who}'s cheeks only",
+}
+# 다른 인물에게는 그 표현이 없다는 1구절(한 명 / 여러 명).
+FX_WHO_NOT = {
+    "tear streams": ("{others} does not cry", "{others} do not cry"),
+    "sweat drop": ("{others} has no sweat drop", "{others} have no sweat drop"),
+    "blush lines": ("{others} does not blush", "{others} do not blush"),
+}
 
 # 한글(음절·자모·호환 자모). 영상 프롬프트에 한글이 남았는지 볼 때 쓴다.
 HANGUL = re.compile(r"[\uac00-\ud7a3\u1100-\u11ff\u3130-\u318f]")
@@ -111,6 +139,50 @@ def normalize_cut_fx(cut: dict) -> dict:
         out["moodKo"] = clean_text(out.get("moodKo"), MOOD_KO_MAX)
     if "moodEn" in out:
         out["moodEn"] = clean_text(out.get("moodEn"), MOOD_EN_MAX)
+    if "fxWho" in out:
+        out["fxWho"] = fx_who(out.get("fxWho"), cut_names(out))
+    return out
+
+
+def cut_names(cut) -> list[str]:
+    """컷 characters 의 이름(정리·중복 제거, 순서 유지). fxWho 대상 후보다."""
+    names: list[str] = []
+    chars = cut.get("characters") if isinstance(cut, dict) else None
+    for char in chars if isinstance(chars, list) else []:
+        if isinstance(char, dict):
+            name = clean_text(char.get("name"), FX_WHO_NAME_MAX)
+            if name and name not in names:
+                names.append(name)
+    return names
+
+
+def fx_who(value, names) -> dict:
+    """fxWho 정리(작업 127). {인물 표현 기호: [이름…]} 만 남긴다.
+
+    기호 키는 fx_list 와 같은 규칙(소문자·공백), 배경 기호·모르는 기호는 버린다. 이름은 names(그 컷 인물) 안의 것만,
+    중복 없이 FX_WHO_MAX 명. 값이 글 하나면 한 명 목록으로 본다. 빈 목록인 기호는 키째 뺀다. dict 가 아니면 {}.
+    """
+    if not isinstance(value, dict):
+        return {}
+    known = [str(name) for name in names or []]
+    out: dict[str, list[str]] = {}
+    for raw_key, raw_names in value.items():
+        if not isinstance(raw_key, str):
+            continue
+        key = " ".join(raw_key.lower().split())
+        if key not in PERSON_FX or key in out:
+            continue
+        if isinstance(raw_names, str):
+            raw_names = [raw_names]
+        if not isinstance(raw_names, (list, tuple)):
+            continue
+        picked: list[str] = []
+        for raw in raw_names:
+            name = clean_text(raw, FX_WHO_NAME_MAX)
+            if name and name in known and name not in picked and len(picked) < FX_WHO_MAX:
+                picked.append(name)
+        if picked:
+            out[key] = picked
     return out
 
 
@@ -228,6 +300,11 @@ def merge_fill(cuts: list, items: list, empty_ids: list, sent_mood: dict) -> tup
                 cut["fxDrawn"] = drawn
                 cut["fxSuggest"] = suggest
                 cut["fx"] = [key for key in applied if key in suggest]
+                # 작업 127: 기호마다 대상 인물(그 컷 인물만, 추천·그림 안의 인물 표현 기호만). 비면 키를 두지 않는다.
+                who = {key: names for key, names in fx_who(item.get("fxWho"), cut_names(cut)).items()
+                       if key in suggest or key in drawn}
+                if who:
+                    cut["fxWho"] = who
                 cut["moodKo"] = clean_text(item.get("moodKo"), MOOD_KO_MAX)
                 cut["moodEn"] = clean_text(item.get("moodEn"), MOOD_EN_MAX)
                 stats["filled"] += 1
@@ -282,6 +359,13 @@ def apply_cap(cuts: list, filled_ids: list) -> tuple[list[dict], int]:
                 keep.append(key)
         cut["fxSuggest"] = keep
         cut["fx"] = [key for key in fx_list(cut.get("fx"), FX_MAX) if key in keep]
+        if isinstance(cut.get("fxWho"), dict):
+            # 작업 127: 뺀 추천 기호의 대상도 뺀다(그려진 기호의 대상은 남는다). 다 빠지면 키째 뺀다.
+            who = {key: names for key, names in cut["fxWho"].items() if key in keep or key in drawn}
+            if who:
+                cut["fxWho"] = who
+            else:
+                cut.pop("fxWho", None)
         out.append(cut)
     return out, capped
 
@@ -299,6 +383,42 @@ def sentences(keys, *, real: bool = False, short: bool = False) -> list[str]:
             text = (FX_SHORT if short else FX_SENTENCE).get(key) or ""
         if text:
             out.append(text)
+    return out
+
+
+def _join_names(names: list[str]) -> str:
+    """"A" / "A and B" / "A, B and C"."""
+    if len(names) <= 1:
+        return "".join(names)
+    return ", ".join(names[:-1]) + " and " + names[-1]
+
+
+def who_sentences(keys, who, present, *, real: bool = False, short: bool = False, name=None) -> list[str]:
+    """기호 문장 목록(작업 127). 대상(who[key])이 있는 인물 표현 기호는 그 사람에게만 붙인다.
+
+    who = fx_who 로 정리한 {기호: [이름]}, present = 그 컷에 보이는 인물(부정 구절 대상), name = 이름 → 프롬프트 표기
+    (기본 그대로). 대상이 있으면 "… {대상}'s cheeks only; {다른 인물} does not cry"(짧은 형은 부정 구절 없음).
+    대상이 없거나 배경 기호면 sentences 와 같은 글이다(옛 컷 = 지금 문장 그대로).
+    """
+    show = name or (lambda value: value)
+    who = who if isinstance(who, dict) else {}
+    out: list[str] = []
+    for key in fx_list(keys, FX_MAX):
+        targets = [str(n) for n in who.get(key) or [] if str(n)]
+        if key not in PERSON_FX or not targets:
+            out.extend(sentences([key], real=real, short=short))
+            continue
+        table = REAL_WHO if real else (FX_WHO_SHORT if short else FX_WHO_SENTENCE)
+        text = table[key].format(who=_join_names([show(n) for n in targets]))
+        others = []
+        for person in present or []:
+            person = str(person or "")
+            if person and person not in targets and person not in others:
+                others.append(person)
+        if others and not short:
+            one, many = FX_WHO_NOT[key]
+            text += "; " + (many if len(others) > 1 else one).format(others=_join_names([show(n) for n in others]))
+        out.append(text)
     return out
 
 

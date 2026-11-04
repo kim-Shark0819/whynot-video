@@ -1556,6 +1556,25 @@ textarea.vnew-field-input {
   font-size: 12px;
 }
 
+/* 작업 127: 인물 표현 기호의 대상 인물 칩. DOM 은 분위기 칸 뒤지만 칩 줄 바로 아래에 보인다. */
+.vnew-fx-who {
+  order: 1;
+  display: grid;
+  gap: 6px;
+}
+
+.vnew-fx-mood {
+  order: 2;
+}
+
+.vnew-fx-who-group {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  padding-left: 12px;
+}
+
 /* ---- 좁은 화면(≤768px) ---- */
 
 @media (max-width: 768px) {

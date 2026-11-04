@@ -3035,6 +3035,10 @@ def _take_timeline_entries(plan: dict, take: dict) -> list[dict]:
                 "moodEn": vnew_fx.clean_text(cut.get("moodEn"), vnew_fx.MOOD_EN_MAX) if fx_on else "",
             }
         )
+        if fx_on:
+            # 작업 127: 기호 대상 인물(정리된 값)과 이 컷 장소(테이크 안 장소가 바뀌는 컷에서만 배경 문장을 다시 쓴다).
+            entries[-1]["fxWho"] = vnew_fx.fx_who(cut.get("fxWho"), vnew_fx.cut_names(cut))
+            entries[-1]["locationEn"] = str(cut.get("locationEn") or "")
         if thought:
             # 지시서 117: 첫 발화가 속마음이면 표시(spoken 이면 키 없음 — 지금 항목 모양 그대로).
             entries[-1]["thought"] = True
@@ -3106,9 +3110,12 @@ def _real_action(text: str) -> str:
     return vnew_fx.strip_drawing_words(out)
 
 
-def _with_real_expressions(action: str, fx_keys) -> str:
-    """연기 뒤에 실사 표현(fx.REAL_FX, 배경 기호는 빈 값이라 빠진다)을 ", " 로 붙인다(RC3.2). 표현이 없으면 그대로."""
-    expressions = vnew_fx.sentences(fx_keys, real=True)
+def _with_real_expressions(action: str, fx_keys, who=None, present=None, name=None) -> str:
+    """연기 뒤에 실사 표현(fx.REAL_FX, 배경 기호는 빈 값이라 빠진다)을 ", " 로 붙인다(RC3.2). 표현이 없으면 그대로.
+
+    작업 127: who(기호 대상)가 있으면 그 사람에게만(fx.who_sentences, 실사 문장). 없으면 지금과 같다.
+    """
+    expressions = vnew_fx.who_sentences(fx_keys, who or {}, present or [], real=True, name=name)
     if not expressions:
         return action
     head = action.rstrip(".").strip()
@@ -3175,6 +3182,10 @@ def _take_prompt(plan: dict, take: dict, *, cast: list[dict], panel_nos: list[in
     TIMELINE 연기는 _real_action 뒤에 실사 표현(배경 기호 없음, FX 조각 없음), rule_replace·AVOID 는 실사 문장이다.
     외형·의상·목소리·연기·분위기·HARMONY 는 strip_drawing_words 를 지난다. 로그는 "vnew.gen.take_prompt variant=real".
     variant="webtoon"(기본)은 지금과 글자 하나 다르지 않다(lr-e).
+
+    작업 127(VNEW_FX 켬일 때만): 맨 앞에 고정부 1줄(_fixed_head, 첫 컷 장소 기준 — 컷 프롬프트와 같은 글자)을 두고
+    예산에서 미리 뺀다. 테이크 안에서 장소가 바뀌는 컷 항목에만 "BACKGROUND now: …"(그 장소 배경 문장)를 둔다.
+    FX·실사 표현은 대상 인물(fxWho)이 있으면 그 사람에게만(이름은 ASSETS 로마자 규칙).
     """
     budget = _take_prompt_budget(caps)
     fx_on = bool(vnew_settings.VNEW_FX)
@@ -3211,6 +3222,36 @@ def _take_prompt(plan: dict, take: dict, *, cast: list[dict], panel_nos: list[in
 
     def _disp_name(ko: str) -> str:
         return name_map.get(str(ko or "").strip(), str(ko or "").strip())
+
+    def _fx_name(ko: str) -> str:
+        # 작업 127: 기호 대상 이름 표기 — ASSETS 매핑이 있으면 그 로마자, 없으면 같은 로마자 변환 규칙.
+        ko = str(ko or "").strip()
+        return name_map[ko] if ko in name_map else (_romanize_name(ko) or ko)
+
+    def _present(entry: dict) -> list[str]:
+        return [str(item.get("name") or "") for item in entry.get("onScreen") or [] if item.get("name")]
+
+    # 작업 127: 맨 앞 고정부(화풍·배경·overall tone, 켬일 때만). 예산에서 미리 빼 두어 어떤 줄이기에도 남는다.
+    # 테이크 안에서 장소가 바뀌는 컷은 항목 안에 그 장소의 배경 문장을 한 번 더 쓴다(bg_change).
+    fixed_head = ""
+    bg_change: dict[int, str] = {}
+    if fx_on:
+        from . import locations as loc_mod  # noqa: PLC0415
+
+        # 장소를 모르면 "" → _background_en 이 대본 setting.locationEn 을 쓴다(컷 프롬프트와 같은 규칙, 같은 글자).
+        first_location = next((str(e.get("locationEn") or "") for e in entries if e.get("locationEn")), "")
+        fixed_head = _fixed_head(plan, first_location, real=real)
+        budget -= _utf8_len(fixed_head) + 1
+        previous = loc_mod.normalize_name(first_location)
+        for index, entry in enumerate(entries):
+            where = str(entry.get("locationEn") or "")
+            if where and loc_mod.normalize_name(where) != previous:
+                bg_change[index] = "BACKGROUND now: " + _background_en(plan, where, real=real)
+                previous = loc_mod.normalize_name(where)
+
+    def _bg_piece(entry: dict) -> str:
+        idx = next((i for i, e in enumerate(entries) if e is entry), -1)
+        return bg_change.get(idx, "")
 
     # vnew-live-fx RA4.1: 분위기 영어의 한국 이름 → 로마자(긴 이름부터). 한글이 남으면 그 컷 분위기는 뺀다.
     # 컷마다 한 번만 계산해 항목에 둔다(moodText). 끔이면 moodEn 이 비어 아무것도 하지 않는다.
@@ -3442,18 +3483,22 @@ def _take_prompt(plan: dict, take: dict, *, cast: list[dict], panel_nos: list[in
         if shot:
             head += " " + shot
         pieces: list[str] = [_on_screen_text(entry)]
+        if _bg_piece(entry):
+            pieces.append(_bg_piece(entry))
         action = _action_core(entry.get("action") or "", state["action_limit"])
         if real:
             # 실사: 홍조 선·눈물 줄기를 실사 말로 바꾸고 연기 뒤에 실사 표현을 붙인다(FX 조각 없음, RC3.2).
             action = _with_real_expressions(
-                _action_core(_real_action(entry.get("action") or ""), state["action_limit"]), entry.get("fx"))
+                _action_core(_real_action(entry.get("action") or ""), state["action_limit"]), entry.get("fx"),
+                entry.get("fxWho"), _present(entry), _fx_name)
         if action:
             pieces.append(action)
         # vnew-live-fx RA4.1: 연기 → 분위기 → 기호 → 대사 → 시선. 끔이면 moodText·fx 가 비어 아무것도 붙지 않는다.
         mood = _clip(str(entry.get("moodText") or ""), state["mood_limit"]) if state["mood_limit"] > 0 else ""
         if mood:
             pieces.append(f"mood: {mood}")
-        fx_texts = [] if real else vnew_fx.sentences(entry.get("fx"), short=state["fx_short"])
+        fx_texts = [] if real else vnew_fx.who_sentences(
+            entry.get("fx"), entry.get("fxWho"), _present(entry), short=state["fx_short"], name=_fx_name)
         if fx_texts:
             pieces.append("FX: " + (", " if state["fx_short"] else " / ").join(fx_texts))
         off_speaker = str(entry.get("offScreenSpeaker") or "").strip()
@@ -3583,9 +3628,12 @@ def _take_prompt(plan: dict, take: dict, *, cast: list[dict], panel_nos: list[in
                 if with_shot and shot:
                     head += " " + shot
                 bits = [_on_screen_text(e)]
+                if _bg_piece(e):
+                    bits.append(_bg_piece(e))
                 if with_action and real:
                     # 실사 최소형: 연기 핵심 + 실사 표현(기호 짧은 형 대신, 배경 기호 없음).
-                    action = _with_real_expressions(_action_core(_real_action(e.get("action") or ""), 55), e.get("fx"))
+                    action = _with_real_expressions(_action_core(_real_action(e.get("action") or ""), 55), e.get("fx"),
+                                                    e.get("fxWho"), _present(e), _fx_name)
                     if action:
                         bits.append(action)
                 elif with_action:
@@ -3593,7 +3641,7 @@ def _take_prompt(plan: dict, take: dict, *, cast: list[dict], panel_nos: list[in
                     if action:
                         bits.append(action)
                     # vnew-live-fx RA4.3: 연기를 남기는 후보만 기호 짧은 형을 남긴다(분위기는 최소형에 넣지 않는다).
-                    fx_short = vnew_fx.sentences(e.get("fx"), short=True)
+                    fx_short = vnew_fx.who_sentences(e.get("fx"), e.get("fxWho"), _present(e), short=True, name=_fx_name)
                     if fx_short:
                         bits.append("FX: " + ", ".join(fx_short))
                 off = str(e.get("offScreenSpeaker") or "").strip()
@@ -3704,6 +3752,9 @@ def _take_prompt(plan: dict, take: dict, *, cast: list[dict], panel_nos: list[in
             # 090: 최소형의 MOTION·HARMONY 형을 단계 로그 끝에 적는다(원문이면 적지 않는다).
             applied.append("motionHarmonyShort" if MOTION_MIN in prompt else "motionHarmonyDrop")
 
+    if fixed_head:
+        # 작업 127: 고정부를 맨 앞에(예산은 위에서 미리 뺐다).
+        prompt = fixed_head + "\n" + prompt
     if real:
         # vnew-live-fx C2: 실사 프롬프트 바이트·줄이기 단계(개발계에서 실사 회차가 얼마나 줄었는지 본다).
         log.info("vnew.gen.take_prompt variant=real bytes=%d steps=%s", _utf8_len(prompt), ",".join(applied) or "none")
@@ -4827,6 +4878,11 @@ def _cut_prompt(plan: dict, seg: dict, variant: str, *, cast: list[dict], has_im
     (CUT_RULE_BODY, ≤ 90B). 줄이기: ⓪ bodyDrop(묘사 문장 빼기, 장소 요약보다 먼저 — 090 필수 수정 2) → ① … ⑥ →
     ⑥-1 FX 짧은 형(웹툰만) → ⑦ ACTION. 끔이면 지금과 바이트 단위로 같다(fx-i).
     돌려주기 전에 로그 `vnew.gen.cut_prompt cut= variant= bytes= steps=`(적용 단계, 없으면 none)를 한 줄 남긴다.
+
+    작업 127(VNEW_FX 켬일 때만): 맨 앞에 고정부 1줄(_fixed_head: 화풍·배경·overall tone, 같은 장소면 통 테이크와 같은
+    글자)을 두고 예산에서 미리 뺀다(어떤 줄이기에도 남는다). SETTING 의 장소 요약(sceneEn)은 고정부가 대신해 넣지 않는다.
+    CAST 다음에 "Only A and B appear."(보이는 인물만),
+    MOOD 는 컷 moodEn 만(촬영 지시서 moodEn 은 쓰지 않는다), FX 는 대상 인물(fxWho)이 있으면 그 사람에게만.
     """
     is_real = variant == "real"
     fx_on = bool(vnew_settings.VNEW_FX)
@@ -4837,6 +4893,11 @@ def _cut_prompt(plan: dict, seg: dict, variant: str, *, cast: list[dict], has_im
     brief = _cut_brief(plan, cut_id)
     cut_fx = vnew_fx.fx_list(cut.get("fx"), vnew_fx.FX_MAX) if fx_on else []
     cut_mood = vnew_fx.clean_text(cut.get("moodEn"), vnew_fx.MOOD_EN_MAX) if fx_on else ""
+    # 작업 127: 기호 대상 인물 · 맨 앞 고정부(화풍·배경·overall tone) · 보이는 인물만 "Only … appear". 켬일 때만.
+    cut_who = vnew_fx.fx_who(cut.get("fxWho"), vnew_fx.cut_names(cut)) if fx_on else {}
+    fixed_head = _fixed_head(plan, str(cut.get("locationEn") or ""), real=is_real) if fx_on else ""
+    cast_names = [str(m.get("name") or "").strip() for m in cast if str(m.get("name") or "").strip()]
+    only_line = _only_appear(cast_names) if fx_on else ""
 
     if is_real:
         style = "photorealistic live-action film"
@@ -4919,7 +4980,11 @@ def _cut_prompt(plan: dict, seg: dict, variant: str, *, cast: list[dict], has_im
         blocking_en = (blocking_en + " " + gaze_en + ".").strip() if blocking_en else (gaze_en + ".")
     action_en = str(brief.get("actionEn") or "").strip()
     mood_en = str(brief.get("moodEn") or "").strip()
-    if cut_mood:
+    if fx_on:
+        # 작업 127: MOOD 는 컷 moodEn 만(촬영 지시서 moodEn 은 장면 전체 분위기를 옮겨 와 모든 컷에 붙었다).
+        # 장면 전체 톤은 고정부 overall tone 1번이다. 컷 moodEn 이 비면 MOOD 줄이 없다.
+        mood_en = cut_mood
+    elif cut_mood:
         # vnew-live-fx RA5.1: 컷 분위기를 MOOD 맨 앞에(줄이기는 뒤 문장 = 지시서 moodEn 부터 뗀다).
         mood_en = (cut_mood.rstrip(".") + ". " + mood_en).strip()
     background_en = str(brief.get("backgroundEn") or "").strip()
@@ -4984,8 +5049,8 @@ def _cut_prompt(plan: dict, seg: dict, variant: str, *, cast: list[dict], has_im
         return continuity_head + (CUT_RULE_BODY if with_body else "") + continuity_tail
 
     # vnew-live-fx RA5.1: 웹툰 FX 줄(긴·짧은 형) / 실사 EXPRESSION 줄(빈 값 제외, 짧은 형 없음). 끔이면 cut_fx 가 비어 줄이 없다.
-    fx_full = vnew_fx.sentences(cut_fx, real=is_real)
-    fx_short_texts = [] if is_real else vnew_fx.sentences(cut_fx, short=True)
+    fx_full = vnew_fx.who_sentences(cut_fx, cut_who, cast_names, real=is_real)
+    fx_short_texts = [] if is_real else vnew_fx.who_sentences(cut_fx, cut_who, cast_names, short=True)
 
     def _fx_line(short: bool) -> str:
         if not fx_full:
@@ -4996,6 +5061,10 @@ def _cut_prompt(plan: dict, seg: dict, variant: str, *, cast: list[dict], has_im
 
     # SETTING = 컷별 backgroundEn + 장소 요약(sceneEn 앞 2~3문장, 최대 350자). 장소 문단 전체는 X.
     scene_summary_full = _scene_summary(scene_en, 350)
+    if fixed_head:
+        # 작업 127: 장소 전체 설명은 고정부 BACKGROUND 1문장이 맡는다(장소 요약은 줄이기 첫 단계라 컷마다 달라졌다).
+        # SETTING 에는 이 프레이밍에서 보이는 배경(지시서 backgroundEn)만 남긴다.
+        scene_summary_full = ""
 
     # MOTION·HARMONY short(설계자 2026-10-26 재지시 v2). 컷 단위(Kling)에서도 마네킹 흔들림을 따라
     # 하지 말고 살아 움직이는 연기·2차 동작·패럴랙스를 하라고, 인물·배경 빛을 맞추라고 지시한다. 둘 다
@@ -5021,12 +5090,15 @@ def _cut_prompt(plan: dict, seg: dict, variant: str, *, cast: list[dict], has_im
         # → DIALOGUE → CONTINUITY. MOTION·HARMONY short 는 고정 블록(지우지 않는 등급).
         # vnew-live-fx: FX/EXPRESSION 줄은 ACTION 바로 다음(끔이면 빈 값이라 빠진다).
         blocks = [
-            assets_line, head, cast_line, shot_line, blocking_line, action_line, _fx_line(fx_short),
+            assets_line, head, cast_line, only_line, shot_line, blocking_line, action_line, _fx_line(fx_short),
             motion_short, mood_line, setting_line, harmony_short, dlg, _continuity(body),
         ]
         return "\n".join(b for b in blocks if b)
 
     budget = vnew_settings.PREVIZ_PROMPT_TARGET  # 바이트 상한(2500).
+    if fixed_head:
+        # 작업 127: 고정부는 줄이지 않는다(예산에서 미리 빼고 _done 이 맨 앞에 붙인다).
+        budget -= _utf8_len(fixed_head) + 1
 
     # 현재 값(줄이기 단계마다 하나씩 바꾼다). ACTION 첫 문장은 절대 지우지 않는다.
     state = {
@@ -5059,6 +5131,8 @@ def _cut_prompt(plan: dict, seg: dict, variant: str, *, cast: list[dict], has_im
     cut_label = vnew_fx.clean_text(cut_id, 40) or "-"
 
     def _done(text: str) -> str:
+        if fixed_head:
+            text = fixed_head + "\n" + text
         log.info(
             "vnew.gen.cut_prompt cut=%s variant=%s bytes=%d steps=%s",
             cut_label, "real" if is_real else "webtoon", _utf8_len(text), ",".join(applied) or "none",
@@ -5255,6 +5329,146 @@ def _location_by_name(plan: dict, name_en: str) -> dict | None:
         if str(loc.get("key") or loc_mod.normalize_name(loc.get("nameEn") or "")) == key:
             return loc
     return None
+
+
+# ---------------------------------------------------------------- 작업 127: 맨 앞 고정부(화풍 · 배경 · overall tone)
+#
+# 통 테이크와 컷 프롬프트 맨 앞에 같은 글자의 고정부를 둔다(참고 구현 compose._cuts_video_prompt 방식). 같은 장소면
+# 바이트 단위로 같은 문장이고, 장소가 바뀔 때만 배경 문장이 바뀐다. 줄이기는 이 줄을 건드리지 않는다(예산에서 미리 뺀다).
+
+# 대본 setting.moodKo → overall tone 영어 낱말(부분일치, 표 순서, 최대 3개). 한글은 프롬프트에 넣지 않는다.
+_TONE_EN = (
+    ("설레", "fluttering"), ("설렘", "fluttering"), ("로맨", "romantic"), ("달달", "sweet"), ("달콤", "sweet"),
+    ("긴장", "tense"), ("불안", "uneasy"), ("어색", "awkward"), ("당황", "flustered"), ("코믹", "comic"),
+    ("유쾌", "cheerful"), ("경쾌", "upbeat"), ("활기", "lively"), ("밝", "bright"), ("따뜻", "warm"),
+    ("훈훈", "warm"), ("잔잔", "calm"), ("평온", "calm"), ("평화", "calm"), ("진지", "serious"), ("비장", "solemn"),
+    ("슬", "sad"), ("우울", "gloomy"), ("감동", "moving"), ("분노", "angry"), ("공포", "eerie"), ("무서", "eerie"),
+    ("신비", "mysterious"),
+)
+# 배경 문장에서 사람을 말하는 문장을 거른다(대본 layoutEn 은 누가 어디 서는지를 적는다).
+_PERSON_WORDS = re.compile(
+    r"\b(?:stands?|standing|sits?|sitting|seated|leans?|leaning|he|she|they|his|her|their|him|man|woman|men|women|"
+    r"boy|girl|people|person|character|characters)\b",
+    re.IGNORECASE,
+)
+FIXED_WEBTOON_STYLE = "Korean webtoon animation"
+FIXED_REAL_STYLE = "photorealistic live-action film"
+BACKGROUND_MAX = 260
+
+
+def _overall_tone(plan: dict) -> str:
+    """대본 setting.moodKo 를 짧은 영어 톤 1구절로(작업 127). 못 맞추면 ""."""
+    mood_ko = str(((plan.get("script") or {}).get("setting") or {}).get("moodKo") or "")
+    words: list[str] = []
+    for needle, english in _TONE_EN:
+        if needle in mood_ko and english not in words:
+            words.append(english)
+        if len(words) >= 3:
+            break
+    return ", ".join(words)
+
+
+def _flag(value) -> bool:
+    if isinstance(value, str):
+        return value.strip().lower() in ("true", "1", "yes")
+    return bool(value)
+
+
+def _people_names(plan: dict) -> list[str]:
+    """배경 문장에서 거를 인물 이름(입력 역할명·콘티 인물·대본 화자, 로마자 포함)."""
+    names: list[str] = []
+    raw = [item.get("roleName") for item in ((plan.get("input") or {}).get("characters") or []) if isinstance(item, dict)]
+    for cut in (plan.get("conti") or {}).get("cuts") or []:
+        raw.extend(c.get("name") for c in (cut.get("characters") or []) if isinstance(c, dict))
+    raw.extend(e.get("speaker") for e in ((plan.get("script") or {}).get("entries") or []) if isinstance(e, dict))
+    for value in raw:
+        name = str(value or "").strip()
+        for form in (name, _romanize_name(name) if name else ""):
+            if form and form not in names:
+                names.append(form)
+    return names
+
+
+def _background_en(plan: dict, location_en: str, *, real: bool = False) -> str:
+    """장소의 사람 없는 배경 1문장(작업 127). 같은 plan·같은 장소면 언제나 같은 글자다.
+
+    장소 시트(locations)의 사실 정리(facts)·설계(design)가 있으면 그것으로(장소 이름 + 실내/실외 + 벽·바닥·빛),
+    없으면 장소 이름 + 대본 setting.layoutEn 중 사람이 없는 문장(그 장소가 대본 첫 장소일 때만). BACKGROUND_MAX 자.
+    """
+    setting = (plan.get("script") or {}).get("setting") or {}
+    location = str(location_en or "").strip() or str(setting.get("locationEn") or "").strip() or "the scene"
+    loc = _location_by_name(plan, location)
+    design = (loc or {}).get("design") if isinstance((loc or {}).get("design"), dict) else {}
+    facts = (loc or {}).get("facts") if isinstance((loc or {}).get("facts"), dict) else {}
+    enclosed = _flag(design.get("enclosed")) if "enclosed" in design else _flag(setting.get("enclosed"))
+    where = "indoor" if enclosed else "outdoor"
+    bits: list[str] = []
+    if loc and (facts or design):
+        from . import locations as loc_mod  # noqa: PLC0415
+
+        name = str(loc.get("nameEn") or "").strip() or location
+        surfaces: list[str] = []
+        for side in loc_mod.SIDES:
+            wall = (facts.get("walls") or {}).get(side) or {}
+            surface = " ".join(p for p in (str(wall.get("wallColorEn") or "").strip(),
+                                           str(wall.get("wallMaterialEn") or "").strip()) if p)
+            if surface and surface not in surfaces:
+                surfaces.append(surface)
+        if surfaces:
+            bits.append("walls: " + " / ".join(surfaces[:2]))
+        floor = str(facts.get("floorEn") or design.get("floorEn") or "").strip().rstrip(".")
+        if floor:
+            bits.append("floor: " + floor)
+        light = str(facts.get("lightEn") or design.get("lightEn") or "").strip()
+        if light:
+            first = _split_sentences(light)
+            bits.append("light: " + (first[0] if first else light).rstrip("."))
+    else:
+        name = location
+        from . import locations as loc_mod  # noqa: PLC0415
+
+        opening = str(setting.get("locationEn") or "").strip()
+        same_as_opening = not opening or loc_mod.normalize_name(opening) == loc_mod.normalize_name(location)
+        if not same_as_opening:
+            # 대본 setting(실내/실외·배치)은 첫 장소 것이라 다른 장소에는 붙이지 않는다.
+            where = ""
+        if same_as_opening:
+            people = _people_names(plan)
+            for sentence in _split_sentences(str(setting.get("layoutEn") or "")):
+                if vnew_fx.HANGUL.search(sentence) or _PERSON_WORDS.search(sentence):
+                    continue
+                if any(person and person in sentence for person in people):
+                    continue
+                bits.append(sentence.rstrip("."))
+    body = (f"{name} ({where})" if where else name) + ("; " + "; ".join(bits) if bits else "")
+    body = " ".join(body.split())
+    if real:
+        body = vnew_fx.strip_drawing_words(body)
+    return _clip_words(body, BACKGROUND_MAX).rstrip(" ,;:.")
+
+
+def _fixed_head(plan: dict, location_en: str, *, real: bool = False) -> str:
+    """프롬프트 맨 앞 고정부 1줄(작업 127): [화풍 1구절] + [배경 1문장] + [overall tone(있으면 1번)]."""
+    style = FIXED_REAL_STYLE if real else FIXED_WEBTOON_STYLE
+    text = f"FIXED: {style}. BACKGROUND (no people, same in every shot): {_background_en(plan, location_en, real=real)}."
+    tone = _overall_tone(plan)
+    if tone:
+        text += f" Overall tone: {tone}."
+    return text
+
+
+def _only_appear(names) -> str:
+    """"Only A appears." / "Only A and B appear."(작업 127, 그 컷에 보이는 인물만). 없으면 ""."""
+    picked: list[str] = []
+    for name in names or []:
+        name = str(name or "").strip()
+        if name and name not in picked:
+            picked.append(name)
+    if not picked:
+        return ""
+    if len(picked) == 1:
+        return f"Only {picked[0]} appears."
+    return "Only " + ", ".join(picked[:-1]) + " and " + picked[-1] + " appear."
 
 
 def _previz_prompt_budget() -> int:
