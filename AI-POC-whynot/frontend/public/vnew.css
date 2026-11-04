@@ -4659,3 +4659,85 @@ textarea.vnew-field-input {
 .vnew-edit-fix-version .vnew-badge {
   padding: 1px 8px;
 }
+
+/* ================================================================ ⑦ 편집 — AI로 고치기 테이크·장면 고르기(지시서 119) */
+/* 머리 줄 [AI로 고치기] 하나와 고르기 창(패널과 같은 고정 위치 대화상자). 목록은 줄을 바꾸고 세로로만 넘친다. */
+
+.vnew-edit-fix-pick {
+  margin-left: auto;
+  font-size: 13px;
+  white-space: nowrap;
+}
+
+.vnew-edit-fix-pick:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
+.vnew-edit-pick {
+  position: fixed;
+  inset: 0;
+  z-index: 60;
+  display: flex;
+  align-items: flex-start;
+  justify-content: center;
+  padding: 24px 12px;
+  background: rgba(17, 24, 39, 0.45);
+  overflow-y: auto;
+}
+
+.vnew-edit-pick-box {
+  max-width: 560px;
+}
+
+.vnew-edit-pick-list {
+  display: grid;
+  gap: 6px;
+  min-width: 0;
+  margin: 0;
+  padding: 10px 12px;
+  border: 1px solid var(--line, #e5e7eb);
+  border-radius: 8px;
+}
+
+.vnew-edit-pick-cuts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 14px;
+  min-width: 0;
+}
+
+.vnew-edit-pick-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  font-size: 13px;
+  cursor: pointer;
+  word-break: break-word;
+}
+
+.vnew-edit-pick-item.is-off {
+  opacity: 0.45;
+  cursor: help;
+}
+
+.vnew-edit-pick-tools,
+.vnew-edit-pick-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.vnew-edit-pick-actions {
+  justify-content: flex-end;
+}
+
+.vnew-edit-pick-note {
+  margin: 0;
+}
+
+.vnew-edit-pick-go:disabled {
+  opacity: 0.45;
+  cursor: default;
+}

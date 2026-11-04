@@ -8666,6 +8666,7 @@
   function editBuild(ctx) {
     var root = ctx.root;
     editFixClose(ctx); // 지시서 116: 다시 그리면 열린 AI로 고치기 패널을 닫는다
+    editFixPickClose(ctx); // 지시서 119: 테이크·장면 고르기 창도
     clear(root);
     var d = (ctx.dom = {});
     ctx.clipEls = [];
@@ -9739,6 +9740,11 @@
       else document.removeEventListener("keydown", ctx.onKey);
       return;
     }
+    if (ctx.fixPick) {
+      // 지시서 119: 테이크·장면 고르기 창이 열린 동안도 ⑦ 단축키는 쓰지 않는다(Esc 는 창 닫기).
+      if (event && event.key === "Escape") editFixPickClose(ctx);
+      return;
+    }
     if (ctx.fix && ctx.fix.open) {
       // 지시서 116: AI로 고치기 패널이 열린 동안 ⑦ 단축키는 쓰지 않는다(Esc 는 패널 닫기).
       if (event && event.key === "Escape") editFixClose(ctx);
@@ -9981,7 +9987,7 @@
     var head = el("div", "vnew-edit-bin-head");
     head.appendChild(el("span", "vnew-edit-bin-title", "재료"));
     head.appendChild(el("span", "vnew-hint", "누르면 재생헤드가 있는 클립 뒤에 넣습니다."));
-    if (editFixOn(ctx)) head.appendChild(editFixSelButton(ctx)); // 지시서 116
+    if (editFixOn(ctx)) head.appendChild(editFixPickButton(ctx)); // 지시서 119: [AI로 고치기] 1개(테이크·장면 고르기 창)
     bin.appendChild(head);
     var row = el("div", "vnew-edit-bin-list");
     list.forEach(function (item) {
@@ -9994,15 +10000,7 @@
       btn.addEventListener("click", function () {
         editInsertMaterial(ctx, item.sourceKey, btn);
       });
-      // 지시서 116: 고칠 수 있는 테이크·컷이면 재료 버튼 옆에 [AI로 고치기](재료 버튼은 그대로, 둘을 한 묶음으로)
-      var fix = editFixOn(ctx) ? editFixBinButton(ctx, item, mat) : null;
-      if (fix) {
-        var cell = el("span", "vnew-edit-bin-cell");
-        cell.appendChild(btn);
-        cell.appendChild(fix);
-        row.appendChild(cell);
-        return;
-      }
+      // 지시서 119: 재료마다 붙던 [AI로 고치기]는 없앴다(머리 줄 [AI로 고치기] 하나에서 테이크를 고른다).
       row.appendChild(btn);
     });
     bin.appendChild(row);
@@ -10468,14 +10466,18 @@
     ctx.fix = null;
   }
 
-  function editFixOpen(ctx, mid, clipId) {
+  /* 지시서 119: range({in, out}, 원본 시간 — 고르기 창에서 고른 장면)가 있으면 그것이 "이 구간만" 범위다(없으면 clipId 의 클립 구간). */
+  function editFixOpen(ctx, mid, clipId, range) {
     if (!editAlive(ctx) || ctx.busy || !mid) return;
     editPause(ctx);
+    editFixPickClose(ctx);
     editFixClose(ctx);
     var fix = { mid: mid, clipId: clipId || "", view: null, timer: 0, busy: false, draftShown: "", refreshing: false, open: true, dom: {} };
     fix.model = ""; // 지시서 116 보완 1: 고른 영상 모델(보기가 오면 원래 모델·초안 모델로 채운다)·범위·고른 클립 구간(원본 일부일 때만)
-    fix.scope = "";
-    fix.clip = editFixClipFor(ctx, fix.clipId);
+    var a = range ? Number(range.in) : NaN;
+    var b = range ? Number(range.out) : NaN;
+    fix.clip = isFinite(a) && isFinite(b) && b > a && a >= 0 ? { in: editRound3(a), out: editRound3(b) } : editFixClipFor(ctx, fix.clipId);
+    fix.scope = range && fix.clip ? "range" : ""; // 지시서 119: 고르기 창에서 컷을 골랐으면 「이 구간만」이 기본(서버가 구간을 못 주면 editFixAdopt 가 full 로)
     ctx.fix = fix;
     editFixBuild(ctx, fix);
     editFixNote(fix, "불러오는 중…");
@@ -11408,6 +11410,262 @@
     editFixPaintVersions(ctx, fix);
     var again = (fix.dom.picks || {})[fix.previewMid];
     if (again && typeof again.focus === "function") again.focus();
+  }
+
+  /* ---------------------------------------------------------------- ⑦ AI로 고치기 — 테이크·장면 고르기(지시서 119)
+     머리 줄 [AI로 고치기] 하나 → 고르기 창(테이크 라디오 · 그 테이크의 장면(컷) 체크박스) → 116 패널(editFixOpen). 장면 경계는 서버
+     재료 표식 retake.cuts(원본 시간). 서버 구간은 하나라 떨어진 장면을 고르면 첫 장면 시작~마지막 장면 끝 한 구간이다. */
+
+  /* 고른 장면들 → 한 구간 {in, out}(첫 시작~마지막 끝, 원본 시간) 또는 null(고른 것 없음 = 통째). 순서는 상관없다. */
+  function editFixCutsRange(cuts) {
+    var list = (Array.isArray(cuts) ? cuts : []).filter(function (c) {
+      return c && isFinite(Number(c.in)) && isFinite(Number(c.out)) && Number(c.out) > Number(c.in);
+    });
+    if (!list.length) return null;
+    var a = Math.min.apply(null, list.map(function (c) {
+      return Number(c.in);
+    }));
+    var b = Math.max.apply(null, list.map(function (c) {
+      return Number(c.out);
+    }));
+    return { in: editRound3(a), out: editRound3(b) };
+  }
+
+  /* 장면 이름: 컷 번호가 있으면 "컷 3", 없으면 "장면 2", 고른 클립 구간(장면 경계를 모를 때)이면 그 말. */
+  function editFixPickCutName(cut, index) {
+    if (cut && cut.clip) return "타임라인에서 고른 클립 구간";
+    return cut && cut.no !== null && cut.no !== undefined ? "컷 " + cut.no : "장면 " + (index + 1);
+  }
+
+  /* 창이 패널에 넘길 구간: 고른 것 없음·장면을 모두 고름(고른 클립 구간 하나는 빼고) → null(통째), 아니면 editFixCutsRange. */
+  function editFixPickRange(cuts, picked) {
+    var list = Array.isArray(cuts) ? cuts : [];
+    var chosen = list.filter(function (c, i) {
+      return !!(picked || [])[i];
+    });
+    if (!chosen.length || (chosen.length === list.length && !list[0].clip)) return null;
+    return editFixCutsRange(chosen);
+  }
+
+  /* 고르기 창 안내 한 줄(통째·한 구간·떨어진 장면이면 사이 장면 이름). */
+  function editFixPickNote(cuts, picked) {
+    var list = Array.isArray(cuts) ? cuts : [];
+    if (!list.length) return "이 테이크는 장면 경계를 알 수 없어 통째로 고칩니다.";
+    var r = editFixPickRange(list, picked);
+    var n = list.filter(function (c, i) {
+      return !!(picked || [])[i];
+    }).length;
+    if (!r) return n ? "모든 장면을 골라 테이크 통째로 고칩니다." : "아무 장면도 고르지 않으면 테이크 통째로 고칩니다.";
+    var span = editFixSecs(r.in) + "–" + editFixSecs(r.out) + "초";
+    var between = [];
+    list.forEach(function (c, i) {
+      if (!(picked || [])[i] && Number(c.in) >= r.in - 0.001 && Number(c.out) <= r.out + 0.001) between.push(editFixPickCutName(c, i));
+    });
+    if (between.length) {
+      return "고른 장면이 떨어져 있어 첫 장면 시작부터 마지막 장면 끝까지(" + span + ") 한 구간으로 고칩니다. 사이 장면(" + between.join("·") +
+        ")도 함께 다시 만들어집니다.";
+    }
+    return "고른 구간(" + span + ")만 고칩니다. 패널의 「이 구간만 다시 만들기」가 이 구간입니다.";
+  }
+
+  /* 고를 수 있는 재료(테이크·컷·v2…, 서버 retake.n 이 있는 것 — 합친 영상·지난 실사 회차는 없다). 이름 = 재료 줄과 같은 이름·길이. */
+  function editFixPickMats(ctx) {
+    var out = [];
+    (ctx.matList[ctx.variant] || []).forEach(function (item) {
+      var mat = ctx.materials[item.sourceKey] || item;
+      var info = mat.retake;
+      if (!info || !info.n) return;
+      var duration = Number(mat.duration);
+      if (mat.group === "retake" && Number(info.trimTo) > 0 && duration > 0) duration = Math.min(duration, Number(info.trimTo));
+      out.push({ mid: String(mat.mid || item.mid || ""), mat: mat, can: info.can === true, reason: info.reason || "AI로 고칠 수 없습니다",
+                 name: (mat.label || "영상") + (duration > 0 ? " · " + duration.toFixed(1) + "초" : "") + (info.running ? " · 다시 만드는 중" : "") });
+    });
+    return out;
+  }
+
+  /* 머리 줄 [AI로 고치기](켬일 때만 editRenderBin 이 붙인다). 고칠 수 있는 재료가 없으면 흐림. */
+  function editFixPickButton(ctx) {
+    var btn = el("button", "outline-button vnew-edit-fix-pick", "AI로 고치기");
+    btn.type = "button";
+    var any = editFixPickMats(ctx).some(function (m) {
+      return m.can;
+    });
+    btn.disabled = !any;
+    btn.title = any ? "고칠 테이크와 장면을 골라 AI로 고칩니다" : "AI로 고칠 수 있는 테이크·컷이 없습니다";
+    btn.setAttribute("aria-haspopup", "dialog");
+    btn.addEventListener("click", function () {
+      editFixPickOpen(ctx);
+    });
+    return btn;
+  }
+
+  function editFixPickClose(ctx) {
+    var pick = ctx && ctx.fixPick;
+    if (!pick) return;
+    if (pick.dom.root && pick.dom.root.parentNode) pick.dom.root.parentNode.removeChild(pick.dom.root);
+    ctx.fixPick = null;
+  }
+
+  /* 창 열기: 처음 테이크 = 타임라인에서 고른 클립의 재료(고칠 수 있으면), 아니면 첫 항목. */
+  function editFixPickOpen(ctx) {
+    if (!editAlive(ctx) || ctx.busy || !editFixOn(ctx)) return;
+    var mats = editFixPickMats(ctx);
+    var usable = mats.filter(function (m) {
+      return m.can;
+    });
+    if (!usable.length) return;
+    editPause(ctx);
+    editFixClose(ctx);
+    editFixPickClose(ctx);
+    var sel = editFixSelMat(ctx);
+    var selMid = sel ? String(sel.mid || "") : "";
+    var start = usable.some(function (m) {
+      return m.mid === selMid;
+    }) ? selMid : usable[0].mid;
+    var pick = { mid: "", mats: mats, cuts: [], picked: [], dom: {} };
+    ctx.fixPick = pick;
+    editFixPickBuild(ctx, pick);
+    ctx.root.appendChild(pick.dom.root);
+    editFixPickChoose(ctx, pick, start);
+    var radio = pick.dom.radios[start];
+    if (radio && typeof radio.focus === "function") radio.focus();
+  }
+
+  /* 뼈대(한 번): 머리 · 테이크 라디오 · 장면 체크박스 칸 · 안내 · [닫기]·[AI로 고치기]. */
+  function editFixPickBuild(ctx, pick) {
+    var d = pick.dom;
+    d.root = el("div", "vnew-edit-pick");
+    d.root.setAttribute("role", "dialog");
+    d.root.setAttribute("aria-modal", "true");
+    d.root.setAttribute("aria-label", "AI로 고칠 테이크·장면 고르기");
+    var box = el("div", "vnew-edit-fix-box vnew-edit-pick-box");
+    var head = el("div", "vnew-edit-fix-head");
+    head.appendChild(el("h3", "vnew-edit-fix-title", "AI로 고치기 — 테이크·장면 고르기"));
+    var close = el("button", "vnew-edit-fix-close", "×");
+    close.type = "button";
+    close.title = "닫기 (Esc)";
+    close.setAttribute("aria-label", close.title);
+    close.addEventListener("click", function () {
+      editFixPickClose(ctx);
+    });
+    head.appendChild(close);
+    box.appendChild(head);
+    var takes = el("fieldset", "vnew-edit-pick-list");
+    takes.appendChild(el("legend", "vnew-edit-fix-label", "테이크"));
+    d.radios = {};
+    pick.mats.forEach(function (m) {
+      var label = el("label", "vnew-edit-pick-item" + (m.can ? "" : " is-off"));
+      var input = el("input", null);
+      input.type = "radio";
+      input.name = "vnew-pick-take";
+      input.value = m.mid;
+      input.disabled = !m.can;
+      input.addEventListener("change", function () {
+        if (input.checked) editFixPickChoose(ctx, pick, m.mid);
+      });
+      if (!m.can) label.title = m.reason;
+      label.appendChild(input);
+      label.appendChild(el("span", null, m.name));
+      d.radios[m.mid] = input;
+      takes.appendChild(label);
+    });
+    box.appendChild(takes);
+    var cuts = el("fieldset", "vnew-edit-pick-list");
+    cuts.appendChild(el("legend", "vnew-edit-fix-label", "장면(컷) — 여러 개 고를 수 있습니다"));
+    var tools = el("div", "vnew-edit-pick-tools");
+    d.all = el("button", "outline-button", "전체");
+    d.none = el("button", "outline-button", "모두 해제");
+    [d.all, d.none].forEach(function (btn, i) {
+      btn.type = "button";
+      btn.addEventListener("click", function () {
+        pick.picked = pick.cuts.map(function () {
+          return i === 0;
+        });
+        (d.boxes || []).forEach(function (input, j) {
+          input.checked = !!pick.picked[j];
+        });
+        editFixPickPaintNote(pick);
+      });
+      tools.appendChild(btn);
+    });
+    cuts.appendChild(tools);
+    d.cutList = el("div", "vnew-edit-pick-cuts");
+    cuts.appendChild(d.cutList);
+    box.appendChild(cuts);
+    d.note = el("p", "vnew-hint vnew-edit-pick-note", "");
+    d.note.setAttribute("aria-live", "polite");
+    box.appendChild(d.note);
+    var actions = el("div", "vnew-edit-pick-actions");
+    var cancel = el("button", "outline-button", "닫기");
+    cancel.type = "button";
+    cancel.addEventListener("click", function () {
+      editFixPickClose(ctx);
+    });
+    d.go = el("button", "primary-button vnew-edit-pick-go", "AI로 고치기");
+    d.go.type = "button";
+    d.go.addEventListener("click", function () {
+      if (ctx.fixPick !== pick || !pick.mid) return;
+      var mid = pick.mid;
+      var range = editFixPickRange(pick.cuts, pick.picked);
+      editFixPickClose(ctx);
+      editFixOpen(ctx, mid, "", range);
+    });
+    actions.appendChild(cancel);
+    actions.appendChild(d.go);
+    box.appendChild(actions);
+    d.root.appendChild(box);
+  }
+
+  /* 테이크 고르기: 그 재료의 장면 목록을 다시 그린다. 처음에는 아무것도 고르지 않는다 — 타임라인에서 고른 클립이 이 재료의 일부면 그
+     구간과 겹치는 장면을 고른다(장면 경계를 모르면 그 클립 구간 한 줄). */
+  function editFixPickChoose(ctx, pick, mid) {
+    pick.mid = mid;
+    var entry = pick.mats.filter(function (m) {
+      return m.mid === mid;
+    })[0];
+    var info = entry ? entry.mat.retake || {} : {};
+    var cuts = (Array.isArray(info.cuts) ? info.cuts : []).filter(function (c) {
+      return c && Number(c.out) > Number(c.in);
+    }).slice().sort(function (x, y) {
+      return Number(x.in) - Number(y.in);
+    });
+    var sel = editFixSelMat(ctx);
+    var clip = editSelected(ctx);
+    var part = sel && clip && String(sel.mid || "") === mid ? editFixClipPart(clip, sel.duration, (sel.retake || {}).trimTo) : null;
+    if (!cuts.length && part) cuts = [{ cutId: "", no: null, in: part.in, out: part.out, clip: true }];
+    pick.cuts = cuts;
+    pick.picked = cuts.map(function (c) {
+      return !!part && Math.min(Number(c.out), part.out) - Math.max(Number(c.in), part.in) > 0.05;
+    });
+    var d = pick.dom;
+    Object.keys(d.radios).forEach(function (key) {
+      d.radios[key].checked = key === mid;
+    });
+    clear(d.cutList);
+    d.boxes = cuts.map(function (c, i) {
+      var label = el("label", "vnew-edit-pick-item");
+      var input = el("input", null);
+      input.type = "checkbox";
+      input.value = String(c.cutId || i);
+      input.checked = !!pick.picked[i];
+      input.addEventListener("change", function () {
+        pick.picked[i] = !!input.checked;
+        editFixPickPaintNote(pick);
+      });
+      var secs = c.clip ? editFixSecs(c.in) + "–" + editFixSecs(c.out) + "초" : editFixSecs(Number(c.out) - Number(c.in)) + "초";
+      label.appendChild(input);
+      label.appendChild(el("span", null, editFixPickCutName(c, i) + " · " + secs));
+      d.cutList.appendChild(label);
+      return input;
+    });
+    d.all.disabled = !cuts.length;
+    d.none.disabled = !cuts.length;
+    d.go.disabled = !entry || !entry.can;
+    editFixPickPaintNote(pick);
+  }
+
+  function editFixPickPaintNote(pick) {
+    pick.dom.note.textContent = editFixPickNote(pick.cuts, pick.picked);
   }
 
   /* ---------------------------------------------------------------- 전역 */

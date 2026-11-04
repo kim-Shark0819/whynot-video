@@ -129,3 +129,9 @@
   - 완료 조건: rta-a~e(구간 offset = range.start + in·소리 있는 v2·v1 소리 없음·muted·1.5×·명령·화면), `node --check`, 전체 검사 "전부 통과".
 - [x] 28. 지시서 118b B: ⑦ 미리보기 원본 소리 — 숨은 `ctx.audio`, `editAltAudioAt`(= max(0, offset + in×scale) + (원본 시각 − in), end 넘으면 멈춤, 내보내기와 같음), `editSyncAudio`를 seek·재생·멈춤·다음 클립·tick(0.15초 넘게 어긋나면 다시)에, audioFrom 클립은 화면 <video> 음소거.
   - 완료 조건: iv3-d(3조합·end 넘음·소리 끔·없음), `node --check`, 전체 검사 " 전부 통과\.
+## 지시서 119 — ⑦ AI로 고치기 버튼 하나·테이크·장면 고르기(2026-11-04)
+
+> 사용자 테스트: 재료마다 [AI로 고치기]가 붙어 너무 많고, 테이크 안 특정 컷은 타임라인에서 잘라 골라야만 고칠 수 있었다. `retake.py`·`vnew.js`·`vnew.css`만 바꾼다.
+
+- [x] 29. `material_flag(..., plan=None, duration=None)`가 can일 때 `cuts [{cutId, no, in, out}]`(`_material_cuts`, 원본 시간·구간 v2는 구간 안만·trimTo로 자름·실패 []), 화면은 재료 줄 버튼·[고른 클립 AI로 고치기]를 없애고 머리 줄 [AI로 고치기] → 고르기 창(`editFixCutsRange`·`editFixPickRange`) → `editFixOpen(ctx, mid, "", range)`.
+  - 완료 조건: rtk-y(3컷·구간 v2·trimTo·can false·왕복·변형 1회), rtk-z(node --check·정적·순수 함수), rtk-j 고르기 창 흐름, `node --check`, 전체 검사 "전부 통과". 남은 일: `edit.py` `material_flag` 호출에 `plan=plan, duration=out["duration"]`(다음 지시서).
