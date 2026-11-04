@@ -2611,3 +2611,6 @@ un_conti가 대본 글 뒤에 ordered_tiles 타일을 Panel N of M: 라벨(N 0�
 ### 126 — 실사 영상 인물 참고 = 3D 모델용 사진, 실사 속 인물 바꿔 다시 만들기 (2026-11-04, 126)
 - 통 테이크 실사 인물 참고를 [고른 캐스팅 사진] → 실사 정면 → 시트 → 후면으로 바꿨다(`_real_take_cast`). 캐스팅 사진은 [이 사진으로]를 골랐을 때만 맨 앞이다. imageListMax 안에서 장소 1장 자리를 먼저 남기고 인물마다 첫 장부터 돌아가며 채워 뒤 사진부터 빠진다. ASSETS 머리에 REAL_TAKE_SHEET_SENTENCE(3D 모델용 사진과 같은 사람, 얼굴·머리·체형·옷 유지, COSTUME이 있으면 그것)를 둬 모든 줄이기 후보에 남는다. lr-d가 실사에서 "sheet"를 금지해 시트는 "turnaround views"로 적었다. 컷 단위 Kling(결정 4)은 그대로다. 대안(인물마다 사진을 다 넣은 뒤 넘치면 자르기)은 뒤 인물의 얼굴 사진이 통째로 빠져 쓰지 않았다.
 - POST /generate/real에 선택 필드 cast [{name, charId, look}]를 더했다. 소유자 캐릭터·완성된 모습·테이크 인물 이름을 검증하고(400 BadCast) realRun.cast에만 저장한다. 애니는 웹툰 정면·시트에 "photoreal person matching this character design"을 붙인다. ⑤ 실사 결과 아래 [인물 바꿔 다시 만들기] 창(GET /generate/real/cast)을 열고 지금 확인창으로 금액을 확인한다. 캐릭터 카드는 ready에도 [실사/애니 다시 만들기](비용 안내 패널)를 둔다. 검사 r3-a~d, 변형 1회 잡힘.
+
+### 129 — 이전 단계에서 작업할 때 화면이 다른 단계로 자동으로 옮겨지지 않게 (2026-11-04, 129)
+- `decidePlanStep`에서 진행 중 작업 단계로 옮기는 규칙을 처음 열 때(planStep 0)만 쓴다. 1~7이면 그대로 두고, 갈 수 없는 단계만 `maxReachableStep()`으로 되돌린다. ⑦ 예외(115)는 그대로다. 다른 단계 작업은 단계 막대 칩에 `is-busy`·"진행 중"(`planBusySteps`)으로만 보인다. 다른 단계 작업만 진행 중인 폴링은 본문을 다시 그리지 않고 막대만 바꾼다(`planBarSync`, 고치던 내용 보존). ② [콘티 만들기]는 콘티가 이미 있으면 ②에 머문다. 검사 check_vnew_plan_step_stay_129. 기대값을 바꾼 곳: lr-n fromStep4(④ 그대로)·ert-c decide·off(partial이어도 ⑥).
