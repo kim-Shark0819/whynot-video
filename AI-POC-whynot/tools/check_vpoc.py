@@ -3952,7 +3952,8 @@ def check_vnew_locations() -> None:
     (o) Astra 프롬프트 지침 문장·사실 단어 포함, Astra→Claude 순서, 완성 프롬프트 길이 1,500~2,500자
     (lv-a) box_view_geometry: back 사각형 화면 안·가로 35~55%, 면이 back 모서리 공유, front 에서 left=east
     (lv-b) rectify: 체커 사다리꼴을 펴면 직사각형 격자, 꼭짓점 순서(west 오른쪽 끝 = back 모서리)
-    (lv-c) 빌드: Seedream 4회(+보정), 첫 참고 가이드(real)·real 뷰(webtoon); wall_key 4·floor_key 저장; previz 사용
+    (lv-c) 빌드: Seedream 4회(+보정), 참고 이미지 0장(작업 125 text-to-image); wall_key 4·floor_key 저장; previz 사용
+    (lf-anchor) 지시문 4개가 같은 공통 문장으로 시작 (lf-timing) vnew.location.timing 단계 로그
     (lv-d) 프롬프트에 CENTER BACK WALL·LEFT WALL·RIGHT WALL·continuous·No people, 뷰 B 에 opposite side
     (lv-e) verify 꼭짓점 4% 초과면 Claude 꼭짓점, 이상하면 가이드
     (lv-f) 옛 데이터(views 없음) location_view 정상
@@ -4140,7 +4141,10 @@ def check_vnew_locations() -> None:
         # 뷰는 16:9(2560x1440). rectify 가 열 수 있는 실제 픽셀 JPEG 를 돌려준다.
         return _tiny_jpeg(640, 360)
 
+    people_calls = {"n": 0}
+
     def fake_count_people(jpeg):
+        people_calls["n"] += 1
         return 1  # 배경 조각 선호 정렬이 안정적으로 돌게(인물 적음).
 
     ledger_calls: list[dict] = []
@@ -4399,10 +4403,13 @@ def check_vnew_locations() -> None:
         # (lv-c)(d) 공간 시트 만들기 → 설계 1회, Seedream 뷰 4장(back·front ×2그림체) → cut → 시트.
         seedream_calls.clear()
         design_calls.clear()
-        resp = client.post(f"/api/vnew/p/{pid}/locations/{lid}/build", json={})
-        if resp.status_code != 202:
-            bad.append(f"(c) POST build 가 202 가 아닙니다: {resp.status_code} {resp.get_json()}")
-        _join()
+        people_calls["n"] = 0
+        timing_logs = _LogCapture()
+        with timing_logs:
+            resp = client.post(f"/api/vnew/p/{pid}/locations/{lid}/build", json={})
+            if resp.status_code != 202:
+                bad.append(f"(c) POST build 가 202 가 아닙니다: {resp.status_code} {resp.get_json()}")
+            _join()
 
         if len(design_calls) != 1:
             bad.append(f"(lv-c) 설계 LLM 호출이 1회가 아닙니다: {len(design_calls)}")
@@ -4424,11 +4431,32 @@ def check_vnew_locations() -> None:
         # 크기는 VIEW_SIZE.
         if any(c["size"] != locmod.VIEW_SIZE for c in initial_calls):
             bad.append(f"(lv-c) 뷰 크기가 {locmod.VIEW_SIZE} 가 아닙니다: {[c['size'] for c in initial_calls]}")
-        # real 뷰 첫 참고는 가이드(참고 1장 이상), webtoon 뷰 첫 참고는 real 뷰(참고 1장 이상).
-        for c in initial_calls:
-            if c["ref_count"] < 1:
-                bad.append(f"(lv-c) {c['variant']} {c['view']} 뷰에 참고 이미지가 없습니다")
+        # 2분 공백 원인(작업 125): 패널 고르기(S3 읽기·타일·사람 수 LLM)를 설계·사실·그림이 저마다 다시 했다.
+        #   이제 빌드당 1번 — 교장실 패널 [0,1,2] = 조각 3개 → 사람 수 세기 3번(예전 9번).
+        if people_calls["n"] != len(office_loc.get("panels") or []):
+            bad.append(f"(lf-gap) 빌드 한 번에 사람 수 세기가 {len(office_loc.get('panels') or [])}번이 아닙니다: {people_calls['n']}")
+        # 작업 125: 공간 시트는 참고 이미지 없이(fal text-to-image) 그린다 → 모든 그림 호출의 참고가 0장.
+        #   (옛 기대: real 첫 참고=가이드, webtoon 첫 참고=real 뷰 — 참고 체인이 없어져 바꿨다.)
+        for c in seedream_calls:
+            if c["ref_count"] != 0:
+                bad.append(f"(lv-c) {c['variant']} {c['view']} 뷰에 참고 이미지가 {c['ref_count']}장 갔습니다(0장이어야 함)")
                 break
+        # 작업 125: 4개 지시문이 같은 공통 문장(방 구조·색·재질·조명)으로 시작한다.
+        plan_anchor, _ = planmod.load_plan(owner, pid)
+        anchor = locmod._room_anchor(locmod._find_location(plan_anchor, lid) or {})
+        if not anchor or "pale green painted plaster" not in anchor:
+            bad.append(f"(lf-anchor) 공통 문장에 사실(벽 색·재질)이 없습니다: {anchor[:200]!r}")
+        if not all(c["prompt"].startswith(anchor + " ") for c in initial_calls):
+            bad.append("(lf-anchor) 지시문 4개가 같은 공통 문장으로 시작하지 않습니다")
+        # 단계 시간 로그(vnew.location.timing step=… ms=…).
+        timing_steps = {
+            m.split("step=")[1].split()[0] for m in timing_logs.messages("vnew.location.timing step=") if "ms=" in m
+        }
+        for step_name in ("panels", "design", "facts", "prompts", "images", "verify", "cut", "sheet", "total"):
+            if step_name not in timing_steps:
+                bad.append(f"(lf-timing) timing 로그에 step={step_name} 이 없습니다: {sorted(timing_steps)}")
+        if any("Image 1" in c["prompt"] or locmod._GUIDE_CLAUSE in c["prompt"] for c in seedream_calls):
+            bad.append("(lv-d) 참고 이미지가 없는데 프롬프트가 'Image 1'(가이드 이미지)을 가리킵니다")
         # (lv-d) 프롬프트 면별 라벨·이음새·인물 금지. 뷰 B(front)에 'opposite side'.
         for c in initial_calls:
             for need in ("CENTER BACK WALL", "LEFT WALL", "RIGHT WALL", "No people"):
@@ -4856,9 +4884,9 @@ def check_vnew_locations() -> None:
         # (lp-a) 업로드 201·정규화 JPEG·7장째 400·GET 200·다른 사용자 404·DELETE 후 파일 삭제
         # (lp-b) PUT side·noteKo·잘못된 side 400·빌드 중 409
         # (lp-c) 사진 있음 → 설계·사실 블록에서 사진이 패널보다 먼저·라벨 문구
-        # (lp-d) 뷰 A 참고 = [가이드, back, left, any, 패널…]·≤6·뷰 B 에 back 사진 없음
-        # (lp-e) 프롬프트 "real reference photo of the CENTER BACK WALL" 이미지 번호가 참고 순서와 일치
-        # (lp-f) 사진 없음 → 참고·프롬프트가 지금과 같다
+        # (lp-d) 작업 125: 사진이 있어도 그림 모델 참고 0장(옛: 뷰 A 참고 = [가이드, back, left, any, 패널…])
+        # (lp-e) 작업 125: 프롬프트에 사진 이미지 번호 지시 없음(옛: "Image N is a real reference photo …")
+        # (lp-f) 사진 없음 → 참고 0장·사진 지시 없음
 
         def _photo_png(label):
             import io as _iop  # noqa: PLC0415
@@ -5053,52 +5081,23 @@ def check_vnew_locations() -> None:
         if "메인배경(뒤)" not in label_texts:
             bad.append("(lp-c) 설계 사진 라벨에 면 한국어(메인배경(뒤))가 없습니다")
 
-        # (lp-d) 뷰 A(real back) 초기 참고 = [가이드, back 사진, left 사진, any 사진, 패널…]·≤6.
+        # (lp-d→125) 사진이 있어도 그림 모델에는 보내지 않는다 — 모든 그림 호출(보정 포함) 참고 0장.
+        #   (옛 기대: 뷰 A 참고 = [가이드, back, left, any, 패널…]. 작업 125 에서 참고 이미지를 없애 바꿨다.
+        #    사진은 (lp-c) 처럼 설계·사실 블록에서 Claude 가 보고 글로 반영한다.)
+        photo_bytes_all = [fake_store.blobs.get(k) for k in (back_key, left_key, any_key)]
         real_back = next((c for c in seedream_calls if c["variant"] == "real" and c["view"] == "back" and not c.get("fix")), None)
         if real_back is None:
             bad.append("(lp-d) real back 생성 호출을 찾지 못했습니다")
-        else:
-            refs = real_back["refs"]
-            if len(refs) > 6:
-                bad.append(f"(lp-d) 참고가 6장을 넘습니다: {len(refs)}")
-            # refs[0] 은 가이드(사진 아님), refs[1..3] 은 back·left·any 사진.
-            photo_keys_in_order = [back_key, left_key, any_key]
-            got_photos = [r for r in refs if r in (fake_store.blobs.get(back_key), fake_store.blobs.get(left_key), fake_store.blobs.get(any_key))]
-            expect_photos = [fake_store.blobs[k] for k in photo_keys_in_order]
-            if refs[:1] and refs[0] in expect_photos:
-                bad.append("(lp-d) 첫 참고가 가이드가 아니라 사진입니다")
-            if got_photos != expect_photos:
-                bad.append("(lp-d) 뷰 A 참고 사진 순서가 [back, left, any] 가 아닙니다")
-            # 사진 바로 뒤에 패널(loc-tile)이 온다(사진이 패널보다 먼저).
-            tile_refs = [r for r in refs if isinstance(r, bytes) and r.startswith(b"loc-tile")]
-            if refs and tile_refs:
-                last_photo_idx = max(refs.index(p) for p in expect_photos if p in refs)
-                first_tile_idx = min(refs.index(t) for t in tile_refs)
-                if first_tile_idx < last_photo_idx:
-                    bad.append("(lp-d) 패널이 사진보다 앞에 왔습니다")
+        if any(c["ref_count"] != 0 for c in seedream_calls):
+            bad.append(f"(lp-d) 사진이 있는 빌드에서 그림 모델에 참고 이미지가 갔습니다: {[c['ref_count'] for c in seedream_calls]}")
+        if any(p in c["refs"] for c in seedream_calls for p in photo_bytes_all if p):
+            bad.append("(lp-d) 장소 사진이 그림 모델에 보내졌습니다")
 
-        # (lp-d) 뷰 B(front)에는 back 사진이 없다.
-        real_front = next((c for c in seedream_calls if c["variant"] == "real" and c["view"] == "front" and not c.get("fix")), None)
-        if real_front is not None:
-            if fake_store.blobs.get(back_key) in real_front["refs"]:
-                bad.append("(lp-d) 뷰 B(front) 참고에 back 사진이 들어갔습니다")
-
-        # (lp-e) 프롬프트에 "real reference photo of the CENTER BACK WALL" 와 이미지 번호가 참고 순서와 일치.
-        if real_back is not None:
-            prompt = real_back["prompt"]
-            if "real reference photo of the CENTER BACK WALL" not in prompt:
-                bad.append("(lp-e) 프롬프트에 CENTER BACK WALL 참고 사진 지시가 없습니다")
-            else:
-                # back 사진은 가이드(이미지1) 다음 첫 사진 → 이미지 2.
-                refs = real_back["refs"]
-                back_bytes = fake_store.blobs.get(back_key)
-                if back_bytes in refs:
-                    img_no = refs.index(back_bytes) + 1  # 1-based
-                    if f"Image {img_no} is a real reference photo of the CENTER BACK WALL" not in prompt:
-                        bad.append(f"(lp-e) CENTER BACK WALL 이미지 번호가 참고 순서(Image {img_no})와 일치하지 않습니다")
-                # 'any' 사진은 "real look of this place" 지시.
-                if "real look of this place" not in prompt:
-                    bad.append("(lp-e) 'any' 사진의 'real look of this place' 지시가 없습니다")
+        # (lp-e→125) 참고 이미지가 없으므로 프롬프트에 사진 '이미지 번호' 지시가 없다.
+        for c in seedream_calls:
+            if "real reference photo" in c["prompt"] or "real look of this place" in c["prompt"]:
+                bad.append("(lp-e) 참고 이미지가 없는데 프롬프트에 사진 이미지 번호 지시가 있습니다")
+                break
 
         # (lp-f) 사진 없음 → 참고·프롬프트가 지금과 같다(사진 지시 없음·참고에 사진 없음).
         def _clear_all_photos(d):
@@ -5116,13 +5115,11 @@ def check_vnew_locations() -> None:
             if "real reference photo" in c["prompt"] or "real look of this place" in c["prompt"]:
                 bad.append("(lp-f) 사진 없음인데 프롬프트에 사진 지시가 남아 있습니다")
                 break
-        # 참고에 사진 바이트가 없다(patterns: photos/ 키 바이트). 가이드·real 뷰·패널(loc-tile)만.
+        # 참고에 사진 바이트가 없다. 작업 125: 사진이 없을 때도 참고 0장(옛 기대: [가이드, 패널…]).
         nb = next((c for c in no_photo_initial if c["variant"] == "real" and c["view"] == "back"), None)
         if nb is not None:
-            # real back 참고는 [가이드, 패널…] — 가이드 1 + 패널 ≤3.
-            tiles = [r for r in nb["refs"] if isinstance(r, bytes) and r.startswith(b"loc-tile")]
-            if len(nb["refs"]) != 1 + len(tiles):
-                bad.append(f"(lp-f) 사진 없음 real back 참고가 [가이드,패널]만이 아닙니다: {len(nb['refs'])}장")
+            if len(nb["refs"]) != 0:
+                bad.append(f"(lp-f) 사진 없음 real back 참고가 0장이 아닙니다: {len(nb['refs'])}장")
 
     except Exception as exc:  # noqa: BLE001
         import traceback as _tb  # noqa: PLC0415
@@ -5161,14 +5158,15 @@ def check_vnew_locations() -> None:
             " (l)다시 만들기 설계 재요청 1회·designEditedAt 있으면 0회 (n)사실 추출 저장·estimated·창문/문/시대/나라"
             " (o)Astra 프롬프트 지침 문장·사실 단어·길이 1500~3000"
             " (lv-a)box_view_geometry back 35~55%·면 모서리 공유·front 매핑 (lv-b)rectify 격자·꼭짓점 순서"
-            " (lv-c)Seedream 뷰 4장·첫 참고 가이드/real·wall_key4·floor_key 저장·previz _textures_for 사용"
+            " (lv-c)Seedream 뷰 4장·참고 0장(작업 125)·wall_key4·floor_key 저장·previz _textures_for 사용"
+            " (lf-anchor)지시문 4개 공통 문장 시작 (lf-timing)단계 timing 로그"
             " (lv-d)프롬프트 CENTER BACK WALL/LEFT/RIGHT/continuous/No people·뷰B opposite side"
             " (lv-e)verify 꼭짓점 4% 초과→Claude·이상→가이드 (lv-f)옛 데이터(views 없음)·montage_2x2 보존"
             " (m)(q)단계 design→facts→prompts→images→verify→cut→sheet→done·뷰마다 +1·보정분 total 반영"
             " (lp-a)업로드 201·정규화 JPEG·7장째 400·GET 200·다른 사용자 404·DELETE 파일 삭제"
             " (lp-b)PUT side/noteKo·잘못된 side 400·빌드 중 409 (lp-c)사진이 설계·사실 블록에서 패널보다 먼저·라벨"
-            " (lp-d)뷰 A 참고 [가이드,back,left,any,패널]·≤6·뷰 B back 없음 (lp-e)프롬프트 CENTER BACK WALL 이미지 번호 일치"
-            " (lp-f)사진 없음→참고·프롬프트 회귀 없음"
+            " (lp-d)사진 있어도 그림 참고 0장(작업 125) (lp-e)프롬프트에 사진 이미지 번호 지시 없음"
+            " (lp-f)사진 없음→참고 0장·사진 지시 없음"
             " (np-d)설계·사실 지침에 Do not add stairs·mezzanines·terrace/balcony·estimate size from people and doors"
         )
 
@@ -12816,7 +12814,7 @@ def check_fal_parity_rollback() -> None:
                 overlay = render.load_config(overlay_path)
                 # 2026-10-30 사용자 결정("seedance도 사용할 수 있고 fal seedance도 사용할 수 있게 해라"): 운영 오버레이가 true 를 뒀다.
                 # 2026-11-04(config.prod.env 주석): ARK 키가 사라지고 사용자 "fal.ai를 쓰라고 했잖아" → 운영도 false(fal 만).
-                # "+true" 되돌리기 경로는 그대로다.
+                # 작업 125 에서 이 기대값을 운영 파일에 맞췄다. "+true" 되돌리기 경로는 그대로다.
                 rendered_flag = "false"
                 for extra, want in (({}, rendered_flag), ({flag: "true"}, "true")):
                     layer = {**overlay, **extra}
@@ -45849,6 +45847,293 @@ def check_seedream_fal_124() -> None:
            "(sf-e)필터 다시 쓰기 (sf-f)ark 인증 실패 fal 1회·키 없음 (sf-g)ark 바디 그대로 (sf-h)금액 unit_usd")
 
 
+def check_vnew_location_fast_125() -> None:
+    """작업 125 — 공간 시트를 fal text-to-image 로, 지시문·그림·검사를 동시에. 가짜 fal/LLM, 유료·네트워크 0.
+
+    (lf-a) seedream.generate(fal_model=…): 공급자 fal·ark 모두 fal 의 그 endpoint 로 POST, image_urls 없음, ark 0회
+    (lf-b) locations._seedream: 참고 0장(받은 참고도 버림)·model/fal_model = VNEW_LOCATION_IMAGE_MODEL(기본 seedream v4.5 t2i)
+    (lf-c) VNEW_LOCATION_IMAGE_MODEL 틀린 값 → 기본값·경고 1줄, 맞는 값 → 그 값
+    (lf-d) _author_all_prompts 4개 동시(가짜 LLM 0.3초씩 → 0.9초 미만)·4개 모두 같은 공통 문장으로 시작
+    (lf-e) _generate_views 4장 동시(0.3초씩 → 0.9초 미만)·참고 0장·원장 4건(fal 단가·모델)·progress +1 4번·저장 4건
+    (lf-f) _verify_views 4개 동시(+다시 그리기 4장, 0.9초 미만)·다시 그리기 참고 0장·원장 4건
+    (lf-g) _prefer_background 사람 수 세기 4개 동시(0.9초 미만)·사람 적은 조각 우선 정렬 유지
+    """
+    sys.path.insert(0, str(ROOT / "app"))
+    import base64 as _b64  # noqa: PLC0415
+    import io as _io  # noqa: PLC0415
+    import threading as _threading  # noqa: PLC0415
+    import time as _time  # noqa: PLC0415
+    import traceback as _tb  # noqa: PLC0415
+    import urllib.request as _ureq  # noqa: PLC0415
+
+    from PIL import Image as _Image  # noqa: PLC0415
+
+    from src.vnew import locations as locmod  # noqa: PLC0415
+    from src.vnew import settings as vns  # noqa: PLC0415
+    from src.vpoc import fal as vpoc_fal  # noqa: PLC0415
+    from src.vpoc import seedream as sd  # noqa: PLC0415
+    from src.vpoc import settings as vs  # noqa: PLC0415
+
+    bad: list[str] = []
+    seen: set[str] = set()
+    default_model = "fal-ai/bytedance/seedream/v4.5/text-to-image"
+    custom = "fal-ai/example/seedream/text-to-image"
+    nap = 0.3
+    limit = 0.9
+
+    def wall(color: str, material: str, kind: str) -> dict:
+        return {"wallColorEn": color, "wallMaterialEn": material, "estimated": False,
+                "objects": [{"kind": kind, "count": 1, "colorEn": "brown", "materialEn": "wood",
+                             "position": "center mid", "sizeEn": "about one metre wide", "attachedTo": "wall"}]}
+
+    loc = {
+        "id": "loc_t125", "nameEn": "A closed principal's office", "photos": [], "styleEn": "", "extraEn": "",
+        "design": {"widthM": 6.0, "depthM": 5.0, "heightM": 2.8, "enclosed": True, "lightEn": "window daylight"},
+        "facts": {
+            "walls": {"north": wall("pale green", "painted plaster", "window"),
+                      "east": wall("pale green", "painted plaster", "bookshelf"),
+                      "south": wall("pale green", "painted plaster", "door"),
+                      "west": wall("dark brown", "wood panelling", "cabinet")},
+            "floorEn": "warm wooden floor", "ceilingEn": "flat white ceiling",
+            "windows": [{"wall": "north", "position": "left high", "sizeEn": "tall"}],
+            "doors": [{"wall": "south", "position": "right mid", "sizeEn": "standard"}],
+            "lightEn": "soft daylight from the north windows", "eraEn": "2010s", "countryEn": "South Korea",
+        },
+    }
+
+    def png(width: int, height: int) -> bytes:
+        buffer = _io.BytesIO()
+        _Image.new("RGB", (width, height), (90, 120, 150)).save(buffer, format="PNG")
+        return buffer.getvalue()
+
+    view_jpeg = _tiny_jpeg(640, 360)
+    calls: list[tuple] = []
+
+    def fake_request(method, url, payload=None, *, where):
+        calls.append((method, url, payload, where))
+        if method == "POST":
+            return {"request_id": f"req{len(calls)}"}
+        if url.endswith("/status"):
+            return {"status": "COMPLETED"}
+        return {"images": [{"url": "data:image/png;base64," + _b64.b64encode(png(2560, 1440)).decode("ascii")}]}
+
+    net: list = []
+
+    def blocked_urlopen(*args, **kwargs):
+        net.append(args)
+        raise RuntimeError("network blocked in check")
+
+    names = ("SEEDREAM_PROVIDER", "FAL_KEY", "ARK_API_KEY")
+    saved_settings = {name: getattr(vs, name) for name in names}
+    saved = {
+        "request": vpoc_fal._request, "urlopen": _ureq.urlopen, "sleep": sd._sleep,  # noqa: SLF001
+        "generate_safe": locmod.vpoc_seedream.generate_safe, "STORE": locmod.STORE,
+        "_author": locmod._author, "_seedream": locmod._seedream, "_verify": locmod._verify,  # noqa: SLF001
+        "bump": locmod._bump_progress, "bump_total": locmod._bump_total,  # noqa: SLF001
+        "charge": locmod.vpoc_ledger.charge, "charge_text": locmod.vpoc_ledger.charge_text,
+        "count_people": locmod.characters._count_people,  # noqa: SLF001
+    }
+    saved_env = os.environ.get("VNEW_LOCATION_IMAGE_MODEL")
+    try:
+        vs.FAL_KEY, vs.ARK_API_KEY = "dummy-fal-key", "ark-dummy"
+        vpoc_fal._request = fake_request  # noqa: SLF001
+        _ureq.urlopen = blocked_urlopen
+        sd._sleep = lambda _s: None  # noqa: SLF001
+
+        # ================= (lf-a) fal_model 이면 공급자와 상관없이 fal 의 그 endpoint =================
+        for provider_name in ("fal", "ark"):
+            calls.clear()
+            vs.SEEDREAM_PROVIDER = provider_name
+            out = sd.generate_safe("a quiet room", [], model="dola-x", where="t.lf", size="2560x1440", fal_model=custom)
+            posts = [c for c in calls if c[0] == "POST"]
+            if len(posts) != 1 or posts[0][1] != f"{vs.FAL_QUEUE_URL}/{custom}" or "image_urls" in (posts[0][2] or {}) \
+                    or out[:2] != b"\xff\xd8" or net:
+                bad.append(f"(lf-a) 공급자 {provider_name}: fal_model 경로가 다릅니다 {[(c[1], c[2] and sorted(c[2])) for c in posts]}")
+        # fal_model 이 없으면 작업 124 그대로(t2i 기본 endpoint).
+        calls.clear()
+        vs.SEEDREAM_PROVIDER = "fal"
+        sd.generate("a quiet room", None, model="dola-x", where="t.lf", size="2560x1440")
+        posts = [c for c in calls if c[0] == "POST"]
+        if not posts or posts[0][1] != f"{vs.FAL_QUEUE_URL}/{vs.SEEDREAM_FAL_T2I_MODEL}":
+            bad.append(f"(lf-a) fal_model 없을 때 기본 t2i 가 아닙니다: {[c[1] for c in posts]}")
+        seen.add("lf-a")
+
+        # ================= (lf-b) locations._seedream: 참고 0장 · 설정 모델 =================
+        got: list[dict] = []
+
+        def fake_generate_safe(prompt, references, **kwargs):
+            got.append({"refs": list(references or []), **kwargs})
+            return view_jpeg
+
+        locmod.vpoc_seedream.generate_safe = fake_generate_safe
+        locmod._seedream("p", [b"guide", b"panel"], size=locmod.VIEW_SIZE)  # noqa: SLF001
+        locmod.vpoc_seedream.generate_safe = saved["generate_safe"]
+        if len(got) != 1 or got[0]["refs"] or got[0].get("fal_model") != vns.LOCATION_IMAGE_MODEL \
+                or got[0].get("model") != vns.LOCATION_IMAGE_MODEL or got[0].get("size") != locmod.VIEW_SIZE:
+            bad.append(f"(lf-b) _seedream 호출이 다릅니다: {[(len(g['refs']), g.get('fal_model'), g.get('size')) for g in got]}")
+        if saved_env is None and (vns.LOCATION_IMAGE_MODEL != default_model or locmod.LOCATION_IMAGE_MODEL != default_model):
+            bad.append(f"(lf-b) 기본 그림 모델이 {default_model} 가 아닙니다: {vns.LOCATION_IMAGE_MODEL}")
+        if locmod.LOCATION_IMAGE_USD != vs.SEEDREAM_FAL_USD:
+            bad.append(f"(lf-b) 공간 시트 장당 금액이 fal 단가가 아닙니다: {locmod.LOCATION_IMAGE_USD} vs {vs.SEEDREAM_FAL_USD}")
+        seen.add("lf-b")
+
+        # ================= (lf-c) 설정값 검사 =================
+        logs = _LogCapture()
+        with logs:
+            os.environ["VNEW_LOCATION_IMAGE_MODEL"] = "https://evil.example/x"
+            wrong = vns._checked_fal_endpoint("VNEW_LOCATION_IMAGE_MODEL", default_model)  # noqa: SLF001
+            os.environ["VNEW_LOCATION_IMAGE_MODEL"] = custom
+            right = vns._checked_fal_endpoint("VNEW_LOCATION_IMAGE_MODEL", default_model)  # noqa: SLF001
+        if wrong != default_model or right != custom or len(logs.messages("vnew.settings.invalid")) != 1:
+            bad.append(f"(lf-c) 설정값 검사가 다릅니다: wrong={wrong} right={right}")
+        seen.add("lf-c")
+
+        # 공통 가짜(원장·진행·저장).
+        lock = _threading.Lock()
+        ledger: list[dict] = []
+        bumps = {"done": 0, "total": 0}
+        locmod.vpoc_ledger.charge = lambda key, **kw: (ledger.append({"key": key, **kw}), {})[1]
+        locmod.vpoc_ledger.charge_text = lambda key, **kw: {}
+
+        def fake_bump(*_a):
+            with lock:
+                bumps["done"] += 1
+
+        def fake_bump_total(*_a):
+            with lock:
+                bumps["total"] += 1
+
+        locmod._bump_progress = fake_bump  # noqa: SLF001
+        locmod._bump_total = fake_bump_total  # noqa: SLF001
+        store = _FakeCharStore()
+        locmod.STORE = store
+
+        # ================= (lf-d) 지시문 4개 동시 · 공통 문장 =================
+        authored: list[str] = []
+
+        def slow_author(system_text, user_text, *, model):
+            _time.sleep(nap)
+            authored.append(user_text)
+            return {"promptEn": "Box-set cutaway view, pale green walls, a brown bookshelf."}, {"model": model}
+
+        locmod._author = slow_author  # noqa: SLF001
+        work = dict(loc)
+        work["anchorEn"] = locmod._room_anchor(work)  # noqa: SLF001
+        started = _time.monotonic()
+        prompts = locmod._author_all_prompts("tester", "prj_t125", work)  # noqa: SLF001
+        elapsed = _time.monotonic() - started
+        if len(authored) != 4 or elapsed >= limit:
+            bad.append(f"(lf-d) 지시문 4개가 동시에 불리지 않았습니다: {len(authored)}회 {elapsed:.2f}초")
+        anchor = work["anchorEn"]
+        if not anchor or "pale green painted plaster" not in anchor or "dark brown wood panelling" not in anchor:
+            bad.append(f"(lf-d) 공통 문장에 벽 색·재질이 없습니다: {anchor!r}")
+        if sorted(prompts) != sorted((v, w) for v in locmod.VARIANTS for w in locmod.VIEWS) \
+                or not all(p.startswith(anchor + " ") for p in prompts.values()):
+            bad.append("(lf-d) 지시문 4개가 같은 공통 문장으로 시작하지 않습니다")
+        if not all(anchor in text for text in authored):
+            bad.append("(lf-d) 지시문 작성 입력에 공통 문장이 들어가지 않았습니다")
+        seen.add("lf-d")
+
+        # ================= (lf-e) 그림 4장 동시 =================
+        drawn: list[dict] = []
+
+        def slow_seedream(prompt, references, *, size):
+            _time.sleep(nap)
+            drawn.append({"prompt": prompt, "refs": len(references or []), "size": size})
+            return view_jpeg
+
+        locmod._seedream = slow_seedream  # noqa: SLF001
+        work["prompts"] = prompts
+        geometries = locmod._build_geometries(work)  # noqa: SLF001
+        guides = locmod._build_guides(work, geometries)  # noqa: SLF001
+        started = _time.monotonic()
+        views = locmod._generate_views("tester", "prj_t125", work["id"], 1, work, guides, [b"panel"], "task")  # noqa: SLF001
+        elapsed = _time.monotonic() - started
+        if len(drawn) != 4 or elapsed >= limit:
+            bad.append(f"(lf-e) 그림 4장이 동시에 그려지지 않았습니다: {len(drawn)}장 {elapsed:.2f}초")
+        if any(d["refs"] for d in drawn):
+            bad.append(f"(lf-e) 그림 호출에 참고 이미지가 갔습니다: {[d['refs'] for d in drawn]}")
+        if len(ledger) != 4 or any(c.get("usd") != locmod.LOCATION_IMAGE_USD or c.get("model") != locmod.LOCATION_IMAGE_MODEL
+                                   for c in ledger):
+            bad.append(f"(lf-e) 원장이 4건(fal 단가·모델)이 아닙니다: {[(c.get('model'), c.get('usd')) for c in ledger]}")
+        if bumps["done"] != 4:
+            bad.append(f"(lf-e) progress.done +1 이 4번이 아닙니다: {bumps['done']}")
+        if sorted(views) != sorted(prompts) or len([k for k in store.blobs if "/view-" in k]) != 4:
+            bad.append(f"(lf-e) 뷰 4장 결과·저장이 다릅니다: {sorted(views)} {sorted(store.blobs)}")
+        seen.add("lf-e")
+
+        # ================= (lf-f) 검사 4개 동시 + 다시 그리기 =================
+        verified: list[int] = []
+
+        def slow_verify(blocks, *, model):
+            _time.sleep(nap)
+            with lock:
+                verified.append(1)
+            return {"matchesPlace": False, "matchesSides": False, "fixesEn": ["make the back wall pale green"]}, {"model": model}
+
+        locmod._verify = slow_verify  # noqa: SLF001
+        drawn.clear()
+        ledger.clear()
+        started = _time.monotonic()
+        checks = locmod._verify_views("tester", "prj_t125", work["id"], 1, work, guides, [b"panel"], views, geometries, "task")  # noqa: SLF001
+        elapsed = _time.monotonic() - started
+        if len(verified) != 4 or len(drawn) != 4 or elapsed >= limit:
+            bad.append(f"(lf-f) 검사·다시 그리기가 동시에 돌지 않았습니다: verify={len(verified)} redraw={len(drawn)} {elapsed:.2f}초")
+        if any(d["refs"] for d in drawn) or not all("Corrections:" in d["prompt"] for d in drawn):
+            bad.append("(lf-f) 다시 그리기 참고 0장·수정 지시가 아닙니다")
+        if len(ledger) != 4 or bumps["total"] != 4:
+            bad.append(f"(lf-f) 다시 그리기 원장·total +1 이 4번이 아닙니다: {len(ledger)} {bumps['total']}")
+        if not all((checks.get(v) or {}).get(w, {}).get("fixedEn") for v in locmod.VARIANTS for w in locmod.VIEWS):
+            bad.append(f"(lf-f) checks.fixedEn 이 4개 모두 True 가 아닙니다: {checks}")
+        seen.add("lf-f")
+
+        # ================= (lf-g) 사람 수 세기 동시 =================
+        people = {b"t0": 3, b"t1": 0, b"t2": 2, b"t3": 1}
+
+        def slow_count(jpeg):
+            _time.sleep(nap)
+            return people[jpeg]
+
+        locmod.characters._count_people = slow_count  # noqa: SLF001
+        started = _time.monotonic()
+        ordered = locmod._prefer_background(list(people))  # noqa: SLF001
+        elapsed = _time.monotonic() - started
+        if ordered != [b"t1", b"t3", b"t2", b"t0"] or elapsed >= limit:
+            bad.append(f"(lf-g) 사람 수 세기가 동시·정렬 유지가 아닙니다: {ordered} {elapsed:.2f}초")
+        seen.add("lf-g")
+    except Exception:  # noqa: BLE001
+        bad.append("작업 125 검사 예외\n" + _tb.format_exc())
+    finally:
+        for name, value in saved_settings.items():
+            setattr(vs, name, value)
+        if saved_env is None:
+            os.environ.pop("VNEW_LOCATION_IMAGE_MODEL", None)
+        else:
+            os.environ["VNEW_LOCATION_IMAGE_MODEL"] = saved_env
+        vpoc_fal._request = saved["request"]  # noqa: SLF001
+        _ureq.urlopen = saved["urlopen"]
+        sd._sleep = saved["sleep"]  # noqa: SLF001
+        locmod.vpoc_seedream.generate_safe = saved["generate_safe"]
+        locmod.STORE = saved["STORE"]
+        locmod._author = saved["_author"]  # noqa: SLF001
+        locmod._seedream = saved["_seedream"]  # noqa: SLF001
+        locmod._verify = saved["_verify"]  # noqa: SLF001
+        locmod._bump_progress = saved["bump"]  # noqa: SLF001
+        locmod._bump_total = saved["bump_total"]  # noqa: SLF001
+        locmod.vpoc_ledger.charge = saved["charge"]
+        locmod.vpoc_ledger.charge_text = saved["charge_text"]
+        locmod.characters._count_people = saved["count_people"]  # noqa: SLF001
+    missing = {"lf-a", "lf-b", "lf-c", "lf-d", "lf-e", "lf-f", "lf-g"} - seen
+    if missing:
+        bad.append(f"돌지 않은 검사: {sorted(missing)}")
+    if bad:
+        fail("작업 125 공간 시트 fal t2i·동시 처리\n" + "\n".join(f"  {item}" for item in bad))
+    else:
+        ok("작업 125 공간 시트 (lf-a)fal_model endpoint·공급자 무관 (lf-b)참고 0장·설정 모델·fal 단가 (lf-c)설정값 검사 "
+           "(lf-d)지시문 4개 동시·공통 문장 (lf-e)그림 4장 동시·원장 4·progress 4 (lf-f)검사·다시 그리기 동시 "
+           "(lf-g)사람 수 동시·정렬")
+
+
 def main() -> int:
     print("== vpoc1 check ==")
     check_compileall()
@@ -45932,6 +46217,7 @@ def main() -> int:
     check_vnew_conti_images_120()
     check_vnew_take_both_123()
     check_seedream_fal_124()
+    check_vnew_location_fast_125()
     check_pod_zones()
     print()
     if warnings:

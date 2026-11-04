@@ -156,6 +156,26 @@ LOST_AFTER = _int("VNEW_3D_LOST_AFTER", 8)
 # "잃은 요청" 자동 재제출은 variant 당 최대 이 횟수(model3d.resubmits). 넘으면 그때 failed.
 MAX_RESUBMITS = _int("VNEW_3D_MAX_RESUBMITS", 2)
 
+# --- 공간 시트 그림 모델(작업 125, 2026-11-04) ---
+# 공간 시트(뷰·다시 그리기)는 참고 이미지 없이 fal text-to-image 로 그린다. 값은 fal endpoint_id 꼴
+# ("fal-ai/<...>/<...>")만 받는다. 틀리면 기본값 + 경고 1줄. 장당 금액은 fal Seedream 단가(VPOC_SEEDREAM_FAL_USD) 1곳을 쓴다.
+_FAL_ENDPOINT_RE = re.compile(r"^fal-ai(/[a-z0-9][a-z0-9._-]*){2,}$")
+_LOCATION_IMAGE_DEFAULT = "fal-ai/bytedance/seedream/v4.5/text-to-image"
+
+
+def _checked_fal_endpoint(name: str, default: str) -> str:
+    raw = os.getenv(name, "").strip()
+    if not raw:
+        return default
+    if _FAL_ENDPOINT_RE.match(raw):
+        return raw
+    _invalid(name, raw, default)
+    return default
+
+
+LOCATION_IMAGE_MODEL = _checked_fal_endpoint("VNEW_LOCATION_IMAGE_MODEL", _LOCATION_IMAGE_DEFAULT)
+LOCATION_IMAGE_USD = vpoc_settings.SEEDREAM_FAL_USD
+
 # --- 단가(원장) ---
 SEEDREAM_USD = _float("VNEW_SEEDREAM_USD", 0.04)  # Seedream 장당
 # 3D 1건당. fal 가격표(2026-10-30 Claude 확인): Hunyuan3D v3 Normal $0.375 + multi-view images +$0.15 + custom face count
