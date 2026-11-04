@@ -48803,6 +48803,48 @@ def check_vnew_real_brief_137() -> None:
            "(rb-f)장면 옷 괄호 메모·'at the' 꼬리 빼기·140자 상한·시작 그림 OUTFITS")
 
 
+def check_vnew_real_brief_138() -> None:
+    """작업 138 — 몸 낱말 앞 옷 색 빼기를 이름 인식 없이, 이름만 쓴 표기(성 없음) 인식. 외부 호출 없음, 유료 0.
+
+    (rb-g) 장면 옷 인물 1명 이상이면 주어와 상관없이 "ivory-white shoulder" → "shoulder", "black hair" 는 남음
+    (rb-h) 이름 표기 = [한글, Beomgeonu, Beom Geonu, Geonu], "Geonu wears ..." → 장면 옷 문장
+    """
+    import traceback as _tb  # noqa: PLC0415
+
+    sys.path.insert(0, str(ROOT / "app"))
+    from src.vnew import generate as genmod  # noqa: PLC0415
+
+    bad: list[str] = []
+    a, b = "범건우", "여의준"
+    outfits = {a: "black open-collar shirt", b: "navy training top"}
+    try:
+        with _guard_real_llm() as llm_calls, _pin_vnew(VNEW_FX=True):
+            # ================= (rb-g) 이름 인식 없이 몸 낱말 앞 옷 색 =================
+            s = "Geonu's charcoal-black hair, angular cheek and ivory-white shoulder form the foreground edge."
+            got = genmod._real_brief_text(s, outfits)  # noqa: SLF001
+            if got != "Geonu's charcoal-black hair, angular cheek and shoulder form the foreground edge.":
+                bad.append(f"(rb-g) 이름만 쓴 문장 옷 색 정리가 다릅니다: {got!r}")
+            got2 = genmod._real_brief_text("The man's black hair and white shoulder fill the edge.", outfits)  # noqa: SLF001
+            if got2 != "The man's black hair and shoulder fill the edge.":
+                bad.append(f"(rb-g) 주어 모르는 문장 옷 색 정리가 다릅니다: {got2!r}")
+            # ================= (rb-h) 이름만 쓴 표기 =================
+            forms = genmod._brief_name_forms(a)  # noqa: SLF001
+            if forms != [a, "Beomgeonu", "Beom Geonu", "Geonu"]:
+                bad.append(f"(rb-h) 이름 표기가 다릅니다: {forms!r}")
+            worn = genmod._real_brief_text("Geonu wears an ivory-white shirt.", outfits)  # noqa: SLF001
+            if worn != f"{a} wears black open-collar shirt.":
+                bad.append(f"(rb-h) 이름만 쓴 옷 문장 정리가 다릅니다: {worn!r}")
+            if llm_calls:
+                bad.append(f"가짜가 아닌 LLM 호출: {llm_calls}")
+    except Exception:  # noqa: BLE001
+        bad.append("작업 138 검사 예외\n" + _tb.format_exc())
+    if bad:
+        fail("작업 138 실사 지시서 이름 없이 옷 색 빼기 검사 실패\n  " + "\n  ".join(bad))
+    else:
+        ok("작업 138 실사 지시서 (rb-g)장면 옷 있으면 주어와 상관없이 몸 낱말 앞 옷 색 빼기·black hair 남음 "
+           "(rb-h)이름만 쓴 표기(Geonu) 인식·장면 옷 문장")
+
+
 def main() -> int:
     print("== vpoc1 check ==")
     check_compileall()
@@ -48899,6 +48941,7 @@ def main() -> int:
     check_vnew_real_cut_sheet_135()
     check_vnew_real_brief_136()
     check_vnew_real_brief_137()
+    check_vnew_real_brief_138()
     check_vnew_plan_step_stay_129()
     check_pod_zones()
     print()
