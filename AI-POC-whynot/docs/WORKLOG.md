@@ -2624,5 +2624,14 @@ un_conti가 대본 글 뒤에 ordered_tiles 타일을 Panel N of M: 라벨(N 0�
 - 원장: Seedance 실사 테이크 금액은 제출 때가 아니라 결과가 정해질 때(완료·거절이 아닌 실패·조회 예외·취소) `pendingCharge`로 1번 남긴다(likeness 0). 시작 그림·Kling 컷은 제출 때마다. 확인창은 `realFallbackMax`(테이크마다 max(Seedance, Σ시작 그림 + Kling 길이 × 단가))를 "최대 $X"로 보인다. ⑤ 실사 칸에 "정면 1장으로 다시 만드는 중"·"컷 단위 Kling으로 만드는 중 (n/N컷)". 검사 check_vnew_real_likeness_130(lk-a~d).
 - 남은 이슈: 컷 재료의 ⑦ AI로 고치기는 칸을 찾지 못한다(cellId "테이크#컷"). Kling 컷 하나가 실패하면 칸 실패이고 이미 제출한 컷 금액은 남는다. Kling 단가는 fal pricing을 못 받으면 0.14/초 기본값이다.
 
+
+### 132 — 컷 단위 Kling 실사가 애니 결과·콘티를 따르게 (2026-11-04)
+- 시작 그림 참고 = [같은 gen 애니(웹툰) 테이크 결과의 그 컷 시작 프레임(녹화 시각 + 테이크 안 앞 녹화 길이, `_take_rec_offsets`), 실사 정면…], 문장은 Image 1을 photoreal live-action으로 다시 그리고 얼굴만 Image 2…(`_cut_still_prompt source="anime"`). 애니 결과가 없거나 프레임을 못 뽑으면 프리비즈 첫 프레임 + 대본 장면 의상(`_resolve_cast` 캐시)·장소 배경 문장. Kling 프롬프트는 `_segment_prompt(real=True)`(127 고정부·REAL_TAKE_STYLE·shotKo 영어/샷 약어·cameraEn·연기·대사·negative `REAL_CUT_NEGATIVE`, 시작 그림 전에 `_assert_no_webtoon`). 검사 check_vnew_real_cut_anime_132(ak-a·b), lk-a 기대값 2곳 변경(애니 결과가 있는 gen이라 Image 1이 애니 프레임 0초·4초, "previz frame" → "photoreal live-action").
+
+
+### 133 — 실사 컷 자동 QA: 애니 같은 컷과 비교해 틀리면 그 컷만 1번 다시 (2026-11-04)
+- `VNEW_REAL_CUT_QA`(기본 true) 켬이면 컷 단위 Kling 컷이 끝날 때 실사 가운데 프레임(min(컷, Kling 길이)/2)과 애니 테이크 같은 시각(`takeAt` + 같은 초) 프레임 + 콘티 글을 `plan._script_model()`·`_read_cut_qa`(emit_cut_qa, 기준 `prompts.CUT_QA_RULES`)로 비교하고 `plan._charge`(charge_text)로 남긴다. 틀리면 그 컷만 `_submit_real_cut(fix="FIX: …", tag="-qa")`로 1번 다시(시작 그림·Kling 실제 금액), 다시 만든 것도 검사해 틀린 항목 수가 많지 않으면 그것을, 많거나 다시 만들기가 실패하면 첫 결과를 쓰고 컷에 `qa {ok, items, note, retried, firstItems}`, 애니 결과·프레임이 없거나 QA 호출이 실패하면 qa ok null(다시 만들지 않음). 최대 금액은 컷마다 2×(시작 그림 + Kling) + QA 2번 추정(`VNEW_REAL_CUT_QA_EST_TOKENS`), 화면 "QA로 다시 만든 컷 포함 최대 $X"·⑤ 실사 칸 "컷 N: 옷이 다름(1번 다시 만듦)". 검사 check_vnew_real_cut_qa_133(qa-a~e), lk·ak 검사는 `VNEW_REAL_CUT_QA=False`로 고정(기대값 그대로).
+
+
 ### 131 — 컷 단위 Kling 실사 재료도 ⑦ AI로 고치기 (2026-11-04)
 - retake.py `_kcut_cell`이 칸 "테이크#컷"(cellKey `real:<take>#<cut>`)을 찾는다: 이전 프롬프트 = 130이 Kling에 보낸 본문(회차 기록 `fallback.cuts[].promptEn` + prompts.json 같은 칸 줄), 원래 모델 Kling i2v(경로 `i2v`, 컷 전체만)는 `generate.resubmit_kling_cut`(저장된 시작 그림 `stillKey`, 없으면 결과 첫 프레임 · 원장 `_charge_kling_cut`), 다른 모델은 그 컷 녹화 구간으로 지금 규칙. 검사 check_vnew_retake_kling_cuts_131(kc-a~d). 남은 이슈: 이 변경 전에 만든 컷(운영 g20261104104135baf7)은 프롬프트 기록이 없어 can=false.
