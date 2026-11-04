@@ -2643,3 +2643,6 @@ un_conti가 대본 글 뒤에 ordered_tiles 타일을 Panel N of M: 라벨(N 0�
 
 ### 135 — 실사 컷 시작 그림 배경을 공간 시트 실사 뷰로 고정, QA 는 틀린 항목이 적은 쪽 (2026-11-05)
 - `_submit_real_cut` 시작 그림 참고 = [애니 프레임, 공간 시트 실사 뷰(`_cut_location_view`: 콘티 locationEn → 없으면 scene.locationId, 카메라 pos→target 이 주로 +z 면 front 그 밖·모르면 back, 키 없으면 다른 쪽), 실사 정면…] + `REAL_STILL_BACKGROUND`(Image 2 배경 문장), 시트 없으면 그대로. 문장에 대본·콘티 옷·사진 옷 금지 구절 항상, 끝 `REAL_STILL_LOOK`. QA 는 Image 3 = 시트 뷰(`CUT_QA_RULES` locationMatch), 다시 만든 것은 맞거나 틀린 항목이 더 적을 때만 씀(같으면 첫 결과). 검사 check_vnew_real_cut_sheet_135(sh-a~c), 130·132 기대값 정면 앞에 LOC-RB·그림 낱말 검사에서 `REAL_STILL_LOOK` 제외, 134 rm-b 가짜 프레임에 영상 바이트(다시 만든 컷 판별).
+
+### 136 — 실사 컷 프롬프트에서 촬영 지시서의 그림 문장·기본 옷 문장 걷어내기 (2026-11-05)
+- `_real_brief_text(text, scene_outfits)`: 그림·화풍 낱말(`REAL_BRIEF_DRAWING_WORDS`: contour·line art·flat color·cel·shading·색 붙은 shadows·webtoon·manhwa·illustration·drawn·ink·screentone 등)이 든 문장(; 절 포함)은 통째로 빼고, 옷 낱말(`REAL_BRIEF_CLOTHING_WORDS`) 구절은 빼고 그 인물 장면 옷이 있으면 "{이름} wears {옷}." 1번(머리·얼굴 구절은 남음). 장면 옷 `_scene_outfits` = 콘티 컷 characters → 대본 entries(겹치는 panels) characters → 132/135 outfits(`_resolve_cast`) → "". 실사 시작 그림 SHOT·BLOCKING·SETTING·OUTFITS, Kling 컷 ACTION(지시서는 안 쓰지만 콘티 문장을 같은 함수로), 실사 통 테이크 연기(actionEn)가 거친다. 애니(웹툰)·`shot_brief.py` 원문은 그대로. 검사 check_vnew_real_brief_136(rb-a~d), 기존 기대값 변경 없음.

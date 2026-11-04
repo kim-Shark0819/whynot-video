@@ -3273,6 +3273,11 @@ def _take_prompt(plan: dict, take: dict, *, cast: list[dict], panel_nos: list[in
     fx_on = bool(vnew_settings.VNEW_FX)
     real = variant == "real"
     entries = _take_timeline_entries(plan, take)
+    if real:
+        # 작업 136: 실사 연기(지시서 actionEn) = 그림 문장 빼기·옷 구절 → 그 컷 장면 옷(_real_brief_text). 웹툰은 그대로.
+        costumes = {str(m.get("name") or ""): str(m.get("costume") or "") for m in cast if m.get("name")}
+        for entry, cut_id in zip(entries, _seg_cut_ids(take)):
+            entry["action"] = _real_brief_text(entry.get("action"), _scene_outfits(plan, [cut_id], costumes)).rstrip(".")
     all_stamps = [f"{e['start']}-{e['end']}s" for e in entries]
     # 지시서 118a: 줄이기 마지막에 빼는 대사 줄 (항목 번호, 줄 번호). 비어 있으면 모든 줄을 쓴다.
     dropped_lines: set[tuple[int, int]] = set()
@@ -4530,6 +4535,164 @@ def _real_words(text) -> str:
     return vnew_fx.strip_drawing_words(_CEL_WORDS.sub(" ", str(text or "")))
 
 
+# 작업 136: 실사 프롬프트에 넣는 지시서 문장 정리(_real_brief_text). 이 낱말이 든 문장(; 로 나뉜 절 포함)은 통째로 뺀다.
+# 낱말만 지우면 "like an background"·"in style" 같은 조각이 남아서다. 그림자는 색이 붙은 것(peach … facial shadows)만.
+_SHADOW_COLORS = r"(?:peach|pink|brown|purple|violet|lavender|blue|grey|gray|red|orange|tan|beige|rose)"
+REAL_BRIEF_DRAWING_WORDS = re.compile(
+    r"\b(?:web-?toons?|manhwa|manga|anime|cartoon\w*|illustrat\w*|drawn|drawing style|art style|sketch\w*|"
+    r"ink(?:ed|ing|s)?|screen-?tones?|cel(?:[- ]shad\w*)?|contours?|outlines?|outlined|line-?art|linework|"
+    r"line (?:art|work|weight)s?|(?:thin|fine|clean|bold|crisp|ink|pen) lines?|flat[- ]colou?r\w*|flat[- ]shad\w*|"
+    r"shading(?! (?:his|her|their|its) )|cross-?hatch\w*|brush ?strokes?|painterly|watercolou?r\w*|facial shadows?|"
+    + _SHADOW_COLORS + r"(?:-(?:toned|tinted|colou?red))?(?: (?:and|or) " + _SHADOW_COLORS + r")?"
+    r"(?: (?:facial|face|skin|cheek|soft))? shadows?)\b",
+    re.IGNORECASE,
+)
+# 작업 136: 옷 낱말. 이 낱말이 든 구절은 그 인물의 장면 옷 문장으로 바꾸거나(없으면) 뺀다. 머리·얼굴 구절은 남는다.
+REAL_BRIEF_CLOTHING_WORDS = re.compile(
+    r"\b(?:(?:t-)?shirts?|overshirts?|blouses?|jackets?|blazers?|coats?|overcoats?|collars?|collared|sleeves?|sleeved|"
+    r"sleeveless|cuffs?|lapels?|sweaters?|cardigans?|hoodies?|sweatshirts?|jumpers?|vests?|pants|trousers|jeans|slacks|"
+    r"skirts?|dress(?:es|ed)?|uniforms?(?! (?:light|lighting|colou?r|spacing|distance|height|pace))|suit|neckties?|"
+    r"ties?|scarf|scarves|aprons?|outfits?|clothes|clothing|garments?|attire|shoes|sneakers|boots|loafers)\b",
+    re.IGNORECASE,
+)
+# 옷 구절 경계: 쉼표(뒤 and·with·wearing·while 포함), 또는 and·with·wearing·while.
+_BRIEF_PIECES = re.compile(r"(,\s*(?:(?:and|with|wearing|while)\s+)?|\s+(?:and|with|wearing|while)\s+)", re.IGNORECASE)
+_BRIEF_DANGLING = re.compile(r"(?:[\s,]+(?:and|with|in|of|a|an|the|his|her|their|its|wearing|while|has|have|is|are))+$",
+                             re.IGNORECASE)
+_OUTFIT_PHRASE = re.compile(r"\b(?:wear(?:s|ing)?|dressed in|in)\s+([^,.;]+)", re.IGNORECASE)
+_OUTFIT_ARTICLE = re.compile(r"^(?:(?:a|an|the|his|her|their)\s+)+", re.IGNORECASE)
+
+
+def _brief_name_hits(text: str, aliases: dict[str, list[str]]) -> list[str]:
+    """문장 안에 나온 인물 이름(키) — 나온 순서. aliases = {이름: [이름, 로마자]}."""
+    hits: list[tuple[int, str]] = []
+    for name, forms in aliases.items():
+        spots = []
+        for form in forms:
+            if form.isascii():
+                m = re.search(r"(?<![A-Za-z])" + re.escape(form) + r"(?![A-Za-z])", text, re.IGNORECASE)
+                if m:
+                    spots.append(m.start())
+            elif form in text:
+                spots.append(text.find(form))
+        if spots:
+            hits.append((min(spots), name))
+    return [name for _pos, name in sorted(hits)]
+
+
+def _real_brief_text(text, scene_outfits: dict | None = None) -> str:
+    """작업 136: 실사 프롬프트에 넣을 지시서 문장. 애니(웹툰) 프롬프트는 쓰지 않는다(지시서 원문은 그대로).
+
+    - 그림·화풍 낱말(REAL_BRIEF_DRAWING_WORDS)이 든 문장은 통째로 뺀다(조각을 남기지 않는다).
+    - 옷 낱말(REAL_BRIEF_CLOTHING_WORDS)이 든 구절은 뺀다. 그 구절의 인물(구절 안 이름 → 같은 문장 앞 이름 → 앞 문장의
+      주어 → 장면 인물이 1명이면 그 사람)의 장면 옷(scene_outfits[이름])이 있으면 그 자리에 "{이름} wears {옷}." 1번.
+      남은 구절이 문장이 못 되면(2낱말 미만) 그 문장도 뺀다. 머리·얼굴 구절은 옷 낱말이 없어 남는다.
+    """
+    outfits = {str(k).strip(): str(v or "").strip() for k, v in (scene_outfits or {}).items() if str(k or "").strip()}
+    aliases = {name: list(dict.fromkeys(f for f in (name, _romanize_name(name)) if f)) for name in outfits}
+    only = next(iter(outfits)) if len(outfits) == 1 else ""
+    out: list[str] = []
+    emitted: set[str] = set()
+    subject = ""
+    for sentence in re.split(r"(?<=[.!?;])\s+", " ".join(str(text or "").split())):
+        if not sentence or REAL_BRIEF_DRAWING_WORDS.search(sentence):
+            continue
+        named = _brief_name_hits(sentence, aliases)
+        if not REAL_BRIEF_CLOTHING_WORDS.search(sentence):
+            out.append(sentence)
+            subject = named[0] if named else subject
+            continue
+        end = sentence[-1] if sentence[-1] in ".!?;" else "."
+        parts = _BRIEF_PIECES.split(sentence[:-1] if sentence[-1] in ".!?;" else sentence)
+        kept: list[str] = []
+        owners: list[str] = []
+        last = subject
+        dropped_after_comma = False
+        for i in range(0, len(parts), 2):
+            piece = parts[i]
+            here = _brief_name_hits(piece, aliases)
+            if REAL_BRIEF_CLOTHING_WORDS.search(piece):
+                owners.append(here[0] if here else (last or only))
+                dropped_after_comma = bool(i) and parts[i - 1].lstrip().startswith(",")
+                continue
+            if here:
+                last = here[-1]
+            delim = parts[i - 1] if i and kept else ""
+            if dropped_after_comma and delim.strip() == ",":
+                delim = " "  # "A, in a coat, faces B" → "A faces B"(쉼표로 끼운 옷 구절이 빠지면 닫는 쉼표도 뺀다)
+            dropped_after_comma = False
+            kept.append(delim + piece)
+        rest = _BRIEF_DANGLING.sub("", "".join(kept).strip(" ,;")).strip(" ,;")
+        if len(rest.split()) >= 2:
+            out.append(rest[:1].upper() + rest[1:] + end)
+        subject = named[0] if named else subject
+        for owner in owners:
+            costume = _clip_words(_real_words(outfits.get(owner)), 140).rstrip(" .")
+            if owner and costume and owner not in emitted:
+                out.append(f"{owner} wears {costume}.")
+                emitted.add(owner)
+    joined = " ".join(out)
+    return _real_words(joined[:-1] + "." if joined.endswith(";") else joined)
+
+
+def _outfit_of(item: dict) -> str:
+    """콘티 컷·대본 entry 의 characters 항목 1개의 영어 옷 표현(작업 136). outfitEn·costumeEn·costume 이 먼저,
+    없으면 actionEn·positionEn 안의 "wearing/dressed in/in + 옷" 구절. 한글이면 쓰지 않는다. 없으면 ""."""
+    for field in ("outfitEn", "costumeEn", "costume"):
+        value = str(item.get(field) or "").strip()
+        if value and not vnew_fx.HANGUL.search(value):
+            return value
+    for field in ("actionEn", "positionEn"):
+        for m in _OUTFIT_PHRASE.finditer(str(item.get(field) or "")):
+            chunk = _OUTFIT_ARTICLE.sub("", m.group(1).strip())
+            if REAL_BRIEF_CLOTHING_WORDS.search(chunk) and not vnew_fx.HANGUL.search(chunk):
+                return chunk
+    return ""
+
+
+def _scene_outfits(plan: dict, cut_ids, cast_outfits: dict | None = None) -> dict[str, str]:
+    """작업 136: 컷 인물별 장면 옷 {이름: 영어 옷}. 우선순위 ① 콘티 컷 characters ② 대본 entries(그 컷 panels 와 겹치는 것)
+    characters ③ cast_outfits(= 132/135 의 outfits, _resolve_cast: 원작 패널 읽기 + 장면 의상 수정) ④ "".
+
+    cast_outfits 가 None 이면 _resolve_cast(read=False, 캐시만 — 외부 호출 없음). 이름 = 그 컷에 보이는 인물 + 콘티 인물,
+    없으면 모든 출처의 이름. 캐릭터 기본 옷(analysis outfitEn, 3D 기본 옷)은 쓰지 않는다.
+    """
+    ids = [str(c) for c in cut_ids or [] if str(c or "")]
+    if cast_outfits is None:
+        try:
+            cast_outfits = {n: str(v.get("costume") or "")
+                            for n, v in _resolve_cast("", "", plan, {"cutIds": ids}, read=False).items()}
+        except Exception:  # noqa: BLE001
+            cast_outfits = {}
+    cuts = {str(c.get("id")): c for c in (plan.get("conti") or {}).get("cuts") or []}
+    entries = [e for e in (plan.get("script") or {}).get("entries") or [] if isinstance(e, dict)]
+    tiers: list[dict[str, str]] = [{}, {}]
+    names: list[str] = [str(a.get("name") or "") for a in _segment_actors(plan, {"cutIds": ids})]
+
+    def note(tier: dict, item) -> None:
+        name = str((item or {}).get("name") or "").strip() if isinstance(item, dict) else ""
+        value = _outfit_of(item) if name else ""
+        if value and not tier.get(name):
+            tier[name] = value
+
+    for cut_id in ids:
+        cut = cuts.get(cut_id) or {}
+        for ch in cut.get("characters") or []:
+            note(tiers[0], ch)
+            names.append(str((ch or {}).get("name") or "") if isinstance(ch, dict) else "")
+        panels = {int(p) for p in cut.get("panels") or [] if isinstance(p, (int, float)) and not isinstance(p, bool)}
+        for entry in entries:
+            entry_panels = {int(p) for p in entry.get("panels") or [] if isinstance(p, (int, float)) and not isinstance(p, bool)}
+            if panels & entry_panels:
+                for ch in entry.get("characters") or []:
+                    note(tiers[1], ch)
+    names = [n for n in dict.fromkeys(n.strip() for n in names) if n]
+    if not names:
+        names = list(dict.fromkeys([*tiers[0], *tiers[1], *(str(n) for n in cast_outfits or {})]))
+    return {name: tiers[0].get(name) or tiers[1].get(name) or str((cast_outfits or {}).get(name) or "").strip()
+            for name in names}
+
+
 def _shot_ko_en(shot_ko: str) -> str:
     """콘티 shotKo 를 영어 샷 이름으로(작업 132). 표에 없으면 ""."""
     rest = str(shot_ko or "")
@@ -4646,8 +4809,10 @@ def _cut_still_prompt(plan: dict, cut: dict, people: list[tuple[str, str, int]],
         parts.append(REAL_STILL_BACKGROUND.format(no=background_no) if has_frame and background_no > 1
                      else REAL_STILL_BACKGROUND_ONLY)
     worn = []
+    # 작업 136: 장면 옷 = 콘티 → 대본 → outfits(웹툰 패널 읽기) 순(_scene_outfits). 지시서 문장은 _real_brief_text 를 지난다.
+    scene_outfits = _scene_outfits(plan, [cut_id], outfits or {})
     for _color, name, _no in people:
-        costume = _clip_words(_real_words((outfits or {}).get(name)), 140).rstrip(" .")
+        costume = _clip_words(_real_words(scene_outfits.get(name) or (outfits or {}).get(name)), 140).rstrip(" .")
         if costume:
             worn.append(f"{name} wears {costume}")
     if worn:
@@ -4656,9 +4821,10 @@ def _cut_still_prompt(plan: dict, cut: dict, people: list[tuple[str, str, int]],
     if not anime:
         parts.append("LOCATION: " + _background_en(plan, str(conti_cut.get("locationEn") or ""), real=True) + ".")
     for label, text in (("SHOT", brief.get("shotEn")), ("BLOCKING", brief.get("blockingEn"))):
-        if _real_words(text):
-            parts.append(f"{label}: {_real_words(text)}")
-    scene = _real_words(_scene_summary(_scene_brief_text(plan, cut).strip(), 300))
+        cleaned = _real_brief_text(text, scene_outfits)
+        if cleaned:
+            parts.append(f"{label}: {cleaned}")
+    scene = _scene_summary(_real_brief_text(_scene_brief_text(plan, cut).strip(), scene_outfits), 300)
     if scene:
         parts.append("SETTING: " + scene)
     if anime:
@@ -7255,7 +7421,7 @@ def _real_cut_prompt(plan: dict, seg: dict, *, model: str = "", prompt_max: int 
     actors = ", ".join(f"{ch.get('name', '')} {ch.get('actionEn', '')}".strip()
                        for ch in (cut.get("characters") or []) if (ch.get("name") or ch.get("actionEn")))
     action = ". ".join(p for p in (_real_action(cut.get("promptEn")).rstrip("."), _real_action(actors).rstrip(".")) if p)
-    action = _real_words(action)
+    action = _real_brief_text(action, _scene_outfits(plan, [cut_id]))  # 작업 136: 그림 문장 빼기·옷 구절 → 장면 옷
     if action:
         lines.append("ACTION: " + action + ".")
     spoken = [ln for ln in _cut_lines(plan, cut) if not ln.get("silent") and str(ln.get("lineKo") or "").strip()]

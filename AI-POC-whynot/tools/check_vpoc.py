@@ -48607,6 +48607,139 @@ def check_vnew_real_cut_sheet_135() -> None:
            "(sh-b)시트 없음 지금과 같음 (sh-c)QA (2,1) 다시·(1,2)·(1,1) 첫 결과·QA Image 3 = 시트 뷰")
 
 
+def check_vnew_real_brief_136() -> None:
+    """작업 136 — 실사 프롬프트의 촬영 지시서 문장: 그림 문장 빼기·기본 옷 구절 → 장면 옷. 외부 호출 없음, 유료 0.
+
+    (rb-a) _real_brief_text: 운영 test2 cut01 SHOT·BLOCKING 문장 → contours·flat colors·shadows 문장 없음, ivory-white dress shirt →
+           장면 옷("… wears black open-collar shirt"), 머리 묘사 남음, 장면 옷 없으면 옷 구절만 빠짐, "like an background"·"in style" 조각 없음
+    (rb-b) _scene_outfits 우선순위: 콘티 characters → 대본 entries → outfits(웹툰 패널 읽기) → ""
+    (rb-c) 실사 시작 그림(애니·프리비즈)·Kling 컷·통 테이크 프롬프트에 그림 낱말 0·기본 옷 문장 0(고정 negative 구절 제외)
+    (rb-d) 애니(웹툰) 통 테이크·컷 프롬프트는 정리 함수를 부르지 않고 지시서 원문 그대로
+    """
+    import re as _re  # noqa: PLC0415
+    import traceback as _tb  # noqa: PLC0415
+
+    sys.path.insert(0, str(ROOT / "app"))
+    from src.vnew import generate as genmod  # noqa: PLC0415
+
+    bad: list[str] = []
+    a, b = "범건우", "여의준"
+    ra = genmod._romanize_name(a)  # noqa: SLF001
+    shot = "Medium close-up at eye level on " + ra + ". Fine dark-brown contours, muted flat colors and restrained peach and brown facial shadows."
+    blocking = (f"{ra} stands at the counter, half-turned toward {b}. He has short charcoal-black hair falling over his forehead. "
+                "His ivory-white dress shirt has an open pointed collar and the sleeves are rolled to the elbows. "
+                f"{b}, in a beige coat, faces {ra}; soft light falls like an illustrated background. The panel is in webtoon style.")
+    drawing = _re.compile(r"contour|line ?art|lineart|flat[- ]colou?r|\bcel\b|shading|webtoon|manhwa|illustrat|\bdrawn\b|\bink\b|"
+                          r"screentone|facial shadow|peach and brown", _re.IGNORECASE)
+    default_outfit = _re.compile(r"ivory-white|pointed collar|dress shirt|sleeves are rolled", _re.IGNORECASE)
+    fixed_neg = (genmod.REAL_STILL_LOOK, genmod.REAL_CUT_NEGATIVE, genmod.REAL_TAKE_AVOID,
+                 "No outline strokes, no flat-color shading.")
+
+    def outside(p: str) -> str:
+        for phrase in fixed_neg:
+            p = p.replace(phrase, "")
+        return p
+
+    try:
+        with _guard_real_llm() as llm_calls, _pin_vnew(VNEW_FX=True):
+            # ================= (rb-a) 정리 함수 =================
+            outfits = {ra: "black open-collar shirt", b: ""}
+            s_clean = genmod._real_brief_text(shot, outfits)  # noqa: SLF001
+            b_clean = genmod._real_brief_text(blocking, outfits)  # noqa: SLF001
+            b_none = genmod._real_brief_text(blocking, {})  # noqa: SLF001
+            want_s = f"Medium close-up at eye level on {ra}."
+            want_b = (f"{ra} stands at the counter, half-turned toward {b}. He has short charcoal-black hair falling over his forehead. "
+                      f"{ra} wears black open-collar shirt. {b} faces {ra}.")
+            want_n = (f"{ra} stands at the counter, half-turned toward {b}. He has short charcoal-black hair falling over his forehead. "
+                      f"{b} faces {ra}.")
+            if s_clean != want_s:
+                bad.append(f"(rb-a) SHOT 정리가 다릅니다: {s_clean!r} 기대 {want_s!r}")
+            if b_clean != want_b:
+                bad.append(f"(rb-a) BLOCKING 정리(장면 옷)가 다릅니다: {b_clean!r} 기대 {want_b!r}")
+            if b_none != want_n:
+                bad.append(f"(rb-a) 장면 옷 없음 정리가 다릅니다: {b_none!r} 기대 {want_n!r}")
+            mixed = genmod._real_brief_text(  # noqa: SLF001
+                f"{ra}, with short charcoal-black hair and an ivory-white dress shirt, leans on the counter.", outfits)
+            if mixed != f"{ra}, with short charcoal-black hair, leans on the counter. {ra} wears black open-collar shirt.":
+                bad.append(f"(rb-a) 한 문장 안 머리 + 옷 구절 정리가 다릅니다: {mixed!r}")
+            for text in (s_clean, b_clean, b_none, mixed):
+                if drawing.search(text) or default_outfit.search(text) or _re.search(r"like an? background|\bin style\b", text):
+                    bad.append(f"(rb-a) 그림 낱말·기본 옷·조각이 남았습니다: {text!r}")
+
+            # ================= (rb-b) 장면 옷 우선순위 =================
+            plan = _fw_plan()
+            plan["input"] = {"castOverrides": {a: {"costume": "black open-collar shirt"}, b: {"costume": "navy training top"}}}
+            got0 = genmod._scene_outfits(plan, ["c1"])  # noqa: SLF001
+            plan_p = _fw_plan()
+            plan_p["conti"]["cuts"][0]["characters"] = [{"name": a, "positionEn": "left", "actionEn": "stares in a grey hoodie"},
+                                                       {"name": b, "positionEn": "right", "actionEn": "cries"}]
+            plan_p["script"]["entries"] = [{"id": "e1", "panels": [0], "characters": [
+                {"name": a, "outfitEn": "red parka"}, {"name": b, "outfitEn": "green cardigan"}]}]
+            got1 = genmod._scene_outfits(plan_p, ["c1"], {a: "cast coat", b: "cast top"})  # noqa: SLF001
+            got2 = genmod._scene_outfits(_fw_plan(), ["c1"], {})  # noqa: SLF001
+            if got0 != {a: "black open-collar shirt", b: "navy training top"} \
+                    or got1 != {a: "grey hoodie", b: "green cardigan"} or got2 != {a: "", b: ""}:
+                bad.append(f"(rb-b) 장면 옷 우선순위가 콘티 → 대본 → outfits → '' 가 아닙니다: {got0} {got1} {got2}")
+
+            # ================= (rb-c) 실사 프롬프트 3곳 =================
+            plan["conti"]["cuts"][0]["promptEn"] = (f"{a} leans on the counter. His ivory-white dress shirt has an open pointed collar. "
+                                                    "Fine dark-brown contours and flat colors.")
+            briefs = plan["previz"]["shotBrief"]["cuts"]
+            briefs["c1"].update({"shotEn": shot, "blockingEn": blocking.replace(ra, a),
+                                 "actionEn": f"{b} looks down, tugging at his ivory-white dress shirt collar."})
+            briefs["c2"].update({"actionEn": "She blinks; fine dark-brown contours frame her face."})
+            plan["previz"]["shotBrief"]["scene"]["loc1"] = "A small store with bright aisles. Drawn in muted flat colors."
+            people = [("blue", a, 2), ("red", b, 3)]
+            cast_out = {a: "black open-collar shirt", b: "navy training top"}
+            prompts = {
+                "still-anime": genmod._cut_still_prompt(plan, {"cutId": "c1"}, people, True, source="anime", outfits=cast_out),  # noqa: SLF001
+                "still-previz": genmod._cut_still_prompt(plan, {"cutId": "c1"}, people, True, outfits=cast_out),  # noqa: SLF001
+                "kling": genmod._segment_prompt(plan, {"cutIds": ["c1"]}, first_segment=True, real=True),  # noqa: SLF001
+            }
+            cast_take = [{"name": a, "colorName": "blue", "frontNo": 1, "costume": "black open-collar shirt"},
+                         {"name": b, "colorName": "red", "frontNo": 2, "costume": "navy training top"}]
+            take = {"id": "take1", "cutIds": ["c1", "c2", "c3"], "seconds": 12}
+            prompts["take"] = genmod._take_prompt(plan, take, cast=cast_take, panel_nos=[], location_no=None,  # noqa: SLF001
+                                                  variant="real")
+            for tag, p in prompts.items():
+                if drawing.search(outside(p)) or default_outfit.search(p):
+                    bad.append(f"(rb-c) {tag} 프롬프트에 그림 낱말·기본 옷 문장이 있습니다: {p!r}")
+            for tag in ("still-anime", "still-previz"):
+                p = prompts[tag]
+                if f"BLOCKING: {a} stands at the counter" not in p or "short charcoal-black hair" not in p \
+                        or f"{a} wears black open-collar shirt." not in p or f"SHOT: Medium close-up at eye level on {ra}." not in p \
+                        or "SETTING: A small store with bright aisles." not in p:
+                    bad.append(f"(rb-c) {tag} 시작 그림 SHOT·BLOCKING·SETTING 정리가 다릅니다: {p!r}")
+            if f"ACTION: {a} leans on the counter. {a} wears black open-collar shirt." not in prompts["kling"]:
+                bad.append(f"(rb-c) Kling ACTION 정리가 다릅니다: {prompts['kling']!r}")
+            if f"{b} looks down" not in prompts["take"] or "She blinks" not in prompts["take"]:
+                bad.append(f"(rb-c) 통 테이크 연기가 남지 않았습니다: {prompts['take']!r}")
+
+            # ================= (rb-d) 애니(웹툰)는 원문 그대로 =================
+            saved = (genmod._real_brief_text, genmod._scene_outfits)  # noqa: SLF001
+
+            def boom(*_a, **_k):
+                raise AssertionError("애니 경로가 실사 정리 함수를 불렀습니다")
+
+            genmod._real_brief_text = genmod._scene_outfits = boom  # noqa: SLF001
+            try:
+                web = genmod._take_prompt(plan, take, cast=cast_take, panel_nos=[3], location_no=None)  # noqa: SLF001
+                seg = genmod._segment_prompt(plan, {"cutIds": ["c1"]}, first_segment=True)  # noqa: SLF001
+            finally:
+                genmod._real_brief_text, genmod._scene_outfits = saved  # noqa: SLF001
+            if "tugging at his ivory-white dress shirt collar" not in web or not seg:
+                bad.append(f"(rb-d) 애니 통 테이크에 지시서 원문 연기가 없습니다: {web!r}")
+            if llm_calls:
+                bad.append(f"가짜가 아닌 LLM 호출: {llm_calls}")
+    except Exception:  # noqa: BLE001
+        bad.append("작업 136 검사 예외\n" + _tb.format_exc())
+    if bad:
+        fail("작업 136 실사 지시서 정리 검사 실패\n  " + "\n  ".join(bad))
+    else:
+        ok("작업 136 실사 지시서 정리 (rb-a)그림 문장 빼기·ivory-white dress shirt → 장면 옷·머리 남음·옷 없으면 구절만 빠짐·조각 없음 "
+           "(rb-b)콘티 → 대본 → outfits → '' (rb-c)시작 그림·Kling·통 테이크 그림 낱말 0·기본 옷 0 (rb-d)애니는 원문 그대로")
+
+
 def main() -> int:
     print("== vpoc1 check ==")
     check_compileall()
@@ -48701,6 +48834,7 @@ def main() -> int:
     check_vnew_retake_kling_cuts_131()
     check_vnew_real_remerge_134()
     check_vnew_real_cut_sheet_135()
+    check_vnew_real_brief_136()
     check_vnew_plan_step_stay_129()
     check_pod_zones()
     print()
