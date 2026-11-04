@@ -827,7 +827,8 @@ def create_blueprint(deps: VnewDependencies) -> Blueprint:
             confirm = payload.get("confirmUsd")
             if confirm is None:
                 raise VpocError("vnew.generate", "NoConfirmUsd", "확인 금액(confirmUsd)이 필요합니다.", 400)
-            gen_id = generate.start_generate(owner, pid, float(confirm))
+            # 작업 123: styles(선택) ["webtoon"] | ["webtoon","real"] — "real" 은 통 테이크 + VNEW_TAKE_REAL 만(그 밖 400).
+            gen_id = generate.start_generate(owner, pid, float(confirm), styles=payload.get("styles"))
             data, _ = plan_mod.load_plan(owner, pid)
             return jsonify({"ok": True, "genId": gen_id, "plan": plan_mod.plan_view(owner, pid, data)}), 202
         except Exception as exc:  # noqa: BLE001
