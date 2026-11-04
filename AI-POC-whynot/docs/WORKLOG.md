@@ -2649,3 +2649,6 @@ un_conti가 대본 글 뒤에 ordered_tiles 타일을 Panel N of M: 라벨(N 0�
 
 ### 137 — 136 정리에서 남은 조각: 몸 낱말 앞 옷 색, 장면 옷 괄호 메모·잘린 꼬리
 - `_real_brief_text`: 장면 옷이 있는 인물 문장에서 몸 낱말(shoulder·chest·back·arm·collarbone 등) 바로 앞 옷 색(`REAL_BRIEF_OUTFIT_COLORS` 1곳)을 뺀다("ivory-white shoulder" → "shoulder"). 장면 옷 문장은 `_scene_outfit_text`(괄호 메모 빼기 → 실사 낱말·140자 상한 그대로 → 관사·전치사 꼬리 빼기)를 지난다(지시서 옷 문장·시작 그림 OUTFITS). 애니 경로는 안 부름. 검사 check_vnew_real_brief_137(rb-e·f).
+
+### 138 — 몸 낱말 앞 옷 색 빼기를 이름 인식 없이, 이름만 쓴 표기 인식
+- _real_brief_text: 그 컷에 장면 옷 인물이 1명 이상이면 주어와 상관없이 몸 낱말 앞 옷 색을 뺀다(hair·eyes·skin 앞 색은 남음). 이름 표기는 _brief_name_forms(범건우 → Beomgeonu·Beom Geonu·Geonu) 1곳. 애니 경로는 안 부름. 검사 check_vnew_real_brief_138(rb-g·h).

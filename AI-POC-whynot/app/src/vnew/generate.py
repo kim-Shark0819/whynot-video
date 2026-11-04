@@ -4561,7 +4561,7 @@ _BRIEF_DANGLING = re.compile(r"(?:[\s,]+(?:and|with|in|of|a|an|the|his|her|their
                              re.IGNORECASE)
 _OUTFIT_PHRASE = re.compile(r"\b(?:wear(?:s|ing)?|dressed in|in)\s+([^,.;]+)", re.IGNORECASE)
 _OUTFIT_ARTICLE = re.compile(r"^(?:(?:a|an|the|his|her|their)\s+)+", re.IGNORECASE)
-# 작업 137: 옷 색 낱말(1곳). 장면 옷이 있는 인물 문장에서 몸 낱말 바로 앞의 이 색("ivory-white shoulder")을 뺀다(_real_brief_text).
+# 작업 137/138: 옷 색 낱말(1곳). 장면 옷 인물이 1명 이상인 컷에서 몸 낱말 바로 앞의 이 색("ivory-white shoulder")을 뺀다(_real_brief_text).
 REAL_BRIEF_OUTFIT_COLORS = (r"(?:off-white|white|ivory|cream|beige|black|navy|grey|gray|charcoal|blue|red|pink|green|brown|"
                             r"khaki|olive|camel|yellow|purple|maroon|burgundy)")
 _BRIEF_BODY_COLOR = re.compile(
@@ -4582,6 +4582,17 @@ def _scene_outfit_text(text) -> str:
     text = _OUTFIT_NOTE.sub(" ", str(text or "")).strip()
     text = _clip_words(_real_words(text), 140).rstrip(" .")
     return _OUTFIT_DANGLING.sub("", text).rstrip(" ,;")
+
+
+def _brief_name_forms(name: str) -> list[str]:
+    """작업 138: 이름 인식에 쓰는 표기들. 한글 3글자 이상이면 로마자 마지막 두 음절(이름만)도 더한다.
+    예: 범건우 → [범건우, Beomgeonu, Beom Geonu, Geonu]."""
+    name = str(name or "").strip()
+    forms = [name, _romanize_name(name)]
+    if len(name) >= 3 and all("\uac00" <= ch <= "\ud7a3" for ch in name):
+        given = _romanize_name(name[-2:])
+        forms += [_romanize_name(name[:-2]) + " " + given, given]
+    return list(dict.fromkeys(f for f in forms if f))
 
 
 def _brief_name_hits(text: str, aliases: dict[str, list[str]]) -> list[str]:
@@ -4610,7 +4621,7 @@ def _real_brief_text(text, scene_outfits: dict | None = None) -> str:
       남은 구절이 문장이 못 되면(2낱말 미만) 그 문장도 뺀다. 머리·얼굴 구절은 옷 낱말이 없어 남는다.
     """
     outfits = {str(k).strip(): str(v or "").strip() for k, v in (scene_outfits or {}).items() if str(k or "").strip()}
-    aliases = {name: list(dict.fromkeys(f for f in (name, _romanize_name(name)) if f)) for name in outfits}
+    aliases = {name: _brief_name_forms(name) for name in outfits}
     only = next(iter(outfits)) if len(outfits) == 1 else ""
     out: list[str] = []
     emitted: set[str] = set()
@@ -4619,8 +4630,9 @@ def _real_brief_text(text, scene_outfits: dict | None = None) -> str:
         if not sentence or REAL_BRIEF_DRAWING_WORDS.search(sentence):
             continue
         named = _brief_name_hits(sentence, aliases)
-        if any(outfits.get(n) for n in (named or [subject or only])):
-            sentence = _BRIEF_BODY_COLOR.sub("", sentence)  # 작업 137: "ivory-white shoulder" → "shoulder"
+        if any(outfits.values()):
+            # 작업 137/138: "ivory-white shoulder" → "shoulder". 장면 옷 인물이 1명 이상이면 주어와 상관없이.
+            sentence = _BRIEF_BODY_COLOR.sub("", sentence)
         if not REAL_BRIEF_CLOTHING_WORDS.search(sentence):
             out.append(sentence)
             subject = named[0] if named else subject
