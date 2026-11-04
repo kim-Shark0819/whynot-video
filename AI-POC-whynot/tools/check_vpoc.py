@@ -46465,6 +46465,300 @@ def check_vnew_location_fast_125() -> None:
            "(lf-g)사람 수 동시·정렬")
 
 
+def check_vnew_location_speed_128() -> None:
+    """작업 128 — 공간 시트 검사 한도·설계/사실 동시·끊긴 작업 바로 재개. 가짜 LLM·저장소, 유료·네트워크 0.
+
+    (ls-a) _verify 첫 호출 max_tokens = VERIFY_MAX_TOKENS(> 실측 최대 1535)·잘림 재시도 예산이 그보다 크다
+    (ls-b) run_build: 설계·사실 가짜가 각 0.3초 잠들 때 둘을 합쳐 0.5초 미만(겹쳐 돈다)
+    (ls-c) 업로드 읽기·타일 자르기 파일당 1회, 사진 S3 읽기 설계+사실 합쳐 1회, 두 블록의 이미지가 같은 bytes 객체
+    (ls-d) timing 로그 step=facts_prep·design·facts
+    (ls-e) updatedAt 200초 전 + 이 파드 미실행 → 조회 failed(문구)·build 202 새 task·build-all 이 다시 시작·사진 막지 않음
+    (ls-f) updatedAt 30초 전 → 조회 building·build 409·사진 409
+    (ls-g) 이 파드 실행 중(_mark_running) → updatedAt 200초 전이어도 조회 building·build 409
+    (ls-h) 다른 파드 heartbeatAt 10초 전(updatedAt 200초 전) → 조회 building·build 409
+    (ls-i) _Heartbeat: 간격마다 heartbeatAt 만 갱신(updatedAt 그대로)·task 어긋나면 쓰지 않음·stop 후 스레드 끝
+    """
+    sys.path.insert(0, str(ROOT / "app"))
+    import time as _time  # noqa: PLC0415
+    import traceback as _tb  # noqa: PLC0415
+    from datetime import datetime as _dt, timedelta as _td, timezone as _tz  # noqa: PLC0415
+
+    from flask import Flask  # noqa: PLC0415
+
+    from src import vnew  # noqa: PLC0415
+    from src.vnew import locations as locmod  # noqa: PLC0415
+    from src.vnew import plan as planmod  # noqa: PLC0415
+    from src.vpoc import images as _images  # noqa: PLC0415
+    from src.vpoc import llm as _llm  # noqa: PLC0415
+
+    bad: list[str] = []
+    seen: set[str] = set()
+    owner, pid, lid = "tester", "prj_s128", "loc_s128"
+
+    def iso_ago(seconds: float) -> str:
+        return (_dt.now(_tz.utc) - _td(seconds=seconds)).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    class CountingStore(_FakeCharStore):
+        def __init__(self) -> None:
+            super().__init__()
+            self.reads: list[tuple[str, bool]] = []  # (key, 지시문 단계 뒤인지)
+
+        def get_bytes(self, key: str, *, bucket: str = "") -> bytes:
+            self.reads.append((key, phase["after_read"]))
+            return super().get_bytes(key, bucket=bucket)
+
+    phase = {"after_read": False}
+    store = CountingStore()
+    saved = {
+        "loc_STORE": locmod.STORE, "plan_STORE": planmod.STORE, "converse": locmod.vpoc_llm._converse,  # noqa: SLF001
+        "_design": locmod._design, "_facts": locmod._facts, "_author": locmod._author,  # noqa: SLF001
+        "_verify": locmod._verify, "_seedream": locmod._seedream, "_spawn": locmod._spawn,  # noqa: SLF001
+        "charge": locmod.vpoc_ledger.charge, "charge_text": locmod.vpoc_ledger.charge_text,
+        "count_people": locmod.characters._count_people, "tiles": _images.tiles_for_analysis,  # noqa: SLF001
+    }
+    try:
+        # ================= (ls-a) verify 첫 호출 출력 한도 =================
+        got: list[dict] = []
+
+        def fake_converse(**kwargs):
+            got.append(kwargs)
+            return {"matchesPlace": True}, {"model": kwargs.get("model")}
+
+        locmod.vpoc_llm._converse = fake_converse  # noqa: SLF001
+        locmod._verify([{"text": "x"}], model=locmod.VERIFY_MODEL)  # noqa: SLF001
+        locmod.vpoc_llm._converse = saved["converse"]  # noqa: SLF001
+        if len(got) != 1 or got[0].get("max_tokens") != locmod.VERIFY_MAX_TOKENS:
+            bad.append(f"(ls-a) verify 첫 호출 max_tokens 가 VERIFY_MAX_TOKENS 가 아닙니다: {[g.get('max_tokens') for g in got]}")
+        if not locmod.VERIFY_MAX_TOKENS > 1535:
+            bad.append(f"(ls-a) VERIFY_MAX_TOKENS 가 실측 성공 출력(최대 1535)보다 크지 않습니다: {locmod.VERIFY_MAX_TOKENS}")
+        if not _llm._trunc_budget(locmod.VERIFY_MAX_TOKENS) > locmod.VERIFY_MAX_TOKENS:  # noqa: SLF001
+            bad.append("(ls-a) 잘림 재시도 예산이 첫 한도보다 크지 않습니다(재시도가 사라짐)")
+        seen.add("ls-a")
+
+        # ================= 공통 가짜 =================
+        locmod.STORE = store
+        planmod.STORE = store
+        locmod.vpoc_ledger.charge = lambda key, **kw: {}
+        locmod.vpoc_ledger.charge_text = lambda key, **kw: {}
+        locmod.characters._count_people = lambda jpeg: 1  # noqa: SLF001
+        tile_calls: list[bytes] = []
+
+        def fake_tiles(jpeg):
+            tile_calls.append(jpeg)
+            return [jpeg + b"-t0", jpeg + b"-t1"]
+
+        _images.tiles_for_analysis = fake_tiles
+        nap = 0.3
+        spans: dict[str, tuple[float, float]] = {}
+        blocks_seen: dict[str, list[dict]] = {}
+
+        def slow(name, payload):
+            def fake(blocks, *, model):
+                begin = _time.monotonic()
+                _time.sleep(nap)
+                spans[name] = (begin, _time.monotonic())
+                blocks_seen[name] = list(blocks)
+                return payload, {"model": model}
+            return fake
+
+        wall = {"wallColorEn": "pale green", "wallMaterialEn": "painted plaster", "estimated": False, "objects": []}
+        locmod._design = slow("design", {"widthM": 6, "depthM": 5, "heightM": 2.8, "enclosed": True,  # noqa: SLF001
+                                         "walls": {s: {"descEn": "a wall with a window", "featuresEn": "window"} for s in locmod.SIDES}})
+        locmod._facts = slow("facts", {"walls": {s: dict(wall) for s in locmod.SIDES}, "floorEn": "wooden floor"})  # noqa: SLF001
+
+        def fake_author(system_text, user_text, *, model):
+            phase["after_read"] = True
+            return {"promptEn": "Box-set cutaway view, pale green walls."}, {"model": model}
+
+        locmod._author = fake_author  # noqa: SLF001
+        locmod._seedream = lambda prompt, references, *, size: _tiny_jpeg(640, 360)  # noqa: SLF001
+        locmod._verify = lambda blocks, *, model: ({"matchesPlace": True, "matchesSides": True}, {"model": model})  # noqa: SLF001
+        photo_key = locmod.photo_key(owner, pid, lid, "ph_1")
+        files = ("f_a", "f_b")
+        for file_id in files:
+            store.put_bytes(planmod.upload_key(owner, pid, file_id), file_id.encode("ascii"), "image/jpeg")
+        store.put_bytes(photo_key, _tiny_jpeg(80, 60), "image/jpeg")
+
+        def seed(*, updated_ago: float | None, heartbeat_ago: float | None = None, task_id: str = "old"):
+            def mutator(data):
+                data.setdefault("input", {})["order"] = list(files)
+                data["script"] = {"setting": {"locationKo": "교장실", "enclosed": True}, "entries": []}
+                progress = {"step": "images", "done": 1, "total": 4, "startedAt": iso_ago(400),
+                            "updatedAt": iso_ago(updated_ago) if updated_ago is not None else None}
+                if heartbeat_ago is not None:
+                    progress["heartbeatAt"] = iso_ago(heartbeat_ago)
+                data["locations"] = [{
+                    "id": lid, "nameKo": "교장실", "nameEn": "A closed principal's office", "key": "x",
+                    "panels": [0, 1, 2], "status": "building", "error": "", "design": {}, "facts": {},
+                    "photos": [{"photoId": "ph_1", "key": photo_key, "side": "back"}],
+                    "variants": {v: locmod._empty_variant() for v in locmod.VARIANTS},  # noqa: SLF001
+                    "task": {"status": "running", "startedAt": iso_ago(400), "id": task_id},
+                    "progress": progress, "version": 1,
+                }]
+            planmod.mutate_plan(owner, pid, mutator)
+
+        planmod.load_or_create(owner, pid)
+
+        # ================= (ls-b)(ls-c)(ls-d) 한 번 빌드 =================
+        seed(updated_ago=0, task_id="t-run")
+        store.reads.clear()
+        logs = _LogCapture()
+        with logs:
+            locmod.run_build(owner, pid, lid, "t-run")
+        plan_b, _ = planmod.load_plan(owner, pid)
+        loc_b = locmod._find_location(plan_b, lid) or {}  # noqa: SLF001
+        if loc_b.get("status") != "ready":
+            bad.append(f"(ls-b) 빌드가 ready 로 끝나지 않았습니다: {loc_b.get('status')} {loc_b.get('error')}")
+        if set(spans) != {"design", "facts"}:
+            bad.append(f"(ls-b) 설계·사실이 둘 다 불리지 않았습니다: {sorted(spans)}")
+        else:
+            together = max(e for _, e in spans.values()) - min(s for s, _ in spans.values())
+            overlap = spans["design"][0] < spans["facts"][1] and spans["facts"][0] < spans["design"][1]
+            if together >= 0.5 or not overlap:
+                bad.append(f"(ls-b) 설계·사실이 동시에 돌지 않았습니다: 합 {together:.2f}초 겹침={overlap}")
+        seen.add("ls-b")
+        upload_keys = [planmod.upload_key(owner, pid, f) for f in files]
+        read_keys = [key for key, _ in store.reads]
+        if any(read_keys.count(k) != 1 for k in upload_keys) or len(tile_calls) != len(files):
+            bad.append(f"(ls-c) 업로드 읽기·타일 자르기가 파일당 1회가 아닙니다: reads={[read_keys.count(k) for k in upload_keys]} tiles={len(tile_calls)}")
+        # 사진은 설계+사실 합쳐 1번. 그 뒤 verify 가 뷰마다 읽는 것은 범위 밖이라 지시문 단계 전까지만 센다.
+        photo_reads = [late for key, late in store.reads if key == photo_key]
+        if photo_reads.count(False) != 1:
+            bad.append(f"(ls-c) 사진 S3 읽기가 설계+사실 합쳐 1회가 아닙니다: {photo_reads.count(False)}회")
+
+        def images_of(blocks):
+            return [b["image"]["source"]["bytes"] for b in blocks if isinstance(b, dict) and "image" in b]
+
+        d_imgs, f_imgs = images_of(blocks_seen.get("design") or []), images_of(blocks_seen.get("facts") or [])
+        if not d_imgs or len(d_imgs) != len(f_imgs) or not all(a is b for a, b in zip(d_imgs, f_imgs)):
+            bad.append(f"(ls-c) 설계·사실 블록이 같은 bytes(패널·사진)를 쓰지 않습니다: {len(d_imgs)} vs {len(f_imgs)}")
+        seen.add("ls-c")
+        steps = {m.split("step=")[1].split()[0] for m in logs.messages("vnew.location.timing step=")}
+        for need in ("panels", "facts_prep", "design", "facts", "total"):
+            if need not in steps:
+                bad.append(f"(ls-d) timing 로그에 step={need} 가 없습니다: {sorted(steps)}")
+        seen.add("ls-d")
+
+        # ================= 끊긴 작업(라우트 경로) =================
+        spawned: list[str] = []
+        locmod._spawn = lambda func, o, p, l, task_id, *, name: spawned.append(task_id)  # noqa: SLF001
+        app = Flask(__name__)
+        app.register_blueprint(vnew.create_blueprint(vnew.VnewDependencies(
+            require_auth=lambda h: h, current_owner=lambda: owner,
+            get_project=lambda p: {"id": p, "owner": owner, "track": "video_new"},
+            can_read_project=lambda proj: True, can_write_project=lambda proj: True,
+            project_owner_prefix=lambda name: name,
+        )))
+        client = app.test_client()
+
+        def view_loc():
+            body = client.get(f"/api/vnew/p/{pid}/plan").get_json() or {}
+            return next((l for l in (body.get("locations") or []) if l.get("id") == lid), {})
+
+        def build():
+            resp = client.post(f"/api/vnew/p/{pid}/locations/{lid}/build", json={})
+            return resp.status_code, resp.get_json() or {}
+
+        def expect_kept(label: str):
+            v = view_loc()
+            if v.get("status") != "building" or (v.get("task") or {}).get("id") != "old":
+                bad.append(f"({label}) 조회가 진행 중 작업을 그대로 두지 않았습니다: {v.get('status')} {v.get('error')}")
+            code, body = build()
+            if code != 409 or (body.get("error") or {}).get("type") != "Building":
+                bad.append(f"({label}) build 가 409 Building 이 아닙니다: {code} {body}")
+
+        # (ls-e) 200초 전 + 이 파드 미실행 → failed · 202 새 task.
+        seed(updated_ago=200)
+        v = view_loc()
+        if v.get("status") != "failed" or v.get("error") != locmod.INTERRUPTED_MESSAGE \
+                or v.get("error") != "서버 재시작으로 중단되었습니다. 다시 만들어 주세요.":
+            bad.append(f"(ls-e) 조회가 끊긴 작업을 failed 로 정리하지 않았습니다: {v.get('status')} {v.get('error')!r}")
+        spawned.clear()
+        code, body = build()
+        plan_e, _ = planmod.load_plan(owner, pid)
+        task_e = (locmod._find_location(plan_e, lid) or {}).get("task") or {}  # noqa: SLF001
+        if code != 202 or not body.get("taskId") or body.get("taskId") == "old" \
+                or task_e.get("id") != body.get("taskId") or task_e.get("status") != "running" or spawned != [body.get("taskId")]:
+            bad.append(f"(ls-e) build 가 202 새 task 로 바로 시작하지 않았습니다: {code} {body} task={task_e} spawned={spawned}")
+        seed(updated_ago=200)
+        spawned.clear()
+        if locmod.start_build_all(owner, pid) != [lid] or len(spawned) != 1:
+            bad.append(f"(ls-e) build-all 이 끊긴 작업을 다시 시작하지 않았습니다: spawned={spawned}")
+        seed(updated_ago=200)
+        try:
+            locmod._guard_photos_not_running(locmod._find_location(planmod.load_plan(owner, pid)[0], lid), owner, pid)  # noqa: SLF001
+        except Exception as exc:  # noqa: BLE001
+            bad.append(f"(ls-e) 끊긴 작업인데 사진 변경을 막았습니다: {exc!r}")
+        seen.add("ls-e")
+
+        # (ls-f) 30초 전 → 그대로.
+        seed(updated_ago=30)
+        expect_kept("ls-f")
+        try:
+            locmod._guard_photos_not_running(locmod._find_location(planmod.load_plan(owner, pid)[0], lid), owner, pid)  # noqa: SLF001
+            bad.append("(ls-f) 진행 중(30초 전)인데 사진 변경을 막지 않았습니다")
+        except locmod.VpocError as exc:
+            if exc.status != 409:
+                bad.append(f"(ls-f) 사진 변경 거절이 409 가 아닙니다: {exc.status}")
+        seen.add("ls-f")
+
+        # (ls-g) 이 파드 실행 중 → 200초 전이어도 그대로.
+        seed(updated_ago=200)
+        locmod._mark_running(owner, pid, lid)  # noqa: SLF001
+        try:
+            expect_kept("ls-g")
+        finally:
+            locmod._clear_running(owner, pid, lid)  # noqa: SLF001
+        seen.add("ls-g")
+
+        # (ls-h) 다른 파드가 heartbeat 를 신선하게 쓰는 중 → 그대로.
+        seed(updated_ago=200, heartbeat_ago=10)
+        expect_kept("ls-h")
+        seen.add("ls-h")
+
+        # ================= (ls-i) heartbeat 스레드 =================
+        seed(updated_ago=200, heartbeat_ago=200, task_id="hb")
+        before = (locmod._find_location(planmod.load_plan(owner, pid)[0], lid) or {}).get("progress") or {}  # noqa: SLF001
+        beat = locmod._Heartbeat(owner, pid, lid, "hb", 0.05).start()  # noqa: SLF001
+        _time.sleep(0.25)
+        beat.stop()
+        after = (locmod._find_location(planmod.load_plan(owner, pid)[0], lid) or {}).get("progress") or {}  # noqa: SLF001
+        age = locmod._heartbeat_age_s({"progress": after})  # noqa: SLF001
+        if age is None or age > 5 or after.get("updatedAt") != before.get("updatedAt") or beat._thread.is_alive():  # noqa: SLF001
+            bad.append(f"(ls-i) heartbeat 가 heartbeatAt 만 갱신하지 않았습니다: before={before} after={after}")
+        seed(updated_ago=200, heartbeat_ago=200, task_id="hb")
+        other = locmod._Heartbeat(owner, pid, lid, "other-task", 0.05).start()  # noqa: SLF001
+        _time.sleep(0.15)
+        other.stop()
+        mismatch = (locmod._find_location(planmod.load_plan(owner, pid)[0], lid) or {}).get("progress") or {}  # noqa: SLF001
+        if (locmod._heartbeat_age_s({"progress": mismatch}) or 0) < 150:  # noqa: SLF001
+            bad.append(f"(ls-i) task 가 어긋났는데 heartbeat 를 썼습니다: {mismatch}")
+        seen.add("ls-i")
+    except Exception:  # noqa: BLE001
+        bad.append("작업 128 검사 예외\n" + _tb.format_exc())
+    finally:
+        locmod.STORE = saved["loc_STORE"]
+        planmod.STORE = saved["plan_STORE"]
+        locmod.vpoc_llm._converse = saved["converse"]  # noqa: SLF001
+        locmod._design = saved["_design"]  # noqa: SLF001
+        locmod._facts = saved["_facts"]  # noqa: SLF001
+        locmod._author = saved["_author"]  # noqa: SLF001
+        locmod._verify = saved["_verify"]  # noqa: SLF001
+        locmod._seedream = saved["_seedream"]  # noqa: SLF001
+        locmod._spawn = saved["_spawn"]  # noqa: SLF001
+        locmod.vpoc_ledger.charge = saved["charge"]
+        locmod.vpoc_ledger.charge_text = saved["charge_text"]
+        locmod.characters._count_people = saved["count_people"]  # noqa: SLF001
+        _images.tiles_for_analysis = saved["tiles"]
+    missing = {"ls-a", "ls-b", "ls-c", "ls-d", "ls-e", "ls-f", "ls-g", "ls-h", "ls-i"} - seen
+    if missing:
+        bad.append(f"돌지 않은 검사: {sorted(missing)}")
+    if bad:
+        fail("작업 128 공간 시트 검사 한도·설계/사실 동시·끊긴 작업 재개\n" + "\n".join(f"  {item}" for item in bad))
+    else:
+        ok("작업 128 공간 시트 (ls-a)verify 첫 한도 상수·재시도 유지 (ls-b)설계·사실 동시 0.5초 미만 "
+           "(ls-c)업로드·타일 1회·사진 1회·같은 bytes (ls-d)facts_prep timing (ls-e)끊긴 작업 조회 failed·build 202·build-all "
+           "(ls-f)30초 전 409 (ls-g)이 파드 실행 중 유지 (ls-h)다른 파드 heartbeat 신선 유지 (ls-i)heartbeat 스레드")
 def check_vnew_real_from_3d_126() -> None:
     """작업 126 — 통 테이크 실사 인물 참고 = 3D 모델용 사진, 실사 속 인물 바꿔 다시 만들기(cast). 가짜 fal·저장소, 유료 0.
 
@@ -46808,6 +47102,7 @@ def main() -> int:
     check_seedream_fal_124()
     check_vnew_sound_122()
     check_vnew_location_fast_125()
+    check_vnew_location_speed_128()
     check_vnew_real_from_3d_126()
     check_pod_zones()
     print()
