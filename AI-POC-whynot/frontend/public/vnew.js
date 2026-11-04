@@ -2125,6 +2125,7 @@
   function planStepBar() {
     var bar = el("nav", "vnew-plan-steps");
     var maxStep = maxReachableStep();
+    var busy = planBusySteps(state.plan);
     planStepList().forEach(function (step, index) {
       var stepNo = index + 1;
       var item = el("button", "vnew-plan-step");
@@ -2133,6 +2134,11 @@
       if (stepNo < state.planStep) item.classList.add("is-done");
       item.appendChild(el("span", "vnew-plan-step-mark", step[0]));
       item.appendChild(el("span", "vnew-plan-step-text", step[1]));
+      // 다른 단계에서 작업이 진행 중이면 그 칩에 "진행 중"만 단다. 화면은 옮기지 않는다(지시서 129).
+      if (busy[stepNo] && stepNo !== state.planStep) {
+        item.classList.add("is-busy");
+        item.appendChild(el("span", "vnew-plan-step-busy", "진행 중"));
+      }
       // 갈 수 있는 단계까지만 활성화. 그 뒤 단계는 아직 안내만(is-soon).
       // ⑦ 편집은 영상 선택 없이도(부분 성공 gen) 서버가 재료가 있다고 주면 연다(dev 화면 확인 2026-11-02).
       var canGo = stepNo <= maxStep || (stepNo === 7 && editAvailable());
@@ -2185,16 +2191,25 @@
     api("/api/vnew/p/" + encodeURIComponent(pid) + "/plan")
       .then(function (plan) {
         if (!state.mounted || state.projectId !== pid) return;
+        var prevPlan = state.plan;
         state.plan = plan;
         // 지시서 118b: 서버에 저장된 대본 서명(속마음 찾기 전 저장 여부). scriptSigOf 와 같은 꼴을 여기서 바로 만든다.
         var savedScript = (plan || {}).script || {};
         state.scriptSig = JSON.stringify({ setting: savedScript.setting || {}, entries: savedScript.entries || [] });
         var editOpen = editOpenFor(pid);
+        var stepBefore = state.planStep;
         decidePlanStep();
         // ⑦ 편집이 열려 있으면(지시서 115) 처음 불러오기가 아닌 응답으로 다시 그리지 않는다 — ⑦ 이 ⑤ 로 밀려나거나 처음부터
         // 그려져 실행 취소·재생헤드를 잃지 않게(⑦ 은 자기 GET /edit 만 부른다). 단계가 바뀌었으면 남은 저장을 먼저 보낸다.
         if (editOpen && !first && state.planStep === 7) return;
         if (editOpen && !first) editLeave();
+        // 지시서 129: 다른 단계의 작업만 진행 중인 폴링이면(지금 단계는 전·후 모두 진행 중 아님) 본문을 다시 그리지 않는다 —
+        // 이전 단계에서 고치던 내용이 지워지지 않게. 단계 막대("진행 중" 표시·갈 수 있는 단계)만 맞춘다.
+        if (fromPoll === true && !first && state.planStep === stepBefore && !planBusySteps(prevPlan)[state.planStep] &&
+            !planBusySteps(plan)[state.planStep] && planBarSync(host)) {
+          schedulePlanPoll();
+          return;
+        }
         // ⑤ 폴링: 상태 서명이 지금 그린 ⑤와 같으면 다시 그리지 않고 폴링만 다시 건다(재생 중인 영상이 끊기지 않게).
         // state.plan 은 위에서 새 값으로 바꿨다(다음 버튼 동작이 새 데이터를 쓴다).
         if (fromPoll === true && genPollUnchanged()) {
@@ -2218,8 +2233,9 @@
       });
   }
 
-  /* 처음 열 때(또는 task 진행 중) 알맞은 단계를 고른다. 사용자가 단계 막대로 옮긴 뒤에는
-     그 선택을 존중하되, 진행 중인 작업이 있으면 그 단계를 보여 준다. */
+  /* 처음 열 때(또는 task 진행 중) 알맞은 단계를 고른다. 처음 열 때(planStep 0)만 진행 중인 작업 단계를 보여 준다.
+     이미 단계를 보고 있으면(1~7) 폴링·다시 불러오기로는 옮기지 않는다(지시서 129) — 다른 단계의 작업은 단계 막대에
+     "진행 중"으로만 보인다. 작업을 시작한 버튼이 그 단계로 가야 하면 그 처리기가 state.planStep 을 정한다. */
   function decidePlanStep() {
     var plan = state.plan || {};
     var task = plan.task || {};
@@ -2228,7 +2244,13 @@
     // ⑦ 편집에 있으면(서버가 gen.edit 을 주는 동안) 그대로 둔다(지시서 115). 폴링·다시 불러오기로 gen 이 진행 중·partial 이
     // 되거나(실사 회차 시작·다시 만들기), gen.selected 가 비거나, 재료가 없어져도 ⑤ 로 밀려나지 않는다 — ⑦ 화면이 안내한다.
     if (state.planStep === 7 && gen.edit && typeof gen.edit === "object") return;
-    // 영상 생성이 진행 중(running)이면 ⑤를 보여 준다.
+    // 사용자가 이미 단계를 골랐으면(1~7) 그대로 둔다(단, 갈 수 없는 단계면 되돌린다).
+    if (state.planStep >= 1 && state.planStep <= 7) {
+      var maxStep = maxReachableStep();
+      if (state.planStep > maxStep) state.planStep = maxStep;
+      return;
+    }
+    // 처음 열 때: 영상 생성이 진행 중(running·partial)이면 ⑤를 보여 준다.
     if (gen.status === "running" || gen.status === "partial") {
       state.planStep = 5;
       return;
@@ -2243,13 +2265,7 @@
       state.planStep = task.name === "conti" || task.name === "fxFill" ? 3 : 2;
       return;
     }
-    // 사용자가 이미 단계를 골랐으면(1~7) 그대로 둔다(단, 갈 수 없는 단계면 되돌린다).
-    if (state.planStep >= 1 && state.planStep <= 7) {
-      var maxStep = maxReachableStep();
-      if (state.planStep > maxStep) state.planStep = maxStep;
-      return;
-    }
-    // 처음 열 때: gen.selected 면 ⑥, gen 이 있으면 ⑤, 프리비즈가 있으면 ④, 아니면 ①.
+    // 진행 중인 작업이 없으면: gen.selected 면 ⑥, gen 이 있으면 ⑤, 프리비즈가 있으면 ④, 아니면 ①.
     if (gen.selected) {
       state.planStep = 6;
       return;
@@ -2263,6 +2279,35 @@
       return;
     }
     state.planStep = 1;
+  }
+
+  /* 진행 중인 작업이 있는 단계 {단계 번호: true}(지시서 129). 폴링을 거는 조건(schedulePlanPoll)과 같은 것만 본다:
+     task(콘티·기호 채우기는 ③, 그 밖은 ②)·공간 시트(③)·프리비즈 설계(④)·영상 생성·촬영 지시서(⑤). partial 은 진행 중이 아니다. */
+  function planBusySteps(plan) {
+    var p = plan || {};
+    var task = p.task || {};
+    var previz = p.previz || {};
+    var busy = {};
+    if (task.status === "running") busy[task.name === "conti" || task.name === "fxFill" ? 3 : 2] = true;
+    if (locationsBuilding(p)) busy[3] = true;
+    if (previz.status === "designing") busy[4] = true;
+    if ((p.gen || {}).status === "running" || (previz.shotBrief || {}).status === "running") busy[5] = true;
+    return busy;
+  }
+
+  /* 폴링에서 본문을 다시 그리지 않을 때 단계 막대만 맞춘다(지시서 129). 막대 칩(글·클래스·title)이 그대로면 그대로 두고,
+     바뀌었으면 막대만 갈아 끼운다. 그린 막대가 화면에 없으면(오류 화면 등) false — 호출자가 다시 그린다. */
+  function planBarSync(host) {
+    var old = state.planBar;
+    if (!old || old.parentNode !== host) return false;
+    function sig(bar) {
+      return JSON.stringify((bar.children || []).map(function (c) { return [c.className, c.textContent, c.title || ""]; }));
+    }
+    var bar = planStepBar();
+    if (sig(bar) === sig(old)) return true;
+    host.replaceChild(bar, old);
+    state.planBar = bar;
+    return true;
   }
 
   /* 진행 중(task.running 또는 gen.running)이면 다시 불러온다. 영상 생성은 이미지·제출 단계에서
@@ -2377,7 +2422,8 @@
       el("p", "vnew-lead", "웹툰 이미지를 넣으면 대본·상황을 읽고 콘티까지 만듭니다.")
     );
     host.appendChild(head);
-    host.appendChild(planStepBar());
+    state.planBar = planStepBar(); // 폴링이 막대만 갈아 끼울 때 쓴다(planBarSync)
+    host.appendChild(state.planBar);
 
     var body = el("div", "vnew-plan-body");
     host.appendChild(body);
@@ -3700,6 +3746,9 @@
       contiBtn.type = "button";
       contiBtn.addEventListener("click", function () {
         contiBtn.disabled = true;
+        // 지시서 129: 콘티가 이미 있으면(콘티 다시) ② 에 머문다 — ③ 칩에 "진행 중"이 보인다. 처음 만들 때만 ③ 으로 간다.
+        var conti0 = (state.plan || {}).conti || {};
+        var contiAgain = conti0.status === "ready" && (conti0.cuts || []).length > 0;
         // 먼저 현재 수정본을 저장한 뒤 콘티 시작(덮어쓰기 방지).
         var script = (state.plan || {}).script || {};
         api("/api/vnew/p/" + encodeURIComponent(state.projectId) + "/script", {
@@ -3712,7 +3761,7 @@
             });
           })
           .then(function () {
-            state.planStep = 3;
+            if (!contiAgain) state.planStep = 3;
             loadPlan(false);
           })
           .catch(function (err) {

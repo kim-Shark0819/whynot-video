@@ -25069,13 +25069,15 @@ async function run() {
   apiQueue.push({ ok: planOf(genRun("d4", "completed")) });
   loadPlan(false); await tick();
   out.nonPoll = renders.length - r0;
-  // (5) ④를 그린 뒤(서명 비움) 폴링 → decidePlanStep 이 ⑤로 되돌리고 다시 그린다
+  // (5) ④를 그린 뒤(서명 비움) 폴링 → 지시서 129: ④ 그대로, ⑤ 작업만 진행 중이라 ④ 본문은 다시 그리지 않는다
   state.planStep = 4; renderPlan();
   var sig4 = state.genViewSig;
   r0 = renders.length;
   apiQueue.push({ ok: planOf(genRun("e5", "completed")) });
   firePoll(); await tick();
   out.fromStep4 = [sig4, renders.slice(r0), state.planStep];
+  // 아래 경우는 ⑤ 에서 본다(사용자가 막대로 ⑤ 를 누른 것과 같다)
+  state.planStep = 5; renderPlan();
   // (6) 같은 상태 폴링 두 번 → 다시 그리기 0번, 요청 2번, 폴링은 이어진다
   r0 = renders.length;
   var a0 = apiCalls.length;
@@ -25208,7 +25210,7 @@ def _lr_095_poll_problems(got: dict) -> list[str]:
         "urlOnly": ([0, True, True, True, True], "URL 만 바뀐 폴링(다시 그리지 않음·state.plan 새 값·노드 그대로·폴링 이어짐)"),
         "changed": ([1, False, True], "상태가 바뀐 폴링(다시 그림)"),
         "nonPoll": (1, "폴링이 아닌 loadPlan(false)(늘 다시 그림)"),
-        "fromStep4": (["", [[5, "running"]], 5], "④ 뒤 폴링(서명 비움·⑤로 다시 그림)"),
+        "fromStep4": (["", [], 4], "④ 뒤 폴링(지시서 129: ④ 그대로·④ 본문 다시 그리지 않음)"),
         "quiet": ([0, 2, True], "같은 상태 폴링 2번(다시 그리기 0·요청 2·폴링 이어짐)"),
         "afterError": ([True, "", True, 1], "불러오기 실패 뒤 폴링(오류 화면·서명 비움·다시 그림)"),
         "startScreen": ([3, "", 5, True], "시작 화면 폴링(늘 다시 그림)"),
@@ -39544,16 +39546,16 @@ def _ert_steps_problems(got: dict, lock: dict) -> list[str]:
          [["⑦편집", "is-soon", "⑤에서 영상을 먼저 만들면 편집할 수 있습니다.", "true"], 6, ["⑦편집", "is-current", "R", "true"],
           ["⑦편집", "", "", ""]],
          "reason 이 없으면 기본 문구·편집 끔(gen.edit 없음)이면 ⑥ 까지·⑦ 에 있으면 흐리지 않음(이유 title)·갈 수 있으면 열림")
-    want("ert-c", got.get("decide"), [7, 7, 7, 5, 5, 5, 1, 7, 7, 5],
-         "decidePlanStep: ⑦ 에서 진행 중·partial·재료 없음·selected 없음이어도 7, gen.edit 이 없으면 지금 규칙(partial → 5), "
-         "⑤·⑥ 은 지금 규칙, 처음 열기 그대로")
+    want("ert-c", got.get("decide"), [7, 7, 7, 6, 5, 6, 1, 7, 7, 5],
+         "decidePlanStep: ⑦ 에서 진행 중·partial·재료 없음·selected 없음이어도 7, gen.edit 이 없으면 갈 수 있는 끝(지시서 129: partial 이어도 6), "
+         "⑤·⑥ 은 진행 중이어도 그대로(지시서 129), 처음 열기 그대로")
     stay = got.get("stay") or {}
     want("ert-c", [stay.get("opened"), stay.get("running"), stay.get("partial"), stay.get("gone")],
          [[7, True, [6], 3, 1], [7, True, True, "running", [6], 0, True], [7, True, True, "partial", [6], 0, True],
           [7, True, True, "partial", [6], 0, True]],
          "⑦ 이 열린 동안 /plan 응답(폴링 진행 중·콜백 partial selected 없음·재료 없음): 단계 7·같은 ⑦ 화면·다시 그리기 0·GET /edit 0")
-    want("ert-c", [stay.get("off"), stay.get("first")], [[5, True, False, 1, 0, 5, 1, True], [7, True, False]],
-         "편집 꺼짐 응답: editLeave 로 남은 저장(소리 끔)을 바로 PUT·⑦ 닫음·갈 수 있는 단계, 처음 불러오기는 ⑦ 을 새로 그림")
+    want("ert-c", [stay.get("off"), stay.get("first")], [[6, True, False, 1, 0, 6, 1, True], [7, True, False]],
+         "편집 꺼짐 응답: editLeave 로 남은 저장(소리 끔)을 바로 PUT·⑦ 닫음·갈 수 있는 단계(지시서 129: partial 이어도 ⑥), 처음 불러오기는 ⑦ 을 새로 그림")
     gone = got.get("gone") or {}
     want("ert-c", [gone.get("open"), gone.get("reopened")],
          [[_ERT_GONE_NOMAT, 0, ["다시 시도", "⑤ 영상으로"], "편집", 1], [3, 0]],
@@ -46465,6 +46467,114 @@ def check_vnew_location_fast_125() -> None:
            "(lf-g)사람 수 동시·정렬")
 
 
+_STAY_129_NODE = r"""
+var VARIANTS = [{ key: "real", title: "실사" }, { key: "webtoon", title: "웹툰 그림체" }];
+var PLAN_POLL_MS = 3001, GEN_POLL_FAST_MS = 3002, GEN_POLL_SLOW_MS = 5003;
+var host = new FakeNode("div");
+var renders = [];
+FakeNode.prototype.replaceChild = function (n, o) {
+  var i = this.children.indexOf(o);
+  if (n.parentNode) n.parentNode.removeChild(n);
+  this.children[i] = n; n.parentNode = this; o.parentNode = null; return o;
+};
+function planHost() { return host; }
+function stopPlanPolling() { if (state.planPollTimer) { window.clearTimeout(state.planPollTimer); state.planPollTimer = 0; } }
+function locationsBuilding(plan) { return ((plan || {}).locations || []).some(function (l) { return l.status === "building"; }); }
+function genBusyFast() { return false; }
+function genViewSignature() { return "sig"; }
+function loadPlan() {}
+function editLeave() {}
+function stub(n) { return function (body) { renders.push(n); body.appendChild(new FakeNode("stub-" + n)); }; }
+var renderInputStep = stub(1), renderScriptStep = stub(2), renderContiStep = stub(3), renderPrevizStep = stub(4), renderGenStep = stub(5),
+    renderSoundStep = stub(6), renderEditStep = stub(7);
+function planOf(extra) {
+  var p = { task: { status: "none" }, previz: { status: "ready", recordedAll: true }, conti: { status: "ready", cuts: [{ id: "c1" }] },
+            locations: [], gen: { status: "none" } };
+  Object.keys(extra || {}).forEach(function (k) { p[k] = extra[k]; });
+  return p;
+}
+function decide(plan, step) { state.plan = plan; state.planStep = step; decidePlanStep(); return state.planStep; }
+function busyOf(plan, step) {
+  state.plan = plan; state.planStep = step;
+  var bar = planStepBar(), list = [];
+  bar.children.forEach(function (b, i) {
+    if (b.classList.contains("is-busy")) list.push([i + 1, byClass(b, "vnew-plan-step-busy").map(function (n) { return n.textContent; }).join("")]);
+  });
+  return list;
+}
+var notAll = { status: "ready", recordedAll: false };
+out.decide = [
+  decide(planOf({ gen: { status: "partial" } }), 4), decide(planOf({ gen: { status: "running" } }), 4),
+  decide(planOf({ previz: { status: "designing" } }), 2), decide(planOf({ task: { status: "running", name: "script" } }), 3),
+  decide(planOf({ gen: { status: "running" } }), 0), decide(planOf({ gen: { status: "partial" } }), 0),
+  decide(planOf({ previz: { status: "designing" } }), 0), decide(planOf({ task: { status: "running", name: "conti" } }), 0),
+  decide(planOf({ previz: notAll }), 6), decide(planOf({ previz: notAll, gen: { status: "running" } }), 6)
+];
+out.busy = [
+  busyOf(planOf({ gen: { status: "running" } }), 4), busyOf(planOf({ previz: { status: "designing" } }), 2),
+  busyOf(planOf({ task: { status: "running", name: "conti" } }), 2), busyOf(planOf({ task: { status: "running", name: "script" } }), 2),
+  busyOf(planOf({ gen: { status: "partial" } }), 4), busyOf(planOf({ previz: { status: "ready", recordedAll: true, shotBrief: { status: "running" } } }), 4),
+  busyOf(planOf({ locations: [{ status: "building" }] }), 2)
+];
+// planBarSync: 같은 막대면 그대로, 바뀌면 막대만 갈아 끼움(본문 다시 그리기 0), 화면에 없으면 false
+state.plan = planOf({ task: { status: "running", name: "conti" } }); state.planStep = 2; renderPlan();
+var bar0 = state.planBar, r0 = renders.length;
+var same = [planBarSync(host), state.planBar === bar0];
+state.plan = planOf({});
+var swapped = [planBarSync(host), state.planBar !== bar0, host.children.indexOf(bar0), host.children.indexOf(state.planBar) >= 0,
+               byClass(state.planBar, "is-busy").length, renders.length - r0];
+clear(host);
+out.sync = { same: same, swapped: swapped, gone: planBarSync(host) };
+console.log(JSON.stringify(out));
+"""
+_STAY_129_WIRING = {
+    "② 콘티 다시 머무르기": "            if (!contiAgain) state.planStep = 3;",
+    "폴링 막대만": "            !planBusySteps(plan)[state.planStep] && planBarSync(host)) {",
+    "막대 진행 중": '        item.appendChild(el("span", "vnew-plan-step-busy", "진행 중"));',
+    "막대 기억": "    state.planBar = planStepBar(); // 폴링이 막대만 갈아 끼울 때 쓴다(planBarSync)",
+}
+
+
+def check_vnew_plan_step_stay_129() -> None:
+    """작업 129 — 이미 단계를 보고 있으면(1~7) 폴링·다시 불러오기로 다른 단계로 옮기지 않는다. node 가짜 DOM(_EDU_STEP_SLICES).
+
+    decidePlanStep: ④+gen partial·running → 4, ②+previz designing → 2, ③+task → 3, 처음 열기(0)는 지금 규칙(running·partial → 5,
+    designing → 4, conti → 3), ⑥ 인데 갈 수 있는 끝이 ④ → 4. 단계 막대: 다른 단계 작업 칩에 is-busy·"진행 중"(지금 단계·partial 은 없음).
+    planBarSync: 같으면 그대로·바뀌면 막대만 교체·화면에 없으면 false. 배선 4곳, vnew.css 클래스.
+    """
+    bad: list[str] = []
+    vjs = (PUBLIC / "vnew.js").read_text(encoding="utf-8")
+    css = (PUBLIC / "vnew.css").read_text(encoding="utf-8")
+    counts = {name: vjs.count(needle) for name, needle in _STAY_129_WIRING.items()}
+    if counts != {name: 1 for name in _STAY_129_WIRING}:
+        bad.append(f"배선이 한 번씩이 아닙니다: {counts}")
+    if ".vnew-plan-step-busy {" not in css:
+        bad.append("vnew.css 에 .vnew-plan-step-busy 가 없습니다")
+    node = shutil.which("node")
+    code, problems = _edu_code(vjs, _EDU_STEP_SLICES)
+    bad.extend(problems)
+    if node and not problems:
+        got, err = _lr_run_node(node, _EDU_NODE_HARNESS + code + _STAY_129_NODE, "stay129_")
+        if err:
+            bad.append(f"node 실행 실패: {err}")
+        else:
+            want = {
+                "decide": [4, 4, 2, 3, 5, 5, 4, 3, 4, 4],
+                "busy": [[[5, "진행 중"]], [[4, "진행 중"]], [[3, "진행 중"]], [], [], [[5, "진행 중"]], [[3, "진행 중"]]],
+                "sync": {"same": [True, True], "swapped": [True, True, -1, True, 0, 0], "gone": False},
+            }
+            for key, value in want.items():
+                if got.get(key) != value:
+                    bad.append(f"{key} 결과 {got.get(key)!r} (기대 {value!r})")
+    elif not node:
+        warn("node 가 없어 작업 129 화면 실행을 건너뜁니다")
+    if bad:
+        fail("작업 129 단계 머무르기 검사 실패\n  " + "\n  ".join(bad))
+    else:
+        ok("작업 129 단계 머무르기 decidePlanStep 10경우(1~7 그대로·처음 열기 지금 규칙·갈 수 있는 끝)·막대 진행 중 7경우·"
+           "planBarSync 3경우·배선 4곳·css")
+
+
 def check_vnew_location_speed_128() -> None:
     """작업 128 — 공간 시트 검사 한도·설계/사실 동시·끊긴 작업 바로 재개. 가짜 LLM·저장소, 유료·네트워크 0.
 
@@ -47104,6 +47214,7 @@ def main() -> int:
     check_vnew_location_fast_125()
     check_vnew_location_speed_128()
     check_vnew_real_from_3d_126()
+    check_vnew_plan_step_stay_129()
     check_pod_zones()
     print()
     if warnings:
