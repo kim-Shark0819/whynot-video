@@ -4561,6 +4561,27 @@ _BRIEF_DANGLING = re.compile(r"(?:[\s,]+(?:and|with|in|of|a|an|the|his|her|their
                              re.IGNORECASE)
 _OUTFIT_PHRASE = re.compile(r"\b(?:wear(?:s|ing)?|dressed in|in)\s+([^,.;]+)", re.IGNORECASE)
 _OUTFIT_ARTICLE = re.compile(r"^(?:(?:a|an|the|his|her|their)\s+)+", re.IGNORECASE)
+# 작업 137: 옷 색 낱말(1곳). 장면 옷이 있는 인물 문장에서 몸 낱말 바로 앞의 이 색("ivory-white shoulder")을 뺀다(_real_brief_text).
+REAL_BRIEF_OUTFIT_COLORS = (r"(?:off-white|white|ivory|cream|beige|black|navy|grey|gray|charcoal|blue|red|pink|green|brown|"
+                            r"khaki|olive|camel|yellow|purple|maroon|burgundy)")
+_BRIEF_BODY_COLOR = re.compile(
+    r"\b" + REAL_BRIEF_OUTFIT_COLORS + r"(?:[- ]" + REAL_BRIEF_OUTFIT_COLORS + r")*\s+"
+    r"(?=(?:shoulders?|chest|back(?!\s+(?:walls?|doors?|ground|rows?|seats?|rooms?|lights?|lit|alley|yard|stage)\b)|"
+    r"arms?|forearms?|upper arms?|collarbones?|torso|neck|waist)\b)",
+    re.IGNORECASE,
+)
+# 작업 137: 장면 옷 문장 정리(_scene_outfit_text) — 괄호 메모, 관사·전치사로 잘린 꼬리("collar open at the").
+_OUTFIT_NOTE = re.compile(r"\s*\([^()]*\)\s*")
+_OUTFIT_DANGLING = re.compile(r"(?:[\s,;/]+(?:at|of|with|in|on|to|for|from|by|into|onto|over|under|around|near|a|an|the|"
+                              r"and|or|his|her|their|its))+$", re.IGNORECASE)
+
+
+def _scene_outfit_text(text) -> str:
+    """작업 137: 장면 옷 1개 → 실사 문장 조각(끝 마침표 없음). 괄호 메모를 빼고, 실사 낱말 정리·140자 상한(지금과 같다) 뒤
+    관사·전치사로 잘린 꼬리를 뺀다."""
+    text = _OUTFIT_NOTE.sub(" ", str(text or "")).strip()
+    text = _clip_words(_real_words(text), 140).rstrip(" .")
+    return _OUTFIT_DANGLING.sub("", text).rstrip(" ,;")
 
 
 def _brief_name_hits(text: str, aliases: dict[str, list[str]]) -> list[str]:
@@ -4598,6 +4619,8 @@ def _real_brief_text(text, scene_outfits: dict | None = None) -> str:
         if not sentence or REAL_BRIEF_DRAWING_WORDS.search(sentence):
             continue
         named = _brief_name_hits(sentence, aliases)
+        if any(outfits.get(n) for n in (named or [subject or only])):
+            sentence = _BRIEF_BODY_COLOR.sub("", sentence)  # 작업 137: "ivory-white shoulder" → "shoulder"
         if not REAL_BRIEF_CLOTHING_WORDS.search(sentence):
             out.append(sentence)
             subject = named[0] if named else subject
@@ -4627,7 +4650,7 @@ def _real_brief_text(text, scene_outfits: dict | None = None) -> str:
             out.append(rest[:1].upper() + rest[1:] + end)
         subject = named[0] if named else subject
         for owner in owners:
-            costume = _clip_words(_real_words(outfits.get(owner)), 140).rstrip(" .")
+            costume = _scene_outfit_text(outfits.get(owner))
             if owner and costume and owner not in emitted:
                 out.append(f"{owner} wears {costume}.")
                 emitted.add(owner)
@@ -4812,7 +4835,7 @@ def _cut_still_prompt(plan: dict, cut: dict, people: list[tuple[str, str, int]],
     # 작업 136: 장면 옷 = 콘티 → 대본 → outfits(웹툰 패널 읽기) 순(_scene_outfits). 지시서 문장은 _real_brief_text 를 지난다.
     scene_outfits = _scene_outfits(plan, [cut_id], outfits or {})
     for _color, name, _no in people:
-        costume = _clip_words(_real_words(scene_outfits.get(name) or (outfits or {}).get(name)), 140).rstrip(" .")
+        costume = _scene_outfit_text(scene_outfits.get(name) or (outfits or {}).get(name))
         if costume:
             worn.append(f"{name} wears {costume}")
     if worn:

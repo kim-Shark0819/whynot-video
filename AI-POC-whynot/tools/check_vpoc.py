@@ -48740,6 +48740,69 @@ def check_vnew_real_brief_136() -> None:
            "(rb-b)콘티 → 대본 → outfits → '' (rb-c)시작 그림·Kling·통 테이크 그림 낱말 0·기본 옷 0 (rb-d)애니는 원문 그대로")
 
 
+def check_vnew_real_brief_137() -> None:
+    """작업 137 — 136 정리에서 남은 조각. 외부 호출 없음, 유료 0.
+
+    (rb-e) 장면 옷이 있는 인물: 몸 낱말 앞 옷 색 빼기("ivory-white shoulder" → "shoulder"), 장면 옷 없으면 그대로, "back wall" 색은 남음
+    (rb-f) 장면 옷 문장: 괄호 메모 빼기·관사/전치사 꼬리("at the") 빼기·140자 상한 그대로, 시작 그림 OUTFITS 에 메모 없음
+    """
+    import traceback as _tb  # noqa: PLC0415
+
+    sys.path.insert(0, str(ROOT / "app"))
+    from src.vnew import generate as genmod  # noqa: PLC0415
+
+    bad: list[str] = []
+    a, b = "범건우", "여의준"
+    ra = genmod._romanize_name(a)  # noqa: SLF001
+    try:
+        with _guard_real_llm() as llm_calls, _pin_vnew(VNEW_FX=True):
+            # ================= (rb-e) 몸 낱말 앞 옷 색 =================
+            s = f"{ra}'s charcoal-black hair, angular cheek and ivory-white shoulder form the foreground edge."
+            want = f"{ra}'s charcoal-black hair, angular cheek and shoulder form the foreground edge."
+            got = genmod._real_brief_text(s, {a: "black open-collar shirt", b: ""})  # noqa: SLF001
+            if got != want:
+                bad.append(f"(rb-e) 몸 낱말 앞 옷 색 정리가 다릅니다: {got!r} 기대 {want!r}")
+            only = genmod._real_brief_text("His cream chest and white back wall stay in frame.", {a: "black shirt"})  # noqa: SLF001
+            if only != "His chest and white back wall stay in frame.":
+                bad.append(f"(rb-e) 장면 인물 1명 문장 정리가 다릅니다: {only!r}")
+            for outfits in ({}, {a: ""}):
+                kept = genmod._real_brief_text(s, outfits)  # noqa: SLF001
+                if kept != s:
+                    bad.append(f"(rb-e) 장면 옷 없는 인물 문장이 바뀌었습니다: {kept!r}")
+
+            # ================= (rb-f) 장면 옷 문장 =================
+            note = "(Identified as the dark-haired man, speaks in casual/informal Korean.) "
+            raw = note + "Plain dark navy/black button-up dress shirt, collar open at the."
+            got_f = genmod._scene_outfit_text(raw)  # noqa: SLF001
+            if got_f != "Plain dark navy/black button-up dress shirt, collar open":
+                bad.append(f"(rb-f) 장면 옷 정리가 다릅니다: {got_f!r}")
+            long_raw = note + "Plain dark navy/black button-up dress shirt, collar open at the throat, " + "sleeves rolled " * 12
+            got_l = genmod._scene_outfit_text(long_raw)  # noqa: SLF001
+            if len(got_l) > 140 or "(" in got_l or "Identified" in got_l:
+                bad.append(f"(rb-f) 장면 옷 길이 상한·메모 정리가 다릅니다: {got_l!r}")
+            if genmod._scene_outfit_text("black open-collar shirt") != "black open-collar shirt":  # noqa: SLF001
+                bad.append("(rb-f) 깨끗한 장면 옷이 바뀌었습니다")
+            clipped = genmod._real_brief_text(f"{ra} adjusts his ivory-white dress shirt.", {a: raw})  # noqa: SLF001
+            if clipped != f"{a} wears Plain dark navy/black button-up dress shirt, collar open.":
+                bad.append(f"(rb-f) 지시서 옷 문장 정리가 다릅니다: {clipped!r}")
+            plan = _fw_plan()
+            plan["conti"]["cuts"][0]["characters"] = [{"name": a, "outfitEn": raw}, {"name": b, "outfitEn": "navy training top"}]
+            still = genmod._cut_still_prompt(plan, {"cutId": "c1"}, [("blue", a, 2), ("red", b, 3)], True,  # noqa: SLF001
+                                             source="anime", outfits={})
+            if f"{a} wears Plain dark navy/black button-up dress shirt, collar open; {b} wears navy training top." not in still \
+                    or "Identified" in still:
+                bad.append(f"(rb-f) 시작 그림 OUTFITS 정리가 다릅니다: {still!r}")
+            if llm_calls:
+                bad.append(f"가짜가 아닌 LLM 호출: {llm_calls}")
+    except Exception:  # noqa: BLE001
+        bad.append("작업 137 검사 예외\n" + _tb.format_exc())
+    if bad:
+        fail("작업 137 실사 지시서 남은 조각 검사 실패\n  " + "\n  ".join(bad))
+    else:
+        ok("작업 137 실사 지시서 남은 조각 (rb-e)몸 낱말 앞 옷 색 빼기·장면 옷 없으면 그대로 "
+           "(rb-f)장면 옷 괄호 메모·'at the' 꼬리 빼기·140자 상한·시작 그림 OUTFITS")
+
+
 def main() -> int:
     print("== vpoc1 check ==")
     check_compileall()
@@ -48835,6 +48898,7 @@ def main() -> int:
     check_vnew_real_remerge_134()
     check_vnew_real_cut_sheet_135()
     check_vnew_real_brief_136()
+    check_vnew_real_brief_137()
     check_vnew_plan_step_stay_129()
     check_pod_zones()
     print()

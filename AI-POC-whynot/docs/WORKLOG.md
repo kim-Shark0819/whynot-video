@@ -2646,3 +2646,6 @@ un_conti가 대본 글 뒤에 ordered_tiles 타일을 Panel N of M: 라벨(N 0�
 
 ### 136 — 실사 컷 프롬프트에서 촬영 지시서의 그림 문장·기본 옷 문장 걷어내기 (2026-11-05)
 - `_real_brief_text(text, scene_outfits)`: 그림·화풍 낱말(`REAL_BRIEF_DRAWING_WORDS`: contour·line art·flat color·cel·shading·색 붙은 shadows·webtoon·manhwa·illustration·drawn·ink·screentone 등)이 든 문장(; 절 포함)은 통째로 빼고, 옷 낱말(`REAL_BRIEF_CLOTHING_WORDS`) 구절은 빼고 그 인물 장면 옷이 있으면 "{이름} wears {옷}." 1번(머리·얼굴 구절은 남음). 장면 옷 `_scene_outfits` = 콘티 컷 characters → 대본 entries(겹치는 panels) characters → 132/135 outfits(`_resolve_cast`) → "". 실사 시작 그림 SHOT·BLOCKING·SETTING·OUTFITS, Kling 컷 ACTION(지시서는 안 쓰지만 콘티 문장을 같은 함수로), 실사 통 테이크 연기(actionEn)가 거친다. 애니(웹툰)·`shot_brief.py` 원문은 그대로. 검사 check_vnew_real_brief_136(rb-a~d), 기존 기대값 변경 없음.
+
+### 137 — 136 정리에서 남은 조각: 몸 낱말 앞 옷 색, 장면 옷 괄호 메모·잘린 꼬리
+- `_real_brief_text`: 장면 옷이 있는 인물 문장에서 몸 낱말(shoulder·chest·back·arm·collarbone 등) 바로 앞 옷 색(`REAL_BRIEF_OUTFIT_COLORS` 1곳)을 뺀다("ivory-white shoulder" → "shoulder"). 장면 옷 문장은 `_scene_outfit_text`(괄호 메모 빼기 → 실사 낱말·140자 상한 그대로 → 관사·전치사 꼬리 빼기)를 지난다(지시서 옷 문장·시작 그림 OUTFITS). 애니 경로는 안 부름. 검사 check_vnew_real_brief_137(rb-e·f).
