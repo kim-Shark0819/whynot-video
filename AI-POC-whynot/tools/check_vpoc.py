@@ -47440,6 +47440,230 @@ console.log(JSON.stringify({
            "그 회차 참고·애니 photoreal·plan 그대로·realHistory cast·real_cast_options (r3-d)node --check·문구·화면 함수·textContent·css")
 
 
+def check_vnew_real_likeness_130() -> None:
+    """작업 130·보완 1 — 실사 통 테이크 likeness 거절 → Seedance 정면 1장 → 컷 단위 Kling image-to-video. 가짜 fal·Seedream, 유료 0.
+
+    (lk-a) 거절 → 정면 1장 다시(인물당 1장 + 장소) → 또 거절 → 컷 N개마다 시작 그림(Seedream: 첫 프레임 + 실사 정면) 1번·Kling 1번,
+           모델 id·길이 5/10·시작 그림 필드, 원장 = 시작 그림·Kling 컷만(거절 Seedance 0), realRun.realFallback·칸 fallback,
+           이어 붙인 실사 결과(merged → finalReal done), ⑦ 재료 kind=cut 2개(trimTo 컷 길이), gen_view fallback·realFallbackMax(계산값)
+    (lk-b) 첫 Seedance 성공 → Kling·Seedream 0, Seedance 원장 1(조회 때)
+    (lk-c) 거절이 아닌 실패(소리 거절) → 단계 없음·failed·원장 1 / 모든 단계 거절 → failed·시도한 단계 문구·kind likeness
+    (lk-d) 화면: node --check, 단계 문구(정면 1장·n/N컷)·최대 금액 문구(node), 배선
+    """
+    import base64 as _b64  # noqa: PLC0415
+    import traceback as _tb  # noqa: PLC0415
+
+    sys.path.insert(0, str(ROOT / "app"))
+    from src.vnew import edit as editmod  # noqa: PLC0415
+    from src.vnew import generate as genmod  # noqa: PLC0415
+    from src.vpoc.errors import VpocError  # noqa: PLC0415
+
+    bad: list[str] = []
+    owner = "tester"
+    kling = "fal-ai/kling-video/v3/pro/image-to-video"
+    kling_caps = {"promptField": "prompt", "startImageField": "start_image_url", "durations": [5, 10], "durationAsString": True,
+                  "durationValues": {"5": "5", "10": "10"}, "sendDuration": True, "aspectRatios": ["16:9"], "available": True}
+    likeness_raw = "The images or videos provided may contain likenesses of real people or other private information."
+
+    def decode(uri: str) -> bytes:
+        try:
+            return _b64.b64decode(str(uri).split(",", 1)[1])
+        except Exception:  # noqa: BLE001
+            return b""
+
+    try:
+        with _guard_real_llm(), _LrEnv(owner) as env, _pin_vnew(
+                VNEW_FX=True, VNEW_CASTING=True, VNEW_TAKE_REAL=True, VNEW_GEN_PARALLEL=2, POLL_INTERVAL_S=0,
+                VNEW_TAKE_AUDIO=True, VNEW_TAKE_RESOLUTION="480p", VNEW_PREPARE_STALE_S=300,
+                VNEW_TAKE_REAL_LIKENESS_LADDER=True, VNEW_TAKE_REAL_KLING_MODEL=kling):
+            prefix_id = genmod.vpoc_settings.FAL_ID_PREFIX
+            seed_find = genmod.vpoc_fal.find
+            env.set(genmod.vpoc_fal, "find", lambda m: {"id": prefix_id + kling, "endpointId": kling, "caps": dict(kling_caps)}
+                    if str(m) == prefix_id + kling else seed_find(m))
+            stills: list[dict] = []
+            env.set(genmod, "_seedream", lambda prompt, refs, *, size: stills.append(
+                {"prompt": prompt, "refs": [bytes(r) for r in refs], "size": size}) or b"STILL%d" % len(stills))
+            env.set(genmod, "_cut_first_frame", lambda mp4, start: b"FRAME@%.1f" % float(start))
+            env.set(genmod, "_trim_clip", lambda mp4, seconds: b"TRIM%.1f:" % float(seconds) + bytes(mp4))
+            policy = {"reject": lambda req: False}
+            base_fal = env._fal
+
+            def fal_request(method, url, payload=None, *, where=""):
+                rid = url.split("/requests/", 1)[-1].split("/", 1)[0]
+                req = next((r for r in env.requests if r["rid"] == rid), None)
+                if method == "GET" and not url.endswith("/status") and req and policy["reject"](req):
+                    raise VpocError("fal.poll", "HTTP422", likeness_raw, 502)
+                return base_fal(method, url, payload, where=where)
+
+            env.set(env.falmod, "_request", fal_request)
+            client = env.client()
+
+            def seedance_real(req):
+                return req["url"].endswith(_LR_ENDPOINT) and req["kind"] == "real"
+
+            def kling_req(req):
+                return req["url"].endswith("/" + kling)
+
+            def ready(pid: str) -> float:
+                env.make_plan(pid, [{"id": "s1", "cutIds": ["c1"], "seconds": 4}, {"id": "s2", "cutIds": ["c2"], "seconds": 8}])
+                resp = client.post(f"/api/vnew/p/{pid}/generate", json={"confirmUsd": genmod.estimate(env.plan(pid))["totalUsd"]})
+                g = env.drive(pid)
+                if resp.status_code != 202 or (g.get("finalWebtoon") or {}).get("status") != "done":
+                    bad.append(f"준비({pid}): 웹툰 통 테이크가 끝나지 않았습니다: {resp.status_code} {g.get('status')}")
+                return genmod.real_estimate(g)["usd"]
+
+            # ================= (lk-a) 거절 → 정면 1장 → 컷 단위 Kling =================
+            pid = "prj_lk_a"
+            usd = ready(pid)
+            policy["reject"] = seedance_real
+            since, led0, stills0 = len(env.requests), len(env.ledger), len(stills)
+            resp = client.post(f"/api/vnew/p/{pid}/generate/real", json={"confirmUsd": usd})
+            max_view = (((resp.get_json() or {}).get("plan") or {}).get("gen") or {}).get("realFallbackMax") or {}
+            g = env.drive(pid)
+            news = env.requests[since:]
+            seeds = [r for r in news if seedance_real(r)]
+            klings = [r for r in news if kling_req(r)]
+            images = [[decode(u) for u in r["payload"].get("image_urls") or []] for r in seeds]
+            if len(seeds) != 2 or len(images[0]) <= len(images[1]) or images[1] != [b"RF2", b"RF1", b"LOC-RB"]:
+                bad.append(f"(lk-a) Seedance 기본·정면 1장 다시([비 정면, 에이 정면, 장소])가 아닙니다: {len(seeds)} "
+                           f"{[len(i) for i in images]} {images[1:] }")
+            bodies = [r["payload"] for r in klings]
+            if len(klings) != 2 or [b.get("duration") for b in bodies] != ["5", "10"] \
+                    or any(decode(b.get("start_image_url")) not in (b"STILL1", b"STILL2") for b in bodies) \
+                    or any("first frame" not in str(b.get("prompt")) for b in bodies) \
+                    or any(set(b) - {"prompt", "start_image_url", "duration", "aspect_ratio"} for b in bodies):
+                bad.append(f"(lk-a) Kling 컷 제출(2번·{kling}·길이 5/10·시작 그림)이 다릅니다: "
+                           f"{[(r['url'][-45:], sorted(r['payload'])) for r in klings]} {[b.get('duration') for b in bodies]}")
+            new_stills = stills[stills0:]
+            # 컷마다 자기 녹화 구간(s1·s2)의 시작(0초) 프레임이 Image 1 이다.
+            if len(new_stills) != 2 or [s["refs"][0] for s in new_stills] != [b"FRAME@0.0", b"FRAME@0.0"] \
+                    or any(s["refs"][1:] != [b"RF2", b"RF1"] for s in new_stills) \
+                    or any("photoreal" not in s["prompt"].lower() or "previz frame" not in s["prompt"] for s in new_stills):
+                bad.append(f"(lk-a) 시작 그림(첫 프레임 + 실사 정면 2장, photoreal)이 다릅니다: "
+                           f"{[(s['refs'], s['prompt'][:80]) for s in new_stills]}")
+            charges = env.ledger[led0:]
+            per_s = genmod._previz_model_unit_price(kling)  # noqa: SLF001
+            still_usd = float(genmod.vpoc_seedream.unit_usd())
+            got = sorted((c.get("kind"), c.get("model"), round(float(c.get("usd") or 0), 4)) for c in charges)
+            want = sorted([("image", genmod.vnew_settings.SEEDREAM_MODEL, round(still_usd, 4))] * 2
+                          + [("video", kling, round(per_s * 5, 4)), ("video", kling, round(per_s * 10, 4))])
+            if got != want or any(str(c.get("key")).startswith("fal-take-") for c in charges):
+                bad.append(f"(lk-a) 원장이 시작 그림 2·Kling 2 만이 아닙니다(거절 Seedance 0): {got}")
+            unit = g["units"][0]["real"]
+            fb = unit.get("fallback") or {}
+            if unit.get("status") != "completed" or not str(unit.get("outputKey")).endswith("/merged.mp4") \
+                    or fb.get("step") != 2 or fb.get("model") != kling or fb.get("tried") != ["Seedance", "Seedance 정면 1장"] \
+                    or [c.get("status") for c in fb.get("cuts") or []] != ["completed", "completed"] \
+                    or (g.get("realRun") or {}).get("realFallback") != {"step": 2, "reason": "likeness", "model": kling} \
+                    or (g.get("finalReal") or {}).get("status") != "done" or g.get("status") != "done":
+                bad.append(f"(lk-a) 칸·회차 기록·이어 붙인 결과가 다릅니다: {unit.get('status')} {unit.get('outputKey')} "
+                           f"{ {k: fb.get(k) for k in ('step', 'model', 'tried')} } {g.get('realRun')} {g.get('finalReal')} {g.get('status')}")
+            merged = env.store.blobs.get(str(unit.get("outputKey")), b"")
+            if not merged.startswith(b"MERGED:"):
+                bad.append(f"(lk-a) 컷 결과를 이어 붙이지 않았습니다: {merged[:40]!r}")
+            mats = [m for m in editmod._material_items(g, "real") if m["group"] == "current"]  # noqa: SLF001
+            if [(m["kind"], m["cutIds"], m["trimTo"]) for m in mats] != [("cut", ["c1"], 4.0), ("cut", ["c2"], 8.0)]:
+                bad.append(f"(lk-a) ⑦ 재료가 컷 2개(kind=cut, trimTo 컷 길이)가 아닙니다: {[(m['kind'], m['cutIds'], m['trimTo']) for m in mats]}")
+            gv = (((client.get(f"/api/vnew/p/{pid}/plan").get_json() or {}).get("gen")) or {})
+            want_max = round(max(genmod._take_usd(_LR_ENDPOINT, 12.0, "480p"), 2 * still_usd + per_s * 15), 2)  # noqa: SLF001
+            if (gv.get("units") or [{}])[0].get("real", {}).get("fallback") != {"step": 2, "reason": "likeness", "model": kling,
+                                                                               "total": 2, "done": 2} \
+                    or max_view != {"usd": want_max, "model": kling} or (gv.get("realFallbackMax") or {}).get("usd") != want_max:
+                bad.append(f"(lk-a) gen_view fallback·realFallbackMax 가 다릅니다: {(gv.get('units') or [{}])[0].get('real', {}).get('fallback')} "
+                           f"{max_view} want {want_max}")
+
+            # ================= (lk-b) 첫 Seedance 성공 → Kling 0 =================
+            pid_b = "prj_lk_b"
+            usd_b = ready(pid_b)
+            policy["reject"] = lambda req: False
+            since, led0, stills0 = len(env.requests), len(env.ledger), len(stills)
+            client.post(f"/api/vnew/p/{pid_b}/generate/real", json={"confirmUsd": usd_b})
+            g_b = env.drive(pid_b)
+            news = env.requests[since:]
+            takes = [c for c in env.ledger[led0:] if str(c.get("key")).startswith("fal-take-")]
+            if [r for r in news if kling_req(r)] or len(stills) != stills0 or len([r for r in news if seedance_real(r)]) != 1 \
+                    or len(takes) != 1 or len(env.ledger) - led0 != 1 or (g_b.get("finalReal") or {}).get("status") != "done" \
+                    or "fallback" in g_b["units"][0]["real"]:
+                bad.append(f"(lk-b) 첫 제출 성공인데 Kling·시작 그림이 있거나 원장이 1건이 아닙니다: {len(news)} {env.ledger[led0:]}")
+
+            # ================= (lk-c) 거절이 아닌 실패 · 모든 단계 거절 =================
+            pid_c = "prj_lk_c"
+            usd_c = ready(pid_c)
+            since, led0 = len(env.requests), len(env.ledger)
+            env.reject.add("real")  # 소리 검사 거절(likeness 아님)
+            client.post(f"/api/vnew/p/{pid_c}/generate/real", json={"confirmUsd": usd_c})
+            g_c = env.drive(pid_c)
+            cell_c = g_c["units"][0]["real"]
+            if cell_c.get("status") != "failed" or cell_c.get("failureKind") != "audio" or "fallback" in cell_c \
+                    or len(env.requests) - since != 1 or len(env.ledger) - led0 != 1:
+                bad.append(f"(lk-c) 거절이 아닌 실패가 단계로 넘어갔거나 원장이 1건이 아닙니다: {cell_c.get('status')} "
+                           f"{cell_c.get('failureKind')} {len(env.requests) - since} {len(env.ledger) - led0}")
+            pid_d = "prj_lk_d"
+            usd_d = ready(pid_d)
+            policy["reject"] = lambda req: seedance_real(req) or kling_req(req)
+            since = len(env.requests)
+            client.post(f"/api/vnew/p/{pid_d}/generate/real", json={"confirmUsd": usd_d})
+            g_d = env.drive(pid_d)
+            cell_d = g_d["units"][0]["real"]
+            news = env.requests[since:]
+            want_err = genmod.REAL_FALLBACK_FAIL.format(steps="Seedance → Seedance 정면 1장 → 컷 단위 Kling")
+            if cell_d.get("status") != "failed" or cell_d.get("error") != want_err or cell_d.get("failureKind") != "likeness" \
+                    or len([r for r in news if seedance_real(r)]) != 2 or len([r for r in news if kling_req(r)]) != 2:
+                bad.append(f"(lk-c) 모든 단계 거절 → failed·시도한 단계 문구가 아닙니다: {cell_d.get('status')} {cell_d.get('error')!r}")
+            # 2단계 모델이 등록표에 없으면 건너뛰고 1단계 뒤 실패(문구에 건너뜀).
+            env.set(genmod.vnew_settings, "VNEW_TAKE_REAL_KLING_MODEL", "fal-ai/none/image-to-video")
+            pid_e = "prj_lk_e"
+            usd_e = ready(pid_e)
+            policy["reject"] = seedance_real
+            since = len(env.requests)
+            client.post(f"/api/vnew/p/{pid_e}/generate/real", json={"confirmUsd": usd_e})
+            cell_e = env.drive(pid_e)["units"][0]["real"]
+            if cell_e.get("status") != "failed" or genmod.REAL_FALLBACK_NO_KLING.strip() not in str(cell_e.get("error")) \
+                    or len(env.requests) - since != 2 or genmod.real_fallback_max(env.plan(pid_e), env.gen(pid_e)) is not None:
+                bad.append(f"(lk-c) Kling 미등록에서 2단계 건너뜀·최대 금액 없음이 아닙니다: {cell_e.get('error')!r}")
+
+        # ================= (lk-d) 화면 =================
+        vjs = (PUBLIC / "vnew.js").read_text(encoding="utf-8")
+        node = shutil.which("node")
+        a = vjs.find("  /* ---- 작업 130: 실사 likeness 거절 단계")
+        b = vjs.find("  /* 확인창: 테이크 수·초·해상도·금액 숫자")
+        section = vjs[a:b] if 0 <= a < b else ""
+        if not section or "innerHTML" in section:
+            bad.append("(lk-d) vnew.js 작업 130 구역이 없거나 innerHTML 을 씁니다")
+        for text in ("var fallbackMax = realFallbackMaxText(gen); // 작업 130 보완 1",
+                     'var fallbackLine = variant.key === "real" ? realFallbackText(v, unit) : "";'):
+            if vjs.count(text) != 1:
+                bad.append(f"(lk-d) vnew.js 에 {text!r} 가 한 번 있지 않습니다")
+        if node and section:
+            script = section + """
+console.log(JSON.stringify({
+  max: [realFallbackMaxText({realFallbackMax: {usd: 3.5, model: "k"}}), realFallbackMaxText({}), realFallbackMaxText(null)],
+  step: [realFallbackText({status: "submitted", fallback: {step: 1}}, {cutIds: ["c1"]}),
+         realFallbackText({status: "submitted", fallback: {step: 2, done: 1, total: 3}}, {cutIds: ["c1"]}),
+         realFallbackText({status: "queued", fallback: {step: 2}}, {cutIds: ["c1", "c2"]}),
+         realFallbackText({status: "failed", fallback: {step: 2}}, {}), realFallbackText({status: "submitted"}, {})]
+}));
+"""
+            got, err = _lr_run_node(node, script, "lk_")
+            want = {"max": ["거절되면 컷 단위 Kling으로 바뀌어 금액이 달라질 수 있음(최대 $3.50)", "", ""],
+                    "step": ["실존 인물 검사에 걸려 정면 1장으로 다시 만드는 중", "Seedance 거절 → 컷 단위 Kling으로 만드는 중 (1/3컷)",
+                             "Seedance 거절 → 컷 단위 Kling으로 만드는 중 (0/2컷)", "", ""]}
+            if got != want:
+                bad.append(f"(lk-d) 화면 함수 결과가 다릅니다: {got} {err}")
+        elif not node:
+            warn("node 가 없어 작업 130 화면 함수 실행을 건너뜁니다")
+        result = subprocess.run([node, "--check", str(PUBLIC / "vnew.js")], capture_output=True, text=True) if node else None
+        if result is not None and result.returncode != 0:
+            bad.append("(lk-d) node --check vnew.js 실패: " + (result.stderr or "")[:300])
+    except Exception:  # noqa: BLE001
+        bad.append("작업 130 검사 예외\n" + _tb.format_exc())
+    if bad:
+        fail("작업 130 실사 likeness 단계 검사 실패\n  " + "\n  ".join(bad))
+    else:
+        ok("작업 130 실사 likeness 단계 (lk-a)거절 → 정면 1장 → 컷 단위 Kling(시작 그림·5/10초·원장·이어 붙임·⑦ 컷 재료·최대 금액) "
+           "(lk-b)첫 제출 성공 Kling 0 (lk-c)소리 거절 그대로·모든 단계 거절 문구·Kling 미등록 건너뜀 (lk-d)node --check·문구")
+
+
 def main() -> int:
     print("== vpoc1 check ==")
     check_compileall()
@@ -47528,6 +47752,7 @@ def main() -> int:
     check_vnew_fx_who_127()
     check_vnew_location_speed_128()
     check_vnew_real_from_3d_126()
+    check_vnew_real_likeness_130()
     check_vnew_plan_step_stay_129()
     check_pod_zones()
     print()

@@ -2378,7 +2378,8 @@
       cells.map(function (cell) {
         var w = (cell || {}).webtoon || {};
         var r = (cell || {}).real || {};
-        return [w.status || "", w.failureKind || "", r.status || "", r.failureKind || ""];
+        var fb = r.fallback ? [r.fallback.step || 0, r.fallback.done || 0, r.fallback.total || 0] : null; // 작업 130 단계·진행
+        return [w.status || "", w.failureKind || "", r.status || "", r.failureKind || "", fb];
       }),
       finalOf(g.finalWebtoon),
       finalOf(g.finalReal),
@@ -7075,6 +7076,8 @@
       el("span", "vnew-badge-gen is-" + (v.status || "waiting"), genStatusLabel(v.status || "waiting"))
     );
     cell.appendChild(head);
+    var fallbackLine = variant.key === "real" ? realFallbackText(v, unit) : ""; // 작업 130: likeness 단계 문구
+    if (fallbackLine) cell.appendChild(el("p", "vnew-hint vnew-real-fallback", fallbackLine));
 
     if (v.status === "completed" && v.videoUrl) {
       var video = el("video", "vnew-seg-video");
@@ -7742,6 +7745,25 @@
     return scrim;
   }
 
+  /* ---- 작업 130: 실사 likeness 거절 단계(⑤ 실사 행 문구·확인창 최대 금액) ---- */
+  /* 확인창 안내: 서버 gen.realFallbackMax {usd, model}(컷 단위 Kling 을 쓸 수 없으면 없다) → 문구, 없으면 "". */
+  function realFallbackMaxText(gen) {
+    var max = (gen || {}).realFallbackMax;
+    var usd = Number((max || {}).usd);
+    if (!max || !(usd > 0)) return "";
+    return "거절되면 컷 단위 Kling으로 바뀌어 금액이 달라질 수 있음(최대 $" + usd.toFixed(2) + ")";
+  }
+
+  /* 실사 칸의 단계 문구(칸 fallback {step, done, total}). 단계가 없거나 실패·취소면 "". 컷 수는 제출 전이면 테이크 컷 수. */
+  function realFallbackText(v, unit) {
+    var fb = (v || {}).fallback;
+    if (!fb || !fb.step || v.status === "failed" || v.status === "cancelled") return "";
+    var total = Number(fb.total) || ((unit || {}).cutIds || []).length;
+    if (fb.step === 1) return v.status === "completed" ? "실존 인물 검사에 걸려 정면 1장으로 다시 만들었습니다" : "실존 인물 검사에 걸려 정면 1장으로 다시 만드는 중";
+    if (v.status === "completed") return "Seedance 거절 → 컷 단위 Kling으로 만들었습니다 (" + total + "컷)";
+    return "Seedance 거절 → 컷 단위 Kling으로 만드는 중 (" + (Number(fb.done) || 0) + "/" + total + "컷)";
+  }
+
   /* 확인창: 테이크 수·초·해상도·금액 숫자 + "소리도 만들기"(기본 켬) → POST /generate/real {confirmUsd, audio}.
      409 CostMismatch(운영에서도 type 은 남는다) → GET /plan 으로 새 금액을 읽어 확인창 글을 바꾸고, 다시 누를 때 새 금액으로
      보낸다. 다시 읽은 gen 이 시작할 수 없으면(설정 끔·진행 중 등) 창을 닫고 화면을 다시 그린다(realBlock 이 보인다). */
@@ -7762,6 +7784,8 @@
     var bodyWrap = el("div", "vnew-modal-body");
     var lead = el("p", "vnew-real-confirm-text", takeRealConfirmText(est));
     bodyWrap.appendChild(lead);
+    var fallbackMax = realFallbackMaxText(gen); // 작업 130 보완 1
+    if (fallbackMax) bodyWrap.appendChild(el("p", "vnew-hint vnew-real-fallback-max", fallbackMax));
     if (withCast) bodyWrap.appendChild(el("p", "vnew-hint vnew-real-cast", takeRealCastText(cast)));
     if (gen && gen.realRun) {
       bodyWrap.appendChild(el("p", "vnew-hint", "지금 실사 결과는 '이전 실사 보기'로 남습니다."));
