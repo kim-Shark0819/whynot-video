@@ -130,6 +130,11 @@ def final_real_run_key(owner: str, pid: str, gen_id: str, n: int) -> str:
     return f"{_gen_root(owner, pid, gen_id)}/final-real-r{int(n)}.mp4"
 
 
+def final_real_fixed_key(owner: str, pid: str, gen_id: str, n: int) -> str:
+    """작업 134: 실사 회차 n 을 다시 이어 붙인 병합본(remerge_real_cuts). 원래 final-real-r{n}.mp4 를 덮어쓰지 않는다."""
+    return f"{_gen_root(owner, pid, gen_id)}/final-real-r{int(n)}-fixed.mp4"
+
+
 def final_webtoon_key(owner: str, pid: str, gen_id: str) -> str:
     return f"{_gen_root(owner, pid, gen_id)}/final-webtoon.mp4"
 
@@ -314,6 +319,62 @@ def _trim_clip(mp4: bytes, seconds: float) -> bytes:
             handle.write(mp4)
         out = os.path.join(workdir, "trimmed.mp4")
         stitcher.trim(src, out, start_sec=0.0, end_sec=max(0.1, float(seconds)))
+        with open(out, "rb") as handle:
+            return handle.read()
+
+
+# 작업 134: 컷 단위 실사를 이을 때 컷마다 맞추는 형식. Kling 원래 컷(Main·오디오 먼저·스테레오 44.1k)과 QA 로 다시 만든 컷
+# (Constrained Baseline·비디오 먼저·모노)이 섞이면 스트림 복사 concat 이 깨진다(missing picture in access unit, 길이 39.64초).
+REAL_CUT_FPS = 24
+REAL_CUT_SIZE = (1920, 1080)
+
+
+def _real_cut_seconds(cut: dict) -> float:
+    """컷을 자를 길이(작업 134): 그 컷의 콘티 길이(seconds). 3초로 채운 컷(padded)은 원래 길이(origSeconds). 없으면 0(영상 길이)."""
+    cut = cut if isinstance(cut, dict) else {}
+    if cut.get("padded") and float(cut.get("origSeconds") or 0) > 0:
+        return float(cut["origSeconds"])
+    return max(0.0, float(cut.get("seconds") or 0))
+
+
+def _conform_concat(pieces: list[tuple[bytes, float]]) -> bytes:
+    """컷마다 같은 형식으로 맞춘 뒤 잇는다(작업 134). pieces = [(mp4, 자를 길이 초 — 0 이하면 그 영상 길이)].
+
+    컷마다 stitcher.edit_segment: 0초부터 frames = round(초 × 24)장, -map 0:v:0, 1920x1080(비율 유지·검은 여백), 24fps, yuv420p,
+    libx264 crf 20(High). 소리는 있으면 -map 0:a:0, 없으면 무음 — 둘 다 48kHz 스테레오 PCM 으로 정확히 frames/24 초.
+    그다음 stitcher.edit_join: 맞춘 영상은 스트림 복사로 잇고, 이은 PCM 을 AAC 48k 스테레오로 한 번 인코딩한다.
+    영상이 콘티 길이보다 1초 넘게 짧으면 영상 길이 + 0.9초까지만 쓴다(edit_segment 의 마지막 프레임 복제가 1초다).
+    못 읽는 컷이 있으면 StitchError.
+    """
+    if not pieces:
+        raise stitcher.StitchError("이어 붙일 컷이 없습니다.")
+    fps = REAL_CUT_FPS
+    width, height = REAL_CUT_SIZE
+    with tempfile.TemporaryDirectory(prefix="vnew-conform-") as workdir:
+        videos: list[str] = []
+        pcm_all = os.path.join(workdir, "audio.pcm")
+        with open(pcm_all, "wb") as joined:
+            for index, (mp4, seconds) in enumerate(pieces):
+                src = os.path.join(workdir, f"src-{index:03d}.mp4")
+                with open(src, "wb") as handle:
+                    handle.write(mp4 or b"")
+                info = stitcher.probe_media(src)
+                length = float(info.get("duration") or 0)
+                if length <= 0 or not info.get("width"):
+                    raise stitcher.StitchError(f"컷 {index + 1} 영상을 읽지 못했습니다.")
+                target = float(seconds or 0)
+                target = min(target, length + 0.9) if target > 0 else length
+                video = os.path.join(workdir, f"cut-{index:03d}.mp4")
+                pcm = os.path.join(workdir, f"cut-{index:03d}.pcm")
+                stitcher.edit_segment(src, video, start_sec=0.0, frames=max(1, round(target * fps)), fps=fps, width=width,
+                                      height=height, audio_out=pcm, audio_from_source=bool(info.get("hasAudio")))
+                os.unlink(src)
+                with open(pcm, "rb") as handle:
+                    joined.write(handle.read())
+                os.unlink(pcm)
+                videos.append(video)
+        out = os.path.join(workdir, "merged.mp4")
+        stitcher.edit_join(videos, out, audio_path=pcm_all)
         with open(out, "rb") as handle:
             return handle.read()
 
@@ -1338,11 +1399,14 @@ def _real_run_summary(gen: dict) -> dict:
     units = []
     for unit in gen.get("units") or []:
         state = unit.get("real") or {}
+        # 작업 134: 컷 단위 실사 칸이면 이어 붙인 컷 목록 {cutId, outputKey, qa(QA 로 다시 만든 쪽)}(없으면 키 없음 — 옛 요약과 같다).
+        cuts = state.get("mergedCuts") or _real_cut_list((state.get("fallback") or {}).get("cuts"))
         units.append({
             "id": str(unit.get("id") or ""),
             "status": str(state.get("status") or ""),
             "outputKey": str(state.get("outputKey") or ""),
             "error": str(state.get("error") or "")[:300],
+            **({"cuts": [dict(c) for c in cuts]} if cuts else {}),
         })
     states = [u["status"] for u in units]
     if final.get("status") == "done":
@@ -1358,6 +1422,8 @@ def _real_run_summary(gen: dict) -> dict:
         "startedAt": str(run.get("startedAt") or ""),
         "status": status,
         "finalKey": str(final.get("key") or "") if final.get("status") == "done" else "",
+        # 작업 134: remerge 로 고친 회차는 원래(깨진) 병합본 키를 남긴다.
+        **({"finalKeyBroken": str(final["finalKeyBroken"])} if final.get("finalKeyBroken") else {}),
         "audio": bool(run.get("audio")),
         "units": units,
         # 작업 126: 인물 바꾸기 회차만 cast 를 남긴다(없으면 키 없음 — 옛 요약과 같다).
@@ -5024,24 +5090,35 @@ def _do_poll_real_cuts(owner: str, pid: str, gen_id: str, index: int, claim: str
 
 
 def _merge_real_cuts(owner: str, pid: str, gen_id: str, index: int, claim: str, cuts: list[dict]) -> None:
-    """컷 결과를 컷 길이로 잘라(못 자르면 그대로) 이어 붙여 그 테이크 실사 결과(outputKey)로 둔다. 컷 결과 파일은 그대로 남는다."""
+    """컷 결과를 이어 붙여 그 테이크 실사 결과(outputKey)로 둔다. 컷 결과 파일은 그대로 남는다.
+
+    작업 134: 컷마다 같은 형식으로 맞추고 콘티 길이(_real_cut_seconds)로 자른 뒤 잇는다(_conform_concat). 맞추지 못하면(못 읽는
+    컷) 경고를 남기고 예전 방식(길면 _trim_clip, 그다음 _concat)으로 잇는다.
+    """
     plan, _ = plan_mod.load_plan(owner, pid)
     take = _previz_cells(plan.get("gen") or {})[index]
-    clips = []
-    for cut in cuts:
-        clip = _fetch_bytes(str(cut.get("outputKey") or ""), bucket=vpoc_settings.VIDEO_BUCKET)
-        seconds = float(cut.get("seconds") or 0)
-        if seconds > 0 and float(cut.get("duration") or 0) > seconds + 0.05:
-            try:
-                clip = _trim_clip(clip, seconds)
-            except Exception as exc:  # noqa: BLE001 — 자르지 못하면 Kling 길이 그대로 잇는다(⑦ 재료는 trimTo 로 맞춘다).
-                log.warning("vnew.gen.real_cut_trim_failed pid=%s cut=%s err=%s", pid, cut.get("cutId"), type(exc).__name__)
-        clips.append(clip)
-    merged = clips[0] if len(clips) == 1 else _concat(clips)
+    pieces = [(_fetch_bytes(str(cut.get("outputKey") or ""), bucket=vpoc_settings.VIDEO_BUCKET), _real_cut_seconds(cut))
+              for cut in cuts]
+    try:
+        merged = _conform_concat(pieces)
+    except Exception as exc:  # noqa: BLE001 — 맞추지 못하면 예전 방식으로 잇는다.
+        log.warning("vnew.gen.real_cut_conform_failed pid=%s take=%s err=%s", pid, take.get("id"), _msg(exc))
+        clips = []
+        for cut, (clip, _seconds) in zip(cuts, pieces):
+            seconds = float(cut.get("seconds") or 0)
+            if seconds > 0 and float(cut.get("duration") or 0) > seconds + 0.05:
+                try:
+                    clip = _trim_clip(clip, seconds)
+                except Exception as trim_exc:  # noqa: BLE001 — 자르지 못하면 Kling 길이 그대로 잇는다(⑦ 재료는 trimTo 로 맞춘다).
+                    log.warning("vnew.gen.real_cut_trim_failed pid=%s cut=%s err=%s", pid, cut.get("cutId"),
+                                type(trim_exc).__name__)
+            clips.append(clip)
+        merged = clips[0] if len(clips) == 1 else _concat(clips)
+    del pieces
     attempt = int((take.get("real") or {}).get("attempt") or 1)
     key = f"{_seg_output_prefix(owner, pid, gen_id, str(take.get('id') or index) + '-real-cuts', attempt).rstrip('/')}/merged.mp4"
     STORE.put_bytes(key, merged, "video/mp4", bucket=vpoc_settings.VIDEO_BUCKET)
-    del clips, merged
+    del merged
 
     def mutator(data: dict) -> None:
         g = data.get("gen") or {}
@@ -5052,6 +5129,152 @@ def _merge_real_cuts(owner: str, pid: str, gen_id: str, index: int, claim: str, 
 
     _commit(owner, pid, mutator)
     log.info("vnew.gen.real_cut_merged pid=%s take=%s cuts=%d", pid, take.get("id"), len(cuts))
+
+
+# ================================================================ 작업 134: 끝난 실사 회차 다시 이어 붙이기
+#
+# 컷 단위 실사 회차의 병합본이 깨졌을 때(형식이 다른 컷을 스트림 복사로 이음) 새 생성 없이 남아 있는 컷 결과로 다시 잇는다. 유료 호출 0.
+
+_REAL_CUTS_MERGED = re.compile(r"/([^/]+)-real-cuts-(\d+)/merged\.mp4$")
+
+
+def _is_qa_cut_key(key: str, cut_id: str) -> bool:
+    """그 컷 결과 키가 QA 로 다시 만든 쪽(출력 접두사 꼬리 "-qa", _submit_real_cut tag)인지."""
+    return f"-real-{cut_id}-qa-" in str(key or "")
+
+
+def _real_cut_list(cuts) -> list[dict]:
+    """칸 fallback.cuts → 이어 붙인 컷 목록 [{cutId, outputKey, qa}](완료·키 있는 것만, 컷 순서)."""
+    out: list[dict] = []
+    for cut in cuts or []:
+        if isinstance(cut, dict) and cut.get("status") == "completed" and cut.get("outputKey"):
+            cut_id, key = str(cut.get("cutId") or ""), str(cut["outputKey"])
+            out.append({"cutId": cut_id, "outputKey": key, "qa": _is_qa_cut_key(key, cut_id)})
+    return out
+
+
+def _find_real_cut_key(owner: str, pid: str, gen_id: str, take_id: str, cut_id: str, attempt: int) -> str:
+    """S3 에서 그 컷 결과(…/output.mp4)를 찾는다. QA 로 다시 만든 쪽(<take>-real-<cutId>-qa-<attempt>/)을 먼저, 없으면 첫 결과
+    (<take>-real-<cutId>-<attempt>/). 여럿이면 키 이름 순 마지막. 없으면 ""."""
+    for tag in ("-qa", ""):
+        prefix = _seg_output_prefix(owner, pid, gen_id, f"{take_id}-real-{cut_id}{tag}", attempt).rstrip("/") + "/"
+        keys = sorted(str(item.get("key") or "") for item in STORE.list_keys(prefix, bucket=vpoc_settings.VIDEO_BUCKET)
+                      if str(item.get("key") or "").endswith("/output.mp4"))
+        if keys:
+            return keys[-1]
+    return ""
+
+
+def _run_n(value) -> int:
+    try:
+        return int(value or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def remerge_real_cuts(owner: str, pid: str, gen_id: str, run_n: int) -> dict:
+    """끝난 실사 회차 run_n 을 새 생성 없이 다시 이어 붙인다(작업 134, 관리자 경로). 유료 호출·원장 0.
+
+    회차 = 지금 회차(gen.realRun.n) 또는 gen.realHistory 의 n. 테이크마다 컷 결과 키를 기록(지금 회차는 칸 mergedCuts·fallback.cuts,
+    이전 회차는 history units[].cuts)에서 찾고, 없으면 테이크 결과 키(…/<take>-real-cuts-<attempt>/merged.mp4)의 attempt 로 S3 에서
+    찾는다(_find_real_cut_key, QA 쪽 우선). 컷 길이는 _real_cut_seconds(기록, 없으면 콘티 컷). 컷 단위가 아닌 테이크는 테이크 결과를
+    그 길이 그대로 쓴다. 전부 _conform_concat 으로 맞춰 이어 final-real-r{n}-fixed.mp4 에 둔다(원래 병합본은 그대로 남는다).
+    기록: 지금 회차는 finalReal{key=새 키, finalKeyBroken=원래 키, status done}·칸 real.mergedCuts, 이전 회차는 그 항목
+    finalKey·finalKeyBroken·status done·units[].cuts. finalKeyBroken 은 처음 고칠 때의 원래 키를 지킨다.
+    반환 {n, key, finalKeyBroken, bytes, takes[{id, cuts[{cutId, outputKey, qa}]}]}.
+    """
+    where = "vnew.generate.remerge"
+    n = _run_n(run_n)
+    plan, _ = plan_mod.load_plan(owner, pid)
+    gen = plan.get("gen") or {}
+    if n <= 0 or not gen_id or str(gen.get("genId") or "") != gen_id or gen.get("mode") != "previz-take":
+        raise VpocError(where, "RunNotFound", "그 실사 회차를 찾을 수 없습니다.", 404)
+    current = _run_n((gen.get("realRun") or {}).get("n")) == n
+    if current:
+        if gen.get("status") == "running" and not _gen_stale(gen):
+            raise VpocError(where, "RealRunning", "영상 생성이 진행 중입니다. 끝난 뒤에 다시 눌러 주세요.", 409)
+        rows = [(str(u.get("id") or ""), u.get("real") if isinstance(u.get("real"), dict) else {})
+                for u in gen.get("units") or [] if isinstance(u, dict)]
+        old_key = str((gen.get("finalReal") or {}).get("key") or "")
+    else:
+        item = next((h for h in gen.get("realHistory") or [] if isinstance(h, dict) and _run_n(h.get("n")) == n), None)
+        if item is None:
+            raise VpocError(where, "RunNotFound", "그 실사 회차를 찾을 수 없습니다.", 404)
+        rows = [(str(u.get("id") or ""), u) for u in item.get("units") or [] if isinstance(u, dict)]
+        old_key = str(item.get("finalKey") or "")
+    if not rows:
+        raise VpocError(where, "NoClips", "이어 붙일 영상이 없습니다.", 409)
+    takes = {str(u.get("id") or ""): u for u in gen.get("units") or [] if isinstance(u, dict)}
+    pieces: list[tuple[bytes, float]] = []
+    used: list[dict] = []
+    for take_id, state in rows:
+        if state.get("status") != "completed":
+            raise VpocError(where, "RunIncomplete", f"테이크 {take_id} 이 끝나지 않은 회차입니다.", 409)
+        take = takes.get(take_id)
+        seconds = {str(c.get("cutId") or ""): _real_cut_seconds(c) for c in (_take_cut_units(plan, take) if take else [])}
+        fallback_cuts = [c for c in (state.get("fallback") or {}).get("cuts") or [] if isinstance(c, dict)] if current else []
+        seconds.update({str(c.get("cutId") or ""): _real_cut_seconds(c) for c in fallback_cuts})
+        listed = (state.get("mergedCuts") or _real_cut_list(fallback_cuts)) if current else state.get("cuts")
+        cuts = [{"cutId": str(r.get("cutId") or ""), "outputKey": str(r["outputKey"]),
+                 "qa": _is_qa_cut_key(str(r["outputKey"]), str(r.get("cutId") or ""))}
+                for r in listed or [] if isinstance(r, dict) and r.get("outputKey")]
+        take_key = str(state.get("outputKey") or "")
+        match = _REAL_CUTS_MERGED.search(take_key)
+        if not cuts and match:  # 기록에 컷 목록이 없다(작업 134 전 회차) → S3
+            for unit in _take_cut_units(plan, take) if take else []:
+                cut_id = str(unit.get("cutId") or "")
+                key = _find_real_cut_key(owner, pid, gen_id, take_id, cut_id, int(match.group(2)))
+                if not key:
+                    raise VpocError(where, "CutMissing", f"테이크 {take_id} 컷 {cut_id} 결과를 찾지 못했습니다.", 409)
+                cuts.append({"cutId": cut_id, "outputKey": key, "qa": _is_qa_cut_key(key, cut_id)})
+            if not cuts:
+                raise VpocError(where, "CutMissing", f"테이크 {take_id} 의 컷을 찾지 못했습니다.", 409)
+        if cuts:
+            for cut in cuts:
+                pieces.append((_fetch_bytes(cut["outputKey"], bucket=vpoc_settings.VIDEO_BUCKET), seconds.get(cut["cutId"], 0.0)))
+        elif take_key:
+            pieces.append((_fetch_bytes(take_key, bucket=vpoc_settings.VIDEO_BUCKET), 0.0))
+        else:
+            raise VpocError(where, "NoClips", f"테이크 {take_id} 결과가 없습니다.", 409)
+        used.append({"id": take_id, "cuts": cuts})
+    merged = _conform_concat(pieces)
+    del pieces
+    key = final_real_fixed_key(owner, pid, gen_id, n)
+    STORE.put_bytes(key, merged, "video/mp4", bucket=vpoc_settings.VIDEO_BUCKET)
+    size = len(merged)
+    del merged
+    by_take = {t["id"]: t["cuts"] for t in used if t["cuts"]}
+    box = {"broken": old_key}
+
+    def mutator(data: dict) -> None:
+        g = data.get("gen") or {}
+        changed = VpocError(where, "RunChanged", "회차 기록이 바뀌었습니다. 다시 눌러 주세요.", 409)
+        if str(g.get("genId") or "") != gen_id:
+            raise changed
+        if current:
+            if _run_n((g.get("realRun") or {}).get("n")) != n:
+                raise changed
+            final = dict(g.get("finalReal") or {})
+            box["broken"] = str(final.get("finalKeyBroken") or "") or old_key
+            final.update(status="done", key=key, error="", n=n, finalKeyBroken=box["broken"])
+            g["finalReal"] = final
+            for unit in g.get("units") or []:
+                if isinstance(unit, dict) and isinstance(unit.get("real"), dict) and by_take.get(str(unit.get("id") or "")):
+                    unit["real"]["mergedCuts"] = [dict(c) for c in by_take[str(unit.get("id") or "")]]
+            return
+        entry = next((h for h in g.get("realHistory") or [] if isinstance(h, dict) and _run_n(h.get("n")) == n), None)
+        if entry is None:
+            raise changed
+        box["broken"] = str(entry.get("finalKeyBroken") or "") or old_key
+        entry.update(status="done", finalKey=key, finalKeyBroken=box["broken"])
+        for unit in entry.get("units") or []:
+            if isinstance(unit, dict) and by_take.get(str(unit.get("id") or "")):
+                unit["cuts"] = [dict(c) for c in by_take[str(unit.get("id") or "")]]
+
+    _commit(owner, pid, mutator)
+    log.info("vnew.gen.real_remerged pid=%s n=%d takes=%d cuts=%d qa=%d bytes=%d", pid, n, len(used),
+             sum(len(t["cuts"]) for t in used), sum(1 for t in used for c in t["cuts"] if c["qa"]), size)
+    return {"n": n, "key": key, "finalKeyBroken": box["broken"], "bytes": size, "takes": used}
 
 
 def real_fallback_max(plan: dict, gen: dict) -> dict | None:

@@ -19,6 +19,11 @@ from . import characters
 from . import plan as plan_mod
 
 
+def _no_admin() -> bool:
+    """is_admin 이 주입되지 않으면 관리자가 아니다(fail-closed)."""
+    return False
+
+
 @dataclass
 class VnewDependencies:
     """server.py 가 주입한다. `g` 에 의존하는 것은 전부 호출자에서 받는다.
@@ -37,6 +42,8 @@ class VnewDependencies:
     # 프로젝트 소유자 username → S3 키 소유자 접두사(safe_user_prefix). 주입되지 않으면 그대로 쓴다
     # (검사에서는 이미 안전한 값을 넣으므로 항등이면 된다).
     project_owner_prefix: Callable[[str], str] | None = None
+    # 작업 134: 관리자 판별(다시 이어 붙이기 경로). 주입하지 않으면 거부(_no_admin) — vpoc 와 같다.
+    is_admin: Callable[[], bool] = _no_admin
 
 
 def create_blueprint(deps: VnewDependencies) -> Blueprint:
@@ -859,6 +866,25 @@ def create_blueprint(deps: VnewDependencies) -> Blueprint:
             run = generate.start_real(owner, pid, confirm_usd, audio=audio, cast=payload.get("cast"))
             data, _ = plan_mod.load_plan(owner, pid)
             return jsonify({"ok": True, "run": run, "plan": plan_mod.plan_view(owner, pid, data)}), 202
+        except Exception as exc:  # noqa: BLE001
+            return _fail(exc)
+
+    # 작업 134: 끝난 실사 회차 n 을 새 생성 없이 다시 이어 붙인다(컷마다 형식 맞춤). 관리자만, 소유자 확인, 유료 호출 0.
+    # 새 키 final-real-r{n}-fixed.mp4 에 두고 회차 기록 finalKey 를 바꾼다(원래 키는 finalKeyBroken).
+    @bp.post("/p/<pid>/generate/real/<int:n>/remerge")
+    @deps.require_auth
+    def plan_generate_real_remerge(pid: str, n: int):
+        try:
+            from . import generate  # noqa: PLC0415
+
+            if not deps.is_admin():
+                raise VpocError("vnew.generate.remerge", "AdminOnly", "관리자만 다시 이어 붙일 수 있습니다.", 403)
+            owner = _project_for(pid, write=True)
+            data, _ = plan_mod.load_plan(owner, pid)
+            gen_id = str((data.get("gen") or {}).get("genId") or "")
+            result = generate.remerge_real_cuts(owner, pid, gen_id, n)
+            data, _ = plan_mod.load_plan(owner, pid)
+            return jsonify({"ok": True, "remerge": result, "plan": plan_mod.plan_view(owner, pid, data)})
         except Exception as exc:  # noqa: BLE001
             return _fail(exc)
 
