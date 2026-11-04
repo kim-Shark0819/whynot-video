@@ -4479,6 +4479,57 @@ def _charge_kling_cut(owner: str, pid: str, gen_id: str, token: str, endpoint: s
         log.warning("vnew.gen.charge_kling_cut_failed pid=%s err=%s", pid, str(exc)[:200])
 
 
+def _keep_cut_still(pid: str, out_prefix: str, still: bytes) -> str:
+    """작업 131: 컷 시작 그림을 {컷 결과 접두사}/start.jpg 로 남긴다(영상 버킷). 반환 키, 실패면 ""(경고 1줄 — 제출은 막지 않는다)."""
+    key = f"{str(out_prefix or '').rstrip('/')}/start.jpg"
+    try:
+        STORE.put_bytes(key, still, "image/jpeg", bucket=vpoc_settings.VIDEO_BUCKET)
+        return key
+    except Exception as exc:  # noqa: BLE001
+        log.warning("vnew.gen.real_cut_still_keep_failed pid=%s err=%s", pid, type(exc).__name__)
+        return ""
+
+
+def _log_kling_cut_result(owner: str, pid: str, gen_id: str, take_id: str, cut: dict) -> None:
+    """작업 131: 조회가 끝난 Kling 컷의 기록(칸 "real:테이크id#컷id", 같은 invocationArn)을 completed·failed 로. 예외를 내지 않는다."""
+    status = str((cut or {}).get("status") or "")
+    arn = str((cut or {}).get("invocationArn") or "")
+    if not vnew_settings.VNEW_EDIT_RETAKE or not arn or status not in ("completed", "failed"):
+        return
+    try:
+        from . import retake as vnew_retake  # noqa: PLC0415 — retake 가 generate 를 import 한다(순환 피함).
+
+        vnew_retake.log_result(owner, pid, gen_id, f"real:{take_id}#{cut.get('cutId') or ''}", arn, status,
+                               output_key=str(cut.get("outputKey") or ""), error=str(cut.get("error") or ""))
+    except Exception as exc:  # noqa: BLE001 — 기록은 영상 생성을 막지 않는다.
+        log.warning("vnew.gen.prompt_log_failed pid=%s cell=%s stage=result err=%s", pid, take_id, type(exc).__name__)
+
+
+def _kling_cut_record(gen: dict, variant: str, cell_id) -> tuple[int, dict, dict] | None:
+    """작업 131: ⑦ 컷 단위 Kling 실사 재료의 칸 "테이크id#컷id"(edit._material_items) → (테이크 index, 테이크 칸, 컷 기록 fallback.cuts 한 줄).
+    실사·통 테이크이고 그 테이크 칸에 그 컷 기록이 있을 때만, 아니면 None."""
+    text = str(cell_id or "")
+    gen = gen if isinstance(gen, dict) else {}
+    if variant != "real" or str(gen.get("mode") or "") != "previz-take" or "#" not in text:
+        return None
+    take_id, _, cut_id = text.partition("#")
+    for index, take in enumerate(_previz_cells(gen)):
+        if not isinstance(take, dict) or str(take.get("id") or "") != take_id:
+            continue
+        state = take.get("real") if isinstance(take.get("real"), dict) else {}
+        fallback = state.get("fallback") if isinstance(state.get("fallback"), dict) else {}
+        record = next((c for c in fallback.get("cuts") or [] if isinstance(c, dict) and str(c.get("cutId") or "") == cut_id), None)
+        return (index, take, record) if record is not None else None
+    return None
+
+
+def _kling_cut_model_of(take: dict) -> str:
+    """작업 131: 그 테이크 컷 단위 Kling 단계에 쓴 모델(칸 fallback.model, 없으면 지금 설정)."""
+    state = (take or {}).get("real") if isinstance((take or {}).get("real"), dict) else {}
+    fallback = state.get("fallback") if isinstance(state.get("fallback"), dict) else {}
+    return str(fallback.get("model") or vnew_settings.VNEW_TAKE_REAL_KLING_MODEL or "")
+
+
 def _escalate_likeness(owner: str, pid: str, gen_id: str, index: int, claim: str) -> None:
     """likeness 거절 → 다음 단계로 같은 칸을 queued(0→1, 1→2). 2단계 모델이 없거나 이미 마지막이면 시도한 단계를 적고 실패."""
     kling = _kling_cut_model()
@@ -4517,9 +4568,11 @@ def _escalate_likeness(owner: str, pid: str, gen_id: str, index: int, claim: str
 def _do_submit_real_cuts(owner: str, pid: str, gen_id: str, index: int, claim: str) -> None:
     """2단계: 테이크를 컷마다 시작 그림(프리비즈 첫 프레임 + 실사 정면 → Seedream) 1장 + Kling image-to-video 1번으로 낸다.
 
-    시작 그림은 메모리로만 쓴다(저장하지 않는다). Kling 프롬프트는 _segment_prompt(컷 1개, 첫 프레임에서 이어 가기), 길이는
+    시작 그림은 컷 결과 접두사 아래 start.jpg 로 남긴다(작업 131 — ⑦ AI로 고치기가 같은 그림으로 다시 낸다, 실패해도 제출은 한다).
+    Kling 프롬프트는 _segment_prompt(컷 1개, 첫 프레임에서 이어 가기), 길이는
     _kling_duration. 준비~제출은 _PREPARE_SEM 안. 원장은 시작 그림·Kling 컷마다 제출 성공 때. 칸 fallback.cuts 에 컷마다
-    {cutId, seconds, duration, status, invocationArn, outputPrefix, outputKey, error}.
+    {cutId, seconds, duration, status, invocationArn, outputPrefix, outputKey, error, promptEn, promptBytes, stillKey}.
+    작업 131: 컷마다 프롬프트 기록 한 줄(칸 "테이크id#컷id", _log_attempt), 조회가 끝나면 그 줄의 상태(_log_kling_cut_result).
     """
     records: list[dict] = []
     stage = "start"
@@ -4569,17 +4622,27 @@ def _do_submit_real_cuts(owner: str, pid: str, gen_id: str, index: int, claim: s
                                           prompt=_segment_prompt(plan, {"cutIds": [cut_id]}, first_segment=True, model=model_id),
                                           keyframe_jpeg_b64=base64.b64encode(still).decode("ascii"), duration_s=duration,
                                           prompt_max=prompt_max)
+            out_prefix = _seg_output_prefix(owner, pid, gen_id, f"{take_id}-real-{cut_id}", attempt)
+            still_key = _keep_cut_still(pid, out_prefix, still)  # 작업 131: ⑦ AI로 고치기가 같은 시작 그림으로 다시 낸다
             del still
+            sent_prompt = str(body.get(caps.get("promptField") or "prompt") or "")
             result = _previz_request("POST", f"{vpoc_settings.FAL_QUEUE_URL}/{endpoint}", body)
             del body
             request_id = str(result.get("request_id") or "")
             if not request_id:
                 raise VpocError("vnew.generate", "NoRequestId", f"요청 ID 가 없습니다: {str(result)[:300]}", 502)
             _charge_kling_cut(owner, pid, gen_id, "fal-kcut-" + request_id, endpoint, duration)
+            arn = f"{vpoc_fal.ARN_PREFIX}{endpoint}/{request_id}"
             records.append({"cutId": cut_id, "seconds": round(float(cut.get("seconds") or 0), 3), "duration": duration,
-                            "status": "submitted", "invocationArn": f"{vpoc_fal.ARN_PREFIX}{endpoint}/{request_id}",
-                            "outputPrefix": _seg_output_prefix(owner, pid, gen_id, f"{take_id}-real-{cut_id}", attempt),
-                            "outputKey": "", "error": ""})
+                            "status": "submitted", "invocationArn": arn, "outputPrefix": out_prefix, "outputKey": "", "error": "",
+                            "promptEn": sent_prompt, "promptBytes": len(sent_prompt.encode("utf-8")), "stillKey": still_key})
+            # 작업 131: 컷 칸("테이크id#컷id") 기록 한 줄 — ⑦ AI로 고치기의 이전 프롬프트·시도
+            _log_attempt(owner, pid, gen_id, source="gen", mode=str(gen.get("mode") or ""), variant="real",
+                         cell_id=f"{take_id}#{cut_id}", index=index, attempt=attempt,
+                         run=int((gen.get("realRun") or {}).get("n") or 0) or None, endpoint=endpoint,
+                         params={"seconds": round(float(cut.get("seconds") or 0), 3), "duration": duration, "startImage": "still"},
+                         refs=[{"slot": "startImage", "key": still_key}], video_keys=[str(cut.get("recordingKey") or "")],
+                         result={"invocationArn": arn, "outputPrefix": out_prefix}, prompt=sent_prompt)
             log.info("vnew.gen.real_cut_submit pid=%s take=%s cut=%s endpoint=%s duration=%d refs=%d", pid, take_id, cut_id,
                      endpoint, duration, len(people))
     except _Discard:
@@ -4635,8 +4698,10 @@ def _do_poll_real_cuts(owner: str, pid: str, gen_id: str, index: int, claim: str
                     stored[number].update(change)
 
         _commit(owner, pid, mutator)
+        take_id = str(_previz_cells(gen)[index].get("id") or index)
         for number, change in updates.items():
             cuts[number] = {**cuts[number], **change}
+            _log_kling_cut_result(owner, pid, gen_id, take_id, cuts[number])  # 작업 131
     failed = [c for c in cuts if c.get("status") == "failed"]
     if failed:
         error = str(failed[0].get("error") or "")
@@ -7757,9 +7822,13 @@ def retake_template(owner: str, pid: str, gen_id: str, *, variant: str, cell_id:
     """
     plan, _ = plan_mod.load_plan(owner, pid)
     gen = plan.get("gen") or {}
-    _index, cell, mode = _retake_cell(plan, gen, gen_id, variant, cell_id)
-    kind = "take" if mode == "previz-take" else "cut"
-    original = str(gen.get("videoModel") or vnew_settings.VNEW_PREVIZ_EDIT_MODEL)
+    kcut = _retake_kcut_cell(plan, gen, gen_id, variant, cell_id)  # 작업 131: 컷 단위 Kling 실사 재료 = 그 컷의 녹화 구간
+    if kcut:
+        _index, cell, kind, original, _mode = kcut
+    else:
+        _index, cell, mode = _retake_cell(plan, gen, gen_id, variant, cell_id)
+        kind = "take" if mode == "previz-take" else "cut"
+        original = str(gen.get("videoModel") or vnew_settings.VNEW_PREVIZ_EDIT_MODEL)
     path = retake_path(model, original=original, kind=kind)
     like = _retake_like(cell, kind=kind, path=path, span=span, cut_ids=cut_ids)
     _PREPARE_SEM.acquire()
@@ -7796,9 +7865,15 @@ def resubmit_model(owner: str, pid: str, gen_id: str, *, variant: str, cell_id: 
     """
     plan, _ = plan_mod.load_plan(owner, pid)
     gen = plan.get("gen") or {}
-    index, cell, mode = _retake_cell(plan, gen, gen_id, variant, cell_id)
-    kind = "take" if mode == "previz-take" else "cut"
-    original = str(gen.get("videoModel") or vnew_settings.VNEW_PREVIZ_EDIT_MODEL)
+    kcut = _retake_kcut_cell(plan, gen, gen_id, variant, cell_id)  # 작업 131: 컷 단위 Kling 실사 재료 = 그 컷의 녹화 구간
+    if kcut:
+        index, cell, kind, original, mode = kcut
+        if str(model or original) == original:  # 원래 모델(시작 그림 경로)은 resubmit_kling_cut 만 낸다
+            raise VpocError("vnew.retake", "RetakeBadModel", RETAKE_MODEL_GONE_TEXT, 409)
+    else:
+        index, cell, mode = _retake_cell(plan, gen, gen_id, variant, cell_id)
+        kind = "take" if mode == "previz-take" else "cut"
+        original = str(gen.get("videoModel") or vnew_settings.VNEW_PREVIZ_EDIT_MODEL)
     model = str(model or original)
     path = retake_path(model, original=original, kind=kind)
     cell_seconds = float(cell.get("seconds") or 0.0)
@@ -7812,7 +7887,7 @@ def resubmit_model(owner: str, pid: str, gen_id: str, *, variant: str, cell_id: 
     audio_choice = state.get("audio") if isinstance(state.get("audio"), bool) else None
     run_n = (int((gen.get("realRun") or {}).get("n") or 0) or None) if kind == "take" and variant == "real" else None
     attempt = max(1, int(attempt or 1))
-    prefix = _seg_output_prefix(owner, pid, gen_id, f"{cell_id}-{variant}-{tag}", attempt)
+    prefix = _seg_output_prefix(owner, pid, gen_id, f"{str(cell_id).replace('#', '-')}-{variant}-{tag}", attempt)  # 131: S3 키에 # 없이
     started = time.monotonic()
     _PREPARE_SEM.acquire()
     try:
@@ -7852,3 +7927,100 @@ def resubmit_model(owner: str, pid: str, gen_id: str, *, variant: str, cell_id: 
     return {"invocationArn": str(result.get("invocationArn") or ""), "outputPrefix": str(result.get("outputPrefix") or prefix),
             "provider": str(result.get("provider") or ""), "usd": info["usd"], "logId": log_id,
             "sentSeconds": meta.get("sentSeconds"), "trimTo": info["trimTo"]}
+
+
+# ================================================================ 작업 131: 컷 단위 Kling 실사 재료의 ⑦ AI로 고치기
+#
+# 130 의 컷 단위 Kling 실사 결과는 ⑦ 재료 kind=cut·칸 "테이크id#컷id" 다(edit._material_items). 원래 모델(Kling image-to-video)로 다시 낼 때는
+# resubmit_kling_cut(같은 길이·저장된 시작 그림, 없으면 그 컷 결과 첫 프레임), 다른 모델(영상 편집·참고 영상)은 retake_template·resubmit_model 이
+# 그 컷의 프리비즈 녹화 구간(_take_cut_units 한 줄)을 컷 칸처럼 쓴다. 칸 상태(gen.units)는 읽기만 한다.
+
+RETAKE_NO_START_TEXT = "이 컷의 시작 그림을 찾지 못해 제출하지 않았습니다."
+
+
+def _retake_kcut_cell(plan: dict, gen: dict, gen_id: str, variant: str, cell_id: str) -> tuple[int, dict, str, str, str] | None:
+    """컷 단위 Kling 실사 재료 칸이면 (테이크 index, 그 컷의 컷 단위 작업 사본, 칸 종류 "cut", 원래 모델, gen 모드). 아니면 None."""
+    found = _kling_cut_record(gen, variant, cell_id)
+    if not found:
+        return None
+    if str(gen.get("genId") or "") != gen_id:
+        raise VpocError("vnew.retake", "RetakeGenChanged", "영상 생성 기록이 바뀌었습니다. ⑦ 편집을 다시 열어 주세요.", 409)
+    index, take, record = found
+    unit = next((u for u in _take_cut_units(plan, take) if str(u.get("cutId") or "") == str(record.get("cutId") or "")), None)
+    if not unit or not unit.get("recordingKey"):
+        raise VpocError("vnew.retake", "RetakeNotTarget", "고칠 칸을 찾을 수 없습니다.", 409)
+    return index, dict(unit), "cut", _kling_cut_model_of(take), str(gen.get("mode") or "")
+
+
+def resubmit_kling_cut(owner: str, pid: str, gen_id: str, *, cell_id: str, prompt: str, tag: str, attempt: int = 1,
+                       version=None) -> dict:
+    """컷 단위 Kling 실사 재료 하나를 원래 경로(같은 Kling image-to-video·같은 길이)로 새 프롬프트만 바꿔 제출한다.
+
+    시작 그림 = 그 컷의 저장된 시작 그림(stillKey), 없거나 못 읽으면 그 컷 결과의 첫 프레임(_cut_first_frame). 준비~제출은 _PREPARE_SEM 안,
+    원장은 130 과 같은 _charge_kling_cut(작업 id 키, 보낸 길이 × 그 모델 초당 단가), 기록 source=retake·칸 "테이크id#컷id".
+    결과 접두사 "{테이크}-real-{컷}-{tag}" + attempt. 반환 {invocationArn, outputPrefix, provider, usd, logId, startImage(still|firstFrame)}.
+    """
+    plan, _ = plan_mod.load_plan(owner, pid)
+    gen = plan.get("gen") or {}
+    if str(gen.get("genId") or "") != gen_id:
+        raise VpocError("vnew.retake", "RetakeGenChanged", "영상 생성 기록이 바뀌었습니다. ⑦ 편집을 다시 열어 주세요.", 409)
+    found = _kling_cut_record(gen, "real", cell_id)
+    if not found or found[2].get("status") != "completed" or not found[2].get("outputKey"):
+        raise VpocError("vnew.retake", "RetakeNotTarget", "고칠 칸을 찾을 수 없습니다.", 409)
+    index, take, record = found
+    endpoint = _kling_cut_model_of(take)
+    caps = _previz_caps(endpoint)
+    if not caps.get("startImageField"):
+        raise VpocError("vnew.retake", "RetakeBadModel", RETAKE_MODEL_GONE_TEXT, 409)
+    take_id, _, cut_id = str(cell_id).partition("#")
+    seconds = float(record.get("seconds") or 0)
+    try:
+        duration = int(record.get("duration") or 0)
+    except (TypeError, ValueError):
+        duration = 0
+    duration = duration if duration > 0 else _kling_duration(caps, seconds)
+    run_n = int((gen.get("realRun") or {}).get("n") or 0) or None
+    attempt = max(1, int(attempt or 1))
+    prefix = _seg_output_prefix(owner, pid, gen_id, f"{take_id}-real-{cut_id}-{tag}", attempt)
+    prompt_max = vpoc_settings.fal_prompt_max(endpoint, caps.get("promptMaxLength") or vpoc_fal.DEFAULT_PROMPT_MAX)
+    still_key = str(record.get("stillKey") or "")
+    started = time.monotonic()
+    _PREPARE_SEM.acquire()
+    try:
+        _assert_no_webtoon(prompt)
+        start, source = None, ""
+        if still_key:
+            try:
+                start, source = _fetch_bytes(still_key, bucket=vpoc_settings.VIDEO_BUCKET), "still"
+            except Exception as exc:  # noqa: BLE001 — 저장된 그림을 못 읽으면 결과 첫 프레임으로
+                log.warning("vnew.gen.resubmit_kling_still_failed pid=%s cell=%s err=%s", pid, cell_id, type(exc).__name__)
+                start = None
+        if not start:
+            start = _cut_first_frame(_fetch_bytes(str(record.get("outputKey") or ""), bucket=vpoc_settings.VIDEO_BUCKET), 0.0)
+            source = "firstFrame"
+        if not start:
+            raise VpocError("vnew.retake", "RetakeNoStartImage", RETAKE_NO_START_TEXT, 409)
+        body = vpoc_fal.build_payload({**caps, "durations": [duration]}, prompt=prompt,
+                                      keyframe_jpeg_b64=base64.b64encode(start).decode("ascii"), duration_s=duration,
+                                      prompt_max=prompt_max)
+        del start
+        sent = str(body.get(caps.get("promptField") or "prompt") or "")
+        result = _previz_request("POST", f"{vpoc_settings.FAL_QUEUE_URL}/{endpoint}", body)
+        del body
+    finally:
+        _PREPARE_SEM.release()
+    request_id = str(result.get("request_id") or "")
+    if not request_id:
+        raise VpocError("vnew.generate", "NoRequestId", f"요청 ID 가 없습니다: {str(result)[:300]}", 502)
+    _charge_kling_cut(owner, pid, gen_id, "fal-kcut-" + request_id, endpoint, duration)
+    arn = f"{vpoc_fal.ARN_PREFIX}{endpoint}/{request_id}"
+    usd = round(_previz_model_unit_price(endpoint) * float(duration), 4)
+    log_id = _log_attempt(owner, pid, gen_id, source="retake", mode=str(gen.get("mode") or ""), variant="real", cell_id=str(cell_id),
+                          index=index, attempt=attempt, run=run_n, endpoint=endpoint,
+                          params={"seconds": round(seconds, 3), "duration": duration, "startImage": source},
+                          refs=[{"slot": "startImage", "key": still_key if source == "still" else ""}],
+                          video_keys=[] if source == "still" else [str(record.get("outputKey") or "")],
+                          result={"invocationArn": arn, "outputPrefix": prefix}, prompt=sent, version=version)
+    log.info("vnew.gen.resubmit_kling_cut pid=%s cell=%s tag=%s attempt=%d duration=%d start=%s bytes=%d ms=%d", pid, cell_id, tag,
+             attempt, duration, source, len(sent.encode("utf-8")), int((time.monotonic() - started) * 1000))
+    return {"invocationArn": arn, "outputPrefix": prefix, "provider": "fal", "usd": usd, "logId": log_id, "startImage": source}
