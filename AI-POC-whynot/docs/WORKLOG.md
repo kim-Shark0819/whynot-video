@@ -2635,3 +2635,8 @@ un_conti가 대본 글 뒤에 ordered_tiles 타일을 Panel N of M: 라벨(N 0�
 
 ### 131 — 컷 단위 Kling 실사 재료도 ⑦ AI로 고치기 (2026-11-04)
 - retake.py `_kcut_cell`이 칸 "테이크#컷"(cellKey `real:<take>#<cut>`)을 찾는다: 이전 프롬프트 = 130이 Kling에 보낸 본문(회차 기록 `fallback.cuts[].promptEn` + prompts.json 같은 칸 줄), 원래 모델 Kling i2v(경로 `i2v`, 컷 전체만)는 `generate.resubmit_kling_cut`(저장된 시작 그림 `stillKey`, 없으면 결과 첫 프레임 · 원장 `_charge_kling_cut`), 다른 모델은 그 컷 녹화 구간으로 지금 규칙. 검사 check_vnew_retake_kling_cuts_131(kc-a~d). 남은 이슈: 이 변경 전에 만든 컷(운영 g20261104104135baf7)은 프롬프트 기록이 없어 can=false.
+
+
+
+### 134 — 컷 단위 실사 이어 붙이기: 컷마다 같은 형식으로 맞춘 뒤 잇기, 끝난 회차 remerge (2026-11-05)
+- `_merge_real_cuts`가 `_conform_concat`(컷마다 `stitcher.edit_segment` 0초부터 round(콘티 초×24)장·-map 0:v:0·1920x1080 비율 유지 pad·24fps·yuv420p·libx264 crf 20, 소리는 0:a:0 또는 무음 → 48k 스테레오 PCM, 그다음 `edit_join` 영상 copy + AAC 48k 스테레오 1번)로 잇는다(길이 `_real_cut_seconds`, 채운 컷은 origSeconds, 못 읽으면 예전 방식). `remerge_real_cuts`·`POST /api/vnew/p/<pid>/generate/real/<n>/remerge`(관리자 `is_admin`·소유자, 유료 0)는 기록(칸 cuts·history units[].cuts) 또는 S3(`<take>-real-<cut>-qa-<attempt>` 우선)의 컷으로 `final-real-r<n>-fixed.mp4`를 만들고 finalKey 갱신·finalKeyBroken 보존, 회차 요약 units[].cuts `{cutId, outputKey, qa}`. 검사 check_vnew_real_remerge_134(rm-a~d: 합성 컷 3개 7.42초/178프레임/디코드 오류 0). server.py vnew deps에 is_admin 1줄.

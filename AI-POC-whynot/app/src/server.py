@@ -7007,6 +7007,8 @@ if VNEW_ENABLED:
                 can_read_project=can_read_project,
                 can_write_project=can_write_project,
                 project_owner_prefix=safe_user_prefix,
+                # 작업 134: 관리자 전용 경로(실사 회차 다시 이어 붙이기).
+                is_admin=lambda: g.role == ROLE_ADMIN,
             )
         )
     )

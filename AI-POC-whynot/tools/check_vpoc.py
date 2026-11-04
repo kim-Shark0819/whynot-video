@@ -47998,6 +47998,270 @@ console.log(JSON.stringify({
            "(qa-c)두 번 다 틀림 첫 결과·qa ok false·이어 붙임 (qa-d)끔 QA 0 (qa-e)node --check·문구")
 
 
+def _rm134_ffmpeg(args: list[str]) -> subprocess.CompletedProcess:
+    """작업 134 검사: 로컬 ffmpeg(stitcher.ffmpeg_path) 한 번."""
+    from src import stitcher as stitchmod  # noqa: PLC0415
+
+    return subprocess.run([stitchmod.ffmpeg_path(), "-hide_banner", *args], capture_output=True, timeout=300)
+
+
+def check_vnew_real_remerge_134() -> None:
+    """작업 134 — 컷 단위 실사: 컷마다 같은 형식으로 맞춘 뒤 잇기, 끝난 회차 다시 이어 붙이기(remerge). 로컬 ffmpeg, 유료 0.
+
+    (rm-a) 형식이 다른 합성 컷 3개(Main+스테레오 44.1k·오디오 먼저 / Constrained Baseline+모노·비디오 먼저 1280x720 30fps /
+           소리 없음 640x480 25fps)를 콘티 길이 2.5·3.2·1.7 로 _conform_concat: 디코드 오류 0·길이 = 7.4 ±0.1·프레임 = 길이×24 ±2·
+           비디오 첫 스트림 h264 High 1920x1080 24fps yuv420p·AAC 48k 스테레오·컷 경계 앞뒤 프레임 다름·마지막 컷 안 움직임,
+           _real_cut_seconds(채운 컷 = origSeconds)
+    (rm-b) 가짜 회차(133 하네스, QA 로 c1 다시 만듦): 이어 붙이기가 _conform_concat(컷 길이 4·8). 비관리자 403·관리자 remerge →
+           final-real-r1-fixed.mp4·finalReal.key·finalKeyBroken·원래 파일 그대로·mergedCuts(c1 qa true)·원장·fal 요청 0
+    (rm-c) 다음 회차 → realHistory finalKey·finalKeyBroken·units[].cuts, 새 회차 요약 cuts {cutId, outputKey, qa}. 컷 목록 없는 옛 기록 +
+           가짜 S3 키 → QA 쪽 우선으로 찾아 이어 붙임·기록 갱신·finalKeyBroken 유지, 없는 회차 404 (rm-d) server.py is_admin 주입
+    """
+    import hashlib as _hashlib  # noqa: PLC0415
+    import re as _re  # noqa: PLC0415
+    import tempfile as _tempfile  # noqa: PLC0415
+    import traceback as _tb  # noqa: PLC0415
+
+    sys.path.insert(0, str(ROOT / "app"))
+    from src import stitcher as stitchmod  # noqa: PLC0415
+    from src.vnew import generate as genmod  # noqa: PLC0415
+    from src.vpoc.errors import VpocError  # noqa: PLC0415
+
+    bad: list[str] = []
+    owner = "tester"
+    try:
+        # ================= (rm-a) 형식이 다른 컷 3개 → 맞춘 뒤 잇기 =================
+        with _tempfile.TemporaryDirectory(prefix="chk134-") as work:
+            def synth(name: str, args: list[str]) -> bytes:
+                out = os.path.join(work, name)
+                done = _rm134_ffmpeg(["-y", "-loglevel", "error", *args, out])
+                if done.returncode != 0:
+                    raise RuntimeError(f"합성 컷 {name} 실패: {done.stderr.decode(errors='replace')[:300]}")
+                return open(out, "rb").read()
+
+            cut_a = synth("a.mp4", ["-f", "lavfi", "-i", "sine=frequency=440:sample_rate=44100:duration=5",
+                                    "-f", "lavfi", "-i", "testsrc2=size=1920x1080:rate=24:duration=5", "-map", "0:a:0", "-map", "1:v:0",
+                                    "-c:v", "libx264", "-profile:v", "main", "-pix_fmt", "yuv420p", "-c:a", "aac", "-ac", "2",
+                                    "-ar", "44100"])
+            cut_b = synth("b.mp4", ["-f", "lavfi", "-i", "testsrc=size=1280x720:rate=30:duration=5",
+                                    "-f", "lavfi", "-i", "sine=frequency=660:sample_rate=24000:duration=5", "-map", "0:v:0", "-map", "1:a:0",
+                                    "-c:v", "libx264", "-profile:v", "baseline", "-pix_fmt", "yuv420p", "-c:a", "aac", "-ac", "1"])
+            cut_c = synth("c.mp4", ["-f", "lavfi", "-i", "testsrc2=size=640x480:rate=25:duration=5", "-c:v", "libx264",
+                                    "-pix_fmt", "yuv420p", "-an"])
+            inputs = []
+            for name in ("a.mp4", "b.mp4"):
+                inputs.append(" | ".join(line.strip() for line in _rm134_ffmpeg(["-i", os.path.join(work, name)]).stderr
+                                         .decode(errors="replace").splitlines() if "Stream #" in line))
+            if not ("Audio:" in inputs[0].split("|")[0] and "(Main)" in inputs[0] and "stereo" in inputs[0]) \
+                    or not ("Video:" in inputs[1].split("|")[0] and "Constrained Baseline" in inputs[1] and "mono" in inputs[1]):
+                bad.append(f"(rm-a) 합성 컷 형식이 운영 실측(오디오 먼저 Main 스테레오 / 비디오 먼저 Baseline 모노)과 다릅니다: {inputs}")
+            seconds = (2.5, 3.2, 1.7)
+            merged = genmod._conform_concat(list(zip((cut_a, cut_b, cut_c), seconds)))  # noqa: SLF001
+            path = os.path.join(work, "merged.mp4")
+            with open(path, "wb") as handle:
+                handle.write(merged)
+            errors = _rm134_ffmpeg(["-v", "error", "-i", path, "-f", "null", "-"]).stderr.decode(errors="replace").strip()
+            if errors:
+                bad.append(f"(rm-a) 이어 붙인 결과에 디코드 오류가 있습니다: {errors[:300]}")
+            info = stitchmod.probe_media(path)
+            want_len = sum(seconds)
+            if abs(info["duration"] - want_len) > 0.1:
+                bad.append(f"(rm-a) 길이 {info['duration']:.3f}초가 콘티 합 {want_len}초 ±0.1 이 아닙니다")
+            streams = [line.strip() for line in _rm134_ffmpeg(["-i", path]).stderr.decode(errors="replace").splitlines()
+                       if "Stream #" in line]
+            video = streams[0] if streams else ""
+            audio = streams[1] if len(streams) > 1 else ""
+            if len(streams) != 2 or not all(s in video for s in ("Video: h264 (High)", "yuv420p", "1920x1080", "24 fps")) \
+                    or not all(s in audio for s in ("Audio: aac", "48000 Hz", "stereo")):
+                bad.append(f"(rm-a) 결과 형식(비디오 먼저 h264 High 1920x1080 24fps yuv420p, AAC 48k 스테레오)이 다릅니다: {streams}")
+            w, h = 32, 18
+            raw = _rm134_ffmpeg(["-loglevel", "error", "-i", path, "-map", "0:v:0", "-vf", f"scale={w}:{h}", "-f", "rawvideo",
+                                 "-pix_fmt", "gray", "-"]).stdout
+            size = w * h
+            frames = [raw[i:i + size] for i in range(0, len(raw) - size + 1, size)]
+            if abs(len(frames) - info["duration"] * 24) > 2 or len(frames) < 170:
+                bad.append(f"(rm-a) 프레임 수 {len(frames)} 가 길이 × 24 ({info['duration'] * 24:.1f}) ±2 가 아닙니다")
+
+            def diff(i: int, j: int) -> float:
+                if max(i, j) >= len(frames):
+                    return 0.0
+                return sum(abs(x - y) for x, y in zip(frames[i], frames[j])) / size
+
+            edges = [round(2.5 * 24), round(2.5 * 24) + round(3.2 * 24)]
+            moves = {f"경계 {e}": diff(e - 1, e) for e in edges}
+            moves["마지막 컷 안"] = diff(edges[1] + 1, len(frames) - 1)
+            moves["둘째 컷 안"] = diff(edges[0] + 1, edges[1] - 2)
+            if any(v <= 1.0 for v in moves.values()):
+                bad.append(f"(rm-a) 컷 경계·컷 안 프레임이 같습니다(멈춤): {moves}")
+            if genmod._real_cut_seconds({"seconds": 3.0, "padded": True, "origSeconds": 1.7}) != 1.7 \
+                    or genmod._real_cut_seconds({"seconds": 2.4}) != 2.4 or genmod._real_cut_seconds({}) != 0.0:  # noqa: SLF001
+                bad.append("(rm-a) _real_cut_seconds(채운 컷 = origSeconds, 아니면 seconds)가 다릅니다")
+            rm_a = f"길이 {info['duration']:.2f}초(콘티 {want_len}) 프레임 {len(frames)} 디코드 오류 0"
+
+        # ================= (rm-b) 가짜 회차 → remerge =================
+        kling = "fal-ai/kling-video/v3/pro/image-to-video"
+        kling_caps = {"promptField": "prompt", "startImageField": "start_image_url", "durations": [5, 10], "durationAsString": True,
+                      "durationValues": {"5": "5", "10": "10"}, "sendDuration": True, "aspectRatios": ["16:9"], "available": True}
+        likeness_raw = "The images or videos provided may contain likenesses of real people or other private information."
+        with _guard_real_llm() as llm_calls, _LrEnv(owner) as env, _pin_vnew(
+                VNEW_FX=True, VNEW_CASTING=True, VNEW_TAKE_REAL=True, VNEW_GEN_PARALLEL=2, POLL_INTERVAL_S=0,
+                VNEW_TAKE_AUDIO=True, VNEW_TAKE_RESOLUTION="480p", VNEW_PREPARE_STALE_S=300,
+                VNEW_TAKE_REAL_LIKENESS_LADDER=True, VNEW_TAKE_REAL_KLING_MODEL=kling, VNEW_REAL_CUT_QA=True):
+            prefix_id = genmod.vpoc_settings.FAL_ID_PREFIX
+            seed_find = genmod.vpoc_fal.find
+            env.set(genmod.vpoc_fal, "find", lambda m: {"id": prefix_id + kling, "endpointId": kling, "caps": dict(kling_caps)}
+                    if str(m) == prefix_id + kling else seed_find(m))
+            env.set(genmod, "_seedream", lambda prompt, refs, *, size: b"STILL")
+            env.set(genmod, "_cut_first_frame", lambda mp4, start: b"FRAME@%.1f" % float(start))
+            env.set(genmod, "_trim_clip", lambda mp4, seconds: b"TRIM%.1f:" % float(seconds) + bytes(mp4))
+            conform_calls: list[list[tuple[bytes, float]]] = []
+
+            def fake_conform(pieces):
+                conform_calls.append([(bytes(b), float(s)) for b, s in pieces])
+                return b"CONFORMED:" + _hashlib.sha1(b"|".join(bytes(b) for b, _ in pieces)).hexdigest().encode()
+
+            env.set(genmod, "_conform_concat", fake_conform)
+
+            def fake_qa(blocks, *, model):
+                text = " ".join(b["text"] for b in blocks if "text" in b)
+                retry = b"-qa" in [b["image"]["source"]["bytes"] for b in blocks if "image" in b][1]
+                first_c1 = _re.search(r"Storyboard cut (\d+)", text).group(1) == "1" and not retry
+                return ({"animeStyle": False, "outfitMatch": not first_c1, "locationMatch": True, "peopleMatch": True,
+                         "note": "outfit differs" if first_c1 else ""}, {"model": model, "inputTokens": 3000, "outputTokens": 100})
+
+            env.set(genmod, "_read_cut_qa", fake_qa)
+            base_fal = env._fal
+
+            def fal_request(method, url, payload=None, *, where=""):
+                rid = url.split("/requests/", 1)[-1].split("/", 1)[0]
+                req = next((r for r in env.requests if r["rid"] == rid), None)
+                if method == "GET" and not url.endswith("/status") and req and req["url"].endswith(_LR_ENDPOINT) \
+                        and req["kind"] == "real":
+                    raise VpocError("fal.poll", "HTTP422", likeness_raw, 502)
+                return base_fal(method, url, payload, where=where)
+
+            env.set(env.falmod, "_request", fal_request)
+            client = env.client()
+
+            from flask import Flask  # noqa: PLC0415
+
+            from src import vnew  # noqa: PLC0415
+
+            admin_app = Flask(__name__)
+            admin_app.register_blueprint(vnew.create_blueprint(vnew.VnewDependencies(
+                require_auth=lambda handler: handler, current_owner=lambda: owner,
+                get_project=lambda p: {"id": p, "owner": owner, "track": "video_new"},
+                can_read_project=lambda proj: True, can_write_project=lambda proj: True,
+                project_owner_prefix=lambda name: name, is_admin=lambda: True)))
+            admin = admin_app.test_client()
+
+            pid = "prj_rm_b"
+            env.make_plan(pid, [{"id": "s1", "cutIds": ["c1"], "seconds": 4}, {"id": "s2", "cutIds": ["c2"], "seconds": 8}])
+            client.post(f"/api/vnew/p/{pid}/generate", json={"confirmUsd": genmod.estimate(env.plan(pid))["totalUsd"]})
+            env.drive(pid)
+            client.post(f"/api/vnew/p/{pid}/generate/real", json={"confirmUsd": genmod.real_estimate(env.gen(pid))["usd"]})
+            g = env.drive(pid)
+            gen_id = str(g.get("genId") or "")
+            take_id = str(g["units"][0].get("id") or "")
+            cell = g["units"][0]["real"]
+            cuts = (cell.get("fallback") or {}).get("cuts") or []
+            old_final = str((g.get("finalReal") or {}).get("key") or "")
+            if len(conform_calls) != 1 or [s for _, s in conform_calls[0]] != [4.0, 8.0] \
+                    or not env.store.blobs.get(str(cell.get("outputKey")), b"").startswith(b"CONFORMED:") \
+                    or not old_final.endswith("/final-real-r1.mp4") or "-qa" not in str(cuts[0].get("outputKey")):
+                bad.append(f"(rm-b) 이어 붙이기가 컷 길이 4·8 로 _conform_concat 을 쓰지 않았거나 회차가 다릅니다: "
+                           f"{[[s for _, s in c] for c in conform_calls]} {cell.get('outputKey')} {old_final} {[c.get('outputKey') for c in cuts]}")
+            old_blob = env.store.blobs.get(old_final)
+            led0, req0 = len(env.ledger), len(env.requests)
+            denied = client.post(f"/api/vnew/p/{pid}/generate/real/1/remerge")
+            if denied.status_code != 403 or ((denied.get_json() or {}).get("error") or {}).get("type") != "AdminOnly" \
+                    or len(conform_calls) != 1:
+                bad.append(f"(rm-b) 비관리자 remerge 가 403 AdminOnly 가 아닙니다: {denied.status_code} {denied.get_json()}")
+            resp = admin.post(f"/api/vnew/p/{pid}/generate/real/1/remerge")
+            body = (resp.get_json() or {}).get("remerge") or {}
+            g = env.gen(pid)
+            fixed = genmod.final_real_fixed_key(owner, pid, gen_id, 1)
+            want_cuts = [{"cutId": "c1", "outputKey": str(cuts[0].get("outputKey")), "qa": True},
+                         {"cutId": "c2", "outputKey": str(cuts[1].get("outputKey")), "qa": False}]
+            final = g.get("finalReal") or {}
+            if resp.status_code != 200 or body.get("key") != fixed or not fixed.endswith("/final-real-r1-fixed.mp4") \
+                    or final.get("key") != fixed or final.get("finalKeyBroken") != old_final or final.get("status") != "done" \
+                    or final.get("n") != 1 or not env.store.blobs.get(fixed, b"").startswith(b"CONFORMED:") \
+                    or env.store.blobs.get(old_final) != old_blob or g["units"][0]["real"].get("mergedCuts") != want_cuts \
+                    or [s for _, s in conform_calls[-1]] != [4.0, 8.0] \
+                    or [b for b, _ in conform_calls[-1]] != [env.store.blobs.get(c["outputKey"], b"CLIP:" + c["outputKey"].encode())
+                                                             for c in want_cuts]:
+                bad.append(f"(rm-b) 관리자 remerge 결과·기록이 다릅니다: {resp.status_code} {body} {final} "
+                           f"{g['units'][0]['real'].get('mergedCuts')}")
+            if len(env.ledger) != led0 or len(env.requests) != req0:
+                bad.append(f"(rm-b) remerge 가 원장·fal 요청을 만들었습니다: {env.ledger[led0:]} {env.requests[req0:]}")
+
+            # ================= (rm-c) 다음 회차 → history, 옛 기록 + 가짜 S3 키 =================
+            client.post(f"/api/vnew/p/{pid}/generate/real", json={"confirmUsd": genmod.real_estimate(env.gen(pid))["usd"]})
+            g = env.drive(pid)
+            hist = [h for h in g.get("realHistory") or [] if isinstance(h, dict) and h.get("n") == 1]
+            item = hist[0] if hist else {}
+            if item.get("finalKey") != fixed or item.get("finalKeyBroken") != old_final \
+                    or ((item.get("units") or [{}])[0]).get("cuts") != want_cuts:
+                bad.append(f"(rm-c) realHistory 1회차 finalKey·finalKeyBroken·cuts 가 다릅니다: {item}")
+            summary = genmod._real_run_summary(g)  # noqa: SLF001
+            cuts2 = (g["units"][0]["real"].get("fallback") or {}).get("cuts") or []
+            want2 = [{"cutId": str(c.get("cutId")), "outputKey": str(c.get("outputKey")), "qa": "-qa-" in str(c.get("outputKey"))}
+                     for c in cuts2]
+            if summary["units"][0].get("cuts") != want2 or len(want2) != 2 or not want2[0]["qa"] or want2[1]["qa"] \
+                    or "finalKeyBroken" in summary:
+                bad.append(f"(rm-c) 새 회차 요약 cuts {{cutId, outputKey, qa}} 가 다릅니다: {summary['units'][0].get('cuts')} {want2}")
+            match = _re.search(r"-real-cuts-(\d+)/merged\.mp4$", str(item.get("units", [{}])[0].get("outputKey") or ""))
+            attempt = int(match.group(1)) if match else 0
+
+            def s3_key(tag: str, cut_id: str, rid: str) -> str:
+                return genmod._seg_output_prefix(owner, pid, gen_id, f"{take_id}-real-{cut_id}{tag}", attempt) + f"/{rid}/output.mp4"  # noqa: SLF001
+
+            listed = {s3_key("-qa", "c1", "rq1"): b"S3-C1-QA", s3_key("", "c1", "r1"): b"S3-C1-FIRST", s3_key("", "c2", "r2"): b"S3-C2",
+                      s3_key("", "c2", "r2").replace("output.mp4", "start.jpg"): b"JPG"}
+            env.store.blobs.update(listed)
+            env.store.list_keys = lambda prefix, *, bucket="": [{"key": k, "size": len(v)} for k, v in listed.items()
+                                                                if k.startswith(prefix)]
+
+            def drop_cuts(gg: dict) -> None:
+                for h in gg.get("realHistory") or []:
+                    if isinstance(h, dict) and h.get("n") == 1:
+                        for u in h.get("units") or []:
+                            u.pop("cuts", None)
+
+            env.mutate_gen(pid, drop_cuts)
+            resp = admin.post(f"/api/vnew/p/{pid}/generate/real/1/remerge")
+            g = env.gen(pid)
+            item = next((h for h in g.get("realHistory") or [] if isinstance(h, dict) and h.get("n") == 1), {})
+            want_s3 = [{"cutId": "c1", "outputKey": s3_key("-qa", "c1", "rq1"), "qa": True},
+                       {"cutId": "c2", "outputKey": s3_key("", "c2", "r2"), "qa": False}]
+            if resp.status_code != 200 or attempt <= 0 or [b for b, _ in conform_calls[-1]] != [b"S3-C1-QA", b"S3-C2"] \
+                    or [s for _, s in conform_calls[-1]] != [4.0, 8.0] or item.get("finalKey") != fixed \
+                    or item.get("finalKeyBroken") != old_final or (item.get("units") or [{}])[0].get("cuts") != want_s3 \
+                    or (g.get("finalReal") or {}).get("n") != 2 or "finalKeyBroken" in (g.get("finalReal") or {}):
+                bad.append(f"(rm-c) 옛 기록 + S3 키 remerge 가 다릅니다: {resp.status_code} {resp.get_json() if resp.status_code != 200 else ''} "
+                           f"{[b for b, _ in conform_calls[-1]]} {item}")
+            missing = admin.post(f"/api/vnew/p/{pid}/generate/real/9/remerge")
+            if missing.status_code != 404 or ((missing.get_json() or {}).get("error") or {}).get("type") != "RunNotFound":
+                bad.append(f"(rm-c) 없는 회차가 404 RunNotFound 가 아닙니다: {missing.status_code} {missing.get_json()}")
+            if llm_calls:
+                bad.append(f"가짜가 아닌 LLM 호출: {llm_calls}")
+
+        # ================= (rm-d) server.py 주입 =================
+        server_src = (ROOT / "app" / "src" / "server.py").read_text(encoding="utf-8")
+        tail = server_src[server_src.find("vnew.VnewDependencies("):]
+        if "is_admin=lambda: g.role == ROLE_ADMIN" not in tail[:tail.find("project_tracks.install")]:
+            bad.append("(rm-d) server.py 가 VnewDependencies 에 is_admin=lambda: g.role == ROLE_ADMIN 을 넘기지 않습니다")
+    except Exception:  # noqa: BLE001
+        bad.append("작업 134 검사 예외\n" + _tb.format_exc())
+    if bad:
+        fail("작업 134 실사 컷 맞춤·remerge 검사 실패\n  " + "\n  ".join(bad))
+    else:
+        ok(f"작업 134 실사 컷 맞춤·remerge (rm-a){rm_a}·High 1920x1080 24fps·AAC 48k 스테레오·경계 멈춤 없음 "
+           "(rm-b)이어 붙이기 컷 길이·비관리자 403·관리자 fixed 키·finalKeyBroken·원장 0 (rm-c)history cuts·옛 기록 S3 QA 우선·404 "
+           "(rm-d)server.py is_admin")
+
+
 def check_vnew_retake_kling_cuts_131() -> None:
     """작업 131 — 컷 단위 Kling 실사 재료(⑦ kind=cut, 칸 "테이크#컷")의 AI로 고치기. 가짜 fal·Seedream·LLM, 유료 0.
 
@@ -48269,6 +48533,7 @@ def main() -> int:
     check_vnew_real_cut_anime_132()
     check_vnew_real_cut_qa_133()
     check_vnew_retake_kling_cuts_131()
+    check_vnew_real_remerge_134()
     check_vnew_plan_step_stay_129()
     check_pod_zones()
     print()
