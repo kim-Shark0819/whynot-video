@@ -4682,6 +4682,35 @@
     return wrap;
   }
 
+  /* ---- 콘티 샷 크기(지시서 120) ---- */
+  // 서버 prompts.SHOT_SIZES 와 같은 키·순서. 화면에는 한국어 이름만 쓴다.
+  var SHOT_SIZE_KO = {
+    wide: "와이드",
+    medium: "미디엄",
+    closeup: "클로즈업",
+    extreme_closeup: "익스트림 클로즈업",
+    over_shoulder: "어깨 너머",
+    profile: "옆모습",
+    insert: "인서트"
+  };
+
+  /* 컷의 대표 패널 번호(0 이상 정수). 없거나 맞지 않으면 null(옛 컷). */
+  function contiSourcePanel(cut) {
+    var p = cut ? cut.sourcePanel : null;
+    return typeof p === "number" && isFinite(p) && p >= 0 && Math.floor(p) === p ? p : null;
+  }
+
+  /* 컷 카드 머리 글: "패널 N · 클로즈업". 값이 있는 것만, 둘 다 없으면 "". */
+  function contiShotHead(cut) {
+    var parts = [];
+    var panel = contiSourcePanel(cut);
+    if (panel !== null) parts.push("패널 " + panel);
+    var size = cut && typeof cut.shotSize === "string" ? cut.shotSize : "";
+    if (size && Object.prototype.hasOwnProperty.call(SHOT_SIZE_KO, size)) parts.push(SHOT_SIZE_KO[size]);
+    return parts.join(" · ");
+  }
+  /* ---- 콘티 샷 크기 끝 ---- */
+
   function cutCard(cut, index, cuts, segments) {
     var card = el("div", "vnew-cut-card");
     // 구간 색 띠
@@ -4695,6 +4724,8 @@
 
     var head = el("div", "vnew-cut-head");
     head.appendChild(el("span", "vnew-cut-no", "컷 " + (index + 1)));
+    var shotHead = contiShotHead(cut);
+    if (shotHead) head.appendChild(el("span", "vnew-cut-shot", shotHead));
 
     // 초 입력
     var secWrap = el("label", "vnew-cut-sec");
@@ -4709,12 +4740,14 @@
     secWrap.appendChild(secInput);
     head.appendChild(secWrap);
 
-    // 참고 웹툰 컷 썸네일
-    var thumb = panelThumb((cut.panels || [])[0]);
+    // 참고 웹툰 컷 썸네일(지시서 120: 대표 패널이 있으면 그 패널을 테두리로 강조)
+    var sourcePanel = contiSourcePanel(cut);
+    var thumb = panelThumb(sourcePanel !== null ? sourcePanel : (cut.panels || [])[0]);
     if (thumb && thumb.url) {
-      var img = el("img", "vnew-cut-thumb");
+      var img = el("img", "vnew-cut-thumb" + (sourcePanel !== null ? " is-source" : ""));
       img.src = thumb.url;
       img.alt = "참고 컷";
+      if (sourcePanel !== null) img.title = "원본 패널 " + sourcePanel;
       img.loading = "lazy";
       img.addEventListener("click", function () {
         openLightbox(thumb.url, "참고 컷");

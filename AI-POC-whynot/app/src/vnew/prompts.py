@@ -14,7 +14,7 @@ broker 는 vpoc.llm 이 그대로 맡는다(여기서는 프롬프트·스키마
 from __future__ import annotations
 
 # 기호 열거값은 순수 모듈 fx.py 한 곳에서 읽는다(네트워크·S3 없음).
-from .fx import FX_KEYS
+from .fx import DRAWN_MAX, FX_KEYS, FX_MAX, MOOD_EN_MAX, MOOD_KO_MAX
 
 # ================================================================ ② 대본(script)
 
@@ -178,6 +178,9 @@ Rules you must follow:
 
 # ================================================================ ③ 콘티(conti)
 
+# 지시서 120: 컷의 샷 크기(원작 패널 구도에서 고른다). 화면 이름표는 vnew.js SHOT_SIZE_KO 와 같은 순서다.
+SHOT_SIZES = ("wide", "medium", "closeup", "extreme_closeup", "over_shoulder", "profile", "insert")
+
 EMIT_CONTI = {
     "name": "emit_conti",
     "description": "Return the drama storyboard (conti) cuts for the whole video.",
@@ -218,6 +221,15 @@ EMIT_CONTI = {
                             "situationKo": {"type": "string"},
                             # 이 컷을 영상 모델에 줄 영어 문장(장소·인물 위치·동작·카메라·대사 상황).
                             "promptEn": {"type": "string"},
+                            # 지시서 120(전부 선택): 대표 패널 번호·그 구도의 샷 크기·그려진 기호·추천 기호·분위기 한 줄.
+                            "sourcePanel": {"type": "integer"},
+                            "shotSize": {"type": "string", "enum": list(SHOT_SIZES)},
+                            "fxDrawn": {"type": "array", "maxItems": DRAWN_MAX,
+                                        "items": {"type": "string", "enum": list(FX_KEYS)}},
+                            "fxSuggest": {"type": "array", "maxItems": FX_MAX,
+                                          "items": {"type": "string", "enum": list(FX_KEYS)}},
+                            "moodKo": {"type": "string", "maxLength": MOOD_KO_MAX},
+                            "moodEn": {"type": "string", "maxLength": MOOD_EN_MAX},
                         },
                     },
                 }
@@ -248,8 +260,24 @@ Rules you must follow:
 6. shotKo is a short Korean description of the cut for the user. dialogueKo carries the relevant line(s)
    from the script for this cut. situationKo is what happens. cameraEn is one positive English camera
    instruction (e.g. static camera, slow push-in, over-the-shoulder).
-7. Write Korean for every *Ko field and plain English for every *En field. Answer only with the
-   emit_conti tool."""
+7. Write Korean for every *Ko field and plain English for every *En field.
+8. Webtoon panel images may follow the script, each one right after a label "Panel N of M:". N is the same
+   0-based tile number the script entries' panels use, and M is how many panels were sent. When panels are
+   given, judge each cut's framing from the drawing itself, not from the text alone.
+9. sourcePanel is the one panel (from this cut's panels) that best stands for the cut. Its drawn framing sets
+   shotSize: a face that fills the panel -> closeup (only the eyes or one small feature -> extreme_closeup);
+   figures from the waist up -> medium; whole bodies or a broad background -> wide; a face seen past another
+   character's shoulder -> over_shoulder; a face in side view -> profile; only hands or an object -> insert.
+   shotKo and cameraEn must agree with that framing.
+10. fxDrawn lists the webtoon symbols that are actually drawn in the source panel, only from: """ + " | ".join(FX_KEYS) + """.
+   Drawn blush -> blush lines; a drawn sweat drop -> sweat drop; drawn tears -> tear streams; a sparkle or
+   flower background -> pink sparkle background; speed or focus lines -> speed lines. Leave it empty when
+   nothing is drawn or when no panel images are given; never invent a symbol.
+11. fxSuggest: when the cut's emotion is clear, at most """ + str(FX_MAX) + """ symbols from the same list that suit it, best
+   first (a drawn one first); otherwise empty. moodKo (<= """ + str(MOOD_KO_MAX) + """ characters, Korean) and moodEn
+   (<= """ + str(MOOD_EN_MAX) + """ characters, English) give the mood and the visible characters' expressions in one line,
+   with the character names exactly as given. Never describe hair, skin or clothing colors there.
+Answer only with the emit_conti tool."""
 
 
 # ================================================================ ③ 기호·분위기 채우기(vnew-live-fx 묶음 A, 2026-10-30)

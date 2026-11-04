@@ -1029,6 +1029,9 @@ def run_conti(owner: str, pid: str, task_id: str) -> None:
 
     VNEW_FX 가 켜져 있으면(작업 시작 때 한 번 읽는다) 저장 전에 기호·분위기 채우기를 1회 부르고 결과를 같은 저장에
     넣는다(fxFill). 채우기가 실패해도 콘티는 기호 없이 저장한다(vnew-live-fx RA2.1). 끄면 지금 동작.
+
+    지시서 120: VNEW_CONTI_IMAGES 면 대본 글 뒤에 웹툰 타일을 붙여 보낸다(_conti_blocks). 그림 호출이 실패하면 글만 1회
+    다시(_conti_call). 그림을 본 콘티가 모든 컷의 기호·분위기를 채웠으면 채우기 호출을 건너뛴다.
     """
     try:
         fx_on = bool(vnew_settings_module().VNEW_FX)
@@ -1048,15 +1051,18 @@ def run_conti(owner: str, pid: str, task_id: str) -> None:
         notes = str(inp.get("notes") or "").strip()
         roster = _roster_text(owner, inp.get("characters") or [])
 
-        blocks = [{"text": _conti_prompt(script, total_seconds, notes, roster)}]
-        payload, usage = _analyze_conti(blocks, model=_conti_model())
+        text = _conti_prompt(script, total_seconds, notes, roster)
+        blocks, sent = _conti_blocks(owner, pid, plan, text)
+        payload, usage, blocks, sent = _conti_call(pid, blocks, sent, text)
         model = str(usage.get("model") or _conti_model())
         _charge(owner, pid, plan.get("planId") or "", usage, model)
 
-        cuts = _normalize_cuts(payload, script)
+        # 지시서 120: 그림을 보낸 콘티만 기호·분위기를 믿는다(글만이면 그려진 기호를 볼 수 없어 지금처럼 채우기에 맡긴다).
+        fx_from_conti = fx_on and sent > 0
+        cuts = _normalize_cuts(payload, script, fx_from_conti=fx_from_conti, panel_count=sent)
         # 최소 5컷 보정: 모델이 모자라게 주면 거절(재요청) 후 그래도 모자라면 쪼개서 채운다.
         if len(cuts) < MIN_CUTS:
-            cuts = _ensure_min_cuts(blocks, cuts, script, model_hint=model)
+            cuts = _ensure_min_cuts(blocks, cuts, script, model_hint=model, fx_from_conti=fx_from_conti, panel_count=sent)
 
         # 초 맞춤 + 세그먼트(모델 최대 길이 기준, 컷 경계에서).
         video_model = str(inp.get("videoModel") or vpoc_ark.DEFAULT_MODEL)
@@ -1064,10 +1070,17 @@ def run_conti(owner: str, pid: str, task_id: str) -> None:
         cuts, segments = compute_segments(cuts, _max_segment_seconds(video_model))
 
         # 기호·분위기 채우기(켬일 때만, 실패해도 콘티는 저장). 결과 상태는 콘티와 같은 저장에 넣는다.
+        # 지시서 120: 콘티가 모든 컷의 기호·분위기를 채웠으면(채울 컷·옮길 컷 0) 채우기 모델을 부르지 않는다.
         extra = None
         if fx_on:
-            cuts, fx_state = _fill_new_conti(owner, pid, plan, cuts)
-            extra = {"fxFill": fx_state}
+            by_conti = sum(1 for cut in cuts if isinstance(cut, dict) and "fxSuggest" in cut)
+            empty_ids, translate_ids = vnew_fx.fill_targets(cuts)
+            if by_conti and not empty_ids and not translate_ids:
+                log.info("vnew.conti.fx.skipped pid=%s by_conti=%d", pid, by_conti)
+                extra = {"fxFill": _fx_state("ready", model=model, stats={"filled": by_conti})}
+            else:
+                cuts, fx_state = _fill_new_conti(owner, pid, plan, cuts)
+                extra = {"fxFill": fx_state}
 
         conti = {"status": "ready", "error": "", "model": model, "cuts": cuts, "segments": segments}
         _commit_step(owner, pid, "conti", task_id, conti, extra=extra)
@@ -1108,6 +1121,49 @@ def _unapprove_previz_after_conti(owner: str, pid: str) -> None:
     except Exception as exc:  # noqa: BLE001
         log.warning("vnew.conti.unapprove_previz_failed pid=%s err=%s", pid, str(exc)[:200])
 
+
+
+def _conti_blocks(owner: str, pid: str, plan: dict, text: str) -> tuple[list[dict], int]:
+    """콘티 요청 블록(지시서 120). (blocks, 보낸 이미지 수).
+
+    맨 앞은 늘 대본 글 하나다. VNEW_CONTI_IMAGES 가 켜져 있으면 그 뒤에 대본 분석과 같은 ordered_tiles 타일을
+    "Panel N of M:" 글 + 이미지 짝으로 붙인다. N 은 대본 entries[].panels 와 같은 0부터 번호, M 은 보낸 장수다.
+    끔·순서 없음·타일 없음·타일 읽기 실패면 글 하나(지금과 같은 블록). 이미지는 저장하지 않는다.
+    """
+    blocks: list[dict] = [{"text": text}]
+    if not vnew_settings_module().VNEW_CONTI_IMAGES:
+        return blocks, 0
+    order = list((plan.get("input") or {}).get("order") or [])
+    if not order:
+        return blocks, 0
+    try:
+        tiles, _total, _picked = ordered_tiles(owner, pid, order)
+    except Exception as exc:  # noqa: BLE001 — 그림을 못 읽으면 글만 보낸다.
+        log.warning("vnew.conti.tiles_failed pid=%s err=%s", pid, str(exc)[:200])
+        return blocks, 0
+    count = len(tiles)
+    for number, jpeg in enumerate(tiles):
+        blocks.append({"text": f"Panel {number} of {count}:"})
+        blocks.append({"image": {"format": "jpeg", "source": {"bytes": jpeg}}})
+    return blocks, count
+
+
+def _conti_call(pid: str, blocks: list[dict], sent: int, text: str) -> tuple[dict, dict, list[dict], int]:
+    """콘티 1회 호출(지시서 120). (payload, usage, 쓴 blocks, 보낸 이미지 수).
+
+    모델 체인·다음 모델 넘김은 _converse 가 대본 분석과 같게 맡는다. 그림을 보낸 호출이 끝내 실패하면 로그 1줄을 남기고
+    글만 보내는 지금 방식으로 1회 다시 부른다(그것도 실패하면 예외 그대로 → 콘티 실패).
+    """
+    try:
+        payload, usage = _analyze_conti(blocks, model=_conti_model())
+        return payload, usage, blocks, sent
+    except Exception as exc:  # noqa: BLE001
+        if not sent:
+            raise
+        log.warning("vnew.conti.images_fallback pid=%s images=%d err=%s", pid, sent, str(exc)[:200])
+    text_blocks = [{"text": text}]
+    payload, usage = _analyze_conti(text_blocks, model=_conti_model())
+    return payload, usage, text_blocks, 0
 
 
 def _conti_prompt(script: dict, total_seconds: int, notes: str, roster: str) -> str:
@@ -1186,9 +1242,14 @@ def _cut_location(model_location: str, cut_panels: list[int], script: dict) -> s
     return overlap[0] or setting_location
 
 
-def _normalize_cuts(payload: dict, script: dict) -> list[dict]:
-    """모델 출력 cuts 를 정리한다. locationEn 은 그 컷이 맡은 웹툰 컷의 장소로 보정, seconds 는 양수."""
+def _normalize_cuts(payload: dict, script: dict, *, fx_from_conti: bool = False, panel_count: int = 0) -> list[dict]:
+    """모델 출력 cuts 를 정리한다. locationEn 은 그 컷이 맡은 웹툰 컷의 장소로 보정, seconds 는 양수.
+
+    지시서 120: sourcePanel·shotSize 는 값이 맞으면 둔다. fx_from_conti(그림을 보냈고 VNEW_FX 켬)면 콘티가 준
+    fxDrawn·fxSuggest·moodKo·moodEn 을 기호·분위기 채우기와 같은 규칙(merge_fill·apply_cap)으로 넣는다.
+    """
     cuts = []
+    fx_items: list[dict] = []
     raw_cuts = _loads_if_str(payload.get("cuts"))
     if not isinstance(raw_cuts, list):
         raw_cuts = []
@@ -1218,26 +1279,75 @@ def _normalize_cuts(payload: dict, script: dict) -> list[dict]:
         if seconds <= 0:
             seconds = 1.0
         cut_panels = [int(p) for p in (item.get("panels") or []) if _is_int(p)]
-        cuts.append(
-            {
-                "id": str(item.get("id") or f"c{index + 1}"),
-                "no": index + 1,
-                "seconds": seconds,
-                "panels": cut_panels,
-                "shotKo": str(item.get("shotKo") or ""),
-                "cameraEn": str(item.get("cameraEn") or ""),
-                # 모델이 웹툰에 없는 장소를 지어내면 그 컷이 맡은 웹툰 컷의 장소로 되돌린다.
-                "locationEn": _cut_location(str(item.get("locationEn") or ""), cut_panels, script),
-                "characters": chars,
-                "dialogueKo": str(item.get("dialogueKo") or ""),
-                "situationKo": str(item.get("situationKo") or ""),
-                "promptEn": str(item.get("promptEn") or ""),
-            }
-        )
+        cut = {
+            "id": str(item.get("id") or f"c{index + 1}"),
+            "no": index + 1,
+            "seconds": seconds,
+            "panels": cut_panels,
+            "shotKo": str(item.get("shotKo") or ""),
+            "cameraEn": str(item.get("cameraEn") or ""),
+            # 모델이 웹툰에 없는 장소를 지어내면 그 컷이 맡은 웹툰 컷의 장소로 되돌린다.
+            "locationEn": _cut_location(str(item.get("locationEn") or ""), cut_panels, script),
+            "characters": chars,
+            "dialogueKo": str(item.get("dialogueKo") or ""),
+            "situationKo": str(item.get("situationKo") or ""),
+            "promptEn": str(item.get("promptEn") or ""),
+        }
+        # 지시서 120: 대표 패널·샷 크기는 값이 맞을 때만 키를 둔다(없으면 옛 컷과 같은 모양).
+        source = _conti_source_panel(item.get("sourcePanel"), cut_panels, panel_count)
+        if source is not None:
+            cut["sourcePanel"] = source
+        shot_size = _conti_shot_size(item.get("shotSize"))
+        if shot_size:
+            cut["shotSize"] = shot_size
+        if fx_from_conti:
+            fx_item = _conti_fx_item(cut["id"], item)
+            if fx_item is not None:
+                fx_items.append(fx_item)
+        cuts.append(cut)
+    if fx_items:
+        # 기호·분위기 채우기(_analyze_fx)와 같은 합치기·3컷 한도를 그대로 거친다.
+        cuts, stats = vnew_fx.merge_fill(cuts, fx_items, [row["id"] for row in fx_items], {})
+        cuts, _capped = vnew_fx.apply_cap(cuts, stats.get("filledIds") or [])
     return cuts
 
 
-def _ensure_min_cuts(blocks: list[dict], cuts: list[dict], script: dict, *, model_hint: str) -> list[dict]:
+def _conti_source_panel(value, cut_panels: list[int], panel_count: int) -> int | None:
+    """sourcePanel 정리(지시서 120). 정수(bool 아님)·0 이상, 컷 panels 가 있으면 그 안, 보낸 장수가 있으면 그 미만. 아니면 None."""
+    if isinstance(value, bool) or not _is_int(value):
+        return None
+    number = int(value)
+    if number < 0 or (panel_count and number >= panel_count) or (cut_panels and number not in cut_panels):
+        return None
+    return number
+
+
+def _conti_shot_size(value) -> str:
+    """shotSize 정리(지시서 120). 소문자·공백·붙임표 → 밑줄 뒤 prompts.SHOT_SIZES 안이면 그 값, 아니면 ""."""
+    if not isinstance(value, str):
+        return ""
+    key = re.sub(r"[\s\-]+", "_", value.strip().lower())
+    return key if key in prompts.SHOT_SIZES else ""
+
+
+def _conti_fx_item(cut_id: str, item: dict) -> dict | None:
+    """콘티가 준 기호·분위기를 merge_fill 이 받는 모양으로(지시서 120). 기호도 moodKo 도 없으면 None(채우기 대상으로 남긴다).
+
+    fx(선택값)가 비면 fxDrawn 앞 FX_MAX 개를 넣는다(그려진 기호 = 적용, _analyze_fx 의 FX_SYSTEM 규칙과 같다).
+    """
+    drawn = vnew_fx.fx_list(_loads_if_str(item.get("fxDrawn")), vnew_fx.DRAWN_MAX)
+    suggest = vnew_fx.fx_list(_loads_if_str(item.get("fxSuggest")), vnew_fx.FX_MAX)
+    mood_ko = vnew_fx.clean_text(item.get("moodKo"), vnew_fx.MOOD_KO_MAX)
+    if not drawn and not suggest and not mood_ko:
+        return None
+    applied = vnew_fx.fx_list(_loads_if_str(item.get("fx")), vnew_fx.FX_MAX) or drawn[: vnew_fx.FX_MAX]
+    return {"id": cut_id, "drawnFx": drawn, "fxSuggest": suggest, "fx": applied,
+            "moodKo": mood_ko, "moodEn": item.get("moodEn")}
+
+
+def _ensure_min_cuts(
+    blocks: list[dict], cuts: list[dict], script: dict, *, model_hint: str, fx_from_conti: bool = False, panel_count: int = 0
+) -> list[dict]:
     """컷이 MIN_CUTS 보다 적으면 한 번 재요청하고, 그래도 적으면 긴 컷을 쪼개 채운다."""
     retry = list(blocks) + [
         {
@@ -1249,7 +1359,7 @@ def _ensure_min_cuts(blocks: list[dict], cuts: list[dict], script: dict, *, mode
     ]
     try:
         payload2, _ = _analyze_conti(retry, model=model_hint)
-        cuts2 = _normalize_cuts(payload2, script)
+        cuts2 = _normalize_cuts(payload2, script, fx_from_conti=fx_from_conti, panel_count=panel_count)
         if len(cuts2) >= len(cuts):
             cuts = cuts2
     except Exception as exc:  # noqa: BLE001
@@ -1501,6 +1611,7 @@ def update_conti(owner: str, pid: str, patch: dict) -> dict:
                 _clear_stale_mood_en(old_cuts, cuts)
             for no, cut in enumerate(cuts, start=1):
                 cut["no"] = no
+                _clean_conti_shot(cut)
                 try:
                     cut["seconds"] = max(1, int(cut.get("seconds") or 1))
                 except (TypeError, ValueError):
@@ -1521,6 +1632,23 @@ def update_conti(owner: str, pid: str, patch: dict) -> dict:
     updated, info = mutate_plan(owner, pid, mutator)
     updated["_fit"] = info  # routes 가 응답에 쓴다(저장 데이터가 아니라 반환용).
     return updated
+
+
+def _clean_conti_shot(cut: dict) -> None:
+    """사용자 저장 컷의 sourcePanel·shotSize 를 제자리 정리(지시서 120). 들어온 키만 보고, 맞지 않는 값은 키째 뺀다."""
+    if "sourcePanel" in cut:
+        panels = [int(p) for p in (cut.get("panels") or []) if _is_int(p)] if isinstance(cut.get("panels"), list) else []
+        source = _conti_source_panel(cut.get("sourcePanel"), panels, 0)
+        if source is None:
+            cut.pop("sourcePanel", None)
+        else:
+            cut["sourcePanel"] = source
+    if "shotSize" in cut:
+        size = _conti_shot_size(cut.get("shotSize"))
+        if size:
+            cut["shotSize"] = size
+        else:
+            cut.pop("shotSize", None)
 
 
 def _clear_stale_mood_en(old_cuts: list[dict], new_cuts: list[dict]) -> None:

@@ -249,6 +249,10 @@ VNEW_PREVIZ_SUPPORT = _bool("VNEW_PREVIZ_SUPPORT", True)
 VNEW_FX = _bool("VNEW_FX", True)
 # 채우기 1회에 보낼 패널 이미지 상한. 넘으면 순서를 지켜 고르게 고른다(코드 기본, 템플릿에 넣지 않는다).
 VNEW_FX_MAX_PANELS = _int("VNEW_FX_MAX_PANELS", 20)
+# 콘티 그림 보기(지시서 120). 켜면 ③ 콘티 요청에 대본 글과 함께 웹툰 타일(대본 분석과 같은 ordered_tiles)을
+# "Panel N of M:" 라벨과 보내 컷의 sourcePanel·shotSize·그려진 기호를 받는다. 그림 요청이 실패하면 글만 1회 다시 보낸다.
+# false 면 지금 동작(글 블록 하나, 바이트 같음).
+VNEW_CONTI_IMAGES = _bool("VNEW_CONTI_IMAGES", True)
 
 # 실사 캐스팅(vnew-live-fx 묶음 B, 2026-10-30). 켜면 캐릭터 상세에서 실사 배우 사진을 글로만 뽑아 고르고(Seedream 4.5
 # text-to-image, 웹툰 그림은 보내지 않는다), 캐릭터 분석에 성별(genderEn)을 더한다. false 면 지금 동작(캐스팅 라우트 404·

@@ -45035,6 +45035,256 @@ def check_vnew_edit_fix_picker_119() -> None:
            "(rtk-z)node --check·재료 줄 버튼 없음·머리 줄 문구·구간 순수 함수 (화면 흐름은 rtk-j)")
 
 
+_CI120_SLICE = (("  /* ---- 콘티 샷 크기(지시서 120) ---- */", "  /* ---- 콘티 샷 크기 끝 ---- */"),)
+_CI120_NODE = r"""
+var R = {};
+R.keys = Object.keys(SHOT_SIZE_KO);
+R.names = R.keys.map(function (k) { return SHOT_SIZE_KO[k]; });
+R.head = [contiShotHead({}), contiShotHead(null), contiShotHead({ sourcePanel: 2, shotSize: "closeup" }), contiShotHead({ sourcePanel: 0 }),
+          contiShotHead({ shotSize: "constructor" }), contiShotHead({ sourcePanel: "2", shotSize: "zoom" }),
+          contiShotHead({ sourcePanel: -1, shotSize: "insert" }), contiShotHead({ sourcePanel: 1.5, shotSize: "over_shoulder" })];
+console.log(JSON.stringify(R));
+"""
+
+
+def check_vnew_conti_images_120() -> None:
+    """지시서 120 — ③ 콘티가 웹툰 그림을 직접 보고 샷 구도·그려진 기호를 정한다. 가짜 LLM·가짜 저장소·유료 호출 0.
+
+    (ci-a) 스키마·규칙: EMIT_CONTI 새 선택 필드 6개(enum·상한 = fx.py 상수)·required 그대로, CONTI_SYSTEM 라벨·샷 크기·기호 목록
+    (ci-b) 블록(run_conti): 켬 → 글 1 + "Panel N of M:" 라벨 바로 뒤 이미지(타일 수만큼, N = 0부터 = entries.panels 번호),
+           끔 → [글 하나] 바이트 같음·타일 읽기 0
+    (ci-c) 저장: sourcePanel(컷 panels 안·보낸 장수 미만)·shotSize(정리·목록 밖 버림)·fxDrawn(목록 밖·중복 버림·5개)·fx 비면 fxDrawn 앞 2개·
+           mood 60/80자, 끔이면 콘티의 기호 필드를 쓰지 않음, update_conti 정리(_clean_conti_shot)·옛 컷 그대로
+    (ci-d) 채우기 건너뛰기: 콘티가 모든 컷을 채움 → _analyze_fx 0회, 비었음 → 1회. 변형 1회: _conti_fx_item 이 빈 값도 채운 것으로 보면 잡힌다
+    (ci-e) 그림 호출 실패 → 로그 1줄 + 글만 1회 다시 → 성공
+    (ci-f) 화면(node): SHOT_SIZE_KO 7개(서버 SHOT_SIZES 순서)·contiShotHead(옛 컷 "")·카드 머리·대표 썸네일 강조
+    """
+    sys.path.insert(0, str(ROOT / "app"))
+    import logging as _logging  # noqa: PLC0415
+    import traceback as _tb  # noqa: PLC0415
+
+    bad: list[str] = []
+    seen: set[str] = set()
+
+    def expect(group: str, got, want, what: str) -> None:
+        seen.add(group)
+        if got != want:
+            bad.append(f"({group}) {what}\n      결과 {got!r}\n      기대 {want!r}")
+
+    try:
+        from src.vnew import fx as fxmod  # noqa: PLC0415
+        from src.vnew import plan as planmod  # noqa: PLC0415
+        from src.vnew import prompts as prmod  # noqa: PLC0415
+
+        # ================= (ci-a) 스키마·규칙 =================
+        item = prmod.EMIT_CONTI["inputSchema"]["json"]["properties"]["cuts"]["items"]
+        props = item["properties"]
+        expect("ci-a", [item["required"], props.get("sourcePanel"), props.get("shotSize"),
+                        props.get("fxDrawn", {}).get("maxItems"), props.get("fxDrawn", {}).get("items", {}).get("enum"),
+                        props.get("fxSuggest", {}).get("maxItems"), props.get("fxSuggest", {}).get("items", {}).get("enum"),
+                        props.get("moodKo"), props.get("moodEn"), "fx" in props],
+               [["id", "seconds", "shotKo", "promptEn"], {"type": "integer"},
+                {"type": "string", "enum": ["wide", "medium", "closeup", "extreme_closeup", "over_shoulder", "profile", "insert"]},
+                fxmod.DRAWN_MAX, list(fxmod.FX_KEYS), fxmod.FX_MAX, list(fxmod.FX_KEYS),
+                {"type": "string", "maxLength": fxmod.MOOD_KO_MAX}, {"type": "string", "maxLength": fxmod.MOOD_EN_MAX}, False],
+               "EMIT_CONTI 새 선택 필드(sourcePanel·shotSize·fxDrawn ≤5·fxSuggest ≤2·moodKo ≤60·moodEn ≤80, fx.py 상수)·required 그대로")
+        system = prmod.CONTI_SYSTEM
+        expect("ci-a", ['"Panel N of M:"' in system, all(s in system for s in prmod.SHOT_SIZES), " | ".join(fxmod.FX_KEYS) in system,
+                        "sourcePanel" in system and "fxDrawn" in system and "fxSuggest" in system,
+                        system.rstrip().endswith("Answer only with the emit_conti tool.")],
+               [True, True, True, True, True], "CONTI_SYSTEM: 라벨 뜻·샷 크기 7개·기호 목록·새 필드·끝 문장")
+
+        # ================= 가짜 저장소·LLM =================
+        def base_plan() -> dict:
+            return {"planId": "plan_c", "revision": 1, "input": {"order": ["f1"], "totalSeconds": 15},
+                    "task": {"name": "conti", "status": "running", "startedAt": None, "id": "t1"},
+                    "script": {"status": "ready", "setting": {"locationKo": "교실", "locationEn": "classroom"}, "entries": [
+                        {"id": "e1", "panels": [0], "speaker": "민지", "lineKo": "왜?", "situationKo": "본다", "locationEn": "classroom"},
+                        {"id": "e2", "panels": [1], "speaker": "준호", "lineKo": "응", "situationKo": "웃는다", "locationEn": "classroom"},
+                        {"id": "e3", "panels": [2], "speaker": "민지", "lineKo": "", "situationKo": "손", "locationEn": "classroom"}]}}
+
+        def cuts_payload(with_fx: bool) -> dict:
+            rows = [
+                {"id": "c1", "seconds": 3, "panels": [0, 1], "shotKo": "민지 얼굴", "promptEn": "p1", "sourcePanel": 1, "shotSize": "closeup",
+                 "fxDrawn": ["blush lines", "horns", "Sweat  Drop", "blush lines", "tear streams", "speed lines", "pink sparkle background"],
+                 "moodKo": "가" * 100, "moodEn": "a" * 120},
+                {"id": "c2", "seconds": 3, "panels": [1], "shotKo": "준호", "promptEn": "p2", "sourcePanel": 9, "shotSize": "zoom",
+                 "fxSuggest": ["speed lines", "horns"], "moodKo": "긴장", "moodEn": "tense"},
+                {"id": "c3", "seconds": 3, "panels": [2], "shotKo": "눈", "promptEn": "p3", "sourcePanel": 2, "shotSize": "Extreme Closeup",
+                 "moodKo": "평온", "moodEn": "calm"},
+                {"id": "c4", "seconds": 3, "panels": [2], "shotKo": "울음", "promptEn": "p4", "sourcePanel": True, "shotSize": "wide",
+                 "fxDrawn": ["tear streams"], "moodKo": "슬픔", "moodEn": "sad"},
+                {"id": "c5", "seconds": 3, "panels": [0], "shotKo": "손", "promptEn": "p5", "shotSize": "insert", "moodKo": "손", "moodEn": "hands"},
+            ]
+            if not with_fx:
+                for row in rows:
+                    for key in fxmod.FX_FIELDS:
+                        row.pop(key, None)
+            return {"cuts": rows}
+
+        saved: dict = {}
+        conti_calls: list = []
+        fx_calls: list = []
+        tile_calls: list = []
+        state = {"payload": None, "fail_images": False}
+        names = ("load_plan", "mutate_plan", "ordered_tiles", "_analyze_conti", "_analyze_fx", "_charge",
+                 "_sync_locations_after_conti", "_unapprove_previz_after_conti", "_max_segment_seconds", "_conti_fx_item")
+        orig = {n: getattr(planmod, n) for n in names}
+
+        def fake_conti(blocks, *, model):
+            conti_calls.append(blocks)
+            if state["fail_images"] and any("image" in b for b in blocks):
+                raise RuntimeError("ValidationException: too many images")
+            return json.loads(json.dumps(state["payload"])), {"model": "m-c"}
+
+        planmod.load_plan = lambda owner, pid: (saved, "etag")
+        planmod.mutate_plan = lambda owner, pid, mutator, **kw: (saved, mutator(saved))
+        planmod.ordered_tiles = lambda owner, pid, order: (tile_calls.append(list(order)) or ([b"t0", b"t1", b"t2"], 3, 3))
+        planmod._analyze_conti = fake_conti  # noqa: SLF001
+        planmod._analyze_fx = lambda blocks, *, model: (fx_calls.append(blocks) or ({"cuts": []}, {"model": "m-f"}))  # noqa: SLF001
+        planmod._charge = lambda *a, **kw: None  # noqa: SLF001
+        planmod._sync_locations_after_conti = lambda owner, pid: None  # noqa: SLF001
+        planmod._unapprove_previz_after_conti = lambda owner, pid: None  # noqa: SLF001
+        planmod._max_segment_seconds = lambda video_model: 15  # noqa: SLF001
+
+        fallback_logs: list = []
+
+        class _Grab(_logging.Handler):
+            def emit(self, record):
+                if str(record.msg).startswith("vnew.conti.images_fallback"):
+                    fallback_logs.append(record.getMessage())
+
+        grab = _Grab()
+        _logging.getLogger("vpoc").addHandler(grab)
+
+        def run(with_fx: bool, *, images: bool = True, fail_images: bool = False) -> dict:
+            saved.clear()
+            saved.update(base_plan())
+            conti_calls.clear()
+            fx_calls.clear()
+            tile_calls.clear()
+            fallback_logs.clear()
+            state["payload"] = cuts_payload(with_fx)
+            state["fail_images"] = fail_images
+            with _pin_vnew(VNEW_FX=True, VNEW_CONTI_IMAGES=images):
+                planmod.run_conti("o", "p", "t1")
+            return saved
+
+        def prompt_text() -> str:
+            plan0 = base_plan()
+            return planmod._conti_prompt(plan0["script"], 15, "", "(연결된 캐릭터 없음)")  # noqa: SLF001
+
+        try:
+            # ================= (ci-b) 블록 =================
+            run(True)
+            blocks = conti_calls[0] if conti_calls else []
+            images = [i for i, b in enumerate(blocks) if "image" in b]
+            labels = [blocks[i - 1].get("text") for i in images]
+            expect("ci-b", [len(conti_calls), blocks[:1] == [{"text": prompt_text()}], len(images), labels,
+                            [blocks[i]["image"]["source"]["bytes"] for i in images], tile_calls],
+                   [1, True, 3, ["Panel 0 of 3:", "Panel 1 of 3:", "Panel 2 of 3:"], [b"t0", b"t1", b"t2"], [["f1"]]],
+                   "켬: 대본 글 블록 맨 앞·이미지 수 = 타일 수·각 이미지 바로 앞 \"Panel N of M:\"(N 0부터 = entries.panels)·대본과 같은 ordered_tiles")
+
+            cuts_on = {c["id"]: c for c in saved["conti"]["cuts"]}
+            fx_on_calls = len(fx_calls)
+            fill_on = dict(saved.get("fxFill") or {})
+
+            run(True, images=False)
+            off_blocks = conti_calls[0] if conti_calls else []
+            expect("ci-b", [json.dumps(off_blocks, ensure_ascii=False) == json.dumps([{"text": prompt_text()}], ensure_ascii=False),
+                            tile_calls, len(conti_calls), len(fx_calls)],
+                   [True, [["f1"]], 1, 1], "끔: 블록 = [글 하나](바이트 같음·이미지 0)·타일 읽기는 지금처럼 채우기 1번뿐")
+            cuts_off = saved["conti"]["cuts"]
+
+            # ================= (ci-c) 저장 =================
+            c1, c2, c3, c4, c5 = (cuts_on.get(k, {}) for k in ("c1", "c2", "c3", "c4", "c5"))
+            expect("ci-c", [c1.get("sourcePanel"), c1.get("shotSize"), c1.get("fxDrawn"), c1.get("fxSuggest"), c1.get("fx"),
+                            len(c1.get("moodKo", "")), len(c1.get("moodEn", ""))],
+                   [1, "closeup", ["blush lines", "sweat drop", "tear streams", "speed lines", "pink sparkle background"],
+                    ["blush lines", "sweat drop"], ["blush lines", "sweat drop"], fxmod.MOOD_KO_MAX, fxmod.MOOD_EN_MAX],
+                   "c1: 대표 패널·샷 크기·fxDrawn(목록 밖·중복 버림·5개 상한)·fx 비면 fxDrawn 앞 2개·mood 60/80자")
+            expect("ci-c", [["sourcePanel" in c2, "shotSize" in c2, c2.get("fxSuggest"), c2.get("fx"), c2.get("fxDrawn")],
+                            [c3.get("sourcePanel"), c3.get("shotSize"), c3.get("fxSuggest"), c3.get("fx")],
+                            ["sourcePanel" in c4, c4.get("shotSize"), c4.get("fx")], [c5.get("shotSize"), "sourcePanel" in c5]],
+                   [[False, False, ["speed lines"], [], []], [2, "extreme_closeup", [], []], [False, "wide", ["tear streams"]], ["insert", False]],
+                   "c2 패널 밖 sourcePanel·목록 밖 shotSize 버림·추천만(그려진 것 없으면 fx 빈 값), c3 shotSize 정리, c4 bool sourcePanel 버림, c5 키 없음")
+            expect("ci-c", [[any(k in c for k in fxmod.FX_FIELDS) for c in cuts_off], [c.get("shotSize") for c in cuts_off]],
+                   [[False] * 5, ["closeup", None, "extreme_closeup", "wide", "insert"]],
+                   "끔(그림 안 봄): 콘티의 기호·분위기는 쓰지 않음(채우기에 맡김)·샷 크기만 둠")
+            kept = {"panels": [0, 1], "sourcePanel": 1, "shotSize": "Over Shoulder"}
+            dropped = {"panels": [0], "sourcePanel": 3, "shotSize": "zoom"}
+            old = {"id": "c1", "panels": [0], "shotKo": "옛 컷"}
+            old_copy = dict(old)
+            for cut in (kept, dropped, old):
+                planmod._clean_conti_shot(cut)  # noqa: SLF001
+            expect("ci-c", [kept, dropped, old == old_copy], [{"panels": [0, 1], "sourcePanel": 1, "shotSize": "over_shoulder"}, {"panels": [0]}, True],
+                   "update_conti 정리: 맞는 값 정리·맞지 않는 값 키째 뺌·옛 컷(키 없음) 그대로")
+
+            # ================= (ci-d) 채우기 건너뛰기 =================
+            run(False)
+            empty_calls = len(fx_calls)
+            expect("ci-d", [fx_on_calls, fill_on.get("status"), fill_on.get("filled"), empty_calls, saved.get("fxFill", {}).get("status")],
+                   [0, "ready", 5, 1, "ready"], "콘티가 모든 컷을 채움 → _analyze_fx 0회(fxFill ready·filled 5), 비었음 → 1회")
+
+            def mutant(cut_id, item):
+                row = orig["_conti_fx_item"](cut_id, item)
+                return row or {"id": cut_id, "drawnFx": [], "fxSuggest": [], "fx": [], "moodKo": "", "moodEn": ""}
+
+            planmod._conti_fx_item = mutant  # noqa: SLF001
+            try:
+                run(False)
+                caught = len(fx_calls) != 1
+            finally:
+                planmod._conti_fx_item = orig["_conti_fx_item"]  # noqa: SLF001
+            expect("ci-d", caught, True, "변형(빈 값도 채운 것으로 봄)이면 '비었음 → 1회' 검사가 잡는다")
+
+            # ================= (ci-e) 그림 실패 → 글만 =================
+            run(True, fail_images=True)
+            expect("ci-e", [len(conti_calls), sum(1 for b in conti_calls[0] if "image" in b) if conti_calls else -1,
+                            conti_calls[1] if len(conti_calls) > 1 else None, saved["conti"].get("status"), len(saved["conti"].get("cuts") or []),
+                            len(fallback_logs), any("fxSuggest" in c for c in saved["conti"]["cuts"]), len(fx_calls)],
+                   [2, 3, [{"text": prompt_text()}], "ready", 5, 1, False, 1],
+                   "그림 호출 실패 → 로그 1줄·글만 1회 다시 → 콘티 ready, 그 콘티의 기호는 믿지 않고 채우기 1회")
+        finally:
+            for n, f in orig.items():
+                setattr(planmod, n, f)
+            _logging.getLogger("vpoc").removeHandler(grab)
+    except Exception as exc:  # noqa: BLE001
+        bad.append("검사 중 예외: " + repr(exc) + "\n" + _tb.format_exc()[:1500])
+
+    # ================= (ci-f) 화면(node) =================
+    node = shutil.which("node")
+    vjs = (PUBLIC / "vnew.js").read_text(encoding="utf-8")
+    css = (PUBLIC / "vnew.css").read_text(encoding="utf-8")
+    code, problems = _edu_code(vjs, _CI120_SLICE)
+    bad.extend(p.replace("(edu-a)", "(ci-f)") for p in problems)
+    expect("ci-f", ['if (shotHead) head.appendChild(el("span", "vnew-cut-shot", shotHead));' in vjs,
+                    'el("img", "vnew-cut-thumb" + (sourcePanel !== null ? " is-source" : ""))' in vjs,
+                    ".vnew-cut-thumb.is-source" in css, ".vnew-cut-shot" in css],
+           [True, True, True, True], "카드 머리 글(값 있을 때만)·대표 패널 썸네일 테두리 강조")
+    if node and not problems:
+        got, err = _lr_run_node(node, code + _CI120_NODE, "ci120_f_")
+        if err:
+            bad.append(f"(ci-f) node 실행 실패: {err}")
+        else:
+            expect("ci-f", got, {"keys": ["wide", "medium", "closeup", "extreme_closeup", "over_shoulder", "profile", "insert"],
+                                 "names": ["와이드", "미디엄", "클로즈업", "익스트림 클로즈업", "어깨 너머", "옆모습", "인서트"],
+                                 "head": ["", "", "패널 2 · 클로즈업", "패널 0", "", "", "인서트", "어깨 너머"]},
+                   "SHOT_SIZE_KO 7개(서버 순서)·contiShotHead: 옛 컷 ''·값 있는 것만·모르는 값·문자열·음수·소수 버림")
+    elif not node:
+        warn("node 가 없어 ci-f(화면)를 건너뜁니다")
+
+    missing = [g for g in ("ci-a", "ci-b", "ci-c", "ci-d", "ci-e", "ci-f") if g not in seen]
+    if missing and not bad:
+        bad.append(f"검사하지 못한 묶음: {missing}")
+    if bad:
+        for item in bad:
+            fail("vnew 콘티 그림 보기(지시서 120) " + item)
+    else:
+        ok("vnew 콘티 그림 보기(지시서 120) 검사 (ci-a)스키마·규칙 (ci-b)블록 켬·끔 (ci-c)저장 정리·끔·사용자 저장 "
+           "(ci-d)채우기 0/1회·변형 1회 (ci-e)그림 실패 → 글만 (ci-f)화면")
+
+
 def main() -> int:
     print("== vpoc1 check ==")
     check_compileall()
@@ -45115,6 +45365,7 @@ def main() -> int:
     check_vnew_inner_voice_118a()
     check_vnew_voice_scan_118b()
     check_vnew_edit_fix_picker_119()
+    check_vnew_conti_images_120()
     check_pod_zones()
     print()
     if warnings:
