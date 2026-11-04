@@ -110,15 +110,17 @@ def generate(
     model: str,
     where: str = "seedream",
     size: str = SIZE,
+    fal_model: str | None = None,
 ) -> bytes:
     """그림 1장(JPEG bytes). references 는 순서대로 "Image 1, 2, …" 가 된다(최대 10장).
 
     size 는 "WxH"(예: "2560x1440"). 기본은 SIZE(1920x1080) 라 기존 호출은 그대로다.
     캐릭터 만들기(vnew)가 시트 2560x1440 · 정면 1440x2560 처럼 다른 크기를 쓰려고 넣었다
     (설계자 2026-10-20). 공급자는 provider()(작업 124) — fal 이면 model 은 쓰지 않는다.
+    fal_model(작업 125)을 주면 공급자와 상관없이 fal 의 그 endpoint 로 부른다(공간 시트 text-to-image).
     """
-    if provider() == "fal":
-        return _generate_fal(prompt, references, where=where, size=size)
+    if fal_model or provider() == "fal":
+        return _generate_fal(prompt, references, where=where, size=size, fal_model=fal_model)
     try:
         return _generate_ark(prompt, references, model=model, where=where, size=size)
     except VpocError as exc:
@@ -298,12 +300,17 @@ def _generate_fal(
     *,
     where: str,
     size: str,
+    fal_model: str | None = None,
 ) -> bytes:
-    """fal Seedream: 제출 → 조회 → 결과(작업 124). 참고 이미지가 있으면 edit, 없으면 text-to-image."""
+    """fal Seedream: 제출 → 조회 → 결과(작업 124). 참고 이미지가 있으면 edit, 없으면 text-to-image.
+
+    fal_model(작업 125)이 있으면 그 endpoint 를 쓴다(없으면 위 규칙).
+    """
     if not settings.FAL_KEY:
         raise VpocError(where, "NoApiKey", "fal 키(FAL_KEY)가 설정되지 않았습니다.", 400)
     refs = list(references or [])[:_FAL_MAX_REFS]
-    endpoint = _fal_endpoint(settings.SEEDREAM_FAL_EDIT_MODEL if refs else settings.SEEDREAM_FAL_T2I_MODEL)
+    default_endpoint = settings.SEEDREAM_FAL_EDIT_MODEL if refs else settings.SEEDREAM_FAL_T2I_MODEL
+    endpoint = _fal_endpoint(fal_model or default_endpoint)
     want = _parse_wh(size or SIZE) or _parse_wh(SIZE)
     width, height = fal_image_size(size or SIZE)
     body: dict = {
@@ -369,6 +376,7 @@ def generate_safe(
     model: str,
     where: str = "seedream",
     size: str = SIZE,
+    fal_model: str | None = None,
 ) -> bytes:
     """generate + 안전 필터 오탐 대응(설계자 2026-10-14 "에러가 다시는 나지 않도록").
 
@@ -383,7 +391,7 @@ def generate_safe(
     rewritten = False
     while index < len(attempts):
         try:
-            return generate(attempts[index], references, model=model, where=where, size=size)
+            return generate(attempts[index], references, model=model, where=where, size=size, fal_model=fal_model)
         except VpocError as exc:
             if not _filtered(exc):
                 raise

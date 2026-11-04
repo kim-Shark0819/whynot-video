@@ -7,7 +7,8 @@
 - 뷰 A(back, 뒤 보기): 가운데=뒤 벽(north), 좌=왼쪽 벽(west), 우=오른쪽 벽(east), 아래=바닥.
 - 뷰 B(front, 앞 보기): 같은 방을 반대편에서(south 가 가운데).
 
-서버가 방 치수(design)로 PIL 가이드 이미지를 그려 Seedream 에 참고 1번으로 주고(그림체 real→webtoon),
+서버가 방 치수(design)로 PIL 가이드 이미지를 그리고(verify·cut 기준), 뷰 4장은 참고 이미지 없이 fal text-to-image
+(settings.LOCATION_IMAGE_MODEL)로 동시에 그린다(작업 125 — 같은 방이 되게 지시문 앞에 공통 문장을 붙인다).
 생성 뷰에서 각 면 사다리꼴을 원근 보정(location_views.rectify)해 기존 wall_key/floor_key 로 저장한다
 → previz 텍스처(_textures_for)는 수정 없이 그대로 동작한다. 바닥은 뷰 A 의 floor 사다리꼴을 편다.
 
@@ -30,6 +31,7 @@ import logging
 import re
 import secrets
 import threading
+import time
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 
@@ -81,8 +83,11 @@ GUIDE_SIZE = "2560x1440"
 VIEWS = ("back", "front")
 # 그릴 뷰 총 장수(뷰2 × 그림체2 = 4). 진행 막대 total.
 TOTAL_VIEWS = len(VARIANTS) * len(VIEWS)
-# 뷰를 동시에 그리는 최대 스레드 수(real A 후 real B·webtoon A 병렬).
-VIEW_WORKERS = 2
+# 공간 시트 한 장소에서 동시에 부르는 외부 호출 수(작업 125, 1곳): 지시문 4개·그림 4장·검사 4개·사람 수 세기.
+# 참고 이미지 체인(real A → real B·webtoon A → webtoon B)이 없어져 뷰 4장이 서로 독립이다.
+LOCATION_WORKERS = 4
+# (옛 이름) 뷰를 동시에 그리는 최대 스레드 수. LOCATION_WORKERS 를 따른다.
+VIEW_WORKERS = LOCATION_WORKERS
 # verify 꼭짓점 차이가 화면 가로·세로의 이 비율을 넘으면 Claude 꼭짓점을 쓴다(설계자 048).
 VERTEX_TOLERANCE = 0.04
 
@@ -111,9 +116,12 @@ MAX_EXTRA_PROMPT_LEN = 500
 # build task 가 이 시간을 넘게 running 이면 멈춘 것으로 본다(조회 때 failed).
 BUILD_STALL_S = 1800
 
-# 단가(원장). Seedream 장당.
+# 단가(원장). Seedream 장당. (작업 125 전 값 — 다른 모듈·옛 검사가 읽을 수 있어 남긴다.)
 SEEDREAM_USD = settings.SEEDREAM_USD
 SEEDREAM_MODEL = settings.SEEDREAM_MODEL
+# 공간 시트 그림(작업 125): 참고 이미지 없이 fal text-to-image. 원장 금액은 fal Seedream 장당 단가.
+LOCATION_IMAGE_MODEL = settings.LOCATION_IMAGE_MODEL
+LOCATION_IMAGE_USD = settings.LOCATION_IMAGE_USD
 # 설계 LLM 체인: Claude 분석 체인(Fable 5.1) 먼저, 실패하면 Astra.
 # (실측 2026-10-21: Astra 가 패널 그림을 거의 못 읽어 빈 벽·'assumed'/'provisional' 설계가 나왔다.
 #  Claude 가 이미지 읽기가 강해 먼저 쓴다. Astra 는 지시서 036 장면 설계에 그대로 쓴다.)
@@ -450,14 +458,29 @@ def _design(blocks: list[dict], *, model: str) -> tuple[dict, dict]:
 
 
 def _seedream(prompt: str, references: list[bytes], *, size: str) -> bytes:
-    """Seedream Pro 로 그림 1장. 안전 필터 오탐은 generate_safe 가 처리."""
+    """공간 시트 그림 1장 — fal text-to-image(LOCATION_IMAGE_MODEL, 작업 125). 안전 필터 오탐은 generate_safe.
+
+    references 는 받기만 하고 보내지 않는다(참고 이미지 0장). 장소 사진·웹툰 패널은 사실 정리·지시문에서
+    글로만 반영한다.
+    """
     return vpoc_seedream.generate_safe(
         prompt,
-        references,
-        model=SEEDREAM_MODEL,
+        [],
+        model=LOCATION_IMAGE_MODEL,
         where="vnew.location.seedream",
         size=size,
+        fal_model=LOCATION_IMAGE_MODEL,
     )
+
+
+def _timing(pid: str, lid: str, step: str, started: float) -> None:
+    """단계 걸린 시간 로그 1줄(작업 125). 사용자 글·키는 쓰지 않는다."""
+    ms = int((time.monotonic() - started) * 1000)
+    log.info("vnew.location.timing step=%s ms=%d pid=%s lid=%s", step, ms, pid, lid)
+
+
+# 그림이 동시에 끝날 때 progress(plan.json 조건부 쓰기) 경합을 이 파드 안에서 줄인다(작업 125).
+_PROGRESS_LOCK = threading.Lock()
 
 
 # ================================================================ 설계(Claude → Astra)
@@ -540,15 +563,16 @@ _DESIGN_TOOL = {
 }
 
 
-def design_location(owner: str, pid: str, loc: dict) -> dict:
+def design_location(owner: str, pid: str, loc: dict, panels: list[bytes] | None = None) -> dict:
     """그 장소 패널(최대 6장)을 Claude 분석 체인에 먼저, 실패하면 Astra 로 보내 설계 JSON 을 받는다.
 
     세로 긴 패널은 tiles_for_analysis 로 잘려 있으므로, 인물이 적고 배경이 큰 조각을 먼저 고른다.
     setting 의 locationKo·layoutEn·enclosed 와 패널 설명을 함께 준다. 결과에 'assumed'/'provisional'
     같은 말이 있으면(벽을 못 읽었다는 뜻) 1회만 더 강하게 재요청한다.
+    panels: run_build 가 한 번 고른 패널(작업 125 — 매 단계 다시 읽고 사람 수를 세지 않게). None 이면 고른다.
     반환: 정리된 설계 JSON(아래 _normalize_design) + model.
     """
-    panels = _design_panels(owner, pid, loc)
+    panels = _design_panels(owner, pid, loc) if panels is None else list(panels)
     name_en = str(loc.get("nameEn") or "").strip() or "the place"
     setting = _setting_for(owner, pid)
     location_ko = str(setting.get("locationKo") or "").strip()
@@ -686,13 +710,23 @@ def _prefer_background(tiles: list[bytes]) -> list[bytes]:
     """인물이 적은 조각을 앞으로(배경이 크게 보이는 조각 우선). characters._count_people 를 쓴다.
 
     검사가 _count_people 를 건너뛰거나(None) 오류면 원래 순서를 그대로 둔다(안정 정렬).
+    사람 수 세기는 조각마다 LLM 1번이라 LOCATION_WORKERS 개씩 동시에 부른다(작업 125 — 차례로 부르면
+    조각 수 × 수 초가 걸려 설계·사실 사이 공백의 대부분이었다).
     """
-    scored: list[tuple[int, int, bytes]] = []
-    for index, jpeg in enumerate(tiles):
+
+    def _count(jpeg: bytes):
         try:
-            count = characters._count_people(jpeg)  # noqa: SLF001
+            return characters._count_people(jpeg)  # noqa: SLF001
         except Exception:  # noqa: BLE001
-            count = None
+            return None
+
+    if len(tiles) > 1:
+        with ThreadPoolExecutor(max_workers=LOCATION_WORKERS, thread_name_prefix="vnew-loc-people") as pool:
+            counts = list(pool.map(_count, tiles))
+    else:
+        counts = [_count(jpeg) for jpeg in tiles]
+    scored: list[tuple[int, int, bytes]] = []
+    for index, (jpeg, count) in enumerate(zip(tiles, counts)):
         rank = 99 if count is None else int(count)
         scored.append((rank, index, jpeg))
     scored.sort(key=lambda item: (item[0], item[1]))
@@ -971,13 +1005,14 @@ def _facts(blocks: list[dict], *, model: str) -> tuple[dict, dict]:
     )
 
 
-def extract_facts(owner: str, pid: str, loc: dict) -> dict:
+def extract_facts(owner: str, pid: str, loc: dict, panels: list[bytes] | None = None) -> dict:
     """그 장소 패널(배경 큰 조각 우선, 최대 6장)에서 벽별 물건·창문·문·재질·빛·시대·나라를 읽는다.
 
     Claude 분석 체인 먼저, 실패하면 Astra. 보이지 않는 벽은 보이는 벽에서 '추정'(estimated=true)해 채운다.
+    panels: run_build 가 한 번 고른 패널(작업 125). None 이면 고른다.
     반환: 정리된 사실 JSON(_normalize_facts) + model.
     """
-    panels = _design_panels(owner, pid, loc)
+    panels = _design_panels(owner, pid, loc) if panels is None else list(panels)
     name_en = str(loc.get("nameEn") or "").strip() or "the place"
     setting = _setting_for(owner, pid)
     location_ko = str(setting.get("locationKo") or "").strip()
@@ -1129,11 +1164,18 @@ _CONTINUOUS_CLAUSE = (
     "skirting, wall material and lighting continue across both corners without a break."
 )
 
-# 뷰 B 는 이음새 대신 '반대편에서 본 같은 방'(검사가 "opposite side" 확인).
+# 뷰 B 는 이음새 대신 '반대편에서 본 같은 방'(검사가 "opposite side" 확인). 작업 125: 참고 이미지가 없으므로
+# 이미지 번호 대신 '뒤 보기'로 가리킨다.
 _OPPOSITE_CLAUSE = (
-    "Same room as Image 2 seen from the opposite side; its side walls are the same walls as in Image 2 "
-    "seen from their other end."
+    "Same room as the back view seen from the opposite side; its side walls are the same walls as in the "
+    "back view seen from their other end."
 )
+
+# 구도 지시(작업 125, text-to-image). 가이드 이미지를 보내지 않으므로 상자 구도를 글로 적는다.
+_LAYOUT_MARK = "One-point perspective box-set cutaway"
+
+# 모든 지시문 앞에 그대로 붙이는 공통 문장(방 구조·색·재질·조명)의 최대 길이(작업 125).
+ANCHOR_MAX_CHARS = 600
 
 # 대충 그려도 된다는 지시(공간·빛이 장식보다 중요).
 _BLOCKIN_CLAUSE = (
@@ -1153,13 +1195,14 @@ _ORTHO = (
 # 벽·바닥 프롬프트 끝에 붙이는 지시(검사가 확인): 글자·표지판 금지 + 한국 배경.
 _NO_TEXT = "No text, letters, signs or labels anywhere. Korean setting."
 
-# Astra 지침(설계자 2026-10-21, 048). 이 문장이 그대로 Astra system 에 들어간다(검사가 확인).
+# Astra 지침(설계자 2026-10-21, 048 → 작업 125 text-to-image). 이 문장이 그대로 Astra system 에 들어간다(검사가 확인).
 ASTRA_PROMPT_INSTRUCTION = (
-    "Write a prompt for a non-intelligent image model that draws a box-set cutaway view of a room over a "
-    "layout guide. Be explicit and literal: describe each screen area separately — CENTER BACK WALL (main "
-    "background), LEFT WALL, RIGHT WALL, FLOOR, CEILING/SKY — and for each state every object, its exact "
-    "count, color, material, size and position. State where the main light comes from, its direction and "
-    "which side the shadows fall. Keep the box geometry and corner lines of the guide. No people, no text. "
+    "Write a prompt for a non-intelligent text-to-image model that draws a box-set cutaway view of a room. "
+    "The model gets NO reference images, only your text. Be explicit and literal: describe each screen area "
+    "separately — CENTER BACK WALL (main background), LEFT WALL, RIGHT WALL, FLOOR, CEILING/SKY — and for "
+    "each state every object, its exact count, color, material, size and position. State where the main "
+    "light comes from, its direction and which side the shadows fall. Keep the one-point perspective box "
+    "geometry given in the brief. Never contradict the fixed room description. No people, no text. "
     "Do not use vague words (nice, typical, some)."
 )
 
@@ -1174,7 +1217,89 @@ def _style_clause(variant: str, loc: dict) -> str:
     style = str(loc.get("styleEn") or "").strip()
     if style:
         return style + " Match this drawing style exactly."
-    return "same drawing style as the reference panels."
+    # 작업 125: 참고 패널을 그림 모델에 보내지 않으므로 '참고 패널 그림체' 대신 글로 적는다.
+    return "Korean webtoon drawing style: clean line art, flat cel shading, soft colors."
+
+
+def _layout_clause(loc: dict, view: str) -> str:
+    """상자 구도 지시(작업 125). 방 치수로 계산한 뒤 벽 사각형 크기를 글로 적는다(가이드 이미지 대신).
+
+    cut 단계는 verify 가 생성 그림에서 다시 찾은 꼭짓점(4% 넘게 다르면)으로 펴므로, 여기 비율은 목표값이다.
+    """
+    design = loc.get("design") or {}
+    size = _size_wh(VIEW_SIZE)
+    try:
+        geom = location_views.box_view_geometry(
+            _as_float(design.get("widthM"), 4.0),
+            _as_float(design.get("depthM"), 4.0),
+            _as_float(design.get("heightM"), 2.7),
+            view=view,
+            size=size,
+        )
+        xs = [float(p[0]) for p in geom["back"]]
+        ys = [float(p[1]) for p in geom["back"]]
+        width_pct = round((max(xs) - min(xs)) / size[0] * 100)
+        height_pct = round((max(ys) - min(ys)) / size[1] * 100)
+    except Exception:  # noqa: BLE001 — 치수가 이상하면 보통 비율
+        width_pct, height_pct = 45, 50
+    return (
+        f"{_LAYOUT_MARK} of a rectangular room with its front wall removed, seen straight on from outside "
+        "the open front at eye height. The back wall is a flat rectangle centred in the image, about "
+        f"{width_pct}% of the image width and {height_pct}% of the image height; the left wall, right wall, "
+        "floor and ceiling are trapezoids that meet its four corners and widen toward the image edges. "
+        "Straight vertical corner lines, level floor line, no tilt, no fisheye."
+    )
+
+
+def _room_anchor(loc: dict) -> str:
+    """4개 지시문 앞에 그대로 붙이는 공통 문장(작업 125): 방 구조·벽 색·재질·바닥·천장·빛·시대.
+
+    참고 이미지 없이 그리므로 그림체 간·뷰 간 같은 방이 되게 사실(facts)·설계에서 결정적으로 만든다.
+    같은 장소·같은 사실이면 언제나 같은 문장이다.
+    """
+    design = loc.get("design") or {}
+    facts = loc.get("facts") or {}
+    name_en = str(loc.get("nameEn") or "").strip() or "the room"
+    width = _as_float(design.get("widthM"), 4.0)
+    depth = _as_float(design.get("depthM"), 4.0)
+    height = _as_float(design.get("heightM"), 2.7)
+    kind = "closed room" if _as_bool(design.get("enclosed")) else "room"
+    parts = [
+        f"Same room in every image: {name_en}, a rectangular {kind} about {width:g} m wide, "
+        f"{depth:g} m deep and {height:g} m high."
+    ]
+    surfaces: list[str] = []
+    for side in SIDES:
+        wall = (facts.get("walls") or {}).get(side) or {}
+        surface = " ".join(
+            p for p in (str(wall.get("wallColorEn") or "").strip(), str(wall.get("wallMaterialEn") or "").strip()) if p
+        )
+        if surface and surface not in surfaces:
+            surfaces.append(surface)
+    if surfaces:
+        parts.append("Wall surfaces: " + "; ".join(surfaces) + ".")
+    floor = str(facts.get("floorEn") or design.get("floorEn") or "").strip()
+    ceiling = str(facts.get("ceilingEn") or design.get("ceilingEn") or "").strip()
+    light = str(facts.get("lightEn") or design.get("lightEn") or "").strip()
+    if floor:
+        parts.append(f"Floor: {floor}.")
+    if ceiling:
+        parts.append(f"Ceiling: {ceiling}.")
+    windows = len(facts.get("windows") or [])
+    doors = len(facts.get("doors") or [])
+    if windows or doors:
+        parts.append(f"{windows} window(s) and {doors} door(s), always in the same places.")
+    if light:
+        parts.append(f"Light: {light}.")
+    era = " ".join(p for p in (str(facts.get("eraEn") or "").strip(), str(facts.get("countryEn") or "").strip()) if p)
+    if era:
+        parts.append(f"Era and country: {era}.")
+    return " ".join(parts)[:ANCHOR_MAX_CHARS].rstrip()
+
+
+def _anchor_for(loc: dict) -> str:
+    """run_build 가 사실 정리 뒤 만든 공통 문장(loc['anchorEn']). 없으면 지금 사실로 만든다."""
+    return str(loc.get("anchorEn") or "").strip() or _room_anchor(loc)
 
 
 # ---------------------------------------------------------------- 사실 → 사람이 읽는 설명
@@ -1287,37 +1412,31 @@ def _author_prompt(owner: str, pid: str, loc: dict, *, variant: str, view: str) 
     """컷어웨이 뷰(back·front) 한 장의 Seedream 프롬프트를 Astra 가 쓴다(실패 시 Claude, 둘 다 실패 시 템플릿).
 
     면별 위치를 화면 기준으로 구체적으로 쓰게 하고, 보증 문구(CENTER BACK WALL/LEFT WALL/RIGHT WALL/
-    continuous(또는 opposite side)/No people)를 보장한다. webtoon 은 real 뷰를 '그대로 다시 그려라'.
+    continuous(또는 opposite side)/No people)를 보장한다. 작업 125: 그림 모델은 참고 이미지 없이 글만 받으므로
+    real·webtoon 모두 사실(facts) 면별 설명 + 공통 문장 + 구도 글로 쓴다(그림체만 다르다).
     """
     name_en = str(loc.get("nameEn") or "").strip() or "the room"
     style = _style_clause(variant, loc)
     faces = _view_face_facts(loc, view)
     light = str((loc.get("facts") or {}).get("lightEn") or (loc.get("design") or {}).get("lightEn") or "").strip()
 
-    if variant == "webtoon":
-        user_text = (
-            f"Place: {name_en}. Image 1 is the photoreal {view}-view of this room.\n"
-            f"Redraw Image 1 exactly (same composition, every corner and object in the same place) in this "
-            f"webtoon drawing style: {style}\n"
-            f"Keep the box geometry and the positions of every wall, window, door and the floor/ceiling lines.\n"
-            f"Write ONE image prompt of {PROMPT_MIN_CHARS} to {PROMPT_MAX_CHARS} characters. "
-            "Call emit_image_prompt once with promptEn."
-        )
-    else:
-        seam = "continuous room" if view == "back" else "same room seen from the opposite side"
-        user_text = (
-            f"Place: {name_en}. Draw a box-set cutaway {view}-view over the layout guide (Image 1).\n"
-            f"Drawing style: {style}\n"
-            f"CENTER BACK WALL (main background): {faces['back']}\n"
-            f"LEFT WALL: {faces['left']}\n"
-            f"RIGHT WALL: {faces['right']}\n"
-            f"FLOOR: {faces['floor']}\n"
-            f"CEILING/SKY: {faces['ceiling']}\n"
-            f"Light: {light}\n"
-            f"This is one {seam}; corners, floor line and lighting continue without a break.\n"
-            f"Write ONE image prompt of {PROMPT_MIN_CHARS} to {PROMPT_MAX_CHARS} characters. "
-            "Call emit_image_prompt once with promptEn."
-        )
+    seam = "continuous room" if view == "back" else "same room seen from the opposite side"
+    user_text = (
+        f"Place: {name_en}. Write a prompt for a box-set cutaway {view}-view of this room. The image model "
+        "gets NO reference images, only your text.\n"
+        f"Fixed room description (it is placed verbatim before your prompt; never contradict it): {_anchor_for(loc)}\n"
+        f"Camera and layout: {_layout_clause(loc, view)}\n"
+        f"Drawing style: {style}\n"
+        f"CENTER BACK WALL (main background): {faces['back']}\n"
+        f"LEFT WALL: {faces['left']}\n"
+        f"RIGHT WALL: {faces['right']}\n"
+        f"FLOOR: {faces['floor']}\n"
+        f"CEILING/SKY: {faces['ceiling']}\n"
+        f"Light: {light}\n"
+        f"This is one {seam}; corners, floor line and lighting continue without a break.\n"
+        f"Write ONE image prompt of {PROMPT_MIN_CHARS} to {PROMPT_MAX_CHARS} characters. "
+        "Call emit_image_prompt once with promptEn."
+    )
     system_text = ASTRA_PROMPT_INSTRUCTION
     for model in (PROMPT_AUTHOR_MODEL, PROMPT_AUTHOR_FALLBACK_MODEL):
         try:
@@ -1336,6 +1455,8 @@ def _author_prompt(owner: str, pid: str, loc: dict, *, variant: str, view: str) 
 
 def _photo_prompt_clause(loc: dict, variant: str, view: str) -> str:
     """사진이 들어간 뷰의 프롬프트 지시(이미지 번호를 실제 참고 순서와 맞춘다). 사진 없으면 빈 문자열.
+
+    작업 125 부터 공간 시트는 참고 이미지 없이 그리므로 _finalize_prompt 가 이 함수를 부르지 않는다(옛 경로용으로 둔다).
 
     면 지정 사진: "Image N is a real reference photo of the {WALL}: copy its objects, materials, colors,
     openings and light exactly, but keep Image 1's box geometry and corner positions."
@@ -1365,13 +1486,18 @@ def _photo_prompt_clause(loc: dict, variant: str, view: str) -> str:
 def _finalize_prompt(text: str, variant: str, view: str, loc: dict) -> str:
     """Astra 가 쓴 프롬프트에 보증 문구·그림체·가이드 지시를 보장하고, 사용자 추가 요청을 붙이고, 길이를 맞춘다.
 
-    - 가이드 지시(_GUIDE_CLAUSE)·면별 라벨(_GUARD_CLAUSES)·인물 금지(_NO_PEOPLE)가 빠졌으면 뒤에 덧붙인다.
+    - 공통 문장(_anchor_for, 작업 125)을 맨 앞에 그대로 붙인다(4개 지시문이 같은 문장으로 시작).
+    - 구도 지시(_layout_clause)·면별 라벨(_GUARD_CLAUSES)·인물 금지(_NO_PEOPLE)가 빠졌으면 뒤에 덧붙인다.
     - 뷰 A 는 "continuous", 뷰 B 는 "opposite side" 문장을 보장한다.
-    - PROMPT_MIN_CHARS 미만이면 사실 설명을 덧대 늘린다. PROMPT_HARD_CAP 초과면 자른다.
+    - 참고 이미지가 없으므로 사진 '이미지 번호' 지시는 넣지 않는다(사진은 사실 정리에 글로 들어가 있다).
+    - PROMPT_MIN_CHARS 미만이면 사실 설명을 덧대 늘린다. PROMPT_HARD_CAP 초과면 뒤를 자른다(앞 공통 문장 보존).
     """
     text = (text or "").strip()
-    if "layout guide" not in text:
-        text += " " + _GUIDE_CLAUSE
+    anchor = _anchor_for(loc)
+    if anchor and text.startswith(anchor):
+        text = text[len(anchor):].strip()
+    if _LAYOUT_MARK not in text:
+        text += " " + _layout_clause(loc, view)
     style = _style_clause(variant, loc)
     if style.split(".")[0] not in text:
         text += " " + style
@@ -1393,12 +1519,10 @@ def _finalize_prompt(text: str, variant: str, view: str, loc: dict) -> str:
         text += " " + _BLOCKIN_CLAUSE
     if "No people" not in text:
         text += " " + _NO_PEOPLE
-    # 참고 사진이 있으면 이미지 번호 지시를 넣는다(이미지 모델이 사진을 따르게). 사진 없으면 빈 문자열.
-    photo_clause = _photo_prompt_clause(loc, variant, view)
-    if photo_clause and "real reference photo" not in text and "real look of this place" not in text:
-        text += " " + photo_clause
     text += " " + _NO_TEXT
     text = _with_extra(text, loc)
+    if anchor:
+        text = anchor + " " + text.strip()
     # 너무 짧으면 사실 설명으로 늘린다(1,500자 미만 방지).
     if len(text) < PROMPT_MIN_CHARS:
         filler = _facts_context("north", loc)
@@ -1415,7 +1539,7 @@ def _view_prompt(variant: str, view: str, loc: dict) -> str:
     faces = _view_face_facts(loc, view)
     seam = _CONTINUOUS_CLAUSE if view == "back" else _OPPOSITE_CLAUSE
     prompt = (
-        f"{_GUIDE_CLAUSE} Box-set cutaway {view}-view of {name_en}. "
+        f"{_layout_clause(loc, view)} Box-set cutaway {view}-view of {name_en}. "
         f"CENTER BACK WALL (main background): {faces['back']} "
         f"LEFT WALL: {faces['left']} RIGHT WALL: {faces['right']} "
         f"FLOOR: {faces['floor']} CEILING/SKY: {faces['ceiling']} "
@@ -1632,58 +1756,85 @@ def run_build(owner: str, pid: str, lid: str, task_id: str) -> None:
         loc = dict(loc)
         loc["styleEn"] = _project_style(owner, data)
         loc["extraEn"] = _extra_en(loc)
+        build_started = time.monotonic()
+
+        # a0. 패널 고르기(작업 125): S3 에서 업로드를 읽어 타일로 자르고 사람 수를 센다. 예전에는 설계·사실·
+        #     그림 단계가 저마다 다시 해서(사람 수 = 조각마다 LLM 1번, 차례로) 단계 사이에 1~2분 공백이 생겼다.
+        #     이제 빌드마다 한 번만 하고 설계·사실·검사가 같은 목록을 쓴다.
+        _set_progress(owner, pid, lid, task_id, step="design", done=0, total=TOTAL_VIEWS)
+        started = time.monotonic()
+        panels = _design_panels(owner, pid, loc)
+        _timing(pid, lid, "panels", started)
 
         # a. 설계(Claude → Astra). [다시 만들기] 는 설계를 새로 한다 — 예전 설계(벽 4면 "흰 벽 가정")를
         #    재사용하면 창문 없는 방이 그대로 남기 때문. 다만 사용자가 설계를 직접 고친 적이 있으면
         #    (designEditedAt) 그 수정본을 유지한다. 설계가 아직 없으면(walls 없음) 당연히 새로 받는다.
-        _set_progress(owner, pid, lid, task_id, step="design", done=0, total=TOTAL_VIEWS)
+        started = time.monotonic()
         design = loc.get("design") or {}
         user_edited = bool(design.get("designEditedAt"))
         if not design.get("walls") or not user_edited:
-            design = design_location(owner, pid, loc)
+            design = design_location(owner, pid, loc, panels=panels)
             _store_design(owner, pid, lid, design)
             loc["design"] = design
+        _timing(pid, lid, "design", started)
 
         # a2. 사실 추출(Claude → Astra). 벽별 물건·창문·문·재질·빛·시대·나라를 읽어 loc["facts"] 에 둔다.
         #     사용자가 사실을 직접 고친 적이 있으면(factsEditedAt) 그 수정본을 유지한다.
+        #     장소 사진·웹툰 패널은 여기(와 설계)에서만 Claude 가 본다 — 그림 모델에는 글로만 간다(작업 125).
         _set_progress(owner, pid, lid, task_id, step="facts", done=0, total=TOTAL_VIEWS)
+        started = time.monotonic()
         facts = loc.get("facts") or {}
         facts_user_edited = bool(facts.get("factsEditedAt"))
         if not _facts_has_wall_detail(facts) or not facts_user_edited:
             if not facts_user_edited:
-                facts = extract_facts(owner, pid, loc)
+                facts = extract_facts(owner, pid, loc, panels=panels)
                 _store_facts(owner, pid, lid, facts)
         loc["facts"] = facts
+        # 공통 문장(방 구조·색·재질·조명) 1개 — 4개 지시문 앞에 그대로 붙는다(작업 125).
+        loc["anchorEn"] = _room_anchor(loc)
+        _timing(pid, lid, "facts", started)
 
-        # a3. 가이드·프롬프트. 방 치수로 컷어웨이 뷰 가이드(PIL)를 그리고, 뷰별 Seedream 프롬프트(Astra→Claude)를 쓴다.
+        # a3. 가이드·프롬프트. 방 치수로 컷어웨이 뷰 가이드(PIL)를 그리고(verify·cut 기준), 뷰별 프롬프트
+        #     4개(Astra→Claude)를 동시에 쓴다.
         _set_progress(owner, pid, lid, task_id, step="prompts", done=0, total=TOTAL_VIEWS)
+        started = time.monotonic()
         geometries = _build_geometries(loc)
         guides = _build_guides(loc, geometries)
         prompts = _author_all_prompts(owner, pid, loc)
         loc["prompts"] = prompts
+        _timing(pid, lid, "prompts", started)
 
-        # b. 뷰 4장(그림체별 back·front)을 그린다. real A → (real B·webtoon A 병렬) → webtoon B.
-        #    뷰 한 장이 끝날 때마다 done +1. 참고 첫 장은 가이드(real)·real 뷰(webtoon).
+        # b. 뷰 4장(그림체별 back·front)을 참고 이미지 없이 동시에 그린다(fal text-to-image, 작업 125).
+        #    뷰 한 장이 끝날 때마다 done +1.
         _set_progress(owner, pid, lid, task_id, step="images", done=0, total=TOTAL_VIEWS)
-        refs = _design_panels(owner, pid, loc)[:MAX_REF_PANELS]
+        started = time.monotonic()
+        refs = panels[:MAX_REF_PANELS]  # verify(Claude)가 볼 패널. 그림 모델에는 보내지 않는다.
         views = _generate_views(owner, pid, lid, version, loc, guides, refs, task_id)
+        _timing(pid, lid, "images", started)
 
         # b2. verify(Claude). 뷰마다 패널 일치·가이드 구도(꼭짓점)를 보고, 꼭짓점 차이가 크면 Claude 꼭짓점을
-        #     쓴다. (a)(c) 불일치면 그 뷰만 1회 다시 그린다. 반환: {variant:{view:{...quads,...}}}.
+        #     쓴다. (a)(c) 불일치면 그 뷰만 1회 다시 그린다. 뷰 4개를 동시에 한다. 반환: {variant:{view:{...}}}.
         _set_progress(owner, pid, lid, task_id, step="verify", done=TOTAL_VIEWS, total=TOTAL_VIEWS)
+        started = time.monotonic()
         checks = _verify_views(owner, pid, lid, version, loc, guides, refs, views, geometries, task_id)
+        _timing(pid, lid, "verify", started)
 
         # c. cut — 뷰에서 각 면을 원근 보정해 벽·바닥 텍스처(기존 wall_key/floor_key)로 저장한다.
         _set_step(owner, pid, lid, task_id, step="cut")
+        started = time.monotonic()
         cut = _cut_textures(owner, pid, lid, version, views, geometries, checks)
+        _timing(pid, lid, "cut", started)
 
         # d. 시트 합치기(뷰 A 크게 + 펴진 텍스처 줄).
         _set_step(owner, pid, lid, task_id, step="sheet")
+        started = time.monotonic()
         for variant in VARIANTS:
             _assemble_variant(owner, pid, lid, variant, version, views, cut, checks, task_id)
+        _timing(pid, lid, "sheet", started)
 
         _set_step(owner, pid, lid, task_id, step="done")
         _commit(owner, pid, lid, task_id, status="ready")
+        _timing(pid, lid, "total", build_started)
     except Exception as exc:  # noqa: BLE001
         log.warning("vnew.location.build.failed pid=%s lid=%s err=%s", pid, lid, str(exc)[:300])
         message = exc.message if isinstance(exc, VpocError) else str(exc)[:300]
@@ -1775,11 +1926,15 @@ def _author_all_prompts(owner: str, pid: str, loc: dict) -> dict[tuple[str, str]
 
     반환: {(variant, view): promptEn}. view 는 'back'|'front'. 설계자: 이미지 모델은 지능이 없으므로
     면별 위치를 화면 기준으로 아주 구체적으로 쓴다(CENTER BACK WALL/LEFT WALL/RIGHT WALL/FLOOR).
+    작업 125: 4개는 서로 독립이라 LOCATION_WORKERS 개까지 동시에 부른다. 실패 처리·대체 모델(Astra→Claude→
+    템플릿)은 _author_prompt 안에서 지금과 같다.
     """
-    prompts: dict[tuple[str, str], str] = {}
-    for variant in VARIANTS:
-        for view in VIEWS:
-            prompts[(variant, view)] = _author_prompt(owner, pid, loc, variant=variant, view=view)
+    jobs = [(variant, view) for variant in VARIANTS for view in VIEWS]
+    with ThreadPoolExecutor(max_workers=LOCATION_WORKERS, thread_name_prefix="vnew-loc-prompt") as pool:
+        futures = {
+            job: pool.submit(_author_prompt, owner, pid, loc, variant=job[0], view=job[1]) for job in jobs
+        }
+        prompts: dict[tuple[str, str], str] = {job: futures[job].result() for job in jobs}
     return prompts
 
 
@@ -1801,64 +1956,38 @@ def _generate_views(
     refs: list[bytes],
     task_id: str,
 ) -> dict[tuple[str, str], tuple[bytes, str]]:
-    """컷어웨이 뷰 4장(그림체별 back·front)을 그린다(설계자 048).
+    """컷어웨이 뷰 4장(그림체별 back·front)을 그린다(설계자 048 → 작업 125).
 
-    순서: real 뷰 A(back) → real 뷰 B(front, 뷰 A 참고)·webtoon 뷰 A(real A 참고) 병렬 → webtoon 뷰 B
-    (real B + webtoon A 참고). Seedream 참고 첫 장은 가이드(real)·real 뷰(webtoon), 이어서 패널(≤3).
-    반환: {(variant, view): (jpeg, key)}. 저장·원장은 여기서 그림당 1회. 완료마다 progress.done +1.
+    작업 125: 참고 이미지 없이 fal text-to-image 로 그리므로 4장이 서로 독립이다 → LOCATION_WORKERS 개까지
+    동시에 그린다. guides·refs 는 그림 모델에 보내지 않는다(verify 가 쓴다). 같은 방이 되게 하는 것은
+    지시문 앞 공통 문장(_room_anchor)이다.
+    반환: {(variant, view): (jpeg, key)}. 저장·원장은 그림당 1회. 완료마다 progress.done +1.
+    한 장이라도 실패하면 나머지가 끝난 뒤(저장·원장은 된 채로) 첫 오류를 올린다.
     """
     results: dict[tuple[str, str], tuple[bytes, str]] = {}
-    panels = list(refs)[:3]
 
-    def _refs(variant: str, view: str, lead_images: list[bytes], job_panels: list[bytes]) -> list[bytes]:
-        """참고 이미지(≤6): 가이드/앞 뷰(lead) → 뷰 면 사진·'any' 사진 → 남는 자리에 웹툰 패널.
-
-        사진이 없으면 lead + job_panels 로 기존과 완전히 같다(회귀 없음). 사진이 있으면 lead 다음에
-        사진을 넣고, 전체 6장 안에서 패널을 뒤로 민다.
-        """
-        lead = [b for b in lead_images if b]
-        plan = _view_photo_plan(loc, view, lead=len(lead))
-        photo_bytes: list[bytes] = []
-        for item in plan:
-            jpeg = _photo_jpeg(owner, pid, lid, item["photo"])
-            if jpeg is not None:
-                photo_bytes.append(jpeg)
-        return (lead + photo_bytes + list(job_panels))[:6]
-
-    def _draw(variant: str, view: str, references: list[bytes]) -> None:
+    def _draw(variant: str, view: str) -> tuple[bytes, str]:
         prompt = _prompt_for(loc, variant, view)
-        image = _seedream(prompt, references, size=VIEW_SIZE)
+        image = _seedream(prompt, [], size=VIEW_SIZE)
         key = view_key(owner, pid, lid, variant, view, version)
         STORE.put_bytes(key, image, "image/jpeg")
         _charge_seedream(owner, pid, lid, f"{variant}-view-{view}")
-        results[(variant, view)] = (image, key)
-        _bump_progress(owner, pid, lid, task_id)
+        with _PROGRESS_LOCK:
+            _bump_progress(owner, pid, lid, task_id)
+        return image, key
 
-    # 1) real 뷰 A(back): lead = [가이드 back], 패널 ≤3. 사진은 _refs 가 lead 뒤에 붙인다.
-    _draw("real", "back", _refs("real", "back", [guides["back"]], panels))
-
-    # 2) real 뷰 B(front)·webtoon 뷰 A(back) 병렬.
-    #    real B lead = [가이드 front, real A], 패널 ≤2. webtoon A lead = [real A], 패널 ≤2.
-    real_a = results[("real", "back")][0]
-    parallel_jobs = [
-        ("real", "front", _refs("real", "front", [guides["front"], real_a], panels[:2])),
-        ("webtoon", "back", _refs("webtoon", "back", [real_a], panels[:2])),
-    ]
-    last_error: Exception | None = None
-    with ThreadPoolExecutor(max_workers=VIEW_WORKERS, thread_name_prefix=f"vnew-loc-view-{lid}") as pool:
-        futures = {pool.submit(_draw, v, w, r): (v, w) for (v, w, r) in parallel_jobs}
-        for future in futures:
+    jobs = [(variant, view) for variant in VARIANTS for view in VIEWS]
+    first_error: Exception | None = None
+    with ThreadPoolExecutor(max_workers=LOCATION_WORKERS, thread_name_prefix=f"vnew-loc-view-{lid}") as pool:
+        futures = {job: pool.submit(_draw, job[0], job[1]) for job in jobs}
+        for job in jobs:
             try:
-                future.result()
+                results[job] = futures[job].result()
             except Exception as exc:  # noqa: BLE001
-                last_error = exc
-    if last_error is not None:
-        raise last_error
-
-    # 3) webtoon 뷰 B(front): lead = [real B, webtoon A], 패널 ≤1. 사진은 _refs 가 붙인다.
-    real_b = results[("real", "front")][0]
-    webtoon_a = results[("webtoon", "back")][0]
-    _draw("webtoon", "front", _refs("webtoon", "front", [real_b, webtoon_a], panels[:1]))
+                if first_error is None:
+                    first_error = exc
+    if first_error is not None:
+        raise first_error
     return results
 
 
@@ -1937,47 +2066,54 @@ def _verify_views(
       backQuad/frontQuad 는 cut 이 쓸 '최종' 꼭짓점(정규화). method 는 'guide' | 'claude'.
     """
     checks: dict[str, dict[str, dict]] = {v: {} for v in VARIANTS}
-    for variant in VARIANTS:
-        for view in VIEWS:
-            image, key = views[(variant, view)]
-            geom = geometries[view]
-            size = geom.get("_size") or _size_wh(VIEW_SIZE)
-            guide_back = _normalize_quad(geom.get("back"), size)
-            guide_front = _normalize_quad(geom.get("_front"), size)
-            try:
-                payload, usage = _verify_view(owner, pid, lid, loc, variant, view, image, guides[view], refs)
-            except Exception as exc:  # noqa: BLE001
-                log.warning("vnew.location.verify.failed pid=%s lid=%s view=%s err=%s", pid, lid, view, str(exc)[:200])
-                checks[variant][view] = {
-                    "matchesPlace": True, "matchesSides": True, "fixedEn": False, "fixesEn": [],
-                    "backQuad": guide_back, "frontQuad": guide_front, "method": "guide",
-                }
-                continue
-            matches_place = _as_bool(payload.get("matchesPlace"))
-            matches_sides = _as_bool(payload.get("matchesSides")) if view == "front" else True
-            raw_fixes = payload.get("fixesEn")
-            fixes = [str(f).strip() for f in raw_fixes if str(f).strip()] if isinstance(raw_fixes, list) else []
 
-            # 꼭짓점: Claude 가 준 값이 가이드와 4% 넘게 다르고 볼록·화면 안이면 Claude 좌표, 아니면 가이드.
-            back_quad, back_method = _pick_quad(payload.get("backQuad"), guide_back, size)
-            front_quad, front_method = _pick_quad(payload.get("frontQuad"), guide_front, size)
-            method = "claude" if (back_method == "claude" or front_method == "claude") else "guide"
+    def _check_one(variant: str, view: str) -> tuple[dict, bytes | None]:
+        """뷰 1장 검사(+필요하면 다시 그리기). 반환: (checks 항목, 다시 그린 그림 또는 None)."""
+        image, key = views[(variant, view)]
+        geom = geometries[view]
+        size = geom.get("_size") or _size_wh(VIEW_SIZE)
+        guide_back = _normalize_quad(geom.get("back"), size)
+        guide_front = _normalize_quad(geom.get("_front"), size)
+        try:
+            payload, usage = _verify_view(owner, pid, lid, loc, variant, view, image, guides[view], refs)
+        except Exception as exc:  # noqa: BLE001
+            log.warning("vnew.location.verify.failed pid=%s lid=%s view=%s err=%s", pid, lid, view, str(exc)[:200])
+            return {
+                "matchesPlace": True, "matchesSides": True, "fixedEn": False, "fixesEn": [],
+                "backQuad": guide_back, "frontQuad": guide_front, "method": "guide",
+            }, None
+        matches_place = _as_bool(payload.get("matchesPlace"))
+        matches_sides = _as_bool(payload.get("matchesSides")) if view == "front" else True
+        raw_fixes = payload.get("fixesEn")
+        fixes = [str(f).strip() for f in raw_fixes if str(f).strip()] if isinstance(raw_fixes, list) else []
 
-            fixed = False
-            if not matches_place or not matches_sides:
-                fixed_image = _redraw_view(owner, pid, lid, version, loc, variant, view, key, guides[view], refs, fixes, task_id)
-                if fixed_image is not None:
-                    views[(variant, view)] = (fixed_image, key)
-                    fixed = True
-            checks[variant][view] = {
-                "matchesPlace": matches_place,
-                "matchesSides": matches_sides,
-                "fixedEn": fixed,
-                "fixesEn": fixes,
-                "backQuad": back_quad,
-                "frontQuad": front_quad,
-                "method": method,
-            }
+        # 꼭짓점: Claude 가 준 값이 가이드와 4% 넘게 다르고 볼록·화면 안이면 Claude 좌표, 아니면 가이드.
+        back_quad, back_method = _pick_quad(payload.get("backQuad"), guide_back, size)
+        front_quad, front_method = _pick_quad(payload.get("frontQuad"), guide_front, size)
+        method = "claude" if (back_method == "claude" or front_method == "claude") else "guide"
+
+        fixed_image = None
+        if not matches_place or not matches_sides:
+            fixed_image = _redraw_view(owner, pid, lid, version, loc, variant, view, key, guides[view], refs, fixes, task_id)
+        return {
+            "matchesPlace": matches_place,
+            "matchesSides": matches_sides,
+            "fixedEn": fixed_image is not None,
+            "fixesEn": fixes,
+            "backQuad": back_quad,
+            "frontQuad": front_quad,
+            "method": method,
+        }, fixed_image
+
+    # 작업 125: 뷰끼리 독립(다시 그리기도 참고 이미지 없이 그 뷰만)이라 동시에 한다.
+    jobs = [(variant, view) for variant in VARIANTS for view in VIEWS]
+    with ThreadPoolExecutor(max_workers=LOCATION_WORKERS, thread_name_prefix=f"vnew-loc-verify-{lid}") as pool:
+        futures = {job: pool.submit(_check_one, job[0], job[1]) for job in jobs}
+        outcomes = {job: futures[job].result() for job in jobs}
+    for (variant, view), (entry, fixed_image) in outcomes.items():
+        if fixed_image is not None:
+            views[(variant, view)] = (fixed_image, views[(variant, view)][1])
+        checks[variant][view] = entry
     return checks
 
 
@@ -2083,30 +2219,23 @@ def _redraw_view(
 ) -> bytes | None:
     """불일치 뷰를 fixesEn 을 붙여 1회 다시 그린다. 같은 키에 덮어쓰고 원장·진행을 +1 한다.
 
+    작업 125: 참고 이미지 없이(fal text-to-image) 그린다. guide·refs 는 받기만 한다(호출부 호환).
     실패하면(None) 원래 그림을 그대로 둔다.
     """
     base_prompt = _prompt_for(loc, variant, view)
     fix_text = " Corrections: " + " ".join(fixes) if fixes else ""
     prompt = (base_prompt + fix_text)[:PROMPT_HARD_CAP]
-    panels = list(refs)[:2]
-    lead = [guide] if variant == "real" else []
-    # 사진을 lead 다음에(프롬프트가 사진을 따르게). 번호는 생성 때 계획을 그대로 쓴다.
-    photo_bytes: list[bytes] = []
-    for item in _view_photo_plan(loc, view, lead=_view_lead(variant, view)):
-        jpeg = _photo_jpeg(owner, pid, lid, item["photo"])
-        if jpeg is not None:
-            photo_bytes.append(jpeg)
-    references = (lead + photo_bytes + panels)[:6]
     last_error: Exception | None = None
     for _ in range(FIX_RETRY):
         try:
-            image = _seedream(prompt, references, size=VIEW_SIZE)
+            image = _seedream(prompt, [], size=VIEW_SIZE)
         except Exception as exc:  # noqa: BLE001
             last_error = exc
             continue
         STORE.put_bytes(key, image, "image/jpeg")
         _charge_seedream(owner, pid, lid, f"{variant}-view-{view}-fix")
-        _bump_total(owner, pid, lid, task_id)  # 보정 장수만큼 total 을 늘리고 done 도 +1.
+        with _PROGRESS_LOCK:
+            _bump_total(owner, pid, lid, task_id)  # 보정 장수만큼 total 을 늘리고 done 도 +1.
         return image
     if last_error is not None:
         log.warning("vnew.location.redraw.failed pid=%s lid=%s view=%s err=%s", pid, lid, view, str(last_error)[:200])
@@ -2765,14 +2894,15 @@ def _reconcile_stale(loc: dict) -> dict:
 
 
 def _charge_seedream(owner: str, pid: str, lid: str, kind: str) -> None:
+    """공간 시트 그림 1장 원장(작업 125): 모델 = LOCATION_IMAGE_MODEL, 금액 = fal Seedream 장당(LOCATION_IMAGE_USD)."""
     key = f"vnew-loc-{pid}-{lid}-{kind}-{secrets.token_hex(3)}"
     try:
         vpoc_ledger.charge(
             key,
             kind="image",
-            model=SEEDREAM_MODEL,
+            model=LOCATION_IMAGE_MODEL,
             units=1,
-            usd=SEEDREAM_USD,
+            usd=LOCATION_IMAGE_USD,
             user=owner,
             project_id=pid,
             plan_id=lid,
