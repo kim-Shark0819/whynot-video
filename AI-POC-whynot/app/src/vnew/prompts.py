@@ -357,7 +357,8 @@ CUT_QA_RULES = (
     "- outfitMatch: false if any person's clothing color or garment type in Image 2 differs from the same person "
     "in Image 1 (e.g. white shirt vs black jacket).",
     "- locationMatch: false if the place in Image 2 differs from Image 1: a different building, railing, street, "
-    "walls or kind of space (e.g. a seaside road instead of a villa entrance).",
+    "walls or kind of space (e.g. a seaside road instead of a villa entrance). When Image 3 (the location sheet view) "
+    "is given, judge the place against Image 3, because the background of Image 1 may be blurred.",
     "- peopleMatch: false if the number of visible people or their left-right positions differ from Image 1.",
 )
 
