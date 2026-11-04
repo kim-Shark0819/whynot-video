@@ -1280,6 +1280,16 @@ textarea.vnew-field-input {
   cursor: zoom-in;
 }
 
+/* 지시서 120: ③ 컷 카드 머리의 원본 패널·샷 크기 글, 대표 패널 썸네일 강조. */
+.vnew-cut-shot {
+  font-size: 12px;
+  color: var(--text-muted, #9ca3af);
+}
+
+.vnew-cut-thumb.is-source {
+  border: 2px solid var(--accent, #2563eb);
+}
+
 .vnew-entry-panels {
   font-size: 12px;
   color: var(--text-muted, #9ca3af);

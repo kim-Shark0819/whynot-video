@@ -2589,3 +2589,7 @@
 ### 119 — ⑦ AI로 고치기 버튼 하나·테이크·장면 고르기 (2026-11-04, 119)
 - 머리 줄 [AI로 고치기] → 고르기 창(테이크 라디오·장면 체크박스, 떨어진 장면은 첫 시작~마지막 끝 한 구간) → `editFixOpen(ctx, mid, "", range)`. 서버 `material_flag` cuts = `_material_cuts`(칸 녹화 시각 → `(t − offset) ÷ scale`). 검사 rtk-y·rtk-z·rtk-j, 변형 1회(÷ scale 없음) 잡힘.
 - `edit.py`(수정 금지)가 `material_flag`에 plan·길이를 넘기지 않아 지금 운영 cuts는 늘 []다. 그동안 창은 고른 클립 구간 한 줄로 대신한다. 대안(retake 쪽 thread-local로 plan 읽기·장면 고를 때마다 retake_view 조회)은 숨은 결합·비용 때문에 쓰지 않았다.
+### 120 — ③ 콘티가 웹툰 그림을 직접 봄 (2026-11-04, 120)
+- 
+un_conti가 대본 글 뒤에 ordered_tiles 타일을 Panel N of M: 라벨(N 0부터 = entries.panels)과 보내 sourcePanel·shotSize·xDrawn·xSuggest·mood를 받고 merge_fill·pply_cap으로 저장한다. 모든 컷이 채워지면 _analyze_fx를 건너뛴다. 그림 호출이 실패하면 글만 1회 다시 보낸다. 글만 간 콘티의 기호는 쓰지 않는다(그림을 못 봄). 검사 ci-a~f, 변형 1회 잡힘.
+- VNEW_CONTI_IMAGES는 코드 기본 true다. k8s/(수정 금지)에 배선이 없어 config로는 못 끈다. 라벨은 지시서 예시(Panel 1)가 아니라 대본 번호와 맞추려고 0부터 붙인다.
