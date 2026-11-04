@@ -934,17 +934,19 @@
       return row;
     }
 
-    if (status !== "failed") {
-      // ready — 별도 액션 없음(3D 재시도는 viewer3d 가 처리).
+    if (status !== "failed" && status !== "ready") {
       return row;
     }
 
-    // 실패·중단: [이 그림체만 다시 만들기] + 추가 요청 창(재사용).
+    // 실패·중단: [이 그림체만 다시 만들기], 완성(ready): [실사 다시 만들기]·[애니 다시 만들기](작업 126) + 추가 요청 창(재사용).
+    // 어느 쪽이든 패널의 비용 안내를 보고 [다시 만들기]를 한 번 더 눌러야 보낸다(금액 확인).
+    var ready = status === "ready";
     var error = el("p", "login-error vnew-variant-rebuild-error");
     error.setAttribute("role", "alert");
     error.style.display = "none";
 
-    var btn = el("button", "outline-action vnew-variant-rebuild-btn", "이 그림체만 다시 만들기");
+    var btn = el("button", "outline-action vnew-variant-rebuild-btn",
+      ready ? (meta.key === "real" ? "실사 다시 만들기" : "애니 다시 만들기") : "이 그림체만 다시 만들기");
     btn.type = "button";
 
     var panel = el("div", "vnew-rebuild-panel");
@@ -956,7 +958,9 @@
     textarea.placeholder = "후드티 말고 베이지 셔츠로 / 연필 선 느낌을 더 살려서 / 표정은 무표정으로";
     textarea.value = detail.extraPromptKo || "";
     panel.appendChild(textarea);
-    panel.appendChild(el("p", "vnew-rebuild-cost", "이 그림체만 새로 그립니다. 비용이 듭니다."));
+    panel.appendChild(el("p", "vnew-rebuild-cost", ready
+      ? "이 그림체의 시트·정면·후면·3D를 처음부터 새로 그립니다. 지금 그림은 새 그림으로 바뀌고 비용이 듭니다."
+      : "이 그림체만 새로 그립니다. 비용이 듭니다."));
     var panelBtns = el("div", "vnew-rebuild-btns");
     var confirmBtn = el("button", "primary-button", "다시 만들기");
     confirmBtn.type = "button";
@@ -7316,6 +7320,8 @@
     var g = gen || {};
     var col = el("div", "vnew-final-col vnew-real-col");
     col.appendChild(el("h2", "vnew-variant-title", "실사"));
+    var castLine = takeRealCastText((g.realRun || {}).cast); // 작업 126: 인물 바꾸기 회차 머리
+    if (castLine) col.appendChild(el("p", "vnew-hint vnew-real-cast", castLine));
     var stateName = takeRealState(g);
     var final = g.finalReal || {};
     var autoPending = takeRealAutoPending(g); // 작업 123: 처음부터 실사도 골랐고 애니(웹툰)가 아직 진행 중
@@ -7363,6 +7369,15 @@
           openRealConfirm(g, showError);
         });
         col.appendChild(startBtn);
+        if (stateName !== "none") {
+          // 작업 126: 실사 결과 아래 [인물 바꿔 다시 만들기] — 인물마다 캐릭터·모습(실사|애니)을 고른 뒤 금액 확인창으로.
+          var castBtn = el("button", "outline-button vnew-real-cast-btn", TAKE_REAL_CAST_BUTTON);
+          castBtn.type = "button";
+          castBtn.addEventListener("click", function () {
+            openRealCastPicker(g, showError);
+          });
+          col.appendChild(castBtn);
+        }
       } else if (stateName === "none" && !autoPending) {
         col.appendChild(el("p", "vnew-hint vnew-real-block", g.realBlock || "지금은 실사 버전을 만들 수 없습니다."));
       }
@@ -7383,6 +7398,8 @@
     items.slice().reverse().forEach(function (item) {
       var box = el("div", "vnew-real-history-item");
       box.appendChild(el("p", "vnew-real-history-label", takeRealHistoryLabel(item)));
+      var castText = takeRealCastText(item.cast);
+      if (castText) box.appendChild(el("p", "vnew-hint vnew-real-cast", castText));
       if (item.finalUrl) {
         var video = el("video", "vnew-final-player");
         video.src = item.finalUrl;
@@ -7398,16 +7415,212 @@
     return details;
   }
 
+  /* ---- 작업 126: 실사 속 인물 바꿔 다시 만들기 ----
+
+     ⑤ 실사 결과 아래 [인물 바꿔 다시 만들기] → 작은 창(GET /generate/real/cast): 이 테이크 인물마다 캐릭터(기본 = 지금 캐릭터,
+     소유자 캐릭터 목록에서 바꿈)와 모습 [실사]|[애니]. 고를 수 없는 캐릭터·모습은 흐리게(is-off·disabled) 두고 이유를 title 로.
+     [다음] → 지금 실사 확인창(openRealConfirm, realEstimate 금액·409 CostMismatch 다시 읽기)에 cast 를 실어 보낸다.
+     글은 모두 textContent(el)·속성으로만 넣는다. */
+  var TAKE_REAL_CAST_BUTTON = "인물 바꿔 다시 만들기";
+  var TAKE_REAL_CAST_LEAD = "인물마다 캐릭터와 모습을 고르세요. 이 회차만 바뀌고 대본·프리비즈·지난 회차는 그대로 남습니다.";
+  var TAKE_REAL_CAST_LOOKS = [
+    { key: "real", title: "실사" },
+    { key: "anime", title: "애니" }
+  ];
+
+  /* "인물: 에이→철수(애니), 비→비(실사)". cast 가 없거나 비면 "". */
+  function takeRealCastText(cast) {
+    if (!Array.isArray(cast) || !cast.length) return "";
+    var parts = [];
+    cast.forEach(function (item) {
+      if (!item || typeof item !== "object") return;
+      var look = item.look === "anime" ? "애니" : "실사";
+      parts.push(String(item.name || "") + "→" + String(item.charName || item.charId || "") + "(" + look + ")");
+    });
+    return parts.length ? "인물: " + parts.join(", ") : "";
+  }
+
+  /* 그 캐릭터의 그 모습을 고를 수 없는 이유(서버 realBlock·animeBlock). 목록에 없으면 기본 문구, 고를 수 있으면 "". */
+  function realCastLookBlock(chars, charId, look) {
+    var found = null;
+    (Array.isArray(chars) ? chars : []).forEach(function (c) {
+      if (c && c.id === charId) found = c;
+    });
+    if (!found) return "캐릭터 목록에 없습니다.";
+    var reason = look === "anime" ? found.animeBlock : found.realBlock;
+    return typeof reason === "string" ? reason : "";
+  }
+
+  /* 두 모습 모두 못 고르면 그 이유(캐릭터를 흐리게), 하나라도 되면 "". */
+  function realCastCharBlock(chars, charId) {
+    var real = realCastLookBlock(chars, charId, "real");
+    var anime = realCastLookBlock(chars, charId, "anime");
+    if (!real || !anime) return "";
+    return real === anime ? real : "실사: " + real + " / 애니: " + anime;
+  }
+
+  function openRealCastPicker(gen, showError) {
+    var pid = state.projectId;
+    var scrim = el("div", "vnew-modal-scrim");
+    var modal = el("div", "vnew-modal vnew-real-cast-picker");
+    var head = el("div", "vnew-modal-head");
+    head.appendChild(el("h3", null, TAKE_REAL_CAST_BUTTON));
+    var close = el("button", "icon-button", "×");
+    close.type = "button";
+    close.addEventListener("click", closeModal);
+    head.appendChild(close);
+    modal.appendChild(head);
+    var bodyWrap = el("div", "vnew-modal-body");
+    bodyWrap.appendChild(el("p", "vnew-hint", TAKE_REAL_CAST_LEAD));
+    var list = el("div", "vnew-real-cast-list");
+    list.appendChild(el("p", "vnew-hint", "인물과 캐릭터 목록을 불러오는 중…"));
+    bodyWrap.appendChild(list);
+    var message = planError("");
+    bodyWrap.appendChild(message);
+    var actions = el("div", "vnew-modal-actions");
+    var cancelBtn = el("button", "outline-button", "취소");
+    cancelBtn.type = "button";
+    cancelBtn.addEventListener("click", closeModal);
+    var nextBtn = el("button", "primary-button", "다음 (금액 확인)");
+    nextBtn.type = "button";
+    nextBtn.disabled = true;
+    actions.appendChild(cancelBtn);
+    actions.appendChild(nextBtn);
+    bodyWrap.appendChild(actions);
+    modal.appendChild(bodyWrap);
+    scrim.appendChild(modal);
+    scrim.addEventListener("click", function (event) {
+      if (event.target === scrim) closeModal();
+    });
+    document.body.appendChild(scrim);
+
+    var rows = [];
+    function showMessage(text) {
+      message.textContent = text;
+      message.style.display = "";
+    }
+    function refreshNext() {
+      nextBtn.disabled = !rows.length || rows.some(function (row) {
+        return !row.charId || !!realCastLookBlock(row.chars, row.charId, row.look);
+      });
+    }
+
+    function personRow(person, chars) {
+      var row = { name: String(person.name || ""), charId: String(person.charId || ""), look: "real", chars: chars };
+      var line = el("div", "vnew-real-cast-row");
+      line.appendChild(el("span", "vnew-real-cast-name", row.name));
+      var select = el("select", "vnew-real-cast-select");
+      var options = chars.slice();
+      if (row.charId && !options.some(function (c) { return c && c.id === row.charId; })) {
+        options.unshift({ id: row.charId, name: person.charName || row.charId, realBlock: "캐릭터 목록에 없습니다.",
+          animeBlock: "캐릭터 목록에 없습니다." });
+        row.chars = options;
+      }
+      options.forEach(function (c) {
+        var option = el("option", null, String(c.name || c.id || ""));
+        option.value = String(c.id || "");
+        var block = realCastCharBlock(row.chars, option.value);
+        if (block) {
+          option.disabled = true;
+          option.title = block;
+          option.className = "is-off";
+        }
+        if (option.value === row.charId) option.selected = true;
+        select.appendChild(option);
+      });
+      select.value = row.charId;
+      line.appendChild(select);
+      var looks = el("div", "vnew-real-cast-looks");
+      var lookBtns = {};
+      TAKE_REAL_CAST_LOOKS.forEach(function (meta) {
+        var btn = el("button", "outline-button vnew-real-cast-look", meta.title);
+        btn.type = "button";
+        btn.addEventListener("click", function () {
+          if (btn.disabled) return;
+          row.look = meta.key;
+          paint();
+        });
+        lookBtns[meta.key] = btn;
+        looks.appendChild(btn);
+      });
+      line.appendChild(looks);
+
+      function paint() {
+        // 고른 캐릭터에서 지금 모습을 못 쓰면 다른 모습으로 옮긴다(둘 다 안 되면 그대로 두고 [다음]을 막는다).
+        if (realCastLookBlock(row.chars, row.charId, row.look)) {
+          var other = row.look === "real" ? "anime" : "real";
+          if (!realCastLookBlock(row.chars, row.charId, other)) row.look = other;
+        }
+        TAKE_REAL_CAST_LOOKS.forEach(function (meta) {
+          var btn = lookBtns[meta.key];
+          var block = realCastLookBlock(row.chars, row.charId, meta.key);
+          btn.disabled = !!block;
+          btn.title = block;
+          btn.className = "outline-button vnew-real-cast-look" + (block ? " is-off" : "") +
+            (row.look === meta.key && !block ? " is-on" : "");
+        });
+        refreshNext();
+      }
+      select.addEventListener("change", function () {
+        row.charId = String(select.value || "");
+        paint();
+      });
+      rows.push(row);
+      paint();
+      return line;
+    }
+
+    api("/api/vnew/p/" + encodeURIComponent(pid) + "/generate/real/cast")
+      .then(function (payload) {
+        clear(list);
+        var people = Array.isArray((payload || {}).people) ? payload.people : [];
+        var chars = (Array.isArray((payload || {}).characters) ? payload.characters : []).filter(function (c) {
+          return !!c && typeof c === "object" && typeof c.id === "string";
+        });
+        if (!people.length) {
+          list.appendChild(el("p", "vnew-hint", "이 테이크에 바꿀 인물이 없습니다."));
+          return;
+        }
+        people.forEach(function (person) {
+          if (person && typeof person === "object") list.appendChild(personRow(person, chars));
+        });
+        refreshNext();
+      })
+      .catch(function (err) {
+        clear(list);
+        showMessage("인물 목록을 불러오지 못했습니다: " + errMessage(err));
+      });
+
+    nextBtn.addEventListener("click", function () {
+      if (nextBtn.disabled) return;
+      var cast = rows.map(function (row) {
+        var picked = null;
+        row.chars.forEach(function (c) {
+          if (c && c.id === row.charId) picked = c;
+        });
+        return { name: row.name, charId: row.charId, look: row.look, charName: String((picked || {}).name || row.charId) };
+      });
+      closeModal();
+      openRealConfirm(gen, showError, cast);
+    });
+
+    function closeModal() {
+      if (scrim.parentNode) scrim.parentNode.removeChild(scrim);
+    }
+    return scrim;
+  }
+
   /* 확인창: 테이크 수·초·해상도·금액 숫자 + "소리도 만들기"(기본 켬) → POST /generate/real {confirmUsd, audio}.
      409 CostMismatch(운영에서도 type 은 남는다) → GET /plan 으로 새 금액을 읽어 확인창 글을 바꾸고, 다시 누를 때 새 금액으로
      보낸다. 다시 읽은 gen 이 시작할 수 없으면(설정 끔·진행 중 등) 창을 닫고 화면을 다시 그린다(realBlock 이 보인다). */
-  function openRealConfirm(gen, showError) {
+  function openRealConfirm(gen, showError, cast) {
     var est = (gen && gen.realEstimate) || {};
     var pid = state.projectId;
+    var withCast = Array.isArray(cast) && cast.length > 0; // 작업 126: 인물 바꿔 다시 만들기에서 왔을 때만 cast 를 보낸다
     var scrim = el("div", "vnew-modal-scrim");
     var modal = el("div", "vnew-modal vnew-real-confirm");
     var head = el("div", "vnew-modal-head");
-    head.appendChild(el("h3", null, "실사 버전 만들기"));
+    head.appendChild(el("h3", null, withCast ? TAKE_REAL_CAST_BUTTON : "실사 버전 만들기"));
     var close = el("button", "icon-button", "×");
     close.type = "button";
     close.addEventListener("click", closeModal);
@@ -7417,6 +7630,7 @@
     var bodyWrap = el("div", "vnew-modal-body");
     var lead = el("p", "vnew-real-confirm-text", takeRealConfirmText(est));
     bodyWrap.appendChild(lead);
+    if (withCast) bodyWrap.appendChild(el("p", "vnew-hint vnew-real-cast", takeRealCastText(cast)));
     if (gen && gen.realRun) {
       bodyWrap.appendChild(el("p", "vnew-hint", "지금 실사 결과는 '이전 실사 보기'로 남습니다."));
     }
@@ -7473,9 +7687,15 @@
     okBtn.addEventListener("click", function () {
       setBusy(true);
       message.style.display = "none";
+      var realBody = { confirmUsd: Number(est.usd) || 0, audio: audioBox.checked === true };
+      if (withCast) {
+        realBody.cast = cast.map(function (item) {
+          return { name: item.name, charId: item.charId, look: item.look };
+        });
+      }
       api("/api/vnew/p/" + encodeURIComponent(pid) + "/generate/real", {
         method: "POST",
-        body: JSON.stringify({ confirmUsd: Number(est.usd) || 0, audio: audioBox.checked === true })
+        body: JSON.stringify(realBody)
       })
         .then(function (payload) {
           closeModal();

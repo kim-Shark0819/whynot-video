@@ -23725,8 +23725,10 @@ def check_vnew_take_real() -> None:
                 bad.append(f"(lr-c) 실사 본문 키·이미지·영상이 data URI 가 아닙니다: {sorted(body)}")
             if body.get("video_urls") != web_req_a["payload"].get("video_urls"):
                 bad.append("(lr-c) 실사 @Video1 이 웹툰 테이크와 같은 녹화가 아닙니다")
-            if sorted(decoded[:2]) != [b"CAST1", b"RF2"] or decoded[2:] != [b"LOC-RB"]:
-                bad.append(f"(lr-c) 실사 이미지가 [캐스팅 사진·실사 정면] → 실사 장소 뷰가 아닙니다: {decoded}")
+            # 작업 126: 인물 참고 = [고른 캐스팅 사진] → 실사 정면 → 시트 → 후면(가짜 저장소에 시트·후면 바이트가 없어 빠진다).
+            # 비(캐스팅 없음) RF2 · 에이(캐스팅 고름) CAST1·RF1 → 실사 장소 뷰.
+            if decoded != [b"RF2", b"CAST1", b"RF1", b"LOC-RB"]:
+                bad.append(f"(lr-c) 실사 이미지가 [실사 정면] · [캐스팅 사진·실사 정면] → 실사 장소 뷰가 아닙니다: {decoded}")
             no_uri = _re.sub(r"data:[\w.+/-]+;base64,[A-Za-z0-9+/=]*", "data:…", _json.dumps(body, ensure_ascii=False))
             if any(word in no_uri for word in ("http", "users/", "rec/", "s3://", "signed.example")):
                 bad.append("(lr-c) 실사 본문에 URL·S3 키가 남았습니다")
@@ -23734,8 +23736,9 @@ def check_vnew_take_real() -> None:
             for name, number in people.items():
                 if f"{name} (" not in prompt or f"face and hair from @Image{number} (photo)" not in prompt:
                     bad.append(f"(lr-c) ASSETS 의 {name} @Image{number} (photo) 번호가 이미지 순서와 다릅니다")
-            if "@Image3 = the location (real photo); keep its structure and props" not in prompt:
-                bad.append("(lr-c) ASSETS 실사 장소 문장(@Image3)이 없습니다")
+            if "@Image4 = the location (real photo); keep its structure and props" not in prompt \
+                    or "face and hair from @Image2 (photo), same person in @Image3" not in prompt:
+                bad.append("(lr-c) ASSETS 실사 장소 문장(@Image4)·에이 둘째 사진(@Image3)이 없습니다")
             mark("lr-c")
             # (lr-d) 실사 프롬프트.
             stamps = [f"{e['start']}-{e['end']}s" for e in genmod._take_timeline_entries(env.plan(pid_a), g_a["units"][0])]  # noqa: SLF001
@@ -24093,7 +24096,9 @@ def check_vnew_take_real() -> None:
                                          cast=[{"name": "에이", "colorName": "blue", "frontNo": 1, "costume": ""},
                                                {"name": "비", "colorName": "red", "frontNo": None, "costume": ""}])
             assets_c = lines_of(text_c, "ASSETS:")
-            if "에이 (" not in assets_c or "COSTUME: as worn in @Image1" not in assets_c or assets_c.count("COSTUME") != 1 \
+            # 작업 126: ASSETS 머리에 3D 모델용 사진 문장(REAL_TAKE_SHEET_SENTENCE)이 붙고, 그 문장의 "COSTUME" 1번은 센다.
+            if "에이 (" not in assets_c or "COSTUME: as worn in @Image1" not in assets_c \
+                    or assets_c.count("COSTUME") != 1 + genmod.REAL_TAKE_SHEET_SENTENCE.count("COSTUME") \
                     or "original panels" in text_c:
                 bad.append(f"(lr-d) 의상이 빈 실사 인물 문장이 다릅니다: {assets_c!r}")
             # (lr-i) 옛 순차 모드 다시 시도도 activeSince 를 둔다.
@@ -24591,6 +24596,8 @@ def _lr_screen_problems(got: dict) -> list[str]:
     retry_hint = " 아래 테이크 행에서 다시 시도할 수 있습니다."
     pick = ["primary-button vnew-pick-btn", "이걸로 고르기", False]
     redo = ["outline-button vnew-real-start", "실사 버전 다시 만들기 ($3.08)", False]
+    # 작업 126: 끝난 회차(완료·실패·취소) 아래에 [인물 바꿔 다시 만들기]가 [실사 버전 다시 만들기] 뒤에 붙는다.
+    cast_btn = ["outline-button vnew-real-cast-btn", "인물 바꿔 다시 만들기", False]
     modal_buttons = [["icon-button", "×", False], ["outline-button", "취소", False], ["primary-button", "만들기 시작", False]]
     want_pure = {
         "shown": [True, False, True, False, False, False],
@@ -24663,7 +24670,7 @@ def _lr_screen_problems(got: dict) -> list[str]:
                     col(real_col, "실사", [["vnew-progress-label", "실사 버전을 만드는 중… (1/2)"]], [], fill=["50%"]), []]
     if got.get("running") != want_running:
         problems.append(f"(lr-n) 진행 막대·문구(완료/전체)·진행 중 고르기 숨김이 다릅니다: {got.get('running')}")
-    real_done = col(real_col, "실사", [], [pick, redo], [[r_url, "", True, False]], [[r_url, "내려받기"]])
+    real_done = col(real_col, "실사", [], [pick, redo, cast_btn], [[r_url, "", True, False]], [[r_url, "내려받기"]])
     if got.get("done") != {"grid": "vnew-final-grid", "children": [real_col, "vnew-final-col", "panel vnew-take-compare"],
                            "views": [real_done, web_done]}:
         problems.append(f"(lr-n) done 화면(영상·내려받기·고르기·다시 만들기·나란히 보기)이 다릅니다: {got.get('done')}")
@@ -24698,11 +24705,11 @@ def _lr_screen_problems(got: dict) -> list[str]:
     ]]]
     if history != want_history:
         problems.append(f"(lr-n) 접기 '이전 실사 보기 (n)'(최근 것부터·finalUrl·preload none)가 다릅니다: {history}")
-    want_failed = [col(real_col, "실사", [["login-error vnew-real-error", "실사 테이크 1개를 만들지 못했습니다." + retry_hint]], [redo]), [pick]]
-    want_cancelled = col(real_col, "실사", [["vnew-hint vnew-real-error", "실사 버전 만들기를 취소했습니다." + retry_hint]], [redo])
+    want_failed = [col(real_col, "실사", [["login-error vnew-real-error", "실사 테이크 1개를 만들지 못했습니다." + retry_hint]], [redo, cast_btn]), [pick]]
+    want_cancelled = col(real_col, "실사", [["vnew-hint vnew-real-error", "실사 버전 만들기를 취소했습니다." + retry_hint]], [redo, cast_btn])
     want_merge = col(real_col, "실사", [["login-error vnew-real-error", "이어 붙이기 실패 " + evil]], [])
     want_no_url = {"grid": "vnew-final-grid", "children": [real_col, "vnew-final-col"],
-                   "views": [col(real_col, "실사", [["vnew-hint vnew-real-error", "영상을 불러오지 못했습니다."]], [pick, redo]), web_done]}
+                   "views": [col(real_col, "실사", [["vnew-hint vnew-real-error", "영상을 불러오지 못했습니다."]], [pick, redo, cast_btn]), web_done]}
     want_done_running = col(real_col, "실사", [], [], [[r_url, "", True, False]], [[r_url, "내려받기"]])
     if got.get("failed") != want_failed or got.get("cancelled") != want_cancelled or got.get("mergeFailed") != want_merge \
             or got.get("noUrl") != want_no_url or got.get("doneRunning") != want_done_running:
@@ -40891,8 +40898,8 @@ def check_vnew_edit_retake() -> None:
             r_req = request_of(real_cell.get("invocationArn"))
             expect("rtk-b", [resp.status_code, len(log_real), r_rec.get("run"), r_rec.get("status"), r_rec.get("prompt") == (r_req.get("payload") or {}).get("prompt"),
                              [r["key"] for r in r_rec.get("refs") or []], ref_bytes(r_rec) == payload_images(r_req), r_rec.get("params", {}).get("audio")],
-                   [202, 1, 1, "completed", True, ["rf-ch2", env.CAST_KEY, "loc-rb-back"], True, True],
-                   "실사 회차: real:take1 기록(run 1·캐스팅 사진·실사 정면·실사 장소 키·본문 프롬프트)")
+                   [202, 1, 1, "completed", True, ["rf-ch2", "rb-ch2", env.CAST_KEY, "rf-ch1", "rb-ch1", "loc-rb-back"], True, True],
+                   "실사 회차: real:take1 기록(run 1·작업 126 실사 정면·후면 / 캐스팅 사진·실사 정면·후면·실사 장소 키·본문 프롬프트)")
             # 컷 단위(Kling elements): 컷 2 × 그림체 2 = 4줄
             pid_bc = "prj_rtk_bc"
             gen_bc = env.take_done(client, pid_bc, cut_mode=True)
@@ -46458,6 +46465,264 @@ def check_vnew_location_fast_125() -> None:
            "(lf-g)사람 수 동시·정렬")
 
 
+def check_vnew_real_from_3d_126() -> None:
+    """작업 126 — 통 테이크 실사 인물 참고 = 3D 모델용 사진, 실사 속 인물 바꿔 다시 만들기(cast). 가짜 fal·저장소, 유료 0.
+
+    (r3-a) _take_payload(실사)·_real_take_cast·_real_photo_keys·_ref_counts: 캐스팅 후보가 있어도 고르지 않으면 [정면, 시트, 후면],
+           고르면 캐스팅이 맨 앞, 상한(imageListMax 4 = 장소 1 + 인물 3)을 넘으면 뒤 사진부터 빠짐. 변형 1회: _ref_counts 를
+           앞 인물부터 다 채우기로 바꾸면 이 판정이 잡는다.
+    (r3-b) _take_prompt(실사)·_assets: ASSETS 에 REAL_TAKE_SHEET_SENTENCE, 예산 1500B(최소형까지 줄임)에서도 남음, 웹툰은 없음.
+    (r3-c) POST /generate/real cast·start_real·_validate_real_cast·_cast_look_block·_real_cast_overrides·_real_run_summary·
+           gen_view·GET /generate/real/cast(real_cast_options): 남의 캐릭터·미완성 모습·모르는 이름 → 400 BadCast(회차 없음),
+           정상 → realRun.cast·그 회차 참고 = 바뀐 캐릭터 사진·plan.input/script/conti/previz 그대로, look anime → 웹툰 정면·시트 +
+           "photoreal" 문장, 다음 회차의 realHistory 에 cast.
+    (r3-d) 화면: node --check, 버튼·창 문구, takeRealCastText·realCastLookBlock·realCastCharBlock(node), 새 구역 innerHTML 0,
+           캐릭터 카드 "실사 다시 만들기"/"애니 다시 만들기"·비용 안내, vnew.css 클래스.
+    """
+    import base64 as _b64  # noqa: PLC0415
+    import copy as _copy  # noqa: PLC0415
+    import json as _json  # noqa: PLC0415
+    import traceback as _tb  # noqa: PLC0415
+
+    sys.path.insert(0, str(ROOT / "app"))
+    from src.vnew import generate as genmod  # noqa: PLC0415
+    from src.vpoc.errors import VpocError  # noqa: PLC0415
+
+    bad: list[str] = []
+    owner = "tester"
+    logs = _LogCapture()
+
+    def decode(uri: str) -> bytes:
+        try:
+            return _b64.b64decode(str(uri).split(",", 1)[1])
+        except Exception:  # noqa: BLE001
+            return b""
+
+    def err_of(resp) -> tuple[int, str]:
+        return resp.status_code, str(((resp.get_json() or {}).get("error") or {}).get("type") or "")
+
+    try:
+        with _guard_real_llm(), logs, _LrEnv(owner) as env, _pin_vnew(
+                VNEW_FX=True, VNEW_CASTING=True, VNEW_TAKE_REAL=True, VNEW_GEN_PARALLEL=2, POLL_INTERVAL_S=0,
+                VNEW_TAKE_AUDIO=True, VNEW_TAKE_RESOLUTION="480p", VNEW_PREPARE_STALE_S=300):
+            # 3D 모델용 사진: 에이(ch1, 캐스팅 고름)·비(ch2, 캐스팅 후보만 있고 안 고름) 모두 정면·시트·후면.
+            env.chars["ch1"]["variants"]["real"]["sheetKey"] = "rs-ch1"
+            env.chars["ch2"]["variants"]["real"]["sheetKey"] = "rs-ch2"
+            env.chars["ch2"]["casting"] = {"preset": "idol", "gender": "", "lookEn": "", "lookEdited": False, "status": "ready",
+                                          "chosen": "", "history": [],
+                                          "candidates": [{"id": "k_2", "key": "cast-ch2", "preset": "idol", "round": 1, "createdAt": ""}]}
+            ch3 = _lr_char("ch3", "철수", "male", "Short brown hair and a square jaw.", "grey hoodie")
+            ch3["variants"]["real"]["sheetKey"] = "rs-ch3"
+            ch3["variants"]["webtoon"]["sheetKey"] = "ws-ch3"
+            ch4 = _lr_char("ch4", "미완", "female", "Long red hair and freckles.", "green dress")
+            ch4["variants"]["real"].update({"frontKey": "", "backKey": "", "status": "failed"})
+            ch4["variants"]["webtoon"]["sheetKey"] = "ws-ch4"
+            env.chars.update({"ch3": ch3, "ch4": ch4})
+            env.blobs.update({"rs-ch1": b"RS1", "rb-ch1": b"RB1", "rs-ch2": b"RS2", "rb-ch2": b"RB2", "cast-ch2": b"CAST2",
+                              "rf-ch3": b"RF3", "rs-ch3": b"RS3", "rb-ch3": b"RB3", "wf-ch3": b"WF3", "ws-ch3": b"WS3",
+                              "wf-ch4": b"WF4", "ws-ch4": b"WS4"})
+            # 남의 캐릭터: 다른 사용자(other) 저장소에만 있다.
+            others = {"ch_x": _lr_char("ch_x", "남", "male", "Bald.", "suit")}
+            mine = genmod.characters.load_char
+
+            def load_char(who, char_id):
+                if char_id in others:
+                    if who == "other":
+                        return _copy.deepcopy(others[char_id]), "etag"
+                    raise VpocError("vnew.characters", "NotFound", "캐릭터를 찾을 수 없습니다.", 404)
+                return mine(who, char_id)
+
+            env.set(genmod.characters, "load_char", load_char)
+            env.set(genmod.characters, "list_characters", lambda who: [
+                {"id": cid, "name": env.chars[cid]["name"], "status": "ready"} for cid in ("ch1", "ch2", "ch3", "ch4")
+            ] + [{"id": "../evil", "name": "x"}])
+            client = env.client()
+
+            pid = "prj_r3"
+            env.make_plan(pid, [{"id": "s1", "cutIds": ["c1", "c2"], "seconds": 10}])
+            resp = client.post(f"/api/vnew/p/{pid}/generate", json={"confirmUsd": genmod.estimate(env.plan(pid))["totalUsd"]})
+            g0 = env.drive(pid)
+            if resp.status_code != 202 or (g0.get("finalWebtoon") or {}).get("status") != "done":
+                bad.append(f"준비: 웹툰 통 테이크가 끝나지 않았습니다: {resp.status_code} {g0.get('status')}")
+            plan0 = env.plan(pid)
+            take = g0["units"][0]
+
+            # ================= (r3-a) 참고 순서·상한 =================
+            entries = {e["charId"]: e for e in genmod._char_entries(owner, plan0["input"])}  # noqa: SLF001
+            if entries["ch2"].get("castingKey") != "" or entries["ch1"].get("castingKey") != env.CAST_KEY:
+                bad.append(f"(r3-a) castingKey(고름·안 고름)가 다릅니다: {entries['ch1'].get('castingKey')!r} {entries['ch2'].get('castingKey')!r}")
+            if genmod._real_photo_keys(entries["ch2"]) != ["rf-ch2", "rs-ch2", "rb-ch2"] \
+                    or genmod._real_photo_keys(entries["ch1"]) != [env.CAST_KEY, "rf-ch1", "rs-ch1", "rb-ch1"]:  # noqa: SLF001
+                bad.append("(r3-a) _real_photo_keys 순서가 [캐스팅(고름)] → 정면 → 시트 → 후면이 아닙니다")
+
+            def payload_images(cap: int) -> tuple[list[bytes], dict]:
+                built = genmod._take_payload(owner, pid, plan0, take, dict(_LR_CAPS, imageListMax=cap), variant="real")  # noqa: SLF001
+                return [bytes(b) for b in built["imageUrls"]], built
+
+            full, built_full = payload_images(10)
+            want_full = [b"RF2", b"RS2", b"RB2", b"CAST1", b"RF1", b"RS1", b"RB1", b"LOC-RB"]
+            if full != want_full:
+                bad.append(f"(r3-a) 상한 10 실사 참고가 [비: 정면·시트·후면] [에이: 캐스팅·정면·시트·후면] → 장소가 아닙니다: {full}")
+            want_cap = [b"RF2", b"RS2", b"CAST1", b"LOC-RB"]
+
+            def judge_cap(images: list[bytes]) -> bool:
+                return images == want_cap
+
+            small, built_small = payload_images(4)
+            if not judge_cap(small):
+                bad.append(f"(r3-a) 상한 4 에서 뒤 사진부터 빠지지 않았습니다(장소 1 + 인물 3): {small}")
+            # 변형 1회: 인물마다 다 채우는(앞 인물 먼저) 배분이면 에이의 첫 사진이 빠진다 — 위 판정이 잡아야 한다.
+            real_counts = genmod._ref_counts  # noqa: SLF001
+
+            def greedy(lengths, cap):
+                out, left = [], cap
+                for n in lengths:
+                    out.append(min(n, max(0, left)))
+                    left -= out[-1]
+                return out
+
+            env.set(genmod, "_ref_counts", greedy)
+            mutated, _ = payload_images(4)
+            env.set(genmod, "_ref_counts", real_counts)
+            if judge_cap(mutated):
+                bad.append(f"(r3-a) 변형(앞 인물부터 다 채우기)을 판정이 잡지 못했습니다: {mutated}")
+            prompt_small = built_small["prompt"]
+            if "@Image4 = the location (real photo)" not in prompt_small \
+                    or "face and hair from @Image1 (photo), same person in @Image2" not in prompt_small \
+                    or "face and hair from @Image3 (photo)" not in prompt_small or "@Image3 (photo), same person" in prompt_small:
+                bad.append(f"(r3-a) 상한 4 의 ASSETS @Image 번호가 이미지 순서와 다릅니다: {prompt_small[:600]!r}")
+
+            # ================= (r3-b) 프롬프트 문장 =================
+            sentence = genmod.REAL_TAKE_SHEET_SENTENCE
+            if sentence not in built_full["prompt"].split("\n")[1] or "sheet" in sentence.lower() \
+                    or "webtoon" in built_full["prompt"].lower():
+                bad.append("(r3-b) 실사 ASSETS 에 3D 모델용 사진 문장이 없거나 sheet·webtoon 낱말이 있습니다")
+            web = genmod._take_payload(owner, pid, plan0, take, dict(_LR_CAPS))["prompt"]  # noqa: SLF001
+            if sentence in web:
+                bad.append("(r3-b) 웹툰 테이크 프롬프트에 실사 3D 사진 문장이 들어갔습니다")
+            plan_t, take_t = _fx_take_fixture(12, 30)
+            cast_t = [{"name": "에이", "colorName": "blue", "frontNo": 1, "refNos": [1, 2, 3], "look": "real",
+                       "appearance": "a Korean man in his late 20s with short black hair and sharp eyes " * 2,
+                       "costume": "black dress shirt, sleeves rolled; charcoal slacks " * 3, "voice": "low calm voice " * 4},
+                      {"name": "비", "colorName": "red", "frontNo": 4, "refNos": [4], "look": "real",
+                       "appearance": "a Korean woman with ash blonde hair " * 3, "costume": "navy training top " * 5, "voice": ""}]
+            logs.clear()
+            tight = genmod._take_prompt(plan_t, take_t, cast=cast_t, panel_nos=[], location_no=5,  # noqa: SLF001
+                                        caps={"promptMaxLength": 1500}, variant="real")
+            steps = (logs.messages("vnew.gen.take_prompt variant=real bytes=") or ["steps=?"])[-1].split("steps=", 1)[1]
+            if sentence not in tight or len(tight.encode("utf-8")) > 1500 or "minimalTimeline" not in steps:
+                bad.append(f"(r3-b) 줄이기(최소형) 뒤에 3D 사진 문장이 남지 않았거나 예산을 넘었습니다: "
+                           f"{len(tight.encode('utf-8'))}B steps={steps}")
+
+            # ================= (r3-c) cast 검증·저장·그 회차 참고 =================
+            usd = genmod.real_estimate(env.gen(pid))["usd"]
+
+            def start(cast):
+                return client.post(f"/api/vnew/p/{pid}/generate/real", json={"confirmUsd": usd, "cast": cast})
+
+            for label, cast in (("남의 캐릭터", [{"name": "에이", "charId": "ch_x", "look": "real"}]),
+                                ("미완성 모습", [{"name": "비", "charId": "ch4", "look": "real"}]),
+                                ("모르는 이름", [{"name": "모름", "charId": "ch3", "look": "real"}]),
+                                ("틀린 look", [{"name": "에이", "charId": "ch3", "look": "cartoon"}]),
+                                ("경로 꼴 charId", [{"name": "에이", "charId": "../ch3", "look": "real"}]),
+                                ("목록 아님", {"name": "에이"})):
+                got = err_of(start(cast))
+                if got != (400, "BadCast") or env.gen(pid).get("realRun"):
+                    bad.append(f"(r3-c) {label} → 400 BadCast·회차 없음이 아닙니다: {got}")
+            frozen = {k: _json.dumps(plan0.get(k), sort_keys=True) for k in ("input", "script", "conti", "previz")}
+            opts = client.get(f"/api/vnew/p/{pid}/generate/real/cast").get_json() or {}
+            want_opts = {"people": [{"name": "비", "charId": "ch2", "charName": "비"}, {"name": "에이", "charId": "ch1", "charName": "에이"}],
+                         "characters": [{"id": "ch1", "name": "에이", "realBlock": "", "animeBlock": ""},
+                                        {"id": "ch2", "name": "비", "realBlock": "", "animeBlock": ""},
+                                        {"id": "ch3", "name": "철수", "realBlock": "", "animeBlock": ""},
+                                        {"id": "ch4", "name": "미완", "realBlock": "실사 정면이 아직 없습니다.", "animeBlock": ""}]}
+            if opts != want_opts:
+                bad.append(f"(r3-c) GET /generate/real/cast 재료가 다릅니다: {opts}")
+            ok_cast = [{"name": "에이", "charId": "ch3", "look": "real"}, {"name": "비", "charId": "ch4", "look": "anime"}]
+            resp = start(ok_cast)
+            g1 = env.gen(pid)
+            want_run_cast = [{"name": "에이", "charId": "ch3", "look": "real", "charName": "철수"},
+                             {"name": "비", "charId": "ch4", "look": "anime", "charName": "미완"}]
+            if resp.status_code != 202 or (g1.get("realRun") or {}).get("cast") != want_run_cast:
+                bad.append(f"(r3-c) 정상 cast 가 202·realRun.cast 로 저장되지 않았습니다: {resp.status_code} {(g1.get('realRun') or {}).get('cast')}")
+            view_run = ((resp.get_json() or {}).get("plan") or {}).get("gen", {}).get("realRun") or {}
+            if view_run.get("cast") != want_run_cast:
+                bad.append("(r3-c) 보기 gen.realRun 에 cast 가 없습니다")
+            since = len(env.requests)
+            env.drive(pid)
+            reals = env.new_requests(since, "real")
+            body = reals[0]["payload"] if reals else {}
+            images = [decode(u) for u in body.get("image_urls") or []]
+            prompt = str(body.get("prompt") or "")
+            if images != [b"WF4", b"WS4", b"RF3", b"RS3", b"RB3", b"LOC-RB"]:
+                bad.append(f"(r3-c) 인물 바꾼 회차 참고가 [비→미완 애니: 웹툰 정면·시트] [에이→철수 실사: 정면·시트·후면] → 장소가 아닙니다: {images}")
+            if f"character design in @Image1, @Image2; {genmod.REAL_TAKE_ANIME_SENTENCE}" not in prompt \
+                    or "photoreal person matching this character design" not in prompt or sentence not in prompt \
+                    or "face and hair from @Image3 (photo), same person in @Image4, @Image5" not in prompt:
+                bad.append(f"(r3-c) 인물 바꾼 회차 프롬프트(애니 photoreal·3D 사진 문장·번호)가 다릅니다: {prompt[:700]!r}")
+            plan1 = env.plan(pid)
+            if any(_json.dumps(plan1.get(k), sort_keys=True) != v for k, v in frozen.items()):
+                bad.append("(r3-c) 인물 바꾸기가 plan.input·script·conti·previz 를 바꿨습니다")
+            # 다음 회차(바꾸기 없음): 지난 회차 요약·보기에 cast, 새 회차는 원래 인물로 돌아간다.
+            resp2 = client.post(f"/api/vnew/p/{pid}/generate/real", json={"confirmUsd": usd})
+            gen_view = ((resp2.get_json() or {}).get("plan") or {}).get("gen") or {}
+            hist = gen_view.get("realHistory") or []
+            if resp2.status_code != 202 or not hist or hist[-1].get("cast") != want_run_cast \
+                    or "cast" in (env.gen(pid).get("realRun") or {}) or genmod._real_cast_overrides(env.plan(pid)):  # noqa: SLF001
+                bad.append(f"(r3-c) 다음 회차의 realHistory cast·새 회차 cast 없음이 다릅니다: {resp2.status_code} {hist}")
+            if not logs.messages("vnew.gen.real_cast pid=prj_r3 n=1 people=2 anime=1"):
+                bad.append("(r3-c) 인물 바꾸기 로그(vnew.gen.real_cast)가 없습니다")
+
+            # ================= (r3-d) 화면 =================
+            vjs = (PUBLIC / "vnew.js").read_text(encoding="utf-8")
+            css = (PUBLIC / "vnew.css").read_text(encoding="utf-8")
+            node = shutil.which("node")
+            start_mark, end_mark = "  /* ---- 작업 126: 실사 속 인물 바꿔 다시 만들기 ----", "  /* 확인창: 테이크 수·초·해상도·금액 숫자"
+            a, b = vjs.find(start_mark), vjs.find(end_mark)
+            section = vjs[a:b] if 0 <= a < b else ""
+            if not section or "innerHTML" in section or "insertAdjacentHTML" in section or "outerHTML" in section:
+                bad.append("(r3-d) vnew.js 인물 바꾸기 구역이 없거나 HTML 문자열로 글을 넣습니다")
+            for text in ('var TAKE_REAL_CAST_BUTTON = "인물 바꿔 다시 만들기";', "openRealCastPicker(g, showError)",
+                         '"다음 (금액 확인)"', '+ "/generate/real/cast")', "      openRealConfirm(gen, showError, cast);",
+                         'meta.key === "real" ? "실사 다시 만들기" : "애니 다시 만들기"', "realBody.cast = cast.map("):
+                if vjs.count(text) != 1:
+                    bad.append(f"(r3-d) vnew.js 에 {text!r} 가 한 번 있지 않습니다")
+            for cls in (".vnew-real-cast {", ".vnew-real-cast-btn {", ".vnew-real-cast-row {", ".vnew-real-cast-look.is-on {"):
+                if cls not in css:
+                    bad.append(f"(r3-d) vnew.css 에 {cls} 가 없습니다")
+            if not node:
+                warn("node 가 없어 작업 126 화면 함수 실행을 건너뜁니다")
+            elif section:
+                script = section + """
+var chars = [{id: "ch3", name: "철수", realBlock: "", animeBlock: ""},
+             {id: "ch4", name: "미완", realBlock: "실사 정면이 아직 없습니다.", animeBlock: ""},
+             {id: "ch5", name: "빈", realBlock: "실사 정면이 아직 없습니다.", animeBlock: "웹툰 그림체 정면이 아직 없습니다."}];
+console.log(JSON.stringify({
+  text: takeRealCastText([{name: "에이", charId: "ch3", look: "real", charName: "철수"}, {name: "비", charId: "ch4", look: "anime"}]),
+  empty: [takeRealCastText(null), takeRealCastText([]), takeRealCastText("x")],
+  look: [realCastLookBlock(chars, "ch4", "real"), realCastLookBlock(chars, "ch4", "anime"), realCastLookBlock(chars, "zz", "real")],
+  charBlock: [realCastCharBlock(chars, "ch3"), realCastCharBlock(chars, "ch4"), realCastCharBlock(chars, "ch5")]
+}));
+"""
+                got, err = _lr_run_node(node, script, "r3d_")
+                want = {"text": "인물: 에이→철수(실사), 비→ch4(애니)", "empty": ["", "", ""],
+                        "look": ["실사 정면이 아직 없습니다.", "", "캐릭터 목록에 없습니다."],
+                        "charBlock": ["", "", "실사: 실사 정면이 아직 없습니다. / 애니: 웹툰 그림체 정면이 아직 없습니다."]}
+                if got != want:
+                    bad.append(f"(r3-d) 화면 함수 결과가 다릅니다: {got} {err}")
+            result = subprocess.run([node, "--check", str(PUBLIC / "vnew.js")], capture_output=True, text=True) if node else None
+            if result is not None and result.returncode != 0:
+                bad.append("(r3-d) node --check vnew.js 실패: " + (result.stderr or "")[:300])
+    except Exception:  # noqa: BLE001
+        bad.append("작업 126 검사 예외\n" + _tb.format_exc())
+    if bad:
+        fail("작업 126 실사 3D 사진·인물 바꾸기 검사 실패\n  " + "\n  ".join(bad))
+    else:
+        ok("작업 126 실사 3D 사진·인물 바꾸기 (r3-a)_take_payload·_real_take_cast·_real_photo_keys·_ref_counts 순서·고름·상한·변형 잡음 "
+           "(r3-b)_assets REAL_TAKE_SHEET_SENTENCE·최소형 유지·웹툰 없음 (r3-c)start_real·_validate_real_cast 400 6꼴·realRun.cast·"
+           "그 회차 참고·애니 photoreal·plan 그대로·realHistory cast·real_cast_options (r3-d)node --check·문구·화면 함수·textContent·css")
+
+
 def main() -> int:
     print("== vpoc1 check ==")
     check_compileall()
@@ -46543,6 +46808,7 @@ def main() -> int:
     check_seedream_fal_124()
     check_vnew_sound_122()
     check_vnew_location_fast_125()
+    check_vnew_real_from_3d_126()
     check_pod_zones()
     print()
     if warnings:

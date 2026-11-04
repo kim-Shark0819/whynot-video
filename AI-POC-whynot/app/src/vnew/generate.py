@@ -27,6 +27,7 @@ import base64
 import hashlib
 import logging
 import os
+import re
 import secrets
 import tempfile
 import threading
@@ -855,6 +856,241 @@ def _real_front_key(entry: dict) -> str:
     entry = entry if isinstance(entry, dict) else {}
     return str(entry.get("castingKey") or entry.get("realFrontKey") or "")
 
+
+# ---------------------------------------------------------------- 작업 126: 실사 인물 참고 = 3D 모델용 사진 · 인물 바꿔 다시 만들기
+#
+# 통 테이크 실사(_take_payload variant="real")의 인물 참고는 캐릭터 만들기의 3D 모델용 실사 사진이다: 실사 정면 → 실사 시트
+# → 실사 후면(있으면). 캐스팅 사진은 사용자가 [이 사진으로] 고른 경우(castingKey 가 빈 값이 아님)에만 맨 앞에 둔다.
+# 참고 이미지 상한(caps.imageListMax) 안에서 인물마다 첫 장부터 돌아가며 채우고(_ref_counts), 넘치면 뒤 사진부터 빠진다.
+# 회차(realRun.cast)에 인물 바꾸기가 있으면 그 회차의 참고·프롬프트만 바뀐다(plan.input·대본·프리비즈는 그대로).
+# 컷 단위 Kling 실사 payload(결정 4)는 이 함수들을 쓰지 않는다.
+
+# 실사 프롬프트 ASSETS 의 고정 문장(줄이기 단계·최소형 모두 ASSETS 머리에 남는다). "sheet" 낱말은 쓰지 않는다(lr-d 검사:
+# 웹툰 rule_replace 의 "reference sheet" 가 실사에 남지 않게 본다) — 시트는 "turnaround views" 로 적는다.
+REAL_TAKE_SHEET_SENTENCE = (
+    "Each person is the same person as in their 3D-model photos (front and turnaround views); keep face, hair, "
+    "body shape and outfit as in those photos unless COSTUME says otherwise"
+)
+# 인물 바꾸기에서 모습 [애니]를 고른 인물: 웹툰 정면·시트를 참고로 주고 실사 인물로 옮기라고 적는다.
+REAL_TAKE_ANIME_SENTENCE = "render as a photoreal person matching this character design"
+REAL_CAST_LOOKS = ("real", "anime")
+REAL_CAST_LOOK_KO = {"real": "실사", "anime": "애니"}
+_CAST_CHAR_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
+
+
+def _real_photo_keys(entry) -> list[str]:
+    """실사 인물 참고 키 순서(작업 126): [고른 캐스팅 사진] → 실사 정면 → 실사 시트 → 실사 후면. 빈 값·중복은 뺀다."""
+    entry = entry if isinstance(entry, dict) else {}
+    out: list[str] = []
+    for field in ("castingKey", "realFrontKey", "realSheetKey", "realBackKey"):
+        key = str(entry.get(field) or "")
+        if key and key not in out:
+            out.append(key)
+    return out
+
+
+def _anime_ref_keys(entry) -> list[str]:
+    """인물 바꾸기 모습 [애니]의 참고 키: 웹툰 정면 → 웹툰 시트. 빈 값·중복은 뺀다."""
+    entry = entry if isinstance(entry, dict) else {}
+    out: list[str] = []
+    for field in ("webtoonFrontKey", "webtoonSheetKey"):
+        key = str(entry.get(field) or "")
+        if key and key not in out:
+            out.append(key)
+    return out
+
+
+def _ref_counts(lengths: list[int], cap: int) -> list[int]:
+    """인물마다 넣을 참고 장수. 첫 장을 모두에게 먼저 주고 둘째 장, 셋째 장 순으로 상한(cap)까지 채운다(뒤 사진부터 빠진다)."""
+    counts = [0] * len(lengths)
+    left = max(0, int(cap or 0))
+    rank = 0
+    while left > 0 and any(rank < n for n in lengths):
+        for i, n in enumerate(lengths):
+            if left <= 0:
+                break
+            if rank < n:
+                counts[i] += 1
+                left -= 1
+        rank += 1
+    return counts
+
+
+def _image_refs(nos: list[int]) -> str:
+    """[2, 3] → "@Image2, @Image3"."""
+    return ", ".join(f"@Image{n}" for n in nos)
+
+
+def _cast_entry(owner: str, char_id: str, name: str) -> dict | None:
+    """인물 바꾸기 캐릭터 1명의 _char_entries 항목(소유자 저장소에서만 읽는다). 못 읽으면 None."""
+    entries = _char_entries(owner, {"characters": [{"charId": char_id, "roleName": name}]})
+    entry = entries[0] if entries else None
+    return None if not entry or entry.get("missing") else entry
+
+
+def _cast_look_block(entry: dict | None, look: str) -> str:
+    """그 캐릭터의 그 모습을 고를 수 없는 이유(한국어). 고를 수 있으면 ""."""
+    if not entry:
+        return "캐릭터를 찾을 수 없습니다."
+    if look == "anime":
+        return "" if entry.get("webtoonFrontKey") else "웹툰 그림체 정면이 아직 없습니다."
+    return "" if entry.get("realFrontKey") else "실사 정면이 아직 없습니다."
+
+
+def _real_take_people(plan: dict, gen: dict) -> list[dict]:
+    """실사 회차가 다루는 인물(모든 테이크의 배우, 이름 기준 한 번씩, 처음 나온 순서): [{name, charId}]."""
+    people: list[dict] = []
+    seen: set[str] = set()
+    for unit in gen.get("units") or []:
+        for actor in _segment_actors(plan, unit):
+            name = str(actor.get("name") or "")
+            if name and name not in seen:
+                seen.add(name)
+                people.append({"name": name, "charId": str(actor.get("charId") or "")})
+    return people
+
+
+def _cast_error(message: str) -> VpocError:
+    return VpocError("vnew.generate.real", "BadCast", message, 400)
+
+
+def _validate_real_cast(owner: str, plan: dict, gen: dict, cast) -> list[dict] | None:
+    """POST /generate/real 의 cast(선택) 검증. None·[] → None(바꾸지 않음). 틀리면 400 BadCast.
+
+    형식 [{name, charId, look:"real"|"anime"}]. name 은 이 회차 테이크의 인물 이름(한 번씩), charId 는 소유자(owner)의
+    캐릭터(지운 캐릭터 제외), 고른 모습은 완성돼 있어야 한다(실사 = 실사 정면, 애니 = 웹툰 정면). 반환은 저장할 모양
+    [{name, charId, look, charName}] — charName 은 회차 머리 "인물: 이름→캐릭터(실사/애니)" 에 쓴다.
+    """
+    if cast is None:
+        return None
+    if not isinstance(cast, list):
+        raise _cast_error("인물 바꾸기(cast) 형식이 틀렸습니다.")
+    if not cast:
+        return None
+    names = {p["name"] for p in _real_take_people(plan, gen)}
+    if len(cast) > len(names):
+        raise _cast_error("인물 바꾸기(cast) 항목이 이 테이크의 인물 수보다 많습니다.")
+    out: list[dict] = []
+    used: set[str] = set()
+    for item in cast:
+        if not isinstance(item, dict):
+            raise _cast_error("인물 바꾸기(cast) 형식이 틀렸습니다.")
+        name, char_id, look = item.get("name"), item.get("charId"), item.get("look")
+        if not isinstance(name, str) or not isinstance(char_id, str) or look not in REAL_CAST_LOOKS:
+            raise _cast_error("인물 바꾸기(cast) 항목에는 name·charId·look(real|anime)이 있어야 합니다.")
+        if name not in names or name in used:
+            raise _cast_error("이 테이크에 없는 인물이거나 같은 인물이 두 번 있습니다.")
+        used.add(name)
+        if not _CAST_CHAR_ID_RE.match(char_id):
+            raise _cast_error("캐릭터를 찾을 수 없습니다.")
+        try:
+            char, _ = characters.load_char(owner, char_id)
+        except Exception:  # noqa: BLE001 — 남의 캐릭터·없는 캐릭터는 소유자 저장소에 없다.
+            char = None
+        if not char or char.get("deleted"):
+            raise _cast_error("캐릭터를 찾을 수 없습니다.")
+        block = _cast_look_block(_cast_entry(owner, char_id, name), look)
+        if block:
+            raise _cast_error(f"고른 모습({REAL_CAST_LOOK_KO[look]})을 쓸 수 없습니다: {block}")
+        out.append({"name": name, "charId": char_id, "look": look, "charName": str(char.get("name") or "")[:80]})
+    return out
+
+
+def _real_cast_overrides(plan: dict) -> dict:
+    """지금 실사 회차(plan.gen.realRun.cast)의 인물 바꾸기: 이름 → {charId, look}. 없거나 깨졌으면 {}."""
+    run = ((plan or {}).get("gen") or {}).get("realRun") or {}
+    items = run.get("cast") if isinstance(run, dict) else None
+    out: dict = {}
+    for item in items if isinstance(items, list) else []:
+        if isinstance(item, dict) and item.get("look") in REAL_CAST_LOOKS and item.get("name") and item.get("charId"):
+            out[str(item["name"])] = {"charId": str(item["charId"]), "look": str(item["look"])}
+    return out
+
+
+def real_cast_options(owner: str, pid: str) -> dict:
+    """[인물 바꿔 다시 만들기] 창의 재료(작업 126). 캐릭터 JSON 을 읽으므로 창을 열 때만 부른다.
+
+    반환 {people:[{name, charId, charName}], characters:[{id, name, realBlock, animeBlock}]}. block 은 그 모습을 고를 수
+    없는 이유(한국어, 고를 수 있으면 ""). 캐릭터는 소유자의 목록(지운 것 제외)이다.
+    """
+    plan, _ = plan_mod.load_plan(owner, pid)
+    gen = plan.get("gen") or {}
+    char_by_id = _char_by_id(owner, plan)
+    people = []
+    for person in _real_take_people(plan, gen):
+        entry = char_by_id.get(person["charId"]) or {}
+        people.append({**person, "charName": str(entry.get("name") or "")})
+    rows = []
+    try:
+        listed = characters.list_characters(owner)
+    except Exception as exc:  # noqa: BLE001 — 목록을 못 읽어도 창은 지금 캐릭터로 연다.
+        log.warning("vnew.gen.real_cast_list_failed err=%s", type(exc).__name__)
+        listed = []
+    for row in listed:
+        cid = str((row or {}).get("id") or "")
+        if not _CAST_CHAR_ID_RE.match(cid):
+            continue
+        entry = _cast_entry(owner, cid, str(row.get("name") or ""))
+        rows.append({
+            "id": cid,
+            "name": str(row.get("name") or ""),
+            "realBlock": _cast_look_block(entry, "real"),
+            "animeBlock": _cast_look_block(entry, "anime"),
+        })
+    return {"people": people, "characters": rows}
+
+
+def _real_take_cast(owner: str, plan: dict, actors: list[dict], char_by_id: dict, resolved: dict,
+                    cap: int) -> tuple[list[bytes], list[dict]]:
+    """통 테이크 실사 인물 참고·ASSETS 인물(작업 126). 반환 (이미지 바이트 목록, cast).
+
+    인물마다 참고 키: 모습 real → _real_photo_keys(캐스팅 고름 → 정면 → 시트 → 후면), anime → _anime_ref_keys(웹툰 정면 →
+    시트). 회차의 인물 바꾸기(_real_cast_overrides)가 있으면 그 캐릭터·모습을 쓴다. 장수는 _ref_counts(cap)로 정하고,
+    한 인물의 사진은 이어진 번호다. cast 항목: frontNo(첫 장)·refNos(모든 장)·look·appearance·costume·voice.
+    """
+    overrides = _real_cast_overrides(plan)
+    rows = []
+    for actor in actors:
+        name = actor.get("name") or "a character"
+        pick = overrides.get(str(name))
+        if pick:
+            char_id, look = pick["charId"], pick["look"]
+            char = _cast_entry(owner, char_id, str(name))
+        else:
+            char_id, look = str(actor.get("charId") or ""), "real"
+            char = char_by_id.get(char_id) if char_id else None
+        keys = (_anime_ref_keys(char) if look == "anime" else _real_photo_keys(char)) if char else []
+        rows.append((actor, str(name), char_id, char, look, keys))
+    counts = _ref_counts([len(row[5]) for row in rows], cap)
+    images: list[bytes] = []
+    cast: list[dict] = []
+    for (actor, name, char_id, char, look, keys), count in zip(rows, counts):
+        nos: list[int] = []
+        for key in keys[:count]:
+            photo = _load_jpeg(key)
+            if photo is not None:
+                images.append(_fit_ref(photo))
+                nos.append(len(images))
+        if not char:
+            appearance = ""
+        elif look == "anime":
+            appearance = _real_appearance(str(char.get("appearanceEn") or ""))
+        else:
+            appearance = _real_appearance(_real_look(owner, char_id))
+        member = resolved.get(name) or {}
+        cast.append({
+            "name": name,
+            "colorName": actor.get("colorName") or "grey",
+            "frontNo": nos[0] if nos else None,
+            "refNos": nos,
+            "look": look,
+            "appearance": appearance,
+            "costume": vnew_fx.strip_drawing_words(member.get("costume") or ""),
+            "voice": vnew_fx.strip_drawing_words(member.get("voice") or ""),
+        })
+    return images, cast
+
+
 def _model_accepts_real_start(model: str) -> bool:
     """이 모델이 실사 인물 시작 이미지를 받는지(설계자 2026-10-20).
 
@@ -1108,6 +1344,8 @@ def _real_run_summary(gen: dict) -> dict:
         "finalKey": str(final.get("key") or "") if final.get("status") == "done" else "",
         "audio": bool(run.get("audio")),
         "units": units,
+        # 작업 126: 인물 바꾸기 회차만 cast 를 남긴다(없으면 키 없음 — 옛 요약과 같다).
+        **({"cast": list(run["cast"])} if isinstance(run.get("cast"), list) and run.get("cast") else {}),
     }
 
 
@@ -1117,12 +1355,14 @@ def _empty_real_state(audio: bool) -> dict:
             "promptBytes": 0}
 
 
-def start_real(owner: str, pid: str, confirm_usd: float, audio: bool | None = None) -> dict:
+def start_real(owner: str, pid: str, confirm_usd: float, audio: bool | None = None, cast=None) -> dict:
     """웹툰 통 테이크가 끝난 gen 에서 실사 회차를 시작한다(design §C.4). 반환 {n, usd}.
 
     금액(confirm_usd)이 real_estimate 와 다르면 409 CostMismatch(원장 기록용이고 생성을 막지 않는다 — 기존과 같다).
     이전 회차가 있으면 realHistory 에 요약을 넣고(최대 3, 오래된 것부터 버림) 칸을 모두 queued 로 되돌린다.
     웹툰 결과(unit.webtoon·finalWebtoon)는 건드리지 않는다. selected 가 real 이면 비운다(RC4.4).
+    작업 126: cast(선택, [{name, charId, look}])는 _validate_real_cast 를 지나 realRun.cast 에만 저장한다(400 BadCast).
+    plan.input·대본·프리비즈는 바꾸지 않는다. 바꾼 인물은 원래 캐릭터의 실사 사진이 없어도 막지 않는다.
     """
     _require_take_real()
     plan, _ = plan_mod.load_plan(owner, pid)
@@ -1130,9 +1370,11 @@ def start_real(owner: str, pid: str, confirm_usd: float, audio: bool | None = No
     blocked = _real_ready_error(gen)
     if blocked is not None:
         raise blocked
+    cast_items = _validate_real_cast(owner, plan, gen, cast)
     if not vpoc_settings.FAL_KEY:
         raise VpocError("vnew.generate.real", "FalKeyMissing", "fal API 키가 설정되지 않았습니다.", 409)
-    missing = _real_missing_names(owner, plan, gen)
+    replaced = {item["name"] for item in cast_items or []}
+    missing = [name for name in _real_missing_names(owner, plan, gen) if name not in replaced]
     if missing:
         raise VpocError(
             "vnew.generate.real",
@@ -1178,6 +1420,8 @@ def start_real(owner: str, pid: str, confirm_usd: float, audio: bool | None = No
             "endpoint": str(g.get("videoModel") or ""),
             "resolution": est["resolution"],
         }
+        if cast_items:
+            g["realRun"]["cast"] = [dict(item) for item in cast_items]
         g["activeSince"] = now_iso()
         g["status"] = "running"
         if g.get("selected") == "real":
@@ -1190,6 +1434,9 @@ def start_real(owner: str, pid: str, confirm_usd: float, audio: bool | None = No
         "vnew.gen.real_start pid=%s n=%d takes=%d usd=%.2f audio=%s",
         pid, box["n"], est["takes"], est["usd"], "on" if audio_on else "off",
     )
+    if cast_items:
+        log.info("vnew.gen.real_cast pid=%s n=%d people=%d anime=%d", pid, box["n"], len(cast_items),
+                 sum(1 for item in cast_items if item["look"] == "anime"))
     return {"n": box["n"], "usd": est["usd"]}
 
 
@@ -3089,6 +3336,9 @@ def _take_prompt(plan: dict, take: dict, *, cast: list[dict], panel_nos: list[in
     def _assets() -> str:
         # ASSETS 인물 문장은 어떤 경우에도 유지한다(색·이름·@Image·COSTUME). 외형·목소리만 줄이거나 뺀다.
         parts = ["@Video1 = rough 3D previz (layout, blocking, camera and cuts only)"]
+        if real and any(m.get("frontNo") and m.get("look") != "anime" for m in cast):
+            # 작업 126: 3D 모델용 실사 사진과 같은 사람(ASSETS 머리 — 모든 줄이기·최소형 후보에 남는다).
+            parts.append(REAL_TAKE_SHEET_SENTENCE)
         for member in cast:
             ko = str(member.get("name") or "").strip() or "a character"
             roman = _disp_name(ko)
@@ -3107,9 +3357,16 @@ def _take_prompt(plan: dict, take: dict, *, cast: list[dict], panel_nos: list[in
             # 이름 소개: "{한국 이름} ({로마자})". 로마자가 이름과 같으면(이미 영문) 괄호 생략.
             label = f"{ko} ({roman})" if roman and roman != ko else ko
             # 얼굴·머리는 참조 정면 1장에서만(후면 제외 — 다른 의상 증거를 줄인다). 실사는 인물 사진 1장(photo).
-            if front_no:
+            if front_no and real and member.get("look") == "anime":
+                # 작업 126 인물 바꾸기 [애니]: 웹툰 정면·시트를 디자인 참고로, 실사 인물로 옮긴다.
+                sentence = (f"The {color} mannequin is {label}: character design in "
+                            f"{_image_refs(member.get('refNos') or [front_no])}; {REAL_TAKE_ANIME_SENTENCE}")
+            elif front_no:
                 sentence = f"The {color} mannequin is {label}: face and hair from @Image{front_no} " + (
                     "(photo)" if real else "(front)")
+                more = [n for n in (member.get("refNos") or []) if n != front_no] if real else []
+                if more:
+                    sentence += f", same person in {_image_refs(more)}"
             else:
                 sentence = f"The {color} mannequin is {label}"
             if appearance:
@@ -3489,7 +3746,8 @@ def _take_payload(owner: str, pid: str, plan: dict, take: dict, caps: dict, vari
       ③ 장소 시트(webtoon back 뷰) — 있으면 1장.
     전부 061 축소 규칙(긴 변 1024, JPEG q85). 총 ≤ caps.imageListMax(기본 10).
 
-    vnew-live-fx C.5(variant="real"): ① 인물마다 _real_front_key 사진 1장(캐스팅 사진, 없으면 실사 정면) → 원작 패널
+    vnew-live-fx C.5(variant="real"): ① 인물 사진(작업 126: _real_take_cast — 고른 캐스팅 사진 → 실사 정면 → 실사 시트 →
+    실사 후면, 상한 안에서 뒤 사진부터 뺌, 회차 인물 바꾸기 반영) → 원작 패널
     없음 → ③ 실사 장소 뷰(locations real viewKeys.back). 외형은 실사 외모 문장(_real_look → _real_appearance).
     이미지는 모두 _fit_ref 를 지나고 제출 때 data URI 가 된다(_submit_take). 웹툰(기본)은 지금 그대로다.
 
@@ -3506,7 +3764,14 @@ def _take_payload(owner: str, pid: str, plan: dict, take: dict, caps: dict, vari
 
     image_urls: list[bytes] = []
     cast: list[dict] = []
-    for actor in actors:
+    real_loc = None
+    if real:
+        # 작업 126: 인물 참고 = 3D 모델용 실사 사진(고른 캐스팅 → 정면 → 시트 → 후면, 회차 인물 바꾸기 반영). 장소 1장 자리를
+        # 먼저 남기고(있을 때) 그 안에서 인물마다 첫 장부터 돌아가며 채운다. 외형은 실사 외모 문장의 얼굴·머리 조각.
+        real_loc = _take_location_jpeg(plan, take, variant="real")
+        person_cap = max(0, max_images - (1 if real_loc is not None else 0))
+        image_urls, cast = _real_take_cast(owner, plan, actors, char_by_id, resolved, person_cap)
+    for actor in [] if real else actors:
         if len(image_urls) >= max_images:
             break
         name = actor.get("name") or "a character"
@@ -3515,22 +3780,6 @@ def _take_payload(owner: str, pid: str, plan: dict, take: dict, caps: dict, vari
         char = char_by_id.get(char_id) if char_id else None
         front_no = None
         appearance = actor.get("appearanceEn") or ""
-        if real:
-            # 실사: 캐스팅 사진(고름) → 실사 정면 1장(결정 4·RC2.2). 외형은 실사 외모 문장의 얼굴·머리 조각.
-            photo = _load_jpeg(_real_front_key(char)) if char else None
-            if photo is not None and len(image_urls) < max_images:
-                image_urls.append(_fit_ref(photo))
-                front_no = len(image_urls)
-            member = resolved.get(str(name)) or {}
-            cast.append({
-                "name": name,
-                "colorName": color_name,
-                "frontNo": front_no,
-                "appearance": _real_appearance(_real_look(owner, str(char_id))) if char else "",
-                "costume": vnew_fx.strip_drawing_words(member.get("costume") or ""),
-                "voice": vnew_fx.strip_drawing_words(member.get("voice") or ""),
-            })
-            continue
         if char:
             # 정면 1장만 — 후면은 넣지 않는다(설계자 2026-10-26, 064).
             front = _load_jpeg(str(char.get("webtoonFrontKey") or ""))
@@ -3560,7 +3809,7 @@ def _take_payload(owner: str, pid: str, plan: dict, take: dict, caps: dict, vari
         panel_nos.append(len(image_urls))
 
     location_no = None
-    loc_jpeg = _take_location_jpeg(plan, take, variant="real") if real else _take_location_jpeg(plan, take)
+    loc_jpeg = real_loc if real else _take_location_jpeg(plan, take)
     if loc_jpeg is not None and len(image_urls) < max_images:
         image_urls.append(_fit_ref(loc_jpeg))
         location_no = len(image_urls)
@@ -6162,6 +6411,12 @@ def gen_view(owner: str, pid: str, plan: dict) -> dict | None:
                 for u in item.get("units") or [] if isinstance(u, dict)
             ],
         })
+        if isinstance(item.get("cast"), list) and item.get("cast"):
+            # 작업 126: 인물 바꾸기 회차의 머리 "인물: 이름→캐릭터(실사/애니)"(없으면 키 없음 — 옛 보기와 같다).
+            real_history_out[-1]["cast"] = [
+                {k: str(c.get(k) or "") for k in ("name", "charId", "look", "charName")}
+                for c in item["cast"] if isinstance(c, dict)
+            ]
     real_block = _real_block_text(owner, plan, gen) if is_take else ""
     auto_real = gen.get("autoReal")
     view = {

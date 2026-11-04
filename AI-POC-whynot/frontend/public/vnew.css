@@ -2407,6 +2407,60 @@ textarea.vnew-field-input {
   cursor: not-allowed;
 }
 
+/* 작업 126: ⑤ 실사 [인물 바꿔 다시 만들기] · 창(인물마다 캐릭터·모습) · 회차 머리 "인물: …" */
+.vnew-real-cast {
+  margin: 0;
+  font-size: 12px;
+}
+
+.vnew-real-cast-btn {
+  align-self: flex-start;
+}
+
+.vnew-real-cast-list {
+  display: grid;
+  gap: 10px;
+  margin: 8px 0;
+}
+
+.vnew-real-cast-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.vnew-real-cast-name {
+  min-width: 64px;
+  font-weight: 600;
+}
+
+.vnew-real-cast-select {
+  min-width: 0;
+  max-width: 220px;
+}
+
+.vnew-real-cast-select option.is-off {
+  color: var(--text-muted, #6b7280);
+}
+
+.vnew-real-cast-looks {
+  display: inline-flex;
+  gap: 6px;
+}
+
+.vnew-real-cast-look.is-on {
+  border-color: var(--accent, #cb3208);
+  color: var(--accent, #cb3208);
+}
+
+.vnew-real-cast-look.is-off,
+.vnew-real-cast-look:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
 .vnew-take-compare {
   grid-column: 1 / -1;
 }
