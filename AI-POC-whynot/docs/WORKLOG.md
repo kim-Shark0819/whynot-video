@@ -2596,3 +2596,6 @@ un_conti가 대본 글 뒤에 ordered_tiles 타일을 Panel N of M: 라벨(N 0�
 ### 123 — ⑤ 통 테이크에서 실사·애니(웹툰) 처음부터 함께 (2026-11-04, 123)
 - POST /generate `styles:["webtoon","real"]`(통 테이크 + VNEW_TAKE_REAL만, 그 밖 400)이면 confirmUsd = 웹툰 + real_estimate 합, gen.autoReal 저장. 드라이버가 웹툰을 끝낸 순회(gen done·finalWebtoon done)에서 start_real을 그대로 1번 부른다(선점 autoReal.startedAt, 실패·partial·취소는 autoReal.error, 버튼은 그대로). 대안(start_real 없이 드라이버가 실사 칸을 직접 queued)은 원장·선점 규칙이 둘로 갈라져 쓰지 않았다.
 - 컷 단위(previz)는 이미 실사·웹툰을 함께 만들어 이름만 바꿨다. "애니(웹툰)"은 ⑤ 결과 열·테이크 칸·나란히 보기·⑥ 머리·⑦ 고르기·준비 카드 단계 목록에만 쓰고, 캐릭터 화면(VARIANTS)과 저장값(webtoon)은 그대로 뒀다. 검사 tb-a~f, 변형 1회 잡힘.
+### 124 — Seedream 그림을 BytePlus ARK 대신 fal로 (2026-11-04, 124)
+- BytePlus 쪽에서 ARK 키가 사라져("The API key doesn't exist") 공간·캐릭터 시트가 실패했다. 뿌리 `vpoc/seedream.py`에 VPOC_SEEDREAM_PROVIDER(기본 fal)를 두고 fal Seedream 4.5(참고 그림이 있으면 edit·image_urls 최대 10장, 없으면 text-to-image)를 vpoc.fal._request 큐로 부른다. 저장소에 Seedream 5 fal id가 없어 4.5를 쓴다. fal일 때 호출부 model(ARK id)은 무시하고, 장당 금액은 `seedream.unit_usd()`(fal 0.04)다.
+- 크기는 fal_image_size(총 픽셀 2560x1440~4096x4096, 한 변 4096, 비율 유지)로 맞추고 결과를 요청 크기 JPEG로 되돌린다. ark는 바디 그대로이고, 401·"API key doesn't exist"·AuthenticationError면 그 호출만 fal로 간다(경고 1줄, 키 없음). 대안(호출부 4곳을 각각 fal로)은 같은 뿌리를 네 번 고쳐야 해 쓰지 않았다. 검사 sf-a~h, 변형 1회 잡힘.

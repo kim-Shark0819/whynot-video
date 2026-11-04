@@ -45564,6 +45564,290 @@ def check_vnew_take_both_123() -> None:
            "(tb-f)확인창 체크 2개·합계·애니(웹툰) 이름")
 
 
+def check_seedream_fal_124() -> None:
+    """작업 124 — Seedream 그림을 fal 로(기본 VPOC_SEEDREAM_PROVIDER=fal) · ark 그대로 · ark 인증 실패면 그 호출만 fal. 유료·네트워크 0.
+
+    (sf-a) fal t2i 바디 {prompt, image_size, num_images, sync_mode}·이미지 0·model 무시, 결과 JPEG 요청 크기(1920x1080)
+    (sf-b) fal edit 바디 image_urls = _data_url 순서대로·10장 상한
+    (sf-c) fal_image_size 범위 안·작음(늘림)·큼(줄임)·꼴 틀림, 변형 1회(크기 변환 없음)를 (sf-a) 판정이 잡음
+    (sf-d) 결과가 https URL 이면 _fetch_url 1번 → JPEG
+    (sf-e) fal 422 content checker → generate_safe 다시 쓰기 단계(같은 문장 2번 → 다시 쓴 문장), 필터 아닌 422 는 바로 올림
+    (sf-f) ark 401 "API key doesn't exist" → fal 1회·경고 1줄·로그에 키 없음, 404+같은 문구도 전환, ark 500 은 전환 없음
+    (sf-g) ark 정상 → 작업 124 전과 같은 바디 bytes·주소·헤더, fal 0회
+    (sf-h) 금액 unit_usd: fal 0.04(VPOC_SEEDREAM_FAL_USD) · ark VPOC_SEEDREAM_USD, ledger.charge_seedream 이 그 값을 쓴다
+    """
+    sys.path.insert(0, str(ROOT / "app"))
+    import base64 as _b64  # noqa: PLC0415
+    import io as _io  # noqa: PLC0415
+    import traceback as _tb  # noqa: PLC0415
+    import urllib.error as _uerr  # noqa: PLC0415
+    import urllib.request as _ureq  # noqa: PLC0415
+
+    from PIL import Image as _Image  # noqa: PLC0415
+
+    from src.vpoc import fal as vpoc_fal  # noqa: PLC0415
+    from src.vpoc import ledger as vpoc_ledger  # noqa: PLC0415
+    from src.vpoc import llm as vpoc_llm  # noqa: PLC0415
+    from src.vpoc import seedream as sd  # noqa: PLC0415
+    from src.vpoc import settings as vs  # noqa: PLC0415
+    from src.vpoc.errors import VpocError  # noqa: PLC0415
+
+    bad: list[str] = []
+    seen: set[str] = set()
+    t2i = "fal-ai/bytedance/seedream/v4.5/text-to-image"
+    edit = "fal-ai/bytedance/seedream/v4.5/edit"
+    ark_model = "dola-seedream-5-0-pro-260628"
+    ark_key = "ark-secret-KEY-124"
+
+    def png(width: int, height: int, color=(10, 20, 30)) -> bytes:
+        buffer = _io.BytesIO()
+        _Image.new("RGB", (width, height), color).save(buffer, format="PNG")
+        return buffer.getvalue()
+
+    def small_jpeg(index: int) -> bytes:
+        buffer = _io.BytesIO()
+        _Image.new("RGB", (64, 48), (index * 20 % 256, 40, 200 - index * 10)).save(buffer, format="JPEG")
+        return buffer.getvalue()
+
+    def jpeg_size(raw: bytes):
+        if not isinstance(raw, bytes) or raw[:2] != b"\xff\xd8":
+            return None
+        with _Image.open(_io.BytesIO(raw)) as image:
+            return image.format, image.size
+
+    calls: list[tuple] = []
+    state = {"out": (2560, 1440), "reject": 0, "reject_msg": "", "https": False}
+
+    def fake_request(method, url, payload=None, *, where):
+        calls.append((method, url, payload, where))
+        if method == "POST":
+            return {"request_id": f"req{len(calls)}"}
+        if url.endswith("/status"):
+            return {"status": "COMPLETED"}
+        if state["reject"] > 0:
+            state["reject"] -= 1
+            raise VpocError(where, "HTTP422", state["reject_msg"], 502)
+        if state["https"]:
+            return {"images": [{"url": "https://v3.fal.media/files/x/out.png"}]}
+        return {"images": [{"url": "data:image/png;base64," + _b64.b64encode(png(*state["out"])).decode("ascii")}]}
+
+    net: list = []
+
+    def blocked_urlopen(*args, **kwargs):
+        net.append(args)
+        raise RuntimeError("network blocked in check")
+
+    def posts() -> list[tuple]:
+        return [c for c in calls if c[0] == "POST"]
+
+    def t2i_ok(post: tuple, prompt: str) -> bool:
+        return post[1] == f"{vs.FAL_QUEUE_URL}/{t2i}" and post[2] == {
+            "prompt": prompt, "image_size": {"width": 2560, "height": 1440}, "num_images": 1, "sync_mode": True}
+
+    names = ("SEEDREAM_PROVIDER", "FAL_KEY", "ARK_API_KEY", "SEEDREAM_USD", "SEEDREAM_FAL_USD",
+             "SEEDREAM_FAL_EDIT_MODEL", "SEEDREAM_FAL_T2I_MODEL")
+    saved_settings = {name: getattr(vs, name) for name in names}
+    saved = {"request": vpoc_fal._request, "urlopen": _ureq.urlopen, "sleep": sd._sleep,  # noqa: SLF001
+             "size": sd.fal_image_size, "fetch": sd._fetch_url, "rewrite": vpoc_llm.safe_image_prompt,  # noqa: SLF001
+             "charge": vpoc_ledger.charge}
+    logs = _LogCapture()
+    try:
+        with logs:
+            if "VPOC_SEEDREAM_PROVIDER" not in os.environ and saved_settings["SEEDREAM_PROVIDER"] != "fal":
+                bad.append(f"기본 공급자가 fal 이 아닙니다: {saved_settings['SEEDREAM_PROVIDER']}")
+            vs.SEEDREAM_PROVIDER, vs.FAL_KEY, vs.ARK_API_KEY = "fal", "dummy-fal-key", ark_key
+            vs.SEEDREAM_FAL_EDIT_MODEL, vs.SEEDREAM_FAL_T2I_MODEL = edit, t2i
+            vpoc_fal._request = fake_request  # noqa: SLF001
+            _ureq.urlopen = blocked_urlopen
+            sd._sleep = lambda _s: None  # noqa: SLF001
+
+            # ================= (sf-a) t2i =================
+            out_a = sd.generate("a quiet room", None, model=ark_model, where="t.a", size="1920x1080")
+            gets_a = [c[1] for c in calls if c[0] == "GET"]
+            if len(posts()) != 1 or not t2i_ok(posts()[0], "a quiet room") or "image_urls" in posts()[0][2] \
+                    or jpeg_size(out_a) != ("JPEG", (1920, 1080)) \
+                    or gets_a != [vpoc_fal._status_url(t2i, "req1"), vpoc_fal._response_url(t2i, "req1")]:  # noqa: SLF001
+                bad.append(f"(sf-a) t2i 바디·결과가 다릅니다: {[(c[1], c[2]) for c in posts()]} {jpeg_size(out_a)} {gets_a}")
+            seen.add("sf-a")
+
+            # ================= (sf-b) edit =================
+            calls.clear()
+            refs = [small_jpeg(i) for i in range(12)]
+            out_b = sd.generate("Image 1 is the room.", refs, model=ark_model, where="t.b", size="2560x1440")
+            post_b = posts()[0] if posts() else ("", "", {})
+            want_urls = [sd._data_url(item) for item in refs[:10]]  # noqa: SLF001
+            if len(posts()) != 1 or post_b[1] != f"{vs.FAL_QUEUE_URL}/{edit}" \
+                    or (post_b[2] or {}).get("image_urls") != want_urls \
+                    or (post_b[2] or {}).get("image_size") != {"width": 2560, "height": 1440} \
+                    or "model" in (post_b[2] or {}) or jpeg_size(out_b) != ("JPEG", (2560, 1440)):
+                bad.append(f"(sf-b) edit 바디가 다릅니다: url={post_b[1]} n={len((post_b[2] or {}).get('image_urls') or [])} "
+                           f"{jpeg_size(out_b)}")
+            seen.add("sf-b")
+
+            # ================= (sf-c) 크기 순수 함수 + 변형 =================
+            sizes = [sd.fal_image_size(x) for x in ("2560x1440", "1440x2560", "1920x1080", "8192x4608", "bad")]
+            if sizes != [(2560, 1440), (1440, 2560), (2560, 1440), (4096, 2304), (2560, 1440)]:
+                bad.append(f"(sf-c) fal_image_size 가 다릅니다: {sizes}")
+            calls.clear()
+            sd.fal_image_size = lambda size: sd._parse_wh(size)  # noqa: SLF001 — 변형: 범위 맞추기 없음
+            sd.generate("a quiet room", None, model=ark_model, where="t.c", size="1920x1080")
+            if not posts() or t2i_ok(posts()[0], "a quiet room"):
+                bad.append("(sf-c) 변형(크기 변환 없음)을 (sf-a) 판정이 잡지 못했습니다")
+            sd.fal_image_size = saved["size"]
+            seen.add("sf-c")
+
+            # ================= (sf-d) https 결과 =================
+            calls.clear()
+            fetched: list[str] = []
+
+            def fake_fetch(url, where):
+                fetched.append(url)
+                return png(2560, 1440)
+
+            sd._fetch_url = fake_fetch  # noqa: SLF001
+            state["https"] = True
+            out_d = sd.generate("x", None, model=ark_model, where="t.d", size="1920x1080")
+            state["https"] = False
+            sd._fetch_url = saved["fetch"]  # noqa: SLF001
+            if fetched != ["https://v3.fal.media/files/x/out.png"] or jpeg_size(out_d) != ("JPEG", (1920, 1080)) or net:
+                bad.append(f"(sf-d) https 결과 받기가 다릅니다: {fetched} {jpeg_size(out_d)} net={len(net)}")
+            seen.add("sf-d")
+
+            # ================= (sf-e) 안전 필터 → 다시 쓰기 =================
+            calls.clear()
+            rewrites: list[str] = []
+
+            def fake_rewrite(prompt):
+                rewrites.append(prompt)
+                return "calm rewritten scene", {}
+
+            vpoc_llm.safe_image_prompt = fake_rewrite
+            state["reject"], state["reject_msg"] = 2, (
+                "The content could not be processed because it contained material flagged by a content checker.")
+            out_e = sd.generate_safe("Style. Scene: a fight", None, model=ark_model, where="t.e")
+            prompts_e = [c[2]["prompt"] for c in posts()]
+            if prompts_e != ["Style. Scene: a fight"] * 2 + ["calm rewritten scene"] or rewrites != ["Style. Scene: a fight"] \
+                    or jpeg_size(out_e) != ("JPEG", (1920, 1080)) or len(logs.messages("vpoc.seedream.filtered")) != 2:
+                bad.append(f"(sf-e) 필터 다시 쓰기가 돌지 않았습니다: {prompts_e} {rewrites}")
+            calls.clear()
+            rewrites.clear()
+            state["reject"], state["reject_msg"] = 1, "image_size: width must be an integer"
+            try:
+                sd.generate_safe("p", None, model=ark_model, where="t.e2")
+                bad.append("(sf-e) 필터 아닌 422 가 올라오지 않았습니다")
+            except VpocError as exc:
+                if exc.kind != "HTTP422" or len(posts()) != 1 or rewrites:
+                    bad.append(f"(sf-e) 필터 아닌 422 처리 다름: {exc.kind} posts={len(posts())}")
+            state["reject"] = 0
+            seen.add("sf-e")
+
+            # ================= (sf-f) ark 인증 실패 → fal 1회 =================
+            vs.SEEDREAM_PROVIDER = "ark"
+            ark_seen: list = []
+
+            def ark_error(code: int, message: str):
+                def opener(request, timeout=None):
+                    ark_seen.append(request)
+                    body = json.dumps({"error": {"code": "AuthenticationError", "message": message}}).encode()
+                    raise _uerr.HTTPError(request.full_url, code, "err", {}, _io.BytesIO(body))
+                return opener
+
+            for code, msg, want_fal in ((401, "The API key doesn't exist. Request id: 0217", 1),
+                                        (404, "The API key doesn't exist. Request id: 0218", 1),
+                                        (500, "Internal error", 0)):
+                calls.clear()
+                ark_seen.clear()
+                logs.clear()
+                _ureq.urlopen = ark_error(code, msg)
+                try:
+                    out_f = sd.generate("p", None, model=ark_model, where="t.f", size="1920x1080")
+                    got = ("ok", jpeg_size(out_f))
+                except VpocError as exc:
+                    got = ("err", exc.kind)
+                warns = logs.messages("vpoc.seedream.ark_auth_fallback")
+                every = logs.messages("")
+                if len(ark_seen) != 1 or len(posts()) != want_fal or any(ark_key in m for m in every):
+                    bad.append(f"(sf-f) ark {code} 전환이 다릅니다: ark={len(ark_seen)} fal={len(posts())} {got}")
+                elif want_fal and (got != ("ok", ("JPEG", (1920, 1080))) or len(warns) != 1 or "kind=HTTP" not in warns[0]):
+                    bad.append(f"(sf-f) ark {code} 전환 결과·경고가 다릅니다: {got} {warns}")
+                elif not want_fal and (got != ("err", "HTTP500") or warns):
+                    bad.append(f"(sf-f) ark 500 이 전환됐습니다: {got} {warns}")
+            seen.add("sf-f")
+
+            # ================= (sf-g) ark 정상 → 같은 바디 =================
+            calls.clear()
+            captured: list = []
+
+            class _Resp:
+                def __init__(self, raw: bytes) -> None:
+                    self._raw = raw
+
+                def read(self, *_a):
+                    return self._raw
+
+                def __enter__(self):
+                    return self
+
+                def __exit__(self, *_a):
+                    return False
+
+            def ark_ok(request, timeout=None):
+                captured.append((request, timeout))
+                b64 = _b64.b64encode(png(1920, 1080)).decode("ascii")
+                return _Resp(json.dumps({"data": [{"b64_json": b64}]}).encode())
+
+            _ureq.urlopen = ark_ok
+            refs_g = refs[:11]
+            out_g = sd.generate("ark prompt", refs_g, model=ark_model, where="t.g", size="2560x1440")
+            want_body = json.dumps({
+                "model": ark_model, "prompt": "ark prompt", "size": "2560x1440", "response_format": "b64_json",
+                "watermark": False, "image": [sd._data_url(item) for item in refs_g[:10]],  # noqa: SLF001
+            }).encode("utf-8")
+            req_g = captured[0][0] if captured else None
+            if req_g is None or req_g.data != want_body or req_g.full_url != vs.ARK_BASE_URL + "/images/generations" \
+                    or req_g.get_header("Authorization") != "Bearer " + ark_key or captured[0][1] != 300 \
+                    or req_g.get_method() != "POST" or calls or jpeg_size(out_g) != ("JPEG", (1920, 1080)):
+                bad.append(f"(sf-g) ark 바디가 작업 124 전과 다릅니다: fal={len(calls)} {jpeg_size(out_g)}")
+            seen.add("sf-g")
+
+            # ================= (sf-h) 금액 =================
+            charged: list[float] = []
+            vpoc_ledger.charge = lambda key, **kw: charged.append(kw["usd"]) or {}
+            vs.SEEDREAM_USD, vs.SEEDREAM_FAL_USD = 0.035, 0.04
+            vs.SEEDREAM_PROVIDER = "fal"
+            usd_fal = sd.unit_usd()
+            vpoc_ledger.charge_seedream("k1", model=ark_model, user="u", project_id="p", plan_id="x")
+            vs.SEEDREAM_PROVIDER = "ark"
+            usd_ark = sd.unit_usd()
+            vpoc_ledger.charge_seedream("k2", model=ark_model, user="u", project_id="p", plan_id="x")
+            if (usd_fal, usd_ark) != (0.04, 0.035) or charged != [0.04, 0.035] or saved_settings["SEEDREAM_FAL_USD"] != 0.04 \
+                    and "VPOC_SEEDREAM_FAL_USD" not in os.environ:
+                bad.append(f"(sf-h) 금액이 다릅니다: fal={usd_fal} ark={usd_ark} ledger={charged}")
+            seen.add("sf-h")
+            if net:
+                bad.append(f"네트워크 호출이 있었습니다: {len(net)}")
+    except Exception:  # noqa: BLE001
+        bad.append("작업 124 검사 예외\n" + _tb.format_exc())
+    finally:
+        for name, value in saved_settings.items():
+            setattr(vs, name, value)
+        vpoc_fal._request = saved["request"]  # noqa: SLF001
+        _ureq.urlopen = saved["urlopen"]
+        sd._sleep = saved["sleep"]  # noqa: SLF001
+        sd.fal_image_size = saved["size"]
+        sd._fetch_url = saved["fetch"]  # noqa: SLF001
+        vpoc_llm.safe_image_prompt = saved["rewrite"]
+        vpoc_ledger.charge = saved["charge"]
+    missing = {"sf-a", "sf-b", "sf-c", "sf-d", "sf-e", "sf-f", "sf-g", "sf-h"} - seen
+    if missing:
+        bad.append(f"돌지 않은 검사: {sorted(missing)}")
+    if bad:
+        fail("작업 124 Seedream fal\n" + "\n".join(f"  {item}" for item in bad))
+    else:
+        ok("작업 124 Seedream fal (sf-a)t2i 바디 (sf-b)edit image_urls 10장 (sf-c)크기 3경우·변형 잡힘 (sf-d)https 결과 "
+           "(sf-e)필터 다시 쓰기 (sf-f)ark 인증 실패 fal 1회·키 없음 (sf-g)ark 바디 그대로 (sf-h)금액 unit_usd")
+
+
 def main() -> int:
     print("== vpoc1 check ==")
     check_compileall()
@@ -45646,6 +45930,7 @@ def main() -> int:
     check_vnew_edit_fix_picker_119()
     check_vnew_conti_images_120()
     check_vnew_take_both_123()
+    check_seedream_fal_124()
     check_pod_zones()
     print()
     if warnings:

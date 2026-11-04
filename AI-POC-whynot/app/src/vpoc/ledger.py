@@ -16,7 +16,7 @@ from __future__ import annotations
 import logging
 import threading
 
-from . import settings
+from . import seedream, settings
 from .errors import VpocError, now_iso
 from .store import LEDGER_KEY, STORE
 
@@ -167,7 +167,7 @@ def charge_seedream(key: str, *, model: str, user: str, project_id: str, plan_id
         kind="image",
         model=model,
         units=1,
-        usd=settings.SEEDREAM_USD,
+        usd=seedream.unit_usd(),
         user=user,
         project_id=project_id,
         plan_id=plan_id,
