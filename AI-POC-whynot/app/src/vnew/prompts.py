@@ -346,3 +346,45 @@ For each FILL cut:
 For each TRANSLATE cut: only id and moodEn (the English of its moodKo, <= 80 characters, names kept as given).
 Describe only what the panels and the cut text show. Never describe hair, skin or clothing colors. No dialogue
 text. Answer only with the emit_fx tool."""
+
+
+
+# ---------------------------------------------------------------- 작업 133: 실사 컷 자동 품질 검사(emit_cut_qa)
+# 판정 기준 문구는 이 상수 한 곳에만 둔다(generate._read_cut_qa 가 CUT_QA_SYSTEM 으로 쓴다).
+CUT_QA_RULES = (
+    "- animeStyle: true if Image 2 shows anime or cartoon line art, drawn outlines or cel shading anywhere "
+    "(on people or background). A real photographic frame is false.",
+    "- outfitMatch: false if any person's clothing color or garment type in Image 2 differs from the same person "
+    "in Image 1 (e.g. white shirt vs black jacket).",
+    "- locationMatch: false if the place in Image 2 differs from Image 1: a different building, railing, street, "
+    "walls or kind of space (e.g. a seaside road instead of a villa entrance).",
+    "- peopleMatch: false if the number of visible people or their left-right positions differ from Image 1.",
+)
+
+EMIT_CUT_QA = {
+    "name": "emit_cut_qa",
+    "description": "Report whether the live-action frame matches the anime reference frame of the same shot.",
+    "inputSchema": {
+        "json": {
+            "type": "object",
+            "required": ["animeStyle", "outfitMatch", "locationMatch", "peopleMatch", "note"],
+            "properties": {
+                "animeStyle": {"type": "boolean"},
+                "outfitMatch": {"type": "boolean"},
+                "locationMatch": {"type": "boolean"},
+                "peopleMatch": {"type": "boolean"},
+                "note": {"type": "string", "maxLength": 80},
+            },
+        }
+    },
+}
+
+CUT_QA_SYSTEM = (
+    "You check one shot of a Korean drama made from an anime version. Image 1 is the anime reference frame; "
+    "Image 2 is the live-action frame at the same moment. Image 2 should be the same shot rendered as real "
+    "photography: same people, outfits, location and positions. The change from drawing to photo, faces, "
+    "small lighting and small pose differences are expected and are not errors. Judge:\n"
+    + "\n".join(CUT_QA_RULES)
+    + "\nnote: at most 80 characters, English, naming what differs (empty when everything matches). "
+    "Call the emit_cut_qa tool exactly once."
+)

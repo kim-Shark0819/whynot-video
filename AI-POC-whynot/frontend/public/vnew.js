@@ -2378,7 +2378,7 @@
       cells.map(function (cell) {
         var w = (cell || {}).webtoon || {};
         var r = (cell || {}).real || {};
-        var fb = r.fallback ? [r.fallback.step || 0, r.fallback.done || 0, r.fallback.total || 0] : null; // 작업 130 단계·진행
+        var fb = r.fallback ? [r.fallback.step || 0, r.fallback.done || 0, r.fallback.total || 0, realCutQaLines(r).join("|")] : null; // 작업 130 단계·진행, 133 QA
         return [w.status || "", w.failureKind || "", r.status || "", r.failureKind || "", fb];
       }),
       finalOf(g.finalWebtoon),
@@ -7078,6 +7078,9 @@
     cell.appendChild(head);
     var fallbackLine = variant.key === "real" ? realFallbackText(v, unit) : ""; // 작업 130: likeness 단계 문구
     if (fallbackLine) cell.appendChild(el("p", "vnew-hint vnew-real-fallback", fallbackLine));
+    if (variant.key === "real") {
+      realCutQaLines(v).forEach(function (line) { cell.appendChild(el("p", "vnew-hint vnew-real-cut-qa", line)); }); // 작업 133
+    }
 
     if (v.status === "completed" && v.videoUrl) {
       var video = el("video", "vnew-seg-video");
@@ -7751,7 +7754,24 @@
     var max = (gen || {}).realFallbackMax;
     var usd = Number((max || {}).usd);
     if (!max || !(usd > 0)) return "";
+    if (max.qa) return "거절되면 컷 단위 Kling으로 바뀌어 금액이 달라질 수 있음(QA로 다시 만든 컷 포함 최대 $" + usd.toFixed(2) + ")"; // 작업 133
     return "거절되면 컷 단위 Kling으로 바뀌어 금액이 달라질 수 있음(최대 $" + usd.toFixed(2) + ")";
+  }
+
+  /* 작업 133: 실사 칸 컷별 QA 결과(칸 fallback.qa [{no, ok, items, firstItems, retried}], 문제 있던 컷만) → 문구 목록.
+     예 "컷 7: 옷이 다름(1번 다시 만듦)". 다시 만들어도 틀리면 끝에 ", 그래도 다름". 문제 없는 컷·목록 없음이면 []. */
+  var REAL_CUT_QA_LABELS = { animeStyle: "그림체가 애니", outfit: "옷이 다름", location: "장소가 다름", people: "인물 수·위치가 다름" };
+  function realCutQaLines(v) {
+    var rows = (((v || {}).fallback || {}).qa) || [];
+    var out = [];
+    rows.forEach(function (row) {
+      var items = row.ok === false ? (row.items || []) : (row.firstItems || []);
+      var labels = items.map(function (key) { return REAL_CUT_QA_LABELS[key] || key; }).filter(Boolean);
+      if (!labels.length) return;
+      var tail = row.retried ? "1번 다시 만듦" + (row.ok === false ? ", 그래도 다름" : "") : "다시 만들지 못함";
+      out.push("컷 " + (row.no != null ? row.no : row.cutId) + ": " + labels.join(", ") + "(" + tail + ")");
+    });
+    return out;
   }
 
   /* 실사 칸의 단계 문구(칸 fallback {step, done, total}). 단계가 없거나 실패·취소면 "". 컷 수는 제출 전이면 테이크 컷 수. */
