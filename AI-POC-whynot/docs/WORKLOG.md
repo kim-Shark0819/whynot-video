@@ -2593,3 +2593,6 @@
 - 
 un_conti가 대본 글 뒤에 ordered_tiles 타일을 Panel N of M: 라벨(N 0부터 = entries.panels)과 보내 sourcePanel·shotSize·xDrawn·xSuggest·mood를 받고 merge_fill·pply_cap으로 저장한다. 모든 컷이 채워지면 _analyze_fx를 건너뛴다. 그림 호출이 실패하면 글만 1회 다시 보낸다. 글만 간 콘티의 기호는 쓰지 않는다(그림을 못 봄). 검사 ci-a~f, 변형 1회 잡힘.
 - VNEW_CONTI_IMAGES는 코드 기본 true다. k8s/(수정 금지)에 배선이 없어 config로는 못 끈다. 라벨은 지시서 예시(Panel 1)가 아니라 대본 번호와 맞추려고 0부터 붙인다.
+### 123 — ⑤ 통 테이크에서 실사·애니(웹툰) 처음부터 함께 (2026-11-04, 123)
+- POST /generate `styles:["webtoon","real"]`(통 테이크 + VNEW_TAKE_REAL만, 그 밖 400)이면 confirmUsd = 웹툰 + real_estimate 합, gen.autoReal 저장. 드라이버가 웹툰을 끝낸 순회(gen done·finalWebtoon done)에서 start_real을 그대로 1번 부른다(선점 autoReal.startedAt, 실패·partial·취소는 autoReal.error, 버튼은 그대로). 대안(start_real 없이 드라이버가 실사 칸을 직접 queued)은 원장·선점 규칙이 둘로 갈라져 쓰지 않았다.
+- 컷 단위(previz)는 이미 실사·웹툰을 함께 만들어 이름만 바꿨다. "애니(웹툰)"은 ⑤ 결과 열·테이크 칸·나란히 보기·⑥ 머리·⑦ 고르기·준비 카드 단계 목록에만 쓰고, 캐릭터 화면(VARIANTS)과 저장값(webtoon)은 그대로 뒀다. 검사 tb-a~f, 변형 1회 잡힘.

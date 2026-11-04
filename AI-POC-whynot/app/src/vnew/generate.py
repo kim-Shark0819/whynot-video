@@ -938,15 +938,37 @@ def _previz_recorded_all(plan: dict) -> bool:
     return True
 
 
-def start_generate(owner: str, pid: str, confirm_usd: float) -> str:
+def _wants_real(styles) -> bool:
+    """POST /generate 의 styles(작업 123). None → 웹툰만(지금과 같다). ["webtoon"] | ["webtoon","real"] 만 받는다(그 밖 400)."""
+    if styles is None:
+        return False
+    if not isinstance(styles, list) or not all(isinstance(s, str) for s in styles) \
+            or len(set(styles)) != len(styles) or set(styles) not in ({"webtoon"}, {"webtoon", "real"}):
+        raise VpocError("vnew.generate", "BadStyles",
+                        '만들 영상(styles)은 ["webtoon"] 또는 ["webtoon","real"] 이어야 합니다.', 400)
+    return "real" in styles
+
+
+def start_generate(owner: str, pid: str, confirm_usd: float, styles: list | None = None) -> str:
     """새 genId 로 프리비즈 gen 을 만들고 백그라운드 진행을 시작한다. genId 를 돌려준다.
 
     금액이 서버 계산과 다르면 409 CostMismatch(vpoc 방식). 선행 조건 위반도 409.
+    작업 123: styles 에 "real" 이 있으면(통 테이크 + VNEW_TAKE_REAL 만, 그 밖 400) 금액은 웹툰 + 실사(real_estimate) 합이고,
+    gen.autoReal 에 실사 몫을 남겨 웹툰이 끝나면 드라이버가 start_real 로 실사 회차를 1번 시작한다(_maybe_auto_real).
     """
     plan, _ = plan_mod.load_plan(owner, pid)
+    want_real = _wants_real(styles)
+    if want_real and not vnew_settings.VNEW_TAKE_REAL:
+        raise VpocError("vnew.generate", "TakeRealDisabled", "통 테이크 실사 버전 기능이 꺼져 있습니다.", 400)
+    if want_real and _gen_mode(plan) != "previz-take":
+        raise VpocError("vnew.generate", "RealNotTake", "실사를 함께 만들기는 통 테이크에서만 됩니다.", 400)
     check_preconditions(plan, owner)
 
+    new = _new_take_gen(plan) if _gen_mode(plan) == "previz-take" else _new_previz_gen(plan)
     expected = estimate(plan)["totalUsd"]
+    real_usd = real_estimate(new)["usd"] if want_real else 0.0
+    if want_real:
+        expected = round(expected + real_usd, 2)
     if round(float(confirm_usd), 2) != expected:
         raise VpocError(
             "vnew.generate",
@@ -954,8 +976,8 @@ def start_generate(owner: str, pid: str, confirm_usd: float) -> str:
             f"금액이 서버 계산과 다릅니다. 서버 {expected} USD, 화면 {round(float(confirm_usd), 2)} USD.",
             409,
         )
-
-    new = _new_take_gen(plan) if _gen_mode(plan) == "previz-take" else _new_previz_gen(plan)
+    if want_real:
+        new["autoReal"] = {"confirmUsd": real_usd, "audio": bool(vnew_settings.VNEW_TAKE_AUDIO), "at": now_iso()}
 
     def mutator(data: dict) -> None:
         current = data.get("gen") or {}
@@ -1188,6 +1210,82 @@ def _real_block_text(owner: str, plan: dict, gen: dict) -> str:
     if missing:
         return "실사 사진(캐스팅 사진 또는 실사 정면)이 없는 등장인물이 있습니다: " + ", ".join(missing)
     return ""
+
+
+# ---------------------------------------------------------------- 작업 123: 처음부터 실사도 함께(autoReal)
+#
+# POST /generate {styles:["webtoon","real"]} 이면 gen.autoReal = {confirmUsd(실사 몫), audio, at}. 드라이버가 웹툰 통 테이크를
+# 다 끝내고(gen done · finalWebtoon done = canStartReal 이 true 가 되는 때) start_real 을 그대로 1번 부른다. 선점은
+# autoReal.startedAt(저장 뒤에 부른다 → 같은 gen 에서 두 번 시작하지 않는다), 실패·건너뜀은 autoReal.error.
+
+AUTO_REAL_SKIP_TEXT = "웹툰이 모두 끝나지 않아 실사를 자동으로 시작하지 않았습니다."
+AUTO_REAL_CANCEL_TEXT = "취소해서 실사를 자동으로 시작하지 않았습니다."
+
+
+def _take_start_real_block(owner: str, plan: dict) -> str:
+    """⑤ 시작 확인창의 [실사] 체크를 흐리게 할 이유(realBlock 문구, 웹툰 진행 상태 제외). 만들 수 있으면 ""."""
+    if not vnew_settings.VNEW_TAKE_REAL:
+        return "실사 버전 기능이 꺼져 있습니다."
+    if not vpoc_settings.FAL_KEY:
+        return "fal API 키가 설정되지 않았습니다."
+    try:
+        missing = _real_missing_names(owner, plan, {"units": _take_units(plan)})
+    except Exception as exc:  # noqa: BLE001 — 보기는 실패하지 않는다(자동 시작 때 start_real 이 다시 확인한다).
+        log.warning("vnew.gen.auto_real_block_failed err=%s", type(exc).__name__)
+        return ""
+    if missing:
+        return "실사 사진(캐스팅 사진 또는 실사 정면)이 없는 등장인물이 있습니다: " + ", ".join(missing)
+    return ""
+
+
+def _auto_real_mark(owner: str, pid: str, gen_id: str, field: str, value: str) -> bool:
+    """autoReal 에 startedAt 또는 error 를 한 번만 남긴다(이미 시작했거나 오류가 있으면 그대로). 남겼으면 True."""
+    def mutator(data: dict) -> None:
+        g = data.get("gen") or {}
+        auto = g.get("autoReal")
+        if str(g.get("genId") or "") != gen_id or not isinstance(auto, dict) or auto.get("error") \
+                or (field == "startedAt" and auto.get("startedAt")):
+            raise _Discard()
+        auto[field] = value
+
+    try:
+        _mutate_locked(owner, pid, mutator)
+    except _Discard:
+        return False
+    return True
+
+
+def _maybe_auto_real(owner: str, pid: str, gen_id: str) -> bool:
+    """웹툰 통 테이크가 끝난 gen 에 autoReal 이 있으면 start_real 로 실사 회차를 1번 시작한다. 시작했으면 True.
+
+    웹툰이 일부 실패(partial)·실패·취소로 끝났으면 시작하지 않고 autoReal.error 를 남긴다(뒤에 다시 시도로 done 이 돼도
+    자동 시작하지 않는다 — 화면의 [실사 버전 만들기] 로 만든다). start_real 이 거절하면 그 문구를 autoReal.error 에 남긴다.
+    """
+    try:
+        plan, _ = plan_mod.load_plan(owner, pid)
+    except VpocError:
+        return False
+    gen = plan.get("gen") or {}
+    auto = gen.get("autoReal")
+    if str(gen.get("genId") or "") != gen_id or not isinstance(auto, dict) or auto.get("startedAt") or auto.get("error") \
+            or gen.get("mode") != "previz-take" or gen.get("realRun") or gen.get("status") == "running":
+        return False
+    if gen.get("status") != "done" or (gen.get("finalWebtoon") or {}).get("status") != "done":
+        _auto_real_mark(owner, pid, gen_id, "error", AUTO_REAL_SKIP_TEXT)
+        log.info("vnew.gen.auto_real_skip pid=%s status=%s", pid, gen.get("status"))
+        return False
+    if not _auto_real_mark(owner, pid, gen_id, "startedAt", now_iso()):
+        return False
+    try:
+        run = start_real(owner, pid, float(auto.get("confirmUsd") or 0), audio=bool(auto.get("audio")))
+    except Exception as exc:  # noqa: BLE001 — 자동 시작 실패는 화면의 [실사 버전 만들기] 로 넘긴다.
+        message = exc.message if isinstance(exc, VpocError) else "실사 버전을 자동으로 시작하지 못했습니다."
+        _auto_real_mark(owner, pid, gen_id, "error", str(message)[:300])
+        log.warning("vnew.gen.auto_real_failed pid=%s kind=%s", pid,
+                    exc.kind if isinstance(exc, VpocError) else type(exc).__name__)
+        return False
+    log.info("vnew.gen.auto_real_start pid=%s n=%d usd=%.2f", pid, run["n"], run["usd"])
+    return True
 
 
 # ================================================================ 진행 드라이버
@@ -1540,6 +1638,9 @@ def _drive_previz_pass(owner: str, pid: str, gen_id: str):
 
     if not polls and not submits:
         _maybe_finalize_previz(owner, pid, gen_id)
+        # 작업 123: 웹툰 통 테이크가 끝났고 autoReal 이 있으면 실사 회차를 1번 시작한다 → 이 드라이버가 이어서 돈다.
+        if _maybe_auto_real(owner, pid, gen_id):
+            return "work"
         return None
 
     # 칸별 스레드로 병렬 수행하고 모두 끝날 때까지 기다린다.
@@ -5767,6 +5868,9 @@ def cancel_gen(owner: str, pid: str) -> dict:
                         state["cancelRemote"] = remote[arn]
                     if arn:
                         state["cancelledAt"] = now_iso()
+        auto = g.get("autoReal")  # 작업 123: 취소한 gen 은 실사를 자동으로 시작하지 않는다.
+        if isinstance(auto, dict) and not auto.get("startedAt") and not auto.get("error"):
+            auto["error"] = AUTO_REAL_CANCEL_TEXT
         g["status"] = "cancelled"
 
     updated, _ = plan_mod.mutate_plan(owner, pid, mutator)
@@ -5916,6 +6020,16 @@ def gen_view(owner: str, pid: str, plan: dict) -> dict | None:
     """GET /plan 의 gen 보기. 영상·이미지 presigned URL, estimate 포함. gen 이 없으면 None."""
     gen = plan.get("gen")
     est = estimate(plan)
+    if est.get("mode") == "previz-take":
+        # 작업 123: ⑤ 시작 확인창의 [실사] 체크 — 실사 회차 1번 금액(real_estimate 와 같은 계산)과 못 만드는 이유.
+        # 진행 중에는 확인창을 열지 않으므로 인물을 읽지 않는다(조회마다 S3 읽기를 늘리지 않는다).
+        running = bool(gen) and gen.get("status") == "running"
+        est = {
+            **est,
+            "realUsd": real_estimate({"videoModel": est.get("videoModel"), "resolution": est.get("resolution"),
+                                      "units": _take_units(plan)})["usd"],
+            "realBlock": "영상 생성이 진행 중입니다." if running else _take_start_real_block(owner, plan),
+        }
     if not gen:
         view = {"status": "none", "estimate": est}
         # ⑦ 편집(지시서 115): 켜져 있으면 gen 이 없어도 요약(잠긴 ⑦ 칩과 이유)을 둔다. 꺼져 있으면 키가 없다.
@@ -6049,6 +6163,7 @@ def gen_view(owner: str, pid: str, plan: dict) -> dict | None:
             ],
         })
     real_block = _real_block_text(owner, plan, gen) if is_take else ""
+    auto_real = gen.get("autoReal")
     view = {
         "genId": gen.get("genId"),
         "mode": mode,
@@ -6089,6 +6204,9 @@ def gen_view(owner: str, pid: str, plan: dict) -> dict | None:
         "canStartReal": bool(is_take and not real_block),
         "realBlock": real_block,
         "realEnabled": bool(vnew_settings.VNEW_TAKE_REAL),  # vnew-live-fx C3: 화면이 실사 열을 그릴지(끔 + 회차 없음이면 지금 화면)
+        # 작업 123: 처음부터 실사도 함께 고른 gen 이면 {confirmUsd, audio, at, startedAt, error}, 아니면 None.
+        "autoReal": {k: auto_real.get(k) for k in ("confirmUsd", "audio", "at", "startedAt", "error")}
+        if isinstance(auto_real, dict) else None,
     }
     # ⑦ 편집(지시서 110): 켜져 있으면 끝에 요약 {available, variants}(S3 를 읽지 않는다). 꺼져 있으면 키가 없다(⑦ 단계 없음).
     if vnew_settings.VNEW_EDIT:

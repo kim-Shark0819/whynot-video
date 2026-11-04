@@ -23,7 +23,7 @@
     ["①", "웹툰 이미지 올리기"],
     ["②", "대본·상황 정리"],
     ["③", "콘티"],
-    ["④", "영상(실사·웹툰풍)"],
+    ["④", "영상(실사·애니(웹툰))"],
     ["⑤", "사운드(베타)"]
   ];
 
@@ -31,6 +31,12 @@
   var VARIANTS = [
     { key: "real", title: "실사" },
     { key: "webtoon", title: "웹툰 그림체" }
+  ];
+  // 작업 123: ⑤ 영상·⑥·⑦ 의 그림체 이름. 저장값(webtoon)은 그대로 두고 보이는 이름만 "애니(웹툰)"(캐릭터 화면은 VARIANTS).
+  var GEN_WEBTOON_TITLE = "애니(웹툰)";
+  var GEN_VARIANTS = [
+    { key: "real", title: "실사" },
+    { key: "webtoon", title: GEN_WEBTOON_TITLE }
   ];
 
   // variant.status / char.status 배지 문구.
@@ -4534,16 +4540,19 @@
 
     var bodyWrap = el("div", "vnew-modal-body");
     var isTake = est.mode === "previz-take";
+    var styles = null; // 작업 123: 통 테이크 "만들 영상" 체크 2개(genStylesBox)
     if (isTake) {
       var takeSecs = 0;
       (est.takes || []).forEach(function (t) { takeSecs += Number(t.seconds) || 0; });
       takeSecs = Math.round(takeSecs);
       var takeLead = el("p", null, "통 테이크(베타): 승인한 프리비즈 녹화를 통째로 넣어 ");
-      takeLead.appendChild(el("span", null, "웹툰 그림체로 " + takeSecs + "초를 한 번에 만듭니다 (480p 초안)."));
+      takeLead.appendChild(el("span", null, GEN_WEBTOON_TITLE + "로 " + takeSecs + "초를 한 번에 만듭니다 (480p 초안)."));
       bodyWrap.appendChild(takeLead);
       bodyWrap.appendChild(
         el("p", "vnew-hint", takePlanHintText("confirm", (est.takes || []).length, takeRealEnabledOf(gen, plan)))
       );
+      styles = genStylesBox(est, updateCost);
+      bodyWrap.appendChild(styles.node);
     } else {
       bodyWrap.appendChild(
         el("p", null, "승인한 프리비즈 녹화에 실사·웹툰 그림체를 각각 입혀 영상을 만듭니다.")
@@ -4556,8 +4565,12 @@
         el("p", "vnew-hint vnew-remake-note", "지금 결과는 '이전 영상'으로만 남고 새로 만듭니다.")
       );
     }
-    // 금액 숫자는 보이지 않는다(설계자 2026-10-20) — 문구만.
-    bodyWrap.appendChild(el("p", "vnew-gen-cost", "예상 비용이 듭니다."));
+    // 금액 숫자는 보이지 않는다(설계자 2026-10-20) — 문구만. 작업 123: 통 테이크는 고른 것의 합을 숫자로 보인다.
+    var cost = el("p", "vnew-gen-cost", styles ? genStylesCostText(est, styles.real()) : "예상 비용이 듭니다.");
+    bodyWrap.appendChild(cost);
+    function updateCost() {
+      if (styles) cost.textContent = genStylesCostText(est, styles.real());
+    }
 
     var error = planError("");
     bodyWrap.appendChild(error);
@@ -4586,9 +4599,15 @@
       okBtn.disabled = true;
       cancelBtn.disabled = true;
       var confirmUsd = Number((gen.estimate || {}).totalUsd) || 0;
+      var genBody = { confirmUsd: confirmUsd };
+      if (styles) {
+        var withReal = styles.real();
+        genBody.styles = withReal ? ["webtoon", "real"] : ["webtoon"];
+        if (withReal) genBody.confirmUsd = takeUsdSum(est.totalUsd, est.realUsd);
+      }
       api("/api/vnew/p/" + encodeURIComponent(state.projectId) + "/generate", {
         method: "POST",
-        body: JSON.stringify({ confirmUsd: confirmUsd })
+        body: JSON.stringify(genBody)
       })
         .then(function (payload) {
           state.plan = payload.plan || state.plan;
@@ -6444,7 +6463,7 @@
     details.appendChild(el("summary", "vnew-prev-gen-summary", "이전 영상 보기"));
     var body = el("div", "vnew-prev-gen-body");
     var shown = false;
-    VARIANTS.forEach(function (meta) {
+    GEN_VARIANTS.forEach(function (meta) {
       var final = (meta.key === "real" ? gen.finalReal : gen.finalWebtoon) || {};
       if (final.status === "done" && final.videoUrl) {
         shown = true;
@@ -6729,7 +6748,7 @@
     var cells = el("div", "vnew-seg-cells has-previz");
     cells.appendChild(previzPreviewCell(unit));
     // 웹툰 결과 칸.
-    cells.appendChild(cutCell(unit, { key: "webtoon", title: "웹툰 그림체" }, showError));
+    cells.appendChild(cutCell(unit, { key: "webtoon", title: GEN_WEBTOON_TITLE }, showError));
     // 실사 회차(gen.realRun)가 있으면 실사 칸도 실제 상태(배지·영상·실패 문구·다시 시도)로 그린다(vnew-live-fx RC9.2).
     if (gen && gen.realRun) {
       cells.appendChild(cutCell(unit, { key: "real", title: "실사" }, showError));
@@ -6904,7 +6923,7 @@
 
     var cells = el("div", "vnew-seg-cells has-previz");
     cells.appendChild(previzPreviewCell(unit));
-    VARIANTS.forEach(function (variant) {
+    GEN_VARIANTS.forEach(function (variant) {
       cells.appendChild(cutCell(unit, variant, showError));
     });
     row.appendChild(cells);
@@ -6997,7 +7016,7 @@
     var bothReady =
       !isTake && (gen.finalReal || {}).status === "done" && (gen.finalWebtoon || {}).status === "done";
 
-    VARIANTS.forEach(function (meta) {
+    GEN_VARIANTS.forEach(function (meta) {
       if (isTake && meta.key === "real" && takeRealShown(gen)) {
         section.appendChild(takeRealColumn(gen, showError));
         return;
@@ -7071,6 +7090,72 @@
   var TAKE_REAL_LEAD = "같은 프리비즈 녹화로 실사 버전을 만들 수 있습니다. 웹툰 결과는 그대로 남습니다.";
   var TAKE_REAL_DONE_TEXT = "웹툰 영상이 준비됐습니다. 실사 버전을 만들거나 웹툰을 골라 사운드로 넘어가세요.";
   var TAKE_REAL_HISTORY_STATUS = { done: "완료", partial: "일부 실패", failed: "실패", cancelled: "취소됨" };
+
+  /* ---- 작업 123: 처음부터 실사도 함께(⑤ 시작 확인창 "만들 영상" 체크 2개 · 결과 실사 열 자동 시작 안내) ---- */
+  var TAKE_REAL_AUTO_TEXT = "애니가 끝나면 실사를 자동으로 시작합니다";
+
+  /* 자동 시작을 기다리는 중: 회차 없음 · gen 진행 중 · 서버 autoReal 이 아직 시작·오류 전. 오류·멈춤이면 지금 버튼이 보인다. */
+  function takeRealAutoPending(gen) {
+    var g = gen || {};
+    var auto = g.autoReal;
+    return !g.realRun && g.status === "running" && !!auto && typeof auto === "object" && !auto.startedAt && !auto.error;
+  }
+
+  function takeUsdSum(a, b) {
+    return Math.round(((Number(a) || 0) + (Number(b) || 0)) * 100) / 100;
+  }
+
+  /* [실사] 체크를 흐리게 할 이유: 서버 estimate.realBlock(realBlock 문구), 금액이 없으면(옛 서버) 기본 문구. 되면 "". */
+  function genRealBlockOf(est) {
+    var e = est || {};
+    if (typeof e.realBlock === "string" && e.realBlock) return e.realBlock;
+    return Number(e.realUsd) > 0 ? "" : "지금은 실사 버전을 만들 수 없습니다.";
+  }
+
+  /* "애니 $A + 실사 $B = $합계" · 실사를 안 고르면 "애니 $A". */
+  function genStylesCostText(est, real) {
+    var e = est || {};
+    if (!real) return "애니 " + takeRealUsdText(e.totalUsd);
+    return "애니 " + takeRealUsdText(e.totalUsd) + " + 실사 " + takeRealUsdText(e.realUsd) + " = " +
+      takeRealUsdText(takeUsdSum(e.totalUsd, e.realUsd));
+  }
+
+  /* 체크 2개: [애니(웹툰)](항상 켬·끌 수 없음) · [실사](기본 켬, 못 만들면 흐리고 이유를 title). 반환 {node, real()}. */
+  function genStylesBox(est, onChange) {
+    var box = el("div", "vnew-gen-styles");
+    box.appendChild(el("span", "vnew-field-label", "만들 영상"));
+    var webLabel = el("label", "vnew-gen-style");
+    var webBox = el("input");
+    webBox.type = "checkbox";
+    webBox.checked = true;
+    webBox.disabled = true;
+    webLabel.title = GEN_WEBTOON_TITLE + "는 항상 만듭니다.";
+    webLabel.appendChild(webBox);
+    webLabel.appendChild(el("span", null, GEN_WEBTOON_TITLE));
+    box.appendChild(webLabel);
+    var block = genRealBlockOf(est);
+    var realLabel = el("label", "vnew-gen-style" + (block ? " is-off" : ""));
+    var realBox = el("input");
+    realBox.type = "checkbox";
+    realBox.checked = !block;
+    realBox.disabled = !!block;
+    if (block) {
+      realLabel.title = block;
+      realBox.title = block;
+    }
+    realBox.addEventListener("change", function () {
+      if (onChange) onChange();
+    });
+    realLabel.appendChild(realBox);
+    realLabel.appendChild(el("span", null, "실사"));
+    box.appendChild(realLabel);
+    return {
+      node: box,
+      real: function () {
+        return !realBox.disabled && realBox.checked === true;
+      }
+    };
+  }
 
   /* 실사 열을 그리는가: take 이면서 설정 켬(realEnabled) 또는 이미 시작한 회차(realRun)가 있을 때. */
   function takeRealShown(gen) {
@@ -7233,8 +7318,10 @@
     col.appendChild(el("h2", "vnew-variant-title", "실사"));
     var stateName = takeRealState(g);
     var final = g.finalReal || {};
+    var autoPending = takeRealAutoPending(g); // 작업 123: 처음부터 실사도 골랐고 애니(웹툰)가 아직 진행 중
     if (stateName === "none") {
-      col.appendChild(el("p", "vnew-hint vnew-real-lead", TAKE_REAL_LEAD));
+      col.appendChild(autoPending ? el("p", "vnew-hint vnew-real-auto", TAKE_REAL_AUTO_TEXT)
+        : el("p", "vnew-hint vnew-real-lead", TAKE_REAL_LEAD));
     } else if (stateName === "running") {
       var progress = takeRealProgress(g);
       var bar = el("div", "vnew-real-progress");
@@ -7276,7 +7363,7 @@
           openRealConfirm(g, showError);
         });
         col.appendChild(startBtn);
-      } else if (stateName === "none") {
+      } else if (stateName === "none" && !autoPending) {
         col.appendChild(el("p", "vnew-hint vnew-real-block", g.realBlock || "지금은 실사 버전을 만들 수 없습니다."));
       }
     }
@@ -7421,7 +7508,7 @@
 
   /* 나란히 보기 — 같이 재생·멈춤·시간 맞추기·소리 고르기(순수 동작, 검사 lr-n 이 가짜 video 로 실행한다). */
   function takeCompareSoundLabel(which) {
-    return which === "real" ? "소리: 실사" : "소리: 웹툰";
+    return which === "real" ? "소리: 실사" : "소리: " + GEN_WEBTOON_TITLE;
   }
 
   /* 소리는 한쪽만: which 가 "real" 이면 실사, 그 밖에는 웹툰(기본). */
@@ -7483,7 +7570,7 @@
       row.appendChild(item);
       return video;
     }
-    var webVideo = player("웹툰 그림체", web.videoUrl);
+    var webVideo = player(GEN_WEBTOON_TITLE, web.videoUrl);
     var realVideo = player("실사", real.videoUrl);
     section.appendChild(row);
 
@@ -7579,7 +7666,7 @@
     if (mode === "previz") {
       cells.appendChild(previzPreviewCell(seg));
     }
-    VARIANTS.forEach(function (variant) {
+    GEN_VARIANTS.forEach(function (variant) {
       cells.appendChild(segmentCell(seg, variant, showError, mode));
     });
     row.appendChild(cells);
@@ -7700,7 +7787,7 @@
     }
 
     var selected = gen.selected; // "real" | "webtoon"
-    var meta = selected === "real" ? VARIANTS[0] : VARIANTS[1];
+    var meta = selected === "real" ? VARIANTS[0] : { key: "webtoon", title: "애니(웹툰)" }; // 작업 123: 보이는 이름만
     var final = (selected === "real" ? gen.finalReal : gen.finalWebtoon) || {};
 
     // --- 머리글 + BETA 배지 ---
@@ -7851,7 +7938,7 @@
   var EDIT_SPEEDS = [0.5, 0.75, 1, 1.25, 1.5, 2]; // 클립 속도(지시서 115, 서버 edit.SPEEDS 와 같다)
   // 단축키 [ ]·Shift+[ ] 동작 → [끝(edge), 방향](지시서 115): out 앞(줄이기)·out 뒤(늘이기)·in 앞(늘이기)·in 뒤(줄이기)
   var EDIT_NUDGES = { outEarlier: ["out", -1], outLater: ["out", 1], inEarlier: ["in", -1], inLater: ["in", 1] };
-  var EDIT_VARIANT_LABEL = { real: "실사", webtoon: "웹툰" };
+  var EDIT_VARIANT_LABEL = { real: "실사", webtoon: "애니(웹툰)" }; // 작업 123: 서버 label("웹툰")보다 이 이름을 먼저 쓴다
   var EDIT_SVG_NS = "http://www.w3.org/2000/svg";
   // 눈금 [큰 눈금 간격(초), 작은 눈금 간격(초)]. 큰 눈금 사이가 64px 이상인 첫 간격을 쓴다(editTickStep).
   var EDIT_TICKS = [[1, 0.25], [2, 0.5], [5, 1], [10, 2]];
@@ -8960,7 +9047,7 @@
     clear(box);
     ctx.variants.forEach(function (item) {
       if (!item || !EDIT_VARIANT_LABEL[item.key]) return;
-      var btn = el("button", "vnew-edit-variant" + (item.key === ctx.variant ? " is-on" : ""), item.label || EDIT_VARIANT_LABEL[item.key]);
+      var btn = el("button", "vnew-edit-variant" + (item.key === ctx.variant ? " is-on" : ""), EDIT_VARIANT_LABEL[item.key]);
       btn.type = "button";
       btn.disabled = item.available !== true;
       btn.title = item.available === true ? EDIT_VARIANT_LABEL[item.key] + " 영상으로 편집" : "아직 " + EDIT_VARIANT_LABEL[item.key] + " 영상이 없습니다";

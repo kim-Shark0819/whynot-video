@@ -2269,6 +2269,32 @@ textarea.vnew-field-input {
   cursor: pointer;
 }
 
+/* 작업 123: ⑤ 시작 확인창 "만들 영상" 체크 2개 · 결과 실사 열 자동 시작 안내 */
+.vnew-real-auto {
+  margin: 0;
+}
+
+.vnew-gen-styles {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 14px;
+  margin: 4px 0 8px;
+}
+
+.vnew-gen-style {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.vnew-gen-style.is-off {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
 .vnew-take-compare {
   grid-column: 1 / -1;
 }

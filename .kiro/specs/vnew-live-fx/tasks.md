@@ -108,3 +108,9 @@
 - [x] 120. 콘티 요청에 웹툰 타일(Panel N of M:)·CONTI_SYSTEM 샷 규칙·EMIT_CONTI 선택 필드 6개·저장 정리(merge_fill·pply_cap)·채우기 건너뛰기·글만 다시 시도·③ 카드 머리 글
   - 파일: pp/src/vnew/plan.py, prompts.py, settings.py(VNEW_CONTI_IMAGES), deploy/config.env.example, rontend/public/vnew.js, new.css, 	ools/check_vpoc.py(ci-a~f).
   - 남은 것: VNEW_CONTI_IMAGES는 k8s/workloads.yaml.tmpl 배선이 없어 지금은 코드 기본(true)으로만 동작한다.
+
+### 작업 123 — ⑤ 실사·애니(웹툰) 처음부터 함께 (2026-11-04)
+
+- [x] 123. POST /generate `styles`(통 테이크 + VNEW_TAKE_REAL만 "real", 그 밖 400)·합계 409·gen.autoReal·웹툰 완료 순회에서 start_real 1번 자동 시작·실패/취소 autoReal.error·보기 estimate.realUsd·realBlock·autoReal, 확인창 "만들 영상" 체크 2개·합계 문구, 실사 열 자동 시작 안내, ⑤⑥⑦ "애니(웹툰)" 이름
+  - 파일: app/src/vnew/generate.py, routes.py, frontend/public/vnew.js, vnew.css, tools/check_vpoc.py(tb-a~f, lr-n·edu 기대 이름 갱신).
+  - 남은 것: 웹툰이 끝난 뒤 자동 시작 전에 파드가 죽으면 자동 시작은 다시 오지 않는다(화면의 [실사 버전 만들기] 버튼으로 만든다). 400 BadStyles·RealNotTake는 USER_FACING_KINDS(vpoc/errors.py, 범위 밖)에 없어 운영에서는 코드만 보인다.

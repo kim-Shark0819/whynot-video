@@ -24604,7 +24604,7 @@ def _lr_screen_problems(got: dict) -> list[str]:
                    "실사 테이크 2개를 만들지 못했습니다." + retry_hint, "실사 버전 만들기가 멈췄습니다. 다시 만들어 주세요."],
         "history": ["1회차 · 완료", "2회차 · 일부 실패 · 소리 없음", "3회차 · 취소됨", "0회차 · 기록", "0회차 · 기록"],
         "status": [_LR_TAKE_DONE_TEXT, "", "", "", "", ""],
-        "sound": ["소리: 웹툰", "소리: 실사", "소리: 웹툰"],
+        "sound": ["소리: 애니(웹툰)", "소리: 실사", "소리: 애니(웹툰)"],  # 작업 123: 보이는 이름 "애니(웹툰)"
     }
     pure = got.get("pure") or {}
     for key, value in want_pure.items():
@@ -24615,7 +24615,7 @@ def _lr_screen_problems(got: dict) -> list[str]:
         return {"cls": cls, "title": title, "p": [list(x) for x in paras], "buttons": [list(x) for x in btns],
                 "videos": [list(x) for x in vids], "links": [list(x) for x in links], "fill": list(fill), "history": list(history)}
 
-    web_done = col("vnew-final-col", "웹툰 그림체", [], [pick], [[w_url, "", True, False]], [[w_url, "내려받기"]])
+    web_done = col("vnew-final-col", "애니(웹툰)", [], [pick], [[w_url, "", True, False]], [[w_url, "내려받기"]])
     real_col = "vnew-final-col vnew-real-col"
     want_none = {"grid": "vnew-final-grid", "children": [real_col, "vnew-final-col"],
                  "views": [col(real_col, "실사", [["vnew-hint vnew-real-lead", lead]],
@@ -24670,9 +24670,9 @@ def _lr_screen_problems(got: dict) -> list[str]:
         problems.append(f"(lr-n) done 화면(영상·내려받기·고르기·다시 만들기·나란히 보기)이 다릅니다: {got.get('done')}")
     want_compare = {
         "title": "나란히 보기", "p": [["vnew-hint", "웹툰과 실사를 같은 시간으로 맞춰 봅니다. 한쪽을 옮기면 다른 쪽도 따라갑니다. 소리는 한쪽만 납니다."]],
-        "titles": ["웹툰 그림체", "실사"], "videos": [[w_url, "metadata", True, False], [r_url, "metadata", True, True]],
+        "titles": ["애니(웹툰)", "실사"], "videos": [[w_url, "metadata", True, False], [r_url, "metadata", True, True]],
         "buttons": [["primary-button vnew-take-compare-play", "같이 재생", False], ["outline-button vnew-take-compare-pause", "멈춤", False],
-                    ["outline-button vnew-take-compare-sound", "소리: 웹툰", False]],
+                    ["outline-button vnew-take-compare-sound", "소리: 애니(웹툰)", False]],
         "soundTitle": "누르면 소리를 다른 영상으로 바꿉니다",
     }
     if got.get("compare") != want_compare or got.get("compareNone") != [None, None, None, None]:
@@ -24682,7 +24682,7 @@ def _lr_screen_problems(got: dict) -> list[str]:
     if got.get("follow") != [[5, 5, [5]], [5.3, []], [9, [9]], [5], [5], [9]]:
         problems.append(f"(lr-n) 한쪽을 옮기면 다른 쪽을 맞추고 되부름을 막는 동작이 다릅니다: {got.get('follow')}")
     if got.get("play") != [[0], [0], 1, 1, 0, 0] or got.get("playSeeked") != [1, 1] or got.get("pause") != [1, 1] \
-            or got.get("sound1") != ["소리: 실사", True, False] or got.get("sound2") != ["소리: 웹툰", False, True]:
+            or got.get("sound1") != ["소리: 실사", True, False] or got.get("sound2") != ["소리: 애니(웹툰)", False, True]:
         problems.append(f"(lr-n) [같이 재생](0초부터 둘 다)·[멈춤]·[소리: 웹툰/실사]가 다릅니다: {got.get('play')} "
                         f"{got.get('playSeeked')} {got.get('pause')} {got.get('sound1')} {got.get('sound2')}")
     if got.get("pickReal") != [[["POST", p + "/select", {"variant": "real"}]], 6, [6], "after"] \
@@ -24710,12 +24710,12 @@ def _lr_screen_problems(got: dict) -> list[str]:
         problems.append(f"(lr-n) 실패·취소·병합 실패·영상 주소 없음·진행 중 done 화면이 다릅니다: {got.get('failed')} "
                         f"{got.get('cancelled')} {got.get('mergeFailed')} {got.get('noUrl')} {got.get('doneRunning')}")
     previz_cell = {"cls": "stub-previz", "head": "", "p": [], "buttons": [], "videos": []}
-    web_cell = {"cls": "vnew-seg-cell", "head": "웹툰 그림체완료", "p": [], "buttons": [], "videos": [[wu_url, "", True, False]]}
+    web_cell = {"cls": "vnew-seg-cell", "head": "애니(웹툰)완료", "p": [], "buttons": [], "videos": [[wu_url, "", True, False]]}
     skip_cell = {"cls": "vnew-seg-cell", "head": "실사건너뜀", "p": [["vnew-hint", _LR_SKIP_NOTE]], "buttons": [], "videos": []}
     silent = ["outline-button vnew-seg-retry vnew-seg-silent", "소리 없이 다시 만들기", False]
     want_row_real = [previz_cell, web_cell, {"cls": "vnew-seg-cell", "head": "실사실패", "p": [["login-error vnew-seg-error", "소리 거절 " + evil]],
                                              "buttons": [["outline-button vnew-seg-retry", "실사 다시", False], silent], "videos": []}]
-    want_row_web = [previz_cell, {"cls": "vnew-seg-cell", "head": "웹툰 그림체실패", "p": [["login-error vnew-seg-error", "x"]],
+    want_row_web = [previz_cell, {"cls": "vnew-seg-cell", "head": "애니(웹툰)실패", "p": [["login-error vnew-seg-error", "x"]],
                                   "buttons": [["outline-button vnew-seg-retry", "웹툰 다시", False], silent], "videos": []}, skip_cell]
     retry = p + "/generate/retry"
     if got.get("rowReal") != want_row_real or got.get("rowWeb") != want_row_web or got.get("rowNoGen") != [previz_cell, web_cell, skip_cell]:
@@ -38208,7 +38208,7 @@ async function run() {
   await settle();
   var c3 = editCtx;
   var realOff = byText(rootOf(host3), "button", "실사");
-  out.variantOff = [realOff.disabled, realOff.title, byText(rootOf(host3), "button", "웹툰").disabled];
+  out.variantOff = [realOff.disabled, realOff.title, byText(rootOf(host3), "button", "애니(웹툰)").disabled]; // 작업 123: 보이는 이름
   editSetZoom(c3, 400);
   var t0 = Date.now(), c0 = created;
   for (var rr = 0; rr < 5; rr++) editRenderTimeline(c3);
@@ -38462,7 +38462,7 @@ def _edu_ctl_problems(got: dict, server: dict) -> list[str]:
           [35, ["00:00", "00:01", "00:02", "00:03", "00:04", "00:05", "00:06", "00:07", "00:08"]], "870px", "00:00.00 / 00:07.50", "저장 전"],
          "클립 너비 = 길이 × px/초·소리 상자(받기 전 회색·소리 없는 원본)·눈금 1초(작은 눈금 0.25초)·끝 여백 120px·시각 표기")
     want("edu-d", [b.get("variants"), b.get("bin"), b.get("videos"), b.get("empty"), b.get("media")],
-         [[["실사", "vnew-edit-variant", False], ["웹툰", "vnew-edit-variant is-on", False]],
+         [[["실사", "vnew-edit-variant", False], ["애니(웹툰)", "vnew-edit-variant is-on", False]],
           ["＋ 컷 1 · 3.0초", "＋ 컷 2 · 3.0초", "＋ 컷 3 · 3.0초", "＋ 합친 영상"],
           [["vnew-edit-video is-active", True, "auto"], ["vnew-edit-video", False, "auto"]], "none", [mids[0]]],
          "그림체 고르기·재료(길이 모르면 표시 없음)·<video> 2개(첫 클립 원본)·필름은 첫 재료 하나만 먼저")
@@ -38532,7 +38532,7 @@ def _edu_ctl_problems(got: dict, server: dict) -> list[str]:
          "+/− 1.25배·슬라이더는 한 화면에 한 번 다시 그림·재생헤드 화면 위치 그대로")
     want("edu-f", got.get("variant"), {"declined": [1, 0], "switched": ["지금 편집을 실사 기본 문서로 바꿉니다. 실행 취소로 되돌릴 수 있습니다.",
                                                                        edit_url + "?variant=real", "real", ["c1", "c2"], True, "실사", 2],
-                                       "putReal": ["real", 2], "undone": ["webtoon", "웹툰"], "putBack": "webtoon"},
+                                       "putReal": ["real", 2], "undone": ["webtoon", "애니(웹툰)"], "putBack": "webtoon"},
          "그림체 바꾸기: 확인창(취소면 요청 0) → GET ?variant= → 그 문서로 바꾸고 저장, 실행 취소로 되돌림")
     ins = got.get("insert") or {}
     want("edu-f", ins, {"text": "＋ 합친 영상", "media": [mids[3]], "mid": mids[3], "clips": [[0, 3, "컷 1"], [0, 7.5, "합친 영상"], [0, 3, "컷 3"]],
@@ -45285,6 +45285,285 @@ def check_vnew_conti_images_120() -> None:
            "(ci-d)채우기 0/1회·변형 1회 (ci-e)그림 실패 → 글만 (ci-f)화면")
 
 
+# ---------------------------------------------------------------- 작업 123 — ⑤ 통 테이크 실사·애니(웹툰) 처음부터 함께
+#
+# 서버: 실제 라우트(POST /generate)·start_generate·드라이버 한 순회(_drive_previz_pass)·start_real 을 _LrEnv 의 가짜 fal·원장으로
+# 돌린다(start_real 은 호출 수를 세는 감싸개). 화면: lr-n 구역 + 095 확인창 구역을 node 가짜 DOM 에서 돌린다. 유료·네트워크 0.
+_TB123_NODE_CASES = r"""
+var TB_EST = { mode: "previz-take", totalUsd: 3.08, realUsd: 3.08, realBlock: "", takes: [{ id: "take1", seconds: 15 }] };
+function confirmOf(est) {
+  closeAll(); reset();
+  state.plan = { previz: {}, features: { fx: true }, gen: { status: "none", estimate: est } };
+  openGenerateConfirm(showError, {});
+  var scrim = document.body.children[0];
+  return {
+    boxes: byTag(scrim, "input"),
+    view: function () {
+      return [byTag(scrim, "input").map(function (b) { return [b.type, b.checked, b.disabled]; }),
+              byClass(scrim, "vnew-gen-style").map(function (l) { return [l.textContent, l.className, l.title]; }),
+              (byClass(scrim, "vnew-gen-cost")[0] || {}).textContent];
+    },
+    ok: function () { byText(scrim, "button", "만들기 시작").fire("click"); return calls[calls.length - 1]; }
+  };
+}
+async function run() {
+  var c = confirmOf(TB_EST);
+  out.both = c.view(); out.bothBody = c.ok(); await tick();
+  c = confirmOf(TB_EST);
+  c.boxes[1].checked = false; c.boxes[1].fire("change");
+  out.webOnly = [c.view()[2], c.ok()]; await tick();
+  c = confirmOf({ mode: "previz-take", totalUsd: 3.08, realUsd: 3.08, realBlock: "실사 버전 기능이 꺼져 있습니다.", takes: [{ id: "take1", seconds: 15 }] });
+  out.blocked = c.view().concat([c.ok()]); await tick();
+  c = confirmOf({ mode: "previz", totalUsd: 4, segments: [{ id: "s1" }] });
+  out.cut = [c.boxes.length, c.view()[2], c.ok()]; await tick();
+  closeAll();
+  var auto = { confirmUsd: 3.08, audio: true, at: "t", startedAt: null, error: null };
+  var pending = { genId: "g1", mode: "previz-take", status: "running", realEnabled: true, realRun: null, realHistory: [], canStartReal: false,
+                  realBlock: "웹툰 통 테이크가 끝난 뒤에 실사 버전을 만들 수 있습니다.", realEstimate: { usd: 3.08 }, autoReal: auto,
+                  finalWebtoon: { status: "waiting" }, finalReal: { status: "skipped" }, units: [] };
+  var pv = colView(realCol(pending));
+  out.pending = [pv.p, pv.buttons];
+  var failed = Object.assign({}, pending, { status: "done", canStartReal: true, realBlock: "",
+                                           autoReal: Object.assign({}, auto, { startedAt: "t", error: "x" }),
+                                           finalWebtoon: { status: "done", videoUrl: "https://signed.example/fw.mp4" } });
+  var fv = colView(realCol(failed));
+  out.failed = [fv.p, fv.buttons];
+  out.heads = byTag(finalResults(failed, showError), "h2").map(function (n) { return n.textContent; });
+  out.sound = takeCompareSoundLabel("webtoon");
+  console.log(JSON.stringify(out));
+}
+run().catch(function (e) { console.error(String((e && e.stack) || e)); process.exit(1); });
+"""
+
+
+def check_vnew_take_both_123() -> None:
+    """작업 123 — ⑤ 통 테이크에서 실사·애니(웹툰)를 처음부터 함께(styles·autoReal·자동 시작·화면). 유료 호출 0.
+
+    (tb-a) styles 생략: autoReal 없음·estimate 그대로(실사 0)·보기 estimate.realUsd = real_estimate·realBlock "", 실사 시작 0
+    (tb-b) ["webtoon","real"]: 웹툰 금액만 409 CostMismatch, 모양 틀림 400 BadStyles(gen 없음), 합 → 202·autoReal 저장·보기
+    (tb-c) 웹툰이 끝난 순회에 실사 회차 1개(start_real 1번·startedAt·"work"), 실사 원장 1번, 끝난 뒤 순회 0번
+    (tb-d) 웹툰 실패(partial)·다시 시도로 done·취소 → 시작 0·autoReal.error, 자동 시작 거절 → error·canStartReal(버튼)
+    (tb-e) 끔·컷 단위 + "real" → 400(gen 없음), 변형(_wants_real 이 styles 무시)을 잡음
+    (tb-f) 화면: node --check, 확인창 체크 2개·합계 문구·보낸 본문·흐림+title, 컷 단위 그대로, 자동 시작 안내, "애니(웹툰)" 이름
+    """
+    sys.path.insert(0, str(ROOT / "app"))
+    import traceback as _tb  # noqa: PLC0415
+
+    from src.vnew import generate as genmod  # noqa: PLC0415
+    from src.vpoc.errors import VpocError  # noqa: PLC0415
+
+    bad: list[str] = []
+    seen: set[str] = set()
+    owner = "tester"
+    seg = [{"id": "s1", "cutIds": ["c1"], "seconds": 15}]
+    both = ["webtoon", "real"]
+    logs = _LogCapture()
+    try:
+        with _guard_real_llm() as real_calls, logs, _LrEnv(owner) as env, _pin_vnew(
+                VNEW_FX=True, VNEW_CASTING=True, VNEW_TAKE_REAL=True, VNEW_GEN_PARALLEL=2, POLL_INTERVAL_S=0,
+                VNEW_TAKE_AUDIO=True, VNEW_TAKE_RESOLUTION="480p", VNEW_PREPARE_STALE_S=300):
+            client = env.client()
+            starts: list[str] = []
+            fail_start: list[str] = []
+            real_start = genmod.start_real
+
+            def counting(*args, **kwargs):
+                starts.append(args[1])
+                if fail_start:
+                    raise VpocError("vnew.generate.real", "CharacterRealMissing", fail_start.pop(), 409)
+                return real_start(*args, **kwargs)
+
+            env.set(genmod, "start_real", counting)
+
+            def post(pid: str, body: dict) -> tuple[int, str]:
+                resp = client.post(f"/api/vnew/p/{pid}/generate", json=body)
+                return resp.status_code, str(((resp.get_json() or {}).get("error") or {}).get("type") or "")
+
+            def est_view(pid: str) -> dict:
+                return genmod.gen_view(owner, pid, env.plan(pid))["estimate"]
+
+            def fresh(pid: str) -> tuple[dict, float]:
+                env.make_plan(pid, seg)
+                est = est_view(pid)
+                return est, round(est["totalUsd"] + est["realUsd"], 2)
+
+            def one_pass(pid: str):
+                return genmod._drive_previz_pass(owner, pid, env.gen(pid)["genId"])  # noqa: SLF001
+
+            # ================= (tb-a) styles 생략 =================
+            est_a, _ = fresh("prj_tb_a")
+            raw_a = genmod.estimate(env.plan("prj_tb_a"))
+            code_a = post("prj_tb_a", {"confirmUsd": raw_a["totalUsd"]})
+            g_a = env.gen("prj_tb_a")
+            if code_a != (202, "") or "autoReal" in g_a or raw_a.get("realUsd") != 0.0 or est_a["totalUsd"] != raw_a["totalUsd"] \
+                    or est_a.get("realUsd") != genmod.real_estimate(g_a)["usd"] or not est_a["realUsd"] > 0 \
+                    or est_a.get("realBlock") != "" or genmod.gen_view(owner, "prj_tb_a", env.plan("prj_tb_a")).get("autoReal") is not None:
+                bad.append(f"(tb-a) styles 생략이 지금과 다르거나 보기 견적이 다릅니다: {code_a} {est_a} {g_a.get('autoReal')}")
+            if env.drive("prj_tb_a").get("realRun") or starts:
+                bad.append("(tb-a) styles 생략인데 실사가 시작됐습니다")
+            seen.add("tb-a")
+
+            # ================= (tb-b) 합계·모양 =================
+            pid_b = "prj_tb_b"
+            est_b, total_b = fresh(pid_b)
+            codes_b = [post(pid_b, {"confirmUsd": est_b["totalUsd"], "styles": both}),
+                       post(pid_b, {"confirmUsd": total_b, "styles": ["real"]}),
+                       post(pid_b, {"confirmUsd": total_b, "styles": "webtoon,real"}),
+                       post(pid_b, {"confirmUsd": total_b, "styles": ["webtoon", "webtoon"]})]
+            no_gen_b = not env.gen(pid_b)
+            code_b = post(pid_b, {"confirmUsd": total_b, "styles": both})
+            auto_b = env.gen(pid_b).get("autoReal") or {}
+            view_auto_b = genmod.gen_view(owner, pid_b, env.plan(pid_b)).get("autoReal") or {}
+            if codes_b != [(409, "CostMismatch")] + [(400, "BadStyles")] * 3 or not no_gen_b or code_b != (202, "") \
+                    or auto_b.get("confirmUsd") != est_b["realUsd"] or auto_b.get("audio") is not True or not auto_b.get("at") \
+                    or auto_b.get("startedAt") or view_auto_b.get("confirmUsd") != est_b["realUsd"] or starts:
+                bad.append(f"(tb-b) 합계 409·모양 400·autoReal 저장이 다릅니다: {codes_b} {code_b} {auto_b}")
+            seen.add("tb-b")
+
+            # ================= (tb-c) 자동 시작 1번 =================
+            led0 = len(env.ledger)
+            hit = None
+            for _ in range(10):
+                before = env.gen(pid_b)
+                web_done = all((u.get("webtoon") or {}).get("status") == "completed" for u in before.get("units") or [])
+                res = one_pass(pid_b)
+                if starts:
+                    g = env.gen(pid_b)
+                    hit = [web_done, res, (g.get("realRun") or {}).get("n"), len(starts),
+                           bool((g.get("autoReal") or {}).get("startedAt")), g.get("status")]
+                    break
+            led1, req1 = len(env.ledger), len(env.requests)
+            g_c = env.drive(pid_b)
+            real_charges = [e for e in env.ledger[led1:] if e.get("kind") == "video"]
+            web_charges = [e for e in env.ledger[led0:led1] if e.get("kind") == "video"]
+            led2, req2 = len(env.ledger), len(env.requests)
+            res_after = one_pass(pid_b)
+            if hit != [True, "work", 1, 1, True, "running"] or len(web_charges) != 1 or len(real_charges) != 1 \
+                    or len(env.new_requests(req1, "real")) != 1 or g_c.get("status") != "done" \
+                    or (g_c.get("finalReal") or {}).get("status") != "done" or res_after is not None or len(starts) != 1 \
+                    or env.ledger[led2:] or env.requests[req2:] or env.gen(pid_b)["realRun"]["n"] != 1:
+                bad.append(f"(tb-c) 웹툰 완료 순회의 자동 시작 1번·원장 1번·다음 순회 0번이 아닙니다: {hit} "
+                           f"웹툰 원장 {len(web_charges)} 실사 원장 {len(real_charges)} {g_c.get('status')} {res_after} {len(starts)}")
+            if not logs.messages("vnew.gen.auto_real_start pid=prj_tb_b n=1"):
+                bad.append("(tb-c) 자동 시작 로그가 없습니다")
+            seen.add("tb-c")
+
+            # ================= (tb-d) 웹툰 실패·취소·자동 시작 거절 =================
+            pid_d = "prj_tb_d"
+            _, total_d = fresh(pid_d)
+            env.reject.add("webtoon")
+            post(pid_d, {"confirmUsd": total_d, "styles": both})
+            g_d = env.drive(pid_d)
+            auto_d = dict(g_d.get("autoReal") or {})
+            genmod.retry_segment(owner, pid_d, g_d["units"][0]["id"], "webtoon")
+            g_d2 = env.drive(pid_d)
+            pid_x = "prj_tb_x"
+            _, total_x = fresh(pid_x)
+            post(pid_x, {"confirmUsd": total_x, "styles": both})
+            genmod.cancel_gen(owner, pid_x)
+            g_x = env.drive(pid_x)
+            if g_d.get("status") != "partial" or auto_d.get("error") != genmod.AUTO_REAL_SKIP_TEXT or auto_d.get("startedAt") \
+                    or g_d2.get("status") != "done" or g_d2.get("realRun") or g_x.get("status") != "cancelled" \
+                    or (g_x.get("autoReal") or {}).get("error") != genmod.AUTO_REAL_CANCEL_TEXT or g_x.get("realRun") or len(starts) != 1:
+                bad.append(f"(tb-d) 웹툰 실패·취소인데 실사가 시작됐거나 autoReal.error 가 다릅니다: {g_d.get('status')} {auto_d} "
+                           f"{g_d2.get('status')} {g_x.get('status')} {g_x.get('autoReal')} {len(starts)}")
+            pid_f = "prj_tb_f"
+            _, total_f = fresh(pid_f)
+            post(pid_f, {"confirmUsd": total_f, "styles": both})
+            fail_start.append("실사 사진이 없는 등장인물이 있습니다: 비")
+            g_f = env.drive(pid_f)
+            view_f = genmod.gen_view(owner, pid_f, env.plan(pid_f))
+            if g_f.get("status") != "done" or g_f.get("realRun") or len(starts) != 2 \
+                    or (g_f.get("autoReal") or {}).get("error") != "실사 사진이 없는 등장인물이 있습니다: 비" \
+                    or not (g_f.get("autoReal") or {}).get("startedAt") or view_f.get("canStartReal") is not True \
+                    or not logs.messages("vnew.gen.auto_real_failed pid=prj_tb_f kind=CharacterRealMissing", logging.WARNING):
+                bad.append(f"(tb-d) 자동 시작 거절이 autoReal.error·버튼(canStartReal)으로 남지 않았습니다: {g_f.get('autoReal')}")
+            seen.add("tb-d")
+
+            # ================= (tb-e) 끔·컷 단위 400, 변형 =================
+            pid_e = "prj_tb_e"
+            _, total_e = fresh(pid_e)
+            with _pin_vnew(VNEW_TAKE_REAL=False):
+                off_e = post(pid_e, {"confirmUsd": total_e, "styles": both})
+            pid_k = "prj_tb_k"
+            env.make_plan(pid_k, seg)
+            env.planmod.mutate_plan(owner, pid_k, lambda data: data["input"].update(videoModel=""))
+            cut_k = post(pid_k, {"confirmUsd": total_e, "styles": both})
+            if off_e != (400, "TakeRealDisabled") or cut_k != (400, "RealNotTake") or env.gen(pid_e) or env.gen(pid_k):
+                bad.append(f"(tb-e) 끔·컷 단위의 \"real\" 이 400 이 아닙니다: {off_e} {cut_k}")
+            saved_wants = genmod._wants_real  # noqa: SLF001
+            genmod._wants_real = lambda styles: False  # noqa: SLF001 — 변형: styles 를 무시
+            try:
+                mutant = post(pid_k, {"confirmUsd": total_e, "styles": both})
+            finally:
+                genmod._wants_real = saved_wants  # noqa: SLF001
+            if mutant[0] == 400:
+                bad.append(f"(tb-e) 변형(styles 무시)을 컷 단위 400 검사가 잡지 못합니다: {mutant}")
+            seen.add("tb-e")
+            if real_calls or env.urlopen_calls:
+                bad.append(f"가짜가 아닌 호출이 있었습니다: {real_calls} {env.urlopen_calls}")
+    except Exception as exc:  # noqa: BLE001
+        bad.append("작업 123 서버 검사 중 예외: " + repr(exc) + "\n" + _tb.format_exc()[:2000])
+
+    # ================= (tb-f) 화면 =================
+    vjs = (PUBLIC / "vnew.js").read_text(encoding="utf-8")
+    css = (PUBLIC / "vnew.css").read_text(encoding="utf-8")
+    for needle in ('var GEN_WEBTOON_TITLE = "애니(웹툰)";', '["④", "영상(실사·애니(웹툰))"],',
+                   '{ key: "webtoon", title: "애니(웹툰)" }; // 작업 123', 'webtoon: "애니(웹툰)" }; // 작업 123',
+                   "EDIT_VARIANT_LABEL[item.key]);"):
+        if vjs.count(needle) != 1:
+            bad.append(f"(tb-f) vnew.js 에 \"애니(웹툰)\" 이름 배선이 없거나 두 번 있습니다: {needle}")
+    for cls in (".vnew-gen-styles", ".vnew-gen-style", ".vnew-real-auto"):
+        if not re.search(r"^" + re.escape(cls) + r" \{", css, re.M):
+            bad.append(f"(tb-f) vnew.css 에 {cls} 가 없습니다")
+    node = shutil.which("node")
+    if not node:
+        warn("node 가 없어 작업 123 화면 검사를 건너뜁니다")
+    else:
+        checked = subprocess.run([node, "--check", str(PUBLIC / "vnew.js")], capture_output=True, text=True, encoding="utf-8")
+        if checked.returncode != 0:
+            bad.append(f"(tb-f) node --check vnew.js 실패: {(checked.stderr or '').strip()[:300]}")
+        code, problems = _lr_screen_code(vjs)
+        hint_code, _poll_code, problems2 = _lr_095_code(vjs)
+        bad.extend(problems + problems2)
+        if not problems and not problems2:
+            got, err = _lr_run_node(node, _LR_SCREEN_NODE_HARNESS + code + hint_code + _LR_095_HINT_STUBS + _TB123_NODE_CASES, "tb123_")
+            path = "/api/vnew/p/p%201/generate"
+            web = ["애니(웹툰)", "vnew-gen-style", "애니(웹툰)는 항상 만듭니다."]
+            want = {
+                "both": [[["checkbox", True, True], ["checkbox", True, False]], [web, ["실사", "vnew-gen-style", ""]],
+                         "애니 $3.08 + 실사 $3.08 = $6.16"],
+                "bothBody": ["POST", path, {"confirmUsd": 6.16, "styles": both}],
+                "webOnly": ["애니 $3.08", ["POST", path, {"confirmUsd": 3.08, "styles": ["webtoon"]}]],
+                "blocked": [[["checkbox", True, True], ["checkbox", False, True]],
+                            [web, ["실사", "vnew-gen-style is-off", "실사 버전 기능이 꺼져 있습니다."]], "애니 $3.08",
+                            ["POST", path, {"confirmUsd": 3.08, "styles": ["webtoon"]}]],
+                "cut": [0, "예상 비용이 듭니다.", ["POST", path, {"confirmUsd": 4}]],
+                "pending": [[["vnew-hint vnew-real-auto", "애니가 끝나면 실사를 자동으로 시작합니다"]], []],
+                "failed": [[["vnew-hint vnew-real-lead", "같은 프리비즈 녹화로 실사 버전을 만들 수 있습니다. 웹툰 결과는 그대로 남습니다."]],
+                           [["primary-button vnew-real-start", "실사 버전 만들기 ($3.08)", False]]],
+                "heads": ["실사", "애니(웹툰)"],
+                "sound": "소리: 애니(웹툰)",
+            }
+            if err:
+                bad.append(f"(tb-f) node 실행 실패: {err}")
+            else:
+                for key, value in want.items():
+                    if got.get(key) != value:
+                        bad.append(f"(tb-f) 화면 {key} 가 다릅니다: {got.get(key)} != {value}")
+    seen.add("tb-f")
+
+    missing = [f"tb-{c}" for c in "abcdef" if f"tb-{c}" not in seen]
+    if missing and not bad:
+        bad.append(f"끝까지 돌지 않은 검사: {missing}")
+    if bad:
+        fail("작업 123 실사·애니(웹툰) 함께 만들기 검사 실패\n" + "\n".join(f"  {item}" for item in bad))
+    else:
+        ok("작업 123 실사·애니(웹툰) 함께 만들기 (tb-a)styles 생략 그대로 (tb-b)합계 409·모양 400·autoReal "
+           "(tb-c)웹툰 완료 순회 자동 시작 1번·원장 1번·다음 0번 (tb-d)실패·취소·거절 (tb-e)끔·컷 400·변형 잡음 "
+           "(tb-f)확인창 체크 2개·합계·애니(웹툰) 이름")
+
+
 def main() -> int:
     print("== vpoc1 check ==")
     check_compileall()
@@ -45366,6 +45645,7 @@ def main() -> int:
     check_vnew_voice_scan_118b()
     check_vnew_edit_fix_picker_119()
     check_vnew_conti_images_120()
+    check_vnew_take_both_123()
     check_pod_zones()
     print()
     if warnings:
