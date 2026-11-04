@@ -78,6 +78,15 @@ SINGLE_DURATION_DEFAULT = _int("VPOC_SINGLE_DURATION_DEFAULT", 10)
 SEEDREAM_ROUGH_MODEL = os.getenv("VPOC_SEEDREAM_ROUGH_MODEL", "dola-seedream-5-0-flash-260915")
 SEEDREAM_FINAL_MODEL = os.getenv("VPOC_SEEDREAM_FINAL_MODEL", "dola-seedream-5-0-pro-260628")
 SEEDREAM_USD = _float("VPOC_SEEDREAM_USD", 0.035)
+# Seedream 공급자(작업 124, 2026-11-04): BytePlus 쪽에서 ARK 키가 사라져("The API key doesn't exist") 기본을 fal 로
+# 바꿨다. "fal" = fal 큐(참고 이미지 있으면 edit, 없으면 text-to-image), "ark" = 예전 BytePlus 그대로(인증 실패면
+# 그 호출만 fal). 그 밖의 값은 fal. 모델 id 가 빈 값이면 아래 기본. 장당 금액은 fal 이면 SEEDREAM_FAL_USD.
+SEEDREAM_PROVIDER = os.getenv("VPOC_SEEDREAM_PROVIDER", "fal").strip().lower()
+SEEDREAM_FAL_EDIT_MODEL = (os.getenv("VPOC_SEEDREAM_FAL_EDIT_MODEL", "").strip()
+                           or "fal-ai/bytedance/seedream/v4.5/edit")
+SEEDREAM_FAL_T2I_MODEL = (os.getenv("VPOC_SEEDREAM_FAL_T2I_MODEL", "").strip()
+                          or "fal-ai/bytedance/seedream/v4.5/text-to-image")
+SEEDREAM_FAL_USD = _float("VPOC_SEEDREAM_FAL_USD", 0.04)
 # 한 샷에 Seedance 로 보내는 웹툰 장면 이미지 수 / 설명을 쓸 때 Claude 에 보여 주는 장면 수.
 PANELS_PER_SHOT_REFS = _int("VPOC_PANELS_PER_SHOT_REFS", 3)
 PANELS_PER_SHOT_BRIEF = _int("VPOC_PANELS_PER_SHOT_BRIEF", 6)
