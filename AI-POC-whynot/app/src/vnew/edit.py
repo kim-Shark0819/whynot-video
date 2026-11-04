@@ -480,6 +480,19 @@ def _material_items(gen: dict, variant: str) -> list[dict]:
         state = cell.get(variant) if isinstance(cell.get(variant), dict) else {}
         if state.get("status") != "completed":
             continue
+        cut_clips = [c for c in ((state.get("fallback") or {}).get("cuts") or [])
+                     if isinstance(c, dict) and c.get("status") == "completed" and c.get("outputKey")] \
+            if kind == "take" and variant == "real" and isinstance(state.get("fallback"), dict) else []
+        if cut_clips:
+            # 작업 130 보완 1: Seedance 거절로 컷 단위 Kling 으로 만든 실사 테이크는 컷 결과를 컷 재료(kind=cut)로 둔다. Kling 길이
+            # (5·10초)가 컷보다 길면 trimTo = 컷 길이. cellId 는 "테이크id#컷id"(테이크 결과·AI로 고치기 칸과 섞이지 않는다).
+            for clip in cut_clips:
+                seconds, duration = _num(clip.get("seconds")), _num(clip.get("duration"))
+                trim_cut = seconds if seconds and duration and duration > seconds + 0.05 else None
+                add(clip.get("outputKey"), kind="cut", group="current", index=index,
+                    cellId=f"{cell.get('id') or ''}#{clip.get('cutId') or ''}", cutIds=[str(clip.get("cutId") or "")],
+                    trimTo=trim_cut, run=None)
+            continue
         trim_to = None
         if kind == "cut" and state.get("padded"):
             orig = _num(state.get("origSeconds"))

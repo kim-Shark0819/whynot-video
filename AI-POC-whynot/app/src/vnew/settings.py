@@ -334,6 +334,20 @@ def brave_search_api_key() -> str:
 # 회차는 드라이버가 끝까지 진행한다. 소리 검사 거절 안내·"소리 없이 다시 만들기"·기존 결함 수정(C.6·C.10)은 이 설정과
 # 상관없이 적용한다. 저장된 realRun·realHistory 는 지우지 않는다.
 VNEW_TAKE_REAL = _bool("VNEW_TAKE_REAL", True)
+# 작업 130·보완 1(2026-11-04, 사용자 결정 "seedance 를 기본으로, 안 되는 것은 fal image to video 상위 모델로"): 실사 통 테이크가 fal
+# "실존 인물과 닮음(likeness)"으로 거절되면 같은 회차 안에서 차례로 다시 만든다(단계마다 1번).
+#   1단계: 같은 Seedance 로, 인물 참고를 인물당 실사 정면 1장으로 줄인다.
+#   2단계: 그 테이크를 컷 단위로 나눠 컷마다 시작 그림(프리비즈 첫 프레임 + 실사 정면 → Seedream) 1장과
+#          VNEW_TAKE_REAL_KLING_MODEL(image-to-video) 1번으로 만들고, 컷 결과를 이어 붙여 그 테이크 결과로 둔다.
+# 켜면 Seedance 실사 테이크 금액은 결과가 정해진 뒤(완료·거절이 아닌 실패·취소) 원장에 남고, likeness 거절은 0 이다.
+# false 면 지금 동작(거절이면 그 칸 실패, 제출 때 계상)이다. 코드 기본값이다(템플릿에는 배선하지 않았다).
+VNEW_TAKE_REAL_LIKENESS_LADDER = _bool("VNEW_TAKE_REAL_LIKENESS_LADDER", True)
+# 2단계 컷 단위 모델(fal 등록표에 있어야 한다 — 운영 등록표에 있음). 없거나 시작 그림을 받지 않으면 2단계는 건너뛴다.
+VNEW_TAKE_REAL_KLING_MODEL = os.getenv(
+    "VNEW_TAKE_REAL_KLING_MODEL", "fal-ai/kling-video/v3/pro/image-to-video"
+).strip()
+# 2단계 컷 길이 허용값(초). 컷 길이 이상인 가장 작은 값, 넘으면 가장 큰 값(fal caps.durations 가 있으면 그 안에서 고른다).
+VNEW_TAKE_REAL_KLING_DURATIONS = (5, 10)
 
 # ⑦ 편집 — 영상 편집 타임라인(지시서 110, 2026-11-01). 켜면 ⑤에서 만든 영상(컷·테이크 결과)을 클립으로 늘어놓고 자르기·나누기·
 # 순서·소리 끄기를 고친 편집 문서를 gen 마다 저장하고, 서버 ffmpeg 로 mp4 하나로 내보낸다(유료 생성 API 호출 없음, edit.py).

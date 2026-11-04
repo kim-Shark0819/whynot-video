@@ -2617,3 +2617,9 @@ un_conti가 대본 글 뒤에 ordered_tiles 타일을 Panel N of M: 라벨(N 0�
 
 ### 129 — 이전 단계에서 작업할 때 화면이 다른 단계로 자동으로 옮겨지지 않게 (2026-11-04, 129)
 - `decidePlanStep`에서 진행 중 작업 단계로 옮기는 규칙을 처음 열 때(planStep 0)만 쓴다. 1~7이면 그대로 두고, 갈 수 없는 단계만 `maxReachableStep()`으로 되돌린다. ⑦ 예외(115)는 그대로다. 다른 단계 작업은 단계 막대 칩에 `is-busy`·"진행 중"(`planBusySteps`)으로만 보인다. 다른 단계 작업만 진행 중인 폴링은 본문을 다시 그리지 않고 막대만 바꾼다(`planBarSync`, 고치던 내용 보존). ② [콘티 만들기]는 콘티가 이미 있으면 ②에 머문다. 검사 check_vnew_plan_step_stay_129. 기대값을 바꾼 곳: lr-n fromStep4(④ 그대로)·ert-c decide·off(partial이어도 ⑥).
+
+
+### 130·보완 1 — 실사 테이크 likeness 거절 → Seedance 정면 1장 → 컷 단위 Kling v3 Pro image-to-video (2026-11-04)
+- fal.poll 실패 문구가 `_REJECT_LIKENESS_MSG`면(fal.py 그대로) 같은 칸을 다음 단계로 queued: 1단계 같은 Seedance·인물당 실사 정면 1장(`_fallback_front_keys`), 2단계 컷마다 시작 그림(그 컷 녹화 첫 프레임 + 실사 정면 → `_seedream`, 메모리만) 1장 + `fal-ai/kling-video/v3/pro/image-to-video`(`VNEW_TAKE_REAL_KLING_MODEL`, 프롬프트 `_segment_prompt`, 길이 5/10) 1번, 컷 결과를 잘라 이어 붙여 칸 결과로 둔다. 기록 칸 `fallback`·`realRun.realFallback`, ⑦ 재료는 컷마다 kind=cut(trimTo 컷 길이). 130의 애니·Kling 레퍼런스 단계는 뺐다.
+- 원장: Seedance 실사 테이크 금액은 제출 때가 아니라 결과가 정해질 때(완료·거절이 아닌 실패·조회 예외·취소) `pendingCharge`로 1번 남긴다(likeness 0). 시작 그림·Kling 컷은 제출 때마다. 확인창은 `realFallbackMax`(테이크마다 max(Seedance, Σ시작 그림 + Kling 길이 × 단가))를 "최대 $X"로 보인다. ⑤ 실사 칸에 "정면 1장으로 다시 만드는 중"·"컷 단위 Kling으로 만드는 중 (n/N컷)". 검사 check_vnew_real_likeness_130(lk-a~d).
+- 남은 이슈: 컷 재료의 ⑦ AI로 고치기는 칸을 찾지 못한다(cellId "테이크#컷"). Kling 컷 하나가 실패하면 칸 실패이고 이미 제출한 컷 금액은 남는다. Kling 단가는 fal pricing을 못 받으면 0.14/초 기본값이다.

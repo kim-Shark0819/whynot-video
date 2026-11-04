@@ -900,6 +900,16 @@ def _anime_ref_keys(entry) -> list[str]:
     return out
 
 
+def _fallback_front_keys(entry, look: str) -> list[str]:
+    """작업 130 likeness 1단계 참고: 인물당 정면 1장. 실사 = 실사 정면(없으면 고른 캐스팅 사진), 인물 바꾸기 애니 = 웹툰 정면.
+    시트·후면은 뺀다. 2단계(컷 단위 Kling)의 시작 그림 참고도 이 함수(실사)를 쓴다."""
+    entry = entry if isinstance(entry, dict) else {}
+    if look == "anime":
+        return _anime_ref_keys(entry)[:1]
+    key = str(entry.get("realFrontKey") or entry.get("castingKey") or "")
+    return [key] if key else []
+
+
 def _ref_counts(lengths: list[int], cap: int) -> list[int]:
     """인물마다 넣을 참고 장수. 첫 장을 모두에게 먼저 주고 둘째 장, 셋째 장 순으로 상한(cap)까지 채운다(뒤 사진부터 빠진다)."""
     counts = [0] * len(lengths)
@@ -1041,12 +1051,13 @@ def real_cast_options(owner: str, pid: str) -> dict:
 
 
 def _real_take_cast(owner: str, plan: dict, actors: list[dict], char_by_id: dict, resolved: dict,
-                    cap: int) -> tuple[list[bytes], list[dict]]:
+                    cap: int, fallback_step: int = 0) -> tuple[list[bytes], list[dict]]:
     """통 테이크 실사 인물 참고·ASSETS 인물(작업 126). 반환 (이미지 바이트 목록, cast).
 
     인물마다 참고 키: 모습 real → _real_photo_keys(캐스팅 고름 → 정면 → 시트 → 후면), anime → _anime_ref_keys(웹툰 정면 →
     시트). 회차의 인물 바꾸기(_real_cast_overrides)가 있으면 그 캐릭터·모습을 쓴다. 장수는 _ref_counts(cap)로 정하고,
     한 인물의 사진은 이어진 번호다. cast 항목: frontNo(첫 장)·refNos(모든 장)·look·appearance·costume·voice.
+    작업 130 likeness 1단계(fallback_step=1): 인물당 정면 1장(_fallback_front_keys). 0 이면 지금 그대로.
     """
     overrides = _real_cast_overrides(plan)
     rows = []
@@ -1059,7 +1070,12 @@ def _real_take_cast(owner: str, plan: dict, actors: list[dict], char_by_id: dict
         else:
             char_id, look = str(actor.get("charId") or ""), "real"
             char = char_by_id.get(char_id) if char_id else None
-        keys = (_anime_ref_keys(char) if look == "anime" else _real_photo_keys(char)) if char else []
+        if not char:
+            keys = []
+        elif fallback_step == 1:
+            keys = _fallback_front_keys(char, look)
+        else:
+            keys = _anime_ref_keys(char) if look == "anime" else _real_photo_keys(char)
         rows.append((actor, str(name), char_id, char, look, keys))
     counts = _ref_counts([len(row[5]) for row in rows], cap)
     images: list[bytes] = []
@@ -3787,7 +3803,8 @@ def _real_appearance(look: str, limit: int = 170) -> str:
                                        is_outfit=lambda piece: not _short_appearance(piece, 1000))
 
 
-def _take_payload(owner: str, pid: str, plan: dict, take: dict, caps: dict, variant: str = "webtoon") -> dict:
+def _take_payload(owner: str, pid: str, plan: dict, take: dict, caps: dict, variant: str = "webtoon",
+                  fallback_step: int = 0) -> dict:
     """통 테이크(웹툰) 참조 이미지 목록·프롬프트(설계자 2026-10-26, 064).
 
     image_urls(순서 고정 — 프롬프트 번호와 일치):
@@ -3804,6 +3821,7 @@ def _take_payload(owner: str, pid: str, plan: dict, take: dict, caps: dict, vari
 
     장면 의상·목소리는 _resolve_cast(원작 패널 읽기 Claude 1회·캐시, override 우선)로 인물별 costume·
     voice 를 구해 cast 에 담는다(ASSETS 의 COSTUME/Voice 문구가 쓴다).
+    fallback_step(작업 130): 실사 likeness 1단계(인물당 정면 1장)면 1 을 _real_take_cast 에 넘긴다. 0 이면 지금 그대로.
     반환: {imageUrls:[bytes], prompt, cast, panelNos, locationNo}.
     """
     real = variant == "real"
@@ -3821,7 +3839,8 @@ def _take_payload(owner: str, pid: str, plan: dict, take: dict, caps: dict, vari
         # 먼저 남기고(있을 때) 그 안에서 인물마다 첫 장부터 돌아가며 채운다. 외형은 실사 외모 문장의 얼굴·머리 조각.
         real_loc = _take_location_jpeg(plan, take, variant="real")
         person_cap = max(0, max_images - (1 if real_loc is not None else 0))
-        image_urls, cast = _real_take_cast(owner, plan, actors, char_by_id, resolved, person_cap)
+        image_urls, cast = _real_take_cast(owner, plan, actors, char_by_id, resolved, person_cap,
+                                           fallback_step=fallback_step)
     for actor in [] if real else actors:
         if len(image_urls) >= max_images:
             break
@@ -4038,7 +4057,8 @@ def _do_submit_take(owner: str, pid: str, gen_id: str, index: int, variant: str,
 
         stage = "payload"
         trace = _RefTrace.start()  # 지시서 116: 이 스레드의 참고 이미지 읽기·맞춤을 따라간다(바이트는 붙잡지 않는다)
-        built = _take_payload(owner, pid, plan, take, caps, variant="real") if real else _take_payload(
+        step = _fallback_step(state) if real else 0  # 작업 130: likeness 1단계면 인물당 정면 1장
+        built = _take_payload(owner, pid, plan, take, caps, variant="real", fallback_step=step) if real else _take_payload(
             owner, pid, plan, take, caps)
         refs = trace.stop(built)
         prompt = built["prompt"]
@@ -4088,7 +4108,9 @@ def _do_submit_take(owner: str, pid: str, gen_id: str, index: int, variant: str,
     if not prepared:
         return
 
-    _charge_take(owner, pid, gen_id, result, take_seconds, resolution)
+    defer = real and bool(vnew_settings.VNEW_TAKE_REAL_LIKENESS_LADDER)
+    if not defer:
+        _charge_take(owner, pid, gen_id, result, take_seconds, resolution)
     _log_attempt(owner, pid, gen_id, source="gen", result=result, prompt=prompt, **log_ctx)  # 지시서 116
 
     def mutator(data: dict) -> None:
@@ -4103,6 +4125,11 @@ def _do_submit_take(owner: str, pid: str, gen_id: str, index: int, variant: str,
         s["error"] = ""
         s["promptEn"] = prompt
         s["promptBytes"] = prompt_bytes
+        if defer:
+            # 작업 130: likeness 거절(생성 전 거절)은 원장 0 — 결과가 정해질 때 _settle_take_charge 가 1번 남긴다.
+            s["pendingCharge"] = {"clientRequestToken": str(result.get("clientRequestToken") or ""),
+                                  "provider": str(result.get("provider") or ""), "seconds": take_seconds,
+                                  "resolution": resolution}
         draft_id = str(result.get("draftId") or "")
         if draft_id and real:
             s["draftId"] = draft_id  # 웹툰 테이크의 cell.draftId 를 덮어쓰지 않는다.
@@ -4112,8 +4139,12 @@ def _do_submit_take(owner: str, pid: str, gen_id: str, index: int, variant: str,
     try:
         _commit(owner, pid, mutator)
     except _Discard:
+        if defer:  # 칸이 바뀌어(취소 등) 결과를 기다리지 않는다 — 제출한 것은 보수적으로 남긴다.
+            _charge_take(owner, pid, gen_id, result, take_seconds, resolution)
         return
     except Exception as exc:  # noqa: BLE001
+        if defer:
+            _charge_take(owner, pid, gen_id, result, take_seconds, resolution)
         _fail_variant(owner, pid, gen_id, index, variant, claim, _msg(exc))
 
 
@@ -4148,6 +4179,11 @@ def _do_submit_previz(owner: str, pid: str, gen_id: str, index: int, variant: st
     except VpocError:
         return
     if (plan0.get("gen") or {}).get("mode") == "previz-take":
+        cells0 = _previz_cells(plan0.get("gen") or {})
+        state0 = (cells0[index].get("real") or {}) if variant == "real" and 0 <= index < len(cells0) else {}
+        if _fallback_step(state0) == 2:
+            _do_submit_real_cuts(owner, pid, gen_id, index, claim)  # 작업 130 보완 1: 컷 단위 Kling
+            return
         _do_submit_take(owner, pid, gen_id, index, variant, claim)
         return
     _PREPARE_SEM.acquire()
@@ -4263,6 +4299,7 @@ def _do_submit_previz(owner: str, pid: str, gen_id: str, index: int, variant: st
 
 def _do_poll_previz(owner: str, pid: str, gen_id: str, index: int, variant: str, claim: str) -> None:
     """프리비즈 컷 한 그림체 조회. 완료면 completed + outputKey."""
+    state: dict = {}
     try:
         plan, _ = plan_mod.load_plan(owner, pid)
         gen = plan.get("gen") or {}
@@ -4271,10 +4308,22 @@ def _do_poll_previz(owner: str, pid: str, gen_id: str, index: int, variant: str,
         state = _previz_cells(gen)[index][variant]
         arn = str(state.get("invocationArn") or "")
         prefix = str(state.get("outputPrefix") or "")
+        take_real = gen.get("mode") == "previz-take" and variant == "real"
+        if take_real and _fallback_step(state) == 2:
+            _do_poll_real_cuts(owner, pid, gen_id, index, claim)  # 작업 130 보완 1: 컷마다 조회
+            return
         poll_result = vpoc_fal.poll(arn, prefix)
         status = str(poll_result.get("status") or "")
         if status == "InProgress":
             return
+        if take_real and status != "Completed" and state.get("pendingCharge") \
+                and _likeness_rejected(poll_result.get("failureMessage")):
+            # 작업 130: 생성 전 거절이라 원장 0. 다음 단계(정면 1장 → 컷 단위 Kling)로 같은 회차 안에서 다시 만든다.
+            _log_result(owner, pid, gen_id, gen, index, variant, arn, "failed", error=str(poll_result.get("failureMessage")))
+            _escalate_likeness(owner, pid, gen_id, index, claim)
+            return
+        if take_real:
+            _settle_take_charge(owner, pid, gen_id, state)
         if status != "Completed":
             message = poll_result.get("failureMessage") or "영상 생성 실패"
             _log_result(owner, pid, gen_id, gen, index, variant, arn, "failed", error=message)  # 지시서 116
@@ -4300,7 +4349,360 @@ def _do_poll_previz(owner: str, pid: str, gen_id: str, index: int, variant: str,
     except _Discard:
         return
     except Exception as exc:  # noqa: BLE001
+        if variant == "real":
+            _settle_take_charge(owner, pid, gen_id, state)  # 작업 130: 결과를 모르면 보수적으로 남긴다(없으면 아무것도 안 함)
         _fail_variant(owner, pid, gen_id, index, variant, claim, _msg(exc))
+
+
+# ================================================================ 작업 130·보완 1: 실사 likeness 거절 → 정면 1장 → 컷 단위 Kling
+#
+# 실사 통 테이크(Seedance)가 fal likeness 로 거절되면(fal.poll 의 문구 = vpoc_fal._REJECT_LIKENESS_MSG, fal.py 그대로) 같은 칸을
+# 다음 단계로 다시 queued 로 둔다. 단계마다 1번. 칸 state.fallback = {step, reason, model, tried[, cuts, total]},
+# 회차 realRun.realFallback = {step, reason, model}. 1단계는 _do_submit_take(fallback_step=1), 2단계는 _do_submit_real_cuts.
+# Seedance 실사 금액은 결과가 정해질 때 _settle_take_charge 가 남긴다(거절 0). 2단계는 시작 그림·Kling 컷마다 제출 때 남긴다.
+
+REAL_FALLBACK_TRIED = {0: "Seedance", 1: "Seedance 정면 1장", 2: "컷 단위 Kling"}
+REAL_FALLBACK_FAIL = "실존 인물 검사에 걸려 실사 영상을 만들지 못했습니다(시도한 단계: {steps}). 인물 사진을 바꿔 다시 만들어 주세요."
+REAL_FALLBACK_NO_KLING = " 컷 단위 Kling 모델이 fal 등록표에 없어 그 단계는 건너뛰었습니다."
+_SEEDREAM_MAX_REFS = 10
+
+
+def _fallback_step(state) -> int:
+    """칸의 likeness 단계(0 = 기본 Seedance, 1 = 정면 1장, 2 = 컷 단위 Kling)."""
+    fallback = (state or {}).get("fallback") if isinstance(state, dict) else None
+    try:
+        return int((fallback or {}).get("step") or 0) if isinstance(fallback, dict) else 0
+    except (TypeError, ValueError):
+        return 0
+
+
+def _likeness_rejected(message) -> bool:
+    """fal.poll 실패 문구가 likeness 거절 문구인가(fal.py 의 반환값을 그대로 쓴다)."""
+    return str(message or "") == vpoc_fal._REJECT_LIKENESS_MSG
+
+
+def _settle_take_charge(owner: str, pid: str, gen_id: str, state: dict) -> None:
+    """미뤄 둔 Seedance 실사 테이크 금액(state.pendingCharge)을 원장에 1번 남긴다(키 = 작업 토큰이라 두 번 불러도 1건)."""
+    pending = (state or {}).get("pendingCharge")
+    if not isinstance(pending, dict) or not pending.get("clientRequestToken"):
+        return
+    _charge_take(owner, pid, gen_id, {"clientRequestToken": pending["clientRequestToken"], "provider": pending.get("provider")},
+                 float(pending.get("seconds") or 0), str(pending.get("resolution") or vnew_settings.VNEW_TAKE_RESOLUTION))
+
+
+def _kling_cut_model() -> tuple[str, dict] | None:
+    """2단계 모델(endpoint, caps). fal 등록표에 있고 시작 그림(startImageField)을 받을 때만, 아니면 None(2단계 건너뜀)."""
+    endpoint = str(vnew_settings.VNEW_TAKE_REAL_KLING_MODEL or "").strip()
+    if not endpoint:
+        return None
+    item = vpoc_fal.find(vpoc_settings.FAL_ID_PREFIX + endpoint)
+    caps = (item or {}).get("caps") or {}
+    if not item or not caps.get("startImageField") or caps.get("available") is False:
+        return None
+    return endpoint, caps
+
+
+def _kling_duration(caps: dict, seconds: float) -> int:
+    """컷 길이 → 허용 길이(VNEW_TAKE_REAL_KLING_DURATIONS 와 caps.durations 의 교집합) 중 컷 이상인 가장 작은 값, 넘으면 가장 큰 값."""
+    allowed = set()
+    for value in (caps or {}).get("durations") or []:
+        try:
+            allowed.add(int(value))
+        except (TypeError, ValueError):
+            continue
+    base = [int(d) for d in vnew_settings.VNEW_TAKE_REAL_KLING_DURATIONS]
+    choices = sorted(set(base) & allowed) or sorted(base)
+    return next((d for d in choices if d >= float(seconds or 0) - 0.01), choices[-1])
+
+
+def _take_cut_units(plan: dict, take: dict) -> list[dict]:
+    """테이크의 컷 단위 작업(_previz_units 와 같은 모양: cutId·recordingKey·startSec·endSec·seconds), 테이크 컷 순서."""
+    by_cut = {str(u.get("cutId") or ""): u for u in _previz_units(plan)}
+    return [by_cut[c] for c in (str(c) for c in (take.get("cutIds") or [])) if c in by_cut]
+
+
+def _cut_first_frame(mp4: bytes, start_sec: float) -> bytes | None:
+    """녹화 mp4 의 start_sec 프레임 1장(JPEG). 못 뽑으면 None(시작 그림은 인물 사진·문장만으로 만든다)."""
+    try:
+        with tempfile.TemporaryDirectory(prefix="vnew-cutframe-") as workdir:
+            src = os.path.join(workdir, "rec.mp4")
+            out = os.path.join(workdir, "first.jpg")
+            with open(src, "wb") as handle:
+                handle.write(mp4)
+            result = stitcher._run([stitcher.ffmpeg_path(), "-y", "-hide_banner", "-loglevel", "error",  # noqa: SLF001
+                                    "-ss", f"{max(0.0, float(start_sec or 0)):.3f}", "-i", src, "-frames:v", "1", "-q:v", "2", out])
+            if result.returncode != 0 or not os.path.exists(out) or not os.path.getsize(out):
+                return None
+            with open(out, "rb") as handle:
+                return handle.read()
+    except Exception as exc:  # noqa: BLE001
+        log.warning("vnew.gen.real_cut_frame_failed err=%s", type(exc).__name__)
+        return None
+
+
+def _cut_still_prompt(plan: dict, cut: dict, people: list[tuple[str, str, int]], has_frame: bool) -> str:
+    """컷 시작 그림(Seedream) 문장: 장면·인물 위치·카메라 + photoreal. people = [(색, 이름, 이미지 번호)]."""
+    brief = _cut_brief(plan, str(cut.get("cutId") or ""))
+    parts = ["Photoreal live-action film still, 16:9, a single frame of a Korean drama."]
+    if has_frame:
+        parts.append("Image 1 is a rough 3D previz frame: keep its camera angle, framing, lens, positions and poses exactly; "
+                     "replace every mannequin with a real person, no mannequins remain.")
+    if people:
+        parts.append("CAST: " + "; ".join(f"the {color} mannequin is {name}, the real person in Image {no}"
+                                          for color, name, no in people) + ".")
+    for label, text in (("SHOT", brief.get("shotEn")), ("BLOCKING", brief.get("blockingEn"))):
+        if str(text or "").strip():
+            parts.append(f"{label}: {str(text).strip()}")
+    scene = _scene_summary(_scene_brief_text(plan, cut).strip(), 300)
+    if scene:
+        parts.append("SETTING: " + scene)
+    parts.append("Natural skin texture, realistic lighting and shadows, photoreal. No text, no subtitles, no speech bubbles.")
+    return "\n".join(parts)
+
+
+def _charge_cut_still(owner: str, pid: str, gen_id: str, key: str) -> None:
+    """컷 시작 그림 1장(Seedream) 계상. 금액은 지금 공급자 장당 금액(vpoc_seedream.unit_usd)."""
+    try:
+        vpoc_ledger.charge(key, kind="image", model=vnew_settings.SEEDREAM_MODEL, units=1, usd=float(vpoc_seedream.unit_usd()),
+                           user=owner, project_id=pid, plan_id=gen_id)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("vnew.gen.charge_cut_still_failed pid=%s err=%s", pid, str(exc)[:200])
+
+
+def _charge_kling_cut(owner: str, pid: str, gen_id: str, token: str, endpoint: str, seconds: int) -> None:
+    """Kling 컷 제출 1회 계상(보낸 길이 × 그 모델 초당 단가). 키 = 작업 토큰."""
+    try:
+        vpoc_ledger.charge(token, kind="video", model=endpoint, units=float(seconds),
+                           usd=round(_previz_model_unit_price(endpoint) * float(seconds), 4), user=owner, project_id=pid,
+                           plan_id=gen_id)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("vnew.gen.charge_kling_cut_failed pid=%s err=%s", pid, str(exc)[:200])
+
+
+def _escalate_likeness(owner: str, pid: str, gen_id: str, index: int, claim: str) -> None:
+    """likeness 거절 → 다음 단계로 같은 칸을 queued(0→1, 1→2). 2단계 모델이 없거나 이미 마지막이면 시도한 단계를 적고 실패."""
+    kling = _kling_cut_model()
+    box: dict = {}
+
+    def mutator(data: dict) -> None:
+        g = data.get("gen") or {}
+        if not _claim_ok_variant(g, index, "real", claim):
+            raise _Discard()
+        state = _previz_cells(g)[index]["real"]
+        step = _fallback_step(state)
+        tried = list((state.get("fallback") or {}).get("tried") or []) + [REAL_FALLBACK_TRIED.get(step, "")]
+        nxt = 1 if step == 0 else (2 if step == 1 and kling else 0)
+        state.pop("pendingCharge", None)
+        box.update(step=step, next=nxt, tried=tried)
+        if not nxt:
+            return
+        model = kling[0] if nxt == 2 else str(g.get("videoModel") or "")
+        state.update(status="queued", invocationArn="", outputKey="", error="", claim="", claimedAt="")
+        state["fallback"] = {"step": nxt, "reason": "likeness", "model": model, "tried": tried}
+        if isinstance(g.get("realRun"), dict):
+            g["realRun"]["realFallback"] = {"step": nxt, "reason": "likeness", "model": model}
+
+    try:
+        _commit(owner, pid, mutator)
+    except _Discard:
+        return
+    log.info("vnew.gen.real_fallback pid=%s take=%d from=%d to=%d", pid, index, box.get("step", 0), box.get("next", 0))
+    if not box.get("next"):
+        message = REAL_FALLBACK_FAIL.format(steps=" → ".join(box.get("tried") or []))
+        if box.get("step") == 1 and not kling:
+            message += REAL_FALLBACK_NO_KLING
+        _fail_variant(owner, pid, gen_id, index, "real", claim, message, kind="likeness")
+
+
+def _do_submit_real_cuts(owner: str, pid: str, gen_id: str, index: int, claim: str) -> None:
+    """2단계: 테이크를 컷마다 시작 그림(프리비즈 첫 프레임 + 실사 정면 → Seedream) 1장 + Kling image-to-video 1번으로 낸다.
+
+    시작 그림은 메모리로만 쓴다(저장하지 않는다). Kling 프롬프트는 _segment_prompt(컷 1개, 첫 프레임에서 이어 가기), 길이는
+    _kling_duration. 준비~제출은 _PREPARE_SEM 안. 원장은 시작 그림·Kling 컷마다 제출 성공 때. 칸 fallback.cuts 에 컷마다
+    {cutId, seconds, duration, status, invocationArn, outputPrefix, outputKey, error}.
+    """
+    records: list[dict] = []
+    stage = "start"
+    _PREPARE_SEM.acquire()
+    try:
+        plan, _ = plan_mod.load_plan(owner, pid)
+        gen = plan.get("gen") or {}
+        if not _claim_ok_variant(gen, index, "real", claim):
+            return
+        model = _kling_cut_model()
+        if not model:
+            raise VpocError("vnew.generate", "KlingMissing", "컷 단위 Kling 모델이 fal 등록표에 없습니다.", 409)
+        endpoint, caps = model
+        take = _previz_cells(gen)[index]
+        take_id = str(take.get("id") or index)
+        attempt = int((take.get("real") or {}).get("attempt") or 1)
+        cuts = _take_cut_units(plan, take)
+        if not cuts:
+            raise VpocError("vnew.generate", "NoCuts", "이 테이크의 컷을 찾지 못했습니다.", 409)
+        char_by_id = _char_by_id(owner, plan)
+        overrides = _real_cast_overrides(plan)
+        model_id = vpoc_settings.FAL_ID_PREFIX + endpoint
+        prompt_max = vpoc_settings.fal_prompt_max(endpoint, caps.get("promptMaxLength") or vpoc_fal.DEFAULT_PROMPT_MAX)
+        for cut in cuts:
+            cut_id = str(cut.get("cutId") or "")
+            stage = "frame"
+            frame = _cut_first_frame(_fetch_bytes(str(cut.get("recordingKey") or ""), bucket=vpoc_settings.VIDEO_BUCKET),
+                                     float(cut.get("startSec") or 0))
+            stage = "still"
+            refs = [_fit_ref(frame)] if frame else []
+            people: list[tuple[str, str, int]] = []
+            for actor in _segment_actors(plan, cut):
+                name = str(actor.get("name") or "")
+                pick = overrides.get(name)
+                char = _cast_entry(owner, pick["charId"], name) if pick else char_by_id.get(str(actor.get("charId") or ""))
+                keys = _fallback_front_keys(char, pick["look"] if pick else "real") if char else []
+                photo = _load_jpeg(keys[0]) if keys else None
+                if photo is not None and len(refs) < _SEEDREAM_MAX_REFS:
+                    refs.append(_fit_ref(photo))
+                    people.append((str(actor.get("colorName") or "grey"), name or "a person", len(refs)))
+            still = _seedream(_cut_still_prompt(plan, cut, people, frame is not None), refs, size=vpoc_seedream.SIZE)
+            del frame, refs
+            _charge_cut_still(owner, pid, gen_id, f"vnew-gen-{pid}-{gen_id}-{take_id}-{cut_id}-still-{attempt}-{secrets.token_hex(3)}")
+            stage = "submit"
+            duration = _kling_duration(caps, float(cut.get("seconds") or 0))
+            body = vpoc_fal.build_payload({**caps, "durations": [duration]},
+                                          prompt=_segment_prompt(plan, {"cutIds": [cut_id]}, first_segment=True, model=model_id),
+                                          keyframe_jpeg_b64=base64.b64encode(still).decode("ascii"), duration_s=duration,
+                                          prompt_max=prompt_max)
+            del still
+            result = _previz_request("POST", f"{vpoc_settings.FAL_QUEUE_URL}/{endpoint}", body)
+            del body
+            request_id = str(result.get("request_id") or "")
+            if not request_id:
+                raise VpocError("vnew.generate", "NoRequestId", f"요청 ID 가 없습니다: {str(result)[:300]}", 502)
+            _charge_kling_cut(owner, pid, gen_id, "fal-kcut-" + request_id, endpoint, duration)
+            records.append({"cutId": cut_id, "seconds": round(float(cut.get("seconds") or 0), 3), "duration": duration,
+                            "status": "submitted", "invocationArn": f"{vpoc_fal.ARN_PREFIX}{endpoint}/{request_id}",
+                            "outputPrefix": _seg_output_prefix(owner, pid, gen_id, f"{take_id}-real-{cut_id}", attempt),
+                            "outputKey": "", "error": ""})
+            log.info("vnew.gen.real_cut_submit pid=%s take=%s cut=%s endpoint=%s duration=%d refs=%d", pid, take_id, cut_id,
+                     endpoint, duration, len(people))
+    except _Discard:
+        return
+    except Exception as exc:  # noqa: BLE001
+        log.warning("vnew.gen.real_cut_submit_failed pid=%s take=%s stage=%s err=%s", pid, index, stage, _msg(exc))
+        _fail_variant(owner, pid, gen_id, index, "real", claim, "컷 단위 Kling 으로 만들지 못했습니다: " + _msg(exc))
+        return
+    finally:
+        _PREPARE_SEM.release()
+
+    def mutator(data: dict) -> None:
+        g = data.get("gen") or {}
+        if not _claim_ok_variant(g, index, "real", claim):
+            raise _Discard()
+        state = _previz_cells(g)[index]["real"]
+        state.update(status="submitted", invocationArn="", outputKey="", error="")
+        state["fallback"] = {**(state.get("fallback") or {}), "cuts": records, "total": len(records)}
+
+    try:
+        _commit(owner, pid, mutator)
+    except _Discard:
+        return
+
+
+def _do_poll_real_cuts(owner: str, pid: str, gen_id: str, index: int, claim: str) -> None:
+    """2단계 칸 조회: 제출된 컷을 모두 조회해 저장하고, 하나라도 실패면 칸 실패, 모두 완료면 이어 붙인다(_merge_real_cuts)."""
+    plan, _ = plan_mod.load_plan(owner, pid)
+    gen = plan.get("gen") or {}
+    if not _claim_ok_variant(gen, index, "real", claim):
+        return
+    state = _previz_cells(gen)[index]["real"]
+    cuts = list((state.get("fallback") or {}).get("cuts") or [])
+    updates: dict[int, dict] = {}
+    for number, cut in enumerate(cuts):
+        if cut.get("status") != "submitted":
+            continue
+        arn, prefix = str(cut.get("invocationArn") or ""), str(cut.get("outputPrefix") or "")
+        result = vpoc_fal.poll(arn, prefix)
+        status = str(result.get("status") or "")
+        if status == "Completed":
+            updates[number] = {"status": "completed", "outputKey": _find_output_key(prefix, arn)}
+        elif status != "InProgress":
+            updates[number] = {"status": "failed", "error": str(result.get("failureMessage") or "영상 생성 실패")[:300]}
+    if updates:
+        def mutator(data: dict) -> None:
+            g = data.get("gen") or {}
+            if not _claim_ok_variant(g, index, "real", claim):
+                raise _Discard()
+            stored = (_previz_cells(g)[index]["real"].get("fallback") or {}).get("cuts") or []
+            for number, change in updates.items():
+                if number < len(stored):
+                    stored[number].update(change)
+
+        _commit(owner, pid, mutator)
+        for number, change in updates.items():
+            cuts[number] = {**cuts[number], **change}
+    failed = [c for c in cuts if c.get("status") == "failed"]
+    if failed:
+        error = str(failed[0].get("error") or "")
+        if _likeness_rejected(error):
+            tried = list((state.get("fallback") or {}).get("tried") or []) + [REAL_FALLBACK_TRIED[2]]
+            message, kind = REAL_FALLBACK_FAIL.format(steps=" → ".join(tried)), "likeness"
+        else:
+            message, kind = f"컷 단위 Kling 의 컷 {failed[0].get('cutId')} 이 실패했습니다: {error}", _audio_kind(error)
+        _fail_variant(owner, pid, gen_id, index, "real", claim, message, kind=kind)
+        return
+    if cuts and all(c.get("status") == "completed" for c in cuts):
+        _merge_real_cuts(owner, pid, gen_id, index, claim, cuts)
+
+
+def _merge_real_cuts(owner: str, pid: str, gen_id: str, index: int, claim: str, cuts: list[dict]) -> None:
+    """컷 결과를 컷 길이로 잘라(못 자르면 그대로) 이어 붙여 그 테이크 실사 결과(outputKey)로 둔다. 컷 결과 파일은 그대로 남는다."""
+    plan, _ = plan_mod.load_plan(owner, pid)
+    take = _previz_cells(plan.get("gen") or {})[index]
+    clips = []
+    for cut in cuts:
+        clip = _fetch_bytes(str(cut.get("outputKey") or ""), bucket=vpoc_settings.VIDEO_BUCKET)
+        seconds = float(cut.get("seconds") or 0)
+        if seconds > 0 and float(cut.get("duration") or 0) > seconds + 0.05:
+            try:
+                clip = _trim_clip(clip, seconds)
+            except Exception as exc:  # noqa: BLE001 — 자르지 못하면 Kling 길이 그대로 잇는다(⑦ 재료는 trimTo 로 맞춘다).
+                log.warning("vnew.gen.real_cut_trim_failed pid=%s cut=%s err=%s", pid, cut.get("cutId"), type(exc).__name__)
+        clips.append(clip)
+    merged = clips[0] if len(clips) == 1 else _concat(clips)
+    attempt = int((take.get("real") or {}).get("attempt") or 1)
+    key = f"{_seg_output_prefix(owner, pid, gen_id, str(take.get('id') or index) + '-real-cuts', attempt).rstrip('/')}/merged.mp4"
+    STORE.put_bytes(key, merged, "video/mp4", bucket=vpoc_settings.VIDEO_BUCKET)
+    del clips, merged
+
+    def mutator(data: dict) -> None:
+        g = data.get("gen") or {}
+        if not _claim_ok_variant(g, index, "real", claim):
+            raise _Discard()
+        state = _previz_cells(g)[index]["real"]
+        state.update(status="completed", outputKey=key, error="", claim="", claimedAt="")
+
+    _commit(owner, pid, mutator)
+    log.info("vnew.gen.real_cut_merged pid=%s take=%s cuts=%d", pid, take.get("id"), len(cuts))
+
+
+def real_fallback_max(plan: dict, gen: dict) -> dict | None:
+    """확인창 안내: 거절되면 컷 단위 Kling 으로 바뀔 때의 최대 금액. 테이크마다 max(Seedance 테이크, Σ컷(시작 그림 + Kling 길이 × 단가)).
+
+    거절은 0 이므로 한 테이크의 실제 금액은 둘 중 하나다. 2단계를 쓸 수 없으면(끔·모델 없음·통 테이크 아님) None.
+    """
+    gen = gen if isinstance(gen, dict) else {}
+    if not vnew_settings.VNEW_TAKE_REAL_LIKENESS_LADDER or gen.get("mode") != "previz-take":
+        return None
+    model = _kling_cut_model()
+    if not model:
+        return None
+    endpoint, caps = model
+    per_second = _previz_model_unit_price(endpoint)
+    still = float(vpoc_seedream.unit_usd())
+    seedance = str(gen.get("videoModel") or vnew_settings.VNEW_PREVIZ_EDIT_MODEL)
+    resolution = str(gen.get("resolution") or vnew_settings.VNEW_TAKE_RESOLUTION)
+    total = 0.0
+    for unit in gen.get("units") or []:
+        cut_usd = sum(still + per_second * _kling_duration(caps, float(c.get("seconds") or 0)) for c in _take_cut_units(plan, unit))
+        total += max(_take_usd(seedance, float(unit.get("seconds") or 0), resolution), cut_usd)
+    return {"usd": round(total, 2), "model": endpoint}
 
 
 def _maybe_finalize_previz(owner: str, pid: str, gen_id: str) -> None:
@@ -6308,6 +6710,12 @@ def cancel_gen(owner: str, pid: str) -> dict:
             state = seg.get(variant) or {}
             if state.get("status") == "submitted" and state.get("invocationArn"):
                 remote[state["invocationArn"]] = _cancel_video(state["invocationArn"])
+            if state.get("status") == "submitted" and variant == "real":
+                # 작업 130: 컷 단위 Kling 컷도 취소하고, 미뤄 둔 Seedance 금액은 남긴다(이미 생성 중일 수 있다).
+                for cut in (state.get("fallback") or {}).get("cuts") or []:
+                    if cut.get("status") == "submitted" and cut.get("invocationArn"):
+                        remote[cut["invocationArn"]] = _cancel_video(cut["invocationArn"])
+                _settle_take_charge(owner, pid, str(gen.get("genId") or ""), state)
 
     def mutator(data: dict) -> None:
         g = data.get("gen") or {}
@@ -6379,6 +6787,8 @@ def retry_segment(owner: str, pid: str, seg_id: str, variant: str = "real", audi
                 st["invocationArn"] = ""
                 st["outputKey"] = ""
                 st.pop("failureKind", None)
+                st.pop("fallback", None)  # 작업 130: 사용자 다시 시도는 기본 Seedance 부터
+                st.pop("pendingCharge", None)
                 if isinstance(audio, bool):
                     st["audio"] = audio
                 break
@@ -6543,7 +6953,7 @@ def gen_view(owner: str, pid: str, plan: dict) -> dict | None:
 
     # 컷 단위(units): 프리비즈 미리보기 URL = 그 컷이 속한 녹화 구간 mp4. promptEn(보낸 지시서)·바이트 포함.
     def _variant_out(state: dict) -> dict:
-        return {
+        out = {
             "status": state.get("status"),
             "attempt": state.get("attempt"),
             "error": state.get("error") or "",
@@ -6556,6 +6966,14 @@ def gen_view(owner: str, pid: str, plan: dict) -> dict | None:
             "failureKind": state.get("failureKind") or "",
             "audio": state.get("audio") if isinstance(state.get("audio"), bool) else None,
         }
+        fallback = state.get("fallback")
+        if isinstance(fallback, dict) and fallback.get("step"):
+            # 작업 130: likeness 단계(⑤ 실사 행 문구). 컷 단위는 끝난 컷 수 / 전체 컷 수. 없으면 키 없음(옛 보기와 같다).
+            cuts = [c for c in fallback.get("cuts") or [] if isinstance(c, dict)]
+            out["fallback"] = {"step": _fallback_step(state), "reason": str(fallback.get("reason") or ""),
+                               "model": str(fallback.get("model") or ""), "total": len(cuts),
+                               "done": sum(1 for c in cuts if c.get("status") == "completed")}
+        return out
 
     # 콘티 cut.no(콘티 컷 번호) 를 cutId 로 찾는다(행 머리 "컷 {no}" 표시용).
     cut_no_by_id = {str(c.get("id")): c.get("no") for c in (plan.get("conti") or {}).get("cuts") or []}
@@ -6678,6 +7096,10 @@ def gen_view(owner: str, pid: str, plan: dict) -> dict | None:
         if isinstance(auto_real, dict) else None,
     }
     # ⑦ 편집(지시서 110): 켜져 있으면 끝에 요약 {available, variants}(S3 를 읽지 않는다). 꺼져 있으면 키가 없다(⑦ 단계 없음).
+    if is_take:
+        fallback_max = real_fallback_max(plan, gen)
+        if fallback_max:
+            view["realFallbackMax"] = fallback_max  # 작업 130 보완 1: 확인창 "최대 $X" 안내(2단계를 쓸 수 없으면 키 없음)
     if vnew_settings.VNEW_EDIT:
         from . import edit as vnew_edit  # noqa: PLC0415 — edit 이 generate 를 import 한다(순환 피함).
 
