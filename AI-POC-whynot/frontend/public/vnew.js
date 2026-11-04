@@ -4964,6 +4964,63 @@
     return applied.concat([key]);
   }
 
+  /* 작업 127: 인물 표현 기호(누구에게 붙일지 고른다). 배경 기호는 대상이 없다(fx.py PERSON_FX 와 같은 글자). */
+  var FX_PERSON_KEYS = ["tear streams", "sweat drop", "blush lines"];
+  var FX_WHO_MAX = 4;
+
+  /* 컷 인물 이름(characters[].name, 공백 정리, 중복 없이). 대상 칩 후보다. */
+  function fxCutNames(cut) {
+    var chars = cut && Array.isArray(cut.characters) ? cut.characters : [];
+    var out = [];
+    chars.forEach(function (c) {
+      var name = c && typeof c.name === "string" ? c.name.replace(/\s+/g, " ").trim() : "";
+      if (name && out.indexOf(name) < 0) out.push(name);
+    });
+    return out;
+  }
+
+  function fxWhoOf(cut) {
+    var who = (cut || {}).fxWho;
+    return who && typeof who === "object" && !Array.isArray(who) ? who : {};
+  }
+
+  /* 고른 인물 표현 기호마다 대상 칩 상태: [{key, label, names: [{name, on}]}]. 컷 인물이 없으면 []. */
+  function fxWhoStates(cut) {
+    var c = cut || {};
+    var names = fxCutNames(c);
+    if (!names.length) return [];
+    var who = fxWhoOf(c);
+    return fxKeys(c.fx, FX_APPLY_MAX).filter(function (key) { return FX_PERSON_KEYS.indexOf(key) >= 0; }).map(function (key) {
+      var picked = Array.isArray(who[key]) ? who[key] : [];
+      return {
+        key: key,
+        label: FX_LABEL_KO[key],
+        names: names.map(function (name) { return { name: name, on: picked.indexOf(name) >= 0 }; })
+      };
+    });
+  }
+
+  /* 대상 칩을 누른 뒤 fxWho(새 객체). 그 컷 인물·인물 표현 기호만 남기고, 있으면 빼고 없으면 넣는다(최대 4명).
+     빈 기호는 키째 뺀다(서버 fx_who 와 같은 규칙). */
+  function fxWhoToggled(cut, key, name) {
+    var names = fxCutNames(cut);
+    var who = fxWhoOf(cut);
+    var out = {};
+    Object.keys(who).forEach(function (k) {
+      if (FX_PERSON_KEYS.indexOf(k) < 0 || !Array.isArray(who[k])) return;
+      var list = who[k].filter(function (n, i) { return names.indexOf(n) >= 0 && who[k].indexOf(n) === i; });
+      if (list.length) out[k] = list.slice(0, FX_WHO_MAX);
+    });
+    if (FX_PERSON_KEYS.indexOf(key) < 0 || names.indexOf(name) < 0) return out;
+    var cur = (out[key] || []).slice();
+    var at = cur.indexOf(name);
+    if (at >= 0) cur.splice(at, 1);
+    else if (cur.length < FX_WHO_MAX) cur.push(name);
+    if (cur.length) out[key] = cur;
+    else delete out[key];
+    return out;
+  }
+
   /* 번역 안내를 보일지: 분위기(한국어)는 있는데 영상용 영어가 비었다(고친 뒤 저장했거나 아직 옮기지 않음). */
   function fxNeedsTranslation(cut) {
     var c = cut || {};
@@ -5013,8 +5070,33 @@
   function fxRow(cut) {
     var wrap = el("div", "vnew-fx-row");
     var chips = el("div", "vnew-fx-chips");
+    // 작업 127: 고른 인물 표현 기호의 대상 인물 칩(화면에서는 CSS order 로 칩 줄 바로 아래, DOM 은 분위기 칸 뒤).
+    var whoRow = el("div", "vnew-fx-who");
+
+    function drawWho() {
+      clear(whoRow);
+      var groups = fxWhoStates(cut);
+      whoRow.style.display = groups.length ? "" : "none";
+      groups.forEach(function (group) {
+        var line = el("div", "vnew-fx-who-group");
+        line.appendChild(el("span", "vnew-field-label vnew-fx-label", group.label + " 대상"));
+        group.names.forEach(function (item) {
+          var btn = el("button", "vnew-fx-chip vnew-fx-who-chip" + (item.on ? " is-on" : ""), item.name);
+          btn.type = "button";
+          btn.setAttribute("aria-pressed", item.on ? "true" : "false");
+          btn.title = "이 기호를 " + item.name + "에게만 붙입니다 (아무도 고르지 않으면 대상 없이)";
+          btn.addEventListener("click", function () {
+            cut.fxWho = fxWhoToggled(cut, group.key, item.name);
+            drawWho();
+          });
+          line.appendChild(btn);
+        });
+        whoRow.appendChild(line);
+      });
+    }
 
     function drawChips() {
+      drawWho();
       clear(chips);
       chips.appendChild(el("span", "vnew-field-label vnew-fx-label", "기호"));
       var states = fxChipStates(cut);
@@ -5073,6 +5155,7 @@
     moodWrap.appendChild(hint);
     updateHint();
     wrap.appendChild(moodWrap);
+    wrap.appendChild(whoRow);
     return wrap;
   }
 

@@ -5727,8 +5727,9 @@ def check_vnew_generate() -> None:
         #   - CONTINUITY 에 "Do not add any action"·"identical to the reference"·"skin texture".
         for pay in reals:
             prompt = str(pay.get("prompt") or "")
-            first_line = prompt.split("\n", 1)[0]
-            if not first_line.startswith("ASSETS:"):
+            # 작업 127: 켬이면 맨 앞에 고정부(FIXED:) 1줄이 있고 그다음 줄이 ASSETS 다.
+            first_line = _strip_fixed(prompt).split("\n", 1)[0]
+            if not first_line.startswith("ASSETS:") or not prompt.startswith("FIXED: "):
                 bad.append(f"(np-a) 실사 프롬프트 첫 줄이 ASSETS 가 아닙니다: {first_line[:80]}")
             if "@Video1 = rough 3D previz" not in prompt:
                 bad.append("(np-a) ASSETS 줄에 @Video1 자료 설명이 없습니다")
@@ -5743,8 +5744,8 @@ def check_vnew_generate() -> None:
                 bad.append(f"(np-a) 실사 프롬프트가 2500바이트를 넘습니다: {len(prompt.encode('utf-8'))}")
         for pay in webs:
             prompt = str(pay.get("prompt") or "")
-            first_line = prompt.split("\n", 1)[0]
-            if not first_line.startswith("ASSETS:"):
+            first_line = _strip_fixed(prompt).split("\n", 1)[0]
+            if not first_line.startswith("ASSETS:") or not prompt.startswith("FIXED: "):
                 bad.append(f"(np-a) 웹툰 프롬프트 첫 줄이 ASSETS 가 아닙니다: {first_line[:80]}")
             if "@Image" not in first_line:
                 bad.append(f"(np-a) 웹툰 ASSETS 줄에 @Image 참고가 없습니다: {first_line[:120]}")
@@ -5769,7 +5770,7 @@ def check_vnew_generate() -> None:
         }
         cast_demo = [{"colorName": "blue", "name": "Kim", "elementRef": "@Element1", "appearance": "a middle-aged man in a dark suit"}]
         long_real = genmod._cut_prompt(long_plan, {"cutId": "c1"}, "real", cast=cast_demo, has_image_ref=False)
-        if not long_real.startswith("ASSETS:"):
+        if not _strip_fixed(long_real).startswith("ASSETS:"):
             bad.append("(np-a2) 긴 입력 실사 프롬프트 첫 줄이 ASSETS 가 아닙니다")
         for need in ("@Element1 =", "Do not add any action", "identical to the reference", "skin texture"):
             if need not in long_real:
@@ -8825,9 +8826,12 @@ def check_vnew_shot_brief() -> None:
         prompt_i = genmod._cut_prompt(plan_i, {"cutId": "c1"}, "real", cast=cast, has_image_ref=False)
         if len(prompt_i.encode("utf-8")) > 2450:  # 069 v2 MOTION/HARMONY short 고정 블록으로 기본 길이 증가 — 한도(2500) 안
             bad.append(f"(sb-i) 전제: 짧은 지시서 프롬프트가 2450바이트를 넘습니다: {len(prompt_i.encode('utf-8'))}")
-        for must in ("\nACTION:", "\nMOOD:", "\nSETTING:"):
+        # 작업 127로 바뀐 기대값: MOOD 는 컷 moodEn 만이라 컷 분위기가 없는 이 입력에는 MOOD 줄이 없다(지시서 moodEn 안 씀).
+        for must in ("\nACTION:", "\nSETTING:"):
             if must not in ("\n" + prompt_i):
                 bad.append(f"(sb-i) 짧은 지시서인데 섹션 {must.strip()} 이 지워졌습니다")
+        if "\nMOOD:" in ("\n" + prompt_i):
+            bad.append("(sb-i) 컷 분위기가 없는데 MOOD 줄(지시서 분위기)이 들어갔습니다")
         # 069 v2: MOTION(short)·HARMONY(short) 고정 블록이 짧은 지시서에서도 들어 있어야 한다.
         if "\nMOTION:" not in ("\n" + prompt_i):
             bad.append("(sb-i) 짧은 지시서인데 MOTION(short) 섹션이 없습니다")
@@ -8836,8 +8840,8 @@ def check_vnew_shot_brief() -> None:
         # 본문이 그대로 들어갔는지(줄이기가 전혀 일어나지 않았다).
         if "He leans forward and narrows his eyes." not in prompt_i:
             bad.append("(sb-i) 짧은 지시서인데 ACTION 본문이 줄여졌습니다")
-        if "tense and controlled" not in prompt_i:
-            bad.append("(sb-i) 짧은 지시서인데 MOOD 본문이 줄여졌습니다")
+        if "tense and controlled" in prompt_i:
+            bad.append("(sb-i) 지시서 분위기(장면 전체)가 MOOD 에 들어갔습니다")
 
         # ---------------- (sb-j) 긴 지시서 → ≤2500, ACTION 전체 유지, 장소 요약·배경 먼저 줆, CAST·CONTINUITY 유지 ----------------
         plan_j = _plan_cuts(1, 6)
@@ -10258,8 +10262,8 @@ def check_vnew_take() -> None:
 
             # (tk-d) 프롬프트.
             prompt = str(body.get("prompt") or "")
-            if not prompt.startswith("STYLE:"):
-                bad.append(f"(tk-d) 프롬프트가 STYLE 로 시작하지 않습니다: {prompt[:40]}")
+            if not _strip_fixed(prompt).startswith("STYLE:") or not prompt.startswith("FIXED: "):
+                bad.append(f"(tk-d) 프롬프트가 FIXED·STYLE 로 시작하지 않습니다: {prompt[:40]}")
             if "AVOID:" not in prompt:
                 bad.append("(tk-d) 프롬프트에 AVOID 섹션이 없습니다")
             style_part = prompt.split("TIMELINE", 1)[0]
@@ -10443,7 +10447,7 @@ def check_vnew_take_prompt() -> None:
             bad.append(f"(tp-a) 프롬프트에 빠진 컷 타임스탬프가 있습니다: {missing_a}")
         if len(prompt_a.encode("utf-8")) > 4000:
             bad.append(f"(tp-a) 프롬프트가 4,000바이트를 넘습니다: {len(prompt_a.encode('utf-8'))}")
-        if not prompt_a.startswith("STYLE:"):
+        if not _strip_fixed(prompt_a).startswith("STYLE:"):
             bad.append(f"(tp-a) 프롬프트가 STYLE 로 시작하지 않습니다: {prompt_a[:30]}")
         if "TIMELINE" not in prompt_a or "RULES:" not in prompt_a:
             bad.append("(tp-a) TIMELINE·RULES 섹션이 없습니다")
@@ -10464,7 +10468,7 @@ def check_vnew_take_prompt() -> None:
         if len(prompt_c.encode("utf-8")) > 4000:
             bad.append(f"(tp-c) 12컷 프롬프트가 4,000바이트를 넘습니다: {len(prompt_c.encode('utf-8'))}")
         # STYLE·RULES 는 유지.
-        if not prompt_c.startswith("STYLE:"):
+        if not _strip_fixed(prompt_c).startswith("STYLE:"):
             bad.append("(tp-c) 12컷 프롬프트가 STYLE 로 시작하지 않습니다")
 
     except Exception as exc:  # noqa: BLE001
@@ -11625,9 +11629,9 @@ def check_vnew_take_harmony_motion() -> None:
             bad.append("(hm-c) MOTION(short) 핵심 문구(do NOT copy it)가 없습니다")
         if "no drift to sunset" not in prompt_cut:
             bad.append("(hm-c) HARMONY(short) 에 'no drift to sunset' 가 없습니다")
-        # 짧은 지시서에서 MOOD·SETTING 유지(지워지지 않는다).
-        if "\nMOOD:" not in prompt_cut:
-            bad.append("(hm-c) 짧은 지시서인데 MOOD 가 지워졌습니다")
+        # 짧은 지시서에서 SETTING 유지(지워지지 않는다). 작업 127로 바뀐 기대값: 컷 분위기가 없으면 MOOD 줄이 없다(지시서 moodEn 안 씀).
+        if "\nMOOD:" in prompt_cut:
+            bad.append("(hm-c) 컷 분위기가 없는데 MOOD 줄(지시서 분위기)이 들어갔습니다")
         if "\nSETTING:" not in prompt_cut:
             bad.append("(hm-c) 짧은 지시서인데 SETTING 이 지워졌습니다")
         # 순서: ACTION → MOTION → MOOD → SETTING → HARMONY → DIALOGUE → CONTINUITY.
@@ -17234,6 +17238,12 @@ def _previz_test3_scene() -> dict:
     }
 
 
+def _strip_fixed(text: str) -> str:
+    """작업 127: 프롬프트 맨 앞 고정부 1줄("FIXED: …")을 뗀 나머지. 고정부가 없으면 그대로(옛 검사가 둘째 줄부터 본다)."""
+    text = str(text or "")
+    return text.split("\n", 1)[1] if text.startswith("FIXED: ") and "\n" in text else text
+
+
 @contextlib.contextmanager
 def _pin_vnew(**values):
     """`vnew.settings` 속성을 잠시 바꾸고 되돌린다. 예: with _pin_vnew(VNEW_PREVIZ_COLLISION=False): …"""
@@ -19682,6 +19692,18 @@ def check_vnew_fx() -> None:
             planmod.update_conti(owner, pid_e, {"cuts": changed})
             if load(pid_e)["previz"].get("approved") is not False:
                 bad.append("(fx-e) 기호 밖 필드(대사)가 바뀐 저장이 승인을 풀지 않았습니다")
+            # 작업 127: ③ 대상 인물 칩 저장(fxWho) — 기호처럼 승인을 유지하고 revision +1, 모르는 이름·배경 기호는 버린다.
+            pid_w = "prj_fx_who"
+            two = [{"name": "민지", "positionEn": "left", "actionEn": "cries"}, {"name": "준호", "positionEn": "right", "actionEn": "stares"}]
+            seed_plan(pid_w, cuts=[cut("w1", 1, [0], characters=two, fx=[tear])], approved=True, revision=7)
+            send_w = _copy.deepcopy(load(pid_w)["conti"]["cuts"])
+            send_w[0]["fxWho"] = {"Tear  Streams": ["민지", "유령", "민지"], "speed lines": ["준호"], "blush lines": "준호"}
+            planmod.update_conti(owner, pid_w, {"cuts": send_w})
+            saved_w = load(pid_w)
+            if cut_of(saved_w, "w1").get("fxWho") != {tear: ["민지"], blush: ["준호"]} \
+                    or saved_w["previz"].get("approved") is not True or saved_w.get("revision") != 8:
+                bad.append(f"(fx-e) 대상 인물(fxWho) 저장 정리·승인 유지가 다릅니다: {cut_of(saved_w, 'w1').get('fxWho')} "
+                           f"{saved_w['previz'].get('approved')} {saved_w.get('revision')}")
             # 끔: 옛 알고리즘(no·seconds·compute_segments)으로 만든 기대값과 같고, 기호만 바뀌어도 늘 해제한다.
             pid_e2 = "prj_fx_e2"
             seed_plan(pid_e2, cuts=base_e, approved=True, revision=1)
@@ -19815,7 +19837,8 @@ def check_vnew_fx() -> None:
                 bad.append(f"(fx-f) 타일 범위 밖·음수·bool panels 를 버리지 않았습니다: {numbers_x}")
             # 모델 결과 모양(Fable 계열 JSON 문자열 중첩)·대상 없음·이름 상한
             items_x = planmod._fx_items({"cuts": ['{"id": "a", "fx": "[\\"blush lines\\"]", "moodKo": "m"}', 3, "{bad json"]})  # noqa: SLF001
-            if items_x != [{"id": "a", "drawnFx": None, "fxSuggest": None, "fx": [blush], "moodKo": "m", "moodEn": None}] \
+            # 작업 127: fxWho 키가 더해졌다(값 정리는 merge_fill 의 fx_who 가 한다).
+            if items_x != [{"id": "a", "drawnFx": None, "fxSuggest": None, "fx": [blush], "moodKo": "m", "moodEn": None, "fxWho": None}] \
                     or planmod._fx_items({"cuts": "not a list"}) != [] or planmod._fx_items(None) != []:  # noqa: SLF001
                 bad.append(f"(fx-f) 모델 결과 정리(_fx_items)가 다릅니다: {items_x}")
             llm_before = len(llm_calls)
@@ -20332,10 +20355,12 @@ _FX_TAKE_MUST = {
 _LR_TAKE_SHA_ON = (
     # 지시서 118a: take6(기호 없음)은 컷마다 대사 2줄이라 모든 줄 + lineDrop5 로 다시 쟀다
     # (옛 값 3901B 911839e77759d742f04a7899e0d04de8362bcaefc8c041f3c664e276249040d7). 나머지는 둘째 줄이 다 빠져 그대로다.
-    ("take6", 6, 18, 3963, "6d498e39642c16ca63e6321070bfa892daca4f5247d61ba296435281085ecbc6"),
-    ("take6normal", 6, 18, 3874, "a63f170889e044b685f94ef7c6304474139de13f96531d2f2a537e667150ee58"),
-    ("take6worst", 6, 18, 3875, "aa4bc25cb3bfe611c79fe7d701a463616eeb573d93607be243e1890cbe2b6bdc"),
-    ("take12worst", 12, 30, 3627, "024819e5ca722ee86653519ca546a5d70885ce1de0e38139d144c01ee015c62e"),
+    # 작업 127: 맨 앞 고정부(FIXED: 화풍·배경·overall tone)가 붙고 그 몫을 예산에서 미리 빼 다시 쟀다. 옛 값(126까지):
+    # take6 3963B 6d498e39…, take6normal 3874B a63f1708…, take6worst 3875B aa4bc25c…, take12worst 3627B 024819e5….
+    ("take6", 6, 18, 3999, "be2830b8ba996b14b599a49dc1000bd84092ac503320a79ae4d72ca91dd6496c"),
+    ("take6normal", 6, 18, 3972, "e1d41770a1aa1fae6b1b83410525987ed0a927cf4bcfe58cb96dd1f4865af651"),
+    ("take6worst", 6, 18, 3973, "f0cd64dea1f7d543a9022c50f0f2479e74ab2b0b98cf1f0f4f98c0dfab5569f0"),
+    ("take12worst", 12, 30, 3725, "f80462b13e9991e28fc30d7b1d932895b4f9d0617530d5691f7d76e0e7fb820a"),
 )
 
 
@@ -20367,9 +20392,10 @@ def check_vnew_fx_prompt() -> None:
     report: list[str] = []
     blush, sweat, speed, tear, sparkle = "blush lines", "sweat drop", "speed lines", "tear streams", "pink sparkle background"
     new_steps = ("mood40", "moodDrop", "fxShort")
-    take_heads = ("STYLE:", "ASSETS:", "TIMELINE", "MOTION:", "HARMONY:", "RULES:", "AVOID:")
-    cut_heads = ("ASSETS:", "@Video1 is", "CAST —", "SHOT:", "BLOCKING:", "ACTION:", "FX:", "EXPRESSION:", "MOTION:", "MOOD:",
-                 "SETTING:", "HARMONY:", "DIALOGUE:", "CONTINUITY:")
+    # 작업 127: 맨 앞 고정부(FIXED:)와 컷 단위 "Only … appear." 줄이 더해졌다.
+    take_heads = ("FIXED:", "STYLE:", "ASSETS:", "TIMELINE", "MOTION:", "HARMONY:", "RULES:", "AVOID:")
+    cut_heads = ("FIXED:", "ASSETS:", "@Video1 is", "CAST —", "Only ", "SHOT:", "BLOCKING:", "ACTION:", "FX:", "EXPRESSION:", "MOTION:",
+                 "MOOD:", "SETTING:", "HARMONY:", "DIALOGUE:", "CONTINUITY:")
 
     def mark(*ids: str) -> None:
         seen_ids.update(ids)
@@ -20533,9 +20559,13 @@ def check_vnew_fx_prompt() -> None:
                                                     body_of(prompt))
                 names = {"full": "원문", "short": "짧은 형", "none": "없음", "other": "기타"}
                 report.append(f"{label} {nbytes(prompt)}B [{','.join(steps)}] MOTION {names[mo]}·HARMONY {names[ha]}·묘사 규칙 {names[body]}")
-            capped, stamps_c, steps_c = take_run(6, 18, worst, caps={"promptMaxLength": 1800})
-            if nbytes(capped) > 1800 or any(stamp not in capped for stamp in stamps_c):
-                bad.append(f"(fx-h) 스키마 1800 caps 에서 {nbytes(capped)}B 이거나 타임스탬프가 빠졌습니다")
+            # 작업 127: 고정부(FIXED) 몫은 예산에서 미리 빠진다 → 나머지가 지금과 같은 1800 이 되게 caps 에 고정부 바이트를 더한다.
+            plan_fixed, take_fixed = _fx_take_fixture(6, 18, worst)
+            fixed_bytes = nbytes(genmod._fixed_head(plan_fixed, "")) + 1
+            capped, stamps_c, steps_c = take_run(6, 18, worst, caps={"promptMaxLength": 1800 + fixed_bytes})
+            if nbytes(capped) > 1800 + fixed_bytes or any(stamp not in capped for stamp in stamps_c) \
+                    or not capped.startswith(genmod._fixed_head(plan_fixed, "") + "\n"):
+                bad.append(f"(fx-h) 스키마 1800 caps 에서 {nbytes(capped)}B 이거나 타임스탬프·고정부가 빠졌습니다")
             # 1800: 연기 있는·없는 후보가 모두 넘쳐 의상을 줄인 ASSETS + MOTION·HARMONY 짧은 형. 1500: 그것도 넘쳐 빠짐(로그로 알린다).
             if steps_c[-2:] != ["assetsStripped", "motionHarmonyShort"] or genmod.MOTION_MIN not in capped \
                     or genmod._harmony_min(plan_mh) not in capped:
@@ -20562,13 +20592,20 @@ def check_vnew_fx_prompt() -> None:
                 return next((row for row in text.split("\n") if row.startswith("SETTING:")), "")
 
             # 090 필수 수정 2 합격 기준: 기본 입력(웹툰·실사)은 켬에서도 SETTING(장소 요약 포함)이 끔과 같고 줄이기 단계가 없다.
+            # 작업 127로 바뀐 기대값: 켬이면 장소 요약은 맨 앞 고정부(FIXED: … BACKGROUND …)가 맡아 SETTING 에는 지시서 backgroundEn 만
+            # 남고, 고정부 몫(예산에서 미리 뺀다) 때문에 웹툰 기본 입력은 묘사 문장(bodyDrop)을 먼저 뺀다. 실사는 그대로 단계 없음.
+            want_on_steps = {"webtoon": ["bodyDrop"], "real": ["none"]}
             for variant in ("webtoon", "real"):
                 on_text, on_steps = cut_run(variant)
                 with _pin_vnew(VNEW_FX=False):
                     off_text, off_steps = cut_run(variant)
-                if setting_of(on_text) != setting_of(off_text) or "A closed principal's office" not in setting_of(on_text) \
-                        or on_steps != ["none"] or off_steps != ["none"] or nbytes(on_text) > 2500 \
-                        or _FX_CUT_RULE_DESIGN + "The mannequin colors are only placeholders" not in on_text:
+                fixed_line = on_text.split("\n")[0]
+                body_in = _FX_CUT_RULE_DESIGN + "The mannequin colors are only placeholders" in on_text
+                if setting_of(on_text) != "SETTING: The principal's office behind him, bookshelves and a wide window." \
+                        or "A closed principal's office" not in setting_of(off_text) \
+                        or not fixed_line.startswith("FIXED: ") or "A closed principal's office (indoor)" not in fixed_line \
+                        or on_steps != want_on_steps[variant] or off_steps != ["none"] or nbytes(on_text) > 2500 \
+                        or body_in != (on_steps == ["none"]):
                     bad.append(f"(fx-j) 기본 입력 {variant}: 켬 SETTING·묘사 문장·단계가 끔과 다릅니다: {on_steps} {nbytes(on_text)}B "
                                f"{setting_of(on_text)[:60]!r} / {setting_of(off_text)[:60]!r}")
                 report.append(f"컷 단위 {variant} 기본: 끔 {nbytes(off_text)}B · 켬 {nbytes(on_text)}B [{','.join(on_steps)}]")
@@ -20582,21 +20619,23 @@ def check_vnew_fx_prompt() -> None:
             if fx_at < 1 or not web_lines[fx_at - 1].startswith("ACTION:") or not web_lines[fx_at + 1].startswith("MOTION:"):
                 bad.append(f"(fx-j) 웹툰 FX 줄이 ACTION 바로 다음·MOTION 앞이 아닙니다: {[line[:20] for line in web_lines]}")
             mood_line = next((line for line in web_lines if line.startswith("MOOD:")), "")
-            if not mood_line.startswith("MOOD: Kim's cold glare; heavy air.") or "모드코" in web:
-                bad.append(f"(fx-j) MOOD 맨 앞이 컷 분위기가 아니거나 moodKo 가 들어갔습니다: {mood_line[:120]!r}")
+            # 작업 127로 바뀐 기대값: MOOD 는 컷 moodEn 만(지시서 moodEn "tense and heavy…" 는 장면 전체 분위기라 빠진다).
+            if mood_line != "MOOD: Kim's cold glare; heavy air" or "모드코" in web or "tense and heavy" in web:
+                bad.append(f"(fx-j) MOOD 가 컷 분위기만이 아니거나 moodKo·지시서 분위기가 들어갔습니다: {mood_line[:120]!r}")
             roomy = _fx_cut_prompt(genmod, "webtoon", cut_extra={"moodEn": "Kim's cold glare; heavy air"})
-            if "\nMOOD: Kim's cold glare; heavy air. tense and heavy, the air thick with unspoken anger.\n" not in roomy:
-                bad.append("(fx-j) 예산 안 컷의 MOOD 가 '컷 분위기. 지시서 분위기' 가 아닙니다")
-            # 기호 2개 + 분위기: 넘치면 묘사 문장을 장소 요약보다 먼저 뺀다(bodyDrop 이 첫 단계, 장소 요약은 남는다).
-            if web_steps[:1] != ["bodyDrop"] or _FX_CUT_RULE_DESIGN in web or setting_of(web) != setting_of(_fx_cut_prompt(genmod, "webtoon")):
-                bad.append(f"(fx-j) 넘친 컷에서 묘사 문장보다 장소 요약을 먼저 뗐습니다: {web_steps} {setting_of(web)[:60]!r}")
+            if "\nMOOD: Kim's cold glare; heavy air\n" not in roomy or "tense and heavy" in roomy:
+                bad.append("(fx-j) 예산 안 컷의 MOOD 가 컷 분위기만이 아닙니다")
+            # 기호 2개 + 분위기: 넘치면 묘사 문장을 먼저 뺀다(bodyDrop 이 첫 단계). 작업 127: 장소 요약은 고정부로 옮겨 갔고,
+            # 컷 분위기(MOOD)는 SETTING backgroundEn 보다 늦게 줄인다.
+            if web_steps[:1] != ["bodyDrop"] or _FX_CUT_RULE_DESIGN in web or not mood_line:
+                bad.append(f"(fx-j) 넘친 컷에서 묘사 문장을 먼저 빼지 않았거나 MOOD 가 빠졌습니다: {web_steps} {setting_of(web)[:60]!r}")
             if nbytes(web) > 2500 or any(line and not line.startswith(cut_heads) for line in web_lines):
                 bad.append(f"(fx-j) 웹툰 컷 프롬프트가 {nbytes(web)}B 이거나 머리글이 아닌 줄이 있습니다")
             real = _fx_cut_prompt(genmod, "real", cut_extra={"fx": [blush, speed], "moodEn": "tense"})
             real_bg = _fx_cut_prompt(genmod, "real", cut_extra={"fx": [speed, sparkle]})
             if f"\nEXPRESSION: {_FX_REF_REAL[blush]}.\n" not in real or "\nFX:" in real or "EXPRESSION" in real_bg or "\nFX:" in real_bg:
                 bad.append("(fx-j) 실사 EXPRESSION 줄(배경 기호 없음·FX 줄 없음)이 다릅니다")
-            if nbytes(real) > 2500 or _FX_CUT_RULE_DESIGN not in real or not re.search(r"\nMOOD: tense\. ", real):
+            if nbytes(real) > 2500 or _FX_CUT_RULE_DESIGN not in real or not re.search(r"\nMOOD: tense\n", real):
                 bad.append("(fx-j) 실사 컷 프롬프트 바이트·CONTINUITY·MOOD 가 다릅니다")
             # ⑥-1: SETTING·MOOD·BLOCKING·대사 연기가 없는 컷을 FX 짧은 형으로만 맞출 수 있게 외형 길이를 맞춘다.
             two_sentences = "Kim leans forward. He slams the folder on the desk and glares at the door."
@@ -20627,8 +20666,10 @@ def check_vnew_fx_prompt() -> None:
                     or len(lean_log) != 1 or not lean_log[0].endswith(" steps=bodyDrop,fxShort"):
                 bad.append(f"(fx-j) ⑥-1 FX 짧은 형이 bodyDrop 뒤·ACTION 줄이기 전에 오지 않았습니다(pad={pad}, {nbytes(lean)}B, {lean_log})")
             long_web, long_steps = cut_run("webtoon", long_brief=True, cut_extra={"fx": [sweat, sparkle]})
+            # 작업 127로 바뀐 기대값: 켬이면 장소 요약이 고정부로 옮겨 가 settingSummary 단계가 없고 첫 줄이기는 SETTING backgroundEn.
             if nbytes(long_web) > budget or short_line not in long_web.split("\n") or "\nACTION: a very detailed description." not in long_web \
-                    or long_steps[:2] != ["bodyDrop", "settingSummary"] or long_steps.index("fxShort") > long_steps.index("action"):
+                    or long_steps[:2] != ["bodyDrop", "settingBackground"] or "settingSummary" in long_steps \
+                    or long_steps.index("fxShort") > long_steps.index("action"):
                 bad.append(f"(fx-j) 긴 입력 웹툰이 짧은 FX·ACTION 첫 문장·≤2500·단계 순서가 아닙니다: {nbytes(long_web)}B {long_steps}")
             with _pin_vnew(VNEW_FX=False):
                 _off_long, off_long_steps = cut_run("real", long_brief=True)
@@ -23183,7 +23224,7 @@ class _LrEnv:
         with self.lock:
             rid = f"rq{len(self.requests) + 1}"
             prompt = str((payload or {}).get("prompt") or "")
-            kind = "real" if prompt.startswith(_LR_REAL_STYLE_DESIGN) else "webtoon"
+            kind = "real" if _strip_fixed(prompt).startswith(_LR_REAL_STYLE_DESIGN) else "webtoon"
             self.kinds[rid] = kind
             self.requests.append({"rid": rid, "kind": kind, "url": url, "payload": payload, "semHeld": self.sem.held})
         return {"request_id": rid, "draft_id": "dr-" + rid}
@@ -23744,7 +23785,7 @@ def check_vnew_take_real() -> None:
             stamps = [f"{e['start']}-{e['end']}s" for e in genmod._take_timeline_entries(env.plan(pid_a), g_a["units"][0])]  # noqa: SLF001
             low = prompt.lower()
             not_avoid = "\n".join(line for line in prompt.split("\n") if not line.startswith("AVOID:"))
-            if not prompt.startswith(_LR_REAL_STYLE_DESIGN + "\n") or "webtoon" in low or "warm pastel" in low \
+            if not _strip_fixed(prompt).startswith(_LR_REAL_STYLE_DESIGN + "\n") or "webtoon" in low or "warm pastel" in low \
                     or "romance" in low or lines_of(prompt, "AVOID:") != _LR_REAL_AVOID_DESIGN \
                     or _LR_REAL_REPLACE_DESIGN not in lines_of(prompt, "RULES:") or genmod.REAL_TAKE_STYLE != _LR_REAL_STYLE_DESIGN:
                 bad.append(f"(lr-d) 실사 STYLE·RULES·AVOID 가 design 원문이 아니거나 웹툰 낱말이 있습니다: {prompt[:200]!r}")
@@ -23810,7 +23851,7 @@ def check_vnew_take_real() -> None:
                 text, stamps_r, steps = real_prompt(n_cuts, seconds, extra)
                 missing = [s for s in stamps_r if s not in text]
                 if "webtoon" in text.lower() or nbytes(text) > 4000 or missing or len(stamps_r) != n_cuts \
-                        or "sparkle" in text.lower() or "FX:" in text or not text.startswith(_LR_REAL_STYLE_DESIGN):
+                        or "sparkle" in text.lower() or "FX:" in text or not _strip_fixed(text).startswith(_LR_REAL_STYLE_DESIGN):
                     bad.append(f"(lr-d) 실사 {label}: {nbytes(text)}B·빠진 타임스탬프 {missing}·webtoon/FX/배경 기호")
                 if extra is not None and "leans forward" in text and "a bead of sweat on the temple" not in text:
                     bad.append(f"(lr-d) 실사 {label}: 연기를 남겼는데 실사 표현(땀)이 없습니다")
@@ -41210,13 +41251,14 @@ def check_vnew_edit_retake() -> None:
             ]
             got_f = [rt.check_prompt(p, base_f, rules_take) for p in cases]
             labels_f = rt._labels(base_f)  # noqa: SLF001
+            # 작업 127: 켬이면 맨 앞 고정부(FIXED:)도 항목으로 읽힌다(빠지거나 순서가 바뀌면 retake 검사가 막는다).
             expect("rtk-f", [labels_f, got_f],
-                   [["STYLE", "ASSETS", "TIMELINE", "MOTION", "HARMONY", "RULES", "AVOID"],
+                   [["FIXED", "STYLE", "ASSETS", "TIMELINE", "MOTION", "HARMONY", "RULES", "AVOID"],
                     [[], [f"새 프롬프트가 {len((base_f + ' ' + 'x' * 1000).encode()):,}바이트입니다. 4,000바이트 안으로 줄여 주세요."],
                      ["참고 표시(@Video·@Image·@Element)가 이전 프롬프트와 다릅니다(빠짐 @Image4)."],
                      ["참고 표시(@Video·@Image·@Element)가 이전 프롬프트와 다릅니다(새로 생김 @Image9)."],
                      ["이전 프롬프트의 항목이 빠졌습니다: AVOID."],
-                     ["항목 순서가 이전 프롬프트와 다릅니다(STYLE → ASSETS → TIMELINE → MOTION → HARMONY → RULES → AVOID)."],
+                     ["항목 순서가 이전 프롬프트와 다릅니다(FIXED → STYLE → ASSETS → TIMELINE → MOTION → HARMONY → RULES → AVOID)."],
                      ["새 프롬프트에 인터넷 주소(URL)를 넣을 수 없습니다."], ["새 프롬프트에 구분 표시(<previous_prompt> 등)가 남아 있습니다."],
                      ["새 프롬프트가 비어 있습니다."]]],
                    "통 테이크 규칙: 그대로 통과·4,000바이트·참고 표시 빠짐/생김·항목 빠짐·순서·주소·구분 표시·빈 값")
@@ -42757,7 +42799,8 @@ def check_vnew_edit_retake_models() -> None:
             def pad_to(text: str, size: int) -> str:
                 return text + " " + "z" * (size - len(text.encode()) - 1)
 
-            kl_2700, kl_2450 = pad_to(ok_kl_w, 2700), pad_to(ok_kl_w, 2450)  # Kling 본보기 자체가 2,425B → 상한 안 2번째는 2,450B
+            # 작업 127: 켬이면 본보기 맨 앞에 고정부(FIXED)가 붙어 본보기가 2,450B 가 됐다 → 상한 안 2번째는 2,480B 로 잰다.
+            kl_2700, kl_2450 = pad_to(ok_kl_w, 2700), pad_to(ok_kl_w, 2480)  # Kling 본보기 자체가 2,450B → 상한 안 2번째는 2,480B
             kl_2700_noref = pad_to(ok_kl_w.replace("@Element2", "the woman"), 2700)
             logs.clear()
             d_x1, calls_x1, led_x1 = run_w(pid_t, mid_t, over_kl, (kl_2700, kl_2450), {"requestKo": "두 번", "model": kl})
@@ -42770,7 +42813,7 @@ def check_vnew_edit_retake_models() -> None:
             logs.clear()
             d_x4, calls_x4, led_x4 = run_w(pid_t, mid_t, over_kl, ok_kl_w, {"requestKo": "한 번", "model": kl})
             try_x4 = logs.messages("vnew.retake.shrink_try", level=logging.INFO)
-            expect("rtk-w", [len(ok_kl_w.encode()) < 2450,
+            expect("rtk-w", [len(ok_kl_w.encode()) < 2480,
                              (d_x1.get("prompt") == kl_2450, d_x1.get("problems"), d_x1.get("shrunk"), len(calls_x1),
                               [e["key"] for e in led_x1] == ["vnew-retake-" + str(d_x1.get("id")) + s for s in ("", "-shrink", "-shrink2")],
                               [m.split("cell=")[1].split(" ", 1)[1] for m in try_x1 if "cell=" in m],
@@ -42784,7 +42827,7 @@ def check_vnew_edit_retake_models() -> None:
                              (d_x4.get("shrunk"), len(calls_x4), len(led_x4), [m.split("cell=")[1].split(" ", 1)[1] for m in try_x4])],
                    [True,
                     (True, [], True, 3, True, ["n=1 from=%d to=2700 problems=1 kept=True" % len(over_kl.encode()),
-                                               "n=2 from=2700 to=2450 problems=0 kept=True"], [True, True, True], []),
+                                               "n=2 from=2700 to=2480 problems=0 kept=True"], [True, True, True], []),
                     ("done", True, 1, True, 3, 2, [True]),
                     (True, False, 2),
                     (True, 2, 2, ["n=1 from=%d to=%d problems=0 kept=True" % (len(over_kl.encode()), len(ok_kl_w.encode()))])],
@@ -43495,7 +43538,8 @@ def check_vnew_edit_retake_models() -> None:
             expect("rtk-p", [rt._labels(tmpl_c_lr)[:3], "@Image1" in tmpl_c_lr and "@Element1" not in tmpl_c_lr,  # noqa: SLF001
                              "Image 1" in tmpl_c_img and "@Element1" not in tmpl_c_img, rt.check_prompt(tmpl_c_lr, "", rules_t),
                              rt.check_prompt(swapped, "", rules_t)],
-                   [["STYLE", "ASSETS", "TIMELINE"], True, True, [],
+                   # 작업 127: 켬이면 본보기 맨 앞에 고정부(FIXED)가 있다.
+                   [["FIXED", "STYLE", "ASSETS"], True, True, [],
                     ["항목 순서가 고른 모델 형식과 다릅니다(" + " → ".join(rt._labels(tmpl_c_lr)) + ")."]],  # noqa: SLF001
                    "컷 칸 → 참고 영상 모델 본보기(STYLE·ASSETS·TIMELINE·@Image)·이미지 목록 모델 본보기(Image N), 본보기 기준 검사(그대로 통과·순서 문구)")
             # 견적 경계: 영상 편집 모델 15초 넘음·duration 값이 글자, 본보기 확인 없이 resubmit_model(제출 1)
@@ -44426,8 +44470,10 @@ def check_vnew_inner_voice() -> None:
         take_rows = []
         for variant in ("webtoon", "real"):
             full = genmod._take_prompt(plan_m, take, cast=cast, panel_nos=[1], location_no=None, variant=variant)  # noqa: SLF001
+            # 작업 127: 고정부 몫(예산에서 미리 뺀다)을 더해 나머지가 지금과 같은 1,400B 최소형이 되게 한다.
+            fixed_m = genmod._utf8_len(genmod._fixed_head(plan_m, "", real=variant == "real")) + 1  # noqa: SLF001
             tiny = genmod._take_prompt(plan_m, take, cast=cast, panel_nos=[1], location_no=None, variant=variant,  # noqa: SLF001
-                                       caps={"promptMaxLength": 1400})
+                                       caps={"promptMaxLength": 1400 + fixed_m})
             take_rows.append([prompt.count('Minji (inner voice-over, lips closed): "왜 저러지?"') for prompt in (full, tiny)]
                              + [rule_add in full, rule_add in tiny, "Minji (off-screen voice)" in full, 'Junho (off-screen voice): "안녕"' in full])
         spoken_only = [dict(e, voice="spoken") for e in mixed]
@@ -44625,10 +44671,12 @@ def check_vnew_inner_voice_118a() -> None:
                 {"id": "e6", "panels": [2], "speaker": "준호", "lineKo": "가자"}]
         rows = []
         with _pin_vnew(VNEW_FX=True):
+            # 작업 127: 고정부(FIXED) 몫은 예산에서 미리 빠진다 → 나머지 예산이 같도록 상한에 고정부 바이트를 더한다.
+            fixed_many = genmod._utf8_len(genmod._fixed_head(iv_plan(many), "")) + 1  # noqa: SLF001
             for cap in (3000, 2900, 1400):
-                text = take_prompt(iv_plan(many), caps={"promptMaxLength": cap})
+                text = take_prompt(iv_plan(many), caps={"promptMaxLength": cap + fixed_many})
                 tl_s = block(text, "TIMELINE")
-                rows.append([genmod._utf8_len(text) <= genmod._take_prompt_budget({"promptMaxLength": cap}),  # noqa: SLF001
+                rows.append([genmod._utf8_len(text) <= genmod._take_prompt_budget({"promptMaxLength": cap + fixed_many}),  # noqa: SLF001
                              all(s in text for s in ("0-4s", "4-8s", "8-12s")), tl_s.count("(inner voice-over, lips closed)"),
                              [w for w in ("하나", "둘", "셋") if f'Junho (off-screen voice): "{w} ' in tl_s], 'Junho (off-screen voice): "가자"' in tl_s])
         expect("iv2-b", rows, [[True, True, 2, ["하나", "둘"], True], [True, True, 2, ["하나"], True], [True, True, 2, [], True]],
@@ -46467,6 +46515,270 @@ def check_vnew_location_fast_125() -> None:
            "(lf-g)사람 수 동시·정렬")
 
 
+# ---------------------------------------------------------------- 작업 127: 기호 대상 · 컷 분위기 · 배경 고정부
+
+_FW_NODE_CASES = r"""
+var T = "tear streams", P = "speed lines", A = "범건우", B = "여의준";
+var c = { id: "c1", fx: [T, P], characters: [{ name: A }, { name: B }, { name: " 여의준 " }, null], fxWho: {} };
+out.states = fxWhoStates(c);
+out.none = [fxWhoStates({ fx: [T] }), fxWhoStates({ fx: [P], characters: [{ name: A }] }), fxWhoStates(null)];
+out.toggled = [fxWhoToggled(c, T, B),
+               fxWhoToggled({ characters: [{ name: A }], fxWho: { "tear streams": [A, "유령"], "speed lines": [A] } }, T, A),
+               fxWhoToggled(c, P, A), fxWhoToggled(c, T, "유령"), fxWhoToggled({ characters: [{ name: A }], fxWho: [1] }, T, A)];
+var row = fxRow(c);
+var who = row.children[2];
+out.who = [who.className, who.style.display, who.children.map(function (g) { return g.children.map(function (x) { return x.textContent; }); })];
+who.children[0].children[2].fire("click");
+out.after = [JSON.parse(JSON.stringify(c.fxWho)), who.children[0].children[2].attrs["aria-pressed"], who.children[0].children[2].className];
+out.body = JSON.stringify({ cuts: [c] }).indexOf('"fxWho":{"tear streams":["여의준"]}') >= 0;
+row.children[0].children[1].fire("click");
+out.hidden = [c.fx.length, who.style.display, who.children.length];
+out.innerHTML = innerHTMLUsed;
+console.log(JSON.stringify(out));
+"""
+
+
+def _fw_plan(*, with_locations: bool = True) -> dict:
+    """작업 127 fw 계획: 편의점 2컷(c1 우는 컷·c2 띠용 컷) + 밤거리 1컷(c3, fxWho 없음). 두 사람 모두 화면에 있다."""
+    a, b = "범건우", "여의준"
+    chars = [{"name": a, "positionEn": "left", "actionEn": "stares"}, {"name": b, "positionEn": "right", "actionEn": "cries"}]
+    cuts = [
+        {"id": "c1", "no": 1, "seconds": 4, "panels": [0], "dialogueKo": f'{b}: "흑…"', "locationEn": "A convenience store",
+         "characters": chars, "fx": ["tear streams"], "fxWho": {"tear streams": [b]}, "moodEn": f"{b}'s quiet tears; heavy air"},
+        {"id": "c2", "no": 2, "seconds": 4, "panels": [1], "dialogueKo": f'{b}: "어?"', "locationEn": "A convenience store",
+         "characters": chars, "fx": [], "moodEn": "comic beat — puzzled blink"},
+        {"id": "c3", "no": 3, "seconds": 4, "panels": [2], "dialogueKo": "", "locationEn": "A night street",
+         "characters": chars, "fx": ["tear streams"], "moodEn": ""},
+    ]
+    ids = [cut["id"] for cut in cuts]
+    actors = [{"id": "a1", "name": a, "color": "#4363d8", "charId": "ch1"}, {"id": "a2", "name": b, "color": "#e6194b", "charId": "ch2"}]
+    plan = {
+        "conti": {"status": "ready", "cuts": cuts, "segments": [{"id": f"s{i}", "cutIds": [cid], "seconds": 4} for i, cid in enumerate(ids)]},
+        "script": {"status": "ready", "entries": [], "setting": {
+            "timeKo": "밤", "enclosed": True, "locationEn": "A convenience store", "moodKo": "설레고 긴장감 있는 분위기",
+            "layoutEn": f"{a} stands at the counter. Bright aisles of snacks and a glass door."}},
+        "previz": {
+            "status": "ready",
+            "scenes": [{"locationId": "loc1", "actors": actors,
+                        "timeline": [{"cutId": cid, "actors": [{"id": "a1"}, {"id": "a2"}]} for cid in ids]}],
+            "panelGrammar": {cid: {"grammar": {"mainSubject": a, "others": [{"name": b, "how": "full"}]}} for cid in ids},
+            "shotBrief": {"status": "ready", "scene": {"loc1": "A small store with bright aisles."}, "cuts": {
+                cid: {"shotEn": "MCU.", "actionEn": f"{b} looks down.", "moodEn": "fluttering, tense romance",
+                      "backgroundEn": "Shelves of snacks behind them.", "dialogue": []} for cid in ids}},
+        },
+    }
+    if with_locations:
+        plan["locations"] = [{"nameEn": "A convenience store", "design": {"enclosed": True, "lightEn": "cold fluorescent ceiling light. Flicker."},
+                              "facts": {"walls": {"north": {"wallColorEn": "white", "wallMaterialEn": "tile"}}, "floorEn": "grey vinyl"}}]
+    return plan
+
+
+def check_vnew_fx_who_127() -> None:
+    """작업 127 — 기호는 "누구에게", 분위기는 "그 컷 것만", 배경은 한 영상 안에서 고정. 외부 호출 없음(가짜 LLM·S3 없음).
+
+    (fw-a) fx_who 정리(모르는 이름·배경 기호·글 하나·상한)·FX_FIELDS(승인 규칙)·merge_fill 대상(추천·그림 안만)·apply_cap 가지치기
+    (fw-b) who_sentences: 대상 → "… 's cheeks only; … does not cry"(여럿 do not), 대상 없음·배경 기호 = 지금 문장, 실사·짧은 형
+    (fw-c) 분석: EMIT_CONTI·EMIT_FX fxWho 스키마(인물 표현 기호만)·규칙 문장(대상·코믹 순간), 콘티 정리가 fxWho 저장, 채우기 FILL 줄 인물·화자별 감정
+    (fw-d) 통 테이크: FX 로마자 대상·부정 구절, 대상 없는 컷 = 지금 문장, 실사 표현 대상, MOOD = 컷 moodEn 만, overall tone 1번, 장소 바뀐 컷 BACKGROUND now
+    (fw-e) 컷 프롬프트: 고정부 같은 장소 바이트 같음·다른 장소 다름·테이크와 같음, MOOD 컷 것만, Only … appear, FX/EXPRESSION 대상, 줄이기에도 고정부 유지
+    (fw-f) 배경 문장: 장소 사실 → 1문장, 없으면 layoutEn 중 사람 없는 문장, 다른 장소는 setting 을 붙이지 않음, 끔이면 고정부 없음
+    (fw-g) 화면: fxWhoStates·fxWhoToggled·fxRow 대상 칩 누르기 → cut.fxWho(저장 본문), 기호 끄면 숨김, innerHTML 0, CSS
+    """
+    sys.path.insert(0, str(ROOT / "app"))
+    import traceback as _tb  # noqa: PLC0415
+
+    from src.vnew import fx as fxmod  # noqa: PLC0415
+    from src.vnew import generate as genmod  # noqa: PLC0415
+    from src.vnew import plan as planmod  # noqa: PLC0415
+    from src.vnew import prompts as vprompts  # noqa: PLC0415
+
+    bad: list[str] = []
+    seen: set[str] = set()
+    tear, sweat, blush, speed, sparkle = "tear streams", "sweat drop", "blush lines", "speed lines", "pink sparkle background"
+    a, b = "범건우", "여의준"
+    ra, rb = genmod._romanize_name(a), genmod._romanize_name(b)  # noqa: SLF001
+
+    def expect(group: str, got, want, what: str) -> None:
+        seen.add(group)
+        if got != want:
+            bad.append(f"({group}) {what}\n      결과 {got!r}\n      기대 {want!r}")
+
+    def line_of(text: str, head: str) -> str:
+        return next((row for row in text.split("\n") if row.startswith(head)), "")
+
+    cast_cut = [{"colorName": "blue", "name": a, "elementRef": "@Element1", "appearance": "a man"},
+                {"colorName": "red", "name": b, "elementRef": "@Element2", "appearance": "a man"}]
+    cast_take = [{"name": a, "colorName": "blue", "frontNo": 1}, {"name": b, "colorName": "red", "frontNo": 2}]
+    take = {"id": "take1", "cutIds": ["c1", "c2", "c3"], "seconds": 12}
+    saved_tiles = planmod.ordered_tiles
+    try:
+        with _guard_real_llm(), _pin_vnew(VNEW_FX=True):
+            # ================= (fw-a) 정리·합치기 =================
+            names = [a, b]
+            raw_who = {"Tear  Streams": [b, "유령", b], "speed lines": [a], sparkle: [b], "sweat drop": a, 3: [a],
+                       "blush lines": ["x1", "x2"]}
+            many = ["p1", "p2", "p3", "p4", "p5"]
+            cap_cuts = [{"id": f"u{i}", "fxSuggest": [blush]} for i in range(3)] + [
+                {"id": "f1", "fxSuggest": [blush, tear], "fx": [blush], "fxWho": {blush: [a], tear: [b]}}]
+            capped, n_capped = fxmod.apply_cap(cap_cuts, ["f1"])
+            merged, _stats = fxmod.merge_fill(
+                [{"id": "m1", "characters": [{"name": a}, {"name": b}]}, {"id": "m2", "characters": [{"name": a}]}],
+                [{"id": "m1", "drawnFx": [tear], "fx": [tear], "fxSuggest": [speed], "fxWho": {tear: [b, "유령"], speed: [a], sweat: [a]},
+                  "moodKo": "울음"}, {"id": "m2", "fx": [sweat], "moodKo": "당황"}], ["m1", "m2"], {})
+            expect("fw-a", [fxmod.fx_who(raw_who, names), fxmod.fx_who("x", names), fxmod.fx_who({tear: many}, many),
+                            fxmod.fx_who({tear: [a]}, []), fxmod.cut_names({"characters": [{"name": " 범건우 "}, {"name": a}, "x", {}]}),
+                            "fxWho" in fxmod.FX_FIELDS, fxmod.only_fx_changed([{"id": "c", "fxWho": {}}], [{"id": "c", "fxWho": {tear: [a]}}]),
+                            fxmod.normalize_cut_fx({"characters": [{"name": a}], "fxWho": {tear: [a, b]}}).get("fxWho"),
+                            "fxWho" in fxmod.normalize_cut_fx({"fx": [tear]}),
+                            merged[0].get("fxWho"), "fxWho" in merged[1], n_capped, capped[3].get("fxWho"), capped[3].get("fxSuggest")],
+                   [{tear: [b], sweat: [a]}, {}, {tear: many[:4]}, {}, [a], True, True, {tear: [a]}, False,
+                    {tear: [b]}, False, 1, {tear: [b]}, [tear]],
+                   "fx_who 정리(키 정리·모르는 이름·배경 기호·글 하나·4명)·FX_FIELDS·merge_fill(추천·그림 안 기호만)·apply_cap 가지치기")
+
+            # ================= (fw-b) 문장 =================
+            roman = {a: ra, b: rb}.get
+            c3 = "C"
+            expect("fw-b", [fxmod.who_sentences([tear], {tear: [b]}, [a, b], name=roman),
+                            fxmod.who_sentences([tear, speed], {}, [a, b]), fxmod.who_sentences([speed], {speed: [a]}, [a]),
+                            fxmod.who_sentences([tear], {tear: [b]}, [a, b], real=True, name=roman),
+                            fxmod.who_sentences([tear, sweat], {tear: [b], sweat: [a]}, [a, b], short=True, name=roman),
+                            fxmod.who_sentences([blush], {blush: [b]}, [a, b, c3]), fxmod.who_sentences([sweat], {sweat: [a, b]}, [a, b]),
+                            fxmod.who_sentences([tear], {tear: [b]}, [a, b], real=True, name=roman) != fxmod.sentences([tear], real=True)],
+                   [[f"Webtoon-style tear streams run down {rb}'s cheeks only; {ra} does not cry"],
+                    fxmod.sentences([tear, speed]), fxmod.sentences([speed]),
+                    [f"tears run down {rb}'s cheeks only; {ra} does not cry"],
+                    [f"tear streams on {rb} only", f"one sweat drop by {ra} only, not an anger mark"],
+                    [f"Pink webtoon blush lines on {b}'s cheeks only; {a} and C do not blush"],
+                    [f"A single anime sweat drop beside {a} and {b}'s head only, not an anger mark"], True],
+                   "who_sentences: 대상만·다른 인물 부정 1구절(여럿 do not)·대상 없음/배경 기호 = 지금 문장·실사·짧은 형(부정 없음)")
+
+            # ================= (fw-c) 분석 =================
+            conti_who = vprompts.EMIT_CONTI["inputSchema"]["json"]["properties"]["cuts"]["items"]["properties"].get("fxWho") or {}
+            fx_who_schema = vprompts.EMIT_FX["inputSchema"]["json"]["properties"]["cuts"]["items"]["properties"].get("fxWho") or {}
+            payload = {"cuts": [{"id": "k1", "seconds": 3, "panels": [0], "characters": [{"name": a}, {"name": b}], "fxDrawn": [tear],
+                                 "fxWho": '{"tear streams": ["여의준", "유령"], "speed lines": ["범건우"]}', "moodKo": "울음"},
+                                {"id": "k2", "seconds": 3, "panels": [0], "characters": [{"name": a}], "fxDrawn": [sweat]}]}
+            norm = planmod._normalize_cuts(payload, {"entries": []}, fx_from_conti=True, panel_count=1)  # noqa: SLF001
+            planmod.ordered_tiles = lambda *_a, **_k: ([b"P0"], 1, 1)
+            blocks, _numbers, _sent = planmod._fx_blocks(  # noqa: SLF001
+                "tester", "prj_fw", {"input": {"characters": [], "order": []}, "script": {"entries": [
+                    {"panels": [0], "speaker": b, "emotionKo": "울먹임"}, {"panels": [0], "speaker": a, "emotionKo": "당황"},
+                    {"panels": [5], "speaker": a, "emotionKo": "기쁨"}]}},
+                [{"id": "k1", "panels": [0], "characters": [{"name": a}, {"name": b}]}], ["k1"], [])
+            fill_line = next((row for row in blocks[0]["text"].split("\n") if row.startswith("FILL ")), "")
+            expect("fw-c", [sorted(conti_who.get("properties") or {}), sorted(fx_who_schema.get("properties") or {}),
+                            vprompts.FX_WHO_RULE in vprompts.CONTI_SYSTEM, vprompts.FX_WHO_RULE in vprompts.FX_SYSTEM,
+                            vprompts.MOOD_CUT_RULE in vprompts.CONTI_SYSTEM, vprompts.MOOD_CUT_RULE in vprompts.FX_SYSTEM,
+                            "comic beat — puzzled blink" in vprompts.MOOD_CUT_RULE, "actually drawn on" in vprompts.FX_WHO_RULE,
+                            "emotionKo or situationKo" in vprompts.FX_WHO_RULE,
+                            norm[0].get("fxWho"), "fxWho" in norm[1],
+                            f"인물: {a}, {b}" in fill_line, f"화자별 감정: {b}=울먹임 / {a}=당황" in fill_line, "기쁨" in fill_line],
+                   [sorted(fxmod.PERSON_FX), sorted(fxmod.PERSON_FX), True, True, True, True, True, True, True,
+                    {tear: [b]}, False, True, True, False],
+                   "EMIT_CONTI·EMIT_FX fxWho(인물 표현 기호만)·규칙(그려진 인물 → 대본 감정 → 비움·코믹 순간)·콘티 저장(JSON 글 풀기)·FILL 줄")
+
+            # ================= (fw-d) 통 테이크 =================
+            plan = _fw_plan()
+            web = genmod._take_prompt(plan, take, cast=cast_take, panel_nos=[3], location_no=None)  # noqa: SLF001
+            real = genmod._take_prompt(plan, take, cast=cast_take, panel_nos=[], location_no=None, variant="real")  # noqa: SLF001
+            tl = line_of(web, "TIMELINE")
+            first_c1, rest = tl.split(" 4-8s", 1) if " 4-8s" in tl else (tl, "")
+            store_head = genmod._fixed_head(plan, "A convenience store")  # noqa: SLF001
+            expect("fw-d", [f"FX: Webtoon-style tear streams run down {rb}'s cheeks only; {ra} does not cry" in first_c1,
+                            "FX: Webtoon-style tear streams run down the cheeks" in rest.split(" 8-12s", 1)[-1],
+                            "mood: comic beat — puzzled blink" in rest, "fluttering, tense romance" in web,
+                            web.count("Overall tone:"), web.split("\n")[0] == store_head,
+                            "BACKGROUND now: A night street" in rest.split(" 8-12s", 1)[-1], tl.count("BACKGROUND now:"),
+                            f"tears run down {rb}'s cheeks only; {ra} does not cry" in real, "webtoon" in real.lower(),
+                            real.split("\n")[0] == genmod._fixed_head(plan, "A convenience store", real=True)],  # noqa: SLF001
+                   [True, True, True, False, 1, True, True, 1, True, False, True],
+                   "통 테이크: FX 대상(로마자)·부정 구절, 대상 없는 컷 = 지금 문장, 실사 표현 대상, MOOD 컷 것만, overall tone 1번, 장소 바뀐 컷만 배경")
+
+            # ================= (fw-e) 컷 프롬프트 =================
+            def cut_p(cid: str, variant: str = "webtoon", plan_x=None) -> str:
+                return genmod._cut_prompt(plan_x or plan, {"cutId": cid}, variant, cast=cast_cut,  # noqa: SLF001
+                                          has_image_ref=variant != "real")
+
+            p1, p2, p3, r1, r2 = cut_p("c1"), cut_p("c2"), cut_p("c3"), cut_p("c1", "real"), cut_p("c2", "real")
+            long_plan = _fw_plan()
+            long_text = "A very long detail sentence about the scene and its many objects. " * 30
+            for brief in long_plan["previz"]["shotBrief"]["cuts"].values():
+                brief.update({"blockingEn": long_text, "actionEn": "He looks down. " + long_text, "backgroundEn": long_text})
+            long_p = cut_p("c1", plan_x=long_plan)
+            tiny = genmod._take_prompt(plan, take, cast=cast_take, panel_nos=[3], location_no=None,  # noqa: SLF001
+                                       caps={"promptMaxLength": 1200})
+            expect("fw-e", [p1.split("\n")[0] == p2.split("\n")[0] == store_head, p1.split("\n")[0] != p3.split("\n")[0],
+                            p1.split("\n")[0].encode("utf-8") == web.split("\n")[0].encode("utf-8"),
+                            r1.split("\n")[0] == r2.split("\n")[0] != p1.split("\n")[0],
+                            line_of(p2, "MOOD:"), line_of(p1, "MOOD:"), "fluttering, tense romance" in p1 + p2, line_of(p3, "MOOD:"),
+                            [p.count("Overall tone:") for p in (p1, p2, p3)], f"\nOnly {a} and {b} appear.\n" in p1,
+                            line_of(p1, "FX:"), line_of(r1, "EXPRESSION:"), line_of(p3, "FX:"),
+                            long_p.split("\n")[0] == store_head, genmod._utf8_len(long_p) <= 2500,  # noqa: SLF001
+                            tiny.split("\n")[0] == store_head, genmod._utf8_len(tiny) <= 1200, "Shelves of snacks" in p1],  # noqa: SLF001
+                   [True, True, True, True, "MOOD: comic beat — puzzled blink", f"MOOD: {b}'s quiet tears; heavy air", False, "",
+                    [1, 1, 1], True,
+                    f"FX: Webtoon-style tear streams run down {b}'s cheeks only; {a} does not cry.",
+                    f"EXPRESSION: tears run down {b}'s cheeks only; {a} does not cry.",
+                    "FX: Webtoon-style tear streams run down the cheeks.", True, True, True, True, True],
+                   "컷 프롬프트: 고정부 같은 장소 같은 바이트(테이크와도)·다른 장소 다름, MOOD 컷 것만, Only … appear, 대상, 줄이기에도 고정부 유지")
+
+            # ================= (fw-f) 배경 문장 =================
+            bare = _fw_plan(with_locations=False)
+            with _pin_vnew(VNEW_FX=False):
+                off_cut, off_take = cut_p("c1"), genmod._take_prompt(plan, take, cast=cast_take, panel_nos=[3], location_no=None)  # noqa: SLF001
+            expect("fw-f", [genmod._background_en(plan, "A convenience store"),  # noqa: SLF001
+                            genmod._background_en(bare, "A convenience store"), genmod._background_en(bare, "A night street"),  # noqa: SLF001
+                            genmod._background_en(bare, ""), genmod._overall_tone(plan), genmod._overall_tone({}),  # noqa: SLF001
+                            "FIXED:" in off_cut or "FIXED:" in off_take, "fluttering, tense romance" in line_of(off_cut, "MOOD:")],
+                   ["A convenience store (indoor); walls: white tile; floor: grey vinyl; light: cold fluorescent ceiling light",
+                    "A convenience store (indoor); Bright aisles of snacks and a glass door", "A night street",
+                    "A convenience store (indoor); Bright aisles of snacks and a glass door", "fluttering, tense", "", False, True],
+                   "배경: 장소 사실 → 1문장·없으면 사람 없는 layoutEn 문장·다른 장소는 setting 안 붙임, tone, 끔이면 고정부 없음·지시서 MOOD 그대로")
+
+        # ================= (fw-g) 화면 =================
+        vjs = (PUBLIC / "vnew.js").read_text(encoding="utf-8")
+        css = (PUBLIC / "vnew.css").read_text(encoding="utf-8")
+        start = vjs.find("  var FX_KEYS = [")
+        end = vjs.find("/* ================================================================ ④ 프리비즈(3D)")
+        el_start, el_end = vjs.find("  function el(tag, className, text)"), vjs.find("  function token()")
+        node = shutil.which("node")
+        css_ok = all(re.search(r"^" + re.escape(cls) + r" \{", css, re.M) for cls in (".vnew-fx-who", ".vnew-fx-who-group"))
+        if not node:
+            warn("node 가 없어 fw-g 화면 함수 실행을 건너뜁니다 (E16)")
+            expect("fw-g", css_ok, True, "vnew.css 대상 칩 클래스")
+        elif min(start, end, el_start, el_end) < 0:
+            expect("fw-g", "구역 없음", "구역", "vnew.js 기호 구역·el 을 찾지 못했습니다")
+        else:
+            script = _FX_SCREEN_NODE_HARNESS + vjs[el_start:el_end] + vjs[start:end] + _FW_NODE_CASES
+            tmp_dir = tempfile.mkdtemp(prefix="fw_g_")
+            try:
+                path = Path(tmp_dir) / "fw_screen.js"
+                path.write_text(script, encoding="utf-8")
+                result = subprocess.run([node, str(path)], capture_output=True, text=True, encoding="utf-8", timeout=60)
+            finally:
+                shutil.rmtree(tmp_dir, ignore_errors=True)
+            got = json.loads((result.stdout or "").strip().splitlines()[-1]) if result.returncode == 0 else {"error": result.stderr[:400]}
+            label = "눈물 줄기"
+            expect("fw-g", [got.get("states"), got.get("none"), got.get("toggled"), got.get("who"), got.get("after"), got.get("body"),
+                            got.get("hidden"), got.get("innerHTML"), css_ok],
+                   [[{"key": tear, "label": label, "names": [{"name": a, "on": False}, {"name": b, "on": False}]}], [[], [], []],
+                    [{tear: [b]}, {}, {}, {}, {tear: [a]}],
+                    ["vnew-fx-who", "", [[label + " 대상", a, b]]],
+                    [{tear: [b]}, "true", "vnew-fx-chip vnew-fx-who-chip is-on"], True, [0, "none", 0], False, True],
+                   "화면: 고른 인물 표현 기호만 대상 칩(컷 인물)·누르기 → cut.fxWho(저장 본문)·기호 끄면 숨김·innerHTML 0·CSS")
+    except Exception as exc:  # noqa: BLE001
+        bad.append(f"검사 중 예외: {exc}\n{_tb.format_exc()[-1500:]}")
+    finally:
+        planmod.ordered_tiles = saved_tiles
+    missing = {"fw-a", "fw-b", "fw-c", "fw-d", "fw-e", "fw-f", "fw-g"} - seen
+    if missing:
+        bad.append(f"돌지 않은 검사: {sorted(missing)}")
+    if bad:
+        fail("작업 127 기호 대상·컷 분위기·배경 고정부\n" + "\n".join(f"  {item}" for item in bad))
+    else:
+        ok("작업 127 (fw-a)fxWho 정리·승인 규칙·합치기·한도 (fw-b)대상 문장·부정 구절·지금 문장 (fw-c)스키마·규칙·콘티 저장·FILL 줄 "
+           "(fw-d)통 테이크 대상·MOOD·tone 1번·장소 바뀐 컷 배경 (fw-e)고정부 바이트 같음·Only appear·줄이기 유지 "
+           "(fw-f)배경 1문장·layoutEn 사람 거르기·끔 (fw-g)대상 칩·저장 본문·숨김·CSS")
 _STAY_129_NODE = r"""
 var VARIANTS = [{ key: "real", title: "실사" }, { key: "webtoon", title: "웹툰 그림체" }];
 var PLAN_POLL_MS = 3001, GEN_POLL_FAST_MS = 3002, GEN_POLL_SLOW_MS = 5003;
@@ -46998,7 +47310,8 @@ def check_vnew_real_from_3d_126() -> None:
 
             # ================= (r3-b) 프롬프트 문장 =================
             sentence = genmod.REAL_TAKE_SHEET_SENTENCE
-            if sentence not in built_full["prompt"].split("\n")[1] or "sheet" in sentence.lower() \
+            # 작업 127: 켬이면 맨 앞에 고정부(FIXED:) 1줄이 붙는다 — 그 줄을 뗀 뒤 둘째 줄(ASSETS)을 본다(기대값 그대로).
+            if sentence not in _strip_fixed(built_full["prompt"]).split("\n")[1] or "sheet" in sentence.lower() \
                     or "webtoon" in built_full["prompt"].lower():
                 bad.append("(r3-b) 실사 ASSETS 에 3D 모델용 사진 문장이 없거나 sheet·webtoon 낱말이 있습니다")
             web = genmod._take_payload(owner, pid, plan0, take, dict(_LR_CAPS))["prompt"]  # noqa: SLF001
@@ -47212,6 +47525,7 @@ def main() -> int:
     check_seedream_fal_124()
     check_vnew_sound_122()
     check_vnew_location_fast_125()
+    check_vnew_fx_who_127()
     check_vnew_location_speed_128()
     check_vnew_real_from_3d_126()
     check_vnew_plan_step_stay_129()

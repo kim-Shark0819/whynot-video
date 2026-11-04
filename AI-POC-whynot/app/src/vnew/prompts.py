@@ -14,7 +14,27 @@ broker 는 vpoc.llm 이 그대로 맡는다(여기서는 프롬프트·스키마
 from __future__ import annotations
 
 # 기호 열거값은 순수 모듈 fx.py 한 곳에서 읽는다(네트워크·S3 없음).
-from .fx import DRAWN_MAX, FX_KEYS, FX_MAX, MOOD_EN_MAX, MOOD_KO_MAX
+from .fx import DRAWN_MAX, FX_KEYS, FX_MAX, MOOD_EN_MAX, MOOD_KO_MAX, PERSON_FX
+
+# 작업 127: 기호마다 대상 인물({인물 표현 기호: [이름]}). 콘티·채우기 도구가 같은 모양을 쓴다.
+FX_WHO_SCHEMA = {
+    "type": "object",
+    "properties": {key: {"type": "array", "items": {"type": "string"}} for key in PERSON_FX},
+}
+# 대상 인물 규칙(콘티·채우기 시스템 문장이 같이 쓴다).
+FX_WHO_RULE = (
+    "fxWho: for each applied or suggested person symbol (" + " | ".join(PERSON_FX) + ") list who it belongs to, "
+    "with the character names exactly as given. Name only the characters the symbol is actually drawn on in the panels. "
+    "If the panels do not show it, use the character whose emotionKo or situationKo in the script entries for this "
+    "cut's panels states that feeling. If you still cannot tell, leave that symbol out of fxWho. Background symbols "
+    "(pink sparkle background, speed lines) never go in fxWho."
+)
+# 컷 분위기 규칙 1문장(작업 127): 그 컷의 감정만, 짧은 반응·코믹한 순간은 가벼운 톤.
+MOOD_CUT_RULE = (
+    "Write this cut's own feeling, not the whole scene's: for a short reaction (e.g. \"어?\", \"!?\") or a comic "
+    "moment write a light tone such as \"comic beat — puzzled blink\", and do not carry over the scene-wide "
+    "feeling (flutter, tension)."
+)
 
 # ================================================================ ② 대본(script)
 
@@ -230,6 +250,7 @@ EMIT_CONTI = {
                                           "items": {"type": "string", "enum": list(FX_KEYS)}},
                             "moodKo": {"type": "string", "maxLength": MOOD_KO_MAX},
                             "moodEn": {"type": "string", "maxLength": MOOD_EN_MAX},
+                            "fxWho": FX_WHO_SCHEMA,
                         },
                     },
                 }
@@ -276,7 +297,8 @@ Rules you must follow:
 11. fxSuggest: when the cut's emotion is clear, at most """ + str(FX_MAX) + """ symbols from the same list that suit it, best
    first (a drawn one first); otherwise empty. moodKo (<= """ + str(MOOD_KO_MAX) + """ characters, Korean) and moodEn
    (<= """ + str(MOOD_EN_MAX) + """ characters, English) give the mood and the visible characters' expressions in one line,
-   with the character names exactly as given. Never describe hair, skin or clothing colors there.
+   with the character names exactly as given. Never describe hair, skin or clothing colors there. """ + MOOD_CUT_RULE + """
+12. """ + FX_WHO_RULE + """
 Answer only with the emit_conti tool."""
 
 
@@ -295,7 +317,8 @@ EMIT_FX = {
             "fxSuggest": {"type": "array", "maxItems": 2, "items": {"type": "string", "enum": list(FX_KEYS)}},
             "fx": {"type": "array", "maxItems": 2, "items": {"type": "string", "enum": list(FX_KEYS)}},
             "moodKo": {"type": "string"},
-            "moodEn": {"type": "string"}}}}}}},
+            "moodEn": {"type": "string"},
+            "fxWho": FX_WHO_SCHEMA}}}}}},
 }
 
 FX_SYSTEM = """You read Korean webtoon panels and add webtoon visual symbols and a one-line mood to storyboard cuts.
@@ -318,6 +341,8 @@ For each FILL cut:
   e.g. "민지가 당황해 굳은 웃음, 어색한 공기". Use the given character names.
 - moodEn (<= 80 characters, English): the same line for a video model, e.g. "민지's frozen, embarrassed smile;
   awkward air". Keep the character names exactly as given; do not translate or romanize them.
+- """ + MOOD_CUT_RULE + """
+- """ + FX_WHO_RULE + """ Each FILL line lists the cut's characters and the script feeling of each speaker.
 For each TRANSLATE cut: only id and moodEn (the English of its moodKo, <= 80 characters, names kept as given).
 Describe only what the panels and the cut text show. Never describe hair, skin or clothing colors. No dialogue
 text. Answer only with the emit_fx tool."""

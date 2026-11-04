@@ -1342,7 +1342,7 @@ def _conti_fx_item(cut_id: str, item: dict) -> dict | None:
         return None
     applied = vnew_fx.fx_list(_loads_if_str(item.get("fx")), vnew_fx.FX_MAX) or drawn[: vnew_fx.FX_MAX]
     return {"id": cut_id, "drawnFx": drawn, "fxSuggest": suggest, "fx": applied,
-            "moodKo": mood_ko, "moodEn": item.get("moodEn")}
+            "moodKo": mood_ko, "moodEn": item.get("moodEn"), "fxWho": _loads_if_str(item.get("fxWho"))}
 
 
 def _ensure_min_cuts(
@@ -1731,6 +1731,21 @@ def _cut_emotions(cut: dict, entries: list) -> str:
     return vnew_fx.clean_text(", ".join(found), FX_EMOTION_MAX)
 
 
+def _cut_speaker_feelings(cut: dict, entries: list) -> str:
+    """대본 entries 중 이 컷 panels 와 겹치는 항목의 "화자=감정"(작업 127, 중복 제거, " / ", 120자). 화자·감정이 없으면 뺀다."""
+    panels = set(_cut_panels(cut))
+    found: list[str] = []
+    for entry in entries or []:
+        if not isinstance(entry, dict) or not panels & set(entry.get("panels") or []):
+            continue
+        speaker = vnew_fx.clean_text(entry.get("speaker"), FX_NAME_MAX)
+        emotion = vnew_fx.clean_text(entry.get("emotionKo"), FX_EMOTION_MAX)
+        piece = f"{speaker}={emotion}" if speaker and emotion else ""
+        if piece and piece not in found:
+            found.append(piece)
+    return vnew_fx.clean_text(" / ".join(found), 120)
+
+
 def _pick_even(numbers: list[int], cap: int) -> list[int]:
     """순서를 지켜 고르게 cap 개를 고른다(ordered_tiles 와 같은 방식)."""
     if len(numbers) <= cap:
@@ -1777,6 +1792,13 @@ def _fx_blocks(
                 parts.append(f"상황: {situation}")
             if emotion:
                 parts.append(f"감정(대본): {emotion}")
+            # 작업 127: 기호 대상 인물 판단 재료 — 컷 인물과 화자별 대본 감정(그림에 안 보일 때 쓴다).
+            cast_names = vnew_fx.cut_names(cut)
+            if cast_names:
+                parts.append("인물: " + ", ".join(cast_names))
+            feelings = _cut_speaker_feelings(cut, entries)
+            if feelings:
+                parts.append(f"화자별 감정: {feelings}")
             lines.append(" | ".join(parts))
         elif cid in translate_set:
             mood = vnew_fx.clean_text(cut.get("moodKo"), vnew_fx.MOOD_KO_MAX)
@@ -1818,6 +1840,7 @@ def _fx_items(payload: dict) -> list[dict]:
             row[key] = _loads_if_str(item.get(key))
         row["moodKo"] = item.get("moodKo")
         row["moodEn"] = item.get("moodEn")
+        row["fxWho"] = _loads_if_str(item.get("fxWho"))  # 작업 127: 정리는 merge_fill(fx_who)이 한다.
         items.append(row)
     return items
 
