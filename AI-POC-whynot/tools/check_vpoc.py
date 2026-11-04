@@ -41739,8 +41739,9 @@ def check_vnew_edit_retake() -> None:
                                   ".vnew-edit-fix-version.is-current {") if sel not in section]
         expect("rtk-k", [start > 0, 0 < js_start < js_end, sorted(used - defined), states, "overflow-x" in section, max(widths or [0]) <= 960,
                          css.endswith("}\n"), "\r" in css, "\r" in vjs, vjs.count("⑦ AI로 고치기(지시서 116)"), len(used)],
-               [True, True, [], [], False, True, True, False, False, 1, 49],
-               "CSS 116 구역: 화면이 쓰는 클래스 49개(116 40 + 보완 1 9) 정의·가로 스크롤 없음·고정 너비 960px 이하·LF·끝 줄바꿈, JS 소구역 표시 하나")
+               [True, True, [], [], False, True, True, False, False, 1, 59],
+               "CSS 116 구역: 화면이 쓰는 클래스 59개(116 40 + 보완 1 9 + 지시서 119 고르기 창 10) 정의·가로 스크롤 없음·고정 너비 960px 이하·LF·끝 줄바꿈, "
+               "JS 소구역 표시 하나")
     except Exception as exc:  # noqa: BLE001
         bad.append("(rtk-k) 예외: " + repr(exc) + "\n" + _tb.format_exc()[:1200])
 
@@ -41850,6 +41851,10 @@ function C(id, key, a, b, extra) {
   Object.keys(extra || {}).forEach(function (k) { c[k] = extra[k]; });
   return c;
 }
+// 지시서 119: 머리 줄 [AI로 고치기] → 고르기 창 → [AI로 고치기](whole 이면 [모두 해제] 먼저 = 테이크 통째)
+function pickOpen(root) { byClass(root, "vnew-edit-fix-pick")[0].fire("click"); return editCtx.fixPick; }
+function pickGo(root, whole) { var pk = pickOpen(root); if (whole) pk.dom.none.fire("click"); pk.dom.go.fire("click"); }
+function pickInfo(pk) { return pk ? [pk.mid, pk.cuts.length, pk.picked.slice(), pk.dom.note.textContent] : null; }
 async function run() {
   // ===== 끔: 버튼 없음
   var hostOff = new FakeNode("div");
@@ -41857,7 +41862,7 @@ async function run() {
   renderEditStep(hostOff);
   await settle();
   var rootOff = editCtx.root;
-  out.off = [byClass(rootOff, "vnew-edit-fix-open").length, byClass(rootOff, "vnew-edit-fix-sel").length,
+  out.off = [byClass(rootOff, "vnew-edit-fix-open").length, byClass(rootOff, "vnew-edit-fix-pick").length,
              byClass(rootOff, "vnew-edit-bin-cell").length, texts(rootOff, "vnew-edit-bin-item"), editCtx.retakeOn];
   editLeave();
   // ===== 켬: 재료 줄
@@ -41867,32 +41872,44 @@ async function run() {
   await settle();
   var ctx = editCtx;
   var root = ctx.root;
-  var sel = byClass(root, "vnew-edit-fix-sel")[0];
-  out.bin = { open: byClass(root, "vnew-edit-fix-open").map(function (b) { return [b.textContent, b.disabled, b.attrs["aria-label"]]; }),
+  var pkBtn = byClass(root, "vnew-edit-fix-pick")[0];
+  out.bin = { open: byClass(root, "vnew-edit-fix-open").length, sel: byClass(root, "vnew-edit-fix-sel").length,
               items: texts(root, "vnew-edit-bin-item"), cells: byClass(root, "vnew-edit-bin-cell").length,
-              sel: sel ? [sel.textContent, sel.disabled, sel.title] : null, retakeOn: ctx.retakeOn, clips: ctx.clips.map(function (c) { return c.label; }) };
+              pick: pkBtn ? [pkBtn.textContent, pkBtn.disabled, pkBtn.title] : null, retakeOn: ctx.retakeOn, clips: ctx.clips.map(function (c) { return c.label; }) };
+  // 지시서 119: 고른 클립(원본 0–7.5초)의 재료가 처음 테이크, 장면 경계(cuts)가 없으면 그 클립 구간 한 줄을 골라 둔다. 창이 열린 동안 단축키 무시·Esc 닫기
   editSelect(ctx, 0);
-  out.selOn = [sel.disabled, sel.title];
-  // 합친 영상(고칠 수 없는 재료) 클립을 고르면 [고른 클립 AI로 고치기] 흐림 — 넣었다가 실행 취소로 되돌린다
+  var pk0 = pickOpen(root);
+  var nKeys = ctx.clips.length;
+  var ksPick = key("s", "KeyS");
+  out.selOn = [pickInfo(pk0), pk0.dom.root.parentNode === root, pk0.dom.radios[S.rv0.mid].checked, ctx.clips.length === nKeys, !!ksPick.defaultPrevented];
+  key("Escape", "Escape");
+  out.selOn.push(ctx.fixPick, byClass(root, "vnew-edit-pick").length);
+  // 합친 영상(고칠 수 없는 재료) 클립을 고르면 첫 테이크가 처음 값·구간 없음 — 넣었다가 실행 취소로 되돌린다
   byClass(root, "vnew-edit-bin-item").filter(function (b) { return b.textContent.indexOf("합친 영상") >= 0; })[0].fire("click");
   await settle();
-  var selFinal = byClass(root, "vnew-edit-fix-sel")[0];
-  out.selFinal = [ctx.clips.length, ctx.sel, selFinal.disabled, selFinal.title];
+  var pkF = pickOpen(root);
+  out.selFinal = [ctx.clips.length, ctx.sel, pickInfo(pkF)];
+  byClass(pkF.dom.root, "vnew-edit-fix-close")[0].fire("click");
+  out.selFinal.push(ctx.fixPick);
   editDo(ctx, "undo");
   editSeek(ctx, 0);
   editSelect(ctx, 0);
-  sel = byClass(root, "vnew-edit-fix-sel")[0];
   // ===== 고른 클립에서 패널 열기
   var mid = S.rv0.mid;
-  push("GET", P + "/retake/" + mid, { ok: clone(S.rv0) });
-  sel.fire("click");
+  // 지시서 119 보완 1: 컷(컷 1 = 0–7.5초)을 골라 열면 「이 구간만」이 기본 → 첫 GET 이 ?in=&out=. 보기에 구간이 없으면(rv0) editFixAdopt 가 full 로
+  push("GET", P + "/retake/" + mid + "?in=0&out=7.5", { ok: clone(S.rv0) });
+  pickGo(root, false);
+  var openScope = [ctx.fix.scope];
   await settle();
   var fx = ctx.fix;
   var fr = fx.dom.root;
+  openScope.push(fx.scope, calls.filter(function (c) { return c[0] === "GET" && c[1].indexOf(P + "/retake/" + mid) === 0; })
+    .slice(-1).map(function (c) { return c[1].slice(P.length).replace(mid, "MID"); })[0]);
   out.open = {
+    scope: openScope,
     attached: fr.parentNode === root, role: [fr.attrs.role, fr.attrs["aria-modal"]], title: txt(fr, "vnew-edit-fix-title"), src: txt(fr, "vnew-edit-fix-src"),
     prompt: byClass(fr, "vnew-edit-fix-prompt")[0].textContent === S.base, summary: byTag(fr, "summary").map(function (n) { return n.textContent; }),
-    meta: texts(fr, "vnew-edit-fix-meta").length, video: fx.dom.video.src === S.rv0.videoUrl, clipId: fx.clipId === ctx.clips[0].id,
+    meta: texts(fr, "vnew-edit-fix-meta").length, video: fx.dom.video.src === S.rv0.videoUrl, clipId: [fx.clipId, fx.clip],
     versions: texts(fr, "vnew-edit-fix-version-name"), draft: fx.dom.draft.style.display, run: fx.dom.run.style.display,
     make: [fx.dom.make.textContent, fx.dom.make.disabled], note: fx.dom.note.style.display
   };
@@ -41905,7 +41922,7 @@ async function run() {
   out.esc = [ctx.fix, byClass(root, "vnew-edit-fix").length, fx.open];
   // ===== 재료 줄에서 다시 열기 → 새 프롬프트 만들기
   push("GET", P + "/retake/" + mid, { ok: clone(S.rv0) });
-  byClass(root, "vnew-edit-fix-open")[0].fire("click");
+  pickGo(root, true);
   await settle();
   fx = ctx.fix;
   var reopenClip = fx.clipId;
@@ -41917,7 +41934,7 @@ async function run() {
   fx.dom.make.fire("click");
   await settle();
   var pv = calls.filter(function (c) { return c[0] === "POST" && c[1] === P + "/retake/" + mid + "/preview"; });
-  out.preview = { reopenClip: reopenClip, emptyNote: emptyNote, posts: pv.length, body: pv.length ? pv[0][2] : null,
+  out.preview = { reopenClip: reopenClip, scope: fx.scope, emptyNote: emptyNote, posts: pv.length, body: pv.length ? pv[0][2] : null,
                   make: [fx.dom.make.textContent, fx.dom.make.disabled], status: fx.dom.draftStatus.textContent, pending: pending(2000),
                   newShown: fx.dom.newField.style.display };
   push("GET", P + "/retake/" + mid, { ok: clone(S.rvDone) });
@@ -41988,8 +42005,8 @@ async function run() {
   // ===== 닫고 고른 클립(원래 둘째 컷)에서 다시 열기 → v2 [바꾸기] 는 그 클립만
   editFixClose(ctx);
   editSelect(ctx, 2);
-  push("GET", P + "/retake/" + mid, { ok: clone(S.rvV2) });
-  byClass(root, "vnew-edit-fix-sel")[0].fire("click");
+  push("GET", P + "/retake/" + mid + "?in=7.5&out=15", { ok: clone(S.rvV2) });
+  pickGo(root, false);
   await settle();
   fx = ctx.fix;
   var rowsSel = byClass(fx.dom.versions, "vnew-edit-fix-version");
@@ -42003,7 +42020,7 @@ async function run() {
   out.undo = [undoBlocked, ctx.clips.map(function (c) { return c.sourceKey === S.v2Key; })];
   // ===== 떠나기 → 조회 타이머 0
   push("GET", P + "/retake/" + mid, { ok: clone(S.rvRunning) });
-  byClass(root, "vnew-edit-fix-open")[0].fire("click");
+  pickGo(root, true);
   await settle();
   fx = ctx.fix;
   var pendingBefore = pending(2000);
@@ -42016,7 +42033,7 @@ async function run() {
   ctx = editCtx;
   root = ctx.root;
   push("GET", P + "/retake/" + mid, { ok: clone(S.rvV2) });
-  byClass(root, "vnew-edit-fix-open")[0].fire("click");
+  pickGo(root, true);
   await settle();
   fx = ctx.fix;
   function vrows() {
@@ -42075,6 +42092,61 @@ async function run() {
           editFixVersionUrl({ materials: { k3: { videoUrl: "u3" } } }, {}, { status: "submitted", sourceKey: "k3", mid: "m3" }),
           editFixVersionUrl({ materials: {} }, {}, { status: "completed", sourceKey: "k4", mid: "m4" }), editFixVersionUrl({}, null, null)]
   };
+  // ===== (지시서 119) 고르기 창: 장면 경계 4개(retake.cuts, 정렬 안 됨)·고칠 수 없는 v9·떨어진 장면 → 한 구간 → 패널 "이 구간만"
+  var w119 = clone(S.webV1);
+  var take119 = w119.materials.filter(function (m) { return m.retake && m.retake.can === true; })[0];
+  take119.retake.cuts = [{ cutId: "c4", no: 4, in: 10, out: 15 }, { cutId: "c1", no: 1, in: 0, out: 3 }, { cutId: "c2", no: 2, in: 3, out: 6 },
+                         { cutId: "c3", no: 3, in: 6, out: 10 }];
+  var off119 = clone(take119);
+  off119.sourceKey = take119.sourceKey + "-v9";
+  off119.mid = "medoff119";
+  off119.label = take119.label + " v9";
+  off119.group = "retake";
+  off119.retake = { can: false, n: 9, cellKey: take119.retake.cellKey, running: false, reason: "이 칸은 프롬프트 기록이 없어 AI로 고칠 수 없습니다." };
+  w119.materials.push(off119);
+  push("GET", P, { ok: w119 });
+  renderEditStep(new FakeNode("div"));
+  await settle();
+  ctx = editCtx;
+  root = ctx.root;
+  var pk = pickOpen(root);
+  function pickInputs() { return byTag(pk.dom.root, "input").map(function (i) { return [i.type, !!i.disabled, !!i.checked]; }); }
+  function tick(i, on) { pk.dom.boxes[i].checked = on; pk.dom.boxes[i].fire("change"); }
+  var labels119 = byClass(pk.dom.root, "vnew-edit-pick-item");
+  out.pick = { first: [pk.mid === take119.mid, labels119.map(function (l) { return [l.textContent, l.className, l.title || ""]; }), pickInputs(),
+                       pk.dom.note.textContent, [pk.dom.root.attrs.role, pk.dom.root.attrs["aria-modal"]], txt(pk.dom.root, "vnew-edit-fix-title")] };
+  tick(1, true);
+  tick(3, true);
+  out.pick.gap = [pk.picked.slice(), pk.dom.note.textContent, editFixPickRange(pk.cuts, pk.picked)];
+  pk.dom.all.fire("click");
+  out.pick.all = [pickInputs().slice(2), pk.dom.note.textContent, editFixPickRange(pk.cuts, pk.picked)];
+  pk.dom.none.fire("click");
+  out.pick.none = [pk.picked.slice(), pk.dom.note.textContent];
+  tick(1, true);
+  tick(0, true);
+  out.pick.near = [pk.dom.note.textContent, editFixPickRange(pk.cuts, pk.picked)];
+  tick(0, false);
+  tick(3, true);
+  var midT = take119.mid;
+  // 지시서 119 보완 1: 열자마자 범위 = range(첫 GET 이 ?in=3&out=15), 보기에 구간이 없으면(rv0) full 로
+  push("GET", P + "/retake/" + midT + "?in=3&out=15", { ok: clone(S.rv0) });
+  pk.dom.go.fire("click");
+  var scope119 = [ctx.fix.scope];
+  await settle();
+  var fx119 = ctx.fix;
+  scope119.push(fx119.scope);
+  var rangeText119 = [fx119.dom.scope.style.display, fx119.dom.scopeRange.text.textContent];
+  out.pick.go = [ctx.fixPick, fx119.mid === midT, fx119.clipId, fx119.clip, rangeText119, scope119,
+                 calls.filter(function (c) { return c[0] === "GET" && c[1].indexOf(P + "/retake/" + midT) === 0; }).map(function (c) { return c[1].slice(P.length); })
+                   .slice(-1).map(function (s) { return s.replace(midT, "MID"); })];
+  editFixClose(ctx);
+  // 고른 클립(원본 0–7.5초)이 있으면 겹치는 장면(컷 1·2·3)을 골라 둔다. 고칠 수 없는 v9 라디오는 누를 수 없다.
+  editSelect(ctx, 0);
+  pk = pickOpen(root);
+  out.pick.pre = [pk.picked.slice(), pk.dom.note.textContent, pk.dom.radios.medoff119.disabled];
+  key("Escape", "Escape");
+  out.pick.esc = [ctx.fixPick, byClass(root, "vnew-edit-pick").length];
+  editLeave();
   // ===== 순수 함수
   var clips = [C("a", "k1", 0, 5), C("b", "k1", 5, 15, { speed: 2, label: "테이크 1" }), C("c", "k2", 0, 3), C("d", "k1", 14, 15)];
   function sw(r) { return [r.changed, r.skipped, r.clips.map(function (c) { return [c.id, c.sourceKey, c.in, c.out, editSpeedOf(c), c.label || ""]; })]; }
@@ -42153,24 +42225,26 @@ def _rtk_ui_problems(got: dict, server: dict) -> list[str]:
 
     items_v1 = ["＋ " + label + " · 15.0초", "＋ 합친 영상"]
     want(got.get("off"), [0, 0, 0, items_v1, False], "끔(GET /edit 에 retake 없음): AI로 고치기 버튼·고른 클립 버튼·묶음 없음, 재료 버튼 그대로")
-    want(got.get("bin"), {"open": [["AI로 고치기", False, "AI로 고치기 — " + label]], "items": items_v1, "cells": 1,
-                          "sel": ["고른 클립 AI로 고치기", True, "타임라인에서 AI로 고칠 수 있는 테이크·컷 클립을 고르세요"], "retakeOn": True,
-                          "clips": ["컷 1", "컷 2"]},
-         "켬: 테이크 재료 옆에만 [AI로 고치기](합친 영상은 없음)·재료 버튼 글 그대로·고른 클립 없으면 흐림")
-    want(got.get("selOn"), [False, "고른 클립(" + label + ")을 AI로 고칩니다"], "클립을 고르면 [고른 클립 AI로 고치기] 켜짐")
-    want(got.get("selFinal"), [3, 1, True, "타임라인에서 AI로 고칠 수 있는 테이크·컷 클립을 고르세요"],
-         "합친 영상 클립을 고르면 [고른 클립 AI로 고치기] 흐림(고칠 수 없는 재료)")
-    want(got.get("open"), {"attached": True, "role": ["dialog", "true"], "title": "AI로 고치기 — " + label, "src": "기록", "prompt": True,
-                           "summary": ["이전 시도 (1)"], "meta": 1, "video": True, "clipId": True, "versions": ["v1 원본 · 완성"], "draft": "none",
+    want(got.get("bin"), {"open": 0, "sel": 0, "items": items_v1, "cells": 0,
+                          "pick": ["AI로 고치기", False, "고칠 테이크와 장면을 골라 AI로 고칩니다"], "retakeOn": True, "clips": ["컷 1", "컷 2"]},
+         "켬(지시서 119): 재료마다 붙던 [AI로 고치기]·[고른 클립 AI로 고치기]·묶음 없음, 머리 줄 [AI로 고치기] 하나, 재료 버튼 글 그대로")
+    mid0 = (server.get("rv0") or {}).get("mid")
+    want(got.get("selOn"), [[mid0, 2, [True, False], "고른 구간(0.0–7.5초)만 고칩니다. 패널의 「이 구간만 다시 만들기」가 이 구간입니다."], True, True, True, False,
+                            None, 0],
+         "고른 클립(원본 0–7.5초)의 재료가 처음 테이크·겹치는 컷 1만 체크(지시서 119 edit.py plan·길이 전달)·⑦ 루트 안·단축키 무시·Esc 닫기")
+    want(got.get("selFinal"), [3, 1, [mid0, 2, [False, False], "아무 장면도 고르지 않으면 테이크 통째로 고칩니다."], None],
+         "합친 영상 클립(고칠 수 없는 재료)을 고르면 첫 테이크가 처음 값·구간 없음 = 통째, [×] 닫기")
+    want(got.get("open"), {"scope": ["range", "full", "/retake/MID?in=0&out=7.5"], "attached": True, "role": ["dialog", "true"], "title": "AI로 고치기 — " + label, "src": "기록", "prompt": True,
+                           "summary": ["이전 시도 (1)"], "meta": 1, "video": True, "clipId": ["", {"in": 0, "out": 7.5}], "versions": ["v1 원본 · 완성"], "draft": "none",
                            "run": "none", "make": ["새 프롬프트 만들기", False], "note": "none"},
-         "패널: ⑦ 루트 안 대화상자·이름·출처(기록)·이전 프롬프트·이전 시도·지금 결과 영상·고른 클립·버전·초안 없음")
+         "패널: 지시서 119 보완 1 컷 1 을 골라 열면 fix.scope = range·첫 GET ?in=0&out=7.5(보기에 구간이 없으면 full)·⑦ 루트 안 대화상자·이름·출처(기록)·이전 프롬프트·이전 시도·지금 결과 영상·고른 클립·버전·초안 없음")
     want(got.get("keys"), [True, False, False], "패널이 열린 동안 ⑦ 단축키(S·Space) 무시")
     want(got.get("esc"), [None, 0, False], "Esc → 패널 닫기(조회 멈춤)")
     pv = got.get("preview") or {}
-    want([pv.get("reopenClip"), pv.get("emptyNote"), pv.get("posts"), pv.get("body"), pv.get("make"), pv.get("status"), pv.get("pending"), pv.get("newShown")],
-         ["", "수정 사항을 적어 주세요.", 1, {"requestKo": "웃지 않게", "extraKo": "빛은 따뜻하게"}, ["새 프롬프트를 만드는 중…", True],
+    want([pv.get("reopenClip"), pv.get("scope"), pv.get("emptyNote"), pv.get("posts"), pv.get("body"), pv.get("make"), pv.get("status"), pv.get("pending"), pv.get("newShown")],
+         ["", "full", "수정 사항을 적어 주세요.", 1, {"requestKo": "웃지 않게", "extraKo": "빛은 따뜻하게"}, ["새 프롬프트를 만드는 중…", True],
           "새 프롬프트를 만드는 중… (결과 영상 프레임과 이전 프롬프트를 보고 고칩니다)", 1, "none"],
-         "재료 줄에서 열면 고른 클립 없음·빈 요청은 안내만·POST 바디(앞뒤 공백 지움)·running → 2초 뒤 조회")
+         "재료 줄에서 열면(컷 안 고름) 고른 클립 없음·fix.scope = full·빈 요청은 안내만·POST 바디(앞뒤 공백 지움, scope 없음)·running → 2초 뒤 조회")
     dn = got.get("done") or {}
     draft = (server.get("rvDone") or {}).get("draft") or {}
     want(dn, {"value": True, "meter": f"{len(draft.get('prompt', '').encode()):,} / 4,000바이트", "problems": 0,
@@ -42205,8 +42279,8 @@ def _rtk_ui_problems(got: dict, server: dict) -> list[str]:
     want(got.get("add"), [1, [False, True, False]], "[재료에 추가] v2: 재생헤드 클립 뒤에 한 개")
     want(got.get("failed"), {"run": ["vnew-edit-fix-status vnew-edit-fix-run is-failed", "v3 실패 — fal 이 거절했습니다."], "submit": "다시 시도 ($3.08)",
                              "err": ["fal 이 거절했습니다."]}, "실패 버전: 진행 줄 문구·버전 줄 오류·[다시 시도 ($3.08)]")
-    want(got.get("swapOne"), [False, True, True], "고른 클립에서 연 패널의 [바꾸기]는 그 클립만")
-    want(got.get("undo"), [[False, True, True], [False, True, False]], "패널이 열린 동안 Ctrl+Z 무시, 닫으면 실행 취소로 되돌림")
+    want(got.get("swapOne"), [True, True, True], "지시서 119: 고른 클립에서 고르기 창으로 연 패널도 고른 클립이 없어 [바꾸기]는 그 칸의 클립 모두")
+    want(got.get("undo"), [[True, True, True], [False, True, False]], "패널이 열린 동안 Ctrl+Z 무시, 닫으면 실행 취소로 되돌림")
     want(got.get("leave"), [1, 0, 0, False], "⑦ 을 떠나면 패널 조회 타이머 0")
     pure = got.get("pure") or {}
     want(pure, {
@@ -42219,6 +42293,27 @@ def _rtk_ui_problems(got: dict, server: dict) -> list[str]:
         "meta": ["재구성(기록 없음) · 2026-11-02 01:02:03 · m · 완성 · 참고 이미지 기록 없음",
                  "실사 1회차 · 2번째 시도 · 참고 이미지 3장 · 8KB 에서 잘림", "v2 다시 만들기 · 2번째 시도 · 실패 · 참고 이미지 0장"],
     }, "순수 함수: editSwapSource(새 길이 안으로·속도 반영 최소·이름·ids·길이 모름·같은 원본·너무 짧음·원본 불변)·바이트·쉼표·금액·다음 번호·진행 줄·시도 머리")
+    pick = got.get("pick") or {}
+    no_prompt = "이 칸은 프롬프트 기록이 없어 AI로 고칠 수 없습니다."
+    want(pick.get("first"), [True, [[label + " · 15.0초", "vnew-edit-pick-item", ""], [label + " v9 · 15.0초", "vnew-edit-pick-item is-off", no_prompt],
+                                    ["컷 1 · 3.0초", "vnew-edit-pick-item", ""], ["컷 2 · 3.0초", "vnew-edit-pick-item", ""],
+                                    ["컷 3 · 4.0초", "vnew-edit-pick-item", ""], ["컷 4 · 5.0초", "vnew-edit-pick-item", ""]],
+                             [["radio", False, True], ["radio", True, False]] + [["checkbox", False, False]] * 4,
+                             "아무 장면도 고르지 않으면 테이크 통째로 고칩니다.", ["dialog", "true"], "AI로 고치기 — 테이크·장면 고르기"],
+         "지시서 119 고르기 창: 고칠 수 있는 테이크 라디오(처음 값)·고칠 수 없는 v9 흐림 + 이유 title·장면 체크박스(시각순, 처음엔 아무것도 안 고름)·안내")
+    want(pick.get("gap"), [[False, True, False, True], "고른 장면이 떨어져 있어 첫 장면 시작부터 마지막 장면 끝까지(3.0–15.0초) 한 구간으로 고칩니다. "
+                           "사이 장면(컷 3)도 함께 다시 만들어집니다.", {"in": 3, "out": 15}],
+         "떨어진 장면(컷 2·4) → 첫 시작~마지막 끝 한 구간·사이 장면 안내")
+    want(pick.get("all"), [[["checkbox", False, True]] * 4, "모든 장면을 골라 테이크 통째로 고칩니다.", None], "[전체] → 모두 고름 = 통째(null)")
+    want(pick.get("none"), [[False, False, False, False], "아무 장면도 고르지 않으면 테이크 통째로 고칩니다."], "[모두 해제]")
+    want(pick.get("near"), ["고른 구간(0.0–6.0초)만 고칩니다. 패널의 「이 구간만 다시 만들기」가 이 구간입니다.", {"in": 0, "out": 6}], "붙은 장면(컷 1·2)")
+    want(pick.get("go"), [None, True, "", {"in": 3, "out": 15}, ["", "이 구간만 다시 만들기 (클립 3.0–15.0초)"], ["range", "full"],
+                          ["/retake/MID?in=3&out=15"]],
+         "[AI로 고치기] → 창 닫힘·패널 editFixOpen(mid, \"\", {3, 15})·지시서 119 보완 1 열자마자 fix.scope = range·첫 GET ?in=3&out=15"
+         "(보기에 구간이 없으면 full)")
+    want(pick.get("pre"), [[True, True, True, False], "고른 구간(0.0–10.0초)만 고칩니다. 패널의 「이 구간만 다시 만들기」가 이 구간입니다.", True],
+         "고른 클립(원본 0–7.5초)과 겹치는 장면(컷 1·2·3)을 처음부터 골라 둠·v9 라디오 disabled")
+    want(pick.get("esc"), [None, 0], "고르기 창 Esc 닫기")
     want(got.get("innerHTML"), False, "가짜 DOM 에서 innerHTML·outerHTML·insertAdjacentHTML 0")
     _ = edit_url
     return problems
@@ -43060,7 +43155,8 @@ def check_vnew_edit_retake_models() -> None:
             expect("rtk-q", [mat_v2.get("retake"), (row_v2.get("model"), row_v2.get("modelLabel"), row_v2.get("scope"), row_v2.get("range"),
                                                      row_v2.get("trimTo"), row_v2.get("label")),
                              (row_v1.get("model"), row_v1.get("scope"), row_v1.get("range"), row_v1.get("trimTo"), row_v1.get("cutIds"))],
-                   [{"can": True, "n": 2, "cellKey": "webtoon:take1", "running": False, "reason": "", "trimTo": 15.0},
+                   [{"can": True, "n": 2, "cellKey": "webtoon:take1", "running": False, "reason": "", "trimTo": 15.0,
+                     "cuts": [{"cutId": "c1", "in": 0.0, "no": 1, "out": 7.5}, {"cutId": "c2", "in": 7.5, "no": 2, "out": 15.0}]},  # 지시서 119: plan·길이를 넘겨 컷이 채워진다
                     (kl, listed[kl]["label"], "full", None, 15.0, label_t + " v2"), (lr, "full", None, None, ["c1", "c2"])],
                    "재료 표식 trimTo·패널 버전 줄(모델·범위·자를 길이·재료 이름), v1 줄은 원래 모델")
             # v2(다른 형식 버전)를 기준으로 원래 모델·원본 칸 전체 → 새 길(본보기)
@@ -43212,7 +43308,7 @@ def check_vnew_edit_retake_models() -> None:
             expect("rtk-r", [mat_r.get("label"), mat_r.get("retake"), [m["label"] for m in view_r.get("materials") or []],
                              next((v.get("label") for v in server["rvV2Rfull"].get("versions") or [] if v.get("n") == 2), None)],
                    ["테이크 1 · 컷 2 v2", {"can": True, "n": 2, "cellKey": "webtoon:take1", "running": False, "reason": "", "trimTo": 7.5,
-                                           "range": {"start": 7.5, "end": 15.0}},
+                                           "range": {"start": 7.5, "end": 15.0}, "cuts": [{"cutId": "c2", "in": 0.0, "no": 2, "out": 7.5}]},
                     [label_t, "테이크 1 · 컷 2 v2", "합친 영상"], "테이크 1 · 컷 2 v2"],
                    "구간 버전 재료: 이름(구간 컷 번호 + v2, 패널 버전 줄도 같은 이름)·표식 trimTo 7.5·range, 그 칸 v1 바로 뒤")
             # 구간 안 컷에만 나오는 인물로 참고 이미지를 고른다(컷 2 에는 에이만): 구간 견적의 참고 수·본보기·보낸 이미지 3장
@@ -43651,6 +43747,10 @@ function C(id, key, a, b, extra) {
   Object.keys(extra || {}).forEach(function (k) { c[k] = extra[k]; });
   return c;
 }
+// 지시서 119: 머리 줄 [AI로 고치기] → 고르기 창 → [AI로 고치기](whole 이면 [모두 해제] 먼저 = 테이크 통째)
+function pickOpen(root) { byClass(root, "vnew-edit-fix-pick")[0].fire("click"); return editCtx.fixPick; }
+function pickGo(root, whole) { var pk = pickOpen(root); if (whole) pk.dom.none.fire("click"); pk.dom.go.fire("click"); }
+function pickInfo(pk) { return pk ? [pk.mid, pk.cuts.length, pk.picked.slice(), pk.dom.note.textContent] : null; }
 function gets(prefix) { return calls.filter(function (c) { return c[0] === "GET" && c[1].indexOf(prefix) === 0; }).map(function (c) { return c[1]; }); }
 function lastPost(path) { var l = calls.filter(function (c) { return c[0] === "POST" && c[1] === path; }); return l.length ? l[l.length - 1][2] : null; }
 async function run() {
@@ -43663,12 +43763,14 @@ async function run() {
   var root = ctx.root;
   editSelect(ctx, 1);
   var mid = S.rvS.mid;
-  push("GET", P + "/retake/" + mid, { ok: clone(S.rvS) });
-  byClass(root, "vnew-edit-fix-sel")[0].fire("click");
+  // 지시서 119 보완 1: 컷 2 를 골라 열면 「이 구간만」이 기본 → 첫 GET ?in=7.5&out=15. 보기에 구간이 없으면(rvS) editFixAdopt 가 full 로
+  push("GET", P + "/retake/" + mid + "?in=7.5&out=15", { ok: clone(S.rvS) });
+  pickGo(root, false);
+  var openScopeA = ctx.fix.scope;
   await settle();
   var fx = ctx.fix;
   var d = fx.dom;
-  out.setup = { clip: fx.clip, scope: fx.scope, model: fx.model, scopeShown: d.scope.style.display, fullText: d.scopeFull.text.textContent,
+  out.setup = { clip: fx.clip, openScope: openScopeA, scope: fx.scope, model: fx.model, scopeShown: d.scope.style.display, fullText: d.scopeFull.text.textContent,
                 rangeText: d.scopeRange.text.textContent, checked: [d.scopeFull.radio.checked, d.scopeRange.radio.checked], options: opts(d.model),
                 disabled: d.model.disabled, value: d.model.value, info: d.modelInfo.textContent,
                 hidden: [d.modelHidden.style.display, d.modelHidden.textContent, d.modelHidden.title.split("\n").length], gets: gets(P + "/retake/") };
@@ -43712,9 +43814,9 @@ async function run() {
                        gets: gets(P + "/retake/" + mid + "?") };
   editFixClose(ctx);
   push("GET", P + "/retake/" + mid, { ok: clone(S.rvSDone) });
-  byClass(root, "vnew-edit-fix-open")[0].fire("click");
+  pickGo(root, true);
   await settle();
-  out.reopen = [ctx.fix.model, ctx.fix.dom.model.value, ctx.fix.clip, ctx.fix.dom.scope.style.display, ctx.fix.dom.submit.disabled];
+  out.reopen = [ctx.fix.model, ctx.fix.dom.model.value, ctx.fix.clip, ctx.fix.dom.scope.style.display, ctx.fix.dom.submit.disabled, ctx.fix.scope];
   editFixClose(ctx);
   editLeave();
 
@@ -43727,16 +43829,15 @@ async function run() {
   root = ctx.root;
   editSelect(ctx, 1);
   mid = S.rvT.mid;
-  push("GET", P + "/retake/" + mid, { ok: clone(S.rvT) });
-  byClass(root, "vnew-edit-fix-sel")[0].fire("click");
+  // 지시서 119 보완 1: 컷 2 를 골라 열면 라디오를 누르지 않아도 「이 구간만」(첫 GET 부터 ?in=7.5&out=15, 서버가 구간을 준 rvTR → range 유지)
+  push("GET", P + "/retake/" + mid + "?in=7.5&out=15", { ok: clone(S.rvTR) });
+  pickGo(root, false);
+  var openScopeB = ctx.fix.scope;
   await settle();
   fx = ctx.fix;
   d = fx.dom;
-  push("GET", P + "/retake/" + mid + "?in=7.5&out=15", { ok: clone(S.rvTR) });
-  d.scopeRange.radio.checked = true;
-  d.scopeRange.radio.fire("change");
-  await settle();
-  out.range = { scope: fx.scope, model: fx.model, rangeText: d.scopeRange.text.textContent, options: opts(d.model).map(function (o) { return o[0]; }),
+  out.range = { open: [openScopeB, gets(P + "/retake/" + mid)], scope: fx.scope, model: fx.model, rangeText: d.scopeRange.text.textContent,
+                options: opts(d.model).map(function (o) { return o[0]; }),
                 info: d.modelInfo.textContent, checked: [d.scopeFull.radio.checked, d.scopeRange.radio.checked] };
   d.request.value = "뒤로 앉게";
   push("POST", P + "/retake/" + mid + "/preview", { ok: { ok: true, retake: clone(S.rvDR) } });
@@ -43775,8 +43876,8 @@ async function run() {
   editDo(ctx, "undo");
   editFixClose(ctx);
   editSelect(ctx, 0);
-  push("GET", P + "/retake/" + mid, { ok: clone(S.rvV2Rfull) });
-  byClass(root, "vnew-edit-fix-sel")[0].fire("click");
+  push("GET", P + "/retake/" + mid + "?in=0&out=7.5", { ok: clone(S.rvV2Rfull) });
+  pickGo(root, false);
   await settle();
   fx = ctx.fix;
   d = fx.dom;
@@ -43848,11 +43949,12 @@ def _rtk1_ui_problems(got: dict, server: dict) -> list[str]:
 
     rv_s = server["rvS"]
     want(got.get("setup"), {
-        "clip": {"in": 7.5, "out": 15}, "scope": "full", "model": lr, "scopeShown": "", "fullText": "원본 칸 전체 (0.0–15.0초)",
+        "clip": {"in": 7.5, "out": 15}, "openScope": "range", "scope": "full", "model": lr, "scopeShown": "", "fullText": "원본 칸 전체 (0.0–15.0초)",
         "rangeText": "이 구간만 다시 만들기 (클립 7.5–15.0초)", "checked": [True, False], "options": [option(m, "full") for m in rv_s["models"]],
         "disabled": False, "value": lr, "info": "형식: 참고 영상·이미지(@Video1·@Image N) · 원래와 같은 길이 15.0초 · 480p · 예상 $3.08 · 프롬프트 4,000바이트까지",
-        "hidden": ["", "이 칸에 쓸 수 없는 모델 5개는 목록에서 뺐습니다.", 5], "gets": [edit_url + "/retake/" + rv_s["mid"]]},
-        "고른 클립(원본 일부)에서 연 패널: 범위 라디오(원본 칸 전체 고름)·모델 상자(원래 모델 첫 줄·금액·기본 단가)·정보 줄·뺀 모델 5개, 첫 GET 은 116 주소")
+        "hidden": ["", "이 칸에 쓸 수 없는 모델 5개는 목록에서 뺐습니다.", 5], "gets": [edit_url + "/retake/" + rv_s["mid"] + "?in=7.5&out=15"]},
+        "고른 클립(컷 2)에서 연 패널: 지시서 119 보완 1 처음엔 range·첫 GET ?in=7.5&out=15, 보기에 구간이 없어(rvS) full 로·범위 라디오(원본 칸 전체 고름)·"
+        "모델 상자(원래 모델 첫 줄·금액·기본 단가)·정보 줄·뺀 모델 5개")
     want(got.get("klInfo"), [kl, "형식: 인물 요소(@Video1·@Element N) · 15.0초로 만들고 그대로 씀 · 예상 $2.10 · 프롬프트 2,500바이트까지 · 원래 모델과 형식이 달라 새 프롬프트를 "
                              "이 모델 형식으로 옮깁니다"], "모델을 Kling 으로 바꾸면 정보 줄(형식·길이·상한·형식 옮김 안내)을 서버 견적으로 다시 그림")
     draft = (server["rvSDone"].get("draft") or {})
@@ -43872,15 +43974,18 @@ def _rtk1_ui_problems(got: dict, server: dict) -> list[str]:
          "Kling 제출: 확인창(모델·범위·금액)·바디(model·confirmUsd = 고른 모델 견적)")
     want(got.get("rangeRefused"), {"wait": ["구간 정보를 불러오는 중…", True], "scope": "full",
                                    "note": ["", "고른 클립 구간을 읽지 못했습니다. 원본 칸 전체로 고칠 수 있습니다."], "checked": True,
-                                   "gets": [edit_url + "/retake/" + rv_s["mid"] + "?in=7.5&out=15"]},
-         "구간을 고르면 ?in=&out= 로 다시 받고(기다리는 동안 안내·상자 잠김), 서버가 구간을 주지 않으면 원본 칸 전체로 돌리고 이유")
-    want(got.get("reopen"), [kl, kl, None, "none", False], "Kling 초안이 있는 칸을 재료 줄에서 다시 열면 모델 상자 = 초안 모델(제출 가능), 고른 클립 없음 → 범위 줄 없음")
+                                   "gets": [edit_url + "/retake/" + rv_s["mid"] + "?in=7.5&out=15"] * 2},
+         "구간을 고르면 ?in=&out= 로 다시 받고(기다리는 동안 안내·상자 잠김, 열 때 한 번 + 라디오 한 번), 서버가 구간을 주지 않으면 원본 칸 전체로 돌리고 이유")
+    want(got.get("reopen"), [kl, kl, None, "none", False, "full"],
+         "Kling 초안이 있는 칸을 재료 줄에서(컷 안 고름) 다시 열면 모델 상자 = 초안 모델(제출 가능), 고른 클립 없음 → 범위 줄 없음·fix.scope = full")
     rv_tr = server["rvTR"]
-    want(got.get("range"), {"scope": "range", "model": lr, "rangeText": "이 구간만 다시 만들기 (7.5–15.0초 · 컷 2)",
+    want(got.get("range"), {"open": ["range", [edit_url + "/retake/" + rv_tr["mid"] + "?in=7.5&out=15"]], "scope": "range", "model": lr,
+                            "rangeText": "이 구간만 다시 만들기 (7.5–15.0초 · 컷 2)",
                             "options": [m["id"] for m in rv_tr["models"] if (m.get("range") or {}).get("ok")],
                             "info": "형식: 참고 영상·이미지(@Video1·@Image N) · 이 모델 길이 4·8·12·30초 중 8.0초로 만들고 7.5초로 잘라 씀 · 480p · 예상 $1.64 · 프롬프트 "
                                     "4,000바이트까지", "checked": [False, True]},
-         "이 구간만: 라디오 글(녹화 시각·컷 번호)·구간에서 쓸 수 있는 모델·길이 선택지 → 올림·자를 길이")
+         "이 구간만(지시서 119 보완 1: 컷 2 를 골라 열면 라디오 없이 fix.scope = range·첫 GET 부터 ?in=7.5&out=15): 라디오 글(녹화 시각·컷 번호)·"
+         "구간에서 쓸 수 있는 모델·길이 선택지 → 올림·자를 길이")
     dr_r = (server["rvDR"].get("draft") or {})
     want(got.get("rangeDraft"), {"body": {"requestKo": "뒤로 앉게", "extraKo": "", "scope": "range", "in": 7.5, "out": 15},
                                  "status": "새 프롬프트 — v1에서 고침 · 결과 프레임 3장을 봤습니다 · " + lr_label + " · 구간 7.5–15.0초",
@@ -43891,10 +43996,10 @@ def _rtk1_ui_problems(got: dict, server: dict) -> list[str]:
                                   "body": {"prompt": dr_r.get("prompt"), "requestKo": "뒤로 앉게", "extraKo": "", "confirmUsd": 1.64, "draftId": dr_r.get("id"),
                                            "scope": "range", "in": 7.5, "out": 15}, "pending": 1},
          "구간 제출: 확인창(구간)·바디(confirmUsd 1.64·scope·in·out)·5초 조회")
-    want(got.get("rangeDone"), {"rows": [["v1 원본 · 완성", None, [[False, "고른 클립을 v1 원본으로 바꿉니다(구간·속도는 길이 안에서 유지)"]]],
-                                         ["v2 · 완성", "구간 7.5–15.0초", [[False, "고른 클립을 v2로 바꿉니다(녹화 7.5–15.0초 자리, 속도는 그대로)"]]]],
+    want(got.get("rangeDone"), {"rows": [["v1 원본 · 완성", None, [[False, "타임라인에서 이 칸의 클립을 v1 원본으로 바꿉니다(구간·속도는 길이 안에서 유지)"]]],
+                                         ["v2 · 완성", "구간 7.5–15.0초", [[False, "타임라인에서 이 구간 안의 클립을 v2로 바꿉니다(녹화 7.5–15.0초 자리, 속도는 그대로)"]]]],
                                 "bin": ["＋ " + server["label"] + " · 15.0초", "＋ 테이크 1 · 컷 2 v2"]},
-         "완성: 버전 줄 구간 덧붙임·구간 [바꾸기] 안내, 재료 줄에 「테이크 1 · 컷 2 v2」(v1 바로 뒤)")
+         "완성: 버전 줄 구간 덧붙임·구간 [바꾸기] 안내(지시서 119: 고르기 창에서 열면 고른 클립 없음 = 이 칸·이 구간 안의 클립), 재료 줄에 「테이크 1 · 컷 2 v2」(v1 바로 뒤)")
     want(got.get("swapRange"), {"clips": [[False, 0, 7.5, "컷 1"], [True, 0, 7.5, "컷 2"]],
                                 "note": "타임라인 클립 1개를 v2로 바꿨습니다. 다른 버전의 [바꾸기]로 되돌릴 수 있습니다.", "undo": 1},
          "구간 v2 [바꾸기]: 고른 클립(컷 2, 녹화 7.5–15초)만 v2 0–7.5초로, 컷 1·다른 클립 그대로, 실행 취소 한 단계")
@@ -43902,8 +44007,9 @@ def _rtk1_ui_problems(got: dict, server: dict) -> list[str]:
                                   "note": "타임라인 클립 1개를 v1 원본으로 바꿨습니다. 다른 버전의 [바꾸기]로 되돌릴 수 있습니다."},
          "v1 [바꾸기] = 되돌리기: 원래 in·out(7.5–15초)으로")
     want(got.get("addRange"), [1, [[0, 7.5]], "＋ 테이크 1 · 컷 2 v2 · 7.5초"], "구간 v2 [재료에 추가]: 0–7.5초(자를 길이)만, 재료 줄 길이도 7.5초")
-    want(got.get("outside"), {"clips": [False, False], "note": "고른 클립이 v2 구간(7.5–15.0초) 밖이라 바꾸지 않았습니다.", "clip": {"in": 0, "out": 7.5}},
-         "구간 밖 클립(컷 1)에서 연 패널의 구간 v2 [바꾸기]는 그대로 두고 안내")
+    want(got.get("outside"), {"clips": [False, True], "note": "타임라인 클립 1개를 v2로 바꿨습니다. 다른 버전의 [바꾸기]로 되돌릴 수 있습니다.",
+                              "clip": {"in": 0, "out": 7.5}},
+         "지시서 119: 구간 밖 클립(컷 1)을 고르고 연 패널도 고른 클립이 없어 구간 v2 [바꾸기]는 이 구간 안의 클립(컷 2)만, 컷 1 그대로")
     pure = got.get("pure") or {}
     want(pure, {
         "into": [1, 1, 1, [["a", "k1", 0, 7.5, 1, "컷 1"], ["b", "kr", 0, 7.5, 2, "테이크 1 v2"], ["c", "kz", 0, 3, 1, ""], ["t", "k1", 14.98, 15, 1, ""]]],
@@ -44769,6 +44875,166 @@ def check_vnew_voice_scan_118b() -> None:
            "(iv3-d)화면 소리 시각·문구")
 
 
+# rtk-z: 지시서 119 고르기 창 순수 함수(editFixCutsRange·editFixPickRange·editFixPickNote). 화면 흐름은 rtk-j(_RTK_NODE_UI) 끝에 있다.
+_RTK119_NODE = r"""
+var R = {};
+var cuts4 = [{ cutId: "c1", no: 1, in: 0, out: 3 }, { cutId: "c2", no: 2, in: 3, out: 6 }, { cutId: "c3", no: 3, in: 6, out: 10 }, { cutId: "c4", no: 4, in: 10, out: 15 }];
+R.range = [editFixCutsRange([]), editFixCutsRange(null), editFixCutsRange([{ in: 3, out: 6 }]), editFixCutsRange([{ in: 3, out: 6 }, { in: 10, out: 15 }]),
+           editFixCutsRange([{ in: 10, out: 15 }, { in: 0, out: 3 }, { in: 6, out: 10.0004 }]), editFixCutsRange([{ in: 5, out: 5 }, null])];
+R.pick = [editFixPickRange(cuts4, [true, true, true, true]), editFixPickRange([{ in: 0, out: 7.5, clip: true }], [true]), editFixPickRange(cuts4, []),
+          editFixPickRange(cuts4, [false, false, true]), editFixPickRange(null, null)];
+R.note = [editFixPickNote([], []), editFixPickNote(cuts4, [true, false, false, true]), editFixPickNote([{ in: 1, out: 4, clip: true }], [true])];
+R.name = [editFixPickCutName({ no: 7 }, 0), editFixPickCutName({ no: null }, 1), editFixPickCutName({ clip: true, no: 3 }, 0)];
+console.log(JSON.stringify(R));
+"""
+
+
+def check_vnew_edit_fix_picker_119() -> None:
+    """지시서 119 — ⑦ AI로 고치기 버튼 하나·테이크·장면 고르기. 가짜 plan·gen(유료 호출 0).
+
+    (rtk-y) 서버 retake.material_flag cuts·_material_cuts: 컷 3개 테이크(결과 15초·녹화 12초 비례 역변환)·오름차순·겹침 없음·끝 ≤ 재료 길이,
+            plan 없음·계산 실패 → [], can false → cuts 없음, 구간 v2(구간 안 컷만)·trimTo(그 길이로 자름)·컷 칸 1개, _range_of 왕복(cutIds = 그 컷),
+            변형 1회(역변환 없음 → 잡힘)
+    (rtk-z) 화면: node --check·재료 줄에 [AI로 고치기] 만드는 호출 없음(정적)·머리 줄 문구·순수 함수(빈 선택·1개·떨어진 2개·정렬 안 됨·전체·고른 클립)
+    """
+    sys.path.insert(0, str(ROOT / "app"))
+    import traceback as _tb  # noqa: PLC0415
+
+    bad: list[str] = []
+    seen: set[str] = set()
+
+    def expect(group: str, got, want, what: str) -> None:
+        seen.add(group)
+        if got != want:
+            bad.append(f"({group}) {what}\n      결과 {got!r}\n      기대 {want!r}")
+
+    try:
+        from src.vnew import retake as rt  # noqa: PLC0415
+
+        plan = {"conti": {"segments": [{"id": "s1", "cutIds": ["c1", "c2", "c3"]}],
+                          "cuts": [{"id": "c1", "no": 1, "seconds": 3}, {"id": "c2", "no": 2, "seconds": 4}, {"id": "c3", "no": 3, "seconds": 5}]},
+                "previz": {"recordings": {"s1": {"key": "rk1", "seconds": 12}}}}
+        cell = {"id": "take1", "cutIds": ["c1", "c2", "c3"], "recSegIds": ["s1"], "recKeys": ["rk1"], "seconds": 12.0,
+                "webtoon": {"status": "completed", "outputKey": "users/o/video/x/take1.mp4", "promptEn": "P"}}
+        gen = {"mode": "previz-take", "units": [cell]}
+        item = {"sourceKey": "users/o/video/x/take1.mp4", "mid": "m1", "kind": "take", "group": "current", "index": 0, "cellId": "take1",
+                "cutIds": ["c1", "c2", "c3"], "trimTo": None, "run": None}
+        state = {"v": 1, "cells": {}}
+        flag = rt.material_flag("webtoon", item, gen, state, plan=plan, duration=15.0)
+        cuts = flag.get("cuts") or []
+        want3 = [{"cutId": "c1", "no": 1, "in": 0.0, "out": 3.75}, {"cutId": "c2", "no": 2, "in": 3.75, "out": 8.75},
+                 {"cutId": "c3", "no": 3, "in": 8.75, "out": 15.0}]
+        expect("rtk-y", [cuts, all(a["out"] <= b["in"] + 1e-9 and a["in"] < a["out"] for a, b in zip(cuts, cuts[1:])), cuts[-1]["out"] <= 15.0 if cuts else None,
+                         [flag.get(k) for k in ("can", "n", "cellKey", "running", "reason")]],
+               [want3, True, True, [True, 1, "webtoon:take1", False, ""]],
+               "컷 3개 테이크(녹화 12초·결과 15초): 칸 시각 ÷ (12/15) = 원본 시간, 오름차순·겹침 없음·끝 ≤ 재료 길이, 기존 표식 그대로")
+        no_prompt = {**gen, "units": [{**cell, "webtoon": {**cell["webtoon"], "promptEn": ""}}]}
+        flag_off = rt.material_flag("webtoon", item, no_prompt, state, plan=plan, duration=15.0)
+        flag_final = rt.material_flag("webtoon", {**item, "kind": "final", "group": "final"}, gen, state, plan=plan, duration=15.0)
+        saved_spans = rt._cell_spans  # noqa: SLF001
+        rt._cell_spans = lambda *a, **k: (_ for _ in ()).throw(ValueError("boom"))  # noqa: SLF001
+        logged: list[str] = []
+        catcher = logging.Handler()
+        catcher.emit = lambda record: logged.append(record.getMessage())
+        saved_propagate = rt.log.propagate
+        rt.log.addHandler(catcher)
+        rt.log.propagate = False
+        try:
+            flag_fail = rt.material_flag("webtoon", item, gen, state, plan=plan, duration=15.0)
+        finally:
+            rt._cell_spans = saved_spans  # noqa: SLF001
+            rt.log.removeHandler(catcher)
+            rt.log.propagate = saved_propagate
+        expect("rtk-y", [rt.material_flag("webtoon", item, gen, state).get("cuts"), "cuts" in flag_off, flag_off.get("can"), "cuts" in flag_final,
+                         flag_fail.get("cuts"), flag_fail.get("can"), logged,
+                         rt.material_flag("webtoon", item, gen, state, plan=plan).get("cuts")],
+               [[], False, False, False, [], True, ["vnew.retake.cuts_failed cell=take1 err=ValueError"],
+                [{"cutId": "c1", "no": 1, "in": 0.0, "out": 3.0}, {"cutId": "c2", "no": 2, "in": 3.0, "out": 7.0}, {"cutId": "c3", "no": 3, "in": 7.0, "out": 12.0}]],
+               "plan 없음(지금 edit.py 호출) → []·can false·합친 영상 → cuts 없음·계산 실패 → [] + 경고 한 줄·길이 모름 → 칸 길이(1:1)")
+        rng = {"start": 3.0, "end": 12.0}
+        state_v2 = {"v": 1, "cells": {"webtoon:take1": {"versions": [{"n": 2, "status": "completed", "prompt": "P2", "outputKey": "users/o/video/x/v2.mp4",
+                                                                       "range": rng}]}}}
+        item_v2 = {**item, "sourceKey": "users/o/video/x/v2.mp4", "mid": "m2", "group": "retake", "version": 2, "range": dict(rng)}
+        flag_v2 = rt.material_flag("webtoon", item_v2, gen, state_v2, plan=plan, duration=9.0)
+        trimmed = rt._material_cuts(plan, cell, "take", 6.0, rng, 9.0)  # noqa: SLF001
+        cut_cell = {"id": "c2", "cutId": "c2", "seconds": 4.0}
+        padded = rt._material_cuts(plan, cut_cell, "cut", 2.5, None, 4.0)  # noqa: SLF001
+        expect("rtk-y", [flag_v2.get("can"), flag_v2.get("cuts"), trimmed, padded, rt._material_cuts(plan, cell, "take", None, None, 0)],  # noqa: SLF001
+               [True, [{"cutId": "c2", "no": 2, "in": 0.0, "out": 4.0}, {"cutId": "c3", "no": 3, "in": 4.0, "out": 9.0}],
+                [{"cutId": "c2", "no": 2, "in": 0.0, "out": 4.0}, {"cutId": "c3", "no": 3, "in": 4.0, "out": 6.0}],
+                [{"cutId": "c2", "no": 2, "in": 0.0, "out": 2.5}],
+                [{"cutId": "c1", "no": 1, "in": 0.0, "out": 3.0}, {"cutId": "c2", "no": 2, "in": 3.0, "out": 7.0}, {"cutId": "c3", "no": 3, "in": 7.0, "out": 12.0}]],
+               "구간 v2(녹화 3–12초): 구간 안 컷만(컷 1 없음, 구간 시작 = 0)·trimTo 6초로 자름·컷 칸 1개(채운 컷은 원래 길이 2.5초)·길이 0 → 칸 길이")
+        target = {"kind": "take", "trimTo": None, "cell": cell}
+        trips = [(rt._range_of(plan, target, None, 12.0, 15.0, c["in"], c["out"])[0] or {}).get("cutIds") for c in cuts]  # noqa: SLF001
+        trips_v2 = [(rt._range_of(plan, target, rng, 12.0, 9.0, c["in"], c["out"])[0] or {}).get("cutIds") for c in flag_v2.get("cuts") or []]  # noqa: SLF001
+        target_t = {**target, "trimTo": 6.0}
+        trips_t = [(rt._range_of(plan, target_t, rng, 12.0, 9.0, c["in"], c["out"])[0] or {}).get("cutIds") for c in trimmed]  # noqa: SLF001
+        expect("rtk-y", [trips, trips_v2, trips_t], [[["c1"], ["c2"], ["c3"]], [["c2"], ["c3"]], [["c2"], ["c3"]]],
+               "왕복: 컷마다 in·out 을 _range_of 에 넣으면 cutIds 가 그 컷 하나(v1 비례·구간 v2·자른 구간 v2)")
+        # 변형 1회(새 순수 함수 1곳): 역변환(÷ scale)을 빼면 컷 3개 테이크 기대값이 잡는다.
+        saved_cuts = rt._material_cuts  # noqa: SLF001
+
+        def mutant(plan_, cell_, kind_, trim_, rng_, dur_):
+            offset, _scale, extent = rt._time_map(trim_, rng_, kind_, float(cell_.get("seconds") or 0.0), dur_)  # noqa: SLF001
+            return [{"cutId": c, "no": rt.edit._cut_numbers(plan_).get(c), "in": round(max(0.0, a - offset), 3),  # noqa: SLF001
+                     "out": round(min(extent, b - offset), 3)} for a, b, c in rt._cell_spans(plan_, cell_, kind_)]  # noqa: SLF001
+
+        rt._material_cuts = mutant  # noqa: SLF001
+        try:
+            caught = (rt.material_flag("webtoon", item, gen, state, plan=plan, duration=15.0).get("cuts") or []) != want3
+        finally:
+            rt._material_cuts = saved_cuts  # noqa: SLF001
+        expect("rtk-y", caught, True, "변형(역변환 ÷ scale 없음)이면 컷 3개 테이크 검사가 잡는다")
+    except Exception as exc:  # noqa: BLE001
+        bad.append("(rtk-y) 예외: " + repr(exc) + "\n" + _tb.format_exc()[:1500])
+
+    # ================= (rtk-z) 화면 =================
+    node = shutil.which("node")
+    vjs = (PUBLIC / "vnew.js").read_text(encoding="utf-8")
+    bin_start = vjs.find("  function editRenderBin(ctx) {")
+    bin_body = vjs[bin_start:vjs.find("  /* ---- 저장(design §5.5", bin_start)] if bin_start >= 0 else ""
+    sec_start = vjs.find("⑦ AI로 고치기 — 테이크·장면 고르기(지시서 119)")
+    section = vjs[sec_start:vjs.find("  /* ---------------------------------------------------------------- 전역 */")] if sec_start >= 0 else ""
+    expect("rtk-z", [bool(bin_body), "editFixBinButton(" in bin_body, "vnew-edit-fix-open" in bin_body, "editFixSelButton(" in bin_body,
+                     "head.appendChild(editFixPickButton(ctx));" in bin_body, vjs.count("editFixBinButton("), vjs.count("editFixSelButton("),
+                     'el("button", "outline-button vnew-edit-fix-pick", "AI로 고치기")' in section, "innerHTML" in section,
+                     section.count("textContent") > 0, "\r" in vjs],
+           [True, False, False, False, True, 1, 1, True, False, True, False],
+           "정적: 재료 줄(editRenderBin)에 [AI로 고치기]·[고른 클립 AI로 고치기]를 만드는 호출 없음(정의만 남김)·머리 줄 [AI로 고치기] 문구·innerHTML 없음·LF")
+    if node:
+        check = subprocess.run([node, "--check", str(PUBLIC / "vnew.js")], capture_output=True, text=True, encoding="utf-8", timeout=60)
+        expect("rtk-z", check.returncode, 0, "node --check frontend/public/vnew.js")
+        code, problems = _edu_code(vjs, _EDU_SLICES)
+        bad.extend(p.replace("(edu-a)", "(rtk-z)") for p in problems)
+        if not problems:
+            got, err = _lr_run_node(node, _EDU_NODE_HARNESS + code + _RTK119_NODE, "rtk119_z_")
+            if err:
+                bad.append(f"(rtk-z) node 실행 실패: {err}")
+            else:
+                expect("rtk-z", got, {
+                    "range": [None, None, {"in": 3, "out": 6}, {"in": 3, "out": 15}, {"in": 0, "out": 15}, None],
+                    "pick": [None, {"in": 0, "out": 7.5}, None, {"in": 6, "out": 10}, None],
+                    "note": ["이 테이크는 장면 경계를 알 수 없어 통째로 고칩니다.",
+                             "고른 장면이 떨어져 있어 첫 장면 시작부터 마지막 장면 끝까지(0.0–15.0초) 한 구간으로 고칩니다. 사이 장면(컷 2·컷 3)도 함께 다시 만들어집니다.",
+                             "고른 구간(1.0–4.0초)만 고칩니다. 패널의 「이 구간만 다시 만들기」가 이 구간입니다."],
+                    "name": ["컷 7", "장면 2", "타임라인에서 고른 클립 구간"]},
+                    "순수 함수: editFixCutsRange 빈 선택 null·1개·떨어진 2개(첫 시작~마지막 끝)·정렬 안 됨·길이 0 무시, editFixPickRange 모두 고름 = 통째·"
+                    "고른 클립 구간 하나는 구간, 안내 문구·장면 이름")
+    else:
+        warn("node 가 없어 rtk-z(화면)를 건너뜁니다")
+
+    missing = [g for g in ("rtk-y", "rtk-z") if g not in seen]
+    if missing and not bad:
+        bad.append(f"검사하지 못한 묶음: {missing}")
+    if bad:
+        for item_ in bad:
+            fail("vnew ⑦ AI로 고치기 고르기 창(지시서 119) " + item_)
+    else:
+        ok("vnew ⑦ AI로 고치기 고르기 창(지시서 119) 검사 (rtk-y)재료 cuts 역변환·구간 v2·trimTo·왕복·실패 []·변형 1회 "
+           "(rtk-z)node --check·재료 줄 버튼 없음·머리 줄 문구·구간 순수 함수 (화면 흐름은 rtk-j)")
+
+
 def main() -> int:
     print("== vpoc1 check ==")
     check_compileall()
@@ -44848,6 +45114,7 @@ def main() -> int:
     check_vnew_inner_voice()
     check_vnew_inner_voice_118a()
     check_vnew_voice_scan_118b()
+    check_vnew_edit_fix_picker_119()
     check_pod_zones()
     print()
     if warnings:

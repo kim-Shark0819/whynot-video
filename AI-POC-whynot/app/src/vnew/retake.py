@@ -725,17 +725,39 @@ def _has_prompt(gen: dict, variant: str, item: dict, state: dict) -> bool:
     return bool(st.get("promptEn"))
 
 
-def material_flag(variant: str, item: dict, gen: dict, state: dict) -> dict:
-    """GET /edit 재료의 retake 표식(프롬프트는 넣지 않는다): {can, n, cellKey, running, reason}."""
+def material_flag(variant: str, item: dict, gen: dict, state: dict, *, plan: dict | None = None, duration=None) -> dict:
+    """GET /edit 재료의 retake 표식(프롬프트는 넣지 않는다): {can, n, cellKey, running, reason}.
+
+    지시서 119: can 이면 cuts [{cutId, no, in, out}](그 재료 원본 시간, _material_cuts)를 더한다. plan·duration(그 재료 잰 길이)이 없거나
+    계산이 실패하면 [](화면은 테이크 통째로만 고른다).
+    """
     reason = _not_target(gen, item)
     if reason:
         return {"can": False, "n": None, "cellKey": "", "running": False, "reason": reason}
     key = cell_key(variant, item.get("cellId"))
     versions = ((state.get("cells") or {}).get(key) or {}).get("versions") or []
     can = _has_prompt(gen, variant, item, state)
-    return {"can": can, "n": item.get("version") or 1, "cellKey": key,
-            "running": any(v.get("status") in _LIVE for v in versions), "reason": "" if can else NO_PROMPT_TEXT,
-            **_flag_extra(item)}
+    out = {"can": can, "n": item.get("version") or 1, "cellKey": key,
+           "running": any(v.get("status") in _LIVE for v in versions), "reason": "" if can else NO_PROMPT_TEXT,
+           **_flag_extra(item)}
+    if can:
+        out["cuts"] = _flag_cuts(plan, gen, item, duration)
+    return out
+
+
+def _flag_cuts(plan, gen: dict, item: dict, duration) -> list[dict]:
+    """재료 표식의 cuts(지시서 119). plan 이 없거나 칸을 못 찾거나 계산이 실패하면 []."""
+    if not isinstance(plan, dict):
+        return []
+    found = _cell_index(gen).get(str(item.get("cellId") or ""))
+    if not found:
+        return []
+    try:
+        return _material_cuts(plan, found[1], str(item.get("kind") or ""), item.get("trimTo"), _valid_range(item.get("range")),
+                              _num_in(duration))
+    except Exception as exc:  # noqa: BLE001 — 표식은 실패하지 않는다(통째로만 고른다).
+        log.warning("vnew.retake.cuts_failed cell=%s err=%s", _safe_key(item.get("cellId")), type(exc).__name__)
+        return []
 
 
 def _items(plan: dict, gen: dict, state: dict, variant: str) -> list[dict]:
@@ -1810,6 +1832,27 @@ def _cell_spans(plan: dict, cell: dict, kind: str) -> list[tuple[float, float, s
         part = seconds * weight / total
         out.append((clock, clock + part, cut_id))
         clock += part
+    return out
+
+
+def _material_cuts(plan: dict, cell: dict, kind: str, trim_to, rng: dict | None, duration) -> list[dict]:
+    """재료 영상 하나의 컷 경계 [{cutId, no, in, out}](지시서 119). in·out 은 그 재료 원본 시간(초)이라 retake_view 의 clip_in·clip_out 에
+    그대로 넣을 수 있다.
+
+    칸 녹화 시각(_cell_spans)을 _time_map 의 역변환 원본 시간 = (칸 시각 − offset) ÷ scale 로 바꾸고 [0, extent] 안으로 자른다(extent = 자를
+    길이·결과 길이). 구간 버전은 그 구간과 겹치는 컷만 그 구간 안으로 자른다. RANGE_EPS_S 이하로 남는 컷은 뺀다. 시각 오름차순.
+    """
+    offset, scale, extent = _time_map(trim_to, rng, kind, float(cell.get("seconds") or 0.0), duration)
+    if scale <= 0 or extent <= 0:
+        return []
+    low, high = (float(rng["start"]), float(rng["end"])) if rng else (0.0, math.inf)
+    numbers = edit._cut_numbers(plan)  # noqa: SLF001
+    out: list[dict] = []
+    for span_start, span_end, cut_id in _cell_spans(plan, cell, kind):
+        lo, hi = max(span_start, low), min(span_end, high)
+        first, last = max(0.0, (lo - offset) / scale), min(extent, (hi - offset) / scale)
+        if last - first > RANGE_EPS_S:
+            out.append({"cutId": cut_id, "no": numbers.get(cut_id), "in": round(first, 3), "out": round(last, 3)})
     return out
 
 

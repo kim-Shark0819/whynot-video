@@ -2586,3 +2586,6 @@
 ### 118b — 기존 대본 속마음 찾기·⑦ 미리보기 원본 소리 (2026-11-03, 118b)
 - `POST /script/voices`(`start_voice_scan`/`run_voice_scan`, plan.task `voiceScan`·`script.voiceScan`): 타일+줄 목록을 `emit_voices`로 보내 id가 맞고 대사가 있는 줄의 voice만 바꾸고, 바뀐 줄이 있을 때만 revision·승인 해제. 규칙 9 문구는 `prompts.VOICE_RULE` 한 곳. 대안(대본 다시 정리)은 사용자 수정을 덮어써 제외.
 - 미리보기는 숨은 `ctx.audio`로 v1 소리를 낸다. 시각은 내보내기(`_clip_audio`+atrim·atempo)와 같게 `max(0, offset + in×scale) + (원본 시각 − in)`(지시서 식 `offset + (원본−in)×scale`은 in>0이면 내보내기와 달라 따르지 않음). 검사 iv3-a~d, 변형 1회(`apply_voices` 같은 값 비교 없음) 잡힘.
+### 119 — ⑦ AI로 고치기 버튼 하나·테이크·장면 고르기 (2026-11-04, 119)
+- 머리 줄 [AI로 고치기] → 고르기 창(테이크 라디오·장면 체크박스, 떨어진 장면은 첫 시작~마지막 끝 한 구간) → `editFixOpen(ctx, mid, "", range)`. 서버 `material_flag` cuts = `_material_cuts`(칸 녹화 시각 → `(t − offset) ÷ scale`). 검사 rtk-y·rtk-z·rtk-j, 변형 1회(÷ scale 없음) 잡힘.
+- `edit.py`(수정 금지)가 `material_flag`에 plan·길이를 넘기지 않아 지금 운영 cuts는 늘 []다. 그동안 창은 고른 클립 구간 한 줄로 대신한다. 대안(retake 쪽 thread-local로 plan 읽기·장면 고를 때마다 retake_view 조회)은 숨은 결합·비용 때문에 쓰지 않았다.

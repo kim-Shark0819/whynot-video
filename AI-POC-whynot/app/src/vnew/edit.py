@@ -1066,7 +1066,7 @@ def edit_view(owner: str, pid: str, variant: str | None = None) -> dict:
         from . import retake  # noqa: PLC0415
 
         for item, out in zip(items, materials):
-            out["retake"] = retake.material_flag(chosen, item, gen, retakes)
+            out["retake"] = retake.material_flag(chosen, item, gen, retakes, plan=plan, duration=out.get("duration"))  # 지시서 119: 컷 고르기
         # 지시서 116 보완 10: 소리 없는 버전은 그 칸 v1 소리를 쓴다(내보내기와 같은 _audio_sources). 새로 재지 않고 길이 캐시만 본다.
         audio_from = _audio_sources(gen, items, _retake_meta(owner, pid, gen_id, items, meta, probe=False))
         for item, out in zip(items, materials):
