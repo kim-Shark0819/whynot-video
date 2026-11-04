@@ -47539,8 +47539,9 @@ def check_vnew_real_likeness_130() -> None:
             # 컷마다 자기 녹화 구간(s1·s2)의 시작(0초) 프레임이 Image 1 이다.
             # 작업 132: 이 gen 은 애니(웹툰) 테이크가 끝났으므로 Image 1 = 애니 결과의 그 컷 시작 프레임(테이크 안 시각 0초·4초),
             # 문장은 프리비즈("previz frame")가 아니라 photoreal live-action 다시 그리기다.
+            # 작업 135: 이 계획 장소에 공간 시트 실사 뷰(loc-rb-back)가 있어 프레임 다음(Image 2)에 들어간다 → [LOC-RB, 정면…].
             if len(new_stills) != 2 or [s["refs"][0] for s in new_stills] != [b"FRAME@0.0", b"FRAME@4.0"] \
-                    or any(s["refs"][1:] != [b"RF2", b"RF1"] for s in new_stills) \
+                    or any(s["refs"][1:] != [b"LOC-RB", b"RF2", b"RF1"] for s in new_stills) \
                     or any("photoreal live-action" not in s["prompt"].lower() or "Image 1" not in s["prompt"] for s in new_stills):
                 bad.append(f"(lk-a) 시작 그림(첫 프레임 + 실사 정면 2장, photoreal)이 다릅니다: "
                            f"{[(s['refs'], s['prompt'][:80]) for s in new_stills]}")
@@ -47739,13 +47740,16 @@ def check_vnew_real_cut_anime_132() -> None:
             # ================= (ak-a) 애니 결과 있음 =================
             g, new_stills, bodies, anime = run("prj_ak_a", drop_anime=False)
             want_first = [fake_frame(anime, 0.0), fake_frame(anime, 4.0)]
+            # 작업 135: 장소 공간 시트 실사 뷰(LOC-RB)가 애니 프레임 다음(Image 2), 실사 정면은 그 뒤(Image 3·4).
             if not anime or len(new_stills) != 2 or [s["refs"][0] for s in new_stills] != want_first \
-                    or any(s["refs"][1:] != [b"RF2", b"RF1"] for s in new_stills):
+                    or any(s["refs"][1:] != [b"LOC-RB", b"RF2", b"RF1"] for s in new_stills):
                 bad.append(f"(ak-a) 시작 그림 첫 참고가 애니 프레임·다음이 실사 정면이 아닙니다: "
                            f"{[s['refs'] for s in new_stills]} want {want_first}")
             for s in new_stills:
                 p = s["prompt"]
-                if "photoreal live-action" not in p.lower() or drawing.search(p) or "mannequin" in p \
+                # 작업 135: 끝의 실사 고정 구절(REAL_STILL_LOOK, "no anime"·"no illustration")은 그림 낱말 검사에서 뺀다.
+                if "photoreal live-action" not in p.lower() or drawing.search(p.replace(genmod.REAL_STILL_LOOK, "")) \
+                        or "mannequin" in p \
                         or "Image 2" not in p or "Image 3" not in p or "clothing comes from Image 1" not in p:
                     bad.append(f"(ak-a) 시작 그림 문장이 다릅니다: {p!r}")
             plan = env.plan("prj_ak_a")
@@ -47782,7 +47786,8 @@ def check_vnew_real_cut_anime_132() -> None:
                 bad.append(f"(ak-b) 애니 결과가 없는데 프리비즈 프레임이 첫 참고가 아닙니다: {[s['refs'][:1] for s in new_stills]}")
             for s in new_stills:
                 p = s["prompt"]
-                if "previz frame" not in p or "photoreal live-action" not in p.lower() or drawing.search(p) \
+                if "previz frame" not in p or "photoreal live-action" not in p.lower() \
+                        or drawing.search(p.replace(genmod.REAL_STILL_LOOK, "")) \
                         or "에이 wears black dress shirt" not in p or "비 wears navy training top" not in p \
                         or ("LOCATION: " + bg + ".") not in p:
                     bad.append(f"(ak-b) 프리비즈 시작 그림 문장에 옷·장소가 없거나 그림 낱말이 있습니다: {p!r}")
@@ -48112,7 +48117,9 @@ def check_vnew_real_remerge_134() -> None:
             env.set(genmod.vpoc_fal, "find", lambda m: {"id": prefix_id + kling, "endpointId": kling, "caps": dict(kling_caps)}
                     if str(m) == prefix_id + kling else seed_find(m))
             env.set(genmod, "_seedream", lambda prompt, refs, *, size: b"STILL")
-            env.set(genmod, "_cut_first_frame", lambda mp4, start: b"FRAME@%.1f" % float(start))
+            # 작업 135: 같은 수로 틀리면 첫 결과를 쓰므로, fake_qa 가 다시 만든 컷(-qa)을 알아보게 프레임에 영상 바이트를 담는다
+            # (예전엔 다시 만든 것도 첫 검사로 판정됐는데 "더 나쁘지 않으면" 규칙이라 통과했다).
+            env.set(genmod, "_cut_first_frame", lambda mp4, start: b"FRAME[" + bytes(mp4) + b"]@%.1f" % float(start))
             env.set(genmod, "_trim_clip", lambda mp4, seconds: b"TRIM%.1f:" % float(seconds) + bytes(mp4))
             conform_calls: list[list[tuple[bytes, float]]] = []
 
@@ -48441,6 +48448,165 @@ def check_vnew_retake_kling_cuts_131() -> None:
            "(kc-d)다른 모델 본보기 = 그 컷 녹화 구간")
 
 
+def check_vnew_real_cut_sheet_135() -> None:
+    """작업 135 — 컷 단위 실사 시작 그림 배경 = 공간 시트 실사 뷰, 옷·실사 구절 항상, QA 선택(틀린 항목 적은 쪽). 가짜, 유료 0.
+
+    (sh-a) 시트 있음: Seedream 참고 = [애니 프레임, 시트 뷰, 실사 정면…], 뷰 = 카메라가 보는 쪽(c2 +z → front, 카메라 없음 → back),
+           문장에 Image 2 배경 문장·대본 옷·사진 옷 금지 구절, 끝 = REAL_STILL_LOOK
+    (sh-b) 시트 없음: [애니 프레임, 실사 정면…]·배경 문장 없음(지금과 같다), 옷·실사 구절은 그대로
+    (sh-c) QA: (2, 1) → 다시 만든 것, (1, 2) → 첫 결과, (1, 1) → 첫 결과. QA 입력 Image 3 = 시트 뷰, 판정 기준에 Image 3
+    """
+    import re as _re  # noqa: PLC0415
+    import traceback as _tb  # noqa: PLC0415
+
+    sys.path.insert(0, str(ROOT / "app"))
+    from src.vnew import generate as genmod  # noqa: PLC0415
+    from src.vnew import prompts as promptsmod  # noqa: PLC0415
+    from src.vpoc.errors import VpocError  # noqa: PLC0415
+
+    bad: list[str] = []
+    owner = "tester"
+    kling = "fal-ai/kling-video/v3/pro/image-to-video"
+    kling_caps = {"promptField": "prompt", "startImageField": "start_image_url", "durations": [5, 10], "durationAsString": True,
+                  "durationValues": {"5": "5", "10": "10"}, "sendDuration": True, "aspectRatios": ["16:9"], "available": True}
+    likeness_raw = "The images or videos provided may contain likenesses of real people or other private information."
+    bg_line = ("Background and location must match Image 2 exactly (same buildings, railing, street, time of day); "
+               "only the framing follows Image 1.")
+
+    def fake_frame(mp4: bytes, start: float) -> bytes:
+        return b"FRAME[" + bytes(mp4) + b"]@%.1f" % float(start)
+
+    try:
+        with _guard_real_llm() as llm_calls, _LrEnv(owner) as env, _pin_vnew(
+                VNEW_FX=True, VNEW_CASTING=True, VNEW_TAKE_REAL=True, VNEW_GEN_PARALLEL=2, POLL_INTERVAL_S=0,
+                VNEW_TAKE_AUDIO=True, VNEW_TAKE_RESOLUTION="480p", VNEW_PREPARE_STALE_S=300,
+                VNEW_TAKE_REAL_LIKENESS_LADDER=True, VNEW_TAKE_REAL_KLING_MODEL=kling, VNEW_REAL_CUT_QA=False):
+            prefix_id = genmod.vpoc_settings.FAL_ID_PREFIX
+            seed_find = genmod.vpoc_fal.find
+            env.set(genmod.vpoc_fal, "find", lambda m: {"id": prefix_id + kling, "endpointId": kling, "caps": dict(kling_caps)}
+                    if str(m) == prefix_id + kling else seed_find(m))
+            stills: list[dict] = []
+            env.set(genmod, "_seedream", lambda prompt, refs, *, size: stills.append(
+                {"prompt": prompt, "refs": [bytes(r) for r in refs]}) or b"STILL")
+            env.set(genmod, "_cut_first_frame", fake_frame)
+            env.set(genmod, "_trim_clip", lambda mp4, seconds: b"TRIM%.1f:" % float(seconds) + bytes(mp4))
+            env.blobs["loc-rb-front"] = b"LOC-RF"
+            qa_calls: list[dict] = []
+            verdicts: dict = {}
+
+            def fake_qa(blocks, *, model):
+                imgs = [b["image"]["source"]["bytes"] for b in blocks if "image" in b]
+                text = " ".join(b["text"] for b in blocks if "text" in b)
+                cut_no = _re.search(r"Storyboard cut (\d+)", text).group(1)
+                retry = b"-qa" in imgs[1]
+                qa_calls.append({"cut": cut_no, "retry": retry, "images": imgs, "text": text})
+                payload = {"animeStyle": False, "outfitMatch": True, "locationMatch": True, "peopleMatch": True, "note": ""}
+                payload.update(verdicts.get((cut_no, retry), {}))
+                return payload, {"model": model, "inputTokens": 3000, "outputTokens": 100}
+
+            env.set(genmod, "_read_cut_qa", fake_qa)
+            base_fal = env._fal
+
+            def fal_request(method, url, payload=None, *, where=""):
+                rid = url.split("/requests/", 1)[-1].split("/", 1)[0]
+                req = next((r for r in env.requests if r["rid"] == rid), None)
+                if method == "GET" and not url.endswith("/status") and req and req["url"].endswith(_LR_ENDPOINT) \
+                        and req["kind"] == "real":
+                    raise VpocError("fal.poll", "HTTP422", likeness_raw, 502)  # Seedance 실사는 늘 likeness 거절 → 컷 단위 Kling
+                return base_fal(method, url, payload, where=where)
+
+            env.set(env.falmod, "_request", fal_request)
+            client = env.client()
+
+            def run(pid: str, segments: list[dict], edit_plan) -> tuple[dict, list[dict], bytes]:
+                env.make_plan(pid, segments)
+                client.post(f"/api/vnew/p/{pid}/generate", json={"confirmUsd": genmod.estimate(env.plan(pid))["totalUsd"]})
+                g = env.drive(pid)
+                anime_key = str(g["units"][0]["webtoon"].get("outputKey") or "")
+                env.planmod.mutate_plan(owner, pid, edit_plan)
+                stills0 = len(stills)
+                client.post(f"/api/vnew/p/{pid}/generate/real", json={"confirmUsd": genmod.real_estimate(env.gen(pid))["usd"]})
+                g = env.drive(pid)
+                return g, stills[stills0:], env.store.blobs.get(anime_key, b"CLIP:" + anime_key.encode())
+
+            two = [{"id": "s1", "cutIds": ["c1"], "seconds": 4}, {"id": "s2", "cutIds": ["c2"], "seconds": 8}]
+
+            def with_front(plan: dict) -> None:
+                plan["locations"][0]["variants"]["real"]["viewKeys"]["front"] = "loc-rb-front"
+                timeline = plan["previz"]["scenes"][0]["timeline"]
+                timeline[1]["camera"] = {"pos": [0.0, 1.5, -2.0], "target": [0.3, 1.2, 2.0], "fov": 50}  # +z(south) 를 본다
+
+            def no_sheet(plan: dict) -> None:
+                plan["locations"][0]["variants"]["real"]["viewKeys"] = {}
+
+            def common(p: str, tag: str) -> None:
+                if "에이 wears black dress shirt" not in p or "비 wears navy training top" not in p \
+                        or genmod.REAL_STILL_NO_PHOTO_CLOTHES not in p or not p.endswith("\n" + genmod.REAL_STILL_LOOK + ".") \
+                        or genmod.REAL_STILL_LOOK != "35mm film photo, natural skin texture, no illustration, no anime, no digital painting":
+                    bad.append(f"({tag}) 옷 문장·사진 옷 금지·실사 구절(끝)이 없습니다: {p!r}")
+
+            # ================= (sh-a) 시트 있음 =================
+            _g, new_stills, anime = run("prj_sh_a", two, with_front)
+            want = [[fake_frame(anime, 0.0), b"LOC-RB", b"RF2", b"RF1"], [fake_frame(anime, 4.0), b"LOC-RF", b"RF2", b"RF1"]]
+            if [s["refs"] for s in new_stills] != want:
+                bad.append(f"(sh-a) 참고 순서가 [애니, 시트 뷰(c1 back·c2 front), 정면…]이 아닙니다: {[s['refs'] for s in new_stills]}")
+            for s in new_stills:
+                p = s["prompt"]
+                if bg_line not in p or "outfits and background" in p or "Image 3" not in p or "Image 4" not in p:
+                    bad.append(f"(sh-a) Image 2 배경 문장·얼굴 번호(3·4)가 다릅니다: {p!r}")
+                common(p, "sh-a")
+            plan_a = env.plan("prj_sh_a")
+            if genmod._cut_view_side(plan_a, "c1") != "back" or genmod._cut_view_side(plan_a, "c2") != "front":  # noqa: SLF001
+                bad.append("(sh-a) _cut_view_side 가 c1 back·c2 front 가 아닙니다")
+
+            # ================= (sh-b) 시트 없음 =================
+            _g, new_stills, anime = run("prj_sh_b", two, no_sheet)
+            want = [[fake_frame(anime, 0.0), b"RF2", b"RF1"], [fake_frame(anime, 4.0), b"RF2", b"RF1"]]
+            if [s["refs"] for s in new_stills] != want:
+                bad.append(f"(sh-b) 시트 없음인데 참고가 [애니, 정면…]이 아닙니다: {[s['refs'] for s in new_stills]}")
+            for s in new_stills:
+                p = s["prompt"]
+                if "Background and location must match" in p or "outfits and background" not in p \
+                        or "Image 2" not in p or "clothing comes from Image 1" not in p:
+                    bad.append(f"(sh-b) 시트 없음 문장이 지금과 다릅니다: {p!r}")
+                common(p, "sh-b")
+
+            # ================= (sh-c) QA 선택 =================
+            verdicts.clear()
+            verdicts[("1", False)] = {"outfitMatch": False, "locationMatch": False, "note": "outfit and place"}
+            verdicts[("1", True)] = {"outfitMatch": False, "note": "outfit"}
+            verdicts[("2", False)] = {"outfitMatch": False, "note": "outfit"}
+            verdicts[("2", True)] = {"outfitMatch": False, "locationMatch": False, "note": "outfit and place"}
+            verdicts[("3", False)] = {"outfitMatch": False, "note": "outfit"}
+            verdicts[("3", True)] = {"locationMatch": False, "note": "place"}
+            three = [{"id": "s1", "cutIds": ["c1"], "seconds": 4}, {"id": "s2", "cutIds": ["c2"], "seconds": 4},
+                     {"id": "s3", "cutIds": ["c3"], "seconds": 4}]
+            qa0 = len(qa_calls)
+            with _pin_vnew(VNEW_REAL_CUT_QA=True):
+                g, _stills, _anime = run("prj_sh_c", three, lambda plan: None)
+            cuts = (g["units"][0]["real"].get("fallback") or {}).get("cuts") or []
+            got = [("-qa" in str(c.get("outputKey")), (c.get("qa") or {}).get("items"), (c.get("qa") or {}).get("firstItems"))
+                   for c in cuts]
+            want_c = [(True, ["outfit"], ["outfit", "location"]), (False, ["outfit"], ["outfit"]), (False, ["outfit"], ["outfit"])]
+            if got != want_c or (g.get("finalReal") or {}).get("status") != "done":
+                bad.append(f"(sh-c) QA 선택이 (2,1) 다시·(1,2) 첫·(1,1) 첫이 아닙니다: {got} {g.get('finalReal')}")
+            calls = qa_calls[qa0:]
+            if len(calls) != 6 or any(len(q["images"]) != 3 or q["images"][2] != b"LOC-RB" or "Image 3" not in q["text"]
+                                      for q in calls):
+                bad.append(f"(sh-c) QA 입력에 시트 뷰(Image 3)가 없습니다: {[(len(q['images']), q['images'][2:]) for q in calls]}")
+            if "Image 3" not in promptsmod.CUT_QA_SYSTEM:
+                bad.append("(sh-c) 판정 기준(locationMatch)에 Image 3 이 없습니다")
+            if llm_calls:
+                bad.append(f"가짜가 아닌 LLM 호출: {llm_calls}")
+    except Exception:  # noqa: BLE001
+        bad.append("작업 135 검사 예외\n" + _tb.format_exc())
+    if bad:
+        fail("작업 135 실사 컷 시트 배경·QA 선택 검사 실패\n  " + "\n  ".join(bad))
+    else:
+        ok("작업 135 실사 컷 시트 배경 (sh-a)[애니, 시트 뷰(back/front), 정면…]·Image 2 배경 문장·옷·실사 구절 "
+           "(sh-b)시트 없음 지금과 같음 (sh-c)QA (2,1) 다시·(1,2)·(1,1) 첫 결과·QA Image 3 = 시트 뷰")
+
+
 def main() -> int:
     print("== vpoc1 check ==")
     check_compileall()
@@ -48534,6 +48700,7 @@ def main() -> int:
     check_vnew_real_cut_qa_133()
     check_vnew_retake_kling_cuts_131()
     check_vnew_real_remerge_134()
+    check_vnew_real_cut_sheet_135()
     check_vnew_plan_step_stay_129()
     check_pod_zones()
     print()
