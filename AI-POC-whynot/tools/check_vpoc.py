@@ -12814,9 +12814,10 @@ def check_fal_parity_rollback() -> None:
             overlay_path = ROOT / "deploy" / f"config.{target}.env"
             try:
                 overlay = render.load_config(overlay_path)
-                # 2026-10-30 사용자 결정("seedance도 사용할 수 있고 fal seedance도 사용할 수 있게 해라"): 운영 오버레이가 true 를 둔다
-                # (BytePlus·fal Seedance 둘 다 ②에). 개발은 지금처럼 false(fal 만). "+true" 되돌리기 경로는 그대로다.
-                rendered_flag = "true" if target == "prod" else "false"
+                # 2026-10-30 사용자 결정("seedance도 사용할 수 있고 fal seedance도 사용할 수 있게 해라"): 운영 오버레이가 true 를 뒀다.
+                # 2026-11-04(config.prod.env 주석): ARK 키가 사라지고 사용자 "fal.ai를 쓰라고 했잖아" → 운영도 false(fal 만).
+                # "+true" 되돌리기 경로는 그대로다.
+                rendered_flag = "false"
                 for extra, want in (({}, rendered_flag), ({flag: "true"}, "true")):
                     layer = {**overlay, **extra}
                     unknown = sorted(set(layer) - set(base))
@@ -12862,7 +12863,7 @@ def check_fal_parity_rollback() -> None:
         ok(
             "fal-seedance-parity 되돌리기 배선 검사 (rw-a)템플릿 env "
             f"{len(PARITY_ENV_KEYS)}개 (rw-b)config.env.example 기본값 "
-            "(rw-c)render.py 렌더 prod true·dev false·오버레이 true·prod VNEW_ENABLED true"
+            "(rw-c)render.py 렌더 prod·dev false·오버레이 true·prod VNEW_ENABLED true"
         )
 PARITY_KLING = "fal:fal-ai/kling-video/v3/pro/image-to-video"
 
