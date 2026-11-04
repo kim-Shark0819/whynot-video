@@ -47664,6 +47664,185 @@ console.log(JSON.stringify({
            "(lk-b)첫 제출 성공 Kling 0 (lk-c)소리 거절 그대로·모든 단계 거절 문구·Kling 미등록 건너뜀 (lk-d)node --check·문구")
 
 
+def check_vnew_retake_kling_cuts_131() -> None:
+    """작업 131 — 컷 단위 Kling 실사 재료(⑦ kind=cut, 칸 "테이크#컷")의 AI로 고치기. 가짜 fal·Seedream·LLM, 유료 0.
+
+    (kc-a) 컷 3개 재료: can true·cellKey real:take1#c1…c3(서로 다름)·n 1·cuts 1개, retake_view: 이전 프롬프트 = 130 이 Kling 에 보낸 본문(기록 log)·
+           원래 모델 Kling i2v(첫 줄·경로 i2v·same)·시도·견적(fal pricing 0.14/s × 5초)·구간 불가, 회차 기록 promptEn·stillKey·기록 completed
+    (kc-b) 미리보기 → 제출 → 완료: 본문 = Kling i2v·키 4개·고친 프롬프트·길이 5·시작 그림 = 저장된 시작 그림, 원장 영상 1건 0.70, v2 재료가 그 컷 바로 뒤
+           (컷 1 v2·cellKey 같음·n 2·trimTo), 기록 source retake·startImage still, 버전 path i2v·접두사 rt2
+    (kc-c) 저장된 시작 그림이 없으면 그 컷 결과의 첫 프레임(기록 startImage firstFrame)
+    (kc-d) 다른 모델(형식 본보기 길): 그 컷 녹화 구간으로 본보기, 원래 Kling 을 resubmit_model 로 내면 409 RetakeBadModel
+    """
+    import base64 as _b64  # noqa: PLC0415
+    import traceback as _tb  # noqa: PLC0415
+
+    sys.path.insert(0, str(ROOT / "app"))
+    from src.vpoc.errors import VpocError  # noqa: PLC0415
+
+    bad: list[str] = []
+    owner = _RTK_OWNER
+    kling = "fal-ai/kling-video/v3/pro/image-to-video"
+    kling_caps = {"promptField": "prompt", "startImageField": "start_image_url", "durations": [5, 10], "durationAsString": True,
+                  "durationValues": {"5": "5", "10": "10"}, "sendDuration": True, "aspectRatios": ["16:9"], "available": True}
+    likeness_raw = "The images or videos provided may contain likenesses of real people or other private information."
+
+    def expect(group: str, got, want, what: str) -> None:
+        if got != want:
+            bad.append(f"({group}) {what}\n      결과 {got!r}\n      기대 {want!r}")
+
+    def decode(uri) -> bytes:
+        try:
+            return _b64.b64decode(str(uri).split(",", 1)[1])
+        except Exception:  # noqa: BLE001
+            return b""
+
+    try:
+        with _guard_real_llm(), _RtkEnv(owner) as env, _pin_vnew(
+                VNEW_FX=True, VNEW_CASTING=True, VNEW_TAKE_REAL=True, VNEW_GEN_PARALLEL=2, POLL_INTERVAL_S=0, VNEW_TAKE_AUDIO=True,
+                VNEW_TAKE_RESOLUTION="480p", VNEW_PREPARE_STALE_S=300, VNEW_EDIT=True, VNEW_EDIT_RETAKE=True,
+                VNEW_TAKE_REAL_LIKENESS_LADDER=True, VNEW_TAKE_REAL_KLING_MODEL=kling):
+            genmod, rt = env.genmod, env.rtmod
+            prefix_id = genmod.vpoc_settings.FAL_ID_PREFIX
+            base_find, base_price = genmod.vpoc_fal.find, genmod.vpoc_fal.pricing_for
+            env.set(genmod.vpoc_fal, "find", lambda m: {"id": prefix_id + kling, "endpointId": kling, "caps": dict(kling_caps)}
+                    if str(m) == prefix_id + kling else base_find(m))
+            env.set(genmod.vpoc_fal, "pricing_for", lambda m: {"unit": "seconds", "unitPrice": 0.14}
+                    if str(m) == prefix_id + kling else base_price(m))
+            stills: list[bytes] = []
+            env.set(genmod, "_seedream", lambda prompt, refs, *, size: stills.append(b"STILL%d" % (len(stills) + 1)) or stills[-1])
+            first_frame = lambda mp4, start: b"FRAME@%.1f:" % float(start) + bytes(mp4)[:24]  # noqa: E731
+            env.set(genmod, "_cut_first_frame", first_frame)
+            env.set(genmod, "_trim_clip", lambda mp4, seconds: b"TRIM%.1f:" % float(seconds) + bytes(mp4))
+            base_fal = env._fal  # noqa: SLF001
+
+            def seedance_real(req) -> bool:
+                return req["url"].endswith(_LR_ENDPOINT) and req["kind"] == "real"
+
+            def fal_request(method, url, payload=None, *, where=""):
+                rid = url.split("/requests/", 1)[-1].split("/", 1)[0]
+                req = next((r for r in env.requests if r["rid"] == rid), None)
+                if method == "GET" and not url.endswith("/status") and req and seedance_real(req):
+                    raise VpocError("fal.poll", "HTTP422", likeness_raw, 502)
+                return base_fal(method, url, payload, where=where)
+
+            env.set(env.falmod, "_request", fal_request)
+            client = env.client()
+            pid = "prj_kc"
+            env.make_plan(pid, [{"id": "s1", "cutIds": ["c1", "c2", "c3"], "seconds": 12}])
+            client.post(f"/api/vnew/p/{pid}/generate", json={"confirmUsd": genmod.estimate(env.plan(pid))["totalUsd"]})
+            env.drive(pid)
+            since = len(env.requests)
+            client.post(f"/api/vnew/p/{pid}/generate/real", json={"confirmUsd": genmod.real_estimate(env.gen(pid))["usd"]})
+            g = env.drive(pid)
+            klings = [r for r in env.requests[since:] if r["url"].endswith("/" + kling)]
+            records = ((g["units"][0]["real"].get("fallback") or {}).get("cuts")) or []
+            expect("kc-a", [g["units"][0]["real"].get("status"), len(klings), [r.get("status") for r in records],
+                            [r.get("promptEn") == k["payload"].get("prompt") for r, k in zip(records, klings)],
+                            [env.store.blobs.get(str(r.get("stillKey"))) for r in records],
+                            [(x.get("source"), x.get("status"), x.get("model"), x.get("prompt") == r.get("promptEn"))
+                             for r in records for x in (env.log(pid).get(f"real:take1#{r.get('cutId')}") or [{}])]],
+                   ["completed", 3, ["completed"] * 3, [True] * 3, [b"STILL1", b"STILL2", b"STILL3"], [("gen", "completed", kling, True)] * 3],
+                   "준비(130): 컷 3개 Kling·회차 기록 promptEn = 보낸 본문·시작 그림 stillKey·기록 한 줄(칸 테이크#컷, 완료)")
+
+            def mats() -> list[dict]:
+                return [m for m in (client.get(f"/api/vnew/p/{pid}/edit?variant=real").get_json() or {}).get("materials") or []
+                        if str(m.get("label") or "").startswith("컷")]
+
+            m0 = mats()
+            flags = [m.get("retake") or {} for m in m0]
+            expect("kc-a", [[m["label"] for m in m0], [f.get("can") for f in flags], [f.get("cellKey") for f in flags],
+                            len({f.get("cellKey") for f in flags}), [f.get("n") for f in flags], [f.get("reason") for f in flags],
+                            [[c.get("cutId") for c in f.get("cuts") or []] for f in flags]],
+                   [["컷 1", "컷 2", "컷 3"], [True] * 3, ["real:take1#c1", "real:take1#c2", "real:take1#c3"], 3, [1] * 3, [""] * 3,
+                    [["c1"], ["c2"], ["c3"]]],
+                   "⑦ 컷 재료 3개: can true·cellKey 서로 다름(real:테이크#컷)·n 1·cuts 그 컷 1개")
+            views = [client.get(f"/api/vnew/p/{pid}/edit/retake/{m['mid']}").get_json() or {} for m in m0]
+            expect("kc-a", [[((v.get("base") or {}).get("source"), (v.get("base") or {}).get("prompt") == r.get("promptEn"),
+                              v.get("canRetake"), v.get("defaultModel"), v.get("cellKey"), v.get("kind"),
+                              ((v.get("attempts") or [{}])[0].get("model"), (v.get("attempts") or [{}])[0].get("prompt") == r.get("promptEn")),
+                              [(x.get("n"), x.get("label"), x.get("model")) for x in v.get("versions") or []], v.get("estimate"))
+                             for v, r in zip(views, records)]],
+                   [[("log", True, True, kling, f"real:take1#c{i}", "cut", (kling, True), [(1, f"컷 {i}", kling)],
+                      {"usd": 0.7, "seconds": 4.0, "billedSeconds": 5.0, "model": kling, "resolution": ""}) for i in (1, 2, 3)]],
+                   "retake_view: 이전 프롬프트(130 본문·기록)·원래 모델 Kling·시도·버전 v1·견적(0.14/s × 5초)")
+            row = ((views[0].get("models") or [{}])[0]) if views else {}
+            expect("kc-a", [row.get("id"), row.get("original"), row.get("path"), (row.get("full") or {}).get("ok"),
+                            (row.get("full") or {}).get("same"), (row.get("full") or {}).get("usd"), row.get("range"),
+                            [m.get("path") for m in (views[0].get("models") or [])[1:] if m.get("path") == rt.KCUT_PATH],
+                            0 < int(((views[0].get("limits") or {}).get("promptMaxBytes")) or 0) <= 2500],
+                   [kling, True, "i2v", True, True, 0.7, None, [], True], "모델 목록 첫 줄 = 원래 Kling(경로 i2v·같은 경로·견적), 다른 모델은 지금 규칙")
+
+            # ================= (kc-b) 미리보기 → 제출 → 완료 =================
+            base1 = records[0].get("promptEn") or ""
+            env.llm_reply = lambda system, blocks: _rtk_reply(base1, "continue the action smoothly", "continue the action slowly")
+            pv = (client.post(f"/api/vnew/p/{pid}/edit/retake/{m0[0]['mid']}/preview", json={"requestKo": "천천히"}).get_json() or {})
+            draft = (pv.get("retake") or {}).get("draft") or {}
+            led0, req0 = len(env.ledger), len(env.requests)
+            resp = client.post(f"/api/vnew/p/{pid}/edit/retake/{m0[0]['mid']}",
+                               json={"prompt": draft.get("prompt"), "requestKo": "천천히", "confirmUsd": 0.7, "draftId": draft.get("id")})
+            sent = env.requests[req0:]
+            body = (sent[0]["payload"] if sent else {}) or {}
+            versions = env.state(pid)["cells"].get("real:take1#c1", {}).get("versions") or [{}]
+            expect("kc-b", [draft.get("status"), draft.get("problems"), "continue the action slowly" in str(draft.get("prompt")),
+                            resp.status_code, len(sent), sent[0]["url"].endswith("/" + kling) if sent else False, sorted(body),
+                            body.get("prompt") == draft.get("prompt"), body.get("duration"), decode(body.get("start_image_url")),
+                            [(e.get("kind"), e.get("model"), e.get("usd")) for e in env.ledger[led0:] if e.get("kind") == "video"]],
+                   ["done", [], True, 202, 1, True, ["aspect_ratio", "duration", "prompt", "start_image_url"], True, "5", b"STILL1",
+                    [("video", kling, 0.7)]],
+                   "제출 본문 = Kling i2v·키 4개·고친 프롬프트·길이 5·시작 그림 = 저장된 시작 그림, 원장 영상 1건(0.14 × 5)")
+            v2 = versions[0]
+            m1 = mats()
+            labels = [m["label"] for m in m1]
+            f2 = next((m.get("retake") or {} for m in m1 if m["label"] == "컷 1 v2"), {})
+            rec2 = (env.log(pid).get("real:take1#c1") or [{}])[-1]
+            expect("kc-b", [(v2.get("n"), v2.get("status"), v2.get("path"), v2.get("model"), v2.get("usd")),
+                            "/take1-real-c1-rt2-1/" in str(v2.get("outputKey")), labels,
+                            (f2.get("can"), f2.get("cellKey"), f2.get("n"), f2.get("trimTo")),
+                            (rec2.get("source"), rec2.get("version"), rec2.get("status"), rec2.get("model"),
+                             (rec2.get("params") or {}).get("startImage"), rec2.get("prompt") == draft.get("prompt"))],
+                   [(2, "completed", "i2v", kling, 0.7), True, ["컷 1", "컷 1 v2", "컷 2", "컷 3"], (True, "real:take1#c1", 2, 4.0),
+                    ("retake", 2, "completed", kling, "still", True)],
+                   "완료: v2 재료가 그 컷 바로 뒤(컷 1 v2·같은 cellKey·n 2·trimTo), 버전 path i2v·접두사 rt2, 기록 source retake·시작 그림 still")
+
+            # ================= (kc-c) 저장된 시작 그림 없음 → 결과 첫 프레임 =================
+            env.mutate_gen(pid, lambda gg: gg["units"][0]["real"]["fallback"]["cuts"][1].pop("stillKey", None))
+            base2 = records[1].get("promptEn") or ""
+            env.llm_reply = lambda system, blocks: _rtk_reply(base2, "continue the action smoothly", "continue the action calmly")
+            pv2 = (client.post(f"/api/vnew/p/{pid}/edit/retake/{m0[1]['mid']}/preview", json={"requestKo": "차분히"}).get_json() or {})
+            draft2 = (pv2.get("retake") or {}).get("draft") or {}
+            req1 = len(env.requests)
+            resp2 = client.post(f"/api/vnew/p/{pid}/edit/retake/{m0[1]['mid']}",
+                                json={"prompt": draft2.get("prompt"), "requestKo": "차분히", "confirmUsd": 0.7, "draftId": draft2.get("id")})
+            sent2 = env.requests[req1:]
+            want_frame = first_frame(genmod._fetch_bytes(str(records[1].get("outputKey"))), 0.0)  # noqa: SLF001
+            rec3 = (env.log(pid).get("real:take1#c2") or [{}])[-1]
+            expect("kc-c", [resp2.status_code, len(sent2), decode(((sent2[0]["payload"] if sent2 else {}) or {}).get("start_image_url")) == want_frame,
+                            (rec3.get("params") or {}).get("startImage"), [m["label"] for m in mats()]],
+                   [202, 1, True, "firstFrame", ["컷 1", "컷 1 v2", "컷 2", "컷 2 v2", "컷 3"]],
+                   "저장된 시작 그림이 없으면 그 컷 결과의 첫 프레임으로 낸다(기록 startImage firstFrame)")
+
+            # ================= (kc-d) 다른 모델(형식 본보기 길) =================
+            gen_id = str(env.gen(pid).get("genId") or "")
+            tpl = genmod.retake_template(owner, pid, gen_id, variant="real", cell_id="take1#c3", model=_LR_ENDPOINT)
+            try:
+                genmod.resubmit_model(owner, pid, gen_id, variant="real", cell_id="take1#c3", prompt="p", tag="rt9", model=kling)
+                gone = ""
+            except VpocError as exc:
+                gone = exc.kind
+            expect("kc-d", [tpl.get("path"), bool(tpl.get("prompt")), tpl.get("refCount", 0) > 0, gone],
+                   ["take", True, True, "RetakeBadModel"],
+                   "다른 모델: 그 컷 녹화 구간으로 본보기(참고 영상 경로 take), 원래 Kling 은 형식 본보기 길로 내지 않는다")
+    except Exception:  # noqa: BLE001
+        bad.append("작업 131 검사 예외\n" + _tb.format_exc())
+    if bad:
+        fail("작업 131 컷 단위 Kling 실사 재료 AI로 고치기 검사 실패\n  " + "\n  ".join(bad))
+    else:
+        ok("작업 131 컷 단위 Kling 재료 AI로 고치기 (kc-a)재료 3개 can·cellKey 서로 다름·cuts 1개·보기(이전 프롬프트·Kling·견적 0.14/s) "
+           "(kc-b)미리보기 → 제출(Kling i2v·저장된 시작 그림)·원장·v2 가 그 컷 바로 뒤 (kc-c)시작 그림 없음 → 결과 첫 프레임 "
+           "(kc-d)다른 모델 본보기 = 그 컷 녹화 구간")
+
+
 def main() -> int:
     print("== vpoc1 check ==")
     check_compileall()
@@ -47753,6 +47932,7 @@ def main() -> int:
     check_vnew_location_speed_128()
     check_vnew_real_from_3d_126()
     check_vnew_real_likeness_130()
+    check_vnew_retake_kling_cuts_131()
     check_vnew_plan_step_stay_129()
     check_pod_zones()
     print()

@@ -20,6 +20,11 @@
 보완 1(지시서 116 보완 1, 2026-11-02 — design §6): 패널에서 영상 모델(① 과 같은 원천 plan.previz_models, 그 칸에 쓸 수 있는 것만)과 범위(원본 칸 전체 |
 고른 클립 구간만)를 고른다. 원래 모델·원본 칸 전체는 위 116 길 그대로(same), 그 밖은 형식 본보기(generate.retake_template) 기준 규칙·LLM 문구와
 generate.resubmit_model 로 제출한다. 견적은 generate.retake_plan(모델 × 범위마다 보기에 미리 넣는다).
+
+작업 131(2026-11-04): 130 의 컷 단위 Kling 실사 재료(kind cut·칸 "테이크id#컷id")도 대상이다(_kcut_cell — 칸 키 real:<테이크>#<컷>).
+이전 프롬프트는 130 이 Kling 에 보낸 본문(회차 기록 fallback.cuts[].promptEn, 기록 prompts.json 의 같은 칸 줄), 원래 모델은 그 Kling
+image-to-video 이고 같은 경로(KCUT_PATH)는 generate.resubmit_kling_cut(저장된 시작 그림, 없으면 그 컷 결과 첫 프레임)으로 낸다.
+다른 모델은 그 컷의 프리비즈 녹화 구간을 컷 칸처럼 써서 지금 규칙(형식 본보기·resubmit_model) 그대로다. 기존 칸 동작은 그대로다.
 """
 
 from __future__ import annotations
@@ -137,7 +142,10 @@ MODEL_REASONS = {
     "unusable": "지금 고를 수 없는 모델입니다.",
     "real": "실사 인물 사진을 받지 않는 모델입니다.",
     "rangeOnly": "구간 버전은 그 구간만 다시 만들 수 있습니다.",
+    "startImage": "시작 그림에서 만드는 모델이라 컷 전체만, 이 모델로 만든 프롬프트에서만 다시 만들 수 있습니다.",  # 작업 131
 }
+# 작업 131: 컷 단위 Kling 실사 재료(칸 "테이크id#컷id")를 원래 모델로 다시 만드는 경로(시작 그림 + Kling image-to-video, generate.resubmit_kling_cut)
+KCUT_PATH = "i2v"
 FORMAT_NAMES_EN = {
     "reference": "reference video + reference images (@Video1, @Image N)",
     "elements": "video edit with character elements (@Video1, @Element N, style @Image1)",
@@ -674,8 +682,47 @@ def _cell_index(gen: dict) -> dict[str, tuple[int, dict]]:
     return out
 
 
+def _kcut_cell(gen: dict, variant: str, cell_id) -> tuple[int, dict] | None:
+    """작업 131: 컷 단위 Kling 실사 재료의 칸 "테이크id#컷id" → (테이크 index, 컷 칸). 아니면 None.
+
+    컷 칸은 이 모듈의 칸 모양을 따른다: {id, cutId, cutIds, seconds, real: {status, promptEn(130 이 Kling 에 보낸 본문 — 회차 기록),
+    invocationArn, outputKey, attempt}, klingCut: {model, duration, stillKey, trimTo}}. 기존 칸(_cell_index)에는 없는 키다.
+    """
+    found = generate._kling_cut_record(gen, variant, cell_id)  # noqa: SLF001
+    if not found:
+        return None
+    index, take, record = found
+    state = take.get("real") if isinstance(take.get("real"), dict) else {}
+    cut_id = str(record.get("cutId") or "")
+    seconds = edit._num(record.get("seconds")) or 0.0  # noqa: SLF001
+    duration = edit._num(record.get("duration")) or 0.0  # noqa: SLF001
+    prompt = str(record.get("promptEn") or "")
+    return index, {
+        "id": str(cell_id), "cutId": cut_id, "cutIds": [cut_id] if cut_id else [], "seconds": seconds,
+        "real": {"status": str(record.get("status") or ""), "promptEn": prompt,
+                 "promptBytes": _int_or_none(record.get("promptBytes")) or _bytes_of(prompt),
+                 "invocationArn": str(record.get("invocationArn") or ""), "outputKey": str(record.get("outputKey") or ""),
+                 "attempt": state.get("attempt"), "error": str(record.get("error") or "")},
+        "klingCut": {"model": generate._kling_cut_model_of(take), "duration": duration,  # noqa: SLF001
+                     "stillKey": _safe_key(record.get("stillKey")),
+                     "trimTo": seconds if seconds and duration and duration > seconds + 0.05 else None},  # edit._material_items 와 같다
+    }
+
+
+def _find_cell(gen: dict, variant: str, cell_id) -> tuple[int, dict] | None:
+    """칸 찾기: 기존 칸(_cell_index) 먼저, 없으면 작업 131 컷 단위 Kling 실사 칸."""
+    return _cell_index(gen).get(str(cell_id or "")) or _kcut_cell(gen, variant, cell_id)
+
+
+def _kcut_of(cell) -> dict | None:
+    """작업 131: 컷 단위 Kling 실사 칸이면 그 klingCut, 아니면 None."""
+    value = (cell or {}).get("klingCut") if isinstance(cell, dict) else None
+    return value if isinstance(value, dict) else None
+
+
 def material_items(gen: dict, variant: str, state: dict) -> list[dict]:
-    """그 그림체의 완성된 버전(v2…) 재료. edit._all_items 가 그 칸 지금 결과 바로 뒤에 넣는다(group "retake", version n)."""
+    """그 그림체의 완성된 버전(v2…) 재료. edit._all_items 가 그 칸 지금 결과 바로 뒤에 넣는다(group "retake", version n).
+    작업 131: 컷 단위 Kling 실사 칸("테이크id#컷id")의 버전은 kind cut·자를 길이는 그 컷 v1 과 같다."""
     gen = gen if isinstance(gen, dict) else {}
     mode = str(gen.get("mode") or "")
     if mode not in ("previz", "previz-take") or variant not in VARIANTS:
@@ -685,20 +732,28 @@ def material_items(gen: dict, variant: str, state: dict) -> list[dict]:
     out: list[dict] = []
     for key, entry in ((state or {}).get("cells") or {}).items():
         var, _, cell_id = str(key).partition(":")
-        if var != variant or cell_id not in cells:
+        if var != variant:
             continue
-        index, cell = cells[cell_id]
-        st = cell.get(variant) if isinstance(cell.get(variant), dict) else {}
-        trim_to = None
-        if kind == "cut" and st.get("padded"):
-            orig = edit._num(st.get("origSeconds"))  # noqa: SLF001
-            trim_to = orig if orig and orig > 0 else None
+        if cell_id in cells:
+            index, cell = cells[cell_id]
+            cell_kind = kind
+            st = cell.get(variant) if isinstance(cell.get(variant), dict) else {}
+            trim_to = None
+            if kind == "cut" and st.get("padded"):
+                orig = edit._num(st.get("origSeconds"))  # noqa: SLF001
+                trim_to = orig if orig and orig > 0 else None
+        else:
+            found = _kcut_cell(gen, variant, cell_id)  # 작업 131
+            if not found:
+                continue
+            index, cell = found
+            cell_kind, trim_to = "cut", cell["klingCut"]["trimTo"]
         for version in (entry or {}).get("versions") or []:
             source = str(version.get("outputKey") or "")
             number = _int_or_none(version.get("n"))
             if version.get("status") != "completed" or not source or not number:
                 continue
-            out.append({"sourceKey": source, "mid": edit.media_id(source), "kind": kind, "group": "retake", "index": index,
+            out.append({"sourceKey": source, "mid": edit.media_id(source), "kind": cell_kind, "group": "retake", "index": index,
                         "cellId": cell_id, "cutIds": _version_cuts(version) or _cut_ids(cell), "trimTo": _version_trim(version) or trim_to,
                         "run": None, "version": number, "range": _valid_range(version.get("range"))})
     return out
@@ -720,7 +775,7 @@ def _has_prompt(gen: dict, variant: str, item: dict, state: dict) -> bool:
     if number >= 2:
         version = _find_version(state, cell_key(variant, item.get("cellId")), number)
         return bool((version or {}).get("prompt"))
-    found = _cell_index(gen).get(str(item.get("cellId") or ""))
+    found = _find_cell(gen, variant, item.get("cellId"))  # 작업 131: 컷 단위 Kling 실사 칸도
     st = (found[1].get(variant) if found and isinstance(found[1].get(variant), dict) else {}) if found else {}
     return bool(st.get("promptEn"))
 
@@ -741,15 +796,15 @@ def material_flag(variant: str, item: dict, gen: dict, state: dict, *, plan: dic
            "running": any(v.get("status") in _LIVE for v in versions), "reason": "" if can else NO_PROMPT_TEXT,
            **_flag_extra(item)}
     if can:
-        out["cuts"] = _flag_cuts(plan, gen, item, duration)
+        out["cuts"] = _flag_cuts(plan, gen, item, duration, variant=variant)
     return out
 
 
-def _flag_cuts(plan, gen: dict, item: dict, duration) -> list[dict]:
-    """재료 표식의 cuts(지시서 119). plan 이 없거나 칸을 못 찾거나 계산이 실패하면 []."""
+def _flag_cuts(plan, gen: dict, item: dict, duration, *, variant: str = "") -> list[dict]:
+    """재료 표식의 cuts(지시서 119). plan 이 없거나 칸을 못 찾거나 계산이 실패하면 []. 작업 131: 컷 단위 Kling 실사 칸은 그 컷 1개."""
     if not isinstance(plan, dict):
         return []
-    found = _cell_index(gen).get(str(item.get("cellId") or ""))
+    found = _find_cell(gen, variant, item.get("cellId"))
     if not found:
         return []
     try:
@@ -784,7 +839,7 @@ def _target(plan: dict, gen: dict, mid, state: dict) -> dict:
 
 def _target_of(gen: dict, variant: str, item: dict, items: list[dict]) -> dict:
     reason = _not_target(gen, item)
-    found = _cell_index(gen).get(str(item.get("cellId") or "")) if not reason else None
+    found = _find_cell(gen, variant, item.get("cellId")) if not reason else None  # 작업 131: 컷 단위 Kling 실사 칸도
     if not reason and not found:
         reason = NOT_TARGET["cell"]
     if reason:
@@ -830,7 +885,13 @@ def _base(gen: dict, target: dict, state: dict, log_items: list[dict]) -> dict |
 
 
 def _rules(gen: dict, target: dict) -> dict:
-    """새 프롬프트 바이트 상한(⑤ 빌더와 같다): 통 테이크 _take_prompt_budget(caps), 컷 단위 PREVIZ_PROMPT_TARGET."""
+    """새 프롬프트 바이트 상한(⑤ 빌더와 같다): 통 테이크 _take_prompt_budget(caps), 컷 단위 PREVIZ_PROMPT_TARGET.
+    작업 131: 컷 단위 Kling 실사 칸은 130 이 보낸 상한(fal_prompt_max) — PREVIZ_PROMPT_TARGET 을 넘지 않는다."""
+    kcut = _kcut_of(target.get("cell"))
+    if kcut:
+        caps = generate._previz_caps(kcut["model"])  # noqa: SLF001
+        limit = int(vpoc_settings.fal_prompt_max(kcut["model"], caps.get("promptMaxLength") or vpoc_fal.DEFAULT_PROMPT_MAX))
+        return {"maxBytes": min(int(vnew_settings.PREVIZ_PROMPT_TARGET), limit), "real": True}
     if str(gen.get("mode") or "") == "previz-take":
         endpoint = str(gen.get("videoModel") or vnew_settings.VNEW_PREVIZ_EDIT_MODEL)
         max_bytes = int(generate._take_prompt_budget(generate._previz_caps(endpoint)))  # noqa: SLF001
@@ -840,7 +901,14 @@ def _rules(gen: dict, target: dict) -> dict:
 
 
 def estimate(gen: dict, cell: dict) -> dict:
-    """다시 만들기 1회 금액(같은 모델·같은 길이, ⑤ estimate 와 같은 식). usd 는 소수 2자리(confirmUsd 와 비교)."""
+    """다시 만들기 1회 금액(같은 모델·같은 길이, ⑤ estimate 와 같은 식). usd 는 소수 2자리(confirmUsd 와 비교).
+    작업 131: 컷 단위 Kling 실사 칸은 130 과 같다 — 보낸 길이(5·10초) × 그 모델 초당 단가(fal pricing, generate._previz_model_unit_price)."""
+    kcut = _kcut_of(cell)
+    if kcut:
+        seconds = float(cell.get("seconds") or 0)
+        billed = float(kcut.get("duration") or 0) or float(generate._kling_duration(generate._previz_caps(kcut["model"]), seconds))  # noqa: SLF001
+        usd = round(generate._previz_model_unit_price(kcut["model"]) * billed, 2)  # noqa: SLF001
+        return {"usd": usd, "seconds": round(seconds, 3), "billedSeconds": round(billed, 3), "model": kcut["model"], "resolution": ""}
     endpoint = str(gen.get("videoModel") or vnew_settings.VNEW_PREVIZ_EDIT_MODEL)
     seconds = float(cell.get("seconds") or 0)
     if str(gen.get("mode") or "") == "previz-take":
@@ -927,6 +995,10 @@ def _attempt_out(record: dict) -> dict:
 
 def _reconstructed_params(gen: dict, cell: dict, variant: str) -> dict:
     st = cell.get(variant) if isinstance(cell.get(variant), dict) else {}
+    kcut = _kcut_of(cell)
+    if kcut:  # 작업 131: 컷 단위 Kling 실사 칸(130 기록 매개변수와 같은 꼴)
+        return {"seconds": round(float(cell.get("seconds") or 0), 3), "duration": kcut.get("duration"),
+                "startImage": "still" if kcut.get("stillKey") else ""}
     if str(gen.get("mode") or "") == "previz-take":
         params = {"seconds": round(float(cell.get("seconds") or 0), 3), "resolution": str(gen.get("resolution") or "")}
         if isinstance(st.get("audio"), bool):
@@ -948,7 +1020,7 @@ def _attempts(gen: dict, target: dict, log_items: list[dict]) -> list[dict]:
         out.append({
             "id": "", "source": "reconstructed", "at": gen.get("createdAt") or "", "attempt": st.get("attempt"),
             "run": (gen.get("realRun") or {}).get("n") if real_take else None, "version": None,
-            "model": str(gen.get("videoModel") or ""), "provider": "fal",
+            "model": (_kcut_of(target["cell"]) or {}).get("model") or str(gen.get("videoModel") or ""), "provider": "fal",
             "params": _reconstructed_params(gen, target["cell"], variant), "refCount": None, "prompt": prompt,
             "promptBytes": int(st.get("promptBytes") or _bytes_of(prompt)), "truncated": False,
             "status": st.get("status") or "", "error": st.get("error") or "",
@@ -1721,7 +1793,10 @@ _PLAN_KEYS = ("ok", "reason", "path", "seconds", "sentSeconds", "billedSeconds",
               "priceKnown")
 
 
-def _original_model(gen: dict) -> str:
+def _original_model(gen: dict, target: dict | None = None) -> str:
+    kcut = _kcut_of((target or {}).get("cell"))  # 작업 131: 컷 단위 Kling 실사 칸은 그 Kling 모델
+    if kcut:
+        return str(kcut.get("model") or "")
     return str((gen or {}).get("videoModel") or vnew_settings.VNEW_PREVIZ_EDIT_MODEL or "")
 
 
@@ -1948,9 +2023,12 @@ def _no_plan(path: str, seconds: float, reason: str) -> dict:
 
 def _scope_plan(gen: dict, target: dict, endpoint: str, path: str, caps: dict, is_orig: bool, *, seconds: float, needed: int,
                 same: bool, allowed: bool) -> dict:
-    """모델 하나·범위 하나의 견적(design D19·D20). same 이면 116 estimate·_rules 그대로."""
+    """모델 하나·범위 하나의 견적(design D19·D20). same 이면 116 estimate·_rules 그대로.
+    작업 131: 시작 그림 경로(KCUT_PATH)는 같은 경로(same)만 — 구간·다른 형식 버전 기준은 고를 수 없다."""
     if not allowed:
         return _no_plan(path, seconds, MODEL_REASONS["rangeOnly"])
+    if path == KCUT_PATH and not same:
+        return _no_plan(path, seconds, MODEL_REASONS["startImage"])
     if same:
         est = estimate(gen, target["cell"])
         length = float(target["cell"].get("seconds") or 0.0)
@@ -1970,9 +2048,11 @@ def _scope_plan(gen: dict, target: dict, endpoint: str, path: str, caps: dict, i
 
 def _choices(plan: dict, gen: dict, target: dict, rng: dict | None, *, same_ok: bool, full_ok: bool) -> tuple[list[dict], list[dict]]:
     """모델 목록(design D19): 원래 모델 첫 줄 + ① 과 같은 원천 plan.previz_models 의 available·previzCapable 모델. 범위마다 견적을 붙이고
-    두 범위 모두 못 쓰면 hidden(이름·이유)으로 보낸다. 반환 (보일 모델, 뺀 모델)."""
-    original = _original_model(gen)
+    두 범위 모두 못 쓰면 hidden(이름·이유)으로 보낸다. 반환 (보일 모델, 뺀 모델).
+    작업 131: 컷 단위 Kling 실사 칸은 원래 모델 = 그 Kling(경로 KCUT_PATH), 다른 모델은 칸 종류 cut 으로 지금 규칙 그대로."""
+    original = _original_model(gen, target)
     kind = str(target.get("kind") or "")
+    kcut = _kcut_of(target.get("cell"))
     try:
         listed = plan_mod.previz_models()
     except Exception as exc:  # noqa: BLE001 — 목록을 못 읽어도 원래 모델로는 고칠 수 있다.
@@ -1996,7 +2076,7 @@ def _choices(plan: dict, gen: dict, target: dict, rng: dict | None, *, same_ok: 
         if not is_orig and not (row.get("available") and row.get("previzCapable")):
             hidden.append({"id": endpoint, "label": label, "reason": _clean_text(row.get("reason") or MODEL_REASONS["unusable"], 200)})
             continue
-        path = generate.retake_path(endpoint, original=original, kind=kind)
+        path = KCUT_PATH if kcut and is_orig else generate.retake_path(endpoint, original=original, kind=kind)
         caps = generate._previz_caps(endpoint)  # noqa: SLF001
         full = _scope_plan(gen, target, endpoint, path, caps, is_orig, seconds=full_seconds, needed=needed_full,
                            same=is_orig and same_ok, allowed=full_ok)
@@ -2019,7 +2099,7 @@ def _setup(owner: str, pid: str, plan: dict, gen: dict, gen_id: str, target: dic
     duration = _source_duration(owner, pid, gen_id, target["mid"]) if has_clip else None
     rng, note = _range_of(plan, target, vrange, cell_seconds, duration, clip_in, clip_out)
     models, hidden = _choices(plan, gen, target, rng, same_ok=version.get("format") != "template", full_ok=vrange is None)
-    return {"models": models, "modelsHidden": hidden, "defaultModel": _original_model(gen), "cellSeconds": cell_seconds,
+    return {"models": models, "modelsHidden": hidden, "defaultModel": _original_model(gen, target), "cellSeconds": cell_seconds,
             "scopes": (["full"] if vrange is None else []) + (["range"] if rng else []), "range": rng,
             "rangeNote": RANGE_NOTES.get(note, "")}
 
@@ -2186,7 +2266,7 @@ def _range_block(rng: dict, info: dict) -> dict:
 def _run_draft_model(owner: str, pid: str, gen_id: str, key: str, draft_id: str, claim: str, plan: dict, gen: dict, target: dict,
                      base: dict, draft: dict, started: float) -> None:
     """새 길 초안(design D23): 형식 본보기 → (구간) 프레임 → LLM 1회 → 원장 → 정리·규칙(본보기 기준) → done. 예외는 run_draft 가 맡는다."""
-    original = _original_model(gen)
+    original = _original_model(gen, target)
     model = str(draft.get("model") or original)
     rng = _valid_range(draft.get("range"))
     template = generate.retake_template(owner, pid, gen_id, variant=target["variant"], cell_id=target["cellId"], model=model,
@@ -2224,9 +2304,12 @@ def _run_draft_model(owner: str, pid: str, gen_id: str, key: str, draft_id: str,
 
 
 def _resubmit(owner: str, pid: str, gen_id: str, variant: str, cell_id: str, n: int, version: dict) -> dict:
-    """버전 하나를 제출한다: 같은 경로(116)는 generate.resubmit_cell, 새 길(format template)은 generate.resubmit_model."""
+    """버전 하나를 제출한다: 같은 경로(116)는 generate.resubmit_cell, 새 길(format template)은 generate.resubmit_model.
+    작업 131: 컷 단위 Kling 실사 칸의 같은 경로(path KCUT_PATH)는 generate.resubmit_kling_cut(시작 그림 + Kling image-to-video)."""
     prompt = str(version.get("prompt") or "")
     attempt = int(version.get("attempt") or 1)
+    if version.get("format") != "template" and version.get("path") == KCUT_PATH:
+        return generate.resubmit_kling_cut(owner, pid, gen_id, cell_id=cell_id, prompt=prompt, tag=f"rt{n}", attempt=attempt, version=n)
     if version.get("format") != "template":
         return generate.resubmit_cell(owner, pid, gen_id, variant=variant, cell_id=cell_id, prompt=prompt, tag=f"rt{n}", attempt=attempt,
                                       version=n)
