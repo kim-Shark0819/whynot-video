@@ -115,6 +115,13 @@ IMAGE_RETRY = 1
 MAX_EXTRA_PROMPT_LEN = 500
 # build task 가 이 시간을 넘게 running 이면 멈춘 것으로 본다(조회 때 failed).
 BUILD_STALL_S = 1800
+# 끊긴 작업 바로 재개(작업 128): 이 파드에서 돌고 있지 않고 heartbeat(progress.heartbeatAt·updatedAt 중 늦은 값)가
+# 이 시간보다 오래됐으면 서버 재시작으로 끊긴 것으로 본다(조회 때 failed, build 요청이면 바로 새로 시작).
+LOCATION_STALL_S = settings.LOCATION_STALL_S
+# 진행 중 heartbeat 간격(작업 128). 오래 걸리는 단계(설계·사실·그림·검사)에서도 이 간격으로 heartbeatAt 을 민다.
+LOCATION_HEARTBEAT_S = settings.LOCATION_HEARTBEAT_S
+# 끊긴 작업 정리 문구(작업 128).
+INTERRUPTED_MESSAGE = "서버 재시작으로 중단되었습니다. 다시 만들어 주세요."
 
 # 단가(원장). Seedream 장당. (작업 125 전 값 — 다른 모듈·옛 검사가 읽을 수 있어 남긴다.)
 SEEDREAM_USD = settings.SEEDREAM_USD
@@ -141,6 +148,9 @@ PROMPT_AUTHOR_FALLBACK_MODEL = settings.ANALYZE_FALLBACK_MODEL
 # 비교·보정(설계자 2026-10-21, 046): 벽 그림마다 (패널·생성 그림·사실)로 일치 여부를 보고, 불일치면
 # 그 벽만 1회 다시 그린다. 이미지 읽기가 강한 Claude 를 쓴다.
 VERIFY_MODEL = settings.ANALYZE_FALLBACK_MODEL  # Claude Fable 5.1
+# verify 첫 호출 출력 한도(작업 128). 운영 실측(2026-11-04) 성공 출력 900~1535 토큰에 여유를 더했다.
+# 700 이던 때는 첫 호출 4개가 모두 stop=max_tokens 로 잘려 trunc_retry 를 한 번씩 더 했다.
+VERIFY_MAX_TOKENS = 2400
 
 # Seedream 프롬프트 길이(글자 수). 설계자: 1,500~2,500자(Seedream 3,000자 이내).
 PROMPT_MIN_CHARS = 1500
@@ -214,6 +224,63 @@ def _mark_running(owner: str, pid: str, lid: str) -> bool:
 def _clear_running(owner: str, pid: str, lid: str) -> None:
     with _RUNNING_LOCK:
         _RUNNING.discard((owner, pid, lid))
+
+
+def _running_here(owner: str, pid: str, lid: str) -> bool:
+    """(owner,pid,lid) 빌드 스레드가 이 파드에서 돌고 있으면 True(작업 128 — 끊긴 작업 판정)."""
+    with _RUNNING_LOCK:
+        return (owner, pid, lid) in _RUNNING
+
+
+# ================================================================ heartbeat(작업 128)
+#
+# 서버가 재시작되면 그 파드의 빌드 스레드가 사라져도 plan 에는 status=building 이 남는다. 그래서 빌드 중에는
+# 단계마다(progress.updatedAt) 그리고 LOCATION_HEARTBEAT_S 마다(progress.heartbeatAt) 살아 있음을 적는다.
+# heartbeatAt 을 updatedAt 과 따로 두는 것은 화면의 '응답이 늦어지고 있습니다'(updatedAt 3분)를 지금처럼 두기 위해서다.
+
+
+def _touch_heartbeat(owner: str, pid: str, lid: str, task_id: str) -> None:
+    """progress.heartbeatAt 만 now 로 쓴다. task_id 가 어긋나거나 running 이 아니면 쓰지 않는다."""
+    from . import plan as plan_mod  # noqa: PLC0415
+
+    def mutator(data: dict) -> None:
+        loc = _find_location(data, lid)
+        task = (loc or {}).get("task") or {}
+        if loc is None or task.get("id") != task_id or task.get("status") != "running":
+            raise _Discard()
+        progress = dict(loc.get("progress") or _empty_progress())
+        progress["heartbeatAt"] = now_iso()
+        loc["progress"] = progress
+
+    try:
+        plan_mod.mutate_plan(owner, pid, mutator)
+    except _Discard:
+        return
+    except Exception as exc:  # noqa: BLE001
+        log.warning("vnew.location.heartbeat.failed pid=%s lid=%s err=%s", pid, lid, str(exc)[:150])
+
+
+class _Heartbeat:
+    """빌드 동안 every_s 마다 _touch_heartbeat 를 부르는 데몬 스레드. stop() 하면 곧 끝난다."""
+
+    def __init__(self, owner: str, pid: str, lid: str, task_id: str, every_s: float) -> None:
+        self._args = (owner, pid, lid, task_id)
+        self._every_s = max(0.01, float(every_s))
+        self._stop = threading.Event()
+        self._thread = threading.Thread(target=self._run, daemon=True, name=f"vnew-loc-hb-{lid}")
+
+    def _run(self) -> None:
+        while not self._stop.wait(self._every_s):
+            _touch_heartbeat(*self._args)
+
+    def start(self) -> "_Heartbeat":
+        self._thread.start()
+        return self
+
+    def stop(self) -> None:
+        self._stop.set()
+        if self._thread.is_alive() and self._thread is not threading.current_thread():
+            self._thread.join(timeout=5)
 
 
 # ================================================================ 진행 표시(progress)
@@ -563,18 +630,27 @@ _DESIGN_TOOL = {
 }
 
 
-def design_location(owner: str, pid: str, loc: dict, panels: list[bytes] | None = None) -> dict:
+def design_location(
+    owner: str,
+    pid: str,
+    loc: dict,
+    panels: list[bytes] | None = None,
+    *,
+    setting: dict | None = None,
+    photo_blocks: list[dict] | None = None,
+) -> dict:
     """그 장소 패널(최대 6장)을 Claude 분석 체인에 먼저, 실패하면 Astra 로 보내 설계 JSON 을 받는다.
 
     세로 긴 패널은 tiles_for_analysis 로 잘려 있으므로, 인물이 적고 배경이 큰 조각을 먼저 고른다.
     setting 의 locationKo·layoutEn·enclosed 와 패널 설명을 함께 준다. 결과에 'assumed'/'provisional'
     같은 말이 있으면(벽을 못 읽었다는 뜻) 1회만 더 강하게 재요청한다.
     panels: run_build 가 한 번 고른 패널(작업 125 — 매 단계 다시 읽고 사람 수를 세지 않게). None 이면 고른다.
+    setting·photo_blocks: run_build 가 한 번 준비해 사실 추출과 함께 쓰는 값(작업 128). None 이면 읽는다.
     반환: 정리된 설계 JSON(아래 _normalize_design) + model.
     """
     panels = _design_panels(owner, pid, loc) if panels is None else list(panels)
     name_en = str(loc.get("nameEn") or "").strip() or "the place"
-    setting = _setting_for(owner, pid)
+    setting = _setting_for(owner, pid) if setting is None else setting
     location_ko = str(setting.get("locationKo") or "").strip()
     layout_en = str(setting.get("layoutEn") or "").strip()
     enclosed = _as_bool(setting.get("enclosed"))
@@ -595,7 +671,7 @@ def design_location(owner: str, pid: str, loc: dict, panels: list[bytes] | None 
         "Each panel below shows this place from a different angle — read the drawn walls, windows, "
         "shelves, desks and doors in the panels and base every wall on them."
     )
-    photo_blocks = _photo_blocks(owner, pid, loc)
+    photo_blocks = _photo_blocks(owner, pid, loc) if photo_blocks is None else list(photo_blocks)
     if photo_blocks:
         intro_lines.append(
             "아래에 사용자가 첨부한 실제 참고 사진이 먼저 옵니다(최우선). " + _PHOTO_PRIORITY_KO
@@ -1005,16 +1081,26 @@ def _facts(blocks: list[dict], *, model: str) -> tuple[dict, dict]:
     )
 
 
-def extract_facts(owner: str, pid: str, loc: dict, panels: list[bytes] | None = None) -> dict:
+def extract_facts(
+    owner: str,
+    pid: str,
+    loc: dict,
+    panels: list[bytes] | None = None,
+    *,
+    setting: dict | None = None,
+    photo_blocks: list[dict] | None = None,
+) -> dict:
     """그 장소 패널(배경 큰 조각 우선, 최대 6장)에서 벽별 물건·창문·문·재질·빛·시대·나라를 읽는다.
 
     Claude 분석 체인 먼저, 실패하면 Astra. 보이지 않는 벽은 보이는 벽에서 '추정'(estimated=true)해 채운다.
     panels: run_build 가 한 번 고른 패널(작업 125). None 이면 고른다.
+    setting·photo_blocks: run_build 가 설계와 함께 쓰려고 한 번 준비한 값(작업 128). None 이면 읽는다.
+    설계 결과(loc["design"])는 쓰지 않는다 — 그래서 run_build 가 설계와 동시에 부른다(작업 128).
     반환: 정리된 사실 JSON(_normalize_facts) + model.
     """
     panels = _design_panels(owner, pid, loc) if panels is None else list(panels)
     name_en = str(loc.get("nameEn") or "").strip() or "the place"
-    setting = _setting_for(owner, pid)
+    setting = _setting_for(owner, pid) if setting is None else setting
     location_ko = str(setting.get("locationKo") or "").strip()
     enclosed = _as_bool(setting.get("enclosed"))
 
@@ -1029,7 +1115,7 @@ def extract_facts(owner: str, pid: str, loc: dict, panels: list[bytes] | None = 
     intro_lines.append(
         "This is a Korean setting (closed room)." if enclosed else "This is a Korean setting."
     )
-    photo_blocks = _photo_blocks(owner, pid, loc)
+    photo_blocks = _photo_blocks(owner, pid, loc) if photo_blocks is None else list(photo_blocks)
     if photo_blocks:
         intro_lines.append(
             "아래에 사용자가 첨부한 실제 참고 사진이 먼저 옵니다(최우선). " + _PHOTO_PRIORITY_KO
@@ -1688,7 +1774,10 @@ def start_build(owner: str, pid: str, lid: str, extra_prompt_ko: str | None = No
             raise VpocError("vnew.location.build", "NotFound", "장소를 찾을 수 없습니다.", 404)
         task = loc.get("task") or _empty_task()
         if task.get("status") == "running" and not _task_stale(task):
-            raise VpocError("vnew.location.build", "Building", "이미 공간 시트를 만들고 있습니다.", 409)
+            if not _interrupted(owner, pid, loc):
+                raise VpocError("vnew.location.build", "Building", "이미 공간 시트를 만들고 있습니다.", 409)
+            # 작업 128: 이 파드에서 돌지 않고 heartbeat 가 LOCATION_STALL_S 보다 오래됨 → 끊긴 작업. 정리하고 새로 시작한다.
+            log.info("vnew.location.build.interrupted pid=%s lid=%s old_task=%s", pid, lid, task.get("id"))
         if extra_prompt_ko is not None:
             cleaned = str(extra_prompt_ko or "").strip()[:MAX_EXTRA_PROMPT_LEN]
             if cleaned:
@@ -1722,7 +1811,7 @@ def start_build_all(owner: str, pid: str) -> list[str]:
     for loc in data.get("locations") or []:
         lid = str(loc.get("id") or "")
         task = loc.get("task") or {}
-        if not lid or (task.get("status") == "running" and not _task_stale(task)):
+        if not lid or (task.get("status") == "running" and not _task_stale(task) and not _interrupted(owner, pid, loc)):
             continue
         try:
             start_build(owner, pid, lid, None)
@@ -1745,7 +1834,10 @@ def run_build(owner: str, pid: str, lid: str, task_id: str) -> None:
 
     if not _mark_running(owner, pid, lid):
         return
+    # 작업 128: 빌드 동안 LOCATION_HEARTBEAT_S 마다 heartbeatAt 을 민다(다른 파드·재시작 후 조회가 끊김을 판정).
+    heartbeat = _Heartbeat(owner, pid, lid, task_id, LOCATION_HEARTBEAT_S)
     try:
+        heartbeat.start()
         data, _ = plan_mod.load_plan(owner, pid)
         loc = _find_location(data, lid)
         if loc is None:
@@ -1766,33 +1858,58 @@ def run_build(owner: str, pid: str, lid: str, task_id: str) -> None:
         panels = _design_panels(owner, pid, loc)
         _timing(pid, lid, "panels", started)
 
-        # a. 설계(Claude → Astra). [다시 만들기] 는 설계를 새로 한다 — 예전 설계(벽 4면 "흰 벽 가정")를
-        #    재사용하면 창문 없는 방이 그대로 남기 때문. 다만 사용자가 설계를 직접 고친 적이 있으면
-        #    (designEditedAt) 그 수정본을 유지한다. 설계가 아직 없으면(walls 없음) 당연히 새로 받는다.
+        # a1. 설계·사실 공통 입력(작업 128): 장소 설정은 이미 읽은 plan 에서, 참고 사진은 S3 에서 한 번만 읽어
+        #     블록을 만든다. 설계와 사실이 같은 bytes(패널·사진)를 쓴다. 예전에는 둘이 저마다 plan 을 다시 읽고
+        #     사진을 다시 받았다.
         started = time.monotonic()
-        design = loc.get("design") or {}
-        user_edited = bool(design.get("designEditedAt"))
-        if not design.get("walls") or not user_edited:
-            design = design_location(owner, pid, loc, panels=panels)
-            _store_design(owner, pid, lid, design)
-            loc["design"] = design
-        _timing(pid, lid, "design", started)
+        setting = ((data.get("script") or {}).get("setting")) or {}
+        setting = setting if isinstance(setting, dict) else {}
+        photo_blocks = _photo_blocks(owner, pid, loc)
+        _timing(pid, lid, "facts_prep", started)
 
-        # a2. 사실 추출(Claude → Astra). 벽별 물건·창문·문·재질·빛·시대·나라를 읽어 loc["facts"] 에 둔다.
-        #     사용자가 사실을 직접 고친 적이 있으면(factsEditedAt) 그 수정본을 유지한다.
-        #     장소 사진·웹툰 패널은 여기(와 설계)에서만 Claude 가 본다 — 그림 모델에는 글로만 간다(작업 125).
-        _set_progress(owner, pid, lid, task_id, step="facts", done=0, total=TOTAL_VIEWS)
-        started = time.monotonic()
+        # a. 설계(Claude → Astra)와 a2. 사실 추출(Claude → Astra)을 동시에 한다(작업 128). 사실 추출은 설계 결과를
+        #    쓰지 않는다(입력 = 장소 이름·설정·사진·패널). 실패·대체 모델 규칙은 각 함수 안에서 지금과 같다.
+        #    [다시 만들기] 는 설계를 새로 한다 — 예전 설계(벽 4면 "흰 벽 가정")를 재사용하면 창문 없는 방이 그대로
+        #    남기 때문. 다만 사용자가 설계를 직접 고친 적이 있으면(designEditedAt) 그 수정본을 유지한다. 설계가 아직
+        #    없으면(walls 없음) 당연히 새로 받는다. 사실도 사용자가 고친 적이 있으면(factsEditedAt) 수정본을 쓴다.
+        #    장소 사진·웹툰 패널은 여기서만 Claude 가 본다 — 그림 모델에는 글로만 간다(작업 125).
+        design = loc.get("design") or {}
+        need_design = not design.get("walls") or not bool(design.get("designEditedAt"))
         facts = loc.get("facts") or {}
-        facts_user_edited = bool(facts.get("factsEditedAt"))
-        if not _facts_has_wall_detail(facts) or not facts_user_edited:
-            if not facts_user_edited:
-                facts = extract_facts(owner, pid, loc, panels=panels)
+        need_facts = not bool(facts.get("factsEditedAt"))
+
+        def _timed(step: str, func, *args, **kwargs):
+            step_started = time.monotonic()
+            try:
+                return func(*args, **kwargs)
+            finally:
+                _timing(pid, lid, step, step_started)
+
+        shared = {"setting": setting, "photo_blocks": photo_blocks}
+        with ThreadPoolExecutor(max_workers=2, thread_name_prefix=f"vnew-loc-read-{lid}") as pool:
+            design_future = (
+                pool.submit(_timed, "design", design_location, owner, pid, dict(loc), panels, **shared)
+                if need_design else None
+            )
+            facts_future = (
+                pool.submit(_timed, "facts", extract_facts, owner, pid, dict(loc), panels, **shared)
+                if need_facts else None
+            )
+            if design_future is not None:
+                design = design_future.result()
+                _store_design(owner, pid, lid, design)
+                loc["design"] = design
+            else:
+                _timing(pid, lid, "design", time.monotonic())
+            _set_progress(owner, pid, lid, task_id, step="facts", done=0, total=TOTAL_VIEWS)
+            if facts_future is not None:
+                facts = facts_future.result()
                 _store_facts(owner, pid, lid, facts)
+            else:
+                _timing(pid, lid, "facts", time.monotonic())
         loc["facts"] = facts
         # 공통 문장(방 구조·색·재질·조명) 1개 — 4개 지시문 앞에 그대로 붙는다(작업 125).
         loc["anchorEn"] = _room_anchor(loc)
-        _timing(pid, lid, "facts", started)
 
         # a3. 가이드·프롬프트. 방 치수로 컷어웨이 뷰 가이드(PIL)를 그리고(verify·cut 기준), 뷰별 프롬프트
         #     4개(Astra→Claude)를 동시에 쓴다.
@@ -1840,6 +1957,7 @@ def run_build(owner: str, pid: str, lid: str, task_id: str) -> None:
         message = exc.message if isinstance(exc, VpocError) else str(exc)[:300]
         _commit(owner, pid, lid, task_id, status="failed", error=message)
     finally:
+        heartbeat.stop()
         _clear_running(owner, pid, lid)
 
 
@@ -2039,7 +2157,7 @@ def _verify(blocks: list[dict], *, model: str) -> tuple[dict, dict]:
         system_text=_VERIFY_SYSTEM,
         blocks=blocks,
         tool=_VERIFY_TOOL,
-        max_tokens=700,
+        max_tokens=VERIFY_MAX_TOKENS,
         where="vnew.location.verify",
         model=VERIFY_MODEL,
     )
@@ -2618,10 +2736,12 @@ def _photos_by_side(photos: list[dict], side: str) -> list[dict]:
     return [p for p in photos if p.get("side") == side]
 
 
-def _guard_photos_not_running(loc: dict) -> None:
-    """빌드 중(running, stale 아님)이면 사진 변경을 409 로 막는다."""
+def _guard_photos_not_running(loc: dict, owner: str | None = None, pid: str | None = None) -> None:
+    """빌드 중(running, stale·끊김 아님)이면 사진 변경을 409 로 막는다(작업 128: 끊긴 작업이면 막지 않는다)."""
     task = loc.get("task") or {}
     if task.get("status") == "running" and not _task_stale(task):
+        if owner is not None and pid is not None and _interrupted(owner, pid, loc):
+            return
         raise VpocError(
             "vnew.location.photos",
             "Building",
@@ -2649,7 +2769,7 @@ def add_photos(owner: str, pid: str, lid: str, files: list[tuple[bytes, str]], s
     loc0 = _find_location(data0, lid)
     if loc0 is None:
         raise VpocError("vnew.location.photos", "NotFound", "장소를 찾을 수 없습니다.", 404)
-    _guard_photos_not_running(loc0)
+    _guard_photos_not_running(loc0, owner, pid)
     existing = len(_loc_photos(loc0))
     if existing + len(pending) > MAX_LOCATION_PHOTOS:
         raise VpocError(
@@ -2683,7 +2803,7 @@ def add_photos(owner: str, pid: str, lid: str, files: list[tuple[bytes, str]], s
         loc = _find_location(data, lid)
         if loc is None:
             raise VpocError("vnew.location.photos", "NotFound", "장소를 찾을 수 없습니다.", 404)
-        _guard_photos_not_running(loc)
+        _guard_photos_not_running(loc, owner, pid)
         photos = _loc_photos(loc)
         if len(photos) + len(new_metas) > MAX_LOCATION_PHOTOS:
             raise VpocError(
@@ -2707,7 +2827,7 @@ def update_photo(owner: str, pid: str, lid: str, photo_id: str, patch: dict) -> 
         loc = _find_location(data, lid)
         if loc is None:
             raise VpocError("vnew.location.photos", "NotFound", "장소를 찾을 수 없습니다.", 404)
-        _guard_photos_not_running(loc)
+        _guard_photos_not_running(loc, owner, pid)
         photos = _loc_photos(loc)
         target = next((p for p in photos if p.get("photoId") == photo_id), None)
         if target is None:
@@ -2736,7 +2856,7 @@ def delete_photo(owner: str, pid: str, lid: str, photo_id: str) -> dict:
         loc = _find_location(data, lid)
         if loc is None:
             raise VpocError("vnew.location.photos", "NotFound", "장소를 찾을 수 없습니다.", 404)
-        _guard_photos_not_running(loc)
+        _guard_photos_not_running(loc, owner, pid)
         photos = _loc_photos(loc)
         target = next((p for p in photos if p.get("photoId") == photo_id), None)
         if target is None:
@@ -2834,7 +2954,7 @@ def locations_view(owner: str, pid: str, plan: dict) -> list[dict]:
     """plan_view 의 locations[] — 각 장소의 설계·상태·그림체별 이미지 presigned URL."""
     out: list[dict] = []
     for loc in plan.get("locations") or []:
-        loc = _reconcile_stale(loc)
+        loc = _reconcile_stale(loc, owner=owner, pid=pid)
         variants_out = {}
         has_views = False
         for variant in VARIANTS:
@@ -2879,9 +2999,19 @@ def locations_view(owner: str, pid: str, plan: dict) -> list[dict]:
     return out
 
 
-def _reconcile_stale(loc: dict) -> dict:
-    """조회 때: building 이 오래 멈췄으면 failed 로 본다(저장하지 않고 뷰만)."""
+def _reconcile_stale(loc: dict, *, owner: str | None = None, pid: str | None = None) -> dict:
+    """조회 때: building 이 끊겼거나 오래 멈췄으면 failed 로 본다(저장하지 않고 뷰만).
+
+    작업 128: owner·pid 가 오면 먼저 '끊긴 작업'(_interrupted — 이 파드 미실행 + heartbeat 가 LOCATION_STALL_S
+    보다 오래됨)을 본다. 다른 파드에서 heartbeat 가 신선하게 돌고 있으면 그대로 둔다.
+    """
     task = loc.get("task") or {}
+    if owner is not None and pid is not None and _interrupted(owner, pid, loc):
+        loc = dict(loc)
+        loc["status"] = "failed"
+        loc["error"] = INTERRUPTED_MESSAGE
+        loc["task"] = {"status": "error", "startedAt": task.get("startedAt"), "id": None}
+        return loc
     if _task_stale(task):
         loc = dict(loc)
         loc["status"] = "failed"
@@ -3024,6 +3154,35 @@ def _task_stale(task: dict) -> bool:
     if not started:
         return False
     return (datetime.now(timezone.utc) - started).total_seconds() > BUILD_STALL_S
+
+
+def _heartbeat_age_s(loc: dict) -> float | None:
+    """마지막 살아 있음 표시(progress.heartbeatAt·updatedAt 중 늦은 값, 없으면 시작 시각)부터 지난 초. 모르면 None."""
+    progress = (loc or {}).get("progress") or {}
+    task = (loc or {}).get("task") or {}
+    stamps = [_parse_iso(progress.get(k) or "") for k in ("heartbeatAt", "updatedAt")]
+    stamps = [s for s in stamps if s is not None]
+    if not stamps:
+        fallback = _parse_iso(progress.get("startedAt") or "") or _parse_iso(task.get("startedAt") or "")
+        stamps = [fallback] if fallback is not None else []
+    if not stamps:
+        return None
+    return (datetime.now(timezone.utc) - max(stamps)).total_seconds()
+
+
+def _interrupted(owner: str, pid: str, loc: dict) -> bool:
+    """끊긴 빌드인지(작업 128): running 인데 이 파드에서 돌고 있지 않고 heartbeat 가 LOCATION_STALL_S 보다 오래됐다.
+
+    다른 파드에서 실제로 돌고 있으면 heartbeat 가 LOCATION_HEARTBEAT_S 마다 갱신되므로 False 다.
+    """
+    task = (loc or {}).get("task") or {}
+    if task.get("status") != "running":
+        return False
+    lid = str((loc or {}).get("id") or "")
+    if _running_here(owner, pid, lid):
+        return False
+    age = _heartbeat_age_s(loc)
+    return age is not None and age > LOCATION_STALL_S
 
 
 def _parse_iso(value: str):

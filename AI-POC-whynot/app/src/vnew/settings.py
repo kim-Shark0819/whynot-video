@@ -175,6 +175,10 @@ def _checked_fal_endpoint(name: str, default: str) -> str:
 
 LOCATION_IMAGE_MODEL = _checked_fal_endpoint("VNEW_LOCATION_IMAGE_MODEL", _LOCATION_IMAGE_DEFAULT)
 LOCATION_IMAGE_USD = vpoc_settings.SEEDREAM_FAL_USD
+# 공간 시트 끊긴 작업 바로 재개(작업 128): 이 파드에서 돌지 않고 heartbeat 가 이 초보다 오래됐으면 끊긴 것으로 본다.
+LOCATION_STALL_S = _int("VNEW_LOCATION_STALL_S", 180)
+# 공간 시트 빌드 중 heartbeat 간격(초). LOCATION_STALL_S 보다 넉넉히 짧아야 다른 파드의 진행 중 작업을 끊지 않는다.
+LOCATION_HEARTBEAT_S = _int("VNEW_LOCATION_HEARTBEAT_S", 20)
 
 # --- 단가(원장) ---
 SEEDREAM_USD = _float("VNEW_SEEDREAM_USD", 0.04)  # Seedream 장당
