@@ -346,6 +346,10 @@ VNEW_RETAKE_MODEL = os.getenv("VNEW_RETAKE_MODEL", "").strip() or ANALYZE_FALLBA
 # 줄이기(길이만 줄인다) LLM(보완 9, 코드 기본, 템플릿에 넣지 않는다). dev 실측(2026-11-03): Fable 5.1 52~90초·한 번은 8,000 토큰에서 잘림,
 # 바로 뒤 같은 일을 Opus 5.5 는 8.6초·1,086 토큰. 빈 값이면 기본값. 넘어가는 순서는 vpoc.llm._model_chain 그대로, 초안 호출은 위 모델 그대로.
 VNEW_RETAKE_SHRINK_MODEL = os.getenv("VNEW_RETAKE_SHRINK_MODEL", "").strip() or "global.anthropic.claude-opus-5-5"
+# ⑥ 사운드 — 대사마다 실제 말/속마음(작업 122, 2026-11-04). 켜면 ⑥ 에서 대사 줄마다 목소리 종류와 구간을 정하고, 원래 소리의 속마음 줄
+# 구간에만 효과를 걸어 새 mp4(영상은 복사만)를 만든다(sound.py, 유료 호출 없음). false 면 사운드 라우트 3개가 404(SoundDisabled)이고
+# ⑥ 은 예전처럼 영상만 보인다. 저장된 문서·결과 영상은 지우지 않는다. 코드 기본값이다(템플릿에는 아직 배선하지 않았다).
+VNEW_SOUND = _bool("VNEW_SOUND", True)
 
 # 캐릭터 충실도(char-fidelity, 2026-10-30). 켜면 분석이 기준 사진 한 장의 옷을 그대로 기본 복장으로 쓰고, 한쪽 소품의 좌우를
 # 화면 기준으로 받아 코드가 캐릭터 좌우로 바꾼다. 시트는 화면 왼쪽으로 45°씩 도는 다섯 인물로 그리고, 정면·후면·시트를 검사한다.
