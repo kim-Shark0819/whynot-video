@@ -433,6 +433,9 @@ BRIEF_STALL_S = _int("VNEW_BRIEF_STALL_S", 1800)
 #
 # 한 테이크 최대 길이(초). 녹화 구간들을 앞에서부터 묶어 합계가 이 값을 넘지 않게 테이크를 만든다.
 VNEW_TAKE_MAX_SECONDS = _int("VNEW_TAKE_MAX_SECONDS", 30)
+# 작업 152: 테이크 녹화가 모델의 참고 영상 상한(vpoc ark.video_options maxRefVideoS, fal 기본 15초)보다 길면 컷 경계에서
+# 상한 이하 조각(part)으로 나눠 제출하고 결과를 이어 붙인다. 끄면 나누지 않고 제출 전 검사가 막는다(유료 호출 0).
+VNEW_TAKE_REF_SPLIT = _bool("VNEW_TAKE_REF_SPLIT", True)
 # 테이크 출력 해상도(480p 초안 권장 — 비용 통제). 480p/720p/1080p.
 VNEW_TAKE_RESOLUTION = os.getenv("VNEW_TAKE_RESOLUTION", "480p")
 # draft(초안) 모드 — 480p 초안 생성, 응답에 draft_id(나중 1080p 완성용). 기본 켬.

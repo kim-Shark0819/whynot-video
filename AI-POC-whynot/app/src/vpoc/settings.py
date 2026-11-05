@@ -254,6 +254,10 @@ FAL_SEEDANCE_LABEL = "Seedance 2.5 (fal)"
 # fal Seedance 계열 샷·영상 1개 길이 상한(초, 073 D3·R3.2). caps 는 4~30초지만 BytePlus 와 같은 15초로 묶는다
 # (30초는 단가·실패 위험이 크고 미검증). 계열이 아닌 fal 모델에는 쓰지 않는다(R14.3). 최소 1.
 FAL_SEEDANCE_MAX_S = max(1, _int("VPOC_FAL_SEEDANCE_MAX_S", 15))
+# fal 영상 입력(참조 영상) 길이 상한(초, 152). 출력 길이(caps.durations)와 따로다 — Wan 3.0 r2v 는 출력 30초까지
+# 만들지만 입력 영상은 15초까지만 받는다("Video duration exceeds the maximum allowed. Maximum is 15 seconds").
+# caps 에 값이 없을 때 영상 입력 필드(videoField·videoListField)가 있는 fal 모델에 쓴다. 최소 1.
+FAL_REF_VIDEO_MAX_S = max(1, _int("VPOC_FAL_REF_VIDEO_MAX_S", 15))
 
 
 def _parse_fal_family(raw: str) -> dict[str, str]:

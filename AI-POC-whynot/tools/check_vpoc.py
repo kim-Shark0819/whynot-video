@@ -51551,6 +51551,237 @@ def check_vnew_previz_camera_clear_151() -> None:
     else:
         ok("작업 151 프리비즈 카메라 여유 (cc-a)앞사람 머리 안 orbit·얼굴 앞 pullback·벽 orbit·3.5 뒤 다시 보기 로그 (cc-b)어깨 너머 35% 이하 "
            "(cc-c)낮은 컷 같거나 좋아짐 (cc-d)여유 있으면 바이트 같음 (cc-e)렌더러 물림·결정적 — " + "; ".join(notes))
+_RV152_ENDPOINT = "alibaba/wan-3.0/reference-to-video"
+_RV152_CAPS = {
+    "promptField": "prompt", "videoListField": "video_urls", "videoListMax": 3, "imageListField": "image_urls",
+    "imageListMax": 10, "durations": [5, 10, 15, 20, 25, 30], "durationAsString": False, "sendDuration": True,
+    "resolutions": ["480p", "720p"], "previzCapable": True, "available": True,
+}
+
+
+def check_vnew_ref_video_split_152() -> None:
+    """작업 152 — 참고(입력) 영상 상한 maxRefVideoS 와 테이크 자동 나누기. 가짜 fal(Wan 3.0 r2v)·가짜 자르기·잇기, 유료 0.
+
+    (rv-a) caps: Wan 3.0 r2v maxRefVideoS 15 · maxDurationS 30. Seedance r2v 는 그대로(maxRefVideoS = maxDurationS, 검사 상한 0)
+    (rv-b) 새 계획: 45초 콘티 → 구간 모두 ≤15초(_max_segment_seconds 15), Seedance 는 maxDurationS 그대로
+    (rv-c) test3 꼴(구간 30초+15초, 13컷): 조각 ≤15초 컷 경계 · 모든 fal 요청 영상 ≤15초 · 이은 길이 = 합 · 조각마다 원장 1번 ·
+           조각 프롬프트에 자기 컷 대사만 · 견적 조각 합 = 통째 금액 · 조각 하트비트
+    (rv-d) 이어지는 말(147 run) 가운데는 피해서 나눈다 · 20초 한 컷은 15초에서 자른다 · 컷을 못 찾으면 한국어 오류
+    (rv-e) 재시도: 실패한 조각만 다시 낸다(끝난 조각 재사용) · ⑦ 통째(116) 30초 다시 만들기는 유료 호출 전에 한국어 오류
+    (rv-f) 나누기를 끄면 30초 테이크는 제출 전 검사가 막는다(그 테이크 요청 0, 한국어 오류)
+    """
+    import base64 as _b64  # noqa: PLC0415
+    import traceback as _tb  # noqa: PLC0415
+
+    sys.path.insert(0, str(ROOT / "app"))
+    from src.vnew import generate as genmod  # noqa: PLC0415
+    from src.vnew import plan as planmod  # noqa: PLC0415
+    from src.vpoc import ark as arkmod  # noqa: PLC0415
+    from src.vpoc.errors import VpocError  # noqa: PLC0415
+
+    bad: list[str] = []
+    owner = "tester"
+    clip_re = re.compile(rb"^CLIP:(\d+\.\d+)-(\d+\.\d+):")
+    rec_seconds = {b"PREVIZ-REC-s1": 30.0, b"PREVIZ-REC-s2": 15.0}
+
+    def video_seconds(mp4: bytes) -> float:
+        match = clip_re.match(mp4 or b"")
+        if match:
+            return float(match.group(2)) - float(match.group(1))
+        return rec_seconds.get(bytes(mp4 or b""), 0.0)
+
+    def req_video_seconds(req: dict) -> float:
+        uri = str(((req.get("payload") or {}).get("video_urls") or [""])[0])
+        return video_seconds(_b64.b64decode(uri.split(",", 1)[-1])) if "," in uri else -1.0
+
+    def lines_of(prompt: str) -> set[str]:
+        return set(re.findall(r"대사(\d+)번", prompt))
+
+    try:
+        with _guard_real_llm(), _LrEnv(owner) as env, _pin_vnew(
+                VNEW_FX=False, VNEW_GEN_PARALLEL=2, POLL_INTERVAL_S=0, VNEW_TAKE_RESOLUTION="480p",
+                VNEW_TAKE_MAX_SECONDS=30, VNEW_TAKE_REF_SPLIT=True, VNEW_TAKE_AUDIO=True) as vset:
+            prefix_id = genmod.vpoc_settings.FAL_ID_PREFIX
+            wan_id = prefix_id + _RV152_ENDPOINT
+            seed_find = genmod.vpoc_fal.find
+            env.set(genmod.vpoc_fal, "find", lambda m: {"id": wan_id, "endpointId": _RV152_ENDPOINT, "category": "reference-to-video",
+                                                        "caps": dict(_RV152_CAPS)} if str(m) == wan_id else seed_find(m))
+            clips: list[tuple[float, float]] = []
+
+            def cut_clip(mp4, unit):
+                start, end = float(unit["startSec"]), float(unit["endSec"])
+                clips.append((start, end))
+                return {"bytes": b"CLIP:%.3f-%.3f:" % (start, end) + bytes(mp4)[:20], "origSeconds": round(end - start, 3),
+                        "sentSeconds": round(end - start, 3), "padded": False}
+
+            merges: list[list[float]] = []
+
+            def conform(pieces):
+                merges.append([float(s) for _b, s in pieces])
+                return b"PARTS:%d" % len(pieces)
+
+            env.set(genmod, "_cut_clip", cut_clip)
+            env.set(genmod, "_mp4_seconds", video_seconds)
+            env.set(genmod, "_conform_concat", conform)
+            beats = {"n": 0}
+            base_touch = genmod._touch_prepare_claim  # noqa: SLF001
+
+            def touch(*args):
+                beats["n"] += 1
+                return base_touch(*args)
+
+            env.set(genmod, "_touch_prepare_claim", touch)
+            client = env.client()
+
+            # ================= (rv-a) caps =================
+            wan_opts = arkmod.video_options(wan_id)
+            if wan_opts.get("maxRefVideoS") != 15 or wan_opts.get("maxDurationS") != 30 or not wan_opts.get("videoInput"):
+                bad.append(f"(rv-a) Wan caps: maxRefVideoS={wan_opts.get('maxRefVideoS')} maxDurationS={wan_opts.get('maxDurationS')}")
+            env.set(genmod.vpoc_settings, "FAL_REF_VIDEO_MAX_S", 9)
+            if arkmod.video_options(wan_id).get("maxRefVideoS") != 9:
+                bad.append("(rv-a) FAL_REF_VIDEO_MAX_S 설정이 기본값을 바꾸지 못합니다")
+            env.set(genmod.vpoc_settings, "FAL_REF_VIDEO_MAX_S", 15)
+            seed_opts = arkmod.video_options(env.model_id)
+            if seed_opts.get("maxDurationS") != 12 or seed_opts.get("maxRefVideoS") != seed_opts.get("maxDurationS") \
+                    or genmod._take_ref_limit(_LR_ENDPOINT) != 0:  # noqa: SLF001
+                bad.append(f"(rv-a) Seedance 값이 바뀌었습니다: {seed_opts.get('maxDurationS')} {seed_opts.get('maxRefVideoS')}")
+
+            # ================= (rv-b) 새 계획 =================
+            if planmod._max_segment_seconds(wan_id) != 15 or planmod._max_segment_seconds(env.model_id) != 12:  # noqa: SLF001
+                bad.append(f"(rv-b) 구간 상한: wan={planmod._max_segment_seconds(wan_id)} "  # noqa: SLF001
+                           f"seedance={planmod._max_segment_seconds(env.model_id)}")  # noqa: SLF001
+            _cuts, segs = planmod.compute_segments([{"id": f"c{i}", "no": i, "seconds": 5} for i in range(1, 10)],
+                                                   planmod._max_segment_seconds(wan_id))  # noqa: SLF001
+            if not segs or any(int(s.get("seconds") or 0) > 15 for s in segs) or sum(int(s["seconds"]) for s in segs) != 45:
+                bad.append(f"(rv-b) 45초 콘티 구간: {[s.get('seconds') for s in segs]}")
+
+            # ================= (rv-c) test3 꼴 =================
+            def make(pid: str, dialogues: dict | None = None) -> None:
+                env.make_plan(pid, [{"id": "s1", "cutIds": [f"c{i}" for i in range(1, 11)], "seconds": 30},
+                                    {"id": "s2", "cutIds": ["c11", "c12", "c13"], "seconds": 15}])
+
+                def mutator(data: dict) -> None:
+                    data["input"]["videoModel"] = wan_id
+                    for cut in data["conti"]["cuts"]:
+                        text = (dialogues or {}).get(cut["id"]) or f"대사{cut['no']}번."
+                        cut["dialogueKo"] = f'에이: "{text}"'
+                        data["previz"]["shotBrief"]["cuts"][cut["id"]]["dialogue"] = [
+                            {"speaker": "에이", "lineKo": text, "deliveryEn": "calm"}]
+
+                planmod.mutate_plan(owner, pid, mutator)
+
+            pid = "prj_rv_c"
+            make(pid)
+            est = genmod.estimate(env.plan(pid))
+            rows = est.get("takes") or []
+            parts_est = (rows[0].get("parts") or []) if rows else []
+            whole = genmod._take_usd(_RV152_ENDPOINT, 30.0, "480p")  # noqa: SLF001
+            if [p["seconds"] for p in parts_est] != [15.0, 15.0] or abs(rows[0]["webtoonUsd"] - whole) > 0.01 \
+                    or len(rows) != 2 or "parts" in rows[1]:
+                bad.append(f"(rv-c) 견적 조각: {[(r.get('seconds'), r.get('parts')) for r in rows]} whole={whole}")
+            since, ledger0 = len(env.requests), len(env.ledger)
+            beats["n"] = 0
+            client.post(f"/api/vnew/p/{pid}/generate", json={"confirmUsd": est["totalUsd"]})
+            g = env.drive(pid)
+            reqs = env.requests[since:]
+            cells = genmod._previz_cells(g)  # noqa: SLF001
+            parts = (cells[0].get("webtoon") or {}).get("parts") or []
+            if [p.get("cutIds") for p in parts] != [[f"c{i}" for i in range(1, 6)], [f"c{i}" for i in range(6, 11)]]:
+                bad.append(f"(rv-c) 조각 컷: {[p.get('cutIds') for p in parts]}")
+            if len(reqs) != 3 or any(not 0 < req_video_seconds(r) <= 15.0 for r in reqs):
+                bad.append(f"(rv-c) fal 요청 영상 길이: {[round(req_video_seconds(r), 3) for r in reqs]}")
+            if merges != [[15.0, 15.0]] or (cells[0].get("webtoon") or {}).get("status") != "completed":
+                bad.append(f"(rv-c) 잇기: {merges} {(cells[0].get('webtoon') or {}).get('status')}")
+            if abs(sum(merges[0] if merges else []) - float(cells[0].get("seconds") or 0)) > 0.01:
+                bad.append(f"(rv-c) 이은 길이가 테이크 길이와 다릅니다: {merges} {cells[0].get('seconds')}")
+            charges = [x for x in env.ledger[ledger0:] if str(x.get("key") or "").startswith("fal-take-")]
+            if len(charges) != 3 or [round(float(x.get("units") or 0), 3) for x in charges] != [15.0, 15.0, 15.0]:
+                bad.append(f"(rv-c) 원장(조각마다 1번): {[(x.get('key'), x.get('units')) for x in charges]}")
+            if len(reqs) == 3:
+                want = [{str(i) for i in range(1, 6)}, {str(i) for i in range(6, 11)}, {"11", "12", "13"}]
+                got = [lines_of(str(r["payload"].get("prompt") or "")) for r in reqs]
+                if got != want:
+                    bad.append(f"(rv-c) 조각 프롬프트 대사: {got}")
+            if beats["n"] < 3:
+                bad.append(f"(rv-c) 조각 하트비트 수: {beats['n']}")
+            if g.get("status") != "done" or (g.get("finalWebtoon") or {}).get("status") != "done":
+                bad.append(f"(rv-c) 회차가 끝나지 않았습니다: {g.get('status')} {(g.get('finalWebtoon') or {}).get('status')}")
+
+            # ================= (rv-e) 116 통째 다시 만들기 =================
+            since = len(env.requests)
+            try:
+                genmod.resubmit_cell(owner, pid, str(g.get("genId") or ""), variant="webtoon", cell_id="take1", prompt="redo",
+                                     tag="rt1")
+                bad.append("(rv-e) 30초 통째 다시 만들기가 제출됐습니다")
+            except VpocError as exc:
+                if exc.kind != "RefVideoTooLong" or "15초" not in exc.message or len(env.requests) != since:
+                    bad.append(f"(rv-e) 통째 다시 만들기 오류: {exc.kind} {exc.message} reqs={len(env.requests) - since}")
+
+            # ================= (rv-d) 경계 고르기 =================
+            pid_d = "prj_rv_d"
+            make(pid_d, {"c5": "그러니까", "c6": "…아니야."})
+            plan_d = env.plan(pid_d)
+            take_d = genmod._take_units(plan_d)[0]  # noqa: SLF001
+            got_d = [p["cutIds"] for p in genmod._take_parts(plan_d, take_d, 15.0)]  # noqa: SLF001
+            if got_d != [["c1", "c2", "c3", "c4"], ["c5", "c6", "c7", "c8", "c9"], ["c10"]]:
+                bad.append(f"(rv-d) 이어지는 말 가운데를 피하지 않았습니다: {got_d}")
+            pid_l = "prj_rv_long"
+            env.make_plan(pid_l, [{"id": "s1", "cutIds": ["c1"], "seconds": 20}])
+            plan_l = env.plan(pid_l)
+            take_l = genmod._take_units(plan_l)[0]  # noqa: SLF001
+            got_l = [(p["cutIds"], p["start"], p["end"]) for p in genmod._take_parts(plan_l, take_l, 15.0)]  # noqa: SLF001
+            if got_l != [(["c1"], 0.0, 15.0), (["c1"], 15.0, 20.0)]:
+                bad.append(f"(rv-d) 20초 한 컷: {got_l}")
+            try:
+                genmod._take_parts(plan_l, {**take_l, "cutIds": []}, 15.0)  # noqa: SLF001
+                bad.append("(rv-d) 컷이 없는데 나눴습니다")
+            except VpocError as exc:
+                if exc.kind != "RefSplitFailed" or "나눌 수 없습니다" not in exc.message:
+                    bad.append(f"(rv-d) 나눌 수 없을 때 오류: {exc.kind} {exc.message}")
+
+            # ================= (rv-e) 재시도 =================
+            pid_e = "prj_rv_e"
+            make(pid_e)
+            since = len(env.requests)
+            env.reject.add("webtoon")  # 첫 조회(take1 조각 1)가 실패
+            client.post(f"/api/vnew/p/{pid_e}/generate", json={"confirmUsd": genmod.estimate(env.plan(pid_e))["totalUsd"]})
+            g = env.drive(pid_e)
+            state = genmod._previz_cells(g)[0]["webtoon"]  # noqa: SLF001
+            first = [p.get("status") for p in state.get("parts") or []]
+            if state.get("status") != "failed" or "조각" not in str(state.get("error") or ""):
+                bad.append(f"(rv-e) 조각 실패가 칸 실패가 아닙니다: {state.get('status')} {state.get('error')} {first}")
+            done_rid = [p.get("invocationArn") for p in state.get("parts") or [] if p.get("status") == "completed"]
+            mid = len(env.requests)
+            genmod.retry_segment(owner, pid_e, "take1", "webtoon")
+            g = env.drive(pid_e)
+            state = genmod._previz_cells(g)[0]["webtoon"]  # noqa: SLF001
+            again = env.requests[mid:]
+            if len(again) != 1 or lines_of(str(again[0]["payload"].get("prompt") or "")) - {"1", "2", "3", "4", "5"} \
+                    or state.get("status") != "completed" or not done_rid \
+                    or done_rid[0] not in [p.get("invocationArn") for p in state.get("parts") or []]:
+                bad.append(f"(rv-e) 재시도: 요청 {len(again)} 상태 {state.get('status')} {since}")
+
+            # ================= (rv-f) 나누기 끔 → 제출 전 검사 =================
+            vset.VNEW_TAKE_REF_SPLIT = False
+            pid_f = "prj_rv_f"
+            make(pid_f)
+            since = len(env.requests)
+            client.post(f"/api/vnew/p/{pid_f}/generate", json={"confirmUsd": genmod.estimate(env.plan(pid_f))["totalUsd"]})
+            g = env.drive(pid_f)
+            state = genmod._previz_cells(g)[0]["webtoon"]  # noqa: SLF001
+            reqs = env.requests[since:]
+            if state.get("status") != "failed" or "최대 길이(15초)" not in str(state.get("error") or "") \
+                    or any(req_video_seconds(r) > 15.0 for r in reqs) or len(reqs) != 1:
+                bad.append(f"(rv-f) 제출 전 검사: {state.get('status')} {state.get('error')} {[req_video_seconds(r) for r in reqs]}")
+            vset.VNEW_TAKE_REF_SPLIT = True
+    except Exception:  # noqa: BLE001
+        bad.append("작업 152 검사 예외\n" + _tb.format_exc())
+    if bad:
+        fail("작업 152 참고 영상 상한·테이크 나누기 검사 실패\n  " + "\n  ".join(bad))
+    else:
+        ok("작업 152 참고 영상 상한 (rv-a)Wan 15/30·Seedance 그대로 (rv-b)45초 → 구간 ≤15초 (rv-c)30+15초 13컷 → 조각 ≤15초·"
+           "요청 영상 ≤15초·이은 길이=합·조각마다 원장·자기 컷 대사 (rv-d)말 가운데 피함·20초 컷 15초에서 자름·못 나누면 한국어 오류 "
+           "(rv-e)실패 조각만 재시도·통째 30초 다시 만들기 차단 (rv-f)나누기 끔 → 제출 전 차단")
 
 
 def main() -> int:
@@ -51662,6 +51893,7 @@ def main() -> int:
     check_vnew_previz_pose_148()
     check_vnew_api_retry_150()
     check_vnew_previz_camera_clear_151()
+    check_vnew_ref_video_split_152()
     check_vnew_plan_step_stay_129()
     check_pod_zones()
     print()
