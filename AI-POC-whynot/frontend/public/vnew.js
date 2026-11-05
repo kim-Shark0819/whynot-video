@@ -9256,7 +9256,8 @@
       matList: {},
       materials: {},
       binTake: {}, // 작업 145: 그림체별 고른 테이크(sourceKey) — 다시 그리기·폴링에도 남는다
-      binCut: {}, // 작업 145: 그림체별 고른 컷(sourceKey)
+      binCut: {}, // 작업 145: 그림체별 고른 컷(sourceKey). 작업 149: 통 테이크 안 컷이면 "cut:<cutId>"
+      binFollow: {}, // 작업 149: 그림체별 재료 메뉴가 마지막으로 따라간 타임라인 클립(editBinFollow)
       limits: {},
       invalidIds: {},
       media: {},
@@ -10041,6 +10042,7 @@
       parts.abox.classList[method]("is-selected");
     });
     editRenderTools(ctx);
+    if (editBinFollow(ctx)) editRenderBin(ctx); // 작업 149: 고른 클립의 테이크·컷을 재료 메뉴에
   }
 
   function editShowDrop(ctx, index) {
@@ -10358,6 +10360,7 @@
     editPlaceHead(ctx);
     var loc = editLocate(ctx.clips, ctx.t);
     if (ctx.dom.empty) ctx.dom.empty.style.display = loc ? "none" : "";
+    if (!ctx.playing && editBinFollow(ctx)) editRenderBin(ctx); // 작업 149: 멈춘 재생헤드가 든 클립의 테이크·컷을 재료 메뉴에
     var video = ctx.vids[ctx.cur];
     if (!loc || !video) {
       ctx.curIndex = -1;
@@ -10827,8 +10830,9 @@
   }
 
   /* 재료 넣기: 재생헤드가 있는 클립 뒤에(없으면 끝에) 그 영상 전체(기본 문서에 그 원본 클립이 하나면 그 구간)를 넣는다.
+     작업 149: range({in, out, label}, 원본 시간 — 통 테이크 안 컷)가 있으면 그 구간을 넣는다.
      길이를 아직 안 잰 재료는 필름 요청이 먼저 잰다. */
-  function editInsertMaterial(ctx, sourceKey, button) {
+  function editInsertMaterial(ctx, sourceKey, button, range) {
     if (!editAlive(ctx) || ctx.busy) return;
     var mat = ctx.materials[sourceKey];
     if (!mat) return;
@@ -10850,6 +10854,10 @@
       var start = same.length === 1 ? Number(same[0].in) : 0;
       var end = same.length === 1 ? Number(same[0].out) : duration;
       if (same.length !== 1 && mat.group === "retake" && Number((mat.retake || {}).trimTo) > 0) end = Math.min(end, Number(mat.retake.trimTo)); // 지시서 116 보완 1: 자른 버전은 그 길이까지
+      if (range) {
+        start = Math.max(0, Number(range.in) || 0);
+        end = Math.min(duration, Number(range.out) || 0);
+      }
       end = Math.min(end, start + maxTotal - editStarts(ctx.clips).total);
       if (end - start < editMinLen(ctx)) {
         editNote(ctx, "타임라인 전체 길이는 " + maxTotal + "초까지입니다.");
@@ -10858,7 +10866,8 @@
       var loc = editLocate(ctx.clips, ctx.t);
       var at = loc ? loc.index + 1 : ctx.clips.length;
       var clip = { id: editNewId(ctx.clips), sourceKey: sourceKey, in: editRound3(start), out: editRound3(end), muted: false };
-      if (mat.label) clip.label = String(mat.label).slice(0, 40);
+      if (range && range.label) clip.label = String(range.label).slice(0, 40);
+      else if (mat.label) clip.label = String(mat.label).slice(0, 40);
       var next = ctx.clips.slice();
       next.splice(at, 0, clip);
       ctx.t = editStarts(next).starts[at];
@@ -10958,6 +10967,7 @@
     clear(bin);
     var list = ctx.matList[ctx.variant] || [];
     if (!list.length) return;
+    editBinFollow(ctx); // 작업 149: 고른 타임라인 클립(또는 재생헤드 클립)이 바뀌었으면 메뉴를 그 테이크·컷으로
     var head = el("div", "vnew-edit-bin-head");
     head.appendChild(el("span", "vnew-edit-bin-title", "재료"));
     head.appendChild(el("span", "vnew-hint", "누르면 재생헤드가 있는 클립 뒤에 넣습니다."));
@@ -10990,30 +11000,177 @@
       bin.appendChild(row);
     }
     var cuts = info.cutsOf(take || null);
-    if (!cuts.length) return;
+    var timeCuts = editBinTimeCuts(take);
+    var options = timeCuts.map(function (c) {
+      return { value: editBinCutValue(c), text: c.label + " · " + editFixSecs(c.seconds) + "초", cut: c, mat: null };
+    }).concat(cuts.map(function (mat) {
+      var seconds = editBinSeconds(mat);
+      return { value: mat.sourceKey, text: String(mat.label || "영상").replace(/^실사 \d+회차 · /, "") + (seconds > 0 ? " · " + seconds.toFixed(1) + "초" : ""),
+               cut: null, mat: mat };
+    }));
+    if (!options.length) return;
     var cutPicked = ctx.binCut[ctx.variant];
-    var cut = cuts.filter(function (m) {
-      return m.sourceKey === cutPicked;
-    })[0] || cuts[0];
-    ctx.binCut[ctx.variant] = cut.sourceKey;
+    var chosen = options.filter(function (o) {
+      return o.value === cutPicked;
+    })[0] || options[0];
+    ctx.binCut[ctx.variant] = chosen.value;
     var cutRow = el("div", "vnew-edit-bin-list vnew-edit-bin-cuts");
     cutRow.appendChild(el("span", "vnew-edit-bin-label", take ? "컷" : "컷 고르기"));
-    var cutSel = editBinSelect("vnew-edit-bin-cut", "컷 고르기", cuts, cut.sourceKey, function (mat) {
-      var seconds = editBinSeconds(mat);
-      return String(mat.label || "영상").replace(/^실사 \d+회차 · /, "") + (seconds > 0 ? " · " + seconds.toFixed(1) + "초" : "");
+    var cutSel = editBinSelect("vnew-edit-bin-cut", "컷 고르기", options.map(function (o) {
+      return { sourceKey: o.value, text: o.text };
+    }), chosen.value, function (o) {
+      return o.text;
     });
-    cutSel.addEventListener("change", function () {
-      ctx.binCut[ctx.variant] = String(cutSel.value || "");
-    });
+    function current() {
+      return options.filter(function (o) {
+        return o.value === ctx.binCut[ctx.variant];
+      })[0] || options[0];
+    }
     cutRow.appendChild(cutSel);
     var addCut = el("button", "outline-button vnew-edit-bin-cut-add", "＋ 컷 넣기");
     addCut.type = "button";
     addCut.title = "고른 컷을 재생헤드가 있는 클립 뒤에 넣기";
     addCut.addEventListener("click", function () {
-      editInsertMaterial(ctx, ctx.binCut[ctx.variant], addCut);
+      var o = current();
+      if (o.cut) editInsertMaterial(ctx, take.sourceKey, addCut, { in: o.cut.start, out: o.cut.end, label: o.cut.label });
+      else editInsertMaterial(ctx, o.value, addCut);
     });
     cutRow.appendChild(addCut);
+    var fixCut = null;
+    if (editFixOn(ctx)) { // 작업 149: [이 컷 AI로 고치기] → 119 패널을 그 테이크·그 컷 구간(「이 구간만」)으로 바로 연다
+      fixCut = el("button", "outline-button vnew-edit-bin-cut-fix", "이 컷 AI로 고치기");
+      fixCut.type = "button";
+      fixCut.setAttribute("aria-haspopup", "dialog");
+      fixCut.addEventListener("click", function () {
+        editBinFixCut(ctx, take, current());
+      });
+      cutRow.appendChild(fixCut);
+    }
+    function paintFix() {
+      if (!fixCut) return;
+      var target = editBinFixTarget(take, current());
+      fixCut.disabled = !target || ctx.busy;
+      fixCut.title = target ? "고른 컷만 AI로 고칩니다(비용은 다음 창에서 보입니다)" : "이 컷은 AI로 고칠 수 없습니다";
+    }
+    cutSel.addEventListener("change", function () {
+      ctx.binCut[ctx.variant] = String(cutSel.value || "");
+      paintFix();
+    });
+    paintFix();
     bin.appendChild(cutRow);
+  }
+
+  /* 작업 149: 통 테이크 재료의 컷(서버 cuts {cutId, no, label, start, end, seconds}, 원본 시간) — 시작 순. 테이크가 아니면 []. */
+  function editBinTimeCuts(take) {
+    return (take && Array.isArray(take.cuts) ? take.cuts : []).filter(function (c) {
+      return c && isFinite(Number(c.start)) && isFinite(Number(c.end)) && Number(c.end) > Number(c.start);
+    }).map(function (c, i) {
+      var a = Number(c.start);
+      var b = Number(c.end);
+      return { cutId: String(c.cutId || ""), no: c.no, label: String(c.label || "장면 " + (i + 1)), start: a, end: b,
+               seconds: Number(c.seconds) > 0 ? Number(c.seconds) : b - a };
+    }).sort(function (x, y) {
+      return x.start - y.start;
+    });
+  }
+
+  function editBinCutValue(cut) {
+    return "cut:" + cut.cutId;
+  }
+
+  /* 작업 149(순수): 클립 원본 구간 [a, b] → 컷 번호(cuts 는 시작 순). 클립이 거의 그 컷이면(서로 80% 넘게 겹침) 그 컷, 아니면 in 점이 든 컷
+     (컷 끝 0.05초 안은 다음 컷), in 점이 끝보다 뒤면 마지막 컷. 컷이 없으면 -1. */
+  function editBinCutAt(cuts, a, b) {
+    var list = Array.isArray(cuts) ? cuts : [];
+    var start = Number(a);
+    var end = Number(b);
+    if (!list.length || !isFinite(start)) return -1;
+    var best = -1;
+    var most = 0;
+    list.forEach(function (c, i) {
+      var overlap = Math.min(end, Number(c.end)) - Math.max(start, Number(c.start));
+      if (overlap > most) {
+        most = overlap;
+        best = i;
+      }
+    });
+    if (best >= 0 && end > start && most >= 0.8 * (end - start) && most >= 0.8 * (Number(list[best].end) - Number(list[best].start))) return best;
+    for (var i = 0; i < list.length; i++) {
+      if (start < Number(list[i].end) - 0.05) return i;
+    }
+    return list.length - 1;
+  }
+
+  /* 작업 149: 타임라인 클립 → 재료 메뉴 값 {take, cut}(테이크 sourceKey·컷 메뉴 값). 테이크 원본이면 그 안 컷(editBinCutAt), 테이크의 컷 재료면
+     그 테이크와 그 재료. 메뉴에 없는 재료면 null. */
+  function editBinPickFor(ctx, clip) {
+    if (!clip) return null;
+    var info = editBinTakes(ctx);
+    var take = info.takes.filter(function (m) {
+      return m.sourceKey === clip.sourceKey;
+    })[0];
+    if (take) {
+      var cuts = editBinTimeCuts(take);
+      var i = editBinCutAt(cuts, clip.in, clip.out);
+      return { take: take.sourceKey, cut: i >= 0 ? editBinCutValue(cuts[i]) : "" };
+    }
+    var mat = ctx.materials[clip.sourceKey] || {};
+    var owner = typeof mat.takeOf === "number" ? info.takes.filter(function (m) {
+      return m.takeNo === mat.takeOf;
+    })[0] : null;
+    return owner ? { take: owner.sourceKey, cut: mat.sourceKey } : null;
+  }
+
+  /* 작업 149: 고른 타임라인 클립(없으면 멈춘 재생헤드가 있는 클립)이 바뀌었으면 재료 메뉴를 그 클립의 테이크·컷으로 맞춘다. 같은 클립이면
+     그대로(사용자가 메뉴에서 고른 값이 다시 그리기에도 남는다). 처음 한 번은 기억만 한다(처음 값 = 가장 최근 테이크, 작업 145).
+     메뉴 값이 바뀌었으면 true. */
+  function editBinFollow(ctx) {
+    if (!ctx || !ctx.matList || !ctx.materials || !ctx.binTake || !ctx.binCut || !Array.isArray(ctx.clips)) return false;
+    if (!ctx.binFollow) ctx.binFollow = {};
+    var v = ctx.variant;
+    var clip = editSelected(ctx);
+    var how = "s";
+    if (!clip) {
+      if (ctx.playing) return false;
+      var loc = editLocate(ctx.clips, ctx.t);
+      clip = loc ? loc.clip : null;
+      how = "p";
+    }
+    var key = clip ? [how, clip.id, clip.sourceKey, clip.in, clip.out].join("|") : "";
+    var first = !Object.prototype.hasOwnProperty.call(ctx.binFollow, v);
+    if (!first && ctx.binFollow[v] === key) return false;
+    ctx.binFollow[v] = key;
+    if (first || !clip) return false;
+    var pick = editBinPickFor(ctx, clip);
+    if (!pick) return false;
+    var changed = ctx.binTake[v] !== pick.take || (!!pick.cut && ctx.binCut[v] !== pick.cut);
+    ctx.binTake[v] = pick.take;
+    if (pick.cut) ctx.binCut[v] = pick.cut;
+    return changed;
+  }
+
+  /* 작업 149: [이 컷 AI로 고치기] 대상 {mid, range}. 통 테이크 안 컷 = 그 테이크(retake.can) + 그 컷 구간, 컷 재료 = 그 재료 통째(range null).
+     고칠 수 없으면 null. */
+  function editBinFixTarget(take, option) {
+    if (!option) return null;
+    if (option.cut) {
+      if (!take || !take.retake || take.retake.can !== true) return null;
+      return { mid: String(take.mid || ""), sourceKey: take.sourceKey, range: { in: editRound3(option.cut.start), out: editRound3(option.cut.end) } };
+    }
+    var mat = option.mat;
+    if (!mat || !mat.retake || mat.retake.can !== true) return null;
+    return { mid: String(mat.mid || ""), sourceKey: mat.sourceKey, range: null };
+  }
+
+  /* 119 패널(editFixOpen)을 그 대상으로 연다. 고른 클립이 같은 원본이고 그 구간과 겹치면 [바꾸기]가 그 클립을 바꾼다. */
+  function editBinFixCut(ctx, take, option) {
+    var target = editBinFixTarget(take, option);
+    if (!target || !target.mid || !editFixOn(ctx)) return;
+    var clip = editSelected(ctx);
+    var r = target.range;
+    var same = clip && clip.sourceKey === target.sourceKey &&
+      (!r || Math.min(Number(clip.out), r.out) - Math.max(Number(clip.in), r.in) > 0.05);
+    editFixOpen(ctx, target.mid, same ? clip.id : "", r);
   }
 
   /* ---- 저장(design §5.5: 0.8초 디바운스, 한 번에 하나, 409 다시 불러오기) ---- */

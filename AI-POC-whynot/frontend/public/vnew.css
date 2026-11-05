@@ -4314,8 +4314,15 @@ textarea.vnew-field-input {
 }
 
 .vnew-edit-bin-add,
-.vnew-edit-bin-cut-add {
+.vnew-edit-bin-cut-add,
+.vnew-edit-bin-cut-fix {
   font-size: 13px;
+}
+
+/* 작업 149: [이 컷 AI로 고치기] — 고칠 수 없는 테이크면 흐림 */
+.vnew-edit-bin-cut-fix:disabled {
+  opacity: 0.45;
+  cursor: default;
 }
 
 .vnew-edit-bin-cuts {

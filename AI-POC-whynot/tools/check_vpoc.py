@@ -42341,6 +42341,9 @@ def _rtk_ui_problems(got: dict, server: dict) -> list[str]:
             problems.append(f"(rtk-j) {what}\n      결과 {value!r}\n      기대 {expected!r}")
 
     items_v1 = ["테이크 1 · 15.0초 · 애니", "합친 영상"]  # 작업 145: 재료 = 테이크 메뉴(테이크 → 합친 영상)
+    # 작업 149: 컷 메뉴가 통 테이크 안 컷(서버 재료 cuts)을 늘 보인다 — 테이크 1(컷 1·2, 15초) 뒤에 「컷 n · s초」 2개가 붙는다.
+    cuts_v1 = ["컷 1 · 7.5초", "컷 2 · 7.5초"]
+    items_v1 = items_v1 + cuts_v1
     want(got.get("off"), [0, 0, 0, items_v1, False], "끔(GET /edit 에 retake 없음): AI로 고치기 버튼·고른 클립 버튼·묶음 없음, 재료 버튼 그대로")
     want(got.get("bin"), {"open": 0, "sel": 0, "items": items_v1, "cells": 0,
                           "pick": ["AI로 고치기", False, "고칠 테이크와 장면을 골라 AI로 고칩니다"], "retakeOn": True, "clips": ["컷 1", "컷 2"]},
@@ -42385,7 +42388,7 @@ def _rtk_ui_problems(got: dict, server: dict) -> list[str]:
     fin = got.get("finished") or {}
     want(fin, {"run": "v2 완성 — [바꾸기]·[재료에 추가]로 타임라인에 쓸 수 있습니다.",
                "rows": [["v1 원본 · 완성", [False], 1], ["v2 · 완성", [False], 1]],
-               "bin": items_v1[:1] + ["테이크 2 · 애니", "합친 영상 · 15.0초"], "refreshed": 1, "pending": [0, 0]},
+               "bin": items_v1[:1] + ["테이크 2 · 애니", "합친 영상 · 15.0초"] + cuts_v1, "refreshed": 1, "pending": [0, 0]},
          "완성: 진행 줄·버전마다 [바꾸기]·[재료에 추가]·GET /edit?variant= 로 재료만 다시 받아 v2 가 테이크 메뉴 「테이크 2」(앞에서 잰 합친 영상 길이는 그대로)")
     sa = got.get("swapAll") or {}
     want(sa, {"clips": [[True, 0, 7.5, 0.5, "컷 1"], [True, 7.5, 15, 1, "컷 2"]], "undo": 1,
@@ -49788,6 +49791,190 @@ def check_vnew_edit_take_menu_145() -> None:
            "컷 모드 합친 영상·허용 목록·기본 문서 그대로 (tm-b)select 1개·N옵션·최근 테이크 기본·넣기 sourceKey·컷 메뉴·다시 그리기/폴링 유지·1개")
 
 
+# 작업 149: 통 테이크(previz-take) 웹툰 gen — 테이크 1개 · 컷 11개 30초(녹화 s1 컷 1–5 15초 · s2 컷 6–11 15초). 컷 3 = 5–10초.
+_CF149_SECONDS = (2, 3, 5, 2, 3, 2, 3, 2, 3, 2, 3)
+
+
+def _cf149_plan(env, pid: str) -> dict:
+    planmod = env.planmod
+    plan = planmod.new_plan()
+    ids = [f"c{n:02d}" for n in range(1, 12)]
+    plan["conti"] = {"status": "ready", "cuts": [{"id": c, "no": n, "seconds": s} for n, (c, s) in enumerate(zip(ids, _CF149_SECONDS), 1)],
+                     "segments": [{"id": "s1", "cutIds": ids[:5], "seconds": 15}, {"id": "s2", "cutIds": ids[5:], "seconds": 15}]}
+    plan["previz"]["recordings"] = {"s1": {"status": "ready", "key": "rec/s1.mp4", "seconds": 15.0},
+                                    "s2": {"status": "ready", "key": "rec/s2.mp4", "seconds": 15.0}}
+    web = _edt_key(pid, "take1-webtoon-1")
+    final_web = f"users/{_EDT_OWNER}/video/{pid}/vnew/gen/g1/final-webtoon.mp4"
+    plan["gen"] = {
+        "genId": "g1", "mode": "previz-take", "status": "done", "createdAt": "2026-11-01T00:00:00Z",
+        "units": [{"id": "take1", "cutIds": ids, "recKeys": ["rec/s1.mp4", "rec/s2.mp4"], "recSegIds": ["s1", "s2"], "seconds": 30.0,
+                   "startCutNo": 1, "endCutNo": 11, "real": _edt_cell("cancelled"),
+                   "webtoon": _edt_cell("completed", web, promptEn="P-take1")}],
+        "segments": [], "finalReal": {"status": "cancelled", "key": "", "error": ""},
+        "finalWebtoon": {"status": "done", "key": final_web, "error": ""}, "selected": "webtoon", "costUsd": 0.0,
+    }
+    env.store.blobs.update({web: _edt_fake(30.0), final_web: _edt_fake(30.0)})
+    env.save_plan(pid, plan)
+    return plan
+
+
+# 작업 149 화면(node): 실제 GET /edit 응답(SERVER.on = AI로 고치기 켬, SERVER.off = 끔)을 ⑦ 화면에 넣고 컷 메뉴·따라가기·넣기·고치기를 본다.
+_CF149_NODE = r"""
+var P = "/api/vnew/p/p%201/edit";
+var viewNow = clone(SERVER.on);
+handlers.push(function (m, p) { if (m === "GET" && (p.indexOf(P + "/media/") === 0 || p.indexOf(P + "/retake/") === 0)) return "hold"; });
+handlers.push(function (m, p) { if (m === "GET" && (p === P || p.indexOf(P + "?") === 0)) return { ok: clone(viewNow) }; });
+handlers.push(function (m, p) { if (m === "PUT" && p === P) return { ok: { doc: { version: 1 }, etag: "e1", saved: true, totalSeconds: 0 } }; });
+var inserted = [];
+var realInsert = editInsertMaterial;
+editInsertMaterial = function (c, key, btn, range) { inserted.push([key, range ? [range.in, range.out, range.label] : null]); return realInsert(c, key, btn, range); };
+function vals(root) { var t = binTake(root), c = binCut(root); return [t ? t.value : null, c ? c.value : null]; }
+function fixBtn(root) { return byClass(root, "vnew-edit-bin-cut-fix")[0] || null; }
+async function run() {
+  // ===== 끔: 컷 메뉴는 보이고 [이 컷 AI로 고치기]는 없다
+  viewNow = clone(SERVER.off);
+  renderEditStep(new FakeNode("div"));
+  await settle();
+  out.off = [binOptions(binCut(editCtx.root)).length, !!fixBtn(editCtx.root), editCtx.retakeOn];
+  editLeave();
+  // ===== 켬
+  viewNow = clone(SERVER.on);
+  renderEditStep(new FakeNode("div"));
+  await settle();
+  var ctx = editCtx;
+  var root = ctx.root;
+  var take = SERVER.takeKey;
+  var fb = fixBtn(root);
+  out.first = { takes: binOptions(binTake(root)), cuts: binOptions(binCut(root)), values: vals(root),
+                cutValues: byTag(binCut(root), "option").map(function (o) { return o.value; }),
+                fix: fb ? [fb.textContent, fb.disabled] : null, clips: ctx.clips.map(function (c) { return [c.label, c.in, c.out]; }) };
+  // 타임라인 컷 3(클립 3번째)을 고르면 두 메뉴가 테이크 1 · 컷 3
+  editSelect(ctx, 2);
+  out.sel3 = vals(root);
+  // 다시 그리기·재료 다시 받기에도 남는다. 메뉴에서 컷 5 로 바꾼 값도 같은 클립이면 남는다
+  editRenderBin(ctx);
+  editAbsorbMaterials(ctx, clone(SERVER.on));
+  editRenderBin(ctx);
+  out.rerender = vals(root);
+  var cs = binCut(root);
+  cs.value = "cut:c05";
+  cs.fire("change");
+  editRenderBin(ctx);
+  editSeek(ctx, ctx.t);
+  out.manual = vals(root);
+  editSelect(ctx, 2);
+  out.manualSame = vals(root);
+  // 고른 클립이 없으면 멈춘 재생헤드가 든 클립(26초 = 컷 10)
+  editSelect(ctx, -1);
+  editSeek(ctx, 26);
+  out.head = vals(root);
+  // 다시 컷 3 을 고르고 [이 컷 AI로 고치기] → 119 패널이 테이크 1 · 컷 3 구간(「이 구간만」)으로
+  editSelect(ctx, 2);
+  fixBtn(root).fire("click");
+  var fx = ctx.fix;
+  out.fix = fx ? { mid: fx.mid === SERVER.takeMid, clip: fx.clip, scope: fx.scope, clipId: fx.clipId === ctx.clips[2].id,
+                   get: calls.filter(function (c) { return c[0] === "GET" && c[1].indexOf(P + "/retake/") === 0; })
+                     .map(function (c) { return c[1].slice(P.length).replace(encodeURIComponent(SERVER.takeMid), "MID"); }),
+                   pick: !!ctx.fixPick, panel: byClass(root, "vnew-edit-fix").length } : null;
+  editFixClose(ctx);
+  // [＋ 컷 넣기] = 테이크 원본의 컷 3 구간(in·out = 5·10)
+  var n = ctx.clips.length;
+  byClass(root, "vnew-edit-bin-cut-add")[0].fire("click");
+  var added = ctx.clips[ctx.sel] || {};
+  out.insert = { calls: inserted.slice(), count: ctx.clips.length - n, clip: [added.sourceKey === take, added.in, added.out, added.label],
+                 values: vals(root) };
+  // 머리 줄 [AI로 고치기](119)는 그대로
+  out.head119 = byClass(root, "vnew-edit-fix-pick").map(function (b) { return b.textContent; });
+  out.innerHTML = innerHTMLUsed;
+  console.log(JSON.stringify(out));
+}
+run().catch(function (e) { console.error(String((e && e.stack) || e)); process.exit(1); });
+"""
+
+
+def check_vnew_edit_cut_fix_149() -> None:
+    """작업 149 — ⑦ 재료 [컷 고르기] = 통 테이크 안 컷(컷 1…11) · 타임라인 선택을 따라감 · [이 컷 AI로 고치기]. 유료 호출 0, 가짜 저장소.
+
+    (cf-a) 서버: previz-take 웹툰 테이크(컷 11개 30초) 재료 cuts 11개 {cutId, no, label, start, end, seconds}·이어짐·합 = 테이크 길이·
+           retake.cuts(119)와 같은 시각·끔이어도 cuts·테이크가 아닌 재료는 cuts 없음·기본 문서 그대로(컷 11개)
+    (cf-b) 화면(node): 컷 메뉴 11개(컷 재료 없이)·컷 3 클립 고르면 테이크 1·cut:c03·다시 그리기/폴링/같은 클립이면 고른 값 유지·재생헤드 클립·
+           [＋ 컷 넣기] = 테이크 원본 in 5·out 10·[이 컷 AI로 고치기] = 119 패널(테이크 1 mid·구간 5–10·scope range·고른 클립)·끔이면 버튼 없음
+    """
+    import traceback as _tb  # noqa: PLC0415
+
+    bad: list[str] = []
+
+    def expect(group: str, got, want, what: str) -> None:
+        if got != want:
+            bad.append(f"({group}) {what}\n      결과 {got!r}\n      기대 {want!r}")
+
+    server: dict = {}
+    try:
+        with _EdtEnv() as env:
+            client = env.client()
+            _cf149_plan(env, "prj_cf_a")
+            views = {}
+            for name, on in (("on", True), ("off", False)):
+                with _pin_vnew(VNEW_EDIT=True, VNEW_EDIT_RETAKE=on):
+                    views[name] = client.get("/api/vnew/p/prj_cf_a/edit?variant=webtoon").get_json() or {}
+            take = next((m for m in views["on"].get("materials") or [] if m.get("kind") == "take"), {})
+            cuts = take.get("cuts") or []
+            starts = [0.0] + [sum(_CF149_SECONDS[:i]) for i in range(1, 11)]
+            want = [{"cutId": f"c{n:02d}", "no": n, "label": f"컷 {n}", "start": float(a), "end": float(a + s), "seconds": float(s)}
+                    for n, (a, s) in enumerate(zip(starts, _CF149_SECONDS), 1)]
+            expect("cf-a", [len(cuts), cuts], [11, want], "통 테이크 재료 cuts 11개(컷 n · 시작·끝·길이, 원본 시간)")
+            expect("cf-a", [round(sum(c["end"] - c["start"] for c in cuts), 6), take.get("duration"),
+                            all(abs(a["end"] - b["start"]) < 1e-9 for a, b in zip(cuts, cuts[1:]))],
+                   [30.0, 30.0, True], "컷 길이 합 = 테이크 길이(30초)·컷이 이어진다")
+            expect("cf-a", [(c["start"], c["end"]) for c in cuts] == [(c["in"], c["out"]) for c in (take.get("retake") or {}).get("cuts") or []],
+                   True, "119 retake.cuts 와 같은 시각(같은 계산)")
+            off_take = next((m for m in views["off"].get("materials") or [] if m.get("kind") == "take"), {})
+            expect("cf-a", [off_take.get("cuts") == cuts, "retake" in off_take,
+                            ["cuts" in m for m in views["on"]["materials"] if m.get("kind") != "take"]],
+                   [True, False, [False]], "AI로 고치기 끔이어도 cuts·테이크가 아닌 재료(합친 영상)는 cuts 없음")
+            expect("cf-a", [[c.get("label"), c.get("in"), c.get("out")] for c in views["on"]["doc"]["clips"]][:3],
+                   [["컷 1", 0.0, 2.0], ["컷 2", 2.0, 5.0], ["컷 3", 5.0, 10.0]], "기본 문서 그대로(테이크를 컷 경계로 나눈 클립)")
+            server = {"on": views["on"], "off": views["off"], "takeKey": take.get("sourceKey"), "takeMid": take.get("mid")}
+    except Exception:  # noqa: BLE001
+        bad.append("(cf-a) 예외\n" + _tb.format_exc())
+
+    node = shutil.which("node")
+    if not node:
+        warn("node 가 없어 작업 149 화면 검사(cf-b)를 건너뜁니다 (E16)")
+    elif server.get("takeKey"):
+        vjs = (PUBLIC / "vnew.js").read_text(encoding="utf-8")
+        code, problems = _edu_code(vjs, _EDU_SLICES)
+        bad.extend(problems)
+        prefix = "var SERVER = " + json.dumps(server, ensure_ascii=False) + ";\n"
+        got, err = _lr_run_node(node, prefix + _EDU_NODE_HARNESS + code + _CF149_NODE, "cf149_")
+        if err:
+            bad.append(f"(cf-b) node 실행 실패: {err}")
+        else:
+            secs = [f"{float(s):.1f}" for s in _CF149_SECONDS]
+            first = got.get("first") or {}
+            expect("cf-b", [got.get("off"), first.get("cuts"), first.get("cutValues"), first.get("fix")],
+                   [[11, False, False], [f"컷 {n} · {s}초" for n, s in enumerate(secs, 1)], [f"cut:c{n:02d}" for n in range(1, 12)],
+                    ["이 컷 AI로 고치기", False]],
+                   "컷 메뉴 11개(컷 재료 없이, 「컷 n · s초」)·켬이면 [이 컷 AI로 고치기]·끔이면 없음")
+            take = server["takeKey"]
+            expect("cf-b", [got.get("sel3"), got.get("rerender"), got.get("manual"), got.get("manualSame"), got.get("head")],
+                   [[take, "cut:c03"], [take, "cut:c03"], [take, "cut:c05"], [take, "cut:c05"], [take, "cut:c10"]],
+                   "컷 3 클립 → 테이크 1·컷 3, 다시 그리기·폴링에도 유지, 메뉴에서 고친 값은 같은 클립이면 유지, 고른 클립 없으면 재생헤드(26초) 클립 = 컷 10")
+            expect("cf-b", got.get("fix"),
+                   {"mid": True, "clip": {"in": 5, "out": 10}, "scope": "range", "clipId": True, "get": ["/retake/MID?in=5&out=10"],
+                    "pick": False, "panel": 1},
+                   "[이 컷 AI로 고치기] → 119 패널(editFixOpen): 테이크 1 · 컷 3 구간 5–10초 · 「이 구간만」(range)·[바꾸기] 대상 = 고른 클립·고르기 창 없음")
+            expect("cf-b", got.get("insert"),
+                   {"calls": [[take, [5, 10, "컷 3"]]], "count": 1, "clip": [True, 5, 10, "컷 3"], "values": [take, "cut:c03"]},
+                   "[＋ 컷 넣기] = 테이크 원본 in 5·out 10(이름 컷 3), 넣은 클립을 고르면 메뉴도 컷 3")
+            expect("cf-b", [got.get("head119"), got.get("innerHTML")], [["AI로 고치기"], False], "머리 줄 [AI로 고치기] 그대로·innerHTML 0")
+    if bad:
+        fail("작업 149 ⑦ 컷 고르기·이 컷 AI로 고치기 검사 실패\n  " + "\n  ".join(bad))
+    else:
+        ok("작업 149 ⑦ 컷 고르기·이 컷 AI로 고치기 (cf-a)통 테이크 cuts 11개·합 = 길이·119 와 같은 시각·끔에도·기본 문서 그대로 "
+           "(cf-b)컷 메뉴 11개·타임라인 선택/재생헤드 따라감·다시 그리기 유지·＋ 컷 넣기 5–10·이 컷 AI로 고치기 = 119 range")
+
+
 # 작업 143: 새 기본값(VNEW_LOCATION_REAL_FROM_WEBTOON 켬)에서는 실사 뷰가 웹툰 뷰 편집(_seedream_edit)이 된다. 기존 공간 시트
 # 검사(check_vnew_locations·125·128)는 작업 125 의 text-to-image 경로(참고 0장·원장 모델·호출 수·동시성)를 보므로 부르는 줄에서
 # 끔으로 고정한다(기대값은 그대로). 켬 경로는 check_vnew_location_real_edit_143 이 본다. 끔이면 유료 fal 경로도 타지 않는다.
@@ -50990,6 +51177,7 @@ def main() -> int:
     check_vnew_real_take_costume_146()
     check_vnew_real_sheet_ref_142()
     check_vnew_edit_take_menu_145()
+    check_vnew_edit_cut_fix_149()
     check_vnew_location_real_edit_143()
     check_vnew_dialogue_runs_147()
     check_vnew_previz_pose_148()
