@@ -125,7 +125,15 @@
 
   /* 캐릭터 API 전용. 성공 응답이 {ok:true} 가 아니라 데이터 객체이므로, HTTP 상태로 성공을
      판단하고 에러는 {error:{...}} 봉투(vpoc.errors.envelope)를 그대로 던진다.
-     409 등 상태 코드가 필요한 곳을 위해 status 를 error 에 실어 준다. */
+     409 등 상태 코드가 필요한 곳을 위해 status 를 error 에 실어 준다.
+     작업 150: 본문이 JSON 이 아닌 502·503·504(ALB·nginx 가 배포·재시작 중에 주는 HTML)나 fetch 자체 실패는
+     같은 요청을 다시 보내도 되는 GET·PUT(문서 통째 저장)만 1·2·4초 뒤 최대 3번 다시 보낸다. POST·DELETE 는
+     유료 작업을 시작할 수 있어 다시 보내지 않는다(예전 그대로). JSON 오류 응답은 다시 보내지 않고 예전 그대로다. */
+  var API_RETRY_DELAYS_MS = [1000, 2000, 4000];
+  var API_TRANSIENT_MESSAGE =
+    "서버가 잠시 응답하지 않습니다(배포·재시작 중일 수 있습니다). 잠시 후 [다시 시도]를 눌러 주세요.";
+  var API_NOT_JSON = {};
+
   function api(path, options) {
     var init = options || {};
     init.headers = init.headers || {};
@@ -133,25 +141,53 @@
     if (init.body && !(init.body instanceof FormData)) {
       init.headers["Content-Type"] = "application/json";
     }
-    var httpStatus = 0;
-    return fetch(path, init).then(function (response) {
-      httpStatus = response.status;
-      return response
-        .json()
-        .catch(function () {
-          return null;
-        })
-        .then(function (payload) {
-          if (response.ok) {
-            return payload || {};
-          }
-          var err = (payload && payload.error) || { message: "서버 오류가 발생했습니다." };
-          if (typeof err === "object" && err && err.status === undefined) {
-            err.status = httpStatus;
-          }
-          throw err;
+    var method = String(init.method || "GET").toUpperCase();
+    var retryable = method === "GET" || method === "PUT";
+
+    function again(attempt, status) {
+      if (attempt < API_RETRY_DELAYS_MS.length) {
+        return new Promise(function (resolve) {
+          window.setTimeout(resolve, API_RETRY_DELAYS_MS[attempt]);
+        }).then(function () {
+          return send(attempt + 1);
         });
-    });
+      }
+      return Promise.reject({ message: API_TRANSIENT_MESSAGE, status: status });
+    }
+
+    function send(attempt) {
+      return fetch(path, init).then(
+        function (response) {
+          var httpStatus = response.status;
+          return response
+            .json()
+            .catch(function () {
+              return API_NOT_JSON;
+            })
+            .then(function (payload) {
+              var notJson = payload === API_NOT_JSON;
+              if (notJson) payload = null;
+              if (response.ok) {
+                return payload || {};
+              }
+              if (notJson && retryable && (httpStatus === 502 || httpStatus === 503 || httpStatus === 504)) {
+                return again(attempt, httpStatus);
+              }
+              var err = (payload && payload.error) || { message: "서버 오류가 발생했습니다." };
+              if (typeof err === "object" && err && err.status === undefined) {
+                err.status = httpStatus;
+              }
+              throw err;
+            });
+        },
+        function (networkError) {
+          if (!retryable) throw networkError;
+          return again(attempt, 0);
+        }
+      );
+    }
+
+    return send(0);
   }
 
   function errMessage(error) {

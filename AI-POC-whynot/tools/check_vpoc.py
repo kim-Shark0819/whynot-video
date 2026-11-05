@@ -51073,6 +51073,141 @@ def check_vnew_previz_pose_148() -> None:
            "(pz-c)가짜 읽기 새 필드·gesture 도출·v2→v3 actions 만 다시 읽기·옛 문법 그대로 (pz-d)포즈 절·쉬는 손 없음·바이트 상한·대사보다 먼저 뺌")
 
 
+# 작업 150: vnew.js 통신 구역(apiOk·api)을 잘라 가짜 fetch·가짜 window.setTimeout 으로 돌린다. 외부 호출 0.
+_RT150_SLICE = ("  /* ---------------------------------------------------------------- 통신 */", "  function errMessage(error)")
+_RT150_MESSAGE = "서버가 잠시 응답하지 않습니다(배포·재시작 중일 수 있습니다). 잠시 후 [다시 시도]를 눌러 주세요."
+_RT150_NODE = r"""
+function FakeFormData() {}
+function make(sliced) {
+  return new Function("window", "fetch", "token", "FormData", sliced + "\nreturn { api: api };");
+}
+function html(status) { return { status: status, text: "<html>" + status + " Bad Gateway</html>" }; }
+function json(status, body) { return { status: status, body: body }; }
+function netErr() { return { network: true }; }
+function flush() { return new Promise(function (r) { setImmediate(r); }); }
+async function run(api, path, init, script) {
+  var timers = [], delays = [], fetches = [], left = script.slice(), settled = 0, out = null;
+  var win = { setTimeout: function (fn, ms) { timers.push({ fn: fn, ms: ms }); return timers.length; } };
+  function fakeFetch(p, i) {
+    fetches.push({ path: p, method: (i && i.method) || "GET", body: i && i.body });
+    var step = left.length ? left.shift() : html(599);
+    if (step.network) return Promise.reject(new TypeError("Failed to fetch"));
+    return Promise.resolve({
+      status: step.status, ok: step.status >= 200 && step.status < 300,
+      json: function () { return step.body !== undefined ? Promise.resolve(step.body) : Promise.reject(new SyntaxError("Unexpected token <")); }
+    });
+  }
+  var api0 = make(api)(win, fakeFetch, function () { return "TOKEN"; }, FakeFormData).api;
+  var p = api0(path, init).then(function (v) { settled++; out = { ok: true, value: v }; },
+                                function (e) { settled++; out = { ok: false, message: e && e.message, status: (e && e.status !== undefined) ? e.status : null, type: e && e.constructor && e.constructor.name }; });
+  for (var guard = 0; guard < 50; guard++) {
+    for (var k = 0; k < 10; k++) await flush();
+    if (out) break;
+    var t = timers.shift();
+    if (!t) break;
+    delays.push(t.ms);
+    t.fn();
+  }
+  await p;
+  for (var k2 = 0; k2 < 10; k2++) await flush();
+  return { out: out, fetches: fetches.length, methods: fetches.map(function (f) { return f.method; }),
+           bodies: fetches.map(function (f) { return f.body === undefined ? null : f.body; }),
+           delays: delays, pendingTimers: timers.length, settled: settled };
+}
+(async function () {
+  var S = SLICE, R = {};
+  R.get502then200 = await run(S, "/api/vnew/p/x/conti", undefined, [html(502), json(200, { a: 1 })]);
+  R.get503x4 = await run(S, "/api/vnew/p/x/conti", undefined, [html(503), html(503), html(503), html(503)]);
+  R.get504then200 = await run(S, "/api/vnew/p/x", { method: "get" }, [html(504), html(504), json(200, { b: 2 })]);
+  R.post502 = await run(S, "/api/vnew/p/x/generate", { method: "POST", body: "{}" }, [html(502), json(200, {})]);
+  R.delete503 = await run(S, "/api/vnew/p/x", { method: "DELETE" }, [html(503), json(200, {})]);
+  R.get409 = await run(S, "/api/vnew/p/x", undefined, [json(409, { error: { code: "busy", message: "이미 만드는 중입니다." } }), json(200, {})]);
+  R.get503json = await run(S, "/api/vnew/p/x", undefined, [json(503, { error: { code: "account", message: "계정 불일치" } }), json(200, {})]);
+  R.get502jsonNoError = await run(S, "/api/vnew/p/x", undefined, [json(502, { nope: 1 }), json(200, {})]);
+  R.get500html = await run(S, "/api/vnew/p/x", undefined, [html(500), json(200, {})]);
+  R.putNetThen200 = await run(S, "/api/vnew/p/x/conti", { method: "PUT", body: "{\"cuts\":[]}" }, [netErr(), json(200, { saved: true })]);
+  R.putNetx4 = await run(S, "/api/vnew/p/x/conti", { method: "PUT", body: "{\"cuts\":[]}" }, [netErr(), netErr(), netErr(), netErr()]);
+  R.postNet = await run(S, "/api/vnew/p/x/generate", { method: "POST", body: "{}" }, [netErr(), json(200, {})]);
+  R.get200html = await run(S, "/api/vnew/p/x", undefined, [{ status: 200 }]);
+  console.log(JSON.stringify(R));
+})().catch(function (e) { console.error(e && e.stack || e); process.exit(1); });
+"""
+
+
+def check_vnew_api_retry_150() -> None:
+    """작업 150 — vnew.js api(): 본문이 JSON 이 아닌 502·503·504 와 fetch 실패는 GET·PUT 만 1·2·4초 뒤 최대 3번 다시 보낸다.
+    유료 호출 0, 외부 호출 0(가짜 fetch·가짜 타이머).
+
+    (rt-a) GET 502 HTML → 200: 한 번 다시 보내 200 본문으로 끝남, 1초 대기, 남은 타이머 0·한 번만 끝남(폴링 이중 예약 없음)
+    (rt-b) GET 503 HTML 4번 → 3번 다시 보낸 뒤 새 문구·status 503, 1·2·4초 / GET 504 두 번 → 200(method 소문자도)
+    (rt-c) POST 502·DELETE 503 HTML·POST 네트워크 오류 → 다시 보내지 않고 예전 그대로(일반 문구·원래 오류)
+    (rt-d) JSON 오류(409·503·error 없는 502)·HTML 500 → 다시 보내지 않고 예전 그대로
+    (rt-e) PUT 네트워크 오류 → 같은 본문으로 다시 보냄 / 4번 실패 → 새 문구·status 0 · 200 HTML → {}
+    """
+    bad: list[str] = []
+
+    def expect(group: str, got, want, what: str) -> None:
+        if got != want:
+            bad.append(f"({group}) {what}\n      결과 {got!r}\n      기대 {want!r}")
+
+    vjs = (PUBLIC / "vnew.js").read_text(encoding="utf-8")
+    start, end = vjs.find(_RT150_SLICE[0]), vjs.find(_RT150_SLICE[1])
+    if start < 0 or end <= start or vjs.count(_RT150_SLICE[0]) != 1:
+        fail("작업 150 api 다시 보내기 검사 실패\n  (rt-a) vnew.js 통신 구역(apiOk·api)을 찾지 못했습니다")
+        return
+    expect("rt-b", vjs.count(_RT150_MESSAGE), 1, "vnew.js 에 새 문구가 한 번 있다")
+    node = shutil.which("node")
+    if not node:
+        warn("node 가 없어 작업 150 api 다시 보내기 검사(rt-a~e)를 건너뜁니다 (E16)")
+        return
+    sliced = vjs[start:end]
+    got, err = _lr_run_node(node, "var SLICE = " + json.dumps(sliced, ensure_ascii=False) + ";\n" + _RT150_NODE, "rt150_")
+    if err:
+        fail(f"작업 150 api 다시 보내기 검사 실패\n  (rt-a) node 실행 실패: {err}")
+        return
+
+    def brief(name: str) -> list:
+        r = got.get(name) or {}
+        return [r.get("out"), r.get("fetches"), r.get("delays"), r.get("pendingTimers"), r.get("settled")]
+
+    generic = "서버 오류가 발생했습니다."
+    expect("rt-a", brief("get502then200"), [{"ok": True, "value": {"a": 1}}, 2, [1000], 0, 1],
+           "GET 502 HTML → 200: 1초 뒤 한 번 다시 보내 200 본문, 남은 타이머 0, 한 번만 끝남")
+    expect("rt-b", brief("get503x4"),
+           [{"ok": False, "message": _RT150_MESSAGE, "status": 503, "type": "Object"}, 4, [1000, 2000, 4000], 0, 1],
+           "GET 503 HTML 4번 → 3번 다시 보낸 뒤(1·2·4초) 새 문구·status 503")
+    expect("rt-b", brief("get504then200"), [{"ok": True, "value": {"b": 2}}, 3, [1000, 2000], 0, 1],
+           "GET(method 소문자) 504 두 번 → 200")
+    expect("rt-c", brief("post502"), [{"ok": False, "message": generic, "status": 502, "type": "Object"}, 1, [], 0, 1],
+           "POST 502 HTML → 바로 실패(다시 보내지 않음, 예전 문구)")
+    expect("rt-c", brief("delete503"), [{"ok": False, "message": generic, "status": 503, "type": "Object"}, 1, [], 0, 1],
+           "DELETE 503 HTML → 바로 실패(다시 보내지 않음, 예전 문구)")
+    expect("rt-c", brief("postNet"),
+           [{"ok": False, "message": "Failed to fetch", "status": None, "type": "TypeError"}, 1, [], 0, 1],
+           "POST 네트워크 오류 → 바로 실패(원래 오류 그대로)")
+    expect("rt-d", brief("get409"),
+           [{"ok": False, "message": "이미 만드는 중입니다.", "status": 409, "type": "Object"}, 1, [], 0, 1],
+           "409 JSON 오류 → 바로 그 문구로 실패")
+    expect("rt-d", brief("get503json"), [{"ok": False, "message": "계정 불일치", "status": 503, "type": "Object"}, 1, [], 0, 1],
+           "503 JSON 오류(account_guard 등) → 다시 보내지 않음")
+    expect("rt-d", brief("get502jsonNoError"), [{"ok": False, "message": generic, "status": 502, "type": "Object"}, 1, [], 0, 1],
+           "502 JSON(error 없음) → 예전 그대로 일반 문구, 다시 보내지 않음")
+    expect("rt-d", brief("get500html"), [{"ok": False, "message": generic, "status": 500, "type": "Object"}, 1, [], 0, 1],
+           "500 HTML → 예전 그대로(502·503·504 만 다시 보냄)")
+    put_ok = got.get("putNetThen200") or {}
+    expect("rt-e", brief("putNetThen200") + [put_ok.get("methods"), put_ok.get("bodies")],
+           [{"ok": True, "value": {"saved": True}}, 2, [1000], 0, 1, ["PUT", "PUT"], ['{"cuts":[]}', '{"cuts":[]}']],
+           "PUT 네트워크 오류 → 1초 뒤 같은 본문으로 다시 보내 성공")
+    expect("rt-e", brief("putNetx4"),
+           [{"ok": False, "message": _RT150_MESSAGE, "status": 0, "type": "Object"}, 4, [1000, 2000, 4000], 0, 1],
+           "PUT 네트워크 오류 4번 → 새 문구·status 0")
+    expect("rt-e", brief("get200html"), [{"ok": True, "value": {}}, 1, [], 0, 1], "200 인데 JSON 아님 → {} (예전 그대로)")
+    if bad:
+        fail("작업 150 api 다시 보내기 검사 실패\n  " + "\n  ".join(bad))
+    else:
+        ok("작업 150 api 다시 보내기 (rt-a)GET 502→200 1번·타이머 0 (rt-b)503×4 → 새 문구·1/2/4초 (rt-c)POST·DELETE 안 다시 보냄 "
+           "(rt-d)JSON 오류·500 그대로 (rt-e)PUT 네트워크 오류 다시 보냄")
+
 
 def main() -> int:
     print("== vpoc1 check ==")
@@ -51181,6 +51316,7 @@ def main() -> int:
     check_vnew_location_real_edit_143()
     check_vnew_dialogue_runs_147()
     check_vnew_previz_pose_148()
+    check_vnew_api_retry_150()
     check_vnew_plan_step_stay_129()
     check_pod_zones()
     print()
