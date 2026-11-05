@@ -1715,6 +1715,30 @@ def _mutate_locked(owner: str, pid: str, mutator):
         return plan_mod.mutate_plan(owner, pid, mutator)
 
 
+def _touch_prepare_claim(owner: str, pid: str, gen_id: str, index: int, variant: str, claim: str) -> bool:
+    """작업 144: preparing 칸의 claimedAt 을 지금으로 갱신한다(하트비트, _reconcile_prepare_stale_previz 가 되돌리지 않게).
+
+    저장된 claim 이 우리 것이고 칸이 preparing 일 때만 쓴다. 아니면(취소·stale 뒤 재선점) 쓰지 않고 False —
+    호출한 쪽은 더 돈을 쓰지 않고 멈춘다(vnew.gen.prepare_claim_lost).
+    """
+
+    def mutator(data: dict) -> None:
+        g = data.get("gen") or {}
+        if not _claim_ok_variant(g, index, variant, claim):
+            raise _Discard()
+        state = _previz_cells(g)[index][variant]
+        if state.get("status") != "preparing":
+            raise _Discard()
+        state["claimedAt"] = now_iso()
+
+    try:
+        _mutate_locked(owner, pid, mutator)
+    except _Discard:
+        log.info("vnew.gen.prepare_claim_lost pid=%s gen=%s take=%s variant=%s", pid, gen_id, index, variant)
+        return False
+    return True
+
+
 
 def _driver_name(owner: str, pid: str) -> str:
     return f"vnew-gen-{owner}-{pid}"
@@ -4231,6 +4255,9 @@ def _do_submit_take(owner: str, pid: str, gen_id: str, index: int, variant: str,
                    "run": (int((gen.get("realRun") or {}).get("n") or 0) or None) if real else None, "endpoint": endpoint,
                    "params": _take_params(caps, take_seconds, resolution, audio_choice), "refs": refs, "video_keys": rec_keys}
 
+        # 작업 144: 하트비트 + 유료 제출 전 선점 확인(취소·재선점이면 제출하지 않는다).
+        if not _touch_prepare_claim(owner, pid, gen_id, index, variant, claim):
+            return  # finally 에서 세마포어 해제.
         stage = "submit"
         result = _submit_take(
             endpoint=endpoint,
@@ -5388,6 +5415,7 @@ def _submit_real_cut(owner: str, pid: str, gen_id: str, plan: dict, ctx: dict, c
     틀리면 Seedream 만 1번 다시. 컷 기록 animeLayout·stillCheck. 읽기 실패(None)면 138 과 같다.
     """
     endpoint, caps, take_id, attempt = ctx["endpoint"], ctx["caps"], ctx["takeId"], ctx["attempt"]
+    beat = ctx.get("beat") or (lambda: None)  # 작업 144: 2단계 첫 제출만 — 하트비트 + 선점 확인(잃으면 _Discard)
     cut_id = str(cut.get("cutId") or "")
     ctx["stage"] = "frame"
     start_sec = float(cut.get("startSec") or 0)
@@ -5438,6 +5466,7 @@ def _submit_real_cut(owner: str, pid: str, gen_id: str, plan: dict, ctx: dict, c
         if photos:
             rows.append((str(actor.get("colorName") or "grey"), name or "a person", photos))
     people, sheets, refs_kind = _pack_still_people(rows, refs, _SEEDREAM_MAX_REFS - len(refs))
+    beat()  # 작업 144: 시작 그림(유료) 전
     still = _seedream(_cut_still_prompt(plan, cut, people, frame is not None, source=source, outfits=ctx["outfits"],
                                         background_no=background_no, layout=layout, sheets=sheets or None), refs,
                       size=vpoc_seedream.SIZE)
@@ -5446,10 +5475,12 @@ def _submit_real_cut(owner: str, pid: str, gen_id: str, plan: dict, ctx: dict, c
     _charge_cut_still(owner, pid, gen_id, f"{still_key_base}-still-{attempt}-{secrets.token_hex(3)}")
     still_check = None
     if layout and vnew_settings.VNEW_REAL_STILL_CHECK:  # 작업 139: Kling(비싼 단계) 전에 시작 그림 검사, 틀리면 Seedream 만 1번 다시
+        beat()  # 작업 144: 시작 그림 검사(다시 그리기 유료) 전
         still, still_check = _checked_cut_still(owner, pid, gen_id, plan, cut, ctx, frame=frame, still=still, layout=layout,
                                                 refs=refs, people=people, background_no=background_no, sheets=sheets,
                                                 charge_key=f"{still_key_base}-still2-{attempt}")
     del frame, refs, sheet
+    beat()  # 작업 144: Kling 제출(유료) 전
     ctx["stage"] = "submit"
     out_prefix = _seg_output_prefix(owner, pid, gen_id, f"{take_id}-real-{cut_id}{tag}", attempt)
     still_key = _keep_cut_still(pid, out_prefix, still)  # 작업 131: ⑦ AI로 고치기가 같은 시작 그림으로 다시 낸다
@@ -5517,8 +5548,16 @@ def _do_submit_real_cuts(owner: str, pid: str, gen_id: str, index: int, claim: s
             raise VpocError("vnew.generate", "NoCuts", "이 테이크의 컷을 찾지 못했습니다.", 409)
         ctx = _real_cut_ctx(owner, pid, plan, take, *model)
         ctx["takeId"], ctx["index"] = str(take.get("id") or index), index
+
+        def beat() -> None:
+            # 작업 144: 컷 루프가 300초를 넘어도 stale 로 되돌려지지 않게 claimedAt 을 갱신하고, 선점을 잃었으면(취소·재선점) 멈춘다.
+            if not _touch_prepare_claim(owner, pid, gen_id, index, "real", claim):
+                raise _Discard()
+
+        ctx["beat"] = beat
         for cut in cuts:
             records.append(_submit_real_cut(owner, pid, gen_id, plan, ctx, cut))
+            beat()  # 작업 144: 컷마다
     except _Discard:
         return
     except Exception as exc:  # noqa: BLE001
