@@ -1045,6 +1045,26 @@ def _material_out(item: dict, info: dict | None, default_mids: set[str]) -> dict
     }
 
 
+def _take_cuts(plan: dict, gen: dict, variant: str, item: dict, duration) -> list[dict]:
+    """작업 149: 통 테이크 재료 하나의 컷 [{cutId, no, label("컷 n", 번호 없으면 "장면 n"), start, end, seconds}](그 재료 원본 시간, 초).
+
+    지시서 119 고르기 창과 같은 계산(retake._flag_cuts → _material_cuts: 칸 녹화 시각을 결과 길이로 역변환)이라 start·end 를 그대로
+    retake 구간(?in=&out=)에 넣을 수 있다. 저장하지 않는다. 테이크가 아니거나 계산이 실패하면 [].
+    """
+    if item.get("kind") != "take":
+        return []
+    from . import retake  # noqa: PLC0415 — retake 가 edit 를 읽는다(순환 import 를 피한다)
+
+    out: list[dict] = []
+    for index, cut in enumerate(retake._flag_cuts(plan, gen, item, duration, variant=variant)):  # noqa: SLF001
+        no = cut.get("no")
+        start, end = float(cut["in"]), float(cut["out"])
+        out.append({"cutId": str(cut.get("cutId") or ""), "no": no,
+                    "label": f"컷 {no}" if isinstance(no, int) and not isinstance(no, bool) else f"장면 {index + 1}",
+                    "start": round(start, 3), "end": round(end, 3), "seconds": round(end - start, 3)})
+    return out
+
+
 def _invalid_clips(clips: list, allowed: set[str], meta: dict[str, dict]) -> list[dict]:
     """저장된 문서에서 지금 쓸 수 없는 클립(재료가 아님·원본보다 김). 저장값은 바꾸지 않는다."""
     out = []
@@ -1146,6 +1166,9 @@ def edit_view(owner: str, pid: str, variant: str | None = None) -> dict:
         if saved else ""
     default_mids = {m["mid"] for m in default_items}
     materials = [_material_out(m, meta.get(m["sourceKey"]), default_mids) for m in items]
+    for item, out in zip(items, materials):  # 작업 149: 통 테이크 재료의 컷 목록(⑦ 재료 [컷 고르기])
+        if item.get("kind") == "take":
+            out["cuts"] = _take_cuts(plan, gen, chosen, item, out.get("duration"))
     if retakes is not None:  # 지시서 116: 재료마다 AI로 고치기 표식(프롬프트는 넣지 않는다 — 이 보기는 읽기 권한)
         from . import retake  # noqa: PLC0415
 
