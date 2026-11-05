@@ -50077,6 +50077,184 @@ def check_vnew_location_real_edit_143() -> None:
            "(le-e)다시 그리기 edit/t2i (le-f)실사 ASSETS 새 문구·애니 sha 그대로")
 
 
+def check_vnew_prepare_heartbeat_144() -> None:
+    """작업 144 — 컷 단위 Kling(2단계) 준비 중 하트비트·선점 확인. 가짜 fal·Seedream·가짜 시계, 유료 0.
+
+    (hb-a) 11컷 × 컷당 60초(가짜 시계): 매 컷마다 다른 드라이버의 stale 정리가 돌아도 칸을 되돌리지 않는다 →
+           Kling 제출 11번(컷마다 1번), attempt 그대로, 결과 done
+    (hb-b) 3번째 컷 Kling 제출 뒤 선점을 잃으면(재선점) 4번째 컷부터 Seedream·Kling 0, prepare_claim_lost 로그
+    (hb-c) 2번째 컷 시작 그림 중 취소(cancel_gen) → 3번째 컷 Seedream·Kling 0
+    """
+    import traceback as _tb  # noqa: PLC0415
+    from datetime import datetime as _dt, timedelta as _td, timezone as _tz  # noqa: PLC0415
+
+    sys.path.insert(0, str(ROOT / "app"))
+    from src.vnew import generate as genmod  # noqa: PLC0415
+    from src.vpoc.errors import VpocError  # noqa: PLC0415
+
+    bad: list[str] = []
+    owner = "tester"
+    kling = "fal-ai/kling-video/v3/pro/image-to-video"
+    kling_caps = {"promptField": "prompt", "startImageField": "start_image_url", "durations": [5, 10], "durationAsString": True,
+                  "durationValues": {"5": "5", "10": "10"}, "sendDuration": True, "aspectRatios": ["16:9"], "available": True}
+    likeness_raw = "The images or videos provided may contain likenesses of real people or other private information."
+    n_cuts = 11
+    clock = {"t": 0.0}
+
+    class FakeDT(_dt):
+        @classmethod
+        def now(cls, tz=None):  # noqa: ANN001
+            return _dt.now(tz) + _td(seconds=clock["t"])
+
+    try:
+        with _guard_real_llm(), _LrEnv(owner) as env, _LogCapture() as logs, _pin_vnew(
+                VNEW_FX=True, VNEW_CASTING=True, VNEW_TAKE_REAL=True, VNEW_GEN_PARALLEL=2, POLL_INTERVAL_S=0,
+                VNEW_TAKE_AUDIO=True, VNEW_TAKE_RESOLUTION="480p", VNEW_PREPARE_STALE_S=300,
+                VNEW_TAKE_REAL_LIKENESS_LADDER=True, VNEW_TAKE_REAL_KLING_MODEL=kling, VNEW_REAL_CUT_QA=False):
+            env.set(genmod, "datetime", FakeDT)
+            env.set(genmod, "now_iso", lambda: FakeDT.now(_tz.utc).strftime("%Y-%m-%dT%H:%M:%SZ"))
+            prefix_id = genmod.vpoc_settings.FAL_ID_PREFIX
+            seed_find = genmod.vpoc_fal.find
+            env.set(genmod.vpoc_fal, "find", lambda m: {"id": prefix_id + kling, "endpointId": kling, "caps": dict(kling_caps)}
+                    if str(m) == prefix_id + kling else seed_find(m))
+            env.set(genmod, "_cut_first_frame", lambda mp4, start: b"FRAME@%.1f" % float(start))
+            env.set(genmod, "_trim_clip", lambda mp4, seconds: b"TRIM%.1f:" % float(seconds) + bytes(mp4))
+            base_fal = env._fal
+            reject = {"on": False}
+
+            def fal_request(method, url, payload=None, *, where=""):
+                rid = url.split("/requests/", 1)[-1].split("/", 1)[0]
+                req = next((r for r in env.requests if r["rid"] == rid), None)
+                if method == "GET" and not url.endswith("/status") and req and reject["on"] \
+                        and req["url"].endswith(_LR_ENDPOINT) and req["kind"] == "real":
+                    raise VpocError("fal.poll", "HTTP422", likeness_raw, 502)
+                return base_fal(method, url, payload, where=where)
+
+            env.set(env.falmod, "_request", fal_request)
+            # 시작 그림(Seedream) = 컷 1개 준비. hook 이 컷마다 할 일(시계·stale 정리·취소)을 한다.
+            box: dict = {"pid": "", "stills": 0, "hook": None}
+
+            def seedream(prompt, refs, *, size):
+                box["stills"] += 1
+                if box["hook"]:
+                    box["hook"](box["stills"])
+                return b"STILL%d" % box["stills"]
+
+            env.set(genmod, "_seedream", seedream)
+            kling_box: dict = {"n": 0, "hook": None}
+            base_submit = genmod._previz_request  # noqa: SLF001 — 하네스의 가짜 제출
+
+            def submit(method, url, payload):
+                out = base_submit(method, url, payload)
+                if str(url).endswith("/" + kling):
+                    kling_box["n"] += 1
+                    if kling_box["hook"]:
+                        kling_box["hook"](kling_box["n"])
+                return out
+
+            env.set(genmod, "_previz_request", submit)
+            client = env.client()
+
+            def cell(pid: str) -> dict:
+                return genmod._previz_cells(env.gen(pid))[0]["real"]  # noqa: SLF001
+
+            def start(pid: str, seed_hook=None, kling_hook=None) -> None:
+                """웹툰 통 테이크를 끝내고, 실사 회차를 시작해 2단계(컷 단위 Kling)까지 간다. hook 은 실사 회차에만 건다."""
+                box["hook"], kling_box["hook"] = None, None
+                reject["on"] = False
+                env.make_plan(pid, [{"id": "s1", "cutIds": [f"c{i + 1}" for i in range(n_cuts)], "seconds": 4 * n_cuts}])
+                client.post(f"/api/vnew/p/{pid}/generate", json={"confirmUsd": genmod.estimate(env.plan(pid))["totalUsd"]})
+                g = env.drive(pid)
+                if (g.get("finalWebtoon") or {}).get("status") != "done":
+                    bad.append(f"준비({pid}): 웹툰 통 테이크가 끝나지 않았습니다: {g.get('status')}")
+                reject["on"] = True
+                box.update(pid=pid, stills=0, hook=seed_hook)
+                kling_box.update(n=0, hook=kling_hook)
+                client.post(f"/api/vnew/p/{pid}/generate/real", json={"confirmUsd": genmod.real_estimate(g)["usd"]})
+
+            # ================= (hb-a) 11컷 × 60초 =================
+            pid = "prj_hb_a"
+            requeued: list[bool] = []
+            attempts: list[int] = []
+
+            def slow(n: int) -> None:
+                if n == 1:
+                    attempts.append(int(cell(box["pid"]).get("attempt") or 0))
+                clock["t"] += 60.0  # 이 컷 준비에 60초
+
+                def reconcile(data: dict) -> None:  # 다른 드라이버 순회의 stale 정리(같은 함수)
+                    requeued.append(genmod._reconcile_prepare_stale_previz(data.get("gen") or {}))  # noqa: SLF001
+
+                genmod._mutate_locked(owner, box["pid"], reconcile)  # noqa: SLF001
+
+            since = len(env.requests)
+            start(pid, seed_hook=slow)
+            g = env.drive(pid)
+            box["hook"] = None
+            klings = [r for r in env.requests[since:] if r["url"].endswith("/" + kling)]
+            real = genmod._previz_cells(g)[0]["real"]  # noqa: SLF001
+            cuts = (real.get("fallback") or {}).get("cuts") or []
+            if any(requeued) or len(requeued) != n_cuts or clock["t"] < n_cuts * 60:
+                bad.append(f"(hb-a) stale 정리가 준비 중 칸을 되돌렸습니다: {requeued} t={clock['t']}")
+            if len(klings) != n_cuts or [c.get("cutId") for c in cuts] != [f"c{i + 1}" for i in range(n_cuts)]:
+                bad.append(f"(hb-a) Kling 제출이 컷마다 1번(11번)이 아닙니다: {len(klings)} {[c.get('cutId') for c in cuts]}")
+            if attempts != [int(real.get("attempt") or 0)]:
+                bad.append(f"(hb-a) attempt 가 바뀌었습니다: {attempts} → {real.get('attempt')}")
+            if real.get("status") != "completed" or g.get("status") != "done":
+                bad.append(f"(hb-a) 결과가 done 이 아닙니다: {real.get('status')} {g.get('status')}")
+            if logs.messages("vnew.gen.prepare_claim_lost"):
+                bad.append(f"(hb-a) 선점을 잃지 않았는데 prepare_claim_lost 로그: {logs.messages('vnew.gen.prepare_claim_lost')}")
+
+            # ================= (hb-b) 3번째 컷 뒤 선점을 잃음 =================
+            pid_b = "prj_hb_b"
+
+            def steal(n: int) -> None:
+                if n == 3:  # stale 뒤 다른 드라이버가 재선점(claim 바뀜, attempt +1)
+                    def mutate(g: dict) -> None:
+                        state = genmod._previz_cells(g)[0]["real"]  # noqa: SLF001
+                        state.update(claim="other-driver", attempt=int(state.get("attempt") or 0) + 1)
+
+                    env.mutate_gen(pid_b, mutate)
+
+            logs.clear()
+            start(pid_b, kling_hook=steal)
+            env.drive(pid_b)
+            kling_box["hook"] = None
+            if box["stills"] != 3 or kling_box["n"] != 3:
+                bad.append(f"(hb-b) 선점을 잃은 뒤에도 Seedream·Kling 을 불렀습니다: stills={box['stills']} kling={kling_box['n']}")
+            lost = logs.messages("vnew.gen.prepare_claim_lost")
+            if len(lost) != 1 or pid_b not in lost[0]:
+                bad.append(f"(hb-b) prepare_claim_lost 로그가 1줄이 아닙니다: {lost}")
+            if cell(pid_b).get("claim") != "other-driver" or cell(pid_b).get("status") != "preparing":
+                bad.append(f"(hb-b) 새 선점자의 칸을 덮어썼습니다: {cell(pid_b).get('claim')} {cell(pid_b).get('status')}")
+
+            # ================= (hb-c) 2번째 컷 중 취소 =================
+            pid_c = "prj_hb_c"
+
+            def cancel(n: int) -> None:
+                if n == 2:
+                    genmod.cancel_gen(owner, pid_c)
+
+            logs.clear()
+            start(pid_c, seed_hook=cancel)
+            env.drive(pid_c)
+            box["hook"] = None
+            if box["stills"] != 2 or kling_box["n"] != 1:
+                bad.append(f"(hb-c) 취소 뒤 3번째 컷까지 갔습니다: stills={box['stills']} kling={kling_box['n']}")
+            if cell(pid_c).get("status") != "cancelled" or env.gen(pid_c).get("status") != "cancelled":
+                bad.append(f"(hb-c) 취소 상태가 아닙니다: {cell(pid_c).get('status')} {env.gen(pid_c).get('status')}")
+            if len(logs.messages("vnew.gen.prepare_claim_lost")) != 1:
+                bad.append(f"(hb-c) prepare_claim_lost 로그가 1줄이 아닙니다: {logs.messages('vnew.gen.prepare_claim_lost')}")
+    except Exception:  # noqa: BLE001
+        bad.append("작업 144 검사 예외\n" + _tb.format_exc())
+    if bad:
+        fail("작업 144 준비 중 하트비트·선점 확인 검사 실패\n  " + "\n  ".join(bad))
+    else:
+        ok("작업 144 준비 중 하트비트 (hb-a)11컷×60초 stale 되돌림 0·Kling 컷마다 1번·attempt 그대로 "
+           "(hb-b)선점 잃음 → 4번째 컷부터 유료 0·로그 (hb-c)취소 → 3번째 컷 유료 0")
+
+
+
 def main() -> int:
     print("== vpoc1 check ==")
     check_compileall()
@@ -50176,6 +50354,7 @@ def main() -> int:
     check_vnew_real_brief_138()
     check_vnew_real_still_139()
     check_vnew_real_ai_note_140()
+    check_vnew_prepare_heartbeat_144()
     check_vnew_real_sheet_ref_142()
     check_vnew_edit_take_menu_145()
     check_vnew_location_real_edit_143()
