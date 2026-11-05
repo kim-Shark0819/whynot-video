@@ -2652,3 +2652,6 @@ un_conti가 대본 글 뒤에 ordered_tiles 타일을 Panel N of M: 라벨(N 0�
 
 ### 138 — 몸 낱말 앞 옷 색 빼기를 이름 인식 없이, 이름만 쓴 표기 인식
 - _real_brief_text: 그 컷에 장면 옷 인물이 1명 이상이면 주어와 상관없이 몸 낱말 앞 옷 색을 뺀다(hair·eyes·skin 앞 색은 남음). 이름 표기는 _brief_name_forms(범건우 → Beomgeonu·Beom Geonu·Geonu) 1곳. 애니 경로는 안 부름. 검사 check_vnew_real_brief_138(rb-g·h).
+
+### 139 — 실사 컷 시작 그림을 애니 컷 구도로(보이는 인물만 + 시작 그림 검사)
+- _submit_real_cut: 애니 프레임 + 시트 뷰가 있으면 _anime_frame_layout(vision 1번, 원장 charge_text)으로 샷 크기·보이는 인물을 읽어 face·partial 인물 정면만 참고로 넣고(back 은 문장만, none 은 이름도 뺌) 시작 그림 맨 앞에 구도 고정 구절·Exactly N 문장, ECU·CU·MCU 는 시트 뷰 없이 짧은 LOCATION, MS 이상은 REAL_STILL_BACKGROUND_PLACE, ECU·CU 는 지시서 160자. _check_cut_still(VNEW_REAL_STILL_CHECK) 로 Kling 전에 비교해 틀리면 Seedream 만 1번 다시(시트 없이, 교정 문장), 고르기는 _retry_better(135 규칙, QA 도 같이 씀). 컷 기록 animeLayout·stillCheck, Kling real 머리에 REAL_CUT_KEEP_FRAMING. 읽기 실패면 138 과 같다. 하네스 _LrEnv 는 새 vision 읽기 2개를 기본 실패로 둔다(기존 기대값 그대로). 검사 check_vnew_real_still_139(st-a~e).

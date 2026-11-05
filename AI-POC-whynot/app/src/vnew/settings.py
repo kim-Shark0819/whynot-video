@@ -354,6 +354,10 @@ VNEW_TAKE_REAL_KLING_DURATIONS = (5, 10)
 VNEW_REAL_CUT_QA = _bool("VNEW_REAL_CUT_QA", True)
 # 확인창 최대 금액에 넣는 QA 1번 추정 토큰(입력, 출력). 그림 2장 + 콘티 글 기준.
 VNEW_REAL_CUT_QA_EST_TOKENS = (4000, 300)
+# 작업 139(2026-11-05): 컷 시작 그림(Seedream) 검사. 켜면 애니 프레임 읽기(구도·보이는 인물)가 된 컷마다 시작 그림을 애니 프레임과
+# vision 1번으로 비교하고(샷 크기·인물 수·좌우·그림 느낌), 틀리면 Seedream 만 1번 다시 만든다(Kling 전). false 면 검사·다시 만들기 0.
+# 코드 기본값이다(템플릿에는 배선하지 않았다).
+VNEW_REAL_STILL_CHECK = _bool("VNEW_REAL_STILL_CHECK", True)
 
 # ⑦ 편집 — 영상 편집 타임라인(지시서 110, 2026-11-01). 켜면 ⑤에서 만든 영상(컷·테이크 결과)을 클립으로 늘어놓고 자르기·나누기·
 # 순서·소리 끄기를 고친 편집 문서를 gen 마다 저장하고, 서버 ffmpeg 로 mp4 하나로 내보낸다(유료 생성 API 호출 없음, edit.py).
