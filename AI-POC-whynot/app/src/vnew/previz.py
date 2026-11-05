@@ -1237,7 +1237,8 @@ def _read_grammars(owner, pid, plan_id, groups, chars, grammar_cache, reread_cut
       아니고 v ≥ previz_grammar.GRAMMAR_VERSION 이면 read_cut 을 부르지 않는다(다시 만들기 때 Claude 재호출 없음).
     - 같은 해시의 옛 캐시(v 없음·작음, 받침 판단 이전)는 한 번 다시 읽되, 옛 grammar 의 다른 필드는 그대로 두고
       supports 만 새 값으로 채워 v 를 올린다(사용자가 본 카메라가 바뀌지 않게, previz-support-reasoning R2.3).
-      다시 읽기가 실패하면 옛 grammar + supports [] 로 이번 설계를 하고 캐시는 그대로 둔다(다음 설계에서 다시 시도).
+      작업 148: v<3 이면 actions(손·자세·머리·눈)도 새 값으로 채운다. v 2 캐시는 actions 만 바꾼다(supports 옛 값).
+      다시 읽기가 실패하면 옛 grammar(+ v<2 면 supports []) 로 이번 설계를 하고 캐시는 그대로 둔다(다음 설계에서 다시 시도).
     - reread 대상·해시가 바뀐 컷은 새 읽기 전체를 쓴다.
     - 읽기 실패(이미지 없음·None)면 grammar_by_cut 에 넣지 않는다(camera 가 Astra 카메라를 둔다).
     - charge 는 _grammar_charge 콜백으로 원장에.
@@ -1274,10 +1275,15 @@ def _read_grammars(owner, pid, plan_id, groups, chars, grammar_cache, reread_cut
                 log.warning("vnew.previz.grammar.failed cut=%s err=%s", cut_id, str(exc)[:200])
                 grammar = None
             if same:
-                # 옛 캐시 판 올림: 카메라 문법은 옛 값, supports 만 새 읽기 값.
+                # 옛 캐시 판 올림: 카메라 문법은 옛 값. v<2 는 supports 를, v<3 은 actions(작업 148 손·자세·머리·눈)를
+                # 새 읽기 값으로 채운다. v 2 캐시의 supports 는 옛 값 그대로(사용자가 본 받침이 바뀌지 않게).
                 upgraded = copy.deepcopy(cached["grammar"])
                 ok = isinstance(grammar, dict)
-                upgraded["supports"] = list(grammar.get("supports") or []) if ok else []
+                old_v = cached_v if isinstance(cached_v, int) and not isinstance(cached_v, bool) else 0
+                if old_v < 2:
+                    upgraded["supports"] = list(grammar.get("supports") or []) if ok else []
+                if ok:
+                    upgraded["actions"] = list(grammar.get("actions") or [])
                 grammar_by_cut[cut_id] = upgraded
                 if ok:
                     cache[cut_id] = {"hash": hashed, "grammar": upgraded, "v": version}
@@ -1476,6 +1482,10 @@ def _apply_appearance(owner: str, scenes: list[dict], chars: list[dict]) -> None
                 actor["hairColor"] = HAIR_COLOR_DEFAULT
 
 
+# 작업 148: 패널 읽기 actions[] → timeline actor 로 옮기는 손·자세·머리·눈 키.
+_POSE_KEYS = ("posture", "hands", "head", "eyes")
+
+
 def _apply_gestures(scenes: list[dict], groups: list[dict], grammar_by_cut: dict, plan: dict | None = None) -> None:
     """컷마다 보이는 인물의 timeline actor gesture·gestureTarget 을 채운다.
 
@@ -1508,8 +1518,8 @@ def _apply_gestures(scenes: list[dict], groups: list[dict], grammar_by_cut: dict
             cut_id = str(cut.get("cutId") or "")
             grammar = grammar_by_cut.get(cut_id) if isinstance(grammar_by_cut, dict) else None
             actions = (grammar or {}).get("actions") if isinstance(grammar, dict) else None
-            # name → (gesture, target_name) 맵.
-            gesture_by_name: dict[str, tuple[str, str]] = {}
+            # name → (gesture, target_name, pose) 맵. pose = 작업 148 손·자세·머리·눈(패널 읽기, 옛 캐시는 빈 dict).
+            gesture_by_name: dict[str, tuple[str, str, dict]] = {}
             if actions:
                 for act in actions:
                     nm = str((act or {}).get("name") or "").strip()
@@ -1518,6 +1528,7 @@ def _apply_gestures(scenes: list[dict], groups: list[dict], grammar_by_cut: dict
                     gesture_by_name[nm] = (
                         str((act or {}).get("gesture") or "none"),
                         str((act or {}).get("target") or "none"),
+                        {k: act[k] for k in _POSE_KEYS if k in act},
                     )
             else:
                 # 옛 캐시 대비책: 콘티 actionEn 키워드.
@@ -1527,7 +1538,7 @@ def _apply_gestures(scenes: list[dict], groups: list[dict], grammar_by_cut: dict
                     if not nm:
                         continue
                     g = gesture_from_action(str((ch or {}).get("actionEn") or ""))
-                    gesture_by_name[nm] = (g, "none")
+                    gesture_by_name[nm] = (g, "none", {})
 
             name_by_id = {v: k for k, v in id_by_name.items()}
             for ca in cut.get("actors") or []:
@@ -1536,12 +1547,21 @@ def _apply_gestures(scenes: list[dict], groups: list[dict], grammar_by_cut: dict
                 entry = gesture_by_name.get(nm)
                 if not entry:
                     continue
-                gesture, target_name = entry
+                gesture, target_name, pose = entry
+                target_id = id_by_name.get(target_name.strip()) if target_name and target_name != "none" else None
+                if target_id == aid:
+                    target_id = None
                 if gesture and gesture != "none":
                     ca["gesture"] = gesture
-                    target_id = id_by_name.get(target_name.strip()) if target_name and target_name != "none" else None
-                    if target_id and target_id != aid:
+                    if target_id:
                         ca["gestureTarget"] = target_id
+                if pose:
+                    # 작업 148: other_* 손 목표·상대 쪽 머리는 gestureTarget(상대 id)으로 잡는다. schema 와 같은 규칙으로 정리.
+                    if target_id:
+                        ca["gestureTarget"] = target_id
+                    for key in _POSE_KEYS:
+                        ca.pop(key, None)
+                    ca.update(previz_schema.normalize_pose_fields(pose, has_target="gestureTarget" in ca))
 
             # 서버 규칙(설계자 2026-10-22): 대사가 있는 컷에서 말하는 인물에 다른 제스처가 없으면
             # 상대(듣는 사람)를 바라보게 한다. 말하는 인물 = _cut_lines 의 speaker, 상대 = 그 컷
@@ -1565,6 +1585,9 @@ def _apply_gestures(scenes: list[dict], groups: list[dict], grammar_by_cut: dict
                     continue
                 # 이미 다른 제스처가 붙었으면 두지 않는다.
                 if str(ca.get("gesture") or "none") not in ("", "none"):
+                    continue
+                # 작업 148: 패널에서 읽은 손이 상대를 잡고 있으면 그 상대(gestureTarget)를 바꾸지 않는다.
+                if ca.get("hands") and ca.get("gestureTarget"):
                     continue
                 listener_id = next((other for other in cut_actor_ids if other and other != aid), "")
                 if not listener_id:

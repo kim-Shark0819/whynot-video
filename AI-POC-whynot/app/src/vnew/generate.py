@@ -3000,6 +3000,109 @@ def _cut_on_screen(plan: dict, cut: dict) -> dict:
     return {"onScreen": on_screen, "offScreenSpeaker": off_speaker}
 
 
+# 작업 148: 프리비즈 timeline actor 의 hands(패널에서 읽은 손)로 만드는 짧은 포즈 절. 사람마다 1절, 쓰는 손이 없으면 없음.
+_POSE_PART_EN = {
+    "face": "face", "eyes": "eyes", "cheek": "cheek", "chin": "chin", "mouth": "mouth", "chest": "chest",
+    "knee": "knee", "shoulder": "shoulder", "neck": "neck", "hand": "hand", "head": "head", "arm": "arm",
+}
+_POSE_PART_PLURAL = {"cheek": "cheeks", "shoulder": "shoulders", "hand": "hands", "knee": "knees", "arm": "arms"}
+# act → (한 손 동사, 두 손 동사). 목표 앞에 붙는다.
+_POSE_VERB = {
+    "grab": ("grabs", "grab"), "hold": ("holds", "hold"), "touch": ("touches", "touch"), "cup": ("cups", "cup"),
+    "cover": ("covers", "cover"), "rest_on": ("rests on", "rest on"), "point": ("points at", "point at"),
+}
+
+
+def _cut_poses(plan: dict, cut: dict) -> list[dict]:
+    """이 컷 프리비즈 인물 중 쓰는 손(act ≠ rest·none)이 있는 사람 [{name, hands, other}](작업 148).
+
+    hands = timeline actor 의 hands(previz_schema 로 정리된 값), other = gestureTarget 인물 이름(없으면 "").
+    hands 가 없는 옛 데이터는 [] — 포즈 절이 붙지 않아 프롬프트가 지금과 같다.
+    """
+    cut_id = str(cut.get("id") or "")
+    scene = _scene_by_cut(plan).get(cut_id)
+    if not scene:
+        return []
+    names = {str(a.get("id") or ""): str(a.get("name") or "").strip() for a in scene.get("actors") or []}
+    out: list[dict] = []
+    for entry in scene.get("timeline") or []:
+        if str(entry.get("cutId") or "") != cut_id:
+            continue
+        for ca in entry.get("actors") or []:
+            hands = ca.get("hands") if isinstance(ca, dict) else None
+            name = names.get(str((ca or {}).get("id") or ""), "")
+            if not isinstance(hands, dict) or not name:
+                continue
+            kept = {side: dict(hands[side]) for side in previz_schema.HAND_SIDES if isinstance(hands.get(side), dict)}
+            if not any(str(h.get("act") or "") not in ("",) + previz_schema.IDLE_HAND_ACTS for h in kept.values()):
+                continue
+            out.append({"name": name, "hands": kept, "other": names.get(str(ca.get("gestureTarget") or ""), "")})
+        break
+    return out
+
+
+def _pose_clause(pose: dict, disp_name) -> str:
+    """사람 하나의 포즈 절(영어 1문장, 마침표 없음). 예: "Beomgeonu's right hand grabs Yeouijun's chin and lifts it;
+    the left hand rests". 쓰는 손이 없으면 "". disp_name(한국 이름) → 프롬프트 표기(로마자)."""
+    name = disp_name(str(pose.get("name") or "")) or "A character"
+    other = disp_name(str(pose.get("other") or "")) if pose.get("other") else ""
+    hands = pose.get("hands") or {}
+
+    def _active(side: str) -> dict | None:
+        hand = hands.get(side)
+        if isinstance(hand, dict) and str(hand.get("act") or "") in _POSE_VERB:
+            return hand
+        return None
+
+    def _target(hand: dict, plural: bool) -> str:
+        target = str(hand.get("target") or "none")
+        if target == "none":
+            return other if other and hand.get("act") == "point" else ""
+        own = target.startswith("own_")
+        part = target.split("_", 1)[1]
+        word = _POSE_PART_EN.get(part, part)
+        if plural:
+            word = _POSE_PART_PLURAL.get(part, word)
+        if own:
+            return f"the {word}"
+        return f"{other}'s {word}" if other else f"the other person's {word}"
+
+    def _phrase(hand: dict, plural: bool) -> str:
+        act = str(hand.get("act") or "")
+        verb = _POSE_VERB[act][1 if plural else 0]
+        target = _target(hand, plural)
+        if not target:
+            if act == "point":
+                return "point" if plural else "points"
+            return ""
+        text = f"{verb} {target}"
+        if act == "grab" and hand.get("target") == "other_chin":
+            text += " and lifts it" if not plural else " and lift it"
+        return text
+
+    right, left = _active("right"), _active("left")
+    if not right and not left:
+        return ""
+    if right and left and (right.get("act"), right.get("target")) == (left.get("act"), left.get("target")):
+        phrase = _phrase(right, True)
+        return f"Both of {name}'s hands {phrase}" if phrase else ""
+    if right and left:
+        first, second = _phrase(right, False), _phrase(left, False)
+        parts = [f"{name}'s right hand {first}" if first else "", f"the left hand {second}" if second else ""]
+        return "; ".join(p for p in parts if p)
+    side, hand = ("right", right) if right else ("left", left)
+    rest_side = "left" if side == "right" else "right"
+    own_rest = str(hand.get("act")) == "rest_on" and str(hand.get("target")) in ("own_cheek", "own_chin")
+    if own_rest:
+        # 뺨·턱을 손에 괸 자세: 주어를 뺨·턱으로(손이 뺨 아래).
+        part = str(hand.get("target")).split("_", 1)[1]
+        return f"{name}'s {part} rests on the {side} hand; the {rest_side} hand rests"
+    phrase = _phrase(hand, False)
+    if not phrase:
+        return ""
+    return f"{name}'s {side} hand {phrase}; the {rest_side} hand rests"
+
+
 # 한국어 시간대 → 영어(HARMONY 의 "time of day"). 부분일치로 가장 먼저 맞는 것을 쓴다.
 _TIME_OF_DAY_EN = (
     ("새벽", "dawn"),
@@ -3215,6 +3318,11 @@ def _take_timeline_entries(plan: dict, take: dict) -> list[dict]:
                 "moodEn": vnew_fx.clean_text(cut.get("moodEn"), vnew_fx.MOOD_EN_MAX) if fx_on else "",
             }
         )
+        # 작업 148: 화면에 보이는 사람 중 쓰는 손이 있는 사람의 손(프리비즈 hands). 없으면 키 없음(지금 항목 모양 그대로).
+        visible = {str(item.get("name") or "") for item in on["onScreen"]}
+        poses = [p for p in _cut_poses(plan, cut) if not visible or p["name"] in visible]
+        if poses:
+            entries[-1]["poses"] = poses
         if fx_on:
             # 작업 127: 기호 대상 인물(정리된 값)과 이 컷 장소(테이크 안 장소가 바뀌는 컷에서만 배경 문장을 다시 쓴다).
             entries[-1]["fxWho"] = vnew_fx.fx_who(cut.get("fxWho"), vnew_fx.cut_names(cut))
@@ -3556,6 +3664,7 @@ def _take_prompt(plan: dict, take: dict, *, cast: list[dict], panel_nos: list[in
         "dialogue_limit": 0,       # 작업 147: 대사 글자 상한(0 = 없음 → 맨 마지막에 25, _fit_dialogue 문장 단위)
         "gaze_limit": 90,          # gaze 글자 상한(예외 컷에서만, 작업 147: 대사 앞에서 55)
         "on_plain": False,         # 작업 147: ON SCREEN 부분 노출 괄호 빼기(대사 앞)
+        "pose_on": True,           # 작업 148: 포즈 절(사람마다 1절, 대사 앞에서 뺀다)
         "costume_limit": 200,      # ④ ASSETS 장면 의상 글자 상한(200→110)
         "avoid": avoid_full,       # ⑥ AVOID 축약
         "audio": audio_full,       # ⑦ RULES 오디오 문장 축약
@@ -3728,6 +3837,12 @@ def _take_prompt(plan: dict, take: dict, *, cast: list[dict], panel_nos: list[in
                 entry.get("fxWho"), _present(entry), _fx_name)
         if action:
             pieces.append(action)
+        # 작업 148: 사람마다 짧은 포즈 절(프리비즈 hands, 쓰는 손이 있을 때만). 대사보다 먼저 뺀다(poseDrop).
+        if state["pose_on"]:
+            for pose in entry.get("poses") or []:
+                clause = _pose_clause(pose, _disp_name)
+                if clause:
+                    pieces.append(clause)
         # vnew-live-fx RA4.1: 연기 → 분위기 → 기호 → 대사 → 시선. 끔이면 moodText·fx 가 비어 아무것도 붙지 않는다.
         mood = _clip(str(entry.get("moodText") or ""), state["mood_limit"]) if state["mood_limit"] > 0 else ""
         if mood:
@@ -3808,6 +3923,9 @@ def _take_prompt(plan: dict, take: dict, *, cast: list[dict], panel_nos: list[in
     if any(len(e.get("onScreen") or []) > 1 and any(str(i.get("how") or "full") not in ("full", "main")
                                                    for i in e.get("onScreen") or []) for e in entries):
         steps.append(("on_plain", True, "onScreenPlain"))
+    if any(e.get("poses") for e in entries):
+        # 작업 148: 포즈 절은 대사(dialogue25) 바로 앞에서 뺀다. 포즈가 없는 테이크는 단계가 없다(로그가 지금과 같다).
+        steps.append(("pose_on", False, "poseDrop"))
     steps.append(("dialogue_limit", 25, "dialogue25"))
     for field, value, label in steps:
         if _utf8_len(prompt) <= budget:
