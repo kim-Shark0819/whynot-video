@@ -51618,7 +51618,7 @@ def check_vnew_ref_video_split_152() -> None:
 
             merges: list[list[float]] = []
 
-            def conform(pieces):
+            def conform(pieces, **_kw):  # 작업 156: 조각 잇기는 hold=True(계획 길이 맞춤)로 부른다
                 merges.append([float(s) for _b, s in pieces])
                 return b"PARTS:%d" % len(pieces)
 
@@ -51857,7 +51857,7 @@ def check_vnew_content_flag_153() -> None:
                 "sentSeconds": round(float(unit["endSec"]) - float(unit["startSec"]), 3), "padded": False})
             env.set(genmod, "_mp4_seconds", video_seconds)
             merges: list[int] = []
-            env.set(genmod, "_conform_concat", lambda pieces: merges.append(len(pieces)) or b"PARTS:%d" % len(pieces))
+            env.set(genmod, "_conform_concat", lambda pieces, **_kw: merges.append(len(pieces)) or b"PARTS:%d" % len(pieces))
             llm_calls: list[str] = []
 
             def fake_soften(blocks, *, model):
@@ -52118,7 +52118,7 @@ def check_vnew_part_continuity_155() -> None:
                 "sentSeconds": round(float(unit["endSec"]) - float(unit["startSec"]), 3), "padded": False})
             env.set(genmod, "_mp4_seconds", video_seconds)
             merges: list[list[float]] = []
-            env.set(genmod, "_conform_concat", lambda pieces: merges.append([float(s) for _b, s in pieces]) or b"PARTS")
+            env.set(genmod, "_conform_concat", lambda pieces, **_kw: merges.append([float(s) for _b, s in pieces]) or b"PARTS")
             frames: list[float] = []
 
             def last_frame(mp4, start):
@@ -52580,6 +52580,337 @@ def check_vnew_contact_action_154() -> None:
 
 
 
+
+_RS156_TEXT_RULE = "RULES: no captions, no burned-in subtitles, no on-screen lettering. Reproduce @Video1's"
+_RS156_SPOKEN = ', spoken (audio only, never written on screen): "'
+
+
+def check_vnew_real_seedance_156() -> None:
+    """작업 156 — 실사 테이크 = Seedance, 조각·테이크 계획 길이 맞추기, 화면 글자·멈춘 화면 검사. 가짜 fal·가짜 vision, 로컬 ffmpeg, 유료 0.
+
+    (rs-a) 애니 모델 Wan 3.0 r2v 계획의 실사 회차: 실사 요청은 모두 Seedance endpoint(애니 요청은 Wan), realRun.endpoint = Seedance,
+           금액 = Seedance 단가(Wan 단가로 확인하면 CostMismatch), 조각 상한 = Seedance 참고 영상 상한. VNEW_REAL_TAKE_MODEL 빈 값 → 애니 모델
+    (rs-b) 로컬 ffmpeg: 8·15·7초 조각이 10·15·10초로 오면 8·15·7초로 잘라 30초(720프레임), 7초 조각이 5초면 마지막 프레임을 잡아 채움,
+           테이크 30초 + 15초(17초로 옴) → 최종 45초 ±1프레임(1080프레임)·소리 있음. 길이가 맞으면 지금 방식(None)
+    (rs-c) 화면 글자: vision "있음" → 1번 다시(대사 audio only·RULES 맨 앞 글자 금지, 그 밖 글자는 첫 프롬프트와 같음), 글자 프레임이
+           적은 쪽(같으면 첫 것), 남으면 note. "없음" → 다시 0. VNEW_TEXT_CHECK 끔 → vision 0. vision 마다 charge_text 1건. 152 조각:
+           글자 있는 조각만 다시
+    (rs-d) 멈춘 화면: 로컬 ffmpeg 정지 클립 → frozen, 움직이는 클립 → 아님. 흐름: 멈춤 → 같은 프롬프트로 1번 다시, 더 움직이는 쪽
+    """
+    import base64 as _b64  # noqa: PLC0415
+    import re as _re  # noqa: PLC0415
+    import tempfile as _tempfile  # noqa: PLC0415
+    import threading as _threading  # noqa: PLC0415
+    import traceback as _tb  # noqa: PLC0415
+
+    sys.path.insert(0, str(ROOT / "app"))
+    from src import stitcher as stitchmod  # noqa: PLC0415
+    from src.vnew import generate as genmod  # noqa: PLC0415
+    from src.vnew import plan as planmod  # noqa: PLC0415
+    from src.vpoc import ark as arkmod  # noqa: PLC0415
+    from src.vpoc.errors import VpocError  # noqa: PLC0415
+
+    bad: list[str] = []
+    owner = "tester"
+    fps = genmod.REAL_CUT_FPS
+
+    def frames_of(path: str) -> list[bytes]:
+        raw = _rm134_ffmpeg(["-loglevel", "error", "-i", path, "-map", "0:v:0", "-vf", "scale=32:18", "-f", "rawvideo",
+                             "-pix_fmt", "gray", "-"]).stdout
+        return [raw[i:i + 576] for i in range(0, len(raw) - 575, 576)]
+
+    def mean_diff(a: bytes, b: bytes) -> float:
+        return sum(abs(x - y) for x, y in zip(a, b)) / max(1, len(a))
+
+    # ================= (rs-b)·(rs-d 앞) 로컬 ffmpeg =================
+    try:
+        saved_size = genmod.REAL_CUT_SIZE
+        genmod.REAL_CUT_SIZE = (320, 180)  # 길이·프레임 규칙만 본다(1080p 인코딩 시간 절약)
+        try:
+            with _tempfile.TemporaryDirectory(prefix="chk156-") as work:
+                def synth(name: str, args: list[str]) -> bytes:
+                    out = os.path.join(work, name)
+                    done = _rm134_ffmpeg(["-y", "-loglevel", "error", *args, out])
+                    if done.returncode != 0:
+                        raise RuntimeError(f"합성 클립 {name} 실패: {done.stderr.decode(errors='replace')[:300]}")
+                    return open(out, "rb").read()
+
+                def moving(name: str, seconds: float) -> bytes:
+                    return synth(name, ["-f", "lavfi", "-i", f"testsrc2=size=320x180:rate=24:duration={seconds}",
+                                        "-f", "lavfi", "-i", f"sine=frequency=440:sample_rate=48000:duration={seconds}",
+                                        "-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p", "-c:a", "aac", "-shortest"])
+
+                def save(name: str, data: bytes) -> str:
+                    path = os.path.join(work, name)
+                    with open(path, "wb") as handle:
+                        handle.write(data)
+                    return path
+
+                c10, c15, c5, c17 = moving("c10.mp4", 10), moving("c15.mp4", 15), moving("c5.mp4", 5), moving("c17.mp4", 17)
+                trimmed = genmod._conform_concat([(c10, 8.0), (c15, 15.0), (c10, 7.0)], hold=True)  # noqa: SLF001
+                path = save("parts.mp4", trimmed)
+                info = stitchmod.probe_media(path)
+                got = frames_of(path)
+                if len(got) != 30 * fps or abs(info["duration"] - 30.0) > 1.0 / fps + 0.03 or not info["hasAudio"]:
+                    bad.append(f"(rs-b) 10·15·10초 → 8·15·7초: 프레임 {len(got)} 길이 {info['duration']:.3f} 소리 {info['hasAudio']}")
+                held = genmod._conform_concat([(c10, 8.0), (c15, 15.0), (c5, 7.0)], hold=True)  # noqa: SLF001
+                path = save("held.mp4", held)
+                got = frames_of(path)
+                tail = got[-36:]  # 마지막 1.5초 = 5초 영상 뒤에 잡은 마지막 프레임
+                if len(got) != 30 * fps or not tail or max(mean_diff(tail[0], f) for f in tail) > 1.0 \
+                        or mean_diff(got[23 * fps + 12], got[23 * fps + 60]) < 2.0:
+                    bad.append(f"(rs-b) 5초 → 7초 채움: 프레임 {len(got)}·끝 정지 "
+                               f"{max(mean_diff(tail[0], f) for f in tail) if tail else None}")
+                final = genmod._fit_takes([trimmed, c17], [30.0, 15.0], "webtoon")  # noqa: SLF001
+                if final is None:
+                    bad.append("(rs-b) 17초로 온 테이크가 있는데 최종을 맞추지 않았습니다")
+                else:
+                    path = save("final.mp4", final)
+                    info = stitchmod.probe_media(path)
+                    got = frames_of(path)
+                    if abs(len(got) - 45 * fps) > 1 or abs(info["duration"] - 45.0) > 1.0 / fps + 0.03 or not info["hasAudio"]:
+                        bad.append(f"(rs-b) 최종 45초: 프레임 {len(got)} 길이 {info['duration']:.3f} 소리 {info['hasAudio']}")
+                if genmod._fit_takes([trimmed, c15], [30.0, 15.0], "webtoon") is not None:  # noqa: SLF001
+                    bad.append("(rs-b) 길이가 맞는 테이크도 다시 인코딩했습니다(지금 방식이어야 합니다)")
+
+                # ================= (rs-d) 정지·움직임 클립 =================
+                still = synth("still.mp4", ["-f", "lavfi", "-i", "color=c=0x556677:s=320x180:r=24:d=6", "-c:v", "libx264",
+                                            "-preset", "ultrafast", "-pix_fmt", "yuv420p"])
+                diffs_still = genmod._motion_diffs(still)  # noqa: SLF001
+                diffs_move = genmod._motion_diffs(c10)  # noqa: SLF001
+                share = lambda ds: sum(1 for d in ds if d < genmod.FROZEN_DIFF) / max(1, len(ds))  # noqa: E731
+                if len(diffs_still) < 15 or share(diffs_still) <= genmod.FROZEN_SHARE \
+                        or len(diffs_move) < 30 or share(diffs_move) > genmod.FROZEN_SHARE:
+                    bad.append(f"(rs-d) 정지 {len(diffs_still)}개 {share(diffs_still):.2f} · 움직임 {len(diffs_move)}개 "
+                               f"{share(diffs_move):.2f}")
+        finally:
+            genmod.REAL_CUT_SIZE = saved_size
+    except Exception:  # noqa: BLE001
+        bad.append("작업 156 ffmpeg 검사 예외\n" + _tb.format_exc())
+
+    # ================= 가짜 흐름 =================
+    rid_re = _re.compile(rb"/(rq\d+)/output\.mp4")
+    current = _threading.local()
+    answers: dict[str, int] = {}     # rid → 글자 프레임 수(가짜 vision)
+    motions: dict[str, float] = {}   # rid → 이웃 프레임 차이(가짜 ffmpeg)
+    vision: list[str] = []
+    try:
+        with _guard_real_llm(), _LrEnv(owner) as env, _pin_vnew(
+                VNEW_FX=False, VNEW_GEN_PARALLEL=2, POLL_INTERVAL_S=0, VNEW_TAKE_RESOLUTION="480p", VNEW_TAKE_MAX_SECONDS=30,
+                VNEW_TAKE_REF_SPLIT=True, VNEW_TAKE_AUDIO=True, VNEW_PART_CONTINUITY=False, VNEW_TEXT_CHECK=True,
+                VNEW_REAL_TAKE_MODEL=_LR_ENDPOINT, VNEW_CONTENT_FALLBACK_MODEL=_LR_ENDPOINT) as vset:
+            prefix_id = genmod.vpoc_settings.FAL_ID_PREFIX
+            wan_id = prefix_id + _RV152_ENDPOINT
+            seed_find = genmod.vpoc_fal.find
+            env.set(genmod.vpoc_fal, "find", lambda m: {"id": wan_id, "endpointId": _RV152_ENDPOINT, "category": "reference-to-video",
+                                                        "caps": dict(_RV152_CAPS)} if str(m) == wan_id else seed_find(m))
+            seed_price = genmod.vpoc_fal.pricing_for
+            env.set(genmod.vpoc_fal, "pricing_for", lambda m: {"unit": "1000 tokens", "unitPrice": 0.05}
+                    if str(m) == wan_id else seed_price(m))
+            env.set(genmod, "_cut_clip", lambda mp4, unit: {
+                "bytes": b"CLIP:%.3f-%.3f:" % (float(unit["startSec"]), float(unit["endSec"])) + bytes(mp4)[:20],
+                "origSeconds": round(float(unit["endSec"]) - float(unit["startSec"]), 3),
+                "sentSeconds": round(float(unit["endSec"]) - float(unit["startSec"]), 3), "padded": False})
+            merges: list[tuple[list[float], bool]] = []
+            env.set(genmod, "_conform_concat", lambda pieces, hold=False: merges.append(([float(s) for _b, s in pieces], hold))
+                    or b"PARTS")
+            base_fetch = genmod._fetch_bytes  # noqa: SLF001
+
+            def fetch(key, *, bucket=""):
+                if str(key).endswith("/output.mp4"):
+                    return b"\x00\x00\x00\x18ftypisom" + str(key).encode()  # 결과 = mp4 로 보이는 가짜(검사가 돈다)
+                return base_fetch(key, bucket=bucket)
+
+            def rid_of(mp4) -> str:
+                match = rid_re.search(bytes(mp4 or b""))
+                return match.group(1).decode() if match else ""
+
+            def frame(mp4, at):
+                current.rid = rid_of(mp4)
+                return _tiny_jpeg(64, 36)
+
+            def read_text(blocks, *, model):
+                vision.append(getattr(current, "rid", ""))
+                n = answers.get(getattr(current, "rid", ""), 0)
+                return ({"frames": [{"image": i, "text": i <= n} for i in (1, 2, 3)]},
+                        {"model": "vision-156", "inputTokens": 30, "outputTokens": 5})
+
+            env.set(genmod, "_fetch_bytes", fetch)
+            env.set(genmod, "_cut_first_frame", frame)
+            env.set(genmod, "_read_text_check", read_text)
+            env.set(genmod, "_motion_diffs", lambda mp4: [motions.get(rid_of(mp4), 4.0)] * 40)
+            env.set(genmod, "_mp4_seconds", lambda mp4: 12.0 if genmod._is_mp4(mp4) else 0.0)  # noqa: SLF001
+
+            queue = genmod.vpoc_settings.FAL_QUEUE_URL + "/"
+            clip_re = _re.compile(rb"^CLIP:(\d+\.\d+)-(\d+\.\d+):")
+
+            def endpoint_of(req: dict) -> str:
+                return str(req["url"]).split(queue, 1)[-1]
+
+            def sent_seconds(req: dict) -> float:
+                uri = str((req["payload"].get("video_urls") or [""])[0])
+                match = clip_re.match(_b64.b64decode(uri.split(",", 1)[-1])) if "," in uri else None
+                return float(match.group(2)) - float(match.group(1)) if match else -1.0
+
+            def run(pid: str) -> tuple[dict, list[dict]]:
+                since = len(env.requests)
+                genmod.start_generate(owner, pid, genmod.estimate(env.plan(pid))["totalUsd"])
+                return env.drive(pid), env.requests[since:]
+
+            def text_charges(since: int) -> int:
+                return sum(1 for x in env.ledger[since:] if x.get("text") and x.get("model") == "vision-156")
+
+            # ================= (rs-c) 화면 글자 · 통째 테이크 =================
+            cases = [  # (이름, 첫 글자 프레임, 다시 만든 것 글자 프레임, 쓸 쪽, note)
+                ("다시 만든 것 깨끗", 3, 0, "retry", False),
+                ("다시 만든 것이 적음", 3, 1, "retry", True),
+                ("같음 → 첫 것", 2, 2, "first", True),
+            ]
+            for number, (name, first_n, second_n, want_used, want_note) in enumerate(cases, 1):
+                pid = f"prj_rs_c{number}"
+                env.make_plan(pid, [{"id": "s1", "cutIds": ["c1", "c2", "c3"], "seconds": 12}])
+                base = len(env.requests)
+                answers[f"rq{base + 1}"], answers[f"rq{base + 2}"] = first_n, second_n
+                vision.clear()
+                ledger0 = len(env.ledger)
+                g, reqs = run(pid)
+                state = genmod._previz_cells(g)[0]["webtoon"]  # noqa: SLF001
+                prompts = [str(r["payload"].get("prompt") or "") for r in reqs]
+                used_rid = f"rq{base + (2 if want_used == 'retry' else 1)}"
+                restored = prompts[1].replace(_RS156_SPOKEN, ': "').replace(
+                    "RULES: no captions, no burned-in subtitles, no on-screen lettering. ", "RULES: ") if len(prompts) == 2 else ""
+                checks = {
+                    "요청 2개": len(reqs) == 2,
+                    "첫 프롬프트 그대로": len(prompts) == 2 and _RS156_SPOKEN not in prompts[0] and "no on-screen lettering" not in prompts[0],
+                    "다시: RULES 맨 앞": len(prompts) == 2 and _RS156_TEXT_RULE in prompts[1],
+                    "다시: 대사 audio only": len(prompts) == 2 and prompts[1].count(_RS156_SPOKEN) >= 1,
+                    "다시: 그 밖 글자 같음": restored == (prompts[0] if prompts else None),
+                    "고른 쪽": f"/{used_rid}/" in str(state.get("outputKey") or "") and (state.get("qc") or {}).get("used") == want_used,
+                    "note": (state.get("note") == genmod.TEXT_LEFT_NOTE) == want_note,
+                    "vision 2번·charge_text 2건": len(vision) == 2 and text_charges(ledger0) == 2,
+                    "끝": state.get("status") == "completed" and g.get("status") == "done",
+                }
+                failed = [k for k, v in checks.items() if not v]
+                if failed:
+                    bad.append(f"(rs-c) {name}: {failed} vision={vision} state={ {k: state.get(k) for k in ('status', 'outputKey', 'note', 'qc')} }")
+            pid = "prj_rs_c_no"
+            env.make_plan(pid, [{"id": "s1", "cutIds": ["c1", "c2", "c3"], "seconds": 12}])
+            vision.clear()
+            g, reqs = run(pid)
+            state = genmod._previz_cells(g)[0]["webtoon"]  # noqa: SLF001
+            if len(reqs) != 1 or len(vision) != 1 or "qc" in state or state.get("note") or state.get("status") != "completed":
+                bad.append(f"(rs-c) 글자 없음: 요청 {len(reqs)} vision {len(vision)} {state.get('qc')} {state.get('note')}")
+            pid = "prj_rs_c_off"
+            env.make_plan(pid, [{"id": "s1", "cutIds": ["c1", "c2", "c3"], "seconds": 12}])
+            answers[f"rq{len(env.requests) + 1}"] = 3
+            vset.VNEW_TEXT_CHECK = False
+            vision.clear()
+            g, reqs = run(pid)
+            vset.VNEW_TEXT_CHECK = True
+            if len(reqs) != 1 or vision:
+                bad.append(f"(rs-c) VNEW_TEXT_CHECK 끔: 요청 {len(reqs)} vision {len(vision)}")
+
+            # ================= (rs-c) 152 조각: 글자 있는 조각만 다시 =================
+            pid = "prj_rs_c_parts"
+            env.make_plan(pid, [{"id": "s1", "cutIds": [f"c{i}" for i in range(1, 11)], "seconds": 30}])
+
+            def to_wan(data: dict) -> None:
+                data["input"]["videoModel"] = wan_id
+                for cut in data["conti"]["cuts"]:
+                    cut["dialogueKo"] = f'에이: "대사{cut["no"]}번."'
+                    data["previz"]["shotBrief"]["cuts"][cut["id"]]["dialogue"] = [
+                        {"speaker": "에이", "lineKo": f"대사{cut['no']}번.", "deliveryEn": "calm"}]
+
+            planmod.mutate_plan(owner, pid, to_wan)
+            base = len(env.requests)
+            answers[f"rq{base + 2}"] = 2  # 조각 2 첫 결과에 글자
+            merges.clear()
+            vision.clear()
+            g, reqs = run(pid)
+            state = genmod._previz_cells(g)[0]["webtoon"]  # noqa: SLF001
+            parts = state.get("parts") or []
+            prompts = [str(r["payload"].get("prompt") or "") for r in reqs]
+            if len(reqs) != 3 or _RS156_SPOKEN in prompts[0] or _RS156_SPOKEN in prompts[1] or _RS156_TEXT_RULE not in prompts[2] \
+                    or set(_re.findall(r"대사(\d+)번", prompts[2])) != set(_re.findall(r"대사(\d+)번", prompts[1])) \
+                    or merges != [([15.0, 15.0], True)] or len(parts) != 2 or f"/rq{base + 3}/" not in str(parts[1].get("outputKey")) \
+                    or (parts[1].get("qc") or {}).get("used") != "retry" or "qc" in parts[0] or state.get("status") != "completed":
+                bad.append(f"(rs-c) 조각: 요청 {len(reqs)} merges {merges} parts "
+                           f"{[(p.get('status'), p.get('outputKey'), (p.get('qc') or {}).get('used')) for p in parts]}")
+
+            # ================= (rs-d) 멈춘 화면 흐름 =================
+            for name, first_m, second_m, want_used in (("다시 만든 것이 움직임", 0.1, 3.0, "retry"),
+                                                       ("첫 것이 더 움직임", 0.3, 0.1, "first")):
+                pid = f"prj_rs_d_{want_used}"
+                env.make_plan(pid, [{"id": "s1", "cutIds": ["c1", "c2", "c3"], "seconds": 12}])
+                base = len(env.requests)
+                motions[f"rq{base + 1}"], motions[f"rq{base + 2}"] = first_m, second_m
+                g, reqs = run(pid)
+                state = genmod._previz_cells(g)[0]["webtoon"]  # noqa: SLF001
+                used_rid = f"rq{base + (2 if want_used == 'retry' else 1)}"
+                prompts = [str(r["payload"].get("prompt") or "") for r in reqs]
+                if len(reqs) != 2 or prompts[0] != prompts[1] or f"/{used_rid}/" not in str(state.get("outputKey") or "") \
+                        or (state.get("qc") or {}).get("reasons") != ["frozen"] or state.get("note"):
+                    bad.append(f"(rs-d) {name}: 요청 {len(reqs)} 같은 프롬프트 {len(set(prompts)) == 1} "
+                               f"{state.get('outputKey')} {state.get('qc')}")
+            pid = "prj_rs_d_move"
+            env.make_plan(pid, [{"id": "s1", "cutIds": ["c1", "c2", "c3"], "seconds": 12}])
+            _g, reqs = run(pid)
+            if len(reqs) != 1:
+                bad.append(f"(rs-d) 움직이는 결과도 다시 만들었습니다: {len(reqs)}")
+
+            # ================= (rs-a) 실사 = Seedance =================
+            pid = "prj_rs_a"
+            env.make_plan(pid, [{"id": "s1", "cutIds": [f"c{i}" for i in range(1, 11)], "seconds": 30},
+                                {"id": "s2", "cutIds": ["c11", "c12", "c13"], "seconds": 15}])
+            planmod.mutate_plan(owner, pid, to_wan)
+            g, reqs = run(pid)
+            anime_urls = {endpoint_of(r) for r in reqs}
+            if g.get("status") != "done" or anime_urls != {_RV152_ENDPOINT}:
+                bad.append(f"(rs-a) 애니(Wan) 회차: {g.get('status')} {anime_urls}")
+            est = genmod.real_estimate(g)
+            seed_usd = round(sum(genmod._take_usd(_LR_ENDPOINT, float(u["seconds"]), "480p") for u in g["units"]), 2)  # noqa: SLF001
+            wan_usd = round(sum(genmod._take_usd(_RV152_ENDPOINT, float(u["seconds"]), "480p") for u in g["units"]), 2)  # noqa: SLF001
+            view_usd = genmod.real_estimate({"videoModel": _RV152_ENDPOINT, "resolution": "480p", "units": g["units"]})["usd"]
+            if est["usd"] != seed_usd or seed_usd == wan_usd or view_usd != seed_usd:
+                bad.append(f"(rs-a) 실사 금액: {est['usd']} seedance={seed_usd} wan={wan_usd} 확인창={view_usd}")
+            try:
+                genmod.start_real(owner, pid, wan_usd)
+                bad.append("(rs-a) Wan 단가 금액으로 실사가 시작됐습니다")
+            except VpocError as exc:
+                if exc.kind != "CostMismatch":
+                    bad.append(f"(rs-a) Wan 단가 금액 오류: {exc.kind}")
+            since = len(env.requests)
+            genmod.start_real(owner, pid, est["usd"])
+            g = env.drive(pid)
+            reals = env.requests[since:]
+            limit = float(arkmod.video_options(env.model_id)["maxRefVideoS"])
+            sent = [sent_seconds(r) for r in reals]
+            real_cells = [c.get("real") or {} for c in genmod._previz_cells(g)]  # noqa: SLF001
+            if not reals or any(endpoint_of(r) != _LR_ENDPOINT or r["kind"] != "real" for r in reals) \
+                    or (g.get("realRun") or {}).get("endpoint") != _LR_ENDPOINT \
+                    or not sent or max(sent) > limit + 0.05 or abs(sum(sent) - 45.0) > 0.05 \
+                    or (g.get("finalReal") or {}).get("status") != "done" or any(c.get("status") != "completed" for c in real_cells):
+                bad.append(f"(rs-a) 실사 회차: 요청 {[(endpoint_of(r), r['kind']) for r in reals]} "
+                           f"endpoint={(g.get('realRun') or {}).get('endpoint')} 조각 {sent} 상한 {limit} "
+                           f"final={(g.get('finalReal') or {}).get('status')}")
+            vset.VNEW_REAL_TAKE_MODEL = ""
+            if genmod._real_take_model(g) != _RV152_ENDPOINT or genmod.real_estimate(g)["usd"] != wan_usd:  # noqa: SLF001
+                bad.append("(rs-a) VNEW_REAL_TAKE_MODEL 빈 값이 애니 모델로 돌아가지 않습니다")
+            vset.VNEW_REAL_TAKE_MODEL = "bytedance/not-registered/reference-to-video"
+            if genmod._real_take_model(g) != _RV152_ENDPOINT:  # noqa: SLF001
+                bad.append("(rs-a) 등록표에 없는 실사 모델이 애니 모델로 돌아가지 않습니다")
+            vset.VNEW_REAL_TAKE_MODEL = _LR_ENDPOINT
+    except Exception:  # noqa: BLE001
+        bad.append("작업 156 흐름 검사 예외\n" + _tb.format_exc())
+    if bad:
+        fail("작업 156 실사 Seedance·계획 길이·화면 글자·멈춘 화면 검사 실패\n  " + "\n  ".join(bad))
+    else:
+        ok("작업 156 (rs-a)Wan 계획의 실사 = Seedance 요청·realRun.endpoint·Seedance 단가·Seedance 조각 상한·빈 값/미등록 → 애니 모델 "
+           "(rs-b)10·15·10초 → 8·15·7초 720프레임·5초 → 7초 마지막 프레임·최종 45초 ±1프레임·맞으면 그대로 "
+           "(rs-c)글자 → 1번 다시(audio only·RULES 맨 앞, 그 밖 같음)·적은 쪽·note·없음 0·끔 vision 0·조각만 다시 "
+           "(rs-d)정지 클립 frozen·움직임 아님·같은 프롬프트로 1번·더 움직이는 쪽")
+
+
 def main() -> int:
     print("== vpoc1 check ==")
     check_compileall()
@@ -52694,6 +53025,7 @@ def main() -> int:
     check_vnew_part_continuity_155()
     check_vnew_plan_step_stay_129()
     check_vnew_contact_action_154()
+    check_vnew_real_seedance_156()
     check_pod_zones()
     print()
     if warnings:

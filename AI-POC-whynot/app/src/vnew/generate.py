@@ -338,7 +338,7 @@ def _real_cut_seconds(cut: dict) -> float:
     return max(0.0, float(cut.get("seconds") or 0))
 
 
-def _conform_concat(pieces: list[tuple[bytes, float]]) -> bytes:
+def _conform_concat(pieces: list[tuple[bytes, float]], *, hold: bool = False) -> bytes:
     """컷마다 같은 형식으로 맞춘 뒤 잇는다(작업 134). pieces = [(mp4, 자를 길이 초 — 0 이하면 그 영상 길이)].
 
     컷마다 stitcher.edit_segment: 0초부터 frames = round(초 × 24)장, -map 0:v:0, 1920x1080(비율 유지·검은 여백), 24fps, yuv420p,
@@ -346,11 +346,16 @@ def _conform_concat(pieces: list[tuple[bytes, float]]) -> bytes:
     그다음 stitcher.edit_join: 맞춘 영상은 스트림 복사로 잇고, 이은 PCM 을 AAC 48k 스테레오로 한 번 인코딩한다.
     영상이 콘티 길이보다 1초 넘게 짧으면 영상 길이 + 0.9초까지만 쓴다(edit_segment 의 마지막 프레임 복제가 1초다).
     못 읽는 컷이 있으면 StitchError.
+    hold(작업 156, 테이크 조각·테이크 → 최종): 늘 계획 길이로 맞춘다. 짧은 영상은 stitcher.pad_to_seconds 로 마지막 프레임을 계획
+    길이까지 잡고(소리는 원본에서, 모자란 곳은 무음), 프레임 수는 누적 시각으로 센다(round(끝 × 24) − 앞까지 프레임) — 조각이 많아도
+    합이 계획 합의 ±1프레임 안이다. 끄면(기본, 134 컷 단위 실사) 지금 그대로다.
     """
     if not pieces:
         raise stitcher.StitchError("이어 붙일 컷이 없습니다.")
     fps = REAL_CUT_FPS
     width, height = REAL_CUT_SIZE
+    clock = 0.0
+    done_frames = 0
     with tempfile.TemporaryDirectory(prefix="vnew-conform-") as workdir:
         videos: list[str] = []
         pcm_all = os.path.join(workdir, "audio.pcm")
@@ -364,12 +369,31 @@ def _conform_concat(pieces: list[tuple[bytes, float]]) -> bytes:
                 if length <= 0 or not info.get("width"):
                     raise stitcher.StitchError(f"컷 {index + 1} 영상을 읽지 못했습니다.")
                 target = float(seconds or 0)
-                target = min(target, length + 0.9) if target > 0 else length
                 video = os.path.join(workdir, f"cut-{index:03d}.mp4")
                 pcm = os.path.join(workdir, f"cut-{index:03d}.pcm")
-                stitcher.edit_segment(src, video, start_sec=0.0, frames=max(1, round(target * fps)), fps=fps, width=width,
-                                      height=height, audio_out=pcm, audio_from_source=bool(info.get("hasAudio")))
-                os.unlink(src)
+                if hold:
+                    want = target if target > 0 else length
+                    clock += want
+                    frames = max(1, round(clock * fps) - done_frames)
+                    done_frames += frames
+                    source = src
+                    if frames / fps > length + 0.9:  # edit_segment 의 마지막 프레임 복제(1초)로 모자란다
+                        source = os.path.join(workdir, f"pad-{index:03d}.mp4")
+                        stitcher.pad_to_seconds(src, source, target_sec=frames / fps + 0.1, threads=1)
+                    if abs(length - want) > 1.0 / fps:
+                        log.info("vnew.gen.plan_fit piece=%d got=%.3f want=%.3f frames=%d %s", index + 1, length, want, frames,
+                                 "trim" if length > want else "hold")
+                    stitcher.edit_segment(source, video, start_sec=0.0, frames=frames, fps=fps, width=width, height=height,
+                                          audio_out=pcm, audio_from_source=bool(info.get("hasAudio")),
+                                          audio_source=src if source != src else "", audio_start_sec=0.0)
+                    if source != src:
+                        os.unlink(source)
+                    os.unlink(src)
+                else:
+                    target = min(target, length + 0.9) if target > 0 else length
+                    stitcher.edit_segment(src, video, start_sec=0.0, frames=max(1, round(target * fps)), fps=fps, width=width,
+                                          height=height, audio_out=pcm, audio_from_source=bool(info.get("hasAudio")))
+                    os.unlink(src)
                 with open(pcm, "rb") as handle:
                     joined.write(handle.read())
                 os.unlink(pcm)
@@ -1418,12 +1442,12 @@ def _require_take_real(where: str = "vnew.generate.real") -> None:
 
 
 def real_estimate(gen: dict) -> dict:
-    """실사 회차 1번 금액(design §C.4). 테이크마다 _take_usd(gen.videoModel, unit.seconds, gen.resolution) 합.
+    """실사 회차 1번 금액(design §C.4). 테이크마다 _take_usd(실사 테이크 모델, unit.seconds, gen.resolution) 합.
 
-    웹툰 테이크와 같은 공식·같은 저장값(모델·해상도)이다. 반환 {usd(소수 2자리), seconds, takes, resolution}.
+    작업 156: 모델은 _real_take_model(gen)(VNEW_REAL_TAKE_MODEL, 애니 모델과 따로). 반환 {usd(소수 2자리), seconds, takes, resolution}.
     """
     gen = gen if isinstance(gen, dict) else {}
-    endpoint = str(gen.get("videoModel") or vnew_settings.VNEW_PREVIZ_EDIT_MODEL)
+    endpoint = _real_take_model(gen)
     resolution = str(gen.get("resolution") or vnew_settings.VNEW_TAKE_RESOLUTION)
     usd = 0.0
     seconds = 0.0
@@ -1575,7 +1599,7 @@ def start_real(owner: str, pid: str, confirm_usd: float, audio: bool | None = No
             "startedAt": now_iso(),
             "audio": audio_on,
             "usd": est["usd"],
-            "endpoint": str(g.get("videoModel") or ""),
+            "endpoint": _real_take_model(g),  # 작업 156: 실사 테이크 모델(애니 모델과 따로)
             "resolution": est["resolution"],
         }
         if cast_items:
@@ -3504,7 +3528,7 @@ def _assert_no_webtoon(prompt: str) -> None:
 
 
 def _take_prompt(plan: dict, take: dict, *, cast: list[dict], panel_nos: list[int], location_no, caps: dict | None = None,
-                 variant: str = "webtoon", soften: bool = False, anchor: dict | None = None) -> str:
+                 variant: str = "webtoon", soften: bool = False, anchor: dict | None = None, no_text: bool = False) -> str:
     """통 테이크 프롬프트(영어, UTF-8 ≤ VNEW_TAKE_PROMPT_MAX 바이트, 설계자 2026-10-26, 066 — ASSETS·연기 보존).
 
     순서: ① STYLE(스타일 앵커 맨 앞) → ② ASSETS(@Video1·@Image 매핑) → ③ TIMELINE(컷마다 1줄: ON SCREEN
@@ -3698,6 +3722,9 @@ def _take_prompt(plan: dict, take: dict, *, cast: list[dict], panel_nos: list[in
     rule_reproduce = (
         "RULES: Reproduce @Video1's composition, camera, positions, cuts and timing exactly."
     )
+    if no_text:
+        # 작업 156: 화면 글자 검사로 다시 만드는 제출만 — RULES 맨 앞에 글자 금지(필수 문장이라 어떤 축약에서도 남는다).
+        rule_reproduce = "RULES: " + TEXT_RETRY_RULE + " " + rule_reproduce[len("RULES: "):]
     rule_replace = (
         " Replace each mannequin with its person; keep face and hair identical to the reference sheet "
         "and the costume exactly as written in ASSETS in every cut."
@@ -3914,6 +3941,10 @@ def _take_prompt(plan: dict, take: dict, *, cast: list[dict], panel_nos: list[in
             tags.append("one continuous line that carries over the next cut, no pause at the cut")
         elif run == "cont":
             tags.append("continues the same line from the previous shot, finishing with")
+        if no_text:
+            # 작업 156: 대사는 소리로만(화면 글자 검사로 다시 만들 때). 따옴표 대사를 글자로 그리던 test3 Wan 대응.
+            who_tags = f'{who} ({"; ".join(tags)})' if tags else who
+            return f'{who_tags}, {TEXT_RETRY_SPOKEN}: "{dialogue}"'
         if tags:
             return f'{who} ({"; ".join(tags)}): "{dialogue}"'
         return f'{who}: "{dialogue}"'
@@ -4308,7 +4339,8 @@ def _real_appearance(look: str, limit: int = 170) -> str:
 
 
 def _take_payload(owner: str, pid: str, plan: dict, take: dict, caps: dict, variant: str = "webtoon",
-                  fallback_step: int = 0, soften: bool = False, continuity: dict | None = None) -> dict:
+                  fallback_step: int = 0, soften: bool = False, continuity: dict | None = None,
+                  no_text: bool = False) -> dict:
     """통 테이크(웹툰) 참조 이미지 목록·프롬프트(설계자 2026-10-26, 064).
 
     image_urls(순서 고정 — 프롬프트 번호와 일치):
@@ -4426,6 +4458,8 @@ def _take_payload(owner: str, pid: str, plan: dict, take: dict, caps: dict, vari
         # 작업 153: 콘텐츠 검사 거절 뒤 다시 만들기 — 테이크 컷 글(대사·연기)을 순화한 계획 사본으로 프롬프트를 다시 만든다.
         prompt_plan = _soften_plan(owner, pid, plan, take)
         prompt_kwargs["soften"] = True
+    if no_text:
+        prompt_kwargs["no_text"] = True  # 작업 156: 화면 글자 검사로 다시 만들 때만(아니면 지금과 같은 호출)
     prompt = _take_prompt(prompt_plan, take, cast=cast, panel_nos=panel_nos, location_no=location_no, caps=caps,
                           **prompt_kwargs)
     if len(image_urls) > max_images:
@@ -4661,11 +4695,14 @@ def _take_parts(plan: dict, take: dict, limit: float) -> list[dict]:
     return parts
 
 
-def _take_parts_for(plan: dict, take: dict, endpoint: str) -> list[dict]:
-    """그 모델로 제출할 때의 조각(작업 152). 나누기가 꺼져 있거나 상한이 없으면 [](그때는 _assert_ref_video 가 막는다)."""
+def _take_parts_for(plan: dict, take: dict, endpoint: str, *, real: bool = False, anime: str = "") -> list[dict]:
+    """그 모델로 제출할 때의 조각(작업 152). 나누기가 꺼져 있거나 상한이 없으면 [](그때는 _assert_ref_video 가 막는다).
+
+    작업 156: 실사가 애니(anime)와 다른 모델이면 그 모델의 참고 영상 상한으로 나눈다(_take_split_limit — Seedance 도 상한이 있다).
+    """
     if not vnew_settings.VNEW_TAKE_REF_SPLIT:
         return []
-    return _take_parts(plan, take, _take_ref_limit(endpoint))
+    return _take_parts(plan, take, _take_split_limit(endpoint, real, anime))
 
 
 def _part_take(plan: dict, take: dict, part: dict) -> dict:
@@ -4711,7 +4748,7 @@ def _submit_take_parts(owner: str, pid: str, gen_id: str, index: int, variant: s
                 # 작업 155: 앞 조각이 끝난 뒤에 낸다(그 마지막 프레임을 이어 받는다). 콘텐츠 단계는 그대로 넘긴다.
                 waiting = {**part, "sig": sig, "status": "pending", "invocationArn": "", "outputPrefix": "", "outputKey": "",
                            "error": ""}
-                for field in ("contentStep", "contentFallback"):
+                for field in ("contentStep", "contentFallback", "qc"):
                     if old and field in old:
                         waiting[field] = old[field]
                 records.append(waiting)
@@ -4736,10 +4773,11 @@ def _submit_take_parts(owner: str, pid: str, gen_id: str, index: int, variant: s
             if part_endpoint != endpoint:
                 continuity.update(origMax=int(caps.get("imageListMax") or vpoc_fal.DEFAULT_IMAGE_LIST_MAX),
                                   origFrame=in_order and bool(records))
+            no_text = bool(old) and _qc_no_text(old)  # 작업 156: 화면 글자 검사로 다시 만드는 조각
             with _RefTrace() as trace:
                 built = _take_payload(owner, pid, plan, sub, part_caps, variant="real", fallback_step=step,
-                                      soften=content_step >= 1, continuity=continuity) if real else _take_payload(
-                    owner, pid, plan, sub, part_caps, soften=content_step >= 1, continuity=continuity)
+                                      soften=content_step >= 1, continuity=continuity, no_text=no_text) if real else _take_payload(
+                    owner, pid, plan, sub, part_caps, soften=content_step >= 1, continuity=continuity, no_text=no_text)
             del frame
             refs = trace.refs(built)
             framed = bool(built.get("frameNo"))
@@ -4774,6 +4812,8 @@ def _submit_take_parts(owner: str, pid: str, gen_id: str, index: int, variant: s
                 records[-1]["contentStep"] = content_step
                 if isinstance(old.get("contentFallback"), dict):
                     records[-1]["contentFallback"] = dict(old["contentFallback"])
+            if old and _qc_pending(old):
+                records[-1]["qc"] = dict(old["qc"])  # 작업 156: 첫 결과와 비교할 검사 기록
             log.info("vnew.gen.take_part_submit pid=%s take=%s part=%d/%d start=%.3f end=%.3f cuts=%d%s%s%s", pid, take_id,
                      part["no"], len(parts), part["start"], part["end"], len(part["cutIds"]), " variant=real" if real else "",
                      f" content={CONTENT_STEP_NAMES.get(content_step, '')}" if content_step else "", " frame=1" if framed else "")
@@ -4808,6 +4848,21 @@ def _do_poll_take_parts(owner: str, pid: str, gen_id: str, index: int, variant: 
             key = _find_output_key(prefix, arn)
             updates[number] = {"status": "completed", "outputKey": key, "error": ""}
             _log_result(owner, pid, gen_id, gen, index, variant, arn, "completed", output_key=key)
+            # 작업 156: 조각 결과 검사(화면 글자·멈춤) → 1번 다시(status qcRetry) 또는 둘 중 고르기.
+            verdict = _qc_verdict(owner, pid, gen_id, part, key, float(part.get("seconds") or 0),
+                                  f"take={index} part={part.get('no')}")
+            if verdict.get("retry"):
+                updates[number] = {"status": "qcRetry", "outputKey": "", "invocationArn": "", "error": "",
+                                   "qc": verdict["retry"]}
+            elif verdict.get("keep"):
+                updates[number].update(outputKey=verdict["keep"], qc=verdict["qc"], qcNote=bool(verdict.get("note")))
+        elif status != "InProgress" and _qc_pending(part):
+            # 작업 156: 검사로 다시 만든 조각이 실패 → 첫 결과를 쓴다.
+            kept = _qc_first_kept(part)
+            updates[number] = {"status": "completed", "outputKey": kept["keep"], "error": "", "qc": kept["qc"],
+                               "qcNote": bool(kept.get("note"))}
+            _log_result(owner, pid, gen_id, gen, index, variant, arn, "failed",
+                        error=str(result.get("failureMessage") or "영상 생성 실패")[:300])
         elif status != "InProgress":
             error = str(result.get("failureMessage") or "영상 생성 실패")[:300]
             kind = str(result.get("failureKind") or "") or _content_kind(error)  # 작업 153: 콘텐츠 검사 거절도 조각에 적는다
@@ -4843,8 +4898,8 @@ def _do_poll_take_parts(owner: str, pid: str, gen_id: str, index: int, variant: 
         return
     if parts and all(p.get("status") == "completed" and p.get("outputKey") for p in parts):
         _merge_take_parts(owner, pid, gen_id, index, variant, claim, parts)
-    elif any(p.get("status") == "pending" for p in parts) and not any(p.get("status") == "submitted" for p in parts):
-        _queue_next_part(owner, pid, gen_id, index, variant, claim)  # 작업 155: 앞 조각이 끝났다 → 다음 조각을 낸다
+    elif any(p.get("status") in ("pending", "qcRetry") for p in parts) and not any(p.get("status") == "submitted" for p in parts):
+        _queue_next_part(owner, pid, gen_id, index, variant, claim)  # 작업 155: 앞 조각이 끝났다 → 다음 조각을 낸다(156: 검사 다시)
 
 
 def _merge_take_parts(owner: str, pid: str, gen_id: str, index: int, variant: str, claim: str, parts: list[dict]) -> None:
@@ -4854,7 +4909,7 @@ def _merge_take_parts(owner: str, pid: str, gen_id: str, index: int, variant: st
     pieces = [(_fetch_bytes(str(p.get("outputKey") or ""), bucket=vpoc_settings.VIDEO_BUCKET), float(p.get("seconds") or 0))
               for p in parts]
     try:
-        merged = _conform_concat(pieces)
+        merged = _conform_concat(pieces, hold=True)  # 작업 156: 조각마다 계획 길이(긴 것은 자르고 짧은 것은 마지막 프레임)
     except Exception as exc:  # noqa: BLE001 — 맞추지 못하면 예전 방식(길면 자르고 잇기)
         log.warning("vnew.gen.take_part_conform_failed pid=%s take=%s err=%s", pid, take.get("id"), _msg(exc))
         clips = []
@@ -4877,6 +4932,8 @@ def _merge_take_parts(owner: str, pid: str, gen_id: str, index: int, variant: st
             raise _Discard()
         s = _previz_cells(g)[index][variant]
         s.update(status="completed", outputKey=key, error="", claim="", claimedAt="")
+        if any(p.get("qcNote") for p in parts):
+            s["note"] = TEXT_LEFT_NOTE  # 작업 156: 다시 만들어도 화면 글자가 남은 조각이 있다
 
     _commit(owner, pid, mutator)
     log.info("vnew.gen.take_parts_merged pid=%s take=%s parts=%d", pid, take.get("id"), len(parts))
@@ -5165,7 +5222,7 @@ def _escalate_content(owner: str, pid: str, gen_id: str, index: int, variant: st
         take = _previz_cells(g)[index]
         state = take[variant]
         step = _content_step(state)
-        original = str(g.get("videoModel") or vnew_settings.VNEW_PREVIZ_EDIT_MODEL)
+        original = _real_take_model(g) if variant == "real" else str(g.get("videoModel") or vnew_settings.VNEW_PREVIZ_EDIT_MODEL)
         fallback = _content_fallback_model(original)
         nxt = 1 if step == 0 else (2 if step == 1 and fallback else 0)
         box.update(step=step, next=nxt, cutIds=list(_seg_cut_ids(take)))
@@ -5202,7 +5259,7 @@ def _escalate_content_parts(owner: str, pid: str, gen_id: str, index: int, varia
         if not _claim_ok_variant(g, index, variant, claim):
             raise _Discard()
         state = _previz_cells(g)[index][variant]
-        original = str(g.get("videoModel") or vnew_settings.VNEW_PREVIZ_EDIT_MODEL)
+        original = _real_take_model(g) if variant == "real" else str(g.get("videoModel") or vnew_settings.VNEW_PREVIZ_EDIT_MODEL)
         fallback = _content_fallback_model(original)
         flagged = [p for p in state.get("parts") or [] if isinstance(p, dict) and p.get("status") == "failed"
                    and p.get("failureKind") == CONTENT_FLAG_KIND]
@@ -5314,6 +5371,248 @@ def _queue_next_part(owner: str, pid: str, gen_id: str, index: int, variant: str
     log.info("vnew.gen.take_part_next pid=%s take=%d%s", pid, index, " variant=real" if variant == "real" else "")
 
 
+# ---------------------------------------------------------------- 작업 156: 실사 테이크 모델 · 결과 검사(화면 글자·멈춘 화면)
+#
+# ① 실사 테이크(start_real·autoReal·실사 다시 시도·인물 바꾸기)는 늘 VNEW_REAL_TAKE_MODEL(기본 Seedance 2.5 r2v)로 낸다 — 애니 테이크
+#    모델과 따로다(test3: Wan 3.0 실사가 길이·자막·멈춤·의상이 틀렸다). 금액·realRun.endpoint·152 조각 상한도 이 모델 기준이다.
+# ② 테이크·조각 결과마다(애니·실사) 검사 1번: 화면 글자(VNEW_TEXT_CHECK, 25·50·75% 프레임 3장 vision 1번, charge_text)와 멈춘 화면
+#    (ffmpeg 로 FROZEN_FPS·FROZEN_SIZE 회색 프레임의 평균 절대 차이, FROZEN_DIFF 아래인 구간이 FROZEN_SHARE 넘음). 걸리면 그 테이크
+#    (조각)만 1번 다시 만든다 — 글자면 대사를 TEXT_RETRY_SPOKEN 으로 적고 RULES 맨 앞에 TEXT_RETRY_RULE. 기록 = 칸(조각) qc
+#    {reasons, first{outputKey, text, motion, frozenShare, frozen}[, done, used, second]}. 둘 중 글자 프레임이 적은 쪽, 같으면(멈춤이
+#    이유일 때) 더 움직이는 쪽, 그래도 같으면 첫 것. 고른 쪽에 글자가 남으면 note = TEXT_LEFT_NOTE. 다시 만든 것이 실패하면 첫 것을 쓴다.
+#    영상(mp4)이 아니거나 못 읽으면 검사하지 않는다(지금 그대로).
+
+TEXT_CHECK_AT = (0.25, 0.5, 0.75)
+TEXT_CHECK_QUESTION = "Is there any visible text, subtitle or caption overlaid on the picture?"
+TEXT_CHECK_SYSTEM = (
+    "You inspect frames taken from a generated drama video. For every image answer one question: " + TEXT_CHECK_QUESTION
+    + " Count lettering drawn over the picture (subtitles, captions, titles, speech text). Writing that belongs to an object "
+    "in the scene (a sign, a book, a screen) does not count."
+)
+_TEXT_CHECK_TOOL = {
+    "name": "emit_text_check",
+    "description": "Return, for every image, whether text, a subtitle or a caption is overlaid on the picture.",
+    "inputSchema": {"json": {
+        "type": "object",
+        "properties": {"frames": {"type": "array", "items": {
+            "type": "object", "properties": {"image": {"type": "integer"}, "text": {"type": "boolean"}},
+            "required": ["image", "text"]}}},
+        "required": ["frames"],
+    }},
+}
+TEXT_RETRY_SPOKEN = "spoken (audio only, never written on screen)"
+TEXT_RETRY_RULE = "no captions, no burned-in subtitles, no on-screen lettering."
+TEXT_LEFT_NOTE = "화면에 글자가 남았습니다"
+# 멈춘 화면: 초당 4장·64x36 회색으로 줄인 프레임의 이웃 차이 평균(0~255). 말하는 샷(입·고개·숨)은 이 축소에서도 1 을 넘고,
+# test3 take2 처럼 같은 옆얼굴이 몇 초 서 있는 화면은 압축 잡음뿐이라 0.5 아래다. 그 구간이 길이의 절반을 넘으면 멈춤.
+FROZEN_FPS = 4
+FROZEN_SIZE = (64, 36)
+FROZEN_DIFF = 0.5
+FROZEN_SHARE = 0.5
+
+
+def _real_take_model(gen: dict | None = None) -> str:
+    """실사 테이크 모델 endpoint(작업 156): VNEW_REAL_TAKE_MODEL. 비었거나 fal 등록표에 테이크 모델(videoListField)로 없으면 애니 모델."""
+    gen = gen if isinstance(gen, dict) else {}
+    anime = str(gen.get("videoModel") or vnew_settings.VNEW_PREVIZ_EDIT_MODEL)
+    model = str(vnew_settings.VNEW_REAL_TAKE_MODEL or "").strip()
+    if model.startswith(vpoc_settings.FAL_ID_PREFIX):
+        model = model[len(vpoc_settings.FAL_ID_PREFIX):]
+    if not model or model == anime:
+        return anime
+    if not _previz_caps(model).get("videoListField"):
+        log.warning("vnew.gen.real_take_model_missing model=%s fallback=%s", model, anime)
+        return anime
+    return model
+
+
+def _take_split_limit(endpoint: str, real: bool, anime: str = "") -> float:
+    """152 조각 상한. 실사가 애니와 다른 모델(작업 156)이면 그 모델의 참고 영상 상한(Seedance = maxRefVideoS = maxDurationS)."""
+    limit = _take_ref_limit(endpoint)
+    if limit > 0 or not real or not anime or str(endpoint) == str(anime):
+        return limit
+    try:
+        options = vpoc_ark.video_options(vpoc_settings.FAL_ID_PREFIX + str(endpoint))
+    except Exception as exc:  # noqa: BLE001
+        log.warning("vnew.gen.ref_limit_failed endpoint=%s err=%s", endpoint, type(exc).__name__)
+        return 0.0
+    return max(0.0, float(options.get("maxRefVideoS") or 0)) if options.get("videoInput") else 0.0
+
+
+def _is_mp4(data) -> bool:
+    """mp4(ISO BMFF) 바이트인가(앞 상자 ftyp). 아니면 결과 검사를 하지 않는다."""
+    return isinstance(data, (bytes, bytearray)) and len(data) > 12 and bytes(data[4:8]) == b"ftyp"
+
+
+def _motion_diffs(mp4: bytes) -> list[float]:
+    """이웃 프레임 평균 절대 차이 목록(FROZEN_FPS 초당 장수, FROZEN_SIZE 회색). 못 읽으면 []."""
+    width, height = FROZEN_SIZE
+    size = width * height
+    with tempfile.TemporaryDirectory(prefix="vnew-motion-") as workdir:
+        src = os.path.join(workdir, "clip.mp4")
+        with open(src, "wb") as handle:
+            handle.write(mp4)
+        result = stitcher._run([stitcher.ffmpeg_path(), "-hide_banner", "-loglevel", "error", "-i", src, "-an",  # noqa: SLF001
+                                "-vf", f"fps={FROZEN_FPS},scale={width}:{height},format=gray",
+                                "-f", "rawvideo", "-pix_fmt", "gray", "pipe:1"])
+    raw = result.stdout if result.returncode == 0 else b""
+    frames = [raw[at:at + size] for at in range(0, len(raw) - size + 1, size)]
+    return [sum(abs(a - b) for a, b in zip(one, two)) / size for one, two in zip(frames, frames[1:])]
+
+
+def _read_text_check(blocks: list[dict], *, model: str) -> tuple[dict, dict]:
+    """llm._converse 로 emit_text_check 를 받는다. (payload, usage{..model}). 검사가 가짜로 바꾼다."""
+    return vpoc_llm._converse(  # noqa: SLF001 — 공개 래퍼가 없어 내부 함수를 쓴다
+        system_text=TEXT_CHECK_SYSTEM, blocks=blocks, tool=_TEXT_CHECK_TOOL, max_tokens=200,
+        where="vnew.generate.text_check", model=model,
+    )
+
+
+def _text_frames(owner: str, pid: str, gen_id: str, frames: list[bytes]) -> int | None:
+    """프레임들에 글자가 얹힌 장수(vision 1번, charge_text). 호출이 실패하면 None(판정 없음)."""
+    blocks: list[dict] = []
+    for number, frame in enumerate(frames, 1):
+        blocks += [{"text": f"Image {number}:"}, {"image": {"format": "jpeg", "source": {"bytes": _fit_ref(frame)}}}]
+    blocks.append({"text": TEXT_CHECK_QUESTION + " Answer for every image."})
+    model = str(vnew_settings.PEOPLE_COUNT_MODEL)
+    try:
+        payload, usage = _read_text_check(blocks, model=model)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("vnew.gen.text_check_failed pid=%s err=%s", pid, _msg(exc))
+        return None
+    plan_mod._charge(owner, pid, gen_id, usage or {}, str((usage or {}).get("model") or model))  # noqa: SLF001
+    items = (payload or {}).get("frames") if isinstance(payload, dict) else None
+    hits = sum(1 for item in items or [] if isinstance(item, dict) and _flag(item.get("text")))
+    return min(hits, len(frames))
+
+
+def _qc_measure(owner: str, pid: str, gen_id: str, key: str, seconds: float) -> dict | None:
+    """결과 1개 검사 → {text(글자 프레임 수, 끔·실패면 None), motion, frozenShare, frozen}. mp4 가 아니면 None(검사 안 함)."""
+    try:
+        mp4 = _fetch_bytes(key, bucket=vpoc_settings.VIDEO_BUCKET)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("vnew.gen.qc_fetch_failed pid=%s key=%s err=%s", pid, key, type(exc).__name__)
+        return None
+    if not _is_mp4(mp4):
+        return None
+    frames: list[bytes] = []
+    diffs: list[float] = []
+    _PREPARE_SEM.acquire()  # 061: 영상 바이트·ffmpeg 는 준비 세마포어 안에서
+    try:
+        duration = _mp4_seconds(mp4) or float(seconds or 0)
+        if vnew_settings.VNEW_TEXT_CHECK and duration > 0:
+            frames = [f for f in (_cut_first_frame(mp4, duration * at) for at in TEXT_CHECK_AT) if f]
+        try:
+            diffs = _motion_diffs(mp4)
+        except Exception as exc:  # noqa: BLE001
+            log.warning("vnew.gen.motion_failed pid=%s err=%s", pid, type(exc).__name__)
+    finally:
+        _PREPARE_SEM.release()
+    del mp4
+    text = _text_frames(owner, pid, gen_id, frames) if frames else None
+    share = (sum(1 for d in diffs if d < FROZEN_DIFF) / len(diffs)) if diffs else None
+    return {"text": text, "motion": round(sum(diffs) / len(diffs), 3) if diffs else None,
+            "frozenShare": round(share, 3) if share is not None else None,
+            "frozen": share is not None and share > FROZEN_SHARE}
+
+
+def _qc_reasons(measured: dict | None) -> list[str]:
+    """다시 만들 이유(text·frozen). 검사가 없으면 []."""
+    measured = measured or {}
+    return [name for name, hit in (("text", int(measured.get("text") or 0) > 0), ("frozen", bool(measured.get("frozen")))) if hit]
+
+
+def _qc_pending(record) -> bool:
+    """검사로 다시 만드는 중인가(첫 결과가 남아 있고 아직 고르지 않았다)."""
+    qc = record.get("qc") if isinstance(record, dict) else None
+    return isinstance(qc, dict) and bool((qc.get("first") or {}).get("outputKey")) and not qc.get("done")
+
+
+def _qc_no_text(record) -> bool:
+    """다시 만드는 제출에 글자 없는 프롬프트(TEXT_RETRY_*)를 쓰는가."""
+    return _qc_pending(record) and "text" in ((record.get("qc") or {}).get("reasons") or [])
+
+
+def _qc_retry_better(first: dict, second: dict | None, reasons) -> bool:
+    """다시 만든 것을 쓰는가: 글자 프레임이 적으면, 같고 멈춤이 이유면 더 움직이면. 다시 만든 것 검사가 없으면 True(135 규칙)."""
+    if second is None:
+        return True
+    one, two = int(first.get("text") or 0), int(second.get("text") or 0)
+    if one != two:
+        return two < one
+    if "frozen" in (reasons or []):
+        return float(second.get("motion") or 0) > float(first.get("motion") or 0)
+    return False
+
+
+def _qc_verdict(owner: str, pid: str, gen_id: str, record: dict, key: str, seconds: float, label: str) -> dict:
+    """끝난 결과 1개의 검사 판정. {} = 그대로, {"retry": qc} = 1번 다시, {"keep": 쓸 키, "qc": 기록, "note": bool} = 둘 중 고름."""
+    qc = record.get("qc") if isinstance(record.get("qc"), dict) else None
+    if qc and qc.get("done"):
+        return {}
+    measured = _qc_measure(owner, pid, gen_id, key, seconds)
+    if not _qc_pending(record):
+        reasons = _qc_reasons(measured)
+        if not reasons:
+            return {}
+        log.info("vnew.gen.qc_retry pid=%s %s reasons=%s text=%s motion=%s frozen=%s", pid, label, ",".join(reasons),
+                 measured.get("text"), measured.get("motion"), measured.get("frozenShare"))
+        return {"retry": {"reasons": reasons, "first": {"outputKey": key, **measured}}}
+    first = dict(qc["first"])
+    use_retry = _qc_retry_better(first, measured, qc.get("reasons"))
+    chosen = (measured or {}) if use_retry else first
+    note = int(chosen.get("text") or 0) > 0
+    done = {**qc, "done": True, "used": "retry" if use_retry else "first", "second": {"outputKey": key, **(measured or {})}}
+    log.info("vnew.gen.qc_pick pid=%s %s used=%s text=%s/%s motion=%s/%s", pid, label, done["used"], first.get("text"),
+             (measured or {}).get("text"), first.get("motion"), (measured or {}).get("motion"))
+    return {"keep": key if use_retry else str(first["outputKey"]), "qc": done, "note": note}
+
+
+def _qc_first_kept(record: dict) -> dict:
+    """다시 만든 것이 실패했을 때 첫 결과를 쓰는 판정(_qc_verdict 의 keep 모양)."""
+    qc = dict(record.get("qc") or {})
+    first = dict(qc.get("first") or {})
+    return {"keep": str(first.get("outputKey") or ""), "qc": {**qc, "done": True, "used": "first", "retryFailed": True},
+            "note": int(first.get("text") or 0) > 0}
+
+
+def _qc_requeue(owner: str, pid: str, gen_id: str, index: int, variant: str, claim: str, qc: dict) -> None:
+    """통째 테이크 칸을 검사 기록(qc)과 함께 다시 queued(1번 다시 만들기, 제출 경로가 qc 를 읽는다)."""
+    def mutator(data: dict) -> None:
+        g = data.get("gen") or {}
+        if not _claim_ok_variant(g, index, variant, claim):
+            raise _Discard()
+        s = _previz_cells(g)[index][variant]
+        s.update(status="queued", invocationArn="", outputKey="", error="", claim="", claimedAt="")
+        s.pop("pendingCharge", None)  # 첫 결과 금액은 이미 남겼다
+        s["qc"] = qc
+
+    try:
+        _commit(owner, pid, mutator)
+    except _Discard:
+        return
+
+
+def _qc_store(owner: str, pid: str, gen_id: str, index: int, variant: str, claim: str, verdict: dict, key: str) -> None:
+    """통째 테이크 칸 완료 기록(작업 156 판정 반영: 쓸 키·qc·note)."""
+    def mutator(data: dict) -> None:
+        g = data.get("gen") or {}
+        if not _claim_ok_variant(g, index, variant, claim):
+            raise _Discard()
+        s = _previz_cells(g)[index][variant]
+        s["status"] = "completed"
+        s["outputKey"] = key
+        s["error"] = ""
+        s["claim"] = ""
+        s["claimedAt"] = ""
+        if verdict.get("qc"):
+            s["qc"] = verdict["qc"]
+            if verdict.get("note"):
+                s["note"] = TEXT_LEFT_NOTE
+
+    _commit(owner, pid, mutator)
+
+
 def _do_submit_take(owner: str, pid: str, gen_id: str, index: int, variant: str, claim: str) -> None:
     """통 테이크 1개(웹툰)를 Seedance 2.5 reference-to-video 로 제출한다(설계자 2026-10-26, 063).
 
@@ -5357,7 +5656,7 @@ def _do_submit_take(owner: str, pid: str, gen_id: str, index: int, variant: str,
         if not rec_keys:
             raise VpocError("vnew.generate", "NoRecording", "테이크 녹화가 없습니다.", 409)
 
-        endpoint = str(gen.get("videoModel") or vnew_settings.VNEW_PREVIZ_EDIT_MODEL)
+        endpoint = _real_take_model(gen) if real else str(gen.get("videoModel") or vnew_settings.VNEW_PREVIZ_EDIT_MODEL)
         caps = _previz_caps(endpoint)
         resolution = str(gen.get("resolution") or vnew_settings.VNEW_TAKE_RESOLUTION)
 
@@ -5366,7 +5665,8 @@ def _do_submit_take(owner: str, pid: str, gen_id: str, index: int, variant: str,
 
         # 작업 152: 녹화가 참고 영상 상한보다 길면 컷 경계 조각으로 나눠 낸다(조각마다 원장 1번, 결과는 조회가 잇는다).
         stage = "split"
-        parts = _take_parts_for(plan, take, endpoint)
+        parts = _take_parts_for(plan, take, endpoint, real=real,
+                                anime=str(gen.get("videoModel") or vnew_settings.VNEW_PREVIZ_EDIT_MODEL))
         if parts:
             run_n = (int((gen.get("realRun") or {}).get("n") or 0) or None) if real else None
             stage = "submit"
@@ -5407,14 +5707,17 @@ def _do_submit_take(owner: str, pid: str, gen_id: str, index: int, variant: str,
             del frame
             endpoint = _content_fallback_model(endpoint)
             caps = _previz_caps(endpoint)
+        no_text = _qc_no_text(state)  # 작업 156: 화면 글자 검사로 다시 만드는 제출(대사 audio only·RULES 맨 앞 글자 금지)
         built = _take_payload(owner, pid, plan, take, caps, variant="real", fallback_step=step,
-                              soften=content_step >= 1, continuity=continuity) if real else _take_payload(
-            owner, pid, plan, take, caps, soften=content_step >= 1, continuity=continuity)
+                              soften=content_step >= 1, continuity=continuity, no_text=no_text) if real else _take_payload(
+            owner, pid, plan, take, caps, soften=content_step >= 1, continuity=continuity, no_text=no_text)
         continuity = None
         if content_step:
             tag += f" content={CONTENT_STEP_NAMES.get(content_step, '')}"
         if built.get("frameNo"):
             tag += " frame=1"
+        if _qc_pending(state):
+            tag += " qc=" + ",".join((state.get("qc") or {}).get("reasons") or [])
         refs = trace.stop(built)
         prompt = built["prompt"]
         image_urls = built["imageUrls"]
@@ -5680,6 +5983,15 @@ def _do_poll_previz(owner: str, pid: str, gen_id: str, index: int, variant: str,
         status = str(poll_result.get("status") or "")
         if status == "InProgress":
             return
+        if status != "Completed" and gen.get("mode") == "previz-take" and _qc_pending(state):
+            # 작업 156: 검사로 다시 만든 테이크가 실패 → 첫 결과를 쓴다(거절 금액 규칙은 130 그대로).
+            if take_real and not _likeness_rejected(poll_result.get("failureMessage")):
+                _settle_take_charge(owner, pid, gen_id, state)
+            _log_result(owner, pid, gen_id, gen, index, variant, arn, "failed",
+                        error=str(poll_result.get("failureMessage") or "영상 생성 실패"))
+            kept = _qc_first_kept(state)
+            _qc_store(owner, pid, gen_id, index, variant, claim, kept, kept["keep"])
+            return
         if take_real and status != "Completed" and state.get("pendingCharge") \
                 and _likeness_rejected(poll_result.get("failureMessage")):
             # 작업 130: 생성 전 거절이라 원장 0. 다음 단계(정면 1장 → 컷 단위 Kling)로 같은 회차 안에서 다시 만든다.
@@ -5701,6 +6013,19 @@ def _do_poll_previz(owner: str, pid: str, gen_id: str, index: int, variant: str,
             _fail_variant(owner, pid, gen_id, index, variant, claim, message, kind=kind)
             return
         output_key = _find_output_key(prefix, arn)
+        verdict: dict = {}
+        if gen.get("mode") == "previz-take":
+            # 작업 156: 테이크 결과 검사(화면 글자·멈춤) → 1번 다시 만들기 또는 둘 중 고르기. 영상이 아니면 {}(지금 그대로).
+            verdict = _qc_verdict(owner, pid, gen_id, state, output_key, float(_previz_cells(gen)[index].get("seconds") or 0),
+                                  f"take={index}{' variant=real' if variant == 'real' else ''}")
+        if verdict.get("retry"):
+            _log_result(owner, pid, gen_id, gen, index, variant, arn, "completed", output_key=output_key)
+            _qc_requeue(owner, pid, gen_id, index, variant, claim, verdict["retry"])
+            return
+        if verdict.get("keep"):
+            _qc_store(owner, pid, gen_id, index, variant, claim, verdict, verdict["keep"])
+            _log_result(owner, pid, gen_id, gen, index, variant, arn, "completed", output_key=output_key)
+            return
 
         def mutator(data: dict) -> None:
             g = data.get("gen") or {}
@@ -6373,7 +6698,7 @@ def _escalate_likeness(owner: str, pid: str, gen_id: str, index: int, claim: str
         box.update(step=step, next=nxt, tried=tried)
         if not nxt:
             return
-        model = kling[0] if nxt == 2 else str(g.get("videoModel") or "")
+        model = kling[0] if nxt == 2 else _real_take_model(g)  # 작업 156: 1단계 = 실사 테이크 모델(정면 1장)
         state.update(status="queued", invocationArn="", outputKey="", error="", claim="", claimedAt="")
         state["fallback"] = {"step": nxt, "reason": "likeness", "model": model, "tried": tried}
         if isinstance(g.get("realRun"), dict):
@@ -7226,7 +7551,7 @@ def real_fallback_max(plan: dict, gen: dict) -> dict | None:
     endpoint, caps = model
     per_second = _previz_model_unit_price(endpoint)
     still = float(vpoc_seedream.unit_usd())
-    seedance = str(gen.get("videoModel") or vnew_settings.VNEW_PREVIZ_EDIT_MODEL)
+    seedance = _real_take_model(gen)  # 작업 156: 실사 테이크 모델
     resolution = str(gen.get("resolution") or vnew_settings.VNEW_TAKE_RESOLUTION)
     total = 0.0
     qa_on = bool(vnew_settings.VNEW_REAL_CUT_QA)
@@ -9001,6 +9326,25 @@ def _maybe_finalize(owner: str, pid: str, gen_id: str) -> None:
         return
 
 
+def _fit_takes(clips: list[bytes], planned: list[float], variant: str) -> bytes | None:
+    """통 테이크 최종 잇기 전 계획 길이 맞추기(작업 156). 테이크 결과 길이가 계획(테이크 seconds)과 1프레임 넘게 다르면 모든 테이크를
+    _conform_concat(hold=True)로 맞춰 잇는다(긴 것은 끝을 자르고, 짧은 것은 마지막 프레임을 잡는다 — 최종 = 계획 합 ±1프레임).
+    모두 맞거나 길이를 못 재면(mp4 아님) None(지금 방식: 1개 복사·여러 개 concat). 맞추기가 실패해도 None(경고 로그).
+    """
+    lengths = [_mp4_seconds(clip) if _is_mp4(clip) else 0.0 for clip in clips]
+    off = [i for i, (got, want) in enumerate(zip(lengths, planned)) if got > 0 and want > 0 and abs(got - want) > 1.0 / REAL_CUT_FPS]
+    if not off:
+        return None
+    try:
+        merged = _conform_concat(list(zip(clips, planned)), hold=True)
+    except Exception as exc:  # noqa: BLE001 — 맞추지 못하면 예전 방식
+        log.warning("vnew.gen.final_fit_failed variant=%s err=%s", variant, _msg(exc))
+        return None
+    log.info("vnew.gen.final_fit variant=%s takes=%d off=%s got=%s want=%.3f", variant, len(clips),
+             ",".join(str(i + 1) for i in off), ",".join(f"{x:.2f}" for x in lengths), sum(planned))
+    return merged
+
+
 def _do_concat(owner: str, pid: str, gen_id: str, variant: str) -> None:
     """실사/웹툰 구간 영상을 순서대로 이어 붙여 final-*.mp4 로 저장한다."""
     final_field = "finalReal" if variant == "real" else "finalWebtoon"
@@ -9033,6 +9377,7 @@ def _do_concat(owner: str, pid: str, gen_id: str, variant: str) -> None:
         is_previz = gen.get("mode") == "previz"  # 컷 단위 previz 만 3초 채움 트림 대상.
         cells = _previz_cells(gen) if _is_previz_mode(gen) else (gen.get("segments") or [])
         clips = []
+        planned: list[float] = []  # 작업 156: 통 테이크의 계획 길이(테이크 seconds)
         for seg in cells:
             state = seg[variant]
             key = str(state.get("outputKey") or "")
@@ -9044,11 +9389,15 @@ def _do_concat(owner: str, pid: str, gen_id: str, variant: str) -> None:
                     if orig > 0:
                         clip_bytes = _trim_clip(clip_bytes, orig)
                 clips.append(clip_bytes)
+                planned.append(float(seg.get("seconds") or 0))
         if not clips:
             raise VpocError("vnew.generate", "NoClips", "이어 붙일 영상이 없습니다.", 502)
+        fitted = _fit_takes(clips, planned, variant) if gen.get("mode") == "previz-take" else None
         # 통 테이크(설계자 2026-10-26, 064): 클립이 1개면 결과 mp4 를 **그대로 복사**한다(재인코딩·-an
         # 없음 → 오디오 스트림 보존). 여러 개면 stitcher.concat(오디오 맞춤 지원)으로 이어 붙인다.
-        if len(clips) == 1:
+        if fitted is not None:
+            merged = fitted
+        elif len(clips) == 1:
             merged = clips[0]
             log.info("vnew.gen.final_copy variant=%s clips=1 bytes=%d (no re-encode)", variant, len(merged or b""))
         else:
@@ -9556,6 +9905,9 @@ def retry_segment(owner: str, pid: str, seg_id: str, variant: str = "real", audi
                 st.pop("fallback", None)  # 작업 130: 사용자 다시 시도는 기본 Seedance 부터
                 st.pop("pendingCharge", None)
                 st.pop("contentFallback", None)
+                st.pop("qc", None)  # 작업 156: 사용자 다시 시도는 결과 검사도 처음부터
+                if st.get("note") == TEXT_LEFT_NOTE:
+                    st.pop("note", None)
                 if content_retry:
                     # 작업 153: 콘텐츠 검사로 끝난 칸은 1단계(순화한 프롬프트, 같은 모델)부터 다시. 조각도 거절된 조각만 1단계로.
                     st["contentStep"] = 1

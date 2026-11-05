@@ -442,6 +442,12 @@ VNEW_PART_CONTINUITY = _bool("VNEW_PART_CONTINUITY", True)
 # 작업 153: fal 콘텐츠 검사 거절(contentFlag) 2단계 모델. 1단계(같은 모델, 순화한 프롬프트)도 거절되면 순화한 테이크를 이 모델
 # (fal endpoint, Seedance 테이크 경로)로 낸다. 빈 값이면 2단계를 건너뛰고 칸 실패. 원래 모델이 이 모델이어도 건너뛴다.
 VNEW_CONTENT_FALLBACK_MODEL = os.getenv("VNEW_CONTENT_FALLBACK_MODEL", "bytedance/seedance-2.5/reference-to-video").strip()
+# 작업 156: 실사 테이크(start_real·autoReal·실사 다시 시도·인물 바꾸기) 모델(fal endpoint). 애니 테이크 모델(input.videoModel)과 따로다.
+# 금액·realRun.endpoint·참고 영상 상한(152 조각)도 이 모델 기준. 빈 값이거나 fal 등록표에 테이크 모델(videoListField)로 없으면 애니 모델 그대로.
+VNEW_REAL_TAKE_MODEL = os.getenv("VNEW_REAL_TAKE_MODEL", "bytedance/seedance-2.5/reference-to-video").strip()
+# 작업 156: 테이크·조각 결과마다 화면 글자(자막·캡션) 검사 — 25·50·75% 프레임 3장을 vision 1번(charge_text). 글자가 있으면 대사를
+# "audio only" 로 적은 프롬프트로 1번 다시 만들고 글자 프레임이 적은 쪽을 쓴다. 끄면 vision 호출 0(멈춘 화면 검사는 그대로).
+VNEW_TEXT_CHECK = _bool("VNEW_TEXT_CHECK", True)
 # 테이크 출력 해상도(480p 초안 권장 — 비용 통제). 480p/720p/1080p.
 VNEW_TAKE_RESOLUTION = os.getenv("VNEW_TAKE_RESOLUTION", "480p")
 # draft(초안) 모드 — 480p 초안 생성, 응답에 draft_id(나중 1080p 완성용). 기본 켬.
