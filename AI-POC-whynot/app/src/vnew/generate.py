@@ -3504,7 +3504,7 @@ def _assert_no_webtoon(prompt: str) -> None:
 
 
 def _take_prompt(plan: dict, take: dict, *, cast: list[dict], panel_nos: list[int], location_no, caps: dict | None = None,
-                 variant: str = "webtoon", soften: bool = False) -> str:
+                 variant: str = "webtoon", soften: bool = False, anchor: dict | None = None) -> str:
     """통 테이크 프롬프트(영어, UTF-8 ≤ VNEW_TAKE_PROMPT_MAX 바이트, 설계자 2026-10-26, 066 — ASSETS·연기 보존).
 
     순서: ① STYLE(스타일 앵커 맨 앞) → ② ASSETS(@Video1·@Image 매핑) → ③ TIMELINE(컷마다 1줄: ON SCREEN
@@ -3774,6 +3774,7 @@ def _take_prompt(plan: dict, take: dict, *, cast: list[dict], panel_nos: list[in
     def _assets() -> str:
         # ASSETS 인물 문장은 어떤 경우에도 유지한다(색·이름·@Image·COSTUME). 외형·목소리만 줄이거나 뺀다.
         parts = ["@Video1 = rough 3D previz (layout, blocking, camera and cuts only)"]
+        locks: list[str] = []  # 작업 155: 조각·대체 제출의 인물별 의상 고정 구절(anchor 가 있을 때만)
         if real and any(m.get("frontNo") and m.get("look") != "anime" for m in cast):
             # 작업 126: 3D 모델용 실사 사진과 같은 사람(ASSETS 머리 — 모든 줄이기·최소형 후보에 남는다).
             parts.append(REAL_TAKE_SHEET_SENTENCE)
@@ -3793,6 +3794,11 @@ def _take_prompt(plan: dict, take: dict, *, cast: list[dict], panel_nos: list[in
                                              state["costume_limit"])
             else:
                 costume = _clip_words(_txt(member.get("costume")), state["costume_limit"])
+                if anchor is not None:
+                    # 작업 155: 조각·대체 제출은 146 정리(괄호·"Identified as"·"speaks" 메모 빼기)한 옷. 쓸 만하지 않으면 지금 그대로.
+                    costume = _scene_outfit_pick([member.get("costume")], state["costume_limit"]) or costume
+            if anchor is not None and costume:
+                locks.append(_costume_lock(roman or ko, costume))
             voice = (
                 _clip_words(_txt(member.get("voice")), state["voice_limit"])
                 if state["voice_limit"] > 0 else ""
@@ -3837,13 +3843,18 @@ def _take_prompt(plan: dict, take: dict, *, cast: list[dict], panel_nos: list[in
             if voice:
                 sentence += f". Voice: {voice.rstrip('.')}"
             parts.append(sentence)
+        if anchor is not None and anchor.get("frameNo"):
+            parts.append(TAKE_ANCHOR_FRAME_LINE.format(no=anchor["frameNo"]))  # 작업 155: 앞 샷 마지막 프레임
         if location_no:
             # 작업 143: 실사 장소는 사람을 지운 실사 사진(웹툰 뷰 편집) — live.reference_lead(place=True) 문구. 애니 줄은 그대로.
-            if real:
+            if anchor is not None:
+                parts.append(TAKE_ANCHOR_LOCATION_LINE.format(no=location_no))  # 작업 155: 조각·대체 제출의 장소 고정
+            elif real:
                 parts.append(f"@Image{location_no} = the location (real photo, no people in it); "
                              "keep this place, its background and light in every shot")
             else:
                 parts.append(f"@Image{location_no} = the location; keep its structure and props")
+        parts.extend(locks)
         return "ASSETS: " + ". ".join(parts) + "."
 
     def _entry_gaze(entry: dict) -> str:
@@ -4297,7 +4308,7 @@ def _real_appearance(look: str, limit: int = 170) -> str:
 
 
 def _take_payload(owner: str, pid: str, plan: dict, take: dict, caps: dict, variant: str = "webtoon",
-                  fallback_step: int = 0, soften: bool = False) -> dict:
+                  fallback_step: int = 0, soften: bool = False, continuity: dict | None = None) -> dict:
     """통 테이크(웹툰) 참조 이미지 목록·프롬프트(설계자 2026-10-26, 064).
 
     image_urls(순서 고정 — 프롬프트 번호와 일치):
@@ -4315,7 +4326,12 @@ def _take_payload(owner: str, pid: str, plan: dict, take: dict, caps: dict, vari
     장면 의상·목소리는 _resolve_cast(원작 패널 읽기 Claude 1회·캐시, override 우선)로 인물별 costume·
     voice 를 구해 cast 에 담는다(ASSETS 의 COSTUME/Voice 문구가 쓴다).
     fallback_step(작업 130): 실사 likeness 1단계(인물당 정면 1장)면 1 을 _real_take_cast 에 넘긴다. 0 이면 지금 그대로.
-    반환: {imageUrls:[bytes], prompt, cast, panelNos, locationNo}.
+    continuity(작업 155, 152 조각·153 Seedance 대체 제출만): {take: 통 테이크, frame: 앞 샷 마지막 프레임|None, frameKey,
+    origMax: 대체 전 모델 imageListMax(대체일 때), origFrame: 대체 전 요청에도 프레임 자리가 있었나}. 있으면 장소 = 통 테이크의
+    장소 뷰(모든 조각 같은 1장, 늘 맨 끝), 그 앞에 프레임, ASSETS 에 장소 고정·프레임 줄·인물별 의상 고정 구절. 상한에 걸리면
+    인물 둘째 사진부터 뺀다(장소는 빼지 않는다). 대체는 신원 참고를 원래 요청보다 적게 넣지 않는다(자리가 모자라면 프레임을 뺀다).
+    None 이면 지금과 바이트 단위로 같다.
+    반환: {imageUrls:[bytes], prompt, cast, panelNos, locationNo}(continuity 가 있으면 frameNo 도).
     """
     real = variant == "real"
     max_images = int(caps.get("imageListMax") or vpoc_fal.DEFAULT_IMAGE_LIST_MAX)
@@ -4324,19 +4340,37 @@ def _take_payload(owner: str, pid: str, plan: dict, take: dict, caps: dict, vari
     # 장면 의상·목소리(override 우선 + 원작 패널 읽기). 생성 경로라 read=True(캐시 없으면 1회 읽음).
     resolved = _resolve_cast(owner, pid, plan, take, read=True)
 
+    anchor = continuity if isinstance(continuity, dict) else None
+    person_limit = panel_limit = max_images
+    anchor_loc = anchor_frame = None
+    if anchor is not None:
+        # 작업 155: 장소는 조각이 아니라 통 테이크 기준(조각마다 첫 컷 장소가 달라도 같은 1장). 장소·프레임 자리를 먼저 남긴다.
+        anchor_loc = _take_location_jpeg(plan, anchor.get("take") or take, variant="real" if real else "webtoon")
+        frame = anchor.get("frame")
+        anchor_frame = bytes(frame) if isinstance(frame, (bytes, bytearray)) and frame else None
+        if anchor_frame is not None:
+            _ref_note_load(str(anchor.get("frameKey") or ""), anchor_frame)
+        n_loc, n_frame = int(anchor_loc is not None), int(anchor_frame is not None)
+        person_limit = panel_limit = max(0, max_images - n_loc - n_frame)
+        orig_max = int(anchor.get("origMax") or 0)
+        if orig_max:
+            # 대체: 신원 참고는 원래 요청의 인물 자리만큼(이 모델 상한 안에서). 프레임은 남는 자리가 있을 때만.
+            orig_cap = orig_max - n_loc - (n_frame if anchor.get("origFrame") else 0)
+            person_limit = max(0, min(orig_cap, max_images - n_loc))
+
     image_urls: list[bytes] = []
     cast: list[dict] = []
     real_loc = None
     if real:
         # 작업 126: 인물 참고 = 3D 모델용 실사 사진(고른 캐스팅 → 정면 → 시트 → 후면, 회차 인물 바꾸기 반영). 장소 1장 자리를
         # 먼저 남기고(있을 때) 그 안에서 인물마다 첫 장부터 돌아가며 채운다. 외형은 실사 외모 문장의 얼굴·머리 조각.
-        real_loc = _take_location_jpeg(plan, take, variant="real")
-        person_cap = max(0, max_images - (1 if real_loc is not None else 0))
+        real_loc = anchor_loc if anchor is not None else _take_location_jpeg(plan, take, variant="real")
+        person_cap = person_limit if anchor is not None else max(0, max_images - (1 if real_loc is not None else 0))
         image_urls, cast = _real_take_cast(owner, plan, actors, char_by_id, resolved, person_cap,
                                            fallback_step=fallback_step)
     for actor in [] if real else actors:
-        if len(image_urls) >= max_images:
-            break
+        if len(image_urls) >= person_limit and anchor is None:
+            break  # 작업 155: 조각·대체 제출은 자리가 없어도 인물 문장(의상 고정)을 남긴다(사진만 뺀다)
         name = actor.get("name") or "a character"
         color_name = actor.get("colorName") or "grey"
         char_id = actor.get("charId") or ""
@@ -4346,7 +4380,7 @@ def _take_payload(owner: str, pid: str, plan: dict, take: dict, caps: dict, vari
         if char:
             # 정면 1장만 — 후면은 넣지 않는다(설계자 2026-10-26, 064).
             front = _load_jpeg(str(char.get("webtoonFrontKey") or ""))
-            if front is not None and len(image_urls) < max_images:
+            if front is not None and len(image_urls) < person_limit:
                 image_urls.append(_fit_ref(front))
                 front_no = len(image_urls)
                 # 외형은 appearanceEn(얼굴·머리). 옷은 COSTUME 이 담당하므로 outfitEn 은 섞지 않는다.
@@ -4366,19 +4400,27 @@ def _take_payload(owner: str, pid: str, plan: dict, take: dict, caps: dict, vari
     # 실사는 원작 웹툰 패널을 넣지 않는다(RC2.2).
     panels = [] if real else _segment_panel_jpegs(owner, pid, plan, take, int(vnew_settings.VNEW_TAKE_MAX_PANELS or 3))
     for panel in panels:
-        if len(image_urls) >= max_images:
+        if len(image_urls) >= panel_limit:
             break
         image_urls.append(_fit_ref(panel))
         panel_nos.append(len(image_urls))
 
+    frame_no = None
+    if anchor_frame is not None and len(image_urls) < max_images - int(anchor_loc is not None):
+        # 작업 155: 앞 샷 마지막 프레임은 장소 바로 앞(장소가 늘 맨 끝).
+        image_urls.append(_fit_ref(anchor_frame))
+        frame_no = len(image_urls)
+
     location_no = None
-    loc_jpeg = real_loc if real else _take_location_jpeg(plan, take)
+    loc_jpeg = anchor_loc if anchor is not None else real_loc if real else _take_location_jpeg(plan, take)
     if loc_jpeg is not None and len(image_urls) < max_images:
         image_urls.append(_fit_ref(loc_jpeg))
         location_no = len(image_urls)
 
     # 웹툰은 지금과 같은 호출(variant 인자 없음), 실사만 variant="real".
     prompt_kwargs = {"variant": "real"} if real else {}
+    if anchor is not None:
+        prompt_kwargs["anchor"] = {"frameNo": frame_no}  # 작업 155: 장소 고정·프레임 줄·의상 고정
     prompt_plan = plan
     if soften:
         # 작업 153: 콘텐츠 검사 거절 뒤 다시 만들기 — 테이크 컷 글(대사·연기)을 순화한 계획 사본으로 프롬프트를 다시 만든다.
@@ -4388,13 +4430,16 @@ def _take_payload(owner: str, pid: str, plan: dict, take: dict, caps: dict, vari
                           **prompt_kwargs)
     if len(image_urls) > max_images:
         image_urls = image_urls[:max_images]
-    return {
+    out = {
         "imageUrls": image_urls,
         "prompt": prompt,
         "cast": cast,
         "panelNos": panel_nos,
         "locationNo": location_no,
     }
+    if anchor is not None:
+        out["frameNo"] = frame_no
+    return out
 
 
 def _take_duration_value(caps: dict, duration_int: int):
@@ -4645,18 +4690,31 @@ def _submit_take_parts(owner: str, pid: str, gen_id: str, index: int, variant: s
 
     같은 조각(_part_sig)이 앞 시도에서 completed 면 그대로 둔다(재시도 때 다시 내지 않는다). 유료 제출 전마다 하트비트(작업 144).
     중간에 실패하면 이미 낸 조각을 취소 시도하고 오류를 다시 낸다(낸 조각 원장은 이미 남았다).
+    작업 155: 모든 조각에 통 테이크 장소·의상 고정(_take_payload continuity). VNEW_PART_CONTINUITY 켬이면 끝나지 않은 첫 조각만 내고
+    (앞 조각 결과의 마지막 프레임을 1장 더해) 뒤 조각은 "pending" 으로 둔다 — 조회가 앞 조각이 끝나면 칸을 다시 queued 로 둔다.
     """
     real = variant == "real"
     take_id = str(take.get("id") or index)
     limit = _take_ref_limit(endpoint)
     previous = {_json_key(p.get("sig")): p for p in (state.get("parts") or []) if isinstance(p, dict)}
     records: list[dict] = []
+    in_order = bool(vnew_settings.VNEW_PART_CONTINUITY)
+    submitted_n = 0
     try:
         for part in parts:
             sig = _part_sig(part, step)
             old = previous.get(_json_key(sig))
             if old and old.get("status") == "completed" and old.get("outputKey"):
                 records.append(dict(old))
+                continue
+            if in_order and submitted_n:
+                # 작업 155: 앞 조각이 끝난 뒤에 낸다(그 마지막 프레임을 이어 받는다). 콘텐츠 단계는 그대로 넘긴다.
+                waiting = {**part, "sig": sig, "status": "pending", "invocationArn": "", "outputPrefix": "", "outputKey": "",
+                           "error": ""}
+                for field in ("contentStep", "contentFallback"):
+                    if old and field in old:
+                        waiting[field] = old[field]
+                records.append(waiting)
                 continue
             sub = _part_take(plan, take, part)
             # 작업 153: 콘텐츠 검사로 거절된 조각은 기록된 단계로(1 = 순화, 2 = 순화 + Seedance). 0 이면 지금 그대로.
@@ -4666,11 +4724,25 @@ def _submit_take_parts(owner: str, pid: str, gen_id: str, index: int, variant: s
                 part_endpoint = _content_fallback_model(endpoint)
                 part_caps = _previz_caps(part_endpoint)
                 part_limit = _take_ref_limit(part_endpoint)
+            # 작업 155: 이음 프레임 — 앞 조각 결과의 마지막 프레임, 첫 조각의 Seedance 대체는 앞 테이크 결과의 마지막 프레임.
+            frame, frame_key = None, ""
+            before = records[-1] if records else None
+            if in_order and before and before.get("status") == "completed" and before.get("outputKey"):
+                frame = _video_last_frame(str(before["outputKey"]), float(before.get("seconds") or 0))
+                frame_key = str(before["outputKey"]) + "#last"
+            elif in_order and not records and part_endpoint != endpoint:
+                frame, frame_key = _prev_take_frame(plan, index, variant)
+            continuity = {"take": take, "frame": frame, "frameKey": frame_key}
+            if part_endpoint != endpoint:
+                continuity.update(origMax=int(caps.get("imageListMax") or vpoc_fal.DEFAULT_IMAGE_LIST_MAX),
+                                  origFrame=in_order and bool(records))
             with _RefTrace() as trace:
                 built = _take_payload(owner, pid, plan, sub, part_caps, variant="real", fallback_step=step,
-                                      soften=content_step >= 1) if real else _take_payload(
-                    owner, pid, plan, sub, part_caps, soften=content_step >= 1)
+                                      soften=content_step >= 1, continuity=continuity) if real else _take_payload(
+                    owner, pid, plan, sub, part_caps, soften=content_step >= 1, continuity=continuity)
+            del frame
             refs = trace.refs(built)
+            framed = bool(built.get("frameNo"))
             prompt = str(built["prompt"])
             if real:
                 _assert_no_webtoon(prompt)
@@ -4685,9 +4757,12 @@ def _submit_take_parts(owner: str, pid: str, gen_id: str, index: int, variant: s
                                   output_prefix=prefix, image_urls=built["imageUrls"], seconds=float(part["seconds"]),
                                   resolution=resolution, audio=audio)
             del clip, built
+            submitted_n += 1
             _charge_take(owner, pid, gen_id, result, float(part["seconds"]), resolution)
             params = {**_take_params(part_caps, float(part["seconds"]), resolution, audio), "part": part["no"],
                       "parts": len(parts), "rangeStart": part["start"], "rangeEnd": part["end"]}
+            if framed:
+                params["continuityFrame"] = True  # 작업 155
             _log_attempt(owner, pid, gen_id, source="gen", mode="previz-take", variant=variant, cell_id=take_id, index=index,
                          attempt=attempt, run=run_n, endpoint=part_endpoint, params=params, refs=refs, video_keys=rec_keys,
                          result=result, prompt=prompt)
@@ -4699,9 +4774,9 @@ def _submit_take_parts(owner: str, pid: str, gen_id: str, index: int, variant: s
                 records[-1]["contentStep"] = content_step
                 if isinstance(old.get("contentFallback"), dict):
                     records[-1]["contentFallback"] = dict(old["contentFallback"])
-            log.info("vnew.gen.take_part_submit pid=%s take=%s part=%d/%d start=%.3f end=%.3f cuts=%d%s%s", pid, take_id,
+            log.info("vnew.gen.take_part_submit pid=%s take=%s part=%d/%d start=%.3f end=%.3f cuts=%d%s%s%s", pid, take_id,
                      part["no"], len(parts), part["start"], part["end"], len(part["cutIds"]), " variant=real" if real else "",
-                     f" content={CONTENT_STEP_NAMES.get(content_step, '')}" if content_step else "")
+                     f" content={CONTENT_STEP_NAMES.get(content_step, '')}" if content_step else "", " frame=1" if framed else "")
     except BaseException:
         for record in records:
             if record.get("status") == "submitted" and record.get("invocationArn"):
@@ -4768,6 +4843,8 @@ def _do_poll_take_parts(owner: str, pid: str, gen_id: str, index: int, variant: 
         return
     if parts and all(p.get("status") == "completed" and p.get("outputKey") for p in parts):
         _merge_take_parts(owner, pid, gen_id, index, variant, claim, parts)
+    elif any(p.get("status") == "pending" for p in parts) and not any(p.get("status") == "submitted" for p in parts):
+        _queue_next_part(owner, pid, gen_id, index, variant, claim)  # 작업 155: 앞 조각이 끝났다 → 다음 조각을 낸다
 
 
 def _merge_take_parts(owner: str, pid: str, gen_id: str, index: int, variant: str, claim: str, parts: list[dict]) -> None:
@@ -5160,6 +5237,83 @@ def _escalate_content_parts(owner: str, pid: str, gen_id: str, index: int, varia
                  index, no, step)
 
 
+# ---------------------------------------------------------------- 작업 155: 조각·Seedance 대체의 장소·이음 프레임·의상 고정
+#
+# 152 조각과 153 Seedance 대체는 따로 만드는 생성이라 배경·옷이 바뀌었다(test3: 조각 2 회색 벽, 대체에서 지퍼 트랙 재킷).
+# ① 장소: 모든 조각·대체 제출에 통 테이크의 장소 뷰(143 실사/웹툰, ASSETS 와 같은 1장)를 맨 끝 이미지로 + TAKE_ANCHOR_LOCATION_LINE.
+# ② 이음 프레임(VNEW_PART_CONTINUITY): 조각 k(>1)는 조각 k−1 결과의 마지막 프레임(길이 − TAKE_FRAME_BACK_S)을 1장 더하고
+#    차례로 낸다(조각 k 는 k−1 이 끝난 뒤, 기다리는 조각은 status "pending"). 앞 테이크 뒤의 대체는 앞 테이크 결과의 마지막 프레임.
+# ③ 의상: 보이는 인물마다 ASSETS COSTUME(146 정리) + _costume_lock 구절. 조각·대체가 아닌 통째 요청은 지금과 바이트 단위로 같다.
+
+TAKE_FRAME_BACK_S = 0.05
+TAKE_ANCHOR_LOCATION_LINE = "@Image{no} = the location; keep exactly this place, background and light in every shot"
+TAKE_ANCHOR_FRAME_LINE = ("@Image{no} = the previous shot's last frame: same background, lighting, outfits and hair; "
+                          "continue from it")
+# 의상 고정 "no …" 목록의 옷 낱말(한 목록). 그 인물 옷 문장에 든 낱말(정규식)은 빼고 쓴다.
+COSTUME_LOCK_GARMENTS = (
+    ("jacket", r"\bjackets?\b"),
+    ("zipper", r"\bzip(?:per(?:s|ed)?|ped|-up|s)?\b"),
+    ("hoodie", r"\bhood(?:ie|ies|ed|s)?\b"),
+)
+_COSTUME_LOCK_RE = tuple((word, re.compile(pattern, re.IGNORECASE)) for word, pattern in COSTUME_LOCK_GARMENTS)
+
+
+def _costume_lock(name: str, costume: str) -> str:
+    """인물 1명의 의상 고정 구절(끝 마침표 없음). no 목록 = COSTUME_LOCK_GARMENTS 중 그 옷 문장에 없는 낱말."""
+    costume = str(costume or "").strip().rstrip(" .")
+    if not costume:
+        return ""
+    banned = [word for word, pattern in _COSTUME_LOCK_RE if not pattern.search(costume)]
+    head = (", ".join(banned) + " or ") if banned else ""
+    return f"{name} wears exactly {costume}; same garment in every shot, no {head}other garment change"
+
+
+def _video_last_frame(key: str, seconds: float) -> bytes | None:
+    """끝난 결과 영상(S3 키)의 마지막 프레임 JPEG(_cut_first_frame, 길이 − 0.05초). 못 뽑으면 None(프레임 없이 낸다)."""
+    if not key:
+        return None
+    try:
+        mp4 = _fetch_bytes(key, bucket=vpoc_settings.VIDEO_BUCKET)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("vnew.gen.last_frame_fetch_failed key=%s err=%s", key, type(exc).__name__)
+        return None
+    duration = _mp4_seconds(mp4) or float(seconds or 0)
+    frame = _cut_first_frame(mp4, max(0.0, duration - TAKE_FRAME_BACK_S)) if duration > 0 else None
+    del mp4
+    return frame
+
+
+def _prev_take_frame(plan: dict, index: int, variant: str) -> tuple[bytes | None, str]:
+    """앞 테이크(index − 1) 같은 그림체 결과의 마지막 프레임과 그 키. 앞 테이크가 없거나 아직 안 끝났으면 (None, "")."""
+    if not vnew_settings.VNEW_PART_CONTINUITY or index <= 0:
+        return None, ""
+    cells = _previz_cells(plan.get("gen") or {})
+    if index - 1 >= len(cells):
+        return None, ""
+    prev = cells[index - 1]
+    state = prev.get(variant) or {}
+    key = str(state.get("outputKey") or "")
+    if state.get("status") != "completed" or not key:
+        return None, ""
+    return _video_last_frame(key, float(prev.get("seconds") or 0)), key + "#last"
+
+
+def _queue_next_part(owner: str, pid: str, gen_id: str, index: int, variant: str, claim: str) -> None:
+    """이음 프레임 조각 칸: 낸 조각이 모두 끝났고 기다리는 조각이 있으면 칸을 queued 로(제출이 끝난 조각을 다시 쓰고 다음 조각을 낸다)."""
+    def mutator(data: dict) -> None:
+        g = data.get("gen") or {}
+        if not _claim_ok_variant(g, index, variant, claim):
+            raise _Discard()
+        state = _previz_cells(g)[index][variant]
+        state.update(status="queued", invocationArn="", outputKey="", error="", claim="", claimedAt="")
+
+    try:
+        _commit(owner, pid, mutator)
+    except _Discard:
+        return
+    log.info("vnew.gen.take_part_next pid=%s take=%d%s", pid, index, " variant=real" if variant == "real" else "")
+
+
 def _do_submit_take(owner: str, pid: str, gen_id: str, index: int, variant: str, claim: str) -> None:
     """통 테이크 1개(웹툰)를 Seedance 2.5 reference-to-video 로 제출한다(설계자 2026-10-26, 063).
 
@@ -5232,7 +5386,7 @@ def _do_submit_take(owner: str, pid: str, gen_id: str, index: int, variant: str,
                 s = _previz_cells(g)[index][variant]
                 s.update(status="submitted", invocationArn="", outputPrefix="", outputKey="", error="")
                 s["parts"] = part_records
-                s["promptEn"] = "\n\n".join(str(p.get("promptEn") or "") for p in part_records)
+                s["promptEn"] = "\n\n".join(str(p.get("promptEn") or "") for p in part_records if p.get("promptEn"))
                 s["promptBytes"] = sum(int(p.get("promptBytes") or 0) for p in part_records)
                 s.pop("pendingCharge", None)  # 조각은 제출 때 원장을 남긴다
 
@@ -5244,14 +5398,23 @@ def _do_submit_take(owner: str, pid: str, gen_id: str, index: int, variant: str,
         trace = _RefTrace.start()  # 지시서 116: 이 스레드의 참고 이미지 읽기·맞춤을 따라간다(바이트는 붙잡지 않는다)
         step = _fallback_step(state) if real else 0  # 작업 130: likeness 1단계면 인물당 정면 1장
         content_step = _content_step(state)  # 작업 153: 1 = 순화(같은 모델), 2 = 순화 + Seedance
+        continuity = None
         if content_step >= 2 and _content_fallback_model(endpoint):
+            # 작업 155: Seedance 대체 = 같은 장소 1장(맨 끝)·의상 고정·원래 모델과 같은 신원 참고·앞 테이크 마지막 프레임(있을 때).
+            frame, frame_key = _prev_take_frame(plan, index, variant)
+            continuity = {"take": take, "frame": frame, "frameKey": frame_key, "origFrame": False,
+                          "origMax": int(caps.get("imageListMax") or vpoc_fal.DEFAULT_IMAGE_LIST_MAX)}
+            del frame
             endpoint = _content_fallback_model(endpoint)
             caps = _previz_caps(endpoint)
         built = _take_payload(owner, pid, plan, take, caps, variant="real", fallback_step=step,
-                              soften=content_step >= 1) if real else _take_payload(owner, pid, plan, take, caps,
-                                                                                   soften=content_step >= 1)
+                              soften=content_step >= 1, continuity=continuity) if real else _take_payload(
+            owner, pid, plan, take, caps, soften=content_step >= 1, continuity=continuity)
+        continuity = None
         if content_step:
             tag += f" content={CONTENT_STEP_NAMES.get(content_step, '')}"
+        if built.get("frameNo"):
+            tag += " frame=1"
         refs = trace.stop(built)
         prompt = built["prompt"]
         image_urls = built["imageUrls"]

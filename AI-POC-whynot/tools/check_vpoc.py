@@ -51598,9 +51598,11 @@ def check_vnew_ref_video_split_152() -> None:
         return set(re.findall(r"대사(\d+)번", prompt))
 
     try:
+        # 작업 155: 이 검사는 152 의 조각 한꺼번에 제출(rv-c 요청 순서 조각1·조각2·테이크2, rv-e 조각 1 이 실패할 때 조각 2 는 이미 끝남)을
+        # 본다 — 이음 프레임(VNEW_PART_CONTINUITY 켬, 조각 차례 제출)은 check_vnew_part_continuity_155 가 본다.
         with _guard_real_llm(), _LrEnv(owner) as env, _pin_vnew(
                 VNEW_FX=False, VNEW_GEN_PARALLEL=2, POLL_INTERVAL_S=0, VNEW_TAKE_RESOLUTION="480p",
-                VNEW_TAKE_MAX_SECONDS=30, VNEW_TAKE_REF_SPLIT=True, VNEW_TAKE_AUDIO=True) as vset:
+                VNEW_TAKE_MAX_SECONDS=30, VNEW_TAKE_REF_SPLIT=True, VNEW_TAKE_AUDIO=True, VNEW_PART_CONTINUITY=False) as vset:
             prefix_id = genmod.vpoc_settings.FAL_ID_PREFIX
             wan_id = prefix_id + _RV152_ENDPOINT
             seed_find = genmod.vpoc_fal.find
@@ -52046,6 +52048,314 @@ def check_vnew_content_flag_153() -> None:
            "(cf-e)152 조각 2만 순화·Seedance (cf-f)vnew.js 한 줄")
 
 
+# 작업 155 전 코드의 조각·대체 없는 15초 테이크(_LrEnv make_plan c1~c3, Wan 3.0, FX 끔) 프롬프트·참고 이미지 sha256 앞 16자.
+# 다른 작업이 테이크 프롬프트를 일부러 바꿨다면 그 작업이 이 값을 함께 고친다.
+_AN155_BASE = {"webtoonPrompt": "aa227a25994e9a91", "webtoonImages": "1854b03fbc9fa9a9",
+               "realPrompt": "59492465c43d0c70", "realImages": "b13a1c687cf05e5d"}
+_AN155_CREW = "black crew-neck long-sleeve top with white sleeve stripes"
+
+
+def check_vnew_part_continuity_155() -> None:
+    """작업 155 — 152 조각·153 Seedance 대체의 장소 고정·이음 프레임·의상 고정. 가짜 fal(Wan 3.0 r2v·Seedance)·가짜 프레임, 유료 0.
+
+    (an-a) 30초 테이크·참고 상한 10초 → 3조각(조각 2 컷은 다른 장소 이름), 이음 켬: 모든 조각 요청 마지막 이미지 = 통 테이크 장소 뷰 +
+           장소 고정 줄, 조각 2·3 = 앞 조각 결과 마지막 프레임(길이 − 0.05초) + 프레임 줄, 조각 1 프레임 없음, 조각 k 는 k−1 결과 조회
+           뒤에 제출, 인물별 의상 고정 구절, 잇기·조각마다 원장
+    (an-b) 이음 끔: 3조각을 조회 전에 한꺼번에 제출, 프레임 없음, 장소 맨 끝·의상 고정은 그대로
+    (an-c) 상한(실사 payload, imageListMax 4): 인물 둘째 사진부터 빠지고 장소 맨 끝·프레임 그 앞. 대체는 원래 요청보다 신원 참고를
+           적게 넣지 않는다(자리가 모자라면 프레임을 뺀다)
+    (an-d) 대체: 테이크 2 Wan 거절 2번 → Seedance 요청 = 원래 Wan 요청의 인물 참고 + 앞 테이크 결과 마지막 프레임 + 장소(맨 끝),
+           프롬프트 의상 고정(crew-neck → no jacket, zipper, hoodie). 테이크 1·Wan 요청은 고정 구절 없음
+    (an-e) 조각·대체 없는 테이크: 요청 프롬프트·참고 이미지 sha = 작업 155 전 값(웹툰 요청, 실사 payload)
+    (an-f) _costume_lock: 옷 문장에 든 낱말(jacket·zip-up·hood)은 no 목록에서 빠진다
+    """
+    import base64 as _b64  # noqa: PLC0415
+    import hashlib as _hashlib  # noqa: PLC0415
+    import traceback as _tb  # noqa: PLC0415
+
+    sys.path.insert(0, str(ROOT / "app"))
+    from src.vnew import generate as genmod  # noqa: PLC0415
+    from src.vnew import plan as planmod  # noqa: PLC0415
+    from src.vpoc import fal as falmod  # noqa: PLC0415
+
+    bad: list[str] = []
+    owner = "tester"
+    clip_re = re.compile(rb"^CLIP:(\d+\.\d+)-(\d+\.\d+):")
+    rec_seconds = {b"PREVIZ-REC-s1": 15.0, b"PREVIZ-REC-s2": 15.0}
+
+    def video_seconds(mp4: bytes) -> float:
+        match = clip_re.match(mp4 or b"")
+        if match:
+            return float(match.group(2)) - float(match.group(1))
+        return rec_seconds.get(bytes(mp4 or b""), 0.0)
+
+    def sha16(data: bytes) -> str:
+        return _hashlib.sha256(data).hexdigest()[:16]
+
+    def images(req: dict) -> list[bytes]:
+        return [_b64.b64decode(str(u).split(",", 1)[1]) for u in (req["payload"].get("image_urls") or [])]
+
+    def prompt_of(req: dict) -> str:
+        return str(req["payload"].get("prompt") or "")
+
+    def lines_of(prompt: str) -> set[str]:
+        return set(re.findall(r"대사(\d+)번", prompt))
+
+    loc_line = "@Image{} = the location; keep exactly this place, background and light in every shot"
+    frame_line = "@Image{} = the previous shot's last frame: same background, lighting, outfits and hair; continue from it"
+    try:
+        with _guard_real_llm(), _LrEnv(owner) as env, _pin_vnew(
+                VNEW_FX=False, VNEW_GEN_PARALLEL=2, POLL_INTERVAL_S=0, VNEW_TAKE_RESOLUTION="480p",
+                VNEW_TAKE_MAX_SECONDS=30, VNEW_TAKE_REF_SPLIT=True, VNEW_TAKE_AUDIO=True,
+                VNEW_CONTENT_FALLBACK_MODEL=_LR_ENDPOINT, VNEW_PART_CONTINUITY=True) as vset:
+            wan_id = genmod.vpoc_settings.FAL_ID_PREFIX + _RV152_ENDPOINT
+            seed_find = genmod.vpoc_fal.find
+            env.set(genmod.vpoc_fal, "find", lambda m: {"id": wan_id, "endpointId": _RV152_ENDPOINT, "category": "reference-to-video",
+                                                        "caps": dict(_RV152_CAPS)} if str(m) == wan_id else seed_find(m))
+            env.set(genmod, "_cut_clip", lambda mp4, unit: {
+                "bytes": b"CLIP:%.3f-%.3f:" % (float(unit["startSec"]), float(unit["endSec"])) + bytes(mp4)[:20],
+                "origSeconds": round(float(unit["endSec"]) - float(unit["startSec"]), 3),
+                "sentSeconds": round(float(unit["endSec"]) - float(unit["startSec"]), 3), "padded": False})
+            env.set(genmod, "_mp4_seconds", video_seconds)
+            merges: list[list[float]] = []
+            env.set(genmod, "_conform_concat", lambda pieces: merges.append([float(s) for _b, s in pieces]) or b"PARTS")
+            frames: list[float] = []
+
+            def last_frame(mp4, start):
+                frames.append(round(float(start), 3))
+                return b"FRAME@%.2f:" % float(start) + bytes(mp4)
+
+            env.set(genmod, "_cut_first_frame", last_frame)
+            result_gets = {"n": 0}
+            reject = {"fn": lambda req: False}
+            base_fal = env._fal  # noqa: SLF001
+
+            def fal_request(method, url, payload=None, *, where=""):
+                rid = url.split("/requests/", 1)[-1].split("/", 1)[0]
+                req = next((r for r in env.requests if r["rid"] == rid), None)
+                if method == "GET" and not url.endswith("/status"):
+                    result_gets["n"] += 1
+                    if req is not None and reject["fn"](req):
+                        env.fal_calls.append((method, url))
+                        raise env.VpocError("fal.poll", "HTTP422", _CF153_MSG, 502)
+                return base_fal(method, url, payload, where=where)
+
+            env.set(falmod, "_request", fal_request)
+            marks: dict[str, int] = {}
+
+            def submit(method, url, payload):
+                out = env._submit(method, url, payload)  # noqa: SLF001
+                marks[out["request_id"]] = result_gets["n"]  # 이 제출 전까지 끝난 결과 조회 수
+                return out
+
+            env.set(genmod, "_previz_request", submit)
+            client = env.client()
+
+            def make(pid: str, segments: list[dict], other_place: tuple = ()) -> None:
+                env.make_plan(pid, segments)
+
+                def mutator(data: dict) -> None:
+                    data["input"]["videoModel"] = wan_id
+                    for cut in data["conti"]["cuts"]:
+                        cut["dialogueKo"] = f'에이: "대사{cut["no"]}번."'
+                        data["previz"]["shotBrief"]["cuts"][cut["id"]]["dialogue"] = [
+                            {"speaker": "에이", "lineKo": f"대사{cut['no']}번.", "deliveryEn": "calm"}]
+                        if cut["id"] in other_place:
+                            cut["locationEn"] = "A plain grey street wall"  # test3 조각 2: 다른 장소 이름(장소 뷰 없음)
+
+                planmod.mutate_plan(owner, pid, mutator)
+
+            def run(pid: str) -> tuple[dict, list[dict]]:
+                since = len(env.requests)
+                client.post(f"/api/vnew/p/{pid}/generate", json={"confirmUsd": genmod.estimate(env.plan(pid))["totalUsd"]})
+                return env.drive(pid), env.requests[since:]
+
+            # ================= (an-e) 조각·대체 없는 테이크 = 작업 155 전 =================
+            pid_e = "prj_an_base_wan"
+            env.make_plan(pid_e, [{"id": "s1", "cutIds": ["c1", "c2", "c3"], "seconds": 15}])
+            planmod.mutate_plan(owner, pid_e, lambda data: data["input"].__setitem__("videoModel", wan_id))
+            _g, reqs = run(pid_e)
+            got_e = [(sha16(prompt_of(r).encode("utf-8")), sha16(b"|".join(images(r)))) for r in reqs]
+            if got_e != [(_AN155_BASE["webtoonPrompt"], _AN155_BASE["webtoonImages"])]:
+                bad.append(f"(an-e) 조각·대체 없는 웹툰 테이크 요청이 바뀌었습니다: {got_e}")
+            plan_e = env.plan(pid_e)
+            built_e = genmod._take_payload(owner, pid_e, plan_e, genmod._take_units(plan_e)[0], dict(_RV152_CAPS),  # noqa: SLF001
+                                           variant="real")
+            got_r = (sha16(built_e["prompt"].encode("utf-8")), sha16(b"|".join(built_e["imageUrls"])))
+            if got_r != (_AN155_BASE["realPrompt"], _AN155_BASE["realImages"]) or "frameNo" in built_e:
+                bad.append(f"(an-e) 조각·대체 없는 실사 payload 가 바뀌었습니다: {got_r}")
+            if any("wears exactly" in prompt_of(r) for r in reqs) or "wears exactly" in built_e["prompt"]:
+                bad.append("(an-e) 조각·대체 없는 테이크에 의상 고정 구절이 붙었습니다")
+
+            # ================= (an-f) 의상 고정 구절 =================
+            crew = genmod._costume_lock("Yeouijun", _AN155_CREW)  # noqa: SLF001
+            want_crew = (f"Yeouijun wears exactly {_AN155_CREW}; same garment in every shot, "
+                         "no jacket, zipper, hoodie or other garment change")
+            track = genmod._costume_lock("Kim", "black zip-up track jacket.")  # noqa: SLF001
+            hood = genmod._costume_lock("Lee", "grey hooded sweatshirt with zippered pockets and a denim jacket")  # noqa: SLF001
+            if crew != want_crew or track != ("Kim wears exactly black zip-up track jacket; same garment in every shot, "
+                                              "no hoodie or other garment change") \
+                    or not hood.endswith("no other garment change") or genmod._costume_lock("X", " ") != "":  # noqa: SLF001
+                bad.append(f"(an-f) 의상 고정 구절: {crew!r} {track!r} {hood!r}")
+
+            # 이 뒤는 test3 꼴: 에이 = crew-neck(ASSETS COSTUME), 비 = navy training top.
+            def crew_notes(blocks, *, model):
+                return ({"people": [{"name": "에이", "costumeEn": _AN155_CREW, "voiceEn": "low, calm adult male voice"},
+                                    {"name": "비", "costumeEn": "navy training top", "voiceEn": "soft young female voice"}]},
+                        {"model": model, "inputTokens": 5, "outputTokens": 10})
+
+            env.set(genmod, "_read_cast_notes", crew_notes)
+            name_a, name_b = genmod._romanize_name("에이"), genmod._romanize_name("비")  # noqa: SLF001
+            lock_a = genmod._costume_lock(name_a, _AN155_CREW)  # noqa: SLF001
+            lock_b = genmod._costume_lock(name_b, "navy training top")  # noqa: SLF001
+            loc_wb = genmod._fit_ref(b"LOC-WB")  # noqa: SLF001
+
+            # ================= (an-a) 3조각 · 이음 켬 =================
+            env.set(genmod.vpoc_settings, "FAL_REF_VIDEO_MAX_S", 10)
+            rec_seconds[b"PREVIZ-REC-s1"] = 30.0
+            pid_a = "prj_an_a"
+            make(pid_a, [{"id": "s1", "cutIds": [f"c{i}" for i in range(1, 7)], "seconds": 30}], other_place=("c3", "c4"))
+            ledger0 = len(env.ledger)
+            g, reqs = run(pid_a)
+            state = genmod._previz_cells(g)[0]["webtoon"]  # noqa: SLF001
+            parts = state.get("parts") or []
+            if [p.get("cutIds") for p in parts] != [["c1", "c2"], ["c3", "c4"], ["c5", "c6"]] or len(reqs) != 3:
+                bad.append(f"(an-a) 조각: {[p.get('cutIds') for p in parts]} 요청 {len(reqs)}")
+            elif [lines_of(prompt_of(r)) for r in reqs] != [{"1", "2"}, {"3", "4"}, {"5", "6"}]:
+                bad.append(f"(an-a) 조각 순서: {[lines_of(prompt_of(r)) for r in reqs]}")
+            else:
+                for k, req in enumerate(reqs):
+                    imgs, prompt = images(req), prompt_of(req)
+                    if not imgs or imgs[-1] != loc_wb or loc_line.format(len(imgs)) not in prompt:
+                        bad.append(f"(an-a) 조각 {k + 1}: 장소 뷰가 맨 끝이 아니거나 장소 고정 줄이 없습니다")
+                    if lock_a not in prompt or lock_b not in prompt or f"COSTUME in this scene (overrides the sheet's clothing): " \
+                                                                       f"{_AN155_CREW}" not in prompt:
+                        bad.append(f"(an-a) 조각 {k + 1}: ASSETS COSTUME·의상 고정 구절이 없습니다")
+                    if k == 0:
+                        if "previous shot's last frame" in prompt or any(i.startswith(b"FRAME") for i in imgs):
+                            bad.append("(an-a) 조각 1 에 이음 프레임이 있습니다")
+                        continue
+                    want = genmod._fit_ref(b"FRAME@9.95:" + b"CLIP:" + str(parts[k - 1].get("outputKey")).encode())  # noqa: SLF001
+                    if len(imgs) < 2 or imgs[-2] != want or frame_line.format(len(imgs) - 1) not in prompt:
+                        bad.append(f"(an-a) 조각 {k + 1}: 앞 조각 마지막 프레임(9.95초)이 장소 앞에 없습니다")
+                got_marks = [marks.get(r["rid"], -1) for r in reqs]
+                if not got_marks[0] < got_marks[1] < got_marks[2]:
+                    bad.append(f"(an-a) 조각이 차례로 제출되지 않았습니다(제출 전 결과 조회 수 {got_marks})")
+            charges = [x for x in env.ledger[ledger0:] if str(x.get("key") or "").startswith("fal-take-")]
+            if state.get("status") != "completed" or merges[-1:] != [[10.0, 10.0, 10.0]] or len(charges) != 3 \
+                    or frames != [9.95, 9.95]:
+                bad.append(f"(an-a) 결과: {state.get('status')} {state.get('error')} 잇기 {merges[-1:]} 원장 {len(charges)} "
+                           f"프레임 {frames}")
+            if any(p.get("status") == "pending" for p in parts) or "\n\n\n" in str(state.get("promptEn") or ""):
+                bad.append("(an-a) 끝난 칸에 기다리는 조각·빈 프롬프트가 남았습니다")
+
+            # ================= (an-b) 이음 끔 → 한꺼번에 =================
+            vset.VNEW_PART_CONTINUITY = False
+            pid_b = "prj_an_b"
+            make(pid_b, [{"id": "s1", "cutIds": [f"c{i}" for i in range(1, 7)], "seconds": 30}], other_place=("c3", "c4"))
+            frames0 = len(frames)
+            g, reqs = run(pid_b)
+            state = genmod._previz_cells(g)[0]["webtoon"]  # noqa: SLF001
+            got_marks = [marks.get(r["rid"], -1) for r in reqs]
+            if len(reqs) != 3 or len(set(got_marks)) != 1 or len(frames) != frames0 or state.get("status") != "completed":
+                bad.append(f"(an-b) 이음 끔: 요청 {len(reqs)} 제출 전 조회 수 {got_marks} 프레임 {len(frames) - frames0} "
+                           f"{state.get('status')}")
+            for k, req in enumerate(reqs):
+                imgs, prompt = images(req), prompt_of(req)
+                if not imgs or imgs[-1] != loc_wb or loc_line.format(len(imgs)) not in prompt or lock_a not in prompt \
+                        or "previous shot's last frame" in prompt:
+                    bad.append(f"(an-b) 조각 {k + 1}: 장소 맨 끝·의상 고정·프레임 없음이 아닙니다")
+            vset.VNEW_PART_CONTINUITY = True
+
+            # ================= (an-c) 상한(실사 payload) =================
+            plan_c = env.plan(pid_a)
+            take_c = genmod._take_units(plan_c)[0]  # noqa: SLF001
+            parts_c = genmod._take_parts_for(plan_c, take_c, _RV152_ENDPOINT)  # noqa: SLF001
+            sub_c = genmod._part_take(plan_c, take_c, parts_c[1])  # noqa: SLF001
+            caps4 = {**_RV152_CAPS, "imageListMax": 4}
+            env.blobs.update({"rb-ch1": b"RB1", "rb-ch2": b"RB2"})  # 인물마다 사진 2장 이상(둘째 사진이 빠지는지 본다)
+            loc_rb, frame_x = genmod._fit_ref(b"LOC-RB"), genmod._fit_ref(b"FRAME-X")  # noqa: SLF001
+
+            def payload(caps: dict, continuity) -> dict:
+                return genmod._take_payload(owner, pid_a, plan_c, sub_c, caps, variant="real",  # noqa: SLF001
+                                            continuity=continuity)
+
+            def ref_counts(built: dict) -> list[int]:
+                return [len(m.get("refNos") or []) for m in built["cast"]]
+
+            wide = payload(dict(_RV152_CAPS), {"take": take_c, "frame": b"FRAME-X"})
+            tight = payload(caps4, {"take": take_c, "frame": b"FRAME-X"})
+            if max(ref_counts(wide)) < 2 or ref_counts(tight) != [1, 1] or len(tight["imageUrls"]) != 4 \
+                    or tight["imageUrls"][-1] != loc_rb or tight["imageUrls"][-2] != frame_x \
+                    or wide["imageUrls"][-1] != loc_rb or loc_line.format(4) not in tight["prompt"] \
+                    or frame_line.format(3) not in tight["prompt"]:
+                bad.append(f"(an-c) 상한 4: 인물 {ref_counts(wide)} → {ref_counts(tight)} 장수 {len(tight['imageUrls'])} "
+                           f"장소 끝 {tight['imageUrls'][-1:] == [loc_rb]}")
+            # 통째 테이크 대체: 대체 전 요청(조각·대체 아님, 장소 1장 자리) 과 같은 신원 참고. 프레임은 남는 자리가 없어 빠진다.
+            whole = genmod._take_payload(owner, pid_a, plan_c, take_c, caps4, variant="real")  # noqa: SLF001
+            n_whole = sum(ref_counts(whole))
+            fb = genmod._take_payload(owner, pid_a, plan_c, take_c, caps4, variant="real",  # noqa: SLF001
+                                      continuity={"take": take_c, "frame": b"FRAME-X", "origMax": 4, "origFrame": False})
+            fb_framed = payload(caps4, {"take": take_c, "frame": b"FRAME-X", "origMax": 4, "origFrame": True})
+            if fb["imageUrls"][:n_whole] != whole["imageUrls"][:n_whole] or ref_counts(fb) != ref_counts(whole) \
+                    or n_whole != 3 or fb.get("frameNo") or fb["imageUrls"][-1] != loc_rb or len(fb["imageUrls"]) > 4:
+                bad.append(f"(an-c) 대체 신원 참고: {ref_counts(whole)} → {ref_counts(fb)} 프레임 {fb.get('frameNo')}")
+            if ref_counts(fb_framed) != [1, 1] or fb_framed["imageUrls"][-2:] != [frame_x, loc_rb]:
+                bad.append(f"(an-c) 프레임 자리가 있던 조각의 대체: {ref_counts(fb_framed)}")
+            try:
+                genmod._assert_no_webtoon(tight["prompt"])  # noqa: SLF001
+            except Exception as exc:  # noqa: BLE001
+                bad.append(f"(an-c) 실사 조각 프롬프트가 웹툰 검사에 걸립니다: {exc}")
+            env.blobs.pop("rb-ch1", None)
+            env.blobs.pop("rb-ch2", None)
+
+            # ================= (an-d) Seedance 대체 =================
+            env.set(genmod.vpoc_settings, "FAL_REF_VIDEO_MAX_S", 15)
+            vset.VNEW_TAKE_MAX_SECONDS = 15
+            rec_seconds[b"PREVIZ-REC-s1"] = 15.0
+            pid_d = "prj_an_d"
+            make(pid_d, [{"id": "s1", "cutIds": ["c1", "c2", "c3"], "seconds": 15},
+                         {"id": "s2", "cutIds": ["c4", "c5", "c6"], "seconds": 15}])
+            reject["fn"] = lambda req: f"/{_RV152_ENDPOINT}" in req["url"] and "대사4번" in prompt_of(req)
+            g, reqs = run(pid_d)
+            reject["fn"] = lambda req: False
+            cells = genmod._previz_cells(g)  # noqa: SLF001
+            t2 = [r for r in reqs if "대사4번" in prompt_of(r)]
+            t1 = [r for r in reqs if "대사1번" in prompt_of(r)]
+            where = ["seed" if f"/{_LR_ENDPOINT}" in r["url"] else "wan" for r in t2]
+            if len(cells) != 2 or where != ["wan", "wan", "seed"] or len(t1) != 1 \
+                    or (cells[1].get("webtoon") or {}).get("status") != "completed":
+                bad.append(f"(an-d) 흐름: 테이크 {len(cells)} {where} 테이크1 요청 {len(t1)} "
+                           f"{(cells[-1].get('webtoon') or {}).get('status') if cells else ''}")
+            else:
+                orig, seed = images(t2[0]), images(t2[2])
+                prompt = prompt_of(t2[2])
+                prev_key = str((cells[0].get("webtoon") or {}).get("outputKey") or "")
+                want = genmod._fit_ref(b"FRAME@14.95:" + b"CLIP:" + prev_key.encode())  # noqa: SLF001
+                fronts = [genmod._fit_ref(b"WF1"), genmod._fit_ref(b"WF2")]  # noqa: SLF001
+                if seed[:2] != orig[:2] or sorted(seed[:2]) != sorted(fronts):
+                    bad.append("(an-d) Seedance 대체의 신원 참고(웹툰 정면)가 원래 Wan 요청과 다릅니다")
+                if seed[-1] != loc_wb or loc_line.format(len(seed)) not in prompt:
+                    bad.append("(an-d) Seedance 대체에 장소 뷰(맨 끝)·장소 고정 줄이 없습니다")
+                if len(seed) < 2 or seed[-2] != want or frame_line.format(len(seed) - 1) not in prompt:
+                    bad.append("(an-d) Seedance 대체에 앞 테이크 마지막 프레임(14.95초)이 없습니다")
+                if lock_a not in prompt or "no jacket, zipper, hoodie or other garment change" not in lock_a \
+                        or lock_b not in prompt:
+                    bad.append("(an-d) Seedance 대체 프롬프트에 의상 고정(crew-neck → no jacket, zipper …)이 없습니다")
+                if any("wears exactly" in prompt_of(r) or "previous shot's last frame" in prompt_of(r) for r in t1 + t2[:2]):
+                    bad.append("(an-d) 테이크 1·Wan 요청(조각·대체 아님)에 고정 구절이 붙었습니다")
+            vset.VNEW_TAKE_MAX_SECONDS = 30
+    except Exception:  # noqa: BLE001
+        bad.append("작업 155 검사 예외\n" + _tb.format_exc())
+    if bad:
+        fail("작업 155 조각·대체 장소·이음 프레임·의상 고정 검사 실패\n  " + "\n  ".join(bad))
+    else:
+        ok("작업 155 조각·대체 (an-a)3조각 모두 같은 장소 뷰 맨 끝·조각 2·3 앞 조각 마지막 프레임·차례 제출·의상 고정 "
+           "(an-b)이음 끔 → 한꺼번에·프레임 없음 (an-c)상한 4 → 인물 둘째 사진부터 빠짐·장소 맨 끝·대체 신원 참고 그대로 "
+           "(an-d)Seedance 대체 = 신원 참고·앞 테이크 마지막 프레임·장소·crew-neck 고정 (an-e)조각·대체 없는 테이크 sha 그대로 "
+           "(an-f)no 목록")
+
+
 def _ca154_plan(*, hands_in_timeline: bool = True) -> tuple[dict, dict]:
     """작업 154 test3 꼴: 30초 테이크 1개(cut-01~06), Wan 15초 조각 2개(조각 2 = cut-03~06, cut-06 = 12-15s).
 
@@ -52269,6 +52579,7 @@ def check_vnew_contact_action_154() -> None:
            "닿는 문장만 다름 (ca-d)순화 (ca-e)동사 한 목록·숨 참기·지시서 같은 동사")
 
 
+
 def main() -> int:
     print("== vpoc1 check ==")
     check_compileall()
@@ -52380,8 +52691,9 @@ def main() -> int:
     check_vnew_previz_camera_clear_151()
     check_vnew_ref_video_split_152()
     check_vnew_content_flag_153()
-    check_vnew_contact_action_154()
+    check_vnew_part_continuity_155()
     check_vnew_plan_step_stay_129()
+    check_vnew_contact_action_154()
     check_pod_zones()
     print()
     if warnings:
