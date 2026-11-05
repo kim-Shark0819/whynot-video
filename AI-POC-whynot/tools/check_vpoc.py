@@ -20497,8 +20497,9 @@ def check_vnew_fx_prompt() -> None:
                 for label, n_cuts, seconds in (("6컷 끔", 6, 18), ("12컷 끔", 12, 30)):
                     runs[label] = take_run(n_cuts, seconds)
             # 지시서 118a: 12컷은 컷마다 대사 2줄이라 최소형 앞에서 둘째 줄 12개를 뺀다(lineDrop12).
-            full_order = ["styleTrim", "avoidShort", "voice40", "voiceDrop", "mood40", "appearance100", "costume110", "dialogue25",
-                          "audioShort", "moodDrop", "fxShort", "bodyShort", "action55", "lineDrop12", "minimalTimeline"]
+            # 작업 147: 대사는 맨 마지막에 줄인다 → dialogue25 가 costume110 뒤에서 action55 뒤(lineDrop 앞)로 옮겼다.
+            full_order = ["styleTrim", "avoidShort", "voice40", "voiceDrop", "mood40", "appearance100", "costume110",
+                          "audioShort", "moodDrop", "fxShort", "bodyShort", "action55", "dialogue25", "lineDrop12", "minimalTimeline"]
             if [step for step in runs["12컷 최악"][2] if not step.startswith("motionHarmony")] != full_order:
                 bad.append(f"(fx-h) 큰 입력의 단계 순서가 다릅니다: {runs['12컷 최악'][2]}")
             for label in ("6컷 보통", "6컷 최악"):
@@ -44724,14 +44725,16 @@ def check_vnew_inner_voice_118a() -> None:
         with _pin_vnew(VNEW_FX=True):
             # 작업 127: 고정부(FIXED) 몫은 예산에서 미리 빠진다 → 나머지 예산이 같도록 상한에 고정부 바이트를 더한다.
             fixed_many = genmod._utf8_len(genmod._fixed_head(iv_plan(many), "")) + 1  # noqa: SLF001
-            for cap in (3000, 2900, 1400):
+            # 작업 147: 대사를 더는 40자로 자르지 않아(긴 줄 44자 그대로) 같은 단계에 바이트가 더 든다 → 상한 3000·2900 을
+            # 3100·3000 으로 올렸다(뒤쪽 줄부터 하나씩 빠지는 모양은 그대로).
+            for cap in (3100, 3000, 1400):
                 text = take_prompt(iv_plan(many), caps={"promptMaxLength": cap + fixed_many})
                 tl_s = block(text, "TIMELINE")
                 rows.append([genmod._utf8_len(text) <= genmod._take_prompt_budget({"promptMaxLength": cap + fixed_many}),  # noqa: SLF001
                              all(s in text for s in ("0-4s", "4-8s", "8-12s")), tl_s.count("(inner voice-over, lips closed)"),
                              [w for w in ("하나", "둘", "셋") if f'Junho (off-screen voice): "{w} ' in tl_s], 'Junho (off-screen voice): "가자"' in tl_s])
         expect("iv2-b", rows, [[True, True, 2, ["하나", "둘"], True], [True, True, 2, ["하나"], True], [True, True, 2, [], True]],
-               "작은 상한: 보통 대사 뒤쪽 줄부터 하나씩 빠지고(3,000B 셋 → 2,900B 둘 → 1,400B 하나) 속마음 두 줄·1줄 컷·모든 컷은 남는다")
+               "작은 상한: 보통 대사 뒤쪽 줄부터 하나씩 빠지고(3,100B 셋 → 3,000B 둘 → 1,400B 하나) 속마음 두 줄·1줄 컷·모든 컷은 남는다")
 
         # ================= (iv2-c) deliveryEn =================
         plan_d = iv_plan(mixed, {"c2": {"shotEn": "MCU.", "actionEn": "Junho waves.",
@@ -47830,12 +47833,13 @@ def check_vnew_real_cut_anime_132() -> None:
             web = genmod._segment_prompt(plan, {"cutIds": ["c1"]}, first_segment=True)  # noqa: SLF001
             if negative in web or genmod.REAL_TAKE_STYLE in web or web.startswith("FIXED: "):
                 bad.append(f"(ak-a) _segment_prompt 기본(real=False)이 바뀌었습니다: {web!r}")
-            # 길이 상한이 작아도 고정부·negative 는 남고 가운데(대사)만 줄어든다.
+            # 길이 상한이 작아도 고정부·negative 는 남는다. 작업 147: 대사는 맨 마지막 — 가운데 샷·연기부터 줄고 대사 줄은
+            # 그대로 남는다(전에는 대사가 먼저 빠졌다: '"DIALOGUE" in short' 이면 실패였다).
             full = genmod._segment_prompt(plan, {"cutIds": ["c1"]}, first_segment=True, real=True)  # noqa: SLF001
             cap = len(full.encode("utf-8")) - 20
             short = genmod._segment_prompt(plan, {"cutIds": ["c1"]}, first_segment=True, real=True, prompt_max=cap)  # noqa: SLF001
             if not _no_ai_note(short).startswith(fixed) or not short.endswith(negative) or len(short.encode("utf-8")) > cap \
-                    or "DIALOGUE" in short:
+                    or 'DIALOGUE (Korean, lip-sync): 에이: "자네 뭐 하나?"' not in short or short == full:
                 bad.append(f"(ak-a) 짧은 상한에서 고정부·negative 가 빠졌거나 넘칩니다: {len(short.encode('utf-8'))}/{cap} {short!r}")
 
             # ================= (ak-b) 애니 결과 없음 =================
@@ -50255,6 +50259,165 @@ def check_vnew_prepare_heartbeat_144() -> None:
 
 
 
+# 작업 147: test2 실제 회차 10 의 콘티 대사(cut03 5초 · cut04 3초)와 한 패널을 둘로 나눈 컷(cut07-1·07-2).
+_DR147_CUTS = [
+    {"id": "cut01", "seconds": 3, "panels": [1], "dialogueKo": '범건우: "왜 왔어?"'},
+    {"id": "cut02", "seconds": 3, "panels": [2], "dialogueKo": '여의준: "그냥요."'},
+    {"id": "cut03", "seconds": 5, "panels": [3],
+     "dialogueKo": '여의준: "음… 이제 더 할 말도 없어요. 곧 괜찮아지겠죠." / "이런 쓸데없는 감정…" / "빨리 끝내버려야 하니까…"'},
+    {"id": "cut04", "seconds": 3, "panels": [4], "dialogueKo": '여의준: "요…?" / "…아저씨?"'},
+    {"id": "cut07-1", "seconds": 2, "panels": [7], "dialogueKo": '범건우: "가만히 있어."'},
+    {"id": "cut07-2", "seconds": 2, "panels": [7], "dialogueKo": '범건우: "가만히 있어."'},
+]
+_DR147_WHOLE = "음… 이제 더 할 말도 없어요. 곧 괜찮아지겠죠. 이런 쓸데없는 감정… 빨리 끝내버려야 하니까…요…?"
+
+
+def check_vnew_dialogue_runs_147() -> None:
+    """작업 147 — 대사는 자르지 않고(맨 마지막에 문장 단위로만), 컷을 넘는 한 사람의 말은 한 줄. 가짜 입력, 유료 0.
+
+    (dr-a) cut03+cut04, 줄이기가 일어나는 상한: cut03 줄 = 이어진 말 전체("…하니까…요…?"), "곧." 없음, cut04 = "continues the
+           same line … finishing with): \"요…?\"", 대사가 아닌 단계만 적용(dialogue25·lineDrop 없음), 애니·실사 둘 다 · 바이트 상한 안
+    (dr-b) cut07-1·07-2 같은 대사: 대사 글은 한 번, 둘째 컷은 "(still speaking the same line)"
+    (dr-c) 보통 따로인 줄(cut01 범건우 → cut02 여의준, 끝 문장부호)·같은 화자라도 끝 문장부호/새 낱말이면 잇지 않음 · 어미 목록 판정
+    (dr-d) _fit_dialogue: 뒤 문장부터 통째로, 첫 문장 유지, 원문 앞부분만(없는 마침표 없음), 따옴표 짝 · 아주 작은 상한(최소형)
+           에서도 모든 컷·바이트 상한 안 · "곧." 없음
+    (dr-e) 컷 단위 프롬프트: _cut_prompt(웹툰·실사)·_real_cut_prompt 의 긴 대사가 한 글자도 잘리지 않음, 작은 상한에서도 문장 안 자르기 없음
+    """
+    sys.path.insert(0, str(ROOT / "app"))
+    bad: list[str] = []
+
+    def expect(group: str, got, want, what: str) -> None:
+        if got != want:
+            bad.append(f"({group}) {what}\n      결과 {got!r}\n      기대 {want!r}")
+
+    try:
+        from src.vnew import generate as genmod  # noqa: PLC0415
+
+        cuts = [dict(c) for c in _DR147_CUTS]
+        action = ("Beomgeonu grabs Yeouijun's chin with one hand and tilts his face up toward him, holding his gaze, "
+                  "while the rain keeps falling outside the window.")
+        briefs = {c["id"]: {"actionEn": action} for c in cuts}
+
+        def plan_of(rows: list[dict]) -> dict:
+            return {"conti": {"cuts": rows}, "previz": {"shotBrief": {"status": "ready", "cuts": briefs}},
+                    "script": {"entries": []}}
+
+        cast = [{"name": "여의준", "colorName": "blue", "frontNo": 1, "appearance": "slim young man with soft black hair"},
+                {"name": "범건우", "colorName": "red", "frontNo": 2, "appearance": "tall man with short neat hair"}]
+
+        def take_of(rows: list[dict]) -> dict:
+            return {"id": "t1", "cutIds": [c["id"] for c in rows], "seconds": sum(c["seconds"] for c in rows)}
+
+        def run(rows: list[dict], variant: str, prompt_max: int) -> tuple[str, str]:
+            with _pin_vnew(VNEW_FX=True, VNEW_TAKE_PROMPT_MAX=prompt_max), _LogCapture() as logs:
+                text = genmod._take_prompt(plan_of(rows), take_of(rows), cast=cast, panel_nos=[5],  # noqa: SLF001
+                                           location_no=None, variant=variant)
+            steps = next((r.getMessage().rsplit("steps=", 1)[-1] for r in logs.records
+                          if r.getMessage().startswith("vnew.gen.take_prompt ")), "")
+            return text, steps
+
+        def timeline(text: str) -> str:
+            return next((ln for ln in text.split("\n") if ln.startswith("TIMELINE")), "")
+
+        # ================= (dr-a) cut03+cut04, 줄이기가 일어나는 상한 =================
+        pair = [c for c in cuts if c["id"] in ("cut03", "cut04")]
+        head = 'Yeouijun (off-screen voice; one continuous line that carries over the next cut, no pause at the cut): '
+        cont = 'Yeouijun (off-screen voice; continues the same line from the previous shot, finishing with): "요…?"'
+        for variant in ("webtoon", "real"):
+            full, _ = run(pair, variant, 20000)
+            limit = genmod._utf8_len(full) - 120  # noqa: SLF001 — 넘친 120B 를 줄이게 한다
+            text, steps = run(pair, variant, limit)
+            tl = timeline(text)
+            dialogue_steps = [s for s in steps.split(",") if s.startswith(("dialogue", "lineDrop"))]
+            expect("dr-a", [genmod._utf8_len(text) <= limit, steps not in ("", "none"), dialogue_steps,  # noqa: SLF001
+                            f'{head}"{_DR147_WHOLE}"' in tl, "곧." in text, cont in tl,
+                            'Yeouijun (off-screen voice): "…아저씨?"' in tl, all(s in tl for s in ("0-5s", "5-8s"))],
+                   [True, True, [], True, False, True, True, True],
+                   f"{variant}: 상한 {limit}B 에서 대사 아닌 것만 줄고(steps={steps}) cut03 줄 전체·cut04 이어짐 형")
+        # 옛 증상(대사 40자 단어 자르기 + 마침표) 재현 형이 어떤 상한에서도 나오지 않는다.
+        for limit in (3000, 2200, 1700):
+            text, _ = run(pair, "real", limit)
+            expect("dr-a", ["곧." in text, "하니까…" in text or "음… 이제 더 할 말도 없어요." in text,
+                            genmod._utf8_len(text) <= limit], [False, True, True],  # noqa: SLF001
+                   f"실사 상한 {limit}B: 문장 안 자르기·없는 마침표 없음, 바이트 상한 안")
+
+        # ================= (dr-b) 나눈 컷의 같은 대사 =================
+        split = [c for c in cuts if c["id"] in ("cut07-1", "cut07-2")]
+        text, _ = run(split, "webtoon", 20000)
+        tl = timeline(text)
+        expect("dr-b", [tl.count('"가만히 있어."'), "Beomgeonu (off-screen voice; still speaking the same line)" in tl,
+                        tl.index('"가만히 있어."') < tl.index("2-4s")],
+               [1, True, True], "같은 대사는 첫 컷에 한 번, 둘째 컷은 계속 말하는 중")
+        rows = genmod._dialogue_runs(split)  # noqa: SLF001
+        expect("dr-b", [[ln["run"] for ln in r] for r in rows], [["start"], ["still"]], "_dialogue_runs 나눈 컷 = start · still")
+        no_split = [dict(split[0], id="cut08", panels=[8]), dict(split[1], id="cut09", panels=[9])]
+        expect("dr-b", [[ln["run"] for ln in r] for r in genmod._dialogue_runs(no_split)], [[""], [""]],  # noqa: SLF001
+               "패널·id 가 다른 컷의 같은 대사는 나눈 컷이 아니다(지금 그대로 두 번)")
+
+        # ================= (dr-c) 잇지 않는 줄 · 어미 판정 =================
+        runs_all = genmod._dialogue_runs(cuts)  # noqa: SLF001
+        expect("dr-c", [[(ln["speaker"], ln["run"]) for ln in r] for r in runs_all],
+               [[("범건우", "")], [("여의준", "")], [("여의준", "start")], [("여의준", "cont"), ("여의준", "")],
+                [("범건우", "start")], [("범건우", "still")]],
+               "cut01→02 다른 화자·끝 문장부호는 따로, cut03→04 이어짐, 화자 없는 조각은 앞 화자")
+        expect("dr-c", runs_all[2][0]["utterance"], _DR147_WHOLE, "이어진 말 = cut03 세 조각 + cut04 첫 조각")
+        same_closed = [{"id": "a", "seconds": 2, "panels": [1], "dialogueKo": '여의준: "그냥요."'},
+                       {"id": "b", "seconds": 2, "panels": [2], "dialogueKo": '여의준: "요즘 바빠요."'},
+                       {"id": "c", "seconds": 2, "panels": [3], "dialogueKo": '여의준: "그러니까"'},
+                       {"id": "d", "seconds": 2, "panels": [4], "dialogueKo": '여의준: "지금 가자."'}]
+        expect("dr-c", [[ln["run"] for ln in r] for r in genmod._dialogue_runs(same_closed)], [[""], [""], [""], [""]],  # noqa: SLF001
+               "같은 화자라도 앞이 끝 문장부호면, 또는 다음 첫 어절이 어미가 아닌 낱말(요즘·지금)이면 잇지 않는다")
+        expect("dr-c", [genmod._dialogue_cont_start(t) for t in ("요…?", "까요?", "는데요…", "…아저씨?", "죠.", "지금", "요즘", "고마워", "다들")],  # noqa: SLF001
+               [True, True, True, True, True, False, False, False, False], "어미·조사 판정(DIALOGUE_CONT_ENDINGS 한 곳)")
+        expect("dr-c", [genmod._dialogue_open_end(t) for t in ("하니까…", "그러니까", "그만해..", "괜찮아요.", "요…?")],  # noqa: SLF001
+               [True, True, True, False, False], "앞 조각이 끝나지 않음 판정")
+        expect("dr-c", genmod.DIALOGUE_CONT_ENDINGS, ("요", "죠", "다", "까", "는데", "고", "서", "지", "네", "는", "을", "를"),
+               "어미 목록(한 상수)")
+
+        # ================= (dr-d) _fit_dialogue · 아주 작은 상한 =================
+        fit = genmod._fit_dialogue  # noqa: SLF001
+        expect("dr-d", [fit(_DR147_WHOLE, 0), fit(_DR147_WHOLE, 40), fit(_DR147_WHOLE, 25), fit(_DR147_WHOLE, 5),
+                        fit('여의준: "음… 이제 더 할 말도 없어요. 곧 괜찮아지겠죠." / "이런 쓸데없는 감정…"', 40),
+                        fit("한 문장인데 아주 길어서 상한을 넘지만 자를 곳이 없는 대사", 10)],
+               [_DR147_WHOLE, "음… 이제 더 할 말도 없어요. 곧 괜찮아지겠죠.", "음… 이제 더 할 말도 없어요.",
+                "음… 이제 더 할 말도 없어요.", '여의준: "음… 이제 더 할 말도 없어요. 곧 괜찮아지겠죠."',
+                "한 문장인데 아주 길어서 상한을 넘지만 자를 곳이 없는 대사"],
+               "뒤 문장부터 통째로·첫 문장 유지·원문 앞부분만·따옴표 짝 맞는 자리만")
+        for variant, small in (("webtoon", 1500), ("real", 1800)):
+            text, steps = run(cuts, variant, small)
+            tl = timeline(text)
+            expect("dr-d", [genmod._utf8_len(text) <= small, all(s in tl for s in ("0-3s", "3-6s", "6-11s", "11-14s", "14-16s", "16-18s")),  # noqa: SLF001
+                            "곧." in text, "음… 이제 더 할 말도 없어요." in tl, "still speaking the same line" in tl],
+                   [True, True, False, True, True], f"{variant} {small}B(최소형 {steps}): 모든 컷·문장 단위 대사·나눈 컷 표기")
+        # 최후 byteTrim(실사 1200B)도 대사 따옴표 안에서 자르지 않는다.
+        text, steps = run(cuts, "real", 1200)
+        expect("dr-d", [genmod._utf8_len(text) <= 1200, "byteTrim" in steps, timeline(text).count('"') % 2, "곧." in text],  # noqa: SLF001
+               [True, True, 0, False], f"실사 1200B({steps}): 바이트로 자를 때도 대사 조각 단위")
+
+        # ================= (dr-e) 컷 단위 프롬프트 =================
+        long_line = "음… 이제 더 할 말도 없어요. 곧 괜찮아지겠죠. 이런 쓸데없는 감정… 빨리 끝내버려야 하니까…"
+        one = [{"id": "c1", "no": 1, "seconds": 5, "panels": [3], "dialogueKo": f'여의준: "{long_line}"',
+                "promptEn": "Beomgeonu grabs his chin.", "locationEn": "office"}]
+        plan_c = plan_of(one)
+        with _pin_vnew(VNEW_FX=True):
+            web = genmod._cut_prompt(plan_c, {"cutId": "c1"}, "webtoon", cast=cast, has_image_ref=False)  # noqa: SLF001
+            real = genmod._cut_prompt(plan_c, {"cutId": "c1"}, "real", cast=cast, has_image_ref=False)  # noqa: SLF001
+            kling = genmod._real_cut_prompt(plan_c, {"cutIds": ["c1"]})  # noqa: SLF001
+            kling_tight = genmod._real_cut_prompt(plan_c, {"cutIds": ["c1"]}, prompt_max=genmod._utf8_len(kling) - 30)  # noqa: SLF001
+        expect("dr-e", [f'"{long_line}"' in web, f'"{long_line}"' in real, f'여의준: "{long_line}"' in kling,
+                        f'여의준: "{long_line}"' in kling_tight, genmod._utf8_len(kling_tight) <= genmod._utf8_len(kling) - 30,  # noqa: SLF001
+                        "곧." in web + real + kling + kling_tight],
+               [True, True, True, True, True, False], "컷 단위(웹툰·실사·Kling) 대사 그대로, Kling 작은 상한에서는 샷·연기부터 준다")
+    except Exception as exc:  # noqa: BLE001
+        import traceback as _tb  # noqa: PLC0415
+        bad.append(f"예외: {type(exc).__name__}: {exc}\n{_tb.format_exc()}")
+    if bad:
+        fail("작업 147 대사 이어짐·자르기 없음 검사 실패\n  " + "\n  ".join(bad))
+    else:
+        ok("작업 147 대사 (dr-a)줄이기 상한에서 cut03 말 전체·cut04 이어짐·대사 아닌 것부터·애니/실사 (dr-b)나눈 컷 한 번·계속 말하는 중 "
+           "(dr-c)따로인 줄 그대로·어미 목록 (dr-d)문장 단위·최소형 바이트 상한 (dr-e)컷 단위 대사 그대로")
+
+
 def check_vnew_real_take_costume_146() -> None:
     """작업 146 — 실사 통 테이크 COSTUME 정리(패널 읽기 메모 빼기·잘린 조각은 다음 출처). 외부 호출 없음, 유료 0.
 
@@ -50334,6 +50497,7 @@ def check_vnew_real_take_costume_146() -> None:
     else:
         ok("작업 146 실사 통 테이크 COSTUME (rc-a)메모 빼기·잘린 조각 다음 출처 (rc-b)여의준 Black crew-neck·범건우 콘티 옷 "
            "(rc-c)사진 옷 유지 문장 없음·시트 기본 옷 금지 (rc-d)애니 sha 그대로")
+
 
 
 def main() -> int:
@@ -50436,10 +50600,11 @@ def main() -> int:
     check_vnew_real_still_139()
     check_vnew_real_ai_note_140()
     check_vnew_prepare_heartbeat_144()
+    check_vnew_real_take_costume_146()
     check_vnew_real_sheet_ref_142()
     check_vnew_edit_take_menu_145()
-    check_vnew_real_take_costume_146()
     check_vnew_location_real_edit_143()
+    check_vnew_dialogue_runs_147()
     check_vnew_plan_step_stay_129()
     check_pod_zones()
     print()

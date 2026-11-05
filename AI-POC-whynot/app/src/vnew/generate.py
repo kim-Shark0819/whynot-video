@@ -3155,7 +3155,10 @@ def _take_timeline_entries(plan: dict, take: dict) -> list[dict]:
     cuts_by_id = {str(c.get("id")): c for c in (plan.get("conti") or {}).get("cuts") or []}
     entries: list[dict] = []
     clock = 0.0
-    for cut_id in _seg_cut_ids(take):
+    take_cut_ids = _seg_cut_ids(take)
+    # 작업 147: 컷을 넘어 이어지는 말·나눈 컷의 같은 대사(_dialogue_runs). lines 는 이 결과로 만든다.
+    runs = _dialogue_runs([cuts_by_id.get(str(cid)) or {} for cid in take_cut_ids], plan)
+    for run_lines, cut_id in zip(runs, take_cut_ids):
         cut = cuts_by_id.get(str(cut_id)) or {}
         seconds = float(cut.get("seconds") or 0)
         start = int(round(clock))
@@ -3179,11 +3182,15 @@ def _take_timeline_entries(plan: dict, take: dict) -> list[dict]:
             dialogue = str(first.get("lineKo") or "").strip()
             thought = _is_thought(first)
         # 지시서 118a: 컷의 모든 대사 줄(빈 대사 제외, 순서 유지). speaker·dialogue·thought(첫 줄)는 뒤호환으로 둔다.
-        all_lines = [
-            {"speaker": str(ln.get("speaker") or "").strip() or "A character",
-             "dialogue": str(ln.get("lineKo") or "").strip(), "thought": _is_thought(ln)}
-            for ln in spoken
-        ]
+        # 작업 147: 줄은 _dialogue_runs 결과(화자 없는 조각은 앞 화자 말에 붙음). 이어지는 말이면 run·utterance 를 더한다.
+        all_lines = []
+        for ln in run_lines:
+            item = {"speaker": ln["speaker"] or "A character", "dialogue": ln["lineKo"], "thought": ln["thought"]}
+            if ln["run"]:
+                item["run"] = ln["run"]
+                if ln["run"] == "start":
+                    item["utterance"] = ln["utterance"]
+            all_lines.append(item)
         eyelines = _cut_eyelines(plan, cut)
         names = [str(e.get("name") or "") for e in eyelines if e.get("name")]
         gaze_default = _gaze_is_default(eyelines, speaker, names)
@@ -3340,7 +3347,8 @@ def _take_prompt(plan: dict, take: dict, *, cast: list[dict], panel_nos: list[in
     예산(2,500바이트)을 넘으면 아래 순서로 **단계별로 조금씩** 줄이고, 매 단계 뒤 길이를 재서 한도 안이면
     즉시 멈춘다(컷 수·ON SCREEN·샷 약어·대사·MOTION·HARMONY·ASSETS 인물 문장은 유지):
       ① STYLE 둘째 문장 제거 → ② AVOID 축약 → ③ 목소리 80→40 → ④ 목소리 제거 → ⑤ 외형 170→100 →
-      ⑥ 장면 의상 200→110 → ⑦ 대사 40→25 → ⑧ RULES 오디오 축약 → ⑨ (마지막) 연기 70→55(핵심 절 유지).
+      ⑥ 장면 의상 200→110 → ⑦ RULES 오디오 축약 → ⑧ 연기 70→55(핵심 절 유지) → (작업 147) 시선 55·ON SCREEN 세부 →
+      ⑨ (맨 마지막) 대사 25(_fit_dialogue: 뒤 문장부터 통째로, 첫 문장 유지). 대사는 기본 상한이 없다(작업 147).
     그래도 넘치면 모든 후보에 ASSETS 인물 문장·ON SCREEN·MOTION·HARMONY·연기 핵심을 포함한 최소형으로
     재구성한다. 마지막에 최종 바이트·적용 단계 이름을 로그로 남긴다.
 
@@ -3545,8 +3553,9 @@ def _take_prompt(plan: dict, take: dict, *, cast: list[dict], panel_nos: list[in
         "appearance_limit": 170,   # ① ASSETS 인물 외형(얼굴·머리만)
         "voice_limit": 80,         # ② ASSETS 목소리(80→40→0)
         "action_limit": 70,        # 연기 문장 글자 상한(마지막에만 70→55, 핵심 절 유지)
-        "dialogue_limit": 40,      # ⑤ 대사 글자 상한(40→25, 제거하지 않는다)
-        "gaze_limit": 90,          # gaze 글자 상한(예외 컷에서만)
+        "dialogue_limit": 0,       # 작업 147: 대사 글자 상한(0 = 없음 → 맨 마지막에 25, _fit_dialogue 문장 단위)
+        "gaze_limit": 90,          # gaze 글자 상한(예외 컷에서만, 작업 147: 대사 앞에서 55)
+        "on_plain": False,         # 작업 147: ON SCREEN 부분 노출 괄호 빼기(대사 앞)
         "costume_limit": 200,      # ④ ASSETS 장면 의상 글자 상한(200→110)
         "avoid": avoid_full,       # ⑥ AVOID 축약
         "audio": audio_full,       # ⑦ RULES 오디오 문장 축약
@@ -3657,6 +3666,9 @@ def _take_prompt(plan: dict, take: dict, *, cast: list[dict], panel_nos: list[in
             return "ON SCREEN: no one"
         if len(on_list) == 1:
             return f"ON SCREEN: {_disp_name(on_list[0].get('name') or '')} only"
+        if state["on_plain"]:
+            # 작업 147: 대사보다 먼저 줄이는 ON SCREEN 세부(부분 노출 괄호). 이름은 그대로 남는다.
+            return "ON SCREEN: " + ", ".join(_disp_name(i.get("name") or "") for i in on_list)
         # how 가 full/main 아닌(부분 노출) 사람이 있으면 괄호로 표기한다.
         special = any(str(i.get("how") or "full") not in ("full", "main") for i in on_list)
         parts = []
@@ -3673,16 +3685,29 @@ def _take_prompt(plan: dict, take: dict, *, cast: list[dict], panel_nos: list[in
 
     def _line_piece(line: dict, off_speaker: str, limit: int) -> str:
         # 대사 한 줄 표기(지시서 117·118a): 속마음 > 화면 밖 > 보통. 글자 상한은 줄마다 적용한다.
+        # 작업 147: 상한은 _fit_dialogue(뒤 문장부터 통째로, 첫 문장 유지, 문장 안 자르기 없음). 컷을 넘는 말(run)은
+        # 첫 컷에 말 전체 + "이어짐", 다음 컷에 "이어서 끝맺음" + 이 컷 조각, 나눈 컷의 같은 대사는 "계속 말하는 중"(글 없음).
         speaker_ko = str(line.get("speaker") or "").strip()
-        dialogue = _clip(str(line.get("dialogue") or "").strip(), limit)
-        if not dialogue:
-            return ""
+        run = str(line.get("run") or "")
         who = _disp_name(speaker_ko) or "A character"
+        tags = []
         if line.get("thought"):
             # 지시서 117: 속마음은 화면 밖 화자 표기보다 우선(입 다문 채 목소리만).
-            return f'{who} (inner voice-over, lips closed): "{dialogue}"'
-        if off_speaker and off_speaker == speaker_ko:
-            return f'{who} (off-screen voice): "{dialogue}"'
+            tags.append("inner voice-over, lips closed")
+        elif off_speaker and off_speaker == speaker_ko:
+            tags.append("off-screen voice")
+        if run == "still":
+            return f"{who} ({'; '.join(tags + ['still speaking the same line'])})"
+        source = line.get("utterance") if run == "start" else line.get("dialogue")
+        dialogue = _fit_dialogue(str(source or "").strip(), limit)
+        if not dialogue:
+            return ""
+        if run == "start":
+            tags.append("one continuous line that carries over the next cut, no pause at the cut")
+        elif run == "cont":
+            tags.append("continues the same line from the previous shot, finishing with")
+        if tags:
+            return f'{who} ({"; ".join(tags)}): "{dialogue}"'
         return f'{who}: "{dialogue}"'
 
     def _entry_text(entry: dict) -> str:
@@ -3761,7 +3786,6 @@ def _take_prompt(plan: dict, take: dict, *, cast: list[dict], panel_nos: list[in
         ("voice_limit", 0, "voiceDrop"),
         ("appearance_limit", 100, "appearance100"),
         ("costume_limit", 110, "costume110"),
-        ("dialogue_limit", 25, "dialogue25"),
         ("audio", audio_short, "audioShort"),
         ("action_limit", 55, "action55"),
     ]
@@ -3777,6 +3801,14 @@ def _take_prompt(plan: dict, take: dict, *, cast: list[dict], panel_nos: list[in
         # 090 필수 수정 1(가): 묘사 규칙 짧은 형은 fxShort(없으면 audioShort) 다음, 연기를 줄이는 action55 앞.
         # 묘사 규칙은 켬이면 늘 붙으므로 기호·분위기가 없어도 이 단계를 둔다.
         steps.insert(steps.index(("action_limit", 55, "action55")), ("body", RULE_BODY_SHORT, "bodyShort"))
+    # 작업 147: 대사는 맨 마지막에 줄인다. 그 앞에 시선(예외 컷 gaze 가 55자를 넘을 때만)·ON SCREEN 세부(부분 노출이
+    # 있을 때만)를 먼저 줄인다. 대사 25 는 뒤 문장부터 통째로(첫 문장 유지, _fit_dialogue).
+    if any(len(_entry_gaze(e)) > 55 for e in entries):
+        steps.append(("gaze_limit", 55, "gaze55"))
+    if any(len(e.get("onScreen") or []) > 1 and any(str(i.get("how") or "full") not in ("full", "main")
+                                                   for i in e.get("onScreen") or []) for e in entries):
+        steps.append(("on_plain", True, "onScreenPlain"))
+    steps.append(("dialogue_limit", 25, "dialogue25"))
     for field, value, label in steps:
         if _utf8_len(prompt) <= budget:
             break
@@ -3796,6 +3828,8 @@ def _take_prompt(plan: dict, take: dict, *, cast: list[dict], panel_nos: list[in
             first_thought = next((j for j, ln in enumerate(cut_lines) if ln.get("thought")), None)
             first_spoken = next((j for j, ln in enumerate(cut_lines) if not ln.get("thought")), None)
             for j in range(len(cut_lines) - 1, -1, -1):
+                if cut_lines[j].get("run"):
+                    continue  # 작업 147: 컷을 넘는 말(첫 컷·이어짐·계속 말하는 중)은 빼지 않는다(앞뒤 컷 표기가 어긋난다).
                 if cut_lines[j].get("thought"):
                     if j != first_thought:
                         thought_order.append((i, j))
@@ -3827,6 +3861,8 @@ def _take_prompt(plan: dict, take: dict, *, cast: list[dict], panel_nos: list[in
                 str(take.get("id") or ""), ",".join(missing), _utf8_len(prompt),
             )
 
+        minimal_dlg = {"limit": 25}  # 작업 147: 최소형 대사 상한(후보 만들 때 0 → 25, 그 뒤 재구성은 25)
+
         def _minimal_timeline(with_shot: bool, with_action: bool) -> str:
             # 최소형: 머리(타임스탬프 + 샷 약어) + ON SCREEN + (연기 핵심) + 대사 + 예외 gaze.
             # ON SCREEN·대사는 어떤 최소형에서도 유지한다. 연기는 with_action 이 True 일 때만 넣는다
@@ -3855,9 +3891,9 @@ def _take_prompt(plan: dict, take: dict, *, cast: list[dict], panel_nos: list[in
                     if fx_short:
                         bits.append("FX: " + ", ".join(fx_short))
                 off = str(e.get("offScreenSpeaker") or "").strip()
-                # 지시서 118a: 모든 줄, 줄마다 25자.
+                # 지시서 118a: 모든 줄. 작업 147: 대사 상한은 minimal_dlg(먼저 상한 없이, 그다음 25 — 문장 단위).
                 for ln in _entry_lines(e):
-                    piece = _line_piece(ln, off, 25)
+                    piece = _line_piece(ln, off, minimal_dlg["limit"])
                     if piece:
                         bits.append(piece)
                 gaze = _clip(_entry_gaze(e), 55)
@@ -3897,21 +3933,30 @@ def _take_prompt(plan: dict, take: dict, *, cast: list[dict], panel_nos: list[in
         motion_min_inner = MOTION_MIN + (MOTION_MIN_INNER if take_voices in ("thought", "mixed") else "")
 
         # (머리 블록, 꼬리 블록). MOTION·HARMONY 를 넣으면 TIMELINE 과 RULES 사이(_assemble 순서와 같다).
-        keep_action = [
-            # ① 연기 유지 + 외형 요약 + 짧은 RULES.
-            ([style, _assets(), _minimal_timeline(True, True)], [rules_min, avoid_short]),
-            ([style_first, _assets(), _minimal_timeline(True, True)], [rules_short]),
-            # ② 연기 유지 + 외형 비움(COSTUME 유지) + 짧은 RULES — 6컷 보통 입력을 여기서 맞춘다.
-            ([style_first, _assets_no_appearance(), _minimal_timeline(True, True)], [rules_short]),
-            ([style_first, _assets_no_appearance(), _minimal_timeline(False, True)], [rules_short]),
-        ]
-        drop_action = [
-            # ③ (마지막 수단) 연기 제거 — 12컷 극단 입력 등 연기 보존이 불가능할 때만.
-            ([style_first, _assets_no_appearance(), _minimal_timeline(True, False)], [rules_short]),
-            ([style_first, _assets_no_appearance(), _minimal_timeline(False, False)], [rules_short]),
-            ([style_first, _assets_no_appearance(), _minimal_timeline(False, False)], [rule_eyes.strip()]),
-        ]
-        plain = [_join(head + tail) for head, tail in keep_action + drop_action]
+        # 작업 147: 대사는 마지막에 줄인다 — 모든 후보를 대사 그대로(상한 없음) 먼저 보고, 그다음 대사 25(문장 단위)로 본다.
+        def _groups() -> tuple[list, list]:
+            keep = [
+                # ① 연기 유지 + 외형 요약 + 짧은 RULES.
+                ([style, _assets(), _minimal_timeline(True, True)], [rules_min, avoid_short]),
+                ([style_first, _assets(), _minimal_timeline(True, True)], [rules_short]),
+                # ② 연기 유지 + 외형 비움(COSTUME 유지) + 짧은 RULES — 6컷 보통 입력을 여기서 맞춘다.
+                ([style_first, _assets_no_appearance(), _minimal_timeline(True, True)], [rules_short]),
+                ([style_first, _assets_no_appearance(), _minimal_timeline(False, True)], [rules_short]),
+            ]
+            drop = [
+                # ③ (마지막 수단) 연기 제거 — 12컷 극단 입력 등 연기 보존이 불가능할 때만.
+                ([style_first, _assets_no_appearance(), _minimal_timeline(True, False)], [rules_short]),
+                ([style_first, _assets_no_appearance(), _minimal_timeline(False, False)], [rules_short]),
+                ([style_first, _assets_no_appearance(), _minimal_timeline(False, False)], [rule_eyes.strip()]),
+            ]
+            return keep, drop
+
+        minimal_dlg["limit"] = 0
+        groups_full = _groups()
+        minimal_dlg["limit"] = 25
+        groups_short = _groups()
+        plain = [_join(head + tail) for keep_action, drop_action in (groups_full, groups_short)
+                 for head, tail in keep_action + drop_action]
         if fx_on:
             # 090 필수 수정 1(다): 켬이면 최소형에도 MOTION·HARMONY 를 넣는다. 원문이 들어가면 원문, 아니면 짧은 형.
             # 연기를 남기는 후보를 먼저 다 본 뒤 연기를 뺀다(067). MOTION·HARMONY 는 의상보다 높은 등급(069)이라
@@ -3922,8 +3967,9 @@ def _take_prompt(plan: dict, take: dict, *, cast: list[dict], panel_nos: list[in
             def _with(group: list, mh: list[str]) -> list[str]:
                 return [_join(head + mh + tail) for head, tail in group]
 
-            candidates = (_with(keep_action, mh_full) + _with(keep_action, mh_short)
-                          + _with(drop_action, mh_full) + _with(drop_action, mh_short))
+            candidates = [cand for keep_action, drop_action in (groups_full, groups_short)
+                          for cand in (_with(keep_action, mh_full) + _with(keep_action, mh_short)
+                                       + _with(drop_action, mh_full) + _with(drop_action, mh_short))]
         else:
             candidates = plain
         chosen = None
@@ -3957,6 +4003,11 @@ def _take_prompt(plan: dict, take: dict, *, cast: list[dict], panel_nos: list[in
             chosen = "\n".join(b for b in [_assets(), _minimal_timeline(False, False)] if b)
             if _utf8_len(chosen) > budget:
                 chosen = _trim_utf8(chosen, budget)
+                if chosen.count('"') % 2:
+                    # 작업 147: 대사 따옴표 안에서 잘렸으면 그 대사 조각 앞("; ")까지 물린다(대사 글을 반쯤 남기지 않는다).
+                    quote = chosen.rfind('"')
+                    piece = chosen.rfind("; ", 0, quote)
+                    chosen = chosen[:piece] if piece > 0 else chosen[:quote].rstrip()
         prompt = chosen
         if fx_on and not (motion in prompt and harmony in prompt):
             # 090: 최소형의 MOTION·HARMONY 형을 단계 로그 끝에 적는다(원문이면 적지 않는다).
@@ -6290,6 +6341,143 @@ def _cut_lines(plan: dict, cut: dict) -> list[dict]:
     return out
 
 
+# 작업 147: 대사 줄이기 단위(문장) 경계 — 끝 문장부호(. ! ?, 뒤 닫는 따옴표 포함) 뒤 공백, 또는 " / " 구분자.
+# 말줄임표 "…" 만으로는 문장을 끊지 않는다("음… 이제 …" 는 한 문장).
+_DIALOGUE_BREAK = re.compile(r"[.!?。！？]+[\"”’」]*(?=\s)|(?=\s+/\s+)")
+# 작업 147: 문장을 시작할 수 없는 한국어 어미·조사(한 곳). 다음 컷 대사 첫 어절이 이것들로만 이루어지면 앞 컷 말의 끝이다.
+DIALOGUE_CONT_ENDINGS = ("요", "죠", "다", "까", "는데", "고", "서", "지", "네", "는", "을", "를")
+_DIALOGUE_ELLIPSES = ("…", "..", "⋯")
+_DIALOGUE_TERMINALS = (".", "!", "?", "。", "！", "？")
+
+
+def _fit_dialogue(text: str, limit: int = 0) -> str:
+    """프롬프트에 넣는 대사 한 줄(작업 147, 대사를 넣는 모든 프롬프트가 이 함수 하나를 쓴다).
+
+    limit <= 0 이거나 글자 수가 limit 이하면 그대로. 넘으면 **뒤 문장부터 통째로** 뺀다(첫 문장은 늘 남는다).
+    문장 안에서 자르지 않고, 원문에 없는 마침표를 붙이지 않는다(남는 글은 늘 원문의 앞부분이다). 따옴표 짝이
+    맞지 않는 자리(`이름: "가. 나." / "다"` 의 "가." 뒤)에서는 끊지 않는다.
+    """
+    body = str(text or "").strip()
+    if limit <= 0 or len(body) <= limit:
+        return body
+    ends = [m.end() for m in _DIALOGUE_BREAK.finditer(body)]
+    candidates = []
+    for end in ends:
+        head = body[:end].rstrip()
+        if head and head.count('"') % 2 == 0 and head.count("“") == head.count("”"):
+            candidates.append(head)
+    if not candidates:
+        return body
+    fitting = [c for c in candidates if len(c) <= limit]
+    return fitting[-1] if fitting else candidates[0]
+
+
+def _dialogue_open_end(text: str) -> bool:
+    """앞 조각이 말을 끝내지 않았는가: 끝 문장부호가 없거나 말줄임표("…"·"..")로 끝난다."""
+    tail = str(text or "").rstrip().rstrip("\"”’」").rstrip()
+    if not tail:
+        return False
+    if tail.endswith(_DIALOGUE_ELLIPSES):
+        return True
+    return not tail.endswith(_DIALOGUE_TERMINALS)
+
+
+def _dialogue_cont_start(text: str) -> bool:
+    """다음 조각이 앞말의 끝인가: "…" 로 시작하거나 첫 어절(한글 이어진 글자)이 DIALOGUE_CONT_ENDINGS 로만 이루어진다.
+
+    "요…?" "까요?" "는데요…" 는 이어짐, "지금" "고마워" "다들" 처럼 어미 뒤에 다른 글자가 붙은 낱말은 새 문장이다.
+    """
+    head = str(text or "").lstrip().lstrip("\"“‘「").lstrip()
+    if head.startswith(_DIALOGUE_ELLIPSES):
+        return True
+    word = re.match(r"[가-힣]+", head)
+    if not word:
+        return False
+    word = word.group(0)
+    ok = [False] * (len(word) + 1)
+    ok[0] = True
+    for i in range(len(word)):
+        if ok[i]:
+            for ending in DIALOGUE_CONT_ENDINGS:
+                if word.startswith(ending, i):
+                    ok[i + len(ending)] = True
+    return ok[len(word)]
+
+
+def _split_cut_pair(a: dict, b: dict) -> bool:
+    """한 패널을 두 컷으로 나눈 사이인가(같은 패널이 겹치거나, id 가 cut07-1 · cut07-2 처럼 뒤 번호만 다르다)."""
+    def _panels(cut: dict) -> set:
+        return {int(p) for p in (cut.get("panels") or []) if isinstance(p, (int, float)) and not isinstance(p, bool)}
+
+    pa, pb = _panels(a), _panels(b)
+    if pa and pb and (pa & pb):
+        return True
+    ia, ib = str(a.get("id") or ""), str(b.get("id") or "")
+    base_a, base_b = re.sub(r"-\d+$", "", ia), re.sub(r"-\d+$", "", ib)
+    return bool(base_a) and base_a == base_b and base_a != ia and base_b != ib
+
+
+def _dialogue_runs(conti_cuts: list[dict], plan: dict | None = None) -> list[list[dict]]:
+    """컷을 넘어 이어지는 한 사람의 말(작업 147). 컷 순서대로, 컷마다 말한 줄 목록을 돌려준다.
+
+    줄: {speaker, lineKo(이 컷 몫), thought, run, utterance}. run 은
+      ""      — 보통 줄(지금 그대로),
+      "start" — 다음 컷으로 이어지는 말의 첫 컷. utterance = 이어진 말 전체,
+      "cont"  — 앞 컷 말을 이어 끝맺는 조각(lineKo = 이 컷 몫),
+      "still" — 한 패널을 나눈 컷의 같은 대사(말은 첫 컷에 한 번만, 이 컷은 계속 말하는 중).
+    잇는 조건(모두): 같은 화자 · 이웃 컷 · 앞 조각이 끝 문장부호 없이(또는 "…"·".." 로) 끝남 · 다음 조각이 "…" 나
+    DIALOGUE_CONT_ENDINGS 로 시작. 이웃한 나눈 컷(_split_cut_pair)의 대사가 글자까지 같으면 "still".
+    한 컷 안에서 화자 없는 조각(`이름: "가" / "나"` 의 "나")은 앞 화자의 말로 이어 붙인다. 속마음 여부는 첫 조각을 따른다.
+    """
+    per_cut: list[list[dict]] = []
+    for cut in conti_cuts or []:
+        merged: list[dict] = []
+        for ln in _cut_lines(plan or {}, cut or {}):
+            text = str(ln.get("lineKo") or "").strip()
+            if ln.get("silent") or not text:
+                continue
+            speaker = str(ln.get("speaker") or "").strip()
+            if not speaker and merged and merged[-1]["speaker"]:
+                speaker = merged[-1]["speaker"]  # `이름: "가" / "나"` 의 "나" = 같은 사람
+            merged.append({"speaker": speaker, "lineKo": text, "thought": bool(_is_thought(ln)), "run": "",
+                           "utterance": ""})
+        per_cut.append(merged)
+    for k in range(1, len(per_cut)):
+        prev, cur = per_cut[k - 1], per_cut[k]
+        if not prev or not cur:
+            continue
+        same = [(p["speaker"], p["lineKo"]) for p in prev] == [(c["speaker"], c["lineKo"]) for c in cur]
+        if same and _split_cut_pair(conti_cuts[k - 1] or {}, conti_cuts[k] or {}):
+            for p, c in zip(prev, cur):
+                if not p["run"]:
+                    p["run"], p["utterance"] = "start", p["lineKo"]
+                c["run"], c["thought"], c["source"] = "still", p["thought"], p.get("source") or p
+            continue
+        a, b = prev[-1], cur[0]
+        if a["run"] == "still":
+            continue
+        if a["speaker"] and a["speaker"] == b["speaker"] and _dialogue_open_end(a["lineKo"]) \
+                and _dialogue_cont_start(b["lineKo"]):
+            head = a.get("source")
+            if head is None:
+                # 첫 컷: 끝에 붙은 같은 화자의 줄들(한 컷 안 연달은 말)을 한 줄로 묶어 이어지는 말의 머리로 둔다.
+                at = len(prev) - 1
+                while at > 0 and prev[at - 1]["speaker"] == a["speaker"] and not prev[at - 1]["run"]:
+                    at -= 1
+                head = prev[at]
+                if not head["run"]:
+                    head["lineKo"] = " ".join(p["lineKo"] for p in prev[at:])
+                    head["run"], head["utterance"] = "start", head["lineKo"]
+                    del prev[at + 1:]
+            sep = " " if b["lineKo"].lstrip().startswith(_DIALOGUE_ELLIPSES) else ""
+            head["utterance"] = head["utterance"].rstrip() + sep + b["lineKo"].lstrip()
+            b["run"], b["thought"], b["source"] = "cont", head["thought"], head
+    for lines in per_cut:
+        for ln in lines:
+            ln.pop("source", None)
+    return per_cut
+
+
 def _scene_by_cut(plan: dict) -> dict:
     """cutId → 그 컷이 속한 프리비즈 scene. 배우 색·등장 여부를 찾을 때 쓴다."""
     out: dict[str, dict] = {}
@@ -6649,7 +6837,7 @@ def _cut_prompt(plan: dict, seg: dict, variant: str, *, cast: list[dict], has_im
 
     바이트 초과 시 줄이는 순서(각 단계는 **넘친 만큼만** 문장 단위로 줄이고, 한도 안에 들어오면 즉시
     멈춘다): ① SETTING 의 장소 요약 → ② SETTING 의 backgroundEn → ③ MOOD → ④ BLOCKING 뒤쪽 문장
-    → ⑤ DIALOGUE 의 deliveryEn → ⑥ SHOT 뒤쪽 문장 → ⑦ 마지막에만 ACTION 뒤쪽 문장.
+    → ⑤ DIALOGUE 의 deliveryEn → ⑥ SHOT 뒤쪽 문장 → ⑦ 마지막에만 ACTION 뒤쪽 문장 → ⑧ (작업 147) 대사 25(_fit_dialogue).
     ASSETS·CAST·CONTINUITY·ACTION 첫 문장은 절대 지우지 않는다. **한도 안이면 아무 것도 지우지 않는다.**
 
     vnew-live-fx RA5(VNEW_FX 켬일 때만): 웹툰은 ACTION 다음 `FX: {기호 문장; …}.`, 실사는 `EXPRESSION: {실사 표현}.`
@@ -6780,13 +6968,14 @@ def _cut_prompt(plan: dict, seg: dict, variant: str, *, cast: list[dict], has_im
     spoken = [line for line in lines if not line.get("silent") and str(line.get("lineKo") or "").strip()]
     any_spoken = bool(spoken)
 
-    def _dialogue_line(with_delivery: bool) -> str:
+    def _dialogue_line(with_delivery: bool, limit: int = 0) -> str:
         if not any_spoken:
             return "DIALOGUE: No one speaks; keep mouths closed."
         parts = []
         for line in spoken:
             speaker = str(line.get("speaker") or "").strip()
-            text = str(line.get("lineKo") or "").strip()
+            # 작업 147: 대사는 자르지 않는다(맨 마지막 단계에서만 _fit_dialogue 로 뒤 문장부터 통째로).
+            text = _fit_dialogue(str(line.get("lineKo") or "").strip(), limit)
             piece = (f'{speaker or "A character"} (inner thought, voice-over only — mouth stays closed, lips do not move): "{text}"'
                      if _is_thought(line) else f'{speaker or "A character"} (Korean, lips move): "{text}"')
             if with_delivery and not _is_thought(line):
@@ -6859,13 +7048,14 @@ def _cut_prompt(plan: dict, seg: dict, variant: str, *, cast: list[dict], has_im
         return ("SETTING: " + body) if body else ""
 
     def _build(*, scene_summary: str, background: str, mood: str, blocking: str,
-               with_delivery: bool, shot: str, action: str, fx_short: bool = False, body: bool = False) -> str:
+               with_delivery: bool, shot: str, action: str, fx_short: bool = False, body: bool = False,
+               dialogue_limit: int = 0) -> str:
         shot_line = ("SHOT: " + shot) if shot else "SHOT: Match the framing, lens, camera height and angle exactly as shown in @Video1."
         blocking_line = ("BLOCKING: " + blocking) if blocking else ""
         action_line = ("ACTION: " + action) if action else ""
         mood_line = ("MOOD: " + mood) if mood else ""
         setting_line = _setting_line(background, scene_summary)
-        dlg = _dialogue_line(with_delivery)
+        dlg = _dialogue_line(with_delivery, dialogue_limit)
         # 순서(설계자 2026-10-26 재지시 v2): … ACTION → MOTION(short) → MOOD → SETTING → HARMONY(short)
         # → DIALOGUE → CONTINUITY. MOTION·HARMONY short 는 고정 블록(지우지 않는 등급).
         # vnew-live-fx: FX/EXPRESSION 줄은 ACTION 바로 다음(끔이면 빈 값이라 빠진다).
@@ -6891,6 +7081,7 @@ def _cut_prompt(plan: dict, seg: dict, variant: str, *, cast: list[dict], has_im
         "action": action_en,
         "fx_short": False,
         "body": fx_on,
+        "dialogue_limit": 0,  # 작업 147: 대사 상한(0 = 없음, byteTrim 바로 앞에서만 25)
     }
 
     def _current() -> str:
@@ -6904,6 +7095,7 @@ def _cut_prompt(plan: dict, seg: dict, variant: str, *, cast: list[dict], has_im
             action=state["action"],
             fx_short=state["fx_short"],
             body=state["body"],
+            dialogue_limit=state["dialogue_limit"],
         )
 
     # 090 필수 수정 2: 적용한 줄이기 단계를 로그 한 줄로 남긴다(운영 확인용, 프롬프트 글자는 바꾸지 않는다).
@@ -6979,6 +7171,14 @@ def _cut_prompt(plan: dict, seg: dict, variant: str, *, cast: list[dict], has_im
     # ⑦ 마지막에만 ACTION 뒤쪽 문장(첫 문장은 절대 지우지 않는다).
     if _reduce_field("action", keep_first=True, label="action"):
         return _done(_current())
+    # ⑧ (작업 147) 맨 마지막에만 대사: 줄마다 25자 안으로 뒤 문장부터 통째로 뺀다(첫 문장 유지, 문장 안 자르기 없음).
+    if any_spoken:
+        before = _current()
+        state["dialogue_limit"] = 25
+        if _current() != before:
+            applied.append("dialogue")
+        if _utf8_len(_current()) <= budget:
+            return _done(_current())
     # 그래도 넘치면 전체를 바이트로 자른다(최후). CAST·CONTINUITY 가 이미 들어간 뼈대 기준.
     applied.append("byteTrim")
     return _done(_trim_utf8(_current(), budget))
@@ -7027,7 +7227,7 @@ def _previz_timeline_text(plan: dict, seg: dict) -> str:
                 who = speaker_name
             else:
                 who = "the speaker"
-            part += f' {who} speaks (Korean): "{dialogue[:40]}"'
+            part += f' {who} speaks (Korean): "{_fit_dialogue(dialogue, 40)}"'  # 작업 147: 문장 단위(자르기 없음)
         if emotion:
             part += f" ({emotion})"
         lines.append(part + ".")
@@ -7957,17 +8157,31 @@ def _real_cut_prompt(plan: dict, seg: dict, *, model: str = "", prompt_max: int 
     if action:
         lines.append("ACTION: " + action + ".")
     spoken = [ln for ln in _cut_lines(plan, cut) if not ln.get("silent") and str(ln.get("lineKo") or "").strip()]
-    if spoken:
-        said = " / ".join(f'{str(ln.get("speaker") or "").strip() or "A character"}: "{str(ln.get("lineKo")).strip()}"'
-                          for ln in spoken)
-        lines.append("DIALOGUE (Korean, lip-sync): " + said)
-    body = "\n".join(lines)
+
+    def _said(limit: int) -> str:
+        # 작업 147: 대사는 _fit_dialogue 로만(문장 안 자르기 없음). 예산이 모자라면 샷·연기부터 줄인다.
+        if not spoken:
+            return ""
+        return "DIALOGUE (Korean, lip-sync): " + " / ".join(
+            f'{str(ln.get("speaker") or "").strip() or "A character"}: "{_fit_dialogue(str(ln.get("lineKo")).strip(), limit)}"'
+            for ln in spoken)
+
+    dialogue = _said(0)
+    rest = "\n".join(lines)
+    body = "\n".join(p for p in (rest, dialogue) if p)
     budget = _prompt_budget(model)
     if prompt_max:
         budget = min(budget, int(prompt_max))
     room = budget - _utf8_len(head) - _utf8_len(tail) - 2
     if _utf8_len(body) > room:
-        body = vpoc_fal._trim_prompt(body, max(0, room))  # noqa: SLF001
+        # 작업 147: 대사는 맨 마지막 — SHOT 줄이 통째로 남을 자리가 없을 때만 대사를 25(문장 단위)로 줄인다.
+        if dialogue and room - _utf8_len(dialogue) - 1 < _utf8_len(lines[0]):
+            dialogue = _said(25)
+        room_rest = room - (_utf8_len(dialogue) + 1 if dialogue else 0)
+        rest = vpoc_fal._trim_prompt(rest, room_rest) if room_rest > 0 else ""  # noqa: SLF001
+        body = "\n".join(p for p in (rest, dialogue) if p)
+        if _utf8_len(body) > room:
+            body = vpoc_fal._trim_prompt(body, max(0, room))  # noqa: SLF001 — 최후(거의 없음)
     return "\n".join(p for p in (head, body, tail) if p)
 
 
