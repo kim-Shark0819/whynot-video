@@ -51784,6 +51784,268 @@ def check_vnew_ref_video_split_152() -> None:
            "(rv-e)실패 조각만 재시도·통째 30초 다시 만들기 차단 (rv-f)나누기 끔 → 제출 전 차단")
 
 
+_CF153_MSG = "The content could not be processed because it contained material flagged by a content checker."
+_CF153_LINE = "몸 좋고 / 좆 큰 놈이랑 붙어 먹으면"
+
+
+def check_vnew_content_flag_153() -> None:
+    """작업 153 — fal 콘텐츠 검사 거절 → 순화(같은 모델) → Seedance → 한국어 문구. 가짜 fal(Wan 3.0 r2v·Seedance)·가짜 LLM, 유료 0.
+
+    (cf-a) 분류: test3 fal 원문(직접·fal.rejection 문구 둘 다) → contentFlag, 소리·likeness 문구는 아님, USER_FACING_KINDS
+    (cf-b) 순화: test3 cut-11 대사·연기 → "좆"·"붙어 먹"·"downward"·"lips separate" 0, 대사 줄 수·화자 같음, LLM 0회.
+           순화 안 한 프롬프트 sha = 기본 호출 sha, 깨끗한 글은 순화해도 sha 같음. 지도에 없는 말 → LLM 1번·charge_text 1건·캐시
+    (cf-c) 흐름: Wan 거절 → Wan 순화 거절 → Seedance 순화 성공, contentFallback {from,to}·화면 보기·제출마다 원장 1번·로그 step=soften
+    (cf-d) 두 번 다 거절 → 한국어 문구(컷 1…3)·failureKind contentFlag, 다시 시도 → 1단계(Wan 순화)부터
+    (cf-e) 152 조각: 조각 2만 거절 → 조각 2만 순화·Seedance(조각 1 다시 내지 않음), 원장 4건, 이어 붙임
+    (cf-f) vnew.js contentFallback 한 줄(node --check, node 없으면 경고 후 건너뜀)
+    """
+    import hashlib as _hashlib  # noqa: PLC0415
+    import logging as _logging  # noqa: PLC0415
+    import traceback as _tb  # noqa: PLC0415
+
+    sys.path.insert(0, str(ROOT / "app"))
+    from src.vnew import generate as genmod  # noqa: PLC0415
+    from src.vnew import plan as planmod  # noqa: PLC0415
+    from src.vpoc import errors as vpoc_errors  # noqa: PLC0415
+    from src.vpoc import fal as falmod  # noqa: PLC0415
+
+    bad: list[str] = []
+    owner = "tester"
+    clip_re = re.compile(rb"^CLIP:(\d+\.\d+)-(\d+\.\d+):")
+    rec_seconds = {b"PREVIZ-REC-s1": 15.0}
+
+    def video_seconds(mp4: bytes) -> float:
+        match = clip_re.match(mp4 or b"")
+        if match:
+            return float(match.group(2)) - float(match.group(1))
+        return rec_seconds.get(bytes(mp4 or b""), 0.0)
+
+    def sha(text: str) -> str:
+        return _hashlib.sha256(str(text).encode("utf-8")).hexdigest()
+
+    def speakers(prompt: str) -> list[str]:
+        return re.findall(r"([A-Za-z][\w-]*(?: \([^)]*\))?): \"", prompt)
+
+    class _Logs(_logging.Handler):
+        def __init__(self) -> None:
+            super().__init__()
+            self.lines: list[str] = []
+
+        def emit(self, record) -> None:
+            self.lines.append(record.getMessage())
+
+    logs = _Logs()
+    log_level = genmod.log.level
+    try:
+        genmod.log.addHandler(logs)
+        genmod.log.setLevel(_logging.INFO)
+        genmod._SOFTEN_CACHE.clear()  # noqa: SLF001
+        with _guard_real_llm(), _LrEnv(owner) as env, _pin_vnew(
+                VNEW_FX=False, VNEW_GEN_PARALLEL=2, POLL_INTERVAL_S=0, VNEW_TAKE_RESOLUTION="480p",
+                VNEW_TAKE_MAX_SECONDS=30, VNEW_TAKE_REF_SPLIT=True, VNEW_TAKE_AUDIO=True,
+                VNEW_CONTENT_FALLBACK_MODEL=_LR_ENDPOINT):
+            prefix_id = genmod.vpoc_settings.FAL_ID_PREFIX
+            wan_id = prefix_id + _RV152_ENDPOINT
+            seed_find = genmod.vpoc_fal.find
+            env.set(genmod.vpoc_fal, "find", lambda m: {"id": wan_id, "endpointId": _RV152_ENDPOINT, "category": "reference-to-video",
+                                                        "caps": dict(_RV152_CAPS)} if str(m) == wan_id else seed_find(m))
+            env.set(genmod, "_cut_clip", lambda mp4, unit: {
+                "bytes": b"CLIP:%.3f-%.3f:" % (float(unit["startSec"]), float(unit["endSec"])) + bytes(mp4)[:20],
+                "origSeconds": round(float(unit["endSec"]) - float(unit["startSec"]), 3),
+                "sentSeconds": round(float(unit["endSec"]) - float(unit["startSec"]), 3), "padded": False})
+            env.set(genmod, "_mp4_seconds", video_seconds)
+            merges: list[int] = []
+            env.set(genmod, "_conform_concat", lambda pieces: merges.append(len(pieces)) or b"PARTS:%d" % len(pieces))
+            llm_calls: list[str] = []
+
+            def fake_soften(blocks, *, model):
+                import json as _json  # noqa: PLC0415
+
+                items = _json.loads(blocks[0]["text"])["items"]
+                llm_calls.append(blocks[0]["text"])
+                return ({"items": [{"id": it["id"], "text": it["text"].replace("박아", "안아")} for it in items]},
+                        {"model": model, "inputTokens": 40, "outputTokens": 20})
+
+            env.set(genmod, "_read_soften", fake_soften)
+            reject = {"fn": lambda req: False}
+            base_fal = env._fal  # noqa: SLF001
+
+            def fal_request(method, url, payload=None, *, where=""):
+                rid = url.split("/requests/", 1)[-1].split("/", 1)[0]
+                req = next((r for r in env.requests if r["rid"] == rid), None)
+                if method == "GET" and not url.endswith("/status") and req is not None and reject["fn"](req):
+                    env.fal_calls.append((method, url))
+                    raise env.VpocError("fal.poll", "HTTP422", _CF153_MSG, 502)
+                return base_fal(method, url, payload, where=where)
+
+            env.set(falmod, "_request", fal_request)
+            client = env.client()
+
+            def make(pid: str, cut_ids: list[str], seconds: int, explicit: dict) -> None:
+                env.make_plan(pid, [{"id": "s1", "cutIds": cut_ids, "seconds": seconds}])
+
+                def mutator(data: dict) -> None:
+                    data["input"]["videoModel"] = wan_id
+                    for cut in data["conti"]["cuts"]:
+                        text, action = explicit.get(cut["id"]) or (f"대사{cut['no']}번.", "Kim nods once.")
+                        cut["dialogueKo"] = f'에이: "{text}"'
+                        brief = data["previz"]["shotBrief"]["cuts"][cut["id"]]
+                        brief["dialogue"] = [{"speaker": "에이", "lineKo": text, "deliveryEn": "calm"}]
+                        brief["actionEn"] = action
+
+                planmod.mutate_plan(owner, pid, mutator)
+
+            test3 = {"c2": (_CF153_LINE, "He takes Lee's hand and guides it downward, smirking."),
+                     "c3": ("이리 와.", "Their lips separate by a few centimetres.")}
+
+            # ================= (cf-a) 분류 =================
+            via_fal = falmod.rejection(_CF153_MSG, "HTTP422")[1]
+            if genmod._content_kind(_CF153_MSG) != "contentFlag" or genmod._content_kind(via_fal) != "contentFlag":  # noqa: SLF001
+                bad.append(f"(cf-a) test3 원문이 contentFlag 가 아닙니다: {via_fal}")
+            if genmod._content_kind(falmod._REJECT_AUDIO_MSG) or genmod._content_kind(falmod._REJECT_LIKENESS_MSG):  # noqa: SLF001
+                bad.append("(cf-a) 소리·likeness 문구가 contentFlag 로 분류됩니다")
+            if genmod.CONTENT_FLAG_WORDS != ("content checker", "flagged", "content policy", "safety", "moderation") \
+                    or "contentFlag" not in vpoc_errors.USER_FACING_KINDS:
+                bad.append("(cf-a) 분류 낱말 상수·USER_FACING_KINDS")
+
+            # ================= (cf-b) 순화 =================
+            make("prj_cf_b", ["c1", "c2", "c3"], 15, test3)
+            plan_b = env.plan("prj_cf_b")
+            take_b = genmod._take_units(plan_b)[0]  # noqa: SLF001
+            caps_w = dict(_RV152_CAPS)
+            plain = genmod._take_payload(owner, "prj_cf_b", plan_b, take_b, caps_w)["prompt"]  # noqa: SLF001
+            plain_off = genmod._take_payload(owner, "prj_cf_b", plan_b, take_b, caps_w, soften=False)["prompt"]  # noqa: SLF001
+            soft = genmod._take_payload(owner, "prj_cf_b", plan_b, take_b, caps_w, soften=True)["prompt"]  # noqa: SLF001
+            if sha(plain) != sha(plain_off) or "좆" not in plain or "downward" not in plain:
+                bad.append("(cf-b) 순화 안 한 프롬프트가 기본 호출과 다릅니다(또는 원문 대사·연기가 없습니다)")
+            leftover = [w for w in ("좆", "붙어 먹", "downward", "lips separate") if w in soft]
+            if leftover or "물건 큰 놈이랑 함께 자면" not in soft or "faces stay very close" not in soft:
+                bad.append(f"(cf-b) 순화 프롬프트에 남은 말 {leftover}")
+            if speakers(plain) != speakers(soft) or plain.count(" / ") != soft.count(" / ") or not speakers(soft):
+                bad.append(f"(cf-b) 대사 줄·화자가 바뀌었습니다: {speakers(plain)} → {speakers(soft)}")
+            if llm_calls:
+                bad.append(f"(cf-b) 지도로 끝나는 글에 LLM 을 불렀습니다: {len(llm_calls)}")
+            make("prj_cf_clean", ["c1", "c2", "c3"], 15, {})
+            plan_c = env.plan("prj_cf_clean")
+            take_c = genmod._take_units(plan_c)[0]  # noqa: SLF001
+            if sha(genmod._take_payload(owner, "prj_cf_clean", plan_c, take_c, caps_w)["prompt"]) != sha(  # noqa: SLF001
+                    genmod._take_payload(owner, "prj_cf_clean", plan_c, take_c, caps_w, soften=True)["prompt"]):  # noqa: SLF001
+                bad.append("(cf-b) 노골적인 말이 없는 프롬프트가 순화로 바뀌었습니다")
+            make("prj_cf_llm", ["c1", "c2", "c3"], 15, {"c2": ("거기 박아 줘.", "Kim nods once.")})
+            plan_l = env.plan("prj_cf_llm")
+            take_l = genmod._take_units(plan_l)[0]  # noqa: SLF001
+            ledger0 = len(env.ledger)
+            soft_l = genmod._take_payload(owner, "prj_cf_llm", plan_l, take_l, caps_w, soften=True)["prompt"]  # noqa: SLF001
+            genmod._take_payload(owner, "prj_cf_llm", plan_l, take_l, caps_w, soften=True)  # noqa: SLF001
+            texts = [x for x in env.ledger[ledger0:] if x.get("text") and str(x.get("key") or "").startswith("vnew-soften-")]
+            if len(llm_calls) != 1 or len(texts) != 1 or "박아" in soft_l or "안아 줘" not in soft_l:
+                bad.append(f"(cf-b) LLM 순화: 호출 {len(llm_calls)} 원장 {len(texts)} 남음 {'박아' in soft_l}")
+            if "박아" not in str(env.plan("prj_cf_llm")["conti"]["cuts"][1].get("dialogueKo")):
+                bad.append("(cf-b) 순화가 저장된 계획을 바꿨습니다")
+
+            # ================= (cf-c) 흐름: Wan 거절 2번 → Seedance 성공 =================
+            pid = "prj_cf_c"
+            make(pid, ["c1", "c2", "c3"], 15, test3)
+            reject["fn"] = lambda req: f"/{_RV152_ENDPOINT}" in req["url"]
+            since, ledger0, logs0 = len(env.requests), len(env.ledger), len(logs.lines)
+            client.post(f"/api/vnew/p/{pid}/generate", json={"confirmUsd": genmod.estimate(env.plan(pid))["totalUsd"]})
+            g = env.drive(pid)
+            reqs = env.requests[since:]
+            state = genmod._previz_cells(g)[0]["webtoon"]  # noqa: SLF001
+            where = [("wan" if f"/{_RV152_ENDPOINT}" in r["url"] else "seed" if f"/{_LR_ENDPOINT}" in r["url"] else r["url"])
+                     for r in reqs]
+            prompts = [str(r["payload"].get("prompt") or "") for r in reqs]
+            if where != ["wan", "wan", "seed"] or len(prompts) != 3 or "좆" not in prompts[0] \
+                    or any("좆" in p or "downward" in p or "붙어 먹" in p for p in prompts[1:]):
+                bad.append(f"(cf-c) 제출 순서·순화: {where} {[('좆' in p) for p in prompts]}")
+            if state.get("status") != "completed" or state.get("contentFallback") != {"from": _RV152_ENDPOINT, "to": _LR_ENDPOINT}:
+                bad.append(f"(cf-c) 칸: {state.get('status')} {state.get('error')} {state.get('contentFallback')}")
+            charges = [x for x in env.ledger[ledger0:] if str(x.get("key") or "").startswith("fal-take-")]
+            if [x.get("model") for x in charges] != [_RV152_ENDPOINT, _RV152_ENDPOINT, _LR_ENDPOINT]:
+                bad.append(f"(cf-c) 원장(제출마다 1번): {[(x.get('key'), x.get('model')) for x in charges]}")
+            new_logs = logs.lines[logs0:]
+            if not any("vnew.gen.content_flag step=soften" in ln for ln in new_logs) \
+                    or not any("vnew.gen.content_flag step=fallback" in ln for ln in new_logs):
+                bad.append("(cf-c) 로그 vnew.gen.content_flag step=soften·fallback 이 없습니다")
+            view = genmod.gen_view(owner, pid, env.plan(pid)) or {}
+            shown = ((view.get("units") or [{}])[0].get("webtoon") or {}).get("contentFallback")
+            if shown != {"from": _RV152_ENDPOINT, "to": _LR_ENDPOINT}:
+                bad.append(f"(cf-c) 화면 보기 contentFallback: {shown}")
+
+            # ================= (cf-d) 두 번 다 거절 → 한국어 문구 → 다시 시도는 1단계부터 =================
+            pid = "prj_cf_d"
+            make(pid, ["c1", "c2", "c3"], 15, test3)
+            reject["fn"] = lambda req: True
+            since, ledger0 = len(env.requests), len(env.ledger)
+            client.post(f"/api/vnew/p/{pid}/generate", json={"confirmUsd": genmod.estimate(env.plan(pid))["totalUsd"]})
+            g = env.drive(pid)
+            state = genmod._previz_cells(g)[0]["webtoon"]  # noqa: SLF001
+            want = ("fal 콘텐츠 검사에서 거절되었습니다(컷 1…3). 대사·동작 표현을 순화했지만 계속 거절되어 "
+                    "이 테이크를 만들지 못했습니다.")
+            charges = [x for x in env.ledger[ledger0:] if str(x.get("key") or "").startswith("fal-take-")]
+            if state.get("status") != "failed" or state.get("error") != want or state.get("failureKind") != "contentFlag" \
+                    or len(env.requests) - since != 3 or len(charges) != 3:
+                bad.append(f"(cf-d) 두 번 거절: {state.get('status')} {state.get('error')} {state.get('failureKind')} "
+                           f"reqs={len(env.requests) - since} charges={len(charges)}")
+            reject["fn"] = lambda req: False
+            mid = len(env.requests)
+            genmod.retry_segment(owner, pid, "take1", "webtoon")
+            g = env.drive(pid)
+            again = env.requests[mid:]
+            state = genmod._previz_cells(g)[0]["webtoon"]  # noqa: SLF001
+            if len(again) != 1 or f"/{_RV152_ENDPOINT}" not in again[0]["url"] \
+                    or "좆" in str(again[0]["payload"].get("prompt") or "") or state.get("status") != "completed" \
+                    or state.get("contentFallback"):
+                bad.append(f"(cf-d) 다시 시도: 요청 {len(again)} 상태 {state.get('status')} {state.get('contentFallback')}")
+
+            # ================= (cf-e) 152 조각: 조각 2만 거절 =================
+            pid = "prj_cf_e"
+            rec_seconds[b"PREVIZ-REC-s1"] = 30.0
+            make(pid, [f"c{i}" for i in range(1, 11)], 30, {"c8": (_CF153_LINE, "He guides it downward, smirking.")})
+            reject["fn"] = lambda req: f"/{_RV152_ENDPOINT}" in req["url"] and "대사9번" in str(req["payload"].get("prompt"))
+            since, ledger0, merges0 = len(env.requests), len(env.ledger), len(merges)
+            client.post(f"/api/vnew/p/{pid}/generate", json={"confirmUsd": genmod.estimate(env.plan(pid))["totalUsd"]})
+            g = env.drive(pid)
+            reqs = env.requests[since:]
+            state = genmod._previz_cells(g)[0]["webtoon"]  # noqa: SLF001
+            parts = state.get("parts") or []
+            got = [("wan" if f"/{_RV152_ENDPOINT}" in r["url"] else "seed",
+                    "p2" if "대사9번" in str(r["payload"].get("prompt")) else "p1", "좆" in str(r["payload"].get("prompt")))
+                   for r in reqs]
+            if got != [("wan", "p1", False), ("wan", "p2", True), ("wan", "p2", False), ("seed", "p2", False)]:
+                bad.append(f"(cf-e) 조각 제출: {got}")
+            charges = [x for x in env.ledger[ledger0:] if str(x.get("key") or "").startswith("fal-take-")]
+            if len(charges) != 4 or state.get("status") != "completed" or merges[merges0:] != [2] \
+                    or [p.get("contentStep", 0) for p in parts] != [0, 2] \
+                    or state.get("contentFallback") != {"from": _RV152_ENDPOINT, "to": _LR_ENDPOINT}:
+                bad.append(f"(cf-e) 조각 결과: charges={len(charges)} {state.get('status')} {state.get('error')} "
+                           f"{[p.get('contentStep') for p in parts]} {state.get('contentFallback')}")
+            rec_seconds[b"PREVIZ-REC-s1"] = 15.0
+
+        # ================= (cf-f) vnew.js =================
+        js_path = ROOT / "frontend" / "public" / "vnew.js"
+        if "콘텐츠 검사로 Seedance 로 만들었습니다" not in js_path.read_text(encoding="utf-8"):
+            bad.append("(cf-f) vnew.js 에 contentFallback 문구가 없습니다")
+        node = shutil.which("node")
+        if not node:
+            warn("작업 153 (cf-f) node 가 없어 vnew.js 문법 검사를 건너뜁니다")
+        else:
+            res = subprocess.run([node, "--check", str(js_path)], capture_output=True, text=True, timeout=60)
+            if res.returncode != 0:
+                bad.append(f"(cf-f) node --check vnew.js: {res.stderr[:300]}")
+    except Exception:  # noqa: BLE001
+        bad.append("작업 153 검사 예외\n" + _tb.format_exc())
+    finally:
+        genmod.log.removeHandler(logs)
+        genmod.log.setLevel(log_level)
+    if bad:
+        fail("작업 153 콘텐츠 검사 거절 재시도 검사 실패\n  " + "\n  ".join(bad))
+    else:
+        ok("작업 153 콘텐츠 검사 거절 (cf-a)test3 원문 → contentFlag (cf-b)cut-11 순화·줄 수·화자 같음·순화 안 함 sha 같음·LLM 1번+원장 "
+           "(cf-c)Wan → Wan 순화 → Seedance 성공·contentFallback·제출마다 원장 (cf-d)두 번 거절 한국어 문구·다시 시도 1단계부터 "
+           "(cf-e)152 조각 2만 순화·Seedance (cf-f)vnew.js 한 줄")
+
+
 def main() -> int:
     print("== vpoc1 check ==")
     check_compileall()
@@ -51894,6 +52156,7 @@ def main() -> int:
     check_vnew_api_retry_150()
     check_vnew_previz_camera_clear_151()
     check_vnew_ref_video_split_152()
+    check_vnew_content_flag_153()
     check_vnew_plan_step_stay_129()
     check_pod_zones()
     print()
