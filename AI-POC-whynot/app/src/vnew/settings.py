@@ -475,6 +475,11 @@ VNEW_TAKE_PROMPT_MAX_CHARS = _int("VNEW_TAKE_PROMPT_MAX_CHARS", 4000)
 # live.live_video_prompt) 형식으로 만든다(generate._vibe_take_prompt). 참고 이미지 = 인물별 시트+정면 → 장소 뷰, @Video1 = 프리비즈.
 # 끄면 지금 _take_prompt·참고 이미지 그대로(sha 같음). 컷 단위 Kling(130)은 켬·끔과 상관없다.
 VNEW_VIBE_PROMPT = _bool("VNEW_VIBE_PROMPT", True)
+# 작업 160: 실사 회차마다 보이는 인물 1명당 fal Seedream edit 1번(실사 정면 → 장면 옷을 입은 같은 사람, 장당 SEEDREAM_FAL_USD,
+# 호출마다 원장 1줄)으로 신원 참고의 정면 자리를 바꾼다. 결과 바이트는 이 회차 동안 메모리에만 두고 저장하지 않는다(S3·STORE 쓰기 0 —
+# 보안 규칙: 모델은 API 로만 쓰고 새 그림을 남기지 않는다). 편집이 실패하면 그 인물은 지금 참고 그대로. 끄면 편집 호출 0(159 그대로).
+VNEW_REAL_COSTUME_REF = _bool("VNEW_REAL_COSTUME_REF", True)
+VNEW_REAL_COSTUME_REF_MODEL = _checked_fal_endpoint("VNEW_REAL_COSTUME_REF_MODEL", "fal-ai/bytedance/seedream/v4.5/edit")
 # 해상도별 (가로, 세로) — 토큰 공식 tokens = w×h×24×s/1024 에 쓴다(fal 실측 기준).
 TAKE_RESOLUTION_WH = {
     "480p": (854, 480),

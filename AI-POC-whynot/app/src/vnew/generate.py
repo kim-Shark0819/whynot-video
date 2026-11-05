@@ -1019,6 +1019,8 @@ REAL_SHEET_REF_SENTENCE = (
     "and its clothes — clothing comes from the scene."
 )
 REAL_SHEET_FRONT_SENTENCE = "{img} is {name}'s close front portrait from the same sheet set."
+# 작업 160: 정면 자리의 장면 옷 편집 그림 이름표(시작 그림·Seedance 공통).
+REAL_COSTUME_REF_SENTENCE = "{img} is {name} in this scene's clothes."
 
 
 def _real_identity_refs(entry, look: str) -> list[str]:
@@ -1038,9 +1040,15 @@ def _real_identity_refs(entry, look: str) -> list[str]:
     return [sheet, front] if front and front != sheet else [sheet]
 
 
-def _real_sheet_sentences(name: str, sheet_no: int, front_no: int | None = None, *, ref: str = "Image {}") -> str:
-    """작업 142: 시트(와 정면) 참고 문장. ref = 번호 표기("Image {}" 시작 그림, "@Image{}" Seedance)."""
+def _real_sheet_sentences(name: str, sheet_no: int, front_no: int | None = None, *, ref: str = "Image {}",
+                          costume: bool = False) -> str:
+    """작업 142: 시트(와 정면) 참고 문장. ref = 번호 표기("Image {}" 시작 그림, "@Image{}" Seedance).
+    작업 160: costume=True 면 front_no 는 장면 옷 편집 그림 — 시트 문장 끝 "clothes come from {그 번호}", 정면 문장은 이름표."""
     text = REAL_SHEET_REF_SENTENCE.format(img=ref.format(sheet_no), name=name)
+    if front_no and costume:
+        img = ref.format(front_no)
+        text = text.replace("clothing comes from the scene.", f"clothes come from {img}.")
+        return text + " " + REAL_COSTUME_REF_SENTENCE.format(img=img, name=name)
     if front_no:
         text += " " + REAL_SHEET_FRONT_SENTENCE.format(img=ref.format(front_no), name=name)
     return text
@@ -1195,7 +1203,8 @@ def real_cast_options(owner: str, pid: str) -> dict:
 
 
 def _real_take_cast(owner: str, plan: dict, actors: list[dict], char_by_id: dict, resolved: dict,
-                    cap: int, fallback_step: int = 0) -> tuple[list[bytes], list[dict]]:
+                    cap: int, fallback_step: int = 0, *, costume_location: str | None = None,
+                    pid: str = "") -> tuple[list[bytes], list[dict]]:
     """통 테이크 실사 인물 참고·ASSETS 인물(작업 126). 반환 (이미지 바이트 목록, cast).
 
     인물마다 참고 키: 모습 real → _real_photo_keys(캐스팅 고름 → 정면 → 시트 → 후면), anime → _anime_ref_keys(웹툰 정면 →
@@ -1204,6 +1213,8 @@ def _real_take_cast(owner: str, plan: dict, actors: list[dict], char_by_id: dict
     작업 130 likeness 1단계(fallback_step=1): 인물당 정면 1장(_fallback_front_keys). 0 이면 지금 그대로.
     작업 142: 실사 시트가 있고 읽히는 인물은 _real_identity_refs — 0단계 [시트, 정면], 1단계 [시트] 1장. cast 항목에 sheetNo.
     시트가 없거나 못 읽는 인물·애니 모습은 140 그대로(0단계 _real_photo_keys/_anime_ref_keys, 1단계 _fallback_front_keys).
+    작업 160: costume_location(장소, None 이면 끔)이 있으면 실사 정면(realFrontKey) 자리를 그 장소 장면 옷 편집 그림(_costume_refs,
+    메모리만)으로 바꾸고 cast 항목에 costumeNo. 편집이 없거나 실패한 인물은 지금 그대로.
     """
     overrides = _real_cast_overrides(plan)
     loaded: dict[str, bytes | None] = {}
@@ -1239,14 +1250,22 @@ def _real_take_cast(owner: str, plan: dict, actors: list[dict], char_by_id: dict
             keys = _anime_ref_keys(char) if look == "anime" else _real_photo_keys(char)
         rows.append((actor, str(name), char_id, char, look, keys, sheet))
     counts = _ref_counts([len(row[5]) for row in rows], cap)
+    swaps: dict[str, bytes] = {}
+    if costume_location is not None:
+        swaps = _costume_refs(owner, pid, plan, [(row[1], row[3], row[4]) for row in rows], costume_location,
+                              {row[1]: str((resolved.get(row[1]) or {}).get("costume") or "") for row in rows}, load)
     images: list[bytes] = []
     cast: list[dict] = []
     for (actor, name, char_id, char, look, keys, sheet), count in zip(rows, counts):
         nos: list[int] = []
-        sheet_no = None
+        sheet_no = costume_no = None
+        front_key = str((char or {}).get("realFrontKey") or "") if look != "anime" else ""
         for key in keys[:count]:
             photo = load(key)
             if photo is not None:
+                if front_key and key == front_key and swaps.get(name):
+                    photo = swaps[name]  # 작업 160: 정면 자리 = 장면 옷 편집 그림(메모리만)
+                    costume_no = len(images) + 1
                 images.append(_fit_ref(photo))
                 nos.append(len(images))
                 if sheet and key == sheet:
@@ -1270,7 +1289,83 @@ def _real_take_cast(owner: str, plan: dict, actors: list[dict], char_by_id: dict
         })
         if sheet_no:
             cast[-1]["sheetNo"] = sheet_no  # 작업 142: 이 번호는 AI 캐릭터 시트(없는 인물은 키 없음 — 140 과 같은 dict)
+        if costume_no:
+            cast[-1]["costumeNo"] = costume_no  # 작업 160: 장면 옷 편집 그림 번호(없는 인물은 키 없음 — 159 와 같은 dict)
     return images, cast
+
+
+# ---------------------------------------------------------------- 작업 160: 장면 옷 신원 참고(메모리만)
+# 142 시트·정면은 인물 기본 옷(아이보리 셔츠)을 입고 있어 Seedance·Seedream 이 그 옷을 따라 입혔다(test3 take2 흰 셔츠). 실사 회차마다
+# 보이는 인물 1명당 fal Seedream edit 1번(입력 = 실사 정면)으로 "같은 사람, 장면 옷"을 만들어 정면 자리에 쓴다. 바이트는 이 프로세스의
+# 메모리(_COSTUME_REF_RUNS, 회차 키, 최근 _COSTUME_REF_RUNS_MAX 회차)에만 두고 S3·STORE 에 쓰지 않는다(보안 규칙). 파드가 바뀌면 다시 만든다.
+REAL_COSTUME_REF_PROMPT = "Same person, same face and hair, now wearing {costume}; plain light background; photo."
+_COSTUME_REF_RUNS: dict[tuple, dict] = {}
+_COSTUME_REF_RUNS_MAX = 4
+_COSTUME_REF_LOCK = threading.Lock()
+
+
+def _seedream_costume(prompt: str, front: bytes, *, size: str) -> bytes:
+    """장면 옷 편집 1장(fal Seedream 4.5 edit, 참고 = 실사 정면 1장). 재시도·다시 쓰기 없음(호출 1번 = 원장 1줄). 검사가 바꿔 끼운다."""
+    model = vnew_settings.VNEW_REAL_COSTUME_REF_MODEL
+    return vpoc_seedream.generate(prompt, [front], model=model, where="vnew.generate.costume_ref", size=size, fal_model=model)
+
+
+def _charge_costume_ref(owner: str, pid: str, gen_id: str, run_n: int) -> None:
+    """장면 옷 편집 1장 원장(그림 1장, fal Seedream 장당 = 공간 시트 편집과 같은 단가)."""
+    try:
+        vpoc_ledger.charge(f"vnew-gen-{pid}-{gen_id}-costume-r{run_n}-{secrets.token_hex(4)}", kind="image",
+                           model=vnew_settings.VNEW_REAL_COSTUME_REF_MODEL, units=1,
+                           usd=float(vnew_settings.LOCATION_IMAGE_USD), user=owner, project_id=pid, plan_id=gen_id)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("vnew.gen.charge_costume_ref_failed pid=%s err=%s", pid, str(exc)[:200])
+
+
+def _costume_refs(owner: str, pid: str, plan: dict, people, location, fallbacks: dict, load=None) -> dict[str, bytes]:
+    """작업 160: {이름: 장면 옷 편집 그림 바이트}(메모리만). people = [(이름, 캐릭터 entry, 모습)], 실사 모습·실사 정면이 있는 인물만.
+
+    옷 = _scene_costume(장소, fallback = 그 인물 지금 값). 같은 회차(genId·realRun.n)·같은 인물·같은 정면·같은 옷이면 다시 부르지 않는다
+    (실패도 기억 — 이 회차에서 다시 사지 않는다). VNEW_REAL_COSTUME_REF 끔이면 {}(호출 0)."""
+    if not vnew_settings.VNEW_REAL_COSTUME_REF:
+        return {}
+    gen = plan.get("gen") or {}
+    gen_id = str(gen.get("genId") or "")
+    run_n = int((gen.get("realRun") or {}).get("n") or 0)
+    run_key = (str(owner), str(pid), gen_id, run_n)
+    load = load or _load_jpeg
+    out: dict[str, bytes] = {}
+    made = failed = 0
+    with _COSTUME_REF_LOCK:
+        run = _COSTUME_REF_RUNS.get(run_key)
+        if run is None:
+            run = _COSTUME_REF_RUNS[run_key] = {}
+            while len(_COSTUME_REF_RUNS) > _COSTUME_REF_RUNS_MAX:
+                _COSTUME_REF_RUNS.pop(next(iter(_COSTUME_REF_RUNS)))
+        for name, char, look in people:
+            front_key = str((char or {}).get("realFrontKey") or "") if look != "anime" else ""
+            costume = _scene_costume(plan, name, location, fallback=vnew_fx.strip_drawing_words(fallbacks.get(name) or ""))
+            if not front_key or not costume:
+                continue
+            slot = (str(name), front_key, costume)
+            if slot not in run:
+                front = load(front_key)
+                image = None
+                if front is not None:
+                    try:
+                        image = _seedream_costume(REAL_COSTUME_REF_PROMPT.format(costume=costume), _fit_ref(front),
+                                                  size=vnew_settings.FRONT_SIZE) or None
+                    except Exception as exc:  # noqa: BLE001 — 실패면 그 인물은 지금 참고 그대로
+                        log.warning("vnew.gen.costume_ref_failed pid=%s err=%s", pid, _msg(exc))
+                    if image:
+                        _charge_costume_ref(owner, pid, gen_id, run_n)
+                        made += 1
+                    else:
+                        failed += 1
+                run[slot] = image
+            if run[slot]:
+                out[str(name)] = run[slot]
+    if made or failed:
+        log.info("vnew.gen.costume_ref pid=%s run=%d made=%d failed=%d stored=0", pid, run_n, made, failed)
+    return out
 
 
 def _model_accepts_real_start(model: str) -> bool:
@@ -2482,6 +2577,7 @@ def _scene_cast_notes(owner: str, pid: str, plan: dict, take: dict) -> dict:
 
     cache = ((plan.get("previz") or {}).get("castNotes") or {}).get(key)
     if isinstance(cache, dict) and cache:
+        _note_cast_cuts(owner, pid, plan, take, key)
         return {str(n): dict(v) for n, v in cache.items() if isinstance(v, dict)}
 
     # 패널 + 인물 이름 목록을 Claude 에 보낸다.
@@ -2513,17 +2609,44 @@ def _scene_cast_notes(owner: str, pid: str, plan: dict, take: dict) -> dict:
             "voiceEn": _clip_words(str(item.get("voiceEn") or ""), 70),
         }
 
-    # 캐시에 저장(패널 바이트 해시 키).
+    # 캐시에 저장(패널 바이트 해시 키). 작업 160: 컷 → 캐시 키 표(처음 읽은 테이크가 정한다)도 함께.
+    cut_ids = _seg_cut_ids(take)
+
     def mutator(data: dict) -> None:
         previz = data.setdefault("previz", {})
         store = previz.setdefault("castNotes", {})
         store[key] = notes
+        by_cut = previz.setdefault("castNotesCuts", {})
+        for cut_id in cut_ids:
+            by_cut.setdefault(cut_id, key)
 
     try:
         plan_mod.mutate_plan(owner, pid, mutator)
     except Exception as exc:  # noqa: BLE001
         log.warning("vnew.gen.cast_notes_cache_failed pid=%s err=%s", pid, str(exc)[:200])
+    mutator(plan)  # 작업 160: 이 호출의 계획 사본에도(같은 순회의 _scene_costume 이 바로 본다)
     return notes
+
+
+def _note_cast_cuts(owner: str, pid: str, plan: dict, take: dict, key: str) -> None:
+    """작업 160: 캐시를 그대로 쓸 때 그 테이크 컷의 컷 → 캐시 키 표가 비어 있으면 채운다(계획 사본·저장 둘 다). 이미 있으면 아무것도 안 한다."""
+    from . import plan as plan_mod  # noqa: PLC0415
+
+    cut_ids = [c for c in _seg_cut_ids(take) if c not in ((plan.get("previz") or {}).get("castNotesCuts") or {})]
+    if not cut_ids:
+        return
+
+    def mutator(data: dict) -> None:
+        by_cut = data.setdefault("previz", {}).setdefault("castNotesCuts", {})
+        for cut_id in cut_ids:
+            by_cut.setdefault(cut_id, key)
+
+    mutator(plan)
+    if owner and pid:
+        try:
+            plan_mod.mutate_plan(owner, pid, mutator)
+        except Exception as exc:  # noqa: BLE001
+            log.warning("vnew.gen.cast_notes_cuts_failed pid=%s err=%s", pid, str(exc)[:200])
 
 
 def _charge_cast_notes(owner: str, pid: str, plan_id: str, usage: dict, model: str) -> None:
@@ -3637,16 +3760,16 @@ def _take_prompt(plan: dict, take: dict, *, cast: list[dict], panel_nos: list[in
     fx_on = bool(vnew_settings.VNEW_FX)
     real = variant == "real"
     entries = _take_timeline_entries(plan, take)
+    # 작업 160: 인물 장면 옷 = 장소 단위 1벌(_scene_costume — 수정 → 콘티·대본 → 장소 모든 컷 패널 읽기 다수 → 이 테이크 값, 146 정리).
+    # 애니·실사, 원형·짧은 형·155 의상 고정이 같은 값을 쓴다.
+    take_location = _take_location(plan, take)
+    raw = {str(m.get("name") or ""): str(m.get("costume") or "") for m in cast if m.get("name")}
     if real:
-        # 작업 146: 인물 장면 옷 = 정리한 COSTUME(괄호·"Identified as"·"speaks" 메모 빼기), 쓸 만하지 않으면(2낱말 미만·옷 낱말
-        # 없음) 테이크 컷의 콘티 → 대본 → 패널 읽기 순(_scene_outfits sources). 후보는 한 번만 모으고 상한은 줄이기 단계가 정한다.
-        raw = {str(m.get("name") or ""): str(m.get("costume") or "") for m in cast if m.get("name")}
-        outfit_sources = _scene_outfits(plan, _seg_cut_ids(take), raw, sources=True)
-        outfit_candidates = {name: [value, *outfit_sources.get(name, [])] for name, value in raw.items()}
         # 작업 136: 실사 연기(지시서 actionEn) = 그림 문장 빼기·옷 구절 → 그 컷 장면 옷(_real_brief_text). 웹툰은 그대로.
-        costumes = {name: _scene_outfit_pick(values) for name, values in outfit_candidates.items()}
+        costumes = {name: _scene_costume(plan, name, take_location, fallback=value) for name, value in raw.items()}
         for entry, cut_id in zip(entries, _seg_cut_ids(take)):
-            entry["action"] = _real_brief_text(entry.get("action"), _scene_outfits(plan, [cut_id], costumes)).rstrip(".")
+            entry["action"] = _real_brief_text(entry.get("action"),
+                                               _scene_costume_map(plan, [cut_id], take_location, costumes)).rstrip(".")
     if soften:
         _soften_entries(entries)  # 작업 153: 콘텐츠 검사 거절 뒤 다시 만들 때만(대사·연기·분위기 순화, 줄 수·화자 그대로)
 
@@ -3846,15 +3969,14 @@ def _take_prompt(plan: dict, take: dict, *, cast: list[dict], panel_nos: list[in
         return vnew_fx.strip_drawing_words(text) if real else text
 
     def _member_costume(member: dict) -> str:
-        # 인물 장면 옷(원형·짧은 형 ASSETS 가 같은 값을 쓴다).
+        # 인물 장면 옷(원형·짧은 형 ASSETS 가 같은 값을 쓴다). 작업 160: 장소 단위 1벌(_scene_costume), 줄이기 상한으로 다시 정리.
+        name = str(member.get("name") or "")
         if real:
-            # 작업 146: 정리·출처 넘김(_scene_outfit_pick). 줄이기 상한에서도 옷 구절 중간에서 끊지 않는다.
-            return _scene_outfit_pick(outfit_candidates.get(str(member.get("name") or ""), []), state["costume_limit"])
+            return _scene_costume(plan, name, take_location, fallback=raw.get(name, ""), limit=state["costume_limit"])
         costume = _clip_words(_txt(member.get("costume")), state["costume_limit"])
-        if anchor is not None:
-            # 작업 155: 조각·대체 제출은 146 정리(괄호·"Identified as"·"speaks" 메모 빼기)한 옷. 쓸 만하지 않으면 지금 그대로.
-            costume = _scene_outfit_pick([member.get("costume")], state["costume_limit"]) or costume
-        return costume
+        scene = _scene_costume(plan, name, take_location, fallback=str(member.get("costume") or ""),
+                               limit=state["costume_limit"], real=False)
+        return scene or costume
 
     def _location_line() -> str:
         if not location_no:
@@ -4267,6 +4389,9 @@ VIBE_LOCATION_LEAD = "@Image{no} is the location (no people in it); keep this pl
 VIBE_FRAME_LEAD = "@Image{no} is the previous shot's last frame: same background, lighting, outfits and hair; continue from it"
 VIBE_PANEL_LEAD = "{refs} {be} the uploaded webtoon {images} (art style reference only)"  # fix1: 애니 원작 패널
 VIBE_SHEET_CLAUSE = "AI-generated turnaround sheet of a fictional character; match face/hair/build, clothes from the look line"
+# 작업 160: 정면 자리가 장면 옷 편집 그림(_costume_refs)인 인물의 시트 절·이름표.
+VIBE_SHEET_COSTUME_CLAUSE = "AI-generated turnaround sheet of a fictional character; match face/hair/build, clothes come from @Image{no}"
+REAL_COSTUME_REF_LABEL = "@Image{no} is {name} in this scene's clothes"
 VIBE_VIDEO_LINE = ("@Video1 is the 3D previz: follow its camera, positions, cuts and timing exactly; "
                    "replace each mannequin with its person")
 VIBE_SPOKEN = "spoken (audio only, never written on screen)"  # = TEXT_RETRY_SPOKEN(156, 아래에서 정의)
@@ -4327,14 +4452,17 @@ def _vibe_take_prompt(plan: dict, take: dict, *, real: bool, cast: list[dict], l
     cuts_by_id = {str(c.get("id")): c for c in (plan.get("conti") or {}).get("cuts") or []}
     entries = _take_timeline_entries(plan, take)
     raw = {str(m.get("name") or ""): str(m.get("costume") or "") for m in cast if m.get("name")}
+    # 작업 160: 장면 옷 = 장소 단위 1벌(_scene_costume, 테이크 첫 장소). 모든 테이크·조각·대체가 같은 값(애니는 그림 낱말을 지우지
+    # 않는다). 애니는 쓸 만한 옷이 없을 때만 지금 값(200자) 그대로.
+    take_location = _take_location(plan, take)
+    costumes = {name: _scene_costume(plan, name, take_location, fallback=value, real=real) for name, value in raw.items()}
     if real:
-        # 146: 장면 옷 후보(정리한 COSTUME → 콘티 → 대본 → 패널 읽기), 136: 실사 연기의 그림 문장·옷 구절.
-        outfit_sources = _scene_outfits(plan, take_cut_ids, raw, sources=True)
-        costumes = {name: _scene_outfit_pick([value, *outfit_sources.get(name, [])]) for name, value in raw.items()}
+        # 136: 실사 연기의 그림 문장·옷 구절 → 장면 옷.
         for entry, cut_id in zip(entries, take_cut_ids):
-            entry["action"] = _real_brief_text(entry.get("action"), _scene_outfits(plan, [cut_id], costumes)).rstrip(".")
+            entry["action"] = _real_brief_text(entry.get("action"),
+                                               _scene_costume_map(plan, [cut_id], take_location, costumes)).rstrip(".")
     else:
-        costumes = {name: _scene_outfit_pick([value]) or _clip_words(value, 200) for name, value in raw.items()}
+        costumes = {name: costumes.get(name) or _clip_words(value, 200) for name, value in raw.items()}
     if soften:
         _soften_entries(entries)  # 153
 
@@ -4496,12 +4624,19 @@ def _vibe_take_prompt(plan: dict, take: dict, *, real: bool, cast: list[dict], l
     def _labels() -> str:
         rows: list[tuple[int, str]] = []
         sheets: list[int] = []
+        costume_sheets: list[str] = []
         for member in cast:
             handle = _disp(str(member.get("name") or ""))
             nos = [n for n in (member.get("refNos") or []) if n] or ([member["frontNo"]] if member.get("frontNo") else [])
+            costume_no = member.get("costumeNo")
             for no in nos:
-                rows.append((no, f"@Image{no} is {handle}"))
-            if member.get("sheetNo"):
+                # 작업 160: 정면 자리의 장면 옷 편집 그림은 "in this scene's clothes"
+                rows.append((no, REAL_COSTUME_REF_LABEL.format(no=no, name=handle) if no == costume_no
+                             else f"@Image{no} is {handle}"))
+            if member.get("sheetNo") and costume_no in nos:
+                costume_sheets.append(f"@Image{int(member['sheetNo'])}: "
+                                      + VIBE_SHEET_COSTUME_CLAUSE.format(no=costume_no) + ".")
+            elif member.get("sheetNo"):
                 sheets.append(int(member["sheetNo"]))
         if frame_no:
             rows.append((frame_no, VIBE_FRAME_LEAD.format(no=frame_no)))
@@ -4518,6 +4653,8 @@ def _vibe_take_prompt(plan: dict, take: dict, *, real: bool, cast: list[dict], l
         text = "; ".join(t for _n, t in sorted(rows, key=lambda r: r[0])) + "."
         if sheets:
             text += " " + ", ".join(f"@Image{n}" for n in sorted(sheets)) + f": {VIBE_SHEET_CLAUSE}."
+        if costume_sheets:
+            text += " " + " ".join(costume_sheets)
         return text
 
     colors = ", ".join(f"{m.get('colorName') or 'grey'} = {_disp(str(m.get('name') or ''))}"
@@ -4625,6 +4762,7 @@ def _vibe_take_payload(owner: str, pid: str, plan: dict, take: dict, caps: dict,
     max_images = int(caps.get("imageListMax") or vpoc_fal.DEFAULT_IMAGE_LIST_MAX)
     actors = _segment_actors(plan, take)
     char_by_id = _char_by_id(owner, plan)
+    _read_location_cast(owner, pid, plan, take)  # 작업 160: 같은 장소 모든 테이크의 패널 읽기 먼저(캐시면 호출 0)
     resolved = _resolve_cast(owner, pid, plan, take, read=True)
     anchor = continuity if isinstance(continuity, dict) else None
     loc_take = (anchor.get("take") or take) if anchor is not None else take
@@ -4640,7 +4778,8 @@ def _vibe_take_payload(owner: str, pid: str, plan: dict, take: dict, caps: dict,
         person_cap = max(0, min(orig_cap, max_images - n_loc))
     if real:
         image_urls, cast = _real_take_cast(owner, plan, actors, char_by_id, resolved, person_cap,
-                                           fallback_step=fallback_step)
+                                           fallback_step=fallback_step, costume_location=_take_location(plan, take),
+                                           pid=pid)
     else:
         image_urls, cast = _vibe_anime_cast(actors, char_by_id, resolved, person_cap)
     frame_no = None
@@ -4740,6 +4879,7 @@ def _take_payload(owner: str, pid: str, plan: dict, take: dict, caps: dict, vari
     actors = _segment_actors(plan, take)
     char_by_id = _char_by_id(owner, plan)
     # 장면 의상·목소리(override 우선 + 원작 패널 읽기). 생성 경로라 read=True(캐시 없으면 1회 읽음).
+    _read_location_cast(owner, pid, plan, take)  # 작업 160: 같은 장소 모든 테이크의 패널 읽기 먼저(캐시면 호출 0)
     resolved = _resolve_cast(owner, pid, plan, take, read=True)
 
     anchor = continuity if isinstance(continuity, dict) else None
@@ -6632,6 +6772,30 @@ REAL_STILL_BACKGROUND = ("Background and location must match Image {no} exactly 
 REAL_STILL_BACKGROUND_ONLY = ("Background and location must match Image 1 exactly (same buildings, railing, street, "
                               "time of day).")
 REAL_STILL_NO_PHOTO_CLOTHES = "Do not copy the default clothes worn in the cast photos (such as a plain white shirt)."
+# 작업 160: 컷 단위 Kling(130 2단계) 이어짐 — test3 take1 컷마다 하늘(낮·밤)·가게·샷 크기가 달랐다.
+REAL_STILL_NO_WIDEN = "Do not widen the shot; close-up stays close-up."
+REAL_STILL_PREV = "Same place, time of day and light as Image {no} (the previous shot); keep this shot's own framing and people."
+REAL_TIME_OF_DAY = "{tod}, same time of day in every shot."
+_NIGHT_WORDS = re.compile(r"\b(?:night|night-?time|midnight)\b|밤|심야|자정", re.IGNORECASE)
+
+
+def _real_time_sentence(plan: dict) -> str:
+    """작업 160: 실사 시작 그림·Kling 프롬프트의 시간대 고정 1문장. 콘티(setting·컷 lightEn/locationEn)·대본 setting.timeKo·장소 빛
+    가운데 밤 낱말이 있으면 "Night, …", 아니면 "Daylight, same time of day in every shot."(같은 plan 이면 언제나 같은 글자)."""
+    conti = plan.get("conti") or {}
+    setting = (plan.get("script") or {}).get("setting") or {}
+    texts = [str(v) for v in (conti.get("setting") or {}).values() if isinstance(v, str)] if isinstance(
+        conti.get("setting"), dict) else []
+    texts.append(_time_of_day_en(setting.get("timeKo") or ""))
+    texts.append(str(setting.get("timeKo") or ""))
+    for cut in conti.get("cuts") or []:
+        if isinstance(cut, dict):
+            texts += [str(cut.get("lightEn") or ""), str(cut.get("locationEn") or ""), str(cut.get("timeKo") or "")]
+    for loc in plan.get("locations") or []:
+        if isinstance(loc, dict):
+            texts.append(str(((loc.get("design") or {}) if isinstance(loc.get("design"), dict) else {}).get("lightEn") or ""))
+    night = any(_NIGHT_WORDS.search(t) for t in texts if t)
+    return REAL_TIME_OF_DAY.format(tod="Night" if night else "Daylight")
 # 작업 139: 애니 프레임 읽기(animeLayout)가 있을 때 시작 그림 문장. 맨 앞 = 구도 고정, MS 이상의 시트 뷰 문장 = 보이는 배경만.
 REAL_STILL_FRAMING = ("Keep Image 1's exact framing and shot size ({shot}): do not zoom out, do not add people, "
                       "do not show more background than Image 1.")
@@ -6712,12 +6876,13 @@ _OUTFIT_GARMENT = re.compile(
 )
 
 
-def _scene_outfit_text(text, limit: int = 140) -> str:
+def _scene_outfit_text(text, limit: int = 140, *, real: bool = True) -> str:
     """작업 137: 장면 옷 1개 → 실사 문장 조각(끝 마침표 없음). 괄호 메모를 빼고, 실사 낱말 정리·140자 상한(지금과 같다) 뒤
-    관사·전치사로 잘린 꼬리를 뺀다. 작업 146: "Identified as …"·"speaks …" 문장도 빼고, 상한(limit)은 통 테이크 줄이기가 정한다."""
+    관사·전치사로 잘린 꼬리를 뺀다. 작업 146: "Identified as …"·"speaks …" 문장도 빼고, 상한(limit)은 통 테이크 줄이기가 정한다.
+    작업 160: real=False(애니)면 실사 낱말 정리(_real_words — 그림 낱말 빼기, 실사만)만 건너뛴다. 나머지 정리는 같다."""
     text = _OUTFIT_NOTE.sub(" ", str(text or "")).strip()
     text = " ".join(s for s in re.split(r"(?<=[.!?;])\s+", text) if s and not _OUTFIT_ANALYSIS.search(s))
-    text = _clip_words(_real_words(text), limit).rstrip(" .")
+    text = _clip_words(_real_words(text) if real else " ".join(text.split()), limit).rstrip(" .")
     return _OUTFIT_DANGLING.sub("", text).rstrip(" ,;")
 
 
@@ -6879,6 +7044,125 @@ def _scene_outfits(plan: dict, cut_ids, cast_outfits: dict | None = None, *, sou
             for name in names}
 
 
+# ---------------------------------------------------------------- 작업 160: 장소마다 인물 옷 1벌(_scene_costume)
+# test3: 테이크마다 그 테이크 패널 읽기로 옷을 골라 take1 "track top"·take2 "zip-up track jacket" 이 갈렸다. 장면 옷은 장소 단위로
+# 한 번 고른다: ① 사용자 장면 의상 수정(input.castOverrides) ② 그 장소 모든 컷의 콘티 → 대본 옷(컷 순) ③ 그 장소 모든 컷의 패널 읽기
+# 가운데 가장 많은 것(같으면 앞 컷) ④ 부른 쪽의 지금 값(fallback). 정리는 146 _scene_outfit_pick/_scene_outfit_text.
+# 패널 읽기는 테이크마다 캐시(previz.castNotes[hash])라 컷 → 캐시 키 표(previz.castNotesCuts, 처음 읽은 테이크가 정한다)로 찾는다.
+
+
+def _cut_location(plan: dict, cut_id) -> str:
+    """콘티 컷의 locationEn(없으면 "")."""
+    cut = next((c for c in (plan.get("conti") or {}).get("cuts") or [] if str(c.get("id")) == str(cut_id)), {})
+    return str(cut.get("locationEn") or "")
+
+
+def _take_location(plan: dict, take: dict) -> str:
+    """테이크(조각) 첫 장소 = 그 컷들 가운데 처음 locationEn 이 있는 컷(_vibe_take_prompt first_loc 과 같다)."""
+    return next((loc for loc in (_cut_location(plan, c) for c in _seg_cut_ids(take)) if loc), "")
+
+
+def _location_cut_ids(plan: dict, location) -> list[str]:
+    """그 장소(이름 정규화가 같은) 콘티 컷 id, 콘티 순. 하나도 없으면 모든 컷."""
+    from . import locations as loc_mod  # noqa: PLC0415
+
+    want = loc_mod.normalize_name(str(location or ""))
+    cuts = [c for c in (plan.get("conti") or {}).get("cuts") or [] if isinstance(c, dict)]
+    ids = [str(c.get("id")) for c in cuts if loc_mod.normalize_name(str(c.get("locationEn") or "")) == want]
+    return ids or [str(c.get("id")) for c in cuts]
+
+
+def _cut_cast_readings(plan: dict) -> dict[str, dict[str, str]]:
+    """컷마다 패널 읽기 옷 {컷 id: {이름: costumeEn}} (previz.castNotesCuts → castNotes). 표가 없으면 {}."""
+    previz = plan.get("previz") or {}
+    store = previz.get("castNotes") or {}
+    out: dict[str, dict[str, str]] = {}
+    for cut_id, key in (previz.get("castNotesCuts") or {}).items():
+        notes = store.get(key)
+        if isinstance(notes, dict):
+            out[str(cut_id)] = {str(n): str((v or {}).get("costumeEn") or "") for n, v in notes.items() if isinstance(v, dict)}
+    return out
+
+
+def _scene_costume(plan: dict, name: str, location, *, fallback: str = "", limit: int = 140, real: bool = True) -> str:
+    """작업 160: 그 장소(scene/location)에서 그 인물의 옷 1벌(끝 마침표 없음, 146 정리). 모든 테이크·조각·대체·시작 그림·Kling 이 같은 값.
+
+    사용자 장면 의상 수정(castOverrides, 한국어여도)이 있으면 그것. 없으면 후보 순서: 그 장소 컷들의 콘티 characters 옷 → 대본 entries
+    옷(컷 순) → 그 장소 모든 컷의 패널 읽기 옷 가운데 가장 많은 것(같으면 앞 컷) → fallback. 첫 쓸 만한 후보(146 규칙: 실사 정리 뒤
+    2낱말 이상·옷 낱말)를 limit 으로 정리한다. 고르기는 애니·실사가 같고, real=False(애니)면 그 후보를 그림 낱말 빼기 없이 정리한다
+    (그림 낱말은 실사만 지운다 — lr-e).
+    """
+    name = str(name or "").strip()
+    if not name:
+        return ""
+    override = ((plan.get("input") or {}).get("castOverrides") or {}).get(name) or {}
+    if isinstance(override, dict) and str(override.get("costume") or "").strip():
+        value = str(override.get("costume"))
+        return _scene_outfit_text(value, limit, real=real) or _clip_words(value, limit)
+    ids = _location_cut_ids(plan, location)
+    cuts = {str(c.get("id")): c for c in (plan.get("conti") or {}).get("cuts") or [] if isinstance(c, dict)}
+    entries = [e for e in (plan.get("script") or {}).get("entries") or [] if isinstance(e, dict)]
+
+    def panels_of(item: dict) -> set[int]:
+        return {int(p) for p in item.get("panels") or [] if isinstance(p, (int, float)) and not isinstance(p, bool)}
+
+    conti_values: list[str] = []
+    script_values: list[str] = []
+    for cut_id in ids:
+        cut = cuts.get(cut_id) or {}
+        conti_values += [_outfit_of(ch) for ch in cut.get("characters") or []
+                         if isinstance(ch, dict) and str(ch.get("name") or "").strip() == name]
+        panels = panels_of(cut)
+        for entry in entries:
+            if panels & panels_of(entry):
+                script_values += [_outfit_of(ch) for ch in entry.get("characters") or []
+                                  if isinstance(ch, dict) and str(ch.get("name") or "").strip() == name]
+    readings = _cut_cast_readings(plan)
+    votes: dict[str, list] = {}
+    for order, cut_id in enumerate(ids):
+        value = (readings.get(cut_id) or {}).get(name)
+        text = _scene_outfit_text(value)
+        if text:
+            vote = votes.setdefault(text.lower(), [0, order, value])
+            vote[0] += 1
+    majority = [v[2] for v in sorted(votes.values(), key=lambda v: (-v[0], v[1]))]
+    for value in [*conti_values, *script_values, *majority, fallback]:
+        text = _scene_outfit_text(value)
+        if len(text.split()) >= 2 and _OUTFIT_GARMENT.search(text):
+            return _scene_outfit_text(value, limit, real=real)
+    return ""
+
+
+def _scene_costume_map(plan: dict, cut_ids, location, fallback: dict | None = None) -> dict[str, str]:
+    """작업 160: 컷 인물(_scene_outfits 의 이름)마다 _scene_costume. _real_brief_text 의 scene_outfits 자리에 쓴다(컷마다 콘티 옷이
+    장면 옷을 덮지 않게). fallback = {이름: 지금 값}(없으면 _scene_outfits 값)."""
+    base = _scene_outfits(plan, cut_ids, fallback)
+    fallback = fallback if fallback is not None else base
+    names = list(dict.fromkeys([*base, *fallback]))
+    return {name: _scene_costume(plan, name, location, fallback=str(fallback.get(name) or base.get(name) or ""))
+            for name in names}
+
+
+def _read_location_cast(owner: str, pid: str, plan: dict, take: dict) -> None:
+    """작업 160: 테이크(조각) 프롬프트 전에 같은 장소 컷이 있는 모든 테이크의 패널 읽기를 채운다(_scene_cast_notes — 캐시면 호출 0).
+    그래야 첫 테이크도 장소 전체 패널 읽기로 옷을 고른다. 컷 → 캐시 키 표가 이미 다 있는 테이크는 건너뛴다."""
+    from . import locations as loc_mod  # noqa: PLC0415
+
+    def locs(ids) -> set[str]:
+        return {loc_mod.normalize_name(_cut_location(plan, c)) for c in ids}
+
+    mine = locs(_seg_cut_ids(take))
+    for unit in _take_units(plan):
+        ids = _seg_cut_ids(unit)
+        mapped = (plan.get("previz") or {}).get("castNotesCuts") or {}
+        if not ids or all(c in mapped for c in ids) or not (locs(ids) & mine):
+            continue
+        try:
+            _scene_cast_notes(owner, pid, plan, unit)
+        except Exception as exc:  # noqa: BLE001
+            log.warning("vnew.gen.location_cast_failed pid=%s take=%s err=%s", pid, unit.get("id"), _msg(exc))
+
+
 def _shot_ko_en(shot_ko: str) -> str:
     """콘티 shotKo 를 영어 샷 이름으로(작업 132). 표에 없으면 ""."""
     rest = str(shot_ko or "")
@@ -6991,7 +7275,8 @@ def _drop_named(text: str, names) -> str:
 
 def _cut_still_prompt(plan: dict, cut: dict, people: list[tuple[str, str, int]], has_frame: bool, *,
                       source: str = "previz", outfits: dict | None = None, background_no: int = 0,
-                      layout: dict | None = None, fix: str = "", sheets: dict | None = None) -> str:
+                      layout: dict | None = None, fix: str = "", sheets: dict | None = None,
+                      costumes: dict | None = None, prev_no: int = 0) -> str:
     """컷 시작 그림(Seedream) 문장: 장면·인물 위치·카메라 + photoreal. people = [(색, 이름, 이미지 번호)].
 
     작업 132: source="anime"(Image 1 = 같은 gen 애니 테이크 결과의 그 컷 첫 프레임)이면 Image 1 의 구도·카메라·인물 위치·
@@ -7005,9 +7290,17 @@ def _cut_still_prompt(plan: dict, cut: dict, people: list[tuple[str, str, int]],
     fix 가 없으면 138 과 글자 하나 다르지 않다.
     작업 142: sheets = {이름: 정면 번호(0 = 없음)} — 그 인물의 people 번호는 AI 캐릭터 시트다. FACES/CAST 바로 뒤에 인물마다
     _real_sheet_sentences 1줄. sheets 가 없으면 140 과 같다. 옷은 OUTFITS·REAL_STILL_NO_PHOTO_CLOTHES 가 그대로 정한다.
+    작업 160: OUTFITS 옷 = 그 컷 장소의 _scene_costume(모든 컷·테이크 같은 1벌). costumes = {이름: 장면 옷 편집 그림 번호} — 시트 문장이
+    "clothes come from Image N", 시트 없는 인물은 이름표 1문장. prev_no = 앞 컷 시작 그림 번호(REAL_STILL_PREV). 늘 시간대 1문장
+    (_real_time_sentence)·"Do not widen the shot"(REAL_STILL_NO_WIDEN, 구도 줄 바로 뒤).
     """
     sheets = {str(k): int(v or 0) for k, v in (sheets or {}).items()}
-    sheet_lines = [_real_sheet_sentences(name, no, sheets[name] or None) for _color, name, no in people if name in sheets]
+    costumes = {str(k): int(v or 0) for k, v in (costumes or {}).items() if v}
+    sheet_lines = [_real_sheet_sentences(name, no, sheets[name] or None, costume=bool(sheets[name])
+                                         and costumes.get(name) == sheets[name])
+                   for _color, name, no in people if name in sheets]
+    sheet_lines += [REAL_COSTUME_REF_SENTENCE.format(img=f"Image {costumes[name]}", name=name)
+                    for _color, name, _no in people if name in costumes and name not in sheets]
     cut_id = str(cut.get("cutId") or "")
     brief = _cut_brief(plan, cut_id)
     conti_cut = next((c for c in (plan.get("conti") or {}).get("cuts") or [] if str(c.get("id")) == cut_id), {})
@@ -7025,6 +7318,7 @@ def _cut_still_prompt(plan: dict, cut: dict, people: list[tuple[str, str, int]],
     if layout:
         parts.append(REAL_STILL_FRAMING.format(shot=SHOT_SIZE_EN.get(shot, shot)))
     parts.append("Photoreal live-action film still, 16:9, a single frame of a Korean drama.")
+    parts.append(REAL_STILL_NO_WIDEN)  # 작업 160: 139 샷 크기 유지(넓히지 않는다)
     if anime:
         parts.append("Image 1 is this exact shot: redraw Image 1 as a photoreal live-action frame with the same composition, "
                      "camera angle, framing, lens, character positions and poses, "
@@ -7054,9 +7348,13 @@ def _cut_still_prompt(plan: dict, cut: dict, people: list[tuple[str, str, int]],
         else:
             parts.append(REAL_STILL_BACKGROUND.format(no=background_no) if has_frame and background_no > 1
                          else REAL_STILL_BACKGROUND_ONLY)
+    if prev_no:
+        parts.append(REAL_STILL_PREV.format(no=prev_no))  # 작업 160: 앞 컷 시작 그림과 같은 장소·시간대·빛
+    parts.append(_real_time_sentence(plan))  # 작업 160: 시간대 고정
     worn = []
     # 작업 136: 장면 옷 = 콘티 → 대본 → outfits(웹툰 패널 읽기) 순(_scene_outfits). 지시서 문장은 _real_brief_text 를 지난다.
-    scene_outfits = _scene_outfits(plan, [cut_id], outfits or {})
+    # 작업 160: 그 컷 장소의 장면 옷 1벌(_scene_costume_map — 수정 → 장소 콘티·대본 → 장소 패널 읽기 다수 → outfits).
+    scene_outfits = _scene_costume_map(plan, [cut_id], _cut_location(plan, cut_id), dict(outfits or {}))
     worn_names = [name for _color, name, _no in people]
     if layout:  # 작업 139: 뒷모습 인물도 옷은 보인다
         worn_names += [name for name, _side, visible in listed if visible == "back" and name not in worn_names]
@@ -7373,22 +7671,30 @@ def _retry_better(first_items, retry_items) -> bool:
 
 def _checked_cut_still(owner: str, pid: str, gen_id: str, plan: dict, cut: dict, ctx: dict, *, frame: bytes, still: bytes,
                        layout: dict, refs: list[bytes], people: list[tuple[str, str, int]], background_no: int,
-                       charge_key: str, sheets: dict | None = None) -> tuple[bytes, dict]:
+                       charge_key: str, sheets: dict | None = None, costumes: dict | None = None,
+                       prev_no: int = 0) -> tuple[bytes, dict]:
     """시작 그림 검사(_check_cut_still) → 틀리면 Seedream 만 1번 다시(시트 뷰 없이 [애니 프레임 + 보이는 인물 정면], 교정 문장).
 
     둘 다 틀리면 틀린 항목이 적은 쪽(_retry_better, 같으면 첫 것). 돌려주는 값 = (쓸 시작 그림, 컷 기록 stillCheck
     {ok, items, note, retried, firstItems, used}). 검사가 안 되면 첫 그림 그대로(ok None).
     작업 142: sheets(이름 → 정면 번호, 인물 첫 장이 AI 캐릭터 시트)도 같은 규칙으로 번호를 당긴다.
+    작업 160: costumes(이름 → 장면 옷 그림 번호)·prev_no(앞 컷 시작 그림 번호)도 같은 규칙으로 당긴다.
     """
     first = _check_cut_still(owner, pid, gen_id, frame, still, layout)
     if first is None or first["ok"]:
         return still, {"ok": None if first is None else True, "items": [], "note": (first or {}).get("note", ""),
                        "retried": False, "firstItems": [], "used": "first"}
     refs2 = [ref for no, ref in enumerate(refs, 1) if no != background_no]
-    people2 = [(color, name, no - 1 if background_no and no > background_no else no) for color, name, no in people]
-    sheets2 = {name: (no - 1 if background_no and no > background_no else no) for name, no in (sheets or {}).items()}
+
+    def shift(no: int) -> int:
+        return no - 1 if background_no and no > background_no else no
+
+    people2 = [(color, name, shift(no)) for color, name, no in people]
+    sheets2 = {name: shift(no) for name, no in (sheets or {}).items()}
+    costumes2 = {name: shift(no) for name, no in (costumes or {}).items()}
     prompt2 = _cut_still_prompt(plan, cut, people2, True, source="anime", outfits=ctx["outfits"], background_no=0,
-                                layout=layout, fix=_still_fix(first["items"], layout), sheets=sheets2 or None)
+                                layout=layout, fix=_still_fix(first["items"], layout), sheets=sheets2 or None,
+                                costumes=costumes2 or None, prev_no=shift(prev_no) if prev_no else 0)
     still2 = _seedream(prompt2, refs2, size=vpoc_seedream.SIZE)
     del refs2
     _charge_cut_still(owner, pid, gen_id, f"{charge_key}-{secrets.token_hex(3)}")
@@ -7468,28 +7774,49 @@ def _submit_real_cut(owner: str, pid: str, gen_id: str, plan: dict, ctx: dict, c
     # 작업 142: 보이는 인물마다 _real_identity_refs(실사 시트 → 정면, 시트 없으면 140 과 같은 정면 1장). Seedream 상한 안에서
     # _ref_counts 로 첫 장(시트)을 모두에게 먼저 — 넘치면 정면부터 빠지고 보이는 인물은 빠지지 않는다(_pack_still_people).
     rows: list[tuple[str, str, list[tuple[str, bytes]]]] = []
+    picked: list[tuple[str, dict | None, str]] = []
     for actor in actors:
         name = str(actor.get("name") or "")
         if shown is not None and shown.get(name) not in REAL_STILL_SHOWN:
             continue  # 작업 139: 애니 프레임에 얼굴이 안 보이는 인물(back·none)은 정면 사진을 넣지 않는다
         pick = ctx["overrides"].get(name)
         char = _cast_entry(owner, pick["charId"], name) if pick else ctx["charById"].get(str(actor.get("charId") or ""))
-        look = pick["look"] if pick else "real"
+        picked.append((actor, char, pick["look"] if pick else "real"))
+    # 작업 160: 보이는 인물의 장면 옷 편집 그림(메모리만) — 실사 정면 자리를 바꾼다. 그 컷 장소의 _scene_costume.
+    swaps = _costume_refs(owner, pid, plan, [(str(a.get("name") or ""), c, lk) for a, c, lk in picked],
+                          _cut_location(plan, cut_id), ctx.get("outfits") or {})
+    costume_names: set[str] = set()
+    for actor, char, look in picked:
+        name = str(actor.get("name") or "")
         keys = _real_identity_refs(char, look) if char else []
         sheet_key = str(char.get("realSheetKey") or "") if char and look != "anime" else ""
+        front_key = str(char.get("realFrontKey") or "") if char and look != "anime" else ""
         photos: list[tuple[str, bytes]] = []
         for key in keys:
             photo = _load_jpeg(key)
             if photo is not None:
+                if front_key and key == front_key and swaps.get(name):
+                    photo = swaps[name]
+                    costume_names.add(name or "a person")
                 photos.append(("sheet" if sheet_key and key == sheet_key else "front", photo))
         if sheet_key and keys[:1] == [sheet_key] and not photos[:1]:
             photos = [("front", p) for p in (_load_jpeg(k) for k in _fallback_front_keys(char, "real")) if p is not None]
         if photos:
             rows.append((str(actor.get("colorName") or "grey"), name or "a person", photos))
-    people, sheets, refs_kind = _pack_still_people(rows, refs, _SEEDREAM_MAX_REFS - len(refs))
+    # 작업 160: 컷 k(>1)는 앞 컷 시작 그림을 참고 맨 뒤에 1장(같은 장소·시간대·빛). 자리를 먼저 남긴다.
+    prev_still = ctx.get("prevStill") if isinstance(ctx.get("prevStill"), (bytes, bytearray)) else None
+    people, sheets, refs_kind = _pack_still_people(rows, refs, _SEEDREAM_MAX_REFS - len(refs) - int(prev_still is not None))
+    # 장면 옷 그림이 실제로 들어간 인물만: 시트 인물은 정면 번호(둘째 장)가 남았을 때, 시트 없는 인물은 첫 장.
+    costumes = {name: (sheets[name] if name in sheets else no) for _color, name, no in people
+                if name in costume_names and (sheets.get(name) or name not in sheets)}
+    prev_no = 0
+    if prev_still is not None:
+        refs.append(_fit_ref(bytes(prev_still)))
+        prev_no = len(refs)
     beat()  # 작업 144: 시작 그림(유료) 전
     still = _seedream(_cut_still_prompt(plan, cut, people, frame is not None, source=source, outfits=ctx["outfits"],
-                                        background_no=background_no, layout=layout, sheets=sheets or None), refs,
+                                        background_no=background_no, layout=layout, sheets=sheets or None,
+                                        costumes=costumes or None, prev_no=prev_no), refs,
                       size=vpoc_seedream.SIZE)
     sheet_view = sheet[1] if sheet else "none"
     still_key_base = f"vnew-gen-{pid}-{gen_id}-{take_id}-{cut_id}{tag}"
@@ -7499,8 +7826,10 @@ def _submit_real_cut(owner: str, pid: str, gen_id: str, plan: dict, ctx: dict, c
         beat()  # 작업 144: 시작 그림 검사(다시 그리기 유료) 전
         still, still_check = _checked_cut_still(owner, pid, gen_id, plan, cut, ctx, frame=frame, still=still, layout=layout,
                                                 refs=refs, people=people, background_no=background_no, sheets=sheets,
-                                                charge_key=f"{still_key_base}-still2-{attempt}")
+                                                charge_key=f"{still_key_base}-still2-{attempt}",
+                                                costumes=costumes or None, prev_no=prev_no)
     del frame, refs, sheet
+    ctx["prevStill"] = still  # 작업 160: 다음 컷 시작 그림의 참고(메모리, 이 컷 루프 동안만)
     beat()  # 작업 144: Kling 제출(유료) 전
     ctx["stage"] = "submit"
     out_prefix = _seg_output_prefix(owner, pid, gen_id, f"{take_id}-real-{cut_id}{tag}", attempt)
@@ -7696,6 +8025,20 @@ def _judge_real_cut(owner: str, pid: str, gen_id: str, plan: dict, cut: dict, an
     return {"ok": not items, "items": items, "note": note}
 
 
+def _prev_cut_still(cuts: list[dict], number: int) -> bytes | None:
+    """작업 160: 컷 기록 목록에서 number 앞 컷의 시작 그림(131 stillKey, 영상 버킷 읽기만). 첫 컷·키 없음·못 읽음이면 None."""
+    if number <= 0 or number > len(cuts):
+        return None
+    key = str((cuts[number - 1] or {}).get("stillKey") or "")
+    if not key:
+        return None
+    try:
+        return _fetch_bytes(key, bucket=vpoc_settings.VIDEO_BUCKET) or None
+    except Exception as exc:  # noqa: BLE001
+        log.warning("vnew.gen.prev_cut_still_failed err=%s", type(exc).__name__)
+        return None
+
+
 def _qa_real_cuts(owner: str, pid: str, gen_id: str, index: int, claim: str, plan: dict, cuts: list[dict]) -> dict[int, dict]:
     """완료됐고 qa 가 없는 컷을 검사한다(작업 133). 돌려주는 값 = {컷 번호: 바꿀 값}. 첫 검사에서 틀리면 그 컷만 1번 다시 제출한다.
 
@@ -7734,6 +8077,7 @@ def _qa_real_cuts(owner: str, pid: str, gen_id: str, index: int, claim: str, pla
             try:
                 ctx = _real_cut_ctx(owner, pid, plan, take, *model)
                 ctx["takeId"], ctx["index"] = str(take.get("id") or index), index
+                ctx["prevStill"] = _prev_cut_still(cuts, number)  # 작업 160: 다시 만들 때도 앞 컷 시작 그림 참고
                 unit = next((u for u in _take_cut_units(plan, take) if str(u.get("cutId")) == str(cut.get("cutId"))), None)
                 if unit is not None:
                     record = _submit_real_cut(owner, pid, gen_id, plan, ctx, unit, fix=_real_cut_fix(judge["items"]), tag="-qa")
@@ -10178,6 +10522,7 @@ def _real_cut_prompt(plan: dict, seg: dict, *, model: str = "", prompt_max: int 
         "same place, lighting, characters, positions and outfits.",
         REAL_TAKE_STYLE,
         REAL_CUT_KEEP_FRAMING,  # 작업 139: 시작 그림 구도 유지(카메라가 물러나지 않고 새 인물이 들어오지 않는다)
+        _real_time_sentence(plan),  # 작업 160: 시간대 고정(머리라 줄이기에서 빠지지 않는다)
     ])
     tail = "No text, no subtitles, no speech bubbles.\nNEGATIVE: " + REAL_CUT_NEGATIVE + "."
     if fix:  # 작업 133: QA 교정 문장 1개(줄이기에서 빠지지 않는다)
@@ -10188,7 +10533,8 @@ def _real_cut_prompt(plan: dict, seg: dict, *, model: str = "", prompt_max: int 
     actors = ", ".join(f"{ch.get('name', '')} {ch.get('actionEn', '')}".strip()
                        for ch in (cut.get("characters") or []) if (ch.get("name") or ch.get("actionEn")))
     action = ". ".join(p for p in (_real_action(cut.get("promptEn")).rstrip("."), _real_action(actors).rstrip(".")) if p)
-    action = _real_brief_text(action, _scene_outfits(plan, [cut_id]))  # 작업 136: 그림 문장 빼기·옷 구절 → 장면 옷
+    # 작업 136: 그림 문장 빼기·옷 구절 → 장면 옷. 작업 160: 장면 옷 = 그 컷 장소 1벌(_scene_costume_map).
+    action = _real_brief_text(action, _scene_costume_map(plan, [cut_id], str(cut.get("locationEn") or "")))
     if action:
         lines.append("ACTION: " + action + ".")
     spoken = [ln for ln in _cut_lines(plan, cut) if not ln.get("silent") and str(ln.get("lineKo") or "").strip()]
