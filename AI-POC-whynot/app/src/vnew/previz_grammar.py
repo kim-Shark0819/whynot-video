@@ -16,15 +16,26 @@ import hashlib
 import json
 
 from ..vpoc import llm as vpoc_llm
+from . import previz_schema as _schema
 from . import previz_support
 from . import settings as vnew_settings
+
+# 작업 148: 손·자세·머리·눈 열거값(previz_schema 한 곳). SYSTEM 문장이 이 값을 그대로 나열한다.
+_SCHEMA_POSTURES = _schema.POSE_POSTURES
+_SCHEMA_ACTS = _schema.HAND_ACTS
+_SCHEMA_TARGETS = _schema.HAND_TARGETS
+_SCHEMA_TURNS = _schema.HEAD_TURNS
+_SCHEMA_TILTS = _schema.HEAD_TILTS
+_SCHEMA_EYES = _schema.EYE_STATES
 
 # 패널 분석과 같은 모델(Claude 분석 체인). previz.PANEL_ANALYZE_MODEL 과 같은 값.
 GRAMMAR_MODEL = vnew_settings.ANALYZE_FALLBACK_MODEL
 
 # 읽기 결과 판(previz.panelGrammar[cutId].v). 2 = 받침 판단(supports) 포함(previz-support-reasoning R2, 2026-10-29).
-# 같은 패널 해시라도 v 가 이보다 작은 옛 캐시는 한 번 다시 읽어 supports 만 채운다(previz._read_grammars).
-GRAMMAR_VERSION = 2
+# 3 = actions[] 에 손·자세·머리·눈(posture·hands·head·eyes) 포함(작업 148).
+# 같은 패널 해시라도 v 가 이보다 작은 옛 캐시는 다시 만들기 때 한 번 다시 읽어 새 필드만 채운다(previz._read_grammars):
+# v<2 는 supports·actions, v 2 는 actions 만(카메라 문법·supports 는 옛 값).
+GRAMMAR_VERSION = 3
 
 # ================================================================ 시스템·도구(read_test.py 원본)
 
@@ -42,6 +53,15 @@ SYSTEM = (
     "- others: every other person visible, with how they appear: full | partial_edge | shoulder_or_back | hands_only | lips_or_face_part, their side of the frame (left|right|center|bottom), and their screenX.\n"
     "- offscreenPartnerSide: if the subject is talking to / looking at someone not in frame, on which side that person must be: left | right | front_of_camera | none.\n"
     "- actions: what each visible person is physically DOING with hands/head/body (acting beats). For each, give {name (the person), actionEn (one sentence on the hand/head/body action), gesture (ONE of: none | point | bow | hands_on_knees | cover_face | hand_to_own_face | wipe_tears | hand_on_other_cheek | both_hands_other_cheeks | hand_on_chest | press_hand_to_other_chest | lean_in | laugh | look_down | look_up | nod | turn_head_to_other), target (the other person the action is directed at, or none)}. Pick the gesture that best matches the drawn action; use none if the person just stands/sits still.\n"
+    "- For every actions entry also give the body detail. Read it from the panel IMAGE, not from the dialogue or the cut "
+    "description. posture: " + " | ".join(_SCHEMA_POSTURES) + ". hands: {left: {act, target}, right: {act, target}}, where "
+    "left and right are the person's OWN left and right hand (not screen left/right). act: " + " | ".join(_SCHEMA_ACTS) + ". "
+    "target: " + " | ".join(_SCHEMA_TARGETS) + " (own_* = a part of the person's own body, other_* = a part of the body of "
+    "the action's target person). A hand that is not visible, or does nothing, is act rest with target none. Use rest_on "
+    "when a body part rests on the hand (a cheek resting on the hand = rest_on own_cheek). Example: a man lifting the "
+    "other person's chin with his right hand while his left hand hangs = right {act: grab, target: other_chin}, left "
+    "{act: rest, target: none}. head: {turn: " + " | ".join(_SCHEMA_TURNS) + ", tilt: " + " | ".join(_SCHEMA_TILTS) + "} "
+    "(tilt is toward the person's own left or right). eyes: " + " | ".join(_SCHEMA_EYES) + ".\n"
     "- expressionEn: the MAIN subject's facial expression in one short phrase (e.g. 'teary-eyed, trembling lips').\n"
     "- eyelines: for every visible person, state where their pupils point: target is one of "
     "'person:<name>' (looking at that person's face) | 'camera' | 'down' | 'up' | 'offscreen_left' | "
@@ -115,6 +135,23 @@ TOOL = {
                             "actionEn": {"type": "string"},
                             "gesture": {"type": "string"},
                             "target": {"type": "string"},
+                            # 작업 148: 손·자세·머리·눈(패널 그림에서). 왼쪽·오른쪽 = 인물 자신의 손.
+                            "posture": {"type": "string"},
+                            "hands": {
+                                "type": "object",
+                                "properties": {
+                                    side: {
+                                        "type": "object",
+                                        "properties": {"act": {"type": "string"}, "target": {"type": "string"}},
+                                    }
+                                    for side in ("left", "right")
+                                },
+                            },
+                            "head": {
+                                "type": "object",
+                                "properties": {"turn": {"type": "string"}, "tilt": {"type": "string"}},
+                            },
+                            "eyes": {"type": "string"},
                         },
                     },
                 },
@@ -304,6 +341,8 @@ def normalize_grammar(payload: dict) -> dict:
 
     # actions: 보이는 인물의 연기 동작. gesture 는 ACTION_GESTURES 열거값(모르면 "none"),
     # target 은 상대 이름(없으면 "none"). name 이 비면 버린다.
+    # 작업 148: posture·hands·head·eyes 를 정리해 더한다(모르는 값은 버림, other_* 손 목표는 target 이 있을 때만).
+    # hands 에서 gesture 를 고를 수 있으면 그 값을 쓴다(뒤호환: 옛 렌더러·옛 규칙이 gesture 를 본다).
     actions = []
     for item in payload.get("actions") or []:
         if not isinstance(item, dict):
@@ -311,12 +350,18 @@ def normalize_grammar(payload: dict) -> dict:
         name = str(item.get("name") or "").strip()
         if not name:
             continue
-        actions.append({
+        target = str(item.get("target") or "none").strip() or "none"
+        pose = _schema.normalize_pose_fields(item, has_target=target.lower() != "none")
+        gesture = _enum(item.get("gesture"), ACTION_GESTURES, "none")
+        derived = _schema.gesture_from_hands(pose.get("hands"))
+        action = {
             "name": name,
             "actionEn": str(item.get("actionEn") or "").strip(),
-            "gesture": _enum(item.get("gesture"), ACTION_GESTURES, "none"),
-            "target": str(item.get("target") or "none").strip() or "none",
-        })
+            "gesture": derived or gesture,
+            "target": target,
+        }
+        action.update(pose)
+        actions.append(action)
 
     # eyelines: 보이는 인물의 눈동자 방향(설계자 2026-10-26, 065-E). name 이 비거나 target 이
     # 판정 불가면 버린다(보완 규칙 _cut_eyelines 가 채운다).

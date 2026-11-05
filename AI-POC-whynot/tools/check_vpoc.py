@@ -9053,6 +9053,14 @@ def check_vnew_mannequin() -> None:
             bad.append(
                 f"(mf-a) 렌더러 GESTURES 가 schema 와 다릅니다:\n  js={js_gestures}\n  schema={list(pvschema.GESTURES)}"
             )
+    # 작업 148: 손·자세·머리·눈 열거값도 schema 와 문자열로 같아야 한다.
+    for js_name, py_values in (("POSE_POSTURES", pvschema.POSE_POSTURES), ("HAND_ACTS", pvschema.HAND_ACTS),
+                               ("HAND_TARGETS", pvschema.HAND_TARGETS), ("HEAD_TURNS", pvschema.HEAD_TURNS),
+                               ("HEAD_TILTS", pvschema.HEAD_TILTS), ("EYE_STATES", pvschema.EYE_STATES)):
+        found_js = _re.search(r"const " + js_name + r" = \[(.*?)\];", js, _re.S)
+        js_values = _re.findall(r'"([^"]+)"', found_js.group(1)) if found_js else None
+        if js_values != list(py_values):
+            bad.append(f"(mf-a) 렌더러 {js_name} 가 schema 와 다릅니다:\n  js={js_values}\n  schema={list(py_values)}")
 
     # ---------------- (mf-b) schema: hairColor·gesture·gestureTarget 정리 ----------------
     scene = pvschema.normalize_scene(
@@ -18446,8 +18454,9 @@ def check_previz_support() -> None:
                 missing_e = [value for value in enum if value not in grammarmod.SYSTEM]
                 if missing_e:
                     bad.append(f"(sr-b) SYSTEM 에 열거값이 없습니다: {missing_e}")
-            if grammarmod.GRAMMAR_VERSION != 2:
-                bad.append(f"(sr-b) GRAMMAR_VERSION 이 2 가 아닙니다: {grammarmod.GRAMMAR_VERSION}")
+            # 작업 148: actions[] 에 손·자세·머리·눈이 붙어 판이 3 으로 올랐다(옛 2 캐시는 다시 만들기 때 actions 만 다시 읽는다).
+            if grammarmod.GRAMMAR_VERSION != 3:
+                bad.append(f"(sr-b) GRAMMAR_VERSION 이 3 이 아닙니다: {grammarmod.GRAMMAR_VERSION}")
             blocker = vpoc_llm._converse  # noqa: SLF001 — _guard_real_llm 의 막는 함수
             captured: list[dict] = []
             vpoc_llm._converse = lambda **kw: (captured.append(kw) or ({"mainSubject": "A"}, {}))  # noqa: SLF001
@@ -18513,10 +18522,13 @@ def check_previz_support() -> None:
             cuts_c = [{"cutId": cid, "seconds": 3, "panels": [0], "shotKo": f"[{cid}]", "characters": []}
                       for cid in ("c1", "c2", "c3", "c4", "c5")] + [{"cutId": "c6", "seconds": 3, "panels": [], "shotKo": "[c6]"}]
             groups_c = [{"locationEn": "x", "cuts": cuts_c}]
+            # 작업 148: '지금 판' 캐시는 v = GRAMMAR_VERSION(3). 2 로 두면 판 올림 대상이 되어(actions 다시 읽기) 이 검사가 보려는
+            # '지금 판은 다시 읽지 않는다'가 아니게 된다. v 2 → 3 판 올림은 작업 148 검사(pz-c)가 따로 본다.
+            gv = grammarmod.GRAMMAR_VERSION
             cache_c = {
                 "c1": {"hash": h_tiles, "grammar": old_g},
-                "c2": {"hash": h_tiles, "grammar": v2_g, "v": 2},
-                "c3": {"hash": h_tiles, "grammar": v2_g, "v": 2},
+                "c2": {"hash": h_tiles, "grammar": v2_g, "v": gv},
+                "c3": {"hash": h_tiles, "grammar": v2_g, "v": gv},
                 "c4": {"hash": "other-hash", "grammar": old_g},
                 "c5": {"hash": h_tiles, "grammar": old_g, "v": 1},
                 "c6": {"hash": h_empty, "grammar": old_g},
@@ -18529,12 +18541,12 @@ def check_previz_support() -> None:
                 want_up = dict(old_g, supports=new_norm["supports"])
                 if g_by.get(cid) != want_up:
                     bad.append(f"(sr-c) 옛 캐시 {cid} 판 올림이 다릅니다(다른 필드 옛 값·supports 새 값): {g_by.get(cid)}")
-                if cache_out.get(cid) != {"hash": h_tiles, "grammar": want_up, "v": 2}:
-                    bad.append(f"(sr-c) 옛 캐시 {cid} 가 v 2 로 저장되지 않았습니다: {cache_out.get(cid)}")
+                if cache_out.get(cid) != {"hash": h_tiles, "grammar": want_up, "v": gv}:
+                    bad.append(f"(sr-c) 옛 캐시 {cid} 가 v {gv} 로 저장되지 않았습니다: {cache_out.get(cid)}")
             if g_by.get("c2") != v2_g or cache_out.get("c2") != cache_c["c2"]:
                 bad.append("(sr-c) v 2 캐시가 그대로가 아닙니다")
             for cid in ("c3", "c4"):
-                if g_by.get(cid) != new_norm or cache_out.get(cid) != {"hash": h_tiles, "grammar": new_norm, "v": 2}:
+                if g_by.get(cid) != new_norm or cache_out.get(cid) != {"hash": h_tiles, "grammar": new_norm, "v": gv}:
                     bad.append(f"(sr-c) {cid}(reread·해시 바뀜) 가 새 읽기 전체가 아닙니다: {g_by.get(cid, {}).get('vantage')}")
             if g_by.get("c6") != dict(old_g, supports=[]) or cache_out.get("c6") != cache_c["c6"]:
                 bad.append(f"(sr-c) 옛 캐시 + 읽기 None(c6) 이 옛 값 + supports [] · 캐시 그대로가 아닙니다: {cache_out.get('c6')}")
@@ -18914,7 +18926,8 @@ def check_previz_support() -> None:
             for cid in cut_ids3:
                 cell = cache_h.get(cid) or {}
                 gram = cell.get("grammar") or {}
-                if cell.get("v") != 2 or gram.get("reasonKo") != "옛 읽기" or gram.get("vantage") != "3q" or not gram.get("supports"):
+                # 작업 148: 판이 3 으로 올라 저장되는 v 도 GRAMMAR_VERSION(3).
+                if cell.get("v") != grammarmod.GRAMMAR_VERSION or gram.get("reasonKo") != "옛 읽기" or gram.get("vantage") != "3q" or not gram.get("supports"):
                     bad.append(f"(sr-h) {cid} 캐시 판 올림이 다릅니다(옛 카메라 문법 유지·supports·v 2): {cell.get('v')} {gram.get('vantage')}")
             prompt_h = design_prompts[0] if design_prompts else ""
             if prompt_h.count("   [받침 판단] ") != 11 or prompt_h.count(psup.PROMPT_GUIDE_KO) != 1 or "받침=parking bollard(" not in prompt_h:
@@ -19065,8 +19078,9 @@ def check_previz_support() -> None:
             if logs.messages("step=support") or logs.messages("vnew.previz.support."):
                 bad.append("(sr-j) 설정을 껐는데 받침 로그가 있습니다")
             cache_j = pv_j.get("panelGrammar") or {}
-            if any((cache_j.get(c) or {}).get("v") != 2 or not ((cache_j.get(c) or {}).get("grammar") or {}).get("supports") for c in cut_ids3):
-                bad.append("(sr-j) 설정을 꺼도 읽기 캐시에는 supports(v 2)가 남아야 합니다")
+            # 작업 148: 판이 3 으로 올라 새로 저장되는 v 는 GRAMMAR_VERSION(3).
+            if any((cache_j.get(c) or {}).get("v") != grammarmod.GRAMMAR_VERSION or not ((cache_j.get(c) or {}).get("grammar") or {}).get("supports") for c in cut_ids3):
+                bad.append("(sr-j) 설정을 꺼도 읽기 캐시에는 supports(v 3)가 남아야 합니다")
             mark("sr-j")
 
             # ---------------- (sr-m) test3 실측 읽기(필수 수정 A): 안 보이는 받침은 적용하지 않는다 ----------------
@@ -50499,6 +50513,379 @@ def check_vnew_real_take_costume_146() -> None:
            "(rc-c)사진 옷 유지 문장 없음·시트 기본 옷 금지 (rc-d)애니 sha 그대로")
 
 
+# 작업 148: 렌더러 검사 하네스(node). vnew-previz.js 를 임시 .mjs 로 복사해 three 를 파일 URL 로 바꾸고 Mannequin·PrevizScene
+# 을 내보낸다. cases = {이름: normalize_scene 결과}. 장면마다 t 에서 update 하고 인물별 뼈 회전·손·신체 부위 세계 위치를 돌려준다.
+_PZ148_RUNNER = r"""
+globalThis.window = {};
+const THREE = await import(process.argv[2]);
+const fs = await import('node:fs');
+const out = {};
+for (const variant of ['new', 'old']) {
+  const mod = await import(new URL('./previz_' + variant + '.mjs', import.meta.url));
+  const cases = JSON.parse(fs.readFileSync(new URL('./cases.json', import.meta.url), 'utf8'));
+  out[variant] = {};
+  for (const [name, sd] of Object.entries(cases)) {
+    const sc = new mod.PrevizScene(sd, null, null);
+    const cam = new THREE.PerspectiveCamera(50, 16 / 9, 0.1, 100);
+    sc.update(Number(sd.t148 || 1.3), cam);
+    sc.root.updateMatrixWorld(true);
+    const r6 = (v) => Math.round(v * 1e6) / 1e6;
+    const rot = (o) => [r6(o.rotation.x), r6(o.rotation.y), r6(o.rotation.z)];
+    const pos = (v) => (v ? v.toArray().map(r6) : null);
+    const actors = {};
+    for (const [id, entry] of Object.entries(sc.actors)) {
+      const m = entry.mannequin;
+      const limb = (l) => [rot(l.pivot), rot(l.elbow)];
+      actors[id] = {
+        hipsY: r6(m.hips.position.y), spine: rot(m.spine), neck: rot(m.neck),
+        shL: limb(m.shoulderL), shR: limb(m.shoulderR), hipL: limb(m.hipL), hipR: limb(m.hipR),
+        eyeY: r6(m.eyeMeshes[0].scale.y),
+        handL: pos(m.shoulderL.hand.getWorldPosition(new THREE.Vector3())),
+        handR: pos(m.shoulderR.hand.getWorldPosition(new THREE.Vector3())),
+        chin: pos(m.bodyPoint('chin')), eyes: pos(m.bodyPoint('eyes')),
+        cheekL: pos(m.bodyPoint('cheek', 'left')), cheekR: pos(m.bodyPoint('cheek', 'right')),
+        kneeL: pos(m.bodyPoint('knee', 'left')), kneeR: pos(m.bodyPoint('knee', 'right')),
+      };
+    }
+    out[variant][name] = actors;
+  }
+}
+console.log(JSON.stringify(out));
+"""
+# 148 이전 렌더러 흉내: 새 호출 두 줄(자세·머리·눈 applyBody, 손 IK 대기열)을 뺀 것. hands 가 없는 인물은 이 둘만 다르다.
+_PZ148_NEW_CALLS = (
+    "      entry.mannequin.applyBody(ca, t, targetYaw);\n",
+    '      if (ca.hands && typeof ca.hands === "object") handJobs.push({ entry, ca });\n',
+)
+
+
+def _pz148_render(cases: dict) -> tuple[dict, str]:
+    """렌더러를 node 로 돌린다(타임아웃 60초). (결과 {new, old}, 오류 문장)."""
+    import tempfile as _tempfile  # noqa: PLC0415
+
+    node = shutil.which("node")
+    if not node:
+        return {}, "node 가 없습니다"
+    src = (PUBLIC / "vnew-previz.js").read_text(encoding="utf-8")
+    line = 'import * as THREE from "/vendor/three/three.module.min.js?v=__ASSET_VERSION__";'
+    three = (PUBLIC / "vendor" / "three" / "three.module.min.js").resolve().as_uri()
+    if line not in src or any(call not in src for call in _PZ148_NEW_CALLS):
+        return {}, "vnew-previz.js 의 three import 줄·148 호출 줄을 찾지 못했습니다"
+    tail = "\nexport { Mannequin, PrevizScene };\n"
+    new_src = src.replace(line, f'import * as THREE from "{three}";') + tail
+    old_src = new_src
+    for call in _PZ148_NEW_CALLS:
+        old_src = old_src.replace(call, "")
+    work = Path(_tempfile.mkdtemp(prefix="vpoc_pz148_"))
+    try:
+        (work / "previz_new.mjs").write_text(new_src, encoding="utf-8")
+        (work / "previz_old.mjs").write_text(old_src, encoding="utf-8")
+        (work / "cases.json").write_text(json.dumps(cases, ensure_ascii=False), encoding="utf-8")
+        (work / "run.mjs").write_text(_PZ148_RUNNER, encoding="utf-8")
+        try:
+            result = subprocess.run([node, str(work / "run.mjs"), three], capture_output=True, text=True,
+                                    encoding="utf-8", timeout=60)
+        except subprocess.TimeoutExpired:
+            return {}, "node 렌더러 검사가 60초 안에 끝나지 않았습니다"
+        if result.returncode != 0:
+            return {}, f"node 실패: {(result.stderr or '').strip()[:600]}"
+        return json.loads(result.stdout), ""
+    finally:
+        shutil.rmtree(work, ignore_errors=True)
+
+
+def check_vnew_previz_pose_148() -> None:
+    """작업 148 — 프리비즈 포즈가 웹툰 패널을 따른다(어느 손·어느 신체 부위·자세). 가짜 LLM, 유료 0.
+
+    (pz-a) schema: posture·hands·head·eyes 정리, 모르는 값 버림, gestureTarget 없는 other_chin 버림, 옛 인물은 키 없음
+    (pz-b) 렌더러(node): 범건우 right grab other_chin → 오른손이 여의준 턱 0.12m 안·왼팔 쉼(앉음 = 무릎, 서 있음 = 내림),
+           cover own_eyes 오른손이 자기 눈 가까이, rest_on own_cheek 손이 뺨 아래, lean_forward 척추 x, 눈 반쯤·고개 기울임,
+           hands 없는 인물은 148 이전과 같은 회전(제스처 16개 + 없음 · 서기/앉기, 스냅숏 값 포함)
+    (pz-c) 패널 읽기: 가짜 도구 결과 → actions 에 새 필드 저장·hands 에서 gesture 도출·멱등, SYSTEM 문장,
+           v 2 캐시는 다시 만들기 때 actions 만 다시 읽음(supports·카메라 옛 값), 지금 판은 0회, 옛 문법(새 필드 없음)은 지금처럼
+           (gesture 만, 키 없음, LLM 0회), _apply_gestures 가 timeline actor 로 옮김(gestureTarget)
+    (pz-d) 생성 문장: 잡는 손 포즈 절 · 쉬는 손만이면 없음 · 애니·실사 · 바이트 상한 · 대사보다 먼저 poseDrop
+    """
+    import copy as _copy  # noqa: PLC0415
+    import math as _math  # noqa: PLC0415
+    import traceback as _tb  # noqa: PLC0415
+
+    sys.path.insert(0, str(ROOT / "app"))
+    bad: list[str] = []
+
+    def expect(group: str, got, want, what: str) -> None:
+        if got != want:
+            bad.append(f"({group}) {what}\n      결과 {got!r}\n      기대 {want!r}")
+
+    try:
+        from src.vnew import generate as genmod  # noqa: PLC0415
+        from src.vnew import previz as pvmod  # noqa: PLC0415
+        from src.vnew import previz_grammar as grammarmod  # noqa: PLC0415
+        from src.vnew import previz_schema as pvschema  # noqa: PLC0415
+
+        grab_hands = {"right": {"act": "grab", "target": "other_chin"}, "left": {"act": "rest", "target": "none"}}
+
+        # ================= (pz-a) schema =================
+        def norm_cut(actors_cut: list[dict], actors=None) -> dict:
+            scene = pvschema.normalize_scene({
+                "room": {"width": 6, "depth": 6},
+                "actors": actors or [{"id": "a1", "name": "범건우", "heightM": 1.8}, {"id": "a2", "name": "여의준", "heightM": 1.72},
+                                     {"id": "a3", "name": "김민수"}],
+                "timeline": [{"cutId": "c1", "camera": {"pos": [0, 1.4, 3]}, "actors": actors_cut}],
+            }, location_id="x", cut_specs=[{"cutId": "c1", "seconds": 3}])
+            return scene
+
+        got_a = {ca["id"]: ca for ca in norm_cut([
+            {"id": "a1", "pos": [0.3, 0, 0], "pose": "sit", "gesture": "hand_on_other_cheek", "gestureTarget": "a2",
+             "posture": "SIT", "hands": {"right": {"act": "grab", "target": "other_chin"}, "left": {"act": "rest", "target": "other_neck"}},
+             "head": {"turn": "toward_other", "tilt": "sideways"}, "eyes": "open"},
+            {"id": "a2", "pos": [-0.3, 0, 0], "posture": "crouch", "eyes": "winking", "head": {"turn": "x"},
+             "hands": {"right": {"act": "cover", "target": "own_eyes"}, "left": {"act": "slap", "target": "own_cheek"}}},
+            {"id": "a3", "pos": [1, 0, 0], "posture": "lean_forward",
+             "hands": {"right": {"act": "grab", "target": "other_chin"}, "left": {"act": "touch", "target": "other_hand"}}},
+        ])["timeline"][0]["actors"]}
+        expect("pz-a", {k: got_a["a1"].get(k) for k in ("posture", "hands", "head", "eyes", "gestureTarget")},
+               {"posture": "sit", "hands": grab_hands, "head": {"turn": "toward_other"}, "eyes": "open", "gestureTarget": "a2"},
+               "a1: 새 필드 저장(대소문자 정리, 쉬는 손 target none, 모르는 tilt 버림)")
+        expect("pz-a", sorted(k for k in ("posture", "hands", "head", "eyes") if k in got_a["a2"]), ["hands"],
+               "a2: 모르는 posture·eyes·head.turn 은 키째 버림")
+        expect("pz-a", got_a["a2"].get("hands"), {"right": {"act": "cover", "target": "own_eyes"}}, "a2: 모르는 act(slap) 손은 버림")
+        expect("pz-a", ["hands" in got_a["a3"], got_a["a3"].get("posture"), "gestureTarget" in got_a["a3"]], [False, "lean_forward", False],
+               "a3: gestureTarget 없는 other_chin·other_hand 손은 버림(손이 남지 않으면 hands 키 없음)")
+        old_actor = norm_cut([{"id": "a1", "pos": [0, 0, 0], "gesture": "nod"}])["timeline"][0]["actors"][0]
+        expect("pz-a", sorted(old_actor), ["facingDeg", "gesture", "id", "pos", "pose", "speaking"], "옛 인물(새 필드 없음)은 키가 지금과 같다")
+        expect("pz-a", [pvschema.normalize_hands({"right": {"act": "grab", "target": "other_toe"}}, has_target=True),
+                        pvschema.normalize_hands({"left": {"act": "point"}}, has_target=False),
+                        pvschema.normalize_hands("x", has_target=True), pvschema.normalize_head({"tilt": " Left "})],
+               [None, {"left": {"act": "point", "target": "none"}}, None, {"tilt": "left"}],
+               "모르는 target 버림·target 없음 = none·dict 아님 None·tilt 정리")
+        expect("pz-a", [pvschema.gesture_from_hands(h) for h in (
+            grab_hands, {"right": {"act": "cover", "target": "own_eyes"}, "left": {"act": "cover", "target": "own_eyes"}},
+            {"right": {"act": "cover", "target": "own_eyes"}}, {"left": {"act": "rest_on", "target": "own_cheek"}},
+            {"right": {"act": "cup", "target": "other_cheek"}, "left": {"act": "cup", "target": "other_cheek"}},
+            {"right": {"act": "rest"}}, {"right": {"act": "hold", "target": "other_shoulder"}})],
+               ["hand_on_other_cheek", "cover_face", "hand_to_own_face", "hand_to_own_face", "both_hands_other_cheeks", "", ""],
+               "hands → 옛 gesture 도출")
+
+        # ================= (pz-b) 렌더러 =================
+        actors_r = [{"id": "a1", "name": "범건우", "heightM": 1.8}, {"id": "a2", "name": "여의준", "heightM": 1.72}]
+        two = [{"id": "a1", "pos": [0.3, 0, 0], "facingDeg": 270, "pose": "sit"},
+               {"id": "a2", "pos": [-0.3, 0, 0], "facingDeg": 90, "pose": "sit"}]
+
+        def case(*updates, stand: bool = False, t: float = 1.3) -> dict:
+            cut = _copy.deepcopy(two)
+            for ca, extra in zip(cut, updates):
+                ca.update(extra)
+                if stand:
+                    ca["pose"] = "stand"
+            scene = norm_cut(cut, actors_r)
+            scene["t148"] = t
+            return scene
+
+        cases = {
+            # test2 cut04/05: 범건우(오른쪽)가 오른손으로 여의준 턱을 잡아 올린다. 여의준은 고개를 들고 앉아 있다.
+            "grab": case({"gesture": "hand_on_other_cheek", "gestureTarget": "a2", "hands": grab_hands},
+                         {"head": {"turn": "up"}}),
+            "grab_stand": case({"gesture": "hand_on_other_cheek", "gestureTarget": "a2", "hands": grab_hands}, {}, stand=True),
+            "cover": case({}, {"hands": {"right": {"act": "cover", "target": "own_eyes"}}}),
+            "cheek": case({}, {"hands": {"left": {"act": "rest_on", "target": "own_cheek"}},
+                               "head": {"tilt": "left"}, "eyes": "half"}),
+            "lean": case({}, {"posture": "lean_forward", "eyes": "closed"}),
+            "plain": case({}, {}),
+        }
+        for gesture in (None,) + tuple(pvschema.GESTURES):
+            for stand in (False, True):
+                extra = {"gestureTarget": "a2", "speaking": True}
+                if gesture:
+                    extra["gesture"] = gesture
+                cases[f"g:{gesture}:{'stand' if stand else 'sit'}"] = case(extra, {}, stand=stand)
+        rendered, err = _pz148_render(cases)
+        if err == "node 가 없습니다":
+            warn("node 가 없어 작업 148 렌더러 검사(pz-b)를 건너뜁니다")
+        elif err:
+            bad.append(f"(pz-b) {err}")
+        else:
+            new, old = rendered["new"], rendered["old"]
+
+            def dist(p, q) -> float:
+                return _math.dist(p, q) if p and q else 99.0
+
+            g = new["grab"]
+            expect("pz-b", [dist(g["a1"]["handR"], g["a2"]["chin"]) <= 0.12, dist(g["a1"]["handL"], g["a1"]["kneeL"]) <= 0.05,
+                            dist(g["a1"]["handL"], g["a2"]["chin"]) > 0.3],
+                   [True, True, True],
+                   f"grab: 오른손-여의준 턱 {dist(g['a1']['handR'], g['a2']['chin']):.3f}m ≤ 0.12, 앉은 왼손은 무릎(쉼), 왼손은 턱에서 멀다")
+            gs = new["grab_stand"]
+            expect("pz-b", [dist(gs["a1"]["handR"], gs["a2"]["chin"]) <= 0.12, gs["a1"]["shL"]],
+                   [True, [[0, 0, 0.1], [0, 0, 0]]], "서서 잡기: 오른손 턱 0.12m 안, 왼팔은 쉬는 자세(내림 = 기본 회전)")
+            c = new["cover"]["a2"]
+            expect("pz-b", [dist(c["handR"], c["eyes"]) <= 0.12, c["shL"] == new["plain"]["a2"]["shL"]], [True, False],
+                   f"cover own_eyes: 오른손-자기 눈 {dist(c['handR'], c['eyes']):.3f}m ≤ 0.12, 쓰지 않는 왼손은 앉은 쉼(무릎)")
+            k = new["cheek"]["a2"]
+            expect("pz-b", [dist(k["handL"], k["cheekL"]) <= 0.12, (k["handL"] or [0, 9, 0])[1] < k["cheekL"][1], k["eyeY"],
+                            k["neck"][2]],
+                   [True, True, 0.5, -0.25], "rest_on own_cheek: 왼손이 왼뺨 아래(뺨을 손에 굄), 눈 반쯤(0.5), 고개 왼쪽(z −0.25)")
+            ln, pl = new["lean"]["a2"], new["plain"]["a2"]
+            expect("pz-b", [round(ln["spine"][0] - pl["spine"][0], 4), ln["eyeY"], ln["shL"] == pl["shL"]],
+                   [round(25 * _math.pi / 180, 4), 0.15, True], "lean_forward: 척추 x +25°, 감은 눈 0.15, 팔은 그대로")
+            expect("pz-b", new["grab"]["a2"]["neck"][0], -0.45, "여의준 head.turn up: 목 x −0.45")
+            same = [name for name in cases if name.startswith("g:") and new[name] != old[name]]
+            expect("pz-b", same, [], "hands 없는 인물(제스처 16개 + 없음 · 서기/앉기)은 148 이전 렌더러와 같은 회전·위치")
+            expect("pz-b", [new["g:point:stand"]["a1"]["shR"][0], new["g:cover_face:stand"]["a1"]["shL"][0],
+                            new["g:None:sit"]["a1"]["hipL"], new["g:None:sit"]["a1"]["hipsY"]],
+                   [[-1.570796, 0, -0.1], [-2.513274, 0, 0.5], [[-1.570796, 0, 0], [1.570796, 0, 0]], 0.5],
+                   "스냅숏: point 오른팔·cover_face 왼팔·앉기 다리·엉덩이 높이(148 이전 코드의 상수)")
+
+        # ================= (pz-c) 패널 읽기 =================
+        payload = {
+            "mainSubject": "여의준", "frameBottomCut": "chest", "shotType": "two_shot", "vantage": "back3q",
+            "actions": [
+                {"name": "범건우", "actionEn": "grabs Yeouijun's chin and lifts it", "gesture": "both_hands_other_cheeks",
+                 "target": "여의준", "posture": "sit", "hands": grab_hands, "head": {"turn": "toward_other", "tilt": "none"},
+                 "eyes": "open"},
+                {"name": "여의준", "actionEn": "looks up", "gesture": "look_up", "target": "범건우", "posture": "sit",
+                 "hands": {"right": {"act": "rest"}, "left": {"act": "rest"}}, "head": {"turn": "up"}, "eyes": "open"},
+            ],
+        }
+        saved = {"read": grammarmod._read, "all": pvmod._all_tiles, "cut": pvmod._cut_tiles,  # noqa: SLF001
+                 "charge": pvmod._grammar_charge}  # noqa: SLF001
+        reads: list[int] = []
+
+        def fake_read(blocks, *, model):
+            reads.append(1)
+            return _copy.deepcopy(payload), {}
+
+        try:
+            with _guard_real_llm() as llm_calls:
+                grammarmod._read = fake_read  # noqa: SLF001
+                pvmod._all_tiles = lambda owner, pid: [b"FAKE-PANEL"]  # noqa: SLF001
+                pvmod._cut_tiles = lambda panels, tiles: list(tiles[:1])  # noqa: SLF001
+                pvmod._grammar_charge = lambda *a: (lambda usage, model: None)  # noqa: SLF001
+                gram = grammarmod.read_cut("o", "p", "pl", {"shotKo": "x", "characters": []}, [b"FAKE"], [], charge=None)
+                acts = {a["name"]: a for a in gram["actions"]}
+                expect("pz-c", {k: acts["범건우"].get(k) for k in ("gesture", "posture", "hands", "head", "eyes")},
+                       {"gesture": "hand_on_other_cheek", "posture": "sit", "hands": grab_hands,
+                        "head": {"turn": "toward_other", "tilt": "none"}, "eyes": "open"},
+                       "도구 결과의 새 필드 저장, gesture 는 hands 에서 도출(모델 both_hands_other_cheeks → hand_on_other_cheek)")
+                expect("pz-c", [acts["여의준"]["gesture"], acts["여의준"]["hands"], grammarmod.normalize_grammar(gram) == gram],
+                       ["look_up", {"right": {"act": "rest", "target": "none"}, "left": {"act": "rest", "target": "none"}}, True],
+                       "쉬는 손만이면 모델 gesture 유지, 정리는 멱등")
+                for phrase in ("Read it from the panel IMAGE, not from the dialogue", "the person's OWN left and right hand",
+                               "A hand that is not visible, or does nothing, is act rest with target none",
+                               "right {act: grab, target: other_chin}", "cheek resting on the hand = rest_on own_cheek"):
+                    if phrase not in grammarmod.SYSTEM:
+                        bad.append(f"(pz-c) SYSTEM 에 '{phrase}' 이 없습니다")
+                for enum in (pvschema.POSE_POSTURES, pvschema.HAND_ACTS, pvschema.HAND_TARGETS, pvschema.HEAD_TURNS,
+                             pvschema.HEAD_TILTS, pvschema.EYE_STATES):
+                    if " | ".join(enum) not in grammarmod.SYSTEM:
+                        bad.append(f"(pz-c) SYSTEM 에 열거값 줄이 없습니다: {enum}")
+                item_props = grammarmod.TOOL["inputSchema"]["json"]["properties"]["actions"]["items"]["properties"]
+                expect("pz-c", [list(item_props)[:4], list(item_props["hands"]["properties"]),
+                                list(item_props["hands"]["properties"]["left"]["properties"])],
+                       [["name", "actionEn", "gesture", "target"], ["left", "right"], ["act", "target"]], "TOOL actions 항목 필드")
+                # 캐시: v 2(손 없음) → 다시 만들기 때 actions 만 새 값, supports·카메라 옛 값, v 3. 다시 부르면 0회.
+                tiles_h = grammarmod.tiles_hash([b"FAKE-PANEL"])
+                old2 = grammarmod.normalize_grammar({"mainSubject": "여의준", "frameBottomCut": "belly", "vantage": "3q",
+                                                     "actions": [{"name": "범건우", "gesture": "both_hands_other_cheeks", "target": "여의준"}],
+                                                     "supports": [{"name": "여의준", "seen": "visible", "posture": "sit", "supportKind": "bench"}]})
+                groups = [{"locationEn": "x", "cuts": [{"cutId": "c4", "seconds": 3, "panels": [0], "shotKo": "x", "characters": []}]}]
+                reads.clear()
+                g_by, cache = pvmod._read_grammars("o", "p", "pl", groups, [], {"c4": {"hash": tiles_h, "grammar": old2, "v": 2}}, set())  # noqa: SLF001
+                want = dict(old2, actions=gram["actions"])
+                expect("pz-c", [len(reads), g_by.get("c4") == want, cache.get("c4") == {"hash": tiles_h, "grammar": want, "v": 3}],
+                       [1, True, True], "v 2 캐시: 한 번 다시 읽어 actions 만 새 값(supports·vantage 옛 값), v 3 저장")
+                reads.clear()
+                pvmod._read_grammars("o", "p", "pl", groups, [], _copy.deepcopy(cache), set())  # noqa: SLF001
+                expect("pz-c", len(reads), 0, "v 3 캐시는 다시 읽지 않는다")
+                # timeline actor 로 옮김(_apply_gestures): 범건우 → gestureTarget 여의준(a2) + 새 필드. 옛 문법은 gesture 만.
+                scene_c = {"actors": [{"id": "a1", "name": "범건우"}, {"id": "a2", "name": "여의준"}],
+                           "timeline": [{"cutId": "c4", "actors": [{"id": "a1"}, {"id": "a2"}]}]}
+                pvmod._apply_gestures([scene_c], groups, {"c4": gram})  # noqa: SLF001
+                ca1, ca2 = scene_c["timeline"][0]["actors"]
+                expect("pz-c", [ca1.get("gesture"), ca1.get("gestureTarget"), ca1.get("hands"), ca1.get("head"), ca2.get("head"),
+                                ca2.get("gesture")],
+                       ["hand_on_other_cheek", "a2", grab_hands, {"turn": "toward_other", "tilt": "none"}, {"turn": "up"}, "look_up"],
+                       "_apply_gestures 가 손·머리를 timeline actor 로 옮긴다")
+                scene_o = {"actors": scene_c["actors"], "timeline": [{"cutId": "c4", "actors": [{"id": "a1"}, {"id": "a2"}]}]}
+                pvmod._apply_gestures([scene_o], groups, {"c4": old2})  # noqa: SLF001
+                expect("pz-c", scene_o["timeline"][0]["actors"],
+                       [{"id": "a1", "gesture": "both_hands_other_cheeks", "gestureTarget": "a2"}, {"id": "a2"}],
+                       "옛 문법(새 필드 없음)은 지금처럼 gesture·gestureTarget 만")
+                if llm_calls:
+                    bad.append(f"(pz-c) 가짜가 아닌 LLM 호출: {llm_calls}")
+        finally:
+            grammarmod._read = saved["read"]  # noqa: SLF001
+            pvmod._all_tiles, pvmod._cut_tiles, pvmod._grammar_charge = saved["all"], saved["cut"], saved["charge"]  # noqa: SLF001
+
+        # ================= (pz-d) 생성 문장 =================
+        plan = _fw_plan()
+        tl = plan["previz"]["scenes"][0]["timeline"]
+        tl[0]["actors"] = [{"id": "a1", "gestureTarget": "a2", "hands": grab_hands},
+                           {"id": "a2", "hands": {"right": {"act": "rest", "target": "none"}, "left": {"act": "none", "target": "none"}}}]
+        tl[1]["actors"] = [{"id": "a1"}, {"id": "a2", "hands": {"left": {"act": "rest_on", "target": "own_cheek"}}}]
+        take = {"id": "take1", "cutIds": ["c1", "c2", "c3"], "seconds": 12}
+        cast = [{"name": "범건우", "colorName": "blue", "frontNo": 1, "costume": "black open-collar shirt"},
+                {"name": "여의준", "colorName": "red", "frontNo": 2, "costume": "navy training top"}]
+        grab_clause = "Beomgeonu's right hand grabs Yeouijun's chin and lifts it; the left hand rests"
+        cheek_clause = "Yeouijun's cheek rests on the left hand; the right hand rests"
+        expect("pz-d", [genmod._pose_clause({"name": "범건우", "other": "여의준", "hands": grab_hands}, genmod._romanize_name),  # noqa: SLF001
+                        genmod._pose_clause({"name": "여의준", "hands": {"right": {"act": "cover", "target": "own_eyes"}}},  # noqa: SLF001
+                                            genmod._romanize_name),  # noqa: SLF001
+                        genmod._pose_clause({"name": "범건우", "other": "여의준", "hands": {  # noqa: SLF001
+                            "right": {"act": "cup", "target": "other_cheek"}, "left": {"act": "cup", "target": "other_cheek"}}},
+                            genmod._romanize_name)],  # noqa: SLF001
+               [grab_clause, "Yeouijun's right hand covers the eyes; the left hand rests",
+                "Both of Beomgeonu's hands cup Yeouijun's cheeks"], "포즈 절 문장")
+
+        def run(variant: str, limit: int) -> tuple[str, str]:
+            with _guard_real_llm(), _pin_vnew(VNEW_FX=True, VNEW_TAKE_PROMPT_MAX=limit), _LogCapture() as logs:
+                text = genmod._take_prompt(plan, take, cast=cast, panel_nos=[3], location_no=None, variant=variant)  # noqa: SLF001
+            steps = next((r.getMessage().rsplit("steps=", 1)[-1] for r in logs.records
+                          if r.getMessage().startswith("vnew.gen.take_prompt ")), "")
+            return text, steps
+
+        def timeline(text: str) -> str:
+            return next((ln for ln in text.split("\n") if ln.startswith("TIMELINE")), "")
+
+        for variant in ("webtoon", "real"):
+            full, _steps = run(variant, 20000)
+            t_full = timeline(full)
+            c1_text = t_full[t_full.find("0-4s"):t_full.find("4-8s")]
+            expect("pz-d", [c1_text.count(grab_clause), "Yeouijun's right hand" in c1_text, "Yeouijun's cheek rests" in c1_text,
+                            t_full.count(cheek_clause), t_full.count("hand rests")],
+                   [1, False, False, 1, 2], f"{variant}: c1 잡는 손 절 1개·여의준 쉬는 손은 절 없음, c2 뺨 괴기 절 1개")
+            limit = genmod._utf8_len(full)  # noqa: SLF001
+            dropped = None
+            for _ in range(400):
+                limit -= 15
+                text, steps = run(variant, limit)
+                if "poseDrop" in steps.split(","):
+                    dropped = (limit, text, steps)
+                    break
+            if dropped is None:
+                bad.append(f"(pz-d) {variant}: poseDrop 단계가 나오지 않았습니다")
+                continue
+            limit, text, steps = dropped
+            labels = steps.split(",")
+            expect("pz-d", [genmod._utf8_len(text) <= limit, grab_clause in text, "dialogue25" in labels,  # noqa: SLF001
+                            any(s.startswith("lineDrop") for s in labels), labels.index("poseDrop") == len(labels) - 1,
+                            'Yeouijun: "흑…"' in timeline(text)],
+                   [True, False, False, False, True, True],
+                   f"{variant} {limit}B(steps={steps}): 바이트 상한 안, 포즈 절은 대사보다 먼저 빠진다")
+            small = 1500 if variant == "webtoon" else 1800
+            text, steps = run(variant, small)
+            expect("pz-d", [genmod._utf8_len(text) <= small, all(s in timeline(text) for s in ("0-4s", "4-8s", "8-12s"))],  # noqa: SLF001
+                   [True, True], f"{variant} {small}B(최소형 {steps}): 바이트 상한 안·모든 컷")
+    except Exception as exc:  # noqa: BLE001
+        bad.append(f"예외: {type(exc).__name__}: {exc}\n{_tb.format_exc()}")
+    if bad:
+        fail("작업 148 프리비즈 포즈(손·신체 부위·자세) 검사 실패\n  " + "\n  ".join(bad))
+    else:
+        ok("작업 148 프리비즈 포즈 (pz-a)posture·hands·head·eyes 정리·모르는 값·gestureTarget 없는 other_* 버림 "
+           "(pz-b)node 렌더러 오른손→상대 턱 0.12m 안·왼팔 쉼·자기 눈 가리기·뺨 괴기·lean_forward·hands 없는 인물 회전 그대로 "
+           "(pz-c)가짜 읽기 새 필드·gesture 도출·v2→v3 actions 만 다시 읽기·옛 문법 그대로 (pz-d)포즈 절·쉬는 손 없음·바이트 상한·대사보다 먼저 뺌")
+
+
 
 def main() -> int:
     print("== vpoc1 check ==")
@@ -50605,6 +50992,7 @@ def main() -> int:
     check_vnew_edit_take_menu_145()
     check_vnew_location_real_edit_143()
     check_vnew_dialogue_runs_147()
+    check_vnew_previz_pose_148()
     check_vnew_plan_step_stay_129()
     check_pod_zones()
     print()
