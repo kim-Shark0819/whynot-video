@@ -71,6 +71,51 @@ const FORE_ARM_M = 0.29;
 // lean_forward / lean_back 척추 기울기(25°).
 const LEAN_RAD = 25 * Math.PI / 180;
 const DEFAULT_HAIR_COLOR = "#2b2b2b";
+/* 작업 151: 그리는 카메라 여유. 마네킹 머리 구(반지름 0.16m × 키/1.7)·몸통 캡슐(어깨 → 엉덩이, 반지름 0.22m) 표면에서
+   이 거리(m) 안이면 시선 반대로 물려 그린다(서버 previz_camera 와 같은 크기). 저장된 설계는 바꾸지 않는다. */
+const RENDER_MIN_CLEAR_M = 0.25;
+const HEAD_CLEAR_RADIUS_M = 0.16;
+const BODY_CLEAR_RADIUS_M = 0.22;
+const RENDER_CLEAR_STEP_M = 0.02;
+const RENDER_CLEAR_MAX_M = 3;
+
+/* 점 p 에서 마네킹 부피(구 {center, r}·캡슐 {a, b, r}) 표면까지 가장 가까운 거리. 안이면 음수, 부피가 없으면 Infinity. */
+function volumeClearance(p, volumes) {
+  let best = Infinity;
+  const ab = new THREE.Vector3();
+  const ap = new THREE.Vector3();
+  const q = new THREE.Vector3();
+  (volumes || []).forEach((v) => {
+    if (v.b) {
+      ab.subVectors(v.b, v.a);
+      const len2 = ab.lengthSq();
+      const t = len2 < 1e-12 ? 0 : Math.max(0, Math.min(1, ap.subVectors(p, v.a).dot(ab) / len2));
+      q.copy(v.a).addScaledVector(ab, t);
+      best = Math.min(best, p.distanceTo(q) - v.r);
+    } else {
+      best = Math.min(best, p.distanceTo(v.center) - v.r);
+    }
+  });
+  return best;
+}
+
+/* 카메라 위치(position, 제자리 수정)가 부피 표면에서 minClear 안이면 시선(direction, 단위 벡터) 반대로 0.02m 씩 물린다.
+   결정적(같은 입력이면 같은 결과 — 녹화가 화면과 같다). 물린 거리(m)를 돌려준다(그대로면 0). */
+function clearCameraPosition(position, direction, volumes, minClear) {
+  if (!(volumeClearance(position, volumes) < minClear)) return 0;
+  const start = position.clone();
+  const steps = Math.round(RENDER_CLEAR_MAX_M / RENDER_CLEAR_STEP_M);
+  const p = new THREE.Vector3();
+  for (let k = 1; k <= steps; k += 1) {
+    p.copy(start).addScaledVector(direction, -RENDER_CLEAR_STEP_M * k);
+    if (volumeClearance(p, volumes) >= minClear) {
+      position.copy(p);
+      return RENDER_CLEAR_STEP_M * k;
+    }
+  }
+  position.copy(start).addScaledVector(direction, -RENDER_CLEAR_MAX_M);
+  return RENDER_CLEAR_MAX_M;
+}
 
 /* 벽 한 면의 위치·회전. north 는 z=-depth/2 를 바라보는 안쪽 면.
    (x, z, rotationY) 를 돌려준다. 평면(PlaneGeometry)은 +z 를 향하므로 방 안쪽을 보게 돌린다. */
@@ -468,6 +513,16 @@ class Mannequin {
     this.eyeMeshes.forEach((eye) => eye.scale.set(1, squash, 1));
   }
 
+  /* 카메라 여유 부피(작업 151): 머리 구(머리 중심, 0.16m × 키/1.7)·몸통 캡슐(두 어깨 가운데 → 엉덩이, 0.22m). 행렬은 호출자가 갱신해 둔다. */
+  clearVolumes() {
+    const scale = this.group.scale.y || 1;
+    const center = this.head.getWorldPosition(new THREE.Vector3());
+    const a = this.shoulderL.pivot.getWorldPosition(new THREE.Vector3())
+      .add(this.shoulderR.pivot.getWorldPosition(new THREE.Vector3())).multiplyScalar(0.5);
+    const b = this.hips.getWorldPosition(new THREE.Vector3());
+    return [{ center, r: HEAD_CLEAR_RADIUS_M * scale }, { a, b, r: BODY_CLEAR_RADIUS_M }];
+  }
+
   /* 신체 부위의 세계 위치(작업 148). side = 인물 자신의 "left"|"right"(뺨·무릎·어깨). near(세계 점)를 주면 좌우가 있는
      부위는 그 점에 가까운 쪽을 고른다(상대를 잡는 손이 가까운 뺨·어깨로 가게). 행렬은 호출자가 갱신해 둔다. */
   bodyPoint(part, side, near) {
@@ -820,11 +875,13 @@ class PrevizScene {
     const cam = cut.camera || {};
     const pos = vec3(cam.pos, 0, 1.5, this.room.depth / 2 + 1);
     const target = vec3(cam.target, 0, 1.2, 0);
+    const look = target.clone();
     if (cam.moveTo) {
       const pos2 = vec3(cam.moveTo.pos, pos.x, pos.y, pos.z);
       const tgt2 = vec3(cam.moveTo.target, target.x, target.y, target.z);
       camera.position.set(lerp(pos.x, pos2.x, frac), lerp(pos.y, pos2.y, frac), lerp(pos.z, pos2.z, frac));
-      camera.lookAt(lerp(target.x, tgt2.x, frac), lerp(target.y, tgt2.y, frac), lerp(target.z, tgt2.z, frac));
+      look.set(lerp(target.x, tgt2.x, frac), lerp(target.y, tgt2.y, frac), lerp(target.z, tgt2.z, frac));
+      camera.lookAt(look);
     } else {
       camera.position.copy(pos);
       camera.lookAt(target);
@@ -909,6 +966,19 @@ class PrevizScene {
     Object.keys(this.actors).forEach((id) => {
       this.actors[id].mannequin.group.visible = !!seen[id];
     });
+    // 작업 151: 카메라가 보이는 마네킹 머리·몸통 안이거나 0.25m 안이면 시선 반대로 물려 그린다(설계 cut.camera 는 그대로).
+    this.root.updateMatrixWorld(true);
+    const volumes = [];
+    Object.keys(this.actors).forEach((id) => {
+      const mannequin = this.actors[id].mannequin;
+      if (mannequin.group.visible) mannequin.clearVolumes().forEach((v) => volumes.push(v));
+    });
+    const viewDir = look.clone().sub(camera.position);
+    if (volumes.length && viewDir.lengthSq() > 1e-12) {
+      this.cameraPullback = clearCameraPosition(camera.position, viewDir.normalize(), volumes, RENDER_MIN_CLEAR_M);
+    } else {
+      this.cameraPullback = 0;
+    }
   }
 
   /* 편집 오버레이용 항목(빛·소품·인물 라벨 + 3D 위치). 녹화에는 쓰지 않는다. */

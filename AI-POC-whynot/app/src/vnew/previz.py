@@ -1155,6 +1155,8 @@ def run_design(owner: str, pid: str, task_id: str) -> None:
                 pid, int(round(collision_ms)), n_fixes, n_unresolved,
             )
 
+        # 3.55) 카메라 여유 다시 보기(작업 151): 2차 보정으로 인물이 카메라 쪽에 붙었으면 카메라를 물리거나 돌린다.
+        _clear_cameras(scenes, fit, grammar_by_cut, overrides)
         # 3.6) 받침 맞춤 결과(R5.6): 카메라 계산 뒤 fit[cut].support 에 둔다(084 fit[cut].collision 과 같은 방식).
         # 받침 판단이 짝지어진 컷만. 끈 상태면 support_by_cut 이 비어 키가 없다.
         for cut_id, entries in support_by_cut.items():
@@ -1411,6 +1413,38 @@ def _rematch_cut(scene: dict, cut: dict, grammar: dict, fit_entry: dict) -> None
     if fit_entry.get("occluded") or fit_entry.get("extraVisible"):
         match *= 0.5
     fit_entry["match"] = round(match, 4)
+
+
+def _clear_cameras(scenes: list[dict], fit: dict, grammar_by_cut: dict, overrides: dict) -> None:
+    """작업 151: 문법 카메라 컷마다 previz_camera.clear_cut_camera 로 머리·몸통 여유(0.35m)·어깨 너머 35% 를 다시 본다.
+
+    옮긴 컷만 camera·fit.cameraFix·fit.lens 를 바꾸고 일치도를 다시 잰다(_rematch_cut). 규칙을 지키면 그대로.
+    """
+    for scene in scenes or []:
+        room = scene.get("room") or {}
+        for cut in scene.get("timeline") or []:
+            cut_id = str(cut.get("cutId") or "")
+            entry = fit.get(cut_id)
+            raw = grammar_by_cut.get(cut_id)
+            if not isinstance(entry, dict) or entry.get("method") != "grammar" or not isinstance(raw, dict):
+                continue
+            grammar = _merge_override(raw, overrides.get(cut_id))
+            try:
+                cleared = previz_camera.clear_cut_camera(cut.get("camera") or {}, _actors_in_cut(scene, cut), room,
+                                                         grammar, entry.get("lens"))
+            except Exception as exc:  # noqa: BLE001 — 여유 보정 실패가 설계를 막지 않는다.
+                log.warning("vnew.previz.camera_clear.failed cut=%s err=%s", previz_collision._log_id(cut_id), str(exc)[:150])  # noqa: SLF001
+                continue
+            if not cleared:
+                continue
+            camera = dict(cut.get("camera") or {})
+            camera.update(cleared["camera"])
+            cut["camera"] = camera
+            entry["cameraFix"] = cleared["cameraFix"]
+            entry["lens"] = cleared["lens"]
+            _rematch_cut(scene, cut, grammar, entry)
+            log.info("vnew.previz.camera_clear cut=%s kind=%s dist=%.3f pass=B", previz_collision._log_id(cut_id),  # noqa: SLF001
+                     cleared["cameraFix"].get("kind"), float(cleared["cameraFix"].get("dist") or 0.0))
 
 
 def _merge_override(grammar: dict, override: dict | None) -> dict:
@@ -1676,7 +1710,7 @@ def _place_cameras(owner, pid, scenes, groups, grammar_by_cut, overrides, *, tas
                 g_local["shotSize"] = "CU"
                 push_in_to = "ECU"
             try:
-                result = previz_camera.place_cut(g_local, _actors_in_cut(scene, cut), room, side)
+                result = previz_camera.place_cut(g_local, _actors_in_cut(scene, cut), room, side, min_match=APPROVE_MIN_MATCH)
             except Exception as exc:  # noqa: BLE001
                 log.warning("vnew.previz.place_cut.failed cut=%s err=%s", cut_id, str(exc)[:200])
                 fit[cut_id] = {"match": None, "method": "astra"}
@@ -1685,6 +1719,13 @@ def _place_cameras(owner, pid, scenes, groups, grammar_by_cut, overrides, *, tas
                 continue
             _apply_cut_result(scene, cut, result)
             rfit = result.get("fit") or {}
+            retry = result.get("retry")
+            if isinstance(retry, dict):
+                log.info("vnew.previz.match_retry cut=%s before=%.4f after=%.4f",
+                         previz_collision._log_id(cut_id), float(retry.get("before") or 0.0), float(retry.get("after") or 0.0))  # noqa: SLF001
+            if isinstance(rfit.get("cameraFix"), dict):
+                log.info("vnew.previz.camera_clear cut=%s kind=%s dist=%.3f pass=A", previz_collision._log_id(cut_id),  # noqa: SLF001
+                         rfit["cameraFix"].get("kind"), float(rfit["cameraFix"].get("dist") or 0.0))
             fit[cut_id] = {
                 "match": rfit.get("match"),
                 "method": "grammar",
@@ -1702,6 +1743,8 @@ def _place_cameras(owner, pid, scenes, groups, grammar_by_cut, overrides, *, tas
             }
             if push_in_to:
                 fit[cut_id]["pushInTo"] = push_in_to
+            if isinstance(rfit.get("cameraFix"), dict):
+                fit[cut_id]["cameraFix"] = dict(rfit["cameraFix"])
             if cut_id in overrides:
                 fit[cut_id]["override"] = True
             if task_id:
