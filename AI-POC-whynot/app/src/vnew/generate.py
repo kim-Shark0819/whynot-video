@@ -621,7 +621,7 @@ def _empty_take_unit(take: dict) -> dict:
         "endCutNo": take.get("endCutNo"),
         "draftId": "",
         "real": {**_empty_variant_state(), "status": "skipped",
-                 "note": "통 테이크(베타)는 웹툰만 만듭니다 — 실사는 기본 모델로 따로 만들 수 있습니다."},
+                 "note": "실사는 웹툰이 끝나면 기본 모델(Seedance)로 이어서 만듭니다."},
         "webtoon": {**_empty_variant_state(), "status": "queued"},
     }
 
@@ -643,7 +643,7 @@ def _new_take_gen(plan: dict) -> dict:
         "units": units,
         "segments": [],
         "finalReal": {"status": "skipped", "key": "", "error": "",
-                      "note": "통 테이크(베타)는 웹툰만 만듭니다 — 실사는 기본 모델로 따로 만들 수 있습니다."},
+                      "note": "실사는 웹툰이 끝나면 기본 모델(Seedance)로 이어서 만듭니다."},
         "finalWebtoon": {"status": "waiting", "key": "", "error": ""},
         "selected": None,
         "costUsd": 0.0,
@@ -3033,6 +3033,10 @@ def _cut_poses(plan: dict, cut: dict) -> list[dict]:
     if not scene:
         return []
     names = {str(a.get("id") or ""): str(a.get("name") or "").strip() for a in scene.get("actors") or []}
+    # 작업 154: timeline actor 에 hands 키가 없으면(장면을 만든 뒤 패널을 다시 읽음·gestureTarget 없이 저장돼 other_* 손이 빠짐)
+    # 그 컷 패널 읽기(panelGrammar actions)의 손을 쓴다. 상대 = action target(장면 인물 이름일 때만), schema 규칙으로 정리.
+    grammar_acts = {str(act.get("name") or "").strip(): act for act in _cut_grammar(plan, cut_id).get("actions") or []
+                    if isinstance(act, dict) and isinstance(act.get("hands"), dict)}
     out: list[dict] = []
     for entry in scene.get("timeline") or []:
         if str(entry.get("cutId") or "") != cut_id:
@@ -3040,14 +3044,75 @@ def _cut_poses(plan: dict, cut: dict) -> list[dict]:
         for ca in entry.get("actors") or []:
             hands = ca.get("hands") if isinstance(ca, dict) else None
             name = names.get(str((ca or {}).get("id") or ""), "")
+            other = names.get(str((ca or {}).get("gestureTarget") or ""), "") if isinstance(ca, dict) else ""
+            if isinstance(ca, dict) and "hands" not in ca and name in grammar_acts:
+                act = grammar_acts[name]
+                target = str(act.get("target") or "").strip()
+                other = target if target and target != name and target in names.values() else ""
+                hands = previz_schema.normalize_hands(act.get("hands"), has_target=bool(other))
             if not isinstance(hands, dict) or not name:
                 continue
             kept = {side: dict(hands[side]) for side in previz_schema.HAND_SIDES if isinstance(hands.get(side), dict)}
             if not any(str(h.get("act") or "") not in ("",) + previz_schema.IDLE_HAND_ACTS for h in kept.values()):
                 continue
-            out.append({"name": name, "hands": kept, "other": names.get(str(ca.get("gestureTarget") or ""), "")})
+            out.append({"name": name, "hands": kept, "other": other})
         break
     return out
+
+
+# 작업 154: 몸이 닿는 연기 동사(콘티 characters[].actionEn = 패널에서 읽은 연기). (원형, 3인칭, -ing) — 이 한 목록만 쓴다.
+CONTACT_VERBS = (
+    ("touch", "touches", "touching"),
+    ("hold", "holds", "holding"),
+    ("cup", "cups", "cupping"),
+    ("stroke", "strokes", "stroking"),
+    ("grab", "grabs", "grabbing"),
+    ("wipe", "wipes", "wiping"),
+    ("kiss", "kisses", "kissing"),
+    ("press", "presses", "pressing"),
+    ("hug", "hugs", "hugging"),
+    ("pull", "pulls", "pulling"),
+    ("caress", "caresses", "caressing"),
+    ("rest on", "rests on", "resting on"),
+    ("lean on", "leans on", "leaning on"),
+)
+# 동사 뒤가 이 말로 시작하면 닿는 연기가 아니다("holds back tears", "holds his breath").
+_CONTACT_NOT_RE = re.compile(r"^\s*(?:back\b|(?:his|her|their|a)\s+breath\b|breath\b|still\b)", re.IGNORECASE)
+CONTACT_MAX = 110  # 닿는 연기 문장 본문 글자 상한(이름 뒤, 단어 경계)
+CONTACT_BG_SHORT = 120  # 닿는 연기·포즈가 있는 테이크의 긴 "BACKGROUND now" 줄이기 글자 상한
+_CONTACT_RES = tuple(
+    (forms, re.compile(r"\b(?:" + "|".join(re.escape(f).replace(r"\ ", r"\s+") for f in forms) + r")\b", re.IGNORECASE))
+    for forms in CONTACT_VERBS
+)
+
+
+def _cut_contact(cut: dict, brief_action: str) -> dict | None:
+    """콘티 인물 연기에 몸이 닿는 동사(CONTACT_VERBS)가 있는데 지시서 연기(brief_action)에 그 동사가 없으면 그 절(작업 154).
+
+    인물 순서대로 첫 문장을 쉼표·세미콜론·while/as/then 으로 나눠 동사가 있는 첫 절을 고른다. 반환
+    {"name": 한국 이름, "text": "strokes 여의준's neck and nape", "names": 컷 인물 이름} — 이름 표기는 _take_prompt 가 바꾼다. 없으면 None.
+    """
+    brief = str(brief_action or "")
+    chars = [ch for ch in cut.get("characters") or [] if isinstance(ch, dict)]
+    names = [str(ch.get("name") or "").strip() for ch in chars if str(ch.get("name") or "").strip()]
+    for ch in chars:
+        name = str(ch.get("name") or "").strip()
+        action = str(ch.get("actionEn") or "").strip()
+        if not name or not action:
+            continue
+        first = _split_sentences(action)
+        first = (first[0] if first else action).strip()
+        for clause in re.split(r"\s*[,;]\s*|\s+(?:while|as|then)\s+", first):
+            for forms, pattern in _CONTACT_RES:
+                match = pattern.search(clause)
+                if not match or pattern.search(brief):
+                    continue
+                rest = clause[match.end():].rstrip(" .!?")
+                if not rest.strip() or _CONTACT_NOT_RE.match(rest):
+                    continue
+                text = _clip_words(forms[1] + rest, CONTACT_MAX).rstrip(".")
+                return {"name": name, "text": text, "names": names}
+    return None
 
 
 def _pose_clause(pose: dict, disp_name) -> str:
@@ -3332,6 +3397,10 @@ def _take_timeline_entries(plan: dict, take: dict) -> list[dict]:
         poses = [p for p in _cut_poses(plan, cut) if not visible or p["name"] in visible]
         if poses:
             entries[-1]["poses"] = poses
+        # 작업 154: 콘티(패널) 연기의 닿는 동작이 지시서 연기에 없으면 그 절(없으면 키 없음 — 지금 항목 모양 그대로).
+        contact = _cut_contact(cut, action_en)
+        if contact:
+            entries[-1]["contact"] = contact
         if fx_on:
             # 작업 127: 기호 대상 인물(정리된 값)과 이 컷 장소(테이크 안 장소가 바뀌는 컷에서만 배경 문장을 다시 쓴다).
             entries[-1]["fxWho"] = vnew_fx.fx_who(cut.get("fxWho"), vnew_fx.cut_names(cut))
@@ -3569,7 +3638,9 @@ def _take_prompt(plan: dict, take: dict, *, cast: list[dict], panel_nos: list[in
 
     def _bg_piece(entry: dict) -> str:
         idx = next((i for i, e in enumerate(entries) if e is entry), -1)
-        return bg_change.get(idx, "")
+        piece = bg_change.get(idx, "")
+        limit = state["bg_limit"]  # state 는 아래에서 만든다(이 함수는 그 뒤에만 불린다)
+        return _clip_words(piece, limit) if piece and limit > 0 else piece
 
     # vnew-live-fx RA4.1: 분위기 영어의 한국 이름 → 로마자(긴 이름부터). 한글이 남으면 그 컷 분위기는 뺀다.
     # 컷마다 한 번만 계산해 항목에 둔다(moodText). 끔이면 moodEn 이 비어 아무것도 하지 않는다.
@@ -3666,6 +3737,8 @@ def _take_prompt(plan: dict, take: dict, *, cast: list[dict], panel_nos: list[in
     harmony = _harmony_line(plan, True)
     if real:
         harmony = vnew_fx.strip_drawing_words(harmony)  # 장소 빛 문장(lightEn)의 그림 낱말
+    # 작업 154: 닿는 연기·포즈 절이 있는 테이크는 그것을 지키려고 STYLE → HARMONY → MOTION 짧은 형부터 줄인다.
+    protect = any(e.get("poses") or e.get("contact") for e in entries)
 
     # --- 줄이기 상태(컷 수·ON SCREEN·ASSETS 인물 문장은 절대 줄이지 않는다). 샷 약어·대사·연기는 유지. ---
     state = {
@@ -3676,6 +3749,10 @@ def _take_prompt(plan: dict, take: dict, *, cast: list[dict], panel_nos: list[in
         "gaze_limit": 90,          # gaze 글자 상한(예외 컷에서만, 작업 147: 대사 앞에서 55)
         "on_plain": False,         # 작업 147: ON SCREEN 부분 노출 괄호 빼기(대사 앞)
         "pose_on": True,           # 작업 148: 포즈 절(사람마다 1절, 대사 앞에서 뺀다)
+        "contact_on": True,        # 작업 154: 닿는 연기 문장(포즈 절 다음, 대사 앞에서 뺀다)
+        "motion": motion,          # 작업 154: MOTION(→ MOTION_MIN, 닿는 연기·포즈가 있을 때만 앞 단계에서)
+        "harmony": harmony,        # 작업 154: HARMONY(→ _harmony_min, 위와 같음)
+        "bg_limit": 0,             # 작업 154: BACKGROUND now 글자 상한(0 = 없음)
         "costume_limit": 200,      # ④ ASSETS 장면 의상 글자 상한(200→110)
         "avoid": avoid_full,       # ⑥ AVOID 축약
         "audio": audio_full,       # ⑦ RULES 오디오 문장 축약
@@ -3830,6 +3907,27 @@ def _take_prompt(plan: dict, take: dict, *, cast: list[dict], panel_nos: list[in
             return f'{who} ({"; ".join(tags)}): "{dialogue}"'
         return f'{who}: "{dialogue}"'
 
+    def _contact_text(entry: dict) -> str:
+        # 작업 154: 닿는 연기 1문장 = "{이름} {콘티 절}." 한국 이름은 ASSETS 로마자(긴 이름부터). 실사는 _real_action,
+        # 순화(153)는 _soften_text — 그래도 노골적이거나 한글이 남으면 넣지 않는다.
+        contact = entry.get("contact")
+        if not state["contact_on"] or not isinstance(contact, dict) or not contact.get("text"):
+            return ""
+        text = str(contact.get("text") or "")
+        for ko in sorted(set(contact.get("names") or []) | set(name_map), key=len, reverse=True):
+            if ko:
+                text = text.replace(ko, _fx_name(ko))
+        sentence = f"{_fx_name(contact.get('name') or '')} {text}".strip()
+        if real:
+            sentence = _real_action(sentence)
+        if soften:
+            sentence = _soften_text(sentence)
+            if _explicit_text(sentence):
+                return ""
+        if vnew_fx.HANGUL.search(sentence):
+            return ""
+        return sentence.rstrip(" .") + "."
+
     def _entry_text(entry: dict) -> str:
         # 형식: "{s}-{e}s {샷 약어}: ON SCREEN …; {연기}; {화자}: \"{대사}\"[; gaze …]".
         # ON SCREEN 줄을 컷 항목 맨 앞(타임스탬프·샷 뒤)에 둔다. 화면 밖 화자 대사는 "(off-screen voice)".
@@ -3848,6 +3946,9 @@ def _take_prompt(plan: dict, take: dict, *, cast: list[dict], panel_nos: list[in
                 entry.get("fxWho"), _present(entry), _fx_name)
         if action:
             pieces.append(action)
+        contact = _contact_text(entry)
+        if contact:
+            pieces.append(contact)
         # 작업 148: 사람마다 짧은 포즈 절(프리비즈 hands, 쓰는 손이 있을 때만). 대사보다 먼저 뺀다(poseDrop).
         if state["pose_on"]:
             for pose in entry.get("poses") or []:
@@ -3894,7 +3995,7 @@ def _take_prompt(plan: dict, take: dict, *, cast: list[dict], panel_nos: list[in
 
     def _assemble() -> str:
         # 순서: STYLE → ASSETS → TIMELINE → MOTION → HARMONY → RULES → AVOID.
-        blocks = [_style(), _assets(), _timeline(), motion, harmony, _rules(), state["avoid"]]
+        blocks = [_style(), _assets(), _timeline(), state["motion"], state["harmony"], _rules(), state["avoid"]]
         return "\n".join(b for b in blocks if b)
 
     # 한도 안이면 아무 것도 줄이지 않는다.
@@ -3938,6 +4039,23 @@ def _take_prompt(plan: dict, take: dict, *, cast: list[dict], panel_nos: list[in
         # 작업 148: 포즈 절은 대사(dialogue25) 바로 앞에서 뺀다. 포즈가 없는 테이크는 단계가 없다(로그가 지금과 같다).
         steps.append(("pose_on", False, "poseDrop"))
     steps.append(("dialogue_limit", 25, "dialogue25"))
+    if protect:
+        # 작업 154: 닿는 연기·포즈 절이 있으면 그것과 컷 연기를 지키는 순서로 다시 짠다 — STYLE → HARMONY → MOTION → AVOID →
+        # 긴 BACKGROUND → 시선 → 분위기·기호 → 목소리·외형·의상·오디오·묘사 규칙 → 연기 55 → ON SCREEN 세부 → 포즈 절 →
+        # 닿는 연기 → 대사(147). 둘 다 없는 테이크는 위 순서 그대로(바이트·로그가 지금과 같다).
+        motion_short = MOTION_MIN + (MOTION_MIN_INNER if take_voices in ("thought", "mixed") else "")
+        protect_steps = [("style_trim", True, "styleTrim"), ("harmony", _harmony_min(plan), "harmonyShort"),
+                         ("motion", motion_short, "motionShort"), ("avoid", avoid_short, "avoidShort")]
+        if any(len(piece) > CONTACT_BG_SHORT for piece in bg_change.values()):
+            protect_steps.append(("bg_limit", CONTACT_BG_SHORT, "backgroundShort"))
+        late = {"poseDrop", "dialogue25", "onScreenPlain", "action55"}
+        early = ("gaze55", "mood40", "moodDrop", "fxShort")
+        moved = sorted((s for s in steps if s[2] in early), key=lambda s: early.index(s[2]))
+        rest = [s for s in steps if s[2] not in late and s not in moved and s[2] not in ("styleTrim", "avoidShort")]
+        tail = [s for s in steps if s[2] in ("action55", "onScreenPlain", "poseDrop")]
+        if any(e.get("contact") for e in entries):
+            tail.append(("contact_on", False, "contactDrop"))
+        steps = protect_steps + moved + rest + tail + [("dialogue_limit", 25, "dialogue25")]
     for field, value, label in steps:
         if _utf8_len(prompt) <= budget:
             break

@@ -6935,7 +6935,7 @@
     realHead.appendChild(el("span", "vnew-seg-cell-title", "실사"));
     realHead.appendChild(el("span", "vnew-badge-gen is-skipped", "건너뜀"));
     realCell.appendChild(realHead);
-    var note = (unit.real || {}).note || "통 테이크(베타)는 웹툰만 만듭니다 — 실사는 기본 모델로 따로 만들 수 있습니다.";
+    var note = (unit.real || {}).note || "실사는 웹툰이 끝나면 기본 모델(Seedance)로 이어서 만듭니다.";
     realCell.appendChild(el("p", "vnew-hint", note));
     cells.appendChild(realCell);
     row.appendChild(cells);
@@ -7242,7 +7242,7 @@
       } else if (final.status === "skipped") {
         var skip = el("div", "vnew-final-pending");
         skip.appendChild(
-          el("p", "vnew-hint", final.note || "통 테이크(베타)는 웹툰만 만듭니다 — 실사는 기본 모델로 따로 만들 수 있습니다.")
+          el("p", "vnew-hint", final.note || "실사는 웹툰이 끝나면 기본 모델(Seedance)로 이어서 만듭니다.")
         );
         col.appendChild(skip);
       } else {
