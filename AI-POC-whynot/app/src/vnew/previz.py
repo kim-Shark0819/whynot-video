@@ -65,7 +65,8 @@ REC_FPS = 24
 # 녹화 길이 허용 오차·절대 범위(초). 구간 seconds ±0.5초, 그리고 3~15초.
 REC_TOLERANCE_S = 0.5
 REC_MIN_S = 3.0
-REC_MAX_S = 15.0
+# 구간 길이는 영상 모델 최대 길이(_max_segment_seconds)로 정해진다 — 30초 모델(Wan 등) 구간도 받도록 60초까지.
+REC_MAX_S = 60.0
 # 업로드 바이트 상한(200MB).
 MAX_RECORDING_BYTES = 200 * 1024 * 1024
 # 프레임(오프라인 렌더) 한 장의 바이트 상한(2MB). jpeg 0.85 1280x720 은 보통 수백 KB.
