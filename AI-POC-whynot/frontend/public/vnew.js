@@ -2301,7 +2301,7 @@
     var old = state.planBar;
     if (!old || old.parentNode !== host) return false;
     function sig(bar) {
-      return JSON.stringify((bar.children || []).map(function (c) { return [c.className, c.textContent, c.title || ""]; }));
+      return JSON.stringify(Array.prototype.slice.call(bar.children || []).map(function (c) { return [c.className, c.textContent, c.title || ""]; }));
     }
     var bar = planStepBar();
     if (sig(bar) === sig(old)) return true;
