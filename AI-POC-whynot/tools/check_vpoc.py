@@ -17272,6 +17272,18 @@ def _no_ai_note(text: str) -> str:
     return text[len(head):] if text.startswith(head) else text
 
 
+def _no_160(text: str) -> str:
+    """작업 160: 실사 시작 그림·Kling 프롬프트에 더한 고정 줄(넓히지 않기·시간대·앞 컷 시작 그림)을 뗀 나머지.
+    139 이전 sha 기대값은 이 줄들만 빼면 그대로라 이 함수를 지난 뒤 비교한다(기대값은 바꾸지 않는다). 줄이 있는지는 부른 쪽이 본다."""
+    sys.path.insert(0, str(ROOT / "app"))
+    from src.vnew import generate as genmod  # noqa: PLC0415
+
+    drop = {genmod.REAL_STILL_NO_WIDEN, genmod.REAL_TIME_OF_DAY.format(tod="Daylight"),
+            genmod.REAL_TIME_OF_DAY.format(tod="Night")}
+    prev = re.compile(re.escape(genmod.REAL_STILL_PREV).replace(re.escape("{no}"), r"\d+"))
+    return "\n".join(ln for ln in str(text or "").split("\n") if ln not in drop and not prev.fullmatch(ln))
+
+
 def _strip_fixed(text: str) -> str:
     """작업 127: 프롬프트 맨 앞 고정부 1줄("FIXED: …")을 뗀 나머지. 고정부가 없으면 그대로(옛 검사가 둘째 줄부터 본다).
     작업 140: 실사 프롬프트 맨 앞 AI 캐릭터 고지(있으면)도 먼저 뗀다."""
@@ -47637,8 +47649,9 @@ def check_vnew_real_likeness_130() -> None:
             # 작업 132: 이 gen 은 애니(웹툰) 테이크가 끝났으므로 Image 1 = 애니 결과의 그 컷 시작 프레임(테이크 안 시각 0초·4초),
             # 문장은 프리비즈("previz frame")가 아니라 photoreal live-action 다시 그리기다.
             # 작업 135: 이 계획 장소에 공간 시트 실사 뷰(loc-rb-back)가 있어 프레임 다음(Image 2)에 들어간다 → [LOC-RB, 정면…].
+            # 작업 160: 둘째 컷 시작 그림은 앞 컷 시작 그림(가짜 STILL1)을 참고 맨 뒤에 1장 더 받는다(같은 장소·시간대·빛).
             if len(new_stills) != 2 or [s["refs"][0] for s in new_stills] != [b"FRAME@0.0", b"FRAME@4.0"] \
-                    or any(s["refs"][1:] != [b"LOC-RB", b"RF2", b"RF1"] for s in new_stills) \
+                    or [s["refs"][1:] for s in new_stills] != [[b"LOC-RB", b"RF2", b"RF1"], [b"LOC-RB", b"RF2", b"RF1", b"STILL1"]] \
                     or any("photoreal live-action" not in s["prompt"].lower() or "Image 1" not in s["prompt"] for s in new_stills):
                 bad.append(f"(lk-a) 시작 그림(첫 프레임 + 실사 정면 2장, photoreal)이 다릅니다: "
                            f"{[(s['refs'], s['prompt'][:80]) for s in new_stills]}")
@@ -47838,8 +47851,9 @@ def check_vnew_real_cut_anime_132() -> None:
             g, new_stills, bodies, anime = run("prj_ak_a", drop_anime=False)
             want_first = [fake_frame(anime, 0.0), fake_frame(anime, 4.0)]
             # 작업 135: 장소 공간 시트 실사 뷰(LOC-RB)가 애니 프레임 다음(Image 2), 실사 정면은 그 뒤(Image 3·4).
+            # 작업 160: 둘째 컷은 앞 컷 시작 그림(가짜 STILL1)이 맨 뒤에 1장 더.
             if not anime or len(new_stills) != 2 or [s["refs"][0] for s in new_stills] != want_first \
-                    or any(s["refs"][1:] != [b"LOC-RB", b"RF2", b"RF1"] for s in new_stills):
+                    or [s["refs"][1:] for s in new_stills] != [[b"LOC-RB", b"RF2", b"RF1"], [b"LOC-RB", b"RF2", b"RF1", b"STILL1"]]:
                 bad.append(f"(ak-a) 시작 그림 첫 참고가 애니 프레임·다음이 실사 정면이 아닙니다: "
                            f"{[s['refs'] for s in new_stills]} want {want_first}")
             for s in new_stills:
@@ -48645,7 +48659,8 @@ def check_vnew_real_cut_sheet_135() -> None:
 
             # ================= (sh-a) 시트 있음 =================
             _g, new_stills, anime = run("prj_sh_a", two, with_front)
-            want = [[fake_frame(anime, 0.0), b"LOC-RB", b"RF2", b"RF1"], [fake_frame(anime, 4.0), b"LOC-RF", b"RF2", b"RF1"]]
+            # 작업 160: 둘째 컷은 앞 컷 시작 그림(가짜 STILL)이 맨 뒤에 1장 더.
+            want = [[fake_frame(anime, 0.0), b"LOC-RB", b"RF2", b"RF1"], [fake_frame(anime, 4.0), b"LOC-RF", b"RF2", b"RF1", b"STILL"]]
             if [s["refs"] for s in new_stills] != want:
                 bad.append(f"(sh-a) 참고 순서가 [애니, 시트 뷰(c1 back·c2 front), 정면…]이 아닙니다: {[s['refs'] for s in new_stills]}")
             for s in new_stills:
@@ -48659,7 +48674,7 @@ def check_vnew_real_cut_sheet_135() -> None:
 
             # ================= (sh-b) 시트 없음 =================
             _g, new_stills, anime = run("prj_sh_b", two, no_sheet)
-            want = [[fake_frame(anime, 0.0), b"RF2", b"RF1"], [fake_frame(anime, 4.0), b"RF2", b"RF1"]]
+            want = [[fake_frame(anime, 0.0), b"RF2", b"RF1"], [fake_frame(anime, 4.0), b"RF2", b"RF1", b"STILL"]]  # 160: 앞 컷 그림
             if [s["refs"] for s in new_stills] != want:
                 bad.append(f"(sh-b) 시트 없음인데 참고가 [애니, 정면…]이 아닙니다: {[s['refs'] for s in new_stills]}")
             for s in new_stills:
@@ -49050,15 +49065,18 @@ def check_vnew_real_still_139() -> None:
                                                                background_no=2, layout=ms),
             }
             for tag, text in got_none.items():
-                if sha(_no_ai_note(text)) != _ST139_SHA_138[tag]:  # 작업 140: 첫 줄 고지 다음부터 138 과 같다
+                # 작업 160: 넓히지 않기·시간대 고정 줄이 더해졌다 — 그 줄을 뗀 나머지가 138 과 같다(기대값 그대로).
+                if sha(_no_ai_note(_no_160(text))) != _ST139_SHA_138[tag] or genmod.REAL_STILL_NO_WIDEN not in text \
+                        or genmod._real_time_sentence(plan) not in text:  # noqa: SLF001
                     bad.append(f"(st-a) layout 없음(또는 프리비즈) {tag} 문장이 138 과 다릅니다: {text!r}")
 
             # ================= (st-e) Kling·애니 프롬프트 =================
             kl = genmod._segment_prompt(plan, {"cutIds": ["c1"]}, first_segment=True, real=True)  # noqa: SLF001
             if genmod.REAL_CUT_KEEP_FRAMING not in kl.split("\n")[:5] \
-                    or sha(_no_ai_note(kl).replace("\n" + genmod.REAL_CUT_KEEP_FRAMING, "", 1)) != _ST139_SHA_138["kling-real-without-139"] \
+                    or sha(_no_ai_note(_no_160(kl)).replace("\n" + genmod.REAL_CUT_KEEP_FRAMING, "", 1)) \
+                    != _ST139_SHA_138["kling-real-without-139"] or genmod._real_time_sentence(plan) not in kl.split("\n")[:7] \
                     or genmod.REAL_CUT_KEEP_FRAMING != ("Keep the start frame's framing and shot size; the camera does not pull "
-                                                        "back; no new person enters the frame."):
+                                                        "back; no new person enters the frame."):  # noqa: SLF001
                 bad.append(f"(st-e) Kling real 프롬프트에 새 구절(머리)이 없거나 나머지가 바뀌었습니다: {kl!r}")
             cast_take = [{"name": a, "colorName": "blue", "frontNo": 1, "costume": "black open-collar shirt"},
                          {"name": b, "colorName": "red", "frontNo": 2, "costume": "navy training top"}]
@@ -49169,7 +49187,8 @@ def check_vnew_real_still_139() -> None:
             # ================= (st-b) 검사 끔 =================
             r = run("prj_st_b")
             refs = [s["refs"] for s in r["stills"]]
-            if refs != [[r["f0"], b"RF1"], [r["f4"], b"LOC-RB", b"RF2", b"RF1"]]:
+            # 작업 160: c2 는 앞 컷 시작 그림(가짜 STILL-c1-0)이 맨 뒤에 1장 더.
+            if refs != [[r["f0"], b"RF1"], [r["f4"], b"LOC-RB", b"RF2", b"RF1", b"STILL-c1-0"]]:
                 bad.append(f"(st-b) refs 가 c1 [애니, 정면 1]·c2 [애니, 시트, 정면 2] 가 아닙니다: {refs}")
             p1, p2 = (s["prompt"] for s in r["stills"]) if len(r["stills"]) == 2 else ("", "")
             if "Exactly 1 person in frame: 에이 (center); no other people." not in p1 or "do not zoom out" not in p1 \
@@ -49201,7 +49220,9 @@ def check_vnew_real_still_139() -> None:
             with _pin_vnew(VNEW_REAL_STILL_CHECK=True):
                 r = run("prj_st_c")
             refs = [s["refs"] for s in r["stills"]]
-            want = [[r["f0"], b"RF1"], [r["f0"], b"RF1"], [r["f4"], b"LOC-RB", b"RF2", b"RF1"], [r["f4"], b"RF2", b"RF1"]]
+            # 작업 160: c2(두 번 다)는 앞 컷이 쓴 시작 그림(다시 그린 STILL-c1-1)을 맨 뒤에 1장 더(다시 그리기에서도 같은 자리).
+            want = [[r["f0"], b"RF1"], [r["f0"], b"RF1"], [r["f4"], b"LOC-RB", b"RF2", b"RF1", b"STILL-c1-1"],
+                    [r["f4"], b"RF2", b"RF1", b"STILL-c1-1"]]
             if refs != want or [s["out"] for s in r["stills"]] != [b"STILL-c1-0", b"STILL-c1-1", b"STILL-c2-0", b"STILL-c2-1"]:
                 bad.append(f"(st-c) 시작 그림 4장(두 번째는 시트 없이 [애니 + 정면])이 아닙니다: {refs}")
             if len(r["stills"]) == 4:
@@ -49238,7 +49259,8 @@ def check_vnew_real_still_139() -> None:
             with _pin_vnew(VNEW_REAL_STILL_CHECK=True):
                 r = run("prj_st_d")
             refs = [s["refs"] for s in r["stills"]]
-            if refs != [[r["f0"], b"LOC-RB", b"RF2", b"RF1"], [r["f4"], b"LOC-RB", b"RF2", b"RF1"]] \
+            # 작업 160: c2 는 앞 컷 시작 그림(STILL-c1-0)이 맨 뒤에 1장 더.
+            if refs != [[r["f0"], b"LOC-RB", b"RF2", b"RF1"], [r["f4"], b"LOC-RB", b"RF2", b"RF1", b"STILL-c1-0"]] \
                     or any(old_bg not in s["prompt"] or "Keep Image 1's exact framing" in s["prompt"] or "Exactly" in s["prompt"]
                            for s in r["stills"]) \
                     or r["checks"] or len(r["texts"]) != 0 or any("animeLayout" in c or "stillCheck" in c for c in r["cuts"]):
@@ -49550,7 +49572,8 @@ def check_vnew_real_sheet_ref_142() -> None:
             if [m.rsplit(" refs=", 1)[-1] for m in take_logs] != ["both variant=real", "sheet variant=real"]:
                 bad.append(f"(rs-c) Seedance 제출 로그 refs=both·refs=sheet 가 아닙니다: {take_logs}")
             refs = [s["refs"] for s in stills]
-            if refs != [[b"FRAME@0.0", b"RS1", b"RF1"], [b"FRAME@4.0", b"LOC-RB", b"RS2", b"RF2", b"RS1", b"RF1"]]:
+            # 작업 160: 둘째 컷(MS) 시작 그림은 앞 컷 시작 그림(STILL1)을 참고 맨 뒤에 1장 더 받는다(같은 장소·시간대·빛).
+            if refs != [[b"FRAME@0.0", b"RS1", b"RF1"], [b"FRAME@4.0", b"LOC-RB", b"RS2", b"RF2", b"RS1", b"RF1", b"STILL1"]]:
                 bad.append(f"(rs-c) 시작 그림 refs 가 CU [애니, 시트, 정면]·MS [애니, 시트 뷰, 시트, 정면 ×2] 가 아닙니다: {refs}")
             q1, q2 = (s["prompt"] for s in stills) if len(stills) == 2 else ("", "")
             if genmod._real_sheet_sentences(ea, 2, 3) not in q1 or eb in q1 \
@@ -52066,6 +52089,7 @@ def check_vnew_content_flag_153() -> None:
 
 # 작업 155 전 코드의 조각·대체 없는 15초 테이크(_LrEnv make_plan c1~c3, Wan 3.0, FX 끔) 프롬프트·참고 이미지 sha256 앞 16자.
 # 다른 작업이 테이크 프롬프트를 일부러 바꿨다면 그 작업이 이 값을 함께 고친다.
+# 작업 160: 그대로다 — 애니 COSTUME 은 장소 단위로 고른 같은 옷이고(이 계획은 테이크 1개라 고르는 값이 같다), 그림 낱말 빼기는 실사만이다.
 _AN155_BASE = {"webtoonPrompt": "aa227a25994e9a91", "webtoonImages": "1854b03fbc9fa9a9",
                "realPrompt": "59492465c43d0c70", "realImages": "b13a1c687cf05e5d"}
 _AN155_CREW = "black crew-neck long-sleeve top with white sleeve stripes"
@@ -53498,7 +53522,8 @@ def check_vnew_vibe_prompt_159() -> None:
         with _guard_real_llm() as llm_calls, _LogCapture() as logs, _LrEnv(owner) as env, _pin_vnew(
                 VNEW_FX=False, VNEW_CASTING=True, VNEW_TAKE_REAL=True, VNEW_GEN_PARALLEL=1, POLL_INTERVAL_S=0,
                 VNEW_TAKE_AUDIO=True, VNEW_TAKE_RESOLUTION="480p", VNEW_TEXT_CHECK=False, VNEW_REAL_TAKE_MODEL=_LR_ENDPOINT,
-                VNEW_VIBE_PROMPT=True, VNEW_TAKE_PROMPT_MAX_CHARS=4000) as vset:
+                VNEW_VIBE_PROMPT=True, VNEW_TAKE_PROMPT_MAX_CHARS=4000,
+                VNEW_REAL_COSTUME_REF=False) as vset:  # 작업 160: 159 기대값은 [시트, 정면] 그대로 — 장면 옷 편집은 160 검사가 본다
             # 상한 4,000자를 이 검사 안에서 고정한다(_tc157_submit 은 fix1 부터 finally 로 되돌리지만, 순서에 기대지 않는다).
             for cid in ("ch1", "ch2"):
                 env.chars[cid]["variants"]["real"]["sheetKey"] = f"rs-{cid}"
@@ -53594,6 +53619,304 @@ def check_vnew_vibe_prompt_159() -> None:
            "(vb-f)Seedance·프리비즈 영상·시트+정면·장소·애니 원작 패널(상한 때 패널부터 빠짐)")
         for line in report:
             print(f"       159: {line}")
+
+
+# 작업 160: test3 실측 장면 옷(take1·take2 패널 읽기가 같은 사람·같은 장소에서 다른 옷을 골랐다).
+_CR160_TRACK = "Black long-sleeve track top with a single white stripe down each sleeve"
+_CR160_ZIP = "black zip-up track jacket/hoodie with a high collar"
+_CR160_NAVY = "Dark navy long-sleeve button-up dress shirt, collar open, worn untucked"
+_CR160_CREW = "plain black top with a crew neckline"
+
+
+def check_vnew_real_costume_160() -> None:
+    """작업 160 — 장소마다 인물 옷 1벌(_scene_costume)·장면 옷 신원 참고(메모리만)·컷 단위 Kling 이어짐. 가짜, 유료 0.
+
+    (cs-a) 옷: test3 모양(take1 패널 "track top", take2 패널 "zip-up track jacket", 같은 사람·장소)에서 실사·애니 vibe 테이크·조각·
+           155 의상 고정·옛 _take_prompt·시작 그림이 모두 한 벌(3:3 동점 → 앞 컷 take1). 다수결(4:2)·동점 앞 컷·장소별·콘티 우선·수정 우선
+    (cs-b) 신원 참고: 실사 회차(테이크 2개) = 보이는 인물당 edit 1번(입력 실사 정면·문구·세로 크기), 정면 자리 = 편집 바이트·
+           "@ImageN is X in this scene's clothes"·시트 절 "clothes come from @ImageN", 원장 호출마다 1줄(image·$0.04),
+           저장 0(STORE put·blob·JSON 에 편집 바이트 없음), 애니 회차 호출 0 / 실패 → 지금 참고(RF)·이름표 없음·원장 0·다시 부르지 않음
+    (cs-c) Kling 이어짐(Seedance 0·1단계 거절 → 2단계): 컷 2 시작 그림 참고 맨 뒤 = 컷 1 시작 그림 + REAL_STILL_PREV, 모든 시작 그림·
+           Kling 프롬프트에 시간대 문장, 시작 그림 넓히지 않기, 시작 그림 정면 자리 = 편집 그림(같은 회차 edit 2번뿐), 밤 콘티 → Night
+    """
+    import base64 as _b64  # noqa: PLC0415
+    import copy as _copy  # noqa: PLC0415
+    import traceback as _tb  # noqa: PLC0415
+
+    sys.path.insert(0, str(ROOT / "app"))
+    from src.vnew import generate as genmod  # noqa: PLC0415
+    from src.vpoc.errors import VpocError  # noqa: PLC0415
+
+    bad: list[str] = []
+    report: list[str] = []
+
+    def expect(group: str, got, want, what: str) -> None:
+        if got != want:
+            bad.append(f"({group}) {what}\n      결과 {got!r}\n      기대 {want!r}")
+
+    def decode(uri) -> bytes:
+        try:
+            return _b64.b64decode(str(uri).split(",", 1)[1])
+        except Exception:  # noqa: BLE001
+            return b""
+
+    try:
+        # ================= (cs-a) 장소마다 옷 1벌 =================
+        with _guard_real_llm() as llm_calls, _LogCapture(), _pin_vnew(VNEW_FX=True, VNEW_TAKE_PROMPT_MAX_CHARS=8000):
+            a, b = _TC157_A, _TC157_B
+            plan, take = _tc157_plan()
+            ids = list(take["cutIds"])
+            loc = genmod._take_location(plan, take)  # noqa: SLF001
+            t1 = dict(genmod._part_take(plan, take, {"cutIds": ids[:3], "seconds": 12.0}), id="take1")  # noqa: SLF001
+            t2 = dict(genmod._part_take(plan, take, {"cutIds": ids[3:], "seconds": 11.0}), id="take2")  # noqa: SLF001
+            notes = {"k1": {b: {"costumeEn": _CR160_TRACK, "voiceEn": ""}, a: {"costumeEn": _CR160_NAVY, "voiceEn": ""}},
+                     "k2": {b: {"costumeEn": _CR160_ZIP, "voiceEn": ""}, a: {"costumeEn": _CR160_CREW, "voiceEn": ""}}}
+
+            def with_map(mapping: dict) -> dict:
+                out = _copy.deepcopy(plan)
+                out["previz"]["castNotes"] = _copy.deepcopy(notes)
+                out["previz"]["castNotesCuts"] = mapping
+                return out
+
+            p3 = with_map({c: ("k1" if c in ids[:3] else "k2") for c in ids})  # test3: take1 3컷 · take2 3컷(동점)
+
+            def cast_for(key: str, real: bool) -> list[dict]:
+                look = "real" if real else "webtoon"
+                return [{"name": b, "colorName": "blue", "frontNo": 2, "sheetNo": 1, "refNos": [1, 2], "look": look,
+                         "appearance": "", "voice": "", "costume": notes[key][b]["costumeEn"]},
+                        {"name": a, "colorName": "orange", "frontNo": 4, "sheetNo": 3, "refNos": [3, 4], "look": look,
+                         "appearance": "", "voice": "", "costume": notes[key][a]["costumeEn"]}]
+
+            want = {b: genmod._scene_outfit_text(_CR160_TRACK), a: genmod._scene_outfit_text(_CR160_NAVY)}  # noqa: SLF001
+            other = {b: genmod._scene_outfit_text(_CR160_ZIP), a: genmod._scene_outfit_text(_CR160_CREW)}  # noqa: SLF001
+            prompts: dict[str, str] = {}
+            part = genmod._part_take(p3, t2, {"cutIds": ids[4:], "seconds": 7.0})  # noqa: SLF001
+            for real in (True, False):
+                tag = "real" if real else "anime"
+                for name, sub, key in (("take1", t1, "k1"), ("take2", t2, "k2"), ("part", part, "k2")):
+                    prompts[f"vibe-{tag}-{name}"] = genmod._vibe_take_prompt(  # noqa: SLF001
+                        p3, sub, real=real, cast=cast_for(key, real), location_no=5, quiet=True)
+                prompts[f"vibe-{tag}-lock"] = genmod._vibe_take_prompt(  # noqa: SLF001
+                    p3, t2, real=real, cast=cast_for("k2", real), location_no=5, anchor=True, quiet=True)
+                for name, sub, key in (("take1", t1, "k1"), ("take2", t2, "k2")):
+                    prompts[f"old-{tag}-{name}"] = genmod._take_prompt(  # noqa: SLF001
+                        p3, sub, cast=cast_for(key, real), panel_nos=[], location_no=5, variant="real" if real else "webtoon",
+                        quiet=True)
+                prompts[f"old-{tag}-lock"] = genmod._take_prompt(  # noqa: SLF001
+                    p3, t2, cast=cast_for("k2", real), panel_nos=[], location_no=5, variant="real" if real else "webtoon",
+                    anchor={}, quiet=True)
+            got_a = {}
+            for tag, text in prompts.items():
+                low = text.lower()
+                got_a[tag] = [want[b][:40].lower() in low, want[a][:40].lower() in low,
+                              other[b][:30].lower() in low, other[a].lower() in low]
+            expect("cs-a", got_a, {tag: [True, True, False, False] for tag in prompts},
+                   "모든 테이크·조각·155 고정·실사/애니·옛 경로가 한 벌(take1 패널 읽기, 3:3 동점 앞 컷)만 쓴다")
+            expect("cs-a", [genmod._costume_lock_tail(want[b]) in prompts["vibe-real-lock"],  # noqa: SLF001
+                            genmod._costume_lock("Yeouijun", want[b]) in prompts["old-real-lock"]],  # noqa: SLF001
+                   [True, True], "155 의상 고정 구절도 같은 옷")
+            stills = {cid: genmod._cut_still_prompt(p3, {"cutId": cid}, [("blue", b, 2), ("orange", a, 3)], True,  # noqa: SLF001
+                                                    source="anime", outfits={n: v["costumeEn"] for n, v in notes[k].items()})
+                      for cid, k in (("cut-02", "k1"), ("cut-05", "k2"))}
+            expect("cs-a", {cid: [f"{b} wears {want[b]}" in p, f"{a} wears {want[a]}" in p, other[b] in p]
+                            for cid, p in stills.items()},
+                   {"cut-02": [True, True, False], "cut-05": [True, True, False]}, "시작 그림 OUTFITS 도 같은 옷")
+            # 다수결·동점·장소·콘티·수정
+            p_major = with_map({c: ("k2" if c in ids[:2] else "k1") for c in ids})  # k2 앞 2컷, k1 뒤 4컷
+            p_tie = with_map({c: ("k2" if c in ids[:3] else "k1") for c in ids})  # k2 가 앞 3컷(동점)
+            p_loc = with_map({c: ("k1" if c in ids[:3] else "k2") for c in ids})
+            p_loc["conti"]["cuts"][5]["locationEn"] = "Inside a bright convenience store"
+            p_conti = _copy.deepcopy(p3)
+            p_conti["conti"]["cuts"][4]["characters"][1]["outfitEn"] = "grey hooded sweatshirt and faded jeans"
+            p_over = _copy.deepcopy(p_conti)
+            p_over.setdefault("input", {})["castOverrides"] = {b: {"costume": "white cable-knit sweater"}}
+            sc = genmod._scene_costume  # noqa: SLF001
+            expect("cs-a", [sc(p_major, b, loc), sc(p_tie, b, loc), sc(p_loc, b, loc),
+                            sc(p_loc, b, "Inside a bright convenience store"), sc(p_conti, b, loc), sc(p_over, b, loc),
+                            sc(plan, b, loc, fallback=_CR160_ZIP)],
+                   [want[b], other[b], want[b], other[b], "grey hooded sweatshirt and faded jeans", "white cable-knit sweater",
+                    other[b]],
+                   "다수결(4:2)·동점 앞 컷·장소별·콘티 우선·수정 우선·읽기 없으면 fallback")
+            report.append(f"장면 옷: {b} = {want[b]!r} / {a} = {want[a]!r} (프롬프트 {len(prompts)}개·시작 그림 2개)")
+            if llm_calls:
+                bad.append(f"가짜가 아닌 LLM 호출: {llm_calls}")
+
+        # ================= (cs-b)(cs-c) 실사 회차 흐름 =================
+        owner = "tester"
+        kling = "fal-ai/kling-video/v3/pro/image-to-video"
+        kling_caps = {"promptField": "prompt", "startImageField": "start_image_url", "durations": [5, 10],
+                      "durationAsString": True, "durationValues": {"5": "5", "10": "10"}, "sendDuration": True,
+                      "aspectRatios": ["16:9"], "available": True}
+        likeness_raw = "The images or videos provided may contain likenesses of real people or other private information."
+        with _guard_real_llm() as llm_calls, _LogCapture() as logs, _LrEnv(owner) as env, _pin_vnew(
+                VNEW_FX=False, VNEW_CASTING=True, VNEW_TAKE_REAL=True, VNEW_GEN_PARALLEL=1, POLL_INTERVAL_S=0,
+                VNEW_TAKE_AUDIO=True, VNEW_TAKE_RESOLUTION="480p", VNEW_TEXT_CHECK=False, VNEW_REAL_TAKE_MODEL=_LR_ENDPOINT,
+                VNEW_VIBE_PROMPT=True, VNEW_TAKE_PROMPT_MAX_CHARS=4000, VNEW_TAKE_MAX_SECONDS=4,
+                VNEW_TAKE_REAL_LIKENESS_LADDER=True, VNEW_TAKE_REAL_KLING_MODEL=kling, VNEW_REAL_CUT_QA=False,
+                VNEW_REAL_COSTUME_REF=True) as vset:
+            for cid in ("ch1", "ch2"):
+                env.chars[cid]["variants"]["real"]["sheetKey"] = f"rs-{cid}"
+            env.blobs.update({"rs-ch1": b"RS1", "rs-ch2": b"RS2"})
+            prefix_id = genmod.vpoc_settings.FAL_ID_PREFIX
+            seed_find = genmod.vpoc_fal.find
+            env.set(genmod.vpoc_fal, "find", lambda m: {"id": prefix_id + kling, "endpointId": kling, "caps": dict(kling_caps)}
+                    if str(m) == prefix_id + kling else seed_find(m))
+            edits: list[dict] = []
+            mode = {"fail": False}
+
+            def fake_edit(prompt, front, *, size):
+                edits.append({"prompt": prompt, "front": bytes(front), "size": size})
+                if mode["fail"]:
+                    raise VpocError("vnew.generate.costume_ref", "HTTP500", "edit failed", 502)
+                return b"COSTUME-" + bytes(front)
+
+            env.set(genmod, "_seedream_costume", fake_edit)
+            stills: list[dict] = []
+            env.set(genmod, "_seedream", lambda prompt, refs, *, size: stills.append(
+                {"prompt": prompt, "refs": [bytes(r) for r in refs]}) or b"STILL%d" % len(stills))
+            env.set(genmod, "_cut_first_frame", lambda mp4, start: b"FRAME@%.1f" % float(start))
+            env.set(genmod, "_trim_clip", lambda mp4, seconds: b"TRIM%.1f:" % float(seconds) + bytes(mp4))
+            puts: list[tuple[str, bytes]] = []
+            base_put = env.store.put_bytes
+
+            def put(key, body, content_type, *, bucket=""):
+                puts.append((str(key), bytes(body)))
+                return base_put(key, body, content_type, bucket=bucket)
+
+            env.set(env.store, "put_bytes", put)
+            policy = {"reject": lambda req: False}
+            base_fal = env._fal  # noqa: SLF001
+
+            def fal_request(method, url, payload=None, *, where=""):
+                rid = url.split("/requests/", 1)[-1].split("/", 1)[0]
+                req = next((r for r in env.requests if r["rid"] == rid), None)
+                if method == "GET" and not url.endswith("/status") and req and policy["reject"](req):
+                    raise VpocError("fal.poll", "HTTP422", likeness_raw, 502)
+                return base_fal(method, url, payload, where=where)
+
+            env.set(env.falmod, "_request", fal_request)
+            client = env.client()
+
+            def seedance_real(req) -> bool:
+                # vibe 실사 프롬프트는 _LrEnv 의 옛 STYLE 머리로 실사를 가르지 않는다 → 실사 회차 뒤 요청만 이 함수로 본다.
+                return req["url"].endswith(_LR_ENDPOINT)
+
+            def run_real(pid: str, segments: list[dict], reject: bool = False) -> dict:
+                env.make_plan(pid, segments)
+                pre = len(edits)
+                client.post(f"/api/vnew/p/{pid}/generate", json={"confirmUsd": genmod.estimate(env.plan(pid))["totalUsd"]})
+                g = env.drive(pid)
+                out = {"animeEdits": len(edits) - pre, "since": len(env.requests), "led": len(env.ledger), "e0": len(edits),
+                       "s0": len(stills)}
+                real_rids = lambda req: req in env.requests[out["since"]:]  # noqa: E731
+                policy["reject"] = (lambda req: seedance_real(req) and real_rids(req)) if reject else (lambda req: False)
+                client.post(f"/api/vnew/p/{pid}/generate/real", json={"confirmUsd": genmod.real_estimate(g)["usd"]})
+                env.drive(pid)
+                policy["reject"] = lambda req: False
+                out["reqs"] = env.requests[out["since"]:]
+                out["edits"] = edits[out["e0"]:]
+                out["stills"] = stills[out["s0"]:]
+                out["costumeLedger"] = [e for e in env.ledger[out["led"]:]
+                                        if e.get("model") == vset.VNEW_REAL_COSTUME_REF_MODEL]
+                out["plan"] = env.plan(pid)
+                return out
+
+            two_takes = [{"id": "s1", "cutIds": ["c1"], "seconds": 4}, {"id": "s2", "cutIds": ["c2"], "seconds": 4}]
+            office = "A closed principal's office"
+
+            # ---- (cs-b) Seedance 성공, 테이크 2개 ----
+            ra = run_real("prj_cr_a", two_takes)
+            costume_of = {n: genmod._scene_costume(ra["plan"], n, office) for n in ("에이", "비")}  # noqa: SLF001
+            seeds = [r for r in ra["reqs"] if seedance_real(r)]
+            got_b = {"animeEdits": ra["animeEdits"], "edits": len(ra["edits"]),
+                     "fronts": sorted(e["front"] for e in ra["edits"]),
+                     "prompts": sorted(e["prompt"] for e in ra["edits"]),
+                     "size": {e["size"] for e in ra["edits"]}, "takes": len(seeds)}
+            want_b = {"animeEdits": 0, "edits": 2, "fronts": [b"RF1", b"RF2"],
+                      "prompts": sorted(genmod.REAL_COSTUME_REF_PROMPT.format(costume=c) for c in costume_of.values()),
+                      "size": {genmod.vnew_settings.FRONT_SIZE}, "takes": 2}
+            expect("cs-b", got_b, want_b, "실사 회차(테이크 2개) = 보이는 인물당 edit 1번·실사 정면 입력·문구·세로 크기")
+            expect("cs-b", [genmod.REAL_COSTUME_REF_PROMPT.startswith("Same person, same face and hair, now wearing {costume}"),
+                            all(c for c in costume_of.values())], [True, True], "edit 문구·장면 옷 있음")
+            per_req = []
+            for req in seeds:
+                images = [decode(u) for u in req["payload"].get("image_urls") or []]
+                prompt = str(req["payload"].get("prompt") or "")
+                row = []
+                for rf, rs, ko in ((b"RF1", b"RS1", "에이"), (b"RF2", b"RS2", "비")):
+                    cno = images.index(b"COSTUME-" + rf) + 1 if b"COSTUME-" + rf in images else 0
+                    sno = images.index(rs) + 1 if rs in images else 0
+                    handle = genmod._romanize_name(ko)  # noqa: SLF001
+                    row.append([bool(cno), rf in images, bool(sno),
+                                genmod.REAL_COSTUME_REF_LABEL.format(no=cno, name=handle) in prompt,
+                                f"@Image{sno}: " + genmod.VIBE_SHEET_COSTUME_CLAUSE.format(no=cno) + "." in prompt,
+                                f"wearing {costume_of[ko][:1].lower() + costume_of[ko][1:]}" in prompt])
+                per_req.append(row)
+            expect("cs-b", per_req, [[[True, False, True, True, True, True]] * 2] * 2,
+                   "테이크마다 정면 자리 = 편집 바이트(실사 정면 없음)·시트 그대로·이름표·시트 절 clothes come from·look 줄 같은 옷")
+            expect("cs-b", [len(ra["costumeLedger"]), {(e.get("kind"), e.get("units"), e.get("usd")) for e in ra["costumeLedger"]}],
+                   [2, {("image", 1, float(genmod.vnew_settings.LOCATION_IMAGE_USD))}], "원장: edit 호출마다 1줄(image·장당)")
+            stored = [k for k, body in puts if b"COSTUME-" in body] + [
+                k for k, body in env.store.blobs.items() if isinstance(body, (bytes, bytearray)) and b"COSTUME-" in body]
+            expect("cs-b", [stored, "COSTUME-" in repr(env.store.json), genmod.STORE is env.store],
+                   [[], False, True], "편집 그림은 저장하지 않는다(STORE put·blob·JSON 0)")
+            expect("cs-b", any("vnew.gen.costume_ref pid=prj_cr_a run=1 made=2 failed=0 stored=0" in m
+                               for m in logs.messages("vnew.gen.costume_ref")), True, "로그 made=2 stored=0")
+
+            # ---- (cs-b) edit 실패 → 지금 참고 ----
+            mode["fail"] = True
+            rc = run_real("prj_cr_c", two_takes)
+            mode["fail"] = False
+            seeds_c = [r for r in rc["reqs"] if seedance_real(r)]
+            got_fail = [len(rc["edits"]), len(rc["costumeLedger"]), len(seeds_c),
+                        [[b"RF1" in [decode(u) for u in r["payload"].get("image_urls") or []],
+                          b"RF2" in [decode(u) for u in r["payload"].get("image_urls") or []],
+                          "in this scene's clothes" in str(r["payload"].get("prompt") or "")] for r in seeds_c],
+                        any("failed=2" in m for m in logs.messages("vnew.gen.costume_ref pid=prj_cr_c"))]
+            expect("cs-b", got_fail, [2, 0, 2, [[True, True, False]] * 2, True],
+                   "edit 실패: 인물당 1번만 시도·원장 0·지금 참고(실사 정면)·이름표 없음")
+
+            # ---- (cs-c) Seedance 0·1단계 거절 → 컷 단위 Kling(테이크 1개·컷 2개) ----
+            rb = run_real("prj_cr_b", [{"id": "s1", "cutIds": ["c1", "c2"], "seconds": 8}], reject=True)
+            klings = [r["payload"] for r in rb["reqs"] if r["url"].endswith("/" + kling)]
+            day = genmod._real_time_sentence(rb["plan"])  # noqa: SLF001
+            s1, s2 = (rb["stills"] + [{"prompt": "", "refs": []}] * 2)[:2]
+            first_out = b"STILL%d" % (rb["s0"] + 1)
+            got_c = {"stills": len(rb["stills"]), "klings": len(klings), "edits": len(rb["edits"]),
+                     "prevRef": [first_out in s1["refs"], s2["refs"][-1:] == [first_out]],
+                     "prevLine": [genmod.REAL_STILL_PREV.format(no=len(s2["refs"])) in s2["prompt"],
+                                  "the previous shot" in s1["prompt"]],
+                     "time": [day in s1["prompt"], day in s2["prompt"], all(day in str(k.get("prompt") or "") for k in klings)],
+                     "noWiden": [genmod.REAL_STILL_NO_WIDEN in s1["prompt"], genmod.REAL_STILL_NO_WIDEN in s2["prompt"]],
+                     "costumeRef": [all(b"COSTUME-" + rf in s["refs"] and rf not in s["refs"] for rf in (b"RF1", b"RF2"))
+                                    for s in (s1, s2)],
+                     "label": [all(f"is {n} in this scene's clothes." in s["prompt"] for n in ("에이", "비")) for s in (s1, s2)],
+                     "sheetClothes": ["clothes come from Image" in s["prompt"] for s in (s1, s2)]}
+            want_c = {"stills": 2, "klings": 2, "edits": 2, "prevRef": [False, True], "prevLine": [True, False],
+                      "time": [True, True, True], "noWiden": [True, True], "costumeRef": [True, True], "label": [True, True],
+                      "sheetClothes": [True, True]}
+            expect("cs-c", got_c, want_c, "컷 2 시작 그림 = 컷 1 시작 그림 참고·문장, 시간대·넓히지 않기, 정면 자리 = 편집 그림(edit 2번뿐)")
+            expect("cs-c", day, "Daylight, same time of day in every shot.", "낮 콘티 → Daylight 문장")
+            night = _copy.deepcopy(rb["plan"])
+            night["script"]["setting"]["timeKo"] = "밤"
+            kl_night = genmod._segment_prompt(night, {"cutIds": ["c1"]}, first_segment=True, real=True)  # noqa: SLF001
+            st_night = genmod._cut_still_prompt(night, {"cutId": "c1"}, [], True, source="anime")  # noqa: SLF001
+            expect("cs-c", [genmod._real_time_sentence(night), genmod.REAL_TIME_OF_DAY.format(tod="Night") in kl_night,  # noqa: SLF001
+                            genmod.REAL_TIME_OF_DAY.format(tod="Night") in st_night, day in st_night],
+                   ["Night, same time of day in every shot.", True, True, False], "밤 콘티 → Night 문장(시작 그림·Kling)")
+            report.append(f"edit {len(ra['edits'])}+{len(rb['edits'])}+{len(rc['edits'])}회(인물 2명 × 회차 3), "
+                          f"원장 {len(ra['costumeLedger']) + len(rb['costumeLedger'])}줄, 저장 0, 컷 2 참고 {len(s2['refs'])}장")
+            if llm_calls:
+                bad.append(f"가짜가 아닌 LLM 호출: {llm_calls}")
+    except Exception:  # noqa: BLE001
+        bad.append("작업 160 검사 예외\n" + _tb.format_exc())
+    if bad:
+        fail("작업 160 장면 옷 1벌·장면 옷 참고·Kling 이어짐 검사 실패\n  " + "\n  ".join(bad))
+    else:
+        ok("작업 160 (cs-a)장소마다 옷 1벌(테이크·조각·155 고정·옛 경로·시작 그림, 다수결·동점·장소·콘티·수정) "
+           "(cs-b)인물당 edit 1번·정면 자리·이름표·원장·저장 0·실패 → 지금 참고 (cs-c)앞 컷 시작 그림·시간대·넓히지 않기·밤")
+        for line in report:
+            print(f"       160: {line}")
 # 작업 158: 기존 콘티 경로(CONTI_SYSTEM · _analyze_conti)를 가짜로 바꿔 끼우는 검사는 VNEW_VIBE_CONTI=False 로 부른다(기대값은 그대로).
 # 이유: 새 기본값(켬)에서 run_conti 는 _analyze_vibe(샷 계획)를 부르므로 그 검사들의 가짜 _analyze_conti 가 불리지 않는다. 끔 경로는
 # 158 전과 바이트가 같다(vb-d sha). 대상: check_vnew_plan · check_vnew_locations · check_vnew_previz · check_vnew_fx ·
@@ -54035,8 +54358,10 @@ def main() -> int:
     # 작업 159: 아래 검사(064~157)의 통 테이크 기대값(프롬프트 글자·sha·ASSETS/TIMELINE·패널 참고 장수)은 옛 _take_prompt 경로
     # 기준이다. VNEW_VIBE_PROMPT 기본 켬이면 그 프롬프트·참고 이미지가 바뀌므로(의도한 변경) 끔 경로에 고정한다. 기대값은 하나도
     # 바꾸지 않았다. 켬 경로는 check_vnew_vibe_prompt_159 가 본다(맨 끝, 고정을 푼 뒤).
+    # 작업 160: 같은 이유로 VNEW_REAL_COSTUME_REF(실사 회차 장면 옷 편집 — 정면 자리 바꾸기·fal edit 호출)도 끔에 고정한다. 그 검사들의
+    # 실사 참고 기대값(시트·정면 사진)은 160 전 그대로다. 켬 경로는 check_vnew_real_costume_160 이 본다.
     vibe_off = contextlib.ExitStack()
-    vibe_off.enter_context(_pin_vnew(VNEW_VIBE_PROMPT=False))
+    vibe_off.enter_context(_pin_vnew(VNEW_VIBE_PROMPT=False, VNEW_REAL_COSTUME_REF=False))
     check_cancel()
     check_dual()
     check_vnew()
@@ -54145,6 +54470,7 @@ def main() -> int:
     check_pod_zones()
     vibe_off.close()
     check_vnew_vibe_prompt_159()
+    check_vnew_real_costume_160()
     print()
     if warnings:
         print(f"경고 {len(warnings)}건")
