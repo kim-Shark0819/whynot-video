@@ -23156,6 +23156,7 @@ class _LrEnv:
         self.urlopen_calls: list[str] = []
         self.cast_notes_calls = 0
         self.project_calls: list[str] = []
+        self.vision_off: list[str] = []  # 작업 139: 기본 가짜(실패)로 막힌 vision 읽기
         self.chars = {
             "ch1": _lr_char("ch1", "에이", "male", "A young man with short black hair and sharp dark eyes, a lean face.",
                             "black dress shirt and charcoal slacks", casting_key=self.CAST_KEY,
@@ -23211,7 +23212,18 @@ class _LrEnv:
         self.set(genmod, "_PREPARE_SEM", self.sem)
         self.set(vpoc_set, "FAL_KEY", "dummy-fal-key-LR")
         self.set(_urlrequest, "urlopen", self._urlopen)
+        # 작업 139: 애니 프레임 읽기·시작 그림 검사(vision)는 기본으로 "실패"(None → 138 과 같은 시작 그림, 원장 0).
+        # 그 단계를 보는 검사(check_vnew_real_still_139)만 가짜 답으로 바꾼다. 기존 검사의 기대값은 그대로다.
+        self.set(genmod, "_read_anime_layout", self._no_vision("layout"))
+        self.set(genmod, "_read_still_check", self._no_vision("still"))
         return self
+
+    def _no_vision(self, kind: str):
+        def fake(blocks, *, model):
+            self.vision_off.append(kind)
+            raise RuntimeError(f"작업 139 {kind} 읽기는 이 검사에서 끔")
+
+        return fake
 
     def __exit__(self, *_exc) -> bool:
         for obj, name, value in reversed(self._saved):
@@ -48845,6 +48857,318 @@ def check_vnew_real_brief_138() -> None:
            "(rb-h)이름만 쓴 표기(Geonu) 인식·장면 옷 문장")
 
 
+# 작업 139 검사 기대값: 바꾸기 전(138) 코드로 만든 프롬프트 sha256(_fw_plan, 아래 _st139_prompts 와 같은 인자).
+_ST139_SHA_138 = {
+    "still-anime-sheet": "05359e1478a4f596f3aa26528ffc2dffbed381865c382f4e51189bf94604edb4",
+    "still-anime": "3773230c46dc953bab6661dabcf02879ed64726b999429ea12831af936a69786",
+    "still-previz-sheet": "037426b1bfe61a13a544d6ec7e04fa95175f416019e47f9763feb9e72522c0d2",
+    "kling-real-without-139": "765d299f83eb1fcc2ec2f595bca1fa5fcf6d34477b9ffd9f7e8415abe4459f77",
+    "anime-take": "b2cf37530ea84dd2af9aba37f960dc73027b1c82b8ed8ff7abd31481dcad867e",
+    "anime-segment": "8b30cb23d1566f90c8bd77da504c70c1c0ee567e88c16ae111957f4d39103e36",
+}
+
+
+def check_vnew_real_still_139() -> None:
+    """작업 139 — 실사 컷 시작 그림이 애니 컷과 같은 구도(보이는 인물만·구도 고정·시작 그림 검사). 가짜 vision·Seedream·fal, 유료 0.
+
+    (st-a) 문장: CU·[범건우 face center, 여의준 none] → 맨 앞 구도 고정·"Exactly 1 person"·여의준 이름 없음·짧은 LOCATION·지시서 160자,
+           back → 사진 없이 문장, MS → 바뀐 Image 2 문장, layout None → 138 sha 그대로
+    (st-b) 흐름(검사 끔): c1 CU → refs [애니, 정면 1]·시트 없음, c2 MS → [애니, 시트, 정면 2]·바뀐 Image 2 문장, 기록 animeLayout,
+           시작 그림 검사 vision 0, 원장 텍스트 2(읽기)·그림 2
+    (st-c) 흐름(검사 켬): c1 (틀림 → 맞음) → 두 번째, c2 (2개 틀림, 1개 틀림) → 두 번째, 두 번째 refs 에 시트 없음·교정 문장,
+           Kling 시작 그림·start.jpg = 고른 그림, 기록 stillCheck, 원장 그림 4·텍스트 6
+    (st-d) 읽기 실패 → 138 과 같은 refs·문장·검사 0 (st-e) Kling real 새 구절·나머지 바이트 그대로·애니 프롬프트 sha 그대로·_retry_better
+    """
+    import base64 as _b64  # noqa: PLC0415
+    import hashlib as _hashlib  # noqa: PLC0415
+    import re as _re  # noqa: PLC0415
+    import traceback as _tb  # noqa: PLC0415
+
+    sys.path.insert(0, str(ROOT / "app"))
+    from src.vnew import generate as genmod  # noqa: PLC0415
+    from src.vnew import prompts as promptsmod  # noqa: PLC0415
+    from src.vpoc.errors import VpocError  # noqa: PLC0415
+
+    bad: list[str] = []
+    a, b = "범건우", "여의준"
+    ra, rb = genmod._romanize_name(a), genmod._romanize_name(b)  # noqa: SLF001
+    owner = "tester"
+    kling = "fal-ai/kling-video/v3/pro/image-to-video"
+    kling_caps = {"promptField": "prompt", "startImageField": "start_image_url", "durations": [5, 10], "durationAsString": True,
+                  "durationValues": {"5": "5", "10": "10"}, "sendDuration": True, "aspectRatios": ["16:9"], "available": True}
+    likeness_raw = "The images or videos provided may contain likenesses of real people or other private information."
+    old_bg = ("Background and location must match Image 2 exactly (same buildings, railing, street, time of day); "
+              "only the framing follows Image 1.")
+    drawing = _re.compile(_LR_DRAWING_RE + r"|\bcel\b", _re.IGNORECASE)
+
+    def sha(text: str) -> str:
+        return _hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+    def lay(shot: str, *people) -> dict:
+        return {"shotSize": shot, "people": [{"name": n, "side": s, "visible": v} for n, s, v in people],
+                "count": sum(1 for _n, _s, v in people if v != "none")}
+
+    def fake_frame(mp4: bytes, start: float) -> bytes:
+        return b"FRAME[" + bytes(mp4) + b"]@%.1f" % float(start)
+
+    try:
+        with _guard_real_llm() as llm_calls, _pin_vnew(VNEW_FX=True):
+            # ================= (st-a) 시작 그림 문장 =================
+            plan = _fw_plan()
+            brief = plan["previz"]["shotBrief"]["cuts"]["c1"]
+            brief["shotEn"] = ("Close-up at eye level on " + ra + ", his hands pressed over his face while the convenience store "
+                               "counter, the glass door and the bright aisles of snacks stretch far behind him into the night.")
+            brief["blockingEn"] = (f"{ra} stands at the counter and hides his face in his hands. {rb} stands mostly off-frame "
+                                   f"behind him. Bright aisles of snacks run toward the far glass door of the store.")
+            cu = lay("CU", (a, "center", "face"), (b, "left", "none"))
+            p_cu = genmod._cut_still_prompt(plan, {"cutId": "c1"}, [("blue", a, 2)], True,  # noqa: SLF001
+                                            source="anime", outfits={}, background_no=0, layout=cu)
+            head = genmod.REAL_STILL_FRAMING.format(shot="close-up")
+            lines = {ln.split(":", 1)[0]: ln for ln in p_cu.split("\n")}
+            if not p_cu.startswith(head + "\n") or "do not zoom out" not in p_cu \
+                    or f"Exactly 1 person in frame: {a} (center); no other people." not in p_cu \
+                    or "LOCATION: A convenience store." not in p_cu or "Image 2's place" in p_cu or "must match Image" in p_cu \
+                    or "outfits and background." not in p_cu or not p_cu.endswith("\n" + genmod.REAL_STILL_LOOK + "."):
+                bad.append(f"(st-a) CU 문장(구도 고정·Exactly 1·짧은 LOCATION·시트 문장 없음)이 다릅니다: {p_cu!r}")
+            low = p_cu.lower()
+            if b in p_cu or any(f.lower() in low for f in genmod._brief_name_forms(b) if f.isascii()):  # noqa: SLF001
+                bad.append(f"(st-a) 화면에 없는 {b} 이름이 문장에 남았습니다: {p_cu!r}")
+            for label in ("SHOT", "BLOCKING", "SETTING"):
+                if label not in lines or len(lines[label]) > len(label) + 2 + genmod.REAL_STILL_BRIEF_TIGHT:
+                    bad.append(f"(st-a) CU 의 {label} 지시서가 160자 안이 아닙니다: {lines.get(label)!r}")
+            if drawing.search(p_cu.replace(genmod.REAL_STILL_LOOK, "")):
+                bad.append(f"(st-a) 그림 낱말이 있습니다: {p_cu!r}")
+            back = lay("MCU", (a, "right", "face"), (b, "left", "back"))
+            plan["conti"]["cuts"][0]["characters"] = [{"name": a, "outfitEn": "black open-collar shirt"},
+                                                      {"name": b, "outfitEn": "navy training top"}]
+            p_back = genmod._cut_still_prompt(plan, {"cutId": "c1"}, [("blue", a, 2)], True,  # noqa: SLF001
+                                              source="anime", outfits={}, background_no=0, layout=back)
+            if f"Exactly 2 people in frame: {b} (left, seen from behind, face not visible); {a} (right); no other people." \
+                    not in p_back or f"{b} wears navy training top" not in p_back or f"{b} in Image" in p_back \
+                    or "(medium close-up)" not in p_back:
+                bad.append(f"(st-a) 뒷모습 인물 문장(사진 없이 문장·옷)이 다릅니다: {p_back!r}")
+            plan = _fw_plan()
+            ms = lay("MS", (a, "left", "face"), (b, "right", "face"))
+            p_ms = genmod._cut_still_prompt(plan, {"cutId": "c1"}, [("blue", a, 3), ("red", b, 4)], True,  # noqa: SLF001
+                                            source="anime", outfits={}, background_no=2, layout=ms)
+            if genmod.REAL_STILL_BACKGROUND_PLACE.format(no=2) not in p_ms or old_bg in p_ms \
+                    or "(medium shot)" not in p_ms.split("\n")[0] or "Exactly 2 people in frame:" not in p_ms \
+                    or "LOCATION:" in p_ms or "SETTING: A small store with bright aisles." not in p_ms:
+                bad.append(f"(st-a) MS 문장(바뀐 Image 2 문장)이 다릅니다: {p_ms!r}")
+            ppl = [("blue", a, 3), ("red", b, 4)]
+            got_none = {
+                "still-anime-sheet": genmod._cut_still_prompt(plan, {"cutId": "c1"}, ppl, True, source="anime",  # noqa: SLF001
+                                                              outfits={}, background_no=2, layout=None),
+                "still-anime": genmod._cut_still_prompt(plan, {"cutId": "c1"}, ppl, True, source="anime", outfits={}),  # noqa: SLF001
+                "still-previz-sheet": genmod._cut_still_prompt(plan, {"cutId": "c1"}, ppl, True, outfits={},  # noqa: SLF001
+                                                               background_no=2, layout=ms),
+            }
+            for tag, text in got_none.items():
+                if sha(text) != _ST139_SHA_138[tag]:
+                    bad.append(f"(st-a) layout 없음(또는 프리비즈) {tag} 문장이 138 과 다릅니다: {text!r}")
+
+            # ================= (st-e) Kling·애니 프롬프트 =================
+            kl = genmod._segment_prompt(plan, {"cutIds": ["c1"]}, first_segment=True, real=True)  # noqa: SLF001
+            if genmod.REAL_CUT_KEEP_FRAMING not in kl.split("\n")[:5] \
+                    or sha(kl.replace("\n" + genmod.REAL_CUT_KEEP_FRAMING, "", 1)) != _ST139_SHA_138["kling-real-without-139"] \
+                    or genmod.REAL_CUT_KEEP_FRAMING != ("Keep the start frame's framing and shot size; the camera does not pull "
+                                                        "back; no new person enters the frame."):
+                bad.append(f"(st-e) Kling real 프롬프트에 새 구절(머리)이 없거나 나머지가 바뀌었습니다: {kl!r}")
+            cast_take = [{"name": a, "colorName": "blue", "frontNo": 1, "costume": "black open-collar shirt"},
+                         {"name": b, "colorName": "red", "frontNo": 2, "costume": "navy training top"}]
+            take = {"id": "take1", "cutIds": ["c1", "c2", "c3"], "seconds": 12}
+            web_take = genmod._take_prompt(_fw_plan(), take, cast=cast_take, panel_nos=[3], location_no=None)  # noqa: SLF001
+            web_seg = genmod._segment_prompt(_fw_plan(), {"cutIds": ["c1"]}, first_segment=True)  # noqa: SLF001
+            if sha(web_take) != _ST139_SHA_138["anime-take"] or sha(web_seg) != _ST139_SHA_138["anime-segment"]:
+                bad.append("(st-e) 애니(웹툰) 통 테이크·컷 프롬프트 sha 가 바뀌었습니다")
+            rules = [genmod._retry_better(f, r) for f, r in  # noqa: SLF001
+                     ((["shot"], []), (["count", "side"], ["side"]), (["side"], ["count", "side"]), (["side"], ["shot"]),
+                      (["side"], None))]
+            if rules != [True, True, False, False, True]:
+                bad.append(f"(st-e) _retry_better(135 규칙)이 다릅니다: {rules}")
+            fix = genmod._still_fix(list(genmod.REAL_STILL_CHECK_ITEMS), ms)  # noqa: SLF001
+            if not fix.startswith("FIX: keep exactly Image 1's shot size (medium shot)") or drawing.search(fix) \
+                    or f"{a} left, {b} right" not in fix:
+                bad.append(f"(st-e) 시작 그림 교정 문장이 다릅니다: {fix!r}")
+            if promptsmod.EMIT_ANIME_LAYOUT["inputSchema"]["json"]["properties"]["shotSize"]["enum"] != list(promptsmod.STILL_SHOT_SIZES) \
+                    or set(promptsmod.EMIT_STILL_CHECK["inputSchema"]["json"]["properties"]) \
+                    != {"shotSize", "count", "sideMatch", "animeStyle", "note"} \
+                    or any(r not in promptsmod.STILL_CHECK_SYSTEM for r in promptsmod.STILL_CHECK_RULES):
+                bad.append("(st-e) emit_anime_layout·emit_still_check 스키마·판정 기준이 다릅니다")
+            if llm_calls:
+                bad.append(f"가짜가 아닌 LLM 호출: {llm_calls}")
+
+        # ================= (st-b·c·d) 컷 단위 Kling 흐름 =================
+        with _guard_real_llm() as llm_calls, _LrEnv(owner) as env, _pin_vnew(
+                VNEW_FX=True, VNEW_CASTING=True, VNEW_TAKE_REAL=True, VNEW_GEN_PARALLEL=2, POLL_INTERVAL_S=0,
+                VNEW_TAKE_AUDIO=True, VNEW_TAKE_RESOLUTION="480p", VNEW_PREPARE_STALE_S=300,
+                VNEW_TAKE_REAL_LIKENESS_LADDER=True, VNEW_TAKE_REAL_KLING_MODEL=kling, VNEW_REAL_CUT_QA=False,
+                VNEW_REAL_STILL_CHECK=False):
+            ea, eb = "에이", "비"  # 하네스 인물(에이 = 정면 RF1, 비 = RF2)
+            prefix_id = genmod.vpoc_settings.FAL_ID_PREFIX
+            seed_find = genmod.vpoc_fal.find
+            env.set(genmod.vpoc_fal, "find", lambda m: {"id": prefix_id + kling, "endpointId": kling, "caps": dict(kling_caps)}
+                    if str(m) == prefix_id + kling else seed_find(m))
+            stills: list[dict] = []
+
+            def fake_seedream(prompt, refs, *, size):
+                cut = "c1" if bytes(refs[0]).endswith(b"@0.0") else "c2"
+                out = b"STILL-%s-%d" % (cut.encode(), int("FIX: " in prompt))
+                stills.append({"prompt": prompt, "refs": [bytes(r) for r in refs], "out": out})
+                return out
+
+            env.set(genmod, "_seedream", fake_seedream)
+            env.set(genmod, "_cut_first_frame", fake_frame)
+            env.set(genmod, "_trim_clip", lambda mp4, seconds: b"TRIM%.1f:" % float(seconds) + bytes(mp4))
+            layouts: dict = {}
+            verdicts: dict = {}
+            layout_calls: list[dict] = []
+            check_calls: list[dict] = []
+
+            def fake_layout(blocks, *, model):
+                img = [x["image"]["source"]["bytes"] for x in blocks if "image" in x][0]
+                text = " ".join(x["text"] for x in blocks if "text" in x)
+                layout_calls.append({"img": img, "text": text, "model": model})
+                return layouts["c1" if img.endswith(b"@0.0") else "c2"], {"model": model, "inputTokens": 1500, "outputTokens": 80}
+
+            def fake_check(blocks, *, model):
+                imgs = [x["image"]["source"]["bytes"] for x in blocks if "image" in x]
+                text = " ".join(x["text"] for x in blocks if "text" in x)
+                check_calls.append({"imgs": imgs, "text": text})
+                payload = {"shotSize": "CU", "count": 1, "sideMatch": True, "animeStyle": False, "note": ""}
+                payload.update(verdicts.get(bytes(imgs[1]), {}))
+                return payload, {"model": model, "inputTokens": 2500, "outputTokens": 80}
+
+            env.set(genmod, "_read_anime_layout", fake_layout)
+            env.set(genmod, "_read_still_check", fake_check)
+            base_fal = env._fal
+
+            def fal_request(method, url, payload=None, *, where=""):
+                rid = url.split("/requests/", 1)[-1].split("/", 1)[0]
+                req = next((r for r in env.requests if r["rid"] == rid), None)
+                if method == "GET" and not url.endswith("/status") and req and req["url"].endswith(_LR_ENDPOINT) \
+                        and req["kind"] == "real":
+                    raise VpocError("fal.poll", "HTTP422", likeness_raw, 502)  # Seedance 실사는 늘 likeness 거절 → 컷 단위 Kling
+                return base_fal(method, url, payload, where=where)
+
+            env.set(env.falmod, "_request", fal_request)
+            client = env.client()
+            two = [{"id": "s1", "cutIds": ["c1"], "seconds": 4}, {"id": "s2", "cutIds": ["c2"], "seconds": 8}]
+
+            def run(pid: str) -> dict:
+                env.make_plan(pid, two)
+                client.post(f"/api/vnew/p/{pid}/generate", json={"confirmUsd": genmod.estimate(env.plan(pid))["totalUsd"]})
+                g = env.drive(pid)
+                anime_key = str(g["units"][0]["webtoon"].get("outputKey") or "")
+                since, led0, s0, l0, c0 = len(env.requests), len(env.ledger), len(stills), len(layout_calls), len(check_calls)
+                client.post(f"/api/vnew/p/{pid}/generate/real", json={"confirmUsd": genmod.real_estimate(env.gen(pid))["usd"]})
+                g = env.drive(pid)
+                charges = env.ledger[led0:]
+                anime = env.store.blobs.get(anime_key, b"CLIP:" + anime_key.encode())
+                return {"g": g, "stills": stills[s0:], "layouts": layout_calls[l0:], "checks": check_calls[c0:],
+                        "klings": [r["payload"] for r in env.requests[since:] if r["url"].endswith("/" + kling)],
+                        "cuts": (g["units"][0]["real"].get("fallback") or {}).get("cuts") or [],
+                        "images": [c for c in charges if c.get("kind") == "image"], "texts": [c for c in charges if c.get("text")],
+                        "f0": fake_frame(anime, 0.0), "f4": fake_frame(anime, 4.0)}
+
+            def start_image(body: dict) -> bytes:
+                try:
+                    return _b64.b64decode(str(body.get("start_image_url")).split(",", 1)[1])
+                except Exception:  # noqa: BLE001
+                    return b""
+
+            layouts["c1"] = lay("CU", (ea, "center", "face"), (eb, "left", "none"))
+            layouts["c2"] = lay("MS", (ea, "left", "face"), (eb, "right", "face"))
+
+            # ================= (st-b) 검사 끔 =================
+            r = run("prj_st_b")
+            refs = [s["refs"] for s in r["stills"]]
+            if refs != [[r["f0"], b"RF1"], [r["f4"], b"LOC-RB", b"RF2", b"RF1"]]:
+                bad.append(f"(st-b) refs 가 c1 [애니, 정면 1]·c2 [애니, 시트, 정면 2] 가 아닙니다: {refs}")
+            p1, p2 = (s["prompt"] for s in r["stills"]) if len(r["stills"]) == 2 else ("", "")
+            if "Exactly 1 person in frame: 에이 (center); no other people." not in p1 or "do not zoom out" not in p1 \
+                    or eb in p1 or "Image 2's place" in p1 or "Image 2" not in p1:
+                bad.append(f"(st-b) c1 CU 시작 그림 문장이 다릅니다: {p1!r}")
+            if genmod.REAL_STILL_BACKGROUND_PLACE.format(no=2) not in p2 or old_bg in p2 \
+                    or "Exactly 2 people in frame: 에이 (left); 비 (right); no other people." not in p2:
+                bad.append(f"(st-b) c2 MS 시작 그림 문장이 다릅니다: {p2!r}")
+            if len(r["layouts"]) != 2 or any(ea not in q["text"] or eb not in q["text"] for q in r["layouts"]) \
+                    or [q["img"] for q in r["layouts"]] != [r["f0"], r["f4"]] \
+                    or any(q["model"] != genmod.plan_mod._script_model() for q in r["layouts"]):  # noqa: SLF001
+                bad.append(f"(st-b) 애니 프레임 읽기 입력(프레임·인물 이름·대본 모델)이 다릅니다: {r['layouts']}")
+            if r["checks"] or len(r["images"]) != 2 or len(r["texts"]) != 2 or len(r["klings"]) != 2:
+                bad.append(f"(st-b) 끔인데 시작 그림 검사 vision 이 있거나 원장(그림 2·텍스트 2)·Kling 2 가 다릅니다: "
+                           f"{len(r['checks'])} {len(r['images'])} {len(r['texts'])} {len(r['klings'])}")
+            if [c.get("animeLayout", {}).get("shotSize") for c in r["cuts"]] != ["CU", "MS"] \
+                    or any("stillCheck" in c for c in r["cuts"]):
+                bad.append(f"(st-b) 컷 기록 animeLayout·stillCheck 가 다릅니다: {r['cuts']}")
+            if any(genmod.REAL_CUT_KEEP_FRAMING not in str(k.get("prompt")) for k in r["klings"]) \
+                    or [start_image(k) for k in r["klings"]] != [b"STILL-c1-0", b"STILL-c2-0"]:
+                bad.append("(st-b) Kling 프롬프트에 구도 유지 구절이 없거나 시작 그림이 다릅니다")
+
+            # ================= (st-c) 검사 켬 =================
+            verdicts.clear()
+            verdicts[b"STILL-c1-0"] = {"shotSize": "MS", "note": "wider than close-up"}  # CU → MS 두 단계: 틀림
+            verdicts[b"STILL-c1-1"] = {"shotSize": "MCU"}  # 한 단계: 맞음
+            verdicts[b"STILL-c2-0"] = {"shotSize": "MS", "count": 3, "sideMatch": False, "note": "3 people vs 2"}
+            verdicts[b"STILL-c2-1"] = {"shotSize": "MS", "count": 2, "sideMatch": False, "note": "sides swapped"}
+            with _pin_vnew(VNEW_REAL_STILL_CHECK=True):
+                r = run("prj_st_c")
+            refs = [s["refs"] for s in r["stills"]]
+            want = [[r["f0"], b"RF1"], [r["f0"], b"RF1"], [r["f4"], b"LOC-RB", b"RF2", b"RF1"], [r["f4"], b"RF2", b"RF1"]]
+            if refs != want or [s["out"] for s in r["stills"]] != [b"STILL-c1-0", b"STILL-c1-1", b"STILL-c2-0", b"STILL-c2-1"]:
+                bad.append(f"(st-c) 시작 그림 4장(두 번째는 시트 없이 [애니 + 정면])이 아닙니다: {refs}")
+            if len(r["stills"]) == 4:
+                q1, q2 = r["stills"][1]["prompt"], r["stills"][3]["prompt"]
+                if "FIX: keep exactly Image 1's shot size (close-up)" not in q1 \
+                        or "FIX: show exactly 2 people (에이, 비) and no one else; keep each person on the same side" not in q2 \
+                        or "Image 2's place" in q2 or "must match Image" in q2 or "LOCATION: A closed principal's office." not in q2 \
+                        or f"{eb} in Image 1 has the face and hair of the real person in Image 2" not in q2 \
+                        or f"{ea} in Image 1 has the face and hair of the real person in Image 3" not in q2 \
+                        or not q2.endswith("\n" + genmod.REAL_STILL_LOOK + "."):
+                    bad.append(f"(st-c) 두 번째 시작 그림 문장(교정·시트 없음·번호)이 다릅니다: {q1!r} {q2!r}")
+            if [start_image(k) for k in r["klings"]] != [b"STILL-c1-1", b"STILL-c2-1"] \
+                    or [env.store.blobs.get(str(c.get("stillKey"))) for c in r["cuts"]] != [b"STILL-c1-1", b"STILL-c2-1"]:
+                bad.append(f"(st-c) Kling 시작 그림·start.jpg 가 고른 두 번째 그림이 아닙니다: "
+                           f"{[start_image(k) for k in r['klings']]}")
+            got = [c.get("stillCheck") for c in r["cuts"]]
+            want_c = [{"ok": True, "items": [], "note": "", "retried": True, "firstItems": ["shot"], "used": "retry"},
+                      {"ok": False, "items": ["side"], "note": "sides swapped", "retried": True, "firstItems": ["count", "side"],
+                       "used": "retry"}]
+            if got != want_c:
+                bad.append(f"(st-c) 컷 기록 stillCheck 가 다릅니다: {got}")
+            if len(r["checks"]) != 4 or any(q["imgs"][0] != f for q, f in zip(r["checks"], (r["f0"], r["f0"], r["f4"], r["f4"]))) \
+                    or "Image 1 reading: shot size CU (close-up); 1 person: 에이 center." not in r["checks"][0]["text"]:
+                bad.append(f"(st-c) 시작 그림 검사 입력(애니 프레임·시작 그림·읽기 글)이 다릅니다: "
+                           f"{[(q['imgs'][0][-6:], q['imgs'][1], q['text'][-90:]) for q in r['checks']]}")
+            if len(r["images"]) != 4 or len(r["texts"]) != 6 or len(r["klings"]) != 2:
+                bad.append(f"(st-c) 원장(그림 4·텍스트 6)·Kling 2 가 다릅니다: {len(r['images'])} {len(r['texts'])} {len(r['klings'])}")
+
+            # ================= (st-d) 읽기 실패 → 138 과 같다 =================
+            def boom(blocks, *, model):
+                raise RuntimeError("vision down")
+
+            env.set(genmod, "_read_anime_layout", boom)
+            with _pin_vnew(VNEW_REAL_STILL_CHECK=True):
+                r = run("prj_st_d")
+            refs = [s["refs"] for s in r["stills"]]
+            if refs != [[r["f0"], b"LOC-RB", b"RF2", b"RF1"], [r["f4"], b"LOC-RB", b"RF2", b"RF1"]] \
+                    or any(old_bg not in s["prompt"] or "Keep Image 1's exact framing" in s["prompt"] or "Exactly" in s["prompt"]
+                           for s in r["stills"]) \
+                    or r["checks"] or len(r["texts"]) != 0 or any("animeLayout" in c or "stillCheck" in c for c in r["cuts"]):
+                bad.append(f"(st-d) 읽기 실패인데 138 과 다릅니다: {refs} checks {len(r['checks'])} texts {len(r['texts'])}")
+            if llm_calls:
+                bad.append(f"가짜가 아닌 LLM 호출: {llm_calls}")
+    except Exception:  # noqa: BLE001
+        bad.append("작업 139 검사 예외\n" + _tb.format_exc())
+    if bad:
+        fail("작업 139 실사 시작 그림 구도 검사 실패\n  " + "\n  ".join(bad))
+    else:
+        ok("작업 139 실사 시작 그림 구도 (st-a)CU 구도 고정·Exactly 1·안 보이는 인물 이름 0·160자·back 문장·MS Image 2 문장·"
+           "layout 없음 138 sha (st-b)CU [애니, 정면]·MS [애니, 시트, 정면 2]·끔 검사 0 (st-c)틀림→맞음·(2,1) 두 번째·시트 없음·"
+           "원장 그림 4·텍스트 6 (st-d)읽기 실패 = 138 (st-e)Kling 구절·애니 sha 그대로")
+
+
 def main() -> int:
     print("== vpoc1 check ==")
     check_compileall()
@@ -48942,6 +49266,7 @@ def main() -> int:
     check_vnew_real_brief_136()
     check_vnew_real_brief_137()
     check_vnew_real_brief_138()
+    check_vnew_real_still_139()
     check_vnew_plan_step_stay_129()
     check_pod_zones()
     print()

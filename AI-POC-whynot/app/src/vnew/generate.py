@@ -54,6 +54,7 @@ from . import previz_schema
 from . import settings as vnew_settings
 # 지시서 117: 속마음 대사 판정은 prompts.is_thought 한 곳(순수 모듈)에서만 한다.
 from .prompts import is_thought as _is_thought
+from .prompts import STILL_SHOT_SIZES as _SHOT_SIZES
 
 log = logging.getLogger("vpoc")
 
@@ -4520,6 +4521,20 @@ REAL_STILL_BACKGROUND = ("Background and location must match Image {no} exactly 
 REAL_STILL_BACKGROUND_ONLY = ("Background and location must match Image 1 exactly (same buildings, railing, street, "
                               "time of day).")
 REAL_STILL_NO_PHOTO_CLOTHES = "Do not copy the default clothes worn in the cast photos (such as a plain white shirt)."
+# 작업 139: 애니 프레임 읽기(animeLayout)가 있을 때 시작 그림 문장. 맨 앞 = 구도 고정, MS 이상의 시트 뷰 문장 = 보이는 배경만.
+REAL_STILL_FRAMING = ("Keep Image 1's exact framing and shot size ({shot}): do not zoom out, do not add people, "
+                      "do not show more background than Image 1.")
+REAL_STILL_BACKGROUND_PLACE = ("Match Image {no}'s place (buildings, railing, light) only where Image 1 shows background; "
+                               "framing comes from Image 1.")
+SHOT_SIZE_EN = {"ECU": "extreme close-up", "CU": "close-up", "MCU": "medium close-up", "MS": "medium shot",
+                "MLS": "medium long shot", "LS": "long shot"}
+REAL_STILL_CLOSE = ("ECU", "CU", "MCU")  # 이 샷이면 공간 시트 뷰를 참고로 넣지 않는다(배경은 애니 프레임)
+REAL_STILL_TIGHT = ("ECU", "CU")  # 이 샷이면 SHOT·BLOCKING·SETTING 을 160자로(넓은 장소 묘사가 구도를 끌어간다)
+REAL_STILL_BRIEF_TIGHT = 160
+REAL_STILL_SHOWN = ("face", "partial")  # 정면 사진을 참고로 넣는 visible
+# 작업 139: 컷 단위 Kling 실사 프롬프트 고정 구절(머리, 줄이기에서 빠지지 않는다).
+REAL_CUT_KEEP_FRAMING = ("Keep the start frame's framing and shot size; the camera does not pull back; "
+                         "no new person enters the frame.")
 _CEL_WORDS = re.compile(r"\bcel(?:[- ]shad\w*)?\b", re.IGNORECASE)
 # 콘티 shotKo(한국어 샷 이름) → 영어. 앞에 있는 긴 이름이 먼저(익스트림 클로즈업 ⊃ 클로즈업).
 _SHOT_KO_EN = (
@@ -4809,8 +4824,38 @@ def _cut_location_view(plan: dict, cut_id: str) -> tuple[bytes, str] | None:
     return None
 
 
+def _layout_listed(layout: dict | None) -> list[tuple[str, str, str]]:
+    """작업 139: 애니 프레임 읽기에서 화면에 있는 인물 [(이름, side, visible)] — visible face·partial·back, 왼쪽 → 오른쪽."""
+    order = {"left": 0, "center": 1, "right": 2}
+    rows = [(str(p.get("name") or ""), str(p.get("side") or "center"), str(p.get("visible") or "none"))
+            for p in (layout or {}).get("people") or [] if isinstance(p, dict)]
+    rows = [r for r in rows if r[0] and r[2] in (*REAL_STILL_SHOWN, "back")]
+    return sorted(rows, key=lambda r: order.get(r[1], 1))
+
+
+def _layout_people_sentence(listed: list[tuple[str, str, str]]) -> str:
+    """작업 139: "Exactly N person(s) in frame: 이름 (side)…; no other people." 좌우는 애니 프레임 기준. back 은 사진 없이 문장만."""
+    if not listed:
+        return "No people in frame; do not add any person."
+    who = "; ".join(f"{name} ({side}{', seen from behind, face not visible' if visible == 'back' else ''})"
+                    for name, side, visible in listed)
+    count = len(listed)
+    return f"Exactly {count} {'person' if count == 1 else 'people'} in frame: {who}; no other people."
+
+
+def _drop_named(text: str, names) -> str:
+    """작업 139: 문장(; 로 나뉜 절 포함) 가운데 names(한글·로마자 표기, _brief_name_forms)가 든 것을 뺀다. 화면에 없는 인물 이름 빼기."""
+    aliases = {n: _brief_name_forms(n) for n in names if str(n or "").strip()}
+    if not aliases or not text:
+        return text
+    kept = [s for s in re.split(r"(?<=[.!?;])\s+", str(text).strip()) if s and not _brief_name_hits(s, aliases)]
+    joined = " ".join(kept)
+    return joined[:-1] + "." if joined.endswith(";") else joined
+
+
 def _cut_still_prompt(plan: dict, cut: dict, people: list[tuple[str, str, int]], has_frame: bool, *,
-                      source: str = "previz", outfits: dict | None = None, background_no: int = 0) -> str:
+                      source: str = "previz", outfits: dict | None = None, background_no: int = 0,
+                      layout: dict | None = None, fix: str = "") -> str:
     """컷 시작 그림(Seedream) 문장: 장면·인물 위치·카메라 + photoreal. people = [(색, 이름, 이미지 번호)].
 
     작업 132: source="anime"(Image 1 = 같은 gen 애니 테이크 결과의 그 컷 첫 프레임)이면 Image 1 의 구도·카메라·인물 위치·
@@ -4818,12 +4863,26 @@ def _cut_still_prompt(plan: dict, cut: dict, people: list[tuple[str, str, int]],
     마네킹 문장 + 장소(배경 문장)를 넣는다. 그림 낱말·cel 은 고정 구절(REAL_STILL_LOOK) 밖에 넣지 않는다.
     작업 135: background_no(공간 시트 실사 뷰의 이미지 번호, 0 = 없음)면 배경은 그 그림을 따른다(REAL_STILL_BACKGROUND).
     대본·콘티의 옷(outfits = {이름: 장면 의상})과 사진 옷을 따르지 말라는 구절은 언제나, 끝은 REAL_STILL_LOOK.
+    작업 139: layout(애니 프레임 읽기, source="anime" 일 때만)이 있으면 맨 앞 = 구도 고정(REAL_STILL_FRAMING), 인물 문장
+    "Exactly N …"(back 은 문장만), 화면에 없는 인물 이름은 문장에서 뺀다. 시트 뷰가 있으면 REAL_STILL_BACKGROUND_PLACE, 없으면
+    짧은 LOCATION 1구절. ECU·CU 면 SHOT·BLOCKING·SETTING 160자. fix(시작 그림 검사 교정 문장)는 끝 구절 앞. layout 이 없고
+    fix 가 없으면 138 과 글자 하나 다르지 않다.
     """
     cut_id = str(cut.get("cutId") or "")
     brief = _cut_brief(plan, cut_id)
     conti_cut = next((c for c in (plan.get("conti") or {}).get("cuts") or [] if str(c.get("id")) == cut_id), {})
     anime = has_frame and source == "anime"
-    parts = ["Photoreal live-action film still, 16:9, a single frame of a Korean drama."]
+    layout = layout if anime and isinstance(layout, dict) and layout.get("shotSize") else None
+    shot = str((layout or {}).get("shotSize") or "")
+    listed = _layout_listed(layout)
+    hidden: set[str] = set()
+    if layout:
+        known = {str(p.get("name") or "") for p in layout.get("people") or [] if isinstance(p, dict)}
+        known |= {str(a.get("name") or "") for a in _segment_actors(plan, {"cutIds": [cut_id]})}
+        known |= {str(ch.get("name") or "") for ch in conti_cut.get("characters") or [] if isinstance(ch, dict)}
+        hidden = {n for n in known if n.strip()} - {name for name, _side, _visible in listed}
+    parts = [REAL_STILL_FRAMING.format(shot=SHOT_SIZE_EN.get(shot, shot))] if layout else []
+    parts.append("Photoreal live-action film still, 16:9, a single frame of a Korean drama.")
     if anime:
         parts.append("Image 1 is this exact shot: redraw Image 1 as a photoreal live-action frame with the same composition, "
                      "camera angle, framing, lens, character positions and poses, "
@@ -4833,6 +4892,8 @@ def _cut_still_prompt(plan: dict, cut: dict, people: list[tuple[str, str, int]],
             parts.append("FACES: " + "; ".join(f"{name} in Image 1 has the face and hair of the real person in Image {no}"
                                                for _color, name, no in people)
                          + ". Take only faces from those photos; clothing comes from Image 1.")
+        if layout:
+            parts.append(_layout_people_sentence(listed))
     else:
         if has_frame:
             parts.append("Image 1 is a rough 3D previz frame: keep its camera angle, framing, lens, positions and poses exactly; "
@@ -4841,12 +4902,18 @@ def _cut_still_prompt(plan: dict, cut: dict, people: list[tuple[str, str, int]],
             parts.append("CAST: " + "; ".join(f"the {color} mannequin is {name}, the real person in Image {no}"
                                               for color, name, no in people) + ".")
     if background_no:
-        parts.append(REAL_STILL_BACKGROUND.format(no=background_no) if has_frame and background_no > 1
-                     else REAL_STILL_BACKGROUND_ONLY)
+        if layout and background_no > 1:
+            parts.append(REAL_STILL_BACKGROUND_PLACE.format(no=background_no))
+        else:
+            parts.append(REAL_STILL_BACKGROUND.format(no=background_no) if has_frame and background_no > 1
+                         else REAL_STILL_BACKGROUND_ONLY)
     worn = []
     # 작업 136: 장면 옷 = 콘티 → 대본 → outfits(웹툰 패널 읽기) 순(_scene_outfits). 지시서 문장은 _real_brief_text 를 지난다.
     scene_outfits = _scene_outfits(plan, [cut_id], outfits or {})
-    for _color, name, _no in people:
+    worn_names = [name for _color, name, _no in people]
+    if layout:  # 작업 139: 뒷모습 인물도 옷은 보인다
+        worn_names += [name for name, _side, visible in listed if visible == "back" and name not in worn_names]
+    for name in worn_names:
         costume = _scene_outfit_text(scene_outfits.get(name) or (outfits or {}).get(name))
         if costume:
             worn.append(f"{name} wears {costume}")
@@ -4855,11 +4922,24 @@ def _cut_still_prompt(plan: dict, cut: dict, people: list[tuple[str, str, int]],
     parts.append(REAL_STILL_NO_PHOTO_CLOTHES)
     if not anime:
         parts.append("LOCATION: " + _background_en(plan, str(conti_cut.get("locationEn") or ""), real=True) + ".")
+    elif layout and not background_no:
+        place = _clip_words(_real_words(conti_cut.get("locationEn")), 80).rstrip(" .")
+        if place:
+            parts.append("LOCATION: " + place + ".")
+    tight = REAL_STILL_BRIEF_TIGHT if shot in REAL_STILL_TIGHT else 0
     for label, text in (("SHOT", brief.get("shotEn")), ("BLOCKING", brief.get("blockingEn"))):
         cleaned = _real_brief_text(text, scene_outfits)
+        if layout:
+            cleaned = _drop_named(cleaned, hidden)
+        if tight:
+            cleaned = _clip_words(cleaned, tight)
         if cleaned:
             parts.append(f"{label}: {cleaned}")
-    scene = _scene_summary(_real_brief_text(_scene_brief_text(plan, cut).strip(), scene_outfits), 300)
+    if layout:
+        scene = _scene_summary(_drop_named(_real_brief_text(_scene_brief_text(plan, cut).strip(), scene_outfits), hidden),
+                               tight or 300)
+    else:
+        scene = _scene_summary(_real_brief_text(_scene_brief_text(plan, cut).strip(), scene_outfits), 300)
     if scene:
         parts.append("SETTING: " + scene)
     if anime:
@@ -4867,6 +4947,8 @@ def _cut_still_prompt(plan: dict, cut: dict, people: list[tuple[str, str, int]],
                      "shading. No text, no subtitles, no speech bubbles.")
     else:
         parts.append("Natural skin texture, realistic lighting and shadows, photoreal. No text, no subtitles, no speech bubbles.")
+    if fix:
+        parts.append(fix.strip())
     parts.append(REAL_STILL_LOOK + ".")  # 작업 135: 실사 그림체 고정 구절(끝)
     return "\n".join(parts)
 
@@ -4994,6 +5076,181 @@ def _real_cut_ctx(owner: str, pid: str, plan: dict, take: dict, endpoint: str, c
     }
 
 
+# ---------------------------------------------------------------- 작업 139: 애니 프레임 읽기·시작 그림 검사(Kling 전, 값쌈)
+# 컷 단위 Kling 실사에서 시작 그림(Seedream)이 애니 프레임과 구도가 다르면 Kling 이 고칠 수 없다(다시 만들어도 같은 시작 그림).
+# 애니 프레임을 대본 분석 모델(Claude, _judge_real_cut 과 같은 _converse 경로)로 1번 읽어 샷 크기·보이는 인물을 받고, 시작 그림을
+# 애니 프레임과 나란히 1번 비교한다. 원장은 vision 호출마다 plan._charge(charge_text), Seedream 장마다 _charge_cut_still.
+REAL_STILL_CHECK_ITEMS = ("shot", "count", "side", "animeStyle")
+
+
+def _read_anime_layout(blocks: list[dict], *, model: str) -> tuple[dict, dict]:
+    """llm._converse 로 emit_anime_layout 을 받는다. (payload, usage{..model}). 검사가 가짜로 바꾼다."""
+    from .prompts import ANIME_LAYOUT_SYSTEM, EMIT_ANIME_LAYOUT  # noqa: PLC0415
+
+    return vpoc_llm._converse(  # noqa: SLF001 — 공개 래퍼가 없어 내부 함수를 쓴다
+        system_text=ANIME_LAYOUT_SYSTEM, blocks=blocks, tool=EMIT_ANIME_LAYOUT, max_tokens=500,
+        where="vnew.generate.anime_layout", model=model,
+    )
+
+
+def _read_still_check(blocks: list[dict], *, model: str) -> tuple[dict, dict]:
+    """llm._converse 로 emit_still_check 를 받는다. (payload, usage{..model}). 검사가 가짜로 바꾼다."""
+    from .prompts import EMIT_STILL_CHECK, STILL_CHECK_SYSTEM  # noqa: PLC0415
+
+    return vpoc_llm._converse(  # noqa: SLF001 — 공개 래퍼가 없어 내부 함수를 쓴다
+        system_text=STILL_CHECK_SYSTEM, blocks=blocks, tool=EMIT_STILL_CHECK, max_tokens=400,
+        where="vnew.generate.still_check", model=model,
+    )
+
+
+def _shot_size(value) -> str:
+    """샷 크기 약어(prompts.STILL_SHOT_SIZES 안), 아니면 ""."""
+    text = str(value or "").strip().upper()
+    return text if text in _SHOT_SIZES else ""
+
+
+def _anime_frame_layout(owner: str, pid: str, gen_id: str, plan: dict, cut_id: str, frame: bytes | None,
+                        names) -> dict | None:
+    """애니 프레임 1장을 1번 읽는다 → {shotSize, people[{name, side, visible}], count}. 실패·샷 크기 모름이면 None(138 과 같게).
+
+    names = 컷 등장인물 이름(그 이름으로만 받는다. 로마자로 와도 그 이름으로 맞춘다). 답에 없는 이름은 visible none.
+    """
+    names = [n for n in dict.fromkeys(str(n or "").strip() for n in names or []) if n]
+    if not frame:
+        return None
+    blocks = [{"text": "Image 1 (anime frame of this shot):"}, {"image": {"format": "jpeg", "source": {"bytes": _fit_ref(frame)}}},
+              {"text": "Cast names in this shot (use exactly these names): " + (", ".join(names) or "(none)") + "."}]
+    model = str(plan_mod._script_model())  # noqa: SLF001 — 대본 분석과 같은 모델 체인
+    try:
+        payload, usage = _read_anime_layout(blocks, model=model)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("vnew.gen.anime_layout_failed pid=%s cut=%s err=%s", pid, cut_id, _msg(exc))
+        return None
+    plan_mod._charge(owner, pid, gen_id, usage or {}, str((usage or {}).get("model") or model))  # noqa: SLF001
+    payload = payload if isinstance(payload, dict) else {}
+    shot = _shot_size(payload.get("shotSize"))
+    if not shot:
+        log.warning("vnew.gen.anime_layout_bad pid=%s cut=%s shot=%s", pid, cut_id, str(payload.get("shotSize"))[:20])
+        return None
+    alias = {form.lower(): name for name in names for form in _brief_name_forms(name)}
+    got: dict[str, dict] = {}
+    for item in payload.get("people") or []:
+        if not isinstance(item, dict):
+            continue
+        name = alias.get(str(item.get("name") or "").strip().lower())
+        if not name or name in got:
+            continue
+        side = str(item.get("side") or "").strip().lower()
+        visible = str(item.get("visible") or "").strip().lower()
+        got[name] = {"name": name, "side": side if side in ("left", "center", "right") else "center",
+                     "visible": visible if visible in (*REAL_STILL_SHOWN, "back", "none") else "none"}
+    people = [got.get(n) or {"name": n, "side": "center", "visible": "none"} for n in names]
+    try:
+        count = max(0, int(payload.get("count")))
+    except (TypeError, ValueError):
+        count = sum(1 for p in people if p["visible"] != "none")
+    layout = {"shotSize": shot, "people": people, "count": count}
+    log.info("vnew.gen.anime_layout pid=%s cut=%s shot=%s people=%s", pid, cut_id, shot,
+             ",".join(f"{p['name']}:{p['side']}:{p['visible']}" for p in people) or "none")
+    return layout
+
+
+def _layout_reading(layout: dict) -> str:
+    """시작 그림 검사에 주는 Image 1 읽기 글(샷 크기·화면 인물·좌우)."""
+    shot = str(layout.get("shotSize") or "")
+    listed = _layout_listed(layout)
+    who = "; ".join(f"{name} {side}" + (" (from behind)" if visible == "back" else "") for name, side, visible in listed)
+    people = f"{len(listed)} {'person' if len(listed) == 1 else 'people'}: {who}" if listed else "no people"
+    return f"Image 1 reading: shot size {shot} ({SHOT_SIZE_EN.get(shot, shot)}); {people}."
+
+
+def _check_cut_still(owner: str, pid: str, gen_id: str, frame: bytes, still: bytes, layout: dict) -> dict | None:
+    """시작 그림을 애니 프레임과 나란히 vision 1번으로 비교한다 → {ok, items, note, shotSize, count} 또는 None(호출 실패).
+
+    items(REAL_STILL_CHECK_ITEMS 순): shot = 샷 크기가 두 단계 이상 다름(한 단계는 허용), count = 인물 수가 읽기와 다름,
+    side = 좌우가 다름, animeStyle = 그림 느낌. 기준(Image 1)은 애니 프레임 읽기(layout).
+    """
+    blocks = [{"text": "Image 1 (anime frame):"}, {"image": {"format": "jpeg", "source": {"bytes": _fit_ref(frame)}}},
+              {"text": "Image 2 (live-action start frame made from it):"},
+              {"image": {"format": "jpeg", "source": {"bytes": _fit_ref(still)}}},
+              {"text": _layout_reading(layout)}]
+    model = str(plan_mod._script_model())  # noqa: SLF001
+    try:
+        payload, usage = _read_still_check(blocks, model=model)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("vnew.gen.still_check_failed pid=%s err=%s", pid, _msg(exc))
+        return None
+    plan_mod._charge(owner, pid, gen_id, usage or {}, str((usage or {}).get("model") or model))  # noqa: SLF001
+    payload = payload if isinstance(payload, dict) else {}
+    want = _shot_size(layout.get("shotSize"))
+    shot = _shot_size(payload.get("shotSize"))
+    try:
+        count = max(0, int(payload.get("count")))
+    except (TypeError, ValueError):
+        count = None
+    wrong = {
+        "shot": bool(shot and want) and abs(_SHOT_SIZES.index(shot) - _SHOT_SIZES.index(want)) > 1,
+        "count": count is not None and count != len(_layout_listed(layout)),
+        "side": payload.get("sideMatch") is not None and not _flag(payload.get("sideMatch")),
+        "animeStyle": payload.get("animeStyle") is not None and _flag(payload.get("animeStyle")),
+    }
+    items = [i for i in REAL_STILL_CHECK_ITEMS if wrong[i]]
+    return {"ok": not items, "items": items, "note": " ".join(str(payload.get("note") or "").split())[:80],
+            "shotSize": shot, "count": count}
+
+
+def _still_fix(items, layout: dict) -> str:
+    """시작 그림 검사의 틀린 항목 → Seedream 교정 문장 1개("FIX: …."). 그림 낱말은 쓰지 않는다. 항목이 없으면 ""."""
+    shot = str(layout.get("shotSize") or "")
+    listed = _layout_listed(layout)
+    names = ", ".join(name for name, _side, _visible in listed)
+    pieces = []
+    if "shot" in (items or []):
+        pieces.append(f"keep exactly Image 1's shot size ({SHOT_SIZE_EN.get(shot, shot)}) and crop, do not zoom out")
+    if "count" in (items or []):
+        pieces.append(f"show exactly {len(listed)} {'person' if len(listed) == 1 else 'people'} ({names}) and no one else"
+                      if listed else "show no people")
+    if "side" in (items or []) and listed:
+        pieces.append("keep each person on the same side as in Image 1 ("
+                      + ", ".join(f"{name} {side}" for name, side, _visible in listed) + ")")
+    if "animeStyle" in (items or []):
+        pieces.append("make it a real photograph with real skin, real hair and real fabric")
+    return "FIX: " + "; ".join(pieces) + "." if pieces else ""
+
+
+def _retry_better(first_items, retry_items) -> bool:
+    """작업 135 규칙(실사 컷 QA·시작 그림 검사 같이 씀): 다시 만든 것을 쓰는가. 다시 만든 것 검사가 안 됐거나(None) 맞았거나
+    틀린 항목이 첫 것보다 적으면 True, 같거나 많으면 False(첫 것)."""
+    return retry_items is None or not retry_items or len(retry_items) < len(first_items or [])
+
+
+def _checked_cut_still(owner: str, pid: str, gen_id: str, plan: dict, cut: dict, ctx: dict, *, frame: bytes, still: bytes,
+                       layout: dict, refs: list[bytes], people: list[tuple[str, str, int]], background_no: int,
+                       charge_key: str) -> tuple[bytes, dict]:
+    """시작 그림 검사(_check_cut_still) → 틀리면 Seedream 만 1번 다시(시트 뷰 없이 [애니 프레임 + 보이는 인물 정면], 교정 문장).
+
+    둘 다 틀리면 틀린 항목이 적은 쪽(_retry_better, 같으면 첫 것). 돌려주는 값 = (쓸 시작 그림, 컷 기록 stillCheck
+    {ok, items, note, retried, firstItems, used}). 검사가 안 되면 첫 그림 그대로(ok None).
+    """
+    first = _check_cut_still(owner, pid, gen_id, frame, still, layout)
+    if first is None or first["ok"]:
+        return still, {"ok": None if first is None else True, "items": [], "note": (first or {}).get("note", ""),
+                       "retried": False, "firstItems": [], "used": "first"}
+    refs2 = [ref for no, ref in enumerate(refs, 1) if no != background_no]
+    people2 = [(color, name, no - 1 if background_no and no > background_no else no) for color, name, no in people]
+    prompt2 = _cut_still_prompt(plan, cut, people2, True, source="anime", outfits=ctx["outfits"], background_no=0,
+                                layout=layout, fix=_still_fix(first["items"], layout))
+    still2 = _seedream(prompt2, refs2, size=vpoc_seedream.SIZE)
+    del refs2
+    _charge_cut_still(owner, pid, gen_id, f"{charge_key}-{secrets.token_hex(3)}")
+    second = _check_cut_still(owner, pid, gen_id, frame, still2, layout)
+    use_retry = _retry_better(first["items"], None if second is None else second["items"])
+    final = (second or {"ok": None, "items": [], "note": ""}) if use_retry else first
+    record = {"ok": final["ok"], "items": list(final["items"]), "note": final["note"], "retried": True,
+              "firstItems": list(first["items"]), "used": "retry" if use_retry else "first"}
+    return (still2 if use_retry else still), record
+
+
 def _submit_real_cut(owner: str, pid: str, gen_id: str, plan: dict, ctx: dict, cut: dict, *, fix: str = "",
                      tag: str = "") -> dict:
     """컷 1개: 시작 그림(Seedream) 1장 + Kling 1번 제출(작업 132). 원장은 시작 그림·Kling 제출 성공 때. 돌려주는 값 = 칸 fallback.cuts 항목.
@@ -5002,6 +5259,9 @@ def _submit_real_cut(owner: str, pid: str, gen_id: str, plan: dict, ctx: dict, c
     작업 131: 시작 그림을 출력 접두사 아래 start.jpg 로 남기고(stillKey, 실패해도 제출은 한다) 보낸 프롬프트를 promptEn·promptBytes 로,
     제출을 컷 칸("테이크id#컷id", tag 없음) 기록 한 줄(_log_attempt)로 남긴다. 다시 만들기는 같은 칸에 한 줄 더, 접두사는 tag 꼬리.
     ctx["index"] = 테이크 index(기록 cellIndex).
+    작업 139: 애니 프레임 + 시트 뷰가 있으면 애니 프레임을 1번 읽어(_anime_frame_layout) 얼굴이 보이는 인물(face·partial) 정면만
+    참고로 넣고, ECU·CU·MCU 면 시트 뷰를 넣지 않는다. 시작 그림은 Kling 전에 검사하고(_checked_cut_still, VNEW_REAL_STILL_CHECK)
+    틀리면 Seedream 만 1번 다시. 컷 기록 animeLayout·stillCheck. 읽기 실패(None)면 138 과 같다.
     """
     endpoint, caps, take_id, attempt = ctx["endpoint"], ctx["caps"], ctx["takeId"], ctx["attempt"]
     cut_id = str(cut.get("cutId") or "")
@@ -5023,13 +5283,20 @@ def _submit_real_cut(owner: str, pid: str, gen_id: str, plan: dict, ctx: dict, c
     refs = [_fit_ref(frame)] if frame else []
     # 작업 135: 공간 시트 실사 뷰(배경 기준) = 프레임 다음(Image 2). 없으면 지금과 같다.
     sheet = _cut_location_view(plan, cut_id)
+    actors = _segment_actors(plan, cut)
+    # 작업 139: 애니 프레임 + 시트 뷰가 있으면 애니 프레임을 1번 읽는다(샷 크기·보이는 인물). 실패(None)면 138 과 같다.
+    layout = (_anime_frame_layout(owner, pid, gen_id, plan, cut_id, frame, [a.get("name") for a in actors])
+              if sheet is not None and source == "anime" and frame else None)
+    shown = {name: visible for name, _side, visible in _layout_listed(layout)} if layout else None
     background_no = 0
-    if sheet is not None:
+    if sheet is not None and not (layout and layout["shotSize"] in REAL_STILL_CLOSE):  # 작업 139: 가까운 샷은 시트 뷰 없음
         refs.append(_fit_ref(sheet[0]))
         background_no = len(refs)
     people: list[tuple[str, str, int]] = []
-    for actor in _segment_actors(plan, cut):
+    for actor in actors:
         name = str(actor.get("name") or "")
+        if shown is not None and shown.get(name) not in REAL_STILL_SHOWN:
+            continue  # 작업 139: 애니 프레임에 얼굴이 안 보이는 인물(back·none)은 정면 사진을 넣지 않는다
         pick = ctx["overrides"].get(name)
         char = _cast_entry(owner, pick["charId"], name) if pick else ctx["charById"].get(str(actor.get("charId") or ""))
         keys = _fallback_front_keys(char, pick["look"] if pick else "real") if char else []
@@ -5038,12 +5305,17 @@ def _submit_real_cut(owner: str, pid: str, gen_id: str, plan: dict, ctx: dict, c
             refs.append(_fit_ref(photo))
             people.append((str(actor.get("colorName") or "grey"), name or "a person", len(refs)))
     still = _seedream(_cut_still_prompt(plan, cut, people, frame is not None, source=source, outfits=ctx["outfits"],
-                                        background_no=background_no), refs,
+                                        background_no=background_no, layout=layout), refs,
                       size=vpoc_seedream.SIZE)
     sheet_view = sheet[1] if sheet else "none"
+    still_key_base = f"vnew-gen-{pid}-{gen_id}-{take_id}-{cut_id}{tag}"
+    _charge_cut_still(owner, pid, gen_id, f"{still_key_base}-still-{attempt}-{secrets.token_hex(3)}")
+    still_check = None
+    if layout and vnew_settings.VNEW_REAL_STILL_CHECK:  # 작업 139: Kling(비싼 단계) 전에 시작 그림 검사, 틀리면 Seedream 만 1번 다시
+        still, still_check = _checked_cut_still(owner, pid, gen_id, plan, cut, ctx, frame=frame, still=still, layout=layout,
+                                                refs=refs, people=people, background_no=background_no,
+                                                charge_key=f"{still_key_base}-still2-{attempt}")
     del frame, refs, sheet
-    _charge_cut_still(owner, pid, gen_id,
-                      f"vnew-gen-{pid}-{gen_id}-{take_id}-{cut_id}{tag}-still-{attempt}-{secrets.token_hex(3)}")
     ctx["stage"] = "submit"
     out_prefix = _seg_output_prefix(owner, pid, gen_id, f"{take_id}-real-{cut_id}{tag}", attempt)
     still_key = _keep_cut_still(pid, out_prefix, still)  # 작업 131: ⑦ AI로 고치기가 같은 시작 그림으로 다시 낸다
@@ -5067,11 +5339,19 @@ def _submit_real_cut(owner: str, pid: str, gen_id: str, plan: dict, ctx: dict, c
                  params={"seconds": round(float(cut.get("seconds") or 0), 3), "duration": duration, "startImage": "still"},
                  refs=[{"slot": "startImage", "key": still_key}], video_keys=[str(cut.get("recordingKey") or "")],
                  result={"invocationArn": arn, "outputPrefix": out_prefix}, prompt=sent_prompt)
-    log.info("vnew.gen.real_cut_submit pid=%s take=%s cut=%s endpoint=%s duration=%d refs=%d frame=%s sheet=%s%s", pid,
-             take_id, cut_id, endpoint, duration, len(people), source, sheet_view, " qa_retry=1" if tag else "")
-    return {"cutId": cut_id, "seconds": round(float(cut.get("seconds") or 0), 3), "duration": duration, "takeAt": take_at,
-            "status": "submitted", "invocationArn": arn, "outputPrefix": out_prefix, "outputKey": "", "error": "",
-            "promptEn": sent_prompt, "promptBytes": len(sent_prompt.encode("utf-8")), "stillKey": still_key}
+    extra = f" layout={layout['shotSize']}" if layout else ""
+    if still_check is not None:
+        extra += f" still={','.join(still_check['items']) or 'ok'}" + (" still_retry=1" if still_check["retried"] else "")
+    log.info("vnew.gen.real_cut_submit pid=%s take=%s cut=%s endpoint=%s duration=%d refs=%d frame=%s sheet=%s%s%s", pid,
+             take_id, cut_id, endpoint, duration, len(people), source, sheet_view, " qa_retry=1" if tag else "", extra)
+    record = {"cutId": cut_id, "seconds": round(float(cut.get("seconds") or 0), 3), "duration": duration, "takeAt": take_at,
+              "status": "submitted", "invocationArn": arn, "outputPrefix": out_prefix, "outputKey": "", "error": "",
+              "promptEn": sent_prompt, "promptBytes": len(sent_prompt.encode("utf-8")), "stillKey": still_key}
+    if layout:
+        record["animeLayout"] = layout  # 작업 139
+    if still_check is not None:
+        record["stillCheck"] = still_check
+    return record
 
 
 def _do_submit_real_cuts(owner: str, pid: str, gen_id: str, index: int, claim: str) -> None:
@@ -5238,7 +5518,7 @@ def _qa_real_cuts(owner: str, pid: str, gen_id: str, index: int, claim: str, pla
         first = cut.get("qaFirst") if isinstance(cut.get("qaFirst"), dict) else None
         if first is not None:
             first_items = list(first.get("items") or [])
-            if judge is None or not judge["items"] or len(judge["items"]) < len(first_items):
+            if _retry_better(first_items, None if judge is None else judge["items"]):
                 final = judge or {"ok": None, "items": [], "note": ""}
                 changes[number] = {"qa": {**final, "retried": True, "firstItems": first_items}}
             else:  # 다시 만든 것도 틀렸고 틀린 항목이 적지 않다 → 첫 결과(작업 135)
@@ -5276,7 +5556,8 @@ def _qa_real_cuts(owner: str, pid: str, gen_id: str, index: int, claim: str, pla
 
 
 # 작업 131·133: 첫 결과로 되돌릴 때 함께 되돌리는 컷 기록(⑦ AI로 고치기가 읽는 그 결과의 제출·프롬프트·시작 그림).
-_REAL_CUT_FIRST_KEYS = ("invocationArn", "outputPrefix", "promptEn", "promptBytes", "stillKey")
+# 작업 139: 그 시작 그림의 애니 프레임 읽기·시작 그림 검사도 함께.
+_REAL_CUT_FIRST_KEYS = ("invocationArn", "outputPrefix", "promptEn", "promptBytes", "stillKey", "animeLayout", "stillCheck")
 
 
 def _real_cut_first(first: dict) -> dict:
@@ -7434,7 +7715,7 @@ def _real_cut_prompt(plan: dict, seg: dict, *, model: str = "", prompt_max: int 
     """컷 단위 Kling 실사 프롬프트(작업 132, _segment_prompt real=True). 컷 1개.
 
     순서: 127 고정부(실사 화풍 + 같은 배경 문장, _fixed_head real) → 첫 프레임에서 이어 가기 → REAL_TAKE_STYLE(실사 통 테이크와
-    같은 문구) → SHOT(shotKo 영어, 없으면 샷 약어)·Camera(cameraEn) → ACTION(promptEn + 인물 actionEn, 실사 연기) →
+    같은 문구) → REAL_CUT_KEEP_FRAMING(작업 139, 구도 유지) → SHOT(shotKo 영어, 없으면 샷 약어)·Camera(cameraEn) → ACTION(promptEn + 인물 actionEn, 실사 연기) →
     DIALOGUE(컷 대사 그대로) → 자막 없음 → NEGATIVE(REAL_CUT_NEGATIVE). 머리·꼬리는 남기고 넘치면 가운데(샷~대사)만 문장
     경계에서 줄인다(UTF-8 바이트, 모델 상한 · prompt_max 중 작은 값). negative 구절 밖에는 webtoon·anime·illustration·cel 이 없다.
     """
@@ -7446,6 +7727,7 @@ def _real_cut_prompt(plan: dict, seg: dict, *, model: str = "", prompt_max: int 
         "Start from the first frame (a live-action still) and continue the action smoothly, keeping the "
         "same place, lighting, characters, positions and outfits.",
         REAL_TAKE_STYLE,
+        REAL_CUT_KEEP_FRAMING,  # 작업 139: 시작 그림 구도 유지(카메라가 물러나지 않고 새 인물이 들어오지 않는다)
     ])
     tail = "No text, no subtitles, no speech bubbles.\nNEGATIVE: " + REAL_CUT_NEGATIVE + "."
     if fix:  # 작업 133: QA 교정 문장 1개(줄이기에서 빠지지 않는다)

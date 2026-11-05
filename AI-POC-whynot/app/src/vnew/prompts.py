@@ -389,3 +389,89 @@ CUT_QA_SYSTEM = (
     + "\nnote: at most 80 characters, English, naming what differs (empty when everything matches). "
     "Call the emit_cut_qa tool exactly once."
 )
+
+
+# ---------------------------------------------------------------- 작업 139: 애니 프레임 구도 읽기(emit_anime_layout)·시작 그림 검사(emit_still_check)
+# generate._read_anime_layout / generate._read_still_check 가 쓴다. 샷 크기 눈금은 STILL_SHOT_SIZES 한 곳.
+STILL_SHOT_SIZES = ("ECU", "CU", "MCU", "MS", "MLS", "LS")
+SHOT_SIZE_SCALE = ("ECU = only part of the face (eyes, mouth); CU = the face fills the frame, head and neck; "
+                   "MCU = head and shoulders to the chest; MS = from the waist up; MLS = from the knees up; "
+                   "LS = the full body or wider.")
+LAYOUT_SIDES = ("left", "center", "right")
+LAYOUT_VISIBLE = ("face", "partial", "back", "none")
+
+EMIT_ANIME_LAYOUT = {
+    "name": "emit_anime_layout",
+    "description": "Report the shot size of the anime frame and where each cast member is in it.",
+    "inputSchema": {
+        "json": {
+            "type": "object",
+            "required": ["shotSize", "people", "count"],
+            "properties": {
+                "shotSize": {"type": "string", "enum": list(STILL_SHOT_SIZES)},
+                "people": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "required": ["name", "side", "visible"],
+                        "properties": {
+                            "name": {"type": "string"},
+                            "side": {"type": "string", "enum": list(LAYOUT_SIDES)},
+                            "visible": {"type": "string", "enum": list(LAYOUT_VISIBLE)},
+                        },
+                    },
+                },
+                "count": {"type": "integer", "minimum": 0},
+            },
+        }
+    },
+}
+
+ANIME_LAYOUT_SYSTEM = (
+    "You read one frame of an anime shot that will be remade as a live-action frame with the same framing. "
+    "Report:\n"
+    "- shotSize: " + SHOT_SIZE_SCALE + "\n"
+    "- people: one entry for each cast name given in the text, using exactly that name. side = where that person "
+    "is in the frame (left, center or right, as seen by the viewer). visible = face (the face is clearly seen), "
+    "partial (only part of the face or body is in frame, or a profile), back (seen from behind, the face is not "
+    "visible), none (not in this frame at all).\n"
+    "- count: the number of people seen in the frame (face, partial or back).\n"
+    "Call the emit_anime_layout tool exactly once."
+)
+
+STILL_CHECK_RULES = (
+    "- shotSize: the shot size of Image 2 on the same scale (" + ", ".join(STILL_SHOT_SIZES) + ").",
+    "- count: the number of people seen in Image 2 (face, partial or back view).",
+    "- sideMatch: false if any person in Image 2 is on a different side (left, center, right) than in Image 1, "
+    "or the left-right order of the people is swapped.",
+    "- animeStyle: true if Image 2 looks drawn anywhere (anime or cartoon outlines, cel shading, flat colors). "
+    "A real photograph is false.",
+)
+
+EMIT_STILL_CHECK = {
+    "name": "emit_still_check",
+    "description": "Report whether the live-action start frame keeps the framing of the anime frame.",
+    "inputSchema": {
+        "json": {
+            "type": "object",
+            "required": ["shotSize", "count", "sideMatch", "animeStyle", "note"],
+            "properties": {
+                "shotSize": {"type": "string", "enum": list(STILL_SHOT_SIZES)},
+                "count": {"type": "integer", "minimum": 0},
+                "sideMatch": {"type": "boolean"},
+                "animeStyle": {"type": "boolean"},
+                "note": {"type": "string", "maxLength": 80},
+            },
+        }
+    },
+}
+
+STILL_CHECK_SYSTEM = (
+    "You check a live-action start frame (Image 2) made from an anime frame (Image 1) of the same shot. Image 2 "
+    "must keep Image 1's framing: the same shot size and the same people on the same sides. Faces, the change "
+    "from drawing to photo and small pose differences are expected and are not errors. The text gives the shot "
+    "size and the people read from Image 1. Shot sizes: " + SHOT_SIZE_SCALE + " Report:\n"
+    + "\n".join(STILL_CHECK_RULES)
+    + "\nnote: at most 80 characters, English, naming what differs (empty when everything matches). "
+    "Call the emit_still_check tool exactly once."
+)
