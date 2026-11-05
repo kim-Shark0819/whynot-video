@@ -972,6 +972,48 @@ def _fallback_front_keys(entry, look: str) -> list[str]:
     return [key] if key else []
 
 
+# 작업 142: 실사 인물 참고 = 우리 AI 캐릭터 시트(실사 5방향 턴어라운드 1장) + 정면. 문장은 아래 빌더 1곳(Seedance ASSETS·시작 그림 FACES/CAST).
+REAL_SHEET_REF_SENTENCE = (
+    "{img} is {name}'s AI-generated character turnaround sheet (front, three-quarter, side, three-quarter back, back views "
+    "of the same fictional person): match face, hair, skin tone and body build from it; ignore its plain white background "
+    "and its clothes — clothing comes from the scene."
+)
+REAL_SHEET_FRONT_SENTENCE = "{img} is {name}'s close front portrait from the same sheet set."
+
+
+def _real_identity_refs(entry, look: str) -> list[str]:
+    """작업 142: 실사 인물 1명의 신원 참고 키(순서 고정).
+
+    실사: 시트가 있으면 [실사 시트, 실사 정면](정면이 없으면 [시트]), 시트가 없으면 [실사 정면 또는 고른 캐스팅 사진]
+    (= _fallback_front_keys, 140 과 같다). 인물 바꾸기 애니(126): _anime_ref_keys(entry)[:1] 그대로.
+    상한에 걸리면 _ref_counts 가 둘째 장(정면)부터 뺀다 — 누구의 시트보다 정면이 먼저 빠진다.
+    """
+    entry = entry if isinstance(entry, dict) else {}
+    if look == "anime":
+        return _anime_ref_keys(entry)[:1]
+    sheet = str(entry.get("realSheetKey") or "")
+    if not sheet:
+        return _fallback_front_keys(entry, "real")
+    front = str(entry.get("realFrontKey") or "")
+    return [sheet, front] if front and front != sheet else [sheet]
+
+
+def _real_sheet_sentences(name: str, sheet_no: int, front_no: int | None = None, *, ref: str = "Image {}") -> str:
+    """작업 142: 시트(와 정면) 참고 문장. ref = 번호 표기("Image {}" 시작 그림, "@Image{}" Seedance)."""
+    text = REAL_SHEET_REF_SENTENCE.format(img=ref.format(sheet_no), name=name)
+    if front_no:
+        text += " " + REAL_SHEET_FRONT_SENTENCE.format(img=ref.format(front_no), name=name)
+    return text
+
+
+def _person_refs_kind(cast) -> str:
+    """작업 142 제출 로그 refs=: 인물 참고에 시트가 있으면 sheet, 시트 아닌 사진이 있으면 front, 둘 다면 both."""
+    members = [m for m in cast or [] if isinstance(m, dict)]
+    has_sheet = any(m.get("sheetNo") for m in members)
+    has_front = any(n != m.get("sheetNo") for m in members for n in m.get("refNos") or [])
+    return "both" if has_sheet and has_front else "sheet" if has_sheet else "front"
+
+
 def _ref_counts(lengths: list[int], cap: int) -> list[int]:
     """인물마다 넣을 참고 장수. 첫 장을 모두에게 먼저 주고 둘째 장, 셋째 장 순으로 상한(cap)까지 채운다(뒤 사진부터 빠진다)."""
     counts = [0] * len(lengths)
@@ -1120,8 +1162,17 @@ def _real_take_cast(owner: str, plan: dict, actors: list[dict], char_by_id: dict
     시트). 회차의 인물 바꾸기(_real_cast_overrides)가 있으면 그 캐릭터·모습을 쓴다. 장수는 _ref_counts(cap)로 정하고,
     한 인물의 사진은 이어진 번호다. cast 항목: frontNo(첫 장)·refNos(모든 장)·look·appearance·costume·voice.
     작업 130 likeness 1단계(fallback_step=1): 인물당 정면 1장(_fallback_front_keys). 0 이면 지금 그대로.
+    작업 142: 실사 시트가 있고 읽히는 인물은 _real_identity_refs — 0단계 [시트, 정면], 1단계 [시트] 1장. cast 항목에 sheetNo.
+    시트가 없거나 못 읽는 인물·애니 모습은 140 그대로(0단계 _real_photo_keys/_anime_ref_keys, 1단계 _fallback_front_keys).
     """
     overrides = _real_cast_overrides(plan)
+    loaded: dict[str, bytes | None] = {}
+
+    def load(key: str) -> bytes | None:
+        if key not in loaded:
+            loaded[key] = _load_jpeg(key)
+        return loaded[key]
+
     rows = []
     for actor in actors:
         name = actor.get("name") or "a character"
@@ -1132,23 +1183,34 @@ def _real_take_cast(owner: str, plan: dict, actors: list[dict], char_by_id: dict
         else:
             char_id, look = str(actor.get("charId") or ""), "real"
             char = char_by_id.get(char_id) if char_id else None
+        sheet = ""
+        if char and look != "anime":
+            ids = _real_identity_refs(char, look)
+            want = str(char.get("realSheetKey") or "")
+            if want and ids[:1] == [want] and load(want) is not None:
+                sheet = want
         if not char:
             keys = []
+        elif sheet:
+            keys = ids[:1] if fallback_step == 1 else ids
         elif fallback_step == 1:
             keys = _fallback_front_keys(char, look)
         else:
             keys = _anime_ref_keys(char) if look == "anime" else _real_photo_keys(char)
-        rows.append((actor, str(name), char_id, char, look, keys))
+        rows.append((actor, str(name), char_id, char, look, keys, sheet))
     counts = _ref_counts([len(row[5]) for row in rows], cap)
     images: list[bytes] = []
     cast: list[dict] = []
-    for (actor, name, char_id, char, look, keys), count in zip(rows, counts):
+    for (actor, name, char_id, char, look, keys, sheet), count in zip(rows, counts):
         nos: list[int] = []
+        sheet_no = None
         for key in keys[:count]:
-            photo = _load_jpeg(key)
+            photo = load(key)
             if photo is not None:
                 images.append(_fit_ref(photo))
                 nos.append(len(images))
+                if sheet and key == sheet:
+                    sheet_no = len(images)
         if not char:
             appearance = ""
         elif look == "anime":
@@ -1166,6 +1228,8 @@ def _real_take_cast(owner: str, plan: dict, actors: list[dict], char_by_id: dict
             "costume": vnew_fx.strip_drawing_words(member.get("costume") or ""),
             "voice": vnew_fx.strip_drawing_words(member.get("voice") or ""),
         })
+        if sheet_no:
+            cast[-1]["sheetNo"] = sheet_no  # 작업 142: 이 번호는 AI 캐릭터 시트(없는 인물은 키 없음 — 140 과 같은 dict)
     return images, cast
 
 
@@ -3493,11 +3557,15 @@ def _take_prompt(plan: dict, take: dict, *, cast: list[dict], panel_nos: list[in
             )
             # 이름 소개: "{한국 이름} ({로마자})". 로마자가 이름과 같으면(이미 영문) 괄호 생략.
             label = f"{ko} ({roman})" if roman and roman != ko else ko
+            sheet_no = member.get("sheetNo") if real and member.get("look") != "anime" else None
             # 얼굴·머리는 참조 정면 1장에서만(후면 제외 — 다른 의상 증거를 줄인다). 실사는 인물 사진 1장(photo).
             if front_no and real and member.get("look") == "anime":
                 # 작업 126 인물 바꾸기 [애니]: 웹툰 정면·시트를 디자인 참고로, 실사 인물로 옮긴다.
                 sentence = (f"The {color} mannequin is {label}: character design in "
                             f"{_image_refs(member.get('refNos') or [front_no])}; {REAL_TAKE_ANIME_SENTENCE}")
+            elif sheet_no:
+                # 작업 142: AI 캐릭터 시트(+정면) 문장은 외형 뒤에 붙인다(아래). 옷은 장면 COSTUME 이 이긴다.
+                sentence = f"The {color} mannequin is {label}"
             elif front_no:
                 sentence = f"The {color} mannequin is {label}: face and hair from @Image{front_no} " + (
                     "(photo)" if real else "(front)")
@@ -3508,13 +3576,17 @@ def _take_prompt(plan: dict, take: dict, *, cast: list[dict], panel_nos: list[in
                 sentence = f"The {color} mannequin is {label}"
             if appearance:
                 sentence += f", {appearance.rstrip('.')}"
+            if sheet_no:
+                portrait = next((n for n in (member.get("refNos") or []) if n != sheet_no), None)
+                sentence += ". " + _real_sheet_sentences(roman or ko, sheet_no, portrait, ref="@Image{}").rstrip(".")
             # COSTUME: override·패널에서 읽은 이 장면의 의상이 시트 복장을 덮어쓴다. 비면 패널을 따르게.
             # 실사: 사진의 옷을 덮어쓰고, 비면 사진에 입은 그대로(사진이 없으면 COSTUME 문장 없음).
+            # 작업 142: 시트 인물은 시트 옷을 쓰지 않는다(장면 의상이 없으면 COSTUME 문장 없음).
             if costume:
                 source = "photo" if real else "sheet"
                 sentence += f". COSTUME in this scene (overrides the {source}'s clothing): {costume.rstrip('.')}"
             elif real:
-                if front_no:
+                if front_no and not sheet_no:
                     sentence += f". COSTUME: as worn in @Image{front_no}"
             else:
                 sentence += f". COSTUME: exactly as in the original panels {panel_ref}"
@@ -4148,6 +4220,7 @@ def _do_submit_take(owner: str, pid: str, gen_id: str, index: int, variant: str,
         refs = trace.stop(built)
         prompt = built["prompt"]
         image_urls = built["imageUrls"]
+        refs_kind = _person_refs_kind(built.get("cast")) if real else ""
         prompt_bytes = len(prompt.encode("utf-8"))
         prefix = _seg_output_prefix(owner, pid, gen_id, take_id + "-" + variant, attempt)
         take_seconds = float(take.get("seconds") or 0)
@@ -4173,8 +4246,9 @@ def _do_submit_take(owner: str, pid: str, gen_id: str, index: int, variant: str,
         del video_mp4, built, image_urls
         prepared = True
         log.info(
-            "vnew.gen.take_submit pid=%s take=%s bytes_body=%d ms=%d%s",
-            pid, take_id, prompt_bytes, int((time.monotonic() - started) * 1000), tag,
+            "vnew.gen.take_submit pid=%s take=%s bytes_body=%d ms=%d%s%s",
+            pid, take_id, prompt_bytes, int((time.monotonic() - started) * 1000),
+            f" refs={refs_kind}" if real else "", tag,
         )
     except _Discard:
         return
@@ -4869,7 +4943,7 @@ def _drop_named(text: str, names) -> str:
 
 def _cut_still_prompt(plan: dict, cut: dict, people: list[tuple[str, str, int]], has_frame: bool, *,
                       source: str = "previz", outfits: dict | None = None, background_no: int = 0,
-                      layout: dict | None = None, fix: str = "") -> str:
+                      layout: dict | None = None, fix: str = "", sheets: dict | None = None) -> str:
     """컷 시작 그림(Seedream) 문장: 장면·인물 위치·카메라 + photoreal. people = [(색, 이름, 이미지 번호)].
 
     작업 132: source="anime"(Image 1 = 같은 gen 애니 테이크 결과의 그 컷 첫 프레임)이면 Image 1 의 구도·카메라·인물 위치·
@@ -4881,7 +4955,11 @@ def _cut_still_prompt(plan: dict, cut: dict, people: list[tuple[str, str, int]],
     "Exactly N …"(back 은 문장만), 화면에 없는 인물 이름은 문장에서 뺀다. 시트 뷰가 있으면 REAL_STILL_BACKGROUND_PLACE, 없으면
     짧은 LOCATION 1구절. ECU·CU 면 SHOT·BLOCKING·SETTING 160자. fix(시작 그림 검사 교정 문장)는 끝 구절 앞. layout 이 없고
     fix 가 없으면 138 과 글자 하나 다르지 않다.
+    작업 142: sheets = {이름: 정면 번호(0 = 없음)} — 그 인물의 people 번호는 AI 캐릭터 시트다. FACES/CAST 바로 뒤에 인물마다
+    _real_sheet_sentences 1줄. sheets 가 없으면 140 과 같다. 옷은 OUTFITS·REAL_STILL_NO_PHOTO_CLOTHES 가 그대로 정한다.
     """
+    sheets = {str(k): int(v or 0) for k, v in (sheets or {}).items()}
+    sheet_lines = [_real_sheet_sentences(name, no, sheets[name] or None) for _color, name, no in people if name in sheets]
     cut_id = str(cut.get("cutId") or "")
     brief = _cut_brief(plan, cut_id)
     conti_cut = next((c for c in (plan.get("conti") or {}).get("cuts") or [] if str(c.get("id")) == cut_id), {})
@@ -4905,9 +4983,11 @@ def _cut_still_prompt(plan: dict, cut: dict, people: list[tuple[str, str, int]],
                      + ("and outfits. " if background_no > 1 else "outfits and background. ")
                      + "Change only the rendering, not the content.")
         if people:
-            parts.append("FACES: " + "; ".join(f"{name} in Image 1 has the face and hair of the real person in Image {no}"
-                                               for _color, name, no in people)
-                         + ". Take only faces from those photos; clothing comes from Image 1.")
+            parts.append("FACES: " + "; ".join(
+                f"{name} in Image 1 has the face and hair of the person in Image {no}" if name in sheets else
+                f"{name} in Image 1 has the face and hair of the real person in Image {no}"
+                for _color, name, no in people) + ". Take only faces from those photos; clothing comes from Image 1.")
+            parts.extend(sheet_lines)
         if layout:
             parts.append(_layout_people_sentence(listed))
     else:
@@ -4915,8 +4995,11 @@ def _cut_still_prompt(plan: dict, cut: dict, people: list[tuple[str, str, int]],
             parts.append("Image 1 is a rough 3D previz frame: keep its camera angle, framing, lens, positions and poses exactly; "
                          "replace every mannequin with a real person, no mannequins remain.")
         if people:
-            parts.append("CAST: " + "; ".join(f"the {color} mannequin is {name}, the real person in Image {no}"
-                                              for color, name, no in people) + ".")
+            parts.append("CAST: " + "; ".join(
+                f"the {color} mannequin is {name}, the person in Image {no}" if name in sheets else
+                f"the {color} mannequin is {name}, the real person in Image {no}"
+                for color, name, no in people) + ".")
+            parts.extend(sheet_lines)
     if background_no:
         if layout and background_no > 1:
             parts.append(REAL_STILL_BACKGROUND_PLACE.format(no=background_no))
@@ -5242,11 +5325,12 @@ def _retry_better(first_items, retry_items) -> bool:
 
 def _checked_cut_still(owner: str, pid: str, gen_id: str, plan: dict, cut: dict, ctx: dict, *, frame: bytes, still: bytes,
                        layout: dict, refs: list[bytes], people: list[tuple[str, str, int]], background_no: int,
-                       charge_key: str) -> tuple[bytes, dict]:
+                       charge_key: str, sheets: dict | None = None) -> tuple[bytes, dict]:
     """시작 그림 검사(_check_cut_still) → 틀리면 Seedream 만 1번 다시(시트 뷰 없이 [애니 프레임 + 보이는 인물 정면], 교정 문장).
 
     둘 다 틀리면 틀린 항목이 적은 쪽(_retry_better, 같으면 첫 것). 돌려주는 값 = (쓸 시작 그림, 컷 기록 stillCheck
     {ok, items, note, retried, firstItems, used}). 검사가 안 되면 첫 그림 그대로(ok None).
+    작업 142: sheets(이름 → 정면 번호, 인물 첫 장이 AI 캐릭터 시트)도 같은 규칙으로 번호를 당긴다.
     """
     first = _check_cut_still(owner, pid, gen_id, frame, still, layout)
     if first is None or first["ok"]:
@@ -5254,8 +5338,9 @@ def _checked_cut_still(owner: str, pid: str, gen_id: str, plan: dict, cut: dict,
                        "retried": False, "firstItems": [], "used": "first"}
     refs2 = [ref for no, ref in enumerate(refs, 1) if no != background_no]
     people2 = [(color, name, no - 1 if background_no and no > background_no else no) for color, name, no in people]
+    sheets2 = {name: (no - 1 if background_no and no > background_no else no) for name, no in (sheets or {}).items()}
     prompt2 = _cut_still_prompt(plan, cut, people2, True, source="anime", outfits=ctx["outfits"], background_no=0,
-                                layout=layout, fix=_still_fix(first["items"], layout))
+                                layout=layout, fix=_still_fix(first["items"], layout), sheets=sheets2 or None)
     still2 = _seedream(prompt2, refs2, size=vpoc_seedream.SIZE)
     del refs2
     _charge_cut_still(owner, pid, gen_id, f"{charge_key}-{secrets.token_hex(3)}")
@@ -5265,6 +5350,29 @@ def _checked_cut_still(owner: str, pid: str, gen_id: str, plan: dict, cut: dict,
     record = {"ok": final["ok"], "items": list(final["items"]), "note": final["note"], "retried": True,
               "firstItems": list(first["items"]), "used": "retry" if use_retry else "first"}
     return (still2 if use_retry else still), record
+
+
+def _pack_still_people(rows, refs: list, cap: int) -> tuple[list[tuple[str, str, int]], dict[str, int], str]:
+    """작업 142: 시작 그림 인물 참고 채우기. rows = [(색, 이름, [(kind "sheet"|"front", jpeg)])], refs 뒤에 이어 붙인다.
+
+    장수는 _ref_counts(cap): 모두의 첫 장(시트)을 먼저 주고 남으면 둘째 장(정면). 한 인물의 장은 이어진 번호다.
+    반환 (people [(색, 이름, 첫 장 번호)], sheets {이름: 정면 번호(0 = 없음)} — 첫 장이 시트인 인물만, 로그 refs=sheet|front|both).
+    """
+    people: list[tuple[str, str, int]] = []
+    sheets: dict[str, int] = {}
+    kinds: set[str] = set()
+    for (color, name, photos), count in zip(rows, _ref_counts([len(r[2]) for r in rows], cap)):
+        nos: list[tuple[str, int]] = []
+        for kind, photo in photos[:count]:
+            refs.append(_fit_ref(photo))
+            nos.append((kind, len(refs)))
+            kinds.add(kind)
+        if not nos:
+            continue
+        people.append((color, name, nos[0][1]))
+        if nos[0][0] == "sheet":
+            sheets[name] = nos[1][1] if len(nos) > 1 else 0
+    return people, sheets, "both" if len(kinds) > 1 else (next(iter(kinds)) if kinds else "front")
 
 
 def _submit_real_cut(owner: str, pid: str, gen_id: str, plan: dict, ctx: dict, cut: dict, *, fix: str = "",
@@ -5308,20 +5416,30 @@ def _submit_real_cut(owner: str, pid: str, gen_id: str, plan: dict, ctx: dict, c
     if sheet is not None and not (layout and layout["shotSize"] in REAL_STILL_CLOSE):  # 작업 139: 가까운 샷은 시트 뷰 없음
         refs.append(_fit_ref(sheet[0]))
         background_no = len(refs)
-    people: list[tuple[str, str, int]] = []
+    # 작업 142: 보이는 인물마다 _real_identity_refs(실사 시트 → 정면, 시트 없으면 140 과 같은 정면 1장). Seedream 상한 안에서
+    # _ref_counts 로 첫 장(시트)을 모두에게 먼저 — 넘치면 정면부터 빠지고 보이는 인물은 빠지지 않는다(_pack_still_people).
+    rows: list[tuple[str, str, list[tuple[str, bytes]]]] = []
     for actor in actors:
         name = str(actor.get("name") or "")
         if shown is not None and shown.get(name) not in REAL_STILL_SHOWN:
             continue  # 작업 139: 애니 프레임에 얼굴이 안 보이는 인물(back·none)은 정면 사진을 넣지 않는다
         pick = ctx["overrides"].get(name)
         char = _cast_entry(owner, pick["charId"], name) if pick else ctx["charById"].get(str(actor.get("charId") or ""))
-        keys = _fallback_front_keys(char, pick["look"] if pick else "real") if char else []
-        photo = _load_jpeg(keys[0]) if keys else None
-        if photo is not None and len(refs) < _SEEDREAM_MAX_REFS:
-            refs.append(_fit_ref(photo))
-            people.append((str(actor.get("colorName") or "grey"), name or "a person", len(refs)))
+        look = pick["look"] if pick else "real"
+        keys = _real_identity_refs(char, look) if char else []
+        sheet_key = str(char.get("realSheetKey") or "") if char and look != "anime" else ""
+        photos: list[tuple[str, bytes]] = []
+        for key in keys:
+            photo = _load_jpeg(key)
+            if photo is not None:
+                photos.append(("sheet" if sheet_key and key == sheet_key else "front", photo))
+        if sheet_key and keys[:1] == [sheet_key] and not photos[:1]:
+            photos = [("front", p) for p in (_load_jpeg(k) for k in _fallback_front_keys(char, "real")) if p is not None]
+        if photos:
+            rows.append((str(actor.get("colorName") or "grey"), name or "a person", photos))
+    people, sheets, refs_kind = _pack_still_people(rows, refs, _SEEDREAM_MAX_REFS - len(refs))
     still = _seedream(_cut_still_prompt(plan, cut, people, frame is not None, source=source, outfits=ctx["outfits"],
-                                        background_no=background_no, layout=layout), refs,
+                                        background_no=background_no, layout=layout, sheets=sheets or None), refs,
                       size=vpoc_seedream.SIZE)
     sheet_view = sheet[1] if sheet else "none"
     still_key_base = f"vnew-gen-{pid}-{gen_id}-{take_id}-{cut_id}{tag}"
@@ -5329,7 +5447,7 @@ def _submit_real_cut(owner: str, pid: str, gen_id: str, plan: dict, ctx: dict, c
     still_check = None
     if layout and vnew_settings.VNEW_REAL_STILL_CHECK:  # 작업 139: Kling(비싼 단계) 전에 시작 그림 검사, 틀리면 Seedream 만 1번 다시
         still, still_check = _checked_cut_still(owner, pid, gen_id, plan, cut, ctx, frame=frame, still=still, layout=layout,
-                                                refs=refs, people=people, background_no=background_no,
+                                                refs=refs, people=people, background_no=background_no, sheets=sheets,
                                                 charge_key=f"{still_key_base}-still2-{attempt}")
     del frame, refs, sheet
     ctx["stage"] = "submit"
@@ -5358,8 +5476,9 @@ def _submit_real_cut(owner: str, pid: str, gen_id: str, plan: dict, ctx: dict, c
     extra = f" layout={layout['shotSize']}" if layout else ""
     if still_check is not None:
         extra += f" still={','.join(still_check['items']) or 'ok'}" + (" still_retry=1" if still_check["retried"] else "")
-    log.info("vnew.gen.real_cut_submit pid=%s take=%s cut=%s endpoint=%s duration=%d refs=%d frame=%s sheet=%s%s%s", pid,
-             take_id, cut_id, endpoint, duration, len(people), source, sheet_view, " qa_retry=1" if tag else "", extra)
+    log.info("vnew.gen.real_cut_submit pid=%s take=%s cut=%s endpoint=%s duration=%d people=%d refs=%s frame=%s sheet=%s%s%s",
+             pid, take_id, cut_id, endpoint, duration, len(people), refs_kind, source, sheet_view, " qa_retry=1" if tag else "",
+             extra)
     record = {"cutId": cut_id, "seconds": round(float(cut.get("seconds") or 0), 3), "duration": duration, "takeAt": take_at,
               "status": "submitted", "invocationArn": arn, "outputPrefix": out_prefix, "outputKey": "", "error": "",
               "promptEn": sent_prompt, "promptBytes": len(sent_prompt.encode("utf-8")), "stillKey": still_key}
