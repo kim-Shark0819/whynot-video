@@ -3435,7 +3435,7 @@ def _assert_no_webtoon(prompt: str) -> None:
 
 
 def _take_prompt(plan: dict, take: dict, *, cast: list[dict], panel_nos: list[int], location_no, caps: dict | None = None,
-                 variant: str = "webtoon") -> str:
+                 variant: str = "webtoon", soften: bool = False) -> str:
     """통 테이크 프롬프트(영어, UTF-8 ≤ VNEW_TAKE_PROMPT_MAX 바이트, 설계자 2026-10-26, 066 — ASSETS·연기 보존).
 
     순서: ① STYLE(스타일 앵커 맨 앞) → ② ASSETS(@Video1·@Image 매핑) → ③ TIMELINE(컷마다 1줄: ON SCREEN
@@ -3507,6 +3507,8 @@ def _take_prompt(plan: dict, take: dict, *, cast: list[dict], panel_nos: list[in
         costumes = {name: _scene_outfit_pick(values) for name, values in outfit_candidates.items()}
         for entry, cut_id in zip(entries, _seg_cut_ids(take)):
             entry["action"] = _real_brief_text(entry.get("action"), _scene_outfits(plan, [cut_id], costumes)).rstrip(".")
+    if soften:
+        _soften_entries(entries)  # 작업 153: 콘텐츠 검사 거절 뒤 다시 만들 때만(대사·연기·분위기 순화, 줄 수·화자 그대로)
     all_stamps = [f"{e['start']}-{e['end']}s" for e in entries]
     # 지시서 118a: 줄이기 마지막에 빼는 대사 줄 (항목 번호, 줄 번호). 비어 있으면 모든 줄을 쓴다.
     dropped_lines: set[tuple[int, int]] = set()
@@ -3850,7 +3852,7 @@ def _take_prompt(plan: dict, take: dict, *, cast: list[dict], panel_nos: list[in
         if state["pose_on"]:
             for pose in entry.get("poses") or []:
                 clause = _pose_clause(pose, _disp_name)
-                if clause:
+                if clause and not (soften and _explicit_text(clause)):  # 작업 153: 순화 때 노골적인 포즈 절만 뺀다
                     pieces.append(clause)
         # vnew-live-fx RA4.1: 연기 → 분위기 → 기호 → 대사 → 시선. 끔이면 moodText·fx 가 비어 아무것도 붙지 않는다.
         mood = _clip(str(entry.get("moodText") or ""), state["mood_limit"]) if state["mood_limit"] > 0 else ""
@@ -4177,7 +4179,7 @@ def _real_appearance(look: str, limit: int = 170) -> str:
 
 
 def _take_payload(owner: str, pid: str, plan: dict, take: dict, caps: dict, variant: str = "webtoon",
-                  fallback_step: int = 0) -> dict:
+                  fallback_step: int = 0, soften: bool = False) -> dict:
     """통 테이크(웹툰) 참조 이미지 목록·프롬프트(설계자 2026-10-26, 064).
 
     image_urls(순서 고정 — 프롬프트 번호와 일치):
@@ -4259,7 +4261,13 @@ def _take_payload(owner: str, pid: str, plan: dict, take: dict, caps: dict, vari
 
     # 웹툰은 지금과 같은 호출(variant 인자 없음), 실사만 variant="real".
     prompt_kwargs = {"variant": "real"} if real else {}
-    prompt = _take_prompt(plan, take, cast=cast, panel_nos=panel_nos, location_no=location_no, caps=caps, **prompt_kwargs)
+    prompt_plan = plan
+    if soften:
+        # 작업 153: 콘텐츠 검사 거절 뒤 다시 만들기 — 테이크 컷 글(대사·연기)을 순화한 계획 사본으로 프롬프트를 다시 만든다.
+        prompt_plan = _soften_plan(owner, pid, plan, take)
+        prompt_kwargs["soften"] = True
+    prompt = _take_prompt(prompt_plan, take, cast=cast, panel_nos=panel_nos, location_no=location_no, caps=caps,
+                          **prompt_kwargs)
     if len(image_urls) > max_images:
         image_urls = image_urls[:max_images]
     return {
@@ -4533,36 +4541,49 @@ def _submit_take_parts(owner: str, pid: str, gen_id: str, index: int, variant: s
                 records.append(dict(old))
                 continue
             sub = _part_take(plan, take, part)
+            # 작업 153: 콘텐츠 검사로 거절된 조각은 기록된 단계로(1 = 순화, 2 = 순화 + Seedance). 0 이면 지금 그대로.
+            content_step = _content_step(old) if old else 0
+            part_endpoint, part_caps, part_limit = endpoint, caps, limit
+            if content_step >= 2 and _content_fallback_model(endpoint):
+                part_endpoint = _content_fallback_model(endpoint)
+                part_caps = _previz_caps(part_endpoint)
+                part_limit = _take_ref_limit(part_endpoint)
             with _RefTrace() as trace:
-                built = _take_payload(owner, pid, plan, sub, caps, variant="real", fallback_step=step) if real else _take_payload(
-                    owner, pid, plan, sub, caps)
+                built = _take_payload(owner, pid, plan, sub, part_caps, variant="real", fallback_step=step,
+                                      soften=content_step >= 1) if real else _take_payload(
+                    owner, pid, plan, sub, part_caps, soften=content_step >= 1)
             refs = trace.refs(built)
             prompt = str(built["prompt"])
             if real:
                 _assert_no_webtoon(prompt)
             clip = _cut_clip(video_mp4, {"startSec": part["start"], "endSec": part["end"]})
             sent = float(clip.get("sentSeconds") or 0) or float(part["seconds"])
-            if limit > 0 and sent > limit + TAKE_PART_TOL_S:
-                raise VpocError("vnew.generate", "RefVideoTooLong", REF_TOO_LONG_TEXT.format(seconds=sent, limit=limit), 409)
+            if part_limit > 0 and sent > part_limit + TAKE_PART_TOL_S:
+                raise VpocError("vnew.generate", "RefVideoTooLong", REF_TOO_LONG_TEXT.format(seconds=sent, limit=part_limit), 409)
             prefix = _seg_output_prefix(owner, pid, gen_id, f"{take_id}-{variant}-p{part['no']}", attempt)
             if not _touch_prepare_claim(owner, pid, gen_id, index, variant, claim):  # 작업 144: 조각(유료) 제출 전마다
                 raise _Discard()
-            result = _submit_take(endpoint=endpoint, caps=caps, video_mp4=clip["bytes"], prompt=prompt, output_prefix=prefix,
-                                  image_urls=built["imageUrls"], seconds=float(part["seconds"]), resolution=resolution,
-                                  audio=audio)
+            result = _submit_take(endpoint=part_endpoint, caps=part_caps, video_mp4=clip["bytes"], prompt=prompt,
+                                  output_prefix=prefix, image_urls=built["imageUrls"], seconds=float(part["seconds"]),
+                                  resolution=resolution, audio=audio)
             del clip, built
             _charge_take(owner, pid, gen_id, result, float(part["seconds"]), resolution)
-            params = {**_take_params(caps, float(part["seconds"]), resolution, audio), "part": part["no"],
+            params = {**_take_params(part_caps, float(part["seconds"]), resolution, audio), "part": part["no"],
                       "parts": len(parts), "rangeStart": part["start"], "rangeEnd": part["end"]}
             _log_attempt(owner, pid, gen_id, source="gen", mode="previz-take", variant=variant, cell_id=take_id, index=index,
-                         attempt=attempt, run=run_n, endpoint=endpoint, params=params, refs=refs, video_keys=rec_keys,
+                         attempt=attempt, run=run_n, endpoint=part_endpoint, params=params, refs=refs, video_keys=rec_keys,
                          result=result, prompt=prompt)
             records.append({**part, "sig": sig, "status": "submitted", "invocationArn": str(result.get("invocationArn") or ""),
                             "outputPrefix": str(result.get("outputPrefix") or prefix), "outputKey": "", "error": "",
                             "promptEn": prompt, "promptBytes": len(prompt.encode("utf-8")),
                             "clientRequestToken": str(result.get("clientRequestToken") or ""), "sentSeconds": round(sent, 3)})
-            log.info("vnew.gen.take_part_submit pid=%s take=%s part=%d/%d start=%.3f end=%.3f cuts=%d%s", pid, take_id,
-                     part["no"], len(parts), part["start"], part["end"], len(part["cutIds"]), " variant=real" if real else "")
+            if content_step:
+                records[-1]["contentStep"] = content_step
+                if isinstance(old.get("contentFallback"), dict):
+                    records[-1]["contentFallback"] = dict(old["contentFallback"])
+            log.info("vnew.gen.take_part_submit pid=%s take=%s part=%d/%d start=%.3f end=%.3f cuts=%d%s%s", pid, take_id,
+                     part["no"], len(parts), part["start"], part["end"], len(part["cutIds"]), " variant=real" if real else "",
+                     f" content={CONTENT_STEP_NAMES.get(content_step, '')}" if content_step else "")
     except BaseException:
         for record in records:
             if record.get("status") == "submitted" and record.get("invocationArn"):
@@ -4596,7 +4617,8 @@ def _do_poll_take_parts(owner: str, pid: str, gen_id: str, index: int, variant: 
             _log_result(owner, pid, gen_id, gen, index, variant, arn, "completed", output_key=key)
         elif status != "InProgress":
             error = str(result.get("failureMessage") or "영상 생성 실패")[:300]
-            updates[number] = {"status": "failed", "error": error, "failureKind": str(result.get("failureKind") or "")}
+            kind = str(result.get("failureKind") or "") or _content_kind(error)  # 작업 153: 콘텐츠 검사 거절도 조각에 적는다
+            updates[number] = {"status": "failed", "error": error, "failureKind": kind}
             _log_result(owner, pid, gen_id, gen, index, variant, arn, "failed", error=error)
     if updates:
         def mutator(data: dict) -> None:
@@ -4616,6 +4638,11 @@ def _do_poll_take_parts(owner: str, pid: str, gen_id: str, index: int, variant: 
         error = str(failed[0].get("error") or "")
         if variant == "real" and _likeness_rejected(error):
             _escalate_likeness(owner, pid, gen_id, index, claim)
+            return
+        if all(p.get("failureKind") == CONTENT_FLAG_KIND for p in failed):
+            # 작업 153: 콘텐츠 검사 거절만 있으면 아직 도는 조각을 기다렸다가(이중 제출 없음) 거절된 조각만 다음 단계로.
+            if not any(p.get("status") == "submitted" for p in parts):
+                _escalate_content_parts(owner, pid, gen_id, index, variant, claim)
             return
         message = f"테이크 조각 {failed[0].get('no')}/{len(parts)} 이 실패했습니다: {error}"
         _fail_variant(owner, pid, gen_id, index, variant, claim, message,
@@ -4658,6 +4685,361 @@ def _merge_take_parts(owner: str, pid: str, gen_id: str, index: int, variant: st
 
     _commit(owner, pid, mutator)
     log.info("vnew.gen.take_parts_merged pid=%s take=%s parts=%d", pid, take.get("id"), len(parts))
+
+
+# ---------------------------------------------------------------- 작업 153: fal 콘텐츠 검사 거절 → 순화 → Seedance
+#
+# fal 이 콘텐츠 검사로 거절하면(실패 문구에 CONTENT_FLAG_WORDS 중 하나) 그 칸(또는 152 조각)의 failureKind = "contentFlag".
+# 1단계: 같은 모델에 순화한 프롬프트(soften)로 1번. 2단계: 또 거절이면 순화한 그대로 VNEW_CONTENT_FALLBACK_MODEL(Seedance 테이크
+# 경로)로 1번. 3단계: 그래도 거절이면 CONTENT_FLAG_FAIL_TEXT 로 칸 실패. 단계 = 칸(조각) contentStep(0·1·2), 2단계 기록 =
+# contentFallback {from, to}. 원장은 실제로 낸 제출마다 제출 경로가 1번 남긴다. 순화하지 않은 프롬프트는 지금과 바이트 단위로 같다.
+# 사용자의 다시 시도(retry_segment)는 contentFlag 칸을 1단계부터 다시 한다.
+
+CONTENT_FLAG_KIND = "contentFlag"
+CONTENT_FLAG_WORDS = ("content checker", "flagged", "content policy", "safety", "moderation")
+CONTENT_FLAG_FAIL_TEXT = ("fal 콘텐츠 검사에서 거절되었습니다(컷 {cuts}). 대사·동작 표현을 순화했지만 계속 거절되어 "
+                          "이 테이크를 만들지 못했습니다.")
+CONTENT_STEP_NAMES = {1: "soften", 2: "fallback"}
+# 대사(한국어): 노골적·비속한 말 → 같은 뜻·말투의 순한 말. 앞에서부터 차례로 바꾼다(긴 것 먼저).
+SOFTEN_KO = (
+    ("붙어 먹으면", "함께 자면"), ("붙어먹으면", "함께 자면"), ("붙어 먹고", "함께 자고"), ("붙어먹고", "함께 자고"),
+    ("붙어 먹는", "함께 자는"), ("붙어먹는", "함께 자는"), ("붙어 먹었", "함께 잤"), ("붙어먹었", "함께 잤"),
+    ("붙어 먹", "함께 자"), ("붙어먹", "함께 자"), ("따먹", "꼬시"), ("좆같", "엿같"), ("좆", "물건"),
+    ("씨발", "젠장"), ("씨팔", "젠장"), ("존나", "진짜"), ("개새끼", "나쁜 놈"), ("섹스", "잠자리"),
+    ("꼴려", "끌려"), ("꼴리", "끌리"),
+)
+# 연기·효과 글(영어): 성적·신체 밀착 표현 → 중립 블로킹. (정규식, 바꿀 말). 첫 글자 대소문자는 원문을 따른다.
+SOFTEN_EN = (
+    (r"\bguides (?:it|his hand|her hand) (?:downwards?|down|lower)\b", "holds his hand against his chest"),
+    (r"\bguiding (?:it|his hand|her hand) (?:downwards?|down|lower)\b", "holding his hand against his chest"),
+    (r"\bguided (?:it|his hand|her hand) (?:downwards?|down|lower)\b", "held his hand against his chest"),
+    (r"\b(?:lips|mouths) (?:separate|part)s? by a few (?:centimet(?:re|er)s|inches)\b", "faces stay very close"),
+    (r"\b(?:lips|mouths) (?:separate|part)\b", "faces stay very close"),
+    (r"\b(?:deep|passionate|french) kiss(?:es|ing)?\b", "close embrace"),
+    (r"\bstraddles\b", "sits facing"), (r"\bstraddling\b", "sitting facing"),
+    (r"\bgrinds against\b", "leans against"), (r"\bgrinding against\b", "leaning against"),
+    (r"\bmoans\b", "sighs"), (r"\bmoaning\b", "sighing"), (r"\bmoan\b", "sigh"),
+    (r"\b(?:crotch|groin)\b", "waist"), (r"\b(?:naked|nude)\b", "bare-shouldered"), (r"\berection\b", "tension"),
+    (r"\bthrusts\b", "leans in"), (r"\bthrusting\b", "leaning in"),
+    (r"\bundresses\b", "loosens his collar"), (r"\bundressing\b", "loosening his collar"),
+)
+_SOFTEN_EN_RE = tuple((re.compile(pattern, re.IGNORECASE), repl) for pattern, repl in SOFTEN_EN)
+# 지도로 바꾸고도 남으면 LLM 1번(_soften_rewrite)으로 고칠 낱말(지도 왼쪽 + 지도에 없는 노골적인 말).
+_EXPLICIT_KO = re.compile("|".join([re.escape(k) for k, _ in SOFTEN_KO] + ["박아", "빨아", "자지", "정액", "발기", "애무",
+                                                                         "떡치", "사까시"]))
+_EXPLICIT_EN = re.compile(
+    "|".join([p for p, _ in SOFTEN_EN] + [
+        r"\bsex(?:ual(?:ly)?|y)?\b", r"\bpenis\b", r"\bgenitals?\b", r"\borgasm\w*", r"\bejaculat\w*", r"\barous(?:ed|al)\b",
+        r"\berotic\w*", r"\blick(?:s|ing|ed)?\b",
+        r"\b(?:hand|hands|it) (?:slides?|sliding|moves?|travels?) (?:down|downwards?|lower)\b"]),
+    re.IGNORECASE)
+_HANGUL_RE = re.compile(r"[\uac00-\ud7a3]")
+_LATIN_RE = re.compile(r"[A-Za-z]")
+_SOFTEN_CACHE: dict[str, dict[str, str]] = {}
+_SOFTEN_CACHE_MAX = 64
+_SOFTEN_SYSTEM = (
+    "You rewrite short pieces of a drama script so that a video model's content checker accepts them. "
+    "For every item keep the same meaning, emotion, length and speaker; make it broadcast-safe. "
+    "Items with lang \"ko\" are Korean dialogue: Korean only, keep every \" / \" separator and any \"name:\" speaker prefix. "
+    "Items with lang \"en\" are English action text: English only, describe neutral blocking (where people stand, faces close, "
+    "hands on shoulders or chest) with no sexual or explicit wording. Items with lang \"mixed\" keep their names as written. "
+    "Return every item id exactly once with its rewritten text."
+)
+_SOFTEN_TOOL = {
+    "name": "emit_softened",
+    "description": "Return the broadcast-safe rewrite of every item.",
+    "inputSchema": {"json": {
+        "type": "object",
+        "properties": {"items": {"type": "array", "items": {
+            "type": "object", "properties": {"id": {"type": "string"}, "text": {"type": "string"}}, "required": ["id", "text"]}}},
+        "required": ["items"],
+    }},
+}
+
+
+def _content_kind(message) -> str:
+    """fal 실패 문구가 콘텐츠 검사 거절이면 "contentFlag", 아니면 ""(작업 153, 웹툰·실사 테이크·152 조각이 같이 쓴다)."""
+    low = str(message or "").lower()
+    return CONTENT_FLAG_KIND if any(word in low for word in CONTENT_FLAG_WORDS) else ""
+
+
+def _content_step(state) -> int:
+    """칸·조각의 콘텐츠 단계(0 = 처음, 1 = 순화·같은 모델, 2 = 순화·Seedance)."""
+    try:
+        return max(0, min(2, int((state or {}).get("contentStep") or 0))) if isinstance(state, dict) else 0
+    except (TypeError, ValueError):
+        return 0
+
+
+def _content_fallback_model(original: str) -> str:
+    """2단계 모델 endpoint. 비었거나 원래 모델과 같으면 ""(2단계를 건너뛴다)."""
+    fallback = str(vnew_settings.VNEW_CONTENT_FALLBACK_MODEL or "").strip()
+    prefix = vpoc_settings.FAL_ID_PREFIX
+    if fallback.startswith(prefix):
+        fallback = fallback[len(prefix):]
+    original = str(original or "").strip()
+    if original.startswith(prefix):
+        original = original[len(prefix):]
+    return "" if not fallback or fallback == original else fallback
+
+
+def _soften_text(text: str) -> str:
+    """대사·연기 글 한 조각을 상수 지도로 순화한다(한국어 지도 → 영어 지도). 바뀔 말이 없으면 같은 글자."""
+    out = str(text or "")
+    if not out:
+        return out
+    for old, new in SOFTEN_KO:
+        if old in out:
+            out = out.replace(old, new)
+
+    def _repl(repl: str):
+        def inner(match: re.Match) -> str:
+            first = match.group(0)[:1]
+            return repl[:1].upper() + repl[1:] if first.isupper() else repl
+        return inner
+
+    for pattern, repl in _SOFTEN_EN_RE:
+        out = pattern.sub(_repl(repl), out)
+    return out
+
+
+def _explicit_text(text) -> bool:
+    """지도로 순화한 뒤에도 노골적인 말이 남았는가(LLM 1번 대상·노골적인 포즈 절)."""
+    value = str(text or "")
+    return bool(value) and bool(_EXPLICIT_KO.search(value) or _EXPLICIT_EN.search(value))
+
+
+def _soften_entries(entries: list[dict]) -> None:
+    """테이크 타임라인 항목의 대사·연기·분위기를 지도로 순화한다(제자리). 줄 수·화자·시각·run 표시는 그대로."""
+    for entry in entries:
+        for field in ("action", "dialogue", "moodEn"):
+            if isinstance(entry.get(field), str):
+                entry[field] = _soften_text(entry[field])
+        if isinstance(entry.get("lines"), list):
+            entry["lines"] = [{**ln, "dialogue": _soften_text(ln.get("dialogue") or "")} if isinstance(ln, dict) else ln
+                              for ln in entry["lines"]]
+
+
+def _soften_lang(text: str) -> str:
+    hangul, latin = bool(_HANGUL_RE.search(text)), bool(_LATIN_RE.search(text))
+    return "ko" if hangul and not latin else ("en" if latin and not hangul else "mixed")
+
+
+def _soften_ok(source: str, new: str, lang: str) -> bool:
+    """LLM 순화 결과를 받을지: 빈 글·" / " 수·화자 머리·언어·길이(0.5~2배)가 원문과 맞아야 한다."""
+    if not new or source.count(" / ") != new.count(" / "):
+        return False
+    if lang == "ko" and _LATIN_RE.search(new):
+        return False
+    if lang == "en" and _HANGUL_RE.search(new):
+        return False
+    if ": " in source:
+        head = source.split(": ", 1)[0]
+        if len(head) <= 20 and new.split(": ", 1)[0] != head:
+            return False
+    return len(source) * 0.5 - 4 <= len(new) <= len(source) * 2 + 8
+
+
+def _read_soften(blocks: list[dict], *, model: str) -> tuple[dict, dict]:
+    """llm._converse 로 emit_softened 를 받는다. (payload, usage{..model}). 검사가 가짜로 바꾼다."""
+    return vpoc_llm._converse(  # noqa: SLF001 — 공개 래퍼가 없어 내부 함수를 쓴다
+        system_text=_SOFTEN_SYSTEM, blocks=blocks, tool=_SOFTEN_TOOL, max_tokens=1500,
+        where="vnew.generate.soften", model=model,
+    )
+
+
+def _soften_rewrite(owner: str, pid: str, plan_id: str, texts: list[str]) -> dict[str, str]:
+    """지도로 순화하고도 노골적인 글들을 LLM 1번으로 고친다(작업 153). {원문: 고친 글}. 실패·안 맞는 답은 빼고(지도 결과 유지).
+
+    같은 글 묶음은 프로세스 안에서 다시 묻지 않는다(_SOFTEN_CACHE). 원장 charge_text 1번(토큰이 있을 때).
+    """
+    import json  # noqa: PLC0415
+
+    texts = [t for t in dict.fromkeys(texts) if t]
+    if not texts:
+        return {}
+    cache_key = hashlib.sha256("\x00".join(texts).encode("utf-8")).hexdigest()
+    if cache_key in _SOFTEN_CACHE:
+        return dict(_SOFTEN_CACHE[cache_key])
+    items = [{"id": f"t{i}", "lang": _soften_lang(t), "text": t} for i, t in enumerate(texts, start=1)]
+    blocks = [{"text": json.dumps({"items": items}, ensure_ascii=False)}]
+    model = str(vnew_settings.ANALYZE_FALLBACK_MODEL)
+    try:
+        payload, usage = _read_soften(blocks, model=model)
+    except Exception as exc:  # noqa: BLE001 — 고치지 못하면 지도 결과로 낸다
+        log.warning("vnew.gen.soften_rewrite_failed pid=%s err=%s", pid, _msg(exc))
+        return {}
+    used = str((usage or {}).get("model") or model)
+    try:
+        input_tokens = int((usage or {}).get("inputTokens") or 0)
+        output_tokens = int((usage or {}).get("outputTokens") or 0)
+        if input_tokens or output_tokens:
+            vpoc_ledger.charge_text("vnew-soften-" + secrets.token_hex(6), model=used, input_tokens=input_tokens,
+                                    output_tokens=output_tokens, user=owner, project_id=pid, plan_id=plan_id)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("vnew.gen.charge_soften_failed pid=%s err=%s", pid, str(exc)[:200])
+    by_id = {item["id"]: item for item in items}
+    out: dict[str, str] = {}
+    for got in (payload.get("items") or []) if isinstance(payload, dict) else []:
+        if not isinstance(got, dict) or str(got.get("id") or "") not in by_id:
+            continue
+        item = by_id[str(got.get("id"))]
+        new = _soften_text(str(got.get("text") or "").strip())
+        if _soften_ok(item["text"], new, item["lang"]):
+            out[item["text"]] = new
+    log.info("vnew.gen.soften_rewrite pid=%s items=%d kept=%d", pid, len(items), len(out))
+    if len(_SOFTEN_CACHE) >= _SOFTEN_CACHE_MAX:
+        _SOFTEN_CACHE.clear()
+    _SOFTEN_CACHE[cache_key] = dict(out)
+    return out
+
+
+def _soften_plan(owner: str, pid: str, plan: dict, take: dict) -> dict:
+    """테이크 컷 글(콘티 컷·촬영 지시서 컷·겹치는 대본 줄)을 순화한 계획 사본(작업 153). 원본 계획은 바꾸지 않는다.
+
+    모든 글 조각을 지도(_soften_text)로 바꾸고, 그래도 노골적인 조각이 있으면 한꺼번에 LLM 1번(_soften_rewrite).
+    """
+    import copy  # noqa: PLC0415
+
+    cut_ids = {str(c) for c in _seg_cut_ids(take)}
+    out = dict(plan)
+    conti = dict(plan.get("conti") or {})
+    conti["cuts"] = copy.deepcopy(conti.get("cuts") or [])
+    out["conti"] = conti
+    script = dict(plan.get("script") or {})
+    script["entries"] = copy.deepcopy(script.get("entries") or [])
+    out["script"] = script
+    nodes: list = []
+    panels: set[int] = set()
+    for cut in conti["cuts"]:
+        if isinstance(cut, dict) and str(cut.get("id")) in cut_ids:
+            nodes.append(cut)
+            panels.update(int(p) for p in cut.get("panels") or [] if isinstance(p, (int, float)) and not isinstance(p, bool))
+    for entry in script["entries"]:
+        if isinstance(entry, dict) and panels & {int(p) for p in entry.get("panels") or []
+                                                 if isinstance(p, (int, float)) and not isinstance(p, bool)}:
+            nodes.append(entry)
+    previz = plan.get("previz") if isinstance(plan.get("previz"), dict) else None
+    brief = (previz or {}).get("shotBrief")
+    if isinstance(brief, dict) and isinstance(brief.get("cuts"), dict):
+        brief = {**brief, "cuts": copy.deepcopy(brief["cuts"])}
+        out["previz"] = {**previz, "shotBrief": brief}
+        nodes.extend(item for cid, item in brief["cuts"].items() if str(cid) in cut_ids and isinstance(item, dict))
+
+    leaves: list[tuple] = []
+
+    def walk(node) -> None:
+        keys = node.keys() if isinstance(node, dict) else range(len(node)) if isinstance(node, list) else ()
+        for key in list(keys):
+            value = node[key]
+            if isinstance(value, str):
+                node[key] = _soften_text(value)
+                leaves.append((node, key))
+            elif isinstance(value, (dict, list)):
+                walk(value)
+
+    for node in nodes:
+        walk(node)
+    explicit = [node[key] for node, key in leaves if _explicit_text(node[key])]
+    if explicit:
+        fixed = _soften_rewrite(owner, pid, str(plan.get("planId") or ""), explicit)
+        for node, key in leaves:
+            if node[key] in fixed:
+                node[key] = fixed[node[key]]
+    return out
+
+
+def _cut_range_text(plan: dict, cut_ids) -> str:
+    """컷 번호 표기(작업 153 실패 문구): "11" 또는 "9…13". 번호를 모르면 "?"."""
+    no_by_id = {str(c.get("id")): c.get("no") for c in (plan.get("conti") or {}).get("cuts") or [] if isinstance(c, dict)}
+    nos = [no_by_id.get(str(c)) for c in cut_ids or []]
+    nos = [n for n in nos if n is not None]
+    if not nos:
+        return "?"
+    return str(nos[0]) if len(nos) == 1 else f"{nos[0]}…{nos[-1]}"
+
+
+def _escalate_content(owner: str, pid: str, gen_id: str, index: int, variant: str, claim: str) -> None:
+    """통째 테이크 칸의 콘텐츠 검사 거절 → 다음 단계로 같은 칸을 queued(0→1, 1→2). 마지막이면 한국어 문구로 칸 실패."""
+    box: dict = {}
+
+    def mutator(data: dict) -> None:
+        g = data.get("gen") or {}
+        if not _claim_ok_variant(g, index, variant, claim):
+            raise _Discard()
+        take = _previz_cells(g)[index]
+        state = take[variant]
+        step = _content_step(state)
+        original = str(g.get("videoModel") or vnew_settings.VNEW_PREVIZ_EDIT_MODEL)
+        fallback = _content_fallback_model(original)
+        nxt = 1 if step == 0 else (2 if step == 1 and fallback else 0)
+        box.update(step=step, next=nxt, cutIds=list(_seg_cut_ids(take)))
+        if not nxt:
+            return
+        state.update(status="queued", invocationArn="", outputKey="", error="", claim="", claimedAt="")
+        state.pop("pendingCharge", None)
+        state["contentStep"] = nxt
+        if nxt == 2:
+            state["contentFallback"] = {"from": original, "to": fallback}
+
+    try:
+        _commit(owner, pid, mutator)
+    except _Discard:
+        return
+    name = CONTENT_STEP_NAMES.get(box.get("next") or 0, "failed")
+    log.info("vnew.gen.content_flag step=%s pid=%s take=%d from=%d%s", name, pid, index, box.get("step", 0),
+             " variant=real" if variant == "real" else "")
+    if not box.get("next"):
+        plan, _ = plan_mod.load_plan(owner, pid)
+        _fail_variant(owner, pid, gen_id, index, variant, claim,
+                      CONTENT_FLAG_FAIL_TEXT.format(cuts=_cut_range_text(plan, box.get("cutIds"))), kind=CONTENT_FLAG_KIND)
+
+
+def _escalate_content_parts(owner: str, pid: str, gen_id: str, index: int, variant: str, claim: str) -> None:
+    """152 조각 칸: 콘텐츠 검사로 거절된 조각만 다음 단계로(조각마다 0→1→2). 끝난 조각은 재시도 때 그대로 쓴다.
+
+    어느 조각이든 마지막 단계에서 또 거절이면 그 조각 컷 번호로 칸 실패. 아니면 칸을 queued 로 둔다(제출이 조각 단계를 읽는다).
+    """
+    box: dict = {}
+
+    def mutator(data: dict) -> None:
+        g = data.get("gen") or {}
+        if not _claim_ok_variant(g, index, variant, claim):
+            raise _Discard()
+        state = _previz_cells(g)[index][variant]
+        original = str(g.get("videoModel") or vnew_settings.VNEW_PREVIZ_EDIT_MODEL)
+        fallback = _content_fallback_model(original)
+        flagged = [p for p in state.get("parts") or [] if isinstance(p, dict) and p.get("status") == "failed"
+                   and p.get("failureKind") == CONTENT_FLAG_KIND]
+        moves = []
+        for part in flagged:
+            step = _content_step(part)
+            nxt = 1 if step == 0 else (2 if step == 1 and fallback else 0)
+            moves.append((part, step, nxt))
+            if not nxt:
+                box.update(failed=list(part.get("cutIds") or []), no=part.get("no"))
+                return
+        for part, _step, nxt in moves:
+            part["contentStep"] = nxt
+            if nxt == 2:
+                part["contentFallback"] = {"from": original, "to": fallback}
+                state["contentFallback"] = {"from": original, "to": fallback}
+        box["moves"] = [(p.get("no"), s, n) for p, s, n in moves]
+        state.update(status="queued", invocationArn="", outputKey="", error="", claim="", claimedAt="")
+
+    try:
+        _commit(owner, pid, mutator)
+    except _Discard:
+        return
+    if "failed" in box:
+        log.info("vnew.gen.content_flag step=failed pid=%s take=%d part=%s", pid, index, box.get("no"))
+        plan, _ = plan_mod.load_plan(owner, pid)
+        _fail_variant(owner, pid, gen_id, index, variant, claim,
+                      CONTENT_FLAG_FAIL_TEXT.format(cuts=_cut_range_text(plan, box["failed"])), kind=CONTENT_FLAG_KIND)
+        return
+    for no, step, nxt in box.get("moves") or []:
+        log.info("vnew.gen.content_flag step=%s pid=%s take=%d part=%s from=%d", CONTENT_STEP_NAMES.get(nxt, "failed"), pid,
+                 index, no, step)
 
 
 def _do_submit_take(owner: str, pid: str, gen_id: str, index: int, variant: str, claim: str) -> None:
@@ -4743,8 +5125,15 @@ def _do_submit_take(owner: str, pid: str, gen_id: str, index: int, variant: str,
         stage = "payload"
         trace = _RefTrace.start()  # 지시서 116: 이 스레드의 참고 이미지 읽기·맞춤을 따라간다(바이트는 붙잡지 않는다)
         step = _fallback_step(state) if real else 0  # 작업 130: likeness 1단계면 인물당 정면 1장
-        built = _take_payload(owner, pid, plan, take, caps, variant="real", fallback_step=step) if real else _take_payload(
-            owner, pid, plan, take, caps)
+        content_step = _content_step(state)  # 작업 153: 1 = 순화(같은 모델), 2 = 순화 + Seedance
+        if content_step >= 2 and _content_fallback_model(endpoint):
+            endpoint = _content_fallback_model(endpoint)
+            caps = _previz_caps(endpoint)
+        built = _take_payload(owner, pid, plan, take, caps, variant="real", fallback_step=step,
+                              soften=content_step >= 1) if real else _take_payload(owner, pid, plan, take, caps,
+                                                                                   soften=content_step >= 1)
+        if content_step:
+            tag += f" content={CONTENT_STEP_NAMES.get(content_step, '')}"
         refs = trace.stop(built)
         prompt = built["prompt"]
         image_urls = built["imageUrls"]
@@ -5023,8 +5412,12 @@ def _do_poll_previz(owner: str, pid: str, gen_id: str, index: int, variant: str,
             message = poll_result.get("failureMessage") or "영상 생성 실패"
             _log_result(owner, pid, gen_id, gen, index, variant, arn, "failed", error=message)  # 지시서 116
             # vnew-live-fx C.6: 소리 검사 거절이면 칸에 failureKind "audio"(화면이 '소리 없이 다시 만들기'를 보인다).
-            _fail_variant(owner, pid, gen_id, index, variant, claim, message,
-                          kind=str(poll_result.get("failureKind") or "") or _audio_kind(message))
+            kind = str(poll_result.get("failureKind") or "") or _audio_kind(message)
+            if not kind and gen.get("mode") == "previz-take" and _content_kind(message):
+                # 작업 153: fal 콘텐츠 검사 거절 → 순화(같은 모델) → Seedance → 한국어 문구로 실패.
+                _escalate_content(owner, pid, gen_id, index, variant, claim)
+                return
+            _fail_variant(owner, pid, gen_id, index, variant, claim, message, kind=kind)
             return
         output_key = _find_output_key(prefix, arn)
 
@@ -8877,9 +9270,20 @@ def retry_segment(owner: str, pid: str, seg_id: str, variant: str = "real", audi
                 st["claimedAt"] = ""
                 st["invocationArn"] = ""
                 st["outputKey"] = ""
+                content_retry = st.get("failureKind") == CONTENT_FLAG_KIND
                 st.pop("failureKind", None)
                 st.pop("fallback", None)  # 작업 130: 사용자 다시 시도는 기본 Seedance 부터
                 st.pop("pendingCharge", None)
+                st.pop("contentFallback", None)
+                if content_retry:
+                    # 작업 153: 콘텐츠 검사로 끝난 칸은 1단계(순화한 프롬프트, 같은 모델)부터 다시. 조각도 거절된 조각만 1단계로.
+                    st["contentStep"] = 1
+                    for part in st.get("parts") or []:
+                        if isinstance(part, dict) and part.get("failureKind") == CONTENT_FLAG_KIND:
+                            part["contentStep"] = 1
+                            part.pop("contentFallback", None)
+                else:
+                    st.pop("contentStep", None)
                 if isinstance(audio, bool):
                     st["audio"] = audio
                 break
@@ -9057,6 +9461,10 @@ def gen_view(owner: str, pid: str, plan: dict) -> dict | None:
             "failureKind": state.get("failureKind") or "",
             "audio": state.get("audio") if isinstance(state.get("audio"), bool) else None,
         }
+        content_fb = state.get("contentFallback")
+        if isinstance(content_fb, dict) and content_fb.get("to"):
+            # 작업 153: 콘텐츠 검사로 Seedance 로 만든 칸(화면 한 줄). 없으면 키 없음(옛 보기와 같다).
+            out["contentFallback"] = {"from": str(content_fb.get("from") or ""), "to": str(content_fb.get("to") or "")}
         fallback = state.get("fallback")
         if isinstance(fallback, dict) and fallback.get("step"):
             # 작업 130: likeness 단계(⑤ 실사 행 문구). 컷 단위는 끝난 컷 수 / 전체 컷 수. 없으면 키 없음(옛 보기와 같다).

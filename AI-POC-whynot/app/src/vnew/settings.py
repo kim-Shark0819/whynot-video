@@ -436,6 +436,9 @@ VNEW_TAKE_MAX_SECONDS = _int("VNEW_TAKE_MAX_SECONDS", 30)
 # 작업 152: 테이크 녹화가 모델의 참고 영상 상한(vpoc ark.video_options maxRefVideoS, fal 기본 15초)보다 길면 컷 경계에서
 # 상한 이하 조각(part)으로 나눠 제출하고 결과를 이어 붙인다. 끄면 나누지 않고 제출 전 검사가 막는다(유료 호출 0).
 VNEW_TAKE_REF_SPLIT = _bool("VNEW_TAKE_REF_SPLIT", True)
+# 작업 153: fal 콘텐츠 검사 거절(contentFlag) 2단계 모델. 1단계(같은 모델, 순화한 프롬프트)도 거절되면 순화한 테이크를 이 모델
+# (fal endpoint, Seedance 테이크 경로)로 낸다. 빈 값이면 2단계를 건너뛰고 칸 실패. 원래 모델이 이 모델이어도 건너뛴다.
+VNEW_CONTENT_FALLBACK_MODEL = os.getenv("VNEW_CONTENT_FALLBACK_MODEL", "bytedance/seedance-2.5/reference-to-video").strip()
 # 테이크 출력 해상도(480p 초안 권장 — 비용 통제). 480p/720p/1080p.
 VNEW_TAKE_RESOLUTION = os.getenv("VNEW_TAKE_RESOLUTION", "480p")
 # draft(초안) 모드 — 480p 초안 생성, 응답에 draft_id(나중 1080p 완성용). 기본 켬.
