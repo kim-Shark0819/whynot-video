@@ -930,9 +930,11 @@ def _real_front_key(entry: dict) -> str:
 # 실사 프롬프트 ASSETS 의 고정 문장(줄이기 단계·최소형 모두 ASSETS 머리에 남는다). "sheet" 낱말은 쓰지 않는다(lr-d 검사:
 # 웹툰 rule_replace 의 "reference sheet" 가 실사에 남지 않게 본다) — 시트는 "turnaround views" 로 적는다.
 REAL_TAKE_SHEET_SENTENCE = (
-    "Each person is the same person as in their 3D-model photos (front and turnaround views); keep face, hair, "
-    "body shape and outfit as in those photos unless COSTUME says otherwise"
+    "Each person is the same person as in their 3D-model photos (front and turnaround views); keep face, hair and "
+    "body shape as in those photos; clothing comes only from COSTUME"
 )
+# 작업 146: 실사 시트 인물에 쓸 만한 장면 옷이 없을 때(COSTUME 문장 없음) 시트 기본 옷을 따라 입지 않게 한다.
+REAL_TAKE_NO_SHEET_CLOTHES = "Do not copy the sheet's default clothes (such as a plain white shirt)"
 # 인물 바꾸기에서 모습 [애니]를 고른 인물: 웹툰 정면·시트를 참고로 주고 실사 인물로 옮기라고 적는다.
 REAL_TAKE_ANIME_SENTENCE = "render as a photoreal person matching this character design"
 REAL_CAST_LOOKS = ("real", "anime")
@@ -3371,8 +3373,13 @@ def _take_prompt(plan: dict, take: dict, *, cast: list[dict], panel_nos: list[in
         budget -= _utf8_len(REAL_REF_AI_NOTE) + 1  # 작업 140: 맨 앞 AI 캐릭터 고지(줄이기에서 빠지지 않게 미리 뺀다)
     entries = _take_timeline_entries(plan, take)
     if real:
+        # 작업 146: 인물 장면 옷 = 정리한 COSTUME(괄호·"Identified as"·"speaks" 메모 빼기), 쓸 만하지 않으면(2낱말 미만·옷 낱말
+        # 없음) 테이크 컷의 콘티 → 대본 → 패널 읽기 순(_scene_outfits sources). 후보는 한 번만 모으고 상한은 줄이기 단계가 정한다.
+        raw = {str(m.get("name") or ""): str(m.get("costume") or "") for m in cast if m.get("name")}
+        outfit_sources = _scene_outfits(plan, _seg_cut_ids(take), raw, sources=True)
+        outfit_candidates = {name: [value, *outfit_sources.get(name, [])] for name, value in raw.items()}
         # 작업 136: 실사 연기(지시서 actionEn) = 그림 문장 빼기·옷 구절 → 그 컷 장면 옷(_real_brief_text). 웹툰은 그대로.
-        costumes = {str(m.get("name") or ""): str(m.get("costume") or "") for m in cast if m.get("name")}
+        costumes = {name: _scene_outfit_pick(values) for name, values in outfit_candidates.items()}
         for entry, cut_id in zip(entries, _seg_cut_ids(take)):
             entry["action"] = _real_brief_text(entry.get("action"), _scene_outfits(plan, [cut_id], costumes)).rstrip(".")
     all_stamps = [f"{e['start']}-{e['end']}s" for e in entries]
@@ -3574,7 +3581,12 @@ def _take_prompt(plan: dict, take: dict, *, cast: list[dict], panel_nos: list[in
                 if state["appearance_limit"] > 0 else ""
             )
             front_no = member.get("frontNo")
-            costume = _clip_words(_txt(member.get("costume")), state["costume_limit"])
+            if real:
+                # 작업 146: 정리·출처 넘김(_scene_outfit_pick). 줄이기 상한에서도 옷 구절 중간에서 끊지 않는다.
+                costume = _scene_outfit_pick(outfit_candidates.get(str(member.get("name") or ""), []),
+                                             state["costume_limit"])
+            else:
+                costume = _clip_words(_txt(member.get("costume")), state["costume_limit"])
             voice = (
                 _clip_words(_txt(member.get("voice")), state["voice_limit"])
                 if state["voice_limit"] > 0 else ""
@@ -3612,6 +3624,8 @@ def _take_prompt(plan: dict, take: dict, *, cast: list[dict], panel_nos: list[in
             elif real:
                 if front_no and not sheet_no:
                     sentence += f". COSTUME: as worn in @Image{front_no}"
+                elif sheet_no:
+                    sentence += f". {REAL_TAKE_NO_SHEET_CLOTHES}"
             else:
                 sentence += f". COSTUME: exactly as in the original panels {panel_ref}"
             if voice:
@@ -4706,12 +4720,33 @@ _OUTFIT_DANGLING = re.compile(r"(?:[\s,;/]+(?:at|of|with|in|on|to|for|from|by|in
                               r"and|or|his|her|their|its))+$", re.IGNORECASE)
 
 
-def _scene_outfit_text(text) -> str:
+# 작업 146: 패널 읽기 메모 문장("Identified as the blond young man", "speaks politely") — 옷 문장이 아니라서 뺀다.
+_OUTFIT_ANALYSIS = re.compile(r"\b(?:identified as|speaks?|speaking)\b", re.IGNORECASE)
+# 작업 146: 쓸 만한 장면 옷인지 보는 옷 낱말 = REAL_BRIEF_CLOTHING_WORDS + 윗옷 이름(crew-neck 등). 옷 구절 빼기(_real_brief_text)는 그대로.
+_OUTFIT_GARMENT = re.compile(
+    REAL_BRIEF_CLOTHING_WORDS.pattern + r"|\b(?:crew-?necks?|turtlenecks?|v-necks?|polos?|tees?|knit(?:wear|s)?|tops?|"
+    r"tank-?tops?|hanbok|robes?|gowns?|parkas?|windbreakers?|tuxedos?|tracksuits?|button-?(?:ups?|downs?))\b",
+    re.IGNORECASE,
+)
+
+
+def _scene_outfit_text(text, limit: int = 140) -> str:
     """작업 137: 장면 옷 1개 → 실사 문장 조각(끝 마침표 없음). 괄호 메모를 빼고, 실사 낱말 정리·140자 상한(지금과 같다) 뒤
-    관사·전치사로 잘린 꼬리를 뺀다."""
+    관사·전치사로 잘린 꼬리를 뺀다. 작업 146: "Identified as …"·"speaks …" 문장도 빼고, 상한(limit)은 통 테이크 줄이기가 정한다."""
     text = _OUTFIT_NOTE.sub(" ", str(text or "")).strip()
-    text = _clip_words(_real_words(text), 140).rstrip(" .")
+    text = " ".join(s for s in re.split(r"(?<=[.!?;])\s+", text) if s and not _OUTFIT_ANALYSIS.search(s))
+    text = _clip_words(_real_words(text), limit).rstrip(" .")
     return _OUTFIT_DANGLING.sub("", text).rstrip(" ,;")
+
+
+def _scene_outfit_pick(candidates, limit: int = 140) -> str:
+    """작업 146: 후보 옷 문장을 앞에서부터 _scene_outfit_text 로 정리해, 2낱말 이상이고 옷 낱말(_OUTFIT_GARMENT)이 든 첫 것.
+    없으면 ""("Plain." 같은 잘린 조각은 다음 출처로 넘어간다)."""
+    for value in candidates or []:
+        text = _scene_outfit_text(value, limit)
+        if len(text.split()) >= 2 and _OUTFIT_GARMENT.search(text):
+            return text
+    return ""
 
 
 def _brief_name_forms(name: str) -> list[str]:
@@ -4815,9 +4850,10 @@ def _outfit_of(item: dict) -> str:
     return ""
 
 
-def _scene_outfits(plan: dict, cut_ids, cast_outfits: dict | None = None) -> dict[str, str]:
+def _scene_outfits(plan: dict, cut_ids, cast_outfits: dict | None = None, *, sources: bool = False) -> dict:
     """작업 136: 컷 인물별 장면 옷 {이름: 영어 옷}. 우선순위 ① 콘티 컷 characters ② 대본 entries(그 컷 panels 와 겹치는 것)
     characters ③ cast_outfits(= 132/135 의 outfits, _resolve_cast: 원작 패널 읽기 + 장면 의상 수정) ④ "".
+    작업 146: sources=True 면 {이름: [① 콘티, ② 대본, ③ cast_outfits]}(빈 값 포함, 같은 순서) — _scene_outfit_pick 의 후보.
 
     cast_outfits 가 None 이면 _resolve_cast(read=False, 캐시만 — 외부 호출 없음). 이름 = 그 컷에 보이는 인물 + 콘티 인물,
     없으면 모든 출처의 이름. 캐릭터 기본 옷(analysis outfitEn, 3D 기본 옷)은 쓰지 않는다.
@@ -4854,6 +4890,9 @@ def _scene_outfits(plan: dict, cut_ids, cast_outfits: dict | None = None) -> dic
     names = [n for n in dict.fromkeys(n.strip() for n in names) if n]
     if not names:
         names = list(dict.fromkeys([*tiers[0], *tiers[1], *(str(n) for n in cast_outfits or {})]))
+    if sources:
+        return {name: [tiers[0].get(name) or "", tiers[1].get(name) or "", str((cast_outfits or {}).get(name) or "").strip()]
+                for name in names}
     return {name: tiers[0].get(name) or tiers[1].get(name) or str((cast_outfits or {}).get(name) or "").strip()
             for name in names}
 

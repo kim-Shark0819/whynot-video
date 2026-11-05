@@ -50255,6 +50255,87 @@ def check_vnew_prepare_heartbeat_144() -> None:
 
 
 
+def check_vnew_real_take_costume_146() -> None:
+    """작업 146 — 실사 통 테이크 COSTUME 정리(패널 읽기 메모 빼기·잘린 조각은 다음 출처). 외부 호출 없음, 유료 0.
+
+    (rc-a) _scene_outfit_text/_scene_outfit_pick: 괄호 메모·"Identified as"·"speaks" 빼기, "Plain." → 다음 후보, 상한에서 꼬리 없음
+    (rc-b) _take_prompt(실사, test2 COSTUME 2개): 여의준 "Black crew-neck", 범건우 "Plain." → 콘티 옷 "black open-collar shirt"
+    (rc-c) ASSETS 머리 문장에 "and outfit as in those photos" 없음, 시트 인물·쓸 만한 옷 없음 → 시트 기본 옷 금지 문장
+    (rc-d) 애니(웹툰) 통 테이크 sha = 139 기대값
+    """
+    import hashlib as _hashlib  # noqa: PLC0415
+    import traceback as _tb  # noqa: PLC0415
+
+    sys.path.insert(0, str(ROOT / "app"))
+    from src.vnew import generate as genmod  # noqa: PLC0415
+
+    bad: list[str] = []
+    a, b = "범건우", "여의준"
+    raw_b = "(Identified as the blond young man, speaks politely.) Black crew-neck."
+    raw_a = "(Identified as the dark-haired man, speaks in casual/informal Korean.) Plain."
+    take = {"id": "take1", "cutIds": ["c1", "c2", "c3"], "seconds": 12}
+
+    def real_cast() -> list[dict]:
+        return [{"name": b, "colorName": "red", "frontNo": 1, "refNos": [1, 2], "sheetNo": 1, "look": "real", "costume": raw_b},
+                {"name": a, "colorName": "blue", "frontNo": 3, "refNos": [3, 4], "sheetNo": 3, "look": "real", "costume": raw_a}]
+
+    def assets(prompt: str) -> str:
+        return next((ln for ln in prompt.split("\n") if ln.startswith("ASSETS")), "")
+
+    try:
+        with _guard_real_llm() as llm_calls, _pin_vnew(VNEW_FX=True):
+            # ================= (rc-a) 정리 helper =================
+            got = [genmod._scene_outfit_text(raw_b), genmod._scene_outfit_text(raw_a),  # noqa: SLF001
+                   genmod._scene_outfit_text("Identified as the tall man. Speaks softly. Grey wool coat."),  # noqa: SLF001
+                   genmod._scene_outfit_pick([raw_a, "", "black open-collar shirt"]),  # noqa: SLF001
+                   genmod._scene_outfit_pick([raw_b, "black open-collar shirt"]),  # noqa: SLF001
+                   genmod._scene_outfit_pick([raw_a, "Plain"]),  # noqa: SLF001
+                   genmod._scene_outfit_pick(["a long charcoal wool coat over a white tee with the collar open at the neck"], 50)]  # noqa: SLF001
+            if got != ["Black crew-neck", "Plain", "Grey wool coat", "black open-collar shirt", "Black crew-neck", "",
+                       "a long charcoal wool coat over a white tee"]:
+                bad.append(f"(rc-a) 장면 옷 정리·후보 넘김이 다릅니다: {got!r}")
+            if genmod._scene_outfit_text("black open-collar shirt") != "black open-collar shirt":  # noqa: SLF001
+                bad.append("(rc-a) 137 장면 옷 문장이 바뀌었습니다")
+
+            # ================= (rc-b)(rc-c) 실사 통 테이크 =================
+            plan = _fw_plan()
+            plan["conti"]["cuts"][0]["characters"] = [{"name": a, "outfitEn": "black open-collar shirt"}]
+            p = genmod._take_prompt(plan, take, cast=real_cast(), panel_nos=[], location_no=None, variant="real")  # noqa: SLF001
+            line = assets(p)
+            ra = genmod._romanize_name(a)  # noqa: SLF001
+            if f"{ra}'s close front portrait from the same sheet set. COSTUME in this scene (overrides the photo's clothing): " \
+                    "black open-collar shirt." not in line \
+                    or "COSTUME in this scene (overrides the photo's clothing): Black crew-neck." not in line \
+                    or "Identified" in p or "speaks" in line or "Plain" in line:
+                bad.append(f"(rc-b) 실사 ASSETS COSTUME 이 정리·출처 넘김이 아닙니다: {line!r}")
+            if "and outfit as in those photos" in p or "outfit as in those photos" in genmod.REAL_TAKE_SHEET_SENTENCE \
+                    or genmod.REAL_TAKE_SHEET_SENTENCE not in line or genmod.REAL_TAKE_NO_SHEET_CLOTHES in line:
+                bad.append(f"(rc-c) ASSETS 머리 문장에 사진 옷 유지가 남았거나 옷이 있는데 금지 문장이 붙었습니다: {line!r}")
+            p_none = genmod._take_prompt(_fw_plan(), take, cast=real_cast(), panel_nos=[], location_no=None,  # noqa: SLF001
+                                         variant="real")
+            line_none = assets(p_none)
+            if line_none.count(genmod.REAL_TAKE_NO_SHEET_CLOTHES) != 1 \
+                    or f"{ra}'s close front portrait from the same sheet set. {genmod.REAL_TAKE_NO_SHEET_CLOTHES}." not in line_none \
+                    or "Plain" in line_none:
+                bad.append(f"(rc-c) 시트 인물·쓸 만한 옷 없음에 시트 기본 옷 금지 문장이 1번이 아닙니다: {line_none!r}")
+
+            # ================= (rc-d) 애니 sha =================
+            cast_take = [{"name": a, "colorName": "blue", "frontNo": 1, "costume": "black open-collar shirt"},
+                         {"name": b, "colorName": "red", "frontNo": 2, "costume": "navy training top"}]
+            web_take = genmod._take_prompt(_fw_plan(), take, cast=cast_take, panel_nos=[3], location_no=None)  # noqa: SLF001
+            if _hashlib.sha256(web_take.encode("utf-8")).hexdigest() != _ST139_SHA_138["anime-take"]:
+                bad.append("(rc-d) 애니(웹툰) 통 테이크 sha 가 바뀌었습니다")
+            if llm_calls:
+                bad.append(f"가짜가 아닌 LLM 호출: {llm_calls}")
+    except Exception:  # noqa: BLE001
+        bad.append("작업 146 검사 예외\n" + _tb.format_exc())
+    if bad:
+        fail("작업 146 실사 통 테이크 COSTUME 정리 검사 실패\n  " + "\n  ".join(bad))
+    else:
+        ok("작업 146 실사 통 테이크 COSTUME (rc-a)메모 빼기·잘린 조각 다음 출처 (rc-b)여의준 Black crew-neck·범건우 콘티 옷 "
+           "(rc-c)사진 옷 유지 문장 없음·시트 기본 옷 금지 (rc-d)애니 sha 그대로")
+
+
 def main() -> int:
     print("== vpoc1 check ==")
     check_compileall()
@@ -50357,6 +50438,7 @@ def main() -> int:
     check_vnew_prepare_heartbeat_144()
     check_vnew_real_sheet_ref_142()
     check_vnew_edit_take_menu_145()
+    check_vnew_real_take_costume_146()
     check_vnew_location_real_edit_143()
     check_vnew_plan_step_stay_129()
     check_pod_zones()
