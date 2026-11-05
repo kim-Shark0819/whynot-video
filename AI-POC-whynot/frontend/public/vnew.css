@@ -4291,11 +4291,35 @@ textarea.vnew-field-input {
 .vnew-edit-bin-list {
   display: flex;
   flex-wrap: wrap;
+  align-items: center;
   gap: 6px;
+  min-width: 0;
 }
 
-.vnew-edit-bin-item {
+/* 작업 145: [테이크 고르기] 메뉴 + [＋ 넣기], 고른 테이크의 [컷 고르기] + [＋ 컷 넣기] */
+.vnew-edit-bin-label {
   font-size: 13px;
+  color: var(--text-muted, #6b7280);
+}
+
+.vnew-edit-bin-take,
+.vnew-edit-bin-cut {
+  min-width: 0;
+  max-width: 100%;
+  font-size: 13px;
+}
+
+.vnew-edit-bin-cut {
+  font-size: 12px;
+}
+
+.vnew-edit-bin-add,
+.vnew-edit-bin-cut-add {
+  font-size: 13px;
+}
+
+.vnew-edit-bin-cuts {
+  padding-left: 12px;
 }
 
 .vnew-edit-export {

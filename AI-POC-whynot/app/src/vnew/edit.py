@@ -636,6 +636,71 @@ def _retake_meta(owner: str, pid: str, gen_id: str, items: list[dict], meta: dic
     return {**extra, **{k: v for k, v in meta.items() if isinstance((v or {}).get("hasAudio"), bool) or k not in extra}}
 
 
+def _number_takes(gen: dict, variant: str, items: list[dict]) -> None:
+    """재료에 테이크 번호를 붙인다(작업 145 — ⑦ 재료 [테이크 고르기] 메뉴). 저장값·허용 목록·기본 문서는 바꾸지 않는다.
+
+    항목마다 takeNo(테이크면 번호, 아니면 None)·takeLabel("테이크 n" 또는 "")·takeAt(만든 시각 ISO 또는 "")·
+    takeOf(그 테이크의 컷 재료면 테이크 번호, 아니면 None)를 둔다.
+      - 실사 통 테이크(회차가 있다): 끝난 회차마다 그 회차 병합본(final-real-r<n>.mp4, 다시 이어 붙였으면 -fixed — 회차 기록 키 그대로)
+        = "테이크 n"(회차 번호 n 그대로). 그 회차의 칸 결과·컷·다시 만든 버전은 takeOf n. 끝나지 않은·실패·취소 회차는 테이크가 아니다.
+      - 그 밖(웹툰·회차 없는 실사): 통 테이크 결과(지금 결과 → 다시 만든 버전 v2… 순서, 오래된 것부터) = 테이크 1, 2, ….
+        통 테이크 결과가 없으면(컷 모드·순차 모드) 합친 영상이 테이크 1 이고 컷·구간 결과는 takeOf 1.
+    """
+    for item in items:
+        item.update(takeNo=None, takeLabel="", takeAt="", takeOf=None)
+    gen = gen if isinstance(gen, dict) else {}
+
+    def run_no(value) -> int:
+        try:
+            number = int(value or 0)
+        except (TypeError, ValueError):
+            return 0
+        return number if number > 0 else 0
+
+    def mark(item: dict, number: int, at: str = "") -> None:
+        item.update(takeNo=number, takeLabel=f"테이크 {number}", takeAt=str(at or ""))
+
+    run = gen.get("realRun") if isinstance(gen.get("realRun"), dict) else {}
+    history = [h for h in (gen.get("realHistory") or []) if isinstance(h, dict)]
+    if variant == "real" and str(gen.get("mode") or "") == "previz-take" and (run_no(run.get("n")) or history):
+        current_n = run_no(run.get("n")) or run_no((gen.get("finalReal") or {}).get("n"))
+        done_runs = {run_no(h.get("n")): h for h in history if h.get("status") == "done" and h.get("finalKey")}
+        current_done = False
+        for item in items:
+            group = str(item.get("group") or "")
+            if group == "final" and current_n:
+                mark(item, current_n, run.get("startedAt"))
+                current_done = True
+            elif group.endswith("-final") and run_no(item.get("run")) in done_runs:
+                mark(item, run_no(item["run"]), done_runs[run_no(item["run"])].get("startedAt"))
+        for item in items:
+            group = str(item.get("group") or "")
+            if group in ("current", "retake") and current_done:
+                item["takeOf"] = current_n
+            elif group == f"r{run_no(item.get('run'))}" and run_no(item.get("run")) in done_runs:
+                item["takeOf"] = run_no(item["run"])
+        return
+    takes = [m for m in items if m.get("kind") == "take" and m.get("group") == "current"]
+    takes += sorted((m for m in items if m.get("kind") == "take" and m.get("group") == "retake"),
+                    key=lambda m: (int(m.get("version") or 0), int(m.get("index") or 0)))
+    if takes:
+        for number, item in enumerate(takes, 1):
+            mark(item, number)
+        by_cell = {str(m.get("cellId") or ""): m["takeNo"] for m in takes if m.get("group") == "current"}
+        for item in items:  # 실사 컷 단위 Kling 칸("테이크id#컷id")은 그 테이크의 컷
+            cell = str(item.get("cellId") or "")
+            if item.get("takeNo") is None and item.get("kind") == "cut" and "#" in cell:
+                item["takeOf"] = by_cell.get(cell.split("#", 1)[0])
+        return
+    final = next((m for m in items if m.get("group") == "final"), None)
+    if final is None:
+        return
+    mark(final, 1)
+    for item in items:
+        if item is not final and item.get("group") in ("current", "retake"):
+            item["takeOf"] = 1
+
+
 def _cut_numbers(plan: dict) -> dict[str, int]:
     cuts = ((plan or {}).get("conti") or {}).get("cuts") or []
     out: dict[str, int] = {}
@@ -964,6 +1029,11 @@ def _material_out(item: dict, info: dict | None, default_mids: set[str]) -> dict
         "label": item.get("label") or "",
         "cutIds": list(item.get("cutIds") or []),
         "run": item.get("run"),
+        # 작업 145: 테이크 고르기 메뉴(_number_takes). 테이크가 아니면 takeNo None·takeLabel "", 테이크의 컷이면 takeOf = 그 번호.
+        "takeNo": item.get("takeNo"),
+        "takeLabel": str(item.get("takeLabel") or ""),
+        "takeAt": str(item.get("takeAt") or ""),
+        "takeOf": item.get("takeOf"),
         "inDefault": item["mid"] in default_mids,
         "duration": duration if duration is None else float(duration),
         "hasAudio": info.get("hasAudio") if isinstance(info.get("hasAudio"), bool) else None,
@@ -1056,6 +1126,7 @@ def edit_view(owner: str, pid: str, variant: str | None = None) -> dict:
         raise VpocError(where, "NoMaterials",
                         f"편집할 {VARIANT_LABELS[chosen]} 영상이 아직 없습니다. ⑤에서 영상을 먼저 만들어 주세요.", 409)
     _describe(plan, items)
+    _number_takes(gen, chosen, items)  # 작업 145
     allowed = {m["sourceKey"] for m in items}
     saved = doc is not None and doc["variant"] == chosen
     default_items = _default_group(items)
