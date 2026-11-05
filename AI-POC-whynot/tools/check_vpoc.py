@@ -10366,9 +10366,9 @@ def check_vnew_take_prompt() -> None:
 
     외부 호출 없음. _take_prompt·_take_timeline_entries·_short_appearance 를 직접 부른다.
 
-    (tp-a) test2 규모(인물 2명·외형 각 600자·6컷·대사 각 2줄 한국어) → 6개 타임스탬프 모두 존재·≤4,000 바이트.
+    (tp-a) test2 규모(인물 2명·외형 각 600자·6컷·대사 각 2줄 한국어) → 6개 타임스탬프 모두 존재·≤4,000자(작업 157: 글자).
     (tp-b) _short_appearance: 인물당 ≤170자, "hair" 정보 포함.
-    (tp-c) 12컷(30초) 극단 입력 → 12개 타임스탬프 모두 존재·≤4,000 바이트.
+    (tp-c) 12컷(30초) 극단 입력 → 12개 타임스탬프·대사 24줄·연기 12컷 모두(작업 157: 넘치면 fits=False → 조각 나누기).
     """
     sys.path.insert(0, str(ROOT / "app"))
     bad: list[str] = []
@@ -10453,8 +10453,8 @@ def check_vnew_take_prompt() -> None:
         missing_a = [s for s in stamps_a if s not in prompt_a]
         if missing_a:
             bad.append(f"(tp-a) 프롬프트에 빠진 컷 타임스탬프가 있습니다: {missing_a}")
-        if len(prompt_a.encode("utf-8")) > 4000:
-            bad.append(f"(tp-a) 프롬프트가 4,000바이트를 넘습니다: {len(prompt_a.encode('utf-8'))}")
+        if genmod._prompt_len(prompt_a) > genmod._take_prompt_budget():  # noqa: SLF001 — 작업 157: 상한 단위 = 글자
+            bad.append(f"(tp-a) 프롬프트가 4,000자를 넘습니다: {genmod._prompt_len(prompt_a)}")  # noqa: SLF001
         if not _strip_fixed(prompt_a).startswith("STYLE:"):
             bad.append(f"(tp-a) 프롬프트가 STYLE 로 시작하지 않습니다: {prompt_a[:30]}")
         if "TIMELINE" not in prompt_a or "RULES:" not in prompt_a:
@@ -10465,7 +10465,8 @@ def check_vnew_take_prompt() -> None:
 
         # (tp-c) 12컷(30초) → 12개 타임스탬프 모두·≤2,500 바이트.
         plan_c, take_c = _make_plan_and_take(12, 30)
-        prompt_c = genmod._take_prompt(plan_c, take_c, cast=cast, panel_nos=[13, 14], location_no=None)
+        audit_c: dict = {}
+        prompt_c = genmod._take_prompt(plan_c, take_c, cast=cast, panel_nos=[13, 14], location_no=None, audit=audit_c)
         entries_c = genmod._take_timeline_entries(plan_c, take_c)
         stamps_c = [f"{e['start']}-{e['end']}s" for e in entries_c]
         if len(stamps_c) != 12:
@@ -10473,8 +10474,11 @@ def check_vnew_take_prompt() -> None:
         missing_c = [s for s in stamps_c if s not in prompt_c]
         if missing_c:
             bad.append(f"(tp-c) 12컷 중 빠진 타임스탬프가 있습니다: {missing_c}")
-        if len(prompt_c.encode("utf-8")) > 4000:
-            bad.append(f"(tp-c) 12컷 프롬프트가 4,000바이트를 넘습니다: {len(prompt_c.encode('utf-8'))}")
+        # 작업 157: 기대값 변경 — 12컷 극단은 대사 24줄·연기 12컷을 다 싣는다. 글자 상한을 넘으면 audit.fits=False 로 제출 쪽이
+        # 조각을 더 나눈다(전에는 최소형이 연기를 빼서 4,000B 안에 넣었다).
+        if audit_c.get("linesInPrompt") != 24 or audit_c.get("actionsInPrompt") != 12 \
+                or audit_c.get("fits") != (genmod._prompt_len(prompt_c) <= genmod._take_prompt_budget()):  # noqa: SLF001
+            bad.append(f"(tp-c) 12컷 대사·연기가 다 실리지 않았거나 fits 판정이 틀립니다: {audit_c}")
         # STYLE·RULES 는 유지.
         if not _strip_fixed(prompt_c).startswith("STYLE:"):
             bad.append("(tp-c) 12컷 프롬프트가 STYLE 로 시작하지 않습니다")
@@ -10490,8 +10494,8 @@ def check_vnew_take_prompt() -> None:
         fail("통 테이크 프롬프트(컷 보존) 검사 실패\n" + "\n".join(f"  {item}" for item in bad))
     else:
         ok(
-            "통 테이크 프롬프트(컷 보존) 검사 (tp-a)6컷 타임스탬프 모두·≤4000B·외형 요약 "
-            "(tp-b)_short_appearance ≤170·hair 포함 (tp-c)12컷 타임스탬프 모두·≤4000B"
+            "통 테이크 프롬프트(컷 보존) 검사 (tp-a)6컷 타임스탬프 모두·≤4000자·외형 요약 "
+            "(tp-b)_short_appearance ≤170·hair 포함 (tp-c)12컷 타임스탬프·대사 24줄·연기 12컷 모두·fits 판정"
         )
 
 
@@ -10867,7 +10871,7 @@ def check_vnew_take_prompt_polish() -> None:
     (pp-a) 키스 컷(두 사람, 대사 화자=여의준) → gaze 에 자기 자신 대상 없음. grammar.eyelines 에
            자기 자신(person:여의준)이 있어도 상대(범건우)로 바뀐다. 동일 인물 중복 없음.
     (pp-b) RULES 에 "costume exactly as written in ASSETS" 있고, "costume identical to the references" 없음.
-    (pp-c) test2 규모(장면 의상·목소리 포함, 6컷) → 6컷 모두 연기 문장 존재·≤4,000 바이트·"approximately" 없음.
+    (pp-c) test2 규모(장면 의상·목소리 포함, 6컷) → 6컷 모두 연기 문장 존재·≤4,000자(작업 157: 글자)·"approximately" 없음.
     (pp-d) voice 문구가 단어 중간에서 끊기지 않음(_clip_words 가 마침표로 끝맺는다).
     """
     sys.path.insert(0, str(ROOT / "app"))
@@ -10972,8 +10976,8 @@ def check_vnew_take_prompt_polish() -> None:
         missing = [s for s in stamps if s not in prompt]
         if missing:
             bad.append(f"(pp-c) 프롬프트에 빠진 컷 타임스탬프: {missing}")
-        if len(prompt.encode("utf-8")) > 4000:
-            bad.append(f"(pp-c) 프롬프트가 4000바이트를 넘습니다: {len(prompt.encode('utf-8'))}")
+        if genmod._prompt_len(prompt) > genmod._take_prompt_budget():  # noqa: SLF001 — 작업 157: 상한 단위 = 글자
+            bad.append(f"(pp-c) 프롬프트가 4000자를 넘습니다: {genmod._prompt_len(prompt)}")  # noqa: SLF001
         if "approximately" in prompt:
             bad.append("(pp-c) 프롬프트에 'approximately'(렌즈·거리 숫자)가 남아 있습니다")
         if " mm" in prompt or "50 mm" in prompt:
@@ -11016,7 +11020,7 @@ def check_vnew_take_prompt_polish() -> None:
     else:
         ok(
             "통 테이크 프롬프트 다듬기(065 dry-run) 검사 (pp-a)자기 자신 시선 없음·중복 없음 "
-            "(pp-b)RULES costume ASSETS·references 없음 (pp-c)6컷 연기·≤4000B·approximately 없음·샷 약어 "
+            "(pp-b)RULES costume ASSETS·references 없음 (pp-c)6컷 연기·≤4000자·approximately 없음·샷 약어 "
             "(pp-d)voice 단어 경계·마침표"
         )
 
@@ -11030,10 +11034,10 @@ def check_vnew_take_prompt_budget() -> None:
     외부 호출 없음. _take_prompt·_take_timeline_entries·_romanize_name·_gaze_is_default 를 직접 부른다.
 
     (pb-a) test2 실제 길이(6컷·한국어 대사 각 25~35자·장면 의상 140자·목소리 70자·인물 2명) →
-           ≤4,000 바이트, ASSETS 에 두 인물 COSTUME 모두, 6컷 모두 연기 문장(최소 30자 이상) 존재.
+           ≤4,000자(작업 157: 글자), ASSETS 에 두 인물 COSTUME 모두, 6컷 모두 연기 문장(최소 30자 이상) 존재.
     (pb-b) 화자→상대 기본 시선 컷은 TIMELINE 에 gaze 없음, closed/down 예외 컷만 gaze 있음,
            RULES 에 "Eyes:" 기본 규칙.
-    (pb-c) 12컷 극단 입력에서도 ASSETS 인물 문장·12 타임스탬프 유지, ≤4,000 바이트.
+    (pb-c) 12컷 극단 입력에서도 ASSETS 인물 문장·12 타임스탬프·대사 12줄·연기 12컷 유지(작업 157: 넘치면 fits=False).
     """
     sys.path.insert(0, str(ROOT / "app"))
     bad: list[str] = []
@@ -11138,8 +11142,8 @@ def check_vnew_take_prompt_budget() -> None:
         # ---- (pb-a) test2 실제 길이: 6컷·한국어 대사 30자·장면 의상 140자·목소리 70자 ----
         plan_a, take_a = _plan(6, dialogue_len=30, gaze_mode="default")
         prompt_a = genmod._take_prompt(plan_a, take_a, cast=cast, panel_nos=[3, 4], location_no=5)
-        if len(prompt_a.encode("utf-8")) > 4000:
-            bad.append(f"(pb-a) 프롬프트가 4,000바이트를 넘습니다: {len(prompt_a.encode('utf-8'))}")
+        if genmod._prompt_len(prompt_a) > 4000:  # noqa: SLF001 — 작업 157: 상한 단위 = 글자
+            bad.append(f"(pb-a) 프롬프트가 4,000자를 넘습니다: {genmod._prompt_len(prompt_a)}")  # noqa: SLF001
         # ASSETS 에 두 인물 COSTUME 모두(장면 의상 문구가 통째로 빠지지 않았는지).
         assets_a = prompt_a.split("ASSETS:", 1)[1].split("\n", 1)[0] if "ASSETS:" in prompt_a else ""
         if "COSTUME in this scene" not in assets_a:
@@ -11198,9 +11202,12 @@ def check_vnew_take_prompt_budget() -> None:
 
         # ---- (pb-c) 12컷 극단 입력: ASSETS 인물 문장·12 타임스탬프·≤2500B ----
         plan_c, take_c = _plan(12, dialogue_len=35, gaze_mode="default")
-        prompt_c = genmod._take_prompt(plan_c, take_c, cast=cast, panel_nos=[3, 4], location_no=5)
-        if len(prompt_c.encode("utf-8")) > 4000:
-            bad.append(f"(pb-c) 12컷 프롬프트가 4,000바이트를 넘습니다: {len(prompt_c.encode('utf-8'))}")
+        audit_c: dict = {}
+        prompt_c = genmod._take_prompt(plan_c, take_c, cast=cast, panel_nos=[3, 4], location_no=5, audit=audit_c)
+        # 작업 157: 기대값 변경 — 12컷 극단도 대사 12줄·연기 12컷을 다 싣는다. 4,000자를 넘으면 fits=False(제출 쪽이 조각을 나눈다).
+        if audit_c.get("linesInPrompt") != 12 or audit_c.get("actionsInPrompt") != 12 \
+                or audit_c.get("fits") != (genmod._prompt_len(prompt_c) <= 4000):  # noqa: SLF001
+            bad.append(f"(pb-c) 12컷 대사·연기가 다 실리지 않았거나 fits 판정이 틀립니다: {audit_c}")
         entries_c = genmod._take_timeline_entries(plan_c, take_c)
         stamps_c = [f"{e['start']}-{e['end']}s" for e in entries_c]
         if len(stamps_c) != 12:
@@ -11230,8 +11237,8 @@ def check_vnew_take_prompt_budget() -> None:
         fail("통 테이크 프롬프트 바이트 예산(066) 검사 실패\n" + "\n".join(f"  {item}" for item in bad))
     else:
         ok(
-            "통 테이크 프롬프트 바이트 예산(066) 검사 (pb-a)실길이 6컷 ≤4000B·두 인물 COSTUME·6컷 연기≥30자·대사 한국어 "
-            "(pb-b)기본 시선 gaze 생략·예외만 gaze·RULES Eyes·gaze 로마자 (pb-c)12컷 ASSETS 인물 문장·12 타임스탬프·≤4000B"
+            "통 테이크 프롬프트 예산(066) 검사 (pb-a)실길이 6컷 ≤4000자·두 인물 COSTUME·6컷 연기≥30자·대사 한국어 "
+            "(pb-b)기본 시선 gaze 생략·예외만 gaze·RULES Eyes·gaze 로마자 (pb-c)12컷 ASSETS 인물 문장·12 타임스탬프·대사·연기 모두"
         )
 
 
@@ -11481,10 +11488,11 @@ def check_vnew_take_harmony_motion() -> None:
     (hm-a) 통 테이크 test2 규모(6컷·인물2·한국어 대사·의상·목소리) → "anime compositing"·"rim light"·
            "depth of field"·"do NOT copy"·"parallax"·"same light direction"·"contact shadows" 포함,
            "unlit flat color tones" 없음, AVOID 에 "cinematic lighting" 없음, 6컷 ON SCREEN·"places his lips"·
-           연기 문장 유지, 두 COSTUME, ≤4,000 바이트.
+           연기 문장 유지, 두 COSTUME, ≤4,000자(작업 157: 글자 — 넘치면 STYLE 짧은 형도 anime compositing 을 남긴다).
     (hm-b) setting.timeKo "낮" → HARMONY 에 "day"·"no drift to sunset".
     (hm-c) 컷 단위 프롬프트: MOTION(short)·HARMONY(short) 포함, ≤2,500 바이트, 짧은 지시서에서 MOOD·SETTING 유지.
-    (hm-d) 스키마에 prompt maxLength 1800 이 명시된 모델(caps.promptMaxLength=1800) → 통 테이크 예산 1800.
+    (hm-d) 스키마에 prompt maxLength 1800 이 명시된 모델(caps.promptMaxLength=1800) → 통 테이크 예산 1800(작업 157: 넘치면
+           고정 부분 짧은 형 전부·대사·연기 그대로·fits=False).
     """
     sys.path.insert(0, str(ROOT / "app"))
     bad: list[str] = []
@@ -11596,8 +11604,8 @@ def check_vnew_take_harmony_motion() -> None:
         assets_a = prompt_a.split("ASSETS:", 1)[1].split("\n", 1)[0] if "ASSETS:" in prompt_a else ""
         if assets_a.count("COSTUME") < 2:
             bad.append(f"(hm-a) ASSETS 에 두 인물 COSTUME 이 모두 있지 않습니다: {assets_a[:300]}")
-        if len(prompt_a.encode("utf-8")) > 4000:
-            bad.append(f"(hm-a) 프롬프트가 4,000바이트를 넘습니다: {len(prompt_a.encode('utf-8'))}")
+        if genmod._prompt_len(prompt_a) > 4000:  # noqa: SLF001 — 작업 157: 상한 단위 = 글자
+            bad.append(f"(hm-a) 프롬프트가 4,000자를 넘습니다: {genmod._prompt_len(prompt_a)}")  # noqa: SLF001
 
         # ---- (hm-b) 낮 → day · no drift to sunset ----
         harmony_part = prompt_a.split("HARMONY:", 1)[1].split("\nRULES", 1)[0] if "HARMONY:" in prompt_a else ""
@@ -11663,11 +11671,15 @@ def check_vnew_take_harmony_motion() -> None:
         # 스키마 명시 1800 → min(4000, 1800) = 1800.
         if genmod._take_prompt_budget({"promptMaxLength": 1800}) != 1800:
             bad.append(f"(hm-d) 스키마 명시 1800 인데 예산이 1800 이 아닙니다: {genmod._take_prompt_budget({'promptMaxLength': 1800})}")
-        # 스키마 명시 1800 caps 로 실제 프롬프트도 1800 이하.
+        # 스키마 명시 1800 caps. 작업 157 기대값 변경: 6컷 대사·연기를 다 실으면 1,800자에 들지 않는다 → 고정 부분은 모두 짧은 형,
+        # 대사 6줄·연기 6컷은 그대로, fits=False(제출 쪽이 조각을 더 나눈다). 전에는 최소형이 연기를 빼서 1,800B 안에 넣었다.
+        audit_d: dict = {}
         prompt_d = genmod._take_prompt(plan_a, take_a, cast=cast, panel_nos=[3, 4], location_no=5,
-                                       caps={"promptMaxLength": 1800})
-        if len(prompt_d.encode("utf-8")) > 1800:
-            bad.append(f"(hm-d) 1800 caps 프롬프트가 1800바이트를 넘습니다: {len(prompt_d.encode('utf-8'))}")
+                                       caps={"promptMaxLength": 1800}, audit=audit_d)
+        fits_d = genmod._prompt_len(prompt_d) <= 1800  # noqa: SLF001
+        if audit_d.get("fits") != fits_d or audit_d.get("linesInPrompt") != 6 or audit_d.get("actionsInPrompt") != 6 \
+                or (not fits_d and len(audit_d.get("compact") or []) != len(genmod.TAKE_COMPACT_ORDER)):
+            bad.append(f"(hm-d) 1800 caps: 짧은 형 전부·대사 6줄·연기 6컷·fits 판정이 아닙니다: {audit_d}")
 
     except Exception as exc:  # noqa: BLE001
         import traceback as _tb  # noqa: PLC0415
@@ -11681,9 +11693,9 @@ def check_vnew_take_harmony_motion() -> None:
     else:
         ok(
             "살아 움직이는 TV 애니 룩·조화·모션(069 v2) 검사 (hm-a)anime compositing·rim light·parallax·"
-            "contact shadows·unlit 없음·AVOID cinematic 없음·6컷·키스 보존·두 COSTUME·≤4000B "
+            "contact shadows·unlit 없음·AVOID cinematic 없음·6컷·키스 보존·두 COSTUME·≤4000자 "
             "(hm-b)낮→day·no drift to sunset·밤→night (hm-c)컷 MOTION/HARMONY short·MOOD/SETTING 유지·순서·≤2500B "
-            "(hm-d)caps 없음 4000·미명시 4000·스키마 1800→1800"
+            "(hm-d)caps 없음 4000·미명시 4000·스키마 1800→1800·넘치면 대사·연기 그대로 fits=False"
         )
 
 
@@ -20200,8 +20212,12 @@ def check_vnew_fx() -> None:
 _FX_PROMPT_SHA_OFF = {
     # 지시서 118a: take6 은 컷마다 대사 2줄(dialogueKo 에이/비)이라 모든 줄을 쓰고 뒤 컷 둘째 줄 5개를 뺀 값으로 다시 쟀다
     # (c1 은 2줄). 옛 값 47de4cc2f1254042b3eed253eb4228849b45cec3ae1c29c8f0ad13bd15b93010. take12 는 둘째 줄을 다 빼 그대로다.
-    "take6": "66dcb00a0a9bb2169df602fcb2d297c23b1a096a0e3fa891099a0e9d670f2c6b",
-    "take12": "f9c5c3e5e800f798a53c724253c66d0da25249b1207b01d67e68bb0c91381dd3",
+    # 작업 157: take6·take12 다시 쟀다(끔 = 기호 필드가 있어도 같다는 성질은 그대로). 이유: 연기가 70자 자르기 대신 지시서 첫 문장
+    # 통째("… one hand flat on the folder as he speaks."), 상한이 글자(4,000자), 줄이기가 고정 부분 짧은 형 먼저(대사 빼기 없음) —
+    # take6 3,817자 [styleCompact], take12 3,756자 [style·avoid·motion·harmony·rules·assets Compact], 대사 12·24줄 모두.
+    # 옛 값 take6 66dcb00a0a9bb2169df602fcb2d297c23b1a096a0e3fa891099a0e9d670f2c6b, take12 f9c5c3e5e800f798a53c724253c66d0da25249b1207b01d67e68bb0c91381dd3.
+    "take6": "fe5257856798638065583405232f7c73719fe3b3e24c13ecb95abdde1d553d52",
+    "take12": "3b217bf221d0dd8aa18a0a4039717d09af1e2de1a00f5be82acc0afbf86d7d4e",
     "cutWebtoon": "eee172c7b7f111c74ebf1dd60dabed4be3a90553a0b2f4517126b7d38112c2c9",
     "cutReal": "760182843167fee9f226b70c19d58e08c8c826e8fb5f26024b11f20e6df82ffc",
     "cutRealLong": "21c40a331d564f300cee0353fb145aa0403ef90ec72880a4a2cbd5e08ef3a877",
@@ -20251,7 +20267,7 @@ def _fx_take_fixture(n_cuts: int, total_seconds: int, cut_extra=None) -> tuple:
     return plan, take
 
 
-def _fx_take_prompt(genmod, n_cuts: int, total_seconds: int, cut_extra=None, caps=None) -> tuple:
+def _fx_take_prompt(genmod, n_cuts: int, total_seconds: int, cut_extra=None, caps=None, audit=None) -> tuple:
     """(프롬프트, 타임스탬프 목록). tp-a·tp-c 와 같은 cast·panel_nos·location_no, styleEn 가짜."""
     plan, take = _fx_take_fixture(n_cuts, total_seconds, cut_extra)
     short = genmod._short_appearance(_FX_TAKE_LONG_APPEARANCE, 170)
@@ -20263,7 +20279,8 @@ def _fx_take_prompt(genmod, n_cuts: int, total_seconds: int, cut_extra=None, cap
     orig_style = genmod._first_take_style_en
     genmod._first_take_style_en = lambda _plan: "thin sketchy pencil lines, soft pastel flat color"
     try:
-        prompt = genmod._take_prompt(plan, take, cast=cast, panel_nos=panel_nos, location_no=location_no, caps=caps)
+        prompt = genmod._take_prompt(plan, take, cast=cast, panel_nos=panel_nos, location_no=location_no, caps=caps,
+                                     audit=audit)
         entries = genmod._take_timeline_entries(plan, take)
     finally:
         genmod._first_take_style_en = orig_style
@@ -20357,9 +20374,8 @@ _FX_RULE_BODY_DESIGN = (
     " background stay identical in every cut."
 )
 _FX_CUT_RULE_DESIGN = "Exactly two hands per person; hair color and outfit patterns as placed in the references. "
-# 090 필수 수정(2026-10-30 Claude): 짧은 형 원문과 합격 기준. 문장 바이트 한도는 RULE_BODY_SHORT 110·CUT_RULE_BODY 90·
-# MOTION·HARMONY 짧은 형 160 이다(HARMONY 는 시간대 낱말을 넣은 뒤 잰다).
-_FX_RULE_BODY_SHORT_DESIGN = " Each person has exactly two hands; keep hair color and outfit (and where its pattern is) as in the references."
+# 090 필수 수정(2026-10-30 Claude): 짧은 형 원문. 문장 바이트 한도는 CUT_RULE_BODY 90·MOTION·HARMONY 짧은 형 160 이다(HARMONY 는
+# 시간대 낱말을 넣은 뒤 잰다). 작업 157: 통 테이크 RULE_BODY_SHORT(bodyShort)는 없앴다 — RULES 짧은 형 1줄(TAKE_RULES_COMPACT)이 대신한다.
 _FX_MOTION_MIN_DESIGN = (
     "MOTION: Living characters, not a panned or zoomed still; @Video1's head bobbing only marks the speaker, "
     "do NOT copy it; parallax depth, no jitter."
@@ -20368,16 +20384,8 @@ _FX_HARMONY_MIN_DESIGN = (
     "HARMONY: {tod} light; same light direction and color temperature on characters and background in every cut, "
     "{drift}; contact shadows."
 )
-# 켬 상태 통 테이크 합격 기준: 입력마다 MOTION·HARMONY 와 묘사 규칙의 형(full 원문 · short 짧은 형)을 고정한다(None = 보지 않음).
-# 모든 입력은 ≤ 4,000B·모든 타임스탬프. 원문이 들어가는 입력은 원문이어야 한다("들어가면 원문"). 12컷 기호없음은 연기 있는
-# 최소형에 원문이 안 들어가 짧은 형, 12컷 최악은 연기 있는 후보가 모두 넘쳐 연기 없는 최소형 + 원문이다(바뀌기 전에도 연기 없음).
-_FX_TAKE_MUST = {
-    "6컷 기호없음": {"mh": ("full",), "body": ("short",)},
-    "6컷 보통": {"mh": ("full",), "body": ("short",)},
-    "6컷 최악": {"mh": ("full",), "body": ("short",)},
-    "12컷 기호없음": {"mh": ("short",), "body": ("short",)},
-    "12컷 최악": {"mh": ("full",), "body": None},
-}
+# 작업 157: 옛 합격 기준 _FX_TAKE_MUST(입력마다 MOTION·HARMONY·묘사 규칙 형 고정)는 없앴다 — 형은 그 고정 부분이 짧은 형 단계를
+# 지났는지로 정해진다(fx-h 가 단계와 형이 맞는지 본다).
 # vnew-live-fx C2 (lr-e): 웹툰 통 테이크 프롬프트 sha256(VNEW_FX 켬). `_take_prompt` 에 variant 인자를 더하기 **전**
 # (2026-10-30, 묶음 B 커밋 뒤 작업 트리)에 _fx_take_prompt 고정 입력(fx-h 와 같은 기호없음·보통·최악)으로 잰 값이다.
 # variant 기본값(webtoon)·variant="webtoon" 둘 다 글자 하나 다르지 않아야 한다. (이름, 컷 수, 초, 바이트, sha256)
@@ -20386,10 +20394,15 @@ _LR_TAKE_SHA_ON = (
     # (옛 값 3901B 911839e77759d742f04a7899e0d04de8362bcaefc8c041f3c664e276249040d7). 나머지는 둘째 줄이 다 빠져 그대로다.
     # 작업 127: 맨 앞 고정부(FIXED: 화풍·배경·overall tone)가 붙고 그 몫을 예산에서 미리 빼 다시 쟀다. 옛 값(126까지):
     # take6 3963B 6d498e39…, take6normal 3874B a63f1708…, take6worst 3875B aa4bc25c…, take12worst 3627B 024819e5….
-    ("take6", 6, 18, 3999, "be2830b8ba996b14b599a49dc1000bd84092ac503320a79ae4d72ca91dd6496c"),
-    ("take6normal", 6, 18, 3972, "e1d41770a1aa1fae6b1b83410525987ed0a927cf4bcfe58cb96dd1f4865af651"),
-    ("take6worst", 6, 18, 3973, "f0cd64dea1f7d543a9022c50f0f2479e74ab2b0b98cf1f0f4f98c0dfab5569f0"),
-    ("take12worst", 12, 30, 3725, "f80462b13e9991e28fc30d7b1d932895b4f9d0617530d5691f7d76e0e7fb820a"),
+    # 작업 157: 네 값 모두 다시 쟀다(기본·variant="webtoon" 이 같다는 성질은 그대로). 이유: 연기 = 지시서 첫 문장 통째(70자 자르기 없음),
+    # 상한 = 4,000자, 넘치면 고정 부분 짧은 형 먼저(대사·연기 빼기 없음). 바이트는 정보로만 남긴다(한국어 대사 때문에 4,000B 를 넘는다).
+    # take6 3,627자 [style·avoid·motion], take6normal 3,632자 [+harmony·rules], take6worst 3,946자 [+assets], take12worst 4,622자
+    # [고정 부분 전부 + moodDrop·fxShort, overBudget — 제출 쪽이 조각을 나눈다]. 옛 값(147~156): take6 3999B be2830b8…,
+    # take6normal 3972B e1d41770…, take6worst 3973B f0cd64de…, take12worst 3725B f80462b1….
+    ("take6", 6, 18, 4035, "545c29fe79deed251868437b34dbeda1214ebdacd3201db4e1701b46c6c42704"),
+    ("take6normal", 6, 18, 4040, "4bdae2cf80c14c270f7c47f05e6db63120b0d82dc45cd38bedfef4709a604a46"),
+    ("take6worst", 6, 18, 4354, "bc21c4c31ad25d380e8ba020bff3830f51ba37e7fb9e6ed8d13f879339c736ee"),
+    ("take12worst", 12, 30, 5426, "46329be99519eea026fb3099d9b850325364dbcad66560f51df29fe6fb291b33"),
 )
 
 
@@ -20397,10 +20410,10 @@ def check_vnew_fx_prompt() -> None:
     """vnew-live-fx 묶음 A3 — 영상 프롬프트·분석 규칙(RA4~RA6). 외부 호출 없음(프롬프트 함수만, LLM 은 가짜로 막는다).
 
     (fx-h) 통 테이크 켬: TIMELINE 연기 → mood → FX → 대사 순서·FX 문장 원문(" / ")·한국 이름 로마자·한글 남으면 분위기 뺌(로그)·
-           moodKo 안 씀, RULES 에 RULE_BODY 1번, 6컷 보통·최악·12컷 극단 ≤4000B·모든 타임스탬프, 단계 순서(mood40 은 voiceDrop 뒤,
-           moodDrop·fxShort·bodyShort 는 audioShort 뒤·action55 앞), 최소형은 분위기 없음·기호 짧은 형만, 기호 없음 → 끔 단계 + bodyShort,
-           합격 기준 _FX_TAKE_MUST(MOTION·HARMONY·묘사 규칙 원문/짧은 형, 090 필수 수정 1)·짧은 형 원문·바이트 한도(110·160)·
-           늦은 시간대 HARMONY, 바이트·단계·형을 출력
+           moodKo 안 씀, RULES 에 RULE_BODY 1번, 6컷 보통·최악·12컷 극단: 모든 타임스탬프·대사·연기, ≤4000자 또는 fits=False,
+           작업 157 단계 순서(고정 부분 짧은 형 TAKE_COMPACT_ORDER → 시선 → 분위기 → 기호 → 연기 첫 문장 → overBudget, 컷 내용은
+           고정 부분이 다 짧은 형이 된 뒤에만), MOTION·HARMONY·묘사 규칙 형 = 단계, 짧은 형 원문·바이트 한도(160)·
+           늦은 시간대 HARMONY, 스키마 1800·1500 caps, 글자·단계·형을 출력
     (fx-i) VNEW_FX=False: 통 테이크 6컷·12컷, 컷 단위 웹툰·실사·실사 긴 입력 sha256 = 변경 전(컷에 기호·분위기 필드가 있어도), 항목 fx·moodEn 빈 값
     (fx-j) 컷 단위 켬: 기본 입력(웹툰·실사) SETTING = 끔·단계 none(090 필수 수정 2), CUT_RULE_BODY ≤90B·위치, 웹툰 FX 줄(ACTION 바로 뒤, "; ")·
            실사 EXPRESSION(배경 기호 없음, FX 줄 없음)·MOOD 맨 앞 컷 분위기·넘치면 bodyDrop 이 장소 요약보다 먼저·≤2500B,
@@ -20434,10 +20447,10 @@ def check_vnew_fx_prompt() -> None:
 
     logs = _LogCapture()
 
-    def take_run(n_cuts: int, seconds: int, extra=None, caps=None) -> tuple[str, list[str], list[str]]:
+    def take_run(n_cuts: int, seconds: int, extra=None, caps=None, audit=None) -> tuple[str, list[str], list[str]]:
         """(프롬프트, 타임스탬프, 적용 단계)."""
         logs.clear()
-        prompt, stamps = _fx_take_prompt(genmod, n_cuts, seconds, extra, caps)
+        prompt, stamps = _fx_take_prompt(genmod, n_cuts, seconds, extra, caps, audit)
         lines = logs.messages("vnew.gen.take_prompt bytes=")
         steps = lines[-1].split("steps=", 1)[1].split(",") if lines else ["?"]
         return prompt, stamps, steps
@@ -20481,7 +20494,7 @@ def check_vnew_fx_prompt() -> None:
             want_piece = (f"; mood: {roman_a}'s frozen, embarrassed smile; awkward air; FX: {_FX_REF_SENTENCE[blush]} / "
                           f"{_FX_REF_SENTENCE[sweat]}; {roman_a} (off-screen voice): \"")
             first_h, _sep, second_h = tl_h.partition(" 3-6s ")
-            if want_piece not in first_h or not first_h.split("; mood: ")[0].endswith("one hand flat on the folder."):
+            if want_piece not in first_h or not first_h.split("; mood: ")[0].endswith("one hand flat on the folder as he speaks."):
                 bad.append(f"(fx-h) 컷 항목이 연기 → mood → FX(\" / \") → 대사 순서·로마자가 아닙니다: {first_h[:400]!r}")
             if "mood:" in second_h or "FX:" in second_h or "미안해" in prompt_h or "모드코" in prompt_h:
                 bad.append("(fx-h) 한글이 남은 분위기·moodKo 가 프롬프트에 들어갔습니다")
@@ -20496,51 +20509,45 @@ def check_vnew_fx_prompt() -> None:
             with _pin_vnew(VNEW_FX=False):
                 if _FX_RULE_BODY_DESIGN in _fx_take_prompt(genmod, 2, 6, lambda i: dict(extra_h[i]))[0]:
                     bad.append("(fx-h) 끔 상태 RULES 에 묘사 규칙이 있습니다")
-            # 바이트·단계: 6컷 보통·최악, 12컷 극단(최악), 기호 없음.
+            # 작업 157 기대값 변경: 줄이기 = 고정 부분 짧은 형(TAKE_COMPACT_ORDER) → 시선 → 분위기·기호 → 연기 첫 문장, 대사·연기 빼기 없음.
+            # 옛 단계(voice40·mood40·bodyShort·action55·dialogue25·lineDrop·minimalTimeline)·_FX_TAKE_MUST(090 MOTION·HARMONY 형 고정)는
+            # 이 순서로 대신한다: MOTION·HARMONY·묘사 규칙은 그 고정 부분이 짧은 형 단계를 지났을 때만 짧은 형이다. 상한 = 글자.
+            order_157 = [s + "Compact" for s in genmod.TAKE_COMPACT_ORDER] + ["gazeDrop", "moodDrop", "fxShort", "actionFirst",
+                                                                              "overBudget"]
+            content_157 = ("gazeDrop", "moodDrop", "fxShort", "actionFirst")
             runs = {}
+            audits: dict[str, dict] = {}
             for label, n_cuts, seconds, extra in (("6컷 기호없음", 6, 18, None), ("6컷 보통", 6, 18, normal), ("6컷 최악", 6, 18, worst),
                                                   ("12컷 기호없음", 12, 30, None), ("12컷 최악", 12, 30, worst)):
-                prompt, stamps, steps = take_run(n_cuts, seconds, extra)
+                audit: dict = {}
+                prompt, stamps, steps = take_run(n_cuts, seconds, extra, audit=audit)
                 runs[label] = (prompt, stamps, steps)
+                audits[label] = audit
                 missing = [stamp for stamp in stamps if stamp not in prompt]
-                if nbytes(prompt) > 4000 or missing or len(stamps) != n_cuts:
-                    bad.append(f"(fx-h) {label}: {nbytes(prompt)}B·빠진 타임스탬프 {missing}")
+                fits = genmod._prompt_len(prompt) <= 4000  # noqa: SLF001
+                if missing or len(stamps) != n_cuts or audit.get("fits") != fits or ("overBudget" in steps) == fits \
+                        or audit.get("linesInPrompt") != 2 * n_cuts or audit.get("actionsInPrompt") != n_cuts:
+                    bad.append(f"(fx-h) {label}: {genmod._prompt_len(prompt)}자·빠진 타임스탬프 {missing}·감사 {audit}")  # noqa: SLF001
                 if any(line and not line.startswith(take_heads) for line in prompt.split("\n")):
                     bad.append(f"(fx-h) {label}: 머리글이 아닌 줄이 있습니다")
+                if [s for s in order_157 if s in steps] != steps and steps != ["none"]:
+                    bad.append(f"(fx-h) {label}: 단계가 157 순서(고정 부분 짧은 형 → 컷 내용)가 아닙니다: {steps}")
+                if any(s in steps for s in content_157) and len(audit.get("compact") or []) != len(genmod.TAKE_COMPACT_ORDER):
+                    bad.append(f"(fx-h) {label}: 고정 부분이 다 짧은 형이 되기 전에 컷 내용을 줄였습니다: {steps}")
             with _pin_vnew(VNEW_FX=False):
                 for label, n_cuts, seconds in (("6컷 끔", 6, 18), ("12컷 끔", 12, 30)):
                     runs[label] = take_run(n_cuts, seconds)
-            # 지시서 118a: 12컷은 컷마다 대사 2줄이라 최소형 앞에서 둘째 줄 12개를 뺀다(lineDrop12).
-            # 작업 147: 대사는 맨 마지막에 줄인다 → dialogue25 가 costume110 뒤에서 action55 뒤(lineDrop 앞)로 옮겼다.
-            full_order = ["styleTrim", "avoidShort", "voice40", "voiceDrop", "mood40", "appearance100", "costume110",
-                          "audioShort", "moodDrop", "fxShort", "bodyShort", "action55", "dialogue25", "lineDrop12", "minimalTimeline"]
-            if [step for step in runs["12컷 최악"][2] if not step.startswith("motionHarmony")] != full_order:
-                bad.append(f"(fx-h) 큰 입력의 단계 순서가 다릅니다: {runs['12컷 최악'][2]}")
-            for label in ("6컷 보통", "6컷 최악"):
-                steps = runs[label][2]
-                idx = {name: steps.index(name) for name in steps}
-                if "mood40" in idx and not (idx["voiceDrop"] < idx["mood40"] < idx.get("appearance100", 99)):
-                    bad.append(f"(fx-h) {label}: mood40 이 voiceDrop 뒤·appearance100 앞이 아닙니다: {steps}")
-                if "fxShort" in idx and not (idx["audioShort"] < idx["moodDrop"] < idx["fxShort"] < idx.get("bodyShort", 99) < idx.get("action55", 99)):
-                    bad.append(f"(fx-h) {label}: moodDrop·fxShort·bodyShort 가 audioShort 뒤·action55 앞 순서가 아닙니다: {steps}")
             for label in ("6컷 기호없음", "12컷 기호없음"):
                 if set(runs[label][2]) & set(new_steps):
-                    bad.append(f"(fx-h) {label}: 기호·분위기가 없는데 새 단계가 들어갔습니다: {runs[label][2]}")
-            # 기호가 없으면 켬 전용 단계(bodyShort·motionHarmony*)만 다르다. bodyShort 는 audioShort 바로 뒤.
-            only_on = ("bodyShort", "motionHarmonyShort", "motionHarmonyDrop")
-            steps_12 = runs["12컷 기호없음"][2]
-            if [step for step in steps_12 if step not in only_on] != runs["12컷 끔"][2] \
-                    or steps_12[steps_12.index("audioShort") + 1:steps_12.index("audioShort") + 2] != ["bodyShort"]:
-                bad.append(f"(fx-h) 기호 없는 12컷의 적용 단계가 끔 + bodyShort 가 아닙니다: {steps_12} / {runs['12컷 끔'][2]}")
+                    bad.append(f"(fx-h) {label}: 기호·분위기가 없는데 분위기·기호 단계가 들어갔습니다: {runs[label][2]}")
+            if "backgroundCompact" in runs["12컷 끔"][2]:
+                bad.append(f"(fx-h) 끔(고정부 없음)인데 backgroundCompact 가 있습니다: {runs['12컷 끔'][2]}")
             for label in ("6컷 보통", "6컷 최악", "12컷 최악"):
                 prompt, _stamps, steps = runs[label]
                 tl = timeline_of(prompt)
-                if "minimalTimeline" in steps:
-                    with_action = "leans forward" in tl
-                    if "mood:" in tl or any(_FX_REF_SENTENCE[key] in tl for key in fxmod.FX_KEYS) \
-                            or ("FX: " in tl) != with_action or (with_action and "FX: one sweat drop, not an anger mark" not in tl):
-                        bad.append(f"(fx-h) {label}: 최소형에 분위기가 있거나 기호가 짧은 형·연기 후보 규칙과 다릅니다: {tl[:300]!r}")
-            # 090 필수 수정 1 합격 기준(_FX_TAKE_MUST): 켬 상태에서 MOTION·HARMONY·묘사 규칙이 원문 또는 짧은 형으로 남는다.
+                if ("mood:" in tl) == ("moodDrop" in steps) or ("FX: one sweat drop, not an anger mark" in tl) != ("fxShort" in steps) \
+                        or tl.count("leans forward") != (6 if label.startswith("6") else 12):
+                    bad.append(f"(fx-h) {label}: 분위기·기호 짧은 형·연기가 단계와 맞지 않습니다: {steps} {tl[:300]!r}")
             plan_mh, _take_mh = _fx_take_fixture(6, 18)
             motion_forms = {"full": genmod._motion_line(True), "short": _FX_MOTION_MIN_DESIGN}
             harmony_forms = {"full": genmod._harmony_line(plan_mh, True),
@@ -20556,23 +20563,17 @@ def check_vnew_fx_prompt() -> None:
                 rules = next((row for row in prompt.split("\n") if row.startswith("RULES:")), "")
                 if _FX_RULE_BODY_DESIGN in rules:
                     return "full"
-                return "short" if _FX_RULE_BODY_SHORT_DESIGN in rules else "none"
+                return "short" if "Two hands per person, hair and outfit patterns as in the references" in rules else "none"
 
             forms: dict[str, tuple[str, str, str]] = {}
-            for label, must in _FX_TAKE_MUST.items():
+            for label in ("6컷 기호없음", "6컷 보통", "6컷 최악", "12컷 기호없음", "12컷 최악"):
                 prompt, _stamps, steps = runs[label]
                 got = (form_of(prompt, "MOTION:", motion_forms), form_of(prompt, "HARMONY:", harmony_forms), body_of(prompt))
                 forms[label] = got
-                if got[0] not in must["mh"] or got[1] not in must["mh"]:
-                    bad.append(f"(fx-h) {label}: 켬 상태 MOTION·HARMONY 가 {must['mh']} 가 아닙니다: {got[:2]} [{','.join(steps)}]")
-                if must["body"] and got[2] not in must["body"]:
-                    bad.append(f"(fx-h) {label}: 켬 상태 묘사 규칙(원문·짧은 형)이 없습니다: {got[2]}")
-                want_tag = {"full": None, "short": "motionHarmonyShort"}.get(got[0])
-                if ("motionHarmonyShort" in steps) != (want_tag == "motionHarmonyShort") or "motionHarmonyDrop" in steps \
-                        or ("motionHarmonyShort" in steps and steps[-1] != "motionHarmonyShort"):
-                    bad.append(f"(fx-h) {label}: 단계 로그의 motionHarmony 표시가 실제 형과 다릅니다: {steps} {got}")
-            if genmod.RULE_BODY_SHORT != _FX_RULE_BODY_SHORT_DESIGN or nbytes(_FX_RULE_BODY_SHORT_DESIGN.strip()) > 110:
-                bad.append("(fx-h) RULE_BODY_SHORT 가 design 원문이 아니거나 110B 를 넘습니다")
+                want = ("short" if "motionCompact" in steps else "full", "short" if "harmonyCompact" in steps else "full",
+                        "short" if "rulesCompact" in steps else "full")
+                if got != want:
+                    bad.append(f"(fx-h) {label}: MOTION·HARMONY·묘사 규칙 형이 단계와 맞지 않습니다: {got} != {want} [{','.join(steps)}]")
             if genmod.MOTION_MIN != _FX_MOTION_MIN_DESIGN or genmod.HARMONY_MIN != _FX_HARMONY_MIN_DESIGN or nbytes(genmod.MOTION_MIN) > 160:
                 bad.append("(fx-h) MOTION·HARMONY 짧은 형이 design 원문이 아니거나 MOTION 이 160B 를 넘습니다")
             for time_ko in ["", "모름"] + [ko for ko, _en in genmod._TIME_OF_DAY_EN]:
@@ -20588,22 +20589,20 @@ def check_vnew_fx_prompt() -> None:
                 mo, ha, body = forms.get(label) or (form_of(prompt, "MOTION:", motion_forms), form_of(prompt, "HARMONY:", harmony_forms),
                                                     body_of(prompt))
                 names = {"full": "원문", "short": "짧은 형", "none": "없음", "other": "기타"}
-                report.append(f"{label} {nbytes(prompt)}B [{','.join(steps)}] MOTION {names[mo]}·HARMONY {names[ha]}·묘사 규칙 {names[body]}")
-            # 작업 127: 고정부(FIXED) 몫은 예산에서 미리 빠진다 → 나머지가 지금과 같은 1800 이 되게 caps 에 고정부 바이트를 더한다.
+                report.append(f"{label} {genmod._prompt_len(prompt)}자 [{','.join(steps)}] MOTION {names[mo]}·HARMONY {names[ha]}·"  # noqa: SLF001
+                              f"묘사 규칙 {names[body]}")
+            # 작업 157: 고정부(FIXED)도 예산 안에서 잰다(전에는 미리 뺐다). 스키마 1800·1500: 고정 부분 모두 짧은 형·고정부는 맨 앞
+            # (BACKGROUND 1문장)·대사 12줄·연기 6컷 그대로, 넘치면 fits=False(조각 나누기). 전 기대값(assetsStripped·motionHarmonyDrop)은 없앴다.
             plan_fixed, take_fixed = _fx_take_fixture(6, 18, worst)
-            fixed_bytes = nbytes(genmod._fixed_head(plan_fixed, "")) + 1
-            capped, stamps_c, steps_c = take_run(6, 18, worst, caps={"promptMaxLength": 1800 + fixed_bytes})
-            if nbytes(capped) > 1800 + fixed_bytes or any(stamp not in capped for stamp in stamps_c) \
-                    or not capped.startswith(genmod._fixed_head(plan_fixed, "") + "\n"):
-                bad.append(f"(fx-h) 스키마 1800 caps 에서 {nbytes(capped)}B 이거나 타임스탬프·고정부가 빠졌습니다")
-            # 1800: 연기 있는·없는 후보가 모두 넘쳐 의상을 줄인 ASSETS + MOTION·HARMONY 짧은 형. 1500: 그것도 넘쳐 빠짐(로그로 알린다).
-            if steps_c[-2:] != ["assetsStripped", "motionHarmonyShort"] or genmod.MOTION_MIN not in capped \
-                    or genmod._harmony_min(plan_mh) not in capped:
-                bad.append(f"(fx-h) 1800 caps 가 assetsStripped + MOTION·HARMONY 짧은 형이 아닙니다: {steps_c[-3:]}")
-            tight, stamps_t, steps_t = take_run(6, 18, worst, caps={"promptMaxLength": 1500})
-            if nbytes(tight) > 1500 or any(stamp not in tight for stamp in stamps_t) or steps_t[-1:] != ["motionHarmonyDrop"] \
-                    or "MOTION:" in tight:
-                bad.append(f"(fx-h) 1500 caps 에서 MOTION·HARMONY 빠짐이 로그에 없거나 예산·타임스탬프가 다릅니다: {nbytes(tight)}B {steps_t[-3:]}")
+            for cap in (1800, 1500):
+                audit_c: dict = {}
+                capped, stamps_c, steps_c = take_run(6, 18, worst, caps={"promptMaxLength": cap}, audit=audit_c)
+                if any(stamp not in capped for stamp in stamps_c) \
+                        or not capped.startswith(genmod._fixed_head(plan_fixed, "", compact=True) + "\n") \
+                        or len(audit_c.get("compact") or []) != len(genmod.TAKE_COMPACT_ORDER) \
+                        or audit_c.get("linesInPrompt") != 12 or audit_c.get("actionsInPrompt") != 6 \
+                        or audit_c.get("fits") != (genmod._prompt_len(capped) <= cap):  # noqa: SLF001
+                    bad.append(f"(fx-h) 스키마 {cap} caps: 짧은 형 전부·고정부·대사·연기·fits 가 아닙니다: {steps_c} {audit_c}")
             mark("fx-h")
 
             # ---------------- (fx-j) 컷 단위 켬 ----------------
@@ -20778,8 +20777,8 @@ def check_vnew_fx_prompt() -> None:
         fail("vnew-live-fx 영상 프롬프트·분석 규칙 검사 실패\n" + "\n".join(f"  {item}" for item in bad))
     else:
         ok(
-            "vnew-live-fx 영상 프롬프트·분석 규칙 검사 (fx-h)통 테이크 mood·FX 순서·로마자·한글 뺌·RULE_BODY·≤4000B·타임스탬프·"
-            "단계 순서(bodyShort)·최소형 짧은 기호·합격 기준 MOTION·HARMONY·묘사 규칙 원문/짧은 형 (fx-i)끔 sha256 5종 = 변경 전 "
+            "vnew-live-fx 영상 프롬프트·분석 규칙 검사 (fx-h)통 테이크 mood·FX 순서·로마자·한글 뺌·RULE_BODY·≤4000자 또는 fits=False·타임스탬프·"
+            "대사·연기 모두·단계 순서(157 고정 부분 짧은 형 → 컷 내용)·MOTION·HARMONY·묘사 규칙 형 = 단계 (fx-i)끔 sha256 5종(157 다시 잼) "
             "(fx-j)컷 기본 입력 SETTING = 끔·FX·EXPRESSION·MOOD·CONTINUITY·bodyDrop 이 장소 요약보다 먼저·≤2500B·⑥-1 짧은 형·단계 로그 "
             "(fx-k)분석·의상 SYSTEM 켬/끔·캐시 키 (fx-n)프롬프트 주입 한 줄·80자·로그 컷 id"
         )
@@ -23093,6 +23092,8 @@ _LR_REAL_STYLE_DESIGN = (
     "STYLE: Cinematic live-action film footage, photorealistic, natural skin texture, 35mm lens, soft natural light, "
     "K-drama cinematography, soft glow, shallow depth of field."
 )
+# 작업 157: 예산을 넘은 실사 테이크는 STYLE 이 짧은 형(generate.REAL_TAKE_STYLE_COMPACT)으로 시작한다 — 가짜 fal 이 실사로 가른다.
+_LR_REAL_STYLE_COMPACT_HEAD = "STYLE: Photoreal live-action K-drama footage"
 _LR_REAL_REPLACE_DESIGN = (
     " Replace each mannequin with its person; keep face and hair identical to the reference photo and the costume "
     "exactly as written in ASSETS in every cut."
@@ -23266,7 +23267,7 @@ class _LrEnv:
         with self.lock:
             rid = f"rq{len(self.requests) + 1}"
             prompt = str((payload or {}).get("prompt") or "")
-            kind = "real" if _strip_fixed(prompt).startswith(_LR_REAL_STYLE_DESIGN) else "webtoon"
+            kind = "real" if _strip_fixed(prompt).startswith((_LR_REAL_STYLE_DESIGN, _LR_REAL_STYLE_COMPACT_HEAD)) else "webtoon"
             self.kinds[rid] = kind
             self.requests.append({"rid": rid, "kind": kind, "url": url, "payload": payload, "semHeld": self.sem.held})
         return {"request_id": rid, "draft_id": "dr-" + rid}
@@ -23419,7 +23420,7 @@ def check_vnew_take_real() -> None:
     (lr-b) 2·3·4·5회차: realHistory(최대 3, 오래된 것 버림)·n·final-real-r{n}.mp4·이전 파일 남음·고른 실사 비움
     (lr-c) 실사 payload: 인물 사진(캐스팅 사진·실사 정면)·실사 장소 뷰·패널·웹툰 그림 없음·@Image 번호·모든 이미지·영상 data URI·
            웹툰과 같은 @Video1·본문 키·URL·S3 키 없음
-    (lr-d) 실사 프롬프트: STYLE 원문(결정 7)·"webtoon" 0·실사 표현(배경 기호 없음)·그림 낱말 제거·rule_replace·AVOID·≤4000B·
+    (lr-d) 실사 프롬프트: STYLE 원문(결정 7, 157: 넘치면 짧은 형)·"webtoon" 0·실사 표현(배경 기호 없음)·그림 낱말 제거·rule_replace·AVOID·≤4000자·모든 컷 연기·
            모든 타임스탬프·로그 variant=real bytes= steps=, 6컷 보통·최악·12컷 최악, 검사에 걸리면 failed·제출 0·원장 0
            (2026-10-30 피드백 2) 실사 외형 _real_appearance 7경우(재현 2 두 입력·with 빠진 옛 문장·"tied" 머리·옷 낱말만·여러 문장·
            그림 낱말): 결과 상수·≤170·머리 조각 통째·옷 낱말 0·매달린 끝 0·with 빠진 이음 0·반쪽 조각 0, 분석 문장 → _real_look →
@@ -23842,8 +23843,8 @@ def check_vnew_take_real() -> None:
                     or "mood: " not in timeline or "short black style hair, sharp eyes" not in lines_of(prompt, "ASSETS:") \
                     or "wearing" in lines_of(prompt, "ASSETS:"):
                 bad.append(f"(lr-d) 실사 표현·실사 연기·분위기·고친 외모 문장이 없습니다: {timeline[:300]!r}")
-            if nbytes(prompt) > 4000 or any(stamp not in prompt for stamp in stamps) or not stamps:
-                bad.append(f"(lr-d) 실사 프롬프트 {nbytes(prompt)}B·타임스탬프 {stamps}")
+            if genmod._prompt_len(prompt) > 4000 or any(stamp not in prompt for stamp in stamps) or not stamps:  # noqa: SLF001 — 157: 글자
+                bad.append(f"(lr-d) 실사 프롬프트 {genmod._prompt_len(prompt)}자·타임스탬프 {stamps}")  # noqa: SLF001
             prompt_logs = logs.messages("vnew.gen.take_prompt variant=real bytes=")
             if len(prompt_logs) != 1 or not prompt_logs[0].startswith(f"vnew.gen.take_prompt variant=real bytes={nbytes(prompt)} steps="):
                 bad.append(f"(lr-d) 실사 프롬프트 로그가 1줄(variant=real bytes= steps=)이 아닙니다: {prompt_logs}")
@@ -23894,12 +23895,16 @@ def check_vnew_take_real() -> None:
                                                   ("12컷 최악", 12, 30, worst), ("12컷 기호없음", 12, 30, None)):
                 text, stamps_r, steps = real_prompt(n_cuts, seconds, extra)
                 missing = [s for s in stamps_r if s not in text]
-                if "webtoon" in text.lower() or nbytes(text) > 4000 or missing or len(stamps_r) != n_cuts \
-                        or "sparkle" in text.lower() or "FX:" in text or not _strip_fixed(text).startswith(_LR_REAL_STYLE_DESIGN):
-                    bad.append(f"(lr-d) 실사 {label}: {nbytes(text)}B·빠진 타임스탬프 {missing}·webtoon/FX/배경 기호")
+                # 작업 157 기대값 변경: 상한 = 4,000자(넘치면 overBudget — 조각 나누기), STYLE 은 styleCompact 단계면 짧은 형,
+                # 실사도 애니와 같은 TIMELINE — 모든 컷에 연기("leans forward")가 남는다(전에는 최소형이 실사 연기를 뺐다).
+                style_want = genmod.REAL_TAKE_STYLE_COMPACT if "styleCompact" in steps else _LR_REAL_STYLE_DESIGN
+                if "webtoon" in text.lower() or (genmod._prompt_len(text) > 4000) != ("overBudget" in steps) or missing \
+                        or len(stamps_r) != n_cuts or text.count("leans forward") != n_cuts \
+                        or "sparkle" in text.lower() or "FX:" in text or not _strip_fixed(text).startswith(style_want):  # noqa: SLF001
+                    bad.append(f"(lr-d) 실사 {label}: {genmod._prompt_len(text)}자·빠진 타임스탬프 {missing}·webtoon/FX/배경 기호·연기")  # noqa: SLF001
                 if extra is not None and "leans forward" in text and "a bead of sweat on the temple" not in text:
                     bad.append(f"(lr-d) 실사 {label}: 연기를 남겼는데 실사 표현(땀)이 없습니다")
-                report.append(f"실사 {label}: {nbytes(text)}B steps={steps}")
+                report.append(f"실사 {label}: {genmod._prompt_len(text)}자 {nbytes(text)}B steps={steps}")  # noqa: SLF001
             mark("lr-d", "lr-f")
 
             # ================= (lr-d) webtoon 이 남으면 제출·원장 0 =================
@@ -24219,8 +24224,8 @@ def check_vnew_take_real() -> None:
         ok(
             "vnew-live-fx 통 테이크 실사 버전 검사 (lr-a)시작 조건 404·400·409 6종·성공 저장 모양·드라이버·운영 문구 "
             "(lr-b)5회차 realHistory 3·final-real-r{n}·이전 파일 (lr-c)인물 사진·실사 장소·data URI·같은 @Video1 "
-            "(lr-d)STYLE 원문·webtoon 0·실사 표현·그림 낱말·≤4000B·타임스탬프·로그·걸리면 제출·원장 0·실사 외형 조각 단위 170자 "
-            "(lr-e)웹툰 sha256 4종 그대로 "
+            "(lr-d)STYLE 원문/짧은 형·webtoon 0·실사 표현·그림 낱말·≤4000자 또는 overBudget·모든 컷 연기·타임스탬프·로그·걸리면 제출·원장 0·실사 외형 조각 단위 170자 "
+            "(lr-e)웹툰 sha256 4종(157 다시 잼)·기본 = variant=webtoon "
             "(lr-f)완료·복사·이어붙이기·웹툰 그대로·원장 (lr-g)소리 거절 3경로·pf-b 그대로·소리 없이 다시(웹툰·실사·끔) "
             "(lr-h)_fail_variant (lr-i)_gen_stale activeSince (lr-j)재시작·취소 (lr-k)select (lr-l)gen_view "
             "(lr-m)_PREPARE_SEM·동시 상한"
@@ -44539,18 +44544,19 @@ def check_vnew_inner_voice() -> None:
         take_rows = []
         for variant in ("webtoon", "real"):
             full = genmod._take_prompt(plan_m, take, cast=cast, panel_nos=[1], location_no=None, variant=variant)  # noqa: SLF001
-            # 작업 127: 고정부 몫(예산에서 미리 뺀다)을 더해 나머지가 지금과 같은 1,400B 최소형이 되게 한다.
-            fixed_m = genmod._utf8_len(genmod._fixed_head(plan_m, "", real=variant == "real")) + 1  # noqa: SLF001
+            # 작업 157: 상한 = 글자, 고정부도 예산 안에서 잰다(전에는 고정부 바이트를 더했다). 작은 상한(1,400자)에서는 RULES 가 짧은 형
+            # 1줄이 되고 속마음 문장도 짧은 형(TAKE_RULES_COMPACT_INNER)으로 남는다 — 기대값 "원문 rule_add" → "원문 또는 짧은 형".
             tiny = genmod._take_prompt(plan_m, take, cast=cast, panel_nos=[1], location_no=None, variant=variant,  # noqa: SLF001
-                                       caps={"promptMaxLength": 1400 + fixed_m})
+                                       caps={"promptMaxLength": 1400})
             take_rows.append([prompt.count('Minji (inner voice-over, lips closed): "왜 저러지?"') for prompt in (full, tiny)]
-                             + [rule_add in full, rule_add in tiny, "Minji (off-screen voice)" in full, 'Junho (off-screen voice): "안녕"' in full])
+                             + [rule_add in full, rule_add in tiny or genmod.TAKE_RULES_COMPACT_INNER in tiny,
+                                "Minji (off-screen voice)" in full, 'Junho (off-screen voice): "안녕"' in full])
         spoken_only = [dict(e, voice="spoken") for e in mixed]
         plain = genmod._take_prompt(iv_plan(spoken_only), take, cast=cast, panel_nos=[1], location_no=None)  # noqa: SLF001
         plain_c1 = dlg(iv_plan(spoken_only), "c1", "webtoon")
         expect("iv-c", [take_rows, "inner" in plain, "lips closed" in plain, plain_c1],
                [[[1, 1, True, True, False, True]] * 2, False, False, 'DIALOGUE: 민지 (Korean, lips move): "왜 저러지?".'],
-               "통 테이크 웹툰·실사: TIMELINE inner 표기(화면 밖 표기보다 우선)·최소형(1,400B)에도 유지·RULES 문장, spoken 만이면 inner 없음")
+               "통 테이크 웹툰·실사: TIMELINE inner 표기(화면 밖 표기보다 우선)·작은 상한(1,400자)에도 유지·RULES 문장(원문/짧은 형), spoken 만이면 inner 없음")
 
         # 변형 1회(새 판정 1곳): _is_thought 를 늘 거짓으로 바꾸면 위 검사가 잡는다(표시가 사라진다).
         orig_is = genmod._is_thought  # noqa: SLF001
@@ -44644,8 +44650,8 @@ def check_vnew_inner_voice_118a() -> None:
 
     (iv2-a) MOTION: _prompt_voices 판정, 컷·테이크 thought → mouth stays closed(lip sync·mouth shapes 없음)·mixed → lip sync only on
             spoken·spoken/none → 지금 문구 그대로, 짧은 형 300B 안. 변형 1회: _prompt_voices 를 늘 "spoken" 으로 바꾸면 잡힌다
-    (iv2-b) 통 테이크: entries lines(뒤호환 첫 줄 필드 유지), spoken+thought 두 줄 각자 표시, 1줄 컷 그대로, 작은 상한에서 보통 뒤쪽 줄부터 빠지고
-            속마음 줄은 남음
+    (iv2-b) 통 테이크: entries lines(뒤호환 첫 줄 필드 유지), spoken+thought 두 줄 각자 표시, 1줄 컷 그대로, 작은 상한에서도
+            모든 줄이 남는다(작업 157 — 옛 lineDrop 없음, 넘치면 fits=False)
     (iv2-c) deliveryEn: 속마음 줄 뒤에 없음·spoken 줄에는 지금처럼
     (iv2-d) 촬영 지시서: 가짜 _brief 에 넘긴 글에 속마음 표시·지침 1문장
     (iv2-e) AI로 고치기: _trim_protected 가 mouth stays closed 조각을 지우지 않는다
@@ -44740,18 +44746,17 @@ def check_vnew_inner_voice_118a() -> None:
                 {"id": "e6", "panels": [2], "speaker": "준호", "lineKo": "가자"}]
         rows = []
         with _pin_vnew(VNEW_FX=True):
-            # 작업 127: 고정부(FIXED) 몫은 예산에서 미리 빠진다 → 나머지 예산이 같도록 상한에 고정부 바이트를 더한다.
-            fixed_many = genmod._utf8_len(genmod._fixed_head(iv_plan(many), "")) + 1  # noqa: SLF001
-            # 작업 147: 대사를 더는 40자로 자르지 않아(긴 줄 44자 그대로) 같은 단계에 바이트가 더 든다 → 상한 3000·2900 을
-            # 3100·3000 으로 올렸다(뒤쪽 줄부터 하나씩 빠지는 모양은 그대로).
+            # 작업 157 기대값 변경: 대사 줄은 어떤 상한에서도 빼지 않는다(옛 118a lineDrop — 3,100B 셋 → 3,000B 둘 → 1,400B 하나 — 을
+            # 없앴다). 상한 = 글자. 넘치면 fits=False 로 제출 쪽이 조각을 더 나눈다. 세 상한 모두 하나·둘·셋·속마음 두 줄·가자가 남는다.
             for cap in (3100, 3000, 1400):
-                text = take_prompt(iv_plan(many), caps={"promptMaxLength": cap + fixed_many})
+                audit: dict = {}
+                text = take_prompt(iv_plan(many), caps={"promptMaxLength": cap}, audit=audit)
                 tl_s = block(text, "TIMELINE")
-                rows.append([genmod._utf8_len(text) <= genmod._take_prompt_budget({"promptMaxLength": cap + fixed_many}),  # noqa: SLF001
+                rows.append([audit.get("fits") == (genmod._prompt_len(text) <= cap),  # noqa: SLF001
                              all(s in text for s in ("0-4s", "4-8s", "8-12s")), tl_s.count("(inner voice-over, lips closed)"),
                              [w for w in ("하나", "둘", "셋") if f'Junho (off-screen voice): "{w} ' in tl_s], 'Junho (off-screen voice): "가자"' in tl_s])
-        expect("iv2-b", rows, [[True, True, 2, ["하나", "둘"], True], [True, True, 2, ["하나"], True], [True, True, 2, [], True]],
-               "작은 상한: 보통 대사 뒤쪽 줄부터 하나씩 빠지고(3,100B 셋 → 3,000B 둘 → 1,400B 하나) 속마음 두 줄·1줄 컷·모든 컷은 남는다")
+        expect("iv2-b", rows, [[True, True, 2, ["하나", "둘", "셋"], True]] * 3,
+               "작은 상한(3,100·3,000·1,400자)에서도 대사 줄을 빼지 않는다(157) — 보통 세 줄·속마음 두 줄·1줄 컷·모든 컷, fits 판정")
 
         # ================= (iv2-c) deliveryEn =================
         plan_d = iv_plan(mixed, {"c2": {"shotEn": "MCU.", "actionEn": "Junho waves.",
@@ -44793,7 +44798,7 @@ def check_vnew_inner_voice_118a() -> None:
         for item in bad:
             fail("vnew 속마음 남은 충돌(지시서 118a) " + item)
     else:
-        ok("vnew 속마음 남은 충돌(지시서 118a) 검사 (iv2-a)MOTION 문구·변형 1회 (iv2-b)통 테이크 모든 대사·줄 빼기 "
+        ok("vnew 속마음 남은 충돌(지시서 118a) 검사 (iv2-a)MOTION 문구·변형 1회 (iv2-b)통 테이크 모든 대사·작은 상한에서도 줄 그대로(157) "
            "(iv2-c)deliveryEn (iv2-d)촬영 지시서 입력 (iv2-e)AI로 고치기 보호")
 
 
@@ -46777,8 +46782,13 @@ def check_vnew_fx_who_127() -> None:
             for brief in long_plan["previz"]["shotBrief"]["cuts"].values():
                 brief.update({"blockingEn": long_text, "actionEn": "He looks down. " + long_text, "backgroundEn": long_text})
             long_p = cut_p("c1", plan_x=long_plan)
+            tiny_audit: dict = {}
             tiny = genmod._take_prompt(plan, take, cast=cast_take, panel_nos=[3], location_no=None,  # noqa: SLF001
-                                       caps={"promptMaxLength": 1200})
+                                       caps={"promptMaxLength": 1200}, audit=tiny_audit)
+            # 작업 157 기대값 변경: 고정부도 예산 안에서 잰다 — 넘치면 BACKGROUND 1문장 짧은 형(맨 앞 줄은 그대로 FIXED), 상한은 글자,
+            # 대사·연기를 빼지 않아 넘치면 fits=False(조각 나누기). 전에는 고정부를 미리 빼고 원형을 지켰다.
+            tiny_head = genmod._fixed_head(plan, "A convenience store", compact="background" in (tiny_audit.get("compact") or []))  # noqa: SLF001
+            tiny_ok = tiny_audit.get("fits") == (genmod._prompt_len(tiny) <= 1200)  # noqa: SLF001
             expect("fw-e", [p1.split("\n")[0] == p2.split("\n")[0] == store_head, p1.split("\n")[0] != p3.split("\n")[0],
                             p1.split("\n")[0].encode("utf-8") == web.split("\n")[0].encode("utf-8"),
                             r1.split("\n")[0] == r2.split("\n")[0] != p1.split("\n")[0],
@@ -46786,7 +46796,7 @@ def check_vnew_fx_who_127() -> None:
                             [p.count("Overall tone:") for p in (p1, p2, p3)], f"\nOnly {a} and {b} appear.\n" in p1,
                             line_of(p1, "FX:"), line_of(r1, "EXPRESSION:"), line_of(p3, "FX:"),
                             long_p.split("\n")[0] == store_head, genmod._utf8_len(long_p) <= 2500,  # noqa: SLF001
-                            tiny.split("\n")[0] == store_head, genmod._utf8_len(tiny) <= 1200, "Shelves of snacks" in p1],  # noqa: SLF001
+                            tiny.split("\n")[0] == tiny_head, tiny_ok, "Shelves of snacks" in p1],
                    [True, True, True, True, "MOOD: comic beat — puzzled blink", f"MOOD: {b}'s quiet tears; heavy air", False, "",
                     [1, 1, 1], True,
                     f"FX: Webtoon-style tear streams run down {b}'s cheeks only; {a} does not cry.",
@@ -47259,7 +47269,8 @@ def check_vnew_real_from_3d_126() -> None:
     (r3-a) _take_payload(실사)·_real_take_cast·_real_photo_keys·_ref_counts: 캐스팅 후보가 있어도 고르지 않으면 [정면, 시트, 후면],
            고르면 캐스팅이 맨 앞, 상한(imageListMax 4 = 장소 1 + 인물 3)을 넘으면 뒤 사진부터 빠짐. 변형 1회: _ref_counts 를
            앞 인물부터 다 채우기로 바꾸면 이 판정이 잡는다.
-    (r3-b) _take_prompt(실사)·_assets: ASSETS 에 REAL_TAKE_SHEET_SENTENCE, 예산 1500B(최소형까지 줄임)에서도 남음, 웹툰은 없음.
+    (r3-b) _take_prompt(실사)·_assets: ASSETS 에 REAL_TAKE_SHEET_SENTENCE, 예산 1500자에서도 남음(157: ASSETS 짧은 형이면
+           REAL_TAKE_PHOTOS_COMPACT 1번), 웹툰은 없음.
     (r3-c) POST /generate/real cast·start_real·_validate_real_cast·_cast_look_block·_real_cast_overrides·_real_run_summary·
            gen_view·GET /generate/real/cast(real_cast_options): 남의 캐릭터·미완성 모습·모르는 이름 → 400 BadCast(회차 없음),
            정상 → realRun.cast·그 회차 참고 = 바뀐 캐릭터 사진·plan.input/script/conti/previz 그대로, look anime → 웹툰 정면·시트 +
@@ -47404,12 +47415,17 @@ def check_vnew_real_from_3d_126() -> None:
                       {"name": "비", "colorName": "red", "frontNo": 4, "refNos": [4], "look": "real",
                        "appearance": "a Korean woman with ash blonde hair " * 3, "costume": "navy training top " * 5, "voice": ""}]
             logs.clear()
+            tight_audit: dict = {}
             tight = genmod._take_prompt(plan_t, take_t, cast=cast_t, panel_nos=[], location_no=5,  # noqa: SLF001
-                                        caps={"promptMaxLength": 1500}, variant="real")
+                                        caps={"promptMaxLength": 1500}, variant="real", audit=tight_audit)
             steps = (logs.messages("vnew.gen.take_prompt variant=real bytes=") or ["steps=?"])[-1].split("steps=", 1)[1]
-            if sentence not in tight or len(tight.encode("utf-8")) > 1500 or "minimalTimeline" not in steps:
-                bad.append(f"(r3-b) 줄이기(최소형) 뒤에 3D 사진 문장이 남지 않았거나 예산을 넘었습니다: "
-                           f"{len(tight.encode('utf-8'))}B steps={steps}")
+            # 작업 157 기대값 변경: 최소형(minimalTimeline)은 없앴다. 1,500자에 12컷 대사·연기가 다 들지 않아 ASSETS 가 짧은 형이 되고
+            # 3D 사진 문장은 모든 사람에 1번인 짧은 형(REAL_TAKE_PHOTOS_COMPACT)으로 남는다. 대사 24줄 그대로, 넘치면 fits=False.
+            photo_line = genmod.REAL_TAKE_PHOTOS_COMPACT if "assetsCompact" in steps else sentence
+            if photo_line not in tight or tight_audit.get("linesInPrompt") != 24 \
+                    or tight_audit.get("fits") != (genmod._prompt_len(tight) <= 1500):  # noqa: SLF001
+                bad.append(f"(r3-b) 줄이기 뒤에 3D 사진 문장(원형/짧은 형)·대사 24줄·fits 가 아닙니다: "
+                           f"{genmod._prompt_len(tight)}자 steps={steps} {tight_audit}")  # noqa: SLF001
 
             # ================= (r3-c) cast 검증·저장·그 회차 참고 =================
             usd = genmod.real_estimate(env.gen(pid))["usd"]
@@ -47517,7 +47533,7 @@ console.log(JSON.stringify({
         fail("작업 126 실사 3D 사진·인물 바꾸기 검사 실패\n  " + "\n  ".join(bad))
     else:
         ok("작업 126 실사 3D 사진·인물 바꾸기 (r3-a)_take_payload·_real_take_cast·_real_photo_keys·_ref_counts 순서·고름·상한·변형 잡음 "
-           "(r3-b)_assets REAL_TAKE_SHEET_SENTENCE·최소형 유지·웹툰 없음 (r3-c)start_real·_validate_real_cast 400 6꼴·realRun.cast·"
+           "(r3-b)_assets REAL_TAKE_SHEET_SENTENCE·짧은 형 유지·웹툰 없음 (r3-c)start_real·_validate_real_cast 400 6꼴·realRun.cast·"
            "그 회차 참고·애니 photoreal·plan 그대로·realHistory cast·real_cast_options (r3-d)node --check·문구·화면 함수·textContent·css")
 
 
@@ -50480,8 +50496,8 @@ def check_vnew_dialogue_runs_147() -> None:
            same line … finishing with): \"요…?\"", 대사가 아닌 단계만 적용(dialogue25·lineDrop 없음), 애니·실사 둘 다 · 바이트 상한 안
     (dr-b) cut07-1·07-2 같은 대사: 대사 글은 한 번, 둘째 컷은 "(still speaking the same line)"
     (dr-c) 보통 따로인 줄(cut01 범건우 → cut02 여의준, 끝 문장부호)·같은 화자라도 끝 문장부호/새 낱말이면 잇지 않음 · 어미 목록 판정
-    (dr-d) _fit_dialogue: 뒤 문장부터 통째로, 첫 문장 유지, 원문 앞부분만(없는 마침표 없음), 따옴표 짝 · 아주 작은 상한(최소형)
-           에서도 모든 컷·바이트 상한 안 · "곧." 없음
+    (dr-d) _fit_dialogue: 뒤 문장부터 통째로, 첫 문장 유지, 원문 앞부분만(없는 마침표 없음), 따옴표 짝 · 아주 작은 상한
+           에서도 모든 컷·대사 그대로(작업 157: 넘치면 overBudget) · "곧." 없음
     (dr-e) 컷 단위 프롬프트: _cut_prompt(웹툰·실사)·_real_cut_prompt 의 긴 대사가 한 글자도 잘리지 않음, 작은 상한에서도 문장 안 자르기 없음
     """
     sys.path.insert(0, str(ROOT / "app"))
@@ -50510,7 +50526,8 @@ def check_vnew_dialogue_runs_147() -> None:
             return {"id": "t1", "cutIds": [c["id"] for c in rows], "seconds": sum(c["seconds"] for c in rows)}
 
         def run(rows: list[dict], variant: str, prompt_max: int) -> tuple[str, str]:
-            with _pin_vnew(VNEW_FX=True, VNEW_TAKE_PROMPT_MAX=prompt_max), _LogCapture() as logs:
+            # 작업 157: 상한 설정 = VNEW_TAKE_PROMPT_MAX_CHARS(글자). 아래 상한 숫자는 모두 글자다.
+            with _pin_vnew(VNEW_FX=True, VNEW_TAKE_PROMPT_MAX_CHARS=prompt_max), _LogCapture() as logs:
                 text = genmod._take_prompt(plan_of(rows), take_of(rows), cast=cast, panel_nos=[5],  # noqa: SLF001
                                            location_no=None, variant=variant)
             steps = next((r.getMessage().rsplit("steps=", 1)[-1] for r in logs.records
@@ -50526,21 +50543,22 @@ def check_vnew_dialogue_runs_147() -> None:
         cont = 'Yeouijun (off-screen voice; continues the same line from the previous shot, finishing with): "요…?"'
         for variant in ("webtoon", "real"):
             full, _ = run(pair, variant, 20000)
-            limit = genmod._utf8_len(full) - 120  # noqa: SLF001 — 넘친 120B 를 줄이게 한다
+            limit = genmod._prompt_len(full) - 120  # noqa: SLF001 — 넘친 120자를 줄이게 한다
             text, steps = run(pair, variant, limit)
             tl = timeline(text)
             dialogue_steps = [s for s in steps.split(",") if s.startswith(("dialogue", "lineDrop"))]
-            expect("dr-a", [genmod._utf8_len(text) <= limit, steps not in ("", "none"), dialogue_steps,  # noqa: SLF001
+            expect("dr-a", [genmod._prompt_len(text) <= limit, steps not in ("", "none"), dialogue_steps,  # noqa: SLF001
                             f'{head}"{_DR147_WHOLE}"' in tl, "곧." in text, cont in tl,
                             'Yeouijun (off-screen voice): "…아저씨?"' in tl, all(s in tl for s in ("0-5s", "5-8s"))],
                    [True, True, [], True, False, True, True, True],
-                   f"{variant}: 상한 {limit}B 에서 대사 아닌 것만 줄고(steps={steps}) cut03 줄 전체·cut04 이어짐 형")
+                   f"{variant}: 상한 {limit}자에서 대사 아닌 것만 줄고(steps={steps}) cut03 줄 전체·cut04 이어짐 형")
         # 옛 증상(대사 40자 단어 자르기 + 마침표) 재현 형이 어떤 상한에서도 나오지 않는다.
+        # 작업 157: 상한 안이거나, 다 줄여도 넘치면 overBudget(대사는 그대로 — 제출 쪽이 조각을 나눈다). 전 기대값 = 늘 바이트 상한 안.
         for limit in (3000, 2200, 1700):
-            text, _ = run(pair, "real", limit)
-            expect("dr-a", ["곧." in text, "하니까…" in text or "음… 이제 더 할 말도 없어요." in text,
-                            genmod._utf8_len(text) <= limit], [False, True, True],  # noqa: SLF001
-                   f"실사 상한 {limit}B: 문장 안 자르기·없는 마침표 없음, 바이트 상한 안")
+            text, steps = run(pair, "real", limit)
+            expect("dr-a", ["곧." in text, f'"{_DR147_WHOLE}"' in text,
+                            (genmod._prompt_len(text) <= limit) != ("overBudget" in steps)], [False, True, True],  # noqa: SLF001
+                   f"실사 상한 {limit}자: 문장 안 자르기·없는 마침표 없음·이어진 말 전체, 상한 안 또는 overBudget")
 
         # ================= (dr-b) 나눈 컷의 같은 대사 =================
         split = [c for c in cuts if c["id"] in ("cut07-1", "cut07-2")]
@@ -50584,16 +50602,14 @@ def check_vnew_dialogue_runs_147() -> None:
                 "음… 이제 더 할 말도 없어요.", '여의준: "음… 이제 더 할 말도 없어요. 곧 괜찮아지겠죠."',
                 "한 문장인데 아주 길어서 상한을 넘지만 자를 곳이 없는 대사"],
                "뒤 문장부터 통째로·첫 문장 유지·원문 앞부분만·따옴표 짝 맞는 자리만")
-        for variant, small in (("webtoon", 1500), ("real", 1800)):
+        # 작업 157 기대값 변경: 최소형·byteTrim 은 없앴다. 아주 작은 상한에서도 대사는 줄이지 않고(이어진 말 전체), 넘치면 overBudget.
+        for variant, small in (("webtoon", 1500), ("real", 1800), ("real", 1200)):
             text, steps = run(cuts, variant, small)
             tl = timeline(text)
-            expect("dr-d", [genmod._utf8_len(text) <= small, all(s in tl for s in ("0-3s", "3-6s", "6-11s", "11-14s", "14-16s", "16-18s")),  # noqa: SLF001
-                            "곧." in text, "음… 이제 더 할 말도 없어요." in tl, "still speaking the same line" in tl],
-                   [True, True, False, True, True], f"{variant} {small}B(최소형 {steps}): 모든 컷·문장 단위 대사·나눈 컷 표기")
-        # 최후 byteTrim(실사 1200B)도 대사 따옴표 안에서 자르지 않는다.
-        text, steps = run(cuts, "real", 1200)
-        expect("dr-d", [genmod._utf8_len(text) <= 1200, "byteTrim" in steps, timeline(text).count('"') % 2, "곧." in text],  # noqa: SLF001
-               [True, True, 0, False], f"실사 1200B({steps}): 바이트로 자를 때도 대사 조각 단위")
+            expect("dr-d", [(genmod._prompt_len(text) <= small) != ("overBudget" in steps),  # noqa: SLF001
+                            all(s in tl for s in ("0-3s", "3-6s", "6-11s", "11-14s", "14-16s", "16-18s")),
+                            "곧." in text, f'"{_DR147_WHOLE}"' in tl, "still speaking the same line" in tl, tl.count('"') % 2],
+                   [True, True, False, True, True, 0], f"{variant} {small}자({steps}): 모든 컷·대사 그대로·나눈 컷 표기·따옴표 짝")
 
         # ================= (dr-e) 컷 단위 프롬프트 =================
         long_line = "음… 이제 더 할 말도 없어요. 곧 괜찮아지겠죠. 이런 쓸데없는 감정… 빨리 끝내버려야 하니까…"
@@ -50616,7 +50632,7 @@ def check_vnew_dialogue_runs_147() -> None:
         fail("작업 147 대사 이어짐·자르기 없음 검사 실패\n  " + "\n  ".join(bad))
     else:
         ok("작업 147 대사 (dr-a)줄이기 상한에서 cut03 말 전체·cut04 이어짐·대사 아닌 것부터·애니/실사 (dr-b)나눈 컷 한 번·계속 말하는 중 "
-           "(dr-c)따로인 줄 그대로·어미 목록 (dr-d)문장 단위·최소형 바이트 상한 (dr-e)컷 단위 대사 그대로")
+           "(dr-c)따로인 줄 그대로·어미 목록 (dr-d)문장 단위·작은 상한에도 대사 그대로 (dr-e)컷 단위 대사 그대로")
 
 
 def check_vnew_real_take_costume_146() -> None:
@@ -51025,7 +51041,8 @@ def check_vnew_previz_pose_148() -> None:
                 "Both of Beomgeonu's hands cup Yeouijun's cheeks"], "포즈 절 문장")
 
         def run(variant: str, limit: int) -> tuple[str, str]:
-            with _guard_real_llm(), _pin_vnew(VNEW_FX=True, VNEW_TAKE_PROMPT_MAX=limit), _LogCapture() as logs:
+            # 작업 157: 상한 설정 = VNEW_TAKE_PROMPT_MAX_CHARS(글자).
+            with _guard_real_llm(), _pin_vnew(VNEW_FX=True, VNEW_TAKE_PROMPT_MAX_CHARS=limit), _LogCapture() as logs:
                 text = genmod._take_prompt(plan, take, cast=cast, panel_nos=[3], location_no=None, variant=variant)  # noqa: SLF001
             steps = next((r.getMessage().rsplit("steps=", 1)[-1] for r in logs.records
                           if r.getMessage().startswith("vnew.gen.take_prompt ")), "")
@@ -51041,28 +51058,27 @@ def check_vnew_previz_pose_148() -> None:
             expect("pz-d", [c1_text.count(grab_clause), "Yeouijun's right hand" in c1_text, "Yeouijun's cheek rests" in c1_text,
                             t_full.count(cheek_clause), t_full.count("hand rests")],
                    [1, False, False, 1, 2], f"{variant}: c1 잡는 손 절 1개·여의준 쉬는 손은 절 없음, c2 뺨 괴기 절 1개")
-            limit = genmod._utf8_len(full)  # noqa: SLF001
-            dropped = None
+            # 작업 157 기대값 변경: 포즈 절은 컷 내용이라 빼지 않는다(옛 poseDrop — 대사 바로 앞에서 빼던 단계 — 은 없앴다). 상한을
+            # 15자씩 줄여 overBudget 이 날 때까지 모든 상한에서 잡는 손 절·대사가 남고, 대사·포즈 단계가 없다.
+            limit = genmod._prompt_len(full)  # noqa: SLF001
+            rows: list = []
             for _ in range(400):
                 limit -= 15
                 text, steps = run(variant, limit)
-                if "poseDrop" in steps.split(","):
-                    dropped = (limit, text, steps)
+                labels = steps.split(",")
+                rows.append([grab_clause in text, 'Yeouijun: "흑…"' in timeline(text),
+                             any(s in ("poseDrop", "contactDrop", "dialogue25") or s.startswith("lineDrop") for s in labels),
+                             (genmod._prompt_len(text) <= limit) != ("overBudget" in labels)])  # noqa: SLF001
+                if "overBudget" in labels:
                     break
-            if dropped is None:
-                bad.append(f"(pz-d) {variant}: poseDrop 단계가 나오지 않았습니다")
-                continue
-            limit, text, steps = dropped
-            labels = steps.split(",")
-            expect("pz-d", [genmod._utf8_len(text) <= limit, grab_clause in text, "dialogue25" in labels,  # noqa: SLF001
-                            any(s.startswith("lineDrop") for s in labels), labels.index("poseDrop") == len(labels) - 1,
-                            'Yeouijun: "흑…"' in timeline(text)],
-                   [True, False, False, False, True, True],
-                   f"{variant} {limit}B(steps={steps}): 바이트 상한 안, 포즈 절은 대사보다 먼저 빠진다")
+            expect("pz-d", [rows[-1][:1] and "overBudget" in steps, sorted({tuple(r) for r in rows})],
+                   [True, [(True, True, False, True)]],
+                   f"{variant} 상한 {genmod._prompt_len(full) - 15}→{limit}자: 모든 상한에서 포즈 절·대사가 남고 넘치면 overBudget")  # noqa: SLF001
             small = 1500 if variant == "webtoon" else 1800
             text, steps = run(variant, small)
-            expect("pz-d", [genmod._utf8_len(text) <= small, all(s in timeline(text) for s in ("0-4s", "4-8s", "8-12s"))],  # noqa: SLF001
-                   [True, True], f"{variant} {small}B(최소형 {steps}): 바이트 상한 안·모든 컷")
+            expect("pz-d", [(genmod._prompt_len(text) <= small) != ("overBudget" in steps),  # noqa: SLF001
+                            all(s in timeline(text) for s in ("0-4s", "4-8s", "8-12s")), grab_clause in text],
+                   [True, True, True], f"{variant} {small}자({steps}): 상한 안 또는 overBudget·모든 컷·포즈 절")
     except Exception as exc:  # noqa: BLE001
         bad.append(f"예외: {type(exc).__name__}: {exc}\n{_tb.format_exc()}")
     if bad:
@@ -51070,7 +51086,7 @@ def check_vnew_previz_pose_148() -> None:
     else:
         ok("작업 148 프리비즈 포즈 (pz-a)posture·hands·head·eyes 정리·모르는 값·gestureTarget 없는 other_* 버림 "
            "(pz-b)node 렌더러 오른손→상대 턱 0.12m 안·왼팔 쉼·자기 눈 가리기·뺨 괴기·lean_forward·hands 없는 인물 회전 그대로 "
-           "(pz-c)가짜 읽기 새 필드·gesture 도출·v2→v3 actions 만 다시 읽기·옛 문법 그대로 (pz-d)포즈 절·쉬는 손 없음·바이트 상한·대사보다 먼저 뺌")
+           "(pz-c)가짜 읽기 새 필드·gesture 도출·v2→v3 actions 만 다시 읽기·옛 문법 그대로 (pz-d)포즈 절·쉬는 손 없음·작은 상한에도 포즈 절 유지(157)")
 
 
 # 작업 150: vnew.js 통신 구역(apiOk·api)을 잘라 가짜 fetch·가짜 window.setTimeout 으로 돌린다. 외부 호출 0.
@@ -52412,10 +52428,10 @@ def _ca154_plan(*, hands_in_timeline: bool = True) -> tuple[dict, dict]:
 def check_vnew_contact_action_154() -> None:
     """작업 154 — 테이크 TIMELINE 이 패널의 닿는 연기(콘티 actionEn)와 148 포즈 절을 지킨다. 가짜 데이터, 유료·LLM 0.
 
-    (ca-a) test3 꼴 30초 테이크 → Wan 15초 조각 2(cut-03~06): 조각·통 테이크 모두 entry.poses 가 있고, Wan 예산(4000)에서
+    (ca-a) test3 꼴 30초 테이크 → Wan 15초 조각 2(cut-03~06): 조각·통 테이크 모두 entry.poses 가 있고, 예산(4000자)에서
            줄이기 없음(poseDrop 안 돎). cut-06 닿는 연기 "neck" + 포즈 "right hand cups Yeouijun's neck", cut-04 "cups … face",
            cut-05 "wipes … tears"(애니·실사). hands 가 패널 읽기에만 있어도(timeline actor 에 없음) 포즈 절이 붙는다
-    (ca-b) 빠듯한 예산: STYLE → HARMONY → MOTION 을 먼저 줄이고, 포즈 절 → 닿는 연기 → 대사 순으로 마지막에 뺀다
+    (ca-b) 빠듯한 예산(작업 157): 고정 부분 짧은 형 먼저, 포즈 절·닿는 연기·대사는 어떤 상한에서도 남는다(넘치면 overBudget)
     (ca-c) 닿는 동사 없는 컷은 그대로(contact 키 없음), 닿는 연기가 없는 fw 계획은 sha 같음, test3 꼴은 닿는 연기 문장만 다르다
     (ca-d) 순화(153): 닿는 연기 문장도 _soften_text 를 지난다
     (ca-e) 동사 목록 한 상수·"holds his breath"·지시서에 같은 동사가 있으면 없음
@@ -52437,10 +52453,11 @@ def check_vnew_contact_action_154() -> None:
         return _hashlib.sha256(text.encode("utf-8")).hexdigest()
 
     def run(plan: dict, take: dict, *, limit: int = 4000, variant: str = "webtoon", soften: bool = False,
-            fx: bool = False) -> tuple[str, str]:
-        with _guard_real_llm(), _pin_vnew(VNEW_FX=fx, VNEW_TAKE_PROMPT_MAX=limit), _LogCapture() as logs:
+            fx: bool = False, audit: dict | None = None) -> tuple[str, str]:
+        # 작업 157: 상한 설정 = VNEW_TAKE_PROMPT_MAX_CHARS(글자).
+        with _guard_real_llm(), _pin_vnew(VNEW_FX=fx, VNEW_TAKE_PROMPT_MAX_CHARS=limit), _LogCapture() as logs:
             text = genmod._take_prompt(plan, take, cast=cast, panel_nos=[3, 4], location_no=5, caps=caps,  # noqa: SLF001
-                                       variant=variant, soften=soften)
+                                       variant=variant, soften=soften, audit=audit)
         steps = next((r.getMessage().rsplit("steps=", 1)[-1] for r in logs.records
                       if r.getMessage().startswith("vnew.gen.take_prompt ")), "")
         return text, steps
@@ -52471,7 +52488,7 @@ def check_vnew_contact_action_154() -> None:
                 text, steps = run(plan, sub, variant=variant)
                 c4, c5, c6 = cut_text(text, "4-8s", "8-12s"), cut_text(text, "8-12s", "12-15s"), cut_text(text, "12-15s", None)
                 checks = {
-                    "줄이기 없음": steps == "none" and genmod._utf8_len(text) <= budget,  # noqa: SLF001
+                    "줄이기 없음": steps == "none" and genmod._prompt_len(text) <= budget,  # noqa: SLF001
                     "cut-06 닿는 연기 neck": "Beomgeonu strokes Yeouijun's neck and nape." in c6,
                     "cut-06 포즈 절": "Beomgeonu's right hand cups Yeouijun's neck" in c6,
                     "cut-06 지시서 연기": "leans closer" in c6,
@@ -52492,34 +52509,31 @@ def check_vnew_contact_action_154() -> None:
             full, _ = run(plan, sub, fx=True)
             contact6 = "Beomgeonu strokes Yeouijun's neck and nape."
             pose6 = "Beomgeonu's right hand cups Yeouijun's neck"
-            seen_steps: list[str] = []
-            first_loss = None
-            limit = genmod._utf8_len(full)  # noqa: SLF001
+            # 작업 157 기대값 변경: 포즈 절·닿는 연기는 빼지 않는다(옛 poseDrop → contactDrop → dialogue25 없음). 상한을 20자씩 줄여
+            # overBudget 이 날 때까지: 모든 상한에서 둘 다 남고, 단계는 157 순서(고정 부분 짧은 형 → 시선 → 분위기 → 연기 첫 문장),
+            # 컷 내용 단계는 고정 부분이 다 짧은 형이 된 뒤에만, 넘치면 고정 부분 전부 짧은 형(MOTION_MIN·HARMONY 짧은 형 포함).
+            order_157 = [s + "Compact" for s in genmod.TAKE_COMPACT_ORDER] + ["gazeDrop", "moodDrop", "fxShort", "actionFirst",
+                                                                              "overBudget"]
+            limit = genmod._prompt_len(full)  # noqa: SLF001
+            last = None
             for _ in range(300):
                 limit -= 20
-                text, steps = run(plan, sub, limit=limit, fx=True)
-                seen_steps = steps.split(",")
-                if pose6 not in text or contact6 not in text:
-                    first_loss = (limit, text, seen_steps)
+                audit_b: dict = {}
+                text, steps = run(plan, sub, limit=limit, fx=True, audit=audit_b)
+                labels = steps.split(",")
+                content = [s for s in labels if s in ("gazeDrop", "moodDrop", "fxShort", "actionFirst")]
+                if pose6 not in text or contact6 not in text or [s for s in order_157 if s in labels] != labels \
+                        or (content and len(audit_b.get("compact") or []) != len(genmod.TAKE_COMPACT_ORDER)) \
+                        or (genmod._prompt_len(text) <= limit) == ("overBudget" in labels):  # noqa: SLF001
+                    bad.append(f"(ca-b) {limit}자: 포즈 절·닿는 연기·157 순서·fits 가 아닙니다: {labels} {audit_b}")
                     break
-            if first_loss is None:
-                bad.append("(ca-b) 포즈 절·닿는 연기가 빠지는 예산을 찾지 못했습니다")
-            else:
-                limit, text, labels = first_loss
-                order_ok = labels[:3] == ["styleTrim", "harmonyShort", "motionShort"] and labels[-1] == "poseDrop" \
-                    and contact6 in text and "dialogue25" not in labels
-                if not order_ok or genmod._utf8_len(text) > limit:  # noqa: SLF001
-                    bad.append(f"(ca-b) {limit}B 줄이기 순서: {labels}")
-                if genmod.MOTION_MIN not in text or "HARMONY: night light; same light direction" not in text:
-                    bad.append("(ca-b) 포즈 절보다 먼저 MOTION·HARMONY 가 짧은 형이 아닙니다")
-                text2, steps2 = run(plan, sub, limit=limit - 300, fx=True)
-                labels2 = steps2.split(",")
-                if "contactDrop" in labels2 and labels2.index("contactDrop") != labels2.index("poseDrop") + 1:
-                    bad.append(f"(ca-b) 포즈 절 다음이 닿는 연기가 아닙니다: {labels2}")
-                if "dialogue25" in labels2 and labels2.index("dialogue25") < labels2.index("contactDrop"):
-                    bad.append(f"(ca-b) 대사가 닿는 연기보다 먼저 줄었습니다: {labels2}")
-                if "contactDrop" not in labels2 and "minimalTimeline" not in labels2:
-                    bad.append(f"(ca-b) {limit - 300}B 에서 닿는 연기 단계가 없습니다: {labels2}")
+                last = (text, labels)
+                if "overBudget" in labels:
+                    break
+            if last is None or "overBudget" not in last[1]:
+                bad.append("(ca-b) overBudget 까지 줄여 보지 못했습니다")
+            elif genmod.MOTION_MIN not in last[0] or "HARMONY: night light; same light direction" not in last[0]:
+                bad.append("(ca-b) 넘친 프롬프트의 MOTION·HARMONY 가 짧은 형이 아닙니다")
 
             # ================= (ca-c) 닿는 동사 없는 컷·sha =================
             entries = genmod._take_timeline_entries(plan, sub)  # noqa: SLF001
@@ -52574,8 +52588,8 @@ def check_vnew_contact_action_154() -> None:
     if bad:
         fail("작업 154 테이크 닿는 연기·포즈 절 검사 실패\n  " + "\n  ".join(bad))
     else:
-        ok("작업 154 닿는 연기 (ca-a)test3 조각 2 cut-06 neck·포즈 절·cut-04 cups face·cut-05 wipes tears(애니·실사, Wan 4000B 줄이기 없음)·"
-           "패널 읽기 hands 대체 (ca-b)STYLE→HARMONY→MOTION 먼저, 포즈→닿는 연기→대사 마지막 (ca-c)동사 없는 컷 그대로·fw sha 같음·"
+        ok("작업 154 닿는 연기 (ca-a)test3 조각 2 cut-06 neck·포즈 절·cut-04 cups face·cut-05 wipes tears(애니·실사, 4000자 줄이기 없음)·"
+           "패널 읽기 hands 대체 (ca-b)고정 부분 짧은 형 먼저·포즈 절·닿는 연기 어떤 상한에서도 유지(157) (ca-c)동사 없는 컷 그대로·fw sha 같음·"
            "닿는 문장만 다름 (ca-d)순화 (ca-e)동사 한 목록·숨 참기·지시서 같은 동사")
 
 
@@ -52911,6 +52925,339 @@ def check_vnew_real_seedance_156() -> None:
            "(rs-d)정지 클립 frozen·움직임 아님·같은 프롬프트로 1번·더 움직이는 쪽")
 
 
+# 작업 157: test3 손 추출(운영 계획 파일을 복사하지 않고 cut-01~06 만 손으로 옮겼다). cut-01 [0,1]·cut-02 [1,2] 가 패널 1 을 나눠
+# 갖는다(대본 e3 "…아냐. 재밌네. 계속 해 봐." = 패널 1 → 콘티대로 cut-01 한 컷에만). 지시서 연기 = test3 actionEn 앞 두 문장.
+_TC157_A, _TC157_B = "범건우", "여의준"
+_TC157_CUTS = (
+    # id, 초, 패널, 콘티 dialogueKo, 콘티 인물 연기, 지시서 actionEn, 화면 인물(main, others), fx
+    ("cut-01", 4, [0, 1], "…….\n죄송해요…. 역시 불편하셨겠죠….\n…아냐. 재밌네. 계속 해 봐.",
+     [(_TC157_A, "Sitting with furrowed brow, listening silently, then replies flatly"),
+      (_TC157_B, "Apologizes in a trembling voice off-screen")],
+     "Hold on his furrowed brow and narrowed near-black eyes through the off-screen apology. His lips remain closed during "
+     "the listening beat. He then slightly relaxes his brow and answers without smiling.", (_TC157_A, []), []),
+    ("cut-02", 4, [1, 2], "음… 이제 더 할 말도 없어요. 곧 괜찮아지겠죠.",
+     [(_TC157_B, "Laughs awkwardly, forcing a bright expression while sitting on the railing")],
+     "He gives a brief awkward laugh, raises his cheeks into a forced smile, then answers. His shoulders remain slightly "
+     "hunched. The smile weakens at the end.", (_TC157_B, []), []),
+    ("cut-03", 4, [3, 4], "이런 쓸데없는 감정…\n빨리 끝내버려야 하니까…",
+     [(_TC157_B, "Covers face with one hand, rubs eyes, wipes tears with the back of his hand")],
+     "First cover his eyes and upper nose with his right palm. Rub lightly at one eye, then turn the wrist and wipe beneath "
+     "his eyes with the back of the hand. Lower the hand only enough to reveal wet, reddened eyelids.", (_TC157_B, []),
+     ["tear streams"]),
+    ("cut-04", 4, [5, 6], "요…?\n…아저씨?",
+     [(_TC157_A, "Reaches out and cups 여의준's face with both hands, looking down at him"),
+      (_TC157_B, "Looks up at 범건우 with wide, surprised eyes, face held in his hands")],
+     "Geonu lifts both hands from his lap in one sudden movement. His right palm supports Uijun's left cheek and his left "
+     "palm supports the right cheek, fingers spread along the jaw without covering the mouth. Uijun raises his chin.",
+     (_TC157_B, [_TC157_A]), []),
+    ("cut-05", 4, [7, 8], "……. 넌 어떻게 눈물이 멈추질 않아.\n저도 멈추고 싶은데 그게 잘… 앗",
+     [(_TC157_A, "Looks down in profile, wipes 여의준's tears with his thumb"),
+      (_TC157_B, "Flinches and squeezes eyes shut as his tears are wiped")],
+     "Geonu looks slightly downward toward the listener's face and speaks. His right forearm makes one small controlled "
+     "movement as his thumb wipes a tear outside the frame; his left hand continues supporting the other cheek outside frame.",
+     (_TC157_A, []), []),
+    ("cut-06", 3, [9, 10], "(속마음) 오래… 만지시네…. 괜히 어색해….",
+     [(_TC157_A, "Leans close, stroking 여의준's neck and nape"), (_TC157_B, "Looks up nervously with flushed cheeks")],
+     "Geonu leans closer by a few centimetres, keeping his eyes on Uijun. His right thumb passes lightly behind the ear while "
+     "the fingers move to the nape. Uijun lifts his eyes to Geonu's face.", (_TC157_B, [_TC157_A]), ["blush lines"]),
+)
+_TC157_SCRIPT = (  # id, 패널, 화자, 대사, 속마음
+    ("e1", [0], _TC157_A, "…….", False), ("e2", [0], _TC157_B, "죄송해요…. 역시 불편하셨겠죠….", False),
+    ("e3", [1], _TC157_A, "…아냐. 재밌네. 계속 해 봐.", False), ("e4", [2], _TC157_B, "음… 이제 더 할 말도 없어요. 곧 괜찮아지겠죠.", False),
+    ("e5", [3], _TC157_B, "이런 쓸데없는 감정…", False), ("e6", [4], _TC157_B, "빨리 끝내버려야 하니까…", False),
+    ("e7", [5], _TC157_B, "요…?", False), ("e8", [6], _TC157_B, "…아저씨?", False),
+    ("e9", [7], _TC157_A, "……. 넌 어떻게 눈물이 멈추질 않아.", False), ("e10", [8], _TC157_B, "저도 멈추고 싶은데 그게 잘… 앗", False),
+    ("e11", [9], "", "", False), ("e12", [10], _TC157_B, "오래… 만지시네…. 괜히 어색해….", True),
+)
+# 컷마다 프롬프트에 나와야 하는 따옴표 대사(147: cut-03 은 cut-04 "요…?" 까지 이어진 말 전체, cut-04 는 끝맺는 조각).
+_TC157_QUOTES = {
+    "cut-01": ["죄송해요…. 역시 불편하셨겠죠….", "…아냐. 재밌네. 계속 해 봐."],
+    "cut-02": ["음… 이제 더 할 말도 없어요. 곧 괜찮아지겠죠."],
+    "cut-03": ["이런 쓸데없는 감정… 빨리 끝내버려야 하니까…요…?"],
+    "cut-04": ["요…?", "…아저씨?"],
+    "cut-05": ["……. 넌 어떻게 눈물이 멈추질 않아.", "저도 멈추고 싶은데 그게 잘… 앗"],
+    "cut-06": ["오래… 만지시네…. 괜히 어색해…."],
+}
+_TC157_CONTACT = {"cut-04": "Beomgeonu cups Yeouijun's face with both hands.",
+                  "cut-05": "Beomgeonu wipes Yeouijun's tears with his thumb.",
+                  "cut-06": "Beomgeonu strokes Yeouijun's neck and nape."}
+
+
+def _tc157_plan() -> tuple[dict, dict]:
+    """작업 157 손 추출 계획(23초 테이크 1개, 녹화 1구간). 프리비즈 hands: cut-06 범건우 오른손 cup 상대 목."""
+    a, b = _TC157_A, _TC157_B
+    cuts, timeline, briefs, grammar = [], [], {}, {}
+    for no, (cid, seconds, panels, dialogue, chars, action, (main, others), fx) in enumerate(_TC157_CUTS, start=1):
+        cut = {"id": cid, "no": no, "seconds": seconds, "panels": panels, "dialogueKo": dialogue,
+               "locationEn": "Outdoors by a low metal railing", "characters": [{"name": n, "actionEn": t} for n, t in chars]}
+        if fx:
+            cut.update(fx=list(fx), fxWho={fx[0]: [b]})
+        cuts.append(cut)
+        lead = {"id": "a1"}
+        if cid == "cut-06":
+            lead = {"id": "a1", "gestureTarget": "a2",
+                    "hands": {"right": {"act": "cup", "target": "other_neck"}, "left": {"act": "rest", "target": "none"}}}
+        timeline.append({"cutId": cid, "actors": [lead, {"id": "a2"}]})
+        briefs[cid] = {"shotEn": "MCU, 50 mm, eye-level three-quarter.", "actionEn": action}
+        grammar[cid] = {"grammar": {"mainSubject": main, "shotSize": "MCU", "shotType": "single", "vantage": "front",
+                                    "others": [{"name": n, "how": "hands_only" if cid == "cut-06" else "full"} for n in others]}}
+    ids = [c["id"] for c in cuts]
+    plan = {
+        "conti": {"status": "ready", "cuts": cuts, "segments": [{"id": "s1", "cutIds": ids, "seconds": 23}]},
+        "script": {"status": "ready", "setting": {"timeKo": "낮", "locationEn": "Outdoors by a low metal railing"},
+                   "entries": [{"id": i, "panels": p, "speaker": s, "lineKo": t, "voice": "thought" if th else "spoken"}
+                               for i, p, s, t, th in _TC157_SCRIPT]},
+        "locations": [{"key": "outdoors by a low metal railing", "nameEn": "Outdoors by a low metal railing",
+                       "design": {"lightEn": "Cool-white store light from the glass front, blue-grey evening fill."}}],
+        "previz": {"status": "ready", "recordings": {"s1": {"key": "PREVIZ-REC-s1", "seconds": 23}},
+                   "scenes": [{"locationId": "loc1", "timeline": timeline,
+                               "actors": [{"id": "a1", "name": a, "color": "#f58231"}, {"id": "a2", "name": b, "color": "#4363d8"}]}],
+                   "panelGrammar": grammar, "shotBrief": {"status": "ready", "cuts": briefs}},
+    }
+    take = {"id": "take1", "cutIds": ids, "recKeys": ["PREVIZ-REC-s1"], "recSegIds": ["s1"], "seconds": 23.0}
+    return plan, take
+
+
+def check_vnew_take_conti_157() -> None:
+    """작업 157 — 테이크 프롬프트가 콘티 전체(모든 컷 연기·모든 대사)를 싣고 고정 문구를 먼저 줄인다. 가짜, 유료 0.
+
+    (tc-a) 한 줄 한 컷: test3 손 추출 cut-01~06 의 _cut_lines = 콘티 dialogueKo(패널 1 의 e3 는 cut-01 만), 패널이 겹치는 두 컷에서
+           콘티에 대사가 든 컷(test3 cut-12 [19,20]·cut-13 [20] → cut-13), 나눈 컷 같은 대사(147 still)는 그대로
+    (tc-b) 실제 예산(4,000자)·조각 c01–c02·c03–c06·애니·실사: 모든 대사 정확히 1번·제 컷 안, 모든 컷 연기(통문장, 낱말 가운데서 끊김 없음),
+           cut-04/05/06 닿는 연기, 실사 cut-02 "음… 이제 더 할 말도 없어요. 곧 괜찮아지겠죠.", 실사·애니 같은 대사·닿는 연기, audit 줄 수 같음
+    (tc-c) 아주 작은 예산: 고정 부분이 모두 짧은 형이 된 뒤에만 컷 내용을 줄이고 대사 줄 수 그대로, 그래도 넘치면 컷 경계 조각으로
+           더 나눈다(_prompt_split_parts: 조각마다 상한 안 또는 컷 1개, 컷·시각 이어짐, 대사 줄 합 그대로)
+    (tc-d) 제출: 넘치는 통 테이크(가짜 fal Seedance) → 조각 여러 개로 제출, 조각 프롬프트에 자기 컷 대사만·모두 합치면 전부,
+           제출마다 vnew.gen.prompt_audit 1줄 lines_in_conti = lines_in_prompt
+    (tc-e) 예산 단위 = 글자(VNEW_TAKE_PROMPT_MAX_CHARS 4000, 스키마 maxLength 는 글자), _action_core 는 낱말 가운데서 자르지 않는다
+    """
+    import traceback as _tb  # noqa: PLC0415
+
+    sys.path.insert(0, str(ROOT / "app"))
+    from src.vnew import fx as fxmod  # noqa: PLC0415
+    from src.vnew import generate as genmod  # noqa: PLC0415
+
+    bad: list[str] = []
+    report: list[str] = []
+
+    def expect(group: str, got, want, what: str) -> None:
+        if got != want:
+            bad.append(f"({group}) {what}\n      결과 {got!r}\n      기대 {want!r}")
+
+    anime_cast = [{"name": _TC157_B, "colorName": "blue", "frontNo": 1, "appearance": "", "voice": "",
+                   "costume": "Black long-sleeve track top with a single white stripe down each sleeve"},
+                  {"name": _TC157_A, "colorName": "orange", "frontNo": 2, "appearance": "", "voice": "",
+                   "costume": "Dark navy long-sleeve button-up dress shirt, collar open, worn untucked"}]
+    real_cast = [dict(anime_cast[0], frontNo=2, sheetNo=1, refNos=[1, 2], look="real",
+                      appearance="a Korean man in his 20s with tousled pale blonde hair and long sweeping bangs"),
+                 dict(anime_cast[1], frontNo=4, sheetNo=3, refNos=[3, 4], look="real",
+                      appearance="narrow half-lidded eyes and short charcoal-black hair swept back")]
+    source = " ".join(c[5] for c in _TC157_CUTS) + " " + " ".join(
+        str(table) for table in (fxmod.FX_SENTENCE, fxmod.REAL_FX, fxmod.FX_WHO_SENTENCE, fxmod.REAL_WHO, fxmod.FX_WHO_NOT))
+
+    def prompt(plan, take, variant: str, audit: dict | None = None, caps=None) -> str:
+        cast, panels, loc = (real_cast, [], 5) if variant == "real" else (anime_cast, [3, 4, 5], 6)
+        kw = {"variant": "real"} if variant == "real" else {}
+        return genmod._take_prompt(plan, take, cast=cast, panel_nos=panels, location_no=loc, caps=caps,  # noqa: SLF001
+                                   audit=audit, **kw)
+
+    def segments(plan, take, text: str) -> dict[str, str]:
+        tl = next((ln for ln in text.split("\n") if ln.startswith("TIMELINE")), "")
+        entries = genmod._take_timeline_entries(plan, take)  # noqa: SLF001
+        stamps = [f"{e['start']}-{e['end']}s " for e in entries]
+        out = {}
+        for k, cid in enumerate(take["cutIds"]):
+            at = tl.find(stamps[k])
+            end = tl.find(stamps[k + 1], at + 1) if k + 1 < len(stamps) else len(tl)
+            out[cid] = tl[at:end] if at >= 0 else ""
+        return out
+
+    def whole_sentences(action: str) -> bool:
+        # 연기 조각의 문장마다 끝 낱말 + 문장부호가 원문(지시서·기호 문장)에 그 모양으로 있다 = 낱말·절 가운데서 끊지 않았다.
+        for sentence in genmod._split_sentences(action):  # noqa: SLF001
+            words = re.findall(r"[A-Za-z][\w'-]*", sentence)
+            if not sentence.endswith((".", "!", "?")) or not words \
+                    or not re.search(re.escape(words[-1]) + r"[.,;!?'\"]", source):
+                return False
+        return True
+
+    try:
+        with _guard_real_llm(), _pin_vnew(VNEW_FX=True, VNEW_TAKE_PROMPT_MAX_CHARS=4000):
+            plan, take = _tc157_plan()
+            # ================= (tc-a) 한 줄 한 컷 =================
+            got_a = {c["id"]: [ln["lineKo"] for ln in genmod._cut_lines(plan, c) if not ln.get("silent")]  # noqa: SLF001
+                     for c in plan["conti"]["cuts"]}
+            want_a = {c[0]: [x.replace("(속마음)", "").strip() for x in c[3].split("\n") if x.strip() and x.strip() != "……."]
+                      for c in _TC157_CUTS}
+            tie = {"conti": {"cuts": [{"id": "cut-12", "panels": [19, 20], "dialogueKo": "정말 그 놈을 잊을 수 있을지."},
+                                      {"id": "cut-13", "panels": [20], "dialogueKo": "한 번 시험 해 보자고."}]},
+                   "script": {"entries": [{"id": "e23", "panels": [19], "speaker": _TC157_A, "lineKo": "정말 그 놈을 잊을 수 있을지."},
+                                          {"id": "e24", "panels": [20], "speaker": _TC157_A, "lineKo": "한 번 시험 해 보자고."}]}}
+            got_tie = [[ln["lineKo"] for ln in genmod._cut_lines(tie, c)] for c in tie["conti"]["cuts"]]  # noqa: SLF001
+            split = [dict(c) for c in _DR147_CUTS if c["id"] in ("cut07-1", "cut07-2")]
+            runs = genmod._dialogue_runs(split, {"conti": {"cuts": split}, "script": {"entries": []}})  # noqa: SLF001
+            expect("tc-a", [got_a, got_tie, [[ln["run"] for ln in r] for r in runs]],
+                   [want_a, [["정말 그 놈을 잊을 수 있을지."], ["한 번 시험 해 보자고."]], [["start"], ["still"]]],
+                   "한 줄 한 컷(콘티 dialogueKo 와 같다)·패널 겹침은 콘티에 대사가 든 컷·나눈 컷 같은 대사는 147 그대로")
+
+            # ================= (tc-b) 실제 예산·조각 c01–c02·c03–c06 =================
+            parts = [{"cutIds": ["cut-01", "cut-02"], "seconds": 8.0},
+                     {"cutIds": ["cut-03", "cut-04", "cut-05", "cut-06"], "seconds": 15.0}]
+            found: dict[str, dict] = {"webtoon": {}, "real": {}}
+            for variant in ("webtoon", "real"):
+                for part in parts:
+                    sub = genmod._part_take(plan, take, part)  # noqa: SLF001
+                    audit: dict = {}
+                    text = prompt(plan, sub, variant, audit)
+                    segs = segments(plan, sub, text)
+                    tl = next((ln for ln in text.split("\n") if ln.startswith("TIMELINE")), "")
+                    for cid in sub["cutIds"]:
+                        quotes = [f'"{q}"' for q in _TC157_QUOTES[cid]]
+                        found[variant][cid] = {
+                            "quotes": [(tl.count(q), q in segs[cid]) for q in quotes],
+                            "contact": cid not in _TC157_CONTACT or _TC157_CONTACT[cid] in segs[cid],
+                        }
+                    actions = audit.get("actions") or []
+                    label = f"{variant} {sub['cutIds'][0]}–{sub['cutIds'][-1]}"
+                    expect("tc-b", [audit.get("fits"), audit.get("linesInPrompt") == audit.get("linesInConti"),
+                                    audit.get("actionsInPrompt"), len(actions), all(a and a in text for a in actions),
+                                    all(whole_sentences(a) for a in actions), "through the off." in text],
+                           [True, True, len(sub["cutIds"]), len(sub["cutIds"]), True, True, False],
+                           f"{label}: 4,000자 안·대사 줄 수 같음·모든 컷 통문장 연기·낱말 가운데 끊김 없음 {actions}")
+                    report.append(f"{label}: {genmod._prompt_len(text)}자 {genmod._utf8_len(text)}B compact="  # noqa: SLF001
+                                  f"{','.join(audit.get('compact') or []) or 'none'} 대사 {audit.get('linesInPrompt')}/"
+                                  f"{audit.get('linesInConti')} 연기 {audit.get('actionsInPrompt')}/{audit.get('cuts')}")
+                    if variant == "real" and "cut-02" in sub["cutIds"]:
+                        expect("tc-b", "음… 이제 더 할 말도 없어요. 곧 괜찮아지겠죠." in segs["cut-02"], True, "실사 cut-02 여의준 대사")
+            for variant in ("webtoon", "real"):
+                expect("tc-b", found[variant], {cid: {"quotes": [(1, True)] * len(_TC157_QUOTES[cid]), "contact": True}
+                                                for cid in _TC157_QUOTES},
+                       f"{variant}: 콘티 대사가 모두 정확히 1번·제 컷 안, cut-04/05/06 닿는 연기")
+            expect("tc-b", found["real"] == found["webtoon"], True, "실사 TIMELINE 의 대사·닿는 연기 = 애니(실사만 빼는 것 없음)")
+
+            # ================= (tc-c) 아주 작은 예산 =================
+            sub2 = genmod._part_take(plan, take, parts[1])  # noqa: SLF001
+            order_157 = [s + "Compact" for s in genmod.TAKE_COMPACT_ORDER] + ["gazeDrop", "moodDrop", "fxShort", "actionFirst",
+                                                                              "overBudget"]
+            for variant in ("webtoon", "real"):
+                for cap in (2600, 1500):
+                    audit = {}
+                    with _LogCapture() as logs:
+                        text = prompt(plan, sub2, variant, audit, caps={"promptMaxLength": cap})
+                    steps = next((m.rsplit("steps=", 1)[-1] for m in logs.messages("vnew.gen.take_prompt ")), "").split(",")
+                    content = [s for s in steps if s in ("gazeDrop", "moodDrop", "fxShort", "actionFirst")]
+                    expect("tc-c", [[s for s in order_157 if s in steps] == steps,
+                                    not content or len(audit.get("compact") or []) == len(genmod.TAKE_COMPACT_ORDER),
+                                    audit.get("linesInPrompt"), audit.get("actionsInPrompt"),
+                                    audit.get("fits") == (genmod._prompt_len(text) <= cap)],  # noqa: SLF001
+                           [True, True, 6, 4, True], f"{variant} {cap}자({','.join(steps)}): 고정 부분 먼저·대사 6줄·연기 4컷")
+            audit = {}
+            built = {"audit": audit, "probe": None}
+            whole = prompt(plan, take, "webtoon", audit, caps={"promptMaxLength": 1500})
+
+            def probe(sub_take: dict) -> dict:
+                out: dict = {}
+                with _LogCapture():
+                    prompt(plan, sub_take, "webtoon", out, caps={"promptMaxLength": 1500})
+                return out
+
+            built["probe"] = probe
+            split_parts = genmod._prompt_split_parts(plan, take, [], built)  # noqa: SLF001
+            probes = [probe(genmod._part_take(plan, take, p)) for p in split_parts]  # noqa: SLF001
+            with _LogCapture():
+                texts = [prompt(plan, genmod._part_take(plan, take, p), "webtoon", {}, caps={"promptMaxLength": 1500})  # noqa: SLF001
+                         for p in split_parts]
+            # 대본 줄마다 정확히 한 조각에(147 이어진 말이 조각 경계에서 갈리면 조각마다 제 몫만 — 줄 수는 달라도 빠짐·겹침 없음).
+            spread = [sum(t in x for x in texts) for _i, _p, _s, t, _th in _TC157_SCRIPT if t and t != "……."]
+            chain = all(abs(split_parts[i]["end"] - split_parts[i + 1]["start"]) < 1e-6 for i in range(len(split_parts) - 1))
+            expect("tc-c", [audit.get("fits"), len(split_parts) >= 2, [c for p in split_parts for c in p["cutIds"]],
+                            all(pr.get("fits") or len(p["cutIds"]) == 1 for p, pr in zip(split_parts, probes)), chain,
+                            split_parts[0]["start"] if split_parts else None, split_parts[-1]["end"] if split_parts else None,
+                            all(pr.get("linesInPrompt") == pr.get("linesInConti") for pr in probes), spread,
+                            genmod._prompt_split_parts(plan, take, [], {"audit": {"fits": True}, "probe": probe})],  # noqa: SLF001
+                   [False, True, take["cutIds"], True, True, 0.0, 23.0, True, [1] * len(spread), []],
+                   f"1,500자 통 테이크({genmod._prompt_len(whole)}자) → 조각 {[p['cutIds'] for p in split_parts]}: 조각마다 상한 안 "  # noqa: SLF001
+                   "또는 컷 1개·컷·시각 이어짐·조각마다 대사 줄 그대로·대본 줄마다 한 조각, 들어가면 나누지 않음")
+            report.append(f"1,500자 통 테이크 {genmod._prompt_len(whole)}자 → 조각 {[p['cutIds'] for p in split_parts]}")  # noqa: SLF001
+
+            # ================= (tc-e) 예산 단위·자르기 =================
+            core = genmod._action_core(_TC157_CUTS[0][5], 70)  # noqa: SLF001
+            expect("tc-e", [genmod._take_prompt_budget(None), genmod._take_prompt_budget({"promptMaxLength": 1800}),  # noqa: SLF001
+                            genmod._prompt_len("가나다"), core],  # noqa: SLF001
+                   [4000, 1800, 3, "Hold on his furrowed brow and narrowed near-black eyes through the off-screen apology."],
+                   "예산 = 글자(기본 4,000, 스키마 maxLength 도 글자)·_action_core 는 절 경계가 없으면 첫 문장 통째")
+
+        # ================= (tc-d) 제출: 넘치는 통 테이크 → 조각, 감사 로그 =================
+        _tc157_submit(bad, report)
+    except Exception:  # noqa: BLE001
+        bad.append("작업 157 검사 예외\n" + _tb.format_exc())
+    if bad:
+        fail("작업 157 테이크 프롬프트 콘티 전체 검사 실패\n  " + "\n  ".join(bad))
+    else:
+        ok("작업 157 콘티 전체 (tc-a)한 줄 한 컷·콘티 대사 컷·147 still (tc-b)4,000자 c01–c02·c03–c06 애니·실사 대사 1번·제 컷·"
+           "통문장 연기·닿는 연기·실사 cut-02 (tc-c)고정 부분 먼저·대사 그대로·넘치면 조각 (tc-d)제출 조각·감사 로그 줄 수 같음 "
+           "(tc-e)글자 예산·자르기")
+        for line in report:
+            print(f"       157: {line}")
+
+
+def _tc157_submit(bad: list[str], report: list[str]) -> None:
+    """(tc-d) 가짜 fal(Seedance r2v)·_LrEnv: 12초 4컷 테이크가 상한에 안 들어 조각으로 나눠 제출되고, 제출마다 감사 로그 1줄."""
+    sys.path.insert(0, str(ROOT / "app"))
+    from src.vnew import generate as genmod  # noqa: PLC0415
+    from src.vnew import plan as planmod  # noqa: PLC0415
+
+    owner, pid = "tester", "prj_tc157"
+    with _guard_real_llm(), _LrEnv(owner) as env, _pin_vnew(
+            VNEW_FX=False, VNEW_GEN_PARALLEL=1, POLL_INTERVAL_S=0, VNEW_TAKE_RESOLUTION="480p", VNEW_TAKE_REF_SPLIT=True,
+            VNEW_TAKE_AUDIO=True, VNEW_PART_CONTINUITY=True, VNEW_TEXT_CHECK=False) as vset, _LogCapture() as logs:
+        env.set(genmod, "_cut_clip", lambda mp4, unit: {
+            "bytes": b"CLIP:%.3f-%.3f:" % (float(unit["startSec"]), float(unit["endSec"])) + bytes(mp4)[:20],
+            "origSeconds": round(float(unit["endSec"]) - float(unit["startSec"]), 3),
+            "sentSeconds": round(float(unit["endSec"]) - float(unit["startSec"]), 3), "padded": False})
+        env.set(genmod, "_mp4_seconds", lambda mp4: 0.0)
+        env.set(genmod, "_conform_concat", lambda pieces, **_kw: b"PARTS:%d" % len(pieces))
+        env.set(genmod, "_cut_first_frame", lambda mp4, start: b"FRAME:" + bytes(mp4)[:10])
+        env.make_plan(pid, [{"id": "s1", "cutIds": ["c1", "c2", "c3", "c4"], "seconds": 12}])
+
+        def mutator(data: dict) -> None:
+            for cut in data["conti"]["cuts"]:
+                cut["panels"] = [cut["no"]]
+                text = f"대사{cut['no']}번 " + "오늘은 정말 할 말이 많아서 처음부터 끝까지 다 이야기해 줄게 잘 들어."
+                cut["dialogueKo"] = f'에이: "{text}"'
+                data["previz"]["shotBrief"]["cuts"][cut["id"]] = {
+                    "shotEn": "MCU.", "actionEn": f"Kim leans forward in cut {cut['no']} and speaks slowly. He keeps his eyes on Bi.",
+                    "dialogue": [{"speaker": "에이", "lineKo": text, "deliveryEn": "calm"}]}
+
+        planmod.mutate_plan(owner, pid, mutator)
+        plan = env.plan(pid)
+        take = genmod._take_units(plan)[0]  # noqa: SLF001
+        caps = dict(_LR_CAPS)
+        vset.VNEW_TAKE_PROMPT_MAX_CHARS = 100  # 다 줄인 길이를 잰다(로그 없음 probe)
+        built = genmod._take_payload(owner, pid, plan, take, caps)  # noqa: SLF001
+        whole_min = int(built["probe"](take).get("chars") or 0)
+        half_min = int(built["probe"](genmod._part_take(plan, take, {"cutIds": ["c1", "c2"], "seconds": 6.0})).get("chars") or 0)  # noqa: SLF001
+        vset.VNEW_TAKE_PROMPT_MAX_CHARS = (whole_min + half_min) // 2  # 4컷은 안 들고 2컷은 든다
+        logs.clear()
+        since = len(env.requests)
+        client = env.client()
+        client.post(f"/api/vnew/p/{pid}/generate", json={"confirmUsd": genmod.estimate(env.plan(pid))["totalUsd"]})
+        g = env.drive(pid)
+        reqs = env.requests[since:]
+        state = genmod._previz_cells(g)[0]["webtoon"]  # noqa: SLF001
+        part_ids = [p.get("cutIds") for p in state.get("parts") or []]
+        lines = [set(re.findall(r"대사(\d+)번", str(r["payload"].get("prompt") or ""))) for r in reqs]
+        audits = logs.messages("vnew.gen.prompt_audit ")
+        counts = [(re.search(r"lines_in_conti=(\d+)", m).group(1), re.search(r"lines_in_prompt=(\d+)", m).group(1)) for m in audits]
+        want_lines = [{str(int(c[1:])) for c in ids} for ids in part_ids]
+        if len(part_ids) < 2 or [c for ids in part_ids for c in ids] != ["c1", "c2", "c3", "c4"] or lines != want_lines \
+                or len(audits) != len(reqs) or any(a != b for a, b in counts) or state.get("status") != "completed":
+            bad.append(f"(tc-d) 넘치는 통 테이크 제출: 조각 {part_ids} 요청 대사 {lines} 감사 {counts} 상태 {state.get('status')} "
+                       f"상한 {vset.VNEW_TAKE_PROMPT_MAX_CHARS}자({whole_min}/{half_min})")
+        report.append(f"제출: 상한 {vset.VNEW_TAKE_PROMPT_MAX_CHARS}자 → 조각 {part_ids}, 감사 {len(audits)}줄 "
+                      f"{audits[0].split(' cuts=', 1)[-1] if audits else ''}")
+
+
 def main() -> int:
     print("== vpoc1 check ==")
     check_compileall()
@@ -53026,6 +53373,7 @@ def main() -> int:
     check_vnew_plan_step_stay_129()
     check_vnew_contact_action_154()
     check_vnew_real_seedance_156()
+    check_vnew_take_conti_157()
     check_pod_zones()
     print()
     if warnings:
