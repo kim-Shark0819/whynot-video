@@ -58,6 +58,22 @@ GESTURES = (
     "nod",
     "turn_head_to_other",
 )
+# 작업 148: 패널에서 읽은 손·자세·머리·눈(timeline actor 의 posture·hands·head·eyes). 렌더러 vnew-previz.js 의
+# POSE_POSTURES·HAND_ACTS·HAND_TARGETS·HEAD_TURNS·HEAD_TILTS·EYE_STATES 와 **문자열이 같아야** 한다(검사 mf-a).
+# 왼쪽·오른쪽은 인물 자신의 왼쪽·오른쪽이다. other_* 목표는 gestureTarget(상대 actor id)이 있어야 남는다(084 규칙).
+POSE_POSTURES = ("stand", "sit", "lean_forward", "lean_back", "kneel", "lie")
+HAND_SIDES = ("left", "right")
+HAND_ACTS = ("rest", "grab", "hold", "touch", "cup", "cover", "rest_on", "point", "none")
+HAND_TARGETS = (
+    "own_face", "own_eyes", "own_cheek", "own_chin", "own_mouth", "own_chest", "own_knee",
+    "other_chin", "other_cheek", "other_face", "other_shoulder", "other_neck", "other_hand",
+    "other_chest", "other_head", "other_arm", "none",
+)
+HEAD_TURNS = ("toward_other", "away", "down", "up", "front")
+HEAD_TILTS = ("none", "left", "right")
+EYE_STATES = ("open", "closed", "half")
+# 손을 쓰지 않는 동작(쉬는 손). 생성 문장(포즈 절)·제스처 도출에서 건너뛴다.
+IDLE_HAND_ACTS = ("rest", "none")
 # 기본 머리카락 색(hairColor 가 비거나 잘못된 값이면). 몸 색보다 어두운 회색.
 DEFAULT_HAIR_COLOR = "#2b2b2b"
 
@@ -336,6 +352,118 @@ def _normalize_actors(raw_actors) -> list[dict]:
     return actors
 
 
+# ================================================================ 손·자세·머리·눈(작업 148)
+
+
+def _enum_key(value, allowed) -> str:
+    """열거값 하나(소문자·공백 정리). 모르는 값·문자열 아님이면 ""."""
+    if not isinstance(value, str):
+        return ""
+    text = value.strip().lower()
+    return text if text in allowed else ""
+
+
+def normalize_hands(raw, *, has_target: bool) -> dict | None:
+    """hands = {left?: {act, target}, right?: {act, target}}. 쓸 수 있는 손이 없으면 None.
+
+    - act 가 모르는 값이면 그 손을 버린다. target 이 없으면 "none", 모르는 값이면 그 손을 버린다.
+    - 쉬는 손(rest·none)은 target 을 "none" 으로 둔다(렌더러가 목표를 보지 않는다).
+    - other_* 목표는 has_target(gestureTarget 이 있다)일 때만 남긴다. 아니면 그 손을 버린다.
+    """
+    if not isinstance(raw, dict):
+        return None
+    out: dict[str, dict] = {}
+    for side in HAND_SIDES:
+        item = raw.get(side)
+        if not isinstance(item, dict):
+            continue
+        act = _enum_key(item.get("act"), HAND_ACTS)
+        if not act:
+            continue
+        target_raw = item.get("target")
+        target = "none" if target_raw is None or (isinstance(target_raw, str) and not target_raw.strip()) \
+            else _enum_key(target_raw, HAND_TARGETS)
+        if not target:
+            continue
+        if act in IDLE_HAND_ACTS:
+            target = "none"
+        if target.startswith("other_") and not has_target:
+            continue
+        out[side] = {"act": act, "target": target}
+    return out or None
+
+
+def normalize_head(raw) -> dict | None:
+    """head = {turn?, tilt?}. 모르는 값은 그 키만 버린다. 남은 키가 없으면 None."""
+    if not isinstance(raw, dict):
+        return None
+    out: dict[str, str] = {}
+    turn = _enum_key(raw.get("turn"), HEAD_TURNS)
+    if turn:
+        out["turn"] = turn
+    tilt = _enum_key(raw.get("tilt"), HEAD_TILTS)
+    if tilt:
+        out["tilt"] = tilt
+    return out or None
+
+
+def normalize_pose_fields(raw, *, has_target: bool) -> dict:
+    """posture·hands·head·eyes 를 정리한 dict(있는 키만). 패널 읽기(actions[])와 timeline actor 가 같이 쓴다."""
+    raw = raw if isinstance(raw, dict) else {}
+    out: dict = {}
+    posture = _enum_key(raw.get("posture"), POSE_POSTURES)
+    if posture:
+        out["posture"] = posture
+    hands = normalize_hands(raw.get("hands"), has_target=has_target)
+    if hands:
+        out["hands"] = hands
+    head = normalize_head(raw.get("head"))
+    if head:
+        out["head"] = head
+    eyes = _enum_key(raw.get("eyes"), EYE_STATES)
+    if eyes:
+        out["eyes"] = eyes
+    return out
+
+
+_OTHER_FACE_TARGETS = ("other_cheek", "other_face", "other_chin", "other_head")
+_OWN_FACE_TARGETS = ("own_face", "own_eyes", "own_cheek", "own_chin", "own_mouth")
+
+
+def gesture_from_hands(hands) -> str:
+    """손(hands)에서 옛 gesture 하나를 고른다(뒤호환). 쓰는 손이 없거나 맞는 gesture 가 없으면 "".
+
+    오른손을 먼저 본다. 두 손이 상대 얼굴이면 both_hands_other_cheeks, 두 손으로 자기 얼굴을 가리면 cover_face.
+    """
+    hands = hands if isinstance(hands, dict) else {}
+    active = [
+        hands[side] for side in ("right", "left")
+        if isinstance(hands.get(side), dict) and str(hands[side].get("act") or "") not in ("",) + IDLE_HAND_ACTS
+    ]
+    if not active:
+        return ""
+    acts = [str(h.get("act") or "") for h in active]
+    targets = [str(h.get("target") or "none") for h in active]
+    if len(active) == 2 and all(t in ("other_cheek", "other_face") for t in targets):
+        return "both_hands_other_cheeks"
+    if len(active) == 2 and "cover" in acts and all(t in ("own_face", "own_eyes") for t in targets):
+        return "cover_face"
+    if acts[0] == "point":
+        return "point"
+    first = targets[0]
+    if first in _OTHER_FACE_TARGETS:
+        return "hand_on_other_cheek"
+    if first == "other_chest":
+        return "press_hand_to_other_chest"
+    if first in _OWN_FACE_TARGETS:
+        return "hand_to_own_face"
+    if first == "own_chest":
+        return "hand_on_chest"
+    if first == "own_knee":
+        return "hands_on_knees"
+    return ""
+
+
 # ================================================================ 타임라인(timeline)
 
 
@@ -421,6 +549,9 @@ def _normalize_cut_actors(raw_actors, actor_ids: list[str], room: dict, prop_ids
         target = _str(item.get("gestureTarget"))
         if target and target in (actor_ids or []) and target != actor_id:
             cut_actor["gestureTarget"] = target
+        # 작업 148: 패널에서 읽은 손·자세·머리·눈. 모르는 값은 버리고, other_* 손 목표는 gestureTarget 이 있을 때만 남긴다.
+        # 없으면 키가 없다(옛 출력과 같다 — 렌더러가 옛 gesture 경로를 쓴다).
+        cut_actor.update(normalize_pose_fields(item, has_target="gestureTarget" in cut_actor))
         move = item.get("moveTo")
         if isinstance(move, (list, tuple)):
             mv = _vec3(move, (pos[0], 0.0, pos[2]))

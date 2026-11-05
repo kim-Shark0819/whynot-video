@@ -52,6 +52,24 @@ const GESTURES = [
   "nod",
   "turn_head_to_other",
 ];
+/* 작업 148: 패널에서 읽은 손·자세·머리·눈(cut actor 의 posture·hands·head·eyes). previz_schema 의 같은 이름 튜플과
+   **문자열이 같아야** 한다(검사 mf-a). 왼쪽·오른쪽은 인물 자신의 손(마네킹 +x 가 왼쪽). hands 가 있는 인물은 팔마다
+   목표 신체 부위의 세계 위치로 2관절 IK(어깨 → 팔꿈치 → 손)를 푼다. other_* 는 gestureTarget 마네킹의 같은 프레임 뼈. */
+const POSE_POSTURES = ["stand", "sit", "lean_forward", "lean_back", "kneel", "lie"];
+const HAND_ACTS = ["rest", "grab", "hold", "touch", "cup", "cover", "rest_on", "point", "none"];
+const HAND_TARGETS = [
+  "own_face", "own_eyes", "own_cheek", "own_chin", "own_mouth", "own_chest", "own_knee",
+  "other_chin", "other_cheek", "other_face", "other_shoulder", "other_neck", "other_hand",
+  "other_chest", "other_head", "other_arm", "none",
+];
+const HEAD_TURNS = ["toward_other", "away", "down", "up", "front"];
+const HEAD_TILTS = ["none", "left", "right"];
+const EYE_STATES = ["open", "closed", "half"];
+// 팔 길이(마네킹 로컬, 키 1.7m 기준): 어깨 → 팔꿈치 0.3, 팔꿈치 → 손끝 0.29(아래팔 캡슐 끝).
+const UPPER_ARM_M = 0.3;
+const FORE_ARM_M = 0.29;
+// lean_forward / lean_back 척추 기울기(25°).
+const LEAN_RAD = 25 * Math.PI / 180;
 const DEFAULT_HAIR_COLOR = "#2b2b2b";
 
 /* 벽 한 면의 위치·회전. north 는 z=-depth/2 를 바라보는 안쪽 면.
@@ -149,6 +167,8 @@ class Mannequin {
     const eyeR = new THREE.Mesh(eyeGeo, this.faceMat);
     eyeR.position.set(-0.035, 0.02, r * 0.93);
     head.add(eyeR);
+    // 눈 감기(작업 148): 눈꺼풀이 없어 흰 눈을 세로로 눌러 감은 눈·반쯤 감은 눈을 흉내 낸다.
+    this.eyeMeshes = [eyeL, eyeR];
     // 어두운 코: 작은 원뿔이 앞으로 0.03 돌출(눈 아래).
     const nose = new THREE.Mesh(new THREE.ConeGeometry(0.022, 0.05, 10), this.darkMat);
     nose.rotation.x = Math.PI / 2; // 끝이 +z 를 향하게
@@ -200,7 +220,11 @@ class Mannequin {
     const fore = new THREE.Mesh(new THREE.CapsuleGeometry(0.05, 0.24, 4, 8), mat);
     fore.position.y = -0.14;
     elbow.add(fore);
-    return { pivot, elbow };
+    // 손 끝 표식(빈 Group, 보이지 않음) — IK 목표·검사가 손 위치를 읽는다(작업 148).
+    const hand = new THREE.Group();
+    hand.position.y = -FORE_ARM_M;
+    elbow.add(hand);
+    return { pivot, elbow, hand };
   }
 
   _makeLeg(mat, xOffset) {
@@ -230,6 +254,7 @@ class Mannequin {
     this.spine.rotation.set(0, 0, 0);
     this.neck.rotation.set(0, 0, 0);
     this._resetLimb(this.hipL, this.hipR, this.shoulderL, this.shoulderR);
+    this.eyeMeshes.forEach((eye) => eye.scale.set(1, 1, 1));
     const seated = pose === "sit" && sit && typeof sit.hipY === "number" && isFinite(sit.hipY);
 
     switch (pose) {
@@ -401,6 +426,182 @@ class Mannequin {
       default:
         break;
     }
+  }
+
+  /* 작업 148: 자세(posture 기울기)·머리(head.turn/tilt)·눈(eyes). apply() 뒤에 부른다. 키가 없으면 아무것도 바꾸지 않는다
+     (옛 cut actor 는 지금과 같은 회전). targetYaw 는 gestureTarget 쪽 로컬 yaw(없으면 null). */
+  applyBody(ca, t, targetYaw) {
+    const data = ca || {};
+    const posture = POSE_POSTURES.indexOf(data.posture) >= 0 ? data.posture : "";
+    if (posture === "lean_forward") this.spine.rotation.x += LEAN_RAD;
+    else if (posture === "lean_back") this.spine.rotation.x -= LEAN_RAD;
+    const head = data.head && typeof data.head === "object" ? data.head : null;
+    if (head) {
+      const aim = typeof targetYaw === "number" && isFinite(targetYaw)
+        ? Math.atan2(Math.sin(targetYaw), Math.cos(targetYaw)) : null;
+      const nod = data.speaking ? Math.sin((Number(t) || 0) * 8) * 0.12 : 0;
+      switch (HEAD_TURNS.indexOf(head.turn) >= 0 ? head.turn : "") {
+        case "toward_other":
+          if (aim !== null) this.neck.rotation.y = Math.max(-1.3, Math.min(1.3, aim));
+          break;
+        case "away":
+          this.neck.rotation.y = aim !== null && aim > 0 ? -0.9 : 0.9;
+          break;
+        case "down":
+          this.neck.rotation.x = 0.45 + nod;
+          break;
+        case "up":
+          this.neck.rotation.x = -0.45 + nod;
+          break;
+        case "front":
+          this.neck.rotation.y = 0;
+          break;
+        default:
+          break;
+      }
+      // 기울기: 인물 자신의 왼쪽(+x) 으로 = z 음수, 오른쪽 = z 양수.
+      if (head.tilt === "left") this.neck.rotation.z = -0.25;
+      else if (head.tilt === "right") this.neck.rotation.z = 0.25;
+    }
+    const eyes = EYE_STATES.indexOf(data.eyes) >= 0 ? data.eyes : "";
+    const squash = eyes === "closed" ? 0.15 : eyes === "half" ? 0.5 : 1;
+    this.eyeMeshes.forEach((eye) => eye.scale.set(1, squash, 1));
+  }
+
+  /* 신체 부위의 세계 위치(작업 148). side = 인물 자신의 "left"|"right"(뺨·무릎·어깨). near(세계 점)를 주면 좌우가 있는
+     부위는 그 점에 가까운 쪽을 고른다(상대를 잡는 손이 가까운 뺨·어깨로 가게). 행렬은 호출자가 갱신해 둔다. */
+  bodyPoint(part, side, near) {
+    const pick = (makeL, makeR) => {
+      const left = makeL();
+      const right = makeR();
+      if (near) return left.distanceToSquared(near) <= right.distanceToSquared(near) ? left : right;
+      return side === "left" ? left : right;
+    };
+    const onHead = (x, y, z) => this.head.localToWorld(new THREE.Vector3(x, y, z));
+    switch (part) {
+      case "face":
+        return onHead(0, 0, 0.16);
+      case "eyes":
+        return onHead(0, 0.02, 0.17);
+      case "mouth":
+        return onHead(0, -0.055, 0.15);
+      case "chin":
+        return onHead(0, -0.1, 0.09);
+      case "head":
+        return onHead(0, 0.15, 0.02);
+      case "cheek":
+        return pick(() => onHead(0.09, -0.03, 0.09), () => onHead(-0.09, -0.03, 0.09));
+      case "cheek_under":
+        // 뺨을 손에 괸 자세: 손이 뺨·턱선 아래.
+        return pick(() => onHead(0.07, -0.12, 0.06), () => onHead(-0.07, -0.12, 0.06));
+      case "neck":
+        return this.neck.localToWorld(new THREE.Vector3(0, -0.02, 0.07));
+      case "chest":
+        return this.spine.localToWorld(new THREE.Vector3(0, 0.42, 0.19));
+      case "shoulder":
+        return pick(() => this.shoulderL.pivot.localToWorld(new THREE.Vector3(0, 0.06, 0)),
+          () => this.shoulderR.pivot.localToWorld(new THREE.Vector3(0, 0.06, 0)));
+      case "arm":
+        return pick(() => this.shoulderL.pivot.localToWorld(new THREE.Vector3(0, -0.15, 0.06)),
+          () => this.shoulderR.pivot.localToWorld(new THREE.Vector3(0, -0.15, 0.06)));
+      case "hand":
+        return pick(() => this.shoulderL.hand.localToWorld(new THREE.Vector3()),
+          () => this.shoulderR.hand.localToWorld(new THREE.Vector3()));
+      case "knee":
+        // 무릎 쪽 허벅지 위(엉덩이에서 0.34m). 앉은 자세에서 손이 닿는 '무릎에 손' 자리.
+        return pick(() => this.hipL.pivot.localToWorld(new THREE.Vector3(0, -0.34, 0.09)),
+          () => this.hipR.pivot.localToWorld(new THREE.Vector3(0, -0.34, 0.09)));
+      default:
+        return null;
+    }
+  }
+
+  /* 2관절 IK(작업 148): 어깨(피벗) → 팔꿈치 → 손끝이 세계 점 targetWorld 에서 끝나게 위팔·아래팔을 돌린다. 팔꿈치는
+     아래·바깥으로 굽는다(pole). 닿지 않으면 그 방향으로 쭉 편다. 돌려준 값 = 목표까지 남은 거리(마네킹 로컬 m, 0 이면 닿음). */
+  _reachArm(arm, sideSign, targetWorld) {
+    const parent = arm.pivot.parent;
+    parent.updateMatrixWorld(true);
+    const rel = parent.worldToLocal(targetWorld.clone()).sub(arm.pivot.position);
+    let dist = rel.length();
+    const minD = Math.abs(UPPER_ARM_M - FORE_ARM_M) + 0.02;
+    const maxD = UPPER_ARM_M + FORE_ARM_M - 0.001;
+    const dir = dist > 1e-6 ? rel.clone().divideScalar(dist) : new THREE.Vector3(0, -1, 0);
+    const reach = Math.min(maxD, Math.max(minD, dist));
+    let bend = new THREE.Vector3(sideSign * 0.6, -1, 0.1);
+    bend.sub(dir.clone().multiplyScalar(bend.dot(dir)));
+    if (bend.lengthSq() < 1e-8) bend = new THREE.Vector3(0, 0, 1).sub(dir.clone().multiplyScalar(dir.z));
+    bend.normalize();
+    const cosA = Math.max(-1, Math.min(1,
+      (UPPER_ARM_M * UPPER_ARM_M + reach * reach - FORE_ARM_M * FORE_ARM_M) / (2 * UPPER_ARM_M * reach)));
+    const sinA = Math.sqrt(Math.max(0, 1 - cosA * cosA));
+    const elbowAt = dir.clone().multiplyScalar(UPPER_ARM_M * cosA).add(bend.multiplyScalar(UPPER_ARM_M * sinA));
+    const handAt = dir.clone().multiplyScalar(reach);
+    const down = new THREE.Vector3(0, -1, 0);
+    arm.pivot.quaternion.setFromUnitVectors(down, elbowAt.clone().normalize());
+    const fore = handAt.sub(elbowAt).normalize().applyQuaternion(arm.pivot.quaternion.clone().invert());
+    arm.elbow.quaternion.setFromUnitVectors(down, fore);
+    return Math.max(0, dist - maxD);
+  }
+
+  /* 팔을 쭉 펴서 세계 점 쪽을 가리킨다(point). */
+  _aimArm(arm, targetWorld) {
+    const parent = arm.pivot.parent;
+    parent.updateMatrixWorld(true);
+    const rel = parent.worldToLocal(targetWorld.clone()).sub(arm.pivot.position);
+    if (rel.lengthSq() < 1e-8) return;
+    arm.pivot.quaternion.setFromUnitVectors(new THREE.Vector3(0, -1, 0), rel.normalize());
+    arm.elbow.rotation.set(0, 0, 0);
+  }
+
+  _restArm(arm, sideSign) {
+    arm.pivot.rotation.set(0, 0, sideSign * 0.1);
+    arm.elbow.rotation.set(0, 0, 0);
+  }
+
+  /* 손(작업 148): hands = {left?, right?: {act, target}}. ctx = {other: 상대 Mannequin|null, seated}. 행렬은 호출자가
+     이 프레임 자세로 갱신해 둔다(apply·applyBody 뒤). 쉬는 손(rest·none·없음) = 팔 내림, 앉았으면 손을 무릎에. */
+  applyHands(hands, ctx) {
+    const opts = ctx || {};
+    const other = opts.other || null;
+    const order = [["right", this.shoulderR, -1], ["left", this.shoulderL, 1]];
+    order.forEach(([side, arm]) => this._restArm(arm, side === "left" ? 1 : -1));
+    order.forEach(([side, arm, sideSign]) => {
+      const hand = hands && hands[side] && typeof hands[side] === "object" ? hands[side] : {};
+      const act = HAND_ACTS.indexOf(hand.act) >= 0 ? hand.act : "rest";
+      const target = HAND_TARGETS.indexOf(hand.target) >= 0 ? hand.target : "none";
+      this.group.updateMatrixWorld(true);
+      const shoulder = arm.pivot.localToWorld(new THREE.Vector3());
+      let point = null;
+      if (act !== "rest" && act !== "none" && target !== "none") {
+        const own = target.indexOf("own_") === 0;
+        let part = target.slice(own ? 4 : 6);
+        if (own && act === "rest_on" && (part === "cheek" || part === "chin")) part = "cheek_under";
+        const body = own ? this : other;
+        if (body) {
+          if (body !== this) body.group.updateMatrixWorld(true);
+          point = body.bodyPoint(part, side, own ? null : shoulder);
+        }
+      }
+      if (act === "point") {
+        if (point) this._aimArm(arm, point);
+        else this._aimArm(arm, this.spine.localToWorld(new THREE.Vector3(arm.pivot.position.x, arm.pivot.position.y, 1)));
+        return;
+      }
+      if (point) {
+        const short = this._reachArm(arm, sideSign, point);
+        if (short > 0 && target.indexOf("other_") === 0) {
+          // 닿지 않으면 상체를 상대 쪽으로 숙여(최대 0.45rad) 한 번 더 뻗는다.
+          this.spine.rotation.x += Math.min(0.45, short * 1.5);
+          this.group.updateMatrixWorld(true);
+          this._reachArm(arm, sideSign, other.bodyPoint(target.slice(6), side, arm.pivot.localToWorld(new THREE.Vector3())));
+        }
+        return;
+      }
+      if (opts.seated) {
+        this.group.updateMatrixWorld(true);
+        this._reachArm(arm, sideSign, this.bodyPoint("knee", side, null));
+      }
+    });
   }
 
   dispose() {
@@ -650,6 +851,7 @@ class PrevizScene {
       }
       posById[ca.id] = { x, z };
     });
+    const handJobs = [];
     cutActors.forEach((ca) => {
       const entry = this.actors[ca.id];
       if (!entry) return;
@@ -685,12 +887,24 @@ class PrevizScene {
         targetYaw = worldYaw - bodyYaw;
       }
       entry.mannequin.apply(ca.pose || "stand", ca.gesture || null, !!ca.speaking, t, targetYaw, sitArg);
+      // 작업 148: 자세 기울기·머리·눈(키가 없으면 그대로). 손은 모든 인물의 이번 프레임 자세가 정해진 뒤(아래) 푼다.
+      entry.mannequin.applyBody(ca, t, targetYaw);
+      if (ca.hands && typeof ca.hands === "object") handJobs.push({ entry, ca });
 
       // 인물 라벨 오버레이 위치(머리 위). 앉을 자리가 있으면 엉덩이 + 상체 높이.
       const heightM = Number(entry.data.heightM) || 1.7;
       const labelY = sitArg ? sitArg.hipY + 0.86 * heightM / 1.7 + 0.2 : heightM + 0.2;
       entry._overlayPos = new THREE.Vector3(px, labelY, pz);
     });
+    if (handJobs.length) {
+      // 손 IK: 내 몸(own_*)과 상대(other_* = gestureTarget, 이 컷에 있는 인물만)의 같은 프레임 뼈 위치를 쓴다.
+      this.root.updateMatrixWorld(true);
+      handJobs.forEach(({ entry, ca }) => {
+        const otherEntry = ca.gestureTarget && posById[ca.gestureTarget] ? this.actors[ca.gestureTarget] : null;
+        const seated = (ca.pose || "stand") === "sit" || ca.posture === "sit";
+        entry.mannequin.applyHands(ca.hands, { other: otherEntry ? otherEntry.mannequin : null, seated });
+      });
+    }
     // 이 컷에 없는 인물은 숨긴다.
     Object.keys(this.actors).forEach((id) => {
       this.actors[id].mannequin.group.visible = !!seen[id];
