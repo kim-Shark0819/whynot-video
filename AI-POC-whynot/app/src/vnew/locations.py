@@ -37,6 +37,7 @@ from datetime import datetime, timezone
 
 from PIL import Image, ImageDraw
 
+from ..vpoc import compose as vpoc_compose
 from ..vpoc import images as vpoc_images
 from ..vpoc import ledger as vpoc_ledger
 from ..vpoc import llm as vpoc_llm
@@ -129,6 +130,16 @@ SEEDREAM_MODEL = settings.SEEDREAM_MODEL
 # 공간 시트 그림(작업 125): 참고 이미지 없이 fal text-to-image. 원장 금액은 fal Seedream 장당 단가.
 LOCATION_IMAGE_MODEL = settings.LOCATION_IMAGE_MODEL
 LOCATION_IMAGE_USD = settings.LOCATION_IMAGE_USD
+# 작업 143: 실사 뷰 = 같은 쪽 웹툰 뷰를 실사 사진으로 편집(video-vibecode live.PLACE_EDIT 이식). 원장은 그림 1장과 같은 단가.
+LOCATION_EDIT_MODEL = "fal-ai/bytedance/seedream/v4.5/edit"
+PLACE_EDIT = (
+    "Turn this image into a real photograph of the same place: {place}. Remove all people completely; show the empty "
+    "place. Keep the same layout, camera angle and daylight. Real photograph taken with a camera, photorealistic, natural "
+    "materials and textures, no illustration, no anime, no drawing, no line art, no people."
+)
+# 장소 묘사 상한(live.place_prompt 와 같다).
+PLACE_TEXT_MAX = 300
+_PLACE_DRAW_WORDS_RE = re.compile(r"\b(?:webtoon|anime|manga|illustrat\w*|drawn|cartoon)\b", re.IGNORECASE)
 # 설계 LLM 체인: Claude 분석 체인(Fable 5.1) 먼저, 실패하면 Astra.
 # (실측 2026-10-21: Astra 가 패널 그림을 거의 못 읽어 빈 벽·'assumed'/'provisional' 설계가 나왔다.
 #  Claude 가 이미지 읽기가 강해 먼저 쓴다. Astra 는 지시서 036 장면 설계에 그대로 쓴다.)
@@ -539,6 +550,47 @@ def _seedream(prompt: str, references: list[bytes], *, size: str) -> bytes:
         fal_model=LOCATION_IMAGE_MODEL,
     )
 
+
+def _seedream_edit(prompt: str, reference: bytes, *, size: str) -> bytes:
+    """실사 뷰 1장 — 웹툰 뷰(reference 1장)를 fal Seedream 4.5 edit 로 실사 사진으로 바꾼다(작업 143).
+
+    vpoc.seedream fal 경로(generate_safe) 그대로. 검사가 바꿔 끼운다.
+    """
+    return vpoc_seedream.generate_safe(
+        prompt,
+        [reference],
+        model=LOCATION_EDIT_MODEL,
+        where="vnew.location.seedream_edit",
+        size=size,
+        fal_model=LOCATION_EDIT_MODEL,
+    )
+
+
+def _real_from_webtoon() -> bool:
+    """작업 143 설정(VNEW_LOCATION_REAL_FROM_WEBTOON). 부를 때마다 읽는다(검사가 바꿔 끼운다)."""
+    return bool(settings.VNEW_LOCATION_REAL_FROM_WEBTOON)
+
+
+def _place_text(loc: dict) -> str:
+    """설계(design)의 영어 장소 묘사: 장소 이름 + 벽 4면 descEn(north→east→south→west). 자르기는 _place_edit_prompt."""
+    design = loc.get("design") or {}
+    walls = design.get("walls") if isinstance(design.get("walls"), dict) else {}
+    pieces = [str(loc.get("nameEn") or "")]
+    for side in SIDES:
+        wall = walls.get(side) if isinstance(walls.get(side), dict) else {}
+        pieces.append(str(wall.get("descEn") or ""))
+    return ". ".join(p.strip().rstrip(".").strip() for p in pieces if p.strip().rstrip("."))
+
+
+def _place_edit_prompt(place_text: str) -> str:
+    """웹툰 뷰 → 실사 사진 편집 문장(live.place_prompt 이식). 그림 낱말을 빼고 장소 묘사는 PLACE_TEXT_MAX 자 안."""
+    place = " ".join(str(place_text or "the same location").split()).rstrip(".")
+    place = _PLACE_DRAW_WORDS_RE.sub("", place)
+    place = re.sub(r"(?<![\w-])-\w+", "", place)  # 낱말을 뺀 뒤 남은 "-style" 같은 조각
+    place = re.sub(r"\s*,(?:\s*,)+", ",", " ".join(place.split())).strip(" ,")
+    place = re.sub(r"\s+([.,;])", r"\1", place)
+    place = vpoc_compose._fit_text(place, PLACE_TEXT_MAX) or "the same location"  # noqa: SLF001
+    return PLACE_EDIT.format(place=place)
 
 def _timing(pid: str, lid: str, step: str, started: float) -> None:
     """단계 걸린 시간 로그 1줄(작업 125). 사용자 글·키는 쓰지 않는다."""
@@ -1922,7 +1974,7 @@ def run_build(owner: str, pid: str, lid: str, task_id: str) -> None:
         _timing(pid, lid, "prompts", started)
 
         # b. 뷰 4장(그림체별 back·front)을 참고 이미지 없이 동시에 그린다(fal text-to-image, 작업 125).
-        #    뷰 한 장이 끝날 때마다 done +1.
+        #    뷰 한 장이 끝날 때마다 done +1. 작업 143(기본 켬): 웹툰 2장 먼저, 실사 2장은 같은 쪽 웹툰 뷰 편집.
         _set_progress(owner, pid, lid, task_id, step="images", done=0, total=TOTAL_VIEWS)
         started = time.monotonic()
         refs = panels[:MAX_REF_PANELS]  # verify(Claude)가 볼 패널. 그림 모델에는 보내지 않는다.
@@ -2081,32 +2133,50 @@ def _generate_views(
     지시문 앞 공통 문장(_room_anchor)이다.
     반환: {(variant, view): (jpeg, key)}. 저장·원장은 그림당 1회. 완료마다 progress.done +1.
     한 장이라도 실패하면 나머지가 끝난 뒤(저장·원장은 된 채로) 첫 오류를 올린다.
+
+    작업 143(VNEW_LOCATION_REAL_FROM_WEBTOON 켬, 기본): 웹툰 뷰 2장을 먼저 동시에 그리고, 실사 뷰 2장은 같은 쪽
+    웹툰 뷰를 참고 1장으로 fal Seedream 4.5 edit(_place_edit_prompt)로 동시에 만든다. 웹툰 뷰가 실패한 쪽의
+    실사 뷰는 지금처럼 text-to-image 로 그린다. 끄면 작업 125 그대로.
     """
     results: dict[tuple[str, str], tuple[bytes, str]] = {}
 
-    def _draw(variant: str, view: str) -> tuple[bytes, str]:
-        prompt = _prompt_for(loc, variant, view)
-        image = _seedream(prompt, [], size=VIEW_SIZE)
+    def _draw(variant: str, view: str, base: bytes | None = None) -> tuple[bytes, str]:
+        if base is not None:
+            image = _seedream_edit(_place_edit_prompt(_place_text(loc)), base, size=VIEW_SIZE)
+            model = LOCATION_EDIT_MODEL
+        else:
+            prompt = _prompt_for(loc, variant, view)
+            image = _seedream(prompt, [], size=VIEW_SIZE)
+            model = LOCATION_IMAGE_MODEL
         key = view_key(owner, pid, lid, variant, view, version)
         STORE.put_bytes(key, image, "image/jpeg")
-        _charge_seedream(owner, pid, lid, f"{variant}-view-{view}")
+        _charge_seedream(owner, pid, lid, f"{variant}-view-{view}", model=model)
         with _PROGRESS_LOCK:
             _bump_progress(owner, pid, lid, task_id)
         return image, key
 
     jobs = [(variant, view) for variant in VARIANTS for view in VIEWS]
-    first_error: Exception | None = None
-    with ThreadPoolExecutor(max_workers=LOCATION_WORKERS, thread_name_prefix=f"vnew-loc-view-{lid}") as pool:
-        futures = {job: pool.submit(_draw, job[0], job[1]) for job in jobs}
-        for job in jobs:
-            try:
-                results[job] = futures[job].result()
-            except Exception as exc:  # noqa: BLE001
-                if first_error is None:
-                    first_error = exc
-    if first_error is not None:
-        raise first_error
-    return results
+    errors: dict[tuple[str, str], Exception] = {}
+
+    def _run(batch: list[tuple[str, str]], bases: dict[str, bytes]) -> None:
+        with ThreadPoolExecutor(max_workers=LOCATION_WORKERS, thread_name_prefix=f"vnew-loc-view-{lid}") as pool:
+            futures = {job: pool.submit(_draw, job[0], job[1], bases.get(job[1])) for job in batch}
+            for job in batch:
+                try:
+                    results[job] = futures[job].result()
+                except Exception as exc:  # noqa: BLE001
+                    errors[job] = exc
+
+    if _real_from_webtoon():
+        _run([job for job in jobs if job[0] == "webtoon"], {})
+        bases = {view: results[("webtoon", view)][0] for view in VIEWS if ("webtoon", view) in results}
+        _run([job for job in jobs if job[0] == "real"], bases)
+    else:
+        _run(jobs, {})
+    for job in jobs:
+        if job in errors:
+            raise errors[job]
+    return {job: results[job] for job in jobs}
 
 
 # ================================================================ verify(Claude, 꼭짓점)
@@ -2212,7 +2282,12 @@ def _verify_views(
 
         fixed_image = None
         if not matches_place or not matches_sides:
-            fixed_image = _redraw_view(owner, pid, lid, version, loc, variant, view, key, guides[view], refs, fixes, task_id)
+            # 작업 143: 켬이면 실사 다시 그리기도 같은 쪽 웹툰 뷰 편집(웹툰 뷰가 없으면 text-to-image).
+            base = None
+            if variant == "real" and _real_from_webtoon() and ("webtoon", view) in views:
+                base = views[("webtoon", view)][0]
+            fixed_image = _redraw_view(owner, pid, lid, version, loc, variant, view, key, guides[view], refs, fixes, task_id,
+                                       base=base)
         return {
             "matchesPlace": matches_place,
             "matchesSides": matches_sides,
@@ -2334,24 +2409,31 @@ def _redraw_view(
     refs: list[bytes],
     fixes: list[str],
     task_id: str,
+    *,
+    base: bytes | None = None,
 ) -> bytes | None:
     """불일치 뷰를 fixesEn 을 붙여 1회 다시 그린다. 같은 키에 덮어쓰고 원장·진행을 +1 한다.
 
     작업 125: 참고 이미지 없이(fal text-to-image) 그린다. guide·refs 는 받기만 한다(호출부 호환).
+    작업 143: base(같은 쪽 웹툰 뷰)가 있으면 편집 문장(_place_edit_prompt) + 수정 지시로 Seedream edit.
     실패하면(None) 원래 그림을 그대로 둔다.
     """
-    base_prompt = _prompt_for(loc, variant, view)
+    base_prompt = _place_edit_prompt(_place_text(loc)) if base is not None else _prompt_for(loc, variant, view)
     fix_text = " Corrections: " + " ".join(fixes) if fixes else ""
     prompt = (base_prompt + fix_text)[:PROMPT_HARD_CAP]
     last_error: Exception | None = None
     for _ in range(FIX_RETRY):
         try:
-            image = _seedream(prompt, [], size=VIEW_SIZE)
+            if base is not None:
+                image = _seedream_edit(prompt, base, size=VIEW_SIZE)
+            else:
+                image = _seedream(prompt, [], size=VIEW_SIZE)
         except Exception as exc:  # noqa: BLE001
             last_error = exc
             continue
         STORE.put_bytes(key, image, "image/jpeg")
-        _charge_seedream(owner, pid, lid, f"{variant}-view-{view}-fix")
+        _charge_seedream(owner, pid, lid, f"{variant}-view-{view}-fix",
+                         model=LOCATION_EDIT_MODEL if base is not None else None)
         with _PROGRESS_LOCK:
             _bump_total(owner, pid, lid, task_id)  # 보정 장수만큼 total 을 늘리고 done 도 +1.
         return image
@@ -3023,14 +3105,17 @@ def _reconcile_stale(loc: dict, *, owner: str | None = None, pid: str | None = N
 # ================================================================ 원장
 
 
-def _charge_seedream(owner: str, pid: str, lid: str, kind: str) -> None:
-    """공간 시트 그림 1장 원장(작업 125): 모델 = LOCATION_IMAGE_MODEL, 금액 = fal Seedream 장당(LOCATION_IMAGE_USD)."""
+def _charge_seedream(owner: str, pid: str, lid: str, kind: str, *, model: str | None = None) -> None:
+    """공간 시트 그림 1장 원장(작업 125): 모델 = LOCATION_IMAGE_MODEL, 금액 = fal Seedream 장당(LOCATION_IMAGE_USD).
+
+    작업 143: 실사 편집(model=LOCATION_EDIT_MODEL)도 그림 1장과 같은 단가로 적는다.
+    """
     key = f"vnew-loc-{pid}-{lid}-{kind}-{secrets.token_hex(3)}"
     try:
         vpoc_ledger.charge(
             key,
             kind="image",
-            model=LOCATION_IMAGE_MODEL,
+            model=model or LOCATION_IMAGE_MODEL,
             units=1,
             usd=LOCATION_IMAGE_USD,
             user=owner,

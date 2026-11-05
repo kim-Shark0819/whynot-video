@@ -3522,8 +3522,12 @@ def _take_prompt(plan: dict, take: dict, *, cast: list[dict], panel_nos: list[in
                 sentence += f". Voice: {voice.rstrip('.')}"
             parts.append(sentence)
         if location_no:
-            where = " (real photo)" if real else ""
-            parts.append(f"@Image{location_no} = the location{where}; keep its structure and props")
+            # 작업 143: 실사 장소는 사람을 지운 실사 사진(웹툰 뷰 편집) — live.reference_lead(place=True) 문구. 애니 줄은 그대로.
+            if real:
+                parts.append(f"@Image{location_no} = the location (real photo, no people in it); "
+                             "keep this place, its background and light in every shot")
+            else:
+                parts.append(f"@Image{location_no} = the location; keep its structure and props")
         return "ASSETS: " + ". ".join(parts) + "."
 
     def _entry_gaze(entry: dict) -> str:
