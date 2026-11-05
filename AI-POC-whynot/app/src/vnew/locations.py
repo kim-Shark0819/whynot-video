@@ -132,10 +132,14 @@ LOCATION_IMAGE_MODEL = settings.LOCATION_IMAGE_MODEL
 LOCATION_IMAGE_USD = settings.LOCATION_IMAGE_USD
 # 작업 143: 실사 뷰 = 같은 쪽 웹툰 뷰를 실사 사진으로 편집(video-vibecode live.PLACE_EDIT 이식). 원장은 그림 1장과 같은 단가.
 LOCATION_EDIT_MODEL = "fal-ai/bytedance/seedream/v4.5/edit"
+# 작업 161: 실사 장소 뷰(test3 앞 보기)에 실제 상표 "LAWSON"·ATM 간판이 나왔다. 실사 장소 글(뷰 편집·t2i 실사, generate 의 실사
+# 시작 그림·실사 테이크 장소 줄)에 이 구절 1곳. 애니(웹툰) 글에는 넣지 않는다.
+REAL_NO_BRAND = "generic store with no real brand names, no logos, no readable signage text"
+REAL_NO_BRAND_SENTENCE = "Any shop is a " + REAL_NO_BRAND + "."
 PLACE_EDIT = (
     "Turn this image into a real photograph of the same place: {place}. Remove all people completely; show the empty "
     "place. Keep the same layout, camera angle and daylight. Real photograph taken with a camera, photorealistic, natural "
-    "materials and textures, no illustration, no anime, no drawing, no line art, no people."
+    "materials and textures, no illustration, no anime, no drawing, no line art, no people. " + REAL_NO_BRAND_SENTENCE
 )
 # 장소 묘사 상한(live.place_prompt 와 같다).
 PLACE_TEXT_MAX = 300
@@ -1666,9 +1670,11 @@ def _finalize_prompt(text: str, variant: str, view: str, loc: dict) -> str:
         filler = _facts_context("north", loc)
         while len(text) < PROMPT_MIN_CHARS and filler:
             text += " " + filler
-    if len(text) > PROMPT_HARD_CAP:
-        text = text[:PROMPT_HARD_CAP].rstrip()
-    return text
+    # 작업 161: 실사만 상표 금지 1문장을 맨 끝에(상한 자르기에서도 남게 자리를 먼저 뺀다). 웹툰은 그대로.
+    brand = " " + REAL_NO_BRAND_SENTENCE if variant == "real" else ""
+    if len(text) + len(brand) > PROMPT_HARD_CAP:
+        text = text[:PROMPT_HARD_CAP - len(brand)].rstrip()
+    return text + brand
 
 
 def _view_prompt(variant: str, view: str, loc: dict) -> str:

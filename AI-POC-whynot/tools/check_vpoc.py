@@ -17278,8 +17278,9 @@ def _no_160(text: str) -> str:
     sys.path.insert(0, str(ROOT / "app"))
     from src.vnew import generate as genmod  # noqa: PLC0415
 
-    drop = {genmod.REAL_STILL_NO_WIDEN, genmod.REAL_TIME_OF_DAY.format(tod="Daylight"),
-            genmod.REAL_TIME_OF_DAY.format(tod="Night")}
+    drop = {genmod.REAL_STILL_NO_WIDEN, *genmod.REAL_TIME_OF_DAY.values(),
+            # 작업 161: 시간대 문장이 "Bright daytime, …"/"Night, dark night sky, …" 로 바뀌었고 상표 금지 줄이 더해졌다 — 같이 뗀다.
+            genmod.REAL_NO_BRAND_SENTENCE}
     prev = re.compile(re.escape(genmod.REAL_STILL_PREV).replace(re.escape("{no}"), r"\d+"))
     return "\n".join(ln for ln in str(text or "").split("\n") if ln not in drop and not prev.fullmatch(ln))
 
@@ -50025,10 +50026,12 @@ def _run_loc_edit_off(check) -> None:
 
 # 작업 143 전(140 코드)의 애니 통 테이크 프롬프트 sha256 — _fw_plan, panel_nos=[3], location_no=4, VNEW_FX 켬.
 _LE143_ANIME_TAKE_SHA = "9db057061961708c2a71bd4314b29a0b503cf6d0f713193cd2681e7a9f8ce072"
+# 작업 161: 기대값 변경 — 실사 뷰 편집 문장 끝에 상표 금지 1문장(test3 실사 앞 보기에 "LAWSON" 간판). 앞부분은 143 원문 그대로.
 _LE143_PLACE_EDIT = (
     "Turn this image into a real photograph of the same place: {place}. Remove all people completely; show the empty "
     "place. Keep the same layout, camera angle and daylight. Real photograph taken with a camera, photorealistic, natural "
-    "materials and textures, no illustration, no anime, no drawing, no line art, no people."
+    "materials and textures, no illustration, no anime, no drawing, no line art, no people. "
+    "Any shop is a generic store with no real brand names, no logos, no readable signage text."
 )
 
 
@@ -53896,14 +53899,17 @@ def check_vnew_real_costume_160() -> None:
                       "time": [True, True, True], "noWiden": [True, True], "costumeRef": [True, True], "label": [True, True],
                       "sheetClothes": [True, True]}
             expect("cs-c", got_c, want_c, "컷 2 시작 그림 = 컷 1 시작 그림 참고·문장, 시간대·넓히지 않기, 정면 자리 = 편집 그림(edit 2번뿐)")
-            expect("cs-c", day, "Daylight, same time of day in every shot.", "낮 콘티 → Daylight 문장")
+            # 작업 161: 기대값 변경 — 낮 문장을 분명하게 바꿨다(지시: "Bright daytime, blue sky, no dusk, no night, no sunset light.").
+            expect("cs-c", day, "Bright daytime, blue sky, no dusk, no night, no sunset light.", "낮 콘티 → 낮 문장")
             night = _copy.deepcopy(rb["plan"])
             night["script"]["setting"]["timeKo"] = "밤"
             kl_night = genmod._segment_prompt(night, {"cutIds": ["c1"]}, first_segment=True, real=True)  # noqa: SLF001
             st_night = genmod._cut_still_prompt(night, {"cutId": "c1"}, [], True, source="anime")  # noqa: SLF001
-            expect("cs-c", [genmod._real_time_sentence(night), genmod.REAL_TIME_OF_DAY.format(tod="Night") in kl_night,  # noqa: SLF001
-                            genmod.REAL_TIME_OF_DAY.format(tod="Night") in st_night, day in st_night],
-                   ["Night, same time of day in every shot.", True, True, False], "밤 콘티 → Night 문장(시작 그림·Kling)")
+            # 작업 161: 기대값 변경 — 밤 문장도 낮 문장의 거울 꼴로 바꿨다(REAL_TIME_OF_DAY 가 {"day", "night"} 표가 됐다).
+            expect("cs-c", [genmod._real_time_sentence(night), genmod.REAL_TIME_OF_DAY["night"] in kl_night,  # noqa: SLF001
+                            genmod.REAL_TIME_OF_DAY["night"] in st_night, day in st_night],
+                   ["Night, dark night sky, no daylight, no dusk, no sunset light.", True, True, False],
+                   "밤 콘티 → 밤 문장(시작 그림·Kling)")
             report.append(f"edit {len(ra['edits'])}+{len(rb['edits'])}+{len(rc['edits'])}회(인물 2명 × 회차 3), "
                           f"원장 {len(ra['costumeLedger']) + len(rb['costumeLedger'])}줄, 저장 0, 컷 2 참고 {len(s2['refs'])}장")
             if llm_calls:
@@ -54342,6 +54348,163 @@ def check_vnew_vibe_conti_158() -> None:
            "대사 한 줄 한 컷 · 기호 키 · 블록 · 시트) (vb-c)프리비즈 설계 입력 (vb-d)끔 sha 그대로 (vb-e)그림 실패 → 시트 뺌 → 글만")
 
 
+def check_vnew_real_daylight_161() -> None:
+    """작업 161 — 실사 컷 시작 그림 시간대 기준 = 장소 뷰(앞 컷 시작 그림이 아니다)·시간대 검사·상표 금지. 가짜, 유료 0.
+
+    (td-a) 문장: REAL_STILL_PREV 새 문구(장소·소품만, 시간대·빛 = 장소 그림)·낮 문장·밤 거울 문장, 시작 그림 문장에 둘 다·옛 문구 없음
+    (td-b) 시간대 검사(139 _check_cut_still 에 접음): 같은 1번 호출에 기준 시간대 글·timeOfDayMatch(필수, prompts 원본 그대로),
+           틀림 → 다시 그리기 정확히 1번·앞 컷 시작 그림 참고 없음(refs·문장)·장소 뷰 남김·교정 문장, 두 번 다 틀려도 1번,
+           맞으면 0번, 구도+시간대 틀림 → 시트 뷰·앞 컷 둘 다 뺌, 구도만 틀림 → 160 그대로(앞 컷 남김)
+    (td-c) 상표 금지: 실사 뷰 편집 문장·실사 t2i(상한 자르기에서도)·실사 시작 그림·실사 vibe 테이크 장소 줄에 구절, 웹툰 t2i·애니 테이크·
+           옛 _take_prompt(VNEW_VIBE_PROMPT 끔 = 되돌리기, 바이트 그대로) 없음
+    """
+    import traceback as _tb  # noqa: PLC0415
+
+    sys.path.insert(0, str(ROOT / "app"))
+    from src.vnew import generate as genmod  # noqa: PLC0415
+    from src.vnew import locations as locmod  # noqa: PLC0415
+    from src.vnew import prompts as promptsmod  # noqa: PLC0415
+
+    bad: list[str] = []
+    seen: set[str] = set()
+    a, b = "범건우", "여의준"
+    brand = "generic store with no real brand names, no logos, no readable signage text"
+    day_text = "Bright daytime, blue sky, no dusk, no night, no sunset light."
+
+    def expect(group: str, got, want, what: str) -> None:
+        seen.add(group)
+        if got != want:
+            bad.append(f"({group}) {what}\n      결과 {got!r}\n      기대 {want!r}")
+
+    day = _fw_plan()
+    day["script"]["setting"]["timeKo"] = "낮"
+    day["conti"]["cuts"][2]["locationEn"] = "A street"
+    cu = {"shotSize": "CU", "people": [{"name": a, "side": "center", "visible": "face"},
+                                      {"name": b, "side": "left", "visible": "none"}], "count": 1}
+    saved = {"_read_still_check": genmod._read_still_check, "_seedream": genmod._seedream,  # noqa: SLF001
+             "_charge_cut_still": genmod._charge_cut_still, "_charge": genmod.plan_mod._charge}  # noqa: SLF001
+    try:
+        with _guard_real_llm() as llm_calls, _pin_vnew(VNEW_FX=True):
+            # ================= (td-a) 문장 =================
+            prompt = genmod._cut_still_prompt(day, {"cutId": "c1"}, [("blue", a, 3)], True, source="anime",  # noqa: SLF001
+                                              outfits={}, background_no=2, layout=cu, prev_no=4)
+            expect("td-a", [genmod.REAL_STILL_PREV.format(no=4), genmod._real_time_sentence(day),  # noqa: SLF001
+                            genmod._real_time_sentence(_fw_plan())],  # noqa: SLF001
+                   ["Image 4 = the previous shot, for continuity of place and props only; time of day and light follow "
+                    "the location image.", day_text, "Night, dark night sky, no daylight, no dusk, no sunset light."],
+                   "앞 컷 참고 문구·낮 문장·밤 거울 문장")
+            expect("td-a", [genmod.REAL_STILL_PREV.format(no=4) in prompt.split("\n"), day_text in prompt.split("\n"),
+                            "Same place, time of day and light as Image" in prompt, "same time of day in every shot" in prompt],
+                   [True, True, False, False], "시작 그림 문장에 새 문구 2줄·옛 문구 없음")
+
+            # ================= (td-b) 시간대 검사 =================
+            system_text, tool = genmod._still_check_tool()  # noqa: SLF001
+            schema = tool["inputSchema"]["json"]
+            expect("td-b", [schema["properties"].get("timeOfDayMatch"), "timeOfDayMatch" in schema["required"],
+                            genmod.REAL_STILL_TOD_RULE in system_text, tool["name"],
+                            set(promptsmod.EMIT_STILL_CHECK["inputSchema"]["json"]["properties"]),
+                            genmod.REAL_STILL_TOD_RULE in promptsmod.STILL_CHECK_SYSTEM],
+                   [{"type": "boolean"}, True, True, "emit_still_check",
+                    {"shotSize", "count", "sideMatch", "animeStyle", "note"}, False],
+                   "같은 호출(emit_still_check)에 timeOfDayMatch 1항목, prompts 139 원본 그대로")
+            verdicts: dict = {}
+            checks: list[str] = []
+            draws: list[dict] = []
+
+            def fake_check(blocks, *, model):
+                imgs = [x["image"]["source"]["bytes"] for x in blocks if "image" in x]
+                checks.append(" ".join(x["text"] for x in blocks if "text" in x))
+                payload = {"shotSize": "CU", "count": 1, "sideMatch": True, "animeStyle": False, "note": "",
+                           "timeOfDayMatch": True}
+                payload.update(verdicts.get(bytes(imgs[1]), {}))
+                return payload, {"model": model, "inputTokens": 10, "outputTokens": 5}
+
+            def fake_seedream(prompt_, refs, *, size):
+                draws.append({"prompt": prompt_, "refs": [bytes(r) for r in refs]})
+                return b"STILL1"
+
+            genmod._read_still_check = fake_check  # noqa: SLF001
+            genmod._seedream = fake_seedream  # noqa: SLF001
+            genmod._charge_cut_still = lambda *a_, **k_: None  # noqa: SLF001
+            genmod.plan_mod._charge = lambda *a_, **k_: None  # noqa: SLF001
+
+            def run(first: dict, second: dict) -> tuple:
+                verdicts.clear()
+                verdicts[b"STILL0"] = first
+                verdicts[b"STILL1"] = second
+                checks.clear()
+                draws.clear()
+                out, record = genmod._checked_cut_still(  # noqa: SLF001
+                    "tester", "prj_t161", "gen1", day, {"cutId": "c1"}, {"outfits": {}}, frame=b"FRAME", still=b"STILL0",
+                    layout=cu, refs=[b"FRAME", b"LOC", b"RF1", b"PREV"], people=[("blue", a, 3)], background_no=2,
+                    charge_key="k", prev_no=4)
+                return out, record, list(draws), list(checks)
+
+            tod_bad = {"timeOfDayMatch": False, "note": "dusk sky"}
+            out, record, got_draws, got_checks = run(tod_bad, {})
+            p2 = got_draws[0]["prompt"] if got_draws else ""
+            expect("td-b", [len(got_draws), got_draws[0]["refs"] if got_draws else None, "the previous shot" in p2,
+                            genmod.REAL_STILL_TOD_FIX["day"] in p2, genmod.REAL_STILL_BACKGROUND_PLACE.format(no=2) in p2,
+                            day_text in p2, out, record],
+                   [1, [b"FRAME", b"LOC", b"RF1"], False, True, True, True, b"STILL1",
+                    {"ok": True, "items": [], "note": "", "retried": True, "firstItems": ["timeOfDay"], "used": "retry"}],
+                   "시간대 틀림 → 다시 그리기 1번·앞 컷 참고 없음·장소 뷰 남김·교정 문장")
+            expect("td-b", [len(got_checks), all(genmod.REAL_STILL_TOD_REQUIRED["day"] in t for t in got_checks)], [2, True],
+                   "검사 2번(첫·다시) 모두 같은 호출에 기준 시간대 글")
+            out, record, got_draws, _ = run(tod_bad, tod_bad)
+            expect("td-b", [len(got_draws), out, record["used"], record["items"]], [1, b"STILL0", "first", ["timeOfDay"]],
+                   "두 번 다 틀려도 다시 그리기 1번(같으면 첫 것)")
+            _, record, got_draws, _ = run({}, {})
+            expect("td-b", [len(got_draws), record["retried"]], [0, False], "맞으면 다시 그리기 0번")
+            _, _, got_draws, _ = run({"shotSize": "LS", "timeOfDayMatch": False}, {})
+            p2 = got_draws[0]["prompt"] if got_draws else ""
+            expect("td-b", [len(got_draws), got_draws[0]["refs"] if got_draws else None, "the previous shot" in p2,
+                            "real person in Image 2" in p2],
+                   [1, [b"FRAME", b"RF1"], False, True], "구도+시간대 틀림 → 시트 뷰·앞 컷 둘 다 뺌·번호 당김")
+            _, _, got_draws, _ = run({"shotSize": "LS"}, {})
+            p2 = got_draws[0]["prompt"] if got_draws else ""
+            expect("td-b", [got_draws[0]["refs"] if got_draws else None, genmod.REAL_STILL_PREV.format(no=3) in p2],
+                   [[b"FRAME", b"RF1", b"PREV"], True], "구도만 틀림 → 160 그대로(앞 컷 남김)")
+
+            # ================= (td-c) 상표 금지 =================
+            loc = {"id": "loc_t161", "nameEn": "A convenience store", "photos": [], "styleEn": "", "extraEn": "",
+                   "design": {"widthM": 7.0, "depthM": 6.0, "heightM": 2.8, "enclosed": True, "lightEn": "daylight",
+                              "walls": {s: {"descEn": "Shelves of snacks."} for s in locmod.SIDES}}, "facts": {}}
+            real_t2i = locmod._finalize_prompt("Bright store.", "real", "back", loc)  # noqa: SLF001
+            web_t2i = locmod._finalize_prompt("Bright store.", "webtoon", "back", loc)  # noqa: SLF001
+            long_t2i = locmod._finalize_prompt("Bright store. " * 400, "real", "front", loc)  # noqa: SLF001
+            cast_take = [{"name": a, "colorName": "blue", "frontNo": 1, "costume": "black open-collar shirt"},
+                         {"name": b, "colorName": "red", "frontNo": 2, "costume": "navy training top"}]
+            take = {"id": "take1", "cutIds": ["c1", "c2", "c3"], "seconds": 12}
+            real_take = genmod._take_prompt(day, take, cast=cast_take, panel_nos=[], location_no=3, variant="real")  # noqa: SLF001
+            web_take = genmod._take_prompt(day, take, cast=cast_take, panel_nos=[3], location_no=4)  # noqa: SLF001
+            vibe_real = genmod._vibe_take_prompt(day, take, real=True, cast=cast_take, location_no=3)  # noqa: SLF001
+            vibe_web = genmod._vibe_take_prompt(day, take, real=False, cast=cast_take, location_no=3, panel_nos=[4])  # noqa: SLF001
+            expect("td-c", [locmod.REAL_NO_BRAND, brand in locmod.PLACE_EDIT, brand in locmod._place_edit_prompt("A store"),  # noqa: SLF001
+                            real_t2i.endswith(" Any shop is a " + brand + "."), brand in web_t2i,
+                            long_t2i.endswith(brand + "."), len(long_t2i) <= locmod.PROMPT_HARD_CAP,
+                            brand in prompt, brand in real_take, brand in web_take, brand in vibe_real, brand in vibe_web],
+                   [brand, True, True, True, False, True, True, True, False, False, True, False],
+                   "실사 뷰 편집·실사 t2i(상한 안)·실사 시작 그림·실사 vibe 테이크에 구절, 웹툰·애니·옛 _take_prompt(끔 = 되돌리기) 없음")
+            if llm_calls:
+                bad.append(f"가짜가 아닌 LLM 호출: {llm_calls}")
+    except Exception:  # noqa: BLE001
+        bad.append("작업 161 검사 예외\n" + _tb.format_exc())
+    finally:
+        genmod._read_still_check = saved["_read_still_check"]  # noqa: SLF001
+        genmod._seedream = saved["_seedream"]  # noqa: SLF001
+        genmod._charge_cut_still = saved["_charge_cut_still"]  # noqa: SLF001
+        genmod.plan_mod._charge = saved["_charge"]  # noqa: SLF001
+    missing = {"td-a", "td-b", "td-c"} - seen
+    if missing and not bad:
+        bad.append(f"검사 단계가 빠졌습니다: {sorted(missing)}")
+    if bad:
+        fail("작업 161 실사 시간대·상표 금지 검사 실패\n  " + "\n  ".join(bad))
+    else:
+        ok("작업 161 (td-a)앞 컷 참고 = 장소·소품만·낮/밤 문장 (td-b)시간대 검사 같은 호출·틀림 → 1번 다시(앞 컷 참고 없음)·"
+           "두 번 틀려도 1번·구도만 = 160 (td-c)상표 금지 실사 뷰·t2i·시작 그림·테이크, 애니 없음")
+
+
 
 def main() -> int:
     print("== vpoc1 check ==")
@@ -54471,6 +54634,7 @@ def main() -> int:
     vibe_off.close()
     check_vnew_vibe_prompt_159()
     check_vnew_real_costume_160()
+    check_vnew_real_daylight_161()
     print()
     if warnings:
         print(f"경고 {len(warnings)}건")
