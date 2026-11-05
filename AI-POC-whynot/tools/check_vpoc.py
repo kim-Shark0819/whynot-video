@@ -37608,6 +37608,28 @@ function byTag(node, tag) { return walk(node).filter(function (n) { return n.tag
 function byText(node, tag, text) { return byTag(node, tag).filter(function (n) { return n.textContent === text; })[0]; }
 function clone(v) { return JSON.parse(JSON.stringify(v)); }
 function r3(v) { return Math.round(v * 1000) / 1000; }
+// 작업 145: ⑦ 재료 = [테이크 고르기] 메뉴 + [＋ 넣기], 고른 테이크의 [컷 고르기] + [＋ 컷 넣기].
+function binTake(node) { return byClass(node, "vnew-edit-bin-take")[0] || null; }
+function binCut(node) { return byClass(node, "vnew-edit-bin-cut")[0] || null; }
+function binOptions(sel) { return sel ? byTag(sel, "option").map(function (o) { return o.textContent; }) : []; }
+// 재료 메뉴 글(테이크 메뉴 → 지금 컷 메뉴 차례). 이전 버튼 줄 글 대신 쓴다.
+function binTexts(node) { return binOptions(binTake(node)).concat(binOptions(binCut(node))); }
+// sourceKey 가 key 인 재료를 메뉴에서 골라 넣기 버튼을 누른다(테이크면 [＋ 넣기], 컷이면 그 테이크를 고른 뒤 [＋ 컷 넣기]). 누른 버튼.
+function binInsert(node, key) {
+  var take = binTake(node);
+  var takeKeys = take ? byTag(take, "option").map(function (o) { return o.value; }) : [null];
+  for (var i = 0; i < takeKeys.length; i++) {
+    take = binTake(node);
+    if (take && take.value !== takeKeys[i]) { take.value = takeKeys[i]; take.fire("change"); }
+    if (take && takeKeys[i] === key) { var add = byClass(node, "vnew-edit-bin-add")[0]; add.fire("click"); return add; }
+    var cut = binCut(node);
+    if (cut && byTag(cut, "option").some(function (o) { return o.value === key; })) {
+      cut.value = key; cut.fire("change");
+      var addCut = byClass(node, "vnew-edit-bin-cut-add")[0]; addCut.fire("click"); return addCut;
+    }
+  }
+  throw new Error("재료 메뉴에 없음: " + key);
+}
 """
 
 # edu-b: 순수 함수(DOM 없음). 기대값은 _EDU_PURE_WANT.
@@ -37816,7 +37838,7 @@ async function run() {
     save: saveText(root),
     exportText: byClass(root, "vnew-edit-export-status")[0].textContent,
     variants: byClass(root, "vnew-edit-variant").map(function (b) { return [b.textContent, b.className, b.disabled]; }),
-    bin: byClass(root, "vnew-edit-bin-item").map(function (b) { return b.textContent; }),
+    bin: binTexts(root),
     videos: byClass(root, "vnew-edit-video").map(function (v) { return [v.className, v.src === S.web.materials[0].videoUrl, v.preload]; }),
     empty: byClass(root, "vnew-edit-empty")[0].style.display,
     media: media()
@@ -38083,7 +38105,7 @@ async function run() {
   byText(rootOf(host), "button", "실사").fire("click");
   await settle();
   var switched = [confirms.slice(-1)[0], gets().slice(-1)[0], ctx.variant, ids(ctx.clips), ctx.clips[0].sourceKey === S.real.doc.clips[0].sourceKey,
-                  byClass(rootOf(host), "vnew-edit-variant is-on")[0].textContent, byClass(rootOf(host), "vnew-edit-bin-item").length];
+                  byClass(rootOf(host), "vnew-edit-variant is-on")[0].textContent, binTexts(rootOf(host)).length];
   fire(800);
   await settle();
   var putReal = puts().slice(-1)[0][2];
@@ -38097,24 +38119,24 @@ async function run() {
   // ================= (10) 재료 넣기(길이 모르는 합친 영상 → 필름 요청이 잰다) =================
   root = rootOf(host);
   key("Home", "Home");
-  var finalBtn = byClass(root, "vnew-edit-bin-item").filter(function (b) { return b.textContent.indexOf("합친 영상") >= 0; })[0];
+  var finalKey = S.web.materials[3].sourceKey;
   var mediaBefore = media().length;
-  finalBtn.fire("click");
+  var finalBtn = binInsert(root, finalKey);
   await settle();
   var finalMid = S.web.materials[3].mid;
   out.insert = { text: finalBtn.textContent, media: media().slice(mediaBefore), mid: finalMid, clips: ctx.clips.map(function (c) { return [c.in, c.out, c.label || ""]; }),
-                 sel: ctx.sel, t: ctx.t, binAfter: byClass(rootOf(host), "vnew-edit-bin-item").map(function (b) { return b.textContent; }).filter(function (t) { return t.indexOf("합친") >= 0; }) };
+                 sel: ctx.sel, t: ctx.t, binAfter: binOptions(binTake(rootOf(host))) };
   fire(800);
   await settle();
   // 한도: 200개면 넣기·자르기를 막는다
   var savedLimits = ctx.limits;
   ctx.limits = { maxClips: ctx.clips.length, maxTotalSeconds: 300, minClipSeconds: 0.04 };
-  byClass(rootOf(host), "vnew-edit-bin-item")[0].fire("click");
+  binInsert(rootOf(host), S.web.materials[0].sourceKey);
   var limitNote = byClass(rootOf(host), "vnew-edit-notice")[0].textContent;
   key("s", "KeyS");
   var limitSplit = [byClass(rootOf(host), "vnew-edit-notice")[0].textContent, pending(800)];
   ctx.limits = { maxClips: 200, maxTotalSeconds: editStarts(ctx.clips).total, minClipSeconds: 0.04 };
-  byClass(rootOf(host), "vnew-edit-bin-item")[0].fire("click");
+  binInsert(rootOf(host), S.web.materials[0].sourceKey);
   var totalNote = byClass(rootOf(host), "vnew-edit-notice")[0].textContent;
   ctx.limits = savedLimits;
   key("End", "End");
@@ -38542,7 +38564,7 @@ def _edu_ctl_problems(got: dict, server: dict) -> list[str]:
          "클립 너비 = 길이 × px/초·소리 상자(받기 전 회색·소리 없는 원본)·눈금 1초(작은 눈금 0.25초)·끝 여백 120px·시각 표기")
     want("edu-d", [b.get("variants"), b.get("bin"), b.get("videos"), b.get("empty"), b.get("media")],
          [[["실사", "vnew-edit-variant", False], ["애니(웹툰)", "vnew-edit-variant is-on", False]],
-          ["＋ 컷 1 · 3.0초", "＋ 컷 2 · 3.0초", "＋ 컷 3 · 3.0초", "＋ 합친 영상"],
+          ["테이크 1 · 애니", "컷 1 · 3.0초", "컷 2 · 3.0초", "컷 3 · 3.0초"],
           [["vnew-edit-video is-active", True, "auto"], ["vnew-edit-video", False, "auto"]], "none", [mids[0]]],
          "그림체 고르기·재료(길이 모르면 표시 없음)·<video> 2개(첫 클립 원본)·필름은 첫 재료 하나만 먼저")
     m = got.get("media") or {}
@@ -38614,9 +38636,9 @@ def _edu_ctl_problems(got: dict, server: dict) -> list[str]:
                                        "putReal": ["real", 2], "undone": ["webtoon", "애니(웹툰)"], "putBack": "webtoon"},
          "그림체 바꾸기: 확인창(취소면 요청 0) → GET ?variant= → 그 문서로 바꾸고 저장, 실행 취소로 되돌림")
     ins = got.get("insert") or {}
-    want("edu-f", ins, {"text": "＋ 합친 영상", "media": [mids[3]], "mid": mids[3], "clips": [[0, 3, "컷 1"], [0, 7.5, "합친 영상"], [0, 3, "컷 3"]],
-                        "sel": 1, "t": 3, "binAfter": ["＋ 합친 영상 · 7.5초"]},
-         "재료 넣기: 길이 모르는 합친 영상은 필름 요청이 잰 뒤 재생헤드 클립 뒤에 넣음")
+    want("edu-f", ins, {"text": "＋ 넣기", "media": [mids[3]], "mid": mids[3], "clips": [[0, 3, "컷 1"], [0, 7.5, "합친 영상"], [0, 3, "컷 3"]],
+                        "sel": 1, "t": 3, "binAfter": ["테이크 1 · 7.5초 · 애니"]},
+         "재료 넣기(작업 145 테이크 메뉴): 길이 모르는 합친 영상(테이크 1)은 필름 요청이 잰 뒤 재생헤드 클립 뒤에 넣음")
     want("edu-f", got.get("limits"), ["클립은 3개까지 둘 수 있습니다.", ["클립은 3개까지 둘 수 있습니다.", 0], "타임라인 전체 길이는 13.5초까지입니다.",
                                       "클립 끝에 너무 가까워 자를 수 없습니다. 재생헤드를 조금 옮겨 주세요."],
          "한도(클립 수·전체 길이)·끝에서 자르기는 안내만(저장 없음)")
@@ -41943,7 +41965,7 @@ async function run() {
   await settle();
   var rootOff = editCtx.root;
   out.off = [byClass(rootOff, "vnew-edit-fix-open").length, byClass(rootOff, "vnew-edit-fix-pick").length,
-             byClass(rootOff, "vnew-edit-bin-cell").length, texts(rootOff, "vnew-edit-bin-item"), editCtx.retakeOn];
+             byClass(rootOff, "vnew-edit-bin-cell").length, binTexts(rootOff), editCtx.retakeOn];
   editLeave();
   // ===== 켬: 재료 줄
   var host = new FakeNode("div");
@@ -41954,7 +41976,7 @@ async function run() {
   var root = ctx.root;
   var pkBtn = byClass(root, "vnew-edit-fix-pick")[0];
   out.bin = { open: byClass(root, "vnew-edit-fix-open").length, sel: byClass(root, "vnew-edit-fix-sel").length,
-              items: texts(root, "vnew-edit-bin-item"), cells: byClass(root, "vnew-edit-bin-cell").length,
+              items: binTexts(root), cells: byClass(root, "vnew-edit-bin-cell").length,
               pick: pkBtn ? [pkBtn.textContent, pkBtn.disabled, pkBtn.title] : null, retakeOn: ctx.retakeOn, clips: ctx.clips.map(function (c) { return c.label; }) };
   // 지시서 119: 고른 클립(원본 0–7.5초)의 재료가 처음 테이크, 장면 경계(cuts)가 없으면 그 클립 구간 한 줄을 골라 둔다. 창이 열린 동안 단축키 무시·Esc 닫기
   editSelect(ctx, 0);
@@ -41965,7 +41987,7 @@ async function run() {
   key("Escape", "Escape");
   out.selOn.push(ctx.fixPick, byClass(root, "vnew-edit-pick").length);
   // 합친 영상(고칠 수 없는 재료) 클립을 고르면 첫 테이크가 처음 값·구간 없음 — 넣었다가 실행 취소로 되돌린다
-  byClass(root, "vnew-edit-bin-item").filter(function (b) { return b.textContent.indexOf("합친 영상") >= 0; })[0].fire("click");
+  binInsert(root, ctx.matList.webtoon.filter(function (m) { return m.kind === "final"; })[0].sourceKey); // 작업 145: 테이크 메뉴
   await settle();
   var pkF = pickOpen(root);
   out.selFinal = [ctx.clips.length, ctx.sel, pickInfo(pkF)];
@@ -42058,7 +42080,7 @@ async function run() {
   var rows = byClass(fx.dom.versions, "vnew-edit-fix-version");
   out.finished = { run: fx.dom.run.textContent, rows: rows.map(function (r) { return [txt(r, "vnew-edit-fix-version-name"),
                    byClass(r, "vnew-edit-fix-swap").map(function (b) { return b.disabled; }), byClass(r, "vnew-edit-fix-add").length]; }),
-                   bin: texts(root, "vnew-edit-bin-item"), refreshed: calls.filter(function (c) { return c[0] === "GET" && c[1] === P + "?variant=webtoon"; }).length,
+                   bin: binTexts(root), refreshed: calls.filter(function (c) { return c[0] === "GET" && c[1] === P + "?variant=webtoon"; }).length,
                    pending: [pending(2000), pending(5000)] };
   // ===== [바꾸기] v2(재료 줄에서 열었으니 그 칸의 클립 모두) — 구간·속도 유지, 실행 취소 한 단계, 저장 예약
   ctx.clips[0].speed = 0.5;
@@ -42303,7 +42325,7 @@ def _rtk_ui_problems(got: dict, server: dict) -> list[str]:
         if value != expected:
             problems.append(f"(rtk-j) {what}\n      결과 {value!r}\n      기대 {expected!r}")
 
-    items_v1 = ["＋ " + label + " · 15.0초", "＋ 합친 영상"]
+    items_v1 = ["테이크 1 · 15.0초 · 애니", "합친 영상"]  # 작업 145: 재료 = 테이크 메뉴(테이크 → 합친 영상)
     want(got.get("off"), [0, 0, 0, items_v1, False], "끔(GET /edit 에 retake 없음): AI로 고치기 버튼·고른 클립 버튼·묶음 없음, 재료 버튼 그대로")
     want(got.get("bin"), {"open": 0, "sel": 0, "items": items_v1, "cells": 0,
                           "pick": ["AI로 고치기", False, "고칠 테이크와 장면을 골라 AI로 고칩니다"], "retakeOn": True, "clips": ["컷 1", "컷 2"]},
@@ -42348,8 +42370,8 @@ def _rtk_ui_problems(got: dict, server: dict) -> list[str]:
     fin = got.get("finished") or {}
     want(fin, {"run": "v2 완성 — [바꾸기]·[재료에 추가]로 타임라인에 쓸 수 있습니다.",
                "rows": [["v1 원본 · 완성", [False], 1], ["v2 · 완성", [False], 1]],
-               "bin": items_v1[:1] + ["＋ " + label + " v2", "＋ 합친 영상 · 15.0초"], "refreshed": 1, "pending": [0, 0]},
-         "완성: 진행 줄·버전마다 [바꾸기]·[재료에 추가]·GET /edit?variant= 로 재료만 다시 받아 v2 가 재료 줄 v1 바로 뒤(앞에서 잰 합친 영상 길이는 그대로)")
+               "bin": items_v1[:1] + ["테이크 2 · 애니", "합친 영상 · 15.0초"], "refreshed": 1, "pending": [0, 0]},
+         "완성: 진행 줄·버전마다 [바꾸기]·[재료에 추가]·GET /edit?variant= 로 재료만 다시 받아 v2 가 테이크 메뉴 「테이크 2」(앞에서 잰 합친 영상 길이는 그대로)")
     sa = got.get("swapAll") or {}
     want(sa, {"clips": [[True, 0, 7.5, 0.5, "컷 1"], [True, 7.5, 15, 1, "컷 2"]], "undo": 1,
               "note": "타임라인 클립 2개를 v2로 바꿨습니다. 다른 버전의 [바꾸기]로 되돌릴 수 있습니다.", "media": 1, "saveTimer": 1},
@@ -43939,7 +43961,7 @@ async function run() {
   var rows = byClass(d.versions, "vnew-edit-fix-version");
   out.rangeDone = { rows: rows.map(function (r) { return [txt(r, "vnew-edit-fix-version-name"), txt(r, "vnew-edit-fix-version-meta"),
                     byClass(r, "vnew-edit-fix-swap").map(function (b) { return [b.disabled, b.title]; })]; }),
-                    bin: texts(root, "vnew-edit-bin-item").slice(0, 2) };
+                    bin: binTexts(root).slice(0, 2) };
   var undo0 = ctx.hist.undo.length;
   byClass(rows[1], "vnew-edit-fix-swap")[0].fire("click");
   await settle();
@@ -43954,7 +43976,7 @@ async function run() {
   byClass(rows[1], "vnew-edit-fix-add")[0].fire("click");
   await settle();
   out.addRange = [ctx.clips.length - n0, ctx.clips.filter(function (c) { return c.sourceKey === S.v2RKey; }).map(function (c) { return [c.in, c.out]; }),
-                  texts(root, "vnew-edit-bin-item")[1]];
+                  binTexts(root)[1]];
   editDo(ctx, "undo");
   editFixClose(ctx);
   editSelect(ctx, 0);
@@ -44080,15 +44102,15 @@ def _rtk1_ui_problems(got: dict, server: dict) -> list[str]:
          "구간 제출: 확인창(구간)·바디(confirmUsd 1.64·scope·in·out)·5초 조회")
     want(got.get("rangeDone"), {"rows": [["v1 원본 · 완성", None, [[False, "타임라인에서 이 칸의 클립을 v1 원본으로 바꿉니다(구간·속도는 길이 안에서 유지)"]]],
                                          ["v2 · 완성", "구간 7.5–15.0초", [[False, "타임라인에서 이 구간 안의 클립을 v2로 바꿉니다(녹화 7.5–15.0초 자리, 속도는 그대로)"]]]],
-                                "bin": ["＋ " + server["label"] + " · 15.0초", "＋ 테이크 1 · 컷 2 v2"]},
-         "완성: 버전 줄 구간 덧붙임·구간 [바꾸기] 안내(지시서 119: 고르기 창에서 열면 고른 클립 없음 = 이 칸·이 구간 안의 클립), 재료 줄에 「테이크 1 · 컷 2 v2」(v1 바로 뒤)")
+                                "bin": ["테이크 1 · 15.0초 · 애니", "테이크 2 · 애니"]},
+         "완성: 버전 줄 구간 덧붙임·구간 [바꾸기] 안내(지시서 119: 고르기 창에서 열면 고른 클립 없음 = 이 칸·이 구간 안의 클립), 테이크 메뉴에 v2 = 「테이크 2」(작업 145)")
     want(got.get("swapRange"), {"clips": [[False, 0, 7.5, "컷 1"], [True, 0, 7.5, "컷 2"]],
                                 "note": "타임라인 클립 1개를 v2로 바꿨습니다. 다른 버전의 [바꾸기]로 되돌릴 수 있습니다.", "undo": 1},
          "구간 v2 [바꾸기]: 고른 클립(컷 2, 녹화 7.5–15초)만 v2 0–7.5초로, 컷 1·다른 클립 그대로, 실행 취소 한 단계")
     want(got.get("revertRange"), {"clips": [[False, 0, 7.5, "컷 1"], [False, 7.5, 15, "컷 2"]],
                                   "note": "타임라인 클립 1개를 v1 원본으로 바꿨습니다. 다른 버전의 [바꾸기]로 되돌릴 수 있습니다."},
          "v1 [바꾸기] = 되돌리기: 원래 in·out(7.5–15초)으로")
-    want(got.get("addRange"), [1, [[0, 7.5]], "＋ 테이크 1 · 컷 2 v2 · 7.5초"], "구간 v2 [재료에 추가]: 0–7.5초(자를 길이)만, 재료 줄 길이도 7.5초")
+    want(got.get("addRange"), [1, [[0, 7.5]], "테이크 2 · 7.5초 · 애니"], "구간 v2 [재료에 추가]: 0–7.5초(자를 길이)만, 테이크 메뉴 길이도 7.5초")
     want(got.get("outside"), {"clips": [False, True], "note": "타임라인 클립 1개를 v2로 바꿨습니다. 다른 버전의 [바꾸기]로 되돌릴 수 있습니다.",
                               "clip": {"in": 0, "out": 7.5}},
          "지시서 119: 구간 밖 클립(컷 1)을 고르고 연 패널도 고른 클립이 없어 구간 v2 [바꾸기]는 이 구간 안의 클립(컷 2)만, 컷 1 그대로")
@@ -49311,6 +49333,222 @@ def check_vnew_real_ai_note_140() -> None:
            "(an-b)Seedance 0·1단계·Seedream·Kling 본문 첫 줄·거절 로그 step 0·1·2 note=1")
 
 
+def _tm145_plan(env, pid: str, *, current_done: bool) -> dict:
+    """작업 145 통 테이크 gen(테이크 1개 · 컷 3개 10초). current_done=False: 6회차 취소(기록)·7회차 끝(다시 이어 붙임 -fixed)·8회차 끝·
+    지금 9회차 취소. current_done=True: 7회차 끝(기록)·지금 8회차 끝(컷 단위 Kling 컷 3개)."""
+    planmod = env.planmod
+    plan = planmod.new_plan()
+    cuts = [{"id": "c1", "no": 1, "seconds": 3}, {"id": "c2", "no": 2, "seconds": 3}, {"id": "c3", "no": 3, "seconds": 4}]
+    plan["conti"] = {"status": "ready", "cuts": cuts, "segments": [{"id": "s1", "cutIds": ["c1", "c2", "c3"], "seconds": 10}]}
+    root = f"users/{_EDT_OWNER}/video/{pid}/vnew/gen/g1"
+    web, final_web = _edt_key(pid, "take1-webtoon-1"), f"{root}/final-webtoon.mp4"
+
+    def hist(n: int, status: str, final: str = "", **extra) -> dict:
+        unit_status = "completed" if status == "done" else "cancelled"
+        return {"n": n, "status": status, "finalKey": final, "audio": True, **extra,
+                "units": [{"id": "take1", "status": unit_status, "outputKey": _edt_key(pid, f"take1-real-{n}") if status == "done" else "",
+                           "error": ""}]}
+
+    blobs = {web: _edt_fake(10.0), final_web: _edt_fake(10.0)}
+    if current_done:
+        cut_keys = [_edt_key(pid, f"take1-real-8-{c}") for c in ("c1", "c2", "c3")]
+        real = _edt_cell("completed", _edt_key(pid, "take1-real-8"), fallback={"step": 2, "cuts": [
+            {"cutId": c, "status": "completed", "outputKey": k, "seconds": s, "duration": 5}
+            for c, k, s in zip(("c1", "c2", "c3"), cut_keys, (3, 3, 4))]})
+        final_real = {"status": "done", "key": f"{root}/final-real-r8.mp4", "error": "", "n": 8}
+        run = {"n": 8, "startedAt": "2026-11-03T03:00:00Z"}
+        history = [hist(7, "done", f"{root}/final-real-r7.mp4")]
+        blobs.update({k: _edt_fake(5.0) for k in cut_keys})
+        blobs.update({f"{root}/final-real-r8.mp4": _edt_fake(10.0), f"{root}/final-real-r7.mp4": _edt_fake(10.0),
+                      _edt_key(pid, "take1-real-7"): _edt_fake(10.0), _edt_key(pid, "take1-real-8"): _edt_fake(10.0)})
+    else:
+        real = _edt_cell("cancelled")
+        final_real = {"status": "cancelled", "key": "", "error": "", "n": 9}
+        run = {"n": 9, "startedAt": "2026-11-04T03:00:00Z"}
+        history = [hist(6, "cancelled"),
+                   hist(7, "done", f"{root}/final-real-r7-fixed.mp4", finalKeyBroken=f"{root}/final-real-r7.mp4"),
+                   hist(8, "done", f"{root}/final-real-r8.mp4", startedAt="2026-11-02T03:00:00Z")]
+        blobs.update({f"{root}/final-real-r7-fixed.mp4": _edt_fake(10.0), f"{root}/final-real-r7.mp4": _edt_fake(10.0),
+                      f"{root}/final-real-r8.mp4": _edt_fake(10.5), _edt_key(pid, "take1-real-7"): _edt_fake(10.0),
+                      _edt_key(pid, "take1-real-8"): _edt_fake(10.0)})
+    plan["gen"] = {
+        "genId": "g1", "mode": "previz-take", "status": "done" if current_done else "cancelled", "createdAt": "2026-11-01T00:00:00Z",
+        "units": [{"id": "take1", "cutIds": ["c1", "c2", "c3"], "recKeys": ["rec/s1.mp4"], "recSegIds": ["s1"], "seconds": 10.0,
+                   "startCutNo": 1, "endCutNo": 3, "real": real, "webtoon": _edt_cell("completed", web)}],
+        "segments": [], "finalReal": final_real, "finalWebtoon": {"status": "done", "key": final_web, "error": ""},
+        "realRun": run, "realHistory": history, "selected": None, "costUsd": 0.0,
+    }
+    env.store.blobs.update(blobs)
+    env.save_plan(pid, plan)
+    return plan
+
+
+# 작업 145 화면(node): 실제 GET /edit 응답(SERVER.real8 = 지금 8회차 끝·7회차 기록)을 ⑦ 화면에 넣고 재료 메뉴를 본다.
+_TM145_NODE = r"""
+var P = "/api/vnew/p/p%201/edit";
+var V = SERVER.real8;
+var viewNow = clone(V);
+handlers.push(function (m, p) { if (m === "GET" && p.indexOf(P + "/media/") === 0) return "hold"; });
+handlers.push(function (m, p) { if (m === "GET" && (p === P || p.indexOf(P + "?") === 0)) return { ok: clone(viewNow) }; });
+handlers.push(function (m, p) { if (m === "PUT" && p === P) return { ok: { doc: { version: 1 }, etag: "e1", saved: true, totalSeconds: 0 } }; });
+var inserted = [];
+var realInsert = editInsertMaterial;
+editInsertMaterial = function (c, key, btn) { inserted.push(key); return realInsert(c, key, btn); };
+function keyOf(no) { return V.materials.filter(function (m) { return m.takeNo === no; })[0].sourceKey; }
+function snap(root) {
+  var t = binTake(root), c = binCut(root);
+  return { takes: binOptions(t), takeValue: t ? t.value : null, takeTitle: t ? [t.tagName, t.title, t.attrs["aria-label"]] : null,
+           cuts: binOptions(c), cutValues: c ? byTag(c, "option").map(function (o) { return o.value; }) : [],
+           add: byClass(root, "vnew-edit-bin-add").map(function (b) { return b.textContent; }),
+           addCut: byClass(root, "vnew-edit-bin-cut-add").map(function (b) { return b.textContent; }),
+           selects: byTag(byClass(root, "vnew-edit-bin")[0], "select").length, hint: byClass(byClass(root, "vnew-edit-bin")[0], "vnew-hint").map(function (n) { return n.textContent; }) };
+}
+async function run() {
+  var host = new FakeNode("div");
+  renderEditStep(host);
+  await settle();
+  var ctx = editCtx;
+  var root = ctx.root;
+  out.first = snap(root);
+  out.keys = { k7: keyOf(7), k8: keyOf(8) };
+  // [＋ 넣기] = 고른(가장 최근) 테이크
+  byClass(root, "vnew-edit-bin-add")[0].fire("click");
+  out.insertNewest = inserted.slice();
+  // [＋ 컷 넣기] = 고른 컷(둘째 컷으로 바꾼 뒤)
+  var cut = binCut(root);
+  cut.value = byTag(cut, "option")[1].value;
+  cut.fire("change");
+  byClass(root, "vnew-edit-bin-cut-add")[0].fire("click");
+  out.insertCut = [inserted.slice(-1)[0], cut.value];
+  // 테이크 7 로 바꾸기 → 컷 메뉴가 그 테이크의 컷
+  var take = binTake(root);
+  take.value = out.keys.k7;
+  take.fire("change");
+  out.pick7 = snap(root);
+  // 다시 그리기·폴링(재료 다시 받기)에도 고른 값이 남는다
+  editRenderBin(ctx);
+  out.rerender = snap(root).takeValue;
+  editAbsorbMaterials(ctx, clone(V));
+  editRenderBin(ctx);
+  out.poll = [snap(root).takeValue, ctx.binTake.real];
+  byClass(root, "vnew-edit-bin-add")[0].fire("click");
+  out.insert7 = inserted.slice(-1)[0];
+  // 테이크가 하나뿐이어도 메뉴는 보인다
+  var one = clone(V);
+  one.materials = one.materials.filter(function (m) { return m.takeNo === 8; });
+  ctx.binTake = {};
+  editAbsorbMaterials(ctx, one);
+  editRenderBin(ctx);
+  out.single = snap(root);
+  out.innerHTML = innerHTMLUsed;
+  console.log(JSON.stringify(out));
+}
+run().catch(function (e) { console.error(String((e && e.stack) || e)); process.exit(1); });
+"""
+
+
+def check_vnew_edit_take_menu_145() -> None:
+    """작업 145 — ⑦ 재료 = [테이크 고르기] 메뉴(테이크 1, 2, 3 …). 유료 호출 0, 가짜 저장소.
+
+    (tm-a) 서버: 실사 회차 7(끝, -fixed)·8(끝)·9(지금, 취소)·6(기록, 취소) → 테이크 7·8 만(takeNo·takeLabel, 7 은 -fixed 키), 회차 칸 결과는
+           takeOf, 9·6 은 테이크 없음. 웹툰 = 통 테이크 결과 테이크 1, 합친 영상은 테이크 아님. 지금 회차 8 끝(컷 단위 Kling) → 컷 3개 takeOf 8.
+           컷 모드 = 합친 영상 테이크 1·컷 takeOf 1. 허용 목록·기본 문서는 그대로.
+    (tm-b) 화면(node): select 하나에 테이크 N개·가장 최근 테이크 처음 값·[＋ 넣기] = 그 테이크 sourceKey·컷 메뉴 = 그 테이크의 컷·
+           [＋ 컷 넣기]·다시 그리기와 폴링에도 고른 값·테이크 하나여도 메뉴·안내 글 그대로
+    """
+    import traceback as _tb  # noqa: PLC0415
+
+    bad: list[str] = []
+
+    def expect(group: str, got, want, what: str) -> None:
+        if got != want:
+            bad.append(f"({group}) {what}\n      결과 {got!r}\n      기대 {want!r}")
+
+    def takes(view: dict) -> list:
+        return [(m["takeNo"], m["takeLabel"], m["sourceKey"].rsplit("/", 1)[-1]) for m in view.get("materials") or []
+                if m.get("takeNo") is not None]
+
+    def parts(view: dict) -> list:
+        return [(m["takeOf"], m["label"]) for m in view.get("materials") or [] if m.get("takeOf") is not None]
+
+    server: dict = {}
+    try:
+        with _EdtEnv() as env, _pin_vnew(VNEW_EDIT=True, VNEW_EDIT_RETAKE=False):
+            client = env.client()
+            edit = env.editmod
+            _tm145_plan(env, "prj_tm_a", current_done=False)
+            real = client.get("/api/vnew/p/prj_tm_a/edit?variant=real").get_json() or {}
+            expect("tm-a", takes(real), [(8, "테이크 8", "final-real-r8.mp4"), (7, "테이크 7", "final-real-r7-fixed.mp4")],
+                   "실사 회차 7(-fixed)·8 만 테이크(취소된 9·6 없음, 회차 번호 그대로)")
+            expect("tm-a", parts(real), [(8, "실사 8회차 · 테이크 1 · 컷 1–3"), (7, "실사 7회차 · 테이크 1 · 컷 1–3")],
+                   "회차 칸 결과 = 그 테이크의 컷 재료(takeOf)")
+            expect("tm-a", [(m["takeAt"], m["takeOf"]) for m in real["materials"] if m.get("takeNo") == 8], [("2026-11-02T03:00:00Z", None)],
+                   "테이크 8 takeAt = 회차 시작 시각")
+            expect("tm-a", sorted(k for k in ("takeNo", "takeLabel", "takeAt", "takeOf") if k in real["materials"][0]),
+                   ["takeAt", "takeLabel", "takeNo", "takeOf"], "재료마다 새 필드 4개")
+            expect("tm-a", all(m.get("videoUrl") for m in real["materials"] if m.get("takeNo")), True, "테이크 재료 presigned URL")
+            plan_a = env.plan("prj_tm_a")
+            allowed = sorted(m["sourceKey"] for m in edit._all_items(plan_a["gen"], "real", None))  # noqa: SLF001
+            expect("tm-a", sorted(m["sourceKey"] for m in real["materials"]), allowed, "허용 목록 그대로(재료 수·키)")
+            web = client.get("/api/vnew/p/prj_tm_a/edit?variant=webtoon").get_json() or {}
+            expect("tm-a", [takes(web), [(m["label"], m["takeNo"], m["takeOf"]) for m in web["materials"] if m["kind"] == "final"]],
+                   [[(1, "테이크 1", "output.mp4")], [("합친 영상", None, None)]], "웹툰: 통 테이크 결과 = 테이크 1, 합친 영상은 테이크 아님")
+            _tm145_plan(env, "prj_tm_b", current_done=True)
+            real8 = client.get("/api/vnew/p/prj_tm_b/edit?variant=real").get_json() or {}
+            expect("tm-a", [takes(real8), parts(real8)],
+                   [[(8, "테이크 8", "final-real-r8.mp4"), (7, "테이크 7", "final-real-r7.mp4")],
+                    [(8, "컷 1"), (8, "컷 2"), (8, "컷 3"), (7, "실사 7회차 · 테이크 1 · 컷 1–3")]],
+                   "지금 회차 8 끝: 병합본 = 테이크 8, 컷 단위 Kling 컷 3개 = 테이크 8 의 컷")
+            server["real8"] = real8
+            _edt_cut_plan(env, "prj_tm_c")
+            cutv = client.get("/api/vnew/p/prj_tm_c/edit").get_json() or {}
+            expect("tm-a", [takes(cutv), parts(cutv), cutv["doc"]["clips"] == cutv["defaultClips"], len(cutv["defaultClips"])],
+                   [[(1, "테이크 1", "final-webtoon.mp4")], [(1, "컷 1"), (1, "컷 2"), (1, "컷 3")], True, 3],
+                   "컷 모드: 합친 영상 = 테이크 1, 컷 = 테이크 1 의 컷, 기본 문서 그대로(컷 3개)")
+    except Exception:  # noqa: BLE001
+        bad.append("(tm-a) 예외\n" + _tb.format_exc())
+
+    node = shutil.which("node")
+    if not node:
+        warn("node 가 없어 작업 145 화면 검사(tm-b)를 건너뜁니다 (E16)")
+    elif server.get("real8"):
+        vjs = (PUBLIC / "vnew.js").read_text(encoding="utf-8")
+        code, problems = _edu_code(vjs, _EDU_SLICES)
+        bad.extend(problems)
+        prefix = "var SERVER = " + json.dumps(server, ensure_ascii=False) + ";\n"
+        got, err = _lr_run_node(node, prefix + _EDU_NODE_HARNESS + code + _TM145_NODE, "tm145_")
+        if err:
+            bad.append(f"(tm-b) node 실행 실패: {err}")
+        else:
+            keys = got.get("keys") or {}
+            mats = {m["sourceKey"]: m for m in server["real8"]["materials"]}
+            cuts8 = [k for k, m in mats.items() if m.get("takeOf") == 8]
+            first = got.get("first") or {}
+            texts = first.get("takes") or []
+            expect("tm-b", [len(texts), first.get("selects"), first.get("takeTitle"), first.get("takeValue") == keys.get("k8"),
+                            first.get("add"), first.get("addCut"), first.get("hint")],
+                   [2, 2, ["SELECT", "테이크 고르기", "테이크 고르기"], True, ["＋ 넣기"], ["＋ 컷 넣기"], ["누르면 재생헤드가 있는 클립 뒤에 넣습니다."]],
+                   "select 하나에 테이크 2개(+ 컷 메뉴)·가장 최근 테이크(8) 처음 값·[＋ 넣기]·[＋ 컷 넣기]·안내 글 그대로")
+            expect("tm-b", [texts[0] if texts else "", bool(re.match(r"^테이크 8 · \d{1,2}/\d{1,2} \d\d:\d\d$", texts[1] if len(texts) > 1 else ""))],
+                   ["테이크 7 · 실사", True], "옵션 글: 「테이크 n · <초> · <날짜 또는 실사/애니>」(오래된 것부터, 길이 모르면 초 없음)")
+            expect("tm-b", [first.get("cuts"), first.get("cutValues") == cuts8], [["컷 1 · 5.0초", "컷 2 · 5.0초", "컷 3 · 5.0초"], True],
+                   "컷 메뉴 = 고른 테이크(8)의 컷(기본 묶음이라 길이를 잰 컷은 초)")
+            expect("tm-b", [got.get("insertNewest"), got.get("insertCut")], [[keys.get("k8")], [cuts8[1], cuts8[1]]],
+                   "[＋ 넣기] → editInsertMaterial(테이크 8 sourceKey), [＋ 컷 넣기] → 고른 컷 sourceKey")
+            p7 = got.get("pick7") or {}
+            expect("tm-b", [p7.get("takeValue") == keys.get("k7"), p7.get("cuts"), got.get("rerender") == keys.get("k7"),
+                            [v == keys.get("k7") for v in got.get("poll") or []], got.get("insert7") == keys.get("k7")],
+                   [True, ["테이크 1 · 컷 1–3"], True, [True, True], True],
+                   "테이크 7 고르면 컷 메뉴가 그 테이크 것·다시 그리기와 폴링(재료 다시 받기)에도 고른 값(ctx.binTake)·[＋ 넣기] = 테이크 7")
+            single = got.get("single") or {}
+            expect("tm-b", [len(single.get("takes") or []), single.get("selects"), single.get("takeValue") == keys.get("k8")],
+                   [1, 1, True], "테이크가 하나뿐이어도 메뉴(옵션 1개)")
+            expect("tm-b", got.get("innerHTML"), False, "innerHTML 0")
+    if bad:
+        fail("작업 145 ⑦ 재료 테이크 메뉴 검사 실패\n  " + "\n  ".join(bad))
+    else:
+        ok("작업 145 ⑦ 재료 테이크 메뉴 (tm-a)실사 회차 7·8 만 테이크(9·6 취소 없음, -fixed)·takeNo/takeLabel/takeAt/takeOf·웹툰 테이크 1·"
+           "컷 모드 합친 영상·허용 목록·기본 문서 그대로 (tm-b)select 1개·N옵션·최근 테이크 기본·넣기 sourceKey·컷 메뉴·다시 그리기/폴링 유지·1개")
 # 작업 143: 새 기본값(VNEW_LOCATION_REAL_FROM_WEBTOON 켬)에서는 실사 뷰가 웹툰 뷰 편집(_seedream_edit)이 된다. 기존 공간 시트
 # 검사(check_vnew_locations·125·128)는 작업 125 의 text-to-image 경로(참고 0장·원장 모델·호출 수·동시성)를 보므로 부르는 줄에서
 # 끔으로 고정한다(기대값은 그대로). 켬 경로는 check_vnew_location_real_edit_143 이 본다. 끔이면 유료 fal 경로도 타지 않는다.
@@ -49717,6 +49955,7 @@ def main() -> int:
     check_vnew_real_brief_138()
     check_vnew_real_still_139()
     check_vnew_real_ai_note_140()
+    check_vnew_edit_take_menu_145()
     check_vnew_location_real_edit_143()
     check_vnew_plan_step_stay_129()
     check_pod_zones()

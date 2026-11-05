@@ -9255,6 +9255,8 @@
       defaults: {},
       matList: {},
       materials: {},
+      binTake: {}, // 작업 145: 그림체별 고른 테이크(sourceKey) — 다시 그리기·폴링에도 남는다
+      binCut: {}, // 작업 145: 그림체별 고른 컷(sourceKey)
       limits: {},
       invalidIds: {},
       media: {},
@@ -10883,6 +10885,73 @@
       });
   }
 
+  /* 재료 한 줄 길이(초). AI로 고친 자른 버전은 그 길이까지(지시서 116 보완 1). 모르면 0. */
+  function editBinSeconds(mat) {
+    var duration = Number(mat.duration);
+    if (mat.group === "retake" && Number((mat.retake || {}).trimTo) > 0 && duration > 0) duration = Math.min(duration, Number(mat.retake.trimTo));
+    return duration > 0 ? duration : 0;
+  }
+
+  /* 테이크 만든 때(서버 takeAt ISO) → "11/3 14:05". 읽을 수 없으면 "". */
+  function editTakeWhen(iso) {
+    var d = iso ? new Date(String(iso)) : null;
+    if (!d || isNaN(d.getTime())) return "";
+    function pad(n) {
+      return (n < 10 ? "0" : "") + n;
+    }
+    return d.getMonth() + 1 + "/" + d.getDate() + " " + pad(d.getHours()) + ":" + pad(d.getMinutes());
+  }
+
+  /* 작업 145: 재료 → 테이크 메뉴 항목. takes = 테이크(takeNo 오름차순 = 오래된 것부터) + 테이크가 아닌 통 영상(합친 영상),
+     cutsOf(take) = 그 테이크의 컷 재료(takeOf). 테이크·통 영상이 하나도 없으면 cutsOf(null) = 재료 전부. */
+  function editBinTakes(ctx) {
+    var mats = (ctx.matList[ctx.variant] || []).map(function (item) {
+      return ctx.materials[item.sourceKey] || item;
+    });
+    var takes = mats.filter(function (m) {
+      return typeof m.takeNo === "number";
+    }).sort(function (a, b) {
+      return a.takeNo - b.takeNo;
+    });
+    var extras = mats.filter(function (m) {
+      return typeof m.takeNo !== "number" && m.kind === "final" && typeof m.takeOf !== "number";
+    });
+    return {
+      takes: takes.concat(extras),
+      newest: takes.length ? takes[takes.length - 1] : extras[0] || null,
+      cutsOf: function (take) {
+        if (!take) return takes.length || extras.length ? [] : mats;
+        if (typeof take.takeNo !== "number") return [];
+        return mats.filter(function (m) {
+          return m.takeOf === take.takeNo && m.sourceKey !== take.sourceKey;
+        });
+      }
+    };
+  }
+
+  function editBinTakeText(ctx, mat) {
+    var seconds = editBinSeconds(mat);
+    var parts = [typeof mat.takeNo === "number" ? mat.takeLabel || "테이크 " + mat.takeNo : mat.label || "영상"];
+    if (seconds > 0) parts.push(seconds.toFixed(1) + "초");
+    if (typeof mat.takeNo === "number") parts.push(editTakeWhen(mat.takeAt) || (ctx.variant === "real" ? "실사" : "애니"));
+    return parts.join(" · ");
+  }
+
+  function editBinSelect(className, label, mats, value, textOf) {
+    var select = el("select", className);
+    select.title = label;
+    select.setAttribute("aria-label", label);
+    mats.forEach(function (mat) {
+      var option = el("option", "", textOf(mat));
+      option.value = mat.sourceKey;
+      select.appendChild(option);
+    });
+    select.value = value;
+    return select;
+  }
+
+  /* 작업 145: 재료 = [테이크 고르기] 메뉴(가장 최근 테이크가 처음 값) + [＋ 넣기], 고른 테이크에 컷 재료가 있으면 [컷 고르기] + [＋ 컷 넣기].
+     고른 값(sourceKey)은 ctx.binTake·ctx.binCut[그림체]에 두어 다시 그리기·폴링(재료 다시 받기)에도 남는다. 넣기는 editInsertMaterial. */
   function editRenderBin(ctx) {
     var bin = ctx.dom.bin;
     if (!bin) return;
@@ -10894,21 +10963,57 @@
     head.appendChild(el("span", "vnew-hint", "누르면 재생헤드가 있는 클립 뒤에 넣습니다."));
     if (editFixOn(ctx)) head.appendChild(editFixPickButton(ctx)); // 지시서 119: [AI로 고치기] 1개(테이크·장면 고르기 창)
     bin.appendChild(head);
-    var row = el("div", "vnew-edit-bin-list");
-    list.forEach(function (item) {
-      var mat = ctx.materials[item.sourceKey] || item;
-      var duration = Number(mat.duration);
-      if (mat.group === "retake" && Number((mat.retake || {}).trimTo) > 0 && duration > 0) duration = Math.min(duration, Number(mat.retake.trimTo)); // 지시서 116 보완 1
-      var btn = el("button", "outline-button vnew-edit-bin-item", "＋ " + (mat.label || "영상") + (duration > 0 ? " · " + duration.toFixed(1) + "초" : ""));
-      btn.type = "button";
-      btn.title = "이 영상을 타임라인에 넣기";
-      btn.addEventListener("click", function () {
-        editInsertMaterial(ctx, item.sourceKey, btn);
+    var info = editBinTakes(ctx);
+    var picked = ctx.binTake[ctx.variant];
+    var take = info.takes.filter(function (m) {
+      return m.sourceKey === picked;
+    })[0] || info.newest;
+    if (take) {
+      ctx.binTake[ctx.variant] = take.sourceKey;
+      var row = el("div", "vnew-edit-bin-list");
+      row.appendChild(el("span", "vnew-edit-bin-label", "테이크 고르기"));
+      var takeSel = editBinSelect("vnew-edit-bin-take", "테이크 고르기", info.takes, take.sourceKey, function (mat) {
+        return editBinTakeText(ctx, mat);
       });
-      // 지시서 119: 재료마다 붙던 [AI로 고치기]는 없앴다(머리 줄 [AI로 고치기] 하나에서 테이크를 고른다).
-      row.appendChild(btn);
+      takeSel.addEventListener("change", function () {
+        ctx.binTake[ctx.variant] = String(takeSel.value || "");
+        editRenderBin(ctx);
+      });
+      row.appendChild(takeSel);
+      var add = el("button", "outline-button vnew-edit-bin-add", "＋ 넣기");
+      add.type = "button";
+      add.title = "고른 테이크를 재생헤드가 있는 클립 뒤에 넣기";
+      add.addEventListener("click", function () {
+        editInsertMaterial(ctx, ctx.binTake[ctx.variant], add);
+      });
+      row.appendChild(add);
+      bin.appendChild(row);
+    }
+    var cuts = info.cutsOf(take || null);
+    if (!cuts.length) return;
+    var cutPicked = ctx.binCut[ctx.variant];
+    var cut = cuts.filter(function (m) {
+      return m.sourceKey === cutPicked;
+    })[0] || cuts[0];
+    ctx.binCut[ctx.variant] = cut.sourceKey;
+    var cutRow = el("div", "vnew-edit-bin-list vnew-edit-bin-cuts");
+    cutRow.appendChild(el("span", "vnew-edit-bin-label", take ? "컷" : "컷 고르기"));
+    var cutSel = editBinSelect("vnew-edit-bin-cut", "컷 고르기", cuts, cut.sourceKey, function (mat) {
+      var seconds = editBinSeconds(mat);
+      return String(mat.label || "영상").replace(/^실사 \d+회차 · /, "") + (seconds > 0 ? " · " + seconds.toFixed(1) + "초" : "");
     });
-    bin.appendChild(row);
+    cutSel.addEventListener("change", function () {
+      ctx.binCut[ctx.variant] = String(cutSel.value || "");
+    });
+    cutRow.appendChild(cutSel);
+    var addCut = el("button", "outline-button vnew-edit-bin-cut-add", "＋ 컷 넣기");
+    addCut.type = "button";
+    addCut.title = "고른 컷을 재생헤드가 있는 클립 뒤에 넣기";
+    addCut.addEventListener("click", function () {
+      editInsertMaterial(ctx, ctx.binCut[ctx.variant], addCut);
+    });
+    cutRow.appendChild(addCut);
+    bin.appendChild(cutRow);
   }
 
   /* ---- 저장(design §5.5: 0.8초 디바운스, 한 번에 하나, 409 다시 불러오기) ---- */
