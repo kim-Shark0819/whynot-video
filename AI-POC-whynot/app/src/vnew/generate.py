@@ -52,6 +52,8 @@ from . import imaging
 from . import plan as plan_mod
 from . import previz_schema
 from . import settings as vnew_settings
+# 작업 161: 실사 장소 글의 상표 금지 구절(한 곳 = locations). locations 는 generate 를 import 하지 않는다.
+from .locations import REAL_NO_BRAND, REAL_NO_BRAND_SENTENCE
 # 지시서 117: 속마음 대사 판정은 prompts.is_thought 한 곳(순수 모듈)에서만 한다.
 from .prompts import is_thought as _is_thought
 from .prompts import STILL_SHOT_SIZES as _SHOT_SIZES
@@ -3656,6 +3658,8 @@ REAL_TAKE_SHEETS_COMPACT = ("{sheets} are AI-generated turnaround sheets of fict
                             "clothes come from COSTUME")
 REAL_TAKE_FRONTS_COMPACT = "{fronts} are their close front portraits"
 REAL_TAKE_PHOTOS_COMPACT = "Each person matches their photos (face, hair, build); clothes come from COSTUME"
+# 작업 161: 실사 테이크 장소 줄 꼬리(상표 금지, locations.REAL_NO_BRAND). 애니 장소 줄에는 붙이지 않는다.
+REAL_TAKE_NO_BRAND = "; any shop is a " + REAL_NO_BRAND
 
 
 def _real_action(text: str) -> str:
@@ -3985,6 +3989,7 @@ def _take_prompt(plan: dict, take: dict, *, cast: list[dict], panel_nos: list[in
         if anchor is not None:
             return TAKE_ANCHOR_LOCATION_LINE.format(no=location_no)  # 작업 155: 조각·대체 제출의 장소 고정
         if real:
+            # 작업 161: 상표 금지는 vibe(159, 기본 켬) 장소 줄에만. 이 옛 경로(VNEW_VIBE_PROMPT 끔 = 되돌리기)는 바이트 그대로 둔다.
             return (f"@Image{location_no} = the location (real photo, no people in it); "
                     "keep this place, its background and light in every shot")
         return f"@Image{location_no} = the location; keep its structure and props"
@@ -4641,7 +4646,8 @@ def _vibe_take_prompt(plan: dict, take: dict, *, real: bool, cast: list[dict], l
         if frame_no:
             rows.append((frame_no, VIBE_FRAME_LEAD.format(no=frame_no)))
         if location_no:
-            rows.append((location_no, VIBE_LOCATION_LEAD.format(no=location_no)))
+            rows.append((location_no, VIBE_LOCATION_LEAD.format(no=location_no)
+                         + (REAL_TAKE_NO_BRAND if real else "")))  # 작업 161: 실사 장소만 상표 금지
         panels = [n for n in (panel_nos or []) if n] if not real else []
         if panels:
             # fix1: 원작 패널(옛 _take_prompt 와 같은 패널·순서)을 STYLE 의 "the uploaded webtoon images" 로 부른다.
@@ -6774,14 +6780,26 @@ REAL_STILL_BACKGROUND_ONLY = ("Background and location must match Image 1 exactl
 REAL_STILL_NO_PHOTO_CLOTHES = "Do not copy the default clothes worn in the cast photos (such as a plain white shirt)."
 # 작업 160: 컷 단위 Kling(130 2단계) 이어짐 — test3 take1 컷마다 하늘(낮·밤)·가게·샷 크기가 달랐다.
 REAL_STILL_NO_WIDEN = "Do not widen the shot; close-up stays close-up."
-REAL_STILL_PREV = "Same place, time of day and light as Image {no} (the previous shot); keep this shot's own framing and people."
-REAL_TIME_OF_DAY = "{tod}, same time of day in every shot."
+# 작업 161: test3 take1 — 앞 컷 시작 그림이 해 질 녘으로 나오자 그 참고가 다음 컷들로 해 질 녘을 옮겼다. 시간대·빛의 기준은 장소 뷰(143)다.
+REAL_STILL_PREV = ("Image {no} = the previous shot, for continuity of place and props only; time of day and light follow "
+                   "the location image.")
+REAL_TIME_OF_DAY = {"day": "Bright daytime, blue sky, no dusk, no night, no sunset light.",
+                    "night": "Night, dark night sky, no daylight, no dusk, no sunset light."}
 _NIGHT_WORDS = re.compile(r"\b(?:night|night-?time|midnight)\b|밤|심야|자정", re.IGNORECASE)
+# 작업 161: 시작 그림 검사(139 _check_cut_still)에 접는 시간대 항목. 기준 글(Image 2 가 이 시간대여야 한다).
+REAL_STILL_TOD_REQUIRED = {"day": "Required time of day for Image 2: bright daytime with a blue sky (dusk, blue hour, "
+                                  "sunset light or night are wrong).",
+                           "night": "Required time of day for Image 2: night with a dark sky (daylight, dusk or sunset "
+                                    "light are wrong)."}
+REAL_STILL_TOD_RULE = ("- timeOfDayMatch: false if the time of day and light in Image 2 are not the required time of day "
+                       "given in the text (Image 1 is not the reference for time of day).")
+REAL_STILL_TOD_FIX = {"day": "make it bright daytime with a blue sky, no dusk, no night, no sunset light",
+                      "night": "make it night with a dark sky, no daylight, no dusk, no sunset light"}
 
 
-def _real_time_sentence(plan: dict) -> str:
-    """작업 160: 실사 시작 그림·Kling 프롬프트의 시간대 고정 1문장. 콘티(setting·컷 lightEn/locationEn)·대본 setting.timeKo·장소 빛
-    가운데 밤 낱말이 있으면 "Night, …", 아니면 "Daylight, same time of day in every shot."(같은 plan 이면 언제나 같은 글자)."""
+def _real_tod(plan: dict) -> str:
+    """작업 160/161: 실사 시간대 "day"|"night". 콘티(setting·컷 lightEn/locationEn)·대본 setting.timeKo·장소 빛 가운데 밤 낱말이
+    있으면 "night", 아니면 "day"(같은 plan 이면 언제나 같은 값)."""
     conti = plan.get("conti") or {}
     setting = (plan.get("script") or {}).get("setting") or {}
     texts = [str(v) for v in (conti.get("setting") or {}).values() if isinstance(v, str)] if isinstance(
@@ -6794,8 +6812,13 @@ def _real_time_sentence(plan: dict) -> str:
     for loc in plan.get("locations") or []:
         if isinstance(loc, dict):
             texts.append(str(((loc.get("design") or {}) if isinstance(loc.get("design"), dict) else {}).get("lightEn") or ""))
-    night = any(_NIGHT_WORDS.search(t) for t in texts if t)
-    return REAL_TIME_OF_DAY.format(tod="Night" if night else "Daylight")
+    return "night" if any(_NIGHT_WORDS.search(t) for t in texts if t) else "day"
+
+
+def _real_time_sentence(plan: dict) -> str:
+    """작업 160: 실사 시작 그림·Kling 프롬프트의 시간대 고정 1문장(_real_tod). 작업 161: 낮 문장을 분명하게
+    ("Bright daytime, blue sky, no dusk, no night, no sunset light."), 밤은 같은 꼴의 거울 문장."""
+    return REAL_TIME_OF_DAY[_real_tod(plan)]
 # 작업 139: 애니 프레임 읽기(animeLayout)가 있을 때 시작 그림 문장. 맨 앞 = 구도 고정, MS 이상의 시트 뷰 문장 = 보이는 배경만.
 REAL_STILL_FRAMING = ("Keep Image 1's exact framing and shot size ({shot}): do not zoom out, do not add people, "
                       "do not show more background than Image 1.")
@@ -7349,8 +7372,9 @@ def _cut_still_prompt(plan: dict, cut: dict, people: list[tuple[str, str, int]],
             parts.append(REAL_STILL_BACKGROUND.format(no=background_no) if has_frame and background_no > 1
                          else REAL_STILL_BACKGROUND_ONLY)
     if prev_no:
-        parts.append(REAL_STILL_PREV.format(no=prev_no))  # 작업 160: 앞 컷 시작 그림과 같은 장소·시간대·빛
-    parts.append(_real_time_sentence(plan))  # 작업 160: 시간대 고정
+        parts.append(REAL_STILL_PREV.format(no=prev_no))  # 작업 160/161: 앞 컷 시작 그림 = 장소·소품 이어짐만(시간대·빛은 장소 뷰)
+    parts.append(_real_time_sentence(plan))  # 작업 160: 시간대 고정(161: 낮 문장 분명하게)
+    parts.append(REAL_NO_BRAND_SENTENCE)  # 작업 161: 실제 상표·로고·읽히는 간판 글자 없음
     worn = []
     # 작업 136: 장면 옷 = 콘티 → 대본 → outfits(웹툰 패널 읽기) 순(_scene_outfits). 지시서 문장은 _real_brief_text 를 지난다.
     # 작업 160: 그 컷 장소의 장면 옷 1벌(_scene_costume_map — 수정 → 장소 콘티·대본 → 장소 패널 읽기 다수 → outfits).
@@ -7525,7 +7549,7 @@ def _real_cut_ctx(owner: str, pid: str, plan: dict, take: dict, endpoint: str, c
 # 컷 단위 Kling 실사에서 시작 그림(Seedream)이 애니 프레임과 구도가 다르면 Kling 이 고칠 수 없다(다시 만들어도 같은 시작 그림).
 # 애니 프레임을 대본 분석 모델(Claude, _judge_real_cut 과 같은 _converse 경로)로 1번 읽어 샷 크기·보이는 인물을 받고, 시작 그림을
 # 애니 프레임과 나란히 1번 비교한다. 원장은 vision 호출마다 plan._charge(charge_text), Seedream 장마다 _charge_cut_still.
-REAL_STILL_CHECK_ITEMS = ("shot", "count", "side", "animeStyle")
+REAL_STILL_CHECK_ITEMS = ("shot", "count", "side", "animeStyle", "timeOfDay")  # 작업 161: timeOfDay(시간대) 접음
 
 
 def _read_anime_layout(blocks: list[dict], *, model: str) -> tuple[dict, dict]:
@@ -7538,12 +7562,23 @@ def _read_anime_layout(blocks: list[dict], *, model: str) -> tuple[dict, dict]:
     )
 
 
-def _read_still_check(blocks: list[dict], *, model: str) -> tuple[dict, dict]:
-    """llm._converse 로 emit_still_check 를 받는다. (payload, usage{..model}). 검사가 가짜로 바꾼다."""
+def _still_check_tool() -> tuple[str, dict]:
+    """작업 161: emit_still_check(139) + timeOfDayMatch(boolean, 필수) 1항목. prompts 의 139 원본은 그대로 두고 여기서 덧붙인다."""
     from .prompts import EMIT_STILL_CHECK, STILL_CHECK_SYSTEM  # noqa: PLC0415
 
+    schema = dict(EMIT_STILL_CHECK["inputSchema"]["json"])
+    schema["properties"] = {**schema["properties"], "timeOfDayMatch": {"type": "boolean"}}
+    schema["required"] = [*schema["required"], "timeOfDayMatch"]
+    tool = {**EMIT_STILL_CHECK, "inputSchema": {"json": schema}}
+    return STILL_CHECK_SYSTEM.replace("\nnote:", "\n" + REAL_STILL_TOD_RULE + "\nnote:", 1), tool
+
+
+def _read_still_check(blocks: list[dict], *, model: str) -> tuple[dict, dict]:
+    """llm._converse 로 emit_still_check 를 받는다. (payload, usage{..model}). 검사가 가짜로 바꾼다.
+    작업 161: 같은 1번 호출에 시간대(timeOfDayMatch)를 접는다(_still_check_tool)."""
+    system_text, tool = _still_check_tool()
     return vpoc_llm._converse(  # noqa: SLF001 — 공개 래퍼가 없어 내부 함수를 쓴다
-        system_text=STILL_CHECK_SYSTEM, blocks=blocks, tool=EMIT_STILL_CHECK, max_tokens=400,
+        system_text=system_text, blocks=blocks, tool=tool, max_tokens=400,
         where="vnew.generate.still_check", model=model,
     )
 
@@ -7609,16 +7644,21 @@ def _layout_reading(layout: dict) -> str:
     return f"Image 1 reading: shot size {shot} ({SHOT_SIZE_EN.get(shot, shot)}); {people}."
 
 
-def _check_cut_still(owner: str, pid: str, gen_id: str, frame: bytes, still: bytes, layout: dict) -> dict | None:
+def _check_cut_still(owner: str, pid: str, gen_id: str, frame: bytes, still: bytes, layout: dict, *,
+                     tod: str = "") -> dict | None:
     """시작 그림을 애니 프레임과 나란히 vision 1번으로 비교한다 → {ok, items, note, shotSize, count} 또는 None(호출 실패).
 
     items(REAL_STILL_CHECK_ITEMS 순): shot = 샷 크기가 두 단계 이상 다름(한 단계는 허용), count = 인물 수가 읽기와 다름,
     side = 좌우가 다름, animeStyle = 그림 느낌. 기준(Image 1)은 애니 프레임 읽기(layout).
+    작업 161: tod("day"|"night")가 있으면 같은 호출에 기준 시간대 글 1줄(REAL_STILL_TOD_REQUIRED) — timeOfDayMatch 가 false 면
+    timeOfDay. 기준은 plan 시간대(_real_tod)이지 애니 프레임이 아니다.
     """
     blocks = [{"text": "Image 1 (anime frame):"}, {"image": {"format": "jpeg", "source": {"bytes": _fit_ref(frame)}}},
               {"text": "Image 2 (live-action start frame made from it):"},
               {"image": {"format": "jpeg", "source": {"bytes": _fit_ref(still)}}},
               {"text": _layout_reading(layout)}]
+    if tod in REAL_STILL_TOD_REQUIRED:
+        blocks.append({"text": REAL_STILL_TOD_REQUIRED[tod]})
     model = str(plan_mod._script_model())  # noqa: SLF001
     try:
         payload, usage = _read_still_check(blocks, model=model)
@@ -7638,14 +7678,17 @@ def _check_cut_still(owner: str, pid: str, gen_id: str, frame: bytes, still: byt
         "count": count is not None and count != len(_layout_listed(layout)),
         "side": payload.get("sideMatch") is not None and not _flag(payload.get("sideMatch")),
         "animeStyle": payload.get("animeStyle") is not None and _flag(payload.get("animeStyle")),
+        "timeOfDay": tod in REAL_STILL_TOD_REQUIRED and payload.get("timeOfDayMatch") is not None
+        and not _flag(payload.get("timeOfDayMatch")),
     }
     items = [i for i in REAL_STILL_CHECK_ITEMS if wrong[i]]
     return {"ok": not items, "items": items, "note": " ".join(str(payload.get("note") or "").split())[:80],
             "shotSize": shot, "count": count}
 
 
-def _still_fix(items, layout: dict) -> str:
-    """시작 그림 검사의 틀린 항목 → Seedream 교정 문장 1개("FIX: …."). 그림 낱말은 쓰지 않는다. 항목이 없으면 ""."""
+def _still_fix(items, layout: dict, *, tod: str = "day") -> str:
+    """시작 그림 검사의 틀린 항목 → Seedream 교정 문장 1개("FIX: …."). 그림 낱말은 쓰지 않는다. 항목이 없으면 "".
+    작업 161: timeOfDay 는 tod("day"|"night")의 REAL_STILL_TOD_FIX 조각(맨 뒤)."""
     shot = str(layout.get("shotSize") or "")
     listed = _layout_listed(layout)
     names = ", ".join(name for name, _side, _visible in listed)
@@ -7660,6 +7703,8 @@ def _still_fix(items, layout: dict) -> str:
                       + ", ".join(f"{name} {side}" for name, side, _visible in listed) + ")")
     if "animeStyle" in (items or []):
         pieces.append("make it a real photograph with real skin, real hair and real fabric")
+    if "timeOfDay" in (items or []):
+        pieces.append(REAL_STILL_TOD_FIX.get(tod, REAL_STILL_TOD_FIX["day"]))
     return "FIX: " + "; ".join(pieces) + "." if pieces else ""
 
 
@@ -7679,26 +7724,33 @@ def _checked_cut_still(owner: str, pid: str, gen_id: str, plan: dict, cut: dict,
     {ok, items, note, retried, firstItems, used}). 검사가 안 되면 첫 그림 그대로(ok None).
     작업 142: sheets(이름 → 정면 번호, 인물 첫 장이 AI 캐릭터 시트)도 같은 규칙으로 번호를 당긴다.
     작업 160: costumes(이름 → 장면 옷 그림 번호)·prev_no(앞 컷 시작 그림 번호)도 같은 규칙으로 당긴다.
+    작업 161: 같은 검사 호출에 시간대(_real_tod)를 접는다. 시간대가 틀리면 다시 그리기(1번 그대로)에서 앞 컷 시작 그림 참고를 뺀다
+    (prev_no 0). 시트 뷰(시간대·빛의 기준)는 구도 항목이 틀렸을 때만 뺀다(139) — 시간대만 틀리면 남긴다.
     """
-    first = _check_cut_still(owner, pid, gen_id, frame, still, layout)
+    tod = _real_tod(plan)
+    first = _check_cut_still(owner, pid, gen_id, frame, still, layout, tod=tod)
     if first is None or first["ok"]:
         return still, {"ok": None if first is None else True, "items": [], "note": (first or {}).get("note", ""),
                        "retried": False, "firstItems": [], "used": "first"}
-    refs2 = [ref for no, ref in enumerate(refs, 1) if no != background_no]
+    framing = any(i != "timeOfDay" for i in first["items"])
+    drop_prev = "timeOfDay" in first["items"] and bool(prev_no)
+    dropped = {no for no in ((background_no if framing else 0), (prev_no if drop_prev else 0)) if no}
+    refs2 = [ref for no, ref in enumerate(refs, 1) if no not in dropped]
 
     def shift(no: int) -> int:
-        return no - 1 if background_no and no > background_no else no
+        return no - sum(1 for d in dropped if d < no)
 
     people2 = [(color, name, shift(no)) for color, name, no in people]
     sheets2 = {name: shift(no) for name, no in (sheets or {}).items()}
     costumes2 = {name: shift(no) for name, no in (costumes or {}).items()}
-    prompt2 = _cut_still_prompt(plan, cut, people2, True, source="anime", outfits=ctx["outfits"], background_no=0,
-                                layout=layout, fix=_still_fix(first["items"], layout), sheets=sheets2 or None,
-                                costumes=costumes2 or None, prev_no=shift(prev_no) if prev_no else 0)
+    prompt2 = _cut_still_prompt(plan, cut, people2, True, source="anime", outfits=ctx["outfits"],
+                                background_no=0 if framing else background_no,
+                                layout=layout, fix=_still_fix(first["items"], layout, tod=tod), sheets=sheets2 or None,
+                                costumes=costumes2 or None, prev_no=shift(prev_no) if prev_no and not drop_prev else 0)
     still2 = _seedream(prompt2, refs2, size=vpoc_seedream.SIZE)
     del refs2
     _charge_cut_still(owner, pid, gen_id, f"{charge_key}-{secrets.token_hex(3)}")
-    second = _check_cut_still(owner, pid, gen_id, frame, still2, layout)
+    second = _check_cut_still(owner, pid, gen_id, frame, still2, layout, tod=tod)
     use_retry = _retry_better(first["items"], None if second is None else second["items"])
     final = (second or {"ok": None, "items": [], "note": ""}) if use_retry else first
     record = {"ok": final["ok"], "items": list(final["items"]), "note": final["note"], "retried": True,
