@@ -47328,17 +47328,21 @@ def check_vnew_real_from_3d_126() -> None:
                 return [bytes(b) for b in built["imageUrls"]], built
 
             full, built_full = payload_images(10)
-            want_full = [b"RF2", b"RS2", b"RB2", b"CAST1", b"RF1", b"RS1", b"RB1", b"LOC-RB"]
+            # 작업 142: 두 인물 모두 실사 시트가 있어 인물 참고가 [시트, 정면](_real_identity_refs) — 캐스팅·후면은 넣지 않는다
+            # (126 기대값 [정면·시트·후면]/[캐스팅·정면·시트·후면] 을 바꿈). 시트 없는 인물은 126 그대로(아래 (r3-a) 키 순서·작업 142 검사).
+            want_full = [b"RS2", b"RF2", b"RS1", b"RF1", b"LOC-RB"]
             if full != want_full:
-                bad.append(f"(r3-a) 상한 10 실사 참고가 [비: 정면·시트·후면] [에이: 캐스팅·정면·시트·후면] → 장소가 아닙니다: {full}")
-            want_cap = [b"RF2", b"RS2", b"CAST1", b"LOC-RB"]
+                bad.append(f"(r3-a) 상한 10 실사 참고가 [비: 시트·정면] [에이: 시트·정면] → 장소가 아닙니다: {full}")
+            # 작업 142: 인물마다 2장이라 상한 4(인물 3)에서는 앞 인물부터 채우기와 돌아가며 채우기가 같다 — 상한 3(장소 1 + 인물 2)으로
+            # 본다: 정면이 먼저 빠지고 두 인물 모두 시트를 지킨다. 변형(앞 인물부터 다 채우기)이면 에이의 시트가 빠진다.
+            want_cap = [b"RS2", b"RS1", b"LOC-RB"]
 
             def judge_cap(images: list[bytes]) -> bool:
                 return images == want_cap
 
-            small, built_small = payload_images(4)
+            small, built_small = payload_images(3)
             if not judge_cap(small):
-                bad.append(f"(r3-a) 상한 4 에서 뒤 사진부터 빠지지 않았습니다(장소 1 + 인물 3): {small}")
+                bad.append(f"(r3-a) 상한 3 에서 정면부터 빠지지 않았습니다(장소 1 + 인물 시트 2): {small}")
             # 변형 1회: 인물마다 다 채우는(앞 인물 먼저) 배분이면 에이의 첫 사진이 빠진다 — 위 판정이 잡아야 한다.
             real_counts = genmod._ref_counts  # noqa: SLF001
 
@@ -47350,16 +47354,19 @@ def check_vnew_real_from_3d_126() -> None:
                 return out
 
             env.set(genmod, "_ref_counts", greedy)
-            mutated, _ = payload_images(4)
+            mutated, _ = payload_images(3)
             env.set(genmod, "_ref_counts", real_counts)
             if judge_cap(mutated):
                 bad.append(f"(r3-a) 변형(앞 인물부터 다 채우기)을 판정이 잡지 못했습니다: {mutated}")
             prompt_small = built_small["prompt"]
+            # 작업 142: ASSETS 번호 = 시트 문장(@Image1 비, @Image2 에이), 정면 문장 없음(정면이 빠졌다).
             # 작업 143: 실사 장소 문장이 "(real photo, no people in it)" 로 바뀌었다(지시서). 번호 검사는 그대로.
-            if "@Image4 = the location (real photo, no people in it)" not in prompt_small \
-                    or "face and hair from @Image1 (photo), same person in @Image2" not in prompt_small \
-                    or "face and hair from @Image3 (photo)" not in prompt_small or "@Image3 (photo), same person" in prompt_small:
-                bad.append(f"(r3-a) 상한 4 의 ASSETS @Image 번호가 이미지 순서와 다릅니다: {prompt_small[:600]!r}")
+            # (143 이 고친 옛 126 상한 4 정면 사진 번호 검사는 142 가 이 상한 3 시트 검사로 바꿨으므로 두지 않는다.)
+            if "@Image3 = the location (real photo, no people in it)" not in prompt_small \
+                    or genmod._real_sheet_sentences(genmod._romanize_name("비"), 1, ref="@Image{}").rstrip(".") not in prompt_small \
+                    or genmod._real_sheet_sentences(genmod._romanize_name("에이"), 2, ref="@Image{}").rstrip(".") not in prompt_small \
+                    or "close front portrait" in prompt_small or "face and hair from @Image" in prompt_small:  # noqa: SLF001
+                bad.append(f"(r3-a) 상한 3 의 ASSETS @Image 번호가 이미지 순서와 다릅니다: {prompt_small[:900]!r}")
 
             # ================= (r3-b) 프롬프트 문장 =================
             sentence = genmod.REAL_TAKE_SHEET_SENTENCE
@@ -47424,11 +47431,12 @@ def check_vnew_real_from_3d_126() -> None:
             body = reals[0]["payload"] if reals else {}
             images = [decode(u) for u in body.get("image_urls") or []]
             prompt = str(body.get("prompt") or "")
-            if images != [b"WF4", b"WS4", b"RF3", b"RS3", b"RB3", b"LOC-RB"]:
-                bad.append(f"(r3-c) 인물 바꾼 회차 참고가 [비→미완 애니: 웹툰 정면·시트] [에이→철수 실사: 정면·시트·후면] → 장소가 아닙니다: {images}")
+            # 작업 142: 철수(실사)는 시트가 있어 [시트, 정면]·시트 문장(126 기대값 [정면·시트·후면]·"face and hair from" 을 바꿈).
+            if images != [b"WF4", b"WS4", b"RS3", b"RF3", b"LOC-RB"]:
+                bad.append(f"(r3-c) 인물 바꾼 회차 참고가 [비→미완 애니: 웹툰 정면·시트] [에이→철수 실사: 시트·정면] → 장소가 아닙니다: {images}")
             if f"character design in @Image1, @Image2; {genmod.REAL_TAKE_ANIME_SENTENCE}" not in prompt \
                     or "photoreal person matching this character design" not in prompt or sentence not in prompt \
-                    or "face and hair from @Image3 (photo), same person in @Image4, @Image5" not in prompt:
+                    or genmod._real_sheet_sentences(genmod._romanize_name("에이"), 3, 4, ref="@Image{}").rstrip(".") not in prompt:  # noqa: SLF001
                 bad.append(f"(r3-c) 인물 바꾼 회차 프롬프트(애니 photoreal·3D 사진 문장·번호)가 다릅니다: {prompt[:700]!r}")
             plan1 = env.plan(pid)
             if any(_json.dumps(plan1.get(k), sort_keys=True) != v for k, v in frozen.items()):
@@ -49333,6 +49341,217 @@ def check_vnew_real_ai_note_140() -> None:
            "(an-b)Seedance 0·1단계·Seedream·Kling 본문 첫 줄·거절 로그 step 0·1·2 note=1")
 
 
+def check_vnew_real_sheet_ref_142() -> None:
+    """작업 142 — 실사 인물 참고 = 우리 AI 캐릭터 시트(5방향 턴어라운드) + 정면. 가짜 fal·Seedream, 유료 0.
+
+    (rs-a) _real_identity_refs: 시트+정면 → [시트, 정면], 시트 없음 → [정면 또는 캐스팅](= _fallback_front_keys), 애니 → 웹툰 정면 1장
+    (rs-b) 시작 그림 문장: 시트 문장·정면 문장(FACES 다음 줄)·OUTFITS·사진 옷 금지 구절, 시트 없으면 140 과 같은 글자
+    (rs-c) 흐름(Seedance 늘 거절): 시작 그림 refs CU [애니, 시트, 정면]·MS [애니, 시트 뷰, 시트, 정면 ×2], Seedance 0단계
+           [시트, 정면]·1단계 인물당 시트 1장, 로그 refs=both/sheet
+    (rs-d) 상한: 보이는 3명·작은 상한 → 정면부터 빠지고 모두 시트 유지(Seedream _pack_still_people·Seedance _real_take_cast)
+    (rs-e) 애니(웹툰) 통 테이크·컷 프롬프트 sha = 139 기대값
+    """
+    import base64 as _b64  # noqa: PLC0415
+    import hashlib as _hashlib  # noqa: PLC0415
+    import traceback as _tb  # noqa: PLC0415
+
+    sys.path.insert(0, str(ROOT / "app"))
+    from src.vnew import generate as genmod  # noqa: PLC0415
+    from src.vpoc.errors import VpocError  # noqa: PLC0415
+
+    bad: list[str] = []
+    a = "범건우"
+    owner = "tester"
+    kling = "fal-ai/kling-video/v3/pro/image-to-video"
+    kling_caps = {"promptField": "prompt", "startImageField": "start_image_url", "durations": [5, 10], "durationAsString": True,
+                  "durationValues": {"5": "5", "10": "10"}, "sendDuration": True, "aspectRatios": ["16:9"], "available": True}
+    likeness_raw = "The images or videos provided may contain likenesses of real people or other private information."
+    want_sheet = ("Image 3 is 범건우's AI-generated character turnaround sheet (front, three-quarter, side, three-quarter back, "
+                  "back views of the same fictional person): match face, hair, skin tone and body build from it; ignore its "
+                  "plain white background and its clothes — clothing comes from the scene.")
+    want_front = "Image 4 is 범건우's close front portrait from the same sheet set."
+
+    def sha(text: str) -> str:
+        return _hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+    def decode(uri) -> bytes:
+        try:
+            return _b64.b64decode(str(uri).split(",", 1)[1])
+        except Exception:  # noqa: BLE001
+            return b""
+
+    def lay(shot: str, *people) -> dict:
+        return {"shotSize": shot, "people": [{"name": n, "side": s, "visible": v} for n, s, v in people],
+                "count": sum(1 for _n, _s, v in people if v != "none")}
+
+    try:
+        with _guard_real_llm() as llm_calls, _pin_vnew(VNEW_FX=True):
+            # ================= (rs-a) 참고 키 =================
+            both = {"realSheetKey": "rs", "realFrontKey": "rf", "castingKey": "ck", "realBackKey": "rb",
+                    "webtoonFrontKey": "wf", "webtoonSheetKey": "ws"}
+            nosheet = dict(both, realSheetKey="")
+            got = [genmod._real_identity_refs(both, "real"), genmod._real_identity_refs(nosheet, "real"),  # noqa: SLF001
+                   genmod._real_identity_refs(dict(nosheet, realFrontKey=""), "real"),  # noqa: SLF001
+                   genmod._real_identity_refs(both, "anime"), genmod._real_identity_refs(dict(both, realFrontKey=""), "real")]  # noqa: SLF001
+            if got != [["rs", "rf"], ["rf"], ["ck"], ["wf"], ["rs"]] \
+                    or genmod._real_identity_refs(nosheet, "real") != genmod._fallback_front_keys(nosheet, "real"):  # noqa: SLF001
+                bad.append(f"(rs-a) _real_identity_refs 가 [시트, 정면]/[정면]/[캐스팅]/[웹툰 정면]/[시트] 가 아닙니다: {got}")
+
+            # ================= (rs-b) 시작 그림 문장 =================
+            outfits = {a: "black open-collar shirt"}
+            p0 = genmod._cut_still_prompt(_fw_plan(), {"cutId": "c1"}, [("blue", a, 3)], True,  # noqa: SLF001
+                                          source="anime", outfits=outfits, background_no=2)
+            p_none = genmod._cut_still_prompt(_fw_plan(), {"cutId": "c1"}, [("blue", a, 3)], True,  # noqa: SLF001
+                                              source="anime", outfits=outfits, background_no=2, sheets={})
+            p1 = genmod._cut_still_prompt(_fw_plan(), {"cutId": "c1"}, [("blue", a, 3)], True,  # noqa: SLF001
+                                          source="anime", outfits=outfits, background_no=2, sheets={a: 4})
+            lines = p0.split("\n")
+            at = next((i for i, ln in enumerate(lines) if ln.startswith("FACES: ")), -1)
+            expect = list(lines)
+            if at >= 0:
+                expect[at] = expect[at].replace("the face and hair of the real person in Image 3",
+                                                "the face and hair of the person in Image 3")
+                expect.insert(at + 1, want_sheet + " " + want_front)
+            if at < 0 or p1 != "\n".join(expect) or p_none != p0 or "turnaround" in p0:
+                bad.append(f"(rs-b) 시트 문장이 FACES 다음 줄이 아니거나 시트 없음이 140 과 다릅니다: {p1!r}")
+            if genmod.REAL_STILL_NO_PHOTO_CLOTHES not in p1 or f"{a} wears " not in p1 \
+                    or not p1.startswith(genmod.REAL_REF_AI_NOTE + "\n"):
+                bad.append(f"(rs-b) 시트가 있어도 장면 옷 문장·사진 옷 금지 구절·AI 고지가 남아야 합니다: {p1!r}")
+            p_only = genmod._cut_still_prompt(_fw_plan(), {"cutId": "c1"}, [("blue", a, 3)], False,  # noqa: SLF001
+                                              outfits=outfits, sheets={a: 0})
+            if "CAST: the blue mannequin is 범건우, the person in Image 3." not in p_only or want_sheet not in p_only \
+                    or "close front portrait" in p_only:
+                bad.append(f"(rs-b) 프리비즈 CAST 시트만(정면 없음) 문장이 다릅니다: {p_only!r}")
+
+            # ================= (rs-d) Seedream 상한: 보이는 3명 =================
+            rows = [("blue", "A", [("sheet", b"SA"), ("front", b"FA")]), ("red", "B", [("sheet", b"SB"), ("front", b"FB")]),
+                    ("grey", "C", [("sheet", b"SC"), ("front", b"FC")])]
+            refs = [b"FRAME", b"VIEW"]
+            people, sheets, kind = genmod._pack_still_people(rows, refs, 4)  # noqa: SLF001
+            if [bytes(r) for r in refs] != [b"FRAME", b"VIEW", b"SA", b"FA", b"SB", b"SC"] \
+                    or people != [("blue", "A", 3), ("red", "B", 5), ("grey", "C", 6)] \
+                    or sheets != {"A": 4, "B": 0, "C": 0} or kind != "both":
+                bad.append(f"(rs-d) Seedream 상한 4 에서 정면부터 빠지고 3명 모두 시트가 남지 않았습니다: {refs} {people} {sheets} {kind}")
+            refs = [b"FRAME"]
+            people, sheets, kind = genmod._pack_still_people(rows, refs, 3)  # noqa: SLF001
+            if [bytes(r) for r in refs] != [b"FRAME", b"SA", b"SB", b"SC"] or sheets != {"A": 0, "B": 0, "C": 0} \
+                    or kind != "sheet":
+                bad.append(f"(rs-d) Seedream 상한 3 에서 3명 모두 시트 1장이 아닙니다: {refs} {sheets} {kind}")
+
+            # ================= (rs-e) 애니 sha =================
+            take = {"id": "take1", "cutIds": ["c1", "c2", "c3"], "seconds": 12}
+            cast_take = [{"name": a, "colorName": "blue", "frontNo": 1, "costume": "black open-collar shirt"},
+                         {"name": "여의준", "colorName": "red", "frontNo": 2, "costume": "navy training top"}]
+            web_take = genmod._take_prompt(_fw_plan(), take, cast=cast_take, panel_nos=[3], location_no=None)  # noqa: SLF001
+            web_seg = genmod._segment_prompt(_fw_plan(), {"cutIds": ["c1"]}, first_segment=True)  # noqa: SLF001
+            if sha(web_take) != _ST139_SHA_138["anime-take"] or sha(web_seg) != _ST139_SHA_138["anime-segment"]:
+                bad.append("(rs-e) 애니(웹툰) 통 테이크·컷 프롬프트 sha 가 바뀌었습니다")
+            if llm_calls:
+                bad.append(f"가짜가 아닌 LLM 호출: {llm_calls}")
+
+        # ================= (rs-c)(rs-d) 흐름 =================
+        with _guard_real_llm() as llm_calls, _LogCapture() as logs, _LrEnv(owner) as env, _pin_vnew(
+                VNEW_FX=True, VNEW_CASTING=True, VNEW_TAKE_REAL=True, VNEW_GEN_PARALLEL=2, POLL_INTERVAL_S=0,
+                VNEW_TAKE_AUDIO=True, VNEW_TAKE_RESOLUTION="480p", VNEW_PREPARE_STALE_S=300,
+                VNEW_TAKE_REAL_LIKENESS_LADDER=True, VNEW_TAKE_REAL_KLING_MODEL=kling, VNEW_REAL_CUT_QA=False,
+                VNEW_REAL_STILL_CHECK=False):
+            ea, eb = "에이", "비"
+            env.chars["ch1"]["variants"]["real"]["sheetKey"] = "rs-ch1"
+            env.chars["ch2"]["variants"]["real"]["sheetKey"] = "rs-ch2"
+            env.blobs.update({"rs-ch1": b"RS1", "rs-ch2": b"RS2"})
+            prefix_id = genmod.vpoc_settings.FAL_ID_PREFIX
+            seed_find = genmod.vpoc_fal.find
+            env.set(genmod.vpoc_fal, "find", lambda m: {"id": prefix_id + kling, "endpointId": kling, "caps": dict(kling_caps)}
+                    if str(m) == prefix_id + kling else seed_find(m))
+            stills: list[dict] = []
+            env.set(genmod, "_seedream", lambda prompt, refs, *, size: stills.append(
+                {"prompt": prompt, "refs": [bytes(r) for r in refs]}) or b"STILL%d" % len(stills))
+            env.set(genmod, "_cut_first_frame", lambda mp4, start: b"FRAME@%.1f" % float(start))
+            env.set(genmod, "_trim_clip", lambda mp4, seconds: b"TRIM%.1f:" % float(seconds) + bytes(mp4))
+            layouts = {"FRAME@0.0": lay("CU", (ea, "center", "face"), (eb, "left", "none")),
+                       "FRAME@4.0": lay("MS", (ea, "left", "face"), (eb, "right", "face"))}
+
+            def fake_layout(blocks, *, model):
+                img = [x["image"]["source"]["bytes"] for x in blocks if "image" in x][0]
+                return layouts[bytes(img).decode()], {"model": model, "inputTokens": 1500, "outputTokens": 80}
+
+            env.set(genmod, "_read_anime_layout", fake_layout)
+            base_fal = env._fal
+
+            def fal_request(method, url, payload=None, *, where=""):
+                rid = url.split("/requests/", 1)[-1].split("/", 1)[0]
+                req = next((r for r in env.requests if r["rid"] == rid), None)
+                if method == "GET" and not url.endswith("/status") and req and req["url"].endswith(_LR_ENDPOINT) \
+                        and req["kind"] == "real":
+                    raise VpocError("fal.poll", "HTTP422", likeness_raw, 502)  # Seedance 실사는 늘 거절 → 1단계 → Kling
+                return base_fal(method, url, payload, where=where)
+
+            env.set(env.falmod, "_request", fal_request)
+            client = env.client()
+            pid = "prj_rs_c"
+            env.make_plan(pid, [{"id": "s1", "cutIds": ["c1"], "seconds": 4}, {"id": "s2", "cutIds": ["c2"], "seconds": 8}])
+            client.post(f"/api/vnew/p/{pid}/generate", json={"confirmUsd": genmod.estimate(env.plan(pid))["totalUsd"]})
+            g = env.drive(pid)
+            since = len(env.requests)
+            client.post(f"/api/vnew/p/{pid}/generate/real", json={"confirmUsd": genmod.real_estimate(g)["usd"]})
+            g = env.drive(pid)
+            seeds = [r["payload"] for r in env.requests[since:] if r["url"].endswith(_LR_ENDPOINT) and r["kind"] == "real"]
+            imgs = [[decode(u) for u in s.get("image_urls") or []] for s in seeds]
+            if imgs != [[b"RS2", b"RF2", b"RS1", b"RF1", b"LOC-RB"], [b"RS2", b"RS1", b"LOC-RB"]]:
+                bad.append(f"(rs-c) Seedance 0단계 [시트, 정면]·1단계 인물당 시트 1장이 아닙니다: {imgs}")
+            rb_, ra_ = genmod._romanize_name(eb), genmod._romanize_name(ea)  # noqa: SLF001
+            p_s0 = str(seeds[0].get("prompt")) if seeds else ""
+            p_s1 = str(seeds[1].get("prompt")) if len(seeds) > 1 else ""
+            if genmod._real_sheet_sentences(rb_, 1, 2, ref="@Image{}").rstrip(".") not in p_s0 \
+                    or genmod._real_sheet_sentences(ra_, 3, 4, ref="@Image{}").rstrip(".") not in p_s0 \
+                    or genmod._real_sheet_sentences(rb_, 1, ref="@Image{}").rstrip(".") + "." not in p_s1 \
+                    or genmod._real_sheet_sentences(ra_, 2, ref="@Image{}").rstrip(".") + "." not in p_s1 \
+                    or "close front portrait" in p_s1 or "COSTUME in this scene" not in p_s0 \
+                    or not p_s0.startswith(genmod.REAL_REF_AI_NOTE + "\n") or "webtoon" in (p_s0 + p_s1).lower():  # noqa: SLF001
+                bad.append(f"(rs-c) Seedance 시트 문장(0단계 시트+정면·1단계 시트만)·COSTUME·고지가 다릅니다: {p_s0[:900]!r}")
+            take_logs = [m for m in logs.messages("vnew.gen.take_submit pid=prj_rs_c") if m.endswith(" variant=real")]
+            if [m.rsplit(" refs=", 1)[-1] for m in take_logs] != ["both variant=real", "sheet variant=real"]:
+                bad.append(f"(rs-c) Seedance 제출 로그 refs=both·refs=sheet 가 아닙니다: {take_logs}")
+            refs = [s["refs"] for s in stills]
+            if refs != [[b"FRAME@0.0", b"RS1", b"RF1"], [b"FRAME@4.0", b"LOC-RB", b"RS2", b"RF2", b"RS1", b"RF1"]]:
+                bad.append(f"(rs-c) 시작 그림 refs 가 CU [애니, 시트, 정면]·MS [애니, 시트 뷰, 시트, 정면 ×2] 가 아닙니다: {refs}")
+            q1, q2 = (s["prompt"] for s in stills) if len(stills) == 2 else ("", "")
+            if genmod._real_sheet_sentences(ea, 2, 3) not in q1 or eb in q1 \
+                    or genmod._real_sheet_sentences(eb, 3, 4) not in q2 or genmod._real_sheet_sentences(ea, 5, 6) not in q2 \
+                    or "Exactly 2 people in frame" not in q2 or any(genmod.REAL_STILL_NO_PHOTO_CLOTHES not in q
+                                                                   for q in (q1, q2)):  # noqa: SLF001
+                bad.append(f"(rs-c) 시작 그림 시트 문장·보이는 인물 규칙·옷 구절이 다릅니다: {q2!r}")
+            cut_logs = logs.messages("vnew.gen.real_cut_submit pid=prj_rs_c")
+            if len(cut_logs) != 2 or any(" refs=both " not in m for m in cut_logs):
+                bad.append(f"(rs-c) 컷 제출 로그 refs=both 가 아닙니다: {cut_logs}")
+
+            # (rs-d) Seedance 상한: 3명(모두 시트) — 정면부터 빠지고 모두 시트 유지.
+            ch3 = _lr_char("ch3", "철수", "male", "Short brown hair and a square jaw.", "grey hoodie")
+            ch3["variants"]["real"]["sheetKey"] = "rs-ch3"
+            env.chars["ch3"] = ch3
+            env.blobs.update({"rf-ch3": b"RF3", "rs-ch3": b"RS3"})
+            entries = {e["charId"]: e for e in genmod._char_entries(owner, {"characters": [  # noqa: SLF001
+                {"charId": c, "roleName": n} for c, n in (("ch1", ea), ("ch2", eb), ("ch3", "철수"))]})}
+            actors = [{"name": ea, "charId": "ch1", "colorName": "blue"}, {"name": eb, "charId": "ch2", "colorName": "red"},
+                      {"name": "철수", "charId": "ch3", "colorName": "grey"}]
+            out = {}
+            for cap in (3, 4):
+                images, cast = genmod._real_take_cast(owner, {}, actors, entries, {}, cap)  # noqa: SLF001
+                out[cap] = ([bytes(i) for i in images], [m.get("sheetNo") for m in cast])
+            if out != {3: ([b"RS1", b"RS2", b"RS3"], [1, 2, 3]), 4: ([b"RS1", b"RF1", b"RS2", b"RS3"], [1, 3, 4])}:
+                bad.append(f"(rs-d) Seedance 상한 3·4 에서 정면부터 빠지고 3명 모두 시트가 남지 않았습니다: {out}")
+            if llm_calls:
+                bad.append(f"가짜가 아닌 LLM 호출: {llm_calls}")
+    except Exception:  # noqa: BLE001
+        bad.append("작업 142 검사 예외\n" + _tb.format_exc())
+    if bad:
+        fail("작업 142 실사 AI 캐릭터 시트 참고 검사 실패\n  " + "\n  ".join(bad))
+    else:
+        ok("작업 142 실사 AI 캐릭터 시트 참고 (rs-a)_real_identity_refs 시트·정면·시트 없음 140·애니 (rs-b)시작 그림 시트·정면 문장·"
+           "OUTFITS·시트 없음 140 글자 그대로 (rs-c)Seedance 0단계 [시트, 정면]·1단계 시트만·시작 그림 [애니, 시트 뷰, 시트, 정면]·"
+           "로그 refs= (rs-d)상한: 정면부터 빠지고 모두 시트 (rs-e)애니 sha 그대로")
+
+
 def _tm145_plan(env, pid: str, *, current_done: bool) -> dict:
     """작업 145 통 테이크 gen(테이크 1개 · 컷 3개 10초). current_done=False: 6회차 취소(기록)·7회차 끝(다시 이어 붙임 -fixed)·8회차 끝·
     지금 9회차 취소. current_done=True: 7회차 끝(기록)·지금 8회차 끝(컷 단위 Kling 컷 3개)."""
@@ -49549,6 +49768,8 @@ def check_vnew_edit_take_menu_145() -> None:
     else:
         ok("작업 145 ⑦ 재료 테이크 메뉴 (tm-a)실사 회차 7·8 만 테이크(9·6 취소 없음, -fixed)·takeNo/takeLabel/takeAt/takeOf·웹툰 테이크 1·"
            "컷 모드 합친 영상·허용 목록·기본 문서 그대로 (tm-b)select 1개·N옵션·최근 테이크 기본·넣기 sourceKey·컷 메뉴·다시 그리기/폴링 유지·1개")
+
+
 # 작업 143: 새 기본값(VNEW_LOCATION_REAL_FROM_WEBTOON 켬)에서는 실사 뷰가 웹툰 뷰 편집(_seedream_edit)이 된다. 기존 공간 시트
 # 검사(check_vnew_locations·125·128)는 작업 125 의 text-to-image 경로(참고 0장·원장 모델·호출 수·동시성)를 보므로 부르는 줄에서
 # 끔으로 고정한다(기대값은 그대로). 켬 경로는 check_vnew_location_real_edit_143 이 본다. 끔이면 유료 fal 경로도 타지 않는다.
@@ -49955,6 +50176,7 @@ def main() -> int:
     check_vnew_real_brief_138()
     check_vnew_real_still_139()
     check_vnew_real_ai_note_140()
+    check_vnew_real_sheet_ref_142()
     check_vnew_edit_take_menu_145()
     check_vnew_location_real_edit_143()
     check_vnew_plan_step_stay_129()
