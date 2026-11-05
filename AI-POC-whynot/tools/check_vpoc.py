@@ -24258,7 +24258,7 @@ _LR_SCREEN_WIRING = {
     "결과 칸": "    host.appendChild(finalResults(gen, showError));",
 }
 _LR_TAKE_DONE_TEXT = "웹툰 영상이 준비됐습니다. 실사 버전을 만들거나 웹툰을 골라 사운드로 넘어가세요."
-_LR_SKIP_NOTE = "통 테이크(베타)는 웹툰만 만듭니다 — 실사는 기본 모델로 따로 만들 수 있습니다."
+_LR_SKIP_NOTE = "실사는 웹툰이 끝나면 기본 모델(Seedance)로 이어서 만듭니다."
 
 _LR_SCREEN_NODE_HARNESS = r"""
 var out = {};
@@ -52046,6 +52046,229 @@ def check_vnew_content_flag_153() -> None:
            "(cf-e)152 조각 2만 순화·Seedance (cf-f)vnew.js 한 줄")
 
 
+def _ca154_plan(*, hands_in_timeline: bool = True) -> tuple[dict, dict]:
+    """작업 154 test3 꼴: 30초 테이크 1개(cut-01~06), Wan 15초 조각 2개(조각 2 = cut-03~06, cut-06 = 12-15s).
+
+    콘티 연기(패널) = test3 cut-04 cups face · cut-05 wipes tears · cut-06 stroking neck, 지시서 연기 = 손 닿음 없는 test3 문장,
+    프리비즈 hands(148) = cut-04 두 손 cup other_face · cut-05 right touch other_cheek · cut-06 right cup other_neck.
+    hands_in_timeline=False 면 hands 를 timeline actor 가 아니라 패널 읽기(panelGrammar actions)에만 둔다.
+    """
+    a, b = "범건우", "여의준"
+    spec = {
+        "cut-01": (7, "MS.", "Geonu walks to the bench.", [(a, "Walks to the bench"), (b, "Sits alone")], None, f'{a}: "여기 있었네."'),
+        "cut-02": (8, "MS two-shot.", "Geonu sits down next to Uijun.", [(a, "Sits beside 여의준"), (b, "Looks away")], None,
+                   f'{b}: "왜 왔어요."'),
+        "cut-03": (4, "MS two-shot.", "Geonu glances at Uijun.", [(a, "Watches 여의준 quietly"), (b, "Stares at the floor")], None,
+                   f'{a}: "괜찮아?"'),
+        "cut-04": (4, "MCU.", "Geonu lifts both hands from his lap, turning toward Uijun.",
+                   [(a, "Cups 여의준's face with both hands"), (b, "Looks up, startled")],
+                   {"right": {"act": "cup", "target": "other_face"}, "left": {"act": "cup", "target": "other_face"}}, f'{a}: "울지 마."'),
+        "cut-05": (4, "CU.", "Geonu looks slightly downward at Uijun and speaks.",
+                   [(a, "Wipes 여의준's tears with his thumb"), (b, "Eyes wet, trembling")],
+                   {"right": {"act": "touch", "target": "other_cheek"}, "left": {"act": "rest", "target": "none"}}, f'{a}: "바보같이."'),
+        "cut-06": (3, "MCU profile.", "Geonu leans closer by a few centimetres, keeping his eyes on Uijun.",
+                   [(a, "Leans close, stroking 여의준's neck and nape"), (b, "Looks up nervously")],
+                   {"right": {"act": "cup", "target": "other_neck"}, "left": {"act": "rest", "target": "none"}}, f'{b}: "오래… 만지시네."'),
+    }
+    ids = list(spec)
+    cuts, timeline, briefs, grammar = [], [], {}, {}
+    for no, cid in enumerate(ids, start=1):
+        seconds, shot, action, chars, hands, dialogue = spec[cid]
+        speaker, line = dialogue.split(": ", 1)
+        cuts.append({"id": cid, "no": no, "seconds": seconds, "panels": [no - 1], "dialogueKo": dialogue,
+                     "characters": [{"name": n, "actionEn": t} for n, t in chars]})
+        lead = {"id": "a1"}
+        cell = {"mainSubject": a, "others": [{"name": b, "how": "full"}]}
+        if hands and hands_in_timeline:
+            lead = {"id": "a1", "gestureTarget": "a2", "hands": hands}
+        elif hands:
+            cell["actions"] = [{"name": a, "target": b, "hands": hands}, {"name": b, "target": a,
+                                                                          "hands": {"right": {"act": "rest", "target": "none"}}}]
+        timeline.append({"cutId": cid, "actors": [lead, {"id": "a2"}]})
+        briefs[cid] = {"shotEn": shot, "actionEn": action, "dialogue": [{"speaker": speaker, "lineKo": line.strip('"')}]}
+        grammar[cid] = {"grammar": cell}
+    plan = {
+        "conti": {"status": "ready", "cuts": cuts, "segments": [{"id": "s1", "cutIds": ids, "seconds": 30}]},
+        "script": {"status": "ready", "entries": [], "setting": {"timeKo": "밤", "locationEn": "A park at night"}},
+        "previz": {"status": "ready", "recordings": {"s1": {"key": "PREVIZ-REC-s1", "seconds": 30}},
+                   "scenes": [{"locationId": "loc1", "timeline": timeline,
+                               "actors": [{"id": "a1", "name": a, "color": "#4363d8"}, {"id": "a2", "name": b, "color": "#e6194b"}]}],
+                   "panelGrammar": grammar, "shotBrief": {"status": "ready", "cuts": briefs}},
+    }
+    take = {"id": "take1", "cutIds": ids, "recKeys": ["PREVIZ-REC-s1"], "recSegIds": ["s1"], "seconds": 30.0}
+    return plan, take
+
+
+def check_vnew_contact_action_154() -> None:
+    """작업 154 — 테이크 TIMELINE 이 패널의 닿는 연기(콘티 actionEn)와 148 포즈 절을 지킨다. 가짜 데이터, 유료·LLM 0.
+
+    (ca-a) test3 꼴 30초 테이크 → Wan 15초 조각 2(cut-03~06): 조각·통 테이크 모두 entry.poses 가 있고, Wan 예산(4000)에서
+           줄이기 없음(poseDrop 안 돎). cut-06 닿는 연기 "neck" + 포즈 "right hand cups Yeouijun's neck", cut-04 "cups … face",
+           cut-05 "wipes … tears"(애니·실사). hands 가 패널 읽기에만 있어도(timeline actor 에 없음) 포즈 절이 붙는다
+    (ca-b) 빠듯한 예산: STYLE → HARMONY → MOTION 을 먼저 줄이고, 포즈 절 → 닿는 연기 → 대사 순으로 마지막에 뺀다
+    (ca-c) 닿는 동사 없는 컷은 그대로(contact 키 없음), 닿는 연기가 없는 fw 계획은 sha 같음, test3 꼴은 닿는 연기 문장만 다르다
+    (ca-d) 순화(153): 닿는 연기 문장도 _soften_text 를 지난다
+    (ca-e) 동사 목록 한 상수·"holds his breath"·지시서에 같은 동사가 있으면 없음
+    """
+    import hashlib as _hashlib  # noqa: PLC0415
+    import traceback as _tb  # noqa: PLC0415
+
+    sys.path.insert(0, str(ROOT / "app"))
+    from src.vnew import generate as genmod  # noqa: PLC0415
+
+    bad: list[str] = []
+    cast = [{"name": "범건우", "colorName": "blue", "frontNo": 1, "appearance": "tall man, black hair", "costume": "black shirt",
+             "voice": "low calm voice"},
+            {"name": "여의준", "colorName": "red", "frontNo": 2, "appearance": "slim man, brown hair", "costume": "navy hoodie",
+             "voice": "soft voice"}]
+    caps = dict(_RV152_CAPS)
+
+    def sha(text: str) -> str:
+        return _hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+    def run(plan: dict, take: dict, *, limit: int = 4000, variant: str = "webtoon", soften: bool = False,
+            fx: bool = False) -> tuple[str, str]:
+        with _guard_real_llm(), _pin_vnew(VNEW_FX=fx, VNEW_TAKE_PROMPT_MAX=limit), _LogCapture() as logs:
+            text = genmod._take_prompt(plan, take, cast=cast, panel_nos=[3, 4], location_no=5, caps=caps,  # noqa: SLF001
+                                       variant=variant, soften=soften)
+        steps = next((r.getMessage().rsplit("steps=", 1)[-1] for r in logs.records
+                      if r.getMessage().startswith("vnew.gen.take_prompt ")), "")
+        return text, steps
+
+    def timeline(text: str) -> str:
+        return next((ln for ln in text.split("\n") if ln.startswith("TIMELINE")), "")
+
+    def cut_text(text: str, start: str, end: str | None) -> str:
+        tl = timeline(text)
+        at = tl.find(start)
+        return tl[at:tl.find(end, at) if end else len(tl)] if at >= 0 else ""
+
+    try:
+        # ================= (ca-a) test3 꼴 · 조각 2 =================
+        plan, take = _ca154_plan()
+        budget = genmod._take_prompt_budget(caps)  # noqa: SLF001
+        parts = genmod._take_parts(plan, take, 15.0)  # noqa: SLF001
+        if budget != 4000 or [p["cutIds"] for p in parts] != [["cut-01", "cut-02"], ["cut-03", "cut-04", "cut-05", "cut-06"]]:
+            bad.append(f"(ca-a) Wan 예산·조각: {budget} {[p['cutIds'] for p in parts]}")
+        else:
+            sub = genmod._part_take(plan, take, parts[1])  # noqa: SLF001
+            for label, which in (("조각 2", sub), ("통 테이크", take)):
+                got = [bool(e.get("poses")) for e in genmod._take_timeline_entries(plan, which)]  # noqa: SLF001
+                want = [False, True, True, True] if which is sub else [False, False, False, True, True, True]
+                if got != want:
+                    bad.append(f"(ca-a) {label} entry.poses: {got}")
+            for variant in ("webtoon", "real"):
+                text, steps = run(plan, sub, variant=variant)
+                c4, c5, c6 = cut_text(text, "4-8s", "8-12s"), cut_text(text, "8-12s", "12-15s"), cut_text(text, "12-15s", None)
+                checks = {
+                    "줄이기 없음": steps == "none" and genmod._utf8_len(text) <= budget,  # noqa: SLF001
+                    "cut-06 닿는 연기 neck": "Beomgeonu strokes Yeouijun's neck and nape." in c6,
+                    "cut-06 포즈 절": "Beomgeonu's right hand cups Yeouijun's neck" in c6,
+                    "cut-06 지시서 연기": "leans closer" in c6,
+                    "cut-04 cups face": "Beomgeonu cups Yeouijun's face with both hands." in c4,
+                    "cut-05 wipes tears": "Beomgeonu wipes Yeouijun's tears with his thumb." in c5,
+                }
+                failed = [k for k, v in checks.items() if not v]
+                if failed:
+                    bad.append(f"(ca-a) {variant}: {failed} steps={steps}\n      {timeline(text)[:900]}")
+            plan_g, take_g = _ca154_plan(hands_in_timeline=False)
+            sub_g = genmod._part_take(plan_g, take_g, genmod._take_parts(plan_g, take_g, 15.0)[1])  # noqa: SLF001
+            text_g, _ = run(plan_g, sub_g)
+            if "Beomgeonu's right hand cups Yeouijun's neck" not in cut_text(text_g, "12-15s", None) \
+                    or "Both of Beomgeonu's hands cup Yeouijun's face" not in text_g:
+                bad.append(f"(ca-a) 패널 읽기에만 있는 hands → 포즈 절 없음: {timeline(text_g)[:600]}")
+
+            # ================= (ca-b) 빠듯한 예산 =================
+            full, _ = run(plan, sub, fx=True)
+            contact6 = "Beomgeonu strokes Yeouijun's neck and nape."
+            pose6 = "Beomgeonu's right hand cups Yeouijun's neck"
+            seen_steps: list[str] = []
+            first_loss = None
+            limit = genmod._utf8_len(full)  # noqa: SLF001
+            for _ in range(300):
+                limit -= 20
+                text, steps = run(plan, sub, limit=limit, fx=True)
+                seen_steps = steps.split(",")
+                if pose6 not in text or contact6 not in text:
+                    first_loss = (limit, text, seen_steps)
+                    break
+            if first_loss is None:
+                bad.append("(ca-b) 포즈 절·닿는 연기가 빠지는 예산을 찾지 못했습니다")
+            else:
+                limit, text, labels = first_loss
+                order_ok = labels[:3] == ["styleTrim", "harmonyShort", "motionShort"] and labels[-1] == "poseDrop" \
+                    and contact6 in text and "dialogue25" not in labels
+                if not order_ok or genmod._utf8_len(text) > limit:  # noqa: SLF001
+                    bad.append(f"(ca-b) {limit}B 줄이기 순서: {labels}")
+                if genmod.MOTION_MIN not in text or "HARMONY: night light; same light direction" not in text:
+                    bad.append("(ca-b) 포즈 절보다 먼저 MOTION·HARMONY 가 짧은 형이 아닙니다")
+                text2, steps2 = run(plan, sub, limit=limit - 300, fx=True)
+                labels2 = steps2.split(",")
+                if "contactDrop" in labels2 and labels2.index("contactDrop") != labels2.index("poseDrop") + 1:
+                    bad.append(f"(ca-b) 포즈 절 다음이 닿는 연기가 아닙니다: {labels2}")
+                if "dialogue25" in labels2 and labels2.index("dialogue25") < labels2.index("contactDrop"):
+                    bad.append(f"(ca-b) 대사가 닿는 연기보다 먼저 줄었습니다: {labels2}")
+                if "contactDrop" not in labels2 and "minimalTimeline" not in labels2:
+                    bad.append(f"(ca-b) {limit - 300}B 에서 닿는 연기 단계가 없습니다: {labels2}")
+
+            # ================= (ca-c) 닿는 동사 없는 컷·sha =================
+            entries = genmod._take_timeline_entries(plan, sub)  # noqa: SLF001
+            if [("contact" in e) for e in entries] != [False, True, True, True]:
+                bad.append(f"(ca-c) contact 키: {[e.get('contact') for e in entries]}")
+            saved = genmod._cut_contact  # noqa: SLF001
+            try:
+                fw = _fw_plan()
+                fw_take = {"id": "take1", "cutIds": ["c1", "c2", "c3"], "seconds": 12}
+                fw_on = run(fw, fw_take, fx=True)[0]
+                plain_on = run(plan, sub)[0]
+                genmod._cut_contact = lambda cut, brief: None  # noqa: SLF001
+                fw_off = run(fw, fw_take, fx=True)[0]
+                plain_off = run(plan, sub)[0]
+            finally:
+                genmod._cut_contact = saved  # noqa: SLF001
+            stripped = plain_on
+            for sentence in ("Beomgeonu cups Yeouijun's face with both hands.", "Beomgeonu wipes Yeouijun's tears with his thumb.",
+                             contact6):
+                stripped = stripped.replace("; " + sentence, "", 1)
+            if sha(fw_on) != sha(fw_off) or sha(stripped) != sha(plain_off) or sha(plain_on) == sha(plain_off):
+                bad.append("(ca-c) 닿는 연기 문장 말고 다른 글자가 바뀌었습니다(또는 fw 계획 sha 가 다릅니다)")
+            if cut_text(plain_on, "0-4s", "4-8s") != cut_text(plain_off, "0-4s", "4-8s"):
+                bad.append("(ca-c) 닿는 동사 없는 cut-03 항목이 바뀌었습니다")
+
+            # ================= (ca-d) 순화 =================
+            plan_s, take_s = _ca154_plan()
+            plan_s["conti"]["cuts"][4]["characters"][0]["actionEn"] = "Presses against 여의준's crotch"
+            sub_s = genmod._part_take(plan_s, take_s, parts[1])  # noqa: SLF001
+            hard, _ = run(plan_s, sub_s)
+            soft, _ = run(plan_s, sub_s, soften=True)
+            if "Beomgeonu presses against Yeouijun's crotch." not in hard or "Beomgeonu presses against Yeouijun's waist." not in soft \
+                    or "crotch" in soft:
+                bad.append(f"(ca-d) 순화: {cut_text(soft, '8-12s', '12-15s')}")
+
+        # ================= (ca-e) 동사 목록·도우미 =================
+        bases = [forms[0] for forms in genmod.CONTACT_VERBS]
+        if bases != ["touch", "hold", "cup", "stroke", "grab", "wipe", "kiss", "press", "hug", "pull", "caress", "rest on", "lean on"]:
+            bad.append(f"(ca-e) CONTACT_VERBS: {bases}")
+        cases = [
+            ({"characters": [{"name": "에이", "actionEn": "Holds his breath, eyes wide"}]}, "Looks ahead.", None),
+            ({"characters": [{"name": "에이", "actionEn": "Holding back tears"}]}, "", None),
+            ({"characters": [{"name": "에이", "actionEn": "Grabs 비's wrist"}]}, "A grabs B's wrist.", None),
+            ({"characters": [{"name": "에이", "actionEn": "Smiles, resting on 비's shoulder"}]}, "A smiles.", "rests on 비's shoulder"),
+        ]
+        for cut, brief, want in cases:
+            got = genmod._cut_contact(cut, brief)  # noqa: SLF001
+            if (got or {}).get("text") != want:
+                bad.append(f"(ca-e) {cut['characters'][0]['actionEn']!r} / {brief!r}: {got}")
+    except Exception:  # noqa: BLE001
+        bad.append("작업 154 검사 예외\n" + _tb.format_exc())
+    if bad:
+        fail("작업 154 테이크 닿는 연기·포즈 절 검사 실패\n  " + "\n  ".join(bad))
+    else:
+        ok("작업 154 닿는 연기 (ca-a)test3 조각 2 cut-06 neck·포즈 절·cut-04 cups face·cut-05 wipes tears(애니·실사, Wan 4000B 줄이기 없음)·"
+           "패널 읽기 hands 대체 (ca-b)STYLE→HARMONY→MOTION 먼저, 포즈→닿는 연기→대사 마지막 (ca-c)동사 없는 컷 그대로·fw sha 같음·"
+           "닿는 문장만 다름 (ca-d)순화 (ca-e)동사 한 목록·숨 참기·지시서 같은 동사")
+
+
 def main() -> int:
     print("== vpoc1 check ==")
     check_compileall()
@@ -52157,6 +52380,7 @@ def main() -> int:
     check_vnew_previz_camera_clear_151()
     check_vnew_ref_video_split_152()
     check_vnew_content_flag_153()
+    check_vnew_contact_action_154()
     check_vnew_plan_step_stay_129()
     check_pod_zones()
     print()
