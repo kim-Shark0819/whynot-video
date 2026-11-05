@@ -1032,6 +1032,9 @@ def run_conti(owner: str, pid: str, task_id: str) -> None:
 
     지시서 120: VNEW_CONTI_IMAGES 면 대본 글 뒤에 웹툰 타일을 붙여 보낸다(_conti_blocks). 그림 호출이 실패하면 글만 1회
     다시(_conti_call). 그림을 본 콘티가 모든 컷의 기호·분위기를 채웠으면 채우기 호출을 건너뛴다.
+
+    작업 158: VNEW_VIBE_CONTI(기본 켬)면 콘티 요청은 video-vibecode 샷 계획(_run_vibe)이고 conti.background 를 더 둔다.
+    끄면 위 경로 그대로(프롬프트 바이트 같음).
     """
     try:
         fx_on = bool(vnew_settings_module().VNEW_FX)
@@ -1049,20 +1052,25 @@ def run_conti(owner: str, pid: str, task_id: str) -> None:
             )
             return
         notes = str(inp.get("notes") or "").strip()
-        roster = _roster_text(owner, inp.get("characters") or [])
+        background = None
+        if vnew_settings_module().VNEW_VIBE_CONTI:
+            # 작업 158: video-vibecode 샷 계획(_run_vibe). 끄면 아래 지금 경로 그대로다.
+            cuts, model, background = _run_vibe(owner, pid, plan, script, total_seconds, notes, fx_on=fx_on)
+        else:
+            roster = _roster_text(owner, inp.get("characters") or [])
 
-        text = _conti_prompt(script, total_seconds, notes, roster)
-        blocks, sent = _conti_blocks(owner, pid, plan, text)
-        payload, usage, blocks, sent = _conti_call(pid, blocks, sent, text)
-        model = str(usage.get("model") or _conti_model())
-        _charge(owner, pid, plan.get("planId") or "", usage, model)
+            text = _conti_prompt(script, total_seconds, notes, roster)
+            blocks, sent = _conti_blocks(owner, pid, plan, text)
+            payload, usage, blocks, sent = _conti_call(pid, blocks, sent, text)
+            model = str(usage.get("model") or _conti_model())
+            _charge(owner, pid, plan.get("planId") or "", usage, model)
 
-        # 지시서 120: 그림을 보낸 콘티만 기호·분위기를 믿는다(글만이면 그려진 기호를 볼 수 없어 지금처럼 채우기에 맡긴다).
-        fx_from_conti = fx_on and sent > 0
-        cuts = _normalize_cuts(payload, script, fx_from_conti=fx_from_conti, panel_count=sent)
-        # 최소 5컷 보정: 모델이 모자라게 주면 거절(재요청) 후 그래도 모자라면 쪼개서 채운다.
-        if len(cuts) < MIN_CUTS:
-            cuts = _ensure_min_cuts(blocks, cuts, script, model_hint=model, fx_from_conti=fx_from_conti, panel_count=sent)
+            # 지시서 120: 그림을 보낸 콘티만 기호·분위기를 믿는다(글만이면 그려진 기호를 볼 수 없어 지금처럼 채우기에 맡긴다).
+            fx_from_conti = fx_on and sent > 0
+            cuts = _normalize_cuts(payload, script, fx_from_conti=fx_from_conti, panel_count=sent)
+            # 최소 5컷 보정: 모델이 모자라게 주면 거절(재요청) 후 그래도 모자라면 쪼개서 채운다.
+            if len(cuts) < MIN_CUTS:
+                cuts = _ensure_min_cuts(blocks, cuts, script, model_hint=model, fx_from_conti=fx_from_conti, panel_count=sent)
 
         # 초 맞춤 + 세그먼트(모델 최대 길이 기준, 컷 경계에서).
         video_model = str(inp.get("videoModel") or vpoc_ark.DEFAULT_MODEL)
@@ -1083,6 +1091,8 @@ def run_conti(owner: str, pid: str, task_id: str) -> None:
                 extra = {"fxFill": fx_state}
 
         conti = {"status": "ready", "error": "", "model": model, "cuts": cuts, "segments": segments}
+        if background is not None:
+            conti["background"] = background
         _commit_step(owner, pid, "conti", task_id, conti, extra=extra)
         # 콘티가 바뀌면 프리비즈 승인을 해제한다(콘티·장면이 바뀌면 다시 확인·승인).
         _unapprove_previz_after_conti(owner, pid)
@@ -1364,8 +1374,14 @@ def _ensure_min_cuts(
             cuts = cuts2
     except Exception as exc:  # noqa: BLE001
         log.warning("vnew.conti.retry_failed err=%s", str(exc)[:200])
+    return _split_to_min(cuts)
 
-    # 그래도 모자라면 가장 긴 컷을 반으로 쪼개 MIN_CUTS 를 채운다(결과 >= 5 보장).
+
+def _split_to_min(cuts: list[dict], *, second_dialogue: bool = True) -> list[dict]:
+    """컷이 MIN_CUTS 보다 적으면 가장 긴 컷을 반으로 쪼개 채우고(결과 >= 5 보장) no 를 다시 매긴다. 컷이 없으면 NoCuts.
+
+    second_dialogue=False(작업 158 샷 계획)면 쪼갠 뒤쪽 컷의 dialogueKo 를 비운다(대본 한 줄은 한 컷에만).
+    """
     cuts = [dict(cut) for cut in cuts]
     while 0 < len(cuts) < MIN_CUTS:
         longest = max(range(len(cuts)), key=lambda i: cuts[i]["seconds"])
@@ -1373,12 +1389,380 @@ def _ensure_min_cuts(
         half = src["seconds"] / 2.0
         first = dict(src, seconds=half)
         second = dict(src, seconds=src["seconds"] - half, id=f"{src['id']}b")
+        if not second_dialogue:
+            second["dialogueKo"] = ""
         cuts[longest : longest + 1] = [first, second]
     if not cuts:
         raise VpocError("vnew.conti", "NoCuts", "콘티 컷을 만들지 못했습니다.", 502)
     for no, cut in enumerate(cuts, start=1):
         cut["no"] = no
     return cuts
+
+
+# ================================================================ ③ 콘티 — video-vibecode 샷 계획(작업 158)
+#
+# 참고 구현 video-vibecode vpoc/routes._build_master → llm.master_plan(cuts=True) 의 샷 계획을 ③ 콘티로 쓴다.
+# SYSTEM · 도구는 prompts.VIBE_CUTS_SYSTEM · EMIT_VIBE_CUTS(참고 그대로). 입력은 우리 것(대본 줄 · panels · 총 길이 ·
+# 캐릭터 이름 · 외형 · 시트 그림 · 부가 설명 · 120 타일), 호출은 _converse(_conti_model 체인) + _charge(지금과 같다).
+# 결과(배경 · 샷)는 _vibe_cuts 가 conti.cuts 모양으로 옮긴다. 인물 외형은 우리 캐릭터 데이터만 쓰고 모델의 appearanceEn 은 버린다.
+
+# 샷 수(참고 vpoc/settings.cuts_shot_range: 최소 ceil(초/4) · 최대 floor(초/2) · 목표 round(초/3)). 상한은 60초 = 30샷.
+VIBE_SHOT_MAX_S, VIBE_SHOT_MIN_S, VIBE_SHOT_TARGET_S, VIBE_MAX_SHOTS = 4, 2, 3, 30
+# 화면 라벨(vnew.js SHOT_SIZE_KO 와 같은 글자). 샷 크기 → shotKo.
+VIBE_SHOT_KO = {"wide": "와이드", "medium": "미디엄", "closeup": "클로즈업", "extreme_closeup": "익스트림 클로즈업",
+                "over_shoulder": "어깨 너머", "profile": "옆모습", "insert": "인서트"}
+
+
+def _analyze_vibe(blocks: list[dict], *, model: str, system_text: str) -> tuple[dict, dict]:
+    """llm._converse 로 샷 계획 JSON 을 받는다(작업 158). (payload, usage{..model}). 검사가 가짜로 바꿔 끼운다."""
+    return vpoc_llm._converse(  # noqa: SLF001
+        system_text=system_text,
+        blocks=blocks,
+        tool=prompts.EMIT_VIBE_CUTS,
+        max_tokens=8000,
+        where="vnew.conti.vibe",
+        model=model,
+    )
+
+
+def _vibe_shot_range(total_seconds: int) -> tuple[int, int, int]:
+    """(최소, 최대, 목표) 샷 수. 참고 cuts_shot_range(CUTS_PLAN_MIN_S 2초) + 상한 VIBE_MAX_SHOTS, 최소는 가능하면 MIN_CUTS."""
+    import math  # noqa: PLC0415
+
+    total = max(1.0, float(total_seconds or 1))
+    low = max(1, math.ceil(total / VIBE_SHOT_MAX_S))
+    high = min(VIBE_MAX_SHOTS, max(low, int(total // VIBE_SHOT_MIN_S)))
+    low = min(max(low, MIN_CUTS), high)
+    target = max(low, min(high, round(total / VIBE_SHOT_TARGET_S)))
+    return low, high, target
+
+
+def _vibe_cast(owner: str, chars: list[dict], script: dict) -> list[dict]:
+    """명단 [{name, appearanceEn, sheets:[(라벨, key)]}]. 외형 = 캐릭터 분석 appearanceEn, 그림 = 시트 · 정면(작업 142 시트).
+
+    그림체는 settings.VARIANTS 순서로 시트나 정면이 있는 첫 것. 연결된 캐릭터가 없으면 대본 화자 · 인물 이름(외형 · 그림 없음).
+    """
+    cast: list[dict] = []
+    for item in chars or []:
+        name = str(item.get("roleName") or "").strip()
+        if not name or any(row["name"] == name for row in cast):
+            continue
+        appearance, sheets = "", []
+        try:
+            char, _ = characters.load_char(owner, str(item.get("charId") or ""))
+            appearance = str((char.get("analysis") or {}).get("appearanceEn") or "").strip()
+            variants = char.get("variants") or {}
+            for variant in vnew_settings_module().VARIANTS:
+                row = variants.get(variant) or {}
+                if row.get("sheetKey") or row.get("frontKey"):
+                    sheets = [(label, str(row.get(field))) for label, field in
+                              (("front view", "frontKey"), ("turnaround sheet", "sheetKey")) if row.get(field)]
+                    break
+        except Exception:  # noqa: BLE001
+            pass
+        cast.append({"name": name, "appearanceEn": appearance, "sheets": sheets})
+    if cast:
+        return cast
+    for entry in script.get("entries") or []:
+        names = [entry.get("speaker")] + [c.get("name") for c in (entry.get("characters") or []) if isinstance(c, dict)]
+        for name in names:
+            name = str(name or "").strip()
+            if name and not any(row["name"] == name for row in cast):
+                cast.append({"name": name, "appearanceEn": "", "sheets": []})
+    return cast
+
+
+def _script_panels(script: dict) -> list[int]:
+    """대본 entries[].panels 의 번호(정렬 · 중복 없음)."""
+    return sorted({int(p) for e in (script.get("entries") or []) for p in (e.get("panels") or []) if _is_int(p)})
+
+
+def _vibe_prompt(
+    script: dict, total_seconds: int, notes: str, cast: list[dict], shots: tuple[int, int, int], numbers: list[int], sent: int
+) -> str:
+    """샷 계획 사용자 글(작업 158). 참고 master_plan 블록의 Story 자리에 우리 대본 · 부가 설명을, Characters 에 우리 명단을 둔다.
+
+    영상 길이 줄 · 패널 줄은 참고 문장 그대로다. sent = 뒤에 붙는 패널 이미지 수(0 이면 글만 — 대본 패널 번호를 알린다).
+    """
+    low, high, target = shots
+    setting = script.get("setting") or {}
+    lines = [
+        "Script (the dialogue-and-situation log read from the webtoon; panels = webtoon panel numbers):",
+        f"Setting: {setting.get('locationKo', '')} / {setting.get('locationEn', '')}"
+        f" ({'closed room' if setting.get('enclosed') else 'open space'}) / time {setting.get('timeKo', '')}"
+        f" / mood {setting.get('moodKo', '')} / layout {setting.get('layoutKo', '')} / {setting.get('layoutEn', '')}",
+    ]
+    for index, entry in enumerate(script.get("entries") or [], start=1):
+        who = ", ".join(
+            f"{c.get('name', '')}({c.get('positionEn') or c.get('positionKo') or ''})"
+            for c in (entry.get("characters") or []) if isinstance(c, dict)
+        )
+        lines.append(
+            f"{index}. [panels {','.join(str(p) for p in (entry.get('panels') or []))}] place={entry.get('locationEn', '')}"
+            f" / speaker={entry.get('speaker', '')} / line=\"{entry.get('lineKo', '')}\""
+            + (" / inner thought (mouth closed)" if prompts.is_thought(entry) else "")
+            + f" / situation={entry.get('situationKo', '')} / emotion={entry.get('emotionKo', '')}"
+            + (f" / characters={who}" if who else "")
+        )
+    lines.append(f"Extra notes: {notes or '(none)'}")
+    cast_text = "\n".join(
+        f"- id={row['name']} handle=\"{row['name']}\" ({row['name']}) appearance=\"{row['appearanceEn']}\"" for row in cast
+    ) or "(none)"
+    lines.append(f"Characters:\n{cast_text}")
+    lines.append(
+        f"Video length {total_seconds}s. Use {low}-{high} shots (about {target}) "
+        f"that tile 0..{total_seconds}s, each 2-4s (average about 3s)."
+    )
+    if sent:
+        lines.append(
+            f"The next {sent} images are the webtoon panels in order."
+            f" Each image is preceded by its label; panels sent (of {sent}): "
+            + ", ".join(str(n) for n in range(sent)) + ". Use only these numbers for sourcePanel."
+        )
+    else:
+        lines.append("No panel images are sent. Panel numbers in the script: "
+                     + (", ".join(str(n) for n in numbers) or "(none)") + ". Use only these numbers for sourcePanel.")
+    return "\n".join(lines)
+
+
+def _vibe_blocks(
+    owner: str, script: dict, total_seconds: int, notes: str, cast: list[dict], shots: tuple, tiles: list[bytes], with_sheets: bool
+) -> tuple[list[dict], int]:
+    """(blocks, 보낸 패널 수). 글 → "Panel N of M:" + 타일(120 과 같은 번호) → 시트 안내 1줄 + 인물별 정면 · 턴어라운드 그림."""
+    numbers = list(range(len(tiles))) if tiles else _script_panels(script)
+    blocks: list[dict] = [{"text": _vibe_prompt(script, total_seconds, notes, cast, shots, numbers, len(tiles))}]
+    for number, jpeg in enumerate(tiles):
+        blocks.append({"text": f"Panel {number} of {len(tiles)}:"})
+        blocks.append({"image": {"format": "jpeg", "source": {"bytes": jpeg}}})
+    if with_sheets:
+        sheet_blocks: list[dict] = []
+        for row in cast:
+            for label, key in row["sheets"]:
+                try:
+                    jpeg = STORE.get_bytes(key)
+                except Exception as exc:  # noqa: BLE001 — 못 읽은 시트는 뺀다.
+                    log.warning("vnew.conti.vibe.sheet_missing name=%s err=%s", row["name"][:40], str(exc)[:150])
+                    continue
+                sheet_blocks.append({"text": f"{row['name']} — {label}:"})
+                sheet_blocks.append({"image": {"format": "jpeg", "source": {"bytes": jpeg}}})
+        if sheet_blocks:
+            blocks.append({"text": prompts.VIBE_SHEET_NOTE})
+            blocks.extend(sheet_blocks)
+    return blocks, len(tiles)
+
+
+def _run_vibe(
+    owner: str, pid: str, plan: dict, script: dict, total_seconds: int, notes: str, *, fx_on: bool
+) -> tuple[list[dict], str, dict]:
+    """샷 계획 1회 → (cuts, model, background). 그림 호출이 실패하면 시트를 빼고, 그래도 실패하면 글만 1회 다시."""
+    inp = plan.get("input") or {}
+    cast = _vibe_cast(owner, inp.get("characters") or [], script)
+    shots = _vibe_shot_range(total_seconds)
+    system = prompts.VIBE_CUTS_SYSTEM.format(total=total_seconds, min_beats=shots[0], max_beats=shots[1], target_beats=shots[2])
+    tiles: list[bytes] = []
+    order = list(inp.get("order") or [])
+    if vnew_settings_module().VNEW_CONTI_IMAGES and order:
+        try:
+            tiles, _total, _picked = ordered_tiles(owner, pid, order)
+        except Exception as exc:  # noqa: BLE001 — 그림을 못 읽으면 글만 보낸다.
+            log.warning("vnew.conti.tiles_failed pid=%s err=%s", pid, str(exc)[:200])
+    has_sheets = bool(tiles) and any(row["sheets"] for row in cast)
+    attempts = [(tiles, True)] if has_sheets else []
+    attempts += [(tiles, False)] if tiles else []
+    attempts += [([], False)]
+    for index, (use_tiles, with_sheets) in enumerate(attempts):
+        blocks, sent = _vibe_blocks(owner, script, total_seconds, notes, cast, shots, use_tiles, with_sheets)
+        try:
+            payload, usage = _analyze_vibe(blocks, model=_conti_model(), system_text=system)
+            break
+        except Exception as exc:  # noqa: BLE001
+            if index == len(attempts) - 1:
+                raise
+            log.warning("vnew.conti.vibe.images_fallback pid=%s images=%d sheets=%s err=%s",
+                        pid, sum(1 for b in blocks if "image" in b), with_sheets, str(exc)[:200])
+    model = str(usage.get("model") or _conti_model())
+    _charge(owner, pid, plan.get("planId") or "", usage, model)
+    numbers = list(range(sent)) if sent else _script_panels(script)
+    cuts = _vibe_cuts(payload, script, [row["name"] for row in cast], numbers,
+                      fx_from_conti=fx_on and sent > 0, panel_count=sent)
+    if len(cuts) < MIN_CUTS:
+        cuts = _split_to_min(cuts, second_dialogue=False)
+    payload = payload if isinstance(payload, dict) else {}
+    background = {"promptEn": str(payload.get("backgroundEn") or "").strip(),
+                  "descKo": str(payload.get("backgroundKo") or "").strip()}
+    log.info("vnew.conti.vibe pid=%s shots=%d cuts=%d images=%d", pid,
+             len(_loads_if_str(payload.get("beats")) or []), len(cuts), sent)
+    return cuts, model, background
+
+
+def _vibe_spans(sources: list, numbers: list[int]) -> list[list[int]]:
+    """샷마다 맡는 패널. 자기 sourcePanel 하나 + 같은 패널 연속 샷의 마지막 샷이 다음 샷 패널 전까지 건너뛴 패널,
+    첫 샷은 그 앞 패널까지. sourcePanel 이 없으면 [] (대사 귀속에서 앞 샷 규칙을 쓴다)."""
+    spans: list[list[int]] = [[p] if p is not None else [] for p in sources]
+    known = sorted(set(numbers))
+    if not known:
+        return spans
+    for index, panel in enumerate(sources):
+        if panel is None:
+            continue
+        later = next((p for p in sources[index + 1:] if p is not None), None)
+        if later == panel:
+            continue  # 같은 패널을 잇는 샷이 더 있다 — 건너뛴 패널은 그 마지막 샷이 맡는다.
+        if later is None:
+            spans[index] += [p for p in known if p > panel]
+        elif later > panel:
+            spans[index] += [p for p in known if panel < p < later]
+    first = next((i for i, p in enumerate(sources) if p is not None), None)
+    if first is not None:
+        spans[first] = [p for p in known if p < sources[first]] + spans[first]
+    return spans
+
+
+def _vibe_line_owners(entries: list[dict], spans: list[list[int]]) -> dict[int, int]:
+    """대본 줄(대사가 있는 entry 번호) → 샷 번호. 한 줄은 한 샷에만(157 규칙).
+
+    그 줄의 첫 패널을 맡은 샷들 중 하나(여러 샷이 같은 패널이면 그 패널의 줄을 순서대로 고르게 나눈다), 맡은 샷이 없으면
+    그 패널보다 앞 패널을 맡은 마지막 샷, 그것도 없으면 첫 샷.
+    """
+    groups: dict[tuple, list[int]] = {}
+    for index, entry in enumerate(entries):
+        line = str(entry.get("lineKo") or "").strip()
+        panels = [int(p) for p in (entry.get("panels") or []) if _is_int(p)]
+        if not line or not spans:
+            continue
+        first = min(panels) if panels else None
+        hits = tuple(i for i, span in enumerate(spans) if first is not None and first in span)
+        if not hits:
+            before = [i for i, span in enumerate(spans) if span and first is not None and min(span) <= first]
+            hits = (before[-1] if before else 0,)
+        groups.setdefault(hits, []).append(index)
+    owners: dict[int, int] = {}
+    for hits, lines in groups.items():
+        for order, index in enumerate(lines):
+            owners[index] = hits[order * len(hits) // len(lines)]
+    return owners
+
+
+def _sentences(text: str) -> list[str]:
+    return [part.strip() for part in re.split(r"(?<=[.!?])\s+", str(text or "").strip()) if part.strip()]
+
+
+def _vibe_cuts(
+    payload: dict, script: dict, names: list[str], numbers: list[int], *, fx_from_conti: bool = False, panel_count: int = 0
+) -> list[dict]:
+    """샷 계획 결과 → conti.cuts(작업 158). 필드 표:
+
+    beat t0·t1 → id·no·seconds(t1-t0) / shotSize·kind → shotSize(kind insert 면 "insert")·shotKo(라벨) / cameraEn → cameraEn /
+    actionEn → promptEn(+ lightEn)·characters[].actionEn(그 이름이 든 문장, 한 명이면 전부) / characters → characters[]
+    (명단 이름만, positionEn = 대본 위치) / backgroundEn → conti.background · locationEn(대본 장소와 같을 때만, 아니면 그 컷
+    패널의 대본 장소 · 앞 컷 · setting) / fxEn·fxSuggest →
+    fx·fxSuggest(fx.vibe_fx, 120 merge_fill·apply_cap) / sourcePanel → sourcePanel·panels(_vibe_spans) / descKo → situationKo.
+    dialogueKo = 그 샷이 맡은 대본 줄(_vibe_line_owners, 한 줄 한 컷). kind·lightEn 은 그대로 둔다.
+    """
+    payload = payload if isinstance(payload, dict) else {}
+    raw = _loads_if_str(payload.get("beats"))
+    beats = [b for b in (_loads_if_str(x) for x in (raw if isinstance(raw, list) else [])) if isinstance(b, dict)]
+    known = set(numbers)
+    sources: list = []
+    for beat in beats:
+        value = beat.get("sourcePanel")
+        panel = int(value) if _is_int(value) and int(value) in known else None
+        sources.append(panel if panel is not None else (sources[-1] if sources else None))
+    spans = _vibe_spans(sources, numbers)
+    entries = [e for e in (script.get("entries") or []) if isinstance(e, dict)]
+    owners = _vibe_line_owners(entries, spans)
+    for index, shot in owners.items():
+        first = [int(p) for p in (entries[index].get("panels") or []) if _is_int(p)]
+        if first and min(first) not in spans[shot]:
+            spans[shot] = sorted(set(spans[shot]) | {min(first)})
+    background = str(payload.get("backgroundEn") or "").strip()
+    setting_location = str((script.get("setting") or {}).get("locationEn") or "").strip()
+    name_set = {n for n in names if n}
+    cuts: list[dict] = []
+    fx_items: list[dict] = []
+    for index, beat in enumerate(beats):
+        try:
+            seconds = float(beat.get("t1")) - float(beat.get("t0"))
+        except (TypeError, ValueError):
+            seconds = 0.0
+        kind = str(beat.get("kind") or "")
+        size = "insert" if kind == "insert" else str(beat.get("shotSize") or "")
+        size = size if size in prompts.SHOT_SIZES else "medium"
+        cut_panels = spans[index]
+        lines = [entries[i] for i in sorted(i for i, shot in owners.items() if shot == index)]
+        raw_who = _loads_if_str(beat.get("characters"))
+        who = []
+        for name in raw_who if isinstance(raw_who, list) else []:
+            name = str(name or "").strip()
+            if name and (name in name_set or not name_set) and name not in who:
+                who.append(name)
+        if not who and kind != "insert":
+            who = [n for n in (str(e.get("speaker") or "").strip() for e in lines) if n in name_set or (n and not name_set)][:1]
+        action = str(beat.get("actionEn") or "").strip()
+        light = str(beat.get("lightEn") or "").strip()
+        sentences = _sentences(action)
+        chars = []
+        for name in who:
+            own = [s for s in sentences if name in s]
+            chars.append({"name": name, "positionEn": _vibe_position(name, cut_panels, entries),
+                          "actionEn": " ".join(own) if own else (action if len(who) == 1 else "")})
+        cut_id = f"c{index + 1}"
+        # backgroundEn 은 대본 장소와 같을 때만 컷 장소가 된다(_cut_location). 겹치는 대본 줄이 없으면 앞 컷 장소 → 대본 setting.
+        if _overlapping_entry_locations(cut_panels, entries):
+            location = _cut_location(background, cut_panels, script)
+        else:
+            location = (cuts[-1]["locationEn"] if cuts else "") or setting_location or background
+        cut = {
+            "id": cut_id,
+            "no": index + 1,
+            "seconds": seconds if seconds > 0 else 1.0,
+            "panels": cut_panels,
+            "shotKo": VIBE_SHOT_KO.get(size, ""),
+            "cameraEn": str(beat.get("cameraEn") or "").strip(),
+            "locationEn": location,
+            "characters": chars,
+            "dialogueKo": " / ".join(
+                (f"{e.get('speaker')}: " if str(e.get("speaker") or "").strip() else "") + f"\"{str(e.get('lineKo')).strip()}\""
+                for e in lines),
+            "situationKo": str(beat.get("descKo") or "").strip(),
+            "promptEn": " ".join(x for x in (action, light.rstrip(".") + "." if light else "") if x),
+            "shotSize": size,
+            "kind": kind if kind in prompts.VIBE_SHOT_KINDS else "character",
+            "lightEn": light,
+        }
+        source = _conti_source_panel(sources[index], cut_panels, panel_count)
+        if source is not None:
+            cut["sourcePanel"] = source
+        if fx_from_conti:
+            applied, picks = vnew_fx.vibe_fx(beat.get("fxEn"), _loads_if_str(beat.get("fxSuggest")))
+            fx_item = _conti_fx_item(cut_id, {"fx": applied, "fxSuggest": picks})
+            if fx_item is not None:
+                fx_items.append(fx_item)
+        cuts.append(cut)
+    if fx_items:
+        cuts, stats = vnew_fx.merge_fill(cuts, fx_items, [row["id"] for row in fx_items], {})
+        cuts, _capped = vnew_fx.apply_cap(cuts, stats.get("filledIds") or [])
+    return cuts
+
+
+def _vibe_position(name: str, cut_panels: list[int], entries: list[dict]) -> str:
+    """대본의 그 인물 positionEn: 컷 패널과 겹치는 entry 의 값, 없으면 그 앞 entry 중 마지막 값, 그것도 없으면 첫 값."""
+    hit, before, any_value = "", "", ""
+    start = min(cut_panels) if cut_panels else None
+    for entry in entries:
+        panels = {int(p) for p in (entry.get("panels") or []) if _is_int(p)}
+        for char in entry.get("characters") or []:
+            if not isinstance(char, dict) or str(char.get("name") or "").strip() != name:
+                continue
+            value = str(char.get("positionEn") or "").strip()
+            if not value:
+                continue
+            any_value = any_value or value
+            if panels & set(cut_panels or []) and not hit:
+                hit = value
+            if start is not None and panels and max(panels) < start:
+                before = value
+    return hit or before or any_value
 
 
 # ================================================================ 초 맞춤 · 세그먼트

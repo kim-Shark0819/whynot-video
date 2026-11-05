@@ -348,6 +348,144 @@ Describe only what the panels and the cut text show. Never describe hair, skin o
 text. Answer only with the emit_fx tool."""
 
 
+# ================================================================ ③ 콘티 — video-vibecode 샷 계획(작업 158)
+#
+# 참고 구현 video-vibecode vpoc/llm.py 의 EMIT_MASTER_CUTS(= _with_shot_fields(EMIT_MASTER)) · MASTER_CUTS_SYSTEM 을
+# 글자 그대로 옮겼다(_SHOT_RULES → VIBE_SHOT_RULES, 이름만 바꿈). 열거값은 참고 compose.SHOT_SIZES · SHOT_KINDS · FX 와 같은
+# 값(기호는 fx.FX_KEYS — 참고 FX 키와 글자 하나 다르지 않다). 바뀐 것은 둘뿐이다:
+#   - 입력: SYSTEM 의 자리표시({min_beats} {max_beats} {target_beats} {total})를 우리 총 길이로 채우고, 사용자 블록에 우리 대본 줄·
+#     panels·부가 설명·캐릭터 명단(이름·외형)·120 타일·캐릭터 시트를 준다(plan._vibe_prompt · _vibe_blocks).
+#   - 호출: vpoc.llm._converse(상위 모델 체인, plan._conti_model) · 원장은 지금처럼 plan._charge.
+# plan.run_conti 가 VNEW_VIBE_CONTI 일 때만 쓴다. 결과는 plan._vibe_cuts 가 우리 conti.cuts 모양으로 옮긴다.
+
+# 참고 compose.SHOT_SIZES(키) · SHOT_KINDS. 우리 SHOT_SIZES 의 "insert" 는 참고에서 kind="insert" 다.
+VIBE_SHOT_SIZES = ("wide", "medium", "closeup", "extreme_closeup", "over_shoulder", "profile")
+VIBE_SHOT_KINDS = ("character", "insert")
+
+_VIBE_MASTER = {
+    "name": "emit_master",
+    "description": "Return the master plan for one continuous video.",
+    "inputSchema": {
+        "json": {
+            "type": "object",
+            "properties": {
+                "backgroundEn": {"type": "string"},
+                "backgroundKo": {"type": "string"},
+                "beats": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "t0": {"type": "number"},
+                            "t1": {"type": "number"},
+                            "actionEn": {"type": "string"},
+                            "cameraEn": {"type": "string"},
+                            "descKo": {"type": "string"},
+                            "characters": {"type": "array", "items": {"type": "string"}},
+                        },
+                        "required": ["t0", "t1", "actionEn", "cameraEn", "descKo", "characters"],
+                    },
+                },
+                "characters": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "id": {"type": "string"},
+                            "appearanceEn": {"type": "string"},
+                        },
+                        "required": ["id", "appearanceEn"],
+                    },
+                },
+            },
+            "required": ["backgroundEn", "beats"],
+        }
+    },
+}
+
+
+# 참고 llm._SHOT_PROPS · _with_shot_fields 그대로(beats 항목에 샷 필드를 더한 사본).
+_VIBE_SHOT_PROPS = {
+    "shotSize": {"type": "string", "enum": list(VIBE_SHOT_SIZES)},
+    "kind": {"type": "string", "enum": list(VIBE_SHOT_KINDS)},
+    "fxEn": {"type": "string", "enum": ["none", *FX_KEYS]},
+    "lightEn": {"type": "string"},
+    "sourcePanel": {"type": "integer"},
+}
+
+
+def _vibe_with_shot_fields(tool: dict) -> dict:
+    """beats 항목에 샷 필드를 더한 도구 스키마 사본(참고 llm._with_shot_fields 와 같다)."""
+    import copy  # noqa: PLC0415
+
+    out = copy.deepcopy(tool)
+    item = out["inputSchema"]["json"]["properties"]["beats"]["items"]
+    item["properties"].update(copy.deepcopy(_VIBE_SHOT_PROPS))
+    item["required"] = [*item["required"], *list(_VIBE_SHOT_PROPS)]
+    item["properties"]["fxSuggest"] = {"type": "array", "maxItems": 2,
+                                       "items": {"type": "string", "enum": list(FX_KEYS)}}
+    return out
+
+
+VIBE_SHOT_RULES = """  Each shot is ONE framing; between shots there is a hard cut, like a TV drama edit of the webtoon.
+  Each shot lasts 2-4 seconds, average about 3s. Cut on every new line of dialogue or reaction. About one shot in four is an
+  insert (hands, sleeves, an object or a small detail). Most shots keep the camera still. For each shot:
+    - shotSize: wide | medium | closeup | extreme_closeup | over_shoulder | profile. Vary the sizes; open
+      with a wide shot that shows where everyone is.
+    - kind: "character" or "insert". For an insert of hands or sleeves, characters lists the owner(s) of
+      the hands; for an object-only insert, characters is [].
+    - actionEn (<= 240 chars): only what is visible in this one framing - a small, readable motion (a glance,
+      a hand tightening, tears falling), not a long continuous action.
+    - cameraEn (<= 80 chars): "Static camera" for most shots; otherwise one small move (e.g. "slow push-in").
+    - fxEn: exactly one of none | tear streams | sweat drop | blush lines | pink sparkle background |
+      speed lines. Use a symbol only when the webtoon panel shows it or the emotion clearly calls for it.
+    - fxSuggest: one or two symbols from the same list (never none, never a new symbol) that would suit this shot's
+      emotion, best first; may include the fxEn you chose. If the symbol is actually drawn in this shot's source
+      webtoon panel, list it first. If the shot has no clear emotion (a neutral look, a plain action, an object),
+      give an empty list. Do not suggest the same symbol for more than three shots in the whole sequence.
+    - lightEn (<= 80 chars): direction and quality of the light only (e.g. "soft window light from the
+      left"). Never a color tint or color grade (no "blue tint", no "warm orange grade").
+    - descKo (<= 70 chars): what happens, in Korean.
+    - characters: ids of the characters visible in this shot.
+    - sourcePanel: the number of the webtoon panel this shot comes from (one of the given panel numbers).
+    - hands: whenever hands are visible in a shot, say whose hands they are, how many ("one hand",
+      "both hands") and where they are. Every other character in that frame keeps "hands resting down,
+      out of frame". Each person has exactly two hands; never show extra hands.
+  Refer to characters ONLY by their handles. Never describe faces, hair, skin or clothing colors inside
+  shots: each character's hair color and clothing colors come only from the character appearance and must
+  stay the same in every shot. (An insert may say whose sleeve it is, e.g. "the black-haired man's hand".)"""
+
+EMIT_VIBE_CUTS = _vibe_with_shot_fields(_VIBE_MASTER)
+
+VIBE_CUTS_SYSTEM = """You plan a short video made from a webtoon as a sequence of SHOTS. The whole video keeps ONE
+fixed setting and the SAME characters throughout. The webtoon panels are in story order; follow them.
+Write English for every *En field, Korean for *Ko.
+- backgroundEn (<= 300 chars): the single setting shared by the whole video - place, time of day, lighting,
+  key props. One empty location only, with NO people in it (a background plate). Never mention characters.
+- backgroundKo (<= 120 chars): the same, in Korean, for the planner to read.
+- beats: {min_beats}-{max_beats} shots (aim for about {target_beats}) whose [t0,t1) seconds tile 0..{total}
+  with NO gaps and NO overlaps (first t0=0, last t1={total}, each t0 equals the previous t1).
+""" + VIBE_SHOT_RULES + """
+- Turn the webtoon's panel direction into drama shots. Each image is labeled "Panel N of M"; shots follow
+  the panel order, and each shot's framing follows its sourcePanel:
+    a face filling the panel -> closeup or extreme_closeup; full bodies or a wide background -> wide;
+    upper bodies -> medium; a face seen past another character's shoulder -> over_shoulder; a face in
+    side view -> profile; only hands or an object -> kind insert; speed or focus lines -> speed lines;
+    drawn blush lines -> blush lines; a drawn sweat drop -> sweat drop; drawn tears -> tear streams;
+    a sparkle or flower background -> pink sparkle background.
+  One panel may become several shots (for example a reaction shot plus an insert of the hands). Panels
+  that add nothing to the story (repeated scenery, text only) may be skipped.
+- characters: for EACH given character, appearanceEn (<= 200 chars) - a clean English look description
+  (hair, build, clothing, colors). Name the hair color exactly as drawn (e.g. "ash blonde" rather than
+  "light brown" when the drawing is pale blonde). For clothing patterns, say where the pattern is
+  (e.g. "a white stripe down each sleeve, plain black body", "a logo on the chest"). If the character
+  already has an appearance, keep its meaning.
+No dialogue text, no speech bubbles, no captions. Answer only with the emit_master tool."""
+
+# 작업 158: 캐릭터 시트 그림(정면 · 턴어라운드)을 보낼 때 그 앞에 붙이는 1줄(사용자 지시 문구 그대로).
+VIBE_SHEET_NOTE = "These are AI-generated character sheets of fictional characters; use them for looks"
+
+
 
 # ---------------------------------------------------------------- 작업 133: 실사 컷 자동 품질 검사(emit_cut_qa)
 # 판정 기준 문구는 이 상수 한 곳에만 둔다(generate._read_cut_qa 가 CUT_QA_SYSTEM 으로 쓴다).

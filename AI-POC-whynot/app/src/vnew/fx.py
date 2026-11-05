@@ -50,6 +50,9 @@ FX_LABEL_KO = {
     "pink sparkle background": "분홍 반짝이 배경",
     "speed lines": "속도선",
 }
+# 작업 158: video-vibecode 샷 계획(prompts.EMIT_VIBE_CUTS) 기호 키 → 우리 키. 참고 compose.FX 키와 FX_KEYS 는 글자째 같고,
+# 참고의 "none"(기호 없음)만 빈 값이다. 표에 없는 값은 버린다.
+VIBE_FX_KEYS = {"none": "", **{key: key for key in FX_KEYS}}
 FX_FIELDS = ("fx", "fxSuggest", "fxDrawn", "moodKo", "moodEn", "fxWho")
 FX_MAX, DRAWN_MAX, MOOD_KO_MAX, MOOD_EN_MAX, SUGGEST_CAP, FILL_MAX_CUTS = 2, 5, 60, 80, 3, 40
 
@@ -124,6 +127,21 @@ def clean_text(value, limit: int) -> str:
         chars.append(" " if category.startswith("C") or category in ("Zl", "Zp") else ch)
     text = " ".join("".join(chars).split())
     return text[: max(0, int(limit))].rstrip()
+
+
+def vibe_fx(fx_en, suggest) -> tuple[list[str], list[str]]:
+    """작업 158: 샷의 fxEn(하나) · fxSuggest(0~2) → (적용 fx, 추천 fxSuggest), 키는 VIBE_FX_KEYS 로 옮긴다.
+
+    추천이 비었는데 적용이 있으면 추천 = 적용이다(merge_fill 은 추천 안의 것만 적용으로 남긴다).
+    """
+    def mapped(value) -> list[str]:
+        values = [value] if isinstance(value, str) else value if isinstance(value, (list, tuple)) else []
+        keys = [VIBE_FX_KEYS.get(" ".join(v.lower().split()), "") for v in values if isinstance(v, str)]
+        return fx_list([key for key in keys if key], FX_MAX)
+
+    applied = mapped(fx_en)[:1]
+    picks = mapped(suggest) or list(applied)
+    return applied, picks
 
 
 def normalize_cut_fx(cut: dict) -> dict:

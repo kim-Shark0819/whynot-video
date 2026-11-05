@@ -4234,6 +4234,450 @@ def _take_prompt(plan: dict, take: dict, *, cast: list[dict], panel_nos: list[in
     return prompt
 
 
+# ---------------------------------------------------------------- 작업 159: video-vibecode 형식 통 테이크 프롬프트
+#
+# 참고 구현(whynot-20261029 vpoc/compose.py _cuts_video_prompt · live.py live_master/live_video_prompt/reference_lead)의 글자를
+# 그대로 옮겼다. VNEW_VIBE_PROMPT 켬이면 _take_payload 가 _vibe_take_payload 로 간다(끄면 지금 _take_prompt 그대로).
+VIBE_STYLE = {
+    "live_action": (
+        "Cinematic live-action film footage, photorealistic, natural skin texture, "
+        "35mm lens, soft natural light, romance K-drama cinematography, soft glow, shallow depth of field, "
+        "warm pastel color grading"
+    ),
+    "webtoon": (
+        "Korean webtoon art style exactly as in the uploaded webtoon images: the same line work, "
+        "coloring, shading and character designs"
+    ),
+}
+VIBE_WEBTOON_PHRASE = ", with Korean webtoon visual symbols."  # live.WEBTOON_PHRASE (실사는 빠진다)
+VIBE_MULTI_SHOT = (
+    "A multi-shot sequence of {n} shots edited like a TV drama, with a hard cut at the start of "
+    "each new shot. Each shot keeps one framing and the camera stays almost still within the shot. "
+    "The same characters, outfits and setting appear in every shot, and each character's hair color and "
+    "clothing colors stay exactly as described above in every shot. Each person has exactly two hands; "
+    "only the hands described in a shot are visible."
+)
+# 줄이기 마지막 단계(head 단락 짧은 형). 컷 수·하드 컷·같은 인물/옷/장소·손 두 개를 남긴다.
+VIBE_MULTI_SHOT_COMPACT = ("A multi-shot sequence of {n} shots with a hard cut at the start of each new shot; the same "
+                           "characters, outfits and setting in every shot. Each person has exactly two hands.")
+VIBE_STYLE_COMPACT = {"live_action": "Photoreal live-action K-drama footage, natural skin, soft natural light, "
+                                     "shallow depth of field",
+                      "webtoon": "Korean webtoon art style exactly as in the uploaded webtoon images"}
+VIBE_LOCATION_LEAD = "@Image{no} is the location (no people in it); keep this place, its background and light in every shot"
+VIBE_FRAME_LEAD = "@Image{no} is the previous shot's last frame: same background, lighting, outfits and hair; continue from it"
+VIBE_PANEL_LEAD = "{refs} {be} the uploaded webtoon {images} (art style reference only)"  # fix1: 애니 원작 패널
+VIBE_SHEET_CLAUSE = "AI-generated turnaround sheet of a fictional character; match face/hair/build, clothes from the look line"
+VIBE_VIDEO_LINE = ("@Video1 is the 3D previz: follow its camera, positions, cuts and timing exactly; "
+                   "replace each mannequin with its person")
+VIBE_SPOKEN = "spoken (audio only, never written on screen)"  # = TEXT_RETRY_SPOKEN(156, 아래에서 정의)
+VIBE_COMPACT_ORDER = ("style", "background", "assets", "paragraph")  # 157 순서(고정 부분 먼저, head 단락 마지막)
+_VIBE_ANGLE_EN = {"OTS": "over-the-shoulder", "profile": "profile", "3/4": "three-quarter view", "front": "front view",
+                  "back": "from behind"}
+
+
+def _join_names(names: list[str]) -> str:
+    """compose._join_names: ["A"] → "A", ["A", "B", "C"] → "A, B and C"."""
+    return names[0] if len(names) == 1 else ", ".join(names[:-1]) + " and " + names[-1]
+
+
+def _vibe_who(on_list: list[dict], handles: list[str], disp) -> str:
+    """compose.who_in_shot 형식: "Only A appears in this shot; B is not visible. ". 모두 보이면 "" (부분 노출이 있으면
+    "A and B (hands only) appear in this shot. "), 아무도 없으면 "No person appears in this shot. "."""
+    shown: list[str] = []
+    labels: list[str] = []
+    for item in on_list or []:
+        name = disp(str(item.get("name") or ""))
+        if not name or name in shown:
+            continue
+        shown.append(name)
+        how = str(item.get("how") or "full")
+        labels.append(f"{name} ({how})" if how not in ("full", "main") else name)
+    if not shown:
+        return "No person appears in this shot. " if handles else ""
+    rest = [h for h in handles if h and h not in shown]
+    verb = "appears" if len(labels) == 1 else "appear"
+    if not rest:
+        return f"{_join_names(labels)} {verb} in this shot. " if labels != shown else ""
+    be = "is" if len(rest) == 1 else "are"
+    return f"Only {_join_names(labels)} {verb} in this shot; {_join_names(rest)} {be} not visible. "
+
+
+def _vibe_size(shot: str) -> str:
+    """샷 약어("MCU front") → 참고 구현 샷 크기 표기("medium close-up, front view")."""
+    size, _, angle = str(shot or "").strip().partition(" ")
+    words = SHOT_SIZE_EN.get(size.upper(), "medium shot")
+    return words + (", " + _VIBE_ANGLE_EN.get(angle, angle) if angle else "")
+
+
+def _vibe_take_prompt(plan: dict, take: dict, *, real: bool, cast: list[dict], location_no=None, frame_no=None,
+                      panel_nos: list[int] | None = None, caps: dict | None = None, soften: bool = False,
+                      anchor: bool = False, no_text: bool = False, audit: dict | None = None, quiet: bool = False) -> str:
+    """작업 159: video-vibecode 형식 통 테이크 프롬프트(참고 구현 _cuts_video_prompt · live_video_prompt).
+
+    순서: 140 AI 고지 → 화풍(STYLE webtoon + 웹툰 기호 / live_action) → 인물별 "{handle}: {look} (keep exactly this look)." →
+    컷 지시 단락(참고 원문) → "Setting (keep identical in every shot): …" → "Shot i (t0-t1s), size: " + who_in_shot + 연기
+    (+154 닿는 연기 + 148 포즈) + FX + 카메라 + 조명 + 대사(147/157 모든 줄, spoken (audio only …)) → @Image 설명(reference_lead
+    문구, 시트 절 1번, fix1: 애니 원작 패널 = STYLE 이 부르는 "the uploaded webtoon images") → @Video1 줄. look = 우리 인물 외형 + 146 장면 옷(실사는 실사 외모 문장). 실사는 live_master 처럼 화풍
+    live_action, 연기 _real_action + REAL_FX(fx.REAL_FX), FX 조각 없음.
+    예산(157 글자): 화풍 → 배경 → 인물(외형 빼고 옷만) → 컷 지시 단락 순으로 짧은 형. 샷 문장은 줄이지 않는다. 그래도 넘치면
+    overBudget → 제출 쪽이 157 조각으로 나눈다. audit 는 _take_prompt 와 같은 키.
+    """
+    budget = _take_prompt_budget(caps)
+    take_cut_ids = [str(c) for c in _seg_cut_ids(take)]
+    cuts_by_id = {str(c.get("id")): c for c in (plan.get("conti") or {}).get("cuts") or []}
+    entries = _take_timeline_entries(plan, take)
+    raw = {str(m.get("name") or ""): str(m.get("costume") or "") for m in cast if m.get("name")}
+    if real:
+        # 146: 장면 옷 후보(정리한 COSTUME → 콘티 → 대본 → 패널 읽기), 136: 실사 연기의 그림 문장·옷 구절.
+        outfit_sources = _scene_outfits(plan, take_cut_ids, raw, sources=True)
+        costumes = {name: _scene_outfit_pick([value, *outfit_sources.get(name, [])]) for name, value in raw.items()}
+        for entry, cut_id in zip(entries, take_cut_ids):
+            entry["action"] = _real_brief_text(entry.get("action"), _scene_outfits(plan, [cut_id], costumes)).rstrip(".")
+    else:
+        costumes = {name: _scene_outfit_pick([value]) or _clip_words(value, 200) for name, value in raw.items()}
+    if soften:
+        _soften_entries(entries)  # 153
+
+    name_map: dict[str, str] = {}
+    for member in cast:
+        ko = str(member.get("name") or "").strip()
+        if ko:
+            name_map[ko] = str(member.get("nameEn") or member.get("roman") or "").strip() or _romanize_name(ko) or ko
+
+    def _disp(ko: str) -> str:
+        ko = str(ko or "").strip()
+        return name_map[ko] if ko in name_map else (_romanize_name(ko) or ko)
+
+    def _txt(value) -> str:
+        text = " ".join(str(value or "").split())
+        return vnew_fx.strip_drawing_words(text) if real else text
+
+    handles = [_disp(str(m.get("name") or "")) for m in cast if str(m.get("name") or "").strip()]
+    state = {"style": False, "background": False, "assets": False, "paragraph": False}
+
+    def _style() -> str:
+        key = "live_action" if real else "webtoon"
+        if state["style"]:
+            text = VIBE_STYLE_COMPACT[key] + ("" if real else VIBE_WEBTOON_PHRASE.rstrip("."))
+        else:
+            text = VIBE_STYLE[key] + ("" if real else VIBE_WEBTOON_PHRASE.rstrip("."))
+        return text + "." + (" " + TEXT_RETRY_RULE[0].upper() + TEXT_RETRY_RULE[1:] if no_text else "")
+
+    def _look_line(member: dict) -> str:
+        ko = str(member.get("name") or "").strip()
+        if not ko:
+            return ""
+        appearance = "" if state["assets"] else _txt(member.get("appearance")).rstrip(" .")
+        costume = _txt(costumes.get(ko) or "").rstrip(" .")
+        if costume[:1].isupper() and costume[1:2].islower():
+            costume = costume[0].lower() + costume[1:]  # "wearing black …" (머리글자만, 약어는 그대로)
+        bits = [appearance, f"wearing {costume}" if costume else ""]
+        if real and member.get("look") == "anime":
+            bits.append(REAL_TAKE_ANIME_SENTENCE)  # 126 인물 바꾸기 [애니]
+        look = ", ".join(b for b in bits if b)
+        if anchor and costume:
+            look += "; " + _costume_lock_tail(costume)  # 155 조각·대체: 옷 고정
+        return f"{_disp(ko)}: {look} (keep exactly this look)." if look else ""
+
+    def _paragraph() -> str:
+        return (VIBE_MULTI_SHOT_COMPACT if state["paragraph"] else VIBE_MULTI_SHOT).format(n=len(entries))
+
+    first_loc = next((str(cuts_by_id.get(cid, {}).get("locationEn") or "") for cid in take_cut_ids
+                      if cuts_by_id.get(cid, {}).get("locationEn")), "")
+
+    def _bg(where: str) -> str:
+        text = _background_en(plan, where, real=real)
+        return _background_sentence(text) if state["background"] else text
+
+    def _setting() -> str:
+        return f"Setting (keep identical in every shot): {_bg(first_loc)}."
+
+    from . import locations as loc_mod  # noqa: PLC0415
+
+    moves: dict[int, str] = {}
+    previous = loc_mod.normalize_name(first_loc)
+    for index, cut_id in enumerate(take_cut_ids):
+        where = str(cuts_by_id.get(cut_id, {}).get("locationEn") or "")
+        if where and loc_mod.normalize_name(where) != previous:
+            moves[index] = where
+            previous = loc_mod.normalize_name(where)
+
+    def _line_piece(line: dict, off_speaker: str) -> str:
+        # 147/157: 모든 줄, 한 줄 한 컷, 이어지는 말(run). 대사·속마음은 늘 소리로만(spoken (audio only …)).
+        speaker_ko = str(line.get("speaker") or "").strip()
+        run = str(line.get("run") or "")
+        who = _disp(speaker_ko) or "A character"
+        tags = []
+        if line.get("thought"):
+            tags.append("inner voice-over, lips closed")
+        elif off_speaker and off_speaker == speaker_ko:
+            tags.append("off-screen voice")
+        if run == "still":
+            return f"{who} ({'; '.join(tags + ['still speaking the same line'])})"
+        source = line.get("utterance") if run == "start" else line.get("dialogue")
+        dialogue = _fit_dialogue(str(source or "").strip(), 0)
+        if not dialogue:
+            return ""
+        if run == "start":
+            tags.append("one continuous line that carries over the next cut, no pause at the cut")
+        elif run == "cont":
+            tags.append("continues the same line from the previous shot, finishing with")
+        who_tags = f'{who} ({"; ".join(tags)})' if tags else who
+        return f'{who_tags}, {VIBE_SPOKEN}: "{dialogue}"'
+
+    def _entry_lines(entry: dict) -> list[dict]:
+        if "lines" in entry:
+            return list(entry.get("lines") or [])
+        if str(entry.get("dialogue") or "").strip():
+            return [{"speaker": entry.get("speaker"), "dialogue": entry.get("dialogue"), "thought": bool(entry.get("thought"))}]
+        return []
+
+    def _present(entry: dict) -> list[str]:
+        return [str(item.get("name") or "") for item in entry.get("onScreen") or [] if item.get("name")]
+
+    def _contact(entry: dict) -> str:
+        contact = entry.get("contact")
+        if not isinstance(contact, dict) or not contact.get("text"):
+            return ""
+        text = str(contact.get("text") or "")
+        for ko in sorted(set(contact.get("names") or []) | set(name_map), key=len, reverse=True):
+            if ko:
+                text = text.replace(ko, _disp(ko))
+        sentence = f"{_disp(contact.get('name') or '')} {text}".strip()
+        if real:
+            sentence = _real_action(sentence)
+        if soften:
+            sentence = _soften_text(sentence)
+            if _explicit_text(sentence):
+                return ""
+        if vnew_fx.HANGUL.search(sentence):
+            return ""
+        return sentence.rstrip(" .")
+
+    def _action(entry: dict) -> str:
+        # 실사 = live.real_action(_real_action + REAL_FX 실사 표현), 애니 = 지시서 연기 그대로(157 앞 2문장).
+        if real:
+            text = _with_real_expressions(_take_action(_real_action(entry.get("action") or "")), entry.get("fx"),
+                                          entry.get("fxWho"), _present(entry), _disp)
+        else:
+            text = _take_action(entry.get("action") or "")
+        return str(text or "").strip().rstrip(".")
+
+    def _shot(index: int, entry: dict, cut_id: str) -> str:
+        cut = cuts_by_id.get(cut_id) or {}
+        prefix = f"Shot {index + 1} ({entry['start']}-{entry['end']}s), {_vibe_size(entry.get('shot'))}: " + _vibe_who(
+            entry.get("onScreen") or [], handles, _disp)
+        parts = []
+        if index in moves:
+            parts.append(f"Setting now: {_bg(moves[index])}")
+        parts.append(_action(entry))
+        parts.append(_contact(entry))
+        for pose in entry.get("poses") or []:
+            clause = _pose_clause(pose, _disp)
+            if clause and not (soften and _explicit_text(clause)):
+                parts.append(clause)
+        if not real:
+            fx_texts = vnew_fx.who_sentences(entry.get("fx"), entry.get("fxWho"), _present(entry), name=_disp)
+            parts.append(" / ".join(fx_texts))
+        for field in ("cameraEn", "lightEn"):
+            value = _txt(cut.get(field)).rstrip(" .")
+            if value and not vnew_fx.HANGUL.search(value):
+                parts.append(value)
+        off_speaker = str(entry.get("offScreenSpeaker") or "").strip()
+        parts.extend(_line_piece(ln, off_speaker) for ln in _entry_lines(entry))
+        body = ""
+        for piece in (p.strip() for p in parts if p and p.strip()):
+            # 문장 사이는 ". "(참고 구현), 따옴표 대사 뒤에는 마침표를 붙이지 않는다.
+            body += ("" if not body else " " if body.endswith(('"', ")")) else ". ") + piece
+        return (prefix + body).rstrip() + ("" if body.endswith(('"', ")")) else ".")
+
+    shots = [_shot(i, e, cid) for i, (e, cid) in enumerate(zip(entries, take_cut_ids))]
+
+    def _labels() -> str:
+        rows: list[tuple[int, str]] = []
+        sheets: list[int] = []
+        for member in cast:
+            handle = _disp(str(member.get("name") or ""))
+            nos = [n for n in (member.get("refNos") or []) if n] or ([member["frontNo"]] if member.get("frontNo") else [])
+            for no in nos:
+                rows.append((no, f"@Image{no} is {handle}"))
+            if member.get("sheetNo"):
+                sheets.append(int(member["sheetNo"]))
+        if frame_no:
+            rows.append((frame_no, VIBE_FRAME_LEAD.format(no=frame_no)))
+        if location_no:
+            rows.append((location_no, VIBE_LOCATION_LEAD.format(no=location_no)))
+        panels = [n for n in (panel_nos or []) if n] if not real else []
+        if panels:
+            # fix1: 원작 패널(옛 _take_prompt 와 같은 패널·순서)을 STYLE 의 "the uploaded webtoon images" 로 부른다.
+            refs = f"@Image{panels[0]}" if len(panels) == 1 else f"@Image{panels[0]}\u2013@Image{panels[-1]}"
+            rows.append((panels[0], VIBE_PANEL_LEAD.format(refs=refs, be="is" if len(panels) == 1 else "are",
+                                                           images="image" if len(panels) == 1 else "images")))
+        if not rows:
+            return ""
+        text = "; ".join(t for _n, t in sorted(rows, key=lambda r: r[0])) + "."
+        if sheets:
+            text += " " + ", ".join(f"@Image{n}" for n in sorted(sheets)) + f": {VIBE_SHEET_CLAUSE}."
+        return text
+
+    colors = ", ".join(f"{m.get('colorName') or 'grey'} = {_disp(str(m.get('name') or ''))}"
+                       for m in cast if str(m.get("name") or "").strip())
+
+    def _assemble() -> str:
+        head = [REAL_REF_AI_NOTE, _style(), *[_look_line(m) for m in cast], _paragraph(), _setting()]
+        video = VIBE_VIDEO_LINE + (f" ({colors})" if colors else "") + "."
+        return "\n".join(b for b in [*head, *shots, _labels(), video] if b)
+
+    prompt = _assemble()
+    applied: list[str] = []
+    for section in VIBE_COMPACT_ORDER:
+        if _prompt_len(prompt) <= budget:
+            break
+        state[section] = True
+        applied.append(section + "Compact")
+        prompt = _assemble()
+    fits = _prompt_len(prompt) <= budget
+    if not fits:
+        applied.append("overBudget")  # 샷 문장은 줄이지 않는다 — 제출 쪽(_prompt_split_parts)이 조각으로 나눈다
+
+    lines_conti = lines_prompt = actions_prompt = 0
+    actions: list[str] = []
+    for entry in entries:
+        off_speaker = str(entry.get("offScreenSpeaker") or "").strip()
+        for ln in _entry_lines(entry):
+            lines_conti += 1
+            piece = _line_piece(ln, off_speaker)
+            if piece and piece in prompt:
+                lines_prompt += 1
+        action = _action(entry)
+        actions.append(action)
+        if action and action in prompt:
+            actions_prompt += 1
+    if audit is not None:
+        audit.update(cuts=len(entries), linesInConti=lines_conti, linesInPrompt=lines_prompt,
+                     actionsInPrompt=actions_prompt, compact=[s[:-len("Compact")] for s in applied if s.endswith("Compact")],
+                     chars=_prompt_len(prompt), budget=budget, fits=fits, actions=actions, builder="vibe")
+    if quiet:
+        return prompt
+    if not fits:
+        log.warning("vnew.gen.take_prompt_over_budget take=%s chars=%d budget=%d", str(take.get("id") or ""),
+                    _prompt_len(prompt), budget)
+    log.info("vnew.gen.take_prompt builder=vibe%s bytes=%d steps=%s", " variant=real" if real else "",
+             _utf8_len(prompt), ",".join(applied) or "none")
+    return prompt
+
+
+def _vibe_anime_cast(actors: list[dict], char_by_id: dict, resolved: dict, cap: int) -> tuple[list[bytes], list[dict]]:
+    """작업 159 애니 신원 참고: 인물마다 [웹툰 시트, 웹툰 정면](읽히는 것만, 상한은 _ref_counts — 정면부터 빠진다)."""
+    rows = []
+    loaded: dict[str, bytes | None] = {}
+    for actor in actors:
+        char_id = str(actor.get("charId") or "")
+        char = char_by_id.get(char_id) if char_id else None
+        keys: list[str] = []
+        for field in ("webtoonSheetKey", "webtoonFrontKey"):
+            key = str((char or {}).get(field) or "")
+            if key and key not in keys:
+                if key not in loaded:
+                    loaded[key] = _load_jpeg(key)
+                if loaded[key] is not None:
+                    keys.append(key)
+        rows.append((actor, char, keys))
+    counts = _ref_counts([len(r[2]) for r in rows], cap)
+    images: list[bytes] = []
+    cast: list[dict] = []
+    for (actor, char, keys), count in zip(rows, counts):
+        name = actor.get("name") or "a character"
+        nos: list[int] = []
+        sheet_no = None
+        for key in keys[:count]:
+            images.append(_fit_ref(loaded[key]))
+            nos.append(len(images))
+            if char and key == str(char.get("webtoonSheetKey") or ""):
+                sheet_no = len(images)
+        member = resolved.get(str(name)) or {}
+        appearance = str((char or {}).get("appearanceEn") or "") or str(actor.get("appearanceEn") or "")
+        cast.append({
+            "name": name,
+            "colorName": actor.get("colorName") or "grey",
+            "frontNo": next((n for n in nos if n != sheet_no), None) or (nos[0] if nos else None),
+            "refNos": nos,
+            "look": "webtoon",
+            "appearance": _short_appearance(appearance, 170),
+            "costume": str(member.get("costume") or ""),
+            "voice": str(member.get("voice") or ""),
+        })
+        if sheet_no:
+            cast[-1]["sheetNo"] = sheet_no
+    return images, cast
+
+
+def _vibe_take_payload(owner: str, pid: str, plan: dict, take: dict, caps: dict, *, variant: str, fallback_step: int,
+                       soften: bool, continuity: dict | None, no_text: bool) -> dict:
+    """작업 159: _take_payload 의 video-vibecode 판(VNEW_VIBE_PROMPT 켬). 반환 모양은 _take_payload 와 같다.
+
+    참고 이미지(순서 고정): 인물별 신원 참고(실사 = _real_take_cast — 142 시트+정면, 130 1단계 시트만; 애니 = 웹툰 시트+정면) →
+    (155 조각·대체) 앞 샷 마지막 프레임 → 143 장소 뷰 → (fix1, 애니만) 원작 패널 최대 VNEW_TAKE_MAX_PANELS 장(옛 _take_prompt 와
+    같은 패널·순서). 상한에 걸리면 패널부터 빠진다(신원 참고·장소는 빼지 않는다). 실사는 패널이 없다.
+    장소·프레임 자리를 먼저 남기고, 대체(origMax)는 원래 요청보다 신원 참고를 적게 넣지 않는다(155 규칙 그대로).
+    """
+    real = variant == "real"
+    max_images = int(caps.get("imageListMax") or vpoc_fal.DEFAULT_IMAGE_LIST_MAX)
+    actors = _segment_actors(plan, take)
+    char_by_id = _char_by_id(owner, plan)
+    resolved = _resolve_cast(owner, pid, plan, take, read=True)
+    anchor = continuity if isinstance(continuity, dict) else None
+    loc_take = (anchor.get("take") or take) if anchor is not None else take
+    loc_jpeg = _take_location_jpeg(plan, loc_take, variant="real" if real else "webtoon")
+    frame = anchor.get("frame") if anchor is not None else None
+    frame_jpeg = bytes(frame) if isinstance(frame, (bytes, bytearray)) and frame else None
+    if frame_jpeg is not None:
+        _ref_note_load(str(anchor.get("frameKey") or ""), frame_jpeg)
+    n_loc, n_frame = int(loc_jpeg is not None), int(frame_jpeg is not None)
+    person_cap = max(0, max_images - n_loc - n_frame)
+    if anchor is not None and int(anchor.get("origMax") or 0):
+        orig_cap = int(anchor["origMax"]) - n_loc - (n_frame if anchor.get("origFrame") else 0)
+        person_cap = max(0, min(orig_cap, max_images - n_loc))
+    if real:
+        image_urls, cast = _real_take_cast(owner, plan, actors, char_by_id, resolved, person_cap,
+                                           fallback_step=fallback_step)
+    else:
+        image_urls, cast = _vibe_anime_cast(actors, char_by_id, resolved, person_cap)
+    frame_no = None
+    if frame_jpeg is not None and len(image_urls) < max_images - n_loc:
+        image_urls.append(_fit_ref(frame_jpeg))
+        frame_no = len(image_urls)
+    location_no = None
+    if loc_jpeg is not None and len(image_urls) < max_images:
+        image_urls.append(_fit_ref(loc_jpeg))
+        location_no = len(image_urls)
+    panel_nos: list[int] = []
+    if not real:
+        # fix1: 애니는 옛 _take_prompt 와 같은 원작 패널(같은 패널·순서)을 신원 참고·장소 뒤에 남는 자리만큼(패널이 먼저 빠진다).
+        for panel in _segment_panel_jpegs(owner, pid, plan, take, int(vnew_settings.VNEW_TAKE_MAX_PANELS or 3)):
+            if len(image_urls) >= max_images:
+                break
+            image_urls.append(_fit_ref(panel))
+            panel_nos.append(len(image_urls))
+    prompt_plan = _soften_plan(owner, pid, plan, take) if soften else plan
+    kwargs = {"real": real, "cast": cast, "location_no": location_no, "frame_no": frame_no, "panel_nos": panel_nos,
+              "caps": caps, "soften": soften, "anchor": anchor is not None, "no_text": no_text}
+    audit: dict = {}
+    prompt = _vibe_take_prompt(prompt_plan, take, audit=audit, **kwargs)
+
+    def probe(sub_take: dict) -> dict:
+        result: dict = {}
+        _vibe_take_prompt(prompt_plan, sub_take, audit=result, quiet=True, **kwargs)
+        return result
+
+    out = {"imageUrls": image_urls[:max_images], "prompt": prompt, "cast": cast, "panelNos": panel_nos,
+           "locationNo": location_no,
+           "audit": audit, "probe": probe}
+    if anchor is not None:
+        out["frameNo"] = frame_no
+    return out
+
+
 def _real_look(owner: str, char_id: str) -> str:
     """실사 외모 문장(casting.lookEn, 없으면 자동 문장 look_sentence). 캐릭터를 못 읽으면 ""(제출을 막지 않는다)."""
     if not char_id:
@@ -4286,7 +4730,11 @@ def _take_payload(owner: str, pid: str, plan: dict, take: dict, caps: dict, vari
     반환: {imageUrls:[bytes], prompt, cast, panelNos, locationNo, audit, probe}(continuity 가 있으면 frameNo 도).
     작업 157: audit = _take_prompt 의 프롬프트 감사(대사 줄·연기·짧은 형·fits), probe(sub_take) = 같은 인물·참고 번호로 다른 컷
     묶음의 프롬프트를 만들어 본 audit(로그 없음, _prompt_split_parts 가 쓴다).
+    작업 159: VNEW_VIBE_PROMPT 켬이면 _vibe_take_payload(video-vibecode 형식 프롬프트·시트+정면 → 장소). 끄면 아래 그대로.
     """
+    if vnew_settings.VNEW_VIBE_PROMPT:
+        return _vibe_take_payload(owner, pid, plan, take, caps, variant=variant, fallback_step=fallback_step,
+                                  soften=soften, continuity=continuity, no_text=no_text)
     real = variant == "real"
     max_images = int(caps.get("imageListMax") or vpoc_fal.DEFAULT_IMAGE_LIST_MAX)
     actors = _segment_actors(plan, take)
