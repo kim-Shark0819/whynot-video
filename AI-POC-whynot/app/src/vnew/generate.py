@@ -802,7 +802,14 @@ def estimate(plan: dict) -> dict:
         webtoon_usd = 0.0
         for take in _take_units(plan):
             seconds = float(take.get("seconds") or 0)
-            cost = _take_usd(endpoint, seconds, resolution)
+            # 작업 152: 참고 영상 상한으로 나뉘는 테이크는 조각 길이마다 금액(합은 거의 같다). 나눌 수 없으면 통째 금액.
+            try:
+                parts = _take_parts_for(plan, take, endpoint)
+            except VpocError:
+                parts = []
+            part_rows = [{"no": p["no"], "cutIds": list(p["cutIds"]), "seconds": p["seconds"],
+                          "webtoonUsd": _take_usd(endpoint, p["seconds"], resolution)} for p in parts]
+            cost = round(sum(r["webtoonUsd"] for r in part_rows), 4) if part_rows else _take_usd(endpoint, seconds, resolution)
             webtoon_usd += cost
             rows.append(
                 {
@@ -813,6 +820,8 @@ def estimate(plan: dict) -> dict:
                     "webtoonUsd": cost,
                 }
             )
+            if part_rows:
+                rows[-1]["parts"] = part_rows
         total = round(webtoon_usd, 2)
         return {
             "mode": "previz-take",
@@ -4299,6 +4308,7 @@ def _submit_take(*, endpoint: str, caps: dict, video_mp4: bytes, prompt: str, ou
         raise VpocError("vnew.generate", "EmptyPrompt", "프롬프트가 비어 있습니다.", 400)
     if not video_mp4:
         raise VpocError("vnew.generate", "EmptyVideo", "참조 영상이 비어 있습니다.", 400)
+    _assert_ref_video(endpoint, video_mp4, seconds)  # 작업 152: 참고 영상 상한을 넘으면 유료 호출 전에 막는다
 
     def _img_uri(jpeg: bytes) -> str:
         return "data:image/jpeg;base64," + base64.b64encode(jpeg).decode("ascii")
@@ -4369,6 +4379,287 @@ def _charge_take(owner: str, pid: str, gen_id: str, result: dict, seconds: float
         log.warning("vnew.gen.charge_take_failed pid=%s err=%s", pid, str(exc)[:200])
 
 
+# ---------------------------------------------------------------- 작업 152: 참고 영상 상한 → 테이크 조각(part)
+#
+# fal 영상 입력 모델은 출력 길이(caps.durations, Wan 3.0 r2v 30초)와 따로 입력(참고) 영상 상한(maxRefVideoS, 기본 15초)이 있다.
+# 테이크 녹화가 그보다 길면 컷 경계에서 상한 이하 조각으로 나눠(_take_parts) 조각마다 녹화를 잘라(_cut_clip) 그 컷들만으로 만든
+# 프롬프트와 함께 제출하고, 원장도 조각마다 1번 남긴다. 조각 기록은 칸 state.parts. 모두 끝나면 134 규칙(_conform_concat)으로
+# 이어 붙여 칸 결과(outputKey) 하나로 둔다(길이 = 조각 합 = 테이크 녹화 길이라 ⑦ 구간 시각이 그대로 맞는다).
+# Seedance 계열(상한 0)·컷 단위 Kling 경로는 바뀌지 않는다. 제출 전 검사(_assert_ref_video)는 상한을 넘는 참고 영상을 보내지 않는다.
+
+TAKE_PART_TOL_S = 0.05
+REF_TOO_LONG_TEXT = ("참고 영상이 {seconds:.1f}초라 이 영상 모델이 받는 최대 길이({limit:g}초)를 넘어 제출하지 않았습니다. "
+                     "⑦ 에서 {limit:g}초 이하 구간을 골라 다시 만들거나 콘티를 더 짧게 나눠 주세요.")
+REF_SPLIT_FAIL_TEXT = ("테이크 녹화({seconds:.1f}초)가 이 영상 모델의 참고 영상 최대 길이({limit:g}초)를 넘는데 컷 경계를 찾지 못해 "
+                       "나눌 수 없습니다. 콘티를 다시 나눠 녹화해 주세요.")
+
+
+def _take_ref_limit(endpoint: str) -> float:
+    """그 테이크 모델의 참고(입력) 영상 상한(초, vpoc ark.video_options maxRefVideoS). Seedance 계열·영상 입력 없음·모름은 0(검사 안 함)."""
+    endpoint = str(endpoint or "").strip()
+    model = vpoc_settings.FAL_ID_PREFIX + endpoint
+    if not endpoint or vpoc_settings.is_fal_seedance_family(model):
+        return 0.0
+    try:
+        options = vpoc_ark.video_options(model)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("vnew.gen.ref_limit_failed endpoint=%s err=%s", endpoint, type(exc).__name__)
+        return 0.0
+    if not options.get("videoInput"):
+        return 0.0
+    return max(0.0, float(options.get("maxRefVideoS") or 0))
+
+
+def _mp4_seconds(mp4: bytes) -> float:
+    """mp4 바이트의 길이(초). 못 재면 0(stitcher.probe_duration 규칙)."""
+    if not mp4:
+        return 0.0
+    try:
+        with tempfile.TemporaryDirectory(prefix="vnew-refprobe-") as workdir:
+            path = os.path.join(workdir, "ref.mp4")
+            with open(path, "wb") as handle:
+                handle.write(mp4)
+            return float(stitcher.probe_duration(path) or 0.0)
+    except Exception:  # noqa: BLE001 — 못 재면 호출부가 넘긴 길이를 쓴다.
+        return 0.0
+
+
+def _assert_ref_video(endpoint: str, video_mp4: bytes, seconds: float) -> None:
+    """제출 전 검사(작업 152): 참고 영상(잰 길이, 못 재면 seconds)이 상한을 넘으면 유료 호출 전에 한국어 오류."""
+    limit = _take_ref_limit(endpoint)
+    if limit <= 0:
+        return
+    measured = _mp4_seconds(video_mp4) or float(seconds or 0)
+    if measured > limit + TAKE_PART_TOL_S:
+        raise VpocError("vnew.generate", "RefVideoTooLong", REF_TOO_LONG_TEXT.format(seconds=measured, limit=limit), 409)
+
+
+def _take_parts(plan: dict, take: dict, limit: float) -> list[dict]:
+    """테이크를 참고 영상 상한 이하 조각으로 나눈다(작업 152). 나눌 필요가 없으면 [].
+
+    컷(_take_cut_units, 테이크 시각 = _take_rec_offsets + 녹화 안 시각)을 앞에서부터 담고(탐욕), 넘치면 닫는다. 닫는 자리가 이어지는
+    말(작업 147 _dialogue_runs 의 cont·still) 가운데면 그 조각 안의 말 사이 경계로 당긴다(남은 컷 + 다음 컷이 상한 안일 때). 한 컷이
+    상한보다 길면 상한에서 자른다. 조각: {no, cutIds, start, end, seconds}(테이크 시각, 초). 컷을 못 찾으면 한국어 오류(유료 호출 전).
+    """
+    total = float(take.get("seconds") or 0)
+    if limit <= 0 or total <= limit + TAKE_PART_TOL_S:
+        return []
+    units = _take_cut_units(plan, take)
+    if not units:
+        raise VpocError("vnew.generate", "RefSplitFailed", REF_SPLIT_FAIL_TEXT.format(seconds=total, limit=limit), 409)
+    offsets = _take_rec_offsets(plan, take)
+    cuts_by_id = {str(c.get("id")): c for c in (plan.get("conti") or {}).get("cuts") or []}
+    runs = _dialogue_runs([cuts_by_id.get(str(u.get("cutId") or "")) or {} for u in units], plan)
+    pieces: list[dict] = []
+    for unit, lines in zip(units, runs):
+        base = float(offsets.get(str(unit.get("recSegId") or ""), 0.0))
+        start = base + float(unit.get("startSec") or 0)
+        end = base + float(unit.get("endSec") or 0)
+        soft = not any(ln.get("run") in ("cont", "still") for ln in lines)  # 이 컷 앞이 말 사이 경계인가
+        clock = start
+        while end - clock > limit + TAKE_PART_TOL_S:
+            pieces.append({"cutId": str(unit.get("cutId") or ""), "start": clock, "end": clock + limit, "soft": soft})
+            clock += limit
+            soft = False  # 한 컷을 나눈 자리는 늘 말 가운데로 본다
+        if end - clock > 0.001 or not pieces or pieces[-1]["cutId"] != str(unit.get("cutId") or ""):
+            pieces.append({"cutId": str(unit.get("cutId") or ""), "start": clock, "end": max(end, clock), "soft": soft})
+    groups: list[list[dict]] = []
+    current: list[dict] = []
+    for piece in pieces:
+        while current and piece["end"] - current[0]["start"] > limit + TAKE_PART_TOL_S:
+            cut_at = len(current)
+            if not piece["soft"]:
+                soft_at = [i for i in range(1, len(current)) if current[i]["soft"]]
+                if soft_at and piece["end"] - current[soft_at[-1]]["start"] <= limit + TAKE_PART_TOL_S:
+                    cut_at = soft_at[-1]
+            groups.append(current[:cut_at])
+            current = current[cut_at:]
+        current.append(piece)
+    if current:
+        groups.append(current)
+    parts = []
+    for number, group in enumerate(groups, start=1):
+        cut_ids: list[str] = []
+        for piece in group:
+            if piece["cutId"] not in cut_ids:
+                cut_ids.append(piece["cutId"])
+        start, end = round(group[0]["start"], 3), round(group[-1]["end"], 3)
+        parts.append({"no": number, "cutIds": cut_ids, "start": start, "end": end, "seconds": round(end - start, 3)})
+    if any(p["seconds"] > limit + TAKE_PART_TOL_S or p["seconds"] <= 0 for p in parts):
+        raise VpocError("vnew.generate", "RefSplitFailed", REF_SPLIT_FAIL_TEXT.format(seconds=total, limit=limit), 409)
+    return parts
+
+
+def _take_parts_for(plan: dict, take: dict, endpoint: str) -> list[dict]:
+    """그 모델로 제출할 때의 조각(작업 152). 나누기가 꺼져 있거나 상한이 없으면 [](그때는 _assert_ref_video 가 막는다)."""
+    if not vnew_settings.VNEW_TAKE_REF_SPLIT:
+        return []
+    return _take_parts(plan, take, _take_ref_limit(endpoint))
+
+
+def _part_take(plan: dict, take: dict, part: dict) -> dict:
+    """조각 하나의 테이크 사본(프롬프트·참고 이미지용): 그 조각의 컷만, 길이 = 조각 길이."""
+    no_by_id = {str(c.get("id")): c.get("no") for c in (plan.get("conti") or {}).get("cuts") or []}
+    cut_ids = [str(c) for c in part.get("cutIds") or []]
+    nos = [no_by_id.get(c) for c in cut_ids if no_by_id.get(c) is not None]
+    return {**take, "cutIds": cut_ids, "seconds": float(part.get("seconds") or 0),
+            "startCutNo": nos[0] if nos else take.get("startCutNo"), "endCutNo": nos[-1] if nos else take.get("endCutNo")}
+
+
+def _part_sig(part: dict, step: int) -> list:
+    """조각이 같은지 가르는 값(재시도 때 끝난 조각을 다시 내지 않는다)."""
+    return [list(part.get("cutIds") or []), round(float(part.get("start") or 0), 3), round(float(part.get("end") or 0), 3),
+            int(step or 0)]
+
+
+def _submit_take_parts(owner: str, pid: str, gen_id: str, index: int, variant: str, claim: str, *, plan: dict, take: dict,
+                       state: dict, parts: list[dict], video_mp4: bytes, endpoint: str, caps: dict, resolution: str,
+                       audio, attempt: int, step: int, rec_keys: list[str], run_n) -> list[dict]:
+    """조각마다 잘라·프롬프트·제출·원장(작업 152). _PREPARE_SEM 안에서 부른다. 조각 기록 목록을 돌려준다.
+
+    같은 조각(_part_sig)이 앞 시도에서 completed 면 그대로 둔다(재시도 때 다시 내지 않는다). 유료 제출 전마다 하트비트(작업 144).
+    중간에 실패하면 이미 낸 조각을 취소 시도하고 오류를 다시 낸다(낸 조각 원장은 이미 남았다).
+    """
+    real = variant == "real"
+    take_id = str(take.get("id") or index)
+    limit = _take_ref_limit(endpoint)
+    previous = {_json_key(p.get("sig")): p for p in (state.get("parts") or []) if isinstance(p, dict)}
+    records: list[dict] = []
+    try:
+        for part in parts:
+            sig = _part_sig(part, step)
+            old = previous.get(_json_key(sig))
+            if old and old.get("status") == "completed" and old.get("outputKey"):
+                records.append(dict(old))
+                continue
+            sub = _part_take(plan, take, part)
+            with _RefTrace() as trace:
+                built = _take_payload(owner, pid, plan, sub, caps, variant="real", fallback_step=step) if real else _take_payload(
+                    owner, pid, plan, sub, caps)
+            refs = trace.refs(built)
+            prompt = str(built["prompt"])
+            if real:
+                _assert_no_webtoon(prompt)
+            clip = _cut_clip(video_mp4, {"startSec": part["start"], "endSec": part["end"]})
+            sent = float(clip.get("sentSeconds") or 0) or float(part["seconds"])
+            if limit > 0 and sent > limit + TAKE_PART_TOL_S:
+                raise VpocError("vnew.generate", "RefVideoTooLong", REF_TOO_LONG_TEXT.format(seconds=sent, limit=limit), 409)
+            prefix = _seg_output_prefix(owner, pid, gen_id, f"{take_id}-{variant}-p{part['no']}", attempt)
+            if not _touch_prepare_claim(owner, pid, gen_id, index, variant, claim):  # 작업 144: 조각(유료) 제출 전마다
+                raise _Discard()
+            result = _submit_take(endpoint=endpoint, caps=caps, video_mp4=clip["bytes"], prompt=prompt, output_prefix=prefix,
+                                  image_urls=built["imageUrls"], seconds=float(part["seconds"]), resolution=resolution,
+                                  audio=audio)
+            del clip, built
+            _charge_take(owner, pid, gen_id, result, float(part["seconds"]), resolution)
+            params = {**_take_params(caps, float(part["seconds"]), resolution, audio), "part": part["no"],
+                      "parts": len(parts), "rangeStart": part["start"], "rangeEnd": part["end"]}
+            _log_attempt(owner, pid, gen_id, source="gen", mode="previz-take", variant=variant, cell_id=take_id, index=index,
+                         attempt=attempt, run=run_n, endpoint=endpoint, params=params, refs=refs, video_keys=rec_keys,
+                         result=result, prompt=prompt)
+            records.append({**part, "sig": sig, "status": "submitted", "invocationArn": str(result.get("invocationArn") or ""),
+                            "outputPrefix": str(result.get("outputPrefix") or prefix), "outputKey": "", "error": "",
+                            "promptEn": prompt, "promptBytes": len(prompt.encode("utf-8")),
+                            "clientRequestToken": str(result.get("clientRequestToken") or ""), "sentSeconds": round(sent, 3)})
+            log.info("vnew.gen.take_part_submit pid=%s take=%s part=%d/%d start=%.3f end=%.3f cuts=%d%s", pid, take_id,
+                     part["no"], len(parts), part["start"], part["end"], len(part["cutIds"]), " variant=real" if real else "")
+    except BaseException:
+        for record in records:
+            if record.get("status") == "submitted" and record.get("invocationArn"):
+                _cancel_video(record["invocationArn"])
+        raise
+    return records
+
+
+def _json_key(value) -> str:
+    """목록·dict 를 dict 키로 쓰는 문자열(순서 유지)."""
+    return repr(value)
+
+
+def _do_poll_take_parts(owner: str, pid: str, gen_id: str, index: int, variant: str, claim: str) -> None:
+    """조각 칸 조회(작업 152): 제출된 조각을 모두 조회해 저장하고, 하나라도 실패면 칸 실패, 모두 완료면 이어 붙인다."""
+    plan, _ = plan_mod.load_plan(owner, pid)
+    gen = plan.get("gen") or {}
+    if not _claim_ok_variant(gen, index, variant, claim):
+        return
+    parts = [dict(p) for p in (_previz_cells(gen)[index][variant].get("parts") or [])]
+    updates: dict[int, dict] = {}
+    for number, part in enumerate(parts):
+        if part.get("status") != "submitted":
+            continue
+        arn, prefix = str(part.get("invocationArn") or ""), str(part.get("outputPrefix") or "")
+        result = vpoc_fal.poll(arn, prefix)
+        status = str(result.get("status") or "")
+        if status == "Completed":
+            key = _find_output_key(prefix, arn)
+            updates[number] = {"status": "completed", "outputKey": key, "error": ""}
+            _log_result(owner, pid, gen_id, gen, index, variant, arn, "completed", output_key=key)
+        elif status != "InProgress":
+            error = str(result.get("failureMessage") or "영상 생성 실패")[:300]
+            updates[number] = {"status": "failed", "error": error, "failureKind": str(result.get("failureKind") or "")}
+            _log_result(owner, pid, gen_id, gen, index, variant, arn, "failed", error=error)
+    if updates:
+        def mutator(data: dict) -> None:
+            g = data.get("gen") or {}
+            if not _claim_ok_variant(g, index, variant, claim):
+                raise _Discard()
+            stored = _previz_cells(g)[index][variant].get("parts") or []
+            for number, change in updates.items():
+                if number < len(stored):
+                    stored[number].update(change)
+
+        _commit(owner, pid, mutator)
+        for number, change in updates.items():
+            parts[number].update(change)
+    failed = [p for p in parts if p.get("status") == "failed"]
+    if failed:
+        error = str(failed[0].get("error") or "")
+        if variant == "real" and _likeness_rejected(error):
+            _escalate_likeness(owner, pid, gen_id, index, claim)
+            return
+        message = f"테이크 조각 {failed[0].get('no')}/{len(parts)} 이 실패했습니다: {error}"
+        _fail_variant(owner, pid, gen_id, index, variant, claim, message,
+                      kind=str(failed[0].get("failureKind") or "") or _audio_kind(error))
+        return
+    if parts and all(p.get("status") == "completed" and p.get("outputKey") for p in parts):
+        _merge_take_parts(owner, pid, gen_id, index, variant, claim, parts)
+
+
+def _merge_take_parts(owner: str, pid: str, gen_id: str, index: int, variant: str, claim: str, parts: list[dict]) -> None:
+    """조각 결과를 순서대로 134 규칙(_conform_concat: 같은 fps·크기·소리)으로 이어 칸 결과로 둔다. 조각 길이로 자른다."""
+    plan, _ = plan_mod.load_plan(owner, pid)
+    take = _previz_cells(plan.get("gen") or {})[index]
+    pieces = [(_fetch_bytes(str(p.get("outputKey") or ""), bucket=vpoc_settings.VIDEO_BUCKET), float(p.get("seconds") or 0))
+              for p in parts]
+    try:
+        merged = _conform_concat(pieces)
+    except Exception as exc:  # noqa: BLE001 — 맞추지 못하면 예전 방식(길면 자르고 잇기)
+        log.warning("vnew.gen.take_part_conform_failed pid=%s take=%s err=%s", pid, take.get("id"), _msg(exc))
+        clips = []
+        for clip, seconds in pieces:
+            try:
+                clip = _trim_clip(clip, seconds) if seconds > 0 else clip
+            except Exception:  # noqa: BLE001
+                pass
+            clips.append(clip)
+        merged = clips[0] if len(clips) == 1 else _concat(clips)
+    del pieces
+    attempt = int((take.get(variant) or {}).get("attempt") or 1)
+    key = f"{_seg_output_prefix(owner, pid, gen_id, str(take.get('id') or index) + '-' + variant + '-parts', attempt).rstrip('/')}/merged.mp4"
+    STORE.put_bytes(key, merged, "video/mp4", bucket=vpoc_settings.VIDEO_BUCKET)
+    del merged
+
+    def mutator(data: dict) -> None:
+        g = data.get("gen") or {}
+        if not _claim_ok_variant(g, index, variant, claim):
+            raise _Discard()
+        s = _previz_cells(g)[index][variant]
+        s.update(status="completed", outputKey=key, error="", claim="", claimedAt="")
+
+    _commit(owner, pid, mutator)
+    log.info("vnew.gen.take_parts_merged pid=%s take=%s parts=%d", pid, take.get("id"), len(parts))
+
+
 def _do_submit_take(owner: str, pid: str, gen_id: str, index: int, variant: str, claim: str) -> None:
     """통 테이크 1개(웹툰)를 Seedance 2.5 reference-to-video 로 제출한다(설계자 2026-10-26, 063).
 
@@ -4418,6 +4709,36 @@ def _do_submit_take(owner: str, pid: str, gen_id: str, index: int, variant: str,
 
         stage = "stitch"
         video_mp4 = _stitch_recordings(rec_keys)
+
+        # 작업 152: 녹화가 참고 영상 상한보다 길면 컷 경계 조각으로 나눠 낸다(조각마다 원장 1번, 결과는 조회가 잇는다).
+        stage = "split"
+        parts = _take_parts_for(plan, take, endpoint)
+        if parts:
+            run_n = (int((gen.get("realRun") or {}).get("n") or 0) or None) if real else None
+            stage = "submit"
+            part_records = _submit_take_parts(
+                owner, pid, gen_id, index, variant, claim, plan=plan, take=take, state=state, parts=parts,
+                video_mp4=video_mp4, endpoint=endpoint, caps=caps, resolution=resolution, audio=audio_choice,
+                attempt=attempt, step=_fallback_step(state) if real else 0, rec_keys=rec_keys, run_n=run_n)
+            del video_mp4
+            prepared = True
+            log.info("vnew.gen.take_submit pid=%s take=%s parts=%d ms=%d%s", pid, take_id, len(part_records),
+                     int((time.monotonic() - started) * 1000), tag)
+
+            def parts_mutator(data: dict) -> None:
+                g = data.get("gen") or {}
+                if not _claim_ok_variant(g, index, variant, claim):
+                    raise _Discard()
+                s = _previz_cells(g)[index][variant]
+                s.update(status="submitted", invocationArn="", outputPrefix="", outputKey="", error="")
+                s["parts"] = part_records
+                s["promptEn"] = "\n\n".join(str(p.get("promptEn") or "") for p in part_records)
+                s["promptBytes"] = sum(int(p.get("promptBytes") or 0) for p in part_records)
+                s.pop("pendingCharge", None)  # 조각은 제출 때 원장을 남긴다
+
+            stage = "commit"
+            _commit(owner, pid, parts_mutator)
+            return  # finally 에서 세마포어 해제.
 
         stage = "payload"
         trace = _RefTrace.start()  # 지시서 116: 이 스레드의 참고 이미지 읽기·맞춤을 따라간다(바이트는 붙잡지 않는다)
@@ -4494,6 +4815,7 @@ def _do_submit_take(owner: str, pid: str, gen_id: str, index: int, variant: str,
         s["error"] = ""
         s["promptEn"] = prompt
         s["promptBytes"] = prompt_bytes
+        s.pop("parts", None)  # 작업 152: 조각 없이 낸 시도(옛 조각 기록이 조회를 가르지 않게)
         if defer:
             # 작업 130: likeness 거절(생성 전 거절)은 원장 0 — 결과가 정해질 때 _settle_take_charge 가 1번 남긴다.
             s["pendingCharge"] = {"clientRequestToken": str(result.get("clientRequestToken") or ""),
@@ -4680,6 +5002,9 @@ def _do_poll_previz(owner: str, pid: str, gen_id: str, index: int, variant: str,
         take_real = gen.get("mode") == "previz-take" and variant == "real"
         if take_real and _fallback_step(state) == 2:
             _do_poll_real_cuts(owner, pid, gen_id, index, claim)  # 작업 130 보완 1: 컷마다 조회
+            return
+        if gen.get("mode") == "previz-take" and state.get("parts"):
+            _do_poll_take_parts(owner, pid, gen_id, index, variant, claim)  # 작업 152: 조각마다 조회 → 잇기
             return
         poll_result = vpoc_fal.poll(arn, prefix)
         status = str(poll_result.get("status") or "")
@@ -8471,6 +8796,11 @@ def cancel_gen(owner: str, pid: str) -> dict:
             state = seg.get(variant) or {}
             if state.get("status") == "submitted" and state.get("invocationArn"):
                 remote[state["invocationArn"]] = _cancel_video(state["invocationArn"])
+            if state.get("status") == "submitted":
+                # 작업 152: 테이크 조각도 취소한다.
+                for part in state.get("parts") or []:
+                    if isinstance(part, dict) and part.get("status") == "submitted" and part.get("invocationArn"):
+                        remote[part["invocationArn"]] = _cancel_video(part["invocationArn"])
             if state.get("status") == "submitted" and variant == "real":
                 # 작업 130: 컷 단위 Kling 컷도 취소하고, 미뤄 둔 Seedance 금액은 남긴다(이미 생성 중일 수 있다).
                 for cut in (state.get("fallback") or {}).get("cuts") or []:

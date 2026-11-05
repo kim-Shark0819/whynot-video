@@ -1988,10 +1988,17 @@ def _conti_model() -> str:
 
 
 def _max_segment_seconds(video_model: str) -> int:
-    """이 영상 모델의 한 번 생성 최대 길이(초). 구간 나누기 단위."""
+    """이 영상 모델의 한 번 생성 최대 길이(초). 구간 나누기 단위.
+
+    152: 영상 입력을 받는 모델은 참조 영상 상한(maxRefVideoS)도 넘지 않게 min 을 쓴다 — 구간 길이가 곧
+    프리비즈 녹화(참조 영상) 길이다(Wan 3.0 r2v: 출력 30초, 입력 15초).
+    """
     try:
         options = vpoc_ark.video_options(video_model)
         value = int(options.get("maxDurationS") or 0)
+        ref_max = int(options.get("maxRefVideoS") or 0)
+        if options.get("videoInput") and ref_max > 0:
+            value = min(value, ref_max) if value > 0 else ref_max
     except Exception as exc:  # noqa: BLE001
         log.warning("vnew.max_seconds.failed model=%s err=%s", video_model, str(exc)[:150])
         value = 0

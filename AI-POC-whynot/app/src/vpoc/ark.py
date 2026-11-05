@@ -366,6 +366,13 @@ def video_options(model: str) -> dict:
             durations = [value for value in durations if low <= value <= high] or [low]
             low, high = durations[0], durations[-1]
             default_resolution = "720p" if "720p" in resolutions else resolutions[0]
+        # 참조(입력) 영상 길이 상한(152). 출력 길이 목록(durations)과 따로다.
+        video_input = bool(caps.get("videoField") or caps.get("videoListField"))
+        if settings.is_fal_seedance_family(model) or not video_input:
+            # Seedance 계열은 지금 값 그대로(테이크 경로가 이미 맞다), 영상 입력이 없으면 제약 없음.
+            max_ref_video = high
+        else:
+            max_ref_video = _caps_ref_video_max(caps) or settings.FAL_REF_VIDEO_MAX_S
         return {
             "model": model,
             "resolutions": resolutions,
@@ -377,6 +384,8 @@ def video_options(model: str) -> dict:
             "durationChoices": durations,
             # 참고 이미지(캐릭터)를 보낼 수 있으면 True — referenceImagesField 또는 startImageField.
             "referenceImages": bool(caps.get("referenceImagesField") or caps.get("startImageField")),
+            "videoInput": video_input,
+            "maxRefVideoS": int(max_ref_video),
         }
     low, high = settings.VIDEO_DURATION_RANGE.get(model, (settings.DURATION_S, settings.DURATION_S))
     return {
@@ -390,7 +399,21 @@ def video_options(model: str) -> dict:
         "durationChoices": list(range(int(low), int(high) + 1)),
         # Seedance 는 샷의 캐릭터 이미지를 참고 이미지로 함께 보낸다(캐릭터 그대로 유지).
         "referenceImages": is_ark(model),
+        "videoInput": False,
+        "maxRefVideoS": int(high),
     }
+
+
+def _caps_ref_video_max(caps: dict) -> int:
+    """caps(스키마에서 뽑은 값)에 참조 영상 최대 길이(초)가 있으면 그 값, 없으면 0(152)."""
+    for key in ("maxRefVideoS", "refVideoMaxS", "videoMaxDurationS"):
+        try:
+            value = int(float(caps.get(key) or 0))
+        except (TypeError, ValueError):
+            value = 0
+        if value > 0:
+            return value
+    return 0
 
 
 def tag_style(model: str) -> str:
