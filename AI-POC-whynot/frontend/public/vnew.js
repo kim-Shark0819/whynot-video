@@ -6336,7 +6336,8 @@
     }
 
     btn.addEventListener("click", function () {
-      doApprove(false);
+      // 이미 [그래도 승인]으로 승인한 장면을 다시 녹화할 때는 같은 force 로 보낸다(아니면 409 LowMatch).
+      doApprove(!!(alreadyApproved && previz.approvedForced));
     });
     host.appendChild(btn);
 

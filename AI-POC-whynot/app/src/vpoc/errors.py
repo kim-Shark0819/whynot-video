@@ -39,6 +39,7 @@ class VpocError(Exception):
 # HTTP<code> · NoRequestId 는 제외한다(감출 이유가 있다)(2026-10-19).
 USER_FACING_KINDS = {
     "BadDuration",
+    "LowMatch",  # 프리비즈 승인 관문: 낮은 컷 번호를 그대로 보여 준다
     "FalBalanceExhausted",
     "FalKeyMissing",
     "FalUnreachable",

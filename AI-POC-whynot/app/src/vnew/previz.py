@@ -2626,7 +2626,9 @@ def approve(owner: str, pid: str, *, force: bool = False) -> dict:
         if previz.get("status") != "ready":
             raise VpocError("vnew.previz.approve", "NotReady", "장면이 준비되지 않았습니다.", 409)
         low = _low_match_cuts(previz)
-        if low and not force:
+        # 이미 [그래도 승인]으로 승인된 장면을 다시 승인(녹화 다시 시작)하면 그대로 통과한다.
+        again = bool(previz.get("approved") and previz.get("approvedForced"))
+        if low and not (force or again):
             raise VpocError("vnew.previz.approve", "LowMatch", _low_cut_message(low), 409)
         previz["approved"] = True
         if low:
