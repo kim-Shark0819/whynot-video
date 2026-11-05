@@ -641,15 +641,270 @@ def _move_to_edge(cam_dict, subject, info, target_screen_x, side_dir, grammar=No
     return best
 
 
+# ================================================================ 카메라 여유(작업 151)
+#
+# 카메라가 마네킹 머리·몸통 안이거나 너무 가까우면(prod test3 컷 7: 화면이 여의준 머리 안쪽) 옮긴다.
+# 마네킹 = 머리 구(중심 눈높이, 반지름 0.16m × 키/1.7) + 몸통 캡슐(어깨 → 엉덩이, 반지름 0.22m).
+# 1) 시선 반대로 물린다(pullback, 0.05m 간격, 방 안에서만). 2) 안 되면 주인공 축을 돌아 ±15° → ±30°
+# (orbit, 같은 쌍에서 일치도가 가장 좋은 자리). 어깨 너머(over_shoulder)는 앞사람이 화면의 35% 이하여야 한다.
+# 렌더러(vnew-previz.js)도 같은 크기로 0.25m 안이면 그리는 카메라만 물린다(설계는 그대로).
+
+CAMERA_MIN_CLEAR_M = 0.35
+HEAD_CLEAR_RADIUS_M = 0.16  # × (키 / 1.7)
+BODY_CLEAR_RADIUS_M = 0.22
+OTS_FOREGROUND_MAX = 0.35
+CLEAR_STEP_M = 0.05
+CLEAR_MAX_PULL_M = 3.0
+CLEAR_ORBIT_DEG = ((15.0, -15.0), (30.0, -30.0))
+# 일치도가 이보다 낮은 컷은 다른 시작점 3개로 다시 보정한다(previz.APPROVE_MIN_MATCH 와 같은 기본값).
+APPROVE_MIN_MATCH = 0.7
+# 다시 보정 시작점: (주인공에서 카메라까지 거리 배율, 주인공 축을 도는 yaw°).
+RETRY_SEEDS = ((1.25, 0.0), (0.8, 12.0), (1.1, -12.0))
+
+
+def _mannequin_volumes(info):
+    """한 인물의 (머리 구 중심, 반지름), (몸통 캡슐 위·아래 끝, 반지름). cheat 이동 포함."""
+    scale = float(info.get("height") or 1.7) / 1.7
+    foot = _world(info, 0.0)
+    head = (foot[0], info["y"]("eye"), foot[2])
+    shoulder = (foot[0], info["y"]("shoulder"), foot[2])
+    hips = (foot[0], info["y"]("hips"), foot[2])
+    return (head, HEAD_CLEAR_RADIUS_M * scale), (shoulder, hips, BODY_CLEAR_RADIUS_M)
+
+
+def _segment_dist(p, a, b) -> float:
+    ab = _sub(b, a)
+    denom = _dot(ab, ab)
+    t = 0.0 if denom < 1e-12 else max(0.0, min(1.0, _dot(_sub(p, a), ab) / denom))
+    q = _add(a, _scale(ab, t))
+    d = _sub(p, q)
+    return math.sqrt(_dot(d, d))
+
+
+def camera_clearance(pos, infos) -> float:
+    """카메라 위치에서 가장 가까운 머리·몸통 표면까지 거리(m). 안이면 음수. 인물이 없으면 inf."""
+    best = math.inf
+    for info in infos or []:
+        (head, head_r), (top, bottom, body_r) = _mannequin_volumes(info)
+        d = _sub(pos, head)
+        best = min(best, math.sqrt(_dot(d, d)) - head_r, _segment_dist(pos, top, bottom) - body_r)
+    return best
+
+
+def _foreground_area(cam_dict, info) -> float:
+    """앞사람(머리+몸통)이 화면에서 차지하는 비율(화면 [0,1] 로 자른 _blocker_box 넓이)."""
+    return _box_area(_clip_box_to_screen(_blocker_box(cam_dict, info)))
+
+
+def _subject_mid(subject, bottom):
+    foot = _world(subject, 0.0)
+    return (foot[0], (subject["y"]("top") + subject["y"](bottom)) / 2.0, foot[2])
+
+
+def _subject_fits(cam, subject) -> bool:
+    """주인공 머리 위·눈이 화면 안에 있으면 True."""
+    cam_dict = _to_camera_dict(cam)
+    for point in ("top", "eye"):
+        sp = project_point(cam_dict, _world(subject, subject["y"](point)))
+        if sp is None or not (-FRAME_EPS <= sp["screenX"] <= 1.0 + FRAME_EPS and -FRAME_EPS <= sp["screenY"] <= 1.0 + FRAME_EPS):
+            return False
+    return True
+
+
+def _rotate_xz(vec, deg):
+    """바닥면에서 yaw 가 deg 만큼 늘어나는 쪽으로 돌린다(_forward 의 yaw 와 같은 방향)."""
+    a = math.radians(deg)
+    c, s = math.cos(a), math.sin(a)
+    return (vec[0] * c - vec[2] * s, vec[1], vec[0] * s + vec[2] * c)
+
+
+def _match_score(cam, subject, top_y, subject_x, bottom, others) -> float:
+    """place_cut 과 같은 보이는 부분 일치도(남은 가림이 있으면 × 0.5)."""
+    cam_dict = _to_camera_dict(cam)
+    hip = (subject.get("actor") or {}).get("hipY")
+    hip = hip if isinstance(hip, (int, float)) and not isinstance(hip, bool) else None
+    score = match_visible(cam_dict, _world(subject, 0.0), subject["height"], subject["pose"], top_y, subject_x, bottom, hip)
+    grammar = {"_bottom": bottom}
+    if any(_occludes(cam_dict, info, subject, grammar) for info in others):
+        score *= 0.5
+    return score
+
+
+def _pose_ok(cam, infos, bounds, foreground, check_room=True, keep=None) -> bool:
+    if check_room and bounds is not None and not _inside_room(cam[0], bounds):
+        return False
+    if camera_clearance(cam[0], infos) < CAMERA_MIN_CLEAR_M - 1e-9:
+        return False
+    if foreground is not None and _foreground_area(_to_camera_dict(cam), foreground) > OTS_FOREGROUND_MAX + 1e-9:
+        return False
+    if keep is not None and keep(cam) > 0:
+        return False
+    return True
+
+
+def _rule_keeper(cam0, subject, others, bottom):
+    """처음 자리의 화면 규칙을 지키는지 세는 함수: 새로 생긴 가림 + 화면 밖이던 머리가 화면 안에 들어온 수.
+
+    (hands_only 상대 머리는 화면 밖, 가림 없음 — _place_single 이 맞춘 것을 옮긴 카메라도 지키게 한다.)
+    """
+    grammar = {"_bottom": bottom}
+    d0 = _to_camera_dict(cam0)
+    occluded0 = {id(i) for i in others if _occludes(d0, i, subject, grammar)}
+    head_off0 = [i for i in others if not _head_onscreen(d0, i)]
+
+    def broken(cam) -> int:
+        d = _to_camera_dict(cam)
+        count = sum(1 for i in others if id(i) not in occluded0 and _occludes(d, i, subject, grammar))
+        return count + sum(1 for i in head_off0 if _head_onscreen(d, i))
+
+    return broken
+
+
+def _pose_badness(cam, infos, foreground, keep=None):
+    """규칙을 얼마나 못 지켰는지(작을수록 좋다): (여유 부족 m, 화면 규칙 깨짐 수, 앞사람 넓이 초과)."""
+    lack = max(0.0, CAMERA_MIN_CLEAR_M - camera_clearance(cam[0], infos))
+    excess = 0.0
+    if foreground is not None:
+        excess = max(0.0, _foreground_area(_to_camera_dict(cam), foreground) - OTS_FOREGROUND_MAX)
+    return (round(lack, 6), keep(cam) if keep is not None else 0, round(excess, 6))
+
+
+def _pull_back(cam, infos, bounds, foreground, tried, keep=None):
+    """시선 반대로 0.05m 씩 물린다(방 밖이면 멈춤). 규칙을 지키는 첫 자리 또는 None. tried 에 후보를 모은다."""
+    pos0, yaw, pitch, fov = cam
+    fwd = _forward(yaw, pitch)
+    for k in range(1, int(round(CLEAR_MAX_PULL_M / CLEAR_STEP_M)) + 1):
+        pos = _sub(pos0, _scale(fwd, CLEAR_STEP_M * k))
+        if bounds is not None and not _inside_room(pos, bounds):
+            break
+        cand = (pos, yaw, pitch, fov)
+        tried.append(cand)
+        if _pose_ok(cand, infos, bounds, foreground, keep=keep):
+            return cand
+    return None
+
+
+def _clear_search(cam, size, infos, subject, bounds, score_fn, foreground):
+    """카메라 여유 규칙(작업 151). 반환 (cam, size, fix). 이미 지키면 (cam, size, None) — 그대로."""
+    if subject is None or _pose_ok(cam, infos, bounds, foreground, check_room=False):
+        return cam, size, None
+    pos0, yaw0, pitch0, fov = cam
+    others = [i for i in infos if i is not subject]
+    keep = _rule_keeper(cam, subject, others, LENS[size][2])
+    fits0 = _subject_fits(cam, subject)
+    tried: list = []
+    chosen = _pull_back(cam, infos, bounds, foreground, tried, keep)
+    kind = "pullback"
+    if chosen is None:
+        kind = "orbit"
+        axis = _world(subject, 0.0)
+        fwd = _forward(yaw0, pitch0)
+        look_pt = _add(pos0, _scale(fwd, max(0.5, _dot(_sub(_subject_mid(subject, LENS[size][2]), pos0), fwd))))
+        for pair in CLEAR_ORBIT_DEG:
+            accepted = []
+            for deg in pair:
+                rel = _rotate_xz(_sub(pos0, axis), deg)
+                pos = _add(axis, rel)
+                cand = (pos, yaw0 + math.radians(deg), pitch0, fov)
+                if bounds is not None and not _inside_room(pos, bounds):
+                    pulled = _pull_inside(pos, bounds)
+                    look_rot = _add(axis, _rotate_xz(_sub(look_pt, axis), deg))
+                    cand = _look(pulled, look_rot, fov)
+                tried.append(cand)
+                if not _pose_ok(cand, infos, bounds, foreground, keep=keep):
+                    cand = _pull_back(cand, infos, bounds, foreground, tried, keep)
+                if cand is not None:
+                    accepted.append(cand)
+            if accepted:
+                chosen = max(accepted, key=score_fn)  # 같으면 먼저 시도한 쪽(+)
+                break
+    if chosen is None:
+        # 규칙을 지키는 자리가 없다: 가장 덜 어긴 자리(지금보다 나을 때만).
+        best = None
+        best_key = _pose_badness(cam, infos, foreground, keep)
+        for cand in tried:
+            key = _pose_badness(cand, infos, foreground, keep)
+            if key < best_key:
+                best, best_key = cand, key
+        if best is None:
+            return cam, size, None
+        chosen = best
+        kind = "pullback" if abs(chosen[1] - yaw0) < 1e-9 and abs(chosen[2] - pitch0) < 1e-9 else "orbit"
+    if fits0 and not _subject_fits(chosen, subject):
+        wider = _wider_lens(size)
+        if wider != size:
+            size = wider
+            chosen = (chosen[0], chosen[1], chosen[2], LENS[size][0])
+    moved = _sub(chosen[0], pos0)
+    return chosen, size, {"kind": kind, "dist": round(math.sqrt(_dot(moved, moved)), 3)}
+
+
+def _size_for_lens(grammar, lens) -> str:
+    """문법 shotSize(ECU 는 CU)에서 fit.lens 와 맞을 때까지 넓힌 샷 크기(previz._rematch_cut 과 같은 순서)."""
+    size = str((grammar or {}).get("shotSize") or "MCU")
+    if size == "ECU":
+        size = "CU"
+    if size not in LENS:
+        size = "MCU"
+    for _ in range(len(LENS)):
+        if not lens or LENS[size][1] == lens:
+            break
+        wider = _wider_lens(size)
+        if wider == size:
+            break
+        size = wider
+    return size
+
+
+def clear_cut_camera(camera: dict, actors_in_cut: list[dict], room: dict | None, grammar: dict, lens: str | None = None):
+    """저장된 컷 카메라에 여유 규칙을 다시 건다(previz 3.5 배우 조정 뒤). 지키면 None.
+
+    actors_in_cut: previz._actors_in_cut 모양({id,name,heightM,foot,pose,hipY}). 반환
+    {camera, cameraFix, lens} — camera 는 {"pos","target","fov"}.
+    """
+    camera = camera or {}
+    if not camera.get("pos") or not camera.get("target") or not actors_in_cut:
+        return None
+    grammar = grammar or {}
+    infos = []
+    for actor in actors_in_cut:
+        info = _actor_points(actor, actor.get("foot") or [0, 0, 0], str(actor.get("pose") or "stand"))
+        info["actor"] = actor
+        info["id"] = actor.get("id")
+        info["name"] = str(actor.get("name") or actor.get("id") or "")
+        infos.append(info)
+    subject_name = str(grammar.get("mainSubject") or "")
+    subject = next((i for i in infos if i["name"] == subject_name), infos[0])
+    others = [i for i in infos if i is not subject]
+    size = _size_for_lens(grammar, lens)
+    fov = _grammar_num(camera.get("fov"), LENS[size][0])
+    cam = _look(_vec3(camera.get("pos")), _vec3(camera.get("target")), fov)
+    foreground = None
+    if str(grammar.get("shotType") or "") == "over_shoulder" and others:
+        foreground = others[0]
+    top_y = _grammar_num(grammar.get("headTopY"), 0.1)
+    subject_x = _grammar_num(grammar.get("subjectX"), 0.5)
+    bottom = LENS[size][2]
+
+    def score(c):
+        return _match_score(c, subject, top_y, subject_x, bottom, others)
+
+    new_cam, new_size, fix = _clear_search(cam, size, infos, subject, _room_bounds(room), score, foreground)
+    if fix is None:
+        return None
+    return {"camera": _to_camera_dict(new_cam), "cameraFix": fix, "lens": LENS[new_size][1]}
+
+
 # ================================================================ place_cut
 
 
-def place_cut(grammar: dict, actors_in_cut: list[dict], room: dict | None, side: int) -> dict:
+def place_cut(grammar: dict, actors_in_cut: list[dict], room: dict | None, side: int, *, min_match: float | None = None) -> dict:
     """한 컷의 카메라·배우 조정·일치도를 계산한다.
 
     actors_in_cut: [{id, name, heightM, foot:[x,0,z], pose, facingDeg?}]. grammar 는 normalize_grammar
     결과. side 는 scene_line 의 기본 쪽(+1|-1); 이 컷이 crossed 면 호출자가 반대 부호를 준다.
-    반환 {camera, actors, cheats, fit}.
+    min_match(작업 151): 주면 일치도가 이보다 낮은 컷을 시작점 3개로 다시 보정한다(previz 는 APPROVE_MIN_MATCH).
+    반환 {camera, actors, cheats, fit, retry?}. fit.cameraFix = 카메라 여유 규칙으로 옮겼을 때 {kind, dist}.
     """
     grammar = grammar or {}
     shot_type = str(grammar.get("shotType") or "clean_single")
@@ -737,6 +992,37 @@ def place_cut(grammar: dict, actors_in_cut: list[dict], room: dict | None, side:
             size = wider
             cam, cheats, bottom = _place_for_size(size)
 
+    # --- 카메라 여유(작업 151): 머리·몸통 안이나 0.35m 안이면 물리거나 돌린다. 어깨 너머 앞사람은 화면 35% 이하 ---
+    hidden_pre = {c["actor"] for c in cheats if c.get("type") == "hide"}
+    visible_infos = [info for info in people.values() if info.get("id") not in hidden_pre]
+    others_visible = [info for info in visible_infos if info is not subject]
+    foreground = None
+    if shot_type == "over_shoulder" and partner is not None and partner.get("id") not in hidden_pre:
+        foreground = partner
+    camera_fix = None
+    retry = None
+    if subject is not None:
+        def score_fn(c, _bottom=bottom):
+            return _match_score(c, subject, top_y, subject_x, _bottom, others_visible)
+
+        cam, new_size, camera_fix = _clear_search(cam, size, visible_infos, subject, bounds, score_fn, foreground)
+        if new_size != size:
+            size = new_size
+            bottom = LENS[size][2]
+
+        # --- 일치도 낮은 컷 다시 보정(작업 151): 시작점 3개, 여유 규칙을 지키는 가장 좋은 자리만 ---
+        if min_match is not None:
+            before = _match_score(cam, subject, top_y, subject_x, bottom, others_visible)
+            if before < float(min_match) - 1e-9:
+                best_cam, after = _retry_low_match(
+                    cam, grammar, shot_type, subject, partner, visible_infos, others_visible, bounds, foreground,
+                    top_y, subject_x, bottom, before,
+                )
+                retry = {"before": round(before, 4), "after": round(after, 4)}
+                if best_cam is not None:
+                    cam = best_cam
+                    camera_fix = None  # 다시 보정한 자리는 처음부터 규칙을 지킨다.
+
     # --- 얼굴 방향(facingDeg): faceTurn 으로 그 컷 actors 의 facingDeg 를 바꾼다(cheat 아님) ---
     _apply_facing(grammar, people, subject, partner, cam)
 
@@ -818,13 +1104,64 @@ def place_cut(grammar: dict, actors_in_cut: list[dict], room: dict | None, side:
         fit["minBodyGapM"] = round(min_gap, 3)
     if needs_lean:
         fit["needsLean"] = True
+    if camera_fix is not None:
+        fit["cameraFix"] = camera_fix
 
-    return {
+    out = {
         "camera": cam_dict,
         "actors": out_actors,
         "cheats": cheats,
         "fit": fit,
     }
+    if retry is not None:
+        out["retry"] = retry  # 로그용(설계에 저장하지 않는다).
+    return out
+
+
+def _retry_low_match(cam, grammar, shot_type, subject, partner, infos, others, bounds, foreground,
+                     top_y, subject_x, bottom, before):
+    """일치도 낮은 컷: RETRY_SEEDS 시작점마다 _refine 을 다시 돌려 가장 좋은 자리. (cam|None, 가장 좋은 점수).
+
+    받는 자리: 방 안·여유 규칙(머리·몸통 0.35m, 어깨 너머 앞사람 35%)·지금 화면 밖인 사람은 계속 화면 밖.
+    지금보다 좋을 때만 바꾼다(나빠지지 않는다). 순수 계산(LLM·유료 호출 없음).
+    """
+    pos0, _yaw0, _pitch0, fov = cam
+    aim = _subject_mid(subject, bottom)
+    rel0 = _sub(pos0, aim)
+    if _dot(rel0, rel0) < 1e-9:
+        return None, before
+    cam_dict0 = _to_camera_dict(cam)
+    offscreen0 = [info for info in others if not _overlaps_frame(_person_screen_box(cam_dict0, info))]
+
+    x2 = None
+    if shot_type in ("two_shot", "profile_two_shot") and partner is not None:
+        x2 = 1.0 - subject_x
+        for other in grammar.get("others") or []:
+            if isinstance(other, dict) and str(other.get("name") or "") == partner.get("name"):
+                x2 = float(other.get("screenX") or (1.0 - subject_x))
+                break
+
+    def residual(c):
+        base = _subject_residual(c, subject, top_y, subject_x, bottom)
+        if x2 is not None:
+            top_sp = project_point(_to_camera_dict(c), _world(partner, partner["y"]("top")))
+            base.append((top_sp["screenX"] if top_sp else 9.0) - x2)
+        return base
+
+    best_cam, best = None, before
+    for dist_scale, yaw_deg in RETRY_SEEDS:
+        seed_pos = _add(aim, _scale(_rotate_xz(rel0, yaw_deg), dist_scale))
+        seed = _look(seed_pos, aim, fov)
+        cand = _refine(seed, fov, residual, _norm(_sub(aim, seed_pos)))
+        if not _pose_ok(cand, infos, bounds, foreground):
+            continue
+        cand_dict = _to_camera_dict(cand)
+        if any(_overlaps_frame(_person_screen_box(cand_dict, info)) for info in offscreen0):
+            continue
+        score = _match_score(cand, subject, top_y, subject_x, bottom, others)
+        if score > best + 1e-9:
+            best_cam, best = cand, score
+    return best_cam, best
 
 
 def _place_single(grammar, people, subject, partner, side_normal, side, shot_size, bottom, top_y, subject_x, others_grammar, cheats):

@@ -51209,6 +51209,350 @@ def check_vnew_api_retry_150() -> None:
            "(rt-d)JSON 오류·500 그대로 (rt-e)PUT 네트워크 오류 다시 보냄")
 
 
+# 작업 151: 렌더러 카메라 여유 하네스(node). vnew-previz.js 를 임시 .mjs 로 복사해 three 를 파일 URL 로 바꾸고 PrevizScene 을
+# 내보낸다. 장면마다 같은 t 로 두 번(새 PrevizScene 두 개) update 해 그린 카메라 위치·물린 거리·보이는 마네킹 부피를 돌려준다.
+_CC151_RUNNER = r"""
+globalThis.window = {};
+const THREE = await import(process.argv[2]);
+const fs = await import('node:fs');
+const mod = await import(new URL('./previz151.mjs', import.meta.url));
+const cases = JSON.parse(fs.readFileSync(new URL('./cases.json', import.meta.url), 'utf8'));
+const out = {};
+for (const [name, sd] of Object.entries(cases)) {
+  const runs = [];
+  for (let i = 0; i < 2; i += 1) {
+    const sc = new mod.PrevizScene(sd, null, null);
+    const cam = new THREE.PerspectiveCamera(50, 16 / 9, 0.1, 100);
+    sc.update(1.0, cam);
+    const vols = [];
+    for (const entry of Object.values(sc.actors)) {
+      if (!entry.mannequin.group.visible) continue;
+      for (const v of entry.mannequin.clearVolumes()) {
+        vols.push(v.b ? { a: v.a.toArray(), b: v.b.toArray(), r: v.r } : { c: v.center.toArray(), r: v.r });
+      }
+    }
+    const dir = cam.getWorldDirection(new THREE.Vector3());
+    runs.push({ pos: cam.position.toArray(), dir: dir.toArray(), pullback: sc.cameraPullback, vols });
+  }
+  out[name] = { runs, savedPos: sd.timeline[0].camera.pos };
+}
+console.log(JSON.stringify(out));
+"""
+
+
+def _cc151_render(cases: dict) -> tuple[dict, str]:
+    """렌더러를 node 로 돌린다(타임아웃 60초). (결과, 오류 문장). node 가 없으면 ({}, "")."""
+    import tempfile as _tempfile  # noqa: PLC0415
+
+    node = shutil.which("node")
+    if not node:
+        return {}, ""
+    src = (PUBLIC / "vnew-previz.js").read_text(encoding="utf-8")
+    line = 'import * as THREE from "/vendor/three/three.module.min.js?v=__ASSET_VERSION__";'
+    three = (PUBLIC / "vendor" / "three" / "three.module.min.js").resolve().as_uri()
+    if line not in src:
+        return {}, "vnew-previz.js 의 three import 줄을 찾지 못했습니다"
+    mod_src = src.replace(line, f'import * as THREE from "{three}";') + "\nexport { PrevizScene };\n"
+    work = Path(_tempfile.mkdtemp(prefix="vpoc_cc151_"))
+    try:
+        (work / "previz151.mjs").write_text(mod_src, encoding="utf-8")
+        (work / "cases.json").write_text(json.dumps(cases, ensure_ascii=False), encoding="utf-8")
+        (work / "run.mjs").write_text(_CC151_RUNNER, encoding="utf-8")
+        try:
+            result = subprocess.run([node, str(work / "run.mjs"), three], capture_output=True, text=True,
+                                    encoding="utf-8", timeout=60)
+        except subprocess.TimeoutExpired:
+            return {}, "node 렌더러 검사가 60초 안에 끝나지 않았습니다"
+        if result.returncode != 0:
+            return {}, f"node 실패: {(result.stderr or '').strip()[:600]}"
+        return json.loads(result.stdout), ""
+    finally:
+        shutil.rmtree(work, ignore_errors=True)
+
+
+def check_vnew_previz_camera_clear_151() -> None:
+    """작업 151 — 프리비즈 카메라가 마네킹 머리·몸통 안이나 너무 가까우면 옮긴다·일치도 낮은 컷 다시 보정. 가짜, 유료 0.
+
+    (cc-a) 서버: 카메라가 인물 머리 안 → 모든 머리·몸통에서 0.35m 이상·주인공을 봄·방 안·cameraFix. 벽에 막히면 orbit.
+           previz 3.5 뒤 다시 보기(_clear_cameras)가 camera·fit.cameraFix·match 를 바꾸고 vnew.previz.camera_clear 로그
+    (cc-b) 서버: 어깨 너머 앞사람이 화면 70% 이상 → 35% 이하. place_cut 어깨 너머도 35% 이하
+    (cc-c) 서버: 일치도 0.7 미만 컷 다시 보정 → 같거나 좋아짐(나빠지지 않음)·여유 규칙 그대로·전후 로그
+    (cc-d) 서버: 여유 있는 카메라는 그대로(place_cut 결과·설계 바이트 같음, clear_cut_camera None)
+    (cc-e) 렌더러(node): 머리 구 안 카메라를 그리기 전에 물림(0.25m 이상, 두 번 같은 값, 저장 설계 그대로)·여유 있으면 그대로
+    """
+    import copy as _copy  # noqa: PLC0415
+    import math as _math  # noqa: PLC0415
+    import traceback as _tb  # noqa: PLC0415
+
+    sys.path.insert(0, str(ROOT / "app"))
+    bad: list[str] = []
+    notes: list[str] = []
+
+    def expect(group: str, got, want, what: str) -> None:
+        if got != want:
+            bad.append(f"({group}) {what}\n      결과 {got!r}\n      기대 {want!r}")
+
+    class _Cap(logging.Handler):
+        def __init__(self):
+            super().__init__(logging.INFO)
+            self.lines: list[str] = []
+
+        def emit(self, record):
+            self.lines.append(record.getMessage())
+
+    try:
+        from src.vnew import previz as pvmod  # noqa: PLC0415
+        from src.vnew import previz_camera as pc  # noqa: PLC0415
+        from src.vnew import previz_grammar as pg  # noqa: PLC0415
+
+        B, Y = "범건우", "여의준"
+        room = {"width": 6.0, "depth": 6.0, "height": 3.0}
+        actors = [
+            {"id": "aB", "name": B, "heightM": 1.80, "foot": [0.0, 0.0, -1.0], "pose": "stand"},
+            {"id": "aY", "name": Y, "heightM": 1.72, "foot": [0.0, 0.0, 0.0], "pose": "stand"},
+        ]
+
+        def infos_of(acts):
+            return [pc._actor_points(a, a["foot"], a.get("pose") or "stand") for a in acts]  # noqa: SLF001
+
+        def subject_seen(camera, info) -> bool:
+            sp = pc.project_point(camera, pc._world(info, info["y"]("eye")))  # noqa: SLF001
+            return sp is not None and 0.0 <= sp["screenX"] <= 1.0 and 0.0 <= sp["screenY"] <= 1.0
+
+        def in_room(camera, rm) -> bool:
+            return pc._inside_room(tuple(camera["pos"]), pc._room_bounds(rm))  # noqa: SLF001
+
+        g_single = pg.normalize_grammar({"mainSubject": B, "shotType": "clean_single", "shotSize": "MCU", "vantage": "3q",
+                                         "headTopY": 0.1, "subjectX": 0.5})
+
+        # ================= (cc-a) 머리 안 카메라 =================
+        infos = infos_of(actors)
+        sub_info = infos[0]
+        mid = (0.0, (sub_info["y"]("top") + sub_info["y"]("chest")) / 2.0, -1.0)
+        inside = {"pos": [0.0, round(infos[1]["y"]("eye"), 4), 0.0], "target": [mid[0], round(mid[1], 4), mid[2]],
+                  "fov": pc.LENS["MCU"][0]}
+        expect("cc-a", pc.camera_clearance(tuple(inside["pos"]), infos) < 0, True, "시작 카메라가 여의준 머리 안이다")
+        cleared = pc.clear_cut_camera(inside, actors, room, g_single, "50mm")
+        if not cleared:
+            bad.append("(cc-a) 머리 안 카메라를 옮기지 않았습니다")
+        else:
+            cam_a = cleared["camera"]
+            clr = pc.camera_clearance(tuple(cam_a["pos"]), infos)
+            # 앞사람 머리 안에서 시선 반대로 물리면 그 사람이 주인공을 가린다 → 물리지 않고 주인공 축을 돈다(orbit).
+            expect("cc-a", [clr >= pc.CAMERA_MIN_CLEAR_M - 1e-9, subject_seen(cam_a, sub_info), in_room(cam_a, room),
+                            pc._occludes(cam_a, infos[1], sub_info, {"_bottom": "chest"}), cleared["cameraFix"].get("kind")],  # noqa: SLF001
+                   [True, True, True, False, "orbit"],
+                   "앞사람 머리 안 → 0.35m 이상·주인공 눈이 화면 안·방 안·가림 없음·orbit")
+            notes.append(f"앞사람 머리 안 → {cleared['cameraFix']} 여유 {clr:.3f}m")
+        # 주인공 얼굴 0.25m 앞(머리 표면에서 0.09m): 시선 반대로 물린다(pullback).
+        near = {"pos": [0.0, round(sub_info["y"]("eye"), 4), -0.75], "target": [0.0, round(sub_info["y"]("eye"), 4), -1.0],
+                "fov": pc.LENS["MCU"][0]}
+        acts_n = _copy.deepcopy(actors)
+        acts_n[1]["foot"] = [1.5, 0.0, 0.0]
+        infos_n = infos_of(acts_n)
+        cleared_n = pc.clear_cut_camera(near, acts_n, room, g_single, "50mm")
+        if not cleared_n:
+            bad.append("(cc-a) 얼굴에 붙은 카메라를 옮기지 않았습니다")
+        else:
+            cam_n = cleared_n["camera"]
+            clr_n = pc.camera_clearance(tuple(cam_n["pos"]), infos_n)
+            fwd_old = pc._norm(pc._sub(tuple(near["target"]), tuple(near["pos"])))  # noqa: SLF001
+            fwd_new = pc._norm(pc._sub(tuple(cam_n["target"]), tuple(cam_n["pos"])))  # noqa: SLF001
+            expect("cc-a", [clr_n >= pc.CAMERA_MIN_CLEAR_M - 1e-9, subject_seen(cam_n, infos_n[0]), in_room(cam_n, room),
+                            cleared_n["cameraFix"].get("kind"), pc._dot(fwd_old, fwd_new) > 0.9999],  # noqa: SLF001
+                   [True, True, True, "pullback", True], "얼굴에 붙음 → 같은 시선으로 물림·0.35m 이상·주인공 눈 화면 안·방 안")
+            notes.append(f"얼굴 앞 → {cleared_n['cameraFix']}")
+        # 뒤가 벽(방 깊이 1.6m)이면 물릴 수 없다 → 주인공 축을 돈다(orbit).
+        tight = {"width": 6.0, "depth": 1.8, "height": 3.0}
+        acts_t = _copy.deepcopy(actors)
+        acts_t[0]["foot"] = [0.0, 0.0, -0.4]
+        acts_t[1]["foot"] = [0.0, 0.0, 0.45]
+        infos_t = infos_of(acts_t)
+        mid_t = (0.0, (infos_t[0]["y"]("top") + infos_t[0]["y"]("chest")) / 2.0, -0.4)
+        inside_t = {"pos": [0.0, round(infos_t[1]["y"]("eye"), 4), 0.45], "target": [0.0, round(mid_t[1], 4), -0.4],
+                    "fov": pc.LENS["MCU"][0]}
+        cleared_t = pc.clear_cut_camera(inside_t, acts_t, tight, g_single, "50mm")
+        if not cleared_t:
+            bad.append("(cc-a) 벽에 막힌 머리 안 카메라를 옮기지 않았습니다")
+        else:
+            cam_t = cleared_t["camera"]
+            clr_t = pc.camera_clearance(tuple(cam_t["pos"]), infos_t)
+            expect("cc-a", [clr_t >= pc.CAMERA_MIN_CLEAR_M - 1e-9, subject_seen(cam_t, infos_t[0]), in_room(cam_t, tight),
+                            cleared_t["cameraFix"].get("kind")], [True, True, True, "orbit"],
+                   "벽에 막힘 → orbit·0.35m 이상·주인공 눈이 화면 안·방 안")
+            notes.append(f"벽 → {cleared_t['cameraFix']} 여유 {clr_t:.3f}m")
+        # previz 3.5 뒤 다시 보기: 저장된 컷 카메라가 머리 안이면 camera·fit.cameraFix·match 를 바꾸고 로그를 남긴다.
+        scene = {"room": dict(room), "actors": [{"id": "aB", "name": B, "heightM": 1.8}, {"id": "aY", "name": Y, "heightM": 1.72}],
+                 "timeline": [{"cutId": "c7", "camera": dict(inside),
+                               "actors": [{"id": "aB", "pos": [0.0, 0.0, -1.0], "pose": "stand"},
+                                          {"id": "aY", "pos": [0.0, 0.0, 0.0], "pose": "stand"}]}]}
+        fit = {"c7": {"match": 0.9, "method": "grammar", "lens": "50mm"}}
+        cap = _Cap()
+        vlog = logging.getLogger("vpoc")
+        old_level = vlog.level
+        vlog.addHandler(cap)
+        vlog.setLevel(logging.INFO)
+        try:
+            pvmod._clear_cameras([scene], fit, {"c7": g_single}, {})  # noqa: SLF001
+        finally:
+            vlog.removeHandler(cap)
+            vlog.setLevel(old_level)
+        cam_s = scene["timeline"][0]["camera"]
+        expect("cc-a", [pc.camera_clearance(tuple(cam_s["pos"]), infos) >= pc.CAMERA_MIN_CLEAR_M - 1e-9,
+                        (fit["c7"].get("cameraFix") or {}).get("kind") in ("pullback", "orbit"), isinstance(fit["c7"].get("match"), float),
+                        any(line.startswith("vnew.previz.camera_clear cut=") and "kind=" in line for line in cap.lines)],
+               [True, True, True, True], "3.5 뒤 다시 보기: 여유·fit.cameraFix·match 다시 잼·camera_clear 로그")
+
+        # ================= (cc-b) 어깨 너머 앞사람 70% =================
+        g_ots = pg.normalize_grammar({"mainSubject": B, "shotType": "over_shoulder", "shotSize": "MCU", "vantage": "3q",
+                                      "headTopY": 0.1, "subjectX": 0.6,
+                                      "others": [{"name": Y, "how": "shoulder_or_back", "side": "left"}]})
+        ots_pos = (0.2, round(infos[1]["y"]("shoulder") + 0.1, 4), 1.0)
+        ots_cam = pc._to_camera_dict(pc._look(ots_pos, mid, pc.LENS["MCU"][0]))  # noqa: SLF001
+        area0 = pc._foreground_area(ots_cam, infos[1])  # noqa: SLF001
+        expect("cc-b", [area0 >= 0.7, pc.camera_clearance(ots_pos, infos) >= pc.CAMERA_MIN_CLEAR_M], [True, True],
+               "시작: 앞사람이 화면 70% 이상(여유는 있음)")
+        cleared_b = pc.clear_cut_camera(ots_cam, actors, room, g_ots, "50mm")
+        if not cleared_b:
+            bad.append("(cc-b) 앞사람 70% 어깨 너머를 옮기지 않았습니다")
+        else:
+            cam_b = cleared_b["camera"]
+            area_b = pc._foreground_area(cam_b, infos[1])  # noqa: SLF001
+            expect("cc-b", [area_b <= pc.OTS_FOREGROUND_MAX + 1e-9,
+                            pc.camera_clearance(tuple(cam_b["pos"]), infos) >= pc.CAMERA_MIN_CLEAR_M - 1e-9,
+                            subject_seen(cam_b, sub_info), in_room(cam_b, room)], [True, True, True, True],
+                   "앞사람 35% 이하·여유·주인공 눈 화면 안·방 안")
+            notes.append(f"어깨 너머 {area0:.2f} → {area_b:.2f} ({cleared_b['cameraFix']['kind']})")
+        identity = lambda cam, size, *a, **k: (cam, size, None)  # noqa: E731
+        saved = pc._clear_search  # noqa: SLF001
+        pc._clear_search = identity  # noqa: SLF001
+        try:
+            res_ots_old = pc.place_cut(dict(g_ots), _copy.deepcopy(actors), room, 1)
+        finally:
+            pc._clear_search = saved  # noqa: SLF001
+        res_ots = pc.place_cut(dict(g_ots), _copy.deepcopy(actors), room, 1)
+        area_old = pc._foreground_area(res_ots_old["camera"], infos[1])  # noqa: SLF001
+        area_new = pc._foreground_area(res_ots["camera"], infos[1])  # noqa: SLF001
+        expect("cc-b", [area_new <= pc.OTS_FOREGROUND_MAX + 1e-9, isinstance(res_ots["fit"].get("cameraFix"), dict)], [True, True],
+               "place_cut 어깨 너머: 앞사람 35% 이하·cameraFix")
+        notes.append(f"place_cut 어깨 너머 {area_old:.2f} → {area_new:.2f} match {res_ots_old['fit']['match']} → {res_ots['fit']['match']}")
+
+        # ================= (cc-c) 일치도 낮은 컷 다시 보정 =================
+        A2, B2 = "가", "나"
+        g_low = pg.normalize_grammar({"shotType": "two_shot", "shotSize": "CU", "mainSubject": A2, "vantage": "3q", "headTopY": 0.1,
+                                      "subjectX": 0.31, "cameraHeight": "eye", "offscreenPartnerSide": "right",
+                                      "others": [{"name": B2, "how": "full", "side": "right", "screenX": 0.69}],
+                                      "faceTurn": "screen_right"})
+        acts_low = [{"id": "a1", "name": A2, "heightM": 1.7, "foot": [-1.0, 0.0, 0.0], "pose": "stand"},
+                    {"id": "a2", "name": B2, "heightM": 1.7, "foot": [1.0, 0.0, 0.0], "pose": "stand"}]
+        room_low = {"width": 8.0, "depth": 6.0, "height": 3.0}
+        r_before = pc.place_cut(dict(g_low), _copy.deepcopy(acts_low), room_low, 1)
+        r_after = pc.place_cut(dict(g_low), _copy.deepcopy(acts_low), room_low, 1, min_match=pc.APPROVE_MIN_MATCH)
+        m0, m1 = r_before["fit"]["match"], r_after["fit"]["match"]
+        infos_low = [pc._actor_points(a, a["foot"], "stand") for a in r_after["actors"]]  # noqa: SLF001
+        expect("cc-c", [m0 < pc.APPROVE_MIN_MATCH, m1 >= m0, r_after.get("retry", {}).get("before"), r_after.get("retry", {}).get("after"),
+                        pc.camera_clearance(tuple(r_after["camera"]["pos"]), infos_low) >= pc.CAMERA_MIN_CLEAR_M - 1e-9,
+                        in_room(r_after["camera"], room_low)],
+               [True, True, m0, m1, True, True], "낮은 컷 다시 보정: 같거나 좋아짐·전후 기록·여유·방 안")
+        notes.append(f"낮은 컷 {m0} → {m1}")
+        # 다시 보정 후보가 모두 나쁘면 그대로(나빠지지 않음).
+        cam0 = pc._look((0.0, 1.6, 2.0), (0.0, 1.5, -1.0), pc.LENS["MCU"][0])  # noqa: SLF001
+        sub_low = infos_of(actors)[0]
+        sub_low["actor"] = actors[0]
+        base_score = pc._match_score(cam0, sub_low, 0.1, 0.5, "chest", [])  # noqa: SLF001
+        pc_refine = pc._refine  # noqa: SLF001
+        pc._refine = lambda seed, fov, residual, free: (seed[0], seed[1] + 1.0, seed[2], fov)  # noqa: SLF001 — 일부러 엉뚱한 자리
+        try:
+            worse_cam, worse_score = pc._retry_low_match(cam0, g_single, "clean_single", sub_low, None, [sub_low], [], None, None,  # noqa: SLF001
+                                                         0.1, 0.5, "chest", base_score)
+        finally:
+            pc._refine = pc_refine  # noqa: SLF001
+        expect("cc-c", [worse_cam, worse_score], [None, base_score], "후보가 모두 나쁘면 카메라·점수 그대로")
+        log_src = (APP_SRC / "vnew" / "previz.py").read_text(encoding="utf-8")
+        expect("cc-c", ["vnew.previz.match_retry cut=%s before=%.4f after=%.4f" in log_src,
+                        "min_match=APPROVE_MIN_MATCH" in log_src], [True, True], "previz 가 APPROVE_MIN_MATCH 로 부르고 전후를 로그")
+
+        # ================= (cc-d) 여유 있는 카메라는 그대로 =================
+        g_two = pg.normalize_grammar({"mainSubject": B, "shotType": "two_shot", "shotSize": "MLS", "vantage": "3q",
+                                      "headTopY": 0.1, "subjectX": 0.35,
+                                      "others": [{"name": Y, "how": "full", "side": "right", "screenX": 0.65}]})
+        acts_d = _copy.deepcopy(actors)
+        acts_d[1]["foot"] = [1.0, 0.0, -1.0]
+        for label, gram in (("single", g_single), ("two_shot", g_two)):
+            pc._clear_search = identity  # noqa: SLF001
+            try:
+                old = pc.place_cut(dict(gram), _copy.deepcopy(acts_d), room, 1)
+            finally:
+                pc._clear_search = saved  # noqa: SLF001
+            new = pc.place_cut(dict(gram), _copy.deepcopy(acts_d), room, 1, min_match=pc.APPROVE_MIN_MATCH)
+            expect("cc-d", [old["fit"]["match"] >= pc.APPROVE_MIN_MATCH, json.dumps(new, sort_keys=True) == json.dumps(old, sort_keys=True),
+                            pc.clear_cut_camera(new["camera"], acts_d, room, gram, new["fit"]["lens"])],
+                   [True, True, None], f"{label}: 여유 있고 일치도 0.7 이상 → place_cut 결과 바이트 같음·clear_cut_camera None")
+        scene_d = {"room": dict(room), "actors": [{"id": "aB", "name": B, "heightM": 1.8}, {"id": "aY", "name": Y, "heightM": 1.72}],
+                   "timeline": [{"cutId": "c1", "camera": dict(new["camera"]),
+                                 "actors": [{"id": a["id"], "pos": list(a["foot"]), "pose": "stand"} for a in new["actors"]]}]}
+        fit_d = {"c1": {"match": new["fit"]["match"], "method": "grammar", "lens": new["fit"]["lens"]}}
+        before_d = json.dumps([scene_d, fit_d], sort_keys=True)
+        pvmod._clear_cameras([scene_d], fit_d, {"c1": g_two}, {})  # noqa: SLF001
+        expect("cc-d", json.dumps([scene_d, fit_d], sort_keys=True) == before_d, True, "3.5 뒤 다시 보기: 여유 있는 설계 바이트 같음")
+
+        # ================= (cc-e) 렌더러(node) =================
+        from src.vnew import previz_schema as pvschema  # noqa: PLC0415
+
+        def r_scene(camera: dict) -> dict:
+            return pvschema.normalize_scene({
+                "room": {"width": 6, "depth": 6},
+                "actors": [{"id": "aB", "name": B, "heightM": 1.8}, {"id": "aY", "name": Y, "heightM": 1.72}],
+                "timeline": [{"cutId": "c1", "camera": camera,
+                              "actors": [{"id": "aB", "pos": [0, 0, -0.6], "facingDeg": 0, "pose": "stand"},
+                                         {"id": "aY", "pos": [0, 0, 0], "facingDeg": 180, "pose": "stand"}]}],
+            }, location_id="x", cut_specs=[{"cutId": "c1", "seconds": 3}])
+
+        cases = {"inside": r_scene({"pos": [0.0, 1.649, 0.0], "target": [0.0, 1.6, -0.6], "fov": 30}),
+                 "clear": r_scene({"pos": [0.0, 1.5, 3.0], "target": [0.0, 1.4, 0.0], "fov": 30})}
+        saved_pos = {k: list(v["timeline"][0]["camera"]["pos"]) for k, v in cases.items()}
+        rendered, err = _cc151_render(cases)
+        if err:
+            bad.append(f"(cc-e) {err}")
+        elif not rendered:
+            warn("node 가 없어 작업 151 렌더러 카메라 여유 검사(cc-e)를 건너뜁니다 (E16)")
+        else:
+            def r_clear(run) -> float:
+                p = run["pos"]
+                best = _math.inf
+                for v in run["vols"]:
+                    if "c" in v:
+                        best = min(best, _math.dist(p, v["c"]) - v["r"])
+                    else:
+                        a, b = v["a"], v["b"]
+                        ab = [b[i] - a[i] for i in range(3)]
+                        den = sum(x * x for x in ab) or 1e-12
+                        t = max(0.0, min(1.0, sum((p[i] - a[i]) * ab[i] for i in range(3)) / den))
+                        best = min(best, _math.dist(p, [a[i] + ab[i] * t for i in range(3)]) - v["r"])
+                return best
+
+            ins = rendered["inside"]
+            run0, run1 = ins["runs"]
+            start = saved_pos["inside"]
+            back = [run0["pos"][i] - start[i] for i in range(3)]
+            along = sum(back[i] * run0["dir"][i] for i in range(3))
+            expect("cc-e", [run0["pullback"] > 0, r_clear(run0) >= 0.25 - 1e-9, run0["pos"] == run1["pos"],
+                            run0["pullback"] == run1["pullback"], along < 0, ins["savedPos"] == start],
+                   [True, True, True, True, True, True],
+                   "머리 안 → 그리기 전에 시선 반대로 물림·0.25m 이상·두 번 같은 값·저장 설계 그대로")
+            clr = rendered["clear"]["runs"][0]
+            expect("cc-e", [clr["pullback"], [round(x, 9) for x in clr["pos"]], rendered["clear"]["savedPos"]],
+                   [0, saved_pos["clear"], saved_pos["clear"]], "여유 있는 카메라는 그대로")
+            notes.append(f"렌더러 물림 {run0['pullback']:.2f}m")
+    except Exception:  # noqa: BLE001
+        bad.append("작업 151 검사 예외\n" + _tb.format_exc())
+    if bad:
+        fail("작업 151 프리비즈 카메라 여유 검사 실패\n  " + "\n  ".join(bad))
+    else:
+        ok("작업 151 프리비즈 카메라 여유 (cc-a)앞사람 머리 안 orbit·얼굴 앞 pullback·벽 orbit·3.5 뒤 다시 보기 로그 (cc-b)어깨 너머 35% 이하 "
+           "(cc-c)낮은 컷 같거나 좋아짐 (cc-d)여유 있으면 바이트 같음 (cc-e)렌더러 물림·결정적 — " + "; ".join(notes))
+
+
 def main() -> int:
     print("== vpoc1 check ==")
     check_compileall()
@@ -51317,6 +51661,7 @@ def main() -> int:
     check_vnew_dialogue_runs_147()
     check_vnew_previz_pose_148()
     check_vnew_api_retry_150()
+    check_vnew_previz_camera_clear_151()
     check_vnew_plan_step_stay_129()
     check_pod_zones()
     print()
