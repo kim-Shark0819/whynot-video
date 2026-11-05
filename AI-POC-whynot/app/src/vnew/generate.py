@@ -3168,6 +3168,12 @@ def _harmony_min(plan: dict) -> str:
     return HARMONY_MIN.format(tod=tod or "@Video1's", drift=drift)
 
 
+# 작업 140: 실사 인물 참고 사진은 이 프로젝트에서 AI 로 만든 캐릭터 프로필이다(실존 인물 아님). 실사 프롬프트(Seedance 통 테이크
+# 0·1단계·인물 바꾸기, 컷 단위 Kling, 컷 시작 그림 Seedream)의 첫 줄. 줄이기에서 빠지지 않는다(예산에서 미리 뺀다). 애니는 넣지 않는다.
+REAL_REF_AI_NOTE = (
+    "MANDATORY: Every person reference image is an AI-generated fictional character profile created for this project, "
+    "not a photo of any real person or celebrity. No real individual is depicted; these are original synthetic characters."
+)
 # vnew-live-fx C.5 실사 통 테이크 조각(design 표 원문). STYLE 은 참고 구현 vpoc/compose.py:13-17 STYLE["live_action"] 에서
 # 결정 7로 두 곳을 바꿨다("warm pastel color grading" 뺌, "romance K-drama cinematography" → "K-drama cinematography").
 REAL_TAKE_STYLE = (
@@ -3273,6 +3279,8 @@ def _take_prompt(plan: dict, take: dict, *, cast: list[dict], panel_nos: list[in
     budget = _take_prompt_budget(caps)
     fx_on = bool(vnew_settings.VNEW_FX)
     real = variant == "real"
+    if real:
+        budget -= _utf8_len(REAL_REF_AI_NOTE) + 1  # 작업 140: 맨 앞 AI 캐릭터 고지(줄이기에서 빠지지 않게 미리 뺀다)
     entries = _take_timeline_entries(plan, take)
     if real:
         # 작업 136: 실사 연기(지시서 actionEn) = 그림 문장 빼기·옷 구절 → 그 컷 장면 옷(_real_brief_text). 웹툰은 그대로.
@@ -3844,6 +3852,7 @@ def _take_prompt(plan: dict, take: dict, *, cast: list[dict], panel_nos: list[in
         # 작업 127: 고정부를 맨 앞에(예산은 위에서 미리 뺐다).
         prompt = fixed_head + "\n" + prompt
     if real:
+        prompt = REAL_REF_AI_NOTE + "\n" + prompt  # 작업 140: 맨 앞(예산은 위에서 미리 뺐다)
         # vnew-live-fx C2: 실사 프롬프트 바이트·줄이기 단계(개발계에서 실사 회차가 얼마나 줄었는지 본다).
         log.info("vnew.gen.take_prompt variant=real bytes=%d steps=%s", _utf8_len(prompt), ",".join(applied) or "none")
         return prompt
@@ -4392,6 +4401,7 @@ def _do_poll_previz(owner: str, pid: str, gen_id: str, index: int, variant: str,
                 and _likeness_rejected(poll_result.get("failureMessage")):
             # 작업 130: 생성 전 거절이라 원장 0. 다음 단계(정면 1장 → 컷 단위 Kling)로 같은 회차 안에서 다시 만든다.
             _log_result(owner, pid, gen_id, gen, index, variant, arn, "failed", error=str(poll_result.get("failureMessage")))
+            log.info("vnew.gen.real_likeness_reject step=%d note=1", _fallback_step(state))  # 작업 140: AI 캐릭터 고지를 보낸 뒤의 거절
             _escalate_likeness(owner, pid, gen_id, index, claim)
             return
         if take_real:
@@ -4881,7 +4891,9 @@ def _cut_still_prompt(plan: dict, cut: dict, people: list[tuple[str, str, int]],
         known |= {str(a.get("name") or "") for a in _segment_actors(plan, {"cutIds": [cut_id]})}
         known |= {str(ch.get("name") or "") for ch in conti_cut.get("characters") or [] if isinstance(ch, dict)}
         hidden = {n for n in known if n.strip()} - {name for name, _side, _visible in listed}
-    parts = [REAL_STILL_FRAMING.format(shot=SHOT_SIZE_EN.get(shot, shot))] if layout else []
+    parts = [REAL_REF_AI_NOTE]  # 작업 140: 첫 줄
+    if layout:
+        parts.append(REAL_STILL_FRAMING.format(shot=SHOT_SIZE_EN.get(shot, shot)))
     parts.append("Photoreal live-action film still, 16:9, a single frame of a Korean drama.")
     if anime:
         parts.append("Image 1 is this exact shot: redraw Image 1 as a photoreal live-action frame with the same composition, "
@@ -5625,6 +5637,7 @@ def _do_poll_real_cuts(owner: str, pid: str, gen_id: str, index: int, claim: str
     if failed:
         error = str(failed[0].get("error") or "")
         if _likeness_rejected(error):
+            log.info("vnew.gen.real_likeness_reject step=2 note=1")  # 작업 140: 컷 단위 Kling 프롬프트에도 고지를 보냈다
             tried = list((state.get("fallback") or {}).get("tried") or []) + [REAL_FALLBACK_TRIED[2]]
             message, kind = REAL_FALLBACK_FAIL.format(steps=" → ".join(tried)), "likeness"
         else:
@@ -7723,6 +7736,7 @@ def _real_cut_prompt(plan: dict, seg: dict, *, model: str = "", prompt_max: int 
     cut_id = cut_ids[0] if cut_ids else ""
     cut = next((c for c in (plan.get("conti") or {}).get("cuts") or [] if str(c.get("id")) == cut_id), {})
     head = "\n".join([
+        REAL_REF_AI_NOTE,  # 작업 140: 첫 줄(머리라 줄이기에서 빠지지 않는다)
         _fixed_head(plan, str(cut.get("locationEn") or ""), real=True),
         "Start from the first frame (a live-action still) and continue the action smoothly, keeping the "
         "same place, lighting, characters, positions and outfits.",
