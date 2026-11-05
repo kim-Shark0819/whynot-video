@@ -280,6 +280,10 @@ VNEW_FX_MAX_PANELS = _int("VNEW_FX_MAX_PANELS", 20)
 # "Panel N of M:" 라벨과 보내 컷의 sourcePanel·shotSize·그려진 기호를 받는다. 그림 요청이 실패하면 글만 1회 다시 보낸다.
 # false 면 지금 동작(글 블록 하나, 바이트 같음).
 VNEW_CONTI_IMAGES = _bool("VNEW_CONTI_IMAGES", True)
+# 작업 158: ③ 콘티 = video-vibecode 샷 계획(prompts.VIBE_CUTS_SYSTEM · EMIT_VIBE_CUTS, 참고 MASTER_CUTS_SYSTEM 그대로). 켜면
+# 우리 대본 줄·패널·총 길이·캐릭터(이름·외형·시트 그림)·부가 설명·120 타일로 샷을 받아 conti.cuts 모양으로 옮긴다
+# (plan._vibe_cuts). false 면 지금 CONTI_SYSTEM 경로 그대로(프롬프트 바이트 같음).
+VNEW_VIBE_CONTI = _bool("VNEW_VIBE_CONTI", True)
 
 # 실사 캐스팅(vnew-live-fx 묶음 B, 2026-10-30). 켜면 캐릭터 상세에서 실사 배우 사진을 글로만 뽑아 고르고(Seedream 4.5
 # text-to-image, 웹툰 그림은 보내지 않는다), 캐릭터 분석에 성별(genderEn)을 더한다. false 면 지금 동작(캐스팅 라우트 404·
@@ -467,6 +471,10 @@ VNEW_TAKE_CAST_PANELS = _int("VNEW_TAKE_CAST_PANELS", 4)
 # '스키마에 명시된 값'이면(= 기본 2500 이 아닌 실제 maxLength) 그 값과 이 값 중 작은 값을 쓴다(_take_prompt_budget).
 # 통 테이크 API 가 바이트 상한을 문서로 밝힌 모델은 없어 바이트 안전 상한은 두지 않는다. Kling 컷 단위는 그대로(PREVIZ_PROMPT_TARGET).
 VNEW_TAKE_PROMPT_MAX_CHARS = _int("VNEW_TAKE_PROMPT_MAX_CHARS", 4000)
+# 작업 159: 통 테이크(프리비즈 테이크·152 조각·153/156 대체) 프롬프트를 video-vibecode(vpoc compose._cuts_video_prompt ·
+# live.live_video_prompt) 형식으로 만든다(generate._vibe_take_prompt). 참고 이미지 = 인물별 시트+정면 → 장소 뷰, @Video1 = 프리비즈.
+# 끄면 지금 _take_prompt·참고 이미지 그대로(sha 같음). 컷 단위 Kling(130)은 켬·끔과 상관없다.
+VNEW_VIBE_PROMPT = _bool("VNEW_VIBE_PROMPT", True)
 # 해상도별 (가로, 세로) — 토큰 공식 tokens = w×h×24×s/1024 에 쓴다(fal 실측 기준).
 TAKE_RESOLUTION_WH = {
     "480p": (854, 480),

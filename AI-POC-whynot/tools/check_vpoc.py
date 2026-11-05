@@ -53233,16 +53233,21 @@ def _tc157_submit(bad: list[str], report: list[str]) -> None:
         plan = env.plan(pid)
         take = genmod._take_units(plan)[0]  # noqa: SLF001
         caps = dict(_LR_CAPS)
-        vset.VNEW_TAKE_PROMPT_MAX_CHARS = 100  # 다 줄인 길이를 잰다(로그 없음 probe)
-        built = genmod._take_payload(owner, pid, plan, take, caps)  # noqa: SLF001
-        whole_min = int(built["probe"](take).get("chars") or 0)
-        half_min = int(built["probe"](genmod._part_take(plan, take, {"cutIds": ["c1", "c2"], "seconds": 6.0})).get("chars") or 0)  # noqa: SLF001
-        vset.VNEW_TAKE_PROMPT_MAX_CHARS = (whole_min + half_min) // 2  # 4컷은 안 들고 2컷은 든다
-        logs.clear()
-        since = len(env.requests)
-        client = env.client()
-        client.post(f"/api/vnew/p/{pid}/generate", json={"confirmUsd": genmod.estimate(env.plan(pid))["totalUsd"]})
-        g = env.drive(pid)
+        saved_limit = vset.VNEW_TAKE_PROMPT_MAX_CHARS  # fix1: 아래에서 바꾼 상한을 finally 에서 되돌린다(뒤 검사로 새지 않게)
+        try:
+            vset.VNEW_TAKE_PROMPT_MAX_CHARS = 100  # 다 줄인 길이를 잰다(로그 없음 probe)
+            built = genmod._take_payload(owner, pid, plan, take, caps)  # noqa: SLF001
+            whole_min = int(built["probe"](take).get("chars") or 0)
+            half_min = int(built["probe"](genmod._part_take(plan, take, {"cutIds": ["c1", "c2"], "seconds": 6.0})).get("chars") or 0)  # noqa: SLF001
+            vset.VNEW_TAKE_PROMPT_MAX_CHARS = (whole_min + half_min) // 2  # 4컷은 안 들고 2컷은 든다
+            logs.clear()
+            since = len(env.requests)
+            client = env.client()
+            client.post(f"/api/vnew/p/{pid}/generate", json={"confirmUsd": genmod.estimate(env.plan(pid))["totalUsd"]})
+            g = env.drive(pid)
+            used_limit = vset.VNEW_TAKE_PROMPT_MAX_CHARS
+        finally:
+            vset.VNEW_TAKE_PROMPT_MAX_CHARS = saved_limit
         reqs = env.requests[since:]
         state = genmod._previz_cells(g)[0]["webtoon"]  # noqa: SLF001
         part_ids = [p.get("cutIds") for p in state.get("parts") or []]
@@ -53253,9 +53258,766 @@ def _tc157_submit(bad: list[str], report: list[str]) -> None:
         if len(part_ids) < 2 or [c for ids in part_ids for c in ids] != ["c1", "c2", "c3", "c4"] or lines != want_lines \
                 or len(audits) != len(reqs) or any(a != b for a, b in counts) or state.get("status") != "completed":
             bad.append(f"(tc-d) 넘치는 통 테이크 제출: 조각 {part_ids} 요청 대사 {lines} 감사 {counts} 상태 {state.get('status')} "
-                       f"상한 {vset.VNEW_TAKE_PROMPT_MAX_CHARS}자({whole_min}/{half_min})")
-        report.append(f"제출: 상한 {vset.VNEW_TAKE_PROMPT_MAX_CHARS}자 → 조각 {part_ids}, 감사 {len(audits)}줄 "
+                       f"상한 {used_limit}자({whole_min}/{half_min})")
+        report.append(f"제출: 상한 {used_limit}자 → 조각 {part_ids}, 감사 {len(audits)}줄 "
                       f"{audits[0].split(' cuts=', 1)[-1] if audits else ''}")
+
+
+# 작업 159: 참고 구현(whynot-20261029 app/src/vpoc/compose.py STYLE·_cuts_video_prompt, live.py reference_lead) 원문을 옮겨 둔 글자.
+_VB159_MULTI_SHOT = (
+    "A multi-shot sequence of {n} shots edited like a TV drama, with a hard cut at the start of "
+    "each new shot. Each shot keeps one framing and the camera stays almost still within the shot. "
+    "The same characters, outfits and setting appear in every shot, and each character's hair color and "
+    "clothing colors stay exactly as described above in every shot. Each person has exactly two hands; "
+    "only the hands described in a shot are visible."
+)
+_VB159_STYLE_WEBTOON = ("Korean webtoon art style exactly as in the uploaded webtoon images: the same line work, "
+                        "coloring, shading and character designs")
+_VB159_STYLE_LIVE = ("Cinematic live-action film footage, photorealistic, natural skin texture, 35mm lens, soft natural light, "
+                     "romance K-drama cinematography, soft glow, shallow depth of field, warm pastel color grading")
+_VB159_LOCATION = "@Image{no} is the location (no people in it); keep this place, its background and light in every shot"
+_VB159_VIDEO = ("@Video1 is the 3D previz: follow its camera, positions, cuts and timing exactly; "
+                "replace each mannequin with its person")
+_VB159_SHEET = "AI-generated turnaround sheet of a fictional character; match face/hair/build, clothes from the look line"
+_VB159_SPOKEN = "spoken (audio only, never written on screen)"
+# fix1: 애니 원작 패널 설명(STYLE 이 부르는 "the uploaded webtoon images", 옛 _take_prompt 와 같은 범위 표기).
+_VB159_PANELS = "{refs} are the uploaded webtoon images (art style reference only)"
+# 끔(VNEW_VIBE_PROMPT=False) 기준: 작업 159 전 _take_prompt 의 157 손 추출 통 테이크 sha(VNEW_FX 켬·4,000자, 157 검사 cast).
+_VB159_SHA_OFF = {"anime": "057902b478b7da5372d374f99a11174b725b72d0bda8498c3f1ca93ce436ccf7",
+                  "real": "df11aa7420e9ebdfdf429983c056cf08187f69ba6ba61e4129570e14f87850c9"}
+
+
+def check_vnew_vibe_prompt_159() -> None:
+    """작업 159 — 통 테이크 프롬프트 = video-vibecode 형식(_vibe_take_prompt, VNEW_VIBE_PROMPT 기본 켬). 가짜, 유료 0.
+
+    (vb-a) 애니(157 손 추출 test3 모양): 140 고지 → 인물 handle+look → 컷 지시 단락(참고 원문 그대로) → Setting → Shot 1..6
+           (who_in_shot·연기+닿는 연기·포즈·모든 대사 spoken (audio only …)) → @Image 설명(reference_lead 문구·시트 절) → @Video1
+    (vb-b) 실사: STYLE live_action 원문·REAL_FX(눈물·옅은 홍조)·웹툰 낱말 없음(_assert_no_webtoon)·@Video1·애니와 같은 대사
+    (vb-c) 감사: 조각 c01–c02·c03–c06 애니·실사 4,000자 안, lines_in_prompt = lines_in_conti, 모든 컷 연기
+    (vb-d) 예산: 짧은 형은 style → background → assets → paragraph 순(앞부분만), 샷 문장은 그대로, 넘치면 157 조각으로 나눈다
+    (vb-e) 끔: _take_prompt sha 그대로(작업 159 전 값), _take_payload 끔 = 지금 _take_prompt·패널 참고 그대로
+    (vb-f) 흐름(가짜 fal Seedance): 애니·실사 제출 프롬프트가 vibe 형식, 실사 = Seedance + 프리비즈 영상 + [시트, 정면]×2 + 실사 장소,
+           애니 = [웹툰 시트, 웹툰 정면]×2 + 웹툰 장소 + 원작 패널(fix1, 옛 _take_prompt 와 같은 패널·순서), 상한에 걸리면 패널부터 빠짐,
+           제출마다 prompt_audit 1줄 줄 수 같음
+    """
+    import base64 as _b64  # noqa: PLC0415
+    import hashlib as _hashlib  # noqa: PLC0415
+    import traceback as _tb  # noqa: PLC0415
+
+    sys.path.insert(0, str(ROOT / "app"))
+    from src.vnew import generate as genmod  # noqa: PLC0415
+
+    bad: list[str] = []
+    report: list[str] = []
+
+    def expect(group: str, got, want, what: str) -> None:
+        if got != want:
+            bad.append(f"({group}) {what}\n      결과 {got!r}\n      기대 {want!r}")
+
+    def sha(text: str) -> str:
+        return _hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+    def decode(uri) -> bytes:
+        try:
+            return _b64.b64decode(str(uri).split(",", 1)[1])
+        except Exception:  # noqa: BLE001
+            return b""
+
+    a, b = _TC157_A, _TC157_B
+    flat_cast = [{"name": b, "colorName": "blue", "frontNo": 1, "appearance": "", "voice": "",
+                  "costume": "Black long-sleeve track top with a single white stripe down each sleeve"},
+                 {"name": a, "colorName": "orange", "frontNo": 2, "appearance": "", "voice": "",
+                  "costume": "Dark navy long-sleeve button-up dress shirt, collar open, worn untucked"}]
+    flat_real = [dict(flat_cast[0], frontNo=2, sheetNo=1, refNos=[1, 2], look="real",
+                      appearance="a Korean man in his 20s with tousled pale blonde hair and long sweeping bangs"),
+                 dict(flat_cast[1], frontNo=4, sheetNo=3, refNos=[3, 4], look="real",
+                      appearance="narrow half-lidded eyes and short charcoal-black hair swept back")]
+    anime_cast = [dict(flat_cast[0], frontNo=2, sheetNo=1, refNos=[1, 2], look="webtoon",
+                       appearance="Pale blonde tousled hair with long bangs, large grey eyes"),
+                  dict(flat_cast[1], frontNo=4, sheetNo=3, refNos=[3, 4], look="webtoon",
+                       appearance="Short swept-back black hair, narrow half-lidded eyes")]
+
+    def kinds(text: str) -> list[str]:
+        out = []
+        for line in text.split("\n"):
+            if line == genmod.REAL_REF_AI_NOTE:
+                out.append("note")
+            elif line.startswith((_VB159_STYLE_WEBTOON, _VB159_STYLE_LIVE, "Korean webtoon art style", "Photoreal live-action")):
+                out.append("style")
+            elif line.endswith("(keep exactly this look)."):
+                out.append("look")
+            elif line.startswith("A multi-shot sequence of "):
+                out.append("paragraph")
+            elif line.startswith("Setting (keep identical in every shot): "):
+                out.append("setting")
+            elif re.match(r"^Shot \d+ \(\d+-\d+s\), ", line):
+                out.append("shot")
+            elif line.startswith("@Image1 is "):
+                out.append("labels")
+            elif line.startswith(_VB159_VIDEO):
+                out.append("video")
+            else:
+                out.append("?" + line[:40])
+        return out
+
+    def shots(text: str) -> list[str]:
+        return [ln for ln in text.split("\n") if re.match(r"^Shot \d+ \(", ln)]
+
+    try:
+        with _guard_real_llm() as llm_calls, _pin_vnew(VNEW_FX=True, VNEW_TAKE_PROMPT_MAX_CHARS=4000, VNEW_VIBE_PROMPT=True) as vset:
+            plan, take = _tc157_plan()
+            ra, rb = genmod._romanize_name(a), genmod._romanize_name(b)  # noqa: SLF001
+            vset.VNEW_TAKE_PROMPT_MAX_CHARS = 8000  # 통 테이크 원형(짧은 형 없음)을 본다
+            full: dict[str, str] = {}
+            audits: dict[str, dict] = {}
+            for variant, cast in (("webtoon", anime_cast), ("real", flat_real)):
+                audits[variant] = {}
+                # fix1: 애니는 원작 패널 @Image6–8(장소 뒤). 실사에 패널 번호를 줘도 설명이 붙지 않아야 한다.
+                full[variant] = genmod._vibe_take_prompt(plan, take, real=variant == "real", cast=cast,  # noqa: SLF001
+                                                         location_no=5, panel_nos=[6, 7, 8], audit=audits[variant],
+                                                         quiet=True)
+            vset.VNEW_TAKE_PROMPT_MAX_CHARS = 4000
+
+            # ================= (vb-a) 애니 순서·내용 =================
+            text = full["webtoon"]
+            lines = text.split("\n")
+            want_kinds = ["note", "style", "look", "look", "paragraph", "setting"] + ["shot"] * 6 + ["labels", "video"]
+            labels = next((ln for ln in lines if ln.startswith("@Image1 is ")), "")
+            expect("vb-a", [kinds(text), lines[1], lines[2], lines[4], lines[5].startswith(
+                "Setting (keep identical in every shot): Outdoors by a low metal railing"), audits["webtoon"].get("compact")],
+                [want_kinds, _VB159_STYLE_WEBTOON + ", with Korean webtoon visual symbols.",
+                 f"{rb}: Pale blonde tousled hair with long bangs, large grey eyes, wearing black long-sleeve track top with a "
+                 "single white stripe down each sleeve (keep exactly this look).", _VB159_MULTI_SHOT.format(n=6), True, []],
+                "애니 줄 순서(고지 → 화풍 → handle+look → 컷 지시 단락 원문 → Setting → Shot → @Image → @Video1)")
+            expect("vb-a", [labels, lines[-1]],
+                   [f"@Image1 is {rb}; @Image2 is {rb}; @Image3 is {ra}; @Image4 is {ra}; " + _VB159_LOCATION.format(no=5)
+                    + f"; {_VB159_PANELS.format(refs='@Image6–@Image8')}. @Image1, @Image3: {_VB159_SHEET}.",
+                    _VB159_VIDEO + f" (blue = {rb}, orange = {ra})."],
+                   "@Image 설명 = reference_lead 문구(인물 → 장소 → 원작 패널(STYLE 의 uploaded webtoon images), 시트 절 1번)·@Video1 줄")
+            whos = {"cut-01": f"Only {ra} appears in this shot; {rb} is not visible. ",
+                    "cut-02": f"Only {rb} appears in this shot; {ra} is not visible. ",
+                    "cut-06": f"{rb} and {ra} (hands only) appear in this shot. "}
+            per_shot = {}
+            for k, (cid, line) in enumerate(zip(take["cutIds"], shots(text))):
+                action = (audits["webtoon"].get("actions") or [""] * 6)[k]
+                quotes = [f'{_VB159_SPOKEN}: "{q}"' for q in _TC157_QUOTES[cid]]
+                per_shot[cid] = [line.startswith(f"Shot {k + 1} ("), whos.get(cid, "") in line, bool(action) and action in line,
+                                 cid not in _TC157_CONTACT or _TC157_CONTACT[cid].rstrip(".") in line,
+                                 [(text.count(q), q in line) for q in quotes]]
+            expect("vb-a", per_shot, {cid: [True, True, True, True, [(1, True)] * len(_TC157_QUOTES[cid])]
+                                      for cid in take["cutIds"]},
+                   "샷마다 번호·who_in_shot·연기·닿는 연기·대사(spoken (audio only …)) 1번 제 샷 안")
+            expect("vb-a", [f"{rb} (inner voice-over, lips closed), {_VB159_SPOKEN}:" in shots(text)[5],
+                            f"{ra}'s right hand cups {rb}'s neck" in shots(text)[5],
+                            f"{rb} (one continuous line that carries over the next cut" in shots(text)[2],
+                            "TIMELINE" in text or "ASSETS:" in text],
+                   [True, True, True, False], "속마음·148 포즈 절·147 이어지는 말, 옛 TIMELINE/ASSETS 없음")
+
+            # ================= (vb-b) 실사 =================
+            real = full["real"]
+            rs = shots(real)
+            try:
+                genmod._assert_no_webtoon(real)  # noqa: SLF001
+                no_webtoon = True
+            except Exception:  # noqa: BLE001
+                no_webtoon = False
+            expect("vb-b", [kinds(real), real.split("\n")[1], no_webtoon, "webtoon" in real.lower(),
+                            f"tears run down {rb}'s cheeks only" in rs[2], f"a faint natural flush on {rb}'s cheeks only" in rs[5],
+                            any(w in real for w in ("blush lines", "tear streams", "Webtoon-style", "visual symbols")),
+                            real.split("\n")[-1].startswith(_VB159_VIDEO), _VB159_LOCATION.format(no=5) in real,
+                            "uploaded webtoon image" in real,
+                            [re.findall(r'"[^"]*"', ln) for ln in rs] == [re.findall(r'"[^"]*"', ln) for ln in shots(text)]],
+                   [want_kinds, _VB159_STYLE_LIVE + ".", True, False, True, True, False, True, True, False, True],
+                   "실사: 같은 줄 순서·STYLE live_action 원문·웹툰 낱말 없음·REAL_FX·@Video1·장소·패널 없음·애니와 같은 대사")
+
+            # ================= (vb-c) 감사(조각 c01–c02·c03–c06, 4,000자) =================
+            parts = [{"cutIds": ["cut-01", "cut-02"], "seconds": 8.0},
+                     {"cutIds": ["cut-03", "cut-04", "cut-05", "cut-06"], "seconds": 15.0}]
+            got_c, want_c = [], []
+            for variant, cast in (("webtoon", anime_cast), ("real", flat_real)):
+                for part in parts:
+                    sub = genmod._part_take(plan, take, part)  # noqa: SLF001
+                    audit: dict = {}
+                    out = genmod._vibe_take_prompt(plan, sub, real=variant == "real", cast=cast, location_no=5,  # noqa: SLF001
+                                                   panel_nos=[] if variant == "real" else [6, 7, 8], audit=audit, quiet=True)
+                    got_c.append([audit.get("fits"), audit.get("linesInPrompt") == audit.get("linesInConti"),
+                                  audit.get("actionsInPrompt"), len(shots(out))])
+                    want_c.append([True, True, len(sub["cutIds"]), len(sub["cutIds"])])
+                    report.append(f"{variant} {sub['cutIds'][0]}–{sub['cutIds'][-1]}: {genmod._prompt_len(out)}자 compact="  # noqa: SLF001
+                                  f"{','.join(audit.get('compact') or []) or 'none'} 대사 {audit.get('linesInPrompt')}/"
+                                  f"{audit.get('linesInConti')} 연기 {audit.get('actionsInPrompt')}/{audit.get('cuts')}")
+            expect("vb-c", got_c, want_c, "조각마다 4,000자 안·대사 줄 수 같음·모든 컷 연기·샷 줄 수 = 컷 수")
+
+            # ================= (vb-d) 예산 =================
+            order = list(genmod.VIBE_COMPACT_ORDER)
+            got_d = []
+            vset.VNEW_TAKE_PROMPT_MAX_CHARS = 8000  # 상한 = caps.promptMaxLength(통 테이크 원형보다 20자 작게 · 3,000 · 1,500)
+            for cap in (genmod._prompt_len(text) - 20, 3000, 1500):  # noqa: SLF001
+                audit = {}
+                with _LogCapture() as logs:
+                    out = genmod._vibe_take_prompt(plan, take, real=False, cast=anime_cast, location_no=5,  # noqa: SLF001
+                                                   panel_nos=[6, 7, 8], caps={"promptMaxLength": cap}, audit=audit)
+                steps = next((m.rsplit("steps=", 1)[-1] for m in logs.messages("vnew.gen.take_prompt builder=vibe")), "")
+                compact = audit.get("compact") or []
+                got_d.append([compact == order[:len(compact)], bool(compact), shots(out) == shots(text),
+                              audit.get("fits") == (genmod._prompt_len(out) <= cap),  # noqa: SLF001
+                              steps.split(",") == [s + "Compact" for s in compact] + ([] if audit.get("fits") else ["overBudget"]),
+                              audit.get("linesInPrompt") == audit.get("linesInConti") == 9])
+            expect("vb-d", got_d, [[True] * 6] * 3, "짧은 형은 style → background → assets → paragraph 앞부분만·샷 문장 그대로·로그 단계")
+            vset.VNEW_TAKE_PROMPT_MAX_CHARS = 4000
+            expect("vb-d", [genmod._prompt_len(text) > 4000, order[-1]], [True, "paragraph"],  # noqa: SLF001
+                   "통 테이크 원형은 4,000자를 넘고 head 단락이 마지막으로 줄어든다")
+
+            def probe(sub_take: dict) -> dict:
+                result: dict = {}
+                genmod._vibe_take_prompt(plan, sub_take, real=False, cast=anime_cast, location_no=5,  # noqa: SLF001
+                                         panel_nos=[6, 7, 8], caps={"promptMaxLength": 1500}, audit=result, quiet=True)
+                return result
+
+            split_parts = genmod._prompt_split_parts(plan, take, [], {"audit": probe(take), "probe": probe})  # noqa: SLF001
+            probes = [probe(genmod._part_take(plan, take, p)) for p in split_parts]  # noqa: SLF001
+            expect("vb-d", [len(split_parts) >= 2, [c for p in split_parts for c in p["cutIds"]],
+                            all(pr.get("fits") or len(p["cutIds"]) == 1 for p, pr in zip(split_parts, probes)),
+                            all(pr.get("linesInPrompt") == pr.get("linesInConti") for pr in probes)],
+                   [True, take["cutIds"], True, True], f"1,500자 → 157 조각 {[p['cutIds'] for p in split_parts]}")
+            report.append(f"통 테이크 원형 {genmod._prompt_len(text)}자 → 4,000자: 짧은 형 4단계 후 조각, "  # noqa: SLF001
+                          f"1,500자 → 조각 {[p['cutIds'] for p in split_parts]}")
+
+            # ================= (vb-e) 끔: _take_prompt sha 그대로 =================
+            vset.VNEW_VIBE_PROMPT = False
+            with _LogCapture():
+                off_w = genmod._take_prompt(plan, take, cast=flat_cast, panel_nos=[3, 4, 5], location_no=6)  # noqa: SLF001
+                off_r = genmod._take_prompt(plan, take, cast=flat_real, panel_nos=[], location_no=5, variant="real")  # noqa: SLF001
+            expect("vb-e", [sha(off_w), sha(off_r)], [_VB159_SHA_OFF["anime"], _VB159_SHA_OFF["real"]],
+                   "끔: 157 손 추출 통 테이크 _take_prompt sha = 작업 159 전")
+            if llm_calls:
+                bad.append(f"가짜가 아닌 LLM 호출: {llm_calls}")
+
+        # ================= (vb-f) 흐름 =================
+        owner = "tester"
+        with _guard_real_llm() as llm_calls, _LogCapture() as logs, _LrEnv(owner) as env, _pin_vnew(
+                VNEW_FX=False, VNEW_CASTING=True, VNEW_TAKE_REAL=True, VNEW_GEN_PARALLEL=1, POLL_INTERVAL_S=0,
+                VNEW_TAKE_AUDIO=True, VNEW_TAKE_RESOLUTION="480p", VNEW_TEXT_CHECK=False, VNEW_REAL_TAKE_MODEL=_LR_ENDPOINT,
+                VNEW_VIBE_PROMPT=True, VNEW_TAKE_PROMPT_MAX_CHARS=4000) as vset:
+            # 상한 4,000자를 이 검사 안에서 고정한다(_tc157_submit 은 fix1 부터 finally 로 되돌리지만, 순서에 기대지 않는다).
+            for cid in ("ch1", "ch2"):
+                env.chars[cid]["variants"]["real"]["sheetKey"] = f"rs-{cid}"
+                env.chars[cid]["variants"]["webtoon"]["sheetKey"] = f"ws-{cid}"
+            env.blobs.update({"rs-ch1": b"RS1", "rs-ch2": b"RS2", "ws-ch1": b"WS1", "ws-ch2": b"WS2"})
+            client = env.client()
+            pid = "prj_vb159"
+            env.make_plan(pid, [{"id": "s1", "cutIds": ["c1", "c2"], "seconds": 8}])
+            since = len(env.requests)
+            client.post(f"/api/vnew/p/{pid}/generate", json={"confirmUsd": genmod.estimate(env.plan(pid))["totalUsd"]})
+            g = env.drive(pid)
+            anime_reqs = env.requests[since:]
+            since = len(env.requests)
+            client.post(f"/api/vnew/p/{pid}/generate/real", json={"confirmUsd": genmod.real_estimate(g)["usd"]})
+            env.drive(pid)
+            real_reqs = env.requests[since:]
+
+            def view(req: dict) -> dict:
+                payload = req["payload"]
+                prompt = str(payload.get("prompt") or "")
+                return {"seedance": str(req["url"]).endswith(_LR_ENDPOINT),
+                        "video": [b"PREVIZ-REC-s1" in decode(u) for u in payload.get("video_urls") or []],
+                        "images": [decode(u) for u in payload.get("image_urls") or []],
+                        "note": prompt.startswith(genmod.REAL_REF_AI_NOTE + "\n"), "videoLine": _VB159_VIDEO in prompt,
+                        "location": _VB159_LOCATION.format(no=5) in prompt, "sheet": _VB159_SHEET in prompt,
+                        "live": _VB159_STYLE_LIVE in prompt, "webtoonStyle": _VB159_STYLE_WEBTOON in prompt,
+                        "webtoonWord": "webtoon" in prompt.lower(), "old": "TIMELINE" in prompt or "ASSETS:" in prompt}
+
+            def pairs(images: list[bytes], sheet: bytes, front: bytes) -> bool:
+                people = [tuple(images[i:i + 2]) for i in range(0, len(images) - 1, 2)]
+                return sorted(people) == sorted([(sheet + b"1", front + b"1"), (sheet + b"2", front + b"2")])
+
+            got_f = [[view(r)["seedance"], view(r)["video"], view(r)["note"], view(r)["videoLine"], view(r)["location"],
+                      view(r)["sheet"], view(r)["live"], view(r)["webtoonStyle"], view(r)["webtoonWord"], view(r)["old"],
+                      view(r)["images"][4:], pairs(view(r)["images"][:4], *((b"RS", b"RF") if r in real_reqs else (b"WS", b"WF"))),
+                      _VB159_PANELS.format(refs="@Image6–@Image7") in str(r["payload"].get("prompt") or "")]
+                     for r in anime_reqs + real_reqs]
+            # fix1: 애니 = 신원 참고 → 장소 → 원작 패널(옛 _take_prompt 와 같은 _segment_panel_jpegs 순서), 실사 = 패널 없음.
+            want_f = [[True, [True], True, True, True, True, False, True, True, False, [b"LOC-WB", b"PANEL1", b"PANEL2"], True,
+                       True],
+                      [True, [True], True, True, True, True, True, False, False, False, [b"LOC-RB"], True, False]]
+            expect("vb-f", got_f, want_f, "애니·실사 제출: Seedance·프리비즈 영상·vibe 줄·[시트, 정면]×2 + 장소 (+ 애니 원작 패널)")
+
+            # fix1: 상한 — 패널부터 빠지고 신원 참고·장소는 남는다.
+            plan_c = env.plan(pid)
+            take_c = genmod._take_units(plan_c)[0]  # noqa: SLF001
+            got_cap = {}
+            for cap in (10, 6, 5, 3):
+                built = genmod._vibe_take_payload(owner, pid, plan_c, take_c, dict(_LR_CAPS, imageListMax=cap),  # noqa: SLF001
+                                                  variant="webtoon", fallback_step=0, soften=False, continuity=None,
+                                                  no_text=False)
+                got_cap[cap] = ([bytes(i) for i in built["imageUrls"]], built["locationNo"], built["panelNos"])
+            want_cap = {cap: (imgs, loc, panels) for cap, imgs, loc, panels in (
+                (10, [b"WS1", b"WS2", b"WF1", b"WF2", b"LOC-WB", b"PANEL1", b"PANEL2"], 5, [6, 7]),
+                (6, [b"WS1", b"WS2", b"WF1", b"WF2", b"LOC-WB", b"PANEL1"], 5, [6]),
+                (5, [b"WS1", b"WS2", b"WF1", b"WF2", b"LOC-WB"], 5, []),
+                (3, [b"WS1", b"WS2", b"LOC-WB"], 3, []))}
+
+            def norm(images: list[bytes]) -> list[bytes]:
+                # 인물 순서(등장 순)는 계획이 정한다 — 신원 참고는 집합으로, 장소·패널은 자리로 본다.
+                n = len([i for i in images if i[:2] in (b"WS", b"WF")])
+                return sorted(images[:n]) + images[n:]
+
+            expect("vb-f", {k: (norm(v[0]), v[1], v[2]) for k, v in got_cap.items()},
+                   {k: (norm(v[0]), v[1], v[2]) for k, v in want_cap.items()},
+                   "상한 10·6·5·3: 패널부터 빠지고 신원 참고·장소는 남는다")
+            audit_logs = logs.messages(f"vnew.gen.prompt_audit pid={pid}")
+            counts = [(re.search(r"lines_in_conti=(\d+)", m).group(1), re.search(r"lines_in_prompt=(\d+)", m).group(1))
+                      for m in audit_logs]
+            expect("vb-f", [len(audit_logs), all(x == y for x, y in counts), any(" variant=real " in m for m in audit_logs)],
+                   [2, True, True], f"제출마다 prompt_audit 1줄·줄 수 같음 {counts}")
+
+            # (vb-e) 끔: _take_payload = 지금 _take_prompt·패널 참고(작업 159 전 경로 그대로).
+            vset.VNEW_VIBE_PROMPT = False
+            plan_f = env.plan(pid)
+            take_f = genmod._take_units(plan_f)[0]  # noqa: SLF001
+            built = genmod._take_payload(owner, pid, plan_f, take_f, dict(_LR_CAPS))  # noqa: SLF001
+            direct = genmod._take_prompt(plan_f, take_f, cast=built["cast"], panel_nos=built["panelNos"],  # noqa: SLF001
+                                         location_no=built["locationNo"], caps=dict(_LR_CAPS))
+            expect("vb-e", [built["prompt"] == direct, b"PANEL1" in [bytes(i) for i in built["imageUrls"]],
+                            built["prompt"].startswith("STYLE: "), _VB159_VIDEO in built["prompt"]],
+                   [True, True, True, False], "끔: _take_payload 가 지금 _take_prompt·원작 패널 참고 그대로")
+            if llm_calls:
+                bad.append(f"가짜가 아닌 LLM 호출: {llm_calls}")
+            report.append(f"제출: 애니 {len(anime_reqs)}건·실사 {len(real_reqs)}건, 감사 {len(audit_logs)}줄")
+    except Exception:  # noqa: BLE001
+        bad.append("작업 159 검사 예외\n" + _tb.format_exc())
+    if bad:
+        fail("작업 159 video-vibecode 테이크 프롬프트 검사 실패\n  " + "\n  ".join(bad))
+    else:
+        ok("작업 159 vibe 테이크 프롬프트 (vb-a)애니 순서·컷 지시 원문·who_in_shot·연기·닿는 연기·대사 (vb-b)실사 live_action·REAL_FX·"
+           "웹툰 없음·@Video1 (vb-c)감사 줄 수 (vb-d)짧은 형 순서·샷 그대로·조각 (vb-e)끔 sha·_take_payload 그대로 "
+           "(vb-f)Seedance·프리비즈 영상·시트+정면·장소·애니 원작 패널(상한 때 패널부터 빠짐)")
+        for line in report:
+            print(f"       159: {line}")
+# 작업 158: 기존 콘티 경로(CONTI_SYSTEM · _analyze_conti)를 가짜로 바꿔 끼우는 검사는 VNEW_VIBE_CONTI=False 로 부른다(기대값은 그대로).
+# 이유: 새 기본값(켬)에서 run_conti 는 _analyze_vibe(샷 계획)를 부르므로 그 검사들의 가짜 _analyze_conti 가 불리지 않는다. 끔 경로는
+# 158 전과 바이트가 같다(vb-d sha). 대상: check_vnew_plan · check_vnew_locations · check_vnew_previz · check_vnew_fx ·
+# check_vnew_conti_images_120 (모두 run_conti 를 가짜 _analyze_conti 로 돈다).
+def _run_vibe_off(check) -> None:
+    """`check()` 를 VNEW_VIBE_CONTI=False 로 부르고 설정을 되돌린다."""
+    with _pin_vnew(VNEW_VIBE_CONTI=False):
+        check()
+
+
+# 참고 구현 video-vibecode vpoc/llm.py MASTER_CUTS_SYSTEM(= 앞 글 + _SHOT_RULES + 뒤 글)과 EMIT_MASTER_CUTS(_with_shot_fields(EMIT_MASTER),
+# 열거값 = 참고 compose.SHOT_SIZES · SHOT_KINDS · FX)를 ast 로만 읽어(모듈 실행 없음) 글자 그대로 옮겨 둔 값.
+_VB158_REF_SYSTEM = (
+    'You plan a short video made from a webtoon as a sequence of SHOTS. The whole video keeps ONE\n'
+    'fixed setting and the SAME characters throughout. The webtoon panels are in story order; follow them.\n'
+    'Write English for every *En field, Korean for *Ko.\n'
+    '- backgroundEn (<= 300 chars): the single setting shared by the whole video - place, time of day, lighting,\n'
+    '  key props. One empty location only, with NO people in it (a background plate). Never mention characters.\n'
+    '- backgroundKo (<= 120 chars): the same, in Korean, for the planner to read.\n'
+    '- beats: {min_beats}-{max_beats} shots (aim for about {target_beats}) whose [t0,t1) seconds tile 0..{total}\n'
+    '  with NO gaps and NO overlaps (first t0=0, last t1={total}, each t0 equals the previous t1).\n'
+    '  Each shot is ONE framing; between shots there is a hard cut, like a TV drama edit of the webtoon.\n'
+    '  Each shot lasts 2-4 seconds, average about 3s. Cut on every new line of dialogue or reaction. About one shot in four is an\n'
+    '  insert (hands, sleeves, an object or a small detail). Most shots keep the camera still. For each shot:\n'
+    '    - shotSize: wide | medium | closeup | extreme_closeup | over_shoulder | profile. Vary the sizes; open\n'
+    '      with a wide shot that shows where everyone is.\n'
+    '    - kind: "character" or "insert". For an insert of hands or sleeves, characters lists the owner(s) of\n'
+    '      the hands; for an object-only insert, characters is [].\n'
+    '    - actionEn (<= 240 chars): only what is visible in this one framing - a small, readable motion (a glance,\n'
+    '      a hand tightening, tears falling), not a long continuous action.\n'
+    '    - cameraEn (<= 80 chars): "Static camera" for most shots; otherwise one small move (e.g. "slow push-in").\n'
+    '    - fxEn: exactly one of none | tear streams | sweat drop | blush lines | pink sparkle background |\n'
+    '      speed lines. Use a symbol only when the webtoon panel shows it or the emotion clearly calls for it.\n'
+    "    - fxSuggest: one or two symbols from the same list (never none, never a new symbol) that would suit this shot's\n"
+    "      emotion, best first; may include the fxEn you chose. If the symbol is actually drawn in this shot's source\n"
+    '      webtoon panel, list it first. If the shot has no clear emotion (a neutral look, a plain action, an object),\n'
+    '      give an empty list. Do not suggest the same symbol for more than three shots in the whole sequence.\n'
+    '    - lightEn (<= 80 chars): direction and quality of the light only (e.g. "soft window light from the\n'
+    '      left"). Never a color tint or color grade (no "blue tint", no "warm orange grade").\n'
+    '    - descKo (<= 70 chars): what happens, in Korean.\n'
+    '    - characters: ids of the characters visible in this shot.\n'
+    '    - sourcePanel: the number of the webtoon panel this shot comes from (one of the given panel numbers).\n'
+    '    - hands: whenever hands are visible in a shot, say whose hands they are, how many ("one hand",\n'
+    '      "both hands") and where they are. Every other character in that frame keeps "hands resting down,\n'
+    '      out of frame". Each person has exactly two hands; never show extra hands.\n'
+    '  Refer to characters ONLY by their handles. Never describe faces, hair, skin or clothing colors inside\n'
+    "  shots: each character's hair color and clothing colors come only from the character appearance and must\n"
+    '  stay the same in every shot. (An insert may say whose sleeve it is, e.g. "the black-haired man\'s hand".)\n'
+    '- Turn the webtoon\'s panel direction into drama shots. Each image is labeled "Panel N of M"; shots follow\n'
+    "  the panel order, and each shot's framing follows its sourcePanel:\n"
+    '    a face filling the panel -> closeup or extreme_closeup; full bodies or a wide background -> wide;\n'
+    "    upper bodies -> medium; a face seen past another character's shoulder -> over_shoulder; a face in\n"
+    '    side view -> profile; only hands or an object -> kind insert; speed or focus lines -> speed lines;\n'
+    '    drawn blush lines -> blush lines; a drawn sweat drop -> sweat drop; drawn tears -> tear streams;\n'
+    '    a sparkle or flower background -> pink sparkle background.\n'
+    '  One panel may become several shots (for example a reaction shot plus an insert of the hands). Panels\n'
+    '  that add nothing to the story (repeated scenery, text only) may be skipped.\n'
+    '- characters: for EACH given character, appearanceEn (<= 200 chars) - a clean English look description\n'
+    '  (hair, build, clothing, colors). Name the hair color exactly as drawn (e.g. "ash blonde" rather than\n'
+    '  "light brown" when the drawing is pale blonde). For clothing patterns, say where the pattern is\n'
+    '  (e.g. "a white stripe down each sleeve, plain black body", "a logo on the chest"). If the character\n'
+    '  already has an appearance, keep its meaning.\n'
+    'No dialogue text, no speech bubbles, no captions. Answer only with the emit_master tool.'
+)
+_VB158_REF_TOOL = json.loads((
+    '{"name": "emit_master", "description": "Return the master plan for one continuous video.", "inputSchema": {"js'
+    'on": {"type": "object", "properties": {"backgroundEn": {"type": "string"}, "backgroundKo": {"type": "string"},'
+    ' "beats": {"type": "array", "items": {"type": "object", "properties": {"t0": {"type": "number"}, "t1": {"type"'
+    ': "number"}, "actionEn": {"type": "string"}, "cameraEn": {"type": "string"}, "descKo": {"type": "string"}, "ch'
+    'aracters": {"type": "array", "items": {"type": "string"}}, "shotSize": {"type": "string", "enum": ["wide", "me'
+    'dium", "closeup", "extreme_closeup", "over_shoulder", "profile"]}, "kind": {"type": "string", "enum": ["charac'
+    'ter", "insert"]}, "fxEn": {"type": "string", "enum": ["none", "tear streams", "sweat drop", "blush lines", "pi'
+    'nk sparkle background", "speed lines"]}, "lightEn": {"type": "string"}, "sourcePanel": {"type": "integer"}, "f'
+    'xSuggest": {"type": "array", "maxItems": 2, "items": {"type": "string", "enum": ["tear streams", "sweat drop",'
+    ' "blush lines", "pink sparkle background", "speed lines"]}}}, "required": ["t0", "t1", "actionEn", "cameraEn",'
+    ' "descKo", "characters", "shotSize", "kind", "fxEn", "lightEn", "sourcePanel"]}}, "characters": {"type": "arra'
+    'y", "items": {"type": "object", "properties": {"id": {"type": "string"}, "appearanceEn": {"type": "string"}}, '
+    '"required": ["id", "appearanceEn"]}}}, "required": ["backgroundEn", "beats"]}}}'
+))
+# VIBE_CUTS_SYSTEM 과 참고 글의 차이(diff). 틀 글은 한 줄도 다르지 않다. 호출 때 바뀌는 것은 아래 입력 자리표시 줄 2개뿐이고
+# ({min_beats} {max_beats} {target_beats} {total} = plan._vibe_shot_range · 총 길이), 그 밖 입력은 사용자 블록(plan._vibe_prompt)이다.
+_VB158_SYSTEM_DIFF: list[str] = []
+_VB158_PLACEHOLDER_LINES = [
+    "- beats: {min_beats}-{max_beats} shots (aim for about {target_beats}) whose [t0,t1) seconds tile 0..{total}",
+    "  with NO gaps and NO overlaps (first t0=0, last t1={total}, each t0 equals the previous t1).",
+]
+# 158 전 코드(끔 경로)에서 _vb158_off_digest 로 잰 값.
+_VB158_OFF_SHA = "ef0b93db34315745b0bdb3cb1a8919a252926db4f06289ca6dbfe20ffd16ebbc"
+
+def _vb158_off_digest() -> str:
+    """작업 158 (vb-d): 콘티 1회(가짜 _converse·저장소)의 호출 인자 전부 + 저장 콘티 sha256. 158 전 코드에서 잰 값과 같아야 한다."""
+    import hashlib  # noqa: PLC0415
+
+    sys.path.insert(0, str(ROOT / "app"))
+    from src.vnew import characters as charmod  # noqa: PLC0415
+    from src.vnew import plan as planmod  # noqa: PLC0415
+
+    saved: dict = {}
+    calls: list = []
+
+    def base_plan() -> dict:
+        return {"planId": "plan_vb", "revision": 1,
+                "input": {"order": ["f1"], "totalSeconds": 15, "notes": "밝게",
+                          "characters": [{"roleName": "민지", "charId": "ch1"}, {"roleName": "준호", "charId": "ch2"}]},
+                "task": {"name": "conti", "status": "running", "startedAt": None, "id": "t1"},
+                "script": {"status": "ready", "setting": {"locationKo": "교실", "locationEn": "classroom", "enclosed": True},
+                           "entries": [
+                               {"id": "e1", "panels": [0], "speaker": "민지", "lineKo": "왜?", "situationKo": "본다", "locationEn": "classroom",
+                                "characters": [{"name": "민지", "positionKo": "창가", "positionEn": "by the window"}]},
+                               {"id": "e2", "panels": [1], "speaker": "준호", "lineKo": "응", "situationKo": "웃는다", "locationEn": "classroom"},
+                               {"id": "e3", "panels": [2], "speaker": "민지", "lineKo": "", "situationKo": "손", "locationEn": "classroom"}]}}
+
+    def fake_converse(*, system_text, blocks, tool, max_tokens, where, model):
+        calls.append({"system": system_text, "tool": tool, "max_tokens": max_tokens, "where": where, "model": model,
+                      "blocks": [b.get("text") if "text" in b else b["image"]["source"]["bytes"].hex() for b in blocks]})
+        if where == "vnew.conti":
+            rows = [{"id": f"c{i}", "seconds": 3, "panels": [i % 3], "shotKo": f"샷{i}", "promptEn": f"p{i}", "cameraEn": "static",
+                     "locationEn": "classroom", "dialogueKo": "", "situationKo": "s",
+                     "characters": [{"name": "민지", "positionEn": "by the window", "actionEn": "looks"}],
+                     "sourcePanel": i % 3, "shotSize": "closeup", "fxSuggest": ["blush lines"] if i == 1 else [],
+                     "moodKo": "설렘" if i == 1 else ""} for i in range(1, 6)]
+            return {"cuts": rows}, {"model": model, "inputTokens": 1, "outputTokens": 1}
+        return {"cuts": [{"id": "c2", "fxSuggest": ["sweat drop"], "moodKo": "당황", "moodEn": "flustered"}]}, \
+            {"model": model, "inputTokens": 1, "outputTokens": 1}
+
+    names = ("load_plan", "mutate_plan", "ordered_tiles", "_charge", "_sync_locations_after_conti",
+             "_unapprove_previz_after_conti", "_max_segment_seconds")
+    orig = {n: getattr(planmod, n) for n in names}
+    orig_conv = planmod.vpoc_llm._converse  # noqa: SLF001
+    orig_load = charmod.load_char
+    try:
+        planmod.load_plan = lambda owner, pid: (saved, "etag")
+        planmod.mutate_plan = lambda owner, pid, mutator, **kw: (saved, mutator(saved))
+        planmod.ordered_tiles = lambda owner, pid, order: ([b"t0", b"t1", b"t2"], 3, 3)
+        planmod._charge = lambda *a, **kw: None  # noqa: SLF001
+        planmod._sync_locations_after_conti = lambda owner, pid: None  # noqa: SLF001
+        planmod._unapprove_previz_after_conti = lambda owner, pid: None  # noqa: SLF001
+        planmod._max_segment_seconds = lambda video_model: 15  # noqa: SLF001
+        planmod.vpoc_llm._converse = fake_converse  # noqa: SLF001
+        charmod.load_char = lambda owner, cid: ({"analysis": {"appearanceEn": f"look of {cid}"}}, "e")
+        saved.update(base_plan())
+        with _pin_vnew(VNEW_FX=True, VNEW_CONTI_IMAGES=True):
+            planmod.run_conti("o", "p", "t1")
+    finally:
+        for n, v in orig.items():
+            setattr(planmod, n, v)
+        planmod.vpoc_llm._converse = orig_conv  # noqa: SLF001
+        charmod.load_char = orig_load
+    fx_fill = {k: v for k, v in (saved.get("fxFill") or {}).items() if k != "at"}
+    body = json.dumps({"calls": calls, "conti": saved.get("conti"), "fxFill": fx_fill}, ensure_ascii=False, sort_keys=True)
+    return hashlib.sha256(body.encode("utf-8")).hexdigest()
+
+
+def check_vnew_vibe_conti_158() -> None:
+    """작업 158 — ③ 콘티 = video-vibecode 샷 계획(참고 MASTER_CUTS_SYSTEM · EMIT_MASTER_CUTS 그대로). 가짜 LLM · 저장소, 유료 호출 0.
+
+    (vb-a) VIBE_CUTS_SYSTEM · EMIT_VIBE_CUTS = 참고 글자 그대로(diff = 자리표시 줄 2개만), 기호 키 표 = fx.FX_KEYS + none, 설정 기본 켬
+    (vb-b) 참고 모양 가짜 답 → conti.cuts: id · no · 초 합 = 총 길이 · characters(명단 이름, 문장 나눔, 대본 위치) · dialogueKo = 대본 줄
+           (한 줄 한 컷, 같은 패널 두 샷에 나눔, 건너뛴 패널) · fx 키 유효 · sourcePanel/panels · background · 블록(대본 · 명단 외형 ·
+           "Panel N of M:" 타일 · 시트 안내 1줄 + 정면 · 턴어라운드) · SYSTEM 채움 · 상위 모델 · 원장 1회 · _analyze_conti 0회
+    (vb-c) 프리비즈 설계 입력(_scene_groups · _design_prompt, _sr_prompt_fixture 대본 · 인물)이 옮긴 콘티를 받는다(cutId · 인물 · 위치 · cameraEn)
+    (vb-d) 끔: 호출 인자 · 저장 콘티 sha = 158 전 값
+    (vb-e) 그림 호출 실패 → 시트 빼고 1회 → 그래도 실패면 글만 1회(대본 패널 번호), 로그 vnew.conti.vibe.images_fallback
+    """
+    sys.path.insert(0, str(ROOT / "app"))
+    import difflib  # noqa: PLC0415
+    import logging as _logging  # noqa: PLC0415
+    import traceback as _tb  # noqa: PLC0415
+
+    bad: list[str] = []
+    seen: set[str] = set()
+
+    def expect(group: str, got, want, what: str) -> None:
+        seen.add(group)
+        if got != want:
+            bad.append(f"({group}) {what}\n      결과 {got!r}\n      기대 {want!r}")
+
+    try:
+        from src.vnew import characters as charmod  # noqa: PLC0415
+        from src.vnew import fx as fxmod  # noqa: PLC0415
+        from src.vnew import plan as planmod  # noqa: PLC0415
+        from src.vnew import previz as pvmod  # noqa: PLC0415
+        from src.vnew import prompts as prmod  # noqa: PLC0415
+        from src.vnew import settings as vsettings  # noqa: PLC0415
+
+        # ================= (vb-a) 참고 글자 그대로 =================
+        ref_lines, our_lines = _VB158_REF_SYSTEM.split("\n"), prmod.VIBE_CUTS_SYSTEM.split("\n")
+        diff = [d for d in difflib.unified_diff(ref_lines, our_lines, lineterm="", n=0)]
+        values = {"total": 15, "min_beats": 5, "max_beats": 7, "target_beats": 5}
+        filled = [d[1:] for d in difflib.unified_diff(ref_lines, _VB158_REF_SYSTEM.format(**values).split("\n"), lineterm="", n=0)
+                  if d.startswith("-") and not d.startswith("---")]
+        expect("vb-a", [diff, filled, prmod.VIBE_CUTS_SYSTEM == _VB158_REF_SYSTEM,
+                        json.dumps(prmod.EMIT_VIBE_CUTS, ensure_ascii=False) == json.dumps(_VB158_REF_TOOL, ensure_ascii=False),
+                        prmod.EMIT_VIBE_CUTS["name"], our_lines[0]],
+               [_VB158_SYSTEM_DIFF, _VB158_PLACEHOLDER_LINES, True, True, "emit_master",
+                "You plan a short video made from a webtoon as a sequence of SHOTS. The whole video keeps ONE"],
+               "VIBE_CUTS_SYSTEM = 참고 MASTER_CUTS_SYSTEM(diff 0줄, 채우는 줄 = 자리표시 2줄)·EMIT_VIBE_CUTS = 참고 EMIT_MASTER_CUTS(키 순서까지)")
+        expect("vb-a", [fxmod.VIBE_FX_KEYS, fxmod.vibe_fx("Speed Lines", []), fxmod.vibe_fx("none", ["sweat drop", "horns", "blush lines"]),
+                        fxmod.vibe_fx(None, None), vsettings.VNEW_VIBE_CONTI, prmod.VIBE_SHEET_NOTE,
+                        planmod._vibe_shot_range(15), planmod._vibe_shot_range(3), planmod._vibe_shot_range(60)],  # noqa: SLF001
+               [{"none": "", **{k: k for k in fxmod.FX_KEYS}}, (["speed lines"], ["speed lines"]), ([], ["sweat drop", "blush lines"]),
+                ([], []), True, "These are AI-generated character sheets of fictional characters; use them for looks",
+                (5, 7, 5), (1, 1, 1), (15, 30, 20)],
+               "기호 키 표(참고 FX 키 = FX_KEYS, none = 빈 값)·vibe_fx·VNEW_VIBE_CONTI 기본 켬·시트 안내 문구·샷 수(참고 공식, 최소 5, 상한 30)")
+
+        # ================= 가짜 저장소 · LLM =================
+        def base_plan() -> dict:
+            return {"planId": "plan_vb", "revision": 1,
+                    "input": {"order": ["f1"], "totalSeconds": 15, "notes": "밝게",
+                              "characters": [{"roleName": "민지", "charId": "ch1"}, {"roleName": "준호", "charId": "ch2"}]},
+                    "task": {"name": "conti", "status": "running", "startedAt": None, "id": "t1"},
+                    "script": {"status": "ready", "setting": {"locationKo": "교실", "locationEn": "classroom", "enclosed": True},
+                               "entries": [
+                                   {"id": "e1", "panels": [0], "speaker": "민지", "lineKo": "왜?", "situationKo": "본다", "locationEn": "classroom",
+                                    "characters": [{"name": "민지", "positionEn": "by the window"}]},
+                                   {"id": "e2", "panels": [1], "speaker": "준호", "lineKo": "응", "situationKo": "웃는다", "locationEn": "classroom",
+                                    "characters": [{"name": "준호", "positionEn": "at the door"}]},
+                                   {"id": "e3", "panels": [1], "speaker": "민지", "lineKo": "진짜?", "situationKo": "놀란다", "locationEn": "classroom"},
+                                   {"id": "e4", "panels": [2], "speaker": "민지", "lineKo": "", "situationKo": "손", "locationEn": "classroom"},
+                                   {"id": "e5", "panels": [3], "speaker": "준호", "lineKo": "가자", "situationKo": "나간다", "locationEn": "classroom"}]}}
+
+        def beat(t0, t1, size, who, panel, fx_en, suggest, action, kind="character"):
+            return {"t0": t0, "t1": t1, "actionEn": action, "cameraEn": "Static camera", "descKo": f"샷 {t0}",
+                    "characters": who, "shotSize": size, "kind": kind, "fxEn": fx_en, "lightEn": "soft window light from the left",
+                    "sourcePanel": panel, "fxSuggest": suggest}
+
+        reply = {"backgroundEn": "An empty classroom in the afternoon, desks in rows", "backgroundKo": "오후의 빈 교실",
+                 "beats": [beat(0, 3, "wide", ["민지", "준호"], 0, "none", [], "민지 looks up from her desk. 준호 leans on the door."),
+                           beat(3, 5.5, "closeup", ["준호"], 1, "blush lines", ["blush lines"], "준호 smiles."),
+                           beat(5.5, 8, "closeup", ["민지"], 1, "none", ["sweat drop", "horns"], "민지 blinks."),
+                           beat(8, 10, "medium", ["민지"], 2, "Speed Lines", [], "민지's hand tightens on the pen.", kind="insert"),
+                           beat(10, 15, "medium", ["준호", "유령"], 99, "none", [], "준호 walks out.")],
+                 "characters": [{"id": "민지", "appearanceEn": "MODEL LOOK must be ignored"}]}
+
+        saved: dict = {}
+        calls: list = []
+        conti_calls: list = []
+        charges: list = []
+        fx_calls: list = []
+        state = {"fail": 0}
+        names = ("load_plan", "mutate_plan", "ordered_tiles", "_analyze_vibe", "_analyze_conti", "_analyze_fx", "_charge",
+                 "_sync_locations_after_conti", "_unapprove_previz_after_conti", "_max_segment_seconds", "STORE")
+        orig = {n: getattr(planmod, n) for n in names}
+        orig_load = charmod.load_char
+
+        class _Store:
+            def get_bytes(self, key):
+                return f"IMG:{key}".encode()
+
+        def fake_vibe(blocks, *, model, system_text):
+            calls.append({"blocks": blocks, "model": model, "system": system_text})
+            has_sheet = any(b.get("text") == prmod.VIBE_SHEET_NOTE for b in blocks)
+            has_image = any("image" in b for b in blocks)
+            if (state["fail"] >= 1 and has_sheet) or (state["fail"] >= 2 and has_image):
+                raise RuntimeError("ValidationException: too many images")
+            return json.loads(json.dumps(reply)), {"model": "m-top", "inputTokens": 5, "outputTokens": 7}
+
+        chars_db = {"ch1": {"analysis": {"appearanceEn": "look of ch1"},
+                            "variants": {"webtoon": {"sheetKey": "s/ch1-sheet.jpg", "frontKey": "s/ch1-front.jpg"}, "real": {}}},
+                    "ch2": {"analysis": {"appearanceEn": "look of ch2"},
+                            "variants": {"webtoon": {}, "real": {"frontKey": "s/ch2-real-front.jpg"}}}}
+        planmod.load_plan = lambda owner, pid: (saved, "etag")
+        planmod.mutate_plan = lambda owner, pid, mutator, **kw: (saved, mutator(saved))
+        planmod.ordered_tiles = lambda owner, pid, order: ([b"t0", b"t1", b"t2", b"t3"], 4, 4)
+        planmod._analyze_vibe = fake_vibe  # noqa: SLF001
+        planmod._analyze_conti = lambda blocks, *, model: (conti_calls.append(blocks) or ({"cuts": []}, {"model": "x"}))  # noqa: SLF001
+        planmod._analyze_fx = lambda blocks, *, model: (fx_calls.append(blocks) or ({"cuts": []}, {"model": "m-f"}))  # noqa: SLF001
+        planmod._charge = lambda owner, pid, plan_id, usage, model: charges.append((plan_id, dict(usage), model))  # noqa: SLF001
+        planmod._sync_locations_after_conti = lambda owner, pid: None  # noqa: SLF001
+        planmod._unapprove_previz_after_conti = lambda owner, pid: None  # noqa: SLF001
+        planmod._max_segment_seconds = lambda video_model: 15  # noqa: SLF001
+        planmod.STORE = _Store()
+        charmod.load_char = lambda owner, cid: (json.loads(json.dumps(chars_db[cid])), "e")
+
+        fallback_logs: list = []
+
+        class _Grab(_logging.Handler):
+            def emit(self, record):
+                if str(record.msg).startswith("vnew.conti.vibe.images_fallback"):
+                    fallback_logs.append(record.getMessage())
+
+        grab = _Grab()
+        _logging.getLogger("vpoc").addHandler(grab)
+
+        def run(fail: int = 0) -> dict:
+            saved.clear()
+            saved.update(base_plan())
+            for bucket in (calls, conti_calls, charges, fx_calls, fallback_logs):
+                bucket.clear()
+            state["fail"] = fail
+            with _pin_vnew(VNEW_FX=True, VNEW_CONTI_IMAGES=True, VNEW_VIBE_CONTI=True):
+                planmod.run_conti("o", "p", "t1")
+            return saved
+
+        def labels(blocks):
+            return [b.get("text") if "text" in b else "<img:" + b["image"]["source"]["bytes"].decode() + ">" for b in blocks[1:]]
+
+        try:
+            # ================= (vb-b) 옮긴 콘티 =================
+            run()
+            conti = saved.get("conti") or {}
+            cuts = conti.get("cuts") or []
+            blocks = calls[0]["blocks"] if calls else [{}]
+            text = blocks[0].get("text") or ""
+            expect("vb-b", [conti.get("status"), conti.get("error"), len(calls), len(conti_calls), calls[0]["model"] if calls else None,
+                            calls[0]["system"] if calls else None, charges, conti.get("model")],
+                   ["ready", "", 1, 0, planmod._conti_model(), prmod.VIBE_CUTS_SYSTEM.format(**values),  # noqa: SLF001
+                    [("plan_vb", {"model": "m-top", "inputTokens": 5, "outputTokens": 7}, "m-top"), ("plan_vb", {"model": "m-f"}, "m-f")],
+                    "m-top"],
+                   "켬: 샷 계획 1회(_analyze_vibe, 상위 모델 _conti_model)·SYSTEM = 참고 글에 15초 · 5-7(약 5)샷 채움·원장 = 샷 계획 1회 + 채우기 1회·"
+                   "옛 _analyze_conti 0회")
+            expect("vb-b", [labels(blocks),
+                            all(s in text for s in ('id=민지 handle="민지" (민지) appearance="look of ch1"',
+                                                    'id=준호 handle="준호" (준호) appearance="look of ch2"', 'speaker=민지 / line="왜?"',
+                                                    "[panels 3]", "Extra notes: 밝게", "Video length 15s. Use 5-7 shots (about 5) that tile 0..15s",
+                                                    "panels sent (of 4): 0, 1, 2, 3. Use only these numbers for sourcePanel.")),
+                            "MODEL LOOK" in json.dumps(cuts, ensure_ascii=False)],
+                   [["Panel 0 of 4:", "<img:t0>", "Panel 1 of 4:", "<img:t1>", "Panel 2 of 4:", "<img:t2>", "Panel 3 of 4:", "<img:t3>",
+                     prmod.VIBE_SHEET_NOTE, "민지 — front view:", "<img:IMG:s/ch1-front.jpg>", "민지 — turnaround sheet:",
+                     "<img:IMG:s/ch1-sheet.jpg>", "준호 — front view:", "<img:IMG:s/ch2-real-front.jpg>"], True, False],
+                   "블록: 글(대본 줄 · 부가 설명 · 명단 이름 + 캐릭터 분석 외형 · 참고 길이 줄 · 패널 줄) → 120 타일 → 시트 안내 1줄 + 정면 · 턴어라운드"
+                   "(그림체 VARIANTS 순서, 웹툰 시트 없으면 실사)·모델 appearanceEn 은 안 씀")
+            script = base_plan()["script"]
+            lines = [e for e in script["entries"] if e["lineKo"]]
+            owners = [[c["id"] for c in cuts if f'"{e["lineKo"]}"' in c.get("dialogueKo", "")] for e in lines]
+            expect("vb-b", [[c.get("id") for c in cuts], [c.get("no") for c in cuts], sum(c.get("seconds", 0) for c in cuts),
+                            all(isinstance(c.get("seconds"), int) and c["seconds"] >= 1 for c in cuts),
+                            [c.get("panels") for c in cuts], [c.get("sourcePanel") for c in cuts], [c.get("shotSize") for c in cuts],
+                            [c.get("shotKo") for c in cuts], [c.get("kind") for c in cuts], [c.get("dialogueKo") for c in cuts], owners,
+                            {c.get("locationEn") for c in cuts}, conti.get("background"), len(conti.get("segments") or [])],
+                   [["c1", "c2", "c3", "c4", "c5"], [1, 2, 3, 4, 5], 15, True, [[0], [1], [1], [2], [2, 3]], [0, 1, 1, 2, 2],
+                    ["wide", "closeup", "closeup", "insert", "medium"], ["와이드", "클로즈업", "클로즈업", "인서트", "미디엄"],
+                    ["character", "character", "character", "insert", "character"],
+                    ['민지: "왜?"', '준호: "응"', '민지: "진짜?"', "", '준호: "가자"'], [["c1"], ["c2"], ["c3"], ["c5"]],
+                    {"classroom"}, {"promptEn": "An empty classroom in the afternoon, desks in rows", "descKo": "오후의 빈 교실"}, 1],
+                   "샷 → 컷: id · no · 정수 초 합 15 · panels(같은 패널 연속 샷의 마지막이 건너뛴 패널 3) · sourcePanel(목록 밖 99 → 앞 샷) · "
+                   "kind insert → shotSize insert · shotKo 라벨 · dialogueKo = 대본 줄(패널 1 두 줄은 두 샷에 하나씩) · 줄마다 정확히 한 컷 · "
+                   "locationEn = 대본 장소 · background = backgroundEn/Ko")
+            expect("vb-b", [[c.get("characters") for c in cuts], cuts[0].get("cameraEn"), cuts[0].get("promptEn"), cuts[0].get("situationKo"),
+                            cuts[0].get("lightEn")],
+                   [[[{"name": "민지", "positionEn": "by the window", "actionEn": "민지 looks up from her desk."},
+                      {"name": "준호", "positionEn": "at the door", "actionEn": "준호 leans on the door."}],
+                     [{"name": "준호", "positionEn": "at the door", "actionEn": "준호 smiles."}],
+                     [{"name": "민지", "positionEn": "by the window", "actionEn": "민지 blinks."}],
+                     [{"name": "민지", "positionEn": "by the window", "actionEn": "민지's hand tightens on the pen."}],
+                     [{"name": "준호", "positionEn": "at the door", "actionEn": "준호 walks out."}]],
+                    "Static camera", "민지 looks up from her desk. 준호 leans on the door. soft window light from the left.", "샷 0",
+                    "soft window light from the left"],
+                   "characters = 샷 인물(명단 밖 '유령' 버림) · actionEn = 그 이름이 든 문장 · positionEn = 대본 위치(겹치는 줄 → 앞 줄 → 첫 값)·"
+                   "cameraEn · promptEn = actionEn + lightEn · situationKo = descKo")
+            fx_fields = [{k: c[k] for k in fxmod.FX_FIELDS if k in c} for c in cuts]
+            valid = all(set(c.get(k) or []) <= set(fxmod.FX_KEYS) for c in cuts for k in ("fx", "fxSuggest", "fxDrawn"))
+            expect("vb-b", [fx_fields, valid, len(fx_calls), (saved.get("fxFill") or {}).get("status")],
+                   [[{}, {"fxDrawn": [], "fxSuggest": ["blush lines"], "fx": ["blush lines"], "moodKo": "", "moodEn": ""},
+                     {"fxDrawn": [], "fxSuggest": ["sweat drop"], "fx": [], "moodKo": "", "moodEn": ""},
+                     {"fxDrawn": [], "fxSuggest": ["speed lines"], "fx": ["speed lines"], "moodKo": "", "moodEn": ""}, {}],
+                    True, 1, "ready"],
+                   "기호: fxEn → fx · fxSuggest → fxSuggest(목록 밖 horns 버림, 추천 비면 fxEn) · 키는 FX_KEYS 안 · 기호 없는 컷(c1·c5)만 채우기 1회")
+
+            # ================= (vb-e) 그림 실패 → 시트 빼고 → 글만 =================
+            run(fail=1)
+            expect("vb-e", [len(calls), [prmod.VIBE_SHEET_NOTE in labels(c["blocks"]) for c in calls],
+                            [sum(1 for b in c["blocks"] if "image" in b) for c in calls], len(fallback_logs),
+                            (saved.get("conti") or {}).get("status")],
+                   [2, [True, False], [7, 4], 1, "ready"], "시트 넣은 호출 실패 → 로그 1줄 + 시트 없이 패널만 1회 → 성공")
+            run(fail=2)
+            last = calls[-1]["blocks"] if calls else [{}]
+            cuts_text = (saved.get("conti") or {}).get("cuts") or []
+            expect("vb-e", [len(calls), [sum(1 for b in c["blocks"] if "image" in b) for c in calls], len(fallback_logs), len(last),
+                            "No panel images are sent. Panel numbers in the script: 0, 1, 2, 3. Use only these numbers for sourcePanel."
+                            in (last[0].get("text") or ""), [c.get("sourcePanel") for c in cuts_text],
+                            any("fxSuggest" in c for c in cuts_text)],
+                   [3, [7, 4, 0], 2, 1, True, [0, 1, 1, 2, 2], False],
+                   "패널도 실패 → 글만 1회(대본 패널 번호 안내)·sourcePanel 은 대본 패널 번호로 남고 글만 간 기호는 안 씀(120 규칙)")
+        finally:
+            _logging.getLogger("vpoc").removeHandler(grab)
+            for n, v in orig.items():
+                setattr(planmod, n, v)
+            charmod.load_char = orig_load
+
+        # ================= (vb-c) 프리비즈 설계 입력 =================
+        _cuts0, pz_script, pz_chars, _grammar = _sr_prompt_fixture()
+        pz_reply = {"backgroundEn": "Convenience store front at night", "beats": [
+            {"t0": 0, "t1": 3, "actionEn": "여의준 sits on the bollard.", "cameraEn": "Static camera", "descKo": "앉아 있다",
+             "characters": ["여의준"], "shotSize": "wide", "kind": "character", "fxEn": "none", "lightEn": "", "sourcePanel": 0, "fxSuggest": []},
+            {"t0": 3, "t1": 6, "actionEn": "범건우 walks up. 여의준 looks at him.", "cameraEn": "slow push-in", "descKo": "다가온다",
+             "characters": ["범건우", "여의준"], "shotSize": "medium", "kind": "character", "fxEn": "none", "lightEn": "", "sourcePanel": 1,
+             "fxSuggest": []},
+            {"t0": 6, "t1": 9, "actionEn": "범건우 nods.", "cameraEn": "Static camera", "descKo": "끄덕인다", "characters": ["범건우"],
+             "shotSize": "over_shoulder", "kind": "character", "fxEn": "none", "lightEn": "", "sourcePanel": 3, "fxSuggest": []}]}
+        pz_cuts = planmod.fit_seconds(planmod._vibe_cuts(pz_reply, pz_script, [c["roleName"] for c in pz_chars], [0, 1, 2, 3],  # noqa: SLF001
+                                                         panel_count=4), 9)
+        groups = pvmod._scene_groups({"cuts": pz_cuts})  # noqa: SLF001
+        prompts_ = [pvmod._design_prompt(g["locationEn"], None, g["cuts"], pz_script, pz_chars, {}, room_height=(3.0, 3.0))  # noqa: SLF001
+                    for g in groups]
+        roles = {c["roleName"] for c in pz_chars}
+        expect("vb-c", [len(groups), groups[0]["locationEn"] if groups else None, [s["cutId"] for g in groups for s in g["cuts"]],
+                        all(f"cutId={s['cutId']} seconds={s['seconds']}" in prompts_[0] for s in groups[0]["cuts"]) if groups else False,
+                        all(s["cameraEn"] for g in groups for s in g["cuts"]),
+                        all(ch["name"] in roles and set(ch) == {"name", "positionEn", "actionEn"} for g in groups for s in g["cuts"]
+                            for ch in s["characters"]),
+                        [[(ch["name"], ch["positionEn"]) for ch in s["characters"]] for g in groups for s in g["cuts"]],
+                        [c["panels"] for c in pz_cuts]],
+                   [1, "Convenience store front at night", ["c1", "c2", "c3"], True, True, True,
+                    [[("여의준", "sitting on a bollard")], [("범건우", ""), ("여의준", "sitting on a bollard")], [("범건우", "")]],
+                    [[0], [1, 2], [3]]],
+                   "옮긴 콘티 → _scene_groups(장소 = 대본 setting)·_design_prompt(cutId · seconds 줄)·cameraEn · 인물(명단 이름, name/positionEn/actionEn)")
+
+        # ================= (vb-d) 끔 = 158 전 sha =================
+        with _pin_vnew(VNEW_VIBE_CONTI=False):
+            expect("vb-d", _vb158_off_digest(), _VB158_OFF_SHA, "끔: CONTI_SYSTEM 경로 호출 인자(SYSTEM · 도구 · 블록 · 모델) + 저장 콘티 sha = 158 전")
+    except Exception as exc:  # noqa: BLE001
+        bad.append("예외: " + repr(exc) + "\n" + _tb.format_exc()[:2000])
+
+    missing = [g for g in ("vb-a", "vb-b", "vb-c", "vb-d", "vb-e") if g not in seen]
+    if missing and not bad:
+        bad.append(f"검사하지 못한 묶음: {missing}")
+    if bad:
+        for item_ in bad:
+            fail("vnew ③ 콘티 샷 계획(작업 158) " + item_)
+    else:
+        ok("vnew ③ 콘티 샷 계획(작업 158) 검사 (vb-a)참고 글 · 도구 그대로(diff = 자리표시 2줄)·기호 표 (vb-b)가짜 답 → conti.cuts(초 합 · 인물 · "
+           "대사 한 줄 한 컷 · 기호 키 · 블록 · 시트) (vb-c)프리비즈 설계 입력 (vb-d)끔 sha 그대로 (vb-e)그림 실패 → 시트 뺌 → 글만")
+
 
 
 def main() -> int:
@@ -53270,14 +54032,19 @@ def main() -> int:
     check_gen_id()
     check_no_budget_cap()
     check_planview_keys()
+    # 작업 159: 아래 검사(064~157)의 통 테이크 기대값(프롬프트 글자·sha·ASSETS/TIMELINE·패널 참고 장수)은 옛 _take_prompt 경로
+    # 기준이다. VNEW_VIBE_PROMPT 기본 켬이면 그 프롬프트·참고 이미지가 바뀌므로(의도한 변경) 끔 경로에 고정한다. 기대값은 하나도
+    # 바꾸지 않았다. 켬 경로는 check_vnew_vibe_prompt_159 가 본다(맨 끝, 고정을 푼 뒤).
+    vibe_off = contextlib.ExitStack()
+    vibe_off.enter_context(_pin_vnew(VNEW_VIBE_PROMPT=False))
     check_cancel()
     check_dual()
     check_vnew()
     _run_3d_hunyuan(lambda: _run_char_fidelity_off(check_vnew_characters))
-    _run_fx_off(check_vnew_plan)
-    _run_fx_off(lambda: _run_loc_edit_off(check_vnew_locations))
+    _run_fx_off(lambda: _run_vibe_off(check_vnew_plan))
+    _run_fx_off(lambda: _run_loc_edit_off(lambda: _run_vibe_off(check_vnew_locations)))
     check_vnew_generate()
-    _run_fx_off(check_vnew_previz)
+    _run_fx_off(lambda: _run_vibe_off(check_vnew_previz))
     check_vnew_previz_camera()
     check_vnew_shot_brief()
     check_vnew_mannequin()
@@ -53312,7 +54079,7 @@ def main() -> int:
     check_llm_top_model_first()
     check_previz_collision()
     check_previz_support()
-    check_vnew_fx()
+    _run_vibe_off(check_vnew_fx)
     _run_char_fidelity_off(lambda: _run_casting_off(check_vnew_fx_prompt))
     check_vnew_fx_screen()
     _run_cast_photo_off(lambda: _run_cast_idol_off(lambda: _run_char_fidelity_off(check_vnew_casting)))
@@ -53338,7 +54105,7 @@ def main() -> int:
     check_vnew_inner_voice_118a()
     check_vnew_voice_scan_118b()
     check_vnew_edit_fix_picker_119()
-    check_vnew_conti_images_120()
+    _run_vibe_off(check_vnew_conti_images_120)
     check_vnew_take_both_123()
     check_seedream_fal_124()
     check_vnew_sound_122()
@@ -53374,7 +54141,10 @@ def main() -> int:
     check_vnew_contact_action_154()
     check_vnew_real_seedance_156()
     check_vnew_take_conti_157()
+    check_vnew_vibe_conti_158()
     check_pod_zones()
+    vibe_off.close()
+    check_vnew_vibe_prompt_159()
     print()
     if warnings:
         print(f"경고 {len(warnings)}건")
