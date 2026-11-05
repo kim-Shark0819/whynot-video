@@ -23804,7 +23804,9 @@ def check_vnew_take_real() -> None:
             for name, number in people.items():
                 if f"{name} (" not in prompt or f"face and hair from @Image{number} (photo)" not in prompt:
                     bad.append(f"(lr-c) ASSETS 의 {name} @Image{number} (photo) 번호가 이미지 순서와 다릅니다")
-            if "@Image4 = the location (real photo); keep its structure and props" not in prompt \
+            # 작업 143: 실사 장소 문장 = live.reference_lead(place=True) 문구(사람 없는 실사 사진). 지시서가 바꾼 기대값.
+            if "@Image4 = the location (real photo, no people in it); keep this place, its background and light in every shot" \
+                    not in prompt \
                     or "face and hair from @Image2 (photo), same person in @Image3" not in prompt:
                 bad.append("(lr-c) ASSETS 실사 장소 문장(@Image4)·에이 둘째 사진(@Image3)이 없습니다")
             mark("lr-c")
@@ -47331,7 +47333,8 @@ def check_vnew_real_from_3d_126() -> None:
             if judge_cap(mutated):
                 bad.append(f"(r3-a) 변형(앞 인물부터 다 채우기)을 판정이 잡지 못했습니다: {mutated}")
             prompt_small = built_small["prompt"]
-            if "@Image4 = the location (real photo)" not in prompt_small \
+            # 작업 143: 실사 장소 문장이 "(real photo, no people in it)" 로 바뀌었다(지시서). 번호 검사는 그대로.
+            if "@Image4 = the location (real photo, no people in it)" not in prompt_small \
                     or "face and hair from @Image1 (photo), same person in @Image2" not in prompt_small \
                     or "face and hair from @Image3 (photo)" not in prompt_small or "@Image3 (photo), same person" in prompt_small:
                 bad.append(f"(r3-a) 상한 4 의 ASSETS @Image 번호가 이미지 순서와 다릅니다: {prompt_small[:600]!r}")
@@ -49308,6 +49311,313 @@ def check_vnew_real_ai_note_140() -> None:
            "(an-b)Seedance 0·1단계·Seedream·Kling 본문 첫 줄·거절 로그 step 0·1·2 note=1")
 
 
+# 작업 143: 새 기본값(VNEW_LOCATION_REAL_FROM_WEBTOON 켬)에서는 실사 뷰가 웹툰 뷰 편집(_seedream_edit)이 된다. 기존 공간 시트
+# 검사(check_vnew_locations·125·128)는 작업 125 의 text-to-image 경로(참고 0장·원장 모델·호출 수·동시성)를 보므로 부르는 줄에서
+# 끔으로 고정한다(기대값은 그대로). 켬 경로는 check_vnew_location_real_edit_143 이 본다. 끔이면 유료 fal 경로도 타지 않는다.
+def _run_loc_edit_off(check) -> None:
+    """`check()` 를 VNEW_LOCATION_REAL_FROM_WEBTOON=False 로 부르고 설정을 되돌린다."""
+    with _pin_vnew(VNEW_LOCATION_REAL_FROM_WEBTOON=False):
+        check()
+
+
+# 작업 143 전(140 코드)의 애니 통 테이크 프롬프트 sha256 — _fw_plan, panel_nos=[3], location_no=4, VNEW_FX 켬.
+_LE143_ANIME_TAKE_SHA = "9db057061961708c2a71bd4314b29a0b503cf6d0f713193cd2681e7a9f8ce072"
+_LE143_PLACE_EDIT = (
+    "Turn this image into a real photograph of the same place: {place}. Remove all people completely; show the empty "
+    "place. Keep the same layout, camera angle and daylight. Real photograph taken with a camera, photorealistic, natural "
+    "materials and textures, no illustration, no anime, no drawing, no line art, no people."
+)
+
+
+def check_vnew_location_real_edit_143() -> None:
+    """작업 143 — 실사 장소 뷰 = 같은 쪽 웹툰 뷰의 Seedream 4.5 edit. 가짜 Seedream·LLM·저장소·원장, 유료 0.
+
+    (le-a) PLACE_EDIT 원문·_place_edit_prompt(그림 낱말 빼기·장소 ≤300자)·_place_text(설계 영어 묘사)·설정 기본 켬·
+           _seedream_edit = fal edit endpoint·참고 1장
+    (le-b) 켬: 웹툰 2장(t2i) 먼저 → 실사 2장(edit, 같은 쪽 웹툰 bytes·편집 문장)·실사 시작 ≥ 웹툰 끝·원장 4건(edit 2건 같은 단가)
+    (le-c) 켬 + 웹툰 back 실패: 실사 back = t2i(지금 지시문), 실사 front = edit, 웹툰 오류를 올린다
+    (le-d) 끔: 결과·호출·원장·저장이 작업 125 그대로(t2i 4장, edit 0)
+    (le-e) 다시 그리기: 켬 실사 = edit(웹툰 bytes·편집 문장 + Corrections)·원장 edit 모델, 웹툰 = t2i, 끔 = t2i 4장
+    (le-f) ASSETS: 실사 장소 줄 새 문구·옛 문구 없음, 애니 줄 그대로·애니 통 테이크 sha = 140
+    """
+    import hashlib as _hashlib  # noqa: PLC0415
+    import re as _re  # noqa: PLC0415
+    import threading as _threading  # noqa: PLC0415
+    import time as _time  # noqa: PLC0415
+    import traceback as _tb  # noqa: PLC0415
+
+    sys.path.insert(0, str(ROOT / "app"))
+    from src.vnew import generate as genmod  # noqa: PLC0415
+    from src.vnew import locations as locmod  # noqa: PLC0415
+    from src.vnew import settings as vns  # noqa: PLC0415
+
+    bad: list[str] = []
+    seen: set[str] = set()
+    draw_re = r"\b(?:webtoon|anime|manga|illustrat\w*|drawn|cartoon)\b"
+    head, _, tail = _LE143_PLACE_EDIT.partition("{place}")
+
+    def place_of(prompt: str) -> str:
+        if not prompt.startswith(head) or not prompt.endswith(tail):
+            return "<not PLACE_EDIT>"
+        return prompt[len(head): len(prompt) - len(tail)]
+
+    loc = {
+        "id": "loc_t143", "nameEn": "A webtoon-style school classroom", "photos": [], "styleEn": "", "extraEn": "",
+        "design": {"widthM": 7.0, "depthM": 6.0, "heightM": 2.8, "enclosed": True, "lightEn": "window daylight",
+                   "walls": {"north": {"descEn": "A green chalkboard drawn in anime style with a teacher's desk."},
+                             "east": {"descEn": "Tall windows, illustrated with soft manga light."},
+                             "south": {"descEn": "Wooden lockers and a sliding door."},
+                             "west": {"descEn": "Cartoon posters on a cream wall."}}},
+        "facts": {},
+    }
+    loc["prompts"] = {(v, w): f"P-{v}-{w}" for v in locmod.VARIANTS for w in locmod.VIEWS}
+
+    saved = {
+        "_seedream": locmod._seedream, "_seedream_edit": locmod._seedream_edit, "_verify": locmod._verify,  # noqa: SLF001
+        "generate_safe": locmod.vpoc_seedream.generate_safe, "STORE": locmod.STORE,
+        "bump": locmod._bump_progress, "bump_total": locmod._bump_total,  # noqa: SLF001
+        "charge": locmod.vpoc_ledger.charge, "charge_text": locmod.vpoc_ledger.charge_text,
+    }
+    paid: list[str] = []
+    try:
+        with _guard_real_llm() as llm_calls:
+            # ================= (le-a) 문장·설정·래퍼 =================
+            if locmod.PLACE_EDIT != _LE143_PLACE_EDIT or locmod.PLACE_TEXT_MAX != 300:
+                bad.append(f"(le-a) PLACE_EDIT 가 지시서 원문이 아닙니다: {locmod.PLACE_EDIT!r}")
+            got = locmod._place_edit_prompt("A webtoon classroom, anime style, with drawn desks.")  # noqa: SLF001
+            if got != _LE143_PLACE_EDIT.format(place="A classroom, style, with desks"):
+                bad.append(f"(le-a) 그림 낱말 빼기가 다릅니다: {got!r}")
+            long_text = locmod._place_text(loc) + ". " + " ".join(["Many Illustrated wooden desks in neat rows"] * 20)  # noqa: SLF001
+            for text in (locmod._place_text(loc), long_text):  # noqa: SLF001
+                place = place_of(locmod._place_edit_prompt(text))  # noqa: SLF001
+                if place.startswith("<") or len(place) > 300 or _re.search(draw_re, place, _re.IGNORECASE) or not place:
+                    bad.append(f"(le-a) 장소 묘사가 300자 안·그림 낱말 없음이 아닙니다: {len(place)} {place[:120]!r}")
+            want_text = ("A webtoon-style school classroom. A green chalkboard drawn in anime style with a teacher's desk. "
+                         "Tall windows, illustrated with soft manga light. Wooden lockers and a sliding door. "
+                         "Cartoon posters on a cream wall")
+            if locmod._place_text(loc) != want_text:  # noqa: SLF001
+                bad.append(f"(le-a) _place_text 가 설계 이름·벽 묘사가 아닙니다: {locmod._place_text(loc)!r}")  # noqa: SLF001
+            edit_prompt = locmod._place_edit_prompt(locmod._place_text(loc))  # noqa: SLF001
+            if place_of(edit_prompt) != ("A school classroom. A green chalkboard in style with a teacher's desk. "
+                                         "Tall windows, with soft light. Wooden lockers and a sliding door. posters on a cream wall"):
+                bad.append(f"(le-a) 설계 묘사 편집 문장이 다릅니다: {edit_prompt!r}")
+            env_saved = os.environ.pop("VNEW_LOCATION_REAL_FROM_WEBTOON", None)
+            try:
+                if vns._bool("VNEW_LOCATION_REAL_FROM_WEBTOON", True) is not True:  # noqa: SLF001
+                    bad.append("(le-a) VNEW_LOCATION_REAL_FROM_WEBTOON 기본이 켬이 아닙니다")
+                os.environ["VNEW_LOCATION_REAL_FROM_WEBTOON"] = "false"
+                if vns._bool("VNEW_LOCATION_REAL_FROM_WEBTOON", True) is not False:  # noqa: SLF001
+                    bad.append("(le-a) VNEW_LOCATION_REAL_FROM_WEBTOON=false 가 끔이 아닙니다")
+            finally:
+                os.environ.pop("VNEW_LOCATION_REAL_FROM_WEBTOON", None)
+                if env_saved is not None:
+                    os.environ["VNEW_LOCATION_REAL_FROM_WEBTOON"] = env_saved
+            if env_saved is None and vns.VNEW_LOCATION_REAL_FROM_WEBTOON is not True:
+                bad.append("(le-a) 설정 모듈 기본값이 켬이 아닙니다")
+            wrapped: list[dict] = []
+            locmod.vpoc_seedream.generate_safe = lambda prompt, refs, **kw: (wrapped.append({"refs": list(refs), **kw}), b"E")[1]
+            locmod._seedream_edit("p", b"WEB", size=locmod.VIEW_SIZE)  # noqa: SLF001
+            if len(wrapped) != 1 or wrapped[0]["refs"] != [b"WEB"] or wrapped[0].get("fal_model") != locmod.LOCATION_EDIT_MODEL \
+                    or locmod.LOCATION_EDIT_MODEL != "fal-ai/bytedance/seedream/v4.5/edit" or wrapped[0].get("size") != locmod.VIEW_SIZE:
+                bad.append(f"(le-a) _seedream_edit 가 fal edit·참고 1장이 아닙니다: {wrapped}")
+
+            def no_paid(*_a, **_k):
+                paid.append("generate_safe")
+                raise RuntimeError("유료 Seedream 호출(검사)")
+
+            locmod.vpoc_seedream.generate_safe = no_paid
+            seen.add("le-a")
+
+            # 공통 가짜.
+            lock = _threading.Lock()
+            ledger: list[dict] = []
+            bumps = {"done": 0, "total": 0}
+            calls: list[dict] = []
+            fail_prompts: set[str] = set()
+            nap = 0.2
+
+            locmod.vpoc_ledger.charge = lambda key, **kw: (ledger.append({"key": key, **kw}), {})[1]
+            locmod.vpoc_ledger.charge_text = lambda key, **kw: {}
+
+            def fake_bump(*_a):
+                with lock:
+                    bumps["done"] += 1
+
+            def fake_bump_total(*_a):
+                with lock:
+                    bumps["total"] += 1
+
+            def fake_t2i(prompt, references, *, size):
+                begin = _time.monotonic()
+                _time.sleep(nap)
+                with lock:
+                    calls.append({"kind": "t2i", "prompt": prompt, "refs": len(references or []), "begin": begin,
+                                  "end": _time.monotonic()})
+                if prompt in fail_prompts:
+                    raise RuntimeError(f"boom {prompt}")
+                return b"T2I:" + prompt.encode("utf-8")
+
+            def fake_edit(prompt, reference, *, size):
+                begin = _time.monotonic()
+                _time.sleep(nap)
+                with lock:
+                    calls.append({"kind": "edit", "prompt": prompt, "ref": reference, "begin": begin, "end": _time.monotonic()})
+                return b"EDIT:" + reference
+
+            locmod._bump_progress = fake_bump  # noqa: SLF001
+            locmod._bump_total = fake_bump_total  # noqa: SLF001
+            locmod._seedream = fake_t2i  # noqa: SLF001
+            locmod._seedream_edit = fake_edit  # noqa: SLF001
+            geometries = locmod._build_geometries(loc)  # noqa: SLF001
+            guides = locmod._build_guides(loc, geometries)  # noqa: SLF001
+            jobs = [(v, w) for v in locmod.VARIANTS for w in locmod.VIEWS]
+
+            def reset():
+                calls.clear()
+                ledger.clear()
+                fail_prompts.clear()
+                bumps.update(done=0, total=0)
+                store = _FakeCharStore()
+                locmod.STORE = store
+                return store
+
+            def gen():
+                return locmod._generate_views("tester", "prj_t143", loc["id"], 1, loc, guides, [b"panel"], "task")  # noqa: SLF001
+
+            def key(v, w):
+                return locmod.view_key("tester", "prj_t143", loc["id"], v, w, 1)
+
+            # ================= (le-b) 켬: 웹툰 먼저 → 실사 편집 =================
+            with _pin_vnew(VNEW_LOCATION_REAL_FROM_WEBTOON=True):
+                store = reset()
+                views = gen()
+            t2i = [c for c in calls if c["kind"] == "t2i"]
+            edits = [c for c in calls if c["kind"] == "edit"]
+            if sorted(c["prompt"] for c in t2i) != ["P-webtoon-back", "P-webtoon-front"] or any(c["refs"] for c in t2i):
+                bad.append(f"(le-b) t2i 가 웹툰 2장(참고 0장)이 아닙니다: {[c['prompt'] for c in t2i]}")
+            if sorted(c["ref"] for c in edits) != [b"T2I:P-webtoon-back", b"T2I:P-webtoon-front"] \
+                    or any(c["prompt"] != edit_prompt for c in edits):
+                bad.append(f"(le-b) 실사 편집이 같은 쪽 웹툰 bytes·편집 문장이 아닙니다: {[(c['ref'], c['prompt'][:60]) for c in edits]}")
+            if t2i and edits and min(c["begin"] for c in edits) < max(c["end"] for c in t2i):
+                bad.append("(le-b) 실사 편집이 웹툰 뷰가 끝나기 전에 시작했습니다")
+            if len(edits) == 2 and max(c["begin"] for c in edits) >= min(c["end"] for c in edits):
+                bad.append("(le-b) 실사 편집 2장이 동시에 돌지 않았습니다")
+            want_views = {("real", w): (b"EDIT:T2I:P-webtoon-" + w.encode(), key("real", w)) for w in locmod.VIEWS}
+            want_views.update({("webtoon", w): (b"T2I:P-webtoon-" + w.encode(), key("webtoon", w)) for w in locmod.VIEWS})
+            if list(views) != jobs or views != want_views or {k: store.blobs.get(k) for _, k in want_views.values()} \
+                    != {k: b for b, k in want_views.values()}:
+                bad.append(f"(le-b) 결과·저장이 다릅니다: {views}")
+            models = sorted(c.get("model") for c in ledger)
+            if models != sorted([locmod.LOCATION_EDIT_MODEL] * 2 + [locmod.LOCATION_IMAGE_MODEL] * 2) \
+                    or any(c.get("usd") != locmod.LOCATION_IMAGE_USD or c.get("kind") != "image" for c in ledger) \
+                    or bumps["done"] != 4:
+                bad.append(f"(le-b) 원장(edit 2·t2i 2, 같은 단가)·progress 4 가 다릅니다: {[(c.get('model'), c.get('usd')) for c in ledger]} {bumps}")
+            seen.add("le-b")
+
+            # ================= (le-c) 켬 + 웹툰 back 실패 → 실사 back t2i =================
+            with _pin_vnew(VNEW_LOCATION_REAL_FROM_WEBTOON=True):
+                store = reset()
+                fail_prompts.add("P-webtoon-back")
+                try:
+                    gen()
+                    raised = ""
+                except RuntimeError as exc:
+                    raised = str(exc)
+            t2i = sorted(c["prompt"] for c in calls if c["kind"] == "t2i")
+            edits = [c for c in calls if c["kind"] == "edit"]
+            if raised != "boom P-webtoon-back" or t2i != ["P-real-back", "P-webtoon-back", "P-webtoon-front"] \
+                    or [c["ref"] for c in edits] != [b"T2I:P-webtoon-front"]:
+                bad.append(f"(le-c) 웹툰 실패 쪽 실사가 t2i 가 아닙니다: raised={raised!r} t2i={t2i} edits={[c['ref'] for c in edits]}")
+            if store.blobs.get(key("real", "back")) != b"T2I:P-real-back" or key("webtoon", "back") in store.blobs:
+                bad.append("(le-c) 실사 back 저장(t2i)·웹툰 back 미저장이 다릅니다")
+            seen.add("le-c")
+
+            # ================= (le-d) 끔: 작업 125 그대로 =================
+            with _pin_vnew(VNEW_LOCATION_REAL_FROM_WEBTOON=False):
+                store = reset()
+                views_off = gen()
+            want_off = {(v, w): (b"T2I:" + f"P-{v}-{w}".encode(), key(v, w)) for v, w in jobs}
+            if list(views_off) != jobs or views_off != want_off or any(c["kind"] != "t2i" or c["refs"] for c in calls) \
+                    or len(calls) != 4 or sorted(store.blobs) != sorted(k for _, k in want_off.values()):
+                bad.append(f"(le-d) 끔 결과·호출이 작업 125 와 다릅니다: {[(c['kind'], c['prompt']) for c in calls]}")
+            if len(calls) == 4 and max(c["begin"] for c in calls) >= min(c["end"] for c in calls):
+                bad.append("(le-d) 끔 4장이 동시에 그려지지 않았습니다")
+            if len(ledger) != 4 or any(c.get("model") != locmod.LOCATION_IMAGE_MODEL or c.get("usd") != locmod.LOCATION_IMAGE_USD
+                                       for c in ledger) or sorted(c["key"].rsplit("-", 1)[0] for c in ledger) \
+                    != sorted(f"vnew-loc-prj_t143-{loc['id']}-{v}-view-{w}" for v, w in jobs):
+                bad.append(f"(le-d) 끔 원장이 작업 125 와 다릅니다: {[(c['key'], c.get('model')) for c in ledger]}")
+            seen.add("le-d")
+
+            # ================= (le-e) 다시 그리기 =================
+            locmod._verify = lambda blocks, *, model: (  # noqa: SLF001
+                {"matchesPlace": False, "matchesSides": False, "fixesEn": ["make the lockers grey"]}, {"model": model})
+            for flag in (True, False):
+                with _pin_vnew(VNEW_LOCATION_REAL_FROM_WEBTOON=flag):
+                    reset()
+                    base_views = dict(views if flag else views_off)
+                    checks = locmod._verify_views("tester", "prj_t143", loc["id"], 1, loc, guides, [b"panel"],  # noqa: SLF001
+                                                  base_views, geometries, "task")
+                edits = [c for c in calls if c["kind"] == "edit"]
+                t2i = sorted(c["prompt"] for c in calls if c["kind"] == "t2i")
+                fixed = all((checks.get(v) or {}).get(w, {}).get("fixedEn") for v, w in jobs)
+                if flag:
+                    ok_edit = sorted(c["ref"] for c in edits) == [b"T2I:P-webtoon-back", b"T2I:P-webtoon-front"] \
+                        and all(c["prompt"] == edit_prompt + " Corrections: make the lockers grey" for c in edits)
+                    ok_t2i = t2i == ["P-webtoon-back Corrections: make the lockers grey",
+                                     "P-webtoon-front Corrections: make the lockers grey"]
+                    ok_ledger = sorted(c.get("model") for c in ledger) == sorted(
+                        [locmod.LOCATION_EDIT_MODEL] * 2 + [locmod.LOCATION_IMAGE_MODEL] * 2)
+                else:
+                    ok_edit = not edits
+                    ok_t2i = len(t2i) == 4 and all(p.endswith(" Corrections: make the lockers grey") for p in t2i)
+                    ok_ledger = [c.get("model") for c in ledger] == [locmod.LOCATION_IMAGE_MODEL] * 4
+                if not (ok_edit and ok_t2i and ok_ledger and fixed and bumps["total"] == 4):
+                    bad.append(f"(le-e) 다시 그리기(켬={flag})가 다릅니다: edits={[c['ref'] for c in edits]} t2i={t2i} "
+                               f"ledger={[c.get('model') for c in ledger]} fixed={fixed} total={bumps['total']}")
+            seen.add("le-e")
+
+            # ================= (le-f) ASSETS 장소 줄 =================
+            a, b = "범건우", "여의준"
+            cast_take = [{"name": a, "colorName": "blue", "frontNo": 1, "costume": "black open-collar shirt"},
+                         {"name": b, "colorName": "red", "frontNo": 2, "costume": "navy training top"}]
+            take = {"id": "take1", "cutIds": ["c1", "c2", "c3"], "seconds": 12}
+            with _pin_vnew(VNEW_FX=True):
+                web = genmod._take_prompt(_fw_plan(), take, cast=cast_take, panel_nos=[3], location_no=4)  # noqa: SLF001
+                real = genmod._take_prompt(_fw_plan(), take, cast=cast_take, panel_nos=[], location_no=3,  # noqa: SLF001
+                                           variant="real")
+            new_line = "@Image3 = the location (real photo, no people in it); keep this place, its background and light in every shot"
+            if new_line not in real or "(real photo); keep its structure and props" in real \
+                    or genmod._utf8_len(real) > genmod._take_prompt_budget():  # noqa: SLF001
+                bad.append("(le-f) 실사 ASSETS 장소 줄이 새 문구가 아니거나 예산을 넘었습니다")
+            if "@Image4 = the location; keep its structure and props." not in web \
+                    or _hashlib.sha256(web.encode("utf-8")).hexdigest() != _LE143_ANIME_TAKE_SHA:
+                bad.append("(le-f) 애니 ASSETS 장소 줄·통 테이크 sha 가 140 과 다릅니다")
+            seen.add("le-f")
+            if llm_calls or paid:
+                bad.append(f"가짜가 아닌 호출: llm={llm_calls} seedream={paid}")
+    except Exception:  # noqa: BLE001
+        bad.append("작업 143 검사 예외\n" + _tb.format_exc())
+    finally:
+        locmod._seedream = saved["_seedream"]  # noqa: SLF001
+        locmod._seedream_edit = saved["_seedream_edit"]  # noqa: SLF001
+        locmod._verify = saved["_verify"]  # noqa: SLF001
+        locmod.vpoc_seedream.generate_safe = saved["generate_safe"]
+        locmod.STORE = saved["STORE"]
+        locmod._bump_progress = saved["bump"]  # noqa: SLF001
+        locmod._bump_total = saved["bump_total"]  # noqa: SLF001
+        locmod.vpoc_ledger.charge = saved["charge"]
+        locmod.vpoc_ledger.charge_text = saved["charge_text"]
+    missing = {"le-a", "le-b", "le-c", "le-d", "le-e", "le-f"} - seen
+    if missing and not bad:
+        bad.append(f"검사 단계가 빠졌습니다: {sorted(missing)}")
+    if bad:
+        fail("작업 143 실사 장소 = 웹툰 뷰 편집 검사 실패\n  " + "\n  ".join(bad))
+    else:
+        ok("작업 143 실사 장소 = 웹툰 뷰 편집 (le-a)PLACE_EDIT 원문·그림 낱말 빼기·300자·기본 켬·fal edit 참고 1장 "
+           "(le-b)웹툰 먼저 → 같은 쪽 bytes 편집·원장 같은 단가 (le-c)웹툰 실패 쪽 t2i (le-d)끔 = 125 그대로 "
+           "(le-e)다시 그리기 edit/t2i (le-f)실사 ASSETS 새 문구·애니 sha 그대로")
+
+
 def main() -> int:
     print("== vpoc1 check ==")
     check_compileall()
@@ -49325,7 +49635,7 @@ def main() -> int:
     check_vnew()
     _run_3d_hunyuan(lambda: _run_char_fidelity_off(check_vnew_characters))
     _run_fx_off(check_vnew_plan)
-    _run_fx_off(check_vnew_locations)
+    _run_fx_off(lambda: _run_loc_edit_off(check_vnew_locations))
     check_vnew_generate()
     _run_fx_off(check_vnew_previz)
     check_vnew_previz_camera()
@@ -49392,9 +49702,9 @@ def main() -> int:
     check_vnew_take_both_123()
     check_seedream_fal_124()
     check_vnew_sound_122()
-    check_vnew_location_fast_125()
+    _run_loc_edit_off(check_vnew_location_fast_125)
     check_vnew_fx_who_127()
-    check_vnew_location_speed_128()
+    _run_loc_edit_off(check_vnew_location_speed_128)
     check_vnew_real_from_3d_126()
     check_vnew_real_likeness_130()
     check_vnew_real_cut_anime_132()
@@ -49407,6 +49717,7 @@ def main() -> int:
     check_vnew_real_brief_138()
     check_vnew_real_still_139()
     check_vnew_real_ai_note_140()
+    check_vnew_location_real_edit_143()
     check_vnew_plan_step_stay_129()
     check_pod_zones()
     print()
