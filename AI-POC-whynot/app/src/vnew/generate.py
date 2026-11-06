@@ -5990,7 +5990,8 @@ def _submit_take_parts(owner: str, pid: str, gen_id: str, index: int, variant: s
             # 작업 155: 이음 프레임 — 앞 조각 결과의 마지막 프레임, 첫 조각의 Seedance 대체는 앞 테이크 결과의 마지막 프레임.
             frame, frame_key = None, ""
             used = _used_parts(records)  # 작업 169: Kling 으로 바뀐(superseded) 조각은 이음 프레임·순서에서 뺀다
-            before = used[-1] if used else None
+            # 작업 171: 앞 결과가 인서트(손만)로 끝나면 그 앞의 인서트가 아닌 가장 늦은 결과, 없으면 이음 그림 없음(글은 남는다).
+            before = _continuity_source(plan, used) if used else None
             if content_step >= CONTENT_STEP_DROP_REFS:
                 pass  # 작업 168 4단계: 앞 조각·앞 테이크 마지막 프레임을 넣지 않는다(이음 글은 continuity 로 남는다)
             elif in_order and before and before.get("status") == "completed" and before.get("outputKey"):
@@ -6001,7 +6002,7 @@ def _submit_take_parts(owner: str, pid: str, gen_id: str, index: int, variant: s
             continuity = {"take": take, "frame": frame, "frameKey": frame_key}
             if part_endpoint != endpoint:
                 continuity.update(origMax=int(caps.get("imageListMax") or vpoc_fal.DEFAULT_IMAGE_LIST_MAX),
-                                  origFrame=in_order and bool(used))
+                                  origFrame=in_order and before is not None)
             no_text = bool(old) and _qc_no_text(old)  # 작업 156: 화면 글자 검사로 다시 만드는 조각
             part_fb = 1 if lk_step == 1 else step  # 작업 169: likeness 1단계 조각 = 인물당 정면 1장(130 1단계)
             part_seed = old.get("seed") if old and lk_step == 0 and lk_retry and old.get("seed") is not None else None
@@ -8659,9 +8660,62 @@ def _kling_part_ctx(owner: str, pid: str, gen_id: str, index: int, claim: str, p
     return ctx
 
 
+def _conti_cut(plan: dict, cut_id: str) -> dict:
+    """콘티 컷 dict(id 로), 없으면 {}."""
+    return next((c for c in (plan.get("conti") or {}).get("cuts") or [] if str(c.get("id")) == str(cut_id)), {})
+
+
+def _cut_is_insert(cut: dict) -> bool:
+    """작업 171: 166 인서트 컷(손만)인가. SHOT 줄과 같은 판단(_vibe_is_insert + 손만 들어오는 사람)."""
+    return bool(cut) and _vibe_is_insert(cut, _hands_only_owners(cut))
+
+
+def _cut_shot_class(plan: dict, cut: dict) -> tuple[str, str]:
+    """작업 171: (크기 종류, 잠금 주인공). 크기 = 170 콘티 크기 우선(_vibe_conti_size)을 "wide" | "medium" | "closeup" 셋으로
+    (medium close-up 은 medium). 잠금 주인공 = 166/170 클로즈업 주인공(콘티 한글 이름, 없으면 ""). 인서트는 ("insert", "")."""
+    if _cut_is_insert(cut):
+        return "insert", ""
+    shot = _shot_abbrev(plan, str(cut.get("id") or ""))
+    size = _vibe_conti_size(cut, shot).split(",", 1)[0].strip().lower()
+    if "close-up" in size and not size.startswith("medium close-up"):
+        kind = "closeup"
+    elif size.startswith("medium"):
+        kind = "medium"
+    else:
+        kind = "wide"
+    return kind, _vibe_closeup_subject(cut, shot, _hands_only_owners(cut), lambda ko: _romanize_name(ko) or ko)
+
+
+def _kling_start_reason(plan: dict, cut_id: str, prev_cut_id: str) -> str:
+    """작업 171: 조각 Kling 컷의 시작 그림 판단. "continue"(앞 결과 마지막 프레임) = 같은 샷이 이어질 때만 — 이 컷 · 앞 컷이 인서트가
+    아니고 크기 종류(넓은 · 중간 · 클로즈업)와 잠금 주인공이 같다(같은 컷이 조각 경계로 나뉜 뒤쪽도 이어짐). 이 컷이나 앞 컷이 인서트면
+    "insert", 그 밖 "shotChange"(139 시작 그림 = 애니 첫 프레임 · 프리비즈)."""
+    cut, prev = _conti_cut(plan, cut_id), _conti_cut(plan, prev_cut_id)
+    if prev_cut_id and str(prev_cut_id) == str(cut_id):
+        return "continue"
+    if _cut_is_insert(cut) or _cut_is_insert(prev):
+        return "insert"
+    if not cut or not prev or _cut_shot_class(plan, cut) != _cut_shot_class(plan, prev):
+        return "shotChange"
+    return "continue"
+
+
+def _output_ends_insert(plan: dict, rec: dict) -> bool:
+    """작업 171: 조각 · 컷 결과의 마지막 컷이 인서트(손만)인가."""
+    ids = [str(c) for c in rec.get("cutIds") or [] if c] or ([str(rec["cutId"])] if rec.get("cutId") else [])
+    return bool(ids) and _cut_is_insert(_conti_cut(plan, ids[-1]))
+
+
+def _continuity_source(plan: dict, used: list[dict]) -> dict | None:
+    """작업 171: 155 이음 프레임을 뽑을 결과 = 마지막 결과, 그것이 인서트로 끝나면 그 앞의 인서트가 아닌 가장 늦은 결과. 없으면 None
+    (이음 그림 없이, 이음 글은 그대로)."""
+    return next((rec for rec in reversed(used or []) if not _output_ends_insert(plan, rec)), None)
+
+
 def _submit_kling_part_cut(owner: str, pid: str, gen_id: str, plan: dict, ctx: dict, take: dict, item: dict, sig: list,
                            before: dict | None) -> dict:
-    """조각 Kling 컷 하나 제출. 시작 그림 = 앞 조각·앞 컷 결과의 마지막 프레임(있을 때), 없으면 139 시작 그림(Seedream)."""
+    """조각 Kling 컷 하나 제출. 시작 그림 = 앞 조각·앞 컷 결과의 마지막 프레임(같은 샷이 이어질 때만, 작업 171), 아니면 139 시작
+    그림(Seedream, 애니 첫 프레임 · 장소 뷰 · 시작 그림 검사)."""
     cut_id = str(item.get("cutId") or "")
     unit = next((u for u in _take_cut_units(plan, take) if str(u.get("cutId") or "") == cut_id), None)
     if unit is None:
@@ -8669,13 +8723,22 @@ def _submit_kling_part_cut(owner: str, pid: str, gen_id: str, plan: dict, ctx: d
     span = _take_cut_spans(plan, take).get(cut_id) or {"start": item.get("start") or 0}
     shift = max(0.0, float(item.get("start") or 0) - float(span.get("start") or 0))
     cut = {**unit, "startSec": float(unit.get("startSec") or 0) + shift, "seconds": float(item.get("seconds") or 0)}
-    start, start_key = None, ""
-    if before and before.get("status") == "completed" and before.get("outputKey"):
+    start, start_key, reason = None, "", ""
+    if before:
+        prev_ids = [str(c) for c in before.get("cutIds") or [] if c] or [str(before.get("cutId") or "")]
+        reason = _kling_start_reason(plan, cut_id, prev_ids[-1])  # 작업 171: 샷이 바뀌면 앞 프레임에서 시작하지 않는다
+    if reason == "continue" and before.get("status") == "completed" and before.get("outputKey"):
         start = _video_last_frame(str(before["outputKey"]), float(before.get("seconds") or 0))
         start_key = str(before["outputKey"]) + "#last" if start else ""
     record = _submit_real_cut(owner, pid, gen_id, plan, ctx, cut, start=start, start_key=start_key)
     del start
-    return {**item, **record, "sig": sig, "kind": "kling", "cutIds": [cut_id], "seconds": float(item.get("seconds") or 0)}
+    out = {**item, **record, "sig": sig, "kind": "kling", "cutIds": [cut_id], "seconds": float(item.get("seconds") or 0)}
+    out.setdefault("startImage", "still")  # 작업 171
+    if reason:
+        out["startReason"] = reason
+        log.info("vnew.gen.kling_start pid=%s take=%s cut=%s start=%s reason=%s", pid, ctx.get("takeId"), cut_id,
+                 out["startImage"], reason)
+    return out
 
 
 def _escalate_likeness_parts(owner: str, pid: str, gen_id: str, index: int, claim: str) -> None:
@@ -8776,28 +8839,27 @@ def _kling_shot_lock(owner: str, plan: dict, ctx: dict, cut_id: str, seconds: fl
                 appearance = _real_appearance(str(char.get("appearanceEn") or ""))
             else:
                 appearance = _real_appearance(_real_look(owner, char_id))
-            # 이름은 Kling ACTION·DIALOGUE 와 같은 콘티 이름(nameEn = 그 이름)
-            cast.append({"name": name, "nameEn": name, "colorName": actor.get("colorName") or "grey", "look": look,
-                         "appearance": appearance, "costume": vnew_fx.strip_drawing_words(outfits.get(name) or ""),
-                         "refNos": []})
+            # 작업 171: 이름은 Seedance SHOT 줄과 같은 로마자(_vibe_take_prompt 의 _disp = _romanize_name)
+            cast.append({"name": name, "nameEn": _romanize_name(name) or name, "colorName": actor.get("colorName") or "grey",
+                         "look": look, "appearance": appearance,
+                         "costume": vnew_fx.strip_drawing_words(outfits.get(name) or ""), "refNos": []})
         framing: dict = {}
         _vibe_take_prompt(plan, sub, real=True, cast=cast, quiet=True, bases=ctx.get("bases"), framing=framing)
         shot = (framing.get("shots") or {}).get(cut_id)
         if not shot:
             return ""
         lead = str(shot["lead"]).strip().rstrip(" .")
-        # 작업 170: 캐스트에 없는 콘티 인물(가장자리 · 손 주인)도 Kling 글과 같은 콘티 이름으로
-        in_cast = {m["name"] for m in cast}
-        cut = next((c for c in (plan.get("conti") or {}).get("cuts") or [] if str(c.get("id")) == str(cut_id)), {})
-        for ch in _cut_named(cut):
-            ko = str(ch.get("name") or "").strip()
-            roman = _romanize_name(ko)
-            if ko not in in_cast and roman and roman != ko:
-                lead = re.sub(r"(?<![A-Za-z])" + re.escape(roman) + r"(?![A-Za-z])", ko, lead)
+        # 작업 171: 첫 부름에 머리색 단서("Beomgeonu (charcoal-black hair)"), 이미 단서가 붙어 있으면 그대로.
+        cues = {_romanize_name(m["name"]) or m["name"]: _identity_cue(m["appearance"]) for m in cast}
+        for roman, cue in cues.items():
+            hit = re.search(r"(?<![A-Za-z])" + re.escape(roman) + r"(?![A-Za-z])", lead)
+            if cue and hit and not lead[hit.end():].startswith(" ("):
+                lead = lead[:hit.end()] + cue + lead[hit.end():]
         lines = [REAL_CUT_FRAMING_LINE.format(size=shot["size"], lead=lead) if lead
                  else REAL_CUT_FRAMING_LINE.split(": {lead}", 1)[0].format(size=shot["size"]) + "."]
         costumes = framing.get("costumes") or {}
-        locks = [_costume_lock(name, str(costumes.get(name) or "")) for name in shot.get("names") or []]
+        locks = [_costume_lock(_romanize_name(name) or name, str(costumes.get(name) or ""))  # 작업 171: 로마자 이름
+                 for name in shot.get("names") or []]
         locks = [lock for lock in locks if lock]
         if locks:
             lines.append(REAL_CUT_COSTUME_LINE.format(locks="; ".join(locks)))
@@ -11989,16 +12051,29 @@ def _real_cut_prompt(plan: dict, seg: dict, *, model: str = "", prompt_max: int 
     action = ". ".join(p for p in (_real_action(cut.get("promptEn")).rstrip("."), _real_action(actors).rstrip(".")) if p)
     # 작업 136: 그림 문장 빼기·옷 구절 → 장면 옷. 작업 160: 장면 옷 = 그 컷 장소 1벌(_scene_costume_map).
     action = _real_brief_text(action, _scene_costume_map(plan, [cut_id], str(cut.get("locationEn") or ""), None, bases))
-    if action:
-        lines.append("ACTION: " + action + ".")
     spoken = [ln for ln in _cut_lines(plan, cut) if not ln.get("silent") and str(ln.get("lineKo") or "").strip()]
+    # 작업 171: 샷 고정 줄(FRAMING · COSTUME)이 있으면 SHOT · ACTION · 대사 화자도 같은 로마자 이름(따옴표 대사는 그대로).
+    names_ko = sorted({str(n).strip() for n in [ch.get("name") for ch in _cut_named(cut)]
+                       + [ln.get("speaker") for ln in spoken] if str(n or "").strip()}, key=len, reverse=True)
+    roman = bool(str(lock or "").strip())
+
+    def _en(text: str) -> str:
+        if roman:
+            for ko in names_ko:
+                text = text.replace(ko, _romanize_name(ko) or ko)
+        return text
+
+    lines = [_en(lines[0])]
+    if action:
+        lines.append("ACTION: " + _en(action) + ".")
 
     def _said(limit: int) -> str:
         # 작업 147: 대사는 _fit_dialogue 로만(문장 안 자르기 없음). 예산이 모자라면 샷·연기부터 줄인다.
         if not spoken:
             return ""
         return "DIALOGUE (Korean, lip-sync): " + " / ".join(
-            f'{str(ln.get("speaker") or "").strip() or "A character"}: "{_fit_dialogue(str(ln.get("lineKo")).strip(), limit)}"'
+            f'{_en(str(ln.get("speaker") or "").strip()) or "A character"}: '
+            f'"{_fit_dialogue(str(ln.get("lineKo")).strip(), limit)}"'
             for ln in spoken)
 
     dialogue = _said(0)
