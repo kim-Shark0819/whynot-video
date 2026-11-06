@@ -237,6 +237,12 @@ PREVIZ_WEBTOON_MAX_ELEMENTS = _int("VNEW_PREVIZ_WEBTOON_MAX_ELEMENTS", 3)
 PREVIZ_WEBTOON_MAX_IMAGE_URLS = _int("VNEW_PREVIZ_WEBTOON_MAX_IMAGE_URLS", 1)
 # 구간 프롬프트 목표 상한(모델 maxLength 가 더 작으면 그 안으로). 설계자: 2,500자 이내.
 PREVIZ_PROMPT_TARGET = _int("VNEW_PREVIZ_PROMPT_TARGET", 2500)
+# 작업 167: Kling(endpoint 에 kling-video, 상한 2500) 컷 프롬프트 여유. fal/Kling 이 @Element·@Image·@Video 태그를 펼친 뒤
+# 길이를 재는 것으로 보여(prod g20261106085713114f: 2497~2500B 가 "size must be between 0 and 2500" 로 거절) 우리 예산을
+# 2500 - 기본 여유 - 태그당 여유 × (서로 다른 태그 수) 로 낮춘다. 바닥 PREVIZ_KLING_PROMPT_FLOOR 바이트.
+PREVIZ_KLING_PROMPT_RESERVE = _int("VNEW_PREVIZ_KLING_PROMPT_RESERVE", 120)
+PREVIZ_KLING_TAG_RESERVE = _int("VNEW_PREVIZ_KLING_TAG_RESERVE", 40)
+PREVIZ_KLING_PROMPT_FLOOR = _int("VNEW_PREVIZ_KLING_PROMPT_FLOOR", 1800)
 # 프리비즈 모드 동시 제출 상한(설계자 2026-10-21, 지시서 041 · 2026-10-23 ⑤ OOM 완화). 한 순회에서
 # 선점·제출할 수 있는 칸(구간×그림체) 수. preparing+submitted(진행 중) 합이 이 수를 넘지 않게 한다.
 # 기본 2(옛 4에서 낮춤 — 512Mi 파드가 동시 4칸 준비에서 OOMKilled). env 로 바꿀 수 있다.

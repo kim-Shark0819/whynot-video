@@ -7030,7 +7030,9 @@ def _do_submit_previz(owner: str, pid: str, gen_id: str, index: int, variant: st
         endpoint = str(gen.get("videoModel") or vnew_settings.VNEW_PREVIZ_EDIT_MODEL)
         caps = _previz_caps(endpoint)
         trace = _RefTrace.start()  # 지시서 116: 이 스레드의 참고 이미지 읽기·맞춤을 따라간다(바이트는 붙잡지 않는다)
-        built = _previz_payload(owner, pid, plan, unit, variant, caps=caps)
+        # 작업 167: Kling 2500 여유 + (크기 거절 뒤 1번) fal 이 알려 준 상한 N 으로 다시 만든다.
+        size_cap = int((state.get("sizeRetry") or {}).get("cap") or 0) if isinstance(state.get("sizeRetry"), dict) else 0
+        built = _previz_payload(owner, pid, plan, unit, variant, caps=caps, endpoint=endpoint, size_cap=size_cap)
         refs = trace.stop(built)
         prompt = built["prompt"]
         elements = built["elements"]
@@ -7152,6 +7154,10 @@ def _do_poll_previz(owner: str, pid: str, gen_id: str, index: int, variant: str,
             _log_result(owner, pid, gen_id, gen, index, variant, arn, "failed", error=message)  # 지시서 116
             # vnew-live-fx C.6: 소리 검사 거절이면 칸에 failureKind "audio"(화면이 '소리 없이 다시 만들기'를 보인다).
             kind = str(poll_result.get("failureKind") or "") or _audio_kind(message)
+            if not kind and gen.get("mode") == "previz" and _prompt_size_cap(message) and not state.get("sizeRetry"):
+                # 작업 167: fal 프롬프트 크기 거절 → 더 짧은 예산으로 같은 칸을 1번 다시 낸다(두 번째 거절은 아래 그대로 실패).
+                _size_requeue(owner, pid, gen_id, index, variant, claim, _prompt_size_cap(message))
+                return
             if not kind and gen.get("mode") == "previz-take" and _content_kind(message):
                 # 작업 153: fal 콘텐츠 검사 거절 → 순화(같은 모델) → Seedance → 한국어 문구로 실패.
                 _escalate_content(owner, pid, gen_id, index, variant, claim)
@@ -7192,6 +7198,25 @@ def _do_poll_previz(owner: str, pid: str, gen_id: str, index: int, variant: str,
         if variant == "real":
             _settle_take_charge(owner, pid, gen_id, state)  # 작업 130: 결과를 모르면 보수적으로 남긴다(없으면 아무것도 안 함)
         _fail_variant(owner, pid, gen_id, index, variant, claim, _msg(exc))
+
+
+def _size_requeue(owner: str, pid: str, gen_id: str, index: int, variant: str, claim: str, size_cap: int) -> None:
+    """작업 167: 컷 단위 칸의 프롬프트 크기 거절 → state.sizeRetry={cap:N} 를 남기고 같은 칸을 queued(153 처럼 드라이버가
+    다시 선점하며 attempt 를 올린다). 제출은 sizeRetry 를 읽어 int(N × 0.85) − 태그 여유로 프롬프트를 다시 만든다. 1번만."""
+
+    def mutator(data: dict) -> None:
+        g = data.get("gen") or {}
+        if not _claim_ok_variant(g, index, variant, claim):
+            raise _Discard()
+        state = _previz_cells(g)[index][variant]
+        state.update(status="queued", invocationArn="", outputKey="", error="", claim="", claimedAt="")
+        state["sizeRetry"] = {"cap": int(size_cap)}
+
+    try:
+        _commit(owner, pid, mutator)
+    except _Discard:
+        return
+    log.info("vnew.gen.prompt_size_retry pid=%s cell=%d variant=%s cap=%d", pid, index, variant, int(size_cap))
 
 
 # ================================================================ 작업 130·보완 1: 실사 likeness 거절 → 정면 1장 → 컷 단위 Kling
@@ -9589,7 +9614,8 @@ def _seg_cut_ids(seg: dict) -> list[str]:
     return [str(cid)] if cid else []
 
 
-def _previz_payload(owner: str, pid: str, plan: dict, seg: dict, variant: str, *, caps: dict | None = None) -> dict:
+def _previz_payload(owner: str, pid: str, plan: dict, seg: dict, variant: str, *, caps: dict | None = None,
+                    endpoint: str = "", size_cap: int = 0) -> dict:
     """한 컷·한 그림체의 제출 payload(elements · imageUrls · prompt)를 만든다(설계자 2026-10-22).
 
     모델별 어댑터(caps):
@@ -9599,17 +9625,19 @@ def _previz_payload(owner: str, pid: str, plan: dict, seg: dict, variant: str, *
       (실사/웹툰) 순서대로 + (웹툰) 그림체 참고 1장, imageListMax 이내. CAST 는 "Image {n} is {name}"
       형식(이미지 번호 = 실제 순서), 마네킹 색 매핑 "The {color} mannequin becomes the person in Image {n}".
     elements+imageUrls 합계는 PREVIZ_MAX_INPUTS(4) 이내. charId 없는 인물은 CAST 색 문장에만.
+    작업 167: endpoint·size_cap 을 주면 프롬프트 예산이 _cut_prompt_budget(Kling 여유·크기 거절 재제출)을 따른다. 안 주면 지금 그대로.
     """
     caps = caps or {}
+    fit = {"endpoint": endpoint, "caps": caps, "size_cap": size_cap} if (endpoint or size_cap) else None
     # elementsField 가 명시돼 있으면 elements 모드. imageListField 만 있으면 imageList 모드.
     # caps 가 비면(기본 Kling 미등록) elements 모드로 본다(기존 동작 유지).
     use_image_list = bool(caps.get("imageListField")) and not caps.get("elementsField")
     if use_image_list:
-        return _previz_payload_image_list(owner, pid, plan, seg, variant, caps)
-    return _previz_payload_elements(owner, pid, plan, seg, variant)
+        return _previz_payload_image_list(owner, pid, plan, seg, variant, caps, fit=fit)
+    return _previz_payload_elements(owner, pid, plan, seg, variant, fit=fit)
 
 
-def _previz_payload_elements(owner: str, pid: str, plan: dict, seg: dict, variant: str) -> dict:
+def _previz_payload_elements(owner: str, pid: str, plan: dict, seg: dict, variant: str, *, fit: dict | None = None) -> dict:
     """elements 방식(기존 Kling O3, 설계자 2026-10-22). @Element 매핑."""
     is_real = variant == "real"
     max_elements = vnew_settings.PREVIZ_REAL_MAX_ELEMENTS if is_real else vnew_settings.PREVIZ_WEBTOON_MAX_ELEMENTS
@@ -9653,7 +9681,7 @@ def _previz_payload_elements(owner: str, pid: str, plan: dict, seg: dict, varian
         if panel is not None:
             image_urls.append(_fit_ref(panel))
 
-    prompt = _cut_prompt(plan, seg, variant, cast=cast, has_image_ref=bool(image_urls))
+    prompt = _cut_prompt(plan, seg, variant, cast=cast, has_image_ref=bool(image_urls), **(fit or {}))
     # 합계 4 넘지 않게(안전) 자른다.
     total_allowed = vnew_settings.PREVIZ_MAX_INPUTS
     if len(elements) > max_elements:
@@ -9664,7 +9692,8 @@ def _previz_payload_elements(owner: str, pid: str, plan: dict, seg: dict, varian
     return {"elements": elements, "imageUrls": image_urls, "prompt": prompt}
 
 
-def _previz_payload_image_list(owner: str, pid: str, plan: dict, seg: dict, variant: str, caps: dict) -> dict:
+def _previz_payload_image_list(owner: str, pid: str, plan: dict, seg: dict, variant: str, caps: dict, *,
+                               fit: dict | None = None) -> dict:
     """imageList 방식(설계자 2026-10-22). 참고 이미지 = 보이는 인물 정면 순서 + (웹툰) 그림체 참고 1장.
 
     elements 는 비우고, image_urls(imageListField) 에 참고 이미지를 담는다. CAST 는 "Image {n} is
@@ -9709,7 +9738,7 @@ def _previz_payload_image_list(owner: str, pid: str, plan: dict, seg: dict, vari
             image_urls.append(_fit_ref(panel))
             has_style_ref = True
 
-    prompt = _cut_prompt(plan, seg, variant, cast=cast, has_image_ref=has_style_ref)
+    prompt = _cut_prompt(plan, seg, variant, cast=cast, has_image_ref=has_style_ref, **(fit or {}))
     # imageListMax 이내로 자른다(안전).
     if len(image_urls) > max_images:
         image_urls = image_urls[:max_images]
@@ -9837,7 +9866,8 @@ def _scene_summary(scene_en: str, max_chars: int = 350) -> str:
     return summary[:max_chars].strip()
 
 
-def _cut_prompt(plan: dict, seg: dict, variant: str, *, cast: list[dict], has_image_ref: bool) -> str:
+def _cut_prompt(plan: dict, seg: dict, variant: str, *, cast: list[dict], has_image_ref: bool,
+                endpoint: str = "", caps: dict | None = None, size_cap: int = 0) -> str:
     """컷 프롬프트(영상 모델 전달문, 설계자 2026-10-22, ⑤). 영어, UTF-8 2,500바이트 이내.
 
     순서 고정: ASSETS(자료 번호 목록) → @Video1 안내 → CAST → SHOT → BLOCKING → ACTION → MOTION(short) → MOOD → SETTING → HARMONY(short) → DIALOGUE → CONTINUITY.
@@ -9860,6 +9890,10 @@ def _cut_prompt(plan: dict, seg: dict, variant: str, *, cast: list[dict], has_im
     글자)을 두고 예산에서 미리 뺀다(어떤 줄이기에도 남는다). SETTING 의 장소 요약(sceneEn)은 고정부가 대신해 넣지 않는다.
     CAST 다음에 "Only A and B appear."(보이는 인물만),
     MOOD 는 컷 moodEn 만(촬영 지시서 moodEn 은 쓰지 않는다), FX 는 대상 인물(fxWho)이 있으면 그 사람에게만.
+
+    작업 167: endpoint(·caps)·size_cap 을 주면 예산 = _cut_prompt_budget(Kling 2500 여유 · fal 크기 거절 뒤 재제출). 그 예산이
+    PREVIZ_PROMPT_TARGET 보다 작을 때만 ⑦ ACTION 앞에 CAST 외형 문장 줄이기(castAppearance — @Element·Image 매핑은 남는다)를 더한다.
+    안 주면(또는 예산이 그대로면) 지금과 바이트 단위로 같다.
     """
     is_real = variant == "real"
     fx_on = bool(vnew_settings.VNEW_FX)
@@ -9906,7 +9940,8 @@ def _cut_prompt(plan: dict, seg: dict, variant: str, *, cast: list[dict], has_im
             body = body[:-1]
         return body.strip()
 
-    cast_sentences = []
+    cast_heads: list[str] = []  # 작업 167: 매핑 부분(외형 앞). 외형은 cast_apps(줄이기에서 뒤 문장부터 뺀다).
+    cast_apps: list[str] = []
     # ASSETS 줄 재료(설계자 2026-10-22): 번호로 매긴 입력 자료 목록. elements 모델은 @Element{n},
     # 이미지 목록 모델은 Image {n}, 웹툰 그림체 참고는 @Image{k}. 모델이 자료를 번호로 읽게 한다.
     asset_refs: list[str] = []
@@ -9928,12 +9963,21 @@ def _cut_prompt(plan: dict, seg: dict, variant: str, *, cast: list[dict], has_im
             asset_refs.append(f"{ref} = {name} reference sheet")
         else:
             sentence = f"The {color} mannequin is {name}"
-        if appearance:
-            sentence += f": {appearance}"
-        # 끝 마침표 하나만.
-        sentence = sentence.rstrip(".").rstrip() + "."
-        cast_sentences.append(sentence)
-    cast_line = "CAST — only these people are in this shot: " + (" ".join(cast_sentences) if cast_sentences else "no one is visible.")
+        cast_heads.append(sentence)
+        cast_apps.append(appearance)
+
+    def _cast_line(apps: list[str]) -> str:
+        cast_sentences = []
+        for head_part, appearance in zip(cast_heads, apps):
+            sentence = head_part
+            if appearance:
+                sentence += f": {appearance}"
+            # 끝 마침표 하나만.
+            sentence = sentence.rstrip(".").rstrip() + "."
+            cast_sentences.append(sentence)
+        return "CAST — only these people are in this shot: " + (" ".join(cast_sentences) if cast_sentences else "no one is visible.")
+
+    cast_line = _cast_line(cast_apps)
 
     # ASSETS — 맨 앞 줄(설계자 2026-10-22, 뉴테이크 프롬프트 규칙). 자료를 번호로 나열한다.
     # @Video1 = 이 샷의 러프 3D 프리비즈, @Element{n}/Image{n} = 각 인물 참고 시트,
@@ -10058,7 +10102,7 @@ def _cut_prompt(plan: dict, seg: dict, variant: str, *, cast: list[dict], has_im
 
     def _build(*, scene_summary: str, background: str, mood: str, blocking: str,
                with_delivery: bool, shot: str, action: str, fx_short: bool = False, body: bool = False,
-               dialogue_limit: int = 0) -> str:
+               dialogue_limit: int = 0, apps: list[str] | None = None) -> str:
         shot_line = ("SHOT: " + shot) if shot else "SHOT: Match the framing, lens, camera height and angle exactly as shown in @Video1."
         blocking_line = ("BLOCKING: " + blocking) if blocking else ""
         action_line = ("ACTION: " + action) if action else ""
@@ -10069,7 +10113,8 @@ def _cut_prompt(plan: dict, seg: dict, variant: str, *, cast: list[dict], has_im
         # → DIALOGUE → CONTINUITY. MOTION·HARMONY short 는 고정 블록(지우지 않는 등급).
         # vnew-live-fx: FX/EXPRESSION 줄은 ACTION 바로 다음(끔이면 빈 값이라 빠진다).
         blocks = [
-            assets_line, head, cast_line, only_line, shot_line, blocking_line, action_line, _fx_line(fx_short),
+            assets_line, head, cast_line if apps is None else _cast_line(apps), only_line, shot_line, blocking_line,
+            action_line, _fx_line(fx_short),
             motion_short, mood_line, setting_line, harmony_short, dlg, _continuity(body),
         ]
         return "\n".join(b for b in blocks if b)
@@ -10091,6 +10136,7 @@ def _cut_prompt(plan: dict, seg: dict, variant: str, *, cast: list[dict], has_im
         "fx_short": False,
         "body": fx_on,
         "dialogue_limit": 0,  # 작업 147: 대사 상한(0 = 없음, byteTrim 바로 앞에서만 25)
+        "apps": None,  # 작업 167: CAST 외형(None = 지금 그대로, 좁은 예산의 castAppearance 단계에서만 목록)
     }
 
     def _current() -> str:
@@ -10105,7 +10151,16 @@ def _cut_prompt(plan: dict, seg: dict, variant: str, *, cast: list[dict], has_im
             fx_short=state["fx_short"],
             body=state["body"],
             dialogue_limit=state["dialogue_limit"],
+            apps=state["apps"],
         )
+
+    # 작업 167: Kling 2500 여유·크기 거절 재제출 예산(태그 수는 줄이기 전 전체 프롬프트에서 센다 — 줄이기는 ASSETS·CAST 매핑을 지우지 않는다).
+    tight = False
+    if endpoint or size_cap:
+        fit_budget = _cut_prompt_budget(endpoint, caps, _prompt_tags(fixed_head + "\n" + _current()), size_cap)
+        if fit_budget < int(vnew_settings.PREVIZ_PROMPT_TARGET):
+            budget = fit_budget - ((_utf8_len(fixed_head) + 1) if fixed_head else 0)  # 고정부는 지금처럼 예산에서 미리 뺀다
+            tight = True
 
     # 090 필수 수정 2: 적용한 줄이기 단계를 로그 한 줄로 남긴다(운영 확인용, 프롬프트 글자는 바꾸지 않는다).
     applied: list[str] = []
@@ -10175,6 +10230,19 @@ def _cut_prompt(plan: dict, seg: dict, variant: str, *, cast: list[dict], has_im
     if fx_short_texts:
         state["fx_short"] = True
         applied.append("fxShort")
+        if _utf8_len(_current()) <= budget:
+            return _done(_current())
+    # ⑥-1-1 (작업 167, 좁은 예산만) CAST 외형 문장을 뒤 인물부터 뒤 문장부터 뺀다. 매핑("The red mannequin is @Element1, Kim")은 남는다.
+    if tight and any(cast_apps):
+        before = _current()
+        state["apps"] = list(cast_apps)
+        for i in reversed(range(len(cast_apps))):
+            over = _utf8_len(_current()) - budget
+            if over <= 0:
+                break
+            state["apps"][i] = _drop_tail_sentences(state["apps"][i], over)
+        if _current() != before:
+            applied.append("castAppearance")
         if _utf8_len(_current()) <= budget:
             return _done(_current())
     # ⑦ 마지막에만 ACTION 뒤쪽 문장(첫 문장은 절대 지우지 않는다).
@@ -10486,6 +10554,42 @@ def _previz_prompt_budget() -> int:
         budget = min(budget, model_max)
     else:
         budget = min(budget, vpoc_fal.DEFAULT_PROMPT_MAX)
+    return budget
+
+
+# 작업 167: fal 프롬프트 크기 거절("prompt: size must be between 0 and 2500") · Kling 태그 여유.
+_PROMPT_TAG_RE = re.compile(r"@(?:Element|Image|Video)\d+")
+_PROMPT_SIZE_RE = re.compile(r"prompt\s*:\s*size must be between\s+0\s+and\s+(\d+)", re.IGNORECASE)
+KLING_PROMPT_CAP = 2500       # 여유를 두는 Kling 상한(fal 스키마 maxLength)
+SIZE_RETRY_RATIO = 0.85       # 크기 거절 뒤 1번 다시 낼 때 예산 = int(N × 0.85) − 태그 여유
+
+
+def _prompt_tags(text: str) -> int:
+    """프롬프트의 서로 다른 @Element·@Image·@Video 태그 수(같은 태그가 여러 번 나와도 1)."""
+    return len(set(_PROMPT_TAG_RE.findall(str(text or ""))))
+
+
+def _prompt_size_cap(message) -> int:
+    """fal 거절 문구의 "prompt: size must be between 0 and N" 에서 N. 그 문구가 아니면 0."""
+    match = _PROMPT_SIZE_RE.search(str(message or ""))
+    return int(match.group(1)) if match else 0
+
+
+def _cut_prompt_budget(endpoint: str, caps: dict | None, tags: int, size_cap: int = 0) -> int:
+    """컷 프롬프트 바이트 예산(작업 167). 기본 PREVIZ_PROMPT_TARGET.
+
+    endpoint 에 kling-video 가 있고 상한(caps.promptMaxLength, 없으면 fal 기본)이 2500 이면
+    cap − PREVIZ_KLING_PROMPT_RESERVE − PREVIZ_KLING_TAG_RESERVE × tags(바닥 PREVIZ_KLING_PROMPT_FLOOR).
+    size_cap(fal 이 알려 준 N)이 있으면 int(N × 0.85) − 태그 여유와 위 값 중 작은 값(모델 무관).
+    """
+    budget = int(vnew_settings.PREVIZ_PROMPT_TARGET)
+    tag_reserve = int(vnew_settings.PREVIZ_KLING_TAG_RESERVE) * max(0, int(tags or 0))
+    cap = int((caps or {}).get("promptMaxLength") or vpoc_fal.DEFAULT_PROMPT_MAX)
+    if "kling-video" in str(endpoint or "").lower() and cap == KLING_PROMPT_CAP:
+        budget = min(budget, max(int(vnew_settings.PREVIZ_KLING_PROMPT_FLOOR),
+                                 cap - int(vnew_settings.PREVIZ_KLING_PROMPT_RESERVE) - tag_reserve))
+    if size_cap > 0:
+        budget = min(budget, max(1, int(size_cap * SIZE_RETRY_RATIO) - tag_reserve))
     return budget
 
 
@@ -11488,6 +11592,7 @@ def retry_segment(owner: str, pid: str, seg_id: str, variant: str = "real", audi
                 st.pop("pendingCharge", None)
                 st.pop("contentFallback", None)
                 st.pop("qc", None)  # 작업 156: 사용자 다시 시도는 결과 검사도 처음부터
+                st.pop("sizeRetry", None)  # 작업 167: 사용자 다시 시도는 크기 거절 재제출도 처음부터
                 if st.get("note") == TEXT_LEFT_NOTE:
                     st.pop("note", None)
                 if content_retry:
