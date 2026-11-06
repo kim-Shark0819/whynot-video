@@ -48800,8 +48800,10 @@ def check_vnew_real_brief_136() -> None:
                 {"name": a, "outfitEn": "red parka"}, {"name": b, "outfitEn": "green cardigan"}]}]
             got1 = genmod._scene_outfits(plan_p, ["c1"], {a: "cast coat", b: "cast top"})  # noqa: SLF001
             got2 = genmod._scene_outfits(_fw_plan(), ["c1"], {})  # noqa: SLF001
+            # 작업 164 fix1: 옷 후보는 옷 필드만 — 콘티 actionEn "stares in a grey hoodie" 는 이제 옷이 아니어서 범건우는 대본 옷
+            # "red parka"(전 기대값 "grey hoodie" = actionEn 에서 뽑은 구절).
             if got0 != {a: "black open-collar shirt", b: "navy training top"} \
-                    or got1 != {a: "grey hoodie", b: "green cardigan"} or got2 != {a: "", b: ""}:
+                    or got1 != {a: "red parka", b: "green cardigan"} or got2 != {a: "", b: ""}:
                 bad.append(f"(rb-b) 장면 옷 우선순위가 콘티 → 대본 → outfits → '' 가 아닙니다: {got0} {got1} {got2}")
 
             # ================= (rb-c) 실사 프롬프트 3곳 =================
@@ -55516,11 +55518,13 @@ def check_vnew_costume_text_164() -> None:
         cut2["characters"].append({"name": a, "presence": "hand_only", "positionEn": prmod.OFF_FRAME_HAND_POSITION,
                                    "actionEn": f"{a}'s hand (off-frame, in dark navy shirt cuff), rests on the railing."})
         loc = genmod._take_location(plan, take)  # noqa: SLF001
+        # 작업 164 fix1: 옷 후보는 옷 필드만 — 연기 · 위치 글의 "in a grey hoodie" 도 이제 옷이 아니다(전에는 "grey hoodie").
         expect("cf-b", [genmod._outfit_of(cut2["characters"][-1]), genmod._outfit_of(cut3["characters"][0]),  # noqa: SLF001
                         genmod._outfit_of({"name": b, "actionEn": "sits in a grey hoodie"}),  # noqa: SLF001
+                        genmod._outfit_of({"name": b, "outfitEn": "grey hoodie and jeans"}),  # noqa: SLF001
                         genmod._scene_costume(plan, b, loc), genmod._scene_costume(plan, a, loc)],  # noqa: SLF001
-               ["", "", "grey hoodie", "", ""],
-               "손 주인 메모(손만 인물 글 · 'in black sleeve')는 옷으로 읽지 않음(보통 옷 구절은 그대로), 조각뿐이면 장면 옷 없음")
+               ["", "", "", "grey hoodie and jeans", "", ""],
+               "옷 필드만 옷 후보(손 주인 메모 · 연기 글의 옷 구절은 아님), 조각뿐이면 장면 옷 없음")
         expect("cf-b", [genmod._scene_costume(plan, b, loc, base=outfit_b, fallback=frag_b),  # noqa: SLF001
                         genmod._scene_costume(plan, a, loc, base=outfit_a, fallback=frag_a, real=False)],  # noqa: SLF001
                [outfit_b, genmod._scene_outfit_text(outfit_a, real=False)],  # noqa: SLF001
@@ -55643,19 +55647,107 @@ def check_vnew_costume_text_164() -> None:
                [outfit_b, genmod._scene_outfit_text(outfit_a, real=False), True,  # noqa: SLF001
                 [{"name": b, "how": "main"}, {"name": a, "how": "hands only"}]],
                "손 주인 옷 메모 = 분석 옷 전체(조각 아님), cut-03 손 절 · 화면 인물 그대로")
+
+        # ================= (cf-f) fix1: 위치 글의 옷 낱말 · 옷 필드 없음 → 기본 옷 (모든 호출 쪽) =================
+        pf, take_f = _tc157_plan()
+        cut2f = next(c for c in pf["conti"]["cuts"] if c["id"] == "cut-02")
+        cut2f["characters"] = [{"name": b, "positionEn": "in panel 1 only his jaw and his dark-sleeved arm enter from the right edge",
+                                "actionEn": "tugs at his sleeve"},
+                               {"name": a, "positionEn": "right side, in a dark navy shirt cuff", "actionEn": "listens"}]
+        loc_f = genmod._take_location(pf, take_f)  # noqa: SLF001
+        expect("cf-f", [genmod._scene_costume(pf, b, loc_f), genmod._scene_costume(pf, b, None),  # noqa: SLF001
+                        genmod._scene_costume(pf, b, loc_f, base=outfit_b), genmod._scene_costume(pf, a, None, base=outfit_a)],  # noqa: SLF001
+               ["", "", outfit_b, genmod._scene_outfit_text(outfit_a)],  # noqa: SLF001
+               "positionEn 'dark-sleeved arm' · 'dark navy shirt cuff' 은 옷이 아님: 옷 필드가 없으면 빈 값, base 를 주면 기본 옷")
+        empty_cast = [dict(m, costume="") for m in cast(False)]
+        with _pin_vnew(VNEW_FX=True, VNEW_TAKE_PROMPT_MAX_CHARS=8000):
+            vibe_f = genmod._vibe_take_prompt(pf, take_f, real=True, cast=[dict(m, look="real") for m in empty_cast],  # noqa: SLF001
+                                              location_no=5, quiet=True, bases=bases)
+            lock_f = genmod._vibe_take_prompt(pf, take_f, real=False, cast=empty_cast, location_no=5, anchor=True,  # noqa: SLF001
+                                              quiet=True, bases=bases)
+            old_f = genmod._take_prompt(pf, take_f, cast=[dict(m, look="real") for m in empty_cast], panel_nos=[],  # noqa: SLF001
+                                        location_no=5, variant="real", quiet=True, bases=bases)
+            still_f = genmod._cut_still_prompt(pf, {"cutId": "cut-02"}, [("blue", b, 2), ("orange", a, 3)], True,  # noqa: SLF001
+                                               source="anime", outfits={}, bases=bases)
+            kling_f = genmod._segment_prompt(pf, {"cutIds": ["cut-02"]}, first_segment=True, real=True, bases=bases)  # noqa: SLF001
+        edits_f: list = []
+        orig_edit = genmod._seedream_costume  # noqa: SLF001
+        orig_charge = genmod._charge_costume_ref  # noqa: SLF001
+        try:
+            genmod._seedream_costume = lambda prompt, front, *, size: edits_f.append(prompt) or b"E"  # noqa: SLF001
+            genmod._charge_costume_ref = lambda *a_, **k: None  # noqa: SLF001
+            with _pin_vnew(VNEW_REAL_COSTUME_REF=True):
+                genmod._costume_refs("o", "p164f", pf, [(b, {"realFrontKey": "FB"}, "real")], loc_f,  # noqa: SLF001
+                                     {b: frag_b}, load=lambda key: b"FRONT", bases=bases)
+        finally:
+            genmod._seedream_costume = orig_edit  # noqa: SLF001
+            genmod._charge_costume_ref = orig_charge  # noqa: SLF001
+        cbase = genmod._scene_outfit_text(outfit_a)  # noqa: SLF001
+        expect("cf-f", [f"{rb}: " in vibe_f and f"wearing {outfit_b}" in vibe_f, f"wearing {cbase.lower()}" in vibe_f.lower(),
+                        genmod._costume_lock_tail(outfit_b) in lock_f,  # noqa: SLF001
+                        f"(overrides the photo's clothing): {outfit_b}" in old_f, f"{b} wears {outfit_b}" in still_f,
+                        f"{a} wears {cbase}" in still_f, f"{b} wears {outfit_b}" in kling_f, "dark-sleeved" in vibe_f + old_f,
+                        edits_f == [genmod.REAL_COSTUME_REF_PROMPT.format(costume=outfit_b)],
+                        genmod._plan_bases(pplan, {"c1": {"outfitEn": outfit_b}, "c2": {"outfitEn": outfit_a}})],  # noqa: SLF001
+               [True, True, True, True, True, True, True, False, True, {b: outfit_b, a: outfit_a}],
+               "기본 옷이 모든 호출 쪽에: vibe look 줄 · 155 고정 · 옛 ASSETS COSTUME · 시작 그림 OUTFITS · Kling ACTION · 장면 옷 편집 · "
+               "컷 단위 실사 ctx(_plan_bases)")
+
+        # ================= (cf-g) fix1: tools/dry_take_prompt.py 가 오프라인 고정 계획에서 돈다 =================
+        import importlib.util as _ilu  # noqa: PLC0415
+        import tempfile as _tempfile  # noqa: PLC0415
+
+        tool = ROOT / "tools" / "dry_take_prompt.py"
+        spec = _ilu.spec_from_file_location("dry_take_prompt_164", tool)
+        drymod = _ilu.module_from_spec(spec)
+        spec.loader.exec_module(drymod)
+        work = Path(_tempfile.mkdtemp(prefix="vpoc_dry164_"))
+        try:
+            fixture = _copy.deepcopy(pf)
+            fixture["input"] = {"characters": [{"roleName": b, "charId": "c1"}, {"roleName": a, "charId": "c2"}]}
+            for actor in fixture["previz"]["scenes"][0]["actors"]:
+                actor["charId"] = "c2" if actor["name"] == a else "c1"
+            (work / "plan.json").write_text(json.dumps(fixture, ensure_ascii=False), encoding="utf-8")
+            (work / "chars.json").write_text(json.dumps(chars_db, ensure_ascii=False), encoding="utf-8")
+            env = {k: v for k, v in os.environ.items() if not k.startswith("AWS_")}
+            env.update(AWS_ACCESS_KEY_ID="none", AWS_SECRET_ACCESS_KEY="none", AWS_DEFAULT_REGION="ap-northeast-2")
+            try:
+                proc = subprocess.run([sys.executable, "-X", "utf8", "-B", str(tool), "p164", "--plan-file", str(work / "plan.json"),
+                                       "--chars-file", str(work / "chars.json")], capture_output=True, text=True,
+                                      encoding="utf-8", timeout=300, cwd=str(ROOT), env=env)
+                dry_out, dry_code = proc.stdout, proc.returncode
+            except subprocess.TimeoutExpired:
+                dry_out, dry_code = "", "timeout"
+        finally:
+            shutil.rmtree(work, ignore_errors=True)
+        looks = [ln for ln in dry_out.splitlines() if ln.startswith("  LOOK")]
+        heads = [ln for ln in dry_out.splitlines() if ln.startswith("== take ")]
+        blocked_line = next((ln for ln in dry_out.splitlines() if ln.startswith("# blocked calls:")), "")
+        expect("cf-g", [callable(getattr(drymod, "run", None)), callable(getattr(drymod, "install_guards", None)), dry_code,
+                        bool(heads) and {("[anime]" in h, "[real]" in h) for h in heads} == {(True, False), (False, True)},
+                        bool(looks) and all(outfit_b in ln for ln in looks if ln.startswith(f"  LOOK    {rb}:")),
+                        any(ln.startswith(f"  LOOK    {rb}:") for ln in looks),
+                        any(ln.startswith("  SHOT    Shot ") and len(ln) <= len("  SHOT    ") + 300 for ln in dry_out.splitlines()),
+                        any(w in blocked_line for w in ("aws:", "STORE.", "fal.", "_seedream", "_submit_video", "mutate_plan"))],
+               [True, True, 0, True, True, True, True, False],
+               "dry_take_prompt.py: import · 오프라인 실행 0 · 애니/실사 테이크 머리 · look 줄 = 기본 옷 · 샷 300자 · 쓰기/유료 시도 0")
+        report.append(f"dry run: {len(heads)} prompts, {blocked_line}")
+        if looks:
+            report.append(f"dry run look: {looks[0][:150]}")
         if llm_calls or llm_calls2:
             bad.append(f"가짜가 아닌 LLM 호출: {llm_calls} {llm_calls2}")
     except Exception as exc:  # noqa: BLE001
         bad.append("예외: " + repr(exc) + "\n" + _tb.format_exc()[:2500])
 
-    missing = [g for g in ("cf-a", "cf-b", "cf-c", "cf-d", "cf-e") if g not in seen]
+    missing = [g for g in ("cf-a", "cf-b", "cf-c", "cf-d", "cf-e", "cf-f", "cf-g") if g not in seen]
     if missing:
         bad.append(f"검사 묶음이 돌지 않았습니다: {missing}")
     if bad:
         fail("작업 164 옷 글 조각 검사 실패\n  " + "\n  ".join(bad))
     else:
         ok("작업 164 (cf-a)옷 글 검사 · 첫 문장 (cf-b)조각 패널 읽기 · 손 주인 메모 → 모든 테이크 · 조각 · 고정 · 옛 경로 분석 옷 전체 "
-           "(cf-c)제출 경로 기본 옷 (cf-d)costume_invalid → 기본 옷 (cf-e)162 손 주인 옷 메모 · 손 절")
+           "(cf-c)제출 경로 기본 옷 (cf-d)costume_invalid → 기본 옷 (cf-e)162 손 주인 옷 메모 · 손 절 "
+           "(cf-f)fix1 위치 글 옷 낱말 → 기본 옷(모든 호출 쪽) (cf-g)fix1 dry_take_prompt.py 오프라인")
         for line in report:
             print(f"       164: {line}")
 

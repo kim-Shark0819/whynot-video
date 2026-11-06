@@ -57,7 +57,6 @@ from .locations import REAL_NO_BRAND, REAL_NO_BRAND_SENTENCE
 # 지시서 117: 속마음 대사 판정은 prompts.is_thought 한 곳(순수 모듈)에서만 한다.
 from .prompts import is_thought as _is_thought
 from .prompts import OFF_FRAME_HAND_POSITION as _OFF_FRAME_HAND
-from .prompts import is_off_frame as _is_off_frame
 from .prompts import STILL_SHOT_SIZES as _SHOT_SIZES
 
 log = logging.getLogger("vpoc")
@@ -7091,8 +7090,6 @@ REAL_BRIEF_CLOTHING_WORDS = re.compile(
 _BRIEF_PIECES = re.compile(r"(,\s*(?:(?:and|with|wearing|while)\s+)?|\s+(?:and|with|wearing|while)\s+)", re.IGNORECASE)
 _BRIEF_DANGLING = re.compile(r"(?:[\s,]+(?:and|with|in|of|a|an|the|his|her|their|its|wearing|while|has|have|is|are))+$",
                              re.IGNORECASE)
-_OUTFIT_PHRASE = re.compile(r"\b(?:wear(?:s|ing)?|dressed in|in)\s+([^,.;]+)", re.IGNORECASE)
-_OUTFIT_ARTICLE = re.compile(r"^(?:(?:a|an|the|his|her|their)\s+)+", re.IGNORECASE)
 # 작업 137/138: 옷 색 낱말(1곳). 장면 옷 인물이 1명 이상인 컷에서 몸 낱말 바로 앞의 이 색("ivory-white shoulder")을 뺀다(_real_brief_text).
 REAL_BRIEF_OUTFIT_COLORS = (r"(?:off-white|white|ivory|cream|beige|black|navy|grey|gray|charcoal|blue|red|pink|green|brown|"
                             r"khaki|olive|camel|yellow|purple|maroon|burgundy)")
@@ -7148,6 +7145,7 @@ _COSTUME_HEAD_END = re.compile(r"\s*[,;:(]|\s+(?:with|over|under|and|plus|featur
                                r"untucked|rolled|open|half|buttoned|unbuttoned|zipped|at|on|in|to|from|down|around|across|"
                                r"along|near|by)\b", re.IGNORECASE)
 _COSTUME_MIN_WORDS = 3
+_COSTUME_OPEN_TAIL = re.compile(r"\s*[(\[{][^()\[\]{}]*$")
 
 
 def _costume_brackets_ok(text: str) -> bool:
@@ -7180,6 +7178,8 @@ def _costume_candidate(value, limit: int = 140, *, real: bool = True) -> str:
     """작업 164: 옷 후보 1개 → 정리한 옷 글(쓸 수 없으면 ""). 146/137 정리(_scene_outfit_text)가 3낱말 미만을 남기면 정리 전
     후보의 첫 문장을 쓴다(옷 구절을 반으로 자르지 않는다). 고르기는 애니·실사가 같다(검사는 실사 정리 140자로)."""
     raw = " ".join(str(value or "").split())
+    # 작업 164 fix1: 패널 읽기는 140자에서 잘려 "… from the shoulder (plain black." 처럼 닫히지 않은 괄호 꼬리가 남는다 — 그 꼬리만 뗀다.
+    raw = _COSTUME_OPEN_TAIL.sub("", raw).rstrip(" ,;")
     if not raw:
         return ""
     probe = _scene_outfit_text(raw)
@@ -7206,6 +7206,16 @@ def _base_outfits(actors, char_by_id: dict) -> dict[str, str]:
         if name and outfit and name not in out:
             out[name] = outfit
     return out
+
+
+def _plan_bases(plan: dict, char_by_id: dict) -> dict[str, str]:
+    """작업 164 fix1: 계획의 모든 인물(input.characters 역할명 + 프리비즈 배우) {이름: 캐릭터 기본 옷}. 컷 단위 실사(시작 그림 · Kling ·
+    장면 옷 편집)가 쓴다."""
+    people = [{"name": str((c or {}).get("roleName") or ""), "charId": str((c or {}).get("charId") or "")}
+              for c in (plan.get("input") or {}).get("characters") or [] if isinstance(c, dict)]
+    for scene in (plan.get("previz") or {}).get("scenes") or []:
+        people += [a for a in (scene or {}).get("actors") or [] if isinstance(a, dict)]
+    return _base_outfits(people, char_by_id or {})
 
 
 def _costume_guard(plan: dict, name: str, costume: str, base: str = "", *, limit: int = 140, real: bool = True,
@@ -7310,23 +7320,13 @@ def _real_brief_text(text, scene_outfits: dict | None = None) -> str:
 
 
 def _outfit_of(item: dict) -> str:
-    """콘티 컷·대본 entry 의 characters 항목 1개의 영어 옷 표현(작업 136). outfitEn·costumeEn·costume 이 먼저,
-    없으면 actionEn·positionEn 안의 "wearing/dressed in/in + 옷" 구절. 한글이면 쓰지 않는다. 없으면 "".
-    작업 164: 162 손 주인 메모("<주인>'s hand (off-frame, in dark navy shirt cuff), …")는 옷이 아니다. 손만·목소리만·화면 밖 인물
-    (presence 또는 positionEn off-frame)의 글은 옷으로 읽지 않고, 글에서 뽑은 구절은 괄호 짝이 맞고 옷의 부분(소매·소맷부리)이 아니어야
-    한다(낱말 수 검사는 _scene_costume 이 한다)."""
+    """콘티 컷·대본 entry 의 characters 항목 1개의 영어 옷 표현(작업 136). 한글이면 쓰지 않는다. 없으면 "".
+    작업 164 fix1: 옷 필드(outfitEn·costumeEn·costume)만 본다. positionEn·actionEn·actionKo·blocking 같은 글은 옷 낱말("dark-sleeved",
+    "shirt cuff")이 있어도 옷 후보가 아니다(prod test3: positionEn "in panel 1 only his jaw and his dark-sleeved arm …" 이 옷이 됐다)."""
     for field in ("outfitEn", "costumeEn", "costume"):
         value = str(item.get(field) or "").strip()
         if value and not vnew_fx.HANGUL.search(value):
             return value
-    if str(item.get("presence") or "") in ("hand_only", "voice_only", "off_screen") or _is_off_frame(item.get("positionEn")):
-        return ""
-    for field in ("actionEn", "positionEn"):
-        for m in _OUTFIT_PHRASE.finditer(str(item.get(field) or "")):
-            chunk = _OUTFIT_ARTICLE.sub("", m.group(1).strip())
-            if (REAL_BRIEF_CLOTHING_WORDS.search(chunk) and not vnew_fx.HANGUL.search(chunk)
-                    and _costume_brackets_ok(chunk) and not _costume_part_only(chunk)):
-                return chunk
     return ""
 
 
@@ -7614,7 +7614,7 @@ def _drop_named(text: str, names) -> str:
 def _cut_still_prompt(plan: dict, cut: dict, people: list[tuple[str, str, int]], has_frame: bool, *,
                       source: str = "previz", outfits: dict | None = None, background_no: int = 0,
                       layout: dict | None = None, fix: str = "", sheets: dict | None = None,
-                      costumes: dict | None = None, prev_no: int = 0) -> str:
+                      costumes: dict | None = None, prev_no: int = 0, bases: dict | None = None) -> str:
     """컷 시작 그림(Seedream) 문장: 장면·인물 위치·카메라 + photoreal. people = [(색, 이름, 이미지 번호)].
 
     작업 132: source="anime"(Image 1 = 같은 gen 애니 테이크 결과의 그 컷 첫 프레임)이면 Image 1 의 구도·카메라·인물 위치·
@@ -7693,12 +7693,13 @@ def _cut_still_prompt(plan: dict, cut: dict, people: list[tuple[str, str, int]],
     worn = []
     # 작업 136: 장면 옷 = 콘티 → 대본 → outfits(웹툰 패널 읽기) 순(_scene_outfits). 지시서 문장은 _real_brief_text 를 지난다.
     # 작업 160: 그 컷 장소의 장면 옷 1벌(_scene_costume_map — 수정 → 장소 콘티·대본 → 장소 패널 읽기 다수 → outfits).
-    scene_outfits = _scene_costume_map(plan, [cut_id], _cut_location(plan, cut_id), dict(outfits or {}))
+    scene_outfits = _scene_costume_map(plan, [cut_id], _cut_location(plan, cut_id), dict(outfits or {}), bases)
     worn_names = [name for _color, name, _no in people]
     if layout:  # 작업 139: 뒷모습 인물도 옷은 보인다
         worn_names += [name for name, _side, visible in listed if visible == "back" and name not in worn_names]
     for name in worn_names:
-        costume = _scene_outfit_text(scene_outfits.get(name) or (outfits or {}).get(name))
+        # 작업 164 fix1: 장면 옷(기본 옷 포함)이 없을 때의 패널 읽기 값도 옷 글 검사(_costume_candidate)를 지나야 한다.
+        costume = _scene_outfit_text(scene_outfits.get(name)) or _costume_candidate((outfits or {}).get(name))
         if costume:
             worn.append(f"{name} wears {costume}")
     if worn:
@@ -7851,12 +7852,14 @@ def _real_cut_ctx(owner: str, pid: str, plan: dict, take: dict, endpoint: str, c
     except Exception as exc:  # noqa: BLE001
         log.warning("vnew.gen.real_cut_outfits_failed pid=%s err=%s", pid, _msg(exc))
         outfits = {}
+    char_by_id = _char_by_id(owner, plan)
     return {
         "endpoint": endpoint, "caps": caps, "modelId": vpoc_settings.FAL_ID_PREFIX + endpoint,
         "promptMax": vpoc_settings.fal_prompt_max(endpoint, caps.get("promptMaxLength") or vpoc_fal.DEFAULT_PROMPT_MAX),
-        "charById": _char_by_id(owner, plan), "overrides": _real_cast_overrides(plan), "anime": anime_mp4,
+        "charById": char_by_id, "overrides": _real_cast_overrides(plan), "anime": anime_mp4,
         "offsets": _take_rec_offsets(plan, take), "outfits": outfits, "takeId": str(take.get("id") or ""),
         "attempt": int((take.get("real") or {}).get("attempt") or 1), "stage": "start",
+        "bases": _plan_bases(plan, char_by_id),  # 작업 164 fix1: 캐릭터 기본 옷(시작 그림 · Kling · 장면 옷 편집)
     }
 
 
@@ -8058,7 +8061,7 @@ def _checked_cut_still(owner: str, pid: str, gen_id: str, plan: dict, cut: dict,
     people2 = [(color, name, shift(no)) for color, name, no in people]
     sheets2 = {name: shift(no) for name, no in (sheets or {}).items()}
     costumes2 = {name: shift(no) for name, no in (costumes or {}).items()}
-    prompt2 = _cut_still_prompt(plan, cut, people2, True, source="anime", outfits=ctx["outfits"],
+    prompt2 = _cut_still_prompt(plan, cut, people2, True, source="anime", outfits=ctx["outfits"], bases=ctx.get("bases"),
                                 background_no=0 if framing else background_no,
                                 layout=layout, fix=_still_fix(first["items"], layout, tod=tod), sheets=sheets2 or None,
                                 costumes=costumes2 or None, prev_no=shift(prev_no) if prev_no and not drop_prev else 0)
@@ -8124,7 +8127,7 @@ def _submit_real_cut(owner: str, pid: str, gen_id: str, plan: dict, ctx: dict, c
     duration = _kling_duration(caps, float(cut.get("seconds") or 0))
     # 작업 132: 실사 컷 프롬프트(그림체 real). 시작 그림(유료) 전에 만들고, "webtoon" 이 남으면 제출하지 않는다.
     kling_prompt = _segment_prompt(plan, {"cutIds": [cut_id]}, first_segment=True, model=ctx["modelId"], real=True,
-                                   prompt_max=ctx["promptMax"], fix=fix)
+                                   prompt_max=ctx["promptMax"], fix=fix, bases=ctx.get("bases"))
     _assert_no_webtoon(kling_prompt)
     refs = [_fit_ref(frame)] if frame else []
     # 작업 135: 공간 시트 실사 뷰(배경 기준) = 프레임 다음(Image 2). 없으면 지금과 같다.
@@ -8151,7 +8154,7 @@ def _submit_real_cut(owner: str, pid: str, gen_id: str, plan: dict, ctx: dict, c
         picked.append((actor, char, pick["look"] if pick else "real"))
     # 작업 160: 보이는 인물의 장면 옷 편집 그림(메모리만) — 실사 정면 자리를 바꾼다. 그 컷 장소의 _scene_costume.
     swaps = _costume_refs(owner, pid, plan, [(str(a.get("name") or ""), c, lk) for a, c, lk in picked],
-                          _cut_location(plan, cut_id), ctx.get("outfits") or {})
+                          _cut_location(plan, cut_id), ctx.get("outfits") or {}, bases=ctx.get("bases"))
     costume_names: set[str] = set()
     for actor, char, look in picked:
         name = str(actor.get("name") or "")
@@ -8182,6 +8185,7 @@ def _submit_real_cut(owner: str, pid: str, gen_id: str, plan: dict, ctx: dict, c
         prev_no = len(refs)
     beat()  # 작업 144: 시작 그림(유료) 전
     still = _seedream(_cut_still_prompt(plan, cut, people, frame is not None, source=source, outfits=ctx["outfits"],
+                                        bases=ctx.get("bases"),
                                         background_no=background_no, layout=layout, sheets=sheets or None,
                                         costumes=costumes or None, prev_no=prev_no), refs,
                       size=vpoc_seedream.SIZE)
@@ -10871,7 +10875,8 @@ def _prompt_budget(model: str) -> int:
     return budget
 
 
-def _real_cut_prompt(plan: dict, seg: dict, *, model: str = "", prompt_max: int = 0, fix: str = "") -> str:
+def _real_cut_prompt(plan: dict, seg: dict, *, model: str = "", prompt_max: int = 0, fix: str = "",
+                     bases: dict | None = None) -> str:
     """컷 단위 Kling 실사 프롬프트(작업 132, _segment_prompt real=True). 컷 1개.
 
     순서: 127 고정부(실사 화풍 + 같은 배경 문장, _fixed_head real) → 첫 프레임에서 이어 가기 → REAL_TAKE_STYLE(실사 통 테이크와
@@ -10901,7 +10906,7 @@ def _real_cut_prompt(plan: dict, seg: dict, *, model: str = "", prompt_max: int 
                        for ch in (cut.get("characters") or []) if (ch.get("name") or ch.get("actionEn")))
     action = ". ".join(p for p in (_real_action(cut.get("promptEn")).rstrip("."), _real_action(actors).rstrip(".")) if p)
     # 작업 136: 그림 문장 빼기·옷 구절 → 장면 옷. 작업 160: 장면 옷 = 그 컷 장소 1벌(_scene_costume_map).
-    action = _real_brief_text(action, _scene_costume_map(plan, [cut_id], str(cut.get("locationEn") or "")))
+    action = _real_brief_text(action, _scene_costume_map(plan, [cut_id], str(cut.get("locationEn") or ""), None, bases))
     if action:
         lines.append("ACTION: " + action + ".")
     spoken = [ln for ln in _cut_lines(plan, cut) if not ln.get("silent") and str(ln.get("lineKo") or "").strip()]
@@ -10934,7 +10939,7 @@ def _real_cut_prompt(plan: dict, seg: dict, *, model: str = "", prompt_max: int 
 
 
 def _segment_prompt(plan: dict, seg: dict, *, first_segment: bool, model: str = "", real: bool = False,
-                    prompt_max: int = 0, fix: str = "") -> str:
+                    prompt_max: int = 0, fix: str = "", bases: dict | None = None) -> str:
     """구간 영상 프롬프트(간결, 설계자 2026-10-20). 목표 1,800자 이하 — 넘으면 시간표 뒤쪽을
     문장 경계에서 자른다(모델 maxLength 가 더 작으면 그 안으로). 첫 구간이 아니면 '앞 프레임에서
     이어진다' 첫 줄을 붙인다. 캐릭터 외형은 첫 프레임 이미지가 책임지므로 넣지 않는다.
@@ -10942,7 +10947,7 @@ def _segment_prompt(plan: dict, seg: dict, *, first_segment: bool, model: str = 
     작업 132: real=True 면 컷 단위 Kling 실사 프롬프트(_real_cut_prompt). 기본(False)은 지금과 글자 하나 다르지 않다.
     """
     if real:
-        return _real_cut_prompt(plan, seg, model=model, prompt_max=prompt_max, fix=fix)
+        return _real_cut_prompt(plan, seg, model=model, prompt_max=prompt_max, fix=fix, bases=bases)
     conti = plan.get("conti") or {}
     setting = conti.get("setting") or {}
     timeline = _cut_timeline(plan, seg)
