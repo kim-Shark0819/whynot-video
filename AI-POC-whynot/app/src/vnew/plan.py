@@ -57,7 +57,7 @@ MAX_CAST_VOICE_LEN = 80
 TASK_STALL_S = 1800
 # 계획 작업(plan.task) 중 단계 상태(plan[name].status)를 같이 두는 작업. 취소는 none, 멈춤은 failed 로 정리한다.
 # fxFill = ③ 기호·분위기 채우기(vnew-live-fx 묶음 A).
-_TASK_STEPS = ("script", "conti", "fxFill")
+_TASK_STEPS = ("script", "conti", "fxFill", "rereadActions")
 
 
 # ================================================================ 키 규칙
@@ -626,11 +626,12 @@ def _analyze_script(blocks: list[dict], *, model: str) -> tuple[dict, dict]:
 
 
 def _analyze_conti(blocks: list[dict], *, model: str) -> tuple[dict, dict]:
-    """llm._converse 로 콘티 JSON 을 받는다. (payload, usage{..model})."""
+    """llm._converse 로 콘티 JSON 을 받는다. (payload, usage{..model}). 작업 162 fix1: VNEW_CONTI_CAST 면 규칙 14·cast 도구."""
+    cast = _cast_on()
     return vpoc_llm._converse(  # noqa: SLF001
-        system_text=prompts.CONTI_SYSTEM,
+        system_text=prompts.CONTI_CAST_SYSTEM if cast else prompts.CONTI_SYSTEM,
         blocks=blocks,
-        tool=prompts.EMIT_CONTI,
+        tool=prompts.EMIT_CONTI_CAST if cast else prompts.EMIT_CONTI,
         max_tokens=8000,
         where="vnew.conti",
         model=model,
@@ -712,6 +713,43 @@ def _roster_text(owner: str, chars: list[dict]) -> str:
             appearance = ""
         lines.append(f"- {role}" + (f" ({appearance})" if appearance else ""))
     return "\n".join(lines)
+
+
+# 작업 162: 인물별 옷·소매 메모(손 주인 판단용) 글자 상한.
+OUTFIT_NOTE_MAX = 140
+
+
+def outfit_notes(owner: str, plan: dict, location: str = "") -> dict[str, str]:
+    """{역할명: 옷} — 손 주인 판단용(콘티 · 샷 계획 · 패널 연출 문법 · 연기 다시 읽기가 같이 쓴다).
+
+    값 = 160 generate._scene_costume(장면 의상 수정 → 그 장소 콘티·대본 옷 → 패널 읽기 다수결, 애니 정리) 이고, 없으면 캐릭터
+    분석 outfitEn(없으면 baseOutfitEn). 장소는 주어진 값, 없으면 대본 setting 장소. 옷을 모르는 인물은 뺀다. 실패해도 {}."""
+    from . import generate as gen_mod  # noqa: PLC0415 — 순환 import 피하기
+
+    location = location or str(((plan.get("script") or {}).get("setting") or {}).get("locationEn") or "")
+    out: dict[str, str] = {}
+    for item in (plan.get("input") or {}).get("characters") or []:
+        name = str((item or {}).get("roleName") or "").strip()
+        if not name or name in out:
+            continue
+        base = ""
+        try:
+            char, _ = characters.load_char(owner, str(item.get("charId") or ""))
+            analysis = char.get("analysis") or {}
+            base = str(analysis.get("outfitEn") or analysis.get("baseOutfitEn") or "").strip()
+        except Exception:  # noqa: BLE001 — 캐릭터를 못 읽으면 장면 옷만 본다.
+            base = ""
+        try:
+            text = gen_mod._scene_costume(plan, name, location, fallback=base, limit=OUTFIT_NOTE_MAX, real=False)  # noqa: SLF001
+        except Exception as exc:  # noqa: BLE001
+            log.warning("vnew.outfit_notes.failed name=%s err=%s", name[:40], str(exc)[:150])
+            text = ""
+        text = " ".join(str(text or base).split())
+        if len(text) > OUTFIT_NOTE_MAX:
+            text = text[:OUTFIT_NOTE_MAX].rsplit(" ", 1)[0]
+        if text:
+            out[name] = text
+    return out
 
 
 # ================================================================ ② 대본(script)
@@ -1060,6 +1098,11 @@ def run_conti(owner: str, pid: str, task_id: str) -> None:
             roster = _roster_text(owner, inp.get("characters") or [])
 
             text = _conti_prompt(script, total_seconds, notes, roster)
+            # 작업 162: 인물별 옷·소매 메모(손 주인 판단용, CONTI_SYSTEM 규칙 13). 메모가 없으면 지금 글 그대로.
+            outfits = outfit_notes(owner, plan)
+            outfit_text = prompts.outfit_notes_text(outfits)
+            if outfit_text:
+                text += "\n\n" + outfit_text
             blocks, sent = _conti_blocks(owner, pid, plan, text)
             payload, usage, blocks, sent = _conti_call(pid, blocks, sent, text)
             model = str(usage.get("model") or _conti_model())
@@ -1071,6 +1114,8 @@ def run_conti(owner: str, pid: str, task_id: str) -> None:
             # 최소 5컷 보정: 모델이 모자라게 주면 거절(재요청) 후 그래도 모자라면 쪼개서 채운다.
             if len(cuts) < MIN_CUTS:
                 cuts = _ensure_min_cuts(blocks, cuts, script, model_hint=model, fx_from_conti=fx_from_conti, panel_count=sent)
+            if _cast_on():
+                cuts = ensure_cast(owner, pid, plan, cuts, script, blocks, outfits=outfits)  # 작업 162 fix1
 
         # 초 맞춤 + 세그먼트(모델 최대 길이 기준, 컷 경계에서).
         video_model = str(inp.get("videoModel") or vpoc_ark.DEFAULT_MODEL)
@@ -1271,14 +1316,22 @@ def _normalize_cuts(payload: dict, script: dict, *, fx_from_conti: bool = False,
         raw_chars = _loads_if_str(item.get("characters"))
         if not isinstance(raw_chars, list):
             raw_chars = []
+        cast_on = _cast_on()
         for char in raw_chars:
             char = _loads_if_str(char)
             if not isinstance(char, dict):
                 continue
+            if cast_on:
+                row = normalize_cast_char(char)  # 작업 162 fix1: presence · actionKo · hands
+                if row is not None:
+                    chars.append(row)
+                continue
+            position = str(char.get("positionEn") or "")
             chars.append(
                 {
                     "name": str(char.get("name") or ""),
-                    "positionEn": str(char.get("positionEn") or ""),
+                    # 작업 162: 손만 보이는 화면 밖 인물은 정확히 prompts.OFF_FRAME_HAND_POSITION.
+                    "positionEn": prompts.OFF_FRAME_HAND_POSITION if prompts.is_off_frame(position) else position,
                     "actionEn": str(char.get("actionEn") or ""),
                 }
             )
@@ -1418,7 +1471,7 @@ def _analyze_vibe(blocks: list[dict], *, model: str, system_text: str) -> tuple[
     return vpoc_llm._converse(  # noqa: SLF001
         system_text=system_text,
         blocks=blocks,
-        tool=prompts.EMIT_VIBE_CUTS,
+        tool=prompts.EMIT_VIBE_CUTS_CAST if _cast_on() else prompts.EMIT_VIBE_CUTS,
         max_tokens=8000,
         where="vnew.conti.vibe",
         model=model,
@@ -1526,11 +1579,18 @@ def _vibe_prompt(
 
 
 def _vibe_blocks(
-    owner: str, script: dict, total_seconds: int, notes: str, cast: list[dict], shots: tuple, tiles: list[bytes], with_sheets: bool
+    owner: str, script: dict, total_seconds: int, notes: str, cast: list[dict], shots: tuple, tiles: list[bytes], with_sheets: bool,
+    outfits: dict | None = None,
 ) -> tuple[list[dict], int]:
-    """(blocks, 보낸 패널 수). 글 → "Panel N of M:" + 타일(120 과 같은 번호) → 시트 안내 1줄 + 인물별 정면 · 턴어라운드 그림."""
+    """(blocks, 보낸 패널 수). 글 → "Panel N of M:" + 타일(120 과 같은 번호) → 시트 안내 1줄 + 인물별 정면 · 턴어라운드 그림.
+
+    작업 162: 글 끝에 손 주인 줄(prompts.VIBE_HAND_OWNER_NOTE)과 인물별 옷 메모(outfits, 있으면)를 붙인다(SYSTEM 은 참고 글 그대로)."""
     numbers = list(range(len(tiles))) if tiles else _script_panels(script)
-    blocks: list[dict] = [{"text": _vibe_prompt(script, total_seconds, notes, cast, shots, numbers, len(tiles))}]
+    text = _vibe_prompt(script, total_seconds, notes, cast, shots, numbers, len(tiles)) + "\n" + prompts.VIBE_HAND_OWNER_NOTE
+    if _cast_on():
+        text += "\n" + prompts.VIBE_CAST_NOTE  # 작업 162 fix1
+    outfit_text = prompts.outfit_notes_text(outfits)
+    blocks: list[dict] = [{"text": text + ("\n" + outfit_text if outfit_text else "")}]
     for number, jpeg in enumerate(tiles):
         blocks.append({"text": f"Panel {number} of {len(tiles)}:"})
         blocks.append({"image": {"format": "jpeg", "source": {"bytes": jpeg}}})
@@ -1570,8 +1630,9 @@ def _run_vibe(
     attempts = [(tiles, True)] if has_sheets else []
     attempts += [(tiles, False)] if tiles else []
     attempts += [([], False)]
+    outfits = outfit_notes(owner, plan)  # 작업 162: 손 주인 판단용 옷 메모(한 번 읽어 모든 시도에 같은 값)
     for index, (use_tiles, with_sheets) in enumerate(attempts):
-        blocks, sent = _vibe_blocks(owner, script, total_seconds, notes, cast, shots, use_tiles, with_sheets)
+        blocks, sent = _vibe_blocks(owner, script, total_seconds, notes, cast, shots, use_tiles, with_sheets, outfits)
         try:
             payload, usage = _analyze_vibe(blocks, model=_conti_model(), system_text=system)
             break
@@ -1587,6 +1648,8 @@ def _run_vibe(
                       fx_from_conti=fx_on and sent > 0, panel_count=sent)
     if len(cuts) < MIN_CUTS:
         cuts = _split_to_min(cuts, second_dialogue=False)
+    if _cast_on():
+        cuts = ensure_cast(owner, pid, plan, cuts, script, blocks, outfits=outfits)  # 작업 162 fix1
     payload = payload if isinstance(payload, dict) else {}
     background = {"promptEn": str(payload.get("backgroundEn") or "").strip(),
                   "descKo": str(payload.get("backgroundKo") or "").strip()}
@@ -1647,6 +1710,18 @@ def _sentences(text: str) -> list[str]:
     return [part.strip() for part in re.split(r"(?<=[.!?])\s+", str(text or "").strip()) if part.strip()]
 
 
+_HAND_NOUNS = r"(?:hands?|arms?|fingers?|palms?|thumbs?)"
+
+
+def _off_frame_hand(name: str, sentence: str) -> bool:
+    """작업 162: 문장이 "<name>'s (큰) hand (off-frame) …" 모양인지(prompts.HAND_OWNER_RULE 이 시키는 표기)."""
+    if not name:
+        return False
+    pattern = (re.escape(name) + r"['\u2019]s\b[^.!?]{0,40}?\b" + _HAND_NOUNS
+               + r"\b\s*\(\s*off[\s-]?(?:frame|screen)\s*\)")
+    return bool(re.search(pattern, str(sentence or ""), re.IGNORECASE))
+
+
 def _vibe_cuts(
     payload: dict, script: dict, names: list[str], numbers: list[int], *, fx_from_conti: bool = False, panel_count: int = 0
 ) -> list[dict]:
@@ -1701,11 +1776,24 @@ def _vibe_cuts(
         action = str(beat.get("actionEn") or "").strip()
         light = str(beat.get("lightEn") or "").strip()
         sentences = _sentences(action)
+        # 작업 162: "<주인>'s hand (off-frame) …" 문장 → 그 주인은 손만 보이는 화면 밖 인물(positionEn 고정), 보이는 사람
+        # actionEn 에서는 그 문장을 뺀다. 그런 문장이 없으면 지금과 같다.
+        hand_owner = {n: [s for s in sentences if _off_frame_hand(n, s)] for n in (name_set or set(who))}
+        hand_owner = {n: v for n, v in hand_owner.items() if v}
+        hand_sents = {s for rows in hand_owner.values() for s in rows}
+        visible = [n for n in who if n not in hand_owner]
+        rest = [s for s in sentences if s not in hand_sents]
         chars = []
-        for name in who:
-            own = [s for s in sentences if name in s]
+        for name in visible:
+            own = [s for s in rest if name in s]
+            whole = action if not hand_sents else " ".join(rest)
             chars.append({"name": name, "positionEn": _vibe_position(name, cut_panels, entries),
-                          "actionEn": " ".join(own) if own else (action if len(who) == 1 else "")})
+                          "actionEn": " ".join(own) if own else (whole if len(visible) == 1 else "")})
+        for name in [n for n in [*names, *who] if n in hand_owner and n not in visible]:
+            if not any(c["name"] == name for c in chars):
+                chars.append({"name": name, "positionEn": prompts.OFF_FRAME_HAND_POSITION, "actionEn": " ".join(hand_owner[name])})
+        if _cast_on():
+            chars = _vibe_cast_chars(beat, chars, name_set, cut_panels, entries)
         cut_id = f"c{index + 1}"
         # backgroundEn 은 대본 장소와 같을 때만 컷 장소가 된다(_cut_location). 겹치는 대본 줄이 없으면 앞 컷 장소 → 대본 setting.
         if _overlapping_entry_locations(cut_panels, entries):
@@ -1763,6 +1851,309 @@ def _vibe_position(name: str, cut_panels: list[int], entries: list[dict]) -> str
             if start is not None and panels and max(panels) < start:
                 before = value
     return hit or before or any_value
+
+
+# ================================================================ 작업 162 fix1: 컷마다 모든 인물(VNEW_CONTI_CAST)
+#
+# 사용자 지시: "콘티를 만들 때 인물마다 무엇을 하는지 적어 이 오류가 다시 나지 않게". 컷 characters[] 에 그 장소의 모든 인물을 두고
+# 인물마다 presence(on_screen|hand_only|voice_only|off_screen) · actionEn(화면 밖이어도) · actionKo · hands({side: "act>target"})를
+# 적는다. 모델 답 뒤 ensure_cast 가 검사한다: ① 그 장소 인물이 컷마다 다 있는가 ② 손·닿는 동작의 주인이 off_screen 이 아닌가 ③ presence ·
+# actionEn 이 있는가. 틀리면 "이 컷들의 characters[] 만 고치기" 1회(_analyze_cast_fix, 원장 _charge), 그래도 틀리면 서버가 채운다.
+
+CAST_ACTION_MAX = 240
+CAST_ACTION_KO_MAX = 80
+CAST_FILL_OFF_EN = "stays out of the frame."
+CAST_FILL_OFF_KO = "화면 밖에 있음"
+CAST_FILL_ON_EN = "stays in the frame."
+CAST_FILL_ON_KO = "화면에 있음"
+_TOUCH_RE = re.compile(
+    r"\b(?:touch(?:es|ing)?|hold(?:s|ing)?|cups?|cupping|strok(?:e|es|ing)|grab(?:s|bing)?|wip(?:e|es|ing)|caress(?:es|ing)?|"
+    r"cover(?:s|ing)?|pat(?:s|ting)?|press(?:es|ing)?|hug(?:s|ging)?|pull(?:s|ing)?|reach(?:es|ing)?\s+in)\b", re.IGNORECASE)
+_TOUCH_NOT_RE = re.compile(r"\bhold(?:s|ing)?\s+(?:back|(?:his|her|their)\s+breath|still)\b", re.IGNORECASE)
+
+
+def _cast_on() -> bool:
+    return bool(getattr(vnew_settings_module(), "VNEW_CONTI_CAST", False))
+
+
+def cast_hands(value) -> dict[str, str]:
+    """손 짧은 표기 정리 {side: "act>target"|"act"}. 148 낱말(prompts.CAST_HAND_ACTS · CAST_HAND_TARGETS)만, 쉬는 손은 뺀다.
+    값은 "touch>other_cheek" · "touch > other cheek" · {act, target} 를 받는다."""
+    out: dict[str, str] = {}
+    if not isinstance(value, dict):
+        return out
+    for side in ("left", "right"):
+        raw = value.get(side)
+        if isinstance(raw, dict):
+            act, target = raw.get("act"), raw.get("target")
+        else:
+            act, _, target = str(raw or "").partition(">")
+        act = re.sub(r"[\s\-]+", "_", str(act or "").strip().lower())
+        target = re.sub(r"[\s\-]+", "_", str(target or "").strip().lower())
+        if act not in prompts.CAST_HAND_ACTS:
+            continue
+        target = target if target in prompts.CAST_HAND_TARGETS and target != "none" else ""
+        out[side] = f"{act}>{target}" if target else act
+    return out
+
+
+def conti_hands_pose(hands) -> dict:
+    """콘티 손 짧은 표기 → 148 hands {left: {act, target}, right: {act, target}} (적지 않은 손 = rest)."""
+    out = {}
+    for side in ("left", "right"):
+        act, _, target = str((hands or {}).get(side) or "rest").partition(">")
+        out[side] = {"act": act or "rest", "target": target or "none"}
+    return out
+
+
+def conti_hand_target(chars: list, name: str) -> str:
+    """콘티 인물 name 의 손이 닿는 상대: actionEn 에 나온 다른 인물 → 첫 다른 on_screen 인물 → ""."""
+    me = next((c for c in chars or [] if isinstance(c, dict) and str(c.get("name") or "").strip() == name), {})
+    action = str(me.get("actionEn") or "")
+    others = [c for c in chars or [] if isinstance(c, dict) and str(c.get("name") or "").strip() not in ("", name)]
+    named = [c["name"].strip() for c in others if c["name"].strip() in action]
+    if named:
+        return named[0]
+    return next((c["name"].strip() for c in others if c.get("presence") == "on_screen"), "")
+
+
+def normalize_cast_char(item) -> dict | None:
+    """콘티 인물 1명(작업 162 fix1). name · presence(모르면 positionEn 이 화면 밖이면 hand_only, 아니면 "") · positionEn(손만 = 고정 글) ·
+    actionEn · actionKo · hands. 이름이 없으면 None."""
+    item = _loads_if_str(item)
+    if not isinstance(item, dict):
+        return None
+    name = str(item.get("name") or "").strip()
+    if not name:
+        return None
+    position = " ".join(str(item.get("positionEn") or "").split())
+    presence = str(item.get("presence") or "").strip().lower().replace("-", "_").replace(" ", "_")
+    if presence not in prompts.PRESENCE_VALUES:
+        presence = "hand_only" if prompts.is_off_frame(position) else ""
+    if presence == "hand_only":
+        position = prompts.OFF_FRAME_HAND_POSITION
+    elif prompts.is_off_frame(position) and presence:
+        position = ""  # presence 가 손만이 아니면 화면 밖 위치 글은 남기지 않는다(presence 가 정한다)
+    row = {
+        "name": name,
+        "presence": presence,
+        "positionEn": position,
+        "actionEn": " ".join(str(item.get("actionEn") or "").split())[:CAST_ACTION_MAX],
+        "actionKo": " ".join(str(item.get("actionKo") or "").split())[:CAST_ACTION_KO_MAX],
+    }
+    if "hands" in item:  # 손을 적지 않은 인물은 키 없음 → 프롬프트 · 프리비즈가 패널 읽기 손을 쓴다
+        row["hands"] = cast_hands(item.get("hands"))
+    return row
+
+
+def _vibe_cast_chars(beat: dict, chars: list[dict], name_set: set, cut_panels: list[int], entries: list[dict]) -> list[dict]:
+    """샷 cast[] → 컷 characters(작업 162 fix1). cast 가 없으면 158/162 characters 에 presence(손만 = hand_only, 아니면 on_screen)를 붙인다.
+    on_screen 인물 positionEn 은 대본 위치가 먼저(158 과 같다)."""
+    raw = _loads_if_str(beat.get("cast"))
+    rows: list[dict] = []
+    for item in raw if isinstance(raw, list) else []:
+        row = normalize_cast_char(item)
+        if row and (not name_set or row["name"] in name_set) and not any(r["name"] == row["name"] for r in rows):
+            if row["presence"] in ("on_screen", ""):
+                row["positionEn"] = _vibe_position(row["name"], cut_panels, entries) or row["positionEn"]
+            rows.append(row)
+    if rows:
+        return rows
+    out = []
+    for char in chars:
+        on = "hand_only" if char.get("positionEn") == prompts.OFF_FRAME_HAND_POSITION else "on_screen"
+        row = normalize_cast_char(dict(char, presence=on))
+        if row:
+            out.append(row)
+    return out
+
+
+def _loc_key(value) -> str:
+    return " ".join(str(value or "").lower().split())
+
+
+def location_casts(cuts: list[dict], script: dict, roster: list[str]) -> dict[str, list[str]]:
+    """장소마다 그 장면 인물(명단 순서). 그 장소 컷의 인물 + 그 장소 컷 패널과 겹치는(없으면 같은 장소) 대본 줄의 화자 · 인물.
+    명단(입력 역할명)이 있으면 명단 이름만."""
+    found: dict[str, list[str]] = {}
+
+    def add(loc: str, name) -> None:
+        name = str(name or "").strip()
+        if name and (not roster or name in roster) and name not in found.setdefault(loc, []):
+            found[loc].append(name)
+
+    panel_loc: dict[int, set] = {}
+    for cut in cuts:
+        loc = _loc_key(cut.get("locationEn"))
+        found.setdefault(loc, [])
+        for char in cut.get("characters") or []:
+            add(loc, (char or {}).get("name") if isinstance(char, dict) else "")
+        for panel in _cut_panels(cut):
+            panel_loc.setdefault(panel, set()).add(loc)
+    for entry in (script or {}).get("entries") or []:
+        if not isinstance(entry, dict):
+            continue
+        locs = set().union(*[panel_loc.get(int(p), set()) for p in entry.get("panels") or [] if _is_int(p)]) \
+            if entry.get("panels") else set()
+        locs = locs or ({_loc_key(entry.get("locationEn"))} & set(found))
+        names = [entry.get("speaker")] + [c.get("name") for c in entry.get("characters") or [] if isinstance(c, dict)]
+        for loc in locs:
+            for name in names:
+                add(loc, name)
+    order = {name: i for i, name in enumerate(roster or [])}
+    return {loc: sorted(names, key=lambda n: order.get(n, len(order))) for loc, names in found.items()}
+
+
+def _touches(char: dict) -> bool:
+    """손을 쓰는가: 쉬지 않는 손이 있거나 actionEn 에 닿는 동사(holds back tears · holds his breath 는 아니다)."""
+    if char.get("hands"):
+        return True
+    return bool(_TOUCH_RE.search(_TOUCH_NOT_RE.sub(" ", str(char.get("actionEn") or ""))))
+
+
+def cast_issues(cuts: list[dict], casts: dict[str, list[str]]) -> dict[str, list[str]]:
+    """컷마다 문제 문장(영어, 고치기 호출에 그대로 준다). 없으면 그 컷은 빠진다."""
+    out: dict[str, list[str]] = {}
+    for cut in cuts:
+        chars = [c for c in cut.get("characters") or [] if isinstance(c, dict)]
+        names = [str(c.get("name") or "").strip() for c in chars]
+        problems = [f"{n} is in this scene but missing from characters." for n in casts.get(_loc_key(cut.get("locationEn")), [])
+                    if n not in names]
+        presence = {str(c.get("name") or "").strip(): c.get("presence") for c in chars}
+        for char in chars:
+            name = str(char.get("name") or "").strip()
+            if char.get("presence") not in prompts.PRESENCE_VALUES:
+                problems.append(f"{name} has no presence.")
+            if not str(char.get("actionEn") or "").strip():
+                problems.append(f"{name} has no actionEn.")
+            if char.get("presence") == "off_screen" and _touches(char):
+                problems.append(f"{name} uses a hand or touches someone but presence is off_screen.")
+            for other, value in presence.items():
+                if other and other != name and value == "off_screen" and re.search(
+                        re.escape(other) + r"['\u2019]s\s+(?:\w+\s+){0,2}?(?:hands?|arms?|fingers?|palms?|thumbs?)\b",
+                        str(char.get("actionEn") or ""), re.IGNORECASE):
+                    problems.append(f"{name}'s action uses {other}'s hand but {other} is off_screen.")
+        if problems:
+            out[str(cut.get("id") or "")] = list(dict.fromkeys(problems))
+    return out
+
+
+def _analyze_cast_fix(blocks: list[dict], *, model: str) -> tuple[dict, dict]:
+    """llm._converse 로 컷 characters[] 고치기(emit_cast_fix)를 받는다. 검사가 가짜로 바꿔 끼운다."""
+    return vpoc_llm._converse(  # noqa: SLF001
+        system_text=prompts.CAST_FIX_SYSTEM,
+        blocks=blocks,
+        tool=prompts.EMIT_CAST_FIX,
+        max_tokens=8000,
+        where="vnew.conti.cast_fix",
+        model=model,
+    )
+
+
+def _panel_image_blocks(blocks: list[dict] | None, panels: set[int]) -> list[dict]:
+    """보냈던 블록에서 "Panel N of M:" 라벨 + 그 뒤 그림 짝 가운데 N 이 panels 안인 것(순서 그대로)."""
+    out: list[dict] = []
+    items = list(blocks or [])
+    for index, block in enumerate(items[:-1]):
+        found = re.match(r"^Panel (\d+) of \d+:$", str(block.get("text") or "")) if isinstance(block, dict) else None
+        if found and int(found.group(1)) in panels and "image" in (items[index + 1] or {}):
+            out += [block, items[index + 1]]
+    return out
+
+
+def _cast_fix_blocks(cuts: list[dict], issues: dict, casts: dict, outfits: dict | None, image_blocks) -> list[dict]:
+    lines = ["Fix only the characters[] of these cuts. Keep every other field as it is."]
+    for loc, names in casts.items():
+        if names:
+            lines.append(f"Cast of location \"{loc or '(none)'}\": {', '.join(names)}")
+    notes = prompts.outfit_notes_text(outfits)
+    if notes:
+        lines.append(notes)
+    panels: set[int] = set()
+    for cut in cuts:
+        cut_id = str(cut.get("id") or "")
+        if cut_id not in issues:
+            continue
+        panels |= set(_cut_panels(cut))
+        lines.append(json.dumps({"id": cut_id, "panels": _cut_panels(cut), "locationEn": cut.get("locationEn"),
+                                 "situationKo": cut.get("situationKo"), "dialogueKo": cut.get("dialogueKo"),
+                                 "characters": cut.get("characters") or [], "problems": issues[cut_id]}, ensure_ascii=False))
+    return [{"text": "\n".join(lines)}] + _panel_image_blocks(image_blocks, panels)
+
+
+def _fill_cast(cuts: list[dict], casts: dict) -> None:
+    """고치기 뒤에도 남은 문제를 서버가 채운다(제자리): presence 없음 → 손만 글이면 hand_only 아니면 on_screen, actionEn 없음 → 기본 글,
+    off_screen 인데 손을 씀 → hand_only, 빠진 인물 → off_screen(화면 밖)."""
+    for cut in cuts:
+        chars = [c for c in cut.get("characters") or [] if isinstance(c, dict)]
+        for char in chars:
+            if char.get("presence") not in prompts.PRESENCE_VALUES:
+                char["presence"] = "hand_only" if char.get("positionEn") == prompts.OFF_FRAME_HAND_POSITION else "on_screen"
+            if char["presence"] == "off_screen" and _touches(char):
+                char["presence"], char["positionEn"] = "hand_only", prompts.OFF_FRAME_HAND_POSITION
+            if not str(char.get("actionEn") or "").strip():
+                on = char["presence"] in ("on_screen", "hand_only")
+                char["actionEn"] = CAST_FILL_ON_EN if on else CAST_FILL_OFF_EN
+                char["actionKo"] = char.get("actionKo") or (CAST_FILL_ON_KO if on else CAST_FILL_OFF_KO)
+        have = {str(c.get("name") or "").strip() for c in chars}
+        for name in casts.get(_loc_key(cut.get("locationEn")), []):
+            if name not in have:
+                chars.append({"name": name, "presence": "off_screen", "positionEn": "", "actionEn": CAST_FILL_OFF_EN,
+                              "actionKo": CAST_FILL_OFF_KO, "hands": {}})
+        # 남은 "off_screen 인 사람의 손" 문장: 그 사람을 hand_only 로.
+        presence = {str(c.get("name") or "").strip(): c for c in chars}
+        for problem in cast_issues([dict(cut, characters=chars)], casts).get(str(cut.get("id") or ""), []):
+            found = re.search(r"uses (.+?)'s hand but", problem)
+            other = presence.get(found.group(1)) if found else None
+            if other is not None:
+                other["presence"], other["positionEn"] = "hand_only", prompts.OFF_FRAME_HAND_POSITION
+        cut["characters"] = chars
+
+
+def ensure_cast(owner: str, pid: str, plan: dict, cuts: list[dict], script: dict, image_blocks=None,
+                *, outfits: dict | None = None) -> list[dict]:
+    """콘티 컷 인물 검사 → 틀리면 고치기 1회 → 그래도 틀리면 _fill_cast. 새 컷 목록(사본)을 돌려준다(작업 162 fix1)."""
+    import copy as _copy  # noqa: PLC0415
+
+    cuts = _copy.deepcopy([c for c in cuts if isinstance(c, dict)])
+    for cut in cuts:
+        cut["characters"] = [r for r in (normalize_cast_char(c) for c in cut.get("characters") or []) if r]
+    roster = [str(c.get("roleName") or "").strip() for c in (plan.get("input") or {}).get("characters") or []
+              if str(c.get("roleName") or "").strip()]
+    casts = location_casts(cuts, script, roster)
+    issues = cast_issues(cuts, casts)
+    if not issues:
+        log.info("vnew.conti.cast pid=%s cuts=%d issues=0 fix=0", pid, len(cuts))
+        return cuts
+    log.info("vnew.conti.cast pid=%s cuts=%d issues=%d first=%s", pid, len(cuts), sum(len(v) for v in issues.values()),
+             json.dumps(next(iter(issues.items())), ensure_ascii=False)[:300])
+    fixed = 0
+    try:
+        model = _conti_model()
+        payload, usage = _analyze_cast_fix(_cast_fix_blocks(cuts, issues, casts, outfits, image_blocks), model=model)
+        _charge(owner, pid, plan.get("planId") or "", usage or {}, str((usage or {}).get("model") or model))
+        rows = _loads_if_str((payload or {}).get("cuts")) if isinstance(payload, dict) else []
+        by_id = {str((r or {}).get("id") or ""): r for r in (rows if isinstance(rows, list) else []) if isinstance(r, dict)}
+        for cut in cuts:
+            row = by_id.get(str(cut.get("id") or ""))
+            if str(cut.get("id") or "") not in issues or not row:
+                continue
+            new = [r for r in (normalize_cast_char(c) for c in _loads_if_str(row.get("characters")) or []) if r]
+            new = [r for r in new if not roster or r["name"] in roster]
+            if new:
+                old = {c["name"]: c for c in cut["characters"]}
+                for r in new:
+                    if r["presence"] == "on_screen" and not r["positionEn"]:
+                        r["positionEn"] = (old.get(r["name"]) or {}).get("positionEn") or ""
+                cut["characters"] = list({r["name"]: r for r in new}.values())
+                fixed += 1
+    except Exception as exc:  # noqa: BLE001 — 고치기 실패는 콘티 실패가 아니다(서버가 채운다).
+        log.warning("vnew.conti.cast_fix.failed pid=%s err=%s", pid, str(exc)[:200])
+    left = cast_issues(cuts, casts)
+    if left:
+        _fill_cast(cuts, casts)
+    log.info("vnew.conti.cast pid=%s fix=1 fixedCuts=%d leftAfterFix=%d", pid, fixed, sum(len(v) for v in left.values()))
+    return cuts
 
 
 # ================================================================ 초 맞춤 · 세그먼트
@@ -2033,6 +2424,19 @@ def _clean_conti_shot(cut: dict) -> None:
             cut["shotSize"] = size
         else:
             cut.pop("shotSize", None)
+    # 작업 162 fix1: 사용자가 고친 인물 줄(presence 가 있는 인물만 정리 — 옛 인물 줄은 그대로).
+    if isinstance(cut.get("characters"), list):
+        chars = []
+        for char in cut["characters"]:
+            if isinstance(char, dict) and "presence" in char:
+                row = normalize_cast_char(char)
+                if row is None:
+                    continue
+                row["presence"] = row["presence"] or "on_screen"
+                chars.append({**{k: v for k, v in char.items() if k not in row}, **row})
+            else:
+                chars.append(char)
+        cut["characters"] = chars
 
 
 def _clear_stale_mood_en(old_cuts: list[dict], new_cuts: list[dict]) -> None:
@@ -2354,6 +2758,172 @@ def run_fx_fill(owner: str, pid: str, task_id: str) -> None:
     except Exception as exc:  # noqa: BLE001
         log.warning("vnew.conti.fx.failed pid=%s err=%s", pid, str(exc)[:300])
         _fail_step(owner, pid, "fxFill", task_id, _fx_error_message(exc))
+
+
+# ================================================================ 작업 162: 콘티 연기 다시 읽기(손 주인)
+#
+# 이미 만든 계획: 컷마다 그 컷 패널을 새 손 주인 규칙(prompts.HAND_OWNER_RULE)으로 다시 읽어 콘티 characters[](이름·positionEn·
+# actionEn)와 148 패널 연출 문법 actions[](손·자세·머리·눈)만 바꾼다. 컷 id·seconds·dialogueKo·fx·카메라는 그대로다. 프리비즈 승인·
+# 녹화도 그대로 두고 previz.posesStale = True 만 세운다(화면이 [포즈 다시 맞추기]를 보인다). 원장은 다른 읽기와 같은 _charge.
+
+REREAD_TASK = "rereadActions"
+REREAD_MAX_TILES = 2  # 컷당 보내는 패널 조각(패널 순서, previz.MAX_PANEL_TILES 와 같은 수)
+
+
+def start_reread_actions(owner: str, pid: str) -> dict:
+    """콘티 연기 다시 읽기 시작. 콘티 ready·컷 있음(아니면 409 ContiNotReady) → start_task(진행 중이면 409). {taskId, cuts}."""
+    plan, _ = load_plan(owner, pid)
+    conti = plan.get("conti") or {}
+    cuts = [cut for cut in (conti.get("cuts") or []) if isinstance(cut, dict)]
+    if conti.get("status") != "ready" or not cuts:
+        raise VpocError("vnew.conti.reread", "ContiNotReady", "먼저 콘티를 만들어 주세요.", 409)
+    task_id = start_task(owner, pid, REREAD_TASK)
+    _spawn(run_reread_actions, owner, pid, task_id, name=f"vnew-reread-{pid}")
+    return {"taskId": task_id, "cuts": len(cuts)}
+
+
+def reread_actions(owner: str, pid: str, plan: dict) -> dict[str, dict]:
+    """컷마다 1회 읽기(previz_grammar.reread_cut). {cutId: {characters, actions}}. 조각이 없거나 실패한 컷은 빠진다(그 컷 그대로)."""
+    from . import previz as previz_mod  # noqa: PLC0415 — 순환 import 피하기
+    from . import previz_grammar  # noqa: PLC0415
+
+    cuts = [cut for cut in ((plan.get("conti") or {}).get("cuts") or []) if isinstance(cut, dict)]
+    all_tiles = previz_mod._all_tiles(owner, pid)  # noqa: SLF001
+    role_names = [str(c.get("roleName") or "").strip() for c in (plan.get("input") or {}).get("characters") or []
+                  if str(c.get("roleName") or "").strip()]
+    plan_id = str(plan.get("planId") or "")
+
+    def charge(usage: dict, model: str) -> None:
+        _charge(owner, pid, plan_id, usage or {}, model)
+
+    results: dict[str, dict] = {}
+    notes_by_location: dict[str, dict] = {}
+    for cut in cuts:
+        cut_id = str(cut.get("id") or "")
+        tiles = [all_tiles[p] for p in _cut_panels(cut) if 0 <= p < len(all_tiles)][:REREAD_MAX_TILES]
+        location = str(cut.get("locationEn") or "")
+        if location not in notes_by_location:
+            notes_by_location[location] = outfit_notes(owner, plan, location)
+        try:
+            got = previz_grammar.reread_cut(cut, tiles, role_names, outfits=notes_by_location[location], charge=charge)
+        except Exception as exc:  # noqa: BLE001 — 한 컷 실패는 그 컷만 그대로 둔다.
+            log.warning("vnew.conti.reread.cut_failed pid=%s cut=%s err=%s", pid, cut_id, str(exc)[:200])
+            got = None
+        if isinstance(got, dict) and (got.get("characters") or got.get("actions")):
+            results[cut_id] = got
+    return results
+
+
+def _reread_characters(before: list, after: list) -> list[dict]:
+    """새 characters(이름 순서 = 새 읽기). 같은 이름의 옛 항목에 있던 다른 키는 남기고, 보이는 사람의 positionEn 이 비면 옛 값.
+    새 읽기가 비면 옛 목록 그대로."""
+    if not after:
+        return [dict(c) for c in before if isinstance(c, dict)]
+    old = {str(c.get("name") or "").strip(): c for c in before if isinstance(c, dict)}
+    out: list[dict] = []
+    for item in after:
+        name = item["name"]
+        row = dict(old.get(name) or {})
+        position = item.get("positionEn") or ("" if prompts.is_off_frame(row.get("positionEn")) else str(row.get("positionEn") or ""))
+        row.update({"name": name, "positionEn": position, "actionEn": item.get("actionEn") or ""})
+        row.update({k: item[k] for k in ("presence", "actionKo", "hands") if k in item})  # 작업 162 fix1
+        out.append(row)
+    return out
+
+
+def _action_summary(actions) -> list[dict]:
+    """로그·diff 용 actions 요약(name · gesture · target · hands · visibility)."""
+    keys = ("name", "gesture", "target", "hands", "visibility")
+    return [{k: a[k] for k in keys if k in a} for a in actions or [] if isinstance(a, dict)]
+
+
+def run_reread_actions(owner: str, pid: str, task_id: str) -> None:
+    """연기 다시 읽기(백그라운드). 읽은 뒤 저장 때 지금 컷에 characters 만, 프리비즈 panelGrammar 캐시에 actions 만 넣는다.
+
+    task.id 가 다르면 버린다. 컷마다 before/after 로그 1줄(vnew.conti.reread). plan.rereadActions = {status, model, cuts,
+    changed, changes[{cutId, before, after}], at}. 프리비즈 장면이 있으면 previz.posesStale = True(승인·녹화는 그대로)."""
+    started = time.monotonic()
+    try:
+        plan, _ = load_plan(owner, pid)
+        results = reread_actions(owner, pid, plan)
+        cast_chars = _reread_cast(owner, pid, plan, results) if _cast_on() else None
+
+        def mutator(data: dict) -> list:
+            if (data.get("task") or {}).get("id") != task_id:
+                raise _Discard()
+            conti = data.setdefault("conti", {})
+            previz = data.get("previz") if isinstance(data.get("previz"), dict) else {}
+            cache = previz.get("panelGrammar") if isinstance(previz.get("panelGrammar"), dict) else {}
+            changes: list[dict] = []
+            for cut in conti.get("cuts") or []:
+                if not isinstance(cut, dict):
+                    continue
+                cut_id = str(cut.get("id") or "")
+                got = results.get(cut_id)
+                if not got and not (cast_chars and cut_id in cast_chars):
+                    continue
+                got = got or {}
+                entry = cache.get(cut_id) if isinstance(cache.get(cut_id), dict) else None
+                grammar = entry.get("grammar") if entry and isinstance(entry.get("grammar"), dict) else None
+                before = {"characters": [dict(c) for c in cut.get("characters") or [] if isinstance(c, dict)],
+                          "actions": _action_summary((grammar or {}).get("actions"))}
+                if cast_chars is not None:
+                    cut["characters"] = cast_chars.get(cut_id, before["characters"])  # 작업 162 fix1: 검사·고치기를 거친 값
+                else:
+                    cut["characters"] = _reread_characters(before["characters"], got.get("characters") or [])
+                if grammar is not None and got.get("actions"):
+                    grammar["actions"] = list(got["actions"])
+                after = {"characters": cut["characters"], "actions": _action_summary((grammar or {}).get("actions"))}
+                log.info("vnew.conti.reread pid=%s cut=%s before=%s after=%s", pid, cut_id,
+                         json.dumps(before, ensure_ascii=False)[:800], json.dumps(after, ensure_ascii=False)[:800])
+                if before != after:
+                    changes.append({"cutId": cut_id, "before": before, "after": after})
+            if changes and previz.get("scenes"):
+                previz["posesStale"] = True
+            data["rereadActions"] = {"status": "ready", "error": "", "model": previz_grammar_model(),
+                                     "cuts": len(results), "changed": len(changes), "changes": changes, "at": now_iso()}
+            data["revision"] = int(data.get("revision") or 0) + 1
+            data["task"] = {"name": REREAD_TASK, "status": "done",
+                            "startedAt": (data.get("task") or {}).get("startedAt"), "id": None}
+            return changes
+
+        try:
+            _, changes = mutate_plan(owner, pid, mutator)
+        except _Discard:
+            log.info("vnew.rereadActions.discarded pid=%s task=%s", pid, task_id)
+            return
+        log.info("vnew.conti.reread.done pid=%s cuts=%d changed=%d ms=%d", pid, len(results), len(changes),
+                 int((time.monotonic() - started) * 1000))
+    except Exception as exc:  # noqa: BLE001
+        log.warning("vnew.conti.reread.failed pid=%s err=%s", pid, str(exc)[:300])
+        message = exc.message if isinstance(exc, VpocError) else f"연기를 다시 읽지 못했습니다({type(exc).__name__})."
+        _fail_step(owner, pid, REREAD_TASK, task_id, message)
+
+
+def _reread_cast(owner: str, pid: str, plan: dict, results: dict) -> dict[str, list]:
+    """작업 162 fix1: 다시 읽은 characters 를 모든 컷에 얹고 ensure_cast(검사 → 고치기 1회 → 채우기). {cutId: characters}.
+    고치기 그림 = 그 컷 패널 조각(previz._all_tiles, 저장하지 않는다)."""
+    import copy as _copy  # noqa: PLC0415
+    from . import previz as previz_mod  # noqa: PLC0415
+
+    cuts = _copy.deepcopy([c for c in (plan.get("conti") or {}).get("cuts") or [] if isinstance(c, dict)])
+    for cut in cuts:
+        got = results.get(str(cut.get("id") or ""))
+        if got:
+            cut["characters"] = _reread_characters(cut.get("characters") or [], got.get("characters") or [])
+    tiles = previz_mod._all_tiles(owner, pid)  # noqa: SLF001
+    images: list[dict] = []
+    for number, jpeg in enumerate(tiles):
+        images += [{"text": f"Panel {number} of {len(tiles)}:"}, {"image": {"format": "jpeg", "source": {"bytes": jpeg}}}]
+    fixed = ensure_cast(owner, pid, plan, cuts, plan.get("script") or {}, images, outfits=outfit_notes(owner, plan))
+    return {str(c.get("id") or ""): c.get("characters") or [] for c in fixed}
+
+
+def previz_grammar_model() -> str:
+    """연기 다시 읽기 모델(패널 연출 문법과 같은 Claude 분석 체인)."""
+    from . import previz_grammar  # noqa: PLC0415
+
+    return previz_grammar.GRAMMAR_MODEL
 
 
 # ================================================================ 모델 · 길이

@@ -56,6 +56,7 @@ from . import settings as vnew_settings
 from .locations import REAL_NO_BRAND, REAL_NO_BRAND_SENTENCE
 # 지시서 117: 속마음 대사 판정은 prompts.is_thought 한 곳(순수 모듈)에서만 한다.
 from .prompts import is_thought as _is_thought
+from .prompts import OFF_FRAME_HAND_POSITION as _OFF_FRAME_HAND
 from .prompts import STILL_SHOT_SIZES as _SHOT_SIZES
 
 log = logging.getLogger("vpoc")
@@ -3142,7 +3143,28 @@ def _cut_on_screen(plan: dict, cut: dict) -> dict:
     }
 
     on_screen: list[dict] = []
-    if grammar:
+    conti_cast = [ch for ch in cut.get("characters") or [] if isinstance(ch, dict) and str(ch.get("name") or "").strip()
+                  and ch.get("presence") in ("on_screen", "hand_only", "voice_only", "off_screen")]
+    if conti_cast:
+        # 작업 162 fix1: 콘티 presence 가 먼저(on_screen = 보임, hand_only = hands only, voice_only·off_screen = 화면에 없음).
+        # 주인공은 패널 읽기 mainSubject 가 on_screen 이면 그 사람, 아니면 첫 on_screen. 보이는 정도(how)는 패널 읽기 others 값.
+        others_how = {str(o.get("name") or "").strip(): how_label.get(str(o.get("how") or "full").strip().lower(), "full")
+                      for o in (grammar or {}).get("others") or [] if isinstance(o, dict)}
+        shown = [str(ch["name"]).strip() for ch in conti_cast if ch.get("presence") == "on_screen"]
+        main = str((grammar or {}).get("mainSubject") or "").strip()
+        main = main if main in shown else (shown[0] if shown else "")
+        if main:
+            on_screen.append({"name": main, "how": "main"})
+        for ch in conti_cast:
+            name = str(ch["name"]).strip()
+            if name == main or any(item["name"] == name for item in on_screen):
+                continue
+            if ch.get("presence") == "on_screen":
+                how = others_how.get(name, "full")
+                on_screen.append({"name": name, "how": "full" if how == "hands only" else how})
+            elif ch.get("presence") == "hand_only":
+                on_screen.append({"name": name, "how": "hands only"})
+    elif grammar:
         main = str(grammar.get("mainSubject") or "").strip()
         seen: set[str] = set()
         if main:
@@ -3197,7 +3219,7 @@ def _cut_poses(plan: dict, cut: dict) -> list[dict]:
     cut_id = str(cut.get("id") or "")
     scene = _scene_by_cut(plan).get(cut_id)
     if not scene:
-        return []
+        scene = {}  # 작업 162 fix1: 장면이 없어도 콘티 손(presence·hands)은 쓴다(옛 데이터는 그대로 [])
     names = {str(a.get("id") or ""): str(a.get("name") or "").strip() for a in scene.get("actors") or []}
     # 작업 154: timeline actor 에 hands 키가 없으면(장면을 만든 뒤 패널을 다시 읽음·gestureTarget 없이 저장돼 other_* 손이 빠짐)
     # 그 컷 패널 읽기(panelGrammar actions)의 손을 쓴다. 상대 = action target(장면 인물 이름일 때만), schema 규칙으로 정리.
@@ -3223,6 +3245,19 @@ def _cut_poses(plan: dict, cut: dict) -> list[dict]:
                 continue
             out.append({"name": name, "hands": kept, "other": other})
         break
+    # 작업 162 fix1: 콘티 인물에 presence·hands 가 있으면 그 손이 먼저(프리비즈·패널 읽기 손을 바꾼다). off_screen·voice_only 는 손 없음.
+    conti_chars = [ch for ch in cut.get("characters") or [] if isinstance(ch, dict) and ch.get("presence") and "hands" in ch]
+    if conti_chars:
+        by_name = {p["name"]: p for p in out}
+        for ch in conti_chars:
+            name = str(ch.get("name") or "").strip()
+            by_name.pop(name, None)
+            hands = plan_mod.cast_hands(ch.get("hands")) if ch.get("presence") in ("on_screen", "hand_only") else {}
+            if name and hands:
+                kept = {side: v for side, v in plan_mod.conti_hands_pose(hands).items() if side in hands}
+                by_name[name] = {"name": name, "hands": kept, "other": plan_mod.conti_hand_target(cut.get("characters"), name)}
+        order = [str(ch.get("name") or "").strip() for ch in cut.get("characters") or [] if isinstance(ch, dict)]
+        out = sorted(by_name.values(), key=lambda p: order.index(p["name"]) if p["name"] in order else len(order))
     return out
 
 
@@ -4432,6 +4467,68 @@ def _vibe_who(on_list: list[dict], handles: list[str], disp) -> str:
     return f"Only {_join_names(labels)} {verb} in this shot; {_join_names(rest)} {be} not visible. "
 
 
+# 작업 162: 손만 들어오는 화면 밖 인물(콘티 positionEn = prompts.OFF_FRAME_HAND_POSITION). "<주인>'s hand (off-frame) …" 머리를 뗀다.
+_HAND_ONLY_HEAD = re.compile(
+    r"^\s*(?P<name>.+?)['\u2019]s\s+(?P<noun>(?:[A-Za-z]+\s+){0,2}?(?:hands?|arms?|fingers?|palms?|thumbs?))\s*"
+    r"\(\s*off[\s-]?(?:frame|screen)\s*\)\s*,?\s*", re.IGNORECASE)
+
+
+def _hands_only_owners(cut: dict) -> list[dict]:
+    """콘티 컷 characters 중 손만 보이는 화면 밖 인물 [{name, actionEn}] (콘티 순서). 없으면 [].
+    작업 162 fix1: presence 가 있으면 presence == hand_only, 없으면(옛 콘티) positionEn == 고정 글."""
+    return [ch for ch in cut.get("characters") or [] if isinstance(ch, dict) and str(ch.get("name") or "").strip()
+            and (ch.get("presence") == "hand_only" if ch.get("presence")
+                 else str(ch.get("positionEn") or "").strip() == _OFF_FRAME_HAND)]
+
+
+def _hands_only_clause(owner: dict, names, disp, *, real: bool = False, soften: bool = False) -> str:
+    """"Beomgeonu's hand enters from off-frame and strokes Yeouijun's cheek"(마침표 없음). 연기 글이 없거나 한글·노골적이면
+    "Beomgeonu's hand enters from off-frame" 까지만."""
+    who = disp(str(owner.get("name") or ""))
+    action = " ".join(str(owner.get("actionEn") or "").split()).rstrip(" .")
+    noun = "hand"
+    head = _HAND_ONLY_HEAD.match(action)
+    if head:
+        noun = " ".join(head.group("noun").lower().split())
+        action = action[head.end():]
+    for ko in sorted({str(n) for n in names if n}, key=len, reverse=True):
+        action = action.replace(ko, disp(ko))
+    if real:
+        action = _real_action(action)
+    if soften:
+        action = _soften_text(action)
+    action = action.strip(" .")
+    plural = noun.endswith("s") and not noun.endswith("ss")
+    base = f"{who}'s {noun} {'enter' if plural else 'enters'} from off-frame"
+    if not action or vnew_fx.HANGUL.search(action) or (soften and _explicit_text(action)):
+        return base
+    starts_with_name = any(action.startswith(disp(str(n))) for n in names if n)
+    if action[1:2].islower() and not starts_with_name:
+        action = action[0].lower() + action[1:]  # "Strokes …" → "strokes …"(이름으로 시작하면 그대로)
+    return f"{base} and {action}"
+
+
+def _vibe_who_hands(on_list: list[dict], handles: list[str], disp, clauses: list[str], owner_names: set[str]) -> str:
+    """작업 162: 159 who_in_shot + 손만 들어오는 절. "Only A appears in this shot; B's hand enters from off-frame and …. "
+    손 주인은 보이는 사람·안 보이는 사람 목록에서 뺀다(손 절이 따로 말한다)."""
+    shown: list[str] = []
+    labels: list[str] = []
+    for item in on_list or []:
+        name = disp(str(item.get("name") or ""))
+        if not name or name in shown or name in owner_names:
+            continue
+        shown.append(name)
+        how = str(item.get("how") or "full")
+        labels.append(f"{name} ({how})" if how not in ("full", "main") else name)
+    rest = [h for h in handles if h and h not in shown and h not in owner_names]
+    parts = []
+    if labels:
+        parts.append(f"Only {_join_names(labels)} {'appears' if len(labels) == 1 else 'appear'} in this shot")
+    if rest:
+        parts.append(f"{_join_names(rest)} {'is' if len(rest) == 1 else 'are'} not visible")
+    return "; ".join(parts + clauses) + ". "
+
+
 def _vibe_size(shot: str) -> str:
     """샷 약어("MCU front") → 참고 구현 샷 크기 표기("medium close-up, front view")."""
     size, _, angle = str(shot or "").strip().partition(" ")
@@ -4598,14 +4695,26 @@ def _vibe_take_prompt(plan: dict, take: dict, *, real: bool, cast: list[dict], l
 
     def _shot(index: int, entry: dict, cut_id: str) -> str:
         cut = cuts_by_id.get(cut_id) or {}
-        prefix = f"Shot {index + 1} ({entry['start']}-{entry['end']}s), {_vibe_size(entry.get('shot'))}: " + _vibe_who(
-            entry.get("onScreen") or [], handles, _disp)
+        # 작업 162: 손만 들어오는 화면 밖 인물이 있으면 who_in_shot 에 손 절을 붙인다(없으면 159 그대로).
+        hand_owners = _hands_only_owners(cut)
+        if hand_owners:
+            names = [str(c.get("name") or "") for c in cut.get("characters") or [] if isinstance(c, dict)] + list(name_map)
+            clauses = [_hands_only_clause(o, names, _disp, real=real, soften=soften) for o in hand_owners]
+            who = _vibe_who_hands(entry.get("onScreen") or [], handles, _disp, clauses,
+                                  {_disp(str(o.get("name") or "")) for o in hand_owners})
+        else:
+            who = _vibe_who(entry.get("onScreen") or [], handles, _disp)
+        prefix = f"Shot {index + 1} ({entry['start']}-{entry['end']}s), {_vibe_size(entry.get('shot'))}: " + who
         parts = []
         if index in moves:
             parts.append(f"Setting now: {_bg(moves[index])}")
         parts.append(_action(entry))
-        parts.append(_contact(entry))
+        if not any(str(o.get("name") or "").strip() == str((entry.get("contact") or {}).get("name") or "").strip()
+                   for o in hand_owners):
+            parts.append(_contact(entry))  # 162: 손 주인의 닿는 연기는 손 절이 이미 말한다
         for pose in entry.get("poses") or []:
+            if any(str(o.get("name") or "").strip() == str(pose.get("name") or "").strip() for o in hand_owners):
+                continue  # 162 fix1: 손만 들어오는 사람의 손은 손 절이 말한다
             clause = _pose_clause(pose, _disp)
             if clause and not (soften and _explicit_text(clause)):
                 parts.append(clause)

@@ -18,6 +18,7 @@ import json
 from ..vpoc import llm as vpoc_llm
 from . import previz_schema as _schema
 from . import previz_support
+from . import prompts as vnew_prompts
 from . import settings as vnew_settings
 
 # 작업 148: 손·자세·머리·눈 열거값(previz_schema 한 곳). SYSTEM 문장이 이 값을 그대로 나열한다.
@@ -39,6 +40,28 @@ GRAMMAR_VERSION = 3
 
 # ================================================================ 시스템·도구(read_test.py 원본)
 
+# actions[] 정의 두 줄(작업 162: 콘티 연기 다시 읽기 REREAD_SYSTEM 이 같은 글을 쓴다). SYSTEM 안 글자는 그대로다.
+ACTIONS_RULES = (
+    "- actions: what each visible person is physically DOING with hands/head/body (acting beats). For each, give {name (the person), actionEn (one sentence on the hand/head/body action), gesture (ONE of: none | point | bow | hands_on_knees | cover_face | hand_to_own_face | wipe_tears | hand_on_other_cheek | both_hands_other_cheeks | hand_on_chest | press_hand_to_other_chest | lean_in | laugh | look_down | look_up | nod | turn_head_to_other), target (the other person the action is directed at, or none)}. Pick the gesture that best matches the drawn action; use none if the person just stands/sits still.\n"
+    "- For every actions entry also give the body detail. Read it from the panel IMAGE, not from the dialogue or the cut "
+    "description. posture: " + " | ".join(_SCHEMA_POSTURES) + ". hands: {left: {act, target}, right: {act, target}}, where "
+    "left and right are the person's OWN left and right hand (not screen left/right). act: " + " | ".join(_SCHEMA_ACTS) + ". "
+    "target: " + " | ".join(_SCHEMA_TARGETS) + " (own_* = a part of the person's own body, other_* = a part of the body of "
+    "the action's target person). A hand that is not visible, or does nothing, is act rest with target none. Use rest_on "
+    "when a body part rests on the hand (a cheek resting on the hand = rest_on own_cheek). Example: a man lifting the "
+    "other person's chin with his right hand while his left hand hangs = right {act: grab, target: other_chin}, left "
+    "{act: rest, target: none}. head: {turn: " + " | ".join(_SCHEMA_TURNS) + ", tilt: " + " | ".join(_SCHEMA_TILTS) + "} "
+    "(tilt is toward the person's own left or right). eyes: " + " | ".join(_SCHEMA_EYES) + ".\n"
+)
+
+# 작업 162: 손 주인(prompts.HAND_OWNER_RULE) + 그 손을 주인의 actions 항목에 두는 법(visibility hands_only).
+HAND_OWNER_ACTIONS = (
+    "- hands: " + vnew_prompts.HAND_OWNER_RULE + " Such a hand gets its own actions entry under its OWNER's name, with "
+    "visibility hands_only (the owner is off-frame or only the hand shows), the owner's hand on that side (e.g. right "
+    "{act: touch, target: other_cheek}) and target = the person it touches; the visible person's entry holds only that "
+    "person's own hands.\n"
+)
+
 SYSTEM = (
     "You are a film director and storyboard artist reading one webtoon panel as if it were a frame from a film. "
     "Describe the CAMERA SHOT using standard film grammar. Answer ONLY by calling emit_shot once.\n"
@@ -52,16 +75,8 @@ SYSTEM = (
     "- cameraHeight: low (looking up at the subject) | eye | high (looking down) | overhead.\n"
     "- others: every other person visible, with how they appear: full | partial_edge | shoulder_or_back | hands_only | lips_or_face_part, their side of the frame (left|right|center|bottom), and their screenX.\n"
     "- offscreenPartnerSide: if the subject is talking to / looking at someone not in frame, on which side that person must be: left | right | front_of_camera | none.\n"
-    "- actions: what each visible person is physically DOING with hands/head/body (acting beats). For each, give {name (the person), actionEn (one sentence on the hand/head/body action), gesture (ONE of: none | point | bow | hands_on_knees | cover_face | hand_to_own_face | wipe_tears | hand_on_other_cheek | both_hands_other_cheeks | hand_on_chest | press_hand_to_other_chest | lean_in | laugh | look_down | look_up | nod | turn_head_to_other), target (the other person the action is directed at, or none)}. Pick the gesture that best matches the drawn action; use none if the person just stands/sits still.\n"
-    "- For every actions entry also give the body detail. Read it from the panel IMAGE, not from the dialogue or the cut "
-    "description. posture: " + " | ".join(_SCHEMA_POSTURES) + ". hands: {left: {act, target}, right: {act, target}}, where "
-    "left and right are the person's OWN left and right hand (not screen left/right). act: " + " | ".join(_SCHEMA_ACTS) + ". "
-    "target: " + " | ".join(_SCHEMA_TARGETS) + " (own_* = a part of the person's own body, other_* = a part of the body of "
-    "the action's target person). A hand that is not visible, or does nothing, is act rest with target none. Use rest_on "
-    "when a body part rests on the hand (a cheek resting on the hand = rest_on own_cheek). Example: a man lifting the "
-    "other person's chin with his right hand while his left hand hangs = right {act: grab, target: other_chin}, left "
-    "{act: rest, target: none}. head: {turn: " + " | ".join(_SCHEMA_TURNS) + ", tilt: " + " | ".join(_SCHEMA_TILTS) + "} "
-    "(tilt is toward the person's own left or right). eyes: " + " | ".join(_SCHEMA_EYES) + ".\n"
+    + ACTIONS_RULES
+    + HAND_OWNER_ACTIONS +
     "- expressionEn: the MAIN subject's facial expression in one short phrase (e.g. 'teary-eyed, trembling lips').\n"
     "- eyelines: for every visible person, state where their pupils point: target is one of "
     "'person:<name>' (looking at that person's face) | 'camera' | 'down' | 'up' | 'offscreen_left' | "
@@ -152,6 +167,8 @@ TOOL = {
                                 "properties": {"turn": {"type": "string"}, "tilt": {"type": "string"}},
                             },
                             "eyes": {"type": "string"},
+                            # 작업 162: 손만 보이는 주인(화면 밖)의 항목이면 hands_only.
+                            "visibility": {"type": "string"},
                         },
                     },
                 },
@@ -308,6 +325,34 @@ def tiles_hash(tiles) -> str:
 # ================================================================ 정규화
 
 
+def normalize_actions(items) -> list[dict]:
+    """actions[] 정리(normalize_grammar 와 콘티 연기 다시 읽기가 같이 쓴다). 작업 162: visibility 가 full 이 아닌
+    OTHER_HOWS 값(hands_only 등)이면 그 키를 둔다(없으면 지금 모양 그대로)."""
+    actions = []
+    for item in items if isinstance(items, list) else []:
+        if not isinstance(item, dict):
+            continue
+        name = str(item.get("name") or "").strip()
+        if not name:
+            continue
+        target = str(item.get("target") or "none").strip() or "none"
+        pose = _schema.normalize_pose_fields(item, has_target=target.lower() != "none")
+        gesture = _enum(item.get("gesture"), ACTION_GESTURES, "none")
+        derived = _schema.gesture_from_hands(pose.get("hands"))
+        action = {
+            "name": name,
+            "actionEn": str(item.get("actionEn") or "").strip(),
+            "gesture": derived or gesture,
+            "target": target,
+        }
+        action.update(pose)
+        visibility = str(item.get("visibility") or "").strip().lower()
+        if visibility in OTHER_HOWS and visibility != "full":
+            action["visibility"] = visibility
+        actions.append(action)
+    return actions
+
+
 def normalize_grammar(payload: dict) -> dict:
     """모델 출력(emit_shot)을 안전한 연출 문법 dict 로 정리한다.
 
@@ -343,25 +388,7 @@ def normalize_grammar(payload: dict) -> dict:
     # target 은 상대 이름(없으면 "none"). name 이 비면 버린다.
     # 작업 148: posture·hands·head·eyes 를 정리해 더한다(모르는 값은 버림, other_* 손 목표는 target 이 있을 때만).
     # hands 에서 gesture 를 고를 수 있으면 그 값을 쓴다(뒤호환: 옛 렌더러·옛 규칙이 gesture 를 본다).
-    actions = []
-    for item in payload.get("actions") or []:
-        if not isinstance(item, dict):
-            continue
-        name = str(item.get("name") or "").strip()
-        if not name:
-            continue
-        target = str(item.get("target") or "none").strip() or "none"
-        pose = _schema.normalize_pose_fields(item, has_target=target.lower() != "none")
-        gesture = _enum(item.get("gesture"), ACTION_GESTURES, "none")
-        derived = _schema.gesture_from_hands(pose.get("hands"))
-        action = {
-            "name": name,
-            "actionEn": str(item.get("actionEn") or "").strip(),
-            "gesture": derived or gesture,
-            "target": target,
-        }
-        action.update(pose)
-        actions.append(action)
+    actions = normalize_actions(payload.get("actions"))
 
     # eyelines: 보이는 인물의 눈동자 방향(설계자 2026-10-26, 065-E). name 이 비거나 target 이
     # 판정 불가면 버린다(보완 규칙 _cut_eyelines 가 채운다).
@@ -417,11 +444,12 @@ def _read(blocks: list[dict], *, model: str) -> tuple[dict, dict]:
 # ================================================================ 한 컷 읽기
 
 
-def read_cut(owner, pid, plan_id, cut, tiles, role_names, *, charge) -> dict | None:
+def read_cut(owner, pid, plan_id, cut, tiles, role_names, *, charge, outfits=None) -> dict | None:
     """한 컷의 웹툰 조각(첫 장)을 Claude 분석 체인에 보내 연출 문법을 읽는다. 없으면 None.
 
     - cut 의 shotKo·characters 를 함께 줘서 모델이 한국 인물 이름으로 식별하게 한다.
     - role_names(이 계획의 인물 이름 목록)도 힌트로 넣는다.
+    - 작업 162: outfits({이름: 옷}, 손 주인 판단용)가 있으면 설명 글 뒤에 prompts.outfit_notes_text 블록 1개. 없으면 지금 블록.
     - charge(usage, model) 콜백으로 사용량을 넘긴다(원장은 호출자가).
     반환은 normalize_grammar 결과 dict.
     """
@@ -444,7 +472,145 @@ def read_cut(owner, pid, plan_id, cut, tiles, role_names, *, charge) -> dict | N
         {"text": "Cut description (who is who): " + desc},
         {"image": {"format": "jpeg", "source": {"bytes": bytes(first)}}},
     ]
+    notes = vnew_prompts.outfit_notes_text(outfits)
+    if notes:
+        blocks.insert(1, {"text": notes})
     payload, usage = _read(blocks, model=GRAMMAR_MODEL)
     if callable(charge):
         charge(usage or {}, GRAMMAR_MODEL)
     return normalize_grammar(payload)
+
+
+# ================================================================ 작업 162: 콘티 연기 다시 읽기(손 주인)
+#
+# 이미 만든 계획의 컷마다 그 컷 패널을 다시 보고 콘티 characters[](이름·positionEn·actionEn)와 148 actions[](손·자세·머리·눈)만
+# 새 손 주인 규칙으로 다시 읽는다. 호출 1번에 둘을 함께 받아 콘티와 프리비즈 포즈가 서로 어긋나지 않게 한다. 모델 = GRAMMAR_MODEL.
+
+REREAD_SYSTEM = (
+    "You re-read ONE storyboard cut from its webtoon panel image(s) to fix who does what, above all whose hands are "
+    "whose. You are given the cut (its id, situation and the characters written for it now), the character names and "
+    "outfit notes per character. Answer ONLY by calling emit_cut_actions once.\n"
+    "- characters: every character who is in this cut, even if only a hand shows: name (exactly as given), positionEn "
+    "(where the person is in the frame; keep the given position of a visible person unless the drawing says otherwise), "
+    "actionEn (one or two English sentences on what THIS person physically does with hands, head, body and face).\n"
+    "- Hands: " + vnew_prompts.HAND_OWNER_RULE + " " + vnew_prompts.HAND_OWNER_CONTI_RULE + "\n"
+    + ACTIONS_RULES.replace("- actions: what each visible person", "- actions: what each person in characters")
+    + HAND_OWNER_ACTIONS +
+    "Identify people by name using the cut description given. Ignore speech bubbles and sound effects. Do not write "
+    "dialogue, camera, timing or symbols. Be precise; do not guess beyond what is drawn."
+)
+
+REREAD_TOOL = {
+    "name": "emit_cut_actions",
+    "description": "who is in the cut and what each person (or each person's hand) does",
+    "inputSchema": {
+        "json": {
+            "type": "object",
+            "properties": {
+                "characters": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "name": {"type": "string"},
+                            "positionEn": {"type": "string"},
+                            "actionEn": {"type": "string"},
+                        },
+                        "required": ["name"],
+                    },
+                },
+                "actions": TOOL["inputSchema"]["json"]["properties"]["actions"],
+            },
+            "required": ["characters"],
+        }
+    },
+}
+
+
+def _reread(blocks: list[dict], *, model: str) -> tuple[dict, dict]:
+    """llm._converse 로 컷 연기(emit_cut_actions)를 받는다. (payload, usage). 검사가 가짜로 바꾼다.
+    작업 162 fix1: VNEW_CONTI_CAST 면 인물마다 presence·actionEn 필수(REREAD_CAST_TOOL)·규칙(prompts.CAST_RULE)."""
+    cast = bool(getattr(vnew_settings, "VNEW_CONTI_CAST", False))
+    return vpoc_llm._converse(  # noqa: SLF001
+        system_text=REREAD_CAST_SYSTEM if cast else REREAD_SYSTEM,
+        blocks=blocks,
+        tool=REREAD_CAST_TOOL if cast else REREAD_TOOL,
+        max_tokens=2000,
+        where="vnew.conti.reread_actions",
+        model=model,
+    )
+
+
+def _reread_cast_tool() -> dict:
+    import copy  # noqa: PLC0415
+
+    tool = copy.deepcopy(REREAD_TOOL)
+    tool["inputSchema"]["json"]["properties"]["characters"]["items"] = copy.deepcopy(vnew_prompts.CAST_CHAR_SCHEMA)
+    return tool
+
+
+REREAD_CAST_TOOL = _reread_cast_tool()
+REREAD_CAST_SYSTEM = REREAD_SYSTEM.replace(
+    "Identify people by name", "- Cast: " + vnew_prompts.CAST_RULE.replace("in every cut", "in this cut") + "\nIdentify people by name")
+
+
+def reread_blocks(cut: dict, tiles, role_names, outfits=None) -> list[dict]:
+    """다시 읽기 블록: 컷 설명 글 → 옷 메모(있으면) → "Panel i of n:" + 그 컷 조각들."""
+    desc = json.dumps(
+        {
+            "cutId": (cut or {}).get("id"),
+            "shotKo": (cut or {}).get("shotKo"),
+            "situationKo": (cut or {}).get("situationKo"),
+            "characters": (cut or {}).get("characters"),
+            "roleNames": list(role_names or []),
+        },
+        ensure_ascii=False,
+    )[:1500]
+    blocks: list[dict] = [{"text": "Cut description (who is who): " + desc}]
+    notes = vnew_prompts.outfit_notes_text(outfits)
+    if notes:
+        blocks.append({"text": notes})
+    images = [bytes(t) for t in tiles or [] if isinstance(t, (bytes, bytearray))]
+    for index, jpeg in enumerate(images):
+        blocks.append({"text": f"Panel {index + 1} of {len(images)}:"})
+        blocks.append({"image": {"format": "jpeg", "source": {"bytes": jpeg}}})
+    return blocks
+
+
+def normalize_reread(payload: dict, names) -> dict:
+    """다시 읽기 결과 정리. characters = 이름이 names 안(names 가 비면 모두)·중복 없음, positionEn 에 off-frame 이 있으면
+    prompts.OFF_FRAME_HAND_POSITION 그대로. actions = normalize_actions."""
+    payload = payload if isinstance(payload, dict) else {}
+    allowed = {str(n).strip() for n in names or [] if str(n or "").strip()}
+    chars: list[dict] = []
+    for item in payload.get("characters") if isinstance(payload.get("characters"), list) else []:
+        if not isinstance(item, dict):
+            continue
+        name = str(item.get("name") or "").strip()
+        if not name or (allowed and name not in allowed) or any(c["name"] == name for c in chars):
+            continue
+        position = " ".join(str(item.get("positionEn") or "").split())
+        if is_off_frame(position):
+            position = vnew_prompts.OFF_FRAME_HAND_POSITION
+        row = {"name": name, "positionEn": position, "actionEn": " ".join(str(item.get("actionEn") or "").split())}
+        # 작업 162 fix1: presence · actionKo · hands 는 답에 있을 때만(정리는 plan.normalize_cast_char).
+        row.update({k: item[k] for k in ("presence", "actionKo", "hands") if k in item})
+        chars.append(row)
+    actions = [a for a in normalize_actions(payload.get("actions")) if not allowed or a["name"] in allowed]
+    return {"characters": chars, "actions": actions}
+
+
+def is_off_frame(position) -> bool:
+    """positionEn 이 화면 밖(손만)을 뜻하는지(off-frame · off frame · offscreen)."""
+    return bool(vnew_prompts.is_off_frame(position))
+
+
+def reread_cut(cut: dict, tiles, role_names, *, outfits=None, charge=None) -> dict | None:
+    """한 컷 다시 읽기(작업 162). 조각이 없으면 None(호출 0). 반환 normalize_reread 결과."""
+    images = [t for t in tiles or [] if isinstance(t, (bytes, bytearray))]
+    if not images:
+        return None
+    payload, usage = _reread(reread_blocks(cut, images, role_names, outfits), model=GRAMMAR_MODEL)
+    if callable(charge):
+        charge(usage or {}, str((usage or {}).get("model") or GRAMMAR_MODEL))
+    return normalize_reread(payload, role_names)

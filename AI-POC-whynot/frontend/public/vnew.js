@@ -2299,6 +2299,7 @@
     if (task.status === "running") {
       // 콘티·기호 채우기(fxFill, vnew-live-fx)는 ③, 대본은 ②.
       state.planStep = task.name === "conti" || task.name === "fxFill" ? 3 : 2;
+      if (task.name === "rereadActions") state.planStep = 3; // 작업 162: 손 주인 다시 읽기도 ③
       return;
     }
     // 진행 중인 작업이 없으면: gen.selected 면 ⑥, gen 이 있으면 ⑤, 프리비즈가 있으면 ④, 아니면 ①.
@@ -2324,7 +2325,7 @@
     var task = p.task || {};
     var previz = p.previz || {};
     var busy = {};
-    if (task.status === "running") busy[task.name === "conti" || task.name === "fxFill" ? 3 : 2] = true;
+    if (task.status === "running") busy[task.name === "conti" || task.name === "fxFill" || task.name === "rereadActions" ? 3 : 2] = true;
     if (locationsBuilding(p)) busy[3] = true;
     if (previz.status === "designing") busy[4] = true;
     if ((p.gen || {}).status === "running" || (previz.shotBrief || {}).status === "running") busy[5] = true;
@@ -3833,6 +3834,11 @@
       host.appendChild(progressBar("기호·분위기를 채우고 있습니다…", showError));
       return;
     }
+    // 작업 162: 콘티 연기 다시 읽기(손 주인) 진행 중.
+    if (task.status === "running" && task.name === "rereadActions") {
+      host.appendChild(progressBar("컷마다 패널을 다시 보고 손 주인·연기를 읽고 있습니다…", showError));
+      return;
+    }
     if (conti.status === "failed") {
       host.appendChild(planError(conti.error || "콘티 만들기에 실패했습니다."));
     }
@@ -3874,6 +3880,8 @@
       if (fxError) host.appendChild(planError(fxError));
       host.appendChild(fxToolbar(cuts, showError));
     }
+    // 작업 162: [손 주인 다시 읽기] — 콘티 인물 연기·프리비즈 손만 다시 읽는다(컷·초·대사·기호·카메라·승인 그대로).
+    host.appendChild(rereadActionsToolbar(showError));
 
     // 컷 카드
     var list = el("div", "vnew-cut-list");
@@ -4908,11 +4916,7 @@
     if (who.length) {
       var whoWrap = el("div", "vnew-entry-who");
       who.forEach(function (person, pIndex) {
-        var row = el("div", "vnew-entry-person");
-        row.appendChild(el("span", "vnew-entry-person-name", person.name || "인물 " + (pIndex + 1)));
-        row.appendChild(textField("위치 (영어)", person, "positionEn", false));
-        row.appendChild(textField("동작 (영어)", person, "actionEn", false));
-        whoWrap.appendChild(row);
+        whoWrap.appendChild(contiPersonRow(person, pIndex));
       });
       card.appendChild(whoWrap);
     }
@@ -4942,6 +4946,40 @@
     cuts[b] = tmp;
     renderPlan();
   }
+
+  /* ---- 작업 162 fix1: 컷 인물 줄(이름 · 나옴 · 한국어 동작). 콘티는 컷마다 그 장면의 모든 인물과 하는 일을 적는다.
+     나옴(presence)·동작을 고치면 그 인물 객체(cut.characters[i])가 바뀌고 [저장](PUT /conti)이 보낸다(프리비즈 승인은 지금처럼 풀린다).
+     presence 가 없는 옛 인물은 "(미정)"으로 보이고, 고르기 전까지 값을 넣지 않는다. 글은 textContent(el)로만 넣는다. ---- */
+  var PRESENCE_ORDER = ["on_screen", "hand_only", "voice_only", "off_screen"];
+  var PRESENCE_KO = { on_screen: "화면에 보임", hand_only: "손만 보임", voice_only: "목소리만", off_screen: "화면 밖" };
+
+  function contiPersonRow(person, pIndex) {
+    var row = el("div", "vnew-entry-person");
+    if (person.presence) row.classList.add("vnew-presence-" + person.presence);
+    row.appendChild(el("span", "vnew-entry-person-name", person.name || "인물 " + (pIndex + 1)));
+    var presWrap = el("label", "vnew-field vnew-entry-presence");
+    presWrap.appendChild(el("span", "vnew-field-label", "나옴"));
+    var select = el("select", "vnew-field-input");
+    var options = (PRESENCE_ORDER.indexOf(person.presence) >= 0 ? [] : [""]).concat(PRESENCE_ORDER);
+    options.forEach(function (value) {
+      var opt = el("option", "", value ? PRESENCE_KO[value] : "(미정)");
+      opt.value = value;
+      select.appendChild(opt);
+    });
+    select.value = PRESENCE_ORDER.indexOf(person.presence) >= 0 ? person.presence : "";
+    select.addEventListener("change", function () {
+      if (PRESENCE_ORDER.indexOf(select.value) < 0) return;
+      person.presence = select.value;
+      if (person.presence === "off_screen" || person.presence === "voice_only") person.hands = {};
+    });
+    presWrap.appendChild(select);
+    row.appendChild(presWrap);
+    row.appendChild(textField("동작 (한국어)", person, "actionKo", false));
+    row.appendChild(textField("위치 (영어)", person, "positionEn", false));
+    row.appendChild(textField("동작 (영어)", person, "actionEn", false));
+    return row;
+  }
+  /* ---- 작업 162 fix1 끝 ---- */
 
   /* ================================================================ ③ 기호·분위기 (vnew-live-fx 묶음 A, RA7)
 
@@ -5245,6 +5283,53 @@
     });
     wrap.appendChild(btn);
     wrap.appendChild(el("span", "vnew-hint", "빈 컷만 채우고, 고친 분위기는 영어로 옮깁니다. 프리비즈 승인은 그대로입니다."));
+    return wrap;
+  }
+
+  /* 작업 162: ③ [손 주인 다시 읽기] → POST /conti/reread-actions. 화면 밖에서 들어온 손을 주인(옷·소매로 판단)에게 돌려 컷 인물
+     연기와 프리비즈 손만 다시 읽는다. 컷·초·대사·기호·카메라·승인·녹화는 그대로이고, 끝나면 ④ 에 [포즈 다시 맞추기]가 보인다. */
+  function rereadActionsToolbar(showError) {
+    var wrap = el("div", "vnew-fx-toolbar vnew-reread-toolbar");
+    var btn = el("button", "outline-button vnew-reread-actions", "손 주인 다시 읽기");
+    btn.type = "button";
+    btn.addEventListener("click", function () {
+      if (!window.confirm("컷마다 웹툰 패널을 다시 보고 인물 연기(누구의 손인지)만 다시 읽습니다. 컷마다 분석 1회 비용이 듭니다. " +
+        "컷·초·대사·기호·카메라·프리비즈 승인은 그대로입니다. 시작할까요?")) return;
+      btn.disabled = true;
+      api("/api/vnew/p/" + encodeURIComponent(state.projectId) + "/conti/reread-actions", { method: "POST" })
+        .then(function () {
+          loadPlan(false);
+        })
+        .catch(function (err) {
+          btn.disabled = false;
+          showError("손 주인 다시 읽기를 시작하지 못했습니다: " + errMessage(err));
+        });
+    });
+    wrap.appendChild(btn);
+    wrap.appendChild(el("span", "vnew-hint", "화면 밖에서 들어온 손을 그 손 주인의 연기로 고칩니다(인물 연기·프리비즈 손만)."));
+    return wrap;
+  }
+
+  /* 작업 162: ④ previz.posesStale 이면 [포즈 다시 맞추기] → POST /previz/refresh-poses(카메라·배치 그대로, 승인 해제 → 다시 녹화). */
+  function previzPosesStaleSection(previz, showError) {
+    if (!previz || !previz.posesStale) return null;
+    var wrap = el("div", "vnew-fx-toolbar vnew-previz-poses-stale");
+    var btn = el("button", "primary-button vnew-refresh-poses", "포즈 다시 맞추기");
+    btn.type = "button";
+    btn.addEventListener("click", function () {
+      btn.disabled = true;
+      api("/api/vnew/p/" + encodeURIComponent(state.projectId) + "/previz/refresh-poses", { method: "POST" })
+        .then(function () {
+          loadPlan(false);
+        })
+        .catch(function (err) {
+          btn.disabled = false;
+          showError("포즈를 다시 맞추지 못했습니다: " + errMessage(err));
+        });
+    });
+    wrap.appendChild(btn);
+    wrap.appendChild(el("span", "vnew-hint", "콘티 연기를 다시 읽었습니다. 마네킹 손·자세를 새 연기에 맞춥니다. 카메라·배치는 그대로이고, " +
+      "다시 승인하면 다시 녹화합니다."));
     return wrap;
   }
 
@@ -5854,6 +5939,8 @@
 
     // --- 설계 후: 뷰포트 + 타임라인 + 장면 탭 + 우측 편집 패널 ---
     // 결과 위: 최근 지시(lastRebuild) 요약 + 지시를 넣는 [다시 만들기](펼침형).
+    var posesStale = previzPosesStaleSection(previz, showError);
+    if (posesStale) host.appendChild(posesStale);
     host.appendChild(previzRebuildSection(previz, scenes, showError));
 
     var layout = el("div", "vnew-previz-layout");

@@ -13,6 +13,8 @@ broker 는 vpoc.llm 이 그대로 맡는다(여기서는 프롬프트·스키마
 
 from __future__ import annotations
 
+import re
+
 # 기호 열거값은 순수 모듈 fx.py 한 곳에서 읽는다(네트워크·S3 없음).
 from .fx import DRAWN_MAX, FX_KEYS, FX_MAX, MOOD_EN_MAX, MOOD_KO_MAX, PERSON_FX
 
@@ -34,6 +36,80 @@ MOOD_CUT_RULE = (
     "Write this cut's own feeling, not the whole scene's: for a short reaction (e.g. \"어?\", \"!?\") or a comic "
     "moment write a light tone such as \"comic beat — puzzled blink\", and do not carry over the scene-wide "
     "feeling (flutter, tension)."
+)
+
+# 작업 162: 손 주인 규칙 1개(콘티 CONTI_SYSTEM · 158 샷 계획 사용자 글 · 148 패널 연출 문법 SYSTEM · 콘티 연기 다시 읽기가 같은 글을 쓴다).
+# test3 cut-03: 범건우는 화면 밖이고 손만 들어오는데, 보이는 사람이 여의준 하나라 모든 손을 여의준 손으로 읽었다.
+HAND_OWNER_RULE = (
+    "A hand or arm entering the frame from an edge, or whose sleeve/cuff does not match the visible person's outfit, "
+    "belongs to ANOTHER character. Decide whose hand it is by sleeve, cuff, skin, watch and outfit, using the outfit notes "
+    "given for each character. Never describe it as the visible person's own hand. If its owner is off-frame, say so: "
+    "'<Owner>'s hand (off-frame) …'."
+)
+# 손만 보이는 화면 밖 인물의 콘티 positionEn(정확히 이 글). generate 가 이 값으로 "손만 들어온다" 절을 만든다.
+OFF_FRAME_HAND_POSITION = "off-frame, hand only"
+# 콘티 characters[] 에 손 주인을 적는 방법(CONTI_SYSTEM 규칙 13 · 콘티 연기 다시 읽기).
+HAND_OWNER_CONTI_RULE = (
+    "When only the hand or arm of a character is in the frame, also list that character in characters, with positionEn \""
+    + OFF_FRAME_HAND_POSITION + "\" and an actionEn for the hand only (e.g. \"<Owner>'s hand (off-frame) strokes "
+    "<Visible>'s cheek.\"). The visible person's actionEn describes only what that person does."
+)
+# 158 샷 계획(VIBE_CUTS_SYSTEM 은 참고 글 그대로 둔다)에는 사용자 글 끝에 이 줄을 붙인다.
+VIBE_HAND_OWNER_NOTE = (
+    "Hands: " + HAND_OWNER_RULE + " In a shot where only such a hand of an off-frame character shows, keep that "
+    "character out of the shot's characters and write the hand in actionEn as \"<Owner>'s hand (off-frame) …\"."
+)
+# 인물별 옷·소매 메모 머리줄(호출마다 "- 이름: 옷" 줄이 뒤따른다). 메모가 없으면 이 줄도 없다.
+OUTFIT_NOTES_HEAD = "Outfit notes per character (use the sleeves, cuffs, skin, watch and clothes to tell whose hand is whose):"
+
+
+def outfit_notes_text(notes) -> str:
+    """{이름: 옷} → OUTFIT_NOTES_HEAD + "- 이름: 옷" 줄들. 비면 ""(호출 글이 지금과 같다)."""
+    rows = [(str(k).strip(), " ".join(str(v or "").split())) for k, v in (notes or {}).items()]
+    rows = [(k, v) for k, v in rows if k and v]
+    if not rows:
+        return ""
+    return OUTFIT_NOTES_HEAD + "\n" + "\n".join(f"- {k}: {v}" for k, v in rows)
+
+
+_OFF_FRAME_RE = re.compile(r"\boff[\s-]?(?:frame|screen)\b", re.IGNORECASE)
+
+
+def is_off_frame(position) -> bool:
+    """콘티 positionEn 이 화면 밖(손만)을 뜻하는지(off-frame · off frame · offscreen)."""
+    return bool(_OFF_FRAME_RE.search(str(position or "")))
+
+
+# 작업 162 fix1: 콘티 컷마다 그 장면의 모든 인물과 그 사람이 하는 일(화면 밖이어도). presence 값·손 짧은 표기(148 낱말).
+from .previz_schema import HAND_ACTS as _HAND_ACTS, HAND_TARGETS as _HAND_TARGETS  # noqa: E402
+
+PRESENCE_VALUES = ("on_screen", "hand_only", "voice_only", "off_screen")
+# 손을 쓰는 동작(쉬는 손 rest·none 은 적지 않는다).
+CAST_HAND_ACTS = tuple(a for a in _HAND_ACTS if a not in ("rest", "none"))
+CAST_HAND_TARGETS = tuple(_HAND_TARGETS)
+CAST_CHAR_SCHEMA = {
+    "type": "object",
+    "required": ["name", "presence", "actionEn"],
+    "properties": {
+        "name": {"type": "string"},
+        "presence": {"type": "string", "enum": list(PRESENCE_VALUES)},
+        "positionEn": {"type": "string"},
+        "actionEn": {"type": "string"},
+        "actionKo": {"type": "string"},
+        # 손마다 "act>target"(예: "touch>other_cheek"). 쉬는 손은 뺀다.
+        "hands": {"type": "object", "properties": {"left": {"type": "string"}, "right": {"type": "string"}}},
+    },
+}
+CAST_RULE = (
+    "characters lists EVERY character who is in this scene (this location) in every cut, not only the visible ones. "
+    "For each: presence = on_screen (body or face in the frame) | hand_only (only a hand or arm enters the frame) | "
+    "voice_only (not in the frame, but speaks) | off_screen (not in the frame and silent); actionEn = what THIS person "
+    "does in this cut, also when off screen (e.g. \"watches Yeouijun silently\", \"reaches in and covers Yeouijun's eyes "
+    "with his right hand\"); actionKo = a short Korean version of actionEn; hands = which of the person's OWN hands "
+    "touches what, as \"act>target\" per hand, act: " + " | ".join(CAST_HAND_ACTS) + ", target: "
+    + " | ".join(CAST_HAND_TARGETS) + " (own_* = the person's own body, other_* = the body of the person they touch), "
+    "e.g. {\"right\": \"touch>other_cheek\"}; leave resting hands out. Whoever's hand touches, holds or covers something "
+    "has presence on_screen or hand_only, never off_screen. " + HAND_OWNER_RULE
 )
 
 # ================================================================ ② 대본(script)
@@ -299,6 +375,7 @@ Rules you must follow:
    (<= """ + str(MOOD_EN_MAX) + """ characters, English) give the mood and the visible characters' expressions in one line,
    with the character names exactly as given. Never describe hair, skin or clothing colors there. """ + MOOD_CUT_RULE + """
 12. """ + FX_WHO_RULE + """
+13. Hands: """ + HAND_OWNER_RULE + " " + HAND_OWNER_CONTI_RULE + """
 Answer only with the emit_conti tool."""
 
 
@@ -484,6 +561,50 @@ No dialogue text, no speech bubbles, no captions. Answer only with the emit_mast
 
 # 작업 158: 캐릭터 시트 그림(정면 · 턴어라운드)을 보낼 때 그 앞에 붙이는 1줄(사용자 지시 문구 그대로).
 VIBE_SHEET_NOTE = "These are AI-generated character sheets of fictional characters; use them for looks"
+
+
+# ---------------------------------------------------------------- 작업 162 fix1: 컷마다 모든 인물(VNEW_CONTI_CAST)
+# 켜면 콘티 도구의 characters 항목이 CAST_CHAR_SCHEMA(presence·actionEn 필수)이고, 옛 경로 SYSTEM 에 규칙 14 를 더한다. 샷 계획은
+# 참고 도구(EMIT_VIBE_CUTS)·SYSTEM 을 그대로 두고 샷마다 cast[] 필드를 더한 사본·사용자 글 끝 VIBE_CAST_NOTE 를 쓴다. 끄면 162 그대로.
+import copy as _copy  # noqa: E402
+
+
+def _conti_cast_tool() -> dict:
+    tool = _copy.deepcopy(EMIT_CONTI)
+    tool["inputSchema"]["json"]["properties"]["cuts"]["items"]["properties"]["characters"]["items"] = _copy.deepcopy(CAST_CHAR_SCHEMA)
+    return tool
+
+
+def _vibe_cast_tool() -> dict:
+    tool = _copy.deepcopy(EMIT_VIBE_CUTS)
+    item = tool["inputSchema"]["json"]["properties"]["beats"]["items"]
+    item["properties"]["cast"] = {"type": "array", "items": _copy.deepcopy(CAST_CHAR_SCHEMA)}
+    item["required"] = [*item["required"], "cast"]
+    return tool
+
+
+EMIT_CONTI_CAST = _conti_cast_tool()
+EMIT_VIBE_CUTS_CAST = _vibe_cast_tool()
+CONTI_CAST_RULE_LINE = "14. Cast: " + CAST_RULE + "\n"
+CONTI_CAST_SYSTEM = CONTI_SYSTEM.replace("Answer only with the emit_conti tool.",
+                                         CONTI_CAST_RULE_LINE + "Answer only with the emit_conti tool.")
+VIBE_CAST_NOTE = ("Cast: for every shot also give cast[] (the beat's characters still lists only the visible ones): "
+                  + CAST_RULE.replace("characters lists", "cast lists"))
+
+# 검사가 고친 뒤(characters 만 고치기) 1회 부르는 도구·시스템.
+EMIT_CAST_FIX = {
+    "name": "emit_cast_fix",
+    "description": "Return the corrected characters[] for the requested storyboard cuts only.",
+    "inputSchema": {"json": {"type": "object", "required": ["cuts"], "properties": {"cuts": {"type": "array", "items": {
+        "type": "object", "required": ["id", "characters"], "properties": {
+            "id": {"type": "string"},
+            "characters": {"type": "array", "items": _copy.deepcopy(CAST_CHAR_SCHEMA)}}}}}}},
+}
+CAST_FIX_SYSTEM = (
+    "You fix only the characters[] of the storyboard cuts you are given. Do not change anything else (no new cuts, no "
+    "timing, dialogue, camera or symbols). Each cut comes with its problems; fix every one. Rules: " + CAST_RULE
+    + " Answer only with the emit_cast_fix tool."
+)
 
 
 

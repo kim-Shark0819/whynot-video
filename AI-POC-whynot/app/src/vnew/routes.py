@@ -501,6 +501,18 @@ def create_blueprint(deps: VnewDependencies) -> Blueprint:
         except Exception as exc:  # noqa: BLE001
             return _fail(exc)
 
+    # 작업 162: 콘티 연기 다시 읽기(손 주인). 컷마다 패널을 다시 보고 characters[]·패널 연출 문법 actions 만 바꾼다(컷 id·초·대사·
+    # 기호·카메라·프리비즈 승인·녹화 그대로, previz.posesStale). 소유자, 그리고 관리자(읽기 권한으로 소유자 저장소에). 202 {ok, taskId, cuts}.
+    @bp.post("/p/<pid>/conti/reread-actions")
+    @deps.require_auth
+    def plan_conti_reread_actions(pid: str):
+        try:
+            owner = _project_for(pid, write=not deps.is_admin())
+            info = plan_mod.start_reread_actions(owner, pid)
+            return jsonify({"ok": True, **info}), 202
+        except Exception as exc:  # noqa: BLE001
+            return _fail(exc)
+
     @bp.post("/p/<pid>/cancel")
     @deps.require_auth
     def plan_cancel(pid: str):
@@ -670,6 +682,20 @@ def create_blueprint(deps: VnewDependencies) -> Blueprint:
             owner = _project_for(pid, write=True)
             payload = request.get_json(silent=True) or {}
             previz.update_scenes(owner, pid, payload)
+            data, _ = plan_mod.load_plan(owner, pid)
+            return jsonify(plan_mod.plan_view(owner, pid, data))
+        except Exception as exc:  # noqa: BLE001
+            return _fail(exc)
+
+    # 작업 162: [포즈 다시 맞추기] — 저장된 패널 연출 문법 actions 로 장면 인물 포즈만 다시(카메라·배치 그대로, 승인 해제 → 다시 녹화).
+    @bp.post("/p/<pid>/previz/refresh-poses")
+    @deps.require_auth
+    def previz_refresh_poses(pid: str):
+        try:
+            from . import previz  # noqa: PLC0415
+
+            owner = _project_for(pid, write=not deps.is_admin())
+            previz.refresh_poses(owner, pid)
             data, _ = plan_mod.load_plan(owner, pid)
             return jsonify(plan_mod.plan_view(owner, pid, data))
         except Exception as exc:  # noqa: BLE001
