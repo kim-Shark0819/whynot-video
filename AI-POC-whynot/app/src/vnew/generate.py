@@ -4517,7 +4517,11 @@ def _hands_only_clause(owner: dict, names, disp, *, real: bool = False, soften: 
     action = action.strip(" .")
     plural = noun.endswith("s") and not noun.endswith("ss")
     base = f"{who}'s {noun} {'enter' if plural else 'enters'} from off-frame"
-    if not action or vnew_fx.HANGUL.search(action) or (soften and _explicit_text(action, _strong(soften))):
+    bare = action  # 작업 170: 이름이 한글인 표기(Kling 컷 = 콘티 이름)는 한글 검사에서 뺀다
+    for shown in sorted({disp(str(n)) for n in names if n} | {who}, key=len, reverse=True):
+        if shown:
+            bare = bare.replace(shown, "")
+    if not action or vnew_fx.HANGUL.search(bare) or (soften and _explicit_text(action, _strong(soften))):
         return base
     starts_with_name = any(action.startswith(disp(str(n))) for n in names if n)
     if action[1:2].islower() and not starts_with_name:
@@ -4558,6 +4562,17 @@ REAL_BLUSH_LOCK_ANY = "a faint natural flush on the cheeks only; no red eyelids,
 _INSERT_WORD = re.compile(r"\binsert\b", re.IGNORECASE)
 _CLOSEUP_WORD = re.compile(r"\b(?:extreme\s+)?close[\s-]?up\b", re.IGNORECASE)
 _MEDIUM_CLOSEUP = re.compile(r"\bmedium\s+close[\s-]?up\b", re.IGNORECASE)
+# 작업 170: 콘티 크기 우선(클로즈업 · 아주 가까운 · 옆얼굴 · 두 얼굴) · 카메라가 부르는 1명 잠금 · 인서트 닿는 동사 먼저.
+VIBE_PROFILE_SIZE = "profile close-up"
+VIBE_PROFILE_LOCK = "Profile close-up of {name}{cue} filling the frame"
+VIBE_TWO_FACES_SIZE = "tight two-shot close-up of both faces"
+_CONTI_SIZE_KIND = {"closeup": "closeup", "cu": "closeup", "extremecloseup": "extreme", "ecu": "extreme",
+                    "profile": "profile", "insert": "insert"}
+_EXTREME_CLOSEUP = re.compile(r"\bextreme\s+close[\s-]?up\b", re.IGNORECASE)
+_PROFILE_CAMERA = re.compile(r"\bprofile\s+(?:shot|close[\s-]?up)\b", re.IGNORECASE)
+_BOTH_FACES = re.compile(r"\b(?:both|two)\s+faces\b", re.IGNORECASE)
+_TWO_SUBJECTS = re.compile(r"\btwo[\s-]?shot\b|\bboth\b|\btwo\s+faces\b", re.IGNORECASE)
+_CONTACT_VERB = re.compile(r"\b(?:grabs|grips|clamps|clasps|presses|holds|seizes|squeezes)\b")
 _NO_OWN_HANDS_EN = re.compile(r"\b(?:does\s+not|doesn['\u2019]t|do\s+not|don['\u2019]t|never)\s+use\s+(?:his|her|their)\s+own\s+"
                               r"hands?\b|\bwithout\s+using\s+(?:his|her|their)\s+own\s+hands?\b", re.IGNORECASE)
 _NO_OWN_HANDS_KO = re.compile(r"(?:자기|자신의?|제)\s*손[은을]?\s*(?:쓰지|사용하지)\s*않")
@@ -4629,13 +4644,17 @@ def _vibe_closeup_subject(cut: dict, shot: str, owners: list[dict], disp) -> str
     face", "X's … face"), 클로즈업에 presence on_screen 이 정확히 1명이면 그 사람."""
     named = _cut_named(cut)
     camera = " ".join(str(cut.get("cameraEn") or "").split())
+    # 작업 170: 콘티 크기가 클로즈업 · 아주 가까운 · 옆얼굴이고 두 사람 샷이 아니면 "looking up at X" · "on X" · "of X" · "X's" 도 부른다.
+    wide_call = _conti_size_kind(cut) in ("closeup", "extreme", "profile") and not _TWO_SUBJECTS.search(camera)
     hits: list[str] = []
     for ch in named:
         ko = str(ch.get("name") or "").strip()
         for form in {ko, disp(ko)}:
             name = re.escape(form)
             if form and (re.search(r"\bclose[\s-]?up\s+(?:shot\s+)?(?:on|of)\s+" + name, camera, re.IGNORECASE)
-                         or re.search(name + r"['\u2019]s\b[^.;]*?\bface\b", camera, re.IGNORECASE)):
+                         or re.search(name + r"['\u2019]s\b[^.;]*?\bface\b", camera, re.IGNORECASE)
+                         or (wide_call and re.search(r"(?:\blook(?:s|ing)?\s+(?:up\s+|down\s+)?at|\bon|\bof)\s+" + name
+                                                     + r"|" + name + r"['\u2019]s\b", camera, re.IGNORECASE))):
                 if ko not in hits:
                     hits.append(ko)
     owner_names = {str(o.get("name") or "").strip() for o in owners}
@@ -4820,6 +4839,78 @@ def _vibe_size(shot: str) -> str:
     size, _, angle = str(shot or "").strip().partition(" ")
     words = SHOT_SIZE_EN.get(size.upper(), "medium shot")
     return words + (", " + _VIBE_ANGLE_EN.get(angle, angle) if angle else "")
+
+
+def _conti_size_kind(cut: dict) -> str:
+    """작업 170: 콘티 크기 종류 "closeup" | "extreme" | "profile" | "insert" | "". 콘티 shotSize 가 먼저, 아니면 cameraEn 크기
+    낱말("medium close-up" 은 아님, 옆얼굴은 "profile shot"/"profile close-up" 만)."""
+    size = str(cut.get("shotSize") or "").strip().lower().replace("-", "").replace("_", "").replace(" ", "")
+    if size in _CONTI_SIZE_KIND:
+        return _CONTI_SIZE_KIND[size]
+    camera = " ".join(str(cut.get("cameraEn") or "").split())
+    if _INSERT_WORD.search(camera):
+        return "insert"
+    if _EXTREME_CLOSEUP.search(camera):
+        return "extreme"
+    if _PROFILE_CAMERA.search(camera):
+        return "profile"
+    if _CLOSEUP_WORD.search(camera) and not _MEDIUM_CLOSEUP.search(camera):
+        return "closeup"
+    return ""
+
+
+def _vibe_conti_size(cut: dict, shot: str) -> str:
+    """작업 170: SHOT 크기 = 콘티 크기 우선. 두 얼굴("both faces"/"two faces") → VIBE_TWO_FACES_SIZE(+각도), 옆얼굴 →
+    VIBE_PROFILE_SIZE(각도 없음), 클로즈업 → close-up(+각도, 프리비즈 CU · ECU 면 그대로), 아주 가까운 → extreme close-up(+각도,
+    ECU 면 그대로). 그 밖(인서트는 VIBE_INSERT_SIZE 가 따로)은 _vibe_size 그대로."""
+    kind = _conti_size_kind(cut)
+    base = _vibe_size(shot)
+    if kind not in ("closeup", "extreme", "profile"):
+        return base
+    size, _, angle = str(shot or "").strip().partition(" ")
+    size = size.upper()
+    tail = ", " + _VIBE_ANGLE_EN.get(angle, angle) if angle else ""
+    if _BOTH_FACES.search(" ".join(str(cut.get("cameraEn") or "").split())):
+        return VIBE_TWO_FACES_SIZE + tail
+    if kind == "profile":
+        return VIBE_PROFILE_SIZE
+    if kind == "extreme":
+        return base if size == "ECU" else SHOT_SIZE_EN["ECU"] + tail
+    return base if size in ("CU", "ECU") else SHOT_SIZE_EN["CU"] + tail
+
+
+def _insert_lead(clauses: list[str]) -> tuple[str, list[str]]:
+    """작업 170: 인서트 손 절 중 첫 닿는 동사(grabs/clamps/presses/holds …) 절 → ("<주인>'s hand clamps around …", 그 절에서
+    동사 앞까지만 남긴 절 목록). 동사가 있는 절이 없으면 ("", clauses)."""
+    for at, clause in enumerate(clauses):
+        head, sep, rest = clause.partition(" from off-frame")
+        verb = _CONTACT_VERB.search(rest)
+        if not sep or not verb:
+            continue
+        owner = re.sub(r"\s+enters?$", "", head)
+        before = rest[:verb.start()].rstrip()
+        before = re.sub(r"\s*\band$", "", before).rstrip(" ,")
+        kept = list(clauses)
+        kept[at] = head + sep + before
+        return f"{owner} {rest[verb.start():]}".strip(), kept
+    return "", clauses
+
+
+_PRONOUN_MANY = re.compile(r"^(?:They|Their|Both|Together)\b")
+
+
+def _named_action(text: str, name: str, names: list[str], tokens) -> str:
+    """작업 170: 첫 연기 문장이 인물 이름(tokens 중 하나)으로 시작하지 않으면 "이름: " 을 앞에 둔다("Begin with …" · "He …" →
+    "Yeouijun: Begin with …"). They/Their/Both 로 시작하면 "A and B: ". 글은 그대로 남긴다(audit 의 연기 글 찾기). 이름이 없으면 그대로."""
+    text = str(text or "")
+    if not text or not name:
+        return text
+    for token in tokens:
+        if token and text.startswith(token) and not re.match(r"[A-Za-z\uac00-\ud7a3]", text[len(token):len(token) + 1]):
+            return text
+    if _PRONOUN_MANY.match(text) and len(names) >= 2:
+        return _join_names(names) + ": " + text
+    return name + ": " + text
 
 
 def _vibe_take_prompt(plan: dict, take: dict, *, real: bool, cast: list[dict], location_no=None, frame_no=None,
@@ -5009,12 +5100,15 @@ def _vibe_take_prompt(plan: dict, take: dict, *, real: bool, cast: list[dict], l
 
     appearances = {str(m.get("name") or "").strip(): str(m.get("appearance") or "") for m in cast}
 
-    def _closeup_who(subject: str, entry: dict, cut: dict, clauses: list[str], owner_names: set[str]) -> str:
+    def _closeup_who(subject: str, entry: dict, cut: dict, clauses: list[str], owner_names: set[str],
+                     profile: bool = False) -> str:
         # 작업 166: "Close-up of A (cue) filling the frame; B only partly visible at the frame edge; C not in frame; <손 절>. "
+        # 작업 170: 옆얼굴 크기면 "Profile close-up of A (cue) filling the frame".
         name = _disp(subject)
         visible = {_disp(str(i.get("name") or "")) for i in entry.get("onScreen") or [] if i.get("name")}
         visible |= {_disp(str(ch.get("name") or "")) for ch in _cut_named(cut) if ch.get("presence") == "on_screen"}
-        pieces = [VIBE_CLOSEUP_LOCK.format(name=name, cue=_identity_cue(appearances.get(subject, "")))]
+        pieces = [(VIBE_PROFILE_LOCK if profile else VIBE_CLOSEUP_LOCK).format(
+            name=name, cue=_identity_cue(appearances.get(subject, "")))]
         seen = {name} | set(owner_names)
         for other in [_disp(str(ch.get("name") or "")) for ch in _cut_named(cut)] + handles:
             if other and other not in seen:
@@ -5034,8 +5128,12 @@ def _vibe_take_prompt(plan: dict, take: dict, *, real: bool, cast: list[dict], l
         if hand_owners:
             names = [str(c.get("name") or "") for c in cut.get("characters") or [] if isinstance(c, dict)] + list(name_map)
             clauses = [_hands_only_clause(o, names, _disp, real=real, soften=soften) for o in hand_owners]
+        lead = ""
+        if insert:
+            lead, clauses = _insert_lead(clauses)  # 작업 170: 첫 닿는 동사 절을 크기 바로 뒤로
+        size = VIBE_INSERT_SIZE if insert else _vibe_conti_size(cut, entry.get("shot"))  # 작업 170: 콘티 크기 우선
         if subject:
-            who = _closeup_who(subject, entry, cut, clauses, owner_names)
+            who = _closeup_who(subject, entry, cut, clauses, owner_names, profile=size == VIBE_PROFILE_SIZE)
         elif hand_owners:
             who = _vibe_who_hands(entry.get("onScreen") or [], handles, _disp, clauses, owner_names)
         else:
@@ -5045,16 +5143,22 @@ def _vibe_take_prompt(plan: dict, take: dict, *, real: bool, cast: list[dict], l
         locks = _vibe_own_hands(cut, hand_owners, _disp, lambda ko: appearances.get(ko, ""), lambda ko: costumes.get(ko) or "")
         locked = {ko for ko, _text in locks}
         own = "".join(text + ". " for _ko, text in locks)
-        size = VIBE_INSERT_SIZE if insert else _vibe_size(entry.get("shot"))
-        prefix = f"Shot {index + 1} ({entry['start']}-{entry['end']}s), {size}: " + (own + who if real else who + own)
+        head = (lead + ". " if lead else "") + (own + who if real else who + own)
+        prefix = f"Shot {index + 1} ({entry['start']}-{entry['end']}s), {size}: " + head
         if framing is not None:
             # 작업 169: 컷 단위 Kling 샷 고정 줄의 재료(크기 · 자기 손 + who, 화면에 보이는 인물)
-            framing.setdefault("shots", {})[cut_id] = {"size": size, "lead": own + who if real else who + own,
-                                                       "names": _present(entry)}
+            framing.setdefault("shots", {})[cut_id] = {"size": size, "lead": head, "names": _present(entry)}
         parts = []
         if index in moves:
             parts.append(f"Setting now: {_bg(moves[index])}")
-        parts.append(_action(entry))
+        action = _action(entry)
+        if not insert:
+            # 작업 170: 첫 연기 문장은 인물 이름으로 시작한다(잠금 주인공, 없으면 콘티 첫 on_screen 인물).
+            on_names = [_disp(str(ch.get("name") or "")) for ch in _cut_named(cut) if ch.get("presence") == "on_screen"]
+            on_names = on_names or [_disp(n) for n in _present(entry)]
+            first = _disp(subject) if subject else (on_names[0] if on_names else "")
+            action = _named_action(action, first, on_names, sorted(people, key=len, reverse=True))
+        parts.append(action)
         contact_name = str((entry.get("contact") or {}).get("name") or "").strip()
         if not any(str(o.get("name") or "").strip() == contact_name for o in hand_owners) and contact_name not in locked:
             parts.append(_contact(entry))  # 162: 손 주인의 닿는 연기는 손 절이 이미 말한다(166: 자기 손 잠금 인물의 손 연기도 뺀다)
@@ -8682,6 +8786,14 @@ def _kling_shot_lock(owner: str, plan: dict, ctx: dict, cut_id: str, seconds: fl
         if not shot:
             return ""
         lead = str(shot["lead"]).strip().rstrip(" .")
+        # 작업 170: 캐스트에 없는 콘티 인물(가장자리 · 손 주인)도 Kling 글과 같은 콘티 이름으로
+        in_cast = {m["name"] for m in cast}
+        cut = next((c for c in (plan.get("conti") or {}).get("cuts") or [] if str(c.get("id")) == str(cut_id)), {})
+        for ch in _cut_named(cut):
+            ko = str(ch.get("name") or "").strip()
+            roman = _romanize_name(ko)
+            if ko not in in_cast and roman and roman != ko:
+                lead = re.sub(r"(?<![A-Za-z])" + re.escape(roman) + r"(?![A-Za-z])", ko, lead)
         lines = [REAL_CUT_FRAMING_LINE.format(size=shot["size"], lead=lead) if lead
                  else REAL_CUT_FRAMING_LINE.split(": {lead}", 1)[0].format(size=shot["size"]) + "."]
         costumes = framing.get("costumes") or {}
