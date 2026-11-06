@@ -7425,7 +7425,8 @@ def _scene_costume(plan: dict, name: str, location, *, fallback: str = "", base:
     옷(컷 순) → 그 장소 모든 컷의 패널 읽기 옷 가운데 가장 많은 것(같으면 앞 컷) → fallback. 첫 쓸 만한 후보(146 규칙: 실사 정리 뒤
     2낱말 이상·옷 낱말)를 limit 으로 정리한다. 고르기는 애니·실사가 같고, real=False(애니)면 그 후보를 그림 낱말 빼기 없이 정리한다
     (그림 낱말은 실사만 지운다 — lr-e).
-    작업 164: 순서 = 콘티 → 대본 → base(캐릭터 분석 기본 옷, 142 시트) → 패널 읽기 다수결 → fallback. 쓸 만한 후보 = _costume_candidate
+    작업 165: 순서 = 콘티 → 대본 → 패널 읽기 다수결(웹툰에 그려진 그 장면 옷) → base(캐릭터 분석 기본 옷, 142 시트) → fallback.
+    (164 는 base 를 패널 앞에 두어 장면 옷(검은 트랙 상의) 대신 기본 옷(아이보리 셔츠)이 나왔다.) 쓸 만한 후보 = _costume_candidate
     (3낱말 이상 · 괄호 짝 · 부분 낱말 아닌 옷 낱말, 정리가 3낱말 미만이면 정리 전 첫 문장). 쓸 수 없는 패널 읽기는 표도 없다.
     """
     name = str(name or "").strip()
@@ -7462,7 +7463,7 @@ def _scene_costume(plan: dict, name: str, location, *, fallback: str = "", base:
             vote = votes.setdefault(text.lower(), [0, order, value])
             vote[0] += 1
     majority = [v[2] for v in sorted(votes.values(), key=lambda v: (-v[0], v[1]))]
-    for value in [*conti_values, *script_values, base, *majority, fallback]:
+    for value in [*conti_values, *script_values, *majority, base, fallback]:
         text = _costume_candidate(value, limit, real=real)
         if text:
             return text
