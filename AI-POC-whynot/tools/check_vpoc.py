@@ -56145,6 +56145,307 @@ def check_vnew_prompt_size_167() -> None:
             print(f"       167: {line}")
 
 
+# 작업 168: test3(pid 34b82e7841205155aeeed0228eae0610, gen g202611061012446afa) take1 조각 4 "Setting" 장소 글의 재료(장소 시트 north 벽)와
+# 그 테이크의 제출 글(_clip_words 로 260자에서 잘려 "…plate glass storefront with." 로 끝났다).
+_CL168_LOC = "Outdoors by a low metal railing with apartment buildings in the background"
+_CL168_NORTH = {"wallColorEn": "white and blue; a full-width glass storefront under a blue sign band with white lettering, "
+                               "framed in white aluminium",
+                "wallMaterialEn": "floor-to-ceiling plate glass storefront with white aluminium mullions, blue plastic fascia "
+                                  "sign panel above, light grey metal roof edge"}
+_CL168_OLD_SETTING = ("Outdoors by a low metal railing with apartment buildings in the background (outdoor); walls: white and "
+                      "blue; a full-width glass storefront under a blue sign band with white lettering, framed in white aluminium "
+                      "floor-to-ceiling plate glass storefront with")
+_CL168_KO = "좆 큰 놈이랑 붙어 먹으면"  # 153 지도 뒤 = "물건 큰 놈이랑 함께 자면"(163 이 잡지 못한 암시)
+_CL168_SOFT = "물건 큰 놈이랑 함께 자면"
+_CL168_NEW = "나랑 한번 만나 보면"
+
+
+def check_vnew_content_ladder_168() -> None:
+    """작업 168 — 실사 콘텐츠 사다리 4·5단계 · 장소 글 절 경계 · 인서트 who 글. 가짜 fal(Wan 3.0 r2v 조각)·가짜 LLM, 유료 0.
+
+    (cl-a) 사다리 표: 실사 0→1→(2)→3→4→5→실패, 애니는 3 뒤 실패(그대로), soften 단계 값
+    (cl-b) 드라이버(이음 조각 2개, 조각 2 = cut 3·4, 대체 모델 없음 → 0·1·3·4·5): 0~3단계 거절 · 4단계 통과 → 조각 2 completed,
+           4단계 요청에 앞 조각 프레임·장면 옷 그림 없음(0단계 요청에는 있음), @Image 번호 다시 매김(시트 1·2 · 장소 3), 의상 고정 글 남음,
+           로그 vnew.gen.content_step, 칸 attempt = 실제 제출 수
+    (cl-c) 4단계 거절 · 5단계 통과: LLM 1번이 "물건 큰 놈이랑 함께 자면" → "나랑 한번 만나 보면", dialogueSoftened 기록, "pulled downward" 빠짐 /
+           LLM 실패 → 대사 0줄 · audioDropped / 모든 단계 거절 → 한국어 문구 · 163 보다 정확히 2번 더 제출 · 그 뒤 제출 0
+    (cl-d) 장소 글: test3 잘린 글 → 마지막 절 경계("… white lettering"), 끝 전치사 없음, 안 잘리는 글 · 절 경계에서 잘린 글은 그대로
+    (cl-e) 인서트 who: test3 cut-11 모양 → "Beomgeonu's chest and hands only; …"(실사 · 애니), "Only Beomgeonu appears" 없음, 닿는 곳이
+           손이면 "hands only"
+    """
+    import base64 as _b64  # noqa: PLC0415
+    import copy as _copy  # noqa: PLC0415
+    import json as _json  # noqa: PLC0415
+    import traceback as _tb  # noqa: PLC0415
+
+    sys.path.insert(0, str(ROOT / "app"))
+    bad: list[str] = []
+    report: list[str] = []
+    seen: set[str] = set()
+
+    def expect(group: str, got, want, what: str) -> None:
+        seen.add(group)
+        if got != want:
+            bad.append(f"({group}) {what}\n      결과 {got!r}\n      기대 {want!r}")
+
+    def decode(uri) -> bytes:
+        try:
+            return _b64.b64decode(str(uri).split(",", 1)[1])
+        except Exception:  # noqa: BLE001
+            return b""
+
+    try:
+        from src.vnew import generate as genmod  # noqa: PLC0415
+        from src.vnew import plan as planmod  # noqa: PLC0415
+        from src.vpoc.errors import VpocError  # noqa: PLC0415
+
+        # ================= (cl-a) 사다리 표 =================
+        nxt = genmod._content_next  # noqa: SLF001
+        expect("cl-a", [[nxt(s, "", True) for s in range(6)], [nxt(s, "seed", True) for s in range(6)],
+                        [nxt(s, "", False) for s in range(4)], [genmod._soften_level(s) for s in range(6)],  # noqa: SLF001
+                        [genmod._strong(v) for v in (False, True, 2, 3, 4)], [genmod._drop_refs(v) for v in (True, 2, 3, 4)],  # noqa: SLF001
+                        [genmod._rewrite_on(v) for v in (True, 2, 3, 4)], genmod._content_step({"contentStep": 9})],  # noqa: SLF001
+               [[1, 3, 3, 4, 5, 0], [1, 2, 3, 4, 5, 0], [1, 3, 3, 0], [False, True, True, 2, 3, 4],
+                [False, False, True, True, True], [False, False, True, True], [False, False, False, True], 5],
+               "실사 3→4→5→실패 · 애니 3 뒤 실패 · soften 값 · 단계 상한 5")
+
+        # ================= (cl-d) 장소 글 =================
+        loc_plan = {"script": {"setting": {"locationEn": _CL168_LOC, "enclosed": False}},
+                    "locations": [{"nameEn": _CL168_LOC, "key": _CL168_LOC.lower(), "design": {"enclosed": False},
+                                   "facts": {"walls": {"north": dict(_CL168_NORTH)}}}]}
+        bg = genmod._background_en(loc_plan, _CL168_LOC, real=True)  # noqa: SLF001
+        clip = genmod._clip_clause  # noqa: SLF001
+        raw = f"{_CL168_LOC} (outdoor); walls: {_CL168_NORTH['wallColorEn']} {_CL168_NORTH['wallMaterialEn']}"
+        expect("cl-d", [genmod._clip_words(raw, genmod.BACKGROUND_MAX).rstrip(" ,;:.") == _CL168_OLD_SETTING,  # noqa: SLF001
+                        bg, bg.rsplit(" ", 1)[-1].lower() in ("with", "of", "and", "in", "on", "at", "under")],
+               [True, _CL168_OLD_SETTING.split(", framed", 1)[0], False],
+               "test3 잘린 장소 글(옛 규칙 = '… storefront with') → 마지막 절 경계에서 끝")
+        expect("cl-d", [clip("Short room; wood floor", 260), clip("A room; wood floor; light: soft daylight", 26),
+                        clip("one two three four five six seven with eight", 40),
+                        clip("Alpha beta gamma, delta epsilon zeta eta", 32)],
+               ["Short room; wood floor", "A room; wood floor", "one two three four five six seven", "Alpha beta gamma"],
+               "안 잘림 · 절 경계에서 잘림 = 지금 글자, 경계가 없으면 단어 경계 뒤 끝 전치사 떼기, 경계가 있으면 그 앞")
+
+        # ================= (cl-e) 인서트 who =================
+        a, b = _TC157_A, _TC157_B
+        ra, rb = genmod._romanize_name(a), genmod._romanize_name(b)  # noqa: SLF001
+        cast_of = {"real": [{"name": b, "colorName": "blue", "frontNo": 2, "sheetNo": 1, "refNos": [1, 2], "look": "real",
+                             "appearance": "a Korean man in his 20s with tousled pale blonde hair", "voice": "",
+                             "costume": "Black long-sleeve track top with a single white stripe down each sleeve"},
+                            {"name": a, "colorName": "orange", "frontNo": 4, "sheetNo": 3, "refNos": [3, 4], "look": "real",
+                             "appearance": "narrow half-lidded eyes and short charcoal-black hair swept back", "voice": "",
+                             "costume": "Dark navy long-sleeve button-up dress shirt, collar open, worn untucked"}]}
+        cast_of["anime"] = [dict(m, look="webtoon") for m in cast_of["real"]]
+        with _guard_real_llm() as llm_calls, _pin_vnew(VNEW_FX=True, VNEW_TAKE_PROMPT_MAX_CHARS=8000, VNEW_VIBE_PROMPT=True):
+            plan_e, take_e = _sl166_plan()
+            cut11 = {"shotSize": "insert", "cameraEn": "Insert tilt-down following the hand from chest downward", "characters": [
+                {"name": a, "presence": "on_screen", "positionEn": "right side of the railing, chest and lower face filling the frame",
+                 "actionEn": f"Stands facing front with his dark navy shirt collar open; his right hand lies over {b}'s hand and "
+                             "presses it flat against his own chest.", "actionKo": "오른손으로 손을 가슴에 눌러 댄다.",
+                 "hands": {"right": "cover>other_hand"}},
+                {"name": b, "presence": "hand_only", "positionEn": "off-frame, hand only",
+                 "actionEn": f"{b}'s right hand (off-frame) is pressed flat, fingers spread, against {a}'s chest under {a}'s hand.",
+                 "actionKo": "가슴에 손이 닿아 있다.", "hands": {"right": "touch>other_chest"}}]}
+            next(c for c in plan_e["conti"]["cuts"] if c["id"] == "cut-05").update(_copy.deepcopy(cut11))
+            lines5 = {}
+            for v in ("real", "anime"):
+                text = genmod._vibe_take_prompt(plan_e, take_e, real=v == "real", cast=cast_of[v], location_no=5,  # noqa: SLF001
+                                                quiet=True)
+                lines5[v] = next((ln for ln in text.split("\n") if ln.startswith("Shot 5 (")), "")
+            head = f"Shot 5 (16-20s), {genmod.VIBE_INSERT_SIZE}: "
+            expect("cl-e", {v: [ln.startswith(head), f"Only {ra} appears" in ln, f"{ra}'s chest and hands only; {rb}'s right hand "
+                                "enters from off-frame" in ln] for v, ln in lines5.items()},
+                   {"real": [True, False, True], "anime": [True, False, True]}, "cut-11 인서트 줄: 몸 · 손만, 'Only X appears' 없음")
+            grab = _copy.deepcopy(cut11)
+            grab["characters"][1]["hands"] = {"right": "touch>other_hand"}
+            expect("cl-e", [genmod._insert_who(f"Only {ra} appears in this shot; {rb}'s hand enters from off-frame. ",  # noqa: SLF001
+                                               grab, genmod._hands_only_owners(grab), genmod._romanize_name),  # noqa: SLF001
+                            genmod._insert_who("Close-up of X filling the frame. ", cut11, [], genmod._romanize_name)],  # noqa: SLF001
+                   [f"hands only; {rb}'s hand enters from off-frame. ", "Close-up of X filling the frame. "],
+                   "닿는 곳이 손이면 'hands only', 'Only …' 로 시작하지 않으면 그대로")
+            report.append(f"cut-11 real: {lines5['real'][:230]}")
+            expect("cl-e", llm_calls, [], "LLM 호출 0")
+
+        # ================= (cl-b)(cl-c) 드라이버 =================
+        owner = "tester"
+        rec_seconds = {b"PREVIZ-REC-s1": 16.0}
+        clip_re = re.compile(rb"^CLIP:(\d+\.\d+)-(\d+\.\d+):")
+
+        def video_seconds(mp4: bytes) -> float:
+            match = clip_re.match(mp4 or b"")
+            if match:
+                return float(match.group(2)) - float(match.group(1))
+            return rec_seconds.get(bytes(mp4 or b""), 0.0)
+
+        with _guard_real_llm() as llm_calls, _LogCapture() as logs, _LrEnv(owner) as env, _pin_vnew(
+                VNEW_FX=False, VNEW_CASTING=True, VNEW_TAKE_REAL=True, VNEW_GEN_PARALLEL=1, POLL_INTERVAL_S=0,
+                VNEW_TAKE_AUDIO=True, VNEW_TAKE_RESOLUTION="480p", VNEW_TEXT_CHECK=False, VNEW_REAL_TAKE_MODEL="",
+                VNEW_VIBE_PROMPT=True, VNEW_TAKE_PROMPT_MAX_CHARS=8000, VNEW_TAKE_MAX_SECONDS=30, VNEW_TAKE_REF_SPLIT=True,
+                VNEW_PART_CONTINUITY=True, VNEW_CONTENT_FALLBACK_MODEL="", VNEW_TAKE_REAL_LIKENESS_LADDER=False,
+                VNEW_REAL_CUT_QA=False, VNEW_REAL_COSTUME_REF=True, VNEW_CONTI_CAST=False):
+            for cid in ("ch1", "ch2"):
+                env.chars[cid]["variants"]["real"]["sheetKey"] = f"rs-{cid}"
+            env.blobs.update({"rs-ch1": b"RS1", "rs-ch2": b"RS2"})
+            wan_id = genmod.vpoc_settings.FAL_ID_PREFIX + _RV152_ENDPOINT
+            seed_find = genmod.vpoc_fal.find
+            env.set(genmod.vpoc_fal, "find", lambda m: {"id": wan_id, "endpointId": _RV152_ENDPOINT, "category": "reference-to-video",
+                                                        "caps": dict(_RV152_CAPS)} if str(m) == wan_id else seed_find(m))
+            env.set(genmod.vpoc_settings, "FAL_REF_VIDEO_MAX_S", 10)
+            env.set(genmod, "_cut_clip", lambda mp4, unit: {
+                "bytes": b"CLIP:%.3f-%.3f:" % (float(unit["startSec"]), float(unit["endSec"])) + bytes(mp4)[:20],
+                "origSeconds": round(float(unit["endSec"]) - float(unit["startSec"]), 3),
+                "sentSeconds": round(float(unit["endSec"]) - float(unit["startSec"]), 3), "padded": False})
+            env.set(genmod, "_mp4_seconds", video_seconds)
+            env.set(genmod, "_conform_concat", lambda pieces, **_kw: b"PARTS:%d" % len(pieces))
+            env.set(genmod, "_cut_first_frame", lambda mp4, start: b"FRAME@%.2f:" % float(start) + bytes(mp4)[:40])
+            env.set(genmod, "_seedream_costume", lambda prompt, front, *, size: b"COSTUME-" + bytes(front))
+            env.set(genmod, "_read_soften", lambda blocks, *, model: (
+                {"items": [{"id": it["id"], "text": it["text"]} for it in _json.loads(blocks[0]["text"])["items"]]},
+                {"model": model}))
+            line_calls: list[list[str]] = []
+            llm_mode = {"fail": False}
+
+            def fake_lines(blocks, *, model):
+                items = _json.loads(blocks[0]["text"])["items"]
+                line_calls.append([it["text"] for it in items])
+                if llm_mode["fail"]:
+                    raise RuntimeError("bedrock down")
+                return ({"items": [{"id": it["id"], "text": it["text"].replace(_CL168_SOFT, _CL168_NEW)} for it in items]},
+                        {"model": model, "inputTokens": 30, "outputTokens": 10})
+
+            env.set(genmod, "_read_line_rewrite", fake_lines)
+            policy = {"since": 10 ** 9, "pass": None}
+            base_fal = env._fal  # noqa: SLF001
+
+            def start_of(req) -> float:
+                match = clip_re.match(decode((req["payload"].get("video_urls") or [""])[0]))
+                return float(match.group(1)) if match else -1.0
+
+            def part2_reqs(since: int) -> list[dict]:
+                return [r for r in env.requests[since:] if start_of(r) == 8.0]
+
+            def fal_request(method, url, payload=None, *, where=""):
+                rid = url.split("/requests/", 1)[-1].split("/", 1)[0]
+                req = next((r for r in env.requests if r["rid"] == rid), None)
+                if method == "GET" and not url.endswith("/status") and req is not None \
+                        and env.requests.index(req) >= policy["since"] and start_of(req) == 8.0:
+                    k = part2_reqs(policy["since"]).index(req)
+                    if policy["pass"] is None or k < policy["pass"]:
+                        raise VpocError("fal.poll", "HTTP422", _CF153_MSG, 502)
+                return base_fal(method, url, payload, where=where)
+
+            env.set(env.falmod, "_request", fal_request)
+            client = env.client()
+
+            def run(pid: str, pass_at) -> dict:
+                env.make_plan(pid, [{"id": "s1", "cutIds": ["c1", "c2", "c3", "c4"], "seconds": 16}])
+
+                def mutator(data: dict) -> None:
+                    data["input"]["videoModel"] = wan_id
+                    for cut in data["conti"]["cuts"]:
+                        text = _CL168_KO if cut["id"] == "c4" else f"대사{cut['no']}번."
+                        cut["dialogueKo"] = f'에이: "{text}"'
+                        brief = data["previz"]["shotBrief"]["cuts"][cut["id"]]
+                        brief["dialogue"] = [{"speaker": "에이", "lineKo": text, "deliveryEn": "calm"}]
+                        brief["actionEn"] = ("Kim's right hand is pressed flat against Bee's chest and is pulled downward."
+                                             if cut["id"] == "c4" else "Kim nods once.")
+
+                planmod.mutate_plan(owner, pid, mutator)
+                client.post(f"/api/vnew/p/{pid}/generate", json={"confirmUsd": genmod.estimate(env.plan(pid))["totalUsd"]})
+                g = env.drive(pid)
+                since, led, calls0, logs0 = len(env.requests), len(env.ledger), len(line_calls), len(logs.records)
+                policy["since"], policy["pass"] = since, pass_at
+                client.post(f"/api/vnew/p/{pid}/generate/real", json={"confirmUsd": genmod.real_estimate(g)["usd"]})
+                g = env.drive(pid)
+                policy["since"] = 10 ** 9
+                state = genmod._previz_cells(g)[0]["real"]  # noqa: SLF001
+                reqs = env.requests[since:]
+                p2 = part2_reqs(since)
+                return {"state": state, "parts": state.get("parts") or [], "reqs": reqs, "p2": p2,
+                        "prompts": [str(r["payload"].get("prompt") or "") for r in p2],
+                        "images": [[decode(u) for u in r["payload"].get("image_urls") or []] for r in p2],
+                        "lineCalls": line_calls[calls0:], "ledger": env.ledger[led:],
+                        "steps": [rec.getMessage().split(" pid=")[0] for rec in logs.records[logs0:]
+                                  if rec.getMessage().startswith("vnew.gen.content_step ")]}
+
+            def kinds(images: list[bytes]) -> list[str]:
+                out = []
+                for img in images:
+                    out.append("frame" if img.startswith(b"FRAME@") else "costume" if img.startswith(b"COSTUME-")
+                               else {b"RS1": "sheet1", b"RS2": "sheet2", b"LOC-RB": "loc"}.get(img, "other"))
+                return out
+
+            # ---- (cl-b) 0·1·3단계 거절 → 4단계 통과 ----
+            r4 = run("prj_cl_b", 3)
+            p2 = (r4["parts"] + [{}, {}])[1]
+            expect("cl-b", [r4["state"].get("status"), [p.get("status") for p in r4["parts"]], p2.get("contentStep"),
+                            len(r4["p2"]), len(r4["reqs"]), r4["state"].get("attempt"), "dialogueSoftened" in p2,
+                            "audioDropped" in p2],
+                   ["completed", ["completed", "completed"], 4, 4, 5, 5, False, False],
+                   "조각 2: 0·1·3단계 거절 → 4단계 통과(제출 4번), 칸 attempt = 실사 제출 수(5)")
+            expect("cl-b", [kinds(r4["images"][0]), kinds(r4["images"][-1])],
+                   [["sheet2", "costume", "sheet1", "costume", "frame", "loc"], ["sheet2", "sheet1", "loc"]],
+                   "0단계 참고 = 시트·장면 옷·프레임·장소(인물 순서 = 등장 많은 비 먼저), 4단계 = 시트·장소만")
+            last = (r4["prompts"] or [""])[-1]
+            first = (r4["prompts"] or [""])[0]
+            expect("cl-b", ["previous shot's last frame" in first, "in this scene's clothes" in first,
+                            "previous shot's last frame" in last, "in this scene's clothes" in last, "@Image4" in last,
+                            "@Image3 is the location" in last, "same garment in every shot" in last,
+                            "Setting (keep identical in every shot)" in last],
+                   [True, True, False, False, False, True, True, True],
+                   "4단계 프롬프트: 프레임 · 장면 옷 줄 없음, 번호 다시 매김(장소 @Image3), 의상 고정 · 장소 고정 글 남음")
+            expect("cl-b", r4["steps"], [f"vnew.gen.content_step take=take1 part=2 step={s}" for s in (1, 3, 4)],
+                   "로그 vnew.gen.content_step(단계마다 1줄)")
+            report.append(f"step4 refs {kinds(r4['images'][-1])} attempt={r4['state'].get('attempt')}")
+
+            # ---- (cl-c) 4단계까지 거절 → 5단계 통과(LLM 다시 쓰기) ----
+            r5 = run("prj_cl_c", 4)
+            p2 = (r5["parts"] + [{}, {}])[1]
+            step3 = r5["prompts"][2] if len(r5["prompts"]) > 2 else ""
+            last = (r5["prompts"] or [""])[-1]
+            expect("cl-c", [r5["state"].get("status"), p2.get("status"), p2.get("contentStep"), len(r5["p2"]),
+                            p2.get("dialogueSoftened"), "audioDropped" in p2, len(r5["lineCalls"]),
+                            _CL168_SOFT in step3, "pulled downward" in step3, _CL168_SOFT in last, _CL168_NEW in last,
+                            "pulled downward" in last, kinds(r5["images"][-1]),
+                            len([x for x in r5["ledger"] if str(x.get("key") or "").startswith("vnew-lines-")])],
+                   ["completed", "completed", 5, 5, [{"orig": _CL168_SOFT, "new": _CL168_NEW}], False, 1,
+                    True, True, False, True, False, ["sheet2", "sheet1", "loc"], 1],
+                   "5단계: LLM 1번 대사 다시 쓰기 · dialogueSoftened · 아래로 끄는 방향 뺌(3단계 글에는 남아 있었다) · 원장 1줄")
+            report.append(f"step5 lines sent {r5['lineCalls'][:1]}")
+
+            # ---- (cl-c) LLM 실패 → 대사 빼기 ----
+            llm_mode["fail"] = True
+            rf = run("prj_cl_f", 4)
+            llm_mode["fail"] = False
+            p2 = (rf["parts"] + [{}, {}])[1]
+            last = (rf["prompts"] or [""])[-1]
+            expect("cl-c", [rf["state"].get("status"), p2.get("contentStep"), p2.get("audioDropped"), "dialogueSoftened" in p2,
+                            "spoken (audio only" in last, "spoken (audio only" in (rf["prompts"] or [""])[0], len(rf["lineCalls"])],
+                   ["completed", 5, True, False, False, True, 1], "LLM 실패 → 그 조각 대사 0줄 · audioDropped")
+
+            # ---- (cl-c) 모든 단계 거절 → 한국어 문구, 163 보다 2번 더 ----
+            rn = run("prj_cl_n", None)
+            p2 = (rn["parts"] + [{}, {}])[1]
+            expect("cl-c", [rn["state"].get("status"), rn["state"].get("error"), rn["state"].get("failureKind"), len(rn["p2"]),
+                            len(rn["reqs"]), p2.get("contentStep"), rn["state"].get("attempt")],
+                   ["failed", genmod.CONTENT_FLAG_FAIL_TEXT.format(cuts="3…4"), "contentFlag", 5, 6, 5, 6],
+                   "모든 단계 거절: 조각 2 제출 5번(163 = 3번, 4·5단계 2번 더) → 한국어 문구 · 그 뒤 제출 0")
+            expect("cl-c", llm_calls, [], "가짜가 아닌 LLM 호출 0")
+    except Exception:  # noqa: BLE001
+        bad.append("작업 168 검사 예외\n" + _tb.format_exc()[:3000])
+
+    missing = [g for g in ("cl-a", "cl-b", "cl-c", "cl-d", "cl-e") if g not in seen]
+    if missing:
+        bad.append(f"검사 묶음이 돌지 않았습니다: {missing}")
+    if bad:
+        fail("작업 168 콘텐츠 사다리 4·5단계 · 장소 글 · 인서트 who 검사 실패\n  " + "\n  ".join(bad))
+    else:
+        ok("작업 168 (cl-a)실사 3→4→5→실패 (cl-b)4단계 = 프레임 · 장면 옷 빼고 번호 다시 매김 · attempt 로 셈 (cl-c)5단계 LLM 대사 다시 쓰기 · "
+           "실패 → 대사 뺌 · 모두 거절 → 한국어 문구(2번 더) (cl-d)장소 글 절 경계 (cl-e)인서트 who 몸 · 손만")
+        for line in report:
+            print(f"       168: {line}")
+
+
 def main() -> int:
     print("== vpoc1 check ==")
     check_compileall()
@@ -56286,6 +56587,7 @@ def main() -> int:
     check_vnew_costume_text_164()
     check_vnew_shot_lock_166()
     check_vnew_prompt_size_167()
+    check_vnew_content_ladder_168()
     print()
     if warnings:
         print(f"경고 {len(warnings)}건")

@@ -3734,7 +3734,8 @@ def _assert_no_webtoon(prompt: str) -> None:
 
 def _take_prompt(plan: dict, take: dict, *, cast: list[dict], panel_nos: list[int], location_no, caps: dict | None = None,
                  variant: str = "webtoon", soften: bool = False, anchor: dict | None = None, no_text: bool = False,
-                 audit: dict | None = None, quiet: bool = False, bases: dict | None = None) -> str:
+                 audit: dict | None = None, quiet: bool = False, bases: dict | None = None,
+                 lines_fix: dict | None = None) -> str:
     """통 테이크 프롬프트(영어, ≤ _take_prompt_budget 글자, 설계자 2026-10-26, 066 — ASSETS·연기 보존).
 
     **작업 157 — TIMELINE 먼저**(이 단락이 아래 옛 줄이기 설명(①~⑨·lineDrop·최소형·byteTrim·154 순서)을 대신한다):
@@ -3820,6 +3821,7 @@ def _take_prompt(plan: dict, take: dict, *, cast: list[dict], panel_nos: list[in
                                                _scene_costume_map(plan, [cut_id], take_location, costumes, bases)).rstrip(".")
     if soften:
         _soften_entries(entries, _strong(soften))  # 작업 153: 콘텐츠 검사 거절 뒤 다시 만들 때만(대사·연기·분위기 순화, 줄 수·화자 그대로)
+    _apply_lines_fix(entries, lines_fix)  # 작업 168 5단계(없으면 그대로)
 
     def _all_entry_lines(entry: dict) -> list[dict]:
         # lines 가 없는 항목(옛 모양)은 첫 대사 필드로 1줄을 만든다.
@@ -4598,6 +4600,30 @@ def _vibe_is_insert(cut: dict, owners: list[dict]) -> bool:
     return bool(owners) and not _cut_on_screen_chars(cut, owners)
 
 
+_ONLY_APPEARS = re.compile(r"^Only (?P<names>.+?) (?:appears|appear) in this shot(?=[;.])")
+
+
+def _insert_who(who: str, cut: dict, owners: list[dict], disp) -> str:
+    """작업 168: 인서트 컷 who 글의 "Only X appears in this shot" → "X's chest and hands only"(손만 들어오는 사람의 손이 X 몸에
+    닿을 때 — 닿는 곳 = 콘티 hands "act>other_<곳>"), 아니면 "hands only". 그 뒤 절(손 절·안 보이는 사람)은 그대로.
+    "Only …" 로 시작하지 않으면 그대로."""
+    match = _ONLY_APPEARS.match(str(who or ""))
+    if not match:
+        return who
+    on_screen = _cut_on_screen_chars(cut, owners)
+    touched: list[str] = []
+    for ch in on_screen:
+        for owner in owners:
+            if owner is ch:
+                continue
+            part = _hand_touch_part(owner, ch, on_screen, disp)
+            if part and part.split(" ")[-1] not in _HAND_PARTS:
+                touched.append(f"{disp(str(ch.get('name') or '').strip())}'s {part}")
+                break
+    head = _join_names(touched) + " and hands only" if touched else "hands only"
+    return head + who[match.end():]
+
+
 def _vibe_closeup_subject(cut: dict, shot: str, owners: list[dict], disp) -> str:
     """작업 166: 클로즈업 주인공(콘티 한글 이름) 또는 "". cameraEn 이 한 사람의 얼굴·클로즈업을 부르거나("closeup on X's …
     face", "X's … face"), 클로즈업에 presence on_screen 이 정확히 1명이면 그 사람."""
@@ -4799,7 +4825,7 @@ def _vibe_size(shot: str) -> str:
 def _vibe_take_prompt(plan: dict, take: dict, *, real: bool, cast: list[dict], location_no=None, frame_no=None,
                       panel_nos: list[int] | None = None, caps: dict | None = None, soften: bool = False,
                       anchor: bool = False, no_text: bool = False, audit: dict | None = None, quiet: bool = False,
-                      bases: dict | None = None) -> str:
+                      bases: dict | None = None, lines_fix: dict | None = None) -> str:
     """작업 159: video-vibecode 형식 통 테이크 프롬프트(참고 구현 _cuts_video_prompt · live_video_prompt).
 
     순서: 140 AI 고지 → 화풍(STYLE webtoon + 웹툰 기호 / live_action) → 인물별 "{handle}: {look} (keep exactly this look)." →
@@ -4834,6 +4860,7 @@ def _vibe_take_prompt(plan: dict, take: dict, *, real: bool, cast: list[dict], l
                                                _scene_costume_map(plan, [cut_id], take_location, costumes, bases)).rstrip(".")
     if soften:
         _soften_entries(entries, _strong(soften))  # 153
+    _apply_lines_fix(entries, lines_fix)  # 작업 168 5단계(없으면 그대로)
 
     name_map: dict[str, str] = {}
     for member in cast:
@@ -5011,6 +5038,8 @@ def _vibe_take_prompt(plan: dict, take: dict, *, real: bool, cast: list[dict], l
             who = _vibe_who_hands(entry.get("onScreen") or [], handles, _disp, clauses, owner_names)
         else:
             who = _vibe_who(entry.get("onScreen") or [], handles, _disp)
+        if insert:
+            who = _insert_who(who, cut, hand_owners, _disp)  # 작업 168: 인서트는 "Only X appears" 대신 몸·손만
         locks = _vibe_own_hands(cut, hand_owners, _disp, lambda ko: appearances.get(ko, ""), lambda ko: costumes.get(ko) or "")
         locked = {ko for ko, _text in locks}
         own = "".join(text + ". " for _ko, text in locks)
@@ -5191,6 +5220,7 @@ def _vibe_take_payload(owner: str, pid: str, plan: dict, take: dict, caps: dict,
     장소·프레임 자리를 먼저 남기고, 대체(origMax)는 원래 요청보다 신원 참고를 적게 넣지 않는다(155 규칙 그대로).
     """
     real = variant == "real"
+    drop = _drop_refs(soften)  # 작업 168 4단계: 앞 조각 마지막 프레임·장면 옷 편집 그림을 넣지 않는다(이음 글은 남긴다)
     max_images = int(caps.get("imageListMax") or vpoc_fal.DEFAULT_IMAGE_LIST_MAX)
     actors = _segment_actors(plan, take)
     char_by_id = _char_by_id(owner, plan)
@@ -5199,7 +5229,7 @@ def _vibe_take_payload(owner: str, pid: str, plan: dict, take: dict, caps: dict,
     anchor = continuity if isinstance(continuity, dict) else None
     loc_take = (anchor.get("take") or take) if anchor is not None else take
     loc_jpeg = _take_location_jpeg(plan, loc_take, variant="real" if real else "webtoon")
-    frame = anchor.get("frame") if anchor is not None else None
+    frame = anchor.get("frame") if anchor is not None and not drop else None
     frame_jpeg = bytes(frame) if isinstance(frame, (bytes, bytearray)) and frame else None
     if frame_jpeg is not None:
         _ref_note_load(str(anchor.get("frameKey") or ""), frame_jpeg)
@@ -5209,9 +5239,10 @@ def _vibe_take_payload(owner: str, pid: str, plan: dict, take: dict, caps: dict,
         orig_cap = int(anchor["origMax"]) - n_loc - (n_frame if anchor.get("origFrame") else 0)
         person_cap = max(0, min(orig_cap, max_images - n_loc))
     if real:
+        # 작업 168 4단계: 인물당 신원 참고 1장(시트, 없으면 정면 = 130 1단계 키)·장면 옷 편집 끔.
         image_urls, cast = _real_take_cast(owner, plan, actors, char_by_id, resolved, person_cap,
-                                           fallback_step=fallback_step, costume_location=_take_location(plan, take),
-                                           pid=pid)
+                                           fallback_step=1 if drop else fallback_step,
+                                           costume_location=None if drop else _take_location(plan, take), pid=pid)
     else:
         image_urls, cast = _vibe_anime_cast(actors, char_by_id, resolved, person_cap)
     frame_no = None
@@ -5230,10 +5261,16 @@ def _vibe_take_payload(owner: str, pid: str, plan: dict, take: dict, caps: dict,
                 break
             image_urls.append(_fit_ref(panel))
             panel_nos.append(len(image_urls))
-    prompt_plan = _soften_plan(owner, pid, plan, take, _strong(soften)) if soften else plan
+    prompt_plan = _soften_plan(owner, pid, plan, take, _strong(soften), _rewrite_on(soften)) if soften else plan
     kwargs = {"real": real, "cast": cast, "location_no": location_no, "frame_no": frame_no, "panel_nos": panel_nos,
               "caps": caps, "soften": soften, "anchor": anchor is not None, "no_text": no_text,
               "bases": _base_outfits(actors, char_by_id)}
+    lines_note: dict = {}
+    if _rewrite_on(soften):
+        # 작업 168 5단계: 그 조각 대사 LLM 1번(실패 → 대사 빼기). 기록은 제출 쪽이 조각·칸에 남긴다.
+        lines_fix, lines_note = _rewrite_part_lines(owner, pid, prompt_plan, take)
+        if lines_fix:
+            kwargs["lines_fix"] = lines_fix
     audit: dict = {}
     prompt = _vibe_take_prompt(prompt_plan, take, audit=audit, **kwargs)
 
@@ -5245,6 +5282,7 @@ def _vibe_take_payload(owner: str, pid: str, plan: dict, take: dict, caps: dict,
     out = {"imageUrls": image_urls[:max_images], "prompt": prompt, "cast": cast, "panelNos": panel_nos,
            "locationNo": location_no,
            "audit": audit, "probe": probe}
+    out.update(lines_note)
     if anchor is not None:
         out["frameNo"] = frame_no
     return out
@@ -5316,12 +5354,13 @@ def _take_payload(owner: str, pid: str, plan: dict, take: dict, caps: dict, vari
     resolved = _resolve_cast(owner, pid, plan, take, read=True)
 
     anchor = continuity if isinstance(continuity, dict) else None
+    drop = _drop_refs(soften)  # 작업 168 4단계: 앞 조각 마지막 프레임을 넣지 않는다(실사 인물은 1장씩)
     person_limit = panel_limit = max_images
     anchor_loc = anchor_frame = None
     if anchor is not None:
         # 작업 155: 장소는 조각이 아니라 통 테이크 기준(조각마다 첫 컷 장소가 달라도 같은 1장). 장소·프레임 자리를 먼저 남긴다.
         anchor_loc = _take_location_jpeg(plan, anchor.get("take") or take, variant="real" if real else "webtoon")
-        frame = anchor.get("frame")
+        frame = None if drop else anchor.get("frame")
         anchor_frame = bytes(frame) if isinstance(frame, (bytes, bytearray)) and frame else None
         if anchor_frame is not None:
             _ref_note_load(str(anchor.get("frameKey") or ""), anchor_frame)
@@ -5342,7 +5381,7 @@ def _take_payload(owner: str, pid: str, plan: dict, take: dict, caps: dict, vari
         real_loc = anchor_loc if anchor is not None else _take_location_jpeg(plan, take, variant="real")
         person_cap = person_limit if anchor is not None else max(0, max_images - (1 if real_loc is not None else 0))
         image_urls, cast = _real_take_cast(owner, plan, actors, char_by_id, resolved, person_cap,
-                                           fallback_step=fallback_step)
+                                           fallback_step=1 if drop else fallback_step)
     for actor in [] if real else actors:
         if len(image_urls) >= person_limit and anchor is None:
             break  # 작업 155: 조각·대체 제출은 자리가 없어도 인물 문장(의상 고정)을 남긴다(사진만 뺀다)
@@ -5400,10 +5439,15 @@ def _take_payload(owner: str, pid: str, plan: dict, take: dict, caps: dict, vari
     if anchor is not None:
         prompt_kwargs["anchor"] = {"frameNo": frame_no}  # 작업 155: 장소 고정·프레임 줄·의상 고정
     prompt_plan = plan
+    lines_note: dict = {}
     if soften:
         # 작업 153: 콘텐츠 검사 거절 뒤 다시 만들기 — 테이크 컷 글(대사·연기)을 순화한 계획 사본으로 프롬프트를 다시 만든다.
-        prompt_plan = _soften_plan(owner, pid, plan, take, _strong(soften))
+        prompt_plan = _soften_plan(owner, pid, plan, take, _strong(soften), _rewrite_on(soften))
         prompt_kwargs["soften"] = SOFTEN_STRONG if _strong(soften) else True  # 작업 163: 3단계면 더 센 순화
+        if _rewrite_on(soften):
+            lines_fix, lines_note = _rewrite_part_lines(owner, pid, prompt_plan, take)  # 작업 168 5단계
+            if lines_fix:
+                prompt_kwargs["lines_fix"] = lines_fix
     if no_text:
         prompt_kwargs["no_text"] = True  # 작업 156: 화면 글자 검사로 다시 만들 때만(아니면 지금과 같은 호출)
     audit: dict = {}
@@ -5428,6 +5472,7 @@ def _take_payload(owner: str, pid: str, plan: dict, take: dict, caps: dict, vari
         "audit": audit,
         "probe": probe,
     }
+    out.update(lines_note)
     if anchor is not None:
         out["frameNo"] = frame_no
     return out
@@ -5801,7 +5846,9 @@ def _submit_take_parts(owner: str, pid: str, gen_id: str, index: int, variant: s
             # 작업 155: 이음 프레임 — 앞 조각 결과의 마지막 프레임, 첫 조각의 Seedance 대체는 앞 테이크 결과의 마지막 프레임.
             frame, frame_key = None, ""
             before = records[-1] if records else None
-            if in_order and before and before.get("status") == "completed" and before.get("outputKey"):
+            if content_step >= CONTENT_STEP_DROP_REFS:
+                pass  # 작업 168 4단계: 앞 조각·앞 테이크 마지막 프레임을 넣지 않는다(이음 글은 continuity 로 남는다)
+            elif in_order and before and before.get("status") == "completed" and before.get("outputKey"):
                 frame = _video_last_frame(str(before["outputKey"]), float(before.get("seconds") or 0))
                 frame_key = str(before["outputKey"]) + "#last"
             elif in_order and not records and part_endpoint != endpoint:
@@ -5828,6 +5875,8 @@ def _submit_take_parts(owner: str, pid: str, gen_id: str, index: int, variant: s
             refs = trace.refs(built)
             framed = bool(built.get("frameNo"))
             prompt = str(built["prompt"])
+            lines_note = {k: built[k] for k in ("dialogueSoftened", "audioDropped") if k in built}  # 작업 168 5단계
+            images_n = len(built.get("imageUrls") or [])
             if real:
                 _assert_no_webtoon(prompt)
             clip = _cut_clip(video_mp4, {"startSec": part["start"], "endSec": part["end"]})
@@ -5859,6 +5908,11 @@ def _submit_take_parts(owner: str, pid: str, gen_id: str, index: int, variant: s
                 records[-1]["contentStep"] = content_step
                 if isinstance(old.get("contentFallback"), dict):
                     records[-1]["contentFallback"] = dict(old["contentFallback"])
+                records[-1].update(lines_note)
+                log.info("vnew.gen.content_step take=%s part=%s step=%d pid=%s name=%s images=%d%s", take_id, part["no"],
+                         content_step, pid, CONTENT_STEP_NAMES.get(content_step, ""), images_n,
+                         (f" softened={len(lines_note.get('dialogueSoftened') or [])}" if "dialogueSoftened" in lines_note
+                          else " audioDropped=1" if lines_note.get("audioDropped") else ""))
             if old and _qc_pending(old):
                 records[-1]["qc"] = dict(old["qc"])  # 작업 156: 첫 결과와 비교할 검사 기록
             log.info("vnew.gen.take_part_submit pid=%s take=%s part=%d/%d start=%.3f end=%.3f cuts=%d%s%s%s", pid, take_id,
@@ -6002,9 +6056,17 @@ CONTENT_FLAG_WORDS = ("content checker", "flagged", "content policy", "safety", 
                       "결과 영상에 민감한 내용")
 CONTENT_FLAG_FAIL_TEXT = ("fal 콘텐츠 검사에서 거절되었습니다(컷 {cuts}). 대사·동작 표현을 순화했지만 계속 거절되어 "
                           "이 테이크를 만들지 못했습니다.")
-CONTENT_STEP_NAMES = {1: "soften", 2: "fallback", 3: "strongSoften"}
+CONTENT_STEP_NAMES = {1: "soften", 2: "fallback", 3: "strongSoften", 4: "dropRefs", 5: "rewriteLines"}
 CONTENT_STEP_STRONG = 3
+# 작업 168: 실사만 3단계 뒤 2단계 더(제출 1번씩, 칸 attempt 로 센다 — 조각당 추가 제출 최대 2번, 되돌아가지 않는다).
+# 4단계 = 위험한 참고 이미지 빼기(앞 조각 마지막 프레임·장면 옷 편집 그림, 시트·장소 뷰는 남김), 5단계 = 대사 LLM 1번 다시 쓰기
+# (실패하면 그 조각 대사를 뺀다)·닿는 연기 중립 낱말. 모델·순화는 앞 단계 그대로. 그래도 거절이면 CONTENT_FLAG_FAIL_TEXT.
+CONTENT_STEP_DROP_REFS = 4
+CONTENT_STEP_REWRITE = 5
+CONTENT_STEP_MAX = CONTENT_STEP_REWRITE
 SOFTEN_STRONG = 2  # _take_payload(soften=SOFTEN_STRONG) = 더 센 순화(작업 163). True 는 지금 순화 그대로.
+SOFTEN_DROP_REFS = 3  # 작업 168: 4단계 = 더 센 순화 + 위험한 참고 이미지 빼기
+SOFTEN_REWRITE = 4  # 작업 168: 5단계 = 4단계 + 대사 다시 쓰기·닿는 연기 중립 낱말
 # 대사(한국어): 노골적·비속한 말 → 같은 뜻·말투의 순한 말. 앞에서부터 차례로 바꾼다(긴 것 먼저).
 SOFTEN_KO = (
     ("붙어 먹으면", "함께 자면"), ("붙어먹으면", "함께 자면"), ("붙어 먹고", "함께 자고"), ("붙어먹고", "함께 자고"),
@@ -6108,34 +6170,53 @@ def _content_kind(message) -> str:
 
 
 def _content_step(state) -> int:
-    """칸·조각의 콘텐츠 단계(0 = 처음, 1 = 순화·같은 모델, 2 = 순화·Seedance, 3 = 더 센 순화·앞 단계 모델)."""
+    """칸·조각의 콘텐츠 단계(0 = 처음, 1 = 순화·같은 모델, 2 = 순화·Seedance, 3 = 더 센 순화·앞 단계 모델,
+    작업 168 실사만: 4 = 위험한 참고 이미지 빼기, 5 = 대사 다시 쓰기)."""
     try:
-        return max(0, min(CONTENT_STEP_STRONG, int((state or {}).get("contentStep") or 0))) if isinstance(state, dict) else 0
+        return max(0, min(CONTENT_STEP_MAX, int((state or {}).get("contentStep") or 0))) if isinstance(state, dict) else 0
     except (TypeError, ValueError):
         return 0
 
 
-def _content_next(step: int, fallback: str) -> int:
-    """다음 콘텐츠 단계(작업 163). 0→1, 1→2(대체 모델이 있을 때) 또는 3(지금 모델이 이미 대체 모델), 2→3, 3→0(= 칸 실패)."""
+def _content_next(step: int, fallback: str, real: bool = False) -> int:
+    """다음 콘텐츠 단계(작업 163). 0→1, 1→2(대체 모델이 있을 때) 또는 3(지금 모델이 이미 대체 모델), 2→3, 3→0(= 칸 실패).
+    작업 168: 실사(real)는 3→4→5, 5→0. 단계는 늘 앞으로만 가서 조각당 추가 제출은 4·5단계 2번뿐이다."""
     if step == 0:
         return 1
     if step == 1:
         return 2 if fallback else CONTENT_STEP_STRONG
     if step == 2:
         return CONTENT_STEP_STRONG
+    if real and CONTENT_STEP_STRONG <= step < CONTENT_STEP_MAX:
+        return step + 1
     return 0
 
 
 def _soften_level(step: int):
-    """제출의 soften 인자: 0 → False(지금 그대로), 1·2 → True(153 순화), 3 → SOFTEN_STRONG(작업 163)."""
+    """제출의 soften 인자: 0 → False(지금 그대로), 1·2 → True(153 순화), 3 → SOFTEN_STRONG(작업 163),
+    4 → SOFTEN_DROP_REFS, 5 → SOFTEN_REWRITE(작업 168)."""
+    if step >= CONTENT_STEP_REWRITE:
+        return SOFTEN_REWRITE
+    if step >= CONTENT_STEP_DROP_REFS:
+        return SOFTEN_DROP_REFS
     if step >= CONTENT_STEP_STRONG:
         return SOFTEN_STRONG
     return step >= 1
 
 
 def _strong(soften) -> bool:
-    """soften 인자가 더 센 순화(SOFTEN_STRONG)인가. True(=1)는 아니다."""
-    return not isinstance(soften, bool) and soften == SOFTEN_STRONG
+    """soften 인자가 더 센 순화(SOFTEN_STRONG 이상 — 작업 168 4·5단계도 센 순화)인가. True(=1)는 아니다."""
+    return not isinstance(soften, bool) and isinstance(soften, int) and soften >= SOFTEN_STRONG
+
+
+def _drop_refs(soften) -> bool:
+    """작업 168: 4단계 이상 — 앞 조각 마지막 프레임·장면 옷 편집 그림을 넣지 않는다."""
+    return not isinstance(soften, bool) and isinstance(soften, int) and soften >= SOFTEN_DROP_REFS
+
+
+def _rewrite_on(soften) -> bool:
+    """작업 168: 5단계 — 대사 LLM 다시 쓰기·닿는 연기 중립 낱말."""
+    return not isinstance(soften, bool) and isinstance(soften, int) and soften >= SOFTEN_REWRITE
 
 
 def _content_fallback_model(original: str) -> str:
@@ -6273,11 +6354,12 @@ def _soften_rewrite(owner: str, pid: str, plan_id: str, texts: list[str], strong
     return out
 
 
-def _soften_plan(owner: str, pid: str, plan: dict, take: dict, strong: bool = False) -> dict:
+def _soften_plan(owner: str, pid: str, plan: dict, take: dict, strong: bool = False, rewrite: bool = False) -> dict:
     """테이크 컷 글(콘티 컷·촬영 지시서 컷·겹치는 대본 줄)을 순화한 계획 사본(작업 153). 원본 계획은 바꾸지 않는다.
 
     모든 글 조각을 지도(_soften_text)로 바꾸고, 그래도 노골적인 조각이 있으면 한꺼번에 LLM 1번(_soften_rewrite).
     strong(작업 163, 3단계): 센 지도까지 바꾸고, 애정 표현이 남은 조각(대사 포함)도 LLM 1번 대상이다.
+    rewrite(작업 168, 5단계): 지도 뒤에 닿는 연기 중립 낱말(_contact_neutral — 아래로 끄는 방향 빼기·"pressed flat" → 손 얹기).
     """
     import copy  # noqa: PLC0415
 
@@ -6314,6 +6396,8 @@ def _soften_plan(owner: str, pid: str, plan: dict, take: dict, strong: bool = Fa
             value = node[key]
             if isinstance(value, str):
                 node[key] = _soften_text(value, strong)
+                if rewrite:
+                    node[key] = _contact_neutral(node[key])
                 leaves.append((node, key))
             elif isinstance(value, (dict, list)):
                 walk(value)
@@ -6327,6 +6411,151 @@ def _soften_plan(owner: str, pid: str, plan: dict, take: dict, strong: bool = Fa
             if node[key] in fixed:
                 node[key] = fixed[node[key]]
     return out
+
+
+# ---------------------------------------------------------------- 작업 168: 5단계 — 닿는 연기 중립 낱말 · 대사 다시 쓰기
+# 닿는 연기(영어): 아래로 끄는 방향은 빼고(허리·벨트 쪽 목적지도), 가슴에 눌러 대는 말은 손을 얹는 말로. (정규식, 바꿀 말 — \1 가능).
+_DOWN_VERBS = (r"(?:pulled|pulls|pull|pulling|drawn|draws|draw|drawing|dragged|drags|drag|dragging|tugged|tugs|tug|tugging|"
+               r"guided|guides|guide|guiding|led|leads|leading|slides|slide|slid|sliding|moves|move|moved|moving|travels|"
+               r"travel|travelled|traveling|travelling)")
+_LOW_PART = r"(?:belt|belt line|waist|waistband|hips?|crotch|groin|lap|thighs?|stomach|abdomen|pelvis|trousers|pants|jeans)"
+_OWN = r"(?:the\s+|his\s+|her\s+|their\s+|[A-Z][\w-]*['\u2019]s\s+)?"
+CONTACT_NEUTRAL_EN = (
+    (r"\bfrom\s+" + _OWN + r"chest\s+(?:downwards?|down|lower)\b", "at chest level"),
+    (r"\b(?:slow\s+)?tilt(?:s|ing)?[\s-]?down(?:wards?)?\s+following\b", "static framing on"),
+    (r"\s*,?\s*(?:\b(?:and|then)\s+)?(?:\b(?:is|are|gets|being)\s+)?\b" + _DOWN_VERBS
+     + r"\s+(?:(?:it|them)\s+|" + _OWN + r"hands?\s+)?(?:downwards?|down|lower)\b"
+     + r"(?:\s+(?:toward|towards|to|over|past|along)\s+" + _OWN + r"(?:[\w-]+\s+)?" + _LOW_PART + r"\b)?", ""),
+    (r"\s+(?:toward|towards|down to|over)\s+" + _OWN + r"(?:[\w-]+\s+)?(?:belt|belt line|waistband|crotch|groin|pelvis|lap)\b", ""),
+    (r"\bpresses\s+(it|them|" + _OWN + r"hands?)\s+flat\s+against\b", r"holds \1 against"),
+    (r"\bpressing\s+(it|them|" + _OWN + r"hands?)\s+flat\s+against\b", r"holding \1 against"),
+    (r"\bis\s+pressed\s+flat\b", "rests"),
+    (r"\bpressed\s+flat\b", "resting"),
+)
+_CONTACT_NEUTRAL_RE = tuple((re.compile(pattern, re.IGNORECASE), repl) for pattern, repl in CONTACT_NEUTRAL_EN)
+
+
+def _contact_neutral(text: str) -> str:
+    """작업 168 5단계: 닿는 연기 글의 아래로 끄는 방향을 빼고 가슴에 눌러 대는 말을 손 얹기로(지도 뒤). 바뀔 말이 없으면 같은 글자."""
+    out = str(text or "")
+    if not out or not _LATIN_RE.search(out):
+        return out
+    before = out
+    for pattern, repl in _CONTACT_NEUTRAL_RE:
+        out = pattern.sub(repl, out)
+    if out == before:
+        return out
+    out = re.sub(r"\s{2,}", " ", out)
+    out = re.sub(r"\s+([,.;])", r"\1", out)
+    out = re.sub(r"([,;])(?=[,.;])", "", out)
+    out = re.sub(r"\.(?:\s*\.)+", ".", out)
+    return out.strip()
+
+
+_LINES_SYSTEM = (
+    "You check the spoken lines of one part of a drama so that a video model's content checker accepts them. "
+    "Rewrite every line that is sexual, an innuendo or explicit (Korean or English) into a neutral line with the same intent, "
+    "emotion, speaker and about the same length; for example \"물건 큰 놈이랑 함께 자면\" becomes \"나랑 한번 만나 보면\". "
+    "Never mention bodies, sleeping together or touching. Return every other line exactly as given. "
+    "Items with lang \"ko\" stay Korean only; keep every \" / \" separator and any \"name:\" speaker prefix. "
+    "Return every item id exactly once with its text."
+)
+
+
+def _read_line_rewrite(blocks: list[dict], *, model: str) -> tuple[dict, dict]:
+    """작업 168: llm._converse 로 emit_softened(대사 다시 쓰기)를 받는다. (payload, usage{..model}). 검사가 가짜로 바꾼다."""
+    return vpoc_llm._converse(  # noqa: SLF001 — 공개 래퍼가 없어 내부 함수를 쓴다
+        system_text=_LINES_SYSTEM, blocks=blocks, tool=_SOFTEN_TOOL, max_tokens=1200,
+        where="vnew.generate.rewrite_lines", model=model,
+    )
+
+
+def _part_line_texts(entries: list[dict]) -> list[str]:
+    """테이크(조각) 항목들의 대사 글(첫 줄·모든 줄·이어지는 말 utterance), 처음 나온 순서·한 번씩."""
+    texts: list[str] = []
+    for entry in entries:
+        values = [entry.get("dialogue")]
+        for line in entry.get("lines") or []:
+            if isinstance(line, dict):
+                values.extend([line.get("dialogue"), line.get("utterance")])
+        for value in values:
+            text = str(value or "").strip() if isinstance(value, str) else ""
+            if text and text not in texts:
+                texts.append(text)
+    return texts
+
+
+def _rewrite_part_lines(owner: str, pid: str, plan: dict, take: dict) -> tuple[dict | None, dict]:
+    """작업 168 5단계: 그 조각의 대사를 LLM 1번으로 다시 쓴다(노골적·성적·암시만 바뀐다). (lines_fix, 기록).
+
+    lines_fix = {"map": {순화한 원문: 새 글}}(빌더가 _soften_entries 뒤에 바꾼다) 또는 {"drop": True}(대사를 뺀다).
+    기록 = {"dialogueSoftened": [{orig, new}]}(바뀐 줄만) 또는 {"audioDropped": True}. 대사가 없으면 (None, {}) — 호출 0.
+    LLM 이 실패하거나 어느 줄이든 답이 없거나 맞지 않으면(언어·" / "·화자·길이, 아직 노골적) 실패로 보고 대사를 뺀다.
+    원장 charge_text 1번(토큰이 있을 때). 같은 조각을 다시 묻지 않게 캐시하지 않는다(5단계는 조각당 1번뿐).
+    """
+    import json  # noqa: PLC0415
+
+    entries = _take_timeline_entries(plan, take)
+    _soften_entries(entries, True)
+    texts = _part_line_texts(entries)
+    if not texts:
+        return None, {}
+    items = [{"id": f"t{i}", "lang": _soften_lang(t), "text": t} for i, t in enumerate(texts, start=1)]
+    model = str(vnew_settings.ANALYZE_FALLBACK_MODEL)
+    fixed: dict[str, str] = {}
+    failed = ""
+    try:
+        payload, usage = _read_line_rewrite([{"text": json.dumps({"items": items}, ensure_ascii=False)}], model=model)
+    except Exception as exc:  # noqa: BLE001 — 다시 쓰지 못하면 대사를 뺀다
+        payload, usage, failed = {}, {}, _msg(exc)
+    if not failed:
+        used = str((usage or {}).get("model") or model)
+        try:
+            input_tokens = int((usage or {}).get("inputTokens") or 0)
+            output_tokens = int((usage or {}).get("outputTokens") or 0)
+            if input_tokens or output_tokens:
+                vpoc_ledger.charge_text("vnew-lines-" + secrets.token_hex(6), model=used, input_tokens=input_tokens,
+                                        output_tokens=output_tokens, user=owner, project_id=pid,
+                                        plan_id=str(plan.get("planId") or ""))
+        except Exception as exc:  # noqa: BLE001
+            log.warning("vnew.gen.charge_lines_failed pid=%s err=%s", pid, str(exc)[:200])
+        got = {str(g.get("id") or ""): str(g.get("text") or "").strip()
+               for g in ((payload or {}).get("items") or []) if isinstance(g, dict)} if isinstance(payload, dict) else {}
+        for item in items:
+            new = _soften_text(got.get(item["id"], ""), True)
+            if not _soften_ok(item["text"], new, item["lang"]) or _explicit_text(new, True):
+                failed = f"bad answer {item['id']}"
+                break
+            fixed[item["text"]] = new
+    if failed:
+        log.warning("vnew.gen.rewrite_lines_failed pid=%s take=%s lines=%d err=%s", pid, take.get("id"), len(texts), failed)
+        return {"drop": True}, {"audioDropped": True}
+    changed = [{"orig": old, "new": new} for old, new in fixed.items() if new != old]
+    log.info("vnew.gen.rewrite_lines pid=%s take=%s lines=%d changed=%d", pid, take.get("id"), len(texts), len(changed))
+    return {"map": {old: new for old, new in fixed.items() if new != old}}, {"dialogueSoftened": changed}
+
+
+def _apply_lines_fix(entries: list[dict], fix: dict | None) -> None:
+    """작업 168: 타임라인 항목 대사에 5단계 결과를 넣는다(제자리). drop 이면 대사 줄을 모두 뺀다(연기·화면은 그대로)."""
+    if not isinstance(fix, dict):
+        return
+    if fix.get("drop"):
+        for entry in entries:
+            entry["dialogue"] = ""
+            entry["speaker"] = ""
+            entry["lines"] = []
+            entry.pop("thought", None)
+        return
+    mapping = fix.get("map") or {}
+    if not mapping:
+        return
+    for entry in entries:
+        if isinstance(entry.get("dialogue"), str) and entry["dialogue"].strip() in mapping:
+            entry["dialogue"] = mapping[entry["dialogue"].strip()]
+        if isinstance(entry.get("lines"), list):
+            entry["lines"] = [{**ln, **{k: mapping[ln[k].strip()] for k in ("dialogue", "utterance")
+                                        if isinstance(ln.get(k), str) and ln[k].strip() in mapping}}
+                              if isinstance(ln, dict) else ln for ln in entry["lines"]]
 
 
 def _cut_range_text(plan: dict, cut_ids) -> str:
@@ -6352,7 +6581,7 @@ def _escalate_content(owner: str, pid: str, gen_id: str, index: int, variant: st
         step = _content_step(state)
         original = _real_take_model(g) if variant == "real" else str(g.get("videoModel") or vnew_settings.VNEW_PREVIZ_EDIT_MODEL)
         fallback = _content_fallback_model(original)
-        nxt = _content_next(step, fallback)  # 작업 163: 2단계 뒤(또는 대체 모델이 없으면 1단계 뒤) 더 센 순화
+        nxt = _content_next(step, fallback, variant == "real")  # 작업 163: 2단계 뒤(또는 대체 모델이 없으면 1단계 뒤) 더 센 순화, 168: 실사 4·5단계
         box.update(step=step, next=nxt, cutIds=list(_seg_cut_ids(take)))
         if not nxt:
             return
@@ -6394,7 +6623,7 @@ def _escalate_content_parts(owner: str, pid: str, gen_id: str, index: int, varia
         moves = []
         for part in flagged:
             step = _content_step(part)
-            nxt = _content_next(step, fallback)  # 작업 163
+            nxt = _content_next(step, fallback, variant == "real")  # 작업 163, 168: 실사 4·5단계
             moves.append((part, step, nxt))
             if not nxt:
                 box.update(failed=list(part.get("cutIds") or []), no=part.get("no"))
@@ -6812,7 +7041,7 @@ def _do_submit_take(owner: str, pid: str, gen_id: str, index: int, variant: str,
             continuity = None
             if content_step >= 2 and _content_fallback_model(endpoint):
                 # 작업 155: Seedance 대체 = 같은 장소 1장(맨 끝)·의상 고정·원래 모델과 같은 신원 참고·앞 테이크 마지막 프레임(있을 때).
-                frame, frame_key = _prev_take_frame(plan, index, variant)
+                frame, frame_key = (None, "") if content_step >= CONTENT_STEP_DROP_REFS else _prev_take_frame(plan, index, variant)
                 continuity = {"take": take, "frame": frame, "frameKey": frame_key, "origFrame": False,
                               "origMax": int(caps.get("imageListMax") or vpoc_fal.DEFAULT_IMAGE_LIST_MAX)}
                 del frame
@@ -6866,6 +7095,12 @@ def _do_submit_take(owner: str, pid: str, gen_id: str, index: int, variant: str,
         refs = trace.stop(built)
         prompt = built["prompt"]
         image_urls = built["imageUrls"]
+        lines_note = {k: built[k] for k in ("dialogueSoftened", "audioDropped") if k in built}  # 작업 168 5단계
+        if content_step:
+            log.info("vnew.gen.content_step take=%s part=- step=%d pid=%s name=%s images=%d%s", take_id, content_step, pid,
+                     CONTENT_STEP_NAMES.get(content_step, ""), len(image_urls),
+                     (f" softened={len(lines_note.get('dialogueSoftened') or [])}" if "dialogueSoftened" in lines_note
+                      else " audioDropped=1" if lines_note.get("audioDropped") else ""))
         refs_kind = _person_refs_kind(built.get("cast")) if real else ""
         prompt_bytes = len(prompt.encode("utf-8"))
         prefix = _seg_output_prefix(owner, pid, gen_id, take_id + "-" + variant, attempt)
@@ -6935,6 +7170,9 @@ def _do_submit_take(owner: str, pid: str, gen_id: str, index: int, variant: str,
         s["promptEn"] = prompt
         s["promptBytes"] = prompt_bytes
         s.pop("parts", None)  # 작업 152: 조각 없이 낸 시도(옛 조각 기록이 조회를 가르지 않게)
+        s.pop("dialogueSoftened", None)
+        s.pop("audioDropped", None)
+        s.update(lines_note)  # 작업 168 5단계: 바꾼 대사·대사 뺌 기록
         if defer:
             # 작업 130: likeness 거절(생성 전 거절)은 원장 0 — 결과가 정해질 때 _settle_take_charge 가 1번 남긴다.
             s["pendingCharge"] = {"clientRequestToken": str(result.get("clientRequestToken") or ""),
@@ -10501,7 +10739,26 @@ def _background_en(plan: dict, location_en: str, *, real: bool = False) -> str:
     body = " ".join(body.split())
     if real:
         body = vnew_fx.strip_drawing_words(body)
-    return _clip_words(body, BACKGROUND_MAX).rstrip(" ,;:.")
+    return _clip_clause(body, BACKGROUND_MAX)
+
+
+# 작업 168: 잘린 장소 글 끝에 남으면 안 되는 낱말(전치사·접속사·관사).
+_DANGLING_TAIL = re.compile(r"(?:[\s,;:/]+(?:with|of|and|in|on|at|under|or|to|for|by|from|into|onto|over|near|behind|beside|"
+                            r"toward|towards|the|a|an))+$", re.IGNORECASE)
+
+
+def _clip_clause(text: str, limit: int) -> str:
+    """장소 글을 limit 자로(작업 168). 넘지 않거나 단어 경계 자른 자리가 원래 절 경계(; , . 또는 끝)면 지금과 같은 글자
+    (_clip_words 뒤 " ,;:." 떼기). 아니면 그 안의 마지막 문장·절 경계("; " ", " ". ")에서 자르고(경계가 너무 앞이면 단어 경계 그대로),
+    끝의 전치사·접속사(with/of/and/in/on/at/under …)를 뗀다."""
+    text = str(text or "").strip()
+    out = _clip_words(text, limit).rstrip(" ,;:.")
+    if len(text) <= limit or re.match(r"\s*(?:[;,.]|$)", text[len(out):]):
+        return out
+    cut = max(out.rfind("; "), out.rfind(", "), out.rfind(". "))
+    if cut >= limit * 0.4:
+        out = out[:cut]
+    return _DANGLING_TAIL.sub("", out).rstrip(" ,;:./")
 
 
 def _background_sentence(text: str) -> str:
