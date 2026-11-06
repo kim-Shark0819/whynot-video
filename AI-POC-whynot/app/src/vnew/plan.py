@@ -740,7 +740,7 @@ def outfit_notes(owner: str, plan: dict, location: str = "") -> dict[str, str]:
         except Exception:  # noqa: BLE001 — 캐릭터를 못 읽으면 장면 옷만 본다.
             base = ""
         try:
-            text = gen_mod._scene_costume(plan, name, location, fallback=base, limit=OUTFIT_NOTE_MAX, real=False)  # noqa: SLF001
+            text = gen_mod._scene_costume(plan, name, location, base=base, limit=OUTFIT_NOTE_MAX, real=False)  # noqa: SLF001
         except Exception as exc:  # noqa: BLE001
             log.warning("vnew.outfit_notes.failed name=%s err=%s", name[:40], str(exc)[:150])
             text = ""
