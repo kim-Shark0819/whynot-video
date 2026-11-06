@@ -17269,7 +17269,14 @@ def _no_ai_note(text: str) -> str:
     고지 글자 자체는 작업 140 검사가 원문(_AI_NOTE_140)과 비교한다."""
     text = str(text or "")
     head = _AI_NOTE_140 + "\n"
-    return text[len(head):] if text.startswith(head) else text
+    if not text.startswith(head):
+        return text
+    # 작업 169: 제출한 Kling 컷 프롬프트는 고지 바로 다음에 샷 고정 줄(FRAMING …, COSTUME: …)이 붙는다. 그 줄들도 뗀다 — 나머지는
+    # 169 전 글자 그대로라 옛 기대값(ak-a 머리 FIXED 시작 등)은 바꾸지 않는다. 고정 줄 자체는 check_vnew_part_likeness_169 가 본다.
+    rest = text[len(head):].split("\n")
+    while rest and rest[0].startswith(("FRAMING (storyboard, keep exactly;", "COSTUME: ")):
+        rest.pop(0)
+    return "\n".join(rest)
 
 
 def _no_160(text: str) -> str:
@@ -56446,6 +56453,298 @@ def check_vnew_content_ladder_168() -> None:
             print(f"       168: {line}")
 
 
+_PL169_KLING = "fal-ai/kling-video/v3/pro/image-to-video"
+_PL169_KLING_CAPS = {"promptField": "prompt", "startImageField": "start_image_url", "durations": [5, 10],
+                     "durationAsString": True, "durationValues": {"5": "5", "10": "10"}, "sendDuration": True,
+                     "aspectRatios": ["16:9"], "available": True}
+_PL169_LIKENESS = "The images or videos provided may contain likenesses of real people or other private information."
+
+
+def check_vnew_part_likeness_169() -> None:
+    """작업 169 — 조각 실사 테이크의 likeness 사다리는 조각마다 · Kling 컷 샷 고정 · 끝난 칸에 남은 조각 없음. 가짜 fal, 유료 0.
+
+    (pl-a) 4조각 테이크(Wan r2v 가짜, 상한 4초, 컷 8개 × 2초): 조각 2 가 2번 거절 → 0b 둘째 다시 내기에서 통과. 조각 1 다시 제출 0,
+           조각 3 · 4 Seedance 1번씩, 0b 요청은 seed 만 다르다(프롬프트 · 참고 이미지 같음), Kling 0, 로그 likeness_part step=0b ×2,
+           조각 기록 likenessStep 0 · likenessRetry 2, 프롬프트 = 거절 없는 실행과 같은 바이트, attempt = 실사 제출 수
+    (pl-b) 조각 2 모든 Seedance 단계 거절(0 · 0b · 0b · 1) → 컷 3 · 4 만 Kling(시작 그림 = 조각 1 · 컷 3 결과 마지막 프레임,
+           Seedream 0), Kling 프롬프트에 FRAMING(클로즈업 · 자기 손 잠금) · COSTUME(장면 옷) · 시간대, 조각 3 · 4 는 Seedance 로
+           Kling 마지막 프레임을 받아 낸다, 조각 기록 [completed, superseded(kling-cuts), kling ×2, completed ×2], 잇기 5조각
+    (pl-c) Kling 컷도 거절 → 칸 failed(likeness, 시도한 단계 문구), 그 뒤 제출 0, 조각당 추가 제출 ≤ 4
+    (pl-d) 통 테이크(나누지 않음)는 지금 사다리: fallback.step 2 · 컷 단위 Kling(시작 그림 Seedream), parts 없음, likeness_part 로그 0
+    (pl-e) _supersede_unused: pending · failed · 쓰지 않은 조각 → superseded, replacedBy, 쓴 조각은 그대로
+    """
+    import base64 as _b64  # noqa: PLC0415
+    import traceback as _tb  # noqa: PLC0415
+
+    sys.path.insert(0, str(ROOT / "app"))
+    bad: list[str] = []
+    report: list[str] = []
+    seen: set[str] = set()
+
+    def expect(group: str, got, want, what: str) -> None:
+        seen.add(group)
+        if got != want:
+            bad.append(f"({group}) {what}\n      결과 {got!r}\n      기대 {want!r}")
+
+    def decode(uri) -> bytes:
+        try:
+            return _b64.b64decode(str(uri).split(",", 1)[1])
+        except Exception:  # noqa: BLE001
+            return b""
+
+    try:
+        from src.vnew import generate as genmod  # noqa: PLC0415
+        from src.vnew import plan as planmod  # noqa: PLC0415
+        from src.vpoc.errors import VpocError  # noqa: PLC0415
+
+        # ================= (pl-e) 남은 조각 정리 =================
+        st = {"parts": [{"sig": [1], "status": "completed"}, {"sig": [2], "status": "failed", "error": "x"},
+                        {"sig": [3], "status": "pending"}, {"sig": [4], "status": "superseded", "replacedBy": "kling-cuts"},
+                        {"sig": [5], "status": "completed"}]}
+        genmod._supersede_unused(st, {genmod._json_key([1])})  # noqa: SLF001
+        expect("pl-e", [(p["status"], p.get("replacedBy"), "error" in p) for p in st["parts"]],
+               [("completed", None, False), ("superseded", None, False), ("superseded", None, False),
+                ("superseded", "kling-cuts", False), ("superseded", None, False)],
+               "쓴 조각만 completed, 나머지(failed · pending · 쓰지 않은 completed) superseded")
+        st2 = {"parts": [{"sig": [1], "status": "completed"}, {"sig": [2], "status": "pending"}]}
+        genmod._supersede_unused(st2, set(), genmod.KLING_CUTS_REPLACED)  # noqa: SLF001
+        expect("pl-e", [(p["status"], p.get("replacedBy")) for p in st2["parts"]],
+               [("superseded", "kling-cuts"), ("superseded", "kling-cuts")], "통 테이크 Kling 이 대신한 조각 = replacedBy kling-cuts")
+
+        owner = "tester"
+        clip_re = re.compile(rb"^CLIP:(\d+\.\d+)-(\d+\.\d+):")
+
+        def video_seconds(mp4: bytes) -> float:
+            match = clip_re.match(mp4 or b"")
+            return float(match.group(2)) - float(match.group(1)) if match else 0.0
+
+        with _guard_real_llm() as llm_calls, _LogCapture() as logs, _LrEnv(owner) as env, _pin_vnew(
+                VNEW_FX=False, VNEW_CASTING=True, VNEW_TAKE_REAL=True, VNEW_GEN_PARALLEL=1, POLL_INTERVAL_S=0,
+                VNEW_TAKE_AUDIO=True, VNEW_TAKE_RESOLUTION="480p", VNEW_TEXT_CHECK=False, VNEW_REAL_TAKE_MODEL="",
+                VNEW_VIBE_PROMPT=True, VNEW_TAKE_PROMPT_MAX_CHARS=8000, VNEW_TAKE_MAX_SECONDS=30, VNEW_TAKE_REF_SPLIT=True,
+                VNEW_PART_CONTINUITY=True, VNEW_CONTENT_FALLBACK_MODEL="", VNEW_TAKE_REAL_LIKENESS_LADDER=True,
+                VNEW_TAKE_REAL_KLING_MODEL=_PL169_KLING, VNEW_REAL_CUT_QA=False, VNEW_REAL_COSTUME_REF=False,
+                VNEW_CONTI_CAST=False, VNEW_REAL_STILL_CHECK=False):
+            for cid in ("ch1", "ch2"):
+                env.chars[cid]["variants"]["real"]["sheetKey"] = f"rs-{cid}"
+            env.blobs.update({"rs-ch1": b"RS1", "rs-ch2": b"RS2"})
+            prefix_id = genmod.vpoc_settings.FAL_ID_PREFIX
+            wan_id = prefix_id + _RV152_ENDPOINT
+            seed_find = genmod.vpoc_fal.find
+            env.set(genmod.vpoc_fal, "find", lambda m: {
+                "id": wan_id, "endpointId": _RV152_ENDPOINT, "category": "reference-to-video",
+                "caps": dict(_RV152_CAPS, seedField="seed")} if str(m) == wan_id else (
+                {"id": prefix_id + _PL169_KLING, "endpointId": _PL169_KLING, "caps": dict(_PL169_KLING_CAPS)}
+                if str(m) == prefix_id + _PL169_KLING else seed_find(m)))
+            env.set(genmod.vpoc_settings, "FAL_REF_VIDEO_MAX_S", 4)
+            env.set(genmod, "_cut_clip", lambda mp4, unit: {
+                "bytes": b"CLIP:%.3f-%.3f:" % (float(unit["startSec"]), float(unit["endSec"])) + bytes(mp4)[:20],
+                "origSeconds": round(float(unit["endSec"]) - float(unit["startSec"]), 3),
+                "sentSeconds": round(float(unit["endSec"]) - float(unit["startSec"]), 3), "padded": False})
+            env.set(genmod, "_mp4_seconds", video_seconds)
+            env.set(genmod, "_conform_concat", lambda pieces, **_kw: b"PARTS:%d" % len(pieces))
+            env.set(genmod, "_cut_first_frame", lambda mp4, start: b"FRAME@%.2f:" % float(start) + bytes(mp4))
+            stills: list[str] = []
+            env.set(genmod, "_seedream", lambda prompt, refs, *, size: stills.append(prompt) or b"STILL%d" % len(stills))
+            policy = {"since": 10 ** 9, "seedance": 0, "kling": False}
+            base_fal = env._fal  # noqa: SLF001
+
+            def start_of(req) -> float:
+                match = clip_re.match(decode((req["payload"].get("video_urls") or [""])[0]))
+                return float(match.group(1)) if match else -1.0
+
+            def is_kling(req) -> bool:
+                return req["url"].endswith("/" + _PL169_KLING)
+
+            def fal_request(method, url, payload=None, *, where=""):
+                rid = url.split("/requests/", 1)[-1].split("/", 1)[0]
+                req = next((r for r in env.requests if r["rid"] == rid), None)
+                if method == "GET" and not url.endswith("/status") and req is not None \
+                        and env.requests.index(req) >= policy["since"]:
+                    if is_kling(req) and policy["kling"]:
+                        raise VpocError("fal.poll", "HTTP422", _PL169_LIKENESS, 502)
+                    if start_of(req) == 4.0:
+                        k = [r for r in env.requests[policy["since"]:] if start_of(r) == 4.0].index(req)
+                        if k < policy["seedance"]:
+                            raise VpocError("fal.poll", "HTTP422", _PL169_LIKENESS, 502)
+                return base_fal(method, url, payload, where=where)
+
+            env.set(env.falmod, "_request", fal_request)
+            client = env.client()
+            a, b = "에이", "비"
+
+            def run(pid: str, seedance_rejects: int, kling_reject: bool = False, cuts: int = 8, seconds: int = 16) -> dict:
+                cut_ids = [f"c{n}" for n in range(1, cuts + 1)]
+                env.make_plan(pid, [{"id": "s1", "cutIds": cut_ids, "seconds": seconds}])
+
+                def mutator(data: dict) -> None:
+                    data["input"]["videoModel"] = wan_id
+                    data["script"]["setting"]["timeKo"] = "낮"
+                    for cut in data["conti"]["cuts"]:
+                        text = f"대사{cut['no']}번."
+                        cut["dialogueKo"] = f'{a}: "{text}"'
+                        brief = data["previz"]["shotBrief"]["cuts"][cut["id"]]
+                        brief["dialogue"] = [{"speaker": a, "lineKo": text, "deliveryEn": "calm"}]
+                        brief["actionEn"] = "Kim nods once."
+                    c3 = next((c for c in data["conti"]["cuts"] if c["id"] == "c3"), None)
+                    if c3 is not None:
+                        c3.update({"shotSize": "closeup", "cameraEn": f"Close-up on {a}'s face", "characters": [
+                            {"name": a, "presence": "on_screen", "positionEn": "center", "actionEn": "sits on the railing, eyes down",
+                             "actionKo": "난간에 앉아 눈을 내리깐다."},
+                            {"name": b, "presence": "hand_only", "positionEn": "off-frame, hand only",
+                             "actionEn": f"{b}'s right hand (off-frame) cups {a}'s cheek", "actionKo": "손으로 뺨을 감싼다.",
+                             "hands": {"right": "touch>other_cheek"}}]})
+
+                planmod.mutate_plan(owner, pid, mutator)
+                client.post(f"/api/vnew/p/{pid}/generate", json={"confirmUsd": genmod.estimate(env.plan(pid))["totalUsd"]})
+                g = env.drive(pid)
+                since, led, logs0, stills0 = len(env.requests), len(env.ledger), len(logs.records), len(stills)
+                policy.update(since=since, seedance=seedance_rejects, kling=kling_reject)
+                client.post(f"/api/vnew/p/{pid}/generate/real", json={"confirmUsd": genmod.real_estimate(g)["usd"]})
+                g = env.drive(pid)
+                policy["since"] = 10 ** 9
+                state = genmod._previz_cells(g)[0]["real"]  # noqa: SLF001
+                reqs = env.requests[since:]
+                return {"state": state, "parts": state.get("parts") or [], "reqs": reqs,
+                        "by_start": {s: [r for r in reqs if start_of(r) == s] for s in (0.0, 4.0, 8.0, 12.0)},
+                        "kling": [r for r in reqs if is_kling(r)], "ledger": env.ledger[led:], "stills": stills[stills0:],
+                        "logs": [rec.getMessage() for rec in logs.records[logs0:]],
+                        "merged": env.store.blobs.get(str(state.get("outputKey") or ""), b"")}
+
+            def prompt_of(req) -> str:
+                return str(req["payload"].get("prompt") or "")
+
+            def lk_logs(r: dict) -> list[str]:
+                return [m.split(" pid=")[0] for m in r["logs"] if m.startswith("vnew.gen.likeness_part ")]
+
+            # ---- 기준: 거절 없음 ----
+            base = run("prj_pl_base", 0)
+            expect("pl-a", [base["state"].get("status"), [p.get("status") for p in base["parts"]],
+                            [len(base["by_start"][s]) for s in (0.0, 4.0, 8.0, 12.0)], len(base["kling"])],
+                   ["completed", ["completed"] * 4, [1, 1, 1, 1], 0], "기준(거절 없음): 4조각 Seedance 1번씩")
+
+            # ---- (pl-a) 조각 2: 2번 거절 → 0b 둘째에서 통과 ----
+            ra = run("prj_pl_a", 2)
+            p2 = ra["by_start"][4.0]
+            part2 = (ra["parts"] + [{}, {}])[1]
+            expect("pl-a", [ra["state"].get("status"), [p.get("status") for p in ra["parts"]],
+                            [len(ra["by_start"][s]) for s in (0.0, 4.0, 8.0, 12.0)], len(ra["kling"]),
+                            [("seed" in r["payload"]) for r in p2], len({r["payload"].get("seed") for r in p2[1:]}),
+                            len({prompt_of(r) for r in p2}), len({repr(r["payload"].get("image_urls")) for r in p2}),
+                            part2.get("likenessStep"), part2.get("likenessRetry"), part2.get("likenessExtra"),
+                            lk_logs(ra), ra["state"].get("attempt"), len(ra["reqs"])],
+                   ["completed", ["completed"] * 4, [1, 3, 1, 1], 0, [False, True, True], 2, 1, 1, 0, 2, 2,
+                    ["vnew.gen.likeness_part take=take1 part=2 step=0b"] * 2, 6, 6],
+                   "조각 2 만 다시(seed 만 다름), 조각 1 다시 제출 0, Kling 0, attempt = 실사 제출 수")
+            expect("pl-a", [[prompt_of(r) for r in ra["by_start"][s]][:1] == [prompt_of(r) for r in base["by_start"][s]]
+                            for s in (0.0, 4.0, 8.0, 12.0)], [True] * 4,
+                   "거절이 없는 조각 · 0b 다시 내기 프롬프트 = 거절 없는 실행과 같은 바이트")
+
+            # ---- (pl-b) 조각 2 모든 Seedance 단계 거절 → 컷 3 · 4 만 Kling ----
+            rb = run("prj_pl_b", 4)
+            p2 = rb["by_start"][4.0]
+            kl = rb["kling"]
+            kprompts = [prompt_of(r) for r in kl]
+            recs = rb["parts"]
+            expect("pl-b", [rb["state"].get("status"), [(p.get("status"), p.get("kind") or "", p.get("replacedBy") or "")
+                                                        for p in recs],
+                            [len(rb["by_start"][s]) for s in (0.0, 4.0, 8.0, 12.0)], len(kl),
+                            [("seed" in r["payload"]) for r in p2],
+                            len(p2[3]["payload"].get("image_urls") or []) < len(p2[0]["payload"].get("image_urls") or []) if len(p2) > 3 else None,
+                            [p.get("cutId") for p in recs if p.get("kind") == "kling"], len(rb["stills"]),
+                            [p.get("startImage") for p in recs if p.get("kind") == "kling"],
+                            lk_logs(rb), (recs + [{}, {}])[1].get("likenessStep"), (recs + [{}, {}])[1].get("likenessExtra"),
+                            rb["state"].get("attempt"), rb["merged"]],
+                   ["completed", [("completed", "", ""), ("superseded", "", "kling-cuts"), ("completed", "kling", ""),
+                                  ("completed", "kling", ""), ("completed", "", ""), ("completed", "", "")],
+                    [1, 4, 1, 1], 2, [False, True, True, False], True, ["c3", "c4"], 0, ["prevFrame", "prevFrame"],
+                    [f"vnew.gen.likeness_part take=take1 part=2 step={s}" for s in ("0b", "0b", "1", "2")], 2, 4, 9,
+                    b"PARTS:5"],
+                   "조각 2: 0 · 0b · 0b · 1(정면만) 거절 → 컷 3 · 4 Kling, 조각 1 다시 0, 조각 3 · 4 Seedance, 잇기 5조각")
+            krecs = [p for p in recs if p.get("kind") == "kling"]
+            if len(krecs) == 2 and len(recs) == 6:
+                expect("pl-b", [krecs[0].get("startKey"), krecs[1].get("startKey")],
+                       [str(recs[0].get("outputKey")) + "#last", str(krecs[0].get("outputKey")) + "#last"],
+                       "Kling 시작 그림 = 조각 1 결과 · 컷 3 결과의 마지막 프레임")
+                p3 = rb["by_start"][8.0][0] if rb["by_start"][8.0] else {"payload": {}}
+                frames = [decode(u) for u in p3["payload"].get("image_urls") or []]
+                expect("pl-b", [any(f.startswith(b"FRAME@") for f in frames), "previous shot's last frame" in prompt_of(p3),
+                                any(("CLIP:" + str(krecs[1].get("outputKey"))).encode() in f for f in frames)],
+                       [True, True, True], "조각 3 = Seedance, 이음 프레임 = Kling 컷 4 결과의 마지막 프레임")
+            lock_line = kprompts[0].split("\n")[1] if kprompts and "\n" in kprompts[0] else ""
+            expect("pl-b", [lock_line.startswith("FRAMING (storyboard, keep exactly;"),
+                            f"{a}'s own hands stay lowered, out of frame, and never touch his own face" in lock_line,
+                            f"Close-up of {a}" in lock_line, f"{b}'s right hand enters from off-frame" in lock_line,
+                            all("COSTUME: " in p and "wears exactly" in p and "same garment in every shot" in p for p in kprompts),
+                            all(genmod._real_time_sentence(env.plan("prj_pl_b")) in p for p in kprompts),  # noqa: SLF001
+                            all(genmod.REAL_CUT_FROM_PREV in p and genmod.REAL_CUT_KEEP_FRAMING not in p for p in kprompts),
+                            all(p.startswith(genmod.REAL_REF_AI_NOTE + "\nFRAMING ") for p in kprompts),
+                            len([c for c in rb["ledger"] if c.get("model") == _PL169_KLING])],
+                   [True, True, True, True, True, True, True, True, 2],
+                   "Kling 프롬프트: 고지 다음 FRAMING(클로즈업 · 자기 손 · 손 주인) · COSTUME · 시간대 · 앞 샷 프레임 문장, 원장 Kling 2")
+            report.append(f"kling c3 lock: {lock_line[:420]}")
+            report.append("kling c3 costume: " + next((ln for ln in (kprompts or [""])[0].split("\n")
+                                                        if ln.startswith("COSTUME: ")), "")[:240])
+
+            # ---- (pl-c) Kling 컷도 거절 → 실패, 더 내지 않음 ----
+            rc = run("prj_pl_c", 4, kling_reject=True)
+            want = genmod.REAL_FALLBACK_FAIL.format(steps=" → ".join(genmod.REAL_PART_FALLBACK_TRIED))
+            expect("pl-c", [rc["state"].get("status"), rc["state"].get("failureKind"), rc["state"].get("error"),
+                            len(rc["by_start"][4.0]), len(rc["kling"]), len(rc["by_start"][8.0]),
+                            lk_logs(rc)[-1:], max(int(p.get("likenessExtra") or 0) for p in rc["parts"])],
+                   ["failed", "likeness", want, 4, 1, 0, ["vnew.gen.likeness_part take=take1 part=2 step=failed"], 4],
+                   "Kling 컷 거절 → 칸 실패(시도한 단계 문구), 컷 4 · 조각 3 제출 0, 조각당 추가 ≤ 4")
+
+            # ---- (pl-d) 통 테이크(나누지 않음) = 지금 사다리 ----
+            env.set(genmod.vpoc_settings, "FAL_REF_VIDEO_MAX_S", 10)
+            policy_all = {"on": False}
+            inner = env.falmod._request
+
+            def reject_all(method, url, payload=None, *, where=""):
+                rid = url.split("/requests/", 1)[-1].split("/", 1)[0]
+                req = next((r for r in env.requests if r["rid"] == rid), None)
+                if policy_all["on"] and method == "GET" and not url.endswith("/status") and req is not None \
+                        and not is_kling(req) and req["payload"].get("video_urls"):
+                    raise VpocError("fal.poll", "HTTP422", _PL169_LIKENESS, 502)
+                return inner(method, url, payload, where=where)
+
+            env.set(env.falmod, "_request", reject_all)
+            env.make_plan("prj_pl_d", [{"id": "s1", "cutIds": ["c1", "c2"], "seconds": 8}])
+            planmod.mutate_plan(owner, "prj_pl_d", lambda d: d["input"].update(videoModel=wan_id))
+            client.post("/api/vnew/p/prj_pl_d/generate", json={"confirmUsd": genmod.estimate(env.plan("prj_pl_d"))["totalUsd"]})
+            g = env.drive("prj_pl_d")
+            since, logs0, stills0 = len(env.requests), len(logs.records), len(stills)
+            policy_all["on"] = True
+            client.post("/api/vnew/p/prj_pl_d/generate/real", json={"confirmUsd": genmod.real_estimate(g)["usd"]})
+            g = env.drive("prj_pl_d")
+            policy_all["on"] = False
+            cell = genmod._previz_cells(g)[0]["real"]  # noqa: SLF001
+            msgs = [rec.getMessage() for rec in logs.records[logs0:]]
+            dk = [r for r in env.requests[since:] if is_kling(r)]
+            expect("pl-d", [cell.get("status"), (cell.get("fallback") or {}).get("step"), "parts" in cell,
+                            len([r for r in env.requests[since:] if r["payload"].get("video_urls")]), len(dk),
+                            len(stills) - stills0, any(m.startswith("vnew.gen.likeness_part ") for m in msgs),
+                            all(genmod.REAL_CUT_KEEP_FRAMING in prompt_of(r) and "\nFRAMING (storyboard" in prompt_of(r)
+                                for r in dk)],
+                   ["completed", 2, False, 2, 2, 2, False, True],
+                   "통 테이크: 0 → 1 → 컷 단위 Kling(시작 그림 Seedream 2장), parts 없음, 조각 로그 0, Kling 프롬프트 FRAMING")
+            expect("pl-d", llm_calls, [], "가짜가 아닌 LLM 호출 0")
+    except Exception:  # noqa: BLE001
+        bad.append("작업 169 검사 예외\n" + _tb.format_exc()[:3000])
+
+    missing = [g for g in ("pl-a", "pl-b", "pl-c", "pl-d", "pl-e") if g not in seen]
+    if missing:
+        bad.append(f"검사 묶음이 돌지 않았습니다: {missing}")
+    if bad:
+        fail("작업 169 조각 likeness 사다리 · Kling 샷 고정 검사 실패\n  " + "\n  ".join(bad))
+    else:
+        ok("작업 169 (pl-a)조각 2 만 0b 다시(seed 만) · 조각 1 다시 0 (pl-b)모든 Seedance 거절 → 컷 3 · 4 만 Kling(앞 프레임 시작 · "
+           "FRAMING · COSTUME) · 조각 3 · 4 Seedance (pl-c)Kling 거절 → 실패 · 더 내지 않음 (pl-d)통 테이크 사다리 그대로 "
+           "(pl-e)남은 조각 superseded")
+        for line in report:
+            print(f"       169: {line}")
+
+
 def main() -> int:
     print("== vpoc1 check ==")
     check_compileall()
@@ -56588,6 +56887,7 @@ def main() -> int:
     check_vnew_shot_lock_166()
     check_vnew_prompt_size_167()
     check_vnew_content_ladder_168()
+    check_vnew_part_likeness_169()
     print()
     if warnings:
         print(f"경고 {len(warnings)}건")
