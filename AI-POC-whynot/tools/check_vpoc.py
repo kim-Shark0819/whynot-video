@@ -55752,6 +55752,216 @@ def check_vnew_costume_text_164() -> None:
             print(f"       164: {line}")
 
 
+# 작업 166: 157 손 추출 테이크(_tc157_plan) 애니 프롬프트 sha(작업 166 전 값, 예산 4,000자). 해당 없는 컷만 있어 그대로여야 한다.
+_SL166_ANIME_SHA = "9a14425389849901493d02f9f69098afe067308c123bff76b7a8b026cba3144a"
+
+
+def _sl166_plan() -> tuple[dict, dict]:
+    """작업 166 test3 모양(gen g20261106073531277f): 157 테이크에서 cut-03 = 자기 손 안 씀 + 범건우 손만(test3 cut-03),
+    cut-05 = 인서트 + 두 사람 손만(test3 cut-10), cut-06 = 여의준 얼굴 클로즈업 + 홍조(test3 cut-12). 다른 컷은 157 그대로."""
+    a, b = _TC157_A, _TC157_B
+    plan, take = _tc157_plan()
+    cuts = {c["id"]: c for c in plan["conti"]["cuts"]}
+    cuts["cut-03"].update(shotSize="closeup", cameraEn=f"Slow push-in closeup on {b}'s tear-stained face", characters=[
+        {"name": b, "presence": "on_screen", "positionEn": "left side of the railing, upper body and face filling the frame",
+         "actionEn": "Sits with his head lowered, eyes red and wet with tears; he does not use his own hands \u2014 Beomgeonu's "
+                     "hand covers his eyes, then wipes his cheek.",
+         "actionKo": "고개를 숙인 채 붉어진 눈으로 눈물을 흘린다. 자기 손은 쓰지 않는다(눈을 가리고 뺨을 닦는 손은 범건우의 손).", "hands": {}},
+        {"name": a, "presence": "hand_only", "positionEn": "off-frame, hand only",
+         "actionEn": "Beomgeonu's right hand (off-frame) covers Yeouijun's eyes, then strokes down his cheek wiping the tears.",
+         "actionKo": "화면 밖에서 오른손으로 여의준의 눈을 가렸다가, 뺨을 쓸어내리며 눈물을 닦아 준다.", "hands": {"right": "touch>other_cheek"}}])
+    cuts["cut-05"].update(shotSize="insert", cameraEn="Quick insert shot on clasped hands, slight shake", characters=[
+        {"name": a, "presence": "hand_only", "positionEn": "off-frame, hand only",
+         "actionEn": f"{a}'s hand (off-frame) shoots in from the left and clamps around {b}'s hand and wrist.",
+         "actionKo": "범건우의 손이 여의준의 손목을 붙잡는다.", "hands": {"left": "grab>other_hand"}},
+        {"name": b, "presence": "hand_only", "positionEn": "off-frame, hand only",
+         "actionEn": f"{b}'s hand (off-frame), in a black sleeve, is seized and pulled.", "actionKo": "여의준 손이 붙잡힌다.",
+         "hands": {}}])
+    cuts["cut-06"].update(shotSize="closeup", cameraEn=f"Static closeup on {b}'s flushed, stunned face", characters=[
+        {"name": b, "presence": "on_screen", "positionEn": "lower left of frame, face turned up",
+         "actionEn": "Face bright red and sweating, eyes wide.", "actionKo": "새빨개진 얼굴로 눈을 크게 뜬다.", "hands": {}},
+        {"name": a, "presence": "on_screen", "positionEn": "right side, leaning in close",
+         "actionEn": f"Leans in close over {b} and grips his extended hand.", "actionKo": "가까이 몸을 기울여 손을 잡는다.",
+         "hands": {"right": "grab>other_hand"}}])
+    plan["previz"]["shotBrief"]["cuts"]["cut-06"]["actionEn"] = (
+        "Uijun holds his eyes wide, cheeks deeply flushed, mouth slightly open. Geonu leans closer over him.")
+    return plan, take
+
+
+def check_vnew_shot_lock_166() -> None:
+    """작업 166 — 테이크 SHOT 줄이 컷마다 주인공 · 샷 크기 · 손 주인을 지킨다(애니 · 실사). 가짜, 유료 0.
+
+    (sl-a) 인서트(콘티 cameraEn/shotSize "insert" 또는 보이는 사람 없이 손만): 크기 = VIBE_INSERT_SIZE, medium/front view 없음
+    (sl-b) 클로즈업 주인공: cameraEn "closeup on <A>'s … face" → 줄 머리 "Close-up of A (머리색) filling the frame; B only partly
+           visible at the frame edge"(실사 · 애니, 이름 = look 줄 로마자)
+    (sl-c) 자기 손: "<A>'s own hands stay lowered … the only hand on his face is <주인>'s (<장면 옷 소매>) entering from the frame
+           edge" — 실사는 SHOT 줄 맨 앞, 애니는 who 뒤
+    (sl-d) 실사 홍조 = "a faint natural flush on <A>'s cheeks only; no red eyelids, no eye makeup"(이름 붙은 사람만, 다른 홍조 구절 지움,
+           "does not blush" 그대로, 두 번 돌려도 같음), 애니 글은 그대로
+    (sl-e) 해당 없는 컷: 157 테이크 애니 sha = 작업 166 전 값, 고친 계획의 cut-01 · 02 · 04 줄(애니 · 실사) = 고치기 전 줄
+    (sl-f) 예산 4,000자 안(audit fits), 새 절은 줄이기 뒤에도 남는다
+    """
+    import hashlib as _hashlib  # noqa: PLC0415
+    import traceback as _tb  # noqa: PLC0415
+
+    sys.path.insert(0, str(ROOT / "app"))
+    bad: list[str] = []
+    report: list[str] = []
+    seen: set[str] = set()
+
+    def expect(group: str, got, want, what: str) -> None:
+        seen.add(group)
+        if got != want:
+            bad.append(f"({group}) {what}\n      결과 {got!r}\n      기대 {want!r}")
+
+    def shots(text: str) -> list[str]:
+        return [ln for ln in text.split("\n") if re.match(r"^Shot \d+ \(", ln)]
+
+    a, b = _TC157_A, _TC157_B
+    flat = [{"name": b, "colorName": "blue", "frontNo": 1, "appearance": "", "voice": "",
+             "costume": "Black long-sleeve track top with a single white stripe down each sleeve"},
+            {"name": a, "colorName": "orange", "frontNo": 2, "appearance": "", "voice": "",
+             "costume": "Dark navy long-sleeve button-up dress shirt, collar open, worn untucked"}]
+    casts = {"real": [dict(flat[0], frontNo=2, sheetNo=1, refNos=[1, 2], look="real",
+                           appearance="a Korean man in his 20s with tousled pale blonde hair and long sweeping bangs"),
+                      dict(flat[1], frontNo=4, sheetNo=3, refNos=[3, 4], look="real",
+                           appearance="narrow half-lidded eyes and short charcoal-black hair swept back")],
+             "anime": [dict(flat[0], frontNo=2, sheetNo=1, refNos=[1, 2], look="webtoon",
+                            appearance="Pale blonde tousled hair with long bangs, large grey eyes"),
+                       dict(flat[1], frontNo=4, sheetNo=3, refNos=[3, 4], look="webtoon",
+                            appearance="Short swept-back black hair, narrow half-lidded eyes")]}
+    try:
+        from src.vnew import generate as genmod  # noqa: PLC0415
+
+        ra, rb = genmod._romanize_name(a), genmod._romanize_name(b)  # noqa: SLF001
+        insert = genmod.VIBE_INSERT_SIZE
+        with _guard_real_llm() as llm_calls, _pin_vnew(VNEW_FX=True, VNEW_TAKE_PROMPT_MAX_CHARS=4000, VNEW_VIBE_PROMPT=True) as vset:
+            base_plan, base_take = _tc157_plan()
+            plan, take = _sl166_plan()
+
+            def build(p: dict, t: dict, variant: str, audit: dict | None = None) -> str:
+                return genmod._vibe_take_prompt(p, t, real=variant == "real", cast=casts[variant], location_no=5,  # noqa: SLF001
+                                                quiet=True, audit=audit)
+
+            base_anime = build(base_plan, base_take, "anime")
+            vset.VNEW_TAKE_PROMPT_MAX_CHARS = 8000  # 줄 비교는 짧은 형 없이
+            wide = {v: (shots(build(base_plan, base_take, v)), shots(build(plan, take, v))) for v in ("anime", "real")}
+            vset.VNEW_TAKE_PROMPT_MAX_CHARS = 4000
+            audits = {"anime": {}, "real": {}}
+            final = {v: build(plan, take, v, audits[v]) for v in ("anime", "real")}
+            lines = {v: shots(final[v]) for v in final}
+
+            # ================= (sl-a) 인서트 =================
+            for v in ("anime", "real"):
+                line = lines[v][4]
+                head = line.split(": ", 1)[0] if ": " in line else line
+                expect("sl-a", [line.startswith(f"Shot 5 (16-20s), {insert}: "), "medium" in head, "front view" in head],
+                       [True, False, False], f"{v} cut-05 인서트 크기(콘티 'Quick insert shot on clasped hands', 둘 다 손만)")
+            expect("sl-a", [genmod._vibe_is_insert({"cameraEn": "Static medium shot", "characters": [  # noqa: SLF001
+                                {"name": a, "presence": "hand_only"}, {"name": b, "presence": "voice_only"}]},
+                                [{"name": a, "presence": "hand_only"}]),
+                            genmod._vibe_is_insert({"cameraEn": "Static medium shot", "characters": [  # noqa: SLF001
+                                {"name": a, "presence": "hand_only"}, {"name": b, "presence": "on_screen"}]},
+                                [{"name": a, "presence": "hand_only"}]),
+                            genmod._vibe_is_insert({"cameraEn": "Medium two-shot", "characters": []}, [])],  # noqa: SLF001
+                   [True, False, False], "보이는 사람 없이 손만 → 인서트, 보이는 사람이 있으면 · 인물 없으면 아님")
+
+            # ================= (sl-b) 클로즈업 주인공 =================
+            lock_b = f"Close-up of {rb} (pale blonde hair) filling the frame; {ra} only partly visible at the frame edge"
+            for v in ("anime", "real"):
+                expect("sl-b", lines[v][5].startswith(f"Shot 6 (20-23s), medium close-up, front view: {lock_b}. "), True,
+                       f"{v} cut-06 줄 머리 = 여의준 클로즈업 잠금(범건우 가장자리)")
+            expect("sl-b", [genmod._identity_cue("short charcoal-black hair swept back"),  # noqa: SLF001
+                            genmod._identity_cue("narrow eyes"),  # noqa: SLF001
+                            genmod._vibe_closeup_subject({"cameraEn": "Slow push-in closeup on both faces", "shotSize": "closeup",  # noqa: SLF001
+                                                          "characters": [{"name": a, "presence": "on_screen"},
+                                                                         {"name": b, "presence": "on_screen"}]}, "CU", [], lambda n: n),
+                            genmod._vibe_closeup_subject({"cameraEn": "Static closeup", "shotSize": "closeup",  # noqa: SLF001
+                                                          "characters": [{"name": a, "presence": "on_screen"},
+                                                                         {"name": b, "presence": "hand_only"}]}, "MCU", [], lambda n: n),
+                            genmod._vibe_closeup_subject({"cameraEn": f"Close-up of {a} and {b}", "shotSize": "closeup",  # noqa: SLF001
+                                                          "characters": [{"name": a, "presence": "on_screen"},
+                                                                         {"name": b, "presence": "on_screen"}]}, "CU", [], lambda n: n)],
+                   [" (charcoal-black hair)", "", "", a, ""],
+                   "머리색 단서 · 두 얼굴 클로즈업은 잠금 없음 · 클로즈업에 보이는 1명이면 그 사람 · 카메라 글이 두 사람을 부르면 잠금 없음")
+
+            # ================= (sl-c) 자기 손 =================
+            own = f"{rb}'s own hands stay lowered, out of frame, and never touch his own face; the only hand on his face is {ra}'s ("
+            real3, anime3 = lines["real"][2], lines["anime"][2]
+            tail = real3[len("Shot 3 (8-12s), medium close-up, front view: "):]
+            sleeve = tail[len(own):].split(")", 1)[0] if tail.startswith(own) else ""
+            expect("sl-c", [real3.startswith("Shot 3 (8-12s), medium close-up, front view: " + own),
+                            sleeve.endswith(" sleeve") and "navy" in sleeve, ") entering from the frame edge. Close-up of " + rb in real3,
+                            anime3.startswith(f"Shot 3 (8-12s), medium close-up, front view: Close-up of {rb} (pale blonde hair) filling "
+                                              f"the frame; {ra}'s right hand enters from off-frame"),
+                            own in anime3, real3.count("own hands stay lowered"), anime3.count("own hands stay lowered")],
+                   [True, True, True, True, True, 1, 1],
+                   "cut-03 자기 손 잠금: 실사 맨 앞(주인 범건우 · 장면 옷 소매), 애니 who 뒤")
+            expect("sl-c", genmod._sleeve_cue("Dark navy/black long-sleeve button-up dress shirt, collar open"),  # noqa: SLF001
+                   "dark navy/black dress shirt sleeve", "소매 단서 = 첫 옷 구절(소매 길이 · 단추 낱말 뺌) + sleeve")
+
+            # ================= (sl-d) 실사 홍조 =================
+            blush = f"a faint natural flush on {rb}'s cheeks only; no red eyelids, no eye makeup"
+            real6, anime6 = lines["real"][5], lines["anime"][5]
+            expect("sl-d", [blush in real6, "deeply flushed" in real6, f"{ra} does not blush" in real6, real6.count("flush"),
+                            "no red eyelids" in final["anime"], f"Pink webtoon blush lines on {rb}'s cheeks only" in anime6,
+                            "cheeks deeply flushed" in anime6],
+                   [True, False, True, 1, False, True, True], "cut-06 실사 홍조 문구(여의준만), 애니 글 그대로")
+            people = {"Uijun": rb, "Geonu": ra, rb: rb, ra: ra}
+            once = genmod._real_blush_pieces(["Uijun looks up at Geonu with wide eyes, deeply flushed cheeks and one sweat bead"],  # noqa: SLF001
+                                             ra, people)
+            expect("sl-d", [once, genmod._real_blush_pieces(once, ra, people),  # noqa: SLF001
+                            genmod._real_blush_pieces(["Geonu cups Uijun's flushed cheek"], ra, people),  # noqa: SLF001
+                            genmod._real_blush_pieces(["He smiles, cheeks flushed", "Static closeup"], "", {}),  # noqa: SLF001
+                            genmod._real_blush_pieces([f"{rb} nods; {ra} does not blush"], rb, people)],  # noqa: SLF001
+                   [[f"Uijun looks up at Geonu with wide eyes and one sweat bead, {blush}"],
+                    [f"Uijun looks up at Geonu with wide eyes and one sweat bead, {blush}"],
+                    [f"Geonu cups Uijun's cheek, {blush}"],
+                    ["He smiles, a faint natural flush on the cheeks only; no red eyelids, no eye makeup", "Static closeup"],
+                    [f"{rb} nods; {ra} does not blush"]],
+                   "홍조 구절 → 그 사람(문장 주어 Uijun · 소유격 Uijun's, who 보다 먼저) · 두 번째도 같음 · 이름 없으면 이름 없는 형 · "
+                   "부정은 그대로")
+
+            # ================= (sl-e) 해당 없는 컷 =================
+            expect("sl-e", _hashlib.sha256(base_anime.encode("utf-8")).hexdigest(), _SL166_ANIME_SHA,
+                   "157 테이크 애니 프롬프트 sha = 작업 166 전 값(해당 컷 없음)")
+            for v in ("anime", "real"):
+                before, after = wide[v]
+                expect("sl-e", [after[k] == before[k] for k in (0, 1, 3)], [True, True, True],
+                       f"{v} 해당 없는 cut-01 · 02 · 04 줄 = 고치기 전 줄")
+
+            # ================= (sl-f) 예산(제출 조각 c01–c02 · c03–c06) =================
+            parts = [{"cutIds": ["cut-01", "cut-02"], "seconds": 8.0},
+                     {"cutIds": ["cut-03", "cut-04", "cut-05", "cut-06"], "seconds": 15.0}]
+            for v in ("anime", "real"):
+                for part in parts:
+                    audit: dict = {}
+                    text = build(plan, genmod._part_take(plan, take, part), v, audit)  # noqa: SLF001
+                    expect("sl-f", [audit.get("fits"), len(text) <= 4000], [True, True],
+                           f"{v} 조각 {part['cutIds'][0]}–{part['cutIds'][-1]} 4,000자 안")
+                    if part["cutIds"][0] == "cut-03":
+                        expect("sl-f", [own in text, lock_b in text, f"), {insert}: " in text, blush in text or v == "anime"],
+                               [True, True, True, True], f"{v} 조각 c03–c06 새 절 그대로")
+                        report.append(f"{v} part c03-c06 chars={len(text)} compact={audit.get('compact')}")
+            expect("sl-f", llm_calls, [], "LLM 호출 0")
+            report.append(f"real cut-03: {lines['real'][2][:260]}")
+            report.append(f"real cut-05: {lines['real'][4][:160]}")
+            report.append(f"real cut-06: {lines['real'][5][:260]}")
+    except Exception as exc:  # noqa: BLE001
+        bad.append("예외: " + repr(exc) + "\n" + _tb.format_exc()[:2500])
+
+    missing = [g for g in ("sl-a", "sl-b", "sl-c", "sl-d", "sl-e", "sl-f") if g not in seen]
+    if missing:
+        bad.append(f"검사 묶음이 돌지 않았습니다: {missing}")
+    if bad:
+        fail("작업 166 SHOT 줄 잠금 검사 실패\n  " + "\n  ".join(bad))
+    else:
+        ok("작업 166 (sl-a)인서트 크기 (sl-b)클로즈업 주인공 (sl-c)자기 손 잠금(실사 맨 앞) (sl-d)실사 홍조 문구 "
+           "(sl-e)해당 없는 컷 그대로(sha) (sl-f)예산 안 · 새 절 남음")
+        for line in report:
+            print(f"       166: {line}")
+
+
 def main() -> int:
     print("== vpoc1 check ==")
     check_compileall()
@@ -55891,6 +56101,7 @@ def main() -> int:
         check_vnew_hand_owner_162()
     check_vnew_conti_cast_162fix1()
     check_vnew_costume_text_164()
+    check_vnew_shot_lock_166()
     print()
     if warnings:
         print(f"경고 {len(warnings)}건")
