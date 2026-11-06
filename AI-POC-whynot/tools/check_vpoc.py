@@ -47891,7 +47891,8 @@ def check_vnew_real_cut_anime_132() -> None:
                 outside = p.replace(genmod.REAL_CUT_NEGATIVE, "")
                 if drawing.search(outside) or not _no_ai_note(p).startswith(fixed + "\n") or not p.endswith(negative) \
                         or genmod.REAL_TAKE_STYLE not in p or "Camera: static camera." not in p \
-                        or '에이: "자네 뭐 하나?"' not in p or "first frame" not in p or "ACTION: Kim speaks." not in p:
+                        or f'{genmod._romanize_name("에이")}: "자네 뭐 하나?"' not in p \
+                        or "first frame" not in p or "ACTION: Kim speaks." not in p:  # 작업 171: 샷 고정 줄이 있으면 화자도 로마자
                     bad.append(f"(ak-a) Kling 실사 컷 프롬프트가 다릅니다: {p!r}")
             if (g.get("finalReal") or {}).get("status") != "done":
                 bad.append(f"(ak-a) 실사 결과가 끝나지 않았습니다: {g.get('finalReal')}")
@@ -56584,7 +56585,8 @@ def check_vnew_part_likeness_169() -> None:
             client = env.client()
             a, b = "에이", "비"
 
-            def run(pid: str, seedance_rejects: int, kling_reject: bool = False, cuts: int = 8, seconds: int = 16) -> dict:
+            def run(pid: str, seedance_rejects: int, kling_reject: bool = False, cuts: int = 8, seconds: int = 16,
+                    c4: str = "") -> dict:
                 cut_ids = [f"c{n}" for n in range(1, cuts + 1)]
                 env.make_plan(pid, [{"id": "s1", "cutIds": cut_ids, "seconds": seconds}])
 
@@ -56605,7 +56607,17 @@ def check_vnew_part_likeness_169() -> None:
                             {"name": b, "presence": "hand_only", "positionEn": "off-frame, hand only",
                              "actionEn": f"{b}'s right hand (off-frame) cups {a}'s cheek", "actionKo": "손으로 뺨을 감싼다.",
                              "hands": {"right": "touch>other_cheek"}}]})
-
+                    c4_cut = next((c for c in data["conti"]["cuts"] if c["id"] == "c4"), None)
+                    if c4_cut is not None and c4 == "same" and c3 is not None:
+                        # 작업 171: c4 = c3 과 같은 샷(클로즈업 · 같은 잠금 주인공) → 앞 컷 마지막 프레임에서 시작
+                        c4_cut.update({k: json.loads(json.dumps(c3[k])) for k in ("shotSize", "cameraEn", "characters")})
+                    elif c4_cut is not None and c4 == "insert":
+                        # 작업 171: c4 = 인서트(두 사람 손만) → 시작 그림 = 애니 프레임, 조각 3 이음 프레임은 c3 결과
+                        c4_cut.update({"shotSize": "insert", "cameraEn": "Quick insert shot on clasped hands", "characters": [
+                            {"name": a, "presence": "hand_only", "positionEn": "off-frame, hand only",
+                             "actionEn": f"{a}'s hand (off-frame) clamps around {b}'s wrist", "hands": {"left": "grab>other_hand"}},
+                            {"name": b, "presence": "hand_only", "positionEn": "off-frame, hand only",
+                             "actionEn": f"{b}'s hand (off-frame) is seized", "hands": {}}]})
                 planmod.mutate_plan(owner, pid, mutator)
                 client.post(f"/api/vnew/p/{pid}/generate", json={"confirmUsd": genmod.estimate(env.plan(pid))["totalUsd"]})
                 g = env.drive(pid)
@@ -56664,39 +56676,87 @@ def check_vnew_part_likeness_169() -> None:
                             len(p2[3]["payload"].get("image_urls") or []) < len(p2[0]["payload"].get("image_urls") or []) if len(p2) > 3 else None,
                             [p.get("cutId") for p in recs if p.get("kind") == "kling"], len(rb["stills"]),
                             [p.get("startImage") for p in recs if p.get("kind") == "kling"],
+                            [p.get("startReason") for p in recs if p.get("kind") == "kling"],
                             lk_logs(rb), (recs + [{}, {}])[1].get("likenessStep"), (recs + [{}, {}])[1].get("likenessExtra"),
                             rb["state"].get("attempt"), rb["merged"]],
                    ["completed", [("completed", "", ""), ("superseded", "", "kling-cuts"), ("completed", "kling", ""),
                                   ("completed", "kling", ""), ("completed", "", ""), ("completed", "", "")],
-                    [1, 4, 1, 1], 2, [False, True, True, False], True, ["c3", "c4"], 0, ["prevFrame", "prevFrame"],
+                    # 작업 171: c2(MCU · 중간) → c3(클로즈업) → c4(MCU) 는 샷이 바뀐다 → 시작 그림 = 애니 프레임(Seedream 2장)
+                    [1, 4, 1, 1], 2, [False, True, True, False], True, ["c3", "c4"], 2, ["still", "still"],
+                    ["shotChange", "shotChange"],
                     [f"vnew.gen.likeness_part take=take1 part=2 step={s}" for s in ("0b", "0b", "1", "2")], 2, 4, 9,
                     b"PARTS:5"],
-                   "조각 2: 0 · 0b · 0b · 1(정면만) 거절 → 컷 3 · 4 Kling, 조각 1 다시 0, 조각 3 · 4 Seedance, 잇기 5조각")
+                   "조각 2: 0 · 0b · 0b · 1(정면만) 거절 → 컷 3 · 4 Kling(샷이 바뀌어 시작 그림), 조각 1 다시 0, 조각 3 · 4 Seedance, 잇기 5조각")
             krecs = [p for p in recs if p.get("kind") == "kling"]
             if len(krecs) == 2 and len(recs) == 6:
-                expect("pl-b", [krecs[0].get("startKey"), krecs[1].get("startKey")],
-                       [str(recs[0].get("outputKey")) + "#last", str(krecs[0].get("outputKey")) + "#last"],
-                       "Kling 시작 그림 = 조각 1 결과 · 컷 3 결과의 마지막 프레임")
+                # 작업 171: 샷이 바뀌므로 앞 프레임 키 없음(시작 그림은 애니 첫 프레임에서 만든 Seedream)
+                expect("pl-b", [krecs[0].get("startKey"), krecs[1].get("startKey"),
+                                [m.split(" frame=", 1)[-1].split(" ", 1)[0] for m in rb["logs"]
+                                 if m.startswith("vnew.gen.real_cut_submit ")]],
+                       [None, None, ["anime", "anime"]], "Kling 시작 그림 = 139 시작 그림(애니 첫 프레임, 앞 프레임 키 없음)")
                 p3 = rb["by_start"][8.0][0] if rb["by_start"][8.0] else {"payload": {}}
                 frames = [decode(u) for u in p3["payload"].get("image_urls") or []]
                 expect("pl-b", [any(f.startswith(b"FRAME@") for f in frames), "previous shot's last frame" in prompt_of(p3),
                                 any(("CLIP:" + str(krecs[1].get("outputKey"))).encode() in f for f in frames)],
                        [True, True, True], "조각 3 = Seedance, 이음 프레임 = Kling 컷 4 결과의 마지막 프레임")
             lock_line = kprompts[0].split("\n")[1] if kprompts and "\n" in kprompts[0] else ""
+            rom_a, rom_b = genmod._romanize_name(a), genmod._romanize_name(b)  # noqa: SLF001 — 작업 171: Kling 글도 로마자 이름
             expect("pl-b", [lock_line.startswith("FRAMING (storyboard, keep exactly;"),
-                            f"{a}'s own hands stay lowered, out of frame, and never touch his own face" in lock_line,
-                            f"Close-up of {a}" in lock_line, f"{b}'s right hand enters from off-frame" in lock_line,
+                            bool(re.search(re.escape(rom_a) + r"(?: \([^)]*\))?'s own hands stay lowered, out of frame, and never "
+                                           r"touch his own face", lock_line)),
+                            f"Close-up of {rom_a}" in lock_line,
+                            bool(re.search(re.escape(rom_b) + r"(?: \([^)]*\))?'s right hand enters from off-frame", lock_line)),
                             all("COSTUME: " in p and "wears exactly" in p and "same garment in every shot" in p for p in kprompts),
                             all(genmod._real_time_sentence(env.plan("prj_pl_b")) in p for p in kprompts),  # noqa: SLF001
-                            all(genmod.REAL_CUT_FROM_PREV in p and genmod.REAL_CUT_KEEP_FRAMING not in p for p in kprompts),
+                            # 작업 171: 샷이 바뀌어 시작 그림 = 139 → 구도 유지 문장(앞 샷 프레임 문장 아님)
+                            all(genmod.REAL_CUT_KEEP_FRAMING in p and genmod.REAL_CUT_FROM_PREV not in p for p in kprompts),
                             all(p.startswith(genmod.REAL_REF_AI_NOTE + "\nFRAMING ") for p in kprompts),
+                            [bool(re.search(r"[\uac00-\ud7a3]", re.sub(r'"[^"]*"', "", p))) for p in kprompts],
                             len([c for c in rb["ledger"] if c.get("model") == _PL169_KLING])],
-                   [True, True, True, True, True, True, True, True, 2],
-                   "Kling 프롬프트: 고지 다음 FRAMING(클로즈업 · 자기 손 · 손 주인) · COSTUME · 시간대 · 앞 샷 프레임 문장, 원장 Kling 2")
+                   [True, True, True, True, True, True, True, True, [False, False], 2],
+                   "Kling 프롬프트: 고지 다음 FRAMING(클로즈업 · 자기 손 · 손 주인, 로마자) · COSTUME · 시간대 · 구도 유지 문장, "
+                   "따옴표 밖 한글 없음, 원장 Kling 2")
             report.append(f"kling c3 lock: {lock_line[:420]}")
             report.append("kling c3 costume: " + next((ln for ln in (kprompts or [""])[0].split("\n")
                                                         if ln.startswith("COSTUME: ")), "")[:240])
 
+            # ---- (pl-f) 작업 171: c4 = c3 과 같은 샷(클로즈업 · 같은 잠금) → c4 는 c3 결과 마지막 프레임에서 시작(지금과 같음) ----
+            rf = run("prj_pl_f", 4, c4="same")
+            kf = [p for p in rf["parts"] if p.get("kind") == "kling"]
+            kfp = [prompt_of(r) for r in rf["kling"]]
+            expect("pl-f", [rf["state"].get("status"), [p.get("cutId") for p in kf], [p.get("startImage") for p in kf],
+                            [p.get("startReason") for p in kf], len(rf["stills"]),
+                            [p.get("startKey") for p in kf][1:] == [str(kf[0].get("outputKey")) + "#last"] if len(kf) == 2 else None,
+                            [genmod.REAL_CUT_FROM_PREV in p for p in kfp]],
+                   ["completed", ["c3", "c4"], ["still", "prevFrame"], ["shotChange", "continue"], 1, True, [False, True]],
+                   "같은 클로즈업 · 같은 주인공 → prevFrame(c3 결과 마지막 프레임), 시작 그림 1장(c3 만)")
+
+            # ---- (pl-g) 작업 171: c4 = 인서트 → 시작 그림, 조각 3 이음 프레임 = 인서트가 아닌 c3 결과 ----
+            rg = run("prj_pl_g", 4, c4="insert")
+            kg = [p for p in rg["parts"] if p.get("kind") == "kling"]
+            p3g = rg["by_start"][8.0][0] if rg["by_start"][8.0] else {"payload": {}}
+            frames_g = [decode(u) for u in p3g["payload"].get("image_urls") or []]
+            key3 = str(kg[0].get("outputKey")) if kg else "?"
+            key4 = str(kg[1].get("outputKey")) if len(kg) > 1 else "?"
+            expect("pl-g", [rg["state"].get("status"), [p.get("startImage") for p in kg], [p.get("startReason") for p in kg],
+                            len(rg["stills"]), any(("CLIP:" + key3).encode() in f for f in frames_g),
+                            any(("CLIP:" + key4).encode() in f for f in frames_g),
+                            "previous shot's last frame" in prompt_of(p3g)],
+                   ["completed", ["still", "still"], ["shotChange", "insert"], 2, True, False, True],
+                   "c4 인서트 → 시작 그림(애니 프레임), 조각 3 이음 프레임 = c3 결과 마지막 프레임(인서트 c4 아님)")
+            kg4 = prompt_of(rg["kling"][1]) if len(rg["kling"]) > 1 else ""
+            expect("pl-g", [kg4.split("\n")[1].startswith("FRAMING (storyboard, keep exactly; this decides the shot size and who is "
+                                                         "in frame) - " + genmod.VIBE_INSERT_SIZE + ": ") if "\n" in kg4 else None,
+                            bool(re.search(r"[\uac00-\ud7a3]", re.sub(r'"[^"]*"', "", kg4)))],
+                   [True, False], "c4 인서트 FRAMING · 따옴표 밖 한글 없음")
+            report.append("pl-g c4 lock: " + (kg4.split("\n")[1][:240] if "\n" in kg4 else ""))
+            # 작업 171 요구 4: 앞이 인서트가 아닌 Seedance 조각 · 같은 c3 Kling 프롬프트는 바이트 그대로(pl-b 와 같은 sha)
+            import hashlib as _hashlib  # noqa: PLC0415
+            sha = lambda text: _hashlib.sha256(text.encode("utf-8")).hexdigest()  # noqa: E731
+            expect("pl-g", [[sha(prompt_of(r)) for r in rg["by_start"][s][:1]] == [sha(prompt_of(r)) for r in rb["by_start"][s][:1]]
+                            for s in (8.0, 12.0)] + [sha(prompt_of(rg["kling"][0])) == sha(kprompts[0]) if rg["kling"] and kprompts
+                                                     else None],
+                   [True, True, True], "조각 3 · 4 Seedance 프롬프트 · Kling c3 프롬프트 sha = pl-b")
             # ---- (pl-c) Kling 컷도 거절 → 실패, 더 내지 않음 ----
             rc = run("prj_pl_c", 4, kling_reject=True)
             want = genmod.REAL_FALLBACK_FAIL.format(steps=" → ".join(genmod.REAL_PART_FALLBACK_TRIED))
@@ -56743,15 +56803,15 @@ def check_vnew_part_likeness_169() -> None:
     except Exception:  # noqa: BLE001
         bad.append("작업 169 검사 예외\n" + _tb.format_exc()[:3000])
 
-    missing = [g for g in ("pl-a", "pl-b", "pl-c", "pl-d", "pl-e") if g not in seen]
+    missing = [g for g in ("pl-a", "pl-b", "pl-c", "pl-d", "pl-e", "pl-f", "pl-g") if g not in seen]
     if missing:
         bad.append(f"검사 묶음이 돌지 않았습니다: {missing}")
     if bad:
         fail("작업 169 조각 likeness 사다리 · Kling 샷 고정 검사 실패\n  " + "\n  ".join(bad))
     else:
-        ok("작업 169 (pl-a)조각 2 만 0b 다시(seed 만) · 조각 1 다시 0 (pl-b)모든 Seedance 거절 → 컷 3 · 4 만 Kling(앞 프레임 시작 · "
+        ok("작업 169 (pl-a)조각 2 만 0b 다시(seed 만) · 조각 1 다시 0 (pl-b)모든 Seedance 거절 → 컷 3 · 4 만 Kling(샷이 바뀌어 시작 그림 · "
            "FRAMING · COSTUME) · 조각 3 · 4 Seedance (pl-c)Kling 거절 → 실패 · 더 내지 않음 (pl-d)통 테이크 사다리 그대로 "
-           "(pl-e)남은 조각 superseded")
+           "(pl-e)남은 조각 superseded (pl-f)171 같은 샷 → 앞 프레임 (pl-g)171 인서트 → 시작 그림 · 이음 프레임은 인서트 앞 결과")
         for line in report:
             print(f"       169: {line}")
 
@@ -56792,7 +56852,7 @@ def check_vnew_shot_size_170() -> None:
            hair)", cut-04 = "Profile close-up of Beomgeonu"
     (ss-c) 이름 없는 첫 연기 문장 금지: 잠금 주인공(없으면 콘티 첫 on_screen) "Name: " 앞머리, They/Their → "A and B: "
     (ss-d) 인서트: 첫 닿는 동사 절이 크기 절 바로 뒤(120자 안), 그 절의 나머지는 손 절에 남음
-    (ss-e) Kling FRAMING(_kling_shot_lock, 콘티 이름): 같은 크기 · 잠금 · 인서트 앞 절(한글 이름이어도 손 절 연기가 남음)
+    (ss-e) Kling FRAMING(_kling_shot_lock, 작업 171 부터 로마자 이름): 같은 크기 · 잠금 · 인서트 앞 절
     (ss-f) 해당 없는 컷 그대로: 157 테이크에서 170 을 끈 줄과 켠 줄 — cut-04~06 같음(sha), cut-01~03 은 "Name: " 앞머리만 다름
     """
     import hashlib as _hashlib  # noqa: PLC0415
@@ -56914,13 +56974,14 @@ def check_vnew_shot_size_170() -> None:
             frames = {cid: genmod._kling_shot_lock("o", plan, ctx, cid, 4.0).split("\n")[0]  # noqa: SLF001
                       for cid in ("cut-02", "cut-04", "cut-05", "cut-06")}
             head = "FRAMING (storyboard, keep exactly; this decides the shot size and who is in frame) - "
-            expect("ss-e", [frames["cut-02"].startswith(head + f"close-up, front view: Close-up of {b} filling the frame; "
-                                                        f"{a} only partly visible at the frame edge"),
-                            frames["cut-04"].startswith(head + f"profile close-up: Profile close-up of {a} filling the frame; "
-                                                        f"{b} only partly visible"),
+            # 작업 171: Kling FRAMING 도 Seedance SHOT 줄과 같은 로마자 이름(이 ctx 는 외형이 없어 머리색 단서 없음)
+            expect("ss-e", [frames["cut-02"].startswith(head + f"close-up, front view: Close-up of {rb} filling the frame; "
+                                                        f"{ra} only partly visible at the frame edge"),
+                            frames["cut-04"].startswith(head + f"profile close-up: Profile close-up of {ra} filling the frame; "
+                                                        f"{rb} only partly visible"),
                             frames["cut-05"].startswith(head + "tight two-shot close-up of both faces, front view"),
-                            frames["cut-06"].startswith(head + f"{insert}: {a}'s hand clamps around {b}'s hand and wrist")],
-                   [True, True, True, True], "Kling FRAMING 크기 · 잠금(콘티 이름) · 인서트 앞 절")
+                            frames["cut-06"].startswith(head + f"{insert}: {ra}'s hand clamps around {rb}'s hand and wrist")],
+                   [True, True, True, True], "Kling FRAMING 크기 · 잠금(로마자 이름) · 인서트 앞 절")
 
             # ================= (ss-f) 해당 없는 컷 그대로 =================
             base_plan, base_take = _tc157_plan()
@@ -56957,6 +57018,134 @@ def check_vnew_shot_size_170() -> None:
            "(ss-e)Kling FRAMING 같음 (ss-f)해당 없는 컷 그대로(sha)")
         for line in report:
             print(f"       170: {line}")
+
+
+_SC171_SNAPSHOT = Path("C:/dev/ai/.claude-helpers/t3plan170.json")  # prod test3 gen g202611061613177bf9(없으면 sc-b 건너뜀)
+
+
+def check_vnew_shot_start_171() -> None:
+    """작업 171 — 조각 Kling 컷은 샷이 바뀌면 앞 샷 마지막 프레임에서 시작하지 않는다 · 이음 프레임은 인서트를 건너뛴다 · Kling 글 로마자.
+    가짜, 유료 0. 통합(가짜 fal 제출)은 check_vnew_part_likeness_169 의 pl-b · pl-f · pl-g 가 본다.
+
+    (sc-a) _kling_start_reason(_ss170_plan): 인서트(이 컷 · 앞 컷) → insert, 크기 종류 · 잠금 주인공이 다르면 shotChange, 같은
+           클로즈업 · 같은 주인공 → continue, 같은 컷(조각 경계로 나뉨) → continue
+    (sc-b) 스냅숏 take2: cut-10(인서트) after cut-09 → insert · cut-11 after cut-10 → insert, 조각 3 이음 결과 = 조각 1(cut-08/09),
+           인서트만 남으면 None
+    (sc-c) _submit_kling_part_cut: 인서트 → start=None · startImage still · startReason insert, 같은 샷 → 앞 프레임 · prevFrame
+    (sc-d) Kling cut-06(test3 cut-10) 프롬프트: 따옴표 밖 한글 없음, "Beomgeonu (charcoal-black hair)" 첫 부름
+    """
+    import traceback as _tb  # noqa: PLC0415
+
+    sys.path.insert(0, str(ROOT / "app"))
+    bad: list[str] = []
+    report: list[str] = []
+    seen: set[str] = set()
+
+    def expect(group: str, got, want, what: str) -> None:
+        seen.add(group)
+        if got != want:
+            bad.append(f"({group}) {what}\n      결과 {got!r}\n      기대 {want!r}")
+
+    def hangul_outside_quotes(text: str) -> list[str]:
+        return re.findall(r"[\uac00-\ud7a3]+", re.sub(r'"[^"]*"', "", text))
+
+    try:
+        from src.vnew import generate as genmod  # noqa: PLC0415
+
+        with _guard_real_llm() as llm_calls, _pin_vnew(VNEW_FX=True, VNEW_TAKE_PROMPT_MAX_CHARS=8000, VNEW_VIBE_PROMPT=True):
+            plan, take = _ss170_plan()
+            reason = genmod._kling_start_reason  # noqa: SLF001
+            same = json.loads(json.dumps(plan))
+            cuts = {c["id"]: c for c in same["conti"]["cuts"]}
+            cuts["cut-03"].update({k: json.loads(json.dumps(cuts["cut-02"][k])) for k in ("shotSize", "cameraEn", "characters")})
+            same["previz"]["panelGrammar"]["cut-03"]["grammar"]["shotSize"] = "MS"
+
+            # ================= (sc-a) 시작 그림 판단 =================
+            expect("sc-a", [reason(plan, "cut-06", "cut-05"), reason(plan, "cut-01", "cut-06"), reason(plan, "cut-05", "cut-04"),
+                            reason(plan, "cut-02", "cut-01"), reason(plan, "cut-03", "cut-01"), reason(same, "cut-03", "cut-02"),
+                            reason(plan, "cut-06", "cut-06"), reason(plan, "cut-02", "nope")],
+                   ["insert", "insert", "shotChange", "shotChange", "continue", "continue", "continue", "shotChange"],
+                   "인서트 · 앞 인서트 → insert, 옆얼굴(범건우) → 두 얼굴 · 중간 → 클로즈업 → shotChange, 같은 크기 · 주인공 → continue")
+            expect("sc-a", [genmod._cut_shot_class(plan, c) for c in plan["conti"]["cuts"]],  # noqa: SLF001
+                   [("medium", ""), ("closeup", _TC157_B), ("medium", ""), ("closeup", _TC157_A), ("closeup", ""), ("insert", "")],
+                   "크기 종류 · 잠금 주인공(MCU = medium)")
+
+            # ================= (sc-b) 스냅숏 take2 =================
+            if _SC171_SNAPSHOT.is_file():
+                snap = json.loads(_SC171_SNAPSHOT.read_text(encoding="utf-8"))
+                take2 = next((u for u in (snap.get("gen") or {}).get("units") or [] if str(u.get("id")) == "take2"), {})
+                parts = (take2.get("real") or {}).get("parts") or []
+                src = genmod._continuity_source(snap, [parts[0], parts[2], parts[3]]) if len(parts) > 3 else None  # noqa: SLF001
+                expect("sc-b", [reason(snap, "cut-10", "cut-09"), reason(snap, "cut-11", "cut-10"),
+                                reason(snap, "cut-12", "cut-11"), (src or {}).get("cutIds"),
+                                genmod._continuity_source(snap, parts[2:4]) if len(parts) > 3 else "?"],  # noqa: SLF001
+                       ["insert", "insert", "insert", ["cut-08", "cut-09"], None],
+                       "cut-10 · cut-11 → 시작 그림, 조각 3 이음 = 조각 1(cut-09 마지막 프레임), 인서트뿐이면 이음 그림 없음")
+            else:
+                seen.add("sc-b")
+                report.append(f"sc-b 스냅숏 없음({_SC171_SNAPSHOT}) — 건너뜀")
+
+            # ================= (sc-c) _submit_kling_part_cut =================
+            calls: list = []
+            saved = (genmod._submit_real_cut, genmod._video_last_frame)  # noqa: SLF001
+            genmod._submit_real_cut = lambda owner, pid, gen_id, p, ctx, cut, *, start=None, start_key="": (  # noqa: SLF001
+                calls.append((cut["cutId"], start, start_key))
+                or ({"startImage": "prevFrame", "startKey": start_key} if start else {"stillKey": "s"}))
+            genmod._video_last_frame = lambda key, seconds: b"LAST:" + key.encode()  # noqa: SLF001
+            try:
+                done = lambda cid, key: {"status": "completed", "outputKey": key, "cutIds": [cid], "seconds": 4.0}  # noqa: E731
+                ins = genmod._submit_kling_part_cut("o", "p", "g", plan, {"takeId": "take1"}, take,  # noqa: SLF001
+                                                    {"cutId": "cut-06", "start": 20.0, "seconds": 3.0}, [], done("cut-05", "k5"))
+                cont = genmod._submit_kling_part_cut("o", "p", "g", same, {"takeId": "take1"}, take,  # noqa: SLF001
+                                                     {"cutId": "cut-03", "start": 8.0, "seconds": 4.0}, [], done("cut-02", "k2"))
+            finally:
+                genmod._submit_real_cut, genmod._video_last_frame = saved  # noqa: SLF001
+            expect("sc-c", [calls, [ins.get("startImage"), ins.get("startReason")],
+                            [cont.get("startImage"), cont.get("startReason"), cont.get("startKey")]],
+                   [[("cut-06", None, ""), ("cut-03", b"LAST:k2", "k2#last")], ["still", "insert"],
+                    ["prevFrame", "continue", "k2#last"]], "인서트 → start=None(139 시작 그림), 같은 샷 → 앞 결과 마지막 프레임")
+
+            # ================= (sc-d) Kling 글 로마자 · 머리색 단서 =================
+            look = {"ch_a": "narrow half-lidded eyes and short charcoal-black hair swept back",
+                    "ch_b": "a Korean man in his 20s with tousled dyed pale blonde hair"}
+            ids = {_TC157_A: "ch_a", _TC157_B: "ch_b"}
+            saved = (genmod._segment_actors, genmod._real_look)  # noqa: SLF001
+            real_actors = genmod._segment_actors  # noqa: SLF001
+            genmod._segment_actors = lambda p, seg: [dict(x, charId=ids.get(str(x.get("name")), "")) for x in real_actors(p, seg)]  # noqa: SLF001
+            genmod._real_look = lambda owner, cid: look.get(str(cid), "")  # noqa: SLF001
+            try:
+                ctx = {"take": take, "takeId": "take1", "overrides": {}, "outfits": {}, "bases": {},
+                       "charById": {cid: {"id": cid, "name": n} for n, cid in ids.items()}}
+                lock = genmod._kling_shot_lock("o", plan, ctx, "cut-06", 3.0)  # noqa: SLF001
+                prompt = genmod._segment_prompt(plan, {"cutIds": ["cut-06"]}, first_segment=True, model=_PL169_KLING,  # noqa: SLF001
+                                                real=True, prompt_max=2500, lock=lock)
+                lock_cu = genmod._kling_shot_lock("o", plan, ctx, "cut-02", 4.0)  # noqa: SLF001
+            finally:
+                genmod._segment_actors, genmod._real_look = saved  # noqa: SLF001
+            ra, rb = genmod._romanize_name(_TC157_A), genmod._romanize_name(_TC157_B)  # noqa: SLF001
+            expect("sc-d", [hangul_outside_quotes(prompt), "Beomgeonu (charcoal-black hair)" in prompt,
+                            prompt.count("(charcoal-black hair)"), lock.split("\n")[0].split(": ", 1)[-1].startswith(
+                                f"{ra} (charcoal-black hair)'s hand clamps around {rb} (pale blonde hair)'s hand and wrist"),
+                            "COSTUME: " not in lock or f"{_TC157_A} wears" not in lock,
+                            lock_cu.count("(pale blonde hair)"), hangul_outside_quotes(lock_cu)],
+                   [[], True, 1, True, True, 1, []],
+                   "cut-06 인서트 Kling: 한글 이름 없음 · 첫 부름 머리색 단서 1번, 클로즈업 잠금은 단서 1번(겹치지 않음)")
+            report.append("kling cut-06 framing: " + lock.split("\n")[0][len("FRAMING (storyboard, keep exactly; this decides "
+                                                                            "the shot size and who is in frame) - "):][:220])
+            expect("sc-d", llm_calls, [], "LLM 호출 0")
+    except Exception as exc:  # noqa: BLE001
+        bad.append("예외: " + repr(exc) + "\n" + _tb.format_exc()[:2500])
+
+    missing = [g for g in ("sc-a", "sc-b", "sc-c", "sc-d") if g not in seen]
+    if missing:
+        bad.append(f"검사 묶음이 돌지 않았습니다: {missing}")
+    if bad:
+        fail("작업 171 Kling 시작 그림 · 이음 프레임 · 로마자 이름 검사 실패\n  " + "\n  ".join(bad))
+    else:
+        ok("작업 171 (sc-a)샷이 바뀌면 시작 그림(인서트 · 크기 · 주인공) (sc-b)스냅숏 cut-10/11 · 이음 = 인서트 앞 결과 "
+           "(sc-c)start=None · startReason (sc-d)Kling 글 로마자 · 머리색 단서")
+        for line in report:
+            print(f"       171: {line}")
 
 
 def main() -> int:
@@ -57103,6 +57292,7 @@ def main() -> int:
     check_vnew_content_ladder_168()
     check_vnew_part_likeness_169()
     check_vnew_shot_size_170()
+    check_vnew_shot_start_171()
     print()
     if warnings:
         print(f"경고 {len(warnings)}건")
