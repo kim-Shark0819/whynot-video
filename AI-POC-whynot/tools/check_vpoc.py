@@ -41367,11 +41367,13 @@ def check_vnew_edit_retake() -> None:
             env.llm_reply = {"resultKo": "x", "promptEn": cut_base.replace("@Element1", "him") + " " + "z" * 2600, "changesKo": []}
             d_cut = ((preview(pid_bc, mid_cut, {"requestKo": "길게"}).get_json() or {}).get("retake") or {}).get("draft") or {}
             r_cut = submit(pid_bc, mid_cut, {"prompt": d_cut.get("prompt"), "requestKo": "길게", "confirmUsd": 0.42, "draftId": d_cut.get("id")})
-            expect("rtk-f", [d_cut.get("status"), len(d_cut.get("problems") or []), err_of(r_cut)[:2],
+            # 작업 167 기대값 변경: 컷 단위 Kling 프롬프트(cut_base)가 태그 여유로 2,500B → 2,220B(태그 4개)가 되어, 2,600B 꼬리를 붙인
+            # 초안도 _trim_to_limit 이 2,500B 안으로 자른다(실측 1,908B). 그래서 길이 문제는 없어지고 참고 표시 문제 1개만 남는다(제출 400 그대로).
+            expect("rtk-f", [d_cut.get("status"), d_cut.get("problems"), len((d_cut.get("prompt") or "").encode()) <= 2500, err_of(r_cut)[:2],
                              (rv_get(pid_bc, mid_cut).get_json() or {}).get("estimate")],
-                   ["done", 2, (400, "RetakePromptInvalid"),
+                   ["done", ["참고 표시(@Video·@Image·@Element)가 이전 프롬프트와 다릅니다(빠짐 @Element1)."], True, (400, "RetakePromptInvalid"),
                     {"usd": 1.05, "seconds": 7.5, "billedSeconds": 7.5, "model": genmod.vnew_settings.VNEW_PREVIZ_EDIT_MODEL, "resolution": ""}],
-                   "규칙을 어긴 LLM 응답: 초안 문제 2개(참고 표시·길이) 그대로 보이고 제출은 400, 컷 견적 = 초당 단가 × 길이")
+                   "규칙을 어긴 LLM 응답: 초안 문제(참고 표시, 길이는 자르기로 2,500B 안) 그대로 보이고 제출은 400, 컷 견적 = 초당 단가 × 길이")
 
             # ================= (rtk-g) 이어받기 =================
             pid_g = "prj_rtk_g"
@@ -55962,6 +55964,187 @@ def check_vnew_shot_lock_166() -> None:
             print(f"       166: {line}")
 
 
+_PS167_SIZE_MSG = "prompt: size must be between 0 and 2500"
+
+
+def check_vnew_prompt_size_167() -> None:
+    """작업 167 — Kling o3 edit 컷 프롬프트 태그 여유 · fal 크기 거절 1번 재제출. 가짜, 유료 0.
+
+    (ps-a) 예산: Kling(kling-video · 상한 2500) = 2500 − 120 − 40 × 태그(바닥 1800), 크기 거절 뒤 int(N × 0.85) − 태그 여유,
+           다른 endpoint · 상한이 2500 이 아닌 Kling = 그대로, 거절 문구에서 N 읽기
+    (ps-b) @Element1 · @Element2 · @Image1 · @Video1 웹툰 컷 프롬프트 ≤ 2500 − 120 − 160, 재제출 예산 안, 고정부 · ASSETS · CAST 매핑 ·
+           ACTION 첫 문장 그대로(배경 · 외형 먼저 줄임), endpoint 를 안 주거나 다른 endpoint 면 지금과 같은 글자
+    (ps-c) 드라이버: 크기 거절 → 같은 칸 1번 다시 제출(더 짧은 프롬프트, attempt 2) → 성공이면 completed, 두 번째 거절이면 오늘 문구로
+           failed · 세 번째 제출 없음
+    (ps-d) Seedance/Wan 통 테이크 프롬프트 sha = 작업 166 값(157 예산)
+    """
+    import hashlib as _hashlib  # noqa: PLC0415
+    import traceback as _tb  # noqa: PLC0415
+
+    sys.path.insert(0, str(ROOT / "app"))
+    bad: list[str] = []
+    report: list[str] = []
+    seen: set[str] = set()
+    logs = _LogCapture()
+
+    def expect(group: str, got, want, what: str) -> None:
+        seen.add(group)
+        if got != want:
+            bad.append(f"({group}) {what}\n      결과 {got!r}\n      기대 {want!r}")
+
+    def nbytes(text: str) -> int:
+        return len(str(text).encode("utf-8"))
+
+    try:
+        from src.vnew import generate as genmod  # noqa: PLC0415
+        from src.vpoc.errors import VpocError  # noqa: PLC0415
+
+        kl = genmod.vnew_settings.VNEW_PREVIZ_EDIT_MODEL
+        other = "fal-ai/other-vendor/video-to-video/edit"
+        # ================= (ps-a) 예산 =================
+        budget = genmod._cut_prompt_budget  # noqa: SLF001
+        expect("ps-a", [kl, budget(kl, {}, 4), budget(kl, {"promptMaxLength": 2500}, 1), budget(kl, {}, 20), budget(kl, {}, 4, 2500),
+                        budget(other, {}, 4), budget(kl, {"promptMaxLength": 2000}, 4), budget(other, {}, 2, 2500),
+                        [genmod.vnew_settings.PREVIZ_KLING_PROMPT_RESERVE, genmod.vnew_settings.PREVIZ_KLING_TAG_RESERVE,
+                         genmod.vnew_settings.PREVIZ_KLING_PROMPT_FLOOR]],
+               ["fal-ai/kling-video/o3/standard/video-to-video/edit", 2220, 2340, 1800, 1965, 2500, 2500, 2045, [120, 40, 1800]],
+               "Kling 2500 − 120 − 40×태그(바닥 1800) · 거절 뒤 int(2500×0.85) − 태그 여유 · 다른 endpoint · 상한 2000 Kling 그대로 · 설정 기본값")
+        cap_of = genmod._prompt_size_cap  # noqa: SLF001
+        expect("ps-a", [cap_of("fal이 요청을 거절했습니다: " + _PS167_SIZE_MSG), cap_of("Prompt: size must be between 0 and 1800"),
+                        cap_of("fal이 요청을 거절했습니다: image too large"), cap_of(""),
+                        genmod._prompt_tags("@Video1 x @Video1 @Element1 @Element2 @Image1 Image 1"),  # noqa: SLF001
+                        genmod._prompt_tags("no tags")],  # noqa: SLF001
+               [2500, 1800, 0, 0, 4, 0], "거절 문구에서 N · 다른 문구 0 · 서로 다른 태그 수")
+
+        # ================= (ps-b) 웹툰 컷 프롬프트(@Element1 · @Element2 · @Image1 · @Video1) =================
+        apps = ["a tall man in his forties with short grey hair. He wears a dark navy suit with a thin red tie. "
+                "His shoes are polished black leather and he carries a worn leather briefcase.",
+                "a slim young man with messy black hair. He wears a white hoodie over a grey t-shirt. "
+                "A silver chain hangs from his belt loop and his sneakers are scuffed white canvas."]
+        cast2 = [{"colorName": "blue", "name": "Kim", "elementRef": "@Element1", "appearance": apps[0]},
+                 {"colorName": "red", "name": "Lee", "elementRef": "@Element2", "appearance": apps[1]}]
+        plan_b = _fx_cut_fixture(long_brief=True)
+        with logs, _pin_vnew(VNEW_FX=True):
+            def build(**kw) -> tuple[str, str]:
+                logs.clear()
+                text = genmod._cut_prompt(plan_b, {"cutId": "c1"}, "webtoon", cast=cast2, has_image_ref=True, **kw)  # noqa: SLF001
+                steps = (logs.messages("vnew.gen.cut_prompt ") or [""])[-1].rsplit("steps=", 1)[-1]
+                return text, steps
+
+            base, base_steps = build()
+            same_other, _ = build(endpoint=other, caps={})
+            tight, tight_steps = build(endpoint=kl, caps={})
+            retry, retry_steps = build(endpoint=kl, caps={}, size_cap=2500)
+        tags = genmod._prompt_tags(base)  # noqa: SLF001
+        limit, retry_limit = 2500 - 120 - 40 * tags, int(2500 * 0.85) - 40 * tags
+
+        def kept(text: str) -> list:
+            lines = text.split("\n")
+            assets = next((ln for ln in base.split("\n") if ln.startswith("ASSETS: ")), "?")
+            return [lines[0] == base.split("\n")[0], assets in lines, "The blue mannequin is @Element1, Kim" in text,
+                    "The red mannequin is @Element2, Lee" in text, "@Image1 = original webtoon panel for drawing style" in text,
+                    "\nACTION: " + _FX_LONG_BRIEF_TEXT.split(". ")[0] in text]
+
+        expect("ps-b", [tags, nbytes(base) <= 2500, nbytes(base) > limit, nbytes(tight) <= limit, nbytes(retry) <= retry_limit,
+                        nbytes(retry) < nbytes(tight) < nbytes(base), same_other == base, kept(tight), kept(retry),
+                        tight_steps.split(",")[:2], "castAppearance" in base_steps],
+                       [4, True, True, True, True, True, True, [True] * 6, [True] * 6, ["bodyDrop", "settingBackground"], False],
+               f"웹툰 컷 태그 4개 → ≤ {limit}B, 재제출 ≤ {retry_limit}B, 고정부·ASSETS·CAST 매핑·ACTION 첫 문장 그대로, 배경부터 줄임, "
+               "다른 endpoint = 지금 글자")
+        report.append(f"cut prompt bytes: default {nbytes(base)} [{base_steps}] · kling {nbytes(tight)}/{limit} [{tight_steps}] · "
+                      f"retry {nbytes(retry)}/{retry_limit} [{retry_steps}]")
+
+        # ================= (ps-c) 드라이버: 크기 거절 → 1번 다시 제출 =================
+        owner = _RTK_OWNER
+        with _guard_real_llm() as llm_calls, logs, _RtkEnv(owner) as env, _pin_vnew(
+                VNEW_FX=True, VNEW_CASTING=True, VNEW_GEN_PARALLEL=1, POLL_INTERVAL_S=0, VNEW_PREPARE_STALE_S=300):
+            falmod = env.falmod
+            script: dict[str, list[bool]] = {"webtoon": [True], "real": [True, True, True]}
+            polled: list[tuple[str, str]] = []
+
+            def variant_of(rid: str) -> str:
+                req = next((r for r in env.requests if r["rid"] == rid), {})
+                prompt = str((req.get("payload") or {}).get("prompt") or "")
+                return "real" if "photorealistic live-action film" in prompt else "webtoon"
+
+            def fake_fal(method, url, payload=None, *, where=""):
+                rid = url.split("/requests/", 1)[-1].split("/", 1)[0]
+                if method == "PUT":
+                    return {}
+                if url.endswith("/status"):
+                    return {"status": "COMPLETED"}
+                variant = variant_of(rid)
+                polled.append((variant, rid))
+                if script.get(variant) and script[variant].pop(0):
+                    raise VpocError("fal.poll", "HTTP422", _PS167_SIZE_MSG, 502)
+                return {"video": {"url": f"https://v3.fal.media/files/{rid}.mp4"}}
+
+            env.set(falmod, "_request", fake_fal)
+            pid = "prj_ps167"
+            env.make_plan(pid, [{"id": "s1", "cutIds": ["c1"], "seconds": 5}])
+            plan_c = env.plan(pid)
+            plan_c["input"]["videoModel"] = ""  # 기본 Kling o3 edit(컷 단위)
+            plan_c["previz"]["shotBrief"]["cuts"]["c1"].update(
+                backgroundEn=_FX_LONG_BRIEF_TEXT, blockingEn=_FX_LONG_BRIEF_TEXT, moodEn=_FX_LONG_BRIEF_TEXT,
+                actionEn="Kim leans forward with blush marks on his cheeks, eyes narrowing. " + _FX_LONG_BRIEF_TEXT)
+            env.planmod.save_plan(owner, pid, plan_c)
+            client = env.client()
+            est = genmod.estimate(env.plan(pid))
+            resp = client.post(f"/api/vnew/p/{pid}/generate", json={"confirmUsd": est["totalUsd"]})
+            logs.clear()
+            gen = env.drive(pid)
+            unit = (gen.get("units") or [{}])[0]
+            sent = {v: [nbytes((r.get("payload") or {}).get("prompt") or "") for r in env.requests if variant_of(r["rid"]) == v]
+                    for v in ("webtoon", "real")}
+            prompts = {v: [str((r.get("payload") or {}).get("prompt") or "") for r in env.requests if variant_of(r["rid"]) == v]
+                       for v in ("webtoon", "real")}
+            web, real = unit.get("webtoon") or {}, unit.get("real") or {}
+            reject_text = falmod.rejection(_PS167_SIZE_MSG, "HTTP422")[1]
+            retry_logs = logs.messages("vnew.gen.prompt_size_retry ")
+            expect("ps-c", [resp.status_code, gen.get("mode"), gen.get("videoModel") or kl, len(sent["webtoon"]), len(sent["real"]),
+                            [b2 < b1 for b1, b2 in zip(sent["webtoon"], sent["webtoon"][1:])],
+                            [b2 < b1 for b1, b2 in zip(sent["real"], sent["real"][1:])],
+                            web.get("status"), web.get("attempt"), web.get("sizeRetry"), web.get("promptEn") == prompts["webtoon"][-1],
+                            real.get("status"), real.get("attempt"), real.get("error"), "failureKind" in real, script["real"],
+                            len(retry_logs)],
+                   [202, "previz", kl, 2, 2, [True], [True], "completed", 2, {"cap": 2500}, True,
+                    "failed", 2, reject_text, False, [True], 2],
+                   "크기 거절 → 같은 칸 1번 다시 제출(더 짧게, attempt 2): 웹툰 성공 → completed, 실사 두 번째 거절 → 오늘 문구 failed · 세 번째 제출 0")
+            for variant in ("webtoon", "real"):
+                tags_v = genmod._prompt_tags(prompts[variant][0])  # noqa: SLF001
+                expect("ps-c", [nbytes(prompts[variant][0]) <= 2500 - 120 - 40 * tags_v,
+                                nbytes(prompts[variant][-1]) <= int(2500 * 0.85) - 40 * tags_v],
+                       [True, True], f"{variant} 첫 제출 ≤ Kling 여유 예산, 다시 제출 ≤ int(2500×0.85) − 태그 여유")
+            report.append(f"driver sent bytes: webtoon {sent['webtoon']} · real {sent['real']} · polls {len(polled)}")
+            expect("ps-c", llm_calls, [], "LLM 호출 0")
+
+        # ================= (ps-d) Seedance/Wan 통 테이크 프롬프트 sha =================
+        flat = [{"name": _TC157_B, "colorName": "blue", "frontNo": 2, "sheetNo": 1, "refNos": [1, 2], "look": "webtoon", "voice": "",
+                 "costume": "Black long-sleeve track top with a single white stripe down each sleeve",
+                 "appearance": "Pale blonde tousled hair with long bangs, large grey eyes"},
+                {"name": _TC157_A, "colorName": "orange", "frontNo": 4, "sheetNo": 3, "refNos": [3, 4], "look": "webtoon", "voice": "",
+                 "costume": "Dark navy long-sleeve button-up dress shirt, collar open, worn untucked",
+                 "appearance": "Short swept-back black hair, narrow half-lidded eyes"}]
+        with _guard_real_llm(), _pin_vnew(VNEW_FX=True, VNEW_TAKE_PROMPT_MAX_CHARS=4000, VNEW_VIBE_PROMPT=True):
+            plan_d, take_d = _tc157_plan()
+            take_text = genmod._vibe_take_prompt(plan_d, take_d, real=False, cast=flat, location_no=5, quiet=True)  # noqa: SLF001
+        expect("ps-d", _hashlib.sha256(take_text.encode("utf-8")).hexdigest(), _SL166_ANIME_SHA,
+               "157 통 테이크 애니 프롬프트 sha = 작업 166 값(통 테이크 경로는 안 바뀜)")
+    except Exception as exc:  # noqa: BLE001
+        bad.append("예외: " + repr(exc) + "\n" + _tb.format_exc()[:2500])
+
+    missing = [g for g in ("ps-a", "ps-b", "ps-c", "ps-d") if g not in seen]
+    if missing:
+        bad.append(f"검사 묶음이 돌지 않았습니다: {missing}")
+    if bad:
+        fail("작업 167 프롬프트 크기 검사 실패\n  " + "\n  ".join(bad))
+    else:
+        ok("작업 167 (ps-a)Kling 태그 여유 · 거절 뒤 예산 (ps-b)웹툰 컷 ≤ 2500−120−40×태그 · 매핑 · ACTION 그대로 "
+           "(ps-c)크기 거절 1번 재제출 · 두 번째 거절 실패 (ps-d)통 테이크 sha 그대로")
+        for line in report:
+            print(f"       167: {line}")
+
+
 def main() -> int:
     print("== vpoc1 check ==")
     check_compileall()
@@ -56102,6 +56285,7 @@ def main() -> int:
     check_vnew_conti_cast_162fix1()
     check_vnew_costume_text_164()
     check_vnew_shot_lock_166()
+    check_vnew_prompt_size_167()
     print()
     if warnings:
         print(f"경고 {len(warnings)}건")
