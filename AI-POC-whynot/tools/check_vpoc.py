@@ -55763,6 +55763,10 @@ def check_vnew_costume_text_164() -> None:
 
 # 작업 166: 157 손 추출 테이크(_tc157_plan) 애니 프롬프트 sha(작업 166 전 값, 예산 4,000자). 해당 없는 컷만 있어 그대로여야 한다.
 _SL166_ANIME_SHA = "9a14425389849901493d02f9f69098afe067308c123bff76b7a8b026cba3144a"
+# 작업 170: 같은 프롬프트의 작업 170 값. 바뀐 것은 cut-01 · 02 · 03 연기 첫 문장("Hold on …" · "He gives …" · "First cover …")
+# 앞의 이름("Beomgeonu: " · "Yeouijun: ", 요구 3 — 이름 없이 시작하는 SHOT 연기 금지)뿐이다. 이 콘티에는 shotSize · cameraEn 이 없어
+# 크기(요구 1) · 잠금(요구 2)은 그대로다. 166 (sl-e)가 _named_action 을 끈 프롬프트 sha = _SL166_ANIME_SHA 로 그것을 확인한다.
+_SL170_ANIME_SHA = "1e53ee4457a1bbf2dac4b93f1cb37a7ff5583db6502b66a67bf938c627b1a447"
 
 
 def _sl166_plan() -> tuple[dict, dict]:
@@ -55853,6 +55857,12 @@ def check_vnew_shot_lock_166() -> None:
                                                 quiet=True, audit=audit)
 
             base_anime = build(base_plan, base_take, "anime")
+            named_action = genmod._named_action  # noqa: SLF001
+            genmod._named_action = lambda text, *_a: text  # noqa: SLF001 — 작업 170 이름 앞머리만 끈 값 = 166 전 값
+            try:
+                base_anime_166 = build(base_plan, base_take, "anime")
+            finally:
+                genmod._named_action = named_action  # noqa: SLF001
             vset.VNEW_TAKE_PROMPT_MAX_CHARS = 8000  # 줄 비교는 짧은 형 없이
             wide = {v: (shots(build(base_plan, base_take, v)), shots(build(plan, take, v))) for v in ("anime", "real")}
             vset.VNEW_TAKE_PROMPT_MAX_CHARS = 4000
@@ -55878,7 +55888,7 @@ def check_vnew_shot_lock_166() -> None:
             # ================= (sl-b) 클로즈업 주인공 =================
             lock_b = f"Close-up of {rb} (pale blonde hair) filling the frame; {ra} only partly visible at the frame edge"
             for v in ("anime", "real"):
-                expect("sl-b", lines[v][5].startswith(f"Shot 6 (20-23s), medium close-up, front view: {lock_b}. "), True,
+                expect("sl-b", lines[v][5].startswith(f"Shot 6 (20-23s), close-up, front view: {lock_b}. "), True,  # 작업 170: 콘티 shotSize closeup → close-up(프리비즈 MCU 대신)
                        f"{v} cut-06 줄 머리 = 여의준 클로즈업 잠금(범건우 가장자리)")
             expect("sl-b", [genmod._identity_cue("short charcoal-black hair swept back"),  # noqa: SLF001
                             genmod._identity_cue("narrow eyes"),  # noqa: SLF001
@@ -55897,11 +55907,11 @@ def check_vnew_shot_lock_166() -> None:
             # ================= (sl-c) 자기 손 =================
             own = f"{rb}'s own hands stay lowered, out of frame, and never touch his own face; the only hand on his face is {ra}'s ("
             real3, anime3 = lines["real"][2], lines["anime"][2]
-            tail = real3[len("Shot 3 (8-12s), medium close-up, front view: "):]
+            tail = real3[len("Shot 3 (8-12s), close-up, front view: "):]  # 작업 170: 콘티 closeup
             sleeve = tail[len(own):].split(")", 1)[0] if tail.startswith(own) else ""
-            expect("sl-c", [real3.startswith("Shot 3 (8-12s), medium close-up, front view: " + own),
+            expect("sl-c", [real3.startswith("Shot 3 (8-12s), close-up, front view: " + own),
                             sleeve.endswith(" sleeve") and "navy" in sleeve, ") entering from the frame edge. Close-up of " + rb in real3,
-                            anime3.startswith(f"Shot 3 (8-12s), medium close-up, front view: Close-up of {rb} (pale blonde hair) filling "
+                            anime3.startswith(f"Shot 3 (8-12s), close-up, front view: Close-up of {rb} (pale blonde hair) filling "
                                               f"the frame; {ra}'s right hand enters from off-frame"),
                             own in anime3, real3.count("own hands stay lowered"), anime3.count("own hands stay lowered")],
                    [True, True, True, True, True, 1, 1],
@@ -55932,8 +55942,9 @@ def check_vnew_shot_lock_166() -> None:
                    "부정은 그대로")
 
             # ================= (sl-e) 해당 없는 컷 =================
-            expect("sl-e", _hashlib.sha256(base_anime.encode("utf-8")).hexdigest(), _SL166_ANIME_SHA,
-                   "157 테이크 애니 프롬프트 sha = 작업 166 전 값(해당 컷 없음)")
+            expect("sl-e", [_hashlib.sha256(base_anime.encode("utf-8")).hexdigest(),
+                            _hashlib.sha256(base_anime_166.encode("utf-8")).hexdigest()], [_SL170_ANIME_SHA, _SL166_ANIME_SHA],
+                   "157 테이크 애니 프롬프트 sha = 작업 170 값, 170 이름 앞머리를 끄면 작업 166 전 값(해당 컷 없음)")
             for v in ("anime", "real"):
                 before, after = wide[v]
                 expect("sl-e", [after[k] == before[k] for k in (0, 1, 3)], [True, True, True],
@@ -56135,8 +56146,8 @@ def check_vnew_prompt_size_167() -> None:
         with _guard_real_llm(), _pin_vnew(VNEW_FX=True, VNEW_TAKE_PROMPT_MAX_CHARS=4000, VNEW_VIBE_PROMPT=True):
             plan_d, take_d = _tc157_plan()
             take_text = genmod._vibe_take_prompt(plan_d, take_d, real=False, cast=flat, location_no=5, quiet=True)  # noqa: SLF001
-        expect("ps-d", _hashlib.sha256(take_text.encode("utf-8")).hexdigest(), _SL166_ANIME_SHA,
-               "157 통 테이크 애니 프롬프트 sha = 작업 166 값(통 테이크 경로는 안 바뀜)")
+        expect("ps-d", _hashlib.sha256(take_text.encode("utf-8")).hexdigest(), _SL170_ANIME_SHA,
+               "157 통 테이크 애니 프롬프트 sha = 작업 170 값(167 은 통 테이크 경로를 안 바꿈, 170 은 연기 앞 이름만 — _SL170_ANIME_SHA 주석)")
     except Exception as exc:  # noqa: BLE001
         bad.append("예외: " + repr(exc) + "\n" + _tb.format_exc()[:2500])
 
@@ -56745,6 +56756,209 @@ def check_vnew_part_likeness_169() -> None:
             print(f"       169: {line}")
 
 
+def _ss170_plan() -> tuple[dict, dict]:
+    """작업 170 test3 모양(gen g202611061012446afa): 157 테이크에서 cut-02 = 클로즈업 · "looking up at 여의준" · 둘 다 on_screen ·
+    연기 "Begin with …"(test3 cut-02, 프리비즈 MS), cut-04 = 옆얼굴 "Profile shot of 범건우"(test3 cut-05), cut-05 = 두 얼굴
+    클로즈업(test3 cut-06), cut-06 = 인서트 · 두 사람 손만 · 범건우 손이 손목을 잡음(test3 cut-10). cut-01 · 03 은 157 그대로."""
+    a, b = _TC157_A, _TC157_B
+    plan, take = _tc157_plan()
+    cuts = {c["id"]: c for c in plan["conti"]["cuts"]}
+    both = [{"name": b, "presence": "on_screen", "actionEn": "Sits on the railing.", "hands": {}},
+            {"name": a, "presence": "on_screen", "actionEn": f"Sits next to {b}.", "hands": {}}]
+    cuts["cut-02"].update(shotSize="closeup", cameraEn=f"Static closeup, slight low angle looking up at {b}", characters=both)
+    cuts["cut-04"].update(shotSize="profile", cameraEn=f"Profile shot of {a}, static camera", characters=[both[1], both[0]])
+    cuts["cut-05"].update(shotSize="closeup", cameraEn="Slow push-in closeup on both faces drawing near", characters=both)
+    cuts["cut-06"].update(shotSize="insert", cameraEn="Quick insert shot on clasped hands, slight shake", characters=[
+        {"name": a, "presence": "hand_only", "positionEn": "off-frame, hand only",
+         "actionEn": f"{a}'s hand (off-frame) shoots in from the left and clamps around {b}'s hand and wrist, yanking it "
+                     "toward himself.", "actionKo": "범건우의 손이 여의준의 손목을 붙잡아 끌어당긴다.", "hands": {"left": "grab>other_hand"}},
+        {"name": b, "presence": "hand_only", "positionEn": "off-frame, hand only",
+         "actionEn": f"{b}'s hand (off-frame), in a black sleeve, is seized and pulled; the fingers splay open in surprise as "
+                     "the palm is forced to face forward.", "actionKo": "여의준 손이 붙잡힌다.", "hands": {}}])
+    briefs = plan["previz"]["shotBrief"]["cuts"]
+    briefs["cut-02"]["actionEn"] = ("Begin with eyes squeezed shut and mouth opening into a short forced laugh. The smile weakens "
+                                    "while he speaks.")
+    plan["previz"]["panelGrammar"]["cut-02"]["grammar"]["shotSize"] = "MS"  # test3 cut-02 프리비즈 = medium shot
+    return plan, take
+
+
+def check_vnew_shot_size_170() -> None:
+    """작업 170 — SHOT 크기는 콘티 클로즈업을 따르고, 모든 SHOT 연기는 이름으로 시작한다(Seedance SHOT · Kling FRAMING). 가짜, 유료 0.
+
+    (ss-a) 콘티 크기 우선: closeup → close-up(+각도, 프리비즈 CU · ECU 면 그대로) · extreme closeup → extreme close-up · profile →
+           "profile close-up"(각도 없음) · "both faces"/"two faces" → "tight two-shot close-up of both faces" · 그 밖 = 지금 매핑
+    (ss-b) 잠금 넓힘: 클로즈업류 크기에서 cameraEn 이 1명만 부르면("looking up at X" · "on X" · "of X" · "X's") 그 사람, 다른 on_screen
+           인물은 가장자리. 두 사람 샷("two-shot" · "both")이나 중간 크기는 잠금 없음. cut-02 = "Close-up of Yeouijun (pale blonde
+           hair)", cut-04 = "Profile close-up of Beomgeonu"
+    (ss-c) 이름 없는 첫 연기 문장 금지: 잠금 주인공(없으면 콘티 첫 on_screen) "Name: " 앞머리, They/Their → "A and B: "
+    (ss-d) 인서트: 첫 닿는 동사 절이 크기 절 바로 뒤(120자 안), 그 절의 나머지는 손 절에 남음
+    (ss-e) Kling FRAMING(_kling_shot_lock, 콘티 이름): 같은 크기 · 잠금 · 인서트 앞 절(한글 이름이어도 손 절 연기가 남음)
+    (ss-f) 해당 없는 컷 그대로: 157 테이크에서 170 을 끈 줄과 켠 줄 — cut-04~06 같음(sha), cut-01~03 은 "Name: " 앞머리만 다름
+    """
+    import hashlib as _hashlib  # noqa: PLC0415
+    import traceback as _tb  # noqa: PLC0415
+
+    sys.path.insert(0, str(ROOT / "app"))
+    bad: list[str] = []
+    report: list[str] = []
+    seen: set[str] = set()
+
+    def expect(group: str, got, want, what: str) -> None:
+        seen.add(group)
+        if got != want:
+            bad.append(f"({group}) {what}\n      결과 {got!r}\n      기대 {want!r}")
+
+    def shots(text: str) -> list[str]:
+        return [ln for ln in text.split("\n") if re.match(r"^Shot \d+ \(", ln)]
+
+    a, b = _TC157_A, _TC157_B
+    flat = {"real": [{"name": b, "colorName": "blue", "frontNo": 2, "sheetNo": 1, "refNos": [1, 2], "voice": "", "look": "real",
+                      "appearance": "a Korean man in his 20s with tousled pale blonde hair and long sweeping bangs",
+                      "costume": "Black long-sleeve track top with a single white stripe down each sleeve"},
+                     {"name": a, "colorName": "orange", "frontNo": 4, "sheetNo": 3, "refNos": [3, 4], "voice": "", "look": "real",
+                      "appearance": "narrow half-lidded eyes and short charcoal-black hair swept back",
+                      "costume": "Dark navy long-sleeve button-up dress shirt, collar open, worn untucked"}]}
+    flat["anime"] = [dict(m, look="webtoon") for m in flat["real"]]
+    try:
+        from src.vnew import generate as genmod  # noqa: PLC0415
+
+        ra, rb = genmod._romanize_name(a), genmod._romanize_name(b)  # noqa: SLF001
+        insert = genmod.VIBE_INSERT_SIZE
+        with _guard_real_llm() as llm_calls, _pin_vnew(VNEW_FX=True, VNEW_TAKE_PROMPT_MAX_CHARS=8000, VNEW_VIBE_PROMPT=True):
+            plan, take = _ss170_plan()
+
+            def build(p: dict, t: dict, variant: str) -> list[str]:
+                return shots(genmod._vibe_take_prompt(p, t, real=variant == "real", cast=flat[variant],  # noqa: SLF001
+                                                      location_no=5, quiet=True))
+
+            lines = {v: build(plan, take, v) for v in ("anime", "real")}
+            cut = {"id": "c", "characters": []}
+
+            # ================= (ss-a) 콘티 크기 우선 =================
+            size = genmod._vibe_conti_size  # noqa: SLF001
+            expect("ss-a", [size(dict(cut, shotSize="closeup"), "MS 3/4"), size(dict(cut, shotSize="closeup"), "ECU profile"),
+                            size(dict(cut, shotSize="closeup"), "CU front"), size(dict(cut, shotSize="extreme_closeup"), "CU profile"),
+                            size(dict(cut, shotSize="profile"), "MCU profile"),
+                            size(dict(cut, shotSize="closeup", cameraEn="Slow push-in closeup on both faces"), "MCU profile"),
+                            size(dict(cut, cameraEn="Static closeup on his face"), "MS front"),
+                            size(dict(cut, cameraEn="Static medium close-up"), "MS front"),
+                            size(dict(cut, shotSize="medium", cameraEn="Medium two-shot"), "MS 3/4"),
+                            size(dict(cut, cameraEn="Medium shot in profile"), "MS front"),
+                            size(dict(cut, cameraEn="Profile shot of X"), "MS front")],
+                   ["close-up, three-quarter view", "extreme close-up, profile", "close-up, front view",
+                    "extreme close-up, profile", "profile close-up", "tight two-shot close-up of both faces, profile",
+                    "close-up, front view", "medium shot, front view", "medium shot, three-quarter view",
+                    "medium shot, front view", "profile close-up"],
+                   "closeup · ECU 그대로 · extreme · profile · both faces · cameraEn 크기 낱말 · medium close-up/medium 은 지금 매핑")
+            for v in ("anime", "real"):
+                expect("ss-a", [lines[v][1].startswith("Shot 2 (4-8s), close-up, front view: "),
+                                lines[v][3].startswith("Shot 4 (12-16s), profile close-up: "),
+                                lines[v][4].startswith("Shot 5 (16-20s), tight two-shot close-up of both faces, front view: ")],
+                       [True, True, True], f"{v} cut-02 close-up(프리비즈 MS 대신) · cut-04 profile close-up · cut-05 두 얼굴")
+
+            # ================= (ss-b) 잠금 넓힘 =================
+            edge = f"{ra} only partly visible at the frame edge"
+            for v in ("anime", "real"):
+                expect("ss-b", [lines[v][1].startswith(f"Shot 2 (4-8s), close-up, front view: Close-up of {rb} (pale blonde hair) "
+                                                       f"filling the frame; {edge}. "),
+                                lines[v][3].startswith(f"Shot 4 (12-16s), profile close-up: Profile close-up of {ra} (charcoal-black "
+                                                       f"hair) filling the frame; {rb} only partly visible at the frame edge. "),
+                                "Close-up of" in lines[v][4]],
+                       [True, True, False], f"{v} cut-02 'looking up at 여의준' 잠금 · cut-04 'Profile shot of 범건우' · 두 얼굴 잠금 없음")
+            subj = genmod._vibe_closeup_subject  # noqa: SLF001
+            on2 = [{"name": a, "presence": "on_screen"}, {"name": b, "presence": "on_screen"}]
+            expect("ss-b", [subj({"cameraEn": f"Static closeup, looking up at {b}", "shotSize": "closeup", "characters": on2},
+                                 "MS", [], lambda n: n),
+                            subj({"cameraEn": f"Static close-up of {a}", "shotSize": "", "characters": on2}, "MS", [], lambda n: n),
+                            subj({"cameraEn": f"Static closeup on {b}", "shotSize": "closeup", "characters": on2}, "MS", [], lambda n: n),
+                            subj({"cameraEn": f"Medium two-shot, slight tilt up toward {a}", "shotSize": "medium",
+                                  "characters": on2}, "MS", [], lambda n: n),
+                            subj({"cameraEn": f"Static closeup two-shot, slight low angle favoring {a}'s smirk", "shotSize": "closeup",
+                                  "characters": on2}, "MCU", [], lambda n: n),
+                            subj({"cameraEn": f"Medium shot looking at {a}", "shotSize": "medium", "characters": on2},
+                                 "MS", [], lambda n: n)],
+                   [b, a, b, "", "", ""], "looking up at · close-up of · on → 그 사람, 중간 크기 · 두 사람 샷 → 잠금 없음")
+
+            # ================= (ss-c) 이름 없는 첫 연기 문장 금지 =================
+            named = genmod._named_action  # noqa: SLF001
+            toks = ["Yeouijun", "Uijun", "Geonu"]
+            expect("ss-c", [named("Begin with eyes shut", "Yeouijun", ["Yeouijun"], toks),
+                            named("He laughs", "Yeouijun", ["Yeouijun"], toks),
+                            named("Their lips part", "Yeouijun", ["Yeouijun", "Beomgeonu"], toks),
+                            named("Geonu leans in", "Yeouijun", ["Yeouijun"], toks),
+                            named("Uijunx waits", "Yeouijun", ["Yeouijun"], toks),
+                            named("Begin", "", [], toks)],
+                   ["Yeouijun: Begin with eyes shut", "Yeouijun: He laughs", "Yeouijun and Beomgeonu: Their lips part",
+                    "Geonu leans in", "Yeouijun: Uijunx waits", "Begin"], "이름 앞머리 · 이름으로 시작하면 그대로 · 이름 없으면 그대로")
+            for v in ("anime", "real"):
+                body = lines[v][1].split(f"{edge}. ", 1)[-1]
+                expect("ss-c", body.startswith(f"{rb}: Begin with eyes squeezed shut"), True, f"{v} cut-02 연기 = '{rb}: Begin with …'")
+
+            # ================= (ss-d) 인서트 닿는 동사 먼저 =================
+            for v in ("anime", "real"):
+                line = lines[v][5]
+                after = line.split(f"{insert}: ", 1)[-1]
+                expect("ss-d", [line.startswith(f"Shot 6 (20-23s), {insert}: "),
+                                after.startswith(f"{ra}'s hand clamps around {rb}'s hand and wrist, yanking it toward himself. "),
+                                bool(re.search(r"\b(?:grabs|clamps|presses|holds)\b", after[:120])),
+                                f"{ra}'s hand enters from off-frame and shoots in from the left;" in after,
+                                after.count("clamps around")],
+                       [True, True, True, True, 1], f"{v} cut-06 인서트: 크기 뒤 '{ra}'s hand clamps …' · 손 절은 동사 앞까지")
+            expect("ss-d", [genmod._insert_lead(["X's hand enters from off-frame and grabs Y's wrist"]),  # noqa: SLF001
+                            genmod._insert_lead(["X's hand enters from off-frame and is pressed flat"])],  # noqa: SLF001
+                   [("X's hand grabs Y's wrist", ["X's hand enters from off-frame"]),
+                    ("", ["X's hand enters from off-frame and is pressed flat"])], "닿는 동사(능동)만 앞으로, 수동형은 그대로")
+
+            # ================= (ss-e) Kling FRAMING =================
+            ctx = {"take": take, "takeId": "take1", "charById": {}, "overrides": {}, "outfits": {}, "bases": {}}
+            frames = {cid: genmod._kling_shot_lock("o", plan, ctx, cid, 4.0).split("\n")[0]  # noqa: SLF001
+                      for cid in ("cut-02", "cut-04", "cut-05", "cut-06")}
+            head = "FRAMING (storyboard, keep exactly; this decides the shot size and who is in frame) - "
+            expect("ss-e", [frames["cut-02"].startswith(head + f"close-up, front view: Close-up of {b} filling the frame; "
+                                                        f"{a} only partly visible at the frame edge"),
+                            frames["cut-04"].startswith(head + f"profile close-up: Profile close-up of {a} filling the frame; "
+                                                        f"{b} only partly visible"),
+                            frames["cut-05"].startswith(head + "tight two-shot close-up of both faces, front view"),
+                            frames["cut-06"].startswith(head + f"{insert}: {a}'s hand clamps around {b}'s hand and wrist")],
+                   [True, True, True, True], "Kling FRAMING 크기 · 잠금(콘티 이름) · 인서트 앞 절")
+
+            # ================= (ss-f) 해당 없는 컷 그대로 =================
+            base_plan, base_take = _tc157_plan()
+            on = build(base_plan, base_take, "anime")
+            saved = (genmod._vibe_conti_size, genmod._named_action, genmod._insert_lead, genmod._conti_size_kind)  # noqa: SLF001
+            genmod._vibe_conti_size = lambda c, shot: genmod._vibe_size(shot)  # noqa: SLF001
+            genmod._named_action = lambda text, *_a: text  # noqa: SLF001
+            genmod._insert_lead = lambda clauses: ("", clauses)  # noqa: SLF001
+            genmod._conti_size_kind = lambda c: ""  # noqa: SLF001
+            try:
+                off = build(base_plan, base_take, "anime")
+            finally:
+                (genmod._vibe_conti_size, genmod._named_action, genmod._insert_lead,  # noqa: SLF001
+                 genmod._conti_size_kind) = saved  # noqa: SLF001
+            sha = [_hashlib.sha256(ln.encode("utf-8")).hexdigest() for ln in on]
+            expect("ss-f", [sha[k] == _hashlib.sha256(off[k].encode("utf-8")).hexdigest() for k in (3, 4, 5)], [True] * 3,
+                   "157 cut-04~06(이름으로 시작 · 콘티 크기 없음) 줄 sha = 170 끈 값")
+            expect("ss-f", [re.sub(r"(?<=\. )(?:Beomgeonu|Yeouijun): ", "", on[k], count=1) == off[k] for k in (0, 1, 2)],
+                   [True] * 3, "157 cut-01~03 = 연기 앞 'Name: ' 만 다름")
+            expect("ss-f", llm_calls, [], "LLM 호출 0")
+            for k in (1, 3, 4, 5):
+                report.append(f"real {lines['real'][k][:200]}")
+            report.append("kling cut-06: " + frames["cut-06"][len(head):][:200])
+    except Exception as exc:  # noqa: BLE001
+        bad.append("예외: " + repr(exc) + "\n" + _tb.format_exc()[:2500])
+
+    missing = [g for g in ("ss-a", "ss-b", "ss-c", "ss-d", "ss-e", "ss-f") if g not in seen]
+    if missing:
+        bad.append(f"검사 묶음이 돌지 않았습니다: {missing}")
+    if bad:
+        fail("작업 170 SHOT 크기 · 이름 검사 실패\n  " + "\n  ".join(bad))
+    else:
+        ok("작업 170 (ss-a)콘티 크기 우선 (ss-b)카메라가 부르는 1명 잠금 (ss-c)연기는 이름으로 시작 (ss-d)인서트 닿는 동사 먼저 "
+           "(ss-e)Kling FRAMING 같음 (ss-f)해당 없는 컷 그대로(sha)")
+        for line in report:
+            print(f"       170: {line}")
+
+
 def main() -> int:
     print("== vpoc1 check ==")
     check_compileall()
@@ -56888,6 +57102,7 @@ def main() -> int:
     check_vnew_prompt_size_167()
     check_vnew_content_ladder_168()
     check_vnew_part_likeness_169()
+    check_vnew_shot_size_170()
     print()
     if warnings:
         print(f"경고 {len(warnings)}건")
