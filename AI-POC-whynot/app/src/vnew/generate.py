@@ -57,6 +57,7 @@ from .locations import REAL_NO_BRAND, REAL_NO_BRAND_SENTENCE
 # 지시서 117: 속마음 대사 판정은 prompts.is_thought 한 곳(순수 모듈)에서만 한다.
 from .prompts import is_thought as _is_thought
 from .prompts import OFF_FRAME_HAND_POSITION as _OFF_FRAME_HAND
+from .prompts import is_off_frame as _is_off_frame
 from .prompts import STILL_SHOT_SIZES as _SHOT_SIZES
 
 log = logging.getLogger("vpoc")
@@ -1256,7 +1257,8 @@ def _real_take_cast(owner: str, plan: dict, actors: list[dict], char_by_id: dict
     swaps: dict[str, bytes] = {}
     if costume_location is not None:
         swaps = _costume_refs(owner, pid, plan, [(row[1], row[3], row[4]) for row in rows], costume_location,
-                              {row[1]: str((resolved.get(row[1]) or {}).get("costume") or "") for row in rows}, load)
+                              {row[1]: str((resolved.get(row[1]) or {}).get("costume") or "") for row in rows}, load,
+                              bases=_base_outfits(actors, char_by_id))
     images: list[bytes] = []
     cast: list[dict] = []
     for (actor, name, char_id, char, look, keys, sheet), count in zip(rows, counts):
@@ -1323,11 +1325,13 @@ def _charge_costume_ref(owner: str, pid: str, gen_id: str, run_n: int) -> None:
         log.warning("vnew.gen.charge_costume_ref_failed pid=%s err=%s", pid, str(exc)[:200])
 
 
-def _costume_refs(owner: str, pid: str, plan: dict, people, location, fallbacks: dict, load=None) -> dict[str, bytes]:
+def _costume_refs(owner: str, pid: str, plan: dict, people, location, fallbacks: dict, load=None, *,
+                  bases: dict | None = None) -> dict[str, bytes]:
     """작업 160: {이름: 장면 옷 편집 그림 바이트}(메모리만). people = [(이름, 캐릭터 entry, 모습)], 실사 모습·실사 정면이 있는 인물만.
 
     옷 = _scene_costume(장소, fallback = 그 인물 지금 값). 같은 회차(genId·realRun.n)·같은 인물·같은 정면·같은 옷이면 다시 부르지 않는다
-    (실패도 기억 — 이 회차에서 다시 사지 않는다). VNEW_REAL_COSTUME_REF 끔이면 {}(호출 0)."""
+    (실패도 기억 — 이 회차에서 다시 사지 않는다). VNEW_REAL_COSTUME_REF 끔이면 {}(호출 0).
+    작업 164: bases = {이름: 캐릭터 기본 옷}(테이크 프롬프트와 같은 후보 · 같은 검사)."""
     if not vnew_settings.VNEW_REAL_COSTUME_REF:
         return {}
     gen = plan.get("gen") or {}
@@ -1345,7 +1349,8 @@ def _costume_refs(owner: str, pid: str, plan: dict, people, location, fallbacks:
                 _COSTUME_REF_RUNS.pop(next(iter(_COSTUME_REF_RUNS)))
         for name, char, look in people:
             front_key = str((char or {}).get("realFrontKey") or "") if look != "anime" else ""
-            costume = _scene_costume(plan, name, location, fallback=vnew_fx.strip_drawing_words(fallbacks.get(name) or ""))
+            costume = _scene_costume(plan, name, location, fallback=vnew_fx.strip_drawing_words(fallbacks.get(name) or ""),
+                                     base=str((bases or {}).get(name) or ""))
             if not front_key or not costume:
                 continue
             slot = (str(name), front_key, costume)
@@ -3730,7 +3735,7 @@ def _assert_no_webtoon(prompt: str) -> None:
 
 def _take_prompt(plan: dict, take: dict, *, cast: list[dict], panel_nos: list[int], location_no, caps: dict | None = None,
                  variant: str = "webtoon", soften: bool = False, anchor: dict | None = None, no_text: bool = False,
-                 audit: dict | None = None, quiet: bool = False) -> str:
+                 audit: dict | None = None, quiet: bool = False, bases: dict | None = None) -> str:
     """통 테이크 프롬프트(영어, ≤ _take_prompt_budget 글자, 설계자 2026-10-26, 066 — ASSETS·연기 보존).
 
     **작업 157 — TIMELINE 먼저**(이 단락이 아래 옛 줄이기 설명(①~⑨·lineDrop·최소형·byteTrim·154 순서)을 대신한다):
@@ -3804,12 +3809,16 @@ def _take_prompt(plan: dict, take: dict, *, cast: list[dict], panel_nos: list[in
     # 애니·실사, 원형·짧은 형·155 의상 고정이 같은 값을 쓴다.
     take_location = _take_location(plan, take)
     raw = {str(m.get("name") or ""): str(m.get("costume") or "") for m in cast if m.get("name")}
+    bases = {str(k): str(v or "") for k, v in (bases or {}).items()}  # 작업 164: 캐릭터 기본 옷
+    costume_logged: set | None = None if quiet else set()
     if real:
         # 작업 136: 실사 연기(지시서 actionEn) = 그림 문장 빼기·옷 구절 → 그 컷 장면 옷(_real_brief_text). 웹툰은 그대로.
-        costumes = {name: _scene_costume(plan, name, take_location, fallback=value) for name, value in raw.items()}
+        costumes = {name: _costume_guard(plan, name, _scene_costume(plan, name, take_location, fallback=value,
+                                                                    base=bases.get(name, "")), bases.get(name, ""))
+                    for name, value in raw.items()}
         for entry, cut_id in zip(entries, _seg_cut_ids(take)):
             entry["action"] = _real_brief_text(entry.get("action"),
-                                               _scene_costume_map(plan, [cut_id], take_location, costumes)).rstrip(".")
+                                               _scene_costume_map(plan, [cut_id], take_location, costumes, bases)).rstrip(".")
     if soften:
         _soften_entries(entries, _strong(soften))  # 작업 153: 콘텐츠 검사 거절 뒤 다시 만들 때만(대사·연기·분위기 순화, 줄 수·화자 그대로)
 
@@ -4012,11 +4021,15 @@ def _take_prompt(plan: dict, take: dict, *, cast: list[dict], panel_nos: list[in
         # 인물 장면 옷(원형·짧은 형 ASSETS 가 같은 값을 쓴다). 작업 160: 장소 단위 1벌(_scene_costume), 줄이기 상한으로 다시 정리.
         name = str(member.get("name") or "")
         if real:
-            return _scene_costume(plan, name, take_location, fallback=raw.get(name, ""), limit=state["costume_limit"])
+            return _costume_guard(plan, name, _scene_costume(plan, name, take_location, fallback=raw.get(name, ""),
+                                                             base=bases.get(name, ""), limit=state["costume_limit"]),
+                                  bases.get(name, ""), limit=state["costume_limit"], logged=costume_logged)
         costume = _clip_words(_txt(member.get("costume")), state["costume_limit"])
         scene = _scene_costume(plan, name, take_location, fallback=str(member.get("costume") or ""),
-                               limit=state["costume_limit"], real=False)
-        return scene or costume
+                               base=bases.get(name, ""), limit=state["costume_limit"], real=False)
+        # 작업 164: 제출 전 검사 — 조각이면 costume_invalid 로그 후 캐릭터 기본 옷.
+        return _costume_guard(plan, name, scene or costume, bases.get(name, ""), limit=state["costume_limit"], real=False,
+                              logged=costume_logged)
 
     def _location_line() -> str:
         if not location_no:
@@ -4541,7 +4554,8 @@ def _vibe_size(shot: str) -> str:
 
 def _vibe_take_prompt(plan: dict, take: dict, *, real: bool, cast: list[dict], location_no=None, frame_no=None,
                       panel_nos: list[int] | None = None, caps: dict | None = None, soften: bool = False,
-                      anchor: bool = False, no_text: bool = False, audit: dict | None = None, quiet: bool = False) -> str:
+                      anchor: bool = False, no_text: bool = False, audit: dict | None = None, quiet: bool = False,
+                      bases: dict | None = None) -> str:
     """작업 159: video-vibecode 형식 통 테이크 프롬프트(참고 구현 _cuts_video_prompt · live_video_prompt).
 
     순서: 140 AI 고지 → 화풍(STYLE webtoon + 웹툰 기호 / live_action) → 인물별 "{handle}: {look} (keep exactly this look)." →
@@ -4560,14 +4574,20 @@ def _vibe_take_prompt(plan: dict, take: dict, *, real: bool, cast: list[dict], l
     # 작업 160: 장면 옷 = 장소 단위 1벌(_scene_costume, 테이크 첫 장소). 모든 테이크·조각·대체가 같은 값(애니는 그림 낱말을 지우지
     # 않는다). 애니는 쓸 만한 옷이 없을 때만 지금 값(200자) 그대로.
     take_location = _take_location(plan, take)
-    costumes = {name: _scene_costume(plan, name, take_location, fallback=value, real=real) for name, value in raw.items()}
+    bases = {str(k): str(v or "") for k, v in (bases or {}).items()}  # 작업 164: 캐릭터 기본 옷(콘티·대본 다음 후보, 검사 실패 대체)
+    costumes = {name: _scene_costume(plan, name, take_location, fallback=value, base=bases.get(name, ""), real=real)
+                for name, value in raw.items()}
+    if not real:
+        costumes = {name: costumes.get(name) or _clip_words(value, 200) for name, value in raw.items()}
+    # 작업 164: 제출 전 검사 — look 줄 옷이 조각이면 costume_invalid 로그 후 캐릭터 기본 옷.
+    logged: set | None = None if quiet else set()
+    costumes = {name: _costume_guard(plan, name, value, bases.get(name, ""), real=real, logged=logged)
+                for name, value in costumes.items()}
     if real:
         # 136: 실사 연기의 그림 문장·옷 구절 → 장면 옷.
         for entry, cut_id in zip(entries, take_cut_ids):
             entry["action"] = _real_brief_text(entry.get("action"),
-                                               _scene_costume_map(plan, [cut_id], take_location, costumes)).rstrip(".")
-    else:
-        costumes = {name: costumes.get(name) or _clip_words(value, 200) for name, value in raw.items()}
+                                               _scene_costume_map(plan, [cut_id], take_location, costumes, bases)).rstrip(".")
     if soften:
         _soften_entries(entries, _strong(soften))  # 153
 
@@ -4920,7 +4940,8 @@ def _vibe_take_payload(owner: str, pid: str, plan: dict, take: dict, caps: dict,
             panel_nos.append(len(image_urls))
     prompt_plan = _soften_plan(owner, pid, plan, take, _strong(soften)) if soften else plan
     kwargs = {"real": real, "cast": cast, "location_no": location_no, "frame_no": frame_no, "panel_nos": panel_nos,
-              "caps": caps, "soften": soften, "anchor": anchor is not None, "no_text": no_text}
+              "caps": caps, "soften": soften, "anchor": anchor is not None, "no_text": no_text,
+              "bases": _base_outfits(actors, char_by_id)}
     audit: dict = {}
     prompt = _vibe_take_prompt(prompt_plan, take, audit=audit, **kwargs)
 
@@ -5081,6 +5102,9 @@ def _take_payload(owner: str, pid: str, plan: dict, take: dict, caps: dict, vari
 
     # 웹툰은 지금과 같은 호출(variant 인자 없음), 실사만 variant="real".
     prompt_kwargs = {"variant": "real"} if real else {}
+    bases = _base_outfits(actors, char_by_id)
+    if bases:
+        prompt_kwargs["bases"] = bases  # 작업 164: 캐릭터 기본 옷(콘티·대본 다음 후보 · 검사 실패 대체)
     if anchor is not None:
         prompt_kwargs["anchor"] = {"frameNo": frame_no}  # 작업 155: 장소 고정·프레임 줄·의상 고정
     prompt_plan = plan
@@ -7114,6 +7138,91 @@ def _scene_outfit_pick(candidates, limit: int = 140) -> str:
     return ""
 
 
+# ---------------------------------------------------------------- 작업 164: 옷 글 검사(조각 "black sleeve" · "shirt cuff)" 막기)
+# test3: 162 손 주인 메모("in dark navy shirt cuff")가 콘티 연기 글에서 장면 옷으로 읽혀 모든 테이크 look 줄이 조각이 됐다.
+# 쓸 만한 옷 = 3낱말 이상 · 괄호 짝이 맞음 · 부분 낱말(소매·소맷부리·깃·단)이 아닌 옷 낱말 · 앞 명사구가 부분 낱말로 끝나지 않음.
+_COSTUME_PART_WORDS = re.compile(r"\b(?:sleeves?|cuffs?|collars?|hems?|hemlines?|lapels?|necklines?|pockets?|buttons?|"
+                                 r"zippers?|waistbands?|straps?)\b", re.IGNORECASE)
+# 앞 명사구 끝: 쉼표·쌍반점·괄호, 또는 with·over·under·and 같은 이음말 앞.
+_COSTUME_HEAD_END = re.compile(r"\s*[,;:(]|\s+(?:with|over|under|and|plus|featuring|showing|that|which|worn|paired|tucked|"
+                               r"untucked|rolled|open|half|buttoned|unbuttoned|zipped|at|on|in|to|from|down|around|across|"
+                               r"along|near|by)\b", re.IGNORECASE)
+_COSTUME_MIN_WORDS = 3
+
+
+def _costume_brackets_ok(text: str) -> bool:
+    stack: list[str] = []
+    pairs = {")": "(", "]": "[", "}": "{"}
+    for ch in text:
+        if ch in "([{":
+            stack.append(ch)
+        elif ch in pairs and (not stack or stack.pop() != pairs[ch]):
+            return False
+    return not stack
+
+
+def _costume_part_only(text: str) -> bool:
+    """옷 낱말이 부분 낱말뿐("black sleeve")이거나 앞 명사구가 부분 낱말로 끝나면("dark navy shirt cuff") True."""
+    if not _OUTFIT_GARMENT.search(_COSTUME_PART_WORDS.sub(" ", text)):
+        return True
+    head = _COSTUME_HEAD_END.split(text, 1)[0].split()
+    return not head or bool(_COSTUME_PART_WORDS.fullmatch(head[-1].strip(".,;:!?\"'")))
+
+
+def _costume_valid(text) -> bool:
+    """작업 164: 옷 글 1개가 쓸 만한가(3낱말 이상 · 괄호 짝 · 부분 낱말 아닌 옷 낱말 · 앞 명사구 끝이 부분 낱말 아님)."""
+    text = " ".join(str(text or "").split()).rstrip(" .")
+    return (len(text.split()) >= _COSTUME_MIN_WORDS and _costume_brackets_ok(text)
+            and not _costume_part_only(text))
+
+
+def _costume_candidate(value, limit: int = 140, *, real: bool = True) -> str:
+    """작업 164: 옷 후보 1개 → 정리한 옷 글(쓸 수 없으면 ""). 146/137 정리(_scene_outfit_text)가 3낱말 미만을 남기면 정리 전
+    후보의 첫 문장을 쓴다(옷 구절을 반으로 자르지 않는다). 고르기는 애니·실사가 같다(검사는 실사 정리 140자로)."""
+    raw = " ".join(str(value or "").split())
+    if not raw:
+        return ""
+    probe = _scene_outfit_text(raw)
+    text = _scene_outfit_text(raw, limit, real=real)
+    if len(probe.split()) < _COSTUME_MIN_WORDS or len(text.split()) < _COSTUME_MIN_WORDS:
+        first = re.split(r"(?<=[.!?])\s+", raw)[0].rstrip(" .")
+        probe = _clip_words(first, 140).rstrip(" .")
+        text = _clip_words(vnew_fx.strip_drawing_words(first) if real else first, limit).rstrip(" .")
+    return text if _costume_valid(probe) and _costume_valid(text) else ""
+
+
+def _override_costume(plan: dict, name: str) -> str:
+    """사용자 장면 의상 수정(castOverrides[이름].costume, 한국어여도). 없으면 ""."""
+    override = ((plan.get("input") or {}).get("castOverrides") or {}).get(str(name or "").strip()) or {}
+    return str(override.get("costume") or "").strip() if isinstance(override, dict) else ""
+
+
+def _base_outfits(actors, char_by_id: dict) -> dict[str, str]:
+    """작업 164: {인물 이름: 캐릭터 분석 기본 옷(_char_entries outfitEn = 142 시트 baseOutfitEn)}. 모르면 키 없음."""
+    out: dict[str, str] = {}
+    for actor in actors or []:
+        name = str(actor.get("name") or "").strip()
+        outfit = str((char_by_id.get(str(actor.get("charId") or "")) or {}).get("outfitEn") or "").strip()
+        if name and outfit and name not in out:
+            out[name] = outfit
+    return out
+
+
+def _costume_guard(plan: dict, name: str, costume: str, base: str = "", *, limit: int = 140, real: bool = True,
+                   logged: set | None = None) -> str:
+    """작업 164: 제출 전 look/COSTUME 줄의 옷 글 검사. 쓸 수 없으면 vnew.gen.costume_invalid 로그(logged 가 None 이면 없음, 이름당 1번)
+    후 캐릭터 기본 옷(base, 정리 · 검사 — 그것도 못 쓰면 ""). 빈 값 · 사용자 장면 의상 수정은 그대로."""
+    costume = str(costume or "").strip()
+    if not costume or _costume_valid(costume) or _override_costume(plan, name):
+        return costume
+    fixed = _costume_candidate(base, limit, real=real)
+    if logged is not None and name not in logged:
+        logged.add(name)
+        log.warning("vnew.gen.costume_invalid name=%s costume=%r base=%s", str(name)[:40], costume[:80],
+                    "used" if fixed else "none")
+    return fixed
+
+
 def _brief_name_forms(name: str) -> list[str]:
     """작업 138: 이름 인식에 쓰는 표기들. 한글 3글자 이상이면 로마자 마지막 두 음절(이름만)도 더한다.
     예: 범건우 → [범건우, Beomgeonu, Beom Geonu, Geonu]."""
@@ -7202,15 +7311,21 @@ def _real_brief_text(text, scene_outfits: dict | None = None) -> str:
 
 def _outfit_of(item: dict) -> str:
     """콘티 컷·대본 entry 의 characters 항목 1개의 영어 옷 표현(작업 136). outfitEn·costumeEn·costume 이 먼저,
-    없으면 actionEn·positionEn 안의 "wearing/dressed in/in + 옷" 구절. 한글이면 쓰지 않는다. 없으면 ""."""
+    없으면 actionEn·positionEn 안의 "wearing/dressed in/in + 옷" 구절. 한글이면 쓰지 않는다. 없으면 "".
+    작업 164: 162 손 주인 메모("<주인>'s hand (off-frame, in dark navy shirt cuff), …")는 옷이 아니다. 손만·목소리만·화면 밖 인물
+    (presence 또는 positionEn off-frame)의 글은 옷으로 읽지 않고, 글에서 뽑은 구절은 괄호 짝이 맞고 옷의 부분(소매·소맷부리)이 아니어야
+    한다(낱말 수 검사는 _scene_costume 이 한다)."""
     for field in ("outfitEn", "costumeEn", "costume"):
         value = str(item.get(field) or "").strip()
         if value and not vnew_fx.HANGUL.search(value):
             return value
+    if str(item.get("presence") or "") in ("hand_only", "voice_only", "off_screen") or _is_off_frame(item.get("positionEn")):
+        return ""
     for field in ("actionEn", "positionEn"):
         for m in _OUTFIT_PHRASE.finditer(str(item.get(field) or "")):
             chunk = _OUTFIT_ARTICLE.sub("", m.group(1).strip())
-            if REAL_BRIEF_CLOTHING_WORDS.search(chunk) and not vnew_fx.HANGUL.search(chunk):
+            if (REAL_BRIEF_CLOTHING_WORDS.search(chunk) and not vnew_fx.HANGUL.search(chunk)
+                    and _costume_brackets_ok(chunk) and not _costume_part_only(chunk)):
                 return chunk
     return ""
 
@@ -7302,13 +7417,16 @@ def _cut_cast_readings(plan: dict) -> dict[str, dict[str, str]]:
     return out
 
 
-def _scene_costume(plan: dict, name: str, location, *, fallback: str = "", limit: int = 140, real: bool = True) -> str:
+def _scene_costume(plan: dict, name: str, location, *, fallback: str = "", base: str = "", limit: int = 140,
+                   real: bool = True) -> str:
     """작업 160: 그 장소(scene/location)에서 그 인물의 옷 1벌(끝 마침표 없음, 146 정리). 모든 테이크·조각·대체·시작 그림·Kling 이 같은 값.
 
     사용자 장면 의상 수정(castOverrides, 한국어여도)이 있으면 그것. 없으면 후보 순서: 그 장소 컷들의 콘티 characters 옷 → 대본 entries
     옷(컷 순) → 그 장소 모든 컷의 패널 읽기 옷 가운데 가장 많은 것(같으면 앞 컷) → fallback. 첫 쓸 만한 후보(146 규칙: 실사 정리 뒤
     2낱말 이상·옷 낱말)를 limit 으로 정리한다. 고르기는 애니·실사가 같고, real=False(애니)면 그 후보를 그림 낱말 빼기 없이 정리한다
     (그림 낱말은 실사만 지운다 — lr-e).
+    작업 164: 순서 = 콘티 → 대본 → base(캐릭터 분석 기본 옷, 142 시트) → 패널 읽기 다수결 → fallback. 쓸 만한 후보 = _costume_candidate
+    (3낱말 이상 · 괄호 짝 · 부분 낱말 아닌 옷 낱말, 정리가 3낱말 미만이면 정리 전 첫 문장). 쓸 수 없는 패널 읽기는 표도 없다.
     """
     name = str(name or "").strip()
     if not name:
@@ -7339,25 +7457,27 @@ def _scene_costume(plan: dict, name: str, location, *, fallback: str = "", limit
     votes: dict[str, list] = {}
     for order, cut_id in enumerate(ids):
         value = (readings.get(cut_id) or {}).get(name)
-        text = _scene_outfit_text(value)
+        text = _costume_candidate(value)
         if text:
             vote = votes.setdefault(text.lower(), [0, order, value])
             vote[0] += 1
     majority = [v[2] for v in sorted(votes.values(), key=lambda v: (-v[0], v[1]))]
-    for value in [*conti_values, *script_values, *majority, fallback]:
-        text = _scene_outfit_text(value)
-        if len(text.split()) >= 2 and _OUTFIT_GARMENT.search(text):
-            return _scene_outfit_text(value, limit, real=real)
+    for value in [*conti_values, *script_values, base, *majority, fallback]:
+        text = _costume_candidate(value, limit, real=real)
+        if text:
+            return text
     return ""
 
 
-def _scene_costume_map(plan: dict, cut_ids, location, fallback: dict | None = None) -> dict[str, str]:
+def _scene_costume_map(plan: dict, cut_ids, location, fallback: dict | None = None,
+                       bases: dict | None = None) -> dict[str, str]:
     """작업 160: 컷 인물(_scene_outfits 의 이름)마다 _scene_costume. _real_brief_text 의 scene_outfits 자리에 쓴다(컷마다 콘티 옷이
-    장면 옷을 덮지 않게). fallback = {이름: 지금 값}(없으면 _scene_outfits 값)."""
+    장면 옷을 덮지 않게). fallback = {이름: 지금 값}(없으면 _scene_outfits 값). 작업 164: bases = {이름: 캐릭터 기본 옷}."""
     base = _scene_outfits(plan, cut_ids, fallback)
     fallback = fallback if fallback is not None else base
     names = list(dict.fromkeys([*base, *fallback]))
-    return {name: _scene_costume(plan, name, location, fallback=str(fallback.get(name) or base.get(name) or ""))
+    return {name: _scene_costume(plan, name, location, fallback=str(fallback.get(name) or base.get(name) or ""),
+                                 base=str((bases or {}).get(name) or ""))
             for name in names}
 
 
