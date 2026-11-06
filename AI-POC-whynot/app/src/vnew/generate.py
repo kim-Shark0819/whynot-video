@@ -4544,6 +4544,251 @@ def _vibe_who_hands(on_list: list[dict], handles: list[str], disp, clauses: list
     return "; ".join(parts + clauses) + ". "
 
 
+# 작업 166: 컷마다 주인공·샷 크기·손 주인을 SHOT 줄 머리에 고정한다(애니·실사, 실사 홍조 문구는 실사만).
+VIBE_INSERT_SIZE = "extreme close-up insert of hands only; no face, no head, no full body in frame"
+VIBE_CLOSEUP_LOCK = "Close-up of {name}{cue} filling the frame"
+VIBE_EDGE_PERSON = "{name} only partly visible at the frame edge"
+VIBE_OUT_PERSON = "{name} not in frame"
+VIBE_OWN_HANDS = "{name}'s own hands stay lowered, out of frame, and never touch {pos} own {part}"
+VIBE_OWN_HANDS_OWNER = "; the only hand on {pos} {part} is {owner} entering from the frame edge"
+REAL_BLUSH_LOCK = "a faint natural flush on {name}'s cheeks only; no red eyelids, no eye makeup"
+REAL_BLUSH_LOCK_ANY = "a faint natural flush on the cheeks only; no red eyelids, no eye makeup"
+_INSERT_WORD = re.compile(r"\binsert\b", re.IGNORECASE)
+_CLOSEUP_WORD = re.compile(r"\b(?:extreme\s+)?close[\s-]?up\b", re.IGNORECASE)
+_MEDIUM_CLOSEUP = re.compile(r"\bmedium\s+close[\s-]?up\b", re.IGNORECASE)
+_NO_OWN_HANDS_EN = re.compile(r"\b(?:does\s+not|doesn['\u2019]t|do\s+not|don['\u2019]t|never)\s+use\s+(?:his|her|their)\s+own\s+"
+                              r"hands?\b|\bwithout\s+using\s+(?:his|her|their)\s+own\s+hands?\b", re.IGNORECASE)
+_NO_OWN_HANDS_KO = re.compile(r"(?:자기|자신의?|제)\s*손[은을]?\s*(?:쓰지|사용하지)\s*않")
+_FACE_PARTS = frozenset(("cheek", "cheeks", "eye", "eyes", "face", "chin", "jaw", "forehead", "mouth", "lip", "lips", "ear",
+                         "ears", "nose", "brow", "brows", "temple", "temples", "head", "hair"))
+_HAND_PARTS = frozenset(("hand", "hands", "wrist", "wrists", "arm", "arms", "finger", "fingers", "palm", "palms"))
+_HAIR_COLOR = re.compile(r"^(?:pale|light|dark|ash|platinum|golden|honey|jet|charcoal|silver|white|grey|gray|black|blond|blonde|"
+                         r"brown|red|auburn|ginger|pink|blue|green|purple|violet|navy|chestnut|copper|sandy)(?:-[a-z]+)?$")
+_REAL_FLUSH_WHO = re.compile(r"a faint natural flush on (?:(?P<who>[^,;.]+?)['\u2019]s|the) cheeks(?: only)?"
+                             r"(?P<tail>; no red eyelids, no eye makeup)?")
+_BLUSH_NEG = r"\b(?:does|do)\s+not\s+blush\b|\bno\s+blush\w*"
+_BLUSH_MOD = r"(?:deeply|deep|faintly|faint|slightly|slight|brightly|bright|lightly|light|visibly|pink|red|crimson)"
+_BLUSH_ANY = (
+    r"\b(?:(?P<pro1>his|her|their)\s+)?(?:(?:a|an)\s+)?(?:" + _BLUSH_MOD + r"\s+)*(?:flush(?:ed|es|ing)?|blush(?:ed|es|ing)?|"
+    r"red(?:dened)?)\s+(?:on\s+(?:his|her|their|the)\s+)?(?P<noun1>cheeks?|face)\b"
+    r"|\b(?:(?:his|her|their)\s+)?(?:cheeks?|face)\s+(?:(?:" + _BLUSH_MOD + r"|turning|turns|turn|goes|go)\s+)*"
+    r"(?:flushed|flush(?:es|ing)?|blush(?:es|ing)?|red(?:dened)?|crimson|pink)\b"
+    r"|\b(?:(?:a|an)\s+)?(?:" + _BLUSH_MOD + r"\s+)*(?:flush(?:ed|es|ing)?|blush(?:ed|es|ing)?)(?:\s+(?:lines?|marks?))?"
+    r"(?:\s+(?:on|across)\s+(?:his|her|their|the)\s+(?:cheeks?|face))?\b")
+_BLUSH_SCAN = re.compile(r"(?P<real>" + _REAL_FLUSH_WHO.pattern + r")|(?P<neg>" + _BLUSH_NEG + r")|(?P<any>" + _BLUSH_ANY + r")",
+                         re.IGNORECASE)
+
+
+def _cut_named(cut: dict) -> list[dict]:
+    """콘티 컷 characters 중 이름이 있는 dict(콘티 순서)."""
+    return [ch for ch in cut.get("characters") or [] if isinstance(ch, dict) and str(ch.get("name") or "").strip()]
+
+
+def _cut_on_screen_chars(cut: dict, owners: list[dict]) -> list[dict]:
+    """작업 166: 화면에 보이는 콘티 인물. presence 가 있으면 on_screen, 없으면(옛 콘티) 손만 들어오는 사람이 아닌 사람."""
+    owner_ids = {id(o) for o in owners}
+    return [ch for ch in _cut_named(cut)
+            if (ch.get("presence") == "on_screen" if ch.get("presence") else id(ch) not in owner_ids)]
+
+
+def _vibe_is_insert(cut: dict, owners: list[dict]) -> bool:
+    """작업 166: 인서트 컷 = 콘티 cameraEn·shotSize 에 "insert", 또는 보이는 사람 없이 손만 들어오는 사람이 있다."""
+    if _INSERT_WORD.search(str(cut.get("cameraEn") or "")) or _INSERT_WORD.search(str(cut.get("shotSize") or "")):
+        return True
+    return bool(owners) and not _cut_on_screen_chars(cut, owners)
+
+
+def _vibe_closeup_subject(cut: dict, shot: str, owners: list[dict], disp) -> str:
+    """작업 166: 클로즈업 주인공(콘티 한글 이름) 또는 "". cameraEn 이 한 사람의 얼굴·클로즈업을 부르거나("closeup on X's …
+    face", "X's … face"), 클로즈업에 presence on_screen 이 정확히 1명이면 그 사람."""
+    named = _cut_named(cut)
+    camera = " ".join(str(cut.get("cameraEn") or "").split())
+    hits: list[str] = []
+    for ch in named:
+        ko = str(ch.get("name") or "").strip()
+        for form in {ko, disp(ko)}:
+            name = re.escape(form)
+            if form and (re.search(r"\bclose[\s-]?up\s+(?:shot\s+)?(?:on|of)\s+" + name, camera, re.IGNORECASE)
+                         or re.search(name + r"['\u2019]s\b[^.;]*?\bface\b", camera, re.IGNORECASE)):
+                if ko not in hits:
+                    hits.append(ko)
+    owner_names = {str(o.get("name") or "").strip() for o in owners}
+    mentioned = [ch for ch in named if any(form and form in camera for form in
+                                           (str(ch.get("name") or "").strip(), disp(str(ch.get("name") or "").strip())))]
+    if len(hits) == 1 and hits[0] not in owner_names and len(mentioned) == 1:
+        return hits[0]
+    size = str(cut.get("shotSize") or "").strip().lower().replace("-", "").replace("_", "").replace(" ", "")
+    closeup = (size in ("closeup", "extremecloseup") or str(shot or "").split(" ")[0].upper() in ("CU", "ECU")
+               or bool(_CLOSEUP_WORD.search(camera) and not _MEDIUM_CLOSEUP.search(camera)))
+    on = [ch for ch in named if ch.get("presence") == "on_screen"]
+    return str(on[0].get("name") or "").strip() if closeup and len(on) == 1 else ""
+
+
+def _identity_cue(appearance: str) -> str:
+    """작업 166: 외형 글의 머리색 짧은 신원 단서(" (pale blonde hair)"). 머리색 낱말이 없으면 ""."""
+    words = re.findall(r"[A-Za-z][A-Za-z-]*", str(appearance or ""))
+    for at, word in enumerate(words):
+        if word.lower() == "hair":
+            colors = [w.lower() for w in words[max(0, at - 4):at] if _HAIR_COLOR.match(w.lower())]
+            if colors:
+                return " (" + " ".join(colors) + " hair)"
+    return ""
+
+
+def _possessive(ch: dict, appearance: str) -> str:
+    """작업 166: 인물 소유격(his/her/their) — 외형 글의 man/woman, 없으면 연기 글의 his/her."""
+    look = str(appearance or "").lower()
+    if re.search(r"\b(?:woman|girl|female|lady)\b", look):
+        return "her"
+    if re.search(r"\b(?:man|boy|male)\b", look):
+        return "his"
+    action = " " + str(ch.get("actionEn") or "").lower() + " "
+    his, her = len(re.findall(r"\bhis\b", action)), len(re.findall(r"\bher\b", action))
+    return "his" if his >= her and his else "her" if her else "their"
+
+
+def _hand_touch_part(owner: dict, target: dict, on_screen: list[dict], disp) -> str:
+    """작업 166: 손만 들어오는 사람(owner)의 손이 target 에 닿는 곳("cheek" …) 또는 "". 콘티 hands "act>other_<곳>" 을 읽고,
+    "other" 는 보이는 사람이 1명이면 그 사람, 아니면 owner 연기 글이 부르는 사람."""
+    ko = str(target.get("name") or "").strip()
+    action = str(owner.get("actionEn") or "")
+    meant = len(on_screen) == 1 or (ko and (ko in action or disp(ko) in action))
+    hands = owner.get("hands") if isinstance(owner.get("hands"), dict) else {}
+    for value in hands.values():
+        _act, _, where = str(value or "").partition(">")
+        if where.startswith("other_") and meant:
+            return where[len("other_"):].replace("_", " ").strip()
+    return ""
+
+
+def _sleeve_cue(costume: str) -> str:
+    """작업 166: 장면 옷 첫 옷 구절의 짧은 형 + " sleeve"("dark navy/black dress shirt sleeve"). 소매 길이·단추 낱말과
+    with/in 뒤 설명은 뺀다. 옷이 없으면 ""."""
+    first = re.split(r"[;,]", " ".join(str(costume or "").split()))[0].strip(" .")
+    first = re.sub(r"^wearing\s+", "", first, flags=re.IGNORECASE)
+    first = re.split(r"\s+(?:with|in|featuring|under|over)\s+", first, maxsplit=1)[0]
+    first = " ".join(w for w in first.split()
+                     if not re.match(r"^(?:long|short|half|three-quarter)-sleeved?$|^sleeveless$|^button-(?:up|down)$", w, re.I))
+    if first[:1].isupper() and first[1:2].islower():
+        first = first[0].lower() + first[1:]
+    first = _clip_words(first, 40).rstrip(".")
+    if not first:
+        return ""
+    return first if re.search(r"\b(?:sleeves?|cuffs?)$", first) else first + " sleeve"
+
+
+def _vibe_own_hands(cut: dict, owners: list[dict], disp, appearance_of, costume_of) -> list[tuple[str, str]]:
+    """작업 166: 자기 손 잠금 [(콘티 한글 이름, 문장(마침표 없음))]. 대상 = presence on_screen 이면서 연기 글이 자기 손을 쓰지
+    않는다고 하거나, 손만 들어오는 다른 사람의 손이 닿고 자기 hands 항목이 없는 사람. 손 주인 옷 소매 단서는 장면 옷에서."""
+    out: list[tuple[str, str]] = []
+    on_screen = [ch for ch in _cut_named(cut) if ch.get("presence") == "on_screen"]
+    for ch in on_screen:
+        ko = str(ch.get("name") or "").strip()
+        refuses = bool(_NO_OWN_HANDS_EN.search(str(ch.get("actionEn") or ""))
+                       or _NO_OWN_HANDS_KO.search(str(ch.get("actionKo") or "")))
+        owner, part = None, ""
+        for cand in owners:
+            if str(cand.get("name") or "").strip() == ko:
+                continue
+            where = _hand_touch_part(cand, ch, on_screen, disp)
+            if where:
+                owner, part = cand, where
+                break
+        if not refuses and (owner is None or ch.get("hands")):
+            continue
+        if not refuses and part.split(" ")[-1] in _HAND_PARTS:
+            continue  # 손을 잡는 손은 자기 손 혼동이 아니다
+        if owner is None and owners:
+            owner = next((o for o in owners if str(o.get("name") or "").strip() != ko), None)
+        part = "face" if refuses or not part or part.split(" ")[-1] in _FACE_PARTS else part
+        pos = _possessive(ch, appearance_of(ko))
+        text = VIBE_OWN_HANDS.format(name=disp(ko), pos=pos, part=part)
+        if owner is not None:
+            owner_ko = str(owner.get("name") or "").strip()
+            sleeve = _sleeve_cue(costume_of(owner_ko))
+            who = f"{disp(owner_ko)}'s ({sleeve})" if sleeve else f"{disp(owner_ko)}'s hand"
+            text += VIBE_OWN_HANDS_OWNER.format(pos=pos, part=part, owner=who)
+        out.append((ko, text))
+    return out
+
+
+def _blush_target(text: str, start: int, people: dict[str, str]) -> str:
+    """작업 166: 홍조 구절의 사람(로마자 handle) — 바로 앞이 "<이름>'s " 면 그 사람, 아니면 같은 문장에서 처음 불린 사람(주어).
+    없으면 ""."""
+    stop = text.rfind(". ", 0, start)
+    sentence_at = stop + 2 if stop >= 0 else 0
+    before = text[sentence_at:start]
+    found: list[tuple[int, int, str]] = []
+    for token, handle in people.items():
+        for m in re.finditer(r"(?<![A-Za-z\uac00-\ud7a3])" + re.escape(token) + r"(?![A-Za-z\uac00-\ud7a3])", before):
+            found.append((m.start(), m.end(), handle))
+    for _s, end, handle in sorted(found, key=lambda f: -f[1]):
+        if re.fullmatch(r"['\u2019]s\s+", before[end:]):
+            return handle
+    return min(found)[2] if found else ""
+
+
+def _real_blush_pieces(pieces: list[str], who: str, people: dict[str, str] | None = None) -> list[str]:
+    """작업 166: 실사 SHOT 조각들의 홍조 글 → REAL_BLUSH_LOCK(이름 붙은 사람만). 실사 표현 문장("a faint natural flush on X's
+    cheeks only")은 꼬리를 붙이고, 그 밖의 홍조 구절("cheeks deeply flushed" …)은 지운다. 표현 문장이 없으면 처음 지운 조각 끝에
+    ", " + 문구 — 이름 = 그 구절 앞 같은 문장에서 불린 사람(people: 이름 조각 → handle), 없으면 who, 그것도 없으면 이름 없는 형.
+    "does not blush" 는 그대로. 홍조 글이 없으면 그대로."""
+    has_who = any(_REAL_FLUSH_WHO.search(p or "") for p in pieces)
+    out: list[str] = []
+    added = has_who
+    for piece in pieces:
+        text = str(piece or "")
+        spans = []
+        target = ""
+        for m in _BLUSH_SCAN.finditer(text):
+            if m.group("real") is not None:
+                spans.append((m.start(), m.end(), REAL_BLUSH_LOCK.format(name=m.group("who")) if m.group("who")
+                              else REAL_BLUSH_LOCK_ANY))
+            elif m.group("any") is not None:
+                if not target and not added:
+                    target = _blush_target(text, m.start(), people or {}) or who
+                if m.group("noun1") and (m.group("pro1") or re.search(r"['\u2019]s\s+$", text[:m.start()])):
+                    # "Uijun's flushed cheek" → "Uijun's cheek": 소유격 뒤 명사는 남긴다(문장이 깨지지 않게)
+                    spans.append((m.start(), m.end(), "\0" + (m.group("pro1") + " " if m.group("pro1") else "")
+                                  + m.group("noun1")))
+                else:
+                    spans.append((m.start(), m.end(), None))
+        removed = False
+        for start, end, repl in reversed(spans):
+            if repl is not None:
+                removed = removed or repl.startswith("\0")
+                text = text[:start] + repl.lstrip("\0") + text[end:]
+                continue
+            removed = True
+            before, after = text[:start], text[end:]
+            if re.search(r"\bwith\s+$", before) and re.match(r"\s*(?:[,.;]|$)", after):
+                before = re.sub(r"\s*\bwith\s+$", "", before)
+            elif after.startswith(", ") and not before.endswith(", "):
+                after = after[2:]
+            elif before.endswith(", "):
+                before = before[:-2]
+            elif after.startswith(" and "):
+                after = after[5:]
+            elif re.search(r"\band\s+$", before):
+                before = re.sub(r"\s*\band\s+$", "", before)
+            if (not before.strip() or before.rstrip().endswith(".")) and after.lstrip()[:1].islower():
+                lead = after[: len(after) - len(after.lstrip())]
+                after = lead + after.lstrip()[0].upper() + after.lstrip()[1:]
+            text = before + after
+        if removed:
+            text = re.sub(r"\s{2,}", " ", text)
+            text = re.sub(r"\s+([,.;])", r"\1", text)
+            text = re.sub(r"([,;])(?=[,.;])", "", text)
+            text = re.sub(r"\.(?:\s*\.)+", ".", text).strip()
+            text = re.sub(r"^[,;.]\s*", "", text)
+            if not added:
+                lock = REAL_BLUSH_LOCK.format(name=target) if target else REAL_BLUSH_LOCK_ANY
+                text = (text.rstrip(" .,;") + ", " if text.strip(" .,;") else "") + lock
+                added = True
+        out.append(text)
+    return out
+
+
 def _vibe_size(shot: str) -> str:
     """샷 약어("MCU front") → 참고 구현 샷 크기 표기("medium close-up, front view")."""
     size, _, angle = str(shot or "").strip().partition(" ")
@@ -4605,6 +4850,14 @@ def _vibe_take_prompt(plan: dict, take: dict, *, real: bool, cast: list[dict], l
         return vnew_fx.strip_drawing_words(text) if real else text
 
     handles = [_disp(str(m.get("name") or "")) for m in cast if str(m.get("name") or "").strip()]
+    # 작업 166: 실사 홍조 대상 찾기용 이름 조각(한글 이름 · handle · 이름만(성 뺌) 한글/로마자) → handle.
+    people: dict[str, str] = {}
+    for member in cast:
+        ko = str(member.get("name") or "").strip()
+        if ko:
+            for token in (ko, _disp(ko), ko[1:] if len(ko) >= 3 else "", _romanize_name(ko[1:]) if len(ko) >= 3 else ""):
+                if token and len(token) >= 2:
+                    people.setdefault(token, _disp(ko))
     state = {"style": False, "background": False, "assets": False, "paragraph": False}
 
     def _style() -> str:
@@ -4706,37 +4959,75 @@ def _vibe_take_prompt(plan: dict, take: dict, *, real: bool, cast: list[dict], l
             return ""
         return sentence.rstrip(" .")
 
+    def _blush_who(entry: dict) -> str:
+        # 작업 166: 실사 홍조 문구가 붙는 사람 = 기호 대상(fxWho blush lines) 첫 사람, 없으면 화면에 온전히 보이는 1명.
+        targets = [str(n) for n in ((entry.get("fxWho") or {}).get("blush lines") or []) if str(n or "").strip()]
+        if targets:
+            return _disp(targets[0])
+        full = [str(i.get("name") or "") for i in entry.get("onScreen") or []
+                if i.get("name") and str(i.get("how") or "full") in ("full", "main")]
+        return _disp(full[0]) if len(full) == 1 else ""
+
     def _action(entry: dict) -> str:
         # 실사 = live.real_action(_real_action + REAL_FX 실사 표현), 애니 = 지시서 연기 그대로(157 앞 2문장).
         if real:
             text = _with_real_expressions(_take_action(_real_action(entry.get("action") or "")), entry.get("fx"),
                                           entry.get("fxWho"), _present(entry), _disp)
+            text = _real_blush_pieces([str(text or "")], _blush_who(entry), people)[0]  # 작업 166
         else:
             text = _take_action(entry.get("action") or "")
         return str(text or "").strip().rstrip(".")
+
+    appearances = {str(m.get("name") or "").strip(): str(m.get("appearance") or "") for m in cast}
+
+    def _closeup_who(subject: str, entry: dict, cut: dict, clauses: list[str], owner_names: set[str]) -> str:
+        # 작업 166: "Close-up of A (cue) filling the frame; B only partly visible at the frame edge; C not in frame; <손 절>. "
+        name = _disp(subject)
+        visible = {_disp(str(i.get("name") or "")) for i in entry.get("onScreen") or [] if i.get("name")}
+        visible |= {_disp(str(ch.get("name") or "")) for ch in _cut_named(cut) if ch.get("presence") == "on_screen"}
+        pieces = [VIBE_CLOSEUP_LOCK.format(name=name, cue=_identity_cue(appearances.get(subject, "")))]
+        seen = {name} | set(owner_names)
+        for other in [_disp(str(ch.get("name") or "")) for ch in _cut_named(cut)] + handles:
+            if other and other not in seen:
+                seen.add(other)
+                pieces.append((VIBE_EDGE_PERSON if other in visible else VIBE_OUT_PERSON).format(name=other))
+        return "; ".join(pieces + clauses) + ". "
 
     def _shot(index: int, entry: dict, cut_id: str) -> str:
         cut = cuts_by_id.get(cut_id) or {}
         # 작업 162: 손만 들어오는 화면 밖 인물이 있으면 who_in_shot 에 손 절을 붙인다(없으면 159 그대로).
         hand_owners = _hands_only_owners(cut)
+        # 작업 166: 인서트 크기 · 클로즈업 주인공 · 자기 손 잠금(해당 없는 컷은 지금 그대로).
+        insert = _vibe_is_insert(cut, hand_owners)
+        subject = "" if insert else _vibe_closeup_subject(cut, entry.get("shot"), hand_owners, _disp)
+        owner_names = {_disp(str(o.get("name") or "")) for o in hand_owners}
+        clauses: list[str] = []
         if hand_owners:
             names = [str(c.get("name") or "") for c in cut.get("characters") or [] if isinstance(c, dict)] + list(name_map)
             clauses = [_hands_only_clause(o, names, _disp, real=real, soften=soften) for o in hand_owners]
-            who = _vibe_who_hands(entry.get("onScreen") or [], handles, _disp, clauses,
-                                  {_disp(str(o.get("name") or "")) for o in hand_owners})
+        if subject:
+            who = _closeup_who(subject, entry, cut, clauses, owner_names)
+        elif hand_owners:
+            who = _vibe_who_hands(entry.get("onScreen") or [], handles, _disp, clauses, owner_names)
         else:
             who = _vibe_who(entry.get("onScreen") or [], handles, _disp)
-        prefix = f"Shot {index + 1} ({entry['start']}-{entry['end']}s), {_vibe_size(entry.get('shot'))}: " + who
+        locks = _vibe_own_hands(cut, hand_owners, _disp, lambda ko: appearances.get(ko, ""), lambda ko: costumes.get(ko) or "")
+        locked = {ko for ko, _text in locks}
+        own = "".join(text + ". " for _ko, text in locks)
+        size = VIBE_INSERT_SIZE if insert else _vibe_size(entry.get("shot"))
+        prefix = f"Shot {index + 1} ({entry['start']}-{entry['end']}s), {size}: " + (own + who if real else who + own)
         parts = []
         if index in moves:
             parts.append(f"Setting now: {_bg(moves[index])}")
         parts.append(_action(entry))
-        if not any(str(o.get("name") or "").strip() == str((entry.get("contact") or {}).get("name") or "").strip()
-                   for o in hand_owners):
-            parts.append(_contact(entry))  # 162: 손 주인의 닿는 연기는 손 절이 이미 말한다
+        contact_name = str((entry.get("contact") or {}).get("name") or "").strip()
+        if not any(str(o.get("name") or "").strip() == contact_name for o in hand_owners) and contact_name not in locked:
+            parts.append(_contact(entry))  # 162: 손 주인의 닿는 연기는 손 절이 이미 말한다(166: 자기 손 잠금 인물의 손 연기도 뺀다)
         for pose in entry.get("poses") or []:
             if any(str(o.get("name") or "").strip() == str(pose.get("name") or "").strip() for o in hand_owners):
                 continue  # 162 fix1: 손만 들어오는 사람의 손은 손 절이 말한다
+            if str(pose.get("name") or "").strip() in locked:
+                continue  # 166: 자기 손을 쓰지 않는 사람의 손 포즈는 넣지 않는다
             clause = _pose_clause(pose, _disp)
             if clause and _strong(soften):
                 clause = _soften_text(clause, True)  # 작업 163
@@ -4749,6 +5040,8 @@ def _vibe_take_prompt(plan: dict, take: dict, *, real: bool, cast: list[dict], l
             value = _txt(cut.get(field)).rstrip(" .")
             if value and not vnew_fx.HANGUL.search(value):
                 parts.append(value)
+        if real:
+            parts = _real_blush_pieces(parts, _blush_who(entry) or (_disp(subject) if subject else ""), people)  # 작업 166
         off_speaker = str(entry.get("offScreenSpeaker") or "").strip()
         parts.extend(_line_piece(ln, off_speaker) for ln in _entry_lines(entry))
         body = ""
