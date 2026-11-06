@@ -1021,6 +1021,7 @@ def run_design(owner: str, pid: str, task_id: str) -> None:
         _set_progress(owner, pid, task_id, step="panels", done=0, total=total_cuts)
         grammar_by_cut, grammar_cache = _read_grammars(
             owner, pid, plan_id, groups, chars, grammar_cache, reread_cuts, task_id=task_id,
+            outfits=plan_mod.outfit_notes(owner, plan),  # 작업 162: 손 주인 판단용 옷 메모
         )
 
         # 2) design: Astra 설계. (progress: design, total=그룹 수)
@@ -1233,7 +1234,7 @@ def _grammar_charge(owner: str, pid: str, plan_id: str):
     return _cb
 
 
-def _read_grammars(owner, pid, plan_id, groups, chars, grammar_cache, reread_cuts, *, task_id=""):
+def _read_grammars(owner, pid, plan_id, groups, chars, grammar_cache, reread_cuts, *, task_id="", outfits=None):
     """컷마다 연출 문법을 읽는다(캐시). 반환 (grammar_by_cut, 갱신된 grammar_cache).
 
     - 캐시 previz["panelGrammar"][cutId] = {hash, grammar, v}. 그 컷 조각 tiles_hash 가 같고 reread 대상이
@@ -1272,7 +1273,7 @@ def _read_grammars(owner, pid, plan_id, groups, chars, grammar_cache, reread_cut
                 continue
             try:
                 grammar = previz_grammar.read_cut(
-                    owner, pid, plan_id, cut, tiles, role_names, charge=charge
+                    owner, pid, plan_id, cut, tiles, role_names, charge=charge, outfits=outfits
                 )
             except Exception as exc:  # noqa: BLE001
                 log.warning("vnew.previz.grammar.failed cut=%s err=%s", cut_id, str(exc)[:200])
@@ -1519,6 +1520,9 @@ def _apply_appearance(owner: str, scenes: list[dict], chars: list[dict]) -> None
 
 # 작업 148: 패널 읽기 actions[] → timeline actor 로 옮기는 손·자세·머리·눈 키.
 _POSE_KEYS = ("posture", "hands", "head", "eyes")
+# 작업 162 fix1: 손으로 하는 옛 gesture(콘티가 "손 없음"이면 지운다).
+_HAND_GESTURES = ("point", "hands_on_knees", "cover_face", "hand_to_own_face", "wipe_tears", "hand_on_other_cheek",
+                  "both_hands_other_cheeks", "hand_on_chest", "press_hand_to_other_chest")
 
 
 def _apply_gestures(scenes: list[dict], groups: list[dict], grammar_by_cut: dict, plan: dict | None = None) -> None:
@@ -1574,6 +1578,28 @@ def _apply_gestures(scenes: list[dict], groups: list[dict], grammar_by_cut: dict
                         continue
                     g = gesture_from_action(str((ch or {}).get("actionEn") or ""))
                     gesture_by_name[nm] = (g, "none", {})
+
+            # 작업 162 fix1: 콘티 인물에 presence·hands 가 있으면 그 손이 먼저(패널 읽기 손은 없을 때만). 손 없음(off_screen·voice_only·
+            # 쉬는 손) = 두 손 rest, 손으로 하는 옛 gesture 는 지운다. 자세·머리·눈은 패널 읽기 값 그대로.
+            conti_chars = (conti_cut_by_id.get(cut_id) or {}).get("characters") or []
+            for ch in conti_chars:
+                if not (isinstance(ch, dict) and ch.get("presence") and "hands" in ch):
+                    continue
+                from . import plan as plan_mod  # noqa: PLC0415
+
+                nm = str(ch.get("name") or "").strip()
+                hands = plan_mod.cast_hands(ch.get("hands")) if ch.get("presence") in ("on_screen", "hand_only") else {}
+                pose_hands = plan_mod.conti_hands_pose(hands)
+                old_gesture, old_target, old_pose = gesture_by_name.get(nm, ("none", "none", {}))
+                pose = {k: v for k, v in old_pose.items() if k != "hands"}
+                pose["hands"] = pose_hands
+                if hands:
+                    gesture = previz_schema.gesture_from_hands(pose_hands) or "none"
+                    target = plan_mod.conti_hand_target(conti_chars, nm) or "none"
+                else:
+                    gesture = "none" if old_gesture in _HAND_GESTURES else old_gesture
+                    target = old_target if gesture != "none" else "none"
+                gesture_by_name[nm] = (gesture, target, pose)
 
             name_by_id = {v: k for k, v in id_by_name.items()}
             for ca in cut.get("actors") or []:
@@ -2448,6 +2474,7 @@ def _commit_scenes(owner: str, pid: str, task_id: str, scenes: list[dict], model
         previz["revision"] = int(previz.get("revision") or 0) + 1
         previz["recordings"] = {}  # revision 이 바뀌면 녹화 키 경로가 달라진다.
         previz["lastRebuild"] = last_rebuild  # 다시 만들기 요약(첫 설계면 None).
+        previz.pop("posesStale", None)  # 작업 162: 새 설계는 지금 패널 읽기로 포즈를 다시 맞췄다.
         # progress 를 done 으로 마무리(막대 가득).
         prog = previz.get("progress") or _empty_progress()
         total = int(prog.get("total") or 0)
@@ -2517,6 +2544,62 @@ def update_scenes(owner: str, pid: str, patch: dict) -> dict:
             previz["status"] = "ready"
         previz["approved"] = False  # 장면을 고치면 승인 해제.
         data["revision"] = int(data.get("revision") or 0) + 1
+        return previz
+
+    _, previz = plan_mod.mutate_plan(owner, pid, mutator)
+    return previz
+
+
+def refresh_poses(owner: str, pid: str) -> dict:
+    """작업 162 [포즈 다시 맞추기]: 저장된 패널 연출 문법(panelGrammar actions — 콘티 연기 다시 읽기가 고친 손)으로 장면 인물
+    포즈만 다시 맞춘다(_apply_gestures). 카메라·배치·소품·컷 길이는 그대로다. 새 actions 에 이름이 있는 인물만 옛 gesture·
+    gestureTarget·posture·hands·head·eyes 를 지우고 다시 채운다. 장면을 바꿨으니 PUT scene 과 같이 승인 해제(다시 승인 = 다시
+    녹화)·plan revision +1, posesStale 은 지운다. 장면이 없거나 준비 전이면 409 NoScenes."""
+    from . import plan as plan_mod  # noqa: PLC0415
+
+    def mutator(data: dict) -> dict:
+        previz = data.setdefault("previz", new_previz())
+        scenes = previz.get("scenes") or []
+        if not scenes or previz.get("status") != "ready":
+            raise VpocError("vnew.previz.poses", "NoScenes", "먼저 장면을 설계해 주세요.", 409)
+        cache = previz.get("panelGrammar") or {}
+        grammar_by_cut = {str(cid): entry["grammar"] for cid, entry in cache.items()
+                          if isinstance(entry, dict) and isinstance(entry.get("grammar"), dict)
+                          and (entry["grammar"].get("actions") or [])}
+        # 작업 162 fix1: 콘티 인물에 presence·hands 가 있는 컷도 다시 맞춘다(콘티 손이 먼저).
+        conti_names: dict[str, set] = {}
+        for cut in (data.get("conti") or {}).get("cuts") or []:
+            names = {str(ch.get("name") or "").strip() for ch in cut.get("characters") or []
+                     if isinstance(ch, dict) and ch.get("presence") and "hands" in ch}
+            if names:
+                conti_names[str(cut.get("id") or "")] = names
+                grammar_by_cut.setdefault(str(cut.get("id") or ""),
+                                          ((cache.get(str(cut.get("id") or "")) or {}).get("grammar") or {}))
+        # 사본에 맞춘 뒤 actions 가 있는 컷만 옮긴다(actions 없는 컷은 _apply_gestures 의 콘티 낱말 대비책을 타지 않게 그대로 둔다).
+        trial = copy.deepcopy(scenes)
+        changed = 0
+        for scene in trial:
+            id_by_name = {str(a.get("name") or "").strip(): str(a.get("id") or "") for a in scene.get("actors") or []}
+            for cut in scene.get("timeline") or []:
+                actions = (grammar_by_cut.get(str(cut.get("cutId") or "")) or {}).get("actions") or []
+                ids = {id_by_name.get(str((a or {}).get("name") or "").strip()) for a in actions if isinstance(a, dict)}
+                ids |= {id_by_name.get(n) for n in conti_names.get(str(cut.get("cutId") or ""), set())}
+                for ca in cut.get("actors") or []:
+                    if isinstance(ca, dict) and str(ca.get("id") or "") in ids:
+                        for key in ("gesture", "gestureTarget", *_POSE_KEYS):
+                            ca.pop(key, None)
+                        changed += 1
+        _apply_gestures(trial, _scene_groups(data.get("conti") or {}), grammar_by_cut, data)
+        for scene, fixed in zip(scenes, trial):
+            timeline = scene.get("timeline") or []
+            for index, cut in enumerate(timeline):
+                if str(cut.get("cutId") or "") in grammar_by_cut and index < len(fixed.get("timeline") or []):
+                    timeline[index] = fixed["timeline"][index]
+        previz["scenes"] = scenes
+        previz.pop("posesStale", None)
+        previz["approved"] = False  # 장면을 고치면 승인 해제(다시 승인하면 다시 녹화).
+        data["revision"] = int(data.get("revision") or 0) + 1
+        log.info("vnew.previz.poses.refresh pid=%s actors=%d", pid, changed)
         return previz
 
     _, previz = plan_mod.mutate_plan(owner, pid, mutator)
@@ -3096,6 +3179,8 @@ def previz_view(owner: str, pid: str, plan: dict) -> dict:
         "lastRebuild": previz.get("lastRebuild"),
         "shotBrief": _shot_brief_view(plan),
     }
+    if previz.get("posesStale"):
+        out["posesStale"] = True  # 작업 162: 연기 다시 읽기 뒤 [포즈 다시 맞추기] 안내(없으면 키 없음 — 지금 모양)
     if collision_on:
         out["collision"] = collision_out
     return out

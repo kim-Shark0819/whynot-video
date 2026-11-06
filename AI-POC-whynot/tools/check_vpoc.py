@@ -54332,8 +54332,18 @@ def check_vnew_vibe_conti_158() -> None:
                    "옮긴 콘티 → _scene_groups(장소 = 대본 setting)·_design_prompt(cutId · seconds 줄)·cameraEn · 인물(명단 이름, name/positionEn/actionEn)")
 
         # ================= (vb-d) 끔 = 158 전 sha =================
+        # 작업 162: 끔 경로 CONTI_SYSTEM 에 규칙 13(손 주인)이 더해졌다(의도한 변경). 그 한 줄을 뺀 SYSTEM 으로 잰 sha 가 158 전 값과
+        # 같아야 한다(호출 인자·블록·저장 콘티는 그대로 — 이 검사 인물에는 옷 메모가 없다). 기대값 _VB158_OFF_SHA 는 바꾸지 않았다.
+        rule13 = "13. Hands: " + prmod.HAND_OWNER_RULE + " " + prmod.HAND_OWNER_CONTI_RULE + "\n"
+        system_162 = prmod.CONTI_SYSTEM
         with _pin_vnew(VNEW_VIBE_CONTI=False):
-            expect("vb-d", _vb158_off_digest(), _VB158_OFF_SHA, "끔: CONTI_SYSTEM 경로 호출 인자(SYSTEM · 도구 · 블록 · 모델) + 저장 콘티 sha = 158 전")
+            try:
+                prmod.CONTI_SYSTEM = system_162.replace(rule13, "")
+                off_digest = _vb158_off_digest()
+            finally:
+                prmod.CONTI_SYSTEM = system_162
+            expect("vb-d", [off_digest, system_162.count(rule13)], [_VB158_OFF_SHA, 1],
+                   "끔: CONTI_SYSTEM 경로 호출 인자(SYSTEM · 도구 · 블록 · 모델) + 저장 콘티 sha = 158 전(162 규칙 13 줄만 뺀 값)")
     except Exception as exc:  # noqa: BLE001
         bad.append("예외: " + repr(exc) + "\n" + _tb.format_exc()[:2000])
 
@@ -54506,6 +54516,705 @@ def check_vnew_real_daylight_161() -> None:
 
 
 
+def check_vnew_hand_owner_162() -> None:
+    """작업 162 — 화면 밖에서 들어온 손은 다른 인물의 손(콘티 · 패널 연출 문법 · 프리비즈 포즈). 가짜 LLM · 저장소, 유료 0.
+
+    (ho-a) 규칙 글 1개(prompts.HAND_OWNER_RULE, 지시서 문장 그대로)가 세 읽기에 다 있다: 옛 CONTI_SYSTEM(규칙 13, 120 패널 읽기 포함) ·
+           158 샷 계획(사용자 글 끝 VIBE_HAND_OWNER_NOTE, SYSTEM 은 참고 글 그대로) · 148 연출 문법 SYSTEM, 그리고 연기 다시 읽기 SYSTEM.
+           옷 메모(outfit_notes: 장면 옷 → 분석 outfitEn)가 콘티 · 샷 계획 글, 연출 문법 · 다시 읽기 블록에 들어간다. 메모가 없으면 블록 그대로
+    (ho-b) test3 cut-03 가짜 다시 읽기(범건우 손이 화면 밖에서 뺨을 쓰다듬음): characters 에 범건우(off-frame, hand only) · 여의준 연기에서
+           "covers face with one hand" 빠짐 · 연출 문법 손은 범건우 아래(right touch > other_cheek, hands_only) · 컷 id/초/대사/기호/카메라 그대로 ·
+           다른 컷 그대로 · 승인 · 녹화 그대로 · posesStale True · 컷마다 1회 원장 · before/after 로그 · 라우트 2개(소유자 · 관리자, 남 403)
+    (ho-c) [포즈 다시 맞추기]: 고친 컷만 포즈(여의준 가린 손 지움, 범건우 오른손 뺨 + gestureTarget), 카메라 · 다른 컷 그대로, posesStale 지움 ·
+           승인 해제(다시 녹화)
+    (ho-d) 테이크(vibe) 프롬프트 cut-03: "Only Yeouijun appears in this shot; Beomgeonu's hand enters from off-frame and strokes Yeouijun's
+           cheek." (애니 · 실사), 범건우 닿는 연기 중복 없음, 다시 읽기 전 = 159 그대로
+    (ho-e) 콘티 정리: 158 샷 "<주인>'s hand (off-frame) …" → 주인 off-frame 항목 · 보이는 사람 연기에서 그 문장 뺌, 옛 콘티 positionEn
+           "off-frame (hand only)" → 정확히 OFF_FRAME_HAND_POSITION, 그런 문장이 없으면 지금과 같다
+    """
+    import copy as _copy  # noqa: PLC0415
+    import traceback as _tb  # noqa: PLC0415
+
+    sys.path.insert(0, str(ROOT / "app"))
+    bad: list[str] = []
+    report: list[str] = []
+    seen: set[str] = set()
+
+    def expect(group: str, got, want, what: str) -> None:
+        seen.add(group)
+        if got != want:
+            bad.append(f"({group}) {what}\n      결과 {got!r}\n      기대 {want!r}")
+
+    rule_text = ("A hand or arm entering the frame from an edge, or whose sleeve/cuff does not match the visible person's outfit, "
+                 "belongs to ANOTHER character. Decide whose hand it is by sleeve, cuff, skin, watch and outfit, using the outfit "
+                 "notes given for each character. Never describe it as the visible person's own hand. If its owner is off-frame, "
+                 "say so: '<Owner>'s hand (off-frame) \u2026'.")
+    a, b = _TC157_A, _TC157_B  # 범건우, 여의준
+    outfit_a = "black dress shirt, sleeves rolled, wristwatch"
+    outfit_b = "black track top with one white stripe down each sleeve"
+    chars_db = {"c1": {"analysis": {"appearanceEn": "look b", "outfitEn": outfit_b}},
+                "c2": {"analysis": {"appearanceEn": "look a", "baseOutfitEn": outfit_a}}}
+    try:
+        from src.vnew import characters as charmod  # noqa: PLC0415
+        from src.vnew import generate as genmod  # noqa: PLC0415
+        from src.vnew import plan as planmod  # noqa: PLC0415
+        from src.vnew import previz as pvmod  # noqa: PLC0415
+        from src.vnew import previz_grammar as grammarmod  # noqa: PLC0415
+        from src.vnew import prompts as prmod  # noqa: PLC0415
+        from src.vnew import routes as routesmod  # noqa: PLC0415
+
+        with _guard_real_llm() as llm_calls:
+            orig_load = charmod.load_char
+            charmod.load_char = lambda owner, cid: (_copy.deepcopy(chars_db[cid]), "e")
+            try:
+                # ================= (ho-a) 규칙 글 · 옷 메모 =================
+                plan0, take = _tc157_plan()
+                plan0.update(planId="plan_ho", revision=3, input={"order": ["f1"], "totalSeconds": 15, "notes": "",
+                                                                  "characters": [{"roleName": b, "charId": "c1"},
+                                                                                 {"roleName": a, "charId": "c2"}]})
+                notes = planmod.outfit_notes("o", plan0)
+                notes_text = prmod.outfit_notes_text(notes)
+                expect("ho-a", [prmod.HAND_OWNER_RULE, list(notes), notes_text.split("\n")[1:], prmod.outfit_notes_text({}),
+                                prmod.OFF_FRAME_HAND_POSITION],
+                       [rule_text, [b, a], [f"- {b}: {notes.get(b)}", f"- {a}: {notes.get(a)}"], "", "off-frame, hand only"],
+                       "규칙 글 = 지시서 문장 그대로 · 옷 메모 줄(명단 순서) · 메모 없으면 빈 글")
+                expect("ho-a", [outfit_b in notes.get(b, "").lower(), outfit_a in notes.get(a, "").lower()], [True, True],
+                       "옷 메모 = 장면 옷(없으면 분석 outfitEn → baseOutfitEn)")
+                expect("ho-a", [prmod.HAND_OWNER_RULE in prmod.CONTI_SYSTEM, prmod.HAND_OWNER_CONTI_RULE in prmod.CONTI_SYSTEM,
+                                prmod.HAND_OWNER_RULE in grammarmod.SYSTEM, prmod.HAND_OWNER_RULE in grammarmod.REREAD_SYSTEM,
+                                prmod.HAND_OWNER_CONTI_RULE in grammarmod.REREAD_SYSTEM, prmod.HAND_OWNER_RULE in prmod.VIBE_HAND_OWNER_NOTE,
+                                prmod.HAND_OWNER_RULE in prmod.VIBE_CUTS_SYSTEM, prmod.VIBE_CUTS_SYSTEM == _VB158_REF_SYSTEM,
+                                prmod.CONTI_SYSTEM.rstrip().endswith("Answer only with the emit_conti tool."),
+                                "visibility hands_only" in grammarmod.SYSTEM],
+                       [True, True, True, True, True, True, False, True, True, True],
+                       "규칙 글: 옛 콘티 규칙 13 · 연출 문법 · 다시 읽기 SYSTEM · 샷 계획 사용자 글(SYSTEM 은 참고 글 그대로)")
+
+                # 콘티 두 경로의 실제 호출(가짜 _converse): 글에 규칙 · 옷 메모
+                calls: list = []
+
+                def fake_converse(*, system_text, blocks, tool, max_tokens, where, model):
+                    calls.append({"where": where, "system": system_text, "blocks": blocks})
+                    if where == "vnew.conti":
+                        return {"cuts": [{"id": f"c{i}", "seconds": 3, "panels": [i], "shotKo": "s", "promptEn": "p",
+                                          "characters": [{"name": b, "positionEn": "Off-frame (hand only)" if i == 1 else "x",
+                                                          "actionEn": "act"}]} for i in range(1, 6)]}, {"model": model}
+                    return {"backgroundEn": "bg", "beats": [{"t0": 0, "t1": 3, "actionEn": "a", "cameraEn": "c", "descKo": "d",
+                                                             "characters": [b], "sourcePanel": 0}]}, {"model": model}
+
+                saved: dict = {}
+                names = ("load_plan", "mutate_plan", "ordered_tiles", "_charge", "_sync_locations_after_conti",
+                         "_unapprove_previz_after_conti", "_max_segment_seconds")
+                orig = {n: getattr(planmod, n) for n in names}
+                orig_conv = planmod.vpoc_llm._converse  # noqa: SLF001
+                try:
+                    planmod.load_plan = lambda owner, pid: (saved, "etag")
+                    planmod.mutate_plan = lambda owner, pid, mutator, **kw: (saved, mutator(saved))
+                    planmod.ordered_tiles = lambda owner, pid, order: ([b"t0", b"t1"], 2, 2)
+                    planmod._charge = lambda *a_, **kw: None  # noqa: SLF001
+                    planmod._sync_locations_after_conti = lambda owner, pid: None  # noqa: SLF001
+                    planmod._unapprove_previz_after_conti = lambda owner, pid: None  # noqa: SLF001
+                    planmod._max_segment_seconds = lambda video_model: 15  # noqa: SLF001
+                    planmod.vpoc_llm._converse = fake_converse  # noqa: SLF001
+                    texts = {}
+                    for vibe in (False, True):
+                        saved.clear()
+                        saved.update(_copy.deepcopy(plan0))
+                        saved["script"] = {"status": "ready", "setting": {"locationEn": "Outdoors by a low metal railing"},
+                                           "entries": [{"id": "e1", "panels": [0], "speaker": b, "lineKo": "응",
+                                                        "locationEn": "Outdoors by a low metal railing"}]}
+                        saved["task"] = {"name": "conti", "status": "running", "id": "t1"}
+                        calls.clear()
+                        with _pin_vnew(VNEW_FX=False, VNEW_CONTI_IMAGES=True, VNEW_VIBE_CONTI=vibe):
+                            planmod.run_conti("o", "p", "t1")
+                        first = next((c for c in calls if c["where"] in ("vnew.conti", "vnew.conti.vibe")), {})
+                        texts[vibe] = (first.get("system") or "", (first.get("blocks") or [{}])[0].get("text") or "",
+                                       (saved.get("conti") or {}).get("cuts") or [])
+                finally:
+                    for n, v in orig.items():
+                        setattr(planmod, n, v)
+                    planmod.vpoc_llm._converse = orig_conv  # noqa: SLF001
+                (sys_old, text_old, cuts_old), (sys_vibe, text_vibe, _cuts_vibe) = texts[False], texts[True]
+                expect("ho-a", [sys_old == prmod.CONTI_SYSTEM, text_old.endswith("\n\n" + notes_text),
+                                sys_vibe.startswith(prmod.VIBE_CUTS_SYSTEM.split("{min_beats}")[0]), prmod.HAND_OWNER_RULE in sys_vibe,
+                                text_vibe.endswith(prmod.VIBE_HAND_OWNER_NOTE + "\n" + notes_text)],
+                       [True, True, True, False, True],
+                       "콘티 호출: 옛 경로 SYSTEM = CONTI_SYSTEM(규칙 13) + 글 끝 옷 메모, 샷 계획 SYSTEM 참고 글 그대로 + 글 끝 손 줄 · 옷 메모")
+                expect("ho-e", [cuts_old[0]["characters"][0]["positionEn"] if cuts_old else None,
+                                cuts_old[1]["characters"][0]["positionEn"] if len(cuts_old) > 1 else None],
+                       ["off-frame, hand only", "x"], "옛 콘티 positionEn \"Off-frame (hand only)\" → 정확히 OFF_FRAME_HAND_POSITION, 다른 값 그대로")
+
+                # 연출 문법 읽기 블록(옷 메모) · _read_grammars 가 메모를 넘긴다
+                reads: list = []
+                orig_read, orig_reread = grammarmod._read, grammarmod._reread  # noqa: SLF001
+                grammarmod._read = lambda blocks, *, model: (reads.append(blocks) or ({"mainSubject": b}, {"model": model}))  # noqa: SLF001
+                orig_tiles = (pvmod._all_tiles, pvmod._cut_tiles)  # noqa: SLF001
+                try:
+                    cut3 = next(c for c in plan0["conti"]["cuts"] if c["id"] == "cut-03")
+                    grammarmod.read_cut("o", "p", "pl", cut3, [b"P3"], [b, a], charge=None, outfits=notes)
+                    grammarmod.read_cut("o", "p", "pl", cut3, [b"P3"], [b, a], charge=None)
+                    pvmod._all_tiles = lambda owner, pid: [b"P0", b"P1", b"P2", b"P3", b"P4"]  # noqa: SLF001
+                    pvmod._cut_tiles = lambda panels, tiles: [tiles[p] for p in panels if p < len(tiles)][:2]  # noqa: SLF001
+                    groups = [{"locationEn": "x", "cuts": [{"cutId": "cut-03", "seconds": 4, "panels": [3, 4], "characters": []}]}]
+                    pvmod._read_grammars("o", "p", "pl", groups, [], {}, set(), outfits=notes)  # noqa: SLF001
+                finally:
+                    grammarmod._read = orig_read  # noqa: SLF001
+                    pvmod._all_tiles, pvmod._cut_tiles = orig_tiles  # noqa: SLF001
+                expect("ho-a", [[list(bl.keys())[0] for bl in r] for r in reads], [["text", "text", "image"], ["text", "image"],
+                                                                                    ["text", "text", "image"]],
+                       "연출 문법 블록: 설명 → 옷 메모 → 그림(메모 없으면 지금 2블록) · run_design 경로(_read_grammars)도 메모를 넘김")
+                expect("ho-a", [reads[0][1].get("text") if reads else None, reads[2][1].get("text") if len(reads) > 2 else None],
+                       [notes_text, notes_text], "연출 문법 옷 메모 블록 = outfit_notes_text")
+
+                # ================= (ho-b) test3 cut-03 가짜 다시 읽기 =================
+                plan = _copy.deepcopy(plan0)
+                old_cuts = _copy.deepcopy(plan["conti"]["cuts"])
+                old_b_action = next(c for c in old_cuts if c["id"] == "cut-03")["characters"][0]["actionEn"]
+                grammar3 = {"mainSubject": b, "shotSize": "MCU", "others": [], "actions": [
+                    {"name": b, "actionEn": "covers his face", "gesture": "cover_face", "target": "none",
+                     "hands": {"right": {"act": "cover", "target": "own_eyes"}, "left": {"act": "cover", "target": "own_face"}}}]}
+                plan["previz"]["panelGrammar"]["cut-03"] = {"hash": "h3", "grammar": _copy.deepcopy(grammar3), "v": 3}
+                plan["previz"].update(approved=True, revision=4)
+                for t in plan["previz"]["scenes"][0]["timeline"]:
+                    t["camera"] = {"pos": [0, 1.5, 3], "lookAt": [0, 1.4, 0], "fovDeg": 40, "cid": t["cutId"]}
+                    if t["cutId"] == "cut-03":
+                        t["actors"][1].update(gesture="cover_face", hands={"right": {"act": "cover", "target": "own_eyes"},
+                                                                          "left": {"act": "cover", "target": "own_face"}})
+                plan["task"] = {"name": "rereadActions", "status": "running", "startedAt": None, "id": "t162"}
+                before_plan = _copy.deepcopy(plan)
+                reread_reply = {
+                    "characters": [{"name": b, "positionEn": "sitting on the railing",
+                                    "actionEn": "Cries with his eyes squeezed shut while tears run down his cheeks."},
+                                   {"name": a, "positionEn": "off-frame (hand only)",
+                                    "actionEn": f"{a}'s hand (off-frame) strokes {b}'s cheek."},
+                                   {"name": "유령", "positionEn": "x", "actionEn": "x"}],
+                    "actions": [{"name": b, "actionEn": "cries", "gesture": "none", "target": "none", "eyes": "closed",
+                                 "hands": {"right": {"act": "rest", "target": "none"}, "left": {"act": "rest", "target": "none"}}},
+                                {"name": a, "actionEn": "strokes his cheek", "gesture": "hand_on_other_cheek", "target": b,
+                                 "visibility": "hands_only",
+                                 "hands": {"right": {"act": "touch", "target": "other_cheek"}, "left": {"act": "rest", "target": "none"}}}]}
+                rereads: list = []
+                charges: list = []
+
+                def fake_reread(blocks, *, model):
+                    rereads.append(blocks)
+                    if '"cutId": "cut-03"' in (blocks[0].get("text") or ""):
+                        return _copy.deepcopy(reread_reply), {"model": "m-claude", "inputTokens": 9, "outputTokens": 4}
+                    return {"characters": [], "actions": []}, {"model": "m-claude", "inputTokens": 9, "outputTokens": 4}
+
+                store = {"plan": plan}
+                orig_plan = {n: getattr(planmod, n) for n in ("load_plan", "mutate_plan", "_charge", "_spawn")}
+                try:
+                    planmod.load_plan = lambda owner, pid: (store["plan"], "etag")
+                    planmod.mutate_plan = lambda owner, pid, mutator, **kw: (store["plan"], mutator(store["plan"]))
+                    planmod._charge = lambda owner, pid, plan_id, usage, model: charges.append((plan_id, model))  # noqa: SLF001
+                    grammarmod._reread = fake_reread  # noqa: SLF001
+                    pvmod._all_tiles = lambda owner, pid: [f"P{i}".encode() for i in range(11)]  # noqa: SLF001
+                    with _LogCapture() as logs:
+                        planmod.run_reread_actions("o", "p", "t162")
+                    reread_logs = logs.messages("vnew.conti.reread pid=")
+                finally:
+                    for n, v in orig_plan.items():
+                        setattr(planmod, n, v)
+                    grammarmod._reread = orig_reread  # noqa: SLF001
+                    pvmod._all_tiles = orig_tiles[0]  # noqa: SLF001
+                after = store["plan"]
+                cuts = after["conti"]["cuts"]
+                c3 = next(c for c in cuts if c["id"] == "cut-03")
+                acts = {x["name"]: x for x in after["previz"]["panelGrammar"]["cut-03"]["grammar"]["actions"]}
+                keep = ("id", "no", "seconds", "panels", "dialogueKo", "fx", "fxWho", "cameraEn", "locationEn", "shotKo", "promptEn")
+                expect("ho-b", c3["characters"],
+                       [{"name": b, "positionEn": "sitting on the railing",
+                         "actionEn": "Cries with his eyes squeezed shut while tears run down his cheeks."},
+                        {"name": a, "positionEn": "off-frame, hand only", "actionEn": f"{a}'s hand (off-frame) strokes {b}'s cheek."}],
+                       "cut-03 characters: 범건우 = off-frame, hand only + 손 연기, 여의준 = 자기 연기만(명단 밖 이름 버림)")
+                expect("ho-b", ["covers face with one hand" in old_b_action.lower(),
+                                "covers face with one hand" in c3["characters"][0]["actionEn"].lower()], [True, False],
+                       "여의준 연기에서 \"covers face with one hand\" 가 빠졌다(전에는 있었다)")
+                expect("ho-b", [acts.get(a, {}).get("hands", {}).get("right"), acts.get(a, {}).get("visibility"),
+                                acts.get(a, {}).get("target"), acts.get(a, {}).get("gesture"),
+                                acts.get(b, {}).get("hands"), acts.get(b, {}).get("gesture")],
+                       [{"act": "touch", "target": "other_cheek"}, "hands_only", b, "hand_on_other_cheek",
+                        {"left": {"act": "rest", "target": "none"}, "right": {"act": "rest", "target": "none"}}, "none"],
+                       "연출 문법: 손은 범건우 아래(right touch > other_cheek, hands_only, 대상 여의준), 여의준 손 rest")
+                expect("ho-b", [[{k: c.get(k) for k in keep} for c in cuts], [c["characters"] for c in cuts if c["id"] != "cut-03"],
+                                after["previz"]["panelGrammar"]["cut-03"]["hash"], after["previz"]["panelGrammar"]["cut-03"]["v"],
+                                {k: v for k, v in after["previz"]["panelGrammar"]["cut-03"]["grammar"].items() if k != "actions"}],
+                       [[{k: c.get(k) for k in keep} for c in old_cuts], [c["characters"] for c in old_cuts if c["id"] != "cut-03"],
+                        "h3", 3, {k: v for k, v in grammar3.items() if k != "actions"}],
+                       "컷 id · 초 · 대사 · 기호 · 카메라 · 장소 그대로, 다른 컷 characters 그대로, 연출 문법 카메라 필드 · 해시 · v 그대로")
+                expect("ho-b", [after["previz"]["approved"], after["previz"]["recordings"], after["previz"]["revision"],
+                                after["previz"].get("posesStale"), after["previz"]["scenes"] == before_plan["previz"]["scenes"],
+                                after["task"]["status"], after["revision"], after["rereadActions"]["changed"],
+                                [ch["cutId"] for ch in after["rereadActions"]["changes"]]],
+                       [True, before_plan["previz"]["recordings"], 4, True, True, "done", 4, 1, ["cut-03"]],
+                       "프리비즈 승인 · 녹화 · revision · 장면 그대로, posesStale True, task done, plan revision +1, 바뀐 컷 1")
+                b3 = next((r for r in rereads if '"cutId": "cut-03"' in (r[0].get("text") or "")), [])
+                expect("ho-b", [len(rereads), len(charges), set(charges), [list(bl)[0] for bl in b3],
+                                [bl.get("text") for bl in b3 if "text" in bl][1:], len(reread_logs),
+                                "before=" in (reread_logs[0] if reread_logs else "") and "after=" in (reread_logs[0] if reread_logs else ""),
+                                "Covers face with one hand" in (reread_logs[0] if reread_logs else "")],
+                       [6, 6, {("plan_ho", "m-claude")}, ["text", "text", "text", "image", "text", "image"],
+                        [notes_text, "Panel 1 of 2:", "Panel 2 of 2:"], 1, True, True],
+                       "컷마다 1회 읽기 · 원장(다른 읽기와 같은 _charge) · 블록(설명 → 옷 메모 → 그 컷 패널 2장) · 컷 before/after 로그")
+
+                # 라우트 2개: 소유자 · 관리자(남의 프로젝트) 202/200, 관리자 아닌 남 403
+                import flask  # noqa: PLC0415
+
+                state = {"admin": False, "writer": True}
+                started: list = []
+                deps = routesmod.VnewDependencies(
+                    require_auth=lambda f: f, current_owner=lambda: "me",
+                    get_project=lambda pid: {"owner": "ownerA", "track": routesmod.project_tracks.TRACK_VIDEO_NEW},
+                    can_read_project=lambda p: True, can_write_project=lambda p: state["writer"],
+                    is_admin=lambda: state["admin"])
+                app = flask.Flask("ho162")
+                app.register_blueprint(routesmod.create_blueprint(deps))
+                orig_start, orig_refresh = planmod.start_reread_actions, pvmod.refresh_poses
+                orig_view, orig_lp = planmod.plan_view, planmod.load_plan
+                try:
+                    planmod.start_reread_actions = lambda owner, pid: (started.append(("reread", owner)) or {"taskId": "t", "cuts": 6})
+                    pvmod.refresh_poses = lambda owner, pid: started.append(("poses", owner)) or {}
+                    planmod.plan_view = lambda owner, pid, data: {"ok": True}
+                    planmod.load_plan = lambda owner, pid: ({}, "e")
+                    codes = []
+                    client = app.test_client()
+                    for admin, writer in ((False, True), (True, False), (False, False)):
+                        state.update(admin=admin, writer=writer)
+                        codes.append((client.post("/api/vnew/p/p1/conti/reread-actions").status_code,
+                                      client.post("/api/vnew/p/p1/previz/refresh-poses").status_code))
+                finally:
+                    planmod.start_reread_actions, pvmod.refresh_poses = orig_start, orig_refresh
+                    planmod.plan_view, planmod.load_plan = orig_view, orig_lp
+                expect("ho-b", [codes, started],
+                       [[(202, 200), (202, 200), (403, 403)], [("reread", "ownerA"), ("poses", "ownerA"), ("reread", "ownerA"),
+                                                                ("poses", "ownerA")]],
+                       "POST /conti/reread-actions 202 · /previz/refresh-poses 200: 소유자 · 관리자(소유자 저장소), 관리자 아닌 남 403")
+
+                # ================= (ho-c) 포즈 다시 맞추기 =================
+                stale = _copy.deepcopy(after)
+                store["plan"] = stale
+                orig_mp = planmod.mutate_plan
+                try:
+                    planmod.mutate_plan = lambda owner, pid, mutator, **kw: (store["plan"], mutator(store["plan"]))
+                    pvmod.refresh_poses("o", "p")
+                finally:
+                    planmod.mutate_plan = orig_mp
+                tl = {t["cutId"]: t for t in stale["previz"]["scenes"][0]["timeline"]}
+                tl0 = {t["cutId"]: t for t in after["previz"]["scenes"][0]["timeline"]}
+                lead, other = tl["cut-03"]["actors"]
+                expect("ho-c", [lead.get("hands"), lead.get("gestureTarget"), lead.get("gesture"), other.get("hands"),
+                                other.get("gesture"), other.get("gestureTarget"), other.get("eyes")],
+                       [{"right": {"act": "touch", "target": "other_cheek"}, "left": {"act": "rest", "target": "none"}}, "a2",
+                        "hand_on_other_cheek", {"right": {"act": "rest", "target": "none"}, "left": {"act": "rest", "target": "none"}},
+                        "turn_head_to_other", "a1", "closed"],
+                       "cut-03: 범건우(a1) 오른손 뺨 + gestureTarget 여의준, 여의준(a2) 가린 손 · cover_face 지움(말하는 사람이라 054 규칙대로 "
+                       "상대 쪽으로 고개)")
+                expect("ho-c", [[t["camera"] for t in tl.values()] == [t["camera"] for t in tl0.values()],
+                                {c: t for c, t in tl.items() if c != "cut-03"} == {c: t for c, t in tl0.items() if c != "cut-03"},
+                                stale["previz"].get("posesStale"), stale["previz"]["approved"], stale["previz"]["recordings"] == after["previz"]["recordings"],
+                                stale["revision"], stale["previz"]["panelGrammar"] == after["previz"]["panelGrammar"]],
+                       [True, True, None, False, True, 5, True],
+                       "카메라 · 다른 컷 그대로, posesStale 지움, 승인 해제(다시 승인 = 다시 녹화, PUT scene 과 같다), revision +1, 문법 캐시 그대로")
+
+                # ================= (ho-d) 테이크(vibe) 프롬프트 손 절 =================
+                cast = [{"name": b, "colorName": "blue", "frontNo": 1, "appearance": "", "voice": "", "costume": outfit_b},
+                        {"name": a, "colorName": "orange", "frontNo": 2, "appearance": "", "voice": "", "costume": outfit_a}]
+                ra, rb = genmod._romanize_name(a), genmod._romanize_name(b)  # noqa: SLF001
+
+                def shot3(plan_x: dict, real: bool) -> str:
+                    with _pin_vnew(VNEW_FX=True, VNEW_TAKE_PROMPT_MAX_CHARS=8000, VNEW_VIBE_PROMPT=True):
+                        text = genmod._vibe_take_prompt(plan_x, take, real=real, cast=cast, location_no=5, quiet=True)  # noqa: SLF001
+                    return next((ln for ln in text.split("\n") if ln.startswith("Shot 3 (")), "")
+
+                want_who = f"Only {rb} appears in this shot; {ra}'s hand enters from off-frame and strokes {rb}'s cheek. "
+                anime_new, real_new, anime_old = shot3(stale, False), shot3(stale, True), shot3(plan0, False)
+                report.append(f"cut-03 before: {b}={old_b_action!r}; grammar {b} hands={grammar3['actions'][0]['hands']}")
+                report.append(f"cut-03 after: {c3['characters']}; grammar {a} hands={acts.get(a, {}).get('hands')} "
+                              f"visibility={acts.get(a, {}).get('visibility')}")
+                report.append(f"take shot 3 (anime): {anime_new[:260]}")
+                expect("ho-d", [want_who in anime_new, want_who in real_new, f"{ra} strokes" in anime_new,
+                                f"Only {rb} appears in this shot; {ra} is not visible. " in anime_old, "off-frame" in anime_old],
+                       [True, True, False, True, False],
+                       "cut-03 샷 줄: who_in_shot + 손 절(애니 · 실사), 범건우 닿는 연기 중복 없음, 다시 읽기 전 = 159 그대로")
+
+                # ================= (ho-e) 158 샷 → 콘티 손 주인 =================
+                script = {"setting": {"locationEn": "rail"}, "entries": [
+                    {"panels": [0], "speaker": b, "lineKo": "응", "locationEn": "rail", "characters": [{"name": b, "positionEn": "on the rail"}]}]}
+                beats = {"backgroundEn": "rail", "beats": [
+                    {"t0": 0, "t1": 3, "actionEn": f"{b} cries. {a}'s large hand (off-frame) strokes {b}'s cheek.", "cameraEn": "Static camera",
+                     "descKo": "d", "characters": [b], "sourcePanel": 0, "shotSize": "closeup", "kind": "character"},
+                    {"t0": 3, "t1": 6, "actionEn": f"{b} looks up.", "cameraEn": "Static camera", "descKo": "d",
+                     "characters": [b], "sourcePanel": 0, "shotSize": "closeup", "kind": "character"}]}
+                vcuts = planmod._vibe_cuts(beats, script, [b, a], [0])  # noqa: SLF001
+                expect("ho-e", [c["characters"] for c in vcuts],
+                       [[{"name": b, "positionEn": "on the rail", "actionEn": f"{b} cries."},
+                         {"name": a, "positionEn": "off-frame, hand only", "actionEn": f"{a}'s large hand (off-frame) strokes {b}'s cheek."}],
+                        [{"name": b, "positionEn": "on the rail", "actionEn": f"{b} looks up."}]],
+                       "샷 계획: 손 주인 = off-frame 항목, 보이는 사람 연기에서 그 문장 뺌, 손 문장 없는 샷은 지금과 같다")
+            finally:
+                charmod.load_char = orig_load
+        expect("ho-a", llm_calls, [], "실제 LLM 호출 0")
+    except Exception as exc:  # noqa: BLE001
+        bad.append("예외: " + repr(exc) + "\n" + _tb.format_exc()[:2500])
+
+    missing = [g for g in ("ho-a", "ho-b", "ho-c", "ho-d", "ho-e") if g not in seen]
+    if missing:
+        bad.append(f"검사 묶음이 돌지 않았습니다: {missing}")
+    if bad:
+        fail("작업 162 손 주인 검사 실패\n  " + "\n  ".join(bad))
+    else:
+        ok("작업 162 (ho-a)손 주인 규칙 1개 · 세 읽기 + 다시 읽기 · 옷 메모 (ho-b)cut-03 다시 읽기: 범건우 off-frame 손 · 여의준 자기 연기 · "
+           "문법 손 범건우 아래 · 컷/승인 그대로 · posesStale · 라우트 (ho-c)포즈 다시 맞추기 (ho-d)테이크 손 절 (ho-e)콘티 정리")
+        for line in report:
+            print(f"       162: {line}")
+
+
+_CC162_NODE = r"""
+function Node(tag) { this.tagName = tag; this.children = []; this.className = ""; this.textContent = ""; this.value = "";
+  this._h = {}; var self = this; this.classList = { add: function (c) { self.className = (self.className ? self.className + " " : "") + c; } }; }
+Node.prototype.appendChild = function (c) { this.children.push(c); return c; };
+Node.prototype.addEventListener = function (t, f) { (this._h[t] = this._h[t] || []).push(f); };
+Node.prototype.fire = function (t) { var self = this; (this._h[t] || []).forEach(function (f) { f({ target: self }); }); };
+var document = { createElement: function (t) { return new Node(t); } };
+eval(SLICE);
+function view(row) {
+  var label = row.children[1], select = label.children[1];
+  return { cls: row.className, name: row.children[0].textContent, presenceLabel: label.children[0].textContent,
+    options: select.children.map(function (o) { return [o.value, o.textContent]; }), value: select.value,
+    fields: row.children.slice(2).map(function (w) { return [w.children[0].textContent, w.children[1].value]; }) };
+}
+var cut = { id: "cut-03", characters: [
+  { name: "범건우", presence: "hand_only", positionEn: "off-frame, hand only", actionEn: "reaches in", actionKo: "손을 뻗어 뺨을 쓰다듬음",
+    hands: { right: "touch>other_cheek" } },
+  { name: "여의준", positionEn: "on the rail", actionEn: "cries" } ] };
+var rows = cut.characters.map(function (p, i) { return contiPersonRow(p, i); });
+var before = rows.map(view);
+var sel0 = rows[0].children[1].children[1]; sel0.value = "off_screen"; sel0.fire("change");
+var ko0 = rows[0].children[2].children[1]; ko0.value = "화면 밖에서 지켜봄"; ko0.fire("input");
+var sel1 = rows[1].children[1].children[1]; sel1.value = ""; sel1.fire("change");
+var sel1b = rows[1].children[1].children[1]; sel1b.value = "on_screen"; sel1b.fire("change");
+console.log(JSON.stringify({ before: before, body: JSON.stringify({ cuts: [cut] }) }));
+"""
+
+
+def check_vnew_conti_cast_162fix1() -> None:
+    """작업 162 fix1 — 콘티 컷마다 그 장면의 모든 인물과 하는 일(presence · actionEn · actionKo · hands). 가짜 LLM · 저장소, 유료 0.
+
+    (cc-a) 스키마: 콘티 · 샷 계획 cast · 다시 읽기 · 고치기 도구의 인물 required = name · presence · actionEn, presence 열거값, 규칙(옛 SYSTEM
+           규칙 14 · 샷 계획 사용자 글 · 다시 읽기 SYSTEM, 손 주인 규칙 포함), 참고 도구 · SYSTEM 그대로, 설정 기본 켬, 실제 호출 도구 · 글
+    (cc-b) 검사 · 고치기: 빠진 인물 · off_screen 손 · presence 없음 → 고치기 1회(문제 문장 · 그 컷 패널만 · 원장) → 모든 컷 문제 0,
+           고치기가 빠뜨린 컷은 서버가 채움, 문제 없으면 고치기 0회, 샷 계획 cast[] → 컷 인물
+    (cc-c) 프롬프트: _cut_on_screen 이 presence 를 먼저(voice_only 주인공 → 빠짐, hand_only → hands only), vibe 샷 줄 손 절 · 포즈 절 중복 없음,
+           _cut_poses · _apply_gestures 가 콘티 hands 를 먼저, 옛 콘티(presence 없음) = 지금과 같다
+    (cc-d) 화면: node 로 contiPersonRow(이름 · 나옴 · 한국어 동작 줄) · 고치기 → PUT /conti 본문 → update_conti 저장(presence · actionKo ·
+           off_screen 손 비움 · 옛 인물 그대로) · 프리비즈 승인 해제. node 가 없으면 경고 후 건너뜀
+    """
+    import copy as _copy  # noqa: PLC0415
+    import traceback as _tb  # noqa: PLC0415
+
+    sys.path.insert(0, str(ROOT / "app"))
+    bad: list[str] = []
+    report: list[str] = []
+    seen: set[str] = set()
+
+    def expect(group: str, got, want, what: str) -> None:
+        seen.add(group)
+        if got != want:
+            bad.append(f"({group}) {what}\n      결과 {got!r}\n      기대 {want!r}")
+
+    a, b = _TC157_A, _TC157_B  # 범건우, 여의준
+    try:
+        from src.vnew import characters as charmod  # noqa: PLC0415
+        from src.vnew import generate as genmod  # noqa: PLC0415
+        from src.vnew import plan as planmod  # noqa: PLC0415
+        from src.vnew import previz as pvmod  # noqa: PLC0415
+        from src.vnew import previz_grammar as grammarmod  # noqa: PLC0415
+        from src.vnew import prompts as prmod  # noqa: PLC0415
+        from src.vnew import settings as vsettings  # noqa: PLC0415
+
+        # ================= (cc-a) 스키마 · 규칙 =================
+        def char_item(tool, *path):
+            node = tool["inputSchema"]["json"]["properties"]
+            for key in path:
+                node = node[key]
+            return node
+
+        items = [char_item(prmod.EMIT_CONTI_CAST, "cuts", "items", "properties", "characters", "items"),
+                 char_item(prmod.EMIT_VIBE_CUTS_CAST, "beats", "items", "properties", "cast", "items"),
+                 char_item(grammarmod.REREAD_CAST_TOOL, "characters", "items"),
+                 char_item(prmod.EMIT_CAST_FIX, "cuts", "items", "properties", "characters", "items")]
+        expect("cc-a", [[i["required"] for i in items], [i["properties"]["presence"]["enum"] for i in items],
+                        [sorted(i["properties"]) for i in items],
+                        "cast" in char_item(prmod.EMIT_VIBE_CUTS_CAST, "beats", "items")["required"]],
+               [[["name", "presence", "actionEn"]] * 4, [["on_screen", "hand_only", "voice_only", "off_screen"]] * 4,
+                [["actionEn", "actionKo", "hands", "name", "positionEn", "presence"]] * 4, True],
+               "인물 항목 required = name · presence · actionEn(콘티 · 샷 계획 cast · 다시 읽기 · 고치기), presence 열거값 4개, hands · actionKo")
+        expect("cc-a", [prmod.CAST_RULE in prmod.CONTI_CAST_SYSTEM, prmod.HAND_OWNER_RULE in prmod.CAST_RULE,
+                        prmod.CONTI_CAST_SYSTEM.rstrip().endswith("Answer only with the emit_conti tool."),
+                        "grab | hold | touch" in prmod.CAST_RULE, prmod.CAST_RULE.replace("in every cut", "in this cut") in grammarmod.REREAD_CAST_SYSTEM,
+                        prmod.CAST_RULE in prmod.CAST_FIX_SYSTEM, prmod.VIBE_CUTS_SYSTEM == _VB158_REF_SYSTEM,
+                        json.dumps(prmod.EMIT_VIBE_CUTS, ensure_ascii=False) == json.dumps(_VB158_REF_TOOL, ensure_ascii=False),
+                        "presence" in json.dumps(prmod.EMIT_CONTI, ensure_ascii=False), vsettings.VNEW_CONTI_CAST],
+               [True, True, True, True, True, True, True, True, False, True],
+               "규칙: 옛 SYSTEM 규칙 14(손 주인 규칙 포함) · 다시 읽기 · 고치기, 참고 샷 계획 SYSTEM · 도구 그대로, 끔 도구 그대로, 기본 켬")
+
+        # ================= 가짜 저장소 · LLM =================
+        chars_db = {"c1": {"analysis": {"outfitEn": "black track top with one white stripe down each sleeve"}},
+                    "c2": {"analysis": {"outfitEn": "black dress shirt, sleeves rolled, wristwatch"}}}
+        loc = "Outdoors by a low metal railing"
+
+        def base_plan() -> dict:
+            return {"planId": "plan_cc", "revision": 1,
+                    "input": {"order": ["f1"], "totalSeconds": 15, "notes": "",
+                              "characters": [{"roleName": b, "charId": "c1"}, {"roleName": a, "charId": "c2"}]},
+                    "task": {"name": "conti", "status": "running", "id": "t1"},
+                    "script": {"status": "ready", "setting": {"locationEn": loc}, "entries": [
+                        {"id": f"e{i}", "panels": [i], "speaker": (b if i % 2 else a), "lineKo": f"줄{i}", "locationEn": loc,
+                         "characters": [{"name": b, "positionEn": "on the rail"}]} for i in range(5)]}}
+
+        def c(name, presence, action, hands=None, position=None):
+            row = {"name": name, "presence": presence, "actionEn": action}
+            if hands is not None:
+                row["hands"] = hands
+            if position is not None:
+                row["positionEn"] = position
+            return row
+
+        conti_rows = [
+            [c(b, "on_screen", "sits on the railing"), c(a, "on_screen", "sits beside him")],
+            [c(b, "on_screen", "looks down")],
+            [c(b, "on_screen", "Covers face with one hand", {"right": "cover>own_eyes"}), c(a, "off_screen", f"strokes {b}'s cheek")],
+            [c(b, "on_screen", "smiles"), c(a, "on_screen", "nods")],
+            [{"name": b, "actionEn": "smiles"}, c(a, "voice_only", "says goodbye")],
+        ]
+        fix_reply = {"cuts": [
+            {"id": "c2", "characters": [c(b, "on_screen", "looks down"), c(a, "off_screen", f"watches {b} silently")]},
+            {"id": "c3", "characters": [
+                c(b, "on_screen", "cries with his eyes shut"),
+                dict(c(a, "hand_only", f"reaches in and strokes {b}'s cheek with his right hand", {"right": "touch > other cheek"}),
+                     actionKo="손을 뻗어 뺨을 쓰다듬음")]}]}
+        calls: list = []
+        charges: list = []
+        state = {"fix": fix_reply}
+
+        def fake_converse(*, system_text, blocks, tool, max_tokens, where, model):
+            calls.append({"where": where, "system": system_text, "tool": tool, "blocks": blocks})
+            usage = {"model": model, "inputTokens": 3, "outputTokens": 2}
+            if where == "vnew.conti":
+                return {"cuts": [{"id": f"c{i + 1}", "seconds": 3, "panels": [i], "shotKo": "s", "promptEn": "p", "locationEn": loc,
+                                  "characters": _copy.deepcopy(rows)} for i, rows in enumerate(conti_rows)]}, usage
+            if where == "vnew.conti.cast_fix":
+                return _copy.deepcopy(state["fix"]), usage
+            if where == "vnew.conti.vibe":
+                beat = lambda t0, cast: {"t0": t0, "t1": t0 + 3, "actionEn": f"{b} looks up.", "cameraEn": "Static camera",  # noqa: E731
+                                         "descKo": "d", "characters": [b], "sourcePanel": t0 // 3, "shotSize": "closeup",
+                                         "kind": "character", "cast": cast}
+                cast = [c(b, "on_screen", "looks up", position="ignored"), dict(c(a, "off_screen", f"watches {b}"), actionKo="지켜봄")]
+                return {"backgroundEn": loc, "beats": [beat(t, cast) for t in range(0, 15, 3)]}, usage
+            raise RuntimeError("unexpected " + where)
+
+        saved: dict = {}
+        names = ("load_plan", "mutate_plan", "ordered_tiles", "_charge", "_sync_locations_after_conti",
+                 "_unapprove_previz_after_conti", "_max_segment_seconds")
+        orig = {n: getattr(planmod, n) for n in names}
+        orig_conv = planmod.vpoc_llm._converse  # noqa: SLF001
+        orig_load = charmod.load_char
+        with _guard_real_llm() as llm_calls:
+            try:
+                planmod.load_plan = lambda owner, pid: (saved, "etag")
+                planmod.mutate_plan = lambda owner, pid, mutator, **kw: (saved, mutator(saved))
+                planmod.ordered_tiles = lambda owner, pid, order: ([f"t{i}".encode() for i in range(5)], 5, 5)
+                planmod._charge = lambda owner, pid, plan_id, usage, model: charges.append(model)  # noqa: SLF001
+                planmod._sync_locations_after_conti = lambda owner, pid: None  # noqa: SLF001
+                planmod._unapprove_previz_after_conti = lambda owner, pid: None  # noqa: SLF001
+                planmod._max_segment_seconds = lambda video_model: 15  # noqa: SLF001
+                planmod.vpoc_llm._converse = fake_converse  # noqa: SLF001
+                charmod.load_char = lambda owner, cid: (_copy.deepcopy(chars_db[cid]), "e")
+
+                def run(vibe: bool) -> list:
+                    saved.clear()
+                    saved.update(base_plan())
+                    calls.clear()
+                    charges.clear()
+                    with _pin_vnew(VNEW_FX=False, VNEW_CONTI_IMAGES=True, VNEW_VIBE_CONTI=vibe, VNEW_CONTI_CAST=True):
+                        planmod.run_conti("o", "p", "t1")
+                    return (saved.get("conti") or {}).get("cuts") or []
+
+                with _LogCapture() as logs:
+                    cuts = run(False)
+                cast_logs = logs.messages("vnew.conti.cast pid=")
+                first = calls[0] if calls else {}
+                fixes = [x for x in calls if x["where"] == "vnew.conti.cast_fix"]
+                expect("cc-a", [first.get("tool") is prmod.EMIT_CONTI_CAST, first.get("system") == prmod.CONTI_CAST_SYSTEM],
+                       [True, True], "옛 경로 호출 = 켬 도구 · 규칙 14 SYSTEM")
+                casts = planmod.location_casts(cuts, base_plan()["script"], [b, a])
+                fix_text = (fixes[0]["blocks"][0].get("text") or "") if fixes else ""
+                fix_labels = [x.get("text") if "text" in x else "<img>" for x in (fixes[0]["blocks"][1:] if fixes else [])]
+                expect("cc-b", [len(fixes), [x["where"] for x in calls], planmod.cast_issues(cuts, casts),
+                                [[(ch["name"], ch["presence"]) for ch in cut["characters"]] for cut in cuts]],
+                       [1, ["vnew.conti", "vnew.conti.cast_fix"], {},
+                        [[(b, "on_screen"), (a, "on_screen")], [(b, "on_screen"), (a, "off_screen")], [(b, "on_screen"), (a, "hand_only")],
+                         [(b, "on_screen"), (a, "on_screen")], [(b, "on_screen"), (a, "voice_only")]]],
+                       "고치기 1회 → 모든 컷 문제 0 · 컷마다 두 사람(c5 여의준 presence 는 서버가 채움)")
+                expect("cc-b", [len(charges), fix_text.startswith("Fix only the characters[] of these cuts."),
+                                f"{a} is in this scene but missing from characters." in fix_text,
+                                f"{a} uses a hand or touches someone but presence is off_screen." in fix_text,
+                                f"{b} has no presence." in fix_text, '"id": "c1"' in fix_text, '"id": "c4"' in fix_text,
+                                prmod.OUTFIT_NOTES_HEAD in fix_text, fix_labels,
+                                len(cast_logs), "leftAfterFix=1" in (cast_logs[-1] if cast_logs else "")],
+                       [2, True, True, True, True, False, False, True,
+                        ["Panel 1 of 5:", "<img>", "Panel 2 of 5:", "<img>", "Panel 4 of 5:", "<img>"], 2, True],
+                       "고치기 글: 문제 문장 · 틀린 컷(c2 · c3 · c5)만 · 옷 메모 · 그 컷 패널만, 원장 2줄(콘티 + 고치기), 로그(남은 문제 1 = c5 → 채움)")
+                c3 = cuts[2]["characters"]
+                expect("cc-b", [c3, cuts[1]["characters"][1]["actionEn"], cuts[4]["characters"][0]["presence"]],
+                       [[{"name": b, "presence": "on_screen", "positionEn": "", "actionEn": "cries with his eyes shut", "actionKo": ""},
+                         {"name": a, "presence": "hand_only", "positionEn": "off-frame, hand only",
+                          "actionEn": f"reaches in and strokes {b}'s cheek with his right hand", "actionKo": "손을 뻗어 뺨을 쓰다듬음",
+                          "hands": {"right": "touch>other_cheek"}}],
+                        f"watches {b} silently", "on_screen"],
+                       "cut-03(test3): 여의준 자기 연기 · 범건우 hand_only + 손(touch>other_cheek), cut-02 범건우 화면 밖 연기")
+
+                # 고치기가 쓸모없는 답 → 그래도 1회만, 서버가 채워 문제 0
+                state["fix"] = {"cuts": []}
+                cuts_bad = run(False)
+                expect("cc-b", [len([x for x in calls if x["where"] == "vnew.conti.cast_fix"]),
+                                planmod.cast_issues(cuts_bad, planmod.location_casts(cuts_bad, base_plan()["script"], [b, a])),
+                                [(ch["name"], ch["presence"], ch["actionEn"]) for ch in cuts_bad[1]["characters"]],
+                                [(ch["name"], ch["presence"]) for ch in cuts_bad[2]["characters"]]],
+                       [1, {}, [(b, "on_screen", "looks down"), (a, "off_screen", planmod.CAST_FILL_OFF_EN)],
+                        [(b, "on_screen"), (a, "hand_only")]],
+                       "고치기 답이 비면: 고치기 1회만 · 빠진 인물 off_screen 으로 채움 · off_screen 손 주인 → hand_only")
+
+                # 샷 계획 cast[]: 문제 없음 → 고치기 0회
+                state["fix"] = fix_reply
+                vcuts = run(True)
+                vfirst = calls[0] if calls else {}
+                expect("cc-b", [vfirst.get("tool") is prmod.EMIT_VIBE_CUTS_CAST, prmod.VIBE_CAST_NOTE in (vfirst["blocks"][0].get("text") or ""),
+                                [x["where"] for x in calls], vcuts[0]["characters"] if vcuts else None],
+                       [True, True, ["vnew.conti.vibe"],
+                        [{"name": b, "presence": "on_screen", "positionEn": "on the rail", "actionEn": "looks up", "actionKo": ""},
+                         {"name": a, "presence": "off_screen", "positionEn": "", "actionEn": f"watches {b}", "actionKo": "지켜봄"}]],
+                       "샷 계획: cast 도구 · 글 끝 cast 줄, cast[] → 컷 인물(on_screen 위치 = 대본, 손을 안 적으면 hands 키 없음), 문제 없으면 고치기 0회")
+            finally:
+                for n, v in orig.items():
+                    setattr(planmod, n, v)
+                planmod.vpoc_llm._converse = orig_conv  # noqa: SLF001
+                charmod.load_char = orig_load
+        expect("cc-b", llm_calls, [], "실제 LLM 호출 0")
+
+        # ================= (cc-c) 프롬프트 · 포즈가 presence · hands 를 먼저 =================
+        plan, take = _tc157_plan()
+        old_plan = _copy.deepcopy(plan)
+        cuts_by = {cut["id"]: cut for cut in plan["conti"]["cuts"]}
+        cuts_by["cut-01"]["characters"] = [c(b, "on_screen", "listens"), c(a, "voice_only", "answers flatly", {})]
+        cuts_by["cut-03"]["characters"] = [
+            dict(c(b, "on_screen", "cries quietly", {}), actionKo="조용히 운다"),
+            c(a, "hand_only", f"{a}'s hand (off-frame) strokes {b}'s cheek.", {"right": "touch>other_cheek"}, prmod.OFF_FRAME_HAND_POSITION)]
+        ra, rb = genmod._romanize_name(a), genmod._romanize_name(b)  # noqa: SLF001
+        cast = [{"name": b, "colorName": "blue", "frontNo": 1, "appearance": "", "voice": "", "costume": "black track top"},
+                {"name": a, "colorName": "orange", "frontNo": 2, "appearance": "", "voice": "", "costume": "black dress shirt"}]
+
+        def shot_lines(plan_x: dict) -> list[str]:
+            with _pin_vnew(VNEW_FX=True, VNEW_TAKE_PROMPT_MAX_CHARS=8000, VNEW_VIBE_PROMPT=True):
+                text = genmod._vibe_take_prompt(plan_x, take, real=False, cast=cast, location_no=5, quiet=True)  # noqa: SLF001
+            return [ln for ln in text.split("\n") if ln.startswith("Shot ")]
+
+        new_lines, old_lines = shot_lines(plan), shot_lines(old_plan)
+        expect("cc-c", [genmod._cut_on_screen(plan, cuts_by["cut-01"])["onScreen"],  # noqa: SLF001
+                        genmod._cut_on_screen(old_plan, old_plan["conti"]["cuts"][0])["onScreen"],  # noqa: SLF001
+                        genmod._cut_on_screen(plan, cuts_by["cut-03"])["onScreen"],  # noqa: SLF001
+                        genmod._cut_poses(plan, cuts_by["cut-03"])],  # noqa: SLF001
+                       [[{"name": b, "how": "main"}], [{"name": a, "how": "main"}],
+                        [{"name": b, "how": "main"}, {"name": a, "how": "hands only"}],
+                        [{"name": a, "hands": {"right": {"act": "touch", "target": "other_cheek"}}, "other": b}]],
+                       "화면 인물: presence 먼저(cut-01 패널 주인공 범건우 voice_only → 빠지고 여의준), hand_only → hands only, 손 = 콘티 hands")
+        expect("cc-c", [new_lines[0].startswith(f"Shot 1 (0-4s), medium close-up, front view: Only {rb} appears in this shot; {ra} is not visible. "),
+                        old_lines[0].startswith(f"Shot 1 (0-4s), medium close-up, front view: Only {ra} appears in this shot; {rb} is not visible. "),
+                        f"Only {rb} appears in this shot; {ra}'s hand enters from off-frame and strokes {rb}'s cheek. " in new_lines[2],
+                        f"{ra}'s right hand" in new_lines[2], new_lines[3:] == old_lines[3:]],
+                       [True, True, True, False, True],
+                       "vibe 샷 줄: presence 로 who_in_shot(옛 콘티는 패널 읽기 그대로) · 손 절 · 포즈 절 중복 없음 · 다른 컷 그대로")
+        scenes = _copy.deepcopy(plan["previz"]["scenes"])
+        grammar = {cid: e["grammar"] for cid, e in plan["previz"]["panelGrammar"].items()}
+        grammar["cut-03"] = dict(grammar["cut-03"], actions=[
+            {"name": b, "gesture": "cover_face", "target": "none",
+             "hands": {"right": {"act": "cover", "target": "own_eyes"}, "left": {"act": "cover", "target": "own_face"}}}])
+        pvmod._apply_gestures(scenes, pvmod._scene_groups(plan["conti"]), grammar, plan)  # noqa: SLF001
+        t3 = next(t for t in scenes[0]["timeline"] if t["cutId"] == "cut-03")
+        lead, other = t3["actors"]
+        expect("cc-c", [lead.get("hands"), lead.get("gestureTarget"), lead.get("gesture"), other.get("hands"), other.get("gesture")],
+               [{"left": {"act": "rest", "target": "none"}, "right": {"act": "touch", "target": "other_cheek"}}, "a2",
+                "hand_on_other_cheek", {"left": {"act": "rest", "target": "none"}, "right": {"act": "rest", "target": "none"}},
+                "turn_head_to_other"],
+               "프리비즈 포즈: 콘티 hands 가 패널 읽기(여의준 cover_face)보다 먼저 — 범건우 오른손 뺨, 여의준 두 손 쉼")
+
+        # ================= (cc-d) 화면 · 저장 =================
+        vjs = (PUBLIC / "vnew.js").read_text(encoding="utf-8")
+        marks = [("  function el(tag, className, text) {", "  function clear(node)"),
+                 ("  function textField(labelText, obj, key, multiline) {", "  function swapEntries("),
+                 ("  /* ---- 작업 162 fix1: 컷 인물 줄", "  /* ---- 작업 162 fix1 끝 ---- */")]
+        spans = [(vjs.find(s), vjs.find(e, max(0, vjs.find(s)))) for s, e in marks]
+        expect("cc-d", [all(s >= 0 and e > s for s, e in spans), vjs.count("whoWrap.appendChild(contiPersonRow(person, pIndex));"),
+                        vjs.count("body: JSON.stringify({ cuts: cuts })")],
+               [True, 1, 2], "vnew.js: 인물 줄 함수 구역 · 컷 카드 배선 · 저장(PUT /conti 본문 그대로)")
+        node = shutil.which("node")
+        if not node:
+            warn("node 가 없어 작업 162 fix1 화면 검사(cc-d node)를 건너뜁니다 (E16)")
+        elif all(s >= 0 and e > s for s, e in spans):
+            sliced = "\n".join(vjs[s:e] for s, e in spans)
+            got, err = _lr_run_node(node, "var SLICE = " + json.dumps(sliced, ensure_ascii=False) + ";\n" + _CC162_NODE, "cc162_")
+            if err:
+                bad.append(f"(cc-d) node 실행 실패: {err}")
+            else:
+                before = got.get("before") or []
+                opts = [["on_screen", "화면에 보임"], ["hand_only", "손만 보임"], ["voice_only", "목소리만"], ["off_screen", "화면 밖"]]
+                expect("cc-d", before,
+                       [{"cls": "vnew-entry-person vnew-presence-hand_only", "name": a, "presenceLabel": "나옴", "options": opts,
+                         "value": "hand_only", "fields": [["동작 (한국어)", "손을 뻗어 뺨을 쓰다듬음"], ["위치 (영어)", "off-frame, hand only"],
+                                                          ["동작 (영어)", "reaches in"]]},
+                        {"cls": "vnew-entry-person", "name": b, "presenceLabel": "나옴", "options": [["", "(미정)"]] + opts, "value": "",
+                         "fields": [["동작 (한국어)", ""], ["위치 (영어)", "on the rail"], ["동작 (영어)", "cries"]]}],
+                       "인물 줄: 이름 · 나옴(4개, 옛 인물은 (미정)) · 한국어 동작 · 위치 · 영어 동작")
+                body = json.loads(got.get("body") or "{}")
+                chars = ((body.get("cuts") or [{}])[0]).get("characters") or []
+                expect("cc-d", chars,
+                       [{"name": a, "presence": "off_screen", "positionEn": "off-frame, hand only", "actionEn": "reaches in",
+                         "actionKo": "화면 밖에서 지켜봄", "hands": {}},
+                        {"name": b, "positionEn": "on the rail", "actionEn": "cries", "presence": "on_screen"}],
+                       "고친 뒤 PUT 본문: 범건우 화면 밖(손 비움) · 한국어 동작, 여의준 (미정) → 화면에 보임")
+                store = {"plan": {"input": {"totalSeconds": 3}, "previz": {"approved": True, "scenes": [{}]},
+                                  "conti": {"status": "ready", "cuts": [{"id": "cut-03", "seconds": 3, "characters": []}]}}}
+                orig_mp = planmod.mutate_plan
+                try:
+                    planmod.mutate_plan = lambda owner, pid, mutator, **kw: (store["plan"], mutator(store["plan"]))
+                    with _pin_vnew(VNEW_FX=False):
+                        planmod.update_conti("o", "p", body)
+                finally:
+                    planmod.mutate_plan = orig_mp
+                saved_chars = store["plan"]["conti"]["cuts"][0]["characters"]
+                expect("cc-d", [saved_chars, store["plan"]["previz"]["approved"]],
+                       [[{"name": a, "presence": "off_screen", "positionEn": "", "actionEn": "reaches in", "actionKo": "화면 밖에서 지켜봄",
+                          "hands": {}},
+                         {"name": b, "presence": "on_screen", "positionEn": "on the rail", "actionEn": "cries", "actionKo": ""}],
+                        False],
+                       "저장(update_conti): presence · actionKo 그대로, 화면 밖 = 손만 위치 글 지움 · 손 비움, 손 안 적은 인물은 hands 키 없음, 승인 해제")
+        report.append(f"cut-03 after fix: {c3}")
+        report.append(f"take shot 3: {new_lines[2][:200] if len(new_lines) > 2 else ''}")
+    except Exception as exc:  # noqa: BLE001
+        bad.append("예외: " + repr(exc) + "\n" + _tb.format_exc()[:2500])
+
+    missing = [g for g in ("cc-a", "cc-b", "cc-c", "cc-d") if g not in seen]
+    if missing:
+        bad.append(f"검사 묶음이 돌지 않았습니다: {missing}")
+    if bad:
+        fail("작업 162 fix1 콘티 인물마다 연기 검사 실패\n  " + "\n  ".join(bad))
+    else:
+        ok("작업 162 fix1 (cc-a)presence · actionEn 필수(콘티 · 샷 계획 · 다시 읽기 · 고치기) (cc-b)빠진 인물 · 화면 밖 손 → 고치기 1회 → 문제 0 "
+           "(cc-c)화면 인물 · 손 절 · 포즈 = 콘티 presence · hands 먼저 (cc-d)인물 줄 node · 저장 · 승인 해제")
+        for line in report:
+            print(f"       162fix1: {line}")
+
+
 def main() -> int:
     print("== vpoc1 check ==")
     check_compileall()
@@ -54525,6 +55234,9 @@ def main() -> int:
     # 실사 참고 기대값(시트·정면 사진)은 160 전 그대로다. 켬 경로는 check_vnew_real_costume_160 이 본다.
     vibe_off = contextlib.ExitStack()
     vibe_off.enter_context(_pin_vnew(VNEW_VIBE_PROMPT=False, VNEW_REAL_COSTUME_REF=False))
+    # 작업 162 fix1: 같은 이유로 VNEW_CONTI_CAST(콘티 인물마다 presence · 검사 · 고치기 호출)도 끔에 고정한다. 아래 검사들의 가짜 콘티 답에는
+    # presence 가 없어 켬이면 고치기 호출(가짜 밖 LLM)이 일어난다. 기대값은 하나도 바꾸지 않았다.
+    vibe_off.enter_context(_pin_vnew(VNEW_CONTI_CAST=False))
     check_cancel()
     check_dual()
     check_vnew()
@@ -54635,6 +55347,11 @@ def main() -> int:
     check_vnew_vibe_prompt_159()
     check_vnew_real_costume_160()
     check_vnew_real_daylight_161()
+    # 작업 162 fix1: 162 검사는 162 동작(인물 = 보이는 사람 + 손 주인)을 본다. VNEW_CONTI_CAST(기본 켬)면 콘티 인물 모양이 바뀌므로 끔에
+    # 고정한다(기대값은 그대로). 켬 경로는 check_vnew_conti_cast_162fix1 이 본다.
+    with _pin_vnew(VNEW_CONTI_CAST=False):
+        check_vnew_hand_owner_162()
+    check_vnew_conti_cast_162fix1()
     print()
     if warnings:
         print(f"경고 {len(warnings)}건")

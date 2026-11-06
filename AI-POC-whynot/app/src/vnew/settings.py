@@ -284,6 +284,10 @@ VNEW_CONTI_IMAGES = _bool("VNEW_CONTI_IMAGES", True)
 # 우리 대본 줄·패널·총 길이·캐릭터(이름·외형·시트 그림)·부가 설명·120 타일로 샷을 받아 conti.cuts 모양으로 옮긴다
 # (plan._vibe_cuts). false 면 지금 CONTI_SYSTEM 경로 그대로(프롬프트 바이트 같음).
 VNEW_VIBE_CONTI = _bool("VNEW_VIBE_CONTI", True)
+# 작업 162 fix1: 콘티 컷마다 그 장면의 모든 인물(presence on_screen|hand_only|voice_only|off_screen · actionEn · actionKo · hands).
+# 켜면 콘티 도구가 presence·actionEn 을 요구하고, 답 뒤에 빠진 인물·화면 밖 손 주인을 검사해 틀리면 고치기 1회(그래도 틀리면 서버가
+# 채운다). 콘티 연기 다시 읽기도 같다. false 면 162 그대로(코드 기본, 템플릿에 넣지 않는다).
+VNEW_CONTI_CAST = _bool("VNEW_CONTI_CAST", True)
 
 # 실사 캐스팅(vnew-live-fx 묶음 B, 2026-10-30). 켜면 캐릭터 상세에서 실사 배우 사진을 글로만 뽑아 고르고(Seedream 4.5
 # text-to-image, 웹툰 그림은 보내지 않는다), 캐릭터 분석에 성별(genderEn)을 더한다. false 면 지금 동작(캐스팅 라우트 404·
