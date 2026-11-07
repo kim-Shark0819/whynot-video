@@ -4452,6 +4452,13 @@ VIBE_SHEET_CLAUSE = "AI-generated turnaround sheet of a fictional character; mat
 # 작업 160: 정면 자리가 장면 옷 편집 그림(_costume_refs)인 인물의 시트 절·이름표.
 VIBE_SHEET_COSTUME_CLAUSE = "AI-generated turnaround sheet of a fictional character; match face/hair/build, clothes come from @Image{no}"
 REAL_COSTUME_REF_LABEL = "@Image{no} is {name} in this scene's clothes"
+# 작업 180: 장면 옷 그림이 없는 인물의 정면 · 신원 이름표 꼬리(look 줄에 옷이 있을 때만) — 정면 그림의 기본 옷을 베끼지 않게.
+# fix1: 짧은 꼬리 + 이름표 블록 끝 공통 옷 문장 1번(4,000자 안). 장면 옷 그림이 있는 인물과 섞이면(실사) 줄마다 긴 꼬리.
+VIBE_FRONT_FACE_ONLY = " (face and hair only)"
+VIBE_FRONT_FACE_ONLY_LONG = " (face and hair only; the clothes come from the look line, not from this image)"
+# 작업 180 fix2: 시트 줄이 없는 cast 의 대표 정면 줄 꼬리(공통 옷 문장 없음).
+VIBE_FRONT_FACE_ONLY_NO_SHEET = " (face and hair only)"  # fix3: 짧은 꼬리(4,000자 안)
+VIBE_CLOTHES_SHARED = "Clothes for every person come only from the look line, never from the sheets or the front images."
 VIBE_VIDEO_LINE = ("@Video1 is the 3D previz: follow its camera, positions, cuts and timing exactly; "
                    "replace each mannequin with its person")
 # 작업 174: 콘티 클로즈업이 프리비즈 카메라보다 가까운 샷이 있는 조각 — 크기는 Shot 줄을 따른다.
@@ -4573,10 +4580,9 @@ VIBE_OUT_PERSON = "{name} not in frame"
 VIBE_SIDES = "{left} on screen left, {right} on screen right"
 VIBE_EDGE_PERSON_SIDE = "{name} only partly visible at the {side} frame edge"
 # 작업 179: 애니 신원 참고의 웹툰 턴어라운드 시트 이름표 — 웹툰 패널에 없는 각도(키스 중 카메라 쪽 얼굴 등)는 시트에서.
-VIBE_ANIME_SHEET_LABEL = ("@Image{no} is {name}'s character turnaround sheet (front, three-quarter, side, back views): when a "
-                          "shot needs an angle the webtoon images do not show (for example a face turned toward camera "
-                          "during a kiss), take that face, hair and build from this sheet; the clothes come from the look "
-                          "line, not from the sheet.")  # fix1: 시트는 기본 옷 — 장면 옷은 look 줄
+# 작업 180 fix1: 짧은 형 — 옷은 이름표 블록 끝 공통 문장(VIBE_CLOTHES_SHARED)이 말한다.
+VIBE_ANIME_SHEET_LABEL = ("@Image{no} is {name}'s turnaround sheet (front, three-quarter, side, back): for angles the webtoon "
+                          "images do not show (e.g. a face turned toward camera in a kiss), take face, hair and build from it.")
 # 작업 179 fix1: 콘티 패널 좌우와 프리비즈 투영 좌우가 거꾸로인 컷(선을 넘은 프리비즈, prod test3 cut-01).
 VIBE_MIRROR_NOTE = " (screen sides as stated here; the previz is mirrored for this shot)"
 VIBE_VIDEO_MIRROR = "; where a Shot says the previz is mirrored, follow that Shot's screen sides instead"
@@ -5588,19 +5594,35 @@ def _vibe_take_prompt(plan: dict, take: dict, *, real: bool, cast: list[dict], l
         sheets: list[int] = []
         costume_sheets: list[str] = []
         anime_sheets: set[int] = set()  # 작업 179: 애니 웹툰 시트 = 한 문장 이름표(VIBE_ANIME_SHEET_LABEL)
+        faces: set[int] = set()  # 작업 180: 얼굴 · 머리만 정면 줄
+        # 작업 180 fix1: 장면 옷 그림이 있는 인물과 없는 인물이 섞이면(실사) 공통 옷 문장 대신 줄마다 긴 꼬리
+        mixed = any(m.get("costumeNo") and m.get("costumeNo") in (m.get("refNos") or [m.get("frontNo")]) for m in cast)
+        # 작업 180 fix2: 시트 줄이 없는 cast 는 인물마다 대표 정면(frontNo) 1줄만 꼬리, 공통 옷 문장 없음(4,000자 안)
+        no_sheet = not any(m.get("sheetNo") for m in cast)
         for member in cast:
             handle = _disp(str(member.get("name") or ""))
             nos = [n for n in (member.get("refNos") or []) if n] or ([member["frontNo"]] if member.get("frontNo") else [])
             costume_no = member.get("costumeNo")
             anime_sheet = int(member["sheetNo"]) if not real and member.get("sheetNo") and costume_no not in nos else 0
+            # 작업 180: 장면 옷 그림이 없고 look 줄에 옷이 있으면 정면 · 신원 줄 = 얼굴 · 머리만(시트 줄은 시트 절이 말한다)
+            face_only = costume_no not in nos and bool(
+                _txt(costumes.get(str(member.get("name") or "").strip()) or "").strip(" ."))
             for no in nos:
                 if no == anime_sheet:
                     rows.append((no, VIBE_ANIME_SHEET_LABEL.format(no=no, name=handle)))
                     anime_sheets.add(no)
                     continue
                 # 작업 160: 정면 자리의 장면 옷 편집 그림은 "in this scene's clothes"
+                tail = ""
+                if face_only and no != member.get("sheetNo") and mixed:
+                    tail = VIBE_FRONT_FACE_ONLY_LONG
+                elif face_only and no_sheet:
+                    tail = VIBE_FRONT_FACE_ONLY_NO_SHEET if no == (member.get("frontNo") or nos[0]) else ""
+                elif face_only and no != member.get("sheetNo"):
+                    tail = VIBE_FRONT_FACE_ONLY
+                    faces.add(no)
                 rows.append((no, REAL_COSTUME_REF_LABEL.format(no=no, name=handle) if no == costume_no
-                             else f"@Image{no} is {handle}"))
+                             else f"@Image{no} is {handle}{tail}"))
             if member.get("sheetNo") and costume_no in nos:
                 costume_sheets.append(f"@Image{int(member['sheetNo'])}: "
                                       + VIBE_SHEET_COSTUME_CLAUSE.format(no=costume_no) + ".")
@@ -5630,6 +5652,8 @@ def _vibe_take_prompt(plan: dict, take: dict, *, real: bool, cast: list[dict], l
             text += " " + ", ".join(f"@Image{n}" for n in sorted(sheets)) + f": {VIBE_SHEET_CLAUSE}."
         if costume_sheets:
             text += " " + " ".join(costume_sheets)
+        if VIBE_CLOTHES_SHARED and (anime_sheets or faces) and not mixed:
+            text += " " + VIBE_CLOTHES_SHARED  # 작업 180 fix1: 시트 · 정면 그림의 옷을 쓰지 않는다(이름표 블록에 1번)
         return text
 
     colors = ", ".join(f"{m.get('colorName') or 'grey'} = {_disp(str(m.get('name') or ''))}"
