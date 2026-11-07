@@ -4454,6 +4454,9 @@ VIBE_SHEET_COSTUME_CLAUSE = "AI-generated turnaround sheet of a fictional charac
 REAL_COSTUME_REF_LABEL = "@Image{no} is {name} in this scene's clothes"
 VIBE_VIDEO_LINE = ("@Video1 is the 3D previz: follow its camera, positions, cuts and timing exactly; "
                    "replace each mannequin with its person")
+# 작업 174: 콘티 클로즈업이 프리비즈 카메라보다 가까운 샷이 있는 조각 — 크기는 Shot 줄을 따른다.
+VIBE_VIDEO_LINE_TIGHT = ("@Video1 is the 3D previz: follow its positions, cuts and timing; for shot size follow each Shot line "
+                         "\u2014 where a Shot says close-up, frame tighter than the previz; replace each mannequin with its person")
 VIBE_SPOKEN = "spoken (audio only, never written on screen)"  # = TEXT_RETRY_SPOKEN(156, 아래에서 정의)
 VIBE_COMPACT_ORDER = ("style", "background", "assets", "paragraph")  # 157 순서(고정 부분 먼저, head 단락 마지막)
 _VIBE_ANGLE_EN = {"OTS": "over-the-shoulder", "profile": "profile", "3/4": "three-quarter view", "front": "front view",
@@ -4904,6 +4907,38 @@ FACE_TOUCH_LINE = ("Touch: a soft, loving, careful chin hold; fingertips lightly
                    "the neck stays uncovered and free; no squeezing, no pressure; the face is tilted up gently toward him.")
 FACE_TOUCH_CHIN = "gently {lift} {name}'s chin with his fingertips, thumb resting lightly on the chin near the lower lip"
 FACE_TOUCH_CHEEK = "softly {cup} {name}'s cheek"
+# 작업 174: 닿는 종류(눈·눈물 / 뺨 / 턱 / 귀·목 쓰다듬)마다 Touch 줄 1개. 턱은 173 줄 그대로.
+FACE_TOUCH_LINES = {
+    "eyes": ("Touch: a soft, careful gesture; his hand lightly covers {name}'s eyes, then his thumb gently wipes the tear down "
+             "the cheek; nose and mouth stay uncovered; no pressure."),
+    "cheek": ("Touch: a soft, loving cheek cup; palm resting lightly on the cheek, fingers toward the ear, the neck stays "
+              "uncovered; no squeezing."),
+    "chin": FACE_TOUCH_LINE,
+    "ear": "Touch: fingertips lightly brush behind the ear; the palm stays away from the throat; no pressure.",
+}
+# 작업 174: 173 턱 받침 글이 종류와 어긋날 때(눈물 닦는 컷의 턱 들기 등) 바꾸는 글, 입이 가까운 컷의 턱 받침 글.
+FACE_TOUCH_EYES = "gently {cover} {name}'s eyes, then {wipe} the tear down the cheek with his thumb"
+FACE_TOUCH_EAR = "lightly {brush} behind {name}'s ear with his fingertips"
+FACE_TOUCH_CHIN_CLOSE = ("gently {lift} {name}'s chin with his fingertips, thumb resting lightly on the chin, away from both "
+                         "mouths; nothing between their lips")
+_TOUCH_KIND_EN = (("eyes", r"\bcover(?:s|ed|ing)?\s+(?:[^\s,;.]+\s+){0,2}?eyes\b|\bwip(?:e|es|ed|ing)\b|\btears?\b"),
+                  ("cheek", r"\bcheeks?\b|\bcup(?:s|ped|ping)?\b"),
+                  ("chin", r"\bchin\b|\bjaw(?:line)?\b|\blift(?:s|ed|ing)?\b"),
+                  ("ear", r"\bears?\b|\bnecks?\b|\bnape\b|\bstrok(?:e|es|ed|ing)\b"))
+_TOUCH_KIND_KO = (("eyes", r"눈물|닦|눈을\s*가[리렸]"), ("cheek", r"볼|뺨"), ("chin", r"턱"), ("ear", r"귀|목덜미|뒷목|목|쓰다듬"))
+_TOUCH_STROKE = re.compile(r"\b(?:strok|brush|caress)\w*|\bears?\b|귀|쓰다듬", re.IGNORECASE)
+_TOUCH_TARGET_KIND = {"other_cheek": "cheek", "other_chin": "chin"}
+_LIPS_CLOSE = re.compile(r"\bkiss\w*|키스|입맞|입을\s*맞|입술|\b(?:lips|mouths)\b[^.;]{0,40}?\b(?:close|centimet\w*|apart|separat\w*|"
+                         r"touch\w*|nearly|almost)\b|\b(?:close|centimet\w*|nearly|almost)\b[^.;]{0,40}?\b(?:lips|mouths)\b",
+                         re.IGNORECASE)
+VIBE_TIGHTER_TAG = " (tighter than the previz)"
+_PREVIZ_SIZE_RANK = {"ECU": 0, "CU": 1, "MCU": 2, "MS": 3, "MLS": 4, "LS": 5}
+_CONTI_SIZE_RANK = {"extreme": 0, "closeup": 1, "profile": 1}
+# 작업 174: 한 사람 클로즈업에서 손 잡기(얼굴 아님) → 화면 아래 가장자리 바로 밑(손끝만), 화면이 넓어지지 않게.
+_EDGE_HAND_RE = re.compile(r"\b(?:grab(?:s|bed)?|grip(?:s|ped)?|holds|clasp(?:s|ed)?|takes|seiz(?:es|ed)|clamps\s+around)\s+"
+                           r"(?P<obj>[^\s,;.()]+['\u2019]s\s+(?:(?:right|left|extended|outstretched|raised)\s+){0,2}hand)"
+                           r"(?:\s+and\s+wrist)?\b(?!\s+just below)", re.IGNORECASE)
+VIBE_EDGE_HAND = "holds {obj} just below the frame edge, only the fingertips visible"
 _FACE_TOUCH_TARGETS = {"other_chin": "chin", "other_face": "chin", "other_neck": "chin", "other_cheek": "cheek"}
 _FACE_PART = r"(?:face|jaw(?:line)?|chin|cheeks?|neck|nape|throat|ears?)"
 _FACE_OWNER = r"(?:(?:his|her|their|the)\s+(?!own\b)|[^\s,;.()]+['\u2019]s\s+)"
@@ -4945,7 +4980,7 @@ def _face_touch(plan: dict, cut: dict, brief_action: str = "") -> dict | None:
             hand = (pose.get("hands") or {}).get(side)
             part = _FACE_TOUCH_TARGETS.get(str((hand or {}).get("target") or "")) if isinstance(hand, dict) else None
             if part and other and other != name:
-                return {"name": name, "other": other, "part": part}
+                return _touch_info(cut, name, other, part, str(hand.get("target") or ""), brief_action)
     if poses or any("hands" in ch for ch in chars):
         return None
     names = [str(ch["name"]).strip() for ch in chars]
@@ -4961,12 +4996,63 @@ def _face_touch(plan: dict, cut: dict, brief_action: str = "") -> dict | None:
                     r"\b" + _FACE_EN_VERB + re.escape(form) + r"['\u2019]s\s+(?:[a-z-]+\s+){0,2}?(?P<part>" + _FACE_PART + r")",
                     t, re.IGNORECASE)] if m), None)
                 if hit_en:
-                    return {"name": name, "other": other, "part": "cheek" if "cheek" in hit_en.group("part").lower() else "chin"}
+                    return _touch_info(cut, name, other, "cheek" if "cheek" in hit_en.group("part").lower() else "chin", "",
+                                       brief_action)
             hit_ko = re.search(re.escape(other) + r"의\s*(?:[\uac00-\ud7a3]+\s+){0,2}?(?P<part>" + _FACE_KO_RE.pattern
                                + r")(?=[을를이가에은는과와도의,.\s]|$)", ko)
             if hit_ko and _FACE_KO_VERB.search(ko[hit_ko.end():hit_ko.end() + 24]):
-                return {"name": name, "other": other, "part": "cheek" if hit_ko.group("part") in ("뺨", "볼") else "chin"}
+                return _touch_info(cut, name, other, "cheek" if hit_ko.group("part") in ("뺨", "볼") else "chin", "",
+                                   brief_action)
     return None
+
+
+def _touch_info(cut: dict, name: str, other: str, part: str, target: str, brief_action: str) -> dict:
+    """작업 174: 173 찾기 결과 + "kind"(eyes|cheek|chin|ear) + "close"(키스 · 입이 가까움). 종류 = 손 주인 콘티 연기(영어, 없으면
+    한국어)에서 가장 먼저 나오는 종류 낱말이 눈·눈물이면 eyes, 아니면 손 표기(other_cheek → cheek, other_chin → chin, other_neck →
+    쓰다듬/귀 낱말이 있으면 ear, 없으면 173 턱 받침), 손 표기가 없으면 그 낱말 종류(없으면 part)."""
+    chars = [ch for ch in cut.get("characters") or [] if isinstance(ch, dict)]
+    owner = next((ch for ch in chars if str(ch.get("name") or "").strip() == name), {})
+    en = str(owner.get("actionEn") or "")
+    ko = str(owner.get("actionKo") or owner.get("action") or "")
+
+    def _first(text: str, table) -> str:
+        hits = [(m.start(), kind) for kind, pattern in table for m in [re.search(pattern, text, re.IGNORECASE)] if m]
+        return min(hits)[1] if hits else ""
+
+    found = _first(en, _TOUCH_KIND_EN) or _first(ko, _TOUCH_KIND_KO) or _first(str(brief_action or ""), _TOUCH_KIND_EN)
+    if found == "eyes":
+        kind = "eyes"
+    elif target == "other_neck":
+        kind = "ear" if _TOUCH_STROKE.search(en + " " + ko) else "chin"
+    elif target in _TOUCH_TARGET_KIND:
+        kind = _TOUCH_TARGET_KIND[target]
+    else:
+        kind = found or part
+    texts = [str(brief_action or ""), str(cut.get("cameraEn") or "")]
+    texts += [str(ch.get(k) or "") for ch in chars for k in ("actionEn", "actionKo", "action")]
+    close = any(_LIPS_CLOSE.search(t) for t in texts if t)
+    return {"name": name, "other": other, "part": part, "kind": kind, "close": close}
+
+
+def _touch_line(touch: dict | None, disp) -> str:
+    """작업 174: 닿는 종류의 Touch 줄(touch 없으면 ""). 종류가 없는(173 형) touch 는 턱 받침 줄."""
+    if not touch:
+        return ""
+    return FACE_TOUCH_LINES.get(str(touch.get("kind") or "chin"), FACE_TOUCH_LINE).format(name=disp(touch.get("other") or ""))
+
+
+def _conti_tighter(cut: dict, shot: str) -> bool:
+    """작업 174: 콘티 크기(170 — 아주 가까운 0, 클로즈업 · 옆얼굴 1)가 프리비즈 샷 크기(ECU 0 · CU 1 · MCU 2 · MS 3 …, 모르면 MS)보다
+    가까우면 True. 콘티가 클로즈업이 아니거나 인서트면 False."""
+    rank = _CONTI_SIZE_RANK.get(_conti_size_kind(cut))
+    if rank is None:
+        return False
+    return rank < _PREVIZ_SIZE_RANK.get(str(shot or "").strip().partition(" ")[0].upper(), 3)
+
+
+def _edge_hand(text: str) -> str:
+    """작업 174: 손 잡기(grabs/grips/holds … X's hand) → "holds X's hand just below the frame edge, only the fingertips visible"."""
+    return _EDGE_HAND_RE.sub(lambda m: VIBE_EDGE_HAND.format(obj=m.group("obj")), str(text or ""))
 
 
 def _soften_face_touch(text: str, touch: dict | None, partner: str) -> str:
@@ -4982,8 +5068,21 @@ def _soften_face_touch(text: str, touch: dict | None, partner: str) -> str:
         cheek = "cheek" in obj and (touch.get("part") == "cheek" or not re.search(r"chin|jaw|neck|nape|throat|face", obj))
         ing = verb.lower().split()[-1].endswith("ing") and not verb.lower().startswith(("is ", "are "))
         base = bool(re.search(r"\bto\s+$", match.string[:match.start()], re.IGNORECASE))  # "to cup and stroke …" → 원형
-        out = (FACE_TOUCH_CHEEK.format(cup="cupping" if ing else "cup" if base else "cups", name=partner) if cheek
-               else FACE_TOUCH_CHIN.format(lift="lifting" if ing else "lift" if base else "lifts", name=partner))
+        kind = touch.get("kind")
+        form = "ing" if ing else "base" if base else "s"
+
+        def _v(stem: str, s: str) -> str:  # 작업 174: lift/cover/wipe/brush/cup 의 꼴
+            return (stem[:-1] if stem.endswith("e") else stem) + "ing" if form == "ing" else stem if form == "base" else stem + s
+
+        if cheek or kind == "cheek":
+            out = FACE_TOUCH_CHEEK.format(cup="cupping" if ing else "cup" if base else "cups", name=partner)
+        elif kind == "eyes":  # 작업 174: 눈물 닦는 컷의 턱 들기 → 눈 가리고 눈물 닦기
+            out = FACE_TOUCH_EYES.format(cover=_v("cover", "s"), wipe=_v("wipe", "s"), name=partner)
+        elif kind == "ear":  # 작업 174: 귀 · 목 쓰다듬는 컷의 턱 들기 → 귀 뒤 손끝
+            out = FACE_TOUCH_EAR.format(brush=_v("brush", "es"), name=partner)
+        else:  # 작업 174: 입이 가까운 컷(키스 등)은 엄지가 입술에서 떨어진 턱 받침
+            out = (FACE_TOUCH_CHIN_CLOSE if touch.get("close") else FACE_TOUCH_CHIN).format(
+                lift="lifting" if ing else "lift" if base else "lifts", name=partner)
         return out[0].upper() + out[1:] if verb[:1].isupper() else out
 
     def _neck(match: re.Match) -> str:
@@ -5237,6 +5336,12 @@ def _vibe_take_prompt(plan: dict, take: dict, *, real: bool, cast: list[dict], l
         if insert:
             lead, clauses = _insert_lead(clauses)  # 작업 170: 첫 닿는 동사 절을 크기 바로 뒤로
         size = VIBE_INSERT_SIZE if insert else _vibe_conti_size(cut, entry.get("shot"))  # 작업 170: 콘티 크기 우선
+        tag = ""
+        if not insert and _conti_tighter(cut, entry.get("shot")):
+            tag = VIBE_TIGHTER_TAG  # 작업 174: 콘티 클로즈업이 프리비즈보다 가까우면 크기 절 바로 뒤에
+            tighter.append(cut_id)
+        edge = (lambda text: _edge_hand(text)) if subject else (lambda text: text)  # 작업 174: 한 사람 클로즈업의 손 잡기
+        clauses = [edge(c) for c in clauses]
         if subject:
             who = _closeup_who(subject, entry, cut, clauses, owner_names, profile=size == VIBE_PROFILE_SIZE)
         elif hand_owners:
@@ -5249,11 +5354,12 @@ def _vibe_take_prompt(plan: dict, take: dict, *, real: bool, cast: list[dict], l
         locked = {ko for ko, _text in locks}
         own = "".join(text + ". " for _ko, text in locks)
         head = (lead + ". " if lead else "") + (own + who if real else who + own)
-        prefix = f"Shot {index + 1} ({entry['start']}-{entry['end']}s), {size}: " + head
+        prefix = f"Shot {index + 1} ({entry['start']}-{entry['end']}s), {size}{tag}: " + head
         if framing is not None:
             # 작업 169: 컷 단위 Kling 샷 고정 줄의 재료(크기 · 자기 손 + who, 화면에 보이는 인물)
-            framing.setdefault("shots", {})[cut_id] = {"size": size, "lead": head, "names": _present(entry),
-                                                       "touch": bool(touch)}  # 작업 173
+            framing.setdefault("shots", {})[cut_id] = {"size": size + tag, "lead": head, "names": _present(entry),
+                                                       "touch": bool(touch),  # 작업 173
+                                                       "touchLine": _touch_line(touch, _disp)}  # 작업 174
         parts = []
         if index in moves:
             parts.append(f"Setting now: {_bg(moves[index])}")
@@ -5268,24 +5374,25 @@ def _vibe_take_prompt(plan: dict, take: dict, *, real: bool, cast: list[dict], l
         contact_name = str((entry.get("contact") or {}).get("name") or "").strip()
         contact_piece = ""
         if not any(str(o.get("name") or "").strip() == contact_name for o in hand_owners) and contact_name not in locked:
-            contact_piece = _soft(_contact(entry), touch)
+            contact_piece = edge(_soft(_contact(entry), touch))
             parts.append(contact_piece)  # 162: 손 주인의 닿는 연기는 손 절이 이미 말한다(166: 자기 손 잠금 인물의 손 연기도 뺀다)
         for pose in entry.get("poses") or []:
             if any(str(o.get("name") or "").strip() == str(pose.get("name") or "").strip() for o in hand_owners):
                 continue  # 162 fix1: 손만 들어오는 사람의 손은 손 절이 말한다
             if str(pose.get("name") or "").strip() in locked:
                 continue  # 166: 자기 손을 쓰지 않는 사람의 손 포즈는 넣지 않는다
-            clause = _soft(_pose_clause(pose, _disp), touch)
+            clause = edge(_soft(_pose_clause(pose, _disp), touch))
             if clause and _strong(soften):
                 clause = _soften_text(clause, True)  # 작업 163
             if clause and not (soften and _explicit_text(clause, _strong(soften))):
                 parts.append(clause)
         if touch:
             # 작업 173: 닿는 연기(154)와 포즈 절(148)이 같은 턱 받침 글이 되면 닿는 연기는 뺀다(같은 말 두 번).
-            soft_key = "chin with his fingertips, thumb resting lightly"
-            if contact_piece and soft_key in contact_piece and any(soft_key in p for p in parts[parts.index(contact_piece) + 1:]):
-                parts.remove(contact_piece)
-            parts.append(FACE_TOUCH_LINE.rstrip("."))  # 작업 173: 다정한 턱 받침 자세 1줄(샷 문장은 줄이지 않는다)
+            for soft_key in ("chin with his fingertips, thumb resting lightly", "'s ear with his fingertips", "'s eyes, then "):
+                if contact_piece in parts and soft_key in contact_piece and any(
+                        soft_key in p for p in parts[parts.index(contact_piece) + 1:]):
+                    parts.remove(contact_piece)  # 작업 174: 바꾼 귀 · 눈 글도 같은 말 두 번이면 뺀다
+            parts.append(_touch_line(touch, _disp).rstrip("."))  # 작업 174: 닿는 종류마다 Touch 줄 1개(샷 문장은 줄이지 않는다)
         if not real:
             fx_texts = vnew_fx.who_sentences(entry.get("fx"), entry.get("fxWho"), _present(entry), name=_disp)
             parts.append(" / ".join(fx_texts))
@@ -5303,6 +5410,7 @@ def _vibe_take_prompt(plan: dict, take: dict, *, real: bool, cast: list[dict], l
             body += ("" if not body else " " if body.endswith(('"', ")")) else ". ") + piece
         return (prefix + body).rstrip() + ("" if body.endswith(('"', ")")) else ".")
 
+    tighter: list[str] = []  # 작업 174: 콘티 클로즈업이 프리비즈보다 가까운 컷
     shots = [_shot(i, e, cid) for i, (e, cid) in enumerate(zip(entries, take_cut_ids))]
 
     def _labels() -> str:
@@ -5347,7 +5455,7 @@ def _vibe_take_prompt(plan: dict, take: dict, *, real: bool, cast: list[dict], l
 
     def _assemble() -> str:
         head = [REAL_REF_AI_NOTE, _style(), *[_look_line(m) for m in cast], _paragraph(), _setting()]
-        video = VIBE_VIDEO_LINE + (f" ({colors})" if colors else "") + "."
+        video = (VIBE_VIDEO_LINE_TIGHT if tighter else VIBE_VIDEO_LINE) + (f" ({colors})" if colors else "") + "."
         return "\n".join(b for b in [*head, *shots, _labels(), video] if b)
 
     prompt = _assemble()
@@ -9017,7 +9125,8 @@ def _kling_shot_lock(owner: str, plan: dict, ctx: dict, cut_id: str, seconds: fl
         lines = [REAL_CUT_FRAMING_LINE.format(size=shot["size"], lead=lead) if lead
                  else REAL_CUT_FRAMING_LINE.split(": {lead}", 1)[0].format(size=shot["size"]) + "."]
         if shot.get("touch"):
-            lines.append(FACE_TOUCH_LINE)  # 작업 173: Seedance SHOT 과 같은 다정한 턱 받침 줄(머리라 줄이지 않는다)
+            # 작업 173 · 174: Seedance SHOT 과 같은 닿는 종류의 Touch 줄(머리라 줄이지 않는다)
+            lines.append(shot.get("touchLine") or FACE_TOUCH_LINE)
         costumes = framing.get("costumes") or {}
         locks = [_costume_lock(_romanize_name(name) or name, str(costumes.get(name) or ""))  # 작업 171: 로마자 이름
                  for name in shot.get("names") or []]

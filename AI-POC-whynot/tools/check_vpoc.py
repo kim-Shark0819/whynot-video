@@ -35807,6 +35807,16 @@ _PZ_GOOD_VALUES = ("ap-northeast-2a", "ap-northeast-2d", "ap-northeast-2a,ap-nor
 # 지시서 106: 롤링 분석(design.md D13)의 전제. 바뀌면 pz-f·pz-g 가 알려 분석을 다시 보게 한다.
 _PZ_ROLLING = ("  replicas: 2\n  strategy:\n    type: RollingUpdate\n    rollingUpdate:\n      maxUnavailable: 0\n"
                "      maxSurge: 1\n")
+# 지시서 175(2026-11-07): frontend 는 위 _PZ_ROLLING(replicas 2 고정) 그대로, app 은 replicas: ${APP_REPLICAS}
+# (base·dev 2, prod 6) + 같은 strategy. 렌더 기대 파드 수는 _PZ_REPLICAS(대상 → [frontend, app]).
+_PZ_ROLLING_STRATEGY = "  strategy:\n    type: RollingUpdate\n    rollingUpdate:\n      maxUnavailable: 0\n      maxSurge: 1\n"
+_PZ_APP_ROLLING_TMPL = "  replicas: ${APP_REPLICAS}\n" + _PZ_ROLLING_STRATEGY
+_PZ_REPLICAS = {"prod": [2, 6], "dev": [2, 2]}
+# 개발 ALB(ai-deploy 손 관리 ingress)도 2026-11-07 부터 2a·2c 다(지시서 175). dev 오버레이가 base(2a·2b·2c)를 덮어쓴다.
+_PZ_DEV_ZONES = ["ap-northeast-2a", "ap-northeast-2c"]
+# 운영 노드 m6i.2xlarge(8 vCPU · 32GiB)와 운영 app 요청. 롤링 중 기존 파드 + surge 파드가 한 노드에 놓여도 요청 합이 노드 안이다.
+_PZ_PROD_NODE = {"cpu": 8, "memory_gi": 32}
+_PZ_PROD_APP_REQUESTS = "            requests:\n              cpu: \"2\"\n              memory: 4Gi\n"
 # 영역 규칙 앞 주석에 있어야 하는 낱말(두 Deployment 모두, frontend 는 _PZ_ZONE_NOTE_FRONT 도).
 _PZ_ZONE_NOTE_WORDS = ("nodeAffinityPolicy", "Honor", "POD_ZONES", "2b")
 _PZ_ZONE_NOTE_FRONT = ("pod-template-hash", "ScheduleAnyway", "nodeTaintsPolicy", "Pending")
@@ -40184,10 +40194,11 @@ def check_pod_zones() -> None:
     """지시서 105(pod-zone-pin) — frontend·app 파드를 ALB 서브넷 AZ(POD_ZONES) 안에만 띄운다. 외부 호출 없음.
 
     (pz-a) 설정 줄: base·prod 에 POD_ZONES= 한 줄씩(값 = 기대 목록, 줄 원문 = load_config 값), 키 순서에서 PUBLIC_SUBNET_IDS
-           바로 다음, dev 오버레이에 키 없음, 주석(base·prod POD_ZONES 위: PUBLIC_SUBNET_IDS·503 / prod 서브넷 위: "Safe because"
+           바로 다음, dev 오버레이에 POD_ZONES=2a,2c 한 줄(지시서 175: 주석 ai-deploy·2a·2c·ALB, BOM 없음·CR 0),
+           주석(base·prod POD_ZONES 위: PUBLIC_SUBNET_IDS·503 / prod 서브넷 위: "Safe because"
            없음·POD_ZONES·Target.NotInUse·"no 2c node" 없음(106 에서 2c 노드가 생겼다)·ap-northeast-2b·EIP 경고 줄 그대로),
            prod 서브넷 수 = 영역 수, prod BOM·CR 0, base BOM 없음·CR 0
-    (pz-b) 값 판정 _pz_zone_problems: base·prod 값 문제 0, 나쁜 값 20개가 기대한 첫 분류로 걸리고 좋은 값 3개는 통과
+    (pz-b) 값 판정 _pz_zone_problems: base·prod·dev 값 문제 0, 나쁜 값 20개가 기대한 첫 분류로 걸리고 좋은 값 3개는 통과
     (pz-c) 템플릿: ${POD_ZONES} 2번(둘 다 values: [${POD_ZONES}]), affinity 8줄 블록 2번(바로 뒤 topologySpreadConstraints,
            바로 앞 주석에 2026-10-31·503), 문서 kind 순서·affinity 는 두 Deployment 에만, topologySpread 두 블록 글자 그대로
     (pz-d) render.py(파일 쓰지 않음) prod·dev: 두 Deployment 마다 affinity 1개·경로 spec/template/spec·블록 글자·values 목록·
@@ -40199,11 +40210,25 @@ def check_pod_zones() -> None:
     (pz-f) 템플릿: 두 Deployment 마다 hostname 블록 1개 바로 뒤(사이는 8칸 주석 줄만)에 영역 규칙 8줄 1개, 바로 뒤 containers,
            주석 낱말(nodeAffinityPolicy·Honor·POD_ZONES·2b, frontend 는 pod-template-hash·ScheduleAnyway·nodeTaintsPolicy·Pending),
            파일 전체 topologyKey zone·DoNotSchedule·ScheduleAnyway·matchLabelKeys 각 2번, nodeAffinityPolicy·nodeTaintsPolicy·
-           minDomains 키 없음, 롤링 전제(replicas 2·maxUnavailable 0·maxSurge 1). _pz_zone_rule_place 자체도 표본 6개로 확인
+           minDomains 키 없음, 롤링 전제(frontend replicas 2·app replicas ${APP_REPLICAS}·maxUnavailable 0·maxSurge 1),
+           replicas 줄 두 개뿐([2, ${APP_REPLICAS}]). _pz_zone_rule_place 자체도 표본 6개로 확인
     (pz-g) render.py 메모리 렌더 prod·dev: 두 Deployment 마다 영역 규칙 자리·부모 경로 spec/template/spec/topologySpreadConstraints·
-           topologySpreadConstraints 1개·롤링 전제, POD_ZONES 서로 다른 영역 2개 이상. PyYAML 이 있으면 분산 목록 dict =
-           [hostname, zone]·selector·파드 라벨 이름·replicas·strategy
-    (pz-h) 주석 사실: prod 서브넷·POD_ZONES 주석에 옛 문구 없음·노드 2a·2b·2c 한 대씩·영역 분산, base POD_ZONES 주석에 영역 분산
+           topologySpreadConstraints 1개·롤링 전제(replicas = _PZ_REPLICAS: prod [2, 6]·dev [2, 2]), POD_ZONES 서로 다른 영역
+           2개 이상, 파드 수가 영역 수로 나누어떨어짐(prod app 3/3·frontend 1/1, dev 1/1), prod app 요청 2 CPU·4Gi 와
+           요청 × 2(파드 + surge) ≤ 노드 8 vCPU·32GiB. PyYAML 이 있으면 분산 목록 dict = [hostname, zone]·selector·파드 라벨
+           이름·replicas·strategy
+    (pz-h) 주석 사실(지시서 175, 2026-11-07): prod 서브넷 주석에 2b 제외·노드그룹 6 x m6i.2xlarge·3 per AZ·app 6·frontend 2·
+           영역 분산·"must equal", 옛 "one each in 2a, 2b and 2c"·"only pods on the 2a node" 없음 / prod POD_ZONES 주석에
+           2026-11-07·6대·3개씩·영역 분산, 옛 "2a·2b·2c 한 대씩"·"2c 노드가 없" 없음 / prod 자원 주석 "노드 6대"·3+3, 옛 "노드 4대"
+           없음 / base POD_ZONES 주석 영역 분산·옛 "whynot-dev-alb 가 2a·2b·2c" 없음
+
+    지시서 175 — app 6개가 안전한 이유(_PZ_REPLICAS 전제가 바뀌면 pz-f·pz-g 가 알린다):
+      - 영역 2개(POD_ZONES 2a·2c)에 6개면 영역 분산(maxSkew 1, DoNotSchedule)으로 3/3 이 된다. 노드도 영역마다 3대다.
+      - 롤링은 maxSurge 1·maxUnavailable 0 이고 영역 규칙이 matchLabelKeys: pod-template-hash 로 새 리비전 파드만 센다.
+        새 파드는 하나씩 늘며(1→6) 매번 적은 쪽 영역에 놓이므로 skew 는 늘 1 이하이고, 옛 파드 수와 섞이지 않는다.
+      - 요청 2 CPU·4Gi 는 8 vCPU·32GiB 노드에 한 노드 한 파드로 들어가고, surge 파드가 같은 노드에 와도 4 CPU·8Gi 로
+        노드 안이다(hostname 규칙은 ScheduleAnyway 라 한 노드 한 파드를 권할 뿐 강제하지 않는다).
+      - frontend 는 2개 그대로(영역마다 1개).
     """
     import importlib.util  # noqa: PLC0415
 
@@ -40271,14 +40296,22 @@ def check_pod_zones() -> None:
                         len(merged.get("PUBLIC_SUBNET_IDS", "").split(",")), len(merged.get("POD_ZONES", "").split(","))],
                [False, True, True, False, True, True, len(_PZ_PROD_ZONES), len(_PZ_PROD_ZONES)],
                "prod: 옛 'Safe because' 없음·서브넷 주석(POD_ZONES·NotInUse·'no 2c node' 없음·2b 다시 넣기·EIP 경고)·서브넷 수 = 영역 수")
-        dev_text = (root / "deploy" / "config.dev.env").read_text(encoding="utf-8-sig")
-        expect("pz-a", ["POD_ZONES" in overlays["dev"], "POD_ZONES" in dev_text], [False, False],
-               "dev 오버레이에 POD_ZONES 없음(개발은 base 값)")
+        # 지시서 175: 개발 ALB(ai-deploy 손 관리 ingress)도 2a·2c 라 dev 오버레이가 base(2a·2b·2c)를 덮어쓴다.
+        dev_data = (root / "deploy" / "config.dev.env").read_bytes()
+        dev_text = dev_data.decode("utf-8-sig")
+        dev_note = _pz_flat_note(comment_above(dev_text.split("\n"), "POD_ZONES"))
+        dev_want = ",".join(_PZ_DEV_ZONES)
+        expect("pz-a", [re.findall(r"^POD_ZONES=(.*)$", dev_text, re.M), overlays["dev"].get("POD_ZONES"),
+                        {**base, **overlays["dev"]}.get("POD_ZONES"), [word in dev_note for word in ("ai-deploy", "2a·2c", "ALB")],
+                        dev_data[:3] == b"\xef\xbb\xbf", dev_data.count(b"\r")],
+               [[dev_want], dev_want, dev_want, [True, True, True], False, 0],
+               "dev: POD_ZONES=2a,2c 한 줄·load_config 값·base 를 덮은 값·주석(ai-deploy·2a·2c·ALB)·BOM 없음·CR 0")
         seen.append("pz-a")
 
     def pz_b() -> None:
-        expect("pz-b", [_pz_zone_problems(base.get("POD_ZONES")), _pz_zone_problems(overlays["prod"].get("POD_ZONES"))],
-               [[], []], "base·prod POD_ZONES 값 문제 0")
+        expect("pz-b", [_pz_zone_problems(base.get("POD_ZONES")), _pz_zone_problems(overlays["prod"].get("POD_ZONES")),
+                        _pz_zone_problems(overlays["dev"].get("POD_ZONES"))],
+               [[], [], []], "base·prod·dev POD_ZONES 값 문제 0")
         got = {repr(value): (_pz_zone_problems(value) or ["(없음)"])[0].split(":", 1)[0] for value, _ in _PZ_BAD_VALUES}
         expect("pz-b", got, {repr(value): kind for value, kind in _PZ_BAD_VALUES}, "나쁜 값의 첫 분류")
         expect("pz-b", [_pz_zone_problems(value) for value in _PZ_GOOD_VALUES], [[]] * len(_PZ_GOOD_VALUES), "좋은 값 통과")
@@ -40314,7 +40347,7 @@ def check_pod_zones() -> None:
 
     def pz_d() -> None:
         notes: list[str] = []
-        for target, want in (("prod", _PZ_PROD_ZONES), ("dev", _PZ_BASE_ZONES)):
+        for target, want in (("prod", _PZ_PROD_ZONES), ("dev", _PZ_DEV_ZONES)):
             layer = overlays[target]
             unknown = sorted(set(layer) - set(base))
             if unknown:
@@ -40417,15 +40450,15 @@ def check_pod_zones() -> None:
                                 "same": work == memory},
                        {"rc": 0, "err": "", "files": files, "hits": {}, "tag": True, "same": True},
                        f"{target}: CLI 렌더(종료·파일·CI 미치환 판정·태그·메모리 렌더와 바이트 같음)")
-            # 음성: base 에 POD_ZONES 가 없으면 CI 배포 job 이 렌더 단계에서 멈춘다. prod 는 오버레이 키 검사
-            # (load_config_chain), dev 는 오버레이에 키가 없어 템플릿 치환(render_text)에서 실패한다.
+            # 음성: base 에 POD_ZONES 가 없으면 CI 배포 job 이 렌더 단계에서 멈춘다. 지시서 175 부터 dev 오버레이에도
+            # POD_ZONES 가 있어 prod·dev 둘 다 오버레이 키 검사(load_config_chain)에서 실패한다.
             config_path.write_text(re.sub(r"^POD_ZONES=.*\n", "", ci_config, flags=re.M), encoding="utf-8", newline="\n")
             negative = {target: run(target) for target in ("prod", "dev")}
             # 템플릿 경로는 OS 구분자로 찍힌다(Windows 는 k8s\workloads…). 비교 전에 / 로 맞춘다.
             expect("pz-e", {t: [r.returncode != 0, r.stderr.strip().replace("\\", "/")[-200:]] for t, r in negative.items()},
                    {"prod": [True, "config.prod.env: config.env 에 없는 키 ['POD_ZONES']. 오버레이는 기존 키를 덮어쓰기만 한다."],
-                    "dev": [True, "k8s/workloads.yaml.tmpl: config.env에 없는 변수 ['POD_ZONES']"]},
-                   "base 에서 POD_ZONES 를 빼면 render.py 실패(prod 오버레이 키 검사·dev 없는 변수)")
+                    "dev": [True, "config.dev.env: config.env 에 없는 키 ['POD_ZONES']. 오버레이는 기존 키를 덮어쓰기만 한다."]},
+                   "base 에서 POD_ZONES 를 빼면 render.py 실패(prod·dev 오버레이 키 검사)")
         expect("pz-e", [(root / "deploy" / "rendered").exists(), (root / "deploy" / "config.env").exists()], before,
                "저장소의 deploy/rendered·deploy/config.env 존재 여부가 검사 전후로 같다")
         seen.append("pz-e")
@@ -40439,7 +40472,7 @@ def check_pod_zones() -> None:
             place = _pz_zone_rule_place(doc, var)
             notes.append(_pz_flat_note(place.pop("note")))
             places.append(place)
-            rolling.append(_PZ_ROLLING in doc)
+            rolling.append((_PZ_ROLLING if index == 1 else _PZ_APP_ROLLING_TMPL) in doc)
         want = {"host": 1, "zone": 1, "comments": True, "next": "      containers:"}
         expect("pz-f", places, [want, want],
                "템플릿 frontend·app: hostname 블록 1개 바로 뒤(사이는 8칸 주석 줄만)에 영역 규칙 8줄 1개·바로 뒤 containers")
@@ -40453,6 +40486,8 @@ def check_pod_zones() -> None:
                         re.findall(r"^\s*(?:- )?(nodeAffinityPolicy|nodeTaintsPolicy|minDomains)\s*:", template, re.M), rolling],
                [2, 2, 2, 2, [], [True, True]],
                "파일 전체: zone·DoNotSchedule·ScheduleAnyway·matchLabelKeys 각 2번, 정책 키 없음(기본 Honor·Ignore·1), 롤링 전제 2곳")
+        expect("pz-f", re.findall(r"^  replicas: (.*)$", template, re.M), ["2", "${APP_REPLICAS}"],
+               "템플릿 replicas 줄: frontend 2 고정·app ${APP_REPLICAS}(지시서 175)")
         # _pz_zone_rule_place 자체: 맞음·주석 없음·주석 아닌 줄·순서 뒤집힘·규칙 없음·규칙 두 번.
         host, zone, note, tail = _pz_spread_block("N"), _pz_zone_spread_block("N"), "        # 영역\n", "      containers:\n"
         samples = [host + note + zone + tail, host + zone + tail, host + "        - maxSkew: 2\n" + zone + tail,
@@ -40481,6 +40516,7 @@ def check_pod_zones() -> None:
                 if re.search(r"^kind: Deployment$", doc, re.M):
                     deployments[(re.findall(r"^  name: (\S+)$", doc, re.M) or ["?"])[0]] = doc
             got = {}
+            replicas = dict(zip(names, _PZ_REPLICAS[target]))
             for name in names:
                 doc = deployments.get(name, "")
                 lines = doc.split("\n")
@@ -40488,13 +40524,25 @@ def check_pod_zones() -> None:
                 del place["note"]
                 items = [i for i, line in enumerate(lines) if line == "        - maxSkew: 1"]
                 got[name] = {**place, "lists": doc.count("\n      topologySpreadConstraints:\n"),
-                             "path": _pz_parent_path(lines, items[1]) if len(items) == 2 else None, "rolling": _PZ_ROLLING in doc}
+                             "path": _pz_parent_path(lines, items[1]) if len(items) == 2 else None,
+                             "rolling": f"  replicas: {replicas[name]}\n{_PZ_ROLLING_STRATEGY}" in doc}
             expect("pz-g", got, {name: {"host": 1, "zone": 1, "comments": True, "next": "      containers:", "lists": 1,
                                         "path": ["spec", "template", "spec", "topologySpreadConstraints", "maxSkew"],
                                         "rolling": True} for name in names},
                    f"{target} frontend·app: 영역 규칙 자리·부모 경로·분산 목록 1개·롤링 전제")
             zones = merged.get("POD_ZONES", "").split(",")
             expect("pz-g", len(set(zones)) >= 2, True, f"{target}: POD_ZONES 에 서로 다른 영역 2개 이상(파드 2개가 다른 영역에 놓일 자리)")
+            # 지시서 175: 파드 수가 영역 수로 나누어떨어져야 영역마다 같은 수가 된다(prod app 6 → 3/3, frontend 2 → 1/1).
+            expect("pz-g", {name: list(divmod(count, len(set(zones)))) for name, count in replicas.items()},
+                   {name: [count // 2, 0] for name, count in replicas.items()},
+                   f"{target}: 영역마다 파드 수(몫·나머지) — 영역 2개에 고르게")
+            if target == "prod":
+                cpu = merged.get("APP_CPU_REQUEST", "")
+                mem = merged.get("APP_MEM_REQUEST", "")
+                fits = (cpu.isdigit() and mem.endswith("Gi") and mem[:-2].isdigit()
+                        and 2 * int(cpu) <= _PZ_PROD_NODE["cpu"] and 2 * int(mem[:-2]) <= _PZ_PROD_NODE["memory_gi"])
+                expect("pz-g", [_PZ_PROD_APP_REQUESTS in deployments.get(names[1], ""), fits], [True, True],
+                       "prod app 요청 2 CPU·4Gi 렌더·요청 × 2(파드 + surge) ≤ 노드 8 vCPU·32GiB")
             if yaml_mod is not None:
                 by_name = {doc["metadata"]["name"]: doc for doc in yaml_mod.safe_load_all(work) if doc and doc.get("kind") == "Deployment"}
                 parsed = {}
@@ -40506,7 +40554,7 @@ def check_pod_zones() -> None:
                                               pod.get("metadata", {}).get("labels", {}).get("app.kubernetes.io/name")],
                                     "replicas": spec_.get("replicas"), "strategy": spec_.get("strategy")}
                 expect("pz-g", parsed, {name: {"spread": [_pz_host_spread_obj(name), _pz_zone_spread_obj(name)], "names": [name, name],
-                                               "replicas": 2, "strategy": {"type": "RollingUpdate",
+                                               "replicas": replicas[name], "strategy": {"type": "RollingUpdate",
                                                                            "rollingUpdate": {"maxUnavailable": 0, "maxSurge": 1}}}
                                         for name in names},
                        f"{target}: YAML 파싱 분산 목록 [hostname, zone]·selector·파드 라벨 이름·replicas·strategy")
@@ -40520,12 +40568,19 @@ def check_pod_zones() -> None:
         subnet = _pz_flat_note(comment_above(prod_lines, "PUBLIC_SUBNET_IDS"))
         prod_zone = _pz_flat_note(comment_above(prod_lines, "POD_ZONES"))
         base_zone = _pz_flat_note(comment_above(base_lines, "POD_ZONES"))
-        expect("pz-h", {"prod 서브넷": [phrase in subnet for phrase in ("only pods on the 2a node can serve", "one each in 2a, 2b and 2c",
-                                                                      "zone spread rule", "different zones")],
-                        "prod POD_ZONES": [phrase in prod_zone for phrase in ("2c 노드가 없", "2a·2b·2c 한 대씩", "영역 분산")],
-                        "base POD_ZONES": ["영역 분산" in base_zone]},
-               {"prod 서브넷": [False, True, True, True], "prod POD_ZONES": [False, True, True], "base POD_ZONES": [True]},
-               "주석 사실(2026-10-31 노드 2a·2b·2c 한 대씩·영역 분산, 옛 '2a 노드만'·'2c 노드가 없' 문구 없음)")
+        resources = _pz_flat_note(comment_above(prod_lines, "APP_REPLICAS"))
+        subnet_words = ("only pods on the 2a node can serve", "one each in 2a, 2b and 2c", "2026-11-07", "dropped for prod and dev",
+                        "6 x m6i.2xlarge", "2a and 2c private subnets only", "3 per AZ", "app runs 6 pods", "frontend runs 2 pods",
+                        "zone spread rule", "different zones", "POD_ZONES must equal")
+        zone_words = ("2c 노드가 없", "2a·2b·2c 한 대씩", "2026-11-07", "6대", "3개씩", "영역 분산")
+        expect("pz-h", {"prod 서브넷": [phrase in subnet for phrase in subnet_words],
+                        "prod POD_ZONES": [phrase in prod_zone for phrase in zone_words],
+                        "prod 자원": [phrase in resources for phrase in ("노드 4대", "2+2", "노드 6대", "3+3")],
+                        "base POD_ZONES": ["영역 분산" in base_zone, "whynot-dev-alb 가 2a·2b·2c" in base_zone]},
+               {"prod 서브넷": [False, False] + [True] * (len(subnet_words) - 2),
+                "prod POD_ZONES": [False, False] + [True] * (len(zone_words) - 2),
+                "prod 자원": [False, False, True, True], "base POD_ZONES": [True, False]},
+               "주석 사실(2026-11-07 2b 제외·2a·2c 노드 6대·app 6·frontend 2, 옛 '2a·2b·2c 한 대씩'·'노드 4대' 문구 없음)")
         seen.append("pz-h")
 
     for group in (pz_a, pz_b, pz_c, pz_d, pz_e, pz_f, pz_g, pz_h):
@@ -40540,9 +40595,10 @@ def check_pod_zones() -> None:
     how = f"PyYAML {getattr(yaml_mod, '__version__', '?')} 파싱 + 글자 블록" if yaml_mod is not None else "PyYAML 없음: 글자 블록·자리·값"
     ok(
         "pod-zone-pin 파드 영역 검사 (pz-a)설정 줄·주석·서브넷 수 (pz-b)값 판정 "
-        f"(pz-c)템플릿 affinity 2곳 (pz-d)렌더 prod [2a,2c]·dev [2a,2b,2c] frontend·app({how}) "
+        f"(pz-c)템플릿 affinity 2곳 (pz-d)렌더 prod [2a,2c]·dev [2a,2c] frontend·app({how}) "
         "(pz-e)CLI 렌더 prod 4·dev 3파일 CI 미치환 0줄·POD_ZONES 없으면 실패 "
-        "(pz-f)템플릿 영역 분산 2곳·주석·롤링 전제 (pz-g)렌더 prod·dev 분산 [hostname, zone] (pz-h)주석 사실(노드 2a·2b·2c)"
+        "(pz-f)템플릿 영역 분산 2곳·주석·롤링 전제(app ${APP_REPLICAS}) (pz-g)렌더 prod·dev 분산 [hostname, zone]·replicas "
+        "prod app 6(3/3)·frontend 2, dev 2·2·prod 요청 2 CPU·4Gi (pz-h)주석 사실(2026-11-07 2a·2c 노드 6대)"
     )
 
 
@@ -53678,23 +53734,26 @@ def check_vnew_vibe_prompt_159() -> None:
             per_shot = {}
             # 작업 173: cut-06(목덜미를 쓰다듬음 · 손 표기 other_neck)은 상대 얼굴 접촉 → 닿는 연기 · 포즈 절의 목 글이 턱 받침 글 1번이
             # 되고(같은 글 두 번은 닿는 연기를 뺌) Touch 줄이 붙는다(요구 2 · 3). 다른 컷의 닿는 연기는 그대로.
-            lift173 = f"{ra}'s right hand gently lifts {rb}'s chin with his fingertips, thumb resting lightly on the chin"
-            touch173 = genmod.FACE_TOUCH_LINE.rstrip(".")
+            # 작업 174: cut-06 은 "stroking … neck and nape" = 귀 · 목 쓰다듬기 종류 → 173 턱 들기 글이 종류와 어긋나 귀 뒤 손끝 글 1번 +
+            # 귀 Touch 줄(요구 1). 같은 글 두 번이면 닿는 연기를 빼는 규칙은 그대로.
+            lift173 = f"{ra}'s right hand lightly brushes behind {rb}'s ear with his fingertips"
+            touch173 = genmod.FACE_TOUCH_LINES["ear"].rstrip(".")
             for k, (cid, line) in enumerate(zip(take["cutIds"], shots(text))):
                 action = (audits["webtoon"].get("actions") or [""] * 6)[k]
                 quotes = [f'{_VB159_SPOKEN}: "{q}"' for q in _TC157_QUOTES[cid]]
                 contact_ok = (cid not in _TC157_CONTACT or _TC157_CONTACT[cid].rstrip(".") in line if cid != "cut-06"
-                              else line.count("gently lifts") == 1 and lift173 in line and touch173 in line)
+                              else line.count("lightly brushes behind") == 1 and lift173 in line and touch173 in line
+                              and "chin" not in line)
                 per_shot[cid] = [line.startswith(f"Shot {k + 1} ("), whos.get(cid, "") in line, bool(action) and action in line,
                                  contact_ok, [(text.count(q), q in line) for q in quotes]]
             expect("vb-a", per_shot, {cid: [True, True, True, True, [(1, True)] * len(_TC157_QUOTES[cid])]
                                       for cid in take["cutIds"]},
-                   "샷마다 번호·who_in_shot·연기·닿는 연기(173: cut-06 턱 받침 + Touch 줄)·대사(spoken (audio only …)) 1번 제 샷 안")
+                   "샷마다 번호·who_in_shot·연기·닿는 연기(174: cut-06 귀 뒤 손끝 + 귀 Touch 줄)·대사(spoken (audio only …)) 1번 제 샷 안")
             expect("vb-a", [f"{rb} (inner voice-over, lips closed), {_VB159_SPOKEN}:" in shots(text)[5],
                             lift173 in shots(text)[5] and f"{rb}'s neck" not in shots(text)[5],
                             f"{rb} (one continuous line that carries over the next cut" in shots(text)[2],
                             "TIMELINE" in text or "ASSETS:" in text],
-                   [True, True, True, False], "속마음·148 포즈 절(173: cut-06 목 → 턱 받침)·147 이어지는 말, 옛 TIMELINE/ASSETS 없음")
+                   [True, True, True, False], "속마음·148 포즈 절(174: cut-06 목 → 귀 뒤 손끝)·147 이어지는 말, 옛 TIMELINE/ASSETS 없음")
 
             # ================= (vb-b) 실사 =================
             real = full["real"]
@@ -55777,6 +55836,10 @@ _SL170_ANIME_SHA = "1e53ee4457a1bbf2dac4b93f1cb37a7ff5583db6502b66a67bf938c627b1
 # other_neck)이 상대 얼굴 접촉이라 그 두 SHOT 줄만 바뀐다(요구 2 · 3: 목/턱 쥐기 글 → 턱 받침 글, Touch 줄 1개). 173 을 끈 값은
 # 여전히 _SL170_ANIME_SHA 다(check_vnew_face_touch_173 ft-e 가 확인).
 _SL173_ANIME_SHA = "c5731c4b22ece9908784b9ab6fd05fa38c8212e55de3d7f42040069fc90f7b71"
+# 작업 174: 같은 프롬프트의 작업 174 값. 바뀐 것은 여전히 cut-04 · cut-06 두 SHOT 줄뿐이다(ft-e 가 줄 번호로 확인). cut-04(두 손으로
+# 얼굴을 cups) = 뺨 종류 → 뺨 Touch 줄, cut-06(목덜미를 stroking) = 귀 · 목 쓰다듬기 종류 → 귀 Touch 줄 + 173 턱 들기 글 대신 귀 뒤 손끝
+# 글(요구 1: 종류와 어긋나는 173 글만 바꿈). 이 콘티에는 shotSize · cameraEn 이 없어 174 크기 꼬리표 · @Video1 줄은 그대로다.
+_SL174_ANIME_SHA = "87b1a0ea86a3d0e67df767bd4114beb98c2d5814424d6ea46bf6521d73d33f6a"
 
 
 def _sl166_plan() -> tuple[dict, dict]:
@@ -55901,7 +55964,8 @@ def check_vnew_shot_lock_166() -> None:
             # ================= (sl-b) 클로즈업 주인공 =================
             lock_b = f"Close-up of {rb} (pale blonde hair) filling the frame; {ra} only partly visible at the frame edge"
             for v in ("anime", "real"):
-                expect("sl-b", lines[v][5].startswith(f"Shot 6 (20-23s), close-up, front view: {lock_b}. "), True,  # 작업 170: 콘티 shotSize closeup → close-up(프리비즈 MCU 대신)
+                expect("sl-b", lines[v][5].startswith(f"Shot 6 (20-23s), close-up, front view{genmod.VIBE_TIGHTER_TAG}: {lock_b}. "),
+                       True,  # 작업 170: 콘티 shotSize closeup → close-up(프리비즈 MCU 대신). 작업 174: 콘티 CU < 프리비즈 MCU → 꼬리표
                        f"{v} cut-06 줄 머리 = 여의준 클로즈업 잠금(범건우 가장자리)")
             expect("sl-b", [genmod._identity_cue("short charcoal-black hair swept back"),  # noqa: SLF001
                             genmod._identity_cue("narrow eyes"),  # noqa: SLF001
@@ -55920,11 +55984,12 @@ def check_vnew_shot_lock_166() -> None:
             # ================= (sl-c) 자기 손 =================
             own = f"{rb}'s own hands stay lowered, out of frame, and never touch his own face; the only hand on his face is {ra}'s ("
             real3, anime3 = lines["real"][2], lines["anime"][2]
-            tail = real3[len("Shot 3 (8-12s), close-up, front view: "):]  # 작업 170: 콘티 closeup
+            head3 = f"Shot 3 (8-12s), close-up, front view{genmod.VIBE_TIGHTER_TAG}: "  # 작업 170: 콘티 closeup, 174: 프리비즈 MCU 보다 가까움
+            tail = real3[len(head3):]
             sleeve = tail[len(own):].split(")", 1)[0] if tail.startswith(own) else ""
-            expect("sl-c", [real3.startswith("Shot 3 (8-12s), close-up, front view: " + own),
+            expect("sl-c", [real3.startswith(head3 + own),
                             sleeve.endswith(" sleeve") and "navy" in sleeve, ") entering from the frame edge. Close-up of " + rb in real3,
-                            anime3.startswith(f"Shot 3 (8-12s), close-up, front view: Close-up of {rb} (pale blonde hair) filling "
+                            anime3.startswith(head3 + f"Close-up of {rb} (pale blonde hair) filling "
                                               f"the frame; {ra}'s right hand enters from off-frame"),
                             own in anime3, real3.count("own hands stay lowered"), anime3.count("own hands stay lowered")],
                    [True, True, True, True, True, 1, 1],
@@ -55956,9 +56021,10 @@ def check_vnew_shot_lock_166() -> None:
 
             # ================= (sl-e) 해당 없는 컷 =================
             # 작업 173: 157 테이크 cut-04 · cut-06 은 상대 얼굴 접촉 → 그 두 줄만 바뀐 _SL173_ANIME_SHA(173 끈 값 = 170 값은 ft-e).
+            # 작업 174: 같은 두 줄의 Touch 줄이 닿는 종류(뺨 · 귀)로 바뀌어 _SL174_ANIME_SHA(주석 참고).
             expect("sl-e", [_hashlib.sha256(base_anime.encode("utf-8")).hexdigest(),
-                            _hashlib.sha256(base_anime_166.encode("utf-8")).hexdigest()], [_SL173_ANIME_SHA, _SL166_ANIME_SHA],
-                   "157 테이크 애니 프롬프트 sha = 작업 173 값, 170 이름 앞머리 · 173 턱 받침을 끄면 작업 166 전 값(해당 컷 없음)")
+                            _hashlib.sha256(base_anime_166.encode("utf-8")).hexdigest()], [_SL174_ANIME_SHA, _SL166_ANIME_SHA],
+                   "157 테이크 애니 프롬프트 sha = 작업 174 값, 170 이름 앞머리 · 173 턱 받침을 끄면 작업 166 전 값(해당 컷 없음)")
             for v in ("anime", "real"):
                 before, after = wide[v]
                 expect("sl-e", [after[k] == before[k] for k in (0, 1, 3)], [True, True, True],
@@ -55986,9 +56052,13 @@ def check_vnew_shot_lock_166() -> None:
                             expect("sl-f", [audit.get("fits"), len(texts[-1]) <= 4000], [True, True],
                                    f"{v} 반쪽 {half['cutIds'][0]}–{half['cutIds'][-1]} 4,000자 안")
                         text = "\n".join(texts)
+                        # 작업 174: c03(눈을 가리고 눈물을 닦음) = 눈 종류, c04(두 손으로 얼굴을 cups) = 뺨 종류 → 173 턱 받침 Touch 줄
+                        # 2개 대신 눈 · 뺨 Touch 줄 1개씩(요구 1).
+                        kinds174 = [genmod.FACE_TOUCH_LINES["eyes"].format(name=rb).rstrip("."),
+                                    genmod.FACE_TOUCH_LINES["cheek"].rstrip(".")]
                         expect("sl-f", [own in text, lock_b in text, f"), {insert}: " in text, blush in text or v == "anime",
-                                        text.count(genmod.FACE_TOUCH_LINE.rstrip("."))],
-                               [True, True, True, True, 2], f"{v} 조각 c03–c06(반쪽 둘) 새 절 · Touch 줄 2개 그대로")
+                                        text.count(genmod.FACE_TOUCH_LINE.rstrip(".")), [text.count(k) for k in kinds174]],
+                               [True, True, True, True, 0, [1, 1]], f"{v} 조각 c03–c06(반쪽 둘) 새 절 · 눈 · 뺨 Touch 줄 1개씩")
             expect("sl-f", llm_calls, [], "LLM 호출 0")
             report.append(f"real cut-03: {lines['real'][2][:260]}")
             report.append(f"real cut-05: {lines['real'][4][:160]}")
@@ -56172,9 +56242,9 @@ def check_vnew_prompt_size_167() -> None:
         with _guard_real_llm(), _pin_vnew(VNEW_FX=True, VNEW_TAKE_PROMPT_MAX_CHARS=4000, VNEW_VIBE_PROMPT=True):
             plan_d, take_d = _tc157_plan()
             take_text = genmod._vibe_take_prompt(plan_d, take_d, real=False, cast=flat, location_no=5, quiet=True)  # noqa: SLF001
-        expect("ps-d", _hashlib.sha256(take_text.encode("utf-8")).hexdigest(), _SL173_ANIME_SHA,
-               "157 통 테이크 애니 프롬프트 sha = 작업 173 값(167 은 통 테이크 경로를 안 바꿈, 173 은 얼굴 접촉 cut-04 · 06 줄만 — "
-               "_SL173_ANIME_SHA 주석)")
+        expect("ps-d", _hashlib.sha256(take_text.encode("utf-8")).hexdigest(), _SL174_ANIME_SHA,
+               "157 통 테이크 애니 프롬프트 sha = 작업 174 값(167 은 통 테이크 경로를 안 바꿈, 173 · 174 는 얼굴 접촉 cut-04 · 06 줄만 — "
+               "_SL174_ANIME_SHA 주석)")
     except Exception as exc:  # noqa: BLE001
         bad.append("예외: " + repr(exc) + "\n" + _tb.format_exc()[:2500])
 
@@ -57011,18 +57081,19 @@ def check_vnew_shot_size_170() -> None:
                     "close-up, front view", "medium shot, front view", "medium shot, three-quarter view",
                     "medium shot, front view", "profile close-up"],
                    "closeup · ECU 그대로 · extreme · profile · both faces · cameraEn 크기 낱말 · medium close-up/medium 은 지금 매핑")
+            tag = genmod.VIBE_TIGHTER_TAG  # 작업 174: 콘티 클로즈업 cut-02 · 04 · 05 < 프리비즈 MS · MCU → 크기 절 뒤 꼬리표
             for v in ("anime", "real"):
-                expect("ss-a", [lines[v][1].startswith("Shot 2 (4-8s), close-up, front view: "),
-                                lines[v][3].startswith("Shot 4 (12-16s), profile close-up: "),
-                                lines[v][4].startswith("Shot 5 (16-20s), tight two-shot close-up of both faces, front view: ")],
+                expect("ss-a", [lines[v][1].startswith(f"Shot 2 (4-8s), close-up, front view{tag}: "),
+                                lines[v][3].startswith(f"Shot 4 (12-16s), profile close-up{tag}: "),
+                                lines[v][4].startswith(f"Shot 5 (16-20s), tight two-shot close-up of both faces, front view{tag}: ")],
                        [True, True, True], f"{v} cut-02 close-up(프리비즈 MS 대신) · cut-04 profile close-up · cut-05 두 얼굴")
 
             # ================= (ss-b) 잠금 넓힘 =================
             edge = f"{ra} only partly visible at the frame edge"
             for v in ("anime", "real"):
-                expect("ss-b", [lines[v][1].startswith(f"Shot 2 (4-8s), close-up, front view: Close-up of {rb} (pale blonde hair) "
+                expect("ss-b", [lines[v][1].startswith(f"Shot 2 (4-8s), close-up, front view{tag}: Close-up of {rb} (pale blonde hair) "
                                                        f"filling the frame; {edge}. "),
-                                lines[v][3].startswith(f"Shot 4 (12-16s), profile close-up: Profile close-up of {ra} (charcoal-black "
+                                lines[v][3].startswith(f"Shot 4 (12-16s), profile close-up{tag}: Profile close-up of {ra} (charcoal-black "
                                                        f"hair) filling the frame; {rb} only partly visible at the frame edge. "),
                                 "Close-up of" in lines[v][4]],
                        [True, True, False], f"{v} cut-02 'looking up at 여의준' 잠금 · cut-04 'Profile shot of 범건우' · 두 얼굴 잠금 없음")
@@ -57076,11 +57147,12 @@ def check_vnew_shot_size_170() -> None:
                       for cid in ("cut-02", "cut-04", "cut-05", "cut-06")}
             head = "FRAMING (storyboard, keep exactly; this decides the shot size and who is in frame) - "
             # 작업 171: Kling FRAMING 도 Seedance SHOT 줄과 같은 로마자 이름(이 ctx 는 외형이 없어 머리색 단서 없음)
-            expect("ss-e", [frames["cut-02"].startswith(head + f"close-up, front view: Close-up of {rb} filling the frame; "
+            # 작업 174: Kling FRAMING 크기도 Seedance SHOT 과 같은 꼬리표(cut-02 · 04 · 05, 인서트 cut-06 은 없음)
+            expect("ss-e", [frames["cut-02"].startswith(head + f"close-up, front view{tag}: Close-up of {rb} filling the frame; "
                                                         f"{ra} only partly visible at the frame edge"),
-                            frames["cut-04"].startswith(head + f"profile close-up: Profile close-up of {ra} filling the frame; "
+                            frames["cut-04"].startswith(head + f"profile close-up{tag}: Profile close-up of {ra} filling the frame; "
                                                         f"{rb} only partly visible"),
-                            frames["cut-05"].startswith(head + "tight two-shot close-up of both faces, front view"),
+                            frames["cut-05"].startswith(head + f"tight two-shot close-up of both faces, front view{tag}"),
                             frames["cut-06"].startswith(head + f"{insert}: {ra}'s hand clamps around {rb}'s hand and wrist")],
                    [True, True, True, True], "Kling FRAMING 크기 · 잠금(로마자 이름) · 인서트 앞 절")
 
@@ -57539,7 +57611,7 @@ def check_vnew_face_touch_173() -> None:
             changed = [i for i, (x, y) in enumerate(zip(was.split("\n"), on.split("\n"))) if x != y]
             expect("ft-e", [_hashlib.sha256(was.encode()).hexdigest(), _hashlib.sha256(on.encode()).hexdigest(),
                             [on.split("\n")[i][:7] for i in changed]],
-                   [_SL170_ANIME_SHA, _SL173_ANIME_SHA, ["Shot 4 ", "Shot 6 "]],
+                   [_SL170_ANIME_SHA, _SL174_ANIME_SHA, ["Shot 4 ", "Shot 6 "]],  # 작업 174: 같은 두 줄, Touch 줄 = 닿는 종류
                    "157 테이크: 173 끔 = 170 값, 켬 = 얼굴 접촉 cut-04(두 손 얼굴) · cut-06(목덜미) 줄만 다름")
             expect("ft-e", llm_calls, [], "LLM 호출 0")
     except Exception as exc:  # noqa: BLE001
@@ -57555,6 +57627,202 @@ def check_vnew_face_touch_173() -> None:
            "(ft-d)4,000자 · Kling 2500 (ft-e)해당 없는 글 그대로(sha)")
         for line in report:
             print(f"       173: {line}")
+
+
+_TK174_SNAPSHOT = Path("C:/dev/ai/.claude-helpers/t3plan173.json")  # prod test3 gen g20261107003737718e(173 뒤, 없으면 tk-a 건너뜀)
+
+
+def check_vnew_touch_kind_174() -> None:
+    """작업 174 — 닿는 종류마다 Touch 줄 · 입이 가까우면 엄지는 입에서 떨어짐 · 콘티 클로즈업이 프리비즈보다 가까우면 Shot 크기가 이김 ·
+    한 사람 클로즈업의 손 잡기는 화면 아래 가장자리 밑. 가짜, 유료 0.
+
+    (tk-a) 스냅숏 t3plan173 Seedance(애니 · 실사, prod 조각 그대로): cut-03 눈 Touch 줄 · 턱 글 없음, cut-08 뺨 Touch 줄만,
+           cut-09 away from both mouths, cut-02 · 04 · 12 조각 새 @Video1 줄 · 꼬리표 컷, cut-12 손 just below the frame edge,
+           cut-10 · 11 인서트 SHOT = prod 173 글 · @Video1 그대로, choke/strangle 없음, 167 예산(4,000자 · Kling 2500 B)
+    (tk-b) 찾기 · 바꾸기: 스냅숏 종류 · close, 종류와 어긋나는 173 글만 바꿈, 손 잡기 → 가장자리, 콘티/프리비즈 크기 비교
+    (tk-c) 해당 없는 글 그대로: 꼬리표 없는 조각 @Video1 = 지금 줄, 종류 없는(173 형) touch 글 = 173 글, 인서트 · 두 사람 샷 손 그대로
+    """
+    import traceback as _tb  # noqa: PLC0415
+
+    sys.path.insert(0, str(ROOT / "app"))
+    bad: list[str] = []
+    report: list[str] = []
+    seen: set[str] = set()
+
+    def expect(group: str, got, want, what: str) -> None:
+        seen.add(group)
+        if got != want:
+            bad.append(f"({group}) {what}\n      결과 {got!r}\n      기대 {want!r}")
+
+    try:
+        from src.vnew import generate as genmod  # noqa: PLC0415
+
+        tag = genmod.VIBE_TIGHTER_TAG
+        lines174 = genmod.FACE_TOUCH_LINES
+        with _guard_real_llm() as llm_calls, _pin_vnew(VNEW_FX=True, VNEW_TAKE_PROMPT_MAX_CHARS=4000, VNEW_VIBE_PROMPT=True):
+            ra, rb = genmod._romanize_name(_TC157_A), genmod._romanize_name(_TC157_B)  # noqa: SLF001
+
+            def cast_for(real: bool) -> list[dict]:
+                return [{"name": _TC157_A, "colorName": "orange", "frontNo": 2, "refNos": [1, 2], "voice": "",
+                         "look": "real" if real else "webtoon", "costume": "Dark navy long-sleeve button-up dress shirt",
+                         "appearance": "short charcoal-black hair swept back"},
+                        {"name": _TC157_B, "colorName": "blue", "frontNo": 4, "refNos": [3, 4], "voice": "",
+                         "look": "real" if real else "webtoon", "costume": "Black long-sleeve track top",
+                         "appearance": "tousled pale blonde hair"}]
+
+            # ================= (tk-a) 스냅숏 =================
+            if _TK174_SNAPSHOT.is_file():
+                snap = json.loads(_TK174_SNAPSHOT.read_text(encoding="utf-8"))
+                prompts: list[str] = []
+                shot: dict = {}    # (variant, cut) → 이번 SHOT 줄
+                video: dict = {}   # (variant, cut) → 그 조각의 @Video1 줄
+                prod: dict = {}    # (variant, cut) → prod(173) SHOT 줄
+                for unit in snap["gen"]["units"]:
+                    for v, key in (("anime", "webtoon"), ("real", "real")):
+                        for part in (unit.get(key) or {}).get("parts") or []:
+                            sub = genmod._part_take(snap, unit, {"cutIds": part["cutIds"], "seconds": part["seconds"]})  # noqa: SLF001
+                            audit: dict = {}
+                            text = genmod._vibe_take_prompt(snap, sub, real=v == "real", cast=cast_for(v == "real"),  # noqa: SLF001
+                                                            location_no=5, quiet=True, audit=audit)
+                            prompts.append(text)
+                            expect("tk-a", [audit.get("fits"), len(text) <= 4000], [True, True],
+                                   f"{v} 조각 {part['cutIds']} 167 예산 4,000자 안")
+                            rows = [ln for ln in text.split("\n") if ln.startswith("Shot ")]
+                            old = [ln for ln in str(part.get("promptEn") or "").split("\n") if ln.startswith("Shot ")]
+                            vline = next((ln for ln in text.split("\n") if ln.startswith("@Video1")), "")
+                            for k, cid in enumerate(part["cutIds"]):
+                                shot[(v, cid)] = rows[k] if k < len(rows) else ""
+                                prod[(v, cid)] = old[k] if k < len(old) else ""
+                                video[(v, cid)] = vline
+                new_video = genmod.VIBE_VIDEO_LINE_TIGHT
+                for v in ("anime", "real"):
+                    s3, s8, s9, s12 = (shot[(v, c)] for c in ("cut-03", "cut-08", "cut-09", "cut-12"))
+                    eyes = lines174["eyes"].format(name=rb).rstrip(".")
+                    expect("tk-a", [eyes in s3, genmod.FACE_TOUCH_LINE.rstrip(".") in s3, bool(re.search(r"\bchin\b", s3)),
+                                    s3.count("Touch: ")],
+                           [True, False, False, 1], f"{v} cut-03 눈 · 눈물 Touch 줄 1개, 턱 받침 줄 · chin 글 없음")
+                    expect("tk-a", [lines174["cheek"].rstrip(".") in s8, s8.count("Touch: "),
+                                    genmod.FACE_TOUCH_LINE.rstrip(".") in s8], [True, 1, False], f"{v} cut-08 뺨 Touch 줄만")
+                    expect("tk-a", ["away from both mouths; nothing between their lips" in s9, "near the lower lip" in s9],
+                           [True, False], f"{v} cut-09 엄지 = 입에서 떨어짐")
+                    expect("tk-a", [video[(v, c)].startswith(new_video) for c in ("cut-02", "cut-04", "cut-12")],
+                           [True, True, True], f"{v} cut-02 · 04 · 12 조각 = 새 @Video1 줄")
+                    # 꼬리표: 콘티 클로즈업 < 프리비즈(cut-02 MS · cut-03 MCU · cut-12 MCU), cut-04 는 콘티도 medium 이라 없음
+                    expect("tk-a", {c: tag + ":" in shot[(v, c)].split(": ", 1)[0] + ":" for c in ("cut-02", "cut-03", "cut-04", "cut-12")},
+                           {"cut-02": True, "cut-03": True, "cut-04": False, "cut-12": True}, f"{v} 꼬리표 = 크기 절 바로 뒤, 그 컷만")
+                    expect("tk-a", [f"{ra}'s right hand holds {rb}'s hand just below the frame edge, only the fingertips visible" in s12,
+                                    f"grabs {rb}'s hand" in s12], [True, False], f"{v} cut-12 손 잡기 = 화면 아래 가장자리 밑")
+                    expect("tk-a", [shot[(v, c)] == prod[(v, c)] for c in ("cut-10", "cut-11")]
+                           + [video[(v, "cut-10")].startswith(genmod.VIBE_VIDEO_LINE)], [True, True, True],
+                           f"{v} cut-10 · 11 인서트 SHOT = prod 173 글, @Video1 그대로")
+                    for c in ("cut-02", "cut-03", "cut-04", "cut-08", "cut-09", "cut-12"):
+                        report.append(f"{v} {c}: {shot[(v, c)][:150]}")
+                report.append("@Video1 (tight): " + video[("real", "cut-02")][:150])
+                saved_look = genmod._real_look  # noqa: SLF001
+                genmod._real_look = lambda owner, cid: ""  # noqa: SLF001
+                try:
+                    units = {u["id"]: u for u in snap["gen"]["units"]}
+                    locks = {}
+                    for take_id, cids in (("take1", ("cut-02", "cut-03")), ("take2", ("cut-08", "cut-09", "cut-10", "cut-12"))):
+                        ctx = {"take": units[take_id], "takeId": take_id, "overrides": {}, "outfits": {}, "bases": {},
+                               "charById": {}}
+                        for cid in cids:
+                            locks[cid] = genmod._kling_shot_lock("o", snap, ctx, cid, 3.0)  # noqa: SLF001
+                    kling = genmod._segment_prompt(snap, {"cutIds": ["cut-03"]}, first_segment=True, model=_PL169_KLING,  # noqa: SLF001
+                                                   real=True, prompt_max=2500, lock=locks["cut-03"])
+                finally:
+                    genmod._real_look = saved_look  # noqa: SLF001
+                prompts.extend([kling, *locks.values()])
+                first = {c: locks[c].split("\n") for c in locks}
+                expect("tk-a", [first["cut-03"][1:2], first["cut-08"][1:2], first["cut-09"][1:2], len(first["cut-12"]),
+                                tag + ":" in first["cut-02"][0], tag in first["cut-10"][0]],
+                       [[lines174["eyes"].format(name=rb)], [lines174["cheek"]], [genmod.FACE_TOUCH_LINE], 2, True, False],
+                       "Kling FRAMING: cut-03 눈 · cut-08 뺨 · cut-09 턱 Touch 줄, cut-12 Touch 없음, cut-02 꼬리표, 인서트 cut-10 없음")
+                expect("tk-a", [len(kling.encode()) <= 2500, lines174["eyes"].format(name=rb) in kling], [True, True],
+                       "Kling cut-03 ≤ 2500 B · 눈 Touch 줄 남음")
+                expect("tk-a", [_FT173_BAD_WORDS.findall(p) for p in prompts if _FT173_BAD_WORDS.search(p)], [],
+                       "프롬프트에 choke/strangle/violence 없음")
+                report.append(f"kling cut-03 {len(kling.encode())}B")
+
+                # ================= (tk-b) 스냅숏 찾기 =================
+                cuts = {c["id"]: c for c in snap["conti"]["cuts"]}
+                found = {cid: (lambda t: t and (t["kind"], t["close"]))(genmod._face_touch(snap, c))  # noqa: SLF001
+                         for cid, c in cuts.items()}
+                expect("tk-b", found, {"cut-01": None, "cut-02": None, "cut-03": ("eyes", False), "cut-04": ("chin", False),
+                                       "cut-05": ("cheek", False), "cut-06": ("ear", False), "cut-07": ("cheek", False),
+                                       "cut-08": ("cheek", True), "cut-09": ("chin", True), "cut-10": None, "cut-11": None,
+                                       "cut-12": None, "cut-13": None},
+                       "종류: 03 눈을 가리고 눈물 닦기 · 04 턱 · 05/07/08 뺨 · 06 귀 · 목 쓰다듬기 · 09 뒷목 쥐기 = 턱(173), 키스 · 입술 = close")
+            else:
+                seen.update({"tk-a", "tk-b"})
+                report.append(f"tk-a 스냅숏 없음({_TK174_SNAPSHOT}) — 건너뜀")
+
+            # ================= (tk-b) 바꾸기 =================
+            info = genmod._touch_info  # noqa: SLF001
+            expect("tk-b", [info({}, "a", "b", "chin", "", text)["close"] for text in
+                            ("Uijun closes his eyes, lips gently closed", "Their lips separate a few centimeters", "kisses him",
+                             "입술이 닿을 듯", "looks up with parted lips")],
+                   [False, True, True, True, False], "close = 키스 · 입술이 가까움, 다문 입 · 벌린 입술만은 아님")
+            soft = genmod._soften_face_touch  # noqa: SLF001
+            grab = f"{ra}'s right hand grabs {rb}'s chin and lifts it; the left hand rests"
+            expect("tk-b", [soft(grab, {"part": "chin", "kind": "eyes"}, rb), soft(grab, {"part": "chin", "kind": "ear"}, rb),
+                            soft(grab, {"part": "chin", "kind": "cheek"}, rb),
+                            soft(grab, {"part": "chin", "kind": "chin", "close": True}, rb),
+                            soft(f"his right hand is wrapped around the back of {rb}'s neck, fingers on the nape.",
+                                 {"part": "chin", "kind": "ear"}, rb),
+                            soft(f"{ra} cups {rb}'s jaw and cheek with the fingers reaching to {rb}'s ear",
+                                 {"part": "cheek", "kind": "eyes"}, rb)],
+                   [f"{ra}'s right hand gently covers {rb}'s eyes, then wipes the tear down the cheek with his thumb; the left hand rests",
+                    f"{ra}'s right hand lightly brushes behind {rb}'s ear with his fingertips; the left hand rests",
+                    f"{ra}'s right hand softly cups {rb}'s cheek; the left hand rests",
+                    f"{ra}'s right hand gently lifts {rb}'s chin with his fingertips, thumb resting lightly on the chin, away from "
+                    f"both mouths; nothing between their lips; the left hand rests",
+                    f"his right hand lightly brushes behind {rb}'s ear with his fingertips.",
+                    f"{ra} softly cups {rb}'s cheek"],
+                   "종류와 어긋나는 173 턱 글만 바꿈(눈 · 귀 · 뺨), 입이 가까우면 away from both mouths, 뺨 글은 그대로")
+            edge = genmod._edge_hand  # noqa: SLF001
+            expect("tk-b", [edge(f"{ra}'s right hand grabs {rb}'s hand; the left hand rests"),
+                            edge(f"{ra} grips {rb}'s extended hand"),
+                            edge(f"{ra}'s hand clamps around {rb}'s hand and wrist"),
+                            edge(f"{ra} grabs {rb}'s chin"),
+                            edge(f"{ra} holds {rb}'s hand just below the frame edge, only the fingertips visible")],
+                   [f"{ra}'s right hand holds {rb}'s hand just below the frame edge, only the fingertips visible; the left hand rests",
+                    f"{ra} holds {rb}'s extended hand just below the frame edge, only the fingertips visible",
+                    f"{ra}'s hand holds {rb}'s hand just below the frame edge, only the fingertips visible",
+                    f"{ra} grabs {rb}'s chin",
+                    f"{ra} holds {rb}'s hand just below the frame edge, only the fingertips visible"],
+                   "손 잡기 → 가장자리 밑(손목까지), 얼굴은 그대로, 두 번 바꾸지 않음")
+            tight = genmod._conti_tighter  # noqa: SLF001
+            expect("tk-b", [tight({"shotSize": "closeup"}, "MS 3/4"), tight({"shotSize": "closeup"}, "MCU front"),
+                            tight({"shotSize": "closeup"}, "CU front"), tight({"shotSize": "closeup"}, "ECU profile"),
+                            tight({"shotSize": "extreme_closeup"}, "CU profile"), tight({"shotSize": "profile"}, "MCU profile"),
+                            tight({"shotSize": "medium"}, "MS 3/4"), tight({"shotSize": "insert"}, "MS front"),
+                            tight({"cameraEn": "Static closeup on his face"}, "MS front")],
+                   [True, True, False, False, True, True, False, False, True],
+                   "콘티 클로즈업 · 아주 가까운 · 옆얼굴이 프리비즈보다 가까울 때만, medium · 인서트 · 같거나 더 가까운 프리비즈는 아님")
+
+            # ================= (tk-c) 해당 없는 글 그대로 =================
+            expect("tk-c", [soft(grab, {"part": "chin"}, rb), soft(grab, {"part": "chin", "kind": "chin", "close": False}, rb)],
+                   [f"{ra}'s right hand gently lifts {rb}'s chin with his fingertips, thumb resting lightly on the chin near the lower "
+                    f"lip; the left hand rests"] * 2, "종류 없는(173 형) · 입이 멀리 있는 턱 받침 = 173 글")
+            plan_d, take_d = _tc157_plan()
+            text = genmod._vibe_take_prompt(plan_d, take_d, real=False, cast=cast_for(False), location_no=5, quiet=True)  # noqa: SLF001
+            expect("tk-c", [text.split("\n")[-1].startswith(genmod.VIBE_VIDEO_LINE + " ("), tag in text],
+                   [True, False], "콘티 크기 없는 157 테이크: @Video1 줄 그대로 · 꼬리표 없음")
+            expect("tk-c", llm_calls, [], "LLM 호출 0")
+    except Exception as exc:  # noqa: BLE001
+        bad.append("예외: " + repr(exc) + "\n" + _tb.format_exc()[:2500])
+
+    missing = [g for g in ("tk-a", "tk-b", "tk-c") if g not in seen]
+    if missing:
+        bad.append(f"검사 묶음이 돌지 않았습니다: {missing}")
+    if bad:
+        fail("작업 174 닿는 종류 · 입 가까움 · 클로즈업 크기 검사 실패\n  " + "\n  ".join(bad))
+    else:
+        ok("작업 174 (tk-a)스냅숏 cut-03 눈 · 08 뺨 · 09 입에서 떨어진 엄지 · 02/04/12 @Video1 · 꼬리표 · 12 손 가장자리 · 10/11 그대로 · "
+           "예산 (tk-b)종류 · 바꾸기 · 크기 비교 (tk-c)해당 없는 글 그대로")
+        for line in report:
+            print(f"       174: {line}")
 
 
 def main() -> int:
@@ -57704,6 +57972,7 @@ def main() -> int:
     check_vnew_shot_start_171()
     check_vnew_hard_cut_172()
     check_vnew_face_touch_173()
+    check_vnew_touch_kind_174()
     print()
     if warnings:
         print(f"경고 {len(warnings)}건")
