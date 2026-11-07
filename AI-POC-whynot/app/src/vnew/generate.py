@@ -4917,6 +4917,154 @@ def _sleeve_cue(costume: str) -> str:
     return first if re.search(r"\b(?:sleeves?|cuffs?)$", first) else first + " sleeve"
 
 
+# 작업 184: 옷 단서의 눈에 띄는 표시 한 개("white sleeve stripe" · "open collar") — look 줄 옷 구절에서.
+_GARMENT_MARK_NOUN = r"(?:stripes?|bands?|trims?|piping|logos?|prints?|patch(?:es)?|panels?|lines?)"
+_GARMENT_MARK = re.compile(r"^(?:(?:a|an|the|one|single|thin|wide|narrow|bold|small|large|big)\s+)*"
+                           r"(?P<color>(?:[a-z]+-)?[a-z]+)\s+(?P<noun>" + _GARMENT_MARK_NOUN + r")\b(?P<rest>.*)$", re.IGNORECASE)
+_GARMENT_COLLAR = re.compile(r"^(?:the\s+)?(?:collar|neckline)\s+(?:(?:left|worn|kept)\s+)?(?P<how>open|unbuttoned|undone|popped)\b",
+                             re.IGNORECASE)
+GARMENT_MARK_MAX = 24  # 표시가 이보다 길면 빼고 옷만
+
+
+def _garment_mark(phrase: str) -> str:
+    """작업 184: 옷 구절 한 조각의 표시("a single white stripe running down … each sleeve" → "white sleeve stripe",
+    "collar left open at the throat" → "open collar"). 없거나 길면 ""."""
+    phrase = " ".join(str(phrase or "").split()).strip(" .")
+    collar = _GARMENT_COLLAR.match(phrase)
+    if collar:
+        return f"{collar.group('how').lower()} collar"
+    mark = _GARMENT_MARK.match(phrase)
+    if not mark or not _HAIR_COLOR.match(mark.group("color").lower()):
+        return ""
+    noun = mark.group("noun").lower()
+    noun = noun[:-1] if noun.endswith("s") and noun not in ("piping",) and not noun.endswith("ss") else noun
+    where = "sleeve " if re.search(r"\bsleeves?\b", mark.group("rest"), re.IGNORECASE) else ""
+    text = f"{mark.group('color').lower()} {where}{noun}"
+    return text if len(text) <= GARMENT_MARK_MAX else ""
+
+
+def _garment_cue(costume: str, short: bool = False) -> str:
+    """작업 184: 클로즈업 주인공의 윗옷 단서(목선까지 보이는 옷) — look 줄 장면 옷 첫 옷 구절의 색 + 옷 낱말, 짧으면 표시 하나.
+    "black long-sleeve sweatshirt/track top with a single white stripe … each sleeve" → "black track top, white sleeve stripe",
+    short → "black track top". 옷 낱말의 갈래("sweatshirt/track")는 끝 것, 색 갈래는 긴 형은 그대로 · short 는 첫 것.
+    _sleeve_cue 와 같은 구절 자르기(소매 길이 · 단추 낱말 뺌). 옷이 없으면 ""."""
+    text = " ".join(str(costume or "").split())
+    first = re.split(r";", text)[0].strip(" .")
+    first = re.sub(r"^wearing\s+", "", first, flags=re.IGNORECASE)
+    pieces = [p.strip() for p in first.split(",") if p.strip()]
+    if not pieces:
+        return ""
+    found = re.search(r"\s+(?:with|featuring)\s+(?P<tail>.+)$", pieces[0], re.IGNORECASE)
+    tail = found.group("tail") if found else ""
+    main = pieces[0][:found.start()] if found else pieces[0]
+    main = re.split(r"\s+(?:in|under|over)\s+", main, maxsplit=1)[0]
+    main = re.sub(r"^(?:a|an|the)\s+", "", main, flags=re.IGNORECASE)
+    words = [w[0].lower() + w[1:] if w[:1].isupper() and w[1:2].islower() else w for w in main.split()
+             if not re.match(r"^(?:long|short|half|three-quarter)-sleeved?$|^sleeveless$|^button-(?:up|down)$", w, re.I)]
+    colors: list[str] = []
+    for word in words:
+        if not _HAIR_COLOR.match(word.split("/")[0].lower()):
+            break
+        colors.append(word)
+    garment = [w.split("/")[-1] for w in words[len(colors):]]
+    if not garment:
+        return ""
+    if short:
+        return " ".join([c.split("/")[0] for c in colors] + garment[-2:])
+    cue = " ".join(colors + garment)
+    mark = next((m for m in (_garment_mark(p) for p in [tail, *pieces[1:]] if p) if m), "")
+    return f"{cue}, {mark}" if mark else cue
+
+
+_GARMENT_NAME_PAREN = re.compile(r"\s\((?P<inner>[^()]*)\)")
+
+
+def _garment_words(text: str) -> bool:
+    """작업 184: 글에 옷 낱말(REAL_BRIEF_CLOTHING_WORDS, "top" · "track top" 포함)이 있으면 True."""
+    return bool(REAL_BRIEF_CLOTHING_WORDS.search(str(text or "")) or re.search(r"\btops?\b", str(text or ""), re.IGNORECASE))
+
+
+def _closeup_garment_cue(pieces: list[str], name: str, cue: str) -> tuple[list[str], bool]:
+    """작업 184: 클로즈업(또는 더 가까운) 샷 글(조각 목록, 앞 → 뒤)에서 주인공 name 에 옷 단서를 한 번. 자리 = 잠금
+    "Close-up of <이름>" · "Profile close-up of <이름>", 없으면 이름 첫 부름 바로 뒤. 바로 뒤에 괄호가 있으면("(pale blonde hair)")
+    그 안에 "; <단서>" 로 합친다. 그 사람 옷 단서가 이미 있으면("<이름> (… shirt …)" · "<이름>'s hand (… sleeve)" · "<이름>'s (…
+    sleeve)" · "<이름> wears …") 그대로. 돌려주는 값 = (새 조각 목록, 붙였는지)."""
+    out = [str(p or "") for p in pieces]
+    if not name or not cue:
+        return out, False
+    who = r"(?<![A-Za-z])" + re.escape(name) + r"(?![A-Za-z])"
+    tied = re.compile(who + r"(?:['\u2019]s(?:\s+[A-Za-z-]+){0,3})?\s*\((?P<inner>[^()]*)\)")
+    worn = re.compile(who + r"\s+wears\b")
+    if any(worn.search(p) or any(_garment_words(m.group("inner")) for m in tied.finditer(p)) for p in out):
+        return out, False
+    lock = re.compile(r"\b(?:Profile close-up|Close-up) of " + re.escape(name) + r"(?![A-Za-z])")
+    spots = [(at, m) for at, p in enumerate(out) for m in [lock.search(p)] if m]
+    spots = spots or [(at, m) for at, p in enumerate(out) for m in [re.search(who, p)] if m]
+    if not spots:
+        return out, False
+    at, match = spots[0]
+    piece = out[at]
+    paren = _GARMENT_NAME_PAREN.match(piece, match.end())
+    if paren:
+        out[at] = piece[:paren.start()] + f" ({paren.group('inner')}; {cue})" + piece[paren.end():]
+    else:
+        out[at] = piece[:match.end()] + f" ({cue})" + piece[match.end():]
+    return out, True
+
+
+_CLOSEUP_SIZE = re.compile(r"\bclose[\s-]?up\b", re.IGNORECASE)
+
+
+def _closeup_main(entry: dict, size: str, subject: str, owners: list[dict]) -> str:
+    """작업 184: 클로즈업 · 아주 가까운 · 미디엄 클로즈업 · 옆얼굴 크기 샷의 주인공(콘티 한글 이름) = 166/170 잠금 주인공, 없으면
+    화면에 온전히(how full · main) 보이는 사람이 정확히 1명일 때 그 사람. 두 사람이 다 보이는 샷 · 그 밖 크기는 ""."""
+    if not _CLOSEUP_SIZE.search(str(size or "")):
+        return ""
+    if subject:
+        return subject
+    owner_names = {str(o.get("name") or "").strip() for o in owners}
+    full: list[str] = []
+    for item in entry.get("onScreen") or []:
+        ko = str(item.get("name") or "").strip()
+        if ko and ko not in owner_names and ko not in full and str(item.get("how") or "full") in ("full", "main"):
+            full.append(ko)
+    return full[0] if len(full) == 1 else ""
+
+
+def _nickname_map(name_map: dict[str, str]) -> dict[str, str]:
+    """작업 184: 영어 샷 글의 이름만 부름(콘티 연기 글 "Uijun" · "Geonu") → 프롬프트 표시 이름("Yeouijun" · "Beomgeonu").
+    후보 = 한글 이름(cast name_map 키)의 로마자 이름만(성 뺌, _brief_name_forms). 그 사람 표시 이름의 끝(대소문자 무시)이고,
+    끝이 그 별칭인 표시 이름이 정확히 하나 · 별칭을 내는 사람이 정확히 한 명 · 어떤 표시 이름과도 같지 않을 때만.
+    {별칭: 표시 이름}."""
+    shown = [s for s in dict.fromkeys(str(v or "").strip() for v in name_map.values()) if s]
+    givers: dict[str, set[str]] = {}
+    for ko in name_map:
+        for form in _brief_name_forms(ko)[1:]:
+            if form and " " not in form and form.isascii() and len(form) >= 2 and form not in shown:
+                givers.setdefault(form, set()).add(ko)
+    out: dict[str, str] = {}
+    for form, kos in givers.items():
+        owners = [s for s in shown if s.lower().endswith(form.lower()) and s.lower() != form.lower()]
+        mine = str(name_map.get(next(iter(kos))) or "").strip()
+        if len(kos) == 1 and len(owners) == 1 and owners[0] == mine:
+            out[form] = mine
+    return out
+
+
+_QUOTED = re.compile(r"(\"[^\"]*\"|\u201c[^\u201d]*\u201d)")
+
+
+def _map_nicknames(text: str, nicknames: dict[str, str]) -> str:
+    """작업 184: 글의 별칭(_nickname_map, 낱말 전체 · 대소문자 그대로)을 표시 이름으로. 따옴표 안(대사)은 그대로."""
+    text = str(text or "")
+    if not text or not nicknames:
+        return text
+    pattern = re.compile(r"(?<![A-Za-z])(" + "|".join(re.escape(k) for k in sorted(nicknames, key=len, reverse=True))
+                         + r")(?![A-Za-z])")
+    return "".join(part if _QUOTED.fullmatch(part) else pattern.sub(lambda m: nicknames[m.group(1)], part)
+                   for part in _QUOTED.split(text))
+
+
 def _vibe_own_hands(cut: dict, owners: list[dict], disp, appearance_of, costume_of) -> list[tuple[str, str]]:
     """작업 166: 자기 손 잠금 [(콘티 한글 이름, 문장(마침표 없음))]. 대상 = presence on_screen 이면서 연기 글이 자기 손을 쓰지
     않는다고 하거나, 손만 들어오는 다른 사람의 손이 닿고 자기 hands 항목이 없는 사람. 손 주인 옷 소매 단서는 장면 옷에서."""
@@ -5345,6 +5493,18 @@ def _vibe_take_prompt(plan: dict, take: dict, *, real: bool, cast: list[dict], l
         ko = str(ko or "").strip()
         return name_map[ko] if ko in name_map else (_romanize_name(ko) or ko)
 
+    # 작업 184: 영어 샷 글(SHOT · Kling FRAMING · ACTION)의 이름만 부름("Uijun") → 표시 이름("Yeouijun"). 따옴표 대사는 그대로.
+    nicknames = _nickname_map(name_map)
+    nick_on = [True]  # 아래 길이 사다리의 마지막 칸(184 를 그 조각만 끈다)에서 False
+    nick_hit = [False]  # 별칭을 바꾼 글이 있었다
+
+    def _nick(text: str) -> str:
+        if not nick_on[0]:
+            return str(text or "")
+        mapped = _map_nicknames(text, nicknames)
+        nick_hit[0] = nick_hit[0] or mapped != str(text or "")
+        return mapped
+
     if real:
         # 136: 실사 연기의 그림 문장·옷 구절 → 장면 옷. 작업 183 fix1: "<이름> wears …" 의 이름 = SHOT 줄과 같은 로마자(_disp).
         for entry, cut_id in zip(entries, take_cut_ids):
@@ -5492,7 +5652,7 @@ def _vibe_take_prompt(plan: dict, take: dict, *, real: bool, cast: list[dict], l
             text = _real_blush_pieces([str(text or "")], _blush_who(entry), people)[0]  # 작업 166
         else:
             text = _take_action(entry.get("action") or "")
-        return _soft(str(text or "").strip().rstrip("."), touch)
+        return _nick(_soft(str(text or "").strip().rstrip("."), touch))  # 작업 184: 별칭 → 표시 이름
 
     appearances = {str(m.get("name") or "").strip(): str(m.get("appearance") or "") for m in cast}
 
@@ -5597,7 +5757,7 @@ def _vibe_take_prompt(plan: dict, take: dict, *, real: bool, cast: list[dict], l
         locks = _vibe_own_hands(cut, hand_owners, _disp, lambda ko: appearances.get(ko, ""), lambda ko: costumes.get(ko) or "")
         locked = {ko for ko, _text in locks}
         own = "".join(text + ". " for _ko, text in locks)
-        head = (lead + ". " if lead else "") + (own + who if real else who + own)
+        head = _nick((lead + ". " if lead else "") + (own + who if real else who + own))  # 작업 184: 별칭 → 표시 이름
         prefix = f"Shot {index + 1} ({entry['start']}-{entry['end']}s), {size}{tag}: " + head
         if framing is not None:
             # 작업 169: 컷 단위 Kling 샷 고정 줄의 재료(크기 · 자기 손 + who, 화면에 보이는 인물)
@@ -5644,6 +5804,7 @@ def _vibe_take_prompt(plan: dict, take: dict, *, real: bool, cast: list[dict], l
             value = _txt(cut.get(field)).rstrip(" .")
             if value and not vnew_fx.HANGUL.search(value):
                 parts.append(value)
+        parts = [_nick(p) for p in parts]  # 작업 184: 연기 · 닿는 연기 · 포즈 · 기호 · 카메라 글의 별칭 → 표시 이름
         if real:
             parts = _real_blush_pieces(parts, _blush_who(entry) or (_disp(subject) if subject else ""), people)  # 작업 166
         if insert:
@@ -5651,6 +5812,16 @@ def _vibe_take_prompt(plan: dict, take: dict, *, real: bool, cast: list[dict], l
             pieces, added = _insert_sleeve_cues([head, *parts], _sleeve_cues(cut))
             if added:
                 sleeved.append(cut_id)
+                head, parts = pieces[0], pieces[1:]
+                prefix = f"Shot {index + 1} ({entry['start']}-{entry['end']}s), {size}{tag}: " + head
+                if framing is not None:
+                    framing["shots"][cut_id]["lead"] = head
+        garment_ko = "" if insert else _closeup_main(entry, size, subject, hand_owners)
+        if garment_ko:
+            # 작업 184: 클로즈업(또는 더 가까운) 샷 주인공의 윗옷 단서 한 번(잠금 "Close-up of …" 자리, SHOT · Kling 같은 글)
+            pieces, added = _closeup_garment_cue([head, *parts], _disp(garment_ko), _garment_cue_of(garment_ko))
+            if added:
+                garbed.append(cut_id)
                 head, parts = pieces[0], pieces[1:]
                 prefix = f"Shot {index + 1} ({entry['start']}-{entry['end']}s), {size}{tag}: " + head
                 if framing is not None:
@@ -5666,6 +5837,15 @@ def _vibe_take_prompt(plan: dict, take: dict, *, real: bool, cast: list[dict], l
     # 작업 183: 인서트 소매 단서 형 — "full"(_sleeve_cue) · "short"(_sleeve_cue_short) · "none"(단계 비교용).
     sleeve_form = ["full"]
     sleeved: list[str] = []  # 단서를 붙인 컷
+    # 작업 184: 클로즈업 주인공 옷 단서 형 — "full"(_garment_cue) · "short"(가장 짧은 형) · "none"(단계 비교 · 그 조각만 뺌).
+    garment_form = ["full"]
+    garbed: list[str] = []  # 옷 단서를 붙인 컷
+
+    def _garment_cue_of(ko: str) -> str:
+        # 작업 184: look 줄과 같은 장면 옷(_look_line 의 _txt)에서
+        if garment_form[0] == "none":
+            return ""
+        return _garment_cue(_txt(costumes.get(ko) or ""), short=garment_form[0] == "short")
 
     def _sleeve_cues(cut: dict) -> list[tuple[str, str]]:
         # 작업 183: 컷 인물마다 (표시 이름, 소매 단서) — look 줄 옷(_sleeve_cue), 없으면 콘티 손 머리 뒤 소매 구절.
@@ -5774,14 +5954,18 @@ def _vibe_take_prompt(plan: dict, take: dict, *, real: bool, cast: list[dict], l
         return text, steps
 
     prompt, applied = _compacted()
-    if sleeved:
+    garment_used, sleeve_used = bool(garbed), bool(sleeved)  # 아래 다시 만들기가 목록을 비운다
+    if sleeve_used or garment_used or nick_hit[0]:
         # 작업 183: 소매 단서로 157 짧은 형 단계가 늘거나 상한을 넘으면(단서 없는 글보다) 가장 짧은 단서로 다시 만든다.
-        def _rebuild(form: str) -> tuple[str, list[str]]:
-            sleeve_form[0] = form
+        # 작업 184: 옷 단서 · 별칭 바꾸기도 183 글(184 끔)의 단계를 넘지 않게 — 옷 단서 긴 형 → 가장 짧은 형 → 그 조각만 뺌 →
+        # 별칭도 그 조각만 그대로(= 183 글).
+        def _rebuild(form: str, garment: str = "none", nick: bool = False) -> tuple[str, list[str]]:
+            sleeve_form[0], garment_form[0], nick_on[0] = form, garment, nick
             for key in state:
                 state[key] = False  # 샷 글은 짧은 형 없이 만든다(첫 만들기와 같게)
             tighter.clear()
             sleeved.clear()
+            garbed.clear()
             shots[:] = [_shot(i, e, cid) for i, (e, cid) in enumerate(zip(entries, take_cut_ids))]
             return _compacted()
 
@@ -5790,10 +5974,26 @@ def _vibe_take_prompt(plan: dict, take: dict, *, real: bool, cast: list[dict], l
 
         full_rank = _rank(prompt, applied)
         if full_rank > (0, False):  # 짧은 형 없이 맞으면 그대로
-            if full_rank > _rank(*_rebuild("none")):
-                prompt, applied = _rebuild("short")
+            none_rank = _rank(*_rebuild("none"))
+            if full_rank <= none_rank:
+                prompt, applied = _rebuild("full", "full", True)
             else:
-                prompt, applied = _rebuild("full")
+                # 183 글(184 끔)과 그 단계 — 183 규칙 그대로
+                sleeve = "short" if sleeve_used and _rank(*_rebuild("full")) > none_rank else "full"
+                ref = _rank(*_rebuild(sleeve))
+                for garment, nick in (("full", True), ("short", True), ("none", True), ("none", False)):
+                    prompt, applied = _rebuild(sleeve, garment, nick)
+                    if _rank(prompt, applied) <= ref:
+                        break
+        if garment_used:
+            if audit is not None:
+                audit["garmentCue"] = garment_form[0] if garbed else "dropped"
+            if not garbed:
+                log.info("vnew.gen.closeup_garment_dropped take=%s", str(take.get("id") or ""))
+        if not nick_on[0]:
+            if audit is not None:
+                audit["nicknamesKept"] = True
+            log.info("vnew.gen.nicknames_kept take=%s", str(take.get("id") or ""))
     fits = _prompt_len(prompt) <= budget
     if not fits:
         applied.append("overBudget")  # 샷 문장은 줄이지 않는다 — 제출 쪽(_prompt_split_parts)이 조각으로 나눈다
@@ -9744,6 +9944,11 @@ def _kling_shot_lock(owner: str, plan: dict, ctx: dict, cut_id: str, seconds: fl
             hit = re.search(r"(?<![A-Za-z])" + re.escape(roman) + r"(?![A-Za-z])", lead)
             if cue and hit and not lead[hit.end():].startswith(" ("):
                 lead = lead[:hit.end()] + cue + lead[hit.end():]
+            elif cue and hit:
+                # 작업 184: 바로 뒤 괄호가 클로즈업 옷 단서뿐이면(머리색 없음) 한 괄호로 합친다 "(charcoal-black hair; <옷>)"
+                paren = _GARMENT_NAME_PAREN.match(lead, hit.end())
+                if paren and _garment_words(paren.group("inner")) and "hair" not in paren.group("inner"):
+                    lead = lead[:paren.start()] + f" ({cue.strip()[1:-1]}; {paren.group('inner')})" + lead[paren.end():]
         lines = [REAL_CUT_FRAMING_LINE.format(size=shot["size"], lead=lead) if lead
                  else REAL_CUT_FRAMING_LINE.split(": {lead}", 1)[0].format(size=shot["size"]) + "."]
         if shot.get("touch"):
