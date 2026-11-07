@@ -60535,6 +60535,247 @@ def check_vnew_closeup_garment_184() -> None:
     for line_ in report:
         print(f"       184: {line_}")
 
+# ---------------------------------------------------------------- 작업 187 — 상단 경로에 지금 프로젝트 이름(tp-a~e)
+def _tp_fn(src: str, name: str) -> str:
+    """app.js 에서 맨 앞 `function name(` 본문(다음 `}` 만 있는 줄까지). 없거나 두 번 있으면 ""."""
+    head = f"\nfunction {name}("
+    if src.count(head) != 1:
+        head = f"\nasync function {name}("
+        if src.count(head) != 1:
+            return ""
+    start = src.find(head) + 1
+    end = src.find("\n}\n", start)
+    return src[start:end + 3] if end > start else ""
+
+
+# renderTopProject · topProject · setCurrentProject 를 가짜 DOM 위에서 돌린다. 경우마다 새 vm 문맥(상태 섞임 없음).
+_TP_NODE = r"""
+var vm = require("vm");
+function fakeEl(cls) {
+  var set = cls.slice(), attrs = {};
+  var e = {
+    textContent: "", dataset: {}, innerHTMLWrites: 0,
+    classList: {
+      toggle: function (c, on) { var has = set.indexOf(c) >= 0; if (on === undefined) on = !has;
+        if (on && !has) set.push(c); if (!on && has) set = set.filter(function (x) { return x !== c; }); return on; },
+      contains: function (c) { return set.indexOf(c) >= 0; }
+    },
+    setAttribute: function (k, v) { attrs[k] = String(v); },
+    getAttribute: function (k) { return Object.prototype.hasOwnProperty.call(attrs, k) ? attrs[k] : null; },
+    removeAttribute: function (k) { delete attrs[k]; }
+  };
+  ["title", "href"].forEach(function (k) {
+    Object.defineProperty(e, k, { get: function () { return attrs[k] || ""; }, set: function (v) { attrs[k] = String(v); } });
+  });
+  Object.defineProperty(e, "innerHTML", { get: function () { return ""; }, set: function () { e.innerHTMLWrites += 1; } });
+  return e;
+}
+function run(c) {
+  var dom = { "#topProjectName": fakeEl(["top-project-name", "is-hidden"]), "#topProjectSep": fakeEl(["is-hidden"]),
+              "#topBreadcrumb": fakeEl(["breadcrumb"]) };
+  var store = { working: c.working || null }, workingSets = [];
+  var sb = {
+    state: { token: c.token === undefined ? "t" : c.token, activeView: c.view, currentProject: c.current || null },
+    $: function (sel) { return dom[sel] || null; },
+    getWorkingProject: function () { return store.working; },
+    setWorkingProject: function (p) { workingSets.push(p ? [p.id, p.title] : null);
+      store.working = p ? { id: p.id, title: p.title } : null; sb.renderTopProject(); },
+    pathForView: function (view, id) { return view === "projectDetail" && id ? "/projects/" + encodeURIComponent(id) : "/projects"; }
+  };
+  vm.createContext(sb);
+  vm.runInContext(CODE + "\nthis.renderTopProject = renderTopProject;\n", sb);
+  if (c.set !== undefined) vm.runInContext("setCurrentProject(" + JSON.stringify(c.set) + ");", sb);
+  else vm.runInContext("renderTopProject();", sb);
+  var a = dom["#topProjectName"];
+  return { shown: !a.classList.contains("is-hidden"), sep: !dom["#topProjectSep"].classList.contains("is-hidden"),
+           has: dom["#topBreadcrumb"].classList.contains("has-project"), text: a.textContent, title: a.getAttribute("title"),
+           aria: a.getAttribute("aria-label"), href: a.getAttribute("href"), pid: a.dataset.projectId || null,
+           current: sb.state.currentProject ? sb.state.currentProject.id : null, workingSets: workingSets, html: a.innerHTMLWrites };
+}
+var out = {};
+CASES.forEach(function (c) { out[c.name] = run(c); });
+console.log(JSON.stringify(out));
+"""
+
+_TP_NAME = "위험한 편의점 test3"
+_TP_VNEW = {"id": "p1", "title": _TP_NAME, "track": "video_new"}
+_TP_VIDEO = {"id": "p 2", "title": "영상 프로젝트", "track": "video"}
+_TP_CASES = [
+    {"name": "vnew", "view": "vnew", "current": _TP_VNEW},
+    {"name": "videoGen", "view": "videoGen", "current": _TP_VIDEO},
+    {"name": "detail", "view": "projectDetail", "current": _TP_VIDEO},
+    {"name": "conti", "view": "imageStudio", "current": None, "working": {"id": "p3", "title": "<img src=x onerror=alert(1)>"}},
+    {"name": "contiNone", "view": "imageStudio", "current": _TP_VNEW},
+    *[{"name": v, "view": v, "current": _TP_VNEW, "working": {"id": "p1", "title": _TP_NAME}}
+      for v in ("home", "library", "characters", "myUsage", "users", "models")],
+    {"name": "loggedOut", "view": "vnew", "current": _TP_VNEW, "token": ""},
+    {"name": "switch", "view": "vnew", "current": _TP_VNEW, "set": {"id": "p9", "title": "다른 프로젝트", "track": "video_new"}},
+    {"name": "clear", "view": "vnew", "current": _TP_VNEW, "set": None},
+    {"name": "rename", "view": "projectDetail", "current": _TP_VIDEO, "working": {"id": "p 2", "title": "옛 이름"},
+     "set": {"id": "p 2", "title": "새 이름", "track": "video"}},
+]
+
+
+def _tp_want() -> dict:
+    hidden = {"shown": False, "sep": False, "has": False, "text": "", "title": None, "aria": None, "href": None, "pid": None,
+              "workingSets": [], "html": 0}
+
+    def shown(name: str, href, pid, current) -> dict:
+        return {"shown": True, "sep": True, "has": True, "text": name, "title": name, "aria": f"현재 프로젝트: {name}",
+                "href": href, "pid": pid, "current": current, "workingSets": [], "html": 0}
+
+    want = {
+        "vnew": shown(_TP_NAME, None, None, "p1"),             # 이미 그 프로젝트 화면(vnew) — 글자만
+        "videoGen": shown("영상 프로젝트", "/projects/p%202", "p 2", "p 2"),
+        "detail": shown("영상 프로젝트", None, None, "p 2"),     # 상세 자체 — 글자만
+        "conti": shown("<img src=x onerror=alert(1)>", "/projects/p3", "p3", None),
+        "contiNone": {**hidden, "current": "p1"},              # 작업 프로젝트 없는 콘티 화면
+        "loggedOut": {**hidden, "current": "p1"},
+        "switch": shown("다른 프로젝트", None, None, "p9"),
+        "clear": {**hidden, "current": None},
+        "rename": {**shown("새 이름", None, None, "p 2"), "workingSets": [["p 2", "새 이름"]]},
+    }
+    for v in ("home", "library", "characters", "myUsage", "users", "models"):
+        want[v] = {**hidden, "current": "p1"}
+    return want
+
+
+def check_topbar_project_187() -> None:
+    """작업 187 — 상단 경로(AI STUDIO › 쪽 제목 › 프로젝트 이름)에 지금 프로젝트 이름. 정적 검사 + 가짜 DOM node 실행(서버 · 네트워크 0).
+
+    (tp-a) index.html: .breadcrumb 안 #pageTitle 바로 뒤에 #topProjectSep · #topProjectName(처음엔 감춤)
+    (tp-b) 하나의 setter: state.currentProject 를 바꾸는 곳은 setCurrentProject 하나 · 목록 열기(dispatchProject 세 트랙) · 새로고침 복원 ·
+           whynotOpenVideoGen · 저장 응답 · 삭제 · 로그아웃이 그것을 부르고, switchView · setWorkingProject 가 다시 그린다.
+           vpoc.js · vnew.js 는 switchView 가 state.currentProject?.id 로 mount 한다(따로 프로젝트를 들고 있지 않다)
+    (tp-c) 이름은 textContent · title · aria-label="현재 프로젝트: <이름>" 으로만(innerHTML 0). 링크는 dispatchProject 와 같은 곳(openProject)
+    (tp-d) 감춤 · 비움: 프로젝트 밖 화면 · 로그아웃(토큰 먼저 비움) · 삭제 · 프로젝트 바꿈 — node 로 경우마다 돌려 본다
+    (tp-e) CSS: 한 줄 말줄임 · 쪽 제목이 먼저 줄어듦 · .breadcrumb 가 잘라 가로 스크롤 없음 · 560px 이하 브랜드 감춤 · LF
+    """
+    bad: list[str] = []
+    seen: set[str] = set()
+
+    def expect(group: str, got, want, what: str) -> None:
+        seen.add(group)
+        if got != want:
+            bad.append(f"({group}) {what}\n      결과 {got!r}\n      기대 {want!r}")
+
+    try:
+        html = (PUBLIC / "index.html").read_text(encoding="utf-8")
+        app = (PUBLIC / "app.js").read_text(encoding="utf-8")
+        css = (PUBLIC / "styles.css").read_text(encoding="utf-8")
+        names = ("setCurrentProject", "topProject", "renderTopProject", "setWorkingProject", "dispatchProject", "applyRoute",
+                 "signOut", "deleteDetailProject", "switchView", "saveProjectDetail", "openProject")
+        body = {n: _tp_fn(app, n) for n in names}
+        expect("tp-b", sorted(n for n, t in body.items() if not t), [], "app.js 에 함수가 하나씩 있다")
+
+        # ---------------- (tp-a) index.html
+        crumb = re.search(r'<div class="breadcrumb" id="topBreadcrumb">(.*?)\n        </div>', html, re.S)
+        inner = crumb.group(1) if crumb else ""
+        title_at = inner.find('<strong id="pageTitle">')
+        expect("tp-a", [bool(crumb), html.count('id="topProjectName"'), html.count('id="topProjectSep"'),
+                        0 <= title_at < inner.find('id="topProjectSep"') < inner.find('id="topProjectName"'),
+                        '<a class="top-project-name is-hidden" id="topProjectName"></a>' in inner,
+                        '<i class="breadcrumb-brand-sep"></i>' in inner],
+               [True, 1, 1, True, True, True], "breadcrumb 안 #pageTitle 뒤에 구분점 · 이름(<a>, 처음엔 감춤, 빈 글)")
+
+        # ---------------- (tp-b) 하나의 setter 와 부르는 곳
+        assigns = re.findall(r"state\.currentProject\s*=(?!=)", app)
+        dispatch = body["dispatchProject"]
+        expect("tp-b", [len(assigns), "state.currentProject = project || null;" in body["setCurrentProject"],
+                        dispatch.count("setCurrentProject(project);"),
+                        "setCurrentProject(payload.item);" in body["applyRoute"],
+                        "setCurrentProject(project);" in app[app.find("window.whynotOpenVideoGen = ("):][:400],
+                        "setCurrentProject(payload.item);" in body["saveProjectDetail"],
+                        "setCurrentProject(null);" in body["deleteDetailProject"],
+                        "if (getWorkingProject()?.id === project.id) setWorkingProject(null);" in body["deleteDetailProject"],
+                        "setCurrentProject(null);" in body["signOut"]],
+               [1, True, 3, True, True, True, True, True, True],
+               "state.currentProject 대입은 setCurrentProject 안 하나 · 목록 열기(세 트랙) · 새로고침 복원 · 영상 열기 · 저장 · 삭제 · 로그아웃이 부른다")
+        sv = body["switchView"]
+        expect("tp-b", [0 <= sv.find("state.activeView = viewName;") < sv.find("renderTopProject();"),
+                        "renderTopProject();" in body["setWorkingProject"], "renderTopProject();" in body["setCurrentProject"],
+                        "window.vpoc?.mount(state.currentProject?.id" in sv, "window.vnew?.mount?.(state.currentProject?.id);" in sv,
+                        'projectDetail: "프로젝트",' in sv],
+               [True, True, True, True, True, True],
+               "switchView(화면을 바꾼 뒤) · setWorkingProject · setCurrentProject 가 다시 그린다 · vpoc/vnew 는 같은 값으로 mount · 상세 제목은 '프로젝트'")
+        for js in ("vnew.js", "vpoc.js"):
+            src = (PUBLIC / js).read_text(encoding="utf-8")
+            expect("tp-b", [src.count("currentProject"), src.count("toon-change-ai-pj:working")], [0, 0],
+                   f"{js} 는 지금 프로젝트를 따로 들고 있지 않다(app.js 가 id 를 넘긴다)")
+
+        # ---------------- (tp-c) textContent · 이름표 · 링크
+        render = body["renderTopProject"]
+        three = render + body["topProject"] + body["setCurrentProject"]
+        expect("tp-c", ["link.textContent = name;" in render, ".innerHTML" in three, ".insertAdjacentHTML" in three,
+                        "link.title = name;" in render, 'link.setAttribute("aria-label", `현재 프로젝트: ${name}`);' in render,
+                        'link.href = pathForView("projectDetail", project.id);' in render,
+                        'const target = project.track === "video_new" ? "vnew" : "projectDetail";' in render],
+               [True, False, False, True, True, True, True],
+               "이름은 textContent · title · aria-label 로만, 링크는 /projects/<id>, 그 화면이면 글자만")
+        click = app[app.find('$("#topProjectName").addEventListener("click"'):][:500]
+        expect("tp-c", [app.count('$("#topProjectName").addEventListener("click"'), "openProject(projectId);" in click,
+                        "if (!projectId) return;" in click, "event.preventDefault();" in click,
+                        "await dispatchProject(payload.item);" in body["openProject"]],
+               [1, True, True, True, True], "누르면 openProject(목록 카드와 같은 dispatchProject) · 링크가 아니면 아무것도 안 함")
+
+        # ---------------- (tp-d) 감춤 · 비움
+        top = body["topProject"]
+        lists = re.findall(r"\[([^\]]*)\]\.includes\(state\.activeView\)", top)
+        views = sorted(v for part in lists for v in re.findall(r'"(\w+)"', part))
+        so = body["signOut"]
+        expect("tp-d", [views, "const project = state.token ? topProject() : null;" in render,
+                        0 <= so.find('state.token = "";') < so.find("setCurrentProject(null);")],
+               [sorted(["projectDetail", "videoGen", "vnew", "imageStudio", "studio"]), True, True],
+               "프로젝트 안 화면만 보이고(목록 · 라이브러리 · 캐릭터 · 사용량 · 관리 제외), 로그아웃은 토큰을 먼저 비운다")
+        node = shutil.which("node")
+        if not node:
+            warn("node 가 없어 작업 187 (tp-d) 실행 검사를 건너뜁니다")
+        else:
+            code = body["setCurrentProject"] + "\n" + top + "\n" + render
+            script = ("var CODE = " + json.dumps(code) + ";\nvar CASES = " + json.dumps(_TP_CASES, ensure_ascii=False) + ";\n" + _TP_NODE)
+            result = subprocess.run([node, "-"], input=script, capture_output=True, text=True, encoding="utf-8", timeout=60)
+            if result.returncode != 0:
+                bad.append("(tp-d) node 실행 실패: " + (result.stderr or "")[:800])
+            else:
+                got = json.loads(result.stdout.strip().splitlines()[-1])
+                want = _tp_want()
+                for name in want:
+                    expect("tp-d", got.get(name), want[name], f"경우 {name}")
+
+        # ---------------- (tp-e) CSS · 줄 끝
+        def rule(selector: str) -> str:
+            return _edu_css_block(css, selector)
+
+        name_rule, title_rule, crumb_rule = rule(".top-project-name"), rule("#pageTitle"), rule(".breadcrumb")
+        narrow = css[css.find("@media (max-width: 560px) {"):]
+        narrow = narrow[:narrow.find("\n}")]
+        expect("tp-e", [all(s in name_rule for s in ("white-space: nowrap;", "text-overflow: ellipsis;", "overflow: hidden;", "min-width: 0;")),
+                        "flex: 0 1 auto;" in name_rule,
+                        all(s in title_rule for s in ("flex: 0 100 auto;", "white-space: nowrap;", "text-overflow: ellipsis;")),
+                        ".breadcrumb.has-project #pageTitle { min-width: 3em; }" in css,
+                        all(s in crumb_rule for s in ("min-width: 0;", "overflow: hidden;")),
+                        "flex-shrink: 0;" in rule(".top-actions"),
+                        ".breadcrumb.has-project .breadcrumb-brand,\n  .breadcrumb.has-project .breadcrumb-brand-sep { display: none; }" in narrow,
+                        [("\r" in (PUBLIC / f).read_bytes().decode("utf-8")) for f in ("index.html", "app.js", "styles.css")]],
+               [True, True, True, True, True, True, True, [False, False, False]],
+               "이름 한 줄 말줄임 · 쪽 제목이 먼저 줄고(3em 까지) · .breadcrumb 가 잘라 가로 스크롤 없음 · 560px 이하 브랜드 감춤 · LF")
+    except Exception as exc:  # noqa: BLE001
+        import traceback as _tb  # noqa: PLC0415
+
+        bad.append("(tp) 예외: " + repr(exc) + "\n" + _tb.format_exc()[:1500])
+
+    groups = {f"tp-{c}" for c in "abcde"}
+    if groups - seen and not bad:
+        bad.append(f"검사하지 못한 묶음: {sorted(groups - seen)}")
+    if bad:
+        for item in bad:
+            fail("작업 187 상단 프로젝트 이름 " + item)
+    else:
+        ok("작업 187 상단 프로젝트 이름 (tp-a)index.html 요소 (tp-b)setCurrentProject 하나 · 부르는 곳 (tp-c)textContent · aria-label · 링크 "
+           f"(tp-d)프로젝트 밖 · 로그아웃 · 삭제 · 바꿈에 감춤(node 경우 {len(_TP_CASES)}) (tp-e)CSS 말줄임 · 가로 스크롤 없음 · LF")
+
+
+
 
 def main() -> int:
     print("== vpoc1 check ==")
@@ -60692,6 +60933,7 @@ def main() -> int:
     check_vnew_edit_jl_ui_182()
     check_vnew_insert_sleeve_183()
     check_vnew_closeup_garment_184()
+    check_topbar_project_187()
     print()
     if warnings:
         print(f"경고 {len(warnings)}건")

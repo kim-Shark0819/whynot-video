@@ -237,9 +237,12 @@
       <header class="topbar">
         <!-- 좁은 화면에서는 서랍 열기, 넓은 화면에서는 메뉴 접기/펼치기 토글로 쓴다. -->
         <button class="icon-button menu-button" id="menuButton" type="button" aria-label="왼쪽 메뉴 접기" title="왼쪽 메뉴 접기" aria-controls="sidebar" aria-expanded="true"><span></span><span></span><span></span></button>
-        <div class="breadcrumb">
+        <div class="breadcrumb" id="topBreadcrumb">
           <span class="breadcrumb-brand"><b>AI STUDIO</b><img class="brand-logo brand-logo-breadcrumb" src="/assets/brand/logo.svg?v=__ASSET_VERSION__" width="339" height="80" alt="" decoding="async"></span>
-          <i></i><strong id="pageTitle">프로젝트</strong>
+          <i class="breadcrumb-brand-sep"></i><strong id="pageTitle">프로젝트</strong>
+          <!-- 작업 187: 지금 프로젝트 이름. 프로젝트 안 화면에서만 보인다(app.js renderTopProject).
+               그 프로젝트 화면으로 갈 수 있으면 href 를 달고, 이미 그 화면이면 글자만 둔다. -->
+          <i class="top-project-sep is-hidden" id="topProjectSep"></i><a class="top-project-name is-hidden" id="topProjectName"></a>
         </div>
         <div class="top-actions">
           <!-- 진행 중인 생성 작업. 없으면 감춘다. 누르면 라이브러리의 진행 목록으로 간다. -->
