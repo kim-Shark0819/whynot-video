@@ -17274,7 +17274,10 @@ def _no_ai_note(text: str) -> str:
     # 작업 169: 제출한 Kling 컷 프롬프트는 고지 바로 다음에 샷 고정 줄(FRAMING …, COSTUME: …)이 붙는다. 그 줄들도 뗀다 — 나머지는
     # 169 전 글자 그대로라 옛 기대값(ak-a 머리 FIXED 시작 등)은 바꾸지 않는다. 고정 줄 자체는 check_vnew_part_likeness_169 가 본다.
     rest = text[len(head):].split("\n")
-    while rest and rest[0].startswith(("FRAMING (storyboard, keep exactly;", "COSTUME: ")):
+    # 작업 176: 그 묶음 끝의 인물 줄(i2v "이름 (머리색): same face and hair in every frame…", elements "@ElementN is …")도 뗀다 —
+    # ak-a 의 i2v Kling 프롬프트에 사람마다 한 줄이 더해졌다(의도한 변경). 나머지 글자는 그대로라 옛 기대값은 바꾸지 않는다.
+    person = re.compile(r"^(?:@Element\d+ is .+: keep exactly this face and hair|[^:\n]+: same face and hair in every frame)")
+    while rest and (rest[0].startswith(("FRAMING (storyboard, keep exactly;", "COSTUME: ")) or person.match(rest[0])):
         rest.pop(0)
     return "\n".join(rest)
 
@@ -56582,6 +56585,12 @@ def check_vnew_part_likeness_169() -> None:
     (pl-e) _supersede_unused: pending · failed · 쓰지 않은 조각 → superseded, replacedBy, 쓴 조각은 그대로
     (pl-h) 작업 172: c3 인서트 → 조각 2 이음 그림 없음(이음 글 남음), Kling c3 시작 그림 검사 shot 2번 실패 → prevFrame,
            Kling c4(앞이 인서트) → 조각 1 마지막 프레임 · Seedream 0, 시작 그림 글 = 시간대 · 사람마다 장면 옷
+    작업 176: Seedance 단계 0 · 0b · 0b · 1 · 1r · 1b → "모든 Seedance 거절" = 6번(pl-b · c · f · g · h, 전 4번), 상한 6.
+    (pl-i) 조각 2 가 1r 까지 거절 → 1b(정면 + 조각 1 결과 마지막 프레임, 신원 · 겉모습 참고 이름표)에서 통과, Kling 0
+    (pl-j) 조각 1 거절(받아들여진 Seedance 결과 없음) → 1b 건너뛰고 Kling
+    (pl-k) 상한을 낮추면 그 자리에서 칸 실패(되돌아가지 않음), pl-c 조각당 추가 ≤ 상한
+    (pl-l) i2v Kling: klingRefs none · 보이는 사람마다 한 줄(장면 옷 · 머리색), 손만 들어오는 사람 줄 없음
+    (pl-m) elements 를 받는 Kling: 보이는 사람마다 elements(실사 정면 + 장면 옷 그림) · @Element 줄 · 167 태그 여유 · 시작 그림 그대로
     """
     import base64 as _b64  # noqa: PLC0415
     import traceback as _tb  # noqa: PLC0415
@@ -56641,10 +56650,11 @@ def check_vnew_part_likeness_169() -> None:
             prefix_id = genmod.vpoc_settings.FAL_ID_PREFIX
             wan_id = prefix_id + _RV152_ENDPOINT
             seed_find = genmod.vpoc_fal.find
+            kling_extra: dict = {}  # 작업 176: (pl-j) elements 를 받는 Kling 일 때만 caps 에 더한다
             env.set(genmod.vpoc_fal, "find", lambda m: {
                 "id": wan_id, "endpointId": _RV152_ENDPOINT, "category": "reference-to-video",
                 "caps": dict(_RV152_CAPS, seedField="seed")} if str(m) == wan_id else (
-                {"id": prefix_id + _PL169_KLING, "endpointId": _PL169_KLING, "caps": dict(_PL169_KLING_CAPS)}
+                {"id": prefix_id + _PL169_KLING, "endpointId": _PL169_KLING, "caps": dict(_PL169_KLING_CAPS, **kling_extra)}
                 if str(m) == prefix_id + _PL169_KLING else seed_find(m)))
             env.set(genmod.vpoc_settings, "FAL_REF_VIDEO_MAX_S", 4)
             env.set(genmod, "_cut_clip", lambda mp4, unit: {
@@ -56656,7 +56666,7 @@ def check_vnew_part_likeness_169() -> None:
             env.set(genmod, "_cut_first_frame", lambda mp4, start: b"FRAME@%.2f:" % float(start) + bytes(mp4))
             stills: list[str] = []
             env.set(genmod, "_seedream", lambda prompt, refs, *, size: stills.append(prompt) or b"STILL%d" % len(stills))
-            policy = {"since": 10 ** 9, "seedance": 0, "kling": False}
+            policy = {"since": 10 ** 9, "seedance": 0, "kling": False, "at": 4.0}  # 작업 176: at = 거절할 조각 시작 초
             base_fal = env._fal  # noqa: SLF001
 
             def start_of(req) -> float:
@@ -56673,8 +56683,8 @@ def check_vnew_part_likeness_169() -> None:
                         and env.requests.index(req) >= policy["since"]:
                     if is_kling(req) and policy["kling"]:
                         raise VpocError("fal.poll", "HTTP422", _PL169_LIKENESS, 502)
-                    if start_of(req) == 4.0:
-                        k = [r for r in env.requests[policy["since"]:] if start_of(r) == 4.0].index(req)
+                    if start_of(req) == policy["at"]:
+                        k = [r for r in env.requests[policy["since"]:] if start_of(r) == policy["at"]].index(req)
                         if k < policy["seedance"]:
                             raise VpocError("fal.poll", "HTTP422", _PL169_LIKENESS, 502)
                 return base_fal(method, url, payload, where=where)
@@ -56684,7 +56694,7 @@ def check_vnew_part_likeness_169() -> None:
             a, b = "에이", "비"
 
             def run(pid: str, seedance_rejects: int, kling_reject: bool = False, cuts: int = 8, seconds: int = 16,
-                    c4: str = "", c3_mode: str = "") -> dict:
+                    c4: str = "", c3_mode: str = "", at: float = 4.0) -> dict:
                 cut_ids = [f"c{n}" for n in range(1, cuts + 1)]
                 env.make_plan(pid, [{"id": "s1", "cutIds": cut_ids, "seconds": seconds}])
 
@@ -56727,7 +56737,7 @@ def check_vnew_part_likeness_169() -> None:
                 client.post(f"/api/vnew/p/{pid}/generate", json={"confirmUsd": genmod.estimate(env.plan(pid))["totalUsd"]})
                 g = env.drive(pid)
                 since, led, logs0, stills0 = len(env.requests), len(env.ledger), len(logs.records), len(stills)
-                policy.update(since=since, seedance=seedance_rejects, kling=kling_reject)
+                policy.update(since=since, seedance=seedance_rejects, kling=kling_reject, at=at)
                 client.post(f"/api/vnew/p/{pid}/generate/real", json={"confirmUsd": genmod.real_estimate(g)["usd"]})
                 g = env.drive(pid)
                 policy["since"] = 10 ** 9
@@ -56769,7 +56779,9 @@ def check_vnew_part_likeness_169() -> None:
                    "거절이 없는 조각 · 0b 다시 내기 프롬프트 = 거절 없는 실행과 같은 바이트")
 
             # ---- (pl-b) 조각 2 모든 Seedance 단계 거절 → 컷 3 · 4 만 Kling ----
-            rb = run("prj_pl_b", 4)
+            # 작업 176: Seedance 단계가 0 · 0b · 0b · 1 · 1r · 1b 여섯이 됐다 → "모든 Seedance 거절" = 6번(전 4번 — 4번이면 이제 1r 에서 통과).
+            all_seedance = 6
+            rb = run("prj_pl_b", all_seedance)
             p2 = rb["by_start"][4.0]
             kl = rb["kling"]
             kprompts = [prompt_of(r) for r in kl]
@@ -56789,11 +56801,13 @@ def check_vnew_part_likeness_169() -> None:
                     # 작업 171: c2(MCU · 중간) → c3(클로즈업) → c4(MCU) 는 샷이 바뀐다.
                     # 작업 172: 인서트가 아닌 컷의 샷 바뀜은 이음 결과 마지막 프레임에서 시작 → startImage prevFrame, Seedream 0장
                     # (전: still · 2장 — 139 시작 그림이 구도를 넓혀 test3 cut-12/13 이 넓은 낮 샷이 됐다)
-                    [1, 4, 1, 1], 2, [False, True, True, False], True, ["c3", "c4"], 0, ["prevFrame", "prevFrame"],
+                    # 작업 176: 조각 2 Seedance 6번(0 · 0b · 0b · 1 · 1r · 1b, 전 4번), seed = 0b · 1r 만(1b 는 참고가 달라 seed 없음),
+                    # 로그에 1r · 1b, likenessExtra 6(전 4), attempt 11(전 9 = Seedance 2번 더)
+                    [1, 6, 1, 1], 2, [False, True, True, False, True, False], True, ["c3", "c4"], 0, ["prevFrame", "prevFrame"],
                     ["shotChange", "shotChange"],
-                    [f"vnew.gen.likeness_part take=take1 part=2 step={s}" for s in ("0b", "0b", "1", "2")], 2, 4, 9,
+                    [f"vnew.gen.likeness_part take=take1 part=2 step={s}" for s in ("0b", "0b", "1", "1r", "1b", "2")], 2, 6, 11,
                     b"PARTS:5"],
-                   "조각 2: 0 · 0b · 0b · 1(정면만) 거절 → 컷 3 · 4 Kling(샷 바뀜 = 이음 결과 마지막 프레임), 조각 1 다시 0, 조각 3 · 4 Seedance, 잇기 5조각")
+                   "조각 2: 0 · 0b · 0b · 1 · 1r · 1b 거절 → 컷 3 · 4 Kling(샷 바뀜 = 이음 결과 마지막 프레임), 조각 1 다시 0, 조각 3 · 4 Seedance, 잇기 5조각")
             krecs = [p for p in recs if p.get("kind") == "kling"]
             if len(krecs) == 2 and len(recs) == 6:
                 # 작업 172: c3 = 조각 1(c1 · c2) 결과 마지막 프레임, c4 = c3 결과 마지막 프레임(전: 키 없음 · 애니 첫 프레임 Seedream)
@@ -56838,7 +56852,7 @@ def check_vnew_part_likeness_169() -> None:
                                                         if ln.startswith("COSTUME: ")), "")[:240])
 
             # ---- (pl-f) 작업 171: c4 = c3 과 같은 샷(클로즈업 · 같은 잠금) → c4 는 c3 결과 마지막 프레임에서 시작(지금과 같음) ----
-            rf = run("prj_pl_f", 4, c4="same")
+            rf = run("prj_pl_f", all_seedance, c4="same")  # 작업 176: 모든 Seedance 거절 = 6번(전 4)
             kf = [p for p in rf["parts"] if p.get("kind") == "kling"]
             kfp = [prompt_of(r) for r in rf["kling"]]
             expect("pl-f", [rf["state"].get("status"), [p.get("cutId") for p in kf], [p.get("startImage") for p in kf],
@@ -56851,7 +56865,7 @@ def check_vnew_part_likeness_169() -> None:
                    "같은 클로즈업 · 같은 주인공 → prevFrame(c3 결과 마지막 프레임), c3 샷 바뀜도 prevFrame(조각 1), 시작 그림 0장")
 
             # ---- (pl-g) 작업 171: c4 = 인서트 → 시작 그림, 조각 3 이음 프레임 = 인서트가 아닌 c3 결과 ----
-            rg = run("prj_pl_g", 4, c4="insert")
+            rg = run("prj_pl_g", all_seedance, c4="insert")  # 작업 176: 모든 Seedance 거절 = 6번(전 4)
             kg = [p for p in rg["parts"] if p.get("kind") == "kling"]
             p3g = rg["by_start"][8.0][0] if rg["by_start"][8.0] else {"payload": {}}
             frames_g = [decode(u) for u in p3g["payload"].get("image_urls") or []]
@@ -56905,7 +56919,7 @@ def check_vnew_part_likeness_169() -> None:
             genmod._check_cut_still = lambda *args, **kw: checks_h.append(1) or dict(shot_bad)  # noqa: SLF001
             genmod.vnew_settings.VNEW_REAL_STILL_CHECK = True
             try:
-                rh = run("prj_pl_h", 4, c3_mode="insert")
+                rh = run("prj_pl_h", all_seedance, c3_mode="insert")  # 작업 176: 모든 Seedance 거절 = 6번(전 4)
             finally:
                 (genmod._cut_location_view, genmod._anime_frame_layout, genmod._check_cut_still,  # noqa: SLF001
                  genmod.vnew_settings.VNEW_REAL_STILL_CHECK) = saved_h
@@ -56928,13 +56942,121 @@ def check_vnew_part_likeness_169() -> None:
                             all(f"{a} wears " in s and f"{b} wears " in s for s in rh["stills"])],
                    [True, True], "인서트 시작 그림 글(첫 · 다시): 시간대 · 두 사람 장면 옷")
             # ---- (pl-c) Kling 컷도 거절 → 실패, 더 내지 않음 ----
-            rc = run("prj_pl_c", 4, kling_reject=True)
+            rc = run("prj_pl_c", all_seedance, kling_reject=True)  # 작업 176: 모든 Seedance 거절 = 6번(전 4)
             want = genmod.REAL_FALLBACK_FAIL.format(steps=" → ".join(genmod.REAL_PART_FALLBACK_TRIED))
             expect("pl-c", [rc["state"].get("status"), rc["state"].get("failureKind"), rc["state"].get("error"),
                             len(rc["by_start"][4.0]), len(rc["kling"]), len(rc["by_start"][8.0]),
                             lk_logs(rc)[-1:], max(int(p.get("likenessExtra") or 0) for p in rc["parts"])],
-                   ["failed", "likeness", want, 4, 1, 0, ["vnew.gen.likeness_part take=take1 part=2 step=failed"], 4],
-                   "Kling 컷 거절 → 칸 실패(시도한 단계 문구), 컷 4 · 조각 3 제출 0, 조각당 추가 ≤ 4")
+                   # 작업 176: 조각 2 Seedance 6번(전 4), 조각당 추가 상한 6(전 4 — 1r · 1b), 단계 문구에 1r · 1b 이름
+                   ["failed", "likeness", want, 6, 1, 0, ["vnew.gen.likeness_part take=take1 part=2 step=failed"], 6],
+                   "Kling 컷 거절 → 칸 실패(시도한 단계 문구), 컷 4 · 조각 3 제출 0, 조각당 추가 ≤ 6")
+
+            # ================= 작업 176: Kling 전 Seedance 1r · 1b, Kling 인물 참고 =================
+            cap = genmod.LIKENESS_PART_MAX_EXTRA
+            # ---- (pl-i) 조각 2: 0 · 0b · 0b · 1 · 1r 거절 → 1b(정면 + 조각 1 결과 마지막 프레임)에서 통과, Kling 0 ----
+            ri = run("prj_pl_i", 5)
+            p2i = ri["by_start"][4.0]
+            part2i = (ri["parts"] + [{}, {}])[1]
+            key1i = str((ri["parts"] or [{}])[0].get("outputKey"))
+            last_i = p2i[-1] if p2i else {"payload": {}}
+            frames_i = [decode(u) for u in last_i["payload"].get("image_urls") or []]
+            frames_1r = [decode(u) for u in p2i[4]["payload"].get("image_urls") or []] if len(p2i) > 4 else []
+            look_no = next((n for n, f in enumerate(frames_i, 1) if ("CLIP:" + key1i).encode() in f), 0)
+            expect("pl-i", [ri["state"].get("status"), [p.get("status") for p in ri["parts"]], len(p2i), len(ri["kling"]),
+                            [("seed" in r["payload"]) for r in p2i],
+                            p2i[4]["payload"].get("seed") not in {r["payload"].get("seed") for r in p2i[1:3]} if len(p2i) > 4 else None,
+                            part2i.get("likenessStep"), part2i.get("likenessExtra"), part2i.get("likenessFrameKey"),
+                            lk_logs(ri), bool(look_no), len(frames_i) == len(frames_1r),
+                            genmod.REAL_LIKENESS_FRAME_LOOK.format(no=look_no) in prompt_of(last_i),
+                            any("identity and look reference only" in prompt_of(r) for r in p2i[:-1]),
+                            len([c for c in ri["ledger"] if c.get("model") == _PL169_KLING]), ri["merged"]],
+                   ["completed", ["completed"] * 4, 6, 0, [False, True, True, False, True, False], True, "1b", 5, key1i,
+                    [f"vnew.gen.likeness_part take=take1 part=2 step={s}" for s in ("0b", "0b", "1", "1r", "1b")], True, True,
+                    True, False, 0, b"PARTS:4"],
+                   "조각 2: 1r(새 seed) 뒤 1b = 정면 + 조각 1 결과 마지막 프레임(신원 · 겉모습 참고 이름표)에서 통과, Kling 0")
+            if len(p2i) == 6:
+                # 1 · 1r 은 seed 만 다르고(같은 프롬프트), 1b 는 프레임 이름표만 다르다(같은 자리, 하드 컷이라 1r 은 겉모습 참고 이름표).
+                expect("pl-i", [prompt_of(p2i[3]) == prompt_of(p2i[4]),
+                                prompt_of(p2i[5]).replace(genmod.REAL_LIKENESS_FRAME_LOOK.format(no=look_no),
+                                                          genmod.VIBE_FRAME_LOOK_LEAD.format(no=look_no)) == prompt_of(p2i[4])],
+                       [True, True], "1r = 1 과 같은 프롬프트(seed 만), 1b = 이음 그림 이름표만 신원 · 겉모습 참고 글")
+            # 거절 없는 조각(1 · 3 · 4) 프롬프트 = 거절 없는 실행과 같은 바이트(no change to unflagged prompts)
+            expect("pl-i", [[prompt_of(r) for r in ri["by_start"][s]][:1] == [prompt_of(r) for r in base["by_start"][s]]
+                            for s in (0.0, 8.0, 12.0)], [True] * 3, "거절 없는 조각 프롬프트 = 기준 실행과 같은 바이트")
+            report.append("pl-i 1b frame lead: " + genmod.REAL_LIKENESS_FRAME_LOOK.format(no=look_no)[:200])
+
+            # ---- (pl-j) 조각 1 거절(앞 Seedance 결과 없음) → 1b 건너뛰고 1r 다음 바로 Kling ----
+            rj = run("prj_pl_j", 5, at=0.0)
+            p1j = rj["by_start"][0.0]
+            sup_j = next((p for p in rj["parts"] if p.get("replacedBy") == genmod.KLING_CUTS_REPLACED), {})
+            expect("pl-j", [rj["state"].get("status"), len(p1j), [p.get("cutId") for p in rj["parts"] if p.get("kind") == "kling"],
+                            lk_logs(rj), "likenessFrameKey" in sup_j, sup_j.get("likenessExtra"),
+                            [genmod._likeness_tried(sup_j, kling=True)][0]],  # noqa: SLF001
+                   ["completed", 5, ["c1", "c2"],
+                    [f"vnew.gen.likeness_part take=take1 part=1 step={s}" for s in ("0b", "0b", "1", "1r", "2")], False, 5,
+                    [n for n in genmod.REAL_PART_FALLBACK_TRIED if n != genmod.REAL_PART_FALLBACK_TRIED[4]]],
+                   "첫 조각: 받아들여진 Seedance 프레임이 없어 1b 를 건너뜀(단계 문구에도 없음)")
+
+            # ---- (pl-k) 상한: 상한을 4 로 낮추면 1r 다음(추가 5번째)에서 멈춘다 — 되돌아가지 않고 칸 실패 ----
+            env.set(genmod, "LIKENESS_PART_MAX_EXTRA", 4)
+            try:
+                rk = run("prj_pl_k", all_seedance)
+            finally:
+                env.set(genmod, "LIKENESS_PART_MAX_EXTRA", cap)
+            expect("pl-k", [cap, rk["state"].get("status"), len(rk["by_start"][4.0]), len(rk["kling"]),
+                            max(int(p.get("likenessExtra") or 0) for p in rk["parts"]),
+                            len(rc["by_start"][4.0]) <= 1 + cap,
+                            max(int(p.get("likenessExtra") or 0) for p in rc["parts"]) <= cap],
+                   [6, "failed", 5, 0, 4, True, True],
+                   "상한 6(0b 2 + 1 + 1r + 1b + Kling), 상한에 닿으면 실패(더 내지 않음), pl-c 추가 ≤ 상한")
+
+            # ---- (pl-l) i2v Kling(elements 없음): klingRefs none, 보이는 사람마다 한 줄(장면 옷 · 머리색), 손만 들어오는 사람 없음 ----
+            rec_b = [p for p in rb["parts"] if p.get("kind") == "kling"]
+            head_c3 = kprompts[0].split("\nSHOT: ", 1)[0] if kprompts else ""
+            expect("pl-l", [[p.get("klingRefs") for p in rec_b], ["elements" in r["payload"] for r in kl],
+                            bool(re.search(re.escape(rom_a) + r" \(black hair\): same face and hair in every frame, wearing "
+                                           r"black dress shirt", head_c3)),
+                            (rom_b + " (ash blonde hair): same face") in head_c3,
+                            [" kling_refs=none" in m for m in rb["logs"] if m.startswith("vnew.gen.real_cut_submit ")]],
+                   [["none", "none"], [False, False], True, False, [True, True]],
+                   "i2v: klingRefs none, c3 머리 묶음에 Ei 한 줄(장면 옷 · 머리색), 손만 들어오는 Bi 줄 없음")
+            report.append("pl-l c3 person line: " + next((ln for ln in head_c3.split("\n") if "same face and hair" in ln), "")[:240])
+
+            # ---- (pl-m) elements 를 받는 Kling: 보이는 사람마다 elements(실사 정면 + 165 장면 옷 그림), @Element 줄, 167 태그 여유 ----
+            costume_calls: list[bytes] = []
+            kling_extra["elementsField"] = "elements"
+            env.set(genmod.vnew_settings, "VNEW_REAL_COSTUME_REF", True)
+            env.set(genmod, "_seedream_costume", lambda prompt, front, *, size: costume_calls.append(front) or b"COSTUME:" + front)
+            try:
+                rm = run("prj_pl_m", all_seedance)
+            finally:
+                kling_extra.clear()
+                env.set(genmod.vnew_settings, "VNEW_REAL_COSTUME_REF", False)
+            km = rm["kling"]
+            km_recs = [p for p in rm["parts"] if p.get("kind") == "kling"]
+            els = [r["payload"].get("elements") or [] for r in km]
+            fronts = [[decode(e.get("frontal_image_url")) for e in row] for row in els]
+            costumes_m = [[[decode(u) for u in e.get("reference_image_urls") or []] for e in row] for row in els]
+            reserve = int(genmod.vnew_settings.PREVIZ_KLING_PROMPT_RESERVE)
+            tag_reserve = int(genmod.vnew_settings.PREVIZ_KLING_TAG_RESERVE)
+            expect("pl-m", [rm["state"].get("status"), len(km), [p.get("klingRefs") for p in km_recs], fronts[:1],
+                            all(f in (b"RF1", b"RF2") for row in fronts for f in row) and all(fronts),
+                            all(len(c) == 1 and c[0].startswith(b"COSTUME:RF") for row in costumes_m for c in row),
+                            [p.get("klingElements") for p in km_recs][:1],
+                            [("@Element1 is " + rom_a + " (black hair): keep exactly this face and hair, wearing ") in prompt_of(r)
+                             for r in km][:1],
+                            all(len(prompt_of(r).encode("utf-8")) <= 2500 - reserve - tag_reserve * len(row)
+                                for r, row in zip(km, els)),
+                            all(bool(r["payload"].get("start_image_url")) for r in km),
+                            [p.get("startImage") for p in km_recs],
+                            [" kling_refs=elements" in m for m in rm["logs"] if m.startswith("vnew.gen.real_cut_submit ")],
+                            len(costume_calls) <= 2, llm_calls],
+                   ["completed", 2, ["elements", "elements"], [[b"RF1"]], True, True, [["rf-ch1"]], [True], True, True,
+                    ["prevFrame", "prevFrame"], [True, True], True, []],
+                   "elements Kling: c3 = Ei 실사 정면 + 장면 옷 그림(손만 들어오는 Bi 없음), @Element1 줄, 프롬프트 ≤ 167 태그 여유 상한, "
+                   "172 시작 그림(prevFrame) 그대로, 장면 옷 그림은 회차 캐시(인물당 1번)")
+            report.append("pl-m c3 element line: " + next((ln for ln in prompt_of(km[0]).split("\n") if ln.startswith("@Element1")),
+                                                          "")[:240] if km else "pl-m: no kling")
 
             # ---- (pl-d) 통 테이크(나누지 않음) = 지금 사다리 ----
             env.set(genmod.vpoc_settings, "FAL_REF_VIDEO_MAX_S", 10)
@@ -56973,7 +57095,8 @@ def check_vnew_part_likeness_169() -> None:
     except Exception:  # noqa: BLE001
         bad.append("작업 169 검사 예외\n" + _tb.format_exc()[:3000])
 
-    missing = [g for g in ("pl-a", "pl-b", "pl-c", "pl-d", "pl-e", "pl-f", "pl-g", "pl-h") if g not in seen]
+    missing = [g for g in ("pl-a", "pl-b", "pl-c", "pl-d", "pl-e", "pl-f", "pl-g", "pl-h", "pl-i", "pl-j", "pl-k", "pl-l",
+                           "pl-m") if g not in seen]  # 작업 176: pl-i ~ pl-m
     if missing:
         bad.append(f"검사 묶음이 돌지 않았습니다: {missing}")
     if bad:
@@ -56982,7 +57105,9 @@ def check_vnew_part_likeness_169() -> None:
         ok("작업 169 (pl-a)조각 2 만 0b 다시(seed 만) · 조각 1 다시 0 (pl-b)모든 Seedance 거절 → 컷 3 · 4 만 Kling(샷이 바뀌어 시작 그림 · "
            "FRAMING · COSTUME) · 조각 3 · 4 Seedance (pl-c)Kling 거절 → 실패 · 더 내지 않음 (pl-d)통 테이크 사다리 그대로 "
            "(pl-e)남은 조각 superseded (pl-f)171 같은 샷 → 앞 프레임 (pl-g)171 인서트 → 시작 그림 · 이음 프레임은 인서트 앞 결과 "
-           "(pl-h)172 인서트 첫 조각 이음 그림 없음 · 시작 그림 shot 실패 → prevFrame")
+           "(pl-h)172 인서트 첫 조각 이음 그림 없음 · 시작 그림 shot 실패 → prevFrame "
+           "(pl-i)176 1r · 1b 에서 통과 · Kling 0 (pl-j)앞 결과 없으면 1b 건너뜀 (pl-k)상한 6 · 넘으면 실패 "
+           "(pl-l)i2v klingRefs none · 사람마다 한 줄 (pl-m)elements(정면 + 장면 옷)")
         for line in report:
             print(f"       169: {line}")
 

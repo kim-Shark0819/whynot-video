@@ -5112,9 +5112,10 @@ def _vibe_take_prompt(plan: dict, take: dict, *, real: bool, cast: list[dict], l
                       panel_nos: list[int] | None = None, caps: dict | None = None, soften: bool = False,
                       anchor: bool = False, no_text: bool = False, audit: dict | None = None, quiet: bool = False,
                       bases: dict | None = None, lines_fix: dict | None = None, framing: dict | None = None,
-                      hard_cut: bool = False) -> str:
+                      hard_cut: bool = False, frame_lead: str = "") -> str:
     """작업 159: video-vibecode 형식 통 테이크 프롬프트(참고 구현 _cuts_video_prompt · live_video_prompt).
     작업 172: hard_cut 이면 이음 그림(frame_no) 이름표 = VIBE_FRAME_LOOK_LEAD(겉모습 참고만), 아니면 VIBE_FRAME_LEAD 그대로.
+    작업 176: frame_lead("{no}" 자리 하나)를 주면 이음 그림 이름표 = 그 글(likeness 1b 만). 안 주면 지금 그대로.
 
     순서: 140 AI 고지 → 화풍(STYLE webtoon + 웹툰 기호 / live_action) → 인물별 "{handle}: {look} (keep exactly this look)." →
     컷 지시 단락(참고 원문) → "Setting (keep identical in every shot): …" → "Shot i (t0-t1s), size: " + who_in_shot + 연기
@@ -5431,7 +5432,7 @@ def _vibe_take_prompt(plan: dict, take: dict, *, real: bool, cast: list[dict], l
             elif member.get("sheetNo"):
                 sheets.append(int(member["sheetNo"]))
         if frame_no:
-            rows.append((frame_no, (VIBE_FRAME_LOOK_LEAD if hard_cut else VIBE_FRAME_LEAD).format(no=frame_no)))
+            rows.append((frame_no, (frame_lead or (VIBE_FRAME_LOOK_LEAD if hard_cut else VIBE_FRAME_LEAD)).format(no=frame_no)))
         if location_no:
             rows.append((location_no, VIBE_LOCATION_LEAD.format(no=location_no)
                          + (REAL_TAKE_NO_BRAND if real else "")))  # 작업 161: 실사 장소만 상표 금지
@@ -5599,6 +5600,9 @@ def _vibe_take_payload(owner: str, pid: str, plan: dict, take: dict, caps: dict,
               "bases": _base_outfits(actors, char_by_id)}
     if frame_no and anchor.get("hardCut"):
         kwargs["hard_cut"] = True  # 작업 172: 하드 컷 = 이음 그림은 겉모습 참고만
+    if frame_no and anchor.get("likenessFrame"):
+        # 작업 176: likeness 1b = 이음 그림 자리의 신원 · 겉모습 참고 프레임 이름표
+        kwargs["frame_lead"] = REAL_LIKENESS_FRAME_CONTINUE if anchor["likenessFrame"] == "continue" else REAL_LIKENESS_FRAME_LOOK
     lines_note: dict = {}
     if _rewrite_on(soften):
         # 작업 168 5단계: 그 조각 대사 LLM 1번(실패 → 대사 빼기). 기록은 제출 쪽이 조각·칸에 남긴다.
@@ -6230,12 +6234,27 @@ def _submit_take_parts(owner: str, pid: str, gen_id: str, index: int, variant: s
             continuity = {"take": take, "frame": frame, "frameKey": frame_key}
             if cut_reason == "shotChange":
                 continuity["hardCut"] = True
+            lk_raw = _part_likeness_step(old) if real and old else 0
+            if lk_raw == LIKENESS_STEP_1B and old.get("likenessFrameKey") and content_step < CONTENT_STEP_DROP_REFS:
+                # 작업 176: 1b = 정면 + 같은 테이크의 받아들여진 Seedance 결과 마지막 프레임(신원 · 겉모습 참고, 이음 프레임 자리).
+                # 이름표: 171/172 규칙으로 같은 샷이면 이어 가기, 아니면(하드 컷 · 인서트) 참고만.
+                look_src = {"status": "completed", "outputKey": str(old["likenessFrameKey"]),
+                            "seconds": float(old.get("likenessFrameSec") or 0), "cutIds": list(old.get("likenessFrameCuts") or [])}
+                look = _video_last_frame(look_src["outputKey"], look_src["seconds"])
+                if look:
+                    del frame
+                    frame, frame_key = look, look_src["outputKey"] + "#last"
+                    look_reason = _part_cut_reason(plan, part, look_src)
+                    continuity = {"take": take, "frame": frame, "frameKey": frame_key,
+                                  "likenessFrame": "continue" if look_reason == "continue" else "look"}
+                del look
             if part_endpoint != endpoint:
                 continuity.update(origMax=int(caps.get("imageListMax") or vpoc_fal.DEFAULT_IMAGE_LIST_MAX),
                                   origFrame=in_order and before is not None and cut_reason != "insert")
             no_text = bool(old) and _qc_no_text(old)  # 작업 156: 화면 글자 검사로 다시 만드는 조각
             part_fb = 1 if lk_step == 1 else step  # 작업 169: likeness 1단계 조각 = 인물당 정면 1장(130 1단계)
-            part_seed = old.get("seed") if old and lk_step == 0 and lk_retry and old.get("seed") is not None else None
+            part_seed = old.get("seed") if old and ((lk_step == 0 and lk_retry) or lk_raw == LIKENESS_STEP_1R) \
+                and old.get("seed") is not None else None  # 작업 176: 1r 도 seed 만 바꾼다
             with _RefTrace() as trace:
                 built = _take_payload(owner, pid, plan, sub, part_caps, variant="real", fallback_step=part_fb,
                                       soften=_soften_level(content_step), continuity=continuity, no_text=no_text) if real else _take_payload(
@@ -6279,9 +6298,11 @@ def _submit_take_parts(owner: str, pid: str, gen_id: str, index: int, variant: s
             if framed:
                 params["continuityFrame"] = True  # 작업 155
             if lk_step or lk_retry:
-                params["likenessStep"] = lk_step  # 작업 169
+                params["likenessStep"] = lk_raw or lk_step  # 작업 169 · 176: "1r" · "1b" 그대로
                 if part_seed is not None:
                     params["seed"] = part_seed
+                if continuity.get("likenessFrame") and framed:
+                    params["likenessFrame"] = continuity["likenessFrame"]  # 작업 176: 1b 프레임 이름표
             _log_attempt(owner, pid, gen_id, source="gen", mode="previz-take", variant=variant, cell_id=take_id, index=index,
                          attempt=attempt, run=run_n, endpoint=part_endpoint, params=params, refs=refs, video_keys=rec_keys,
                          result=result, prompt=prompt)
@@ -7899,15 +7920,27 @@ def _settle_take_charge(owner: str, pid: str, gen_id: str, state: dict) -> None:
 
 
 def _kling_cut_model() -> tuple[str, dict] | None:
-    """2단계 모델(endpoint, caps). fal 등록표에 있고 시작 그림(startImageField)을 받을 때만, 아니면 None(2단계 건너뜀)."""
+    """2단계 모델(endpoint, caps). fal 등록표에 있고 시작 그림(startImageField)을 받을 때만, 아니면 None(2단계 건너뜀).
+
+    작업 176: 설정 모델 caps 에 elementsField 가 있으면 그대로. 없으면 등록표의 다른 Kling(endpoint 에 kling-video)
+    image-to-video 중 elementsField · startImageField 가 있고 영상 입력이 없는(편집 모델이 아닌) 첫 모델. 그것도 없으면 지금처럼
+    설정 모델(i2v, 인물 참고 없음 — klingRefs "none"). 설정이 비면 None(2단계 끔)."""
     endpoint = str(vnew_settings.VNEW_TAKE_REAL_KLING_MODEL or "").strip()
     if not endpoint:
         return None
     item = vpoc_fal.find(vpoc_settings.FAL_ID_PREFIX + endpoint)
     caps = (item or {}).get("caps") or {}
-    if not item or not caps.get("startImageField") or caps.get("available") is False:
-        return None
-    return endpoint, caps
+    usable = bool(item) and bool(caps.get("startImageField")) and caps.get("available") is not False
+    if usable and caps.get("elementsField"):
+        return endpoint, caps
+    for other in vpoc_fal.registered():
+        other_id = str((other or {}).get("endpointId") or "")
+        other_caps = (other or {}).get("caps") or {}
+        if (other_id != endpoint and "kling-video" in other_id.lower() and other_caps.get("elementsField")
+                and other_caps.get("startImageField") and not other_caps.get("videoField")
+                and not other_caps.get("videoListField") and other_caps.get("available") is not False):
+            return other_id, other_caps
+    return (endpoint, caps) if usable else None
 
 
 def _kling_duration(caps: dict, seconds: float) -> int:
@@ -8824,23 +8857,74 @@ def _escalate_likeness(owner: str, pid: str, gen_id: str, index: int, claim: str
 # likenessExtra(추가 제출 수, 상한 LIKENESS_PART_MAX_EXTRA = 0b 2 + 1단계 1 + 2단계 1). 칸 attempt 는 드라이버가 선점마다 올린다
 # (Kling 컷은 컷마다 1번 선점·제출). Kling 컷이 또 거절이면 칸 실패(되돌아가지 않는다). 통 테이크(조각 없음)는 _escalate_likeness 그대로.
 LIKENESS_PART_RETRIES = 2
-LIKENESS_PART_MAX_EXTRA = 4
-LIKENESS_PART_FIELDS = ("likenessStep", "likenessRetry", "likenessExtra", "seed")
+# 작업 176: 0b 2 + 1단계 1 + 1r 1 + 1b 1 + 2단계 1 = 6(전 4 — 1r · 1b 두 단계가 늘었다).
+LIKENESS_PART_MAX_EXTRA = 6
+# 작업 176: likenessFrameKey · likenessFrameSec · likenessFrameCuts = 1b 신원 · 겉모습 참고 프레임(같은 테이크 Seedance 결과).
+LIKENESS_PART_FIELDS = ("likenessStep", "likenessRetry", "likenessExtra", "seed", "likenessFrameKey", "likenessFrameSec",
+                        "likenessFrameCuts")
+LIKENESS_STEP_1R = "1r"  # 작업 176: 1단계(정면만) 1번 더(새 seed)
+LIKENESS_STEP_1B = "1b"  # 작업 176: 정면 + 같은 테이크의 받아들여진 Seedance 결과 프레임(신원 · 겉모습 참고)
 PART_SUPERSEDED = "superseded"
 KLING_CUTS_REPLACED = "kling-cuts"
-REAL_PART_FALLBACK_TRIED = ("Seedance", "Seedance 다시", "Seedance 정면 1장", "컷 단위 Kling")
+REAL_PART_FALLBACK_TRIED = ("Seedance", "Seedance 다시", "Seedance 정면 1장", "Seedance 정면 다시", "Seedance 정면 + 앞 결과 프레임",
+                            "컷 단위 Kling")
+# 작업 176: 1b 프레임 이름표(겉모습 참고만 · 같은 샷이면 이어 가기). 1b 조각에만 쓴다(다른 프롬프트는 그대로).
+REAL_LIKENESS_FRAME_LOOK = ("@Image{no} is an earlier shot of this same scene, for identity and look reference only (same faces, "
+                            "hair, outfits, background and light). Shot 1 is a new framing; do not start on this image or keep "
+                            "its framing")
+REAL_LIKENESS_FRAME_CONTINUE = ("@Image{no} is the previous shot's last frame: same faces, hair, outfits, background and lighting; "
+                                "it is also the identity reference for these people; continue from it")
+
+
+def _part_likeness_step(part):
+    """작업 176: 조각 기록의 likenessStep 원래 값(0 · 1 · "1r" · "1b" · 2). 모르는 값은 0."""
+    value = (part if isinstance(part, dict) else {}).get("likenessStep")
+    if value in (LIKENESS_STEP_1R, LIKENESS_STEP_1B):
+        return value
+    try:
+        return max(0, int(value or 0))
+    except (TypeError, ValueError):
+        return 0
 
 
 def _part_likeness(part) -> tuple[int, int, int]:
-    """조각 기록의 (likenessStep, likenessRetry, likenessExtra). 없으면 (0, 0, 0)."""
+    """조각 기록의 (likenessStep, likenessRetry, likenessExtra). 없으면 (0, 0, 0). 작업 176: "1r" · "1b" 는 1(정면만 단계)."""
     part = part if isinstance(part, dict) else {}
-    out = []
-    for field in ("likenessStep", "likenessRetry", "likenessExtra"):
+    raw = _part_likeness_step(part)
+    out = [1 if raw in (LIKENESS_STEP_1R, LIKENESS_STEP_1B) else int(raw)]
+    for field in ("likenessRetry", "likenessExtra"):
         try:
             out.append(max(0, int(part.get(field) or 0)))
         except (TypeError, ValueError):
             out.append(0)
     return out[0], out[1], out[2]
+
+
+def _likeness_tried(part, *, kling: bool = False) -> list[str]:
+    """작업 176: 그 조각이 거친 단계 이름(REAL_PART_FALLBACK_TRIED 순서). kling = 컷 단위 Kling 까지 갔다."""
+    raw = _part_likeness_step(part)
+    _step, retry, _extra = _part_likeness(part)
+    rank = {0: 0, 1: 1, LIKENESS_STEP_1R: 2, LIKENESS_STEP_1B: 3, 2: 4}.get(raw, 0)
+    names = REAL_PART_FALLBACK_TRIED
+    out = [names[0]] + ([names[1]] if retry > 0 else [])
+    if rank >= 1 or kling:
+        out.append(names[2])
+    if rank >= 2 or kling:
+        out.append(names[3])
+    if rank == 3 or ((rank >= 4 or kling) and (part or {}).get("likenessFrameKey")):
+        out.append(names[4])
+    if rank >= 4 or kling:
+        out.append(names[5])
+    return out
+
+
+def _likeness_look_source(plan: dict, parts, part: dict) -> dict | None:
+    """작업 176: 1b 프레임을 뽑을 결과 — 같은 테이크에서 받아들여진(completed) Seedance 조각 결과(Kling 컷 · superseded · 이 조각 뺌)
+    중 171/172 이음 규칙(_continuity_source: 마지막 결과, 인서트로 끝나면 그 앞의 인서트가 아닌 결과). 없으면 None(1b 건너뜀)."""
+    no = part.get("no")
+    done = [p for p in parts or [] if isinstance(p, dict) and p.get("status") == "completed" and p.get("outputKey")
+            and p.get("kind") != "kling" and p.get("no") != no]
+    return _continuity_source(plan, done) if done else None
 
 
 def _used_parts(parts) -> list[dict]:
@@ -9025,33 +9109,47 @@ def _escalate_likeness_parts(owner: str, pid: str, gen_id: str, index: int, clai
         moves = []
         for part in rejected:
             step, retry, extra = _part_likeness(part)
-            tried = list(REAL_PART_FALLBACK_TRIED[:1 + (retry > 0) + (step >= 1) + (step >= 2)])
+            raw = _part_likeness_step(part)
+            tried = _likeness_tried(part)
+            look = None
             if part.get("kind") == "kling":
-                tried = list(REAL_PART_FALLBACK_TRIED)
+                origin = next((p for p in state.get("parts") or [] if isinstance(p, dict) and p.get("kind") != "kling"
+                               and p.get("no") == part.get("fromPart") and p.get("replacedBy") == KLING_CUTS_REPLACED), {})
+                tried = _likeness_tried(origin, kling=True)
                 nxt = None
             elif step == 0 and retry < LIKENESS_PART_RETRIES:
                 nxt = (0, retry + 1)
             elif step == 0:
                 nxt = (1, retry)
-            elif step == 1 and kling:
+            elif raw == 1:
+                nxt = (LIKENESS_STEP_1R, retry)  # 작업 176: 정면만 1번 더(새 seed)
+            elif raw == LIKENESS_STEP_1R:
+                look = _likeness_look_source(data, state.get("parts") or [], part)
+                nxt = (LIKENESS_STEP_1B, retry) if look else ((2, retry) if kling else None)  # 작업 176: 프레임 없으면 1b 건너뜀
+            elif raw == LIKENESS_STEP_1B and kling:
                 nxt = (2, retry)
             else:
                 nxt = None
             if nxt is None or extra + 1 > LIKENESS_PART_MAX_EXTRA:
-                box.update(fail=True, no=part.get("fromPart") or part.get("no"), step=step, tried=tried,
-                           noKling=step == 1 and not kling)
+                box.update(fail=True, no=part.get("fromPart") or part.get("no"), step=raw, tried=tried,
+                           noKling=step == 1 and not kling and part.get("kind") != "kling")
                 return
-            moves.append((part, nxt, extra + 1))
+            moves.append((part, nxt, extra + 1, look))
         if not moves:
             box["fail"] = True
             box["tried"] = [REAL_PART_FALLBACK_TRIED[0]]
             return
-        for part, (step, retry), extra in moves:
+        for part, (step, retry), extra, look in moves:
             part.update(likenessStep=step, likenessRetry=retry, likenessExtra=extra)
-            if step == 0:
-                part["seed"] = secrets.randbelow(2 ** 31 - 1) + 1  # 0b: 요청 seed 만 바꾼다
+            if step == 0 or step == LIKENESS_STEP_1R:
+                part["seed"] = secrets.randbelow(2 ** 31 - 1) + 1  # 0b · 1r: 요청 seed 만 바꾼다
             else:
                 part.pop("seed", None)
+            if look:
+                # 작업 176: 1b 신원 · 겉모습 참고 = 그 결과의 마지막 프레임(제출 때 읽는다)
+                part.update(likenessFrameKey=str(look.get("outputKey") or ""),
+                            likenessFrameSec=float(look.get("seconds") or 0),
+                            likenessFrameCuts=[str(c) for c in look.get("cutIds") or [] if c])
             if step == 2:
                 part["klingModel"] = kling[0]
             box["moves"].append((part.get("no"), "0b" if step == 0 else str(step), retry, extra))
@@ -9081,10 +9179,69 @@ REAL_CUT_FRAMING_LINE = "FRAMING (storyboard, keep exactly; this decides the sho
 REAL_CUT_COSTUME_LINE = "COSTUME: {locks}."
 REAL_CUT_FROM_PREV = ("The first frame is the previous shot's last frame: keep its place, light, people and outfits, and "
                       "move to the FRAMING above right away.")
+# 작업 176: 컷 단위 Kling 인물 참고. elements 를 받는 Kling 이면 보이는 인물마다 elements 1개(정면 = 실사 신원 정면 realFrontKey,
+# 참고 = 165 장면 옷 그림) + @Element 줄, 아니면(i2v 만) 사람마다 한 줄(장면 옷 · 머리색 단서). FRAMING 묶음(머리) 끝에 붙는다.
+REAL_CUT_ELEMENT_LINE = "{tag} is {name}{cue}: keep exactly this face and hair{wear}."
+REAL_CUT_PERSON_LINE = "{name}{cue}: same face and hair in every frame{wear}."
 
 
-def _kling_shot_lock(owner: str, plan: dict, ctx: dict, cut_id: str, seconds: float) -> str:
-    """Kling 컷 1개의 샷 고정 줄(FRAMING + COSTUME). _vibe_take_prompt(실사, 그 컷만)의 SHOT 앞부분과 같은 글. 못 만들면 ""."""
+def _kling_cut_refs(owner: str, pid: str, plan: dict, ctx: dict, cut_id: str, people: list[dict]) -> dict:
+    """작업 176: Kling 컷 인물 참고 {mode "elements"|"none", elements(제출 본문 항목), lines(FRAMING 묶음 줄), keys(기록용 키)}.
+    elements = caps.elementsField 가 있을 때 보이는 인물(people, _kling_shot_lock)마다 {frontal_image_url: 실사 정면,
+    reference_image_urls: [장면 옷 그림(165, 있으면)]}, 상한 PREVIZ_REAL_MAX_ELEMENTS. 정면을 못 읽은 인물 · i2v 는 사람마다 한 줄."""
+    caps = ctx.get("caps") or {}
+    elements: list[dict] = []
+    keys: list[dict] = []
+    lines: list[str] = []
+    placed: set[str] = set()
+
+    def uri(jpeg: bytes) -> str:
+        return "data:image/jpeg;base64," + base64.b64encode(_fit_ref(jpeg)).decode("ascii")
+
+    if caps.get("elementsField") and people:
+        swaps = _costume_refs(owner, pid, plan, [(p["name"], p["char"], p["look"]) for p in people],
+                              _cut_location(plan, cut_id), ctx.get("outfits") or {}, bases=ctx.get("bases"))
+        for person in people:
+            if len(elements) >= int(vnew_settings.PREVIZ_REAL_MAX_ELEMENTS or 0):
+                break
+            char = person.get("char") or {}
+            front_key = str(char.get("realFrontKey") or "") if person.get("look") != "anime" else ""
+            front = _load_jpeg(front_key) if front_key else None
+            if front is None:
+                continue
+            costume = swaps.get(person["name"])
+            elements.append({"frontal_image_url": uri(front), "reference_image_urls": [uri(costume)] if costume else []})
+            keys.append({"slot": f"element{len(elements)}", "key": front_key, "costumeRef": bool(costume)})
+            wear = f", wearing {person['costume']} (its second image shows these clothes)" if costume and person.get("costume") \
+                else (f", wearing {person['costume']}" if person.get("costume") else "")
+            lines.append(REAL_CUT_ELEMENT_LINE.format(tag=f"@Element{len(elements)}", name=person["roman"],
+                                                      cue=person.get("cue") or "", wear=wear))
+            placed.add(person["name"])
+            del front
+    for person in people or []:
+        if person["name"] in placed:
+            continue
+        wear = f", wearing {person['costume']}" if person.get("costume") else ""
+        lines.append(REAL_CUT_PERSON_LINE.format(name=person["roman"], cue=person.get("cue") or "", wear=wear))
+    return {"mode": "elements" if elements else "none", "elements": elements, "lines": lines, "keys": keys}
+
+
+def _kling_cut_prompt_max(ctx: dict, tags: int) -> int:
+    """작업 176: elements 가 있는 Kling 컷 프롬프트 상한 — 167 규칙(상한 − 기본 여유 − 태그당 여유 × 태그 수, 바닥 있음)과
+    지금 상한(ctx promptMax) 중 작은 값. 태그가 없으면 지금 상한 그대로."""
+    base = int(ctx.get("promptMax") or 0)
+    if tags <= 0:
+        return base
+    cap = int((ctx.get("caps") or {}).get("promptMaxLength") or vpoc_fal.DEFAULT_PROMPT_MAX)
+    room = max(int(vnew_settings.PREVIZ_KLING_PROMPT_FLOOR),
+               cap - int(vnew_settings.PREVIZ_KLING_PROMPT_RESERVE) - int(vnew_settings.PREVIZ_KLING_TAG_RESERVE) * int(tags))
+    return min(base, room) if base else room
+
+
+def _kling_shot_lock(owner: str, plan: dict, ctx: dict, cut_id: str, seconds: float, people: list | None = None) -> str:
+    """Kling 컷 1개의 샷 고정 줄(FRAMING + COSTUME). _vibe_take_prompt(실사, 그 컷만)의 SHOT 앞부분과 같은 글. 못 만들면 "".
+    작업 176: people(목록)을 주면 그 컷에 얼굴이 보이는 인물(샷 인물 중 손만 들어오는 사람 뺌)을
+    {name, roman, cue, costume, char, look} 로 담는다(인물 참고 elements · 사람마다 한 줄)."""
     take = ctx.get("take") if isinstance(ctx.get("take"), dict) else {"id": ctx.get("takeId"), "cutIds": [cut_id]}
     try:
         sub = _part_take(plan, take, {"cutIds": [cut_id], "seconds": float(seconds or 0)})
@@ -9092,6 +9249,7 @@ def _kling_shot_lock(owner: str, plan: dict, ctx: dict, cut_id: str, seconds: fl
         char_by_id = ctx.get("charById") or {}
         outfits = ctx.get("outfits") or {}
         cast = []
+        chars: dict = {}
         for actor in _segment_actors(plan, sub):
             name = str(actor.get("name") or "").strip()
             if not name:
@@ -9110,6 +9268,7 @@ def _kling_shot_lock(owner: str, plan: dict, ctx: dict, cut_id: str, seconds: fl
             cast.append({"name": name, "nameEn": _romanize_name(name) or name, "colorName": actor.get("colorName") or "grey",
                          "look": look, "appearance": appearance,
                          "costume": vnew_fx.strip_drawing_words(outfits.get(name) or ""), "refNos": []})
+            chars[name] = (char, look)  # 작업 176
         framing: dict = {}
         _vibe_take_prompt(plan, sub, real=True, cast=cast, quiet=True, bases=ctx.get("bases"), framing=framing)
         shot = (framing.get("shots") or {}).get(cut_id)
@@ -9133,6 +9292,17 @@ def _kling_shot_lock(owner: str, plan: dict, ctx: dict, cut_id: str, seconds: fl
         locks = [lock for lock in locks if lock]
         if locks:
             lines.append(REAL_CUT_COSTUME_LINE.format(locks="; ".join(locks)))
+        if people is not None:
+            # 작업 176: 얼굴이 보이는 인물(손만 들어오는 사람 뺌) — 신원 참고 · 사람마다 한 줄의 재료
+            hands = {str(o.get("name") or "") for o in _hands_only_owners(_conti_cut(plan, cut_id))}
+            for name in shot.get("names") or []:
+                if not name or name in hands or name not in chars:
+                    continue
+                roman = _romanize_name(name) or name
+                member = next((m for m in cast if m["name"] == name), {})
+                people.append({"name": name, "roman": roman, "cue": cues.get(roman, ""),
+                               "costume": str(costumes.get(name) or "").strip().rstrip(" ."),
+                               "char": chars[name][0], "look": chars[name][1], "appearance": member.get("appearance", "")})
         return "\n".join(lines)
     except Exception as exc:  # noqa: BLE001 — 고정 줄이 없어도 지금 프롬프트로 낸다
         log.warning("vnew.gen.kling_shot_lock_failed take=%s cut=%s err=%s", ctx.get("takeId"), cut_id, _msg(exc))
@@ -9427,9 +9597,16 @@ def _submit_real_cut(owner: str, pid: str, gen_id: str, plan: dict, ctx: dict, c
     ctx["stage"] = "still"
     duration = _kling_duration(caps, float(cut.get("seconds") or 0))
     # 작업 132: 실사 컷 프롬프트(그림체 real). 시작 그림(유료) 전에 만들고, "webtoon" 이 남으면 제출하지 않는다.
-    lock = _kling_shot_lock(owner, plan, ctx, cut_id, float(cut.get("seconds") or 0))  # 작업 169: 샷 고정
+    lock_people: list[dict] = []
+    lock = _kling_shot_lock(owner, plan, ctx, cut_id, float(cut.get("seconds") or 0), people=lock_people)  # 작업 169: 샷 고정
+    # 작업 176: 인물 참고(elements, 받는 Kling 일 때) · 사람마다 한 줄(i2v) — FRAMING 묶음 끝. 167 태그 여유만큼 상한을 낮춘다.
+    kling_refs = _kling_cut_refs(owner, pid, plan, ctx, cut_id, lock_people) if lock else {
+        "mode": "none", "elements": [], "lines": [], "keys": []}
+    if lock and kling_refs["lines"]:
+        lock = lock + "\n" + "\n".join(kling_refs["lines"])
+    cut_max = _kling_cut_prompt_max(ctx, len(kling_refs["elements"]))
     kling_prompt = _segment_prompt(plan, {"cutIds": [cut_id]}, first_segment=True, model=ctx["modelId"], real=True,
-                                   prompt_max=ctx["promptMax"], fix=fix, bases=ctx.get("bases"), lock=lock,
+                                   prompt_max=cut_max, fix=fix, bases=ctx.get("bases"), lock=lock,
                                    from_prev=from_prev)
     _assert_no_webtoon(kling_prompt)
     layout = still_check = None
@@ -9515,7 +9692,7 @@ def _submit_real_cut(owner: str, pid: str, gen_id: str, plan: dict, ctx: dict, c
                     still, start_key, from_prev = bytes(prev_frame), prev_key, True
                     still_check["used"] = "prevFrame"
                     kling_prompt = _segment_prompt(plan, {"cutIds": [cut_id]}, first_segment=True, model=ctx["modelId"],
-                                                   real=True, prompt_max=ctx["promptMax"], fix=fix, bases=ctx.get("bases"),
+                                                   real=True, prompt_max=cut_max, fix=fix, bases=ctx.get("bases"),
                                                    lock=lock, from_prev=True)
                     _assert_no_webtoon(kling_prompt)
                 del prev_frame
@@ -9527,8 +9704,11 @@ def _submit_real_cut(owner: str, pid: str, gen_id: str, plan: dict, ctx: dict, c
     still_key = _keep_cut_still(pid, out_prefix, still)  # 작업 131: ⑦ AI로 고치기가 같은 시작 그림으로 다시 낸다
     body = vpoc_fal.build_payload({**caps, "durations": [duration]}, prompt=kling_prompt,
                                   keyframe_jpeg_b64=base64.b64encode(still).decode("ascii"), duration_s=duration,
-                                  prompt_max=ctx["promptMax"])
+                                  prompt_max=cut_max)
     del still
+    if kling_refs["elements"]:
+        body[str(caps["elementsField"])] = kling_refs["elements"]  # 작업 176: 보이는 인물 신원 정면 + 장면 옷 그림
+    kling_refs["elements"] = []
     sent_prompt = str(body.get(caps.get("promptField") or "prompt") or "")
     result = _previz_request("POST", f"{vpoc_settings.FAL_QUEUE_URL}/{endpoint}", body)
     del body
@@ -9543,20 +9723,24 @@ def _submit_real_cut(owner: str, pid: str, gen_id: str, plan: dict, ctx: dict, c
                  cell_id=f"{take_id}#{cut_id}", index=int(ctx.get("index") or 0), attempt=attempt,
                  run=int((gen.get("realRun") or {}).get("n") or 0) or None, endpoint=endpoint,
                  params={"seconds": round(float(cut.get("seconds") or 0), 3), "duration": duration,
-                         "startImage": "prevFrame" if from_prev else "still"},
-                 refs=[{"slot": "startImage", "key": still_key}], video_keys=[str(cut.get("recordingKey") or "")],
+                         "startImage": "prevFrame" if from_prev else "still", "klingRefs": kling_refs["mode"]},
+                 refs=[{"slot": "startImage", "key": still_key}] + [dict(k) for k in kling_refs["keys"]], video_keys=[str(cut.get("recordingKey") or "")],
                  result={"invocationArn": arn, "outputPrefix": out_prefix}, prompt=sent_prompt)
     extra = f" layout={layout['shotSize']}" if layout else ""
     if still_check is not None:
         extra += f" still={','.join(still_check['items']) or 'ok'}" + (" still_retry=1" if still_check["retried"] else "")
     if lock:
         extra += " lock=1"  # 작업 169
+    extra += f" kling_refs={kling_refs['mode']}" + (f" elements={len(kling_refs['keys'])}" if kling_refs["keys"] else "")
     log.info("vnew.gen.real_cut_submit pid=%s take=%s cut=%s endpoint=%s duration=%d people=%d refs=%s frame=%s sheet=%s%s%s",
              pid, take_id, cut_id, endpoint, duration, len(people), refs_kind, source, sheet_view, " qa_retry=1" if tag else "",
              extra)
     record = {"cutId": cut_id, "seconds": round(float(cut.get("seconds") or 0), 3), "duration": duration, "takeAt": take_at,
               "status": "submitted", "invocationArn": arn, "outputPrefix": out_prefix, "outputKey": "", "error": "",
-              "promptEn": sent_prompt, "promptBytes": len(sent_prompt.encode("utf-8")), "stillKey": still_key}
+              "promptEn": sent_prompt, "promptBytes": len(sent_prompt.encode("utf-8")), "stillKey": still_key,
+              "klingRefs": kling_refs["mode"]}  # 작업 176
+    if kling_refs["keys"]:
+        record["klingElements"] = [k["key"] for k in kling_refs["keys"]]  # 작업 176: 인물 정면 키(장면 옷 그림은 메모리만)
     if from_prev:
         record.update(startImage="prevFrame", startKey=str(start_key or ""))  # 작업 169
     if layout:
