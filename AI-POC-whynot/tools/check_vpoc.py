@@ -48985,13 +48985,14 @@ def check_vnew_real_brief_137() -> None:
             if genmod._scene_outfit_text("black open-collar shirt") != "black open-collar shirt":  # noqa: SLF001
                 bad.append("(rb-f) 깨끗한 장면 옷이 바뀌었습니다")
             clipped = genmod._real_brief_text(f"{ra} adjusts his ivory-white dress shirt.", {a: raw})  # noqa: SLF001
-            if clipped != f"{a} wears Plain dark navy/black button-up dress shirt, collar open.":
+            # 작업 183 fix1: 문장 가운데 옷 첫 낱말 머리글자를 내린다(_wears) — "Plain" → "plain"
+            if clipped != f"{a} wears plain dark navy/black button-up dress shirt, collar open.":
                 bad.append(f"(rb-f) 지시서 옷 문장 정리가 다릅니다: {clipped!r}")
             plan = _fw_plan()
             plan["conti"]["cuts"][0]["characters"] = [{"name": a, "outfitEn": raw}, {"name": b, "outfitEn": "navy training top"}]
             still = genmod._cut_still_prompt(plan, {"cutId": "c1"}, [("blue", a, 2), ("red", b, 3)], True,  # noqa: SLF001
                                              source="anime", outfits={})
-            if f"{a} wears Plain dark navy/black button-up dress shirt, collar open; {b} wears navy training top." not in still \
+            if f"{a} wears plain dark navy/black button-up dress shirt, collar open; {b} wears navy training top." not in still \
                     or "Identified" in still:
                 bad.append(f"(rb-f) 시작 그림 OUTFITS 정리가 다릅니다: {still!r}")
             if llm_calls:
@@ -54058,7 +54059,8 @@ def check_vnew_real_costume_160() -> None:
             stills = {cid: genmod._cut_still_prompt(p3, {"cutId": cid}, [("blue", b, 2), ("orange", a, 3)], True,  # noqa: SLF001
                                                     source="anime", outfits={n: v["costumeEn"] for n, v in notes[k].items()})
                       for cid, k in (("cut-02", "k1"), ("cut-05", "k2"))}
-            expect("cs-a", {cid: [f"{b} wears {want[b]}" in p, f"{a} wears {want[a]}" in p, other[b] in p]
+            # 작업 183 fix1: OUTFITS 글 = _wears(옷 첫 낱말 머리글자 내림)
+            expect("cs-a", {cid: [genmod._wears(b, want[b]) in p, genmod._wears(a, want[a]) in p, other[b] in p]  # noqa: SLF001
                             for cid, p in stills.items()},
                    {"cut-02": [True, True, False], "cut-05": [True, True, False]}, "시작 그림 OUTFITS 도 같은 옷")
             # 다수결·동점·장소·콘티·수정
@@ -55782,7 +55784,8 @@ def check_vnew_costume_text_164() -> None:
         expect("cf-f", [f"{rb}: " in vibe_f and f"wearing {outfit_b}" in vibe_f, f"wearing {cbase.lower()}" in vibe_f.lower(),
                         genmod._costume_lock_tail(outfit_b) in lock_f,  # noqa: SLF001
                         f"(overrides the photo's clothing): {outfit_b}" in old_f, f"{b} wears {outfit_b}" in still_f,
-                        f"{a} wears {cbase}" in still_f, f"{b} wears {outfit_b}" in kling_f, "dark-sleeved" in vibe_f + old_f,
+                        genmod._wears(a, cbase) in still_f, f"{b} wears {outfit_b}" in kling_f,  # noqa: SLF001 — 183 fix1: _wears
+                        "dark-sleeved" in vibe_f + old_f,
                         edits_f == [genmod.REAL_COSTUME_REF_PROMPT.format(costume=outfit_b)],
                         genmod._plan_bases(pplan, {"c1": {"outfitEn": outfit_b}, "c2": {"outfitEn": outfit_a}})],  # noqa: SLF001
                [True, True, True, True, True, True, True, False, True, {b: outfit_b, a: outfit_a}],
@@ -56400,8 +56403,9 @@ def check_vnew_content_ladder_168() -> None:
                                                 quiet=True)
                 lines5[v] = next((ln for ln in text.split("\n") if ln.startswith("Shot 5 (")), "")
             head = f"Shot 5 (16-20s), {genmod.VIBE_INSERT_SIZE}{genmod.VIBE_INSERT_TAG}: "  # 작업 177: 인서트 꼬리표
+            # 작업 183: 인서트 손 첫 부름 뒤 look 줄 소매 단서(" (black track top sleeve)")가 붙는다 — 기대 글에 더했다.
             expect("cl-e", {v: [ln.startswith(head), f"Only {ra} appears" in ln, f"{ra}'s chest and hands only; {rb}'s right hand "
-                                "enters from off-frame" in ln] for v, ln in lines5.items()},
+                                "(black track top sleeve) enters from off-frame" in ln] for v, ln in lines5.items()},
                    {"real": [True, False, True], "anime": [True, False, True]}, "cut-11 인서트 줄: 몸 · 손만, 'Only X appears' 없음")
             grab = _copy.deepcopy(cut11)
             grab["characters"][1]["hands"] = {"right": "touch>other_hand"}
@@ -57289,8 +57293,10 @@ def check_vnew_shot_size_170() -> None:
                 line = lines[v][5]
                 itag = genmod.VIBE_INSERT_TAG  # 작업 177: 인서트 크기 절 바로 뒤 꼬리표가 붙어 기대 머리에 더했다
                 after = line.split(f"{insert}{itag}: ", 1)[-1]
+                # 작업 183: 두 손 주인 첫 부름 뒤 look 줄 소매 단서가 붙는다(인서트만) — 기대 머리에 더했다.
                 expect("ss-d", [line.startswith(f"Shot 6 (20-23s), {insert}{itag}: "),
-                                after.startswith(f"{ra}'s hand clamps around {rb}'s hand and wrist, yanking it toward himself. "),
+                                after.startswith(f"{ra}'s hand (dark navy dress shirt sleeve) clamps around {rb}'s hand "
+                                                 "(black track top sleeve) and wrist, yanking it toward himself. "),
                                 bool(re.search(r"\b(?:grabs|clamps|presses|holds)\b", after[:120])),
                                 f"{ra}'s hand enters from off-frame and shoots in from the left;" in after,
                                 after.count("clamps around")],
@@ -57313,8 +57319,9 @@ def check_vnew_shot_size_170() -> None:
                                                         f"{rb} only partly visible"),
                             frames["cut-05"].startswith(head + f"tight two-shot close-up of both faces, front view{tag}"),
                             # 작업 177: 인서트 cut-06 도 크기 뒤 꼬리표(VIBE_INSERT_TAG)가 붙는다(Seedance SHOT 과 같은 크기 글)
+                            # 작업 183: 이 ctx 는 옷이 없어(outfits {}) 소매 단서 = 콘티 소매 구절("in a black sleeve")만 — 여의준만
                             frames["cut-06"].startswith(head + f"{insert}{genmod.VIBE_INSERT_TAG}: {ra}'s hand clamps around "
-                                                        f"{rb}'s hand and wrist")],
+                                                        f"{rb}'s hand (black sleeve) and wrist")],
                    [True, True, True, True], "Kling FRAMING 크기 · 잠금(로마자 이름) · 인서트 앞 절")
 
             # ================= (ss-f) 해당 없는 컷 그대로 =================
@@ -57457,9 +57464,11 @@ def check_vnew_shot_start_171() -> None:
             finally:
                 genmod._segment_actors, genmod._real_look = saved  # noqa: SLF001
             ra, rb = genmod._romanize_name(_TC157_A), genmod._romanize_name(_TC157_B)  # noqa: SLF001
+            # 작업 183: 인서트 손 첫 부름 뒤 소매 단서 — 이 ctx 는 옷이 없어(outfits {}) 콘티 소매 구절("black sleeve")만, 여의준만
             expect("sc-d", [hangul_outside_quotes(prompt), "Beomgeonu (charcoal-black hair)" in prompt,
                             prompt.count("(charcoal-black hair)"), lock.split("\n")[0].split(": ", 1)[-1].startswith(
-                                f"{ra} (charcoal-black hair)'s hand clamps around {rb} (pale blonde hair)'s hand and wrist"),
+                                f"{ra} (charcoal-black hair)'s hand clamps around {rb} (pale blonde hair)'s hand (black sleeve) "
+                                "and wrist"),
                             "COSTUME: " not in lock or f"{_TC157_A} wears" not in lock,
                             lock_cu.count("(pale blonde hair)"), hangul_outside_quotes(lock_cu)],
                    [[], True, 1, True, True, 1, []],
@@ -57668,8 +57677,12 @@ def check_vnew_face_touch_173() -> None:
                     text = take_prompt(snap, take2, *p1, real, audit)
                     before = off(lambda: take_prompt(snap, take2, *p1, real))  # noqa: B023
                     s9, s10 = shot_of(text, 2), shot_of(text, 3)
+                    # 작업 183: cut-10 인서트 소매 단서 형(긴 · 짧은)은 조각 길이(173 켬 · 끔)를 따른다 → "cut-10 그대로"는 183 을 끈 글로 본다
+                    with _is183_off():
+                        s10 = shot_of(take_prompt(snap, take2, *p1, real), 3)
+                        s10_before = shot_of(off(lambda: take_prompt(snap, take2, *p1, real)), 3)  # noqa: B023
                     expect("ft-a", [touch_line.rstrip(".") in s9, bool(_FT173_HARD.search(s9)), f"{rb}'s neck" in s9,
-                                    s10 == shot_of(before, 3), "clamps around" in s10],
+                                    s10 == s10_before, "clamps around" in s10],
                            [True, False, False, True, True], f"{v} cut-09 Touch 줄 · 얼굴 쥐기 동사 없음, cut-10 손목 인서트 그대로")
                     expect("ft-d", [audit.get("fits"), len(text) <= 4000, touch_line.rstrip(".") in text], [True, True, True],
                            f"{v} 조각 cut-08–10 4,000자 안 · Touch 줄 남음")
@@ -57851,6 +57864,13 @@ def check_vnew_touch_kind_174() -> None:
                             expect("tk-a", [audit.get("fits"), len(text) <= 4000], [True, True],
                                    f"{v} 조각 {part['cutIds']} 167 예산 4,000자 안")
                             rows = [ln for ln in text.split("\n") if ln.startswith("Shot ")]
+                            if {"cut-10", "cut-11"} & set(part["cutIds"]):
+                                # 작업 183: 인서트 소매 단서는 check 183 이 본다 — "prod 173 글 + 꼬리표"는 183 을 끈 글로 잰다
+                                # fix1: 실사 cut-11 "여의준 wears Black …" → "Yeouijun wears black …" 도 183 이 바꾼 글이라 함께 끈다
+                                with _is183_off(fix1=True):
+                                    rows = [ln for ln in genmod._vibe_take_prompt(  # noqa: SLF001
+                                        snap, sub, real=v == "real", cast=cast_for(v == "real"), location_no=5,
+                                        quiet=True).split("\n") if ln.startswith("Shot ")]
                             old = [ln for ln in str(part.get("promptEn") or "").split("\n") if ln.startswith("Shot ")]
                             vline = next((ln for ln in text.split("\n") if ln.startswith("@Video1")), "")
                             for k, cid in enumerate(part["cutIds"]):
@@ -58132,7 +58152,8 @@ def check_vnew_kling_cut_prompt_177() -> None:
 
                     # ================= (kp-b) klingRefs none =================
                     n12, refs_n, max_n = build("cut-12", False)
-                    expect("kp-b", [refs_n["mode"], "\nCOSTUME: Yeouijun wears exactly Black long-sleeve" in n12,
+                    # 작업 183 fix1: COSTUME 고정 글도 옷 첫 낱말 머리글자를 내린다(_wears) — "Black" → "black"
+                    expect("kp-b", [refs_n["mode"], "\nCOSTUME: Yeouijun wears exactly black long-sleeve" in n12,
                                     "holds Yeouijun's hand just below the frame edge" in row(n12, "ACTION: "),
                                     row(n12, "DIALOGUE ("), "@Element" in n12,
                                     row(n12, "Beomgeonu (charcoal-black hair): same face and hair in every frame, wearing Dark"),
@@ -58649,8 +58670,11 @@ def check_vnew_sheet_sides_179() -> None:
                 s34 = shot_rows(part_text("take1", ["cut-03", "cut-04"], "anime"))
                 with _sr179_sides_off(genmod):
                     s34_off = shot_rows(part_text("take1", ["cut-03", "cut-04"], "anime"))
-                expect("sr-d", [_hashlib.sha256(_fc180_strip(genmod, part_text("take2", ["cut-10", "cut-11"], v)).encode()).hexdigest()
-                                for v in ("anime", "real")] + [s34[0] == s34_off[0], s34[1] == s34_off[1]],
+                # 작업 183: 인서트 소매 단서는 check 183 이 본다 — 179 인서트 sha 는 183 을 끈 글(fix1 이름 · 머리글자 포함)
+                with _is183_off(fix1=True):
+                    insert_sha = [_hashlib.sha256(_fc180_strip(genmod, part_text("take2", ["cut-10", "cut-11"], v)).encode())
+                                  .hexdigest() for v in ("anime", "real")]
+                expect("sr-d", insert_sha + [s34[0] == s34_off[0], s34[1] == s34_off[1]],
                        [_SR179_INSERT_SHA["anime"], _SR179_INSERT_SHA["real"], True, False],
                        "인서트 cut-10/11 sha 그대로 · cut-03(한 사람 + 손) 줄 그대로 · cut-04(두 사람) 줄만 바뀜")
 
@@ -59786,6 +59810,339 @@ def check_vnew_edit_jl_ui_182() -> None:
            "(jlu-c)정리 함수 · 부르는 곳 (jlu-d)타임라인 · 미리보기 근사 (jlu-e)CSS")
 
 
+# ---------------------------------------------------------------- 작업 183 — 손만 보이는 인서트의 손 주인마다 소매 단서(is-a~e)
+_IS183_SNAPSHOT = Path("C:/dev/ai/.claude-helpers/t3plan180.json")  # prod test3 gen g202611071125226169(180 뒤, 없으면 is-a · is-b 건너뜀)
+_IS183_CUE_A = "dark navy/black dress shirt sleeve"   # 범건우 look 줄 → _sleeve_cue
+_IS183_CUE_B = "black sweatshirt/track top sleeve"    # 여의준 look 줄 → _sleeve_cue
+
+
+@contextlib.contextmanager
+def _is183_off(fix1: bool = False):
+    """작업 183 을 끈다(검사용 — 183 전 글). 소매 단서를 붙이지 않고, 인서트 손 절의 콘티 소매 구절도 떼지 않는다.
+    fix1=True 면 fix1 도 끈다: "<이름> wears <옷>" = 장면 옷 키 이름(한글) · 옷 머리글자 그대로(prod 173 · 179 sha 비교용)."""
+    sys.path.insert(0, str(ROOT / "app"))
+    from src.vnew import generate as genmod  # noqa: PLC0415
+
+    saved = (genmod._insert_sleeve_cues, genmod._HAND_SLEEVE_PHRASE, genmod._wears, genmod._real_brief_text)  # noqa: SLF001
+    genmod._insert_sleeve_cues = lambda pieces, cues: (list(pieces), [])  # noqa: SLF001
+    genmod._HAND_SLEEVE_PHRASE = re.compile(r"(?!x)x")  # noqa: SLF001
+    if fix1:
+        brief = saved[3]
+        genmod._wears = lambda name, costume, how="wears": f"{name} {how} {str(costume or '').strip()}"  # noqa: SLF001
+        genmod._real_brief_text = lambda text, scene_outfits=None, *, display=None: brief(text, scene_outfits)  # noqa: SLF001
+    try:
+        yield
+    finally:
+        (genmod._insert_sleeve_cues, genmod._HAND_SLEEVE_PHRASE, genmod._wears,  # noqa: SLF001
+         genmod._real_brief_text) = saved  # noqa: SLF001
+
+
+def check_vnew_insert_sleeve_183() -> None:
+    """작업 183 — 손만 보이는 인서트 샷에서 손 · 팔이 보이는 사람마다 look 줄 소매 단서를 손 첫 부름에 한 번. 가짜, 유료 0.
+
+    (is-a) 스냅숏 t3plan180 애니 · 실사 조각(prod 모양 페이로드): cut-10 Shot 1 · cut-11 Shot 2 = 두 손 주인 모두 단서 1번, 콘티
+           "in a black sleeve" 구절 없음("enters from off-frame, is seized and pulled"), 183 을 끈 글과 그 자리만 다름. cut-01~09 ·
+           12 · 13 Shot 줄 = 183 끈 글. 길이표: 조각마다 4,000자 안 · 157 짧은 형 단계 · fits 가 끈 글과 같음
+    (is-b) Kling 컷(elements): cut-10/11 FRAMING = 손 첫 부름에 단서(ACTION 은 같은 사람 단서를 다시 붙이지 않음 · 그대로), 상한 안,
+           cut-01~09 · 12 · 13 프롬프트 = 183 끈 글
+    (is-c) 짧은 형: 단서 때문에 짧은 형 단계가 늘면 가장 짧은 단서("dark navy shirt sleeve"), 늘지 않으면 긴 단서 · _sleeve_cue_short
+    (is-d) _insert_sleeve_cues: 첫 부름만 · 이미 단서 있으면 그대로("<이름>'s (… sleeve)" · "hand in a … cuff") · 이름 경계 ·
+           own hands 아님 · 옷 없으면 콘티 소매 구절. 얼굴이 보이는 샷(인서트 아님) 글 그대로
+    (is-e) _hands_only_clause: drop_sleeve 수동태 ", " · 능동 " and " · 끔(얼굴 샷)은 지금 글 · _hand_sleeve_phrase · LLM 0
+    fix1: 모든 조각 Shot 줄 · Kling 컷 프롬프트 따옴표 밖 한글 0(실사 cut-11 "Yeouijun wears black …"), _wears · display
+    """
+    import copy as _copy  # noqa: PLC0415
+    import traceback as _tb  # noqa: PLC0415
+
+    sys.path.insert(0, str(ROOT / "app"))
+    bad: list[str] = []
+    report: list[str] = []
+    seen: set[str] = set()
+
+    def expect(group: str, got, want, what: str) -> None:
+        seen.add(group)
+        if got != want:
+            bad.append(f"({group}) {what}\n      결과 {got!r}\n      기대 {want!r}")
+
+    def shot_rows(text: str) -> list[str]:
+        return [ln for ln in text.split("\n") if ln.startswith("Shot ")]
+
+    try:
+        from src.vnew import generate as genmod  # noqa: PLC0415
+
+        ident = lambda s: s  # noqa: E731
+        # ================= (is-e) 손 절 =================
+        seized = {"name": "Y", "actionEn": "Y's hand (off-frame), in a black sleeve, is seized and pulled; the fingers splay open."}
+        reach = {"name": "X", "actionEn": "X's hand (off-frame) in a dark navy shirt cuff reaches in and grabs Y's wrist."}
+        clause = genmod._hands_only_clause  # noqa: SLF001
+        expect("is-e", [clause(seized, ["X", "Y"], ident, drop_sleeve=True), clause(seized, ["X", "Y"], ident),
+                        clause(reach, ["X", "Y"], ident, drop_sleeve=True), clause(reach, ["X", "Y"], ident),
+                        genmod._hand_sleeve_phrase(seized), genmod._hand_sleeve_phrase(reach),  # noqa: SLF001
+                        genmod._hand_sleeve_phrase({"actionEn": "X's hand (off-frame) shoots in from the left."})],  # noqa: SLF001
+               ["Y's hand enters from off-frame, is seized and pulled; the fingers splay open",
+                "Y's hand enters from off-frame and in a black sleeve, is seized and pulled; the fingers splay open",
+                "X's hand enters from off-frame and reaches in and grabs Y's wrist",
+                "X's hand enters from off-frame and in a dark navy shirt cuff reaches in and grabs Y's wrist",
+                "black sleeve", "dark navy shirt cuff", ""],
+               "인서트(drop_sleeve) = 소매 구절 뗌 · 수동태는 ', ' · 능동은 ' and ', 얼굴 샷(끔) = 지금 글, 콘티 소매 구절 단서")
+        # fix1: "<이름> wears <옷>" 공통 글 — 옷 머리글자 내림(약어 그대로) · display 를 주면 표시 이름(로마자), 안 주면 키 이름
+        brief = genmod._real_brief_text  # noqa: SLF001
+        roman = genmod._romanize_name  # noqa: SLF001
+        expect("is-e", [genmod._wears("A", "Black long-sleeve top"), genmod._wears("A", "PE uniform"),  # noqa: SLF001
+                        genmod._wears("A", "Dark shirt", "wears exactly"),  # noqa: SLF001
+                        brief("Fingers spread, in a black sleeve.", {"여의준": "Black long-sleeve track top"}, display=roman),
+                        brief("Fingers spread, in a black sleeve.", {"여의준": "Black long-sleeve track top"})],
+               ["A wears black long-sleeve top", "A wears PE uniform", "A wears exactly dark shirt",
+                "Fingers spread. Yeouijun wears black long-sleeve track top.",
+                "Fingers spread. 여의준 wears black long-sleeve track top."],
+               "fix1: _wears 머리글자 내림 · _real_brief_text display = 로마자 이름(없으면 키 이름 그대로)")
+
+        # ================= (is-d) 단서 붙이기 =================
+        cues = genmod._insert_sleeve_cues  # noqa: SLF001
+        ab = [("A", "x sleeve"), ("B", "y sleeve")]
+        expect("is-d", [cues(["A's hand grabs B's hand and wrist.", "A's hand enters; B's hand enters"], ab),
+                        cues(["A's right hand covers B's fingers"], ab),
+                        cues(["A's (x sleeve) hand stays; A's hand moves"], ab[:1]),
+                        cues(["A's hand in a dark navy cuff grabs; A's hand"], ab[:1]),
+                        cues(["XA's hand; A's own hands stay lowered; A's chest"], ab[:1]),
+                        cues(["A's hand (pale hair) moves; A's palm"], ab[:1]),
+                        cues(["A's hand"], [("A", "")])],
+               [(["A's hand (x sleeve) grabs B's hand (y sleeve) and wrist.", "A's hand enters; B's hand enters"], ["A", "B"]),
+                (["A's right hand (x sleeve) covers B's fingers (y sleeve)"], ["A", "B"]),
+                (["A's (x sleeve) hand stays; A's hand moves"], []),
+                (["A's hand in a dark navy cuff grabs; A's hand"], []),
+                (["XA's hand; A's own hands stay lowered; A's chest"], []),
+                (["A's hand (pale hair) moves; A's palm (x sleeve)"], ["A"]),
+                (["A's hand"], [])],
+               "첫 부름만 · 이미 단서 있음 = 그대로 · 이름 경계 · own hands · 괄호 뒤는 다음 부름 · 빈 단서 = 그대로")
+
+        with _guard_real_llm() as llm_calls, _pin_vnew(VNEW_FX=True, VNEW_TAKE_PROMPT_MAX_CHARS=4000, VNEW_VIBE_PROMPT=True):
+            # 얼굴이 보이는 샷 = 그대로(170 test3 모양 테이크, 인서트 cut-06 만 바뀜)
+            a, b = _TC157_A, _TC157_B
+            flat = [{"name": b, "colorName": "blue", "frontNo": 2, "sheetNo": 1, "refNos": [1, 2], "voice": "", "look": "webtoon",
+                     "appearance": "tousled pale blonde hair", "costume": "Black long-sleeve track top"},
+                    {"name": a, "colorName": "orange", "frontNo": 4, "sheetNo": 3, "refNos": [3, 4], "voice": "", "look": "webtoon",
+                     "appearance": "short charcoal-black hair", "costume": "Dark navy long-sleeve button-up dress shirt"}]
+            plan, take = _ss170_plan()
+            with _pin_vnew(VNEW_TAKE_PROMPT_MAX_CHARS=9000):
+                on = shot_rows(genmod._vibe_take_prompt(plan, take, real=False, cast=flat, location_no=5, quiet=True))  # noqa: SLF001
+                with _is183_off():
+                    off = shot_rows(genmod._vibe_take_prompt(plan, take, real=False, cast=flat, location_no=5, quiet=True))  # noqa: SLF001
+            expect("is-d", [x == y for x, y in zip(on, off)] + [len(on) == len(off)], [True] * 5 + [False, True],
+                   "얼굴 샷(cut-01~05) 그대로, 인서트 cut-06 만 바뀜")
+
+            # ================= (is-c) 짧은 형 =================
+            short = genmod._sleeve_cue_short  # noqa: SLF001
+            expect("is-c", [short(_IS183_CUE_A), short(_IS183_CUE_B), short("black sleeve"), short(""),
+                            short("navy dress shirt cuff"), short("striped dress shirt sleeve")],
+                   ["dark navy shirt sleeve", "black top sleeve", "black sleeve", "", "navy shirt cuff", "shirt sleeve"],
+                   "가장 짧은 형 = 앞 색 낱말(갈래 첫 것) + 옷 끝 낱말 + sleeve/cuff")
+
+            if _IS183_SNAPSHOT.is_file() and _SR179_CHARS.is_file():
+                snap = json.loads(_IS183_SNAPSHOT.read_text(encoding="utf-8"))
+                chars = json.loads(_SR179_CHARS.read_text(encoding="utf-8"))
+                units = {u["id"]: u for u in snap["gen"]["units"]}
+                ids = {c["roleName"]: c["charId"] for c in snap["input"]["characters"]}
+                looks = {ids["범건우"]: _KP177_LOOK_A, ids["여의준"]: _KP177_LOOK_B}
+
+                def real_cast(owner, plan_, actors, char_by_id, resolved, cap, **_k):
+                    # prod 실사 이름표 모양: 인물마다 [시트, 장면 옷 그림](@Image1 · 2, 3 · 4)
+                    out = []
+                    for at, actor in enumerate(actors):
+                        ko = str(actor.get("name") or "").strip()
+                        out.append({"name": ko, "colorName": actor.get("colorName") or "grey", "frontNo": 2 * at + 2,
+                                    "refNos": [2 * at + 1, 2 * at + 2], "voice": "", "look": "real", "costume": "",
+                                    "appearance": _KP177_LOOK_A if ko == "범건우" else _KP177_LOOK_B,
+                                    "sheetNo": 2 * at + 1, "costumeNo": 2 * at + 2})
+                    return [b"R%d" % n for n in range(2 * len(actors))], out
+
+                names = ("_read_location_cast", "_resolve_cast", "_take_location_jpeg", "_segment_panel_jpegs", "_load_jpeg",
+                         "_fit_ref", "_real_take_cast", "_real_look", "_costume_refs")
+                saved = {n: getattr(genmod, n) for n in names}
+                saved_load = genmod.characters.load_char
+                genmod.characters.load_char = lambda owner, cid: (_copy.deepcopy(chars[cid]), None)
+                genmod._read_location_cast = lambda *_a, **_k: None  # noqa: SLF001
+                genmod._resolve_cast = lambda *_a, **_k: {}  # noqa: SLF001
+                genmod._take_location_jpeg = lambda plan_, take_, variant="webtoon": b"LOC"  # noqa: SLF001
+                genmod._segment_panel_jpegs = lambda owner, pid, plan_, seg, limit: [b"P1", b"P2", b"P3"][:limit]  # noqa: SLF001
+                genmod._load_jpeg = lambda key: b"F:" + str(key).encode()  # noqa: SLF001
+                genmod._fit_ref = lambda data: bytes(data)  # noqa: SLF001
+                genmod._real_take_cast = real_cast  # noqa: SLF001
+                genmod._real_look = lambda owner, cid: looks.get(cid, "")  # noqa: SLF001
+                genmod._costume_refs = lambda owner, pid, plan_, rows, loc, outfits, bases=None: {}  # noqa: SLF001
+                try:
+                    # ================= (is-a) 애니 · 실사 조각 =================
+                    def payload(u: dict, s: dict, cont: dict, variant: str, off: bool = False) -> dict:
+                        def run() -> dict:
+                            return genmod._vibe_take_payload("o", "p", snap, s, {"imageListMax": 9},  # noqa: SLF001
+                                                             variant=variant, fallback_step=0, soften=False,
+                                                             continuity=cont, no_text=False)
+                        if off:
+                            with _is183_off():
+                                return run()
+                        return run()
+
+                    table: list[tuple] = []
+                    rows_by: dict = {}
+                    for take_id in ("take1", "take2"):
+                        u = units[take_id]
+                        for variant in ("webtoon", "real"):
+                            for p in u[variant]["parts"]:
+                                if p.get("kind") == "kling" or p.get("status") == "superseded":
+                                    continue
+                                s = genmod._part_take(snap, u, {"cutIds": p["cutIds"], "seconds": p["seconds"]})  # noqa: SLF001
+                                prod = str(p.get("promptEn") or "")
+                                # prod 와 같은 이음 그림(이어 가기 · 172 하드 컷 · 없음) — prod 글의 이름표로 정한다
+                                cont = {"take": u, "frame": b"FRAME" if "previous shot's last frame" in prod else None,
+                                        "frameKey": "prev#last",
+                                        **({"hardCut": True} if "hard cut to a new framing; do not start" in prod else {})}
+                                v = "anime" if variant == "webtoon" else "real"
+                                x, y = payload(u, s, cont, variant, off=True), payload(u, s, cont, variant)
+                                with _pin_vnew(VNEW_TAKE_PROMPT_MAX_CHARS=9000):  # 짧은 형 없는 원형 길이
+                                    rx, ry = payload(u, s, cont, variant, off=True), payload(u, s, cont, variant)
+                                label = f"{v} {take_id} {','.join(p['cutIds'])}"
+                                rows_by[label] = (p["cutIds"], shot_rows(x["prompt"]), shot_rows(y["prompt"]))
+                                table.append((label, len(x["prompt"]), len(y["prompt"]), len(rx["prompt"]), len(ry["prompt"]),
+                                              x["audit"].get("compact"), y["audit"].get("compact"), x["audit"].get("fits"),
+                                              y["audit"].get("fits")))
+                    expect("is-a", [(r[0], r[2] <= 4000, r[5] == r[6], r[7], r[8]) for r in table],
+                           [(r[0], True, True, True, True) for r in table],
+                           "길이표: 조각마다 4,000자 안 · 157 짧은 형 단계 = 183 끈 글 · fits 그대로")
+                    changed = {label: [cids[k] for k, (x, y) in enumerate(zip(off_rows, on_rows)) if x != y]
+                               for label, (cids, off_rows, on_rows) in rows_by.items()}
+                    expect("is-a", {k: v for k, v in changed.items() if v},
+                           {"anime take2 cut-10,cut-11": ["cut-10", "cut-11"], "real take2 cut-10,cut-11": ["cut-10", "cut-11"]},
+                           "바뀐 Shot 줄 = cut-10 · cut-11 만(cut-01~09 · 12 · 13 = 183 끈 글)")
+                    # fix1: 모든 조각 Shot 줄(애니 · 실사) — 따옴표 대사 밖 한글 0, 실사 cut-11 옷 문장 = 로마자 이름 · 소문자 옷
+                    hangul = {label: re.findall(r"[^ ]*[\uac00-\ud7a3]+[^ ]*", re.sub(r'"[^"]*"', "", row))
+                              for label, (_c, _off, on_rows) in rows_by.items() for row in on_rows
+                              if re.search(r"[\uac00-\ud7a3]", re.sub(r'"[^"]*"', "", row))}
+                    worn = re.findall(r"[^.;]*\bwears\b[^.;]*", rows_by["real take2 cut-10,cut-11"][2][1])
+                    expect("is-a", [hangul, [w.strip()[:40] for w in worn]],
+                           [{}, ["Yeouijun wears black long-sleeve sweatsh"]],
+                           "fix1: 모든 Shot 줄 따옴표 밖 한글 0 · 실사 cut-11 'Yeouijun wears black long-sleeve …'")
+                    report.append("real cut-11 wears: " + (worn[0].strip()[:120] if worn else ""))
+                    lead_off = "Beomgeonu's hand clamps around Yeouijun's hand and wrist"
+                    lead_on = f"Beomgeonu's hand ({_IS183_CUE_A}) clamps around Yeouijun's hand ({_IS183_CUE_B}) and wrist"
+                    for v in ("anime", "real"):
+                        _cids, off_rows, on_rows = rows_by[f"{v} take2 cut-10,cut-11"]
+                        s1, s2 = on_rows
+                        expect("is-a", [s1 == off_rows[0].replace(lead_off, lead_on, 1).replace(
+                                            "Yeouijun's hand enters from off-frame and in a black sleeve, is seized",
+                                            "Yeouijun's hand enters from off-frame, is seized", 1),
+                                        s2 == off_rows[1].replace("Yeouijun's right hand enters",
+                                                                  f"Yeouijun's right hand ({_IS183_CUE_B}) enters", 1).replace(
+                                            "under Beomgeonu's hand and", f"under Beomgeonu's hand ({_IS183_CUE_A}) and", 1),
+                                        [s.count(_IS183_CUE_A) for s in on_rows], [s.count(_IS183_CUE_B) for s in on_rows],
+                                        "in a black sleeve" in s1, s1 != off_rows[0], s2 != off_rows[1]],
+                               [True, True, [1, 1], [1, 1], False, True, True],
+                               f"{v} cut-10 Shot 1 · cut-11 Shot 2 = 두 손 주인 단서 1번(손 첫 부름) · 콘티 소매 구절 없음, 그 자리만 다름")
+                        report.append(f"{v} cut-10 before: " + off_rows[0][:420])
+                        report.append(f"{v} cut-10 after:  " + s1[:440])
+                        report.append(f"{v} cut-11 before: " + off_rows[1][:380])
+                        report.append(f"{v} cut-11 after:  " + s2[:450])
+                    report += [f"{name}: 4,000 budget {a0} → {a1} ({a1 - a0:+d}); raw {r0} → {r1}; compact {c0} → {c1}; fits {f0} → {f1}"
+                               for name, a0, a1, r0, r1, c0, c1, f0, f1 in table]
+
+                    # ================= (is-c) 짧은 형(스냅숏 cut-10/11 애니) =================
+                    u2 = units["take2"]
+                    s1011 = genmod._part_take(snap, u2, {"cutIds": ["cut-10", "cut-11"], "seconds": 6.0})  # noqa: SLF001
+                    cont = {"take": u2, "frame": None, "frameKey": "prev#last"}
+                    raw_off = next(r for r in table if r[0] == "anime take2 cut-10,cut-11")[3]
+                    with _pin_vnew(VNEW_TAKE_PROMPT_MAX_CHARS=raw_off + 10):  # 끈 글은 짧은 형 없이 맞고, 긴 단서는 넘는다
+                        tight = payload(u2, s1011, cont, "webtoon")
+                        tight_off = payload(u2, s1011, cont, "webtoon", off=True)
+                    t_rows = shot_rows(tight["prompt"])
+                    expect("is-c", [tight_off["audit"].get("compact"), "(dark navy shirt sleeve)" in t_rows[0],
+                                    "(black top sleeve)" in t_rows[0], "(dark navy shirt sleeve)" in t_rows[1],
+                                    _IS183_CUE_A in tight["prompt"], "(dark navy shirt sleeve)" in "\n".join(rows_by[
+                                        "anime take2 cut-10,cut-11"][2])],
+                           [[], True, True, True, False, False],
+                           "단서 때문에 짧은 형 단계가 늘면 가장 짧은 단서(Shot 1 · 2), 4,000자(단계 그대로)에서는 긴 단서")
+                    report.append(f"short form at budget {raw_off + 10}: compact {tight['audit'].get('compact')} · "
+                                  + t_rows[0].split("): ", 1)[-1][:160])
+
+                    # ================= (is-b) Kling 컷 =================
+                    model = _HK178_O3
+
+                    def kling(cid: str, off: bool = False) -> tuple[str, int]:
+                        take = units["take1"] if cid in units["take1"]["cutIds"] else units["take2"]
+                        ctx = {"take": take, "takeId": take["id"], "overrides": {}, "outfits": dict(_KP177_OUTFITS),
+                               "bases": {}, "charById": {c: {"realFrontKey": "front-" + c} for c in ids.values()},
+                               "caps": {"promptField": "prompt", "promptMaxLength": 2500, "elementsField": "elements"},
+                               "promptMax": 2500, "modelId": model}
+
+                        def run() -> tuple[str, int]:
+                            lock, _refs, cut_max, layout = genmod._kling_cut_inputs("o", "p", snap, ctx, cid, 3.0)  # noqa: SLF001
+                            return genmod._segment_prompt(snap, {"cutIds": [cid]}, first_segment=True, model=model,  # noqa: SLF001
+                                                          real=True, prompt_max=cut_max, lock=lock, from_prev=True,
+                                                          kling=layout), cut_max
+                        if off:
+                            with _is183_off():
+                                return run()
+                        return run()
+
+                    def line(text: str, head: str) -> str:
+                        return next((ln for ln in text.split("\n") if ln.startswith(head)), "")
+
+                    same: list[str] = []
+                    kling_hangul: dict = {}
+                    for cid in [f"cut-{n:02d}" for n in range(1, 14)]:
+                        k_on, cap = kling(cid)
+                        k_off, _cap = kling(cid, off=True)
+                        body = re.sub(r'"[^"]*"', "", "\n".join(ln for ln in k_on.split("\n") if not ln.startswith("DIALOGUE")))
+                        if re.search(r"[\uac00-\ud7a3]", body):
+                            kling_hangul[cid] = re.findall(r"[^ ]*[\uac00-\ud7a3]+[^ ]*", body)  # fix1
+                        if cid not in ("cut-10", "cut-11"):
+                            if k_on == k_off:
+                                same.append(cid)
+                            continue
+                        fr_on, fr_off = line(k_on, "FRAMING ("), line(k_off, "FRAMING (")
+                        if cid == "cut-10":
+                            want = fr_off.replace(
+                                "Beomgeonu (charcoal-black hair)'s hand clamps around Yeouijun (pale blonde hair)'s hand and wrist",
+                                f"Beomgeonu (charcoal-black hair)'s hand ({_IS183_CUE_A}) clamps around Yeouijun (pale blonde "
+                                f"hair)'s hand ({_IS183_CUE_B}) and wrist", 1).replace(
+                                "enters from off-frame and in a black sleeve, is seized", "enters from off-frame, is seized", 1)
+                        else:
+                            want = fr_off.replace("Yeouijun (pale blonde hair)'s right hand enters",
+                                                  f"Yeouijun (pale blonde hair)'s right hand ({_IS183_CUE_B}) enters", 1).replace(
+                                "under Beomgeonu's hand and", f"under Beomgeonu's hand ({_IS183_CUE_A}) and", 1)
+                        act = line(k_on, "ACTION: ")
+                        expect("is-b", [fr_on == want, fr_on != fr_off, act == line(k_off, "ACTION: "),
+                                        k_on.count(_IS183_CUE_A), k_on.count(_IS183_CUE_B), len(k_on.encode("utf-8")) <= cap],
+                               [True, True, True, 1, 1, True],
+                               f"Kling {cid}: FRAMING 손 첫 부름 단서(두 사람 1번씩) · ACTION 그대로(단서 두 번 없음) · 상한 안")
+                        report.append(f"kling {cid} FRAMING: " + fr_on.split("frame): ", 1)[-1][:330])
+                        report.append(f"kling {cid} ACTION:  " + act[:200])
+                        report.append(f"kling {cid}: {len(k_off.encode())}B → {len(k_on.encode())}B (max {cap}); trimmed "
+                                      + ", ".join(x[:6] for x in k_off.split("\n") if x and x not in k_on.split("\n")))
+                    expect("is-b", same, [f"cut-{n:02d}" for n in range(1, 14) if n not in (10, 11)],
+                           "Kling cut-01~09 · 12 · 13 프롬프트 = 183 끈 글")
+                    expect("is-b", kling_hangul, {}, "fix1: Kling 컷 프롬프트(대사 줄 · 따옴표 밖) 한글 0")
+                finally:
+                    genmod.characters.load_char = saved_load
+                    for name, value in saved.items():
+                        setattr(genmod, name, value)
+            else:
+                seen.update({"is-a", "is-b"})
+                report.append(f"스냅숏 없음({_IS183_SNAPSHOT} · {_SR179_CHARS}) — is-a · is-b · is-c 스냅숏 건너뜀")
+            expect("is-e", llm_calls, [], "LLM 호출 0")
+    except Exception as exc:  # noqa: BLE001
+        bad.append("예외: " + repr(exc) + "\n" + _tb.format_exc()[:2500])
+
+    missing = [g for g in ("is-a", "is-b", "is-c", "is-d", "is-e") if g not in seen]
+    if missing:
+        bad.append(f"검사 묶음이 돌지 않았습니다: {missing}")
+    if bad:
+        fail("작업 183 인서트 소매 단서 검사 실패\n  " + "\n  ".join(bad))
+    else:
+        ok("작업 183 (is-a)스냅숏 cut-10/11 두 손 주인 소매 단서 · 나머지 Shot 줄 그대로 · 길이표(단계 그대로) (is-b)Kling FRAMING 단서 · "
+           "ACTION 그대로 · 나머지 컷 그대로 (is-c)짧은 형 (is-d)첫 부름 · 겹침 없음 · 얼굴 샷 그대로 (is-e)손 절 · LLM 0")
+    for line_ in report:
+        print(f"       183: {line_}")
+
+
 def main() -> int:
     print("== vpoc1 check ==")
     check_compileall()
@@ -59940,6 +60297,7 @@ def main() -> int:
     check_vnew_front_clothes_180()
     check_vnew_edit_jl_181()
     check_vnew_edit_jl_ui_182()
+    check_vnew_insert_sleeve_183()
     print()
     if warnings:
         print(f"경고 {len(warnings)}건")
