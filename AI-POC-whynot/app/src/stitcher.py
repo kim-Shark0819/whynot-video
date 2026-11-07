@@ -488,6 +488,19 @@ def _fit_pcm(path: str, size: int) -> None:
             remaining -= step
 
 
+def _edit_video_chain(start: float, speed: float, fps: int, width: int, height: int) -> str:
+    """edit_segment 의 영상 필터 사슬(trim → setpts(속도) → fps → 비율 맞춰 줄이기·여백 → 끝 복제). 작업 181: edit_dissolve 도 같은
+    사슬을 써서 디졸브 경계 프레임이 몸통 조각과 같은 프레임 격자에 놓인다(글자는 181 전 edit_segment 와 같다)."""
+    return (
+        f"trim=start={start:.3f},"
+        + (f"setpts=(PTS-STARTPTS)/{speed:g}," if speed != 1.0 else "setpts=PTS-STARTPTS,")
+        + f"fps={fps},"
+        f"scale={width}:{height}:force_original_aspect_ratio=decrease,"
+        f"pad={width}:{height}:(ow-iw)/2:(oh-ih)/2:color=black,setsar=1,format=yuv420p,"
+        "tpad=stop_mode=clone:stop_duration=1"
+    )
+
+
 def edit_segment(
     source_path: str,
     video_out: str,
@@ -504,6 +517,7 @@ def edit_segment(
     audio_source: str = "",
     audio_start_sec: float | None = None,
     audio_end_sec: float | None = None,
+    skip_frames: int = 0,
 ) -> dict:
     """편집 내보내기의 클립 한 개(지시서 110). 원본의 start_sec 부터 frames 장을 width×height·fps 로 다시 인코딩한다.
 
@@ -515,6 +529,8 @@ def edit_segment(
       1초가 2초가 되고 2 면 원본 2초가 1초가 된다. frames·PCM 길이 규칙은 그대로다. 1 이면 명령이 115 전과 같다.
     - audio_source(지시서 116 보완 10, 소리 없는 다시 만든 버전): 소리를 그 파일(두 번째 입력)의 audio_start_sec~audio_end_sec
       (없으면 끝까지)에서 가져온다. atempo·길이 맞춤은 같다. 비어 있으면 명령이 이 보완 전과 같다.
+    - skip_frames(작업 181, 디졸브 경계의 몸통 조각): 같은 영상 사슬의 앞 skip_frames 장을 건너뛰고 frames 장을 쓴다(그 장들은
+      edit_dissolve 가 섞는다). 영상만 받는다(audio_out 과 함께 주면 StitchError). 0 이면 명령이 181 전과 같다.
     반환 {"video": video_out, "audio": audio_out 또는 "", "frames": frames, "samples": 샘플 수}.
     """
     import math
@@ -551,18 +567,17 @@ def edit_segment(
             or (audio_end_sec is not None and (a_end is None or not math.isfinite(a_end) or a_end <= a_start))
         ):
             raise StitchError("편집 구간 값이 올바르지 않습니다.")
+    skip = skip_frames if isinstance(skip_frames, int) and not isinstance(skip_frames, bool) else -1
+    if skip < 0 or (skip and audio_out):
+        # 작업 181: 앞 프레임 건너뛰기는 영상만(디졸브 경계의 몸통 조각). 소리는 edit_audio 가 따로 뽑는다.
+        raise StitchError("편집 구간 값이 올바르지 않습니다.")
     seconds = frames / fps
     samples = frames * EDIT_AUDIO_RATE // fps
     binary = ffmpeg_path()
     retimed = speed != 1.0
-    video_filter = (
-        f"trim=start={start:.3f},"
-        + (f"setpts=(PTS-STARTPTS)/{speed:g}," if retimed else "setpts=PTS-STARTPTS,")
-        + f"fps={fps},"
-        f"scale={width}:{height}:force_original_aspect_ratio=decrease,"
-        f"pad={width}:{height}:(ow-iw)/2:(oh-ih)/2:color=black,setsar=1,format=yuv420p,"
-        "tpad=stop_mode=clone:stop_duration=1"
-    )
+    video_filter = _edit_video_chain(start, speed, fps, width, height)
+    if skip:
+        video_filter += f",trim=start_frame={skip},setpts=PTS-STARTPTS"
     command = [
         binary, "-y", "-hide_banner", "-loglevel", "error",
         *_threads_args(threads),
@@ -635,6 +650,253 @@ def edit_join(segment_paths: list[str], output_path: str, *, audio_path: str = "
         raise StitchError(f"편집 영상을 이어 붙이지 못했습니다: {detail}")
     logger.info("Edit join segments=%d audio=%s bytes=%s", len(segment_paths), bool(audio_path), os.path.getsize(output_path))
     return output_path
+
+
+# ---------------------------------------------------------------- 작업 181: 디졸브 · J/L 컷 소리
+#
+# 디졸브 경계(edit_dissolve): 나가는 클립의 마지막 frames 장과 들어오는 클립의 처음 frames 장을 xfade(fade)로 섞어 frames 장 한
+# 조각으로 다시 인코딩한다. 두 입력은 edit_segment 와 같은 영상 사슬(_edit_video_chain)이라 프레임 격자가 같고, 몸통 조각
+# (edit_segment skip_frames)과 코덱 설정이 같아 edit_join 의 스트림 복사 잇기가 그대로 된다. 한 프레임은 한 번만 인코딩된다.
+# 소리(edit_audio · edit_mix): 클립마다 소리 창(앞당김 + 화면 길이 + 이어 감)을 원시 PCM 으로 뽑고, 타임라인 위치에 놓아 구간마다
+# 직선 이득으로 섞는다(파일 단위, 겹치는 구간만 파이썬으로 계산하고 한 클립만 1.0 으로 들리는 구간은 바이트 복사).
+
+EDIT_MIX_CHUNK = 24000  # 섞기 한 번에 다루는 스테레오 샘플 수(0.5초)
+
+
+def edit_dissolve(
+    a_path: str,
+    b_path: str,
+    video_out: str,
+    *,
+    a_start_sec: float,
+    a_skip_frames: int,
+    b_start_sec: float,
+    frames: int,
+    fps: int,
+    width: int,
+    height: int,
+    a_speed: float = 1.0,
+    b_speed: float = 1.0,
+    threads: int | None = 1,
+) -> dict:
+    """디졸브 경계 조각(작업 181). A 사슬의 a_skip_frames 번째부터 frames 장과 B 사슬의 처음 frames 장을 xfade=transition=fade
+    (duration = frames/fps, offset 0)로 섞어 frames 장을 쓴다(소리 없음). 사슬은 edit_segment 와 같다(start·speed·크기·fps).
+
+    반환 {"video": video_out, "frames": frames}. 값이 틀리거나 ffmpeg 가 실패하면 StitchError.
+    """
+    import math
+
+    def speed_of(value) -> float:
+        return float(value) if isinstance(value, (int, float)) and not isinstance(value, bool) else 0.0
+
+    def int_of(value) -> int:
+        return value if isinstance(value, int) and not isinstance(value, bool) else -1
+
+    frames, skip = int_of(frames), int_of(a_skip_frames)
+    fps, width, height = int_of(fps), int_of(width), int_of(height)
+    a_speed, b_speed = speed_of(a_speed), speed_of(b_speed)
+    starts = [float(a_start_sec or 0.0), float(b_start_sec or 0.0)]
+    if (
+        not a_path or not os.path.exists(a_path) or not b_path or not os.path.exists(b_path)
+        or frames < 1 or skip < 0 or fps not in EDIT_FPS_CHOICES
+        or width < 2 or height < 2 or width % 2 or height % 2
+        or any(not math.isfinite(s) or s < 0 for s in starts)
+        or a_speed not in EDIT_SPEED_CHOICES or b_speed not in EDIT_SPEED_CHOICES
+    ):
+        raise StitchError("편집 구간 값이 올바르지 않습니다.")
+    binary = ffmpeg_path()
+    # trim 뒤에는 프레임 레이트 정보가 사라져 xfade 가 거절하므로 fps 를 한 번 더 둔다(이미 그 격자라 프레임은 그대로).
+    chain_a = (_edit_video_chain(starts[0], a_speed, fps, width, height)
+               + f",trim=start_frame={skip}:end_frame={skip + frames},setpts=PTS-STARTPTS,fps={fps}")
+    chain_b = (_edit_video_chain(starts[1], b_speed, fps, width, height)
+               + f",trim=end_frame={frames},setpts=PTS-STARTPTS,fps={fps}")
+    graph = (f"[0:v:0]{chain_a}[a];[1:v:0]{chain_b}[b];"
+             f"[a][b]xfade=transition=fade:duration={frames / fps:.6f}:offset=0,format=yuv420p[v]")
+    command = [
+        binary, "-y", "-hide_banner", "-loglevel", "error",
+        *_threads_args(threads),
+        "-i", a_path,
+        *_threads_args(threads),
+        "-i", b_path,
+        "-filter_complex", graph, "-map", "[v]", "-frames:v", str(frames), "-an",
+        "-c:v", "libx264", "-preset", "veryfast", "-crf", "20",
+        *_threads_args(threads),
+        "-pix_fmt", "yuv420p", video_out,
+    ]
+    result = _edit_run(command)
+    if result.returncode != 0 or not os.path.exists(video_out) or not os.path.getsize(video_out):
+        detail = result.stderr.decode("utf-8", errors="replace")[:300]
+        raise StitchError(f"디졸브를 만들지 못했습니다({frames}프레임): {detail}")
+    logger.info("Edit dissolve frames=%d fps=%d size=%dx%d skip=%d", frames, fps, width, height, skip)
+    return {"video": video_out, "frames": frames}
+
+
+def edit_audio(
+    source_path: str,
+    audio_out: str,
+    *,
+    start_sec: float,
+    samples: int,
+    speed: float = 1.0,
+    end_sec: float | None = None,
+    pad_front: int = 0,
+    threads: int | None = 1,
+) -> dict:
+    """클립 소리 창 하나(작업 181). 48kHz 스테레오 s16le 원시 PCM 을 정확히 samples 개(스테레오 샘플) 쓴다.
+
+    앞 pad_front 개는 무음(원본 0초보다 앞을 달라는 앞당김), 그 뒤는 원본 start_sec(~end_sec)에서 atempo=speed 로 뽑은 소리,
+    원본이 모자라면 끝은 무음. 소리 필터는 edit_segment 와 같다(atrim → asetpts → atempo). 반환 {"audio", "samples"}.
+    """
+    import math
+
+    samples = samples if isinstance(samples, int) and not isinstance(samples, bool) else -1
+    pad = pad_front if isinstance(pad_front, int) and not isinstance(pad_front, bool) else -1
+    speed = float(speed) if isinstance(speed, (int, float)) and not isinstance(speed, bool) else 0.0
+    start = float(start_sec) if isinstance(start_sec, (int, float)) and not isinstance(start_sec, bool) else -1.0
+    end = float(end_sec) if isinstance(end_sec, (int, float)) and not isinstance(end_sec, bool) else None
+    if (
+        not source_path or not os.path.exists(source_path) or not audio_out
+        or samples < 1 or pad < 0 or pad > samples or speed not in EDIT_SPEED_CHOICES
+        or not math.isfinite(start) or start < 0
+        or (end_sec is not None and (end is None or not math.isfinite(end) or end <= start))
+    ):
+        raise StitchError("편집 구간 값이 올바르지 않습니다.")
+    size = samples * EDIT_AUDIO_BYTES_PER_SAMPLE
+    body = audio_out + ".body"
+    if samples > pad:
+        trim = f"atrim=start={start:.3f}" + (f":end={end:.3f}" if end is not None else "")
+        audio_filter = trim + ",asetpts=PTS-STARTPTS" + (f",atempo={speed:g}" if speed != 1.0 else "")
+        command = [
+            ffmpeg_path(), "-y", "-hide_banner", "-loglevel", "error",
+            *_threads_args(threads),
+            "-i", source_path,
+            "-map", "0:a:0", "-vn", "-af", audio_filter,
+            "-t", f"{(samples - pad) / EDIT_AUDIO_RATE:.6f}", "-ac", "2", "-ar", str(EDIT_AUDIO_RATE),
+            "-c:a", "pcm_s16le", "-f", "s16le", body,
+        ]
+        result = _edit_run(command)
+        if result.returncode != 0 or not os.path.exists(body):
+            detail = result.stderr.decode("utf-8", errors="replace")[:300]
+            raise StitchError(f"클립 소리를 뽑지 못했습니다({start:.2f}s): {detail}")
+    try:
+        with open(audio_out, "wb") as out:
+            remaining = pad * EDIT_AUDIO_BYTES_PER_SAMPLE
+            zeros = b"\0" * min(remaining, 1 << 20)
+            while remaining > 0:
+                step = min(remaining, len(zeros))
+                out.write(zeros[:step])
+                remaining -= step
+            if os.path.exists(body):
+                limit = size - pad * EDIT_AUDIO_BYTES_PER_SAMPLE
+                with open(body, "rb") as src:
+                    while limit > 0:
+                        block = src.read(min(limit, 1 << 20))
+                        if not block:
+                            break
+                        out.write(block)
+                        limit -= len(block)
+    finally:
+        if os.path.exists(body):
+            os.unlink(body)
+    _fit_pcm(audio_out, size)
+    return {"audio": audio_out, "samples": samples}
+
+
+def _mix_envelope_ok(layer, total: int) -> bool:
+    if not isinstance(layer, dict) or not os.path.exists(str(layer.get("path") or "")):
+        return False
+    at = layer.get("at")
+    if not isinstance(at, int) or isinstance(at, bool):
+        return False
+    length = os.path.getsize(layer["path"]) // EDIT_AUDIO_BYTES_PER_SAMPLE
+    for seg in layer.get("envelope") or []:
+        if not isinstance(seg, (list, tuple)) or len(seg) != 4:
+            return False
+        t0, t1, g0, g1 = seg
+        if not (isinstance(t0, int) and isinstance(t1, int)) or t1 <= t0 or t0 < at or t1 > at + length:
+            return False
+        if not all(isinstance(g, (int, float)) and not isinstance(g, bool) and 0.0 <= g <= 1.0 for g in (g0, g1)):
+            return False
+    return True
+
+
+def edit_mix(layers: list[dict], output_path: str, *, samples: int) -> dict:
+    """타임라인 소리 섞기(작업 181). 결과는 정확히 samples 개(스테레오 샘플)의 48kHz s16le 원시 PCM.
+
+    layers 항목 {"path": edit_audio 결과, "at": 그 파일 0번 샘플의 타임라인 위치(음수 가능), "envelope": [(t0, t1, g0, g1), …]}.
+    envelope 는 타임라인 샘플 [t0, t1) 에서 이득을 g0 → g1 로 직선으로 바꾼다(그 밖은 0, 구간끼리 겹치지 않는다). 타임라인 [0, samples)
+    밖은 버린다. 구간 경계마다 나눠: 들리는 층이 없으면 무음, 하나가 1.0 그대로면 바이트 복사, 그 밖은 더해 s16 범위로 자른다
+    (넘친 값이 반대 부호로 감기지 않는다). 반환 {"audio": output_path, "samples": samples, "mixed": 계산한 샘플 수}.
+    """
+    import array
+    import sys
+
+    samples = samples if isinstance(samples, int) and not isinstance(samples, bool) else -1
+    if samples < 1 or not isinstance(layers, list) or any(not _mix_envelope_ok(layer, samples) for layer in layers):
+        raise StitchError("편집 소리 섞기 값이 올바르지 않습니다.")
+    width = EDIT_AUDIO_BYTES_PER_SAMPLE
+    segments = []  # (t0, t1, g0, g1, path, at)
+    points = {0, samples}
+    for layer in layers:
+        for t0, t1, g0, g1 in layer.get("envelope") or []:
+            if g0 == 0 and g1 == 0:
+                continue
+            segments.append((t0, t1, float(g0), float(g1), layer["path"], layer["at"]))
+            points.update(p for p in (t0, t1) if 0 < p < samples)
+    bounds = sorted(points)
+    swap = sys.byteorder == "big"
+    mixed = 0
+
+    def read(path: str, offset: int, count: int) -> bytes:
+        with open(path, "rb") as handle:
+            handle.seek(offset * width)
+            data = handle.read(count * width)
+        return data + b"\0" * (count * width - len(data))
+
+    with open(output_path, "wb") as out:
+        for a, b in zip(bounds, bounds[1:]):
+            active = [s for s in segments if s[0] <= a and s[1] >= b]
+            if not active:
+                remaining = (b - a) * width
+                zeros = b"\0" * min(remaining, 1 << 20)
+                while remaining > 0:
+                    step = min(remaining, len(zeros))
+                    out.write(zeros[:step])
+                    remaining -= step
+                continue
+            if len(active) == 1 and active[0][2] == 1.0 and active[0][3] == 1.0:
+                _t0, _t1, _g0, _g1, path, at = active[0]
+                position = a
+                while position < b:
+                    step = min(b - position, 1 << 18)
+                    out.write(read(path, position - at, step))
+                    position += step
+                continue
+            position = a
+            while position < b:
+                count = min(b - position, EDIT_MIX_CHUNK)
+                acc = None
+                for t0, t1, g0, g1, path, at in active:
+                    data = array.array("h")
+                    data.frombytes(read(path, position - at, count))
+                    if swap:
+                        data.byteswap()
+                    slope = (g1 - g0) / (t1 - t0)
+                    first = g0 + slope * (position - t0)
+                    if slope == 0.0:
+                        values = [v * first for v in data]
+                    else:
+                        values = [v * (first + slope * (i >> 1)) for i, v in enumerate(data)]
+                    acc = values if acc is None else [x + y for x, y in zip(acc, values)]
+                block = array.array("h", [32767 if v >= 32767 else (-32768 if v <= -32768 else int(round(v))) for v in acc])
+                if swap:
+                    block.byteswap()
+                out.write(block.tobytes())
+                mixed += count
+                position += count
+    _fit_pcm(output_path, samples * width)
+    logger.info("Edit mix layers=%d samples=%d mixed=%d", len(layers), samples, mixed)
+    return {"audio": output_path, "samples": samples, "mixed": mixed}
 
 
 def filmstrip_jpeg(

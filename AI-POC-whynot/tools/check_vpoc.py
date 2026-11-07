@@ -59095,6 +59095,679 @@ def check_vnew_front_clothes_180() -> None:
         print(f"       180: {line}")
 
 
+# ---------------------------------------------------------------- 작업 181 — ⑦ 편집 J/L 컷 소리 겹침 · 디졸브(jl-a~e)
+#
+# 서버 검증 · 저장(실제 라우트, 가짜 ffmpeg) · 해시 하위 호환 · 옛 문서 내보내기 명령(가짜 _run 으로 실제 stitcher 명령을 모은다) ·
+# 배치 순수 함수 · 섞기 자르기, 그리고 로컬 ffmpeg 실측(단색 화면 + 서로 다른 사인 소리 합성 클립). 네트워크 · 유료 호출 0.
+
+_JL181_VF = ("trim=start={s},setpts=PTS-STARTPTS,fps=24,scale=1280:720:force_original_aspect_ratio=decrease,"
+             "pad=1280:720:(ow-iw)/2:(oh-ih)/2:color=black,setsar=1,format=yuv420p,tpad=stop_mode=clone:stop_duration=1")
+# 181 전 run_export → edit_segment · edit_join 이 만들던 명령(옛 문서: 컷 1 0~3초 소리 켬, 컷 2 0.5~1.5초 소리 끔, 24fps 1280×720).
+# 임시 폴더 경로는 파일 이름만 남겨 비교한다.
+_JL181_OLD_COMMANDS = [
+    ["/fake/ffmpeg", "-y", "-hide_banner", "-loglevel", "error", "-threads", "1", "-i", "src-000.mp4", "-map", "0:v:0",
+     "-vf", _JL181_VF.format(s="0.000"), "-frames:v", "72", "-an", "-c:v", "libx264", "-preset", "veryfast", "-crf", "20",
+     "-threads", "1", "-pix_fmt", "yuv420p", "seg-000.mp4", "-map", "0:a:0", "-vn", "-af", "atrim=start=0.000,asetpts=PTS-STARTPTS",
+     "-t", "3.000000", "-ac", "2", "-ar", "48000", "-c:a", "pcm_s16le", "-f", "s16le", "seg-000.raw"],
+    ["/fake/ffmpeg", "-y", "-hide_banner", "-loglevel", "error", "-threads", "1", "-i", "src-001.mp4", "-map", "0:v:0",
+     "-vf", _JL181_VF.format(s="0.479"), "-frames:v", "24", "-an", "-c:v", "libx264", "-preset", "veryfast", "-crf", "20",
+     "-threads", "1", "-pix_fmt", "yuv420p", "seg-001.mp4"],
+    ["/fake/ffmpeg", "-y", "-hide_banner", "-loglevel", "error", "-f", "concat", "-safe", "0", "-i", "edit.mp4.txt",
+     "-f", "s16le", "-ar", "48000", "-ac", "2", "-i", "audio.raw", "-map", "0:v:0", "-map", "1:a:0", "-c:v", "copy", "-c:a", "aac",
+     "-b:a", "192k", "-movflags", "+faststart", "edit.mp4"],
+]
+# 181 전 run_export 가 옛 문서에서 _export_segment 에 넘기던 인자(같은 문서).
+_JL181_OLD_KWARGS = [
+    {"start_sec": 0.0, "frames": 72, "fps": 24, "width": 1280, "height": 720, "audio_out": "seg-000.raw",
+     "audio_from_source": True, "speed": 1.0},
+    {"start_sec": 0.5 - 0.5 / 24, "frames": 24, "fps": 24, "width": 1280, "height": 720, "audio_out": "seg-001.raw",
+     "audio_from_source": False, "speed": 1.0},
+]
+
+
+def _jl181_tone(samples, rate: int, t0: float, t1: float, freq: float) -> float:
+    """모노 s16 샘플의 [t0, t1) 구간에서 freq 성분 진폭(Hann 창 Goertzel, 사인 진폭 단위)."""
+    import math  # noqa: PLC0415
+
+    lo, hi = int(t0 * rate), int(t1 * rate)
+    part = samples[lo:hi]
+    n = len(part)
+    if n < 16:
+        return 0.0
+    coeff = 2 * math.cos(2 * math.pi * freq / rate)
+    s1 = s2 = 0.0
+    wsum = 0.0
+    for i, v in enumerate(part):
+        w = 0.5 - 0.5 * math.cos(2 * math.pi * i / (n - 1))
+        wsum += w
+        s0 = v * w + coeff * s1 - s2
+        s2, s1 = s1, s0
+    power = s1 * s1 + s2 * s2 - coeff * s1 * s2
+    return 2 * math.sqrt(max(power, 0.0)) / wsum
+
+
+def check_vnew_edit_jl_181() -> None:
+    """작업 181 — ⑦ 편집 J/L 컷(audioLead · audioTail)과 디졸브(transition) 서버 · 내보내기. 유료 · 네트워크 0.
+
+    (jl-a) 검증 · 저장(실제 라우트): 허용 값 저장 · 기본값 저장 안 함 · 소리 끈 클립 값 그대로 · GET 그대로 · totalSeconds 겹친 뒤 ·
+           400(첫 클립 앞당김 · 마지막 클립 이어 감 · 마지막 클립 전환 · 범위 · 단위 · 꼴 · 디졸브 45% · 속도 반영) · TooLong 겹친 뒤 · 기본 문서 새 필드 없음
+    (jl-b) 하위 호환: _doc_hash(새 필드 없음 = 181 전 공식, 0 · 컷 = 같음, 값 = 다름) · 옛 문서 내보내기 _export_segment 인자와
+           실제 stitcher 명령(가짜 _run)이 181 전과 같음 · 새 래퍼 호출 0
+    (jl-c) 순수 함수: _fx_plan(프레임 · 몸통 · 건너뛰기 · 디졸브 묶기) · _audio_window(앞당김 · 0초 자르기 · 대체 소리) · _audio_envelope ·
+           edit_mix 겹침 더하기 s16 자르기(감기지 않음) · 정확한 샘플 수
+    (jl-d) 로컬 ffmpeg 실측: 0.5초 디졸브(길이 = 합 − 0.5 ±1프레임 · 프레임 수 정확 · 가운데 프레임 섞임 · 소리 엇갈림),
+           J 컷 0.5초(클립 2 소리가 클립 1 화면 마지막 0.5초에), L 컷 0.5초(클립 1 소리가 클립 2 화면 처음 0.5초에), PCM 샘플 수 정확
+    (jl-e) 디졸브 · J/L 문서 명령: 몸통 조각 skip · xfade 경계 · 소리 창(가짜 _run)
+    """
+    sys.path.insert(0, str(ROOT / "app"))
+    import array as _array  # noqa: PLC0415
+    import hashlib as _hashlib  # noqa: PLC0415
+    import time  # noqa: PLC0415
+    import traceback as _tb  # noqa: PLC0415
+
+    bad: list[str] = []
+    seen: set[str] = set()
+    report: list[str] = []
+    logs = _LogCapture()
+    owner = _EDT_OWNER
+    ffmpeg_found = False
+
+    def expect(group: str, got, want, what: str) -> None:
+        seen.add(group)
+        if got != want:
+            bad.append(f"({group}) {what}\n      결과 {got!r}\n      기대 {want!r}")
+
+    def err_of(resp) -> tuple[int, str, str]:
+        body = (resp.get_json(silent=True) or {}).get("error") or {}
+        return resp.status_code, str(body.get("type") or ""), str(body.get("message") or "")
+
+    try:
+        with logs, _EdtEnv() as env, _pin_vnew(VNEW_EDIT=True):
+            edit, stitchmod = env.editmod, env.stitchmod
+            client = env.client()
+            orig_new = {name: getattr(edit, name) for name in ("_export_dissolve", "_export_audio", "_export_mix")}
+
+            def get(pid: str):
+                return client.get(f"/api/vnew/p/{pid}/edit")
+
+            def put(pid: str, body):
+                return client.put(f"/api/vnew/p/{pid}/edit", json=body)
+
+            def post(pid: str, body):
+                return client.post(f"/api/vnew/p/{pid}/edit/export", json=body)
+
+            # ================= (jl-a) 검증 · 저장 =================
+            pid = "prj_jl_save"
+            _edt_cut_plan(env, pid)
+            view0 = get(pid).get_json() or {}
+            k = {m["label"]: m["sourceKey"] for m in view0["materials"]}
+            default_keys = sorted({key for c in view0.get("defaultClips") or [] for key in c})
+            expect("jl-a", [default_keys, len(view0.get("defaultClips") or [])],
+                   [["id", "in", "label", "muted", "out", "sourceKey"], 3], "기본 문서(_default_clips) 클립에 새 필드 없음")
+
+            def clip(cid: str, label: str, a: float, b: float, **extra) -> dict:
+                return {"id": cid, "sourceKey": k[label], "in": a, "out": b, **extra}
+
+            body = {"etag": "", "variant": "webtoon", "clips": [
+                clip("a", "컷 1", 0, 3, audioLead=0, audioTail=0.5, transition={"type": "dissolve", "seconds": 0.5}),
+                clip("b", "컷 2", 0, 3, audioLead=0.25, audioTail=None, transition={"type": "cut"}),
+                clip("c", "컷 3", 0, 3, muted=True, audioLead=1.0, transition=None)]}
+            r1 = put(pid, body)
+            d1 = r1.get_json() or {}
+            stored = env.store.json[edit.doc_key(owner, pid, "g1")][0]["clips"]
+            v1 = get(pid).get_json() or {}
+            want_stored = [
+                {"id": "a", "sourceKey": k["컷 1"], "in": 0.0, "out": 3.0, "muted": False, "audioTail": 0.5,
+                 "transition": {"type": "dissolve", "seconds": 0.5}},
+                {"id": "b", "sourceKey": k["컷 2"], "in": 0.0, "out": 3.0, "muted": False, "audioLead": 0.25},
+                {"id": "c", "sourceKey": k["컷 3"], "in": 0.0, "out": 3.0, "muted": True, "audioLead": 1.0}]
+            expect("jl-a", [r1.status_code, stored, d1.get("totalSeconds"), v1["doc"]["clips"], v1.get("totalSeconds")],
+                   [200, want_stored, 8.5, want_stored, 8.5],
+                   "허용 값 저장(0 · null · 컷은 저장 안 함, 소리 끈 클립 앞당김은 받은 그대로) · GET 그대로 · totalSeconds = 9 − 디졸브 0.5")
+            etag = d1.get("etag") or ""
+
+            def reject(clips_body) -> tuple[int, str, str]:
+                return err_of(put(pid, {"etag": etag, "variant": "webtoon", "clips": clips_body}))
+
+            two = lambda first, second: [clip("a", "컷 1", 0, 3, **first), clip("b", "컷 2", 0, 3, **second)]  # noqa: E731
+            lead_msg = "번째 클립의 소리 먼저 시작(audioLead)은 0~2초 사이 0.05초 단위여야 합니다."
+            tail_msg = "번째 클립의 소리 이어 가기(audioTail)는 0~2초 사이 0.05초 단위여야 합니다."
+            tr_msg = "번째 클립의 전환(transition)은 컷 또는 디졸브(0.25·0.5·0.75·1초)여야 합니다."
+            position = [reject(two({"audioLead": 0.5}, {})), reject(two({}, {"audioTail": 0.5})),
+                        reject(two({}, {"transition": {"type": "dissolve", "seconds": 0.25}}))]
+            expect("jl-a", position,
+                   [(400, "BadClipAudioLead", "첫 클립에는 소리 먼저 시작(audioLead)을 둘 수 없습니다(앞 클립이 없습니다)."),
+                    (400, "BadClipAudioTail", "마지막 클립에는 소리 이어 가기(audioTail)를 둘 수 없습니다(뒤 클립이 없습니다)."),
+                    (400, "BadTransition", "마지막 클립에는 다음 클립으로 가는 전환(transition)을 둘 수 없습니다.")],
+                   "자리 규칙 400: 첫 클립 앞당김 · 마지막 클립 이어 감 · 마지막 클립 전환")
+            ranges = [reject(two({}, {"audioLead": v})) for v in (2.05, -0.05, 0.07, "0.5", True, [0.5], {"s": 1})]
+            ranges += [reject(two({"audioTail": v}, {})) for v in (2.5, -1, 0.333, "1", False)]
+            ranges += [reject(two({"transition": v}, {})) for v in (
+                {"type": "dissolve", "seconds": 0.3}, {"type": "dissolve"}, {"type": "dissolve", "seconds": "0.5"},
+                {"type": "dissolve", "seconds": True}, {"type": "wipe", "seconds": 0.5}, "dissolve", 0.5, [])]
+            expect("jl-a", ranges, [(400, "BadClipAudioLead", "2" + lead_msg)] * 7 + [(400, "BadClipAudioTail", "1" + tail_msg)] * 5
+                   + [(400, "BadTransition", "1" + tr_msg)] * 8,
+                   "범위 · 단위 · 꼴 400: 앞당김 7꼴 · 이어 감 5꼴 · 전환 8꼴(고정 문구, 몇 번째 클립인지)")
+            too_long_d = [reject([clip("a", "컷 1", 0, 1, transition={"type": "dissolve", "seconds": 0.5}), clip("b", "컷 2", 0, 3)]),
+                          reject([clip("a", "컷 1", 0, 3, transition={"type": "dissolve", "seconds": 0.5}), clip("b", "컷 2", 0, 2, speed=2)])]
+            ok_edges = []
+            for clips_ok in (
+                [clip("a", "컷 1", 0, 1.2, transition={"type": "dissolve", "seconds": 0.5}), clip("b", "컷 2", 0, 3)],
+                [clip("a", "컷 1", 0, 3, audioLead=0, audioTail=2.0), clip("b", "컷 2", 0, 3, audioLead=2.0, audioTail=0,
+                                                                          transition={"type": "cut"})]):
+                resp = put(pid, {"etag": etag, "variant": "webtoon", "clips": clips_ok})
+                ok_edges.append(resp)
+                etag = (resp.get_json() or {}).get("etag") or etag
+            expect("jl-a", [too_long_d, [r.status_code for r in ok_edges]],
+                   [[(400, "BadTransition", "1번째 클립의 디졸브(0.5초)는 두 클립 중 짧은 쪽 길이(1.00초)의 45%(0.45초) 이하여야 합니다."),
+                     (400, "BadTransition", "1번째 클립의 디졸브(0.5초)는 두 클립 중 짧은 쪽 길이(1.00초)의 45%(0.45초) 이하여야 합니다.")],
+                    [200, 200]],
+                   "디졸브 45%: 1초 클립 0.5초 400 · 2초 @2× = 1초 400(속도 반영) · 1.2초 0.54 ≥ 0.5 통과, 첫 클립 앞당김 0 · 마지막 컷 · 2.0 통과")
+            env.set(edit, "MAX_TOTAL_S", 5.0)
+            fit = put(pid, {"etag": etag, "variant": "webtoon", "clips": [
+                clip("a", "컷 1", 0, 3, transition={"type": "dissolve", "seconds": 1.0}), clip("b", "컷 2", 0, 3)]})
+            etag = (fit.get_json() or {}).get("etag") or etag
+            over = reject([clip("a", "컷 1", 0, 3), clip("b", "컷 2", 0, 3)])
+            env.set(edit, "MAX_TOTAL_S", 300.0)
+            expect("jl-a", [fit.status_code, (fit.get_json() or {}).get("totalSeconds"), over[:2]], [200, 5.0, (400, "TooLong")],
+                   "MAX_TOTAL_S 는 겹친 뒤 길이: 3 + 3 − 디졸브 1 = 5 통과, 디졸브 없으면 6 > 5 TooLong")
+
+            # ================= (jl-b) 하위 호환 =================
+            base_clip = {"sourceKey": "k", "in": 0.0, "out": 1.0, "muted": False}
+            second = {"sourceKey": "k2", "in": 0.5, "out": 2.0, "muted": True, "speed": 0.5}
+
+            def old_hash(clips_list) -> str:
+                return _hashlib.sha256(json.dumps({"variant": "webtoon", "clips": clips_list}, sort_keys=True,
+                                                  separators=(",", ":")).encode("utf-8")).hexdigest()
+
+            h_old = old_hash([base_clip, second])
+            h = edit._doc_hash  # noqa: SLF001
+            expect("jl-b", [h("webtoon", [base_clip, second]) == h_old,
+                            h("webtoon", [{**base_clip, "audioLead": 0, "audioTail": None, "transition": {"type": "cut"}},
+                                          {**second, "transition": None}]) == h_old,
+                            h("webtoon", [{**base_clip, "transition": {"type": "dissolve", "seconds": 0.3}}, second]) == h_old,
+                            h("webtoon", [{**base_clip, "transition": {"type": "dissolve", "seconds": 0.5}}, second]) != h_old,
+                            h("webtoon", [base_clip, {**second, "audioLead": 0.5}]) != h_old,
+                            h("webtoon", [{**base_clip, "audioTail": 0.5}, second]) != h_old,
+                            edit._total([base_clip, second]), edit._total([{**base_clip, "transition": {"type": "dissolve", "seconds": 0.25}},  # noqa: SLF001
+                                                                          {**second, "transition": {"type": "dissolve", "seconds": 1.0}}])],
+                   [True, True, True, True, True, True, 4.0, 3.75],
+                   "_doc_hash: 새 필드 없음 = 181 전 공식, 0 · null · 컷 · 허용 밖 값 = 같음, 디졸브 · 앞당김(소리 끈 클립도) · 이어 감 = 다름 · "
+                   "_total 은 마지막 클립 전환을 세지 않음")
+            pid_old = "prj_jl_old"
+            _edt_cut_plan(env, pid_old)
+            ko = {m["label"]: m["sourceKey"] for m in (get(pid_old).get_json() or {})["materials"]}
+            old_doc = {"version": 3, "variant": "webtoon", "updatedAt": "2026-11-01T00:00:00Z", "audio": [],
+                       "clips": [{"id": "c1", "sourceKey": ko["컷 1"], "in": 0.0, "out": 3.0, "muted": False, "label": "컷 1"},
+                                 {"id": "c2", "sourceKey": ko["컷 2"], "in": 0.5, "out": 1.5, "muted": True}]}
+            _FakeCharStore.write_json(env.store, edit.doc_key(owner, pid_old, "g1"), old_doc)
+            vo = get(pid_old).get_json() or {}
+            want_hash = old_hash([{"sourceKey": ko["컷 1"], "in": 0.0, "out": 3.0, "muted": False},
+                                  {"sourceKey": ko["컷 2"], "in": 0.5, "out": 1.5, "muted": True}])
+            new_calls: list[str] = []
+            for name in ("_export_dissolve", "_export_audio", "_export_mix"):
+                env.set(edit, name, (lambda tag: (lambda *a, **kw: new_calls.append(tag)))(name))
+            env.segments.clear()
+            env.inline = True
+            po = post(pid_old, {"etag": vo.get("etag")})
+            env.inline = False
+            done_old = env.export_state(pid_old).get("current") or {}
+            kw_keys = ("start_sec", "frames", "fps", "width", "height", "audio_out", "audio_from_source", "speed")
+            got_kwargs = [{key: (os.path.basename(s[key]) if key == "audio_out" else s[key]) for key in kw_keys} for s in env.segments]
+            extra_keys = sorted({key for s in env.segments for key in s} - set(kw_keys) - {"source", "content", "semHeld", "files"})
+            expect("jl-b", [vo.get("saved"), done_old.get("docHash") == want_hash, po.status_code, done_old.get("status"),
+                            got_kwargs, extra_keys, new_calls, done_old.get("seconds"), env.joins[-1]["count"] if env.joins else None],
+                   [True, True, 202, "done", _JL181_OLD_KWARGS, [], [], 4.0, 2],
+                   "옛 문서(새 필드 없음): 내보내기 docHash = 181 전 공식 · _export_segment 인자 181 전 그대로(skip_frames 없음) · "
+                   "새 래퍼(디졸브 · 소리 창 · 섞기) 호출 0 · 조각 2개")
+            # 옛 문서의 실제 stitcher 명령(가짜 _run): edit_segment 2번 + edit_join 1번이 181 전 명령과 같다.
+            commands: list[list[str]] = []
+            saved_fns = {name: getattr(stitchmod, name) for name in ("_run", "ffmpeg_path", "_edit_nice")}
+
+            def fake_run(command):
+                commands.append(list(command))
+                out_path = str(command[-1])
+                if out_path.endswith("edit.mp4"):
+                    frames_out = 72 + 24
+                    with open(out_path, "wb") as handle:
+                        handle.write(_edt_fake(frames_out / 24, w=1280, h=720, fps=24))
+                else:
+                    for index, arg in enumerate(command):
+                        if index and command[index - 1] != "-i" and str(arg).endswith((".mp4", ".raw", ".body")):
+                            with open(arg, "wb") as handle:
+                                handle.write(b"OUT")
+                return subprocess.CompletedProcess(command, 0, stdout=b"", stderr=b"")
+
+            def short(command: list[str]) -> list[str]:
+                return [os.path.basename(a) if (os.sep in a or "/" in a) and "vnew-edit-export-" in a else a for a in command]
+
+            ro = put(pid_old, {"etag": vo.get("etag"), "variant": "webtoon", "clips": old_doc["clips"]}).get_json() or {}
+            try:
+                stitchmod._run = fake_run  # noqa: SLF001
+                stitchmod.ffmpeg_path = lambda: "/fake/ffmpeg"
+                stitchmod._edit_nice = lambda: []  # noqa: SLF001
+                env.real, env.inline = True, True
+                post(pid_old, {"etag": ro.get("etag")})  # 앞 내보내기는 done 이라 같은 해시라도 새로 시작한다(n=2)
+            finally:
+                env.real, env.inline = False, False
+                for name, value in saved_fns.items():
+                    setattr(stitchmod, name, value)
+            got_cmds = [short(c) for c in commands]
+            expect("jl-b", [(env.export_state(pid_old).get("current") or {}).get("status"), got_cmds, new_calls],
+                   ["done", _JL181_OLD_COMMANDS, []],
+                   "옛 문서 실제 명령(가짜 _run): edit_segment 2번 · edit_join 1번이 181 전 명령 글자 그대로")
+
+            # ================= (jl-c) 순수 함수 =================
+            c3 = [{"in": 0, "out": 2.0, "transition": {"type": "dissolve", "seconds": 0.5}, "audioTail": 0.5},
+                  {"in": 0, "out": 2.0, "audioLead": 0.25, "transition": {"type": "dissolve", "seconds": 0.25}},
+                  {"in": 0, "out": 1.0, "audioLead": 2.0, "muted": True}]
+            frames_c = edit._clip_frames(c3, 24)  # noqa: SLF001
+            fx = edit._fx_plan(c3, frames_c, 24)  # noqa: SLF001
+            fx_none = edit._fx_plan([{"in": 0, "out": 1}, {"in": 0, "out": 1, "audioLead": 0.5, "muted": True}], [24, 24], 24)  # noqa: SLF001
+            fx_clamp = edit._fx_plan([{"in": 0, "out": 1, "transition": {"type": "dissolve", "seconds": 1.0}}, {"in": 0, "out": 1}],
+                                     [24, 24], 24)  # noqa: SLF001
+            expect("jl-c", [frames_c, fx, fx_none, fx_clamp["dissolve"], fx_clamp["body"], fx_clamp["total"]],
+                   [[48, 48, 24], {"dissolve": [12, 6, 0], "skip": [0, 12, 6], "body": [36, 30, 18], "start": [0, 36, 78], "total": 102,
+                                   "lead": [0, 12000, 0], "tail": [24000, 0, 0], "spf": 2000}, None, [11, 0], [13, 13], 37],
+                   "_fx_plan: 디졸브 프레임(0.5초 = 12 · 0.25초 = 6) · 화면 시작 당김 · 몸통 = 프레임 − 앞뒤 디졸브 · 합 = Σ − Σ디졸브 · "
+                   "소리 끈 클립 앞당김 무시(None = 181 전 경로) · 한 클립을 다 덮는 디졸브는 (프레임 − 1) // 2 로 묶음")
+            env_c = [edit._audio_envelope(fx, i) for i in range(3)]  # noqa: SLF001
+            g = edit.OFFSCREEN_GAIN
+            expect("jl-c", env_c,
+                   [(0, 96000 + 24000, [(0, 72000, 1.0, 1.0), (72000, 96000, 1.0, g), (96000, 120000, g, 0.0)]),
+                    (72000 - 12000, 96000 + 12000, [(60000, 72000, 0.0, g), (72000, 96000, g, 1.0), (96000, 156000, 1.0, 1.0),
+                                                    (156000, 168000, 1.0, 0.0)]),
+                    (156000, 48000, [(156000, 168000, 0.0, 1.0), (168000, 204000, 1.0, 1.0)])],
+                   "_audio_envelope: 화면 1.0 · 디졸브 엇갈림(이어 감 · 앞당김 쪽은 0.6 에서 이어짐) · 앞당김 0 → 0.6 · 이어 감 0.6 → 0")
+            windows = [edit._audio_window(1.0, 1.0, 24000, 120000, None), edit._audio_window(0.2, 1.0, 24000, 120000, None),  # noqa: SLF001
+                       edit._audio_window(0.2, 2.0, 24000, 120000, None),  # noqa: SLF001
+                       edit._audio_window(9.9, 1.0, 24000, 120000, (1.5, 4.0)), edit._audio_window(9.9, 0.5, 48000, 120000, (0.2, 4.0))]  # noqa: SLF001
+            expect("jl-c", windows,
+                   [{"start_sec": 0.5, "end_sec": None, "pad_front": 0, "samples": 120000},
+                    {"start_sec": 0.0, "end_sec": None, "pad_front": 14400, "samples": 120000},
+                    {"start_sec": 0.0, "end_sec": None, "pad_front": 19200, "samples": 120000},
+                    {"start_sec": 1.0, "end_sec": 4.0, "pad_front": 0, "samples": 120000},
+                    {"start_sec": 0.0, "end_sec": 4.0, "pad_front": 28800, "samples": 120000}],
+                   "_audio_window: 시작 − 앞당김 × 속도 · 0초 앞은 자르고 앞을 무음으로(타임라인 샘플) · 대체 소리는 alt 시작 · 끝 기준")
+            mdir = tempfile.mkdtemp(prefix="jl-c-")
+            try:
+                loud = os.path.join(mdir, "loud.raw")
+                quiet = os.path.join(mdir, "quiet.raw")
+                with open(loud, "wb") as handle:
+                    handle.write(_array.array("h", [30000, -30000] * 1000).tobytes())
+                with open(quiet, "wb") as handle:
+                    handle.write(_array.array("h", [10000, -10000] * 1000).tobytes())
+                mixed = os.path.join(mdir, "mix.raw")
+                result = stitchmod.edit_mix([{"path": loud, "at": 0, "envelope": [(0, 1000, 1.0, 1.0)]},
+                                             {"path": quiet, "at": 500, "envelope": [(500, 1500, 1.0, 1.0)]}], mixed, samples=1700)
+                with open(mixed, "rb") as handle:
+                    data = _array.array("h")
+                    data.frombytes(handle.read())
+                expect("jl-c", [len(data), data[0:2].tolist(), data[1000:1002].tolist(), data[2000:2002].tolist(),
+                                data[3000:3002].tolist(), data[3398:3400].tolist(), result["mixed"]],
+                       [3400, [30000, -30000], [32767, -32768], [10000, -10000], [0, 0], [0, 0], 500],
+                       "edit_mix: 겹침 더하기는 s16 끝에서 자름(30000 + 10000 → 32767, 감기지 않음) · 혼자 1.0 은 그대로 · 무음 · 샘플 수 정확")
+                bad_mix = []
+                for layers in ([{"path": loud, "at": 0, "envelope": [(0, 1500, 1.0, 1.0)]}],
+                               [{"path": loud, "at": 0, "envelope": [(0, 100, 1.5, 1.0)]}], [{"path": "nope", "at": 0, "envelope": []}]):
+                    try:
+                        stitchmod.edit_mix(layers, mixed, samples=100)
+                        bad_mix.append("통과")
+                    except stitchmod.StitchError as exc:
+                        bad_mix.append(str(exc))
+                expect("jl-c", bad_mix, ["편집 소리 섞기 값이 올바르지 않습니다."] * 3, "edit_mix 값 검사: 파일보다 긴 구간 · 이득 1 초과 · 없는 파일")
+            finally:
+                shutil.rmtree(mdir, ignore_errors=True)
+
+            # ================= (jl-e) 디졸브 · J/L 문서 명령(가짜 _run) =================
+            pid_e = "prj_jl_cmd"
+            _edt_cut_plan(env, pid_e)
+            ke = {m["label"]: m["sourceKey"] for m in (get(pid_e).get_json() or {})["materials"]}
+            se = put(pid_e, {"etag": "", "variant": "webtoon", "clips": [
+                {"id": "a", "sourceKey": ke["컷 1"], "in": 0, "out": 2, "transition": {"type": "dissolve", "seconds": 0.5}},
+                {"id": "b", "sourceKey": ke["컷 2"], "in": 0.5, "out": 2.5, "audioLead": 0.25, "audioTail": 0.5},
+                {"id": "c", "sourceKey": ke["컷 1"], "in": 1.0, "out": 3.0}]}).get_json() or {}
+            commands.clear()
+            env.set(edit, "_export_dissolve", orig_new["_export_dissolve"])
+            env.set(edit, "_export_audio", orig_new["_export_audio"])
+
+            def record_mix(layers, output_path, *, samples):
+                commands.append(["MIX", str(samples), str(len(layers))])
+                return orig_new["_export_mix"](layers, output_path, samples=samples)
+
+            env.set(edit, "_export_mix", record_mix)
+            try:
+                stitchmod._run = fake_run  # noqa: SLF001
+                stitchmod.ffmpeg_path = lambda: "/fake/ffmpeg"
+                stitchmod._edit_nice = lambda: []  # noqa: SLF001
+                env.real, env.inline = True, True
+                post(pid_e, {"etag": se.get("etag")})
+            finally:
+                env.real, env.inline = False, False
+                for name, value in saved_fns.items():
+                    setattr(stitchmod, name, value)
+            ce = [short(c) for c in commands]
+            vfs = [c[c.index("-vf") + 1] for c in ce if "-vf" in c]
+            graphs = [c[c.index("-filter_complex") + 1] for c in ce if "-filter_complex" in c]
+            afs = [(c[c.index("-af") + 1], c[c.index("-t") + 1], c[-1]) for c in ce if "-af" in c]
+            frames_v = [c[c.index("-frames:v") + 1] for c in ce if "-frames:v" in c]
+            expect("jl-e", [(env.export_state(pid_e).get("current") or {}).get("status"), len(vfs), [v.split(",")[-2:] for v in vfs],
+                            frames_v, len(graphs), afs, [c for c in ce if c[0] == "MIX"],
+                            ce[-1][ce[-1].index("-i") + 1] if ce and "-i" in ce[-1] else None],
+                   ["done", 3, [
+                       ["format=yuv420p", "tpad=stop_mode=clone:stop_duration=1"],
+                       ["trim=start_frame=12", "setpts=PTS-STARTPTS"],
+                       ["format=yuv420p", "tpad=stop_mode=clone:stop_duration=1"]],
+                    ["36", "12", "36", "48"], 1,
+                    [("atrim=start=0.000,asetpts=PTS-STARTPTS", "2.000000", "aud-000.raw.body"),
+                     ("atrim=start=0.229,asetpts=PTS-STARTPTS", "2.750000", "aud-001.raw.body"),
+                     ("atrim=start=0.979,asetpts=PTS-STARTPTS", "2.000000", "aud-002.raw.body")],
+                    [["MIX", str((48 + 48 + 48 - 12) * 2000), "3"]], "edit.mp4.txt"],
+                   "디졸브 · J/L 문서: 몸통 36 · 디졸브 12 · 몸통 36(앞 12장 건너뜀) · 몸통 48, xfade 경계 1개, 소리 창(앞당김 0.25초 = 원본 0.229, "
+                   "길이 2 + 0.25 + 0.5) · 섞기 샘플 = 132프레임 × 2000 · 잇기")
+            want_graph = ("[0:v:0]" + _JL181_VF.format(s="0.000") + ",trim=start_frame=36:end_frame=48,setpts=PTS-STARTPTS,fps=24[a];"
+                          "[1:v:0]" + _JL181_VF.format(s="0.479") + ",trim=end_frame=12,setpts=PTS-STARTPTS,fps=24[b];"
+                          "[a][b]xfade=transition=fade:duration=0.500000:offset=0,format=yuv420p[v]")
+            expect("jl-e", graphs, [want_graph], "디졸브 경계 그래프: 같은 영상 사슬 · A 마지막 12장 · B 처음 12장 · xfade fade 0.5초")
+
+            # ================= (jl-d) 로컬 ffmpeg 실측 =================
+            try:
+                ffmpeg = stitchmod.ffmpeg_path()
+            except stitchmod.StitchError:
+                ffmpeg = ""
+            if not ffmpeg:
+                warn("(jl-d) 로컬 ffmpeg 가 없어 디졸브 · J/L 실측을 건너뜁니다(가짜 ffmpeg 검사는 했습니다).")
+            else:
+                ffmpeg_found = True
+                for name in ("_export_dissolve", "_export_audio", "_export_mix"):
+                    env.set(edit, name, orig_new[name])
+                hdir = tempfile.mkdtemp(prefix="jl-d-")
+                pcm_sizes: list[int] = []
+                join_counts: list[int] = []
+                prev_join = edit._export_join  # noqa: SLF001
+
+                def record_join(segments_in, output_path, *, audio_path):
+                    pcm_sizes.append(os.path.getsize(audio_path) if audio_path else -1)
+                    join_counts.append(len(segments_in))
+                    return prev_join(segments_in, output_path, audio_path=audio_path)
+
+                env.set(edit, "_export_join", record_join)
+                try:
+                    def make(color: str, freq: int) -> bytes:
+                        path = os.path.join(hdir, f"{color}.mp4")
+                        result = subprocess.run([ffmpeg, "-y", "-hide_banner", "-loglevel", "error", "-f", "lavfi", "-i",
+                                                 f"color=c={color}:size=320x180:rate=24", "-f", "lavfi", "-i",
+                                                 f"sine=frequency={freq}:sample_rate=48000", "-t", "3", "-c:v", "libx264",
+                                                 "-pix_fmt", "yuv420p", "-c:a", "aac", "-ac", "1", path], capture_output=True)
+                        if result.returncode != 0:
+                            raise RuntimeError(result.stderr.decode("utf-8", "replace")[:300])
+                        with open(path, "rb") as handle:
+                            return handle.read()
+
+                    red, blue = make("red", 440), make("blue", 1000)
+                    pid_h = "prj_jl_real"
+                    _edt_cut_plan(env, pid_h, blobs={_edt_key(pid_h, "c1-webtoon-1"): red, _edt_key(pid_h, "c2-webtoon-1"): blue,
+                                                     _edt_key(pid_h, "c3-webtoon-1"): red})
+                    env.real, env.inline = True, True
+                    hk = {m["label"]: m["sourceKey"] for m in (get(pid_h).get_json() or {})["materials"]}
+                    cases = [
+                        ("dissolve", [{"id": "a", "sourceKey": hk["컷 1"], "in": 0, "out": 2, "transition": {"type": "dissolve", "seconds": 0.5}},
+                                      {"id": "b", "sourceKey": hk["컷 2"], "in": 0, "out": 2}], 3.5),
+                        ("J", [{"id": "a", "sourceKey": hk["컷 1"], "in": 0, "out": 2},
+                               {"id": "b", "sourceKey": hk["컷 2"], "in": 0.5, "out": 2.5, "audioLead": 0.5}], 4.0),
+                        ("L", [{"id": "a", "sourceKey": hk["컷 1"], "in": 0, "out": 2, "audioTail": 0.5},
+                               {"id": "b", "sourceKey": hk["컷 2"], "in": 0, "out": 2}], 4.0),
+                    ]
+                    etag_h = ""
+                    tone = {}
+                    for n, (name, clips_h, want_s) in enumerate(cases, 1):
+                        saved_h = put(pid_h, {"etag": etag_h, "variant": "webtoon", "clips": clips_h})
+                        data_h = saved_h.get_json() or {}
+                        etag_h = data_h.get("etag") or ""
+                        started_h = time.monotonic()
+                        post(pid_h, {"etag": etag_h})
+                        took = time.monotonic() - started_h
+                        current_h = env.export_state(pid_h).get("current") or {}
+                        out_path = os.path.join(hdir, f"out-{n}.mp4")
+                        with open(out_path, "wb") as handle:
+                            handle.write(env.store.blobs.get(edit.export_key(owner, pid_h, "g1", n), b""))
+                        info = stitchmod.probe_media(out_path)
+                        rgb = subprocess.run([ffmpeg, "-hide_banner", "-loglevel", "error", "-i", out_path, "-map", "0:v:0", "-vf",
+                                              "scale=16:9", "-f", "rawvideo", "-pix_fmt", "rgb24", "-"], capture_output=True).stdout
+                        per = 16 * 9 * 3
+                        count_v = len(rgb) // per
+                        means = []
+                        for f_i in range(count_v):
+                            px = rgb[f_i * per:(f_i + 1) * per]
+                            means.append((sum(px[0::3]) / 144, sum(px[2::3]) / 144))
+                        pcm = subprocess.run([ffmpeg, "-hide_banner", "-loglevel", "error", "-i", out_path, "-map", "0:a:0", "-ac", "1",
+                                              "-ar", "48000", "-f", "s16le", "-"], capture_output=True).stdout
+                        mono = _array.array("h")
+                        mono.frombytes(pcm[:len(pcm) // 2 * 2])
+                        if sys.byteorder == "big":
+                            mono.byteswap()
+                        want_frames = int(round(want_s * 24))
+                        expect("jl-d", [current_h.get("status"), current_h.get("error"), data_h.get("totalSeconds"),
+                                        abs(info["duration"] - want_s) <= 1 / 24 + 1e-3, count_v, pcm_sizes[-1] if pcm_sizes else None,
+                                        abs(len(mono) / 48000 - want_s) <= 1 / 24 + 1e-3],
+                               ["done", "", want_s, True, want_frames, want_frames * 2000 * 4, True],
+                               f"실측 {name}: 길이 {info['duration']}초(기대 {want_s} ±1프레임) · 영상 {count_v}프레임 정확 · "
+                               f"PCM {pcm_sizes[-1] if pcm_sizes else None}바이트 = 프레임 × 2000샘플 × 4 · 소리 {len(mono) / 48000:.3f}초")
+                        amp = lambda t0, t1, f: _jl181_tone(mono, 48000, t0, t1, f)  # noqa: E731
+                        ref = max(amp(0.2, 1.2, 440), 1.0)
+                        tone[name] = {"ref": round(ref), "took": round(took, 2)}
+                        if name == "dissolve":
+                            mid = means[42] if len(means) > 42 else (0, 0)
+                            blend = [m for m in means[37:47] if 12 < m[0] < 243 and 12 < m[1] < 243]
+                            levels = [amp(0.2, 1.3, 1000) / ref, amp(1.55, 1.95, 440) / ref, amp(1.55, 1.95, 1000) / ref,
+                                      amp(2.2, 3.3, 440) / ref, amp(2.2, 3.3, 1000) / ref]
+                            tone[name].update(mid=[round(v) for v in mid], levels=[round(v, 3) for v in levels])
+                            expect("jl-d", [means[10][0] > 200 and means[10][1] < 40, means[70][1] > 200 and means[70][0] < 40,
+                                            40 < mid[0] < 215 and 40 < mid[1] < 215, len(blend), join_counts[-1],
+                                            levels[0] < 0.02, levels[1] > 0.2, levels[2] > 0.2, levels[3] < 0.02, levels[4] > 0.8],
+                                   [True, True, True, 10, 3, True, True, True, True, True],
+                                   f"디졸브 실측: 프레임 10 빨강 · 70 파랑 · 가운데 42 = 섞임 {mid} · 37~46 열 장 모두 섞임 · 조각 3개(몸통 · 경계 · 몸통) · "
+                                   f"소리 엇갈림(앞 1000Hz 없음 · 겹침 둘 다 · 뒤 440Hz 없음) {levels}")
+                        elif name == "J":
+                            levels = [amp(0.2, 1.4, 1000) / ref, amp(1.6, 1.95, 1000) / ref, amp(1.6, 1.95, 440) / ref,
+                                      amp(2.1, 3.9, 440) / ref, amp(2.1, 3.9, 1000) / ref]
+                            tone[name].update(levels=[round(v, 3) for v in levels])
+                            expect("jl-d", [levels[0] < 0.02, levels[1] > 0.1, levels[2] > 0.8, levels[3] < 0.02, levels[4] > 0.8,
+                                            join_counts[-1]],
+                                   [True, True, True, True, True, 2],
+                                   f"J 컷 실측: 클립 2 소리(1000Hz)가 클립 1 화면 마지막 0.5초(1.5~2.0)에 있음 · 그 앞엔 없음 · 클립 1 소리는 1.0 그대로 · "
+                                   f"컷 뒤 440Hz 없음 {levels}")
+                        else:
+                            levels = [amp(0.2, 1.9, 1000) / ref, amp(2.05, 2.4, 440) / ref, amp(2.05, 2.4, 1000) / ref,
+                                      amp(2.6, 3.9, 440) / ref]
+                            tone[name].update(levels=[round(v, 3) for v in levels])
+                            expect("jl-d", [levels[0] < 0.02, levels[1] > 0.1, levels[2] > 0.8, levels[3] < 0.02, join_counts[-1]],
+                                   [True, True, True, True, 2],
+                                   f"L 컷 실측: 클립 1 소리(440Hz)가 클립 2 화면 처음 0.5초(2.0~2.5)에 있음 · 클립 2 소리 1.0 · 2.5초 뒤 440Hz 없음 {levels}")
+                    report.append("jl-d 실측(로컬 ffmpeg): " + json.dumps(tone, ensure_ascii=False))
+                finally:
+                    env.real, env.inline = False, False
+                    shutil.rmtree(hdir, ignore_errors=True)
+    except Exception as exc:  # noqa: BLE001
+        bad.append("(jl) 예외: " + repr(exc) + "\n" + _tb.format_exc()[:2000])
+
+    expected_groups = {"jl-a", "jl-b", "jl-c", "jl-e"} | ({"jl-d"} if ffmpeg_found else set())
+    missing = sorted(expected_groups - seen)
+    if missing:
+        bad.append(f"돌지 않은 묶음: {missing}")
+    if bad:
+        fail("작업 181 ⑦ 편집 J/L 컷 · 디졸브(jl) 검사 실패\n" + "\n".join(f"  {item}" for item in bad))
+    else:
+        ok("작업 181 ⑦ 편집 J/L 컷 · 디졸브 검사 (jl-a)검증 400 · 저장 · 겹친 뒤 길이 (jl-b)옛 문서 해시 · 명령 그대로 (jl-c)배치 · 소리 창 · "
+           "섞기 자르기 (jl-d)디졸브 · J · L 실측 (jl-e)몸통 · xfade · 소리 창 명령" + "".join(f"\n       {r}" for r in report))
+
+
+def _jlu_body(vjs: str, name: str) -> str:
+    """vnew.js 에서 `  function name(` 본문(다음 두 칸 들여 쓴 `}` 줄까지). 없거나 두 번 있으면 ""."""
+    head = f"  function {name}("
+    if vjs.count(head) != 1:
+        return ""
+    start = vjs.find(head)
+    end = vjs.find("\n  }\n", start)
+    return vjs[start:end + 4] if end > start else ""
+
+
+def check_vnew_edit_jl_ui_182() -> None:
+    """작업 182 — ⑦ 편집 화면의 J/L 컷 · 디졸브(vnew.js · vnew.css). 정적 검사만(node 실행 · 서버 · 네트워크 0).
+
+    (jlu-a) 조작 · 한국어 글: 전환 손잡이(마름모) · 메뉴(컷 · 디졸브 4값 · 막힌 값 안내) · J/L 슬라이더(0~2초 · 0.05초 · 숫자) ·
+            첫 클립 J · 마지막 클립 L 숨김 · 소리 끈 클립 막기 · 미리보기 안내, 값 · 비율이 서버(edit.py)와 같다
+    (jlu-b) 저장: editCloneClip 이 기본값(0 · 컷)이 아닐 때만 새 키를 넣고, 저장 바디 · 실행 취소 스냅샷이 그 사본을 쓴다
+    (jlu-c) 정리: editTidyFx(첫 클립 앞당김 · 마지막 클립 이어 감 · 전환 버림, 안 맞는 디졸브 줄이기 · 없애기)를 editCommit 이 부르고,
+            옮기기 · 삭제 · 자르기 · 끝 끌기 · 속도 · 길이가 editCommit 을 지난다. 자르기는 새 경계를 컷으로
+    (jlu-d) 타임라인 · 미리보기: 겹친 만큼 짧은 전체 길이(editStarts) · 겹침 쐐기 · 소리 줄 막대 · 디졸브 opacity · J/L <video> 근사
+    (jlu-e) vnew.css 182 구역: 새 클래스 정의 · 768px 규칙 · 가로 스크롤 없음 · 고정 너비 960px 이하
+    """
+    bad: list[str] = []
+    seen: set[str] = set()
+
+    def expect(group: str, got, want, what: str) -> None:
+        seen.add(group)
+        if got != want:
+            bad.append(f"({group}) {what}\n      결과 {got!r}\n      기대 {want!r}")
+
+    def missing(text: str, needles) -> list[str]:
+        return [n for n in needles if n not in text]
+
+    try:
+        vjs = (PUBLIC / "vnew.js").read_text(encoding="utf-8")
+        css = (PUBLIC / "vnew.css").read_text(encoding="utf-8")
+        edit_py = (ROOT / "app" / "src" / "vnew" / "edit.py").read_text(encoding="utf-8")
+        body = {name: _jlu_body(vjs, name) for name in (
+            "editCloneClip", "editCloneClips", "editSaveBody", "editSnapshotOf", "editTidyFx", "editCommit", "editSplit", "editFitsTotal",
+            "editStarts", "editLocate", "editAudioFxBox", "editShiftField", "editRenderAudioFx", "editApplyShift", "editRenderTools",
+            "editTrOpen", "editSetTransition", "editRenderFx", "editPlaceFx", "editPaintClip", "editBuild", "editRenderTimeline",
+            "editContiguous", "editTick", "editAdvance", "editFxHoldStart", "editFxTick", "editFxLeadTick", "editPreloadNext", "editSeek",
+            "editPause", "editOnKey", "editLeave", "editDo", "editClipPointer", "editEdgePointer", "editReplaceSel", "editUndoRedo")}
+        expect("jlu-a", sorted(name for name, text in body.items() if not text), [], "함수가 vnew.js 에 하나씩 있다")
+
+        # ---------------- (jlu-a) 조작 · 한국어 글 · 서버와 같은 값
+        expect("jlu-a", missing(vjs, [
+            'var EDIT_SHIFT_MAX_S = 2;', 'var EDIT_SHIFT_STEP_S = 0.05;', 'var EDIT_DISSOLVES = [0.25, 0.5, 0.75, 1];',
+            'var EDIT_DISSOLVE_SHARE = 0.45;', 'var EDIT_OFFSCREEN_GAIN = 0.6;',
+            'var EDIT_TR_SHORT = "클립이 짧아 쓸 수 없습니다";', 'var EDIT_MUTED_NOTE = "소리 끈 클립";',
+            'var EDIT_FX_NOTE = "J/L컷·디졸브는 내보낸 영상에서 정확히 확인할 수 있습니다";']), [],
+            "상수 · 한국어 글(막힌 디졸브 안내 · 소리 끈 클립 · 미리보기 안내)")
+        server = [re.search(pattern, edit_py) for pattern in (
+            r"(?m)^AUDIO_SHIFT_MAX_S = 2\.0$", r"(?m)^AUDIO_SHIFT_STEP_S = 0\.05$", r"(?m)^DISSOLVE_SECONDS = \(0\.25, 0\.5, 0\.75, 1\.0\)$",
+            r"(?m)^DISSOLVE_MAX_SHARE = 0\.45$", r"(?m)^OFFSCREEN_GAIN = 0\.6$")]
+        expect("jlu-a", [bool(m) for m in server], [True] * 5, "서버 edit.py 값(0~2초 · 0.05초 · 디졸브 4값 · 45% · 0.6)이 화면 상수와 같다")
+        expect("jlu-a", missing(body["editAudioFxBox"], [
+            '"소리 먼저 시작 (J컷)"', '"소리 이어 가기 (L컷)"', 'el("div", "vnew-edit-afx")', 'el("span", "vnew-hint vnew-edit-afx-note", EDIT_MUTED_NOTE)']),
+            [], "고른 클립 J/L 칸 이름과 소리 끈 클립 안내")
+        expect("jlu-a", missing(body["editShiftField"], [
+            'range.type = "range";', 'range.min = "0";', "range.max = String(EDIT_SHIFT_MAX_S);", "range.step = String(EDIT_SHIFT_STEP_S);",
+            'el("output", "vnew-edit-afx-value", "0.00초")', 'range.addEventListener("input"', 'range.addEventListener("change"',
+            "editApplyShift(ctx, key, range.value);"]), [], "슬라이더 0~2초 · 0.05초 · 숫자 표시 · 놓으면 바꾸기")
+        expect("jlu-a", missing(body["editRenderAudioFx"], [
+            'field.key === "audioLead" ? ctx.sel === 0 : ctx.sel === last', 'field.wrap.style.display = hide ? "none" : "";',
+            "field.range.disabled = !clip || muted || ctx.busy;", 'd.afxNote.style.display = muted ? "" : "none";']), [],
+            "첫 클립 J · 마지막 클립 L 숨김, 소리 끈 클립은 둘 다 막고 안내")
+        expect("jlu-a", [missing(body["editBuild"], ["tools.appendChild(editAudioFxBox(ctx));", "player.appendChild(d.fxNote);"]),
+                         "editRenderAudioFx(ctx);" in body["editRenderTools"]], [[], True],
+               "J/L 칸은 도구줄(고른 클립), 안내는 미리보기 아래, 고름이 바뀌면 다시 칠한다")
+        expect("jlu-a", missing(body["editTrOpen"], [
+            "[0].concat(EDIT_DISSOLVES).forEach(", 'seconds ? "디졸브 " + seconds + "초" : "컷"', "editDissolveFits(seconds, a, b)",
+            "item.disabled = true;", "item.title = EDIT_TR_SHORT;", 'menu.setAttribute("role", "menu");', 'item.setAttribute("role", "menuitemradio");',
+            "editSetTransition(ctx, index, seconds);"]), [], "전환 메뉴: 컷 · 디졸브 0.25/0.5/0.75/1초, 짧은 클립 45% 넘는 값은 막고 안내")
+        expect("jlu-a", ["EDIT_DISSOLVE_SHARE * Math.min(editClipLen(a), editClipLen(b))" in _jlu_body(vjs, "editDissolveFits"),
+                         'el("button", "vnew-edit-tr", "")' in _jlu_body(vjs, "editTrButton"),
+                         'if (event && event.key === "Escape") editTrClose(ctx, true);' in body["editOnKey"],
+                         "editTrClose(ctx);" in body["editLeave"] and "editTrClose(ctx);" in body["editRenderTimeline"]],
+               [True] * 4, "45% 는 속도 반영 길이(editClipLen) 기준 · 마름모 버튼 · Esc 닫기 · 떠나기 · 다시 그리기에 닫기")
+
+        # ---------------- (jlu-b) 저장은 기본값이 아닐 때만
+        clone = body["editCloneClip"]
+        init = clone[:clone.find("};")]
+        expect("jlu-b", [missing(clone, ['if (lead) copy.audioLead = lead;', 'if (tail) copy.audioTail = tail;',
+                                         'if (dissolve) copy.transition = { type: "dissolve", seconds: dissolve };']),
+                         [k for k in ("audioLead", "audioTail", "transition") if k in init]],
+               [[], []], "editCloneClip: 앞당김 · 이어 감 · 디졸브는 0 · 컷이 아닐 때만 키를 둔다(처음 사본 꼴에는 없다)")
+        expect("jlu-b", ["clips: editCloneClips(clips)" in body["editSaveBody"], "editCloneClip" in body["editCloneClips"],
+                         "clips: editCloneClips(clips)" in body["editSnapshotOf"], "ctx.clips = editCloneClips(snap.clips);" in body["editUndoRedo"]],
+               [True] * 4, "저장 바디 · 실행 취소 스냅샷 · 되돌리기가 그 사본을 쓴다(새 값도 실행 취소 · 다시 실행에 든다)")
+        expect("jlu-b", [missing(body["editApplyShift"], ["if (value) next[key] = value;", "else delete next[key];", "editReplaceSel(ctx, next);"]),
+                         missing(body["editSetTransition"], ['if (seconds) clip.transition = { type: "dissolve", seconds: seconds };',
+                                                             "else delete clip.transition;", "editCommit(ctx, next, {});"])],
+               [[], []], "0 · 컷으로 되돌리면 키를 지우고 한 번의 변경(실행 취소 한 단계)으로 바꾼다")
+        expect("jlu-b", ["function editShiftSnap(value)" in vjs, "Math.round(Math.min(v, EDIT_SHIFT_MAX_S) / EDIT_SHIFT_STEP_S) * EDIT_SHIFT_STEP_S" in vjs,
+                         "EDIT_DISSOLVES.indexOf(seconds) >= 0 ? seconds : 0" in _jlu_body(vjs, "editDissolveOf")],
+               [True] * 3, "값은 0.05초 격자 · 0~2초, 디졸브는 4값만(서버 _clean_shift · _clean_transition 이 받는 꼴)")
+
+        # ---------------- (jlu-c) 정리 함수와 부르는 곳
+        tidy = body["editTidyFx"]
+        expect("jlu-c", missing(tidy, ["if (i === 0 && clip.audioLead !== undefined) delete own(i).audioLead;",
+                                       "if (clip.audioTail !== undefined) delete own(i).audioTail;",
+                                       "if (clip.transition !== undefined) delete own(i).transition;",
+                                       "return s < seconds && editDissolveFits(s, clip, list[i + 1]);",
+                                       'if (fit.length) own(i).transition = { type: "dissolve", seconds: fit[fit.length - 1] };',
+                                       "else delete own(i).transition;", "return changed ? out : list;"]), [],
+               "editTidyFx: 첫 클립 앞당김 · 마지막 클립 이어 감 · 전환 버림, 안 맞는 디졸브는 맞는 가장 긴 값 또는 컷")
+        expect("jlu-c", ["ctx.clips = editTidyFx(clips);" in body["editCommit"], "editTidyFx(list)" in body["editFitsTotal"],
+                         vjs.count("editTidyFx(")],
+               [True, True, 3], "editCommit 이 모든 변경 뒤 부르고, 전체 길이 한도도 정리한 뒤 길이로 본다")
+        expect("jlu-c", [("editCommit(ctx, editMove(ctx.clips, from, drop)" in body["editClipPointer"]),
+                         ("editCommit(ctx, editRemove(ctx.clips, ctx.sel)" in body["editDo"]),
+                         ("editCommit(ctx, ctx.clips.slice(), { before: before, sel: index });" in body["editEdgePointer"]),
+                         ("editCommit(ctx, clips, { sel: ctx.sel });" in body["editReplaceSel"]),
+                         missing(body["editSplit"], ["delete left.audioTail;", "delete left.transition;", "delete right.audioLead;"])],
+               [True, True, True, True, []], "옮기기 · 삭제 · 끝 끌기 · 속도/길이/J·L 이 editCommit 을 지나고, 자르기는 새 경계를 컷으로")
+
+        # ---------------- (jlu-d) 타임라인 · 미리보기
+        expect("jlu-d", ["if (index < list.length - 1) total -= editDissolveOf(clip);" in body["editStarts"],
+                         "var end = i + 1 < list.length ? info.starts[i + 1] : info.starts[i] + len;" in body["editLocate"],
+                         "editRenderFx(ctx);" in body["editRenderTimeline"],
+                         "var overlap = prev ? editDissolveOf(prev) * ctx.pps : 0;" in body["editPaintClip"],
+                         missing(body["editPlaceFx"], ['el("span", "vnew-edit-xfade")', '"is-lead"', '"is-tail"',
+                                                       'd.fxNote.style.display = editHasFx(clips) ? "" : "none";']),
+                         "editPlaceFx(ctx);" in body["editEdgePointer"]],
+               [True, True, True, True, [], True],
+               "전체 길이는 디졸브만큼 짧고 · 겹친 구간은 뒤 클립 · 겹쳐 놓기 · 쐐기 · J/L 막대 · 안내 · 끝 끌기 중에도 자리 맞춤")
+        expect("jlu-d", ["if (editFxEdge(a, b)) return false;" in body["editContiguous"],
+                         "editDissolveOf(clip) * editSpeedOf(clip)" in body["editTick"], "editFxTick(ctx, editStarts(ctx.clips));" in body["editTick"],
+                         "editFxHoldStart(ctx, video, other, prev, ctx.t, leading)" in body["editAdvance"],
+                         'incoming.style.opacity = "0";' in body["editFxHoldStart"],
+                         "hold.incoming.style.opacity = String(" in body["editFxTick"],
+                         "editSetTime(other, source);" in body["editFxLeadTick"],
+                         "if (ctx.fxHold || ctx.fxLead) return;" in body["editPreloadNext"],
+                         "editFxStop(ctx);" in body["editSeek"] and "editFxStop(ctx);" in body["editPause"]],
+               [True] * 9, "미리보기: 효과 경계는 <video> 2개로, 디졸브만큼 일찍 바꿔 끼우고 opacity 0 → 1, J 는 숨은 쪽을 먼저 재생, 멈춤 · 옮기기면 끝")
+
+        # ---------------- (jlu-e) CSS
+        start = css.find("/* ================================================================ ⑦ 편집 — J/L 컷 · 디졸브(작업 182)")
+        section = css[start:] if start >= 0 else ""
+        classes = ["vnew-edit-tr", "vnew-edit-xfade", "vnew-edit-ashift", "vnew-edit-trmenu", "vnew-edit-trmenu-title", "vnew-edit-trmenu-row",
+                   "vnew-edit-trmenu-item", "vnew-edit-afx", "vnew-edit-afx-field", "vnew-edit-afx-text", "vnew-edit-afx-range",
+                   "vnew-edit-afx-value", "vnew-edit-afx-note", "vnew-edit-fx-note"]
+        defined = set(re.findall(r"\.(vnew-edit-[a-z0-9-]+)", section))
+        widths = [int(w) for w in re.findall(r"(?<![-\w])(?:min-)?width: (\d+)px", section)]
+        expect("jlu-e", [start > 0, sorted(set(classes) - defined), sorted(c for c in classes if c not in vjs),
+                         "@media (max-width: 768px) {" in section, "overflow-x" in section, max(widths or [0]) <= 960,
+                         ".vnew-edit-track {\n  position: relative;\n}" in section, "position: fixed;" in _edu_css_block(css, ".vnew-edit-trmenu", start),
+                         "max-width: calc(100vw - 16px);" in _edu_css_block(css, ".vnew-edit-trmenu", start), "\r" in css, css.endswith("}\n")],
+               [True, [], [], True, False, True, True, True, True, False, True],
+               "CSS 182 구역: 새 클래스 정의 · 768px 규칙 · 가로 스크롤 없음 · 960px 이하 · 트랙 기준 · 메뉴는 화면 고정 · 화면 너비 안 · LF")
+    except Exception as exc:  # noqa: BLE001
+        import traceback as _tb  # noqa: PLC0415
+
+        bad.append("(jlu) 예외: " + repr(exc) + "\n" + _tb.format_exc()[:1200])
+
+    groups = {f"jlu-{c}" for c in "abcde"}
+    if groups - seen and not bad:
+        bad.append(f"검사하지 못한 묶음: {sorted(groups - seen)}")
+    if bad:
+        for item in bad:
+            fail("작업 182 ⑦ 편집 화면 J/L 컷 · 디졸브 " + item)
+    else:
+        ok("작업 182 ⑦ 편집 화면 J/L 컷 · 디졸브 정적 검사 (jlu-a)조작 · 한국어 글 · 서버 값 (jlu-b)기본값 저장 안 함 · 실행 취소 "
+           "(jlu-c)정리 함수 · 부르는 곳 (jlu-d)타임라인 · 미리보기 근사 (jlu-e)CSS")
+
+
 def main() -> int:
     print("== vpoc1 check ==")
     check_compileall()
@@ -59247,6 +59920,8 @@ def main() -> int:
     check_vnew_kling_hard_cut_178()
     check_vnew_sheet_sides_179()
     check_vnew_front_clothes_180()
+    check_vnew_edit_jl_181()
+    check_vnew_edit_jl_ui_182()
     print()
     if warnings:
         print(f"경고 {len(warnings)}건")
