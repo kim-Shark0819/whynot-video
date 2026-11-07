@@ -4444,6 +4444,9 @@ VIBE_STYLE_COMPACT = {"live_action": "Photoreal live-action K-drama footage, nat
                       "webtoon": "Korean webtoon art style exactly as in the uploaded webtoon images"}
 VIBE_LOCATION_LEAD = "@Image{no} is the location (no people in it); keep this place, its background and light in every shot"
 VIBE_FRAME_LEAD = "@Image{no} is the previous shot's last frame: same background, lighting, outfits and hair; continue from it"
+# 작업 172: 조각 첫 컷이 이음 결과 마지막 컷에서 하드 컷(크기 종류 · 인서트 · 잠금 주인공이 다름)이면 이음 그림 = 겉모습 참고만.
+VIBE_FRAME_LOOK_LEAD = ("@Image{no} is the previous shot's last frame, for look reference only (same background, lighting, "
+                        "outfits and hair). Shot 1 is a hard cut to a new framing; do not start on this image or keep its framing")
 VIBE_PANEL_LEAD = "{refs} {be} the uploaded webtoon {images} (art style reference only)"  # fix1: 애니 원작 패널
 VIBE_SHEET_CLAUSE = "AI-generated turnaround sheet of a fictional character; match face/hair/build, clothes from the look line"
 # 작업 160: 정면 자리가 장면 옷 편집 그림(_costume_refs)인 인물의 시트 절·이름표.
@@ -4896,6 +4899,99 @@ def _insert_lead(clauses: list[str]) -> tuple[str, list[str]]:
     return "", clauses
 
 
+# 작업 173: 상대 얼굴·턱·뺨·귀·목에 닿는 손 = 부드럽고 다정한 턱 받침(고객 지시). 긍정·중립 낱말만(fal 검사 낱말 없음).
+FACE_TOUCH_LINE = ("Touch: a soft, loving, careful chin hold; fingertips lightly under the jaw line, palm away from the throat, "
+                   "the neck stays uncovered and free; no squeezing, no pressure; the face is tilted up gently toward him.")
+FACE_TOUCH_CHIN = "gently {lift} {name}'s chin with his fingertips, thumb resting lightly on the chin near the lower lip"
+FACE_TOUCH_CHEEK = "softly {cup} {name}'s cheek"
+_FACE_TOUCH_TARGETS = {"other_chin": "chin", "other_face": "chin", "other_neck": "chin", "other_cheek": "cheek"}
+_FACE_PART = r"(?:face|jaw(?:line)?|chin|cheeks?|neck|nape|throat|ears?)"
+_FACE_OWNER = r"(?:(?:his|her|their|the)\s+(?!own\b)|[^\s,;.()]+['\u2019]s\s+)"
+_FACE_OBJ = (r"(?:the\s+(?:back|side|sides)\s+of\s+)?" + _FACE_OWNER + r"(?:(?!own\b)[a-z-]+\s+){0,2}?" + _FACE_PART
+             + r"(?:(?:\s*,\s*|\s+and\s+)(?:the\s+(?:back|side|sides)\s+of\s+)?(?:(?:his|her|the)\s+)?" + _FACE_PART + r")*")
+_FACE_TAIL = (r"(?:\s+with\s+(?:his|her|the|both)\s+(?:(?:right|left|bare)\s+)?(?:hands?|palms?|fingers?))?"
+              r"(?:\s*\([^()]*\b(?:thumb|fingers?)\b[^()]*\))?")
+_FACE_REACH = (r"(?:\s+with\s+(?:his|her|the)\s+fingers?|\s*,\s*(?:with\s+)?(?:(?:his|the)\s+)?fingers?)\s+"
+               r"(?:(?:reaching|extending|resting|curled|wrapped|spread)\s+)?(?:to|behind|around|on|onto|toward|under)\s+"
+               r"(?:the\s+)?(?:[^\s,;.()]+['\u2019]s\s+)?(?:[a-z-]+\s+){0,2}?(?:ears?|nape|neck|throat)")
+_FACE_LIFT = r"(?:\s+and\s+(?:lifts?|raises?|tilts?)\s+(?:it|(?:his|her|their)\s+(?:face|chin|head))(?:\s+up)?)?"
+_FACE_HARD_RE = re.compile(
+    r"\b(?P<verb>(?:(?:is|are)\s+)?(?:grab(?:s|bed|bing)?|grip(?:s|ped|ping)?|clamp(?:s|ed|ing)?|seiz(?:e|es|ed|ing)|"
+    r"squeez(?:e|es|ed|ing)|hold(?:s|ing)?|wrap(?:s|ped|ping)?)(?:\s+(?:around|onto|on|at))?)\s+(?P<obj>" + _FACE_OBJ + r")"
+    + _FACE_TAIL + r"(?:" + _FACE_REACH + r")?" + _FACE_LIFT, re.IGNORECASE)
+_FACE_SOFT_VERB = (r"(?:(?:cup|touch|stroke|caress|cradle)\s+and\s+)?"
+                   r"(?:cup(?:s|ped|ping)?|touch(?:es|ed|ing)?|strok(?:e|es|ed|ing)|caress(?:es|ed|ing)?|cradl(?:e|es|ed|ing))")
+_FACE_SOFT_RE = re.compile(r"\b(?P<verb>" + _FACE_SOFT_VERB + r")\s+(?P<obj>" + _FACE_OBJ + r")" + _FACE_TAIL + _FACE_REACH
+                           + _FACE_LIFT, re.IGNORECASE)
+# 부드러운 동사라도 손이 목 · 목덜미에 있으면(목이 덮인다) 턱 받침으로 바꾼다(Touch 줄 "the neck stays uncovered").
+_FACE_NECK_RE = re.compile(r"\b(?P<verb>" + _FACE_SOFT_VERB + r")\s+(?P<obj>" + _FACE_OBJ + r")" + _FACE_TAIL + _FACE_LIFT,
+                           re.IGNORECASE)
+_FACE_KO_RE = re.compile(r"(?:턱|얼굴|뺨|볼|목덜미|뒷목|목|귀)")
+_FACE_KO_VERB = re.compile(r"(?:감싸|잡|쥐|받쳐|만지|쓰다듬|어루만|닦)")
+_FACE_EN_VERB = (r"(?:touch|hold|held|cup|stroke|grab|grip|clamp|seiz|squeez|wrap|caress|cradl|wipe|press|rest)"
+                 r"[a-z]*\b[^.;]{0,40}?")
+
+
+def _face_touch(plan: dict, cut: dict, brief_action: str = "") -> dict | None:
+    """작업 173: 이 컷에서 한 사람의 손이 다른 사람의 얼굴·턱·뺨·귀·목에 닿으면 {"name": 손 주인, "other": 상대, "part":
+    "chin"|"cheek"}(한국 이름), 아니면 None. 콘티 손 표기(162 fix1)·프리비즈 손(148, _cut_poses)이 있으면 그것만 본다(자기 손
+    own_* · 손목/손/가슴 = 아님). 손 표기가 하나도 없는 옛 데이터만 글(콘티 actionEn/actionKo · 지시서 연기)에서 찾는다."""
+    chars = [ch for ch in cut.get("characters") or [] if isinstance(ch, dict) and str(ch.get("name") or "").strip()]
+    poses = _cut_poses(plan, cut) if cut else []
+    for pose in poses:
+        other = str(pose.get("other") or "").strip()
+        name = str(pose.get("name") or "").strip()
+        for side in ("right", "left"):
+            hand = (pose.get("hands") or {}).get(side)
+            part = _FACE_TOUCH_TARGETS.get(str((hand or {}).get("target") or "")) if isinstance(hand, dict) else None
+            if part and other and other != name:
+                return {"name": name, "other": other, "part": part}
+    if poses or any("hands" in ch for ch in chars):
+        return None
+    names = [str(ch["name"]).strip() for ch in chars]
+    for ch in chars:
+        name = str(ch["name"]).strip()
+        for other in (n for n in names if n != name):
+            forms = {f for f in (other, _romanize_name(other), _romanize_name(other[1:]) if len(other) >= 3 else "") if f}
+            en = str(ch.get("actionEn") or "")
+            ko = str(ch.get("actionKo") or ch.get("action") or "")
+            texts = [en] + ([str(brief_action or "")] if len(names) == 2 and name == names[0] else [])
+            for form in forms:
+                hit_en = next((m for t in texts for m in [re.search(
+                    r"\b" + _FACE_EN_VERB + re.escape(form) + r"['\u2019]s\s+(?:[a-z-]+\s+){0,2}?(?P<part>" + _FACE_PART + r")",
+                    t, re.IGNORECASE)] if m), None)
+                if hit_en:
+                    return {"name": name, "other": other, "part": "cheek" if "cheek" in hit_en.group("part").lower() else "chin"}
+            hit_ko = re.search(re.escape(other) + r"의\s*(?:[\uac00-\ud7a3]+\s+){0,2}?(?P<part>" + _FACE_KO_RE.pattern
+                               + r")(?=[을를이가에은는과와도의,.\s]|$)", ko)
+            if hit_ko and _FACE_KO_VERB.search(ko[hit_ko.end():hit_ko.end() + 24]):
+                return {"name": name, "other": other, "part": "cheek" if hit_ko.group("part") in ("뺨", "볼") else "chin"}
+    return None
+
+
+def _soften_face_touch(text: str, touch: dict | None, partner: str) -> str:
+    """작업 173: 얼굴에 닿는 손 낱말(grab/grip/clamp/seize/squeeze/hold/wrap … 얼굴 부위, "fingers reaching to the ear")을
+    FACE_TOUCH_CHIN(콘티가 뺨이면 FACE_TOUCH_CHEEK)으로 바꾼다. touch 가 없으면 글 그대로."""
+    text = str(text or "")
+    if not touch or not text:
+        return text
+
+    def _sub(match: re.Match) -> str:
+        verb = match.group("verb")
+        obj = match.group("obj").lower()
+        cheek = "cheek" in obj and (touch.get("part") == "cheek" or not re.search(r"chin|jaw|neck|nape|throat|face", obj))
+        ing = verb.lower().split()[-1].endswith("ing") and not verb.lower().startswith(("is ", "are "))
+        base = bool(re.search(r"\bto\s+$", match.string[:match.start()], re.IGNORECASE))  # "to cup and stroke …" → 원형
+        out = (FACE_TOUCH_CHEEK.format(cup="cupping" if ing else "cup" if base else "cups", name=partner) if cheek
+               else FACE_TOUCH_CHIN.format(lift="lifting" if ing else "lift" if base else "lifts", name=partner))
+        return out[0].upper() + out[1:] if verb[:1].isupper() else out
+
+    def _neck(match: re.Match) -> str:
+        return _sub(match) if re.search(r"neck|nape|throat", match.group("obj"), re.IGNORECASE) else match.group(0)
+
+    return _FACE_NECK_RE.sub(_neck, _FACE_SOFT_RE.sub(_sub, _FACE_HARD_RE.sub(_sub, text)))
+
+
 _PRONOUN_MANY = re.compile(r"^(?:They|Their|Both|Together)\b")
 
 
@@ -4916,8 +5012,10 @@ def _named_action(text: str, name: str, names: list[str], tokens) -> str:
 def _vibe_take_prompt(plan: dict, take: dict, *, real: bool, cast: list[dict], location_no=None, frame_no=None,
                       panel_nos: list[int] | None = None, caps: dict | None = None, soften: bool = False,
                       anchor: bool = False, no_text: bool = False, audit: dict | None = None, quiet: bool = False,
-                      bases: dict | None = None, lines_fix: dict | None = None, framing: dict | None = None) -> str:
+                      bases: dict | None = None, lines_fix: dict | None = None, framing: dict | None = None,
+                      hard_cut: bool = False) -> str:
     """작업 159: video-vibecode 형식 통 테이크 프롬프트(참고 구현 _cuts_video_prompt · live_video_prompt).
+    작업 172: hard_cut 이면 이음 그림(frame_no) 이름표 = VIBE_FRAME_LOOK_LEAD(겉모습 참고만), 아니면 VIBE_FRAME_LEAD 그대로.
 
     순서: 140 AI 고지 → 화풍(STYLE webtoon + 웹툰 기호 / live_action) → 인물별 "{handle}: {look} (keep exactly this look)." →
     컷 지시 단락(참고 원문) → "Setting (keep identical in every shot): …" → "Shot i (t0-t1s), size: " + who_in_shot + 연기
@@ -5088,7 +5186,13 @@ def _vibe_take_prompt(plan: dict, take: dict, *, real: bool, cast: list[dict], l
                 if i.get("name") and str(i.get("how") or "full") in ("full", "main")]
         return _disp(full[0]) if len(full) == 1 else ""
 
-    def _action(entry: dict) -> str:
+    # 작업 173: 상대 얼굴에 닿는 손이 있는 컷(없는 컷은 None — 글 그대로).
+    touches = [_face_touch(plan, cuts_by_id.get(cid) or {}, e.get("action")) for e, cid in zip(entries, take_cut_ids)]
+
+    def _soft(text: str, touch: dict | None) -> str:
+        return _soften_face_touch(text, touch, _disp(touch["other"])) if touch else text
+
+    def _action(entry: dict, touch: dict | None = None) -> str:
         # 실사 = live.real_action(_real_action + REAL_FX 실사 표현), 애니 = 지시서 연기 그대로(157 앞 2문장).
         if real:
             text = _with_real_expressions(_take_action(_real_action(entry.get("action") or "")), entry.get("fx"),
@@ -5096,7 +5200,7 @@ def _vibe_take_prompt(plan: dict, take: dict, *, real: bool, cast: list[dict], l
             text = _real_blush_pieces([str(text or "")], _blush_who(entry), people)[0]  # 작업 166
         else:
             text = _take_action(entry.get("action") or "")
-        return str(text or "").strip().rstrip(".")
+        return _soft(str(text or "").strip().rstrip("."), touch)
 
     appearances = {str(m.get("name") or "").strip(): str(m.get("appearance") or "") for m in cast}
 
@@ -5118,6 +5222,7 @@ def _vibe_take_prompt(plan: dict, take: dict, *, real: bool, cast: list[dict], l
 
     def _shot(index: int, entry: dict, cut_id: str) -> str:
         cut = cuts_by_id.get(cut_id) or {}
+        touch = touches[index]
         # 작업 162: 손만 들어오는 화면 밖 인물이 있으면 who_in_shot 에 손 절을 붙인다(없으면 159 그대로).
         hand_owners = _hands_only_owners(cut)
         # 작업 166: 인서트 크기 · 클로즈업 주인공 · 자기 손 잠금(해당 없는 컷은 지금 그대로).
@@ -5127,7 +5232,7 @@ def _vibe_take_prompt(plan: dict, take: dict, *, real: bool, cast: list[dict], l
         clauses: list[str] = []
         if hand_owners:
             names = [str(c.get("name") or "") for c in cut.get("characters") or [] if isinstance(c, dict)] + list(name_map)
-            clauses = [_hands_only_clause(o, names, _disp, real=real, soften=soften) for o in hand_owners]
+            clauses = [_soft(_hands_only_clause(o, names, _disp, real=real, soften=soften), touch) for o in hand_owners]
         lead = ""
         if insert:
             lead, clauses = _insert_lead(clauses)  # 작업 170: 첫 닿는 동사 절을 크기 바로 뒤로
@@ -5147,11 +5252,12 @@ def _vibe_take_prompt(plan: dict, take: dict, *, real: bool, cast: list[dict], l
         prefix = f"Shot {index + 1} ({entry['start']}-{entry['end']}s), {size}: " + head
         if framing is not None:
             # 작업 169: 컷 단위 Kling 샷 고정 줄의 재료(크기 · 자기 손 + who, 화면에 보이는 인물)
-            framing.setdefault("shots", {})[cut_id] = {"size": size, "lead": head, "names": _present(entry)}
+            framing.setdefault("shots", {})[cut_id] = {"size": size, "lead": head, "names": _present(entry),
+                                                       "touch": bool(touch)}  # 작업 173
         parts = []
         if index in moves:
             parts.append(f"Setting now: {_bg(moves[index])}")
-        action = _action(entry)
+        action = _action(entry, touch)
         if not insert:
             # 작업 170: 첫 연기 문장은 인물 이름으로 시작한다(잠금 주인공, 없으면 콘티 첫 on_screen 인물).
             on_names = [_disp(str(ch.get("name") or "")) for ch in _cut_named(cut) if ch.get("presence") == "on_screen"]
@@ -5160,18 +5266,26 @@ def _vibe_take_prompt(plan: dict, take: dict, *, real: bool, cast: list[dict], l
             action = _named_action(action, first, on_names, sorted(people, key=len, reverse=True))
         parts.append(action)
         contact_name = str((entry.get("contact") or {}).get("name") or "").strip()
+        contact_piece = ""
         if not any(str(o.get("name") or "").strip() == contact_name for o in hand_owners) and contact_name not in locked:
-            parts.append(_contact(entry))  # 162: 손 주인의 닿는 연기는 손 절이 이미 말한다(166: 자기 손 잠금 인물의 손 연기도 뺀다)
+            contact_piece = _soft(_contact(entry), touch)
+            parts.append(contact_piece)  # 162: 손 주인의 닿는 연기는 손 절이 이미 말한다(166: 자기 손 잠금 인물의 손 연기도 뺀다)
         for pose in entry.get("poses") or []:
             if any(str(o.get("name") or "").strip() == str(pose.get("name") or "").strip() for o in hand_owners):
                 continue  # 162 fix1: 손만 들어오는 사람의 손은 손 절이 말한다
             if str(pose.get("name") or "").strip() in locked:
                 continue  # 166: 자기 손을 쓰지 않는 사람의 손 포즈는 넣지 않는다
-            clause = _pose_clause(pose, _disp)
+            clause = _soft(_pose_clause(pose, _disp), touch)
             if clause and _strong(soften):
                 clause = _soften_text(clause, True)  # 작업 163
             if clause and not (soften and _explicit_text(clause, _strong(soften))):
                 parts.append(clause)
+        if touch:
+            # 작업 173: 닿는 연기(154)와 포즈 절(148)이 같은 턱 받침 글이 되면 닿는 연기는 뺀다(같은 말 두 번).
+            soft_key = "chin with his fingertips, thumb resting lightly"
+            if contact_piece and soft_key in contact_piece and any(soft_key in p for p in parts[parts.index(contact_piece) + 1:]):
+                parts.remove(contact_piece)
+            parts.append(FACE_TOUCH_LINE.rstrip("."))  # 작업 173: 다정한 턱 받침 자세 1줄(샷 문장은 줄이지 않는다)
         if not real:
             fx_texts = vnew_fx.who_sentences(entry.get("fx"), entry.get("fxWho"), _present(entry), name=_disp)
             parts.append(" / ".join(fx_texts))
@@ -5209,7 +5323,7 @@ def _vibe_take_prompt(plan: dict, take: dict, *, real: bool, cast: list[dict], l
             elif member.get("sheetNo"):
                 sheets.append(int(member["sheetNo"]))
         if frame_no:
-            rows.append((frame_no, VIBE_FRAME_LEAD.format(no=frame_no)))
+            rows.append((frame_no, (VIBE_FRAME_LOOK_LEAD if hard_cut else VIBE_FRAME_LEAD).format(no=frame_no)))
         if location_no:
             rows.append((location_no, VIBE_LOCATION_LEAD.format(no=location_no)
                          + (REAL_TAKE_NO_BRAND if real else "")))  # 작업 161: 실사 장소만 상표 금지
@@ -5250,14 +5364,14 @@ def _vibe_take_prompt(plan: dict, take: dict, *, real: bool, cast: list[dict], l
 
     lines_conti = lines_prompt = actions_prompt = 0
     actions: list[str] = []
-    for entry in entries:
+    for entry, touch in zip(entries, touches):
         off_speaker = str(entry.get("offScreenSpeaker") or "").strip()
         for ln in _entry_lines(entry):
             lines_conti += 1
             piece = _line_piece(ln, off_speaker)
             if piece and piece in prompt:
                 lines_prompt += 1
-        action = _action(entry)
+        action = _action(entry, touch)
         actions.append(action)
         if action and action in prompt:
             actions_prompt += 1
@@ -5375,6 +5489,8 @@ def _vibe_take_payload(owner: str, pid: str, plan: dict, take: dict, caps: dict,
     kwargs = {"real": real, "cast": cast, "location_no": location_no, "frame_no": frame_no, "panel_nos": panel_nos,
               "caps": caps, "soften": soften, "anchor": anchor is not None, "no_text": no_text,
               "bases": _base_outfits(actors, char_by_id)}
+    if frame_no and anchor.get("hardCut"):
+        kwargs["hard_cut"] = True  # 작업 172: 하드 컷 = 이음 그림은 겉모습 참고만
     lines_note: dict = {}
     if _rewrite_on(soften):
         # 작업 168 5단계: 그 조각 대사 LLM 1번(실패 → 대사 빼기). 기록은 제출 쪽이 조각·칸에 남긴다.
@@ -5951,7 +6067,7 @@ def _submit_take_parts(owner: str, pid: str, gen_id: str, index: int, variant: s
                     kling_ctx = _kling_part_ctx(owner, pid, gen_id, index, claim, plan, take)
                 used = _used_parts(records)
                 records.append(_submit_kling_part_cut(owner, pid, gen_id, plan, kling_ctx, take, part, sig,
-                                                      used[-1] if used and in_order else None))
+                                                      used[-1] if used and in_order else None, used=used))
                 submitted_n += 1
                 log.info("vnew.gen.take_part_submit pid=%s take=%s part=%d/%d start=%.3f end=%.3f cuts=1 variant=real kling=1%s",
                          pid, take_id, int(part.get("no") or 0), len(parts), part["start"], part["end"],
@@ -5992,17 +6108,23 @@ def _submit_take_parts(owner: str, pid: str, gen_id: str, index: int, variant: s
             used = _used_parts(records)  # 작업 169: Kling 으로 바뀐(superseded) 조각은 이음 프레임·순서에서 뺀다
             # 작업 171: 앞 결과가 인서트(손만)로 끝나면 그 앞의 인서트가 아닌 가장 늦은 결과, 없으면 이음 그림 없음(글은 남는다).
             before = _continuity_source(plan, used) if used else None
+            # 작업 172: 첫 컷이 이음 결과 마지막 컷에서 하드 컷이면 — 인서트는 이음 그림 없음(글은 남는다), 그 밖은 겉모습 참고만.
+            cut_reason = _part_cut_reason(plan, part, before) if in_order and before else "continue"
             if content_step >= CONTENT_STEP_DROP_REFS:
                 pass  # 작업 168 4단계: 앞 조각·앞 테이크 마지막 프레임을 넣지 않는다(이음 글은 continuity 로 남는다)
+            elif cut_reason == "insert":
+                pass
             elif in_order and before and before.get("status") == "completed" and before.get("outputKey"):
                 frame = _video_last_frame(str(before["outputKey"]), float(before.get("seconds") or 0))
                 frame_key = str(before["outputKey"]) + "#last"
             elif in_order and not used and part_endpoint != endpoint:
                 frame, frame_key = _prev_take_frame(plan, index, variant)
             continuity = {"take": take, "frame": frame, "frameKey": frame_key}
+            if cut_reason == "shotChange":
+                continuity["hardCut"] = True
             if part_endpoint != endpoint:
                 continuity.update(origMax=int(caps.get("imageListMax") or vpoc_fal.DEFAULT_IMAGE_LIST_MAX),
-                                  origFrame=in_order and before is not None)
+                                  origFrame=in_order and before is not None and cut_reason != "insert")
             no_text = bool(old) and _qc_no_text(old)  # 작업 156: 화면 글자 검사로 다시 만드는 조각
             part_fb = 1 if lk_step == 1 else step  # 작업 169: likeness 1단계 조각 = 인물당 정면 1장(130 1단계)
             part_seed = old.get("seed") if old and lk_step == 0 and lk_retry and old.get("seed") is not None else None
@@ -8434,6 +8556,16 @@ def _cut_still_prompt(plan: dict, cut: dict, people: list[tuple[str, str, int]],
         costume = _scene_outfit_text(scene_outfits.get(name)) or _costume_candidate((outfits or {}).get(name))
         if costume:
             worn.append(f"{name} wears {costume}")
+    # 작업 172: 화면의 사람마다 장면 옷(165) — 사진 참고가 없는 사람(인서트 손 주인 등)도 빠지지 않게 더한다(있는 사람은 그대로).
+    on_screen = ([name for name, _side, _visible in listed] if layout
+                 else [str(a.get("name") or "") for a in _segment_actors(plan, {"cutIds": [cut_id]})])
+    for name in on_screen:
+        if not name.strip() or name in worn_names or name in hidden:
+            continue
+        worn_names.append(name)
+        costume = _scene_outfit_text(scene_outfits.get(name)) or _costume_candidate((outfits or {}).get(name))
+        if costume:
+            worn.append(f"{name} wears {costume}")
     if worn:
         parts.append("OUTFITS (from the script, not the photos): " + "; ".join(worn) + ".")
     parts.append(REAL_STILL_NO_PHOTO_CLOTHES)
@@ -8712,10 +8844,27 @@ def _continuity_source(plan: dict, used: list[dict]) -> dict | None:
     return next((rec for rec in reversed(used or []) if not _output_ends_insert(plan, rec)), None)
 
 
+def _part_cut_reason(plan: dict, part: dict, source: dict | None) -> str:
+    """작업 172: 조각(Seedance) 첫 컷과 이음 결과(_continuity_source) 마지막 컷 사이. "insert"(첫 컷이 인서트) · "shotChange"
+    (크기 종류 · 잠금 주인공이 다름 = 하드 컷) · "continue"(같은 샷, 컷을 모르면 지금처럼 이어짐). 판단은 _kling_start_reason 과 같다."""
+    ids = [str(c) for c in (part or {}).get("cutIds") or [] if c]
+    prev_ids = [str(c) for c in (source or {}).get("cutIds") or [] if c] or (
+        [str(source["cutId"])] if source and source.get("cutId") else [])
+    if not ids or not prev_ids:
+        return "continue"
+    if _cut_is_insert(_conti_cut(plan, ids[0])):
+        return "insert"
+    return "continue" if _kling_start_reason(plan, ids[0], prev_ids[-1]) == "continue" else "shotChange"
+
+
 def _submit_kling_part_cut(owner: str, pid: str, gen_id: str, plan: dict, ctx: dict, take: dict, item: dict, sig: list,
-                           before: dict | None) -> dict:
+                           before: dict | None, used: list[dict] | None = None) -> dict:
     """조각 Kling 컷 하나 제출. 시작 그림 = 앞 조각·앞 컷 결과의 마지막 프레임(같은 샷이 이어질 때만, 작업 171), 아니면 139 시작
-    그림(Seedream, 애니 첫 프레임 · 장소 뷰 · 시작 그림 검사)."""
+    그림(Seedream, 애니 첫 프레임 · 장소 뷰 · 시작 그림 검사).
+    작업 172: 인서트가 아닌 컷이 샷이 바뀌면(앞이 인서트여도) 이음 결과(_continuity_source(used), 인서트가 아닌 가장 늦은 결과)의
+    마지막 프레임에서 시작한다(startReason shotChange · startImage prevFrame, 크기는 FRAMING 줄). 인서트 컷 · 이음 결과가 없으면
+    시작 그림 — 그 시작 그림 검사가 다시 그린 뒤에도 shot 이 틀리면 이음 결과 마지막 프레임으로 바꾼다(_submit_real_cut fallback).
+    used 가 없으면(검사 호출) 이음 결과 = before(인서트로 끝나지 않을 때)."""
     cut_id = str(item.get("cutId") or "")
     unit = next((u for u in _take_cut_units(plan, take) if str(u.get("cutId") or "") == cut_id), None)
     if unit is None:
@@ -8724,13 +8873,23 @@ def _submit_kling_part_cut(owner: str, pid: str, gen_id: str, plan: dict, ctx: d
     shift = max(0.0, float(item.get("start") or 0) - float(span.get("start") or 0))
     cut = {**unit, "startSec": float(unit.get("startSec") or 0) + shift, "seconds": float(item.get("seconds") or 0)}
     start, start_key, reason = None, "", ""
+    source = None
     if before:
+        source = _continuity_source(plan, used if used else [before])
         prev_ids = [str(c) for c in before.get("cutIds") or [] if c] or [str(before.get("cutId") or "")]
         reason = _kling_start_reason(plan, cut_id, prev_ids[-1])  # 작업 171: 샷이 바뀌면 앞 프레임에서 시작하지 않는다
-    if reason == "continue" and before.get("status") == "completed" and before.get("outputKey"):
-        start = _video_last_frame(str(before["outputKey"]), float(before.get("seconds") or 0))
-        start_key = str(before["outputKey"]) + "#last" if start else ""
-    record = _submit_real_cut(owner, pid, gen_id, plan, ctx, cut, start=start, start_key=start_key)
+        if reason == "insert" and not _cut_is_insert(_conti_cut(plan, cut_id)):
+            reason = "shotChange"  # 작업 172: 앞 컷만 인서트 = 이 컷은 샷이 바뀐다(이음 결과에서 시작)
+    src = before if reason == "continue" else source if reason == "shotChange" else None
+    if src and src.get("status") == "completed" and src.get("outputKey"):
+        start = _video_last_frame(str(src["outputKey"]), float(src.get("seconds") or 0))
+        start_key = str(src["outputKey"]) + "#last" if start else ""
+    fallback = None
+    if not start and source and source.get("status") == "completed" and source.get("outputKey"):
+        key, secs = str(source["outputKey"]), float(source.get("seconds") or 0)
+        fallback = lambda: (_video_last_frame(key, secs), key + "#last")  # noqa: E731 — 작업 172: 시작 그림 shot 실패 때만 읽는다
+    extra = {"fallback": fallback} if fallback else {}
+    record = _submit_real_cut(owner, pid, gen_id, plan, ctx, cut, start=start, start_key=start_key, **extra)
     del start
     out = {**item, **record, "sig": sig, "kind": "kling", "cutIds": [cut_id], "seconds": float(item.get("seconds") or 0)}
     out.setdefault("startImage", "still")  # 작업 171
@@ -8857,6 +9016,8 @@ def _kling_shot_lock(owner: str, plan: dict, ctx: dict, cut_id: str, seconds: fl
                 lead = lead[:hit.end()] + cue + lead[hit.end():]
         lines = [REAL_CUT_FRAMING_LINE.format(size=shot["size"], lead=lead) if lead
                  else REAL_CUT_FRAMING_LINE.split(": {lead}", 1)[0].format(size=shot["size"]) + "."]
+        if shot.get("touch"):
+            lines.append(FACE_TOUCH_LINE)  # 작업 173: Seedance SHOT 과 같은 다정한 턱 받침 줄(머리라 줄이지 않는다)
         costumes = framing.get("costumes") or {}
         locks = [_costume_lock(_romanize_name(name) or name, str(costumes.get(name) or ""))  # 작업 171: 로마자 이름
                  for name in shot.get("names") or []]
@@ -9127,7 +9288,7 @@ def _pack_still_people(rows, refs: list, cap: int) -> tuple[list[tuple[str, str,
 
 
 def _submit_real_cut(owner: str, pid: str, gen_id: str, plan: dict, ctx: dict, cut: dict, *, fix: str = "",
-                     tag: str = "", start: bytes | None = None, start_key: str = "") -> dict:
+                     tag: str = "", start: bytes | None = None, start_key: str = "", fallback=None) -> dict:
     """컷 1개: 시작 그림(Seedream) 1장 + Kling 1번 제출(작업 132). 원장은 시작 그림·Kling 제출 성공 때. 돌려주는 값 = 칸 fallback.cuts 항목.
 
     작업 133: fix(QA 교정 문장)·tag(출력 경로·원장 키 꼬리, 다시 만들기 "-qa")가 있으면 그 컷 다시 만들기다. takeAt = 테이크 안 컷 시작 초.
@@ -9137,6 +9298,8 @@ def _submit_real_cut(owner: str, pid: str, gen_id: str, plan: dict, ctx: dict, c
     작업 139: 애니 프레임 + 시트 뷰가 있으면 애니 프레임을 1번 읽어(_anime_frame_layout) 얼굴이 보이는 인물(face·partial) 정면만
     참고로 넣고, ECU·CU·MCU 면 시트 뷰를 넣지 않는다. 시작 그림은 Kling 전에 검사하고(_checked_cut_still, VNEW_REAL_STILL_CHECK)
     틀리면 Seedream 만 1번 다시. 컷 기록 animeLayout·stillCheck. 읽기 실패(None)면 138 과 같다.
+    작업 172: fallback(() → (이음 결과 마지막 프레임, 키))이 있고 다시 그린 시작 그림도 shot 이 틀리면 그 프레임에서 시작
+    (stillCheck.used "prevFrame", startImage prevFrame, Kling 글 = 앞 샷 프레임 문장).
     """
     endpoint, caps, take_id, attempt = ctx["endpoint"], ctx["caps"], ctx["takeId"], ctx["attempt"]
     beat = ctx.get("beat") or (lambda: None)  # 작업 144: 2단계 첫 제출만 — 하트비트 + 선점 확인(잃으면 _Discard)
@@ -9236,6 +9399,17 @@ def _submit_real_cut(owner: str, pid: str, gen_id: str, plan: dict, ctx: dict, c
                                                     refs=refs, people=people, background_no=background_no, sheets=sheets,
                                                     charge_key=f"{still_key_base}-still2-{attempt}",
                                                     costumes=costumes or None, prev_no=prev_no)
+            if fallback is not None and still_check.get("retried") and "shot" in (still_check.get("items") or []):
+                # 작업 172: 다시 그려도 샷 크기가 틀리면 이음 결과 마지막 프레임에서 시작(FRAMING 줄이 크기를 정한다)
+                prev_frame, prev_key = fallback()
+                if isinstance(prev_frame, (bytes, bytearray)) and prev_frame:
+                    still, start_key, from_prev = bytes(prev_frame), prev_key, True
+                    still_check["used"] = "prevFrame"
+                    kling_prompt = _segment_prompt(plan, {"cutIds": [cut_id]}, first_segment=True, model=ctx["modelId"],
+                                                   real=True, prompt_max=ctx["promptMax"], fix=fix, bases=ctx.get("bases"),
+                                                   lock=lock, from_prev=True)
+                    _assert_no_webtoon(kling_prompt)
+                del prev_frame
         del frame, refs, sheet
     ctx["prevStill"] = still  # 작업 160: 다음 컷 시작 그림의 참고(메모리, 이 컷 루프 동안만)
     beat()  # 작업 144: Kling 제출(유료) 전
@@ -12051,6 +12225,9 @@ def _real_cut_prompt(plan: dict, seg: dict, *, model: str = "", prompt_max: int 
     action = ". ".join(p for p in (_real_action(cut.get("promptEn")).rstrip("."), _real_action(actors).rstrip(".")) if p)
     # 작업 136: 그림 문장 빼기·옷 구절 → 장면 옷. 작업 160: 장면 옷 = 그 컷 장소 1벌(_scene_costume_map).
     action = _real_brief_text(action, _scene_costume_map(plan, [cut_id], str(cut.get("locationEn") or ""), None, bases))
+    touch = _face_touch(plan, cut)  # 작업 173: 얼굴에 닿는 손 낱말 → 다정한 턱 받침(없으면 그대로)
+    if touch:
+        action = _soften_face_touch(action, touch, touch["other"])
     spoken = [ln for ln in _cut_lines(plan, cut) if not ln.get("silent") and str(ln.get("lineKo") or "").strip()]
     # 작업 171: 샷 고정 줄(FRAMING · COSTUME)이 있으면 SHOT · ACTION · 대사 화자도 같은 로마자 이름(따옴표 대사는 그대로).
     names_ko = sorted({str(n).strip() for n in [ch.get("name") for ch in _cut_named(cut)]
