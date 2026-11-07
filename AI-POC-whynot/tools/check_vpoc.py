@@ -59720,7 +59720,8 @@ def check_vnew_edit_jl_ui_182() -> None:
             'var EDIT_SHIFT_MAX_S = 2;', 'var EDIT_SHIFT_STEP_S = 0.05;', 'var EDIT_DISSOLVES = [0.25, 0.5, 0.75, 1];',
             'var EDIT_DISSOLVE_SHARE = 0.45;', 'var EDIT_OFFSCREEN_GAIN = 0.6;',
             'var EDIT_TR_SHORT = "클립이 짧아 쓸 수 없습니다";', 'var EDIT_MUTED_NOTE = "소리 끈 클립";',
-            'var EDIT_FX_NOTE = "J/L컷·디졸브는 내보낸 영상에서 정확히 확인할 수 있습니다";']), [],
+            # 작업 186: 미리보기 안내에 대사 타이밍을 더했다(186 handoff 요구 4 — "J/L컷·디졸브·대사 타이밍은 …").
+            'var EDIT_FX_NOTE = "J/L컷·디졸브·대사 타이밍은 내보낸 영상에서 정확히 확인할 수 있습니다";']), [],
             "상수 · 한국어 글(막힌 디졸브 안내 · 소리 끈 클립 · 미리보기 안내)")
         server = [re.search(pattern, edit_py) for pattern in (
             r"(?m)^AUDIO_SHIFT_MAX_S = 2\.0$", r"(?m)^AUDIO_SHIFT_STEP_S = 0\.05$", r"(?m)^DISSOLVE_SECONDS = \(0\.25, 0\.5, 0\.75, 1\.0\)$",
@@ -59777,9 +59778,10 @@ def check_vnew_edit_jl_ui_182() -> None:
                                        'if (fit.length) own(i).transition = { type: "dissolve", seconds: fit[fit.length - 1] };',
                                        "else delete own(i).transition;", "return changed ? out : list;"]), [],
                "editTidyFx: 첫 클립 앞당김 · 마지막 클립 이어 감 · 전환 버림, 안 맞는 디졸브는 맞는 가장 긴 값 또는 컷")
+        # 작업 186: 4번째 = editTightenPlan(빈틈 다듬기 적용 계획이 줄인 클립의 디졸브를 같은 규칙으로 정리 — check 186 이 본다).
         expect("jlu-c", ["ctx.clips = editTidyFx(clips);" in body["editCommit"], "editTidyFx(list)" in body["editFitsTotal"],
                          vjs.count("editTidyFx(")],
-               [True, True, 3], "editCommit 이 모든 변경 뒤 부르고, 전체 길이 한도도 정리한 뒤 길이로 본다")
+               [True, True, 4], "editCommit 이 모든 변경 뒤 부르고, 전체 길이 한도도 정리한 뒤 길이로 본다")
         expect("jlu-c", [("editCommit(ctx, editMove(ctx.clips, from, drop)" in body["editClipPointer"]),
                          ("editCommit(ctx, editRemove(ctx.clips, ctx.sel)" in body["editDo"]),
                          ("editCommit(ctx, ctx.clips.slice(), { before: before, sel: index });" in body["editEdgePointer"]),
@@ -61068,6 +61070,183 @@ def check_vnew_edit_gap_slip_185() -> None:
            + "".join(f"\n       {r}" for r in report))
 
 
+# ---------------------------------------------------------------- 작업 186 — ⑦ 편집 화면 빈틈 다듬기 · 대사 타이밍(gsu-a~g)
+def check_vnew_edit_gap_slip_ui_186() -> None:
+    """작업 186 — ⑦ 편집 화면의 (c) 빈틈 다듬기 · (d) 대사 타이밍(vnew.js · vnew.css). 정적 검사만(node 실행 · 서버 · 네트워크 0).
+
+    (gsu-a) 조작 · 한국어 글: [빈틈 다듬기] · 확인 칸(클립 N개 · 총 X.X초 · 앞/뒤 줄 · 그대로 둠 4가지 · 적용/취소) · 이 클립 빈틈 다듬기 ·
+            대사 타이밍 칸(숫자 · 원래대로 · 입 모양 안내 · 소리 끈 클립 막기), 저장 · 내보내기 중 · 클립 없음이면 막기, 서버 값과 같다
+    (gsu-b) 다듬기 요청 · 적용: POST {editPath}/tighten {variant, clips} · 파형 먼저 받기 · noFilm 이면 받고 한 번 더 · 적용은 editCommit 한 번
+            (실행 취소 한 단계, 저장은 늘 하던 자동 저장) · 편집이 바뀌면 제안을 버린다 · 디졸브는 editTidyFx 로 정리
+    (gsu-c) 저장: editCloneClip 이 0 이 아닌 audioSlip 만 넣고(처음 사본 꼴에는 없다), 0 이면 키를 지운다 · 실행 취소 스냅샷도 그 사본
+    (gsu-d) 슬라이더: −1~+1초 · 0.05초 · 놓으면 바꾸기 · 값 격자(서버 _clean_slip 이 받는 꼴)
+    (gsu-e) 소리 줄: 재료 soundRanges 띠(속도 · 대사 타이밍 반영, 클립 밖 자름) · 파형도 대사 타이밍만큼 옮김
+    (gsu-f) 미리보기: 대사 타이밍은 숨은 소리 요소로 근사(editSlipAudioAt), 안내 · J 컷 근사 제외
+    (gsu-g) vnew.css 186 구역: 새 클래스 정의 · 768px 규칙 · 가로 스크롤 없음 · 고정 너비 960px 이하 · 확인 칸 한 줄 전체 · LF
+    """
+    bad: list[str] = []
+    seen: set[str] = set()
+
+    def expect(group: str, got, want, what: str) -> None:
+        seen.add(group)
+        if got != want:
+            bad.append(f"({group}) {what}\n      결과 {got!r}\n      기대 {want!r}")
+
+    def missing(text: str, needles) -> list[str]:
+        return [n for n in needles if n not in text]
+
+    try:
+        vjs = (PUBLIC / "vnew.js").read_text(encoding="utf-8")
+        css = (PUBLIC / "vnew.css").read_text(encoding="utf-8")
+        edit_py = (ROOT / "app" / "src" / "vnew" / "edit.py").read_text(encoding="utf-8")
+        routes_py = (ROOT / "app" / "src" / "vnew" / "routes.py").read_text(encoding="utf-8")
+        names = ("editCloneClip", "editSaveBody", "editSnapshotOf", "editUndoRedo", "editCommit", "editChanged", "editHasFx", "editSlipSnap",
+                 "editSlipOf", "editSlipText", "editSoundBands", "editPeakPath", "editAudioLane", "editPaintClip", "editTightenSec",
+                 "editTightenCutText", "editTightenPlan", "editBuild", "editRenderTools", "editRenderSave", "editDialogueBox", "editRenderDialogue",
+                 "editApplySlip", "editTightenButton", "editTightenBlocked", "editRenderTightenTools", "editTightenMids", "editTightenMedia",
+                 "editTightenCall", "editTightenStart", "editRenderTighten", "editTightenApply", "editTightenClose", "editMediaLoad",
+                 "editPumpMedia", "editSlipAudioAt", "editSyncAudio", "editFxLeadTick", "editOnKey", "editLeave")
+        body = {name: _jlu_body(vjs, name) for name in names}
+        expect("gsu-a", sorted(name for name, text in body.items() if not text), [], "함수가 vnew.js 에 하나씩 있다")
+
+        # ---------------- (gsu-a) 조작 · 한국어 글 · 서버와 같은 값
+        expect("gsu-a", missing(vjs, [
+            "var EDIT_SLIP_MAX_S = 1;", 'var EDIT_SLIP_NOTE = "소리만 옮깁니다. 말하는 사람 입이 화면에 보이면 입 모양과 어긋날 수 있습니다.";',
+            'muted: "그대로 둠 (소리 끈 클립)",', 'noSound: "그대로 둠 (소리 없음)",', 'noFilm: "그대로 둠 (파형 준비 중)",', 'short: "그대로 둠 (이미 짧음)"',
+            'var EDIT_FX_NOTE = "J/L컷·디졸브·대사 타이밍은 내보낸 영상에서 정확히 확인할 수 있습니다";']), [],
+            "상수 · 한국어 글(입 모양 안내 · 그대로 둔 이유 4가지 · 미리보기 안내)")
+        server = [bool(re.search(p, edit_py)) for p in (r"(?m)^AUDIO_SLIP_MAX_S = 1\.0$", r"(?m)^AUDIO_SHIFT_STEP_S = 0\.05$")]
+        server += [f'info["skipped"] = "{k}"' in edit_py for k in ("muted", "noFilm", "noSound")] + ['"short" if head + tail' in edit_py]
+        expect("gsu-a", server, [True] * 6, "서버 edit.py 값(−1~1초 · 0.05초)과 perClip skipped 4가지(muted · noFilm · noSound · short)가 화면과 같다")
+        expect("gsu-a", [missing(body["editTightenButton"], ['"빈틈 다듬기"', "editTightenStart(ctx, -1);", "ctx.dom.btnTighten = btn;"]),
+                         missing(body["editDialogueBox"], ['"대사 타이밍"', 'el("button", "outline-button vnew-edit-dlg-reset", "원래대로")',
+                                                           'el("button", "outline-button vnew-edit-tighten-one", "이 클립 빈틈 다듬기")',
+                                                           "editTightenStart(ctx, ctx.sel);", 'el("span", "vnew-hint vnew-edit-dlg-note", EDIT_SLIP_NOTE)',
+                                                           'el("span", "vnew-hint vnew-edit-dlg-muted", EDIT_MUTED_NOTE)']),
+                         missing(body["editBuild"], ["tools.appendChild(editTightenButton(ctx));", "tools.appendChild(editDialogueBox(ctx));",
+                                                     "d.tools = tools;", "ctx.tighten = null;"]),
+                         "editRenderDialogue(ctx);" in body["editRenderTools"]],
+               [[], [], [], True], "도구줄 [빈틈 다듬기] · 고른 클립 칸(대사 타이밍 · 원래대로 · 이 클립 빈틈 다듬기 · 안내 2줄), 고름이 바뀌면 다시 칠한다")
+        expect("gsu-a", [missing(body["editRenderTighten"], [
+            '"클립 " + plan.count + "개에서 앞뒤 빈 소리 구간을 줄입니다 · 총 " + editTightenSec(plan.saved) + "초 짧아짐"',
+            'el("button", "primary-button vnew-edit-tighten-apply", "적용")', 'el("button", "outline-button vnew-edit-tighten-cancel", "취소")',
+            "cut || EDIT_TIGHTEN_SKIP[row.skipped] || EDIT_TIGHTEN_NONE", 'el("span", "vnew-edit-tighten-tr", note)', "apply.disabled = !plan.count;",
+            "editTightenApply(ctx);", "editTightenClose(ctx, true);", "d.tools.appendChild(box);"]),
+                         missing(body["editTightenCutText"], ['"앞 −" + editTightenSec(head) + "초"', '"뒤 −" + editTightenSec(tail) + "초"',
+                                                              'parts.join(" · ")']),
+                         missing(body["editSlipText"], ['"+" + v.toFixed(2) + "초 늦게"', '"−" + (-v).toFixed(2) + "초 빨리"', '"0 (원래대로)"']),
+                         'v > 0 && v < 0.1 ? v.toFixed(2) : v.toFixed(1)' in body["editTightenSec"]],
+               [[], [], [], True], "확인 칸: 클립 N개 · 총 X.X초 · 클립별 앞/뒤 줄 · 그대로 둔 이유 · 디졸브 줄 · 적용/취소, 숫자 표시 +0.30초 늦게 · −0.20초 빨리 · 0")
+        expect("gsu-a", [missing(body["editTightenBlocked"], ["ctx.busy", "ctx.saving", "ctx.exporting", "!ctx.clips.length", "ctx.tighten.busy"]),
+                         missing(body["editRenderTightenTools"], ["d.btnTighten.disabled = blocked;",
+                                                                  "d.btnTightenOne.disabled = blocked || !clip || clip.muted === true;"]),
+                         "editRenderTightenTools(ctx);" in body["editRenderSave"],
+                         "if (!editAlive(ctx) || editTightenBlocked(ctx)) return;" in body["editTightenStart"],
+                         missing(body["editRenderDialogue"], ["s.range.disabled = !clip || muted || ctx.busy;", 's.muted.style.display = muted ? "" : "none";',
+                                                              "editRenderTightenTools(ctx);"]),
+                         'if (ctx.tighten && ctx.tighten.open && event && event.key === "Escape") {' in body["editOnKey"],
+                         "ctx.tighten = null;" in body["editLeave"]],
+               [[], [], True, True, [], True, True],
+               "저장 중(PUT) · 내보내기 요청 중 · 클립 없음 · 받는 중이면 막고(저장 상태가 바뀔 때도), 소리 끈 클립은 대사 타이밍 · 이 클립 다듬기를 막는다 · Esc · 떠나기")
+
+        # ---------------- (gsu-b) 다듬기 요청 · 적용(실행 취소 한 단계)
+        expect("gsu-b", [missing(body["editTightenCall"], ['api(editPath(ctx) + "/tighten", {', 'method: "POST"',
+                                                           "JSON.stringify({ variant: ctx.variant, clips: editCloneClips(ctx.clips) })"]),
+                         '@bp.post("/p/<pid>/edit/tighten")' in routes_py, 'return "/api/vnew/p/" + encodeURIComponent(ctx.pid) + "/edit";' in vjs],
+               [[], True, True], "POST /api/vnew/p/<pid>/edit/tighten {variant, 저장 전 지금 클립} — 서버 라우트(작업 185)와 같은 길")
+        start = body["editTightenStart"]
+        expect("gsu-b", [missing(start, ["editTightenMedia(ctx, editTightenMids(ctx, targets, null), stale)", "var again = editTightenMids(ctx, targets, res);",
+                                         "return editTightenMedia(ctx, again, stale).then(function () {", "ctx.rev !== job.rev",
+                                         "job.plan = editTightenPlan(ctx.clips, res, only);", "editRenderTighten(ctx);"]),
+                         start.count("editTightenCall(ctx)"), 'p.skipped === "noFilm"' in body["editTightenMids"],
+                         '(ctx.media[mid] || {}).status !== "done"' in body["editTightenMids"],
+                         "editMediaLoad(ctx, mid)" in body["editTightenMedia"], "editMediaLoad(ctx, mid)" in body["editPumpMedia"],
+                         'if (keep && keep.status === "loading" && keep.wait) return keep.wait;' in body["editMediaLoad"]],
+               [[], 2, True, True, True, True, True],
+               "부르기 전에 파형(필름)을 받고, noFilm 이면 그 재료를 받아 한 번 더(두 번까지) · 받는 중인 파형은 같이 기다린다 · 편집이 바뀌면 버린다")
+        apply = body["editTightenApply"]
+        expect("gsu-b", [apply.count("editCommit("), "editCommit(ctx, plan.clips, { sel: ctx.sel });" in apply,
+                         [w for w in ("editHistPush", "api(", "editFlushSave") if w in apply],
+                         "if (ctx.rev !== job.rev) {" in apply, "editHistPush(ctx.hist, o.before || editSnapshotOf(ctx.variant, ctx.clips));" in body["editCommit"],
+                         "if (ctx.tighten) editTightenClose(ctx);" in body["editChanged"]],
+               [1, True, [], True, True, True], "적용 = editCommit 한 번(실행 취소 한 단계 · 바로 저장 안 함 · 자동 저장만), 편집이 바뀌면 제안을 닫는다")
+        plan = body["editTightenPlan"]
+        expect("gsu-b", missing(plan, ["var tidy = editTidyFx(merged);", "copy.in = editRound3(a);", "copy.out = editRound3(b);",
+                                       "a >= copy.in - 1e-9 && b <= copy.out + 1e-9 && b > a", "if (!only && (info[id] || {}).transition) {",
+                                       'editTightenTrText("다음 전환", tr.from, tr.to)', 'trNote(index - 1, "앞 전환")',
+                                       "return { clips: tidy, rows: rows, count: count, saved: editRound3(saved) };"]), [],
+               "적용 계획: id 로 in·out 만(줄이기만), 전체면 서버 디졸브(perClip transition), 이 클립이면 앞뒤 전환을 직접 견주고, editTidyFx 로 정리")
+
+        # ---------------- (gsu-c) 저장은 0 이 아닐 때만
+        clone = body["editCloneClip"]
+        init = clone[:clone.find("};")]
+        expect("gsu-c", [missing(clone, ["var slip = editSlipOf(clip);", "if (slip) copy.audioSlip = slip;"]), "audioSlip" in init,
+                         missing(body["editApplySlip"], ["if (value) next.audioSlip = value;", "else delete next.audioSlip;", "editReplaceSel(ctx, next);"]),
+                         "clips: editCloneClips(clips)" in body["editSaveBody"], "clips: editCloneClips(clips)" in body["editSnapshotOf"],
+                         "ctx.clips = editCloneClips(snap.clips);" in body["editUndoRedo"]],
+               [[], False, [], True, True, True],
+               "editCloneClip: audioSlip 은 0 이 아닐 때만(처음 사본 꼴에 없다), 0 이면 키를 지운다 · 저장 바디 · 실행 취소 스냅샷 · 되돌리기가 그 사본")
+
+        # ---------------- (gsu-d) 슬라이더 범위 · 단위
+        expect("gsu-d", [missing(body["editDialogueBox"], ['range.type = "range";', "range.min = String(-EDIT_SLIP_MAX_S);", "range.max = String(EDIT_SLIP_MAX_S);",
+                                                           "range.step = String(EDIT_SHIFT_STEP_S);", 'range.addEventListener("input"',
+                                                           'range.addEventListener("change"', "editApplySlip(ctx, range.value);", "editApplySlip(ctx, 0);",
+                                                           "editSlipPreview(ctx, value);"]),
+                         "var EDIT_SHIFT_STEP_S = 0.05;" in vjs,
+                         missing(body["editSlipSnap"], ["Math.max(-EDIT_SLIP_MAX_S, Math.min(EDIT_SLIP_MAX_S, v))",
+                                                        "Math.round(v / EDIT_SHIFT_STEP_S) * EDIT_SHIFT_STEP_S", "return v || 0;"])],
+               [[], True, []], "대사 타이밍 슬라이더 −1~+1초 · 0.05초 · 끄는 동안 미리 칠하고 놓으면 바꾸기 · 원래대로 = 0, 값은 −1~1 · 0.05 격자")
+
+        # ---------------- (gsu-e) 소리 줄: 소리 구간 띠 · 대사 타이밍만큼 옮김
+        expect("gsu-e", [missing(body["editAudioLane"], ["editSoundBands(clip, m.data.soundRanges)", "editPeakPath(clip, peaks, shift)",
+                                                         "var shift = slip ? slip * editSpeedOf(clip) : 0;"]),
+                         missing(body["editSoundBands"], ["var slip = editSlipOf(clip);", "(Number(range[0]) - start) / speed + slip",
+                                                          "(Number(range[1]) - start) / speed + slip", "b = Math.min(len, b);"]),
+                         missing(body["editPaintClip"], ["(lane.bands || []).forEach(function (band) {", 'el("span", "vnew-edit-sband")',
+                                                         "band.from * ctx.pps"]),
+                         missing(body["editPeakPath"], ["var move = Number(shift) || 0;", "(Number(clip.in) - move) * per", "(Number(clip.out) - move) * per"]),
+                         '"soundRanges": _film_ranges(data),' in edit_py],
+               [[], [], [], [], True], "소리 줄: 재료 soundRanges(서버 media 응답)를 속도 · 대사 타이밍으로 옮긴 띠 · 파형 창도 같은 만큼 옮김")
+
+        # ---------------- (gsu-f) 미리보기 근사 · 안내
+        expect("gsu-f", ["editSlipAudioAt(from, clip, source, (ctx.materials[key] || {}).duration)" in body["editSyncAudio"],
+                         "var heard = (Number(source) || 0) - editSlipOf(clip) * editSpeedOf(clip);" in body["editSlipAudioAt"],
+                         "!!editSlipOf(clip)" in body["editHasFx"], "|| editSlipOf(next)) return;" in body["editFxLeadTick"]],
+               [True] * 4, "미리보기: 대사 타이밍은 숨은 소리 요소가 원본 t − slip × 속도를 낸다 · 쓰면 안내가 보인다 · 그 클립 J 컷 근사는 뺀다")
+
+        # ---------------- (gsu-g) CSS
+        start_css = css.find("/* ================================================================ ⑦ 편집 — 빈틈 다듬기 · 대사 타이밍(작업 186)")
+        section = css[start_css:] if start_css >= 0 else ""
+        classes = ["vnew-edit-sband", "vnew-edit-tighten-btn", "vnew-edit-dlg", "vnew-edit-dlg-field", "vnew-edit-dlg-text", "vnew-edit-dlg-range",
+                   "vnew-edit-dlg-value", "vnew-edit-dlg-reset", "vnew-edit-tighten-one", "vnew-edit-dlg-note", "vnew-edit-dlg-muted", "vnew-edit-tighten",
+                   "vnew-edit-tighten-title", "vnew-edit-tighten-list", "vnew-edit-tighten-row", "vnew-edit-tighten-name", "vnew-edit-tighten-cut",
+                   "vnew-edit-tighten-tr", "vnew-edit-tighten-actions", "vnew-edit-tighten-apply", "vnew-edit-tighten-cancel"]
+        defined = set(re.findall(r"\.(vnew-edit-[a-z0-9-]+)", section))
+        widths = [int(w) for w in re.findall(r"(?<![-\w])(?:min-)?width: (\d+)px", section)]
+        expect("gsu-g", [start_css > 0, sorted(set(classes) - defined), sorted(c for c in classes if c not in vjs),
+                         "@media (max-width: 768px) {" in section, "overflow-x" in section, max(widths or [0]) <= 960,
+                         "flex: 1 1 100%;" in _edu_css_block(css, ".vnew-edit-tighten", start_css),
+                         "position: relative;" in _edu_css_block(css, ".vnew-edit-aclip .vnew-edit-wave", start_css),
+                         # 바이트로 본다(read_text 는 \r\n 을 \n 으로 바꿔 읽어 CR 을 놓친다)
+                         any(b"\r" in (PUBLIC / name).read_bytes() for name in ("vnew.css", "vnew.js")), css.endswith("}\n")],
+               [True, [], [], True, False, True, True, True, False, True],
+               "CSS 186 구역: 새 클래스 정의 · 768px 규칙 · 가로 스크롤 없음 · 960px 이하 · 확인 칸 한 줄 전체 · 띠 위 파형 · LF")
+    except Exception as exc:  # noqa: BLE001
+        import traceback as _tb  # noqa: PLC0415
+
+        bad.append("(gsu) 예외: " + repr(exc) + "\n" + _tb.format_exc()[:1200])
+
+    groups = {f"gsu-{c}" for c in "abcdefg"}
+    if groups - seen and not bad:
+        bad.append(f"검사하지 못한 묶음: {sorted(groups - seen)}")
+    if bad:
+        for item in bad:
+            fail("작업 186 ⑦ 편집 화면 빈틈 다듬기 · 대사 타이밍 " + item)
+    else:
+        ok("작업 186 ⑦ 편집 화면 빈틈 다듬기 · 대사 타이밍 정적 검사 (gsu-a)조작 · 한국어 글 · 서버 값 (gsu-b)POST /tighten · 적용 한 단계 "
+           "(gsu-c)0 은 저장 안 함 (gsu-d)슬라이더 −1~1 · 0.05 (gsu-e)soundRanges 띠 (gsu-f)미리보기 근사 (gsu-g)CSS")
+
+
 
 # ---------------------------------------------------------------- 작업 187 — 상단 경로에 지금 프로젝트 이름(tp-a~e)
 def _tp_fn(src: str, name: str) -> str:
@@ -61468,6 +61647,7 @@ def main() -> int:
     check_vnew_insert_sleeve_183()
     check_vnew_closeup_garment_184()
     check_vnew_edit_gap_slip_185()
+    check_vnew_edit_gap_slip_ui_186()
     check_topbar_project_187()
     print()
     if warnings:

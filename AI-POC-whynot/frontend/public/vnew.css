@@ -5239,3 +5239,180 @@ textarea.vnew-field-input {
     min-height: 40px;
   }
 }
+
+
+/* ================================================================ ⑦ 편집 — 빈틈 다듬기 · 대사 타이밍(작업 186)
+   소리 줄에는 재료 소리 구간(soundRanges, 주로 대사)을 파형 뒤 옅은 띠로 — 띠 사이가 빈 소리 구간이다. 도구줄에는 [빈틈 다듬기]와
+   고른 클립 대사 타이밍(−1~+1초 슬라이더 · 숫자 · 원래대로) · [이 클립 빈틈 다듬기], 확인 칸은 도구줄 맨 끝 한 줄 전체.
+   가로로 넘치는 것은 여전히 타임라인 하나뿐이다(확인 칸 목록은 세로로만 스크롤). */
+
+/* 소리 구간 띠(파형 뒤). 파형 SVG 를 위치 지정해 띠 위에 그린다. */
+.vnew-edit-sband {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  border-radius: 3px;
+  background: rgba(79, 123, 214, 0.2);
+  pointer-events: none;
+}
+
+.vnew-edit-aclip .vnew-edit-wave {
+  position: relative;
+}
+
+/* 도구줄 [빈틈 다듬기]: 도구 버튼과 같은 모양 */
+.vnew-edit-tighten-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  min-height: 34px;
+  padding: 0 10px;
+  border: 1px solid var(--line, #e5e7eb);
+  border-radius: 8px;
+  background: var(--surface, #ffffff);
+  color: var(--text, #1b1d21);
+  font: inherit;
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.vnew-edit-tighten-btn:hover:not(:disabled) {
+  border-color: var(--accent, #cb3208);
+}
+
+.vnew-edit-tighten-btn:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+/* 도구줄: 고른 클립 대사 타이밍 + 이 클립 빈틈 다듬기, 안내는 아래 줄 */
+.vnew-edit-dlg {
+  display: inline-flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 10px;
+  min-width: 0;
+}
+
+.vnew-edit-dlg-field {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  font-size: 13px;
+  color: var(--text-muted, #6b7280);
+}
+
+.vnew-edit-dlg-text {
+  white-space: nowrap;
+}
+
+.vnew-edit-dlg-range {
+  width: 140px;
+  min-width: 0;
+}
+
+.vnew-edit-dlg-range:disabled {
+  opacity: 0.4;
+}
+
+.vnew-edit-dlg-value {
+  min-width: 84px;
+  color: var(--text, #1b1d21);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.vnew-edit-dlg-reset,
+.vnew-edit-tighten-one {
+  min-height: 34px;
+  padding: 0 10px;
+  font-size: 13px;
+}
+
+.vnew-edit-dlg-note,
+.vnew-edit-dlg-muted {
+  flex: 1 1 100%;
+  min-width: 0;
+  font-size: 12px;
+}
+
+/* 빈틈 다듬기 확인 칸(도구줄 맨 끝 한 줄 전체) */
+.vnew-edit-tighten {
+  flex: 1 1 100%;
+  min-width: 0;
+  box-sizing: border-box;
+  padding: 10px 12px;
+  border: 1px solid var(--line, #e5e7eb);
+  border-radius: 10px;
+  background: var(--surface, #ffffff);
+}
+
+.vnew-edit-tighten-title {
+  margin: 0 0 6px;
+  color: var(--text, #1b1d21);
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.vnew-edit-tighten-list {
+  display: grid;
+  gap: 2px;
+  max-height: 220px;
+  margin: 0 0 8px;
+  padding: 0;
+  overflow-y: auto;
+  list-style: none;
+}
+
+.vnew-edit-tighten-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 2px 10px;
+  min-width: 0;
+  padding: 3px 0;
+  font-size: 13px;
+}
+
+.vnew-edit-tighten-name {
+  min-width: 0;
+  color: var(--text, #1b1d21);
+  overflow-wrap: anywhere;
+}
+
+.vnew-edit-tighten-cut {
+  color: var(--accent, #cb3208);
+  font-variant-numeric: tabular-nums;
+}
+
+.vnew-edit-tighten-row.is-kept .vnew-edit-tighten-cut,
+.vnew-edit-tighten-tr {
+  color: var(--text-muted, #6b7280);
+}
+
+.vnew-edit-tighten-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+@media (max-width: 768px) {
+  .vnew-edit-dlg {
+    width: 100%;
+  }
+
+  .vnew-edit-dlg-field {
+    flex: 1 1 100%;
+  }
+
+  .vnew-edit-dlg-range {
+    flex: 1 1 auto;
+    width: auto;
+  }
+
+  .vnew-edit-tighten-actions .vnew-edit-tighten-apply,
+  .vnew-edit-tighten-actions .vnew-edit-tighten-cancel {
+    flex: 1 1 0;
+    min-height: 40px;
+  }
+}
