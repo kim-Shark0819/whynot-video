@@ -8566,11 +8566,12 @@ def _cut_view_side(plan: dict, cut_id: str) -> str:
     return "front" if dz > abs(dx) else "back"
 
 
-def _cut_location_view(plan: dict, cut_id: str) -> tuple[bytes, str] | None:
+def _cut_location_view(plan: dict, cut_id: str, found: dict | None = None) -> tuple[bytes, str] | None:
     """작업 135: 그 컷 장소 공간 시트의 실사 뷰 이미지 (jpeg, "back"|"front"). 없으면 None(시작 그림·QA 는 지금과 같다).
 
     장소 = 콘티 cut.locationEn(_location_by_name), 못 찾으면 프리비즈 scene.locationId 와 같은 id 의 location.
     뷰 = 카메라가 보는 쪽(_cut_view_side), 그 키가 없으면 다른 쪽. locations real variant viewKeys 를 읽기만 한다.
+    작업 178: found(dict)를 주면 읽은 키를 found["key"] 에 담는다(기록용).
     """
     conti_cut = next((c for c in (plan.get("conti") or {}).get("cuts") or [] if str(c.get("id")) == str(cut_id)), {})
     loc = _location_by_name(plan, str(conti_cut.get("locationEn") or "")) if conti_cut.get("locationEn") else None
@@ -8585,6 +8586,8 @@ def _cut_location_view(plan: dict, cut_id: str) -> tuple[bytes, str] | None:
         key = str(keys.get(view) or "")
         jpeg = _load_jpeg(key) if key else None
         if jpeg:
+            if found is not None:
+                found["key"] = key
             return jpeg, view
     return None
 
@@ -9068,7 +9071,8 @@ def _submit_kling_part_cut(owner: str, pid: str, gen_id: str, plan: dict, ctx: d
     작업 172: 인서트가 아닌 컷이 샷이 바뀌면(앞이 인서트여도) 이음 결과(_continuity_source(used), 인서트가 아닌 가장 늦은 결과)의
     마지막 프레임에서 시작한다(startReason shotChange · startImage prevFrame, 크기는 FRAMING 줄). 인서트 컷 · 이음 결과가 없으면
     시작 그림 — 그 시작 그림 검사가 다시 그린 뒤에도 shot 이 틀리면 이음 결과 마지막 프레임으로 바꾼다(_submit_real_cut fallback).
-    used 가 없으면(검사 호출) 이음 결과 = before(인서트로 끝나지 않을 때)."""
+    used 가 없으면(검사 호출) 이음 결과 = before(인서트로 끝나지 않을 때).
+    작업 178: shotChange · insert 는 hard_cut 으로 넘긴다 — elements Kling 이면 시작 그림을 보내지 않는다(_submit_real_cut)."""
     cut_id = str(item.get("cutId") or "")
     unit = next((u for u in _take_cut_units(plan, take) if str(u.get("cutId") or "") == cut_id), None)
     if unit is None:
@@ -9093,6 +9097,8 @@ def _submit_kling_part_cut(owner: str, pid: str, gen_id: str, plan: dict, ctx: d
         key, secs = str(source["outputKey"]), float(source.get("seconds") or 0)
         fallback = lambda: (_video_last_frame(key, secs), key + "#last")  # noqa: E731 — 작업 172: 시작 그림 shot 실패 때만 읽는다
     extra = {"fallback": fallback} if fallback else {}
+    if reason in ("shotChange", "insert"):
+        extra["hard_cut"] = reason  # 작업 178: elements Kling 이면 시작 그림 없이(장소 뷰 · 이음 프레임은 @Image 참고)
     record = _submit_real_cut(owner, pid, gen_id, plan, ctx, cut, start=start, start_key=start_key, **extra)
     del start
     out = {**item, **record, "sig": sig, "kind": "kling", "cutIds": [cut_id], "seconds": float(item.get("seconds") or 0)}
@@ -9318,6 +9324,38 @@ def _kling_cut_inputs(owner: str, pid: str, plan: dict, ctx: dict, cut_id: str, 
         layout = {**pieces, "refs": list(kling_refs["lines"]),
                   "costume": "" if kling_refs.get("costumeRefs") else pieces.get("costume") or ""}
     return lock, kling_refs, cut_max, layout
+
+
+# 작업 178: 하드 컷(shotChange · insert) elements Kling 컷의 참고 그림 줄(@Image 번호 = 실제 목록 순서). 시작 그림은 보내지 않는다.
+REAL_CUT_IMAGE_LOCATION = "{tag} is the location only (no people): keep this place, its background and light."
+REAL_CUT_IMAGE_LOOK = ("{tag}: look reference only (lighting, outfits, hair); this is a hard cut to a new framing, do not "
+                       "reproduce this image's framing or pose.")
+
+
+def _kling_hard_cut_images(plan: dict, ctx: dict, cut_id: str, n_elements: int, layout: dict, look, look_key: str,
+                           fallback) -> tuple[list[tuple[str, bytes]], int, dict]:
+    """작업 178: 하드 컷 elements Kling 컷의 참고 그림 → (images [(키, jpeg)], cut_max, layout).
+    images = [장소 뷰(_cut_location_view, 사람 없음), 이음 프레임(look, 없으면 fallback())] 중 있는 것, 상한 = caps.imageListMax 와
+    elements 합계 PREVIZ_MAX_INPUTS 안. layout.refs 끝에 @Image 줄, noStart(시작 그림 줄 없음). cut_max = 167 태그 여유 상한
+    (태그 = elements + @Image)."""
+    caps = ctx.get("caps") or {}
+    room = min(int(caps.get("imageListMax") or vpoc_fal.DEFAULT_IMAGE_LIST_MAX),
+               max(0, int(vnew_settings.PREVIZ_MAX_INPUTS) - int(n_elements)))
+    images: list[tuple[str, bytes]] = []
+    lines: list[str] = []
+    found: dict = {}
+    sheet = _cut_location_view(plan, cut_id, found=found) if room > 0 else None
+    if sheet is not None:
+        images.append((str(found.get("key") or ""), sheet[0]))
+        lines.append(REAL_CUT_IMAGE_LOCATION.format(tag=f"@Image{len(images)}"))
+    if len(images) < room:
+        if not (isinstance(look, (bytes, bytearray)) and look) and fallback is not None:
+            look, look_key = fallback()
+        if isinstance(look, (bytes, bytearray)) and look:
+            images.append((str(look_key or ""), bytes(look)))
+            lines.append(REAL_CUT_IMAGE_LOOK.format(tag=f"@Image{len(images)}"))
+    layout = {**layout, "refs": [*(layout.get("refs") or []), *lines], "noStart": True}
+    return images, _kling_cut_prompt_max(ctx, int(n_elements) + len(images)), layout
 
 
 def _kling_cut_prompt_max(ctx: dict, tags: int) -> int:
@@ -9667,7 +9705,8 @@ def _pack_still_people(rows, refs: list, cap: int) -> tuple[list[tuple[str, str,
 
 
 def _submit_real_cut(owner: str, pid: str, gen_id: str, plan: dict, ctx: dict, cut: dict, *, fix: str = "",
-                     tag: str = "", start: bytes | None = None, start_key: str = "", fallback=None) -> dict:
+                     tag: str = "", start: bytes | None = None, start_key: str = "", fallback=None,
+                     hard_cut: str = "") -> dict:
     """컷 1개: 시작 그림(Seedream) 1장 + Kling 1번 제출(작업 132). 원장은 시작 그림·Kling 제출 성공 때. 돌려주는 값 = 칸 fallback.cuts 항목.
 
     작업 133: fix(QA 교정 문장)·tag(출력 경로·원장 키 꼬리, 다시 만들기 "-qa")가 있으면 그 컷 다시 만들기다. takeAt = 테이크 안 컷 시작 초.
@@ -9679,6 +9718,9 @@ def _submit_real_cut(owner: str, pid: str, gen_id: str, plan: dict, ctx: dict, c
     틀리면 Seedream 만 1번 다시. 컷 기록 animeLayout·stillCheck. 읽기 실패(None)면 138 과 같다.
     작업 172: fallback(() → (이음 결과 마지막 프레임, 키))이 있고 다시 그린 시작 그림도 shot 이 틀리면 그 프레임에서 시작
     (stillCheck.used "prevFrame", startImage prevFrame, Kling 글 = 앞 샷 프레임 문장).
+    작업 178: hard_cut("shotChange" · "insert", 조각 Kling 컷)이고 Kling 본문이 elements(klingRefs "elements")이며 모델에
+    imageListField 가 있으면 시작 그림을 보내지 않는다(Seedream · 시작 그림 검사도 없음). 대신 그 목록에 [장소 뷰(135, 사람 없음),
+    이음 프레임(start, 없으면 fallback())] = @Image1 · @Image2 줄, 시작 그림 줄 없음, startImage "none" · klingImages(키).
     """
     endpoint, caps, take_id, attempt = ctx["endpoint"], ctx["caps"], ctx["takeId"], ctx["attempt"]
     beat = ctx.get("beat") or (lambda: None)  # 작업 144: 2단계 첫 제출만 — 하트비트 + 선점 확인(잃으면 _Discard)
@@ -9687,17 +9729,26 @@ def _submit_real_cut(owner: str, pid: str, gen_id: str, plan: dict, ctx: dict, c
     start_sec = float(cut.get("startSec") or 0)
     take_at = round(ctx["offsets"].get(str(cut.get("recSegId") or ""), 0.0) + start_sec, 3)
     from_prev = isinstance(start, (bytes, bytearray)) and bool(start)  # 작업 169: 앞 조각·앞 컷 결과의 마지막 프레임
-    frame, source = None, ("prevFrame" if from_prev else "previz")
-    if not from_prev:
+    duration = _kling_duration(caps, float(cut.get("seconds") or 0))
+    # 작업 132: 실사 컷 프롬프트(그림체 real). 시작 그림(유료) 전에 만들고, "webtoon" 이 남으면 제출하지 않는다.
+    lock, kling_refs, cut_max, layout = _kling_cut_inputs(owner, pid, plan, ctx, cut_id, float(cut.get("seconds") or 0))
+    images: list[tuple[str, bytes]] = []
+    hard = (hard_cut in ("shotChange", "insert") and kling_refs["mode"] == "elements" and layout is not None
+            and bool(caps.get("imageListField")))
+    if hard:
+        # 작업 178: 시작 그림이 있으면 Kling O3 가 그 그림을 이어 가 새 샷의 FRAMING 을 무시한다 → 시작 그림 없음
+        images, cut_max, layout = _kling_hard_cut_images(plan, ctx, cut_id, len(kling_refs["elements"]), layout,
+                                                         start if from_prev else None, start_key if from_prev else "",
+                                                         fallback)
+        start, start_key, from_prev, fallback = None, "", False, None
+    frame, source = None, ("prevFrame" if from_prev else "none" if hard else "previz")
+    if not from_prev and not hard:
         if ctx["anime"]:
             frame = _cut_first_frame(ctx["anime"], take_at)
             source = "anime" if frame else "previz"
         if frame is None:
             frame = _cut_first_frame(_fetch_bytes(str(cut.get("recordingKey") or ""), bucket=vpoc_settings.VIDEO_BUCKET), start_sec)
     ctx["stage"] = "still"
-    duration = _kling_duration(caps, float(cut.get("seconds") or 0))
-    # 작업 132: 실사 컷 프롬프트(그림체 real). 시작 그림(유료) 전에 만들고, "webtoon" 이 남으면 제출하지 않는다.
-    lock, kling_refs, cut_max, layout = _kling_cut_inputs(owner, pid, plan, ctx, cut_id, float(cut.get("seconds") or 0))
     kling_prompt = _segment_prompt(plan, {"cutIds": [cut_id]}, first_segment=True, model=ctx["modelId"], real=True,
                                    prompt_max=cut_max, fix=fix, bases=ctx.get("bases"), lock=lock,
                                    from_prev=from_prev, kling=layout)
@@ -9705,7 +9756,10 @@ def _submit_real_cut(owner: str, pid: str, gen_id: str, plan: dict, ctx: dict, c
     layout = still_check = None
     people: list = []
     refs_kind, sheet_view = "prevFrame", "none"
-    if from_prev:
+    if hard:
+        still = None  # 작업 178: 시작 그림 없음(참고 = images)
+        refs_kind = "images"
+    elif from_prev:
         still = bytes(start)  # 작업 169: 시작 그림 = 앞 샷 마지막 프레임(Seedream·시작 그림 검사 없음)
     else:
         refs = [_fit_ref(frame)] if frame else []
@@ -9790,18 +9844,25 @@ def _submit_real_cut(owner: str, pid: str, gen_id: str, plan: dict, ctx: dict, c
                     _assert_no_webtoon(kling_prompt)
                 del prev_frame
         del frame, refs, sheet
-    ctx["prevStill"] = still  # 작업 160: 다음 컷 시작 그림의 참고(메모리, 이 컷 루프 동안만)
+    if still is not None:
+        ctx["prevStill"] = still  # 작업 160: 다음 컷 시작 그림의 참고(메모리, 이 컷 루프 동안만)
     beat()  # 작업 144: Kling 제출(유료) 전
     ctx["stage"] = "submit"
     out_prefix = _seg_output_prefix(owner, pid, gen_id, f"{take_id}-real-{cut_id}{tag}", attempt)
-    still_key = _keep_cut_still(pid, out_prefix, still)  # 작업 131: ⑦ AI로 고치기가 같은 시작 그림으로 다시 낸다
+    still_key = _keep_cut_still(pid, out_prefix, still) if still is not None else ""  # 작업 131: ⑦ AI로 고치기가 같은 시작 그림으로 다시 낸다
     body = vpoc_fal.build_payload({**caps, "durations": [duration]}, prompt=kling_prompt,
-                                  keyframe_jpeg_b64=base64.b64encode(still).decode("ascii"), duration_s=duration,
-                                  prompt_max=cut_max)
+                                  keyframe_jpeg_b64=base64.b64encode(still).decode("ascii") if still is not None else "",
+                                  duration_s=duration, prompt_max=cut_max)
     del still
     if kling_refs["elements"]:
         body[str(caps["elementsField"])] = kling_refs["elements"]  # 작업 176: 보이는 인물 신원 정면 + 장면 옷 그림
     kling_refs["elements"] = []
+    if images:
+        # 작업 178: 하드 컷 참고 그림(@Image1 장소 뷰 · @Image2 이음 프레임) — 시작 그림 자리는 비운다
+        body[str(caps["imageListField"])] = ["data:image/jpeg;base64," + base64.b64encode(_fit_ref(jpeg)).decode("ascii")
+                                             for _key, jpeg in images]
+    image_keys = [key for key, _jpeg in images]
+    images = []
     sent_prompt = str(body.get(caps.get("promptField") or "prompt") or "")
     result = _previz_request("POST", f"{vpoc_settings.FAL_QUEUE_URL}/{endpoint}", body)
     del body
@@ -9816,8 +9877,11 @@ def _submit_real_cut(owner: str, pid: str, gen_id: str, plan: dict, ctx: dict, c
                  cell_id=f"{take_id}#{cut_id}", index=int(ctx.get("index") or 0), attempt=attempt,
                  run=int((gen.get("realRun") or {}).get("n") or 0) or None, endpoint=endpoint,
                  params={"seconds": round(float(cut.get("seconds") or 0), 3), "duration": duration,
-                         "startImage": "prevFrame" if from_prev else "still", "klingRefs": kling_refs["mode"]},
-                 refs=[{"slot": "startImage", "key": still_key}] + [dict(k) for k in kling_refs["keys"]], video_keys=[str(cut.get("recordingKey") or "")],
+                         "startImage": "none" if hard else "prevFrame" if from_prev else "still",
+                         "klingRefs": kling_refs["mode"]},
+                 refs=([{"slot": f"image{n}", "key": key} for n, key in enumerate(image_keys, 1)] if hard
+                       else [{"slot": "startImage", "key": still_key}]) + [dict(k) for k in kling_refs["keys"]],
+                 video_keys=[str(cut.get("recordingKey") or "")],
                  result={"invocationArn": arn, "outputPrefix": out_prefix}, prompt=sent_prompt)
     extra = f" layout={layout['shotSize']}" if layout else ""
     if still_check is not None:
@@ -9825,6 +9889,8 @@ def _submit_real_cut(owner: str, pid: str, gen_id: str, plan: dict, ctx: dict, c
     if lock:
         extra += " lock=1"  # 작업 169
     extra += f" kling_refs={kling_refs['mode']}" + (f" elements={len(kling_refs['keys'])}" if kling_refs["keys"] else "")
+    if hard:
+        extra += f" start=none images={len(image_keys)} hard_cut={hard_cut}"  # 작업 178
     log.info("vnew.gen.real_cut_submit pid=%s take=%s cut=%s endpoint=%s duration=%d people=%d refs=%s frame=%s sheet=%s%s%s",
              pid, take_id, cut_id, endpoint, duration, len(people), refs_kind, source, sheet_view, " qa_retry=1" if tag else "",
              extra)
@@ -9836,6 +9902,8 @@ def _submit_real_cut(owner: str, pid: str, gen_id: str, plan: dict, ctx: dict, c
         record["klingElements"] = [k["key"] for k in kling_refs["keys"]]  # 작업 176: 인물 정면 키(장면 옷 그림은 메모리만)
     if from_prev:
         record.update(startImage="prevFrame", startKey=str(start_key or ""))  # 작업 169
+    if hard:
+        record.update(startImage="none", klingImages=image_keys)  # 작업 178: 시작 그림 없음, 참고 그림 키(@Image 순서)
     if layout:
         record["animeLayout"] = layout  # 작업 139
     if still_check is not None:
@@ -12598,12 +12666,13 @@ def _kling_cut_layout(plan: dict, cut: dict, kling: dict, *, action: str, said, 
     framing = "\n".join(p for p in (str(kling.get("framing") or "").strip(), str(kling.get("costume") or "").strip()) if p)
     action = str(action or "").strip().rstrip(" .")
     first = REAL_CUT_FROM_PREV if from_prev else REAL_CUT_KEEP_FRAMING
+    no_start = bool(kling.get("noStart"))  # 작업 178: 하드 컷 elements = 시작 그림 없음 → 시작 그림 줄을 통째로 뺀다
     state = {s: False for s in KLING_CUT_TRIM_ORDER}
     box = {"action": ("ACTION: " + action + ".") if action else "", "dialogue": said(0)}
 
     def assemble() -> str:
         style = "" if state["style"] else (REAL_TAKE_STYLE_COMPACT if state["styleCompact"] else REAL_TAKE_STYLE)
-        start = first if state["startDuplicate"] else (
+        start = "" if no_start else first if state["startDuplicate"] else (
             f"{first} {REAL_CUT_START_SENTENCE}" if from_prev else f"{REAL_CUT_START_SENTENCE} {first}")
         tail = [fix.strip()] if str(fix or "").strip() else []  # 작업 133: QA 교정 문장(줄이지 않는다)
         tail.append("No text, no subtitles, no speech bubbles.")

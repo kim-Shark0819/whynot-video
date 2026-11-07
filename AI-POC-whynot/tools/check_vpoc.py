@@ -57497,7 +57497,7 @@ def check_vnew_hard_cut_172() -> None:
             calls: list = []
             saved = (genmod._submit_real_cut, genmod._video_last_frame, genmod._seedream)  # noqa: SLF001
 
-            def fake_cut(owner, pid, gen_id, p, ctx, cut, *, start=None, start_key="", fallback=None):
+            def fake_cut(owner, pid, gen_id, p, ctx, cut, *, start=None, start_key="", fallback=None, **_kw):  # 178: hard_cut
                 calls.append((cut["cutId"], start, start_key, fallback() if fallback else None))
                 return {"startImage": "prevFrame", "startKey": start_key} if start else {"stillKey": "s"}
 
@@ -58204,6 +58204,199 @@ def check_vnew_kling_cut_prompt_177() -> None:
                 print(f"       177: {sub}")
 
 
+_HK178_SNAPSHOT = Path("C:/dev/ai/.claude-helpers/t3plan177.json")  # prod test3 gen g2026110702530903ab r3(177 뒤, 없으면 hk-a ~ hk-d 건너뜀)
+_HK178_O3 = "fal-ai/kling-video/o3/pro/reference-to-video"
+_HK178_I2V = "fal-ai/kling-video/v3/pro/image-to-video"
+_HK178_O3_CAPS = {"promptField": "prompt", "promptMaxLength": 2500, "startImageField": "start_image_url",
+                  "elementsField": "elements", "imageListField": "image_urls", "imageListMax": 4, "durations": [5, 10],
+                  "durationAsString": True, "durationValues": {"5": "5", "10": "10"}, "sendDuration": True,
+                  "aspectRatios": ["16:9"]}
+_HK178_I2V_CAPS = {k: v for k, v in _HK178_O3_CAPS.items() if k not in ("elementsField", "imageListField", "imageListMax")}
+
+
+def check_vnew_kling_hard_cut_178() -> None:
+    """작업 178 — elements Kling 컷이 하드 컷(shotChange · insert)이면 시작 그림을 보내지 않는다. 가짜, 유료 0.
+
+    (hk-a) 스냅숏 t3plan177 take2 cut-12(shotChange ← 조각 2 cut-10/11) elements caps: start_image_url 없음, image_urls =
+           [장소 뷰, 이음 프레임(_continuity_source = 조각 1 cut-08/09 마지막 프레임, 조각 2 는 인서트로 끝남)], @Image1 · @Image2 줄,
+           시작 그림 문장 없음, startImage none · klingImages,
+           ≤ 167 태그 여유 상한(element 2 + @Image 2), Seedream · 시작 그림 검사 0
+    (hk-b) cut-13(shotChange ← Kling cut-12): 같은 모양, 이음 프레임 = cut-12 마지막 프레임
+    (hk-c) continue(같은 컷이 경계로 나뉨) elements caps: start_image_url 그대로, 프롬프트 = 177 짜임(_segment_prompt from_prev) 그대로
+    (hk-d) i2v(klingRefs none) shotChange: 172 그대로(start_image_url = 이음 프레임, prevFrame, @Image 없음), imageListField 가
+           있어도 elements 가 아니면 그대로
+    """
+    import base64 as _b64  # noqa: PLC0415
+    import hashlib as _hashlib  # noqa: PLC0415
+    import traceback as _tb  # noqa: PLC0415
+
+    sys.path.insert(0, str(ROOT / "app"))
+    bad: list[str] = []
+    report: list[str] = []
+    seen: set[str] = set()
+
+    def expect(group: str, got, want, what: str) -> None:
+        seen.add(group)
+        if got != want:
+            bad.append(f"({group}) {what}\n      결과 {got!r}\n      기대 {want!r}")
+
+    def decode(uri) -> bytes:
+        return _b64.b64decode(str(uri or "").split(",", 1)[-1]) if uri else b""
+
+    try:
+        from src.vnew import generate as genmod  # noqa: PLC0415
+
+        with _guard_real_llm() as llm_calls, _pin_vnew(VNEW_FX=True, VNEW_TAKE_PROMPT_MAX_CHARS=4000, VNEW_VIBE_PROMPT=True):
+            if _HK178_SNAPSHOT.is_file():
+                snap = json.loads(_HK178_SNAPSHOT.read_text(encoding="utf-8"))
+                ids = {c["roleName"]: c["charId"] for c in snap["input"]["characters"]}
+                looks = {ids["범건우"]: _KP177_LOOK_A, ids["여의준"]: _KP177_LOOK_B}
+                take2 = next(u for u in snap["gen"]["units"] if u["id"] == "take2")
+                parts = take2["real"]["parts"]
+                p1, p2 = parts[0], parts[1]
+                kc = {p["cutId"]: p for p in parts if p.get("kind") == "kling"}
+                names = ("_real_look", "_load_jpeg", "_fit_ref", "_costume_refs", "_previz_request", "_charge_kling_cut",
+                         "_log_attempt", "_seg_output_prefix", "_keep_cut_still", "_video_last_frame", "_seedream",
+                         "_charge_cut_still", "_cut_first_frame", "_fetch_bytes", "_anime_frame_layout")
+                saved = {n: getattr(genmod, n) for n in names}
+                sent: list = []
+                logged: list = []
+                paid: list = []
+
+                def no_call(what: str):
+                    def fake(*_a, **_k):
+                        paid.append(what)
+                        raise AssertionError(what + " 호출")
+                    return fake
+
+                genmod._real_look = lambda owner, cid: looks.get(cid, "")  # noqa: SLF001
+                genmod._load_jpeg = lambda key: b"F:" + str(key).encode()  # noqa: SLF001
+                genmod._fit_ref = lambda data: bytes(data)  # noqa: SLF001
+                genmod._costume_refs = lambda owner, pid, plan, rows, loc, outfits, bases=None: {  # noqa: SLF001
+                    name: b"C:" + name.encode() for name, _char, _look in rows}
+                genmod._previz_request = lambda method, url, body: sent.append((url, body)) or {  # noqa: SLF001
+                    "request_id": f"rq{len(sent)}"}
+                genmod._charge_kling_cut = lambda *_a, **_k: None  # noqa: SLF001
+                genmod._log_attempt = lambda *_a, **k: logged.append(k)  # noqa: SLF001
+                genmod._seg_output_prefix = lambda owner, pid, gen_id, name, attempt: f"out/{name}"  # noqa: SLF001
+                genmod._keep_cut_still = lambda pid, prefix, still: prefix + "/start.jpg"  # noqa: SLF001
+                genmod._video_last_frame = lambda key, seconds: b"LAST:" + str(key).encode()  # noqa: SLF001
+                for n in ("_seedream", "_charge_cut_still", "_cut_first_frame", "_fetch_bytes", "_anime_frame_layout"):
+                    setattr(genmod, n, no_call(n))
+
+                def ctx_for(caps: dict, endpoint: str) -> dict:
+                    return {"endpoint": endpoint, "caps": caps, "modelId": genmod.vpoc_settings.FAL_ID_PREFIX + endpoint,
+                            "promptMax": 2500, "charById": {c: {"realFrontKey": "front-" + c} for c in ids.values()},
+                            "overrides": {}, "anime": None, "offsets": {}, "outfits": dict(_KP177_OUTFITS), "takeId": "take2",
+                            "attempt": 1, "stage": "start", "bases": {}, "take": take2, "index": 1}
+
+                def submit(caps: dict, endpoint: str, cut_id: str, before: dict, used: list) -> tuple[dict, dict, dict]:
+                    sent.clear()
+                    logged.clear()
+                    item = {k: v for k, v in kc[cut_id].items()
+                            if k in ("kind", "no", "fromPart", "cutId", "cutIds", "start", "end", "seconds")}
+                    rec = genmod._submit_kling_part_cut("o", "p", "g", snap, ctx_for(caps, endpoint), take2, item, [],  # noqa: SLF001
+                                                        before, used=used)
+                    return rec, (sent[-1][1] if sent else {}), (logged[-1] if logged else {})
+
+                def direct(caps: dict, endpoint: str, cut_id: str) -> str:
+                    # 177 짜임 그대로(시작 그림 = 앞 프레임): _kling_cut_inputs + _segment_prompt(from_prev)
+                    ctx = ctx_for(caps, endpoint)
+                    lock, _refs, cut_max, layout = genmod._kling_cut_inputs("o", "p", snap, ctx, cut_id, 3.0)  # noqa: SLF001
+                    return genmod._segment_prompt(snap, {"cutIds": [cut_id]}, first_segment=True, model=ctx["modelId"],  # noqa: SLF001
+                                                  real=True, prompt_max=cut_max, lock=lock, from_prev=True, kling=layout)
+
+                img1 = genmod.REAL_CUT_IMAGE_LOCATION.format(tag="@Image1")
+                img2 = genmod.REAL_CUT_IMAGE_LOOK.format(tag="@Image2")
+                budget = 2500 - int(genmod.vnew_settings.PREVIZ_KLING_PROMPT_RESERVE) \
+                    - 4 * int(genmod.vnew_settings.PREVIZ_KLING_TAG_RESERVE)
+                start_bits = ("Start from the first frame", "The first frame is the previous shot's last frame",
+                              genmod.REAL_CUT_KEEP_FRAMING)
+                try:
+                    # ================= (hk-a) · (hk-b) 하드 컷 elements =================
+                    # 이음 프레임 = _continuity_source(172): cut-12 ← 조각 2(cut-10/11)는 인서트로 끝나 조각 1(cut-08/09) 마지막 프레임
+                    # (prod 기록 startKey 와 같다), cut-13 ← Kling cut-12 마지막 프레임.
+                    for group, cut_id, before, used, look_src in (
+                            ("hk-a", "cut-12", p2, [p1, p2], p1),
+                            ("hk-b", "cut-13", kc["cut-12"], [p1, p2, kc["cut-12"]], kc["cut-12"])):
+                        rec, body, log_row = submit(_HK178_O3_CAPS, _HK178_O3, cut_id, before, used)
+                        prompt = str(body.get("prompt") or "")
+                        rows = prompt.split("\n")
+                        urls = [decode(u) for u in body.get("image_urls") or []]
+                        look_key = str(look_src["outputKey"]) + "#last"
+                        view_key = (rec.get("klingImages") or [""])[0]
+                        expect(group, [sorted(body), "start_image_url" in body, len(body.get("elements") or []),
+                                       urls, rec.get("klingImages"), rec.get("startImage"), rec.get("startReason"),
+                                       rec.get("klingRefs"), rec.get("stillKey"), "startKey" in rec],
+                               [["aspect_ratio", "duration", "elements", "image_urls", "prompt"], False, 2,
+                                [b"F:" + view_key.encode(), b"LAST:" + str(look_src["outputKey"]).encode()],
+                                [view_key, look_key], "none", "shotChange", "elements", "", False],
+                               f"{cut_id}: 시작 그림 없음, image_urls = [장소 뷰, 이음 프레임], startImage none · klingImages")
+                        expect(group, [view_key.endswith(("/view-back.jpg", "/view-front.jpg")) and "/locations/" in view_key,
+                                       img1 in rows, img2 in rows, rows.index(img1) < rows.index(img2) if img2 in rows else None,
+                                       [b for b in start_bits if b in prompt], "@Element2 " in prompt,
+                                       rows.index(img1) > max(n for n, r in enumerate(rows) if r.startswith("@Element"))
+                                       if img1 in rows else None,
+                                       any(r.startswith("ACTION: ") for r in rows), any(r.startswith("DIALOGUE (") for r in rows),
+                                       len(prompt.encode("utf-8")) <= budget, rec.get("promptEn") == prompt, paid],
+                               [True, True, True, True, [], True, True, True, True, True, True, []],
+                               f"{cut_id}: @Image1 장소 · @Image2 겉모습 참고 줄(@Element 뒤), 시작 그림 문장 없음, ACTION · DIALOGUE 남음, "
+                               f"≤ {budget} B(element 2 + @Image 2 태그 여유), Seedream 0")
+                        expect(group, [(log_row.get("params") or {}).get("startImage"),
+                                       [r.get("slot") for r in log_row.get("refs") or []]],
+                               ["none", ["image1", "image2", "element1", "element2"]], f"{cut_id}: 기록 줄 startImage none · 참고 칸")
+                        report.append(f"{cut_id} payload keys: {sorted(body)} · image_urls {len(urls)} · "
+                                      f"{len(prompt.encode('utf-8'))}B (max {budget})")
+                        report.append(f"{cut_id} prompt:\n" + prompt)
+
+                    # ================= (hk-c) continue elements =================
+                    same = {**kc["cut-12"], "cutIds": ["cut-12"]}
+                    rec, body, _row = submit(_HK178_O3_CAPS, _HK178_O3, "cut-12", same, [p1, p2, same])
+                    prompt = str(body.get("prompt") or "")
+                    want = direct(_HK178_O3_CAPS, _HK178_O3, "cut-12")
+                    expect("hk-c", [rec.get("startReason"), rec.get("startImage"), decode(body.get("start_image_url")),
+                                    "image_urls" in body, "klingImages" in rec, len(body.get("elements") or []),
+                                    _hashlib.sha256(prompt.encode()).hexdigest() == _hashlib.sha256(want.encode()).hexdigest(),
+                                    genmod.REAL_CUT_FROM_PREV in prompt, "@Image" in prompt, paid],
+                           ["continue", "prevFrame", b"LAST:" + str(same["outputKey"]).encode(), False, False, 2, True, True,
+                            False, []],
+                           "continue: start_image_url 그대로 · 프롬프트 sha = 177 짜임(from_prev) · @Image 없음")
+                    report.append(f"continue cut-12 sha {_hashlib.sha256(prompt.encode()).hexdigest()[:16]}")
+
+                    # ================= (hk-d) i2v shotChange =================
+                    for caps in (_HK178_I2V_CAPS, {**_HK178_I2V_CAPS, "imageListField": "image_urls", "imageListMax": 4}):
+                        rec, body, _row = submit(caps, _HK178_I2V, "cut-12", p2, [p1, p2])
+                        prompt = str(body.get("prompt") or "")
+                        want = direct(caps, _HK178_I2V, "cut-12")
+                        expect("hk-d", [rec.get("startReason"), rec.get("startImage"), decode(body.get("start_image_url")),
+                                        "image_urls" in body, "elements" in body, rec.get("klingRefs"), "klingImages" in rec,
+                                        prompt == want, genmod.REAL_CUT_FROM_PREV in prompt, "@Image" in prompt, paid],
+                               ["shotChange", "prevFrame", b"LAST:" + str(p1["outputKey"]).encode(), False, False, "none",
+                                False, True, True, False, []],
+                               f"i2v shotChange{' + imageListField' if 'imageListField' in caps else ''}: 172 그대로")
+                finally:
+                    for name, value in saved.items():
+                        setattr(genmod, name, value)
+            else:
+                seen.update({"hk-a", "hk-b", "hk-c", "hk-d"})
+                report.append(f"스냅숏 없음({_HK178_SNAPSHOT}) — hk-a ~ hk-d 건너뜀")
+            expect("hk-d", llm_calls, [], "LLM 호출 0")
+    except Exception as exc:  # noqa: BLE001
+        bad.append("예외: " + repr(exc) + "\n" + _tb.format_exc()[:2500])
+
+    missing = [g for g in ("hk-a", "hk-b", "hk-c", "hk-d") if g not in seen]
+    if missing:
+        bad.append(f"검사 묶음이 돌지 않았습니다: {missing}")
+    if bad:
+        fail("작업 178 하드 컷 elements Kling 시작 그림 없음 검사 실패\n  " + "\n  ".join(bad))
+    else:
+        ok("작업 178 (hk-a)cut-12 · (hk-b)cut-13 하드 컷 = start_image_url 없음 · image_urls [장소 뷰, 이음 프레임] · @Image 줄 · "
+           "startImage none (hk-c)continue 그대로 (hk-d)i2v 그대로")
+        for line in report:
+            for sub in line.split("\n"):
+                print(f"       178: {sub}")
+
+
 def main() -> int:
     print("== vpoc1 check ==")
     check_compileall()
@@ -58353,6 +58546,7 @@ def main() -> int:
     check_vnew_face_touch_173()
     check_vnew_touch_kind_174()
     check_vnew_kling_cut_prompt_177()
+    check_vnew_kling_hard_cut_178()
     print()
     if warnings:
         print(f"경고 {len(warnings)}건")
