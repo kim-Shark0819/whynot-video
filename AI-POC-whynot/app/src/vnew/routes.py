@@ -1038,6 +1038,19 @@ def create_blueprint(deps: VnewDependencies) -> Blueprint:
         except Exception as exc:  # noqa: BLE001
             return _fail(exc)
 
+    # 작업 185: 빈틈 다듬기 제안(저장하지 않는다 — 화면이 한 번에 되돌릴 수 있게 적용하고 PUT 으로 저장). 저장과 같은 쓰기 권한(소유자).
+    @bp.post("/p/<pid>/edit/tighten")
+    @deps.require_auth
+    def edit_tighten(pid: str):
+        try:
+            from . import edit  # noqa: PLC0415
+
+            edit.require_enabled("vnew.edit.tighten")
+            owner = _project_for(pid, write=True)
+            return jsonify(edit.tighten_view(owner, pid, _edit_body("vnew.edit.tighten")))
+        except Exception as exc:  # noqa: BLE001
+            return _fail(exc)
+
     # ------------------------------------------------------------ ⑦ AI로 고치기(지시서 116)
     #
     # ⑦ 재료(테이크·컷) 하나를 이전 프롬프트 + 결과 프레임 + 수정 요청으로 고쳐 같은 경로로 새 버전을 만든다. retake.py 가 맡는다.

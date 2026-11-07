@@ -97,6 +97,12 @@ USER_FACING_KINDS = {
     "BadClipTime",
     "BadClipRange",
     "BadClipMuted",
+    # 작업 181·185: 편집 J/L컷·디졸브·대사 타이밍·빈틈 다듬기 거절 문구(고정 한국어 + 서버 값만)
+    "BadClipAudioLead",
+    "BadClipAudioTail",
+    "BadTransition",
+    "BadClipAudioSlip",
+    "BadTightenKeep",
     "TooLong",
     "EditChanged",
     "EditNotSaved",
