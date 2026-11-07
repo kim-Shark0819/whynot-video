@@ -158,7 +158,7 @@ metadata:
     app.kubernetes.io/component: api
     app.kubernetes.io/part-of: ${PROJECT_NAME}
 spec:
-  replicas: 2
+  replicas: ${APP_REPLICAS}
   strategy:
     type: RollingUpdate
     rollingUpdate:
