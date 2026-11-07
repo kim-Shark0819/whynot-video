@@ -53734,11 +53734,14 @@ def check_vnew_vibe_prompt_159() -> None:
                  f"{rb}: Pale blonde tousled hair with long bangs, large grey eyes, wearing black long-sleeve track top with a "
                  "single white stripe down each sleeve (keep exactly this look).", _VB159_MULTI_SHOT.format(n=6), True, []],
                 "애니 줄 순서(고지 → 화풍 → handle+look → 컷 지시 단락 원문 → Setting → Shot → @Image → @Video1)")
+            # 작업 179: 애니 웹툰 시트(@Image1 · @Image3) 이름표 = 한 문장 시트 글(_SR179_SHEET_LABEL, 패널에 없는 각도는 시트에서) —
+            # 옛 "@Image1 is X" + 맨 끝 시트 절 1번 대신. 정면(@Image2 · @Image4) · 장소 · 패널 글은 그대로.
             expect("vb-a", [labels, lines[-1]],
-                   [f"@Image1 is {rb}; @Image2 is {rb}; @Image3 is {ra}; @Image4 is {ra}; " + _VB159_LOCATION.format(no=5)
-                    + f"; {_VB159_PANELS.format(refs='@Image6–@Image8')}. @Image1, @Image3: {_VB159_SHEET}.",
+                   [_SR179_SHEET_LABEL.format(no=1, name=rb) + f" @Image2 is {rb}; "
+                    + _SR179_SHEET_LABEL.format(no=3, name=ra) + f" @Image4 is {ra}; " + _VB159_LOCATION.format(no=5)
+                    + f"; {_VB159_PANELS.format(refs='@Image6–@Image8')}.",
                     _VB159_VIDEO + f" (blue = {rb}, orange = {ra})."],
-                   "@Image 설명 = reference_lead 문구(인물 → 장소 → 원작 패널(STYLE 의 uploaded webtoon images), 시트 절 1번)·@Video1 줄")
+                   "@Image 설명 = reference_lead 문구(인물 → 장소 → 원작 패널(STYLE 의 uploaded webtoon images), 179 시트 글)·@Video1 줄")
             whos = {"cut-01": f"Only {ra} appears in this shot; {rb} is not visible. ",
                     "cut-02": f"Only {rb} appears in this shot; {ra} is not visible. ",
                     "cut-06": f"{rb} and {ra} (hands only) appear in this shot. "}
@@ -53795,7 +53798,10 @@ def check_vnew_vibe_prompt_159() -> None:
                                                    panel_nos=[] if variant == "real" else [6, 7, 8], audit=audit, quiet=True)
                     got_c.append([audit.get("fits"), audit.get("linesInPrompt") == audit.get("linesInConti"),
                                   audit.get("actionsInPrompt"), len(shots(out))])
-                    want_c.append([True, True, len(sub["cutIds"]), len(sub["cutIds"])])
+                    # 작업 179: 애니 시트 이름표 2개(인물마다 한 문장)가 길어져 애니 c03–c06 은 짧은 형 4단계 뒤에도 4,000자를
+                    # 넘는다(4,058자) → 제출 쪽 157 나누기. 대사 · 연기 · 샷 줄 수는 그대로. 실사 · c01–c02 는 그대로 4,000자 안.
+                    want_c.append([not (variant == "webtoon" and len(sub["cutIds"]) == 4), True, len(sub["cutIds"]),
+                                   len(sub["cutIds"])])
                     report.append(f"{variant} {sub['cutIds'][0]}–{sub['cutIds'][-1]}: {genmod._prompt_len(out)}자 compact="  # noqa: SLF001
                                   f"{','.join(audit.get('compact') or []) or 'none'} 대사 {audit.get('linesInPrompt')}/"
                                   f"{audit.get('linesInConti')} 연기 {audit.get('actionsInPrompt')}/{audit.get('cuts')}")
@@ -53879,7 +53885,8 @@ def check_vnew_vibe_prompt_159() -> None:
                         "note": prompt.startswith(genmod.REAL_REF_AI_NOTE + "\n"), "videoLine": _VB159_VIDEO in prompt,
                         "location": _VB159_LOCATION.format(no=5) in prompt, "sheet": _VB159_SHEET in prompt,
                         "live": _VB159_STYLE_LIVE in prompt, "webtoonStyle": _VB159_STYLE_WEBTOON in prompt,
-                        "webtoonWord": "webtoon" in prompt.lower(), "old": "TIMELINE" in prompt or "ASSETS:" in prompt}
+                        "webtoonWord": "webtoon" in prompt.lower(), "old": "TIMELINE" in prompt or "ASSETS:" in prompt,
+                        "sheet179": _SR179_SHEET_TAIL in prompt}
 
             def pairs(images: list[bytes], sheet: bytes, front: bytes) -> bool:
                 people = [tuple(images[i:i + 2]) for i in range(0, len(images) - 1, 2)]
@@ -53888,12 +53895,13 @@ def check_vnew_vibe_prompt_159() -> None:
             got_f = [[view(r)["seedance"], view(r)["video"], view(r)["note"], view(r)["videoLine"], view(r)["location"],
                       view(r)["sheet"], view(r)["live"], view(r)["webtoonStyle"], view(r)["webtoonWord"], view(r)["old"],
                       view(r)["images"][4:], pairs(view(r)["images"][:4], *((b"RS", b"RF") if r in real_reqs else (b"WS", b"WF"))),
-                      _VB159_PANELS.format(refs="@Image6–@Image7") in str(r["payload"].get("prompt") or "")]
+                      _VB159_PANELS.format(refs="@Image6–@Image7") in str(r["payload"].get("prompt") or ""), view(r)["sheet179"]]
                      for r in anime_reqs + real_reqs]
             # fix1: 애니 = 신원 참고 → 장소 → 원작 패널(옛 _take_prompt 와 같은 _segment_panel_jpegs 순서), 실사 = 패널 없음.
-            want_f = [[True, [True], True, True, True, True, False, True, True, False, [b"LOC-WB", b"PANEL1", b"PANEL2"], True,
-                       True],
-                      [True, [True], True, True, True, True, True, False, False, False, [b"LOC-RB"], True, False]]
+            # 작업 179: 애니 시트 이름표 = 179 시트 글(sheet179 True) → 옛 시트 절(sheet)은 애니에서 False. 실사는 그대로(옛 절, 179 글 없음).
+            want_f = [[True, [True], True, True, True, False, False, True, True, False, [b"LOC-WB", b"PANEL1", b"PANEL2"], True,
+                       True, True],
+                      [True, [True], True, True, True, True, True, False, False, False, [b"LOC-RB"], True, False, False]]
             expect("vb-f", got_f, want_f, "애니·실사 제출: Seedance·프리비즈 영상·vibe 줄·[시트, 정면]×2 + 장소 (+ 애니 원작 패널)")
 
             # fix1: 상한 — 패널부터 빠지고 신원 참고·장소는 남는다.
@@ -55975,7 +55983,8 @@ def check_vnew_shot_lock_166() -> None:
                    [True, False, False], "보이는 사람 없이 손만 → 인서트, 보이는 사람이 있으면 · 인물 없으면 아님")
 
             # ================= (sl-b) 클로즈업 주인공 =================
-            lock_b = f"Close-up of {rb} (pale blonde hair) filling the frame; {ra} only partly visible at the frame edge"
+            # 작업 179: cut-06 콘티 positionEn 여의준 "lower left of frame" · 범건우 "right side" → 가장자리 = 오른쪽(the right frame edge).
+            lock_b = f"Close-up of {rb} (pale blonde hair) filling the frame; {ra} only partly visible at the right frame edge"
             for v in ("anime", "real"):
                 expect("sl-b", lines[v][5].startswith(f"Shot 6 (20-23s), close-up, front view{genmod.VIBE_TIGHTER_TAG}: {lock_b}. "),
                        True,  # 작업 170: 콘티 shotSize closeup → close-up(프리비즈 MCU 대신). 작업 174: 콘티 CU < 프리비즈 MCU → 꼬리표
@@ -56035,8 +56044,11 @@ def check_vnew_shot_lock_166() -> None:
             # ================= (sl-e) 해당 없는 컷 =================
             # 작업 173: 157 테이크 cut-04 · cut-06 은 상대 얼굴 접촉 → 그 두 줄만 바뀐 _SL173_ANIME_SHA(173 끈 값 = 170 값은 ft-e).
             # 작업 174: 같은 두 줄의 Touch 줄이 닿는 종류(뺨 · 귀)로 바뀌어 _SL174_ANIME_SHA(주석 참고).
-            expect("sl-e", [_hashlib.sha256(base_anime.encode("utf-8")).hexdigest(),
-                            _hashlib.sha256(base_anime_166.encode("utf-8")).hexdigest()], [_SL174_ANIME_SHA, _SL166_ANIME_SHA],
+            # 작업 179: 이 cast 는 애니 시트(sheetNo)가 있어 @Image 이름표가 179 시트 글로 바뀐다 → 그 줄을 178 모양으로 되돌린
+            # 글(_sr179_old_labels, 157 테이크는 좌우를 정할 근거가 없어 SHOT 줄은 그대로)의 sha 가 옛 값이다.
+            expect("sl-e", [_hashlib.sha256(_sr179_old_labels(genmod, base_anime).encode("utf-8")).hexdigest(),
+                            _hashlib.sha256(_sr179_old_labels(genmod, base_anime_166).encode("utf-8")).hexdigest(),
+                            _SR179_SHEET_TAIL in base_anime], [_SL174_ANIME_SHA, _SL166_ANIME_SHA, True],
                    "157 테이크 애니 프롬프트 sha = 작업 174 값, 170 이름 앞머리 · 173 턱 받침을 끄면 작업 166 전 값(해당 컷 없음)")
             for v in ("anime", "real"):
                 before, after = wide[v]
@@ -56257,7 +56269,9 @@ def check_vnew_prompt_size_167() -> None:
         with _guard_real_llm(), _pin_vnew(VNEW_FX=True, VNEW_TAKE_PROMPT_MAX_CHARS=4000, VNEW_VIBE_PROMPT=True):
             plan_d, take_d = _tc157_plan()
             take_text = genmod._vibe_take_prompt(plan_d, take_d, real=False, cast=flat, location_no=5, quiet=True)  # noqa: SLF001
-        expect("ps-d", _hashlib.sha256(take_text.encode("utf-8")).hexdigest(), _SL174_ANIME_SHA,
+        # 작업 179: 이 cast 는 애니 시트가 있어 @Image 이름표만 179 시트 글 → 178 모양으로 되돌린 글의 sha = 옛 값.
+        expect("ps-d", [_hashlib.sha256(_sr179_old_labels(genmod, take_text).encode("utf-8")).hexdigest(),
+                        _SR179_SHEET_TAIL in take_text], [_SL174_ANIME_SHA, True],
                "157 통 테이크 애니 프롬프트 sha = 작업 174 값(167 은 통 테이크 경로를 안 바꿈, 173 · 174 는 얼굴 접촉 cut-04 · 06 줄만 — "
                "_SL174_ANIME_SHA 주석)")
     except Exception as exc:  # noqa: BLE001
@@ -57753,7 +57767,9 @@ def check_vnew_face_touch_173() -> None:
             on = genmod._vibe_take_prompt(plan_d, take_d, real=False, cast=flat, location_no=5, quiet=True)  # noqa: SLF001
             was = off(lambda: genmod._vibe_take_prompt(plan_d, take_d, real=False, cast=flat, location_no=5, quiet=True))  # noqa: SLF001
             changed = [i for i, (x, y) in enumerate(zip(was.split("\n"), on.split("\n"))) if x != y]
-            expect("ft-e", [_hashlib.sha256(was.encode()).hexdigest(), _hashlib.sha256(on.encode()).hexdigest(),
+            # 작업 179: 이 cast 는 애니 시트가 있어 @Image 이름표가 179 시트 글(was · on 둘 다) → 178 모양으로 되돌린 글의 sha = 옛 값.
+            expect("ft-e", [_hashlib.sha256(_sr179_old_labels(genmod, was).encode()).hexdigest(),
+                            _hashlib.sha256(_sr179_old_labels(genmod, on).encode()).hexdigest(),
                             [on.split("\n")[i][:7] for i in changed]],
                    [_SL170_ANIME_SHA, _SL174_ANIME_SHA, ["Shot 4 ", "Shot 6 "]],  # 작업 174: 같은 두 줄, Touch 줄 = 닿는 종류
                    "157 테이크: 173 끔 = 170 값, 켬 = 얼굴 접촉 cut-04(두 손 얼굴) · cut-06(목덜미) 줄만 다름")
@@ -57849,8 +57865,13 @@ def check_vnew_touch_kind_174() -> None:
                                     genmod.FACE_TOUCH_LINE.rstrip(".") in s8], [True, 1, False], f"{v} cut-08 뺨 Touch 줄만")
                     expect("tk-a", ["away from both mouths; nothing between their lips" in s9, "near the lower lip" in s9],
                            [True, False], f"{v} cut-09 엄지 = 입에서 떨어짐")
-                    expect("tk-a", [video[(v, c)].startswith(new_video) for c in ("cut-02", "cut-04", "cut-12")],
-                           [True, True, True], f"{v} cut-02 · 04 · 12 조각 = 새 @Video1 줄")
+                    # 작업 179 fix1: cut-01/02 조각은 cut-01 프리비즈가 거꾸로(패널과 반대) → @Video1 에 거꾸로 절이 끼어든다.
+                    # 그 절을 뺀 글이 174 새 줄이고, cut-04 · 12 조각(거꾸로 컷 없음)에는 절이 없다.
+                    expect("tk-a", [[video[(v, c)].replace(genmod.VIBE_VIDEO_MIRROR, "").startswith(new_video)
+                                     for c in ("cut-02", "cut-04", "cut-12")],
+                                    [genmod.VIBE_VIDEO_MIRROR in video[(v, c)] for c in ("cut-02", "cut-04", "cut-12")]],
+                           [[True, True, True], [True, False, False]],
+                           f"{v} cut-02 · 04 · 12 조각 = 새 @Video1 줄(cut-01/02 조각만 179 거꾸로 절)")
                     # 꼬리표: 콘티 클로즈업 < 프리비즈(cut-02 MS · cut-03 MCU · cut-12 MCU), cut-04 는 콘티도 medium 이라 없음
                     expect("tk-a", {c: tag + ":" in shot[(v, c)].split(": ", 1)[0] + ":" for c in ("cut-02", "cut-03", "cut-04", "cut-12")},
                            {"cut-02": True, "cut-03": True, "cut-04": False, "cut-12": True}, f"{v} 꼬리표 = 크기 절 바로 뒤, 그 컷만")
@@ -58159,6 +58180,7 @@ def check_vnew_kling_cut_prompt_177() -> None:
 
                 shas: dict = {}
                 insert_parts: dict = {}
+                diff_rows: dict = {}
                 for unit in snap["gen"]["units"]:
                     for v, key in (("anime", "webtoon"), ("real", "real")):
                         for part in (unit.get(key) or {}).get("parts") or []:
@@ -58171,8 +58193,22 @@ def check_vnew_kling_cut_prompt_177() -> None:
                             if part["cutIds"] == ["cut-10", "cut-11"]:
                                 insert_parts[v] = text
                             else:
-                                shas[label] = _hashlib.sha256(text.encode("utf-8")).hexdigest()
-                expect("kp-d", shas, _KP177_BASE_SHA, "인서트 · Kling 없는 조각(cut-01/02 포함) = 177 전 sha")
+                                # 작업 179: 이 조각들에는 두 사람 샷이 있어 SHOT 줄에 화면 좌우(179)가 붙는다. 좌우를 끈 글
+                                # (_sr179_sides_off, 이 cast 는 시트 번호가 없어 이름표는 그대로)의 sha 가 177 전 값이고,
+                                # 다른 줄은 Shot 줄뿐이다.
+                                with _sr179_sides_off(genmod):
+                                    text_off = genmod._vibe_take_prompt(  # noqa: SLF001
+                                        snap, sub, real=v == "real", cast=cast_for(v == "real"), location_no=5, quiet=True)
+                                shas[label] = _hashlib.sha256(text_off.encode("utf-8")).hexdigest()
+                                diff_rows[label] = sorted({x[:5] for x, y in zip(text.split("\n"), text_off.split("\n"))
+                                                           if x != y} | ({"rows"} if text.count("\n") != text_off.count("\n")
+                                                                         else set()))
+                expect("kp-d", shas, _KP177_BASE_SHA, "인서트 · Kling 없는 조각(cut-01/02 포함) = 177 전 sha(179 좌우를 끈 글)")
+                expect("kp-d", sorted({r for rows in diff_rows.values() for r in rows}), ["@Vide", "Shot "],
+                       "179 좌우를 켠 글과 끈 글은 Shot 줄만 다르다(fix1: 프리비즈가 거꾸로인 cut-01 · 06 · 07 조각은 @Video1 거꾸로 절도)")
+                expect("kp-d", sorted(k for k, rows in diff_rows.items() if "@Vide" in rows),
+                       ["anime:cut-01,cut-02", "anime:cut-05,cut-06", "anime:cut-07", "real:cut-01,cut-02", "real:cut-05,cut-06",
+                        "real:cut-07"], "@Video1 이 바뀐 조각 = 프리비즈 거꾸로 컷(cut-01 · 06 · 07)이 있는 조각만")
                 tag = genmod.VIBE_INSERT_SIZE + genmod.VIBE_INSERT_TAG + ": "
                 for v, text in insert_parts.items():
                     rows = text.split("\n")
@@ -58397,6 +58433,315 @@ def check_vnew_kling_hard_cut_178() -> None:
                 print(f"       178: {sub}")
 
 
+# 작업 179: 애니 웹툰 시트 이름표(요구 문구 그대로 — genmod.VIBE_ANIME_SHEET_LABEL 과 같아야 한다).
+_SR179_SHEET_LABEL = ("@Image{no} is {name}'s character turnaround sheet (front, three-quarter, side, back views): when a "
+                      "shot needs an angle the webtoon images do not show (for example a face turned toward camera during a "
+                      "kiss), take that face, hair and build from this sheet; the clothes come from the look line, not from "
+                      "the sheet.")
+_SR179_SHEET_TAIL = _SR179_SHEET_LABEL.split("{name}", 1)[1]
+_SR179_CHARS = Path("C:/dev/ai/.claude-helpers/t3chars.json")  # prod test3 캐릭터 2명(없으면 sr-b · sr-c 페이로드 건너뜀)
+# 스냅숏 t3plan177 인서트 조각(cut-10/11, 아래 _KP177 cast) 프롬프트 sha. 179 전 실행의 앞 12자(90662fee0ac8 · 8d1c3b73afa2)와 같다.
+_SR179_INSERT_SHA = {"anime": "90662fee0ac893d5c8efe535fc21a966db79bfc29266b4c48696a585078201fe",
+                     "real": "8d1c3b73afa2a261cdb6399fa351f07f0261a3a827813afdfe3b88c801b2427a"}
+# fix1: 스냅숏 cut-08/09 조각(_KP177 cast) = 179 값 그대로(패널 = 프리비즈 좌우, 거꾸로 꼬리 · 방향 뒤집기 없음).
+_SR179_CUT08_SHA = {"anime": "2564b3e79364785838038d5f5abf4ff387e195941d098ffd61e4e8a63b02ded6",
+                    "real": "ff7709b267ce13cea2807103b0ecc61c6af924c5ebaf25c0f587e9ebcd3c6aee"}
+
+
+@contextlib.contextmanager
+def _sr179_sides_off(genmod):
+    """작업 179 화면 좌우를 끈다(검사용, _screen_sides → []). 끈 글 = 178 SHOT 줄."""
+    saved = genmod._screen_sides  # noqa: SLF001
+    genmod._screen_sides = lambda *_a, **_k: []  # noqa: SLF001
+    try:
+        yield
+    finally:
+        genmod._screen_sides = saved  # noqa: SLF001
+
+
+def _sr179_old_labels(genmod, text: str) -> str:
+    """작업 179 애니 시트 이름표를 178 모양("@ImageN is X" + 맨 끝 "@Image1, @Image3: <시트 절>.")으로 되돌린 글(검사용)."""
+    pat = re.compile(re.escape(genmod.VIBE_ANIME_SHEET_LABEL).replace(re.escape("{no}"), r"(?P<no>\d+)")
+                     .replace(re.escape("{name}"), r"(?P<name>[^;@]+?)"))
+    rows = text.split("\n")
+    for i, row in enumerate(rows):
+        nos = [m.group("no") for m in pat.finditer(row)]
+        if not nos:
+            continue
+        row = pat.sub(lambda m: f"@Image{m.group('no')} is {m.group('name')};", row)
+        row = row[:-1] + "." if row.endswith(";") else row
+        rows[i] = row + " " + ", ".join(f"@Image{n}" for n in nos) + f": {genmod.VIBE_SHEET_CLAUSE}."
+    return "\n".join(rows)
+
+
+def check_vnew_sheet_sides_179() -> None:
+    """작업 179 — 애니 신원 참고 = 웹툰 턴어라운드 시트(패널에 없는 각도), 두 사람 샷의 화면 좌우 고정. 가짜, 유료 0.
+
+    (sr-a) 스냅숏 t3plan177 cut-01(실사 · 애니): Yeouijun = 왼쪽 가장자리(콘티 패널 순서, 프리비즈는 선을 넘어 거꾸로),
+           cut-02 Beomgeonu = 오른쪽 가장자리, cut-08 두 사람 좌우, Kling FRAMING(cut-01 · 08 · 12 · 13)도 같은 글
+    (sr-b) 스냅숏 애니 take2 cut-08/09 조각 페이로드: 인물마다 웹툰 시트(variants.webtoon.sheetKey) + 정면, 179 시트 글,
+           옛 시트 절 없음, 이미지 수 ≤ 상한(9 · 4 — 4 이면 정면부터 빠지고 시트는 남는다)
+    (sr-c) 시트 없음: 참고 = 정면만 · 이름표 옛 모양, 스냅숏 애니 조각(시트 없는 cast)은 좌우를 끄면 177 전 sha
+    (sr-d) 인서트 cut-10/11 · 한 사람 샷(cut-03) 그대로
+    (sr-e) _position_side · _screen_sides 출처 순서(139 애니 읽기 → 콘티 positionEn → 프리비즈 투영) · 2명이 아니면 []
+    """
+    import copy as _copy  # noqa: PLC0415
+    import hashlib as _hashlib  # noqa: PLC0415
+    import traceback as _tb  # noqa: PLC0415
+
+    sys.path.insert(0, str(ROOT / "app"))
+    bad: list[str] = []
+    report: list[str] = []
+    seen: set[str] = set()
+
+    def expect(group: str, got, want, what: str) -> None:
+        seen.add(group)
+        if got != want:
+            bad.append(f"({group}) {what}\n      결과 {got!r}\n      기대 {want!r}")
+
+    def shot_rows(text: str) -> list[str]:
+        return [ln for ln in text.split("\n") if ln.startswith("Shot ")]
+
+    try:
+        from src.vnew import generate as genmod  # noqa: PLC0415
+
+        expect("sr-e", genmod.VIBE_ANIME_SHEET_LABEL, _SR179_SHEET_LABEL, "시트 이름표 = 요구 문구 그대로")
+        # ================= (sr-e) 구절 · 출처 순서 =================
+        side = genmod._position_side  # noqa: SLF001
+        expect("sr-e", [side("left side of the railing"), side("right side, leaning in close"),
+                        side("lower left of frame, face turned up"), side("left edge of frame, face partly cut off"),
+                        side("sitting on the railing"), side("holds the cup in his right hand"),
+                        side("right next to him, center of frame"), side("off-frame, hand only"), side("")],
+               ["left", "right", "left", "left", "", "", "center", "", ""],
+               "positionEn 화면 쪽(몸 쪽 글 · right next 는 뺌)")
+        a, b = "가나", "다라"
+        cut = {"id": "c1", "characters": [{"name": a, "presence": "on_screen", "positionEn": "right side of the frame"},
+                                          {"name": b, "presence": "on_screen", "positionEn": "left side of the frame"}]}
+        plan = {"conti": {"cuts": [cut]},
+                "previz": {"scenes": [{"actors": [{"id": "pa", "name": a}, {"id": "pb", "name": b}],
+                                       "timeline": [{"cutId": "c1", "camera": {"pos": [0, 1.5, 3], "target": [0, 1.5, 0], "fov": 40},
+                                                     "actors": [{"id": "pa", "pos": [-1, 0, 0]}, {"id": "pb", "pos": [1, 0, 0]}]}]}]},
+                "gen": {"units": [{"id": "t1", "real": {"parts": [{"kind": "kling", "cutId": "c1", "animeLayout": {
+                    "people": [{"name": a, "side": "left", "visible": "face"}, {"name": b, "side": "right", "visible": "face"}]}}]}}]}}
+        sides = genmod._screen_sides  # noqa: SLF001
+        got = [sides(plan, cut, [a, b])]
+        no_layout = dict(plan, gen={})
+        got.append(sides(no_layout, cut, [a, b]))
+        bare = {"id": "c1", "characters": [{"name": a, "presence": "on_screen"}, {"name": b, "presence": "on_screen"}]}
+        got.append(sides(dict(no_layout, conti={"cuts": [bare]}), bare, [a, b]))
+        got.append(sides({"conti": {"cuts": [bare]}}, bare, [a, b]))
+        got.append(sides(plan, cut, [a]))
+        got.append(sides(plan, cut, [a, b, "마바"]))
+        expect("sr-e", got, [[a, b], [b, a], [a, b], [], [], []],
+               "139 애니 읽기 → 콘티 positionEn → 프리비즈 투영 순, 근거 없음 · 1명 · 3명 = []")
+        # fix1: 패널(또는 애니 읽기)과 프리비즈 투영이 거꾸로면 mirrored, 같거나 패널 근거가 없으면 아님.
+        infos = []
+        for p, c in ((plan, cut), (no_layout, cut), (dict(no_layout, conti={"cuts": [bare]}), bare)):
+            info: dict = {}
+            sides(p, c, [a, b], info)
+            infos.append(bool(info.get("mirrored")))
+        flip = genmod._flip_screen_words  # noqa: SLF001
+        expect("sr-e", [infos, flip("shifts his eyes toward the listener at screen right, not his head"),
+                        flip("Geonu leans toward screen left; off-screen Right; beyond the left edge; held left of center"),
+                        flip("his left hand rests on the right knee; turns right")],
+               [[False, True, False], "shifts his eyes toward the listener at screen left, not his head",
+                "Geonu leans toward screen right; off-screen Left; beyond the right edge; held right of center",
+                "his left hand rests on the right knee; turns right"],
+               "mirrored = 패널 ≠ 프리비즈 · 화면 방향 낱말만 뒤집기(몸 쪽 글 그대로)")
+
+        with _guard_real_llm() as llm_calls, _pin_vnew(VNEW_FX=True, VNEW_TAKE_PROMPT_MAX_CHARS=4000, VNEW_VIBE_PROMPT=True):
+            if _HK178_SNAPSHOT.is_file():
+                snap = json.loads(_HK178_SNAPSHOT.read_text(encoding="utf-8"))
+                units = {u["id"]: u for u in snap["gen"]["units"]}
+                ids = {c["roleName"]: c["charId"] for c in snap["input"]["characters"]}
+                looks = {ids["범건우"]: _KP177_LOOK_A, ids["여의준"]: _KP177_LOOK_B}
+
+                def cast_for(real: bool) -> list[dict]:
+                    return [{"name": "범건우", "colorName": "orange", "frontNo": 2, "refNos": [1, 2], "voice": "",
+                             "look": "real" if real else "webtoon", "costume": "Dark navy long-sleeve button-up dress shirt",
+                             "appearance": _KP177_LOOK_A},
+                            {"name": "여의준", "colorName": "blue", "frontNo": 4, "refNos": [3, 4], "voice": "",
+                             "look": "real" if real else "webtoon", "costume": "Black long-sleeve track top",
+                             "appearance": _KP177_LOOK_B}]
+
+                def part_text(take_id: str, cut_ids: list[str], v: str) -> str:
+                    unit = units[take_id]
+                    part = next(p for p in unit["webtoon" if v == "anime" else "real"]["parts"]
+                                if p.get("kind") != "kling" and p["cutIds"] == cut_ids)
+                    sub = genmod._part_take(snap, unit, {"cutIds": cut_ids, "seconds": part["seconds"]})  # noqa: SLF001
+                    return genmod._vibe_take_prompt(snap, sub, real=v == "real", cast=cast_for(v == "real"),  # noqa: SLF001
+                                                    location_no=5, quiet=True)
+
+                # ================= (sr-a) 화면 좌우 =================
+                expect("sr-a", [sides(snap, genmod._conti_cut(snap, "cut-01"), ["범건우", "여의준"]),  # noqa: SLF001
+                                snap["previz"]["fit"]["cut-01"].get("crossed"),
+                                genmod._previz_screen_x(snap, "cut-01")["여의준"] > genmod._previz_screen_x(snap, "cut-01")["범건우"]],  # noqa: SLF001
+                       [["여의준", "범건우"], True, True],
+                       "cut-01 좌우 = 콘티 패널(여의준 왼쪽), 프리비즈는 선을 넘어(crossed) 여의준이 오른쪽 — 그래서 프리비즈는 마지막 출처")
+                for v in ("real", "anime"):
+                    t12 = part_text("take1", ["cut-01", "cut-02"], v)
+                    s12 = shot_rows(t12)
+                    t89 = part_text("take2", ["cut-08", "cut-09"], v)
+                    s89 = shot_rows(t89)
+                    video12 = next((ln for ln in t12.split("\n") if ln.startswith("@Video1")), "")
+                    body1 = s12[0].split(genmod.VIBE_MIRROR_NOTE + ". ", 1)[-1]
+                    # fix1: cut-01 = 패널(여의준 왼쪽)과 프리비즈 투영(여의준 오른쪽)이 거꾸로 → 가장자리 절 뒤 프리비즈 거꾸로 꼬리,
+                    # 연기 글(촬영 지시서 = 프리비즈 기준) "listener at screen right" → "screen left", @Video1 에 거꾸로 절.
+                    expect("sr-a", ["Yeouijun only partly visible at the left frame edge" + genmod.VIBE_MIRROR_NOTE + ". " in s12[0],
+                                    "listener at screen left" in body1, "screen right" in body1,
+                                    genmod.VIBE_MIRROR_NOTE in s12[1],
+                                    "Beomgeonu only partly visible at the right frame edge. " in s12[1],
+                                    "follow its positions, cuts and timing" in video12, genmod.VIBE_VIDEO_MIRROR in video12,
+                                    "): Beomgeonu on screen left, Yeouijun on screen right. " in s89[0],
+                                    "Beomgeonu only partly visible at the left frame edge. " in s89[1],
+                                    any("only partly visible at the frame edge" in r for r in s12 + s89),
+                                    [genmod.VIBE_MIRROR_NOTE in r for r in s89],
+                                    _hashlib.sha256(t89.encode()).hexdigest()],
+                           [True, True, False, False, True, True, True, True, True, False, [False, False], _SR179_CUT08_SHA[v]],
+                           f"{v} cut-01 Yeouijun 왼쪽 가장자리 + 프리비즈 거꾸로 꼬리 · 연기 screen left · @Video1 거꾸로 절, "
+                           f"cut-02 오른쪽(거꾸로 아님), cut-08 · 09 좌우(패널 = 프리비즈, 꼬리 없음)")
+                    report.append(f"{v} cut-01 SHOT: {s12[0]}")
+                    report.append(f"{v} cut-01/02 @Video1: {video12}")
+                saved = {n: getattr(genmod, n) for n in ("_real_look",)}
+                genmod._real_look = lambda owner, cid: looks.get(cid, "")  # noqa: SLF001
+                try:
+                    ctx = {"take": units["take2"], "takeId": "take2", "overrides": {}, "outfits": dict(_KP177_OUTFITS),
+                           "bases": {}, "charById": {c: {"realFrontKey": "front-" + c} for c in ids.values()},
+                           "caps": {"promptField": "prompt", "promptMaxLength": 2500}, "promptMax": 2500,
+                           "modelId": _HK178_O3}
+                    framing = {}
+                    for cid in ("cut-01", "cut-08", "cut-12", "cut-13"):
+                        ctx_c = dict(ctx, take=units["take1"] if cid == "cut-01" else units["take2"])
+                        framing[cid] = genmod._kling_shot_lock("o", snap, ctx_c, cid, 3.0).split("\n")[0]  # noqa: SLF001
+                    expect("sr-a", ["Yeouijun (pale blonde hair) only partly visible at the left frame edge" in framing["cut-01"],
+                                    genmod.VIBE_MIRROR_NOTE in framing["cut-01"],
+                                    "Beomgeonu (charcoal-black hair) on screen left, Yeouijun (pale blonde hair) on screen right"
+                                    in framing["cut-08"],
+                                    "Beomgeonu (charcoal-black hair) only partly visible at the right frame edge" in framing["cut-12"],
+                                    "Yeouijun only partly visible at the left frame edge" in framing["cut-13"]],
+                           [True, False, True, True, True],
+                           "Kling FRAMING = SHOT 과 같은 좌우 · 가장자리(fix1: 프리비즈 영상이 없어 거꾸로 꼬리는 뺌)")
+                    report.append("kling cut-08 FRAMING: " + framing["cut-08"])
+                finally:
+                    for name, value in saved.items():
+                        setattr(genmod, name, value)
+
+                # ================= (sr-c) 시트 없는 cast = 좌우를 끄면 177 전 sha =================
+                got_sha = {}
+                for label in _KP177_BASE_SHA:
+                    v, cids = label.split(":", 1)
+                    take_id = "take1" if cids.split(",")[0] in ("cut-01", "cut-03", "cut-05", "cut-07") else "take2"
+                    with _sr179_sides_off(genmod):
+                        got_sha[label] = _hashlib.sha256(part_text(take_id, cids.split(","), v).encode()).hexdigest()
+                expect("sr-c", got_sha, _KP177_BASE_SHA, "시트 없는 cast(이름표 옛 모양) · 좌우 끔 = 177 전 sha")
+
+                # ================= (sr-d) 인서트 · 한 사람 샷 =================
+                s34 = shot_rows(part_text("take1", ["cut-03", "cut-04"], "anime"))
+                with _sr179_sides_off(genmod):
+                    s34_off = shot_rows(part_text("take1", ["cut-03", "cut-04"], "anime"))
+                expect("sr-d", [_hashlib.sha256(part_text("take2", ["cut-10", "cut-11"], v).encode()).hexdigest()
+                                for v in ("anime", "real")] + [s34[0] == s34_off[0], s34[1] == s34_off[1]],
+                       [_SR179_INSERT_SHA["anime"], _SR179_INSERT_SHA["real"], True, False],
+                       "인서트 cut-10/11 sha 그대로 · cut-03(한 사람 + 손) 줄 그대로 · cut-04(두 사람) 줄만 바뀜")
+
+                # ================= (sr-b) · (sr-c) 애니 페이로드 =================
+                if _SR179_CHARS.is_file():
+                    chars = json.loads(_SR179_CHARS.read_text(encoding="utf-8"))
+                    names = ("_read_location_cast", "_resolve_cast", "_take_location_jpeg", "_segment_panel_jpegs",
+                             "_load_jpeg", "_fit_ref")
+                    saved = {n: getattr(genmod, n) for n in names}
+                    saved_load = genmod.characters.load_char
+                    store = {"chars": chars}
+                    genmod.characters.load_char = lambda owner, cid: (_copy.deepcopy(store["chars"][cid]), None)
+                    genmod._read_location_cast = lambda *_a, **_k: None  # noqa: SLF001
+                    genmod._resolve_cast = lambda *_a, **_k: {}  # noqa: SLF001
+                    genmod._take_location_jpeg = lambda plan, take, variant="webtoon": b"LOC"  # noqa: SLF001
+                    genmod._segment_panel_jpegs = lambda owner, pid, plan, seg, limit: [b"P1", b"P2", b"P3"][:limit]  # noqa: SLF001
+                    genmod._load_jpeg = lambda key: b"F:" + str(key).encode()  # noqa: SLF001
+                    genmod._fit_ref = lambda data: bytes(data)  # noqa: SLF001
+                    try:
+                        unit = units["take2"]
+                        part = unit["webtoon"]["parts"][0]
+                        sub = genmod._part_take(snap, unit, {"cutIds": part["cutIds"], "seconds": part["seconds"]})  # noqa: SLF001
+                        web = {ids[r]: chars[ids[r]]["variants"]["webtoon"] for r in ("범건우", "여의준")}
+
+                        def payload(cap: int) -> dict:
+                            return genmod._vibe_take_payload("o", "p", snap, sub, {"imageListMax": cap}, variant="webtoon",  # noqa: SLF001
+                                                             fallback_step=0, soften=False, continuity=None, no_text=False)
+
+                        def labels(text: str) -> str:
+                            return next((ln for ln in text.split("\n") if ln.startswith("@Image1 ")), "")
+
+                        sheet_a = b"F:" + web[ids["범건우"]]["sheetKey"].encode()
+                        sheet_b = b"F:" + web[ids["여의준"]]["sheetKey"].encode()
+                        front_a = b"F:" + web[ids["범건우"]]["frontKey"].encode()
+                        front_b = b"F:" + web[ids["여의준"]]["frontKey"].encode()
+                        for cap, want_imgs in ((9, [sheet_a, front_a, sheet_b, front_b, b"LOC", b"P1", b"P2", b"P3"]),
+                                               (4, [sheet_a, front_a, sheet_b, b"LOC"])):
+                            out = payload(cap)
+                            imgs = [bytes(i) for i in out["imageUrls"]]
+                            text = out["prompt"]
+                            rows = shot_rows(text)
+                            want_label = (_SR179_SHEET_LABEL.format(no=1, name="Beomgeonu") + " @Image2 is Beomgeonu; "
+                                          + _SR179_SHEET_LABEL.format(no=3, name="Yeouijun")
+                                          + (" @Image4 is Yeouijun; @Image5 is the location (no people in it); keep this place, "
+                                             "its background and light in every shot; @Image6–@Image8 are the uploaded webtoon "
+                                             "images (art style reference only)." if cap == 9 else
+                                             " @Image4 is the location (no people in it); keep this place, its background and "
+                                             "light in every shot."))
+                            expect("sr-b", [imgs, len(imgs) <= cap, labels(text), genmod.VIBE_SHEET_CLAUSE in text,
+                                            "): Beomgeonu on screen left, Yeouijun on screen right. " in rows[0],
+                                            out["audit"].get("fits"),
+                                            [labels(text).count(k) for k in ("take that face, hair and build from this sheet",
+                                                                             "the clothes come from the look line",
+                                                                             "outfit from this sheet")]],
+                                   [want_imgs, True, want_label, False, True, True, [2, 2, 0]],
+                                   f"상한 {cap}: 인물마다 웹툰 시트(+ 정면, 넘치면 정면부터 빠짐) · 179 시트 글 · 옛 절 없음 · "
+                                   f"cut-08 좌우 · 4,000자 안")
+                            if cap == 9:
+                                report.append("anime take2 cut-08/09 refs: " + ", ".join(i.decode().removeprefix("F:") for i in imgs))
+                                report.append("anime take2 cut-08/09 labels: " + labels(text))
+                        # 시트 없음: 참고 = 정면만, 이름표 = 옛 모양("@Image1 is X; …" — 시트 글 · 시트 절 없음)
+                        store["chars"] = _copy.deepcopy(chars)
+                        for cid in ids.values():
+                            store["chars"][cid]["variants"]["webtoon"]["sheetKey"] = ""
+                        out = payload(9)
+                        text = out["prompt"]
+                        with _sr179_sides_off(genmod):
+                            off_text = payload(9)["prompt"]
+                        expect("sr-c", [[bytes(i) for i in out["imageUrls"]], labels(text), "turnaround" in text,
+                                        [x[:5] for x, y in zip(text.split("\n"), off_text.split("\n")) if x != y]],
+                               [[front_a, front_b, b"LOC", b"P1", b"P2", b"P3"],
+                                "@Image1 is Beomgeonu; @Image2 is Yeouijun; @Image3 is the location (no people in it); keep this "
+                                "place, its background and light in every shot; @Image4–@Image6 are the uploaded webtoon images "
+                                "(art style reference only).", False, ["Shot ", "Shot "]],
+                               "시트 없음: 참고 = 정면만 · 이름표 옛 모양 · 좌우 끈 글과 Shot 줄만 다름")
+                    finally:
+                        genmod.characters.load_char = saved_load
+                        for name, value in saved.items():
+                            setattr(genmod, name, value)
+                else:
+                    seen.add("sr-b")
+                    report.append(f"캐릭터 없음({_SR179_CHARS}) — sr-b 페이로드 건너뜀")
+            else:
+                seen.update({"sr-a", "sr-b", "sr-c", "sr-d"})
+                report.append(f"스냅숏 없음({_HK178_SNAPSHOT}) — sr-a ~ sr-d 건너뜀")
+            expect("sr-e", llm_calls, [], "LLM 호출 0")
+    except Exception as exc:  # noqa: BLE001
+        bad.append("예외: " + repr(exc) + "\n" + _tb.format_exc()[:2500])
+
+    missing = [g for g in ("sr-a", "sr-b", "sr-c", "sr-d", "sr-e") if g not in seen]
+    if missing:
+        bad.append(f"검사 묶음이 돌지 않았습니다: {missing}")
+    if bad:
+        fail("작업 179 애니 시트 · 화면 좌우 검사 실패\n  " + "\n  ".join(bad))
+    else:
+        ok("작업 179 (sr-a)cut-01 Yeouijun 왼쪽 가장자리 · cut-08 좌우 · Kling FRAMING (sr-b)애니 시트 참고 · 시트 글 · 상한 "
+           "(sr-c)시트 없음 = 옛 이름표 · 177 전 sha (sr-d)인서트 · 한 사람 샷 그대로 (sr-e)출처 순서")
+        for line in report:
+            print(f"       179: {line}")
+
+
 def main() -> int:
     print("== vpoc1 check ==")
     check_compileall()
@@ -58547,6 +58892,7 @@ def main() -> int:
     check_vnew_touch_kind_174()
     check_vnew_kling_cut_prompt_177()
     check_vnew_kling_hard_cut_178()
+    check_vnew_sheet_sides_179()
     print()
     if warnings:
         print(f"경고 {len(warnings)}건")

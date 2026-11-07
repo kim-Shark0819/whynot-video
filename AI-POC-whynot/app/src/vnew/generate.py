@@ -4569,6 +4569,29 @@ VIBE_INSERT_SIZE = "extreme close-up insert of hands only; no face, no head, no 
 VIBE_CLOSEUP_LOCK = "Close-up of {name}{cue} filling the frame"
 VIBE_EDGE_PERSON = "{name} only partly visible at the frame edge"
 VIBE_OUT_PERSON = "{name} not in frame"
+# 작업 179: 두 사람 샷의 화면 좌우(Seedance SHOT 줄 · Kling FRAMING). 한 사람이 가장자리에만 보이면 그 가장자리를 적는다.
+VIBE_SIDES = "{left} on screen left, {right} on screen right"
+VIBE_EDGE_PERSON_SIDE = "{name} only partly visible at the {side} frame edge"
+# 작업 179: 애니 신원 참고의 웹툰 턴어라운드 시트 이름표 — 웹툰 패널에 없는 각도(키스 중 카메라 쪽 얼굴 등)는 시트에서.
+VIBE_ANIME_SHEET_LABEL = ("@Image{no} is {name}'s character turnaround sheet (front, three-quarter, side, back views): when a "
+                          "shot needs an angle the webtoon images do not show (for example a face turned toward camera "
+                          "during a kiss), take that face, hair and build from this sheet; the clothes come from the look "
+                          "line, not from the sheet.")  # fix1: 시트는 기본 옷 — 장면 옷은 look 줄
+# 작업 179 fix1: 콘티 패널 좌우와 프리비즈 투영 좌우가 거꾸로인 컷(선을 넘은 프리비즈, prod test3 cut-01).
+VIBE_MIRROR_NOTE = " (screen sides as stated here; the previz is mirrored for this shot)"
+VIBE_VIDEO_MIRROR = "; where a Shot says the previz is mirrored, follow that Shot's screen sides instead"
+# 화면 방향 글(몸 쪽 글 "his left hand" 는 아니다): screen/frame/camera left · off-screen left · left edge · left of center/frame.
+_SCREEN_DIR = re.compile(
+    r"\b(?:(?:off[\s-]?)?screen|frame|camera)[\s-](?P<a>left|right)\b"
+    r"|\b(?P<b>left|right)(?=(?:[\s-](?:frame\s+)?edge\b|\s+(?:side\s+)?of\s+(?:the\s+)?(?:screen|frame|cent(?:er|re))\b))",
+    re.IGNORECASE)
+_SIDE_ORDER = {"left": 0, "center": 1, "right": 2}
+_POSITION_SIDE = re.compile(r"\b(left|right|cent(?:er|re)|middle)\b", re.IGNORECASE)
+# "his right hand" · "left hand" · "right next to" 같은 글은 화면 쪽이 아니다.
+_POSITION_NOT_SIDE_BEFORE = re.compile(r"\b(?:his|her|their|its)\s+$", re.IGNORECASE)
+_POSITION_NOT_SIDE_AFTER = re.compile(r"^[\s-]*(?:hands?|arms?|wrists?|shoulders?|legs?|knees?|foot|feet|elbows?|palms?|thumbs?|"
+                                      r"fingers?|cheeks?|eyes?|ears?|after|away|now|next|behind|beside|there|here)\b",
+                                      re.IGNORECASE)
 VIBE_OWN_HANDS = "{name}'s own hands stay lowered, out of frame, and never touch {pos} own {part}"
 VIBE_OWN_HANDS_OWNER = "; the only hand on {pos} {part} is {owner} entering from the frame edge"
 REAL_BLUSH_LOCK = "a faint natural flush on {name}'s cheeks only; no red eyelids, no eye makeup"
@@ -4681,6 +4704,93 @@ def _vibe_closeup_subject(cut: dict, shot: str, owners: list[dict], disp) -> str
                or bool(_CLOSEUP_WORD.search(camera) and not _MEDIUM_CLOSEUP.search(camera)))
     on = [ch for ch in named if ch.get("presence") == "on_screen"]
     return str(on[0].get("name") or "").strip() if closeup and len(on) == 1 else ""
+
+
+def _position_side(text) -> str:
+    """작업 179: 콘티 positionEn(웹툰 패널 읽기)의 화면 쪽 "left"|"right"|"center", 못 읽으면 "". 몸 쪽 글(his right hand)은 뺀다."""
+    text = " ".join(str(text or "").split())
+    for match in _POSITION_SIDE.finditer(text):
+        if _POSITION_NOT_SIDE_BEFORE.search(text[:match.start()]) or _POSITION_NOT_SIDE_AFTER.match(text[match.end():]):
+            continue
+        word = match.group(1).lower()
+        return "center" if word in ("center", "centre", "middle") else word
+    return ""
+
+
+def _anime_layout_sides(plan: dict, cut_id: str) -> dict[str, str]:
+    """작업 179: 그 컷 139 애니 프레임 읽기(실사 Kling 컷 기록 animeLayout)의 {이름: side}. 기록이 없으면 {}."""
+    for unit in (plan.get("gen") or {}).get("units") or []:
+        for part in ((unit.get("real") or {}).get("parts") or []) if isinstance(unit, dict) else []:
+            layout = part.get("animeLayout") if isinstance(part, dict) else None
+            if isinstance(layout, dict) and str(part.get("cutId") or "") == str(cut_id):
+                return {name: side for name, side, _visible in _layout_listed(layout)}
+    return {}
+
+
+def _previz_screen_x(plan: dict, cut_id: str) -> dict[str, float]:
+    """작업 179: 그 컷 프리비즈 카메라로 투영한 인물 화면 x(0 = 왼쪽, 1 = 오른쪽) {이름: x}. 카메라·자리가 없으면 {}."""
+    from . import previz_fit  # noqa: PLC0415
+
+    scene = _scene_by_cut(plan).get(str(cut_id)) or {}
+    entry = next((e for e in scene.get("timeline") or [] if str(e.get("cutId") or "") == str(cut_id)), {})
+    camera = entry.get("camera") if isinstance(entry.get("camera"), dict) else None
+    if not camera or not camera.get("pos") or not camera.get("target"):
+        return {}
+    names = {str(a.get("id") or ""): str(a.get("name") or "").strip() for a in scene.get("actors") or [] if isinstance(a, dict)}
+    out: dict[str, float] = {}
+    for actor in entry.get("actors") or []:
+        name = names.get(str((actor or {}).get("id") or ""), "") if isinstance(actor, dict) else ""
+        try:
+            point = (float(actor["pos"][0]), 1.0, float(actor["pos"][2]))  # 가슴 높이
+        except (KeyError, TypeError, ValueError, IndexError):
+            continue
+        spot = previz_fit.project_point(camera, point)
+        if name and spot is not None:
+            out[name] = float(spot["screenX"])
+    return out
+
+
+def _flip_screen_words(text: str) -> str:
+    """작업 179 fix1: 화면 방향 글의 left ↔ right(screen right · off-screen left · left edge · left of center …). 몸 쪽 글은 그대로."""
+    def swap(match: re.Match) -> str:
+        word = match.group("a") or match.group("b")
+        new = {"left": "right", "right": "left"}[word.lower()]
+        new = new.capitalize() if word[:1].isupper() else new
+        start = (match.start("a") if match.group("a") else match.start("b")) - match.start()
+        whole = match.group(0)
+        return whole[:start] + new + whole[start + len(word):]
+    return _SCREEN_DIR.sub(swap, str(text or ""))
+
+
+def _screen_sides(plan: dict, cut: dict, names: list[str], info: dict | None = None) -> list[str]:
+    """작업 179: 두 사람 샷의 [화면 왼쪽 사람, 오른쪽 사람](콘티 이름), 못 정하면 [].
+
+    출처 순서: 139 애니 프레임 읽기 side(있을 때) → 콘티 positionEn(웹툰 패널의 왼쪽 → 오른쪽) → 프리비즈 카메라 투영.
+    프리비즈는 마지막이다: 선을 넘은 컷(fit.crossed)은 웹툰과 좌우가 거꾸로일 수 있다(prod test3 cut-01).
+    fix1: info(dict)를 주면 패널(또는 애니 읽기) 좌우와 프리비즈 투영 좌우가 거꾸로일 때 info["mirrored"] = True.
+    """
+    if len(names) != 2:
+        return []
+    a, b = names
+
+    def order(side_a: str, side_b: str) -> list[str]:
+        if side_a in _SIDE_ORDER and side_b in _SIDE_ORDER and side_a != side_b:
+            return [a, b] if _SIDE_ORDER[side_a] < _SIDE_ORDER[side_b] else [b, a]
+        return []
+
+    cut_id = str(cut.get("id") or "")
+    xs = _previz_screen_x(plan, cut_id)
+    previz = ([a, b] if xs[a] < xs[b] else [b, a]) if a in xs and b in xs and abs(xs[a] - xs[b]) >= 0.05 else []
+    layout = _anime_layout_sides(plan, cut_id)
+    got = order(layout.get(a, ""), layout.get(b, ""))
+    if not got:
+        panel = {str(ch.get("name") or "").strip(): _position_side(ch.get("positionEn")) for ch in _cut_named(cut)}
+        got = order(panel.get(a, ""), panel.get(b, ""))
+    if got:
+        if info is not None and previz and previz != got:
+            info["mirrored"] = True
+        return got
+    return previz
 
 
 def _identity_cue(appearance: str) -> str:
@@ -5314,9 +5424,11 @@ def _vibe_take_prompt(plan: dict, take: dict, *, real: bool, cast: list[dict], l
     appearances = {str(m.get("name") or "").strip(): str(m.get("appearance") or "") for m in cast}
 
     def _closeup_who(subject: str, entry: dict, cut: dict, clauses: list[str], owner_names: set[str],
-                     profile: bool = False) -> str:
+                     profile: bool = False, sides: list[str] | None = None, note: str = "") -> str:
         # 작업 166: "Close-up of A (cue) filling the frame; B only partly visible at the frame edge; C not in frame; <손 절>. "
         # 작업 170: 옆얼굴 크기면 "Profile close-up of A (cue) filling the frame".
+        # 작업 179: 두 사람 좌우(sides, 표시 이름 [왼쪽, 오른쪽])를 알면 B 의 가장자리 = "at the left/right frame edge".
+        # fix1: note(VIBE_MIRROR_NOTE, 프리비즈가 거꾸로인 컷)는 그 가장자리 절 바로 뒤.
         name = _disp(subject)
         visible = {_disp(str(i.get("name") or "")) for i in entry.get("onScreen") or [] if i.get("name")}
         visible |= {_disp(str(ch.get("name") or "")) for ch in _cut_named(cut) if ch.get("presence") == "on_screen"}
@@ -5326,8 +5438,48 @@ def _vibe_take_prompt(plan: dict, take: dict, *, real: bool, cast: list[dict], l
         for other in [_disp(str(ch.get("name") or "")) for ch in _cut_named(cut)] + handles:
             if other and other not in seen:
                 seen.add(other)
-                pieces.append((VIBE_EDGE_PERSON if other in visible else VIBE_OUT_PERSON).format(name=other))
+                if other in visible and sides and other in sides:
+                    pieces.append(VIBE_EDGE_PERSON_SIDE.format(name=other, side="left" if sides[0] == other else "right")
+                                  + note)
+                else:
+                    pieces.append((VIBE_EDGE_PERSON if other in visible else VIBE_OUT_PERSON).format(name=other))
         return "; ".join(pieces + clauses) + ". "
+
+    def _two_sides(entry: dict, cut: dict, hand_owners: list[dict], info: dict | None = None) -> list[str]:
+        # 작업 179: 화면에 보이는 사람(손만 들어오는 사람 뺌)이 정확히 2명이면 [왼쪽, 오른쪽](표시 이름), 아니면 [].
+        owners = {str(o.get("name") or "").strip() for o in hand_owners}
+        shown: list[str] = []
+        for item in entry.get("onScreen") or []:
+            ko = str(item.get("name") or "").strip()
+            if ko and ko not in shown and ko not in owners and "hand" not in str(item.get("how") or ""):
+                shown.append(ko)
+        for ch in _cut_named(cut):
+            ko = str(ch.get("name") or "").strip()
+            if ch.get("presence") == "on_screen" and ko not in shown and ko not in owners:
+                shown.append(ko)
+        return [_disp(ko) for ko in _screen_sides(plan, cut, shown, info)]
+
+    def _sides_sentence(entry: dict, sides: list[str], note: str = "") -> str:
+        # 작업 179: "A on screen left, B on screen right. ", 한 사람만 가장자리(how partial)면 "B only partly visible at the … edge. "
+        partial = [s for s in sides if any(_disp(str(i.get("name") or "")) == s and str(i.get("how") or "") == "partial"
+                                           for i in entry.get("onScreen") or [])]
+        if len(partial) == 1:
+            side = "left" if sides[0] == partial[0] else "right"
+            return VIBE_EDGE_PERSON_SIDE.format(name=partial[0], side=side) + note + ". "
+        return VIBE_SIDES.format(left=sides[0], right=sides[1]) + note + ". "
+
+    # 작업 179 fix1: 컷마다 화면 좌우 · 프리비즈 거꾸로(인서트는 없음). 거꾸로인 컷의 연기 글(촬영 지시서 = 프리비즈 기준)은
+    # 화면 방향 낱말을 패널 쪽으로 뒤집는다 — SHOT · 감사 · Kling ACTION 이 모두 같은 글을 본다.
+    sides_by: list[list[str]] = []
+    mirrored_by: list[bool] = []
+    for entry, cut_id in zip(entries, take_cut_ids):
+        cut = cuts_by_id.get(cut_id) or {}
+        owners = _hands_only_owners(cut)
+        info: dict = {}
+        sides_by.append([] if _vibe_is_insert(cut, owners) else _two_sides(entry, cut, owners, info))
+        mirrored_by.append(bool(info.get("mirrored")))
+        if mirrored_by[-1]:
+            entry["action"] = _flip_screen_words(entry.get("action") or "")
 
     def _shot(index: int, entry: dict, cut_id: str) -> str:
         cut = cuts_by_id.get(cut_id) or {}
@@ -5355,12 +5507,17 @@ def _vibe_take_prompt(plan: dict, take: dict, *, real: bool, cast: list[dict], l
             tighter.append(cut_id)
         edge = (lambda text: _edge_hand(text)) if subject else (lambda text: text)  # 작업 174: 한 사람 클로즈업의 손 잡기
         clauses = [edge(c) for c in clauses]
+        sides = sides_by[index]  # 작업 179: 인서트 · 한 사람 샷은 []
+        note = VIBE_MIRROR_NOTE if mirrored_by[index] else ""  # fix1: 프리비즈가 거꾸로인 컷
         if subject:
-            who = _closeup_who(subject, entry, cut, clauses, owner_names, profile=size == VIBE_PROFILE_SIZE)
+            who = _closeup_who(subject, entry, cut, clauses, owner_names, profile=size == VIBE_PROFILE_SIZE, sides=sides,
+                               note=note)
         elif hand_owners:
             who = _vibe_who_hands(entry.get("onScreen") or [], handles, _disp, clauses, owner_names)
         else:
             who = _vibe_who(entry.get("onScreen") or [], handles, _disp)
+        if sides and not subject:
+            who += _sides_sentence(entry, sides, note)  # 작업 179: 두 사람 좌우(클로즈업 잠금은 가장자리 절이 말한다)
         if insert:
             who = _insert_who(who, cut, hand_owners, _disp)  # 작업 168: 인서트는 "Only X appears" 대신 몸·손만
         locks = _vibe_own_hands(cut, hand_owners, _disp, lambda ko: appearances.get(ko, ""), lambda ko: costumes.get(ko) or "")
@@ -5430,18 +5587,24 @@ def _vibe_take_prompt(plan: dict, take: dict, *, real: bool, cast: list[dict], l
         rows: list[tuple[int, str]] = []
         sheets: list[int] = []
         costume_sheets: list[str] = []
+        anime_sheets: set[int] = set()  # 작업 179: 애니 웹툰 시트 = 한 문장 이름표(VIBE_ANIME_SHEET_LABEL)
         for member in cast:
             handle = _disp(str(member.get("name") or ""))
             nos = [n for n in (member.get("refNos") or []) if n] or ([member["frontNo"]] if member.get("frontNo") else [])
             costume_no = member.get("costumeNo")
+            anime_sheet = int(member["sheetNo"]) if not real and member.get("sheetNo") and costume_no not in nos else 0
             for no in nos:
+                if no == anime_sheet:
+                    rows.append((no, VIBE_ANIME_SHEET_LABEL.format(no=no, name=handle)))
+                    anime_sheets.add(no)
+                    continue
                 # 작업 160: 정면 자리의 장면 옷 편집 그림은 "in this scene's clothes"
                 rows.append((no, REAL_COSTUME_REF_LABEL.format(no=no, name=handle) if no == costume_no
                              else f"@Image{no} is {handle}"))
             if member.get("sheetNo") and costume_no in nos:
                 costume_sheets.append(f"@Image{int(member['sheetNo'])}: "
                                       + VIBE_SHEET_COSTUME_CLAUSE.format(no=costume_no) + ".")
-            elif member.get("sheetNo"):
+            elif member.get("sheetNo") and int(member["sheetNo"]) not in anime_sheets:
                 sheets.append(int(member["sheetNo"]))
         if frame_no:
             rows.append((frame_no, (frame_lead or (VIBE_FRAME_LOOK_LEAD if hard_cut else VIBE_FRAME_LEAD)).format(no=frame_no)))
@@ -5456,7 +5619,13 @@ def _vibe_take_prompt(plan: dict, take: dict, *, real: bool, cast: list[dict], l
                                                            images="image" if len(panels) == 1 else "images")))
         if not rows:
             return ""
-        text = "; ".join(t for _n, t in sorted(rows, key=lambda r: r[0])) + "."
+        text = ""
+        after_sheet = False
+        for no, row in sorted(rows, key=lambda r: r[0]):
+            # 작업 179: 애니 시트 이름표는 한 문장(마침표로 끝남) — 다음 이름표는 새 문장. 시트가 없으면 지금 그대로("; " · ".").
+            text += ("" if not text else " " if after_sheet else "; ") + row
+            after_sheet = no in anime_sheets
+        text += "" if after_sheet else "."
         if sheets:
             text += " " + ", ".join(f"@Image{n}" for n in sorted(sheets)) + f": {VIBE_SHEET_CLAUSE}."
         if costume_sheets:
@@ -5469,6 +5638,10 @@ def _vibe_take_prompt(plan: dict, take: dict, *, real: bool, cast: list[dict], l
     def _assemble() -> str:
         head = [REAL_REF_AI_NOTE, _style(), *[_look_line(m) for m in cast], _paragraph(), _setting()]
         video = (VIBE_VIDEO_LINE_TIGHT if tighter else VIBE_VIDEO_LINE) + (f" ({colors})" if colors else "") + "."
+        if any(mirrored_by):
+            # 작업 179 fix1: 프리비즈가 거꾸로인 샷이 있는 조각 — 위치는 프리비즈, 그 샷의 좌우는 Shot 줄.
+            head_v, sep, tail_v = video.rpartition("; replace each mannequin with its person")
+            video = head_v + VIBE_VIDEO_MIRROR + sep + tail_v if sep else video
         return "\n".join(b for b in [*head, *shots, _labels(), video] if b)
 
     prompt = _assemble()
@@ -9410,6 +9583,8 @@ def _kling_shot_lock(owner: str, plan: dict, ctx: dict, cut_id: str, seconds: fl
         if not shot:
             return ""
         lead = str(shot["lead"]).strip().rstrip(" .")
+        # 작업 179 fix1: Kling 컷에는 프리비즈 영상이 없다 → 좌우 글은 그대로, 프리비즈 거꾸로 꼬리만 뺀다.
+        lead = lead.replace(VIBE_MIRROR_NOTE, "")
         # 작업 171: 첫 부름에 머리색 단서("Beomgeonu (charcoal-black hair)"), 이미 단서가 붙어 있으면 그대로.
         cues = {_romanize_name(m["name"]) or m["name"]: _identity_cue(m["appearance"]) for m in cast}
         for roman, cue in cues.items():
