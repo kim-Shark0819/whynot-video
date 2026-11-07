@@ -14,13 +14,15 @@
   edit-media/{mid}-strip.jpg · edit-media/{mid}-film.json(필름스트립·파형 피크, 처음 요청 때 한 번 만든다).
   내보낸 결과는 영상 버킷 {gen 루트}/final-edit-{n}.mp4.
 외부 호출 래퍼(검사가 가짜로 바꾼다): _download · _upload · _probe_file · _film_file · _export_segment · _export_join ·
-_spawn_export. 파드 안 내보내기 잠금 파일: _pod_lock_try · _pod_lock_release(지시서 111). STORE 는 vpoc.store.STORE 다
+_spawn_export(작업 181: · _export_dissolve · _export_audio · _export_mix). 파드 안 내보내기 잠금 파일: _pod_lock_try · _pod_lock_release(지시서 111). STORE 는 vpoc.store.STORE 다
 (검사가 모듈 변수로 바꾼다).
 지시서 115: 클립 속도 speed(SPEEDS, 없으면 1 — 1 은 저장하지 않는다). 타임라인 길이 = (out − in) / speed(_clip_seconds).
 재료가 없을 때 요약에 잠김 이유(summary → reason, gen 이 없어도 gen_view 가 부른다).
 지시서 116: VNEW_EDIT_RETAKE 가 켜져 있으면 ⑦ AI로 고치기(retake.py)로 다시 만든 버전(v2…)도 재료다 — 그 칸 지금 결과 바로 뒤
 (_all_items, group "retake", 이름 끝 " v{n}"). 꺼져 있으면 _retake_state 가 None 이라 재료·보기가 지시서 115 와 같다.
 지시서 116 보완 10: 소리 없는 버전은 그 칸 v1 의 같은 녹화 시각 소리를 쓴다(_audio_sources — 재료 audioFrom·내보내기 audio_source).
+작업 181: 클립 audioLead(J 컷)·audioTail(L 컷)·transition(다음 클립으로 디졸브). 셋 다 없는 문서는 181 전과 같은 해시·같은 내보내기 명령이다.
+쓰는 문서의 내보내기는 _fx_plan(프레임·샘플 배치) → 몸통 조각 + 디졸브 경계 조각 잇기, 소리는 클립별 창을 타임라인에서 섞는다.
 """
 
 from __future__ import annotations
@@ -73,6 +75,14 @@ MIN_CLIP_S = 0.04  # 25fps 한 프레임
 MAX_LABEL_LEN = 40
 # 클립 속도(지시서 115). 0.5× 는 2배로 늘고 2× 는 반으로 준다. 내보내기는 ffmpeg setpts·atempo 한 번(0.5~2)이다.
 SPEEDS = stitcher.EDIT_SPEED_CHOICES
+# 작업 181: J 컷(audioLead — 소리가 화면보다 먼저)·L 컷(audioTail — 소리가 화면 뒤로 이어 감)과 다음 클립으로 가는 디졸브(transition).
+# 앞당김·이어 감은 타임라인 초(0~2, 0.05 단위, 원본 구간 = 초 × 속도), 디졸브는 4값이고 두 클립 중 짧은 쪽(속도 반영)의 45% 까지다.
+# 화면에 없는 클립의 소리(앞당김·이어 감 구간)는 OFFSCREEN_GAIN 까지 직선으로 들어오고 나간다(화면에 있는 클립은 1.0).
+AUDIO_SHIFT_MAX_S = 2.0
+AUDIO_SHIFT_STEP_S = 0.05
+DISSOLVE_SECONDS = (0.25, 0.5, 0.75, 1.0)
+DISSOLVE_MAX_SHARE = 0.45
+OFFSCREEN_GAIN = 0.6
 # 재료가 없을 때 gen_view 요약의 잠김 이유(지시서 115, 화면 ⑦ 칩의 title·안내). 키는 _lock_reason 이 고른다.
 LOCK_REASONS = {
     "none": "⑤에서 영상을 먼저 만들면 편집할 수 있습니다.",
@@ -244,6 +254,21 @@ def _export_join(segments: list[str], output_path: str, *, audio_path: str) -> s
     return stitcher.edit_join(segments, output_path, audio_path=audio_path)
 
 
+def _export_dissolve(a_path: str, b_path: str, video_out: str, **kwargs) -> dict:
+    """작업 181: 디졸브 경계 조각(stitcher.edit_dissolve, -threads 1)."""
+    return stitcher.edit_dissolve(a_path, b_path, video_out, threads=1, **kwargs)
+
+
+def _export_audio(source_path: str, audio_out: str, **kwargs) -> dict:
+    """작업 181: 클립 소리 창 하나(stitcher.edit_audio, -threads 1)."""
+    return stitcher.edit_audio(source_path, audio_out, threads=1, **kwargs)
+
+
+def _export_mix(layers: list[dict], output_path: str, *, samples: int) -> dict:
+    """작업 181: 타임라인 소리 섞기(stitcher.edit_mix)."""
+    return stitcher.edit_mix(layers, output_path, samples=samples)
+
+
 def _spawn_export(owner: str, pid: str, gen_id: str, n: int, claim: str) -> None:
     """내보내기 스레드를 띄운다. claim 마다 하나(이 프로세스에서 돌고 있는지 _alive_here 가 본다)."""
     thread = threading.Thread(
@@ -392,8 +417,25 @@ def _clip_seconds(clip: dict) -> float:
     return (float(clip.get("out") or 0) - float(clip.get("in") or 0)) / _speed_of(clip)
 
 
+def _shift_of(clip, key: str) -> float:
+    """작업 181: 클립의 소리 앞당김(audioLead)·이어 감(audioTail) 초. 없거나 범위(0~2) 밖이면 0."""
+    value = _num(clip.get(key)) if isinstance(clip, dict) else None
+    return value if value is not None and 0 < value <= AUDIO_SHIFT_MAX_S + 1e-9 else 0.0
+
+
+def _dissolve_of(clip) -> float:
+    """작업 181: 다음 클립으로 가는 디졸브 초. 컷(없음·{"type": "cut"})이거나 허용 값(DISSOLVE_SECONDS) 밖이면 0."""
+    raw = clip.get("transition") if isinstance(clip, dict) else None
+    if not isinstance(raw, dict) or raw.get("type") != "dissolve":
+        return 0.0
+    value = _num(raw.get("seconds"))
+    return value if value in DISSOLVE_SECONDS else 0.0
+
+
 def _total(clips: list[dict]) -> float:
-    return round(sum(_clip_seconds(c) for c in clips if isinstance(c, dict)), 3)
+    """타임라인 길이 합. 작업 181: 디졸브마다 두 화면이 겹쳐 그 초만큼 짧아진다(마지막 클립의 전환은 세지 않는다)."""
+    clips = [c for c in clips if isinstance(c, dict)]
+    return round(sum(_clip_seconds(c) for c in clips) - sum(_dissolve_of(c) for c in clips[:-1]), 3)
 
 
 def _changed(where: str) -> VpocError:
@@ -933,7 +975,10 @@ def _clean_clips(raw, allowed: set[str], durations: dict[str, float | None], whe
     - speed(지시서 115): 없거나 null 이면 1, 있으면 SPEEDS 중 하나(JSON 숫자). 타임라인 길이((out − in) / speed)도 0.04 이상.
       1 이면 저장하지 않는다(속도를 안 쓴 문서는 115 전 모양 그대로).
     - muted: 없으면 false, 있으면 bool. label: 글자면 제어 문자를 빼고 40자, 그 밖은 버린다.
-    - 전체 길이(타임라인 길이 합) ≤ MAX_TOTAL_S.
+    - 작업 181: audioLead·audioTail(0~2초, 0.05초 단위, 0·null 은 저장 안 함 — _clean_shift), transition(컷이면 저장 안 함, 디졸브는
+      {"type": "dissolve", "seconds": 0.25·0.5·0.75·1} — _clean_transition)과 자리 규칙(_check_overlaps). 틀리면 400
+      BadClipAudioLead·BadClipAudioTail·BadTransition. 소리 끈 클립의 앞당김·이어 감은 받은 그대로 저장한다(내보내기가 무시한다).
+    - 전체 길이(타임라인 길이 합 − 디졸브 합) ≤ MAX_TOTAL_S.
     """
     raw = _check_clip_list(raw, where)
     clips: list[dict] = []
@@ -975,6 +1020,15 @@ def _clean_clips(raw, allowed: set[str], durations: dict[str, float | None], whe
         item = {"id": clip_id, "sourceKey": source, "in": start, "out": end, "muted": muted}
         if speed != 1:
             item["speed"] = speed
+        # 작업 181: 앞당김·이어 감·디졸브. 기본값(0·컷)은 저장하지 않는다(181 전 문서 모양 그대로). 소리 끈 클립도 받은 그대로 둔다.
+        for key, code, name in (("audioLead", "BadClipAudioLead", "소리 먼저 시작(audioLead)은"),
+                                ("audioTail", "BadClipAudioTail", "소리 이어 가기(audioTail)는")):
+            shift = _clean_shift(clip.get(key), number, where, code, name)
+            if shift:
+                item[key] = shift
+        dissolve = _clean_transition(clip.get("transition"), number, where)
+        if dissolve:
+            item["transition"] = {"type": "dissolve", "seconds": dissolve}
         label = clip.get("label")
         if isinstance(label, str):
             label = _CONTROL_RE.sub("", label).strip()[:MAX_LABEL_LEN]
@@ -982,15 +1036,61 @@ def _clean_clips(raw, allowed: set[str], durations: dict[str, float | None], whe
                 item["label"] = label
         total += (end - start) / speed
         clips.append(item)
+    _check_overlaps(clips, where)
+    total -= sum(_dissolve_of(c) for c in clips[:-1])  # 작업 181: 한도는 디졸브로 겹친 뒤의 길이
     if total > MAX_TOTAL_S + 1e-6:
         raise VpocError(where, "TooLong", f"타임라인 전체 길이는 {MAX_TOTAL_S:.0f}초까지입니다.", 400)
     return clips
+
+
+def _clean_shift(raw, number: int, where: str, code: str, name: str) -> float:
+    """작업 181: audioLead·audioTail 한 값. 없거나 null 이면 0, 있으면 0~2초 0.05초 단위 JSON 숫자(밀리초 반올림 전 기준)."""
+    if raw is None:
+        return 0.0
+    value = _num(raw)
+    steps = value / AUDIO_SHIFT_STEP_S if value is not None else 0.0
+    if value is None or value < 0 or value > AUDIO_SHIFT_MAX_S + 1e-9 or abs(steps - round(steps)) > 1e-6:
+        raise VpocError(where, code, f"{number}번째 클립의 {name} 0~{AUDIO_SHIFT_MAX_S:g}초 사이 {AUDIO_SHIFT_STEP_S:g}초 단위여야 합니다.", 400)
+    return round(round(steps) * AUDIO_SHIFT_STEP_S, 2)
+
+
+def _clean_transition(raw, number: int, where: str) -> float:
+    """작업 181: transition 한 값. 없음·null·{"type": "cut"} 이면 0(컷), {"type": "dissolve", "seconds": 4값 중 하나} 면 그 초."""
+    if raw is None:
+        return 0.0
+    if isinstance(raw, dict) and raw.get("type") == "cut":
+        return 0.0
+    value = _num(raw.get("seconds")) if isinstance(raw, dict) and raw.get("type") == "dissolve" else None
+    if value not in DISSOLVE_SECONDS:
+        raise VpocError(where, "BadTransition",
+                        f"{number}번째 클립의 전환(transition)은 컷 또는 디졸브(0.25·0.5·0.75·1초)여야 합니다.", 400)
+    return value
+
+
+def _check_overlaps(clips: list[dict], where: str) -> None:
+    """작업 181: 자리 규칙. 첫 클립은 앞당김 없음, 마지막 클립은 이어 감·전환 없음, 디졸브는 앞뒤 두 클립 중 짧은 쪽의 45% 이하."""
+    if not clips:
+        return
+    if clips[0].get("audioLead"):
+        raise VpocError(where, "BadClipAudioLead", "첫 클립에는 소리 먼저 시작(audioLead)을 둘 수 없습니다(앞 클립이 없습니다).", 400)
+    if clips[-1].get("audioTail"):
+        raise VpocError(where, "BadClipAudioTail", "마지막 클립에는 소리 이어 가기(audioTail)를 둘 수 없습니다(뒤 클립이 없습니다).", 400)
+    if clips[-1].get("transition"):
+        raise VpocError(where, "BadTransition", "마지막 클립에는 다음 클립으로 가는 전환(transition)을 둘 수 없습니다.", 400)
+    for number, (item, after) in enumerate(zip(clips, clips[1:]), 1):
+        seconds = _dissolve_of(item)
+        shorter = min(_clip_seconds(item), _clip_seconds(after))
+        if seconds and seconds > DISSOLVE_MAX_SHARE * shorter + 1e-9:
+            raise VpocError(where, "BadTransition",
+                            f"{number}번째 클립의 디졸브({seconds:g}초)는 두 클립 중 짧은 쪽 길이({shorter:.2f}초)의 "
+                            f"45%({DISSOLVE_MAX_SHARE * shorter:.2f}초) 이하여야 합니다.", 400)
 
 
 def _doc_hash(variant: str, clips: list[dict]) -> str:
     """내보내기 결과를 정하는 값만(그림체·원본·구간·소리·속도)의 sha256. 클립 id·이름은 넣지 않는다.
 
     속도는 1 이 아닐 때만 넣는다(지시서 115 — 속도를 안 쓴 문서·진행 중 내보내기의 해시가 115 전과 같다).
+    작업 181: audioLead·audioTail·transition(디졸브)도 기본값(0·컷)이 아닐 때만 넣는다(181 전 문서의 해시 그대로).
     """
     body = []
     for c in clips:
@@ -998,6 +1098,11 @@ def _doc_hash(variant: str, clips: list[dict]) -> str:
         speed = _speed_of(c)
         if speed != 1:
             item["speed"] = speed
+        for key in ("audioLead", "audioTail"):
+            if _shift_of(c, key):
+                item[key] = _shift_of(c, key)
+        if _dissolve_of(c):
+            item["transition"] = {"type": "dissolve", "seconds": _dissolve_of(c)}
         body.append(item)
     text = json.dumps({"variant": variant, "clips": body}, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
@@ -1514,6 +1619,95 @@ def _clip_frames(clips: list[dict], fps: int) -> list[int]:
     return frames
 
 
+def _fx_plan(clips: list[dict], frames: list[int], fps: int) -> dict | None:
+    """작업 181: 디졸브·J/L 컷 배치(프레임·샘플). 셋 다 없으면(소리 끈 클립의 앞당김·이어 감은 없는 것으로 본다) None — 181 전 경로.
+
+    dissolve[i]: 클립 i → i+1 디졸브 프레임 = round(초 × fps)(마지막은 0). 두 디졸브가 한 클립을 다 덮지 않게 짧은 쪽 클립의
+    (프레임 − 1) // 2 로 묶는다(검증한 45% 안이면 묶이지 않는다). start[i] = 화면 시작 프레임(앞 디졸브만큼 당겨진다),
+    skip[i] = 앞 디졸브 프레임(몸통 조각이 건너뛰는 장 수), body[i] = 몸통 조각 장 수, total = 전체 프레임 = Σ frames − Σ dissolve.
+    lead·tail: 앞당김·이어 감 샘플(48kHz, 첫 클립 lead·마지막 클립 tail·소리 끈 클립은 0). spf = 프레임당 샘플.
+    """
+    count = len(clips)
+    rate = stitcher.EDIT_AUDIO_RATE
+    dissolve = []
+    for index in range(count):
+        seconds = _dissolve_of(clips[index]) if index < count - 1 else 0.0
+        number = int(round(seconds * fps)) if seconds else 0
+        if number:
+            number = min(number, (min(frames[index], frames[index + 1]) - 1) // 2)
+        dissolve.append(max(0, number))
+    lead = [0 if index == 0 or clip.get("muted") else int(round(_shift_of(clip, "audioLead") * rate))
+            for index, clip in enumerate(clips)]
+    tail = [0 if index == count - 1 or clip.get("muted") else int(round(_shift_of(clip, "audioTail") * rate))
+            for index, clip in enumerate(clips)]
+    if not any(dissolve) and not any(lead) and not any(tail):
+        return None
+    skip = [0] + dissolve[:-1]
+    start, position = [], 0
+    for index in range(count):
+        start.append(position)
+        position += frames[index] - dissolve[index]
+    body = [frames[index] - skip[index] - dissolve[index] for index in range(count)]
+    return {"dissolve": dissolve, "skip": skip, "body": body, "start": start, "total": position, "lead": lead, "tail": tail,
+            "spf": rate // fps}
+
+
+def _audio_window(seg_start: float, speed: float, lead_samples: int, length: int,
+                  alt: tuple[float, float] | None) -> dict:
+    """작업 181: 클립 소리 창의 원본 구간. 반환 edit_audio 인자 {start_sec, end_sec, pad_front, samples}.
+
+    소리 시작 = 화면 원본 시작(seg_start, 대체 소리면 alt 시작) − 앞당김 초 × 속도. 원본 0초보다 앞이면 0초에서 자르고 모자란 만큼
+    (타임라인 샘플) 앞을 무음으로 채운다. 끝은 원본 끝(대체 소리면 alt 끝)까지 — 이어 감이 원본보다 길면 뒤가 무음이다.
+    """
+    rate = stitcher.EDIT_AUDIO_RATE
+    begin = float(alt[0]) if alt is not None else float(seg_start)
+    want = begin - lead_samples / rate * speed
+    pad = 0
+    if want < 0:
+        pad = min(length, int(round(-want / speed * rate)))
+        want = 0.0
+    return {"start_sec": round(want, 6), "end_sec": float(alt[1]) if alt is not None else None, "pad_front": pad,
+            "samples": length}
+
+
+def _audio_envelope(fx: dict, index: int) -> tuple[int, int, list[tuple[int, int, float, float]]]:
+    """작업 181: 클립 index 소리 층의 (타임라인 시작 샘플, 길이, 이득 구간 [(t0, t1, g0, g1)]).
+
+    화면에 있는 동안 1.0. 앞당김 구간(앞 클립 화면 아래)은 0 → OFFSCREEN_GAIN, 이어 감 구간(뒤 클립 화면 아래)은 OFFSCREEN_GAIN → 0
+    직선. 디졸브 구간은 두 클립 소리를 엇갈려 바꾼다: 들어오는 쪽 (앞당김이 있으면 0.6, 없으면 0) → 1, 나가는 쪽 1 → (이어 감이 있으면
+    0.6, 없으면 0). 그래서 이득이 구간 경계에서 끊기지 않는다(앞당김·이어 감과 디졸브가 함께 있어도).
+    """
+    spf = fx["spf"]
+    lead, tail = fx["lead"][index], fx["tail"][index]
+    picture = fx["start"][index] * spf
+    end = (fx["start"][index] + fx["skip"][index] + fx["body"][index] + fx["dissolve"][index]) * spf
+    fade_in, fade_out = fx["skip"][index] * spf, fx["dissolve"][index] * spf
+    gain = OFFSCREEN_GAIN
+    segments: list[tuple[int, int, float, float]] = []
+    if lead:
+        segments.append((picture - lead, picture, 0.0, gain))
+    body_from, body_to = picture, end
+    if fade_in:
+        segments.append((picture, picture + fade_in, gain if lead else 0.0, 1.0))
+        body_from = picture + fade_in
+    if fade_out:
+        body_to = end - fade_out
+    if body_to > body_from:
+        segments.append((body_from, body_to, 1.0, 1.0))
+    if fade_out:
+        segments.append((end - fade_out, end, 1.0, gain if tail else 0.0))
+    if tail:
+        segments.append((end, end + tail, gain, 0.0))
+    return picture - lead, (end - picture) + lead + tail, segments
+
+
+def _seg_start(clip: dict, info: dict, fps: int) -> float:
+    """클립 영상 사슬의 원본 시작(초). 가장 가까운 프레임부터: 밀리초 반올림으로 프레임 시각을 조금 넘긴 in 이 한 프레임을
+    건너뛰지 않게 반 프레임 당긴다(181 전 run_export 안의 계산을 옮겼다 — 값은 같다)."""
+    src_fps = _num((info or {}).get("fps")) or float(fps)
+    return max(0.0, float(clip["in"]) - 0.5 / src_fps)
+
+
 def _append_file(target: str, source: str) -> None:
     with open(target, "ab") as out, open(source, "rb") as src:
         shutil.copyfileobj(src, out, 1 << 20)
@@ -1614,58 +1808,97 @@ def run_export(owner: str, pid: str, gen_id: str, n: int, claim: str) -> None:
                 last_use[audio_from[clip["sourceKey"]]["sourceKey"]] = index
         if any(a is not None for a in alt):
             log.info("vnew.edit.export_audio_from pid=%s gen=%s n=%d clips=%d", pid, gen_id, n, sum(a is not None for a in alt))
+        fx = _fx_plan(clips, frames, fps)  # 작업 181: 디졸브·J/L 컷이 없으면 None(아래는 181 전 경로 그대로)
+        if fx is not None:
+            log.info("vnew.edit.export_fx pid=%s gen=%s n=%d dissolves=%d leads=%d tails=%d frames=%d", pid, gen_id, n,
+                     sum(1 for d in fx["dissolve"] if d), sum(1 for v in fx["lead"] if v), sum(1 for v in fx["tail"] if v),
+                     fx["total"])
         with tempfile.TemporaryDirectory(prefix="vnew-edit-export-") as workdir:
             local: dict[str, str] = {}
             segments: list[str] = []
+            layers: list[dict] = []  # 작업 181: 소리 층(edit_mix)
             audio_path = os.path.join(workdir, "audio.raw") if with_audio else ""
             if audio_path:
                 open(audio_path, "wb").close()
             last_beat = time.monotonic()
+
+            def fetch(key: str, name: str) -> str:
+                path = local.get(key)
+                if path is None:
+                    path = os.path.join(workdir, name)
+                    _download(key, path, bucket=vpoc_settings.VIDEO_BUCKET)
+                    local[key] = path
+                return path
+
             for index, clip in enumerate(clips):
                 clip_no = index + 1
                 if time.monotonic() - attempt_started > EXPORT_MAX_S:
                     raise _ExportTimeout()
                 source = clip["sourceKey"]
                 info = meta.get(source) or {}
-                path = local.get(source)
-                if path is None:
+                if source not in local:
                     stage = "download"
-                    path = os.path.join(workdir, f"src-{index:03d}.mp4")
-                    _download(source, path, bucket=vpoc_settings.VIDEO_BUCKET)
-                    local[source] = path
+                path = fetch(source, f"src-{index:03d}.mp4")
                 extra: dict = {}
                 if audio_path and alt[index] is not None:
                     a_key = audio_from[source]["sourceKey"]
-                    a_path = local.get(a_key)
-                    if a_path is None:
+                    if a_key not in local:
                         stage = "download"
-                        a_path = os.path.join(workdir, f"src-{index:03d}a.mp4")
-                        _download(a_key, a_path, bucket=vpoc_settings.VIDEO_BUCKET)
-                        local[a_key] = a_path
+                    a_path = fetch(a_key, f"src-{index:03d}a.mp4")
                     extra = {"audio_source": a_path, "audio_start_sec": alt[index][0], "audio_end_sec": alt[index][1]}
                 stage = "clip"
-                src_fps = _num(info.get("fps")) or float(fps)
-                # 가장 가까운 프레임부터: 밀리초 반올림으로 프레임 시각을 조금 넘긴 in 이 한 프레임을 건너뛰지 않게 반 프레임 당긴다.
-                start = max(0.0, float(clip["in"]) - 0.5 / src_fps)
+                start = _seg_start(clip, info, fps)
                 seg_video = os.path.join(workdir, f"seg-{index:03d}.mp4")
                 seg_audio = os.path.join(workdir, f"seg-{index:03d}.raw") if audio_path else ""
+                has_sound = bool(audio_path) and not clip.get("muted") and (bool(info.get("hasAudio")) or bool(extra))
                 # 클립 인코딩(720p x264 ≈ 140MB, ⑤ 컷 자르기 trim 과 같은 크기)은 ⑤ 준비 단계와 같은 세마포어 안에서 한다
                 # (같은 프로세스에서 ffmpeg 인코딩 두 개가 겹치지 않게, 512Mi). 클립 하나씩이라 ⑤ 제출을 오래 막지 않는다.
                 generate._PREPARE_SEM.acquire()  # noqa: SLF001
                 try:
-                    _export_segment(
-                        path, seg_video, start_sec=start, frames=frames[index], fps=fps, width=width, height=height,
-                        audio_out=seg_audio,
-                        audio_from_source=bool(audio_path) and not clip.get("muted") and (bool(info.get("hasAudio")) or bool(extra)),
-                        speed=_speed_of(clip),  # 지시서 115: 영상 setpts·소리 atempo(1 이면 115 전 명령 그대로)
-                        **extra,
-                    )
+                    if fx is None:
+                        _export_segment(
+                            path, seg_video, start_sec=start, frames=frames[index], fps=fps, width=width, height=height,
+                            audio_out=seg_audio,
+                            audio_from_source=has_sound,
+                            speed=_speed_of(clip),  # 지시서 115: 영상 setpts·소리 atempo(1 이면 115 전 명령 그대로)
+                            **extra,
+                        )
+                    else:
+                        # 작업 181: 몸통(앞뒤 디졸브 장을 뺀 가운데)만 영상으로, 소리는 앞당김·이어 감을 더한 창을 따로 뽑는다.
+                        _export_segment(path, seg_video, start_sec=start, frames=fx["body"][index], fps=fps, width=width,
+                                        height=height, audio_out="", audio_from_source=False, speed=_speed_of(clip),
+                                        skip_frames=fx["skip"][index])
+                        if has_sound:
+                            at, length, envelope = _audio_envelope(fx, index)
+                            window = _audio_window(start, _speed_of(clip), fx["lead"][index], length, alt[index])
+                            layer_path = os.path.join(workdir, f"aud-{index:03d}.raw")
+                            _export_audio(extra.get("audio_source") or path, layer_path, speed=_speed_of(clip), **window)
+                            layers.append({"path": layer_path, "at": at, "envelope": envelope})
                 finally:
                     generate._PREPARE_SEM.release()  # noqa: SLF001
-                if seg_audio:
+                if fx is None and seg_audio:
                     _append_file(audio_path, seg_audio)
                     os.unlink(seg_audio)
                 segments.append(seg_video)
+                if fx is not None and fx["dissolve"][index]:
+                    # 작업 181: 이 클립의 마지막 장들과 다음 클립의 처음 장들을 섞은 경계 조각(다음 클립 원본을 미리 받는다).
+                    after = clips[index + 1]
+                    if after["sourceKey"] not in local:
+                        stage = "download"
+                    after_path = fetch(after["sourceKey"], f"src-{index + 1:03d}.mp4")
+                    stage = "clip"
+                    blend = os.path.join(workdir, f"dis-{index:03d}.mp4")
+                    generate._PREPARE_SEM.acquire()  # noqa: SLF001
+                    try:
+                        _export_dissolve(
+                            path, after_path, blend, a_start_sec=start, a_speed=_speed_of(clip),
+                            a_skip_frames=frames[index] - fx["dissolve"][index],
+                            b_start_sec=_seg_start(after, meta.get(after["sourceKey"]) or {}, fps), b_speed=_speed_of(after),
+                            frames=fx["dissolve"][index], fps=fps, width=width, height=height,
+                        )
+                    finally:
+                        generate._PREPARE_SEM.release()  # noqa: SLF001
+                    segments.append(blend)
                 for used in dict.fromkeys([source] + ([audio_from[source]["sourceKey"]] if extra else [])):
                     if last_use[used] == index and used in local:
                         os.unlink(local.pop(used))
@@ -1673,6 +1906,10 @@ def run_export(owner: str, pid: str, gen_id: str, n: int, claim: str) -> None:
                     _beat(owner, pid, gen_id, claim, progress={"done": index + 1, "total": len(clips)})
                     last_beat = time.monotonic()
             stage = "join"
+            if fx is not None and audio_path:
+                _export_mix(layers, audio_path, samples=fx["total"] * fx["spf"])  # 작업 181: 소리 층을 타임라인에서 섞는다
+                for layer in layers:
+                    os.unlink(layer["path"])
             output = os.path.join(workdir, "edit.mp4")
             _export_join(segments, output, audio_path=audio_path)
             for segment in segments:

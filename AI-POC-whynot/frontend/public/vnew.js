@@ -8846,6 +8846,16 @@
   var EDIT_CHANGED_TEXT = "다른 곳에서 바뀌어 다시 불러왔습니다.";
   var EDIT_GONE_TEXT = "편집할 영상이 아직 없습니다. ⑤에서 영상을 먼저 만들어 주세요."; // 서버 문구가 없을 때(지시서 115)
   var EDIT_SPEEDS = [0.5, 0.75, 1, 1.25, 1.5, 2]; // 클립 속도(지시서 115, 서버 edit.SPEEDS 와 같다)
+  // 작업 182: J 컷(audioLead)·L 컷(audioTail)·다음 클립으로 디졸브(transition). 서버 edit.AUDIO_SHIFT_*·DISSOLVE_*·OFFSCREEN_GAIN 과 같다.
+  // 앞당김·이어 감은 타임라인 초 0~2(0.05 단위), 디졸브는 4값이고 앞뒤 두 클립 중 짧은 쪽(속도 반영)의 45% 까지다.
+  var EDIT_SHIFT_MAX_S = 2;
+  var EDIT_SHIFT_STEP_S = 0.05;
+  var EDIT_DISSOLVES = [0.25, 0.5, 0.75, 1];
+  var EDIT_DISSOLVE_SHARE = 0.45;
+  var EDIT_OFFSCREEN_GAIN = 0.6; // 미리보기: 화면에 없는 클립 소리(앞당김·이어 감) 크기
+  var EDIT_TR_SHORT = "클립이 짧아 쓸 수 없습니다";
+  var EDIT_MUTED_NOTE = "소리 끈 클립";
+  var EDIT_FX_NOTE = "J/L컷·디졸브는 내보낸 영상에서 정확히 확인할 수 있습니다";
   // 단축키 [ ]·Shift+[ ] 동작 → [끝(edge), 방향](지시서 115): out 앞(줄이기)·out 뒤(늘이기)·in 앞(늘이기)·in 뒤(줄이기)
   var EDIT_NUDGES = { outEarlier: ["out", -1], outLater: ["out", 1], inEarlier: ["in", -1], inLater: ["in", 1] };
   var EDIT_VARIANT_LABEL = { real: "실사", webtoon: "애니(웹툰)" }; // 작업 123: 서버 label("웹툰")보다 이 이름을 먼저 쓴다
@@ -8893,7 +8903,89 @@
     if (typeof clip.label === "string" && clip.label) copy.label = clip.label;
     var speed = editSpeedOf(clip);
     if (speed !== 1) copy.speed = speed; // 1 은 보내지 않는다(서버도 저장하지 않는다)
+    // 작업 182: J/L 컷·디졸브는 기본값(0·컷)이 아닐 때만 둔다 — 안 쓴 문서의 저장 바디는 182 전과 같다.
+    var lead = editShiftOf(clip, "audioLead");
+    if (lead) copy.audioLead = lead;
+    var tail = editShiftOf(clip, "audioTail");
+    if (tail) copy.audioTail = tail;
+    var dissolve = editDissolveOf(clip);
+    if (dissolve) copy.transition = { type: "dissolve", seconds: dissolve };
     return copy;
+  }
+
+  /* 작업 182: 0.05초 격자·0~2초로 맞춘 앞당김·이어 감 값(숫자가 아니면 0). */
+  function editShiftSnap(value) {
+    var v = Number(value);
+    if (!isFinite(v) || !(v > 0)) return 0;
+    v = Math.round(Math.min(v, EDIT_SHIFT_MAX_S) / EDIT_SHIFT_STEP_S) * EDIT_SHIFT_STEP_S;
+    return Math.round(v * 100) / 100;
+  }
+
+  /* 작업 182: 클립의 소리 앞당김(audioLead, J컷)·이어 감(audioTail, L컷) 초. 없거나 0 이하면 0. */
+  function editShiftOf(clip, key) {
+    return editShiftSnap((clip || {})[key]);
+  }
+
+  /* 작업 182: 다음 클립으로 가는 디졸브 초(transition {type: "dissolve", seconds}). 컷·없음·허용 값 밖이면 0. */
+  function editDissolveOf(clip) {
+    var tr = (clip || {}).transition;
+    if (!tr || typeof tr !== "object" || tr.type !== "dissolve") return 0;
+    var seconds = Number(tr.seconds);
+    return EDIT_DISSOLVES.indexOf(seconds) >= 0 ? seconds : 0;
+  }
+
+  /* 작업 182: a → b 경계에 seconds 초 디졸브를 둘 수 있는가 = 두 클립 중 짧은 쪽 타임라인 길이의 45% 이하(서버 _check_overlaps). */
+  function editDissolveFits(seconds, a, b) {
+    if (!a || !b) return false;
+    return Number(seconds) <= EDIT_DISSOLVE_SHARE * Math.min(editClipLen(a), editClipLen(b)) + 1e-9;
+  }
+
+  /* 작업 182: 경계 a → b 에 미리보기가 따로 다뤄야 할 효과가 있는가(디졸브·a 의 이어 감·b 의 앞당김, 소리 끈 클립의 소리 효과는 없음). */
+  function editFxEdge(a, b) {
+    if (!a || !b) return false;
+    return !!(editDissolveOf(a) || (a.muted !== true && editShiftOf(a, "audioTail")) || (b.muted !== true && editShiftOf(b, "audioLead")));
+  }
+
+  /* 작업 182: 클립 하나라도 J/L 컷·디졸브를 쓰는가(미리보기 근사 안내를 보일지). 마지막 클립의 전환·첫 클립의 앞당김은 세지 않는다. */
+  function editHasFx(clips) {
+    var list = clips || [];
+    for (var i = 0; i + 1 < list.length; i++) {
+      if (editFxEdge(list[i], list[i + 1])) return true;
+    }
+    return false;
+  }
+
+  /* 작업 182: 자리 규칙 정리(서버 _check_overlaps 와 같은 규칙). 옮기기·삭제·자르기·늘이기/줄이기·속도·재료 넣기 뒤 editCommit 이 부른다.
+     첫 클립은 앞당김을, 마지막 클립은 이어 감·전환을 버리고, 이제 안 맞는 디졸브는 맞는 가장 긴 값으로 줄이거나(없으면) 컷으로 둔다.
+     바꿀 것이 없으면 받은 목록 그대로, 있으면 바뀐 클립만 사본으로 바꾼 새 목록. */
+  function editTidyFx(clips) {
+    var list = Array.isArray(clips) ? clips : [];
+    var out = list.slice();
+    var changed = false;
+    function own(i) {
+      if (out[i] === list[i]) out[i] = editCloneClip(list[i]);
+      changed = true;
+      return out[i];
+    }
+    var last = list.length - 1;
+    for (var i = 0; i <= last; i++) {
+      var clip = list[i];
+      if (!clip || typeof clip !== "object") continue;
+      if (i === 0 && clip.audioLead !== undefined) delete own(i).audioLead;
+      if (i === last) {
+        if (clip.audioTail !== undefined) delete own(i).audioTail;
+        if (clip.transition !== undefined) delete own(i).transition;
+        continue;
+      }
+      var seconds = editDissolveOf(clip);
+      if (!seconds || editDissolveFits(seconds, clip, list[i + 1])) continue;
+      var fit = EDIT_DISSOLVES.filter(function (s) {
+        return s < seconds && editDissolveFits(s, clip, list[i + 1]);
+      });
+      if (fit.length) own(i).transition = { type: "dissolve", seconds: fit[fit.length - 1] };
+      else delete own(i).transition;
+    }
+    return changed ? out : list;
   }
 
   function editCloneClips(clips) {
@@ -8904,19 +8996,22 @@
       .map(editCloneClip);
   }
 
-  /* 클립마다 타임라인 시작 시각(초)과 전체 길이. 클립은 붙어 있다(간격 없음, design D3). */
+  /* 클립마다 타임라인 시작 시각(초)과 전체 길이. 클립은 붙어 있다(간격 없음, design D3).
+     작업 182: 디졸브가 있으면 다음 클립이 그 초만큼 겹쳐 당겨지고 전체 길이도 그만큼 짧다(서버 _total). */
   function editStarts(clips) {
     var starts = [];
     var total = 0;
-    (clips || []).forEach(function (clip) {
+    var list = clips || [];
+    list.forEach(function (clip, index) {
       starts.push(total);
       total += editClipLen(clip);
+      if (index < list.length - 1) total -= editDissolveOf(clip);
     });
     return { starts: starts, total: total };
   }
 
   /* 타임라인 시각 t → {index, clip, start, local(클립 안 타임라인 초), source(원본 초 = in + local × 속도)}. 경계는 뒤 클립(시작 포함·끝 제외),
-     전체 길이 이상은 마지막 클립의 끝, 0 미만은 0. 클립이 없으면 null. */
+     전체 길이 이상은 마지막 클립의 끝, 0 미만은 0. 클립이 없으면 null. 작업 182: 디졸브로 겹친 구간은 뒤 클립(미리보기가 바꿔 끼우는 시각). */
   function editLocate(clips, t) {
     var list = clips || [];
     if (!list.length) return null;
@@ -8924,7 +9019,8 @@
     var time = Math.max(0, Number(t) || 0);
     for (var i = 0; i < list.length; i++) {
       var len = editClipLen(list[i]);
-      if (time < info.starts[i] + len - 1e-9 || i === list.length - 1) {
+      var end = i + 1 < list.length ? info.starts[i + 1] : info.starts[i] + len;
+      if (time < end - 1e-9 || i === list.length - 1) {
         var local = Math.min(Math.max(0, time - info.starts[i]), len);
         return { index: i, clip: list[i], start: info.starts[i], local: local, source: editRound3(Number(list[i].in) + local * editSpeedOf(list[i])) };
       }
@@ -8954,6 +9050,10 @@
     left.out = cut;
     right.in = cut;
     right.id = String(newId);
+    // 작업 182: 앞당김은 앞 조각(왼쪽 끝)에, 이어 감·다음 클립으로 가는 전환은 뒤 조각(오른쪽 끝)에 남는다. 새 경계는 컷.
+    delete left.audioTail;
+    delete left.transition;
+    delete right.audioLead;
     var next = clips.slice();
     next.splice(loc.index, 1, left, right);
     return { clips: next, index: loc.index + 1 };
@@ -9419,6 +9519,10 @@
       drag: null,
       notice: "",
       fix: null, // 지시서 116: 열린 [AI로 고치기] 패널(editFixOpen). 닫으면 null
+      trEls: [], // 작업 182: 경계마다 {btn(전환 손잡이), wedge(디졸브 겹침)} — editRenderFx
+      trMenu: null, // 작업 182: 열린 전환 메뉴 {el, index, onDoc}(editTrOpen). 닫으면 null
+      fxHold: null, // 작업 182 미리보기: 바꿔 끼운 뒤에도 잠깐 더 재생하는 앞 클립(디졸브·L컷, editFxHoldStart)
+      fxLead: null, // 작업 182 미리보기: 화면보다 먼저 소리를 내는 다음 클립(J컷, editFxLeadTick)
       retakeOn: false // GET /edit 의 retake.enabled(VNEW_EDIT_RETAKE). false 면 AI로 고치기 버튼이 없다
     };
     ctx.onKey = function (event) {
@@ -9462,6 +9566,7 @@
     if (!ctx) return;
     editCtx = null;
     ctx.alive = false;
+    editTrClose(ctx); // 작업 182: 열린 전환 메뉴
     editFixStop(ctx); // 지시서 116: AI로 고치기 패널 조회 타이머·영상
     editPause(ctx);
     editCancelRaf(ctx.zoomRaf);
@@ -9596,6 +9701,7 @@
   }
 
   function editShowWait(ctx, text) {
+    editTrClose(ctx); // 작업 182
     clear(ctx.root);
     ctx.dom = {};
     ctx.clipEls = [];
@@ -9606,6 +9712,7 @@
   }
 
   function editShowLoadError(ctx, err) {
+    editTrClose(ctx); // 작업 182
     clear(ctx.root);
     ctx.dom = {};
     ctx.clipEls = [];
@@ -9632,6 +9739,7 @@
     editPause(ctx);
     if (ctx.exportTimer) window.clearTimeout(ctx.exportTimer);
     ctx.exportTimer = 0;
+    editTrClose(ctx); // 작업 182
     clear(ctx.root);
     ctx.dom = {};
     ctx.clipEls = [];
@@ -9700,6 +9808,7 @@
     var root = ctx.root;
     editFixClose(ctx); // 지시서 116: 다시 그리면 열린 AI로 고치기 패널을 닫는다
     editFixPickClose(ctx); // 지시서 119: 테이크·장면 고르기 창도
+    editTrClose(ctx); // 작업 182: 전환 메뉴도
     clear(root);
     var d = (ctx.dom = {});
     ctx.clipEls = [];
@@ -9764,6 +9873,10 @@
     d.time = el("span", "vnew-edit-time", "");
     transport.appendChild(d.time);
     player.appendChild(transport);
+    // 작업 182: 미리보기는 J/L 컷·디졸브를 근사로만 보인다(editFx*). 쓰는 클립이 있을 때만 보이는 안내 한 줄(editPlaceFx).
+    d.fxNote = el("p", "vnew-hint vnew-edit-fx-note", EDIT_FX_NOTE);
+    d.fxNote.style.display = "none";
+    player.appendChild(d.fxNote);
     root.appendChild(player);
 
     // 도구줄: 실행 취소 · 다시 실행 · 삭제 · 자르기 · 소리 끄기 · 처음 상태로 · 확대/축소
@@ -9790,6 +9903,7 @@
       tools.appendChild(btn);
     });
     tools.appendChild(editRetimeBox(ctx));
+    tools.appendChild(editAudioFxBox(ctx)); // 작업 182: 고른 클립 J/L 컷
     var zoomWrap = el("label", "vnew-edit-zoom");
     zoomWrap.title = "확대/축소(+ / −)";
     zoomWrap.appendChild(el("span", "vnew-edit-tool-icon", "🔍"));
@@ -9954,6 +10068,87 @@
     if (force || document.activeElement !== d.len) d.len.value = clip ? editClipLen(clip).toFixed(2) : "";
   }
 
+  /* 작업 182: 도구줄의 고른 클립 J/L 컷 — 소리 먼저 시작(audioLead)·소리 이어 가기(audioTail). 0~2초 0.05초 슬라이더와 숫자 표시.
+     끄는 동안(input)은 숫자만 바꾸고, 놓으면(change) 실행 취소 한 단계로 바꾼다(editApplyShift). */
+  function editAudioFxBox(ctx) {
+    var d = ctx.dom;
+    var box = el("div", "vnew-edit-afx");
+    d.afxLead = editShiftField(ctx, "audioLead", "소리 먼저 시작 (J컷)",
+      "고른 클립의 소리를 화면보다 먼저 시작합니다 — 앞 클립 끝에 겹쳐 들립니다(0~2초)");
+    d.afxTail = editShiftField(ctx, "audioTail", "소리 이어 가기 (L컷)",
+      "고른 클립의 소리를 다음 클립 화면까지 이어 갑니다(0~2초)");
+    box.appendChild(d.afxLead.wrap);
+    box.appendChild(d.afxTail.wrap);
+    d.afxNote = el("span", "vnew-hint vnew-edit-afx-note", EDIT_MUTED_NOTE);
+    d.afxNote.style.display = "none";
+    box.appendChild(d.afxNote);
+    return box;
+  }
+
+  function editShiftField(ctx, key, label, title) {
+    var wrap = el("label", "vnew-edit-afx-field");
+    wrap.title = title;
+    wrap.appendChild(el("span", "vnew-edit-afx-text", label));
+    var range = el("input", "vnew-edit-afx-range");
+    range.type = "range";
+    range.min = "0";
+    range.max = String(EDIT_SHIFT_MAX_S);
+    range.step = String(EDIT_SHIFT_STEP_S);
+    range.value = "0";
+    range.setAttribute("aria-label", label);
+    var out = el("output", "vnew-edit-afx-value", "0.00초");
+    out.setAttribute("aria-hidden", "true");
+    range.addEventListener("input", function () {
+      out.textContent = editShiftSnap(range.value).toFixed(2) + "초";
+    });
+    range.addEventListener("change", function () {
+      editApplyShift(ctx, key, range.value);
+    });
+    wrap.appendChild(range);
+    wrap.appendChild(out);
+    return { wrap: wrap, range: range, out: out, key: key };
+  }
+
+  /* J/L 칸을 고른 클립 값으로. 첫 클립은 J, 마지막 클립은 L 을 숨기고(앞·뒤 클립이 없다), 소리 끈 클립은 둘 다 막고 "소리 끈 클립". */
+  function editRenderAudioFx(ctx) {
+    var d = ctx.dom;
+    if (!d.afxLead || !d.afxTail) return;
+    var clip = editSelected(ctx);
+    var muted = !!clip && clip.muted === true;
+    var last = ctx.clips.length - 1;
+    [d.afxLead, d.afxTail].forEach(function (field) {
+      var hide = !!clip && (field.key === "audioLead" ? ctx.sel === 0 : ctx.sel === last);
+      var value = clip ? editShiftOf(clip, field.key) : 0;
+      field.wrap.style.display = hide ? "none" : "";
+      field.range.disabled = !clip || muted || ctx.busy;
+      field.range.value = String(value);
+      field.out.textContent = value.toFixed(2) + "초";
+    });
+    d.afxNote.style.display = muted ? "" : "none";
+  }
+
+  /* 고른 클립의 앞당김·이어 감을 바꾼다(0 이면 키를 지운다). 첫 클립 J·마지막 클립 L·소리 끈 클립은 받지 않는다. */
+  function editApplyShift(ctx, key, raw) {
+    var clip = editSelected(ctx);
+    if (!editAlive(ctx) || ctx.busy || !clip || clip.muted === true) {
+      editRenderAudioFx(ctx);
+      return;
+    }
+    if ((key === "audioLead" && ctx.sel === 0) || (key === "audioTail" && ctx.sel === ctx.clips.length - 1)) {
+      editRenderAudioFx(ctx);
+      return;
+    }
+    var value = editShiftSnap(raw);
+    if (value === editShiftOf(clip, key)) {
+      editRenderAudioFx(ctx);
+      return;
+    }
+    var next = editCloneClip(clip);
+    if (value) next[key] = value;
+    else delete next[key];
+    editReplaceSel(ctx, next);
+  }
+
   function editRenderVariants(ctx) {
     var box = ctx.dom.variantBox;
     if (!box) return;
@@ -10021,6 +10216,7 @@
     editToolTitle(d.btnMute, muted ? "고른 클립 소리 켜기" : "고른 클립 소리 끄기", "M");
     d.exportBtn.disabled = ctx.exporting || !ctx.clips.length;
     editRenderRetime(ctx, false);
+    editRenderAudioFx(ctx); // 작업 182
     editRenderPlayButton(ctx);
     editFixRenderSel(ctx); // 지시서 116: [고른 클립 AI로 고치기] disabled·title 만(노드를 만들지 않는다)
   }
@@ -10030,6 +10226,7 @@
   function editRenderTimeline(ctx) {
     var d = ctx.dom;
     if (!d.content) return;
+    editTrClose(ctx); // 작업 182: 손잡이를 새로 그리므로 열린 전환 메뉴를 닫는다
     var info = editStarts(ctx.clips);
     var width = Math.ceil(info.total * ctx.pps) + EDIT_TAIL_PX;
     d.content.style.width = width + "px";
@@ -10044,6 +10241,7 @@
       ctx.clipEls.push(parts);
     });
     if (!ctx.clips.length) d.vtrack.appendChild(el("p", "vnew-edit-track-empty", "클립이 없습니다"));
+    editRenderFx(ctx);
     editPlaceHead(ctx);
     editRenderTools(ctx);
     editQueueMedia(ctx);
@@ -10109,6 +10307,12 @@
       "vnew-edit-clip" + (selected ? " is-selected" : "") + (invalid ? " is-invalid" : "") + (width < 28 ? " is-narrow" : "") +
       (speed !== 1 ? " is-speed" : "");
     parts.box.style.width = width + "px";
+    // 작업 182: 앞 클립이 이 클립으로 디졸브하면 그 초만큼 앞 클립 끝에 겹쳐 놓는다(타임라인 길이가 그만큼 짧다, editStarts).
+    var prev = parts.index > 0 ? ctx.clips[parts.index - 1] : null;
+    var overlap = prev ? editDissolveOf(prev) * ctx.pps : 0;
+    var shift = overlap ? -Math.round(overlap * 10) / 10 + "px" : "";
+    if (parts.box.style.marginLeft !== shift && (shift || parts.box.style.marginLeft)) parts.box.style.marginLeft = shift;
+    if (parts.abox.style.marginLeft !== shift && (shift || parts.abox.style.marginLeft)) parts.abox.style.marginLeft = shift;
     var name = clip.label || mat.label || "클립";
     parts.box.title = name + " · " + len.toFixed(2) + "초" + (speed !== 1 ? " (" + speed + "× 속도)" : "") +
       (invalid ? " — 이 클립의 원본을 지금 쓸 수 없습니다(지우거나 바꿔 주세요)" : "");
@@ -10150,6 +10354,240 @@
       svg.appendChild(line);
       abox.appendChild(svg);
     }
+  }
+
+  /* ---- 작업 182: 전환 손잡이 · 디졸브 겹침 · J/L 막대 ---- */
+
+  /* 경계마다 전환 손잡이(작은 마름모)를 영상 트랙에 둔다. 자리·겹침·J/L 막대는 editPlaceFx 가 맞춘다. */
+  function editRenderFx(ctx) {
+    var d = ctx.dom;
+    ctx.trEls = [];
+    if (!d.vtrack || !d.atrack) return;
+    for (var i = 0; i + 1 < ctx.clips.length; i++) {
+      ctx.trEls.push({ btn: editTrButton(ctx, i), wedge: null });
+      d.vtrack.appendChild(ctx.trEls[i].btn);
+    }
+    editPlaceFx(ctx);
+  }
+
+  function editTrButton(ctx, index) {
+    var btn = el("button", "vnew-edit-tr", "");
+    btn.type = "button";
+    btn.setAttribute("aria-haspopup", "menu");
+    btn.setAttribute("aria-expanded", "false");
+    btn.addEventListener("pointerdown", function (event) {
+      // 빈 곳 누르기(고름 풀기)로 번지지 않게. 메뉴는 click 에서 연다(키보드 Enter·Space 도 같은 길).
+      if (event && event.stopPropagation) event.stopPropagation();
+    });
+    btn.addEventListener("click", function () {
+      if (ctx.trMenu && ctx.trMenu.index === index) editTrClose(ctx);
+      else editTrOpen(ctx, index, btn);
+    });
+    return btn;
+  }
+
+  /* 전환 손잡이·디졸브 겹침(쐐기)·J/L 막대 자리와 글. 끝 끌기 중에도 부른다 — 값이 바뀌지 않으면 새 요소를 만들지 않는다. */
+  function editPlaceFx(ctx) {
+    var d = ctx.dom;
+    if (!d.vtrack || !d.atrack) return;
+    var clips = ctx.clips;
+    var info = editStarts(clips);
+    var pps = ctx.pps;
+    function px(seconds) {
+      return Math.round(seconds * pps * 10) / 10 + "px";
+    }
+    (ctx.trEls || []).forEach(function (item, i) {
+      var a = clips[i];
+      if (!a || !clips[i + 1]) return;
+      var seconds = editDissolveOf(a);
+      var at = info.starts[i + 1];
+      var title = "클립 " + (i + 1) + " → " + (i + 2) + " 전환: " + (seconds ? "디졸브 " + seconds + "초" : "컷") + " — 눌러 바꾸기";
+      item.btn.className = "vnew-edit-tr" + (seconds ? " is-dissolve" : "") + (ctx.trMenu && ctx.trMenu.index === i ? " is-open" : "");
+      item.btn.style.left = px(at + seconds / 2);
+      if (item.btn.title !== title) {
+        item.btn.title = title;
+        item.btn.setAttribute("aria-label", title);
+      }
+      if (seconds && !item.wedge) {
+        item.wedge = el("span", "vnew-edit-xfade");
+        item.wedge.setAttribute("aria-hidden", "true");
+        d.vtrack.appendChild(item.wedge);
+      }
+      if (item.wedge) {
+        item.wedge.style.display = seconds ? "" : "none";
+        item.wedge.style.left = px(at);
+        item.wedge.style.width = px(seconds);
+      }
+    });
+    (ctx.clipEls || []).forEach(function (parts) {
+      var i = parts.index;
+      var clip = clips[i];
+      if (!clip) return;
+      var on = clip.muted !== true; // 소리 끈 클립의 앞당김·이어 감은 내보내기도 무시한다(값은 남는다)
+      var lead = on && i > 0 ? editShiftOf(clip, "audioLead") : 0;
+      var tail = on && i < clips.length - 1 ? editShiftOf(clip, "audioTail") : 0;
+      parts.leadBar = editShiftBar(ctx, parts.leadBar, "is-lead", lead, info.starts[i] - lead, px,
+        "소리 먼저 시작 " + lead.toFixed(2) + "초 (J컷)");
+      parts.tailBar = editShiftBar(ctx, parts.tailBar, "is-tail", tail, info.starts[i] + editClipLen(clip), px,
+        "소리 이어 가기 " + tail.toFixed(2) + "초 (L컷)");
+    });
+    if (d.fxNote) d.fxNote.style.display = editHasFx(clips) ? "" : "none";
+  }
+
+  /* 소리 줄의 앞당김(왼쪽, 앞 클립 소리 아래)·이어 감(오른쪽, 뒤 클립 소리 아래) 막대. 0 초면 숨긴다(없으면 만들지 않는다). */
+  function editShiftBar(ctx, bar, kind, seconds, from, px, title) {
+    if (!seconds) {
+      if (bar) bar.style.display = "none";
+      return bar || null;
+    }
+    if (!bar) {
+      bar = el("span", "vnew-edit-ashift " + kind);
+      ctx.dom.atrack.appendChild(bar);
+    }
+    bar.style.display = "";
+    bar.style.left = px(from);
+    bar.style.width = px(seconds);
+    bar.title = title;
+    return bar;
+  }
+
+  function editInside(node, target) {
+    for (var n = target; n; n = n.parentNode) {
+      if (n === node) return true;
+    }
+    return false;
+  }
+
+  /* 전환 메뉴: 컷(기본) · 디졸브 0.25·0.5·0.75·1초. 두 클립 중 짧은 쪽의 45% 보다 긴 값은 막고 "클립이 짧아 쓸 수 없습니다".
+     화면에 고정(position: fixed)해 타임라인 스크롤 상자에 잘리지 않게 하고, 손잡이 아래(넘치면 위)·화면 안으로 맞춘다. */
+  function editTrOpen(ctx, index, anchor) {
+    var a = ctx.clips[index];
+    var b = ctx.clips[index + 1];
+    if (!editAlive(ctx) || ctx.busy || !a || !b) return;
+    editTrClose(ctx);
+    var current = editDissolveOf(a);
+    var name = "클립 " + (index + 1) + " → " + (index + 2) + " 전환";
+    var menu = el("div", "vnew-edit-trmenu");
+    menu.setAttribute("role", "menu");
+    menu.setAttribute("aria-label", name);
+    menu.appendChild(el("p", "vnew-edit-trmenu-title", name));
+    var focus = null;
+    [0].concat(EDIT_DISSOLVES).forEach(function (seconds) {
+      var fits = !seconds || editDissolveFits(seconds, a, b);
+      var on = seconds === current;
+      var text = seconds ? "디졸브 " + seconds + "초" : "컷";
+      // 막힌 버튼은 마우스 이벤트를 받지 않는 브라우저가 있어 안내(title)는 감싼 줄에도 둔다.
+      var row = el("span", "vnew-edit-trmenu-row");
+      var item = el("button", "vnew-edit-trmenu-item" + (on ? " is-on" : ""), text);
+      item.type = "button";
+      item.setAttribute("role", "menuitemradio");
+      item.setAttribute("aria-checked", on ? "true" : "false");
+      if (fits) {
+        item.title = seconds ? "두 클립을 " + seconds + "초 겹쳐 바꿉니다 — 전체 길이가 " + seconds + "초 줄어듭니다" : "겹침 없이 바로 바꿉니다";
+      } else {
+        item.disabled = true;
+        item.title = EDIT_TR_SHORT;
+        row.title = EDIT_TR_SHORT;
+        item.setAttribute("aria-label", text + " — " + EDIT_TR_SHORT);
+      }
+      item.addEventListener("click", function () {
+        if (fits) editSetTransition(ctx, index, seconds);
+      });
+      if (on) focus = item;
+      row.appendChild(item);
+      menu.appendChild(row);
+    });
+    ctx.root.appendChild(menu);
+    var rect = anchor && anchor.getBoundingClientRect ? anchor.getBoundingClientRect() : null;
+    var vw = Number(window.innerWidth) || 0;
+    var vh = Number(window.innerHeight) || 0;
+    if (rect && vw > 0) {
+      var mw = Number(menu.offsetWidth) || 180;
+      var mh = Number(menu.offsetHeight) || 220;
+      var left = Math.max(8, Math.min(vw - mw - 8, (Number(rect.left) + Number(rect.right)) / 2 - mw / 2));
+      var top = Number(rect.bottom) + 6;
+      if (vh > 0 && top + mh > vh - 8) top = Math.max(8, Number(rect.top) - 6 - mh);
+      menu.style.left = Math.round(left) + "px";
+      menu.style.top = Math.round(top) + "px";
+    }
+    var onDoc = function (event) {
+      var target = event && event.target;
+      if (editInside(menu, target) || editInside(anchor, target)) return;
+      editTrClose(ctx);
+    };
+    var onMove = function (event) {
+      if (event && editInside(menu, event.target)) return;
+      editTrClose(ctx);
+    };
+    document.addEventListener("pointerdown", onDoc, true);
+    if (typeof window.addEventListener === "function") {
+      window.addEventListener("scroll", onMove, true); // 손잡이가 움직이면(페이지·타임라인 스크롤) 메뉴를 닫는다
+      window.addEventListener("resize", onMove);
+    }
+    ctx.trMenu = { el: menu, index: index, anchor: anchor, onDoc: onDoc, onMove: onMove };
+    if (anchor) {
+      anchor.classList.add("is-open");
+      anchor.setAttribute("aria-expanded", "true");
+    }
+    var first = focus || editTrFirst(menu);
+    if (first && typeof first.focus === "function") {
+      try {
+        first.focus({ preventScroll: true });
+      } catch (error) {
+        /* 초점을 줄 수 없는 요소 */
+      }
+    }
+  }
+
+  function editTrFirst(menu) {
+    var rows = menu.children || [];
+    for (var i = 0; i < rows.length; i++) {
+      var item = (rows[i].children || [])[0];
+      if (item && !item.disabled) return item;
+    }
+    return null;
+  }
+
+  function editTrClose(ctx, refocus) {
+    var menu = ctx && ctx.trMenu;
+    if (!menu) return;
+    ctx.trMenu = null;
+    document.removeEventListener("pointerdown", menu.onDoc, true);
+    if (typeof window.removeEventListener === "function") {
+      window.removeEventListener("scroll", menu.onMove, true);
+      window.removeEventListener("resize", menu.onMove);
+    }
+    if (menu.el.parentNode) menu.el.parentNode.removeChild(menu.el);
+    if (menu.anchor) {
+      menu.anchor.classList.remove("is-open");
+      menu.anchor.setAttribute("aria-expanded", "false");
+      if (refocus && typeof menu.anchor.focus === "function") {
+        try {
+          menu.anchor.focus();
+        } catch (error) {
+          /* 이미 떨어진 손잡이 */
+        }
+      }
+    }
+  }
+
+  /* index 번째 클립 → 다음 클립 전환을 seconds(0 = 컷)로. 실행 취소 한 단계, 기본값(컷)이면 transition 키를 지운다. */
+  function editSetTransition(ctx, index, seconds) {
+    editTrClose(ctx);
+    if (!editAlive(ctx) || ctx.busy) return;
+    var a = ctx.clips[index];
+    var b = ctx.clips[index + 1];
+    if (!a || !b || editDissolveOf(a) === seconds) return;
+    if (seconds && !editDissolveFits(seconds, a, b)) {
+      editNote(ctx, EDIT_TR_SHORT + ".");
+      return;
+    }
+    var clip = editCloneClip(a);
+    if (seconds) clip.transition = { type: "dissolve", seconds: seconds };
+    else delete clip.transition;
+    var next = ctx.clips.slice();
+    next[index] = clip;
+    editCommit(ctx, next, {});
   }
 
   function editPlaceHead(ctx) {
@@ -10321,6 +10759,7 @@
         ctx.clips[index] = next;
         editPaintClip(ctx, parts, next);
         ctx.dom.content.style.width = Math.ceil(editStarts(ctx.clips).total * ctx.pps) + EDIT_TAIL_PX + "px";
+        editPlaceFx(ctx); // 작업 182: 전환 손잡이·겹침·J/L 막대 자리(새 요소는 만들지 않는다)
         editTrimPreview(ctx, next, edge, fps);
       },
       end: function (dx, moved, cancelled) {
@@ -10328,6 +10767,7 @@
         if (cancelled || (cur.in === orig.in && cur.out === orig.out)) {
           ctx.clips[index] = orig;
           editPaintClip(ctx, parts, orig);
+          editPlaceFx(ctx); // 작업 182
           editSeek(ctx, ctx.t);
           return;
         }
@@ -10475,11 +10915,141 @@
   }
 
   function editContiguous(ctx, a, b) {
+    if (editFxEdge(a, b)) return false; // 작업 182: 디졸브·J/L 컷 경계는 <video> 2개로 겹쳐 보인다(editFx*)
     return a.sourceKey === b.sourceKey && Math.abs(Number(b.in) - Number(a.out)) < 0.5 / editFpsOf(ctx, a);
   }
 
+  /* ---- 작업 182: 미리보기 근사(디졸브·J/L 컷) ----
+     <video> 2개 모델 그대로: 바꿔 끼운 뒤 앞 클립(이제 숨은 쪽)을 디졸브 + 이어 감 동안 더 재생하고(fxHold), 다음 클립(숨은 쪽)은
+     앞당김만큼 먼저 소리를 낸다(fxLead). 디졸브는 들어오는 <video> 의 CSS opacity 를 타임라인 시각으로 0 → 1, 소리 크기는 내보내기
+     (edit._audio_envelope)처럼 직선으로 바꾼다. 숨은 쪽 하나가 둘 다 맡을 수는 없어 겹치면 앞의 것이 끝난 뒤 시작한다. 재생을 멈추거나
+     옮기면 모두 끝낸다(겹친 구간에 멈추면 뒤 클립만 보인다). 원본 소리 대체(지시서 118b) 클립의 앞당김·이어 감은 미리보기에 없다.
+     정확한 결과는 내보낸 영상(EDIT_FX_NOTE). */
+
+  function editFxVolume(video, value) {
+    try {
+      video.volume = Math.max(0, Math.min(1, Number(value) || 0));
+    } catch (error) {
+      /* 소리 크기를 바꿀 수 없는 브라우저(iOS) — 그대로 들린다 */
+    }
+  }
+
+  /* 앞 클립 붙잡기를 끝낸다: 숨은 <video> 를 멈추고 덮었던 투명도·순서·소리 크기를 되돌린다. */
+  function editFxHoldEnd(ctx) {
+    var hold = ctx.fxHold;
+    if (!hold) return;
+    ctx.fxHold = null;
+    try {
+      hold.video.pause();
+    } catch (error) {
+      /* 무시 */
+    }
+    hold.video.style.opacity = "";
+    editFxVolume(hold.video, 1);
+    if (hold.incoming) {
+      hold.incoming.style.opacity = "";
+      hold.incoming.style.zIndex = "";
+      editFxVolume(hold.incoming, 1);
+    }
+  }
+
+  function editFxLeadEnd(ctx, keepPlaying) {
+    var lead = ctx.fxLead;
+    if (!lead) return;
+    ctx.fxLead = null;
+    if (!keepPlaying) {
+      try {
+        lead.video.pause();
+      } catch (error) {
+        /* 무시 */
+      }
+    }
+    editFxVolume(lead.video, 1);
+  }
+
+  /* 재생을 멈추거나 옮길 때: 겹쳐 재생하던 것을 모두 끝낸다(없으면 아무것도 하지 않는다). */
+  function editFxStop(ctx) {
+    editFxHoldEnd(ctx);
+    editFxLeadEnd(ctx, false);
+  }
+
+  /* 바꿔 끼울 때(editAdvance) 앞 클립 prev 를 더 재생할지: 디졸브(그 초 동안 화면 아래에 남는다) + 이어 감(소리만). */
+  function editFxHoldStart(ctx, video, incoming, prev, at, leadOn) {
+    var dissolve = editDissolveOf(prev);
+    var tail = prev.muted === true ? 0 : editShiftOf(prev, "audioTail");
+    if (!dissolve && !tail) return false;
+    ctx.fxHold = { video: video, incoming: incoming, from: at, fade: dissolve, end: at + dissolve + tail, tail: tail, lead: !!leadOn };
+    if (dissolve) {
+      video.style.opacity = "1"; // 클래스(is-active)를 떼도 디졸브 동안 보인다
+      incoming.style.zIndex = "1";
+      incoming.style.opacity = "0";
+      editFxVolume(incoming, leadOn ? EDIT_OFFSCREEN_GAIN : 0);
+    }
+    editFxVolume(video, dissolve ? 1 : EDIT_OFFSCREEN_GAIN);
+    return true;
+  }
+
+  /* 재생 중 한 화면마다: 붙잡은 앞 클립의 투명도·소리 크기와 끝, 다음 클립 앞당김 시작·소리 크기. */
+  function editFxTick(ctx, info) {
+    var hold = ctx.fxHold;
+    if (hold) {
+      var t = ctx.t;
+      if (t >= hold.end - 1e-6 || hold.video.ended) {
+        editFxHoldEnd(ctx);
+        editPreloadNext(ctx); // 붙잡는 동안 미뤄 둔 다음 클립 불러 두기
+      } else if (hold.fade && t < hold.from + hold.fade) {
+        var p = Math.max(0, Math.min(1, (t - hold.from) / hold.fade));
+        hold.incoming.style.opacity = String(Math.round(p * 1000) / 1000);
+        editFxVolume(hold.video, 1 - p * (1 - (hold.tail ? EDIT_OFFSCREEN_GAIN : 0)));
+        editFxVolume(hold.incoming, (hold.lead ? EDIT_OFFSCREEN_GAIN : 0) + p * (1 - (hold.lead ? EDIT_OFFSCREEN_GAIN : 0)));
+      } else {
+        if (hold.fade && hold.incoming.style.opacity !== "") {
+          hold.video.style.opacity = "";
+          hold.incoming.style.opacity = "";
+          hold.incoming.style.zIndex = "";
+          editFxVolume(hold.incoming, 1);
+        }
+        var q = hold.tail ? Math.max(0, Math.min(1, (t - hold.from - hold.fade) / hold.tail)) : 1;
+        editFxVolume(hold.video, EDIT_OFFSCREEN_GAIN * (1 - q));
+      }
+    }
+    editFxLeadTick(ctx, info);
+  }
+
+  /* 다음 클립의 앞당김(J컷): 그 화면이 오기 앞당김 초 전부터 숨은 <video> 로 소리를 낸다(0 → 0.6). 원본 0초보다 앞은 기다린다. */
+  function editFxLeadTick(ctx, info) {
+    var index = ctx.curIndex + 1;
+    var next = ctx.clips[index];
+    var lead = ctx.fxLead;
+    if (lead && lead.index !== index) {
+      editFxLeadEnd(ctx, false);
+      lead = null;
+    }
+    if (!next || next.muted === true || ctx.fxHold || editAltFrom(ctx, next)) return;
+    var seconds = editShiftOf(next, "audioLead");
+    var at = info.starts[index];
+    if (!seconds || !(at > ctx.t)) return;
+    if (!lead) {
+      var speed = editSpeedOf(next);
+      var source = Number(next.in) - (at - ctx.t) * speed;
+      if (ctx.t < at - seconds - 1e-6 || source < 0) return;
+      var other = ctx.vids[1 - ctx.cur];
+      if (!other) return;
+      editSetSrc(other, editUrlOf(ctx, next.sourceKey));
+      editSetRate(other, next);
+      editSetTime(other, source);
+      other.muted = false;
+      editFxVolume(other, 0);
+      editPlayVideo(other);
+      lead = ctx.fxLead = { index: index, video: other, at: at, seconds: seconds };
+    }
+    editFxVolume(lead.video, EDIT_OFFSCREEN_GAIN * Math.max(0, Math.min(1, 1 - (at - ctx.t) / seconds)));
+  }
+  /* ---- 작업 182 미리보기 근사 끝 ---- */
+
   /* 타임라인 t 로 옮긴다: 그 클립 원본을 지금 <video> 에 두고 원본 시각을 맞춘다. 끝(전체 길이)이면 마지막 프레임. */
   function editSeek(ctx, t) {
+    if (ctx.fxHold || ctx.fxLead) editFxStop(ctx); // 작업 182: 옮기면 겹쳐 재생하던 것을 끝낸다
     var total = editStarts(ctx.clips).total;
     ctx.t = Math.max(0, Math.min(total, Number(t) || 0));
     editPlaceHead(ctx);
@@ -10509,6 +11079,7 @@
     var next = ctx.clips[ctx.curIndex + 1];
     var other = ctx.vids[1 - ctx.cur];
     if (!clip || !next || !other || editContiguous(ctx, clip, next)) return;
+    if (ctx.fxHold || ctx.fxLead) return; // 작업 182: 숨은 <video> 가 앞 클립 붙잡기·앞당김에 쓰이는 동안은 미룬다
     editSetSrc(other, editUrlOf(ctx, next.sourceKey));
     other.muted = true;
     editSetRate(other, next);
@@ -10527,16 +11098,23 @@
       if (editSyncAudio(ctx, next, Number(video.currentTime) || Number(next.in), false)) video.muted = true; // 지시서 118b
     } else {
       var other = ctx.vids[1 - ctx.cur];
+      // 작업 182: 숨은 <video> 가 그 전 경계의 붙잡기에 남아 있으면 끝내고, 이 클립 앞당김으로 이미 재생 중이면 그대로 잇는다.
+      if (ctx.fxHold) editFxHoldEnd(ctx);
+      var leading = !!ctx.fxLead && ctx.fxLead.index === index && ctx.fxLead.video === other;
+      if (ctx.fxLead) editFxLeadEnd(ctx, leading);
       editSetSrc(other, editUrlOf(ctx, next.sourceKey));
-      if (Math.abs((Number(other.currentTime) || 0) - Number(next.in)) > 0.02) editSetTime(other, next.in);
+      if (Math.abs((Number(other.currentTime) || 0) - Number(next.in)) > (leading ? 0.25 : 0.02)) editSetTime(other, next.in);
       other.muted = next.muted === true;
       editSetRate(other, next);
       if (editSyncAudio(ctx, next, Number(next.in), true)) other.muted = true; // 지시서 118b
       editPlayVideo(other);
-      try {
-        video.pause();
-      } catch (error) {
-        /* 무시 */
+      // 작업 182: 디졸브·이어 감이면 앞 클립을 그만큼 더 재생한다(editFxTick 이 투명도·소리 크기·끝을 맞춘다).
+      if (!(prev && editFxHoldStart(ctx, video, other, prev, ctx.t, leading))) {
+        try {
+          video.pause();
+        } catch (error) {
+          /* 무시 */
+        }
       }
       video.classList.remove("is-active");
       other.classList.add("is-active");
@@ -10560,7 +11138,10 @@
       return;
     }
     var now = Number(video.currentTime) || 0;
-    if (now >= Number(clip.out) - 0.5 / editFpsOf(ctx, clip) || video.ended) {
+    // 작업 182: 다음 클립으로 디졸브하면 그 초(원본 = 초 × 속도)만큼 일찍 바꿔 끼운다(다음 클립 화면 시작 = editStarts).
+    var hasNext = ctx.curIndex + 1 < ctx.clips.length;
+    var endAt = Number(clip.out) - (hasNext ? editDissolveOf(clip) * editSpeedOf(clip) : 0);
+    if (now >= endAt - 0.5 / editFpsOf(ctx, clip) || video.ended) {
       if (ctx.curIndex + 1 >= ctx.clips.length) {
         ctx.t = editStarts(ctx.clips).total;
         editPause(ctx);
@@ -10575,6 +11156,8 @@
       // 지시서 118b: 원본 소리를 0.15초 넘게 어긋나면 다시 맞추고, end 를 넘으면 멈춘다
       if (editSyncAudio(ctx, clip, now, false)) video.muted = true;
     }
+    var after = ctx.clips[ctx.curIndex + 1];
+    if (ctx.fxHold || ctx.fxLead || (after && editShiftOf(after, "audioLead"))) editFxTick(ctx, editStarts(ctx.clips)); // 작업 182
     editFollowHead(ctx);
     ctx.raf = editRaf(function () {
       editTick(ctx);
@@ -10605,6 +11188,7 @@
       }
     });
     editAudioStop(ctx); // 지시서 118b: 원본 소리 요소도 함께
+    if (ctx.fxHold || ctx.fxLead) editFxStop(ctx); // 작업 182: 겹쳐 재생하던 앞·다음 클립도
     editRenderPlayButton(ctx);
   }
 
@@ -10775,6 +11359,11 @@
       else document.removeEventListener("keydown", ctx.onKey);
       return;
     }
+    if (ctx.trMenu) {
+      // 작업 182: 전환 메뉴가 열린 동안 ⑦ 단축키는 쓰지 않는다(Space·Enter 는 메뉴 버튼을 누른다, Esc 는 메뉴 닫기).
+      if (event && event.key === "Escape") editTrClose(ctx, true);
+      return;
+    }
     if (ctx.fixPick) {
       // 지시서 119: 테이크·장면 고르기 창이 열린 동안도 ⑦ 단축키는 쓰지 않는다(Esc 는 창 닫기).
       if (event && event.key === "Escape") editFixPickClose(ctx);
@@ -10799,7 +11388,7 @@
   function editCommit(ctx, clips, opts) {
     var o = opts || {};
     editHistPush(ctx.hist, o.before || editSnapshotOf(ctx.variant, ctx.clips));
-    ctx.clips = clips;
+    ctx.clips = editTidyFx(clips); // 작업 182: 옮기기·삭제·자르기·늘이기 뒤 J/L 컷·디졸브 자리 규칙 정리
     if (o.variant) ctx.variant = o.variant;
     if (o.sel !== undefined) ctx.sel = o.sel;
     editChanged(ctx);
@@ -10847,7 +11436,10 @@
   /* 고른 클립을 next 로 바꾸면 전체 길이 한도(maxTotalSeconds) 안인가. 넘으면 안내하고 false(지시서 115). */
   function editFitsTotal(ctx, clip, next) {
     var max = editLimit(ctx, "maxTotalSeconds", 300);
-    var total = editStarts(ctx.clips).total - editClipLen(clip) + editClipLen(next);
+    var list = ctx.clips.slice();
+    var at = list.indexOf(clip);
+    if (at >= 0) list[at] = next;
+    var total = editStarts(editTidyFx(list)).total; // 작업 182: 디졸브가 줄거나 빠지면 그만큼 길어진다
     if (total <= max + 1e-6) return true;
     editNote(ctx, "타임라인 전체 길이는 " + max + "초까지입니다.");
     editRenderRetime(ctx, true);
