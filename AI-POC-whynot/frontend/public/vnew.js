@@ -8855,7 +8855,19 @@
   var EDIT_OFFSCREEN_GAIN = 0.6; // 미리보기: 화면에 없는 클립 소리(앞당김·이어 감) 크기
   var EDIT_TR_SHORT = "클립이 짧아 쓸 수 없습니다";
   var EDIT_MUTED_NOTE = "소리 끈 클립";
-  var EDIT_FX_NOTE = "J/L컷·디졸브는 내보낸 영상에서 정확히 확인할 수 있습니다";
+  var EDIT_FX_NOTE = "J/L컷·디졸브·대사 타이밍은 내보낸 영상에서 정확히 확인할 수 있습니다"; // 작업 186: 대사 타이밍도 근사로만 보인다
+  // 작업 186: 대사 타이밍(audioSlip) — 클립 소리만 화면 안에서 −1~1초(0.05초 단위, 양수 = 소리가 늦게). 서버 edit.AUDIO_SLIP_MAX_S 와 같다.
+  var EDIT_SLIP_MAX_S = 1;
+  var EDIT_SLIP_NOTE = "소리만 옮깁니다. 말하는 사람 입이 화면에 보이면 입 모양과 어긋날 수 있습니다.";
+  // 작업 186: 빈틈 다듬기(POST /edit/tighten 제안 → 확인 → 실행 취소 한 단계로 적용). 서버가 그대로 둔 이유(perClip skipped)의 글.
+  var EDIT_TIGHTEN_SKIP = {
+    muted: "그대로 둠 (소리 끈 클립)",
+    noSound: "그대로 둠 (소리 없음)",
+    noFilm: "그대로 둠 (파형 준비 중)",
+    short: "그대로 둠 (이미 짧음)"
+  };
+  var EDIT_TIGHTEN_NONE = "그대로 둠 (빈틈 없음)";
+  var EDIT_TIGHTEN_STALE = "그사이 편집이 바뀌었습니다. 빈틈 다듬기를 다시 눌러 주세요.";
   // 단축키 [ ]·Shift+[ ] 동작 → [끝(edge), 방향](지시서 115): out 앞(줄이기)·out 뒤(늘이기)·in 앞(늘이기)·in 뒤(줄이기)
   var EDIT_NUDGES = { outEarlier: ["out", -1], outLater: ["out", 1], inEarlier: ["in", -1], inLater: ["in", 1] };
   var EDIT_VARIANT_LABEL = { real: "실사", webtoon: "애니(웹툰)" }; // 작업 123: 서버 label("웹툰")보다 이 이름을 먼저 쓴다
@@ -8910,6 +8922,9 @@
     if (tail) copy.audioTail = tail;
     var dissolve = editDissolveOf(clip);
     if (dissolve) copy.transition = { type: "dissolve", seconds: dissolve };
+    // 작업 186: 대사 타이밍도 0 이 아닐 때만(소리 끈 클립도 받은 그대로 — 서버 _clean_slip 과 같다)
+    var slip = editSlipOf(clip);
+    if (slip) copy.audioSlip = slip;
     return copy;
   }
 
@@ -8946,13 +8961,16 @@
     return !!(editDissolveOf(a) || (a.muted !== true && editShiftOf(a, "audioTail")) || (b.muted !== true && editShiftOf(b, "audioLead")));
   }
 
-  /* 작업 182: 클립 하나라도 J/L 컷·디졸브를 쓰는가(미리보기 근사 안내를 보일지). 마지막 클립의 전환·첫 클립의 앞당김은 세지 않는다. */
+  /* 작업 182: 클립 하나라도 J/L 컷·디졸브를 쓰는가(미리보기 근사 안내를 보일지). 마지막 클립의 전환·첫 클립의 앞당김은 세지 않는다.
+     작업 186: 소리 켠 클립의 대사 타이밍(audioSlip)도 센다. */
   function editHasFx(clips) {
     var list = clips || [];
     for (var i = 0; i + 1 < list.length; i++) {
       if (editFxEdge(list[i], list[i + 1])) return true;
     }
-    return false;
+    return list.some(function (clip) {
+      return !!clip && clip.muted !== true && !!editSlipOf(clip);
+    });
   }
 
   /* 작업 182: 자리 규칙 정리(서버 _check_overlaps 와 같은 규칙). 옮기기·삭제·자르기·늘이기/줄이기·속도·재료 넣기 뒤 editCommit 이 부른다.
@@ -8986,6 +9004,97 @@
       else delete own(i).transition;
     }
     return changed ? out : list;
+  }
+
+  /* 작업 186: 빈틈 다듬기 목록의 초(0.1초 미만은 두 자리, 그 밖은 한 자리). */
+  function editTightenSec(value) {
+    var v = Math.max(0, Number(value) || 0);
+    return v > 0 && v < 0.1 ? v.toFixed(2) : v.toFixed(1);
+  }
+
+  /* 작업 186: 줄인 앞·뒤 한 줄("앞 −0.8초 · 뒤 −1.2초"). 둘 다 0 이면 "". */
+  function editTightenCutText(head, tail) {
+    var parts = [];
+    if (Number(head) > 0.0005) parts.push("앞 −" + editTightenSec(head) + "초");
+    if (Number(tail) > 0.0005) parts.push("뒤 −" + editTightenSec(tail) + "초");
+    return parts.join(" · ");
+  }
+
+  /* 작업 186: 줄이거나 뺀 디졸브 한 줄(서버 perClip transition {from, to}, to 0 = 컷). */
+  function editTightenTrText(where, from, to) {
+    var a = Number(from) || 0;
+    var b = Number(to) || 0;
+    return where + " 디졸브 " + a + "초 → " + (b ? "디졸브 " + b + "초" : "컷");
+  }
+
+  /* 작업 186: 빈틈 다듬기 응답(POST /edit/tighten {clips, perClip})을 지금 클립에 맞춘 적용 계획. 순수 함수.
+     클립은 id 로 맞춰 in·out 만 받는다(줄이기만 — 늘어나거나 숫자가 아닌 값은 버린다). 이름·소리 끔·속도·J/L·대사 타이밍은 지금 그대로.
+     onlyId 가 없으면(전체) 서버가 줄이거나 뺀 디졸브(perClip transition)도 받고, 있으면(이 클립 빈틈 다듬기) 그 클립 in·out 만 받는다.
+     마지막에 editTidyFx 로(디졸브 45% 규칙) 정리한다 — 적용(editCommit)도 같은 정리를 한 번 더 지난다.
+     반환 {clips, rows:[{id, index, head, tail, skipped, notes}], count(줄인 클립 수), saved(줄인 타임라인 초)}. */
+  function editTightenPlan(clips, res, onlyId) {
+    var list = Array.isArray(clips) ? clips : [];
+    var r = res && typeof res === "object" ? res : {};
+    var only = onlyId === undefined || onlyId === null ? "" : String(onlyId);
+    var byId = {};
+    var info = {};
+    (Array.isArray(r.clips) ? r.clips : []).forEach(function (c) {
+      if (c && typeof c === "object" && c.id !== undefined) byId[String(c.id)] = c;
+    });
+    (Array.isArray(r.perClip) ? r.perClip : []).forEach(function (p) {
+      if (p && typeof p === "object" && p.id !== undefined) info[String(p.id)] = p;
+    });
+    var merged = list.map(function (clip) {
+      var id = String(clip.id);
+      var got = byId[id];
+      if (!got || (only && id !== only)) return clip;
+      var copy = editCloneClip(clip);
+      var a = Number(got.in);
+      var b = Number(got.out);
+      if (isFinite(a) && isFinite(b) && a >= copy.in - 1e-9 && b <= copy.out + 1e-9 && b > a) {
+        copy.in = editRound3(a);
+        copy.out = editRound3(b);
+      }
+      if (!only && (info[id] || {}).transition) {
+        var d = editDissolveOf(got);
+        if (d) copy.transition = { type: "dissolve", seconds: d };
+        else delete copy.transition;
+      }
+      return copy;
+    });
+    var tidy = editTidyFx(merged);
+    function trNote(i, where) {
+      var a = editDissolveOf(list[i]);
+      var b = editDissolveOf(tidy[i]);
+      return list[i] && a !== b ? editTightenTrText(where, a, b) : "";
+    }
+    var rows = [];
+    var saved = 0;
+    var count = 0;
+    list.forEach(function (clip, index) {
+      var id = String(clip.id);
+      if (only && id !== only) return;
+      var p = info[id] || {};
+      var speed = editSpeedOf(clip);
+      var head = Math.max(0, editRound3((Number(tidy[index].in) - Number(clip.in)) / speed));
+      var tail = Math.max(0, editRound3((Number(clip.out) - Number(tidy[index].out)) / speed));
+      var notes = [];
+      var tr = p.transition && typeof p.transition === "object" && !only ? p.transition : null;
+      var next = tr ? editTightenTrText("다음 전환", tr.from, tr.to) : trNote(index, "다음 전환");
+      if (only && index > 0) {
+        var before = trNote(index - 1, "앞 전환");
+        if (before) notes.push(before);
+      }
+      if (next) notes.push(next);
+      var skipped = typeof p.skipped === "string" && EDIT_TIGHTEN_SKIP[p.skipped] ? p.skipped : "";
+      if (head + tail > 0.0005) {
+        count += 1;
+        saved += head + tail;
+        skipped = "";
+      }
+      rows.push({ id: id, index: index, head: head, tail: tail, skipped: skipped, notes: notes });
+    });
+    return { clips: tidy, rows: rows, count: count, saved: editRound3(saved) };
   }
 
   function editCloneClips(clips) {
@@ -9286,17 +9395,26 @@
   }
 
   /* 파형 SVG 길(path d, design D6). peaks {perSecond, values(0~1)} 의 [in, out] 부분을 가운데 기준 막대로, viewBox 0 0 n 100.
-     반환 {n, d}, 값이 없으면 null. 화면은 preserveAspectRatio none 으로 클립 너비에 늘린다(확대가 바뀌어도 길은 그대로). */
-  function editPeakPath(clip, peaks) {
+     반환 {n, d}, 값이 없으면 null. 화면은 preserveAspectRatio none 으로 클립 너비에 늘린다(확대가 바뀌어도 길은 그대로).
+     작업 186: shift(원본 초 = 대사 타이밍 × 속도)가 있으면 들리는 창 [in − shift, out − shift] 을 그린다. 창 길이(n)는 그대로이고
+     원본 밖(0 앞·끝 뒤)은 막대 없음(무음). shift 0 이면 186 전과 같다. */
+  function editPeakPath(clip, peaks, shift) {
     var p = peaks || {};
     var values = Array.isArray(p.values) ? p.values : [];
     var per = Number(p.perSecond) || 0;
     if (!values.length || per <= 0) return null;
-    var i0 = Math.max(0, Math.floor(Number(clip.in) * per + 1e-9));
-    var i1 = Math.min(values.length, Math.ceil(Number(clip.out) * per - 1e-9));
-    if (i1 <= i0) return null;
+    var move = Number(shift) || 0;
+    var i0 = Math.floor((Number(clip.in) - move) * per + 1e-9);
+    var i1 = Math.ceil((Number(clip.out) - move) * per - 1e-9);
+    if (!move) {
+      i0 = Math.max(0, i0);
+      i1 = Math.min(values.length, i1);
+    }
+    var lo = Math.max(0, i0);
+    var hi = Math.min(values.length, i1);
+    if (i1 <= i0 || hi <= lo) return null;
     var parts = [];
-    for (var i = i0; i < i1; i++) {
+    for (var i = lo; i < hi; i++) {
       var v = Math.max(0, Math.min(1, Number(values[i]) || 0));
       var bar = Math.max(2, Math.round(v * 96));
       parts.push("M" + (i - i0) + " " + (100 - bar) / 2 + "h0.8v" + bar + "h-0.8z");
@@ -9304,14 +9422,61 @@
     return { n: i1 - i0, d: parts.join("") };
   }
 
+  /* 작업 186: −1~1초·0.05초 격자로 맞춘 대사 타이밍 값(숫자가 아니거나 0 이면 0, −0 도 0). */
+  function editSlipSnap(value) {
+    var v = Number(value);
+    if (!isFinite(v) || v === 0) return 0;
+    v = Math.max(-EDIT_SLIP_MAX_S, Math.min(EDIT_SLIP_MAX_S, v));
+    v = Math.round(Math.round(v / EDIT_SHIFT_STEP_S) * EDIT_SHIFT_STEP_S * 100) / 100;
+    return v || 0;
+  }
+
+  /* 작업 186: 클립의 대사 타이밍(audioSlip, 타임라인 초, 양수 = 소리가 늦게). 없으면 0. */
+  function editSlipOf(clip) {
+    return editSlipSnap((clip || {}).audioSlip);
+  }
+
+  /* 작업 186: 대사 타이밍 숫자 표시("+0.30초 늦게" · "−0.20초 빨리" · "0 (원래대로)"). */
+  function editSlipText(value) {
+    var v = editSlipSnap(value);
+    if (v > 0) return "+" + v.toFixed(2) + "초 늦게";
+    if (v < 0) return "−" + (-v).toFixed(2) + "초 빨리";
+    return "0 (원래대로)";
+  }
+
+  /* 작업 186: 재료 소리 구간(media soundRanges, 원본 초) → 클립 소리 상자 안 띠 [{from, to}](클립 시작부터 타임라인 초).
+     화면 t 에서 들리는 원본 = in + t × 속도 − 대사 타이밍 × 속도(서버 내보내기와 같다) → 띠 = (원본 − in) ÷ 속도 + 대사 타이밍.
+     클립 밖은 자른다. 꼴이 틀린 구간은 버린다. */
+  function editSoundBands(clip, ranges) {
+    if (!Array.isArray(ranges) || !ranges.length || !clip) return [];
+    var speed = editSpeedOf(clip);
+    var slip = editSlipOf(clip);
+    var len = editClipLen(clip);
+    var start = Number(clip.in) || 0;
+    var out = [];
+    ranges.forEach(function (range) {
+      if (!Array.isArray(range) || range.length < 2) return;
+      var a = (Number(range[0]) - start) / speed + slip;
+      var b = (Number(range[1]) - start) / speed + slip;
+      if (!isFinite(a) || !isFinite(b)) return;
+      a = Math.max(0, a);
+      b = Math.min(len, b);
+      if (b - a > 1e-6) out.push({ from: editRound3(a), to: editRound3(b) });
+    });
+    return out;
+  }
+
   /* 소리 줄 한 칸(지시서 116 보완 10). 반환 {kind, title, path, from}. 재료에 audioFrom(소리 없는 다시 만든 버전 → 그 칸 v1 소리,
      서버 _audio_sources)이 있으면 is-silent 대신 v1 파형의 [offset + in × scale, offset + out × scale](end 까지)을 그리고,
-     v1 파형이 아직 없으면 소리 있음 표시만 한다. 소리 끈 클립은 지금처럼 is-muted. */
+     v1 파형이 아직 없으면 소리 있음 표시만 한다. 소리 끈 클립은 지금처럼 is-muted.
+     작업 186: 대사 타이밍만큼 옮긴 파형, 그리고 bands(클립 자기 재료의 소리 구간 띠, editSoundBands — 빈틈 다듬기가 보는 구간). */
   function editAudioLane(clip, mat, media, fromMedia) {
     var m = media || {};
     var info = mat || {};
     var from = info.audioFrom && typeof info.audioFrom === "object" ? info.audioFrom : null;
-    if (clip.muted === true) return { kind: "is-muted", title: "소리 끔", path: null, from: false };
+    if (clip.muted === true) return { kind: "is-muted", title: "소리 끔", path: null, from: false, bands: [] };
+    var slip = editSlipOf(clip);
+    var shift = slip ? slip * editSpeedOf(clip) : 0; // 원본 초
     if (from) {
       var f = fromMedia || {};
       var off = Number(from.offset) || 0;
@@ -9320,13 +9485,14 @@
       var b = off + Number(clip.out) * sc;
       if (Number(from.end) > 0) b = Math.min(b, Number(from.end));
       var fpeaks = f.status === "done" && f.data ? f.data.peaks : null;
-      return { kind: "", title: "원본 소리 사용", path: b > a ? editPeakPath({ in: a, out: b }, fpeaks) : null, from: true };
+      return { kind: "", title: "원본 소리 사용", path: b > a ? editPeakPath({ in: a, out: b }, fpeaks, shift * sc) : null, from: true, bands: [] };
     }
     var peaks = m.status === "done" && m.data ? m.data.peaks : null;
     var kind = info.hasAudio === false ? "is-silent" : "";
-    var path = kind ? null : editPeakPath(clip, peaks);
+    var path = kind ? null : editPeakPath(clip, peaks, shift);
     if (!kind && !path) kind = m.status === "done" ? "is-silent" : "is-loading";
-    return { kind: kind, title: info.hasAudio === false || kind === "is-silent" ? "소리 없음" : "소리", path: path, from: false };
+    var bands = !kind && m.data ? editSoundBands(clip, m.data.soundRanges) : [];
+    return { kind: kind, title: info.hasAudio === false || kind === "is-silent" ? "소리 없음" : "소리", path: path, from: false, bands: bands };
   }
 
   /* 단축키(design §5.4) → 동작 이름(없으면 ""). 입력칸 초점·Alt 는 부르는 쪽이 거른다.
@@ -9523,6 +9689,7 @@
       trMenu: null, // 작업 182: 열린 전환 메뉴 {el, index, onDoc}(editTrOpen). 닫으면 null
       fxHold: null, // 작업 182 미리보기: 바꿔 끼운 뒤에도 잠깐 더 재생하는 앞 클립(디졸브·L컷, editFxHoldStart)
       fxLead: null, // 작업 182 미리보기: 화면보다 먼저 소리를 내는 다음 클립(J컷, editFxLeadTick)
+      tighten: null, // 작업 186: 빈틈 다듬기 {busy, open, rev, only, plan}(editTightenStart). 닫거나 편집이 바뀌면 null
       retakeOn: false // GET /edit 의 retake.enabled(VNEW_EDIT_RETAKE). false 면 AI로 고치기 버튼이 없다
     };
     ctx.onKey = function (event) {
@@ -9567,6 +9734,7 @@
     editCtx = null;
     ctx.alive = false;
     editTrClose(ctx); // 작업 182: 열린 전환 메뉴
+    ctx.tighten = null; // 작업 186: 빈틈 다듬기 제안(받는 중이면 응답을 버린다)
     editFixStop(ctx); // 지시서 116: AI로 고치기 패널 조회 타이머·영상
     editPause(ctx);
     editCancelRaf(ctx.zoomRaf);
@@ -9702,6 +9870,7 @@
 
   function editShowWait(ctx, text) {
     editTrClose(ctx); // 작업 182
+    ctx.tighten = null; // 작업 186: 다시 불러오면 빈틈 다듬기 제안도 버린다
     clear(ctx.root);
     ctx.dom = {};
     ctx.clipEls = [];
@@ -9809,6 +9978,7 @@
     editFixClose(ctx); // 지시서 116: 다시 그리면 열린 AI로 고치기 패널을 닫는다
     editFixPickClose(ctx); // 지시서 119: 테이크·장면 고르기 창도
     editTrClose(ctx); // 작업 182: 전환 메뉴도
+    ctx.tighten = null; // 작업 186: 빈틈 다듬기 확인 칸·받는 중인 제안도(다시 그린 화면에는 없다)
     clear(root);
     var d = (ctx.dom = {});
     ctx.clipEls = [];
@@ -9902,8 +10072,10 @@
     [d.btnUndo, d.btnRedo, d.btnDelete, d.btnSplit, d.btnMute, d.btnReset].forEach(function (btn) {
       tools.appendChild(btn);
     });
+    tools.appendChild(editTightenButton(ctx)); // 작업 186: 빈틈 다듬기(모든 클립)
     tools.appendChild(editRetimeBox(ctx));
     tools.appendChild(editAudioFxBox(ctx)); // 작업 182: 고른 클립 J/L 컷
+    tools.appendChild(editDialogueBox(ctx)); // 작업 186: 고른 클립 대사 타이밍 · 이 클립 빈틈 다듬기
     var zoomWrap = el("label", "vnew-edit-zoom");
     zoomWrap.title = "확대/축소(+ / −)";
     zoomWrap.appendChild(el("span", "vnew-edit-tool-icon", "🔍"));
@@ -9920,6 +10092,7 @@
     zoomWrap.appendChild(d.zoom);
     zoomWrap.appendChild(el("span", "vnew-edit-key", "+/−"));
     tools.appendChild(zoomWrap);
+    d.tools = tools; // 작업 186: 빈틈 다듬기 확인 칸은 열 때 도구줄 맨 끝(한 줄 전체)에 붙인다(editRenderTighten)
     root.appendChild(tools);
 
     // 처음 들어오면 한 줄 도움말(닫으면 다시 보이지 않는다)
@@ -10149,6 +10322,328 @@
     editReplaceSel(ctx, next);
   }
 
+  /* 작업 186: 도구줄의 고른 클립 대사 타이밍(audioSlip, −1~+1초 0.05초 슬라이더 · 숫자 · 원래대로)과 이 클립 빈틈 다듬기.
+     끄는 동안(input)은 숫자와 그 클립 소리 줄(파형 · 소리 구간 띠)만 옮겨 보이고, 놓으면(change) 실행 취소 한 단계로 바꾼다
+     (editApplySlip). 소리 끈 클립은 막고 "소리 끈 클립". */
+  function editDialogueBox(ctx) {
+    var d = ctx.dom;
+    var box = el("div", "vnew-edit-dlg");
+    var field = el("label", "vnew-edit-dlg-field");
+    field.title = "고른 클립의 소리(대사)만 화면보다 늦게(+) 또는 빨리(−) 옮깁니다(−1~+1초)";
+    field.appendChild(el("span", "vnew-edit-dlg-text", "대사 타이밍"));
+    var range = el("input", "vnew-edit-dlg-range");
+    range.type = "range";
+    range.min = String(-EDIT_SLIP_MAX_S);
+    range.max = String(EDIT_SLIP_MAX_S);
+    range.step = String(EDIT_SHIFT_STEP_S);
+    range.value = "0";
+    range.setAttribute("aria-label", "대사 타이밍");
+    var out = el("output", "vnew-edit-dlg-value", editSlipText(0));
+    out.setAttribute("aria-hidden", "true");
+    range.addEventListener("input", function () {
+      var value = editSlipSnap(range.value);
+      out.textContent = editSlipText(value);
+      editSlipPreview(ctx, value);
+    });
+    range.addEventListener("change", function () {
+      editApplySlip(ctx, range.value);
+    });
+    field.appendChild(range);
+    field.appendChild(out);
+    box.appendChild(field);
+    var reset = el("button", "outline-button vnew-edit-dlg-reset", "원래대로");
+    reset.type = "button";
+    reset.title = "대사 타이밍을 0(원래대로)으로 되돌립니다";
+    reset.addEventListener("click", function () {
+      editApplySlip(ctx, 0);
+    });
+    box.appendChild(reset);
+    var one = el("button", "outline-button vnew-edit-tighten-one", "이 클립 빈틈 다듬기");
+    one.type = "button";
+    one.title = "고른 클립 하나만 대사 앞뒤의 빈 소리 구간을 줄입니다 — 적용 전에 확인합니다";
+    one.addEventListener("click", function () {
+      editTightenStart(ctx, ctx.sel);
+    });
+    box.appendChild(one);
+    var note = el("span", "vnew-hint vnew-edit-dlg-note", EDIT_SLIP_NOTE);
+    var muted = el("span", "vnew-hint vnew-edit-dlg-muted", EDIT_MUTED_NOTE);
+    muted.style.display = "none";
+    box.appendChild(note);
+    box.appendChild(muted);
+    d.slip = { range: range, out: out, reset: reset, note: note, muted: muted };
+    d.btnTightenOne = one;
+    return box;
+  }
+
+  /* 대사 타이밍 칸을 고른 클립 값으로. 고른 클립이 없거나 소리 끈 클립이면 막고, 소리 끈 클립은 "소리 끈 클립". */
+  function editRenderDialogue(ctx) {
+    var s = ctx.dom.slip;
+    if (!s) return;
+    var clip = editSelected(ctx);
+    var muted = !!clip && clip.muted === true;
+    var value = clip ? editSlipOf(clip) : 0;
+    s.range.disabled = !clip || muted || ctx.busy;
+    s.reset.disabled = !clip || muted || ctx.busy || !value;
+    s.range.value = String(value);
+    s.out.textContent = editSlipText(value);
+    s.muted.style.display = muted ? "" : "none";
+    s.note.style.display = muted ? "none" : "";
+    editRenderTightenTools(ctx);
+  }
+
+  /* 끄는 동안: 고른 클립 소리 줄을 value 만큼 옮겨 칠한다(문서는 그대로 — 놓으면 editApplySlip). */
+  function editSlipPreview(ctx, value) {
+    var clip = editSelected(ctx);
+    var parts = clip ? ctx.clipEls[ctx.sel] : null;
+    if (!parts || parts.index !== ctx.sel) return;
+    var preview = editCloneClip(clip);
+    if (value) preview.audioSlip = value;
+    else delete preview.audioSlip;
+    editPaintClip(ctx, parts, preview);
+  }
+
+  /* 고른 클립의 대사 타이밍을 바꾼다(0 이면 키를 지운다 — 저장 바디에 없다). 실행 취소 한 단계. 소리 끈 클립은 받지 않는다. */
+  function editApplySlip(ctx, raw) {
+    var clip = editSelected(ctx);
+    if (!editAlive(ctx) || ctx.busy || !clip || clip.muted === true) {
+      if (clip) editSlipPreview(ctx, editSlipOf(clip));
+      editRenderDialogue(ctx);
+      return;
+    }
+    var value = editSlipSnap(raw);
+    if (value === editSlipOf(clip)) {
+      editSlipPreview(ctx, value);
+      editRenderDialogue(ctx);
+      return;
+    }
+    var next = editCloneClip(clip);
+    if (value) next.audioSlip = value;
+    else delete next.audioSlip;
+    editReplaceSel(ctx, next);
+  }
+
+  /* ---- 작업 186: 빈틈 다듬기(POST /edit/tighten 제안 → 확인 칸 → 적용 = 실행 취소 한 단계, 저장은 늘 하던 자동 저장) ---- */
+
+  function editTightenButton(ctx) {
+    var btn = el("button", "vnew-edit-tighten-btn");
+    btn.type = "button";
+    btn.appendChild(el("span", "vnew-edit-tool-icon", "⇥⇤"));
+    btn.appendChild(el("span", "vnew-edit-tool-text", "빈틈 다듬기"));
+    btn.title = "클립마다 대사 앞뒤의 빈 소리 구간을 줄입니다 — 적용 전에 확인하고, 실행 취소로 되돌릴 수 있습니다";
+    btn.setAttribute("aria-label", btn.title);
+    btn.addEventListener("click", function () {
+      editTightenStart(ctx, -1);
+    });
+    ctx.dom.btnTighten = btn;
+    return btn;
+  }
+
+  /* 저장 중(PUT 보내는 중)·내보내기 요청 중·불러오는 중·클립 없음·제안을 받는 중이면 빈틈 다듬기를 막는다. */
+  function editTightenBlocked(ctx) {
+    return !!(ctx.busy || ctx.saving || ctx.exporting || !ctx.clips.length || (ctx.tighten && ctx.tighten.busy));
+  }
+
+  function editRenderTightenTools(ctx) {
+    var d = ctx.dom;
+    var blocked = editTightenBlocked(ctx);
+    if (d.btnTighten) d.btnTighten.disabled = blocked;
+    if (d.btnTightenOne) {
+      var clip = editSelected(ctx);
+      d.btnTightenOne.disabled = blocked || !clip || clip.muted === true;
+    }
+  }
+
+  /* 클립들 재료 mid(소리 끈 클립 제외, 한 번씩). res 가 없으면 파형을 아직 안 받은 것만, 있으면 서버가 "noFilm" 으로 둔 것만. */
+  function editTightenMids(ctx, clips, res) {
+    var skipped = {};
+    ((res && res.perClip) || []).forEach(function (p) {
+      if (p && p.skipped === "noFilm") skipped[String(p.id)] = true;
+    });
+    var out = [];
+    clips.forEach(function (clip) {
+      var mid = String((ctx.materials[clip.sourceKey] || {}).mid || "");
+      if (!mid || clip.muted === true || out.indexOf(mid) >= 0) return;
+      if (res ? skipped[String(clip.id)] : (ctx.media[mid] || {}).status !== "done") out.push(mid);
+    });
+    return out;
+  }
+
+  /* 파형(필름)을 하나씩 차례로 받는다 — 서버 tighten 은 필름을 만들지 않고 이미 만든 필름의 소리 구간만 본다. */
+  function editTightenMedia(ctx, mids, stale) {
+    var chain = Promise.resolve();
+    mids.forEach(function (mid) {
+      chain = chain.then(function () {
+        return stale() ? null : editMediaLoad(ctx, mid);
+      });
+    });
+    return chain;
+  }
+
+  function editTightenCall(ctx) {
+    return api(editPath(ctx) + "/tighten", {
+      method: "POST",
+      body: JSON.stringify({ variant: ctx.variant, clips: editCloneClips(ctx.clips) })
+    });
+  }
+
+  /* [빈틈 다듬기](index < 0: 모든 클립) · [이 클립 빈틈 다듬기](index = 고른 클립). 지금(저장 전) 클립으로 제안을 받아 확인 칸을 연다.
+     파형을 안 받은 재료는 먼저 받고, 그래도 "noFilm" 이 있으면 그 재료를 받아 한 번 더 부른다. 그사이 편집이 바뀌면 버린다. */
+  function editTightenStart(ctx, index) {
+    if (!editAlive(ctx) || editTightenBlocked(ctx)) return;
+    var only = "";
+    if (index >= 0) {
+      var picked = ctx.clips[index];
+      if (!picked || picked.muted === true) return;
+      only = String(picked.id);
+    }
+    editTightenClose(ctx);
+    var job = { busy: true, open: false, rev: ctx.rev, only: only, plan: null };
+    ctx.tighten = job;
+    editShowError(ctx, "");
+    editNote(ctx, "대사 구간을 찾는 중…");
+    editRenderTightenTools(ctx);
+    var targets = ctx.clips.filter(function (clip) {
+      return !only || String(clip.id) === only;
+    });
+    function stale() {
+      return !editAlive(ctx) || ctx.tighten !== job || ctx.rev !== job.rev;
+    }
+    editTightenMedia(ctx, editTightenMids(ctx, targets, null), stale)
+      .then(function () {
+        return stale() ? null : editTightenCall(ctx);
+      })
+      .then(function (res) {
+        if (!res || stale()) return res;
+        var again = editTightenMids(ctx, targets, res);
+        if (!again.length) return res;
+        return editTightenMedia(ctx, again, stale).then(function () {
+          return stale() ? null : editTightenCall(ctx);
+        });
+      })
+      .then(function (res) {
+        if (ctx.tighten !== job) return;
+        job.busy = false;
+        if (!editAlive(ctx)) {
+          ctx.tighten = null;
+          return;
+        }
+        if (!res || ctx.rev !== job.rev) {
+          ctx.tighten = null;
+          editNote(ctx, EDIT_TIGHTEN_STALE);
+          editRenderTightenTools(ctx);
+          return;
+        }
+        job.plan = editTightenPlan(ctx.clips, res, only);
+        job.open = true;
+        editNote(ctx, "");
+        editRenderTighten(ctx);
+        editRenderTightenTools(ctx);
+      })
+      .catch(function (err) {
+        if (ctx.tighten !== job) return;
+        ctx.tighten = null;
+        if (!editAlive(ctx)) return;
+        editNote(ctx, "");
+        editShowError(ctx, "빈틈을 다듬지 못했습니다: " + errMessage(err));
+        editRenderTightenTools(ctx);
+      });
+  }
+
+  /* 확인 칸: "클립 N개에서 앞뒤 빈 소리 구간을 줄입니다 · 총 X.X초 짧아짐" · 클립별 줄(앞 −0.8초 · 뒤 −1.2초 / 그대로 둠 (…) /
+     줄이거나 뺀 디졸브) · [적용] [취소]. 도구줄 맨 끝에 한 줄 전체로 붙인다(열려 있을 때만 있다). */
+  function editRenderTighten(ctx) {
+    var d = ctx.dom;
+    var job = ctx.tighten;
+    if (d.tightenBox && d.tightenBox.parentNode) d.tightenBox.parentNode.removeChild(d.tightenBox);
+    d.tightenBox = null;
+    if (!job || !job.open || !job.plan || !d.tools) return;
+    var plan = job.plan;
+    var box = el("section", "vnew-edit-tighten");
+    box.setAttribute("aria-label", "빈틈 다듬기");
+    box.setAttribute("aria-live", "polite");
+    box.appendChild(el("p", "vnew-edit-tighten-title", plan.count
+      ? "클립 " + plan.count + "개에서 앞뒤 빈 소리 구간을 줄입니다 · 총 " + editTightenSec(plan.saved) + "초 짧아짐"
+      : "줄일 빈 소리 구간이 없습니다"));
+    var list = el("ul", "vnew-edit-tighten-list");
+    plan.rows.forEach(function (row) {
+      var clip = ctx.clips[row.index] || {};
+      var mat = ctx.materials[clip.sourceKey] || {};
+      var cut = editTightenCutText(row.head, row.tail);
+      var item = el("li", "vnew-edit-tighten-row" + (cut ? "" : " is-kept"));
+      item.appendChild(el("span", "vnew-edit-tighten-name", row.index + 1 + ". " + (clip.label || mat.label || "클립")));
+      item.appendChild(el("span", "vnew-edit-tighten-cut", cut || EDIT_TIGHTEN_SKIP[row.skipped] || EDIT_TIGHTEN_NONE));
+      row.notes.forEach(function (note) {
+        item.appendChild(el("span", "vnew-edit-tighten-tr", note));
+      });
+      list.appendChild(item);
+    });
+    box.appendChild(list);
+    var actions = el("div", "vnew-edit-tighten-actions");
+    var apply = el("button", "primary-button vnew-edit-tighten-apply", "적용");
+    apply.type = "button";
+    apply.disabled = !plan.count;
+    apply.title = "한 번에 적용합니다 — 실행 취소(Ctrl+Z) 한 번으로 되돌릴 수 있습니다";
+    apply.addEventListener("click", function () {
+      editTightenApply(ctx);
+    });
+    var cancel = el("button", "outline-button vnew-edit-tighten-cancel", "취소");
+    cancel.type = "button";
+    cancel.addEventListener("click", function () {
+      editTightenClose(ctx, true);
+    });
+    actions.appendChild(apply);
+    actions.appendChild(cancel);
+    box.appendChild(actions);
+    d.tools.appendChild(box);
+    d.tightenBox = box;
+    var first = plan.count ? apply : cancel;
+    if (typeof first.focus === "function") {
+      try {
+        first.focus({ preventScroll: true });
+      } catch (error) {
+        /* 초점을 줄 수 없는 요소 */
+      }
+    }
+  }
+
+  /* [적용]: 받은 클립을 한 번의 변경(editCommit — 실행 취소 한 단계, 디졸브 정리 editTidyFx)으로 바꾼다. 저장은 늘 하던 자동 저장. */
+  function editTightenApply(ctx) {
+    var job = ctx.tighten;
+    if (!editAlive(ctx) || ctx.busy || !job || !job.open || !job.plan || !job.plan.count) return;
+    if (ctx.rev !== job.rev) {
+      editTightenClose(ctx);
+      editNote(ctx, EDIT_TIGHTEN_STALE);
+      return;
+    }
+    var plan = job.plan;
+    var max = editLimit(ctx, "maxTotalSeconds", 300);
+    if (editStarts(plan.clips).total > max + 1e-6) {
+      editNote(ctx, "타임라인 전체 길이는 " + max + "초까지입니다.");
+      return;
+    }
+    editTightenClose(ctx);
+    editCommit(ctx, plan.clips, { sel: ctx.sel });
+    editNote(ctx, "빈틈을 다듬었습니다 · 총 " + editTightenSec(plan.saved) + "초 짧아짐 — 실행 취소(Ctrl+Z)로 되돌릴 수 있습니다.");
+  }
+
+  /* 확인 칸을 닫고 받는 중인 제안도 버린다. refocus 면 [빈틈 다듬기] 로 초점을 돌린다. */
+  function editTightenClose(ctx, refocus) {
+    var d = ctx.dom || {};
+    var had = !!ctx.tighten;
+    ctx.tighten = null;
+    if (d.tightenBox && d.tightenBox.parentNode) d.tightenBox.parentNode.removeChild(d.tightenBox);
+    d.tightenBox = null;
+    if (!had) return;
+    editRenderTightenTools(ctx);
+    if (refocus && d.btnTighten && typeof d.btnTighten.focus === "function") {
+      try {
+        d.btnTighten.focus();
+      } catch (error) {
+        /* 이미 떨어진 버튼 */
+      }
+    }
+  }
+
   function editRenderVariants(ctx) {
     var box = ctx.dom.variantBox;
     if (!box) return;
@@ -10176,6 +10671,7 @@
   function editRenderSave(ctx) {
     var box = ctx.dom.saveBox;
     if (!box) return;
+    editRenderTightenTools(ctx); // 작업 186: 저장 중(PUT)에는 빈틈 다듬기를 막는다
     var kind = editSaveStateOf(ctx);
     clear(box);
     box.className = "vnew-edit-save is-" + kind;
@@ -10217,6 +10713,7 @@
     d.exportBtn.disabled = ctx.exporting || !ctx.clips.length;
     editRenderRetime(ctx, false);
     editRenderAudioFx(ctx); // 작업 182
+    editRenderDialogue(ctx); // 작업 186: 대사 타이밍 · 빈틈 다듬기 버튼
     editRenderPlayButton(ctx);
     editFixRenderSel(ctx); // 지시서 116: [고른 클립 AI로 고치기] disabled·title 만(노드를 만들지 않는다)
   }
@@ -10340,9 +10837,18 @@
     var kind = lane.kind;
     var path = lane.path;
     abox.className = "vnew-edit-aclip" + (kind ? " " + kind : "") + (selected ? " is-selected" : "");
-    abox.title = lane.title;
+    var slip = clip.muted === true ? 0 : editSlipOf(clip); // 작업 186
+    abox.title = lane.title + (slip ? " · 대사 타이밍 " + editSlipText(slip) : "");
     if (clip.muted === true) abox.appendChild(el("span", "vnew-edit-aclip-icon", "🔇"));
     if (lane.from && !path) abox.appendChild(el("span", "vnew-edit-aclip-icon", "🔊"));
+    // 작업 186: 소리 구간(대사) 띠 — 파형 뒤 옅은 띠(대사 타이밍만큼 옮기고 클립 밖은 자른다). 띠 사이가 빈 소리 구간이다.
+    (lane.bands || []).forEach(function (band) {
+      var strip = el("span", "vnew-edit-sband");
+      strip.setAttribute("aria-hidden", "true");
+      strip.style.left = Math.round(band.from * ctx.pps * 10) / 10 + "px";
+      strip.style.width = Math.max(1, Math.round((band.to - band.from) * ctx.pps * 10) / 10) + "px";
+      abox.appendChild(strip);
+    });
     if (path && typeof document.createElementNS === "function") {
       var svg = document.createElementNS(EDIT_SVG_NS, "svg");
       svg.setAttribute("class", "vnew-edit-wave");
@@ -10872,6 +11378,24 @@
     if (end > 0 && at >= end) return null;
     return Math.round(at * 1000) / 1000;
   }
+
+  /* 작업 186: 대사 타이밍(audioSlip) 미리보기 — 화면 원본 시각 source 에서 들릴 소리 시각. 내보내기(edit)처럼 화면 t 에서 원본
+     t − 대사 타이밍 × 속도를 듣는다. from(원본 소리 대체)이 있으면 그 소리 시각으로 옮긴다(editAltAudioAt). 소리 끈 클립이거나
+     원본 밖(0 앞 · duration 끝 뒤)이면 null(무음). */
+  function editSlipAudioAt(from, clip, source, duration) {
+    if (!clip || clip.muted === true) return null;
+    var cin = Number(clip.in) || 0;
+    var heard = (Number(source) || 0) - editSlipOf(clip) * editSpeedOf(clip);
+    var at = heard;
+    if (from) {
+      at = editAltAudioAt(from, clip, Math.max(cin, heard));
+      if (at === null) return null;
+      if (heard < cin) at -= cin - heard;
+    }
+    var end = Number(duration) || 0;
+    if (at < 0 || (end > 0 && at >= end - 0.02)) return null;
+    return Math.round(at * 1000) / 1000;
+  }
   /* ---- 미리보기 원본 소리 끝 ---- */
 
   var EDIT_AUDIO_DRIFT_S = 0.15; // 소리 요소가 이만큼 넘게 어긋나면 다시 맞춘다(editTick)
@@ -10892,12 +11416,17 @@
   }
 
   /* 지금 클립의 원본 소리를 ctx.audio 에 맞춘다(source = 화면 <video> 의 원본 시각). force 면 시각을 꼭 다시 둔다.
-     원본 소리를 내면 true(부르는 쪽이 화면 <video> 를 음소거), 아니면 소리 요소를 멈추고 false(지금 동작 그대로). */
+     원본 소리를 내면 true(부르는 쪽이 화면 <video> 를 음소거), 아니면 소리 요소를 멈추고 false(지금 동작 그대로).
+     작업 186: 대사 타이밍(audioSlip)이 있는 소리 켠 클립도 이 소리 요소가 그 원본(원본 소리 대체면 그 소리)을 옮긴 시각으로 낸다
+     (editSlipAudioAt). 어긋남 허용은 EDIT_AUDIO_DRIFT_S 라 근사다(정확한 결과는 내보낸 영상, EDIT_FX_NOTE). */
   function editSyncAudio(ctx, clip, source, force) {
     var audio = ctx.audio;
     var from = editAltFrom(ctx, clip);
-    var url = from ? editUrlOf(ctx, from.sourceKey) : "";
-    var at = audio && url ? editAltAudioAt(from, clip, source) : null;
+    var slip = clip && clip.muted !== true ? editSlipOf(clip) : 0;
+    var key = from ? from.sourceKey : slip ? clip.sourceKey : "";
+    var url = key ? editUrlOf(ctx, key) : "";
+    var at = null;
+    if (audio && url) at = slip ? editSlipAudioAt(from, clip, source, (ctx.materials[key] || {}).duration) : editAltAudioAt(from, clip, source);
     if (at === null) {
       editAudioStop(ctx);
       return !!(audio && url && clip && clip.muted !== true); // end 넘음: 화면은 계속 음소거(내보내기도 무음)
@@ -10924,6 +11453,7 @@
      앞당김만큼 먼저 소리를 낸다(fxLead). 디졸브는 들어오는 <video> 의 CSS opacity 를 타임라인 시각으로 0 → 1, 소리 크기는 내보내기
      (edit._audio_envelope)처럼 직선으로 바꾼다. 숨은 쪽 하나가 둘 다 맡을 수는 없어 겹치면 앞의 것이 끝난 뒤 시작한다. 재생을 멈추거나
      옮기면 모두 끝낸다(겹친 구간에 멈추면 뒤 클립만 보인다). 원본 소리 대체(지시서 118b) 클립의 앞당김·이어 감은 미리보기에 없다.
+     작업 186: 대사 타이밍(audioSlip)은 숨은 소리 요소(ctx.audio, editSyncAudio)가 옮긴 시각으로 낸다. 그 클립의 앞당김·이어 감도 없다.
      정확한 결과는 내보낸 영상(EDIT_FX_NOTE). */
 
   function editFxVolume(video, value) {
@@ -11025,7 +11555,8 @@
       editFxLeadEnd(ctx, false);
       lead = null;
     }
-    if (!next || next.muted === true || ctx.fxHold || editAltFrom(ctx, next)) return;
+    // 작업 186: 대사 타이밍이 있는 클립의 앞당김도 미리보기에 없다(소리 요소 하나가 지금 클립 소리를 맡는다)
+    if (!next || next.muted === true || ctx.fxHold || editAltFrom(ctx, next) || editSlipOf(next)) return;
     var seconds = editShiftOf(next, "audioLead");
     var at = info.starts[index];
     if (!seconds || !(at > ctx.t)) return;
@@ -11277,9 +11808,21 @@
     var mid = ctx.mediaQueue.shift();
     if (!mid) return;
     ctx.mediaBusy = true;
+    editMediaLoad(ctx, mid).then(function () {
+      ctx.mediaBusy = false;
+      if (!editAlive(ctx)) return;
+      editPumpMedia(ctx);
+    });
+  }
+
+  /* 재료 하나의 필름스트립·파형(GET /edit/media/<mid>)을 받아 ctx.media 에 두고 그 재료 클립을 다시 칠한다. 실패해도 풀리는 약속.
+     작업 186: 빈틈 다듬기도 이 길로 받는다(editTightenMedia) — 받는 중이면 그 약속을 같이 기다린다(같은 요청을 겹쳐 보내지 않는다). */
+  function editMediaLoad(ctx, mid) {
     var keep = ctx.media[mid];
-    ctx.media[mid] = { status: "loading", data: keep ? keep.data : null };
-    api(editPath(ctx) + "/media/" + encodeURIComponent(mid))
+    if (keep && keep.status === "loading" && keep.wait) return keep.wait;
+    var item = { status: "loading", data: keep ? keep.data : null, wait: null };
+    ctx.media[mid] = item;
+    item.wait = api(editPath(ctx) + "/media/" + encodeURIComponent(mid))
       .then(function (data) {
         ctx.media[mid] = { status: "done", data: data || {}, at: Date.now() };
         editMediaFacts(ctx, mid, data || {});
@@ -11288,15 +11831,14 @@
         ctx.media[mid] = { status: "failed", data: null };
       })
       .then(function () {
-        ctx.mediaBusy = false;
         if (!editAlive(ctx)) return;
         ctx.clipEls.forEach(function (parts) {
           var clip = ctx.clips[parts.index];
           var cm = clip ? ctx.materials[clip.sourceKey] || {} : {};
           if (clip && (cm.mid === mid || (cm.audioFrom && cm.audioFrom.mid === mid))) editPaintClip(ctx, parts, clip);
         });
-        editPumpMedia(ctx);
       });
+    return item.wait;
   }
 
   /* 필름 응답의 길이·소리를 그 재료 정보에 채운다(기본 밖 재료는 GET 이 길이를 아직 안 잰다). */
@@ -11374,6 +11916,10 @@
       if (event && event.key === "Escape") editFixClose(ctx);
       return;
     }
+    if (ctx.tighten && ctx.tighten.open && event && event.key === "Escape") {
+      editTightenClose(ctx, true); // 작업 186: Esc 는 빈틈 다듬기 확인 칸 닫기(다른 단축키는 그대로 — 편집하면 칸이 닫힌다)
+      return;
+    }
     if (!event || event.defaultPrevented || event.altKey) return;
     var target = event.target || {};
     var tag = String(target.tagName || "").toLowerCase();
@@ -11396,6 +11942,7 @@
 
   function editChanged(ctx) {
     ctx.rev += 1;
+    if (ctx.tighten) editTightenClose(ctx); // 작업 186: 편집이 바뀌면 받은(받는 중인) 빈틈 다듬기 제안은 버린다
     if (ctx.sel >= ctx.clips.length) ctx.sel = -1;
     editNote(ctx, "");
     editRenderVariants(ctx);
