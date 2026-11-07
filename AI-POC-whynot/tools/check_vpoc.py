@@ -60535,6 +60535,540 @@ def check_vnew_closeup_garment_184() -> None:
     for line_ in report:
         print(f"       184: {line_}")
 
+# ---------------------------------------------------------------- 작업 185 — ⑦ 편집 빈틈 다듬기 · 대사 타이밍(gs-a~g)
+#
+# 소리 구간(순수 함수, 로컬 ffmpeg 합성 소리 실측) · tighten_proposal(순수) · POST /edit/tighten(실제 라우트, 저장 안 함 · 400 · 권한) ·
+# audioSlip 검증 · 해시 하위 호환 · 옛 문서 명령(181 기대값 그대로) · 소리 창 순수 함수 · 로컬 ffmpeg 내보내기 실측(소리 밀림 · J 컷과 함께).
+# 네트워크 · 유료 호출 0.
+
+
+def _gs185_peaks(n: int, spans, *, level: float = 0.5, base: float = 0.0) -> list[float]:
+    """합성 피크 n 칸(바닥 base), spans [(첫 칸, 끝 칸)] 은 level."""
+    values = [base] * n
+    for first, last in spans:
+        for index in range(first, last):
+            values[index] = level
+    return values
+
+
+def _gs185_onset(mono, *, rate: int = 48000, block: int = 960, ratio: float = 0.3) -> tuple[float, float]:
+    """모노 s16 소리에서 20ms 칸 최대 절댓값이 전체 최대 × ratio 를 넘는 첫 칸 시작 · 마지막 칸 끝(초). 소리가 없으면 (-1, -1)."""
+    peaks = [max((abs(v) for v in mono[i:i + block]), default=0) for i in range(0, len(mono), block)]
+    top = max(peaks, default=0)
+    if top <= 0:
+        return -1.0, -1.0
+    loud = [i for i, p in enumerate(peaks) if p >= top * ratio]
+    return round(loud[0] * block / rate, 3), round((loud[-1] + 1) * block / rate, 3)
+
+
+def check_vnew_edit_gap_slip_185() -> None:
+    """작업 185 — ⑦ 편집 (c) 빈틈 다듬기 · (d) 컷별 대사 타이밍(audioSlip) 서버 · 내보내기. 유료 · 네트워크 0.
+
+    (gs-a) sound_ranges 순수 함수(소리 칸 · 쉼 잇기 0.35 · 짧은 구간 버림 0.15 · 바닥 × 3 · 최대 × 0.12 · 최소 0.06 · 빈 입력) +
+           로컬 ffmpeg 합성 소리(testsrc + 1~2 · 3~4.5초 사인, 잡음 섞임, 무음, 낮은 잡음) 실측 ±0.1초
+    (gs-b) tighten_proposal 순수: 앞 1.0 · 뒤 1.5초 빈 클립 = 소리 ± 여유, min_clip(같은 만큼 덜 · 한쪽 0), 이미 짧음, 소리 없음 · 소리 끔 ·
+           필름 없음 그대로, 속도 2, audioSlip 자리, 디졸브 낮춤 · 뺌, J/L 그대로, 입력 그대로
+    (gs-c) POST /edit/tighten(실제 라우트): 옛 필름 캐시(soundRanges 없음) → 재료 보기 soundRanges(ffmpeg 0) · 제안 · 문서 · 상태 쓰기 0 ·
+           내려받기 · 필름 만들기 0 · keep 0~1 묶음 · 400(그림체 · 클립 · 구간 · 대사 타이밍 · keep 꼴 · 재료 밖) · 403 · 404 · 제안을 PUT 하면 그대로 저장
+    (gs-d) audioSlip 검증 · 저장: 400(1.5 · −1.05 · 0.03 · 글자 · bool · 목록) · 허용(−1 · 1 · 0.05 · −0.35) · 0 · null 저장 안 함 · 소리 끈 클립 그대로 ·
+           GET 그대로 · 기본 문서 새 필드 없음
+    (gs-e) 하위 호환 · 순수 함수: _doc_hash(0 · null · 범위 밖 = 185 전, 값 = 다름) · _fx_plan(소리 켠 클립의 slip 만 소리 창 경로, 181 키 그대로) ·
+           _audio_window(slip · 앞당김과 함께 · 0초 앞 무음 · 속도 · 대체 소리 · 대체 소리 끝 넘음 = 무음) · 옛 문서와 소리 끈 클립 slip 문서의
+           내보내기 명령 = 181 전 명령(_JL181_OLD_COMMANDS) · slip 문서 명령(영상 명령은 옛 문서와 같고 소리 창만 옮김)
+    (gs-f) 로컬 ffmpeg 내보내기 실측: slip +0.5 → 소리 시작 · 끝이 0.5초 늦게(±20ms), 샘플 수 정확, 프레임 수 그대로 · slip −0.5 + J 컷 0.5 →
+           앞당김 창이 원본 소리 시작부터(창 = in − 앞당김 + 0.5), J 컷만인 문서와 다름
+    (gs-g) 실제 필름(로컬 ffmpeg 피크) → 재료 보기 soundRanges · 그 필름으로 다듬기 제안
+    """
+    sys.path.insert(0, str(ROOT / "app"))
+    import array as _array  # noqa: PLC0415
+    import hashlib as _hashlib  # noqa: PLC0415
+    import traceback as _tb  # noqa: PLC0415
+
+    bad: list[str] = []
+    seen: set[str] = set()
+    report: list[str] = []
+    logs = _LogCapture()
+    owner = _EDT_OWNER
+    ffmpeg_found = False
+
+    def expect(group: str, got, want, what: str) -> None:
+        seen.add(group)
+        if got != want:
+            bad.append(f"({group}) {what}\n      결과 {got!r}\n      기대 {want!r}")
+
+    def err_of(resp) -> tuple[int, str, str]:
+        body = (resp.get_json(silent=True) or {}).get("error") or {}
+        return resp.status_code, str(body.get("type") or ""), str(body.get("message") or "")
+
+    try:
+        with logs, _EdtEnv() as env, _pin_vnew(VNEW_EDIT=True):
+            edit, stitchmod = env.editmod, env.stitchmod
+            client = env.client()
+            orig_new = {name: getattr(edit, name) for name in ("_export_dissolve", "_export_audio", "_export_mix")}
+
+            def get(pid: str):
+                return client.get(f"/api/vnew/p/{pid}/edit")
+
+            def put(pid: str, body):
+                return client.put(f"/api/vnew/p/{pid}/edit", json=body)
+
+            def post(pid: str, body):
+                return client.post(f"/api/vnew/p/{pid}/edit/export", json=body)
+
+            def tighten(pid: str, body):
+                return client.post(f"/api/vnew/p/{pid}/edit/tighten", json=body)
+
+            # ================= (gs-a) 소리 구간 순수 함수 =================
+            sr = edit.sound_ranges
+            p = _gs185_peaks
+            mixed_levels = p(120, [(20, 40)], level=1.0)
+            mixed_levels[60:80] = [0.1] * 20  # 0.1 은 최대 1.0 × 0.12 아래
+            pure = [
+                sr(p(120, [(20, 40), (60, 90)])),
+                sr(p(120, [(20, 30), (36, 50)])),  # 쉼 6칸 = 0.30초 < 0.35 → 잇는다
+                sr(p(120, [(20, 30), (37, 50)])),  # 쉼 7칸 = 0.35초 → 따로
+                sr(p(120, [(20, 40), (60, 62)])),  # 2칸 = 0.10초 < 0.15 → 버림
+                sr(p(120, [(20, 40), (60, 63)])),  # 3칸 = 0.15초 → 남김
+                sr(p(120, [(40, 60)], base=0.1)),  # 늘 깔린 0.1 잡음 위 0.5 소리(바닥 × 3 = 0.3)
+                sr(p(120, [], base=0.1)),  # 0.1 잡음만
+                sr(p(120, [], base=0.04)),  # 낮은 잡음(0.06 아래)
+                sr(mixed_levels),
+                sr(p(120, [(30, 50)], level=0.07)),  # 0.07 ≥ 0.06 · 최대 × 0.12 → 소리
+                sr(p(120, [])), sr([]), sr(None), sr("x"), sr(p(40, [(0, 40)]), 0),
+                sr([0, 0.5, "x", None, True, 0.5, 0.5, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]),  # 꼴이 틀린 값은 0, 쉼 3칸은 잇는다
+                sr(p(60, [(0, 60)])),  # 처음부터 끝까지 같은 크기 = 바닥 × 3 아래(늘 깔린 소리로 본다)
+            ]
+            expect("gs-a", pure,
+                   [[[1.0, 2.0], [3.0, 4.5]], [[1.0, 2.5]], [[1.0, 1.5], [1.85, 2.5]], [[1.0, 2.0]], [[1.0, 2.0], [3.0, 3.15]],
+                    [[2.0, 3.0]], [], [], [[1.0, 2.0]], [[1.5, 2.5]], [], [], [], [], [], [[0.05, 0.35]], []],
+                   "sound_ranges: 칸 → 초(0.05 반올림) · 쉼 0.30 잇기 / 0.35 따로 · 0.10 버림 / 0.15 남김 · 바닥 × 3 · 잡음만 [] · 최대 × 0.12 · "
+                   "0.06 최소 · 무음 · 빈 · 꼴 틀림 [] · 칸 수 0 · 꼴이 틀린 피크는 0 · 늘 같은 크기 []")
+            expect("gs-a", [edit.SOUND_FLOOR_PERCENTILE, edit.SOUND_MIN_PEAK, edit.SOUND_FLOOR_RATIO, edit.SOUND_MAX_RATIO,
+                            edit.SOUND_MERGE_GAP_S, edit.SOUND_MIN_RANGE_S, edit.SOUND_ROUND_S, edit.PEAKS_PER_SECOND],
+                   [0.2, 0.06, 3.0, 0.12, 0.35, 0.15, 0.05, 20], "소리 구간 상수(지시서 값)")
+
+            # ================= (gs-b) tighten_proposal 순수 =================
+            tp = edit.tighten_proposal
+
+            def one(clip: dict, ranges, **kw) -> list:
+                result = tp([clip], {"A": ranges} if ranges is not None else {}, **kw)
+                item, info = result["clips"][0], result["perClip"][0]
+                return [item["in"], item["out"], info["savedHead"], info["savedTail"], info["skipped"]]
+
+            base_a = {"id": "a", "sourceKey": "A", "in": 0.0, "out": 4.5, "muted": False}
+            main = tp([base_a], {"A": [[1.0, 3.0]]})
+            expect("gs-b", [main["clips"], main["perClip"], main["savedSeconds"], main["totalSeconds"]],
+                   [[{**base_a, "in": 0.75, "out": 3.35}], [{"id": "a", "savedHead": 0.75, "savedTail": 1.15, "skipped": ""}], 1.9, 2.6],
+                   "앞 1.0 · 뒤 1.5초 빈 클립(소리 1~3초) → in = 1 − 0.25, out = 3 + 0.35, 줄인 초 · 줄인 뒤 길이")
+            cases_b = [
+                one({**base_a, "out": 3.0}, [[1.0, 1.2]]),  # 0.75~1.55 = 0.8초 < 1 → 앞뒤 0.1초씩 덜
+                one({**base_a, "out": 3.0}, [[0.1, 0.3]]),  # 앞은 줄일 것 없음 → 덜 줄일 몫을 뒤에서
+                one({**base_a, "out": 0.8}, [[0.3, 0.5]]),  # 이미 1초보다 짧음
+                one({**base_a, "out": 3.0}, [[0.5, 2.9]]),  # 소리가 끝까지(앞만 0.25 줄임, 뒤는 늘리지 않음)
+                one(base_a, []),  # 소리 없는 원본
+                one({**base_a, "in": 2.0}, [[0.5, 1.0]]),  # 소리 구간이 화면 밖
+                one({**base_a, "muted": True}, [[1.0, 3.0]]),
+                one(base_a, None),  # 필름 없음
+                one({**base_a, "out": 6.0, "speed": 2.0}, [[2.0, 4.0]]),  # 여유는 타임라인 초 → 원본 0.5 · 0.7
+                one({**base_a, "out": 6.0, "speed": 2.0}, [[2.0, 2.2]]),  # min_clip 1초 = 원본 2초
+                one({**base_a, "audioSlip": 0.5}, [[1.0, 3.0]]),  # 들리는 자리 1.5~3.5
+                one({**base_a, "audioSlip": -0.5, "speed": 2.0, "out": 6.0}, [[2.0, 4.0]]),  # 들리는 자리 1~3(원본 −1)
+                one(base_a, [[1.0, 3.0]], keep_head=0.0, keep_tail=1.0),
+            ]
+            expect("gs-b", cases_b,
+                   [[0.65, 1.65, 0.65, 1.35, ""], [0.0, 1.0, 0.0, 2.0, ""], [0.0, 0.8, 0.0, 0.0, "short"], [0.25, 3.0, 0.25, 0.0, ""],
+                    [0.0, 4.5, 0.0, 0.0, "noSound"], [2.0, 4.5, 0.0, 0.0, "noSound"], [0.0, 4.5, 0.0, 0.0, "muted"],
+                    [0.0, 4.5, 0.0, 0.0, "noFilm"], [1.5, 4.7, 0.75, 0.65, ""], [1.2, 3.2, 0.6, 1.4, ""],
+                    [1.25, 3.85, 1.25, 0.65, ""], [0.5, 3.7, 0.25, 1.15, ""], [1.0, 4.0, 1.0, 0.5, ""]],
+                   "min_clip(같은 만큼 덜 · 한쪽 0 이면 다른 쪽) · 이미 짧음 · 늘리지 않음 · 소리 없음 · 화면 밖 소리 · 소리 끔 · 필름 없음 그대로 · "
+                   "속도 2(여유 · min_clip 은 타임라인 초) · audioSlip 들리는 자리 · keep 값")
+            pair = [{"id": "a", "sourceKey": "A", "in": 0.0, "out": 4.5, "muted": False, "audioTail": 0.5,
+                     "transition": {"type": "dissolve", "seconds": 1.0}},
+                    {"id": "b", "sourceKey": "B", "in": 0.0, "out": 3.0, "muted": False, "audioLead": 0.5,
+                     "transition": {"type": "dissolve", "seconds": 0.75}},
+                    {"id": "c", "sourceKey": "B", "in": 0.0, "out": 3.0, "muted": False}]
+            before = json.dumps(pair, sort_keys=True)
+            lowered = tp(pair, {"A": [[1.0, 2.0]], "B": [[0.0, 3.0]]})
+            dropped = tp(pair[:2], {"A": [[1.0, 1.1]], "B": [[0.0, 3.0]]}, keep_head=0.0, keep_tail=0.0, min_clip=0.4)
+            expect("gs-b", [lowered["clips"], [p_.get("transition") for p_ in lowered["perClip"]], lowered["totalSeconds"],
+                            dropped["clips"][0], dropped["perClip"][0].get("transition"), json.dumps(pair, sort_keys=True) == before],
+                   [[{**pair[0], "in": 0.75, "out": 2.35, "transition": {"type": "dissolve", "seconds": 0.5}}, pair[1], pair[2]],
+                    [{"from": 1.0, "to": 0.5}, None, None], round(1.6 + 3 + 3 - 0.5 - 0.75, 3),
+                    {"id": "a", "sourceKey": "A", "in": 0.85, "out": 1.25, "muted": False, "audioTail": 0.5}, {"from": 1.0, "to": 0.0},
+                    True],
+                   "디졸브 45% 다시 보기: 1.6초가 된 클립의 1.0 → 0.5(허용 값 중 가장 큰 것) · 맞는 0.75 그대로 · 0.4초면 뺌(컷) · "
+                   "J/L(audioTail · audioLead) 그대로 · 입력 클립은 바꾸지 않음")
+
+            # ================= (gs-c) POST /edit/tighten =================
+            pid = "prj_gs_tight"
+            _edt_cut_plan(env, pid)
+            view = get(pid).get_json() or {}
+            k = {m["label"]: m["sourceKey"] for m in view["materials"]}
+            mids = {m["label"]: m["mid"] for m in view["materials"]}
+            old_film = {"v": 1, "sourceKey": k["컷 1"], "duration": 3.0, "hasAudio": True,
+                        "strip": {"key": edit.strip_key(owner, pid, "g1", mids["컷 1"]), "tiles": 3, "interval": 1.0,
+                                  "tileWidth": 128, "tileHeight": 72},
+                        "peaks": {"perSecond": 20, "values": _gs185_peaks(60, [(20, 40)])}, "createdAt": "2026-11-01T00:00:00Z"}
+            _FakeCharStore.write_json(env.store, edit.film_key(owner, pid, "g1", mids["컷 1"]), old_film)
+            films0 = len(env.films)
+            m1 = client.get(f"/api/vnew/p/{pid}/edit/media/{mids['컷 1']}").get_json() or {}
+            m3 = client.get(f"/api/vnew/p/{pid}/edit/media/{mids['컷 3']}").get_json() or {}  # 소리 없는 원본(가짜 필름을 만든다)
+            expect("gs-c", [m1.get("generated"), m1.get("soundRanges"), m3.get("generated"), m3.get("soundRanges"), len(env.films) - films0,
+                            "soundRanges" in env.store.json[edit.film_key(owner, pid, "g1", mids["컷 1"])][0]],
+                   [False, [[1.0, 2.0]], True, [], 1, False],
+                   "재료 보기 soundRanges: 옛 필름 캐시(구간 없음)는 읽을 때 피크에서 셈(만들기 0 · 다시 쓰기 0) · 소리 없는 원본 []")
+            doc_clips = [{"id": "a", "sourceKey": k["컷 1"], "in": 0, "out": 3, "label": "컷 1"},
+                         {"id": "b", "sourceKey": k["컷 2"], "in": 0, "out": 3},
+                         {"id": "c", "sourceKey": k["컷 3"], "in": 0, "out": 3},
+                         {"id": "d", "sourceKey": k["컷 1"], "in": 0, "out": 3, "muted": True}]
+            saved = put(pid, {"etag": "", "variant": "webtoon", "clips": doc_clips}).get_json() or {}
+            dkey, skey = edit.doc_key(owner, pid, "g1"), edit.export_state_key(owner, pid, "g1")
+            doc_before = json.dumps(env.store.json[dkey][0], sort_keys=True)
+            etag_before = env.store.json[dkey][1]
+            writes0, gets0, films1 = len(env.store.json_writes), len(env.store.gets), len(env.films)
+            rt = tighten(pid, {"variant": "webtoon", "clips": doc_clips})
+            dt = rt.get_json() or {}
+            want_clips = [{"id": "a", "sourceKey": k["컷 1"], "in": 0.75, "out": 2.35, "muted": False, "label": "컷 1"},
+                          {"id": "b", "sourceKey": k["컷 2"], "in": 0.0, "out": 3.0, "muted": False},
+                          {"id": "c", "sourceKey": k["컷 3"], "in": 0.0, "out": 3.0, "muted": False},
+                          {"id": "d", "sourceKey": k["컷 1"], "in": 0.0, "out": 3.0, "muted": True}]
+            expect("gs-c", [rt.status_code, dt.get("clips"), dt.get("perClip"), dt.get("savedSeconds"), dt.get("totalSeconds"),
+                            dt.get("keepHead"), dt.get("keepTail")],
+                   [200, want_clips,
+                    [{"id": "a", "savedHead": 0.75, "savedTail": 0.65, "skipped": ""},
+                     {"id": "b", "savedHead": 0.0, "savedTail": 0.0, "skipped": "noFilm"},
+                     {"id": "c", "savedHead": 0.0, "savedTail": 0.0, "skipped": "noSound"},
+                     {"id": "d", "savedHead": 0.0, "savedTail": 0.0, "skipped": "muted"}], 1.4, 10.6, 0.25, 0.35],
+                   "다듬기 제안: 소리 1~2초 클립 0.75~2.35 · 필름 없는 원본은 그대로(noFilm, 만들지 않음) · 소리 없는 원본 · 소리 끈 클립 그대로")
+            clamp = tighten(pid, {"variant": "webtoon", "clips": doc_clips[:1], "keepHead": 5, "keepTail": -1}).get_json() or {}
+            expect("gs-c", [clamp.get("keepHead"), clamp.get("keepTail"), [(c["in"], c["out"]) for c in clamp.get("clips") or []]],
+                   [1.0, 0.0, [(0.0, 2.0)]], "keepHead · keepTail 은 0~1초로 묶음(5 → 1, −1 → 0)")
+            rejects = [
+                err_of(tighten(pid, {"variant": "x", "clips": doc_clips}))[:2],
+                err_of(tighten(pid, {"variant": "webtoon", "clips": "x"}))[:2],
+                err_of(tighten(pid, {"variant": "webtoon"}))[:2],
+                err_of(tighten(pid, {"variant": "webtoon", "clips": [{**doc_clips[0], "out": 9}]}))[:2],
+                err_of(tighten(pid, {"variant": "webtoon", "clips": [{**doc_clips[0], "audioSlip": 1.5}]}))[:2],
+                err_of(tighten(pid, {"variant": "webtoon", "clips": [{**doc_clips[0], "sourceKey": "users/tester/x.mp4"}]}))[:2],
+                err_of(tighten(pid, {"variant": "webtoon", "clips": [doc_clips[0], {**doc_clips[1], "id": "a"}]}))[:2],
+                err_of(tighten(pid, {"variant": "webtoon", "clips": doc_clips, "keepHead": "0.5"})),
+                err_of(tighten(pid, {"variant": "webtoon", "clips": doc_clips, "keepTail": True}))[:2],
+                err_of(tighten(pid, {"variant": "webtoon", "clips": [doc_clips[0], {**doc_clips[1], "transition": {"type": "dissolve",
+                                                                                                                    "seconds": 2}}]}))[:2],
+            ]
+            expect("gs-c", rejects,
+                   [(400, "BadVariant"), (400, "BadClips"), (400, "BadClips"), (400, "BadClipRange"), (400, "BadClipAudioSlip"),
+                    (400, "SourceNotAllowed"), (400, "DuplicateClipId"), (400, "BadTightenKeep", "남길 여유(keepHead)는 숫자(초)여야 합니다."),
+                    (400, "BadTightenKeep"), (400, "BadTransition")],
+                   "다듬기 400: PUT 과 같은 검증(그림체 · 목록 · 구간 · 대사 타이밍 · 재료 밖 · 겹친 id · 전환) · keep 꼴")
+            env.can_write = False
+            forbidden = err_of(tighten(pid, {"variant": "webtoon", "clips": doc_clips}))[:2]
+            env.can_write = True
+            with _pin_vnew(VNEW_EDIT=False):
+                disabled = err_of(tighten(pid, {"variant": "webtoon", "clips": doc_clips}))[:2]
+            expect("gs-c", [forbidden, disabled, json.dumps(env.store.json[dkey][0], sort_keys=True) == doc_before,
+                            env.store.json[dkey][1] == etag_before, env.store.json_writes[writes0:], env.store.gets[gets0:],
+                            len(env.films) - films1, skey in env.store.json],
+                   [(403, "Forbidden"), (404, "EditDisabled"), True, True, [], [], 0, False],
+                   "쓰기 권한 없음 403 · 기능 끔 404 · 다듬기 요청 뒤 문서 · etag 그대로, 저장소 쓰기 0 · 원본 내려받기 0 · 필름 만들기 0 · 내보내기 상태 없음")
+            applied = put(pid, {"etag": saved.get("etag"), "variant": "webtoon", "clips": dt.get("clips")})
+            expect("gs-c", [applied.status_code, env.store.json[dkey][0]["clips"], (applied.get_json() or {}).get("totalSeconds")],
+                   [200, want_clips, 10.6], "제안을 그대로 PUT 하면 저장 규칙을 통과하고 그 꼴 그대로 저장(한 번에 되돌릴 수 있는 한 단계)")
+
+            # ================= (gs-d) audioSlip 검증 · 저장 =================
+            pid_d = "prj_gs_slip"
+            _edt_cut_plan(env, pid_d)
+            vd = get(pid_d).get_json() or {}
+            kd = {m["label"]: m["sourceKey"] for m in vd["materials"]}
+            expect("gs-d", sorted({key for c in vd.get("defaultClips") or [] for key in c}),
+                   ["id", "in", "label", "muted", "out", "sourceKey"], "기본 문서 클립에 audioSlip 없음")
+
+            def clip_d(cid: str, **extra) -> dict:
+                return {"id": cid, "sourceKey": kd["컷 1"], "in": 0, "out": 3, **extra}
+
+            slip_msg = "번째 클립의 대사 타이밍(audioSlip)은 -1~1초 사이 0.05초 단위여야 합니다."
+            body_d = [clip_d("a", audioSlip=-1.0), clip_d("b", audioSlip=1.0), clip_d("c", audioSlip=0.05),
+                      clip_d("d", audioSlip=-0.35, muted=True), clip_d("e", audioSlip=0), clip_d("f", audioSlip=None)]
+            rd = put(pid_d, {"etag": "", "variant": "webtoon", "clips": body_d})
+            etag_d = (rd.get_json() or {}).get("etag") or ""
+            stored_d = env.store.json[edit.doc_key(owner, pid_d, "g1")][0]["clips"]
+            base_d = {"sourceKey": kd["컷 1"], "in": 0.0, "out": 3.0, "muted": False}
+            want_d = [{"id": "a", **base_d, "audioSlip": -1.0}, {"id": "b", **base_d, "audioSlip": 1.0},
+                      {"id": "c", **base_d, "audioSlip": 0.05}, {"id": "d", **base_d, "muted": True, "audioSlip": -0.35},
+                      {"id": "e", **base_d}, {"id": "f", **base_d}]
+            vd2 = get(pid_d).get_json() or {}
+            slip_bad = [err_of(put(pid_d, {"etag": etag_d, "variant": "webtoon", "clips": [clip_d("a"), clip_d("b", audioSlip=v)]}))
+                        for v in (1.5, -1.05, 0.03, "0.5", True, [0.5], {"s": 0.5})]
+            expect("gs-d", [rd.status_code, stored_d, vd2["doc"]["clips"], slip_bad],
+                   [200, want_d, want_d, [(400, "BadClipAudioSlip", "2" + slip_msg)] * 7],
+                   "audioSlip: −1 · 1 · 0.05 · 소리 끈 클립 −0.35 저장, 0 · null 저장 안 함 · GET 그대로 · 400(1.5 · −1.05 · 0.03 단위 밖 · 글자 · bool · 목록 · 사전)")
+
+            # ================= (gs-e) 하위 호환 · 순수 함수 =================
+            c1 = {"sourceKey": "k", "in": 0.0, "out": 1.0, "muted": False}
+            c2 = {"sourceKey": "k2", "in": 0.5, "out": 2.0, "muted": True, "speed": 0.5}
+
+            def old_hash(clips_list) -> str:
+                return _hashlib.sha256(json.dumps({"variant": "webtoon", "clips": clips_list}, sort_keys=True,
+                                                  separators=(",", ":")).encode("utf-8")).hexdigest()
+
+            h = edit._doc_hash  # noqa: SLF001
+            h_old = old_hash([c1, c2])
+            expect("gs-e", [h("webtoon", [c1, c2]) == h_old, h("webtoon", [{**c1, "audioSlip": 0}, {**c2, "audioSlip": None}]) == h_old,
+                            h("webtoon", [{**c1, "audioSlip": 1.5}, c2]) == h_old, h("webtoon", [{**c1, "audioSlip": 0.5}, c2]) != h_old,
+                            h("webtoon", [c1, {**c2, "audioSlip": -0.5}]) != h_old,
+                            h("webtoon", [{**c1, "audioSlip": 0.5}, c2]) == old_hash([{**c1, "audioSlip": 0.5}, c2])],
+                   [True] * 6, "_doc_hash: audioSlip 없음 · 0 · null · 범위 밖 = 185 전 공식, 값 = 다름(소리 끈 클립도, 181 규칙) · 값은 그대로 넣음")
+            fx_slip = edit._fx_plan([{"in": 0, "out": 1}, {"in": 0, "out": 1, "audioSlip": 0.5}], [24, 24], 24)  # noqa: SLF001
+            fx_muted = edit._fx_plan([{"in": 0, "out": 1}, {"in": 0, "out": 1, "audioSlip": 0.5, "muted": True}], [24, 24], 24)  # noqa: SLF001
+            expect("gs-e", [fx_slip, fx_muted],
+                   [{"dissolve": [0, 0], "skip": [0, 0], "body": [24, 24], "start": [0, 24], "total": 48, "lead": [0, 0], "tail": [0, 0],
+                     "spf": 2000}, None],
+                   "_fx_plan: 소리 켠 클립의 audioSlip 만 있어도 소리 창 경로(배치는 181 키 그대로) · 소리 끈 클립 slip 만이면 None(181 전 경로)")
+            aw = edit._audio_window  # noqa: SLF001
+            windows = [aw(1.0, 1.0, 0, 96000, None), aw(1.0, 1.0, 0, 96000, None, slip=0.0), aw(1.0, 1.0, 0, 96000, None, slip=0.5),
+                       aw(1.0, 1.0, 0, 96000, None, slip=-0.5), aw(0.2, 1.0, 0, 96000, None, slip=0.5),
+                       aw(2.0, 2.0, 0, 96000, None, slip=0.5), aw(1.0, 1.0, 24000, 96000, None, slip=-0.5),
+                       aw(1.0, 1.0, 24000, 96000, None, slip=0.5), aw(9.9, 1.0, 0, 96000, (1.5, 4.0), slip=-1.0),
+                       aw(9.9, 1.0, 0, 96000, (0.2, 4.0), slip=0.5), aw(9.9, 1.0, 0, 96000, (3.5, 4.0), slip=-1.0)]
+            expect("gs-e", windows,
+                   [{"start_sec": 1.0, "end_sec": None, "pad_front": 0, "samples": 96000}] * 2 + [
+                       {"start_sec": 0.5, "end_sec": None, "pad_front": 0, "samples": 96000},
+                       {"start_sec": 1.5, "end_sec": None, "pad_front": 0, "samples": 96000},
+                       {"start_sec": 0.0, "end_sec": None, "pad_front": 14400, "samples": 96000},
+                       {"start_sec": 1.0, "end_sec": None, "pad_front": 0, "samples": 96000},
+                       {"start_sec": 1.0, "end_sec": None, "pad_front": 0, "samples": 96000},
+                       {"start_sec": 0.0, "end_sec": None, "pad_front": 0, "samples": 96000},
+                       {"start_sec": 2.5, "end_sec": 4.0, "pad_front": 0, "samples": 96000},
+                       {"start_sec": 0.0, "end_sec": 4.0, "pad_front": 14400, "samples": 96000},
+                       {"start_sec": 0.0, "end_sec": None, "pad_front": 96000, "samples": 96000}],
+                   "_audio_window: slip 0 = 181 그대로 · +0.5 → 원본 0.5초 앞에서 · −0.5 → 뒤에서 · 0초 앞은 무음(타임라인 샘플) · 속도 2 → 원본 1초 · "
+                   "앞당김 0.5 + slip −0.5 = in 그대로 · 앞당김 + slip 0.5 = in − 1 · 대체 소리(alt 시작 기준 · 끝 그대로 · 끝을 넘으면 창 전체 무음)")
+
+            # 옛 문서 · 소리 끈 클립 slip 문서 → 181 전 명령 그대로(181 검사의 _JL181_OLD_COMMANDS · _JL181_OLD_KWARGS 를 다시 쓴다).
+            commands: list[list[str]] = []
+            saved_fns = {name: getattr(stitchmod, name) for name in ("_run", "ffmpeg_path", "_edit_nice")}
+
+            def fake_run(command):
+                commands.append(list(command))
+                out_path = str(command[-1])
+                if out_path.endswith("edit.mp4"):
+                    with open(out_path, "wb") as handle:
+                        handle.write(_edt_fake(96 / 24, w=1280, h=720, fps=24))
+                else:
+                    for index, arg in enumerate(command):
+                        if index and command[index - 1] != "-i" and str(arg).endswith((".mp4", ".raw", ".body")):
+                            with open(arg, "wb") as handle:
+                                handle.write(b"OUT")
+                return subprocess.CompletedProcess(command, 0, stdout=b"", stderr=b"")
+
+            def short(command: list[str]) -> list[str]:
+                return [os.path.basename(a) if (os.sep in a or "/" in a) and "vnew-edit-export-" in a else a for a in command]
+
+            def run_fake(pid_x: str, etag_x: str) -> list[list[str]]:
+                commands.clear()
+                try:
+                    stitchmod._run = fake_run  # noqa: SLF001
+                    stitchmod.ffmpeg_path = lambda: "/fake/ffmpeg"
+                    stitchmod._edit_nice = lambda: []  # noqa: SLF001
+                    env.real, env.inline = True, True
+                    post(pid_x, {"etag": etag_x})
+                finally:
+                    env.real, env.inline = False, False
+                    for name, value in saved_fns.items():
+                        setattr(stitchmod, name, value)
+                return [short(c) for c in commands]
+
+            pid_o = "prj_gs_old"
+            _edt_cut_plan(env, pid_o)
+            ko = {m["label"]: m["sourceKey"] for m in (get(pid_o).get_json() or {})["materials"]}
+            old_clips = [{"id": "c1", "sourceKey": ko["컷 1"], "in": 0.0, "out": 3.0, "muted": False, "label": "컷 1"},
+                         {"id": "c2", "sourceKey": ko["컷 2"], "in": 0.5, "out": 1.5, "muted": True}]
+            _FakeCharStore.write_json(env.store, edit.doc_key(owner, pid_o, "g1"),
+                                      {"version": 3, "variant": "webtoon", "updatedAt": "2026-11-01T00:00:00Z", "audio": [], "clips": old_clips})
+            vo = get(pid_o).get_json() or {}
+            new_calls: list[str] = []
+            for name in ("_export_dissolve", "_export_audio", "_export_mix"):
+                env.set(edit, name, (lambda tag: (lambda *a, **kw: new_calls.append(tag)))(name))
+            env.segments.clear()
+            env.inline = True
+            post(pid_o, {"etag": vo.get("etag")})
+            env.inline = False
+            done_o = env.export_state(pid_o).get("current") or {}
+            kw_keys = ("start_sec", "frames", "fps", "width", "height", "audio_out", "audio_from_source", "speed")
+            got_kwargs = [{key: (os.path.basename(s[key]) if key == "audio_out" else s[key]) for key in kw_keys} for s in env.segments]
+            cmd_old = run_fake(pid_o, vo.get("etag"))
+            muted_slip = [dict(old_clips[0], audioSlip=0), dict(old_clips[1], audioSlip=0.5)]
+            ro = put(pid_o, {"etag": vo.get("etag"), "variant": "webtoon", "clips": muted_slip}).get_json() or {}
+            stored_o = env.store.json[edit.doc_key(owner, pid_o, "g1")][0]["clips"]
+            cmd_muted = run_fake(pid_o, ro.get("etag"))
+            want_old_hash = old_hash([{"sourceKey": ko["컷 1"], "in": 0.0, "out": 3.0, "muted": False},
+                                      {"sourceKey": ko["컷 2"], "in": 0.5, "out": 1.5, "muted": True}])
+            expect("gs-e", [done_o.get("status"), done_o.get("docHash") == want_old_hash, got_kwargs, cmd_old, [c.get("audioSlip") for c in stored_o],
+                            cmd_muted, new_calls],
+                   ["done", True, _JL181_OLD_KWARGS, _JL181_OLD_COMMANDS, [None, 0.5], _JL181_OLD_COMMANDS, []],
+                   "옛 문서: docHash = 185 전 공식 · _export_segment 인자 · 실제 stitcher 명령이 181 전 그대로 · 소리 끈 클립에만 slip 이 있는 문서도 "
+                   "같은 명령(slip 0 은 저장 안 함, 소리 끈 클립 0.5 는 그대로 저장) · 새 래퍼 호출 0")
+            for name, fn in orig_new.items():
+                env.set(edit, name, fn)
+            slip_clips = [dict(old_clips[0], audioSlip=0.5), dict(old_clips[1], muted=False)]
+            rs = put(pid_o, {"etag": ro.get("etag"), "variant": "webtoon", "clips": slip_clips}).get_json() or {}
+            cmd_slip = run_fake(pid_o, rs.get("etag"))
+            video_old = [c[:c.index("-pix_fmt") + 3] for c in _JL181_OLD_COMMANDS[:2]]
+            vids = [c for c in cmd_slip if "-vf" in c]
+            afs = [(c[c.index("-af") + 1], c[c.index("-t") + 1], c[-1]) for c in cmd_slip if "-af" in c]
+            expect("gs-e", [(env.export_state(pid_o).get("current") or {}).get("status"), vids, afs],
+                   ["done", video_old,
+                    [("atrim=start=0.000,asetpts=PTS-STARTPTS", "2.500000", "aud-000.raw.body"),
+                     ("atrim=start=0.479,asetpts=PTS-STARTPTS", "1.000000", "aud-001.raw.body")]],
+                   "slip 문서 명령: 영상 명령은 옛 문서와 글자 그대로(화면 그대로) · 클립 1 소리 창은 원본 0초 앞 0.5초를 무음으로 채우고 2.5초만 읽음 · "
+                   "클립 2(slip 없음)는 181 소리 창 그대로")
+
+            # ================= (gs-a · gs-f · gs-g) 로컬 ffmpeg 실측 =================
+            try:
+                ffmpeg = stitchmod.ffmpeg_path()
+            except stitchmod.StitchError:
+                ffmpeg = ""
+            if not ffmpeg:
+                warn("(gs) 로컬 ffmpeg 가 없어 소리 구간 · 대사 타이밍 실측을 건너뜁니다(순수 · 가짜 ffmpeg 검사는 했습니다).")
+            else:
+                ffmpeg_found = True
+                hdir = tempfile.mkdtemp(prefix="gs-f-")
+                try:
+                    def make(name: str, audio_src: str, seconds: float) -> str:
+                        path = os.path.join(hdir, f"{name}.mp4")
+                        result = subprocess.run([ffmpeg, "-y", "-hide_banner", "-loglevel", "error", "-f", "lavfi", "-i",
+                                                 "testsrc=size=320x180:rate=24", "-f", "lavfi", "-i", audio_src, "-t", f"{seconds:g}",
+                                                 "-c:v", "libx264", "-pix_fmt", "yuv420p", "-c:a", "aac", "-ac", "1", path],
+                                                capture_output=True)
+                        if result.returncode != 0:
+                            raise RuntimeError(result.stderr.decode("utf-8", "replace")[:300])
+                        return path
+
+                    bursts = "0.5*sin(2*PI*440*t)*(between(t,1,2)+between(t,3,4.5))"
+                    sources = {
+                        "bursts": make("bursts", f"aevalsrc='{bursts}':s=48000:d=6", 6),
+                        "bursts_noise": make("bursts_noise", f"aevalsrc='{bursts}+0.02*(random(0)*2-1)':s=48000:d=6", 6),
+                        "silence": make("silence", "aevalsrc='0':s=48000:d=6", 6),
+                        "noise": make("noise", "anoisesrc=a=0.04:c=white:d=6:r=48000", 6),
+                    }
+                    found = {}
+                    for name, path in sources.items():
+                        found[name] = edit.sound_ranges(stitchmod.audio_peaks(path, hdir, per_second=edit.PEAKS_PER_SECOND, threads=1))
+
+                    def near(got, want) -> bool:
+                        return len(got) == len(want) and all(abs(a - c) <= 0.1 + 1e-9 and abs(b - d) <= 0.1 + 1e-9
+                                                             for (a, b), (c, d) in zip(got, want))
+
+                    expect("gs-a", [near(found["bursts"], [[1.0, 2.0], [3.0, 4.5]]), near(found["bursts_noise"], [[1.0, 2.0], [3.0, 4.5]]),
+                                    found["silence"], found["noise"]],
+                           [True, True, [], []],
+                           f"실측 소리 구간(로컬 ffmpeg 피크): 사인 1~2 · 3~4.5초 ±0.1(잡음 0.02 섞여도) · 무음 [] · 0.04 잡음만 [] — {found}")
+                    report.append(f"gs-a 실측 구간: {json.dumps(found, ensure_ascii=False)}")
+
+                    tone = make("tone", "aevalsrc='0.5*sin(2*PI*440*t)*between(t,1,2)':s=48000:d=4", 4)
+                    quiet = make("quiet", "aevalsrc='0':s=48000:d=4", 4)
+                    with open(tone, "rb") as handle:
+                        tone_b = handle.read()
+                    with open(quiet, "rb") as handle:
+                        quiet_b = handle.read()
+                    pid_h = "prj_gs_real"
+                    _edt_cut_plan(env, pid_h, blobs={_edt_key(pid_h, "c1-webtoon-1"): tone_b, _edt_key(pid_h, "c2-webtoon-1"): quiet_b,
+                                                     _edt_key(pid_h, "c3-webtoon-1"): quiet_b})
+                    env.real, env.inline = True, True
+                    pcm_sizes: list[int] = []
+                    prev_join = edit._export_join  # noqa: SLF001
+
+                    def record_join(segments_in, output_path, *, audio_path):
+                        pcm_sizes.append(os.path.getsize(audio_path) if audio_path else -1)
+                        return prev_join(segments_in, output_path, audio_path=audio_path)
+
+                    env.set(edit, "_export_join", record_join)
+                    vh = get(pid_h).get_json() or {}
+                    hk = {m["label"]: m["sourceKey"] for m in vh["materials"]}
+                    hm = {m["label"]: m["mid"] for m in vh["materials"]}
+
+                    # (gs-g) 실제 필름(로컬 ffmpeg 피크) → soundRanges · 그 필름으로 제안
+                    film_h = client.get(f"/api/vnew/p/{pid_h}/edit/media/{hm['컷 1']}").get_json() or {}
+                    tight_h = tighten(pid_h, {"variant": "webtoon", "clips": [{"id": "a", "sourceKey": hk["컷 1"], "in": 0, "out": 4}]}
+                                      ).get_json() or {}
+                    expect("gs-g", [film_h.get("generated"), near(film_h.get("soundRanges") or [], [[1.0, 2.0]]),
+                                    [(c["in"], c["out"]) for c in tight_h.get("clips") or []]],
+                           [True, True, [(0.75, 2.35)]],
+                           f"실제 필름: 재료 보기 soundRanges {film_h.get('soundRanges')} · 제안 0~4 → 0.75~2.35(앞 1.0 · 뒤 2.0초 빈 클립)")
+
+                    cases = [
+                        ("base", [{"id": "a", "sourceKey": hk["컷 1"], "in": 0, "out": 4}]),
+                        ("slip", [{"id": "a", "sourceKey": hk["컷 1"], "in": 0, "out": 4, "audioSlip": 0.5}]),
+                        ("J", [{"id": "a", "sourceKey": hk["컷 2"], "in": 0, "out": 2},
+                               {"id": "b", "sourceKey": hk["컷 1"], "in": 1.0, "out": 3.0, "audioLead": 0.5}]),
+                        ("J+slip", [{"id": "a", "sourceKey": hk["컷 2"], "in": 0, "out": 2},
+                                    {"id": "b", "sourceKey": hk["컷 1"], "in": 1.0, "out": 3.0, "audioLead": 0.5, "audioSlip": -0.5}]),
+                    ]
+                    etag_h = ""
+                    measured = {}
+                    for n, (name, clips_h) in enumerate(cases, 1):
+                        data_h = put(pid_h, {"etag": etag_h, "variant": "webtoon", "clips": clips_h}).get_json() or {}
+                        etag_h = data_h.get("etag") or ""
+                        post(pid_h, {"etag": etag_h})
+                        current_h = env.export_state(pid_h).get("current") or {}
+                        out_path = os.path.join(hdir, f"out-{n}.mp4")
+                        with open(out_path, "wb") as handle:
+                            handle.write(env.store.blobs.get(edit.export_key(owner, pid_h, "g1", n), b""))
+                        rgb = subprocess.run([ffmpeg, "-hide_banner", "-loglevel", "error", "-i", out_path, "-map", "0:v:0", "-vf",
+                                              "scale=16:9", "-f", "rawvideo", "-pix_fmt", "rgb24", "-"], capture_output=True).stdout
+                        pcm = subprocess.run([ffmpeg, "-hide_banner", "-loglevel", "error", "-i", out_path, "-map", "0:a:0", "-ac", "1",
+                                              "-ar", "48000", "-f", "s16le", "-"], capture_output=True).stdout
+                        mono = _array.array("h")
+                        mono.frombytes(pcm[:len(pcm) // 2 * 2])
+                        if sys.byteorder == "big":
+                            mono.byteswap()
+                        amp = (lambda m: (lambda t0, t1: _jl181_tone(m, 48000, t0, t1, 440)))(mono)
+                        measured[name] = {"status": current_h.get("status"), "error": current_h.get("error"),
+                                          "frames": len(rgb) // (16 * 9 * 3), "pcm": pcm_sizes[-1] if len(pcm_sizes) == n else None,
+                                          "onset": _gs185_onset(mono), "amp": amp}
+                    base_m, slip_m = measured["base"], measured["slip"]
+                    ref = max(base_m["amp"](1.2, 1.8), 1.0)
+                    summary = {name: {k_: v for k_, v in m.items() if k_ != "amp"} for name, m in measured.items()}
+                    expect("gs-f", [[m["status"] for m in measured.values()], [m["frames"] for m in measured.values()],
+                                    [m["pcm"] for m in measured.values()]],
+                           [["done"] * 4, [96] * 4, [96 * 2000 * 4] * 4],
+                           f"실측 내보내기 4개 done · 영상 96프레임(4초 × 24, slip 이 화면을 바꾸지 않음) · PCM = 96 × 2000샘플 × 4바이트 정확 {summary}")
+                    shift = [round(slip_m["onset"][0] - base_m["onset"][0], 3), round(slip_m["onset"][1] - base_m["onset"][1], 3)]
+                    expect("gs-f", [abs(shift[0] - 0.5) <= 0.02 + 1e-9, abs(shift[1] - 0.5) <= 0.02 + 1e-9,
+                                    abs(base_m["onset"][0] - 1.0) <= 0.04, abs(slip_m["onset"][0] - 1.5) <= 0.04,
+                                    slip_m["amp"](1.05, 1.45) / ref < 0.02, slip_m["amp"](2.55, 3.9) / ref < 0.02],
+                           [True] * 6,
+                           f"slip +0.5: 소리 시작 {base_m['onset']} → {slip_m['onset']}(늦어짐 {shift}, 기대 0.5 ±20ms) · 1.05~1.45 · 2.55~3.9 에 소리 없음")
+                    j_m, js_m = measured["J"], measured["J+slip"]
+                    levels = {"J": [round(j_m["amp"](a, b) / ref, 3) for a, b in ((1.55, 1.95), (2.05, 2.45), (2.55, 2.95), (3.05, 3.9))],
+                              "J+slip": [round(js_m["amp"](a, b) / ref, 3) for a, b in ((1.0, 1.45), (1.55, 1.95), (2.05, 2.45),
+                                                                                         (2.55, 2.95), (3.05, 3.9))]}
+                    expect("gs-f", [levels["J"][0] < 0.02, levels["J"][1] > 0.8, levels["J"][2] > 0.8, levels["J"][3] < 0.02,
+                                    levels["J+slip"][0] < 0.02, levels["J+slip"][1] > 0.1, levels["J+slip"][2] > 0.8,
+                                    levels["J+slip"][3] < 0.02, levels["J+slip"][4] < 0.02],
+                           [True] * 9,
+                           "J 컷 0.5 + slip −0.5: 창 = 원본 in − 0.5 + 0.5 = in(1.0, 소리 시작) → 소리가 클립 1 화면 마지막 0.5초(1.5~2.0)에 들어오고 "
+                           f"2.5초에 끝남 · J 컷만이면 앞당김 창은 원본 0.5~1.0(무음)이고 소리는 2.0~3.0 {levels}")
+                    report.append("gs-f 실측: " + json.dumps({**summary, "levels": levels, "shift": shift}, ensure_ascii=False))
+                finally:
+                    env.real, env.inline = False, False
+                    shutil.rmtree(hdir, ignore_errors=True)
+    except Exception as exc:  # noqa: BLE001
+        bad.append("(gs) 예외: " + repr(exc) + "\n" + _tb.format_exc()[:2000])
+
+    expected_groups = {"gs-a", "gs-b", "gs-c", "gs-d", "gs-e"} | ({"gs-f", "gs-g"} if ffmpeg_found else set())
+    missing = sorted(expected_groups - seen)
+    if missing:
+        bad.append(f"돌지 않은 묶음: {missing}")
+    if bad:
+        fail("작업 185 ⑦ 편집 빈틈 다듬기 · 대사 타이밍(gs) 검사 실패\n" + "\n".join(f"  {item}" for item in bad))
+    else:
+        ok("작업 185 ⑦ 편집 빈틈 다듬기 · 대사 타이밍 검사 (gs-a)소리 구간 순수 · 실측 (gs-b)다듬기 제안 순수 (gs-c)/edit/tighten 저장 안 함 · "
+           "400 · 권한 (gs-d)audioSlip 검증 (gs-e)해시 · 옛 문서 명령 · 소리 창 (gs-f)slip · J 컷 실측 (gs-g)실제 필름 구간"
+           + "".join(f"\n       {r}" for r in report))
+
+
+
 # ---------------------------------------------------------------- 작업 187 — 상단 경로에 지금 프로젝트 이름(tp-a~e)
 def _tp_fn(src: str, name: str) -> str:
     """app.js 에서 맨 앞 `function name(` 본문(다음 `}` 만 있는 줄까지). 없거나 두 번 있으면 ""."""
@@ -60933,6 +61467,7 @@ def main() -> int:
     check_vnew_edit_jl_ui_182()
     check_vnew_insert_sleeve_183()
     check_vnew_closeup_garment_184()
+    check_vnew_edit_gap_slip_185()
     check_topbar_project_187()
     print()
     if warnings:

@@ -23,6 +23,8 @@ _spawn_export(작업 181: · _export_dissolve · _export_audio · _export_mix). 
 지시서 116 보완 10: 소리 없는 버전은 그 칸 v1 의 같은 녹화 시각 소리를 쓴다(_audio_sources — 재료 audioFrom·내보내기 audio_source).
 작업 181: 클립 audioLead(J 컷)·audioTail(L 컷)·transition(다음 클립으로 디졸브). 셋 다 없는 문서는 181 전과 같은 해시·같은 내보내기 명령이다.
 쓰는 문서의 내보내기는 _fx_plan(프레임·샘플 배치) → 몸통 조각 + 디졸브 경계 조각 잇기, 소리는 클립별 창을 타임라인에서 섞는다.
+작업 185: 클립 audioSlip(대사 타이밍 — 소리 창을 원본에서 옮겨 읽는다, 넷 다 없으면 181 전 경로)과 빈틈 다듬기(sound_ranges — 재료 보기의
+soundRanges, tighten_proposal·tighten_view — POST /edit/tighten 제안, 저장하지 않는다).
 """
 
 from __future__ import annotations
@@ -83,6 +85,24 @@ AUDIO_SHIFT_STEP_S = 0.05
 DISSOLVE_SECONDS = (0.25, 0.5, 0.75, 1.0)
 DISSOLVE_MAX_SHARE = 0.45
 OFFSCREEN_GAIN = 0.6
+# 작업 185: 대사 타이밍(audioSlip) — 클립 소리만 화면 안에서 앞뒤로 민다(타임라인 초, −1~1, 0.05 단위, 양수 = 소리가 늦게).
+AUDIO_SLIP_MAX_S = 1.0
+# 작업 185: 소리 구간(빈틈 다듬기). 파형 피크(1초 PEAKS_PER_SECOND 개, 0~1)에서 또렷한 소리(주로 대사) 구간을 찾는다.
+# 한 칸이 소리 = 피크 ≥ max(SOUND_MIN_PEAK, 잡음 바닥 × SOUND_FLOOR_RATIO, 가장 큰 피크 × SOUND_MAX_RATIO). 잡음 바닥은 피크의 아래
+# SOUND_FLOOR_PERCENTILE 값이다. 검사(185 gs-a) 합성 소리로 맞췄다: 0.04 백색 잡음(피크 ≈ 0.04)은 SOUND_MIN_PEAK 아래, 늘 깔린 0.1 잡음은
+# 바닥 × 3 아래, 0.5 소리 끝의 AAC 번짐(피크의 수 %)은 최대 × 0.12 아래라 구간이 소리 시작·끝 칸에서 끊긴다.
+SOUND_FLOOR_PERCENTILE = 0.20
+SOUND_MIN_PEAK = 0.06
+SOUND_FLOOR_RATIO = 3.0
+SOUND_MAX_RATIO = 0.12
+SOUND_MERGE_GAP_S = 0.35  # 이보다 짧은 쉼(말 사이 숨)은 한 구간으로 잇는다
+SOUND_MIN_RANGE_S = 0.15  # 이은 뒤 이보다 짧은 구간(딸깍·숨소리)은 버린다
+SOUND_ROUND_S = 0.05  # 구간 경계 반올림(피크 한 칸)
+# 작업 185: 빈틈 다듬기 제안(tighten_proposal) 기본값. 남길 여유(소리 앞·뒤)와 최소 클립 길이는 타임라인 초다. 요청 값은 0~1초로 묶는다.
+TIGHTEN_KEEP_HEAD_S = 0.25
+TIGHTEN_KEEP_TAIL_S = 0.35
+TIGHTEN_MIN_CLIP_S = 1.0
+TIGHTEN_KEEP_MAX_S = 1.0
 # 재료가 없을 때 gen_view 요약의 잠김 이유(지시서 115, 화면 ⑦ 칩의 title·안내). 키는 _lock_reason 이 고른다.
 LOCK_REASONS = {
     "none": "⑤에서 영상을 먼저 만들면 편집할 수 있습니다.",
@@ -421,6 +441,12 @@ def _shift_of(clip, key: str) -> float:
     """작업 181: 클립의 소리 앞당김(audioLead)·이어 감(audioTail) 초. 없거나 범위(0~2) 밖이면 0."""
     value = _num(clip.get(key)) if isinstance(clip, dict) else None
     return value if value is not None and 0 < value <= AUDIO_SHIFT_MAX_S + 1e-9 else 0.0
+
+
+def _slip_of(clip) -> float:
+    """작업 185: 클립의 대사 타이밍(audioSlip) 초. 없거나 범위(−1~1) 밖이면 0."""
+    value = _num(clip.get("audioSlip")) if isinstance(clip, dict) else None
+    return value if value is not None and abs(value) <= AUDIO_SLIP_MAX_S + 1e-9 else 0.0
 
 
 def _dissolve_of(clip) -> float:
@@ -978,6 +1004,7 @@ def _clean_clips(raw, allowed: set[str], durations: dict[str, float | None], whe
     - 작업 181: audioLead·audioTail(0~2초, 0.05초 단위, 0·null 은 저장 안 함 — _clean_shift), transition(컷이면 저장 안 함, 디졸브는
       {"type": "dissolve", "seconds": 0.25·0.5·0.75·1} — _clean_transition)과 자리 규칙(_check_overlaps). 틀리면 400
       BadClipAudioLead·BadClipAudioTail·BadTransition. 소리 끈 클립의 앞당김·이어 감은 받은 그대로 저장한다(내보내기가 무시한다).
+    - 작업 185: audioSlip(−1~1초, 0.05초 단위, 0·null 은 저장 안 함 — _clean_slip). 틀리면 400 BadClipAudioSlip. 소리 끈 클립도 그대로 저장.
     - 전체 길이(타임라인 길이 합 − 디졸브 합) ≤ MAX_TOTAL_S.
     """
     raw = _check_clip_list(raw, where)
@@ -1026,6 +1053,9 @@ def _clean_clips(raw, allowed: set[str], durations: dict[str, float | None], whe
             shift = _clean_shift(clip.get(key), number, where, code, name)
             if shift:
                 item[key] = shift
+        slip = _clean_slip(clip.get("audioSlip"), number, where)  # 작업 185: 0·null 은 저장 안 함, 소리 끈 클립도 받은 그대로
+        if slip:
+            item["audioSlip"] = slip
         dissolve = _clean_transition(clip.get("transition"), number, where)
         if dissolve:
             item["transition"] = {"type": "dissolve", "seconds": dissolve}
@@ -1052,6 +1082,19 @@ def _clean_shift(raw, number: int, where: str, code: str, name: str) -> float:
     if value is None or value < 0 or value > AUDIO_SHIFT_MAX_S + 1e-9 or abs(steps - round(steps)) > 1e-6:
         raise VpocError(where, code, f"{number}번째 클립의 {name} 0~{AUDIO_SHIFT_MAX_S:g}초 사이 {AUDIO_SHIFT_STEP_S:g}초 단위여야 합니다.", 400)
     return round(round(steps) * AUDIO_SHIFT_STEP_S, 2)
+
+
+def _clean_slip(raw, number: int, where: str) -> float:
+    """작업 185: audioSlip 한 값. 없거나 null 이면 0, 있으면 −1~1초 0.05초 단위 JSON 숫자(양수 = 소리가 화면보다 늦게)."""
+    if raw is None:
+        return 0.0
+    value = _num(raw)
+    steps = value / AUDIO_SHIFT_STEP_S if value is not None else 0.0
+    if value is None or abs(value) > AUDIO_SLIP_MAX_S + 1e-9 or abs(steps - round(steps)) > 1e-6:
+        raise VpocError(where, "BadClipAudioSlip",
+                        f"{number}번째 클립의 대사 타이밍(audioSlip)은 -{AUDIO_SLIP_MAX_S:g}~{AUDIO_SLIP_MAX_S:g}초 사이 "
+                        f"{AUDIO_SHIFT_STEP_S:g}초 단위여야 합니다.", 400)
+    return round(round(steps) * AUDIO_SHIFT_STEP_S, 2) or 0.0
 
 
 def _clean_transition(raw, number: int, where: str) -> float:
@@ -1091,6 +1134,7 @@ def _doc_hash(variant: str, clips: list[dict]) -> str:
 
     속도는 1 이 아닐 때만 넣는다(지시서 115 — 속도를 안 쓴 문서·진행 중 내보내기의 해시가 115 전과 같다).
     작업 181: audioLead·audioTail·transition(디졸브)도 기본값(0·컷)이 아닐 때만 넣는다(181 전 문서의 해시 그대로).
+    작업 185: audioSlip 도 0 이 아닐 때만 넣는다.
     """
     body = []
     for c in clips:
@@ -1101,6 +1145,8 @@ def _doc_hash(variant: str, clips: list[dict]) -> str:
         for key in ("audioLead", "audioTail"):
             if _shift_of(c, key):
                 item[key] = _shift_of(c, key)
+        if _slip_of(c):  # 작업 185: 0 이 아닐 때만(185 전 문서의 해시 그대로)
+            item["audioSlip"] = _slip_of(c)
         if _dissolve_of(c):
             item["transition"] = {"type": "dissolve", "seconds": _dissolve_of(c)}
         body.append(item)
@@ -1325,6 +1371,19 @@ def _retake_reconcile(owner: str, pid: str, gen_id: str, retakes: dict) -> dict:
         return retakes
 
 
+def _validated_clips(owner: str, pid: str, variant: str, raw: list, where: str) -> tuple[dict, str, list[dict]]:
+    """저장(PUT)과 빈틈 다듬기(작업 185)가 함께 쓰는 클립 검증. 반환 (gen, gen_id, 정리된 클립).
+
+    그 그림체 재료(다시 만든 버전 포함)만 허용하고, 쓰인 원본 길이를 재(캐시 먼저) _clean_clips 규칙으로 검사한다. 틀리면 400·409.
+    """
+    _plan, gen, gen_id = _load_gen(owner, pid)
+    allowed = {m["sourceKey"] for m in _all_items(gen, variant, _retake_state(owner, pid, gen_id))}
+    referenced = [c.get("sourceKey") for c in raw if isinstance(c, dict) and c.get("sourceKey") in allowed]
+    meta, _ = _ensure_meta(owner, pid, gen_id, referenced)
+    durations = {key: (meta.get(key) or {}).get("duration") for key in allowed}
+    return gen, gen_id, _clean_clips(raw, allowed, durations, where)
+
+
 def save_doc(owner: str, pid: str, payload) -> dict:
     """PUT /p/<pid>/edit. 바디 {etag | version, variant, clips, audio?}. 반환 {doc, etag, saved, totalSeconds}.
 
@@ -1349,12 +1408,7 @@ def save_doc(owner: str, pid: str, payload) -> dict:
     if audio:
         raise VpocError(where, "AudioTrackUnsupported", "사운드 트랙은 아직 넣을 수 없습니다(⑥ 사운드 결과가 없습니다).", 400)
     raw = _check_clip_list(payload.get("clips"), where)
-    plan, gen, gen_id = _load_gen(owner, pid)
-    allowed = {m["sourceKey"] for m in _all_items(gen, variant, _retake_state(owner, pid, gen_id))}
-    referenced = [c.get("sourceKey") for c in raw if isinstance(c, dict) and c.get("sourceKey") in allowed]
-    meta, _ = _ensure_meta(owner, pid, gen_id, referenced)
-    durations = {key: (meta.get(key) or {}).get("duration") for key in allowed}
-    clips = _clean_clips(raw, allowed, durations, where)
+    _gen, gen_id, clips = _validated_clips(owner, pid, variant, raw, where)
     key = doc_key(owner, pid, gen_id)
     current, current_etag = _read_json(key)
     current_version = _doc_version(current)
@@ -1455,8 +1509,183 @@ def media_view(owner: str, pid: str, mid: str) -> dict:
             "tileHeight": strip.get("tileHeight"),
         },
         "peaks": {"perSecond": data["peaks"].get("perSecond"), "values": data["peaks"]["values"]},
+        # 작업 185: 소리 구간(빈틈 다듬기). 저장하지 않고 읽을 때마다 피크에서 센다(옛 필름 캐시도 그대로 된다, ffmpeg 0).
+        "soundRanges": _film_ranges(data),
         "generated": generated,
     }
+
+
+# ================================================================ 작업 185: 빈틈 다듬기(소리 구간 · 제안)
+
+
+def sound_ranges(peaks, per_second: int = PEAKS_PER_SECOND) -> list[list[float]]:
+    """파형 피크(1초 per_second 개, 0~1) → 또렷한 소리 구간 [[시작, 끝], …](원본 초, SOUND_ROUND_S 반올림). 순수 함수.
+
+    칸 i 는 [i/per_second, (i+1)/per_second). 소리 칸 = 피크 ≥ max(SOUND_MIN_PEAK, 바닥 × SOUND_FLOOR_RATIO, 최대 × SOUND_MAX_RATIO)
+    (바닥 = 아래 SOUND_FLOOR_PERCENTILE 값). 이어진 소리 칸을 구간으로, SOUND_MERGE_GAP_S 보다 짧은 쉼은 잇고, 이은 뒤
+    SOUND_MIN_RANGE_S 보다 짧은 구간은 버린다. 피크가 없거나·꼴이 틀리거나·문턱을 넘는 칸이 없으면 [].
+    """
+    if not isinstance(per_second, int) or isinstance(per_second, bool) or per_second < 1 or not isinstance(peaks, list):
+        return []
+    values = []
+    for peak in peaks:
+        value = _num(peak)
+        values.append(max(0.0, min(1.0, value)) if value is not None else 0.0)
+    if not values:
+        return []
+    ordered = sorted(values)
+    floor = ordered[min(len(ordered) - 1, int(len(ordered) * SOUND_FLOOR_PERCENTILE))]
+    loudest = ordered[-1]
+    threshold = max(SOUND_MIN_PEAK, floor * SOUND_FLOOR_RATIO, loudest * SOUND_MAX_RATIO)
+    if loudest < threshold:
+        return []
+    runs: list[list[int]] = []  # [첫 칸, 끝 칸 + 1]
+    for index, value in enumerate(values):
+        if value < threshold:
+            continue
+        if runs and index - runs[-1][1] < SOUND_MERGE_GAP_S * per_second - 1e-9:
+            runs[-1][1] = index + 1
+        else:
+            runs.append([index, index + 1])
+    step = SOUND_ROUND_S
+    out: list[list[float]] = []
+    for first, last in runs:
+        if (last - first) / per_second < SOUND_MIN_RANGE_S - 1e-9:
+            continue
+        start = round(round(first / per_second / step) * step, 2)
+        end = round(round(last / per_second / step) * step, 2)
+        if end > start:
+            out.append([start, end])
+    return out
+
+
+def _film_ranges(data: dict | None) -> list[list[float]]:
+    """작업 185: 필름 캐시(_make_film 저장본) 하나의 소리 구간. 소리 없는 원본·피크 없음이면 []."""
+    if not isinstance(data, dict) or not data.get("hasAudio"):
+        return []
+    peaks = data.get("peaks") if isinstance(data.get("peaks"), dict) else {}
+    rate = peaks.get("perSecond")
+    return sound_ranges(peaks.get("values"), rate if isinstance(rate, int) and not isinstance(rate, bool) else PEAKS_PER_SECOND)
+
+
+def _fit_dissolve(seconds: float, first: dict, second: dict) -> float:
+    """작업 185: 디졸브 초를 두 클립(속도 반영) 중 짧은 쪽의 45% 안으로 내린다(허용 값 중 가장 큰 것, 없으면 0 = 컷)."""
+    limit = DISSOLVE_MAX_SHARE * min(_clip_seconds(first), _clip_seconds(second)) + 1e-9
+    if seconds <= limit:
+        return seconds
+    return max((d for d in DISSOLVE_SECONDS if d <= limit), default=0.0)
+
+
+def tighten_proposal(clips: list[dict], ranges_by_media: dict, *, keep_head: float = TIGHTEN_KEEP_HEAD_S,
+                     keep_tail: float = TIGHTEN_KEEP_TAIL_S, min_clip: float = TIGHTEN_MIN_CLIP_S) -> dict:
+    """작업 185: 클립마다 소리 구간 밖의 앞뒤 빈 시간을 줄인 in·out 제안(순수 함수, 저장하지 않는다).
+
+    clips 는 정리된 클립(_clean_clips 꼴), ranges_by_media 는 {sourceKey: 소리 구간 목록(sound_ranges)}. 키가 없으면 그 원본의 필름이
+    아직 없다는 뜻이다(그 클립은 그대로, skipped "noFilm"). 클립마다(화면 원본 [in, out] 과 겹치는 소리 구간만 본다):
+      새 in = max(in, 첫 소리 시작 − keep_head × 속도), 새 out = min(out, 마지막 소리 끝 + keep_tail × 속도). 늘리지 않는다.
+      타임라인 길이(속도 반영)가 min_clip 보다 짧아지면 앞뒤를 같은 만큼 덜 줄인다(한쪽이 0 이면 남은 만큼 다른 쪽). 이미 min_clip
+      보다 짧은 클립은 그대로("short").
+      대사 타이밍(audioSlip)이 있으면 화면에서 들리는 자리(원본 + slip × 속도)로 소리 구간을 옮겨 본다.
+      소리 끈 클립("muted")·안에 소리가 없는 클립("noSound" — 그림만 넣은 컷일 수 있다)은 그대로.
+    줄인 뒤 디졸브는 45% 규칙을 다시 보고 넘으면 허용 값 중 가장 큰 것으로 내리거나 뺀다(perClip transition {from, to}).
+    앞당김·이어 감(J/L)은 클립 길이에 묶이지 않으므로 그대로 둔다.
+    반환 {clips(새 사본), savedSeconds(줄인 타임라인 초 합), totalSeconds(줄인 뒤 길이), perClip [{id, savedHead, savedTail, skipped}]}.
+    """
+    out_clips: list[dict] = []
+    per_clip: list[dict] = []
+    for clip in clips:
+        item = copy.deepcopy(clip)
+        out_clips.append(item)
+        info = {"id": clip.get("id"), "savedHead": 0.0, "savedTail": 0.0, "skipped": ""}
+        per_clip.append(info)
+        speed = _speed_of(clip)
+        cur_in, cur_out = float(clip["in"]), float(clip["out"])
+        if clip.get("muted"):
+            info["skipped"] = "muted"
+            continue
+        ranges = ranges_by_media.get(clip.get("sourceKey"))
+        if ranges is None:
+            info["skipped"] = "noFilm"
+            continue
+        shift = _slip_of(clip) * speed  # 들리는 자리 = 원본 소리 + slip × 속도
+        inside = [(float(a) + shift, float(b) + shift) for a, b in ranges
+                  if float(b) + shift > cur_in + _TIME_EPS and float(a) + shift < cur_out - _TIME_EPS]
+        if not inside:
+            info["skipped"] = "noSound"
+            continue
+        new_in = max(cur_in, inside[0][0] - keep_head * speed)
+        new_out = min(cur_out, inside[-1][1] + keep_tail * speed)
+        head, tail = max(0.0, new_in - cur_in), max(0.0, cur_out - new_out)
+        allowed = (cur_out - cur_in) - min_clip * speed  # 줄일 수 있는 원본 초
+        if allowed <= _TIME_EPS:
+            info["skipped"] = "short" if head + tail > _TIME_EPS else ""
+            continue
+        if head + tail > allowed:
+            give = (head + tail - allowed) / 2  # 앞뒤를 같은 만큼 덜 줄인다
+            head, tail = head - give, tail - give
+            if head < 0:
+                head, tail = 0.0, tail + head
+            if tail < 0:
+                head, tail = head + tail, 0.0
+        # 밀리초로 내림(덜 줄이는 쪽) — 반올림이 min_clip 아래로 내려가지 않게.
+        head, tail = math.floor(head * 1000 + 1e-6) / 1000, math.floor(tail * 1000 + 1e-6) / 1000
+        item["in"] = round(cur_in + head, 3)
+        item["out"] = round(cur_out - tail, 3)
+        info["savedHead"] = round((item["in"] - cur_in) / speed, 3)
+        info["savedTail"] = round((cur_out - item["out"]) / speed, 3)
+    for index, (item, after) in enumerate(zip(out_clips, out_clips[1:])):
+        seconds = _dissolve_of(item)
+        if not seconds:
+            continue
+        fitted = _fit_dissolve(seconds, item, after)
+        if fitted == seconds:
+            continue
+        if fitted:
+            item["transition"] = {"type": "dissolve", "seconds": fitted}
+        else:
+            item.pop("transition", None)
+        per_clip[index]["transition"] = {"from": seconds, "to": fitted}
+    saved = round(sum(p["savedHead"] + p["savedTail"] for p in per_clip), 3)
+    return {"clips": out_clips, "savedSeconds": saved, "totalSeconds": _total(out_clips), "perClip": per_clip}
+
+
+def _keep_value(raw, default: float, name: str, where: str) -> float:
+    """작업 185: keepHead·keepTail 한 값. 없거나 null 이면 기본값, JSON 숫자면 0~TIGHTEN_KEEP_MAX_S 로 묶는다. 그 밖은 400."""
+    if raw is None:
+        return default
+    value = _num(raw)
+    if value is None:
+        raise VpocError(where, "BadTightenKeep", f"남길 여유({name})는 숫자(초)여야 합니다.", 400)
+    return round(max(0.0, min(TIGHTEN_KEEP_MAX_S, value)), 3)
+
+
+def tighten_view(owner: str, pid: str, payload) -> dict:
+    """POST /p/<pid>/edit/tighten(작업 185). 바디 {variant, clips, keepHead?, keepTail?}. 저장하지 않는다.
+
+    클립은 저장(PUT)과 같은 규칙(_validated_clips)으로 검사한다. 소리 구간은 이미 만든 필름 캐시(media_view 저장본)의 피크에서만
+    센다 — 이 요청은 원본을 내려받거나 ffmpeg 를 돌리지 않는다(요청 시간이 재료 수에 묶이지 않고 내보내기·필름 만들기 세마포어를
+    잡지 않는다). 필름이 아직 없는 원본의 클립은 그대로 두고 perClip skipped "noFilm" 으로 알린다(화면이 재료 파형을 받은 뒤 다시 부른다).
+    반환 {clips, savedSeconds, totalSeconds, perClip, keepHead, keepTail}.
+    """
+    where = "vnew.edit.tighten"
+    payload = payload if isinstance(payload, dict) else {}
+    variant = payload.get("variant")
+    if variant not in VARIANTS:
+        raise VpocError(where, "BadVariant", "그림체(variant)는 real 또는 webtoon 이어야 합니다.", 400)
+    keep_head = _keep_value(payload.get("keepHead"), TIGHTEN_KEEP_HEAD_S, "keepHead", where)
+    keep_tail = _keep_value(payload.get("keepTail"), TIGHTEN_KEEP_TAIL_S, "keepTail", where)
+    raw = _check_clip_list(payload.get("clips"), where)
+    _gen, gen_id, clips = _validated_clips(owner, pid, variant, raw, where)
+    ranges: dict[str, list] = {}
+    for source in dict.fromkeys(c["sourceKey"] for c in clips if not c.get("muted")):
+        data, _ = _read_json(film_key(owner, pid, gen_id, media_id(source)))
+        if _film_ok(data, source):
+            ranges[source] = _film_ranges(data)
+    result = tighten_proposal(clips, ranges, keep_head=keep_head, keep_tail=keep_tail)
+    log.info("vnew.edit.tighten pid=%s gen=%s clips=%d trimmed=%d no_film=%d saved=%.2f", pid, gen_id, len(clips),
+             sum(1 for p in result["perClip"] if p["savedHead"] or p["savedTail"]),
+             sum(1 for p in result["perClip"] if p["skipped"] == "noFilm"), result["savedSeconds"])
+    return {**result, "keepHead": keep_head, "keepTail": keep_tail}
 
 
 # ================================================================ 내보내기
@@ -1621,6 +1850,7 @@ def _clip_frames(clips: list[dict], fps: int) -> list[int]:
 
 def _fx_plan(clips: list[dict], frames: list[int], fps: int) -> dict | None:
     """작업 181: 디졸브·J/L 컷 배치(프레임·샘플). 셋 다 없으면(소리 끈 클립의 앞당김·이어 감은 없는 것으로 본다) None — 181 전 경로.
+    작업 185: 대사 타이밍(audioSlip)이 있는 소리 켠 클립이 하나라도 있으면 None 이 아니다(넷 다 없을 때만 181 전 경로).
 
     dissolve[i]: 클립 i → i+1 디졸브 프레임 = round(초 × fps)(마지막은 0). 두 디졸브가 한 클립을 다 덮지 않게 짧은 쪽 클립의
     (프레임 − 1) // 2 로 묶는다(검증한 45% 안이면 묶이지 않는다). start[i] = 화면 시작 프레임(앞 디졸브만큼 당겨진다),
@@ -1640,7 +1870,9 @@ def _fx_plan(clips: list[dict], frames: list[int], fps: int) -> dict | None:
             for index, clip in enumerate(clips)]
     tail = [0 if index == count - 1 or clip.get("muted") else int(round(_shift_of(clip, "audioTail") * rate))
             for index, clip in enumerate(clips)]
-    if not any(dissolve) and not any(lead) and not any(tail):
+    # 작업 185: 대사 타이밍(audioSlip, 소리 끈 클립은 없는 것으로 본다)만 있어도 소리 창 경로. 값은 run_export 가 클립에서 읽는다.
+    slip = any(not clip.get("muted") and _slip_of(clip) for clip in clips)
+    if not any(dissolve) and not any(lead) and not any(tail) and not slip:
         return None
     skip = [0] + dissolve[:-1]
     start, position = [], 0
@@ -1653,19 +1885,24 @@ def _fx_plan(clips: list[dict], frames: list[int], fps: int) -> dict | None:
 
 
 def _audio_window(seg_start: float, speed: float, lead_samples: int, length: int,
-                  alt: tuple[float, float] | None) -> dict:
+                  alt: tuple[float, float] | None, slip: float = 0.0) -> dict:
     """작업 181: 클립 소리 창의 원본 구간. 반환 edit_audio 인자 {start_sec, end_sec, pad_front, samples}.
 
     소리 시작 = 화면 원본 시작(seg_start, 대체 소리면 alt 시작) − 앞당김 초 × 속도. 원본 0초보다 앞이면 0초에서 자르고 모자란 만큼
     (타임라인 샘플) 앞을 무음으로 채운다. 끝은 원본 끝(대체 소리면 alt 끝)까지 — 이어 감이 원본보다 길면 뒤가 무음이다.
+    작업 185: slip(대사 타이밍 초, 양수 = 소리가 늦게)만큼 창 전체를 원본에서 − slip × 속도 옮겨 읽는다(화면 시각 t 에 원본 t − slip × 속도).
+    앞당김과 같은 규칙이라 원본 앞은 무음으로 채우고, 원본 끝 뒤는 edit_audio 가 무음으로 채운다. 0 이면 181 과 같다.
     """
     rate = stitcher.EDIT_AUDIO_RATE
     begin = float(alt[0]) if alt is not None else float(seg_start)
-    want = begin - lead_samples / rate * speed
+    want = begin - lead_samples / rate * speed - float(slip) * speed
     pad = 0
     if want < 0:
         pad = min(length, int(round(-want / speed * rate)))
         want = 0.0
+    if alt is not None and want >= float(alt[1]) - 1e-6:
+        # 작업 185: 대사 타이밍(음수)으로 옮긴 창의 시작이 대체 소리 끝을 넘었다(남은 소리 없음) — 창 전체가 무음(ffmpeg 를 부르지 않는다).
+        return {"start_sec": 0.0, "end_sec": None, "pad_front": length, "samples": length}
     return {"start_sec": round(want, 6), "end_sec": float(alt[1]) if alt is not None else None, "pad_front": pad,
             "samples": length}
 
@@ -1870,7 +2107,8 @@ def run_export(owner: str, pid: str, gen_id: str, n: int, claim: str) -> None:
                                         skip_frames=fx["skip"][index])
                         if has_sound:
                             at, length, envelope = _audio_envelope(fx, index)
-                            window = _audio_window(start, _speed_of(clip), fx["lead"][index], length, alt[index])
+                            window = _audio_window(start, _speed_of(clip), fx["lead"][index], length, alt[index],
+                                                   slip=_slip_of(clip))  # 작업 185: 대사 타이밍(대체 소리도 같은 규칙)
                             layer_path = os.path.join(workdir, f"aud-{index:03d}.raw")
                             _export_audio(extra.get("audio_source") or path, layer_path, speed=_speed_of(clip), **window)
                             layers.append({"path": layer_path, "at": at, "envelope": envelope})
