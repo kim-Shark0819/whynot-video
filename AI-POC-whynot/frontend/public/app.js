@@ -808,7 +808,7 @@ function signOut(message = "") {
   window.clearTimeout(state.pollTimer);
   state.token = "";
   state.user = null;
-  state.currentProject = null;
+  setCurrentProject(null);
   sessionStorage.removeItem(STORAGE_KEYS.token);
   sessionStorage.removeItem(WORKING_KEY);
   try { localStorage.removeItem(PERSISTED_TOKEN_KEY); } catch (error) { /* 저장소 없음 */ }
@@ -1645,7 +1645,7 @@ function closeProjectTrackModal({ toList = false } = {}) {
 
 function openProjectTrackModal(project) {
   state.projectTrackModalOpener = document.activeElement;
-  state.currentProject = project;
+  setCurrentProject(project);
   state.projectTrackTarget = project;
   state.projectTrackSelection = "";
   const editable = canSelectProjectTrack(project);
@@ -1705,7 +1705,7 @@ async function dispatchProject(project, { replace = false, entry = "open" } = {}
     return;
   }
   if (project.track === "video") {
-    state.currentProject = project;
+    setCurrentProject(project);
     setWorkingProject(project);
     if (entry === "create") {
       navigate("videoGen", { replace });
@@ -1718,12 +1718,12 @@ async function dispatchProject(project, { replace = false, entry = "open" } = {}
   }
   // 영상만들기_신규(vnew): 만들거나 열면 새 화면 vnewView 로 간다. 화면은 vnew.js 가 그린다.
   if (project.track === "video_new") {
-    state.currentProject = project;
+    setCurrentProject(project);
     setWorkingProject(project);
     navigate("vnew", { replace });
     return;
   }
-  state.currentProject = project;
+  setCurrentProject(project);
   resetDocuments(project.id);
   renderProjectDetail(project);
   navigate("projectDetail", { projectId: project.id, replace });
@@ -2097,7 +2097,7 @@ async function saveSource() {
       method: "POST",
       body: JSON.stringify({ text, name: project.source?.name || "붙여넣은 자료" })
     });
-    state.currentProject = payload.item;
+    setCurrentProject(payload.item);
     renderSourcePanel(payload.item, true);
     // 자료가 생기면 AI 작업 버튼이 열린다.
     renderDocumentsPanel();
@@ -2129,7 +2129,7 @@ async function changeInputType(inputType) {
       method: "PATCH",
       body: JSON.stringify({ inputType })
     });
-    state.currentProject = payload.item;
+    setCurrentProject(payload.item);
     renderProjectDetail(payload.item);
     // 진입점이 바뀌면 만들 수 있는 산출물 목록도 달라진다.
     await loadDocuments(payload.item.id);
@@ -2813,7 +2813,7 @@ async function saveDirection() {
         freeDirection: $("#directionFree").value.trim()
       })
     });
-    state.currentProject = payload.item;
+    setCurrentProject(payload.item);
     renderDirectionPanel(payload.item, true);
     $("#directionHint").textContent = `저장됨 · ${formatDate(payload.item.updatedAt)}`;
     showToast("방향 저장", "기획 방향을 반영했습니다.");
@@ -2863,7 +2863,7 @@ async function restoreCover(project, coverKey, button) {
       method: "POST",
       body: JSON.stringify({ coverKey })
     });
-    state.currentProject = payload.item;
+    setCurrentProject(payload.item);
     renderProjectDetail(payload.item);
     await loadProjects();
     showToast("표지 되돌리기", "이전 표지를 현재 표지로 지정했습니다.");
@@ -2887,7 +2887,7 @@ async function saveProjectDetail() {
         story: $("#detailStory").value.trim()
       })
     });
-    state.currentProject = payload.item;
+    setCurrentProject(payload.item);
     renderProjectDetail(payload.item);
     $("#detailSaveHint").textContent = `저장됨 · ${formatDate(payload.item.updatedAt)}`;
     await loadProjects();
@@ -2918,7 +2918,9 @@ async function deleteDetailProject() {
   })) return;
   try {
     await api(`/api/projects/${encodeURIComponent(project.id)}`, { method: "DELETE" });
-    state.currentProject = null;
+    setCurrentProject(null);
+    // 지운 프로젝트가 작업 프로젝트로 남아 있으면 배너 · 상단 이름에 옛 이름이 보인다. 함께 지운다.
+    if (getWorkingProject()?.id === project.id) setWorkingProject(null);
     await loadProjects();
     navigate("home", { replace: true });
     showToast("프로젝트 삭제", "프로젝트를 삭제했습니다.");
@@ -2948,6 +2950,7 @@ function setWorkingProject(project) {
     sessionStorage.removeItem(WORKING_KEY);
   }
   renderWorkingProject();
+  renderTopProject();
 }
 
 function getWorkingProject() {
@@ -2967,6 +2970,56 @@ function renderWorkingProject() {
   const show = Boolean(working) && showOn.includes(state.activeView);
   bar.classList.toggle("is-hidden", !show);
   if (show) $("#fromProjectTitle").textContent = working.title || working.id;
+}
+
+/* 작업 187 — 상단 경로(AI STUDIO › 쪽 제목 › 프로젝트 이름)의 지금 프로젝트.
+   "지금 프로젝트" 는 state.currentProject 하나다. 상세 · 영상 만들기(vpoc.js) · 영상만들기_신규(vnew.js) 는 모두
+   switchView 가 이 값의 id 로 mount 한다. 바꾸는 곳은 setCurrentProject 하나로 모은다(목록 열기 · 저장 응답 ·
+   새로고침 복원 · 삭제 · 로그아웃). 콘티 · 이미지 화면은 프로젝트에서 넘어온 작업 프로젝트(위 배너와 같은 값)를 쓴다. */
+function setCurrentProject(project) {
+  state.currentProject = project || null;
+  // 이름을 고쳐 저장했으면 작업 프로젝트 배너도 같은 이름으로 맞춘다(옛 이름이 남지 않게).
+  const working = getWorkingProject();
+  if (project?.id && working?.id === project.id && working.title !== project.title) setWorkingProject(project);
+  renderTopProject();
+}
+
+function topProject() {
+  // 한 프로젝트 안에서 일하는 화면. 목록 · 라이브러리 · 캐릭터 · 사용량 · 관리 화면에서는 이름을 감춘다.
+  if (["projectDetail", "videoGen", "vnew"].includes(state.activeView)) return state.currentProject;
+  if (["imageStudio", "studio"].includes(state.activeView)) return getWorkingProject();
+  return null;
+}
+
+function renderTopProject() {
+  const link = $("#topProjectName");
+  if (!link) return;
+  const project = state.token ? topProject() : null;
+  const name = project?.id ? String(project.title || project.id) : "";
+  link.classList.toggle("is-hidden", !name);
+  $("#topProjectSep")?.classList.toggle("is-hidden", !name);
+  $("#topBreadcrumb")?.classList.toggle("has-project", Boolean(name));
+  // 이름은 사용자가 지은 글이다. textContent · 속성으로만 넣는다(innerHTML 금지).
+  link.textContent = name;
+  if (!name) {
+    link.removeAttribute("href");
+    link.removeAttribute("title");
+    link.removeAttribute("aria-label");
+    delete link.dataset.projectId;
+    return;
+  }
+  link.title = name;
+  link.setAttribute("aria-label", `현재 프로젝트: ${name}`);
+  // 누르면 목록에서 프로젝트를 열 때와 같은 곳(openProject → dispatchProject)으로 간다.
+  // 이미 그 화면이면(상세, 영상만들기_신규) 글자만 둔다 — vnew 를 다시 mount 하면 편집 저장 전에 화면이 바뀐다.
+  const target = project.track === "video_new" ? "vnew" : "projectDetail";
+  if (target === state.activeView) {
+    link.removeAttribute("href");
+    delete link.dataset.projectId;
+  } else {
+    link.href = pathForView("projectDetail", project.id);
+    link.dataset.projectId = project.id;
+  }
 }
 
 function sendProjectTo(kind) {
@@ -6306,7 +6359,7 @@ async function applyRoute(route) {
     if (working && working.id) {
       try {
         const payload = await api(`/api/projects/${encodeURIComponent(working.id)}`);
-        state.currentProject = payload.item;
+        setCurrentProject(payload.item);
         setWorkingProject(payload.item);
       } catch (_error) {
         window.history.replaceState({ view: "home", projectId: null }, "", "/projects");
@@ -6330,7 +6383,7 @@ async function applyRoute(route) {
 
 window.whynotOpenVideoGen = (project, planId = "") => {
   if (!project || !project.id) return;
-  state.currentProject = project;
+  setCurrentProject(project);
   setWorkingProject(project);
   // 프로젝트 화면의 계획 카드에서 들어오면 그 계획을 연다. 비우면 vpoc 가 알아서 고른다.
   state.vpocPlanId = planId || "";
@@ -6373,7 +6426,7 @@ function switchView(viewName) {
   $$(".nav-item").forEach((b) => b.classList.toggle("active", b.dataset.viewTarget === viewName));
   const labels = {
     home: "프로젝트",
-    projectDetail: state.currentProject?.title || "프로젝트 상세",
+    projectDetail: "프로젝트",
     studio: "새 영상 만들기",
     imageStudio: "콘티 · 이미지",
     videoGen: "영상 만들기",
@@ -6386,6 +6439,8 @@ function switchView(viewName) {
   };
   $("#pageTitle").textContent = labels[viewName] || "AI Studio";
   renderWorkingProject();
+  // 상단 경로의 프로젝트 이름(작업 187). activeView 를 바꾼 뒤에 그려야 감춤 · 링크 판단이 맞는다.
+  renderTopProject();
   closeSidebar();
   // 숨어 있던 뷰는 폭이 0이라 분할 비율의 픽셀 하한을 계산할 수 없었다. 보이는 지금 맞춘다.
   reclampSplits();
@@ -7044,6 +7099,15 @@ $("#fromProjectBack").addEventListener("click", () => {
 });
 $("#fromProjectClear").addEventListener("click", () => setWorkingProject(null));
 
+/* 상단 경로의 프로젝트 이름(작업 187). href 가 있을 때만 링크다. 새 탭 · 새 창 열기는 브라우저에 맡긴다. */
+$("#topProjectName").addEventListener("click", (event) => {
+  const projectId = event.currentTarget.dataset.projectId;
+  if (!projectId) return;
+  if (event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
+  event.preventDefault();
+  openProject(projectId);
+});
+
 /* 진행 중 작업 */
 $("#runningChip").addEventListener("click", () => {
   navigate("library");
@@ -7505,7 +7569,7 @@ async function saveStory() {
         storyType: type
       })
     });
-    state.currentProject = { ...(state.currentProject || {}), ...payload.item };
+    setCurrentProject({ ...(state.currentProject || {}), ...payload.item });
     $("#storyStatus").textContent = `저장했습니다 · ${$("#storyText").value.length.toLocaleString("ko-KR")}자`;
     $("#storyTypeBadge").textContent = STORY_TYPE_LABELS[type] || type;
     syncStoryActions();
