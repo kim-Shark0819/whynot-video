@@ -5011,3 +5011,231 @@ textarea.vnew-field-input {
   opacity: 0.45;
   cursor: default;
 }
+
+/* ================================================================ ⑦ 편집 — J/L 컷 · 디졸브(작업 182)
+   경계마다 작은 마름모(전환 손잡이) → 화면에 고정한 메뉴(컷·디졸브 4값), 디졸브는 두 클립이 겹친 자리에 음영 쐐기, 소리 줄에는
+   앞당김(J)·이어 감(L)을 이웃 클립 소리 아래로 뻗는 옅은 막대로. 고른 클립 도구줄에 J/L 슬라이더. 가로로 넘치는 것은 여전히
+   타임라인 하나뿐이다(메뉴는 화면 안으로 맞추고 max-width 로 줄인다). */
+
+.vnew-edit-track {
+  position: relative;
+}
+
+/* 전환 손잡이: 클립 위쪽 이음매 가운데(끝 손잡이를 덜 가리게). 누르는 칸은 20px, 보이는 마름모는 12px(::before).
+   컷은 회색, 디졸브는 강조색. */
+.vnew-edit-tr {
+  position: absolute;
+  top: 4px;
+  z-index: 4;
+  width: 20px;
+  height: 20px;
+  margin: -10px 0 0 -10px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  cursor: pointer;
+  touch-action: manipulation;
+}
+
+.vnew-edit-tr::before {
+  content: "";
+  position: absolute;
+  top: 4px;
+  left: 4px;
+  width: 12px;
+  height: 12px;
+  box-sizing: border-box;
+  border: 2px solid #ffffff;
+  border-radius: 2px;
+  background: #6b7280;
+  box-shadow: 0 0 0 1px rgba(17, 24, 39, 0.45);
+  transform: rotate(45deg);
+}
+
+.vnew-edit-tr.is-dissolve::before {
+  background: var(--accent, #cb3208);
+}
+
+.vnew-edit-tr:hover::before,
+.vnew-edit-tr.is-open::before,
+.vnew-edit-tr:focus-visible::before {
+  box-shadow: 0 0 0 2px var(--accent, #cb3208);
+}
+
+.vnew-edit-tr:focus {
+  outline: none;
+}
+
+/* 디졸브로 겹친 구간(앞 클립 끝 · 뒤 클립 처음): 음영 쐐기 */
+.vnew-edit-xfade {
+  position: absolute;
+  top: 4px;
+  z-index: 3;
+  height: 48px;
+  box-sizing: border-box;
+  border-right: 1px solid rgba(255, 255, 255, 0.85);
+  border-left: 1px solid rgba(255, 255, 255, 0.85);
+  background: linear-gradient(to top right, rgba(17, 24, 39, 0.55) 50%, rgba(255, 255, 255, 0.4) 50%);
+  pointer-events: none;
+}
+
+/* 소리 줄 J/L 막대: 클립 소리 상자 밖으로 이웃 클립 소리 아래까지(옅은 빗금, 아래 파형이 비친다) */
+.vnew-edit-ashift {
+  position: absolute;
+  top: 50%;
+  z-index: 1;
+  height: 28px;
+  margin-top: -14px;
+  box-sizing: border-box;
+  border: 1px dashed #4f7bd6;
+  background: repeating-linear-gradient(135deg, rgba(79, 123, 214, 0.28) 0 4px, rgba(79, 123, 214, 0.1) 4px 8px);
+  pointer-events: none;
+}
+
+.vnew-edit-ashift.is-lead {
+  border-right: 0;
+  border-radius: 4px 0 0 4px;
+}
+
+.vnew-edit-ashift.is-tail {
+  border-left: 0;
+  border-radius: 0 4px 4px 0;
+}
+
+/* 전환 메뉴(화면에 고정, 손잡이 아래·위 — editTrOpen 이 화면 안으로 맞춘다) */
+.vnew-edit-trmenu {
+  position: fixed;
+  z-index: 60;
+  display: grid;
+  gap: 2px;
+  min-width: 150px;
+  max-width: calc(100vw - 16px);
+  box-sizing: border-box;
+  padding: 6px;
+  border: 1px solid var(--line, #e5e7eb);
+  border-radius: 10px;
+  background: var(--surface, #ffffff);
+  box-shadow: 0 8px 24px rgba(17, 24, 39, 0.18);
+}
+
+.vnew-edit-trmenu-title {
+  margin: 0;
+  padding: 2px 8px 4px;
+  color: var(--text-muted, #6b7280);
+  font-size: 12px;
+}
+
+.vnew-edit-trmenu-row {
+  display: block;
+}
+
+.vnew-edit-trmenu-item {
+  display: block;
+  width: 100%;
+  min-height: 34px;
+  padding: 0 10px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text, #1b1d21);
+  font: inherit;
+  font-size: 13px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.vnew-edit-trmenu-item:hover:not(:disabled),
+.vnew-edit-trmenu-item:focus-visible {
+  background: var(--surface-muted, #f3f4f6);
+}
+
+.vnew-edit-trmenu-item.is-on {
+  color: var(--accent, #cb3208);
+  font-weight: 600;
+}
+
+/* 막힌 값: 안내(title)는 감싼 줄이 받는다(막힌 버튼은 마우스 이벤트를 받지 않는 브라우저가 있다) */
+.vnew-edit-trmenu-item:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+  pointer-events: none;
+}
+
+/* 도구줄: 고른 클립 J/L 컷 슬라이더 + 숫자 */
+.vnew-edit-afx {
+  display: inline-flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 12px;
+  min-width: 0;
+}
+
+.vnew-edit-afx-field {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  font-size: 13px;
+  color: var(--text-muted, #6b7280);
+}
+
+.vnew-edit-afx-text {
+  white-space: nowrap;
+}
+
+.vnew-edit-afx-range {
+  width: 110px;
+  min-width: 0;
+}
+
+.vnew-edit-afx-range:disabled {
+  opacity: 0.4;
+}
+
+.vnew-edit-afx-value {
+  min-width: 44px;
+  color: var(--text, #1b1d21);
+  font-variant-numeric: tabular-nums;
+}
+
+.vnew-edit-afx-note {
+  font-size: 12px;
+}
+
+/* 미리보기 아래 안내: J/L 컷·디졸브는 근사로만 보인다 */
+.vnew-edit-fx-note {
+  margin: 0;
+  font-size: 12px;
+  text-align: center;
+}
+
+@media (max-width: 768px) {
+  .vnew-edit-afx {
+    width: 100%;
+  }
+
+  .vnew-edit-afx-field {
+    flex: 1 1 100%;
+  }
+
+  .vnew-edit-afx-range {
+    flex: 1 1 auto;
+    width: auto;
+  }
+
+  /* 손가락으로 누르기 쉽게 손잡이 칸을 넓힌다(보이는 마름모는 그대로) */
+  .vnew-edit-tr {
+    width: 26px;
+    height: 26px;
+    margin: -13px 0 0 -13px;
+  }
+
+  .vnew-edit-tr::before {
+    top: 7px;
+    left: 7px;
+  }
+
+  .vnew-edit-trmenu-item {
+    min-height: 40px;
+  }
+}
