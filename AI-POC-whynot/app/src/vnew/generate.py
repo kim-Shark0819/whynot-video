@@ -4468,6 +4468,14 @@ def _join_names(names: list[str]) -> str:
     return names[0] if len(names) == 1 else ", ".join(names[:-1]) + " and " + names[-1]
 
 
+def _join_shot_pieces(parts) -> str:
+    """샷 글 조각 잇기(_vibe_take_prompt Shot 줄): 문장 사이는 ". "(참고 구현), 따옴표 대사 · 괄호 뒤에는 마침표를 붙이지 않는다."""
+    body = ""
+    for piece in (str(p).strip() for p in parts if p and str(p).strip()):
+        body += ("" if not body else " " if body.endswith(('"', ")")) else ". ") + piece
+    return body
+
+
 def _vibe_who(on_list: list[dict], handles: list[str], disp) -> str:
     """compose.who_in_shot 형식: "Only A appears in this shot; B is not visible. ". 모두 보이면 "" (부분 노출이 있으면
     "A and B (hands only) appear in this shot. "), 아무도 없으면 "No person appears in this shot. "."""
@@ -4932,6 +4940,7 @@ _LIPS_CLOSE = re.compile(r"\bkiss\w*|키스|입맞|입을\s*맞|입술|\b(?:lips
                          r"touch\w*|nearly|almost)\b|\b(?:close|centimet\w*|nearly|almost)\b[^.;]{0,40}?\b(?:lips|mouths)\b",
                          re.IGNORECASE)
 VIBE_TIGHTER_TAG = " (tighter than the previz)"
+VIBE_INSERT_TAG = " (tighter than the previz; faces out of frame)"  # 작업 177: 166 인서트 크기 절 바로 뒤
 _PREVIZ_SIZE_RANK = {"ECU": 0, "CU": 1, "MCU": 2, "MS": 3, "MLS": 4, "LS": 5}
 _CONTI_SIZE_RANK = {"extreme": 0, "closeup": 1, "profile": 1}
 # 작업 174: 한 사람 클로즈업에서 손 잡기(얼굴 아님) → 화면 아래 가장자리 바로 밑(손끝만), 화면이 넓어지지 않게.
@@ -5338,7 +5347,10 @@ def _vibe_take_prompt(plan: dict, take: dict, *, real: bool, cast: list[dict], l
             lead, clauses = _insert_lead(clauses)  # 작업 170: 첫 닿는 동사 절을 크기 바로 뒤로
         size = VIBE_INSERT_SIZE if insert else _vibe_conti_size(cut, entry.get("shot"))  # 작업 170: 콘티 크기 우선
         tag = ""
-        if not insert and _conti_tighter(cut, entry.get("shot")):
+        if insert:
+            tag = VIBE_INSERT_TAG  # 작업 177: 인서트도 프리비즈 카메라보다 가깝다(얼굴 빼고) — 크기 절 바로 뒤, @Video1 = 174 줄
+            tighter.append(cut_id)
+        elif _conti_tighter(cut, entry.get("shot")):
             tag = VIBE_TIGHTER_TAG  # 작업 174: 콘티 클로즈업이 프리비즈보다 가까우면 크기 절 바로 뒤에
             tighter.append(cut_id)
         edge = (lambda text: _edge_hand(text)) if subject else (lambda text: text)  # 작업 174: 한 사람 클로즈업의 손 잡기
@@ -5404,11 +5416,11 @@ def _vibe_take_prompt(plan: dict, take: dict, *, real: bool, cast: list[dict], l
         if real:
             parts = _real_blush_pieces(parts, _blush_who(entry) or (_disp(subject) if subject else ""), people)  # 작업 166
         off_speaker = str(entry.get("offScreenSpeaker") or "").strip()
+        if framing is not None:
+            # 작업 177: 컷 단위 Kling ACTION 재료 = 크기 · 주인공 절 뒤 샷 글(연기 · 손 절 · Touch 줄 · 카메라), 대사 빼고
+            framing["shots"][cut_id]["action"] = _join_shot_pieces(parts)
         parts.extend(_line_piece(ln, off_speaker) for ln in _entry_lines(entry))
-        body = ""
-        for piece in (p.strip() for p in parts if p and p.strip()):
-            # 문장 사이는 ". "(참고 구현), 따옴표 대사 뒤에는 마침표를 붙이지 않는다.
-            body += ("" if not body else " " if body.endswith(('"', ")")) else ". ") + piece
+        body = _join_shot_pieces(parts)
         return (prefix + body).rstrip() + ("" if body.endswith(('"', ")")) else ".")
 
     tighter: list[str] = []  # 작업 174: 콘티 클로즈업이 프리비즈보다 가까운 컷
@@ -9212,10 +9224,13 @@ def _kling_cut_refs(owner: str, pid: str, plan: dict, ctx: dict, cut_id: str, pe
             costume = swaps.get(person["name"])
             elements.append({"frontal_image_url": uri(front), "reference_image_urls": [uri(costume)] if costume else []})
             keys.append({"slot": f"element{len(elements)}", "key": front_key, "costumeRef": bool(costume)})
-            wear = f", wearing {person['costume']} (its second image shows these clothes)" if costume and person.get("costume") \
-                else (f", wearing {person['costume']}" if person.get("costume") else "")
+            # 작업 177: 옷은 윗옷 · 색만(COSTUME 줄과 겹치지 않게), 머리 단서 = 실사 외모의 머리 · 눈 구절(≤15낱말)
+            top = _short_costume(person.get("costume") or "")
+            wear = f", wearing {top} (its second image shows these clothes)" if costume and top \
+                else (f", wearing {top}" if top else "")
+            cue = _element_cue(person.get("appearance") or "")
             lines.append(REAL_CUT_ELEMENT_LINE.format(tag=f"@Element{len(elements)}", name=person["roman"],
-                                                      cue=person.get("cue") or "", wear=wear))
+                                                      cue=f" ({cue})" if cue else person.get("cue") or "", wear=wear))
             placed.add(person["name"])
             del front
     for person in people or []:
@@ -9223,7 +9238,86 @@ def _kling_cut_refs(owner: str, pid: str, plan: dict, ctx: dict, cut_id: str, pe
             continue
         wear = f", wearing {person['costume']}" if person.get("costume") else ""
         lines.append(REAL_CUT_PERSON_LINE.format(name=person["roman"], cue=person.get("cue") or "", wear=wear))
-    return {"mode": "elements" if elements else "none", "elements": elements, "lines": lines, "keys": keys}
+    return {"mode": "elements" if elements else "none", "elements": elements, "lines": lines, "keys": keys,
+            "costumeRefs": bool(keys) and all(k["costumeRef"] for k in keys)}  # 작업 177: 모든 element 가 장면 옷 그림을 실음
+
+
+# 작업 177: @Element 줄 머리 단서(실사 외모의 머리 · 눈 구절) 상한 낱말 수 · 끝에 매달리면 지우는 낱말.
+ELEMENT_CUE_MAX_WORDS = 15
+_CUE_DANGLING = {"with", "and", "or", "of", "the", "a", "an", "his", "her", "their", "across", "over", "on", "in", "to",
+                 "at", "by", "from", "into", "onto", "falling", "framing"}
+
+
+def _clip_cue(text: str, words: int) -> str:
+    kept = str(text or "").split()[:max(0, words)]
+    while kept and kept[-1].lower().strip(",;") in _CUE_DANGLING:
+        kept.pop()
+    return " ".join(kept).rstrip(" ,;")
+
+
+def _element_cue(appearance: str) -> str:
+    """작업 177: @Element 줄 머리 단서 = 실사 외모 문장(Seedance look 줄과 같은 _real_appearance 글)의 머리 구절 + ", " + 눈 구절,
+    ≤ ELEMENT_CUE_MAX_WORDS 낱말("short charcoal-black hair swept back with loose strands falling across his forehead, narrow
+    half-lidded eyes"). 머리말("a Korean man in his 20s with")은 뗀다. 쉼표 · 마침표 조각 안에서 and 로 나누고, 머리 · 눈 낱말이
+    없는 조각은 앞 구절에 붙인다. "without …"(안경 · 수염) 구절은 쓰지 않는다. 넘치면 머리 구절 뒤를 줄이고(눈 구절이 남을 자리가
+    없으면 머리만), 머리 구절이 없으면 ""(부른 쪽이 176 머리색 단서를 쓴다)."""
+    _head, rest = vnew_casting._split_head(" ".join(str(appearance or "").split()))  # noqa: SLF001 — 캐스팅과 같은 머리말 규칙
+    rest = re.sub(r"^\s*(?:,|with\b)\s*", "", rest, flags=re.IGNORECASE)
+    groups: list[str] = []
+    for chunk in re.split(r"\s*[,;.]\s+|\s*[,;]\s*", rest):
+        start = len(groups)
+        for bit in re.split(r"\s+and\s+", chunk.strip()):
+            bit = re.sub(r"^(?:and|with)\s+", "", bit.strip(), flags=re.IGNORECASE)
+            if not bit:
+                continue
+            if len(groups) == start or re.search(r"\b(?:hair|eyes)\b", bit, re.IGNORECASE):
+                groups.append(bit)
+            else:
+                groups[-1] += " and " + bit
+    usable = [g for g in groups if not re.match(r"(?:without|no)\b", g, re.IGNORECASE)]
+    hair = next((g for g in usable if re.search(r"\bhair\b", re.sub(r"\bfacial\s+hair\b", "", g, flags=re.IGNORECASE),
+                                                re.IGNORECASE)), "")
+    if not hair:
+        return ""
+    eyes = next((g for g in usable if g != hair and re.search(r"\beyes\b", g, re.IGNORECASE)), "")
+    limit = ELEMENT_CUE_MAX_WORDS
+    if eyes and len(eyes.split()) + 4 <= limit:
+        hair = _clip_cue(hair, limit - len(eyes.split()))
+        return f"{hair}, {eyes}" if hair else ""
+    return _clip_cue(hair, limit)
+
+
+def _short_costume(costume: str) -> str:
+    """작업 177: @Element 줄 옷 = 윗옷 · 색만(첫 쉼표 · 쌍반점 앞, "with …" 꾸밈 앞, ≤8낱말, 머리글자 소문자).
+    "Dark navy/black long-sleeve button-up dress shirt, collar …; dark grey trousers" → "dark navy/black long-sleeve button-up
+    dress shirt"."""
+    text = re.split(r"\s*[;,]\s*", str(costume or "").strip(), maxsplit=1)[0]
+    text = re.split(r"\s+(?:with|featuring|that|which|over|under)\s+", text, maxsplit=1)[0].strip().rstrip(" .")
+    text = " ".join(text.split()[:8])
+    if text[:1].isupper() and text[1:2].islower():
+        text = text[0].lower() + text[1:]
+    return text
+
+
+def _kling_cut_inputs(owner: str, pid: str, plan: dict, ctx: dict, cut_id: str, seconds: float) -> tuple:
+    """작업 177: Kling 컷 프롬프트 재료(_submit_real_cut · 검사가 같이 쓴다) → (lock, kling_refs, cut_max, layout).
+    lock = 169 샷 고정 줄 + 176 인물 줄(기록 · 로그용, 못 만들면 ""), kling_refs = _kling_cut_refs(없으면 mode none),
+    cut_max = 167 태그 여유 상한, layout = _kling_cut_layout 재료(lock 이 없으면 None — 지금 프롬프트 그대로).
+    모든 element 가 장면 옷 그림을 실으면 COSTUME 줄을 뺀다(@Element 줄의 윗옷 · 색 구절이 맡는다)."""
+    lock_people: list[dict] = []
+    pieces: dict = {}
+    lock = _kling_shot_lock(owner, plan, ctx, cut_id, float(seconds or 0), people=lock_people, pieces=pieces)  # 작업 169
+    # 작업 176: 인물 참고(elements, 받는 Kling 일 때) · 사람마다 한 줄(i2v) — FRAMING 묶음 끝. 167 태그 여유만큼 상한을 낮춘다.
+    kling_refs = _kling_cut_refs(owner, pid, plan, ctx, cut_id, lock_people) if lock else {
+        "mode": "none", "elements": [], "lines": [], "keys": []}
+    if lock and kling_refs["lines"]:
+        lock = lock + "\n" + "\n".join(kling_refs["lines"])
+    cut_max = _kling_cut_prompt_max(ctx, len(kling_refs["elements"]))
+    layout = None
+    if lock and pieces.get("framing"):
+        layout = {**pieces, "refs": list(kling_refs["lines"]),
+                  "costume": "" if kling_refs.get("costumeRefs") else pieces.get("costume") or ""}
+    return lock, kling_refs, cut_max, layout
 
 
 def _kling_cut_prompt_max(ctx: dict, tags: int) -> int:
@@ -9238,10 +9332,13 @@ def _kling_cut_prompt_max(ctx: dict, tags: int) -> int:
     return min(base, room) if base else room
 
 
-def _kling_shot_lock(owner: str, plan: dict, ctx: dict, cut_id: str, seconds: float, people: list | None = None) -> str:
+def _kling_shot_lock(owner: str, plan: dict, ctx: dict, cut_id: str, seconds: float, people: list | None = None,
+                     pieces: dict | None = None) -> str:
     """Kling 컷 1개의 샷 고정 줄(FRAMING + COSTUME). _vibe_take_prompt(실사, 그 컷만)의 SHOT 앞부분과 같은 글. 못 만들면 "".
     작업 176: people(목록)을 주면 그 컷에 얼굴이 보이는 인물(샷 인물 중 손만 들어오는 사람 뺌)을
-    {name, roman, cue, costume, char, look} 로 담는다(인물 참고 elements · 사람마다 한 줄)."""
+    {name, roman, cue, costume, char, look} 로 담는다(인물 참고 elements · 사람마다 한 줄).
+    작업 177: pieces(dict)를 주면 {framing, touch, costume(줄, 없으면 ""), action(SHOT 크기 · 주인공 절 뒤 글, 대사 빼고)}를 담는다
+    (컷 프롬프트 _kling_cut_layout 재료). 돌려주는 글은 그대로."""
     take = ctx.get("take") if isinstance(ctx.get("take"), dict) else {"id": ctx.get("takeId"), "cutIds": [cut_id]}
     try:
         sub = _part_take(plan, take, {"cutIds": [cut_id], "seconds": float(seconds or 0)})
@@ -9292,6 +9389,9 @@ def _kling_shot_lock(owner: str, plan: dict, ctx: dict, cut_id: str, seconds: fl
         locks = [lock for lock in locks if lock]
         if locks:
             lines.append(REAL_CUT_COSTUME_LINE.format(locks="; ".join(locks)))
+        if pieces is not None:
+            pieces.update(framing=lines[0], touch=lines[1] if shot.get("touch") else "",
+                          costume=lines[-1] if locks else "", action=str(shot.get("action") or "").strip())
         if people is not None:
             # 작업 176: 얼굴이 보이는 인물(손만 들어오는 사람 뺌) — 신원 참고 · 사람마다 한 줄의 재료
             hands = {str(o.get("name") or "") for o in _hands_only_owners(_conti_cut(plan, cut_id))}
@@ -9597,17 +9697,10 @@ def _submit_real_cut(owner: str, pid: str, gen_id: str, plan: dict, ctx: dict, c
     ctx["stage"] = "still"
     duration = _kling_duration(caps, float(cut.get("seconds") or 0))
     # 작업 132: 실사 컷 프롬프트(그림체 real). 시작 그림(유료) 전에 만들고, "webtoon" 이 남으면 제출하지 않는다.
-    lock_people: list[dict] = []
-    lock = _kling_shot_lock(owner, plan, ctx, cut_id, float(cut.get("seconds") or 0), people=lock_people)  # 작업 169: 샷 고정
-    # 작업 176: 인물 참고(elements, 받는 Kling 일 때) · 사람마다 한 줄(i2v) — FRAMING 묶음 끝. 167 태그 여유만큼 상한을 낮춘다.
-    kling_refs = _kling_cut_refs(owner, pid, plan, ctx, cut_id, lock_people) if lock else {
-        "mode": "none", "elements": [], "lines": [], "keys": []}
-    if lock and kling_refs["lines"]:
-        lock = lock + "\n" + "\n".join(kling_refs["lines"])
-    cut_max = _kling_cut_prompt_max(ctx, len(kling_refs["elements"]))
+    lock, kling_refs, cut_max, layout = _kling_cut_inputs(owner, pid, plan, ctx, cut_id, float(cut.get("seconds") or 0))
     kling_prompt = _segment_prompt(plan, {"cutIds": [cut_id]}, first_segment=True, model=ctx["modelId"], real=True,
                                    prompt_max=cut_max, fix=fix, bases=ctx.get("bases"), lock=lock,
-                                   from_prev=from_prev)
+                                   from_prev=from_prev, kling=layout)
     _assert_no_webtoon(kling_prompt)
     layout = still_check = None
     people: list = []
@@ -9693,7 +9786,7 @@ def _submit_real_cut(owner: str, pid: str, gen_id: str, plan: dict, ctx: dict, c
                     still_check["used"] = "prevFrame"
                     kling_prompt = _segment_prompt(plan, {"cutIds": [cut_id]}, first_segment=True, model=ctx["modelId"],
                                                    real=True, prompt_max=cut_max, fix=fix, bases=ctx.get("bases"),
-                                                   lock=lock, from_prev=True)
+                                                   lock=lock, from_prev=True, kling=layout)
                     _assert_no_webtoon(kling_prompt)
                 del prev_frame
         del frame, refs, sheet
@@ -12483,8 +12576,66 @@ def _prompt_budget(model: str) -> int:
     return budget
 
 
+REAL_CUT_START_SENTENCE = ("Start from the first frame (a live-action still) and continue the action smoothly, keeping the "
+                           "same place, lighting, characters, positions and outfits.")
+# 작업 177: Kling 컷 프롬프트가 예산을 넘을 때 아래(덜 중요한 것)부터 줄이는 순서. ACTION · DIALOGUE 는 이것들 다음에만 줄인다.
+KLING_CUT_TRIM_ORDER = ("styleCompact", "background", "startDuplicate", "style", "negative")
+
+
+def _kling_cut_layout(plan: dict, cut: dict, kling: dict, *, action: str, said, model: str = "", prompt_max: int = 0,
+                      fix: str = "", from_prev: bool = False) -> str:
+    """작업 177: 샷 고정 재료(_kling_cut_inputs layout)가 있는 컷 단위 Kling 실사 프롬프트.
+
+    순서: MANDATORY(140 고지) → FRAMING(+ COSTUME, element 가 장면 옷 그림을 싣지 않을 때만) → ACTION(Seedance SHOT 의 크기 ·
+    주인공 절 뒤 글 = 연기 · 173/174 Touch 줄 · 손 절 · 카메라) → DIALOGUE(그 컷 대사, 화자 이름, 한국어 따옴표 그대로) →
+    @Element/사람 줄 → BACKGROUND(짧은 형 _fixed_head compact) → 시간대 1문장(160) → 시작 그림 1줄(앞 샷 프레임이면
+    REAL_CUT_FROM_PREV, 아니면 REAL_CUT_KEEP_FRAMING — 그 앞에 겹치는 REAL_CUT_START_SENTENCE) → STYLE → 꼬리(QA 교정 · 자막 없음 ·
+    NEGATIVE). 상한 = prompt_max(167 태그 여유 상한, 없으면 _prompt_budget) — 1,800 목표로 SHOT 이 통째로 빠지던 것을 막는다.
+    넘치면 KLING_CUT_TRIM_ORDER(STYLE 짧은 형 → BACKGROUND → 겹치는 시작 문장 → STYLE → NEGATIVE), 그래도 넘칠 때만 ACTION 을
+    문장 경계에서, 다음 대사를 _fit_dialogue(25)로 줄인다."""
+    budget = int(prompt_max) if prompt_max else _prompt_budget(model)
+    cut_location = str(cut.get("locationEn") or "")
+    framing = "\n".join(p for p in (str(kling.get("framing") or "").strip(), str(kling.get("costume") or "").strip()) if p)
+    action = str(action or "").strip().rstrip(" .")
+    first = REAL_CUT_FROM_PREV if from_prev else REAL_CUT_KEEP_FRAMING
+    state = {s: False for s in KLING_CUT_TRIM_ORDER}
+    box = {"action": ("ACTION: " + action + ".") if action else "", "dialogue": said(0)}
+
+    def assemble() -> str:
+        style = "" if state["style"] else (REAL_TAKE_STYLE_COMPACT if state["styleCompact"] else REAL_TAKE_STYLE)
+        start = first if state["startDuplicate"] else (
+            f"{first} {REAL_CUT_START_SENTENCE}" if from_prev else f"{REAL_CUT_START_SENTENCE} {first}")
+        tail = [fix.strip()] if str(fix or "").strip() else []  # 작업 133: QA 교정 문장(줄이지 않는다)
+        tail.append("No text, no subtitles, no speech bubbles.")
+        if not state["negative"]:
+            tail.append("NEGATIVE: " + REAL_CUT_NEGATIVE + ".")
+        rows = [REAL_REF_AI_NOTE, framing, box["action"], box["dialogue"], *[str(r) for r in kling.get("refs") or []],
+                "" if state["background"] else _fixed_head(plan, cut_location, real=True, compact=True),
+                _real_time_sentence(plan), start, style, *tail]
+        return "\n".join(r for r in rows if r)
+
+    prompt = assemble()
+    for step in KLING_CUT_TRIM_ORDER:
+        if _utf8_len(prompt) <= budget:
+            break
+        state[step] = True
+        prompt = assemble()
+    if _utf8_len(prompt) > budget and box["action"]:
+        # 마지막 수단: ACTION 을 문장 경계에서(그래도 모자라면 대사를 25 로, 147 문장 단위)
+        room = budget - (_utf8_len(prompt) - _utf8_len(box["action"]))
+        if room < _utf8_len("ACTION: ") + 40 and box["dialogue"]:
+            box["dialogue"] = said(25)
+            prompt = assemble()
+            room = budget - (_utf8_len(prompt) - _utf8_len(box["action"]))
+        box["action"] = vpoc_fal._trim_prompt(box["action"], room) if room > 0 else ""  # noqa: SLF001
+        prompt = assemble()
+    if _utf8_len(prompt) > budget:
+        prompt = vpoc_fal._trim_prompt(prompt, budget)  # noqa: SLF001 — 최후(거의 없음)
+    return prompt
+
+
 def _real_cut_prompt(plan: dict, seg: dict, *, model: str = "", prompt_max: int = 0, fix: str = "",
-                     bases: dict | None = None, lock: str = "", from_prev: bool = False) -> str:
+                     bases: dict | None = None, lock: str = "", from_prev: bool = False, kling: dict | None = None) -> str:
     """컷 단위 Kling 실사 프롬프트(작업 132, _segment_prompt real=True). 컷 1개.
 
     순서: 127 고정부(실사 화풍 + 같은 배경 문장, _fixed_head real) → 첫 프레임에서 이어 가기 → REAL_TAKE_STYLE(실사 통 테이크와
@@ -12499,8 +12650,7 @@ def _real_cut_prompt(plan: dict, seg: dict, *, model: str = "", prompt_max: int 
         REAL_REF_AI_NOTE,  # 작업 140: 첫 줄(머리라 줄이기에서 빠지지 않는다)
         *([str(lock).strip()] if str(lock or "").strip() else []),  # 작업 169: 샷 고정(구도 먼저, 없으면 줄 없음 — 지금과 같다)
         _fixed_head(plan, str(cut.get("locationEn") or ""), real=True),
-        "Start from the first frame (a live-action still) and continue the action smoothly, keeping the "
-        "same place, lighting, characters, positions and outfits.",
+        REAL_CUT_START_SENTENCE,
         REAL_TAKE_STYLE,
         # 작업 139: 시작 그림 구도 유지(카메라가 물러나지 않고 새 인물이 들어오지 않는다). 169: 시작 그림이 앞 샷 마지막 프레임이면
         # 그 구도를 지키지 않고 FRAMING 으로 간다.
@@ -12547,6 +12697,11 @@ def _real_cut_prompt(plan: dict, seg: dict, *, model: str = "", prompt_max: int 
             for ln in spoken)
 
     dialogue = _said(0)
+    if kling and roman:
+        # 작업 177: 샷 고정 재료가 있는 Kling 컷 = 새 짜임(MANDATORY → FRAMING → ACTION → DIALOGUE → @Element → BACKGROUND →
+        # 시작 그림 1줄 → STYLE). 재료가 없으면(고정 실패) 아래 지금 짜임 그대로.
+        return _kling_cut_layout(plan, cut, kling, action=_en(str(kling.get("action") or "")) or _en(action), said=_said,
+                                 model=model, prompt_max=prompt_max, fix=fix, from_prev=from_prev)
     rest = "\n".join(lines)
     body = "\n".join(p for p in (rest, dialogue) if p)
     budget = _prompt_budget(model)
@@ -12567,7 +12722,7 @@ def _real_cut_prompt(plan: dict, seg: dict, *, model: str = "", prompt_max: int 
 
 def _segment_prompt(plan: dict, seg: dict, *, first_segment: bool, model: str = "", real: bool = False,
                     prompt_max: int = 0, fix: str = "", bases: dict | None = None, lock: str = "",
-                    from_prev: bool = False) -> str:
+                    from_prev: bool = False, kling: dict | None = None) -> str:
     """구간 영상 프롬프트(간결, 설계자 2026-10-20). 목표 1,800자 이하 — 넘으면 시간표 뒤쪽을
     문장 경계에서 자른다(모델 maxLength 가 더 작으면 그 안으로). 첫 구간이 아니면 '앞 프레임에서
     이어진다' 첫 줄을 붙인다. 캐릭터 외형은 첫 프레임 이미지가 책임지므로 넣지 않는다.
@@ -12576,7 +12731,7 @@ def _segment_prompt(plan: dict, seg: dict, *, first_segment: bool, model: str = 
     """
     if real:
         return _real_cut_prompt(plan, seg, model=model, prompt_max=prompt_max, fix=fix, bases=bases, lock=lock,
-                                from_prev=from_prev)  # 작업 169: 샷 고정 · 앞 샷 프레임에서 시작
+                                from_prev=from_prev, kling=kling)  # 작업 169: 샷 고정 · 앞 샷 프레임에서 시작(177: kling 짜임)
     conti = plan.get("conti") or {}
     setting = conti.get("setting") or {}
     timeline = _cut_timeline(plan, seg)
