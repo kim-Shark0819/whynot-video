@@ -1084,6 +1084,21 @@ def create_blueprint(deps: VnewDependencies) -> Blueprint:
         except Exception as exc:  # noqa: BLE001
             return _fail(exc)
 
+    @bp.post("/p/<pid>/edit/retake/<mid>/compose")
+    @deps.require_auth
+    def edit_retake_compose(pid: str, mid: str):
+        # 작업 191: 이전 프롬프트 + 수정 사항 → 고른 컷 구간(in·out)만 영상→영상 초안. 번역 한 문장만 LLM(최대 20초) — 초안은 바로 done(200).
+        try:
+            from . import edit, retake  # noqa: PLC0415
+
+            edit.require_enabled("vnew.retake.compose")
+            retake.require_enabled("vnew.retake.compose")
+            owner = _project_for(pid, write=True)
+            payload = _edit_body("vnew.retake.compose")
+            return jsonify({"ok": True, "retake": retake.compose(owner, pid, mid, payload)})
+        except Exception as exc:  # noqa: BLE001
+            return _fail(exc)
+
     @bp.post("/p/<pid>/edit/retake/<mid>")
     @deps.require_auth
     def edit_retake_submit(pid: str, mid: str):

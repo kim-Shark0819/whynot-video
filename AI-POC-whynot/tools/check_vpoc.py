@@ -42019,10 +42019,11 @@ def check_vnew_edit_retake() -> None:
         widths = [int(w) for w in re.findall(r"(?<![-\w])(?:min-|max-)?width: (\d+)px", section)]
         states = [sel for sel in (".vnew-edit-fix-meter.is-over {", ".vnew-edit-fix-run.is-failed {", ".vnew-edit-fix-run.is-completed {",
                                   ".vnew-edit-fix-version.is-current {") if sel not in section]
+        # 작업 192: + 4(프롬프트 준비 길 — vnew-edit-fix-selinfo · -range-line · -composed · -change, 정의는 CSS 192 구역)
         expect("rtk-k", [start > 0, 0 < js_start < js_end, sorted(used - defined), states, "overflow-x" in section, max(widths or [0]) <= 960,
                          css.endswith("}\n"), "\r" in css, "\r" in vjs, vjs.count("⑦ AI로 고치기(지시서 116)"), len(used)],
-               [True, True, [], [], False, True, True, False, False, 1, 59],
-               "CSS 116 구역: 화면이 쓰는 클래스 59개(116 40 + 보완 1 9 + 지시서 119 고르기 창 10) 정의·가로 스크롤 없음·고정 너비 960px 이하·LF·끝 줄바꿈, "
+               [True, True, [], [], False, True, True, False, False, 1, 63],
+               "CSS 116 구역: 화면이 쓰는 클래스 63개(116 40 + 보완 1 9 + 지시서 119 고르기 창 10 + 작업 192 4) 정의·가로 스크롤 없음·고정 너비 960px 이하·LF·끝 줄바꿈, "
                "JS 소구역 표시 하나")
     except Exception as exc:  # noqa: BLE001
         bad.append("(rtk-k) 예외: " + repr(exc) + "\n" + _tb.format_exc()[:1200])
@@ -50186,6 +50187,20 @@ def check_vnew_edit_cut_fix_149() -> None:
 # 작업 143: 새 기본값(VNEW_LOCATION_REAL_FROM_WEBTOON 켬)에서는 실사 뷰가 웹툰 뷰 편집(_seedream_edit)이 된다. 기존 공간 시트
 # 검사(check_vnew_locations·125·128)는 작업 125 의 text-to-image 경로(참고 0장·원장 모델·호출 수·동시성)를 보므로 부르는 줄에서
 # 끔으로 고정한다(기대값은 그대로). 켬 경로는 check_vnew_location_real_edit_143 이 본다. 끔이면 유료 fal 경로도 타지 않는다.
+def _run_retake_full(check) -> None:
+    """작업 191: `check()` 를 retake.FULL_SCOPE_ALLOWED=True(옛 원본 칸 전체 길 — scopes 에 full, scope 없는 바디 = full, 칸 전체 클립 = "whole")로
+    부르고 되돌린다. 116·보완 1·119·131 등 옛 검사의 기대값은 그대로다. 191 기본(False) 동작은 check_vnew_retake_compose_191 이 본다."""
+    sys.path.insert(0, str(ROOT / "app"))
+    from src.vnew import retake as _rt  # noqa: PLC0415
+
+    saved = _rt.FULL_SCOPE_ALLOWED
+    _rt.FULL_SCOPE_ALLOWED = True
+    try:
+        check()
+    finally:
+        _rt.FULL_SCOPE_ALLOWED = saved
+
+
 def _run_loc_edit_off(check) -> None:
     """`check()` 를 VNEW_LOCATION_REAL_FROM_WEBTOON=False 로 부르고 설정을 되돌린다."""
     with _pin_vnew(VNEW_LOCATION_REAL_FROM_WEBTOON=False):
@@ -62609,6 +62624,995 @@ def check_vnew_edit_variant_tabs_190() -> None:
 
 
 
+def check_vnew_retake_compose_191() -> None:
+    """작업 191 — ⑦ AI로 고치기 = 이전 프롬프트 + 수정 사항 → 고른 컷 구간만 영상→영상(compose). 가짜 LLM·fal·저장소·원장, 유료 0.
+
+    (cp-a) compose 구간(컷 2): 200·초안 done(kind compose·framesUsed 0·resultKo ""·changesKo [요청]·format template·v2vFormat reference·range),
+           기준 프롬프트 줄 그대로 + RANGE + EDIT(번역 한 문장 + 한국어 원문), 참고 표시 = 본보기, check_prompt 통과, 번역 호출 1(번역 문구만·기준
+           프롬프트 안 보냄)·원장 -translate 1줄, 새 프롬프트 LLM 0·영상 제출 0, 보기 fullScopeAllowed false·scopes·composeModels·기본 모델
+    (cp-b) 번역 실패·시간 초과·한글 답 → 한국어 원문만(초안 done·문제 0), 시간 초과 뒤 끝난 호출도 원장 계상
+    (cp-c) 원본 칸 전체 거절: compose scope full·제출 scope full·scope 없는 제출·미리보기 full → 400 RetakeBadRange(고정 문구), 지난 버전 줄 읽힘
+    (cp-d) 칸 전체를 덮는 클립(0–15·한 프레임 넘침) = 칸 전체 구간(RANGE 줄 없음)·보기 구간, 짧은 구간 400
+    (cp-e) 영상→영상 못 하는 모델: 목록 밖·뺀 모델 400 RetakeBadModel, 본보기에 @Video1 없음 400, 시작 그림 모델·구간 못 받는 모델·기본 모델 고르기(순수)
+    (cp-f) compose 초안으로 제출: 202·버전 range·template·견적 = draft.plan.usd·원장 영상 금액·녹화 구간만 자름(칸 전체 아님)·새 재료 버전, 금액 다르면
+           409 CostMismatch, 진행 중이면 409 RetakeRunning, 초안 running 이면 compose 409 RetakeDrafting, 칸 전체 구간 초안 제출
+    (cp-g) _compose_prompt 순수: ASSETS 바꾸기·형식 밖 참고 표시 글로·모자란 표시 REFERENCES·앞선 compose 줄·꺾쇠·상한 자르기(EDIT·EXTRA 그대로)
+    (cp-h) 라우트·끔 404·새 kind 없음(USER_FACING 그대로)·LF
+    fix1: compose 초안·버전 videoSource result — @Video1 = 고칠 재료 영상(결과·지난 버전 파일)의 in–out(가짜 _fetch_bytes·_cut_clip·_pad_clip),
+          프롬프트 맨 앞 "EDIT: Edit @Video1. Keep everything identical … change only"·RANGE·CONTEXT, 길이·견적·원장 = out − in, 버전 필드
+          (videoSource·seconds·sentSeconds·range in/out·start/end), 입력 영상 data URI(저장소 put 0), 옛 template 버전(표시 없음)은 프리비즈 녹화
+    """
+    sys.path.insert(0, str(ROOT / "app"))
+    import threading as _threading  # noqa: PLC0415
+    import traceback as _tb  # noqa: PLC0415
+
+    bad: list[str] = []
+    seen: set[str] = set()
+    logs = _LogCapture()
+    owner = _RTK_OWNER
+
+    def expect(group: str, got, want, what: str) -> None:
+        seen.add(group)
+        if got != want:
+            bad.append(f"({group}) {what}\n      결과 {got!r}\n      기대 {want!r}")
+
+    def err_of(resp) -> tuple[int, str, str]:
+        body = (resp.get_json(silent=True) or {}).get("error") or {}
+        return resp.status_code, str(body.get("type") or ""), str(body.get("message") or "")
+
+    saved_tempdir = tempfile.tempdir
+    private_tmp = tempfile.mkdtemp(prefix="cp191-tmp-")
+    tempfile.tempdir = private_tmp
+    try:
+        with _guard_real_llm() as real_calls, logs, _Rtk1Env(owner) as env, _pin_vnew(
+                VNEW_FX=True, VNEW_CASTING=True, VNEW_TAKE_REAL=True, VNEW_GEN_PARALLEL=2, POLL_INTERVAL_S=0, VNEW_TAKE_AUDIO=True,
+                VNEW_TAKE_RESOLUTION="480p", VNEW_PREPARE_STALE_S=300, VNEW_EDIT=True, VNEW_EDIT_RETAKE=True):
+            genmod, rt, edit = env.genmod, env.rtmod, env.editmod
+            from src.vpoc import errors as vpoc_errors  # noqa: PLC0415
+
+            client = env.client()
+            kl = genmod.vnew_settings.VNEW_PREVIZ_EDIT_MODEL
+            lr = _LR_ENDPOINT
+            tr_calls: list[dict] = []
+            tr_mode: dict = {"reply": {"changeEn": "Make her coat red."}, "error": None, "gate": None}
+
+            def fake_translate(*, system_text: str, blocks: list[dict], model: str):
+                tr_calls.append({"system": system_text, "blocks": blocks, "model": model})
+                if tr_mode["gate"] is not None:
+                    tr_mode["gate"].wait(5)
+                if tr_mode["error"] is not None:
+                    raise tr_mode["error"]
+                return dict(tr_mode["reply"]), {"model": model, "inputTokens": 120, "outputTokens": 20}
+
+            env.set(rt, "_translate", fake_translate)
+
+            def compose(pid: str, mid: str, body):
+                return client.post(f"/api/vnew/p/{pid}/edit/retake/{mid}/compose", json=body)
+
+            def submit(pid: str, mid: str, body):
+                return client.post(f"/api/vnew/p/{pid}/edit/retake/{mid}", json=body)
+
+            def preview(pid: str, mid: str, body):
+                return client.post(f"/api/vnew/p/{pid}/edit/retake/{mid}/preview", json=body)
+
+            def rv_get(pid: str, mid: str, **query):
+                tail = "&".join(f"{k}={v}" for k, v in query.items())
+                return client.get(f"/api/vnew/p/{pid}/edit/retake/{mid}" + (f"?{tail}" if tail else ""))
+
+            def mid_of(pid: str, label: str) -> str:
+                mats = (client.get(f"/api/vnew/p/{pid}/edit").get_json() or {}).get("materials") or []
+                return next((m["mid"] for m in mats if m["label"] == label and m.get("group") == "current"), "")
+
+            def draft_of(resp) -> dict:
+                return ((resp.get_json() or {}).get("retake") or {}).get("draft") or {}
+
+            def template(pid: str, model: str, span: dict, cut_ids: list) -> str:
+                return genmod.retake_template(owner, pid, str(env.gen(pid)["genId"]), variant="webtoon", cell_id="take1", model=model,
+                                              span=span, cut_ids=cut_ids)["prompt"]
+
+            def label_of(line: str) -> str:
+                match = rt._LABEL_RE.match(line)  # noqa: SLF001
+                return match.group(1) if match else ""
+
+            def base_kept(base: str, prompt: str) -> list[str]:
+                """기준 줄 중 자르기 대상(SHRINK_TRIM_LINES)·참고 표시 정의 줄(_is_def)이 아닌 줄이 프롬프트에 같은 순서로 그대로 있는지 — 없는 줄 목록."""
+                lines = prompt.split("\n")
+                at, lost = 0, []
+                for line in base.split("\n"):
+                    if label_of(line) in rt.SHRINK_TRIM_LINES or rt._is_def(line):  # noqa: SLF001
+                        continue
+                    try:
+                        at = lines.index(line, at) + 1
+                    except ValueError:
+                        lost.append(line[:60])
+                return lost
+
+            def defs(text: str) -> list[str]:
+                return [line for line in text.split("\n") if rt._is_def(line)]  # noqa: SLF001
+
+            # ================= (cp-a) compose 구간(컷 2) =================
+            pid_t = "prj_cp191_t"
+            env.take_done(client, pid_t)
+            label_t = "테이크 1 · 컷 1–2"
+            mid_t = mid_of(pid_t, label_t)
+            gen_t = str(env.gen(pid_t)["genId"])
+            base_t = env.gen(pid_t)["units"][0]["webtoon"]["promptEn"]
+            tmpl_r = template(pid_t, lr, {"start": 7.5, "end": 15.0}, ["c2"])
+            refs_r = sorted(rt._refs(tmpl_r), key=rt._ref_sort)  # noqa: SLF001
+            labels_t = [n for n in rt._labels(base_t) if n not in rt.COMPOSE_LABELS]  # noqa: SLF001
+            led0, req0, writes0 = len(env.ledger), len(env.requests), len(env.store.writes)
+            env.llm_calls.clear()
+            logs.clear()
+            r_a = compose(pid_t, mid_t, {"requestKo": "코트를 빨갛게", "in": 7.5, "out": 15})
+            v_a = (r_a.get_json() or {}).get("retake") or {}
+            d_a = v_a.get("draft") or {}
+            p_a = str(d_a.get("prompt") or "")
+            lines_a = p_a.split("\n")
+            edit_a = rt.COMPOSE_RESULT_EDIT_HEAD + "Make her coat red. (Korean original: \u201c코트를 빨갛게\u201d)"
+            range_a = ("RANGE: @Video1 is 7.5-15.0s of the shot in the prompt below; the new video is 7.5s long, the same length as "
+                       "@Video1.")
+            expect("cp-a", [r_a.status_code, d_a.get("status"), d_a.get("kind"), d_a.get("framesUsed"), d_a.get("resultKo"), d_a.get("changesKo"),
+                            d_a.get("format"), d_a.get("v2vFormat"), d_a.get("scope"), d_a.get("model"), d_a.get("path"), d_a.get("range"),
+                            (d_a.get("plan") or {}).get("usd"), d_a.get("maxBytes"), d_a.get("problems"), d_a.get("translated"),
+                            d_a.get("changeEn"), d_a.get("promptBytes") == len(p_a.encode())],
+                   [200, "done", "compose", 0, "", ["코트를 빨갛게"], "template", "reference", "range", lr, "take",
+                    {"in": 7.5, "out": 15.0, "start": 7.5, "end": 15.0, "seconds": 7.5, "cutIds": ["c2"],
+                     "cuts": [{"cutId": "c2", "no": 2, "start": 0.0, "end": 7.5}]}, 1.64, 4000, [], True, "Make her coat red.", True],
+                   "compose 컷 2(7.5–15초): 200·초안 done 바로(kind compose·프레임 0·결과 설명 없음·변경 = 요청)·원래 모델 참고 영상 형식·구간·견적 $1.64")
+            st_a = env.state(pid_t)["cells"]["webtoon:take1"]["draft"]
+            swapped_a = set(defs(base_t)) != set(defs(tmpl_r))
+            labels_a = [n for n in rt._labels(p_a) if n in labels_t]  # noqa: SLF001
+            head_a = [line for line in lines_a[:4] if label_of(line) in rt.COMPOSE_LABELS]
+            expect("cp-a", [base_kept(base_t, p_a), lines_a[0] == edit_a + (" " + rt.COMPOSE_TAGS_NOTE_RESULT if swapped_a else ""),
+                            lines_a[1] == range_a, sorted(rt._refs(p_a), key=rt._ref_sort) == refs_r, "@Video1" in refs_r,  # noqa: SLF001
+                            rt.check_prompt(p_a, base_t, {"maxBytes": 4000, "refs": refs_r, "labels": labels_a, "against": "template"}),
+                            len(p_a.encode()) <= 4000, st_a.get("formatRefs") == refs_r, st_a.get("formatLabels") == labels_a,
+                            st_a.get("claim"), swapped_a or p_a == "\n".join(head_a) + "\n" + base_t or bool(d_a.get("shrunk")),
+                            head_a[-1] == rt.COMPOSE_CONTEXT_LINE, d_a.get("videoSource"), st_a.get("videoSource"),
+                            (d_a.get("plan") or {}).get("seconds"),
+                            p_a.split("\n")[0].startswith("EDIT: Edit @Video1. Keep everything identical to @Video1 (characters, outfits, art "
+                                                          "style, lighting, background, camera, composition, motion, timing); change only: ")],
+                   [[], True, True, True, True, [], True, True, True, "", True, True, "result", "result", 7.5, True],
+                   "프롬프트(videoSource result) = EDIT(\"Edit @Video1. Keep everything identical … change only\" + 번역 + 한국어 원문)·RANGE(@Video1 = 그 "
+                   "구간·길이 같음)·CONTEXT 먼저, 그 뒤 기준 줄 그대로(넘으면 꾸밈 줄만 자름), 참고 표시 = 본보기, check_prompt 0, "
+                   "저장 formatRefs·formatLabels(compose 줄 뺀 기준 항목)·videoSource result·견적 길이 = out − in")
+            tr_a = tr_calls[-1] if tr_calls else {"system": "", "blocks": [], "model": ""}
+            led_a = env.ledger[led0:]
+            expect("cp-a", [len(tr_calls), tr_a["system"] == rt.TRANSLATE_SYSTEM, tr_a["blocks"],
+                            any(base_t[:80] in str(b.get("text")) for b in tr_a["blocks"]), tr_a["model"] == genmod.vnew_settings.VNEW_RETAKE_MODEL,
+                            [(e["key"], e.get("text"), e.get("input_tokens"), e.get("output_tokens")) for e in led_a], len(env.llm_calls),
+                            len(env.requests) - req0, sorted(set(env.store.writes[writes0:])), real_calls,
+                            [m for m in logs.messages() if "Make her coat" in m or "코트를" in m],
+                            len(logs.messages("vnew.retake.compose", level=logging.INFO))],
+                   [1, True, [{"text": "<user_request>\n코트를 빨갛게\n</user_request>"}], False, True,
+                    [("vnew-retake-" + str(d_a.get("id")) + "-translate", True, 120, 20)], 0, 0, [rt.retakes_key(owner, pid_t, gen_t)], [], [], 1],
+                   "번역 호출 1(번역 전용 문구·요청만 — 기준 프롬프트 안 보냄)·원장 text 1줄(-translate), 새 프롬프트 LLM 0·영상 제출 0·쓰기 retakes.json 만·"
+                   "로그에 사용자 글 없음")
+            expect("cp-a", [v_a.get("fullScopeAllowed"), v_a.get("scopes"), v_a.get("composeDefaultModel"),
+                            [m for m in (lr, kl) if m in (v_a.get("composeModels") or [])], v_a.get("estimate", {}).get("usd") is not None,
+                            [(v.get("n"), v.get("scope")) for v in v_a.get("versions") or []]],
+                   [False, ["range"], lr, [lr, kl], True, [(1, "full")]],
+                   "보기: fullScopeAllowed false·scopes range 만·compose 기본 = 원래 모델·영상→영상 모델 목록, 원본 줄(scope full)은 그대로 읽힘")
+
+            # 구간 안 컷에 한 사람만 나오면 그림 번호가 바뀐다 → 기준의 참고 정의 줄을 본보기 정의 줄로(나머지 줄은 그대로)
+            pid_v = "prj_cp191_v"
+            env.take_done(client, pid_v)
+
+            def only_a1(plan):
+                for entry in plan["previz"]["scenes"][0]["timeline"]:
+                    if entry["cutId"] == "c2":
+                        entry["actors"] = [{"id": "a1"}]
+
+            env.planmod.mutate_plan(owner, pid_v, only_a1)
+            mid_v = mid_of(pid_v, label_t)
+            base_v = env.gen(pid_v)["units"][0]["webtoon"]["promptEn"]
+            tmpl_v = template(pid_v, lr, {"start": 7.5, "end": 15.0}, ["c2"])
+            d_v = draft_of(compose(pid_v, mid_v, {"requestKo": "코트를 빨갛게", "in": 7.5, "out": 15}))
+            p_v = str(d_v.get("prompt") or "")
+            expect("cp-a", [set(defs(base_v)) != set(defs(tmpl_v)), [l for l in defs(p_v)] == defs(tmpl_v), base_kept(base_v, p_v),
+                            sorted(rt._refs(p_v), key=rt._ref_sort) == sorted(rt._refs(tmpl_v), key=rt._ref_sort),  # noqa: SLF001
+                            len(rt._refs(base_v)) > len(rt._refs(tmpl_v)), p_v.split("\n")[0].endswith(rt.COMPOSE_TAGS_NOTE_RESULT),  # noqa: SLF001
+                            d_v.get("problems"), d_v.get("status")],
+                   [True, True, [], True, True, True, [], "done"],
+                   "구간(컷 2) 인물 1명: 그림 번호가 줄어 기준 정의 줄 → 본보기 정의 줄(나머지 줄 그대로)·참고 표시 = 본보기·EDIT 에 정의 줄 우선 안내·문제 0")
+            # ================= (cp-b) 번역 실패 → 한국어만 =================
+            def ko_only(request: str) -> str:
+                return rt.COMPOSE_RESULT_EDIT_HEAD + "\u201c" + request + "\u201d"
+
+            led_b0 = len(env.ledger)
+            tr_mode.update(error=RuntimeError("bedrock down 코트를"))
+            d_b1 = draft_of(compose(pid_t, mid_t, {"requestKo": "코트를 파랗게", "in": 7.5, "out": 15}))
+            tr_mode.update(error=None, reply={"changeEn": "코트를 파랗게 해 주세요"})
+            d_b2 = draft_of(compose(pid_t, mid_t, {"requestKo": "코트를 파랗게", "in": 7.5, "out": 15}))
+            tr_mode.update(reply={"changeEn": "   "})
+            d_b3 = draft_of(compose(pid_t, mid_t, {"requestKo": "코트를 파랗게", "in": 7.5, "out": 15}))
+            led_b = env.ledger[led_b0:]
+            gate = _threading.Event()
+            tr_mode.update(reply={"changeEn": "Make the coat blue."}, gate=gate)
+            env.set(rt, "TRANSLATE_TIMEOUT_S", 0.05)
+            led_b4 = len(env.ledger)
+            r_b4 = compose(pid_t, mid_t, {"requestKo": "코트를 파랗게", "in": 7.5, "out": 15})
+            d_b4 = draft_of(r_b4)
+            llm_b4 = env.state(pid_t)["cells"]["webtoon:take1"]["draft"].get("llmModel")
+            gate.set()
+            for _ in range(200):
+                if len(env.ledger) > led_b4:
+                    break
+                _time_sleep(0.01)
+            tr_mode.update(gate=None)
+            env.set(rt, "TRANSLATE_TIMEOUT_S", 20.0)
+            expect("cp-b", [[(d.get("status"), d.get("translated"), d.get("changeEn"), d.get("problems"),
+                              str(d.get("prompt") or "").split("\n")[0].startswith(ko_only("코트를 파랗게"))) for d in (d_b1, d_b2, d_b3, d_b4)],
+                            [e["key"].rsplit("-", 1)[-1] for e in led_b], [e["key"] for e in env.ledger[led_b4:]] ==
+                            ["vnew-retake-" + str(d_b4.get("id")) + "-translate"], llm_b4,
+                            [m.split("translate=")[1].split(" ")[0] for m in logs.messages("vnew.retake.compose", level=logging.INFO)][-4:]],
+                   [[("done", False, "", [], True)] * 4, ["translate", "translate"], True, "", ["RuntimeError:", "ok", "ok", "timeout"]],
+                   "번역 예외·한글 답·빈 답·시간 초과(0.05초) → 한국어 원문만으로 done(문제 0), 원장은 끝난 호출만(예외 0줄)·시간 초과 뒤 끝난 호출도 1줄")
+            expect("cp-b", [rt.TRANSLATE_TIMEOUT_S, rt._clean_change_en("Use @Image9 and https://x.y/z <range> coat.", {"@Image1"}, real=False),  # noqa: SLF001
+                            rt._clean_change_en("Webtoon style coat.", set(), real=True), rt._clean_change_en("Webtoon style coat.", set(), real=False)],  # noqa: SLF001
+                   [20.0, "Use Image9 and coat.", "", "Webtoon style coat."],
+                   "번역 상한 20초·정리(형식 밖 참고 표시 글로·주소·구분 표시 제거)·실사 webtoon 이면 버림")
+
+            # ================= (cp-c) 원본 칸 전체 거절 =================
+            req_c0 = len(env.requests)
+            tr_mode.update(reply={"changeEn": "Make her coat red."})
+            d_c = draft_of(compose(pid_t, mid_t, {"requestKo": "코트를 빨갛게", "in": 7.5, "out": 15}))
+            full_errs = [err_of(compose(pid_t, mid_t, {"requestKo": "x", "scope": "full", "in": 0, "out": 15})),
+                         err_of(submit(pid_t, mid_t, {"prompt": d_c.get("prompt"), "requestKo": "코트를 빨갛게", "confirmUsd": 1.64,
+                                                      "draftId": d_c.get("id"), "scope": "full"})),
+                         err_of(preview(pid_t, mid_t, {"requestKo": "x", "scope": "full"}))]
+            no_scope = err_of(submit(pid_t, mid_t, {"prompt": d_c.get("prompt"), "requestKo": "코트를 빨갛게", "confirmUsd": 1.64,
+                                                    "draftId": d_c.get("id")}))
+            no_range = [err_of(compose(pid_t, mid_t, {"requestKo": "x"}))[:2], err_of(compose(pid_t, mid_t, {"requestKo": "x", "in": "a", "out": 3}))[:2],
+                        err_of(compose(pid_t, mid_t, {"requestKo": "", "in": 0, "out": 3}))[:2]]
+            expect("cp-c", [full_errs, no_scope, no_range, len(env.requests) - req_c0],
+                   [[(400, "RetakeBadRange", "선택한 컷 구간만 고칠 수 있습니다.")] * 3, (400, "RetakeBadRange", rt.BAD_RANGE_TEXT),
+                    [(400, "RetakeBadRange"), (400, "RetakeBadRange"), (400, "RetakeBadRequest")], 0],
+                   "원본 칸 전체: compose·제출·미리보기 scope full → 400 RetakeBadRange \"선택한 컷 구간만 고칠 수 있습니다.\", scope 없는 제출(구간 없음)·"
+                   "in/out 없음·틀림 400, 빈 요청 400, 영상 제출 0")
+
+            # ================= (cp-d) 칸 전체를 덮는 클립 = 칸 전체 구간 =================
+            whole = []
+            for clip in ((0, 15), (0, 15.03), (-0.02, 15)):
+                d_w = draft_of(compose(pid_t, mid_t, {"requestKo": "코트를 빨갛게", "in": clip[0], "out": clip[1]}))
+                whole.append((d_w.get("status"), d_w.get("scope"), (d_w.get("range") or {}).get("start"), (d_w.get("range") or {}).get("end"),
+                              (d_w.get("range") or {}).get("cutIds"), any(l.startswith("RANGE:") for l in str(d_w.get("prompt") or "").split("\n")),
+                              d_w.get("problems")))
+            d_whole = d_w
+            rv_whole = rv_get(pid_t, mid_t, **{"in": "0", "out": "15"}).get_json() or {}
+            rv_short = err_of(compose(pid_t, mid_t, {"requestKo": "x", "in": 3, "out": 3.5}))
+            env.set(rt, "FULL_SCOPE_ALLOWED", True)
+            rv_old = rv_get(pid_t, mid_t, **{"in": "0", "out": "15"}).get_json() or {}
+            d_old_whole = draft_of(compose(pid_t, mid_t, {"requestKo": "코트를 빨갛게", "in": 0, "out": 15}))
+            env.set(rt, "FULL_SCOPE_ALLOWED", False)
+            expect("cp-d", [whole, ((rv_whole.get("range") or {}).get("start"), (rv_whole.get("range") or {}).get("end"), rv_whole.get("rangeNote"),
+                                    rv_whole.get("scopes")), rv_short,
+                            (rv_old.get("range"), rv_old.get("rangeNote") == rt.RANGE_NOTES["whole"], rv_old.get("scopes"), rv_old.get("fullScopeAllowed")),
+                            ((d_old_whole.get("range") or {}).get("end"), d_old_whole.get("scope"))],
+                   [[("done", "range", 0.0, 15.0, ["c1", "c2"], False, [])] * 3, (0.0, 15.0, "", ["range"]),
+                    (400, "RetakeBadRange", rt.COMPOSE_SHORT_TEXT), (None, True, ["full"], True), (15.0, "range")],
+                   "칸 전체 클립(0–15·한 프레임 넘침·앞) = 칸 전체 구간(컷 1·2, RANGE 줄 없음)·보기 구간, 1초 미만 400, 옛 길(FULL_SCOPE_ALLOWED) 보기는 "
+                   "그대로 whole·compose 는 그때도 구간")
+
+            # ================= (cp-e) 영상→영상 못 하는 모델 =================
+            hidden_e = err_of(compose(pid_t, mid_t, {"requestKo": "x", "in": 7.5, "out": 15, "model": _RTK1_NOVID}))
+            unknown_e = err_of(compose(pid_t, mid_t, {"requestKo": "x", "in": 7.5, "out": 15, "model": "fal-ai/nope"}))
+            type_e = err_of(compose(pid_t, mid_t, {"requestKo": "x", "in": 7.5, "out": 15, "model": 7}))[:2]
+            real_tmpl = genmod.retake_template
+            env.set(genmod, "retake_template", lambda *a, **k: dict(real_tmpl(*a, **k), prompt="STYLE: no video ref @Image1."))
+            novid_e = err_of(compose(pid_t, mid_t, {"requestKo": "x", "in": 7.5, "out": 15, "model": kl}))
+            env.set(genmod, "retake_template", real_tmpl)
+            d_kl = draft_of(compose(pid_t, mid_t, {"requestKo": "코트를 빨갛게", "in": 7.5, "out": 15, "model": "fal:" + kl}))
+
+            def row(mid: str, path: str, fmt: str, ok: bool, original: bool = False) -> dict:
+                return {"id": mid, "path": path, "format": fmt, "original": original, "range": {"ok": ok}}
+
+            def pick_err(rows: list[dict], model: str):
+                try:
+                    return rt._compose_row({"models": rows}, model)["id"]  # noqa: SLF001
+                except Exception as exc:  # noqa: BLE001
+                    return (getattr(exc, "kind", ""), getattr(exc, "status", None), getattr(exc, "message", ""))
+
+            kc_rows = [row("kling-i2v", rt.KCUT_PATH, "none", False, True), row("edit", "cut", "elements", False), row("seed", "take", "reference", True)]
+            expect("cp-e", [hidden_e, unknown_e[:3], type_e, novid_e,
+                            (d_kl.get("status"), d_kl.get("model"), d_kl.get("v2vFormat"), d_kl.get("maxBytes"),
+                             sorted(rt._refs(str(d_kl.get("prompt") or "")), key=rt._ref_sort) ==  # noqa: SLF001
+                             sorted(rt._refs(template(pid_t, kl, {"start": 7.5, "end": 15.0}, ["c2"])), key=rt._ref_sort),  # noqa: SLF001
+                             [p for p in d_kl.get("problems") or [] if "바이트입니다" not in p],
+                             (int(d_kl.get("promptBytes") or 0) > 2500) == bool(d_kl.get("problems"))),
+                            [pick_err(kc_rows, m) for m in ("kling-i2v", "edit", "seed", "")],
+                            pick_err([row("a", "cut", "elements", False, True)], ""), pick_err([row("a", "cut", "elements", True, True), kc_rows[2]], "")],
+                   [(400, "RetakeBadModel", rt.BAD_MODEL_TEXT), (400, "RetakeBadModel", rt.BAD_MODEL_TEXT), (400, "RetakeBadModel"),
+                    (400, "RetakeBadModel", rt.NO_V2V_RANGE_TEXT), ("done", kl, "elements", 2500, True, [], True),
+                    [("RetakeBadModel", 400, rt.NO_V2V_START_TEXT), ("RetakeBadModel", 400, rt.NO_V2V_RANGE_TEXT), "seed", "seed"],
+                    ("RetakeBadModel", 400, rt.NO_V2V_MODEL_TEXT), "a"],
+                   "모델: 뺀 모델·목록 밖·꼴 틀림 400, 본보기에 @Video1 없음 400, Kling(인물 요소) 고르면 그 형식 참고 표시·상한 2,500(넘으면 바이트 문제만 — "
+                   "사용자가 줄여 낸다), 시작 그림 모델·구간 "
+                   "못 받는 모델 400(고정 이유), 기본 = 원래 모델이 되면 그것·아니면 처음 되는 모델·없으면 400")
+
+            # ================= (cp-f) compose 초안으로 제출 =================
+            tr_mode.update(reply={"changeEn": "Make her coat red."})
+            d_f = draft_of(compose(pid_t, mid_t, {"requestKo": "코트를 빨갛게", "in": 7.5, "out": 15}))
+            body_f = {"prompt": d_f.get("prompt"), "requestKo": "코트를 빨갛게", "confirmUsd": (d_f.get("plan") or {}).get("usd"),
+                      "draftId": d_f.get("id"), "scope": "range", "in": 7.5, "out": 15}
+            cost_f = err_of(submit(pid_t, mid_t, dict(body_f, confirmUsd=9.99)))[:2]
+            led_f, req_f, cut_f = len(env.ledger), len(env.requests), len(env.cut_calls)
+            src_t = rt._target(env.plan(pid_t), env.gen(pid_t), mid_t, env.state(pid_t))["sourceKey"]  # noqa: SLF001 — 타임라인 클립이 재생하는 파일
+            fetched_t = (b"CLIP:" + src_t.encode())[:40]  # 가짜 _fetch_bytes(저장소에 없는 키 = CLIP:키)
+            puts_f = len(env.store.puts)
+            r_f = submit(pid_t, mid_t, body_f)
+            v_f = env.state(pid_t)["cells"]["webtoon:take1"]["versions"][-1]
+            p_f = (env.requests[-1].get("payload") or {}) if len(env.requests) > req_f else {}
+            mats_f = (client.get(f"/api/vnew/p/{pid_t}/edit").get_json() or {}).get("materials") or []
+            mat_f = next((m for m in mats_f if m.get("group") == "retake"), {})
+            expect("cp-f", [cost_f, r_f.status_code,
+                            (v_f.get("status"), v_f.get("n"), v_f.get("scope"), v_f.get("format"), v_f.get("model"), (v_f.get("range") or {}).get("start"),
+                             (v_f.get("range") or {}).get("end"), v_f.get("cutIds"), v_f.get("usd"), v_f.get("prompt") == d_f.get("prompt"),
+                             v_f.get("formatRefs") == d_f.get("formatRefs") if "formatRefs" in d_f else v_f.get("formatRefs") == refs_r),
+                            env.cut_calls[cut_f:], p_f.get("prompt") == d_f.get("prompt"), p_f.get("duration"),
+                            [(e.get("kind"), e.get("usd")) for e in env.ledger[led_f:]],
+                            (mat_f.get("label"), (mat_f.get("retake") or {}).get("range"))],
+                   [(409, "CostMismatch"), 202,
+                    ("completed", 2, "range", "template", lr, 7.5, 15.0, ["c2"], 1.64, True, True),
+                    [(fetched_t, 7.5, 15.0)], True, "8", [("video", 1.6448)],
+                    ("테이크 1 · 컷 2 v2", {"start": 7.5, "end": 15.0})],
+                   "compose 초안 제출(기존 submit): 금액 다르면 409, 202·버전 v2 range·template·견적 $1.64 = draft.plan.usd·원장 영상 $1.6448(같은 견적의 4자리), 영상 입력은 "
+                   "고칠 재료 영상(결과 파일) 7.5–15초만 자름(프리비즈 녹화 아님)·보낸 프롬프트 = 초안, 새 재료 버전(그 구간)")
+            log_f = (env.log(pid_t).get("webtoon:take1") or [{}])[-1]
+            view_f = rv_get(pid_t, mid_t).get_json() or {}
+            row_f = next((r for r in view_f.get("versions") or [] if r.get("n") == 2), {})
+            row_1 = next((r for r in view_f.get("versions") or [] if r.get("n") == 1), {})
+            expect("cp-f", [v_f.get("videoSource"), v_f.get("seconds"), v_f.get("sentSeconds"), v_f.get("trimTo"), v_f.get("fromKey") == src_t,
+                            (v_f.get("range") or {}).get("in"), (v_f.get("range") or {}).get("out"),
+                            {k: (log_f.get("params") or {}).get(k) for k in ("videoSource", "sourceIn", "sourceOut", "trimTo")},
+                            log_f.get("videoKeys") == [src_t],
+                            (row_f.get("videoSource"), row_f.get("seconds"), row_f.get("sentSeconds"), row_f.get("sourceRange"), row_f.get("range")),
+                            "videoSource" in row_1, (p_f.get("video_urls") or [""])[0].startswith("data:video/mp4;base64,"),
+                            env.store.puts[puts_f:]],
+                   ["result", 7.5, (d_f.get("plan") or {}).get("sentSeconds"), 7.5, True, 7.5, 15.0,
+                    {"videoSource": "result", "sourceIn": 7.5, "sourceOut": 15.0, "trimTo": 7.5}, True,
+                    ("result", 7.5, (d_f.get("plan") or {}).get("sentSeconds"), {"in": 7.5, "out": 15.0}, {"start": 7.5, "end": 15.0}),
+                    False, True, []],
+                   "버전 필드(화면 192): videoSource result·seconds = out − in·sentSeconds = 보낸 길이·trimTo·fromKey = 그 재료·range in/out(재료 초)·"
+                   "start/end(칸 시각), 기록 params videoSource·sourceIn/Out·videoKeys = 재료 키, 보기 버전 줄 sourceRange, 원본 줄은 표시 없음, "
+                   "입력 영상은 data URI(저장소에 올리지 않음)")
+            # 진행 중·초안 running·칸 전체 구간 초안 제출
+            d_g = draft_of(compose(pid_t, mid_t, {"requestKo": "코트를 빨갛게", "in": 0, "out": 15}))
+            env.inline_rt = False
+            r_g = submit(pid_t, mid_t, {"prompt": d_g.get("prompt"), "requestKo": "코트를 빨갛게", "confirmUsd": (d_g.get("plan") or {}).get("usd"),
+                                        "draftId": d_g.get("id"), "scope": "range", "in": 0, "out": 15})
+            d_h = draft_of(compose(pid_t, mid_t, {"requestKo": "코트를 빨갛게", "in": 7.5, "out": 15}))
+            running_g = err_of(submit(pid_t, mid_t, {"prompt": d_h.get("prompt"), "requestKo": "코트를 빨갛게", "confirmUsd": 1.64, "draftId": d_h.get("id"),
+                                                     "scope": "range", "in": 7.5, "out": 15}))[:2]
+            job = env.rt_spawned[-1]
+            cut_g = len(env.cut_calls)
+            rt.run_retake(*job[1])
+            env.inline_rt = True
+            v_g = env.state(pid_t)["cells"]["webtoon:take1"]["versions"][-1]
+            env.set_state(pid_t, lambda data: data["cells"]["webtoon:take1"]["draft"].update(status="running", claim="zz", heartbeatAt=rt.now_iso()))
+            env.rtmod._threads["zz"] = _threading.current_thread()  # noqa: SLF001 — 이 프로세스에서 도는 초안(끊긴 것으로 보지 않게)
+            drafting = err_of(compose(pid_t, mid_t, {"requestKo": "x", "in": 7.5, "out": 15}))[:2]
+            env.rtmod._threads.pop("zz", None)  # noqa: SLF001
+            expect("cp-f", [r_g.status_code, running_g, drafting,
+                            (v_g.get("status"), v_g.get("n"), (v_g.get("range") or {}).get("start"), (v_g.get("range") or {}).get("end"), v_g.get("usd"),
+                             v_g.get("usd") == (d_g.get("plan") or {}).get("usd")), env.cut_calls[cut_g:]],
+                   [202, (409, "RetakeRunning"), (409, "RetakeDrafting"), ("completed", 3, 0.0, 15.0, (d_g.get("plan") or {}).get("usd"), True),
+                    [(fetched_t, 0.0, 15.0)]],
+                   "칸 전체 구간 compose 초안 제출 202(구간 0–15·견적 같음), 진행 중 409 RetakeRunning, 초안 running 이면 compose 409 RetakeDrafting")
+            # fix1: 지난 버전(v2 — 칸 7.5–15초, 파일 7.5초)에서 파일 초 1–3 을 고치면 @Video1 = v2 파일의 1–3초(칸 녹화 8.5–10.5 아님)·짧으면 채움
+            env.set_state(pid_t, lambda data: data["cells"]["webtoon:take1"].update(draft=None))
+            mats_v2 = (client.get(f"/api/vnew/p/{pid_t}/edit").get_json() or {}).get("materials") or []
+            mid_v2 = next((m["mid"] for m in mats_v2 if m.get("group") == "retake" and m.get("label") == "테이크 1 · 컷 2 v2"), "")
+            key_v2 = str(v_f.get("outputKey") or "")
+            d_r = draft_of(compose(pid_t, mid_v2, {"requestKo": "코트를 빨갛게", "in": 1, "out": 3}))
+            p_r = str(d_r.get("prompt") or "")
+            cut_r, pad_r = len(env.cut_calls), len(env.pad_calls)
+            r_r = submit(pid_t, mid_v2, {"prompt": p_r, "requestKo": "코트를 빨갛게", "confirmUsd": (d_r.get("plan") or {}).get("usd"),
+                                         "draftId": d_r.get("id"), "scope": "range", "in": 1, "out": 3})
+            v_r = env.state(pid_t)["cells"]["webtoon:take1"]["versions"][-1]
+            plan_r = d_r.get("plan") or {}
+            led_r = [e for e in env.ledger if e.get("kind") == "video"][-1:]
+            expect("cp-f", [(d_r.get("status"), d_r.get("videoSource"), d_r.get("range")), plan_r.get("seconds"), plan_r.get("trimTo"),
+                            float(plan_r.get("sentSeconds") or 0) >= 4.0, p_r.split("\n")[0].startswith(rt.COMPOSE_RESULT_EDIT_HEAD),
+                            "RANGE: @Video1 is 8.5-10.5s of the shot in the prompt below; the new video is 2s long, the same length as @Video1." in
+                            p_r.split("\n"), [l for l in p_r.split("\n") if l.startswith(rt.COMPOSE_KEPT_HEAD)][:1] ==
+                            [rt.COMPOSE_KEPT_HEAD + "Make her coat red. (Korean original: \u201c코트를 빨갛게\u201d)"],
+                            sum(1 for l in p_r.split("\n") if l == rt.COMPOSE_CONTEXT_LINE), d_r.get("problems"), r_r.status_code,
+                            env.cut_calls[cut_r:], env.pad_calls[pad_r:],
+                            (v_r.get("status"), v_r.get("n"), v_r.get("videoSource"), v_r.get("fromKey") == key_v2, v_r.get("seconds"),
+                             v_r.get("sentSeconds") == plan_r.get("sentSeconds"), v_r.get("trimTo"), v_r.get("range", {}).get("in"),
+                             v_r.get("range", {}).get("out"), v_r.get("range", {}).get("start"), v_r.get("range", {}).get("end"), v_r.get("usd")),
+                            [(e.get("units"), round(float(e.get("usd") or 0), 2)) for e in led_r]],
+                   [("done", "result", {"in": 1.0, "out": 3.0, "start": 8.5, "end": 10.5, "seconds": 2.0, "cutIds": ["c2"],
+                                        "cuts": [{"cutId": "c2", "no": 2, "start": 0.0, "end": 2.0}]}), 2.0, 2.0, True, True, True, True, 1, [], 202,
+                    [((b"CLIP:" + key_v2.encode())[:40], 1.0, 3.0)], [(b"CLIP:1-3", float(plan_r.get("sentSeconds") or 0))],
+                    ("completed", 4, "result", True, 2.0, True, 2.0, 1.0, 3.0, 8.5, 10.5, plan_r.get("usd")),
+                    [(plan_r.get("billedSeconds"), plan_r.get("usd"))]],
+                   "지난 버전 v2 파일 1–3초: 초안 videoSource result·길이 2초·자를 길이 2초, 앞 EDIT 는 EARLIER EDIT·CONTEXT 1줄·RANGE = 칸 8.5–10.5, "
+                   "제출 → @Video1 = v2 파일 1–3초 자름(3초 채움) + 보낼 길이까지 채움, 버전 seconds 2·sentSeconds = 견적·range in/out 1–3·start/end "
+                   "8.5–10.5·원장 = 견적")
+            # fix1: 옛 길(videoSource 없는 template 버전)은 지금처럼 프리비즈 녹화를 자른다
+            cut_o = len(env.cut_calls)
+            old_v = {k: v for k, v in v_f.items() if k != "videoSource"}
+            sent_o = rt._resubmit(owner, pid_t, gen_t, "webtoon", "take1", 9, old_v)  # noqa: SLF001
+            res_v = dict(v_f, videoSource=rt.RESULT_SOURCE, fromKey="")
+            try:
+                rt._resubmit(owner, pid_t, gen_t, "webtoon", "take1", 9, res_v)  # noqa: SLF001
+                no_key = None
+            except Exception as exc:  # noqa: BLE001
+                no_key = (getattr(exc, "kind", ""), getattr(exc, "status", None))
+            expect("cp-f", [env.cut_calls[cut_o:], bool(sent_o.get("invocationArn")), no_key],
+                   [[(b"PREVIZ-REC-s1", 7.5, 15.0)], True, ("RetakeBadRange", 400)],
+                   "옛 template 버전(videoSource 없음) = 프리비즈 녹화 7.5–15초 자름, result 인데 재료 키가 없으면 400(제출 0)")
+
+            # ================= (cp-g) _compose_prompt 순수 =================
+            base_g = ("STYLE: webtoon look of @Image3.\nASSETS: @Video1 = previz; @Image1 = Kim; @Image2 = Lee; @Image3 = panel.\n"
+                      "TIMELINE: 0-5s Kim waves at @Image2.\n" + rt._range_line({"start": 0.0, "end": 5.0, "seconds": 5.0, "cuts": []}) + "\n"  # noqa: SLF001
+                      + rt.COMPOSE_EDIT_HEAD + "Smile.")
+            tmpl_g = "STYLE: look of @Image2.\nASSETS: @Video1 = previz; @Image1 = Lee; @Image2 = panel.\nRULES: follow @Video1."
+            rng_g = {"start": 5.0, "end": 10.0, "seconds": 5.0, "cuts": [{"cutId": "c2", "no": 2}]}
+            out_g, meta_g = rt._compose_prompt(base_g, tmpl_g, rng_g, 15.0, request_ko="<b>@Image3 옷</b>", extra_ko="밝게\n더",  # noqa: SLF001
+                                               change_en="Change the clothes.", max_bytes=4000)
+            expect("cp-g", [out_g.split("\n"), meta_g],
+                   [["STYLE: webtoon look of Image3.", "ASSETS: @Video1 = previz; @Image1 = Lee; @Image2 = panel.", "TIMELINE: 0-5s Kim waves at @Image2.",
+                     rt.COMPOSE_KEPT_HEAD + "Smile.",
+                     "RANGE: Render only 5.0-10.0s of the shot above; @Video1 is just this part and the new video is 5s long.",
+                     rt.COMPOSE_EDIT_HEAD + "Change the clothes. (Korean original: \u201c\u2039b\u203aImage3 옷\u2039/b\u203a\u201d) " + rt.COMPOSE_TAGS_NOTE,
+                     "EXTRA: 밝게 더"],
+                    {"refs": ["@Image1", "@Image2", "@Video1"], "labels": ["STYLE", "ASSETS", "TIMELINE"], "swapped": True, "cut": 0}],
+                   "순수: ASSETS 참고 집합이 다르면 본보기 ASSETS 로·형식 밖 표시(@Image3) 글로·앞선 compose RANGE 빼고 EDIT → EARLIER EDIT·꺾쇠 바꿈·"
+                   "EXTRA 한 줄·항목 = compose 줄 뺀 기준")
+            out_g2, meta_g2 = rt._compose_prompt("TIMELINE: 0-5s Kim waves.", tmpl_g, {"start": 0.0, "end": 15.0, "seconds": 15.0, "cuts": []}, 15.0,  # noqa: SLF001
+                                                 request_ko="웃게", extra_ko="", change_en="", max_bytes=4000)
+            out_g3, _ = rt._compose_prompt("TIMELINE: Kim waves.", "RULES: follow @Video1; use @Element1 for Kim. STYLE @Image1 look.", {  # noqa: SLF001
+                "start": 0.0, "end": 15.0, "seconds": 15.0, "cuts": []}, 15.0, request_ko="웃게", extra_ko="", change_en="", max_bytes=4000)
+            long_base = "MOTION: " + "; ".join(f"soft sway {i}" for i in range(60)) + ".\nTIMELINE: 0-5s Kim waves at @Image1."
+            out_g4, meta_g4 = rt._compose_prompt(long_base, "ASSETS: @Video1 = previz; @Image1 = Kim.", {"start": 0.0, "end": 15.0, "seconds": 15.0,  # noqa: SLF001
+                                                                                                        "cuts": []}, 15.0,
+                                                 request_ko="웃게", extra_ko="", change_en="Smile.", max_bytes=500)
+            expect("cp-g", [out_g2.split("\n"), meta_g2["swapped"], out_g3.split("\n")[0],
+                            (len(out_g4.encode()) <= 500, meta_g4["cut"] > 0, out_g4.split("\n")[-1] == rt.COMPOSE_EDIT_HEAD + "Smile. (Korean original: "
+                             "\u201c웃게\u201d) " + rt.COMPOSE_TAGS_NOTE, "TIMELINE: 0-5s Kim waves at @Image1." in out_g4.split("\n"),
+                             out_g4.startswith("ASSETS: @Video1"))],
+                   [["ASSETS: @Video1 = previz; @Image1 = Lee; @Image2 = panel.", "TIMELINE: 0-5s Kim waves.", rt.COMPOSE_EDIT_HEAD + "\u201c웃게\u201d "
+                     + rt.COMPOSE_TAGS_NOTE], True, "REFERENCES: follow @Video1; use @Element1 for Kim. STYLE @Image1 look.",
+                    (True, True, True, True, True)],
+                   "순수: 기준에 ASSETS 없으면 본보기 ASSETS 맨 앞·칸 전체면 RANGE 없음·번역 없으면 한국어만, ASSETS 없는 본보기는 표시가 든 문장을 REFERENCES 로, "
+                   "상한 넘으면 꾸밈 줄(MOTION)만 자름(EDIT·참고 표시 줄 그대로)")
+            # fix1: result(videoSource result) — 앞 줄(EDIT·EXTRA·RANGE·CONTEXT)은 그대로, 넘으면 이전 프롬프트만 자르고(꾸밈 줄 → 참고 표시 없는 줄 통째로)
+            long_r = ("MOTION: " + "; ".join(f"soft sway {i}" for i in range(40)) + ".\nTIMELINE: 0-5s Kim waves at @Image1.\nDIALOGUE: \""
+                      + "대사 " * 120 + "\"")
+            tmpl_r5 = "ASSETS: @Video1 = previz; @Image1 = Kim.\nTIMELINE: shot."
+            rng_r5 = {"in": 1.0, "out": 4.0, "start": 6.0, "end": 9.0, "seconds": 3.0, "cuts": []}
+            out_r5, meta_r5 = rt._compose_prompt(long_r, tmpl_r5, rng_r5, 15.0, request_ko="웃게", extra_ko="밝게", change_en="Smile.",  # noqa: SLF001
+                                                 max_bytes=700, result=True)
+            lines_r5 = out_r5.split("\n")
+            expect("cp-g", [lines_r5[:4], len(out_r5.encode()) <= 700, "TIMELINE: 0-5s Kim waves at @Image1." in lines_r5,
+                            any(l.startswith("DIALOGUE:") for l in lines_r5), meta_r5["labels"], meta_r5["cut"] > 0,
+                            rt.check_prompt(out_r5, long_r, {"maxBytes": 700, "refs": meta_r5["refs"], "labels": meta_r5["labels"],
+                                                             "against": "template"})],
+                   [[rt.COMPOSE_RESULT_EDIT_HEAD + "Smile. (Korean original: \u201c웃게\u201d) " + rt.COMPOSE_TAGS_NOTE_RESULT, "EXTRA: 밝게",
+                     "RANGE: @Video1 is 6.0-9.0s of the shot in the prompt below; the new video is 3s long, the same length as @Video1.",
+                     rt.COMPOSE_CONTEXT_LINE], True, True, False, ["MOTION", "TIMELINE"], True, []],
+                   "순수 result: EDIT(Edit @Video1 … change only)·EXTRA·RANGE(길이 = out − in)·CONTEXT 먼저, 상한 넘으면 이전 프롬프트만 자름(참고 표시 줄 남김·"
+                   "대사 줄 통째로 빼고 항목 규칙에서도 뺌)·check_prompt 0")
+
+            # ================= (cp-h) 라우트·끔·kind·LF =================
+            with _pin_vnew(VNEW_EDIT_RETAKE=False):
+                off = err_of(compose(pid_t, mid_t, {"requestKo": "x", "in": 7.5, "out": 15}))[:2]
+            routes_text = (APP_SRC / "vnew" / "routes.py").read_text(encoding="utf-8")
+            crlf = [p.name for p in (APP_SRC / "vnew" / "retake.py", APP_SRC / "vnew" / "routes.py", APP_SRC / "vpoc" / "errors.py",
+                                     ROOT / "tools" / "check_vpoc.py") if b"\r\n" in p.read_bytes()]
+            expect("cp-h", [off, '@bp.post("/p/<pid>/edit/retake/<mid>/compose")' in routes_text,
+                            [k for k in ("RetakeBadModel", "RetakeBadRange", "RetakeBadRequest", "RetakeNoPrompt", "RetakeDrafting")
+                             if k not in vpoc_errors.USER_FACING_KINDS], crlf, real_calls, env.urlopen_calls],
+                   [(404, "RetakeDisabled"), True, [], [], [], []],
+                   "compose 라우트·끔 404, 던지는 kind 는 모두 기존 화면 kind(새 kind 없음), LF, 실제 LLM·urlopen 0")
+    except Exception as exc:  # noqa: BLE001
+        bad.append("(cp 서버) 예외: " + repr(exc) + "\n" + _tb.format_exc()[:2500])
+    finally:
+        tempfile.tempdir = saved_tempdir
+        shutil.rmtree(private_tmp, ignore_errors=True)
+    groups = {"cp-a", "cp-b", "cp-c", "cp-d", "cp-e", "cp-f", "cp-g", "cp-h"}
+    if groups - seen:
+        bad.append(f"검사하지 못한 묶음: {sorted(groups - seen)}")
+    if bad:
+        fail("작업 191 ⑦ AI로 고치기 compose(cp) 검사 실패\n" + "\n".join(f"  {item}" for item in bad))
+    else:
+        ok("작업 191 ⑦ AI로 고치기 compose 검사 (cp-a)이전 프롬프트 그대로 + RANGE + EDIT·초안 done·번역 1회·원장 (cp-b)번역 실패·시간 초과 → 한국어 "
+           "(cp-c)원본 칸 전체 400 (cp-d)칸 전체 클립 = 구간 (cp-e)영상→영상 못 하는 모델 400·기본 모델 (cp-f)제출·견적·녹화 구간만·RetakeRunning·"
+           "RetakeDrafting (cp-g)_compose_prompt 순수 (cp-h)라우트·kind·LF (fix1)@Video1 = 고칠 재료 영상 in–out·EDIT 맨 앞·길이 = out − in·"
+           "옛 버전은 프리비즈")
+
+
+# 작업 192 화면(node): 실제 서버 응답(SERVER — 191 compose·제출·결과 영상 버전)으로 ⑦ 여러 컷 고르기 → 패널 → 프롬프트 준비 → 제출 → [바꾸기].
+_MS192_NODE = r"""
+var P = "/api/vnew/p/p%201/edit";
+var S = SERVER;
+var RP = P + "/retake/" + encodeURIComponent(S.mid);
+var after = false, rGets = [], composeBodies = [], submitBodies = [], editGets = 0, putN = 0;
+handlers.push(function (m, p, body) {
+  if (m === "GET" && (p === P || p.indexOf(P + "?") === 0)) { editGets += 1; return { ok: clone(after ? S.edit2 : S.edit) }; }
+  if (m === "GET" && p.indexOf(P + "/media/") === 0) {
+    var mid = decodeURIComponent(p.slice((P + "/media/").length));
+    return { ok: mid === S.v2Mid ? clone(S.media2) : { mid: mid, duration: 15, hasAudio: true } };
+  }
+  if (m === "GET" && p.indexOf(RP) === 0 && p.indexOf(RP + "/") !== 0) { rGets.push(p.slice(RP.length)); return { ok: clone(after ? S.rvDone : composeBodies.length ? S.compose.retake : S.rvA) }; }
+  if (m === "POST" && p === RP + "/compose") { composeBodies.push(body); return { ok: clone(S.compose) }; }
+  if (m === "POST" && p === RP) { submitBodies.push(body); after = true; return { ok: clone(S.submit) }; }
+  if (m === "PUT" && p === P) { putN += 1; return { ok: { doc: { version: putN }, etag: "e" + putN, saved: true, totalSeconds: 0 } }; }
+});
+function ids(list) { return list.map(function (c) { return c.id; }); }
+async function run() {
+  var o = {};
+  var host = new FakeNode("div");
+  renderEditStep(host);
+  await settle();
+  await settle();
+  var ctx = editCtx;
+  Object.keys(ctx.materials).forEach(function (k) {
+    if (!ctx.materials[k].videoUrl) ctx.materials[k].videoUrl = "https://signed.example/v" + Object.keys(ctx.materials).indexOf(k) + ".mp4";
+  });
+  function boxes() { return byClass(ctx.root, "vnew-edit-clip"); }
+  function aboxes() { return byClass(ctx.root, "vnew-edit-aclip"); }
+  function press(i, mods) {
+    var b = boxes()[i];
+    var ev = { clientX: 20 + i, pointerId: 7, pointerType: "mouse", button: 0 };
+    Object.keys(mods || {}).forEach(function (k) { ev[k] = mods[k]; });
+    b.fire("pointerdown", ev);
+    b.fire("pointerup", { clientX: 20 + i });
+  }
+  function selNow() {
+    return [ctx.sel, ctx.multi.slice(), boxes().map(function (b) { return b.classList.contains("is-selected"); }),
+            aboxes().map(function (b) { return b.classList.contains("is-selected"); }), r3(ctx.t)];
+  }
+  function inspector() {
+    var d = ctx.dom;
+    return [d.speed.disabled, d.len.disabled, d.afxLead.range.disabled, d.afxTail.range.disabled, d.slip.range.disabled, d.btnTightenOne.disabled,
+            d.btnMute.disabled, d.btnDelete.disabled, d.btnDelete.title, d.multiNote.style.display, d.multiNote.textContent, d.fixSel.disabled,
+            d.fixSel.style.display];
+  }
+  function clipRows() {
+    return ctx.clips.map(function (c) {
+      return [c.id, c.sourceKey === S.takeKey ? "v1" : c.sourceKey === S.v2Key ? "v2" : "?", c.in, c.out, c.label || ""];
+    });
+  }
+  o.open = [ids(ctx.clips), ctx.retakeOn, editStarts(ctx.clips).starts.map(r3), ctx.multi.slice()];
+
+  // ---- (ms-b) 그냥 누르기 · Ctrl · Cmd · Shift
+  press(1);
+  o.plain = selNow();
+  o.single = inspector();
+  editSeek(ctx, 14);
+  press(2, { ctrlKey: true });
+  o.ctrl = selNow();
+  o.multiInspector = inspector();
+  press(1, { metaKey: true });
+  o.meta = selNow();
+  press(1, { ctrlKey: true });
+  press(0, { shiftKey: true });
+  o.shift = selNow();
+  press(2, { shiftKey: true });
+  o.shift2 = selNow();
+  editPlayCut(ctx, true, false);
+  o.cutPlay = [ctx.playing, ctx.cutPlay ? ctx.cutPlay.index : null, r3(ctx.t), ctx.multi.slice()];
+  editPause(ctx);
+  var dblBox = boxes()[0];
+  ctx.dragEndAt = 0;
+  dblBox.fire("dblclick", { target: dblBox, ctrlKey: true });
+  o.ctrlDbl = [ctx.playing, ctx.multi.slice()];
+  press(0);
+  o.plainAgain = selNow();
+
+  // ---- (ms-g) 여러 컷 삭제 = 실행 취소 한 단계
+  press(0);
+  press(1, { shiftKey: true });
+  var undo0 = ctx.hist.undo.length;
+  key("Delete");
+  o.del = [ids(ctx.clips), ctx.hist.undo.length - undo0, ctx.sel, ctx.multi.slice()];
+  key("z", "KeyZ", { ctrlKey: true });
+  o.delUndo = [ids(ctx.clips), ctx.hist.undo.length - undo0];
+  fire(800);
+  await settle();
+
+  // ---- (ms-c) 원본이 다른 컷을 함께 고르면 안내만(패널 없음)
+  ctx.clips.push({ id: "cx", sourceKey: S.finalKey, in: 0, out: 2, muted: false });
+  editRenderTimeline(ctx);
+  press(2);
+  press(3, { ctrlKey: true });
+  var notice = byClass(ctx.root, "vnew-edit-notice")[0];
+  ctx.dom.fixSel.fire("click");
+  o.mixed = [ctx.multi.slice(), !!ctx.fix, notice.textContent, ctx.dom.fixSel.disabled, ctx.dom.fixSel.title];
+  editNote(ctx, "");
+  var binFix = byClass(ctx.root, "vnew-edit-bin-cut-fix")[0];
+  if (binFix) binFix.fire("click");
+  o.mixedBin = [!!binFix, !!ctx.fix, notice.textContent, byClass(ctx.root, "vnew-edit-fix").length];
+  editNote(ctx, "");
+  ctx.clips.pop();
+  editSelect(ctx, -1);
+  editRenderTimeline(ctx);
+
+  // ---- (ms-d) 한 컷: 재료 줄 [이 컷 AI로 고치기] = 그 컷 구간
+  press(2);
+  binFix = byClass(ctx.root, "vnew-edit-bin-cut-fix")[0];
+  binFix.fire("click");
+  var f1 = ctx.fix;
+  o.binSingle = f1 ? [f1.clip, f1.clipIds, f1.fromSel, rGets.slice()] : null;
+  editFixClose(ctx);
+  await settle();
+  rGets.length = 0;
+  // 119 고르기 창에서 장면을 고르지 않음(테이크 통째) → compose 길은 그 재료 처음~끝을 구간으로 보기를 한 번 더 받는다
+  editSelect(ctx, -1);
+  editFixOpen(ctx, S.mid, "", null);
+  await settle();
+  var fw = ctx.fix;
+  o.whole = fw ? [fw.compose, fw.clip, fw.clipIds, rGets.slice(), fw.dom.rangeLine.textContent, fw.dom.make.disabled] : null;
+  editFixClose(ctx);
+  await settle();
+  rGets.length = 0;
+
+  // ---- (ms-d · ms-e) 여러 컷: 도구줄 [고른 컷 AI로 고치기]
+  press(1);
+  press(2, { ctrlKey: true });
+  ctx.dom.fixSel.fire("click");
+  var fx = ctx.fix;
+  var d = fx.dom;
+  o.openSel = [fx.clip, fx.clipIds, fx.names, fx.clipId, rGets.slice()];
+  await settle();
+  var pr = d.root;
+  o.panel = { compose: fx.compose, radios: byTag(pr, "input").filter(function (n) { return n.type === "radio"; }).length,
+              full: pr.textContent.indexOf("원본 칸 전체") >= 0, newPromptBtn: pr.textContent.indexOf("새 프롬프트 만들기") >= 0,
+              rangeLine: d.rangeLine.textContent, selInfo: d.selInfo.textContent, make: [d.make.textContent, d.make.disabled],
+              draft: d.draft.style.display, models: byTag(d.model, "option").map(function (x) { return x.value; }), model: d.model.value,
+              scopeParent: !!d.scope.parentNode, title: d.title.textContent, open: byClass(ctx.root, "vnew-edit-fix").length };
+  d.make.fire("click");
+  o.empty = [composeBodies.length, d.note.textContent];
+  d.request.value = "코트를 빨갛게";
+  d.request.fire("input");
+  d.make.fire("click");
+  o.busy = [d.make.textContent, d.make.disabled];
+  await settle();
+  var spans = byTag(d.composed, "span");
+  o.composed = { body: composeBodies.slice(), status: d.draftStatus.textContent, draft: d.draft.style.display,
+                 text: d.composed.textContent === S.draftPrompt + "\n",
+                 change: spans.map(function (s, i) { return s.className ? [i, s.className] : null; }).filter(Boolean),
+                 changeText: (spans.filter(function (s) { return s.className; })[0] || { textContent: "" }).textContent,
+                 shown: [d.composed.style.display, d.newField.style.display, d.changes.style.display, d.result.style.display, d.cost.style.display],
+                 result: d.result.textContent, cost: d.cost.textContent, meter: d.meter.textContent, submit: [d.submit.textContent, d.submit.disabled],
+                 problems: byTag(d.problems, "li").length, make: [d.make.textContent, d.make.disabled] };
+
+  // ---- (ms-f) 다시 준비
+  function st() { return [d.draftStatus.textContent === EDIT_FIX_STALE, d.submit.disabled, d.composed.style.display]; }
+  var stale = {};
+  d.request.value = "코트를 파랗게";
+  d.request.fire("input");
+  stale.req = st();
+  d.request.value = "코트를 빨갛게";
+  d.request.fire("input");
+  stale.back = st();
+  d.extra.value = "창밖 빛을 따뜻하게";
+  d.extra.fire("input");
+  stale.extra = st();
+  d.extra.value = "";
+  d.extra.fire("input");
+  var keep = d.model.value;
+  d.model.value = byTag(d.model, "option").map(function (x) { return x.value; }).filter(function (v) { return v !== keep; })[0];
+  d.model.fire("change");
+  stale.model = st();
+  d.model.value = keep;
+  d.model.fire("change");
+  stale.modelBack = st();
+  rGets.length = 0;
+  editSelectMore(ctx, 0, false);
+  stale.sel = st().concat([fx.clip, fx.clipIds.slice(), d.rangeLine.textContent]);
+  await settle();
+  editSelectMore(ctx, 0, false);
+  await settle();
+  stale.selBack = st().concat([fx.clip, rGets.slice()]);
+  o.stale = stale;
+
+  // ---- (ms-e) 제출 = 기존 POST(초안 그대로 · range · 같은 in·out)
+  var c0 = confirms.length, g0 = editGets;
+  d.submit.fire("click");
+  await settle();
+  await settle();
+  o.submit = { body: submitBodies.slice(), confirm: confirms.slice(c0), note: d.note.textContent, draft: d.draft.style.display,
+               refreshed: editGets - g0, known: !!ctx.materials[S.v2Key] };
+
+  // ---- (ms-h) 결과 영상 버전 [바꾸기] = 고른 컷만 · 같은 자리 · 같은 길이 · 한 단계
+  var rows = byClass(pr, "vnew-edit-fix-version");
+  var swaps = byClass(pr, "vnew-edit-fix-swap");
+  o.versions = rows.map(function (r) { return byClass(r, "vnew-edit-fix-version-name")[0].textContent; });
+  o.swapBtn = [swaps.length, swaps[1] ? swaps[1].disabled : null, swaps[1] ? swaps[1].title : ""];
+  var total0 = r3(editStarts(ctx.clips).total), undo1 = ctx.hist.undo.length;
+  swaps[1].fire("click");
+  await settle();
+  await settle();
+  o.swap = { clips: clipRows(), total: [total0, r3(editStarts(ctx.clips).total)], undo: ctx.hist.undo.length - undo1, note: d.note.textContent,
+             starts: editStarts(ctx.clips).starts.map(r3) };
+  swaps = byClass(pr, "vnew-edit-fix-swap");
+  swaps[0].fire("click");
+  await settle();
+  o.swapBack = { clips: clipRows(), undo: ctx.hist.undo.length - undo1 };
+  editDo(ctx, "undo");
+  o.swapUndo = clipRows();
+  editFixClose(ctx);
+
+  // ---- (ms-h) 순수: 빈틈 있는 컷 · 구간 밖 · 고른 컷 없음 · 되돌리기
+  var vers = [{ n: 1, original: true, status: "completed", sourceKey: "K1" },
+              { n: 2, status: "completed", sourceKey: "K2", videoSource: "result", fromN: 1, sourceRange: { in: 3, out: 15 }, trimTo: 12, seconds: 12 }];
+  var gap = [{ id: "A", sourceKey: "K1", in: 0, out: 3, muted: false }, { id: "B", sourceKey: "K1", in: 3.2, out: 7, muted: false, audioSlip: 0.2 },
+             { id: "C", sourceKey: "K1", in: 7.6, out: 14.5, muted: true, speed: 2 }, { id: "D", sourceKey: "KX", in: 0, out: 2, muted: false }];
+  var g = editFixResultSwap(gap, ["B", "C"], vers, vers[1], { K2: 12.04 }, 0.04, "", []);
+  function rowsOf(list) { return list.map(function (c) { return [c.id, c.sourceKey, c.in, c.out, c.speed || 1, c.muted, c.audioSlip || 0]; }); }
+  o.pureGap = { clips: rowsOf(g.clips), changed: g.changed, outside: g.outside, total: [r3(editStarts(gap).total), r3(editStarts(g.clips).total)] };
+  var g2 = editFixResultSwap(gap, ["A", "B"], vers, vers[1], {}, 0.04, "", []);
+  o.pureOut = [g2.changed, g2.outside, g2.clips[0].sourceKey];
+  var g3 = editFixResultSwap(gap, null, vers, vers[1], {}, 0.04, "", []);
+  o.pureAll = [g3.changed, g3.outside, g3.clips.map(function (c) { return c.sourceKey; })];
+  o.pureBack = rowsOf(editFixResultSwap(g.clips, ["B", "C"], vers, vers[0], {}, 0.04, "", []).clips);
+  o.pureUses = [editFixResultUses([], vers, vers[1]), editFixResultUses(g.clips, vers, vers[0]), editFixResultUses(gap, vers, vers[0]),
+                editFixResultInfo(vers, { n: 3, videoSource: "result", sourceKey: "K3", fromN: 9, sourceRange: { in: 0, out: 2 } })];
+  o.pureNames = [editFixSelNames([{ label: "컷 1" }, { label: "컷 2" }]), editFixSelNames([{ label: "컷 3" }]),
+                 editFixSelNames([{ label: "컷 4" }, { label: "컷 2" }, { label: "컷 9" }]), editFixSelNames([{ label: "A" }, {}, { label: "A" }], "재료")];
+  o.pureRemove = ids(editRemoveMany([{ id: "a" }, { id: "b" }, { id: "c" }], [0, 2, 9]));
+  o.pureLine = [editFixChangeLine("A\nEDIT: x Make it red.\nB", { changeEn: "Make it red." }),
+                editFixChangeLine("A\nB \u201c빨갛게\u201d", { changeEn: "", requestKo: "빨갛게" }), editFixChangeLine("A", { changeEn: "zzz" })];
+  editLeave();
+  out.ms = o;
+  out.innerHTML = innerHTMLUsed;
+  console.log(JSON.stringify(out));
+}
+run().catch(function (e) { console.error(String((e && e.stack) || e)); process.exit(1); });
+"""
+
+
+def check_vnew_edit_multicut_fix_192() -> None:
+    """작업 192 — ⑦ 여러 컷 고르기 · AI로 고치기 = [프롬프트 준비](compose) · 고른 컷 구간만 · 결과 영상 버전 [바꾸기](vnew.js · vnew.css).
+    가짜 LLM·fal·저장소(191 하네스), 유료 0.
+
+    (ms-a) 서버(191 그대로): 고른 컷 구간 3–15초 보기 fullScopeAllowed false · scopes range · compose 200(kind compose) · 화면과 같은 바디 제출 202 ·
+           결과 영상 버전 줄(videoSource · sourceRange · fromN · trimTo) · 새 재료. 서버 변경 없음
+    (ms-b) Ctrl/Cmd+누르기 넣고 빼기 · Shift+누르기 기준부터 범위 · 그냥 누르기 = 한 컷 + 그 컷 시작(190) · is-selected · ctx.sel = 첫 컷 · ctx.multi ·
+           한 클립 칸(속도 · 길이 · J/L · 대사 타이밍 · 이 클립 빈틈 다듬기 · 소리 끄기) 막힘 + 안내 · 고른 컷 재생(188) = 첫 컷 · Ctrl 두 번 누르기는 재생 안 함
+    (ms-c) 원본이 다른 컷: 「같은 테이크(원본 영상) 안의 컷만 함께 고칠 수 있습니다.」 · 패널 안 열림(도구줄 · 재료 줄 버튼)
+    (ms-d) 범위 = 가장 이른 in ~ 가장 늦은 out(원본 초) · 머리 줄 「컷 1–2 · 3.0–15.0초」 · 첫 GET ?in=3&out=15 · 한 컷이면 그 컷 구간
+    (ms-e) 패널: 범위 라디오 · 「원본 칸 전체」 · 「새 프롬프트 만들기」 없음 · 「선택한 컷 구간만 고칩니다 (3.0–15.0초)」 · [프롬프트 준비] compose 바디 ·
+           준비한 프롬프트 읽기만(수정 줄 강조) · 견적 · 비용 · 제출 바디 = 서버가 받은 바디 · 확인창
+    (ms-f) 수정 사항 · 추가 프롬프트 · 모델 · 고른 컷이 바뀌면 「다시 준비해 주세요」 + 제출 막힘(되돌리면 다시 준비됨)
+    (ms-g) 여러 컷 삭제 = 실행 취소 한 단계
+    (ms-h) [바꾸기]: 고른 컷만 v2 로(새 in·out = 옛 − 구간 in) · 같은 자리 · 같은 길이 · 이웃 그대로 · 한 단계 · v1 [바꾸기] 정확히 되돌림 · 순수(빈틈 · 속도 ·
+           소리 설정 · 구간 밖 · 고른 컷 없음 · 되돌리기)
+    (ms-i) 정적 · CSS 192 구역(좁은 화면 · 가로 스크롤 없음) · LF · innerHTML 0
+    """
+    sys.path.insert(0, str(ROOT / "app"))
+    import traceback as _tb  # noqa: PLC0415
+
+    bad: list[str] = []
+    seen: set[str] = set()
+    owner = _RTK_OWNER
+    node = shutil.which("node")
+
+    def expect(group: str, got, want, what: str) -> None:
+        seen.add(group)
+        if got != want:
+            bad.append(f"({group}) {what}\n      결과 {got!r}\n      기대 {want!r}")
+
+    def secs(value) -> str:
+        return f"{int(float(value) * 10 + 0.5) / 10:.1f}"  # 화면 editFixSecs 와 같은 반올림(양수)
+
+    server: dict = {}
+    saved_tempdir = tempfile.tempdir
+    private_tmp = tempfile.mkdtemp(prefix="ms192-tmp-")
+    tempfile.tempdir = private_tmp
+    try:
+        with _guard_real_llm() as real_calls, _LogCapture(), _Rtk1Env(owner) as env, _pin_vnew(
+                VNEW_FX=True, VNEW_CASTING=True, VNEW_TAKE_REAL=True, VNEW_GEN_PARALLEL=2, POLL_INTERVAL_S=0, VNEW_TAKE_AUDIO=True,
+                VNEW_TAKE_RESOLUTION="480p", VNEW_PREPARE_STALE_S=300, VNEW_EDIT=True, VNEW_EDIT_RETAKE=True):
+            rt = env.rtmod
+            env.set(rt, "_translate", lambda **_k: ({"changeEn": "Make her coat red."}, {"model": "m", "inputTokens": 120, "outputTokens": 20}))
+            client = env.client()
+            pid = "prj_ms192"
+            env.take_done(client, pid)
+            base = f"/api/vnew/p/{pid}/edit"
+            edit_v = client.get(base).get_json() or {}
+            mats = edit_v.get("materials") or []
+            take = next((m for m in mats if m.get("group") == "current" and m.get("kind") == "take"), {})
+            final = next((m for m in mats if m.get("kind") == "final"), {})
+            mid, key = str(take.get("mid") or ""), str(take.get("sourceKey") or "")
+            rv_a = client.get(f"{base}/retake/{mid}?in=3&out=15").get_json() or {}
+            compose_body = {"requestKo": "코트를 빨갛게", "in": 3, "out": 15, "model": rv_a.get("composeDefaultModel")}
+            r_c = client.post(f"{base}/retake/{mid}/compose", json=compose_body)
+            comp = r_c.get_json() or {}
+            dr = (comp.get("retake") or {}).get("draft") or {}
+            plan = dr.get("plan") or {}
+            submit_body = {"prompt": dr.get("prompt"), "requestKo": dr.get("requestKo"), "extraKo": dr.get("extraKo"), "confirmUsd": plan.get("usd"),
+                           "draftId": dr.get("id"), "model": dr.get("model"), "scope": "range", "in": 3, "out": 15}
+            r_s = client.post(f"{base}/retake/{mid}", json=submit_body)
+            sub = r_s.get_json() or {}
+            rv_done = client.get(f"{base}/retake/{mid}?in=3&out=15").get_json() or {}
+            edit2 = client.get(base).get_json() or {}
+            v2_row = next((r for r in rv_done.get("versions") or [] if r.get("n") == 2), {})
+            v2_mat = next((m for m in edit2.get("materials") or [] if m.get("sourceKey") == v2_row.get("sourceKey")), {})
+            media2 = client.get(f"{base}/media/{v2_mat.get('mid')}").get_json() or {}
+            expect("ms-a", [rv_a.get("fullScopeAllowed"), rv_a.get("scopes"), [(rv_a.get("range") or {}).get(k) for k in ("in", "out")],
+                            rv_a.get("composeDefaultModel") in (rv_a.get("composeModels") or []), r_c.status_code, dr.get("kind"), dr.get("status"),
+                            [(dr.get("range") or {}).get(k) for k in ("in", "out")], isinstance(plan.get("usd"), float), r_s.status_code,
+                            [v2_row.get(k) for k in ("status", "videoSource", "sourceRange", "fromN", "trimTo", "seconds")], bool(v2_mat.get("mid")),
+                            (final.get("retake") or {}).get("can"), real_calls, env.urlopen_calls],
+                   [False, ["range"], [3.0, 15.0], True, 200, "compose", "done", [3.0, 15.0], True, 202,
+                    ["completed", "result", {"in": 3.0, "out": 15.0}, 1, 12.0, 12.0], True, False, [], []],
+                   "서버(191): 보기 fullScopeAllowed false · range 만 · compose 초안 done · 화면 바디로 제출 202 · v2 결과 영상 버전 줄 · 새 재료 · 실제 LLM 0")
+            row = next((m for m in rv_a.get("models") or [] if m.get("id") == dr.get("model")), {})
+            label = str(row.get("label") or row.get("id") or "")
+            compose_ids = [m["id"] for m in rv_a.get("models") or [] if m.get("id") in (rv_a.get("composeModels") or [])]
+            three = [{"id": "c1", "sourceKey": key, "in": 0.0, "out": 3.0, "label": "컷 1", "muted": False},
+                     {"id": "c1b", "sourceKey": key, "in": 3.0, "out": 7.5, "label": "컷 1", "muted": False},
+                     {"id": "c2", "sourceKey": key, "in": 7.5, "out": 15.0, "label": "컷 2", "muted": False}]
+            for view in (edit_v, edit2):
+                view["doc"] = dict(view.get("doc") or {}, clips=[dict(c) for c in three])
+            server = {"edit": edit_v, "edit2": edit2, "rvA": rv_a, "compose": comp, "submit": sub, "rvDone": rv_done, "media2": media2,
+                      "mid": mid, "takeKey": key, "finalKey": final.get("sourceKey"), "v2Key": v2_row.get("sourceKey"), "v2Mid": v2_mat.get("mid"),
+                      "draftPrompt": dr.get("prompt"), "label": label, "composeIds": compose_ids, "plan": plan, "model": dr.get("model"),
+                      "composeBody": compose_body, "submitBody": submit_body, "title": "AI로 고치기 — " + str(rv_a.get("label") or "영상")}
+    except Exception as exc:  # noqa: BLE001
+        bad.append("(ms-a) 예외: " + repr(exc) + "\n" + _tb.format_exc()[:2500])
+    finally:
+        tempfile.tempdir = saved_tempdir
+        shutil.rmtree(private_tmp, ignore_errors=True)
+
+    vjs = (PUBLIC / "vnew.js").read_text(encoding="utf-8")
+    css = (PUBLIC / "vnew.css").read_text(encoding="utf-8")
+    multi = "여러 컷이 선택됨 — AI로 고치기·삭제만 할 수 있습니다"
+    mixed = "같은 테이크(원본 영상) 안의 컷만 함께 고칠 수 있습니다."
+    stale_text = "다시 준비해 주세요 — 수정 사항·추가 프롬프트·모델·고른 컷이 프롬프트를 준비할 때와 다릅니다."
+    try:
+        names = ("editSelect", "editSelectMore", "editSelIndexes", "editSelExtend", "editSingle", "editRemoveMany", "editDo", "editClipPointer",
+                 "editFixSelTarget", "editFixOpenSel", "editFixCompose", "editFixSubmitCompose", "editFixPaintCompose", "editFixPaintComposeSetup",
+                 "editFixResultSwap", "editFixSwap", "editMultiBox", "editRenderRetime", "editFixApply")
+        body = {name: _jlu_body(vjs, name) for name in names}
+        expect("ms-i", sorted(name for name, text in body.items() if not text), [], "함수가 vnew.js 에 하나씩 있다")
+        expect("ms-i", [f'var EDIT_MULTI_NOTE = "{multi}";' in vjs, f'var EDIT_FIX_MIXED = "{mixed}";' in vjs,
+                        f'var EDIT_FIX_STALE = "{stale_text}";' in vjs,
+                        "editCommit(ctx, editRemoveMany(ctx.clips, many), { sel: -1 });" in body["editDo"],
+                        "editCommit(ctx, editRemove(ctx.clips, ctx.sel), { sel: -1 });" in body["editDo"],
+                        'editFixPath(ctx, fix) + "/compose"' in body["editFixCompose"],
+                        [w for w in ("editFixPreview(", "/preview", "newPrompt") if w in body["editFixCompose"] + body["editFixSubmitCompose"]],
+                        'scope: "range"' in body["editFixSubmitCompose"], "d.scope.parentNode.removeChild(d.scope);" in body["editFixPaintComposeSetup"],
+                        "fix.compose = view.fullScopeAllowed === false;" in body["editFixApply"],
+                        "if (editMultiOn(ctx)) clip = null;" in body["editRenderRetime"],
+                        "var extra = editSelExtend(ctx, parts.index, event);" in body["editClipPointer"]],
+                   [True, True, True, True, True, True, [], True, True, True, True, True],
+                   "문구 상수 · 여러 컷 삭제 = editCommit 한 번 · compose 길은 LLM 미리보기 · 고칠 수 있는 새 프롬프트 칸을 쓰지 않음 · 제출 scope range · "
+                   "범위 라디오를 뗌 · fullScopeAllowed false 면 compose 길 · 한 클립 칸 막기 · Ctrl/Shift 누르기")
+        if node:
+            check = subprocess.run([node, "--check", str(PUBLIC / "vnew.js")], capture_output=True, text=True, encoding="utf-8", timeout=60)
+            expect("ms-i", check.returncode, 0, "node --check frontend/public/vnew.js")
+        marker = "/* ================================================================ ⑦ 편집 — 여러 컷 고르기 · AI로 고치기 프롬프트 준비(작업 192)"
+        start_css = css.find(marker)
+        section = css[start_css:] if start_css >= 0 else ""
+        narrow = section[section.find("@media (max-width: 768px) {"):] if "@media (max-width: 768px) {" in section else ""
+        classes = {"vnew-edit-selfix", "vnew-edit-multi-note", "vnew-edit-fix-tool", "vnew-edit-fix-selinfo", "vnew-edit-fix-range-line",
+                   "vnew-edit-fix-composed", "vnew-edit-fix-change"}
+        widths = [int(w) for w in re.findall(r"(?<![-\w])(?:min-|max-)?width: (\d+)px", section)]
+        expect("ms-i", [css.count(marker), sorted(classes - set(re.findall(r"\.(vnew-edit-[a-z0-9-]+)", section))), sorted(c for c in classes if c not in vjs),
+                        [w for w in ("overflow-x", "display: none") if w in section], max(widths or [0]) <= 960,
+                        "white-space: normal;" in _edu_css_block(narrow, ".vnew-edit-fix-tool"), "width: 100%;" in _edu_css_block(narrow, ".vnew-edit-selfix"),
+                        "overflow-wrap: anywhere;" in _edu_css_block(css, ".vnew-edit-fix-range-line", start_css),
+                        [n for n, p in (("vnew.js", PUBLIC / "vnew.js"), ("vnew.css", PUBLIC / "vnew.css"), ("check_vpoc.py", ROOT / "tools" / "check_vpoc.py"))
+                         if b"\r" in p.read_bytes()], css.endswith("}\n")],
+                   [1, [], [], [], True, True, True, True, [], True],
+                   "CSS 192 구역: 새 클래스 정의 · 가로 스크롤 · 숨김 규칙 없음 · 960px 이하 · 768px 이하 버튼 감싸기 · 긴 글 줄바꿈 · LF")
+    except Exception as exc:  # noqa: BLE001
+        bad.append("(ms-i) 예외: " + repr(exc) + "\n" + _tb.format_exc()[:1500])
+
+    if not node:
+        warn("node 가 없어 작업 192 화면 실행 검사(ms-b~h)를 건너뜁니다")
+    elif server.get("mid"):
+        code, problems = _edu_code(vjs, _EDU_SLICES)
+        bad.extend(p.replace("(edu-a)", "(ms-b)") for p in problems)
+        got, err = ({}, "") if problems else _lr_run_node(
+            node, "var SERVER = " + json.dumps(server, ensure_ascii=False) + ";\n" + _EDU_NODE_HARNESS + code + _MS192_NODE, "ms192_")
+        if err:
+            bad.append(f"(ms-b) node 실행 실패: {err}")
+        elif got:
+            m = got.get("ms") or {}
+            usd = "$" + f"{float(server['plan'].get('usd') or 0):.2f}"
+            expect("ms-b", [m.get("open"), m.get("plain"), m.get("single")],
+                   [[["c1", "c1b", "c2"], True, [0, 3, 7.5], []], [1, [1], [False, True, False], [False, True, False], 3],
+                    [False, False, False, False, False, False, False, False, "고른 클립 삭제 (Delete)", "none", multi, False, ""]],
+                   "그냥 누르기 = 한 컷 고름(is-selected) + 그 컷 시작(190) · 한 클립 칸은 열림 · 안내 숨김 · [고른 컷 AI로 고치기] 켬")
+            expect("ms-b", [m.get("ctrl"), m.get("multiInspector"), m.get("meta"), m.get("shift"), m.get("shift2")],
+                   [[1, [1, 2], [False, True, True], [False, True, True], 3],
+                    [True, True, True, True, True, True, True, False, "고른 클립 2개 삭제 (Delete)", "", multi, False, ""],
+                    [2, [2], [False, False, True], [False, False, True], 7.5], [0, [0, 1], [True, True, False], [True, True, False], 0],
+                    [1, [1, 2], [False, True, True], [False, True, True], 3]],
+                   "Ctrl+누르기 넣기(ctx.sel = 첫 컷 · 떼면 첫 컷 시작) · 한 클립 칸(속도 · 길이 · J/L · 대사 타이밍 · 이 클립 빈틈 다듬기 · 소리 끄기) 막힘 + 안내 · "
+                   "삭제는 n개 · Cmd+누르기 빼기 · Shift+누르기 = 기준 클립(마지막 Ctrl 클립)부터 그 클립까지(기준은 그대로)")
+            expect("ms-b", [m.get("cutPlay"), m.get("ctrlDbl"), m.get("plainAgain")],
+                   [[True, 1, 3, [1, 2]], [False, [1, 2]], [0, [0], [True, False, False], [True, False, False], 0]],
+                   "고른 컷 재생(188 [이 컷만]) = 첫 컷 · 여러 컷 고름은 그대로 · Ctrl 두 번 누르기는 재생 안 함 · 그냥 누르기는 한 컷으로")
+            expect("ms-g", [m.get("del"), m.get("delUndo")], [[["c2"], 1, -1, []], [["c1", "c1b", "c2"], 0]],
+                   "여러 컷 삭제(Delete) = 고른 컷 모두 · 실행 취소 한 단계 · 한 번 되돌리면 모두 돌아옴")
+            expect("ms-c", [m.get("mixed"), m.get("mixedBin")], [[[2, 3], False, mixed, False, mixed], [True, False, mixed, 0]],
+                   "원본이 다른 컷(합친 영상)을 함께 고르면 안내 한 줄 · 패널 안 열림(도구줄 · 재료 줄 [이 컷 AI로 고치기] 둘 다)")
+            expect("ms-d", [m.get("binSingle"), m.get("openSel"), m.get("whole")],
+                   [[{"in": 7.5, "out": 15}, ["c2"], True, ["?in=7.5&out=15"]], [{"in": 3, "out": 15}, ["c1b", "c2"], "컷 1–2", "c1b", ["?in=3&out=15"]],
+                    [True, {"in": 0, "out": 15}, None, ["", "?in=0&out=15"], "선택한 컷 구간만 고칩니다 (0.0–15.0초)", False]],
+                   "한 컷 = 그 컷 구간 · 여러 컷 = 가장 이른 in ~ 가장 늦은 out(원본 초) · [바꾸기] 대상 = 고른 컷들 · 첫 GET ?in=&out= · "
+                   "범위 없이 연 패널(119 통째)은 재료 처음~끝 구간으로 다시 받음")
+            expect("ms-e", m.get("panel"),
+                   {"compose": True, "radios": 0, "full": False, "newPromptBtn": False, "rangeLine": "선택한 컷 구간만 고칩니다 (3.0–15.0초)",
+                    "selInfo": "고칠 구간: 컷 1–2 · 3.0–15.0초 · 클립 2개", "make": ["프롬프트 준비", False], "draft": "none",
+                    "models": server["composeIds"], "model": server["model"], "scopeParent": False, "title": server["title"], "open": 1},
+                   "패널(compose 길): 범위 라디오 · 원본 칸 전체 · 새 프롬프트 만들기 없음 · 고정 한 줄 · 머리 줄 컷 1–2 · 구간 · [프롬프트 준비] · "
+                   "모델 = composeModels(기본 composeDefaultModel)")
+            p = server["plan"]
+            prompt = str(server["draftPrompt"] or "")
+            first = prompt.split("\n")[0]
+            cut = float(p.get("trimTo") or 0) > 0 and float(p.get("sentSeconds") or 0) > float(p.get("trimTo") or 0) + 0.05
+            cost = (f"예상 비용 {usd} — {server['label']}({server['model']}) · {secs(p.get('sentSeconds'))}초" +
+                    (f"({secs(p.get('trimTo'))}초로 잘라 씀)" if cut else "") + (f" · {p.get('resolution')}" if p.get("resolution") else "") +
+                    ". 원래 결과는 그대로 남습니다.")
+            est = (f"견적: 고른 구간 {secs(p.get('trimTo'))}초 · " +
+                   (f"모델 최소 길이에 맞춰 {secs(p.get('sentSeconds'))}초로 만들고 {secs(p.get('trimTo'))}초만 씀" if cut else
+                    f"{secs(p.get('sentSeconds'))}초로 만듦") + (f" · {p.get('resolution')}" if p.get("resolution") else "") + f" · 예상 {usd}")
+            expect("ms-e", [m.get("empty"), m.get("busy"), m.get("composed")],
+                   [[0, "수정 사항을 적어 주세요."], ["프롬프트 준비 중…", True],
+                    {"body": [server["composeBody"]], "status": f"고칠 프롬프트 — 이전 프롬프트 + 수정 사항 · {server['label']} · 구간 3.0–15.0초",
+                     "draft": "", "text": True, "change": [[0, "vnew-edit-fix-change"]], "changeText": first + "\n",
+                     "shown": ["", "none", "none", "", ""], "result": est, "cost": cost,
+                     "meter": f"{len(prompt.encode('utf-8')):,} / {int(p.get('maxBytes') or 0):,}바이트", "submit": [f"다시 만들기 ({usd})", False],
+                     "problems": 0, "make": ["프롬프트 준비", False]}],
+                   "[프롬프트 준비]: 수정 사항 없으면 안내만 · 누르면 compose 바디 {requestKo, in, out, model}(서버가 받은 바디) · 준비한 프롬프트 그대로 읽기만 · "
+                   "수정 줄(EDIT) 강조 · 견적 · 바이트 · 비용 줄 · [다시 만들기 ($x)]")
+            ready, gone = [False, False, ""], [True, True, "none"]
+            expect("ms-f", m.get("stale"),
+                   {"req": gone, "back": ready, "extra": gone, "model": gone, "modelBack": ready,
+                    "sel": gone + [{"in": 0, "out": 15}, ["c1", "c1b", "c2"], "선택한 컷 구간만 고칩니다 (0.0–15.0초)"],
+                    "selBack": ready + [{"in": 3, "out": 15}, ["?in=0&out=15", "?in=3&out=15"]]},
+                   "수정 사항 · 추가 프롬프트 · 모델 · 고른 컷이 바뀌면 「다시 준비해 주세요」 + 제출 막힘 + 프롬프트 숨김, 준비할 때 입력으로 돌아오면 다시 준비됨 · "
+                   "고른 컷이 바뀌면 범위가 따라가고 보기를 다시 받음")
+            expect("ms-e", m.get("submit"),
+                   {"body": [server["submitBody"]],
+                    "confirm": [f"v2를 {server['label']}(으)로 선택한 컷 구간(3.0–15.0초)만 다시 만듭니다. 예상 비용 {usd}. 원래 결과는 그대로 남습니다."],
+                    "note": "v2를 만들기 시작했습니다. 끝나면 [바꾸기]·[재료에 추가]가 생깁니다.", "draft": "none", "refreshed": 1, "known": True},
+                   "[다시 만들기]: 확인창 · 기존 제출 바디 {prompt, requestKo, extraKo, confirmUsd = draft.plan.usd, draftId, model, scope range, in, out}"
+                   "(서버가 202 로 받은 바디) · 낸 초안은 숨김 · 새 재료를 다시 받음")
+            v2 = [["c1", "v1", 0, 3, "컷 1"], ["c1b", "v2", 0, 4.5, "컷 1"], ["c2", "v2", 4.5, 12, "컷 2"]]
+            expect("ms-h", [m.get("versions"), m.get("swapBtn"), m.get("swap"), m.get("swapBack"), m.get("swapUndo")],
+                   [["v1 원본 · 완성", "v2 · 완성"],
+                    [2, False, "고른 컷을 v2로 바꿉니다(원본 3.0–15.0초 자리, 같은 자리 · 같은 길이 — 이웃 클립은 그대로)"],
+                    {"clips": v2, "total": [15, 15], "undo": 1, "note": "타임라인 클립 2개를 v2로 바꿨습니다. 다른 버전의 [바꾸기]로 되돌릴 수 있습니다.",
+                     "starts": [0, 3, 7.5]},
+                    {"clips": [["c1", "v1", 0, 3, "컷 1"], ["c1b", "v1", 3, 7.5, "컷 1"], ["c2", "v1", 7.5, 15, "컷 2"]], "undo": 2}, v2],
+                   "v2 [바꾸기] = 고른 컷 2개만(새 in·out = 옛 − 3초) · 이웃(c1) 그대로 · 같은 자리 · 전체 길이 같음 · 실행 취소 한 단계 · "
+                   "v1 [바꾸기] = 정확히 원래 in·out · 한 번 되돌리면 v2 상태")
+            expect("ms-h", [m.get("pureGap"), m.get("pureOut"), m.get("pureAll"), m.get("pureBack"), m.get("pureUses")],
+                   [{"clips": [["A", "K1", 0, 3, 1, False, 0], ["B", "K2", 0.2, 4, 1, False, 0.2], ["C", "K2", 4.6, 11.5, 2, True, 0],
+                               ["D", "KX", 0, 2, 1, False, 0]], "changed": 2, "outside": 0, "total": [12.25, 12.25]},
+                    [1, 1, "K1"], [2, 0, ["K1", "K2", "K2", "KX"]],
+                    [["A", "K1", 0, 3, 1, False, 0], ["B", "K1", 3.2, 7, 1, False, 0.2], ["C", "K1", 7.6, 14.5, 2, True, 0], ["D", "KX", 0, 2, 1, False, 0]],
+                    [True, True, False, None]],
+                   "순수: 빈틈 있는 컷(다듬은 구간)도 각자 옮김 · 속도 · 소리 끔 · 대사 타이밍 그대로 · 전체 길이 같음 · 고른 컷이 구간 밖이면 outside · "
+                   "고른 컷이 없으면 구간 안 클립 모두 · 되돌리기 정확 · fromN 버전이 없으면 결과 영상 정보 없음")
+            expect("ms-d", [m.get("pureNames"), m.get("pureRemove"), m.get("pureLine")],
+                   [["컷 1–2", "컷 3", "컷 2–9", "A · 재료"], ["b"], [1, 1, -1]],
+                   "머리 줄 이름(컷 a–b · 이름) · 여러 개 빼기 · 수정 줄 찾기(번역 문장 → 한국어 → 없음)")
+            expect("ms-i", got.get("innerHTML"), False, "가짜 DOM 에서 innerHTML 0")
+    groups = {f"ms-{c}" for c in "abcdefghi"}
+    if not node:  # CI 처럼 node 가 없으면 화면 실행 묶음(ms-b~h)은 위 경고로 건너뛴다
+        groups -= {f"ms-{c}" for c in "bcdefgh"}
+    if groups - seen and not bad:
+        bad.append(f"검사하지 못한 묶음: {sorted(groups - seen)}")
+    if bad:
+        fail("작업 192 ⑦ 여러 컷 고르기 · AI로 고치기 프롬프트 준비(ms) 검사 실패\n" + "\n".join(f"  {item}" for item in bad))
+    else:
+        ok("작업 192 ⑦ 여러 컷 고르기 · AI로 고치기 프롬프트 준비 검사 (ms-a)서버 191 그대로 · 화면 바디 202 (ms-b)Ctrl/Cmd/Shift 고르기 · 한 클립 칸 막힘 · "
+           "고른 컷 재생 = 첫 컷 (ms-c)다른 원본 거절 (ms-d)범위 = 최소 in~최대 out (ms-e)범위 라디오 없음 · 프롬프트 준비 · compose · 제출 바디 "
+           "(ms-f)다시 준비 (ms-g)여러 컷 삭제 한 단계 (ms-h)고른 컷만 바꾸기 · 같은 길이 · 이웃 그대로 · 되돌리기 (ms-i)정적 · CSS · LF")
+
+
 def main() -> int:
     print("== vpoc1 check ==")
     check_compileall()
@@ -62692,8 +63696,10 @@ def main() -> int:
     check_vnew_edit()
     check_vnew_edit_ui()
     check_vnew_edit_retime()
-    check_vnew_edit_retake()
-    check_vnew_edit_retake_models()
+    # 작업 191: 옛 AI로 고치기 검사(원본 칸 전체 길·scope 없는 바디·칸 전체 클립 = whole)는 FULL_SCOPE_ALLOWED=True 로 돌린다(기대값 그대로).
+    # 116(rtk)·보완 1(rtk-n~x)·131(kc) 이 그렇다. 보완 2 소리(check_vnew_edit_retake_audio)·119 는 기본(False)에서도 그대로 통과한다.
+    _run_retake_full(check_vnew_edit_retake)
+    _run_retake_full(check_vnew_edit_retake_models)
     check_vnew_edit_retake_audio()
     check_vnew_inner_voice()
     check_vnew_inner_voice_118a()
@@ -62710,7 +63716,7 @@ def main() -> int:
     check_vnew_real_likeness_130()
     check_vnew_real_cut_anime_132()
     check_vnew_real_cut_qa_133()
-    check_vnew_retake_kling_cuts_131()
+    _run_retake_full(check_vnew_retake_kling_cuts_131)
     check_vnew_real_remerge_134()
     check_vnew_real_cut_sheet_135()
     check_vnew_real_brief_136()
@@ -62771,6 +63777,8 @@ def main() -> int:
     check_vnew_edit_cut_play_188()
     check_vnew_edit_variant_docs_189()
     check_vnew_edit_variant_tabs_190()
+    check_vnew_retake_compose_191()
+    check_vnew_edit_multicut_fix_192()
     print()
     if warnings:
         print(f"경고 {len(warnings)}건")
