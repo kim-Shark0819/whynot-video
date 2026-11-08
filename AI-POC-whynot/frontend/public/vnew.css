@@ -5416,3 +5416,49 @@ textarea.vnew-field-input {
     min-height: 40px;
   }
 }
+
+/* ================================================================ ⑦ 편집 — 고른 컷부터 재생(작업 188)
+   도구줄의 고른 클립 [▶ 이 컷 처음부터 재생] · [이 컷만 재생](재생 중이면 그 버튼이 일시정지)과 작은 안내 한 줄.
+   좁은 화면에서는 두 버튼이 줄을 바꿔 감싸고, 페이지 가로 스크롤은 생기지 않는다. */
+.vnew-edit-cutplay {
+  display: inline-flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 8px;
+  min-width: 0;
+  max-width: 100%;
+}
+
+.vnew-edit-cutplay-from,
+.vnew-edit-cutplay-only {
+  min-height: 34px;
+  padding: 0 10px;
+  font-size: 13px;
+  white-space: nowrap;
+}
+
+.vnew-edit-cutplay-from[aria-pressed="true"],
+.vnew-edit-cutplay-only[aria-pressed="true"] {
+  border-color: var(--accent, #cb3208);
+  color: var(--accent, #cb3208);
+}
+
+.vnew-edit-cutplay-note {
+  flex: 1 1 100%;
+  min-width: 0;
+  font-size: 12px;
+}
+
+@media (max-width: 768px) {
+  .vnew-edit-cutplay {
+    width: 100%;
+  }
+
+  .vnew-edit-cutplay-from,
+  .vnew-edit-cutplay-only {
+    flex: 1 1 auto;
+    min-width: 0;
+    min-height: 40px;
+    white-space: normal;
+  }
+}
