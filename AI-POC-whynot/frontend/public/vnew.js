@@ -13160,7 +13160,8 @@
     var name = editFixVerName(v);
     if (v.status === "failed") return name + " 실패 — " + (v.error || "다시 만들지 못했습니다.");
     if (v.status === "completed") return name + " 완성 — [바꾸기]·[재료에 추가]로 타임라인에 쓸 수 있습니다.";
-    return name + " " + (EDIT_FIX_STATUS[v.status] || v.status || "") + (Number(v.attempt) > 1 ? " (" + v.attempt + "번째 시도)" : "") + "…";
+    return name + " " + (EDIT_FIX_STATUS[v.status] || v.status || "") + (Number(v.attempt) > 1 ? " (" + v.attempt + "번째 시도)" : "") + "…" +
+      (v.contentNote ? " " + v.contentNote : ""); // 작업 195: 콘텐츠 검사 거절 뒤 순화해 한 번 더 내는 중
   }
 
   /* 이전 시도 한 줄 머리(출처·시각·모델·상태·참고 수). */
@@ -13847,6 +13848,8 @@
         d.reload.style.display = "";
       } else if (ver.status === "failed" && ver.error) {
         row.appendChild(el("span", "vnew-edit-fix-error", ver.error));
+      } else if (ver.contentNote && ver.status !== "completed" && ver.status !== "failed") {
+        row.appendChild(el("span", "vnew-hint", ver.contentNote)); // 작업 195: 콘텐츠 검사 거절 뒤 순화해 한 번 더 내는 중
       }
       d.versions.appendChild(row);
     });

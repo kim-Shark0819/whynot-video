@@ -37,6 +37,10 @@ in–out 으로 자른 것(generate.resubmit_model source_key·source_span), 길
 range.in~out(edit._audio_sources — material_items 가 videoSource·fromKey 를 넘긴다). 조회·되살리기 완료 때 결과를 fromKey 크기·fps 로 맞춘다(_post_scale).
 작업 194: 같은 칸(원본 + 그 버전)의 여러 클립은 segments 로 한 번에 고친다(10절) — @Video1 = 조각을 이은 것, 길이 = 합, 완료 때 조각마다 원래 소리를
 넣는다(_post_segments).
+작업 195: fal 콘텐츠 검사 거절(generate._content_kind — 본 생성과 같은 CONTENT_FLAG_WORDS, 제출 때·조회 결과 모두)은 버전 failureKind
+"contentFlag". 처음 거절이면 같은 번호 attempt + 1 로 1번만 다시 낸다(11절 _soft_prompt — 이전 프롬프트(CONTEXT) 부분의 대사 줄을 빼고 본 생성의
+순화 지도로 고친다, EDIT·RANGE·참고 표시는 그대로). 또 거절이면 CONTENT_FLAG_TEXT 로 failed. 원장은 본 생성과 같다(실제로 받아 준 제출마다
+1번 — 제출 자체가 거절되면 0).
 """
 
 from __future__ import annotations
@@ -121,6 +125,11 @@ POLL_FAILED_TEXT = "결과를 확인하지 못했습니다. 다시 시도해 주
 POLL_TIMEOUT_TEXT = f"결과를 {POLL_MAX_S // 60}분 넘게 받지 못했습니다. 다시 시도해 주세요."
 _TIMEOUT_TEXT_RE = re.compile(r"^결과를 \d+분 넘게 받지 못했습니다")  # 보완 4: 옛 상태(timedOut 표시 없음)의 시간 초과 문구
 GEN_TIMEOUT_TEXT = "모델 쪽에서 영상 생성 시간이 초과되어 결과가 없습니다. 다시 시도해 주세요."  # 보완 4b: fal HTTP504 Generation timeout
+# 작업 195: fal 콘텐츠 검사 거절(failureKind contentFlag — vpoc.errors.USER_FACING_KINDS 에 이미 있다). 고정 한국어 문구(영어 원문을 보이지 않는다).
+CONTENT_FLAG_KIND = generate.CONTENT_FLAG_KIND
+CONTENT_RETRY_TEXT = "영상 모델의 콘텐츠 검사에서 거절됐습니다. 대사를 부드럽게 바꿔 한 번 더 시도하는 중입니다."
+CONTENT_FLAG_TEXT = ("영상 모델의 콘텐츠 검사에서 거절됐습니다. 대사를 부드럽게 바꿔 한 번 더 시도했지만 거절됐습니다. "
+                     "키스·노출·거친 대사가 있는 컷을 빼고 다시 골라 보세요.")
 URL_TEXT = "[주소 생략]"
 
 _CONTROL_RE = re.compile(r"[\x00-\x08\x0b-\x1f\x7f]")
@@ -1130,6 +1139,8 @@ def _version_out(target: dict, version: dict) -> dict:
         "createdAt": version.get("createdAt") or "", "submittedAt": version.get("submittedAt") or "",
         "finishedAt": version.get("finishedAt") or "",
         "timedOut": _timed_out(version), "recovering": _recoverable(version, datetime.now(timezone.utc)),  # 보완 4
+        # 작업 195: 콘텐츠 검사 거절 뒤 순화해 다시 내는 중이면 그 안내(끝나면 "" — 실패 문구는 error)
+        "contentNote": CONTENT_RETRY_TEXT if version.get("contentRetry") and version.get("status") in _LIVE else "",
     }
 
 
@@ -1776,6 +1787,7 @@ def submit(owner: str, pid: str, mid: str, payload) -> dict:
         version.pop("postScaled", None)  # 작업 193 fix1: 지난 시도의 크기 맞춤 기록도(완료 때 다시 단다)
         for stale in ("segments", "audioSegments", "audioStitched"):  # 작업 194: 지난 시도의 조각·소리 기록도(pick·완료가 다시 단다)
             version.pop(stale, None)
+        version.pop("contentRetry", None)  # 작업 195: 사용자가 다시 내면 자동 순화 1번을 다시 쓸 수 있다
         version.update(pick["version"])  # 보완 1: 고른 모델·범위·구간·형식·길이
         box.update(n=version["n"], attempt=attempt)
         return data
@@ -1813,22 +1825,33 @@ def _finish(owner: str, pid: str, gen_id: str, key: str, n: int, token: str, *, 
 
 
 def run_retake(owner: str, pid: str, gen_id: str, key: str, n: int, claim: str) -> None:
-    """다시 만들기 스레드: queued·preparing 이면 resubmit_cell(원래 경로 제출·원장·기록) → submitted → 조회(5초) → completed·failed."""
+    """다시 만들기 스레드: queued·preparing 이면 resubmit_cell(원래 경로 제출·원장·기록) → submitted → 조회(5초) → completed·failed.
+    작업 195: 콘텐츠 검사 거절(제출 때·조회 결과)이 처음이면 _content_flag 가 순화한 프롬프트로 같은 버전을 queued(attempt + 1)로 두고 여기서 한 번 더 낸다."""
     stage = "start"
     variant, _, cell_id = str(key).partition(":")
     try:
         version = _beat(owner, pid, gen_id, key, n, claim)
-        if version.get("status") in ("queued", "preparing"):
-            stage = "submit"
-            version = _beat(owner, pid, gen_id, key, n, claim, status="preparing")
-            sent = _resubmit(owner, pid, gen_id, variant, cell_id, n, version)  # 116: resubmit_cell · 보완 1 새 길: resubmit_model
-            real = {"sentSeconds": sent["sentSeconds"]} if version.get("videoSource") == RESULT_SOURCE and \
-                sent.get("sentSeconds") is not None else {}  # 작업 191 fix1: 실제로 보낸 @Video1 길이(채움 포함)
-            version = _beat(owner, pid, gen_id, key, n, claim, status="submitted", invocationArn=sent["invocationArn"],
-                            outputPrefix=sent["outputPrefix"], submittedAt=now_iso(), logId=sent.get("logId") or "", **real)
-            log.info("vnew.retake.submitted pid=%s gen=%s cell=%s n=%d attempt=%s", pid, gen_id, key, n, version.get("attempt"))
-        stage = "poll"
-        _poll_until_done(owner, pid, gen_id, key, n, claim, version)
+        while version is not None:
+            if version.get("status") in ("queued", "preparing"):
+                stage = "submit"
+                version = _beat(owner, pid, gen_id, key, n, claim, status="preparing")
+                try:
+                    sent = _resubmit(owner, pid, gen_id, variant, cell_id, n, version)  # 116: resubmit_cell · 보완 1 새 길: resubmit_model
+                except VpocError as exc:
+                    if not generate._content_kind(exc.message):  # noqa: SLF001
+                        raise
+                    # 작업 195: 제출 자체가 콘텐츠 검사로 거절(원장 0 — 제출 경로는 받아 준 뒤에만 남긴다)
+                    log.warning("vnew.retake.content_flag pid=%s gen=%s cell=%s n=%d attempt=%s at=submit", pid, gen_id, key, n,
+                                version.get("attempt"))
+                    version = _content_flag(owner, pid, gen_id, key, n, claim, version)
+                    continue
+                real = {"sentSeconds": sent["sentSeconds"]} if version.get("videoSource") == RESULT_SOURCE and \
+                    sent.get("sentSeconds") is not None else {}  # 작업 191 fix1: 실제로 보낸 @Video1 길이(채움 포함)
+                version = _beat(owner, pid, gen_id, key, n, claim, status="submitted", invocationArn=sent["invocationArn"],
+                                outputPrefix=sent["outputPrefix"], submittedAt=now_iso(), logId=sent.get("logId") or "", **real)
+                log.info("vnew.retake.submitted pid=%s gen=%s cell=%s n=%d attempt=%s", pid, gen_id, key, n, version.get("attempt"))
+            stage = "poll"
+            version = _poll_until_done(owner, pid, gen_id, key, n, claim, version)  # 작업 195: 순화해 다시 낼 버전이면 dict
     except _ClaimLost:
         log.info("vnew.retake.claim_lost pid=%s gen=%s cell=%s n=%d stage=%s", pid, gen_id, key, n, stage)
     except Exception as exc:  # noqa: BLE001
@@ -1846,7 +1869,8 @@ def run_retake(owner: str, pid: str, gen_id: str, key: str, n: int, claim: str) 
             log.warning("vnew.retake.state_failed pid=%s err=%s", pid, type(write_exc).__name__)
 
 
-def _poll_until_done(owner: str, pid: str, gen_id: str, key: str, n: int, claim: str, version: dict) -> None:
+def _poll_until_done(owner: str, pid: str, gen_id: str, key: str, n: int, claim: str, version: dict) -> dict | None:
+    """조회해 버전을 끝낸다(None). 작업 195: 처음 콘텐츠 검사 거절이면 순화해 다시 낼 버전(queued, _content_flag)을 돌려준다."""
     arn = str(version.get("invocationArn") or "")
     prefix = str(version.get("outputPrefix") or "")
     if not arn:
@@ -1888,16 +1912,23 @@ def _poll_until_done(owner: str, pid: str, gen_id: str, key: str, n: int, claim:
         if status == "Completed":
             output_key = generate._find_output_key(prefix, arn)  # noqa: SLF001
             output_key, scaled = _post_scale(owner, pid, gen_id, key, n, version, output_key)  # 작업 193 fix1: result 는 원본 크기·fps 로
-            _finish(owner, pid, gen_id, key, n, claim, status="completed", outputKey=output_key, error="", **scaled)
+            _finish(owner, pid, gen_id, key, n, claim, status="completed", outputKey=output_key, error="", **scaled,
+                    **({"failureKind": ""} if version.get("failureKind") else {}))  # 작업 195: 순화해 다시 낸 시도가 됐으면 거절 표시를 지운다
             log_result(owner, pid, gen_id, key, arn, "completed", output_key=output_key)
             log.info("vnew.retake.done pid=%s gen=%s cell=%s n=%d mid=%s", pid, gen_id, key, n, edit.media_id(output_key))
-            return
-        message = generate._user_facing_error(str(result.get("failureMessage") or "영상 생성 실패"))  # noqa: SLF001
+            return None
+        raw = str(result.get("failureMessage") or "영상 생성 실패")
+        message = generate._user_facing_error(raw)  # noqa: SLF001
         kind = str(result.get("failureKind") or "") or generate._audio_kind(message)  # noqa: SLF001
+        if not kind and generate._content_kind(raw):  # noqa: SLF001 — 작업 195: 본 생성과 같은 규칙(소리 거절은 "")
+            log_result(owner, pid, gen_id, key, arn, "failed", error=message)
+            log.warning("vnew.retake.content_flag pid=%s gen=%s cell=%s n=%d attempt=%s at=poll", pid, gen_id, key, n,
+                        version.get("attempt"))
+            return _content_flag(owner, pid, gen_id, key, n, claim, version)
         _finish(owner, pid, gen_id, key, n, claim, status="failed", error=_clean_text(message, 300), failureKind=kind)
         log_result(owner, pid, gen_id, key, arn, "failed", error=message)
         log.warning("vnew.retake.job_failed pid=%s gen=%s cell=%s n=%d kind=%s", pid, gen_id, key, n, kind or "-")
-        return
+        return None
 
 
 # ---------------------------------------------------------------- 작업 193 fix1: result 결과를 고칠 재료 영상의 크기·fps 로
@@ -3321,3 +3352,113 @@ def _segments_range_line(rng: dict, count: int) -> str:
     total = float(rng["seconds"])
     return (f"{COMPOSE_RESULT_RANGE_HEAD}the current timeline of {what} ({int(count)} clip{'' if int(count) == 1 else 's'}, {total:.1f}s); "
             f"the new video is {total:g}s long, the same length as @Video1.")
+
+
+
+# ================================================================ 11. 작업 195 — fal 콘텐츠 검사 거절 → 순화해 1번 더
+#
+# 본 생성(generate 153·163·168)과 같은 규칙(generate._content_kind — CONTENT_FLAG_WORDS, 소리 거절은 빼고)으로 거절을 알아본다. 처음 거절이면
+# 같은 번호에서 attempt + 1 로 1번만 다시 낸다: 프롬프트는 그 버전 프롬프트를 compose 꼴 그대로 두고 이전 프롬프트(CONTEXT) 부분만 고친다 —
+# DIALOGUE 줄과 샷 줄의 대사 조각(화자: "…", 화자, spoken (…): "…", 화자 (… still speaking the same line)), 남은 한글 따옴표 글을 빼고
+# 본 생성의 순화 지도(generate._soften_text 센 순화 · _contact_neutral)로 고친다. EDIT · EARLIER EDIT · RANGE · EXTRA · REFERENCES ·
+# CONTEXT 줄과 참고 표시(줄마다 같은 집합)는 그대로, 바이트는 처음 프롬프트를 넘지 않는다. 대사 LLM 다시 쓰기(generate._rewrite_part_lines)는
+# 계획 항목을 받고 LLM 을 1번 더 부르므로 쓰지 않는다(대사는 뺀다). 다시 낸 시도도 거절이면 CONTENT_FLAG_TEXT · failureKind contentFlag 로 failed.
+# 원장: 제출 경로(resubmit_*)가 fal 이 받아 준 제출마다 1번 남긴다(본 생성 _charge_take 와 같다 — 조회 결과 거절도 계상, 제출 자체 거절은 0).
+
+_SPOKEN_WHO = r'[^\s;:.,"()\n][^;:.,"()\n]{0,60}?'
+_SPOKEN_RE = re.compile(
+    r'(?P<sep>[;.:][ \t]+|(?<=["\u201d)])[ \t]+)' + _SPOKEN_WHO
+    + r'(?:(?:[ \t]*\([^()\n]{0,240}\))?(?:,[ \t]*spoken[ \t]*\([^()\n]{0,80}\))?:[ \t]*"[^"\n]*"'
+    + r'|[ \t]*\([^()\n]{0,240}still speaking the same line\))')
+_HANGUL_QUOTE_RE = re.compile(r'[ \t]*"[^"\n]*[\u1100-\u11ff\u3130-\u318f\uac00-\ud7a3][^"\n]*"')
+
+
+def _spoken_repl(match: re.Match) -> str:
+    sep = match.group("sep")
+    return ": " if sep.startswith(":") else "." if sep.startswith(".") else ""
+
+
+def _drop_spoken(line: str) -> tuple[str, int]:
+    """샷 · 자료 줄 하나에서 대사 조각과 남은 한글 따옴표 글을 뺀다. (줄, 뺀 조각 수). 뺀 것이 없으면 같은 글자."""
+    out, count = _SPOKEN_RE.subn(_spoken_repl, line)
+    out, more = _HANGUL_QUOTE_RE.subn("", out)
+    count += more
+    if not count:
+        return line, 0
+    out = re.sub(r":[ \t]*[;.][ \t]*", ": ", out)
+    out = re.sub(r"[ \t]{2,}", " ", out)
+    out = re.sub(r"[ \t]+([;,.])", r"\1", out)
+    out = re.sub(r"([;,])[ \t]*(?=[;,.])", "", out)
+    out = out.rstrip().rstrip(";:,").rstrip()
+    if out and out[-1] not in ".!?\")\u201d":
+        out += "."
+    return out, count
+
+
+def _soft_line(line: str) -> str:
+    """본 생성 순화 지도(작업 153 · 163 센 순화 · 168 닿는 연기 중립 낱말). 바뀔 말이 없으면 같은 글자."""
+    return generate._contact_neutral(generate._soften_text(line, True))  # noqa: SLF001
+
+
+def _soft_prompt(prompt: str) -> tuple[str, dict]:
+    """작업 195: 콘텐츠 검사 거절 뒤 다시 낼 프롬프트. (프롬프트, {droppedLines, droppedPieces, softenedLines}).
+
+    CONTEXT 줄(compose result)이 있으면 그 뒤가, 없으면 compose 줄(COMPOSE_LABELS · COMPOSE_RESULT_VIDEO_LINE) 밖의 모든 줄이 이전 프롬프트다.
+    그 줄마다: DIALOGUE 줄(참고 표시 없음)은 통째로 빼고, 나머지는 대사 조각을 뺀 뒤(_drop_spoken) 순화한다(_soft_line). 참고 표시 집합이 바뀌면
+    순화 · 빼기를 하나씩 물린다. 결과가 처음 바이트를 넘으면 _drop_context(이전 프롬프트 줄을 뒤부터), 그래도 넘으면 빼기만 한 것을 쓴다.
+    """
+    lines = _normalize_prompt(prompt).split("\n")
+    start = lines.index(COMPOSE_CONTEXT_LINE) + 1 if COMPOSE_CONTEXT_LINE in lines else 0
+    full: list[str] = []
+    plain: list[str] = []
+    info = {"droppedLines": 0, "droppedPieces": 0, "softenedLines": 0}
+    for at, line in enumerate(lines):
+        label = _label_of(line)
+        if at < start or not line.strip() or label in COMPOSE_LABELS or line == COMPOSE_RESULT_VIDEO_LINE:
+            full.append(line)
+            plain.append(line)
+            continue
+        refs = _refs(line)
+        if label.startswith("DIALOGUE") and not refs:
+            info["droppedLines"] += 1
+            continue
+        dropped, pieces = _drop_spoken(line)
+        if _refs(dropped) != refs:
+            dropped, pieces = line, 0
+        softened = _soft_line(dropped)
+        if _refs(softened) != refs:
+            softened = dropped
+        info["droppedPieces"] += pieces
+        info["softenedLines"] += int(softened != dropped)
+        if dropped.strip():
+            plain.append(dropped)
+        if softened.strip():
+            full.append(softened)
+    limit = _bytes_of(prompt)
+    out = "\n".join(full)
+    if _bytes_of(out) > limit:
+        kept, _dropped = _drop_context(full, start, limit)
+        out = "\n".join(kept)
+        if _bytes_of(out) > limit:
+            out = "\n".join(plain)
+            info["softenedLines"] = 0
+    return out, info
+
+
+def _content_flag(owner: str, pid: str, gen_id: str, key: str, n: int, claim: str, version: dict) -> dict | None:
+    """작업 195: 콘텐츠 검사 거절. 순화해 다시 낸 시도(contentRetry)였으면 CONTENT_FLAG_TEXT 로 failed(None), 처음이면 같은 버전을
+    queued · attempt + 1 · 순화한 프롬프트 · failureKind contentFlag · contentRetry 로 두고 그 버전을 돌려준다(run_retake 가 바로 다시 낸다)."""
+    if version.get("contentRetry"):
+        _finish(owner, pid, gen_id, key, n, claim, status="failed", error=CONTENT_FLAG_TEXT, failureKind=CONTENT_FLAG_KIND)
+        log.warning("vnew.retake.content_flag pid=%s gen=%s cell=%s n=%d attempt=%s step=failed", pid, gen_id, key, n,
+                    version.get("attempt"))
+        return None
+    prompt, info = _soft_prompt(str(version.get("prompt") or ""))
+    attempt = int(version.get("attempt") or 1) + 1
+    out = _beat(owner, pid, gen_id, key, n, claim, status="queued", attempt=attempt, prompt=prompt, promptBytes=_bytes_of(prompt),
+                invocationArn="", outputPrefix="", outputKey="", submittedAt="", logId="", error="", failureKind=CONTENT_FLAG_KIND,
+                contentRetry={"fromAttempt": attempt - 1, "at": now_iso(), **info})
+    log.info("vnew.retake.content_flag pid=%s gen=%s cell=%s n=%d attempt=%d step=soften bytes=%d dropped_lines=%d dropped_pieces=%d "
+             "softened=%d", pid, gen_id, key, n, attempt, _bytes_of(prompt), info["droppedLines"], info["droppedPieces"],
+             info["softenedLines"])
+    return out
