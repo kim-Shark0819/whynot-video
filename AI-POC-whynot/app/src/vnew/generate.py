@@ -14568,6 +14568,27 @@ def _retake_video(cell: dict, *, kind: str, path: str, span: dict | None, pad_to
     return video, meta, keys
 
 
+def _retake_result_video(source_key: str, start: float, end: float, *, path: str, pad_to: float) -> tuple[bytes, dict, list[str]]:
+    """작업 191 fix1: 고칠 재료 영상(타임라인 클립이 재생하는 파일 — 결과·지난 버전) 자체를 그 파일 초 [start, end] 로 자른 입력 영상.
+
+    _retake_video 와 같은 도구: _cut_clip(소리 없음·3초 미만은 마지막 프레임으로 채움·720 높이), 참고 영상 경로는 보낼 길이(pad_to)까지 _pad_clip.
+    자른 영상은 임시 폴더·메모리에서만 만들어 data URI 로 보낸다(저장소 쓰기 0). 반환 (mp4, {origSeconds, sentSeconds, padded}, [재료 키]).
+    """
+    key = str(source_key or "")
+    if not key:
+        raise VpocError("vnew.generate", "NoRecording", "고칠 영상이 없습니다.", 409)
+    start, end = float(start or 0.0), float(end or 0.0)
+    raw = _fetch_bytes(key, bucket=vpoc_settings.VIDEO_BUCKET)
+    clip = _cut_clip(raw, {"id": "result", "startSec": start, "endSec": end, "seconds": round(max(0.0, end - start), 3)})
+    del raw
+    video = clip["bytes"]
+    meta = {"origSeconds": clip.get("origSeconds"), "sentSeconds": clip.get("sentSeconds"), "padded": bool(clip.get("padded"))}
+    if path == "take" and pad_to and float(pad_to) > float(meta.get("sentSeconds") or 0.0) + 0.05:
+        video = _pad_clip(video, float(pad_to))
+        meta = {**meta, "sentSeconds": round(float(pad_to), 3), "padded": True}
+    return video, meta, [key]
+
+
 def _retake_payload(owner: str, pid: str, plan: dict, like: dict, *, path: str, caps: dict, variant: str) -> dict:
     """경로에 맞는 ⑤ payload 빌더(참고 영상 _take_payload — 실사는 variant="real", 영상 편집 _previz_payload(caps))."""
     if path == "take":
@@ -14618,11 +14639,13 @@ def _charge_retake(owner: str, pid: str, gen_id: str, result: dict, model: str, 
 
 def resubmit_model(owner: str, pid: str, gen_id: str, *, variant: str, cell_id: str, prompt: str, tag: str, model: str,
                    attempt: int = 1, version=None, span: dict | None = None, cut_ids: list | None = None,
-                   expect_refs: list | None = None) -> dict:
+                   expect_refs: list | None = None, source_key: str = "", source_span: tuple | None = None) -> dict:
     """⑦ AI로 고치기 새 길(design D22): 고른 모델·범위로 칸 하나를 제출한다. 칸 상태(gen.units)는 읽기만 한다.
 
     span = {start, end}(칸 녹화 시간, None 이면 원본 칸 전체), cut_ids = 구간 안 컷, expect_refs = 초안 본보기의 참고 표시(다르면 제출하지 않는다).
     준비~제출은 _PREPARE_SEM 안, 원장은 견적 금액(_charge_retake), 기록 source=retake·model=고른 모델. 결과 접두사는 116 과 같다.
+    작업 191 fix1: source_key(고칠 재료 영상 키)·source_span(그 파일 초 (in, out))을 주면 입력 영상 @Video1 = 그 파일의 그 구간
+    (_retake_result_video)이고 길이·견적은 out − in 초다. 없으면 지금처럼 프리비즈 녹화(_retake_video). 참고 이미지는 span·cut_ids 그대로.
     반환 {invocationArn, outputPrefix, provider, usd, logId, sentSeconds, trimTo}.
     """
     plan, _ = plan_mod.load_plan(owner, pid)
@@ -14639,7 +14662,17 @@ def resubmit_model(owner: str, pid: str, gen_id: str, *, variant: str, cell_id: 
     model = str(model or original)
     path = retake_path(model, original=original, kind=kind)
     cell_seconds = float(cell.get("seconds") or 0.0)
-    seconds = (float(span.get("end") or 0.0) - float(span.get("start") or 0.0)) if span else cell_seconds
+    src_in = src_out = None
+    if source_key:
+        try:
+            src_in, src_out = float(source_span[0]), float(source_span[1])  # type: ignore[index]
+        except (TypeError, ValueError, IndexError):
+            src_in = src_out = None
+        if src_in is None or src_out is None or src_in < 0 or src_out <= src_in:
+            raise VpocError("vnew.retake", "RetakeBadRange", "다시 만들 구간이 올바르지 않습니다. 타임라인에서 클립을 다시 골라 주세요.", 400)
+        seconds = round(src_out - src_in, 3)
+    else:
+        seconds = (float(span.get("end") or 0.0) - float(span.get("start") or 0.0)) if span else cell_seconds
     info = retake_plan(gen, model=model, path=path, seconds=seconds, original=model == original)
     if not info["ok"]:
         raise VpocError("vnew.retake", "RetakeBadModel", RETAKE_MODEL_GONE_TEXT, 409)
@@ -14655,8 +14688,11 @@ def resubmit_model(owner: str, pid: str, gen_id: str, *, variant: str, cell_id: 
     try:
         if variant == "real":
             _assert_no_webtoon(prompt)
-        video, meta, video_keys = _retake_video(cell, kind=kind, path=path, span=span,
-                                                pad_to=float(info["sentSeconds"] or 0) if path == "take" else 0.0)
+        pad_to = float(info["sentSeconds"] or 0) if path == "take" else 0.0
+        if source_key:  # 작업 191 fix1: @Video1 = 고칠 재료 영상의 그 구간
+            video, meta, video_keys = _retake_result_video(source_key, float(src_in), float(src_out), path=path, pad_to=pad_to)
+        else:
+            video, meta, video_keys = _retake_video(cell, kind=kind, path=path, span=span, pad_to=pad_to)
         with _RefTrace() as trace:
             built = _retake_payload(owner, pid, plan, like, path=path, caps=caps, variant=variant)
         refs = trace.refs(built)
@@ -14679,12 +14715,15 @@ def resubmit_model(owner: str, pid: str, gen_id: str, *, variant: str, cell_id: 
         _PREPARE_SEM.release()
     params.update(cellSeconds=round(cell_seconds, 3), rangeStart=round(float(span["start"]), 3) if span else None,
                   rangeEnd=round(float(span["end"]), 3) if span else None, trimTo=info["trimTo"])
+    if source_key:
+        params.update(videoSource="result", sourceIn=round(float(src_in), 3), sourceOut=round(float(src_out), 3))
     _charge_retake(owner, pid, gen_id, result, model, float(info["billedSeconds"] or 0), float(info["usd"] or 0))
     log_id = _log_attempt(owner, pid, gen_id, source="retake", mode=mode, variant=variant, cell_id=str(cell_id), index=index,
                           attempt=attempt, run=run_n, endpoint=model, params=params, refs=refs, video_keys=video_keys, result=result,
                           prompt=prompt, version=version)
-    log.info("vnew.gen.resubmit_model pid=%s cell=%s variant=%s tag=%s attempt=%d path=%s sent_s=%.3f trim_s=%.3f bytes=%d refs=%d ms=%d "
-             "rss_mb=%.0f", pid, cell_id, variant, tag, attempt, path, float(meta.get("sentSeconds") or 0), float(info["trimTo"] or 0),
+    log.info("vnew.gen.resubmit_model pid=%s cell=%s variant=%s tag=%s attempt=%d path=%s source=%s sent_s=%.3f trim_s=%.3f bytes=%d "
+             "refs=%d ms=%d rss_mb=%.0f", pid, cell_id, variant, tag, attempt, path, "result" if source_key else "previz",
+             float(meta.get("sentSeconds") or 0), float(info["trimTo"] or 0),
              len(prompt.encode("utf-8")), len(refs), int((time.monotonic() - started) * 1000), _rss_mb())
     return {"invocationArn": str(result.get("invocationArn") or ""), "outputPrefix": str(result.get("outputPrefix") or prefix),
             "provider": str(result.get("provider") or ""), "usd": info["usd"], "logId": log_id,
