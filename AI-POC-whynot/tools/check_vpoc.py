@@ -64278,6 +64278,553 @@ def check_vnew_retake_audio_scale_193b() -> None:
            "(rb-e)_conform_concat 단계 재사용 · 기본 그대로 · LF")
 
 
+# 작업 194 화면(node): 같은 칸(원본 + 그 버전)의 여러 클립 = segments — 고르기 · 패널 머리 · compose · 제출 바디 · [바꾸기] 이어진 조각 · 거절.
+_SG194_NODE = r"""
+var P = "/api/vnew/p/p%201/edit";
+var S = SERVER;
+var RT = P + "/retake/";
+var after = false, rGets = [], composeBodies = [], submitBodies = [], putN = 0;
+handlers.push(function (m, p, body) {
+  if (m === "GET" && (p === P || p.indexOf(P + "?") === 0)) return { ok: clone(after ? S.edit2 : S.edit) };
+  if (m === "GET" && p.indexOf(P + "/media/") === 0) return { ok: { mid: decodeURIComponent(p.slice((P + "/media/").length)), duration: 15, hasAudio: true } };
+  if (m === "POST" && p.indexOf(RT) === 0 && /\/compose$/.test(p)) { composeBodies.push({ at: p.slice(RT.length), body: body }); return { ok: clone(S.compose) }; }
+  if (m === "GET" && p.indexOf(RT) === 0) { rGets.push(p.slice(RT.length)); return { ok: clone(after ? S.rvDone : S.rv) }; }
+  if (m === "POST" && p.indexOf(RT) === 0) { submitBodies.push({ at: p.slice(RT.length), body: body }); after = true; return { ok: clone(S.submit) }; }
+  if (m === "PUT" && p === P) { putN += 1; return { ok: { doc: { version: putN }, etag: "e" + putN, saved: true, totalSeconds: 0 } }; }
+});
+async function run() {
+  var o = {};
+  var host = new FakeNode("div");
+  renderEditStep(host);
+  await settle();
+  await settle();
+  var ctx = editCtx;
+  Object.keys(ctx.materials).forEach(function (k) {
+    if (!ctx.materials[k].videoUrl) ctx.materials[k].videoUrl = "https://signed.example/v" + Object.keys(ctx.materials).indexOf(k) + ".mp4";
+  });
+  function boxes() { return byClass(ctx.root, "vnew-edit-clip"); }
+  function press(i, mods) {
+    var b = boxes()[i];
+    var ev = { clientX: 20 + i, pointerId: 7, pointerType: "mouse", button: 0 };
+    Object.keys(mods || {}).forEach(function (k) { ev[k] = mods[k]; });
+    b.fire("pointerdown", ev);
+    b.fire("pointerup", { clientX: 20 + i });
+  }
+  function rows(list) {
+    return (list || ctx.clips).map(function (c) { return [c.id, S.names[c.sourceKey] || "?", c.in, c.out, c.label || ""]; });
+  }
+  var notice = byClass(ctx.root, "vnew-edit-notice")[0];
+
+  // ---- A. 원본 · v3 · v4 가 섞인 컷 3개(같은 칸) = segments 길
+  press(1);
+  press(3, { shiftKey: true });
+  var t = editFixSelTarget(ctx) || {};
+  o.target = [ctx.multi.slice(), t.segments || null, t.mid === S.mid1, t.total, t.range, t.error || "", t.ids];
+  ctx.dom.fixSel.fire("click");
+  var fx = ctx.fix;
+  var d = fx ? fx.dom : null;
+  await settle();
+  o.panel = fx ? [fx.segments, fx.total, d.selInfo.textContent, d.rangeLine.textContent, rGets.slice(), d.make.disabled, notice.textContent] : null;
+  if (fx) {
+    d.request.value = "코트를 빨갛게";
+    d.request.fire("input");
+    d.make.fire("click");
+    await settle();
+    o.compose = [composeBodies.slice(), d.draftStatus.textContent, d.submit.disabled];
+    var c0 = confirms.length;
+    d.submit.fire("click");
+    await settle();
+    await settle();
+    o.submit = [submitBodies.slice(), confirms.slice(c0)];
+    await settle();
+    var pr = d.root;
+    var vrows = byClass(pr, "vnew-edit-fix-version");
+    var swaps = byClass(pr, "vnew-edit-fix-swap");
+    var last = swaps[swaps.length - 1];
+    var total0 = r3(editStarts(ctx.clips).total), undo0 = ctx.hist.undo.length;
+    o.swapBtn = [vrows.map(function (r) { return byClass(r, "vnew-edit-fix-version-name")[0].textContent; }), swaps.length,
+                 last ? last.disabled : null, last ? last.title : ""];
+    if (last) last.fire("click");
+    await settle();
+    await settle();
+    o.swap = { clips: rows(), total: [total0, r3(editStarts(ctx.clips).total)], undo: ctx.hist.undo.length - undo0, note: d.note.textContent,
+               starts: editStarts(ctx.clips).starts.map(r3) };
+    editDo(ctx, "undo");
+    o.swapUndo = rows();
+    editFixClose(ctx);
+    await settle();
+  }
+
+  // ---- B. 한 원본 · 원본 초가 이어진 컷 2개 = 지금처럼 in · out
+  editSelect(ctx, -1);
+  press(0);
+  press(1, { shiftKey: true });
+  var t2 = editFixSelTarget(ctx) || {};
+  o.single = [t2.segments || null, t2.range, t2.mid === S.mid1, t2.error || ""];
+  rGets.length = 0;
+  ctx.dom.fixSel.fire("click");
+  var f2 = ctx.fix;
+  await settle();
+  if (f2) {
+    f2.dom.request.value = "웃게";
+    f2.dom.request.fire("input");
+    var cb0 = composeBodies.length;
+    f2.dom.make.fire("click");
+    await settle();
+    o.singleBody = [composeBodies.slice(cb0), rGets.slice(), f2.dom.rangeLine.textContent];
+    editFixClose(ctx);
+    await settle();
+  }
+
+  // ---- C. 거절: 속도 1이 아닌 컷 · 고른 컷 사이 디졸브 · 다른 칸(합친 영상)
+  function tryFix(a, b, mods) {
+    editNote(ctx, "");
+    editSelect(ctx, -1);
+    editRenderTimeline(ctx);
+    press(a);
+    press(b, mods || { shiftKey: true });
+    var tt = editFixSelTarget(ctx) || {};
+    ctx.dom.fixSel.fire("click");
+    var r = [tt.error || "", !!ctx.fix, notice.textContent];
+    if (ctx.fix) editFixClose(ctx);
+    return r;
+  }
+  ctx.clips[2].speed = 2;
+  o.speed = tryFix(1, 3);
+  delete ctx.clips[2].speed;
+  ctx.clips[1].transition = { type: "dissolve", seconds: 0.5 };
+  o.dissolve = tryFix(1, 3);
+  delete ctx.clips[1].transition;
+  ctx.clips[3].transition = { type: "dissolve", seconds: 0.5 };
+  var edgeT = (function () { editSelect(ctx, -1); editRenderTimeline(ctx); press(1); press(3, { shiftKey: true }); return editFixSelTarget(ctx) || {}; })();
+  o.dissolveEdge = [edgeT.error || "", (edgeT.segments || []).length];
+  delete ctx.clips[3].transition;
+  ctx.clips.push({ id: "cf", sourceKey: S.finalKey, in: 0, out: 2, muted: false });
+  o.foreign = tryFix(4, 5, { ctrlKey: true });
+  ctx.clips.pop();
+  editNote(ctx, "");
+  editSelect(ctx, -1);
+  editRenderTimeline(ctx);
+
+  // ---- D. 순수
+  function C(id, key, a, b, extra) { var c = { id: id, sourceKey: key, in: a, out: b, muted: false }; Object.keys(extra || {}).forEach(function (k) { c[k] = extra[k]; }); return c; }
+  o.pureNeeds = [editFixNeedsSegments([C("a", "A", 0, 2), C("b", "A", 2, 5)]), editFixNeedsSegments([C("a", "A", 0, 2), C("b", "A", 3, 5)]),
+                 editFixNeedsSegments([C("a", "A", 0, 2), C("b", "B", 0, 2)]), editFixNeedsSegments([C("a", "A", 0, 2)]),
+                 editFixNeedsSegments([C("a", "A", 3, 5), C("b", "A", 0, 3)])];
+  var nine = []; for (var i = 0; i < 9; i++) nine.push(C("n" + i, "A", i, i + 1));
+  o.pureSegs = [editFixSegments(nine, nine.map(function (_c, i) { return i; })).error,
+                editFixSegments([C("a", "A", 0, 2, { transition: { type: "dissolve", seconds: 0.5 } }), C("b", "B", 0, 2)], [3, 5]).segments,
+                editFixSegments([C("a", "A", 0, 2, { speed: 0.5 })], [0]).error];
+  var vers = [{ n: 1, original: true, status: "completed", sourceKey: "K1" },
+              { n: 3, status: "completed", sourceKey: "K3", videoSource: "result", fromN: 1, sourceRange: { in: 7.5, out: 11 } },
+              { n: 5, status: "completed", sourceKey: "K5", videoSource: "result", fromN: 1, sourceRange: { in: 0, out: 9 },
+                segments: [{ sourceKey: "K1", in: 2, out: 4.5 }, { sourceKey: "K3", in: 0, out: 3 }, { sourceKey: "K4", in: 1, out: 4.5 }] }];
+  var tl = [C("A", "K1", 0, 2), C("B", "K1", 2, 4.5, { audioSlip: 0.2 }), C("C", "K3", 0, 3, { muted: true }), C("D", "K4", 1, 4.5), C("E", "K1", 4.5, 6)];
+  function rowsOf(list) { return list.map(function (c) { return [c.id, c.sourceKey, c.in, c.out, c.muted, c.audioSlip || 0]; }); }
+  var g = editFixSegSwap(tl, ["B", "C", "D"], vers, vers[2], { K5: 9.0 }, 0.04, "", []);
+  o.pureSwap = { clips: rowsOf(g.clips), changed: g.changed, outside: g.outside, skipped: g.skipped,
+                 total: [r3(editStarts(tl).total), r3(editStarts(g.clips).total)], starts: [editStarts(tl).starts.map(r3), editStarts(g.clips).starts.map(r3)] };
+  var back = editFixSegSwap(g.clips, ["B", "C", "D"], vers, vers[0], {}, 0.04, "", []);
+  o.pureBack = [rowsOf(back.clips), back.changed];
+  var miss = editFixSegSwap(tl, ["A"], vers, vers[2], {}, 0.04, "", []);
+  o.pureMiss = [miss.changed, miss.outside];
+  o.pureUses = [editFixSegUses([], vers, vers[2]), editFixSegUses(g.clips, vers, vers[0]), editFixSegUses(tl, vers, vers[0]),
+                editFixResultInfo(vers, vers[2]), !!editFixResultInfo(vers, vers[1]),
+                editFixSegInfo(vers[2]).map(function (p) { return [p.sourceKey, p.at, p.len]; }), editFixSegInfo(vers[1])];
+  editLeave();
+  out.sg = o;
+  out.innerHTML = innerHTMLUsed;
+  console.log(JSON.stringify(out));
+}
+run().catch(function (e) { console.error(String((e && e.stack) || e)); process.exit(1); });
+"""
+
+
+def check_vnew_retake_segments_194() -> None:
+    """작업 194 — ⑦ AI로 고치기: 같은 칸(원본 + 그 버전)의 여러 클립을 한 번에(segments). 가짜 LLM·fal·저장소(191 하네스), 유료 0.
+
+    (sg-a) compose segments(원본 2–7.5 · v3 0–3.5 · v4 0.5–3.5): 200 · 초안 segments · 구간 {in 0, out 12, start 2, end 15, cuts 컷 1 · 2} ·
+           견적 = retake_plan(12초) · 이전 프롬프트 = 칸 원래 프롬프트(v1 기준) · RANGE "current timeline of cuts 1–2 (3 clips, 12.0s)" ·
+           check_prompt 0, v3 mid 로 불러도 같은 대상(v1)
+    (sg-b) 거절: 다른 칸(합친 영상)·다른 키 · 속도 ≠ 1 · 9개 · 그 재료 길이 밖 · 합 1초 미만 → 400, 다른 조각으로 제출 · 초안 없이 segments 제출
+           → 409, 영상 제출 0
+    (sg-c) 제출: 202 · @Video1 = 조각마다 _cut_clip(타임라인 순서 · 각 파일 · 각 in/out) → _conform_concat(hold · 조각 길이 · 첫 조각 크기 1920x1080 ·
+           24fps) → _cut_clip(0–12), 원장 = 견적(12초) · 버전 segments · seconds 12 · trimTo 12 · fromKey 원본 · fromN 1 · videoSource result ·
+           기록 sourceSegments · videoKeys
+    (sg-d) 소리: 조각마다 그 클립이 내던 소리(원본 = 자기 2–7.5 · v3 = 원본 7.5–11 · v4 = 원본 12–15), _stitch_segments(1920x1080@24, 조각 길이)
+           → 버전 outputKey = 잇은 파일 · audioStitched · postScaled, 재료에 result 표시 없음(자기 트랙), 원천에 소리 없음 → 무음 · 옛 길 버전 자기 소리,
+           진짜 _stitch_segments: 프레임 누적 · 시작 = 앞 프레임 ÷ fps · 소리 창 · 무음
+    (sg-e) 화면(node): 섞인 컷 → segments(타임라인 순서) · 패널 = 원본 재료 · 머리 「컷 1–2 · 클립 3개 · 합 12.0초」 · compose · 제출 바디 segments,
+           한 원본 · 이어진 컷 → in/out, [바꾸기] = 고른 컷마다 이어진 조각 · 이웃 · 전체 길이 그대로 · 한 단계, 속도 ≠ 1 · 고른 컷 사이 디졸브 · 다른 칸
+           거절, 순수(빈틈 판정 · 조각 · 바꾸기 · 되돌리기)
+    (sg-f) LF · node --check
+    """
+    sys.path.insert(0, str(ROOT / "app"))
+    import traceback as _tb  # noqa: PLC0415
+
+    bad: list[str] = []
+    seen: set[str] = set()
+    owner = _RTK_OWNER
+    node = shutil.which("node")
+    server: dict = {}
+
+    def expect(group: str, got, want, what: str) -> None:
+        seen.add(group)
+        if got != want:
+            bad.append(f"({group}) {what}\n      결과 {got!r}\n      기대 {want!r}")
+
+    def err_of(resp) -> tuple[int, str, str]:
+        body = (resp.get_json(silent=True) or {}).get("error") or {}
+        return resp.status_code, str(body.get("type") or ""), str(body.get("message") or "")
+
+    saved_tempdir = tempfile.tempdir
+    private_tmp = tempfile.mkdtemp(prefix="sg194-tmp-")
+    tempfile.tempdir = private_tmp
+    try:
+        with _guard_real_llm() as real_calls, _LogCapture(), _Rtk1Env(owner) as env, _pin_vnew(
+                VNEW_FX=True, VNEW_CASTING=True, VNEW_TAKE_REAL=True, VNEW_GEN_PARALLEL=2, POLL_INTERVAL_S=0, VNEW_TAKE_AUDIO=True,
+                VNEW_TAKE_RESOLUTION="480p", VNEW_PREPARE_STALE_S=300, VNEW_EDIT=True, VNEW_EDIT_RETAKE=True):
+            genmod, rt, edit = env.genmod, env.rtmod, env.editmod
+            env.set(rt, "_translate", lambda **_k: ({"changeEn": "Make her coat red."}, {"model": "m", "inputTokens": 120, "outputTokens": 20}))
+            client = env.client()
+            lr = _LR_ENDPOINT
+
+            def probe_fake(path: str) -> dict:  # generate._video_geometry · 가짜 바이트(FAKE 머리)
+                return env._probe(path)  # noqa: SLF001
+
+            env.set(genmod.stitcher, "probe_media", probe_fake)
+            conform: list[tuple] = []
+            env.set(genmod, "_conform_concat", lambda pieces, **kwargs: conform.append((list(pieces), dict(kwargs))) or b"JOINED")
+            stitch: list[dict] = []
+
+            def fake_stitch(source_path, output_path, *, pieces, width, height, fps):
+                heads = []
+                for p in pieces:
+                    head = b""
+                    if p.get("audioPath"):
+                        with open(p["audioPath"], "rb") as handle:
+                            head = handle.read(40)
+                    heads.append((p["seconds"], head, p.get("audioIn"), p.get("audioOut")))
+                stitch.append({"pieces": heads, "size": (width, height, fps)})
+                with open(output_path, "wb") as handle:
+                    handle.write(_edt_fake(round(sum(float(p["seconds"]) for p in pieces), 3), w=width, h=height, fps=fps))
+
+            real_stitch = rt._stitch_segments  # noqa: SLF001 — (sg-d) 진짜 래퍼는 아래에서 stitcher 만 가짜로
+            env.set(rt, "_stitch_segments", fake_stitch)
+
+            # ================= 준비: 통 테이크(웹툰 15초 · 컷 1 0–7.5 · 컷 2 7.5–15) + v3 · v4(result) =================
+            pid = "prj_sg194"
+            env.take_done(client, pid)
+            gen_id = str(env.gen(pid)["genId"])
+            k1 = str(env.gen(pid)["units"][0]["webtoon"]["outputKey"])
+            env.store.blobs[k1] = _edt_fake(15.0, w=1920, h=1080, fps=24)
+            stem = k1.rsplit("/", 1)[0]
+            k3, k4 = stem + "-rt3/out3.mp4", stem + "-rt4/out4.mp4"
+            env.store.blobs.update({k3: _edt_fake(3.5, w=1920, h=1080, fps=24), k4: _edt_fake(3.5, w=1920, h=1080, fps=24)})
+            stamp = rt.now_iso()
+
+            def version(n: int, key: str, r_in: float, r_out: float, start: float) -> dict:
+                seconds = round(r_out - r_in, 3)
+                return {"n": n, "status": "completed", "attempt": 1, "outputKey": key, "scope": "range", "format": "template",
+                        "videoSource": rt.RESULT_SOURCE, "fromKey": k1, "fromN": 1, "model": lr, "prompt": f"STYLE: v{n} prompt.",
+                        "range": {"in": r_in, "out": r_out, "start": start, "end": round(start + seconds, 3), "seconds": seconds, "cutIds": ["c2"],
+                                  "cuts": []}, "trimTo": seconds, "seconds": seconds, "createdAt": stamp, "finishedAt": stamp, "claim": ""}
+
+            env.set_state(pid, lambda data: data["cells"].update({"webtoon:take1": {
+                "versions": [version(3, k3, 7.5, 11.0, 7.5), version(4, k4, 11.5, 15.0, 11.5)], "draft": None}}))
+            base = f"/api/vnew/p/{pid}/edit"
+            edit_v = client.get(base).get_json() or {}
+            mats = {m["sourceKey"]: m for m in edit_v.get("materials") or []}
+            take = next((m for m in mats.values() if m.get("group") == "current" and m.get("kind") == "take"), {})
+            final = next((m for m in mats.values() if m.get("kind") == "final"), {})
+            mid1, mid3 = str(take.get("mid") or ""), str((mats.get(k3) or {}).get("mid") or "")
+            segs = [{"sourceKey": k1, "in": 2.0, "out": 7.5}, {"sourceKey": k3, "in": 0.0, "out": 3.5}, {"sourceKey": k4, "in": 0.5, "out": 3.5}]
+            expect("sg-a", [take.get("sourceKey") == k1, [(mats.get(k) or {}).get("retake", {}).get("cellKey") for k in (k1, k3, k4)],
+                            [(mats.get(k) or {}).get("retake", {}).get("n") for k in (k1, k3, k4)], bool(mid3), bool(final.get("sourceKey"))],
+                   [True, ["webtoon:take1"] * 3, [1, 3, 4], True, True], "준비: 원본 · v3 · v4 재료가 같은 칸(webtoon:take1)")
+
+            # ================= (sg-a) compose segments =================
+            rv = client.get(f"{base}/retake/{mid1}?in=0&out=12").get_json() or {}
+            model = rv.get("composeDefaultModel")
+            r_c3 = client.post(f"{base}/retake/{mid3}/compose", json={"requestKo": "코트를 빨갛게", "segments": segs, "model": model})
+            d3 = ((r_c3.get_json() or {}).get("retake") or {}).get("draft") or {}
+            v3_view = (r_c3.get_json() or {}).get("retake") or {}
+            compose_body = {"requestKo": "코트를 빨갛게", "segments": segs, "model": model}
+            r_c = client.post(f"{base}/retake/{mid1}/compose", json=compose_body)
+            comp = r_c.get_json() or {}
+            dr = (comp.get("retake") or {}).get("draft") or {}
+            plan_d = dr.get("plan") or {}
+            gen = env.gen(pid)
+            info = genmod.retake_plan(gen, model=str(dr.get("model") or ""), path=str(dr.get("path") or ""), seconds=12.0, original=True)
+            want_rng = {"in": 0.0, "out": 12.0, "start": 2.0, "end": 15.0, "seconds": 12.0, "cutIds": ["c1", "c2"],
+                        "cuts": [{"cutId": "c1", "no": 1, "start": 0.0, "end": 5.5}, {"cutId": "c2", "no": 2, "start": 5.5, "end": 12.0}]}
+            prompt = str(dr.get("prompt") or "")
+            lines = prompt.split("\n")
+            range_line = ("RANGE: @Video1 is the current timeline of cuts 1\u20132 (3 clips, 12.0s); the new video is 12s long, the same length as "
+                          "@Video1.")
+            base_v1 = str(gen["units"][0]["webtoon"]["promptEn"] or "")
+            ctx_lines = [l for l in rt._result_context(base_v1.split("\n"))[0]  # noqa: SLF001
+                         if l.strip() and rt._label_of(l) not in rt.SHRINK_TRIM_LINES and not rt._is_def(l)]  # noqa: SLF001
+            expect("sg-a", [r_c.status_code, dr.get("status"), dr.get("kind"), dr.get("videoSource"), dr.get("segments"), dr.get("range"),
+                            dr.get("baseN"), plan_d.get("seconds"), plan_d.get("trimTo"), plan_d.get("usd"), dr.get("problems"),
+                            [l for l in lines if l.startswith("RANGE:")], lines[0].startswith(rt.COMPOSE_RESULT_EDIT_HEAD),
+                            [l[:50] for l in ctx_lines if l not in lines], "v3 prompt" in prompt or "v4 prompt" in prompt,
+                            (comp.get("retake") or {}).get("mid") == mid1],
+                   [200, "done", "compose", "result", segs, want_rng, 1, 12.0, 12.0, round(float(info["usd"]), 2), [], [range_line], True, [], False,
+                    True],
+                   "compose segments: 초안 done · segments 그대로 · 구간(in 0 · out 합 12 · 칸 시각 2–15 · 컷 1 0–5.5 · 컷 2 5.5–12) · 견적 = 12초 · 이전 "
+                   "프롬프트 = 칸 원래 프롬프트(v3 · v4 프롬프트 아님) · RANGE = 지금 타임라인 컷 1–2(클립 3개, 12.0초) · 문제 0 · 보기 = 원본")
+            expect("sg-a", [r_c3.status_code, d3.get("baseN"), d3.get("range"), d3.get("segments"), v3_view.get("mid") == mid1, d3.get("prompt") == prompt],
+                   [200, 1, want_rng, segs, True, True], "v3 mid 로 불러도 대상 = 칸 원본(v1) · 같은 초안")
+
+            # ================= (sg-b) 거절 =================
+            req_b = len(env.requests)
+
+            def comp_err(body_segs, **extra) -> tuple:
+                return err_of(client.post(f"{base}/retake/{mid1}/compose", json={"requestKo": "x", "segments": body_segs, **extra}))
+
+            foreign = comp_err(segs[:1] + [{"sourceKey": str(final.get("sourceKey")), "in": 0.0, "out": 2.0}])
+            other = comp_err(segs[:1] + [{"sourceKey": "users/other/video/x/out.mp4", "in": 0.0, "out": 2.0}])
+            speed = comp_err(segs[:1] + [dict(segs[1], speed=1.5)])
+            speed1 = comp_err([dict(s, speed=1) for s in segs])[0]
+            many = comp_err([{"sourceKey": k1, "in": float(i), "out": float(i) + 1} for i in range(9)])
+            outside = comp_err([{"sourceKey": k3, "in": 0.0, "out": 5.0}])
+            short = comp_err([{"sourceKey": k1, "in": 0.0, "out": 0.5}])
+            too_long = comp_err([{"sourceKey": k1, "in": 0.0, "out": 15.0}] * 3)
+            bad_shape = [comp_err([])[:2], comp_err("x")[:2], comp_err([{"sourceKey": k1, "in": "a", "out": 2}])[:2]]
+            # 다시 compose(제출에 쓸 초안) 뒤: 다른 조각으로 제출 · 초안 없이 segments
+            r_c = client.post(f"{base}/retake/{mid1}/compose", json=compose_body)
+            comp = r_c.get_json() or {}
+            dr = (comp.get("retake") or {}).get("draft") or {}
+            plan_d = dr.get("plan") or {}
+            submit_body = {"prompt": dr.get("prompt"), "requestKo": dr.get("requestKo"), "extraKo": dr.get("extraKo"),
+                           "confirmUsd": plan_d.get("usd"), "draftId": dr.get("id"), "model": dr.get("model"), "scope": "range", "segments": segs}
+            changed = err_of(client.post(f"{base}/retake/{mid1}", json=dict(submit_body, segments=segs[:2])))[:2]
+            no_draft = err_of(client.post(f"{base}/retake/{mid1}", json=dict(submit_body, draftId="dzz")))[:2]
+            expect("sg-b", [foreign, other, speed, speed1, many, outside, short, too_long, f"{rt.SEGMENTS_MAX}개" in rt.SEGMENTS_MAX_TEXT, bad_shape,
+                            changed, no_draft, len(env.requests) - req_b],
+                   [(400, "RetakeBadRange", rt.SEGMENTS_FOREIGN_TEXT), (400, "RetakeBadRange", rt.SEGMENTS_FOREIGN_TEXT),
+                    (400, "RetakeBadRange", rt.SEGMENTS_SPEED_TEXT), 200, (400, "RetakeBadRange", rt.SEGMENTS_MAX_TEXT),
+                    (400, "RetakeBadRange", rt.BAD_RANGE_TEXT), (400, "RetakeBadRange", rt.COMPOSE_SHORT_TEXT),
+                    (400, "RetakeBadRange", rt.SEGMENTS_LONG_TEXT), True,
+                    [(400, "RetakeBadRange")] * 3, (409, "RetakeNoDraft"), (409, "RetakeNoDraft"), 0],
+                   "다른 칸(합친 영상) · 다른 키 · 속도 1.5 → 400(속도 1 은 됨) · 9개 · 재료 길이 밖 · 합 1초 미만 · 합 45초(모델 최대 길이 밖) · 꼴 틀림 400, "
+                   "다른 조각 · 초안 없이 제출 409, 영상 제출 0")
+
+            # ================= (sg-c) 제출 =================
+            cut0, led0, req0 = len(env.cut_calls), len(env.ledger), len(env.requests)
+            r_s = client.post(f"{base}/retake/{mid1}", json=submit_body)
+            sub = r_s.get_json() or {}
+            v5 = env.state(pid)["cells"]["webtoon:take1"]["versions"][-1]
+            pay = (env.requests[-1].get("payload") or {}) if len(env.requests) > req0 else {}
+            log5 = (env.log(pid).get("webtoon:take1") or [{}])[-1]
+            vid = [e for e in env.ledger[led0:] if e.get("kind") == "video"]
+            expect("sg-c", [r_s.status_code, env.cut_calls[cut0:], conform,
+                            [(e.get("units"), e.get("usd")) for e in vid], pay.get("prompt") == dr.get("prompt"),
+                            (pay.get("video_urls") or [""])[0].startswith("data:video/mp4;base64,")],
+                   [202, [(env.store.blobs[k1][:40], 2.0, 7.5), (env.store.blobs[k3][:40], 0.0, 3.5), (env.store.blobs[k4][:40], 0.5, 3.5),
+                          (b"JOINED", 0.0, 12.0)],
+                    [([(b"CLIP:2-7.5", 5.5), (b"CLIP:0-3.5", 3.5), (b"CLIP:0.5-3.5", 3.0)], {"hold": True, "size": (1920, 1080), "fps": 24})],
+                    [(info["billedSeconds"], info["usd"])], True, True],
+                   "제출 202: @Video1 = 조각마다 그 파일 그 in/out 을 _cut_clip(타임라인 순서) → _conform_concat(hold · 조각 길이 5.5 · 3.5 · 3 · 첫 조각 "
+                   "1920x1080 · 24fps) → _cut_clip(0–12, 소리 없음), 원장 = 12초 견적, 보낸 프롬프트 = 초안, 입력 영상 data URI")
+            expect("sg-c", [(v5.get("status"), v5.get("n"), v5.get("videoSource"), v5.get("segments"), v5.get("seconds"), v5.get("trimTo"),
+                             v5.get("fromKey") == k1, v5.get("fromN"), v5.get("range"), v5.get("usd"), v5.get("scope"), v5.get("format")),
+                            float(v5.get("sentSeconds") or 0) >= 12.0,
+                            {k: (log5.get("params") or {}).get(k) for k in ("videoSource", "sourceSegments", "sourceSeconds", "trimTo")},
+                            log5.get("videoKeys")],
+                   [("completed", 5, "result", segs, 12.0, 12.0, True, 1, want_rng, round(float(info["usd"]), 2), "range", "template"), True,
+                    {"videoSource": "result", "sourceSegments": 3, "sourceSeconds": 12.0, "trimTo": 12.0}, [k1, k3, k4]],
+                   "버전 v5: segments · seconds = 합 12 · trimTo 12 · fromKey = 첫 조각(원본) · fromN 1 · videoSource result · 구간 · 견적 금액, "
+                   "기록 params 조각 수 · 합 초 · videoKeys = 조각 재료(처음 나온 순서)")
+
+            # ================= (sg-d) 소리 · 잇기 =================
+            out5 = str(v5.get("outputKey") or "")
+            raw5 = genmod._find_output_key(str(v5.get("outputPrefix") or ""), str(v5.get("invocationArn") or ""))  # noqa: SLF001
+            head1 = env.store.blobs[k1][:40]
+            want_audio = [{"at": 0.0, "seconds": 5.5, "sourceKey": k1, "in": 2.0, "out": 7.5},
+                          {"at": 5.5, "seconds": 3.5, "sourceKey": k1, "in": 7.5, "out": 11.0},
+                          {"at": 9.0, "seconds": 3.0, "sourceKey": k1, "in": 12.0, "out": 15.0}]
+            rv_done = client.get(f"{base}/retake/{mid1}?in=0&out=12").get_json() or {}
+            row5 = next((r for r in rv_done.get("versions") or [] if r.get("n") == 5), {})
+            edit2 = client.get(base).get_json() or {}
+            mat5 = next((m for m in edit2.get("materials") or [] if m.get("sourceKey") == out5), {})
+            expect("sg-d", [v5.get("audioSegments"), v5.get("audioStitched"), stitch, out5 == rt._segments_key(raw5, 1920, 1080, 24),  # noqa: SLF001
+                            env.store.blobs.get(out5, b"")[:60], v5.get("postScaled"),
+                            [row5.get(k) for k in ("videoSource", "segments", "audioStitched", "sourceRange", "fromN", "trimTo")],
+                            bool(mat5.get("mid")), mat5.get("audioFrom"), [i.get("videoSource") for i in rt.material_items(
+                                env.gen(pid), "webtoon", env.state(pid)) if i["sourceKey"] == out5]],
+                   [want_audio, True, [{"pieces": [(5.5, head1, 2.0, 7.5), (3.5, head1, 7.5, 11.0), (3.0, head1, 12.0, 15.0)],
+                                        "size": (1920, 1080, 24)}], True,
+                    _edt_fake(12.0, w=1920, h=1080, fps=24)[:60], {"from": "854x480@24", "to": "1920x1080@24"},
+                    ["result", segs, True, {"in": 0.0, "out": 12.0}, 1, 12.0], True, None, [None]],
+                   "소리: 조각마다 그 클립이 내던 소리(원본 = 자기 2–7.5 · v3 = 원본 7.5–11 · v4 = 원본 12–15) → _stitch_segments(첫 조각 1920x1080@24) → "
+                   "outputKey = 잇은 파일 · audioStitched · postScaled, 보기 줄 segments, 재료는 result 표시 없음(자기 트랙 — audioFrom 없음)")
+            # 원천에 소리 없음 · 옛 길 버전(자기 소리)
+            pid_m = "prj_sg194_m"
+            env.take_done(client, pid_m)
+            gm_id = str(env.gen(pid_m)["genId"])
+            m1 = str(env.gen(pid_m)["units"][0]["webtoon"]["outputKey"])
+            mstem = m1.rsplit("/", 1)[0]
+            m2, m3 = mstem + "-rt2/o2.mp4", mstem + "-rt3/o3.mp4"
+            env.store.blobs.update({m1: _edt_fake(15.0, audio=False), m2: _edt_fake(15.0), m3: _edt_fake(3.5)})
+            old2 = {"n": 2, "status": "completed", "attempt": 1, "outputKey": m2, "scope": "full", "range": None, "trimTo": None, "prompt": "p",
+                    "claim": ""}
+            res3 = dict(version(3, m3, 7.5, 11.0, 7.5), fromKey=m1)
+            env.set_state(pid_m, lambda data: data["cells"].update({"webtoon:take1": {"versions": [old2, res3], "draft": None}}))
+            audio_m = rt._segment_audio(owner, pid_m, gm_id, "webtoon", [{"sourceKey": m1, "in": 1.0, "out": 3.0},  # noqa: SLF001
+                                                                         {"sourceKey": m3, "in": 0.0, "out": 2.0},
+                                                                         {"sourceKey": m2, "in": 4.0, "out": 6.0}])
+            # 진짜 _stitch_segments(stitcher 만 가짜): 프레임 누적 · 시작 · 소리 창
+            seg_calls: list[dict] = []
+
+            def fake_edit_segment(source_path, video_out, **kwargs):
+                seg_calls.append({k: kwargs.get(k) for k in ("start_sec", "frames", "fps", "width", "height", "audio_from_source", "audio_source",
+                                                             "audio_start_sec", "audio_end_sec")})
+                with open(video_out, "wb") as handle:
+                    handle.write(b"V")
+                with open(kwargs["audio_out"], "wb") as handle:
+                    handle.write(b"\0\0\0\0")
+
+            joins: list[tuple] = []
+
+            def fake_edit_join(videos, output_path, *, audio_path=""):
+                joins.append((len(videos), os.path.getsize(audio_path)))
+                with open(output_path, "wb") as handle:
+                    handle.write(b"J")
+                return output_path
+
+            env.set(rt.stitcher, "edit_segment", fake_edit_segment)
+            env.set(rt.stitcher, "edit_join", fake_edit_join)
+            src_p, out_p = os.path.join(private_tmp, "raw.mp4"), os.path.join(private_tmp, "joined.mp4")
+            with open(src_p, "wb") as handle:
+                handle.write(b"RAW")
+            real_stitch(src_p, out_p, pieces=[{"seconds": 5.5, "audioPath": src_p, "audioIn": 2.0, "audioOut": 7.5},
+                                              {"seconds": 3.5, "audioPath": "", "audioIn": None, "audioOut": None},
+                                              {"seconds": 3.01, "audioPath": src_p, "audioIn": 12.0, "audioOut": 15.0}], width=1920, height=1080, fps=24)
+            frames = [c["frames"] for c in seg_calls]
+            expect("sg-d", [audio_m, [(c["start_sec"], c["frames"], c["audio_from_source"], bool(c["audio_source"]), c["audio_start_sec"],
+                                       c["audio_end_sec"], c["width"], c["height"], c["fps"]) for c in seg_calls], sum(frames), joins],
+                   [[{"at": 0.0, "seconds": 2.0, "sourceKey": "", "in": None, "out": None},
+                     {"at": 2.0, "seconds": 2.0, "sourceKey": "", "in": None, "out": None},
+                     {"at": 4.0, "seconds": 2.0, "sourceKey": m2, "in": 4.0, "out": 6.0}],
+                    [(0.0, 132, True, True, 2.0, 7.5, 1920, 1080, 24), (5.5, 84, False, False, None, None, 1920, 1080, 24),
+                     (9.0, 72, True, True, 12.0, 15.0, 1920, 1080, 24)], round(12.01 * 24), [(3, 4 * 3)]],
+                   "원천(v1)에 소리 없음 → 원본 · result 조각 무음, 소리 있는 옛 길 버전 → 자기 소리, 진짜 _stitch_segments: 프레임 누적(132 · 84 · 72 = "
+                   "round(12.01 × 24)) · 시작 = 앞 프레임 ÷ 24 · 소리 창 · 무음 조각 · 잇기 1번")
+            # 순수: 첫 조각 크기 · fps(편집 단계가 받는 값만)
+            env.set(genmod.stitcher, "probe_media", lambda path: {"width": 853, "height": 480, "fps": 30.0})
+            odd = genmod._video_geometry(b"x")  # noqa: SLF001
+            env.set(genmod.stitcher, "probe_media", lambda path: {"width": 1280, "height": 720, "fps": 29.97})
+            ntsc = genmod._video_geometry(b"x")  # noqa: SLF001
+            env.set(genmod.stitcher, "probe_media", lambda path: {"width": 1280, "height": 720, "fps": 12.5})
+            slow = genmod._video_geometry(b"x")  # noqa: SLF001
+            env.set(genmod.stitcher, "probe_media", probe_fake)
+            expect("sg-d", [odd, ntsc, slow, genmod._video_geometry(_edt_fake(2.0, w=1280, h=720, fps=30))],  # noqa: SLF001
+                   [(None, None), ((1280, 720), 30), (None, None), ((1280, 720), 30)],
+                   "첫 조각 크기 · fps: 홀수 크기 · 편집 fps 밖(12.5)은 기본(None), 29.97 → 30(허용 오차) · 1280x720@30 그대로")
+
+            # ================= (sg-e) 화면 서버 응답 =================
+            clips = [{"id": "c8", "sourceKey": k1, "in": 0.0, "out": 2.0, "label": "컷 1", "muted": False},
+                     {"id": "c9", "sourceKey": k1, "in": 2.0, "out": 7.5, "label": "컷 1", "muted": False},
+                     {"id": "c10", "sourceKey": k3, "in": 0.0, "out": 3.5, "label": "컷 2", "muted": False},
+                     {"id": "c11", "sourceKey": k4, "in": 0.5, "out": 3.5, "label": "컷 2", "muted": False},
+                     {"id": "c12", "sourceKey": k1, "in": 12.0, "out": 15.0, "label": "컷 2", "muted": False}]
+            for view in (edit_v, edit2):
+                view["doc"] = dict(view.get("doc") or {}, clips=[dict(c) for c in clips])
+            row = next((m for m in rv.get("models") or [] if m.get("id") == dr.get("model")), {})
+            server = {"edit": edit_v, "edit2": edit2, "rv": rv, "compose": comp, "submit": sub, "rvDone": rv_done, "mid1": mid1,
+                      "finalKey": final.get("sourceKey"), "names": {k1: "v1", k3: "v3", k4: "v4", out5: "v5"}, "segs": segs,
+                      "composeBody": compose_body, "submitBody": submit_body, "label": str(row.get("label") or row.get("id") or ""),
+                      "usd": plan_d.get("usd")}
+            expect("sg-e", [real_calls, env.urlopen_calls], [[], []], "실제 LLM · urlopen 0")
+    except Exception as exc:  # noqa: BLE001
+        bad.append("(sg) 예외: " + repr(exc) + "\n" + _tb.format_exc()[:2500])
+    finally:
+        tempfile.tempdir = saved_tempdir
+        shutil.rmtree(private_tmp, ignore_errors=True)
+
+    vjs = (PUBLIC / "vnew.js").read_text(encoding="utf-8")
+    crlf = [n for n, p in (("retake.py", APP_SRC / "vnew" / "retake.py"), ("generate.py", APP_SRC / "vnew" / "generate.py"),
+                           ("vnew.js", PUBLIC / "vnew.js"), ("check_vpoc.py", ROOT / "tools" / "check_vpoc.py")) if b"\r" in p.read_bytes()]
+    expect("sg-f", [crlf, [n for n in ("editFixNeedsSegments", "editFixSegments", "editFixSegTarget", "editFixSegSwap", "editFixSegInfo",
+                                       "editFixSegUses", "editFixCellOf", "editFixCellBase") if not _jlu_body(vjs, n)]],
+           [[], []], "LF · 새 화면 함수가 하나씩")
+    if node:
+        check = subprocess.run([node, "--check", str(PUBLIC / "vnew.js")], capture_output=True, text=True, encoding="utf-8", timeout=60)
+        expect("sg-f", check.returncode, 0, "node --check frontend/public/vnew.js")
+    if not node:
+        warn("node 가 없어 작업 194 화면 실행 검사(sg-e 화면)를 건너뜁니다")
+    elif server.get("mid1"):
+        code, problems = _edu_code(vjs, _EDU_SLICES)
+        bad.extend(p.replace("(edu-a)", "(sg-e)") for p in problems)
+        got, err = ({}, "") if problems else _lr_run_node(
+            node, "var SERVER = " + json.dumps(server, ensure_ascii=False) + ";\n" + _EDU_NODE_HARNESS + code + _SG194_NODE, "sg194_")
+        if err:
+            bad.append(f"(sg-e) node 실행 실패: {err}")
+        elif got:
+            g = got.get("sg") or {}
+            segs_s = server["segs"]
+            usd = "$" + f"{float(server['usd'] or 0):.2f}"
+            mid1 = server["mid1"]
+            expect("sg-e", [g.get("target"), g.get("panel")],
+                   [[[1, 2, 3], segs_s, True, 12, {"in": 0, "out": 12}, "", ["c9", "c10", "c11"]],
+                    [segs_s, 12, "고칠 컷: 컷 1–2 · 클립 3개 · 합 12.0초", "선택한 컷만 고칩니다 (클립 3개 · 합 12.0초)", [mid1 + "?in=0&out=12"], False, ""]],
+                   "원본 · v3 · v4 가 섞인 컷 3개(같은 칸) → segments(타임라인 순서 · 각 파일 · 각 in/out) · 패널 = 칸 원본 재료 · 머리 줄 컷 1–2 · 클립 3개 · "
+                   "합 12.0초 · 고정 줄 · 거절 안내 없음")
+            expect("sg-e", [g.get("compose"), g.get("submit")],
+                   [[[{"at": mid1 + "/compose", "body": server["composeBody"]}],
+                     f"고칠 프롬프트 — 이전 프롬프트 + 수정 사항 · {server['label']} · 고른 컷 3개 · 합 12.0초", False],
+                    [[{"at": mid1, "body": server["submitBody"]}],
+                     [f"v5를 {server['label']}(으)로 고른 컷 3개(합 12.0초)만 다시 만듭니다. 예상 비용 {usd}. 원래 결과는 그대로 남습니다."]]],
+                   "[프롬프트 준비] 바디 {requestKo, segments, model}(in/out 없음 — 서버가 200 으로 받은 바디) · 상태 줄 · [다시 만들기] 바디 segments · scope range"
+                   "(서버가 202 로 받은 바디) · 확인창")
+            v5 = [["c8", "v1", 0, 2, "컷 1"], ["c9", "v5", 0, 5.5, "컷 1"], ["c10", "v5", 5.5, 9, "컷 2"], ["c11", "v5", 9, 12, "컷 2"],
+                  ["c12", "v1", 12, 15, "컷 2"]]
+            before = [["c8", "v1", 0, 2, "컷 1"], ["c9", "v1", 2, 7.5, "컷 1"], ["c10", "v3", 0, 3.5, "컷 2"], ["c11", "v4", 0.5, 3.5, "컷 2"],
+                      ["c12", "v1", 12, 15, "컷 2"]]
+            swap_btn = g.get("swapBtn") or [[], 0, None, ""]
+            expect("sg-e", [swap_btn[1:], g.get("swap"), g.get("swapUndo")],
+                   [[4, False, "고른 컷 3개를 v5로 바꿉니다(클립마다 이어진 조각, 같은 자리 · 같은 길이 — 이웃 클립은 그대로)"],
+                    {"clips": v5, "total": [17, 17], "undo": 1, "note": "타임라인 클립 3개를 v5로 바꿨습니다. 다른 버전의 [바꾸기]로 되돌릴 수 있습니다.",
+                     "starts": [0, 2, 7.5, 11, 14]}, before],
+                   "v5 [바꾸기] = 고른 컷 3개만 이어진 조각(0–5.5 · 5.5–9 · 9–12) · 이웃(c8 · c12) 그대로 · 같은 자리 · 전체 길이 같음 · 실행 취소 한 단계")
+            expect("sg-e", [g.get("single"), g.get("singleBody")],
+                   [[None, {"in": 0, "out": 7.5}, True, ""],
+                    [[{"at": mid1 + "/compose", "body": {"requestKo": "웃게", "in": 0, "out": 7.5, "model": server["composeBody"]["model"]}}],
+                     ["%s?in=0&out=7.5" % mid1], "선택한 컷 구간만 고칩니다 (0.0–7.5초)"]],
+                   "한 원본 · 원본 초가 이어진 컷 2개 → 지금처럼 in/out(segments 없음)")
+            expect("sg-e", [g.get("speed"), g.get("dissolve"), g.get("dissolveEdge"), g.get("foreign")],
+                   [["속도를 바꾼 컷이 있어 함께 고칠 수 없습니다. 속도를 1배로 되돌린 뒤 다시 골라 주세요.", False,
+                     "속도를 바꾼 컷이 있어 함께 고칠 수 없습니다. 속도를 1배로 되돌린 뒤 다시 골라 주세요."],
+                    ["고른 컷 사이에 디졸브가 있어 함께 고칠 수 없습니다. 디졸브를 컷으로 바꾼 뒤 다시 골라 주세요.", False,
+                     "고른 컷 사이에 디졸브가 있어 함께 고칠 수 없습니다. 디졸브를 컷으로 바꾼 뒤 다시 골라 주세요."], ["", 3],
+                    ["같은 테이크(원본 영상) 안의 컷만 함께 고칠 수 있습니다.", False, "같은 테이크(원본 영상) 안의 컷만 함께 고칠 수 있습니다."]],
+                   "속도 ≠ 1 · 고른 컷 사이 디졸브 → 안내만(패널 없음), 고른 묶음 끝의 디졸브(다음 클립으로)는 됨, 다른 칸(합친 영상) → 「같은 테이크…」")
+            expect("sg-e", [g.get("pureNeeds"), g.get("pureSegs"), g.get("pureSwap"), g.get("pureBack"), g.get("pureMiss"), g.get("pureUses")],
+                   [[False, True, True, False, True],
+                    ["한 번에 8개 컷까지 함께 고칠 수 있습니다.", [{"sourceKey": "A", "in": 0, "out": 2}, {"sourceKey": "B", "in": 0, "out": 2}],
+                     "속도를 바꾼 컷이 있어 함께 고칠 수 없습니다. 속도를 1배로 되돌린 뒤 다시 골라 주세요."],
+                    {"clips": [["A", "K1", 0, 2, False, 0], ["B", "K5", 0, 2.5, False, 0.2], ["C", "K5", 2.5, 5.5, True, 0], ["D", "K5", 5.5, 9, False, 0],
+                               ["E", "K1", 4.5, 6, False, 0]], "changed": 3, "outside": 0, "skipped": 0, "total": [12.5, 12.5],
+                     "starts": [[0, 2, 4.5, 7.5, 11], [0, 2, 4.5, 7.5, 11]]},
+                    [[["A", "K1", 0, 2, False, 0], ["B", "K1", 2, 4.5, False, 0.2], ["C", "K5", 2.5, 5.5, True, 0], ["D", "K5", 5.5, 9, False, 0],
+                      ["E", "K1", 4.5, 6, False, 0]], 1], [0, 3],
+                    [True, True, False, None, True, [["K1", 0, 2.5], ["K3", 2.5, 3], ["K4", 5.5, 3.5]], None]],
+                   "순수: 빈틈 판정(이어짐 · 빈틈 · 다른 원본 · 하나 · 거꾸로) · 9개 · 묶음 밖 디졸브 · 속도, 바꾸기 = 조각 k → [앞 길이 합, + 길이] · 소리 끔 · "
+                   "대사 타이밍 그대로 · 이웃 · 자리 · 길이 같음, 되돌리기 = 그 원본 조각만, 짝 없으면 outside, 조각 버전은 결과 영상 정보 없음")
+            expect("sg-e", got.get("innerHTML"), False, "가짜 DOM 에서 innerHTML 0")
+    groups = {f"sg-{c}" for c in "abcdef"}
+    if groups - seen and not bad:
+        bad.append(f"검사하지 못한 묶음: {sorted(groups - seen)}")
+    if bad:
+        fail("작업 194 ⑦ AI로 고치기 같은 칸 여러 클립(segments)(sg) 검사 실패\n" + "\n".join(f"  {item}" for item in bad))
+    else:
+        ok("작업 194 ⑦ AI로 고치기 같은 칸 여러 클립 검사 (sg-a)compose segments · 구간 · 견적 · 칸 원래 프롬프트 · RANGE (sg-b)다른 칸 · 속도 · 개수 · 길이 거절 "
+           "(sg-c)@Video1 조각 순서 · 길이 · 원장 · 버전 필드 (sg-d)조각별 소리 · 잇기 · 크기 (sg-e)화면 segments · in/out · 바꾸기 이어진 조각 · 거절 "
+           "(sg-f)LF · node --check" + ("" if node else " — node 없음: 화면 실행 건너뜀"))
+
+
 def main() -> int:
     print("== vpoc1 check ==")
     check_compileall()
@@ -64446,6 +64993,7 @@ def main() -> int:
     check_vnew_edit_multicut_fix_192()
     check_vnew_compose_cleanup_193()
     check_vnew_retake_audio_scale_193b()
+    check_vnew_retake_segments_194()
     print()
     if warnings:
         print(f"경고 {len(warnings)}건")

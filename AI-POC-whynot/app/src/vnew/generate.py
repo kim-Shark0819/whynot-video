@@ -14591,6 +14591,58 @@ def _retake_result_video(source_key: str, start: float, end: float, *, path: str
     return video, meta, [key]
 
 
+def _video_geometry(video_mp4: bytes) -> tuple[tuple[int, int] | None, int | None]:
+    """작업 194: mp4 바이트의 (크기, fps) — 편집 단계가 받는 값(짝수 크기 · stitcher.EDIT_FPS_CHOICES)이면, 아니면 (None, None)(기본 1920x1080·24).
+    임시 폴더는 그 자리에서 지운다."""
+    with tempfile.TemporaryDirectory(prefix="vnew-retake-geo-") as workdir:
+        path = os.path.join(workdir, "in.mp4")
+        with open(path, "wb") as handle:
+            handle.write(video_mp4 or b"")
+        info = stitcher.probe_media(path)
+    width, height = int(info.get("width") or 0), int(info.get("height") or 0)
+    fps = float(info.get("fps") or 0.0)
+    rounded = int(round(fps))
+    if width < 2 or height < 2 or width % 2 or height % 2 or rounded not in stitcher.EDIT_FPS_CHOICES or abs(fps - rounded) > 0.05:
+        return None, None
+    return (width, height), rounded
+
+
+def _retake_segments_video(segments: list[tuple], *, path: str, pad_to: float) -> tuple[bytes, dict, list[str]]:
+    """작업 194: 고른 클립들(같은 칸의 원본·버전 파일, 타임라인 순서) = 조각 [(키, in, out)]을 이은 입력 영상(@Video1).
+
+    조각마다 _retake_result_video 와 같은 _cut_clip(소리 없음 — 3초 미만 채움은 아래에서 조각 길이로 자른다), 그다음 _conform_concat(hold —
+    조각 길이 그대로, 프레임은 누적 시각으로 셈)으로 첫 조각 재료 크기·fps 에 맞춰 잇는다. 이은 영상을 다시 _cut_clip(0~합: 소리 없음 · 3초 미만
+    채움 · 720 높이)하고 참고 영상 경로는 보낼 길이(pad_to)까지 _pad_clip. 저장소 쓰기 0. 반환 (mp4, {origSeconds, sentSeconds, padded}, [재료 키])."""
+    raws: dict[str, bytes] = {}
+    pieces: list[tuple[bytes, float]] = []
+    size = fps = None
+    keys: list[str] = []
+    for index, (key, start, end) in enumerate(segments):
+        key, start, end = str(key or ""), float(start or 0.0), float(end or 0.0)
+        if not key or end <= start:
+            raise VpocError("vnew.generate", "NoRecording", "고칠 영상이 없습니다.", 409)
+        if key not in raws:
+            raws[key] = _fetch_bytes(key, bucket=vpoc_settings.VIDEO_BUCKET)
+            keys.append(key)
+        if index == 0:
+            size, fps = _video_geometry(raws[key])
+        length = round(end - start, 3)
+        clip = _cut_clip(raws[key], {"id": f"seg{index + 1}", "startSec": start, "endSec": end, "seconds": length})
+        pieces.append((clip["bytes"], length))
+    raws.clear()
+    total = round(sum(length for _bytes, length in pieces), 3)
+    joined = _conform_concat(pieces, hold=True, size=size, fps=fps)
+    del pieces
+    clip = _cut_clip(joined, {"id": "segments", "startSec": 0.0, "endSec": total, "seconds": total})
+    del joined
+    video = clip["bytes"]
+    meta = {"origSeconds": clip.get("origSeconds"), "sentSeconds": clip.get("sentSeconds"), "padded": bool(clip.get("padded"))}
+    if path == "take" and pad_to and float(pad_to) > float(meta.get("sentSeconds") or 0.0) + 0.05:
+        video = _pad_clip(video, float(pad_to))
+        meta = {**meta, "sentSeconds": round(float(pad_to), 3), "padded": True}
+    return video, meta, keys
+
+
 def _retake_payload(owner: str, pid: str, plan: dict, like: dict, *, path: str, caps: dict, variant: str) -> dict:
     """경로에 맞는 ⑤ payload 빌더(참고 영상 _take_payload — 실사는 variant="real", 영상 편집 _previz_payload(caps))."""
     if path == "take":
@@ -14641,13 +14693,16 @@ def _charge_retake(owner: str, pid: str, gen_id: str, result: dict, model: str, 
 
 def resubmit_model(owner: str, pid: str, gen_id: str, *, variant: str, cell_id: str, prompt: str, tag: str, model: str,
                    attempt: int = 1, version=None, span: dict | None = None, cut_ids: list | None = None,
-                   expect_refs: list | None = None, source_key: str = "", source_span: tuple | None = None) -> dict:
+                   expect_refs: list | None = None, source_key: str = "", source_span: tuple | None = None,
+                   source_segments: list | None = None) -> dict:
     """⑦ AI로 고치기 새 길(design D22): 고른 모델·범위로 칸 하나를 제출한다. 칸 상태(gen.units)는 읽기만 한다.
 
     span = {start, end}(칸 녹화 시간, None 이면 원본 칸 전체), cut_ids = 구간 안 컷, expect_refs = 초안 본보기의 참고 표시(다르면 제출하지 않는다).
     준비~제출은 _PREPARE_SEM 안, 원장은 견적 금액(_charge_retake), 기록 source=retake·model=고른 모델. 결과 접두사는 116 과 같다.
     작업 191 fix1: source_key(고칠 재료 영상 키)·source_span(그 파일 초 (in, out))을 주면 입력 영상 @Video1 = 그 파일의 그 구간
     (_retake_result_video)이고 길이·견적은 out − in 초다. 없으면 지금처럼 프리비즈 녹화(_retake_video). 참고 이미지는 span·cut_ids 그대로.
+    작업 194: source_segments [(키, in, out)](같은 칸 원본·버전 파일, 타임라인 순서)를 주면 @Video1 = 조각을 이은 것(_retake_segments_video),
+    길이·견적·원장 = 조각 길이 합. 기록 params videoSource result · sourceSegments.
     반환 {invocationArn, outputPrefix, provider, usd, logId, sentSeconds, trimTo}.
     """
     plan, _ = plan_mod.load_plan(owner, pid)
@@ -14665,7 +14720,16 @@ def resubmit_model(owner: str, pid: str, gen_id: str, *, variant: str, cell_id: 
     path = retake_path(model, original=original, kind=kind)
     cell_seconds = float(cell.get("seconds") or 0.0)
     src_in = src_out = None
-    if source_key:
+    segs: list[tuple[str, float, float]] = []
+    if source_segments is not None:  # 작업 194
+        try:
+            segs = [(str(k), round(float(a), 3), round(float(b), 3)) for k, a, b in source_segments]
+        except (TypeError, ValueError):
+            segs = []
+        if not segs or any(not k or a < 0 or b <= a for k, a, b in segs):
+            raise VpocError("vnew.retake", "RetakeBadRange", "다시 만들 구간이 올바르지 않습니다. 타임라인에서 클립을 다시 골라 주세요.", 400)
+        seconds = round(sum(b - a for _k, a, b in segs), 3)
+    elif source_key:
         try:
             src_in, src_out = float(source_span[0]), float(source_span[1])  # type: ignore[index]
         except (TypeError, ValueError, IndexError):
@@ -14691,7 +14755,9 @@ def resubmit_model(owner: str, pid: str, gen_id: str, *, variant: str, cell_id: 
         if variant == "real":
             _assert_no_webtoon(prompt)
         pad_to = float(info["sentSeconds"] or 0) if path == "take" else 0.0
-        if source_key:  # 작업 191 fix1: @Video1 = 고칠 재료 영상의 그 구간
+        if segs:  # 작업 194: @Video1 = 고른 클립 조각을 이은 것
+            video, meta, video_keys = _retake_segments_video(segs, path=path, pad_to=pad_to)
+        elif source_key:  # 작업 191 fix1: @Video1 = 고칠 재료 영상의 그 구간
             video, meta, video_keys = _retake_result_video(source_key, float(src_in), float(src_out), path=path, pad_to=pad_to)
         else:
             video, meta, video_keys = _retake_video(cell, kind=kind, path=path, span=span, pad_to=pad_to)
@@ -14717,14 +14783,17 @@ def resubmit_model(owner: str, pid: str, gen_id: str, *, variant: str, cell_id: 
         _PREPARE_SEM.release()
     params.update(cellSeconds=round(cell_seconds, 3), rangeStart=round(float(span["start"]), 3) if span else None,
                   rangeEnd=round(float(span["end"]), 3) if span else None, trimTo=info["trimTo"])
-    if source_key:
+    if segs:
+        params.update(videoSource="result", sourceSegments=len(segs), sourceSeconds=seconds)  # 작업 194: 조각 키는 videoKeys(기록은 글·수만)
+    elif source_key:
         params.update(videoSource="result", sourceIn=round(float(src_in), 3), sourceOut=round(float(src_out), 3))
     _charge_retake(owner, pid, gen_id, result, model, float(info["billedSeconds"] or 0), float(info["usd"] or 0))
     log_id = _log_attempt(owner, pid, gen_id, source="retake", mode=mode, variant=variant, cell_id=str(cell_id), index=index,
                           attempt=attempt, run=run_n, endpoint=model, params=params, refs=refs, video_keys=video_keys, result=result,
                           prompt=prompt, version=version)
     log.info("vnew.gen.resubmit_model pid=%s cell=%s variant=%s tag=%s attempt=%d path=%s source=%s sent_s=%.3f trim_s=%.3f bytes=%d "
-             "refs=%d ms=%d rss_mb=%.0f", pid, cell_id, variant, tag, attempt, path, "result" if source_key else "previz",
+             "refs=%d ms=%d rss_mb=%.0f", pid, cell_id, variant, tag, attempt, path,
+             "segments" if segs else "result" if source_key else "previz",
              float(meta.get("sentSeconds") or 0), float(info["trimTo"] or 0),
              len(prompt.encode("utf-8")), len(refs), int((time.monotonic() - started) * 1000), _rss_mb())
     return {"invocationArn": str(result.get("invocationArn") or ""), "outputPrefix": str(result.get("outputPrefix") or prefix),

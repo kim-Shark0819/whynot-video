@@ -35,6 +35,8 @@ in–out 으로 자른 것(generate.resubmit_model source_key·source_span), 길
 @Video1 조각만), 같은 줄·참고 표시가 든 줄의 같은 문장은 처음 것만 둔다. @Video1 정의는 머리의 COMPOSE_RESULT_VIDEO_LINE 한 줄뿐이다.
 작업 193 fix1: result EDIT 줄은 바꿀 것을 구도·카메라가 바뀌어도 끝까지 적용하라고 쓴다(_result_edit_line). result 버전의 소리는 늘 fromKey 의
 range.in~out(edit._audio_sources — material_items 가 videoSource·fromKey 를 넘긴다). 조회·되살리기 완료 때 결과를 fromKey 크기·fps 로 맞춘다(_post_scale).
+작업 194: 같은 칸(원본 + 그 버전)의 여러 클립은 segments 로 한 번에 고친다(10절) — @Video1 = 조각을 이은 것, 길이 = 합, 완료 때 조각마다 원래 소리를
+넣는다(_post_segments).
 """
 
 from __future__ import annotations
@@ -196,6 +198,15 @@ COMPOSE_RESULT_EDIT_KEEP = (" Keep everything the change does not touch identica
 COMPOSE_RESULT_EDIT_HEAD_OLD = ("EDIT: Edit @Video1. Keep everything identical to @Video1 (characters, outfits, art style, lighting, background, "
                                 "camera, composition, motion, timing); change only: ")
 COMPOSE_RESULT_RANGE_HEAD = "RANGE: @Video1 is "
+# 작업 194: 같은 칸(원본 + 그 버전)의 여러 클립 = segments [{sourceKey, in, out}](타임라인 순서, 각 파일 초). @Video1 = 조각마다 자른 것을 이은 것,
+# 길이·견적 = 조각 길이 합. 버전 segments · fromKey = 첫 조각 키, 소리는 조각마다 그 클립이 이미 내던 소리(_post_segments 가 잇는다).
+SEGMENTS_MAX = 8
+SEGMENTS_TEXT = "고른 컷 목록이 올바르지 않습니다. 타임라인에서 컷을 다시 골라 주세요."
+SEGMENTS_MAX_TEXT = "한 번에 8개 컷까지 함께 고칠 수 있습니다."  # SEGMENTS_MAX 와 같은 수(던지는 곳 문구는 고정 글자 — check_vpoc rtk-t)
+SEGMENTS_FOREIGN_TEXT = "같은 테이크(원본 영상) 안의 컷만 함께 고칠 수 있습니다."
+SEGMENTS_SPEED_TEXT = "속도를 바꾼 컷은 함께 고칠 수 없습니다. 속도를 1배로 되돌린 뒤 다시 골라 주세요."
+SEGMENTS_LONG_TEXT = "고른 컷을 합친 길이를 받는 영상 모델이 없습니다. 컷을 줄여 다시 골라 주세요."
+SEGMENTS_KEY_MAX = 512
 COMPOSE_CONTEXT_LINE = ("CONTEXT: The prompt that made @Video1 follows, for reference only (tags and people); where it differs from "
                         "@Video1, follow @Video1.")
 # 작업 193: EDIT 꼬리(정의 줄을 바꿨을 때) — @Video1 은 머리에서만 정의한다. 옛 꼬리(_OLD)는 앞선 compose 줄(EARLIER EDIT)에서 지운다.
@@ -831,7 +842,9 @@ def material_items(gen: dict, variant: str, state: dict) -> list[dict]:
             item = {"sourceKey": source, "mid": edit.media_id(source), "kind": cell_kind, "group": "retake", "index": index,
                     "cellId": cell_id, "cutIds": _version_cuts(version) or _cut_ids(cell), "trimTo": _version_trim(version) or trim_to,
                     "run": None, "version": number, "range": _valid_range(version.get("range"))}
-            if version.get("videoSource") == RESULT_SOURCE:  # 작업 193 fix1: 소리 = fromKey 의 range.in~out(edit._audio_sources)
+            # 작업 193 fix1: 소리 = fromKey 의 range.in~out(edit._audio_sources). 작업 194: segments 버전은 조각마다 소리를 이어 넣은 자기 트랙을
+            # 쓰므로(_post_segments) result 표시를 넘기지 않는다(fromKey 한 파일로 소리를 대신하면 둘째 조각부터 어긋난다).
+            if version.get("videoSource") == RESULT_SOURCE and not version.get("segments"):
                 item.update(videoSource=RESULT_SOURCE, fromKey=str(version.get("fromKey") or ""))
             out.append(item)
     return out
@@ -1126,7 +1139,8 @@ def _draft_out(draft: dict | None) -> dict | None:
     return {key: draft.get(key) for key in ("id", "status", "baseN", "baseSource", "requestKo", "extraKo", "prompt", "promptBytes",
                                             "problems", "resultKo", "changesKo", "framesUsed", "error", "createdAt", "finishedAt",
                                             "model", "modelLabel", "scope", "range", "path", "format", "plan", "maxBytes", "shrunk",
-                                            "kind", "v2vFormat", "changeEn", "translated", "videoSource")}  # 작업 191: compose 초안 표시
+                                            "kind", "v2vFormat", "changeEn", "translated", "videoSource",
+                                            "segments")}  # 작업 191: compose 초안 표시 · 작업 194: 여러 클립 조각
 
 
 def _view(gen: dict, gen_id: str, target: dict, state: dict, log_cells: dict) -> dict:
@@ -1676,6 +1690,7 @@ def submit(owner: str, pid: str, mid: str, payload) -> dict:
     순서: 바디(400) → 대상(404·409) → 기준(409 RetakeNoPrompt) → 모델·범위(400, 보완 1) → 규칙(400 RetakePromptInvalid) → 견적(409 CostMismatch)
     → fal 키(409) → 조건부 쓰기 claim(409 RetakeNoDraft·RetakeRunning·RetakeLimit). 마지막 버전이 failed 면 같은 번호로 다시(attempt + 1). 반환 보기.
     보완 1: 같은 경로가 아니면 규칙은 초안의 형식 본보기, 견적은 고른 모델·범위(retake_plan)이고 초안의 모델·범위·구간과 같아야 한다.
+    작업 194: segments 를 주면 compose 초안(같은 조각)으로만 낼 수 있고(아니면 409 RetakeNoDraft) 대상은 그 칸 원본(v1)이다.
     """
     payload = payload if isinstance(payload, dict) else {}
     raw_prompt = payload.get("prompt")
@@ -1691,20 +1706,28 @@ def submit(owner: str, pid: str, mid: str, payload) -> dict:
     if not math.isfinite(confirm_usd):
         raise VpocError("vnew.retake.submit", "NoConfirmUsd", "확인 금액(confirmUsd)이 필요합니다.", 400)
     draft_id = payload.get("draftId")
+    segments = _read_segments(payload, "vnew.retake.submit")  # 작업 194: 같은 칸 여러 클립(없으면 None — in·out 길 그대로)
     plan, gen, gen_id = edit._load_gen(owner, pid)  # noqa: SLF001
     state = reconcile_state(owner, pid, gen_id)
     target = _target(plan, gen, mid, state)
+    seg_setup, seg_meta = None, None
+    if segments is not None:  # 작업 194: 대상 = 그 칸 원본(v1 — 이전 프롬프트는 칸 원래 프롬프트)
+        seg_setup, target, seg_meta = _segments_setup(owner, pid, plan, gen, gen_id, target, state, segments, where="vnew.retake.submit")
     log_cells = read_log(owner, pid, gen_id)
     base = _base(gen, target, state, log_cells.get(target["cellKey"]) or [])
     if not base:
         raise VpocError("vnew.retake.submit", "RetakeNoPrompt", NO_PROMPT_TEXT, 409)
     now_draft = (((state.get("cells") or {}).get(target["cellKey"]) or {}).get("draft")) or {}
     from_compose = isinstance(draft_id, str) and now_draft.get("id") == draft_id and now_draft.get("kind") == COMPOSE_KIND
+    if segments is not None and not (from_compose and now_draft.get("videoSource") == RESULT_SOURCE):
+        raise VpocError("vnew.retake.submit", "RetakeNoDraft", "먼저 [프롬프트 준비]로 고칠 프롬프트를 확인해 주세요.", 409)
     pick = _choose(owner, pid, plan, gen, gen_id, target, state, payload,  # 보완 1: 고른 모델·범위(400). 191: 칸 전체 구간·full 거절
-                   whole_ok=(not FULL_SCOPE_ALLOWED) or from_compose)
+                   whole_ok=(not FULL_SCOPE_ALLOWED) or from_compose, setup=seg_setup)
     from_result = from_compose and now_draft.get("videoSource") == RESULT_SOURCE
     if from_result:
         _result_pick(pick, gen, target)  # 작업 191 fix1: 초안과 같은 길이(out − in)·견적
+    if segments is not None:
+        _segments_pick(pick, segments, seg_meta)  # 작업 194: 조각·fromKey = 첫 조각
     rules, est = _submit_rules(pick, gen, target, state, draft_id)
     problems = check_prompt(prompt, base["prompt"], rules)
     if problems:
@@ -1751,15 +1774,17 @@ def submit(owner: str, pid: str, mid: str, payload) -> dict:
         })
         version.pop("videoSource", None)  # 작업 191 fix1: 같은 번호로 다시 낼 때 지난 표시를 남기지 않는다(pick 이 다시 단다)
         version.pop("postScaled", None)  # 작업 193 fix1: 지난 시도의 크기 맞춤 기록도(완료 때 다시 단다)
+        for stale in ("segments", "audioSegments", "audioStitched"):  # 작업 194: 지난 시도의 조각·소리 기록도(pick·완료가 다시 단다)
+            version.pop(stale, None)
         version.update(pick["version"])  # 보완 1: 고른 모델·범위·구간·형식·길이
         box.update(n=version["n"], attempt=attempt)
         return data
 
     _mutate_state(owner, pid, gen_id, mutate)
-    log.info("vnew.retake.submit pid=%s gen=%s cell=%s n=%d attempt=%d from=v%d usd=%.2f bytes=%d edited=%s model=%s scope=%s format=%s",
-             pid, gen_id, key, box["n"], box["attempt"], target["n"], est["usd"], _bytes_of(prompt),
+    log.info("vnew.retake.submit pid=%s gen=%s cell=%s n=%d attempt=%d from=v%d usd=%.2f bytes=%d edited=%s model=%s scope=%s format=%s "
+             "segments=%d", pid, gen_id, key, box["n"], box["attempt"], target["n"], est["usd"], _bytes_of(prompt),
              prompt != str((((state.get("cells") or {}).get(key) or {}).get("draft") or {}).get("prompt") or ""),
-             pick["version"]["model"], pick["version"]["scope"], pick["version"]["format"])
+             pick["version"]["model"], pick["version"]["scope"], pick["version"]["format"], len(segments or []))
     _spawn(run_retake, (owner, pid, gen_id, key, box["n"], claim), f"vnew-retake-{pid}-{box['n']}")
     return _view_with(gen, gen_id, target, read_state(owner, pid, gen_id), log_cells, pick["setup"])
 
@@ -1911,6 +1936,8 @@ def _post_scale(owner: str, pid: str, gen_id: str, key: str, n: int, version: di
     맞추면 (맞춘 키, {"postScaled": {"from": "854x480@30", "to": "1920x1080@24"}}). 예외는 경고만(받은 결과를 쓴다)."""
     if (version or {}).get("videoSource") != RESULT_SOURCE or not output_key:
         return output_key, {}
+    if version.get("segments"):  # 작업 194: 여러 클립 조각 버전은 크기 맞춤과 조각별 소리 잇기를 한 번에
+        return _post_segments(owner, pid, gen_id, key, n, version, output_key)
     from_key = str(version.get("fromKey") or "")
     stage = "source"
     started = time.monotonic()
@@ -1951,6 +1978,139 @@ def _post_scale(owner: str, pid: str, gen_id: str, key: str, n: int, version: di
     log.info("vnew.retake.post_scaled pid=%s gen=%s cell=%s n=%d from=%s to=%s ms=%d", pid, gen_id, key, n, info["from"], info["to"],
              int((time.monotonic() - started) * 1000))
     return new_key, {"postScaled": info}
+
+
+# ---------------------------------------------------------------- 작업 194: segments 버전 — 조각별 소리 · 크기 맞춤
+#
+# @Video1 = 고른 클립(같은 칸의 원본·버전 파일)을 조각마다 자른 것을 이은 것이라, 결과 영상의 조각 k = [앞 조각 길이 합, + 조각 k 길이]다.
+# 완료 때 결과를 첫 조각 재료의 크기·fps 로 다시 인코딩하면서(193 fix1 과 같은 edit_segment 단계) 조각마다 그 클립이 타임라인에서 이미 내던 소리
+# (_segment_audio — edit._audio_sources 규칙: 원본은 자기 소리, result·소리 없는 버전은 그 원천)를 그 자리에 넣는다. 실패하면 받은 결과 그대로.
+
+
+def _segment_audio(owner: str, pid: str, gen_id: str, variant: str, segments: list[dict]) -> list[dict]:
+    """조각마다 소리 원천. 반환 [{at, seconds, sourceKey, in, out}](at = 새 영상 안 시작, sourceKey "" = 무음).
+
+    edit._export_audio_from 과 같은 순서: 그 칸 재료·fromKey 사슬의 meta(_retake_meta probe — 길이 캐시 먼저) → edit._audio_sources.
+    대체 원천이 있으면 그 원천의 offset + in × scale ~ (끝 · 조각 길이 × scale 중 이른 것), 없으면 자기 소리(소리가 있고 거의 무음이 아니고
+    result 버전이 아닐 때)의 in~out, 그 밖은 무음."""
+    _plan, gen, _now = edit._load_gen(owner, pid)  # noqa: SLF001
+    every = edit._all_items(gen, variant, read_state(owner, pid, gen_id))  # noqa: SLF001
+    used = [str(s["sourceKey"]) for s in segments]
+    chain = set(edit._result_chain(every, used))  # noqa: SLF001
+    items = [m for m in every if m.get("group") == "current" or m["sourceKey"] in used or m["sourceKey"] in chain]
+    meta = edit._retake_meta(owner, pid, gen_id, items, {}, probe=True, silent_keys=set(used))  # noqa: SLF001
+    found = edit._audio_sources(gen, items, meta)  # noqa: SLF001
+    by_key = {m["sourceKey"]: m for m in items}
+    out: list[dict] = []
+    clock = 0.0
+    for seg in segments:
+        key = str(seg["sourceKey"])
+        length = round(float(seg["out"]) - float(seg["in"]), 3)
+        piece = {"at": round(clock, 3), "seconds": length, "sourceKey": "", "in": None, "out": None}
+        source = found.get(key)
+        own = meta.get(key) or {}
+        if source:
+            window = edit._clip_audio({"in": float(seg["in"])}, source)  # noqa: SLF001
+            if window:
+                a_in = window[0]
+                a_out = round(min(window[1], a_in + length * float(source["scale"])), 3)
+                if a_out - a_in >= edit.MIN_CLIP_S - 1e-9:
+                    piece.update(sourceKey=str(source["sourceKey"]), **{"in": a_in, "out": a_out})
+        elif (by_key.get(key) or {}).get("videoSource") != RESULT_SOURCE and own.get("hasAudio") is True and own.get("silent") is not True:
+            piece.update(sourceKey=key, **{"in": round(float(seg["in"]), 3), "out": round(float(seg["out"]), 3)})
+        out.append(piece)
+        clock += length
+    return out
+
+
+def _stitch_segments(source_path: str, output_path: str, *, pieces: list[dict], width: int, height: int, fps: int) -> None:
+    """외부 호출 래퍼(검사가 가짜로 바꾼다): 결과 영상의 조각마다 stitcher.edit_segment(width×height·fps, 프레임은 누적 시각으로 셈 — 합이
+    round(전체 × fps))로 다시 인코딩하고 소리는 그 조각 원천 파일(audioPath)의 audioIn~audioOut(없으면 무음, 길이는 정확히 프레임 길이), 그다음
+    stitcher.edit_join(영상 스트림 복사 · 이은 PCM → AAC). pieces = [{seconds, audioPath, audioIn, audioOut}]."""
+    with tempfile.TemporaryDirectory(prefix="vnew-retake-seg-") as workdir:
+        videos: list[str] = []
+        pcm_all = os.path.join(workdir, "audio.pcm")
+        clock, done = 0.0, 0
+        with open(pcm_all, "wb") as joined:
+            for index, piece in enumerate(pieces):
+                clock += float(piece["seconds"])
+                frames = max(1, round(clock * fps) - done)
+                video = os.path.join(workdir, f"seg-{index:02d}.mp4")
+                pcm = os.path.join(workdir, f"seg-{index:02d}.pcm")
+                has = bool(piece.get("audioPath"))
+                stitcher.edit_segment(source_path, video, start_sec=done / float(fps), frames=frames, fps=fps, width=width, height=height,
+                                      audio_out=pcm, audio_from_source=has, audio_source=str(piece["audioPath"]) if has else "",
+                                      audio_start_sec=float(piece["audioIn"]) if has else None,
+                                      audio_end_sec=float(piece["audioOut"]) if has else None)
+                done += frames
+                with open(pcm, "rb") as handle:
+                    joined.write(handle.read())
+                os.unlink(pcm)
+                videos.append(video)
+        stitcher.edit_join(videos, output_path, audio_path=pcm_all)
+
+
+def _segments_key(output_key: str, width: int, height: int, fps: int) -> str:
+    """조각 소리를 넣은 결과 키: 받은 결과 옆 output-segments-<W>x<H>-<fps>fps.mp4."""
+    stem = output_key[:-4] if output_key.endswith(".mp4") else output_key
+    return f"{stem}-segments-{int(width)}x{int(height)}-{int(fps)}fps.mp4"
+
+
+def _fit_geometry(width: int, height: int, fps: float) -> tuple[int, int, int] | None:
+    target = int(round(fps))
+    if width < 2 or height < 2 or width % 2 or height % 2 or target not in stitcher.EDIT_FPS_CHOICES or abs(fps - target) > POST_SCALE_FPS_TOL:
+        return None
+    return width, height, target
+
+
+def _post_segments(owner: str, pid: str, gen_id: str, key: str, n: int, version: dict, output_key: str) -> tuple[str, dict]:
+    """segments 버전의 결과 → 첫 조각 재료 크기·fps(모르면 받은 결과 크기, 그것도 못 쓰면 1920x1080·24) + 조각마다 원래 소리.
+    반환 (버전 outputKey, _finish 에 더할 것 — audioSegments · audioStitched(+ 크기가 바뀌면 postScaled)). 실패하면 (받은 결과, audioStitched False)."""
+    segments = _valid_segments(version.get("segments")) or []
+    variant = str(key).partition(":")[0]
+    audio: list[dict] = []
+    stage = "audio"
+    started = time.monotonic()
+    try:
+        if not segments:
+            raise VpocError("vnew.retake", "RetakeBadRange", BAD_RANGE_TEXT, 400)
+        audio = _segment_audio(owner, pid, gen_id, variant, segments)
+        stage = "source"
+        first = str(segments[0]["sourceKey"])
+        meta, _ = edit._ensure_meta(owner, pid, gen_id, [first])  # noqa: SLF001
+        fit = _fit_geometry(*_geometry(meta.get(first)))
+        with tempfile.TemporaryDirectory(prefix="vnew-retake-segpost-") as workdir:
+            stage = "download"
+            raw = os.path.join(workdir, "raw.mp4")
+            edit._download(output_key, raw, bucket=vpoc_settings.VIDEO_BUCKET)  # noqa: SLF001
+            got_w, got_h, got_fps = _geometry(edit._probe_file(raw))  # noqa: SLF001
+            width, height, target_fps = fit or _fit_geometry(got_w, got_h, got_fps) or (*generate.REAL_CUT_SIZE, generate.REAL_CUT_FPS)
+            paths: dict[str, str] = {}
+            for index, source in enumerate(dict.fromkeys(p["sourceKey"] for p in audio if p["sourceKey"])):
+                path = os.path.join(workdir, f"audio-{index:02d}.mp4")
+                edit._download(source, path, bucket=vpoc_settings.VIDEO_BUCKET)  # noqa: SLF001
+                paths[source] = path
+            pieces = [{"seconds": p["seconds"], "audioPath": paths.get(p["sourceKey"], ""), "audioIn": p["in"], "audioOut": p["out"]}
+                      for p in audio]
+            stage = "stitch"
+            joined = os.path.join(workdir, "segments.mp4")
+            _stitch_segments(raw, joined, pieces=pieces, width=width, height=height, fps=target_fps)
+            out_w, out_h, out_fps = _geometry(edit._probe_file(joined))  # noqa: SLF001
+            if (out_w, out_h) != (width, height) or abs(out_fps - target_fps) > POST_SCALE_FPS_TOL:
+                raise stitcher.StitchError(f"segments {out_w}x{out_h}@{out_fps:g}")
+            stage = "upload"
+            new_key = _segments_key(output_key, width, height, target_fps)
+            edit._upload(joined, new_key, bucket=vpoc_settings.VIDEO_BUCKET, content_type="video/mp4")  # noqa: SLF001
+    except Exception as exc:  # noqa: BLE001 — 받은 결과로 completed(소리는 edit 의 옛 길 규칙 — 거의 무음이면 그 칸 v1)
+        log.warning("vnew.retake.post_segments_failed pid=%s gen=%s cell=%s n=%d stage=%s err=%s", pid, gen_id, key, n, stage,
+                    type(exc).__name__)
+        return output_key, {"audioSegments": audio, "audioStitched": False}
+    extra: dict = {"audioSegments": audio, "audioStitched": True}
+    if (got_w, got_h) != (width, height) or abs(got_fps - target_fps) > POST_SCALE_FPS_TOL:
+        extra["postScaled"] = {"from": f"{got_w}x{got_h}@{got_fps:g}", "to": f"{width}x{height}@{target_fps}"}
+    log.info("vnew.retake.post_segments pid=%s gen=%s cell=%s n=%d pieces=%d sounded=%d size=%dx%d@%d ms=%d", pid, gen_id, key, n,
+             len(audio), sum(1 for p in audio if p["sourceKey"]), width, height, target_fps, int((time.monotonic() - started) * 1000))
+    return new_key, extra
 
 
 
@@ -2342,10 +2502,11 @@ def _draft_changed() -> VpocError:
 
 
 def _draft_matches(draft: dict, pick: dict) -> bool:
-    """초안의 모델·범위·구간이 지금 고른 것과 같은가(116 초안은 원래 모델·full·구간 없음으로 본다)."""
+    """초안의 모델·범위·구간이 지금 고른 것과 같은가(116 초안은 원래 모델·full·구간 없음으로 본다). 작업 194: 조각(segments)도 같아야 한다."""
     return (str((draft or {}).get("model") or pick["setup"]["defaultModel"]) == pick["row"]["id"]
             and str((draft or {}).get("scope") or "full") == pick["scope"]
-            and _range_key((draft or {}).get("range")) == _range_key(pick["range"]))
+            and _range_key((draft or {}).get("range")) == _range_key(pick["range"])
+            and _segments_sig((draft or {}).get("segments")) == _segments_sig(pick["draft"].get("segments")))
 
 
 def _submit_rules(pick: dict, gen: dict, target: dict, state: dict, draft_id) -> tuple[dict, dict]:
@@ -2392,6 +2553,9 @@ def _view_with(gen: dict, gen_id: str, target: dict, state: dict, log_cells: dic
             vr = _valid_range(version.get("range")) or {}
             row.update(videoSource=RESULT_SOURCE, seconds=_num_in(version.get("seconds")), sentSeconds=_num_in(version.get("sentSeconds")),
                        sourceRange={"in": _num_in(vr.get("in")), "out": _num_in(vr.get("out"))})
+            segs = _valid_segments(version.get("segments"))
+            if segs:  # 작업 194: [바꾸기] = 고른 클립마다 새 버전의 이어진 조각(조각 k = [앞 조각 길이 합, + 그 길이])
+                row.update(segments=segs, audioStitched=bool(version.get("audioStitched")))
         if row.get("sourceKey") and target["labels"].get(row["sourceKey"]):
             row["label"] = target["labels"][row["sourceKey"]]
     return view
@@ -2511,9 +2675,15 @@ def _resubmit(owner: str, pid: str, gen_id: str, variant: str, cell_id: str, n: 
     refs = version.get("formatRefs")
     source: dict = {}
     if version.get("videoSource") == RESULT_SOURCE:  # 작업 191 fix1: @Video1 = 고칠 재료 영상(fromKey)의 그 파일 초 in–out
-        if not rng or _num_in(rng.get("in")) is None or _num_in(rng.get("out")) is None or not version.get("fromKey"):
+        if version.get("segments") is not None:  # 작업 194: 같은 칸 여러 클립 — 조각마다 자른 것을 이은 것
+            segs = _valid_segments(version.get("segments"))
+            if not segs or not rng:
+                raise VpocError("vnew.retake", "RetakeBadRange", BAD_RANGE_TEXT, 400)
+            source = {"source_segments": [(s["sourceKey"], s["in"], s["out"]) for s in segs]}
+        elif not rng or _num_in(rng.get("in")) is None or _num_in(rng.get("out")) is None or not version.get("fromKey"):
             raise VpocError("vnew.retake", "RetakeBadRange", BAD_RANGE_TEXT, 400)
-        source = {"source_key": str(version["fromKey"]), "source_span": (float(rng["in"]), float(rng["out"]))}
+        else:
+            source = {"source_key": str(version["fromKey"]), "source_span": (float(rng["in"]), float(rng["out"]))}
     return generate.resubmit_model(owner, pid, gen_id, variant=variant, cell_id=cell_id, prompt=prompt, tag=f"rt{n}",
                                    model=str(version.get("model") or ""), attempt=attempt, version=n,
                                    span={"start": float(rng["start"]), "end": float(rng["end"])} if rng else None,
@@ -2785,7 +2955,7 @@ def _result_edit_line(change_en: str, korean: str, *, swapped: bool) -> str:
 
 
 def _compose_prompt(base_prompt: str, template_prompt: str, rng: dict, cell_seconds: float, *, request_ko: str, extra_ko: str,
-                    change_en: str, max_bytes: int, result: bool = False) -> tuple[str, dict]:
+                    change_en: str, max_bytes: int, result: bool = False, range_line: str = "") -> tuple[str, dict]:
     """compose 프롬프트(LLM 0). 반환 (프롬프트, {refs, labels, swapped, cut}).
 
     1. 기준 프롬프트 줄 그대로. 앞선 compose 줄은 RANGE·CONTEXT 를 빼고 EDIT 를 EARLIER EDIT(keep) 로 둔다(그 변경은 이미 반영돼 있다).
@@ -2800,6 +2970,7 @@ def _compose_prompt(base_prompt: str, template_prompt: str, rng: dict, cell_seco
     상한을 넘으면 이전 프롬프트 쪽만 _trim_to_limit 다음 _drop_context(참고 표시 없는 줄을 뒤부터 통째로) — 앞 줄·참고 표시는 자르지 않는다.
     작업 193: result 면 EDIT 바로 뒤에 COMPOSE_RESULT_VIDEO_LINE(@Video1 = 지금 결과 영상), 이전 프롬프트(정의 줄을 바꾼 뒤)는 _result_context 로
     @Video1 문장·겹친 줄·문장을 뺀다. REFERENCES 조각에서도 @Video1 조각은 뺀다. meta.cleaned = 뺀 수.
+    작업 194: range_line 을 주면(result, 여러 클립 조각) RANGE 줄은 늘 그 줄이다(칸 전체를 덮어도).
     """
     allowed = _refs(template_prompt)
     t_lines = _normalize_prompt(template_prompt).split("\n")
@@ -2867,7 +3038,9 @@ def _compose_prompt(base_prompt: str, template_prompt: str, rng: dict, cell_seco
                 COMPOSE_RESULT_VIDEO_LINE]  # 작업 193: @Video1 정의는 이 한 줄뿐
         if extra_ko:
             head.append(COMPOSE_EXTRA_HEAD + _keep_refs(_quote_user(_one_line(extra_ko)), allowed))
-        if not whole:
+        if range_line:  # 작업 194: 여러 클립 조각 — "@Video1 is the current timeline of cuts a–b (N clips, X.Xs)"
+            head.append(range_line)
+        elif not whole:
             head.append(_result_range_line(rng))
         if refs_line:
             head.append(refs_line)
@@ -2920,31 +3093,45 @@ def compose(owner: str, pid: str, mid: str, payload) -> dict:
     → 구간(400 RetakeBadRange — 짧으면 COMPOSE_SHORT_TEXT) → 모델(400 RetakeBadModel, 기본 _compose_default) → 초안 running(409 RetakeDrafting)
     → 번역(스레드, 최대 TRANSLATE_TIMEOUT_S)·형식 본보기 → _compose_prompt → check_prompt → 초안 done(kind compose). 반환 보기(초안·견적 draft.plan).
     영상 모델·원장(영상) 호출 0 — 제출은 기존 submit.
+    작업 194: in·out 대신 segments [{sourceKey, in, out}](같은 칸 원본·버전 파일 초, 타임라인 순서, 최대 SEGMENTS_MAX)를 받으면 대상은 그 칸
+    원본(v1), 길이 = 조각 합, RANGE 줄 = _segments_range_line, 초안 segments(10절).
     """
     where = "vnew.retake.compose"
     payload = payload if isinstance(payload, dict) else {}
     if payload.get("scope") is not None and payload.get("scope") != "range":
         raise VpocError(where, "RetakeBadRange", FULL_SCOPE_TEXT, 400)
     request_ko, extra_ko = _read_request(payload)
-    if _num_in(payload.get("in")) is None or _num_in(payload.get("out")) is None:
+    segments = _read_segments(payload, where)  # 작업 194: 같은 칸 여러 클립(없으면 None — in·out 길 그대로)
+    if segments is None and (_num_in(payload.get("in")) is None or _num_in(payload.get("out")) is None):
         raise VpocError(where, "RetakeBadRange", BAD_RANGE_TEXT, 400)
-    choice = {"model": payload.get("model"), "scope": "range", "in": payload.get("in"), "out": payload.get("out")}
+    choice = {"model": payload.get("model"), "scope": "range", "in": None if segments else payload.get("in"),
+              "out": None if segments else payload.get("out")}
     model, _scope, clip_in, clip_out = _read_choice(choice)  # 모델 꼴(400 RetakeBadModel)
     plan, gen, gen_id = edit._load_gen(owner, pid)  # noqa: SLF001
     state = reconcile_state(owner, pid, gen_id)
     target = _target(plan, gen, mid, state)
+    seg_meta = None
+    if segments is not None:  # 작업 194: 대상 = 그 칸 원본(v1 — 이전 프롬프트는 칸 원래 프롬프트), 구간 = 조각을 이은 길이
+        setup, target, seg_meta = _segments_setup(owner, pid, plan, gen, gen_id, target, state, segments, where=where)
     log_cells = read_log(owner, pid, gen_id)
     base = _base(gen, target, state, log_cells.get(target["cellKey"]) or [])
     if not base:
         raise VpocError(where, "RetakeNoPrompt", NO_PROMPT_TEXT, 409)
-    setup = _setup(owner, pid, plan, gen, gen_id, target, state, clip_in, clip_out, whole_ok=True)
-    if not setup["range"]:
-        if setup["rangeNote"] == RANGE_NOTES["short"]:
-            raise VpocError(where, "RetakeBadRange", COMPOSE_SHORT_TEXT, 400)
-        raise VpocError(where, "RetakeBadRange", BAD_RANGE_TEXT, 400)
+    if segments is None:
+        setup = _setup(owner, pid, plan, gen, gen_id, target, state, clip_in, clip_out, whole_ok=True)
+        if not setup["range"]:
+            if setup["rangeNote"] == RANGE_NOTES["short"]:
+                raise VpocError(where, "RetakeBadRange", COMPOSE_SHORT_TEXT, 400)
+            raise VpocError(where, "RetakeBadRange", BAD_RANGE_TEXT, 400)
+    elif not any(_v2v_row(m) for m in setup["models"]) and any(str(h.get("reason") or "").startswith("이 모델은")
+                                                               for h in setup["modelsHidden"]):
+        # 작업 194: 합친 길이를 받는 모델이 없다(모델 최대 길이 — "이 모델은 최대 …초까지"). 그 밖(영상→영상 모델 없음)은 _compose_row 가 400
+        raise VpocError(where, "RetakeBadRange", SEGMENTS_LONG_TEXT, 400)
     row = _compose_row(setup, model)
     pick = _choose(owner, pid, plan, gen, gen_id, target, state, dict(choice, model=row["id"]), whole_ok=True, setup=setup)
     _result_pick(pick, gen, target)  # 작업 191 fix1: @Video1 = 고칠 재료 영상의 그 구간, 길이 = out − in
+    if segments is not None:
+        _segments_pick(pick, segments, seg_meta)
     key = target["cellKey"]
     if ((state["cells"].get(key) or {}).get("draft") or {}).get("status") == "running":
         raise VpocError(where, "RetakeDrafting", "새 프롬프트를 만드는 중입니다. 끝난 뒤 다시 눌러 주세요.", 409)
@@ -2964,7 +3151,8 @@ def compose(owner: str, pid: str, mid: str, payload) -> dict:
     change_en = "" if timed_out else _clean_change_en((box["payload"] or {}).get("changeEn"), _refs(template["prompt"]), real=real)
     max_bytes = int(pick["plan"].get("maxBytes") or 0)
     prompt, meta = _compose_prompt(base["prompt"], template["prompt"], rng, float(setup["cellSeconds"]), request_ko=request_ko,
-                                   extra_ko=extra_ko, change_en=change_en, max_bytes=max_bytes, result=True)
+                                   extra_ko=extra_ko, change_en=change_en, max_bytes=max_bytes, result=True,
+                                   range_line=_segments_range_line(rng, len(segments)) if segments else "")
     rules = {"maxBytes": max_bytes, "real": real, "refs": meta["refs"], "labels": meta["labels"], "against": "template"}
     problems = check_prompt(prompt, base["prompt"], rules)
     stamp = now_iso()
@@ -2987,9 +3175,149 @@ def compose(owner: str, pid: str, mid: str, payload) -> dict:
 
     _mutate_state(owner, pid, gen_id, mutate)
     log.info("vnew.retake.compose pid=%s gen=%s cell=%s base=v%d source=%s model=%s format=%s start=%.3f end=%.3f bytes=%d max=%d "
-             "problems=%d translated=%s translate=%s trimmed=%d swapped=%s video_dropped=%d dup_lines=%d dup_sentences=%d ms=%d", pid, gen_id,
+             "problems=%d translated=%s translate=%s trimmed=%d swapped=%s video_dropped=%d dup_lines=%d dup_sentences=%d ms=%d segments=%d",
+             pid, gen_id,
              key, target["n"], base["source"], row["id"], fmt, float(rng["start"]), float(rng["end"]), _bytes_of(prompt), max_bytes, len(problems),
              bool(change_en), "timeout" if timed_out else (box["error"] or "ok"), meta["cut"], meta["swapped"],
              meta.get("cleaned", {}).get("video", 0), meta.get("cleaned", {}).get("lines", 0), meta.get("cleaned", {}).get("sentences", 0),
-             int((time.monotonic() - started) * 1000))
+             int((time.monotonic() - started) * 1000), len(segments or []))
     return _view_with(gen, gen_id, target, read_state(owner, pid, gen_id), log_cells, pick["setup"])
+
+
+
+# ================================================================ 10. 작업 194 — 같은 칸(원본 + 그 버전)의 여러 클립 = segments
+#
+# 타임라인에서 고른 클립이 한 칸의 원본·버전 파일에 걸치면(또는 같은 파일이라도 원본 초가 이어지지 않으면) 화면은 in·out 대신
+# segments [{sourceKey, in, out}](타임라인 순서, 그 파일 초)를 보낸다. 대상은 그 칸 원본(v1 — 이전 프롬프트 = 칸 원래 프롬프트 _base),
+# @Video1 = 조각마다 _cut_clip(소리 없음)을 _conform_concat 으로 이은 것(첫 조각 크기·fps — generate._retake_segments_video), 길이·견적·원장 =
+# 조각 길이 합. 구간 {in 0, out 합, start·end = 조각들의 칸 시각 처음~끝, seconds 합, cutIds, cuts(새 영상 안 시각)}. 버전 segments ·
+# fromKey = 첫 조각 키 · fromN = 그 버전 번호. 완료 때 조각마다 원래 소리를 넣는다(_post_segments). 한 파일 in·out 길은 그대로다.
+
+
+def _read_segments(payload: dict, where: str) -> list[dict] | None:
+    """바디 segments(없거나 null 이면 None). 1~SEGMENTS_MAX 개, 조각 = {sourceKey(글자), in, out(유한한 수, 0 ≤ in, out − in ≥ 한 프레임),
+    speed?(있으면 1만)}. 틀리면 400 RetakeBadRange. 반환 [{sourceKey, in, out}](밀리초 반올림)."""
+    raw = (payload or {}).get("segments")
+    if raw is None:
+        return None
+    if not isinstance(raw, list) or not raw:
+        raise VpocError(where, "RetakeBadRange", SEGMENTS_TEXT, 400)
+    if len(raw) > SEGMENTS_MAX:
+        raise VpocError(where, "RetakeBadRange", SEGMENTS_MAX_TEXT, 400)
+    out: list[dict] = []
+    for seg in raw:
+        if not isinstance(seg, dict):
+            raise VpocError(where, "RetakeBadRange", SEGMENTS_TEXT, 400)
+        key = seg.get("sourceKey")
+        first, last = _num_in(seg.get("in")), _num_in(seg.get("out"))
+        if not isinstance(key, str) or not key or len(key) > SEGMENTS_KEY_MAX or first is None or last is None:
+            raise VpocError(where, "RetakeBadRange", SEGMENTS_TEXT, 400)
+        if seg.get("speed") is not None and _num_in(seg.get("speed")) != 1.0:
+            raise VpocError(where, "RetakeBadRange", SEGMENTS_SPEED_TEXT, 400)
+        first = 0.0 if -RANGE_EPS_S <= first < 0 else first
+        if first < 0 or last - first < edit.MIN_CLIP_S - 1e-9:
+            raise VpocError(where, "RetakeBadRange", BAD_RANGE_TEXT, 400)
+        out.append({"sourceKey": key, "in": round(first, 3), "out": round(last, 3)})
+    return out
+
+
+def _valid_segments(value) -> list[dict] | None:
+    """저장된 segments 가 쓸 만하면 사본 [{sourceKey, in, out}], 아니면 None."""
+    if not isinstance(value, list) or not value or len(value) > SEGMENTS_MAX:
+        return None
+    out: list[dict] = []
+    for seg in value:
+        key = (seg or {}).get("sourceKey") if isinstance(seg, dict) else None
+        first, last = (_num_in(seg.get("in")), _num_in(seg.get("out"))) if isinstance(seg, dict) else (None, None)
+        if not isinstance(key, str) or not key or first is None or last is None or first < 0 or last <= first:
+            return None
+        out.append({"sourceKey": key, "in": round(first, 3), "out": round(last, 3)})
+    return out
+
+
+def _segments_sig(value) -> tuple | None:
+    segs = _valid_segments(value)
+    return tuple((s["sourceKey"], s["in"], s["out"]) for s in segs) if segs else None
+
+
+def _segments_setup(owner: str, pid: str, plan: dict, gen: dict, gen_id: str, target: dict, state: dict, segments: list[dict], *,
+                    where: str) -> tuple[dict, dict, list[dict]]:
+    """조각들 → (보기 setup, 대상 = 그 칸 원본 v1, 조각 정보 [{n, mid, start, end}]).
+
+    조각마다 키가 그 칸(같은 그림체)의 원본 또는 다시 만든 버전 재료여야 한다(아니면 400 RetakeBadRange SEGMENTS_FOREIGN_TEXT). 파일 초 →
+    칸 녹화 시각은 그 재료의 _time_map(구간 버전 = 구간 시작 + 초, 통 테이크 v1 = 비례). 그 재료 길이 밖이면 400 BAD_RANGE_TEXT, 합이 1초보다
+    짧으면 400 COMPOSE_SHORT_TEXT. 모델 목록은 _choices(구간 길이 = 합, 칸 전체 길 없음)."""
+    variant, cell_id = target["variant"], target["cellId"]
+    items = _items(plan, gen, state, variant)
+    cell_items = [m for m in items if m.get("cellId") == cell_id and m.get("group") in ("current", "retake")]
+    by_key = {m["sourceKey"]: m for m in cell_items}
+    current = next((m for m in cell_items if m.get("group") == "current"), None)
+    if current is None:
+        reason = NOT_TARGET["cell"]
+        raise VpocError(where, "RetakeNotTarget", reason, 409)
+    base_target = _target_of(gen, variant, current, items)
+    cell = base_target["cell"]
+    kind = str(base_target.get("kind") or "")
+    cell_seconds = round(float(cell.get("seconds") or 0.0), 3)
+    spans = _cell_spans(plan, cell, kind)
+    numbers = edit._cut_numbers(plan)  # noqa: SLF001
+    info: list[dict] = []
+    cuts: list[dict] = []
+    clock = 0.0
+    for seg in segments:
+        item = by_key.get(seg["sourceKey"])
+        if item is None:
+            raise VpocError(where, "RetakeBadRange", SEGMENTS_FOREIGN_TEXT, 400)
+        number = int(item.get("version") or 1)
+        version = (_find_version(state, base_target["cellKey"], number) or {}) if number >= 2 else {}
+        duration = _source_duration(owner, pid, gen_id, item["mid"])
+        offset, scale, extent = _time_map(item.get("trimTo"), _valid_range(version.get("range")), kind, cell_seconds, duration)
+        first, last = float(seg["in"]), float(seg["out"])
+        if scale <= 0 or extent <= 0 or last > extent + RANGE_EPS_S:
+            raise VpocError(where, "RetakeBadRange", BAD_RANGE_TEXT, 400)
+        last = min(last, extent)
+        if last - first < edit.MIN_CLIP_S - 1e-9:
+            raise VpocError(where, "RetakeBadRange", BAD_RANGE_TEXT, 400)
+        seg["out"] = round(last, 3)
+        start, end = offset + first * scale, offset + last * scale
+        for span_start, span_end, cut_id in spans:
+            lo, hi = max(span_start, start), min(span_end, end)
+            if hi - lo > RANGE_EPS_S:
+                a, b = round(clock + (lo - start) / scale, 3), round(clock + (hi - start) / scale, 3)
+                if cuts and cuts[-1]["cutId"] == cut_id and abs(cuts[-1]["end"] - a) <= RANGE_EPS_S:
+                    cuts[-1]["end"] = b
+                else:
+                    cuts.append({"cutId": cut_id, "no": numbers.get(cut_id), "start": a, "end": b})
+        info.append({"n": number, "mid": item["mid"], "start": round(start, 3), "end": round(end, 3)})
+        clock += last - first
+    total = round(sum(float(s["out"]) - float(s["in"]) for s in segments), 3)
+    if total < RANGE_MIN_S - 1e-9:
+        raise VpocError(where, "RetakeBadRange", COMPOSE_SHORT_TEXT, 400)
+    high = cell_seconds if cell_seconds > 0 else math.inf
+    start = round(max(0.0, min(i["start"] for i in info)), 3)
+    end = round(min(high, max(i["end"] for i in info)), 3)
+    if end <= start:
+        raise VpocError(where, "RetakeBadRange", BAD_RANGE_TEXT, 400)
+    cut_ids = list(dict.fromkeys(c["cutId"] for c in cuts)) or _cut_ids(cell)
+    rng = {"in": 0.0, "out": total, "start": start, "end": end, "seconds": total, "cutIds": cut_ids, "cuts": cuts}
+    models, hidden = _choices(plan, gen, base_target, rng, same_ok=True, full_ok=False)
+    setup = {"models": models, "modelsHidden": hidden, "defaultModel": _original_model(gen, base_target), "cellSeconds": cell_seconds,
+             "scopes": ["range"], "range": rng, "rangeNote": ""}
+    return setup, base_target, info
+
+
+def _segments_pick(pick: dict, segments: list[dict], info: list[dict]) -> dict:
+    """pick 의 초안·버전에 조각을 단다(초안 segments — 제출이 대조, 버전 segments · fromKey = 첫 조각 · fromN = 그 버전 번호)."""
+    segs = [dict(s) for s in segments]
+    pick["draft"]["segments"] = segs
+    pick["version"].update(segments=[dict(s) for s in segs], fromKey=str(segs[0]["sourceKey"]), fromN=int(info[0]["n"]))
+    return pick
+
+
+def _segments_range_line(rng: dict, count: int) -> str:
+    """RANGE 줄(여러 클립 조각): "@Video1 is the current timeline of cuts a–b (N clips, X.Xs); the new video is Xs long, …"."""
+    nos = sorted({int(c["no"]) for c in rng.get("cuts") or [] if isinstance(c.get("no"), int)})
+    what = (f"cut {nos[0]}" if len(nos) == 1 else f"cuts {nos[0]}\u2013{nos[-1]}") if nos else "the selected cuts"
+    total = float(rng["seconds"])
+    return (f"{COMPOSE_RESULT_RANGE_HEAD}the current timeline of {what} ({int(count)} clip{'' if int(count) == 1 else 's'}, {total:.1f}s); "
+            f"the new video is {total:g}s long, the same length as @Video1.")

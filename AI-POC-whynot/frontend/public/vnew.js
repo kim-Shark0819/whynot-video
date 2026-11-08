@@ -8881,6 +8881,12 @@
   // 작업 192: 여러 컷 고르기(Ctrl/Cmd+누르기 = 넣고 빼기, Shift+누르기 = 기준 클립부터 그 클립까지). ctx.sel = 첫 컷, ctx.multi = 고른 번호 목록.
   var EDIT_MULTI_NOTE = "여러 컷이 선택됨 — AI로 고치기·삭제만 할 수 있습니다";
   var EDIT_FIX_MIXED = "같은 테이크(원본 영상) 안의 컷만 함께 고칠 수 있습니다.";
+  // 작업 194: 같은 칸(원본 + 그 버전)의 여러 클립 = segments [{sourceKey, in, out}](타임라인 순서). 원본이 섞이거나 원본 초가 이어지지 않을 때.
+  var EDIT_FIX_SEG_MAX = 8;
+  var EDIT_FIX_SEG_EPS = 0.01; // 같은 원본 클립의 원본 초가 이어지는가(앞 out = 다음 in)
+  var EDIT_FIX_SEG_MANY = "한 번에 8개 컷까지 함께 고칠 수 있습니다.";
+  var EDIT_FIX_SEG_SPEED = "속도를 바꾼 컷이 있어 함께 고칠 수 없습니다. 속도를 1배로 되돌린 뒤 다시 골라 주세요.";
+  var EDIT_FIX_SEG_DISSOLVE = "고른 컷 사이에 디졸브가 있어 함께 고칠 수 없습니다. 디졸브를 컷으로 바꾼 뒤 다시 골라 주세요.";
   var EDIT_SVG_NS = "http://www.w3.org/2000/svg";
   // 눈금 [큰 눈금 간격(초), 작은 눈금 간격(초)]. 큰 눈금 사이가 64px 이상인 첫 간격을 쓴다(editTickStep).
   var EDIT_TICKS = [[1, 0.25], [2, 0.5], [5, 1], [10, 2]];
@@ -13276,7 +13282,10 @@
   }
 
   /* 타임라인에서 고른 컷 → {mid, sourceKey, ids, range: {in, out}(원본 초 — 가장 이른 in ~ 가장 늦은 out), names}. 고른 클립이 없으면 null.
-     원본(sourceKey)이 서로 다르면 {error: EDIT_FIX_MIXED}, 그 재료를 AI로 고칠 수 없으면 {error: 이유}. 순수에 가깝다(ctx 만 읽는다). */
+     원본(sourceKey)이 서로 다르면 {error: EDIT_FIX_MIXED}, 그 재료를 AI로 고칠 수 없으면 {error: 이유}. 순수에 가깝다(ctx 만 읽는다).
+     작업 194: 원본이 섞여도 모두 한 칸(같은 retake cellKey — 원본과 그 버전)이거나, 한 원본이라도 원본 초가 이어지지 않으면 segments 길:
+     {mid: 그 칸 원본(v1) 재료, segments [{sourceKey, in, out}](타임라인 순서), total(합 초), range {in 0, out 합(보기 GET 용)}}.
+     다른 칸이 섞이면 EDIT_FIX_MIXED, 속도 1이 아니거나 고른 컷 사이 디졸브 · 8개 넘음은 그 안내. */
   function editFixSelTarget(ctx) {
     var indexes = editSelIndexes(ctx);
     if (!indexes.length) return null;
@@ -13284,9 +13293,7 @@
       return ctx.clips[i];
     });
     var key = clips[0].sourceKey;
-    if (clips.some(function (c) {
-      return c.sourceKey !== key;
-    })) return { error: EDIT_FIX_MIXED };
+    if (editFixNeedsSegments(clips)) return editFixSegTarget(ctx, clips, indexes); // 작업 194
     var mat = ctx.materials[key];
     if (!mat || !mat.retake || mat.retake.can !== true) {
       return { error: (mat && mat.retake && mat.retake.reason) || "이 컷은 AI로 고칠 수 없습니다." };
@@ -13305,8 +13312,74 @@
   function editFixSelTitle(target) {
     var t = target || {};
     var r = t.range || {};
-    var what = (t.names ? t.names + " · " : "") + editFixSecs(r.in) + "–" + editFixSecs(r.out) + "초";
+    var what = (t.names ? t.names + " · " : "") + (t.segments ? "합 " + editFixSecs(t.total) : editFixSecs(r.in) + "–" + editFixSecs(r.out)) + "초";
     return (t.ids && t.ids.length > 1 ? "고른 컷 " + t.ids.length + "개(" + what + ")를" : "고른 컷(" + what + ")을") + " AI로 고칩니다";
+  }
+
+  /* ---- 작업 194: 같은 칸(원본 + 그 버전)의 여러 클립 = segments ---- */
+
+  /* 고른 클립(타임라인 순서)을 segments 로 보내야 하는가(순수): 원본이 섞이거나, 한 원본이라도 원본 초가 이어지지 않는다(앞 out ≠ 다음 in). */
+  function editFixNeedsSegments(clips) {
+    for (var i = 1; i < (clips || []).length; i++) {
+      if (clips[i].sourceKey !== clips[0].sourceKey) return true;
+      if (Math.abs(Number(clips[i].in) - Number(clips[i - 1].out)) > EDIT_FIX_SEG_EPS) return true;
+    }
+    return false;
+  }
+
+  /* 고른 클립 재료가 모두 한 칸(재료 retake.cellKey 가 같고 비지 않음 — 원본과 그 버전)이면 그 cellKey, 아니면 "". */
+  function editFixCellOf(ctx, clips) {
+    var cell = "";
+    for (var i = 0; i < clips.length; i++) {
+      var mat = ctx.materials[clips[i].sourceKey];
+      var key = mat && mat.retake ? String(mat.retake.cellKey || "") : "";
+      if (!key || (cell && key !== cell)) return "";
+      cell = key;
+    }
+    return cell;
+  }
+
+  /* 그 칸 원본(v1 — retake.n 1) 재료. 없으면 null. */
+  function editFixCellBase(ctx, cellKey) {
+    var keys = Object.keys(ctx.materials || {});
+    for (var i = 0; i < keys.length; i++) {
+      var mat = ctx.materials[keys[i]];
+      if (mat && mat.retake && String(mat.retake.cellKey || "") === cellKey && Number(mat.retake.n) === 1) return mat;
+    }
+    return null;
+  }
+
+  /* 고른 클립(타임라인 순서) → {segments: [{sourceKey, in, out}]} 또는 {error}(순수). 8개 넘음 · 속도 1이 아닌 클립 · 이웃한 두 고른 클립
+     사이 디졸브(indexes = 타임라인 번호)는 거절. 각 클립 자기 파일 · 자기 in·out 그대로다. */
+  function editFixSegments(clips, indexes) {
+    if (clips.length > EDIT_FIX_SEG_MAX) return { error: EDIT_FIX_SEG_MANY };
+    if (clips.some(function (c) {
+      return editSpeedOf(c) !== 1;
+    })) return { error: EDIT_FIX_SEG_SPEED };
+    for (var k = 0; k + 1 < clips.length; k++) {
+      if (indexes[k + 1] === indexes[k] + 1 && editDissolveOf(clips[k])) return { error: EDIT_FIX_SEG_DISSOLVE };
+    }
+    return { segments: clips.map(function (c) {
+      return { sourceKey: String(c.sourceKey), in: editRound3(c.in), out: editRound3(c.out) };
+    }) };
+  }
+
+  /* segments 길의 고른 컷 대상: 패널 재료 = 그 칸 원본(v1), range = {in 0, out 합}(보기 GET 이 모델 목록을 주도록 — 원본 길이 안), total = 합. */
+  function editFixSegTarget(ctx, clips, indexes) {
+    var cellKey = editFixCellOf(ctx, clips);
+    if (!cellKey) return { error: EDIT_FIX_MIXED };
+    var segs = editFixSegments(clips, indexes);
+    if (segs.error) return { error: segs.error };
+    var base = editFixCellBase(ctx, cellKey) || ctx.materials[clips[0].sourceKey];
+    if (!base.retake || base.retake.can !== true) return { error: base.retake.reason || "이 컷은 AI로 고칠 수 없습니다." };
+    var total = editRound3(segs.segments.reduce(function (sum, s) {
+      return sum + (s.out - s.in);
+    }, 0));
+    var len = editBinSeconds(base);
+    return { mid: String(base.mid || ""), sourceKey: String(clips[0].sourceKey), ids: clips.map(function (c) {
+      return String(c.id);
+    }), range: { in: 0, out: editRound3(len > 0 ? Math.min(total, len) : total) }, names: editFixSelNames(clips, base.label),
+      segments: segs.segments, total: total };
   }
 
   /* 고른 컷으로 패널을 연다. 고른 컷이 있으면 true(원본이 다르거나 고칠 수 없으면 안내 한 줄만 — 패널을 열지 않는다), 없으면 false. */
@@ -13318,7 +13391,8 @@
       editNote(ctx, target.error);
       return true;
     }
-    editFixOpen(ctx, target.mid, target.ids[0], target.range, { ids: target.ids, names: target.names, fromSel: true });
+    editFixOpen(ctx, target.mid, target.ids[0], target.range, { ids: target.ids, names: target.names, fromSel: true, segments: target.segments,
+                                                                 total: target.total });
     return true;
   }
 
@@ -13345,6 +13419,8 @@
       fix.clipIds = target.ids.slice();
       fix.clipId = target.ids[0];
       fix.names = target.names;
+      fix.segments = target.segments || null; // 작업 194
+      fix.total = target.segments ? target.total : 0;
       if (moved) {
         fix.rangeWait = true;
         editFixPaint(ctx, fix, fix.view);
@@ -13443,6 +13519,11 @@
     fix.names = String(s.names || "");
     fix.fromSel = s.fromSel === true;
     fix.selNow = fix.fromSel ? editFixSelKey(ctx) : "";
+    // 작업 194: 같은 칸 여러 클립 — compose · 제출 바디는 in·out 대신 segments(타임라인 순서), 머리 줄은 컷 이름 · 합 초
+    fix.segments = Array.isArray(s.segments) && s.segments.length ? s.segments.map(function (x) {
+      return { sourceKey: String(x.sourceKey), in: Number(x.in), out: Number(x.out) };
+    }) : null;
+    fix.total = fix.segments ? Number(s.total) || 0 : 0;
     fix.compose = false; // 작업 192: 보기 fullScopeAllowed false 면 true(editFixApply) — 프롬프트 준비(compose) 길
     fix.draftId = ""; // 작업 192: 이 패널이 준비한 compose 초안 id · 그때 입력 표시(editFixComposeSig)
     fix.draftSig = "";
@@ -13693,9 +13774,12 @@
     d.extra.disabled = v.canRetake !== true;
   }
 
-  /* 작업 192: 머리 줄 아래 한 줄 — 고칠 컷 이름(컷 a–b · 클립 이름) · 원본 구간 초. */
+  /* 작업 192: 머리 줄 아래 한 줄 — 고칠 컷 이름(컷 a–b · 클립 이름) · 원본 구간 초. 작업 194: segments 면 컷 이름 · 클립 수 · 합 초. */
   function editFixSelInfo(fix) {
     var c = fix.clip;
+    if (fix.segments) {
+      return "고칠 컷: " + (fix.names ? fix.names + " · " : "") + "클립 " + fix.segments.length + "개 · 합 " + editFixSecs(fix.total) + "초";
+    }
     var span = c ? editFixSecs(c.in) + "–" + editFixSecs(c.out) + "초" : "구간을 알 수 없습니다";
     var count = fix.clipIds && fix.clipIds.length > 1 ? " · 클립 " + fix.clipIds.length + "개" : "";
     return "고칠 구간: " + (fix.names ? fix.names + " · " : "") + span + count;
@@ -13932,8 +14016,11 @@
       var ids = editFixIds(fix); // 작업 192: 고른 컷들(여럿이면 모두)
       var oldLabels = labels.concat(versions.map(function (x) { return (ctx.materials[x.sourceKey] || {}).label; }));
       // 작업 192: 결과 영상 버전(videoSource result)이 끼면 재료 초를 그대로 옮긴다(editFixResultSwap — 같은 자리 · 같은 길이)
-      var result = editFixResultUses(ctx.clips, versions, ver);
-      var res = result ? editFixResultSwap(ctx.clips, ids, versions, ver, editFixDurations(ctx, versions), editMinLen(ctx), mat.label || ver.label, oldLabels) :
+      // 작업 194: 여러 클립 조각 버전이 끼면 고른 클립마다 그 조각(editFixSegSwap — 같은 자리 · 같은 길이)
+      var segs = editFixSegUses(ctx.clips, versions, ver);
+      var result = !segs && editFixResultUses(ctx.clips, versions, ver);
+      var res = segs ? editFixSegSwap(ctx.clips, ids, versions, ver, editFixDurations(ctx, versions), editMinLen(ctx), mat.label || ver.label, oldLabels) :
+        result ? editFixResultSwap(ctx.clips, ids, versions, ver, editFixDurations(ctx, versions), editMinLen(ctx), mat.label || ver.label, oldLabels) :
         ranged ? editFixRangeSwap(ctx.clips, ids, versions, v.kind, v.cellSeconds, editFixDurations(ctx, versions), ver,
         editMinLen(ctx), mat.label || ver.label, oldLabels) :
         editSwapSource(ctx.clips, ids, keys, ver.sourceKey, Number(mat.duration), editMinLen(ctx),
@@ -13941,7 +14028,8 @@
       var span = ver.sourceRange ? editFixSecs(ver.sourceRange.in) + "–" + editFixSecs(ver.sourceRange.out) :
         editFixSecs((ver.range || {}).start) + "–" + editFixSecs((ver.range || {}).end);
       if (!res.changed) {
-        editFixNote(fix, res.outside ? "고른 클립이 " + editFixVerName(ver) + " 구간(" + span +
+        editFixNote(fix, segs && res.outside ? "고른 클립이 " + editFixVerName(ver) + "를 만들 때 고른 컷과 달라 바꾸지 않았습니다." :
+          res.outside ? "고른 클립이 " + editFixVerName(ver) + " 구간(" + span +
           "초) 밖이라 바꾸지 않았습니다." : res.skipped ? "이 버전 길이 안에 들어가지 않는 클립이라 바꾸지 않았습니다." :
           "타임라인에 바꿀 이 칸의 클립이 없습니다. [재료에 추가]로 넣어 주세요.");
         return;
@@ -13949,7 +14037,7 @@
       editCommit(ctx, res.clips, {});
       editFixNote(fix, "타임라인 클립 " + res.changed + "개를 " + editFixVerTo(ver) + " 바꿨습니다." +
         (res.skipped ? " 길이가 맞지 않는 " + res.skipped + "개는 그대로 두었습니다." : "") +
-        (result && res.outside ? " 구간 밖 " + res.outside + "개는 그대로 두었습니다." : "") + " 다른 버전의 [바꾸기]로 되돌릴 수 있습니다.");
+        ((result || segs) && res.outside ? " 구간 밖 " + res.outside + "개는 그대로 두었습니다." : "") + " 다른 버전의 [바꾸기]로 되돌릴 수 있습니다.");
     }
     if (Number(mat.duration) > 0) {
       apply();
@@ -14199,6 +14287,10 @@
   function editFixSwapTitle(fix, ver) {
     var r = (ver || {}).range || {};
     var src = (ver || {}).sourceRange; // 작업 192: 결과 영상 버전 — 고른 컷만, 같은 자리 · 같은 길이
+    var pieces = editFixSegInfo(ver); // 작업 194: 여러 클립 조각 버전 — 고른 클립마다 그 조각
+    if (pieces) {
+      return "고른 컷 " + pieces.length + "개를 " + editFixVerTo(ver) + " 바꿉니다(클립마다 이어진 조각, 같은 자리 · 같은 길이 — 이웃 클립은 그대로)";
+    }
     if (src && (ver || {}).videoSource === "result") {
       return (editFixIds(fix) ? "고른 컷" : "타임라인에서 이 구간 안의 클립") + "을 " + editFixVerTo(ver) + " 바꿉니다(원본 " + editFixSecs(src.in) + "–" +
         editFixSecs(src.out) + "초 자리, 같은 자리 · 같은 길이 — 이웃 클립은 그대로)";
@@ -14310,6 +14402,7 @@
   /* 고정 범위 한 줄(compose 길 · 타임라인에서 고른 컷으로 연 패널). */
   function editFixRangeText(fix) {
     var c = fix.clip;
+    if (fix.segments) return "선택한 컷만 고칩니다 (클립 " + fix.segments.length + "개 · 합 " + editFixSecs(fix.total) + "초)"; // 작업 194
     return "선택한 컷 구간만 고칩니다 (" + (c ? editFixSecs(c.in) + "–" + editFixSecs(c.out) + "초" : "구간 모름") + ")";
   }
 
@@ -14552,8 +14645,10 @@
     }
     var row = editFixPlanOf(v, dr.model, "range").row || { id: dr.model, label: dr.modelLabel };
     var c = fix.clip || {};
-    d.draftStatus.textContent = "고칠 프롬프트 — 이전 프롬프트 + 수정 사항 · " + String(row.label || row.id || "") + " · 구간 " + editFixSecs(c.in) + "–" +
-      editFixSecs(c.out) + "초" + (dr.translated === false ? " · 수정 사항을 번역하지 못해 한국어 그대로 넣었습니다" : "");
+    var where = fix.segments ? "고른 컷 " + fix.segments.length + "개 · 합 " + editFixSecs(fix.total) + "초" : "구간 " + editFixSecs(c.in) + "–" +
+      editFixSecs(c.out) + "초"; // 작업 194
+    d.draftStatus.textContent = "고칠 프롬프트 — 이전 프롬프트 + 수정 사항 · " + String(row.label || row.id || "") + " · " + where +
+      (dr.translated === false ? " · 수정 사항을 번역하지 못해 한국어 그대로 넣었습니다" : "");
     var prompt = String(dr.prompt || "");
     var at = editFixChangeLine(prompt, dr);
     clear(d.composed);
@@ -14585,7 +14680,8 @@
       return;
     }
     var extra = String(d.extra.value || "").trim();
-    var body = { requestKo: request, in: fix.clip.in, out: fix.clip.out };
+    // 작업 194: 같은 칸 여러 클립이면 in·out 대신 segments(타임라인 순서)
+    var body = fix.segments ? { requestKo: request, segments: editFixSegCopy(fix.segments) } : { requestKo: request, in: fix.clip.in, out: fix.clip.out };
     if (extra) body.extraKo = extra;
     if (fix.model) body.model = fix.model;
     var sig = editFixComposeSig(fix);
@@ -14622,10 +14718,17 @@
     var next = editFixNextN(v);
     var row = editFixPlanOf(v, dr.model, "range").row || { id: dr.model, label: dr.modelLabel };
     var span = editFixSecs(fix.clip.in) + "–" + editFixSecs(fix.clip.out) + "초";
-    if (!editConfirm("v" + next + "를 " + String(row.label || row.id || "") + "(으)로 선택한 컷 구간(" + span + ")만 다시 만듭니다. 예상 비용 " +
+    var what = fix.segments ? "고른 컷 " + fix.segments.length + "개(합 " + editFixSecs(fix.total) + "초)" : "선택한 컷 구간(" + span + ")"; // 작업 194
+    if (!editConfirm("v" + next + "를 " + String(row.label || row.id || "") + "(으)로 " + what + "만 다시 만듭니다. 예상 비용 " +
       editFixMoney(usd) + ". 원래 결과는 그대로 남습니다.")) return;
     var body = { prompt: String(dr.prompt || ""), requestKo: String(dr.requestKo || ""), extraKo: String(dr.extraKo || ""), confirmUsd: usd,
-                 draftId: String(dr.id || ""), model: String(dr.model || fix.model || ""), scope: "range", in: fix.clip.in, out: fix.clip.out };
+                 draftId: String(dr.id || ""), model: String(dr.model || fix.model || ""), scope: "range" };
+    if (fix.segments) {
+      body.segments = editFixSegCopy(fix.segments);
+    } else {
+      body.in = fix.clip.in;
+      body.out = fix.clip.out;
+    }
     fix.busy = true;
     fix.dom.submit.disabled = true;
     editFixNote(fix, "");
@@ -14653,6 +14756,7 @@
     var a = Number(r.in);
     var b = Number(r.out);
     if (x.videoSource !== "result" || !x.sourceKey || r.in === null || r.out === null || !isFinite(a) || !isFinite(b) || !(b > a)) return null;
+    if (Array.isArray(x.segments) && x.segments.length) return null; // 작업 194: 여러 클립 조각 버전은 editFixSegSwap
     var from = (versions || []).filter(function (y) {
       return y && y.n === x.fromN && y.sourceKey;
     })[0];
@@ -14729,6 +14833,116 @@
       if (newLabel && (!clip.label || (oldLabels || []).indexOf(clip.label) >= 0)) next.label = String(newLabel).slice(0, 40);
       changed += 1;
       return next;
+    });
+    return { clips: out, changed: changed, skipped: skipped, outside: outside };
+  }
+
+  /* ---- 작업 194: 여러 클립 조각(segments) 버전 [바꾸기] ---- */
+
+  function editFixSegCopy(list) {
+    return (list || []).map(function (s) {
+      return { sourceKey: String(s.sourceKey), in: Number(s.in), out: Number(s.out) };
+    });
+  }
+
+  /* 조각 버전 줄 → [{sourceKey, in, out, at, len}](at = 새 버전 파일 안 시작 = 앞 조각 길이 합). 조각 버전이 아니면 null(순수). */
+  function editFixSegInfo(ver) {
+    var x = ver || {};
+    if (x.videoSource !== "result" || !x.sourceKey || !Array.isArray(x.segments) || !x.segments.length) return null;
+    var at = 0;
+    var out = [];
+    for (var i = 0; i < x.segments.length; i++) {
+      var s = x.segments[i] || {};
+      var a = Number(s.in);
+      var b = Number(s.out);
+      if (!s.sourceKey || !isFinite(a) || !isFinite(b) || !(b > a)) return null;
+      out.push({ sourceKey: String(s.sourceKey), in: a, out: b, at: editRound3(at), len: editRound3(b - a) });
+      at += b - a;
+    }
+    return out;
+  }
+
+  /* [바꾸기]에 조각 버전이 끼는가: 새 버전이 조각 버전이거나, 타임라인에 새 버전 파일을 조각으로 쓴 조각 버전 클립이 있다(되돌리기). */
+  function editFixSegUses(clips, versions, ver) {
+    if (editFixSegInfo(ver)) return true;
+    var key = (ver || {}).sourceKey;
+    return (versions || []).some(function (x) {
+      var pieces = editFixSegInfo(x);
+      return !!pieces && pieces.some(function (p) {
+        return p.sourceKey === key;
+      }) && (clips || []).some(function (c) {
+        return c.sourceKey === x.sourceKey;
+      });
+    });
+  }
+
+  /* 조각 버전 [바꾸기](순수). 앞으로: 조각 k 마다 원본 · in · out 이 그 조각과 같은(±EDIT_FIX_SEG_EPS, 속도 1) 클립 하나(ids 가 있으면 그 중)를
+     새 버전 파일의 [at_k, at_k + 길이_k] 로 — 고른 클립마다 이어진 조각이라 같은 자리 · 같은 길이, 이웃 클립은 그대로. 짝이 없는 조각은 outside.
+     되돌리기: 조각 버전 클립 중 한 조각 안에 드는 클립을 그 조각 원본이 새 버전이면 원본 in = 조각 in + (클립 in − at_k)로. 소리 끔 · J/L · 대사
+     타이밍 · 전환 · id 는 그대로, 이름은 116 규칙. 반환 {clips, changed, skipped, outside}. */
+  function editFixSegSwap(clips, ids, versions, newVer, durations, minLen, newLabel, oldLabels) {
+    var nv = newVer || {};
+    var newKey = String(nv.sourceKey || "");
+    var fwd = editFixSegInfo(nv);
+    var dur = Number((durations || {})[newKey]) || 0;
+    var idSet = null;
+    if (ids && ids.length) {
+      idSet = {};
+      ids.forEach(function (id) {
+        idSet[id] = true;
+      });
+    }
+    var out = editCloneClips(clips);
+    var changed = 0;
+    var skipped = 0;
+    var outside = 0;
+    function put(index, na, nb) {
+      var clip = out[index];
+      if (!(nb - na >= editMinSource(minLen, editSpeedOf(clip)) - 1e-9)) {
+        skipped += 1;
+        return;
+      }
+      var next = editCloneClip(clip);
+      next.sourceKey = newKey;
+      next.in = editRound3(na);
+      next.out = editRound3(nb);
+      if (newLabel && (!clip.label || (oldLabels || []).indexOf(clip.label) >= 0)) next.label = String(newLabel).slice(0, 40);
+      out[index] = next;
+      changed += 1;
+    }
+    if (fwd) {
+      var used = {};
+      fwd.forEach(function (p) {
+        var found = -1;
+        for (var i = 0; i < out.length && found < 0; i++) {
+          var c = out[i];
+          if (used[i] || (idSet && !idSet[c.id]) || c.sourceKey !== p.sourceKey || editSpeedOf(c) !== 1) continue;
+          if (Math.abs(Number(c.in) - p.in) <= EDIT_FIX_SEG_EPS && Math.abs(Number(c.out) - p.out) <= EDIT_FIX_SEG_EPS) found = i;
+        }
+        if (found < 0) {
+          outside += 1;
+          return;
+        }
+        used[found] = true;
+        put(found, p.at, dur > 0 ? Math.min(dur, p.at + p.len) : p.at + p.len);
+      });
+      return { clips: out, changed: changed, skipped: skipped, outside: outside };
+    }
+    var infos = {};
+    (versions || []).forEach(function (x) {
+      var pieces = editFixSegInfo(x);
+      if (pieces) infos[x.sourceKey] = pieces;
+    });
+    out.forEach(function (c, i) {
+      var pieces = infos[c.sourceKey];
+      if (!pieces || (idSet && !idSet[c.id])) return;
+      var a = Number(c.in);
+      var b = Number(c.out);
+      var p = pieces.filter(function (q) {
+        return a >= q.at - EDIT_FIX_SEG_EPS && b <= q.at + q.len + EDIT_FIX_SEG_EPS;
+      })[0];
+      if (!p || p.sourceKey !== newKey) return;
+      put(i, Math.max(p.in, p.in + (a - p.at)), Math.min(p.out, p.in + (b - p.at)));
     });
     return { clips: out, changed: changed, skipped: skipped, outside: outside };
   }
