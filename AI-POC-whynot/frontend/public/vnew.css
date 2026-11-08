@@ -5431,10 +5431,28 @@ textarea.vnew-field-input {
 
 .vnew-edit-cutplay-from,
 .vnew-edit-cutplay-only {
+  display: inline-grid;
+  align-items: center;
+  justify-items: center;
   min-height: 34px;
   padding: 0 10px;
   font-size: 13px;
   white-space: nowrap;
+}
+
+/* fix1: 기본 글과 [❚❚ 일시정지]를 버튼 안 한 칸(grid-area 1/1)에 겹친다. 칸 폭 = 둘 중 긴 글이라 재생 중에도 버튼 폭이
+   그대로다(옆 버튼이 누르던 자리에서 밀리지 않는다). 숨은 쪽은 visibility 로만 숨겨 자리는 남고 읽히지 않는다. */
+.vnew-edit-cutplay-idle,
+.vnew-edit-cutplay-pause {
+  grid-area: 1 / 1;
+  min-width: 0;
+}
+
+.vnew-edit-cutplay-from[aria-pressed="true"] .vnew-edit-cutplay-idle,
+.vnew-edit-cutplay-only[aria-pressed="true"] .vnew-edit-cutplay-idle,
+.vnew-edit-cutplay-from:not([aria-pressed="true"]) .vnew-edit-cutplay-pause,
+.vnew-edit-cutplay-only:not([aria-pressed="true"]) .vnew-edit-cutplay-pause {
+  visibility: hidden;
 }
 
 .vnew-edit-cutplay-from[aria-pressed="true"],
