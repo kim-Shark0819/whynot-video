@@ -8875,6 +8875,9 @@
   // 단축키 [ ]·Shift+[ ] 동작 → [끝(edge), 방향](지시서 115): out 앞(줄이기)·out 뒤(늘이기)·in 앞(늘이기)·in 뒤(줄이기)
   var EDIT_NUDGES = { outEarlier: ["out", -1], outLater: ["out", 1], inEarlier: ["in", -1], inLater: ["in", 1] };
   var EDIT_VARIANT_LABEL = { real: "실사", webtoon: "애니(웹툰)" }; // 작업 123: 서버 label("웹툰")보다 이 이름을 먼저 쓴다
+  // 작업 190: 그림체 탭 title. 편집 문서는 그림체마다 따로 저장된다(서버 작업 189, edit-<variant>.json).
+  var EDIT_VARIANT_TIP = { real: "실사 편집본(따로 저장됩니다)", webtoon: "애니(웹툰) 편집본(따로 저장됩니다)" };
+  var EDIT_VARIANT_SAVED = "편집됨"; // 작업 190: 저장된 편집본이 있는 탭의 점(savedVariants) 설명
   var EDIT_SVG_NS = "http://www.w3.org/2000/svg";
   // 눈금 [큰 눈금 간격(초), 작은 눈금 간격(초)]. 큰 눈금 사이가 64px 이상인 첫 간격을 쓴다(editTickStep).
   var EDIT_TICKS = [[1, 0.25], [2, 0.5], [5, 1], [10, 2]];
@@ -9659,6 +9662,8 @@
       mediaQueue: [],
       mediaBusy: false,
       hist: { undo: [], redo: [] },
+      hists: {}, // 작업 190: 그림체별 실행 취소 스택(hist 는 지금 그림체 것). 이 화면 안에서만 — 다시 열면 비어 있다
+      savedVariants: {}, // 작업 190: 그림체별 저장된 편집본이 있는가(GET savedVariants, 저장 성공이면 true)
       rev: 0,
       savedRev: 0,
       saving: false,
@@ -9824,14 +9829,18 @@
       });
   }
 
-  /* 받은 보기를 상태에 넣는다. 실행 취소 스택·저장 차례는 새로 시작한다(재생헤드·확대는 둔다). */
-  function editApplyView(ctx, view) {
+  /* 받은 보기를 상태에 넣는다. 실행 취소 스택·저장 차례는 새로 시작한다(재생헤드·확대는 둔다).
+     작업 190: keepHist(그림체 탭 바꾸기)면 그 그림체가 이 화면에서 쓰던 실행 취소 스택을 되살린다(없으면 빈 스택). */
+  function editApplyView(ctx, view, keepHist) {
     var variant = view.variant === "real" ? "real" : "webtoon";
+    var savedVariants = view.savedVariants && typeof view.savedVariants === "object" ? view.savedVariants : {};
     ctx.variant = variant;
     ctx.variants = Array.isArray(view.variants) ? view.variants : [];
     ctx.clips = editCloneClips((view.doc || {}).clips);
     ctx.etag = String(view.etag || "");
     ctx.saved = view.saved === true;
+    ctx.savedVariants = { real: savedVariants.real === true, webtoon: savedVariants.webtoon === true };
+    if (ctx.saved) ctx.savedVariants[variant] = true;
     ctx.defaults[variant] = editCloneClips(view.defaultClips);
     ctx.limits = view.limits || {};
     ctx.retakeOn = !!(view.retake && view.retake.enabled === true); // 지시서 116
@@ -9845,12 +9854,14 @@
     ctx.exportSig = "";
     if (ctx.saveTimer) window.clearTimeout(ctx.saveTimer);
     ctx.saveTimer = 0;
-    ctx.hist = { undo: [], redo: [] };
+    ctx.hist = (keepHist && ctx.hists[variant]) || { undo: [], redo: [] };
+    ctx.hists[variant] = ctx.hist;
     ctx.rev = 0;
     ctx.savedRev = 0;
     ctx.saveFailed = false;
     ctx.saveAgain = false;
     ctx.sel = -1;
+    ctx.cutPlay = null; // 작업 190: 작업 188 고른 컷 재생 표시도 새 문서에서는 없다
   }
 
   /* 재료(그림체별 목록 + 원본 키별 정보). 두 그림체를 오가도 앞 그림체 재료 주소·길이를 남긴다(실행 취소로 돌아올 때). */
@@ -10819,16 +10830,28 @@
     }
   }
 
+  /* 그림체 탭. 작업 190: 탭 = 그 그림체의 편집본(따로 저장). 지금 탭은 is-on · aria-pressed, 저장된 편집본이 있는 탭은 점(is-saved). */
   function editRenderVariants(ctx) {
     var box = ctx.dom.variantBox;
     if (!box) return;
     clear(box);
     ctx.variants.forEach(function (item) {
       if (!item || !EDIT_VARIANT_LABEL[item.key]) return;
-      var btn = el("button", "vnew-edit-variant" + (item.key === ctx.variant ? " is-on" : ""), EDIT_VARIANT_LABEL[item.key]);
+      var label = EDIT_VARIANT_LABEL[item.key];
+      var on = item.key === ctx.variant;
+      var saved = (ctx.savedVariants || {})[item.key] === true;
+      var btn = el("button", "vnew-edit-variant" + (on ? " is-on" : "") + (saved ? " is-saved" : ""), EDIT_VARIANT_LABEL[item.key]);
       btn.type = "button";
       btn.disabled = item.available !== true;
-      btn.title = item.available === true ? EDIT_VARIANT_LABEL[item.key] + " 영상으로 편집" : "아직 " + EDIT_VARIANT_LABEL[item.key] + " 영상이 없습니다";
+      btn.title = item.available === true ? EDIT_VARIANT_TIP[item.key] : "아직 " + label + " 영상이 없습니다";
+      btn.setAttribute("aria-pressed", on ? "true" : "false");
+      btn.setAttribute("aria-label", label + (saved ? " · " + EDIT_VARIANT_SAVED : ""));
+      if (saved) {
+        var dot = el("span", "vnew-edit-variant-dot", "");
+        dot.setAttribute("aria-hidden", "true");
+        dot.title = EDIT_VARIANT_SAVED;
+        btn.appendChild(dot);
+      }
       btn.addEventListener("click", function () {
         editSwitchVariant(ctx, item.key);
       });
@@ -10964,7 +10987,10 @@
       editEdgePointer(ctx, parts, "out", event);
     });
     abox.addEventListener("click", function () {
-      if (editAlive(ctx) && !ctx.busy) editSelect(ctx, parts.index);
+      if (editAlive(ctx) && !ctx.busy) {
+        editSelect(ctx, parts.index);
+        editSeekClip(ctx, parts.index); // 작업 190: 소리 상자 누르기도 그 컷 시작으로 재생헤드
+      }
     });
     // 작업 188: 두 번 누르기 = 고르고 그 컷 처음부터 재생(끌기 · 끝 다듬기 뒤의 두 번 누르기는 editClipDblClick 이 거른다)
     box.addEventListener("dblclick", function (event) {
@@ -11401,7 +11427,8 @@
     return drag;
   }
 
-  /* 클립 몸통: 누르면 고르기, 끌면 순서 바꾸기(놓을 자리 세로선). */
+  /* 클립 몸통: 누르면 고르기, 끌면 순서 바꾸기(놓을 자리 세로선).
+     작업 190: 움직이지 않고 떼면(끌기 문턱 안 · 취소 아님) 그 컷 시작으로 재생헤드(editSeekClip). 끌기 · 취소는 옮기지 않는다. */
   function editClipPointer(ctx, parts, event) {
     if (!editPointerOk(ctx, event)) return;
     if (event.stopPropagation) event.stopPropagation();
@@ -11417,13 +11444,21 @@
         drop = editDropIndex(ctx.clips, editContentX(ctx, ev), ctx.pps);
         editShowDrop(ctx, drop);
       },
-      end: function (dx, moved) {
+      end: function (dx, moved, cancelled) {
         editShowDrop(ctx, -1);
         parts.box.classList.remove("is-dragging");
+        if (!moved && !cancelled) editSeekClip(ctx, from);
         if (!moved || drop < 0 || drop === from || drop === from + 1) return;
         editCommit(ctx, editMove(ctx.clips, from, drop), { sel: drop > from ? drop - 1 : drop });
       }
     });
+  }
+
+  /* 작업 190: 클립 한 번 누르기 — 그 컷의 타임라인 시작(editStarts(ctx.clips).starts[index])으로 재생헤드를 옮긴다.
+     멈춰 있으면 멈춘 채(재생을 시작하지 않는다), 재생 중이면 그 자리부터 계속 재생한다(editSeek 이 이어 재생). */
+  function editSeekClip(ctx, index) {
+    if (!editAlive(ctx) || ctx.busy || index < 0 || index >= ctx.clips.length) return;
+    editSeek(ctx, editStarts(ctx.clips).starts[index]);
   }
 
   /* 클립 끝 손잡이: in/out 조정(원본 안·0.04초 이상·원본 fps 프레임). 끄는 동안 미리보기가 그 끝 프레임을 보인다.
@@ -12138,7 +12173,6 @@
     var o = opts || {};
     editHistPush(ctx.hist, o.before || editSnapshotOf(ctx.variant, ctx.clips));
     ctx.clips = editTidyFx(clips); // 작업 182: 옮기기·삭제·자르기·늘이기 뒤 J/L 컷·디졸브 자리 규칙 정리
-    if (o.variant) ctx.variant = o.variant;
     if (o.sel !== undefined) ctx.sel = o.sel;
     editChanged(ctx);
   }
@@ -12157,12 +12191,12 @@
     editScheduleSave(ctx);
   }
 
+  /* 작업 190: 스택은 그림체마다 따로라(ctx.hists) 되돌려도 그림체는 바뀌지 않는다. */
   function editUndoRedo(ctx, redo) {
     var current = editSnapshotOf(ctx.variant, ctx.clips);
     var snap = redo ? editRedo(ctx.hist, current) : editUndo(ctx.hist, current);
     if (!snap) return;
     ctx.clips = editCloneClips(snap.clips);
-    ctx.variant = snap.variant;
     ctx.sel = -1;
     editChanged(ctx);
   }
@@ -12269,31 +12303,50 @@
     editTrimPreview(ctx, next, edge, fps);
   }
 
-  /* 그림체 바꾸기(design §5.3): 확인 → GET ?variant= → 그 문서로 바꾸고 저장(실행 취소로 되돌릴 수 있다). */
+  /* 그림체 탭 바꾸기(작업 190). 탭 = 그 그림체의 편집본(서버 작업 189, 그림체마다 따로 저장) — 확인 창도, 지금 문서에 바꿔 넣기도 없다.
+     ① 지금 그림체의 남은 저장을 보내고 끝나기를 기다린다(editSaveFlushed). 실패하면 이 탭에 남고 오류를 보인다(409 는 지금 그림체를
+        다시 불러오는 editFlushSave 가 맡는다). ② GET ?variant= 로 그 그림체의 문서 · etag · 내보내기 · 기록을 받아 그대로 보인다.
+     실행 취소 스택은 그림체마다(ctx.hists)라 이 화면 안에서 돌아오면 되살아난다. 고른 클립 · 고른 컷 재생(188) · 열린 패널은 지운다. */
   function editSwitchVariant(ctx, variant) {
-    if (!editAlive(ctx) || ctx.busy || variant === ctx.variant) return;
-    var label = EDIT_VARIANT_LABEL[variant] || variant;
-    if (!editConfirm("지금 편집을 " + label + " 기본 문서로 바꿉니다. 실행 취소로 되돌릴 수 있습니다.")) return;
+    if (!editAlive(ctx) || ctx.busy || ctx.exporting || variant === ctx.variant || !EDIT_VARIANT_LABEL[variant]) return;
+    var label = EDIT_VARIANT_LABEL[variant];
     editPause(ctx);
+    editFixClose(ctx); // 지시서 116: AI로 고치기 패널
+    editFixPickClose(ctx); // 지시서 119: 테이크·장면 고르기 창
+    editTrClose(ctx); // 작업 182: 전환 메뉴
+    editTightenClose(ctx); // 작업 186: 빈틈 다듬기 확인 칸
+    if (ctx.exportTimer) window.clearTimeout(ctx.exportTimer); // 앞 그림체 내보내기 조회는 멈춘다(새 그림체 화면이 다시 건다)
+    ctx.exportTimer = 0;
     ctx.busy = true;
-    editNote(ctx, label + " 영상을 불러오는 중…");
-    editFetchView(ctx, variant, function () {
-      editNote(ctx, "영상 길이를 읽는 중…");
-    })
+    editShowError(ctx, "");
+    editNote(ctx, label + " 편집본을 불러오는 중…");
+    editSaveFlushed(ctx)
+      .then(
+        function () {
+          return editFetchView(ctx, variant, function () {
+            editNote(ctx, "영상 길이를 읽는 중…");
+          });
+        },
+        function (err) {
+          if (err && !err.handled) err.saveFailed = true;
+          throw err;
+        }
+      )
       .then(function (view) {
         ctx.busy = false;
         if (!editAlive(ctx)) return;
-        editAbsorbMaterials(ctx, view);
-        ctx.defaults[variant] = editCloneClips(view.defaultClips);
-        ctx.limits = view.limits || ctx.limits;
-        ctx.invalidIds = {};
-        editCommit(ctx, editCloneClips((view.doc || {}).clips), { variant: variant, sel: -1 });
+        editApplyView(ctx, view, true);
+        ctx.t = 0;
+        ctx.notice = "";
+        editBuild(ctx);
       })
       .catch(function (err) {
+        if (err && err.handled) return; // 409 EditChanged: 지금 그림체를 다시 불러오는 editLoad 가 화면 · busy 를 맡는다
         ctx.busy = false;
         if (!editAlive(ctx) || (err && err.left)) return;
         editNote(ctx, "");
-        editShowError(ctx, "그림체를 바꾸지 못했습니다: " + errMessage(err));
+        editShowError(ctx, (err && err.saveFailed ? "저장하지 못해 그림체를 바꾸지 않았습니다: " : "그림체를 바꾸지 못했습니다: ") + errMessage(err));
+        editScheduleExportPoll(ctx);
       });
   }
 
@@ -12304,6 +12357,7 @@
     if (!editAlive(ctx) || ctx.busy) return;
     var mat = ctx.materials[sourceKey];
     if (!mat) return;
+    var variant = ctx.variant; // 작업 190: 길이를 재는 동안 탭을 바꾸면 넣지 않는다(재료는 그 그림체 문서에만)
     function place() {
       var duration = Number(mat.duration) || 0;
       var maxClips = editLimit(ctx, "maxClips", 200);
@@ -12353,6 +12407,7 @@
         if (!editAlive(ctx)) return;
         ctx.media[mat.mid] = { status: "done", data: data || {}, at: Date.now() };
         editMediaFacts(ctx, mat.mid, data || {});
+        if (ctx.busy || ctx.variant !== variant) return;
         editNote(ctx, "");
         place();
       })
@@ -12677,16 +12732,21 @@
       return;
     }
     var rev = ctx.rev;
+    var variant = ctx.variant; // 작업 190: 그 그림체 문서에 그 그림체 etag 로(탭 바꾸기는 이 저장이 끝나기를 기다린다)
     ctx.saving = true;
     ctx.saveAgain = false;
     editRenderSave(ctx);
-    api(editPath(ctx), { method: "PUT", body: JSON.stringify(editSaveBody(ctx.etag, ctx.variant, ctx.clips)) })
+    api(editPath(ctx), { method: "PUT", body: JSON.stringify(editSaveBody(ctx.etag, variant, ctx.clips)) })
       .then(function (res) {
         ctx.saving = false;
         ctx.saveFailed = false;
         ctx.etag = String((res && res.etag) || "");
         ctx.saved = true;
         ctx.savedRev = rev;
+        if (ctx.savedVariants[variant] !== true) {
+          ctx.savedVariants[variant] = true; // 작업 190: 탭에 편집됨 점
+          editRenderVariants(ctx);
+        }
         if (ctx.exportState && ctx.exportState.status && ctx.exportState.status !== "none" && ctx.rev > 0) {
           ctx.exportState.matchesDoc = false;
         }
@@ -12706,7 +12766,7 @@
           if (editAlive(ctx)) {
             editPause(ctx);
             editShowWait(ctx, "다른 곳에서 바뀐 편집을 다시 불러오는 중…");
-            editLoad(ctx, "", EDIT_CHANGED_TEXT);
+            editLoad(ctx, variant, EDIT_CHANGED_TEXT); // 작업 190: 같은 그림체를 다시(인자 없으면 서버가 최근 그림체를 고른다)
           }
           return;
         }
@@ -12729,6 +12789,19 @@
     });
   }
 
+  /* 작업 190: 남은 변경(디바운스 · 보내는 중 · 보내지 않은 편집)이 있으면 지금 보내고 끝나기를 기다리는 약속(탭 바꾸기 앞).
+     editEnsureSaved 와 달리 고친 것 없는 기본 문서는 PUT 하지 않는다(탭만 오가도 저장본이 생기지 않게). */
+  function editSaveFlushed(ctx) {
+    return new Promise(function (resolve, reject) {
+      if (!ctx.saving && !ctx.saveTimer && ctx.rev === ctx.savedRev) {
+        resolve();
+        return;
+      }
+      ctx.saveWaiters.push([resolve, reject]);
+      editFlushSave(ctx);
+    });
+  }
+
   /* ---- 내보내기 ---- */
 
   function editExport(ctx) {
@@ -12739,7 +12812,8 @@
     editPause(ctx);
     editEnsureSaved(ctx)
       .then(function () {
-        return api(editPath(ctx) + "/export", { method: "POST", body: JSON.stringify({ etag: ctx.etag }) });
+        // 작업 190: 지금 그림체 문서를 그 그림체 etag 로(서버 작업 189)
+        return api(editPath(ctx) + "/export", { method: "POST", body: JSON.stringify({ etag: ctx.etag, variant: ctx.variant }) });
       })
       .then(function (res) {
         ctx.exporting = false;
@@ -12755,14 +12829,20 @@
         editRenderTools(ctx);
         if (err && err.type === "EditChanged") {
           editShowWait(ctx, "다른 곳에서 바뀐 편집을 다시 불러오는 중…");
-          editLoad(ctx, "", EDIT_CHANGED_TEXT);
+          editLoad(ctx, ctx.variant, EDIT_CHANGED_TEXT); // 작업 190: 같은 그림체를 다시
+          return;
+        }
+        if (err && err.type === "ExportRunning") {
+          // 작업 190: 다른 그림체(또는 다른 문서) 내보내기가 진행 중 — 실패가 아니라 안내 한 줄(서버 문구, 끝난 뒤 다시 누르면 된다)
+          editNote(ctx, errMessage(err));
           return;
         }
         editShowError(ctx, "내보내지 못했습니다: " + errMessage(err));
       });
   }
 
-  /* 내보내기 queued·running 이면 3초마다 GET — 편집 화면은 다시 그리지 않고 아래 상태만 바꾼다(design §5.6). */
+  /* 내보내기 queued·running 이면 3초마다 GET — 편집 화면은 다시 그리지 않고 아래 상태만 바꾼다(design §5.6).
+     작업 190: 내보내기는 그림체마다 따로라, 보낸 뒤 탭을 바꿨으면 늦게 온 앞 그림체 응답은 버린다. */
   function editScheduleExportPoll(ctx) {
     if (ctx.exportTimer) window.clearTimeout(ctx.exportTimer);
     ctx.exportTimer = 0;
@@ -12771,16 +12851,17 @@
     ctx.exportTimer = window.setTimeout(function () {
       ctx.exportTimer = 0;
       if (!editAlive(ctx)) return;
-      api(editPath(ctx) + "?variant=" + encodeURIComponent(ctx.variant))
+      var variant = ctx.variant;
+      api(editPath(ctx) + "?variant=" + encodeURIComponent(variant))
         .then(function (view) {
-          if (!editAlive(ctx)) return;
+          if (!editAlive(ctx) || ctx.variant !== variant || ctx.busy) return;
           ctx.exportState = (view && view.export) || { status: "none" };
           ctx.exportHistory = Array.isArray((view || {}).exportHistory) ? view.exportHistory : [];
           editRenderExport(ctx);
           editScheduleExportPoll(ctx);
         })
         .catch(function (err) {
-          if (!editAlive(ctx)) return;
+          if (!editAlive(ctx) || ctx.variant !== variant || ctx.busy) return;
           // 재료가 없어졌으면(gen 다시 만들기 등) 같은 실패를 되풀이하지 않고 안내로 바꾼다(지시서 115).
           if (editGoneKind(err)) editShowGone(ctx, err);
           else editScheduleExportPoll(ctx);

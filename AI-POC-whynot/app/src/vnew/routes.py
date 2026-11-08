@@ -964,7 +964,7 @@ def create_blueprint(deps: VnewDependencies) -> Blueprint:
 
     # ------------------------------------------------------------ ⑦ 편집(영상 편집 타임라인, 지시서 110)
     #
-    # ⑤ 결과 영상을 클립으로 늘어놓은 편집 문서(gen 마다 1개) 보기·저장·내보내기와 재료 필름스트립·파형. edit.py 가 맡는다.
+    # ⑤ 결과 영상을 클립으로 늘어놓은 편집 문서(gen·그림체마다 1개, 작업 189) 보기·저장·내보내기와 재료 필름스트립·파형. edit.py 가 맡는다.
     # 설정(VNEW_EDIT)이 꺼져 있으면 프로젝트를 보기 전에 404 EditDisabled(새 라우트가 없는 것과 같다).
     # 보기·재료는 읽기 권한, 저장·내보내기는 쓰기 권한(프로젝트 소유자). 저장 경로의 주인은 프로젝트 소유자다.
 
@@ -1021,7 +1021,7 @@ def create_blueprint(deps: VnewDependencies) -> Blueprint:
             edit.require_enabled("vnew.edit.export")
             owner = _project_for(pid, write=True)
             payload = _edit_body("vnew.edit.export")
-            result = edit.start_export(owner, pid, payload.get("etag"))
+            result = edit.start_export(owner, pid, payload.get("etag"), payload.get("variant"))  # 작업 189: variant 없으면 etag 로 고른다
             return jsonify({"ok": True, **result}), 202
         except Exception as exc:  # noqa: BLE001
             return _fail(exc)
