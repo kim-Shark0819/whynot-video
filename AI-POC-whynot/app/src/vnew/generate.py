@@ -341,7 +341,8 @@ def _real_cut_seconds(cut: dict) -> float:
     return max(0.0, float(cut.get("seconds") or 0))
 
 
-def _conform_concat(pieces: list[tuple[bytes, float]], *, hold: bool = False) -> bytes:
+def _conform_concat(pieces: list[tuple[bytes, float]], *, hold: bool = False, size: tuple[int, int] | None = None,
+                    fps: int | None = None) -> bytes:
     """컷마다 같은 형식으로 맞춘 뒤 잇는다(작업 134). pieces = [(mp4, 자를 길이 초 — 0 이하면 그 영상 길이)].
 
     컷마다 stitcher.edit_segment: 0초부터 frames = round(초 × 24)장, -map 0:v:0, 1920x1080(비율 유지·검은 여백), 24fps, yuv420p,
@@ -352,11 +353,12 @@ def _conform_concat(pieces: list[tuple[bytes, float]], *, hold: bool = False) ->
     hold(작업 156, 테이크 조각·테이크 → 최종): 늘 계획 길이로 맞춘다. 짧은 영상은 stitcher.pad_to_seconds 로 마지막 프레임을 계획
     길이까지 잡고(소리는 원본에서, 모자란 곳은 무음), 프레임 수는 누적 시각으로 센다(round(끝 × 24) − 앞까지 프레임) — 조각이 많아도
     합이 계획 합의 ±1프레임 안이다. 끄면(기본, 134 컷 단위 실사) 지금 그대로다.
+    size·fps(작업 193 fix1, ⑦ result 결과를 고칠 재료 크기로): 주면 1920x1080·24 대신 그 값. 없으면 지금 그대로다.
     """
     if not pieces:
         raise stitcher.StitchError("이어 붙일 컷이 없습니다.")
-    fps = REAL_CUT_FPS
-    width, height = REAL_CUT_SIZE
+    fps = int(fps or REAL_CUT_FPS)
+    width, height = size or REAL_CUT_SIZE
     clock = 0.0
     done_frames = 0
     with tempfile.TemporaryDirectory(prefix="vnew-conform-") as workdir:

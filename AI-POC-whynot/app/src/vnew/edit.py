@@ -22,6 +22,8 @@ _spawn_export(작업 181: · _export_dissolve · _export_audio · _export_mix). 
 지시서 116: VNEW_EDIT_RETAKE 가 켜져 있으면 ⑦ AI로 고치기(retake.py)로 다시 만든 버전(v2…)도 재료다 — 그 칸 지금 결과 바로 뒤
 (_all_items, group "retake", 이름 끝 " v{n}"). 꺼져 있으면 _retake_state 가 None 이라 재료·보기가 지시서 115 와 같다.
 지시서 116 보완 10: 소리 없는 버전은 그 칸 v1 의 같은 녹화 시각 소리를 쓴다(_audio_sources — 재료 audioFrom·내보내기 audio_source).
+작업 193 fix1: AI로 고치기 result 버전은 늘 fromKey 의 range.in + 클립 시각 소리(이어진 버전은 원천까지), 원천에 소리가 없으면 무음.
+옛 길 버전은 필름 캐시 파형이 −60 dBFS 아래면 소리 없음으로 본다(_mark_silent).
 작업 181: 클립 audioLead(J 컷)·audioTail(L 컷)·transition(다음 클립으로 디졸브). 셋 다 없는 문서는 181 전과 같은 해시·같은 내보내기 명령이다.
 쓰는 문서의 내보내기는 _fx_plan(프레임·샘플 배치) → 몸통 조각 + 디졸브 경계 조각 잇기, 소리는 클립별 창을 타임라인에서 섞는다.
 작업 185: 클립 audioSlip(대사 타이밍 — 소리 창을 원본에서 옮겨 읽는다, 넷 다 없으면 181 전 경로)과 빈틈 다듬기(sound_ranges — 재료 보기의
@@ -131,6 +133,9 @@ EXPORT_MAX_HEIGHT = 1080
 STRIP_TILE_HEIGHT = 72
 STRIP_MAX_TILES = 120
 PEAKS_PER_SECOND = 20
+# 작업 193 fix1: 옛 길 다시 만든 버전의 소리 트랙이 이 피크(−60 dBFS = 0.001) 아래뿐이면 소리 없음으로 본다(_mark_silent — 필름 캐시 파형).
+# 피크는 소수 3자리로 반올림돼 있어 실제로는 약 −66 dBFS 아래가 걸린다.
+SILENT_PEAK = 0.001
 URL_EXPIRES_S = 3600  # presigned URL 수명(초). 기존 ⑤·⑥ 영상과 같다.
 
 _CLIP_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,40}$")
@@ -654,6 +659,9 @@ def _audio_sources(gen: dict, items: list[dict], meta: dict[str, dict]) -> dict[
     v1 시각 = offset + 버전 시각 × scale, offset = (버전 offset − v1 offset) ÷ v1 scale, scale = 버전 scale ÷ v1 scale.
     구간 버전이고 v1 이 칸과 1:1 이면 offset = range.start, 전체 버전은 0. end = v1 에서 쓸 수 있는 끝(그 뒤는 무음).
     저장값은 읽기만 한다(판정은 읽을 때마다 계산).
+    작업 193 fix1: meta silent True(필름 캐시 파형이 −60 dBFS 아래, _retake_meta)인 옛 길 버전도 소리 없음으로 본다. videoSource result 버전은
+    자기 소리를 늘 버리고 _result_audio(fromKey 의 range.in + 버전 시각, scale 1, end = range.out — fromKey 가 다시 result 버전이거나
+    소리를 대체한 옛 길 버전이면 그 원천까지 따라간다)를 쓴다.
     """
     from . import retake  # noqa: PLC0415 — retake 가 edit 를 import 한다(순환 피함).
 
@@ -661,11 +669,12 @@ def _audio_sources(gen: dict, items: list[dict], meta: dict[str, dict]) -> dict[
     cells = retake._cell_index(gen)  # noqa: SLF001
     out: dict[str, dict] = {}
     for item in items:
-        if item.get("group") != "retake":
+        if item.get("group") != "retake" or item.get("videoSource") == retake.RESULT_SOURCE:
             continue
         own = meta.get(item["sourceKey"]) or {}
         base = current.get(item.get("cellId"))
-        if own.get("hasAudio") is not False or not base:
+        silent = own.get("hasAudio") is False or (own.get("hasAudio") is True and own.get("silent") is True)
+        if not silent or not base:
             continue
         info = meta.get(base["sourceKey"]) or {}
         if info.get("hasAudio") is not True:
@@ -683,6 +692,88 @@ def _audio_sources(gen: dict, items: list[dict], meta: dict[str, dict]) -> dict[
             continue
         out[item["sourceKey"]] = {"sourceKey": base["sourceKey"], "mid": base["mid"], "offset": round(offset, 3),
                                   "scale": round(sc2 / sc1, 6), "end": round(end1, 3)}
+    by_key = {m["sourceKey"]: m for m in items}
+    found: dict[str, dict] = {}
+    for item in items:
+        if item.get("group") == "retake" and item.get("videoSource") == retake.RESULT_SOURCE:
+            source, _why = _result_audio(item, by_key, out, meta)
+            if source:
+                found[item["sourceKey"]] = source
+    out.update(found)
+    return out
+
+
+def _result_audio(item: dict, by_key: dict[str, dict], old: dict[str, dict], meta: dict[str, dict]) -> tuple[dict | None, str]:
+    """작업 193 fix1: videoSource result 버전 하나의 소리 원천. 반환 (원천 {sourceKey, mid, offset, scale, end} | None, 까닭).
+
+    버전 시각 t → fromKey 시각 range.in + t(scale 1), 끝 range.out. fromKey 가 다시 result 버전이면 같은 규칙을 이어 붙이고(순환이면 멈춤),
+    소리를 대체한 옛 길 버전(old = 옛 길 대체 결과)이면 그 대체(offset·scale·end)까지 잇는다. 마지막 원천의 meta hasAudio 가
+    True 면 "ok", False 면 (None, "silent" — 원천에 소리가 없다), 모르면 (None, "unknown"), 구간·fromKey 가 없거나 순환이면 (None, "bad").
+    """
+    from . import retake  # noqa: PLC0415
+
+    offset, scale, end = 0.0, 1.0, math.inf
+    seen = {item["sourceKey"]}
+    node = item
+    source = ""
+    while True:
+        rng = node.get("range") if isinstance(node.get("range"), dict) else {}
+        r_in, r_out = _num(rng.get("in")), _num(rng.get("out"))
+        source = str(node.get("fromKey") or "")
+        if r_in is None or r_out is None or r_in < 0 or r_out <= r_in or not source or source in seen:
+            return None, "bad"
+        offset, end = r_in + offset, min(r_in + end, r_out)
+        seen.add(source)
+        nxt = by_key.get(source)
+        if nxt and nxt.get("group") == "retake" and nxt.get("videoSource") == retake.RESULT_SOURCE:
+            node = nxt
+            continue
+        sub = old.get(source)
+        if sub:  # 옛 길 버전이 그 칸 v1 소리를 쓴다 → 그 v1 까지
+            offset, scale = float(sub["offset"]) + offset * float(sub["scale"]), scale * float(sub["scale"])
+            end = min(float(sub["offset"]) + end * float(sub["scale"]), float(sub["end"]))
+            source = str(sub["sourceKey"])
+        break
+    has_audio = (meta.get(source) or {}).get("hasAudio")
+    if has_audio is not True:
+        return None, "silent" if has_audio is False else "unknown"
+    if offset >= end - MIN_CLIP_S:
+        return None, "silent"
+    return {"sourceKey": source, "mid": media_id(source), "offset": round(offset, 3), "scale": round(scale, 6),
+            "end": round(end, 3)}, "ok"
+
+
+def _result_chain(items: list[dict], keys) -> list[str]:
+    """작업 193 fix1: keys 중 videoSource result 버전에서 fromKey 를 따라간 키(자기 제외, 처음 나온 순서, 순환 멈춤)."""
+    from . import retake  # noqa: PLC0415
+
+    by_key = {m["sourceKey"]: m for m in items}
+    out: list[str] = []
+    for key in keys:
+        node, seen = by_key.get(key), {key}
+        while node and node.get("group") == "retake" and node.get("videoSource") == retake.RESULT_SOURCE:
+            nxt = str(node.get("fromKey") or "")
+            if not nxt or nxt in seen:
+                break
+            seen.add(nxt)
+            if nxt not in out:
+                out.append(nxt)
+            node = by_key.get(nxt)
+    return out
+
+
+def _result_mutes(items: list[dict], meta: dict[str, dict], sources: dict[str, dict]) -> set[str]:
+    """작업 193 fix1: 소리 원천에 소리가 없는(meta hasAudio False) result 버전 키 — 자기(v2v) 소리를 쓰지 않고 무음으로 둔다.
+    원천을 모르면(meta 없음) 넣지 않는다(보기는 캐시만 보므로 판정을 미룬다 — 내보내기는 재고 나서 본다)."""
+    from . import retake  # noqa: PLC0415
+
+    by_key = {m["sourceKey"]: m for m in items}
+    old = {k: v for k, v in sources.items() if (by_key.get(k) or {}).get("videoSource") != retake.RESULT_SOURCE}
+    out: set[str] = set()
+    for item in items:
+        if item.get("group") == "retake" and item.get("videoSource") == retake.RESULT_SOURCE and item["sourceKey"] not in sources:
+            if _result_audio(item, by_key, old, meta)[1] == "silent":
+                out.add(item["sourceKey"])
     return out
 
 
@@ -697,20 +788,56 @@ def _clip_audio(clip: dict, source: dict | None) -> tuple[float, float] | None:
     return round(start, 3), round(end, 3)
 
 
-def _retake_meta(owner: str, pid: str, gen_id: str, items: list[dict], meta: dict[str, dict], *, probe: bool) -> dict[str, dict]:
-    """_audio_sources 에 넘길 meta: 버전과 그 칸 v1 중 meta 에 없는 것을 채운다(probe 면 _ensure_meta, 아니면 길이 캐시만)."""
+def _retake_meta(owner: str, pid: str, gen_id: str, items: list[dict], meta: dict[str, dict], *, probe: bool,
+                 silent_keys=None) -> dict[str, dict]:
+    """_audio_sources 에 넘길 meta: 버전과 그 칸 v1 중 meta 에 없는 것을 채운다(probe 면 _ensure_meta, 아니면 길이 캐시만).
+    작업 193 fix1: result 버전이 따라가는 fromKey(_result_chain)도 채운다. silent_keys 를 주면 그 키와 fromKey 중 옛 길 버전(소리 있음)에
+    필름 캐시(film.json — 이미 만든 파형, 새로 재지 않음)가 있으면 silent(피크 최대 < SILENT_PEAK)를 단다."""
     cells = {m.get("cellId") for m in items if m.get("group") == "retake"}
-    keys = [m["sourceKey"] for m in items if m.get("cellId") in cells and m.get("group") in ("current", "retake")
-            and not isinstance((meta.get(m["sourceKey"]) or {}).get("hasAudio"), bool)]
-    if not keys:
+    chain = _result_chain(items, [m["sourceKey"] for m in items if m.get("group") == "retake"])
+    want = [m["sourceKey"] for m in items if m.get("cellId") in cells and m.get("group") in ("current", "retake")] + chain
+    keys = [k for k in dict.fromkeys(want) if not isinstance((meta.get(k) or {}).get("hasAudio"), bool)]
+    if keys:
+        if probe:
+            extra, _ = _ensure_meta(owner, pid, gen_id, keys)
+        else:
+            cached = _read_index(owner, pid, gen_id)
+            extra = {k: cached[media_id(k)] for k in keys
+                     if isinstance(cached.get(media_id(k)), dict) and cached[media_id(k)].get("sourceKey") == k}
+        meta = {**extra, **{k: v for k, v in meta.items() if isinstance((v or {}).get("hasAudio"), bool) or k not in extra}}
+    if silent_keys:
+        meta = _mark_silent(owner, pid, gen_id, items, meta, set(silent_keys) | set(chain))
+    return meta
+
+
+def _peaks_silent(values) -> bool | None:
+    """작업 193 fix1: 파형 피크(0~1, 소수 3자리)가 모두 SILENT_PEAK(−60 dBFS) 아래인가. 숫자가 없으면 None(모름)."""
+    numbers = [float(v) for v in values if not isinstance(v, bool) and isinstance(v, (int, float))] if isinstance(values, list) else []
+    return max(numbers) < SILENT_PEAK if numbers else None
+
+
+def _mark_silent(owner: str, pid: str, gen_id: str, items: list[dict], meta: dict[str, dict], keys: set) -> dict[str, dict]:
+    """작업 193 fix1: keys 중 옛 길 다시 만든 버전(소리 트랙 있음)의 필름 캐시 파형으로 meta silent 를 단 사본. 캐시가 없으면 그대로."""
+    from . import retake  # noqa: PLC0415
+
+    targets = [m["sourceKey"] for m in items if m.get("group") == "retake" and m.get("videoSource") != retake.RESULT_SOURCE
+               and m["sourceKey"] in keys and (meta.get(m["sourceKey"]) or {}).get("hasAudio") is True
+               and "silent" not in (meta.get(m["sourceKey"]) or {})]
+    if not targets:
         return meta
-    if probe:
-        extra, _ = _ensure_meta(owner, pid, gen_id, keys)
-    else:
-        cached = _read_index(owner, pid, gen_id)
-        extra = {k: cached[media_id(k)] for k in keys
-                 if isinstance(cached.get(media_id(k)), dict) and cached[media_id(k)].get("sourceKey") == k}
-    return {**extra, **{k: v for k, v in meta.items() if isinstance((v or {}).get("hasAudio"), bool) or k not in extra}}
+    out = dict(meta)
+    for key in dict.fromkeys(targets):
+        try:
+            data, _ = _read_json(film_key(owner, pid, gen_id, media_id(key)))
+        except Exception as exc:  # noqa: BLE001 — 캐시라 못 읽으면 지금 판정(소리 있음) 그대로
+            log.warning("vnew.edit.silent_read_failed pid=%s mid=%s err=%s", pid, media_id(key), type(exc).__name__)
+            continue
+        if not _film_ok(data, key) or not data.get("hasAudio"):
+            continue
+        silent = _peaks_silent((data.get("peaks") or {}).get("values"))
+        if silent is not None:
+            out[key] = {**out[key], "silent": silent}
+    return out
 
 
 def _number_takes(gen: dict, variant: str, items: list[dict]) -> None:
@@ -1411,10 +1538,16 @@ def edit_view(owner: str, pid: str, variant: str | None = None) -> dict:
         for item, out in zip(items, materials):
             out["retake"] = retake.material_flag(chosen, item, gen, retakes, plan=plan, duration=out.get("duration"))  # 지시서 119: 컷 고르기
         # 지시서 116 보완 10: 소리 없는 버전은 그 칸 v1 소리를 쓴다(내보내기와 같은 _audio_sources). 새로 재지 않고 길이 캐시만 본다.
-        audio_from = _audio_sources(gen, items, _retake_meta(owner, pid, gen_id, items, meta, probe=False))
+        # 작업 193 fix1: result 버전은 늘 fromKey 소리(원천에 소리가 없으면 hasAudio false), 타임라인 클립의 옛 길 버전은 무음 판정(필름 캐시).
+        used = {c.get("sourceKey") for c in out_doc["clips"] if isinstance(c, dict)}
+        r_meta = _retake_meta(owner, pid, gen_id, items, meta, probe=False, silent_keys=used)
+        audio_from = _audio_sources(gen, items, r_meta)
+        mutes = _result_mutes(items, r_meta, audio_from)
         for item, out in zip(items, materials):
             if item["sourceKey"] in audio_from:
                 out["audioFrom"] = dict(audio_from[item["sourceKey"]])
+            elif item["sourceKey"] in mutes:
+                out["hasAudio"] = False
     view = {
         "enabled": True,
         "genId": gen_id,
@@ -2090,23 +2223,29 @@ _STAGE_MESSAGES = {
 }
 
 
-def _export_audio_from(owner: str, pid: str, gen_id: str, variant: str, clips: list[dict], meta: dict[str, dict]) -> dict[str, dict]:
-    """내보내기 클립 원본 중 소리를 v1 에서 가져올 것(_audio_sources, 지시서 116 보완 10). 소리 없는 원본이 없으면 아무것도 읽지 않는다.
+def _export_audio_from(owner: str, pid: str, gen_id: str, variant: str, clips: list[dict], meta: dict[str, dict]) -> tuple[dict[str, dict], set[str]]:
+    """내보내기 클립 원본 중 소리를 v1 에서 가져올 것(_audio_sources, 지시서 116 보완 10). 반환 (원본 키 → 원천, 무음으로 둘 키).
 
     gen 이 바뀌었으면(내보내기를 시작한 gen 이 아님) 대체하지 않는다. v1 길이·소리는 _ensure_meta(캐시 먼저)로 읽는다.
+    작업 193 fix1: result 버전은 소리가 있어도 fromKey 소리(_result_audio)라 늘 AI로 고치기 상태를 읽는다. 원천에 소리가 없는 result 버전은
+    무음 키(_result_mutes — v2v 결과 소리를 쓰지 않는다). 옛 길 버전은 필름 캐시 파형이 −60 dBFS 아래면 소리 없음으로 본다.
     """
     used = {c["sourceKey"] for c in clips if not c.get("muted")}
-    if variant not in VARIANTS or not any((meta.get(k) or {}).get("hasAudio") is False for k in used):
-        return {}
+    if variant not in VARIANTS or not used:
+        return {}, set()
     retakes = _retake_state(owner, pid, gen_id)
     if retakes is None:
-        return {}
+        return {}, set()
     _plan, gen, now_gen = _load_gen(owner, pid)
     if now_gen != gen_id:
-        return {}
-    items = [m for m in _all_items(gen, variant, retakes) if m.get("group") == "current" or m["sourceKey"] in used]
-    found = _audio_sources(gen, items, _retake_meta(owner, pid, gen_id, items, meta, probe=True))
-    return {k: v for k, v in found.items() if k in used}
+        return {}, set()
+    every = _all_items(gen, variant, retakes)
+    chain = set(_result_chain(every, used))
+    items = [m for m in every if m.get("group") == "current" or m["sourceKey"] in used or m["sourceKey"] in chain]
+    r_meta = _retake_meta(owner, pid, gen_id, items, meta, probe=True, silent_keys=used)
+    found = _audio_sources(gen, items, r_meta)
+    mutes = _result_mutes(items, r_meta, found)
+    return {k: v for k, v in found.items() if k in used}, {k for k in mutes if k in used}
 
 
 def run_export(owner: str, pid: str, gen_id: str, n: int, claim: str) -> None:
@@ -2140,7 +2279,9 @@ def run_export(owner: str, pid: str, gen_id: str, n: int, claim: str) -> None:
             raise VpocError("vnew.edit.export", "EmptyTimeline", "타임라인에 클립이 없습니다.", 409)
         width, height, fps = _export_geometry(meta[clips[0]["sourceKey"]])
         frames = _clip_frames(clips, fps)
-        audio_from = _export_audio_from(owner, pid, gen_id, str(current.get("variant") or ""), clips, meta)
+        audio_from, mutes = _export_audio_from(owner, pid, gen_id, str(current.get("variant") or ""), clips, meta)
+        if mutes:  # 작업 193 fix1: 원천에 소리가 없는 result 버전 클립은 v2v 소리 대신 무음(이 실행 안에서만 — 문서는 그대로)
+            clips = [dict(c, muted=True) if c["sourceKey"] in mutes else c for c in clips]
         alt = [_clip_audio(c, audio_from.get(c["sourceKey"])) for c in clips]  # 지시서 116 보완 10: 클립별 대체 소리 (v1 시작, 끝)
         with_audio = any(not c.get("muted") and ((meta.get(c["sourceKey"]) or {}).get("hasAudio") or alt[i] is not None)
                          for i, c in enumerate(clips))

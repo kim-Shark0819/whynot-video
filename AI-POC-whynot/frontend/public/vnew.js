@@ -14297,22 +14297,40 @@
     label.appendChild(span);
     label.radio = input;
     label.text = span;
-    parent.appendChild(label);
+    if (parent) parent.appendChild(label); // 작업 193: 뼈대에서는 붙이지 않는다(editFixScopeAttach — 옛 길 보기가 온 뒤)
     return label;
   }
 
-  /* 「설정」 뼈대(한 번): 범위 라디오 두 개·영상 모델 상자·정보 줄·뺀 모델 한 줄. */
+  /* 작업 193: 범위 라디오 두 개를 범위 상자에 붙인다(옛 길 보기가 온 뒤 처음 그릴 때만). 보기 전 뼈대·compose 길에는 라디오가 없다. */
+  function editFixScopeAttach(d) {
+    if (!d.scopeFull.parentNode) d.scope.appendChild(d.scopeFull);
+    if (!d.scopeRange.parentNode) d.scope.appendChild(d.scopeRange);
+  }
+
+  /* 고정 범위 한 줄(compose 길 · 타임라인에서 고른 컷으로 연 패널). */
+  function editFixRangeText(fix) {
+    var c = fix.clip;
+    return "선택한 컷 구간만 고칩니다 (" + (c ? editFixSecs(c.in) + "–" + editFixSecs(c.out) + "초" : "구간 모름") + ")";
+  }
+
+  /* 「설정」 뼈대(한 번): 범위 상자(빈 채 숨김 — 라디오는 보기가 온 뒤 editFixScopeAttach)·고정 범위 한 줄·영상 모델 상자·정보 줄·뺀 모델 한 줄.
+     작업 193: 보기가 오기 전에는 「원본 칸 전체 / 이 구간만 다시 만들기」를 그리지 않는다. 고른 컷으로 열었으면 처음부터 고정 한 줄. */
   function editFixBuildSetup(ctx, fix, parent) {
     var d = fix.dom;
     d.setup = el("div", "vnew-edit-fix-setup");
     d.scope = el("div", "vnew-edit-fix-scope");
     d.scope.setAttribute("role", "radiogroup");
     d.scope.setAttribute("aria-label", "다시 만들 범위");
-    d.scopeFull = editFixScopeItem(ctx, fix, d.scope, "full", "원본 칸 전체");
-    d.scopeRange = editFixScopeItem(ctx, fix, d.scope, "range", "이 구간만 다시 만들기");
+    d.scope.style.display = "none";
+    d.scopeFull = editFixScopeItem(ctx, fix, null, "full", "원본 칸 전체");
+    d.scopeRange = editFixScopeItem(ctx, fix, null, "range", "이 구간만 다시 만들기");
     d.setup.appendChild(d.scope);
     d.rangeLine = el("p", "vnew-edit-fix-range-line", ""); // 작업 192: compose 길 = 범위 라디오 대신 고정 한 줄(editFixPaintSetup)
     d.rangeLine.style.display = "none";
+    if (fix.fromSel && fix.clip) {
+      d.rangeLine.textContent = editFixRangeText(fix);
+      d.rangeLine.style.display = "";
+    }
     d.setup.appendChild(d.rangeLine);
     d.scopeNote = el("p", "vnew-hint vnew-edit-fix-scope-note", "");
     d.scopeNote.style.display = "none";
@@ -14343,7 +14361,12 @@
     }
     var scopes = Array.isArray(v.scopes) && v.scopes.length ? v.scopes : ["full"];
     var hasRange = !!fix.clip || scopes.indexOf("range") >= 0;
-    d.scope.style.display = hasRange ? "" : "none";
+    // 작업 193: 타임라인에서 고른 컷으로 열었고 구간을 받았으면 라디오 없이 고정 한 줄(옛 길 보기여도). 아니면 라디오를 이때 붙인다.
+    var fixed = fix.fromSel && fix.scope === "range" && !!v.range;
+    d.rangeLine.textContent = fixed ? editFixRangeText(fix) : "";
+    d.rangeLine.style.display = fixed ? "" : "none";
+    if (!fixed) editFixScopeAttach(d);
+    d.scope.style.display = hasRange && !fixed ? "" : "none";
     d.scopeFull.style.display = scopes.indexOf("full") >= 0 ? "" : "none";
     d.scopeFull.radio.checked = fix.scope !== "range";
     d.scopeRange.radio.checked = fix.scope === "range";
@@ -14432,8 +14455,7 @@
     var v = fix.view || {};
     var d = fix.dom;
     if (d.scope.parentNode) d.scope.parentNode.removeChild(d.scope); // 「원본 칸 전체」 라디오는 없다
-    var c = fix.clip;
-    d.rangeLine.textContent = "선택한 컷 구간만 고칩니다 (" + (c ? editFixSecs(c.in) + "–" + editFixSecs(c.out) + "초" : "구간 모름") + ")";
+    d.rangeLine.textContent = editFixRangeText(fix);
     d.rangeLine.style.display = "";
     d.scopeNote.textContent = fix.scopeNote || "";
     d.scopeNote.style.display = fix.scopeNote ? "" : "none";

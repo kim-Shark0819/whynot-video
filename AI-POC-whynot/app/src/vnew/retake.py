@@ -31,6 +31,10 @@ image-to-video 이고 같은 경로(KCUT_PATH)는 generate.resubmit_kling_cut(�
 원본 칸 전체(scope full)는 FULL_SCOPE_ALLOWED(기본 False) 뒤로 숨기고 미리보기·제출이 400 RetakeBadRange 로 거절한다. 지난 버전·기록은 그대로 읽는다.
 작업 191 fix1: compose 초안·그 초안으로 낸 버전은 videoSource "result" — @Video1 = 고칠 재료 영상(타임라인 클립이 재생하는 파일) 자체를 그 파일 초
 in–out 으로 자른 것(generate.resubmit_model source_key·source_span), 길이·견적 = out − in. 표시가 없는 옛 초안·버전은 프리비즈 녹화 그대로다.
+작업 193: result 의 이전 프롬프트 부분에서 @Video1 이 든 문장(프리비즈·마네킹 설명)을 빼고(_result_context — 다른 참고 표시가 함께 든 문장은
+@Video1 조각만), 같은 줄·참고 표시가 든 줄의 같은 문장은 처음 것만 둔다. @Video1 정의는 머리의 COMPOSE_RESULT_VIDEO_LINE 한 줄뿐이다.
+작업 193 fix1: result EDIT 줄은 바꿀 것을 구도·카메라가 바뀌어도 끝까지 적용하라고 쓴다(_result_edit_line). result 버전의 소리는 늘 fromKey 의
+range.in~out(edit._audio_sources — material_items 가 videoSource·fromKey 를 넘긴다). 조회·되살리기 완료 때 결과를 fromKey 크기·fps 로 맞춘다(_post_scale).
 """
 
 from __future__ import annotations
@@ -184,12 +188,22 @@ COMPOSE_TAGS_NOTE = "If a line above uses a reference tag differently, follow th
 # 작업 191 fix1: compose 초안·그 초안으로 낸 버전은 videoSource "result" — @Video1 = 고칠 재료 영상(target sourceKey) 자체의 고른 구간(in·out,
 # 그 파일 초). 표시가 없는 옛 초안·버전은 지금처럼 프리비즈 녹화. 프롬프트는 "Edit @Video1 … change only" 를 맨 앞에, 이전 프롬프트는 참고(CONTEXT)로.
 RESULT_SOURCE = "result"
-COMPOSE_RESULT_EDIT_HEAD = ("EDIT: Edit @Video1. Keep everything identical to @Video1 (characters, outfits, art style, lighting, background, "
-                            "camera, composition, motion, timing); change only: ")
+# 작업 193 fix1: EDIT 줄 = HEAD + 바꿀 것(번역 + 한국어 원문) + "." + KEEP. 바꿀 것은 구도·카메라가 바뀌어도 끝까지 적용하고, 그 밖만 @Video1 그대로.
+# 옛 머리(_OLD, 191 fix1~193)는 앞선 compose 프롬프트의 EDIT 를 EARLIER EDIT 로 바꿀 때만 알아본다.
+COMPOSE_RESULT_EDIT_HEAD = "EDIT: Edit @Video1. Apply this change fully, even where it changes framing, camera or composition: "
+COMPOSE_RESULT_EDIT_KEEP = (" Keep everything the change does not touch identical to @Video1 (characters, faces, outfits, art style, lighting, "
+                            "background, the moments before and after the change).")
+COMPOSE_RESULT_EDIT_HEAD_OLD = ("EDIT: Edit @Video1. Keep everything identical to @Video1 (characters, outfits, art style, lighting, background, "
+                                "camera, composition, motion, timing); change only: ")
 COMPOSE_RESULT_RANGE_HEAD = "RANGE: @Video1 is "
 COMPOSE_CONTEXT_LINE = ("CONTEXT: The prompt that made @Video1 follows, for reference only (tags and people); where it differs from "
                         "@Video1, follow @Video1.")
-COMPOSE_TAGS_NOTE_RESULT = "If a line below uses a reference tag differently, follow the line that defines the tag."
+# 작업 193: EDIT 꼬리(정의 줄을 바꿨을 때) — @Video1 은 머리에서만 정의한다. 옛 꼬리(_OLD)는 앞선 compose 줄(EARLIER EDIT)에서 지운다.
+COMPOSE_TAGS_NOTE_RESULT = "Reference tags (@Image N / @Element N) are defined below; @Video1 is defined only here."
+COMPOSE_TAGS_NOTE_RESULT_OLD = "If a line below uses a reference tag differently, follow the line that defines the tag."
+COMPOSE_RESULT_VIDEO_LINE = "@Video1 is the current result video of this shot (not a previz): keep it as the base."
+RESULT_DEDUPE_MIN_CHARS = 60  # 작업 193: 참고 표시가 든 줄에서 참고 표시가 없는 문장은 이 길이 이상만 겹침으로 뺀다(짧은 지시는 둔다)
+_VIDEO1_RE = re.compile(r"@Video1(?!\d)")
 COMPOSE_LABELS = ("EDIT", "EARLIER EDIT", "RANGE", "EXTRA", "REFERENCES", "CONTEXT")
 TRANSLATE_SYSTEM = (
     "Translate the Korean change request in <user_request> into ONE short English sentence (at most 25 words) for an AI video "
@@ -715,8 +729,9 @@ def run_recover(owner: str, pid: str, gen_id: str, key: str, n: int, claim: str)
             log.info("vnew.retake.recover_pending pid=%s gen=%s cell=%s n=%d status=%s", pid, gen_id, key, n, status or "-")
             return
         output_key = generate._find_output_key(prefix, arn)  # noqa: SLF001
+        output_key, scaled = _post_scale(owner, pid, gen_id, key, n, version, output_key)  # 작업 193 fix1
         _finish(owner, pid, gen_id, key, n, claim, statuses=("failed",), status="completed", outputKey=output_key, error="",
-                failureKind="", timedOut=False)
+                failureKind="", timedOut=False, **scaled)
         log_result(owner, pid, gen_id, key, arn, "completed", output_key=output_key, recovered=True)
         log.info("vnew.retake.recovered pid=%s gen=%s cell=%s n=%d mid=%s", pid, gen_id, key, n, edit.media_id(output_key))
     except _ClaimLost:
@@ -813,9 +828,12 @@ def material_items(gen: dict, variant: str, state: dict) -> list[dict]:
             number = _int_or_none(version.get("n"))
             if version.get("status") != "completed" or not source or not number:
                 continue
-            out.append({"sourceKey": source, "mid": edit.media_id(source), "kind": cell_kind, "group": "retake", "index": index,
-                        "cellId": cell_id, "cutIds": _version_cuts(version) or _cut_ids(cell), "trimTo": _version_trim(version) or trim_to,
-                        "run": None, "version": number, "range": _valid_range(version.get("range"))})
+            item = {"sourceKey": source, "mid": edit.media_id(source), "kind": cell_kind, "group": "retake", "index": index,
+                    "cellId": cell_id, "cutIds": _version_cuts(version) or _cut_ids(cell), "trimTo": _version_trim(version) or trim_to,
+                    "run": None, "version": number, "range": _valid_range(version.get("range"))}
+            if version.get("videoSource") == RESULT_SOURCE:  # 작업 193 fix1: 소리 = fromKey 의 range.in~out(edit._audio_sources)
+                item.update(videoSource=RESULT_SOURCE, fromKey=str(version.get("fromKey") or ""))
+            out.append(item)
     return out
 
 
@@ -1732,6 +1750,7 @@ def submit(owner: str, pid: str, mid: str, payload) -> dict:
             "timedOut": False, "recoverAt": "",  # 보완 4: 같은 번호로 다시 내면 되살리기 대상이 아니다
         })
         version.pop("videoSource", None)  # 작업 191 fix1: 같은 번호로 다시 낼 때 지난 표시를 남기지 않는다(pick 이 다시 단다)
+        version.pop("postScaled", None)  # 작업 193 fix1: 지난 시도의 크기 맞춤 기록도(완료 때 다시 단다)
         version.update(pick["version"])  # 보완 1: 고른 모델·범위·구간·형식·길이
         box.update(n=version["n"], attempt=attempt)
         return data
@@ -1843,7 +1862,8 @@ def _poll_until_done(owner: str, pid: str, gen_id: str, key: str, n: int, claim:
             continue
         if status == "Completed":
             output_key = generate._find_output_key(prefix, arn)  # noqa: SLF001
-            _finish(owner, pid, gen_id, key, n, claim, status="completed", outputKey=output_key, error="")
+            output_key, scaled = _post_scale(owner, pid, gen_id, key, n, version, output_key)  # 작업 193 fix1: result 는 원본 크기·fps 로
+            _finish(owner, pid, gen_id, key, n, claim, status="completed", outputKey=output_key, error="", **scaled)
             log_result(owner, pid, gen_id, key, arn, "completed", output_key=output_key)
             log.info("vnew.retake.done pid=%s gen=%s cell=%s n=%d mid=%s", pid, gen_id, key, n, edit.media_id(output_key))
             return
@@ -1853,6 +1873,84 @@ def _poll_until_done(owner: str, pid: str, gen_id: str, key: str, n: int, claim:
         log_result(owner, pid, gen_id, key, arn, "failed", error=message)
         log.warning("vnew.retake.job_failed pid=%s gen=%s cell=%s n=%d kind=%s", pid, gen_id, key, n, kind or "-")
         return
+
+
+# ---------------------------------------------------------------- 작업 193 fix1: result 결과를 고칠 재료 영상의 크기·fps 로
+#
+# v2v 모델(Wan 3.0 등)은 480p·30fps 로 돌려주는데 고칠 재료(테이크 merged.mp4)는 1920x1080·24fps 다. ⑤ 테이크 조각을 이을 때와 같은 단계
+# (generate._conform_concat → stitcher.edit_segment: fps · 비율 유지 scale + 검은 여백 · yuv420p · x264 crf 20, 소리 48k → AAC)를 그 재료
+# 크기·fps 로 한 번 거친다. 길이는 그대로(프레임 = round(길이 × fps)). 유료 호출 0. 실패하면 받은 결과를 그대로 둔다(버전은 completed).
+POST_SCALE_FPS_TOL = 0.05
+
+
+def _scale_file(source_path: str, output_path: str, *, width: int, height: int, fps: int) -> None:
+    """외부 호출 래퍼(검사가 가짜로 바꾼다): 테이크 조각 잇기와 같은 단계(_conform_concat)로 width×height·fps 로 다시 인코딩한다."""
+    with open(source_path, "rb") as handle:
+        data = handle.read()
+    scaled = generate._conform_concat([(data, 0.0)], size=(int(width), int(height)), fps=int(fps))  # noqa: SLF001
+    del data
+    with open(output_path, "wb") as handle:
+        handle.write(scaled)
+
+
+def _scaled_key(output_key: str, width: int, height: int, fps: int) -> str:
+    """크기 맞춘 결과 키: 받은 결과 옆(같은 접두사) output-<W>x<H>-<fps>fps.mp4."""
+    stem = output_key[:-4] if output_key.endswith(".mp4") else output_key
+    return f"{stem}-{int(width)}x{int(height)}-{int(fps)}fps.mp4"
+
+
+def _geometry(info: dict | None) -> tuple[int, int, float]:
+    info = info or {}
+    return int(info.get("width") or 0), int(info.get("height") or 0), float(_num_in(info.get("fps")) or 0.0)
+
+
+def _post_scale(owner: str, pid: str, gen_id: str, key: str, n: int, version: dict, output_key: str) -> tuple[str, dict]:
+    """videoSource result 버전의 결과를 고칠 재료(fromKey) 크기·fps 로 맞춘다. 반환 (버전 outputKey, _finish 에 더할 것).
+
+    옛 길·키 없음 → (output_key, {}). 재료 크기·fps 를 모름(edit 길이 캐시 · 재기)·편집 fps 밖·홀수 크기·이미 같음 → 그대로.
+    맞추면 (맞춘 키, {"postScaled": {"from": "854x480@30", "to": "1920x1080@24"}}). 예외는 경고만(받은 결과를 쓴다)."""
+    if (version or {}).get("videoSource") != RESULT_SOURCE or not output_key:
+        return output_key, {}
+    from_key = str(version.get("fromKey") or "")
+    stage = "source"
+    started = time.monotonic()
+    try:
+        meta, _ = edit._ensure_meta(owner, pid, gen_id, [from_key]) if from_key else ({}, False)  # noqa: SLF001
+        width, height, fps = _geometry(meta.get(from_key))
+        target_fps = int(round(fps))
+        if (width < 2 or height < 2 or width % 2 or height % 2 or target_fps not in stitcher.EDIT_FPS_CHOICES
+                or abs(fps - target_fps) > POST_SCALE_FPS_TOL):
+            log.info("vnew.retake.post_scale_skip pid=%s gen=%s cell=%s n=%d reason=source size=%dx%d fps=%g", pid, gen_id, key, n,
+                     width, height, fps)
+            return output_key, {}
+        with tempfile.TemporaryDirectory(prefix="vnew-retake-scale-") as workdir:
+            stage = "download"
+            raw = os.path.join(workdir, "raw.mp4")
+            edit._download(output_key, raw, bucket=vpoc_settings.VIDEO_BUCKET)  # noqa: SLF001
+            stage = "probe"
+            got_w, got_h, got_fps = _geometry(edit._probe_file(raw))  # noqa: SLF001
+            if got_w < 2 or got_h < 2 or got_fps <= 0:
+                log.info("vnew.retake.post_scale_skip pid=%s gen=%s cell=%s n=%d reason=probe", pid, gen_id, key, n)
+                return output_key, {}
+            if (got_w, got_h) == (width, height) and abs(got_fps - target_fps) <= POST_SCALE_FPS_TOL:
+                return output_key, {}
+            stage = "scale"
+            scaled = os.path.join(workdir, "scaled.mp4")
+            _scale_file(raw, scaled, width=width, height=height, fps=target_fps)
+            out_w, out_h, out_fps = _geometry(edit._probe_file(scaled))  # noqa: SLF001
+            if (out_w, out_h) != (width, height) or abs(out_fps - target_fps) > POST_SCALE_FPS_TOL:
+                raise stitcher.StitchError(f"scaled {out_w}x{out_h}@{out_fps:g}")
+            stage = "upload"
+            new_key = _scaled_key(output_key, width, height, target_fps)
+            edit._upload(scaled, new_key, bucket=vpoc_settings.VIDEO_BUCKET, content_type="video/mp4")  # noqa: SLF001
+    except Exception as exc:  # noqa: BLE001 — 크기 맞춤은 덤이다(받은 결과로 completed)
+        log.warning("vnew.retake.post_scale_failed pid=%s gen=%s cell=%s n=%d stage=%s err=%s", pid, gen_id, key, n, stage,
+                    type(exc).__name__)
+        return output_key, {}
+    info = {"from": f"{got_w}x{got_h}@{got_fps:g}", "to": f"{width}x{height}@{target_fps}"}
+    log.info("vnew.retake.post_scaled pid=%s gen=%s cell=%s n=%d from=%s to=%s ms=%d", pid, gen_id, key, n, info["from"], info["to"],
+             int((time.monotonic() - started) * 1000))
+    return new_key, {"postScaled": info}
 
 
 
@@ -2554,6 +2652,138 @@ def _drop_context(lines: list[str], fixed: int, max_bytes: int) -> tuple[list[st
     return lines, dropped
 
 
+def _split_marks(body: str, marks: str, *, aware: bool = True) -> list[str] | None:
+    """작업 193: body 를 marks(문장 끝 .!? 또는 ;) 뒤 공백에서 나눈 조각(각 조각은 뒤 공백까지 — "".join 이 원문). aware 면 따옴표·괄호 안은
+    나누지 않고, 끝까지 닫히지 않으면 None(부르는 쪽이 aware=False 로 다시 나눈다)."""
+    pieces: list[str] = []
+    cur: list[str] = []
+    depth, quote = 0, ""
+    at, size = 0, len(body)
+    while at < size:
+        ch = body[at]
+        cur.append(ch)
+        at += 1
+        if aware and quote:
+            quote = "" if ch == quote else quote
+            continue
+        if aware and ch in "\"“「":
+            quote = {"\"": "\"", "“": "”", "「": "」"}[ch]
+        elif aware and ch == "(":
+            depth += 1
+        elif aware and ch == ")" and depth:
+            depth -= 1
+        elif ch in marks and depth == 0 and (at >= size or body[at].isspace()):
+            while at < size and body[at].isspace():
+                cur.append(body[at])
+                at += 1
+            pieces.append("".join(cur))
+            cur = []
+    if cur:
+        pieces.append("".join(cur))
+    if aware and (quote or depth):
+        return None
+    return pieces
+
+
+def _split_safe(body: str, marks: str) -> list[str]:
+    return _split_marks(body, marks) or _split_marks(body, marks, aware=False) or [body]
+
+
+def _drop_video_clauses(sentence: str) -> str:
+    """작업 193: @Video1 이 든 문장 → 다른 참고 표시가 없으면 ""(통째로 — "@Video1 is the 3D previz: … replace each mannequin …"),
+    있으면 ; 조각 중 @Video1 이 든 조각만 뺀다("@Video1 = previz; @Image1 = Kim." → "@Image1 = Kim.")."""
+    if not _VIDEO1_RE.search(sentence):
+        return sentence
+    if not (_refs(sentence) - {"@Video1"}):
+        return ""
+    text = sentence.rstrip()
+    end = text[-1] if text and text[-1] in ".!?" else ""
+    kept = [c.strip().rstrip(";").strip() for c in _split_safe(text, ";") if not _VIDEO1_RE.search(c)]
+    kept = [c for c in kept if c]
+    if not kept:
+        return ""
+    out = "; ".join(kept)
+    if end and not out.endswith(end):
+        out = out.rstrip(".!?") + end
+    return out + sentence[len(sentence.rstrip()):]
+
+
+def _strip_note_tails(text: str) -> str:
+    """작업 193: 앞선 compose EDIT(→ EARLIER EDIT) 끝의 참고 표시 안내(옛·새 꼬리)를 지운다."""
+    out = text.rstrip()
+    for tail in (COMPOSE_TAGS_NOTE_RESULT_OLD, COMPOSE_TAGS_NOTE_RESULT, COMPOSE_TAGS_NOTE):
+        if out.endswith(" " + tail):
+            out = out[:-len(tail) - 1].rstrip()
+    return out
+
+
+def _result_context(lines: list[str]) -> tuple[list[str], dict]:
+    """작업 193: videoSource result 의 이전 프롬프트 부분 정리. 반환 (줄, {video, lines, sentences} — 뺀 수).
+
+    1. 같은 줄(앞뒤 공백 무시)은 처음 것만. 2. EARLIER EDIT·EXTRA(사용자 글)는 끝의 참고 표시 안내만 지우고 그대로.
+    3. 나머지 줄: 항목 머리에 @Video1 이 있으면 이름만("TIMELINE (follow @Video1's cuts exactly):" → "TIMELINE:"), 본문 문장마다
+       @Video1 이 든 문장을 뺀다(_drop_video_clauses). 참고 표시가 든 줄(정의·자료 줄)에서는 이미 나온 문장(참고 표시가 들었거나
+       RESULT_DEDUPE_MIN_CHARS 자 이상)도 뺀다 — 참고 표시가 없는 컷 줄은 줄 통째 겹침만 본다.
+       남은 글이 없으면 그 줄을 뺀다(항목 규칙은 부르는 쪽이 결과에 남은 항목으로 다시 잡는다)."""
+    out: list[str] = []
+    seen_lines: set[str] = set()
+    seen_sentences: set[str] = set()
+    stats = {"video": 0, "lines": 0, "sentences": 0}
+    for line in lines:
+        key = line.strip()
+        if not key:
+            out.append(line)
+            continue
+        if key in seen_lines:
+            stats["lines"] += 1
+            continue
+        seen_lines.add(key)
+        label = _label_of(line)
+        if label in ("EARLIER EDIT", "EXTRA"):
+            out.append(_strip_note_tails(line))
+            continue
+        match = _LABEL_RE.match(line)
+        head, body = (line[:match.end()], line[match.end():]) if match else ("", line)
+        changed = False
+        if head and _VIDEO1_RE.search(head):
+            head, changed = match.group(1) + ":", True
+            stats["video"] += 1
+        kept: list[str] = []
+        ref_line = bool(_REF_RE.search(line))  # 문장 겹침은 참고 표시가 든 줄(정의·자료 줄)만 본다 — 컷 줄의 같은 지시는 컷마다 뜻이 있다
+        for sentence in _split_safe(body, ".!?"):
+            piece = _drop_video_clauses(sentence)
+            if piece != sentence:
+                changed = True
+                stats["video"] += 1
+            norm = piece.strip()
+            if not norm:
+                continue
+            dedupe = ref_line and (bool(_REF_RE.search(norm)) or len(norm) >= RESULT_DEDUPE_MIN_CHARS)
+            if dedupe and norm in seen_sentences:
+                changed = True
+                stats["sentences"] += 1
+                continue
+            if dedupe:
+                seen_sentences.add(norm)
+            kept.append(piece)
+        if not changed:
+            out.append(line)
+            continue
+        text = " ".join(p.strip() for p in kept if p.strip())
+        if not text:
+            continue
+        out.append((head.rstrip() + " " + text) if head else text)
+    return out, stats
+
+
+def _result_edit_line(change_en: str, korean: str, *, swapped: bool) -> str:
+    """작업 193 fix1: result EDIT 줄 = HEAD + 바꿀 것 + "." + KEEP(+ 정의 줄을 바꿨으면 193 꼬리). 바꿀 것 = 번역(끝 마침표 뗌) +
+    (Korean original: “…”), 번역이 없으면 한국어만."""
+    en = str(change_en or "").rstrip().rstrip(".").rstrip()
+    change = f"{en} (Korean original: {korean})" if en else korean
+    return COMPOSE_RESULT_EDIT_HEAD + change + "." + COMPOSE_RESULT_EDIT_KEEP + (" " + COMPOSE_TAGS_NOTE_RESULT if swapped else "")
+
+
 def _compose_prompt(base_prompt: str, template_prompt: str, rng: dict, cell_seconds: float, *, request_ko: str, extra_ko: str,
                     change_en: str, max_bytes: int, result: bool = False) -> tuple[str, dict]:
     """compose 프롬프트(LLM 0). 반환 (프롬프트, {refs, labels, swapped, cut}).
@@ -2565,9 +2795,11 @@ def _compose_prompt(base_prompt: str, template_prompt: str, rng: dict, cell_seco
     3. 구간이 칸 전체가 아니면 RANGE 줄. 4. EDIT 줄 = COMPOSE_EDIT_HEAD + 번역 한 문장 + (Korean original: “…”) — 번역이 없으면 한국어만,
        정의 줄을 바꿨으면 COMPOSE_TAGS_NOTE. 추가 프롬프트는 EXTRA 줄.
     5. 상한을 넘으면 _trim_to_limit(기준 항목 줄만 — EDIT·RANGE·EXTRA·REFERENCES 와 참고 표시 조각은 남는다). labels = 결과에 남은 기준 항목(순서대로).
-    작업 191 fix1: result(videoSource result — @Video1 = 고칠 재료 영상의 그 구간)면 맨 앞에 EDIT(COMPOSE_RESULT_EDIT_HEAD — "Edit @Video1. Keep
-    everything identical … change only")·EXTRA·RANGE(_result_range_line)·REFERENCES·CONTEXT 줄, 그 뒤에 이전 프롬프트(참고 표시 고친 그대로).
+    작업 191 fix1: result(videoSource result — @Video1 = 고칠 재료 영상의 그 구간)면 맨 앞에 EDIT(작업 193 fix1: _result_edit_line — "Edit @Video1.
+    Apply this change fully … <바꿀 것>. Keep everything the change does not touch identical …")·EXTRA·RANGE(_result_range_line)·REFERENCES·CONTEXT 줄, 그 뒤에 이전 프롬프트(참고 표시 고친 그대로).
     상한을 넘으면 이전 프롬프트 쪽만 _trim_to_limit 다음 _drop_context(참고 표시 없는 줄을 뒤부터 통째로) — 앞 줄·참고 표시는 자르지 않는다.
+    작업 193: result 면 EDIT 바로 뒤에 COMPOSE_RESULT_VIDEO_LINE(@Video1 = 지금 결과 영상), 이전 프롬프트(정의 줄을 바꾼 뒤)는 _result_context 로
+    @Video1 문장·겹친 줄·문장을 뺀다. REFERENCES 조각에서도 @Video1 조각은 뺀다. meta.cleaned = 뺀 수.
     """
     allowed = _refs(template_prompt)
     t_lines = _normalize_prompt(template_prompt).split("\n")
@@ -2575,8 +2807,13 @@ def _compose_prompt(base_prompt: str, template_prompt: str, rng: dict, cell_seco
     for line in _normalize_prompt(base_prompt).split("\n"):
         if line.startswith((COMPOSE_RANGE_HEAD, COMPOSE_RESULT_RANGE_HEAD)) or line == COMPOSE_CONTEXT_LINE:
             continue
-        if line.startswith(COMPOSE_RESULT_EDIT_HEAD):
-            line = COMPOSE_KEPT_HEAD + line[len(COMPOSE_RESULT_EDIT_HEAD):]
+        if line.startswith(COMPOSE_RESULT_EDIT_HEAD):  # 작업 193 fix1: 새 꼴 — 꼬리(참고 표시 안내 · KEEP)를 떼고 바꿀 것만
+            rest = _strip_note_tails(line[len(COMPOSE_RESULT_EDIT_HEAD):])
+            if rest.endswith(COMPOSE_RESULT_EDIT_KEEP):
+                rest = rest[:-len(COMPOSE_RESULT_EDIT_KEEP)].rstrip()
+            line = COMPOSE_KEPT_HEAD + rest
+        elif line.startswith(COMPOSE_RESULT_EDIT_HEAD_OLD):
+            line = COMPOSE_KEPT_HEAD + line[len(COMPOSE_RESULT_EDIT_HEAD_OLD):]
         elif line.startswith(COMPOSE_EDIT_HEAD):
             line = COMPOSE_KEPT_HEAD + line[len(COMPOSE_EDIT_HEAD):]
         lines.append(line)
@@ -2600,15 +2837,20 @@ def _compose_prompt(base_prompt: str, template_prompt: str, rng: dict, cell_seco
         out[at:at] = left
         lines = out
     lines = [_keep_refs(line, allowed) for line in lines]
-    missing = allowed - _refs("\n".join(lines)) - ({"@Video1"} if result else set())  # fix1: result 면 EDIT 줄에 @Video1 이 있다
+    cleaned = {"video": 0, "lines": 0, "sentences": 0}
+    if result:  # 작업 193: 이전 프롬프트의 @Video1(프리비즈) 문장·겹친 줄·문장을 뺀다(바꾼 정의 줄까지 같은 규칙)
+        lines, cleaned = _result_context(lines)
+    missing = allowed - _refs("\n".join(lines)) - ({"@Video1"} if result else set())  # fix1: result 면 머리에 @Video1 이 있다
     if missing:
         pieces: list[str] = []
         for t_line in t_lines:  # 본보기 순서대로, 모자란 표시가 든 문장만
             head = _LABEL_RE.match(t_line)
             for sentence in re.split(r"(?<=[.;])\s+", t_line[len(head.group(0)):] if head else t_line):
                 if missing & _refs(sentence):
-                    pieces.append(sentence.strip())
-                    missing -= _refs(sentence)
+                    piece = _drop_video_clauses(sentence).strip() if result else sentence.strip()  # 작업 193: 머리 밖 @Video1 정의 없음
+                    if missing & _refs(piece):
+                        pieces.append(piece)
+                    missing -= _refs(piece)
         pieces.extend(sorted(missing, key=_ref_sort))  # 문장을 못 찾은 표시(없어야 한다)
         refs_line = COMPOSE_REFS_HEAD + " ".join(pieces)
         if not result:
@@ -2621,7 +2863,8 @@ def _compose_prompt(base_prompt: str, template_prompt: str, rng: dict, cell_seco
     change = f"{change_en.rstrip()} (Korean original: {korean})" if change_en else korean
     labels_base = [name for name in _labels(base_prompt) if name not in COMPOSE_LABELS]
     if result:
-        head = [COMPOSE_RESULT_EDIT_HEAD + change + (" " + COMPOSE_TAGS_NOTE_RESULT if swapped else "")]
+        head = [_result_edit_line(change_en, korean, swapped=swapped),
+                COMPOSE_RESULT_VIDEO_LINE]  # 작업 193: @Video1 정의는 이 한 줄뿐
         if extra_ko:
             head.append(COMPOSE_EXTRA_HEAD + _keep_refs(_quote_user(_one_line(extra_ko)), allowed))
         if not whole:
@@ -2635,7 +2878,8 @@ def _compose_prompt(base_prompt: str, template_prompt: str, rng: dict, cell_seco
         kept, dropped = _drop_context(prompt.split("\n"), len(head), int(max_bytes))
         prompt = "\n".join(kept)
         labels = [name for name in _labels(prompt) if name in labels_base]  # 통째로 뺀 줄의 항목은 규칙에서도 뺀다
-        return prompt, {"refs": sorted(allowed, key=_ref_sort), "labels": labels, "swapped": swapped, "cut": cut + dropped}
+        return prompt, {"refs": sorted(allowed, key=_ref_sort), "labels": labels, "swapped": swapped, "cut": cut + dropped,
+                        "cleaned": cleaned}
     if not whole:
         lines.append(_range_line(rng))
     lines.append(COMPOSE_EDIT_HEAD + change + (" " + COMPOSE_TAGS_NOTE if swapped else ""))
@@ -2743,7 +2987,9 @@ def compose(owner: str, pid: str, mid: str, payload) -> dict:
 
     _mutate_state(owner, pid, gen_id, mutate)
     log.info("vnew.retake.compose pid=%s gen=%s cell=%s base=v%d source=%s model=%s format=%s start=%.3f end=%.3f bytes=%d max=%d "
-             "problems=%d translated=%s translate=%s trimmed=%d swapped=%s ms=%d", pid, gen_id, key, target["n"], base["source"], row["id"],
-             fmt, float(rng["start"]), float(rng["end"]), _bytes_of(prompt), max_bytes, len(problems), bool(change_en),
-             "timeout" if timed_out else (box["error"] or "ok"), meta["cut"], meta["swapped"], int((time.monotonic() - started) * 1000))
+             "problems=%d translated=%s translate=%s trimmed=%d swapped=%s video_dropped=%d dup_lines=%d dup_sentences=%d ms=%d", pid, gen_id,
+             key, target["n"], base["source"], row["id"], fmt, float(rng["start"]), float(rng["end"]), _bytes_of(prompt), max_bytes, len(problems),
+             bool(change_en), "timeout" if timed_out else (box["error"] or "ok"), meta["cut"], meta["swapped"],
+             meta.get("cleaned", {}).get("video", 0), meta.get("cleaned", {}).get("lines", 0), meta.get("cleaned", {}).get("sentences", 0),
+             int((time.monotonic() - started) * 1000))
     return _view_with(gen, gen_id, target, read_state(owner, pid, gen_id), log_cells, pick["setup"])
