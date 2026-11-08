@@ -5467,6 +5467,17 @@ textarea.vnew-field-input {
   font-size: 12px;
 }
 
+/* fix2: 클립 · 빈 곳을 누르면 버튼에 남은 초점이 타임라인 칸(tabindex -1)으로 온다. 마우스로 누를 때는 테두리를 그리지 않고
+   키보드 초점(:focus-visible)에만 그린다. */
+.vnew-edit-tl:focus {
+  outline: none;
+}
+
+.vnew-edit-tl:focus-visible {
+  outline: 2px solid var(--accent, #cb3208);
+  outline-offset: 2px;
+}
+
 @media (max-width: 768px) {
   .vnew-edit-cutplay {
     width: 100%;

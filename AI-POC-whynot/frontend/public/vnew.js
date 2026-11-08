@@ -10121,6 +10121,13 @@
 
     // 타임라인: 왼쪽 이름 칸 + 가로 스크롤 영역(눈금자 · 영상 · 소리 · 재생헤드)
     var tl = el("div", "vnew-edit-tl");
+    // 작업 188 fix2: 클립 · 빈 곳을 누르면 버튼에 남은 초점을 이 칸으로 옮긴다(editFocusTimeline, 잡기 단계라 끌기 · 다듬기보다 먼저)
+    tl.setAttribute("tabindex", "-1");
+    var onTlDown = function (event) {
+      editFocusTimeline(ctx, event);
+    };
+    tl.addEventListener("pointerdown", onTlDown, true);
+    d.tl = tl;
     var labels = el("div", "vnew-edit-labels");
     labels.appendChild(el("span", "vnew-edit-label is-ruler", ""));
     labels.appendChild(el("span", "vnew-edit-label is-video", "영상"));
@@ -10580,6 +10587,45 @@
     var role = t.getAttribute ? String(t.getAttribute("role") || "") : "";
     if (role) return false;
     return editInside(ctx.root, t) || editInside(t, ctx.root);
+  }
+
+  /* 작업 188 fix2: Enter · Space 를 브라우저가 스스로 누르는 초점 요소 — 버튼 · 링크 · select · summary · option,
+     글이 아닌 input(버튼 · 체크 · 라디오 · range 등), 누르는 [role](button · link · menuitem · tab …). 글 입력칸은 아니다. */
+  var EDIT_FOCUS_OFF_INPUTS = ["button", "submit", "reset", "checkbox", "radio", "range", "color", "file", "image"];
+  var EDIT_FOCUS_OFF_ROLES = ["button", "link", "menuitem", "menuitemcheckbox", "menuitemradio", "tab", "checkbox", "radio",
+    "switch", "option", "slider"];
+
+  function editControlTarget(target) {
+    var t = target || {};
+    var tag = String(t.tagName || "").toLowerCase();
+    if (tag === "button" || tag === "a" || tag === "select" || tag === "summary" || tag === "option") return true;
+    if (tag === "input") {
+      var type = t.type || (t.getAttribute ? t.getAttribute("type") : "") || "text";
+      return EDIT_FOCUS_OFF_INPUTS.indexOf(String(type).toLowerCase()) >= 0;
+    }
+    if (tag === "textarea" || t.isContentEditable) return false;
+    var role = t.getAttribute ? String(t.getAttribute("role") || "").toLowerCase() : "";
+    return EDIT_FOCUS_OFF_ROLES.indexOf(role) >= 0;
+  }
+
+  /* 작업 188 fix2: 타임라인 칸(클립 · 소리 상자 · 빈 곳 · 눈금자)을 누르면(pointerdown 잡기 단계) ⑦ 안의 버튼 · 링크 · select 등에
+     남은 초점을 타임라인 칸(tabindex -1)으로 옮긴다. 그래야 다음 Enter · Space 가 그 버튼([이 컷만 재생] · [삭제] …)을 다시 누르지 않고
+     editOnKey 로 간다. 글 입력칸 초점 · ⑦ 밖 초점은 그대로, 누른 곳이 버튼(재생헤드 · 전환 손잡이)이면 그 버튼에 맡긴다.
+     막기 · 끌기는 하지 않는다(끌기 · 끝 다듬기 길은 그대로). */
+  function editFocusTimeline(ctx, event) {
+    var tl = ctx.dom.tl;
+    var active = document.activeElement;
+    if (!editAlive(ctx) || !tl || !active || active === tl) return;
+    if (!editInside(ctx.root, active) || !editControlTarget(active)) return;
+    for (var n = event ? event.target : null; n && n !== tl; n = n.parentNode) {
+      if (editControlTarget(n)) return;
+    }
+    if (typeof tl.focus !== "function") return;
+    try {
+      tl.focus({ preventScroll: true });
+    } catch (error) {
+      /* 초점을 줄 수 없는 요소 */
+    }
   }
 
   /* 클립들 재료 mid(소리 끈 클립 제외, 한 번씩). res 가 없으면 파형을 아직 안 받은 것만, 있으면 서버가 "noFilm" 으로 둔 것만. */

@@ -61531,6 +61531,77 @@ _CP_KEY_WANT = {
     "typing": [True, True, True, True, True, False, False, False],
 }
 
+# fix2 (cp-h) 실행 검사: editControlTarget · editFocusTimeline · editCutKeyOk 를 가짜 DOM 으로 돌린다.
+# root > (도구줄 버튼 · 링크 · select · [role=button] · checkbox · 글 input · textarea · contenteditable)
+#      · tl(tabindex -1) > (재생헤드 손잡이 button) · scroll > content > (vtrack > box > 손잡이 is-in) · (atrack > abox > svg)
+# 그리고 ⑦ 밖 버튼. 경우마다 초점(activeElement)을 두고 누른 곳(event.target)으로 editFocusTimeline 을 부른 뒤 초점이 어디인지 본다.
+_CP_FOCUS_NODE = r"""
+function N(tag, parent, attrs) {
+  var n = { tagName: tag.toUpperCase(), parentNode: parent || null, isContentEditable: false, _a: attrs || {} };
+  n.getAttribute = function (k) { return Object.prototype.hasOwnProperty.call(n._a, k) ? n._a[k] : null; };
+  return n;
+}
+var html = N("html"), body = N("body", html), main = N("main", body);
+var document = { body: body, documentElement: html, activeElement: body };
+var root = N("div", main), tools = N("div", root);
+var tl = N("div", root, { tabindex: "-1" }), handle = N("button", tl), scroll = N("div", tl), content = N("div", scroll);
+var box = N("div", N("div", content)), inEdge = N("div", box), abox = N("div", N("div", content)), wave = N("svg", abox);
+var focusCalls = [];
+tl.focus = function (opts) { focusCalls.push(opts); document.activeElement = tl; };
+var edit = N("div", tools); edit.isContentEditable = true;
+var f = {
+  button: N("button", tools), link: N("a", tools), select: N("select", tools), roleButton: N("div", tools, { role: "button" }),
+  checkbox: N("input", tools, { type: "checkbox" }), text: N("input", tools, { type: "text" }), bare: N("input", tools),
+  textarea: N("textarea", tools), editable: edit, outsideButton: N("button", main), body: body, tl: tl
+};
+var p = { box: box, abox: abox, wave: wave, empty: content, edge: inEdge, handle: handle };
+function name(node) {
+  var all = Object.assign({}, f, p);
+  for (var k in all) if (all[k] === node) return k;
+  return "?";
+}
+function editSelected(ctx) { return ctx.sel >= 0 ? { id: "c" } : null; }
+function editAlive(ctx) { return ctx.alive !== false; }
+eval(CODE);
+var ctx = { root: root, sel: 0, dom: { tl: tl }, alive: true };
+var cases = [
+  ["button", "box"], ["button", "abox"], ["button", "wave"], ["button", "empty"], ["button", "edge"], ["link", "box"],
+  ["select", "empty"], ["roleButton", "abox"], ["checkbox", "box"], ["text", "box"], ["bare", "abox"], ["textarea", "empty"],
+  ["editable", "box"], ["outsideButton", "box"], ["button", "handle"], ["body", "box"], ["tl", "box"]
+];
+var out = {};
+cases.forEach(function (c) {
+  document.activeElement = f[c[0]];
+  editFocusTimeline(ctx, { target: p[c[1]] });
+  out[c[0] + ">" + c[1]] = name(document.activeElement);
+});
+document.activeElement = f.button;
+editFocusTimeline({ root: root, sel: 0, dom: { tl: tl }, alive: false }, { target: box });
+out.notAlive = name(document.activeElement);
+document.activeElement = f.button;
+editFocusTimeline({ root: root, sel: 0, dom: {}, alive: true }, { target: box });
+out.noTl = name(document.activeElement);
+out.focusOpts = focusCalls.map(function (o) { return JSON.stringify(o); }).filter(function (s, i, a) { return a.indexOf(s) === i; });
+out.focusCount = focusCalls.length;
+out.keyOkTl = editCutKeyOk(ctx, tl);
+out.typingTl = editTypingTarget(tl);
+out.control = ["button", "link", "select", "roleButton", "checkbox", "text", "bare", "textarea", "editable", "tl"].map(function (k) {
+  return editControlTarget(f[k]);
+});
+console.log(JSON.stringify(out));
+"""
+
+_CP_FOCUS_WANT = {
+    "button>box": "tl", "button>abox": "tl", "button>wave": "tl", "button>empty": "tl", "button>edge": "tl", "link>box": "tl",
+    "select>empty": "tl", "roleButton>abox": "tl", "checkbox>box": "tl",
+    "text>box": "text", "bare>abox": "bare", "textarea>empty": "textarea", "editable>box": "editable",
+    "outsideButton>box": "outsideButton", "button>handle": "button", "body>box": "body", "tl>box": "tl",
+    "notAlive": "button", "noTl": "button",
+    "focusOpts": ['{"preventScroll":true}'], "focusCount": 9,
+    "keyOkTl": True, "typingTl": False,
+    "control": [True, True, True, True, True, False, False, False, False, False],
+}
+
 
 def check_vnew_edit_cut_play_188() -> None:
     """작업 188 — ⑦ 편집에서 고른 컷의 시작부터 재생(vnew.js · vnew.css). 정적 검사 + (cp-e) 키 거름 node 실행(서버 · 네트워크 0).
@@ -61547,6 +61618,9 @@ def check_vnew_edit_cut_play_188() -> None:
     (cp-f) 불러오는 중 · 저장 중 · 내보내기 중 · 클립 없음 · 영상 주소 없음이면 막는다(저장 상태가 바뀔 때도 다시 칠함)
     (cp-g) vnew.css 188 구역: 새 클래스 정의 · 줄 바꿈(flex-wrap) · 768px 규칙 · 가로 스크롤 없음 · LF
            fix1: 버튼 폭 고정(두 글 grid 한 칸 겹침 · visibility 만 바꿈 · 고정 px 폭 없음)
+    (cp-h) fix2: 타임라인 칸(tabindex -1) 잡기 단계 pointerdown 이 ⑦ 안 버튼 · 링크 · select 등의 초점을 타임라인 칸으로 옮긴다
+           (focus preventScroll 만 · 막기/끌기 없음) · 글 입력칸 · ⑦ 밖 · 버튼을 누른 경우는 그대로 · editCutKeyOk 가 그 칸을 받음(node 실행) ·
+           CSS 는 :focus-visible 에만 테두리
     """
     bad: list[str] = []
     seen: set[str] = set()
@@ -61565,7 +61639,7 @@ def check_vnew_edit_cut_play_188() -> None:
         names = ("editCutPlayBox", "editCutPlayBlocked", "editCutPlayOn", "editRenderCutPlay", "editPlayCut", "editCutPlayEnd",
                  "editClipDblClick", "editCutKeyOk", "editBuild", "editRenderPlayButton", "editRenderSave", "editTick", "editPause",
                  "editSeek", "editChanged", "editSelect", "editClipBoxes", "editTrack", "editOnKey", "editKeyAction", "editNewCtx",
-                 "editTypingTarget", "editInside")
+                 "editTypingTarget", "editInside", "editControlTarget", "editFocusTimeline")
         body = {name: _jlu_body(vjs, name) for name in names}
         expect("cp-a", sorted(name for name, text in body.items() if not text), [], "함수가 vnew.js 에 하나씩 있다")
 
@@ -61706,12 +61780,46 @@ def check_vnew_edit_cut_play_188() -> None:
                [True, True, True, [], False, [], True, True],
                "fix1 버튼 폭 고정: 기본 글 · [❚❚ 일시정지]를 grid 한 칸에 겹치고 aria-pressed 로 visibility 만 바꾼다(display:none 없음) · "
                "버튼에 고정 px 폭 없음 · 768px 이하는 그대로 감싼다")
+
+        # ---------------- (cp-h) fix2: 타임라인을 누르면 버튼에 남은 초점을 타임라인 칸으로
+        build = body["editBuild"]
+        focus = body["editFocusTimeline"]
+        tl_at = build.find('var tl = el("div", "vnew-edit-tl");')
+        expect("cp-h", [0 <= tl_at < build.find('tl.setAttribute("tabindex", "-1");') < build.find("d.tl = tl;"),
+                        missing(build, ["var onTlDown = function (event) {\n      editFocusTimeline(ctx, event);\n    };",
+                                        'tl.addEventListener("pointerdown", onTlDown, true);']),
+                        "tl.focus({ preventScroll: true });" in focus,
+                        [w for w in ("preventDefault", "stopPropagation", "setPointerCapture", "editSelect(", ".blur(") if w in focus],
+                        missing(focus, ["if (!editInside(ctx.root, active) || !editControlTarget(active)) return;",
+                                        "for (var n = event ? event.target : null; n && n !== tl; n = n.parentNode) {"]),
+                        missing(body["editClipBoxes"], ['box.addEventListener("pointerdown", function (event) {\n      editClipPointer(ctx, parts, event);',
+                                                        'outEdge.addEventListener("pointerdown", function (event) {\n      editEdgePointer(ctx, parts, "out", event);',
+                                                        'abox.addEventListener("click", function () {'])],
+               [True, [], True, [], [], []],
+               "fix2: 타임라인 칸(tabindex -1)에 잡기 단계 pointerdown → editFocusTimeline 이 focus({preventScroll}) 만 한다"
+               "(막기 · 끌기 · 고르기 없음 — 클립 끌기 · 끝 다듬기 길은 그대로)")
+        focus_rule = _edu_css_block(css, ".vnew-edit-tl:focus", start_css)
+        visible_rule = _edu_css_block(css, ".vnew-edit-tl:focus-visible", start_css)
+        expect("cp-h", ["outline: none;" in focus_rule, "outline: 2px solid" in visible_rule, "outline: none" in visible_rule],
+               [True, True, False], "fix2 CSS: 마우스로 준 초점은 테두리 없음, :focus-visible 에만 테두리")
+        if node:
+            code = "\n".join([typing, cut_ok, body["editInside"], body["editControlTarget"], focus])
+            consts = re.findall(r"(?m)^  var EDIT_FOCUS_OFF_(?:INPUTS|ROLES) = [^;]*;", vjs)
+            expect("cp-h", len(consts), 2, "EDIT_FOCUS_OFF_INPUTS · EDIT_FOCUS_OFF_ROLES 가 하나씩 있다")
+            script = "var CODE = " + json.dumps("\n".join(consts) + "\n" + code) + ";\n" + _CP_FOCUS_NODE
+            result = subprocess.run([node, "-"], input=script, capture_output=True, text=True, encoding="utf-8", timeout=60)
+            if result.returncode != 0:
+                bad.append("(cp-h) node 실행 실패: " + (result.stderr or "")[:800])
+            else:
+                got = json.loads(result.stdout.strip().splitlines()[-1])
+                for name, want in _CP_FOCUS_WANT.items():
+                    expect("cp-h", got.get(name), want, f"타임라인 누르기 초점 경우 {name}")
     except Exception as exc:  # noqa: BLE001
         import traceback as _tb  # noqa: PLC0415
 
         bad.append("(cp) 예외: " + repr(exc) + "\n" + _tb.format_exc()[:1200])
 
-    groups = {f"cp-{c}" for c in "abcdefg"}
+    groups = {f"cp-{c}" for c in "abcdefgh"}
     if groups - seen and not bad:
         bad.append(f"검사하지 못한 묶음: {sorted(groups - seen)}")
     if bad:
@@ -61720,7 +61828,7 @@ def check_vnew_edit_cut_play_188() -> None:
     else:
         ok("작업 188 ⑦ 편집 고른 컷부터 재생 정적 검사 (cp-a)두 버튼 · 일시정지 · 안내 (cp-b)starts[sel] · editSeek/editPlay 길 "
            "(cp-c)이 컷만 멈춤 · 멈춤/옮기기/편집/고르기에 지움 (cp-d)dblclick · 끌기 뒤 무시 (cp-e)Enter/Shift+Enter · 입력칸 거름 · <main> 초점(node) "
-           "(cp-f)막기 (cp-g)CSS 감싸기 · 버튼 폭 고정 · LF")
+           "(cp-f)막기 (cp-g)CSS 감싸기 · 버튼 폭 고정 · LF (cp-h)타임라인 누르기 → 버튼 초점을 타임라인 칸으로 · 입력칸 그대로(node)")
 
 
 
