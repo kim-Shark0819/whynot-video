@@ -61489,18 +61489,64 @@ def check_topbar_project_187() -> None:
 
 
 # ---------------------------------------------------------------- 작업 188 — ⑦ 편집: 고른 컷부터 재생(cp-a~g)
+# fix1 (cp-e) 실행 검사: editTypingTarget · editCutKeyOk · editInside 를 가짜 DOM 으로 돌린다.
+# 문서 html > body > main > (header > a · div) · (root > box · button · a · summary · [role] · input range · textarea · select · contenteditable),
+# 그리고 바깥 input. 클립을 누른 뒤 초점이 남는 <main>(⑦ 을 감싼 요소)도 받아야 한다.
+_CP_KEY_NODE = r"""
+function N(tag, parent, attrs) {
+  var n = { tagName: tag.toUpperCase(), parentNode: parent || null, isContentEditable: false, _a: attrs || {} };
+  n.getAttribute = function (k) { return Object.prototype.hasOwnProperty.call(n._a, k) ? n._a[k] : null; };
+  return n;
+}
+var html = N("html"), body = N("body", html), main = N("main", body), header = N("header", main);
+var document = { body: body, documentElement: html };
+var root = N("div", main), box = N("div", N("div", root));
+var edit = N("div", root); edit.isContentEditable = true;
+var t = {
+  main: main, body: body, html: html, box: box, root: root,
+  button: N("button", root), link: N("a", root), summary: N("summary", root), role: N("div", root, { role: "slider" }),
+  range: N("input", root, { type: "range" }), textarea: N("textarea", root), select: N("select", root), editable: edit,
+  outsideInput: N("input", main), outsideDiv: N("div", header), outsideLink: N("a", header),
+  mainWithRole: null, none: null
+};
+var main2 = N("main", body, { role: "region" }), root2 = N("div", main2);
+function editSelected(ctx) { return ctx.sel >= 0 ? { id: "c" } : null; }
+eval(CODE);
+var out = {};
+Object.keys(t).forEach(function (k) { if (t[k]) out[k] = editCutKeyOk({ root: root, sel: 0 }, t[k]); });
+out.mainWithRole = editCutKeyOk({ root: root2, sel: 0 }, main2);
+out.none = editCutKeyOk({ root: root, sel: 0 }, null);
+out.mainNoSel = editCutKeyOk({ root: root, sel: -1 }, main);
+out.typing = ["range", "textarea", "select", "editable", "outsideInput"].map(function (k) { return editTypingTarget(t[k]); })
+  .concat([editTypingTarget(main), editTypingTarget(t.button), editTypingTarget(null)]);
+console.log(JSON.stringify(out));
+"""
+
+_CP_KEY_WANT = {
+    "main": True, "body": True, "html": True, "box": True, "root": True,
+    "button": False, "link": False, "summary": False, "role": False,
+    "range": False, "textarea": False, "select": False, "editable": False,
+    "outsideInput": False, "outsideDiv": False, "outsideLink": False,
+    "mainWithRole": False, "none": False, "mainNoSel": False,
+    "typing": [True, True, True, True, True, False, False, False],
+}
+
+
 def check_vnew_edit_cut_play_188() -> None:
-    """작업 188 — ⑦ 편집에서 고른 컷의 시작부터 재생(vnew.js · vnew.css). 정적 검사만(node 실행 · 서버 · 네트워크 0).
+    """작업 188 — ⑦ 편집에서 고른 컷의 시작부터 재생(vnew.js · vnew.css). 정적 검사 + (cp-e) 키 거름 node 실행(서버 · 네트워크 0).
 
     (cp-a) 고른 클립 칸: [▶ 이 컷 처음부터 재생] · [이 컷만 재생] · 재생 중이면 그 버튼이 [일시정지] · 안내 한 줄(vnew-hint)
+           fix1: 두 글을 버튼 안에 겹쳐 두고 aria-pressed 로만 바꾼다(글을 다시 쓰지 않음)
     (cp-b) 시작 = editStarts(ctx.clips).starts[고른 클립], 늘 하던 editPause · editSeek · editPlay 길만(따로 재생하는 길 없음)
     (cp-c) [이 컷만]: 누른 때 클립으로 멈출 자리(그 컷 끝 한 프레임 앞)를 재고, editTick 이 다음 클립으로 넘어가기 전에 멈춘다 ·
            멈춤(editPause) · 옮기기(editSeek) · 편집(editChanged) · 다른 클립 고르기(editSelect)에 지운다
     (cp-d) 클립 상자 · 소리 상자 dblclick → 고르고 재생, 양 끝 손잡이 · 끄는 중 · 끌기/다듬기 직후는 무시(editTrack 이 끝난 때를 남김)
     (cp-e) Enter / Shift+Enter: 입력칸 거름 뒤 · 버튼/링크의 Enter 와 ⑦ 밖은 건드리지 않음 · 고른 클립 없으면 아무것도 안 함 ·
            editKeyAction(순수 대응표)에는 Enter 를 넣지 않는다
+           fix1: 입력칸 거름은 editTypingTarget 하나(Space · 단축키와 같은 규칙) · ⑦ 을 감싼 요소(<main> · body · html) 초점도 받는다(node 실행)
     (cp-f) 불러오는 중 · 저장 중 · 내보내기 중 · 클립 없음 · 영상 주소 없음이면 막는다(저장 상태가 바뀔 때도 다시 칠함)
     (cp-g) vnew.css 188 구역: 새 클래스 정의 · 줄 바꿈(flex-wrap) · 768px 규칙 · 가로 스크롤 없음 · LF
+           fix1: 버튼 폭 고정(두 글 grid 한 칸 겹침 · visibility 만 바꿈 · 고정 px 폭 없음)
     """
     bad: list[str] = []
     seen: set[str] = set()
@@ -61518,7 +61564,8 @@ def check_vnew_edit_cut_play_188() -> None:
         css = (PUBLIC / "vnew.css").read_text(encoding="utf-8")
         names = ("editCutPlayBox", "editCutPlayBlocked", "editCutPlayOn", "editRenderCutPlay", "editPlayCut", "editCutPlayEnd",
                  "editClipDblClick", "editCutKeyOk", "editBuild", "editRenderPlayButton", "editRenderSave", "editTick", "editPause",
-                 "editSeek", "editChanged", "editSelect", "editClipBoxes", "editTrack", "editOnKey", "editKeyAction", "editNewCtx")
+                 "editSeek", "editChanged", "editSelect", "editClipBoxes", "editTrack", "editOnKey", "editKeyAction", "editNewCtx",
+                 "editTypingTarget", "editInside")
         body = {name: _jlu_body(vjs, name) for name in names}
         expect("cp-a", sorted(name for name, text in body.items() if not text), [], "함수가 vnew.js 에 하나씩 있다")
 
@@ -61528,12 +61575,18 @@ def check_vnew_edit_cut_play_188() -> None:
                                                          "ctx.dom.cutPlay = { from: from, only: only, note: note };"]),
                         'var EDIT_CUT_PLAY_NOTE = "더블클릭 또는 Enter: 이 컷부터 재생 · Shift+Enter: 이 컷만";' in vjs,
                         "tools.appendChild(editCutPlayBox(ctx));" in body["editBuild"],
-                        missing(body["editRenderCutPlay"], ['btn.textContent = on ? "❚❚ 일시정지" : btn._idleText;', "var on = editCutPlayOn(ctx, btn._mode);"]),
+                        "textContent" in body["editRenderCutPlay"], "var on = editCutPlayOn(ctx, btn._mode);" in body["editRenderCutPlay"],
+                        'btn.setAttribute("aria-pressed", on ? "true" : "false");' in body["editRenderCutPlay"],
+                        missing(body["editCutPlayBox"], ['var btn = el("button", "outline-button " + className);',
+                                                         'btn.appendChild(el("span", "vnew-edit-cutplay-idle", text));',
+                                                         'btn.appendChild(el("span", "vnew-edit-cutplay-pause", EDIT_CUT_PLAY_PAUSE));']),
+                        'var EDIT_CUT_PLAY_PAUSE = "❚❚ 일시정지";' in vjs,
                         "ctx.playing && ctx.cutPlay && ctx.cutPlay.mode === mode" in body["editCutPlayOn"],
                         "editRenderCutPlay(ctx);" in body["editRenderPlayButton"],
                         'class="vnew-edit-tool"' in body["editCutPlayBox"] or '"vnew-edit-tool"' in body["editCutPlayBox"]],
-               [[], True, True, [], True, True, False],
-               "고른 클립 칸 두 버튼 · 안내 한 줄 · 그 버튼으로 재생 중이면 [❚❚ 일시정지] · 재생/멈춤/도구줄을 그릴 때 다시 칠함(도구 버튼 수는 그대로)")
+               [[], True, True, False, True, True, [], True, True, True, False],
+               "고른 클립 칸 두 버튼 · 안내 한 줄 · 그 버튼으로 재생 중이면 [❚❚ 일시정지](fix1: 두 글을 겹쳐 두고 aria-pressed 로만 바꾼다, "
+               "글을 다시 쓰지 않음) · 재생/멈춤/도구줄을 그릴 때 다시 칠함(도구 버튼 수는 그대로)")
 
         # ---------------- (cp-b) 시작 자리 · 같은 재생 길
         play = body["editPlayCut"]
@@ -61582,17 +61635,36 @@ def check_vnew_edit_cut_play_188() -> None:
 
         # ---------------- (cp-e) Enter / Shift+Enter
         key = body["editOnKey"]
-        guard = 'if (tag === "input" || tag === "textarea" || tag === "select" || target.isContentEditable) return;'
+        typing = body["editTypingTarget"]
+        guard = "if (editTypingTarget(target)) return;"
         enter = 'if (event.key === "Enter" && !event.ctrlKey && !event.metaKey) {'
+        cut_ok = body["editCutKeyOk"]
         expect("cp-e", [0 <= key.find(guard) < key.find(enter) < key.find("var action = editKeyAction("),
+                        missing(typing, ['return tag === "input" || tag === "textarea" || tag === "select" || !!t.isContentEditable;']),
+                        [w for w in ('tag === "input"', "isContentEditable") if w in key or w in cut_ok],
                         missing(key, ["if (!editCutKeyOk(ctx, target)) return;", "if (!event.repeat) editPlayCut(ctx, !!event.shiftKey, false);"]),
-                        missing(body["editCutKeyOk"], ["if (!editSelected(ctx)) return false;",
-                                                       'if (tag === "button" || tag === "a" || tag === "summary" || tag === "option") return false;',
-                                                       "t === document.body || t === document.documentElement || editInside(ctx.root, t)"]),
+                        missing(cut_ok, ["if (!editSelected(ctx)) return false;", "if (editTypingTarget(t)) return false;",
+                                         'if (tag === "button" || tag === "a" || tag === "summary" || tag === "option") return false;',
+                                         'var role = t.getAttribute ? String(t.getAttribute("role") || "") : "";\n    if (role) return false;',
+                                         "return editInside(ctx.root, t) || editInside(t, ctx.root);"]),
                         "Enter" in body["editKeyAction"],
                         0 <= key.find("if (ctx.trMenu) {") < key.find(enter) and 0 <= key.find("if (ctx.fix && ctx.fix.open) {") < key.find(enter)],
-               [True, [], [], False, True],
-               "입력칸(range 포함) 거름 뒤에 Enter = 이 컷부터 · Shift+Enter = 이 컷만, 버튼/링크 · ⑦ 밖 · 고른 클립 없음은 그대로 둠 · 메뉴/패널이 열리면 안 받음")
+               [True, [], [], [], [], False, True],
+               "입력칸(range 포함) 거름(editTypingTarget, Space · 단축키와 같은 규칙 하나) 뒤에 Enter = 이 컷부터 · Shift+Enter = 이 컷만, "
+               "버튼/링크/[role] · ⑦ 밖 · 고른 클립 없음은 그대로 둠 · ⑦ 을 감싼 요소(<main> 등) 초점은 받음 · 메뉴/패널이 열리면 안 받음")
+        node = shutil.which("node")
+        if not node:
+            warn("node 가 없어 작업 188 fix1 (cp-e) 키 거름 실행 검사를 건너뜁니다")
+        else:
+            code = typing + "\n" + cut_ok + "\n" + body["editInside"]
+            script = "var CODE = " + json.dumps(code) + ";\n" + _CP_KEY_NODE
+            result = subprocess.run([node, "-"], input=script, capture_output=True, text=True, encoding="utf-8", timeout=60)
+            if result.returncode != 0:
+                bad.append("(cp-e) node 실행 실패: " + (result.stderr or "")[:800])
+            else:
+                got = json.loads(result.stdout.strip().splitlines()[-1])
+                for name, want in _CP_KEY_WANT.items():
+                    expect("cp-e", got.get(name), want, f"Enter 키 거름 경우 {name}")
 
         # ---------------- (cp-f) 막기
         expect("cp-f", [missing(body["editCutPlayBlocked"], ["ctx.busy", "ctx.saving", "ctx.exporting", "!ctx.clips.length", "!clip",
@@ -61605,7 +61677,8 @@ def check_vnew_edit_cut_play_188() -> None:
         # ---------------- (cp-g) CSS
         start_css = css.find("/* ================================================================ ⑦ 편집 — 고른 컷부터 재생(작업 188)")
         section = css[start_css:] if start_css >= 0 else ""
-        classes = ["vnew-edit-cutplay", "vnew-edit-cutplay-from", "vnew-edit-cutplay-only", "vnew-edit-cutplay-note"]
+        classes = ["vnew-edit-cutplay", "vnew-edit-cutplay-from", "vnew-edit-cutplay-only", "vnew-edit-cutplay-note",
+                   "vnew-edit-cutplay-idle", "vnew-edit-cutplay-pause"]
         defined = set(re.findall(r"\.(vnew-edit-[a-z0-9-]+)", section))
         widths = [int(w) for w in re.findall(r"(?<![-\w])(?:min-)?width: (\d+)px", section)]
         narrow = section[section.find("@media (max-width: 768px) {"):] if "@media (max-width: 768px) {" in section else ""
@@ -61616,6 +61689,23 @@ def check_vnew_edit_cut_play_188() -> None:
                         any(b"\r" in (PUBLIC / name).read_bytes() for name in ("vnew.css", "vnew.js")), css.endswith("}\n")],
                [True, [], [], True, True, True, True, False, True, False, True],
                "CSS 188 구역: 새 클래스 정의 · 버튼 줄 바꿈 · 안내 한 줄 전체 · 768px 이하 감싸기 · 가로 스크롤 없음 · LF")
+        # fix1: 버튼 폭 고정 — 두 글을 한 칸에 겹치고(칸 폭 = 긴 글) 보이는 쪽만 visibility 로 바꾼다. 고정 px 폭 없음(좁은 화면 감싸기 그대로).
+        btn_rule = _edu_css_block(css, ".vnew-edit-cutplay-only", start_css)
+        label_rule = _edu_css_block(css, ".vnew-edit-cutplay-pause", start_css)
+        narrow_btn = _edu_css_block(narrow, ".vnew-edit-cutplay-only")
+        hide = section[:section.find("visibility: hidden;")] if "visibility: hidden;" in section else ""
+        hide = hide[hide.rfind("}") + 1:]
+        expect("cp-g", ["display: inline-grid;" in btn_rule, "grid-area: 1 / 1;" in label_rule, ".vnew-edit-cutplay-idle," in section,
+                        sorted(s for s in ('.vnew-edit-cutplay-from[aria-pressed="true"] .vnew-edit-cutplay-idle',
+                                           '.vnew-edit-cutplay-only[aria-pressed="true"] .vnew-edit-cutplay-idle',
+                                           '.vnew-edit-cutplay-from:not([aria-pressed="true"]) .vnew-edit-cutplay-pause',
+                                           '.vnew-edit-cutplay-only:not([aria-pressed="true"]) .vnew-edit-cutplay-pause') if s not in hide),
+                        "display: none" in section,
+                        re.findall(r"(?<![-\w])(?:min-|max-)?width: \d+px", btn_rule + narrow_btn),
+                        "min-width: 0;" in narrow_btn, "white-space: normal;" in narrow_btn],
+               [True, True, True, [], False, [], True, True],
+               "fix1 버튼 폭 고정: 기본 글 · [❚❚ 일시정지]를 grid 한 칸에 겹치고 aria-pressed 로 visibility 만 바꾼다(display:none 없음) · "
+               "버튼에 고정 px 폭 없음 · 768px 이하는 그대로 감싼다")
     except Exception as exc:  # noqa: BLE001
         import traceback as _tb  # noqa: PLC0415
 
@@ -61629,8 +61719,8 @@ def check_vnew_edit_cut_play_188() -> None:
             fail("작업 188 ⑦ 편집 고른 컷부터 재생 " + item)
     else:
         ok("작업 188 ⑦ 편집 고른 컷부터 재생 정적 검사 (cp-a)두 버튼 · 일시정지 · 안내 (cp-b)starts[sel] · editSeek/editPlay 길 "
-           "(cp-c)이 컷만 멈춤 · 멈춤/옮기기/편집/고르기에 지움 (cp-d)dblclick · 끌기 뒤 무시 (cp-e)Enter/Shift+Enter · 입력칸 거름 "
-           "(cp-f)막기 (cp-g)CSS 감싸기 · LF")
+           "(cp-c)이 컷만 멈춤 · 멈춤/옮기기/편집/고르기에 지움 (cp-d)dblclick · 끌기 뒤 무시 (cp-e)Enter/Shift+Enter · 입력칸 거름 · <main> 초점(node) "
+           "(cp-f)막기 (cp-g)CSS 감싸기 · 버튼 폭 고정 · LF")
 
 
 
