@@ -41424,7 +41424,9 @@ def check_vnew_edit_retake() -> None:
                    [202, [(label_d, True), (label_d + " v2", True)], (409, "RetakeRunning"), [(2, "completed"), (3, "completed")]],
                    "같은 칸 진행 중: GET /edit 재료 표식 running·다시 제출 → 409 RetakeRunning(claim)")
             # 실패 → 같은 번호로 다시(attempt 2)
-            env.poll_script = [{"status": "Failed", "failureMessage": "content policy https://x.example/p?sig=1", "usage": None}]
+            # 작업 195: 옛 원문 "content policy" 는 이제 콘텐츠 검사 거절(순화해 1번 더 낸다 — check_vnew_retake_content_flag_195)이라, 이 묶음의
+            # 뜻(주소 지움 · 같은 번호로 다시)을 지키도록 콘텐츠 검사 낱말이 없는 거절 원문으로 바꿨다(기대 문구도 같이).
+            env.poll_script = [{"status": "Failed", "failureMessage": "bad request https://x.example/p?sig=1", "usage": None}]
             submit(pid_d, mid_d, ok_body)
             v4 = env.state(pid_d)["cells"]["webtoon:take1"]["versions"][-1]
             submit(pid_d, mid_d, ok_body)
@@ -41433,7 +41435,7 @@ def check_vnew_edit_retake() -> None:
             expect("rtk-e", [(v4.get("n"), v4.get("status"), v4.get("error")), (v4b.get("n"), v4b.get("status"), v4b.get("attempt")),
                              "/take1-webtoon-rt4-2/" in v4b.get("outputKey", ""), len(vlist),
                              [r["status"] for r in env.log(pid_d)["webtoon:take1"] if r.get("version") == 4]],
-                   [(4, "failed", "content policy [주소 생략]"), (4, "completed", 2), True, 3, ["failed", "completed"]],
+                   [(4, "failed", "bad request [주소 생략]"), (4, "completed", 2), True, 3, ["failed", "completed"]],
                    "실패 버전(주소 지움) → 다시 제출은 같은 번호 v4·attempt 2(접두사 rt4-2), 기록 둘")
             # v2 에서 다시(기준 = v2 프롬프트) → v5 fromN 2
             mid_v2 = mid_of(pid_d, label_d + " v2")
@@ -64825,6 +64827,370 @@ def check_vnew_retake_segments_194() -> None:
            "(sg-f)LF · node --check" + ("" if node else " — node 없음: 화면 실행 건너뜀"))
 
 
+# 작업 195: prod test3 애니 테이크 2 · 컷 9–11(segments) v5 — 키스 클로즈업 + 거친 대사가 든 이전 프롬프트(가짜, 같은 꼴).
+_CR195_SHOT = ("Shot 9 (0-3s), extreme close-up: Beomgeonu kisses Yeouijun's lips, eyes closed. Beomgeonu, spoken (audio only, never "
+               "written on screen): \"물건 큰 놈이랑 함께 자면\"")
+_CR195_SHOT_SOFT = "Shot 9 (0-3s), extreme close-up: Beomgeonu rests a hand on Yeouijun's cheek, eyes closed."
+_CR195_DIALOGUE = 'DIALOGUE: Yeouijun (Korean, lips move): "씨발, 그만해"'
+_CR195_FLAG_TEXT = ("영상 모델의 콘텐츠 검사에서 거절됐습니다. 대사를 부드럽게 바꿔 한 번 더 시도했지만 거절됐습니다. "
+                    "키스·노출·거친 대사가 있는 컷을 빼고 다시 골라 보세요.")
+_CR195_RETRY_TEXT = "영상 모델의 콘텐츠 검사에서 거절됐습니다. 대사를 부드럽게 바꿔 한 번 더 시도하는 중입니다."
+# 작업 195 화면(node): 다시 내는 중 안내 · 실패 줄 · 상태 줄 · 실패 뒤 [다시 시도] 그대로(실제 서버 보기).
+_CR195_NODE = r"""
+var S = SERVER;
+function N(tag) { return new FakeNode(tag || "div"); }
+function paint(view) {
+  var mats = {};
+  (view.versions || []).forEach(function (v) { if (v.sourceKey) mats[v.sourceKey] = { duration: 3 }; });
+  var ctx = { clips: [], materials: mats };
+  var fix = { view: view, previewMid: "", clipId: "", dom: { versions: N(), reload: N("button"), run: N("p"), picks: {} } };
+  editFixPaintVersions(ctx, fix);
+  editFixPaintRun(fix);
+  return [byClass(fix.dom.versions, "vnew-edit-fix-version").map(function (r) {
+    function texts(cls) { return byClass(r, cls).map(function (x) { return x.textContent; }); }
+    return [texts("vnew-edit-fix-version-name").join(""), texts("vnew-edit-fix-error"), texts("vnew-hint")];
+  }), fix.dom.run.textContent];
+}
+async function run() {
+  var o = {};
+  o.mid = paint(S.mid);
+  o.fail = paint(S.fail);
+  o.other = paint(S.other);
+  var d = { draft: N(), changes: N(), newField: N(), result: N(), composed: N(), meter: N(), problems: N(), cost: N(), submit: N("button"),
+            draftStatus: N(), request: N("textarea"), extra: N("textarea") };
+  d.request.value = S.fail.draft.requestKo;
+  var fix = { view: S.fail, dom: d, draftId: S.fail.draft.id, model: S.fail.draft.model, segments: S.segs, total: S.total,
+              clip: { in: 0, out: S.total }, selNow: "" };
+  fix.draftSig = editFixComposeSig(fix);
+  editFixPaintCompose(fix);
+  o.submit = [d.submit.disabled, d.submit.textContent, d.submit.style.display];
+  out.cr = o;
+  out.innerHTML = innerHTMLUsed;
+  console.log(JSON.stringify(out));
+}
+run().catch(function (e) { console.error(String((e && e.stack) || e)); process.exit(1); });
+"""
+
+
+def check_vnew_retake_content_flag_195() -> None:
+    """작업 195 — ⑦ AI로 고치기: fal 콘텐츠 검사 거절을 본 생성처럼. 가짜 fal(조회 결과 422 · 제출 422)·LLM·저장소(191·194 하네스), 유료 0.
+
+    (cr-a) 처음 거절(조회 결과, fal.rejection 원문) → 같은 번호 attempt 2 로 1번 다시: 머리(EDIT · @Video1 · RANGE · CONTEXT) 그대로, CONTEXT 에
+           DIALOGUE 줄 · 대사 조각 · 한글 따옴표 0, 키스 → 본 생성 센 순화, 참고 표시 · 참고 이미지 · @Video1 같음, 바이트 ≤ 처음, 버전 completed ·
+           failureKind 지움 · contentRetry, 다시 내는 중 보기 contentNote · live, 기록 2줄(failed → completed), 원장 제출마다 1건
+    (cr-b) 다시 낸 것도 거절 → failed · failureKind contentFlag · 고정 한국어 문구(영어 원문 없음) · 제출 2번뿐, 사용자가 다시 내면 같은 번호
+           attempt 3 · contentRetry 지움 · 자동 순화 다시 가능
+    (cr-c) 다른 fal 오류(거절 원문 · 소리 거절)는 지금 문구 · failureKind 그대로, 다시 내지 않음
+    (cr-d) 제출 자체 거절(422 content checker) → 원장 0 · 순화해 1번 다시, 두 번 다 제출 거절 → 제출 0 · 원장 0 · contentFlag
+    (cr-e) 원장 = 본 생성: 본 생성 테이크 조회 거절 → 순화 다시(제출 2 · 원장 2), 제출 거절 → 원장 0 — ⑦ 와 같은 수
+    (cr-f) 화면(node): 다시 내는 중 상태 줄 · 줄 안내, 실패 줄 · 상태 줄 = 한국어 문구, 다른 오류 문구 그대로, 실패 뒤 [다시 시도 ($x)] 켜짐 ·
+           innerHTML 0, USER_FACING_KINDS contentFlag, LF · node --check
+    """
+    sys.path.insert(0, str(ROOT / "app"))
+    import traceback as _tb  # noqa: PLC0415
+
+    bad: list[str] = []
+    seen: set[str] = set()
+    owner = _RTK_OWNER
+    node = shutil.which("node")
+    server: dict = {}
+
+    def expect(group: str, got, want, what: str) -> None:
+        seen.add(group)
+        if got != want:
+            bad.append(f"({group}) {what}\n      결과 {got!r}\n      기대 {want!r}")
+
+    hangul_quote = re.compile(r'"[^"\n]*[가-힣][^"\n]*"')
+    saved_tempdir = tempfile.tempdir
+    private_tmp = tempfile.mkdtemp(prefix="cr195-tmp-")
+    tempfile.tempdir = private_tmp
+    try:
+        with _guard_real_llm() as real_calls, _LogCapture(), _Rtk1Env(owner) as env, _pin_vnew(
+                VNEW_FX=True, VNEW_CASTING=True, VNEW_TAKE_REAL=True, VNEW_GEN_PARALLEL=2, POLL_INTERVAL_S=0, VNEW_TAKE_AUDIO=True,
+                VNEW_TAKE_RESOLUTION="480p", VNEW_PREPARE_STALE_S=300, VNEW_EDIT=True, VNEW_EDIT_RETAKE=True):
+            genmod, rt, falmod = env.genmod, env.rtmod, env.falmod
+            from src.vpoc import errors as vpoc_errors  # noqa: PLC0415
+
+            env.set(rt, "_translate", lambda **_k: ({"changeEn": "Hold the kiss a little longer."},
+                                                    {"model": "m", "inputTokens": 120, "outputTokens": 20}))
+            client = env.client()
+            env.set(genmod.stitcher, "probe_media", lambda path: env._probe(path))  # noqa: SLF001
+            env.set(genmod, "_conform_concat", lambda pieces, **kwargs: b"JOINED")
+
+            def fake_stitch(source_path, output_path, *, pieces, width, height, fps):
+                with open(output_path, "wb") as handle:
+                    handle.write(_edt_fake(round(sum(float(p["seconds"]) for p in pieces), 3), w=width, h=height, fps=fps))
+
+            env.set(rt, "_stitch_segments", fake_stitch)
+            flag = {"poll": 0, "submit": 0}
+            base_fal = env._fal  # noqa: SLF001
+
+            def fal_request(method, url, payload=None, *, where=""):  # 조회 결과 GET 을 flag["poll"] 번 422 content checker 로(fal 실측 꼴)
+                if method == "GET" and not url.endswith("/status") and flag["poll"] > 0:
+                    flag["poll"] -= 1
+                    env.fal_calls.append((method, url))
+                    raise env.VpocError("fal.poll", "HTTP422", _CF153_MSG, 502)
+                return base_fal(method, url, payload, where=where)
+
+            env.set(falmod, "_request", fal_request)
+            base_submit = genmod._previz_request  # noqa: SLF001
+
+            def submit_request(method, url, payload):  # 제출을 flag["submit"] 번 422 content checker 로
+                if flag["submit"] > 0:
+                    flag["submit"] -= 1
+                    raise env.VpocError("fal.submit", "HTTP422", "fal HTTP422: " + _CF153_MSG, 422)
+                return base_submit(method, url, payload)
+
+            env.set(genmod, "_previz_request", submit_request)
+
+            # ================= 준비: 194 와 같은 통 테이크 + v3 · v4(result), 이전 프롬프트에 키스 · 거친 대사 =================
+            pid = "prj_cr195"
+            env.take_done(client, pid)
+            gen_id = str(env.gen(pid)["genId"])
+            k1 = str(env.gen(pid)["units"][0]["webtoon"]["outputKey"])
+            env.store.blobs[k1] = _edt_fake(15.0, w=1920, h=1080, fps=24)
+            stem = k1.rsplit("/", 1)[0]
+            k3, k4 = stem + "-rt3/out3.mp4", stem + "-rt4/out4.mp4"
+            env.store.blobs.update({k3: _edt_fake(3.5, w=1920, h=1080, fps=24), k4: _edt_fake(3.5, w=1920, h=1080, fps=24)})
+            stamp = rt.now_iso()
+
+            def version(n: int, key: str, r_in: float, r_out: float, start: float) -> dict:
+                seconds = round(r_out - r_in, 3)
+                return {"n": n, "status": "completed", "attempt": 1, "outputKey": key, "scope": "range", "format": "template",
+                        "videoSource": rt.RESULT_SOURCE, "fromKey": k1, "fromN": 1, "model": _LR_ENDPOINT, "prompt": f"STYLE: v{n} prompt.",
+                        "range": {"in": r_in, "out": r_out, "start": start, "end": round(start + seconds, 3), "seconds": seconds,
+                                  "cutIds": ["c2"], "cuts": []}, "trimTo": seconds, "seconds": seconds, "createdAt": stamp,
+                        "finishedAt": stamp, "claim": ""}
+
+            env.set_state(pid, lambda data: data["cells"].update({"webtoon:take1": {
+                "versions": [version(3, k3, 7.5, 11.0, 7.5), version(4, k4, 11.5, 15.0, 11.5)], "draft": None}}))
+
+            def put_base(g: dict) -> None:
+                st = g["units"][0]["webtoon"]
+                lines = str(st.get("promptEn") or "").split("\n")
+                st["promptEn"] = "\n".join(lines[:1] + [_CR195_SHOT, _CR195_DIALOGUE] + lines[1:])
+
+            env.mutate_gen(pid, put_base)
+            base = f"/api/vnew/p/{pid}/edit"
+            mats = {m["sourceKey"]: m for m in (client.get(base).get_json() or {}).get("materials") or []}
+            mid1 = str((mats.get(k1) or {}).get("mid") or "")
+            segs = [{"sourceKey": k1, "in": 2.0, "out": 7.5}, {"sourceKey": k3, "in": 0.0, "out": 3.5},
+                    {"sourceKey": k4, "in": 0.5, "out": 3.5}]
+            rv0 = client.get(f"{base}/retake/{mid1}?in=0&out=12").get_json() or {}
+            compose_body = {"requestKo": "키스를 조금 더 길게", "segments": segs, "model": rv0.get("composeDefaultModel")}
+
+            def compose() -> tuple[int, dict, dict]:
+                r_c = client.post(f"{base}/retake/{mid1}/compose", json=compose_body)
+                dr = ((r_c.get_json() or {}).get("retake") or {}).get("draft") or {}
+                body = {"prompt": dr.get("prompt"), "requestKo": dr.get("requestKo"), "extraKo": dr.get("extraKo"),
+                        "confirmUsd": (dr.get("plan") or {}).get("usd"), "draftId": dr.get("id"), "model": dr.get("model"),
+                        "scope": "range", "segments": segs}
+                return r_c.status_code, dr, body
+
+            def last_version() -> dict:
+                return dict(env.state(pid)["cells"]["webtoon:take1"]["versions"][-1])
+
+            def row_of(view: dict, n: int) -> dict:
+                return next((r for r in view.get("versions") or [] if r.get("n") == n), {})
+
+            def videos(since: int) -> list[dict]:
+                return [e for e in env.ledger[since:] if e.get("kind") == "video"]
+
+            mid_views: list[dict] = []
+            real_resubmit = rt._resubmit  # noqa: SLF001
+
+            def spy(owner_, pid_, gen_id_, variant_, cell_id_, n_, version_):  # 다시 내기 직전 보기(실제 서버 보기)
+                if int(version_.get("attempt") or 1) >= 2:
+                    mid_views.append(json.loads(json.dumps(rt.retake_view(owner_, pid_, mid1))))
+                return real_resubmit(owner_, pid_, gen_id_, variant_, cell_id_, n_, version_)
+
+            env.set(rt, "_resubmit", spy)
+
+            # ================= (cr-a) 처음 거절 → 순화해 1번 다시 → 완성 =================
+            st_c, dr, body = compose()
+            p_draft = str(dr.get("prompt") or "")
+            d_lines = p_draft.split("\n")
+            expect("cr-a", [st_c, _CR195_SHOT in d_lines, _CR195_DIALOGUE in d_lines, rt.COMPOSE_CONTEXT_LINE in d_lines, dr.get("problems"),
+                            bool(hangul_quote.search(p_draft))],
+                   [200, True, True, True, [], True], "준비: compose 초안에 키스 샷 줄 · DIALOGUE 줄 · CONTEXT · 문제 0 · 한글 대사")
+            gen = env.gen(pid)
+            info = genmod.retake_plan(gen, model=str(dr.get("model") or ""), path=str(dr.get("path") or ""), seconds=12.0, original=True)
+            flag["poll"] = 1
+            req0, led0 = len(env.requests), len(env.ledger)
+            r_s = client.post(f"{base}/retake/{mid1}", json=body)
+            v5 = last_version()
+            reqs = env.requests[req0:]
+            prompts = [str((r.get("payload") or {}).get("prompt") or "") for r in reqs]
+            p1, p2 = (prompts + ["", ""])[:2]
+            l1, l2 = p1.split("\n"), p2.split("\n")
+            at = l1.index(rt.COMPOSE_CONTEXT_LINE) if rt.COMPOSE_CONTEXT_LINE in l1 else -1
+            ctx2 = l2[at + 1:]
+            pay = [r.get("payload") or {} for r in reqs]
+            expect("cr-a", [r_s.status_code, len(reqs), p1 == p_draft, at > 0 and l2[:at + 1] == l1[:at + 1],
+                            [l for l in ctx2 if rt._label_of(l).startswith("DIALOGUE")], [l for l in ctx2 if hangul_quote.search(l)],  # noqa: SLF001
+                            [l for l in ctx2 if "spoken (" in l], _CR195_SHOT_SOFT in ctx2, [l for l in ctx2 if "kiss" in l.lower()],
+                            rt._refs(p2) == rt._refs(p1), len(p2.encode()) <= len(p1.encode()),  # noqa: SLF001
+                            len({json.dumps(p.get("image_urls")) for p in pay}), len({json.dumps(p.get("video_urls")) for p in pay})],
+                   [202, 2, True, True, [], [], [], True, [], True, True, 1, 1],
+                   "처음 거절 → 1번만 다시: 처음 = 초안, 머리(EDIT · @Video1 · RANGE · CONTEXT) 줄 그대로, CONTEXT 에 DIALOGUE 줄 · 한글 대사 · "
+                   "spoken 조각 0, 키스 → 「rests a hand on … cheek」(본 생성 센 순화), 참고 표시 같음, 바이트 ≤ 처음, 참고 이미지 · @Video1 같음")
+            retry = v5.get("contentRetry") or {}
+            expect("cr-a", [(v5.get("n"), v5.get("status"), v5.get("attempt"), v5.get("failureKind"), v5.get("error"), v5.get("prompt") == p2),
+                            sorted(retry), retry.get("fromAttempt"), retry.get("droppedLines", 0) >= 1, retry.get("droppedPieces", 0) >= 1,
+                            retry.get("softenedLines", 0) >= 1],
+                   [(5, "completed", 2, "", "", True), ["at", "droppedLines", "droppedPieces", "fromAttempt", "softenedLines"], 1, True, True,
+                    True], "버전 v5: 같은 번호 · attempt 2 · completed · failureKind 지움 · 보낸 순화 프롬프트 · contentRetry 기록")
+            vid = videos(led0)
+            a_counts = (len(reqs), len(vid))  # (cr-e) 본 생성과 비교
+            log5 = [(e.get("attempt"), e.get("status")) for e in env.log(pid).get("webtoon:take1") or [] if e.get("version") == 5]
+            expect("cr-a", [[(e.get("units"), e.get("usd")) for e in vid], len({e.get("key") for e in vid}), log5],
+                   [[(info["billedSeconds"], info["usd"])] * 2, 2, [(1, "failed"), (2, "completed")]],
+                   "원장: fal 이 받아 준 제출마다 1건(견적 금액 · 다른 키 — 조회 거절도 계상), 기록 2줄(attempt 1 failed → 2 completed)")
+            mv = mid_views[0] if mid_views else {}
+            row_m = row_of(mv, 5)
+            rv_done = client.get(f"{base}/retake/{mid1}?in=0&out=12").get_json() or {}
+            expect("cr-a", [[row_m.get(k) for k in ("status", "attempt", "failureKind", "error", "contentNote")], mv.get("live"),
+                            row_of(rv_done, 5).get("contentNote"), rv_done.get("live")],
+                   [["preparing", 2, "contentFlag", "", _CR195_RETRY_TEXT], {"n": 5, "status": "preparing", "attempt": 2}, "", None],
+                   "다시 내는 중 보기: 줄 contentNote(첫 시도 안내) · failureKind contentFlag · live attempt 2, 끝나면 안내 없음")
+
+            # ================= (cr-b) 다시 낸 것도 거절 → 고정 한국어 문구 =================
+            _st, dr6, body6 = compose()
+            flag["poll"] = 2
+            req0, led0 = len(env.requests), len(env.ledger)
+            r_s6 = client.post(f"{base}/retake/{mid1}", json=body6)
+            v6 = last_version()
+            rv_fail = client.get(f"{base}/retake/{mid1}?in=0&out=12").get_json() or {}
+            row6 = row_of(rv_fail, 6)
+            expect("cr-b", [r_s6.status_code, len(env.requests) - req0, len(videos(led0)),
+                            (v6.get("n"), v6.get("status"), v6.get("attempt"), v6.get("failureKind"), v6.get("error")),
+                            "content checker" in str(v6.get("error")).lower() or "fal이" in str(v6.get("error")),
+                            [row6.get(k) for k in ("status", "error", "failureKind", "contentNote")], rv_fail.get("live"), rt.CONTENT_FLAG_TEXT,
+                            flag["poll"]],
+                   [202, 2, 2, (6, "failed", 2, "contentFlag", _CR195_FLAG_TEXT), False,
+                    ["failed", _CR195_FLAG_TEXT, "contentFlag", ""], None, _CR195_FLAG_TEXT, 0],
+                   "두 번 다 거절: 제출 2 · 원장 2(세 번째 없음), failed · failureKind contentFlag · 고정 한국어 문구(영어 원문 없음), 보기 줄 같음")
+            req0 = len(env.requests)
+            r_again = client.post(f"{base}/retake/{mid1}", json=body6)
+            v6b = last_version()
+            expect("cr-b", [r_again.status_code, len(env.requests) - req0,
+                            (v6b.get("n"), v6b.get("status"), v6b.get("attempt"), v6b.get("failureKind"), "contentRetry" in v6b),
+                            env.requests[-1]["payload"].get("prompt") == body6["prompt"]],
+                   [202, 1, (6, "completed", 3, "", False), True],
+                   "실패 뒤 [다시 시도]: 같은 번호 attempt 3 · 초안 프롬프트 그대로 · contentRetry 지움 → 완성")
+
+            # ================= (cr-c) 다른 fal 오류는 지금 그대로 =================
+            _st, _dr7, body7 = compose()
+            other_msg = "fal이 요청을 거절했습니다: Invalid input image size"
+            env.poll_script = [{"status": "Failed", "failureMessage": other_msg, "usage": None}]
+            req0, led0 = len(env.requests), len(env.ledger)
+            client.post(f"{base}/retake/{mid1}", json=body7)
+            v7 = last_version()
+            env.poll_script = [{"status": "Failed", "failureMessage": falmod._REJECT_AUDIO_MSG, "usage": None, "failureKind": "audio"}]  # noqa: SLF001
+            client.post(f"{base}/retake/{mid1}", json=body7)
+            v7b = last_version()
+            rv_other = client.get(f"{base}/retake/{mid1}?in=0&out=12").get_json() or {}
+            expect("cr-c", [(v7.get("n"), v7.get("status"), v7.get("attempt"), v7.get("error"), v7.get("failureKind"), "contentRetry" in v7),
+                            (v7b.get("n"), v7b.get("attempt"), v7b.get("error"), v7b.get("failureKind")), len(env.requests) - req0,
+                            len(videos(led0)), [row_of(rv_other, 7).get(k) for k in ("error", "failureKind", "contentNote")]],
+                   [(7, "failed", 1, other_msg, "", False), (7, 2, falmod._REJECT_AUDIO_MSG, "audio"), 2, 2,  # noqa: SLF001
+                    [falmod._REJECT_AUDIO_MSG, "audio", ""]],  # noqa: SLF001
+                   "다른 거절 원문 · 소리 거절: 지금 문구 · failureKind 그대로, 다시 내지 않음(제출 1번씩)")
+
+            # ================= (cr-d) 제출 자체 거절 =================
+            flag["submit"] = 1
+            req0, led0 = len(env.requests), len(env.ledger)
+            client.post(f"{base}/retake/{mid1}", json=body7)
+            v7c = last_version()
+            expect("cr-d", [len(env.requests) - req0, len(videos(led0)),
+                            (v7c.get("n"), v7c.get("status"), v7c.get("attempt"), (v7c.get("contentRetry") or {}).get("fromAttempt"))],
+                   [1, 1, (7, "completed", 4, 3)], "제출 거절(attempt 3) → 원장 0 · 순화해 1번 다시(attempt 4) → 완성, 원장 = 받아 준 제출 1건")
+            _st, _dr8, body8 = compose()
+            flag["submit"] = 2
+            req0, led0 = len(env.requests), len(env.ledger)
+            client.post(f"{base}/retake/{mid1}", json=body8)
+            v8 = last_version()
+            d_refused = len(videos(led0))
+            expect("cr-d", [len(env.requests) - req0, d_refused, (v8.get("n"), v8.get("status"), v8.get("attempt"),
+                                                                 v8.get("failureKind"), v8.get("error")), flag["submit"]],
+                   [0, 0, (8, "failed", 2, "contentFlag", _CR195_FLAG_TEXT), 0], "두 번 다 제출 거절 → 제출 0 · 원장 0 · contentFlag 문구")
+            retake_counts = [a_counts, d_refused]
+
+            # ================= (cr-e) 원장 = 본 생성 =================
+            pid_m = "prj_cr195_main"
+            flag["poll"] = 1
+            req0, led0 = len(env.requests), len(env.ledger)
+            g_m = env.take_done(client, pid_m)
+            st_m = g_m["units"][0]["webtoon"]
+            main_flag = (len(env.requests) - req0, len(videos(led0)))
+            pid_s = "prj_cr195_main_s"
+            flag["submit"] = 1
+            led0 = len(env.ledger)
+            g_s = env.take_done(client, pid_s)
+            main_refused = len(videos(led0))
+            expect("cr-e", [(st_m.get("status"), st_m.get("contentStep")), main_flag, g_s["units"][0]["webtoon"].get("status"),
+                            [main_flag, main_refused]],
+                   [("completed", 1), (2, 2), "failed", retake_counts],
+                   "본 생성: 조회 거절 → 순화 다시(제출 2 · 원장 2 — 거절된 제출도 계상), 제출 거절 → 원장 0 = ⑦(cr-a 2 · 2, cr-d 0)")
+            expect("cr-e", [real_calls, env.urlopen_calls, "contentFlag" in vpoc_errors.USER_FACING_KINDS, rt.CONTENT_FLAG_KIND],
+                   [[], [], True, "contentFlag"], "실제 LLM · urlopen 0, USER_FACING_KINDS 에 contentFlag(고정 문구 kind)")
+            server = {"mid": mv, "fail": rv_fail, "other": rv_other, "segs": segs, "total": 12.0, "usd": (dr6.get("plan") or {}).get("usd")}
+    except Exception as exc:  # noqa: BLE001
+        bad.append("(cr) 예외: " + repr(exc) + "\n" + _tb.format_exc()[:2500])
+    finally:
+        tempfile.tempdir = saved_tempdir
+        shutil.rmtree(private_tmp, ignore_errors=True)
+
+    vjs = (PUBLIC / "vnew.js").read_text(encoding="utf-8")
+    crlf = [n for n, p in (("retake.py", APP_SRC / "vnew" / "retake.py"), ("vnew.js", PUBLIC / "vnew.js"),
+                           ("check_vpoc.py", ROOT / "tools" / "check_vpoc.py")) if b"\r" in p.read_bytes()]
+    expect("cr-f", crlf, [], "LF")
+    if node:
+        check = subprocess.run([node, "--check", str(PUBLIC / "vnew.js")], capture_output=True, text=True, encoding="utf-8", timeout=60)
+        expect("cr-f", check.returncode, 0, "node --check frontend/public/vnew.js")
+    if not node:
+        warn("node 가 없어 작업 195 화면 실행 검사(cr-f 화면)를 건너뜁니다")
+    elif server.get("fail"):
+        code, problems = _edu_code(vjs, _EDU_SLICES)
+        bad.extend(p.replace("(edu-a)", "(cr-f)") for p in problems)
+        got, err = ({}, "") if problems else _lr_run_node(
+            node, "var SERVER = " + json.dumps(server, ensure_ascii=False) + ";\n" + _EDU_NODE_HARNESS + code + _CR195_NODE, "cr195_")
+        if err:
+            bad.append(f"(cr-f) node 실행 실패: {err}")
+        elif got:
+            g = got.get("cr") or {}
+            mid_rows, mid_run = (g.get("mid") or [[], ""])
+            fail_rows, fail_run = (g.get("fail") or [[], ""])
+            other_rows, other_run = (g.get("other") or [[], ""])
+            usd = "$" + f"{float(server['usd'] or 0):.2f}"
+            expect("cr-f", [[r for r in mid_rows if r[0].startswith("v5")], mid_run],
+                   [[["v5 · 준비 중", [], [_CR195_RETRY_TEXT]]], "v5 준비 중 (2번째 시도)… " + _CR195_RETRY_TEXT],
+                   "다시 내는 중: 버전 줄 안내 · 상태 줄 「v5 준비 중 (2번째 시도)… <첫 시도 안내>」")
+            expect("cr-f", [[r for r in fail_rows if r[0].startswith("v6")], fail_run, g.get("submit")],
+                   [[["v6 · 실패", [_CR195_FLAG_TEXT], []]], "v6 실패 — " + _CR195_FLAG_TEXT, [False, "다시 시도 (" + usd + ")", ""]],
+                   "두 번 거절: 실패 줄 · 상태 줄 = 고정 한국어 문구, [다시 시도 ($x)] 켜짐(실패 뒤에도 다시 만들 수 있다)")
+            expect("cr-f", [[r for r in other_rows if r[0].startswith("v7")], other_run],
+                   [[["v7 · 실패", [falmod_audio_msg()], []]], "v7 실패 — " + falmod_audio_msg()], "다른 오류: 지금 문구 그대로")
+            expect("cr-f", got.get("innerHTML"), False, "가짜 DOM 에서 innerHTML 0")
+    groups = {f"cr-{c}" for c in "abcdef"}
+    if groups - seen and not bad:
+        bad.append(f"검사하지 못한 묶음: {sorted(groups - seen)}")
+    if bad:
+        fail("작업 195 ⑦ AI로 고치기 콘텐츠 검사 거절(cr) 검사 실패\n" + "\n".join(f"  {item}" for item in bad))
+    else:
+        ok("작업 195 ⑦ AI로 고치기 콘텐츠 검사 거절 검사 (cr-a)처음 거절 → 같은 번호 1번 다시 · CONTEXT 대사 0 · 순화 · 머리 · 참고 그대로 "
+           "(cr-b)두 번 거절 → contentFlag · 한국어 문구 · 다시 시도 (cr-c)다른 오류 그대로 (cr-d)제출 거절 원장 0 (cr-e)원장 = 본 생성 "
+           "(cr-f)화면 안내 · 실패 줄 · [다시 시도] · LF · node --check" + ("" if node else " — node 없음: 화면 실행 건너뜀"))
+
+
+def falmod_audio_msg() -> str:
+    """작업 195 (cr-f): vpoc.fal 소리 거절 안내 문구(검사 함수 밖에서 node 결과와 비교할 때)."""
+    sys.path.insert(0, str(ROOT / "app"))
+    from src.vpoc import fal as _fal  # noqa: PLC0415
+
+    return _fal._REJECT_AUDIO_MSG  # noqa: SLF001
+
+
 def main() -> int:
     print("== vpoc1 check ==")
     check_compileall()
@@ -64994,6 +65360,7 @@ def main() -> int:
     check_vnew_compose_cleanup_193()
     check_vnew_retake_audio_scale_193b()
     check_vnew_retake_segments_194()
+    check_vnew_retake_content_flag_195()
     print()
     if warnings:
         print(f"경고 {len(warnings)}건")
