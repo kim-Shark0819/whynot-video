@@ -61488,6 +61488,151 @@ def check_topbar_project_187() -> None:
            f"(tp-d)프로젝트 밖 · 로그아웃 · 삭제 · 바꿈에 감춤(node 경우 {len(_TP_CASES)}) (tp-e)CSS 말줄임 · 가로 스크롤 없음 · LF")
 
 
+# ---------------------------------------------------------------- 작업 188 — ⑦ 편집: 고른 컷부터 재생(cp-a~g)
+def check_vnew_edit_cut_play_188() -> None:
+    """작업 188 — ⑦ 편집에서 고른 컷의 시작부터 재생(vnew.js · vnew.css). 정적 검사만(node 실행 · 서버 · 네트워크 0).
+
+    (cp-a) 고른 클립 칸: [▶ 이 컷 처음부터 재생] · [이 컷만 재생] · 재생 중이면 그 버튼이 [일시정지] · 안내 한 줄(vnew-hint)
+    (cp-b) 시작 = editStarts(ctx.clips).starts[고른 클립], 늘 하던 editPause · editSeek · editPlay 길만(따로 재생하는 길 없음)
+    (cp-c) [이 컷만]: 누른 때 클립으로 멈출 자리(그 컷 끝 한 프레임 앞)를 재고, editTick 이 다음 클립으로 넘어가기 전에 멈춘다 ·
+           멈춤(editPause) · 옮기기(editSeek) · 편집(editChanged) · 다른 클립 고르기(editSelect)에 지운다
+    (cp-d) 클립 상자 · 소리 상자 dblclick → 고르고 재생, 양 끝 손잡이 · 끄는 중 · 끌기/다듬기 직후는 무시(editTrack 이 끝난 때를 남김)
+    (cp-e) Enter / Shift+Enter: 입력칸 거름 뒤 · 버튼/링크의 Enter 와 ⑦ 밖은 건드리지 않음 · 고른 클립 없으면 아무것도 안 함 ·
+           editKeyAction(순수 대응표)에는 Enter 를 넣지 않는다
+    (cp-f) 불러오는 중 · 저장 중 · 내보내기 중 · 클립 없음 · 영상 주소 없음이면 막는다(저장 상태가 바뀔 때도 다시 칠함)
+    (cp-g) vnew.css 188 구역: 새 클래스 정의 · 줄 바꿈(flex-wrap) · 768px 규칙 · 가로 스크롤 없음 · LF
+    """
+    bad: list[str] = []
+    seen: set[str] = set()
+
+    def expect(group: str, got, want, what: str) -> None:
+        seen.add(group)
+        if got != want:
+            bad.append(f"({group}) {what}\n      결과 {got!r}\n      기대 {want!r}")
+
+    def missing(text: str, needles) -> list[str]:
+        return [n for n in needles if n not in text]
+
+    try:
+        vjs = (PUBLIC / "vnew.js").read_text(encoding="utf-8")
+        css = (PUBLIC / "vnew.css").read_text(encoding="utf-8")
+        names = ("editCutPlayBox", "editCutPlayBlocked", "editCutPlayOn", "editRenderCutPlay", "editPlayCut", "editCutPlayEnd",
+                 "editClipDblClick", "editCutKeyOk", "editBuild", "editRenderPlayButton", "editRenderSave", "editTick", "editPause",
+                 "editSeek", "editChanged", "editSelect", "editClipBoxes", "editTrack", "editOnKey", "editKeyAction", "editNewCtx")
+        body = {name: _jlu_body(vjs, name) for name in names}
+        expect("cp-a", sorted(name for name, text in body.items() if not text), [], "함수가 vnew.js 에 하나씩 있다")
+
+        # ---------------- (cp-a) 버튼 · 글 · 안내
+        expect("cp-a", [missing(body["editCutPlayBox"], ['"▶ 이 컷 처음부터 재생"', '"이 컷만 재생"', "editPlayCut(ctx, only, false);",
+                                                         'el("span", "vnew-hint vnew-edit-cutplay-note", EDIT_CUT_PLAY_NOTE)',
+                                                         "ctx.dom.cutPlay = { from: from, only: only, note: note };"]),
+                        'var EDIT_CUT_PLAY_NOTE = "더블클릭 또는 Enter: 이 컷부터 재생 · Shift+Enter: 이 컷만";' in vjs,
+                        "tools.appendChild(editCutPlayBox(ctx));" in body["editBuild"],
+                        missing(body["editRenderCutPlay"], ['btn.textContent = on ? "❚❚ 일시정지" : btn._idleText;', "var on = editCutPlayOn(ctx, btn._mode);"]),
+                        "ctx.playing && ctx.cutPlay && ctx.cutPlay.mode === mode" in body["editCutPlayOn"],
+                        "editRenderCutPlay(ctx);" in body["editRenderPlayButton"],
+                        'class="vnew-edit-tool"' in body["editCutPlayBox"] or '"vnew-edit-tool"' in body["editCutPlayBox"]],
+               [[], True, True, [], True, True, False],
+               "고른 클립 칸 두 버튼 · 안내 한 줄 · 그 버튼으로 재생 중이면 [❚❚ 일시정지] · 재생/멈춤/도구줄을 그릴 때 다시 칠함(도구 버튼 수는 그대로)")
+
+        # ---------------- (cp-b) 시작 자리 · 같은 재생 길
+        play = body["editPlayCut"]
+        expect("cp-b", [bool(re.search(r"var info = editStarts\(ctx\.clips\);\n\s+var start = info\.starts\[index\];", play)),
+                        "var index = ctx.sel;" in play,
+                        0 <= play.find("editPause(ctx);\n    editSeek(ctx, start);\n    editPlay(ctx);"),
+                        [w for w in ("editPlayVideo(", ".play(", "currentTime", "editRaf(", "editSetTime(") if w in play],
+                        "if (!restart && editCutPlayOn(ctx, mode)) {\n      editPause(ctx);\n      return;\n    }" in play,
+                        "if (editCutPlayBlocked(ctx)) return;" in play,
+                        "if (ctx.t >= editStarts(ctx.clips).total - 0.01) ctx.t = 0;" in _jlu_body(vjs, "editPlay")],
+               [True, True, True, [], True, True, True],
+               "시작 = editStarts(ctx.clips).starts[고른 클립] · editPause → editSeek(start) → editPlay(따로 영상을 재생하지 않는다) · 재생 중 같은 버튼 = 일시정지")
+
+        # ---------------- (cp-c) [이 컷만]: 멈출 자리 · 멈춤 · 지우기
+        tick = body["editTick"]
+        expect("cp-c", ["var end = index + 1 < ctx.clips.length ? info.starts[index + 1] : info.total;" in play,
+                        "var stopAt = Math.max(start, end - 1 / (editFpsOf(ctx, clip) * editSpeedOf(clip)));" in play,
+                        0 <= play.find("editPlay(ctx);") < play.find("ctx.cutPlay = { mode: mode, index: index, stopAt: stopAt };"),
+                        'if (ctx.cutPlay && ctx.cutPlay.mode === "only" && (reached || ctx.curIndex !== ctx.cutPlay.index)) {' in tick,
+                        0 <= tick.find("editCutPlayEnd(ctx);") < tick.find("editAdvance(ctx, ctx.curIndex + 1);"),
+                        "var reached = now >= endAt - 0.5 / editFpsOf(ctx, clip) || video.ended;" in tick,
+                        missing(body["editCutPlayEnd"], ["var stopAt = ctx.cutPlay.stopAt;", "editPause(ctx);\n    editSeek(ctx, stopAt);"])],
+               [True, True, True, True, True, True, []],
+               "누른 때 클립으로 그 컷 끝(다음 클립 시작 · 디졸브면 겹침 시작 · 마지막이면 전체 끝) 한 프레임 앞을 재고, editTick 이 넘어가기 전에 멈춘다")
+        expect("cp-c", ["ctx.cutPlay = null;" in body["editPause"], "ctx.cutPlay = null;" in body["editSeek"],
+                        "ctx.cutPlay = null;" in body["editChanged"],
+                        "if (ctx.cutPlay && ctx.cutPlay.index !== ctx.sel) ctx.cutPlay = null;" in body["editSelect"],
+                        "cutPlay: null," in body["editNewCtx"], "dragEndAt: 0," in body["editNewCtx"]],
+               [True] * 6, "멈춤 · 옮기기 · 편집 · 다른 클립 고르기에 멈출 자리를 지운다(처음 값 null)")
+
+        # ---------------- (cp-d) 두 번 누르기
+        dbl = body["editClipDblClick"]
+        expect("cp-d", [missing(body["editClipBoxes"], ['box.addEventListener("dblclick", function (event) {',
+                                                        'abox.addEventListener("dblclick", function (event) {',
+                                                        "editClipDblClick(ctx, parts, event);",
+                                                        'box.addEventListener("pointerdown", function (event) {\n      editClipPointer(ctx, parts, event);',
+                                                        'inEdge.addEventListener("pointerdown", function (event) {\n      editEdgePointer(ctx, parts, "in", event);']),
+                        missing(dbl, ["if (!editAlive(ctx) || ctx.busy || ctx.drag) return;",
+                                      "if (editInside(parts.inEdge, target) || editInside(parts.outEdge, target)) return;",
+                                      "if (Date.now() - (ctx.dragEndAt || 0) < EDIT_DBL_AFTER_DRAG_MS) return;",
+                                      "editSelect(ctx, parts.index);\n    editPlayCut(ctx, false, true);"]),
+                        "if (drag.moved) ctx.dragEndAt = Date.now();" in body["editTrack"],
+                        "var EDIT_DBL_AFTER_DRAG_MS = 500;" in vjs],
+               [[], [], True, True],
+               "클립 · 소리 상자 dblclick = 고르고 처음부터 재생, 손잡이 위 · 끄는 중 · 끌기/다듬기 직후는 무시(한 번 누르기 · 끌기 · 다듬기 길은 그대로)")
+
+        # ---------------- (cp-e) Enter / Shift+Enter
+        key = body["editOnKey"]
+        guard = 'if (tag === "input" || tag === "textarea" || tag === "select" || target.isContentEditable) return;'
+        enter = 'if (event.key === "Enter" && !event.ctrlKey && !event.metaKey) {'
+        expect("cp-e", [0 <= key.find(guard) < key.find(enter) < key.find("var action = editKeyAction("),
+                        missing(key, ["if (!editCutKeyOk(ctx, target)) return;", "if (!event.repeat) editPlayCut(ctx, !!event.shiftKey, false);"]),
+                        missing(body["editCutKeyOk"], ["if (!editSelected(ctx)) return false;",
+                                                       'if (tag === "button" || tag === "a" || tag === "summary" || tag === "option") return false;',
+                                                       "t === document.body || t === document.documentElement || editInside(ctx.root, t)"]),
+                        "Enter" in body["editKeyAction"],
+                        0 <= key.find("if (ctx.trMenu) {") < key.find(enter) and 0 <= key.find("if (ctx.fix && ctx.fix.open) {") < key.find(enter)],
+               [True, [], [], False, True],
+               "입력칸(range 포함) 거름 뒤에 Enter = 이 컷부터 · Shift+Enter = 이 컷만, 버튼/링크 · ⑦ 밖 · 고른 클립 없음은 그대로 둠 · 메뉴/패널이 열리면 안 받음")
+
+        # ---------------- (cp-f) 막기
+        expect("cp-f", [missing(body["editCutPlayBlocked"], ["ctx.busy", "ctx.saving", "ctx.exporting", "!ctx.clips.length", "!clip",
+                                                             "!editUrlOf(ctx, clip.sourceKey)"]),
+                        "btn.disabled = on ? !!ctx.busy : blocked;" in body["editRenderCutPlay"],
+                        "editRenderCutPlay(ctx);" in body["editRenderSave"],
+                        "if (!editAlive(ctx) || ctx.busy) return;" in play],
+               [[], True, True, True], "불러오는 중 · 저장 중 · 내보내기 중 · 클립 없음 · 고른 클립 없음 · 영상 주소 없음이면 막고, 저장 상태가 바뀔 때도 다시 칠한다")
+
+        # ---------------- (cp-g) CSS
+        start_css = css.find("/* ================================================================ ⑦ 편집 — 고른 컷부터 재생(작업 188)")
+        section = css[start_css:] if start_css >= 0 else ""
+        classes = ["vnew-edit-cutplay", "vnew-edit-cutplay-from", "vnew-edit-cutplay-only", "vnew-edit-cutplay-note"]
+        defined = set(re.findall(r"\.(vnew-edit-[a-z0-9-]+)", section))
+        widths = [int(w) for w in re.findall(r"(?<![-\w])(?:min-)?width: (\d+)px", section)]
+        narrow = section[section.find("@media (max-width: 768px) {"):] if "@media (max-width: 768px) {" in section else ""
+        expect("cp-g", [start_css > 0, sorted(set(classes) - defined), sorted(c for c in classes if c not in vjs),
+                        "flex-wrap: wrap;" in _edu_css_block(css, ".vnew-edit-cutplay", start_css),
+                        "flex: 1 1 100%;" in _edu_css_block(css, ".vnew-edit-cutplay-note", start_css),
+                        bool(narrow), "white-space: normal;" in narrow, "overflow-x" in section, max(widths or [0]) <= 960,
+                        any(b"\r" in (PUBLIC / name).read_bytes() for name in ("vnew.css", "vnew.js")), css.endswith("}\n")],
+               [True, [], [], True, True, True, True, False, True, False, True],
+               "CSS 188 구역: 새 클래스 정의 · 버튼 줄 바꿈 · 안내 한 줄 전체 · 768px 이하 감싸기 · 가로 스크롤 없음 · LF")
+    except Exception as exc:  # noqa: BLE001
+        import traceback as _tb  # noqa: PLC0415
+
+        bad.append("(cp) 예외: " + repr(exc) + "\n" + _tb.format_exc()[:1200])
+
+    groups = {f"cp-{c}" for c in "abcdefg"}
+    if groups - seen and not bad:
+        bad.append(f"검사하지 못한 묶음: {sorted(groups - seen)}")
+    if bad:
+        for item in bad:
+            fail("작업 188 ⑦ 편집 고른 컷부터 재생 " + item)
+    else:
+        ok("작업 188 ⑦ 편집 고른 컷부터 재생 정적 검사 (cp-a)두 버튼 · 일시정지 · 안내 (cp-b)starts[sel] · editSeek/editPlay 길 "
+           "(cp-c)이 컷만 멈춤 · 멈춤/옮기기/편집/고르기에 지움 (cp-d)dblclick · 끌기 뒤 무시 (cp-e)Enter/Shift+Enter · 입력칸 거름 "
+           "(cp-f)막기 (cp-g)CSS 감싸기 · LF")
+
+
 
 
 def main() -> int:
@@ -61649,6 +61794,7 @@ def main() -> int:
     check_vnew_edit_gap_slip_185()
     check_vnew_edit_gap_slip_ui_186()
     check_topbar_project_187()
+    check_vnew_edit_cut_play_188()
     print()
     if warnings:
         print(f"경고 {len(warnings)}건")

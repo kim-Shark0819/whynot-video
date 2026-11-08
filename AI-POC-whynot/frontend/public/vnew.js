@@ -8859,6 +8859,9 @@
   // 작업 186: 대사 타이밍(audioSlip) — 클립 소리만 화면 안에서 −1~1초(0.05초 단위, 양수 = 소리가 늦게). 서버 edit.AUDIO_SLIP_MAX_S 와 같다.
   var EDIT_SLIP_MAX_S = 1;
   var EDIT_SLIP_NOTE = "소리만 옮깁니다. 말하는 사람 입이 화면에 보이면 입 모양과 어긋날 수 있습니다.";
+  // 작업 188: 고른 컷부터 재생([▶ 이 컷 처음부터 재생] · [이 컷만 재생] · 클립 두 번 누르기 · Enter / Shift+Enter).
+  var EDIT_CUT_PLAY_NOTE = "더블클릭 또는 Enter: 이 컷부터 재생 · Shift+Enter: 이 컷만";
+  var EDIT_DBL_AFTER_DRAG_MS = 500; // 끌기 · 끝 다듬기를 막 끝낸 뒤 이 안의 두 번 누르기는 재생하지 않는다
   // 작업 186: 빈틈 다듬기(POST /edit/tighten 제안 → 확인 → 실행 취소 한 단계로 적용). 서버가 그대로 둔 이유(perClip skipped)의 글.
   var EDIT_TIGHTEN_SKIP = {
     muted: "그대로 둠 (소리 끈 클립)",
@@ -9683,6 +9686,8 @@
       probeTimer: 0,
       urlRetryAt: 0,
       drag: null,
+      dragEndAt: 0, // 작업 188: 마지막으로 움직인 끌기 · 끝 다듬기가 끝난 때(Date.now) — 그 직후 두 번 누르기는 무시(editClipDblClick)
+      cutPlay: null, // 작업 188: 고른 컷부터 재생 {mode: "from"|"only", index, stopAt}(editPlayCut). 멈춤 · 옮기기 · 편집 · 다른 클립 고르기면 null
       notice: "",
       fix: null, // 지시서 116: 열린 [AI로 고치기] 패널(editFixOpen). 닫으면 null
       trEls: [], // 작업 182: 경계마다 {btn(전환 손잡이), wedge(디졸브 겹침)} — editRenderFx
@@ -10076,6 +10081,7 @@
     tools.appendChild(editRetimeBox(ctx));
     tools.appendChild(editAudioFxBox(ctx)); // 작업 182: 고른 클립 J/L 컷
     tools.appendChild(editDialogueBox(ctx)); // 작업 186: 고른 클립 대사 타이밍 · 이 클립 빈틈 다듬기
+    tools.appendChild(editCutPlayBox(ctx)); // 작업 188: 고른 클립 이 컷 처음부터 재생 · 이 컷만 재생
     var zoomWrap = el("label", "vnew-edit-zoom");
     zoomWrap.title = "확대/축소(+ / −)";
     zoomWrap.appendChild(el("span", "vnew-edit-tool-icon", "🔍"));
@@ -10453,6 +10459,115 @@
     }
   }
 
+  /* ---- 작업 188: 고른 컷부터 재생(늘 하던 editSeek · editPlay · editPause 길만 쓴다) ---- */
+
+  /* 도구줄의 고른 클립 [▶ 이 컷 처음부터 재생] · [이 컷만 재생]과 안내 한 줄. 이 버튼으로 재생 중이면 그 버튼이 [일시정지](editRenderCutPlay). */
+  function editCutPlayBox(ctx) {
+    var box = el("div", "vnew-edit-cutplay");
+    function button(className, text, only, title) {
+      var btn = el("button", "outline-button " + className, text);
+      btn.type = "button";
+      btn._idleText = text;
+      btn._idleTitle = title;
+      btn._mode = only ? "only" : "from";
+      btn.title = title;
+      btn.addEventListener("click", function () {
+        editPlayCut(ctx, only, false);
+      });
+      box.appendChild(btn);
+      return btn;
+    }
+    var from = button("vnew-edit-cutplay-from", "▶ 이 컷 처음부터 재생", false,
+      "고른 클립의 첫 프레임부터 재생합니다 — 다음 클립으로 이어집니다 (Enter · 클립 더블클릭)");
+    var only = button("vnew-edit-cutplay-only", "이 컷만 재생", true,
+      "고른 클립의 첫 프레임부터 그 클립 끝까지만 재생하고 멈춥니다 (Shift+Enter)");
+    var note = el("span", "vnew-hint vnew-edit-cutplay-note", EDIT_CUT_PLAY_NOTE);
+    box.appendChild(note);
+    ctx.dom.cutPlay = { from: from, only: only, note: note };
+    return box;
+  }
+
+  /* 불러오는 중 · 저장 중(PUT) · 내보내기 요청 중 · 클립 없음 · 고른 클립 없음 · 그 클립 영상(필름) 주소가 아직 없으면 막는다. */
+  function editCutPlayBlocked(ctx) {
+    var clip = editSelected(ctx);
+    return !!(ctx.busy || ctx.saving || ctx.exporting || !ctx.clips.length || !clip || !editUrlOf(ctx, clip.sourceKey));
+  }
+
+  /* mode("from" | "only") 버튼으로 시작한 재생이 지금 도는 중인가. */
+  function editCutPlayOn(ctx, mode) {
+    return !!(ctx.playing && ctx.cutPlay && ctx.cutPlay.mode === mode);
+  }
+
+  /* 두 버튼 글 · 막기. 재생 중인 버튼은 [❚❚ 일시정지](저장이 시작돼도 누를 수 있게 불러오는 중에만 막는다). */
+  function editRenderCutPlay(ctx) {
+    var c = ctx.dom.cutPlay;
+    if (!c) return;
+    var blocked = editCutPlayBlocked(ctx);
+    [c.from, c.only].forEach(function (btn) {
+      var on = editCutPlayOn(ctx, btn._mode);
+      btn.textContent = on ? "❚❚ 일시정지" : btn._idleText;
+      btn.title = on ? "일시정지" : btn._idleTitle;
+      btn.setAttribute("aria-pressed", on ? "true" : "false");
+      btn.disabled = on ? !!ctx.busy : blocked;
+    });
+  }
+
+  /* 고른 컷의 타임라인 시작(editStarts.starts[sel])으로 옮겨 재생한다. J/L 컷 · 디졸브는 그 자리를 지나는 보통 재생과 같다(editSeek · editTick).
+     only 면 그 컷 끝 — 다음 클립이 화면을 받는 자리(디졸브면 겹침 시작), 마지막 클립이면 전체 끝 — 에서 멈추도록 멈출 자리를
+     지금 클립으로 잰다(그 자리 한 프레임 앞, 다음 클립 첫 프레임이 아니다). restart 가 아니면 이 버튼으로 재생 중일 때 다시 누르면 일시정지. */
+  function editPlayCut(ctx, only, restart) {
+    if (!editAlive(ctx) || ctx.busy) return;
+    var mode = only ? "only" : "from";
+    if (!restart && editCutPlayOn(ctx, mode)) {
+      editPause(ctx);
+      return;
+    }
+    if (editCutPlayBlocked(ctx)) return;
+    var index = ctx.sel;
+    var clip = ctx.clips[index];
+    var info = editStarts(ctx.clips);
+    var start = info.starts[index];
+    var end = index + 1 < ctx.clips.length ? info.starts[index + 1] : info.total;
+    var stopAt = Math.max(start, end - 1 / (editFpsOf(ctx, clip) * editSpeedOf(clip)));
+    editPause(ctx);
+    editSeek(ctx, start);
+    editPlay(ctx);
+    if (!ctx.playing) return;
+    ctx.cutPlay = { mode: mode, index: index, stopAt: stopAt };
+    editRenderCutPlay(ctx);
+  }
+
+  /* [이 컷만 재생]이 그 컷 끝에 닿았다(editTick): 멈추고(ctx.cutPlay 도 지운다) 그 컷 마지막 프레임에 재생헤드를 둔다. */
+  function editCutPlayEnd(ctx) {
+    var stopAt = ctx.cutPlay.stopAt;
+    editPause(ctx);
+    editSeek(ctx, stopAt);
+    editFollowHead(ctx);
+  }
+
+  /* 클립(영상 상자 · 그 소리 상자) 두 번 누르기 = 고르고 그 컷 처음부터 재생. 양 끝 손잡이 위이거나, 끄는 중이거나,
+     끌기 · 끝 다듬기를 막 끝낸(EDIT_DBL_AFTER_DRAG_MS 안) 두 번 누르기는 무시한다. 한 번 누르기 · 끌기 · 다듬기는 그대로다. */
+  function editClipDblClick(ctx, parts, event) {
+    if (!editAlive(ctx) || ctx.busy || ctx.drag) return;
+    var target = event ? event.target : null;
+    if (editInside(parts.inEdge, target) || editInside(parts.outEdge, target)) return;
+    if (Date.now() - (ctx.dragEndAt || 0) < EDIT_DBL_AFTER_DRAG_MS) return;
+    if (event && event.preventDefault) event.preventDefault();
+    editSelect(ctx, parts.index);
+    editPlayCut(ctx, false, true);
+  }
+
+  /* Enter / Shift+Enter 를 ⑦ 이 받아도 되는가: 초점이 본문이나 ⑦ 화면 안의 버튼 · 링크가 아닌 곳이고(그 요소의 Enter 는 그대로), 고른 클립이 있을 때. */
+  function editCutKeyOk(ctx, target) {
+    if (!editSelected(ctx)) return false;
+    var t = target || {};
+    var tag = String(t.tagName || "").toLowerCase();
+    if (tag === "button" || tag === "a" || tag === "summary" || tag === "option") return false;
+    var role = t.getAttribute ? String(t.getAttribute("role") || "") : "";
+    if (role) return false;
+    return t === document.body || t === document.documentElement || editInside(ctx.root, t);
+  }
+
   /* 클립들 재료 mid(소리 끈 클립 제외, 한 번씩). res 가 없으면 파형을 아직 안 받은 것만, 있으면 서버가 "noFilm" 으로 둔 것만. */
   function editTightenMids(ctx, clips, res) {
     var skipped = {};
@@ -10672,6 +10787,7 @@
     var box = ctx.dom.saveBox;
     if (!box) return;
     editRenderTightenTools(ctx); // 작업 186: 저장 중(PUT)에는 빈틈 다듬기를 막는다
+    editRenderCutPlay(ctx); // 작업 188: 고른 컷부터 재생도
     var kind = editSaveStateOf(ctx);
     clear(box);
     box.className = "vnew-edit-save is-" + kind;
@@ -10695,6 +10811,7 @@
     if (btn._label) btn._label.textContent = ctx.playing ? "멈춤" : "재생";
     editToolTitle(btn, ctx.playing ? "멈춤" : "재생", "Space");
     btn.disabled = !ctx.clips.length;
+    editRenderCutPlay(ctx); // 작업 188: 재생 · 멈춤 · 도구줄을 그릴 때마다 [이 컷 …] 두 버튼도
   }
 
   function editRenderTools(ctx) {
@@ -10788,6 +10905,13 @@
     });
     abox.addEventListener("click", function () {
       if (editAlive(ctx) && !ctx.busy) editSelect(ctx, parts.index);
+    });
+    // 작업 188: 두 번 누르기 = 고르고 그 컷 처음부터 재생(끌기 · 끝 다듬기 뒤의 두 번 누르기는 editClipDblClick 이 거른다)
+    box.addEventListener("dblclick", function (event) {
+      editClipDblClick(ctx, parts, event);
+    });
+    abox.addEventListener("dblclick", function (event) {
+      editClipDblClick(ctx, parts, event);
     });
     return parts;
   }
@@ -11105,6 +11229,7 @@
 
   function editSelect(ctx, index) {
     ctx.sel = index >= 0 && index < ctx.clips.length ? index : -1;
+    if (ctx.cutPlay && ctx.cutPlay.index !== ctx.sel) ctx.cutPlay = null; // 작업 188: 다른 클립을 고르면 이 컷 재생 표시 · 멈출 자리를 지운다
     ctx.clipEls.forEach(function (parts) {
       var method = parts.index === ctx.sel ? "add" : "remove";
       parts.box.classList[method]("is-selected");
@@ -11188,6 +11313,7 @@
     }
     function finish(cancelled) {
       cleanup();
+      if (drag.moved) ctx.dragEndAt = Date.now(); // 작업 188: 끌기 · 끝 다듬기를 끝낸 두 번 누르기는 재생하지 않는다(editClipDblClick)
       if (handlers.end) handlers.end(drag.dx, drag.moved && !cancelled, cancelled);
     }
     function up() {
@@ -11581,6 +11707,10 @@
   /* 타임라인 t 로 옮긴다: 그 클립 원본을 지금 <video> 에 두고 원본 시각을 맞춘다. 끝(전체 길이)이면 마지막 프레임. */
   function editSeek(ctx, t) {
     if (ctx.fxHold || ctx.fxLead) editFxStop(ctx); // 작업 182: 옮기면 겹쳐 재생하던 것을 끝낸다
+    if (ctx.cutPlay) {
+      ctx.cutPlay = null; // 작업 188: 재생헤드를 옮기면 [이 컷만] 멈출 자리를 지운다(editPlayCut 은 editPlay 뒤에 다시 둔다)
+      editRenderCutPlay(ctx);
+    }
     var total = editStarts(ctx.clips).total;
     ctx.t = Math.max(0, Math.min(total, Number(t) || 0));
     editPlaceHead(ctx);
@@ -11672,7 +11802,13 @@
     // 작업 182: 다음 클립으로 디졸브하면 그 초(원본 = 초 × 속도)만큼 일찍 바꿔 끼운다(다음 클립 화면 시작 = editStarts).
     var hasNext = ctx.curIndex + 1 < ctx.clips.length;
     var endAt = Number(clip.out) - (hasNext ? editDissolveOf(clip) * editSpeedOf(clip) : 0);
-    if (now >= endAt - 0.5 / editFpsOf(ctx, clip) || video.ended) {
+    var reached = now >= endAt - 0.5 / editFpsOf(ctx, clip) || video.ended;
+    // 작업 188: [이 컷만 재생]이면 그 컷 끝(다음 클립으로 넘어가는 자리)에서 넘어가지 않고 멈춘다(editCutPlayEnd).
+    if (ctx.cutPlay && ctx.cutPlay.mode === "only" && (reached || ctx.curIndex !== ctx.cutPlay.index)) {
+      editCutPlayEnd(ctx);
+      return;
+    }
+    if (reached) {
       if (ctx.curIndex + 1 >= ctx.clips.length) {
         ctx.t = editStarts(ctx.clips).total;
         editPause(ctx);
@@ -11709,6 +11845,7 @@
 
   function editPause(ctx) {
     ctx.playing = false;
+    ctx.cutPlay = null; // 작업 188: 멈추면 [이 컷만] 멈출 자리 · 이 컷 재생 표시를 지운다
     editCancelRaf(ctx.raf);
     ctx.raf = 0;
     ctx.vids.forEach(function (video) {
@@ -11924,6 +12061,13 @@
     var target = event.target || {};
     var tag = String(target.tagName || "").toLowerCase();
     if (tag === "input" || tag === "textarea" || tag === "select" || target.isContentEditable) return;
+    if (event.key === "Enter" && !event.ctrlKey && !event.metaKey) {
+      // 작업 188: Enter = 고른 컷 처음부터 재생, Shift+Enter = 이 컷만. 버튼 · 링크의 Enter · ⑦ 밖 · 고른 클립 없음이면 건드리지 않는다.
+      if (!editCutKeyOk(ctx, target)) return;
+      if (event.preventDefault) event.preventDefault();
+      if (!event.repeat) editPlayCut(ctx, !!event.shiftKey, false);
+      return;
+    }
     var action = editKeyAction(event.key, event.code, event.ctrlKey || event.metaKey, event.shiftKey);
     if (!action) return;
     if (event.preventDefault) event.preventDefault();
@@ -11942,6 +12086,7 @@
 
   function editChanged(ctx) {
     ctx.rev += 1;
+    ctx.cutPlay = null; // 작업 188: 편집하면 [이 컷만] 멈출 자리(편집 전 클립으로 잰 값)를 지운다 — 재생은 보통 재생으로 잇는다
     if (ctx.tighten) editTightenClose(ctx); // 작업 186: 편집이 바뀌면 받은(받는 중인) 빈틈 다듬기 제안은 버린다
     if (ctx.sel >= ctx.clips.length) ctx.sel = -1;
     editNote(ctx, "");
