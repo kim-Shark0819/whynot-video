@@ -1,6 +1,6 @@
 """vnew ⑦ 편집 — 영상 편집 타임라인(지시서 110, 2026-11-01).
 
-⑤에서 만든 영상(컷·테이크 결과)을 클립으로 늘어놓고 자르기·나누기·순서·소리 끄기를 고친 편집 문서(EDL)를 gen 마다
+⑤에서 만든 영상(컷·테이크 결과)을 클립으로 늘어놓고 자르기·나누기·순서·소리 끄기를 고친 편집 문서(EDL)를 gen·그림체 마다
 하나 저장하고, 문서대로 서버 ffmpeg 로 잘라 이어 붙여 mp4 하나로 내보낸다. 유료 생성 API 는 부르지 않는다.
 
 재료(허용 목록): 지금 gen 의 그 그림체(variant) 결과 영상만 클립 원본(sourceKey)이 될 수 있다(_material_items).
@@ -10,7 +10,8 @@
   - 옛 순차 모드: segments[i].<variant>.outputKey.
   - 합친 영상(finalReal·finalWebtoon done): 위 결과가 없을 때 기본 문서에 통째 1개.
 저장(메인 버킷, gen 루트 = generate._gen_root):
-  edit.json(편집 문서, 조건부 쓰기 → 409) · edit-export.json(내보내기 상태) · edit-media/index.json(길이·소리·크기·fps 캐시) ·
+  edit-<variant>.json(그림체별 편집 문서, 조건부 쓰기 → 409, 작업 189 — 옛 edit.json 은 읽기만, _saved_docs) ·
+  edit-export.json(내보내기 상태, 두 그림체가 함께 쓴다) · edit-media/index.json(길이·소리·크기·fps 캐시) ·
   edit-media/{mid}-strip.jpg · edit-media/{mid}-film.json(필름스트립·파형 피크, 처음 요청 때 한 번 만든다).
   내보낸 결과는 영상 버킷 {gen 루트}/final-edit-{n}.mp4.
 외부 호출 래퍼(검사가 가짜로 바꾼다): _download · _upload · _probe_file · _film_file · _export_segment · _export_join ·
@@ -177,7 +178,15 @@ def _root(owner: str, pid: str, gen_id: str) -> str:
     return generate._gen_root(owner, pid, gen_id)  # noqa: SLF001
 
 
-def doc_key(owner: str, pid: str, gen_id: str) -> str:
+def doc_key(owner: str, pid: str, gen_id: str, variant: str) -> str:
+    """작업 189: 그림체마다 따로 둔 편집 문서 edit-<variant>.json(실사·웹툰 편집이 서로 덮어쓰지 않는다)."""
+    if variant not in VARIANTS:
+        raise ValueError(f"unknown variant {variant!r}")
+    return f"{_root(owner, pid, gen_id)}/edit-{variant}.json"
+
+
+def legacy_doc_key(owner: str, pid: str, gen_id: str) -> str:
+    """작업 189 전 gen 하나에 하나뿐이던 편집 문서 edit.json. 읽기만 한다(고치거나 지우지 않는다 — _saved_docs 참고)."""
     return f"{_root(owner, pid, gen_id)}/edit.json"
 
 
@@ -1154,11 +1163,67 @@ def _doc_hash(variant: str, clips: list[dict]) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
-def _saved_doc(owner: str, pid: str, gen_id: str) -> tuple[dict | None, str]:
-    doc, etag = _read_json(doc_key(owner, pid, gen_id))
-    if doc is None or doc.get("variant") not in VARIANTS or not isinstance(doc.get("clips"), list):
-        return None, etag
-    return doc, etag
+def _valid_doc(doc: dict | None, variant: str) -> bool:
+    return isinstance(doc, dict) and doc.get("variant") == variant and isinstance(doc.get("clips"), list)
+
+
+def _saved_docs(owner: str, pid: str, gen_id: str) -> dict[str, dict]:
+    """작업 189: 두 그림체의 저장 문서. {variant: {doc, etag, source, version}}.
+
+    그림체마다 edit-<variant>.json(doc_key)이 정본이다. 작업 189 전 문서 edit.json(legacy_doc_key)은 읽기만 하고 절대 고치거나
+    지우지 않는다. 규칙(보기·저장·내보내기·사운드가 모두 이 함수를 거친다):
+      - edit-<v>.json 이 있으면 그것이 v 의 문서다(source "own"). 그 뒤로 v 에는 edit.json 을 보지 않는다.
+        파일은 있는데 꼴이 틀리면 doc None(저장 안 됨)이고 etag·version 은 그 파일 것이다(저장은 그 파일 기준 조건부 쓰기).
+      - edit-<v>.json 이 없고 edit.json 의 variant 가 v 면 edit.json 이 v 의 저장 문서다(source "legacy", etag·version 도 그 파일 것).
+        v 를 처음 저장하면 edit-<v>.json 을 새로 만든다(If-None-Match). 충돌 검사는 화면이 받은 기준 = edit.json 의 etag·version.
+      - 둘 다 아니면(edit.json 이 다른 그림체이거나 없음) v 는 기본 문서다(doc None, etag "", version 0). 첫 저장은 만들기만 된다.
+    """
+    legacy, legacy_etag = _read_json(legacy_doc_key(owner, pid, gen_id))
+    out: dict[str, dict] = {}
+    for variant in VARIANTS:
+        own, etag = _read_json(doc_key(owner, pid, gen_id, variant))
+        if own is not None or etag:
+            ok = _valid_doc(own, variant)
+            out[variant] = {"doc": own if ok else None, "etag": etag, "source": "own", "version": _doc_version(own)}
+        elif _valid_doc(legacy, variant):
+            out[variant] = {"doc": legacy, "etag": legacy_etag, "source": "legacy", "version": _doc_version(legacy)}
+        else:
+            out[variant] = {"doc": None, "etag": "", "source": "", "version": 0}
+    return out
+
+
+def _doc_time(doc: dict | None) -> datetime | None:
+    """문서 updatedAt(작업 189 부터 밀리초까지, 그 전은 초까지)을 UTC 시각으로. 없거나 꼴이 틀리면 None."""
+    text = str((doc or {}).get("updatedAt") or "")
+    for fmt in ("%Y-%m-%dT%H:%M:%S.%fZ", "%Y-%m-%dT%H:%M:%SZ"):
+        try:
+            return datetime.strptime(text, fmt).replace(tzinfo=timezone.utc)
+        except ValueError:
+            continue
+    return None
+
+
+def _now_ms() -> str:
+    """편집 문서 updatedAt(작업 189: 밀리초까지 — 두 그림체를 잇달아 저장해도 어느 쪽이 나중인지 가린다)."""
+    now = datetime.now(timezone.utc)
+    return now.strftime("%Y-%m-%dT%H:%M:%S.") + f"{now.microsecond // 1000:03d}Z"
+
+
+def _variant_order(gen: dict) -> list[str]:
+    """그림체 기본 순서(작업 189 전 보기와 같다): gen.selected → 웹툰 → 실사."""
+    order = [gen.get("selected")] if gen.get("selected") in VARIANTS else []
+    return order + [v for v in ("webtoon", "real") if v not in order]
+
+
+def _recent_variant(docs: dict[str, dict], gen: dict) -> str | None:
+    """작업 189: 저장 문서가 있는 그림체 중 updatedAt 이 가장 최근인 것(edit.json 에서 온 문서 포함). 시각이 없거나 같으면
+    기본 순서(_variant_order)가 앞선 쪽. 저장 문서가 하나도 없으면 None."""
+    order = _variant_order(gen)
+    saved = [v for v in order if docs[v]["doc"] is not None]
+    if not saved:
+        return None
+    oldest = datetime.min.replace(tzinfo=timezone.utc)
+    return max(saved, key=lambda v: (_doc_time(docs[v]["doc"]) or oldest, -order.index(v)))
 
 
 def _doc_version(doc: dict | None) -> int:
@@ -1265,11 +1330,28 @@ def _export_out(current: dict | None, doc_hash: str) -> dict:
     }
 
 
+def _variant_exports(state: dict, variant: str) -> tuple[dict | None, list[dict]]:
+    """작업 189: 내보내기 상태(파일 하나, 번호 n 은 두 그림체가 함께 센다) 중 그 그림체 것만. 반환 (가장 최근 항목, 그 앞 기록).
+
+    가장 최근 = 그 그림체 항목(current·history) 중 n 이 가장 큰 것. 기록은 history 순서 그대로, 가장 최근 항목은 뺀다.
+    """
+    items = [h for h in (state.get("history") or []) if isinstance(h, dict) and h.get("variant") == variant]
+    current = state.get("current")
+    if isinstance(current, dict) and current.get("variant") == variant:
+        items.append(current)
+    if not items:
+        return None, []
+    latest = max(items, key=lambda h: h.get("n") if isinstance(h.get("n"), int) and not isinstance(h.get("n"), bool) else -1)
+    return latest, [h for h in items if h is not latest]
+
+
 def edit_view(owner: str, pid: str, variant: str | None = None) -> dict:
     """GET /p/<pid>/edit. 문서(저장본, 없으면 기본 문서)·재료(길이·재생 URL)·내보내기 상태.
 
-    그림체: variant 인자 → 저장된 문서의 그림체 → gen.selected → 웹툰 → 실사 중 재료가 있는 것. 저장된 문서와 다른 그림체를
-    물으면 그 그림체의 기본 문서를 준다(saved false, etag 는 저장본 것 — PUT 하면 바뀐다).
+    작업 189: 문서는 그림체마다 따로다(_saved_docs). 그림체: variant 인자 → 저장 문서가 있으면 updatedAt 이 가장 최근인 그림체 →
+    gen.selected → 웹툰 → 실사 중 재료가 있는 것. doc·saved·etag 는 고른 그림체 것이고(저장 문서가 없으면 기본 문서·saved false·
+    etag "" — 첫 PUT 은 만들기), savedVariants 는 두 그림체의 저장 여부다. export·exportHistory·matchesDoc 도 고른 그림체의
+    내보내기만 본다(_variant_exports).
     """
     where = "vnew.edit"
     if variant not in (None, "") and variant not in VARIANTS:
@@ -1279,18 +1361,18 @@ def edit_view(owner: str, pid: str, variant: str | None = None) -> dict:
         reconcile_export(owner, pid, gen_id)
     except Exception as exc:  # noqa: BLE001 — 보기는 실패하지 않는다(다음 조회가 다시 본다).
         log.warning("vnew.edit.reconcile_failed pid=%s err=%s", pid, type(exc).__name__)
-    doc, etag = _saved_doc(owner, pid, gen_id)
+    docs = _saved_docs(owner, pid, gen_id)
     retakes = _retake_state(owner, pid, gen_id)  # 지시서 116: 켬이면 다시 만든 버전(재료)·끊긴 다시 만들기 이어받기, 끔이면 None
     if retakes is not None:
         retakes = _retake_reconcile(owner, pid, gen_id, retakes)
     available = {v: _all_items(gen, v, retakes) for v in VARIANTS}
+    recent = _recent_variant(docs, gen)
     if variant:
         chosen = variant
-    elif doc is not None:
-        chosen = doc["variant"]
+    elif recent is not None:
+        chosen = recent
     else:
-        order = [gen.get("selected")] if gen.get("selected") in VARIANTS else []
-        order += ["webtoon", "real"]
+        order = _variant_order(gen)
         chosen = next((v for v in order if available[v]), order[0])
     items = available[chosen]
     if not items:
@@ -1299,7 +1381,9 @@ def edit_view(owner: str, pid: str, variant: str | None = None) -> dict:
     _describe(plan, items)
     _number_takes(gen, chosen, items)  # 작업 145
     allowed = {m["sourceKey"] for m in items}
-    saved = doc is not None and doc["variant"] == chosen
+    mine = docs[chosen]
+    doc, etag = mine["doc"], mine["etag"]
+    saved = doc is not None
     default_items = _default_group(items)
     probe_keys = [m["sourceKey"] for m in default_items]
     if saved:
@@ -1309,9 +1393,10 @@ def edit_view(owner: str, pid: str, variant: str | None = None) -> dict:
     if saved:
         out_doc = doc
     else:
-        out_doc = {"version": _doc_version(doc), "variant": chosen, "updatedAt": "", "clips": defaults, "audio": []}
+        out_doc = {"version": mine["version"], "variant": chosen, "updatedAt": "", "clips": defaults, "audio": []}
     state, _ = _read_json(export_state_key(owner, pid, gen_id))
     state = state or {}
+    latest, older = _variant_exports(state, chosen)
     clean = [c for c in out_doc["clips"] if isinstance(c, dict) and c.get("sourceKey") in allowed]
     doc_hash = _doc_hash(chosen, [{**c, "in": _num(c.get("in")) or 0.0, "out": _num(c.get("out")) or 0.0} for c in clean]) \
         if saved else ""
@@ -1342,17 +1427,18 @@ def edit_view(owner: str, pid: str, variant: str | None = None) -> dict:
         "doc": out_doc,
         "saved": saved,
         "etag": etag,
+        "savedVariants": {v: docs[v]["doc"] is not None for v in VARIANTS},  # 작업 189: 탭 표시(그림체마다 저장 문서가 있는가)
         "defaultClips": defaults,
         "invalidClips": _invalid_clips(out_doc["clips"], allowed, meta) if saved else [],
         "probing": not complete,
         "totalSeconds": _total(out_doc["clips"]),
         "materials": materials,
         "limits": {"maxClips": MAX_CLIPS, "maxTotalSeconds": MAX_TOTAL_S, "minClipSeconds": MIN_CLIP_S},
-        "export": _export_out(state.get("current"), doc_hash),
+        "export": _export_out(latest, doc_hash),
         "exportHistory": [
             {**_history_item(h), "videoUrl": _presign_video(str(h.get("key") or "")) if h.get("status") == "done" else "",
              "downloadUrl": _presign_download(str(h.get("key") or ""), h.get("n")) if h.get("status") == "done" else ""}
-            for h in (state.get("history") or []) if isinstance(h, dict)
+            for h in older
         ],
     }
     if retakes is not None:
@@ -1389,6 +1475,7 @@ def save_doc(owner: str, pid: str, payload) -> dict:
 
     기준: etag(글자, 첫 저장은 "") 또는 version(정수, 첫 저장은 0). 지금 저장본과 다르면 409 EditChanged. 쓰기는 S3 조건부
     쓰기(첫 저장은 If-None-Match, 그 뒤 If-Match)라 동시에 같은 기준으로 저장하면 하나만 성공하고 나머지는 409 다.
+    작업 189: 그림체(variant)마다 따로 저장한다(edit-<variant>.json). 기준·충돌은 그 그림체 문서끼리만 본다(_saved_docs 규칙).
     """
     where = "vnew.edit.save"
     payload = payload if isinstance(payload, dict) else {}
@@ -1409,17 +1496,23 @@ def save_doc(owner: str, pid: str, payload) -> dict:
         raise VpocError(where, "AudioTrackUnsupported", "사운드 트랙은 아직 넣을 수 없습니다(⑥ 사운드 결과가 없습니다).", 400)
     raw = _check_clip_list(payload.get("clips"), where)
     _gen, gen_id, clips = _validated_clips(owner, pid, variant, raw, where)
-    key = doc_key(owner, pid, gen_id)
+    # 작업 189: 그 그림체 파일(edit-<variant>.json)에만 쓴다. 다른 그림체 문서와 edit.json 은 건드리지 않는다.
+    # 기준(화면이 받은 것, _saved_docs 규칙): 파일이 있으면 그 파일, 없으면 edit.json 이 같은 그림체일 때 edit.json, 아니면 없음("" · 0).
+    key = doc_key(owner, pid, gen_id, variant)
     current, current_etag = _read_json(key)
-    current_version = _doc_version(current)
+    exists = current is not None or bool(current_etag)
+    base_etag, base_version = current_etag, _doc_version(current)
+    if not exists:
+        legacy, legacy_etag = _read_json(legacy_doc_key(owner, pid, gen_id))
+        base_etag, base_version = (legacy_etag, _doc_version(legacy)) if _valid_doc(legacy, variant) else ("", 0)
     if has_etag:
-        if (current is None and etag) or (current is not None and etag != current_etag):
+        if etag != base_etag:  # 작업 190: 화면이 그림체마다 자기 etag 를 보낸다(다른 그림체 문서의 etag 는 받지 않는다)
             raise _changed(where)
-    elif version != current_version:
+    elif version != base_version:
         raise _changed(where)
-    doc = {"version": current_version + 1, "variant": variant, "updatedAt": now_iso(), "clips": clips, "audio": []}
+    doc = {"version": base_version + 1, "variant": variant, "updatedAt": _now_ms(), "clips": clips, "audio": []}
     try:
-        new_etag = STORE.write_json(key, doc, etag=current_etag if current is not None else "", create_only=current is None)
+        new_etag = STORE.write_json(key, doc, etag=current_etag if exists else "", create_only=not exists)
     except VpocError as exc:
         if exc.kind == "PreconditionFailed":
             raise _changed(where) from exc
@@ -1695,21 +1788,29 @@ def _empty_state() -> dict:
     return {"v": 1, "n": 0, "current": None, "history": []}
 
 
-def start_export(owner: str, pid: str, etag) -> dict:
+def start_export(owner: str, pid: str, etag, variant=None) -> dict:
     """POST /p/<pid>/edit/export. 저장된 문서(etag 가 지금 저장본과 같아야 한다)를 내보내기 시작한다.
 
     같은 문서(_doc_hash)로 진행 중(queued·running)인 내보내기가 있으면 새로 시작하지 않고 그것을 준다(started false).
     다른 문서로 진행 중이면 409 ExportRunning. 문서 클립은 시작 때 사본(snapshot)으로 남겨, 그 뒤 저장이 결과를 바꾸지 않는다.
     반환 {started, export}.
+    작업 189: variant(바디)의 문서를 내보낸다. 없으면(189 전 화면) etag 가 같은 그림체 문서, 그것도 없으면 가장 최근에 저장한
+    그림체(_recent_variant). 상태 파일은 하나·번호 n 은 두 그림체가 함께 센다. gen 하나에 한 번에 하나만 — 다른 그림체가
+    내보내는 중이어도 409 ExportRunning(그 그림체 이름을 말한다).
     """
     where = "vnew.edit.export"
+    if variant not in (None, "") and variant not in VARIANTS:
+        raise VpocError(where, "BadVariant", "그림체(variant)는 real 또는 webtoon 이어야 합니다.", 400)
     _plan, gen, gen_id = _load_gen(owner, pid)
-    doc, doc_etag = _saved_doc(owner, pid, gen_id)
-    if doc is None:
+    docs = _saved_docs(owner, pid, gen_id)
+    if not variant:
+        matched = [v for v in VARIANTS if docs[v]["doc"] is not None and isinstance(etag, str) and etag and docs[v]["etag"] == etag]
+        variant = matched[0] if matched else _recent_variant(docs, gen)
+    if variant is None or docs[variant]["doc"] is None:
         raise VpocError(where, "EditNotSaved", "편집 문서를 먼저 저장해 주세요.", 409)
+    doc, doc_etag = docs[variant]["doc"], docs[variant]["etag"]
     if not isinstance(etag, str) or etag != doc_etag:
         raise _changed(where)
-    variant = doc["variant"]
     allowed = {m["sourceKey"] for m in _all_items(gen, variant, _retake_state(owner, pid, gen_id))}
     referenced = [c.get("sourceKey") for c in doc["clips"] if isinstance(c, dict) and c.get("sourceKey") in allowed]
     meta, _ = _ensure_meta(owner, pid, gen_id, referenced)
@@ -1728,10 +1829,15 @@ def start_export(owner: str, pid: str, etag) -> dict:
             if current.get("docHash") == doc_hash:
                 box["reused"] = current
                 return None
+            busy = current.get("variant")
+            if busy in VARIANTS and busy != variant:  # 작업 189: 다른 그림체가 내보내는 중(gen 하나에 한 번에 하나)
+                raise VpocError(where, "ExportRunning",
+                                f"{VARIANT_LABELS[busy]} 내보내기가 진행 중입니다. 끝난 뒤 다시 눌러 주세요.", 409)
             raise VpocError(where, "ExportRunning", "다른 내보내기가 진행 중입니다. 끝난 뒤 다시 눌러 주세요.", 409)
         history = [h for h in (state.get("history") or []) if isinstance(h, dict)]
         if current:
-            history.append(_history_item(current))
+            # 작업 189: 기록에 docHash 도 남긴다(그 그림체의 가장 최근 결과가 기록으로 밀려도 보기의 matchesDoc 이 맞게).
+            history.append({**_history_item(current), "docHash": current.get("docHash")})
         n = int(state.get("n") or 0) + 1
         now = now_iso()
         started = {

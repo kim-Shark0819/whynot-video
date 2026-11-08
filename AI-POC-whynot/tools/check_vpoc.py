@@ -36607,7 +36607,7 @@ def check_vnew_edit() -> None:
                    [200, 1, True, (409, "EditChanged"), 200, 2, True, (409, "EditChanged"), 200, 3, (409, "EditChanged")],
                    "첫 저장·같은 기준 409·etag 기준·옛 etag 409·version 기준·옛 version 409")
             e3 = (by_version.get_json() or {}).get("etag")
-            doc_key = edit.doc_key(owner, "prj_edt_save", "g1")
+            doc_key = edit.doc_key(owner, "prj_edt_save", "g1", "webtoon")
 
             def sneak() -> None:
                 current, _etag = _FakeCharStore.read_json(env.store, doc_key)
@@ -36619,7 +36619,7 @@ def check_vnew_edit() -> None:
             expect("edt-d", [err_of(raced), after["doc"]["version"], after["saved"], after["etag"] != e3],
                    [(409, "EditChanged"), 99, True, True], "읽은 뒤 다른 저장이 끼면 조건부 쓰기 409·GET 은 저장본·새 etag")
             _edt_cut_plan(env, "prj_edt_first")
-            fdoc_key = edit.doc_key(owner, "prj_edt_first", "g1")
+            fdoc_key = edit.doc_key(owner, "prj_edt_first", "g1", "webtoon")
             first_clips = (get("prj_edt_first").get_json() or {})["doc"]["clips"]
             env.store.read_hooks[fdoc_key] = lambda: _FakeCharStore.write_json(env.store, fdoc_key, {
                 "version": 1, "variant": "webtoon", "updatedAt": "", "clips": [], "audio": []})
@@ -36628,7 +36628,8 @@ def check_vnew_edit() -> None:
                    "첫 저장끼리 겹치면 나중 것은 If-None-Match 로 409(먼저 저장한 문서가 남는다)")
             other = get("prj_edt_save", variant="real").get_json() or {}
             expect("edt-d", [other["saved"], other["etag"] == after["etag"], other["doc"]["version"], other["doc"]["variant"]],
-                   [False, True, 99, "real"], "저장본과 다른 그림체: 기본 문서·저장본 etag·version(PUT 하면 바뀐다)")
+                   [False, False, 0, "real"],
+                   "저장본과 다른 그림체: 그 그림체 기본 문서·etag \"\"·version 0(작업 189 — 그림체마다 따로 저장, 첫 PUT 은 만들기)")
             switched = put("prj_edt_save", {"etag": other["etag"], "variant": "real", "clips": other["doc"]["clips"]})
             expect("edt-d", [switched.status_code, (get("prj_edt_save").get_json() or {}).get("variant")], [200, "real"],
                    "그림체 바꿔 저장 → 다음 GET 은 그 그림체")
@@ -36812,7 +36813,7 @@ def check_vnew_edit() -> None:
                              [h["n"] for h in ev3["exportHistory"]], ev3["exportHistory"][0]["videoUrl"].split("?")[0].endswith("final-edit-1.mp4")],
                    [202, 2, "done", True, [1], True], "다시 내보내기: n 2·지난 결과 기록·지금 문서와 같음")
             for _ in range(3):
-                env.store.json.pop(edit.doc_key(owner, "prj_edt_exp", "g1"), None)
+                env.store.json.pop(edit.doc_key(owner, "prj_edt_exp", "g1", "webtoon"), None)
                 sx = put("prj_edt_exp", {"etag": "", "variant": "webtoon", "clips": exp_clips[:1]}).get_json() or {}
                 post("prj_edt_exp", {"etag": sx["etag"]})
             expect("edt-g", [h["n"] for h in env.export_state("prj_edt_exp")["history"]], [2, 3, 4],
@@ -37044,7 +37045,7 @@ def check_vnew_edit() -> None:
             idx = env.store.json[ik][0]
             idx["items"][edit.media_id(_edt_key("prj_edt_inv", "c1-webtoon-1"))]["duration"] = 2.0
             _FakeCharStore.write_json(env.store, ik, idx)
-            dk = edit.doc_key(owner, "prj_edt_inv", "g1")
+            dk = edit.doc_key(owner, "prj_edt_inv", "g1", "webtoon")
             stored = env.store.json[dk][0]
             stored["clips"].append("junk")
             _FakeCharStore.write_json(env.store, dk, stored)
@@ -37061,7 +37062,7 @@ def check_vnew_edit() -> None:
             expect("edt-h", [reconciled, len(logs.messages("vnew.edit.reconcile_failed"))], [200, 1], "이어받기 확인이 실패해도 보기는 산다")
             from src.vpoc.errors import VpocError as _VpocError  # noqa: PLC0415
 
-            env.store.fail_writes[edit.doc_key(owner, "prj_edt_inv", "g1")] = [_VpocError("store", "SlowDown", "느림", 503)]
+            env.store.fail_writes[edit.doc_key(owner, "prj_edt_inv", "g1", "webtoon")] = [_VpocError("store", "SlowDown", "느림", 503)]
             expect("edt-d", err_of(put("prj_edt_inv", {"etag": gv["etag"], "variant": "webtoon", "clips": []})), (502, "SlowDown"),
                    "조건부 쓰기 충돌이 아닌 저장 오류는 그대로 올린다")
             mk = "users/tester/edt-mutate.json"
@@ -38145,29 +38146,83 @@ async function run() {
   editSetZoom(ctx, 100);
   sc.scrollLeft = 0;
 
-  // ================= (9) 그림체 바꾸기(확인창) =================
-  root = rootOf(host);
-  var realBtn = byText(root, "button", "실사");
-  confirmAnswers.push(false);
-  var getsBefore = gets().length;
-  realBtn.fire("click");
+  // ================= (9) 그림체 탭(작업 190): 확인창 · 바꿔 넣기 없이 그 그림체 편집본을 연다 =================
+  fire(800);
   await settle();
-  var declined = [confirms.length, gets().length - getsBefore];
-  confirmAnswers.push(true);
-  getQueue.push({ ok: clone(S.real) });
+  root = rootOf(host);
+  function tabs() {
+    return byClass(rootOf(host), "vnew-edit-variant").map(function (b) {
+      return [b.textContent, b.className, b.attrs["aria-pressed"], b.title, b.attrs["aria-label"], byClass(b, "vnew-edit-variant-dot").length];
+    });
+  }
+  function keysOf(list) { return list.map(function (c) { return [c.sourceKey, c.in, c.out, c.muted]; }); }
+  var confirms9 = confirms.length;
+  var tabs0 = tabs();
+  // 남은 저장이 실패하면 탭을 바꾸지 않는다(오류 · 그 탭 그대로 · GET 없음)
+  ctx.sel = 0;
+  key("m", "KeyM");
+  putPlan.push({ err: { message: "저장 서버 오류" } });
+  var gets9 = gets().length, puts9 = puts().length;
+  byText(root, "button", "실사").fire("click");
+  var during = [ctx.busy, pending(800)];
+  await settle();
+  var failSave = [puts().length - puts9, gets().length - gets9, ctx.variant, ctx.busy, byClass(rootOf(host), "vnew-plan-error")[0].textContent,
+                  byClass(rootOf(host), "vnew-edit-variant is-on")[0].textContent, byClass(rootOf(host), "vnew-edit-save-retry").length];
+  // 다시 누르면: 남은 저장(지금 그림체 · 그 etag) → 끝난 뒤 GET ?variant=real → 실사 편집본 그대로(자기 etag · 내보내기 · 빈 실행 취소 스택)
+  var webClips = clone(ctx.clips), webUndo = ctx.hist.undo.length, webEtag0 = ctx.etag;
+  key(" ", "Space");
+  var playingBefore = ctx.playing;
+  ctx.fix = { open: true, dom: {}, timer: 0 }; // 열린 AI로 고치기 패널(가짜) — 탭을 바꾸면 닫힌다
+  var realView = clone(S.real);
+  realView.savedVariants = { real: false, webtoon: true };
+  realView.export = { status: "done", n: 2, seconds: 3, hasAudio: true, matchesDoc: true, progress: { done: 2, total: 2 },
+                      videoUrl: "https://signed.example/real-2.mp4?s=1", downloadUrl: "https://signed.example/real-2.mp4?d=1" };
+  realView.exportHistory = [{ n: 1, status: "done", seconds: 2, videoUrl: "https://signed.example/real-1.mp4?s=1", downloadUrl: "https://signed.example/real-1.mp4?d=1" }];
+  getQueue.push({ ok: realView });
   byText(rootOf(host), "button", "실사").fire("click");
   await settle();
-  var switched = [confirms.slice(-1)[0], gets().slice(-1)[0], ctx.variant, ids(ctx.clips), ctx.clips[0].sourceKey === S.real.doc.clips[0].sourceKey,
-                  byClass(rootOf(host), "vnew-edit-variant is-on")[0].textContent, binTexts(rootOf(host)).length];
+  var flushPut = puts().slice(-1)[0][2];
+  var webEtag = "e" + putN;
+  root = rootOf(host);
+  var switched = {
+    put: [puts().length - puts9, flushPut.variant, flushPut.etag === webEtag0, JSON.stringify(keysOf(flushPut.clips)) === JSON.stringify(keysOf(webClips))],
+    get: gets().slice(-1)[0], variant: ctx.variant, sameDoc: JSON.stringify(keysOf(ctx.clips)) === JSON.stringify(keysOf(S.real.doc.clips)),
+    etag: ctx.etag, saved: ctx.saved, undo: [ctx.hist.undo.length, ctx.hist.redo.length, ctx.dom.btnUndo.disabled], sel: ctx.sel,
+    playing: [playingBefore, ctx.playing, ctx.cutPlay], fix: ctx.fix, t: ctx.t, busy: ctx.busy, confirms: confirms.length - confirms9,
+    tabs: tabs(), exportVideo: (byClass(root, "vnew-edit-export-video")[0] || {}).src || "",
+    history: byClass(root, "vnew-edit-export-item").map(function (n) { return n.children[0].textContent; }), save: saveText(root),
+    error: byClass(root, "vnew-plan-error")[0].style.display
+  };
+  // 실사에서 고치면 실사 문서 · 실사 etag("" = 첫 저장)로 저장, 실행 취소도 실사 스택에서(그림체는 그대로)
+  ctx.sel = 0;
+  key("m", "KeyM");
   fire(800);
   await settle();
   var putReal = puts().slice(-1)[0][2];
+  var realEtag1 = "e" + putN;
+  var realTabs = tabs().map(function (t) { return [t[0], t[1], t[5]]; });
   key("z", "KeyZ", { ctrlKey: true });
-  var undone = [ctx.variant, byClass(rootOf(host), "vnew-edit-variant is-on")[0].textContent];
+  var undoneReal = [ctx.variant, ctx.clips[0].muted, ctx.hist.undo.length, ctx.hist.redo.length];
   fire(800);
   await settle();
-  out.variant = { declined: declined, switched: switched, putReal: [putReal.variant, putReal.clips.length], undone: undone,
-                  putBack: puts().slice(-1)[0][2].variant };
+  var putRealUndo = puts().slice(-1)[0][2];
+  // 웹툰으로 돌아오면: 남은 저장이 없어 PUT 없이 GET ?variant=webtoon · 이 화면에서 쓰던 웹툰 실행 취소 스택이 되살아난다
+  var webView = view({ doc: { version: 7, variant: "webtoon", updatedAt: "", clips: webClips, audio: [] }, etag: webEtag, saved: true,
+                       savedVariants: { real: true, webtoon: true } });
+  getQueue.push({ ok: webView });
+  var putsBack = puts().length;
+  byText(rootOf(host), "button", "애니(웹툰)").fire("click");
+  await settle();
+  var back = [puts().length - putsBack, gets().slice(-1)[0], ctx.variant, ctx.etag === webEtag, ctx.hist.undo.length === webUndo, ctx.hist.undo.length > 0,
+              ctx.dom.btnUndo.disabled, tabs().map(function (t) { return [t[0], t[1], t[5]]; })];
+  key("z", "KeyZ", { ctrlKey: true });
+  fire(800);
+  await settle();
+  var putBack = puts().slice(-1)[0][2];
+  out.variant = { tabs0: tabs0, during: during, failSave: failSave, switched: switched,
+                  putReal: [putReal.variant, putReal.etag, putReal.clips[0].muted], realTabs: realTabs, undoneReal: undoneReal,
+                  putRealUndo: [putRealUndo.variant, putRealUndo.etag === realEtag1, putRealUndo.clips[0].muted],
+                  back: back, putBack: [putBack.variant, putBack.etag === webEtag, putBack.clips[0].muted !== webClips[0].muted] };
 
   // ================= (10) 재료 넣기(길이 모르는 합친 영상 → 필름 요청이 잰다) =================
   root = rootOf(host);
@@ -38236,7 +38291,8 @@ async function run() {
   postQueue.push({ err: { type: "ExportRunning", status: 409, message: "다른 내보내기가 진행 중입니다. 끝난 뒤 다시 눌러 주세요." } });
   byClass(rootOf(host), "vnew-edit-export-btn")[0].fire("click");
   await settle();
-  var running409 = [byClass(rootOf(host), "vnew-plan-error")[0].textContent, byClass(rootOf(host), "vnew-edit-export-btn")[0].disabled];
+  var running409 = [byClass(rootOf(host), "vnew-plan-error")[0].textContent, byClass(rootOf(host), "vnew-edit-notice")[0].textContent,
+                    byClass(rootOf(host), "vnew-edit-export-btn")[0].disabled]; // 작업 190: ExportRunning 은 오류가 아니라 안내 한 줄
   out.export = { queued: queued, running: running, done: done, sameNode: sameNode, stale: stale, running409: running409 };
 
   // ================= (12) 떠나기: 남은 저장을 바로 보내고 키·타이머·영상 멈춤 =================
@@ -38324,8 +38380,7 @@ async function run() {
   flushRafOnce();
   out.contiguous = [c2.clips.length, c2.curIndex, c2.cur === curBefore, vid0.plays - plays0, vid0.className, vid0.src === c2.materials[c2.clips[1].sourceKey].videoUrl];
   key(" ", "Space");
-  // 그림체 바꾸기 실패 → 문구, 편집 그대로
-  confirmAnswers.push(true);
+  // 그림체 바꾸기 실패(GET) → 문구, 편집 그대로(작업 190: 확인창 없음)
   getQueue.push({ err: { message: "네트워크 오류" } });
   var clipsBeforeSwitch = ids(c2.clips);
   byText(rootOf(host2), "button", "실사").fire("click");
@@ -38646,9 +38701,9 @@ def _edu_ctl_problems(got: dict, server: dict) -> list[str]:
          "Ctrl+Z 실행 취소·Ctrl+Shift+Z 다시 실행(각각 저장)·Cmd+Y(다시 실행 없음)")
     want("edu-f", got.get("handle"), [3, 4, 4, 5, 0.8, 5, 3, 0.6],
          "가위 손잡이: 떼면 그 자리 자르기·마우스 click 은 더 자르지 않음·키보드 click(detail 0) 자르기·끌면 옮기기만·실행 취소 둘, 눈금자 끌기")
-    want("edu-f", got.get("buttons"), [7.5, 0, 0.042, 0, 4, True, False, 3, 4, 3, ["c1", "c2", "c3"], True, False, 1, -1, 0.2],
-         "버튼 배선: 끝·처음·한 프레임 앞/뒤·자르기·소리 끄기/켜기·삭제·실행 취소·다시 실행·처음 상태로·재생/멈춤, 소리 상자 누르기 = 고르기, "
-         "빈 곳 = 고름 풀기, Shift+← 1초")
+    want("edu-f", got.get("buttons"), [7.5, 0, 0.042, 0, 4, True, False, 3, 4, 3, ["c1", "c2", "c3"], True, False, 1, -1, 2],
+         "버튼 배선: 끝·처음·한 프레임 앞/뒤·자르기·소리 끄기/켜기·삭제·실행 취소·다시 실행·처음 상태로·재생/멈춤, 소리 상자 누르기 = 고르기"
+         "(작업 190: 그 컷 시작 3초로 재생헤드), 빈 곳 = 고름 풀기, Shift+← 1초")
     want("edu-f", got.get("contiguous"), [4, 1, True, 0, "vnew-edit-video is-active", True],
          "같은 원본의 이어진 조각은 <video> 를 바꾸거나 다시 재생하지 않고 그대로 잇는다")
     want("edu-f", got.get("switchFail"), ["그림체를 바꾸지 못했습니다: 네트워크 오류", True, "webtoon", False], "그림체 바꾸기 실패 → 문구, 편집 그대로")
@@ -38656,11 +38711,11 @@ def _edu_ctl_problems(got: dict, server: dict) -> list[str]:
     want("edu-f", got.get("exportReload"), [1, "srv20", "다른 곳에서 바뀌어 다시 불러왔습니다.", 0],
          "내보내기 폴링 GET 실패면 다시 건다, 내보내기 409 EditChanged → 다시 불러오기")
     c = got.get("conflict") or {}
-    want("edu-e", c, {"undoBefore": True, "gets": [edit_url], "clips": ["c1", "c3"], "etag": "srv9", "undo": 0, "redo": 0, "undoBtn": True,
-                      "notice": ["다른 곳에서 바뀌어 다시 불러왔습니다.", ""], "save": "저장됨", "rev": [0, 0],
+    want("edu-e", c, {"undoBefore": True, "gets": [edit_url + "?variant=webtoon"], "clips": ["c1", "c3"], "etag": "srv9", "undo": 0, "redo": 0,
+                      "undoBtn": True, "notice": ["다른 곳에서 바뀌어 다시 불러왔습니다.", ""], "save": "저장됨", "rev": [0, 0],
                       "invalid": [[False, False], [True, True]], "noticeAfter": "none"},
-         "409 EditChanged → GET 으로 다시 불러오기·두 스택 비움·'다른 곳에서 바뀌어 다시 불러왔습니다'·쓸 수 없는 클립 표시(invalidClips)·"
-         "다음 변경이면 안내 지움")
+         "409 EditChanged → GET ?variant=(지금 그림체, 작업 190)으로 다시 불러오기·두 스택 비움·'다른 곳에서 바뀌어 다시 불러왔습니다'·"
+         "쓸 수 없는 클립 표시(invalidClips)·다음 변경이면 안내 지움")
     want("edu-e", got.get("failure"), {"failed": ["저장 실패 — 다시", "저장하지 못했습니다: 2번째 클립 구간은 원본 길이(3.00초) 안에서 0.04초 이상이어야 합니다.",
                                                   "", True, True], "retried": 1, "after": ["저장됨", False, "srv9"]},
          "그 밖 실패 → [저장 실패 — 다시]·문구·편집은 화면에 그대로, 누르면 다시 PUT")
@@ -38684,10 +38739,26 @@ def _edu_ctl_problems(got: dict, server: dict) -> list[str]:
     want("edu-f", got.get("zoom"), {"pps0": 100, "zoomIn": [125, "375px", "612"], "zoomOut": 100, "rafCount": 1, "slider": "set", "anchored": 200,
                                     "sliderValue": "769"},
          "+/− 1.25배·슬라이더는 한 화면에 한 번 다시 그림·재생헤드 화면 위치 그대로")
-    want("edu-f", got.get("variant"), {"declined": [1, 0], "switched": ["지금 편집을 실사 기본 문서로 바꿉니다. 실행 취소로 되돌릴 수 있습니다.",
-                                                                       edit_url + "?variant=real", "real", ["c1", "c2"], True, "실사", 2],
-                                       "putReal": ["real", 2], "undone": ["webtoon", "애니(웹툰)"], "putBack": "webtoon"},
-         "그림체 바꾸기: 확인창(취소면 요청 0) → GET ?variant= → 그 문서로 바꾸고 저장, 실행 취소로 되돌림")
+    tip_real, tip_web = "실사 편집본(따로 저장됩니다)", "애니(웹툰) 편집본(따로 저장됩니다)"
+    want("edu-f", got.get("variant"), {
+        "tabs0": [["실사", "vnew-edit-variant", "false", tip_real, "실사", 0],
+                  ["애니(웹툰)", "vnew-edit-variant is-on is-saved", "true", tip_web, "애니(웹툰) · 편집됨", 1]],
+        "during": [True, 0],
+        "failSave": [1, 0, "webtoon", False, "저장하지 못해 그림체를 바꾸지 않았습니다: 저장 서버 오류", "애니(웹툰)", 1],
+        "switched": {"put": [2, "webtoon", True, True], "get": edit_url + "?variant=real", "variant": "real", "sameDoc": True, "etag": "",
+                     "saved": False, "undo": [0, 0, True], "sel": -1, "playing": [True, False, None], "fix": None, "t": 0, "busy": False,
+                     "confirms": 0,
+                     "tabs": [["실사", "vnew-edit-variant is-on", "true", tip_real, "실사", 0],
+                              ["애니(웹툰)", "vnew-edit-variant is-saved", "false", tip_web, "애니(웹툰) · 편집됨", 1]],
+                     "exportVideo": "https://signed.example/real-2.mp4?s=1", "history": ["1번 · 00:02.00"], "save": "저장 전", "error": "none"},
+        "putReal": ["real", "", True], "realTabs": [["실사", "vnew-edit-variant is-on is-saved", 1], ["애니(웹툰)", "vnew-edit-variant is-saved", 1]],
+        "undoneReal": ["real", False, 0, 1], "putRealUndo": ["real", True, False],
+        "back": [0, edit_url + "?variant=webtoon", "webtoon", True, True, True, False,
+                 [["실사", "vnew-edit-variant is-saved", 1], ["애니(웹툰)", "vnew-edit-variant is-on is-saved", 1]]],
+        "putBack": ["webtoon", True, True]},
+         "그림체 탭(작업 190): 확인창 0 · 남은 저장 실패면 그 탭에 남고 오류(GET 0) · 다시 누르면 남은 저장(그 그림체 etag) 뒤 GET ?variant= → "
+         "그 그림체 문서 · etag · 내보내기 · 기록을 그대로(바꿔 넣기 없음) · 고름 · 재생 · 고른 컷 재생 · AI 패널 지움 · 실사 첫 저장 etag \"\" · "
+         "실행 취소는 그림체 스택 안에서 · 돌아오면 웹툰 스택 되살림 · 탭 점(savedVariants · 저장 성공) · aria-pressed · title")
     ins = got.get("insert") or {}
     want("edu-f", ins, {"text": "＋ 넣기", "media": [mids[3]], "mid": mids[3], "clips": [[0, 3, "컷 1"], [0, 7.5, "합친 영상"], [0, 3, "컷 3"]],
                         "sel": 1, "t": 3, "binAfter": ["테이크 1 · 7.5초 · 애니"]},
@@ -38697,15 +38768,15 @@ def _edu_ctl_problems(got: dict, server: dict) -> list[str]:
          "한도(클립 수·전체 길이)·끝에서 자르기는 안내만(저장 없음)")
     e = got.get("export") or {}
     want("edu-f", e, {
-        "queued": [1, 1, {"etag": "e10"}, "e10", "대기 중 — 앞의 내보내기가 끝나면 시작합니다.", "0%", 1, True, False],
+        "queued": [1, 1, {"etag": "e12", "variant": "webtoon"}, "e12", "대기 중 — 앞의 내보내기가 끝나면 시작합니다.", "0%", 1, True, False],
         "running": [edit_url + "?variant=webtoon", "만드는 중 1/3", "33%", 1],
         "done": ["끝 — 00:05.50", "https://signed.example/final-edit-4.mp4?X-Amz-Signature=a", True, "metadata",
                  "https://signed.example/final-edit-4.mp4?response-content-disposition=attachment&X-Amz-Signature=b", "", "내려받기 (edit-4.mp4)",
                  0, [["3번 · 00:04.00", "https://signed.example/final-edit-3.mp4?s=1", "https://signed.example/final-edit-3.mp4?d=1"]]],
         "sameNode": True, "stale": [["편집이 바뀌었습니다 — 다시 내보내기"], True],
-        "running409": ["내보내지 못했습니다: 다른 내보내기가 진행 중입니다. 끝난 뒤 다시 눌러 주세요.", False]},
-        "내보내기: 남은 저장 먼저 → POST {etag} → 3초 폴링(아래 줄만) → 재생·내려받기(downloadUrl)·지난 결과, 같은 상태면 다시 그리지 않음, "
-        "편집이 바뀌면 안내, 409 문구")
+        "running409": ["", "다른 내보내기가 진행 중입니다. 끝난 뒤 다시 눌러 주세요.", False]},
+        "내보내기: 남은 저장 먼저 → POST {etag, variant}(작업 190) → 3초 폴링(아래 줄만) → 재생·내려받기(downloadUrl)·지난 결과, "
+        "같은 상태면 다시 그리지 않음, 편집이 바뀌면 안내, 409 ExportRunning 은 오류가 아니라 안내 한 줄(서버 문구)")
     want("edu-f", got.get("loadFail"), {"disabled": "편집을 열지 못했습니다: 영상 편집 기능이 꺼져 있습니다.",
                                         "noMat": "편집할 웹툰 영상이 아직 없습니다. ⑤에서 영상을 먼저 만들어 주세요.",
                                         "recovered": 3, "mediaFail": ["failed", "done", True], "firstExport": [1, "", 3, True, True]},
@@ -38735,7 +38806,7 @@ def check_vnew_edit_ui() -> None:
     (edu-e) 저장: 0.8초 디바운스·한 번에 하나(진행 중 변경은 끝난 뒤 한 번 더)·새 etag·실행 취소/다시 실행 저장·409 다시 불러오기
             (스택 비움·안내)·그 밖 실패 [다시]·떠날 때 남은 저장
     (edu-f) 조작: 끝 끌기·순서 바꾸기(포인터 이벤트, 마우스·터치)·단축키 무시 조건·재생(<video> 2개)·프레임 이동·확대(재생헤드 기준)·
-            그림체 바꾸기(확인창)·재료 넣기·한도·내보내기(저장 먼저·폴링·downloadUrl)·불러오기 실패·다시 그리기 비용
+            그림체 탭(작업 190: 확인창 없음 · 그림체별 문서 · 실행 취소 스택)·재료 넣기·한도·내보내기(저장 먼저·폴링·downloadUrl)·불러오기 실패·다시 그리기 비용
     (edu-g) 서버·화면 맞물림: 실제 GET /edit 를 화면에 넣고 화면이 만든 PUT·POST 바디를 실제 라우트에 그대로 보내 200·202·done
     (edu-h) 내려받기 URL: _download_name·_presign_download(실제 Store + 가짜 S3 클라이언트: 영상 버킷·리전·ResponseContentType·
             ResponseContentDisposition attachment; filename="edit-<n>.mp4"·1시간, 검사용 저장소는 재생 URL, 실패 ""),
@@ -38832,36 +38903,44 @@ def check_vnew_edit_ui() -> None:
                     perf = got.get("perf") or {}
                     report.append(f"다시 그리기(클립 100개·400px/초·300초): 노드 {perf.get('nodes')}개, 가짜 DOM {perf.get('msPerRender')}ms/회, "
                                   f"끝 끌기 한 번 노드 {perf.get('edgeNodes')}개")
-                    # 화면이 만든 PUT·POST 바디를 실제 라우트에 차례로(etag 만 실제 값으로) 보낸다
+                    # 화면이 만든 PUT·POST 바디를 실제 라우트에 차례로(etag 만 실제 값으로) 보낸다.
+                    # 작업 190: 문서가 그림체마다 따로라 etag 도 그림체마다 이어 보낸다(화면도 탭마다 그 그림체 etag 를 쓴다).
                     bodies = got.get("bodies") or []
-                    etag = ""
+                    etags: dict = {}
                     statuses = []
                     last_doc = None
                     for method, _path, body in bodies:
                         sent = dict(body)
-                        sent["etag"] = etag
+                        sent["etag"] = etags.get(body.get("variant"), "")
                         if method == "PUT":
                             resp = client.put("/api/vnew/p/prj_edu_cut/edit", json=sent)
                             data = resp.get_json() or {}
                             statuses.append(resp.status_code)
                             if resp.status_code == 200:
-                                etag = data.get("etag") or ""
+                                etags[body.get("variant")] = data.get("etag") or ""
                                 last_doc = data.get("doc")
                                 if [{k: c.get(k) for k in ("id", "sourceKey", "in", "out", "muted", "label")} for c in data["doc"]["clips"]] != \
                                         [{k: c.get(k) for k in ("id", "sourceKey", "in", "out", "muted", "label")} for c in body["clips"]]:
                                     bad.append(f"(edu-g) 서버가 화면 클립을 바꿔 저장했습니다: {body['clips']} → {data['doc']['clips']}")
                             else:
                                 bad.append(f"(edu-g) 화면 PUT 바디를 서버가 거절했습니다: {resp.status_code} {data}")
-                    expect("edu-g", [len(bodies) >= 15, sorted(set(statuses)), (last_doc or {}).get("version"), len((last_doc or {}).get("clips") or [])],
-                           [True, [200], len(statuses), 4],
-                           "화면 PUT 바디(자르기 조각·끝 끌기 프레임·순서·소리·그림체 바꾸기·합친 영상 넣기)를 실제 라우트가 모두 받는다")
+                    # 작업 189 · 190: 문서가 그림체마다 따로라 마지막 문서 version = 그 그림체로 보낸 PUT 수(화면은 탭마다 그 그림체 etag 를
+                    # 보낸다 — 다른 그림체 etag 를 받던 서버 하위 호환은 작업 190 에서 지웠다).
+                    last_variant = (last_doc or {}).get("variant")
+                    want_version = sum(1 for m, _p, b in bodies if m == "PUT" and b.get("variant") == last_variant)
+                    expect("edu-g", [len(bodies) >= 15, sorted(set(statuses)), (last_doc or {}).get("version"), len((last_doc or {}).get("clips") or []),
+                                     sorted({b.get("variant") for m, _p, b in bodies if m == "PUT"}),
+                                     [b for m, _p, b in bodies if m == "POST" and set(b) != {"etag", "variant"}]],
+                           [True, [200], want_version, 4, ["real", "webtoon"], []],
+                           "화면 PUT 바디(자르기 조각·끝 끌기 프레임·순서·소리·그림체 탭마다 따로·합친 영상 넣기)를 실제 라우트가 모두 받는다 · "
+                           "내보내기 바디는 {etag, variant}")
                     report.append(f"화면이 만든 PUT 바디 {len(statuses)}개 → 실제 라우트 {sorted(set(statuses))}")
                     env.inline = True
-                    resp = client.post("/api/vnew/p/prj_edu_cut/edit/export", json={"etag": etag})
+                    resp = client.post("/api/vnew/p/prj_edu_cut/edit/export", json={"etag": etags.get(last_variant, ""), "variant": last_variant})
                     env.inline = False
-                    view = client.get("/api/vnew/p/prj_edu_cut/edit").get_json() or {}
+                    view = client.get(f"/api/vnew/p/prj_edu_cut/edit?variant={last_variant}").get_json() or {}
                     expect("edu-g", [resp.status_code, view["export"]["status"], view["export"]["seconds"], bool(view["export"]["downloadUrl"])],
-                           [202, "done", 7.5, True], "화면의 내보내기 바디({etag})로 202 → done(마지막 문서 합 7.5초)·downloadUrl")
+                           [202, "done", 7.5, True], "화면의 내보내기 바디({etag, variant})로 202 → done(마지막 문서 합 7.5초)·downloadUrl")
 
             # ================= (edu-h) 내려받기 URL =================
             expect("edu-h", [edit._download_name(v) for v in (3, 1, 0, -1, True, "3", None, 2.0)],  # noqa: SLF001
@@ -39941,7 +40020,7 @@ def check_vnew_edit_retime() -> None:
                 clip("g", "컷 1", 0, 1, speed=None), clip("h", "컷 2", 0, 1)]}
             r1 = put(pid, body)
             d1 = r1.get_json() or {}
-            stored = env.store.json[edit.doc_key(owner, pid, "g1")][0]["clips"]
+            stored = env.store.json[edit.doc_key(owner, pid, "g1", "webtoon")][0]["clips"]
             v1 = get(pid).get_json() or {}
             expect("ert-f", [r1.status_code, [c.get("speed") for c in stored], ["speed" in c for c in stored], d1.get("totalSeconds"),
                              v1.get("totalSeconds"), [c.get("speed") for c in v1["doc"]["clips"]]],
@@ -39996,7 +40075,7 @@ def check_vnew_edit_retime() -> None:
             old_doc = {"version": 4, "variant": "webtoon", "updatedAt": "2026-11-01T00:00:00Z", "audio": [],
                        "clips": [{"id": "c1", "sourceKey": ko["컷 1"], "in": 0.0, "out": 3.0, "muted": False, "label": "컷 1"},
                                  {"id": "c2", "sourceKey": ko["컷 2"], "in": 0.5, "out": 1.5, "muted": True}]}
-            _FakeCharStore.write_json(env.store, edit.doc_key(owner, pid_old, "g1"), old_doc)
+            _FakeCharStore.write_json(env.store, edit.legacy_doc_key(owner, pid_old, "g1"), old_doc)  # 작업 189: 옛 edit.json
             vo = get(pid_old).get_json() or {}
             env.segments.clear()
             env.inline = True
@@ -59266,7 +59345,7 @@ def check_vnew_edit_jl_181() -> None:
                 clip("c", "컷 3", 0, 3, muted=True, audioLead=1.0, transition=None)]}
             r1 = put(pid, body)
             d1 = r1.get_json() or {}
-            stored = env.store.json[edit.doc_key(owner, pid, "g1")][0]["clips"]
+            stored = env.store.json[edit.doc_key(owner, pid, "g1", "webtoon")][0]["clips"]
             v1 = get(pid).get_json() or {}
             want_stored = [
                 {"id": "a", "sourceKey": k["컷 1"], "in": 0.0, "out": 3.0, "muted": False, "audioTail": 0.5,
@@ -59352,7 +59431,7 @@ def check_vnew_edit_jl_181() -> None:
             old_doc = {"version": 3, "variant": "webtoon", "updatedAt": "2026-11-01T00:00:00Z", "audio": [],
                        "clips": [{"id": "c1", "sourceKey": ko["컷 1"], "in": 0.0, "out": 3.0, "muted": False, "label": "컷 1"},
                                  {"id": "c2", "sourceKey": ko["컷 2"], "in": 0.5, "out": 1.5, "muted": True}]}
-            _FakeCharStore.write_json(env.store, edit.doc_key(owner, pid_old, "g1"), old_doc)
+            _FakeCharStore.write_json(env.store, edit.legacy_doc_key(owner, pid_old, "g1"), old_doc)  # 작업 189: 옛 edit.json
             vo = get(pid_old).get_json() or {}
             want_hash = old_hash([{"sourceKey": ko["컷 1"], "in": 0.0, "out": 3.0, "muted": False},
                                   {"sourceKey": ko["컷 2"], "in": 0.5, "out": 1.5, "muted": True}])
@@ -60724,7 +60803,7 @@ def check_vnew_edit_gap_slip_185() -> None:
                          {"id": "c", "sourceKey": k["컷 3"], "in": 0, "out": 3},
                          {"id": "d", "sourceKey": k["컷 1"], "in": 0, "out": 3, "muted": True}]
             saved = put(pid, {"etag": "", "variant": "webtoon", "clips": doc_clips}).get_json() or {}
-            dkey, skey = edit.doc_key(owner, pid, "g1"), edit.export_state_key(owner, pid, "g1")
+            dkey, skey = edit.doc_key(owner, pid, "g1", "webtoon"), edit.export_state_key(owner, pid, "g1")
             doc_before = json.dumps(env.store.json[dkey][0], sort_keys=True)
             etag_before = env.store.json[dkey][1]
             writes0, gets0, films1 = len(env.store.json_writes), len(env.store.gets), len(env.films)
@@ -60793,7 +60872,7 @@ def check_vnew_edit_gap_slip_185() -> None:
                       clip_d("d", audioSlip=-0.35, muted=True), clip_d("e", audioSlip=0), clip_d("f", audioSlip=None)]
             rd = put(pid_d, {"etag": "", "variant": "webtoon", "clips": body_d})
             etag_d = (rd.get_json() or {}).get("etag") or ""
-            stored_d = env.store.json[edit.doc_key(owner, pid_d, "g1")][0]["clips"]
+            stored_d = env.store.json[edit.doc_key(owner, pid_d, "g1", "webtoon")][0]["clips"]
             base_d = {"sourceKey": kd["컷 1"], "in": 0.0, "out": 3.0, "muted": False}
             want_d = [{"id": "a", **base_d, "audioSlip": -1.0}, {"id": "b", **base_d, "audioSlip": 1.0},
                       {"id": "c", **base_d, "audioSlip": 0.05}, {"id": "d", **base_d, "muted": True, "audioSlip": -0.35},
@@ -60885,7 +60964,7 @@ def check_vnew_edit_gap_slip_185() -> None:
             ko = {m["label"]: m["sourceKey"] for m in (get(pid_o).get_json() or {})["materials"]}
             old_clips = [{"id": "c1", "sourceKey": ko["컷 1"], "in": 0.0, "out": 3.0, "muted": False, "label": "컷 1"},
                          {"id": "c2", "sourceKey": ko["컷 2"], "in": 0.5, "out": 1.5, "muted": True}]
-            _FakeCharStore.write_json(env.store, edit.doc_key(owner, pid_o, "g1"),
+            _FakeCharStore.write_json(env.store, edit.legacy_doc_key(owner, pid_o, "g1"),  # 작업 189: 옛 edit.json
                                       {"version": 3, "variant": "webtoon", "updatedAt": "2026-11-01T00:00:00Z", "audio": [], "clips": old_clips})
             vo = get(pid_o).get_json() or {}
             new_calls: list[str] = []
@@ -60901,7 +60980,7 @@ def check_vnew_edit_gap_slip_185() -> None:
             cmd_old = run_fake(pid_o, vo.get("etag"))
             muted_slip = [dict(old_clips[0], audioSlip=0), dict(old_clips[1], audioSlip=0.5)]
             ro = put(pid_o, {"etag": vo.get("etag"), "variant": "webtoon", "clips": muted_slip}).get_json() or {}
-            stored_o = env.store.json[edit.doc_key(owner, pid_o, "g1")][0]["clips"]
+            stored_o = env.store.json[edit.doc_key(owner, pid_o, "g1", "webtoon")][0]["clips"]
             cmd_muted = run_fake(pid_o, ro.get("etag"))
             want_old_hash = old_hash([{"sourceKey": ko["컷 1"], "in": 0.0, "out": 3.0, "muted": False},
                                       {"sourceKey": ko["컷 2"], "in": 0.5, "out": 1.5, "muted": True}])
@@ -61831,6 +61910,703 @@ def check_vnew_edit_cut_play_188() -> None:
            "(cp-f)막기 (cp-g)CSS 감싸기 · 버튼 폭 고정 · LF (cp-h)타임라인 누르기 → 버튼 초점을 타임라인 칸으로 · 입력칸 그대로(node)")
 
 
+# ---------------------------------------------------------------- 작업 189 — ⑦ 편집 문서 그림체별 저장(ev-a~f)
+def check_vnew_edit_variant_docs_189() -> None:
+    """작업 189 — ⑦ 편집 문서를 그림체(실사 · 웹툰)마다 따로 저장(서버). 메모리 저장소(_EdtEnv) · 가짜 ffmpeg, 유료 · 네트워크 0.
+
+    (ev-a) 실사 저장 → 웹툰 저장: edit-real.json · edit-webtoon.json 둘 다 남고 GET ?variant= 가 각자 클립 · etag · version · savedVariants,
+           실사를 다시 저장해도 웹툰 파일 그대로, 그림체마다 조건부 쓰기 409(옛 etag · "" · version), 작업 190: 다른 그림체의 지금 etag 로
+           저장(189 전 화면 탭 바꾸기)도 409(하위 호환 없음)
+    (ev-b) 옛 edit.json(웹툰): 웹툰 저장 문서로 보임(saved · etag · version 4) · 실사는 기본 문서(etag "" · version 0) · 옛 문서 내보내기 ·
+           첫 웹툰 저장은 옛 etag · version 기준(""·틀린 값 409 · 첫 저장끼리 겹치면 409)으로 edit-webtoon.json 을 만듦(version 5) · 그 뒤 옛 etag 409 ·
+           옛 문서가 실사면 실사 · edit.json 은 한 번도 쓰지 않음(내용 · etag 그대로)
+    (ev-c) 인자 없는 GET: updatedAt 이 가장 최근인 그림체(옛 문서의 초 꼴 · 새 밀리초 꼴 함께 비교) · 같으면 selected → 웹툰 · 저장 문서 없으면
+           그대로(selected) · 실제 PUT 두 번 뒤 나중 그림체 · updatedAt 밀리초 꼴
+    (ev-d) 내보내기: variant 문서(사본 · docHash) · variant 없으면 etag 로 고름 · BadVariant 400 · 다른 그림체가 진행 중이면 409 ExportRunning
+           "실사 내보내기가 진행 중입니다…" · 같은 문서는 다시 시작 안 함 · 웹툰 보기는 실사 결과를 안 보임(export · exportHistory) · 번호 n 은
+           두 그림체가 함께 셈(final-edit-2) · 기록으로 밀린 결과도 matchesDoc · 상태 파일 하나
+    (ev-e) sound._source: 그림체마다 자기 그림체의 가장 최근 done 내보내기(옛 문서 내보내기 포함) · 없으면 NoSoundSource
+    (ev-f) 정적: edit.py 의 doc_key 호출은 모두 그림체 인자 4개 · legacy_doc_key 는 _read_json 안에서만(읽기 2곳) · 다른 모듈의 edit.doc_key 호출도
+           4개 · 라우트가 바디 variant 를 넘김
+    """
+    sys.path.insert(0, str(ROOT / "app"))
+    import ast as _ast  # noqa: PLC0415
+    import copy  # noqa: PLC0415
+    import time as _time  # noqa: PLC0415
+    import traceback as _tb  # noqa: PLC0415
+
+    bad: list[str] = []
+    seen: set[str] = set()
+    owner = _EDT_OWNER
+    legacy_keys: list[tuple[str, tuple]] = []  # (키, 처음 쓴 (내용, etag)) — 끝에 한 번도 쓰이지 않았는지 본다
+
+    def expect(group: str, got, want, what: str) -> None:
+        seen.add(group)
+        if got != want:
+            bad.append(f"({group}) {what}\n      결과 {got!r}\n      기대 {want!r}")
+
+    def err_of(resp) -> tuple[int, str, str]:
+        body = (resp.get_json(silent=True) or {}).get("error") or {}
+        return resp.status_code, str(body.get("type") or ""), str(body.get("message") or "")
+
+    changed = (409, "EditChanged", "다른 곳에서 편집 문서가 먼저 저장됐습니다. 다시 불러온 뒤 고쳐 주세요.")
+
+    try:
+        with _LogCapture(), _EdtEnv() as env, _pin_vnew(VNEW_EDIT=True):
+            edit = env.editmod
+            from src.vnew import sound as sndmod  # noqa: PLC0415
+            from src.vpoc.errors import VpocError as _VpocError  # noqa: PLC0415
+
+            client = env.client()
+
+            def view(pid: str, variant: str | None = None) -> dict:
+                resp = client.get(f"/api/vnew/p/{pid}/edit" + (f"?variant={variant}" if variant else ""))
+                return resp.get_json() or {}
+
+            def put(pid: str, body):
+                return client.put(f"/api/vnew/p/{pid}/edit", json=body)
+
+            def post(pid: str, body):
+                return client.post(f"/api/vnew/p/{pid}/edit/export", json=body)
+
+            def ids(v: dict) -> list:
+                return [c.get("id") for c in (v.get("doc") or {}).get("clips") or []]
+
+            def clip(key: str, a: float, b: float, cid: str) -> dict:
+                return {"id": cid, "sourceKey": key, "in": a, "out": b, "muted": False}
+
+            def keys_of(pid: str, variant: str) -> dict:
+                return {m["label"]: m["sourceKey"] for m in view(pid, variant).get("materials") or []}
+
+            def stored(key: str):
+                return env.store.json.get(key)
+
+            def put_legacy(pid: str, doc: dict) -> str:
+                key = edit.legacy_doc_key(owner, pid, "g1")
+                etag = _FakeCharStore.write_json(env.store, key, doc)
+                legacy_keys.append((key, copy.deepcopy(env.store.json[key])))
+                return etag
+
+            def finish(pid: str) -> dict:
+                cur = env.export_state(pid).get("current") or {}
+                edit.run_export(owner, pid, "g1", int(cur["n"]), cur["claim"])
+                return env.export_state(pid).get("current") or {}
+
+            def source(pid: str, variant: str):
+                try:
+                    got = sndmod._source(owner, pid, "g1", env.plan(pid)["gen"], variant)  # noqa: SLF001
+                    return (got.get("kind"), got.get("n"), got.get("key", "").rsplit("/", 1)[-1])
+                except _VpocError as exc:
+                    return (exc.kind,)
+
+            # ================= (ev-a) 실사 · 웹툰 따로 저장 =================
+            pid = "prj_ev_a"
+            _edt_cut_plan(env, pid)
+            wkey, rkey = edit.doc_key(owner, pid, "g1", "webtoon"), edit.doc_key(owner, pid, "g1", "real")
+            vr0, vw0 = view(pid, "real"), view(pid, "webtoon")
+            expect("ev-a", [wkey.endswith("/vnew/gen/g1/edit-webtoon.json"), rkey.endswith("/vnew/gen/g1/edit-real.json"),
+                            edit.legacy_doc_key(owner, pid, "g1").endswith("/vnew/gen/g1/edit.json"),
+                            [vr0.get("saved"), vr0.get("etag"), vr0["doc"]["version"]], [vw0.get("saved"), vw0.get("etag"), vw0["doc"]["version"]],
+                            vr0.get("savedVariants")],
+                   [True, True, True, [False, "", 0], [False, "", 0], {"real": False, "webtoon": False}],
+                   "키 edit-<variant>.json · 옛 키 edit.json · 저장 전: 두 그림체 모두 기본 문서 · etag \"\" · version 0 · savedVariants 둘 다 false")
+            kr, kw = keys_of(pid, "real"), keys_of(pid, "webtoon")
+            real_clips = [clip(kr["컷 1"], 0, 2, "r1"), clip(kr["컷 2"], 0, 1, "r2")]
+            web_clips = [clip(kw["컷 3"], 0, 3, "w1")]
+            sr = put(pid, {"etag": "", "variant": "real", "clips": real_clips})
+            sw = put(pid, {"etag": "", "variant": "webtoon", "clips": web_clips})
+            sr_b, sw_b = sr.get_json() or {}, sw.get_json() or {}
+            vr, vw = view(pid, "real"), view(pid, "webtoon")
+            expect("ev-a", [sr.status_code, sw.status_code, ids(vr), ids(vw), vr.get("saved"), vw.get("saved"), vr.get("variant"), vw.get("variant"),
+                            vr.get("etag") == sr_b.get("etag"), vw.get("etag") == sw_b.get("etag"), vr["doc"]["version"], vw["doc"]["version"],
+                            vr.get("savedVariants"), vw.get("savedVariants"), stored(rkey)[0]["variant"], stored(wkey)[0]["variant"]],
+                   [200, 200, ["r1", "r2"], ["w1"], True, True, "real", "webtoon", True, True, 1, 1,
+                    {"real": True, "webtoon": True}, {"real": True, "webtoon": True}, "real", "webtoon"],
+                   "실사 저장 → 웹툰 저장: 두 파일 다 남고 GET ?variant= 가 각자 클립 · etag · version 1 · savedVariants")
+            web_before = copy.deepcopy(stored(wkey))
+            sr2 = put(pid, {"etag": sr_b["etag"], "variant": "real", "clips": real_clips[:1]})
+            sr2_b = sr2.get_json() or {}
+            expect("ev-a", [sr2.status_code, sr2_b.get("doc", {}).get("version"), stored(wkey) == web_before, ids(view(pid, "webtoon")),
+                            ids(view(pid, "real"))],
+                   [200, 2, True, ["w1"], ["r1"]], "실사를 다시 저장해도 웹툰 파일(내용 · etag) 그대로")
+            conflicts = [err_of(put(pid, {"etag": sr_b["etag"], "variant": "real", "clips": real_clips})),  # 옛 실사 etag
+                         err_of(put(pid, {"etag": "", "variant": "real", "clips": real_clips})),  # 파일이 있는데 만들기
+                         err_of(put(pid, {"etag": sr_b["etag"], "variant": "webtoon", "clips": web_clips})),  # 다른 그림체 옛 etag
+                         err_of(put(pid, {"version": 1, "variant": "real", "clips": real_clips})),  # 옛 version
+                         err_of(put(pid, {"version": 0, "variant": "webtoon", "clips": web_clips}))]
+            by_version = put(pid, {"version": 2, "variant": "real", "clips": real_clips})
+            expect("ev-a", [conflicts, by_version.status_code, (by_version.get_json() or {}).get("doc", {}).get("version"), stored(wkey) == web_before],
+                   [[changed] * 5, 200, 3, True], "그림체마다 조건부 쓰기: 옛 etag · \"\" · 다른 그림체 옛 etag · 옛 version 409, 맞는 version 은 그 그림체만 +1")
+            # 작업 190: 화면이 그림체마다 자기 etag 를 보낸다. 다른 그림체의 지금 etag 로 저장하면 409(189 하위 호환 저장은 지웠다).
+            real_now = copy.deepcopy(stored(rkey))
+            web_now = copy.deepcopy(stored(wkey))
+            switched = put(pid, {"etag": real_now[1], "variant": "webtoon", "clips": web_clips + [clip(kw["컷 1"], 0, 1, "w2")]})
+            expect("ev-a", [err_of(switched), ids(view(pid, "webtoon")), stored(rkey) == real_now, stored(wkey) == web_now],
+                   [changed, ["w1"], True, True],
+                   "다른 그림체의 지금 etag 로 저장(189 전 화면 탭 바꾸기)은 409(작업 190) — 두 그림체 파일 그대로")
+            expect("ev-a", [edit.legacy_doc_key(owner, pid, "g1") in env.store.json,
+                            edit.legacy_doc_key(owner, pid, "g1") in env.store.json_writes], [False, False], "저장은 edit.json 을 만들지 않음")
+
+            # ================= (ev-b) 옛 edit.json =================
+            pid = "prj_ev_b"
+            _edt_cut_plan(env, pid)
+            kw, kr = keys_of(pid, "webtoon"), keys_of(pid, "real")
+            legacy_doc = {"version": 4, "variant": "webtoon", "updatedAt": "2026-11-01T00:00:00Z", "audio": [],
+                          "clips": [clip(kw["컷 1"], 0.0, 3.0, "L1"), clip(kw["컷 2"], 0.5, 1.5, "L2")]}
+            letag = put_legacy(pid, legacy_doc)
+            wkey, rkey = edit.doc_key(owner, pid, "g1", "webtoon"), edit.doc_key(owner, pid, "g1", "real")
+            vw, vr, v0 = view(pid, "webtoon"), view(pid, "real"), view(pid)
+            expect("ev-b", [[vw.get("saved"), vw.get("etag") == letag, vw["doc"]["version"], ids(vw), vw.get("savedVariants")],
+                            [vr.get("saved"), vr.get("etag"), vr["doc"]["version"], [c["sourceKey"] for c in vr["doc"]["clips"]]],
+                            v0.get("variant"), v0.get("etag") == letag],
+                   [[True, True, 4, ["L1", "L2"], {"real": False, "webtoon": True}],
+                    [False, "", 0, [kr["컷 1"], kr["컷 2"]]], "webtoon", True],
+                   "옛 edit.json(웹툰) = 웹툰 저장 문서(saved · 옛 etag · version 4) · 실사는 기본 문서(etag \"\" · version 0) · 인자 없는 GET 은 웹툰")
+            env.spawned.clear()
+            lexp = post(pid, {"etag": letag})
+            cur = env.export_state(pid).get("current") or {}
+            expect("ev-b", [lexp.status_code, cur.get("variant"), [c["id"] for c in cur.get("clips") or []], cur.get("docVersion"),
+                            cur.get("docHash") == edit._doc_hash("webtoon", legacy_doc["clips"])],  # noqa: SLF001
+                   [202, "webtoon", ["L1", "L2"], 4, True], "옛 문서 내보내기(variant 없음 · 옛 etag): 웹툰 · 옛 클립 사본 · docVersion 4")
+            done = finish(pid)
+            expect("ev-e", [done.get("status"), source(pid, "webtoon"), source(pid, "real")],
+                   ["done", ("export", 1, "final-edit-1.mp4"), ("NoSoundSource",)],
+                   "sound._source: 옛 문서 웹툰 내보내기는 웹툰 원본 · 실사는 내보내기도 완성본도 없어 NoSoundSource")
+            stale = [err_of(put(pid, {"etag": "", "variant": "webtoon", "clips": legacy_doc["clips"]})),
+                     err_of(put(pid, {"etag": "etag-nope", "variant": "webtoon", "clips": legacy_doc["clips"]})),
+                     err_of(put(pid, {"version": 0, "variant": "webtoon", "clips": legacy_doc["clips"]})),
+                     err_of(put(pid, {"version": 5, "variant": "webtoon", "clips": legacy_doc["clips"]}))]
+            env.store.read_hooks[wkey] = lambda: _FakeCharStore.write_json(env.store, wkey, {
+                "version": 5, "variant": "webtoon", "updatedAt": "", "clips": [], "audio": []})
+            raced = err_of(put(pid, {"etag": letag, "variant": "webtoon", "clips": legacy_doc["clips"]}))
+            env.store.json.pop(wkey, None)
+            expect("ev-b", [stale, raced, wkey in env.store.json], [[changed] * 4, changed, False],
+                   "옛 문서에서 첫 저장: \"\" · 틀린 etag · 틀린 version 409 · 첫 저장끼리 겹치면 If-None-Match 409")
+            first = put(pid, {"etag": letag, "variant": "webtoon", "clips": legacy_doc["clips"][:1]})
+            first_b = first.get_json() or {}
+            vw2 = view(pid, "webtoon")
+            again = err_of(put(pid, {"etag": letag, "variant": "webtoon", "clips": legacy_doc["clips"]}))
+            expect("ev-b", [first.status_code, first_b.get("doc", {}).get("version"), stored(wkey)[0]["clips"] == first_b.get("doc", {}).get("clips"),
+                            [vw2.get("saved"), vw2.get("etag") == first_b.get("etag"), vw2["doc"]["version"], ids(vw2)], again,
+                            vw2["export"]["n"], vw2["export"]["matchesDoc"]],
+                   [200, 5, True, [True, True, 5, ["L1"]], changed, 1, False],
+                   "옛 etag 기준 첫 저장 → edit-webtoon.json 새로(version 5) · 그 뒤 웹툰은 그 파일(옛 etag 409) · 옛 문서 내보내기는 기록으로 보이고 지금 문서와 다름")
+            rfirst = put(pid, {"etag": "", "variant": "real", "clips": [clip(kr["컷 1"], 0, 1, "q1")]})
+            expect("ev-b", [rfirst.status_code, (rfirst.get_json() or {}).get("doc", {}).get("version"), ids(view(pid, "real")),
+                            ids(view(pid, "webtoon"))],
+                   [200, 1, ["q1"], ["L1"]], "옛 문서가 웹툰이면 실사 첫 저장은 만들기(etag \"\") · 웹툰 그대로")
+            pid = "prj_ev_b2"
+            _edt_cut_plan(env, pid)
+            kw = keys_of(pid, "webtoon")
+            put_legacy(pid, {**legacy_doc, "clips": [clip(kw["컷 1"], 0.0, 3.0, "L1")]})
+            by_ver = [err_of(put(pid, {"version": 0, "variant": "webtoon", "clips": []})),
+                      put(pid, {"version": 4, "variant": "webtoon", "clips": []}).status_code,
+                      view(pid, "webtoon")["doc"]["version"]]
+            expect("ev-b", by_ver, [changed, 200, 5], "옛 문서 version 기준 첫 저장(0 은 409 · 4 → 5)")
+            pid = "prj_ev_b3"
+            _edt_cut_plan(env, pid)
+            kr = keys_of(pid, "real")
+            letag3 = put_legacy(pid, {**legacy_doc, "variant": "real", "clips": [clip(kr["컷 2"], 0.0, 1.0, "R9")]})
+            v3, v3w = view(pid), view(pid, "webtoon")
+            expect("ev-b", [v3.get("variant"), v3.get("saved"), v3.get("etag") == letag3, ids(v3), v3.get("savedVariants"), v3w.get("saved"),
+                            v3w.get("etag")],
+                   ["real", True, True, ["R9"], {"real": True, "webtoon": False}, False, ""],
+                   "옛 문서가 실사면: 인자 없는 GET 은 실사(selected 웹툰보다 저장 문서) · 웹툰은 기본 문서")
+
+            # ================= (ev-c) 인자 없는 GET =================
+            pid = "prj_ev_c"
+            _edt_cut_plan(env, pid)
+            kw, kr = keys_of(pid, "webtoon"), keys_of(pid, "real")
+            expect("ev-c", view(pid).get("variant"), "webtoon", "저장 문서가 없으면 그대로(selected 웹툰)")
+
+            def own(variant: str, at: str, key_pid: str = pid) -> None:
+                ks = kw if variant == "webtoon" else kr
+                _FakeCharStore.write_json(env.store, edit.doc_key(owner, key_pid, "g1", variant),
+                                          {"version": 1, "variant": variant, "updatedAt": at, "audio": [], "clips": [clip(ks["컷 1"], 0, 1, variant[0])]})
+
+            own("real", "2026-11-05T00:00:00.000Z")
+            own("webtoon", "2026-11-04T23:59:59.999Z")
+            picks = [view(pid).get("variant")]
+            own("webtoon", "2026-11-05T00:00:00.001Z")
+            picks.append(view(pid).get("variant"))
+            own("real", "2026-11-05T00:00:00.001Z")
+            picks.append(view(pid).get("variant"))  # 같으면 selected(웹툰)
+            own("webtoon", "")
+            picks.append(view(pid).get("variant"))  # 시각 없음 = 가장 오래됨
+            expect("ev-c", picks, ["real", "webtoon", "webtoon", "real"],
+                   "가장 최근 updatedAt(밀리초) · 같으면 selected · 시각 없는 문서는 가장 오래된 것으로")
+            pid = "prj_ev_c2"
+            _edt_cut_plan(env, pid, selected="real")
+            kw, kr = keys_of(pid, "webtoon"), keys_of(pid, "real")
+            put_legacy(pid, {**legacy_doc, "updatedAt": "2026-11-06T00:00:00Z", "clips": [clip(kw["컷 1"], 0.0, 1.0, "L1")]})
+            own("real", "2026-11-05T23:59:59.999Z", pid)
+            picks = [view(pid).get("variant")]
+            own("real", "2026-11-06T00:00:00.500Z", pid)
+            picks.append(view(pid).get("variant"))
+            own("real", "2026-11-06T00:00:00Z", pid)
+            picks.append(view(pid).get("variant"))  # 옛 초 꼴과 같은 시각 → selected(실사)
+            expect("ev-c", picks, ["webtoon", "real", "real"], "옛 문서(초 꼴)도 비교 · 같은 시각이면 selected(실사)")
+            pid = "prj_ev_c3"
+            _edt_cut_plan(env, pid)
+            kw, kr = keys_of(pid, "webtoon"), keys_of(pid, "real")
+            put(pid, {"etag": "", "variant": "webtoon", "clips": [clip(kw["컷 1"], 0, 1, "a")]})
+            _time.sleep(0.05)
+            saved_r = (put(pid, {"etag": "", "variant": "real", "clips": [clip(kr["컷 1"], 0, 1, "b")]}).get_json() or {}).get("doc") or {}
+            expect("ev-c", [view(pid).get("variant"), bool(re.fullmatch(r"\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{3}Z", saved_r.get("updatedAt") or ""))],
+                   ["real", True], "실제 PUT 웹툰 → 실사 뒤 인자 없는 GET 은 실사 · updatedAt 은 밀리초 꼴")
+
+            # ================= (ev-d) 내보내기 =================
+            pid = "prj_ev_d"
+            _edt_cut_plan(env, pid)
+            kr, kw = keys_of(pid, "real"), keys_of(pid, "webtoon")
+            real_clips = [clip(kr["컷 1"], 0, 2, "r1"), clip(kr["컷 2"], 0, 1, "r2")]
+            web_clips = [clip(kw["컷 3"], 0, 3, "w1")]
+            er = (put(pid, {"etag": "", "variant": "real", "clips": real_clips}).get_json() or {}).get("etag")
+            ew = (put(pid, {"etag": "", "variant": "webtoon", "clips": web_clips}).get_json() or {}).get("etag")
+            pre = [err_of(post(pid, {"etag": er, "variant": "anime"}))[:2], err_of(post(pid, {"etag": ew, "variant": "real"})),
+                   err_of(post(pid, {"etag": "", "variant": "real"}))]
+            expect("ev-d", pre, [(400, "BadVariant"), changed, changed], "내보내기 variant 꼴 400 · 그 그림체 etag 가 아니면 409")
+            env.spawned.clear()
+            r1 = post(pid, {"etag": er, "variant": "real"})
+            r1_b = r1.get_json() or {}
+            cur = env.export_state(pid).get("current") or {}
+            real_saved = stored(edit.doc_key(owner, pid, "g1", "real"))[0]["clips"]
+            expect("ev-d", [r1.status_code, r1_b.get("started"), r1_b.get("export", {}).get("variant"), cur.get("n"), cur.get("variant"),
+                            [c["id"] for c in cur.get("clips") or []], cur.get("docHash") == edit._doc_hash("real", real_saved),  # noqa: SLF001
+                            len(env.spawned)],
+                   [202, True, "real", 1, "real", ["r1", "r2"], True, 1], "실사 내보내기 = 실사 문서 사본 · docHash · n 1")
+            vr, vw = view(pid, "real"), view(pid, "webtoon")
+            expect("ev-d", [[vr["export"].get("status"), vr["export"].get("n"), vr["export"].get("matchesDoc"), vr["exportHistory"]],
+                            [vw["export"], vw["exportHistory"]]],
+                   [["queued", 1, True, []], [{"status": "none"}, []]], "웹툰 보기는 실사 내보내기를 보이지 않음(export none · 기록 없음)")
+            busy_msg = (409, "ExportRunning", "실사 내보내기가 진행 중입니다. 끝난 뒤 다시 눌러 주세요.")
+            same = post(pid, {"etag": er})
+            expect("ev-d", [err_of(post(pid, {"etag": ew, "variant": "webtoon"})), err_of(post(pid, {"etag": ew})),
+                            same.status_code, (same.get_json() or {}).get("started"), (same.get_json() or {}).get("export", {}).get("n"),
+                            len(env.spawned)],
+                   [busy_msg, busy_msg, 202, False, 1, 1],
+                   "다른 그림체 진행 중 409 ExportRunning(그 그림체 이름) — variant 없으면 etag 로 웹툰을 고름 · 같은 실사 문서는 다시 시작 안 함")
+            d1 = finish(pid)
+            w2 = post(pid, {"etag": ew})
+            cur2 = env.export_state(pid).get("current") or {}
+            d2 = finish(pid)
+            state = env.export_state(pid)
+            vr, vw = view(pid, "real"), view(pid, "webtoon")
+            expect("ev-d", [d1.get("status"), w2.status_code, cur2.get("variant"), cur2.get("n"), [c["id"] for c in cur2.get("clips") or []],
+                            d2.get("status"), d2.get("key", "").rsplit("/", 1)[-1], state.get("n"),
+                            [(h.get("n"), h.get("variant")) for h in state.get("history") or []]],
+                   ["done", 202, "webtoon", 2, ["w1"], "done", "final-edit-2.mp4", 2, [(1, "real")]],
+                   "실사 끝난 뒤 웹툰 내보내기(variant 없음 · etag 로 웹툰) → n 2 · final-edit-2 · 상태 파일 하나에 기록")
+            expect("ev-d", [[vr["export"].get("n"), vr["export"].get("variant"), vr["export"].get("status"), vr["export"].get("matchesDoc"),
+                             bool(vr["export"].get("videoUrl")), vr["exportHistory"]],
+                            [vw["export"].get("n"), vw["export"].get("variant"), vw["export"].get("matchesDoc"), vw["exportHistory"]]],
+                   [[1, "real", "done", True, True, []], [2, "webtoon", True, []]],
+                   "그림체마다 자기 최근 결과: 실사는 기록으로 밀린 n 1(matchesDoc true) · 웹툰은 n 2 · 서로의 결과는 기록에도 없음")
+            expect("ev-e", [source(pid, "real"), source(pid, "webtoon")],
+                   [("export", 1, "final-edit-1.mp4"), ("export", 2, "final-edit-2.mp4")], "sound._source: 그림체마다 자기 내보내기")
+            er2 = (put(pid, {"etag": vr["etag"], "variant": "real", "clips": real_clips[:1]}).get_json() or {}).get("etag")
+            stale_match = view(pid, "real")["export"].get("matchesDoc")
+            post(pid, {"etag": er2, "variant": "real"})
+            finish(pid)
+            vr, vw = view(pid, "real"), view(pid, "webtoon")
+            expect("ev-d", [stale_match, vr["export"].get("n"), vr["export"].get("matchesDoc"), [h["n"] for h in vr["exportHistory"]],
+                            vr["exportHistory"][0].get("variant") if vr["exportHistory"] else None, vw["export"].get("n"),
+                            [h["n"] for h in vw["exportHistory"]], "docHash" in (vr["exportHistory"] or [{}])[0]],
+                   [False, 3, True, [1], "real", 2, [], False],
+                   "실사 고친 뒤 matchesDoc false → 다시 내보내기 n 3 · 실사 기록 [1] · 웹툰 n 2 그대로 · 보기 기록에는 docHash 를 내보내지 않음")
+            expect("ev-e", [source(pid, "real"), source(pid, "webtoon")],
+                   [("export", 3, "final-edit-3.mp4"), ("export", 2, "final-edit-2.mp4")], "sound._source: 실사는 가장 최근 n 3 · 웹툰 n 2")
+
+            # ================= 옛 edit.json 은 한 번도 쓰이지 않음 =================
+            expect("ev-b", [[key for key, _ in legacy_keys if key in env.store.json_writes],
+                            [key for key, first_seen in legacy_keys if env.store.json.get(key) != first_seen]], [[], []],
+                   "검사 내내 edit.json 은 쓰이지 않고 내용 · etag 그대로")
+
+        # ================= (ev-f) 정적 =================
+        edit_src = (APP_SRC / "vnew" / "edit.py").read_text(encoding="utf-8")
+        tree = _ast.parse(edit_src)
+        parents = {child: node for node in _ast.walk(tree) for child in _ast.iter_child_nodes(node)}
+        calls = [n for n in _ast.walk(tree) if isinstance(n, _ast.Call) and isinstance(n.func, _ast.Name)]
+        doc_args = [len(n.args) for n in calls if n.func.id == "doc_key"]
+        legacy_parents = [getattr(getattr(parents.get(n), "func", None), "id", "") for n in calls if n.func.id == "legacy_doc_key"]
+        outside: list[str] = []
+        for py_path in sorted(APP_SRC.rglob("*.py")):
+            if py_path.name == "edit.py":
+                continue
+            for node in _ast.walk(_ast.parse(py_path.read_text(encoding="utf-8"))):
+                if (isinstance(node, _ast.Call) and isinstance(node.func, _ast.Attribute) and node.func.attr in ("doc_key", "legacy_doc_key")
+                        and isinstance(node.func.value, _ast.Name) and node.func.value.id in ("edit", "vnew_edit", "edit_mod")
+                        and (node.func.attr == "legacy_doc_key" or len(node.args) != 4)):
+                    outside.append(f"{py_path.relative_to(APP_SRC).as_posix()}:{node.lineno}")
+        routes_src = (APP_SRC / "vnew" / "routes.py").read_text(encoding="utf-8")
+        expect("ev-f", [bool(doc_args) and set(doc_args) == {4}, legacy_parents, outside,
+                        'edit.start_export(owner, pid, payload.get("etag"), payload.get("variant"))' in routes_src,
+                        "edit.json" in edit_src and "읽기만" in edit_src, "_switched_tab" in edit_src, "save_switched" in edit_src],
+               [True, ["_read_json", "_read_json"], [], True, True, False, False],
+               "edit.py doc_key 호출은 모두 그림체 인자 · legacy_doc_key 는 _read_json 안 2곳(읽기만) · 다른 모듈은 edit.doc_key 3인자 · 옛 키 호출 없음 · "
+               "라우트가 variant 를 넘김 · 옛 문서 규칙 주석 · 작업 190: 탭 바꾸기 하위 호환(_switched_tab) 없음")
+    except Exception as exc:  # noqa: BLE001
+        bad.append("(ev) 예외: " + repr(exc) + "\n" + _tb.format_exc()[:2000])
+
+    groups = {f"ev-{c}" for c in "abcdef"}
+    if groups - seen and not bad:
+        bad.append(f"검사하지 못한 묶음: {sorted(groups - seen)}")
+    if bad:
+        fail("작업 189 ⑦ 편집 문서 그림체별 저장(ev) 검사 실패\n" + "\n".join(f"  {item}" for item in bad))
+    else:
+        ok("작업 189 ⑦ 편집 문서 그림체별 저장 검사 (ev-a)실사 · 웹툰 따로 · 그림체별 409 · 다른 그림체 etag 409(190) (ev-b)옛 edit.json 읽기만 · "
+           "첫 저장 옛 etag/version (ev-c)인자 없는 GET 최근 updatedAt (ev-d)내보내기 그림체별 · 다른 그림체 진행 중 409 · n 함께 셈 "
+           "(ev-e)sound._source 그림체별 (ev-f)정적 호출 규칙")
+
+
+# ---------------------------------------------------------------- 작업 190 — ⑦ 편집 그림체 탭 = 그 그림체 편집본 · 클립 누르기 = 그 컷 시작
+# node 가짜 DOM 은 _EDU_NODE_HARNESS · _EDU_NODE_CTL 앞부분(가짜 api · 보기 · 포인터 도우미)을 그대로 쓰고 run() 만 새로 둔다.
+_VT_NODE_RUN = r"""
+function keysOf(list) { return (list || []).map(function (c) { return [c.sourceKey, c.in, c.out, c.muted]; }); }
+function sameKeys(a, b) { return JSON.stringify(keysOf(a)) === JSON.stringify(keysOf(b)); }
+async function run() {
+  var o = {};
+  var host = new FakeNode("div");
+  getQueue.push({ ok: view({ saved: true, etag: "w1", savedVariants: { real: false, webtoon: true } }) });
+  renderEditStep(host);
+  await settle();
+  await settle();
+  var ctx = editCtx;
+  function boxes() { return byClass(rootOf(host), "vnew-edit-clip"); }
+  function starts() { return editStarts(ctx.clips).starts.map(r3); }
+  function tool(label) { return byClass(rootOf(host), "vnew-edit-tool").filter(function (b) { return b._label.textContent === label; })[0]; }
+  function up(node, x) { node.fire("pointerup", { clientX: x }); }
+  o.open = [ctx.variant, ctx.etag, starts(), ctx.pps, ctx.playing];
+
+  // ---- (vt-e) 한 번 누르기 = 고르고 그 컷 시작으로(멈춘 채)
+  editSeek(ctx, 0.5);
+  var b2 = boxes()[2];
+  pd(b2, 610);
+  var atDown = r3(ctx.t);
+  up(b2, 610);
+  o.click = [ctx.sel, atDown, r3(ctx.t), r3(ctx.t) === starts()[2], ctx.playing];
+  editSeek(ctx, 0.5);
+  var b1 = boxes()[1];
+  pd(b1, 320);
+  b1.fire("pointermove", { clientX: 323 });
+  up(b1, 323);
+  o.jitter = [ctx.sel, r3(ctx.t)];
+  editSeek(ctx, 0.5);
+  b1 = boxes()[1];
+  pd(b1, 320);
+  b1.fire("pointercancel", {});
+  o.cancel = [ctx.sel, r3(ctx.t)];
+  // 끌어 순서 바꾸기는 옮기지 않는다
+  editSeek(ctx, 0.5);
+  var before = ids(ctx.clips);
+  var b0 = boxes()[0];
+  pd(b0, 50);
+  b0.fire("pointermove", { clientX: 540 });
+  up(b0, 540);
+  o.drag = [before, ids(ctx.clips), r3(ctx.t)];
+  key("z", "KeyZ", { ctrlKey: true });
+  o.dragUndo = ids(ctx.clips);
+  // 끝 다듬기 · 끝 손잡이 누르기도 옮기지 않는다
+  editSeek(ctx, 0.5);
+  var edge = byClass(boxes()[0], "is-out")[0];
+  pd(edge, 300);
+  edge.fire("pointermove", { clientX: 280 });
+  up(edge, 280);
+  var trimmed = r3(ctx.clips[0].out);
+  var edge2 = byClass(boxes()[0], "is-out")[0];
+  pd(edge2, 280);
+  up(edge2, 280);
+  o.trim = [trimmed, r3(ctx.t)];
+  key("z", "KeyZ", { ctrlKey: true });
+  // 재생 중이면 그 컷 시작부터 계속 재생
+  editSeek(ctx, 0.2);
+  key(" ", "Space");
+  var playing0 = ctx.playing;
+  var p1 = boxes()[1];
+  pd(p1, 320);
+  up(p1, 320);
+  o.playing = [playing0, ctx.playing, r3(ctx.t), ctx.curIndex, ctx.sel];
+  key(" ", "Space");
+  // 소리 상자 누르기도 같은 자리
+  editSeek(ctx, 0.5);
+  byClass(rootOf(host), "vnew-edit-aclip")[2].fire("click");
+  o.audio = [ctx.sel, r3(ctx.t), ctx.playing];
+  // 작업 188 두 번 누르기 = 그 컷부터 재생(그대로)
+  ctx.dragEndAt = 0;
+  var d1 = boxes()[1];
+  pd(d1, 320);
+  up(d1, 320);
+  d1.fire("dblclick", { target: d1 });
+  o.dbl = [ctx.playing, r3(ctx.t), ctx.cutPlay ? ctx.cutPlay.mode : null, ctx.sel];
+  editPause(ctx);
+  fire(800);
+  await settle();
+
+  // ---- (vt-a · vt-b) 탭 바꾸기: 확인창 0 · 남은 저장(웹툰 etag) 먼저 · GET ?variant=real · 실사 문서 그대로
+  var confirms0 = confirms.length, puts0 = puts().length;
+  ctx.sel = 0;
+  key("m", "KeyM");
+  var webEtag0 = ctx.etag, webUndo = ctx.hist.undo.length, webClips = clone(ctx.clips);
+  var rv = clone(S.real);
+  rv.savedVariants = { real: false, webtoon: true };
+  getQueue.push({ ok: rv });
+  byText(rootOf(host), "button", "실사").fire("click");
+  await settle();
+  var flush = puts().slice(-1)[0][2];
+  var webEtag = "e" + putN;
+  o.toReal = [puts().length - puts0, flush.variant, flush.etag === webEtag0, sameKeys(flush.clips, webClips), gets().slice(-1)[0] === P + "?variant=real",
+              confirms.length - confirms0, ctx.variant, ctx.etag, ctx.saved, ctx.hist.undo.length, sameKeys(ctx.clips, S.real.doc.clips), ctx.sel];
+  // ---- (vt-c) 실사에서 고친 뒤 내보내기: 실사 문서를 실사 etag("" = 첫 저장)로 PUT → POST {etag, variant}
+  ctx.sel = 0;
+  key("m", "KeyM");
+  postQueue.push({ ok: { ok: true, started: true, export: { status: "queued", n: 3, progress: { done: 0, total: 2 }, matchesDoc: true } } });
+  byClass(rootOf(host), "vnew-edit-export-btn")[0].fire("click");
+  await settle();
+  var realPut = puts().slice(-1)[0][2];
+  var post = calls.filter(function (c) { return c[0] === "POST"; }).slice(-1)[0];
+  var realEtag = ctx.etag;
+  o.realSave = [realPut.variant, realPut.etag, post[1] === P + "/export", Object.keys(post[2]).sort(), post[2].variant, post[2].etag === realEtag,
+                realEtag === "e" + putN];
+  // 다른 그림체가 내보내는 중(409 ExportRunning) → 오류 줄이 아니라 안내 한 줄
+  postQueue.push({ err: { type: "ExportRunning", status: 409, message: "웹툰 내보내기가 진행 중입니다. 끝난 뒤 다시 눌러 주세요." } });
+  byClass(rootOf(host), "vnew-edit-export-btn")[0].fire("click");
+  await settle();
+  var rr = rootOf(host);
+  o.running = [byClass(rr, "vnew-edit-notice")[0].textContent, byClass(rr, "vnew-edit-notice")[0].style.display,
+               byClass(rr, "vnew-plan-error")[0].style.display, ctx.exporting, byClass(rr, "vnew-edit-export-btn")[0].disabled];
+  // ---- (vt-b) 웹툰으로 돌아오기: 남은 저장 없음 → PUT 0 · 실사 내보내기 조회 멈춤 · 웹툰 실행 취소 스택 되살림 · 실사 스택은 남음
+  var realUndo = ctx.hist.undo.length, poll0 = pending(3000), puts1 = puts().length;
+  getQueue.push({ ok: view({ doc: { version: 5, variant: "webtoon", updatedAt: "", clips: webClips, audio: [] }, etag: webEtag, saved: true,
+                             savedVariants: { real: true, webtoon: true } }) });
+  byText(rootOf(host), "button", "애니(웹툰)").fire("click");
+  await settle();
+  o.toWeb = [puts().length - puts1, poll0, pending(3000), gets().slice(-1)[0] === P + "?variant=webtoon", ctx.variant, ctx.etag === webEtag,
+             ctx.hist.undo.length === webUndo, webUndo > 0, realUndo, (ctx.hists.real || { undo: [] }).undo.length];
+  key("z", "KeyZ", { ctrlKey: true });
+  fire(800);
+  await settle();
+  var webUndoPut = puts().slice(-1)[0][2];
+  o.webUndo = [ctx.variant, webUndoPut.variant, webUndoPut.etag === webEtag, ctx.hist.undo.length === webUndo - 1];
+  // ---- (vt-d) 실사로 다시: 실사 스택 되살림 · [처음 상태로]는 실사 문서만 기본 문서로(실행 취소 한 단계, 확인창 0)
+  var rv2 = clone(S.real);
+  rv2.doc = { version: 1, variant: "real", updatedAt: "", clips: realPut.clips, audio: [] };
+  rv2.etag = realEtag;
+  rv2.saved = true;
+  rv2.savedVariants = { real: true, webtoon: true };
+  getQueue.push({ ok: rv2 });
+  byText(rootOf(host), "button", "실사").fire("click");
+  await settle();
+  o.backReal = [ctx.variant, ctx.hist.undo.length === realUndo, ctx.etag === realEtag, sameKeys(ctx.clips, realPut.clips)];
+  var undoBeforeReset = ctx.hist.undo.length;
+  tool("처음 상태로").fire("click");
+  fire(800);
+  await settle();
+  var resetPut = puts().slice(-1)[0][2];
+  o.reset = [ctx.hist.undo.length - undoBeforeReset, resetPut.variant, resetPut.etag === realEtag, sameKeys(resetPut.clips, S.real.defaultClips),
+             sameKeys(resetPut.clips, realPut.clips), confirms.length - confirms0];
+  key("z", "KeyZ", { ctrlKey: true });
+  o.resetUndo = [ctx.variant, sameKeys(ctx.clips, realPut.clips)];
+  fire(800);
+  await settle();
+  // ---- (vt-b) 다시 열면(새 화면) 실행 취소 스택은 비어 있다
+  editLeave();
+  await settle();
+  var host2 = new FakeNode("div");
+  getQueue.push({ ok: view({ saved: true, etag: "w9", savedVariants: { real: true, webtoon: true } }) });
+  renderEditStep(host2);
+  await settle();
+  await settle();
+  o.reload = [editCtx.hist.undo.length, Object.keys(editCtx.hists), byClass(rootOf(host2), "vnew-edit-variant-dot").length];
+  editLeave();
+  out.vt = o;
+  out.innerHTML = innerHTMLUsed;
+  console.log(JSON.stringify(out));
+}
+run().catch(function (e) { console.error(String((e && e.stack) || e)); process.exit(1); });
+"""
+
+
+def check_vnew_edit_variant_tabs_190() -> None:
+    """작업 190 — ⑦ 편집 화면: 그림체 탭 = 그 그림체 편집본(서버 189), 클립 한 번 누르기 = 그 컷 시작으로 재생헤드(vnew.js · vnew.css · edit.py).
+
+    (vt-a) 탭 바꾸기: 확인창 · 바꿔 넣기(editCommit) 없음 · 남은 저장을 먼저 보내고 기다림(실패면 그 탭) · GET ?variant= 로 그 그림체 문서 ·
+           etag · 내보내기 · 기록 · 고름 · 고른 컷 재생 · 열린 패널 지움(정적 + node)
+    (vt-b) 그림체별 etag · 실행 취소: PUT 은 그 그림체 etag(첫 저장 "") · 409 는 같은 그림체를 다시 불러옴 · 스택은 그림체마다(돌아오면 되살림,
+           다시 열면 비어 있음) · 되돌려도 그림체는 그대로(정적 + node)
+    (vt-c) 내보내기 바디 {etag, variant} · 다른 그림체 진행 중 409 ExportRunning 은 안내 한 줄 · 탭을 바꾸면 앞 그림체 조회 응답은 버림
+    (vt-d) 탭 표시(savedVariants 점 · 지금 탭 is-on/aria-pressed · title "… 편집본(따로 저장됩니다)") · [처음 상태로]는 지금 그림체만(실행 취소 한 단계)
+    (vt-e) 클립 상자 · 소리 상자 한 번 누르기 = 고르고 editStarts(ctx.clips).starts[i] 로(멈춘 채 / 재생 중이면 계속) · 끌기 · 다듬기 · 취소는
+           옮기지 않음 · 작업 188 두 번 누르기 그대로(정적 + node)
+    (vt-f) vnew.css 190 구역 · LF(vnew.js · vnew.css · edit.py)
+    (vt-g) edit.py: 189 하위 호환(_switched_tab) 없음
+    """
+    import traceback as _tb  # noqa: PLC0415
+
+    sys.path.insert(0, str(ROOT / "app"))
+    bad: list[str] = []
+    seen: set[str] = set()
+    node = shutil.which("node")
+
+    def expect(group: str, got, want, what: str) -> None:
+        seen.add(group)
+        if got != want:
+            bad.append(f"({group}) {what}\n      결과 {got!r}\n      기대 {want!r}")
+
+    def missing(text: str, needles) -> list[str]:
+        return [n for n in needles if n not in text]
+
+    try:
+        vjs = (PUBLIC / "vnew.js").read_text(encoding="utf-8")
+        css = (PUBLIC / "vnew.css").read_text(encoding="utf-8")
+        edit_src = (APP_SRC / "vnew" / "edit.py").read_text(encoding="utf-8")
+        names = ("editSwitchVariant", "editSaveFlushed", "editApplyView", "editNewCtx", "editUndoRedo", "editCommit", "editFlushSave",
+                 "editExport", "editScheduleExportPoll", "editRenderVariants", "editClipPointer", "editClipBoxes", "editSeekClip", "editDo",
+                 "editInsertMaterial")
+        body = {name: _jlu_body(vjs, name) for name in names}
+        expect("vt-a", sorted(name for name, text in body.items() if not text), [], "함수가 vnew.js 에 하나씩 있다")
+
+        # ---------------- (vt-a) 탭 바꾸기
+        sw = body["editSwitchVariant"]
+        expect("vt-a", [[w for w in ("editConfirm(", "confirm(", "editCommit(", "editAbsorbMaterials(", "defaultClips") if w in sw],
+                        "기본 문서로 바꿉니다" in vjs,
+                        0 <= sw.find("editPause(ctx);") < sw.find("editSaveFlushed(ctx)") < sw.find("editFetchView(ctx, variant")
+                        < sw.find("editApplyView(ctx, view, true);") < sw.find("editBuild(ctx);"),
+                        missing(sw, ["if (!editAlive(ctx) || ctx.busy || ctx.exporting || variant === ctx.variant", "editFixClose(ctx);",
+                                     "editFixPickClose(ctx);", "editTrClose(ctx);", "editTightenClose(ctx);", "ctx.busy = true;",
+                                     "if (err && err.handled) return;", '"저장하지 못해 그림체를 바꾸지 않았습니다: "']),
+                        missing(body["editSaveFlushed"], ["if (!ctx.saving && !ctx.saveTimer && ctx.rev === ctx.savedRev) {",
+                                                          "ctx.saveWaiters.push([resolve, reject]);", "editFlushSave(ctx);"]),
+                        bool(re.search(r"ctx\.saved\b", body["editSaveFlushed"])),
+                        "ctx.cutPlay = null;" in body["editApplyView"], "ctx.sel = -1;" in body["editApplyView"]],
+               [[], False, True, [], [], False, True, True],
+               "탭 바꾸기: 확인창 · 바꿔 넣기 없음 · 멈춤 → 남은 저장 기다림(고친 것 없는 기본 문서는 PUT 안 함) → GET ?variant= → 그 보기 그대로 → "
+               "다시 그림 · 패널 닫기 · 고름 · 고른 컷 재생 지움 · 저장 실패면 그 탭")
+
+        # ---------------- (vt-b) 그림체별 etag · 실행 취소
+        flush = body["editFlushSave"]
+        expect("vt-b", [missing(body["editApplyView"], ["function editApplyView(ctx, view, keepHist) {",
+                                                        "ctx.hist = (keepHist && ctx.hists[variant]) || { undo: [], redo: [] };",
+                                                        "ctx.hists[variant] = ctx.hist;"]),
+                        "hists: {}," in body["editNewCtx"], "savedVariants: {}," in body["editNewCtx"],
+                        "ctx.variant =" in body["editUndoRedo"], "ctx.variant =" in body["editCommit"], "o.variant" in body["editCommit"],
+                        missing(flush, ["var variant = ctx.variant;", "editSaveBody(ctx.etag, variant, ctx.clips)",
+                                        "editLoad(ctx, variant, EDIT_CHANGED_TEXT);", "ctx.savedVariants[variant] = true;"]),
+                        'editLoad(ctx, "", EDIT_CHANGED_TEXT)' in vjs, vjs.count("editLoad(ctx, ctx.variant, EDIT_CHANGED_TEXT);")],
+               [[], True, True, False, False, False, [], False, 1],
+               "그림체별 스택(ctx.hists, 탭 바꾸기면 되살림 · 409 다시 불러오기는 비움) · 되돌리기 · 변경은 그림체를 바꾸지 않음 · "
+               "PUT 은 보낸 때 그림체 · 그 etag · 409 는 같은 그림체를 다시 불러옴(저장 · 내보내기 둘 다)")
+
+        # ---------------- (vt-c) 내보내기
+        exp = body["editExport"]
+        poll = body["editScheduleExportPoll"]
+        expect("vt-c", ["JSON.stringify({ etag: ctx.etag, variant: ctx.variant })" in exp, "JSON.stringify({ etag: ctx.etag })" in vjs,
+                        0 <= exp.find('if (err && err.type === "ExportRunning") {') < exp.find('editShowError(ctx, "내보내지 못했습니다: "'),
+                        "editNote(ctx, errMessage(err));" in exp,
+                        missing(poll, ["var variant = ctx.variant;", 'api(editPath(ctx) + "?variant=" + encodeURIComponent(variant))',
+                                       "if (!editAlive(ctx) || ctx.variant !== variant || ctx.busy) return;"]),
+                        poll.count("ctx.variant !== variant"),
+                        missing(body["editInsertMaterial"], ["var variant = ctx.variant;", "if (ctx.busy || ctx.variant !== variant) return;"])],
+               [True, False, True, True, [], 2, []],
+               "내보내기 바디 {etag, variant} · ExportRunning 은 안내 한 줄 · 탭을 바꾸면 앞 그림체 조회 응답 · 길이 재던 재료 넣기는 버림")
+
+        # ---------------- (vt-d) 탭 표시 · 처음 상태로
+        tabs = body["editRenderVariants"]
+        expect("vt-d", ['var EDIT_VARIANT_TIP = { real: "실사 편집본(따로 저장됩니다)", webtoon: "애니(웹툰) 편집본(따로 저장됩니다)" };' in vjs,
+                        'var EDIT_VARIANT_SAVED = "편집됨";' in vjs,
+                        missing(tabs, ['var saved = (ctx.savedVariants || {})[item.key] === true;', '(on ? " is-on" : "") + (saved ? " is-saved" : "")',
+                                       "btn.title = item.available === true ? EDIT_VARIANT_TIP[item.key]",
+                                       'btn.setAttribute("aria-pressed", on ? "true" : "false");',
+                                       'var dot = el("span", "vnew-edit-variant-dot", "");', 'dot.setAttribute("aria-hidden", "true");']),
+                        "if ((ctx.defaults[ctx.variant] || []).length) editCommit(ctx, editCloneClips(ctx.defaults[ctx.variant]), { sel: -1 });"
+                        in body["editDo"]],
+               [True, True, [], True], "탭: 지금 탭 is-on · aria-pressed, 저장된 편집본 점(aria-hidden, 이름은 aria-label), title 문구 · "
+                                       "[처음 상태로] = 지금 그림체 기본 문서로 editCommit 한 번")
+
+        # ---------------- (vt-e) 클립 누르기
+        cp = body["editClipPointer"]
+        seek = body["editSeekClip"]
+        expect("vt-e", [0 <= cp.find("end: function (dx, moved, cancelled) {") < cp.find("if (!moved && !cancelled) editSeekClip(ctx, from);")
+                        < cp.find("editCommit(ctx, editMove(ctx.clips, from, drop)"),
+                        cp.count("editSeekClip("), "editSeekClip(" in body["editClipBoxes"],
+                        "editSeek(ctx, editStarts(ctx.clips).starts[index]);" in seek,
+                        [w for w in ("editPlay(", "editPause(", "editPlayCut(") if w in seek],
+                        "if (!editAlive(ctx) || ctx.busy || index < 0 || index >= ctx.clips.length) return;" in seek,
+                        vjs.count("editSeekClip(")],
+               [True, 1, True, True, [], True, 3],
+               "클립 상자: 떼는 때 움직이지 않았고 취소가 아니면 그 컷 시작으로(끌기면 순서 바꾸기만) · 소리 상자 click 도 · 재생 상태는 그대로(editSeek) · "
+               "부르는 곳은 이 둘뿐")
+
+        # ---------------- (vt-f) CSS · LF
+        marker = "/* ================================================================ ⑦ 편집 — 그림체별 편집본 탭(작업 190)"
+        start_css = css.find(marker)
+        section = css[start_css:] if start_css >= 0 else ""
+        expect("vt-f", [css.count(marker), sorted({"vnew-edit-variant-dot", "vnew-edit-variant"} - set(re.findall(r"\.(vnew-edit-[a-z0-9-]+)", section))),
+                        "is-on" in section, "border-radius: 50%;" in _edu_css_block(css, ".vnew-edit-variant-dot", start_css),
+                        [w for w in ("display: none", "overflow-x") if w in section],
+                        [n for n, data in (("vnew.js", vjs), ("vnew.css", css), ("edit.py", edit_src)) if "\r" in data], css.endswith("}\n")],
+               [1, [], True, True, [], [], True], "CSS 190 구역(탭 점 · 지금 탭 테두리) · 가로 스크롤 · 숨김 없음 · LF")
+
+        # ---------------- (vt-g) 서버 하위 호환 지움
+        expect("vt-g", [w for w in ("_switched_tab", "save_switched") if w in edit_src], [], "edit.py 에 189 하위 호환 저장(다른 그림체 etag 받기)이 없다")
+
+        # ---------------- node 가짜 DOM(실제 GET /edit 응답)
+        if not node:
+            warn("node 가 없어 작업 190 화면 실행 검사를 건너뜁니다")
+        else:
+            code, problems = _edu_code(vjs, _EDU_SLICES)
+            expect("vt-a", problems, [], "⑦ 편집 구역 자르기")
+            prelude = _EDU_NODE_CTL.split("async function run() {")[0]
+            with _LogCapture(), _EdtEnv() as env, _pin_vnew(VNEW_EDIT=True):
+                client = env.client()
+                _edt_cut_plan(env, "prj_vt190")
+                web = client.get("/api/vnew/p/prj_vt190/edit").get_json() or {}
+                real = client.get("/api/vnew/p/prj_vt190/edit?variant=real").get_json() or {}
+                film = client.get(f"/api/vnew/p/prj_vt190/edit/media/{web['materials'][0]['mid']}").get_json() or {}
+            server = {"web": web, "real": real, "media": film}
+            prefix = "var SERVER = " + json.dumps(server, ensure_ascii=False) + ";\n"
+            got, err = _lr_run_node(node, _EDU_NODE_HARNESS + code + prefix + prelude + _VT_NODE_RUN, "vt190_")
+            if err:
+                bad.append(f"(vt) node 실행 실패: {err}")
+            else:
+                v = got.get("vt") or {}
+                expect("vt-e", [v.get("open"), v.get("click"), v.get("jitter"), v.get("cancel")],
+                       [["webtoon", "w1", [0, 3, 4.5], 100, False], [2, 0.5, 4.5, True, False], [1, 3], [1, 0.5]],
+                       "누르기(움직임 없음): 고르고 starts[2] 4.5초로 · 누르는 때가 아니라 떼는 때 · 멈춘 채 · 끌기 문턱(6px) 안 흔들림도 누르기 · 취소는 고르기만")
+                expect("vt-e", [v.get("drag"), v.get("dragUndo"), v.get("trim")],
+                       [[["c1", "c2", "c3"], ["c2", "c1", "c3"], 0.5], ["c1", "c2", "c3"], [2.792, 0.5]],
+                       "끌어 순서 바꾸기 · 끝 다듬기 · 끝 손잡이 누르기는 재생헤드를 옮기지 않는다")
+                expect("vt-e", [v.get("playing"), v.get("audio"), v.get("dbl")],
+                       [[True, True, 3, 1, 1], [2, 4.5, False], [True, 3, "from", 1]],
+                       "재생 중 누르기 = 그 컷 시작부터 계속 재생 · 소리 상자 누르기도 같음 · 작업 188 두 번 누르기 = 그 컷부터 재생")
+                expect("vt-a", v.get("toReal"), [1, "webtoon", True, True, True, 0, "real", "", False, 0, True, -1],
+                       "탭 바꾸기: 확인창 0 · 남은 웹툰 저장(웹툰 etag) 하나 → GET ?variant=real → 실사 문서 · etag \"\" · 저장 전 · 빈 스택 · 고름 없음")
+                expect("vt-c", [v.get("realSave"), v.get("running")],
+                       [["real", "", True, ["etag", "variant"], "real", True, True],
+                        ["웹툰 내보내기가 진행 중입니다. 끝난 뒤 다시 눌러 주세요.", "", "none", False, False]],
+                       "실사 첫 저장 etag \"\" → 내보내기 POST {etag(새 실사 etag), variant: real} · 다른 그림체 진행 중 409 는 안내 한 줄(오류 줄 없음)")
+                expect("vt-b", [v.get("toWeb"), v.get("webUndo")],
+                       [[0, 1, 0, True, "webtoon", True, True, True, 1, 1], ["webtoon", "webtoon", True, True]],
+                       "웹툰으로 돌아오기: PUT 0 · 실사 내보내기 조회 멈춤 · GET ?variant=webtoon · 웹툰 etag · 웹툰 스택 되살림(실사 스택 1 남음) · "
+                       "되돌리기는 웹툰 문서를 웹툰 etag 로")
+                expect("vt-d", [v.get("backReal"), v.get("reset"), v.get("resetUndo")],
+                       [["real", True, True, True], [1, "real", True, True, False, 0], ["real", True]],
+                       "실사로 다시: 실사 스택 · etag 되살림 · [처음 상태로] = 실사 기본 문서로 실행 취소 한 단계(확인창 0) · 되돌리면 실사 편집으로")
+                expect("vt-b", v.get("reload"), [0, ["webtoon"], 2], "다시 열면(새 화면) 실행 취소 스택은 비어 있다 · 두 탭 모두 편집됨 점")
+                expect("vt-a", got.get("innerHTML"), False, "가짜 DOM 에서 innerHTML 0")
+    except Exception as exc:  # noqa: BLE001
+        bad.append("(vt) 예외: " + repr(exc) + "\n" + _tb.format_exc()[:2000])
+
+    groups = {f"vt-{c}" for c in "abcdefg"}
+    if groups - seen and not bad:
+        bad.append(f"검사하지 못한 묶음: {sorted(groups - seen)}")
+    if bad:
+        fail("작업 190 ⑦ 편집 그림체 탭 · 클립 누르기(vt) 검사 실패\n" + "\n".join(f"  {item}" for item in bad))
+    else:
+        ok("작업 190 ⑦ 편집 그림체 탭 · 클립 누르기 검사 (vt-a)확인창 · 바꿔 넣기 없음 · 남은 저장 먼저(node) (vt-b)그림체별 etag · 실행 취소 스택(node) "
+           "(vt-c)내보내기 {etag, variant} · ExportRunning 안내 (vt-d)탭 점 · aria-pressed · title · 처음 상태로 (vt-e)누르기 = 그 컷 시작 · "
+           "끌기/다듬기는 그대로 · 188 두 번 누르기(node) (vt-f)CSS · LF (vt-g)_switched_tab 없음")
+
+
 
 
 def main() -> int:
@@ -61993,6 +62769,8 @@ def main() -> int:
     check_vnew_edit_gap_slip_ui_186()
     check_topbar_project_187()
     check_vnew_edit_cut_play_188()
+    check_vnew_edit_variant_docs_189()
+    check_vnew_edit_variant_tabs_190()
     print()
     if warnings:
         print(f"경고 {len(warnings)}건")
