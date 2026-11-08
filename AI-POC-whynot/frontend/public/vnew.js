@@ -8878,6 +8878,9 @@
   // 작업 190: 그림체 탭 title. 편집 문서는 그림체마다 따로 저장된다(서버 작업 189, edit-<variant>.json).
   var EDIT_VARIANT_TIP = { real: "실사 편집본(따로 저장됩니다)", webtoon: "애니(웹툰) 편집본(따로 저장됩니다)" };
   var EDIT_VARIANT_SAVED = "편집됨"; // 작업 190: 저장된 편집본이 있는 탭의 점(savedVariants) 설명
+  // 작업 192: 여러 컷 고르기(Ctrl/Cmd+누르기 = 넣고 빼기, Shift+누르기 = 기준 클립부터 그 클립까지). ctx.sel = 첫 컷, ctx.multi = 고른 번호 목록.
+  var EDIT_MULTI_NOTE = "여러 컷이 선택됨 — AI로 고치기·삭제만 할 수 있습니다";
+  var EDIT_FIX_MIXED = "같은 테이크(원본 영상) 안의 컷만 함께 고칠 수 있습니다.";
   var EDIT_SVG_NS = "http://www.w3.org/2000/svg";
   // 눈금 [큰 눈금 간격(초), 작은 눈금 간격(초)]. 큰 눈금 사이가 64px 이상인 첫 간격을 쓴다(editTickStep).
   var EDIT_TICKS = [[1, 0.25], [2, 0.5], [5, 1], [10, 2]];
@@ -9278,6 +9281,17 @@
     return next;
   }
 
+  /* 작업 192: 고른 번호(indexes) 클립을 모두 뺀 목록(순수). 범위 밖 번호는 버린다. */
+  function editRemoveMany(clips, indexes) {
+    var drop = {};
+    (indexes || []).forEach(function (i) {
+      drop[i] = true;
+    });
+    return (clips || []).filter(function (clip, i) {
+      return !drop[i];
+    });
+  }
+
   /* from 번째 클립을 to 자리(0~길이, 그 번호 앞)로 옮긴 순서. */
   function editMove(clips, from, to) {
     var next = (clips || []).slice();
@@ -9674,6 +9688,8 @@
       busy: false,
       exporting: false,
       sel: -1,
+      multi: [], // 작업 192: 고른 클립 번호(오름차순). 하나면 [sel], 없으면 []. ctx.sel 은 늘 그 첫 번호(editSelIndexes)
+      anchor: -1, // 작업 192: Shift+누르기 범위의 기준 클립(마지막으로 그냥 누르거나 Ctrl 로 넣고 뺀 클립)
       t: 0,
       pps: 0,
       playing: false,
@@ -9861,6 +9877,8 @@
     ctx.saveFailed = false;
     ctx.saveAgain = false;
     ctx.sel = -1;
+    ctx.multi = []; // 작업 192
+    ctx.anchor = -1;
     ctx.cutPlay = null; // 작업 190: 작업 188 고른 컷 재생 표시도 새 문서에서는 없다
   }
 
@@ -10094,6 +10112,7 @@
     tools.appendChild(editAudioFxBox(ctx)); // 작업 182: 고른 클립 J/L 컷
     tools.appendChild(editDialogueBox(ctx)); // 작업 186: 고른 클립 대사 타이밍 · 이 클립 빈틈 다듬기
     tools.appendChild(editCutPlayBox(ctx)); // 작업 188: 고른 클립 이 컷 처음부터 재생 · 이 컷만 재생
+    tools.appendChild(editMultiBox(ctx)); // 작업 192: 여러 컷 고름 안내 · [고른 컷 AI로 고치기]
     var zoomWrap = el("label", "vnew-edit-zoom");
     zoomWrap.title = "확대/축소(+ / −)";
     zoomWrap.appendChild(el("span", "vnew-edit-tool-icon", "🔍"));
@@ -10260,6 +10279,7 @@
     var d = ctx.dom;
     if (!d.speed || !d.len) return;
     var clip = ctx.sel >= 0 && ctx.sel < ctx.clips.length ? ctx.clips[ctx.sel] : null;
+    if (editMultiOn(ctx)) clip = null; // 작업 192: 여러 컷을 고르면 한 클립 칸은 막는다
     d.speed.disabled = !clip || ctx.busy;
     d.len.disabled = !clip || ctx.busy;
     d.speed.value = String(clip ? editSpeedOf(clip) : 1);
@@ -10311,7 +10331,7 @@
   function editRenderAudioFx(ctx) {
     var d = ctx.dom;
     if (!d.afxLead || !d.afxTail) return;
-    var clip = editSelected(ctx);
+    var clip = editSingle(ctx); // 작업 192: 여러 컷을 고르면 막는다
     var muted = !!clip && clip.muted === true;
     var last = ctx.clips.length - 1;
     [d.afxLead, d.afxTail].forEach(function (field) {
@@ -10327,7 +10347,7 @@
 
   /* 고른 클립의 앞당김·이어 감을 바꾼다(0 이면 키를 지운다). 첫 클립 J·마지막 클립 L·소리 끈 클립은 받지 않는다. */
   function editApplyShift(ctx, key, raw) {
-    var clip = editSelected(ctx);
+    var clip = editSingle(ctx);
     if (!editAlive(ctx) || ctx.busy || !clip || clip.muted === true) {
       editRenderAudioFx(ctx);
       return;
@@ -10404,7 +10424,7 @@
   function editRenderDialogue(ctx) {
     var s = ctx.dom.slip;
     if (!s) return;
-    var clip = editSelected(ctx);
+    var clip = editSingle(ctx); // 작업 192: 여러 컷을 고르면 막는다
     var muted = !!clip && clip.muted === true;
     var value = clip ? editSlipOf(clip) : 0;
     s.range.disabled = !clip || muted || ctx.busy;
@@ -10418,7 +10438,7 @@
 
   /* 끄는 동안: 고른 클립 소리 줄을 value 만큼 옮겨 칠한다(문서는 그대로 — 놓으면 editApplySlip). */
   function editSlipPreview(ctx, value) {
-    var clip = editSelected(ctx);
+    var clip = editSingle(ctx);
     var parts = clip ? ctx.clipEls[ctx.sel] : null;
     if (!parts || parts.index !== ctx.sel) return;
     var preview = editCloneClip(clip);
@@ -10429,7 +10449,7 @@
 
   /* 고른 클립의 대사 타이밍을 바꾼다(0 이면 키를 지운다 — 저장 바디에 없다). 실행 취소 한 단계. 소리 끈 클립은 받지 않는다. */
   function editApplySlip(ctx, raw) {
-    var clip = editSelected(ctx);
+    var clip = editSingle(ctx);
     if (!editAlive(ctx) || ctx.busy || !clip || clip.muted === true) {
       if (clip) editSlipPreview(ctx, editSlipOf(clip));
       editRenderDialogue(ctx);
@@ -10473,7 +10493,7 @@
     var blocked = editTightenBlocked(ctx);
     if (d.btnTighten) d.btnTighten.disabled = blocked;
     if (d.btnTightenOne) {
-      var clip = editSelected(ctx);
+      var clip = editSingle(ctx); // 작업 192: 이 클립 빈틈 다듬기는 한 컷만
       d.btnTightenOne.disabled = blocked || !clip || clip.muted === true;
     }
   }
@@ -10574,6 +10594,7 @@
     var target = event ? event.target : null;
     if (editInside(parts.inEdge, target) || editInside(parts.outEdge, target)) return;
     if (Date.now() - (ctx.dragEndAt || 0) < EDIT_DBL_AFTER_DRAG_MS) return;
+    if (event && (event.ctrlKey || event.metaKey || event.shiftKey)) return; // 작업 192: 여러 컷 고르기의 두 번 누르기는 재생하지 않는다
     if (event && event.preventDefault) event.preventDefault();
     editSelect(ctx, parts.index);
     editPlayCut(ctx, false, true);
@@ -10678,6 +10699,7 @@
     if (!editAlive(ctx) || editTightenBlocked(ctx)) return;
     var only = "";
     if (index >= 0) {
+      if (editMultiOn(ctx)) return; // 작업 192: 여러 컷을 고르면 이 클립 빈틈 다듬기는 없다
       var picked = ctx.clips[index];
       if (!picked || picked.muted === true) return;
       only = String(picked.id);
@@ -10902,19 +10924,22 @@
     if (!d.btnUndo) return;
     var has = ctx.sel >= 0 && ctx.sel < ctx.clips.length;
     var muted = has && ctx.clips[ctx.sel].muted === true;
+    var many = editSelIndexes(ctx).length; // 작업 192
     d.btnUndo.disabled = !ctx.hist.undo.length;
     d.btnRedo.disabled = !ctx.hist.redo.length;
     d.btnDelete.disabled = !has;
-    d.btnMute.disabled = !has;
+    d.btnMute.disabled = !has || many > 1;
     d.btnSplit.disabled = !ctx.clips.length;
     d.btnReset.disabled = !(ctx.defaults[ctx.variant] || []).length;
     d.btnMute._label.textContent = muted ? "소리 켜기" : "소리 끄기";
     editToolTitle(d.btnMute, muted ? "고른 클립 소리 켜기" : "고른 클립 소리 끄기", "M");
+    editToolTitle(d.btnDelete, many > 1 ? "고른 클립 " + many + "개 삭제" : "고른 클립 삭제", "Delete"); // 작업 192
     d.exportBtn.disabled = ctx.exporting || !ctx.clips.length;
     editRenderRetime(ctx, false);
     editRenderAudioFx(ctx); // 작업 182
     editRenderDialogue(ctx); // 작업 186: 대사 타이밍 · 빈틈 다듬기 버튼
     editRenderPlayButton(ctx);
+    editRenderMulti(ctx); // 작업 192: 여러 컷 고름 안내
     editFixRenderSel(ctx); // 지시서 116: [고른 클립 AI로 고치기] disabled·title 만(노드를 만들지 않는다)
   }
 
@@ -11008,7 +11033,7 @@
     var len = editClipLen(clip);
     var width = Math.max(1, len * ctx.pps);
     var invalid = ctx.invalidIds[clip.id];
-    var selected = parts.index === ctx.sel;
+    var selected = editIsSel(ctx, parts.index); // 작업 192: 여러 컷 고름도 같은 is-selected
     var speed = editSpeedOf(clip);
     parts.box.className =
       "vnew-edit-clip" + (selected ? " is-selected" : "") + (invalid ? " is-invalid" : "") + (width < 28 ? " is-narrow" : "") +
@@ -11315,14 +11340,109 @@
 
   function editSelect(ctx, index) {
     ctx.sel = index >= 0 && index < ctx.clips.length ? index : -1;
+    ctx.multi = ctx.sel >= 0 ? [ctx.sel] : []; // 작업 192: 그냥 고르기 = 그 클립 하나(Shift 범위의 기준도 이 클립)
+    ctx.anchor = ctx.sel;
     if (ctx.cutPlay && ctx.cutPlay.index !== ctx.sel) ctx.cutPlay = null; // 작업 188: 다른 클립을 고르면 이 컷 재생 표시 · 멈출 자리를 지운다
+    editSelChanged(ctx);
+  }
+
+  /* 작업 192: 고른 클립이 바뀐 뒤 — 클립 상자 표시 · 도구줄 · 재료 메뉴(작업 149) · 열린 AI로 고치기 패널(고른 컷에서 열었으면). */
+  function editSelChanged(ctx) {
     ctx.clipEls.forEach(function (parts) {
-      var method = parts.index === ctx.sel ? "add" : "remove";
+      var method = editIsSel(ctx, parts.index) ? "add" : "remove";
       parts.box.classList[method]("is-selected");
       parts.abox.classList[method]("is-selected");
     });
     editRenderTools(ctx);
     if (editBinFollow(ctx)) editRenderBin(ctx); // 작업 149: 고른 클립의 테이크·컷을 재료 메뉴에
+    editFixSelFollow(ctx);
+  }
+
+  /* 작업 192: 고른 클립 번호(오름차순, 중복 없음). ctx.multi 가 둘 이상이고 ctx.sel 을 품으면 그 목록, 아니면 [ctx.sel](없으면 []).
+     ctx.sel 만 바꾸는 옛 길(editCommit sel · 검사)도 그대로 한 클립이다. */
+  function editSelIndexes(ctx) {
+    var n = (ctx.clips || []).length;
+    var sel = ctx.sel;
+    if (!(sel >= 0 && sel < n)) return [];
+    var seen = {};
+    var list = (Array.isArray(ctx.multi) ? ctx.multi : []).filter(function (i) {
+      var ok = typeof i === "number" && i >= 0 && i < n && !seen[i];
+      seen[i] = true;
+      return ok;
+    }).sort(function (a, b) {
+      return a - b;
+    });
+    return list.length > 1 && list.indexOf(sel) >= 0 ? list : [sel];
+  }
+
+  function editMultiOn(ctx) {
+    return editSelIndexes(ctx).length > 1;
+  }
+
+  function editIsSel(ctx, index) {
+    return editSelIndexes(ctx).indexOf(index) >= 0;
+  }
+
+  /* 작업 192: 한 클립만 고른 때의 그 클립(여러 컷이면 null). 속도·길이·J/L·대사 타이밍처럼 한 클립에만 맞는 칸이 쓴다. */
+  function editSingle(ctx) {
+    return editMultiOn(ctx) ? null : editSelected(ctx);
+  }
+
+  /* 작업 192: Ctrl/Cmd+누르기 = 그 클립을 넣고 빼기, Shift+누르기 = 기준 클립부터 그 클립까지(기준은 그대로). 첫 번호가 ctx.sel. */
+  function editSelectMore(ctx, index, range) {
+    var n = ctx.clips.length;
+    if (!(index >= 0 && index < n)) return;
+    var list = editSelIndexes(ctx);
+    if (range) {
+      var anchor = ctx.anchor >= 0 && ctx.anchor < n ? ctx.anchor : list.length ? list[0] : index;
+      list = [];
+      for (var i = Math.min(anchor, index); i <= Math.max(anchor, index); i++) list.push(i);
+      ctx.anchor = anchor;
+    } else {
+      var at = list.indexOf(index);
+      if (at >= 0) list.splice(at, 1);
+      else list.push(index);
+      list.sort(function (a, b) {
+        return a - b;
+      });
+      ctx.anchor = index;
+    }
+    ctx.multi = list;
+    ctx.sel = list.length ? list[0] : -1;
+    if (ctx.cutPlay && ctx.cutPlay.index !== ctx.sel) ctx.cutPlay = null; // 작업 188
+    editSelChanged(ctx);
+  }
+
+  /* 작업 192: 누르기에 Ctrl/Cmd · Shift 가 있으면 여러 컷 고르기(editSelectMore)를 하고 true. 없으면 아무것도 하지 않고 false. */
+  function editSelExtend(ctx, index, event) {
+    var e = event || {};
+    var mod = !!(e.ctrlKey || e.metaKey);
+    if (!mod && !e.shiftKey) return false;
+    editSelectMore(ctx, index, !!e.shiftKey && !mod);
+    return true;
+  }
+
+  /* 작업 192: 도구줄의 여러 컷 고름 안내와 [고른 컷 AI로 고치기](AI로 고치기 켬일 때만 보인다 — editFixRenderSel). */
+  function editMultiBox(ctx) {
+    var box = el("div", "vnew-edit-selfix");
+    var note = el("span", "vnew-hint vnew-edit-multi-note", EDIT_MULTI_NOTE);
+    note.style.display = "none";
+    box.appendChild(note);
+    var btn = el("button", "outline-button vnew-edit-fix-tool", "고른 컷 AI로 고치기");
+    btn.type = "button";
+    btn.setAttribute("aria-haspopup", "dialog");
+    btn.addEventListener("click", function () {
+      editFixOpenSel(ctx);
+    });
+    box.appendChild(btn);
+    ctx.dom.multiNote = note;
+    ctx.dom.fixSel = btn;
+    return box;
+  }
+
+  function editRenderMulti(ctx) {
+    var note = ctx.dom.multiNote;
+    if (note) note.style.display = editMultiOn(ctx) ? "" : "none";
   }
 
   function editShowDrop(ctx, index) {
@@ -11433,12 +11553,15 @@
     if (!editPointerOk(ctx, event)) return;
     if (event.stopPropagation) event.stopPropagation();
     if (event.preventDefault) event.preventDefault();
-    var from = parts.index;
+    // 작업 192: Ctrl/Cmd · Shift+누르기는 여러 컷 고르기(끌어 옮기지 않는다). 떼면 고른 첫 컷 시작으로(작업 190 과 같은 길).
+    var extra = editSelExtend(ctx, parts.index, event);
+    var from = extra ? ctx.sel : parts.index;
     var drop = -1;
-    editSelect(ctx, from);
+    if (!extra) editSelect(ctx, from);
     editTrack(ctx, parts.box, event, {
       threshold: EDIT_DRAG_PX,
       move: function (dx, ev) {
+        if (extra) return;
         if (ctx.playing) editPause(ctx);
         parts.box.classList.add("is-dragging");
         drop = editDropIndex(ctx.clips, editContentX(ctx, ev), ctx.pps);
@@ -12107,9 +12230,13 @@
     } else if (action === "split") {
       editSplitHere(ctx);
     } else if (action === "delete") {
-      if (ctx.sel >= 0 && ctx.sel < ctx.clips.length) editCommit(ctx, editRemove(ctx.clips, ctx.sel), { sel: -1 });
+      var many = editSelIndexes(ctx);
+      if (many.length > 1) editCommit(ctx, editRemoveMany(ctx.clips, many), { sel: -1 }); // 작업 192: 고른 컷 모두 = 실행 취소 한 단계
+      else if (ctx.sel >= 0 && ctx.sel < ctx.clips.length) editCommit(ctx, editRemove(ctx.clips, ctx.sel), { sel: -1 });
     } else if (action === "mute") {
-      if (ctx.sel >= 0 && ctx.sel < ctx.clips.length) {
+      if (editMultiOn(ctx)) {
+        editNote(ctx, EDIT_MULTI_NOTE); // 작업 192
+      } else if (ctx.sel >= 0 && ctx.sel < ctx.clips.length) {
         var next = editCloneClips(ctx.clips);
         next[ctx.sel].muted = !next[ctx.sel].muted;
         editCommit(ctx, next, {});
@@ -12174,6 +12301,7 @@
     editHistPush(ctx.hist, o.before || editSnapshotOf(ctx.variant, ctx.clips));
     ctx.clips = editTidyFx(clips); // 작업 182: 옮기기·삭제·자르기·늘이기 뒤 J/L 컷·디졸브 자리 규칙 정리
     if (o.sel !== undefined) ctx.sel = o.sel;
+    if (o.sel !== undefined) ctx.multi = o.sel >= 0 ? [o.sel] : []; // 작업 192: 고른 클립을 정해 주는 변경은 한 클립으로
     editChanged(ctx);
   }
 
@@ -12182,11 +12310,15 @@
     ctx.cutPlay = null; // 작업 188: 편집하면 [이 컷만] 멈출 자리(편집 전 클립으로 잰 값)를 지운다 — 재생은 보통 재생으로 잇는다
     if (ctx.tighten) editTightenClose(ctx); // 작업 186: 편집이 바뀌면 받은(받는 중인) 빈틈 다듬기 제안은 버린다
     if (ctx.sel >= ctx.clips.length) ctx.sel = -1;
+    ctx.multi = editSelIndexes(ctx); // 작업 192: 고른 컷 목록도 지금 클립 안으로
     editNote(ctx, "");
     editRenderVariants(ctx);
     editRenderTimeline(ctx);
     editRenderBin(ctx);
-    if (ctx.fix && editFixAlive(ctx, ctx.fix)) editFixPaintVersions(ctx, ctx.fix); // 지시서 116 보완 2: 타임라인 사용 중 표시
+    if (ctx.fix && editFixAlive(ctx, ctx.fix)) {
+      editFixPaintVersions(ctx, ctx.fix); // 지시서 116 보완 2: 타임라인 사용 중 표시
+      editFixSelFollow(ctx); // 작업 192: 고른 컷이 바뀌었으면 준비한 프롬프트는 다시 준비
+    }
     editSeek(ctx, ctx.t);
     editScheduleSave(ctx);
   }
@@ -12243,7 +12375,7 @@
 
   /* 도구줄 [속도](지시서 115): 고른 클립 속도를 바꾼다(in·out 그대로, 타임라인 길이 = 원본 구간 ÷ 속도). */
   function editApplySpeed(ctx, value) {
-    var clip = editSelected(ctx);
+    var clip = editSingle(ctx); // 작업 192: 여러 컷이면 하지 않는다
     if (!editAlive(ctx) || ctx.busy || !clip) return;
     var speed = Number(value);
     var next = editSetSpeed(clip, speed, editMinLen(ctx));
@@ -12258,7 +12390,7 @@
 
   /* 도구줄 "길이(초)"(지시서 115, editRetime): 원본 안이면 끝을, 모자라면 속도를 낮춰 맞추고 안내 한 줄. 같은 결과면 저장하지 않는다. */
   function editApplyLength(ctx, raw) {
-    var clip = editSelected(ctx);
+    var clip = editSingle(ctx); // 작업 192: 여러 컷이면 하지 않는다
     if (!editAlive(ctx) || ctx.busy || !clip) return;
     var text = String(raw === undefined || raw === null ? "" : raw).trim().replace(",", ".");
     var mat = ctx.materials[clip.sourceKey] || {};
@@ -12284,6 +12416,10 @@
 
   /* 단축키 [ ]·Shift+[ ](지시서 115): 고른 클립 끝·시작을 원본 fps 한 프레임. 미리보기는 바뀐 끝 프레임을 보인다. */
   function editNudgeSel(ctx, edge, dir) {
+    if (editMultiOn(ctx)) {
+      editNote(ctx, EDIT_MULTI_NOTE); // 작업 192
+      return;
+    }
     var clip = editSelected(ctx);
     if (!clip) {
       editNote(ctx, "먼저 클립을 골라 주세요.");
@@ -12488,6 +12624,7 @@
     var bin = ctx.dom.bin;
     if (!bin) return;
     clear(bin);
+    ctx.dom.binFixPaint = null; // 작업 192
     var list = ctx.matList[ctx.variant] || [];
     if (!list.length) return;
     editBinFollow(ctx); // 작업 149: 고른 타임라인 클립(또는 재생헤드 클립)이 바뀌었으면 메뉴를 그 테이크·컷으로
@@ -12565,16 +12702,19 @@
       fixCut.type = "button";
       fixCut.setAttribute("aria-haspopup", "dialog");
       fixCut.addEventListener("click", function () {
-        editBinFixCut(ctx, take, current());
+        if (!editFixOpenSel(ctx)) editBinFixCut(ctx, take, current()); // 작업 192: 타임라인에서 고른 컷(하나 또는 여럿)이 있으면 그 컷들
       });
       cutRow.appendChild(fixCut);
     }
     function paintFix() {
       if (!fixCut) return;
       var target = editBinFixTarget(take, current());
-      fixCut.disabled = !target || ctx.busy;
-      fixCut.title = target ? "고른 컷만 AI로 고칩니다(비용은 다음 창에서 보입니다)" : "이 컷은 AI로 고칠 수 없습니다";
+      var sel = editFixSelTarget(ctx); // 작업 192
+      fixCut.disabled = !(sel || target) || ctx.busy;
+      fixCut.title = sel ? sel.error || editFixSelTitle(sel) :
+        target ? "고른 컷만 AI로 고칩니다(비용은 다음 창에서 보입니다)" : "이 컷은 AI로 고칠 수 없습니다";
     }
+    ctx.dom.binFixPaint = paintFix; // 작업 192: 고른 컷이 바뀌면 editFixRenderSel 이 다시 칠한다
     cutSel.addEventListener("change", function () {
       ctx.binCut[ctx.variant] = String(cutSel.value || "");
       paintFix();
@@ -12693,7 +12833,7 @@
     var r = target.range;
     var same = clip && clip.sourceKey === target.sourceKey &&
       (!r || Math.min(Number(clip.out), r.out) - Math.max(Number(clip.in), r.in) > 0.05);
-    editFixOpen(ctx, target.mid, same ? clip.id : "", r);
+    editFixOpen(ctx, target.mid, same ? clip.id : "", r, { names: option && option.cut ? option.cut.label : "" }); // 작업 192: 머리 줄 컷 이름
   }
 
   /* ---- 저장(design §5.5: 0.8초 디바운스, 한 번에 하나, 409 다시 불러오기) ---- */
@@ -13098,14 +13238,121 @@
     return mat && mat.retake && mat.retake.can === true ? mat : null;
   }
 
-  /* [고른 클립 AI로 고치기]: disabled·title 만 바꾼다(editRenderTools 가 부른다 — 노드를 만들지 않는다). */
+  /* [고른 클립 AI로 고치기]: disabled·title 만 바꾼다(editRenderTools 가 부른다 — 노드를 만들지 않는다).
+     작업 192: 도구줄 [고른 컷 AI로 고치기](editMultiBox)와 재료 줄 [이 컷 AI로 고치기]가 고른 컷(하나 또는 여럿)을 따른다. */
   function editFixRenderSel(ctx) {
     var btn = ctx.dom.fixSel;
-    if (!btn) return;
-    var mat = editFixSelMat(ctx);
-    btn.disabled = !mat || ctx.busy;
-    btn.title = mat ? "고른 클립(" + (mat.label || "영상") + ")을 AI로 고칩니다" : "타임라인에서 AI로 고칠 수 있는 테이크·컷 클립을 고르세요";
-    btn.setAttribute("aria-label", btn.title);
+    if (btn) {
+      var on = editFixOn(ctx);
+      var target = on ? editFixSelTarget(ctx) : null;
+      btn.style.display = on ? "" : "none";
+      btn.disabled = !target || ctx.busy;
+      btn.title = target ? target.error || editFixSelTitle(target) : "타임라인에서 AI로 고칠 컷을 고르세요(Ctrl/Cmd · Shift+누르기로 여러 개)";
+      btn.setAttribute("aria-label", btn.title);
+    }
+    if (ctx.dom.binFixPaint) ctx.dom.binFixPaint();
+  }
+
+  /* ---- 작업 192: 고른 컷(하나 또는 여럿)으로 AI로 고치기 ---- */
+
+  /* 고른 클립들 이름 한 줄: 모두 "컷 N" 이면 "컷 a" · "컷 a–b"(가장 작은 번호–가장 큰 번호), 아니면 이름(재료 이름)을 · 로(4개 넘으면 "외 n개"). */
+  function editFixSelNames(clips, matLabel) {
+    var names = (clips || []).map(function (c) {
+      return String((c && c.label) || matLabel || "클립");
+    });
+    var nums = names.map(function (name) {
+      var m = /^컷 (\d+)$/.exec(name);
+      return m ? Number(m[1]) : NaN;
+    });
+    if (nums.length && nums.every(isFinite)) {
+      var lo = Math.min.apply(null, nums);
+      var hi = Math.max.apply(null, nums);
+      return lo === hi ? "컷 " + lo : "컷 " + lo + "–" + hi;
+    }
+    var uniq = names.filter(function (name, i) {
+      return names.indexOf(name) === i;
+    });
+    return uniq.slice(0, 4).join(" · ") + (uniq.length > 4 ? " 외 " + (uniq.length - 4) + "개" : "");
+  }
+
+  /* 타임라인에서 고른 컷 → {mid, sourceKey, ids, range: {in, out}(원본 초 — 가장 이른 in ~ 가장 늦은 out), names}. 고른 클립이 없으면 null.
+     원본(sourceKey)이 서로 다르면 {error: EDIT_FIX_MIXED}, 그 재료를 AI로 고칠 수 없으면 {error: 이유}. 순수에 가깝다(ctx 만 읽는다). */
+  function editFixSelTarget(ctx) {
+    var indexes = editSelIndexes(ctx);
+    if (!indexes.length) return null;
+    var clips = indexes.map(function (i) {
+      return ctx.clips[i];
+    });
+    var key = clips[0].sourceKey;
+    if (clips.some(function (c) {
+      return c.sourceKey !== key;
+    })) return { error: EDIT_FIX_MIXED };
+    var mat = ctx.materials[key];
+    if (!mat || !mat.retake || mat.retake.can !== true) {
+      return { error: (mat && mat.retake && mat.retake.reason) || "이 컷은 AI로 고칠 수 없습니다." };
+    }
+    var a = Math.min.apply(null, clips.map(function (c) {
+      return Number(c.in);
+    }));
+    var b = Math.max.apply(null, clips.map(function (c) {
+      return Number(c.out);
+    }));
+    return { mid: String(mat.mid || ""), sourceKey: key, ids: clips.map(function (c) {
+      return String(c.id);
+    }), range: { in: editRound3(a), out: editRound3(b) }, names: editFixSelNames(clips, mat.label) };
+  }
+
+  function editFixSelTitle(target) {
+    var t = target || {};
+    var r = t.range || {};
+    var what = (t.names ? t.names + " · " : "") + editFixSecs(r.in) + "–" + editFixSecs(r.out) + "초";
+    return (t.ids && t.ids.length > 1 ? "고른 컷 " + t.ids.length + "개(" + what + ")를" : "고른 컷(" + what + ")을") + " AI로 고칩니다";
+  }
+
+  /* 고른 컷으로 패널을 연다. 고른 컷이 있으면 true(원본이 다르거나 고칠 수 없으면 안내 한 줄만 — 패널을 열지 않는다), 없으면 false. */
+  function editFixOpenSel(ctx) {
+    if (!editAlive(ctx) || ctx.busy || !editFixOn(ctx)) return false;
+    var target = editFixSelTarget(ctx);
+    if (!target) return false;
+    if (target.error) {
+      editNote(ctx, target.error);
+      return true;
+    }
+    editFixOpen(ctx, target.mid, target.ids[0], target.range, { ids: target.ids, names: target.names, fromSel: true });
+    return true;
+  }
+
+  /* 고른 컷 표시(초안이 고른 컷에 묶인다): 고른 클립마다 [id, 원본, in, out]. */
+  function editFixSelKey(ctx) {
+    return JSON.stringify(editSelIndexes(ctx).map(function (i) {
+      var c = ctx.clips[i];
+      return [c.id, c.sourceKey, c.in, c.out];
+    }));
+  }
+
+  /* 고른 컷에서 연 compose 패널: 고른 컷이 바뀌면(고르기 · 편집) 같은 재료면 범위를 따라가고(보기를 다시 받는다), 아니면 그대로 둔다.
+     어느 쪽이든 준비한 프롬프트는 「다시 준비해 주세요」가 된다(editFixComposeSig 에 고른 컷 표시가 든다). */
+  function editFixSelFollow(ctx) {
+    var fix = ctx.fix;
+    if (!fix || !fix.compose || !fix.fromSel || !editFixAlive(ctx, fix)) return;
+    var key = editFixSelKey(ctx);
+    if (key === fix.selNow) return;
+    fix.selNow = key;
+    var target = editFixSelTarget(ctx);
+    if (target && !target.error && target.mid === fix.mid) {
+      var moved = !fix.clip || target.range.in !== fix.clip.in || target.range.out !== fix.clip.out;
+      fix.clip = target.range;
+      fix.clipIds = target.ids.slice();
+      fix.clipId = target.ids[0];
+      fix.names = target.names;
+      if (moved) {
+        fix.rangeWait = true;
+        editFixPaint(ctx, fix, fix.view);
+        editFixLoad(ctx, fix);
+        return;
+      }
+    }
+    editFixPaint(ctx, fix, fix.view);
   }
 
   function editFixSelButton(ctx) {
@@ -13182,14 +13429,23 @@
     ctx.fix = null;
   }
 
-  /* 지시서 119: range({in, out}, 원본 시간 — 고르기 창에서 고른 장면)가 있으면 그것이 "이 구간만" 범위다(없으면 clipId 의 클립 구간). */
-  function editFixOpen(ctx, mid, clipId, range) {
+  /* 지시서 119: range({in, out}, 원본 시간 — 고르기 창에서 고른 장면)가 있으면 그것이 "이 구간만" 범위다(없으면 clipId 의 클립 구간).
+     작업 192: sel {ids, names, fromSel} — 고른 컷들(editFixOpenSel · 재료 줄 컷). [바꾸기]는 그 클립들만 바꾸고, 머리 줄에 컷 이름 · 구간. */
+  function editFixOpen(ctx, mid, clipId, range, sel) {
     if (!editAlive(ctx) || ctx.busy || !mid) return;
     editPause(ctx);
     editFixPickClose(ctx);
     editFixClose(ctx);
     var fix = { mid: mid, clipId: clipId || "", view: null, timer: 0, busy: false, draftShown: "", refreshing: false, open: true, dom: {} };
     fix.model = ""; // 지시서 116 보완 1: 고른 영상 모델(보기가 오면 원래 모델·초안 모델로 채운다)·범위·고른 클립 구간(원본 일부일 때만)
+    var s = sel || {};
+    fix.clipIds = Array.isArray(s.ids) && s.ids.length ? s.ids.slice() : clipId ? [String(clipId)] : null; // 작업 192
+    fix.names = String(s.names || "");
+    fix.fromSel = s.fromSel === true;
+    fix.selNow = fix.fromSel ? editFixSelKey(ctx) : "";
+    fix.compose = false; // 작업 192: 보기 fullScopeAllowed false 면 true(editFixApply) — 프롬프트 준비(compose) 길
+    fix.draftId = ""; // 작업 192: 이 패널이 준비한 compose 초안 id · 그때 입력 표시(editFixComposeSig)
+    fix.draftSig = "";
     var a = range ? Number(range.in) : NaN;
     var b = range ? Number(range.out) : NaN;
     fix.clip = isFinite(a) && isFinite(b) && b > a && a >= 0 ? { in: editRound3(a), out: editRound3(b) } : editFixClipFor(ctx, fix.clipId);
@@ -13227,6 +13483,9 @@
     });
     head.appendChild(close);
     box.appendChild(head);
+    d.selInfo = el("p", "vnew-edit-fix-selinfo", ""); // 작업 192: 고칠 컷 이름 · 구간(compose 길에서만 글이 있다)
+    d.selInfo.style.display = "none";
+    box.appendChild(d.selInfo);
     d.note = el("p", "vnew-hint vnew-edit-fix-note", "");
     box.appendChild(d.note);
     d.reload = el("button", "outline-button vnew-edit-fix-reload", "다시 불러오기");
@@ -13266,11 +13525,18 @@
     d.extra.setAttribute("maxlength", "500");
     d.extra.setAttribute("placeholder", "예: 창밖 빛을 조금 더 따뜻하게");
     right.appendChild(editFixLabeled("추가 프롬프트(선택, 500자)", d.extra));
-    d.make = el("button", "primary-button vnew-edit-fix-make", "새 프롬프트 만들기");
+    [d.request, d.extra].forEach(function (field) {
+      field.addEventListener("input", function () {
+        if (fix.compose) editFixPaintDraft(fix); // 작업 192: 고치면 준비한 프롬프트는 「다시 준비해 주세요」
+      });
+    });
+    d.make = el("button", "primary-button vnew-edit-fix-make", "프롬프트 준비");
     d.make.type = "button";
+    d.make.disabled = true; // 보기가 오면 editFixPaint 가 글·막기를 정한다(작업 192: 기본 = 프롬프트 준비, 옛 길 = 새 프롬프트 만들기)
     d.make.title = "이전 프롬프트·결과 영상 프레임·수정 사항으로 AI가 새 프롬프트를 씁니다(아직 다시 만들지 않습니다)";
     d.make.addEventListener("click", function () {
-      editFixPreview(ctx, fix);
+      if (fix.compose) editFixCompose(ctx, fix);
+      else editFixPreview(ctx, fix);
     });
     right.appendChild(d.make);
 
@@ -13293,7 +13559,9 @@
       editFixSubmit(ctx, fix);
     });
     d.newField = editFixLabeled("새 프롬프트(제출 전에 고칠 수 있습니다)", d.newPrompt);
-    [d.draftStatus, d.result, d.changes, d.newField, d.meter, d.problems, d.cost, d.submit].forEach(function (node) {
+    d.composed = el("pre", "vnew-edit-fix-prompt vnew-edit-fix-composed", ""); // 작업 192: 준비한 프롬프트(읽기만, 수정 줄 강조)
+    d.composed.style.display = "none";
+    [d.draftStatus, d.result, d.changes, d.newField, d.composed, d.meter, d.problems, d.cost, d.submit].forEach(function (node) {
       d.draft.appendChild(node);
     });
     right.appendChild(d.draft);
@@ -13322,9 +13590,35 @@
   function editFixApply(ctx, fix, view) {
     var before = fix.view;
     fix.view = view;
+    // 작업 192: 원본 칸 전체를 고를 수 없는 서버(fullScopeAllowed false) = 프롬프트 준비(compose) 길. 범위는 늘 고른 컷 구간이고, 범위 없이
+    // 연 패널(테이크 통째)은 그 재료 처음~끝을 구간으로 보기를 한 번 더 받는다.
+    fix.compose = view.fullScopeAllowed === false;
+    if (fix.compose && !fix.clip) {
+      fix.clip = editFixWhole(ctx, fix);
+      if (fix.clip) {
+        fix.scope = "range";
+        fix.rangeWait = true;
+        editFixPaint(ctx, fix, before);
+        editFixLoad(ctx, fix);
+        return;
+      }
+    }
     editFixAdopt(fix); // 지시서 116 보완 1: 범위·모델 기본값(구간을 못 받았으면 원본 칸 전체로)
     editFixPaint(ctx, fix, before);
     editFixSchedule(ctx, fix);
+  }
+
+  /* 작업 192: 패널 재료(mid)의 처음~끝 {in, out}(원본 초 — 자른 버전은 그 길이까지). 길이를 모르면 null. */
+  function editFixWhole(ctx, fix) {
+    var keys = Object.keys(ctx.materials || {});
+    for (var i = 0; i < keys.length; i++) {
+      var mat = ctx.materials[keys[i]];
+      if (mat && String(mat.mid || "") === fix.mid) {
+        var len = editBinSeconds(mat);
+        return len > 0 ? { in: 0, out: editRound3(len) } : null;
+      }
+    }
+    return null;
   }
 
   /* 초안 running 이면 2초, 버전 진행 중이면 5초 뒤 다시 GET(실패면 같은 간격으로 다시 건다). 둘 다 아니면 멈춘다. */
@@ -13383,10 +13677,28 @@
     editFixPaintDraft(fix);
     editFixPaintRun(fix);
     var drafting = !!(v.draft && v.draft.status === "running");
-    d.make.disabled = v.canRetake !== true || fix.busy || drafting;
-    d.make.textContent = drafting ? "새 프롬프트를 만드는 중…" : v.draft ? "새 프롬프트 다시 만들기" : "새 프롬프트 만들기";
+    if (fix.compose) {
+      // 작업 192: [프롬프트 준비] = 이전 프롬프트 + 수정 사항(LLM 다시 쓰기 없음, POST …/compose)
+      d.make.textContent = fix.busy ? "프롬프트 준비 중…" : "프롬프트 준비";
+      d.make.title = "이전 프롬프트에 수정 사항을 붙여 고른 컷 구간만 고칠 프롬프트를 만듭니다(아직 다시 만들지 않습니다)";
+      d.make.disabled = v.canRetake !== true || fix.busy || drafting || !!fix.rangeWait || !v.range || !fix.clip || !fix.model;
+      d.selInfo.textContent = editFixSelInfo(fix);
+      d.selInfo.style.display = "";
+    } else {
+      d.make.disabled = v.canRetake !== true || fix.busy || drafting;
+      d.make.textContent = drafting ? "새 프롬프트를 만드는 중…" : v.draft ? "새 프롬프트 다시 만들기" : "새 프롬프트 만들기";
+      d.make.title = "이전 프롬프트·결과 영상 프레임·수정 사항으로 AI가 새 프롬프트를 씁니다(아직 다시 만들지 않습니다)";
+    }
     d.request.disabled = v.canRetake !== true;
     d.extra.disabled = v.canRetake !== true;
+  }
+
+  /* 작업 192: 머리 줄 아래 한 줄 — 고칠 컷 이름(컷 a–b · 클립 이름) · 원본 구간 초. */
+  function editFixSelInfo(fix) {
+    var c = fix.clip;
+    var span = c ? editFixSecs(c.in) + "–" + editFixSecs(c.out) + "초" : "구간을 알 수 없습니다";
+    var count = fix.clipIds && fix.clipIds.length > 1 ? " · 클립 " + fix.clipIds.length + "개" : "";
+    return "고칠 구간: " + (fix.names ? fix.names + " · " : "") + span + count;
   }
 
   function editFixPaintPrev(fix) {
@@ -13457,9 +13769,14 @@
   }
 
   function editFixPaintDraft(fix) {
+    if (fix.compose) {
+      editFixPaintCompose(fix); // 작업 192
+      return;
+    }
     var v = fix.view || {};
     var d = fix.dom;
     var dr = v.draft;
+    d.composed.style.display = "none";
     if (!dr) {
       d.draft.style.display = "none";
       return;
@@ -13565,6 +13882,10 @@
 
   function editFixSubmit(ctx, fix) {
     if (!editFixAlive(ctx, fix) || fix.busy) return;
+    if (fix.compose) {
+      editFixSubmitCompose(ctx, fix); // 작업 192
+      return;
+    }
     var v = fix.view || {};
     var dr = v.draft || {};
     var cur = editFixPlanOf(v, fix.model, fix.scope); // 지시서 116 보완 1: 고른 모델·범위(같은 경로면 116 확인창·바디 그대로)
@@ -13608,19 +13929,27 @@
         return x.label;
       });
       var ranged = editFixRanged(ctx, versions, ver); // 지시서 116 보완 1: 구간 버전이 끼면 녹화 시간으로 옮긴다
-      var res = ranged ? editFixRangeSwap(ctx.clips, fix.clipId ? [fix.clipId] : null, versions, v.kind, v.cellSeconds, editFixDurations(ctx, versions), ver,
-        editMinLen(ctx), mat.label || ver.label, labels.concat(versions.map(function (x) { return (ctx.materials[x.sourceKey] || {}).label; }))) :
-        editSwapSource(ctx.clips, fix.clipId ? [fix.clipId] : null, keys, ver.sourceKey, Number(mat.duration), editMinLen(ctx),
+      var ids = editFixIds(fix); // 작업 192: 고른 컷들(여럿이면 모두)
+      var oldLabels = labels.concat(versions.map(function (x) { return (ctx.materials[x.sourceKey] || {}).label; }));
+      // 작업 192: 결과 영상 버전(videoSource result)이 끼면 재료 초를 그대로 옮긴다(editFixResultSwap — 같은 자리 · 같은 길이)
+      var result = editFixResultUses(ctx.clips, versions, ver);
+      var res = result ? editFixResultSwap(ctx.clips, ids, versions, ver, editFixDurations(ctx, versions), editMinLen(ctx), mat.label || ver.label, oldLabels) :
+        ranged ? editFixRangeSwap(ctx.clips, ids, versions, v.kind, v.cellSeconds, editFixDurations(ctx, versions), ver,
+        editMinLen(ctx), mat.label || ver.label, oldLabels) :
+        editSwapSource(ctx.clips, ids, keys, ver.sourceKey, Number(mat.duration), editMinLen(ctx),
         mat.label || ver.label, labels);
+      var span = ver.sourceRange ? editFixSecs(ver.sourceRange.in) + "–" + editFixSecs(ver.sourceRange.out) :
+        editFixSecs((ver.range || {}).start) + "–" + editFixSecs((ver.range || {}).end);
       if (!res.changed) {
-        editFixNote(fix, res.outside ? "고른 클립이 " + editFixVerName(ver) + " 구간(" + editFixSecs((ver.range || {}).start) + "–" + editFixSecs((ver.range || {}).end) +
+        editFixNote(fix, res.outside ? "고른 클립이 " + editFixVerName(ver) + " 구간(" + span +
           "초) 밖이라 바꾸지 않았습니다." : res.skipped ? "이 버전 길이 안에 들어가지 않는 클립이라 바꾸지 않았습니다." :
           "타임라인에 바꿀 이 칸의 클립이 없습니다. [재료에 추가]로 넣어 주세요.");
         return;
       }
       editCommit(ctx, res.clips, {});
       editFixNote(fix, "타임라인 클립 " + res.changed + "개를 " + editFixVerTo(ver) + " 바꿨습니다." +
-        (res.skipped ? " 길이가 맞지 않는 " + res.skipped + "개는 그대로 두었습니다." : "") + " 다른 버전의 [바꾸기]로 되돌릴 수 있습니다.");
+        (res.skipped ? " 길이가 맞지 않는 " + res.skipped + "개는 그대로 두었습니다." : "") +
+        (result && res.outside ? " 구간 밖 " + res.outside + "개는 그대로 두었습니다." : "") + " 다른 버전의 [바꾸기]로 되돌릴 수 있습니다.");
     }
     if (Number(mat.duration) > 0) {
       apply();
@@ -13869,6 +14198,11 @@
 
   function editFixSwapTitle(fix, ver) {
     var r = (ver || {}).range || {};
+    var src = (ver || {}).sourceRange; // 작업 192: 결과 영상 버전 — 고른 컷만, 같은 자리 · 같은 길이
+    if (src && (ver || {}).videoSource === "result") {
+      return (editFixIds(fix) ? "고른 컷" : "타임라인에서 이 구간 안의 클립") + "을 " + editFixVerTo(ver) + " 바꿉니다(원본 " + editFixSecs(src.in) + "–" +
+        editFixSecs(src.out) + "초 자리, 같은 자리 · 같은 길이 — 이웃 클립은 그대로)";
+    }
     return (fix.clipId ? "고른 클립" : "타임라인에서 이 구간 안의 클립") + "을 " + editFixVerTo(ver) + " 바꿉니다(녹화 " + editFixSecs(r.start) + "–" +
       editFixSecs(r.end) + "초 자리, 속도는 그대로)";
   }
@@ -13911,6 +14245,10 @@
      범위에서 쓸 수 없으면 원래 모델, 그것도 안 되면 쓸 수 있는 첫 모델. */
   function editFixAdopt(fix) {
     var v = fix.view || {};
+    if (fix.compose) {
+      editFixAdoptCompose(fix); // 작업 192
+      return;
+    }
     var scopes = Array.isArray(v.scopes) && v.scopes.length ? v.scopes : ["full"];
     if (fix.rangeWait) {
       fix.rangeWait = false;
@@ -13973,6 +14311,9 @@
     d.scopeFull = editFixScopeItem(ctx, fix, d.scope, "full", "원본 칸 전체");
     d.scopeRange = editFixScopeItem(ctx, fix, d.scope, "range", "이 구간만 다시 만들기");
     d.setup.appendChild(d.scope);
+    d.rangeLine = el("p", "vnew-edit-fix-range-line", ""); // 작업 192: compose 길 = 범위 라디오 대신 고정 한 줄(editFixPaintSetup)
+    d.rangeLine.style.display = "none";
+    d.setup.appendChild(d.rangeLine);
     d.scopeNote = el("p", "vnew-hint vnew-edit-fix-scope-note", "");
     d.scopeNote.style.display = "none";
     d.setup.appendChild(d.scopeNote);
@@ -13996,6 +14337,10 @@
     var v = fix.view || {};
     var d = fix.dom;
     if (!d.setup) return;
+    if (fix.compose) {
+      editFixPaintComposeSetup(fix); // 작업 192
+      return;
+    }
     var scopes = Array.isArray(v.scopes) && v.scopes.length ? v.scopes : ["full"];
     var hasRange = !!fix.clip || scopes.indexOf("range") >= 0;
     d.scope.style.display = hasRange ? "" : "none";
@@ -14034,6 +14379,336 @@
     d.modelHidden.title = hidden.map(function (h) {
       return String(h.label || h.id || "") + ": " + String(h.reason || "");
     }).join("\n");
+  }
+
+  /* ---------------------------------------------------------------- ⑦ AI로 고치기 — 프롬프트 준비 · 고른 컷만(작업 192)
+
+     서버가 원본 칸 전체를 막으면(보기 fullScopeAllowed false, 작업 191) 패널은 이 길이다: 범위 라디오 대신 「선택한 컷 구간만 고칩니다 (a–b초)」
+     한 줄, [새 프롬프트 만들기](LLM 다시 쓰기) 대신 [프롬프트 준비](POST …/compose {requestKo, extraKo?, model, in, out} — 이전 프롬프트 + 수정 사항),
+     모델 상자는 보기 composeModels(고른 구간을 영상→영상으로 고칠 수 있는 모델). 준비한 프롬프트는 읽기만(수정 줄 강조)·견적·비용 줄이고,
+     [다시 만들기]는 기존 제출 {prompt, requestKo, extraKo, confirmUsd = draft.plan.usd, draftId, model, scope: "range", in, out}. 수정 사항·추가
+     프롬프트·모델·고른 컷이 준비할 때와 다르면 「다시 준비해 주세요」이고 제출은 막힌다(editFixComposeSig).
+     결과 영상 버전(videoSource result — @Video1 = 고친 재료 파일의 in–out)의 [바꾸기]는 editFixResultSwap: 고른 컷만, 클립마다 새 in·out =
+     옛 in·out − 구간 in(속도·소리 설정 그대로) → 같은 자리 · 같은 길이, 이웃 클립은 그대로, 실행 취소 한 단계. 검사는 check_vpoc ms192. */
+
+  var EDIT_FIX_STALE = "다시 준비해 주세요 — 수정 사항·추가 프롬프트·모델·고른 컷이 프롬프트를 준비할 때와 다릅니다.";
+  var EDIT_FIX_NO_V2V = "이 구간을 영상→영상으로 고칠 수 있는 모델이 없습니다.";
+  var EDIT_FIX_EDGE_S = 0.06; // 결과 영상 버전 구간 끝 허용(클립 in·out 이 구간 안인가)
+
+  /* [바꾸기] 대상 클립 id 목록(고른 컷에서 열었으면 그 컷들, 고른 클립 하나면 그것). 없으면 null(그 칸 클립 모두). */
+  function editFixIds(fix) {
+    var ids = (fix || {}).clipIds;
+    if (Array.isArray(ids) && ids.length) return ids.slice();
+    return fix && fix.clipId ? [fix.clipId] : null;
+  }
+
+  /* compose 모델 줄: 보기 models 중 composeModels 에 든 것(그 순서는 models 순서 — 원래 모델 첫 줄). */
+  function editFixComposeRows(view) {
+    var v = view || {};
+    var ids = Array.isArray(v.composeModels) ? v.composeModels : [];
+    return (Array.isArray(v.models) ? v.models : []).filter(function (m) {
+      return m && ids.indexOf(m.id) >= 0;
+    });
+  }
+
+  /* 보기가 올 때(compose 길): 범위는 늘 range, 구간을 못 받았으면 이유, 고른 모델이 compose 목록 밖이면 composeDefaultModel(없으면 첫 줄). */
+  function editFixAdoptCompose(fix) {
+    var v = fix.view || {};
+    var rows = editFixComposeRows(v);
+    fix.scope = "range";
+    fix.rangeWait = false;
+    fix.scopeNote = !v.range ? v.rangeNote || "이 구간은 따로 고칠 수 없습니다." : !rows.length ? EDIT_FIX_NO_V2V : "";
+    if (rows.some(function (m) {
+      return m.id === fix.model;
+    })) return;
+    var def = rows.filter(function (m) {
+      return m.id === v.composeDefaultModel;
+    })[0];
+    fix.model = (def || rows[0] || {}).id || "";
+  }
+
+  /* 「설정」(compose 길): 범위 라디오를 떼고 고정 한 줄 · 모델 상자(compose 목록) · 형식 줄 · 뺀 모델 한 줄. */
+  function editFixPaintComposeSetup(fix) {
+    var v = fix.view || {};
+    var d = fix.dom;
+    if (d.scope.parentNode) d.scope.parentNode.removeChild(d.scope); // 「원본 칸 전체」 라디오는 없다
+    var c = fix.clip;
+    d.rangeLine.textContent = "선택한 컷 구간만 고칩니다 (" + (c ? editFixSecs(c.in) + "–" + editFixSecs(c.out) + "초" : "구간 모름") + ")";
+    d.rangeLine.style.display = "";
+    d.scopeNote.textContent = fix.scopeNote || "";
+    d.scopeNote.style.display = fix.scopeNote ? "" : "none";
+    clear(d.model);
+    var rows = editFixComposeRows(v);
+    rows.forEach(function (m) {
+      var option = el("option", null, String(m.label || m.id) + (m.original ? " · 원래 모델" : ""));
+      option.value = m.id;
+      if (m.id === fix.model) option.selected = true;
+      d.model.appendChild(option);
+    });
+    d.model.value = fix.model || "";
+    d.model.disabled = rows.length < 2 || v.canRetake !== true || !!fix.rangeWait;
+    var row = rows.filter(function (m) {
+      return m.id === fix.model;
+    })[0];
+    d.modelInfo.textContent = fix.rangeWait ? "구간 정보를 불러오는 중…" : row ? "형식: " + (EDIT_FIX_FORMATS[row.format] || String(row.format || "")) +
+      " · 고른 컷 구간을 영상→영상으로 고칩니다(금액은 [프롬프트 준비] 뒤에 보입니다)" : "";
+    var hidden = Array.isArray(v.modelsHidden) ? v.modelsHidden : [];
+    d.modelHidden.style.display = hidden.length ? "" : "none";
+    d.modelHidden.textContent = hidden.length ? "이 칸에 쓸 수 없는 모델 " + hidden.length + "개는 목록에서 뺐습니다." : "";
+    d.modelHidden.title = hidden.map(function (h) {
+      return String(h.label || h.id || "") + ": " + String(h.reason || "");
+    }).join("\n");
+  }
+
+  /* 준비한 프롬프트가 묶이는 입력: 수정 사항 · 추가 프롬프트(앞뒤 공백 뺌) · 모델 · 구간 · 고른 컷 표시. */
+  function editFixComposeSig(fix) {
+    var d = fix.dom;
+    var c = fix.clip || {};
+    return JSON.stringify([String(d.request.value || "").trim(), String(d.extra.value || "").trim(), fix.model || "", c.in, c.out, fix.selNow || ""]);
+  }
+
+  /* "none"(이 패널에서 아직 준비하지 않음) · "stale"(입력이 바뀜 · 서버 초안이 바뀜) · "ready". */
+  function editFixComposeState(fix) {
+    if (!fix.draftId) return "none";
+    var dr = (fix.view || {}).draft || {};
+    if (dr.id !== fix.draftId || dr.kind !== "compose" || dr.status !== "done") return "stale";
+    return fix.draftSig === editFixComposeSig(fix) ? "ready" : "stale";
+  }
+
+  /* 준비한 프롬프트에서 수정 줄 번호(번역 한 문장, 없으면 한국어 수정 사항이 든 첫 줄). 못 찾으면 −1(강조 없음). */
+  function editFixChangeLine(prompt, draft) {
+    var lines = String(prompt || "").split("\n");
+    var dr = draft || {};
+    var keys = [String(dr.changeEn || "").trim(), String(dr.requestKo || "").replace(/\s+/g, " ").trim()].filter(Boolean);
+    for (var k = 0; k < keys.length; k++) {
+      for (var i = 0; i < lines.length; i++) {
+        if (lines[i].indexOf(keys[k]) >= 0) return i;
+      }
+    }
+    return -1;
+  }
+
+  /* 견적 한 줄(draft.plan): 고른 구간 길이 · 모델 최소 길이로 더 길게 만들면 그 길이와 잘라 쓰는 길이 · 해상도 · 예상 금액. */
+  function editFixComposeEstimate(plan) {
+    var p = plan || {};
+    var len = Number(p.trimTo) > 0 ? Number(p.trimTo) : Number(p.seconds) || 0;
+    var sent = Number(p.sentSeconds) || len;
+    var parts = ["견적: 고른 구간 " + editFixSecs(len) + "초"];
+    parts.push(sent > len + 0.05 ? "모델 최소 길이에 맞춰 " + editFixSecs(sent) + "초로 만들고 " + editFixSecs(len) + "초만 씀" : editFixSecs(sent) + "초로 만듦");
+    if (p.resolution) parts.push(String(p.resolution));
+    parts.push("예상 " + editFixMoney(p.usd));
+    return parts.join(" · ");
+  }
+
+  /* 초안 칸(compose 길): 준비 전이면 숨김, 입력이 바뀌었으면 「다시 준비해 주세요」+ 제출 막힘, 아니면 상태 · 준비한 프롬프트(읽기만) · 견적 ·
+     바이트 · 서버 문제 · 비용 · [다시 만들기 ($x)]. 서버 문제(check_prompt)가 있으면 제출할 수 없다(프롬프트는 고칠 수 없다 — 다시 준비). */
+  function editFixPaintCompose(fix) {
+    var v = fix.view || {};
+    var d = fix.dom;
+    var dr = v.draft || {};
+    var state = editFixComposeState(fix);
+    d.changes.style.display = "none";
+    d.newField.style.display = "none";
+    if (state === "none") {
+      d.draft.style.display = "none";
+      return;
+    }
+    d.draft.style.display = "";
+    var ready = state === "ready";
+    [d.result, d.composed, d.meter, d.problems, d.cost].forEach(function (node) {
+      node.style.display = ready ? "" : "none";
+    });
+    d.submit.style.display = "";
+    d.draftStatus.className = "vnew-edit-fix-status" + (ready ? "" : " is-stale");
+    var plan = dr.plan || {};
+    var again = editFixNextN(v) === Number(((v.versions || []).slice(-1)[0] || {}).n);
+    d.submit.textContent = (again ? "다시 시도" : "다시 만들기") + (ready ? " (" + editFixMoney(plan.usd) + ")" : "");
+    if (!ready) {
+      d.draftStatus.textContent = EDIT_FIX_STALE;
+      d.submit.disabled = true;
+      return;
+    }
+    var row = editFixPlanOf(v, dr.model, "range").row || { id: dr.model, label: dr.modelLabel };
+    var c = fix.clip || {};
+    d.draftStatus.textContent = "고칠 프롬프트 — 이전 프롬프트 + 수정 사항 · " + String(row.label || row.id || "") + " · 구간 " + editFixSecs(c.in) + "–" +
+      editFixSecs(c.out) + "초" + (dr.translated === false ? " · 수정 사항을 번역하지 못해 한국어 그대로 넣었습니다" : "");
+    var prompt = String(dr.prompt || "");
+    var at = editFixChangeLine(prompt, dr);
+    clear(d.composed);
+    prompt.split("\n").forEach(function (line, i) {
+      d.composed.appendChild(el("span", i === at ? "vnew-edit-fix-change" : null, line + "\n"));
+    });
+    d.result.textContent = editFixComposeEstimate(plan);
+    var max = Number(plan.maxBytes) || Number(dr.maxBytes) || 0;
+    var bytes = editFixBytes(prompt);
+    d.meter.textContent = editFixComma(bytes) + " / " + editFixComma(max) + "바이트";
+    d.meter.className = "vnew-edit-fix-meter" + (max > 0 && bytes > max ? " is-over" : "");
+    clear(d.problems);
+    var problems = Array.isArray(dr.problems) ? dr.problems : [];
+    problems.forEach(function (problem) {
+      d.problems.appendChild(el("li", null, String(problem)));
+    });
+    if (problems.length) d.problems.appendChild(el("li", "vnew-edit-fix-edited", "수정 사항·추가 프롬프트를 줄이거나 다른 모델을 고른 뒤 다시 준비해 주세요."));
+    d.cost.textContent = editFixCostText(v, row, plan);
+    d.submit.disabled = fix.busy || !!v.live || !prompt.trim() || problems.length > 0;
+  }
+
+  /* [프롬프트 준비]: POST …/compose. 응답 보기의 초안(kind compose · done)을 이 패널 초안으로 두고, 누른 때 입력을 묶는다. */
+  function editFixCompose(ctx, fix) {
+    if (!editFixAlive(ctx, fix) || fix.busy || !fix.clip) return;
+    var d = fix.dom;
+    var request = String(d.request.value || "").trim();
+    if (!request) {
+      editFixNote(fix, "수정 사항을 적어 주세요.");
+      return;
+    }
+    var extra = String(d.extra.value || "").trim();
+    var body = { requestKo: request, in: fix.clip.in, out: fix.clip.out };
+    if (extra) body.extraKo = extra;
+    if (fix.model) body.model = fix.model;
+    var sig = editFixComposeSig(fix);
+    fix.busy = true;
+    editFixNote(fix, "");
+    editFixPaint(ctx, fix, fix.view);
+    api(editFixPath(ctx, fix) + "/compose", { method: "POST", body: JSON.stringify(body) })
+      .then(function (res) {
+        fix.busy = false;
+        if (!editFixAlive(ctx, fix)) return;
+        var view = (res && res.retake) || fix.view || {};
+        var dr = view.draft || {};
+        if (dr.kind === "compose" && dr.status === "done" && dr.id) {
+          fix.draftId = String(dr.id);
+          fix.draftSig = sig;
+        }
+        editFixApply(ctx, fix, view);
+      })
+      .catch(function (err) {
+        fix.busy = false;
+        if (!editFixAlive(ctx, fix)) return;
+        editFixPaint(ctx, fix, fix.view);
+        editFixNote(fix, "프롬프트를 준비하지 못했습니다: " + errMessage(err));
+      });
+  }
+
+  /* [다시 만들기](compose 길): 확인창 → 기존 제출(초안 그대로, scope range · 같은 in·out · 초안 모델 · confirmUsd = draft.plan.usd). */
+  function editFixSubmitCompose(ctx, fix) {
+    var v = fix.view || {};
+    var dr = v.draft || {};
+    if (editFixComposeState(fix) !== "ready" || v.live || !fix.clip) return;
+    var plan = dr.plan || {};
+    var usd = Number(plan.usd) || 0;
+    var next = editFixNextN(v);
+    var row = editFixPlanOf(v, dr.model, "range").row || { id: dr.model, label: dr.modelLabel };
+    var span = editFixSecs(fix.clip.in) + "–" + editFixSecs(fix.clip.out) + "초";
+    if (!editConfirm("v" + next + "를 " + String(row.label || row.id || "") + "(으)로 선택한 컷 구간(" + span + ")만 다시 만듭니다. 예상 비용 " +
+      editFixMoney(usd) + ". 원래 결과는 그대로 남습니다.")) return;
+    var body = { prompt: String(dr.prompt || ""), requestKo: String(dr.requestKo || ""), extraKo: String(dr.extraKo || ""), confirmUsd: usd,
+                 draftId: String(dr.id || ""), model: String(dr.model || fix.model || ""), scope: "range", in: fix.clip.in, out: fix.clip.out };
+    fix.busy = true;
+    fix.dom.submit.disabled = true;
+    editFixNote(fix, "");
+    api(editFixPath(ctx, fix), { method: "POST", body: JSON.stringify(body) })
+      .then(function (res) {
+        fix.busy = false;
+        if (!editFixAlive(ctx, fix)) return;
+        fix.draftId = ""; // 낸 초안은 다 썼다(다시 내려면 다시 준비)
+        fix.draftSig = "";
+        editFixApply(ctx, fix, (res && res.retake) || v);
+        editFixNote(fix, "v" + next + "를 만들기 시작했습니다. 끝나면 [바꾸기]·[재료에 추가]가 생깁니다.");
+      })
+      .catch(function (err) {
+        fix.busy = false;
+        if (!editFixAlive(ctx, fix)) return;
+        editFixPaint(ctx, fix, fix.view);
+        editFixNote(fix, "다시 만들지 못했습니다: " + errMessage(err));
+      });
+  }
+
+  /* 결과 영상 버전 줄 → {key(그 버전 파일), fromKey(고친 재료 파일 = fromN 버전의 원본), in, out(fromKey 초), len(쓸 길이)}. 아니면 null(순수). */
+  function editFixResultInfo(versions, ver) {
+    var x = ver || {};
+    var r = x.sourceRange || {};
+    var a = Number(r.in);
+    var b = Number(r.out);
+    if (x.videoSource !== "result" || !x.sourceKey || r.in === null || r.out === null || !isFinite(a) || !isFinite(b) || !(b > a)) return null;
+    var from = (versions || []).filter(function (y) {
+      return y && y.n === x.fromN && y.sourceKey;
+    })[0];
+    if (!from) return null;
+    var trim = Number(x.trimTo) > 0 ? Number(x.trimTo) : Number(x.seconds) > 0 ? Number(x.seconds) : b - a;
+    return { key: String(x.sourceKey), fromKey: String(from.sourceKey), in: a, out: b, len: Math.min(trim, b - a) };
+  }
+
+  /* [바꾸기]에 결과 영상 버전이 끼는가: 새 버전이 결과 영상 버전이거나, 타임라인에 새 버전 파일을 고친 결과 영상 버전 클립이 있다(되돌리기). */
+  function editFixResultUses(clips, versions, ver) {
+    if (editFixResultInfo(versions, ver)) return true;
+    var key = (ver || {}).sourceKey;
+    return (versions || []).some(function (x) {
+      var info = editFixResultInfo(versions, x);
+      return !!info && info.fromKey === key && (clips || []).some(function (c) {
+        return c.sourceKey === info.key;
+      });
+    });
+  }
+
+  /* 결과 영상 버전 [바꾸기](순수). 앞으로: 원본이 그 버전의 fromKey 이고 in·out 이 구간 [in, out] 안(±EDIT_FIX_EDGE_S)인 클립(ids 가 있으면 그 중)을
+     새 in = 옛 in − 구간 in · 새 out = 옛 out − 구간 in(쓸 길이 · 새 재료 길이 안)으로. 되돌리기: 결과 영상 버전 클립을 그 fromKey(= 새 버전 파일)로
+     새 in = 옛 in + 구간 in. 속도 · 소리 끔 · J/L · 대사 타이밍 · 전환 · id 는 그대로라 타임라인 자리와 길이가 같고 이웃 클립은 그대로다. 이름은 116 규칙.
+     ids 안인데 구간 밖이면 outside, 최소 길이보다 짧아지면 skipped. 반환 {clips, changed, skipped, outside}. */
+  function editFixResultSwap(clips, ids, versions, newVer, durations, minLen, newLabel, oldLabels) {
+    var infos = {};
+    (versions || []).forEach(function (x) {
+      var info = editFixResultInfo(versions, x);
+      if (info) infos[info.key] = info;
+    });
+    var nv = newVer || {};
+    var newKey = String(nv.sourceKey || "");
+    var fwd = infos[newKey] || null;
+    var dur = Number((durations || {})[newKey]) || 0;
+    var idSet = null;
+    if (ids && ids.length) {
+      idSet = {};
+      ids.forEach(function (id) {
+        idSet[id] = true;
+      });
+    }
+    var changed = 0;
+    var skipped = 0;
+    var outside = 0;
+    var out = editCloneClips(clips).map(function (clip) {
+      if ((idSet && !idSet[clip.id]) || clip.sourceKey === newKey) return clip;
+      var a = Number(clip.in);
+      var b = Number(clip.out);
+      var shift = 0;
+      var extent = Infinity;
+      if (fwd && clip.sourceKey === fwd.fromKey) {
+        if (a < fwd.in - EDIT_FIX_EDGE_S || b > fwd.out + EDIT_FIX_EDGE_S) {
+          if (idSet) outside += 1;
+          return clip;
+        }
+        shift = -fwd.in;
+        extent = fwd.len;
+      } else {
+        var back = infos[clip.sourceKey];
+        if (!back || back.fromKey !== newKey) return clip;
+        shift = back.in;
+      }
+      if (dur > 0) extent = Math.min(extent, dur);
+      var na = Math.max(0, a + shift);
+      var nb = Math.min(extent, b + shift);
+      if (!(nb - na >= editMinSource(minLen, editSpeedOf(clip)) - 1e-9)) {
+        skipped += 1;
+        return clip;
+      }
+      var next = editCloneClip(clip);
+      next.sourceKey = newKey;
+      next.in = editRound3(na);
+      next.out = editRound3(nb);
+      if (newLabel && (!clip.label || (oldLabels || []).indexOf(clip.label) >= 0)) next.label = String(newLabel).slice(0, 40);
+      changed += 1;
+      return next;
+    });
+    return { clips: out, changed: changed, skipped: skipped, outside: outside };
   }
 
   /* ---------------------------------------------------------------- ⑦ AI로 고치기 — 버전 미리보기·타임라인 사용 표시(지시서 116 보완 2)
