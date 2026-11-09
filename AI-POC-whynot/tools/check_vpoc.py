@@ -68557,6 +68557,7 @@ def main() -> int:
     check_vnew_previz_edits_200()
     check_vnew_previz_editor_201()
     if not __import__("check_voice_202").check_voice_202(): fail("작업 202 인물 목소리 검사 실패(위 [FAIL] 참고)")
+    if not __import__("check_take_stale_205").check_take_stale_205(): fail("작업 205: 통 테이크 stale · 바뀐 테이크만 · 상단 이름 검사 실패")
     check_vnew_voice_ui_203()
     print()
     if warnings:

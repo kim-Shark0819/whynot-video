@@ -1593,6 +1593,8 @@ def project_detail(project_id: str):
         return jsonify({"ok": True, "deleted": project_id})
 
     payload = request.get_json(silent=True) or {}
+    if "title" in payload and not str(payload.get("title") or "").strip():
+        return response_error("프로젝트 이름을 입력해 주세요.", 400, "PROJECT_TITLE_REQUIRED")
     try:
         updated = graph_store.update_project(
             project_id,
