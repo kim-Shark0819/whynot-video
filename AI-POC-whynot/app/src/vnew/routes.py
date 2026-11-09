@@ -1164,6 +1164,9 @@ def create_blueprint(deps: VnewDependencies) -> Blueprint:
         except Exception as exc:  # noqa: BLE001
             return _fail(exc)
 
+    from . import voices_routes  # noqa: PLC0415 — 작업 202: 인물 목소리(voices.py)
+    voices_routes.register(bp, deps, _sound_project, _fail)
+
     # ------------------------------------------------------------ 작업 198: 모델 노트(모델 에러 로그)
     # gen 하나에서 영상·그림 모델이 거절·실패한 기록(새것부터)과 모델·종류별 수. model_notes.py 가 맡는다(글만 — 그림·프롬프트·주소 없음).
     # ?gen=<genId>(없으면 지금 gen)&variant=webtoon|real|all. 다른 vnew GET 과 같은 읽기 권한. VNEW_MODEL_NOTES 가 꺼져 있으면

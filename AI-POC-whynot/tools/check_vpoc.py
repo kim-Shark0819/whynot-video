@@ -67108,6 +67108,7 @@ def main() -> int:
     check_vnew_bg_reference_197()
     check_vnew_model_notes_198()
     check_vnew_model_notes_ui_199()
+    if not __import__("check_voice_202").check_voice_202(): fail("작업 202 인물 목소리 검사 실패(위 [FAIL] 참고)")
     print()
     if warnings:
         print(f"경고 {len(warnings)}건")
