@@ -2453,6 +2453,9 @@
     clear(host);
     // ⑤를 그리면 그 gen 상태 서명을 둔다(폴링이 같은 상태를 다시 그리지 않게, loadPlan). ⑤가 아니면 비운다.
     state.genViewSig = state.planStep === 5 ? genViewSignature((state.plan || {}).gen) : "";
+    // 작업 199: ⑤ 를 새로 열었는가(바로 앞에 그린 단계가 ⑤ 가 아님) — renderGenStep 이 모델 에러 로그 건수를 한 번 받는다.
+    state.genFresh = state.planStep === 5 && state.drawnStep !== 5;
+    state.drawnStep = state.planStep;
 
     var head = el("div", "vnew-plan-head");
     head.appendChild(el("h1", "vnew-h1", "영상만들기_신규"));
@@ -6770,6 +6773,8 @@
     var running = gen.status === "running";
     // 진행 중이 아니면(취소·실패·일부·완료) 언제든 새 gen 을 시작할 수 있다(설계자 2026-10-22, ⑤).
     var canRemake = !running && gen.status && gen.status !== "none";
+    mnotesGenWatch(state.genFresh === true, running); // 작업 199: 모델 에러 로그 건수(⑤ 를 열 때 · 생성이 끝날 때만)
+    state.genFresh = false;
 
     // --- 진행 상태 띠 + 취소 ---
     var statusBar = el("section", "panel vnew-gen-statusbar");
@@ -6817,6 +6822,7 @@
       });
       statusBar.appendChild(remakeBtn);
     }
+    statusBar.appendChild(mnotesButton("gen", { pid: state.projectId, variant: "all" })); // 작업 199
     host.appendChild(statusBar);
 
     // --- 안내: 프리비즈 기반(설계자 2026-10-21 · 컷 단위 2026-10-22 · 통 테이크 2026-10-26) ---
@@ -9758,6 +9764,7 @@
     editShowWait(ctx, "편집 문서를 불러오는 중…");
     document.addEventListener("keydown", ctx.onKey);
     editLoad(ctx, "", "");
+    mnotesRefresh(ctx.pid); // 작업 199: ⑦ 를 열 때 모델 에러 로그 건수 한 번
   }
 
   /* ⑦ 을 떠날 때(단계 이동·unmount·다시 그리기): 재생·타이머·키를 멈추고, 남은 저장이 있으면 한 번 보낸다(design §5.5). */
@@ -9766,6 +9773,7 @@
     if (!ctx) return;
     editCtx = null;
     ctx.alive = false;
+    mnotesClose(); // 작업 199: 열린 모델 에러 로그 창
     editTrClose(ctx); // 작업 182: 열린 전환 메뉴
     ctx.tighten = null; // 작업 186: 빈틈 다듬기 제안(받는 중이면 응답을 버린다)
     editFixStop(ctx); // 지시서 116: AI로 고치기 패널 조회 타이머·영상
@@ -10031,6 +10039,7 @@
     head.appendChild(d.variantBox);
     d.saveBox = el("div", "vnew-edit-save");
     head.appendChild(d.saveBox);
+    head.appendChild(editMnotesButton(ctx)); // 작업 199: [모델 에러 로그 보기]
     d.exportBtn = el("button", "primary-button vnew-edit-export-btn", "내보내기");
     d.exportBtn.type = "button";
     d.exportBtn.title = "지금 편집대로 mp4 하나를 만듭니다(저장이 남았으면 먼저 저장)";
@@ -12271,6 +12280,7 @@
       if (event && event.key === "Escape") editTrClose(ctx, true);
       return;
     }
+    if (mnotes.close) return; // 작업 199: 모델 에러 로그 창이 열린 동안도(Esc 는 창이 닫는다)
     if (ctx.fixPick) {
       // 지시서 119: 테이크·장면 고르기 창이 열린 동안도 ⑦ 단축키는 쓰지 않는다(Esc 는 창 닫기).
       if (event && event.key === "Escape") editFixPickClose(ctx);
@@ -13673,6 +13683,7 @@
   function editFixApply(ctx, fix, view) {
     var before = fix.view;
     fix.view = view;
+    if (before && before.live && !view.live) mnotesRefresh(ctx.pid); // 작업 199: 버전이 끝났으면 모델 에러 로그 건수 한 번 더
     // 작업 192: 원본 칸 전체를 고를 수 없는 서버(fullScopeAllowed false) = 프롬프트 준비(compose) 길. 범위는 늘 고른 컷 구간이고, 범위 없이
     // 연 패널(테이크 통째)은 그 재료 처음~끝을 구간으로 보기를 한 번 더 받는다.
     fix.compose = view.fullScopeAllowed === false;
@@ -15318,6 +15329,441 @@
     pick.dom.note.textContent = editFixPickNote(pick.cuts, pick.picked);
   }
 
+  /* ================================================================ 모델 에러 로그(작업 199)
+
+     GET /model-notes?gen=&variant=(작업 198) 를 ⑤ 영상 결과 상태 띠와 ⑦ 편집 머리의 [모델 에러 로그 보기] 로 보인다.
+     건수(전체 그림체)는 단계를 열 때 한 번, 영상 생성이 끝날 때(⑤ running → 아님)·AI로 고치기 버전이 끝날 때(⑦) 한 번 더 받는다.
+     폴링하지 않는다. 404(기능 꺼짐)면 버튼을 숨긴다. 노트 글은 모두 textContent 로만 넣는다. */
+
+  var MNOTES_BUTTON = "모델 에러 로그 보기";
+  var MNOTES_TITLE = "모델 에러 로그";
+  var MNOTES_EMPTY = "기록된 모델 오류가 없습니다.";
+  var MNOTES_RESTORED = "예전 기록에서 복원 — 시도 번호·원문이 없을 수 있음";
+  var MNOTES_RAW_SHOW = "모델 원문 보기";
+  var MNOTES_RAW_HIDE = "모델 원문 숨기기";
+  var MNOTES_FILTERS = [["all", "전체"], ["webtoon", "애니"], ["real", "실사"]];
+  var MNOTES_KINDS = ["contentFlag", "promptSize", "timeout", "badRequest", "provider", "qc", "other"];
+  var MNOTES_KIND_LABEL = {
+    contentFlag: "콘텐츠 검사",
+    promptSize: "길이 한도",
+    timeout: "시간 초과",
+    badRequest: "요청 오류",
+    provider: "모델 오류",
+    qc: "품질 검사",
+    other: "기타"
+  };
+  var MNOTES_ACTION_LABEL = {
+    softRetry: "대사 순화 후 다시 시도",
+    dropRefs: "참고 그림 빼고 다시 시도",
+    dialogueRewrite: "대사 다시 쓰기",
+    gaveUp: "포기",
+    retry: "다시 시도"
+  };
+  var MNOTES_STAGE_LABEL = { still: "시작 그림", opening: "시작 장면", costume: "장면 옷 편집" };
+
+  // 건수 캐시(프로젝트·gen 하나): key "pid|genId", count, off(404), running(⑤ 마지막으로 본 진행 중), seq(늦게 온 응답 버리기),
+  // btns(지금 그린 버튼 — "gen"·"edit" 자리마다 하나), close(열린 창 닫기, 없으면 null).
+  var mnotes = { key: "", count: 0, off: false, running: false, seq: 0, btns: {}, close: null };
+
+  function mnotesGenId() {
+    return String(((state.plan || {}).gen || {}).genId || "");
+  }
+
+  function mnotesPath(pid, genId, variant) {
+    return "/api/vnew/p/" + encodeURIComponent(pid) + "/model-notes?variant=" + encodeURIComponent(variant || "all") +
+      (genId ? "&gen=" + encodeURIComponent(genId) : "");
+  }
+
+  /* 프로젝트·gen 이 바뀌었으면 캐시를 비운다. 지금 key. */
+  function mnotesUseKey(pid) {
+    var key = String(pid || "") + "|" + mnotesGenId();
+    if (mnotes.key !== key) {
+      mnotes.key = key;
+      mnotes.count = 0;
+      mnotes.off = false;
+      mnotes.running = false;
+    }
+    return key;
+  }
+
+  /* 버튼 글·숨김: 노트가 있으면 "(n)", 404 면 숨김. */
+  function mnotesPaint(btn) {
+    if (!btn) return;
+    btn.style.display = mnotes.off ? "none" : "";
+    btn.textContent = mnotes.count > 0 ? MNOTES_BUTTON + " (" + mnotes.count + ")" : MNOTES_BUTTON;
+  }
+
+  function mnotesPaintAll() {
+    Object.keys(mnotes.btns).forEach(function (place) {
+      mnotesPaint(mnotes.btns[place]);
+    });
+  }
+
+  /* 받은 응답(전체 그림체)으로 건수를 맞춘다. 404 면 꺼짐. */
+  function mnotesAbsorb(key, view, err) {
+    if (mnotes.key !== key) return;
+    if (err) {
+      if (err.status === 404) mnotes.off = true;
+    } else {
+      mnotes.off = false;
+      mnotes.count = Array.isArray((view || {}).notes) ? view.notes.length : 0;
+    }
+    mnotesPaintAll();
+  }
+
+  /* 건수 한 번 받기(variant all). 실패(404 말고)는 조용히 — 버튼은 건수 없이 그대로. */
+  function mnotesRefresh(pid) {
+    var key = mnotesUseKey(pid);
+    mnotes.seq += 1;
+    var seq = mnotes.seq;
+    api(mnotesPath(pid, mnotesGenId(), "all"))
+      .then(function (view) {
+        if (seq === mnotes.seq) mnotesAbsorb(key, view, null);
+      })
+      .catch(function (err) {
+        if (seq === mnotes.seq) mnotesAbsorb(key, null, err || {});
+      });
+  }
+
+  /* ⑤ 를 그릴 때: 단계를 처음 열었거나(fresh) gen 이 바뀌었거나 생성이 막 끝났으면(running → 아님) 건수를 다시 받는다. */
+  function mnotesGenWatch(fresh, running) {
+    var before = mnotes.key;
+    var key = mnotesUseKey(state.projectId);
+    var finished = before === key && mnotes.running && !running;
+    var changed = before !== key;
+    mnotes.running = !!running;
+    if (fresh || changed || finished) mnotesRefresh(state.projectId);
+  }
+
+  /* [모델 에러 로그 보기] 버튼(place "gen"|"edit"). opts {pid, variant(창 처음 거르기 — 값 또는 함수), onPick(note) → 처리했으면 true,
+     pickable(note)}. */
+  function mnotesButton(place, opts) {
+    var btn = el("button", "outline-button vnew-mnotes-btn", MNOTES_BUTTON);
+    btn.type = "button";
+    btn.title = "영상·그림 모델이 거절하거나 실패한 기록을 봅니다";
+    btn.addEventListener("click", function () {
+      mnotesOpen(opts || {});
+    });
+    mnotes.btns[place] = btn;
+    mnotesPaint(btn);
+    return btn;
+  }
+
+  function mnotesPad(n) {
+    return (n < 10 ? "0" : "") + n;
+  }
+
+  /* 노트 시각(UTC ISO) → 이 컴퓨터 시각 "MM-DD HH:mm". 읽지 못하면 받은 글 그대로. */
+  function mnotesTime(at) {
+    var date = new Date(String(at || ""));
+    if (!at || isNaN(date.getTime())) return String(at || "");
+    return mnotesPad(date.getMonth() + 1) + "-" + mnotesPad(date.getDate()) + " " + mnotesPad(date.getHours()) + ":" +
+      mnotesPad(date.getMinutes());
+  }
+
+  /* 모델 짧은 이름: 계획의 모델 목록(plan.models label)에 있으면 그 이름, 없으면 endpoint id. */
+  function mnotesModelLabel(model) {
+    var id = String(model || "");
+    if (!id || id === "-") return "모델 모름";
+    var models = (state.plan || {}).models || [];
+    for (var i = 0; i < models.length; i++) {
+      var m = models[i] || {};
+      if ((m.id === id || m.id === "fal:" + id || m.endpointId === id) && m.label) return String(m.label);
+    }
+    return id;
+  }
+
+  /* 콘티 컷 id → 번호(plan.conti.cuts 의 정수 no). 모르면 NaN. */
+  function mnotesCutNo(cutId) {
+    var cuts = ((state.plan || {}).conti || {}).cuts || [];
+    for (var i = 0; i < cuts.length; i++) {
+      var c = cuts[i] || {};
+      if (String(c.id) === String(cutId) && typeof c.no === "number" && isFinite(c.no)) return c.no;
+    }
+    return NaN;
+  }
+
+  /* "컷 8" · "컷 8–9"(가장 작은–가장 큰 번호). 번호를 하나도 모르면 "컷 n개", 컷이 없으면 "". */
+  function mnotesCutText(cutIds) {
+    var ids = Array.isArray(cutIds) ? cutIds : [];
+    if (!ids.length) return "";
+    var nos = ids.map(mnotesCutNo).filter(function (n) {
+      return isFinite(n);
+    });
+    if (!nos.length) return "컷 " + ids.length + "개";
+    var lo = Math.min.apply(null, nos);
+    var hi = Math.max.apply(null, nos);
+    return lo === hi ? "컷 " + lo : "컷 " + lo + "–" + hi;
+  }
+
+  /* takeId → "테이크 n"(⑤ gen.units 차례, 없으면 id 의 숫자, 그것도 없으면 id). */
+  function mnotesTakeText(takeId) {
+    var id = String(takeId || "");
+    var units = ((state.plan || {}).gen || {}).units || [];
+    for (var i = 0; i < units.length; i++) {
+      if (String((units[i] || {}).id || "") === id) return "테이크 " + (i + 1);
+    }
+    var m = /^take(\d+)$/.exec(id);
+    return "테이크 " + (m ? Number(m[1]) : id);
+  }
+
+  /* 어디서: "테이크 2 · 조각 1 · 컷 8–9" · "AI로 고치기 · 컷 8 · 버전 6" · "시작 그림 · 컷 3". */
+  function mnotesWhere(note) {
+    var t = (note && note.target) || {};
+    var stage = String((note && note.stage) || "");
+    var parts = [];
+    var cuts = mnotesCutText(t.cutIds);
+    if (stage === "retake" || t.retakeCell) {
+      parts.push("AI로 고치기");
+      if (cuts) parts.push(cuts);
+      if (t.version) parts.push("버전 " + t.version);
+      return parts.join(" · ");
+    }
+    if (MNOTES_STAGE_LABEL[stage]) {
+      parts.push(MNOTES_STAGE_LABEL[stage]);
+    } else {
+      if (t.takeId) parts.push(mnotesTakeText(t.takeId));
+      if (t.partNo) parts.push("조각 " + t.partNo);
+    }
+    if (cuts) parts.push(cuts);
+    return parts.length ? parts.join(" · ") : "영상";
+  }
+
+  /* 그 뒤에 한 일(action) 한국어. 모르면 "". */
+  function mnotesAction(action) {
+    var text = String(action || "");
+    if (text.indexOf("fallbackModel:") === 0) return "다른 모델로 대체 (" + mnotesModelLabel(text.slice(14)) + ")";
+    return MNOTES_ACTION_LABEL[text] || "";
+  }
+
+  function mnotesKindLabel(kind) {
+    return MNOTES_KIND_LABEL[kind] || MNOTES_KIND_LABEL.other;
+  }
+
+  /* 맨 위 한 줄: "Wan 3.0 2건 · Seedance 2.5 1건 | 콘텐츠 검사 2 · 길이 한도 1"(많은 차례, 같으면 받은 차례 · 종류 차례).
+     모르는 kind 는 기타에 더한다. 노트가 없으면 "". */
+  function mnotesSummary(counts) {
+    var byModel = (counts && counts.byModel) || {};
+    var rawKind = (counts && counts.byKind) || {};
+    var byKind = {};
+    Object.keys(rawKind).forEach(function (k) {
+      var key = MNOTES_KIND_LABEL[k] ? k : "other";
+      byKind[key] = (byKind[key] || 0) + (Number(rawKind[k]) || 0);
+    });
+    function order(obj, keys) {
+      return keys.filter(function (k) {
+        return Number(obj[k]) > 0;
+      }).sort(function (a, b) {
+        return Number(obj[b]) - Number(obj[a]) || keys.indexOf(a) - keys.indexOf(b);
+      });
+    }
+    var models = order(byModel, Object.keys(byModel)).map(function (k) {
+      return mnotesModelLabel(k) + " " + Number(byModel[k]) + "건";
+    });
+    var kinds = order(byKind, MNOTES_KINDS).map(function (k) {
+      return mnotesKindLabel(k) + " " + Number(byKind[k]);
+    });
+    if (!models.length && !kinds.length) return "";
+    return models.join(" · ") + " | " + kinds.join(" · ");
+  }
+
+  /* 노트 한 줄. pick(note) 이 있으면 줄을 눌러 그 컷으로 간다(⑦). */
+  function mnotesRow(note, pick) {
+    var row = el("div", "vnew-mnotes-row");
+    var meta = el("div", "vnew-mnotes-meta");
+    meta.appendChild(el("span", "vnew-mnotes-time", mnotesTime(note.at)));
+    meta.appendChild(el("span", "vnew-mnotes-where", mnotesWhere(note)));
+    if (note.variant === "webtoon" || note.variant === "real") {
+      meta.appendChild(el("span", "vnew-mnotes-variant", note.variant === "real" ? "실사" : "애니"));
+    }
+    meta.appendChild(el("span", "vnew-mnotes-model", mnotesModelLabel(note.model)));
+    if (Number(note.attempt) > 0) meta.appendChild(el("span", "vnew-mnotes-attempt", Number(note.attempt) + "번째 시도"));
+    var kind = MNOTES_KIND_LABEL[note.kind] ? note.kind : "other";
+    meta.appendChild(el("span", "vnew-badge vnew-mnotes-kind is-" + kind, mnotesKindLabel(kind)));
+    if (note.resolved === true) meta.appendChild(el("span", "vnew-badge vnew-mnotes-resolved", "해결됨"));
+    row.appendChild(meta);
+    row.appendChild(el("p", "vnew-mnotes-reason", String(note.reasonKo || "")));
+    var action = mnotesAction(note.action);
+    if (action) row.appendChild(el("p", "vnew-mnotes-action", action));
+    if (note.source === "state") row.appendChild(el("p", "vnew-hint vnew-mnotes-restored", MNOTES_RESTORED));
+    var raw = String(note.providerMessage || "");
+    if (raw) {
+      var toggle = el("button", "text-action vnew-mnotes-raw-toggle", MNOTES_RAW_SHOW);
+      toggle.type = "button";
+      toggle.setAttribute("aria-expanded", "false");
+      var pre = el("pre", "vnew-mnotes-raw", raw);
+      pre.style.display = "none";
+      toggle.addEventListener("click", function (event) {
+        if (event && event.stopPropagation) event.stopPropagation();
+        var open = pre.style.display === "none";
+        pre.style.display = open ? "" : "none";
+        toggle.textContent = open ? MNOTES_RAW_HIDE : MNOTES_RAW_SHOW;
+        toggle.setAttribute("aria-expanded", open ? "true" : "false");
+      });
+      row.appendChild(toggle);
+      row.appendChild(pre);
+    }
+    if (pick) {
+      row.classList.add("is-pickable");
+      row.title = "타임라인에서 이 컷으로 갑니다";
+      row.addEventListener("click", function () {
+        pick(note);
+      });
+    }
+    return row;
+  }
+
+  function mnotesClose() {
+    if (mnotes.close) mnotes.close();
+  }
+
+  /* 창 열기(기존 vnew-modal 꼴). 거르기 칩 전체·애니·실사(처음 = opts.variant 또는 전체), 고를 때마다 그 variant 로 다시 받는다. */
+  function mnotesOpen(opts) {
+    mnotesClose();
+    var pid = opts.pid || state.projectId;
+    var genId = mnotesGenId();
+    var key = mnotesUseKey(pid);
+    var first = typeof opts.variant === "function" ? opts.variant() : opts.variant;
+    var variant = first === "webtoon" || first === "real" ? first : "all";
+    var seq = 0;
+    var scrim = el("div", "vnew-modal-scrim");
+    var modal = el("div", "vnew-modal vnew-mnotes-modal");
+    modal.setAttribute("role", "dialog");
+    modal.setAttribute("aria-modal", "true");
+    modal.setAttribute("aria-label", MNOTES_TITLE);
+    var head = el("div", "vnew-modal-head");
+    head.appendChild(el("h3", null, MNOTES_TITLE));
+    var close = el("button", "icon-button", "×");
+    close.type = "button";
+    close.title = "닫기 (Esc)";
+    close.setAttribute("aria-label", close.title);
+    close.addEventListener("click", closeModal);
+    head.appendChild(close);
+    modal.appendChild(head);
+    var body = el("div", "vnew-modal-body vnew-mnotes-body");
+    var chips = el("div", "vnew-mnotes-chips");
+    var chipEls = {};
+    MNOTES_FILTERS.forEach(function (f) {
+      var chip = el("button", "vnew-mnotes-chip", f[1]);
+      chip.type = "button";
+      chip.addEventListener("click", function () {
+        if (variant === f[0]) return;
+        variant = f[0];
+        load();
+      });
+      chipEls[f[0]] = chip;
+      chips.appendChild(chip);
+    });
+    body.appendChild(chips);
+    var summary = el("p", "vnew-hint vnew-mnotes-summary", "");
+    body.appendChild(summary);
+    var error = planError("");
+    body.appendChild(error);
+    var list = el("div", "vnew-mnotes-list");
+    body.appendChild(list);
+    modal.appendChild(body);
+    scrim.appendChild(modal);
+    scrim.addEventListener("click", function (event) {
+      if (event.target === scrim) closeModal();
+    });
+    function onKey(event) {
+      if (event && event.key === "Escape") closeModal();
+    }
+    document.addEventListener("keydown", onKey);
+    document.body.appendChild(scrim);
+    mnotes.close = closeModal;
+
+    function closeModal() {
+      seq += 1;
+      document.removeEventListener("keydown", onKey);
+      if (scrim.parentNode) scrim.parentNode.removeChild(scrim);
+      if (mnotes.close === closeModal) mnotes.close = null;
+    }
+
+    function paintChips() {
+      Object.keys(chipEls).forEach(function (k) {
+        chipEls[k].classList[k === variant ? "add" : "remove"]("is-on");
+        chipEls[k].setAttribute("aria-pressed", k === variant ? "true" : "false");
+      });
+    }
+
+    function load() {
+      seq += 1;
+      var mine = seq;
+      paintChips();
+      error.style.display = "none";
+      error.textContent = "";
+      summary.textContent = "";
+      clear(list);
+      list.appendChild(el("p", "vnew-boot", "불러오는 중…"));
+      api(mnotesPath(pid, genId, variant))
+        .then(function (view) {
+          if (mine !== seq) return;
+          if (variant === "all") mnotesAbsorb(key, view, null);
+          var notes = Array.isArray((view || {}).notes) ? view.notes : [];
+          clear(list);
+          summary.textContent = mnotesSummary((view || {}).counts);
+          if (!notes.length) {
+            list.appendChild(el("p", "vnew-hint vnew-mnotes-empty", MNOTES_EMPTY));
+            return;
+          }
+          notes.forEach(function (note) {
+            if (!note || typeof note !== "object") return;
+            var can = opts.onPick && (!opts.pickable || opts.pickable(note));
+            list.appendChild(mnotesRow(note, can ? function (n) {
+              if (opts.onPick(n)) closeModal();
+            } : null));
+          });
+        })
+        .catch(function (err) {
+          if (mine !== seq) return;
+          clear(list);
+          if (err && err.status === 404) {
+            mnotesAbsorb(key, null, err);
+            closeModal();
+            return;
+          }
+          error.style.display = "";
+          error.textContent = "모델 에러 로그를 불러오지 못했습니다: " + errMessage(err);
+        });
+    }
+
+    load();
+  }
+
+  /* ⑦ 노트의 컷이 지금 타임라인에 있으면 그 클립 번호(라벨 "컷 n" — edit.py _default_clips 와 같은 번호), 없으면 -1. */
+  function editMnotesClip(ctx, note) {
+    var ids = (((note || {}).target || {}).cutIds) || [];
+    for (var i = 0; i < ids.length; i++) {
+      var no = mnotesCutNo(ids[i]);
+      if (!isFinite(no)) continue;
+      for (var j = 0; j < (ctx.clips || []).length; j++) {
+        if (String((ctx.clips[j] || {}).label || "") === "컷 " + no) return j;
+      }
+    }
+    return -1;
+  }
+
+  /* ⑦ 머리 버튼: 처음 거르기 = 지금 그림체 탭, 줄을 누르면 그 컷을 고르고 그 시작으로 간다. */
+  function editMnotesButton(ctx) {
+    return mnotesButton("edit", {
+      pid: ctx.pid,
+      variant: function () {
+        return ctx.variant;
+      },
+      pickable: function (note) {
+        return editMnotesClip(ctx, note) >= 0;
+      },
+      onPick: function (note) {
+        var index = editMnotesClip(ctx, note);
+        if (!editAlive(ctx) || index < 0) return false;
+        editSelect(ctx, index);
+        editSeekClip(ctx, index);
+        return true;
+      }
+    });
+  }
+
   /* ---------------------------------------------------------------- 전역 */
 
   window.vnew = {
@@ -15326,6 +15772,7 @@
       state.projectId = projectId || "";
       state.plan = null;
       state.planStep = 0; // loadPlan 뒤 decidePlanStep 가 정한다
+      state.drawnStep = 0; // 작업 199: 처음 그리는 ⑤ 는 새로 연 것
       stopPlanPolling();
       loadPlan(true);
     },
