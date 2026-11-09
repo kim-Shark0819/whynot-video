@@ -21,9 +21,21 @@ ROOM_MIN_M = 3.0
 ROOM_MAX_M = 30.0
 ROOM_HEIGHT_MIN_M = 2.0
 ROOM_HEIGHT_MAX_M = 10.0
-# 카메라 화각(도).
+# 카메라 화각(도). 설계(Astra 출력) 정리 범위다.
 FOV_MIN = 20.0
 FOV_MAX = 90.0
+# 작업 200: 사용자 PUT 범위. 계산기 렌즈(9.4~42°)가 20° 로 잘리지 않고, 손으로 8~120° 를 고를 수 있다.
+USER_FOV_MIN = 8.0
+USER_FOV_MAX = 120.0
+# 렌즈(mm, 풀프레임 환산). 16:9 화면 = 센서 가로 36mm · 세로 20.25mm → 세로 화각 = 2·atan(10.125/mm).
+FF_HALF_HEIGHT_MM = 10.125
+LENS_MM_MIN = 6.0
+LENS_MM_MAX = 144.0
+LENS_PRESETS_MM = (18, 24, 35, 50, 85, 135)
+# 카메라 기울기(roll, 도).
+ROLL_MAX_DEG = 45.0
+# 직접 놓은(manual) 카메라 위치·바라보는 곳은 방 크기 + 이 여유(m) 안으로만 자른다(벽 너머에서 찍기 허용).
+CAMERA_ROOM_MARGIN_M = 3.0
 # 인물 키(m).
 ACTOR_HEIGHT_MIN_M = 0.5
 ACTOR_HEIGHT_MAX_M = 2.5
@@ -467,24 +479,73 @@ def gesture_from_hands(hands) -> str:
 # ================================================================ 타임라인(timeline)
 
 
-def _normalize_camera(raw: dict, room: dict) -> dict:
+def fov_from_lens_mm(lens_mm: float) -> float:
+    """풀프레임 환산 렌즈(mm) → 세로 화각(도, 16:9)."""
+    import math  # noqa: PLC0415
+
+    return math.degrees(2.0 * math.atan(FF_HALF_HEIGHT_MM / max(0.1, float(lens_mm))))
+
+
+def lens_mm_from_fov(fov_deg: float) -> float:
+    """세로 화각(도, 16:9) → 풀프레임 환산 렌즈(mm)."""
+    import math  # noqa: PLC0415
+
+    half = math.radians(max(0.1, min(179.0, float(fov_deg)))) / 2.0
+    return FF_HALF_HEIGHT_MM / math.tan(half)
+
+
+def camera_bounds(room: dict) -> tuple[float, float, float, float, float, float]:
+    """작업 200: 직접 놓은 카메라 위치·바라보는 곳 범위 (xmin, xmax, ymin, ymax, zmin, zmax) — 방 + CAMERA_ROOM_MARGIN_M."""
+    half_w = _num(room.get("width"), 6.0) / 2.0 + CAMERA_ROOM_MARGIN_M
+    half_d = _num(room.get("depth"), 6.0) / 2.0 + CAMERA_ROOM_MARGIN_M
+    return (-half_w, half_w, 0.05, _num(room.get("height"), 2.8) + CAMERA_ROOM_MARGIN_M, -half_d, half_d)
+
+
+def _clamp_camera_point(point: list[float], bounds) -> list[float]:
+    xmin, xmax, ymin, ymax, zmin, zmax = bounds
+    return [_round(_clamp(point[0], xmin, xmax)), _round(_clamp(point[1], ymin, ymax)), _round(_clamp(point[2], zmin, zmax))]
+
+
+def _normalize_camera(raw: dict, room: dict, user: bool = False) -> dict:
+    """컷 카메라. user(사용자 PUT, 작업 200)면 fov 8~120 · lensMm(fov 를 정한다) · roll 을 받는다.
+
+    manual(사용자가 직접 고친 카메라)이면 표시를 남기고 pos·target·moveTo 를 방 + 여유 안으로만 자른다.
+    표시가 없는 카메라는 지금처럼 자르지 않는다(옛 계획 그대로).
+    """
     raw = raw if isinstance(raw, dict) else {}
     depth = _num(room.get("depth"), 6.0)
     height = _num(room.get("height"), 2.8)
     # 기본 카메라: 방 앞쪽(z = +depth/2 바깥) 눈높이에서 중앙을 본다.
     default_pos = (0.0, max(1.2, height * 0.6), depth / 2.0 + 1.0)
     default_target = (0.0, 1.2, 0.0)
+    fov_lo, fov_hi = (USER_FOV_MIN, USER_FOV_MAX) if user else (FOV_MIN, FOV_MAX)
     camera = {
         "pos": _vec3(raw.get("pos"), default_pos),
         "target": _vec3(raw.get("target"), default_target),
-        "fov": _round(_clamp(_num(raw.get("fov"), 50.0), FOV_MIN, FOV_MAX)),
+        "fov": _round(_clamp(_num(raw.get("fov"), 50.0), fov_lo, fov_hi)),
     }
+    if user:
+        lens = raw.get("lensMm")
+        if _is_num(lens) and float(lens) > 0:
+            lens_mm = _clamp(float(lens), LENS_MM_MIN, LENS_MM_MAX)
+            camera["lensMm"] = round(lens_mm, 1)
+            camera["fov"] = _round(_clamp(fov_from_lens_mm(lens_mm), fov_lo, fov_hi))
+        roll = raw.get("roll")
+        if _is_num(roll) and abs(float(roll)) > 1e-9:
+            camera["roll"] = round(_clamp(float(roll), -ROLL_MAX_DEG, ROLL_MAX_DEG), 1)
     move = raw.get("moveTo")
     if isinstance(move, dict):
         camera["moveTo"] = {
             "pos": _vec3(move.get("pos"), tuple(camera["pos"])),
             "target": _vec3(move.get("target"), tuple(camera["target"])),
         }
+    if _as_bool(raw.get("manual")):
+        bounds = camera_bounds(room)
+        camera["pos"] = _clamp_camera_point(camera["pos"], bounds)
+        camera["target"] = _clamp_camera_point(camera["target"], bounds)
+        if "moveTo" in camera:
+            camera["moveTo"] = {key: _clamp_camera_point(camera["moveTo"][key], bounds) for key in ("pos", "target")}
+        camera["manual"] = True
     return camera
 
 
@@ -571,6 +632,9 @@ def _normalize_cut_actors(raw_actors, actor_ids: list[str], room: dict, prop_ids
         support = _normalize_support(item.get("support"))
         if support is not None:
             cut_actor["support"] = support
+        # 작업 200: 사용자가 직접 고친 인물(자리·방향·자세·동작). 참일 때만 둔다(옛 출력과 같다).
+        if _as_bool(item.get("manual")):
+            cut_actor["manual"] = True
         out.append(cut_actor)
     return out
 
@@ -582,7 +646,7 @@ def _normalize_support(raw) -> dict | None:
     return previz_support.normalize_actor_support(raw)
 
 
-def _normalize_timeline(raw_timeline, room: dict, actor_ids: list[str], cut_specs: list[dict], start_clock: float = 0.0, prop_ids: list[str] | None = None) -> tuple[list[dict], float]:
+def _normalize_timeline(raw_timeline, room: dict, actor_ids: list[str], cut_specs: list[dict], start_clock: float = 0.0, prop_ids: list[str] | None = None, user: bool = False) -> tuple[list[dict], float]:
     """타임라인을 콘티 컷과 1:1 로 맞춘다.
 
     cut_specs = [{cutId, seconds}] (콘티 순서). 모델 timeline 을 cutId 로 맞추되,
@@ -620,17 +684,19 @@ def _normalize_timeline(raw_timeline, room: dict, actor_ids: list[str], cut_spec
                 raw_cut = candidate
 
         if raw_cut is not None:
-            camera = _normalize_camera(raw_cut.get("camera") or {}, room)
+            camera = _normalize_camera(raw_cut.get("camera") or {}, room, user)
             cut_actors = _normalize_cut_actors(raw_cut.get("actors") or [], actor_ids, room, prop_ids)
         elif prev_camera is not None:
             # 빠진 컷: 앞 컷 상태를 복사(카메라만 이어지고 인물 자리는 이어진다).
             camera = copy.deepcopy(prev_camera)
             camera.pop("moveTo", None)  # 복사 컷은 이동 없이 정지.
+            camera.pop("manual", None)  # 직접 고친 표시는 그 컷 것이다(작업 200).
             cut_actors = copy.deepcopy(prev_actors or [])
             for ca in cut_actors:
                 ca.pop("moveTo", None)
+                ca.pop("manual", None)
         else:
-            camera = _normalize_camera({}, room)
+            camera = _normalize_camera({}, room, user)
             cut_actors = []
 
         start = _round(clock)
@@ -653,7 +719,7 @@ def _normalize_timeline(raw_timeline, room: dict, actor_ids: list[str], cut_spec
 # ================================================================ 공개: 장면 하나 정리
 
 
-def normalize_scene(raw: dict, *, location_id: str, cut_specs: list[dict], textures: dict | None = None, start_clock: float = 0.0) -> dict:
+def normalize_scene(raw: dict, *, location_id: str, cut_specs: list[dict], textures: dict | None = None, start_clock: float = 0.0, user: bool = False) -> dict:
     """장면 JSON 하나를 정리한다.
 
     - raw: Astra·사용자 PUT 결과(dict).
@@ -662,6 +728,7 @@ def normalize_scene(raw: dict, *, location_id: str, cut_specs: list[dict], textu
     - textures: {floorKey, walls:{side: wallKey}} — location 이미지 키(previz.py 가 035 에서 뽑아 넣는다).
       room.floorColor 는 그대로 두고, 벽·바닥 textureKey 를 채운다.
     - start_clock: 이 장면의 timeline 이 시작하는 '콘티 전체 기준' 시각(앞 장면 끝에서 이어 센다).
+    - user: 사용자 PUT(작업 200) — 카메라 fov 8~120 · lensMm · roll 을 받는다.
     """
     raw = raw if isinstance(raw, dict) else {}
     room = _normalize_room(raw.get("room") or {})
@@ -670,7 +737,7 @@ def normalize_scene(raw: dict, *, location_id: str, cut_specs: list[dict], textu
     actors = _normalize_actors(raw.get("actors"))
     actor_ids = [a["id"] for a in actors]
     prop_ids = [p["id"] for p in props]
-    timeline, _ = _normalize_timeline(raw.get("timeline"), room, actor_ids, cut_specs, start_clock, prop_ids=prop_ids)
+    timeline, _ = _normalize_timeline(raw.get("timeline"), room, actor_ids, cut_specs, start_clock, prop_ids=prop_ids, user=user)
 
     scene = {
         "version": VERSION,
@@ -703,11 +770,12 @@ def _apply_textures(scene: dict, textures: dict) -> None:
 # ================================================================ 공개: 전체(scenes[]) 정리
 
 
-def normalize_scenes(raw_scenes, *, scene_specs: list[dict]) -> list[dict]:
+def normalize_scenes(raw_scenes, *, scene_specs: list[dict], user: bool = False) -> list[dict]:
     """여러 장면을 정리한다.
 
     scene_specs = [{locationId, cuts:[{cutId, seconds}], textures?}] — 장소가 바뀌는 컷마다 새 장면.
     raw_scenes 는 모델/사용자가 준 scenes 리스트(장면 수가 안 맞으면 spec 기준으로 맞춘다).
+    user: 사용자 PUT(작업 200, normalize_scene 참고).
     """
     raw_list = raw_scenes if isinstance(raw_scenes, list) else []
     out: list[dict] = []
@@ -725,7 +793,7 @@ def normalize_scenes(raw_scenes, *, scene_specs: list[dict]) -> list[dict]:
         if raw is None and index < len(raw_list) and isinstance(raw_list[index], dict):
             raw = raw_list[index]
         scene = normalize_scene(
-            raw or {}, location_id=location_id, cut_specs=cut_specs, textures=textures, start_clock=clock
+            raw or {}, location_id=location_id, cut_specs=cut_specs, textures=textures, start_clock=clock, user=user
         )
         out.append(scene)
         # 다음 장면은 이 장면의 마지막 컷 end 에서 이어 센다.

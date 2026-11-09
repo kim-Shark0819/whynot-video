@@ -1201,6 +1201,8 @@ def _place_single(grammar, people, subject, partner, side_normal, side, shot_siz
         actor_id = info.get("id")
         if actor_id is None:
             continue
+        if (info.get("actor") or {}).get("locked"):
+            continue  # 작업 200: 사용자가 직접 놓은 인물은 옮기거나 숨기지 않는다(배우 조정 없음).
 
         if other_spec is None or how not in EDGE_HOWS:
             # 규칙 2 — 화면에 나오면 안 되는 사람(others 에 없음).
@@ -1387,6 +1389,8 @@ def _apply_facing(grammar, people, subject, partner, cam):
     """
     if subject is None:
         return
+    if (subject.get("actor") or {}).get("locked"):
+        return  # 작업 200: 사용자가 직접 정한 방향(facingDeg)은 바꾸지 않는다.
 
     def facing_to(target_pos, from_pos):
         dx = target_pos[0] - from_pos[0]

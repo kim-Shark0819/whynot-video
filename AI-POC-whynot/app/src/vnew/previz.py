@@ -23,6 +23,7 @@ vnew.previz_schema(정리). plan.py 가 plan_view 에 previz_view 를 담고 승
 from __future__ import annotations
 
 import copy
+import json
 import logging
 import os
 import secrets
@@ -78,6 +79,10 @@ FRAME_FPS_MIN = 1
 FRAME_FPS_MAX = 60
 # design task 가 이 시간을 넘게 running 이면 멈춘 것으로 본다(조회 때 failed).
 TASK_STALL_S = 1800
+# 작업 200: 직접 고친 카메라 경고 — 벽 면에서 이 거리(m) 안이면 "벽 안", 인물 머리·몸통 표면에서 이 거리 안이면 "너무 가깝다"
+# (렌더러 RENDER_MIN_CLEAR_M 과 같은 0.25m — 표시가 없는 카메라는 렌더러가 이만큼 물린다).
+MANUAL_WALL_EPS_M = 0.1
+MANUAL_BODY_CLEAR_M = 0.25
 
 # --- 패널 샷 분석(Claude 분석 체인) · 투영 검산(설계자 2026-10-21, 지시서 045) ---
 # 컷마다 그 컷 panels 웹툰 조각을 Claude(분석 모델)에 보내 샷(크기·높이·각도·인물 화면 좌표)을
@@ -184,9 +189,14 @@ def _root(owner: str, pid: str) -> str:
     return plan_mod._root(owner, pid)  # noqa: SLF001
 
 
-def recording_key(owner: str, pid: str, rev: int, seg_id: str) -> str:
-    """녹화 mp4 는 VIDEO_BUCKET 아래 .../vnew/previz/{rev}/{segId}.mp4."""
-    return f"{_root(owner, pid)}/previz/{int(rev)}/{seg_id}.mp4"
+def recording_key(owner: str, pid: str, rev: int, seg_id: str, edit_rev: int = 0) -> str:
+    """녹화 mp4 는 VIDEO_BUCKET 아래 .../vnew/previz/{rev}/{segId}.mp4.
+
+    작업 200: 장면을 고친 뒤(previz.editRev > 0) 다시 녹화하면 .../{rev}/{segId}-e{editRev}.mp4 — 옛 녹화를 덮어쓰지 않아
+    그 녹화로 만든 영상(gen recKeys)이 바뀌지 않는다. 고친 적 없는 계획은 지금 키 그대로다.
+    """
+    suffix = f"-e{int(edit_rev)}" if int(edit_rev or 0) > 0 else ""
+    return f"{_root(owner, pid)}/previz/{int(rev)}/{seg_id}{suffix}.mp4"
 
 
 def frames_prefix(owner: str, pid: str, rev: int, seg_id: str) -> str:
@@ -1084,6 +1094,12 @@ def run_design(owner: str, pid: str, task_id: str) -> None:
             else:
                 scenes.append(next(designed_iter))
 
+        # 2.4) 작업 200: 다시 만들기면 사용자가 직접 고친 카메라·인물(manual)을 같은 컷에 되살린다(아래 단계가 바꾸지 않는다).
+        if is_rebuild:
+            restored = _restore_manual(scenes, prev_scenes)
+            if restored:
+                log.info("vnew.previz.manual_restored pid=%s items=%d", pid, restored)
+
         # 2.5) 외형(머리카락 색)·연기(gesture·gestureTarget)를 장면 인물·timeline 에 채운다.
         _apply_appearance(owner, scenes, chars)
         _apply_gestures(scenes, groups, grammar_by_cut, plan)
@@ -1354,7 +1370,7 @@ def _actors_in_cut(scene: dict, cut: dict) -> list[dict]:
         aid = str(ca.get("id"))
         meta = meta_by_id.get(aid) or {}
         pos = ca.get("pos") or [0, 0, 0]
-        out.append({
+        item = {
             "id": aid,
             "name": str(meta.get("name") or aid),
             "heightM": float(meta.get("heightM") or 1.7),
@@ -1363,7 +1379,10 @@ def _actors_in_cut(scene: dict, cut: dict) -> list[dict]:
             "facingDeg": ca.get("facingDeg"),
             # 앉은 엉덩이 높이(084 R1.6, previz_collision 이 채운 sit). 없으면 None(지금 값 SEAT_Y+0.05).
             "hipY": (ca.get("sit") or {}).get("hipY") if isinstance(ca.get("sit"), dict) else None,
-        })
+        }
+        if ca.get("manual"):
+            item["locked"] = True  # 작업 200: 직접 놓은 인물 — place_cut 이 옮기거나 숨기거나 돌리지 않는다.
+        out.append(item)
     return out
 
 
@@ -1606,8 +1625,8 @@ def _apply_gestures(scenes: list[dict], groups: list[dict], grammar_by_cut: dict
                 aid = str(ca.get("id") or "")
                 nm = name_by_id.get(aid, "")
                 entry = gesture_by_name.get(nm)
-                if not entry:
-                    continue
+                if not entry or ca.get("manual"):
+                    continue  # 작업 200: 사용자가 직접 고친 인물은 그대로 둔다.
                 gesture, target_name, pose = entry
                 target_id = id_by_name.get(target_name.strip()) if target_name and target_name != "none" else None
                 if target_id == aid:
@@ -1642,7 +1661,7 @@ def _apply_gestures(scenes: list[dict], groups: list[dict], grammar_by_cut: dict
             for ca in cut.get("actors") or []:
                 aid = str(ca.get("id") or "")
                 nm = name_by_id.get(aid, "")
-                if nm not in speaker_names:
+                if nm not in speaker_names or ca.get("manual"):
                     continue
                 # 이미 다른 제스처가 붙었으면 두지 않는다.
                 if str(ca.get("gesture") or "none") not in ("", "none"):
@@ -1679,7 +1698,7 @@ def _mute_thought_speakers(scenes: list[dict], plan: dict | None) -> None:
                 if name and not line.get("silent"):
                     (thought if line.get("thought") else spoken).add(name)
             for ca in cut.get("actors") or []:
-                if name_by_id.get(str(ca.get("id") or ""), "") in (thought - spoken):
+                if name_by_id.get(str(ca.get("id") or ""), "") in (thought - spoken) and not ca.get("manual"):
                     ca["speaking"] = False
 
 
@@ -1719,6 +1738,13 @@ def _place_cameras(owner, pid, scenes, groups, grammar_by_cut, overrides, *, tas
         for cut in timeline:
             cut_id = str(cut.get("cutId") or "")
             g = merged_by_cut.get(cut_id)
+            if (cut.get("camera") or {}).get("manual"):
+                # 작업 200: 사용자가 직접 놓은 카메라는 계산하지 않는다(일치도만 잰다, method manual).
+                fit[cut_id] = {"match": _manual_match(scene, cut, g, cut_id), "method": "manual"}
+                _manual_fit_extras(fit[cut_id], scene, cut, g)
+                if task_id:
+                    _bump_progress(owner, pid, task_id, step="camera")
+                continue
             if not isinstance(g, dict):
                 # 읽기 실패 컷: Astra 카메라 유지, method astra, match null(판정 불가).
                 fit[cut_id] = {"match": None, "method": "astra"}
@@ -2473,6 +2499,7 @@ def _commit_scenes(owner: str, pid: str, task_id: str, scenes: list[dict], model
         previz["approvedForced"] = None  # 강제 승인 기록도 지운다(새 설계는 새 판정).
         previz["revision"] = int(previz.get("revision") or 0) + 1
         previz["recordings"] = {}  # revision 이 바뀌면 녹화 키 경로가 달라진다.
+        previz.pop("editRev", None)  # 작업 200: 새 설계는 새 revision — 고친 횟수는 다시 센다(녹화 키는 옛 모양).
         previz["lastRebuild"] = last_rebuild  # 다시 만들기 요약(첫 설계면 None).
         previz.pop("posesStale", None)  # 작업 162: 새 설계는 지금 패널 읽기로 포즈를 다시 맞췄다.
         # progress 를 done 으로 마무리(막대 가득).
@@ -2536,13 +2563,19 @@ def update_scenes(owner: str, pid: str, patch: dict) -> dict:
         if not scene_specs:
             # 아직 설계 전이면 콘티에서 그룹을 만든다(저장본이 없어도 PUT 을 허용).
             scene_specs = _specs_from_conti(owner, pid, data)
-        scenes = previz_schema.normalize_scenes(raw_scenes, scene_specs=scene_specs)
-        # 사용자가 직접 고친 카메라 컷은 match 를 match_visible 로 다시 계산한다(method "manual").
-        _recompute_manual_fit(previz, current, scenes)
+        scenes = previz_schema.normalize_scenes(raw_scenes, scene_specs=scene_specs, user=True)
+        # 작업 200: 보던 장면(보기 사본 — 녹화가 그린 값)과 컷마다 비교한다(반올림·manual 표시는 빼고).
+        before = _view_copies(previz)
+        _mark_manual(before, scenes)
+        changed = _changed_cut_ids(before, scenes)
+        # 사용자가 직접 고친 카메라 컷은 match 를 match_visible 로 다시 계산한다(method "manual"). 기준은 보던 장면(before).
+        _recompute_manual_fit(previz, before, scenes)
         previz["scenes"] = scenes
         if previz.get("status") in ("none", "failed"):
             previz["status"] = "ready"
         previz["approved"] = False  # 장면을 고치면 승인 해제.
+        if changed:
+            _mark_stale(previz, data, changed)
         data["revision"] = int(data.get("revision") or 0) + 1
         return previz
 
@@ -2585,7 +2618,7 @@ def refresh_poses(owner: str, pid: str) -> dict:
                 ids = {id_by_name.get(str((a or {}).get("name") or "").strip()) for a in actions if isinstance(a, dict)}
                 ids |= {id_by_name.get(n) for n in conti_names.get(str(cut.get("cutId") or ""), set())}
                 for ca in cut.get("actors") or []:
-                    if isinstance(ca, dict) and str(ca.get("id") or "") in ids:
+                    if isinstance(ca, dict) and str(ca.get("id") or "") in ids and not ca.get("manual"):
                         for key in ("gesture", "gestureTarget", *_POSE_KEYS):
                             ca.pop(key, None)
                         changed += 1
@@ -2611,64 +2644,289 @@ def _recompute_manual_fit(previz: dict, old_scenes: list[dict], new_scenes: list
 
     바뀌지 않은 컷의 fit 은 그대로 둔다. grammar(패널 읽기+override)로 주인공·샷 크기·머리 위치를 안다.
     grammar 가 없는 컷은 match null·method manual 로만 둔다(판정 불가).
+    작업 200: 비교는 반올림·manual 표시를 뺀 값으로 한다(저장본 4자리 ↔ 정리 3자리 차이로 모든 컷이 manual 이 되던 것).
+    직접 고친(camera.manual) 카메라면 렌즈(풀프레임 환산)·거리를 그 카메라로 다시 적고 pushInTo·cameraFix 를 뗀다
+    (촬영 지시서가 옛 렌즈·밀어 들어가기를 쓰지 않게). 카메라는 그대로고 인물만 바뀐 문법 컷은 일치도만 다시 잰다.
     """
     fit = previz.get("fit")
     if not isinstance(fit, dict):
         return
     grammar_cache = previz.get("panelGrammar") or {}
     overrides = previz.get("grammarOverrides") or {}
-
-    def _cam_of(scenes, cut_id):
-        for scene in scenes or []:
-            for t in scene.get("timeline") or []:
-                if str(t.get("cutId") or "") == cut_id:
-                    return scene, t
-        return None, None
+    old_by_id = _cuts_by_id(old_scenes)
 
     for scene in new_scenes or []:
         for cut in scene.get("timeline") or []:
             cut_id = str(cut.get("cutId") or "")
-            _, old_cut = _cam_of(old_scenes, cut_id)
+            old_cut = (old_by_id.get(cut_id) or (None, None))[1]
             old_cam = (old_cut or {}).get("camera") or {}
             new_cam = cut.get("camera") or {}
-            if old_cam == new_cam:
-                continue  # 카메라가 안 바뀐 컷은 그대로.
             cached = (grammar_cache.get(cut_id) or {}).get("grammar")
             grammar = _merge_override(cached, overrides.get(cut_id)) if isinstance(cached, dict) else None
-            match = None
-            if isinstance(grammar, dict):
-                subject_name = str(grammar.get("mainSubject") or "")
-                meta = None
-                for a in scene.get("actors") or []:
-                    if str(a.get("name") or "") == subject_name:
-                        meta = a
-                        break
-                if meta is None and scene.get("actors"):
-                    meta = (scene.get("actors") or [None])[0]
-                foot = _actor_foot(scene, cut, (meta or {}).get("id")) if meta else [0, 0, 0]
-                height = float((meta or {}).get("heightM") or 1.7)
-                pose = "stand"
-                hip_y = None
-                for ca in cut.get("actors") or []:
-                    if str(ca.get("id")) == str((meta or {}).get("id")):
-                        pose = str(ca.get("pose") or "stand")
-                        sit = ca.get("sit") if isinstance(ca.get("sit"), dict) else {}
-                        if isinstance(sit.get("hipY"), (int, float)) and not isinstance(sit.get("hipY"), bool):
-                            hip_y = float(sit["hipY"])  # 앉은 엉덩이 높이(084 R1.6)
-                        break
-                shot_size = str(grammar.get("shotSize") or "MCU")
-                bottom = previz_camera.LENS.get(shot_size, previz_camera.LENS["MCU"])[2]
-                top_y = float(grammar.get("headTopY") or 0.1)
-                subject_x = float(grammar.get("subjectX") or 0.5)
-                try:
-                    match = round(previz_fit.match_visible(
-                        new_cam, foot, height, pose, top_y, subject_x, bottom, hip_y
-                    ), 4)
-                except Exception as exc:  # noqa: BLE001
-                    log.warning("vnew.previz.manual_fit.failed cut=%s err=%s", cut_id, str(exc)[:150])
-                    match = None
+            if _sig(old_cam) == _sig(new_cam):
+                # 카메라가 안 바뀐 컷은 그대로. 인물만 움직인 문법 컷은 일치도만 다시 잰다(작업 200).
+                entry = fit.get(cut_id)
+                if old_cut is not None and isinstance(entry, dict) and isinstance(grammar, dict) \
+                        and _sig(old_cut.get("actors")) != _sig(cut.get("actors")):
+                    _rematch_cut(scene, cut, grammar, entry)
+                continue
+            match = _manual_match(scene, cut, grammar, cut_id)
             prev = fit.get(cut_id) if isinstance(fit.get(cut_id), dict) else {}
             fit[cut_id] = dict(prev, match=match, method="manual")
+            if new_cam.get("manual"):
+                _manual_fit_extras(fit[cut_id], scene, cut, grammar)
+
+
+def _manual_match(scene: dict, cut: dict, grammar: dict | None, cut_id: str):
+    """직접 고친 카메라 컷의 일치도(match_visible). grammar 가 없으면 None(판정 불가)."""
+    if not isinstance(grammar, dict):
+        return None
+    new_cam = cut.get("camera") or {}
+    meta = _subject_meta(scene, grammar)
+    foot = _actor_foot(scene, cut, (meta or {}).get("id")) if meta else [0, 0, 0]
+    height = float((meta or {}).get("heightM") or 1.7)
+    pose = "stand"
+    hip_y = None
+    for ca in cut.get("actors") or []:
+        if str(ca.get("id")) == str((meta or {}).get("id")):
+            pose = str(ca.get("pose") or "stand")
+            sit = ca.get("sit") if isinstance(ca.get("sit"), dict) else {}
+            if isinstance(sit.get("hipY"), (int, float)) and not isinstance(sit.get("hipY"), bool):
+                hip_y = float(sit["hipY"])  # 앉은 엉덩이 높이(084 R1.6)
+            break
+    shot_size = str(grammar.get("shotSize") or "MCU")
+    bottom = previz_camera.LENS.get(shot_size, previz_camera.LENS["MCU"])[2]
+    top_y = float(grammar.get("headTopY") or 0.1)
+    subject_x = float(grammar.get("subjectX") or 0.5)
+    try:
+        return round(previz_fit.match_visible(new_cam, foot, height, pose, top_y, subject_x, bottom, hip_y), 4)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("vnew.previz.manual_fit.failed cut=%s err=%s", cut_id, str(exc)[:150])
+        return None
+
+
+def _subject_meta(scene: dict, grammar: dict | None) -> dict | None:
+    subject_name = str((grammar or {}).get("mainSubject") or "")
+    for a in scene.get("actors") or []:
+        if str(a.get("name") or "") == subject_name:
+            return a
+    return (scene.get("actors") or [None])[0]
+
+
+def _manual_fit_extras(entry: dict, scene: dict, cut: dict, grammar: dict | None) -> None:
+    """작업 200: 직접 고친 카메라의 렌즈(풀프레임 환산 mm)·주인공까지 거리. 계산기 보정 흔적(pushInTo·cameraFix)은 뗀다."""
+    cam = cut.get("camera") or {}
+    lens_mm = cam.get("lensMm")
+    if not isinstance(lens_mm, (int, float)) or isinstance(lens_mm, bool) or lens_mm <= 0:
+        lens_mm = previz_schema.lens_mm_from_fov(float(cam.get("fov") or 50.0))
+    entry["lens"] = f"{int(round(float(lens_mm)))}mm"
+    meta = _subject_meta(scene, grammar)
+    if meta:
+        foot = _actor_foot(scene, cut, meta.get("id"))
+        pos = cam.get("pos") or [0, 0, 0]
+        entry["distanceM"] = round(((float(pos[0]) - foot[0]) ** 2 + (float(pos[2]) - foot[2]) ** 2) ** 0.5, 3)
+    entry.pop("pushInTo", None)
+    entry.pop("cameraFix", None)
+
+
+# ================================================================ 작업 200: 직접 고친 값 · 컷 비교 · 녹화 stale
+
+# 패널에서 사람이 고치는 인물 값. 이 값이 보던 장면과 다르면 그 인물을 manual 로 본다.
+_ACTOR_EDIT_KEYS = ("pos", "facingDeg", "pose", "gesture", "speaking")
+# 비교에서 빼는 키: manual 표시, 보기 때 다시 잡는 앉은 모양(sit), 보기 전용 텍스처 경로.
+_SIG_SKIP = ("manual", "sit", "textureUrl", "floorTextureUrl")
+
+
+def _rounded(value):
+    if isinstance(value, bool) or value is None:
+        return value
+    if isinstance(value, (int, float)):
+        return round(float(value), 3)
+    if isinstance(value, dict):
+        # 작업 200 fix1: 값이 None 인 키는 없는 키와 같다(정리가 gesture: None 을 붙여 그대로 저장한 컷이 바뀐 것으로 보이던 것).
+        return {k: _rounded(v) for k, v in value.items() if k not in _SIG_SKIP and v is not None}
+    if isinstance(value, (list, tuple)):
+        return [_rounded(v) for v in value]
+    return value
+
+
+def _sig(value) -> str:
+    """비교용 서명(소수 3자리 반올림, manual·sit·텍스처 경로 뺌)."""
+    return json.dumps(_rounded(value), sort_keys=True, ensure_ascii=False)
+
+
+def _cuts_by_id(scenes) -> dict[str, tuple[dict, dict]]:
+    return {str(c.get("cutId") or ""): (s, c) for s in scenes or [] if isinstance(s, dict)
+            for c in s.get("timeline") or [] if isinstance(c, dict)}
+
+
+def _scene_sig(scene: dict) -> str:
+    return _sig({key: scene.get(key) for key in ("room", "light", "props", "actors")})
+
+
+def _scene_designed(scene: dict, fit: dict) -> bool:
+    """보정과 함께 설계된 장면(어떤 컷 인물이든 sit 이 있거나 그 장면 컷의 fit.collision 이 있음, 084 R1.11)."""
+    timeline = [c for c in (scene.get("timeline") or []) if isinstance(c, dict)]
+    return any(
+        isinstance(ca, dict) and isinstance(ca.get("sit"), dict)
+        for cut in timeline for ca in (cut.get("actors") or [])
+    ) or any(
+        isinstance(fit.get(str(cut.get("cutId") or "")), dict)
+        and isinstance(fit[str(cut.get("cutId") or "")].get("collision"), dict)
+        for cut in timeline
+    )
+
+
+def _view_copies(previz: dict) -> list[dict]:
+    """previz_view 가 보이는(녹화가 그리는) 장면 사본. 보정 켬 + 설계된 장면이면 resolve_scene 을 적용한다."""
+    collision_on = bool(vnew_settings.VNEW_PREVIZ_COLLISION)
+    fit = previz.get("fit") if isinstance(previz.get("fit"), dict) else {}
+    out = []
+    for scene in previz.get("scenes") or []:
+        cp = copy.deepcopy(scene)
+        if collision_on and _scene_designed(scene, fit):
+            try:
+                previz_collision.resolve_scene(cp, log_fixes=False, pass_name="view")
+            except Exception:  # noqa: BLE001 — 비교 기준을 못 만들면 저장본 그대로 쓴다.
+                cp = copy.deepcopy(scene)
+        out.append(cp)
+    return out
+
+
+def _changed_cut_ids(before: list[dict], after: list[dict]) -> set[str]:
+    """보던 장면과 값이 다른 컷 id(카메라·인물, 또는 그 장면의 방·빛·소품·인물 목록)."""
+    old = _cuts_by_id(before)
+    changed: set[str] = set()
+    for cut_id, (scene, cut) in _cuts_by_id(after).items():
+        prev = old.get(cut_id)
+        if prev is None or _scene_sig(prev[0]) != _scene_sig(scene) or \
+                _sig([prev[1].get("camera"), prev[1].get("actors")]) != _sig([cut.get("camera"), cut.get("actors")]):
+            changed.add(cut_id)
+    return changed
+
+
+def _mark_manual(before: list[dict], scenes: list[dict]) -> None:
+    """값이 바뀐 카메라·인물에 manual 표시를 단다(화면이 단 표시는 그대로). 카메라는 방 + 여유 안으로 다시 정리한다."""
+    old = _cuts_by_id(before)
+    for cut_id, (scene, cut) in _cuts_by_id(scenes).items():
+        prev = old.get(cut_id)
+        if prev is None:
+            continue
+        cam = cut.get("camera") or {}
+        if not cam.get("manual") and _sig(prev[1].get("camera")) != _sig(cam):
+            cut["camera"] = previz_schema._normalize_camera(dict(cam, manual=True), scene.get("room") or {}, True)  # noqa: SLF001
+        prev_actors = {str(a.get("id")): a for a in prev[1].get("actors") or [] if isinstance(a, dict)}
+        for ca in cut.get("actors") or []:
+            pa = prev_actors.get(str(ca.get("id")))
+            if ca.get("manual") or pa is None:
+                continue
+            if any(_sig(pa.get(key)) != _sig(ca.get(key)) for key in _ACTOR_EDIT_KEYS):
+                ca["manual"] = True
+
+
+def _mark_stale(previz: dict, data: dict, changed: set[str]) -> list[str]:
+    """바뀐 컷이 든 구간의 녹화만 stale 로 표시하고 editRev 를 올린다(다시 녹화하면 새 키). 표시한 구간 id 목록."""
+    previz["editRev"] = int(previz.get("editRev") or 0) + 1
+    recordings = previz.get("recordings") if isinstance(previz.get("recordings"), dict) else {}
+    marked: list[str] = []
+    for seg in (data.get("conti") or {}).get("segments") or []:
+        seg_id = str(seg.get("id") or "")
+        if not any(str(c) in changed for c in seg.get("cutIds") or []):
+            continue
+        rec = recordings.get(seg_id)
+        if isinstance(rec, dict) and rec.get("key"):
+            rec["stale"] = True
+            marked.append(seg_id)
+    return marked
+
+
+def stale_segments(previz: dict) -> list[str]:
+    """다시 녹화해야 하는 구간 id(녹화가 있고 stale). generate 선행 조건·보기가 쓴다."""
+    recordings = (previz or {}).get("recordings") or {}
+    return [seg_id for seg_id, rec in recordings.items() if isinstance(rec, dict) and rec.get("key") and rec.get("stale")]
+
+
+def _restore_manual(scenes: list[dict], prev_scenes: list[dict]) -> int:
+    """다시 만들기(작업 200): 이전 장면에서 직접 고친 카메라·인물을 같은 컷 id(인물은 같은 id 가 장면에 있을 때)로 되살린다.
+
+    되살린 값은 manual 이라 뒤의 연기·받침·보정·카메라 계산이 바꾸지 않는다. 새 장면에 없는 소품을 가리키는 sitOn·sit 은 뗀다.
+    되살린 항목 수를 돌려준다.
+    """
+    prev = _cuts_by_id(prev_scenes)
+    restored = 0
+    for cut_id, (scene, cut) in _cuts_by_id(scenes).items():
+        old = prev.get(cut_id)
+        if old is None:
+            continue
+        old_cam = old[1].get("camera") or {}
+        if old_cam.get("manual"):
+            cut["camera"] = copy.deepcopy(old_cam)
+            restored += 1
+        actor_ids = {str(a.get("id") or "") for a in scene.get("actors") or []}
+        prop_ids = {str(p.get("id") or "") for p in scene.get("props") or []}
+        actors = cut.setdefault("actors", [])
+        for pa in old[1].get("actors") or []:
+            if not (isinstance(pa, dict) and pa.get("manual") and str(pa.get("id") or "") in actor_ids):
+                continue
+            keep = copy.deepcopy(pa)
+            if str(keep.get("sitOn") or "") not in prop_ids:
+                keep.pop("sitOn", None)
+            if str((keep.get("sit") or {}).get("propId") or "") not in prop_ids:
+                keep.pop("sit", None)
+            index = next((i for i, ca in enumerate(actors) if str(ca.get("id") or "") == str(pa.get("id") or "")), None)
+            if index is None:
+                actors.append(keep)
+            else:
+                actors[index] = keep
+            restored += 1
+    return restored
+
+
+def manual_warnings(scene: dict) -> dict[str, list[str]]:
+    """직접 고친 카메라가 벽·천장·바닥·소품·인물 몸과 부딪치면 그 컷의 한국어 경고(작업 200). 옮기지 않고 알리기만 한다."""
+    room = scene.get("room") or {}
+    half_w = float(room.get("width") or 6.0) / 2.0
+    half_d = float(room.get("depth") or 6.0) / 2.0
+    height = float(room.get("height") or 2.8)
+    vols = previz_collision._scene_vols(scene)  # noqa: SLF001
+    names = {str(a.get("id") or ""): str(a.get("name") or a.get("id") or "") for a in scene.get("actors") or []}
+    labels = {str(p.get("id") or ""): str(p.get("labelKo") or "") for p in scene.get("props") or [] if isinstance(p, dict)}
+    out: dict[str, list[str]] = {}
+    for cut in scene.get("timeline") or []:
+        cam = cut.get("camera") or {}
+        if not cam.get("manual"):
+            continue
+        x, y, z = (float(v) for v in (cam.get("pos") or [0, 0, 0])[:3])
+        notes: list[str] = []
+        if abs(x) > half_w + MANUAL_WALL_EPS_M or abs(z) > half_d + MANUAL_WALL_EPS_M:
+            notes.append("카메라가 벽 밖에 있습니다(벽 너머에서 찍습니다).")
+        elif abs(x) > half_w - MANUAL_WALL_EPS_M or abs(z) > half_d - MANUAL_WALL_EPS_M:
+            notes.append("카메라가 벽 안에 있습니다.")
+        if y > height:
+            notes.append("카메라가 천장 위에 있습니다.")
+        elif y < 0.05:
+            notes.append("카메라가 바닥 아래에 있습니다.")
+        for vol in vols:
+            if _point_in_vol(vol, x, y, z):
+                notes.append(f"카메라가 소품({labels.get(vol['id']) or vol['id']}) 안에 있습니다.")
+                break
+        actors = _actors_in_cut(scene, cut)
+        infos = [previz_camera._actor_points(a, a["foot"], a.get("pose") or "stand") for a in actors]  # noqa: SLF001
+        for actor, info in zip(actors, infos):
+            if previz_camera.camera_clearance((x, y, z), [info]) < MANUAL_BODY_CLEAR_M:
+                notes.append(f"카메라가 {names.get(actor['id'], actor['id'])} 몸 안이거나 너무 가깝습니다.")
+        if notes:
+            out[str(cut.get("cutId") or "")] = notes
+    return out
+
+
+def _point_in_vol(vol: dict, x: float, y: float, z: float) -> bool:
+    if not (vol["cy"] - vol["hy"] - 1e-6 <= y <= vol["cy"] + vol["hy"] + 1e-6):
+        return False
+    if vol["shape"] == "cylinder":
+        return (x - vol["cx"]) ** 2 + (z - vol["cz"]) ** 2 <= vol["r"] ** 2
+    lx, lz = previz_collision._to_local(vol, x, z)  # noqa: SLF001
+    return abs(lx) <= vol["hx"] and abs(lz) <= vol["hz"]
 
 
 def _specs_from_scenes(scenes: list[dict]) -> list[dict]:
@@ -2711,17 +2969,20 @@ def _low_match_cuts(previz: dict) -> list[dict]:
     반환 [{cutId, match, no}]. no 는 컷 번호(scenes timeline 순서, 1 부터).
     """
     fit = previz.get("fit") or {}
-    # cutId → 컷 번호(모든 scene timeline 을 순서대로).
+    # cutId → 컷 번호(모든 scene timeline 을 순서대로). 작업 200: 사용자가 직접 놓은 카메라(camera.manual) 컷은 세지 않는다.
     order: list[str] = []
+    manual: set[str] = set()
     for scene in previz.get("scenes") or []:
         for t in scene.get("timeline") or []:
             order.append(str(t.get("cutId") or ""))
+            if (t.get("camera") or {}).get("manual"):
+                manual.add(str(t.get("cutId") or ""))
     low: list[dict] = []
     for index, cut_id in enumerate(order, start=1):
         info = fit.get(cut_id) or {}
         match = info.get("match")
         # match null(판정 불가)·숫자 < 하한 이면 낮은 컷. 옛 err 형식(match 없음)은 세지 않는다.
-        if "match" not in info:
+        if "match" not in info or cut_id in manual:
             continue
         if match is None or float(match) < APPROVE_MIN_MATCH:
             low.append({"cutId": cut_id, "match": match, "no": index})
@@ -2838,12 +3099,12 @@ def save_recording(owner: str, pid: str, seg_id: str, body: bytes, content_type:
             400,
         )
 
-    key = recording_key(owner, pid, rev, seg_id)
+    key = recording_key(owner, pid, rev, seg_id, int(previz.get("editRev") or 0))
     STORE.put_bytes(key, mp4, "video/mp4", bucket=vpoc_settings.VIDEO_BUCKET)
 
     def mutator(data: dict) -> None:
         pv = data.setdefault("previz", new_previz())
-        pv.setdefault("recordings", {})[seg_id] = {"status": "ready", "key": key, "seconds": round(seconds, 3)}
+        pv.setdefault("recordings", {})[seg_id] = _ready_recording(pv, previz, key, seconds)
 
     plan_mod.mutate_plan(owner, pid, mutator)
     return {"status": "ready", "key": key, "seconds": round(seconds, 3), "url": _presign_video(key)}
@@ -2936,12 +3197,12 @@ def finish_recording(owner: str, pid: str, seg_id: str, frames: int, fps: int) -
                 f"녹화 길이가 구간 {target_seconds:.2f}초와 ±{REC_TOLERANCE_S}초 넘게 차이납니다(측정 {seconds:.2f}초).", 400,
             )
 
-        key = recording_key(owner, pid, rev, seg_id)
+        key = recording_key(owner, pid, rev, seg_id, int(previz.get("editRev") or 0))
         STORE.put_bytes(key, mp4, "video/mp4", bucket=vpoc_settings.VIDEO_BUCKET)
 
         def mutator(data: dict) -> None:
             pv = data.setdefault("previz", new_previz())
-            pv.setdefault("recordings", {})[seg_id] = {"status": "ready", "key": key, "seconds": round(seconds, 3)}
+            pv.setdefault("recordings", {})[seg_id] = _ready_recording(pv, previz, key, seconds)
 
         plan_mod.mutate_plan(owner, pid, mutator)
         return {"status": "ready", "key": key, "seconds": round(seconds, 3), "url": _presign_video(key)}
@@ -3011,6 +3272,14 @@ def _delete_frames(owner: str, pid: str, rev: int, seg_id: str, total: int) -> N
                 )
         except Exception as exc:  # noqa: BLE001
             log.warning("vnew.previz.frames.delete_failed key=%s err=%s", key, str(exc)[:150])
+
+
+def _ready_recording(pv: dict, loaded: dict, key: str, seconds: float) -> dict:
+    """녹화 한 구간의 저장값. 작업 200: 렌더를 시작한 뒤(loaded 를 읽은 뒤) 장면이 또 고쳐졌으면 stale 로 둔다."""
+    rec = {"status": "ready", "key": key, "seconds": round(seconds, 3)}
+    if int(pv.get("editRev") or 0) != int((loaded or {}).get("editRev") or 0):
+        rec["stale"] = True
+    return rec
 
 
 def _find_segment(plan: dict, seg_id: str) -> dict | None:
@@ -3104,14 +3373,7 @@ def previz_view(owner: str, pid: str, plan: dict) -> dict:
     scenes_out = []
     for scene in previz.get("scenes") or []:
         timeline = [c for c in (scene.get("timeline") or []) if isinstance(c, dict)]
-        designed = any(
-            isinstance(ca, dict) and isinstance(ca.get("sit"), dict)
-            for cut in timeline for ca in (cut.get("actors") or [])
-        ) or any(
-            isinstance(fit_in.get(str(cut.get("cutId") or "")), dict)
-            and isinstance(fit_in[str(cut.get("cutId") or "")].get("collision"), dict)
-            for cut in timeline
-        )
+        designed = _scene_designed(scene, fit_in)
         if collision_on and not designed:
             scenes_out.append(_scene_view(pid, scene))
             try:
@@ -3150,6 +3412,8 @@ def previz_view(owner: str, pid: str, plan: dict) -> dict:
                 "url": _presign_video(str(rec.get("key") or "")),
                 "seconds": rec.get("seconds"),
             }
+            if rec.get("stale"):
+                recordings_out[seg_id]["stale"] = True  # 작업 200: 장면을 고친 뒤 다시 녹화해야 하는 구간
         else:
             recordings_out[seg_id] = {"status": "none", "url": "", "seconds": None}
             recorded_all = False
@@ -3181,6 +3445,19 @@ def previz_view(owner: str, pid: str, plan: dict) -> dict:
     }
     if previz.get("posesStale"):
         out["posesStale"] = True  # 작업 162: 연기 다시 읽기 뒤 [포즈 다시 맞추기] 안내(없으면 키 없음 — 지금 모양)
+    # 작업 200: 다시 녹화해야 하는 구간(장면 순서)·직접 고친 카메라 경고. 없으면 키 없음(지금 모양).
+    stale = set(stale_segments(previz))
+    stale_ids = [str(seg.get("id") or "") for seg in segments if str(seg.get("id") or "") in stale]
+    if stale_ids:
+        out["staleSegments"] = stale_ids
+    warnings: dict[str, list[str]] = {}
+    for scene in scenes_out:
+        try:
+            warnings.update(manual_warnings(scene))
+        except Exception as exc:  # noqa: BLE001 — 경고 계산 실패는 보기를 막지 않는다.
+            log.warning("vnew.previz.manual_warnings_failed err=%s", str(exc)[:150])
+    if warnings:
+        out["manualWarnings"] = warnings
     if collision_on:
         out["collision"] = collision_out
     return out

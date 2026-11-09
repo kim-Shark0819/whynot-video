@@ -66934,6 +66934,653 @@ def check_vnew_model_notes_ui_199() -> None:
            "(mu-f)CSS · LF")
 
 
+# ---------------------------------------------------------------- 작업 200: 프리비즈 직접 고친 값이 실제로 간다
+
+# test3 실측 계획(읽기 전용). 있으면 13컷 전체 왕복(t2-f)을 더 본다 — 없으면 그 묶음만 WARN 으로 건너뛴다.
+_T200_SNAPSHOT = Path("C:/dev/ai/.claude-helpers/t3plan184.json")
+_T200_LOC = "Outdoors by a low metal railing with apartment buildings in the background"
+
+
+def _t200_plan() -> dict:
+    """t3plan184 에서 자른 계획: 방 12×8×3 · 난간(shared_rail)·다리·주차 기둥·가게 앞 · 여의준/범건우(둘 다 난간에 앉음) ·
+    컷 cut-04·05·06(실측 카메라·자리, 소수 4자리) · 구간 seg1(cut-04·05)·seg2(cut-06) 녹화 있음 · 승인됨."""
+    def prop(pid, shape, size, pos, sittable=False, label=""):
+        item = {"id": pid, "labelKo": label, "labelEn": "", "shape": shape, "size": size, "pos": pos, "rotY": 0.0, "color": "#34383c"}
+        if sittable:
+            item["sittable"] = True
+        return item
+
+    def sat(aid, pos, facing, yaw, pitch, gesture, target):
+        return {"id": aid, "pos": pos, "facingDeg": facing, "pose": "sit", "speaking": False, "sitOn": "shared_rail",
+                "sit": {"propId": "shared_rail", "hipY": 0.84, "legPitchDeg": pitch, "legYawDeg": yaw},
+                "gesture": gesture, "gestureTarget": target}
+
+    scene = {
+        "version": 1, "locationId": "loc_d3c2d96f",
+        "room": {"width": 12.0, "depth": 8.0, "height": 3.0, "floorColor": "#919598",
+                 "walls": {side: {"color": "#cfcfcf", "openings": []} for side in ("north", "east", "south", "west")}},
+        "light": {"kind": "sun", "from": [-3.0, 7.0, 5.0], "to": [-0.6, 0.8, -0.8], "color": "#eff6ff", "intensity": 1.2, "labelKo": "빛"},
+        "props": [prop("shared_rail", "box", [2.2, 0.12, 0.18], [-0.6, 0.78, -0.8], True, "난간"),
+                  prop("shared_left_leg", "cylinder", [0.1, 0.72, 0.1], [-1.65, 0.36, -0.8], True),
+                  prop("shared_right_leg", "cylinder", [0.1, 0.72, 0.1], [0.45, 0.36, -0.8], True),
+                  prop("parking_post", "cylinder", [0.12, 0.9, 0.12], [4.3, 0.45, 2.5], True, "주차 기둥"),
+                  prop("store_front", "box", [9.0, 2.7, 0.18], [-0.7, 1.35, 3.8], False, "가게 앞")],
+        "actors": [{"id": "uijun", "name": "여의준", "color": "#4363d8", "hairColor": "#e8cf7a", "heightM": 1.76},
+                   {"id": "geonu", "name": "범건우", "color": "#f58231", "hairColor": "#1a1a1a", "heightM": 1.91}],
+        "timeline": [
+            {"cutId": "cut-04", "start": 0.0, "end": 4.0,
+             "camera": {"pos": [-0.6003, 1.6448, 1.4967], "target": [-0.5827, 1.5742, 0.4994], "fov": 22.6},
+             "actors": [sat("uijun", [-0.88, 0.0, -0.8], 90.0, 0.0, 45, "look_up", "geonu"),
+                        sat("geonu", [-0.32, 0.0, -0.8], 270.0, 0.0, 30, "hand_on_other_cheek", "uijun")]},
+            {"cutId": "cut-05", "start": 4.0, "end": 8.0,
+             "camera": {"pos": [-0.3198, 1.7031, 1.3933], "target": [-0.2608, 1.6422, 0.3969], "fov": 15.9},
+             "actors": [sat("uijun", [-0.9798, 0.0, -0.8059], 90.0, 0.0, 45, "look_down", "geonu"),
+                        sat("geonu", [-0.32, 0.0, -0.8], 269.49, 180.0, 30, "both_hands_other_cheeks", "uijun")]},
+            {"cutId": "cut-06", "start": 8.0, "end": 11.0,
+             "camera": {"pos": [-0.8796, 1.6702, 1.0293], "target": [-0.7726, 1.5701, 0.0401], "fov": 15.9},
+             "actors": [sat("uijun", [-0.88, 0.0, -0.8], 88.1, 0.0, 45, "look_up", "geonu"),
+                        sat("geonu", [-0.0714, 0.0, -0.7731], 270.0, 0.0, 30, None, "uijun")]},
+        ],
+        "notesKo": "",
+    }
+    grammar05 = {"mainSubject": "범건우", "shotSize": "MCU", "shotType": "clean_single", "vantage": "side", "faceTurn": "screen_left",
+                 "cameraHeight": "eye", "headTopY": 0.13, "subjectX": 0.38, "others": [],
+                 "actions": [{"name": "범건우", "gesture": "both_hands_other_cheeks", "target": "여의준"},
+                             {"name": "여의준", "gesture": "look_down", "target": "범건우"}]}
+    fit = {cid: {"match": 0.95, "method": "grammar", "lens": lens, "distanceM": 1.0, "collision": {"fixes": [], "unresolved": []}}
+           for cid, lens in (("cut-04", "35mm"), ("cut-05", "50mm"), ("cut-06", "50mm"))}
+    fit["cut-05"]["pushInTo"] = "ECU"
+    root = "users/tester/video/prj_t200/vnew/previz/2"
+    return {
+        "script": {"status": "ready", "setting": {"locationEn": _T200_LOC}, "entries": []},
+        "conti": {"status": "ready",
+                  "cuts": [{"id": cid, "no": no, "seconds": sec, "panels": [no], "locationEn": _T200_LOC, "characters": [],
+                            "dialogueKo": "", "situationKo": "", "shotKo": "", "cameraEn": "", "promptEn": "x"}
+                           for cid, no, sec in (("cut-04", 1, 4), ("cut-05", 2, 4), ("cut-06", 3, 3))],
+                  "segments": [{"id": "seg1", "cutIds": ["cut-04", "cut-05"], "seconds": 8},
+                               {"id": "seg2", "cutIds": ["cut-06"], "seconds": 3}]},
+        "previz": {"status": "ready", "error": "", "model": "x", "revision": 2, "approved": True, "approvedForced": None,
+                   "scenes": [scene], "fit": fit, "panelShots": {}, "grammarOverrides": {},
+                   "panelGrammar": {"cut-05": {"hash": "h", "grammar": grammar05}},
+                   "recordings": {"seg1": {"status": "ready", "key": root + "/seg1.mp4", "seconds": 8.0},
+                                  "seg2": {"status": "ready", "key": root + "/seg2.mp4", "seconds": 3.0}},
+                   "task": {"status": "done", "startedAt": None, "id": None}, "shotBrief": {"status": "ready", "updatedAt": "t"}},
+    }
+
+
+# 렌더러 하네스(node): vnew-previz.js 를 임시 .mjs 로 복사(three = 파일 URL)해 PrevizScene 을 내보내고, 장면마다 컷 시작 시각으로
+# update 해 그린 카메라(위치·fov·roll = lookAt 만 한 카메라와의 각도·물린 거리)와 인물(자리·몸 방향·보임)을 돌려준다.
+_T200_RUNNER = r"""
+globalThis.window = {};
+const THREE = await import(process.argv[2]);
+const fs = await import('node:fs');
+const mod = await import(new URL('./previz200.mjs', import.meta.url));
+const cases = JSON.parse(fs.readFileSync(new URL('./cases.json', import.meta.url), 'utf8'));
+const out = {};
+for (const [name, c] of Object.entries(cases)) {
+  const sc = new mod.PrevizScene(c.scene, null, null);
+  const cam = new THREE.PerspectiveCamera(50, 16 / 9, 0.1, 200);
+  sc.update(c.t + 0.001, cam);
+  const cut = sc._cutAt(c.t + 0.001);
+  const ref = new THREE.PerspectiveCamera(50, 16 / 9, 0.1, 200);
+  ref.position.copy(cam.position);
+  ref.lookAt(new THREE.Vector3(...cut.camera.target));
+  const actors = {};
+  for (const [id, e] of Object.entries(sc.actors)) {
+    actors[id] = { pos: e.mannequin.group.position.toArray(), rotY: e.mannequin.group.rotation.y * 180 / Math.PI, visible: e.mannequin.group.visible };
+  }
+  out[name] = { pos: cam.position.toArray(), fov: cam.fov, roll: cam.quaternion.angleTo(ref.quaternion) * 180 / Math.PI,
+                pullback: sc.cameraPullback, cutId: cut.cutId, actors };
+}
+console.log(JSON.stringify(out));
+"""
+
+
+def _t200_render(cases: dict) -> tuple[dict, str]:
+    """렌더러를 node 로 돌린다(타임아웃 60초). (결과, 오류). node 가 없으면 ({}, "")."""
+    node = shutil.which("node")
+    if not node:
+        return {}, ""
+    src = (PUBLIC / "vnew-previz.js").read_text(encoding="utf-8")
+    line = 'import * as THREE from "/vendor/three/three.module.min.js?v=__ASSET_VERSION__";'
+    three = (PUBLIC / "vendor" / "three" / "three.module.min.js").resolve().as_uri()
+    if line not in src:
+        return {}, "vnew-previz.js 의 three import 줄을 찾지 못했습니다"
+    work = Path(tempfile.mkdtemp(prefix="vpoc_t200_"))
+    try:
+        (work / "previz200.mjs").write_text(src.replace(line, f'import * as THREE from "{three}";') + "\nexport { PrevizScene };\n",
+                                            encoding="utf-8")
+        (work / "cases.json").write_text(json.dumps(cases, ensure_ascii=False), encoding="utf-8")
+        (work / "run.mjs").write_text(_T200_RUNNER, encoding="utf-8")
+        try:
+            result = subprocess.run([node, str(work / "run.mjs"), three], capture_output=True, text=True, encoding="utf-8", timeout=60)
+        except subprocess.TimeoutExpired:
+            return {}, "node 렌더러 검사가 60초 안에 끝나지 않았습니다"
+        if result.returncode != 0:
+            return {}, f"node 실패: {(result.stderr or '').strip()[:600]}"
+        return json.loads(result.stdout), ""
+    finally:
+        shutil.rmtree(work, ignore_errors=True)
+
+
+def _t200_js_function(src: str, name: str) -> str:
+    """vnew.js 에서 '  function name(' 부터 그 함수 끝('\\n  }\\n')까지."""
+    start = src.find(f"\n  function {name}(")
+    if start < 0:
+        return ""
+    end = src.find("\n  }\n", start + 1)
+    return src[start:end + 4] if end > 0 else ""
+
+
+def check_vnew_previz_edits_200() -> None:
+    """작업 200 — 프리비즈에서 사용자가 고친 카메라·인물이 저장 → 보기 → 렌더러 → 녹화 → 생성 참고 영상까지 그대로 간다.
+
+    (t2-a) 범위: PUT fov 8~120(설계 정리는 20~90 그대로) · lensMm(풀프레임 환산 → fov, 6~144mm) · 프리셋 6개 · roll ±45 ·
+           직접 놓은 카메라만 방 + 3m 로 자름 · manual 표시는 참일 때만
+    (t2-b) 고친 값 왕복(test3 자른 fixture, cut-05): 카메라 x +1m · 바라보는 곳 → 범건우 · fov 20→15 · 90→110 · 여의준 x +0.5m ·
+           방향 +90° 가 PUT → 저장 → 보기 → node 렌더러(컷 시작)에서 그대로 · 서버가 manual 표시 · 다른 컷은 그대로 ·
+           roll · 인물에 붙은 직접 놓은 카메라는 물리지 않음(표시 없는 카메라는 151 처럼 물림) · 경고 문구
+    (t2-c) manual 은 계산기(place_cut·_place_cameras)·배우 조정(cheat)·얼굴 방향·보정(밀기·좌석 안쪽)·받침·연기·포즈 다시 맞추기가
+           바꾸지 않고, 표시 없는 값은 지금처럼 바뀐다 · 다시 만들기가 manual 을 되살림 · 직접 놓은 카메라는 70% 관문에서 뺌
+    (t2-d) 녹화 stale: 고친 컷의 구간만 stale · editRev 키(-e1) · 보기 staleSegments · 다시 녹화하면 풀림 · 렌더 중 또 고치면 stale
+    (t2-e) 생성: stale 이면 409 PrevizStale "프리비즈를 다시 녹화해야 합니다." · 다시 녹화하면 그 관문 통과 · 테이크 @Video1 은 새 키 ·
+           previz gen 은 고친 뒤 stale
+    (t2-f) test3 스냅숏 13컷(있으면): 그대로 저장하면 fov·fit·녹화 그대로 · cut-05 만 고치면 seg2 만 stale
+    (t2-g) 옛 계획 그대로: 표시 없는 계획 보기·저장 키·gen stale·렌더러 물림이 지금과 같다
+    (t2-h) 화면: node --check · 렌즈/화각 함수 · 다시 녹화할 구간 · 동작 목록 = GESTURES · 배선 문자열 · LF
+    """
+    import copy as _copy  # noqa: PLC0415
+    import math as _math  # noqa: PLC0415
+    import traceback as _tb  # noqa: PLC0415
+
+    sys.path.insert(0, str(ROOT / "app"))
+    bad: list[str] = []
+    seen: set[str] = set()
+    node = shutil.which("node")
+
+    def expect(group: str, got, want, what: str) -> None:
+        seen.add(group)
+        if got != want:
+            bad.append(f"({group}) {what}\n      결과 {got!r}\n      기대 {want!r}")
+
+    from src.vnew import generate as genmod  # noqa: PLC0415
+    from src.vnew import plan as planmod  # noqa: PLC0415
+    from src.vnew import previz as pvmod  # noqa: PLC0415
+    from src.vnew import previz_camera as pcam  # noqa: PLC0415
+    from src.vnew import previz_collision as pcol  # noqa: PLC0415
+    from src.vnew import previz_grammar as pgram  # noqa: PLC0415
+    from src.vnew import previz_schema as pschema  # noqa: PLC0415
+    from src.vnew import previz_support as psup  # noqa: PLC0415
+    from src.vpoc.errors import VpocError  # noqa: PLC0415
+
+    fake = _FakeCharStore()
+    saved = {"pv": pvmod.STORE, "plan": planmod.STORE}
+    pvmod.STORE = fake
+    planmod.STORE = fake
+    owner = "tester"
+    counter = {"n": 0}
+
+    def seed(plan_data: dict) -> str:
+        counter["n"] += 1
+        pid = f"prj_t200_{counter['n']}"
+        planmod.load_or_create(owner, pid)
+
+        def mut(data):
+            for key, value in _copy.deepcopy(plan_data).items():
+                data[key] = value
+
+        planmod.mutate_plan(owner, pid, mut)
+        return pid
+
+    def stored(pid):
+        return planmod.load_plan(owner, pid)[0]
+
+    def view(pid):
+        return planmod._previz_view(owner, pid, stored(pid))  # noqa: SLF001
+
+    def cut_of(scenes, cid):
+        return next(c for s in scenes for c in s["timeline"] if c["cutId"] == cid)
+
+    def actor_of(cut, aid):
+        return next(a for a in cut["actors"] if a["id"] == aid)
+
+    def r3(values):
+        return [round(float(v), 3) for v in values]
+
+    try:
+        # ================= (t2-a) 범위 =================
+        try:
+            room = {"width": 12.0, "depth": 8.0, "height": 3.0}
+
+            def cam(raw, user=True):
+                return pschema._normalize_camera(raw, room, user)  # noqa: SLF001
+
+            base = {"pos": [0, 1.5, 2], "target": [0, 1.5, 0]}
+            expect("t2-a", [cam(dict(base, fov=f))["fov"] for f in (5, 8, 15, 110, 120, 130)], [8.0, 8.0, 15.0, 110.0, 120.0, 120.0],
+                   "PUT fov 범위 8~120")
+            expect("t2-a", [cam(dict(base, fov=f), False)["fov"] for f in (9.4, 15, 110)], [20.0, 20.0, 90.0],
+                   "설계(Astra) 정리는 지금처럼 20~90")
+            fov50 = cam(dict(base, fov=60, lensMm=50))
+            expect("t2-a", [fov50["lensMm"], abs(fov50["fov"] - 22.9) < 0.05, fov50["fov"] == pschema._round(pschema.fov_from_lens_mm(50))],  # noqa: SLF001
+                   [50.0, True, True], "lensMm 50 → 세로 화각 2·atan(10.125/50) ≈ 22.9°(fov 보다 렌즈가 먼저)")
+            expect("t2-a", [cam(dict(base, lensMm=3))["lensMm"], cam(dict(base, lensMm=300))["lensMm"],
+                            8.0 <= cam(dict(base, lensMm=300))["fov"] <= 120.0, list(pschema.LENS_PRESETS_MM),
+                            [8.0 <= pschema.fov_from_lens_mm(mm) <= 120.0 for mm in pschema.LENS_PRESETS_MM],
+                            round(pschema.lens_mm_from_fov(pschema.fov_from_lens_mm(85)), 6)],
+                   [6.0, 144.0, True, [18, 24, 35, 50, 85, 135], [True] * 6, 85.0],
+                   "lensMm 6~144 로 자름 · 프리셋 18/24/35/50/85/135 모두 fov 범위 안 · fov ↔ mm 왕복")
+            expect("t2-a", [cam(dict(base, roll=60)).get("roll"), cam(dict(base, roll=-60)).get("roll"), "roll" in cam(dict(base, roll=0)),
+                            "roll" in cam(dict(base, roll=30), False), "lensMm" in cam(dict(base, lensMm=50), False)],
+                   [45.0, -45.0, False, False, False], "roll ±45 · 0 이면 키 없음 · 설계 정리는 lensMm·roll 을 받지 않음")
+            far = {"pos": [100, 50, -100], "target": [-100, -5, 100], "fov": 40}
+            expect("t2-a", [cam(dict(far, manual=True))["pos"], cam(dict(far, manual=True))["target"], cam(dict(far, manual=True)).get("manual"),
+                            cam(far)["pos"], "manual" in cam(far)],
+                   [[9.0, 6.0, -7.0], [-9.0, 0.05, 7.0], True, [100.0, 50.0, -100.0], False],
+                   "직접 놓은 카메라만 방(12×8×3) + 3m 로 자름 · 표시 없는 카메라는 지금처럼 그대로")
+            norm_actor = pschema._normalize_cut_actors([{"id": "a", "pos": [0, 0, 0], "manual": True}, {"id": "b", "pos": [0, 0, 0]}],  # noqa: SLF001
+                                                       ["a", "b"], room)
+            expect("t2-a", [norm_actor[0].get("manual"), "manual" in norm_actor[1]], [True, False], "인물 manual 은 참일 때만 남음")
+        except Exception as exc:  # noqa: BLE001
+            bad.append("(t2-a) 예외: " + repr(exc) + "\n" + _tb.format_exc()[:1500])
+
+        # ================= (t2-b) 고친 값 왕복 =================
+        render_cases: dict = {}
+        render_want: dict = {}
+        try:
+            plan0 = _t200_plan()
+            geonu05 = actor_of(cut_of(plan0["previz"]["scenes"], "cut-05"), "geonu")
+
+            def edit_cam(key, fn):
+                def apply(c):
+                    c["camera"][key] = fn(c["camera"][key])
+                return apply
+
+            edits = [
+                ("campos", [edit_cam("pos", lambda p: [p[0] + 1.0, p[1], p[2]])]),
+                ("target", [edit_cam("target", lambda _t: [geonu05["pos"][0], 1.6, geonu05["pos"][2]])]),
+                ("fov15", [edit_cam("fov", lambda _f: 20), edit_cam("fov", lambda _f: 15)]),
+                ("fov110", [edit_cam("fov", lambda _f: 90), edit_cam("fov", lambda _f: 110)]),
+                ("apos", [lambda c: actor_of(c, "uijun").__setitem__("pos", [actor_of(c, "uijun")["pos"][0] + 0.5, 0.0,
+                                                                              actor_of(c, "uijun")["pos"][2]])]),
+                ("facing", [lambda c: actor_of(c, "uijun").__setitem__("facingDeg", actor_of(c, "uijun")["facingDeg"] + 90.0)]),
+            ]
+            for name, steps in edits:
+                pid = seed(plan0)
+                before_other = {cid: _copy.deepcopy(cut_of(view(pid)["scenes"], cid)) for cid in ("cut-04", "cut-06")}
+                for step in steps:
+                    scenes_put = _copy.deepcopy(view(pid)["scenes"])
+                    step(cut_of(scenes_put, "cut-05"))
+                    sent = _copy.deepcopy(cut_of(scenes_put, "cut-05"))
+                    pvmod.update_scenes(owner, pid, {"scenes": scenes_put})
+                st_cut = cut_of(stored(pid)["previz"]["scenes"], "cut-05")
+                vw = view(pid)
+                vw_cut = cut_of(vw["scenes"], "cut-05")
+                cam_keys = ("pos", "target", "fov")
+                got_cam = [r3(st_cut["camera"][k]) if k != "fov" else st_cut["camera"]["fov"] for k in cam_keys]
+                want_cam = [r3(sent["camera"][k]) if k != "fov" else float(sent["camera"]["fov"]) for k in cam_keys]
+                expect("t2-b", [name, got_cam, [vw_cut["camera"][k] for k in cam_keys] == [st_cut["camera"][k] for k in cam_keys]],
+                       [name, want_cam, True], "PUT → 저장 → 보기: 카메라 pos·target·fov 가 보낸 값 그대로(소수 3자리)")
+                ua_sent, ua_st, ua_vw = actor_of(sent, "uijun"), actor_of(st_cut, "uijun"), actor_of(vw_cut, "uijun")
+                expect("t2-b", [name, r3(ua_st["pos"]), ua_st["facingDeg"], r3(ua_vw["pos"]), ua_vw["facingDeg"]],
+                       [name, r3(ua_sent["pos"]), round(float(ua_sent["facingDeg"]), 3), r3(ua_sent["pos"]), round(float(ua_sent["facingDeg"]), 3)],
+                       "PUT → 저장 → 보기: 여의준 자리·방향 그대로(보기 보정이 옮기지 않음)")
+                cam_edit = name in ("campos", "target", "fov15", "fov110")
+                expect("t2-b", [name, bool(st_cut["camera"].get("manual")), bool(ua_st.get("manual")),
+                                "manual" in actor_of(st_cut, "geonu")],
+                       [name, cam_edit, not cam_edit, False], "서버가 바뀐 값에만 manual 표시(카메라 또는 그 인물)")
+                expect("t2-b", [name, pvmod._sig({cid: cut_of(vw["scenes"], cid) for cid in ("cut-04", "cut-06")}) == pvmod._sig(before_other)],  # noqa: SLF001
+                       [name, True], "고치지 않은 컷(cut-04·06)은 보기 그대로")
+                fit05 = (stored(pid)["previz"].get("fit") or {}).get("cut-05") or {}
+                if cam_edit:
+                    want_lens = f"{int(round(pschema.lens_mm_from_fov(float(st_cut['camera']['fov']))))}mm"
+                    expect("t2-b", [name, fit05.get("method"), fit05.get("lens"), "pushInTo" in fit05, isinstance(fit05.get("match"), float)],
+                           [name, "manual", want_lens, False, True],
+                           "직접 놓은 카메라 컷 fit: method manual · 렌즈(풀프레임 환산)를 그 화각으로 · pushInTo 뗌 · 일치도 다시 잼")
+                if name == "facing":
+                    yaw = float((ua_vw.get("sit") or {}).get("legYawDeg") or 0.0)
+                    diff = abs((float(ua_vw["facingDeg"]) - yaw + 180.0) % 360.0 - 180.0)
+                    expect("t2-b", [diff <= 90.0 + 1e-6, yaw != 0.0], [True, True],
+                           "앉은 인물 방향 +90: 보기의 다리 방향이 따라와 몸통이 고친 방향까지 돈다(±90 안)")
+                render_cases[name] = {"scene": vw["scenes"][0], "t": vw_cut["start"]}
+                render_want[name] = {"pos": vw_cut["camera"]["pos"], "fov": vw_cut["camera"]["fov"],
+                                     "uijun": [ua_vw["pos"][0], 0.0, ua_vw["pos"][2]],
+                                     "legYaw": float((ua_vw.get("sit") or {}).get("legYawDeg") or 0.0)}
+            # roll · 인물에 붙은 카메라(manual 이면 물리지 않음, 아니면 151 처럼 물림) · 경고 문구
+            pid_r = seed(plan0)
+            scenes_r = _copy.deepcopy(view(pid_r)["scenes"])
+            c05 = cut_of(scenes_r, "cut-05")
+            c05["camera"]["roll"] = 30
+            c05["camera"]["manual"] = True
+            c06 = cut_of(scenes_r, "cut-06")
+            head = actor_of(c06, "uijun")["pos"]
+            c06["camera"] = {"pos": [head[0], 1.45, head[2] + 0.05], "target": [head[0], 1.45, head[2] - 2.0], "fov": 40, "manual": True}
+            pvmod.update_scenes(owner, pid_r, {"scenes": scenes_r})
+            vw_r = view(pid_r)
+            expect("t2-b", [cut_of(vw_r["scenes"], "cut-05")["camera"].get("roll"),
+                            any("너무 가깝습니다" in t for t in (vw_r.get("manualWarnings") or {}).get("cut-06") or []),
+                            "cut-05" in (vw_r.get("manualWarnings") or {})],
+                   [30.0, True, False], "roll 저장 · 인물 몸에 붙은 직접 놓은 카메라는 보기 경고(manualWarnings) · 문제없는 컷은 경고 없음")
+            wall_scene = _copy.deepcopy(vw_r["scenes"][0])
+            cut_of([wall_scene], "cut-04")["camera"] = {"pos": [5.95, 1.5, 0.0], "target": [0, 1.5, 0], "fov": 40, "manual": True}
+            cut_of([wall_scene], "cut-05")["camera"] = {"pos": [4.3, 0.6, 2.5], "target": [0, 1.5, 0], "fov": 40, "manual": True}
+            warn_w = pvmod.manual_warnings(wall_scene)
+            expect("t2-b", [warn_w.get("cut-04"), any("주차 기둥" in t for t in warn_w.get("cut-05") or [])],
+                   [["카메라가 벽 안에 있습니다."], True], "벽 면에 붙은 카메라 = '카메라가 벽 안에 있습니다.' · 소품 안 카메라 = 그 소품 이름")
+            render_cases["roll"] = {"scene": vw_r["scenes"][0], "t": cut_of(vw_r["scenes"], "cut-05")["start"]}
+            render_cases["close_manual"] = {"scene": vw_r["scenes"][0], "t": cut_of(vw_r["scenes"], "cut-06")["start"]}
+            close_plain = _copy.deepcopy(vw_r["scenes"][0])
+            cut_of([close_plain], "cut-06")["camera"].pop("manual")
+            render_cases["close_plain"] = {"scene": close_plain, "t": cut_of(vw_r["scenes"], "cut-06")["start"]}
+            render_want["close"] = cut_of(vw_r["scenes"], "cut-06")["camera"]["pos"]
+        except Exception as exc:  # noqa: BLE001
+            bad.append("(t2-b) 예외: " + repr(exc) + "\n" + _tb.format_exc()[:2000])
+
+        if not node:
+            warn("node 가 없어 작업 200 렌더러 왕복 검사(t2-b node · t2-h 화면 함수)를 건너뜁니다")
+        elif render_cases:
+            got_r, err_r = _t200_render(render_cases)
+            if err_r:
+                bad.append(f"(t2-b) {err_r}")
+            else:
+                for name, want in render_want.items():
+                    if name == "close":
+                        continue
+                    g = got_r.get(name) or {}
+                    ua = (g.get("actors") or {}).get("uijun") or {}
+                    expect("t2-b", [name, g.get("cutId"), r3(g.get("pos") or [0, 0, 0]), round(float(g.get("fov") or 0), 3),
+                                    round(float(g.get("pullback") or 0), 3), r3(ua.get("pos") or [0, 0, 0]),
+                                    round(float(ua.get("rotY") or 0) % 360.0, 1)],
+                           [name, "cut-05", r3(want["pos"]), round(float(want["fov"]), 3), 0.0, r3(want["uijun"]),
+                            round(want["legYaw"] % 360.0, 1)],
+                           "node 렌더러(컷 시작): 카메라 위치·fov·물림 0·여의준 자리·다리 방향이 보기 값 그대로")
+                g_roll = got_r.get("roll") or {}
+                g_cm, g_cp = got_r.get("close_manual") or {}, got_r.get("close_plain") or {}
+                expect("t2-b", [round(float(g_roll.get("roll") or 0), 1), round(float(g_cm.get("pullback") or 0), 3),
+                                r3(g_cm.get("pos") or [0, 0, 0]), float(g_cp.get("pullback") or 0) > 0.0],
+                       [30.0, 0.0, r3(render_want["close"]), True],
+                       "roll 30° 가 그려짐 · 직접 놓은 카메라는 인물에 붙어도 물리지 않음 · 표시 없는 카메라는 151 처럼 물림")
+
+        # ================= (t2-c) manual 은 계산기·보정·받침·연기·포즈가 바꾸지 않는다 =================
+        try:
+            room6 = {"width": 6.0, "depth": 6.0, "height": 3.0}
+            g_c = pgram.normalize_grammar({"mainSubject": "B", "shotType": "clean_single", "shotSize": "MCU", "vantage": "3q",
+                                           "headTopY": 0.1, "subjectX": 0.5, "faceTurn": "toward_camera"})
+            acts = [{"id": "aB", "name": "B", "heightM": 1.8, "foot": [0.0, 0.0, -1.0], "pose": "stand", "facingDeg": 0.0},
+                    {"id": "aY", "name": "Y", "heightM": 1.72, "foot": [0.6, 0.0, -0.4], "pose": "stand", "facingDeg": 180.0}]
+            free = pcam.place_cut(_copy.deepcopy(g_c), _copy.deepcopy(acts), room6, 1, min_match=0.7)
+            locked_acts = [dict(a, locked=True) for a in acts]
+            held = pcam.place_cut(_copy.deepcopy(g_c), _copy.deepcopy(locked_acts), room6, 1, min_match=0.7)
+            by_free = {a["id"]: a for a in free["actors"]}
+            by_held = {a["id"]: a for a in held["actors"]}
+            expect("t2-c", [[c.get("actor") for c in free["cheats"]], by_free["aY"]["foot"] != acts[1]["foot"], by_free["aB"]["facingDeg"] != 0.0],
+                   [["aY"], True, True], "표시 없는 인물: 배우 조정(cheat)이 옮기고 얼굴 방향(faceTurn)이 바꾼다(지금처럼)")
+            expect("t2-c", [held["cheats"], by_held["aY"]["foot"], by_held["aB"]["facingDeg"], sorted(by_held)],
+                   [[], [0.6, 0.0, -0.4], 0.0, ["aB", "aY"]], "직접 놓은 인물(locked): 옮기지도 숨기지도 돌리지도 않는다")
+
+            plan_c = _t200_plan()
+            scene_c = plan_c["previz"]["scenes"][0]
+            grammar_c = {"cut-05": pgram.normalize_grammar(plan_c["previz"]["panelGrammar"]["cut-05"]["grammar"])}
+            for manual in (False, True):
+                sc = _copy.deepcopy(scene_c)
+                cut05 = cut_of([sc], "cut-05")
+                cut05["camera"] = {"pos": [3.0, 1.0, 3.0], "target": [0.0, 1.0, 0.0], "fov": 40.0}
+                if manual:
+                    cut05["camera"]["manual"] = True
+                fit_c = pvmod._place_cameras(owner, "p", [sc], [{"cuts": []}], grammar_c, {})  # noqa: SLF001
+                expect("t2-c", [manual, cut05["camera"]["pos"] == [3.0, 1.0, 3.0], fit_c["cut-05"]["method"]],
+                       [manual, manual, "manual" if manual else "grammar"],
+                       "_place_cameras: 직접 놓은 카메라는 그대로(method manual), 표시 없는 카메라는 계산기가 다시 놓는다")
+
+            def collide(manual):
+                sc = _copy.deepcopy(scene_c)
+                c4 = cut_of([sc], "cut-04")
+                c4["actors"] = [{"id": "uijun", "pos": [4.3, 0.0, 2.5], "facingDeg": 0.0, "pose": "stand", "gesture": None, "speaking": False},
+                                dict(actor_of(cut_of([scene_c], "cut-04"), "geonu"), pos=[-0.6, 0.0, -0.62])]
+                if manual:
+                    for ca in c4["actors"]:
+                        ca["manual"] = True
+                res = pcol.resolve_cut(sc, c4, log_fixes=False)
+                return c4, res
+
+            c4_free, res_free = collide(False)
+            c4_man, res_man = collide(True)
+            expect("t2-c", [actor_of(c4_free, "uijun")["pos"] != [4.3, 0.0, 2.5], actor_of(c4_free, "geonu")["pos"] != [-0.6, 0.0, -0.62],
+                            sorted({f["actor"] for f in res_free["fixes"]})],
+                   [True, True, ["geonu", "uijun"]], "보정: 표시 없는 인물은 기둥에서 밀리고 좌석 안쪽으로 옮겨진다(지금처럼)")
+            expect("t2-c", [actor_of(c4_man, "uijun")["pos"], actor_of(c4_man, "geonu")["pos"], res_man["fixes"],
+                            {u["actor"]: u["prop"] for u in res_man["unresolved"]}.get("uijun"),
+                            (actor_of(c4_man, "geonu").get("sit") or {}).get("propId")],
+                   [[4.3, 0.0, 2.5], [-0.6, 0.0, -0.62], [], "parking_post", "shared_rail"],
+                   "보정: 직접 놓은 인물은 옮기지 않고(겹침은 unresolved 로 알림) 앉은 모양(sit)만 그 자리에서 다시 잡는다")
+
+            def support(manual):
+                sc = _copy.deepcopy(scene_c)
+                if manual:
+                    actor_of(cut_of([sc], "cut-05"), "uijun")["manual"] = True
+                psup.apply_supports([sc], {"cut-05": {"supports": [
+                    {"name": "여의준", "seen": "visible", "posture": "stand", "supportKind": "none", "contact": "floor", "feet": "floor"}]}})
+                return actor_of(cut_of([sc], "cut-05"), "uijun")
+
+            expect("t2-c", [support(False)["pose"], support(True)["pose"], "support" in support(True)], ["stand", "sit", False],
+                   "받침 맞춤: 표시 없는 인물은 자세가 바뀌고, 직접 고친 인물은 그대로")
+
+            def gestures(manual):
+                sc = _copy.deepcopy(scene_c)
+                ua = actor_of(cut_of([sc], "cut-05"), "uijun")
+                if manual:
+                    ua["manual"] = True
+                pvmod._apply_gestures([sc], [], {"cut-05": {"actions": [{"name": "여의준", "gesture": "nod", "target": "none"}]}}, None)  # noqa: SLF001
+                return ua["gesture"]
+
+            expect("t2-c", [gestures(False), gestures(True)], ["nod", "look_down"], "연기 배정: 표시 없는 인물만 바뀐다")
+
+            plan_p = _t200_plan()
+            c05p = cut_of(plan_p["previz"]["scenes"], "cut-05")
+            actor_of(c05p, "uijun").update({"gesture": "nod", "manual": True})
+            actor_of(c05p, "geonu")["gesture"] = None
+            plan_p["previz"]["panelGrammar"]["cut-05"]["grammar"] = pgram.normalize_grammar(plan_p["previz"]["panelGrammar"]["cut-05"]["grammar"])
+            pid_p = seed(plan_p)
+            pvmod.refresh_poses(owner, pid_p)
+            c05_after = cut_of(stored(pid_p)["previz"]["scenes"], "cut-05")
+            expect("t2-c", [actor_of(c05_after, "uijun").get("gesture"), actor_of(c05_after, "uijun").get("manual"),
+                            actor_of(c05_after, "geonu").get("gesture")],
+                   ["nod", True, "both_hands_other_cheeks"], "[포즈 다시 맞추기]: 직접 고친 인물은 그대로, 나머지는 패널 연기로")
+
+            prev = _copy.deepcopy(plan_c["previz"]["scenes"])
+            pc5 = cut_of(prev, "cut-05")
+            pc5["camera"] = dict(pc5["camera"], manual=True, pos=[1.0, 1.2, 2.0])
+            actor_of(pc5, "uijun").update({"manual": True, "pos": [-1.2, 0.0, -0.8]})
+            actor_of(cut_of(prev, "cut-06"), "geonu").update({"manual": True, "pos": [0.2, 0.0, -0.8]})
+            fresh = _copy.deepcopy(plan_c["previz"]["scenes"])
+            fresh[0]["props"] = [p for p in fresh[0]["props"] if p["id"] != "shared_rail"]
+            count = pvmod._restore_manual(fresh, prev)  # noqa: SLF001
+            f5, f6 = cut_of(fresh, "cut-05"), cut_of(fresh, "cut-06")
+            expect("t2-c", [count, f5["camera"]["pos"], actor_of(f5, "uijun")["pos"], "sit" in actor_of(f5, "uijun"),
+                            actor_of(f6, "geonu")["pos"], actor_of(f5, "geonu")["pos"], "manual" in cut_of(fresh, "cut-04")["camera"]],
+                   [3, [1.0, 1.2, 2.0], [-1.2, 0.0, -0.8], False, [0.2, 0.0, -0.8], [-0.32, 0.0, -0.8], False],
+                   "다시 만들기: 직접 고친 카메라·인물만 같은 컷에 되살림(없어진 소품 sit 은 뗌), 나머지는 새 설계 그대로")
+
+            pv_low = {"scenes": _copy.deepcopy(plan_c["previz"]["scenes"]),
+                      "fit": {"cut-04": {"match": 0.2}, "cut-05": {"match": 0.2}, "cut-06": {"match": 0.9}}}
+            cut_of(pv_low["scenes"], "cut-05")["camera"]["manual"] = True
+            expect("t2-c", [c["cutId"] for c in pvmod._low_match_cuts(pv_low)], ["cut-04"],  # noqa: SLF001
+                   "70% 관문: 직접 놓은 카메라 컷(cut-05)은 세지 않고 표시 없는 낮은 컷만")
+        except Exception as exc:  # noqa: BLE001
+            bad.append("(t2-c) 예외: " + repr(exc) + "\n" + _tb.format_exc()[:2000])
+
+        # ================= (t2-d)(t2-e) 녹화 stale · 생성 =================
+        try:
+            pid_s = seed(_t200_plan())
+            scenes_s = _copy.deepcopy(view(pid_s)["scenes"])
+            cut_of(scenes_s, "cut-06")["camera"]["fov"] = 30
+            pvmod.update_scenes(owner, pid_s, {"scenes": scenes_s})
+            pv_s = stored(pid_s)["previz"]
+            vw_s = view(pid_s)
+            expect("t2-d", [{k: bool(v.get("stale")) for k, v in pv_s["recordings"].items()}, pv_s.get("editRev"), vw_s.get("staleSegments"),
+                            vw_s["recordings"]["seg2"].get("stale"), "stale" in vw_s["recordings"]["seg1"], vw_s["recordedAll"], pv_s["approved"]],
+                   [{"seg1": False, "seg2": True}, 1, ["seg2"], True, False, True, False],
+                   "cut-06(seg2)만 고침 → seg2 녹화만 stale · editRev 1 · 보기 staleSegments · 승인 해제")
+            expect("t2-d", [pvmod.recording_key(owner, "p", 2, "seg2", 1).endswith("/vnew/previz/2/seg2-e1.mp4"),
+                            pvmod.recording_key(owner, "p", 2, "seg2").endswith("/vnew/previz/2/seg2.mp4")],
+                   [True, True], "다시 녹화 키는 -e{editRev}(옛 녹화를 덮지 않음) · 고친 적 없으면 지금 키")
+            plan_s = stored(pid_s)
+            try:
+                genmod.check_preconditions(dict(plan_s, previz=dict(plan_s["previz"], approved=True)), owner)
+                got_err = None
+            except VpocError as err:
+                got_err = [err.kind, err.message, err.status]
+            expect("t2-e", got_err, ["PrevizStale", "프리비즈를 다시 녹화해야 합니다.", 409],
+                   "승인했어도 stale 녹화가 있으면 생성 409 PrevizStale(한국어 문구)")
+            new_key = pvmod.recording_key(owner, pid_s, 2, "seg2", 1)
+
+            def rerecord(data):
+                pv = data["previz"]
+                pv["recordings"]["seg2"] = pvmod._ready_recording(pv, {"editRev": 1}, new_key, 3.0)  # noqa: SLF001
+                pv["approved"] = True
+
+            planmod.mutate_plan(owner, pid_s, rerecord)
+            plan_r = stored(pid_s)
+            try:
+                genmod.check_preconditions(plan_r, owner)
+                after_err = None
+            except VpocError as err:
+                after_err = err.kind
+            takes = genmod._take_units(plan_r)  # noqa: SLF001
+            expect("t2-e", [after_err != "PrevizStale", "staleSegments" in view(pid_s), [k for t in takes for k in t["recKeys"]][-1] == new_key,
+                            pvmod._ready_recording({"editRev": 2}, {"editRev": 1}, "k", 3.0).get("stale")],  # noqa: SLF001
+                   [True, False, True, True],
+                   "다시 녹화하면 stale 관문 통과 · 테이크 @Video1 은 새 녹화 키 · 렌더 중 또 고쳤으면 새 녹화도 stale")
+            gen_old = {"mode": "previz", "previzRevision": 2, "briefUpdatedAt": "t"}
+            expect("t2-e", [genmod._gen_previz_stale(gen_old, plan_r), genmod._gen_previz_stale(dict(gen_old, previzEditRev=1), plan_r),  # noqa: SLF001
+                            genmod._gen_previz_stale(gen_old, _t200_plan())],  # noqa: SLF001
+                   [True, False, False], "previz gen: 고치기 전 gen 은 stale · 고친 판으로 만든 gen 은 아님 · 고친 적 없는 계획은 지금처럼")
+        except Exception as exc:  # noqa: BLE001
+            bad.append("(t2-d) 예외: " + repr(exc) + "\n" + _tb.format_exc()[:2000])
+
+        # ================= (t2-f) test3 스냅숏 13컷 =================
+        if not _T200_SNAPSHOT.exists():
+            warn(f"작업 200: test3 스냅숏({_T200_SNAPSHOT})이 없어 13컷 왕복(t2-f)을 건너뜁니다 — 자른 fixture 검사는 했습니다")
+        else:
+            try:
+                snap = json.loads(_T200_SNAPSHOT.read_text(encoding="utf-8"))
+                pid_f = seed({k: snap[k] for k in ("script", "conti", "previz", "input", "locations") if k in snap})
+                before = stored(pid_f)["previz"]
+                pvmod.update_scenes(owner, pid_f, {"scenes": _copy.deepcopy(view(pid_f)["scenes"])})
+                after = stored(pid_f)["previz"]
+                fovs = lambda pv: [c["camera"]["fov"] for s in pv["scenes"] for c in s["timeline"]]  # noqa: E731
+                expect("t2-f", [fovs(after) == fovs(before), min(fovs(after)) < 20.0, after["fit"] == before["fit"],
+                                after["recordings"] == before["recordings"], "editRev" in after,
+                                '"manual"' in json.dumps(after["scenes"])],
+                       [True, True, True, True, False, False],
+                       "13컷 그대로 저장: fov(9.4~22.6) 그대로 · fit·녹화 그대로 · editRev·manual 없음")
+                scenes_f = _copy.deepcopy(view(pid_f)["scenes"])
+                cut_of(scenes_f, "cut-05")["camera"]["pos"][0] += 1.0
+                pvmod.update_scenes(owner, pid_f, {"scenes": scenes_f})
+                pv_f = stored(pid_f)["previz"]
+                expect("t2-f", [sorted(k for k, v in pv_f["recordings"].items() if v.get("stale")),
+                                sorted(c["cutId"] for s in pv_f["scenes"] for c in s["timeline"] if c["camera"].get("manual")),
+                                (pv_f["fit"].get("cut-05") or {}).get("method"),
+                                sorted({(pv_f["fit"].get(c) or {}).get("method") for c in pv_f["fit"] if c != "cut-05"})],
+                       [["seg2"], ["cut-05"], "manual", ["grammar"]],
+                       "13컷 중 cut-05 카메라만 고침 → seg2 만 stale · cut-05 만 manual · 다른 컷 fit 그대로")
+            except Exception as exc:  # noqa: BLE001
+                bad.append("(t2-f) 예외: " + repr(exc) + "\n" + _tb.format_exc()[:2000])
+
+        # ================= (t2-g) 옛 계획 그대로 =================
+        try:
+            plan_g = _t200_plan()
+            pid_g = seed(plan_g)
+            vw_g = view(pid_g)
+            expect("t2-g", [[k for k in ("staleSegments", "manualWarnings") if k in vw_g], any("stale" in r for r in vw_g["recordings"].values()),
+                            '"manual"' in json.dumps(vw_g["scenes"]), vw_g["lowMatchCuts"]],
+                   [[], False, False, []], "표시 없는 계획 보기: 새 키 없음(staleSegments·manualWarnings·stale·manual)")
+            pvmod.update_scenes(owner, pid_g, {"scenes": _copy.deepcopy(vw_g["scenes"])})
+            pv_g = stored(pid_g)["previz"]
+            specs_g = pvmod._specs_from_scenes(plan_g["previz"]["scenes"])  # noqa: SLF001
+            new_norm = pschema.normalize_scenes(_copy.deepcopy(vw_g["scenes"]), scene_specs=specs_g, user=True)
+            old_norm = pschema.normalize_scenes(_copy.deepcopy(vw_g["scenes"]), scene_specs=specs_g)
+            fov_only = [c["cutId"] for s in old_norm for c in s["timeline"] if c["camera"] != cut_of(new_norm, c["cutId"])["camera"]]
+            for s in old_norm:
+                for c in s["timeline"]:
+                    c["camera"]["fov"] = cut_of(new_norm, c["cutId"])["camera"]["fov"]
+            expect("t2-g", [pv_g["scenes"] == new_norm, old_norm == new_norm, fov_only, pv_g["fit"] == plan_g["previz"]["fit"],
+                            pv_g["recordings"] == plan_g["previz"]["recordings"], "editRev" in pv_g, pv_g["approved"]],
+                   [True, True, ["cut-05", "cut-06"], True, True, False, False],
+                   "그대로 저장: 옛 정리와 같고 다른 것은 20° 미만 fov(15.9)를 자르지 않는 것뿐 · fit·녹화·키 그대로 · 승인 해제는 지금처럼")
+            scene_g = pschema.normalize_scene({"room": {"width": 6, "depth": 6},
+                                               "timeline": [{"cutId": "c1", "camera": {"pos": [0, 1, 3], "fov": 9.4, "lensMm": 50, "roll": 20}}]},
+                                              location_id="x", cut_specs=[{"cutId": "c1", "seconds": 3}])
+            expect("t2-g", sorted(scene_g["timeline"][0]["camera"]), ["fov", "pos", "target"], "설계 정리 카메라 키는 지금 그대로(pos·target·fov)")
+        except Exception as exc:  # noqa: BLE001
+            bad.append("(t2-g) 예외: " + repr(exc) + "\n" + _tb.format_exc()[:2000])
+
+        # ================= (t2-h) 화면 =================
+        try:
+            vjs = (PUBLIC / "vnew.js").read_text(encoding="utf-8")
+            pjs = (PUBLIC / "vnew-previz.js").read_text(encoding="utf-8")
+            labels = re.search(r"var GESTURE_LABELS = \[(.*?)\n  \];", vjs, re.S)
+            keys = re.findall(r'\["([a-z_]*)", "', labels.group(1)) if labels else []
+            expect("t2-h", [sorted(k for k in keys if k), sorted(pschema.GESTURES), keys[:1]], [sorted(pschema.GESTURES), sorted(pschema.GESTURES), [""]],
+                   "동작 목록 = previz_schema.GESTURES 16개 + 없음")
+            wires = {
+                "fov 8~120": "var PREVIZ_FOV_MIN = 8;" in vjs and "var PREVIZ_FOV_MAX = 120;" in vjs,
+                "렌즈 프리셋": "var PREVIZ_LENS_PRESETS = [18, 24, 35, 50, 85, 135];" in vjs,
+                "저장 뒤 그 컷": "if (focus) previzCtl.seek(Number(focus.cut.start) || 0);" in vjs,
+                "④ 다시 녹화": vjs.count("previzApproveAndRecord(!!previz.approvedForced, false, showError") == 2,
+                "⑤ 안내": vjs.count("previzStaleNotice();") == 2 and '"프리비즈를 다시 녹화해야 합니다"' in vjs,
+                "생성 409": 'err.type === "PrevizStale"' in vjs,
+                "저장 안 한 수정": "if (previzDirty) {" in vjs,
+                "렌더러 manual": "if (!cam.manual && volumes.length && viewDir.lengthSq() > 1e-12) {" in pjs,
+                "렌더러 roll": "camera.rotateZ(" in pjs,
+            }
+            expect("t2-h", [k for k, v in wires.items() if not v], [], "화면 배선(범위·프리셋·저장 뒤 그 컷·다시 녹화·⑤ 안내·409·저장 안 함·렌더러)")
+            crlf = [p.name for p in (PUBLIC / "vnew.js", PUBLIC / "vnew-previz.js", ROOT / "tools" / "check_vpoc.py",
+                                     ROOT / "app" / "src" / "vnew" / "previz.py", ROOT / "app" / "src" / "vnew" / "previz_schema.py",
+                                     ROOT / "app" / "src" / "vnew" / "previz_camera.py", ROOT / "app" / "src" / "vnew" / "previz_collision.py",
+                                     ROOT / "app" / "src" / "vnew" / "previz_support.py", ROOT / "app" / "src" / "vnew" / "generate.py")
+                     if b"\r" in p.read_bytes()]
+            expect("t2-h", crlf, [], "고친 파일 LF")
+            if node:
+                for path in (PUBLIC / "vnew.js", PUBLIC / "vnew-previz.js"):
+                    checked = subprocess.run([node, "--check", str(path)], capture_output=True, text=True, encoding="utf-8", timeout=60)
+                    expect("t2-h", [path.name, checked.returncode], [path.name, 0], "node --check")
+                funcs = "".join(_t200_js_function(vjs, n) for n in ("previzFovFromLens", "previzLensFromFov", "previzPendingSegments"))
+                script = funcs + """
+console.log(JSON.stringify({
+  fov: [18, 24, 35, 50, 85, 135].map(previzFovFromLens), mm: previzLensFromFov(previzFovFromLens(50)),
+  pending: previzPendingSegments({segments: [{id: "a"}, {id: "b"}, {id: "c"}],
+    recordings: {a: {status: "ready"}, b: {status: "ready", stale: true}}}).map(function (s) { return s.id; })
+}));
+"""
+                work = Path(tempfile.mkdtemp(prefix="vpoc_t200js_"))
+                try:
+                    (work / "f.js").write_text(script, encoding="utf-8")
+                    res = subprocess.run([node, str(work / "f.js")], capture_output=True, text=True, encoding="utf-8", timeout=60)
+                finally:
+                    shutil.rmtree(work, ignore_errors=True)
+                got_js = json.loads(res.stdout) if res.returncode == 0 else {"err": (res.stderr or "")[:300]}
+                expect("t2-h", got_js, {"fov": [round(pschema.fov_from_lens_mm(mm), 1) for mm in pschema.LENS_PRESETS_MM], "mm": 50,
+                                        "pending": ["b", "c"]},
+                       "화면 렌즈 → 화각(서버와 같은 식) · 왕복 · 다시 녹화할 구간 = 녹화 없음 + stale")
+        except Exception as exc:  # noqa: BLE001
+            bad.append("(t2-h) 예외: " + repr(exc) + "\n" + _tb.format_exc()[:1500])
+    finally:
+        pvmod.STORE = saved["pv"]
+        planmod.STORE = saved["plan"]
+
+    groups = {"t2-a", "t2-b", "t2-c", "t2-d", "t2-e", "t2-g", "t2-h"}
+    if _T200_SNAPSHOT.exists():
+        groups.add("t2-f")
+    if groups - seen and not bad:
+        bad.append(f"검사하지 못한 묶음: {sorted(groups - seen)}")
+    if bad:
+        fail("작업 200 프리비즈 고친 값 검사 실패\n  " + "\n  ".join(bad))
+    else:
+        ok("작업 200 프리비즈 고친 값 (t2-a)fov 8~120·lensMm·roll·방+3m (t2-b)카메라 x+1·바라보는 곳·fov 15/110·인물 x+0.5·방향 +90 "
+           "PUT→저장→보기→node 렌더러 그대로·roll·붙은 카메라 안 물림·경고 (t2-c)계산기·cheat·보정·받침·연기·포즈·다시 만들기가 manual 그대로 "
+           "(t2-d)고친 구간만 stale·-e 키 (t2-e)생성 409 PrevizStale·새 녹화가 @Video1 (t2-f)test3 13컷 (t2-g)옛 계획 그대로 (t2-h)화면·LF")
+
+
 def main() -> int:
     print("== vpoc1 check ==")
     check_compileall()
@@ -67108,6 +67755,7 @@ def main() -> int:
     check_vnew_bg_reference_197()
     check_vnew_model_notes_198()
     check_vnew_model_notes_ui_199()
+    check_vnew_previz_edits_200()
     if not __import__("check_voice_202").check_voice_202(): fail("작업 202 인물 목소리 검사 실패(위 [FAIL] 참고)")
     print()
     if warnings:

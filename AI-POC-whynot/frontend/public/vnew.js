@@ -4725,6 +4725,13 @@
             msg = msg + " 캐릭터 만들기에서 실사 버전을 완성해 주세요.";
           }
           showModalError(msg, isMissing);
+          if (err && err.type === "PrevizStale") {
+            // 작업 200: 고친 장면을 다시 녹화하지 않았다 — 버튼 하나로 ④ 에 가서 다시 녹화.
+            var rerecord = previzRerecordButton();
+            rerecord.addEventListener("click", closeModal);
+            error.appendChild(document.createElement("br"));
+            error.appendChild(rerecord);
+          }
         });
     });
     actions.appendChild(cancelBtn);
@@ -5368,6 +5375,7 @@
   var previzCtl = null; // 현재 화면의 controller
   var previzCutIndex = 0; // 우측 패널이 보여 주는 timeline 컷 인덱스(평탄화)
   var previzRecording = null; // 녹화 진행 상태 {total, done, failed:[], current, aborted}
+  var previzDirty = false; // 작업 200: 편집 패널에서 고치고 아직 [저장]하지 않았다(녹화 전에 저장해야 한다)
 
   function destroyPreviz() {
     if (previzCtl) {
@@ -5392,8 +5400,83 @@
     ["point", "가리키기"],
     ["bow", "숙이기"],
     ["hands_on_knees", "무릎에 손"],
-    ["cover_face", "얼굴 가리기"]
+    ["cover_face", "얼굴 가리기"],
+    // 작업 200: 연기 동작 전부(previz_schema.GESTURES 와 같은 문자열). 설계가 붙인 동작이 "없음"으로 보이지 않게.
+    ["hand_to_own_face", "자기 얼굴에 손"],
+    ["wipe_tears", "눈물 닦기"],
+    ["hand_on_other_cheek", "상대 뺨에 손"],
+    ["both_hands_other_cheeks", "두 손으로 상대 얼굴"],
+    ["hand_on_chest", "가슴에 손"],
+    ["press_hand_to_other_chest", "상대 가슴에 손"],
+    ["lean_in", "다가가기"],
+    ["laugh", "웃기"],
+    ["look_down", "내려다보기"],
+    ["look_up", "올려다보기"],
+    ["nod", "끄덕이기"],
+    ["turn_head_to_other", "상대 쪽 보기"]
   ];
+  // 상대(gestureTarget)가 필요한 동작.
+  var GESTURES_WITH_TARGET = ["hand_on_other_cheek", "both_hands_other_cheeks", "press_hand_to_other_chest", "lean_in", "turn_head_to_other"];
+  /* 작업 200: 카메라 범위·렌즈(previz_schema 와 같은 값). 렌즈는 풀프레임 환산 — 16:9 세로 화각 = 2·atan(10.125 / mm). */
+  var PREVIZ_FOV_MIN = 8;
+  var PREVIZ_FOV_MAX = 120;
+  var PREVIZ_LENS_MIN = 6;
+  var PREVIZ_LENS_MAX = 144;
+  var PREVIZ_LENS_PRESETS = [18, 24, 35, 50, 85, 135];
+  var PREVIZ_ROLL_MAX = 45;
+  var PREVIZ_CAMERA_MARGIN_M = 3;
+  var PREVIZ_ACTOR_WALL_M = 0.2;
+  var PREVIZ_STALE_TEXT = "프리비즈를 다시 녹화해야 합니다";
+  var PREVIZ_DIRTY_TEXT = "저장하지 않은 수정이 있습니다. [저장]을 누른 뒤 녹화해 주세요.";
+
+  function previzFovFromLens(mm) {
+    return Math.round(2 * Math.atan(10.125 / mm) * 180 / Math.PI * 10) / 10;
+  }
+
+  function previzLensFromFov(fov) {
+    return Math.round(10.125 / Math.tan(fov * Math.PI / 360));
+  }
+
+  /* 녹화가 없거나 stale(장면을 고친 뒤 다시 녹화해야 함)인 구간. */
+  function previzPendingSegments(previz) {
+    var recs = (previz || {}).recordings || {};
+    return ((previz || {}).segments || []).filter(function (seg) {
+      var rec = recs[seg.id] || {};
+      return rec.status !== "ready" || !!rec.stale;
+    });
+  }
+
+  /* 승인 → 녹화. all 이면 모든 구간, 아니면 녹화가 없거나 stale 인 구간만(작업 200). 저장 안 한 수정이 있으면 멈춘다. */
+  function previzApproveAndRecord(force, all, showError, onFail) {
+    if (previzDirty) {
+      showError(PREVIZ_DIRTY_TEXT);
+      if (onFail) onFail();
+      return Promise.resolve();
+    }
+    return api("/api/vnew/p/" + encodeURIComponent(state.projectId) + "/previz/approve", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(force ? { force: true } : {})
+    })
+      .then(function (plan) {
+        state.plan = plan;
+        var pv = (state.plan || {}).previz || {};
+        var segs = all ? pv.segments || [] : previzPendingSegments(pv);
+        if (!segs.length) {
+          loadPlan(false);
+          return null;
+        }
+        return recordSegments(segs, showError);
+      })
+      .catch(function (err) {
+        if (onFail) onFail();
+        if (err && err.status === 409) {
+          showError(errMessage(err) || "시점 일치도가 낮은 컷이 있습니다.");
+        } else {
+          showError("승인하지 못했습니다: " + errMessage(err));
+        }
+      });
+  }
 
   /* 모든 장면 timeline 을 평탄화해 [{sceneIndex, cutIndex, cut, scene}] 로. 타임라인 눈금·패널에 쓴다. */
   function flattenCuts(scenes) {
@@ -5980,6 +6063,8 @@
 
     // 타임라인(컷 경계 눈금·컷 번호·대사 말풍선)
     var flat = flattenCuts(scenes);
+    if (!flat[previzCutIndex]) previzCutIndex = 0; // 다시 설계로 컷 수가 줄었으면 처음 컷
+    previzDirty = false; // 새로 그린 장면은 서버 저장본이다
     var timeline = el("div", "vnew-previz-timeline");
     left.appendChild(timeline);
 
@@ -6043,6 +6128,14 @@
         previzCtl = ctl;
         duration = previzCtl.duration || 0;
         buildTimeline();
+        // 작업 200: 다시 그린 뒤(저장 → 다시 불러오기 포함) 패널이 보던 컷의 시작을 그린다 — 저장한 값이 그 컷에 보인다.
+        var focus = flat[previzCutIndex];
+        if (focus) previzCtl.seek(Number(focus.cut.start) || 0);
+        // ⑤ 의 [다시 녹화]로 왔으면 바로 다시 녹화한다(stale·녹화 없는 구간만).
+        if (state.previzRerecord) {
+          state.previzRerecord = false;
+          previzApproveAndRecord(!!previz.approvedForced, false, showError);
+        }
       })
       .catch(function (err) {
         // 모듈 로드 실패(E7)는 그 문구 그대로, 그 밖(텍스처·WebGL 등)은 기존 문구로 보인다.
@@ -6112,6 +6205,7 @@
 
     // --- 우측 편집 패널: 현재 컷의 카메라·인물 ---
     var isEditingPanel = false;
+    var dirtyNote = null; // 작업 200: [저장] 아래 "저장하지 않은 수정" 줄
 
     function renderCutPanel() {
       clear(right);
@@ -6122,49 +6216,185 @@
       }
       var scene = item.scene;
       var cut = item.cut;
+      var room = scene.room || {};
       right.appendChild(el("h3", "vnew-previz-panel-title", "컷 " + (previzCutIndex + 1) + " 편집"));
 
       // 웹툰 패널 썸네일 + 시점 일치도 배지 + 패널 분석(읽기 전용)
       right.appendChild(previzPanelMatchCard(cut, previz));
 
+      // 작업 200: 직접 놓은 값 때문에 생긴 문제(옮기지 않고 알리기만 한다) — 저장한 값 기준(서버 보기).
+      var warnList = cutWarnings(cut);
+      if (warnList.length) {
+        var warnBox = el("div", "vnew-previz-manual-warn");
+        warnList.forEach(function (text) {
+          warnBox.appendChild(el("p", null, text));
+        });
+        right.appendChild(warnBox);
+      }
+
       // 카메라
       var camCard = el("div", "vnew-previz-edit-card");
-      camCard.appendChild(el("strong", "vnew-previz-edit-head", "카메라"));
+      var camHead = el("div", "vnew-previz-actor-head");
+      camHead.appendChild(el("strong", "vnew-previz-edit-head", "카메라"));
       var cam = cut.camera || (cut.camera = { pos: [0, 1.5, 4], target: [0, 1.2, 0], fov: 50 });
-      camCard.appendChild(vec3Field("위치 (x,y,z)", cam, "pos", scene, cut));
-      camCard.appendChild(vec3Field("바라보는 곳 (x,y,z)", cam, "target", scene, cut));
-      camCard.appendChild(numField("화각(fov)", cam, "fov", 20, 90, scene, cut));
+      camHead.appendChild(manualTag(cam, "카메라", function () {
+        delete cam.manual;
+      }));
+      camCard.appendChild(camHead);
+      var camNote = el("p", "vnew-hint vnew-previz-limit-note");
+      var camBounds = cameraBounds(room);
+      camCard.appendChild(vec3Field("위치 (x,y,z)", cam, "pos", camBounds, camNote, scene, cut, function (axis, delta) {
+        cam.manual = true;
+        shiftMove(cam, "pos", axis, delta);
+      }));
+      camCard.appendChild(vec3Field("바라보는 곳 (x,y,z)", cam, "target", camBounds, camNote, scene, cut, function (axis, delta) {
+        cam.manual = true;
+        shiftMove(cam, "target", axis, delta);
+      }));
+      // 바라보는 곳을 인물 눈높이로 한 번에(작업 200).
+      var lookRow = el("div", "vnew-previz-look-row");
+      var actorsMeta = {};
+      (scene.actors || []).forEach(function (a) {
+        actorsMeta[a.id] = a;
+      });
+      (cut.actors || []).forEach(function (ca) {
+        var meta = actorsMeta[ca.id] || {};
+        var btn = el("button", "outline-button vnew-previz-look", (meta.name || ca.id) + " 보기");
+        btn.type = "button";
+        btn.addEventListener("click", function () {
+          var p = ca.pos || [0, 0, 0];
+          var next = [Number(p[0]) || 0, eyeHeight(ca, meta), Number(p[2]) || 0];
+          var old = (cam.target || [0, 0, 0]).slice();
+          cam.target = next;
+          cam.manual = true;
+          [0, 1, 2].forEach(function (i) {
+            shiftMove(cam, "target", i, next[i] - (Number(old[i]) || 0));
+          });
+          applyEdit(scene, cut);
+          renderCutPanel();
+        });
+        lookRow.appendChild(btn);
+      });
+      if (lookRow.childNodes.length) camCard.appendChild(lookRow);
+      var fovWrap = numField("화각(fov, 도)", cam, "fov", PREVIZ_FOV_MIN, PREVIZ_FOV_MAX, camNote, scene, cut, function () {
+        cam.manual = true;
+        delete cam.lensMm; // 화각을 직접 고치면 렌즈 값은 뗀다(렌즈는 화각에서 다시 보인다)
+        lensInput.value = "";
+        lensInput.placeholder = String(previzLensFromFov(Number(cam.fov) || 50));
+      });
+      var fovInput = fovWrap.querySelector("input");
+      if (fovInput) fovInput.step = "0.1";
+      camCard.appendChild(fovWrap);
+      // 렌즈(mm, 풀프레임 환산) + 프리셋
+      var lensWrap = el("label", "vnew-field");
+      lensWrap.appendChild(el("span", "vnew-field-label", "렌즈(mm, 풀프레임 환산)"));
+      var lensInput = el("input", "vnew-field-input");
+      lensInput.type = "number";
+      lensInput.min = String(PREVIZ_LENS_MIN);
+      lensInput.max = String(PREVIZ_LENS_MAX);
+      lensInput.value = cam.lensMm ? String(cam.lensMm) : "";
+      lensInput.placeholder = String(previzLensFromFov(Number(cam.fov) || 50));
+      lensInput.addEventListener("input", function () {
+        var mm = parseFloat(lensInput.value);
+        if (!isFinite(mm) || mm <= 0) return;
+        setLens(Math.max(PREVIZ_LENS_MIN, Math.min(PREVIZ_LENS_MAX, mm)), mm);
+      });
+      lensWrap.appendChild(lensInput);
+      camCard.appendChild(lensWrap);
+      var presetRow = el("div", "vnew-previz-lens-presets");
+      PREVIZ_LENS_PRESETS.forEach(function (mm) {
+        var pb = el("button", "outline-button vnew-previz-lens", mm + "mm");
+        pb.type = "button";
+        if (Number(cam.lensMm) === mm) pb.classList.add("is-on");
+        pb.addEventListener("click", function () {
+          setLens(mm, mm);
+          renderCutPanel();
+        });
+        presetRow.appendChild(pb);
+      });
+      camCard.appendChild(presetRow);
+      function setLens(mm, asked) {
+        cam.lensMm = mm;
+        cam.fov = previzFovFromLens(mm);
+        cam.manual = true;
+        if (fovInput) fovInput.value = String(cam.fov);
+        camNote.textContent = mm !== asked ? "렌즈는 " + PREVIZ_LENS_MIN + "~" + PREVIZ_LENS_MAX + "mm 라 " + mm + "mm 로 맞췄습니다." : "";
+        applyEdit(scene, cut);
+      }
+      camCard.appendChild(numField("기울기(roll, 도)", cam, "roll", -PREVIZ_ROLL_MAX, PREVIZ_ROLL_MAX, camNote, scene, cut, function () {
+        cam.manual = true;
+      }));
+      if (cam.moveTo) {
+        // 카메라 이동이 있는 컷: 위치를 고치면 끝 위치도 같은 만큼 옮긴다. 고정하려면 이동을 없앤다.
+        var moveRow = el("div", "vnew-previz-move-row");
+        moveRow.appendChild(el("span", "vnew-hint", "이 컷은 카메라가 움직입니다(위치를 고치면 끝 위치도 같이 옮깁니다)."));
+        var stopBtn = el("button", "outline-button", "이동 없애기(고정)");
+        stopBtn.type = "button";
+        stopBtn.addEventListener("click", function () {
+          delete cam.moveTo;
+          cam.manual = true;
+          applyEdit(scene, cut);
+          renderCutPanel();
+        });
+        moveRow.appendChild(stopBtn);
+        camCard.appendChild(moveRow);
+      }
+      camCard.appendChild(camNote);
       right.appendChild(camCard);
 
       // 인물 목록(색 칩·이름·pose·위치)
-      var actorsById = {};
-      (scene.actors || []).forEach(function (a) {
-        actorsById[a.id] = a;
-      });
       (cut.actors || []).forEach(function (ca) {
-        var meta = actorsById[ca.id] || {};
+        var meta = actorsMeta[ca.id] || {};
         var card = el("div", "vnew-previz-edit-card");
         var headRow = el("div", "vnew-previz-actor-head");
         var chip = el("i", "vnew-previz-dot");
         chip.style.background = meta.color || "#ffffff";
         headRow.appendChild(chip);
         headRow.appendChild(el("strong", "vnew-previz-edit-head", meta.name || ca.id));
+        headRow.appendChild(manualTag(ca, meta.name || ca.id, function () {
+          delete ca.manual;
+        }));
         card.appendChild(headRow);
-        card.appendChild(selectField("자세", ca, "pose", POSE_LABELS, scene, cut));
-        card.appendChild(selectField("동작", ca, "gesture", GESTURE_LABELS, scene, cut));
-        card.appendChild(numField("방향(도)", ca, "facingDeg", -360, 360, scene, cut));
-        card.appendChild(vec3Field("위치 (x,y,z)", ca, "pos", scene, cut));
+        var actorNote = el("p", "vnew-hint vnew-previz-limit-note");
+        card.appendChild(selectField("자세", ca, "pose", POSE_LABELS, scene, cut, function () {
+          ca.manual = true;
+          delete ca.posture; // 패널에서 읽은 자세 기울기보다 고른 자세가 먼저
+          if (ca.pose !== "sit") {
+            delete ca.sit;
+            delete ca.sitOn;
+          }
+        }));
+        card.appendChild(selectField("동작", ca, "gesture", GESTURE_LABELS, scene, cut, function () {
+          ca.manual = true;
+          // 고른 동작이 보이게 패널에서 읽은 손·머리 방향을 뗀다(렌더러가 손·머리를 동작 위에 덮는다).
+          delete ca.hands;
+          delete ca.head;
+          if (GESTURES_WITH_TARGET.indexOf(ca.gesture) >= 0 && !ca.gestureTarget) {
+            var other = (cut.actors || []).filter(function (o) { return o.id !== ca.id; })[0];
+            if (other) ca.gestureTarget = other.id;
+          }
+        }));
+        card.appendChild(numField("방향(도)", ca, "facingDeg", -360, 360, actorNote, scene, cut, function () {
+          ca.manual = true;
+          // 앉은 인물은 다리 방향(sit.legYawDeg)도 같이 돌려 미리 본다(저장하면 서버가 앉은 모양을 다시 잡는다).
+          if (ca.sit && typeof ca.sit === "object") ca.sit.legYawDeg = Number(ca.facingDeg) || 0;
+        }));
+        card.appendChild(vec3Field("위치 (x,z)", ca, "pos", actorBounds(room), actorNote, scene, cut, function () {
+          ca.manual = true;
+        }, [0, 2]));
         var speakWrap = el("label", "vnew-previz-check");
         var speak = el("input");
         speak.type = "checkbox";
         speak.checked = !!ca.speaking;
         speak.addEventListener("change", function () {
           ca.speaking = speak.checked;
+          ca.manual = true;
           applyEdit(scene, cut);
         });
         speakWrap.appendChild(speak);
         speakWrap.appendChild(el("span", null, "말하는 중(머리 끄덕임)"));
         card.appendChild(speakWrap);
+        card.appendChild(actorNote);
         right.appendChild(card);
       });
 
@@ -6178,6 +6408,8 @@
           body: JSON.stringify({ scenes: scenes })
         })
           .then(function (plan) {
+            // 작업 200: 저장본을 다시 불러와 그린다(뷰포트는 이 컷 시작 — previzCutIndex 는 그대로).
+            previzDirty = false;
             state.plan = plan;
             loadPlan(false);
           })
@@ -6187,11 +6419,81 @@
           });
       });
       right.appendChild(saveBtn);
+      dirtyNote = el("p", "vnew-hint vnew-previz-dirty", "저장하지 않은 수정이 있습니다.");
+      dirtyNote.style.display = previzDirty ? "" : "none";
+      right.appendChild(dirtyNote);
+    }
+
+    /* 작업 200: 이 컷의 경고 — 서버가 본 직접 놓은 카메라 문제 + 직접 놓은 인물이 소품과 겹침(풀지 않고 알림). */
+    function cutWarnings(cut) {
+      var out = ((previz.manualWarnings || {})[cut.cutId] || []).slice();
+      var col = (previz.collision || {})[cut.cutId] || {};
+      var names = {};
+      flat.forEach(function (it) {
+        (it.scene.actors || []).forEach(function (a) {
+          names[a.id] = a.name || a.id;
+        });
+      });
+      var manualIds = {};
+      (cut.actors || []).forEach(function (ca) {
+        if (ca.manual) manualIds[ca.id] = true;
+      });
+      (col.unresolved || []).forEach(function (u) {
+        if (manualIds[u.actor]) out.push((names[u.actor] || u.actor) + "이(가) 소품과 겹칩니다(직접 놓은 자리라 옮기지 않았습니다).");
+      });
+      return out;
+    }
+
+    /* 직접 고친 값 표시 + [자동으로 되돌리기](표시만 뗀다 — 다음 다시 만들기 때 자동 계산). */
+    function manualTag(obj, label, release) {
+      var wrap = el("span", "vnew-previz-manual");
+      if (!obj.manual) return wrap;
+      wrap.appendChild(el("span", "vnew-badge vnew-previz-manual-badge", "직접 고침"));
+      var undo = el("button", "link-button vnew-previz-manual-undo", "자동으로 되돌리기");
+      undo.type = "button";
+      undo.title = label + " 값을 다음 [다시 만들기] 때 자동으로 계산합니다(지금 값은 그대로 둡니다).";
+      undo.addEventListener("click", function () {
+        release();
+        previzDirty = true;
+        renderCutPanel();
+      });
+      wrap.appendChild(undo);
+      return wrap;
+    }
+
+    function cameraBounds(room) {
+      var hw = (Number(room.width) || 6) / 2 + PREVIZ_CAMERA_MARGIN_M;
+      var hd = (Number(room.depth) || 6) / 2 + PREVIZ_CAMERA_MARGIN_M;
+      return [[-hw, hw], [0.05, (Number(room.height) || 2.8) + PREVIZ_CAMERA_MARGIN_M], [-hd, hd]];
+    }
+
+    function actorBounds(room) {
+      var hw = (Number(room.width) || 6) / 2 - PREVIZ_ACTOR_WALL_M;
+      var hd = (Number(room.depth) || 6) / 2 - PREVIZ_ACTOR_WALL_M;
+      return [[-hw, hw], [0, 0], [-hd, hd]];
+    }
+
+    /* 인물 눈높이(바라보는 곳 버튼). 앉은 인물은 엉덩이 높이 + 상체. */
+    function eyeHeight(ca, meta) {
+      var h = Number(meta.heightM) || 1.7;
+      if (ca.pose === "sit") {
+        var hip = ca.sit && Number(ca.sit.hipY) > 0 ? Number(ca.sit.hipY) : 0.5;
+        return Math.round((hip + 0.75 * h / 1.7) * 1000) / 1000;
+      }
+      return Math.round(h * 0.94 * 1000) / 1000;
+    }
+
+    /* 카메라 이동(moveTo)이 있으면 시작을 옮긴 만큼 끝도 옮긴다(옛 끝으로 되돌아가지 않게). */
+    function shiftMove(cam, key, axis, delta) {
+      if (!cam.moveTo || !Array.isArray(cam.moveTo[key]) || !delta) return;
+      cam.moveTo[key][axis] = Math.round(((Number(cam.moveTo[key][axis]) || 0) + delta) * 1000) / 1000;
     }
 
     // 편집값을 즉시 뷰포트에 반영: 컨트롤러를 그 컷 시작 시각으로 다시 그린다.
     function applyEdit(scene, cut) {
       isEditingPanel = true;
+      previzDirty = true;
+      if (dirtyNote) dirtyNote.style.display = "";
       if (previzCtl) {
         previzCtl.pause();
         previzCtl.seek(Number(cut.start) || 0);
@@ -6201,20 +6503,36 @@
       }, 50);
     }
 
-    // 숫자 벡터 3칸 입력
-    function vec3Field(label, obj, key, scene, cut) {
+    /* 범위로 자른 값과 안내. 자르지 않았으면 note 를 비운다. */
+    function clampNote(value, lo, hi, note, label) {
+      var v = Math.max(lo, Math.min(hi, value));
+      if (note) note.textContent = v !== value ? label + " 값은 " + lo + "~" + hi + " 범위라 " + v + "(으)로 맞췄습니다." : "";
+      return v;
+    }
+
+    // 숫자 벡터 입력(axes = 보이는 칸, 기본 x·y·z). 숫자가 아닌 글(입력 중 "-")은 무시한다. bounds = [[lo,hi]×3].
+    function vec3Field(label, obj, key, bounds, note, scene, cut, onEdit, axes) {
       var wrap = el("label", "vnew-field vnew-previz-vec");
       wrap.appendChild(el("span", "vnew-field-label", label));
       var row = el("div", "vnew-previz-vec-row");
       var arr = Array.isArray(obj[key]) ? obj[key] : (obj[key] = [0, 0, 0]);
-      [0, 1, 2].forEach(function (i) {
+      var names = ["x", "y", "z"];
+      (axes || [0, 1, 2]).forEach(function (i) {
         var input = el("input", "vnew-field-input");
         input.type = "number";
-        input.step = "0.1";
+        input.step = "0.05";
         input.value = String(Number(arr[i]) || 0);
         input.addEventListener("input", function () {
-          arr[i] = Number(input.value) || 0;
+          var raw = parseFloat(input.value);
+          if (!isFinite(raw)) return;
+          var before = Number(arr[i]) || 0;
+          var v = clampNote(raw, Math.round(bounds[i][0] * 100) / 100, Math.round(bounds[i][1] * 100) / 100, note, names[i]);
+          arr[i] = v;
+          if (onEdit) onEdit(i, v - before);
           applyEdit(scene, cut);
+        });
+        input.addEventListener("change", function () {
+          input.value = String(Number(arr[i]) || 0);
         });
         row.appendChild(input);
       });
@@ -6222,7 +6540,7 @@
       return wrap;
     }
 
-    function numField(label, obj, key, min, max, scene, cut) {
+    function numField(label, obj, key, min, max, note, scene, cut, onEdit) {
       var wrap = el("label", "vnew-field");
       wrap.appendChild(el("span", "vnew-field-label", label));
       var input = el("input", "vnew-field-input");
@@ -6231,14 +6549,20 @@
       if (max !== undefined) input.max = String(max);
       input.value = String(Number(obj[key]) || 0);
       input.addEventListener("input", function () {
-        obj[key] = Number(input.value) || 0;
+        var raw = parseFloat(input.value);
+        if (!isFinite(raw)) return;
+        obj[key] = clampNote(raw, min, max, note, label);
+        if (onEdit) onEdit();
         applyEdit(scene, cut);
+      });
+      input.addEventListener("change", function () {
+        input.value = String(Number(obj[key]) || 0);
       });
       wrap.appendChild(input);
       return wrap;
     }
 
-    function selectField(label, obj, key, options, scene, cut) {
+    function selectField(label, obj, key, options, scene, cut, onEdit) {
       var wrap = el("label", "vnew-field");
       wrap.appendChild(el("span", "vnew-field-label", label));
       var sel = el("select", "vnew-field-input");
@@ -6250,6 +6574,7 @@
       });
       sel.addEventListener("change", function () {
         obj[key] = sel.value || null;
+        if (onEdit) onEdit();
         applyEdit(scene, cut);
       });
       wrap.appendChild(sel);
@@ -6334,6 +6659,7 @@
         video.controls = true;
         video.setAttribute("playsinline", "");
         row.appendChild(video);
+        if (rec.stale) row.appendChild(el("span", "vnew-badge vnew-previz-rec-stale", "고친 장면 · 다시 녹화 필요"));
       } else {
         row.appendChild(el("span", "vnew-previz-rec-state", "아직 영상 전"));
         var redo = el("button", "outline-button vnew-previz-rec-redo", "다시 만들기");
@@ -6373,27 +6699,32 @@
     var alreadyApproved = !!previz.approved;
 
     // approve → (옵션 force) → 녹화. force 면 confirm 창(비용 포함) 후 진행.
+    // 작업 200: 이미 승인한 장면의 [모두 녹화]는 모든 구간, 승인할 때는 녹화가 없거나 stale 인 구간만 녹화한다.
     function doApprove(force) {
       btn.disabled = true;
-      var body = force ? JSON.stringify({ force: true }) : JSON.stringify({});
-      api("/api/vnew/p/" + encodeURIComponent(state.projectId) + "/previz/approve", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: body
-      })
-        .then(function (plan) {
-          state.plan = plan;
-          var segs = (((state.plan || {}).previz || {}).segments) || segments;
-          return recordSegments(segs, showError);
-        })
-        .catch(function (err) {
-          btn.disabled = false;
-          if (err && err.status === 409) {
-            showError(errMessage(err) || "시점 일치도가 낮은 컷이 있습니다.");
-          } else {
-            showError("승인하지 못했습니다: " + errMessage(err));
-          }
+      previzApproveAndRecord(force, alreadyApproved, showError, function () {
+        btn.disabled = false;
+      });
+    }
+
+    // 작업 200: 장면을 고쳐 다시 녹화해야 하는 구간 — 안내 + 버튼 하나(승인 → 그 구간만 녹화).
+    var staleIds = previz.staleSegments || [];
+    if (staleIds.length) {
+      var staleBox = el("div", "vnew-previz-stale");
+      var staleNos = segments.map(function (seg, i) { return staleIds.indexOf(seg.id) >= 0 ? "구간 " + (i + 1) : ""; })
+        .filter(function (t) { return t; });
+      staleBox.appendChild(el("p", "vnew-previz-stale-msg", PREVIZ_STALE_TEXT + " (" + staleNos.join(", ") + ")"));
+      var staleBtn = el("button", "primary-button vnew-previz-stale-btn", "다시 녹화");
+      staleBtn.type = "button";
+      staleBtn.disabled = busy;
+      staleBtn.addEventListener("click", function () {
+        staleBtn.disabled = true;
+        previzApproveAndRecord(!!previz.approvedForced, false, showError, function () {
+          staleBtn.disabled = false;
         });
+      });
+      staleBox.appendChild(staleBtn);
+      host.appendChild(staleBox);
     }
 
     if (lowCuts.length && !alreadyApproved) {
@@ -6431,8 +6762,8 @@
     });
     host.appendChild(btn);
 
-    // 모두 녹화 완료 안내 + 다음 단계로
-    if (previz.recordedAll) {
+    // 모두 녹화 완료 안내 + 다음 단계로(작업 200: 다시 녹화해야 하는 구간이 있으면 위 안내가 대신한다)
+    if (previz.recordedAll && !staleIds.length) {
       var done = el("p", "vnew-previz-rec-done", "녹화 완료 — ⑤ 영상으로 넘어갈 수 있습니다.");
       host.appendChild(done);
       var next = el("button", "outline-button", "⑤ 영상으로");
@@ -6668,6 +6999,8 @@
   function renderGenStart(host, showError, staleGen) {
     var plan = state.plan || {};
     var previz = plan.previz || {};
+    var staleNotice = previzStaleNotice(); // 작업 200: 장면을 고친 뒤 다시 녹화해야 하는 구간
+    if (staleNotice) host.appendChild(staleNotice);
 
     if (staleGen) {
       host.appendChild(
@@ -6719,6 +7052,31 @@
       renderPlan();
     });
     host.appendChild(backBtn);
+  }
+
+  /* 작업 200: 장면을 고친 뒤 다시 녹화하지 않은 구간이 있으면 ⑤ 에도 알린다(없으면 null). [다시 녹화] = ④ 로 가서 그 구간만
+     다시 녹화한다(뷰포트가 준비되면 승인 → 녹화). 영상 생성은 그동안 409 PrevizStale 로 막힌다. */
+  function previzStaleNotice() {
+    var previz = (state.plan || {}).previz || {};
+    var stale = previz.staleSegments || [];
+    if (!stale.length) return null;
+    var nos = (previz.segments || []).map(function (seg, i) { return stale.indexOf(seg.id) >= 0 ? "구간 " + (i + 1) : ""; })
+      .filter(function (t) { return t; });
+    var box = el("section", "panel vnew-previz-stale");
+    box.appendChild(el("p", "vnew-previz-stale-msg", "프리비즈를 다시 녹화해야 합니다" + (nos.length ? " (" + nos.join(", ") + ")" : "")));
+    box.appendChild(previzRerecordButton());
+    return box;
+  }
+
+  function previzRerecordButton() {
+    var btn = el("button", "primary-button vnew-previz-stale-btn", "다시 녹화");
+    btn.type = "button";
+    btn.addEventListener("click", function () {
+      state.previzRerecord = true;
+      state.planStep = 4;
+      renderPlan();
+    });
+    return btn;
   }
 
   /* 접이식 "이전 영상 보기" — 이전 gen 의 최종 영상(있으면)만 보인다(설계자 2026-10-22, ⑤). */
@@ -6773,6 +7131,8 @@
     var running = gen.status === "running";
     // 진행 중이 아니면(취소·실패·일부·완료) 언제든 새 gen 을 시작할 수 있다(설계자 2026-10-22, ⑤).
     var canRemake = !running && gen.status && gen.status !== "none";
+    var staleNotice = previzStaleNotice(); // 작업 200
+    if (staleNotice) host.appendChild(staleNotice);
     mnotesGenWatch(state.genFresh === true, running); // 작업 199: 모델 에러 로그 건수(⑤ 를 열 때 · 생성이 끝날 때만)
     state.genFresh = false;
 

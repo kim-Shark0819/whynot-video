@@ -520,7 +520,7 @@ def _new_previz_gen(plan: dict) -> dict:
         units.append(item)
     previz = plan.get("previz") or {}
     brief = previz.get("shotBrief") or {}
-    return {
+    out = {
         "genId": _gen_id(),
         "mode": "previz",
         "status": "running",  # running|done|partial|failed|cancelled
@@ -537,6 +537,9 @@ def _new_previz_gen(plan: dict) -> dict:
         "selected": None,  # None|"real"|"webtoon"
         "costUsd": 0.0,
     }
+    if int(previz.get("editRev") or 0):
+        out["previzEditRev"] = int(previz.get("editRev") or 0)  # 작업 200: 고친 장면을 다시 녹화한 판(없으면 키 없음)
+    return out
 
 
 # ---------------------------------------------------------------- 영상 모델 선택(설계자 2026-10-22)
@@ -1408,6 +1411,10 @@ def _model_accepts_real_start(model: str) -> bool:
 
 
 
+# 작업 200: 장면을 고친 뒤 옛 녹화로 영상을 만들려 하면(409 PrevizStale) 보이는 글.
+PREVIZ_STALE_MESSAGE = "프리비즈를 다시 녹화해야 합니다."
+
+
 def check_preconditions(plan: dict, owner: str) -> list[dict]:
     """generate 선행 조건(설계자 2026-10-21, 지시서 038 — 프리비즈 기반). 어기면 VpocError(409).
 
@@ -1422,6 +1429,9 @@ def check_preconditions(plan: dict, owner: str) -> list[dict]:
         raise VpocError("vnew.generate", "ContiNotReady", "먼저 콘티를 완성해 주세요.", 409)
 
     previz = plan.get("previz") or {}
+    # 작업 200: 장면을 고친 뒤 다시 녹화하지 않은 구간이 있으면 그 옛 녹화를 참고 영상(@Video1)으로 보내지 않는다.
+    if _previz_stale_segments(previz):
+        raise VpocError("vnew.generate", "PrevizStale", PREVIZ_STALE_MESSAGE, 409)
     if not previz.get("approved") or not _previz_recorded_all(plan):
         raise VpocError(
             "vnew.generate",
@@ -1464,6 +1474,12 @@ def check_preconditions(plan: dict, owner: str) -> list[dict]:
             409,
         )
     return chars
+
+
+def _previz_stale_segments(previz: dict) -> list[str]:
+    """작업 200: 장면을 고쳐 다시 녹화해야 하는 구간 id(녹화 key 가 있고 stale)."""
+    recordings = (previz or {}).get("recordings") or {}
+    return [str(seg_id) for seg_id, rec in recordings.items() if isinstance(rec, dict) and rec.get("key") and rec.get("stale")]
 
 
 def _previz_recorded_all(plan: dict) -> bool:
@@ -14149,6 +14165,9 @@ def _gen_previz_stale(gen: dict, plan: dict) -> bool:
 
     if "previzRevision" in gen:
         if int(gen.get("previzRevision") or 0) != cur_rev:
+            return True
+        # 작업 200: 그 뒤 장면을 고쳤으면(editRev) stale. 고친 적 없는 계획·옛 gen 은 둘 다 0 이라 지금과 같다.
+        if int(gen.get("previzEditRev") or 0) != int(previz.get("editRev") or 0):
             return True
         # 지시서가 새로 만들어졌으면(값이 있을 때만 비교) stale.
         gen_brief = str(gen.get("briefUpdatedAt") or "")
