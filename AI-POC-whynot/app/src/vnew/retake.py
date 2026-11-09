@@ -1180,15 +1180,28 @@ def _view(gen: dict, gen_id: str, target: dict, state: dict, log_cells: dict) ->
     }
 
 
-def retake_view(owner: str, pid: str, mid: str, clip_in=None, clip_out=None) -> dict:
+def retake_view(owner: str, pid: str, mid: str, clip_in=None, clip_out=None, segments=None) -> dict:
     """GET /p/<pid>/edit/retake/<mid>(소유자). 그 칸의 이전 프롬프트·시도·버전·초안·견적. 끊긴 작업은 먼저 이어받는다.
 
     보완 1: clip_in·clip_out(고른 클립의 원본 시간, 쿼리 글자)이 있으면 구간 범위와 그 견적을 더한다(틀리면 구간 없음 + rangeNote).
+    작업 196: segments(쿼리 글자 "[mid:]in-out,…" — 조각마다 그 재료 원본 초, 최대 SEGMENTS_MAX)가 있으면 in·out 대신 compose 와 같은
+    _segments_setup(같은 합 길이 · 같은 모델 규칙 · 대상 = 칸 원본)으로 모델·견적을 낸다. 틀리면 틀린 구간과 같다(구간 없음 + rangeNote, 예외 없음).
     """
     plan, gen, gen_id = edit._load_gen(owner, pid)  # noqa: SLF001
     state = reconcile_state(owner, pid, gen_id)
     target = _target(plan, gen, mid, state)
     state = recover_timed_out(owner, pid, gen_id, target["cellKey"], state)  # 보완 4: 시간 초과 버전 조회 1번(스레드)
+    if segments is not None:
+        where = "vnew.retake"
+        try:
+            parsed = _read_segments({"segments": _query_segments(segments, plan, gen, state, target, where)}, where)
+            setup, target, _info = _segments_setup(owner, pid, plan, gen, gen_id, target, state, parsed, where=where)
+        except VpocError as exc:
+            if exc.kind not in ("RetakeBadRange", "RetakeNotTarget"):
+                raise
+            setup = _setup(owner, pid, plan, gen, gen_id, target, state, "", "", whole_ok=not FULL_SCOPE_ALLOWED)  # 틀린 구간과 같은 보기
+            setup["rangeNote"] = exc.message  # 고정 문구(SEGMENTS_* · BAD_RANGE_TEXT · COMPOSE_SHORT_TEXT)
+        return _view_with(gen, gen_id, target, state, read_log(owner, pid, gen_id), setup)
     setup = _setup(owner, pid, plan, gen, gen_id, target, state, clip_in, clip_out, whole_ok=not FULL_SCOPE_ALLOWED)  # 191: 칸 전체 클립도 구간
     return _view_with(gen, gen_id, target, state, read_log(owner, pid, gen_id), setup)
 
@@ -2150,8 +2163,8 @@ def _post_segments(owner: str, pid: str, gen_id: str, key: str, n: int, version:
 # 보기(GET)는 모델 × 범위(full | range)마다 견적을 미리 넣고(_setup), 미리보기·제출은 바디의 model·scope·in·out 을 서버 목록과 대조한다(_choose).
 # 같은 경로(원래 모델·원본 칸 전체·116 꼴 기준)는 116 그대로, 그 밖은 형식 본보기(_run_draft_model)와 generate.resubmit_model(_resubmit).
 
-_PLAN_KEYS = ("ok", "reason", "path", "seconds", "sentSeconds", "billedSeconds", "durations", "resolution", "trimTo", "maxBytes",
-              "priceKnown")
+_PLAN_KEYS = ("ok", "reason", "path", "seconds", "sentSeconds", "sentReason", "billedSeconds", "durations", "resolution", "trimTo",
+              "maxBytes", "priceKnown")
 
 
 def _original_model(gen: dict, target: dict | None = None) -> str:
@@ -2378,6 +2391,7 @@ def _format_of(path: str, caps: dict | None) -> str:
 def _plan_out(info: dict, *, same: bool = False) -> dict:
     """보기에 넣는 견적 한 칸(금액은 소수 2자리 — confirmUsd 와 비교)."""
     out = {key: info.get(key) for key in _PLAN_KEYS}
+    out["sentReason"] = str(info.get("sentReason") or "")  # 작업 196: min · step · ""(같은 경로 · 견적 없음은 "")
     out["usd"] = round(float(info["usd"]), 2) if info.get("ok") and info.get("usd") is not None else None
     out["same"] = same
     return out
@@ -2513,8 +2527,8 @@ def _choose(owner: str, pid: str, plan: dict, gen: dict, gen_id: str, target: di
     same = bool(chosen.get("same"))
     fmt = "same" if same else "template"
     draft = {"model": row["id"], "modelLabel": row["label"], "scope": scope, "range": rng, "path": row["path"], "format": fmt,
-             "plan": {key: chosen.get(key) for key in ("usd", "seconds", "sentSeconds", "billedSeconds", "trimTo", "maxBytes", "resolution",
-                                                       "durations")}}
+             "plan": {key: chosen.get(key) for key in ("usd", "seconds", "sentSeconds", "sentReason", "billedSeconds", "trimTo", "maxBytes",
+                                                       "resolution", "durations")}}
     version = {"model": row["id"], "modelLabel": row["label"], "scope": scope, "range": rng, "cutIds": (rng or {}).get("cutIds"),
                "path": row["path"], "format": fmt, "formatRefs": None, "sentSeconds": chosen.get("sentSeconds"),
                "billedSeconds": chosen.get("billedSeconds"), "trimTo": None if same else chosen.get("trimTo")}
@@ -3109,8 +3123,8 @@ def _result_pick(pick: dict, gen: dict, target: dict) -> dict:
         raise VpocError("vnew.retake", "RetakeBadModel", NO_V2V_RANGE_TEXT, 400)
     chosen = _plan_out(info)
     pick["plan"] = chosen
-    pick["draft"]["plan"] = {key: chosen.get(key) for key in ("usd", "seconds", "sentSeconds", "billedSeconds", "trimTo", "maxBytes",
-                                                              "resolution", "durations")}
+    pick["draft"]["plan"] = {key: chosen.get(key) for key in ("usd", "seconds", "sentSeconds", "sentReason", "billedSeconds", "trimTo",
+                                                              "maxBytes", "resolution", "durations")}  # 작업 196: sentReason(견적 글 까닭)
     pick["draft"]["videoSource"] = RESULT_SOURCE
     pick["version"].update(sentSeconds=chosen.get("sentSeconds"), billedSeconds=chosen.get("billedSeconds"), trimTo=chosen.get("trimTo"),
                            videoSource=RESULT_SOURCE)
@@ -3249,6 +3263,31 @@ def _read_segments(payload: dict, where: str) -> list[dict] | None:
         if first < 0 or last - first < edit.MIN_CLIP_S - 1e-9:
             raise VpocError(where, "RetakeBadRange", BAD_RANGE_TEXT, 400)
         out.append({"sourceKey": key, "in": round(first, 3), "out": round(last, 3)})
+    return out
+
+
+SEGMENTS_QUERY_MAX = 1024  # 작업 196: 보기 쿼리 segments 글자 상한(조각 하나 "m + 16자:in-out" ≈ 45자 × SEGMENTS_MAX 의 여유)
+_SEG_QUERY_RE = re.compile(r"^(?:(m[0-9a-f]{16}):)?(-?\d{1,6}(?:\.\d{1,6})?)-(\d{1,6}(?:\.\d{1,6})?)$")
+
+
+def _query_segments(text, plan: dict, gen: dict, state: dict, target: dict, where: str) -> list[dict]:
+    """보기 쿼리 segments "[mid:]in-out,…"(작업 196, 타임라인 순서) → compose 바디 꼴 [{sourceKey, in, out}](_read_segments 가 마저 본다).
+    mid 가 없으면 보기 재료(target). 틀리면 400 RetakeBadRange(꼴 SEGMENTS_TEXT · 개수 SEGMENTS_MAX_TEXT · 모르는 재료 SEGMENTS_FOREIGN_TEXT)."""
+    if not isinstance(text, str) or not text.strip() or len(text) > SEGMENTS_QUERY_MAX:
+        raise VpocError(where, "RetakeBadRange", SEGMENTS_TEXT, 400)
+    parts = text.split(",")
+    if len(parts) > SEGMENTS_MAX:
+        raise VpocError(where, "RetakeBadRange", SEGMENTS_MAX_TEXT, 400)
+    keys = {m["mid"]: m["sourceKey"] for m in _items(plan, gen, state, target["variant"])}
+    out: list[dict] = []
+    for part in parts:
+        found = _SEG_QUERY_RE.match(part.strip())
+        if not found:
+            raise VpocError(where, "RetakeBadRange", SEGMENTS_TEXT, 400)
+        key = keys.get(found.group(1)) if found.group(1) else target["sourceKey"]
+        if not key:
+            raise VpocError(where, "RetakeBadRange", SEGMENTS_FOREIGN_TEXT, 400)
+        out.append({"sourceKey": key, "in": float(found.group(2)), "out": float(found.group(3))})
     return out
 
 

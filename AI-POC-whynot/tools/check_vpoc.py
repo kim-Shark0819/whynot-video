@@ -23,6 +23,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import urllib.parse
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]      # AI-POC-whynot
@@ -63566,8 +63567,10 @@ def check_vnew_edit_multicut_fix_192() -> None:
             cost = (f"예상 비용 {usd} — {server['label']}({server['model']}) · {secs(p.get('sentSeconds'))}초" +
                     (f"({secs(p.get('trimTo'))}초로 잘라 씀)" if cut else "") + (f" · {p.get('resolution')}" if p.get("resolution") else "") +
                     ". 원래 결과는 그대로 남습니다.")
+            why = {"min": f"모델 최소 길이({secs(p.get('sentSeconds'))}초)에 맞춰 ", "step": "모델이 만드는 길이 단위에 맞춰 "}.get(  # 작업 196
+                str(p.get("sentReason") or "")) if cut else None
             est = (f"견적: 고른 구간 {secs(p.get('trimTo'))}초 · " +
-                   (f"모델 최소 길이에 맞춰 {secs(p.get('sentSeconds'))}초로 만들고 {secs(p.get('trimTo'))}초만 씀" if cut else
+                   (f"{why}{secs(p.get('sentSeconds'))}초로 만들고 {secs(p.get('trimTo'))}초만 씀" if why else
                     f"{secs(p.get('sentSeconds'))}초로 만듦") + (f" · {p.get('resolution')}" if p.get("resolution") else "") + f" · 예상 {usd}")
             expect("ms-e", [m.get("empty"), m.get("busy"), m.get("composed")],
                    [[0, "수정 사항을 적어 주세요."], ["프롬프트 준비 중…", True],
@@ -64738,7 +64741,8 @@ def check_vnew_retake_segments_194() -> None:
             server = {"edit": edit_v, "edit2": edit2, "rv": rv, "compose": comp, "submit": sub, "rvDone": rv_done, "mid1": mid1,
                       "finalKey": final.get("sourceKey"), "names": {k1: "v1", k3: "v3", k4: "v4", out5: "v5"}, "segs": segs,
                       "composeBody": compose_body, "submitBody": submit_body, "label": str(row.get("label") or row.get("id") or ""),
-                      "usd": plan_d.get("usd")}
+                      "usd": plan_d.get("usd"),
+                      "segQuery": ",".join(f"{mats[s['sourceKey']]['mid']}:{s['in']:g}-{s['out']:g}" for s in segs)}  # 작업 196: 보기 GET 쿼리
             expect("sg-e", [real_calls, env.urlopen_calls], [[], []], "실제 LLM · urlopen 0")
     except Exception as exc:  # noqa: BLE001
         bad.append("(sg) 예외: " + repr(exc) + "\n" + _tb.format_exc()[:2500])
@@ -64771,7 +64775,8 @@ def check_vnew_retake_segments_194() -> None:
             mid1 = server["mid1"]
             expect("sg-e", [g.get("target"), g.get("panel")],
                    [[[1, 2, 3], segs_s, True, 12, {"in": 0, "out": 12}, "", ["c9", "c10", "c11"]],
-                    [segs_s, 12, "고칠 컷: 컷 1–2 · 클립 3개 · 합 12.0초", "선택한 컷만 고칩니다 (클립 3개 · 합 12.0초)", [mid1 + "?in=0&out=12"], False, ""]],
+                    [segs_s, 12, "고칠 컷: 컷 1–2 · 클립 3개 · 합 12.0초", "선택한 컷만 고칩니다 (클립 3개 · 합 12.0초)",
+                     [mid1 + "?segments=" + urllib.parse.quote(server["segQuery"], safe="-_.!~*'()")], False, ""]],  # 작업 196: 실제 조각
                    "원본 · v3 · v4 가 섞인 컷 3개(같은 칸) → segments(타임라인 순서 · 각 파일 · 각 in/out) · 패널 = 칸 원본 재료 · 머리 줄 컷 1–2 · 클립 3개 · "
                    "합 12.0초 · 고정 줄 · 거절 안내 없음")
             expect("sg-e", [g.get("compose"), g.get("submit")],
@@ -65183,6 +65188,196 @@ def check_vnew_retake_content_flag_195() -> None:
            "(cr-f)화면 안내 · 실패 줄 · [다시 시도] · LF · node --check" + ("" if node else " — node 없음: 화면 실행 건너뜀"))
 
 
+# 작업 196 화면(node): 견적 한 줄(sentReason min · step · 없음 · 옛 초안) · 보기 GET segments 쿼리. 함수만 떼어 돌린다(DOM 없음).
+_SR196_NODE = r"""
+var o = {};
+o.est = [
+  editFixComposeEstimate({ seconds: 2, trimTo: 2, sentSeconds: 3, sentReason: "min", usd: 0.84 }),
+  editFixComposeEstimate({ seconds: 8.6, trimTo: 8.6, sentSeconds: 9, sentReason: "step", resolution: "480p", usd: 0.9 }),
+  editFixComposeEstimate({ seconds: 12, trimTo: 12, sentSeconds: 12, sentReason: "", resolution: "480p", usd: 1.2 }),
+  editFixComposeEstimate({ seconds: 8.6, trimTo: 8.6, sentSeconds: 9, usd: 0.9 }),
+  editFixComposeEstimate({ seconds: 8.97, trimTo: 8.97, sentSeconds: 9, sentReason: "step", usd: 0.9 })
+];
+var ctx = { materials: { K1: { mid: "m0123456789abcdef" }, K2: {} } };
+o.query = editFixSegQuery(ctx, [{ sourceKey: "K1", in: 2, out: 7.5 }, { sourceKey: "K2", in: 0, out: 3.5 }, { sourceKey: "K1", in: 0.1234, out: 1 }]);
+o.path = editFixViewPath(ctx, { mid: "mX", segments: [{ sourceKey: "K1", in: 2, out: 7.5 }], scope: "range", clip: { in: 0, out: 5.5 } });
+o.single = editFixViewPath(ctx, { mid: "mX", segments: null, scope: "range", clip: { in: 3, out: 15 } });
+console.log(JSON.stringify(o));
+"""
+
+
+def check_vnew_retake_sent_reason_196() -> None:
+    """작업 196 — ⑦ AI로 고치기(compose): 견적 글 까닭(sentReason) · 여러 컷(segments) 보기의 모델 목록 · 견적. 가짜 LLM·fal·저장소(191·194 하네스), 유료 0.
+
+    (sr-a) retake_plan sentReason: 참고 영상 enum [5, 10] 4.6 → 5 min · 8.6 → 10 step · 5 → "" · enum 없음(4~30) 8.6 → 9 step · 3.2 → 4 min,
+           영상 편집 2 → 3 min · 7 → "", 견적 없음 · 같은 경로 sentReason ""
+    (sr-b) 화면(node — 없으면 WARN 건너뜀): 견적 한 줄 min · step · 없음 · 옛 초안(까닭 없음) · 0.05초 안 · segments 쿼리 · 한 컷 길 ?in=&out= 그대로
+    (sr-c) 보기 ?segments=(원본 2–7.5 · v3 0–3.5 · v4 0.5–3.5) = compose 같은 조각: models · composeModels · composeDefaultModel · range · 대상(원본) 같음,
+           초안 견적 = 보기 그 모델 range 견적(sentReason 포함)
+    (sr-d) 틀린 segments(빈 글 · 꼴 · 9개 · 모르는 재료 · 재료 길이 밖 · 합 1초 미만 · 다른 칸) → 200 · 구간 없음 · rangeNote(고정 문구) · composeModels 없음
+    (sr-e) LF · node --check · 화면 함수 하나씩
+    """
+    sys.path.insert(0, str(ROOT / "app"))
+    import traceback as _tb  # noqa: PLC0415
+
+    bad: list[str] = []
+    seen: set[str] = set()
+    owner = _RTK_OWNER
+    node = shutil.which("node")
+
+    def expect(group: str, got, want, what: str) -> None:
+        seen.add(group)
+        if got != want:
+            bad.append(f"({group}) {what}\n      결과 {got!r}\n      기대 {want!r}")
+
+    saved_tempdir = tempfile.tempdir
+    private_tmp = tempfile.mkdtemp(prefix="sr196-tmp-")
+    tempfile.tempdir = private_tmp
+    try:
+        with _guard_real_llm() as real_calls, _LogCapture(), _Rtk1Env(owner) as env, _pin_vnew(
+                VNEW_FX=True, VNEW_CASTING=True, VNEW_TAKE_REAL=True, VNEW_GEN_PARALLEL=2, POLL_INTERVAL_S=0, VNEW_TAKE_AUDIO=True,
+                VNEW_TAKE_RESOLUTION="480p", VNEW_PREPARE_STALE_S=300, VNEW_EDIT=True, VNEW_EDIT_RETAKE=True):
+            genmod, rt = env.genmod, env.rtmod
+            env.set(rt, "_translate", lambda **_k: ({"changeEn": "Make her coat red."}, {"model": "m", "inputTokens": 120, "outputTokens": 20}))
+            client = env.client()
+            pid = "prj_sr196"
+            env.take_done(client, pid)
+            gen = env.gen(pid)
+
+            # ================= (sr-a) retake_plan sentReason =================
+            free = "fal-ai/rtk/take-free196"
+            env.registry[free] = {"id": "fal:" + free, "endpointId": free, "label": "Free", "category": "video-to-video",
+                                  "caps": {"previzCapable": True, "available": True, "videoListField": "video_urls"},
+                                  "pricing": {"unit": "seconds", "unitPrice": 0.1}}
+
+            def why(model: str, path: str, seconds: float) -> tuple:
+                p = genmod.retake_plan(gen, model=model, path=path, seconds=seconds, original=False)
+                return p["ok"], p["sentSeconds"], p["sentReason"]
+
+            got_a = [why(_RTK1_FAST, "take", 4.6), why(_RTK1_FAST, "take", 8.6), why(_RTK1_FAST, "take", 5.0), why(_RTK1_FAST, "take", 10.03),
+                     why(free, "take", 8.6), why(free, "take", 3.2), why(free, "take", 9.0),
+                     why(_RTK1_PRO, "cut", 2.0), why(_RTK1_PRO, "cut", 7.0), why(_RTK1_PRO, "cut", 2.97),
+                     why(_RTK1_FAST, "take", 12.0)]
+            del env.registry[free]
+            no_plan = rt._no_plan("take", 3.0, "x")  # noqa: SLF001
+            expect("sr-a", [got_a, no_plan.get("sentReason"), "sentReason" in rt._PLAN_KEYS],  # noqa: SLF001
+                   [[(True, 5.0, "min"), (True, 10.0, "step"), (True, 5.0, ""), (True, 10.0, ""), (True, 9.0, "step"), (True, 4.0, "min"),
+                     (True, 9.0, ""), (True, 3.0, "min"), (True, 7.0, ""), (True, 3.0, ""), (False, None, "")], "", True],
+                   "sentReason: 가장 짧은 duration 으로 올림 = min · 다음 duration 으로 올림 = step · 늘리지 않음(0.05초 안) = \"\" · "
+                   "영상 편집 3초 채움 = min · 견적 없음 \"\"")
+
+            # ================= (sr-c) 보기 segments = compose =================
+            k1 = str(gen["units"][0]["webtoon"]["outputKey"])
+            env.store.blobs[k1] = _edt_fake(15.0, w=1920, h=1080, fps=24)
+            stem = k1.rsplit("/", 1)[0]
+            k3, k4 = stem + "-rt3/out3.mp4", stem + "-rt4/out4.mp4"
+            env.store.blobs.update({k3: _edt_fake(3.5, w=1920, h=1080, fps=24), k4: _edt_fake(3.5, w=1920, h=1080, fps=24)})
+            stamp = rt.now_iso()
+
+            def version(n: int, key: str, r_in: float, r_out: float, start: float) -> dict:
+                seconds = round(r_out - r_in, 3)
+                return {"n": n, "status": "completed", "attempt": 1, "outputKey": key, "scope": "range", "format": "template",
+                        "videoSource": rt.RESULT_SOURCE, "fromKey": k1, "fromN": 1, "model": _LR_ENDPOINT, "prompt": f"STYLE: v{n} prompt.",
+                        "range": {"in": r_in, "out": r_out, "start": start, "end": round(start + seconds, 3), "seconds": seconds, "cutIds": ["c2"],
+                                  "cuts": []}, "trimTo": seconds, "seconds": seconds, "createdAt": stamp, "finishedAt": stamp, "claim": ""}
+
+            env.set_state(pid, lambda data: data["cells"].update({"webtoon:take1": {
+                "versions": [version(3, k3, 7.5, 11.0, 7.5), version(4, k4, 11.5, 15.0, 11.5)], "draft": None}}))
+            base = f"/api/vnew/p/{pid}/edit"
+            mats = {m["sourceKey"]: m for m in (client.get(base).get_json() or {}).get("materials") or []}
+            final = next((m for m in mats.values() if m.get("kind") == "final"), {})
+            mid1, mid3 = str((mats.get(k1) or {}).get("mid") or ""), str((mats.get(k3) or {}).get("mid") or "")
+            segs = [{"sourceKey": k1, "in": 2.0, "out": 7.5}, {"sourceKey": k3, "in": 0.0, "out": 3.5}, {"sourceKey": k4, "in": 0.5, "out": 3.5}]
+            query = ",".join(f"{mats[s['sourceKey']]['mid']}:{s['in']:g}-{s['out']:g}" for s in segs)
+            r_v = client.get(f"{base}/retake/{mid1}?segments={urllib.parse.quote(query)}")
+            rv = r_v.get_json() or {}
+            rv3 = client.get(f"{base}/retake/{mid3}?segments={urllib.parse.quote(query)}").get_json() or {}
+            r_c = client.post(f"{base}/retake/{mid1}/compose", json={"requestKo": "코트를 빨갛게", "segments": segs})
+            cv = (r_c.get_json() or {}).get("retake") or {}
+            dr = cv.get("draft") or {}
+            keys = ("models", "modelsHidden", "composeModels", "composeDefaultModel", "range", "rangeNote", "scopes", "mid")
+            row = next((m for m in rv.get("models") or [] if m.get("id") == dr.get("model")), {})
+            want_plan = {k: (row.get("range") or {}).get(k) for k in ("usd", "seconds", "sentSeconds", "sentReason", "billedSeconds", "trimTo",
+                                                                       "maxBytes", "resolution", "durations")}
+            expect("sr-c", [r_v.status_code, [k for k in keys if rv.get(k) != cv.get(k)], [k for k in keys if rv3.get(k) != rv.get(k)],
+                            rv.get("mid") == mid1, (rv.get("range") or {}).get("seconds"), bool(rv.get("composeModels")), r_c.status_code,
+                            dr.get("plan") == want_plan, (dr.get("plan") or {}).get("sentReason") in ("", "min", "step"),
+                            dr.get("model") == rv.get("composeDefaultModel")],
+                   [200, [], [], True, 12.0, True, 200, True, True, True],
+                   "보기 ?segments= = compose 같은 조각: 모델 목록 · composeModels · 기본 모델 · 구간(합 12초) · 대상(원본 — v3 mid 로 불러도) 같음, "
+                   "초안 견적 = 보기 그 모델 range 견적(sentReason 포함)")
+
+            # ================= (sr-d) 틀린 segments =================
+            def bad_view(text: str) -> tuple:
+                resp = client.get(f"{base}/retake/{mid1}?segments={urllib.parse.quote(text)}")
+                view = resp.get_json(silent=True) or {}
+                return resp.status_code, view.get("range"), view.get("rangeNote"), view.get("composeModels"), view.get("scopes")
+
+            m1 = mats[k1]["mid"]
+            fmid = str(final.get("mid") or "")
+            cases = ["", "x", "2-1-3", "inf-3", ",".join(f"{m1}:{i}-{i + 1}" for i in range(9)), "m0000000000000000:0-2", f"{mid3}:0-5",
+                     f"{m1}:0-0.5", f"{m1}:2-7.5,{fmid}:0-2", "3-2", "1e1-12"]
+            got_d = [bad_view(t) for t in cases]
+            texts = [rt.SEGMENTS_TEXT, rt.SEGMENTS_TEXT, rt.SEGMENTS_TEXT, rt.SEGMENTS_TEXT, rt.SEGMENTS_MAX_TEXT, rt.SEGMENTS_FOREIGN_TEXT,
+                     rt.BAD_RANGE_TEXT, rt.COMPOSE_SHORT_TEXT, rt.SEGMENTS_FOREIGN_TEXT, rt.BAD_RANGE_TEXT, rt.SEGMENTS_TEXT]
+            expect("sr-d", got_d, [(200, None, t, [], []) for t in texts],
+                   "틀린 segments(빈 글 · 꼴 · 9개 · 모르는 재료 · 재료 길이 밖 · 합 1초 미만 · 다른 칸 · 거꾸로 · 지수 표기) → 200 · 구간 없음 · rangeNote · "
+                   "composeModels 없음(500 아님)")
+            single = client.get(f"{base}/retake/{mid1}?in=0&out=7.5").get_json() or {}
+            expect("sr-d", [(single.get("range") or {}).get("seconds"), bool(single.get("composeModels")), real_calls, env.urlopen_calls],
+                   [7.5, True, [], []], "한 컷 길 ?in=&out= 그대로 · 실제 LLM · urlopen 0")
+    except Exception as exc:  # noqa: BLE001
+        bad.append("(sr) 예외: " + repr(exc) + "\n" + _tb.format_exc()[:2500])
+    finally:
+        tempfile.tempdir = saved_tempdir
+        shutil.rmtree(private_tmp, ignore_errors=True)
+
+    vjs = (PUBLIC / "vnew.js").read_text(encoding="utf-8")
+    names = ("editFixSecs", "editFixMoney", "editRound3", "editFixPath", "editPath", "editFixComposeEstimate", "editFixSegQuery", "editFixViewPath")
+    bodies = {n: _jlu_body(vjs, n) for n in names}
+    crlf = [n for n, p in (("retake.py", APP_SRC / "vnew" / "retake.py"), ("generate.py", APP_SRC / "vnew" / "generate.py"),
+                           ("routes.py", APP_SRC / "vnew" / "routes.py"), ("vnew.js", PUBLIC / "vnew.js"),
+                           ("check_vpoc.py", ROOT / "tools" / "check_vpoc.py")) if b"\r" in p.read_bytes()]
+    expect("sr-e", [crlf, sorted(n for n, b in bodies.items() if not b), "모델 최소 길이에 맞춰 " in vjs],
+           [[], [], False], "LF · 화면 함수 하나씩 · 옛 「모델 최소 길이에 맞춰」 문구 없음")
+    if node:
+        check = subprocess.run([node, "--check", str(PUBLIC / "vnew.js")], capture_output=True, text=True, encoding="utf-8", timeout=60)
+        expect("sr-e", check.returncode, 0, "node --check frontend/public/vnew.js")
+        stub = "function editPath(ctx) { return \"/api/vnew/p/p1/edit\"; }\n"
+        code = stub + "".join(bodies[n] for n in names if n != "editPath")
+        got, err = _lr_run_node(node, code + _SR196_NODE, "sr196_")
+        if err:
+            bad.append(f"(sr-b) node 실행 실패: {err}")
+        else:
+            expect("sr-b", got.get("est"),
+                   ["견적: 고른 구간 2.0초 · 모델 최소 길이(3.0초)에 맞춰 3.0초로 만들고 2.0초만 씀 · 예상 $0.84",
+                    "견적: 고른 구간 8.6초 · 모델이 만드는 길이 단위에 맞춰 9.0초로 만들고 8.6초만 씀 · 480p · 예상 $0.90",
+                    "견적: 고른 구간 12.0초 · 12.0초로 만듦 · 480p · 예상 $1.20",
+                    "견적: 고른 구간 8.6초 · 9.0초로 만듦 · 예상 $0.90",
+                    "견적: 고른 구간 9.0초 · 9.0초로 만듦 · 예상 $0.90"],
+                   "견적 한 줄: min = 모델 최소 길이(N초) · step = 모델이 만드는 길이 단위 · 없음 · 옛 초안(까닭 없음) · 0.05초 안 = N초로 만듦")
+            expect("sr-b", [got.get("query"), got.get("path"), got.get("single")],
+                   ["m0123456789abcdef:2-7.5,0-3.5,m0123456789abcdef:0.123-1",
+                    "/api/vnew/p/p1/edit/retake/mX?segments=" + urllib.parse.quote("m0123456789abcdef:2-7.5", safe="-_.!~*'()"),
+                    "/api/vnew/p/p1/edit/retake/mX?in=3&out=15"],
+                   "보기 GET: 여러 컷 = ?segments=mid:in-out,…(재료 mid 모르면 mid 없이 · 밀리초 반올림) · 한 컷 = ?in=&out= 그대로")
+    else:
+        warn("node 가 없어 작업 196 화면 실행 검사(sr-b)를 건너뜁니다")
+    groups = {f"sr-{c}" for c in "abcde"}
+    if not node:
+        groups -= {"sr-b"}
+    if groups - seen and not bad:
+        bad.append(f"검사하지 못한 묶음: {sorted(groups - seen)}")
+    if bad:
+        fail("작업 196 ⑦ AI로 고치기 견적 까닭 · 여러 컷 보기(sr) 검사 실패\n" + "\n".join(f"  {item}" for item in bad))
+    else:
+        ok("작업 196 ⑦ AI로 고치기 견적 까닭 · 여러 컷 보기 검사 (sr-a)sentReason min · step · 없음 (sr-b)견적 한 줄 · segments 쿼리 "
+           "(sr-c)보기 segments = compose 모델 · 견적 (sr-d)틀린 segments → rangeNote (sr-e)LF · node --check" +
+           ("" if node else " — node 없음: 화면 실행 건너뜀"))
+
+
+
+
 def falmod_audio_msg() -> str:
     """작업 195 (cr-f): vpoc.fal 소리 거절 안내 문구(검사 함수 밖에서 node 결과와 비교할 때)."""
     sys.path.insert(0, str(ROOT / "app"))
@@ -65361,6 +65556,7 @@ def main() -> int:
     check_vnew_retake_audio_scale_193b()
     check_vnew_retake_segments_194()
     check_vnew_retake_content_flag_195()
+    check_vnew_retake_sent_reason_196()
     print()
     if warnings:
         print(f"경고 {len(warnings)}건")
