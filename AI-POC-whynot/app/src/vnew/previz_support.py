@@ -487,8 +487,8 @@ def _apply_scene(scene: dict, grammar_by_cut: dict) -> dict:
         for sup in supports:
             actor_id = id_by_name.get(sup["name"])
             ca = by_id.get(actor_id) if actor_id else None
-            if ca is None:
-                continue  # 이름이 장면 인물과 맞지 않거나 이 컷에 없다(무시).
+            if ca is None or ca.get("manual"):
+                continue  # 이름이 장면 인물과 맞지 않거나 이 컷에 없다(무시). 작업 200: 직접 고친 인물은 그대로 둔다.
             entry, prop = _apply_actor(ca, sup, height_by_id.get(actor_id, BASE_HEIGHT_M), items)
             entries.append(entry)
             if prop is not None:

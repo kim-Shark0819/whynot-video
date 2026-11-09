@@ -886,6 +886,9 @@ class PrevizScene {
       camera.position.copy(pos);
       camera.lookAt(target);
     }
+    // 작업 200: 기울기(roll, 도). lookAt 이 매 프레임 방향을 새로 정하므로 쌓이지 않는다.
+    const roll = Number(cam.roll) || 0;
+    if (roll) camera.rotateZ(Math.max(-45, Math.min(45, roll)) * Math.PI / 180);
     if (cam.fov && camera.fov !== cam.fov) {
       camera.fov = Number(cam.fov);
       camera.updateProjectionMatrix();
@@ -967,6 +970,7 @@ class PrevizScene {
       this.actors[id].mannequin.group.visible = !!seen[id];
     });
     // 작업 151: 카메라가 보이는 마네킹 머리·몸통 안이거나 0.25m 안이면 시선 반대로 물려 그린다(설계 cut.camera 는 그대로).
+    // 작업 200: 사용자가 직접 놓은 카메라(cam.manual)는 물리지 않는다 — 놓은 자리 그대로 그리고, 경고는 편집 패널이 보인다.
     this.root.updateMatrixWorld(true);
     const volumes = [];
     Object.keys(this.actors).forEach((id) => {
@@ -974,7 +978,7 @@ class PrevizScene {
       if (mannequin.group.visible) mannequin.clearVolumes().forEach((v) => volumes.push(v));
     });
     const viewDir = look.clone().sub(camera.position);
-    if (volumes.length && viewDir.lengthSq() > 1e-12) {
+    if (!cam.manual && volumes.length && viewDir.lengthSq() > 1e-12) {
       this.cameraPullback = clearCameraPosition(camera.position, viewDir.normalize(), volumes, RENDER_MIN_CLEAR_M);
     } else {
       this.cameraPullback = 0;

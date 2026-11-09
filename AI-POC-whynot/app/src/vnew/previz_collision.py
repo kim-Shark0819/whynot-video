@@ -642,7 +642,8 @@ def resolve_cut(scene: dict, cut: dict, *, log_fixes: bool = True, pass_name: st
         x, z = _foot(ca)
         nx, nz = _inset_point(seat, x, z)
         moved = math.hypot(nx - x, nz - z)
-        if moved > SEAT_FIX_MIN:
+        # 작업 200: 사용자가 직접 놓은 인물(manual)은 자리를 옮기지 않는다(앉은 모양 sit 만 그 자리에서 다시 잡는다).
+        if moved > SEAT_FIX_MIN and not ca.get("manual"):
             x, z = round(nx, 4), round(nz, 4)
             ca["pos"] = [x, 0.0, z]
             _add_fix(actor_id, seat["id"], moved, "seat")
@@ -665,6 +666,12 @@ def resolve_cut(scene: dict, cut: dict, *, log_fixes: bool = True, pass_name: st
         actor_id = str(ca.get("id") or "")
         x0, z0 = _foot(ca)
         body = actor_parts(ca, heights.get(actor_id, BASE_HEIGHT_M), seated=False)
+        if ca.get("manual"):
+            # 작업 200: 직접 놓은 인물은 밀어내지 않는다. 겹치면 unresolved 로 알린다(화면이 경고를 보인다).
+            hits = _body_hits(body, _near_vols(vols, x0, z0))
+            if hits:
+                _add_unresolved(actor_id, hits[0][1])
+            continue
         others = []
         for other in actors:
             if other is ca:
