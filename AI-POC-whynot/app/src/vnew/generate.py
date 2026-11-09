@@ -14439,11 +14439,13 @@ def retake_plan(gen: dict, *, model: str, path: str, seconds: float, original: b
 
     참고 영상 경로: duration = enum(4~30, enum 이 없으면 4~30 정수) 중 필요 길이 이상인 가장 짧은 값(올림), 과금 = 그 길이, 해상도 = 원래 모델은
     gen 해상도, 그 밖은 _retake_resolution. 영상 편집 경로: 입력 = max(3, 길이)(채움), 원래 모델이 아니면 입력 15초 이하. trimTo = 필요 길이.
+    작업 196: sentReason = 보낼 길이가 필요 길이보다 긴 까닭 — "min"(모델 최소 길이: 가장 짧은 duration · PREVIZ_MIN_CLIP_S), "step"(다음 duration 으로
+    올림), ""(늘리지 않음 — 차이가 0.05초 이하).
     """
     gen = gen if isinstance(gen, dict) else {}
     caps = _previz_caps(model)
     length = round(max(0.0, float(seconds or 0)), 3)
-    out: dict = {"ok": False, "reason": "", "path": path, "seconds": length, "sentSeconds": None, "billedSeconds": None,
+    out: dict = {"ok": False, "reason": "", "path": path, "seconds": length, "sentSeconds": None, "sentReason": "", "billedSeconds": None,
                  "durations": [], "durationValue": None, "resolution": "", "resolutionValue": "", "usd": None, "priceKnown": False,
                  "maxBytes": 0, "trimTo": length}
     if path == "take":
@@ -14468,7 +14470,8 @@ def retake_plan(gen: dict, *, model: str, path: str, seconds: float, original: b
             return out
         usd, known = _retake_price(model, "take", sent, res[0])
         value = _take_duration_value(caps, sent)
-        out.update(ok=True, sentSeconds=float(sent), billedSeconds=float(sent),
+        raised = "" if sent <= length + 0.05 else "min" if sent == allowed[0] else "step"  # 196: 가장 짧은 길이로 올림 = 최소 길이
+        out.update(ok=True, sentSeconds=float(sent), sentReason=raised, billedSeconds=float(sent),
                    durationValue=str(value) if caps.get("durationAsString") else value, resolution=res[0], resolutionValue=res[1],
                    usd=usd, priceKnown=known, maxBytes=int(_take_prompt_budget(caps)))
         return out
@@ -14480,7 +14483,8 @@ def retake_plan(gen: dict, *, model: str, path: str, seconds: float, original: b
     max_bytes = int(vnew_settings.PREVIZ_PROMPT_TARGET)
     if not original and int(caps.get("promptMaxLength") or 0) > 0:
         max_bytes = min(max_bytes, int(caps.get("promptMaxLength")))
-    out.update(ok=True, sentSeconds=billed, billedSeconds=billed, usd=usd, priceKnown=known, maxBytes=max_bytes)
+    out.update(ok=True, sentSeconds=billed, sentReason="min" if billed > length + 0.05 else "", billedSeconds=billed, usd=usd,
+               priceKnown=known, maxBytes=max_bytes)
     return out
 
 

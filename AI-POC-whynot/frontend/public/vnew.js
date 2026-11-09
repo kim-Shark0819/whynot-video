@@ -13415,7 +13415,8 @@
     fix.selNow = key;
     var target = editFixSelTarget(ctx);
     if (target && !target.error && target.mid === fix.mid) {
-      var moved = !fix.clip || target.range.in !== fix.clip.in || target.range.out !== fix.clip.out;
+      var moved = !fix.clip || target.range.in !== fix.clip.in || target.range.out !== fix.clip.out ||
+        JSON.stringify(target.segments || null) !== JSON.stringify(fix.segments || null); // 작업 196: 보기가 조각을 따르므로 조각이 바뀌어도 다시 받는다
       fix.clip = target.range;
       fix.clipIds = target.ids.slice();
       fix.clipId = target.ids[0];
@@ -14332,8 +14333,19 @@
 
   function editFixViewPath(ctx, fix) {
     var path = editFixPath(ctx, fix);
+    if (fix.segments) return path + "?segments=" + encodeURIComponent(editFixSegQuery(ctx, fix.segments)); // 작업 196: 고른 조각 그대로
     if (fix.scope === "range" && fix.clip) path += "?in=" + encodeURIComponent(String(fix.clip.in)) + "&out=" + encodeURIComponent(String(fix.clip.out));
     return path;
+  }
+
+  /* 작업 196: 보기 GET 의 segments 쿼리 "mid:in-out,…"(타임라인 순서 · 조각마다 그 재료 원본 초 — 서버 retake._query_segments). 재료 mid 를
+     모르면 mid 없이(서버가 보기 재료로 본다). */
+  function editFixSegQuery(ctx, segments) {
+    return (segments || []).map(function (s) {
+      var mat = ((ctx || {}).materials || {})[s.sourceKey];
+      var mid = mat && mat.mid ? String(mat.mid) : "";
+      return (mid ? mid + ":" : "") + String(editRound3(Number(s.in))) + "-" + String(editRound3(Number(s.out)));
+    }).join(",");
   }
 
   /* 보기가 올 때 범위·모델 기본값. 구간을 기다리던 중 보기에 구간이 없으면(서버가 거절) 원본 칸 전체로 돌리고 이유를 남긴다. 고른 모델을 그
@@ -14606,13 +14618,21 @@
     return -1;
   }
 
-  /* 견적 한 줄(draft.plan): 고른 구간 길이 · 모델 최소 길이로 더 길게 만들면 그 길이와 잘라 쓰는 길이 · 해상도 · 예상 금액. */
+  /* 견적 한 줄(draft.plan): 고른 구간 길이 · 더 길게 만들면 그 까닭(작업 196 sentReason — min 모델 최소 길이 · step 모델 길이 단위)과 그 길이 ·
+     잘라 쓰는 길이 · 해상도 · 예상 금액. 까닭이 없으면(옛 초안 포함) 만드는 길이만. */
   function editFixComposeEstimate(plan) {
     var p = plan || {};
     var len = Number(p.trimTo) > 0 ? Number(p.trimTo) : Number(p.seconds) || 0;
     var sent = Number(p.sentSeconds) || len;
+    var longer = sent > len + 0.05;
     var parts = ["견적: 고른 구간 " + editFixSecs(len) + "초"];
-    parts.push(sent > len + 0.05 ? "모델 최소 길이에 맞춰 " + editFixSecs(sent) + "초로 만들고 " + editFixSecs(len) + "초만 씀" : editFixSecs(sent) + "초로 만듦");
+    if (longer && p.sentReason === "min") {
+      parts.push("모델 최소 길이(" + editFixSecs(sent) + "초)에 맞춰 " + editFixSecs(sent) + "초로 만들고 " + editFixSecs(len) + "초만 씀");
+    } else if (longer && p.sentReason === "step") {
+      parts.push("모델이 만드는 길이 단위에 맞춰 " + editFixSecs(sent) + "초로 만들고 " + editFixSecs(len) + "초만 씀");
+    } else {
+      parts.push(editFixSecs(sent) + "초로 만듦");
+    }
     if (p.resolution) parts.push(String(p.resolution));
     parts.push("예상 " + editFixMoney(p.usd));
     return parts.join(" · ");
