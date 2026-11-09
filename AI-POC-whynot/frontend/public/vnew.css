@@ -5737,3 +5737,144 @@ textarea.vnew-field-input {
     padding: 8px 10px;
   }
 }
+
+
+/* ---- 작업 201: ④ 뷰포트 편집기(도구 줄·조준 줄·도움말·키 줄·아웃라이너) ---- */
+
+.vnew-previz-editbar {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.vnew-previz-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+.vnew-previz-toolgroup {
+  display: inline-flex;
+  gap: 4px;
+}
+
+.vnew-previz-tool {
+  padding: 4px 10px;
+  font-size: 13px;
+  min-height: 30px;
+}
+
+.vnew-previz-tool.is-on {
+  border-color: var(--accent, #cb3208);
+  background: var(--accent, #cb3208);
+  color: #ffffff;
+}
+
+.vnew-previz-tool:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
+.vnew-previz-snap {
+  font-size: 13px;
+}
+
+.vnew-previz-caminfo {
+  margin-left: auto;
+  font-size: 12px;
+  color: var(--text-muted, #6b7280);
+  font-variant-numeric: tabular-nums;
+}
+
+.vnew-previz-help {
+  margin: 0;
+  font-size: 12px;
+}
+
+/* 뷰포트 포커스(단축키를 받는 상태)를 테두리로 보인다. */
+.vnew-previz-stage:focus {
+  outline: none;
+}
+
+.vnew-previz-stage:focus-visible,
+.vnew-previz-viewport:focus-within {
+  box-shadow: 0 0 0 2px var(--accent, #cb3208);
+}
+
+.vnew-previz-stage canvas {
+  touch-action: none;
+}
+
+.vnew-previz-keys {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+}
+
+.vnew-previz-keys-head {
+  font-size: 13px;
+}
+
+.vnew-previz-keys-scrub {
+  flex: 1 1 160px;
+  min-width: 120px;
+}
+
+.vnew-previz-keys-note {
+  flex-basis: 100%;
+  margin: 0;
+  font-size: 12px;
+}
+
+.vnew-previz-outliner {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-bottom: 8px;
+}
+
+.vnew-previz-outliner-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 3px 10px;
+  border: 1px solid var(--line, #e5e7eb);
+  border-radius: 999px;
+  background: var(--surface, #ffffff);
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.vnew-previz-outliner-item.is-on {
+  border-color: var(--accent, #cb3208);
+  color: var(--accent, #cb3208);
+  font-weight: 600;
+}
+
+/* 채널 박스: 고른 것 하나, 칸은 촘촘하게 */
+.vnew-previz-edit-card.is-selected {
+  border-color: var(--accent, #cb3208);
+}
+
+.vnew-previz-panel .vnew-field {
+  margin-bottom: 6px;
+}
+
+.vnew-previz-panel .vnew-field-input {
+  padding: 3px 6px;
+  font-size: 13px;
+}
+
+@media (max-width: 960px) {
+  .vnew-previz-layout {
+    grid-template-columns: 1fr;
+  }
+
+  .vnew-previz-caminfo {
+    margin-left: 0;
+    flex-basis: 100%;
+  }
+}

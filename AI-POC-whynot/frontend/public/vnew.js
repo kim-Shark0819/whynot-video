@@ -2188,6 +2188,8 @@
       item.addEventListener("click", function () {
         if (stepNo === state.planStep) return;
         if (stepNo <= maxStep || (stepNo === 7 && editAvailable())) {
+          // 작업 201: ④ 프리비즈에서 저장하지 않은 수정이 있으면 떠나기 전에 묻는다.
+          if (state.planStep === 4 && !previzConfirmLeave()) return;
           if (state.planStep === 7) editLeave(); // ⑦ 을 떠나면 남은 저장을 보내고 재생·키를 멈춘다
           state.planStep = stepNo;
           renderPlan();
@@ -5376,6 +5378,21 @@
   var previzCutIndex = 0; // 우측 패널이 보여 주는 timeline 컷 인덱스(평탄화)
   var previzRecording = null; // 녹화 진행 상태 {total, done, failed:[], current, aborted}
   var previzDirty = false; // 작업 200: 편집 패널에서 고치고 아직 [저장]하지 않았다(녹화 전에 저장해야 한다)
+  var PREVIZ_LEAVE_TEXT = "저장하지 않은 프리비즈 수정이 있습니다. 저장하지 않고 떠날까요?";
+
+  /* 작업 201: 저장하지 않은 프리비즈 수정이 있으면 떠나기 전에 묻는다(단계 이동·창 닫기). 떠나도 되면 true. */
+  function previzConfirmLeave() {
+    if (!previzDirty || !previzCtl) return true;
+    if (!window.confirm(PREVIZ_LEAVE_TEXT)) return false;
+    previzDirty = false;
+    return true;
+  }
+  window.addEventListener("beforeunload", function (event) {
+    if (previzDirty && previzCtl) {
+      event.preventDefault();
+      event.returnValue = PREVIZ_LEAVE_TEXT;
+    }
+  });
 
   function destroyPreviz() {
     if (previzCtl) {
@@ -6048,6 +6065,10 @@
       left.appendChild(tabs);
     }
 
+    // 작업 201: 뷰포트 위 도구 줄(시점·도구·눈금·되돌리기) + 조준 줄(이 인물 보기·카메라를 여기로·렌즈) + 도움말 한 줄.
+    var bar = previzEditorBar();
+    left.appendChild(bar.root);
+
     // 16:9 뷰포트
     var viewport = el("div", "vnew-previz-viewport");
     left.appendChild(viewport);
@@ -6060,6 +6081,10 @@
     var timeLabel = el("span", "vnew-previz-time", "0.0s");
     transport.appendChild(timeLabel);
     left.appendChild(transport);
+
+    // 작업 201: 이 컷 카메라의 시작/끝 키 + 미리 보기 스크러버. 끝 키가 없으면 카메라는 고정.
+    var keys = previzKeyStrip();
+    left.appendChild(keys.root);
 
     // 타임라인(컷 경계 눈금·컷 번호·대사 말풍선)
     var flat = flattenCuts(scenes);
@@ -6128,6 +6153,7 @@
         previzCtl = ctl;
         duration = previzCtl.duration || 0;
         buildTimeline();
+        wireEditor();
         // 작업 200: 다시 그린 뒤(저장 → 다시 불러오기 포함) 패널이 보던 컷의 시작을 그린다 — 저장한 값이 그 컷에 보인다.
         var focus = flat[previzCutIndex];
         if (focus) previzCtl.seek(Number(focus.cut.start) || 0);
@@ -6203,6 +6229,180 @@
       }
     });
 
+    // --- 작업 201: 편집기 도구 줄·키 줄·연결 ---
+    var selected = null; // 뷰포트에서 고른 것({type, id}) — 패널이 그것을 보인다
+
+    function toolButton(parent, text, title, onClick) {
+      var b = el("button", "outline-button vnew-previz-tool", text);
+      b.type = "button";
+      if (title) b.title = title;
+      b.addEventListener("click", function () {
+        if (previzCtl) onClick();
+      });
+      parent.appendChild(b);
+      return b;
+    }
+
+    function previzEditorBar() {
+      var root = el("div", "vnew-previz-editbar");
+      var row = el("div", "vnew-previz-toolbar");
+      var views = el("div", "vnew-previz-toolgroup");
+      var workBtn = toolButton(views, "작업 시점", "자유롭게 둘러보는 시점(녹화되지 않습니다)", function () {
+        previzCtl.setViewMode("work");
+      });
+      var shotBtn = toolButton(views, "카메라 시점", "이 컷 카메라로 봅니다 — 녹화되는 화면", function () {
+        previzCtl.setViewMode("shot");
+      });
+      row.appendChild(views);
+      var tools = el("div", "vnew-previz-toolgroup");
+      var toolBtns = {
+        select: toolButton(tools, "선택 (Q)", "눌러서 고르기", function () { previzCtl.setTool("select"); }),
+        translate: toolButton(tools, "이동 (W)", "인물은 바닥에서, 카메라·바라보는 곳은 높이까지", function () { previzCtl.setTool("translate"); }),
+        rotate: toolButton(tools, "회전 (E)", "인물 방향 / 카메라 좌우·위아래", function () { previzCtl.setTool("rotate"); })
+      };
+      toolButton(tools, "맞춰 보기 (F)", "F = 선택한 것에 맞춰 보기", function () { previzCtl.frameSelection(); });
+      row.appendChild(tools);
+      var snapWrap = el("label", "vnew-previz-check vnew-previz-snap");
+      var snap = el("input");
+      snap.type = "checkbox";
+      snap.addEventListener("change", function () {
+        if (previzCtl) previzCtl.setSnap(snap.checked);
+      });
+      snapWrap.appendChild(snap);
+      snapWrap.appendChild(el("span", null, "눈금 맞춤 (10cm / 15°)"));
+      row.appendChild(snapWrap);
+      var hist = el("div", "vnew-previz-toolgroup");
+      var undoBtn = toolButton(hist, "↶ 되돌리기", "Ctrl+Z", function () { previzCtl.undo(); });
+      var redoBtn = toolButton(hist, "↷ 다시 하기", "Ctrl+Shift+Z", function () { previzCtl.redo(); });
+      row.appendChild(hist);
+      root.appendChild(row);
+
+      var aimRow = el("div", "vnew-previz-toolbar vnew-previz-aimbar");
+      var aimBtn = toolButton(aimRow, "이 인물 보기", "카메라를 고른 뒤 인물을 누르면 그 머리 높이를 바라봅니다", function () {
+        var on = !previzCtl.state().aim;
+        if (on) previzCtl.select({ type: "camera" });
+        previzCtl.setAimMode(on);
+      });
+      var hereBtn = toolButton(aimRow, "카메라를 여기로", "작업 시점의 지금 자리·방향으로 촬영 카메라를 옮깁니다", function () {
+        previzCtl.placeCameraHere();
+      });
+      var lensBtns = {};
+      PREVIZ_LENS_PRESETS.forEach(function (mm) {
+        lensBtns[mm] = toolButton(aimRow, mm + "mm", "렌즈 " + mm + "mm", function () { previzCtl.setLens(mm); });
+        lensBtns[mm].classList.add("vnew-previz-lens");
+      });
+      var info = el("span", "vnew-previz-caminfo", "");
+      aimRow.appendChild(info);
+      root.appendChild(aimRow);
+      root.appendChild(el("p", "vnew-hint vnew-previz-help", "Q 선택 · W 이동 · E 회전 · F 맞춰 보기 · 휠 확대 · Shift+드래그 이동 · Ctrl+Z 되돌리기"));
+
+      function sync(st) {
+        if (!previzCtl || !st) return;
+        workBtn.classList.toggle("is-on", st.view === "work");
+        shotBtn.classList.toggle("is-on", st.view === "shot");
+        Object.keys(toolBtns).forEach(function (k) {
+          toolBtns[k].classList.toggle("is-on", st.tool === k);
+        });
+        snap.checked = !!st.snap;
+        undoBtn.disabled = !st.canUndo;
+        redoBtn.disabled = !st.canRedo;
+        aimBtn.classList.toggle("is-on", !!st.aim);
+        hereBtn.disabled = st.view !== "work";
+        var ci = previzCtl.cameraInfo();
+        Object.keys(lensBtns).forEach(function (mm) {
+          lensBtns[mm].classList.toggle("is-on", ci.lensSet && Number(ci.lensMm) === Number(mm));
+        });
+        info.textContent = st.aim
+          ? "인물을 누르세요(Esc 취소)"
+          : "렌즈 " + ci.lensMm + "mm · 화각 " + ci.fov + "° · 카메라 높이 " + ci.heightM.toFixed(2) + "m";
+      }
+      return { root: root, sync: sync };
+    }
+
+    function previzKeyStrip() {
+      var root = el("div", "vnew-previz-keys");
+      root.appendChild(el("strong", "vnew-previz-keys-head", "카메라 키"));
+      var startBtn = toolButton(root, "시작 키", "지금 보이는 카메라를 이 컷의 시작 자세로", function () { previzCtl.setKey("start"); });
+      var endBtn = toolButton(root, "끝 키", "지금 보이는 카메라를 이 컷의 끝 자세로(시작 → 끝으로 움직입니다)", function () { previzCtl.setKey("end"); });
+      var clearBtn = toolButton(root, "끝 키 지우기", "카메라를 고정합니다", function () { previzCtl.clearEndKey(); });
+      var scrub = el("input", "vnew-previz-keys-scrub");
+      scrub.type = "range";
+      scrub.min = "0";
+      scrub.max = "1";
+      scrub.step = "0.01";
+      scrub.value = "0";
+      scrub.title = "이 컷 안에서 미리 보기";
+      scrub.addEventListener("input", function () {
+        if (previzCtl) previzCtl.scrubKey(parseFloat(scrub.value) || 0);
+      });
+      root.appendChild(scrub);
+      var note = el("span", "vnew-hint vnew-previz-keys-note", "");
+      root.appendChild(note);
+      void startBtn;
+      void endBtn;
+      function sync() {
+        if (!previzCtl) return;
+        var ci = previzCtl.cameraInfo();
+        clearBtn.disabled = !ci.hasEndKey;
+        if (document.activeElement !== scrub) scrub.value = String(ci.keyU);
+        note.textContent = ci.hasEndKey
+          ? (ci.editingEnd ? "끝 키를 고치는 중" : "시작 키를 고치는 중") + " · 시작 → 끝으로 부드럽게 움직입니다"
+          : "끝 키가 없으면 카메라는 고정입니다";
+      }
+      return { root: root, sync: sync };
+    }
+
+    var panelCommitTimer = 0;
+    function schedulePanelCommit(cut) {
+      if (panelCommitTimer) window.clearTimeout(panelCommitTimer);
+      panelCommitTimer = window.setTimeout(function () {
+        panelCommitTimer = 0;
+        if (previzCtl && previzCtl.commitEdit) previzCtl.commitEdit(cut);
+      }, 600);
+    }
+
+    function markDirty() {
+      previzDirty = true;
+      if (dirtyNote) dirtyNote.style.display = "";
+    }
+
+    function focusCutOf(cut) {
+      var idx = flat.findIndex(function (it) { return it.cut === cut; });
+      if (idx >= 0 && idx !== previzCutIndex) {
+        previzCutIndex = idx;
+        return true;
+      }
+      return false;
+    }
+
+    /* 뷰포트 편집기 ↔ 패널: 고르면 패널이 그것으로 넘어가고, 끄는 동안 숫자가 따라 바뀌고, 놓으면(한 단계) 패널을 다시 그린다. */
+    function wireEditor() {
+      if (!previzCtl.onState) return;
+      previzCtl.onState(function (st) {
+        bar.sync(st);
+        keys.sync();
+      });
+      previzCtl.onSelect(function (sel) {
+        selected = sel;
+        renderCutPanel();
+        var card = right.querySelector(".vnew-previz-edit-card.is-selected");
+        if (card && card.scrollIntoView) card.scrollIntoView({ block: "nearest" });
+      });
+      previzCtl.onEdit(function (ev) {
+        markDirty();
+        var moved = ev && ev.cut ? focusCutOf(ev.cut) : false;
+        if (ev && ev.kind === "live" && !moved) {
+          fieldRefreshers.forEach(function (fn) { fn(); });
+        } else {
+          renderCutPanel();
+        }
+        bar.sync(previzCtl.state());
+        keys.sync();
+      });
+      bar.sync(previzCtl.state());
+      keys.sync();
+    }
+
     // --- 우측 편집 패널: 현재 컷의 카메라·인물 ---
     var isEditingPanel = false;
     var dirtyNote = null; // 작업 200: [저장] 아래 "저장하지 않은 수정" 줄
@@ -6217,10 +6417,41 @@
       var scene = item.scene;
       var cut = item.cut;
       var room = scene.room || {};
+      fieldRefreshers = [];
       right.appendChild(el("h3", "vnew-previz-panel-title", "컷 " + (previzCutIndex + 1) + " 편집"));
 
-      // 웹툰 패널 썸네일 + 시점 일치도 배지 + 패널 분석(읽기 전용)
-      right.appendChild(previzPanelMatchCard(cut, previz));
+      // 작업 201: 목록(아웃라이너) — 누르면 뷰포트에서도 고른다. 패널은 고른 것의 값(채널 박스)만 보인다.
+      var actorsMeta = {};
+      (scene.actors || []).forEach(function (a) {
+        actorsMeta[a.id] = a;
+      });
+      var selActor = selected && selected.type === "actor" ? (cut.actors || []).filter(function (ca) { return ca.id === selected.id; })[0] : null;
+      var outliner = el("div", "vnew-previz-outliner");
+      function outlinerItem(text, sel, on, color) {
+        var b = el("button", "vnew-previz-outliner-item" + (on ? " is-on" : ""));
+        b.type = "button";
+        if (color) {
+          var dot = el("i", "vnew-previz-dot");
+          dot.style.background = color;
+          b.appendChild(dot);
+        }
+        b.appendChild(el("span", null, text));
+        b.addEventListener("click", function () {
+          if (previzCtl && previzCtl.select) previzCtl.select(sel);
+          else {
+            selected = sel;
+            renderCutPanel();
+          }
+        });
+        outliner.appendChild(b);
+      }
+      outlinerItem("카메라", { type: "camera" }, !selActor && (!selected || selected.type === "camera"));
+      outlinerItem("바라보는 곳", { type: "target" }, !!(selected && selected.type === "target"));
+      (cut.actors || []).forEach(function (ca) {
+        var meta = actorsMeta[ca.id] || {};
+        outlinerItem(meta.name || ca.id, { type: "actor", id: ca.id }, selActor === ca, meta.color || "#ffffff");
+      });
+      right.appendChild(outliner);
 
       // 작업 200: 직접 놓은 값 때문에 생긴 문제(옮기지 않고 알리기만 한다) — 저장한 값 기준(서버 보기).
       var warnList = cutWarnings(cut);
@@ -6232,8 +6463,8 @@
         right.appendChild(warnBox);
       }
 
-      // 카메라
-      var camCard = el("div", "vnew-previz-edit-card");
+      // 카메라(카메라·바라보는 곳을 골랐거나 아무것도 안 골랐을 때)
+      var camCard = el("div", "vnew-previz-edit-card" + (selActor ? "" : " is-selected"));
       var camHead = el("div", "vnew-previz-actor-head");
       camHead.appendChild(el("strong", "vnew-previz-edit-head", "카메라"));
       var cam = cut.camera || (cut.camera = { pos: [0, 1.5, 4], target: [0, 1.2, 0], fov: 50 });
@@ -6243,35 +6474,28 @@
       camCard.appendChild(camHead);
       var camNote = el("p", "vnew-hint vnew-previz-limit-note");
       var camBounds = cameraBounds(room);
-      camCard.appendChild(vec3Field("위치 (x,y,z)", cam, "pos", camBounds, camNote, scene, cut, function (axis, delta) {
+      // 작업 201: 끝 키를 고치는 중이면 위치·바라보는 곳은 끝 키(moveTo) 값이다.
+      var editingEnd = !!(cam.moveTo && previzCtl && previzCtl.cameraInfo && previzCtl.cameraInfo().editingEnd);
+      var keyObj = editingEnd ? cam.moveTo : cam;
+      var keyLabel = editingEnd ? " · 끝 키" : "";
+      camCard.appendChild(vec3Field("위치 (x,y,z)" + keyLabel, keyObj, "pos", camBounds, camNote, scene, cut, function (axis, delta) {
         cam.manual = true;
-        shiftMove(cam, "pos", axis, delta);
+        if (!editingEnd) shiftMove(cam, "pos", axis, delta);
       }));
-      camCard.appendChild(vec3Field("바라보는 곳 (x,y,z)", cam, "target", camBounds, camNote, scene, cut, function (axis, delta) {
+      camCard.appendChild(vec3Field("바라보는 곳 (x,y,z)" + keyLabel, keyObj, "target", camBounds, camNote, scene, cut, function (axis, delta) {
         cam.manual = true;
-        shiftMove(cam, "target", axis, delta);
+        if (!editingEnd) shiftMove(cam, "target", axis, delta);
       }));
-      // 바라보는 곳을 인물 눈높이로 한 번에(작업 200).
+      // 바라보는 곳을 인물 머리 높이로 한 번에(작업 200) — 계산은 뷰포트 편집기(lookAtActor) 하나로.
       var lookRow = el("div", "vnew-previz-look-row");
-      var actorsMeta = {};
-      (scene.actors || []).forEach(function (a) {
-        actorsMeta[a.id] = a;
-      });
       (cut.actors || []).forEach(function (ca) {
         var meta = actorsMeta[ca.id] || {};
         var btn = el("button", "outline-button vnew-previz-look", (meta.name || ca.id) + " 보기");
         btn.type = "button";
         btn.addEventListener("click", function () {
-          var p = ca.pos || [0, 0, 0];
-          var next = [Number(p[0]) || 0, eyeHeight(ca, meta), Number(p[2]) || 0];
-          var old = (cam.target || [0, 0, 0]).slice();
-          cam.target = next;
-          cam.manual = true;
-          [0, 1, 2].forEach(function (i) {
-            shiftMove(cam, "target", i, next[i] - (Number(old[i]) || 0));
-          });
-          applyEdit(scene, cut);
-          renderCutPanel();
+          if (!previzCtl || !previzCtl.lookAtActor) return;
+          if (previzCtl.editCut() !== cut) previzCtl.seek(Number(cut.start) || 0);
+          previzCtl.lookAtActor(ca.id);
         });
         lookRow.appendChild(btn);
       });
@@ -6301,18 +6525,7 @@
       });
       lensWrap.appendChild(lensInput);
       camCard.appendChild(lensWrap);
-      var presetRow = el("div", "vnew-previz-lens-presets");
-      PREVIZ_LENS_PRESETS.forEach(function (mm) {
-        var pb = el("button", "outline-button vnew-previz-lens", mm + "mm");
-        pb.type = "button";
-        if (Number(cam.lensMm) === mm) pb.classList.add("is-on");
-        pb.addEventListener("click", function () {
-          setLens(mm, mm);
-          renderCutPanel();
-        });
-        presetRow.appendChild(pb);
-      });
-      camCard.appendChild(presetRow);
+      // 렌즈 프리셋(18~135mm)은 작업 201부터 뷰포트 위 조준 줄에 있다(같은 lensMm).
       function setLens(mm, asked) {
         cam.lensMm = mm;
         cam.fov = previzFovFromLens(mm);
@@ -6325,27 +6538,19 @@
         cam.manual = true;
       }));
       if (cam.moveTo) {
-        // 카메라 이동이 있는 컷: 위치를 고치면 끝 위치도 같은 만큼 옮긴다. 고정하려면 이동을 없앤다.
-        var moveRow = el("div", "vnew-previz-move-row");
-        moveRow.appendChild(el("span", "vnew-hint", "이 컷은 카메라가 움직입니다(위치를 고치면 끝 위치도 같이 옮깁니다)."));
-        var stopBtn = el("button", "outline-button", "이동 없애기(고정)");
-        stopBtn.type = "button";
-        stopBtn.addEventListener("click", function () {
-          delete cam.moveTo;
-          cam.manual = true;
-          applyEdit(scene, cut);
-          renderCutPanel();
-        });
-        moveRow.appendChild(stopBtn);
-        camCard.appendChild(moveRow);
+        // 카메라 이동(끝 키)이 있는 컷: 고정은 아래 [끝 키 지우기].
+        camCard.appendChild(el("p", "vnew-hint", editingEnd
+          ? "끝 키 값을 고치는 중입니다(키 줄 스크러버를 앞쪽으로 옮기면 시작 키)."
+          : "이 컷은 카메라가 움직입니다(위치를 고치면 끝 위치도 같이 옮깁니다)."));
       }
       camCard.appendChild(camNote);
-      right.appendChild(camCard);
+      if (!selActor) right.appendChild(camCard);
 
-      // 인물 목록(색 칩·이름·pose·위치)
+      // 인물(고른 인물 하나 — 색 칩·이름·pose·위치)
       (cut.actors || []).forEach(function (ca) {
+        if (ca !== selActor) return;
         var meta = actorsMeta[ca.id] || {};
-        var card = el("div", "vnew-previz-edit-card");
+        var card = el("div", "vnew-previz-edit-card is-selected");
         var headRow = el("div", "vnew-previz-actor-head");
         var chip = el("i", "vnew-previz-dot");
         chip.style.background = meta.color || "#ffffff";
@@ -6398,6 +6603,9 @@
         right.appendChild(card);
       });
 
+      // 웹툰 패널 썸네일 + 시점 일치도 배지 + 패널 분석(읽기 전용) — 작업 201: 채널 박스 아래로.
+      right.appendChild(previzPanelMatchCard(cut, previz));
+
       // 저장 버튼
       var saveBtn = el("button", "primary-button vnew-previz-save", "저장");
       saveBtn.type = "button";
@@ -6422,7 +6630,13 @@
       dirtyNote = el("p", "vnew-hint vnew-previz-dirty", "저장하지 않은 수정이 있습니다.");
       dirtyNote.style.display = previzDirty ? "" : "none";
       right.appendChild(dirtyNote);
+      if (previzCtl && previzCtl.state) {
+        bar.sync(previzCtl.state());
+        keys.sync();
+      }
     }
+
+    var fieldRefreshers = []; // 작업 201: 기즈모를 끄는 동안 숫자 칸을 따라 바꾼다(입력 중인 칸은 그대로)
 
     /* 작업 200: 이 컷의 경고 — 서버가 본 직접 놓은 카메라 문제 + 직접 놓은 인물이 소품과 겹침(풀지 않고 알림). */
     function cutWarnings(cut) {
@@ -6473,30 +6687,22 @@
       return [[-hw, hw], [0, 0], [-hd, hd]];
     }
 
-    /* 인물 눈높이(바라보는 곳 버튼). 앉은 인물은 엉덩이 높이 + 상체. */
-    function eyeHeight(ca, meta) {
-      var h = Number(meta.heightM) || 1.7;
-      if (ca.pose === "sit") {
-        var hip = ca.sit && Number(ca.sit.hipY) > 0 ? Number(ca.sit.hipY) : 0.5;
-        return Math.round((hip + 0.75 * h / 1.7) * 1000) / 1000;
-      }
-      return Math.round(h * 0.94 * 1000) / 1000;
-    }
-
     /* 카메라 이동(moveTo)이 있으면 시작을 옮긴 만큼 끝도 옮긴다(옛 끝으로 되돌아가지 않게). */
     function shiftMove(cam, key, axis, delta) {
       if (!cam.moveTo || !Array.isArray(cam.moveTo[key]) || !delta) return;
       cam.moveTo[key][axis] = Math.round(((Number(cam.moveTo[key][axis]) || 0) + delta) * 1000) / 1000;
     }
 
-    // 편집값을 즉시 뷰포트에 반영: 컨트롤러를 그 컷 시작 시각으로 다시 그린다.
+    // 편집값을 즉시 뷰포트에 반영: 그 컷을 보고 있으면 지금 자세 그대로(키 스크러버 유지), 아니면 그 컷 시작을 그린다.
+    // 작업 201: 잠시 멈춘 뒤(0.6초) 되돌리기 한 단계로 기록한다.
     function applyEdit(scene, cut) {
       isEditingPanel = true;
-      previzDirty = true;
-      if (dirtyNote) dirtyNote.style.display = "";
+      markDirty();
       if (previzCtl) {
         previzCtl.pause();
-        previzCtl.seek(Number(cut.start) || 0);
+        if (previzCtl.editCut && previzCtl.editCut() === cut) previzCtl.refresh();
+        else previzCtl.seek(Number(cut.start) || 0);
+        schedulePanelCommit(cut);
       }
       window.setTimeout(function () {
         isEditingPanel = false;
@@ -6515,16 +6721,17 @@
       var wrap = el("label", "vnew-field vnew-previz-vec");
       wrap.appendChild(el("span", "vnew-field-label", label));
       var row = el("div", "vnew-previz-vec-row");
-      var arr = Array.isArray(obj[key]) ? obj[key] : (obj[key] = [0, 0, 0]);
+      if (!Array.isArray(obj[key])) obj[key] = [0, 0, 0];
       var names = ["x", "y", "z"];
       (axes || [0, 1, 2]).forEach(function (i) {
         var input = el("input", "vnew-field-input");
         input.type = "number";
         input.step = "0.05";
-        input.value = String(Number(arr[i]) || 0);
+        input.value = String(Number(obj[key][i]) || 0);
         input.addEventListener("input", function () {
           var raw = parseFloat(input.value);
           if (!isFinite(raw)) return;
+          var arr = obj[key]; // 작업 201: 편집기가 바꾼 뒤에도 지금 배열을 쓴다
           var before = Number(arr[i]) || 0;
           var v = clampNote(raw, Math.round(bounds[i][0] * 100) / 100, Math.round(bounds[i][1] * 100) / 100, note, names[i]);
           arr[i] = v;
@@ -6532,7 +6739,10 @@
           applyEdit(scene, cut);
         });
         input.addEventListener("change", function () {
-          input.value = String(Number(arr[i]) || 0);
+          input.value = String(Number(obj[key][i]) || 0);
+        });
+        fieldRefreshers.push(function () {
+          if (document.activeElement !== input && Array.isArray(obj[key])) input.value = String(Number(obj[key][i]) || 0);
         });
         row.appendChild(input);
       });
@@ -6557,6 +6767,9 @@
       });
       input.addEventListener("change", function () {
         input.value = String(Number(obj[key]) || 0);
+      });
+      fieldRefreshers.push(function () {
+        if (document.activeElement !== input) input.value = String(Number(obj[key]) || 0);
       });
       wrap.appendChild(input);
       return wrap;
@@ -6714,7 +6927,7 @@
       var staleNos = segments.map(function (seg, i) { return staleIds.indexOf(seg.id) >= 0 ? "구간 " + (i + 1) : ""; })
         .filter(function (t) { return t; });
       staleBox.appendChild(el("p", "vnew-previz-stale-msg", PREVIZ_STALE_TEXT + " (" + staleNos.join(", ") + ")"));
-      var staleBtn = el("button", "primary-button vnew-previz-stale-btn", "다시 녹화");
+      var staleBtn = el("button", "primary-button vnew-previz-stale-btn", "변경된 컷만 다시 녹화");
       staleBtn.type = "button";
       staleBtn.disabled = busy;
       staleBtn.addEventListener("click", function () {
