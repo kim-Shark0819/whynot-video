@@ -712,7 +712,8 @@ def _take_prompt_budget(caps: dict | None = None) -> int:
     Seedance 2.5 reference-to-video 의 prompt 에는 maxLength 가 없다(073 caps 확인) → 2500 은 우리 fal 기본값
     (DEFAULT_PROMPT_MAX)일 뿐이라 상한으로 보지 않는다. caps.promptMaxLength 가 '스키마 명시 값'(= 기본 2500 이 아닌
     실제 maxLength)이면 그 값과 기본값 중 작은 값을 쓴다. promptMaxLength 가 DEFAULT_PROMPT_MAX 와 같으면 '미명시'로 본다.
-    통 테이크 API 가 바이트 상한을 문서로 밝힌 모델은 없어 바이트 안전 상한은 두지 않는다.
+    통 테이크 API 가 바이트 상한을 문서로 밝힌 모델은 없다. 작업 197 fix2: 197 짧은 형 단계만 이 글자 상한과 함께
+    기본 상한의 UTF-8 바이트도 본다(_take_prompt_bytes_ok, 검사 065 의 4,000B). fits 는 글자만.
     """
     budget = int(vnew_settings.VNEW_TAKE_PROMPT_MAX_CHARS or 4000)
     caps = caps or {}
@@ -726,6 +727,17 @@ def _take_prompt_budget(caps: dict | None = None) -> int:
 def _prompt_len(text: str) -> int:
     """통 테이크 프롬프트 길이(작업 157): 글자 수(_take_prompt_budget 과 같은 단위)."""
     return len(str(text or ""))
+
+
+def _take_prompt_bytes_ok(text: str) -> bool:
+    """통 테이크 · vibe 프롬프트가 UTF-8 바이트로도 기본 상한(VNEW_TAKE_PROMPT_MAX_CHARS, 4000) 안인가(작업 197 fix2).
+
+    한글 대사 · 기호(–, →, —)는 글자보다 바이트가 길어 글자만 재면 3,978자 = 4,074B 처럼 197 글이 4,000B 를 넘겨도
+    197 짧은 형 단계(통 테이크 bgHarmony · vibe harmony — 조화 문장 짧은 형 + 장소 줄 짧은 형)가 돌지 않는다. 바이트는
+    그 197 단계만 더 돌린다. 157 고정 부분 짧은 형 · 컷 내용 줄이기 · fits · 조각 나누기는 지금처럼 글자 상한
+    (_take_prompt_budget)만 본다(197 끈 글은 그대로 — fx-i sha).
+    """
+    return len(str(text or "").encode("utf-8")) <= int(vnew_settings.VNEW_TAKE_PROMPT_MAX_CHARS or 4000)
 
 
 # ================================================================ 금액(estimate)
@@ -3621,12 +3633,66 @@ def _take_timeline_entries(plan: dict, take: dict) -> list[dict]:
     return entries
 
 
+# ---------------------------------------------------------------- 작업 197: 장소 · 배경 그림은 참고만
+#
+# prod: 배경이 인물 뒤에 붙인 그림처럼 따로 놀았다(화풍 · 빛 · 원근 · 선명도가 다름). 장소 그림을 "그대로 지켜라 · 똑같이 맞춰라" 하던
+# 줄을 모두 이 한 곳의 문구로 바꾼다 — 장소 그림 = 어디인지(배치 · 랜드마크 · 소품 · 시간대) 참고, 배경은 영상 모델이 인물과 같은 샷에서
+# 새로 그린다. 조화 문장(_bg_harmony)은 장소 · 배경을 말하는 프롬프트마다 1번, 줄여야 하면 짧은 형(BG_HARMONY_SHORT — 배경 조각 중
+# 맨 마지막에 빠진다). 장소 이어짐은 "같은 장소"(같은 픽셀이 아님)로 남긴다. 보내는 그림(어느 참고 · 몇 장 · 순서)은 그대로다.
+LOCATION_REF_LINE = ("{tag}{note} = location reference only (layout, landmarks, props, time of day); do not paste it as a "
+                     "backdrop, render the background fresh with the characters")
+# 줄여야 할 때(통 테이크 · vibe 줄이기 첫 단계부터)의 짧은 형. 새로 그리라는 말은 조화 짧은 형이 맡는다. fix1: 197 전 장소 줄보다
+# 길지 않게(다 줄인 프롬프트가 197 전보다 길어지지 않게) — 배치 · 랜드마크 목록은 긴 형에만.
+LOCATION_REF_SHORT = "{tag}{note} = location reference only, not a backdrop"
+LOCATION_REF_EMPTY = " (no people in it)"
+LOCATION_REF_REAL = " (real photo, no people in it)"
+# 작업 197 fix1: 통 테이크 · 컷 단위 예산(4,000자 · 2,500B) 때문에 문구를 줄였다(뜻은 같다 — 한 그림 · 화풍/사진 느낌 · 빛 ·
+# 선명도 · 크기 · 접지 그림자 · 원근 · 카메라와 함께 움직이는 배경).
+BG_HARMONY = ("Render characters and background as one image: {look}, palette, light direction and sharpness; characters "
+              "at the right scale with contact shadows and matching perspective{camera}.")
+BG_HARMONY_LOOK = {"webtoon": "same art style (the characters' webtoon style), line work",
+                   "real": "one photographic look (the same lens, depth of field and grain)"}
+BG_HARMONY_CAMERA = "; the background moves with the camera"
+BG_HARMONY_SHORT = "Render background and characters together in one style."
+
+
+def _location_ref(tag: str, note: str = "", *, short: bool = False) -> str:
+    """작업 197: 장소 그림 이름표 1줄(끝 마침표 없음). tag = "@Image{no}" · "Image 2" 처럼 그 프롬프트의 그림 부름."""
+    return (LOCATION_REF_SHORT if short else LOCATION_REF_LINE).format(tag=tag, note=note)
+
+
+def _bg_harmony(real: bool = False, *, short: bool = False, still: bool = False) -> str:
+    """작업 197: 인물 · 배경 조화 문장. real = 한 사진 느낌(렌즈 · 심도 · 그레인), 아니면 인물의 웹툰 화풍. still(시작 그림 1장)은
+    카메라 절이 없다. short = 줄여야 할 때의 짧은 형."""
+    if short:
+        return BG_HARMONY_SHORT
+    return BG_HARMONY.format(look=BG_HARMONY_LOOK["real" if real else "webtoon"], camera="" if still else BG_HARMONY_CAMERA)
+
+
+def _bg_harmony_form(real: bool, form: str) -> str:
+    """작업 197: 조화 문장의 형 — "full" · "short" · "none"(줄이기 맨 끝에 뺌)."""
+    return "" if form == "none" else _bg_harmony(real, short=form == "short")
+
+
+# 작업 197: 통 테이크(옛 경로) ASSETS 장소 줄(+ 배경 짧은 형 단계의 짧은 형). 옛 글 "the location; keep its structure and props" ·
+# "(real photo, no people in it); keep this place, its background and light in every shot".
+TAKE_LOCATION_LINE = _location_ref("@Image{no}")
+TAKE_LOCATION_LINE_SHORT = _location_ref("@Image{no}", short=True)
+REAL_TAKE_LOCATION_LINE = _location_ref("@Image{no}", LOCATION_REF_REAL)
+REAL_TAKE_LOCATION_LINE_SHORT = _location_ref("@Image{no}", LOCATION_REF_REAL, short=True)
+# 작업 197: 맨 앞 고정부(_fixed_head)의 배경 머리 · vibe Setting 머리. 옛 글 "BACKGROUND (no people, same in every shot)" ·
+# "Setting (keep identical in every shot)" — 같은 픽셀이 아니라 같은 장소. fix1: 고정부는 Kling 2,300B 컷 · 2,500B 컷 단위
+# 머리에도 들어가 옛 글보다 3B 만 길게("same place throughout") — 그 컷들의 장소 고정 줄이 밀려나지 않게.
+FIXED_BACKGROUND_HEAD = "BACKGROUND (no people, same place throughout)"
+VIBE_SETTING_HEAD = "Setting (the same place in every shot)"
+
 # vnew-live-fx RA4.2·RA5.2 묘사 규칙(참고 구현 vpoc/compose.py:491·500-502, vpoc/llm.py:1255-1258). 인물 모습 유지
 # (rule_replace "keep face and hair identical …")는 이미 있어 그대로 둔다. VNEW_FX 켬일 때만 붙인다.
+# 작업 197: 끝 문장 옛 글 "The location, its props and background stay identical in every cut." → 같은 장소 · 같은 소품.
 RULE_BODY = (
     " Each person has exactly two hands; never show extra hands. Hair color and clothing patterns,"
-    " including where each pattern is, stay exactly as in the references. The location, its props and"
-    " background stay identical in every cut."
+    " including where each pattern is, stay exactly as in the references. Every cut stays in the same place"
+    " with the same props."
 )
 # 작업 157: 옛 bodyShort 짧은 형(RULE_BODY_SHORT)은 없앴다 — 통 테이크 RULES 는 짧은 형 1줄(TAKE_RULES_COMPACT)로 통째로 바뀐다.
 # 컷 단위(Kling) CONTINUITY 앞에 넣는 문장(090 필수 수정 2: ≤ 90B 짧은 형, 문장 89B + 띄어쓰기). 손 두 개·머리색·
@@ -3681,7 +3747,8 @@ REAL_TAKE_AVOID = (
 )
 
 # 작업 157: 통 테이크 고정 부분의 짧은 형(예산을 넘으면 컷 내용보다 먼저 이 형으로, 이 순서로 바꾼다). 각 1줄.
-TAKE_COMPACT_ORDER = ("style", "avoid", "motion", "harmony", "rules", "background", "assets")
+# 작업 197: 맨 앞 bgHarmony(조화 문장 짧은 형), 맨 끝 bgHarmonyDrop(조화 문장 뺌 — 배경 조각 중 마지막, 컷 내용보다 먼저).
+TAKE_COMPACT_ORDER = ("bgHarmony", "style", "avoid", "motion", "harmony", "rules", "background", "assets", "bgHarmonyDrop")
 TAKE_STYLE_COMPACT = ("STYLE: TV-anime adaptation of the original webtoon{panels}: keep its faces, hair and line art; "
                       "cel shading with anime compositing, soft rim light, shallow depth of field.")
 REAL_TAKE_STYLE_COMPACT = "STYLE: Photoreal live-action K-drama footage, natural skin, soft natural light, shallow depth of field."
@@ -3784,7 +3851,7 @@ def _take_prompt(plan: dict, take: dict, *, cast: list[dict], panel_nos: list[in
     **기호·분위기**(vnew-live-fx RA4, VNEW_FX 켬일 때만): 컷 항목 연기 다음에 `mood: {moodEn}`, 그다음
     `FX: {기호 문장}`(2개면 " / "). moodEn 안 한국 이름은 긴 이름부터 로마자로 바꾸고, 한글이 남으면 그 분위기는
     넣지 않는다(로그 vnew.gen.take_mood_dropped). moodEn 이 비면 분위기 조각이 없다(moodKo 는 쓰지 않는다, 결정 6).
-    RULES 에 묘사 규칙(RULE_BODY: 손 두 개·머리색·무늬 위치·장소 고정)을 더한다.
+    RULES 에 묘사 규칙(RULE_BODY: 손 두 개·머리색·무늬 위치·같은 장소)을 더한다.
     어느 컷에 기호·분위기가 있으면 줄이기 단계를 더한다: ④ 목소리 제거 다음 mood40, ⑧ RULES 오디오 축약 다음
     moodDrop → fxShort. 켬이면(기호가 없어도) 그다음 bodyShort(RULE_BODY → RULE_BODY_SHORT), 그다음 ⑨ action55.
     최소형은 연기를 남기는 후보에서만 기호 짧은 형을 남기고(분위기 없음), RULES 에 지금 묘사 규칙(보통 짧은 형)을 둔다.
@@ -4009,6 +4076,7 @@ def _take_prompt(plan: dict, take: dict, *, cast: list[dict], panel_nos: list[in
         "mood_limit": 80,          # vnew-live-fx 분위기 글자 상한
         "fx_short": False,         # vnew-live-fx 기호 짧은 형(컷 내용 줄이기 2단계)
         "body": RULE_BODY if fx_on else "",  # vnew-live-fx RA4.2 묘사 규칙(끔이면 없음)
+        "bg_harmony": "full",      # 작업 197: 조화 문장(HARMONY 줄 끝) — full → short(줄이기 첫 단계) → none(고정 부분 맨 끝)
     }
     applied: list[str] = []
 
@@ -4034,17 +4102,19 @@ def _take_prompt(plan: dict, take: dict, *, cast: list[dict], panel_nos: list[in
         return _costume_guard(plan, name, scene or costume, bases.get(name, ""), limit=state["costume_limit"], real=False,
                               logged=costume_logged)
 
-    def _location_line() -> str:
+    def _location_line(short: bool | None = None) -> str:
         if not location_no:
             return ""
-        # 작업 143: 실사 장소는 사람을 지운 실사 사진(웹툰 뷰 편집) — live.reference_lead(place=True) 문구. 애니 줄은 그대로.
+        # 작업 143: 실사 장소는 사람을 지운 실사 사진(웹툰 뷰 편집). 작업 197: 장소 그림은 참고만(_location_ref 한 문구),
+        # 줄이기 첫 단계(bgHarmony — 197 글 짧은 형)부터 짧은 형(fix1: 4,000자 안에 컷 내용을 지키려고).
+        short = (state["bg_compact"] or state["bg_harmony"] != "full") if short is None else short
         if anchor is not None:
-            return TAKE_ANCHOR_LOCATION_LINE.format(no=location_no)  # 작업 155: 조각·대체 제출의 장소 고정
+            # 작업 155: 조각·대체 제출의 장소 그림
+            return (TAKE_ANCHOR_LOCATION_LINE_SHORT if short else TAKE_ANCHOR_LOCATION_LINE).format(no=location_no)
         if real:
-            # 작업 161: 상표 금지는 vibe(159, 기본 켬) 장소 줄에만. 이 옛 경로(VNEW_VIBE_PROMPT 끔 = 되돌리기)는 바이트 그대로 둔다.
-            return (f"@Image{location_no} = the location (real photo, no people in it); "
-                    "keep this place, its background and light in every shot")
-        return f"@Image{location_no} = the location; keep its structure and props"
+            # 작업 161: 상표 금지는 vibe(159, 기본 켬) 장소 줄에만. 이 옛 경로(VNEW_VIBE_PROMPT 끔 = 되돌리기)는 붙이지 않는다.
+            return (REAL_TAKE_LOCATION_LINE_SHORT if short else REAL_TAKE_LOCATION_LINE).format(no=location_no)
+        return (TAKE_LOCATION_LINE_SHORT if short else TAKE_LOCATION_LINE).format(no=location_no)
 
     def _assets_compact() -> str:
         # 작업 157: ASSETS 짧은 형 — 시트·사진 문장은 모든 사람에 1번, 155 의상 고정은 그 사람 COSTUME 문장에 합친다,
@@ -4335,14 +4405,18 @@ def _take_prompt(plan: dict, take: dict, *, cast: list[dict], panel_nos: list[in
         # 순서: [실사 AI 고지(140, 늘 원문)] → [FIXED(127, 켬일 때만)] → STYLE → ASSETS → TIMELINE → MOTION → HARMONY
         # → RULES → AVOID. 작업 157: 맨 앞 두 줄도 예산 안에서 잰다(고정부 짧은 형 = BACKGROUND 1문장).
         head = fixed_head_compact if state["bg_compact"] else fixed_head
+        bg_harmony = _bg_harmony_form(real, state["bg_harmony"])  # 작업 197: HARMONY 줄 끝(없으면 그 줄 그대로)
+        harmony_row = state["harmony"] + (" " + bg_harmony if bg_harmony else "")
         blocks = [REAL_REF_AI_NOTE if real else "", head, _style(), _assets(), _timeline(), state["motion"],
-                  state["harmony"], _rules(), state["avoid"]]
+                  harmony_row, _rules(), state["avoid"]]
         return "\n".join(b for b in blocks if b)
 
     # 작업 157: 줄이기 순서. 먼저 고정 부분을 하나씩 짧은 형으로(TAKE_COMPACT_ORDER), 모두 짧은 형인데도 넘칠 때만 컷 내용을
     # 시선 → 분위기·기호 → 연기 첫 문장 순으로 줄인다. 대사·닿는 연기·포즈 절·ON SCREEN 은 줄이지 않는다. 매 단계 뒤 길이를
     # 재서 예산 안이면 멈춘다. 바뀌는 것이 없는 단계(짧은 형 = 원형, 시선·분위기 없는 테이크)는 건너뛴다.
+    # 작업 197: 조화 문장은 맨 처음 짧은 형(bgHarmony), 고정 부분 맨 끝에 뺀다(bgHarmonyDrop) — 컷 내용보다 먼저.
     compact_steps = {
+        "bgHarmony": ("bg_harmony", "short"),
         "style": ("style", style_compact),
         "avoid": ("avoid", avoid_compact),
         "motion": ("motion", motion_compact),
@@ -4350,12 +4424,18 @@ def _take_prompt(plan: dict, take: dict, *, cast: list[dict], panel_nos: list[in
         "rules": ("rules_compact", True),
         "background": ("bg_compact", True),
         "assets": ("assets_compact", True),
+        "bgHarmonyDrop": ("bg_harmony", "none"),
     }
     steps: list[tuple[str, object, str, str]] = []
     for section in TAKE_COMPACT_ORDER:
         field, value = compact_steps[section]
-        same = (fixed_head == fixed_head_compact and bg_change == bg_change_compact) if section == "background" else (
-            field in ("style", "avoid", "motion", "harmony") and state[field] == value)
+        if section == "background":
+            # 작업 197 fix1: 장소 줄은 이 단계 전(bgHarmony, 맨 앞)에 이미 짧은 형이다 — 고정부 · 장소 바뀜 글만 견준다.
+            same = fixed_head == fixed_head_compact and bg_change == bg_change_compact
+        elif section in ("bgHarmony", "bgHarmonyDrop"):
+            same = _bg_harmony_form(real, "full" if section == "bgHarmony" else "short") == _bg_harmony_form(real, value)
+        else:
+            same = field in ("style", "avoid", "motion", "harmony") and state[field] == value
         # 짧은 형이 원형과 같으면(고정부 없음 등) 이미 짧은 형이다 — 로그 단계 없이 compact 목록에만 적는다.
         steps.append((field, value, "" if same else section + "Compact", section))
     if any(_entry_gaze(e) for e in entries):
@@ -4371,7 +4451,8 @@ def _take_prompt(plan: dict, take: dict, *, cast: list[dict], panel_nos: list[in
     applied: list[str] = []
     compacted: list[str] = []
     for field, value, label, section in steps:
-        if _prompt_len(prompt) <= budget:
+        # 작업 197 fix2: 197 짧은 형(bgHarmony, 맨 앞)은 글자 · 바이트 둘 다 안일 때만 건너뛴다. 나머지 단계는 글자만.
+        if _prompt_len(prompt) <= budget and (section != "bgHarmony" or _take_prompt_bytes_ok(prompt)):
             break
         state[field] = value
         if section:
@@ -4444,7 +4525,8 @@ VIBE_MULTI_SHOT_COMPACT = ("A multi-shot sequence of {n} shots with a hard cut a
 VIBE_STYLE_COMPACT = {"live_action": "Photoreal live-action K-drama footage, natural skin, soft natural light, "
                                      "shallow depth of field",
                       "webtoon": "Korean webtoon art style exactly as in the uploaded webtoon images"}
-VIBE_LOCATION_LEAD = "@Image{no} is the location (no people in it); keep this place, its background and light in every shot"
+VIBE_LOCATION_LEAD = _location_ref("@Image{no}", LOCATION_REF_EMPTY)  # 작업 197: 참고만(옛 글 "keep this place, its background …")
+VIBE_LOCATION_LEAD_SHORT = _location_ref("@Image{no}", LOCATION_REF_EMPTY, short=True)  # 작업 197: 배경 짧은 형 단계
 VIBE_FRAME_LEAD = "@Image{no} is the previous shot's last frame: same background, lighting, outfits and hair; continue from it"
 # 작업 172: 조각 첫 컷이 이음 결과 마지막 컷에서 하드 컷(크기 종류 · 인서트 · 잠금 주인공이 다름)이면 이음 그림 = 겉모습 참고만.
 VIBE_FRAME_LOOK_LEAD = ("@Image{no} is the previous shot's last frame, for look reference only (same background, lighting, "
@@ -4467,7 +4549,9 @@ VIBE_VIDEO_LINE = ("@Video1 is the 3D previz: follow its camera, positions, cuts
 VIBE_VIDEO_LINE_TIGHT = ("@Video1 is the 3D previz: follow its positions, cuts and timing; for shot size follow each Shot line "
                          "\u2014 where a Shot says close-up, frame tighter than the previz; replace each mannequin with its person")
 VIBE_SPOKEN = "spoken (audio only, never written on screen)"  # = TEXT_RETRY_SPOKEN(156, 아래에서 정의)
-VIBE_COMPACT_ORDER = ("style", "background", "assets", "paragraph")  # 157 순서(고정 부분 먼저, head 단락 마지막)
+# 157 순서(고정 부분 먼저, head 단락 마지막). 작업 197: 맨 앞 harmony(조화 문장 짧은 형 · 장소 이름표 짧은 형), harmonyDrop(조화 문장
+# 뺌 — 배경 조각 중 마지막, fix1: head 단락(컷 지시 원문)보다 먼저).
+VIBE_COMPACT_ORDER = ("harmony", "style", "background", "assets", "harmonyDrop", "paragraph")
 _VIBE_ANGLE_EN = {"OTS": "over-the-shoulder", "profile": "profile", "3/4": "three-quarter view", "front": "front view",
                   "back": "from behind"}
 
@@ -5458,7 +5542,7 @@ def _vibe_take_prompt(plan: dict, take: dict, *, real: bool, cast: list[dict], l
     작업 176: frame_lead("{no}" 자리 하나)를 주면 이음 그림 이름표 = 그 글(likeness 1b 만). 안 주면 지금 그대로.
 
     순서: 140 AI 고지 → 화풍(STYLE webtoon + 웹툰 기호 / live_action) → 인물별 "{handle}: {look} (keep exactly this look)." →
-    컷 지시 단락(참고 원문) → "Setting (keep identical in every shot): …" → "Shot i (t0-t1s), size: " + who_in_shot + 연기
+    컷 지시 단락(참고 원문) → "Setting (the same place in every shot): …"(+197 조화 문장) → "Shot i (t0-t1s), size: " + who_in_shot + 연기
     (+154 닿는 연기 + 148 포즈) + FX + 카메라 + 조명 + 대사(147/157 모든 줄, spoken (audio only …)) → @Image 설명(reference_lead
     문구, 시트 절 1번, fix1: 애니 원작 패널 = STYLE 이 부르는 "the uploaded webtoon images") → @Video1 줄. look = 우리 인물 외형 + 146 장면 옷(실사는 실사 외모 문장). 실사는 live_master 처럼 화풍
     live_action, 연기 _real_action + REAL_FX(fx.REAL_FX), FX 조각 없음.
@@ -5530,7 +5614,7 @@ def _vibe_take_prompt(plan: dict, take: dict, *, real: bool, cast: list[dict], l
             for token in (ko, _disp(ko), ko[1:] if len(ko) >= 3 else "", _romanize_name(ko[1:]) if len(ko) >= 3 else ""):
                 if token and len(token) >= 2:
                     people.setdefault(token, _disp(ko))
-    state = {"style": False, "background": False, "assets": False, "paragraph": False}
+    state = {"style": False, "background": False, "assets": False, "paragraph": False, "harmony": False, "harmonyDrop": False}
 
     def _style() -> str:
         key = "live_action" if real else "webtoon"
@@ -5567,7 +5651,9 @@ def _vibe_take_prompt(plan: dict, take: dict, *, real: bool, cast: list[dict], l
         return _background_sentence(text) if state["background"] else text
 
     def _setting() -> str:
-        return f"Setting (keep identical in every shot): {_bg(first_loc)}."
+        # 작업 197: 같은 장소(같은 픽셀이 아님) + 조화 문장 1번(harmony 단계에서 짧은 형, harmonyDrop 에서 뺌).
+        harmony = _bg_harmony_form(real, "none" if state["harmonyDrop"] else "short" if state["harmony"] else "full")
+        return f"{VIBE_SETTING_HEAD}: {_bg(first_loc)}." + (" " + harmony if harmony else "")
 
     from . import locations as loc_mod  # noqa: PLC0415
 
@@ -5907,7 +5993,9 @@ def _vibe_take_prompt(plan: dict, take: dict, *, real: bool, cast: list[dict], l
         if frame_no:
             rows.append((frame_no, (frame_lead or (VIBE_FRAME_LOOK_LEAD if hard_cut else VIBE_FRAME_LEAD)).format(no=frame_no)))
         if location_no:
-            rows.append((location_no, VIBE_LOCATION_LEAD.format(no=location_no)
+            # 작업 197: 줄이기 첫 단계(harmony — 197 글 짧은 형)부터 짧은 형(fix1, 배경 짧은 형 단계에서만이던 것을 앞당김)
+            lead = VIBE_LOCATION_LEAD_SHORT if state["harmony"] or state["background"] else VIBE_LOCATION_LEAD
+            rows.append((location_no, lead.format(no=location_no)
                          + (REAL_TAKE_NO_BRAND if real else "")))  # 작업 161: 실사 장소만 상표 금지
         panels = [n for n in (panel_nos or []) if n] if not real else []
         if panels:
@@ -5948,8 +6036,11 @@ def _vibe_take_prompt(plan: dict, take: dict, *, real: bool, cast: list[dict], l
         text = _assemble()
         steps: list[str] = []
         for section in VIBE_COMPACT_ORDER:
-            if _prompt_len(text) <= budget:
+            # 작업 197 fix2: 통 테이크와 같은 구멍 — 197 짧은 형(harmony, 맨 앞)은 글자 · 바이트 둘 다 안일 때만 건너뛴다.
+            if _prompt_len(text) <= budget and (section != "harmony" or _take_prompt_bytes_ok(text)):
                 break
+            if section in ("harmony", "harmonyDrop") and not _bg_harmony(real):
+                continue  # 작업 197: 조화 문장이 없으면(검사의 197 끔) 그 단계도 없다
             state[section] = True
             steps.append(section + "Compact")
             text = _assemble()
@@ -7615,7 +7706,8 @@ def _escalate_content_parts(owner: str, pid: str, gen_id: str, index: int, varia
 # ③ 의상: 보이는 인물마다 ASSETS COSTUME(146 정리) + _costume_lock 구절. 조각·대체가 아닌 통째 요청은 지금과 바이트 단위로 같다.
 
 TAKE_FRAME_BACK_S = 0.05
-TAKE_ANCHOR_LOCATION_LINE = "@Image{no} = the location; keep exactly this place, background and light in every shot"
+TAKE_ANCHOR_LOCATION_LINE = _location_ref("@Image{no}")  # 작업 197: 참고만(옛 글 "the location; keep exactly this place, …")
+TAKE_ANCHOR_LOCATION_LINE_SHORT = _location_ref("@Image{no}", short=True)
 TAKE_ANCHOR_FRAME_LINE = ("@Image{no} = the previous shot's last frame: same background, lighting, outfits and hair; "
                           "continue from it")
 # 의상 고정 "no …" 목록의 옷 낱말(한 목록). 그 인물 옷 문장에 든 낱말(정규식)은 빼고 쓴다.
@@ -8513,11 +8605,11 @@ def _cut_first_frame(mp4: bytes, start_sec: float) -> bytes | None:
 # 작업 132: 컷 단위 Kling 실사 프롬프트 끝 negative 1구절(원문). 이 구절 밖에는 그림 낱말이 없다.
 REAL_CUT_NEGATIVE = "no anime, no cartoon, no illustration, keep the same outfit and location as the start frame"
 # 작업 135: 컷 시작 그림(Seedream) 고정 구절. 실사 그림체 구절은 문장 끝, 배경 문장은 공간 시트 뷰가 있을 때(Image 번호 = 그 뷰).
+# 작업 197: 시트 뷰는 장소 참고만(_location_ref). 옛 글 "Background and location must match Image N exactly (same buildings, railing,
+# street, time of day)" · "Match Image N's place (buildings, railing, light) only where Image 1 shows background".
 REAL_STILL_LOOK = "35mm film photo, natural skin texture, no illustration, no anime, no digital painting"
-REAL_STILL_BACKGROUND = ("Background and location must match Image {no} exactly (same buildings, railing, street, time of day); "
-                         "only the framing follows Image 1.")
-REAL_STILL_BACKGROUND_ONLY = ("Background and location must match Image 1 exactly (same buildings, railing, street, "
-                              "time of day).")
+REAL_STILL_BACKGROUND = _location_ref("Image {no}") + "; only the framing follows Image 1."
+REAL_STILL_BACKGROUND_ONLY = _location_ref("Image 1") + "."
 REAL_STILL_NO_PHOTO_CLOTHES = "Do not copy the default clothes worn in the cast photos (such as a plain white shirt)."
 # 작업 160: 컷 단위 Kling(130 2단계) 이어짐 — test3 take1 컷마다 하늘(낮·밤)·가게·샷 크기가 달랐다.
 REAL_STILL_NO_WIDEN = "Do not widen the shot; close-up stays close-up."
@@ -8563,7 +8655,7 @@ def _real_time_sentence(plan: dict) -> str:
 # 작업 139: 애니 프레임 읽기(animeLayout)가 있을 때 시작 그림 문장. 맨 앞 = 구도 고정, MS 이상의 시트 뷰 문장 = 보이는 배경만.
 REAL_STILL_FRAMING = ("Keep Image 1's exact framing and shot size ({shot}): do not zoom out, do not add people, "
                       "do not show more background than Image 1.")
-REAL_STILL_BACKGROUND_PLACE = ("Match Image {no}'s place (buildings, railing, light) only where Image 1 shows background; "
+REAL_STILL_BACKGROUND_PLACE = (_location_ref("Image {no}") + "; that place appears only where Image 1 shows background; "
                                "framing comes from Image 1.")
 SHOT_SIZE_EN = {"ECU": "extreme close-up", "CU": "close-up", "MCU": "medium close-up", "MS": "medium shot",
                 "MLS": "medium long shot", "LS": "long shot"}
@@ -9224,6 +9316,9 @@ def _cut_still_prompt(plan: dict, cut: dict, people: list[tuple[str, str, int]],
         else:
             parts.append(REAL_STILL_BACKGROUND.format(no=background_no) if has_frame and background_no > 1
                          else REAL_STILL_BACKGROUND_ONLY)
+    harmony = _bg_harmony(True, still=True)  # 작업 197: 인물 · 배경 한 사진(렌즈 · 심도 · 그레인 · 빛 · 접지 그림자)
+    if harmony:
+        parts.append(harmony)
     if prev_no:
         parts.append(REAL_STILL_PREV.format(no=prev_no))  # 작업 160/161: 앞 컷 시작 그림 = 장소·소품 이어짐만(시간대·빛은 장소 뷰)
     parts.append(_real_time_sentence(plan))  # 작업 160: 시간대 고정(161: 낮 문장 분명하게)
@@ -9855,7 +9950,9 @@ def _kling_cut_inputs(owner: str, pid: str, plan: dict, ctx: dict, cut_id: str, 
 
 
 # 작업 178: 하드 컷(shotChange · insert) elements Kling 컷의 참고 그림 줄(@Image 번호 = 실제 목록 순서). 시작 그림은 보내지 않는다.
-REAL_CUT_IMAGE_LOCATION = "{tag} is the location only (no people): keep this place, its background and light."
+# 작업 197: 참고만(옛 글 "keep this place, …"). fix1: 이 줄은 줄이기에서 빠지지 않는 참고 줄이라(상한 2,220B) 짧은 형 — 긴 형이면
+# FIXED 장소 고정 · STYLE 이 밀려났다. 새로 그리라는 말은 조화 문장(BACKGROUND 다음 줄)이 맡는다.
+REAL_CUT_IMAGE_LOCATION = _location_ref("{tag}", LOCATION_REF_EMPTY, short=True) + "."
 REAL_CUT_IMAGE_LOOK = ("{tag}: look reference only (lighting, outfits, hair); this is a hard cut to a new framing, do not "
                        "reproduce this image's framing or pose.")
 
@@ -10513,6 +10610,10 @@ def _do_submit_real_cuts(owner: str, pid: str, gen_id: str, index: int, claim: s
 # 항목이 더 적으면 그것을 쓴다(작업 135, 같으면 첫 결과). 공간 시트 실사 뷰가 있으면 Image 3 으로 함께 준다(장소 판정 기준).
 # 판정 기준 문구는 prompts.CUT_QA_RULES 한 곳. 컷 기록 qa = {ok, items[], note, retried, firstItems[]}.
 REAL_CUT_QA_ITEMS = ("animeStyle", "outfit", "location", "people")
+# 작업 197: Image 3(공간 시트 실사 뷰) 이름표 = 어느 장소인지의 참고(같은 장소를 본다, 같은 픽셀이 아님). 판정 글은 prompts.CUT_QA_RULES.
+# 옛 글 "Image 3 (live-action location sheet view of the place this shot must be in):".
+REAL_CUT_QA_SHEET_LABEL = ("Image 3 (live-action location sheet view: a reference for which place this shot is in, "
+                           "not a backdrop to match):")
 # 교정 문장 조각(틀린 항목 → 한 문장 "FIX: …, …."). 그림 낱말(webtoon·anime·illustration·cel)은 쓰지 않는다.
 REAL_CUT_QA_FIX = {
     "animeStyle": "render every frame as photoreal live-action footage with real skin and real fabric",
@@ -10576,7 +10677,7 @@ def _judge_real_cut(owner: str, pid: str, gen_id: str, plan: dict, cut: dict, an
               {"image": {"format": "jpeg", "source": {"bytes": _fit_ref(real_frame)}}}]
     sheet = _cut_location_view(plan, str(cut.get("cutId") or ""))  # 작업 135: 애니 프레임 배경이 흐릴 수 있어 장소 기준을 함께 준다
     if sheet is not None:
-        blocks += [{"text": "Image 3 (live-action location sheet view of the place this shot must be in):"},
+        blocks += [{"text": REAL_CUT_QA_SHEET_LABEL},
                    {"image": {"format": "jpeg", "source": {"bytes": _fit_ref(sheet[0])}}}]
     del sheet
     blocks.append({"text": _cut_qa_text(plan, str(cut.get("cutId") or ""))})
@@ -11771,6 +11872,7 @@ def _cut_prompt(plan: dict, seg: dict, variant: str, *, cast: list[dict], has_im
     이름은 CAST 처럼 한국 역할명 그대로다. CONTINUITY 의 "The mannequin colors …" 앞에 손 두 개·머리색·무늬 위치 문장
     (CUT_RULE_BODY, ≤ 90B). 줄이기: ⓪ bodyDrop(묘사 문장 빼기, 장소 요약보다 먼저 — 090 필수 수정 2) → ① … ⑥ →
     ⑥-1 FX 짧은 형(웹툰만) → ⑦ ACTION. 끔이면 지금과 바이트 단위로 같다(fx-i).
+    작업 197: HARMONY 줄 끝에 조화 문장 짧은 형(BG_HARMONY_SHORT). fix1: 넘치면 맨 먼저(⓪-0 harmonyDrop, bodyDrop · SETTING 보다 먼저) 뺀다.
     돌려주기 전에 로그 `vnew.gen.cut_prompt cut= variant= bytes= steps=`(적용 단계, 없으면 none)를 한 줄 남긴다.
 
     작업 127(VNEW_FX 켬일 때만): 맨 앞에 고정부 1줄(_fixed_head: 화풍·배경·overall tone, 같은 장소면 통 테이크와 같은
@@ -11981,6 +12083,8 @@ def _cut_prompt(plan: dict, seg: dict, variant: str, *, cast: list[dict], has_im
     # 지시서 118a: 이 컷 대사 줄의 목소리(속마음만·섞임이면 입 모양 구절을 바꾼다, spoken·none 은 지금 문구).
     motion_short = _motion_line(False, _prompt_voices(spoken))
     harmony_short = _harmony_line(plan, False)
+    # 작업 197: HARMONY 줄 끝 조화 문장 짧은 형(2,500B 컷 단위). fix1: 넘치면 맨 먼저 뺀다(197 전 글을 줄이기 전에).
+    bg_harmony = _bg_harmony(is_real, short=True)
 
     def _setting_line(bg: str, scene_summary: str) -> str:
         parts = [p for p in (scene_summary, bg) if p]
@@ -12002,7 +12106,8 @@ def _cut_prompt(plan: dict, seg: dict, variant: str, *, cast: list[dict], has_im
         blocks = [
             assets_line, head, cast_line if apps is None else _cast_line(apps), only_line, shot_line, blocking_line,
             action_line, _fx_line(fx_short),
-            motion_short, mood_line, setting_line, harmony_short, dlg, _continuity(body),
+            motion_short, mood_line, setting_line,
+            harmony_short + (" " + bg_harmony if bg_harmony and state.get("bg_harmony", True) else ""), dlg, _continuity(body),
         ]
         return "\n".join(b for b in blocks if b)
 
@@ -12024,6 +12129,7 @@ def _cut_prompt(plan: dict, seg: dict, variant: str, *, cast: list[dict], has_im
         "body": fx_on,
         "dialogue_limit": 0,  # 작업 147: 대사 상한(0 = 없음, byteTrim 바로 앞에서만 25)
         "apps": None,  # 작업 167: CAST 외형(None = 지금 그대로, 좁은 예산의 castAppearance 단계에서만 목록)
+        "bg_harmony": True,  # 작업 197: 조화 문장(fix1: 넘치면 맨 먼저 뺀다)
     }
 
     def _current() -> str:
@@ -12067,6 +12173,13 @@ def _cut_prompt(plan: dict, seg: dict, variant: str, *, cast: list[dict], has_im
     if _utf8_len(prompt) <= budget:
         return _done(prompt)
 
+    # ⓪-0 (작업 197 fix1) 조화 문장 — 2,500B 컷 단위에서는 197 전 글(묘사 규칙 · SETTING …)보다 먼저 뺀다(HARMONY 줄은 남는다).
+    # 그래서 넘치는 컷의 나머지 줄이기는 197 전과 같다. 끔(검사)이면 문장이 없어 건너뛴다.
+    if bg_harmony and state["bg_harmony"]:
+        state["bg_harmony"] = False
+        applied.append("harmonyDrop")
+        if _utf8_len(_current()) <= budget:
+            return _done(_current())
     # ⓪ (vnew-live-fx, 090 필수 수정 2) 묘사 규칙 문장을 장소 요약보다 먼저 뺀다. 끔이면 문장이 없어 건너뛴다.
     if state["body"]:
         state["body"] = False
@@ -12419,12 +12532,13 @@ def _fixed_head(plan: dict, location_en: str, *, real: bool = False, compact: bo
     """프롬프트 맨 앞 고정부 1줄(작업 127): [화풍 1구절] + [배경 1문장] + [overall tone(있으면 1번)].
 
     compact(작업 157, 통 테이크 줄이기): 배경은 첫 조각(장소 이름 + 실내/실외)만.
+    작업 197: 배경 머리 = FIXED_BACKGROUND_HEAD(같은 장소 — 같은 픽셀을 지키라는 뜻이 아니다).
     """
     style = FIXED_REAL_STYLE if real else FIXED_WEBTOON_STYLE
     background = _background_en(plan, location_en, real=real)
     if compact:
         background = _background_sentence(background)
-    text = f"FIXED: {style}. BACKGROUND (no people, same in every shot): {background}."
+    text = f"FIXED: {style}. {FIXED_BACKGROUND_HEAD}: {background}."
     tone = _overall_tone(plan)
     if tone:
         text += f" Overall tone: {tone}."
@@ -13182,7 +13296,9 @@ def _prompt_budget(model: str) -> int:
 REAL_CUT_START_SENTENCE = ("Start from the first frame (a live-action still) and continue the action smoothly, keeping the "
                            "same place, lighting, characters, positions and outfits.")
 # 작업 177: Kling 컷 프롬프트가 예산을 넘을 때 아래(덜 중요한 것)부터 줄이는 순서. ACTION · DIALOGUE 는 이것들 다음에만 줄인다.
-KLING_CUT_TRIM_ORDER = ("styleCompact", "background", "startDuplicate", "style", "negative")
+# 작업 197: 조화 문장(BACKGROUND 줄 다음 줄)은 맨 처음 짧은 형, 그다음 뺀다. fix1: 2,300B 컷에서 197 전 글(BACKGROUND 장소 고정 ·
+# STYLE …)을 줄이기 전에 197 글부터 — 그래서 나머지 줄이기는 197 전과 같다.
+KLING_CUT_TRIM_ORDER = ("harmonyShort", "harmonyDrop", "styleCompact", "background", "startDuplicate", "style", "negative")
 
 
 def _kling_cut_layout(plan: dict, cut: dict, kling: dict, *, action: str, said, model: str = "", prompt_max: int = 0,
@@ -13194,8 +13310,8 @@ def _kling_cut_layout(plan: dict, cut: dict, kling: dict, *, action: str, said, 
     @Element/사람 줄 → BACKGROUND(짧은 형 _fixed_head compact) → 시간대 1문장(160) → 시작 그림 1줄(앞 샷 프레임이면
     REAL_CUT_FROM_PREV, 아니면 REAL_CUT_KEEP_FRAMING — 그 앞에 겹치는 REAL_CUT_START_SENTENCE) → STYLE → 꼬리(QA 교정 · 자막 없음 ·
     NEGATIVE). 상한 = prompt_max(167 태그 여유 상한, 없으면 _prompt_budget) — 1,800 목표로 SHOT 이 통째로 빠지던 것을 막는다.
-    넘치면 KLING_CUT_TRIM_ORDER(STYLE 짧은 형 → BACKGROUND → 겹치는 시작 문장 → STYLE → NEGATIVE), 그래도 넘칠 때만 ACTION 을
-    문장 경계에서, 다음 대사를 _fit_dialogue(25)로 줄인다."""
+    넘치면 KLING_CUT_TRIM_ORDER(조화 짧은 형(197) → 조화 빼기(197) → STYLE 짧은 형 → BACKGROUND → 겹치는 시작 문장 → STYLE → NEGATIVE),
+    그래도 넘칠 때만 ACTION 을 문장 경계에서, 다음 대사를 _fit_dialogue(25)로 줄인다. 작업 197: BACKGROUND 다음 줄 = 조화 문장."""
     budget = int(prompt_max) if prompt_max else _prompt_budget(model)
     cut_location = str(cut.get("locationEn") or "")
     framing = "\n".join(p for p in (str(kling.get("framing") or "").strip(), str(kling.get("costume") or "").strip()) if p)
@@ -13215,6 +13331,7 @@ def _kling_cut_layout(plan: dict, cut: dict, kling: dict, *, action: str, said, 
             tail.append("NEGATIVE: " + REAL_CUT_NEGATIVE + ".")
         rows = [REAL_REF_AI_NOTE, framing, box["action"], box["dialogue"], *[str(r) for r in kling.get("refs") or []],
                 "" if state["background"] else _fixed_head(plan, cut_location, real=True, compact=True),
+                "" if state.get("harmonyDrop") else _bg_harmony(True, short=bool(state.get("harmonyShort"))),  # 작업 197
                 _real_time_sentence(plan), start, style, *tail]
         return "\n".join(r for r in rows if r)
 
@@ -13250,17 +13367,24 @@ def _real_cut_prompt(plan: dict, seg: dict, *, model: str = "", prompt_max: int 
     cut_ids = _seg_cut_ids(seg)
     cut_id = cut_ids[0] if cut_ids else ""
     cut = next((c for c in (plan.get("conti") or {}).get("cuts") or [] if str(c.get("id")) == cut_id), {})
-    head = "\n".join([
-        REAL_REF_AI_NOTE,  # 작업 140: 첫 줄(머리라 줄이기에서 빠지지 않는다)
-        *([str(lock).strip()] if str(lock or "").strip() else []),  # 작업 169: 샷 고정(구도 먼저, 없으면 줄 없음 — 지금과 같다)
-        _fixed_head(plan, str(cut.get("locationEn") or ""), real=True),
-        REAL_CUT_START_SENTENCE,
-        REAL_TAKE_STYLE,
-        # 작업 139: 시작 그림 구도 유지(카메라가 물러나지 않고 새 인물이 들어오지 않는다). 169: 시작 그림이 앞 샷 마지막 프레임이면
-        # 그 구도를 지키지 않고 FRAMING 으로 간다.
-        REAL_CUT_FROM_PREV if from_prev else REAL_CUT_KEEP_FRAMING,
-        _real_time_sentence(plan),  # 작업 160: 시간대 고정(머리라 줄이기에서 빠지지 않는다)
-    ])
+
+    def _head(short: bool) -> str:
+        # 작업 197: 고정부 다음 줄 = 조화 문장(머리라 빠지지 않는다 — 가운데가 넘치면 짧은 형으로 먼저 바꾼다).
+        harmony = _bg_harmony(True, short=short)
+        return "\n".join([
+            REAL_REF_AI_NOTE,  # 작업 140: 첫 줄(머리라 줄이기에서 빠지지 않는다)
+            *([str(lock).strip()] if str(lock or "").strip() else []),  # 작업 169: 샷 고정(구도 먼저, 없으면 줄 없음 — 지금과 같다)
+            _fixed_head(plan, str(cut.get("locationEn") or ""), real=True),
+            *([harmony] if harmony else []),
+            REAL_CUT_START_SENTENCE,
+            REAL_TAKE_STYLE,
+            # 작업 139: 시작 그림 구도 유지(카메라가 물러나지 않고 새 인물이 들어오지 않는다). 169: 시작 그림이 앞 샷 마지막 프레임이면
+            # 그 구도를 지키지 않고 FRAMING 으로 간다.
+            REAL_CUT_FROM_PREV if from_prev else REAL_CUT_KEEP_FRAMING,
+            _real_time_sentence(plan),  # 작업 160: 시간대 고정(머리라 줄이기에서 빠지지 않는다)
+        ])
+
+    head = _head(False)
     tail = "No text, no subtitles, no speech bubbles.\nNEGATIVE: " + REAL_CUT_NEGATIVE + "."
     if fix:  # 작업 133: QA 교정 문장 1개(줄이기에서 빠지지 않는다)
         tail = fix.strip() + "\n" + tail
@@ -13312,6 +13436,10 @@ def _real_cut_prompt(plan: dict, seg: dict, *, model: str = "", prompt_max: int 
     if prompt_max:
         budget = min(budget, int(prompt_max))
     room = budget - _utf8_len(head) - _utf8_len(tail) - 2
+    if _utf8_len(body) > room and _head(True) != head:
+        # 작업 197: 가운데를 줄이기 전에 조화 문장을 짧은 형으로(머리는 빠지지 않는다).
+        head = _head(True)
+        room = budget - _utf8_len(head) - _utf8_len(tail) - 2
     if _utf8_len(body) > room:
         # 작업 147: 대사는 맨 마지막 — SHOT 줄이 통째로 남을 자리가 없을 때만 대사를 25(문장 단위)로 줄인다.
         if dialogue and room - _utf8_len(dialogue) - 1 < _utf8_len(lines[0]):

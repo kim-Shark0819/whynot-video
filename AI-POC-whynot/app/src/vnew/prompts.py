@@ -617,7 +617,9 @@ CUT_QA_RULES = (
     "in Image 1 (e.g. white shirt vs black jacket).",
     "- locationMatch: false if the place in Image 2 differs from Image 1: a different building, railing, street, "
     "walls or kind of space (e.g. a seaside road instead of a villa entrance). When Image 3 (the location sheet view) "
-    "is given, judge the place against Image 3, because the background of Image 1 may be blurred.",
+    "is given, judge the place against Image 3, because the background of Image 1 may be blurred: it must be the same "
+    "place (layout, landmarks, time of day), not a pixel copy of Image 3; a background redrawn in that same place passes "
+    "even when its detail, framing or rendering differ.",
     "- peopleMatch: false if the number of visible people or their left-right positions differ from Image 1.",
 )
 
