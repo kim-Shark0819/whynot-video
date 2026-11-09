@@ -5878,3 +5878,199 @@ textarea.vnew-field-input {
     flex-basis: 100%;
   }
 }
+
+/* ================================================================ ⑥ 사운드 — 캐릭터 목소리(작업 203) */
+
+.vnew-voc {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 12px;
+  border: 1px solid var(--line, #e6e1dc);
+  border-radius: 8px;
+  min-width: 0;
+}
+
+.vnew-voc-title {
+  margin: 0;
+  font-size: 15px;
+}
+
+.vnew-voc-hint {
+  margin: 0;
+}
+
+.vnew-voc-cards {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+  gap: 10px;
+}
+
+.vnew-voc-card {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px;
+  border: 1px solid var(--line, #e6e1dc);
+  border-radius: 8px;
+  min-width: 0;
+}
+
+.vnew-voc-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+}
+
+.vnew-voc-chip {
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  flex: 0 0 auto;
+}
+
+.vnew-voc-name {
+  overflow-wrap: anywhere;
+}
+
+.vnew-voc-count {
+  font-size: 12px;
+  color: var(--muted, #6b625a);
+}
+
+.vnew-voc-current {
+  margin: 0;
+  font-size: 13px;
+  overflow-wrap: anywhere;
+}
+
+.vnew-voc-tools,
+.vnew-voc-presetrow {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+}
+
+.vnew-voc-tools .outline-button,
+.vnew-voc-panel .outline-button,
+.vnew-voc-preview,
+.vnew-voc-apply,
+.vnew-voc-mnotes {
+  font-size: 13px;
+  padding: 4px 8px;
+}
+
+.vnew-voc-split {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 13px;
+}
+
+.vnew-voc-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding-top: 6px;
+  border-top: 1px dashed var(--line, #e6e1dc);
+}
+
+.vnew-voc-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.vnew-voc-item {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+}
+
+.vnew-voc-item.is-on {
+  background: var(--accent-soft, #fff4ee);
+}
+
+.vnew-voc-itemtext {
+  flex: 1 1 160px;
+  min-width: 0;
+  font-size: 13px;
+  overflow-wrap: anywhere;
+}
+
+.vnew-voc-preset {
+  max-width: 100%;
+}
+
+.vnew-voc-msg {
+  margin: 0;
+}
+
+.vnew-voc-msg.is-bad,
+.vnew-voc-cmpstatus.is-bad {
+  color: var(--danger, #b42318);
+}
+
+.vnew-voc-cell {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 4px;
+}
+
+.vnew-voc-pwrap {
+  display: inline-block;
+}
+
+.vnew-voc-rowcmp {
+  grid-column: 1 / -1;
+}
+
+.vnew-voc-cmp {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+}
+
+.vnew-voc-players {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.vnew-voc-pbox {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  flex: 1 1 220px;
+  min-width: 0;
+}
+
+.vnew-voc-ptitle {
+  font-size: 12px;
+  color: var(--muted, #6b625a);
+}
+
+.vnew-voc-audio {
+  width: 100%;
+  max-width: 360px;
+  height: 32px;
+}
+
+@media (max-width: 768px) {
+  .vnew-voc-cards {
+    grid-template-columns: 1fr;
+  }
+
+  .vnew-voc-apply {
+    width: 100%;
+  }
+
+  .vnew-voc-audio {
+    max-width: 100%;
+  }
+}

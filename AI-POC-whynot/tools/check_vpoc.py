@@ -67961,6 +67961,425 @@ def check_vnew_previz_editor_201() -> None:
            "(e12)moveTo 유지·옛 계획 그대로")
 
 
+_V203_MARK = "  /* ================================================================ ⑥ 사운드 — 인물 목소리(작업 203)"
+_V203_END = "  /* ---------------------------------------------------------------- 작업 203 끝 */"
+_V203_CSS_MARK = "/* ================================================================ ⑥ 사운드 — 캐릭터 목소리(작업 203) */"
+
+# 작은 DOM(필요한 것만) · 가짜 목소리 서버(작업 202 응답 모양) · 화면 조작. 마지막 줄에 결과 JSON 한 줄.
+_V203_NODE_PRE = r"""
+var innerHTMLUsed = false;
+function N(tag) {
+  this.tagName = String(tag).toUpperCase(); this.children = []; this.parentNode = null; this._text = ""; this.className = "";
+  this.attrs = {}; this.style = {}; this.listeners = {}; this.disabled = false; this.title = ""; this.value = ""; this.checked = false;
+  var self = this;
+  this.classList = {
+    add: function (c) { var a = self.className.split(/\s+/).filter(Boolean); if (a.indexOf(c) < 0) a.push(c); self.className = a.join(" "); },
+    remove: function (c) { self.className = self.className.split(/\s+/).filter(function (x) { return x && x !== c; }).join(" "); },
+    contains: function (c) { return self.className.split(/\s+/).indexOf(c) >= 0; }
+  };
+}
+Object.defineProperty(N.prototype, "textContent", {
+  get: function () { return this._text + this.children.map(function (c) { return c.textContent; }).join(""); },
+  set: function (v) { this.children.forEach(function (c) { c.parentNode = null; }); this.children = []; this._text = String(v); }
+});
+Object.defineProperty(N.prototype, "innerHTML", { get: function () { return ""; }, set: function () { innerHTMLUsed = true; } });
+Object.defineProperty(N.prototype, "firstChild", { get: function () { return this.children[0] || null; } });
+N.prototype.appendChild = function (c) { if (c.parentNode) c.parentNode.removeChild(c); c.parentNode = this; this.children.push(c); return c; };
+N.prototype.removeChild = function (c) { var i = this.children.indexOf(c); if (i >= 0) this.children.splice(i, 1); c.parentNode = null; return c; };
+N.prototype.insertBefore = function (c, ref) {
+  if (!ref) return this.appendChild(c);
+  if (c.parentNode) c.parentNode.removeChild(c);
+  c.parentNode = this; this.children.splice(this.children.indexOf(ref), 0, c); return c;
+};
+N.prototype.setAttribute = function (k, v) { this.attrs[k] = String(v); };
+N.prototype.getAttribute = function (k) { return this.attrs.hasOwnProperty(k) ? this.attrs[k] : null; };
+N.prototype.addEventListener = function (t, fn) { (this.listeners[t] = this.listeners[t] || []).push(fn); };
+N.prototype.dispatch = function (t) { (this.listeners[t] || []).slice().forEach(function (fn) { fn({ target: this }); }, this); };
+N.prototype.click = function () { if (!this.disabled) this.dispatch("click"); };
+N.prototype.play = function () { this.playing = true; return Promise.resolve(); };
+N.prototype.pause = function () { this.playing = false; };
+var document = { createElement: function (t) { return new N(t); } };
+var timers = [], confirms = [], confirmAnswer = true, calls = [], mnotesCalls = [];
+var window = {
+  setTimeout: function (fn) { timers.push(fn); return timers.length; }, clearTimeout: function () {},
+  confirm: function (t) { confirms.push(t); return confirmAnswer; }
+};
+var state = { projectId: "p1", mounted: true, planStep: 6, plan: { script: { entries: [
+  { id: "e1", speaker: "민지", lineKo: "안녕", panels: [1] }, { id: "e2", speaker: "준호", lineKo: "응", panels: [2] },
+  { id: "e3", speaker: "민지", lineKo: "가자", panels: [3] }, { id: "e4", speaker: "준호", lineKo: "그래", panels: [4] }] } } };
+function downloadLink(url, label) { return el("a", "dl", label); }
+function planError(m) { return el("p", "login-error", m); }
+function dialogueList() { return el("section", "vnew-dialogue-sec"); }
+function mnotesOpen(o) { mnotesCalls.push(o); }
+"""
+
+_V203_NODE_CASES = r"""
+var HD = "resemble-ai/chatterboxhd/speech-to-speech", EL = "fal-ai/elevenlabs/voice-changer";
+var MODELS = [{ id: HD, label: "Chatterbox HD", modes: ["clip", "preset"], presets: ["Aurora", "Blade"] },
+              { id: EL, label: "ElevenLabs", modes: ["preset"], presets: ["Aria", "Rachel"] },
+              { id: "fal-ai/chatterbox/speech-to-speech", label: "Chatterbox", modes: ["clip"], presets: [] }];
+var LINES = [{ id: "e1", speaker: "민지", lineKo: "안녕", voice: "spoken", auto: true, start: 0.5, end: 1.8 },
+             { id: "e2", speaker: "준호", lineKo: "응", voice: "spoken", auto: true, start: 2, end: 3 },
+             { id: "e3", speaker: "민지", lineKo: "가자", voice: "spoken", auto: true, start: 3.5, end: 4.6 },
+             { id: "e4", speaker: "준호", lineKo: "그래", voice: "spoken", auto: true, start: 5, end: 6.2 }];
+var USD = { e1: 0.05, e2: 0.08, e3: 0.07, e4: 0.1 };
+var server = { flag: true, routes404: false, job: { status: "none", error: "", at: "" }, versions: [],
+  prof: { "민지": { shared: { mode: "clip", model: HD, preset: "", ref: { genId: "g1", variant: "webtoon", lineId: "e1", start: 0.5, end: 1.8,
+                                                                          seconds: 1.3, url: "https://s3.example/ref-e1.wav?sig=1" } } } } };
+function copy(v) { return JSON.parse(JSON.stringify(v)); }
+function voicesView() {
+  var speakers = ["민지", "준호"].map(function (n) {
+    var e = server.prof[n] || {}; var over = (e.perVariant || {}).webtoon; var p = over || e.shared || null;
+    var pub = p ? copy(p) : null; if (pub) pub.scope = over ? "variant" : "shared";
+    return { speaker: n, lines: 2, profile: pub, scope: p ? (over ? "variant" : "shared") : "", usingSaved: !!p,
+             status: p ? "저장된 목소리 사용 중" : "목소리 미지정" };
+  });
+  var profiles = {};
+  Object.keys(server.prof).forEach(function (n) { profiles[n] = { shared: server.prof[n].shared || null, perVariant: server.prof[n].perVariant || {} }; });
+  return { enabled: true, genId: "g1", variant: "webtoon", speakers: speakers, profiles: copy(profiles), models: MODELS,
+           defaults: { clip: HD, preset: EL }, priceUnknownLabel: "가격 확인 불가" };
+}
+function soundView() {
+  var v = { enabled: true, genId: "g1", variant: "webtoon",
+            source: { kind: "final", label: "⑤ 완성본", duration: 8, hasAudio: true, videoUrl: "https://s3.example/src.mp4?sig=2" },
+            lines: copy(LINES), versions: copy(server.versions), job: copy(server.job), limits: { minLineSeconds: 0.2 } };
+  if (server.flag) v.voices = voicesView();
+  return v;
+}
+function est(ids) {
+  var lines = LINES.filter(function (l) { return ids.indexOf(l.id) >= 0; }).map(function (l) {
+    return { lineId: l.id, speaker: l.speaker, model: HD, seconds: Math.round((l.end - l.start + 0.3) * 1000) / 1000, usd: USD[l.id] };
+  });
+  var total = Math.round(lines.reduce(function (a, l) { return a + l.usd; }, 0) * 100) / 100;
+  return { usd: total, priceKnown: true, label: total.toFixed(2) + " USD", requests: lines.length, lines: lines, models: {} };
+}
+function fail(status, type) { var e = { status: status, type: type, message: type }; throw e; }
+function route(m, path, body) {
+  if (m === "GET" && path === "/api/vnew/p/p1/sound?variant=webtoon") return soundView();
+  if (path.indexOf("/sound/voice") >= 0 && (!server.flag || server.routes404)) fail(404, "VoicesDisabled");
+  if (m === "PUT" && path === "/api/vnew/p/p1/sound/voices") {
+    var e = server.prof[body.speaker] = server.prof[body.speaker] || {};
+    var p = null;
+    if (body.mode !== "off") {
+      p = { mode: body.mode, model: body.model || (body.mode === "clip" ? HD : EL), preset: body.preset || "", ref: null };
+      if (body.mode === "clip") {
+        var l = LINES.filter(function (x) { return x.id === body.ref.lineId; })[0];
+        p.ref = { genId: "g1", variant: body.ref.variant, lineId: l.id, start: l.start, end: l.end, seconds: 1, url: "https://s3.example/ref-" + l.id + ".wav" };
+      }
+    }
+    if (body.variant) { e.perVariant = e.perVariant || {}; if (p) e.perVariant[body.variant] = p; else delete e.perVariant[body.variant]; }
+    else if (p) e.shared = p; else delete e.shared;
+    return { voices: voicesView() };
+  }
+  if (m === "POST" && path === "/api/vnew/p/p1/sound/voice-preview") {
+    var x = est([body.lineId]);
+    if (body.dryRun) return { estimate: x };
+    if (body.confirmUsd !== x.usd) fail(409, "CostMismatch");
+    var l2 = LINES.filter(function (y) { return y.id === body.lineId; })[0];
+    return { preview: { url: "https://s3.example/preview-" + l2.id + ".wav?sig=3", lineId: l2.id, speaker: l2.speaker, start: l2.start, end: l2.end,
+                        seconds: 1.6, model: HD, mode: "clip", scope: "shared" }, estimate: x, charge: { usd: x.usd, requests: 1, priceKnown: true } };
+  }
+  if (m === "POST" && path === "/api/vnew/p/p1/sound/voice-apply") {
+    var ids = LINES.filter(function (l) { return body.speakers.indexOf(l.speaker) >= 0; }).map(function (l) { return l.id; });
+    var y = est(ids);
+    if (body.dryRun) return { estimate: y };
+    if (body.confirmUsd !== y.usd) fail(409, "CostMismatch");
+    server.job = { status: "running", error: "", at: "", progress: { done: 0, total: ids.length } };
+    return { ok: true, started: true, job: copy(server.job), estimate: y };
+  }
+  fail(500, "Unexpected " + m + " " + path);
+}
+function api(path, opts) {
+  var m = (opts && opts.method) || "GET"; var body = opts && opts.body ? JSON.parse(opts.body) : null;
+  calls.push([m, path, body]);
+  return Promise.resolve().then(function () { return route(m, path, body); });
+}
+function flush() { var p = Promise.resolve(); for (var i = 0; i < 12; i++) p = p.then(function () { return new Promise(function (r) { setImmediate(r); }); }); return p; }
+function all(root, cls, out) {
+  out = out || [];
+  (root.children || []).forEach(function (c) { if (c.classList.contains(cls)) out.push(c); all(c, cls, out); });
+  return out;
+}
+function one(root, cls) { return all(root, cls)[0] || null; }
+function txt(n) { return n ? n.textContent : null; }
+function card(name) { return all(soundCtx.root, "vnew-voc-card").filter(function (c) { return txt(one(c, "vnew-voc-name")) === name; })[0]; }
+function cards() {
+  return all(soundCtx.root, "vnew-voc-card").map(function (c) {
+    return [txt(one(c, "vnew-voc-name")), !!one(c, "vnew-voc-chip").style.backgroundColor, txt(one(c, "vnew-voc-current")),
+            all(c, "vnew-voc-saved").map(txt), one(c, "vnew-voc-split-input").checked];
+  });
+}
+function rows() { return all(soundCtx.root, "vnew-voc-preview").map(function (b) { return [b.textContent, b.disabled, b.parentNode.title]; }); }
+function lastBody(m, part) { var c = calls.filter(function (x) { return x[0] === m && x[1].indexOf(part) >= 0; }); return c.length ? c[c.length - 1][2] : null; }
+function count(part) { return calls.filter(function (x) { return x[1].indexOf(part) >= 0; }).length; }
+var out = {};
+async function run() {
+  // (vu-a) 처음: 민지 = 기준 대사, 준호 = 미지정 · 줄 버튼 · 반영 버튼
+  soundMount(el("div"), "webtoon", {});
+  await flush();
+  var root = soundCtx.root;
+  out.order = root.children.map(function (c) { return c.className; }).filter(function (c) { return c === "vnew-voc" || c === "vnew-sound-table"; });
+  out.head = [txt(one(root, "vnew-voc-title")), txt(one(root, "vnew-voc-hint"))];
+  out.cardsA = cards();
+  var ra = one(card("민지"), "vnew-voc-audio");
+  out.refAudio = ra ? [ra.src, ra.preload, !!ra.autoplay, ra.controls] : null;
+  out.firstEst = calls.filter(function (x) { return x[1].indexOf("voice-apply") >= 0; }).map(function (x) { return x[2]; });
+  out.rowsA = rows();
+  out.applyA = [txt(one(root, "vnew-voc-apply")), one(root, "vnew-voc-apply").disabled,
+                root.children.filter(function (c) { return c.className === "vnew-sound-actions"; })[0].children.map(function (c) { return c.textContent; }).slice(0, 2)];
+  // (vu-c) 기본 목소리: 준호
+  one(card("준호"), "vnew-voc-presetbtn").click();
+  var sel = one(card("준호"), "vnew-voc-preset");
+  var labels = sel.children.map(txt);
+  out.presetLabels = [labels.length, labels.indexOf("ElevenLabs · Rachel") >= 0, labels.indexOf("Chatterbox HD · Aurora") >= 0];
+  var pl = one(card("준호"), "vnew-voc-presetlisten");
+  out.presetListenOff = [pl.disabled, pl.title];
+  sel.value = String(labels.indexOf("ElevenLabs · Rachel"));
+  one(card("준호"), "vnew-voc-presetsave").click();
+  await flush();
+  out.presetPut = lastBody("PUT", "/sound/voices");
+  out.cardsB = cards();
+  out.estB = lastBody("POST", "voice-apply");
+  out.rowsB = rows();
+  // (vu-b) 기준 대사: 준호 — 목록 · ▶ · 정하기
+  one(card("준호"), "vnew-voc-clip").click();
+  var items = all(card("준호"), "vnew-voc-item");
+  out.clipItems = items.map(function (i) { return txt(one(i, "vnew-voc-itemtext")); });
+  one(items[0], "vnew-voc-play").click();
+  out.play = [soundCtx.player.currentTime, soundCtx.stopAt, !!soundCtx.player.playing];
+  one(items[1], "vnew-voc-pick").click();
+  await flush();
+  out.clipPut = lastBody("PUT", "/sound/voices");
+  out.cardsC = cards();
+  // (vu-d) 실사/애니 따로: 민지
+  var sw = one(card("민지"), "vnew-voc-split-input");
+  sw.checked = true; sw.dispatch("change");
+  out.splitNote = txt(one(card("민지"), "vnew-voc-msg"));
+  one(card("민지"), "vnew-voc-clip").click();
+  one(all(card("민지"), "vnew-voc-item")[1], "vnew-voc-pick").click();
+  await flush();
+  out.splitPut = lastBody("PUT", "/sound/voices");
+  out.cardsD = cards();
+  var nConfirm = confirms.length;
+  sw = one(card("민지"), "vnew-voc-split-input");
+  sw.checked = false; sw.dispatch("change");
+  await flush();
+  out.offConfirm = confirms.slice(nConfirm);
+  out.offPut = lastBody("PUT", "/sound/voices");
+  out.cardsE = cards();
+  // (vu-e) 한 줄 들어보기: e1 — 확인 창 금액 → 두 플레이어
+  nConfirm = confirms.length;
+  var b1 = all(root, "vnew-voc-preview")[0];
+  b1.click();
+  await flush();
+  out.previewBodies = calls.filter(function (x) { return x[1].indexOf("voice-preview") >= 0; }).map(function (x) { return x[2]; });
+  out.previewConfirm = confirms.slice(nConfirm);
+  var cmp = one(root, "vnew-voc-rowcmp");
+  out.players = all(cmp, "vnew-voc-pbox").map(function (b) {
+    var a = one(b, "vnew-voc-audio"); return [txt(one(b, "vnew-voc-ptitle")), a.src, !!a.autoplay, a.controls];
+  });
+  out.cmpInRow = cmp.parentNode.className;
+  out.cmpStatus = txt(one(cmp, "vnew-voc-cmpstatus"));
+  confirmAnswer = false;
+  all(root, "vnew-voc-preview")[2].click();
+  await flush();
+  out.previewCancel = calls.filter(function (x) { return x[1].indexOf("voice-preview") >= 0; }).length;
+  confirmAnswer = true;
+  // (vu-f) 목소리 맞춰 반영: 확인 창(인물·줄 수·합계) → 진행 → 결과 줄·배지·에러 로그
+  nConfirm = confirms.length;
+  var nApply = count("voice-apply");
+  out.applyLabel = txt(one(root, "vnew-voc-apply"));
+  one(root, "vnew-voc-apply").click();
+  await flush();
+  out.applyBodies = calls.filter(function (x) { return x[1].indexOf("voice-apply") >= 0; }).slice(nApply).map(function (x) { return x[2]; });
+  out.applyConfirm = confirms.slice(nConfirm);
+  out.jobRunning = [soundCtx.jobLine.textContent, one(root, "vnew-voc-apply").disabled, timers.length > 0];
+  var msg = "3/4 줄 목소리 맞춤, 1줄 원음 유지";
+  server.job = { status: "done", error: "", at: "", message: msg, progress: { done: 4, total: 4 } };
+  server.versions = [{ n: 1, at: "", thoughtIds: [], currentSource: true, videoUrl: "https://s3.example/v1.mp4",
+                       voices: { converted: 3, total: 4, kept: 1, message: msg } }];
+  var t = timers.splice(0); t.forEach(function (fn) { fn(); });
+  await flush();
+  out.jobDone = soundCtx.jobLine.textContent;
+  out.badge = all(root, "vnew-voc-badge").map(txt);
+  out.options = one(root, "vnew-sound-version").children.map(txt);
+  var mb = one(root, "vnew-voc-mnotes");
+  out.mnotesBtn = txt(mb);
+  if (mb) mb.click();
+  out.mnotes = mnotesCalls;
+  // (vu-g) 꺼짐: voices 없음 · 목소리 라우트 404
+  server.flag = false;
+  var before = calls.length;
+  soundMount(el("div"), "webtoon", {});
+  await flush();
+  out.offA = [all(soundCtx.root, "vnew-voc").length, all(soundCtx.root, "vnew-voc-preview").length, all(soundCtx.root, "vnew-voc-apply").length,
+              all(soundCtx.root, "vnew-sound-apply").map(txt), all(soundCtx.root, "vnew-sound-listen").length,
+              calls.slice(before).filter(function (x) { return x[1].indexOf("/sound/voice") >= 0; }).length];
+  server.flag = true; server.routes404 = true;
+  soundMount(el("div"), "webtoon", {});
+  await flush();
+  out.offB = [all(soundCtx.root, "vnew-voc").length, all(soundCtx.root, "vnew-voc-preview").length, all(soundCtx.root, "vnew-voc-apply").length,
+              all(soundCtx.root, "vnew-sound-apply").map(txt), all(soundCtx.root, "vnew-sound-listen").length];
+  out.innerHTML = innerHTMLUsed;
+}
+run().then(function () { console.log(JSON.stringify(out)); }, function (e) { console.log(JSON.stringify({ error: String(e && e.stack || e).slice(0, 800) })); });
+"""
+
+
+def _v203_fn(vjs: str, name: str) -> str:
+    """vnew.js 최상위(들여쓰기 2칸) 함수 하나의 글."""
+    start = vjs.find("\n  function " + name + "(")
+    end = vjs.find("\n  }\n", start)
+    return vjs[start + 1:end + 5] if start >= 0 and end > start else ""
+
+
+def check_vnew_voice_ui_203() -> None:
+    """작업 203 — ⑥ 사운드 캐릭터 목소리 화면(작업 202 API). vnew.js · vnew.css 만.
+
+    (vu-0) 정적: 구역 하나 · 배선 6곳 · 구역 안 innerHTML · insertAdjacentHTML · outerHTML 0 · 자동 재생 없음 · node --check · CSS · LF
+    (vu-a) 카드 2명(기준 대사 · 미지정) · 색 칩 · 저장 배지 · 안내 · 대사 목록 위 · 줄 버튼 금액 · 목소리 없는 줄은 꺼짐 + 안내 · 반영 버튼 합계
+    (vu-b) 기준 대사 목록 · ▶ 구간 듣기 · 정하기 PUT 본문   (vu-c) 기본 목소리 목록(모델 · 이름) · PUT 본문 · 카드 글
+    (vu-d) 실사/애니 따로: variant 를 담은 PUT · "애니만" · 끄면 확인 뒤 mode off   (vu-e) 한 줄 들어보기: 확인 창 금액 → 두 플레이어(presigned)
+    (vu-f) 반영: 확인 창(인물 · 줄 수 · 합계) · confirmUsd · 진행 · 결과 줄 · 목소리 맞춤 배지 · 모델 에러 로그   (vu-g) 404 · voices 없음 → 숨김
+    """
+    import traceback as _tb  # noqa: PLC0415
+
+    bad: list[str] = []
+    name = "vnew ⑥ 사운드 캐릭터 목소리 화면(작업 203)"
+
+    def expect(group: str, got, want, what: str) -> None:
+        if got != want:
+            bad.append(f"({group}) {what}\n      결과 {str(got)[:600]}\n      기대 {str(want)[:600]}")
+
+    vjs = (PUBLIC / "vnew.js").read_text(encoding="utf-8")
+    css = (PUBLIC / "vnew.css").read_text(encoding="utf-8")
+    start = vjs.find(_V203_MARK)
+    section = vjs[start:vjs.find(_V203_END, start + 1)] if start >= 0 else ""
+    node = shutil.which("node")
+    try:
+        hooks = ["    vocMount(ctx); // 작업 203: 캐릭터 목소리(대사 목록 위, voices 가 없으면 그리지 않음)\n    ctx.root.appendChild(soundTable(ctx));",
+                 "    actions.appendChild(applyBtn);\n    vocApplyButton(ctx, actions); // 작업 203",
+                 "    vocRowTools(ctx, line, row, listenCell); // 작업 203", "    vocRenderJob(ctx); // 작업 203: 목소리 맞춤 진행·결과",
+                 '(v.currentSource ? "" : " · 이전 원본") + vocVersionTag(v);', "    var vocBadge = vocVersionBadge(chosen); // 작업 203"]
+        expect("vu-0", [vjs.count(_V203_MARK), vjs.count(_V203_END), [h[:50] for h in hooks if vjs.count(h) != 1],
+                        [w for w in ("innerHTML", "insertAdjacentHTML", "outerHTML", "autoplay = true", ".play()") if w in section]],
+               [1, 1, [], []], "구역 하나 · 배선 6곳 · 구역 안 innerHTML 0 · 자동 재생 없음")
+        if node:
+            checked = subprocess.run([node, "--check", str(PUBLIC / "vnew.js")], capture_output=True, text=True, encoding="utf-8", timeout=60)
+            expect("vu-0", [checked.returncode, (checked.stderr or "").strip()[:300]], [0, ""], "node --check frontend/public/vnew.js")
+        cstart = css.find(_V203_CSS_MARK)
+        csec = css[cstart:] if cstart >= 0 else ""
+        used = set(re.findall(r"\b(vnew-voc-[a-z-]*[a-z])", section))
+        defined = set(re.findall(r"\.(vnew-voc[a-z0-9-]*)", csec))
+        plain = {"vnew-voc-split-input", "vnew-voc-play", "vnew-voc-pick", "vnew-voc-clip", "vnew-voc-presetbtn", "vnew-voc-presetsave",
+                 "vnew-voc-presetlisten", "vnew-voc-saved", "vnew-voc-badge"}  # 기존 outline-button · vnew-badge 꾸밈 그대로
+        widths = [int(w) for w in re.findall(r"(?<![-\w])(?:min-|max-)?width: (\d+)px", csec)]
+        expect("vu-0", [css.count(_V203_CSS_MARK), sorted(used - defined - plain), "@media (max-width: 768px) {" in csec,
+                        [w for w in ("overflow-x", "display: none") if w in csec], max(widths or [0]) <= 960,
+                        [n for n, p in (("vnew.js", PUBLIC / "vnew.js"), ("vnew.css", PUBLIC / "vnew.css"),
+                                        ("check_vpoc.py", ROOT / "tools" / "check_vpoc.py")) if b"\r" in p.read_bytes()]],
+               [1, [], True, [], True, []], "CSS 203 구역: 쓰는 클래스 정의 · 768px 규칙 · 가로 스크롤 · 숨김 없음 · 960px 이하 · LF")
+    except Exception as exc:  # noqa: BLE001
+        bad.append("(vu-0) 예외: " + repr(exc) + "\n" + _tb.format_exc()[:1500])
+
+    if not node:
+        warn("node 가 없어 작업 203 화면 실행 검사(vu-a~g)를 건너뜁니다")
+    else:
+        try:
+            s_start = vjs.find("  /* ================================================================ ⑥ 사운드 — 대사별 실제 말/속마음(작업 122)")
+            s_end = vjs.find("  /* ================================================================ ⑦ 편집(영상 편집 타임라인", s_start + 1)
+            helpers = [_v203_fn(vjs, n) for n in ("el", "clear", "errMessage")]
+            if s_start < 0 or s_end < 0 or start < s_start or start > s_end or not all(helpers):
+                bad.append("(vu-a) 사운드 구역 · 도구 함수를 잘라내지 못했습니다")
+            else:
+                code = _V203_NODE_PRE + "\n".join(helpers) + "\n" + vjs[s_start:s_end] + _V203_NODE_CASES
+                with tempfile.NamedTemporaryFile("w", suffix=".js", prefix="v203_", delete=False, encoding="utf-8", newline="\n") as fh:
+                    fh.write(code)
+                    path = fh.name
+                try:
+                    run = subprocess.run([node, path], capture_output=True, text=True, encoding="utf-8", timeout=120)
+                finally:
+                    os.remove(path)
+                lines = (run.stdout or "").strip().splitlines()
+                got = json.loads(lines[-1]) if lines else {"error": (run.stderr or "")[:800]}
+                if got.get("error"):
+                    bad.append("(vu-a) node 실행 실패: " + str(got["error"])[:800])
+                else:
+                    _v203_expect(expect, got)
+        except Exception as exc:  # noqa: BLE001
+            bad.append("(vu-a) 예외: " + repr(exc) + "\n" + _tb.format_exc()[:1500])
+
+    if bad:
+        for item in bad:
+            fail(name + " " + item)
+    else:
+        ok(name + " 검사 (vu-0)정적 · CSS · LF (vu-a)카드 3상태 · 줄 버튼 · 반영 버튼 (vu-b)기준 대사 (vu-c)기본 목소리 (vu-d)그림체 따로 "
+           "(vu-e)미리 듣기 확인 · 두 플레이어 (vu-f)반영 확인 · 결과 · 배지 · 에러 로그 (vu-g)404 숨김")
+
+
+def _v203_expect(expect, got: dict) -> None:
+    none = "아직 정하지 않음 — 영상마다 목소리가 달라질 수 있음"
+    saved = ["저장된 목소리 사용 중"]
+    tip = "이 인물의 목소리를 위 '캐릭터 목소리'에서 먼저 정해 주세요"
+    clip_e1 = "기준 대사: \u201c안녕\u201d (컷 1)"
+    expect("vu-a", [got.get("order"), got.get("head"), got.get("cardsA"), got.get("refAudio"), got.get("firstEst")],
+           [["vnew-voc", "vnew-sound-table"], ["캐릭터 목소리", "한 번 정하면 다음 영상에도 같은 목소리로 맞춥니다."],
+            [["민지", True, clip_e1, saved, False], ["준호", True, none, [], False]],
+            ["https://s3.example/ref-e1.wav?sig=1", "none", False, True],
+            [{"variant": "webtoon", "speakers": ["민지"], "dryRun": True}]],
+           "카드 2명(기준 대사 · 미지정) · 색 칩 · 저장 배지 · 안내 · 대사 목록 위 · 기준 소리(presigned, 자동 재생 없음) · 견적 dryRun")
+    on = "이 줄만 맞춘 목소리로 바꿔 원래 소리와 견줘 들어 봅니다(유료)"
+    expect("vu-a", [got.get("rowsA"), got.get("applyA")],
+           [[["목소리 맞춰 미리 듣기 ($0.05)", False, on], ["목소리 맞춰 미리 듣기 ($…)", True, tip],
+             ["목소리 맞춰 미리 듣기 ($0.07)", False, on], ["목소리 맞춰 미리 듣기 ($…)", True, tip]],
+            ["목소리 맞춰 반영 ($0.12)", False, ["소리에 반영", "목소리 맞춰 반영 ($0.12)"]]],
+           "줄 버튼 금액 · 목소리 없는 인물의 줄은 꺼짐 + 안내 · [소리에 반영] 옆 [목소리 맞춰 반영 (합계)]")
+    expect("vu-c", [got.get("presetLabels"), got.get("presetListenOff"), got.get("presetPut"), got.get("cardsB"), got.get("estB"),
+                    [r[0] for r in got.get("rowsB") or []]],
+           [[4, True, True], [True, tip],
+            {"mode": "preset", "model": "fal-ai/elevenlabs/voice-changer", "preset": "Rachel", "speaker": "준호"},
+            [["민지", True, clip_e1, saved, False], ["준호", True, "기본 목소리: ElevenLabs · Rachel", saved, False]],
+            {"variant": "webtoon", "speakers": ["민지", "준호"], "dryRun": True},
+            ["목소리 맞춰 미리 듣기 ($0.05)", "목소리 맞춰 미리 듣기 ($0.08)", "목소리 맞춰 미리 듣기 ($0.07)", "목소리 맞춰 미리 듣기 ($0.10)"]],
+           "기본 목소리: 모델 · 이름 목록(preset 모델만) · 미지정이면 미리 듣기 꺼짐 · PUT 본문 · 카드 글 · 다시 견적 · 줄 금액")
+    expect("vu-b", [got.get("clipItems"), got.get("play"), got.get("clipPut"), (got.get("cardsC") or [[], []])[1]],
+           [["컷 2 · 응", "컷 4 · 그래"], [2, 3, True],
+            {"mode": "clip", "ref": {"lineId": "e4", "variant": "webtoon", "genId": "g1"}, "speaker": "준호"},
+            ["준호", True, "기준 대사: \u201c그래\u201d (컷 4)", saved, False]],
+           "기준 대사 목록(그 인물 줄만) · ▶ = 원본 플레이어 구간 재생 · 정하기 PUT 본문 · 카드 글")
+    expect("vu-d", [got.get("splitNote"), got.get("splitPut"), (got.get("cardsD") or [[]])[0], len(got.get("offConfirm") or []),
+                    (got.get("offConfirm") or [""])[0][:12], got.get("offPut"), (got.get("cardsE") or [[]])[0]],
+           ["지금부터 고르는 목소리는 애니에만 씁니다.",
+            {"mode": "clip", "ref": {"lineId": "e3", "variant": "webtoon", "genId": "g1"}, "speaker": "민지", "variant": "webtoon"},
+            ["민지", True, "기준 대사: \u201c가자\u201d (컷 3) · 애니만", saved, True], 1, "애니 전용 목소리를 지",
+            {"speaker": "민지", "mode": "off", "variant": "webtoon"}, ["민지", True, clip_e1, saved, False]],
+           "실사/애니 따로: 켜면 안내 · variant 담은 PUT · '애니만' · 끄면 확인 뒤 mode off · 함께 쓰는 목소리로")
+    conf = (got.get("previewConfirm") or [""])
+    expect("vu-e", [got.get("previewBodies"), len(conf), "비용: $0.05" in conf[0], "민지" in conf[0] and "컷 1" in conf[0],
+                    got.get("players"), got.get("cmpInRow"), got.get("cmpStatus"), got.get("previewCancel")],
+           [[{"variant": "webtoon", "lineId": "e1", "speaker": "민지", "dryRun": True},
+             {"variant": "webtoon", "lineId": "e1", "speaker": "민지", "confirmUsd": 0.05}], 1, True, True,
+            [["원래 소리", "https://s3.example/src.mp4?sig=2#t=0.50,1.80", False, True],
+             ["맞춘 소리", "https://s3.example/preview-e1.wav?sig=3", False, True]],
+            "vnew-sound-row", "맞춘 소리를 만들었습니다 · $0.05.", 3],
+           "한 줄 들어보기: dryRun → 확인 창 금액 → confirmUsd · 원래/맞춘 소리 두 플레이어(presigned, 자동 재생 없음) · 취소면 보내지 않음")
+    aconf = (got.get("applyConfirm") or [""])
+    expect("vu-f", [got.get("applyLabel"), got.get("applyBodies"), len(aconf),
+                    ["- 민지: 2줄" in aconf[0], "- 준호: 2줄" in aconf[0], "합계 4줄 · $0.30" in aconf[0]], got.get("jobRunning")],
+           ["목소리 맞춰 반영 ($0.30)",
+            [{"variant": "webtoon", "speakers": ["민지", "준호"], "dryRun": True},
+             {"variant": "webtoon", "speakers": ["민지", "준호"], "confirmUsd": 0.3}], 1, [True, True, True],
+            ["목소리를 맞추는 중… 0/4줄", True, True]],
+           "반영: dryRun → 확인 창(인물 · 줄 수 · 합계) → confirmUsd · 진행 n/m줄 · 진행 중 버튼 꺼짐 · 폴링")
+    expect("vu-f", [got.get("jobDone"), got.get("badge"), got.get("options"), got.get("mnotesBtn"), got.get("mnotes")],
+           ["3/4 줄 목소리 맞춤, 1줄 원음 유지", ["목소리 맞춤"], ["v1 · 속마음 0줄 · 목소리 맞춤"], "모델 에러 로그 보기",
+            [{"pid": "p1", "variant": "webtoon"}]],
+           "끝: 결과 줄 · 버전 목소리 맞춤 배지 · 목록 글 · 원음 유지 줄이 있으면 [모델 에러 로그 보기](작업 199 창)")
+    expect("vu-g", [got.get("offA"), got.get("offB"), got.get("innerHTML")],
+           [[0, 0, 0, ["소리에 반영"], 4, 0], [0, 0, 0, ["소리에 반영"], 4], False],
+           "voices 없음 · 목소리 라우트 404 → 구역 · 줄 버튼 · 반영 버튼 숨김, 기존 사운드 그대로 · innerHTML 0")
+
+
 def main() -> int:
     print("== vpoc1 check ==")
     check_compileall()
@@ -68138,6 +68557,7 @@ def main() -> int:
     check_vnew_previz_edits_200()
     check_vnew_previz_editor_201()
     if not __import__("check_voice_202").check_voice_202(): fail("작업 202 인물 목소리 검사 실패(위 [FAIL] 참고)")
+    check_vnew_voice_ui_203()
     print()
     if warnings:
         print(f"경고 {len(warnings)}건")
