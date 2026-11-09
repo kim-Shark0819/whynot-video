@@ -15432,7 +15432,7 @@ def check_vnew_previz_lazy() -> None:
 
         # ---- (vl-c) Dockerfile 치환 목록 ----
         loop = re.search(r"for f in (.*?); do", docker_src, re.S)
-        listed = re.findall(r"/usr/share/nginx/html/[\w.\-]+", loop.group(1)) if loop else []
+        listed = re.findall(r"/usr/share/nginx/html/[\w.\-/]+", loop.group(1)) if loop else []
         if "/usr/share/nginx/html/vnew-previz.js" not in listed:
             bad.append(f"(vl-c) Dockerfile 치환 목록에 vnew-previz.js 가 없습니다: {listed}")
         if 'grep -q "__ASSET_VERSION__" "$f"' not in docker_src:
@@ -15448,7 +15448,7 @@ def check_vnew_previz_lazy() -> None:
             bad.append("(vl-d) app.js·index.html 에 __ASSET_VERSION__ 이 없습니다")
         for path in listed:
             name = path.rsplit("/", 1)[-1]
-            local = PUBLIC / name
+            local = PUBLIC / path[len("/usr/share/nginx/html/"):]  # 작업 201: vendor/three/addons/* 처럼 하위 경로도
             if not local.exists():
                 bad.append(f"(vl-d) 치환 목록 파일이 frontend/public 에 없습니다: {name}")
                 continue
@@ -67581,6 +67581,386 @@ console.log(JSON.stringify({
            "(t2-d)고친 구간만 stale·-e 키 (t2-e)생성 409 PrevizStale·새 녹화가 @Video1 (t2-f)test3 13컷 (t2-g)옛 계획 그대로 (t2-h)화면·LF")
 
 
+# 작업 201 편집기 하네스(node): 가짜 DOM·가짜 렌더러(그린 카메라·도우미 보임을 적는다)·가짜 OrbitControls/TransformControls 로
+# createController 를 만들어 시점 전환·선택·기즈모 끌기·눈금·이 인물 보기·렌즈·키·되돌리기·단축키·녹화 중 도우미를 돌린다.
+_T201_RUNNER = r"""
+const THREE = await import(process.argv[2]);
+class FakeEl {
+  constructor(tag) {
+    this.tagName = String(tag).toUpperCase(); this.style = {}; this.children = []; this.listeners = {};
+    this.className = ""; this.innerHTML = ""; this.clientWidth = 1280; this.clientHeight = 720; this.parentNode = null;
+    this.classList = { add() {}, remove() {}, toggle() {}, contains() { return false; } };
+  }
+  appendChild(c) { this.children.push(c); c.parentNode = this; return c; }
+  removeChild(c) { this.children = this.children.filter((x) => x !== c); c.parentNode = null; return c; }
+  get firstChild() { return this.children[0] || null; }
+  addEventListener(t, f) { (this.listeners[t] = this.listeners[t] || []).push(f); }
+  removeEventListener(t, f) { this.listeners[t] = (this.listeners[t] || []).filter((x) => x !== f); }
+  dispatch(t, ev) { (this.listeners[t] || []).forEach((f) => f(ev)); }
+  focus() { globalThis.document.activeElement = this; }
+  getBoundingClientRect() { return { left: 0, top: 0, width: 1280, height: 720 }; }
+  toBlob(cb) { cb(new Blob(["x"])); }
+  captureStream() { return {}; }
+}
+globalThis.window = globalThis;
+globalThis.document = { createElement: (t) => new FakeEl(t), addEventListener() {}, removeEventListener() {}, visibilityState: "visible", activeElement: null };
+globalThis.requestAnimationFrame = (cb) => setTimeout(() => cb(performance.now()), 4);
+globalThis.cancelAnimationFrame = (id) => clearTimeout(id);
+globalThis.MediaRecorder = class { static isTypeSupported() { return true; } start() {} stop() { setTimeout(() => this.onstop && this.onstop(), 0); } };
+class FakeTC extends THREE.EventDispatcher {
+  constructor(cam) { super(); this.camera = cam; this.object = null; this.dragging = false; this.axis = null; this.mode = "translate";
+    this.showX = true; this.showY = true; this.showZ = true; this.helper = new THREE.Object3D(); this.tSnap = null; this.rSnap = null; FakeTC.last = this; }
+  getHelper() { return this.helper; } attach(o) { this.object = o; } detach() { this.object = null; } setMode(m) { this.mode = m; }
+  setSpace(s) { this.space = s; } setTranslationSnap(s) { this.tSnap = s; } setRotationSnap(s) { this.rSnap = s; } dispose() {}
+}
+class FakeOrbit extends THREE.EventDispatcher {
+  constructor(cam) { super(); this.object = cam; this.target = new THREE.Vector3(); this.enabled = true; FakeOrbit.last = this; }
+  update() {} dispose() {}
+}
+const mod = await import(new URL('./previz201.mjs', import.meta.url));
+const renders = [];
+const canvas = new FakeEl("canvas");
+const renderer = { domElement: canvas, shadowMap: {}, setPixelRatio() {}, setSize() {}, dispose() {},
+  render(scene, cam) { renders.push({ helpers: scene.getObjectByName("previz-editor-helpers").visible, cam }); } };
+const sceneData = {
+  room: { width: 6, depth: 6, height: 3, walls: {} },
+  actors: [{ id: "a", name: "A", heightM: 1.7, color: "#ff0000" }, { id: "b", name: "B", heightM: 1.7, color: "#00ff00" }],
+  props: [], light: {},
+  timeline: [
+    { cutId: "c1", start: 0, end: 2, camera: { pos: [0, 1.5, 4], target: [0, 1.2, 0], fov: 40 },
+      actors: [{ id: "a", pos: [0, 0, 0], facingDeg: 0, pose: "stand" }, { id: "b", pos: [1, 0, -1], facingDeg: 180, pose: "sit", sit: null }] },
+    { cutId: "c2", start: 2, end: 4, camera: { pos: [0, 1.5, 4], target: [0, 1.2, 0], fov: 40, moveTo: { pos: [0, 1.5, 2], target: [0, 1.2, 0] } },
+      actors: [{ id: "a", pos: [0, 0, 0], facingDeg: 0, pose: "stand" }] },
+  ],
+};
+const host = new FakeEl("div");
+const ctl = mod.createController(host, { scenes: [sceneData], renderer, controls: { OrbitControls: FakeOrbit, TransformControls: FakeTC }, width: 1280, height: 720 });
+await ctl.ready();
+const E = ctl._editor;
+const tc = FakeTC.last;
+const orbit = FakeOrbit.last;
+const c1 = sceneData.timeline[0];
+const original = JSON.stringify(c1);
+const out = {};
+const last = () => renders[renders.length - 1];
+const r3 = (v) => v.toArray().map((x) => Math.round(x * 1000) / 1000);
+const grid = E.helpers.getObjectByName("previz-grid");
+const icon = E.helpers.getObjectByName("previz-camera-icon");
+function drag(steps) {
+  tc.dragging = true; tc.dispatchEvent({ type: "dragging-changed", value: true });
+  steps.forEach((fn) => { fn(E.proxy); tc.dispatchEvent({ type: "objectChange" }); });
+  tc.dragging = false; tc.dispatchEvent({ type: "dragging-changed", value: false });
+}
+const events = { select: [], live: 0, commit: 0 };
+ctl.onSelect((s) => events.select.push(s));
+ctl.onEdit((e) => { if (e.kind === "live") events.live += 1; else events.commit += 1; });
+
+// (v) 시점 전환
+const v0 = { view: ctl.viewMode, shot: last().cam === E.shotCamera, grid: grid.visible, icon: icon.visible, orbit: orbit.enabled };
+ctl.setViewMode("work");
+const v1 = { view: ctl.viewMode, work: last().cam === E.workCamera, grid: grid.visible, icon: icon.visible, orbit: orbit.enabled, helpers: last().helpers };
+ctl.setViewMode("shot");
+const v2 = { view: ctl.viewMode, shot: last().cam === E.shotCamera, grid: grid.visible, orbit: orbit.enabled };
+out.view = [v0, v1, v2];
+
+// (s) 선택 → 패널(onSelect)
+ctl.select({ type: "actor", id: "a" });
+out.select = { events: events.select.slice(), selection: ctl.selection };
+
+// (g) 기즈모 이동 → 숫자·manual, 한 번 끈 것 = 한 단계 / 반대로(패널 숫자 → 기즈모)
+ctl.setTool("translate");
+const undo0 = ctl.canUndo;
+drag([(p) => p.position.set(1.234, 0, -0.5), (p) => p.position.set(1.5, 0, -0.7)]);
+const ca = c1.actors[0];
+out.gizmo = { attached: tc.object === E.proxy, showY: tc.showY, pos: ca.pos.slice(), manual: !!ca.manual, camManual: !!c1.camera.manual,
+  otherManual: !!c1.actors[1].manual, live: events.live, commit: events.commit, undo0, canUndo: ctl.canUndo };
+ca.pos[0] = -1; ca.pos[2] = 0.5; ctl.refresh();
+out.reverse = r3(E.proxy.position);
+
+// (n) 눈금 맞춤
+ctl.setSnap(true);
+drag([(p) => p.position.set(0.234, 0, 0.66)]);
+const snapPos = ca.pos.slice();
+ctl.setTool("rotate");
+const rotAxes = [tc.showX, tc.showY, tc.showZ];
+drag([(p) => p.rotation.set(0, 37 * Math.PI / 180, 0)]);
+out.snap = { pos: snapPos, facing: ca.facingDeg, tSnap: tc.tSnap, rSnapDeg: Math.round(tc.rSnap * 180 / Math.PI), rotAxes };
+ctl.setSnap(false);
+
+// (c) 작업 시점에서 카메라 이동 — 바라보는 곳은 그대로
+ctl.setViewMode("work");
+ctl.select({ type: "camera" });
+ctl.setTool("translate");
+drag([(p) => p.position.set(0.5, 2.0, 4.0)]);
+out.camera = { pos: c1.camera.pos.slice(), target: c1.camera.target.slice(), manual: !!c1.camera.manual, actorStill: ca.pos.slice() };
+
+// (l) 이 인물 보기: 버튼(lookAtActor) · 카메라 고른 뒤 인물 클릭(조준)
+ctl.lookAtActor("b");
+const lookB = c1.camera.target.slice();
+ctl.setAimMode(true);
+E.workCamera.position.set(0, 3, 6); E.workCamera.lookAt(ca.pos[0], 1, ca.pos[2]); E.workCamera.updateMatrixWorld(true);
+const scr = new THREE.Vector3(ca.pos[0], 1.0, ca.pos[2]).project(E.workCamera);
+const hit = ctl.clickAt((scr.x * 0.5 + 0.5) * 1280, (-scr.y * 0.5 + 0.5) * 720);
+out.look = { b: lookB, hit, aimTarget: c1.camera.target.slice(), aimOff: ctl.state().aim };
+
+// (p) 렌즈 프리셋
+out.lens = [18, 24, 35, 50, 85, 135].map((mm) => { ctl.setLens(mm); return [c1.camera.lensMm, c1.camera.fov]; });
+const info = ctl.cameraInfo();
+out.info = { lensMm: info.lensMm, fov: info.fov, heightM: info.heightM };
+
+// (k) 시작/끝 키 + ease in-out 보간
+ctl.setKey("end");
+const afterEnd = { keyU: ctl.keyU, moveTo: JSON.parse(JSON.stringify(c1.camera.moveTo || null)) };
+drag([(p) => p.position.set(2, 1.5, 3)]);
+const keyed = { start: c1.camera.pos.slice(), end: c1.camera.moveTo.pos.slice() };
+const at = (u) => { ctl.scrubKey(u); return r3(E.shotCamera.position); };
+out.keys = { afterEnd, keyed, t0: at(0), t5: at(0.5), t1: at(1), t25: at(0.25) };
+const sc = new mod.PrevizScene(sceneData, null, null);
+const cam2 = new THREE.PerspectiveCamera(40, 16 / 9, 0.1, 100);
+sc.update(2.5, cam2);
+out.keys.oldLinear = r3(cam2.position);
+out.keys.pose = ["u0", "u5", "u1"].map((k, i) => r3(mod.cameraPoseAt({ manual: true, pos: [0, 1, 0], target: [0, 1, -1], moveTo: { pos: [4, 1, 0], target: [4, 1, -1] } }, [0, 0.5, 1][i]).pos));
+ctl.clearEndKey();
+out.keys.cleared = !("moveTo" in c1.camera);
+
+// (u) 되돌리기 / 다시 하기
+const finalJson = JSON.stringify(c1);
+let n = 0;
+while (ctl.undo()) n += 1;
+const undone = JSON.stringify(c1) === original;
+let m = 0;
+while (ctl.redo()) m += 1;
+out.undo = { steps: n, redo: m, undone, redone: JSON.stringify(c1) === finalJson };
+for (let i = 0; i < 60; i++) ctl.setLens(i % 2 ? 24 : 35);
+let cap = 0;
+while (ctl.undo()) cap += 1;
+out.undo.cap = cap;
+
+// (h) 단축키: 입력 중엔 무시, 뷰포트(stage)에서만 · 한글 입력(code)
+ctl.setTool("select");
+const input = new FakeEl("input");
+const key = (code, k, target, extra) => E.stage.dispatch("keydown", Object.assign({ code, key: k, target, preventDefault() {} }, extra || {}));
+key("KeyW", "w", input);
+const typed = ctl.tool;
+key("KeyW", "w", E.stage);
+const w = ctl.tool;
+key("KeyE", "ㄷ", E.stage);
+const e = ctl.tool;
+const undoBefore = ctl.canRedo;
+key("KeyZ", "z", input, { ctrlKey: true });
+out.keys2 = { typed, w, e, ctrlZTyped: ctl.canRedo === undoBefore };
+
+// (r) 녹화·프레임 렌더: 작업 시점이어도 촬영 카메라, 도우미 숨김 → 끝나면 되돌림
+ctl.setViewMode("work");
+let k0 = renders.length;
+await ctl.renderFrames(0, 0.25, 8);
+const rf = renders.slice(k0);
+const rfAfter = last();
+k0 = renders.length;
+await ctl.record(0, 0.05);
+const rec = renders.slice(k0);
+const recAfter = last();
+out.rec = {
+  frames: rf.length > 1, framesHidden: rf.slice(0, -1).every((r) => !r.helpers && r.cam === E.shotCamera),
+  framesAfter: rfAfter.helpers && rfAfter.cam === E.workCamera,
+  rec: rec.length > 1, recHidden: rec.slice(0, -1).every((r) => !r.helpers && r.cam === E.shotCamera),
+  recAfter: recAfter.helpers && recAfter.cam === E.workCamera,
+};
+ctl.destroy();
+console.log(JSON.stringify(out));
+"""
+
+
+def _t201_run() -> tuple[dict, str]:
+    """편집기 하네스를 node 로 돌린다(60초). (결과, 오류). node 가 없으면 ({}, "")."""
+    node = shutil.which("node")
+    if not node:
+        return {}, ""
+    src = (PUBLIC / "vnew-previz.js").read_text(encoding="utf-8")
+    line = 'import * as THREE from "/vendor/three/three.module.min.js?v=__ASSET_VERSION__";'
+    three = (PUBLIC / "vendor" / "three" / "three.module.min.js").resolve().as_uri()
+    if line not in src:
+        return {}, "vnew-previz.js 의 three import 줄을 찾지 못했습니다"
+    work = Path(tempfile.mkdtemp(prefix="vpoc_t201_"))
+    try:
+        (work / "previz201.mjs").write_text(src.replace(line, f'import * as THREE from "{three}";')
+                                            + "\nexport { PrevizScene, createController, cameraPoseAt };\n", encoding="utf-8")
+        (work / "run.mjs").write_text(_T201_RUNNER, encoding="utf-8")
+        try:
+            result = subprocess.run([node, str(work / "run.mjs"), three], capture_output=True, text=True, encoding="utf-8", timeout=60)
+        except subprocess.TimeoutExpired:
+            return {}, "node 편집기 검사가 60초 안에 끝나지 않았습니다"
+        if result.returncode != 0:
+            return {}, f"node 실패: {(result.stderr or '').strip()[:800]}"
+        return json.loads(result.stdout.strip().splitlines()[-1]), ""
+    finally:
+        shutil.rmtree(work, ignore_errors=True)
+
+
+def check_vnew_previz_editor_201() -> None:
+    """작업 201 — 프리비즈 뷰포트 직접 편집기(작업 시점/카메라 시점·선택·이동/회전·키·되돌리기).
+
+    (e1) 시점 전환: 카메라 시점 = 촬영 카메라·격자/아이콘 없음·궤도 끔, 작업 시점 = 작업 카메라·격자·카메라 아이콘·궤도 켬
+    (e2) 고르기 → onSelect(패널이 그것으로 넘어감)
+    (e3) 기즈모로 인물 이동 → pos·그 인물만 manual · 끄는 동안 live, 놓으면 한 단계 · 반대로 숫자를 고치면 기즈모가 따라감 ·
+         카메라 이동은 바라보는 곳 그대로 + camera.manual
+    (e4) 눈금 맞춤 10cm / 15°(기즈모 snap 값도)
+    (e5) 이 인물 보기(버튼·카메라 고른 뒤 인물 클릭) = 그 인물 머리 높이
+    (e6) 렌즈 프리셋 18~135mm = lensMm + 서버와 같은 fov
+    (e7) 시작/끝 키(cut.camera.moveTo — 스키마 그대로) · t = 0 / 0.5 / 1 · 놓은 카메라는 ease in-out, 옛 이동은 선형 · 끝 키 지우기
+    (e8) 되돌리기/다시 하기(처음 그대로·끝 그대로) · 50단계 상한
+    (e9) 단축키: 입력 중엔 무시 · 뷰포트에서 W/E(한글 입력은 code)
+    (e10) record·renderFrames: 작업 시점이어도 촬영 카메라 + 도우미 숨김, 끝나면 되돌림
+    (e11) Dockerfile 치환 목록에 addons 2개 · addons 의 three import = vnew-previz.js 와 같은 URL · ?v= 로 불러옴 · 화면 배선 · node --check · LF
+    (e12) normalize_scenes 가 놓은 카메라의 moveTo(끝 키)를 그대로 두고, 옛 계획(표시 없음)은 그대로
+    """
+    import traceback as _tb  # noqa: PLC0415
+
+    sys.path.insert(0, str(ROOT / "app"))
+    bad: list[str] = []
+    seen: set[str] = set()
+    node = shutil.which("node")
+
+    def expect(group: str, got, want, what: str) -> None:
+        seen.add(group)
+        if got != want:
+            bad.append(f"({group}) {what}\n      결과 {got!r}\n      기대 {want!r}")
+
+    from src.vnew import previz_schema as pschema  # noqa: PLC0415
+
+    addons = PUBLIC / "vendor" / "three" / "addons"
+    pjs = (PUBLIC / "vnew-previz.js").read_text(encoding="utf-8")
+    vjs = (PUBLIC / "vnew.js").read_text(encoding="utf-8")
+    docker = (ROOT / "frontend" / "Dockerfile").read_text(encoding="utf-8")
+    groups = {"e11", "e12"}
+    try:
+        if not node:
+            warn("node 가 없어 작업 201 편집기 실행 검사(e1~e10)를 건너뜁니다")
+        else:
+            groups |= {f"e{i}" for i in range(1, 11)}
+            got, err = _t201_run()
+            if err:
+                bad.append("(e1) " + err)
+            else:
+                expect("e1", got["view"], [{"view": "shot", "shot": True, "grid": False, "icon": False, "orbit": False},
+                                           {"view": "work", "work": True, "grid": True, "icon": True, "orbit": True, "helpers": True},
+                                           {"view": "shot", "shot": True, "grid": False, "orbit": False}], "시점 전환")
+                expect("e2", got["select"], {"events": [{"type": "actor", "id": "a"}], "selection": {"type": "actor", "id": "a"}},
+                       "고르기 → onSelect")
+                expect("e3", got["gizmo"], {"attached": True, "showY": False, "pos": [1.5, 0, -0.7], "manual": True, "camManual": False,
+                                            "otherManual": False, "live": 2, "commit": 1, "undo0": False, "canUndo": True},
+                       "기즈모 이동(바닥면) → 숫자·그 인물만 manual · 끄는 동안 live 2 · 놓으면 1단계")
+                expect("e3", got["reverse"], [-1, 0, 0.5], "숫자를 고치면 기즈모가 따라감")
+                expect("e3", got["camera"], {"pos": [0.5, 2, 4], "target": [0, 1.2, 0], "manual": True, "actorStill": [0.2, 0, 0.7]},
+                       "카메라 이동(높이 포함) — 바라보는 곳 그대로 · camera.manual · 인물은 그대로")
+                expect("e4", got["snap"], {"pos": [0.2, 0, 0.7], "facing": 30, "tSnap": 0.1, "rSnapDeg": 15, "rotAxes": [False, True, False]},
+                       "눈금 맞춤 10cm / 15° · 인물 회전은 세로축만")
+                expect("e5", got["look"], {"b": [1, 1.25, -1], "hit": {"type": "actor", "id": "a"}, "aimTarget": [0.2, 1.598, 0.7], "aimOff": False},
+                       "이 인물 보기 = 머리 높이(앉은 B 1.25 · 선 A 1.598) · 조준 클릭")
+                want_lens = [[mm, round(pschema.fov_from_lens_mm(mm), 1)] for mm in (18, 24, 35, 50, 85, 135)]
+                expect("e6", got["lens"], want_lens, "렌즈 프리셋 = lensMm + 서버와 같은 fov")
+                expect("e6", got["info"], {"lensMm": 135, "fov": round(pschema.fov_from_lens_mm(135), 1), "heightM": 2.0},
+                       "렌즈·화각·카메라 높이 글")
+                k = got["keys"]
+                expect("e7", [k["afterEnd"], k["keyed"]],
+                       [{"keyU": 1, "moveTo": {"pos": [0.5, 2, 4], "target": [0.2, 1.598, 0.7]}}, {"start": [0.5, 2, 4], "end": [2, 1.5, 3]}],
+                       "끝 키 = 지금 카메라 · 끝 키에서 끈 값은 끝 키(moveTo)로")
+                ease = 0.25 * 0.25 * (3 - 2 * 0.25)
+                want_t25 = [round(0.5 + (2 - 0.5) * ease, 3), round(2 + (1.5 - 2) * ease, 3), round(4 + (3 - 4) * ease, 3)]
+                expect("e7", [k["t0"], k["t5"], k["t1"], k["t25"], k["oldLinear"], k["pose"], k["cleared"]],
+                       [[0.5, 2, 4], [1.25, 1.75, 3.5], [2, 1.5, 3], want_t25, [0, 1.5, 3.5], [[0, 1, 0], [2, 1, 0], [4, 1, 0]], True],
+                       "t = 0 / 0.5 / 1 · 0.25 는 ease in-out · 옛 이동은 선형 · 끝 키 지우기")
+                u = got["undo"]
+                expect("e8", [u["undone"], u["redone"], u["steps"] == u["redo"], u["steps"] >= 10, u["cap"]], [True, True, True, True, 50],
+                       "되돌리기 → 처음 그대로 · 다시 하기 → 끝 그대로 · 50단계 상한")
+                expect("e9", got["keys2"], {"typed": "select", "w": "translate", "e": "rotate", "ctrlZTyped": True},
+                       "입력 중 단축키 무시 · 뷰포트 W/E(한글 입력은 code)")
+                expect("e10", got["rec"], {"frames": True, "framesHidden": True, "framesAfter": True, "rec": True, "recHidden": True,
+                                           "recAfter": True}, "녹화·프레임 렌더 = 촬영 카메라 + 도우미 숨김, 끝나면 되돌림")
+    except Exception as exc:  # noqa: BLE001
+        bad.append("(e1~e10) 예외: " + repr(exc) + "\n" + _tb.format_exc()[:1500])
+
+    # ---- (e11) 정적: Dockerfile · addons import · 배선 · node --check · LF ----
+    try:
+        three_line = 'from "/vendor/three/three.module.min.js?v=__ASSET_VERSION__";'
+        loop = re.search(r"for f in (.*?); do", docker, re.S)
+        listed = re.findall(r"/usr/share/nginx/html/[\w.\-/]+", loop.group(1)) if loop else []
+        expect("e11", [p for p in ("/usr/share/nginx/html/vendor/three/addons/OrbitControls.js",
+                                   "/usr/share/nginx/html/vendor/three/addons/TransformControls.js") if p not in listed], [],
+               "Dockerfile 치환 목록에 addons 2개")
+        imports = {}
+        for name in ("OrbitControls.js", "TransformControls.js"):
+            text = (addons / name).read_text(encoding="utf-8")
+            imports[name] = sorted(set(re.findall(r'from\s+"([^"]+)"', text)))
+        expect("e11", imports, {n: ["/vendor/three/three.module.min.js?v=__ASSET_VERSION__"] for n in ("OrbitControls.js", "TransformControls.js")},
+               "addons 는 vnew-previz.js 와 같은 three URL 만 import")
+        expect("e11", [three_line.replace("from ", "import * as THREE from ", 1) in pjs,
+                       '"/vendor/three/addons/OrbitControls.js?v=__ASSET_VERSION__"' in pjs,
+                       '"/vendor/three/addons/TransformControls.js?v=__ASSET_VERSION__"' in pjs],
+               [True, True, True], "vnew-previz.js 가 three 와 addons 를 ?v= 로 불러옴")
+        wires = {
+            "시점": '"작업 시점"' in vjs and '"카메라 시점"' in vjs,
+            "도구": all(s in vjs for s in ('"선택 (Q)"', '"이동 (W)"', '"회전 (E)"', '"F = 선택한 것에 맞춰 보기"', '"눈금 맞춤 (10cm / 15°)"')),
+            "조준": '"이 인물 보기"' in vjs and '"카메라를 여기로"' in vjs and "previzCtl.setLens(mm)" in vjs,
+            "도움말": '"Q 선택 · W 이동 · E 회전 · F 맞춰 보기 · 휠 확대 · Shift+드래그 이동 · Ctrl+Z 되돌리기"' in vjs,
+            "키": '"시작 키"' in vjs and '"끝 키"' in vjs and "previzCtl.scrubKey(" in vjs,
+            "패널 연결": "previzCtl.onSelect(" in vjs and "previzCtl.onEdit(" in vjs and "fieldRefreshers.forEach(" in vjs,
+            "이 인물 보기 하나": "previzCtl.lookAtActor(ca.id)" in vjs and "function eyeHeight(" not in vjs,
+            "떠날 때 확인": "previzConfirmLeave()" in vjs and '"beforeunload"' in vjs,
+            "다시 녹화": '"변경된 컷만 다시 녹화"' in vjs,
+            "되돌리기": '"↶ 되돌리기"' in vjs and "previzCtl.undo()" in vjs,
+        }
+        expect("e11", [k for k, v in wires.items() if not v], [], "화면 배선")
+        crlf = [p.name for p in (PUBLIC / "vnew.js", PUBLIC / "vnew-previz.js", PUBLIC / "vnew.css", ROOT / "frontend" / "Dockerfile",
+                                 ROOT / "tools" / "check_vpoc.py") if b"\r" in p.read_bytes()]
+        expect("e11", crlf, [], "고친 파일 LF")
+        if node:
+            work = Path(tempfile.mkdtemp(prefix="vpoc_t201c_"))
+            try:
+                failed = []
+                for path in (PUBLIC / "vnew.js",):
+                    if subprocess.run([node, "--check", str(path)], capture_output=True, timeout=60).returncode != 0:
+                        failed.append(path.name)
+                for path in (PUBLIC / "vnew-previz.js", addons / "OrbitControls.js", addons / "TransformControls.js"):
+                    copy = work / (path.stem + ".mjs")
+                    copy.write_text(path.read_text(encoding="utf-8"), encoding="utf-8")
+                    if subprocess.run([node, "--check", str(copy)], capture_output=True, timeout=60).returncode != 0:
+                        failed.append(path.name)
+            finally:
+                shutil.rmtree(work, ignore_errors=True)
+            expect("e11", failed, [], "node --check")
+    except Exception as exc:  # noqa: BLE001
+        bad.append("(e11) 예외: " + repr(exc) + "\n" + _tb.format_exc()[:1500])
+
+    # ---- (e12) 스키마: moveTo(끝 키) 유지 · 옛 계획 그대로 ----
+    try:
+        specs = [{"locationId": "loc", "cuts": [{"cutId": "c1", "seconds": 3}]}]
+
+        def scene(cam):
+            return [{"locationId": "loc", "room": {"width": 6, "depth": 6, "height": 3},
+                     "timeline": [{"cutId": "c1", "camera": cam}]}]
+
+        keyed = {"pos": [0.5, 2, 4], "target": [0, 1.2, 0], "fov": 30, "manual": True, "moveTo": {"pos": [2, 1.5, 3], "target": [0, 1.4, 0]}}
+        cam_u = pschema.normalize_scenes(scene(keyed), scene_specs=specs, user=True)[0]["timeline"][0]["camera"]
+        expect("e12", [cam_u.get("moveTo"), cam_u.get("manual")], [{"pos": [2.0, 1.5, 3.0], "target": [0.0, 1.4, 0.0]}, True],
+               "사용자 PUT: 놓은 카메라의 끝 키(moveTo) 그대로")
+        old = {"pos": [0, 1.5, 4], "target": [0, 1.2, 0], "fov": 40, "moveTo": {"pos": [0, 1.5, 2], "target": [0, 1.2, 0]}}
+        cam_o = pschema.normalize_scenes(scene(old), scene_specs=specs)[0]["timeline"][0]["camera"]
+        expect("e12", cam_o, {"pos": [0.0, 1.5, 4.0], "target": [0.0, 1.2, 0.0], "fov": 40.0, "moveTo": {"pos": [0.0, 1.5, 2.0], "target": [0.0, 1.2, 0.0]}},
+               "옛 계획(표시 없음) 카메라 그대로")
+    except Exception as exc:  # noqa: BLE001
+        bad.append("(e12) 예외: " + repr(exc) + "\n" + _tb.format_exc()[:1500])
+
+    if groups - seen and not bad:
+        bad.append(f"검사하지 못한 묶음: {sorted(groups - seen)}")
+    if bad:
+        fail("작업 201 프리비즈 편집기 검사 실패\n  " + "\n  ".join(bad))
+    else:
+        ok("작업 201 프리비즈 편집기 (e1)시점 전환 (e2)고르기→패널 (e3)기즈모↔숫자·manual·한 단계 (e4)눈금 10cm/15° (e5)이 인물 보기 "
+           "(e6)렌즈 프리셋 (e7)시작/끝 키·ease (e8)되돌리기 50 (e9)입력 중 단축키 무시 (e10)녹화 중 도우미 숨김 (e11)Dockerfile·addons·배선·LF "
+           "(e12)moveTo 유지·옛 계획 그대로")
+
+
 def main() -> int:
     print("== vpoc1 check ==")
     check_compileall()
@@ -67756,6 +68136,7 @@ def main() -> int:
     check_vnew_model_notes_198()
     check_vnew_model_notes_ui_199()
     check_vnew_previz_edits_200()
+    check_vnew_previz_editor_201()
     if not __import__("check_voice_202").check_voice_202(): fail("작업 202 인물 목소리 검사 실패(위 [FAIL] 참고)")
     print()
     if warnings:

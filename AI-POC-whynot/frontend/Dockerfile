@@ -19,9 +19,13 @@ USER root
 # 버전 쿼리로 부르므로, 치환이 빠지면 배포 후에도 옛 파일이 캐시에서 나온다.
 # vnew-previz.js 도 치환 대상이다(073 R9). app.js 가 동적 import 하고, 이 파일이 three.js 를
 # ?v= 버전 쿼리로 import 하므로 치환이 빠지면 배포 후에도 옛 three.js·프리비즈가 캐시에서 나온다.
+# vendor/three/addons 의 OrbitControls.js·TransformControls.js 도 치환 대상이다(작업 201). 둘 다 vnew-previz.js 와
+# 같은 three URL(?v=)을 import 해 THREE 인스턴스를 나눠 쓰고, vnew-previz.js 가 ?v= 로 불러 캐시를 무효화한다.
 RUN set -eu; \
     for f in /usr/share/nginx/html/index.html /usr/share/nginx/html/app.js \
-             /usr/share/nginx/html/vpoc-smoke.html /usr/share/nginx/html/vnew-previz.js; do \
+             /usr/share/nginx/html/vpoc-smoke.html /usr/share/nginx/html/vnew-previz.js \
+             /usr/share/nginx/html/vendor/three/addons/OrbitControls.js \
+             /usr/share/nginx/html/vendor/three/addons/TransformControls.js; do \
       sed -i "s/__ASSET_VERSION__/${ASSET_VERSION}/g" "$f"; \
       if grep -q "__ASSET_VERSION__" "$f"; then \
         echo "ASSET_VERSION placeholder not replaced in $f"; exit 1; \

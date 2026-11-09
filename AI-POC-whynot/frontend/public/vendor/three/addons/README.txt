@@ -1,0 +1,1 @@
+three.js r169 (0.169.0) examples/jsm/controls OrbitControls.js and TransformControls.js from cdn.jsdelivr.net/npm/three@0.169.0, only the import specifier rewritten to the vendored module. MIT, see ../LICENSE.
