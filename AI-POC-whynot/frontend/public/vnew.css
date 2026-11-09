@@ -6094,3 +6094,9 @@ textarea.vnew-field-input {
 .vnew-only-changed-block {
   margin: 0;
 }
+
+/* 작업 206: 촬영 지시서 마무리 중 — 바뀐 테이크 버튼을 잠깐 막아 둔다. */
+.vnew-only-changed-btn.is-waiting {
+  cursor: progress;
+  opacity: 0.7;
+}

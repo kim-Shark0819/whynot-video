@@ -24,6 +24,7 @@ STORE 는 vpoc.store.STORE 를 쓴다(검사가 모듈 변수로 바꿔 끼운�
 from __future__ import annotations
 
 import base64
+import contextvars
 import hashlib
 import logging
 import os
@@ -665,6 +666,11 @@ def _new_take_gen(plan: dict) -> dict:
     units = [_empty_take_unit(t) for t in _take_units(plan)]
     previz = plan.get("previz") or {}
     brief = previz.get("shotBrief") or {}
+    # 작업 206: 컷 지문(pvSig)을 가진 지시서면 테이크마다 그 테이크 컷 지시서 내용 지문(briefSig)을 둔다.
+    # stale 판정이 지시서 updatedAt 대신 이것을 본다(지시서를 다시 만들어도 안 바뀐 테이크는 그대로).
+    if _brief_has_pv_sig(plan):
+        for unit in units:
+            unit["briefSig"] = _unit_brief_sig(plan, unit.get("cutIds") or [])
     return {
         "genId": _gen_id(),
         "mode": "previz-take",
@@ -1417,7 +1423,24 @@ def _model_accepts_real_start(model: str) -> bool:
 PREVIZ_STALE_MESSAGE = "프리비즈를 다시 녹화해야 합니다."
 
 
-def check_preconditions(plan: dict, owner: str) -> list[dict]:
+# 작업 206: 지시서를 만드는 중(이 상태)이면 /generate 가 409 BriefBuilding 으로 기다리게 한다.
+BRIEF_BUILDING_STATUSES = ("running", "queued", "building")
+BRIEF_BUILDING_MESSAGE = "촬영 지시서를 만드는 중입니다. 잠시 뒤 다시 눌러 주세요."
+
+# 작업 206 fix 1: check_preconditions 가 지시서 따라잡기를 시작하려면 pid 가 필요하다. start_generate 가 여기에 둔다
+# (check_preconditions(plan, owner) 모양은 그대로 — 검사들이 그 모양으로 바꿔 끼운다).
+_PRECONDITION_PID: contextvars.ContextVar[str] = contextvars.ContextVar("vnew_generate_pid", default="")
+
+
+def _check_preconditions_for(plan: dict, owner: str, pid: str) -> list[dict]:
+    token = _PRECONDITION_PID.set(str(pid or ""))
+    try:
+        return check_preconditions(plan, owner)
+    finally:
+        _PRECONDITION_PID.reset(token)
+
+
+def check_preconditions(plan: dict, owner: str, pid: str = "") -> list[dict]:
     """generate 선행 조건(설계자 2026-10-21, 지시서 038 — 프리비즈 기반). 어기면 VpocError(409).
 
     - 콘티가 ready 여야 한다(구간이 있어야 프리비즈·녹화가 가능).
@@ -1443,6 +1466,12 @@ def check_preconditions(plan: dict, owner: str) -> list[dict]:
         )
 
     brief = previz.get("shotBrief") or {}
+    # 작업 206: 지시서를 (다시) 만드는 중이면 끝날 때까지 기다리게 한다(바뀐 테이크 판정·금액이 지시서에 달려 있다).
+    if brief.get("status") in BRIEF_BUILDING_STATUSES:
+        from . import shot_brief as brief_mod  # noqa: PLC0415
+
+        if not brief_mod._task_stale(brief.get("task") or {}):  # noqa: SLF001
+            raise VpocError("vnew.generate", "BriefBuilding", BRIEF_BUILDING_MESSAGE, 409)
     if brief.get("status") != "ready":
         raise VpocError(
             "vnew.generate",
@@ -1450,6 +1479,20 @@ def check_preconditions(plan: dict, owner: str) -> list[dict]:
             "촬영 지시서를 만드는 중입니다. 잠시 후 다시 시도해 주세요.",
             409,
         )
+    # 작업 206 fix 1: 지시서는 ready 인데 그 뒤 바뀐 컷이 있으면(옛 컷 설명) 지시서를 다시 돌리고 같은 409 로 기다리게 한다.
+    from . import shot_brief as brief_mod  # noqa: PLC0415
+
+    try:
+        outdated = brief_mod.brief_outdated_cuts(plan, owner=owner)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("vnew.generate.brief_outdated_check_failed err=%s", str(exc)[:200])
+        outdated = []
+    if outdated:
+        pid = pid or _PRECONDITION_PID.get()
+        log.info("vnew.generate.brief_outdated pid=%s cuts=%s", pid or "-", ",".join(outdated)[:300])
+        if pid:
+            brief_mod.start_brief_safe(owner, pid)
+        raise VpocError("vnew.generate", "BriefBuilding", BRIEF_BUILDING_MESSAGE, 409)
 
     gen = plan.get("gen") or {}
     if gen.get("status") == "running" and not _gen_stale(gen):
@@ -1520,7 +1563,7 @@ def start_generate(owner: str, pid: str, confirm_usd: float, styles: list | None
     """
     plan, _ = plan_mod.load_plan(owner, pid)
     if only_changed:
-        check_preconditions(plan, owner)
+        _check_preconditions_for(plan, owner, pid)
         prev = plan.get("gen") or {}
         new, quote = _only_changed_gen(plan, prev)
         expected = quote["usd"]
@@ -1546,7 +1589,7 @@ def start_generate(owner: str, pid: str, confirm_usd: float, styles: list | None
         raise VpocError("vnew.generate", "TakeRealDisabled", "통 테이크 실사 버전 기능이 꺼져 있습니다.", 400)
     if want_real and _gen_mode(plan) != "previz-take":
         raise VpocError("vnew.generate", "RealNotTake", "실사를 함께 만들기는 통 테이크에서만 됩니다.", 400)
-    check_preconditions(plan, owner)
+    _check_preconditions_for(plan, owner, pid)
 
     new = _new_take_gen(plan) if _gen_mode(plan) == "previz-take" else _new_previz_gen(plan)
     expected = estimate(plan)["totalUsd"]
@@ -1669,6 +1712,11 @@ def _only_changed_gen(plan: dict, prev: dict, est: dict | None = None) -> tuple[
             continue
         old = copy.deepcopy(prev_units[uid])
         reused = {**old, "real": unit["real"], "reusedFrom": str(prev.get("genId") or "")}
+        # 작업 206: 안 바뀐 테이크는 지금 지시서 내용과 같다 — 새 gen 의 지문을 그대로 쓴다(없으면 키도 없다).
+        if "briefSig" in unit:
+            reused["briefSig"] = unit["briefSig"]
+        else:
+            reused.pop("briefSig", None)
         if real_made:
             reused["realReused"] = old.get("real")
         else:
@@ -14334,6 +14382,28 @@ def _gen_previz_stale(gen: dict, plan: dict) -> bool:
     return False
 
 
+def _brief_has_pv_sig(plan: dict) -> bool:
+    """작업 206: 지시서 컷 항목에 pvSig(컷 지문)가 있는지 — 바뀐 컷만 다시 쓰는 지시서. 없으면 옛 지시서(전부 새로 씀)."""
+    cuts = _brief_bundle(plan).get("cuts")
+    return isinstance(cuts, dict) and any(isinstance(item, dict) and item.get("pvSig") for item in cuts.values())
+
+
+def _unit_brief_sig(plan: dict, cut_ids: list) -> str:
+    """작업 206: 이 테이크 컷들의 지시서 내용(_cut_brief 항목, pvSig 제외)과 그 장소 문장(_scene_brief_text)의 지문."""
+    import json  # noqa: PLC0415
+
+    cuts = []
+    scenes: list[str] = []
+    for cid in cut_ids or []:
+        item = {k: v for k, v in _cut_brief(plan, str(cid)).items() if k != "pvSig"}
+        cuts.append([str(cid), item])
+        scene = _scene_brief_text(plan, {"cutIds": [str(cid)]})
+        if scene not in scenes:
+            scenes.append(scene)
+    text = json.dumps({"cuts": cuts, "scenes": scenes}, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()[:16]
+
+
 def _take_split_key(units: list[dict]) -> list[tuple]:
     """테이크 나눔 비교용(작업 205): 테이크마다 (id, 컷 id 들, 녹화 구간 id 들). 녹화 키·길이는 넣지 않는다."""
     return [(str(u.get("id") or ""), tuple(str(c) for c in (u.get("cutIds") or [])),
@@ -14352,6 +14422,7 @@ def _take_gen_stale(gen: dict, plan: dict) -> tuple[bool, list[str]]:
     고쳐서 다시 녹화해야 하면(rec.stale) 그 테이크가 바뀐 것. gen 전체: previzRevision·지시서(briefUpdatedAt)가
     다르거나 테이크 나눔이 달라졌으면 모든 테이크. previzEditRev 는 키가 있을 때만 비교한다(205 이전 gen 은 키가 없다 →
     editRev 로 거짓 stale 이 되지 않고 녹화 키로만 본다). editRev 만 다르고 바뀐 테이크를 못 찾으면 모든 테이크.
+    작업 206: 모든 테이크에 briefSig 가 있으면 지시서는 테이크별(그 테이크 컷 지시서 내용 지문)로 보고 briefUpdatedAt 은 보지 않는다.
     """
     units = gen.get("units") or []
     all_ids = [str(u.get("id") or "") for u in units]
@@ -14370,12 +14441,21 @@ def _take_gen_stale(gen: dict, plan: dict) -> tuple[bool, list[str]]:
                 changed.append(str(unit.get("id") or ""))
                 break
 
+    # 작업 206: 테이크마다 briefSig 가 있으면 지시서는 테이크별 내용으로 본다(지시서 updatedAt 은 보지 않는다).
+    by_sig = bool(units) and all("briefSig" in u for u in units)
+    if by_sig:
+        for unit in units:
+            uid = str(unit.get("id") or "")
+            if uid not in changed and str(unit.get("briefSig") or "") != _unit_brief_sig(plan, unit.get("cutIds") or []):
+                changed.append(uid)
+        changed = [uid for uid in all_ids if uid in changed]
+
     whole = False
     if "previzRevision" in gen and int(gen.get("previzRevision") or 0) != int(previz.get("revision") or 0):
         whole = True
     gen_brief = str(gen.get("briefUpdatedAt") or "")
     cur_brief = str((previz.get("shotBrief") or {}).get("updatedAt") or "")
-    if gen_brief and cur_brief and gen_brief != cur_brief:
+    if not by_sig and gen_brief and cur_brief and gen_brief != cur_brief:
         whole = True
     if not whole and not _take_split_same(gen, plan):
         whole = True
