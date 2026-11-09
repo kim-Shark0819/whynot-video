@@ -5592,3 +5592,148 @@ textarea.vnew-field-input {
     max-height: 220px;
   }
 }
+
+
+/* ================================================================ 모델 에러 로그(작업 199) */
+
+.vnew-mnotes-btn {
+  align-self: flex-start;
+  white-space: nowrap;
+}
+
+.vnew-mnotes-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-bottom: 10px;
+}
+
+/* 칩 모양은 ⑦ 그림체 탭(.vnew-edit-variant)과 같다 */
+.vnew-mnotes-chip {
+  padding: 5px 12px;
+  border: 1px solid var(--line, #e5e7eb);
+  border-radius: 999px;
+  background: var(--surface, #ffffff);
+  color: var(--text-muted, #6b7280);
+  font: inherit;
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.vnew-mnotes-chip.is-on {
+  border-color: var(--accent, #cb3208);
+  color: var(--accent, #cb3208);
+  background: var(--accent-soft, #fff4ee);
+  font-weight: 600;
+}
+
+.vnew-mnotes-summary {
+  margin: 0 0 10px;
+  overflow-wrap: anywhere;
+}
+
+.vnew-mnotes-list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  min-width: 0;
+}
+
+.vnew-mnotes-row {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+  padding: 10px 12px;
+  border: 1px solid var(--line, #e5e7eb);
+  border-radius: 10px;
+  background: var(--surface, #ffffff);
+}
+
+.vnew-mnotes-row.is-pickable {
+  cursor: pointer;
+}
+
+.vnew-mnotes-row.is-pickable:hover {
+  border-color: var(--accent, #cb3208);
+}
+
+.vnew-mnotes-meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 10px;
+  font-size: 12px;
+  color: var(--text-muted, #6b7280);
+}
+
+.vnew-mnotes-where {
+  font-weight: 600;
+  color: var(--text, #111827);
+  overflow-wrap: anywhere;
+}
+
+.vnew-mnotes-model {
+  overflow-wrap: anywhere;
+}
+
+.vnew-mnotes-resolved {
+  color: var(--success, #15803d);
+  background: var(--surface-muted, #f3f4f6);
+}
+
+.vnew-mnotes-reason {
+  margin: 0;
+  font-size: 14px;
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+
+.vnew-mnotes-action {
+  margin: 0;
+  font-size: 13px;
+  overflow-wrap: anywhere;
+}
+
+.vnew-mnotes-action::before {
+  content: "→ ";
+  color: var(--text-muted, #6b7280);
+}
+
+.vnew-mnotes-restored {
+  margin: 0;
+  font-size: 12px;
+}
+
+.vnew-mnotes-raw-toggle {
+  align-self: flex-start;
+  font-size: 12px;
+}
+
+.vnew-mnotes-raw {
+  margin: 0;
+  max-height: 200px;
+  overflow: auto;
+  padding: 8px 10px;
+  border-radius: 8px;
+  background: var(--surface-muted, #f3f4f6);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 12px;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.vnew-mnotes-empty {
+  margin: 0;
+}
+
+@media (max-width: 768px) {
+  .vnew-mnotes-btn {
+    width: 100%;
+    white-space: normal;
+  }
+
+  .vnew-mnotes-row {
+    padding: 8px 10px;
+  }
+}

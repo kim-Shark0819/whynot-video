@@ -24349,8 +24349,15 @@ var window = {
 };
 var PLAN_POLL_MS = 3001, GEN_POLL_FAST_MS = 3002, GEN_POLL_SLOW_MS = 5003;
 var state = { mounted: true, projectId: "p 1", plan: { tag: "before" }, planStep: 5, planPollTimer: 0 };
+// 작업 199: 모델 에러 로그 건수 GET(/model-notes?)은 calls · apiPlan 을 건드리지 않는다(mnCalls 에 따로, 답은 mnAnswer(path) — 없으면 빈 기록).
+var mnCalls = [], mnAnswer = null;
 function api(path, init) {
   var method = (init && init.method) || "GET";
+  if (String(path).indexOf("/model-notes?") >= 0) {
+    mnCalls.push(path);
+    var mn = mnAnswer ? mnAnswer(path) : { ok: { ok: true, notes: [], counts: { byModel: {}, byKind: {} } } };
+    return mn.err ? Promise.reject(mn.err) : Promise.resolve(mn.ok);
+  }
   calls.push([method, path, init && init.body ? JSON.parse(init.body) : null]);
   var next = apiPlan.length ? apiPlan.shift() : { ok: { plan: { tag: "after" } } };
   return next.err ? Promise.reject(next.err) : Promise.resolve(next.ok);
@@ -24892,6 +24899,9 @@ def _lr_screen_problems(got: dict) -> list[str]:
 _LR_095_HINT_SLICES = (
     ("  /* ③ → ④ : 영상 만들기 확인창.", "  function contiSummary(totalSeconds, sumSeconds, showError) {"),
     ("  /* ⑤ 시작 화면(촬영 지시서 카드", "  /* 장면 의상·목소리 표(설계자 2026-10-26, 064)."),
+    # 작업 199: renderGenStep 이 상태 띠에 [모델 에러 로그 보기](mnotesButton · mnotesGenWatch)를 붙인다 — 그 구역도 함께 자른다.
+    ("  /* ================================================================ 모델 에러 로그(작업 199)",
+     "  /* ---------------------------------------------------------------- 전역 */"),
 )
 _LR_095_POLL_SLICES = (
     ("  function el(tag, className, text)", "  function token()"),
@@ -37658,8 +37668,16 @@ function flushRafOnce() {
 function tick() { return new Promise(function (resolve) { setTimeout(resolve, 0); }); }
 async function settle() { for (var i = 0; i < 8; i++) await tick(); }
 var calls = [], held = [], handlers = [];
+// 작업 199: 모델 에러 로그 건수 GET(/model-notes?)은 calls 에 넣지 않고 mnCalls 에 따로 센다 — ⑦ 호출 목록 기대값은 그대로다.
+// 답은 mnAnswer(path)(없으면 빈 기록).
+var mnCalls = [], mnAnswer = null;
 function api(path, init) {
   var method = (init && init.method) || "GET";
+  if (String(path).indexOf("/model-notes?") >= 0) {
+    mnCalls.push(path);
+    var mn = mnAnswer ? mnAnswer(path) : { ok: { ok: true, notes: [], counts: { byModel: {}, byKind: {} } } };
+    return mn.err ? Promise.reject(mn.err) : Promise.resolve(mn.ok);
+  }
   var body = init && init.body ? JSON.parse(init.body) : null;
   calls.push([method, path, body]);
   for (var i = 0; i < handlers.length; i++) {
@@ -62685,7 +62703,8 @@ def check_vnew_edit_variant_tabs_190() -> None:
                         [w for w in ("editPlay(", "editPause(", "editPlayCut(") if w in seek],
                         "if (!editAlive(ctx) || ctx.busy || index < 0 || index >= ctx.clips.length) return;" in seek,
                         vjs.count("editSeekClip(")],
-               [True, 1, True, True, [], True, 3],
+               # 작업 199 기대값 변경 3 → 4: 모델 에러 로그 줄 누르기(editMnotesButton onPick)도 그 컷을 고르고 그 시작으로 간다.
+               [True, 1, True, True, [], True, 4],
                "클립 상자: 떼는 때 움직이지 않았고 취소가 아니면 그 컷 시작으로(끌기면 순서 바꾸기만) · 소리 상자 click 도 · 재생 상태는 그대로(editSeek) · "
                "부르는 곳은 이 둘뿐")
 
@@ -66473,6 +66492,448 @@ def falmod_audio_msg() -> str:
     return _fal._REJECT_AUDIO_MSG  # noqa: SLF001
 
 
+# ---------------------------------------------------------------- 작업 199: 모델 에러 로그 화면(vnew.js · vnew.css)
+_MN199_MARK = "  /* ================================================================ 모델 에러 로그(작업 199)"
+_MN199_END = "  /* ---------------------------------------------------------------- 전역 */"
+_MN199_CSS_MARK = "/* ================================================================ 모델 에러 로그(작업 199) */"
+_MN199_EVIL = "<img src=x onerror=alert(1)>"
+# 가짜 GET /model-notes 노트(작업 198 모양). 컷 c1~c3 = 컷 1~3(_edt_cut_plan 콘티), 모델 목록 = _MN199_MODELS.
+_MN199_NOTES = [
+    {"at": "2026-11-09T14:17:39", "variant": "webtoon", "stage": "part", "target": {"takeId": "take2", "partNo": 1, "cutIds": ["c2", "c3"]},
+     "model": "fal-ai/wan/v3", "attempt": 2, "kind": "contentFlag", "providerMessage": _MN199_EVIL + " flagged by content checker",
+     "reasonKo": "영상 모델의 콘텐츠 검사가 거절했습니다. " + _MN199_EVIL, "action": "softRetry", "resolved": True, "source": "live"},
+    {"at": "2026-11-09T13:05:00", "variant": "real", "stage": "retake", "target": {"retakeCell": "real:c2", "version": 6, "cutIds": ["c2"]},
+     "model": "bytedance/seedance-2.5/x", "attempt": 1, "kind": "promptSize", "providerMessage": "",
+     "reasonKo": "프롬프트가 모델의 길이 한도(2500)를 넘었습니다.", "action": "gaveUp", "resolved": False, "source": "live"},
+    {"at": "2026-11-08T09:00:00", "variant": "real", "stage": "still", "target": {"takeId": "take1", "cutIds": ["c3"]},
+     "model": "fal-ai/seedream/v4/edit", "attempt": 0, "kind": "timeout", "providerMessage": "timed out",
+     "reasonKo": "모델이 제한 시간 안에 결과를 주지 않았습니다.", "action": "fallbackModel:fal-ai/wan/v3", "resolved": False, "source": "state"},
+    {"at": "2026-11-08T08:00:00Z", "variant": "webtoon", "stage": "cut", "target": {"takeId": "take9", "cutIds": ["zz"]}, "model": "",
+     "attempt": 3, "kind": "badRequest", "providerMessage": "fal HTTP422", "reasonKo": "r4", "action": "dropRefs", "resolved": False,
+     "source": "live"},
+    {"at": "bad", "variant": "webtoon", "stage": "segment", "target": {}, "model": "m5", "attempt": 1, "kind": "provider",
+     "providerMessage": "x", "reasonKo": "r5", "action": "dialogueRewrite", "resolved": False, "source": "live"},
+    {"at": "2026-11-07T10:00:00", "variant": "", "stage": "costume", "target": {}, "model": "m6", "attempt": 1, "kind": "qc",
+     "providerMessage": "", "reasonKo": "r6", "action": "retry", "resolved": False, "source": "live"},
+    {"at": "2026-11-07T09:00:00", "variant": "webtoon", "stage": "take", "target": {"takeId": "take1"}, "model": "m7", "attempt": 1,
+     "kind": "other", "providerMessage": "", "reasonKo": "r7", "action": "", "resolved": False, "source": "live"},
+    {"at": "2026-11-07T08:00:00", "variant": "real", "stage": "take", "target": {"takeId": "take1"}, "model": "bytedance/seedance-2.5/x",
+     "attempt": 1, "kind": "weird", "providerMessage": "", "reasonKo": "r8", "action": "nonsense", "resolved": False, "source": "live"},
+]
+_MN199_MODELS = [{"id": "fal-ai/wan/v3", "label": "Wan 3.0"}, {"id": "fal:bytedance/seedance-2.5/x", "label": "Seedance 2.5"}]
+
+# 두 화면(⑤ · ⑦) 공통: 가짜 답(mnAnswer — variant 거르기 · counts 는 서버 view 와 같은 규칙) · 창 읽기.
+_MN199_NODE_COMMON = r"""
+var mnMode = "ok";
+function mnCopy(v) { return JSON.parse(JSON.stringify(v)); }
+mnAnswer = function (path) {
+  if (mnMode === "404") return { err: { status: 404, type: "ModelNotesDisabled", message: "모델 노트 기능이 꺼져 있습니다." } };
+  if (mnMode === "500") return { err: { status: 500, message: "서버 오류가 발생했습니다." } };
+  var v = (/[?&]variant=(\w+)/.exec(path) || [])[1] || "all";
+  var notes = mnMode === "empty" ? [] : MN.notes.filter(function (n) { return v === "all" || n.variant === v; });
+  var counts = { byModel: {}, byKind: {} };
+  notes.forEach(function (n) {
+    var m = n.model || "-", k = n.kind || "other";
+    counts.byModel[m] = (counts.byModel[m] || 0) + 1;
+    counts.byKind[k] = (counts.byKind[k] || 0) + 1;
+  });
+  return { ok: { ok: true, genId: "g1", notes: mnCopy(notes), counts: counts } };
+};
+function mnScrim() {
+  var list = document.body.children.filter(function (c) { return c.className === "vnew-modal-scrim"; });
+  return list[list.length - 1] || null;
+}
+function mnText(node, cls) { var n = byClass(node, cls)[0]; return n ? n.textContent : null; }
+function mnRow(row) {
+  var pre = byClass(row, "vnew-mnotes-raw")[0];
+  var kind = byClass(row, "vnew-mnotes-kind")[0];
+  return { time: mnText(row, "vnew-mnotes-time"), where: mnText(row, "vnew-mnotes-where"), variant: mnText(row, "vnew-mnotes-variant"),
+           model: mnText(row, "vnew-mnotes-model"), attempt: mnText(row, "vnew-mnotes-attempt"), kind: kind ? kind.textContent : null,
+           kindCls: kind ? kind.className : null, resolved: mnText(row, "vnew-mnotes-resolved"), reason: mnText(row, "vnew-mnotes-reason"),
+           action: mnText(row, "vnew-mnotes-action"), restored: mnText(row, "vnew-mnotes-restored"),
+           toggle: mnText(row, "vnew-mnotes-raw-toggle"), raw: pre ? [pre.tagName, pre.textContent, pre.style.display || ""] : null,
+           pick: (" " + row.className + " ").indexOf(" is-pickable ") >= 0 };
+}
+function mnPanel() {
+  var s = mnScrim();
+  if (!s) return null;
+  var err = byClass(s, "vnew-plan-error")[0];
+  var modal = byClass(s, "vnew-modal")[0];
+  return { scrims: document.body.children.length, title: byTag(s, "h3")[0].textContent, cls: modal.className,
+           dialog: [modal.attrs.role, modal.attrs["aria-modal"]],
+           chips: byClass(s, "vnew-mnotes-chip").map(function (c) { return [c.textContent, (" " + c.className + " ").indexOf(" is-on ") >= 0, c.attrs["aria-pressed"]]; }),
+           summary: mnText(s, "vnew-mnotes-summary"), error: err ? [err.textContent, err.style.display || ""] : null,
+           empty: mnText(s, "vnew-mnotes-empty"), rows: byClass(s, "vnew-mnotes-row").map(mnRow) };
+}
+function mnChip(label) { return byClass(mnScrim(), "vnew-mnotes-chip").filter(function (c) { return c.textContent === label; })[0]; }
+"""
+
+# ⑤: 095 화면 묶음(_LR_SCREEN_NODE_HARNESS + 실제 renderGenStep)에 창을 열 때 필요한 것만 더한다(classList · 문서 키).
+_MN199_GEN_NODE = r"""
+(function () {
+  function CL(node) { this.node = node; }
+  CL.prototype.list = function () { return String(this.node.className || "").split(/\s+/).filter(Boolean); };
+  CL.prototype.add = function (c) { var l = this.list(); if (l.indexOf(c) < 0) { l.push(c); this.node.className = l.join(" "); } };
+  CL.prototype.remove = function (c) { this.node.className = this.list().filter(function (x) { return x !== c; }).join(" "); };
+  CL.prototype.contains = function (c) { return this.list().indexOf(c) >= 0; };
+  if (!("classList" in FakeNode.prototype)) Object.defineProperty(FakeNode.prototype, "classList", { get: function () { return new CL(this); } });
+})();
+var docKeys = [];
+document.addEventListener = function (t, f) { if (t === "keydown") docKeys.push(f); };
+document.removeEventListener = function (t, f) { docKeys = docKeys.filter(function (g) { return g !== f; }); };
+function pressKey(k) { var ev = { key: k, preventDefault: function () {} }; docKeys.slice().forEach(function (f) { f(ev); }); }
+function genPlan(extra) {
+  var plan = startPlan(takeGen(extra || {}));
+  plan.gen.units = [unitS("take2", cellS("completed"), cellS("skipped")), unitS("tB", cellS("completed"), cellS("skipped"))];
+  plan.conti = { cuts: MN.cuts };
+  plan.models = MN.models;
+  return plan;
+}
+function draw(plan, fresh) {
+  state.plan = plan;
+  state.genFresh = fresh;
+  var host = new FakeNode("div");
+  renderGenStep(host);
+  var bar = byClass(host, "vnew-gen-statusbar")[0];
+  return bar ? byClass(bar, "vnew-mnotes-btn")[0] || null : null;
+}
+async function settleMn() { for (var i = 0; i < 4; i++) await tick(); }
+async function run() {
+  var o = {};
+  var btn = draw(genPlan(), true);
+  o.first = [btn ? btn.textContent : null, btn ? btn.className : null, btn ? btn.type : null, mnCalls.slice(), state.genFresh];
+  await settleMn();
+  o.badge = [btn.textContent, btn.style.display || ""];
+  var again = draw(genPlan(), false);
+  await settleMn();
+  o.again = [mnCalls.length, again.textContent];
+  draw(genPlan({ status: "running" }), false);
+  await settleMn();
+  var runCalls = mnCalls.length;
+  draw(genPlan({ status: "running" }), false);
+  await settleMn();
+  o.running = [runCalls, mnCalls.length];
+  draw(genPlan({ status: "partial" }), false);
+  await settleMn();
+  o.finished = [mnCalls.length, mnCalls[mnCalls.length - 1]];
+  draw(genPlan({ genId: "g2" }), false);
+  await settleMn();
+  o.newGen = [mnCalls.length, mnCalls[mnCalls.length - 1]];
+  mnMode = "404";
+  var off = draw(genPlan(), true);
+  await settleMn();
+  o.off = [mnCalls.length, off.style.display, draw(genPlan(), false).style.display];
+  mnMode = "ok";
+  var on = draw(genPlan(), true);
+  await settleMn();
+  on.fire("click");
+  await settleMn();
+  var p = mnPanel();
+  o.open = [on.textContent, on.style.display || "", mnCalls[mnCalls.length - 1], p.chips, p.rows.length, p.rows[0].where, p.summary];
+  pressKey("Escape");
+  o.esc = [mnScrim() === null, docKeys.length];
+  draw(genPlan({ status: "none" }), true);
+  o.none = mnCalls.length;
+  out.mn = o;
+  out.innerHTML = innerHTMLUsed;
+  console.log(JSON.stringify(out));
+}
+run().catch(function (e) { console.error(e && e.stack || e); process.exit(1); });
+"""
+
+# ⑦: 실제 GET /edit 응답으로 renderEditStep(_EDU_SLICES — ⑦ 구역 안에 모델 에러 로그 구역이 있다) → 머리 버튼 · 창 · 줄 누르기.
+_MN199_EDIT_NODE = r"""
+async function run() {
+  var o = {};
+  state.plan = { conti: { cuts: MN.cuts }, models: MN.models, gen: { genId: "g1" } };
+  var host = new FakeNode("div");
+  getQueue.push({ ok: view({ saved: true, etag: "w1", savedVariants: { real: false, webtoon: true } }) });
+  renderEditStep(host);
+  await settle();
+  await settle();
+  var ctx = editCtx;
+  var root = rootOf(host);
+  function btn() { return byClass(rootOf(host), "vnew-mnotes-btn")[0] || null; }
+  var b = btn();
+  o.open = [b ? b.textContent : null, b ? b.parentNode.className : null, mnCalls.slice(), gets(), ctx.variant];
+  b.fire("click");
+  await settle();
+  var p = mnPanel();
+  o.panelWeb = { chips: p.chips, call: mnCalls[mnCalls.length - 1], rows: p.rows.map(function (r) { return r.where; }), title: p.title,
+                 cls: p.cls, dialog: p.dialog, summary: p.summary };
+  var clipsBefore = ctx.clips.length;
+  editSelect(ctx, 0);
+  key("Delete", "Delete");
+  key(" ", "Space");
+  o.keys = [ctx.clips.length === clipsBefore, ctx.playing === true, mnScrim() !== null];
+  key("Escape", "Escape");
+  o.esc = [mnScrim() === null, mnotes.close === null];
+  btn().fire("click");
+  await settle();
+  mnChip("전체").fire("click");
+  await settle();
+  var all = mnPanel();
+  o.all = { call: mnCalls[mnCalls.length - 1], chips: all.chips, summary: all.summary, rows: all.rows, badge: btn().textContent };
+  var firstRow = byClass(mnScrim(), "vnew-mnotes-row")[0];
+  var toggle = byClass(firstRow, "vnew-mnotes-raw-toggle")[0];
+  toggle.fire("click", { stopPropagation: function () {} });
+  var shown = mnRow(firstRow);
+  var expanded = toggle.attrs["aria-expanded"];
+  toggle.fire("click", { stopPropagation: function () {} });
+  o.raw = [shown.raw, shown.toggle, expanded, mnRow(firstRow).raw[2], mnRow(firstRow).toggle, mnScrim() !== null];
+  mnChip("실사").fire("click");
+  await settle();
+  var real = mnPanel();
+  o.real = [mnCalls[mnCalls.length - 1], real.chips.filter(function (c) { return c[1]; }).map(function (c) { return c[0]; }),
+            real.rows.map(function (r) { return r.where; }), real.summary];
+  mnChip("전체").fire("click");
+  await settle();
+  var starts = editStarts(ctx.clips).starts.map(r3);
+  editSeek(ctx, 0);
+  byClass(mnScrim(), "vnew-mnotes-row")[0].fire("click", {});
+  o.pick = [mnScrim() === null, ctx.sel, ctx.clips[ctx.sel] ? ctx.clips[ctx.sel].label : null, r3(ctx.t), starts[ctx.sel],
+            ctx.playing === true];
+  mnMode = "empty";
+  btn().fire("click");
+  await settle();
+  var empty = mnPanel();
+  o.empty = [empty.empty, empty.rows.length, empty.summary, btn().textContent];
+  mnotesClose();
+  mnMode = "500";
+  btn().fire("click");
+  await settle();
+  var broken = mnPanel();
+  o.error = [broken.error, broken.rows.length, btn().style.display || ""];
+  mnotesClose();
+  mnMode = "404";
+  btn().fire("click");
+  await settle();
+  o.off = [mnScrim() === null, btn().style.display, document.body.children.length];
+  mnMode = "ok";
+  mnotes.off = false;
+  btn().fire("click");
+  await settle();
+  var openBefore = mnScrim() !== null;
+  editLeave();
+  o.leave = [openBefore, mnScrim() === null, mnotes.close === null, docListeners.keydown.length];
+  out.mn = o;
+  out.innerHTML = innerHTMLUsed;
+  console.log(JSON.stringify(out));
+}
+run().catch(function (e) { console.error(e && e.stack || e); process.exit(1); });
+"""
+
+
+def check_vnew_model_notes_ui_199() -> None:
+    """작업 199 — [모델 에러 로그 보기] 버튼 · 창(작업 198 GET /model-notes 화면). vnew.js · vnew.css 만, 서버 변경 없음.
+
+    (mu-a) 정적: 함수가 하나씩 · 배선(⑤ 상태 띠 · ⑦ 머리 · ⑦ 열 때 · AI로 고치기 버전 끝 · ⑦ 단축키 막기 · 떠날 때 닫기 · ⑤ 새로 열기) ·
+           폴링 없음(setInterval · setTimeout 0) · 구역 안 innerHTML · insertAdjacentHTML · outerHTML 0 · node --check
+    (mu-b) ⑤(실제 renderGenStep): 상태 띠 버튼 · 건수 (n) · 받는 때(열 때 · 생성 끝 · gen 바뀜, 다시 그리기 · 진행 중은 안 받음) · 404 숨김 ·
+           창 처음 거르기 전체 · Esc 닫기
+    (mu-c) ⑦(실제 renderEditStep · 실제 GET /edit): 머리 버튼 · 건수 · 창 처음 거르기 = 지금 그림체 탭 · 창이 열린 동안 ⑦ 단축키 없음 · Esc
+    (mu-d) 줄: 시각(MM-DD HH:mm) · 어디서(테이크 · 조각 · 컷 a–b · AI로 고치기 · 버전 · 시작 그림) · 모델 이름(plan.models, 없으면 endpoint id) ·
+           시도 · 종류 배지 7 · reasonKo · 한 일 · 해결됨 · 원문 토글(monospace pre) · 예전 기록 안내 · 맨 위 요약 · textContent 그대로
+    (mu-e) 거르기 칩(전체 · 애니 · 실사 → variant 다시 받기) · 빈 기록 · 오류 줄 · 404 면 창 닫고 버튼 숨김 · 줄 누르기 = 그 컷 고르고 그 시작으로
+    (mu-f) vnew.css 199 구역: 새 클래스 정의 · 768px 규칙 · 가로 스크롤 없음 · 고정 너비 960px 이하 · monospace · LF
+    """
+    import traceback as _tb  # noqa: PLC0415
+
+    bad: list[str] = []
+    seen: set[str] = set()
+    node = shutil.which("node")
+
+    def expect(group: str, got, want, what: str) -> None:
+        seen.add(group)
+        if got != want:
+            bad.append(f"({group}) {what}\n      결과 {got!r}\n      기대 {want!r}")
+
+    vjs = (PUBLIC / "vnew.js").read_text(encoding="utf-8")
+    css = (PUBLIC / "vnew.css").read_text(encoding="utf-8")
+    start = vjs.find(_MN199_MARK)
+    section = vjs[start:vjs.find(_MN199_END, start + 1)] if start >= 0 else ""
+    try:
+        names = ("mnotesButton", "mnotesOpen", "mnotesRow", "mnotesWhere", "mnotesAction", "mnotesSummary", "mnotesRefresh",
+                 "mnotesGenWatch", "mnotesTime", "mnotesModelLabel", "mnotesCutText", "mnotesTakeText", "editMnotesButton", "editMnotesClip",
+                 "renderGenStep", "renderPlan", "renderEditStep", "editBuild", "editFixApply", "editOnKey", "editLeave")
+        body = {name: _jlu_body(vjs, name) for name in names}
+        expect("mu-a", [vjs.count(_MN199_MARK), sorted(n for n, text in body.items() if not text)], [1, []], "구역 하나 · 함수가 하나씩")
+        expect("mu-a", ['statusBar.appendChild(mnotesButton("gen", { pid: state.projectId, variant: "all" }));' in body["renderGenStep"],
+                        "mnotesGenWatch(state.genFresh === true, running);" in body["renderGenStep"],
+                        "state.genFresh = state.planStep === 5 && state.drawnStep !== 5;" in body["renderPlan"],
+                        "head.appendChild(editMnotesButton(ctx));" in body["editBuild"],
+                        body["editBuild"].find("head.appendChild(editMnotesButton(ctx));") < body["editBuild"].find("head.appendChild(d.exportBtn);"),
+                        "mnotesRefresh(ctx.pid);" in body["renderEditStep"],
+                        "if (before && before.live && !view.live) mnotesRefresh(ctx.pid);" in body["editFixApply"],
+                        "if (mnotes.close) return;" in body["editOnKey"], "mnotesClose();" in body["editLeave"],
+                        vjs.count("mnotesRefresh("), "state.drawnStep = 0;" in vjs],
+                   [True, True, True, True, True, True, True, True, True, 4, True],
+                   "배선: ⑤ 상태 띠 버튼 · ⑤ 받는 때 · renderPlan 이 ⑤ 새로 열기를 적음 · ⑦ 머리(내보내기 앞) · ⑦ 열 때 · 버전 끝 · ⑦ 단축키 막기 · "
+                   "떠날 때 닫기 · 건수 받기는 정의 + 세 곳뿐 · mount 가 처음으로")
+        expect("mu-a", [[w for w in ("innerHTML", "insertAdjacentHTML", "outerHTML", "setInterval", "setTimeout") if w in section],
+                        'el("pre", "vnew-mnotes-raw", raw)' in body["mnotesRow"]],
+                   [[], True], "구역 안 innerHTML · insertAdjacentHTML · outerHTML 0 · 폴링(setInterval · setTimeout) 없음 · 원문은 <pre> 글")
+        if node:
+            checked = subprocess.run([node, "--check", str(PUBLIC / "vnew.js")], capture_output=True, text=True, encoding="utf-8", timeout=60)
+            expect("mu-a", [checked.returncode, (checked.stderr or "").strip()[:300]], [0, ""], "node --check frontend/public/vnew.js")
+    except Exception as exc:  # noqa: BLE001
+        bad.append("(mu-a) 예외: " + repr(exc) + "\n" + _tb.format_exc()[:1500])
+
+    # ---------------- (mu-f) CSS
+    try:
+        start_css = css.find(_MN199_CSS_MARK)
+        csec = css[start_css:] if start_css >= 0 else ""
+        narrow = csec[csec.find("@media (max-width: 768px) {"):] if "@media (max-width: 768px) {" in csec else ""
+        used = set(re.findall(r"\b(vnew-mnotes-[a-z-]*[a-z])", section))
+        defined = set(re.findall(r"\.(vnew-mnotes-[a-z0-9-]+)", csec))
+        widths = [int(w) for w in re.findall(r"(?<![-\w])(?:min-|max-)?width: (\d+)px", csec)]
+        # 꾸밈이 필요 없는 칸(창 · 본문 · 시각 · 그림체 · 시도 — 머리 줄 글자 크기를 물려받음 · 종류 = 기존 vnew-badge)은 정의하지 않는다.
+        expect("mu-f", [css.count(_MN199_CSS_MARK), sorted(used - defined - {"vnew-mnotes-modal", "vnew-mnotes-body", "vnew-mnotes-time",
+                                                                                "vnew-mnotes-variant", "vnew-mnotes-attempt", "vnew-mnotes-kind"}),
+                        ".vnew-mnotes-chip.is-on {" in csec, "vnew-edit-" in section,
+                        [w for w in ("overflow-x", "display: none") if w in csec], max(widths or [0]) <= 960,
+                        "width: 100%;" in _edu_css_block(narrow, ".vnew-mnotes-btn"), "monospace" in _edu_css_block(csec, ".vnew-mnotes-raw"),
+                        "white-space: pre-wrap;" in _edu_css_block(csec, ".vnew-mnotes-raw"),
+                        "overflow-wrap: anywhere;" in _edu_css_block(csec, ".vnew-mnotes-reason"),
+                        [n for n, p in (("vnew.js", PUBLIC / "vnew.js"), ("vnew.css", PUBLIC / "vnew.css"), ("check_vpoc.py", ROOT / "tools" / "check_vpoc.py"))
+                         if b"\r" in p.read_bytes()], css.endswith("}\n")],
+                   [1, [], True, False, [], True, True, True, True, True, [], True],
+                   "CSS 199 구역: 화면 클래스 정의(종류 배지는 기존 vnew-badge) · 칩 is-on · ⑦ 클래스(vnew-edit-*)를 쓰지 않음(116 클래스 수 그대로) · "
+                   "가로 스크롤 · 숨김 없음 · 960px 이하 · 768px 버튼 한 줄 · 원문 monospace 줄바꿈 · LF")
+    except Exception as exc:  # noqa: BLE001
+        bad.append("(mu-f) 예외: " + repr(exc) + "\n" + _tb.format_exc()[:1500])
+
+    mn = {"notes": _MN199_NOTES, "models": _MN199_MODELS,
+          "cuts": [{"id": "c1", "no": 1}, {"id": "c2", "no": 2}, {"id": "c3", "no": 3}]}
+    mn_js = "var MN = " + json.dumps(mn, ensure_ascii=False) + ";\n"
+    button = "모델 에러 로그 보기"
+    calls_all = "/api/vnew/p/p%201/model-notes?variant=all&gen=g1"
+    # 요약 = 모델 이름 n건(많은 차례, 같으면 받은 차례) | 종류 n(많은 차례, 같으면 종류 차례 — 모르는 kind 는 기타에 더함)
+    summary_all = ("Seedance 2.5 2건 · Wan 3.0 1건 · fal-ai/seedream/v4/edit 1건 · 모델 모름 1건 · m5 1건 · m6 1건 · m7 1건 | "
+                   "기타 2 · 콘텐츠 검사 1 · 길이 한도 1 · 시간 초과 1 · 요청 오류 1 · 모델 오류 1 · 품질 검사 1")
+    if not node:
+        warn("node 가 없어 작업 199 화면 실행 검사(mu-b~e)를 건너뜁니다")
+    else:
+        # ---------------- (mu-b) ⑤
+        try:
+            code, problems = _lr_screen_code(vjs)
+            hint_code, _poll, hint_problems = _lr_095_code(vjs)
+            expect("mu-b", problems + hint_problems, [], "⑤ 구역 자르기(095 묶음 + 199 구역)")
+            prelude = _LR_095_NODE_CASES.split("async function run() {")[0]
+            got, err = ({}, "") if problems or hint_problems else _lr_run_node(
+                node, _LR_SCREEN_NODE_HARNESS + code + hint_code + _LR_095_HINT_STUBS + prelude + mn_js + _MN199_NODE_COMMON + _MN199_GEN_NODE,
+                "mn199g_")
+            if err:
+                bad.append(f"(mu-b) node 실행 실패: {err}")
+            elif got:
+                m = got.get("mn") or {}
+                expect("mu-b", [m.get("first"), m.get("badge"), m.get("again")],
+                       [[button, "outline-button vnew-mnotes-btn", "button", [calls_all], False], [button + " (8)", ""], [1, button + " (8)"]],
+                       "⑤ 상태 띠 버튼 · 처음 연 ⑤ 에서 한 번 받음(variant all · gen) · 건수 (8) · 같은 ⑤ 다시 그리기는 안 받고 건수 그대로")
+                expect("mu-b", [m.get("running"), m.get("finished"), m.get("newGen"), m.get("off"), m.get("none")],
+                       [[1, 1], [2, calls_all], [3, "/api/vnew/p/p%201/model-notes?variant=all&gen=g2"], [4, "none", "none"], 6],
+                       "진행 중 다시 그리기는 안 받음 · 생성이 끝나면(running → partial) 한 번 · gen 이 바뀌면 한 번 · 404 면 숨김(다시 그려도) · "
+                       "gen 없음(시작 화면)에는 버튼 없음")
+                expect("mu-b", [m.get("open"), m.get("esc"), got.get("innerHTML")],
+                       [[button + " (8)", "", calls_all, [["전체", True, "true"], ["애니", False, "false"], ["실사", False, "false"]], 8,
+                         "테이크 1 · 조각 1 · 컷 2–3", summary_all],
+                        [True, 0], False],
+                       "⑤ 창: 처음 거르기 전체 · 테이크 번호 = gen.units 차례(take2 가 첫 테이크) · 요약 줄 · Esc 닫기(키 처리기 떼기) · innerHTML 0")
+        except Exception as exc:  # noqa: BLE001
+            bad.append("(mu-b) 예외: " + repr(exc) + "\n" + _tb.format_exc()[:1500])
+
+        # ---------------- (mu-c·d·e) ⑦
+        try:
+            code, problems = _edu_code(vjs, _EDU_SLICES)
+            expect("mu-c", problems, [], "⑦ 구역 자르기")
+            with _LogCapture(), _EdtEnv() as env, _pin_vnew(VNEW_EDIT=True):
+                client = env.client()
+                _edt_cut_plan(env, "prj_mn199")
+                web = client.get("/api/vnew/p/prj_mn199/edit").get_json() or {}
+                real = client.get("/api/vnew/p/prj_mn199/edit?variant=real").get_json() or {}
+                film = client.get(f"/api/vnew/p/prj_mn199/edit/media/{web['materials'][0]['mid']}").get_json() or {}
+            server = {"web": web, "real": real, "media": film}
+            prefix = "var SERVER = " + json.dumps(server, ensure_ascii=False) + ";\n"
+            prelude = _EDU_NODE_CTL.split("async function run() {")[0]
+            got, err = ({}, "") if problems else _lr_run_node(
+                node, _EDU_NODE_HARNESS + code + prefix + prelude + mn_js + _MN199_NODE_COMMON + _MN199_EDIT_NODE, "mn199e_")
+            labels = [c.get("label") for c in (web.get("doc") or {}).get("clips") or []]
+            if err:
+                bad.append(f"(mu-c) node 실행 실패: {err}")
+            elif got:
+                m = got.get("mn") or {}
+                web_where = ["테이크 2 · 조각 1 · 컷 2–3", "테이크 9 · 컷 1개", "영상", "테이크 1"]
+                expect("mu-c", [m.get("open"), m.get("panelWeb")],
+                       [[button + " (8)", "vnew-edit-head", [calls_all], ["/api/vnew/p/p%201/edit"], "webtoon"],
+                        {"chips": [["전체", False, "false"], ["애니", True, "true"], ["실사", False, "false"]],
+                         "call": "/api/vnew/p/p%201/model-notes?variant=webtoon&gen=g1", "rows": web_where, "title": "모델 에러 로그",
+                         "cls": "vnew-modal vnew-mnotes-modal", "dialog": ["dialog", "true"],
+                         "summary": "Wan 3.0 1건 · 모델 모름 1건 · m5 1건 · m7 1건 | 콘텐츠 검사 1 · 요청 오류 1 · 모델 오류 1 · 기타 1"}],
+                       "⑦ 머리 버튼(편집 GET 다음에 건수 한 번 · 편집 호출 목록 그대로) · 건수 (8) · 창 처음 거르기 = 지금 탭(애니) · 그 variant 로 받음")
+                expect("mu-c", [m.get("keys"), m.get("esc"), m.get("leave")], [[True, False, True], [True, True], [True, True, True, 0]],
+                       "창이 열린 동안 ⑦ 단축키(고른 클립 Delete 삭제 · Space 재생) 없음 · Esc 로 닫힘 · ⑦ 을 떠나면 열린 창도 닫힘(키 처리기 0)")
+                rows = (m.get("all") or {}).get("rows") or []
+                want_rows = [
+                    {"time": "11-09 14:17", "where": "테이크 2 · 조각 1 · 컷 2–3", "variant": "애니", "model": "Wan 3.0", "attempt": "2번째 시도",
+                     "kind": "콘텐츠 검사", "kindCls": "vnew-badge vnew-mnotes-kind is-contentFlag", "resolved": "해결됨",
+                     "reason": _MN199_NOTES[0]["reasonKo"], "action": "대사 순화 후 다시 시도", "restored": None, "toggle": "모델 원문 보기",
+                     "raw": ["PRE", _MN199_NOTES[0]["providerMessage"], "none"], "pick": True},
+                    {"time": "11-09 13:05", "where": "AI로 고치기 · 컷 2 · 버전 6", "variant": "실사", "model": "Seedance 2.5", "attempt": "1번째 시도",
+                     "kind": "길이 한도", "kindCls": "vnew-badge vnew-mnotes-kind is-promptSize", "resolved": None,
+                     "reason": _MN199_NOTES[1]["reasonKo"], "action": "포기", "restored": None, "toggle": None, "raw": None, "pick": True},
+                    {"time": "11-08 09:00", "where": "시작 그림 · 컷 3", "variant": "실사", "model": "fal-ai/seedream/v4/edit", "attempt": None,
+                     "kind": "시간 초과", "kindCls": "vnew-badge vnew-mnotes-kind is-timeout", "resolved": None,
+                     "reason": _MN199_NOTES[2]["reasonKo"], "action": "다른 모델로 대체 (Wan 3.0)",
+                     "restored": "예전 기록에서 복원 — 시도 번호·원문이 없을 수 있음", "toggle": "모델 원문 보기", "raw": ["PRE", "timed out", "none"],
+                     "pick": True},
+                ]
+                expect("mu-d", rows[:3], want_rows, "줄 3개(조각 · 다시 만들기 · 예전 기록 시작 그림) 모든 칸 · 악성 글도 textContent 그대로")
+                tail = [[r.get("where"), r.get("model"), r.get("kind"), r.get("action"), r.get("pick"), r.get("toggle") is not None] for r in rows[3:]]
+                expect("mu-d", [tail, bool(re.fullmatch(r"\d\d-\d\d \d\d:\d\d", str((rows[3:4] or [{}])[0].get("time")))),
+                                (rows[4:5] or [{}])[0].get("time"), (rows[5:6] or [{}])[0].get("variant")],
+                       [[["테이크 9 · 컷 1개", "모델 모름", "요청 오류", "참고 그림 빼고 다시 시도", False, True],
+                         ["영상", "m5", "모델 오류", "대사 다시 쓰기", False, True],
+                         ["장면 옷 편집", "m6", "품질 검사", "다시 시도", False, False],
+                         ["테이크 1", "m7", "기타", None, False, False],
+                         ["테이크 1", "Seedance 2.5", "기타", None, False, False]], True, "bad", None],
+                       "나머지 종류 배지(요청 오류 · 모델 오류 · 품질 검사 · 기타 · 모르는 kind = 기타) · 한 일(참고 그림 빼고 · 대사 다시 쓰기 · 다시 시도 · "
+                       "없음 · 모르는 값 = 없음) · 모르는 컷 = 컷 n개 · 모델 없음 = 모델 모름 · Z 시각도 MM-DD HH:mm · 못 읽는 시각은 그대로 · 그림체 없음")
+                expect("mu-d", [(m.get("all") or {}).get("summary"), (m.get("all") or {}).get("call"), (m.get("all") or {}).get("badge"),
+                                (m.get("all") or {}).get("chips")],
+                       [summary_all, calls_all, button + " (8)",
+                        [["전체", True, "true"], ["애니", False, "false"], ["실사", False, "false"]]],
+                       "맨 위 요약(counts: 모델 이름 n건 많은 차례 | 종류 n) · 전체 칩 = variant all · 건수 버튼")
+                expect("mu-d", m.get("raw"),
+                       [["PRE", _MN199_NOTES[0]["providerMessage"], ""], "모델 원문 숨기기", "true", "none", "모델 원문 보기", True],
+                       "[모델 원문 보기] 누르면 <pre> 원문 보임 · 글 바뀜 · aria-expanded, 다시 누르면 숨김 · 창은 그대로")
+                expect("mu-e", m.get("real"),
+                       ["/api/vnew/p/p%201/model-notes?variant=real&gen=g1", ["실사"],
+                        ["AI로 고치기 · 컷 2 · 버전 6", "시작 그림 · 컷 3", "테이크 1"],
+                        "Seedance 2.5 2건 · fal-ai/seedream/v4/edit 1건 | 길이 한도 1 · 시간 초과 1 · 기타 1"],
+                       "실사 칩 = variant real 로 다시 받기 · 칩 is-on · 그 줄만 · 요약도 그 variant")
+                expect("mu-e", [m.get("pick"), labels[:3]],
+                       [[True, 1, "컷 2", 3, 3, False], ["컷 1", "컷 2", "컷 3"]],
+                       "⑦ 줄 누르기(컷 2–3 이 타임라인에 있음) = 창 닫고 컷 2 클립을 고르고 그 시작(3초)으로 · 재생은 시작하지 않음")
+                expect("mu-e", [m.get("empty"), m.get("error"), m.get("off"), got.get("innerHTML")],
+                       [["기록된 모델 오류가 없습니다.", 0, "", button + " (8)"],
+                        [["모델 에러 로그를 불러오지 못했습니다: 서버 오류가 발생했습니다.", ""], 0, ""], [True, "none", 0], False],
+                       "빈 기록 안내 · 다른 오류 = 한국어 오류 줄(버튼은 그대로) · 404 = 창 닫고 버튼 숨김 · 가짜 DOM innerHTML 0")
+        except Exception as exc:  # noqa: BLE001
+            bad.append("(mu-c) 예외: " + repr(exc) + "\n" + _tb.format_exc()[:2000])
+
+    groups = {"mu-a", "mu-b", "mu-c", "mu-d", "mu-e", "mu-f"}
+    if not node:
+        groups -= {"mu-b", "mu-c", "mu-d", "mu-e"}
+    if groups - seen and not bad:
+        bad.append(f"검사하지 못한 묶음: {sorted(groups - seen)}")
+    if bad:
+        fail("작업 199 모델 에러 로그 화면 검사 실패\n  " + "\n  ".join(bad))
+    else:
+        ok("작업 199 모델 에러 로그 화면 (mu-a)배선 · innerHTML 0 · 폴링 없음 · node --check (mu-b)⑤ 상태 띠 버튼 · 건수 · 받는 때 · 404 숨김 "
+           "(mu-c)⑦ 머리 버튼 · 처음 거르기 = 지금 탭 · 단축키 막기 (mu-d)줄 칸 · 요약 · 원문 토글 (mu-e)칩 · 빈 기록 · 오류 줄 · 404 · 줄 누르기 "
+           "(mu-f)CSS · LF")
+
+
 def main() -> int:
     print("== vpoc1 check ==")
     check_compileall()
@@ -66646,6 +67107,7 @@ def main() -> int:
     check_vnew_retake_sent_reason_196()
     check_vnew_bg_reference_197()
     check_vnew_model_notes_198()
+    check_vnew_model_notes_ui_199()
     print()
     if warnings:
         print(f"경고 {len(warnings)}건")
