@@ -66,6 +66,7 @@ from ..vpoc.errors import VpocError, now_iso
 
 from . import edit
 from . import generate
+from . import model_notes as vnew_model_notes
 from . import plan as plan_mod
 from . import settings as vnew_settings
 
@@ -1832,9 +1833,25 @@ def _beat(owner: str, pid: str, gen_id: str, key: str, n: int, token: str, *, st
     return box["version"]
 
 
-def _finish(owner: str, pid: str, gen_id: str, key: str, n: int, token: str, *, statuses: tuple = _LIVE, **fields) -> None:
-    """끝 상태(completed·failed)를 쓰고 claim 을 비운다(claim 이 token 그대로일 때만)."""
-    _beat(owner, pid, gen_id, key, n, token, statuses=statuses, claim="", finishedAt=now_iso(), **fields)
+def _finish(owner: str, pid: str, gen_id: str, key: str, n: int, token: str, *, statuses: tuple = _LIVE,
+            provider_message: str = "", **fields) -> None:
+    """끝 상태(completed·failed)를 쓰고 claim 을 비운다(claim 이 token 그대로일 때만).
+    작업 198: 진행 중 버전이 failed 로 끝나면 모델 노트 1줄(action gaveUp, provider_message = 공급자 원문 — 없으면 error).
+    되살리기(statuses 가 failed)는 같은 시도라 노트를 더하지 않는다."""
+    version = _beat(owner, pid, gen_id, key, n, token, statuses=statuses, claim="", finishedAt=now_iso(), **fields)
+    if fields.get("status") == "failed" and statuses == _LIVE:
+        _note_version(owner, pid, gen_id, key, version, provider_message or fields.get("error"),
+                      kind=str(fields.get("failureKind") or "") or ("timeout" if fields.get("timedOut") else ""), action="gaveUp")
+
+
+def _note_version(owner: str, pid: str, gen_id: str, key: str, version, message, *, kind: str = "", action: str = "") -> None:
+    """작업 198: 다시 만들기 버전 하나의 모델 노트(model_notes.record — 예외를 내지 않는다, retakes.json 은 건드리지 않는다)."""
+    try:
+        head = vnew_model_notes.version_head(key, version if isinstance(version, dict) else {})
+    except Exception as exc:  # noqa: BLE001 — 노트는 다시 만들기를 막지 않는다.
+        log.warning("vnew.retake.model_note_head_failed pid=%s cell=%s err=%s", pid, key, type(exc).__name__)
+        head = {"stage": "retake", "target": {"retakeCell": str(key)}}
+    vnew_model_notes.record(owner, pid, gen_id, {**head, "providerMessage": str(message or ""), "kind": kind, "action": action})
 
 
 def run_retake(owner: str, pid: str, gen_id: str, key: str, n: int, claim: str) -> None:
@@ -1856,7 +1873,7 @@ def run_retake(owner: str, pid: str, gen_id: str, key: str, n: int, claim: str) 
                     # 작업 195: 제출 자체가 콘텐츠 검사로 거절(원장 0 — 제출 경로는 받아 준 뒤에만 남긴다)
                     log.warning("vnew.retake.content_flag pid=%s gen=%s cell=%s n=%d attempt=%s at=submit", pid, gen_id, key, n,
                                 version.get("attempt"))
-                    version = _content_flag(owner, pid, gen_id, key, n, claim, version)
+                    version = _content_flag(owner, pid, gen_id, key, n, claim, version, message=exc.message)
                     continue
                 real = {"sentSeconds": sent["sentSeconds"]} if version.get("videoSource") == RESULT_SOURCE and \
                     sent.get("sentSeconds") is not None else {}  # 작업 191 fix1: 실제로 보낸 @Video1 길이(채움 포함)
@@ -1875,7 +1892,8 @@ def run_retake(owner: str, pid: str, gen_id: str, key: str, n: int, claim: str) 
         log.warning("vnew.retake.failed pid=%s gen=%s cell=%s n=%d stage=%s err=%s:%s", pid, gen_id, key, n, stage,
                     type(exc).__name__, getattr(exc, "kind", ""))
         try:
-            _finish(owner, pid, gen_id, key, n, claim, status="failed", error=_clean_text(message, 300))
+            _finish(owner, pid, gen_id, key, n, claim, status="failed", error=_clean_text(message, 300),
+                    provider_message=exc.message if isinstance(exc, VpocError) else type(exc).__name__)
         except _ClaimLost:
             pass
         except Exception as write_exc:  # noqa: BLE001
@@ -1905,7 +1923,8 @@ def _poll_until_done(owner: str, pid: str, gen_id: str, key: str, n: int, claim:
             errors = 0
         except Exception as exc:  # noqa: BLE001 — 일시 오류는 다시 조회한다(5번 연속이면 실패).
             if _terminal_fal_error(exc):  # 보완 4b: 생성 시간 초과로 끝난 작업 → 재시도 없이 failed(timedOut 없음 — 되살릴 결과가 없다)
-                _finish(owner, pid, gen_id, key, n, claim, status="failed", error=GEN_TIMEOUT_TEXT)
+                _finish(owner, pid, gen_id, key, n, claim, status="failed", error=GEN_TIMEOUT_TEXT,
+                        provider_message=str(getattr(exc, "message", "") or GEN_TIMEOUT_TEXT))
                 log_result(owner, pid, gen_id, key, arn, "failed", error=GEN_TIMEOUT_TEXT)
                 log.warning("vnew.retake.job_failed pid=%s gen=%s cell=%s n=%d kind=gen_timeout", pid, gen_id, key, n)
                 return
@@ -1937,8 +1956,9 @@ def _poll_until_done(owner: str, pid: str, gen_id: str, key: str, n: int, claim:
             log_result(owner, pid, gen_id, key, arn, "failed", error=message)
             log.warning("vnew.retake.content_flag pid=%s gen=%s cell=%s n=%d attempt=%s at=poll", pid, gen_id, key, n,
                         version.get("attempt"))
-            return _content_flag(owner, pid, gen_id, key, n, claim, version)
-        _finish(owner, pid, gen_id, key, n, claim, status="failed", error=_clean_text(message, 300), failureKind=kind)
+            return _content_flag(owner, pid, gen_id, key, n, claim, version, message=raw)
+        _finish(owner, pid, gen_id, key, n, claim, status="failed", error=_clean_text(message, 300), failureKind=kind,
+                provider_message=raw)
         log_result(owner, pid, gen_id, key, arn, "failed", error=message)
         log.warning("vnew.retake.job_failed pid=%s gen=%s cell=%s n=%d kind=%s", pid, gen_id, key, n, kind or "-")
         return None
@@ -3484,11 +3504,13 @@ def _soft_prompt(prompt: str) -> tuple[str, dict]:
     return out, info
 
 
-def _content_flag(owner: str, pid: str, gen_id: str, key: str, n: int, claim: str, version: dict) -> dict | None:
+def _content_flag(owner: str, pid: str, gen_id: str, key: str, n: int, claim: str, version: dict, message: str = "") -> dict | None:
     """작업 195: 콘텐츠 검사 거절. 순화해 다시 낸 시도(contentRetry)였으면 CONTENT_FLAG_TEXT 로 failed(None), 처음이면 같은 버전을
-    queued · attempt + 1 · 순화한 프롬프트 · failureKind contentFlag · contentRetry 로 두고 그 버전을 돌려준다(run_retake 가 바로 다시 낸다)."""
+    queued · attempt + 1 · 순화한 프롬프트 · failureKind contentFlag · contentRetry 로 두고 그 버전을 돌려준다(run_retake 가 바로 다시 낸다).
+    작업 198: 거절마다 모델 노트 1줄(message = 공급자 원문) — 처음은 action softRetry, 순화한 것도 거절이면 _finish 가 gaveUp."""
     if version.get("contentRetry"):
-        _finish(owner, pid, gen_id, key, n, claim, status="failed", error=CONTENT_FLAG_TEXT, failureKind=CONTENT_FLAG_KIND)
+        _finish(owner, pid, gen_id, key, n, claim, status="failed", error=CONTENT_FLAG_TEXT, failureKind=CONTENT_FLAG_KIND,
+                provider_message=message)
         log.warning("vnew.retake.content_flag pid=%s gen=%s cell=%s n=%d attempt=%s step=failed", pid, gen_id, key, n,
                     version.get("attempt"))
         return None
@@ -3497,6 +3519,7 @@ def _content_flag(owner: str, pid: str, gen_id: str, key: str, n: int, claim: st
     out = _beat(owner, pid, gen_id, key, n, claim, status="queued", attempt=attempt, prompt=prompt, promptBytes=_bytes_of(prompt),
                 invocationArn="", outputPrefix="", outputKey="", submittedAt="", logId="", error="", failureKind=CONTENT_FLAG_KIND,
                 contentRetry={"fromAttempt": attempt - 1, "at": now_iso(), **info})
+    _note_version(owner, pid, gen_id, key, version, message, kind=CONTENT_FLAG_KIND, action="softRetry")  # 거절된 시도(attempt - 1)
     log.info("vnew.retake.content_flag pid=%s gen=%s cell=%s n=%d attempt=%d step=soften bytes=%d dropped_lines=%d dropped_pieces=%d "
              "softened=%d", pid, gen_id, key, n, attempt, _bytes_of(prompt), info["droppedLines"], info["droppedPieces"],
              info["softenedLines"])

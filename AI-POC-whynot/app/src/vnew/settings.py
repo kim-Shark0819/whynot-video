@@ -395,6 +395,11 @@ VNEW_RETAKE_SHRINK_MODEL = os.getenv("VNEW_RETAKE_SHRINK_MODEL", "").strip() or 
 # 구간에만 효과를 걸어 새 mp4(영상은 복사만)를 만든다(sound.py, 유료 호출 없음). false 면 사운드 라우트 3개가 404(SoundDisabled)이고
 # ⑥ 은 예전처럼 영상만 보인다. 저장된 문서·결과 영상은 지우지 않는다. 코드 기본값이다(템플릿에는 아직 배선하지 않았다).
 VNEW_SOUND = _bool("VNEW_SOUND", True)
+# 모델 노트(작업 198, 2026-11-09). 켜면 영상·그림 모델이 거절하거나 실패할 때마다(콘텐츠 사다리 단계·프롬프트 크기·시간 초과·Kling 컷·
+# 다시 만들기 포함) gen 마다 model-notes.json 에 글로만 한 줄씩 남기고(model_notes.py, 원장과 무관) GET /api/vnew/p/<pid>/model-notes 로
+# 보여 준다. false 면 그 라우트가 404(ModelNotesDisabled)이고 노트를 쓰지 않는다. 저장된 노트는 지우지 않는다. 코드 기본값이다
+# (템플릿에는 배선하지 않았다).
+VNEW_MODEL_NOTES = _bool("VNEW_MODEL_NOTES", True)
 
 # 캐릭터 충실도(char-fidelity, 2026-10-30). 켜면 분석이 기준 사진 한 장의 옷을 그대로 기본 복장으로 쓰고, 한쪽 소품의 좌우를
 # 화면 기준으로 받아 코드가 캐릭터 좌우로 바꾼다. 시트는 화면 왼쪽으로 45°씩 도는 다섯 인물로 그리고, 정면·후면·시트를 검사한다.

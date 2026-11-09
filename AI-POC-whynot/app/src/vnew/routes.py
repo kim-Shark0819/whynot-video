@@ -1164,4 +1164,21 @@ def create_blueprint(deps: VnewDependencies) -> Blueprint:
         except Exception as exc:  # noqa: BLE001
             return _fail(exc)
 
+    # ------------------------------------------------------------ 작업 198: 모델 노트(모델 에러 로그)
+    # gen 하나에서 영상·그림 모델이 거절·실패한 기록(새것부터)과 모델·종류별 수. model_notes.py 가 맡는다(글만 — 그림·프롬프트·주소 없음).
+    # ?gen=<genId>(없으면 지금 gen)&variant=webtoon|real|all. 다른 vnew GET 과 같은 읽기 권한. VNEW_MODEL_NOTES 가 꺼져 있으면
+    # 프로젝트를 보기 전에 404.
+
+    @bp.get("/p/<pid>/model-notes")
+    @deps.require_auth
+    def model_notes_get(pid: str):
+        try:
+            from . import model_notes  # noqa: PLC0415
+
+            model_notes.require_enabled("vnew.model_notes")
+            owner = _project_for(pid, write=False)
+            return jsonify(model_notes.view(owner, pid, request.args.get("gen"), request.args.get("variant")))
+        except Exception as exc:  # noqa: BLE001
+            return _fail(exc)
+
     return bp
