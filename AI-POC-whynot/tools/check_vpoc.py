@@ -66066,6 +66066,405 @@ def check_vnew_bg_reference_197() -> None:
 
 
 
+_MN198_KLING = "fal-ai/kling-video/o3/standard/image-to-video"
+_MN198_EDIT = "alibaba/wan-3.0/video-edit"
+
+
+class _Mn198Store:
+    """작업 198 (mn-g): etag 조건부 쓰기를 지키는 메모리 저장소. inject 번만큼 쓰기 직전에 '다른 파드'가 노트 1줄을 먼저 쓴다."""
+
+    def __init__(self, error_cls) -> None:
+        import threading as _threading  # noqa: PLC0415
+
+        self.data: dict = {}
+        self.lock = _threading.Lock()
+        self.seq = 0
+        self.inject = 0
+        self.conflicts = 0
+        self.error_cls = error_cls
+
+    def read_json(self, key: str):
+        import copy as _copy  # noqa: PLC0415
+
+        with self.lock:
+            if key not in self.data:
+                return None, ""
+            data, etag = self.data[key]
+            return _copy.deepcopy(data), etag
+
+    def write_json(self, key: str, data: dict, *, etag: str = "", create_only: bool = False) -> str:
+        import copy as _copy  # noqa: PLC0415
+
+        with self.lock:
+            if self.inject > 0:
+                self.inject -= 1
+                cur = _copy.deepcopy((self.data.get(key) or ({"version": 1, "notes": []}, ""))[0])
+                cur.setdefault("notes", []).append({"at": "2026-11-09T00:00:00Z", "stage": "part", "kind": "other",
+                                                    "providerMessage": f"other-pod-{self.conflicts}"})
+                self.seq += 1
+                self.data[key] = (cur, f"e{self.seq}")
+            current = self.data.get(key)
+            if (create_only and current is not None) or (etag and (current is None or current[1] != etag)):
+                self.conflicts += 1
+                raise self.error_cls("store", "PreconditionFailed", "etag mismatch", 412)
+            self.seq += 1
+            self.data[key] = (_copy.deepcopy(data), f"e{self.seq}")
+            return f"e{self.seq}"
+
+
+def check_vnew_model_notes_198() -> None:
+    """작업 198 — 모델 노트(…/vnew/gen/<gen>/model-notes.json): 영상·그림 모델 거절·오류 기록 · 정리 · 한국어 이유 · GET · backfill.
+    가짜 fal·LLM·저장소(153 하네스), 유료 0, 네트워크 0.
+
+    (mn-a) 조각 테이크: 조각 2 처음 거절 → 순화해 다시 → 성공: 노트 1줄(part · contentFlag · softRetry · 조각 2 · Wan), GET resolved
+    (mn-b) Kling 컷 프롬프트 크기 거절 → kind promptSize · stage cut · 컷 c1 · Kling endpoint · reasonKo 한도(2500) · gaveUp
+    (mn-c) 시간 초과(조회 HTTP504 Generation timeout) → kind timeout · 칸 failed 그대로
+    (mn-d) 다시 만들기: 거절 → 순화 다시(softRetry) → 또 거절 → 포기(gaveUp): 노트 2줄 · retakeCell · version · attempt 1 · 2
+    (mn-e) 정리: presigned URL · data URI · 긴 base64 · fal 키 · Authorization 값 → 지움, 600자, 노트에 주소 없음
+    (mn-f) 기록이 예외를 내도 생성 결과(칸 상태) 같음 · 예외 밖으로 0 · 노트 파일 0
+    (mn-g) 동시에 더하기(스레드 8 × 10) · 다른 파드 etag 경합 → 노트 모두 남음, 500개 상한(새것만)
+    (mn-h) backfill: error · failureKind 가 있는 상태(칸 · 조각 · retakes.json) → 노트(source state), 저장소 쓰기 0
+    (mn-i) GET: variant 거르기 · 새것부터 · counts(byModel · byKind) · 틀린 variant 400 · 끔이면 404 · 끔이면 기록 0
+    (mn-j) reasonKo: kind 마다 한국어 문장(콘텐츠 · 입력 영상 · 크기 · 시간 · 형식 HTTP · 공급자 HTTP · 그 밖), 콘텐츠 낱말 = CONTENT_FLAG_WORDS
+    """
+    import threading as _threading  # noqa: PLC0415
+    import traceback as _tb  # noqa: PLC0415
+
+    sys.path.insert(0, str(ROOT / "app"))
+    from src.vnew import edit as editmod  # noqa: PLC0415
+    from src.vnew import generate as genmod  # noqa: PLC0415
+    from src.vnew import model_notes as mn  # noqa: PLC0415
+    from src.vnew import plan as planmod  # noqa: PLC0415
+    from src.vnew import retake as rt  # noqa: PLC0415
+    from src.vpoc import fal as falmod  # noqa: PLC0415
+
+    bad: list[str] = []
+    seen: set[str] = set()
+    owner = "tester"
+
+    def expect(group: str, got, want, what: str) -> None:
+        seen.add(group)
+        if got != want:
+            bad.append(f"({group}) {what}\n      결과 {got!r}\n      기대 {want!r}")
+
+    def pick(note: dict, *names: str) -> list:
+        return [note.get(n) for n in names]
+
+    clip_re = re.compile(rb"^CLIP:(\d+\.\d+)-(\d+\.\d+):")
+    rec_seconds = {b"PREVIZ-REC-s1": 30.0}
+
+    def video_seconds(mp4: bytes) -> float:
+        match = clip_re.match(mp4 or b"")
+        if match:
+            return float(match.group(2)) - float(match.group(1))
+        return rec_seconds.get(bytes(mp4 or b""), 0.0)
+
+    try:
+        with _guard_real_llm() as real_calls, _LogCapture(), _LrEnv(owner) as env, _pin_vnew(
+                VNEW_FX=False, VNEW_GEN_PARALLEL=2, POLL_INTERVAL_S=0, VNEW_TAKE_RESOLUTION="480p", VNEW_TAKE_MAX_SECONDS=30,
+                VNEW_TAKE_REF_SPLIT=True, VNEW_TAKE_AUDIO=True, VNEW_CONTENT_FALLBACK_MODEL=_LR_ENDPOINT, VNEW_MODEL_NOTES=True,
+                VNEW_VIBE_PROMPT=False, VNEW_REAL_COSTUME_REF=False, VNEW_CONTI_CAST=False):
+            env.set(editmod, "STORE", env.store)  # retakes.json(⑦)도 같은 가짜 저장소
+            prefix_id = genmod.vpoc_settings.FAL_ID_PREFIX
+            wan_id = prefix_id + _RV152_ENDPOINT
+            seed_find = genmod.vpoc_fal.find
+            env.set(genmod.vpoc_fal, "find", lambda m: {"id": wan_id, "endpointId": _RV152_ENDPOINT, "category": "reference-to-video",
+                                                        "caps": dict(_RV152_CAPS)} if str(m) == wan_id else seed_find(m))
+            env.set(genmod, "_cut_clip", lambda mp4, unit: {
+                "bytes": b"CLIP:%.3f-%.3f:" % (float(unit["startSec"]), float(unit["endSec"])) + bytes(mp4)[:20],
+                "origSeconds": round(float(unit["endSec"]) - float(unit["startSec"]), 3),
+                "sentSeconds": round(float(unit["endSec"]) - float(unit["startSec"]), 3), "padded": False})
+            env.set(genmod, "_mp4_seconds", video_seconds)
+            env.set(genmod, "_conform_concat", lambda pieces, **_kw: b"PARTS:%d" % len(pieces))
+            env.set(genmod, "_read_soften", lambda blocks, *, model: (
+                {"items": [{"id": it["id"], "text": it["text"]} for it in json.loads(blocks[0]["text"])["items"]]},
+                {"model": model, "inputTokens": 1, "outputTokens": 1}))
+            reject = {"left": 0}
+            base_fal = env._fal  # noqa: SLF001
+
+            def fal_request(method, url, payload=None, *, where=""):
+                rid = url.split("/requests/", 1)[-1].split("/", 1)[0]
+                req = next((r for r in env.requests if r["rid"] == rid), None)
+                if method == "GET" and not url.endswith("/status") and req is not None and reject["left"] > 0 \
+                        and "대사9번" in str(req["payload"].get("prompt")):
+                    reject["left"] -= 1
+                    raise env.VpocError("fal.poll", "HTTP422", _CF153_MSG, 502)
+                return base_fal(method, url, payload, where=where)
+
+            env.set(falmod, "_request", fal_request)
+            client = env.client()
+
+            def make(pid: str, cut_ids: list[str], seconds: int) -> None:
+                env.make_plan(pid, [{"id": "s1", "cutIds": cut_ids, "seconds": seconds}])
+
+                def mutator(data: dict) -> None:
+                    data["input"]["videoModel"] = wan_id
+                    for cut in data["conti"]["cuts"]:
+                        text = _CF153_LINE if cut["id"] == "c8" else f"대사{cut['no']}번."
+                        cut["dialogueKo"] = f'에이: "{text}"'
+                        brief = data["previz"]["shotBrief"]["cuts"][cut["id"]]
+                        brief["dialogue"] = [{"speaker": "에이", "lineKo": text, "deliveryEn": "calm"}]
+                        brief["actionEn"] = "Kim nods once."
+
+                planmod.mutate_plan(owner, pid, mutator)
+
+            def plant(pid: str, gen: dict) -> None:
+                env.make_plan(pid, [{"id": "s1", "cutIds": ["c1", "c2"], "seconds": 10}])
+                planmod.mutate_plan(owner, pid, lambda data: data.update(gen=gen))
+
+            def notes_of(pid: str, gen_id: str) -> list[dict]:
+                return mn.read_notes(owner, pid, gen_id)
+
+            def get(pid: str, query: str = ""):
+                resp = client.get(f"/api/vnew/p/{pid}/model-notes{query}")
+                return resp.status_code, resp.get_json() or {}
+
+            # ================= (mn-a) 조각 테이크: 조각 2 처음 거절 → 순화 → 성공 =================
+            pid = "prj_mn_a"
+            make(pid, [f"c{i}" for i in range(1, 11)], 30)
+            reject["left"] = 1
+            client.post(f"/api/vnew/p/{pid}/generate", json={"confirmUsd": genmod.estimate(env.plan(pid))["totalUsd"]})
+            g = env.drive(pid)
+            gen_a = str(g.get("genId") or "")
+            state = genmod._previz_cells(g)[0]["webtoon"]  # noqa: SLF001
+            notes = notes_of(pid, gen_a)
+            note = notes[0] if notes else {}
+            expect("mn-a", [state.get("status"), len(state.get("parts") or []), len(notes)], ["completed", 2, 1],
+                   "칸 completed · 조각 2 · 노트 1줄")
+            # attempt = 칸 시도 번호(조각 1 = 1, 조각 1 이 끝나 조각 2 를 낼 때 다시 선점 = 2)
+            expect("mn-a", pick(note, "variant", "stage", "kind", "action", "model", "attempt", "resolved", "source"),
+                   ["webtoon", "part", "contentFlag", "softRetry", _RV152_ENDPOINT, 2, False, "live"], "노트 머리")
+            expect("mn-a", [(note.get("target") or {}).get("takeId"), (note.get("target") or {}).get("partNo"),
+                            "content checker" in str(note.get("providerMessage")), note.get("reasonKo")],
+                   ["take1", 2, True, mn.REASON_CONTENT.format(who="영상 모델")], "대상 · 원문 · 한국어 이유")
+            code, body = get(pid)
+            shown = (body.get("notes") or [{}])[0]
+            expect("mn-a", [code, body.get("genId"), len(body.get("notes") or []), shown.get("resolved"), shown.get("action")],
+                   [200, gen_a, 1, True, "softRetry"], "GET: 나중에 성공 → resolved")
+            expect("mn-a", [k for k in env.store.json if k.endswith("/model-notes.json")],
+                   [f"users/{owner}/video/{pid}/vnew/gen/{gen_a}/model-notes.json"], "노트 파일 = gen 루트(retakes.json 옆)")
+
+            # ================= (mn-b) Kling 컷 프롬프트 크기 거절 =================
+            pid, gen_b = "prj_mn_b", "g_mnb"
+            plant(pid, {"genId": gen_b, "mode": "previz-take", "status": "running", "videoModel": _RV152_ENDPOINT, "units": [
+                {"id": "take1", "cutIds": ["c1", "c2"], "webtoon": {"status": "completed"},
+                 "real": {"status": "submitted", "claim": "cl-b", "attempt": 2, "fallback": {"step": 2, "model": _MN198_KLING, "cuts": [
+                     {"cutId": "c1", "status": "submitted", "invocationArn": f"{falmod.ARN_PREFIX}{_MN198_KLING}/rk1",
+                      "outputPrefix": "out/b1"},
+                     {"cutId": "c2", "status": "completed", "invocationArn": f"{falmod.ARN_PREFIX}{_MN198_KLING}/rk2",
+                      "outputPrefix": "out/b2", "outputKey": "out/b2/o.mp4"}]}}}]})
+            size_msg = "fal이 요청을 거절했습니다: prompt: size must be between 0 and 2500"
+            env.set(falmod, "poll", lambda arn, prefix: {"status": "Failed", "failureMessage": size_msg, "usage": None})
+            genmod._do_poll_real_cuts(owner, pid, gen_b, 0, "cl-b")  # noqa: SLF001
+            notes = notes_of(pid, gen_b)
+            note = notes[0] if notes else {}
+            expect("mn-b", [len(notes), genmod._previz_cells(env.gen(pid))[0]["real"].get("status")], [1, "failed"],  # noqa: SLF001
+                   "노트 1줄 · 칸 failed")
+            expect("mn-b", pick(note, "variant", "stage", "kind", "model", "attempt", "action", "target", "reasonKo"),
+                   ["real", "cut", "promptSize", _MN198_KLING, 2, "gaveUp", {"takeId": "take1", "cutIds": ["c1"]},
+                    "프롬프트가 모델의 길이 한도(2500)를 넘었습니다."], "Kling 컷 크기 거절 노트")
+
+            # ================= (mn-c) 시간 초과 · (mn-f) 기록 예외 =================
+            def timeout_gen(gen_id: str) -> dict:
+                return {"genId": gen_id, "mode": "previz-take", "status": "running", "videoModel": _RV152_ENDPOINT, "units": [
+                    {"id": "take1", "cutIds": ["c1", "c2"],
+                     "webtoon": {"status": "submitted", "claim": "cl-c", "attempt": 3,
+                                 "invocationArn": f"{falmod.ARN_PREFIX}{_RV152_ENDPOINT}/rt1", "outputPrefix": "out/c"}}]}
+
+            def timeout_poll(arn, prefix):
+                raise env.VpocError("fal.poll", "HTTP504", "Generation timeout", 504)
+
+            env.set(falmod, "poll", timeout_poll)
+            plant("prj_mn_c", timeout_gen("g_mnc"))
+            genmod._do_poll_previz(owner, "prj_mn_c", "g_mnc", 0, "webtoon", "cl-c")  # noqa: SLF001
+            state_c = dict(genmod._previz_cells(env.gen("prj_mn_c"))[0]["webtoon"])  # noqa: SLF001
+            notes = notes_of("prj_mn_c", "g_mnc")
+            note = notes[0] if notes else {}
+            expect("mn-c", [len(notes), state_c.get("status"), state_c.get("error")], [1, "failed", "Generation timeout"],
+                   "노트 1줄 · 칸 failed")
+            expect("mn-c", pick(note, "stage", "kind", "model", "attempt", "action", "reasonKo"),
+                   ["take", "timeout", _RV152_ENDPOINT, 3, "gaveUp", "모델이 제한 시간 안에 결과를 주지 않았습니다."], "시간 초과 노트")
+            real_append = mn._append  # noqa: SLF001
+
+            def broken_append(key, entry):
+                raise RuntimeError("노트 저장소 고장(검사)")
+
+            raised = ""
+            try:
+                mn._append = broken_append  # noqa: SLF001
+                plant("prj_mn_f", timeout_gen("g_mnf"))
+                genmod._do_poll_previz(owner, "prj_mn_f", "g_mnf", 0, "webtoon", "cl-c")  # noqa: SLF001
+                recorded = mn.record(owner, "prj_mn_f", "g_mnf", {"stage": "take", "message": "x"})
+            except Exception as exc:  # noqa: BLE001
+                raised, recorded = repr(exc), None
+            finally:
+                mn._append = real_append  # noqa: SLF001
+            state_f = dict(genmod._previz_cells(env.gen("prj_mn_f"))[0]["webtoon"])  # noqa: SLF001
+            expect("mn-f", [raised, recorded, state_f, notes_of("prj_mn_f", "g_mnf")], ["", False, state_c, []],
+                   "기록 예외 → 생성 결과 같음 · 예외 0 · 노트 0")
+
+            # ================= (mn-d) 다시 만들기: 거절 → 순화 다시 → 또 거절 → 포기 =================
+            pid_d, gen_d, key_d = "prj_mn_c", "g_mnc", "webtoon:take1"
+            raw_d = "fal이 요청을 거절했습니다: " + _CF153_MSG
+            env.set(rt, "_poll", lambda arn, prefix: {"status": "Failed", "failureMessage": raw_d})
+            version = {"n": 2, "status": "submitted", "claim": "tok-d", "attempt": 1, "model": _MN198_EDIT,
+                       "invocationArn": f"{falmod.ARN_PREFIX}{_MN198_EDIT}/rr1", "outputPrefix": "out/d1", "submittedAt": rt.now_iso(),
+                       "prompt": "EDIT: hold the kiss.\nCONTEXT: Kim kisses Lee.", "range": {"cutIds": ["c2"]}}
+            env.store.write_json(rt.retakes_key(owner, pid_d, gen_d),
+                                 {"v": 1, "cells": {key_d: {"versions": [dict(version)], "draft": None}}})
+            again = rt._poll_until_done(owner, pid_d, gen_d, key_d, 2, "tok-d", dict(version))  # noqa: SLF001
+            resub = {**(again or {}), "status": "submitted", "invocationArn": f"{falmod.ARN_PREFIX}{_MN198_EDIT}/rr2",
+                     "outputPrefix": "out/d2", "submittedAt": rt.now_iso()}
+
+            def put_resub(data):
+                data["cells"][key_d]["versions"][0] = dict(resub)
+                return data
+
+            rt._mutate_state(owner, pid_d, gen_d, put_resub)  # noqa: SLF001
+            done = rt._poll_until_done(owner, pid_d, gen_d, key_d, 2, "tok-d", dict(resub))  # noqa: SLF001
+            last = rt.read_state(owner, pid_d, gen_d)["cells"][key_d]["versions"][0]
+            retake_notes = [n for n in notes_of(pid_d, gen_d) if n.get("stage") == "retake"]
+            expect("mn-d", [bool(again), (again or {}).get("status"), done, last.get("status"), last.get("failureKind")],
+                   [True, "queued", None, "failed", "contentFlag"], "처음 거절 → queued, 또 거절 → failed contentFlag")
+            expect("mn-d", [pick(n, "action", "attempt", "kind", "model", "variant") for n in retake_notes],
+                   [["softRetry", 1, "contentFlag", _MN198_EDIT, "webtoon"], ["gaveUp", 2, "contentFlag", _MN198_EDIT, "webtoon"]],
+                   "노트 2줄(softRetry → gaveUp)")
+            expect("mn-d", [n.get("target") for n in retake_notes],
+                   [{"retakeCell": key_d, "version": 2, "cutIds": ["c2"]}] * 2, "대상 = 다시 만들기 칸 · 버전 · 컷")
+            code, body = get(pid_d, f"?gen={gen_d}")
+            expect("mn-d", [code, [n.get("action") for n in body.get("notes") or []][:2], body.get("counts", {}).get("byKind")],
+                   [200, ["gaveUp", "softRetry"], {"contentFlag": 2, "timeout": 1}], "GET 새것부터 · 종류별 수")
+
+            # ================= (mn-e) 정리 =================
+            b64 = "QUJDREVGR0hJSktMTU5PUFFSU1RVVldYWVphYmNkZWZnaGlqa2xtbm9wcXJzdHV2d3h5ejAxMjM0NTY3ODk" * 2
+            dirty = ("Rejected: https://bucket.s3.ap-northeast-2.amazonaws.com/users/x/out.mp4?X-Amz-Signature=deadbeef01&"
+                     "X-Amz-Credential=AKIAABCDEFGHIJKLMNOP%2F20261109 input data:image/jpeg;base64,/9j/4AAQSkZJRgABAQAAAQABAAD "
+                     f"blob {b64} Authorization: Key fal_abc123:secretXYZ987654 key dummy-fal-key-LR "
+                     "see https://v3.fal.media/files/lion/abc.mp4 " + "x" * 5000)
+            clean = mn.sanitize(dirty)
+            made = mn.make_note({"stage": "take", "providerMessage": dirty, "excerpt": "https://a.b/c?d=e " + "y" * 400})
+            leaks = [w for w in ("http", "amazonaws", "X-Amz", "AKIA", "data:image", "/9j/", b64[:40], "secretXYZ987654",
+                                 "dummy-fal-key-LR", "fal.media") if w in clean or w in json.dumps(made, ensure_ascii=False)]
+            expect("mn-e", [leaks, len(clean) <= mn.MESSAGE_MAX, len(made["providerMessage"]) <= 600, len(made.get("excerpt") or "") <= 200,
+                            mn.OMIT_URL in clean, mn.OMIT_DATA in clean, mn.OMIT_LONG in clean, _MN198_KLING in mn.sanitize(_MN198_KLING)],
+                   [[], True, True, True, True, True, True, True], "주소 · data URI · base64 · 키 지움 · 길이 상한 · 모델 id 그대로")
+
+            # ================= (mn-g) 동시에 더하기 · etag 경합 · 상한 =================
+            store_g = _Mn198Store(env.VpocError)
+            env.set(genmod, "STORE", store_g)
+            key_g = mn.notes_key(owner, "prj_mn_g", "g_mng")
+
+            def writer(no: int) -> None:
+                for i in range(10):
+                    mn.record(owner, "prj_mn_g", "g_mng", {"stage": "part", "target": {"partNo": no}, "attempt": i,
+                                                           "message": f"t{no}-{i} content checker"})
+
+            threads = [_threading.Thread(target=writer, args=(no,)) for no in range(1, 9)]
+            for thread in threads:
+                thread.start()
+            for thread in threads:
+                thread.join()
+            got_g = (store_g.read_json(key_g)[0] or {}).get("notes") or []
+            store_g.inject = 2
+            mn.record(owner, "prj_mn_g", "g_mng", {"stage": "take", "message": "after-conflict"})
+            got_g2 = (store_g.read_json(key_g)[0] or {}).get("notes") or []
+            msgs = [n.get("providerMessage") for n in got_g2]
+            expect("mn-g", [len(got_g), len({n.get("providerMessage") for n in got_g}), store_g.conflicts, len(got_g2),
+                            msgs[-3:]],
+                   [80, 80, 2, 83, ["other-pod-0", "other-pod-1", "after-conflict"]], "스레드 80줄 · 다른 파드 경합 2번 → 다시 읽기 · 0 유실")
+            for i in range(mn.NOTES_MAX + 20):
+                mn.record(owner, "prj_mn_g", "g_mng", {"stage": "take", "message": f"cap-{i}"})
+            got_g3 = (store_g.read_json(key_g)[0] or {}).get("notes") or []
+            expect("mn-g", [len(got_g3), got_g3[-1].get("providerMessage"), (store_g.read_json(key_g)[0] or {}).get("version")],
+                   [500, f"cap-{mn.NOTES_MAX + 19}", 1], "새것 500개만 · version 1")
+            env.set(genmod, "STORE", env.store)
+
+            # ================= (mn-h) backfill · (mn-i) GET =================
+            pid_h, gen_h = "prj_mn_h", "g_mnh"
+            plant(pid_h, {"genId": gen_h, "mode": "previz-take", "status": "partial", "videoModel": _RV152_ENDPOINT,
+                          "realRun": {"n": 1, "endpoint": _LR_ENDPOINT}, "units": [
+                {"id": "take1", "cutIds": ["c1"], "webtoon": {
+                    "status": "failed", "attempt": 2, "finishedAt": "2026-11-09T01:00:00Z", "failureKind": "contentFlag",
+                    "error": "fal이 요청을 거절했습니다: " + _CF153_MSG,
+                    "invocationArn": f"{falmod.ARN_PREFIX}{_RV152_ENDPOINT}/h1"}},
+                {"id": "take2", "cutIds": ["c2"], "real": {
+                    "status": "failed", "attempt": 1, "finishedAt": "2026-11-09T03:00:00Z",
+                    "error": "테이크 조각 2/2 이 실패했습니다: Generation timeout", "parts": [
+                        {"no": 1, "status": "completed", "error": "", "cutIds": ["c2"]},
+                        {"no": 2, "status": "failed", "error": "Generation timeout", "cutIds": ["c2"],
+                         "finishedAt": "2026-11-09T02:00:00Z", "invocationArn": f"{falmod.ARN_PREFIX}{_LR_ENDPOINT}/h2"}]}}]})
+            env.store.write_json(rt.retakes_key(owner, pid_h, gen_h), {"v": 1, "cells": {"webtoon:take1": {"versions": [
+                {"n": 2, "status": "failed", "attempt": 1, "model": _MN198_EDIT, "error": "결과를 30분 넘게 받지 못했습니다. 다시 시도해 주세요.",
+                 "timedOut": True, "finishedAt": "2026-11-09T04:00:00Z", "range": {"cutIds": ["c1"]}},
+                {"n": 3, "status": "completed", "attempt": 1, "model": _MN198_EDIT, "error": ""}], "draft": None}}})
+            snapshot = json.dumps({k: v for k, v in env.store.json.items()}, sort_keys=True, ensure_ascii=False, default=str)
+            code, body = get(pid_h)
+            after = json.dumps({k: v for k, v in env.store.json.items()}, sort_keys=True, ensure_ascii=False, default=str)
+            rows = body.get("notes") or []
+            expect("mn-h", [code, body.get("genId"), len(rows), {n.get("source") for n in rows}, snapshot == after,
+                            [k for k in env.store.json if k.endswith(f"{gen_h}/model-notes.json")]],
+                   [200, gen_h, 4, {"state"}, True, []], "상태에서 4줄 · source state · 저장소 그대로 · 노트 파일 0")
+            expect("mn-h", [pick(n, "at", "variant", "stage", "kind", "model", "action") for n in rows],
+                   [["2026-11-09T04:00:00Z", "webtoon", "retake", "timeout", _MN198_EDIT, ""],
+                    ["2026-11-09T03:00:00Z", "real", "take", "timeout", _LR_ENDPOINT, ""],
+                    ["2026-11-09T02:00:00Z", "real", "part", "timeout", _LR_ENDPOINT, ""],
+                    ["2026-11-09T01:00:00Z", "webtoon", "take", "contentFlag", _RV152_ENDPOINT, ""]],
+                   "새것부터 · 칸 · 조각 · 다시 만들기 버전")
+            expect("mn-i", [body.get("counts"), [n.get("resolved") for n in rows]],
+                   [{"byModel": {_MN198_EDIT: 1, _LR_ENDPOINT: 2, _RV152_ENDPOINT: 1}, "byKind": {"timeout": 3, "contentFlag": 1}},
+                    [False, False, False, False]], "counts · resolved 없음")
+            code_r, body_r = get(pid_h, "?variant=real")
+            code_w, body_w = get(pid_h, f"?gen={gen_h}&variant=webtoon")
+            code_x, _ = get(pid_h, "?variant=anime")
+            code_bad, _ = get(pid_h, "?gen=../x")
+            expect("mn-i", [code_r, [n.get("variant") for n in body_r.get("notes") or []], body_r.get("counts", {}).get("byKind"),
+                            code_w, [n.get("stage") for n in body_w.get("notes") or []], code_x, code_bad],
+                   [200, ["real", "real"], {"timeout": 2}, 200, ["retake", "take"], 400, 400], "variant 거르기 · 틀린 값 400")
+            with _pin_vnew(VNEW_MODEL_NOTES=False):
+                code_off, _ = get(pid_h)
+                off_recorded = mn.record(owner, pid_h, gen_h, {"stage": "take", "message": "off"})
+            expect("mn-i", [code_off, off_recorded, [k for k in env.store.json if k.endswith(f"{gen_h}/model-notes.json")]],
+                   [404, False, []], "끔이면 404 · 기록 0")
+
+            # ================= (mn-j) reasonKo =================
+            want_content = "영상 모델의 콘텐츠 검사가 이 장면(키스·신체 접촉·노출·폭력 등)을 민감한 내용으로 판단해 거절했습니다."
+            cases = [
+                (_CF153_MSG, "", "contentFlag", want_content),
+                ("The @Video1 input video was flagged by the content checker", "", "contentFlag",
+                 "영상 모델의 콘텐츠 검사가 프롬프트 글이 아니라 입력 영상(@Video1 등)을 민감한 내용으로 판단해 거절했습니다."),
+                (falmod._REJECT_LIKENESS_MSG, "likeness", "contentFlag", mn.REASON_LIKENESS.format(who="영상 모델")),  # noqa: SLF001
+                (falmod._REJECT_AUDIO_MSG, "audio", "contentFlag", mn.REASON_AUDIO.format(who="영상 모델")),  # noqa: SLF001
+                ("prompt: size must be between 0 and 2500", "", "promptSize", "프롬프트가 모델의 길이 한도(2500)를 넘었습니다."),
+                ("Generation timeout", "", "timeout", "모델이 제한 시간 안에 결과를 주지 않았습니다."),
+                ("fal HTTP422: duration must be 5 or 10", "", "badRequest", "모델이 요청(형식·값)을 받아들이지 않았습니다(HTTP 422)."),
+                ("fal HTTP500: internal error", "", "provider", "모델 쪽에서 오류가 나 결과를 받지 못했습니다(HTTP 500)."),
+                ("녹화가 없습니다.", "", "other", "모델 호출이 실패했습니다."),
+                ("frames", "qc", "qc", "결과 검사(화면 글자·멈춘 화면 등)에서 문제가 보였습니다."),
+            ]
+            got_j = [(mn.classify(m, h), mn.reason_ko(mn.classify(m, h), m, hint=h)) for m, h, _k, _r in cases]
+            expect("mn-j", got_j, [(k, r) for _m, _h, k, r in cases], "kind · reasonKo")
+            expect("mn-j", mn.reason_ko("contentFlag", _CF153_MSG, stage="still"), want_content.replace("영상 모델", "그림 모델"),
+                   "그림 모델 단계(Seedream)")
+            model_src = (ROOT / "app" / "src" / "vnew" / "model_notes.py").read_text(encoding="utf-8")
+            expect("mn-j", [all(mn.classify(word) == "contentFlag" for word in genmod.CONTENT_FLAG_WORDS), "content checker" in model_src],
+                   [True, False], "콘텐츠 낱말 = generate.CONTENT_FLAG_WORDS(목록을 베끼지 않음)")
+            expect("mn-j", [real_calls, env.urlopen_calls], [[], []], "LLM 호출 0 · 네트워크 0")
+    except Exception as exc:  # noqa: BLE001
+        bad.append("예외: " + repr(exc) + "\n" + _tb.format_exc()[:3000])
+
+    if b"\r\n" in (ROOT / "app" / "src" / "vnew" / "model_notes.py").read_bytes():
+        bad.append("model_notes.py 줄 끝이 LF 가 아닙니다")
+    missing = [g for g in ("mn-a", "mn-b", "mn-c", "mn-d", "mn-e", "mn-f", "mn-g", "mn-h", "mn-i", "mn-j") if g not in seen]
+    if missing:
+        bad.append(f"검사 묶음이 돌지 않았습니다: {missing}")
+    if bad:
+        fail("작업 198 모델 노트 검사 실패\n  " + "\n  ".join(bad))
+    else:
+        ok("작업 198 모델 노트 (mn-a)조각 거절 → softRetry 1줄 → resolved (mn-b)Kling 크기 거절 promptSize (mn-c)시간 초과 "
+           "(mn-d)다시 만들기 softRetry · gaveUp 2줄 (mn-e)주소 · data URI · base64 · 키 지움 (mn-f)기록 예외 → 결과 같음 "
+           "(mn-g)동시 더하기 · etag 경합 · 500 상한 (mn-h)backfill 쓰기 0 (mn-i)GET 거르기 · 순서 · counts · 404 (mn-j)reasonKo")
+
+
 def falmod_audio_msg() -> str:
     """작업 195 (cr-f): vpoc.fal 소리 거절 안내 문구(검사 함수 밖에서 node 결과와 비교할 때)."""
     sys.path.insert(0, str(ROOT / "app"))
@@ -66246,6 +66645,7 @@ def main() -> int:
     check_vnew_retake_content_flag_195()
     check_vnew_retake_sent_reason_196()
     check_vnew_bg_reference_197()
+    check_vnew_model_notes_198()
     print()
     if warnings:
         print(f"경고 {len(warnings)}건")

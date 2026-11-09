@@ -49,6 +49,8 @@ from . import casting as vnew_casting
 from . import characters
 from . import fx as vnew_fx
 from . import imaging
+# 작업 198: 모델 거절·오류 노트(한 곳). model_notes 는 generate 를 함수 안에서만 import 한다.
+from . import model_notes as vnew_model_notes
 from . import plan as plan_mod
 from . import previz_schema
 from . import settings as vnew_settings
@@ -1354,6 +1356,7 @@ def _costume_refs(owner: str, pid: str, plan: dict, people, location, fallbacks:
     load = load or _load_jpeg
     out: dict[str, bytes] = {}
     made = failed = 0
+    notes: list[str] = []  # 작업 198: 장면 옷 편집 실패 원문(잠금 밖에서 노트로)
     with _COSTUME_REF_LOCK:
         run = _COSTUME_REF_RUNS.get(run_key)
         if run is None:
@@ -1376,6 +1379,7 @@ def _costume_refs(owner: str, pid: str, plan: dict, people, location, fallbacks:
                                                   size=vnew_settings.FRONT_SIZE) or None
                     except Exception as exc:  # noqa: BLE001 — 실패면 그 인물은 지금 참고 그대로
                         log.warning("vnew.gen.costume_ref_failed pid=%s err=%s", pid, _msg(exc))
+                        notes.append(_msg(exc))
                     if image:
                         _charge_costume_ref(owner, pid, gen_id, run_n)
                         made += 1
@@ -1386,6 +1390,10 @@ def _costume_refs(owner: str, pid: str, plan: dict, people, location, fallbacks:
                 out[str(name)] = run[slot]
     if made or failed:
         log.info("vnew.gen.costume_ref pid=%s run=%d made=%d failed=%d stored=0", pid, run_n, made, failed)
+    for message in notes:  # 작업 198: 장면 옷 편집(fal Seedream edit) 실패 노트 — 그 인물은 지금 참고 그대로
+        vnew_model_notes.record(owner, pid, gen_id, {"variant": "real", "stage": "costume",
+                                                     "model": vnew_settings.VNEW_REAL_COSTUME_REF_MODEL, "attempt": run_n,
+                                                     "providerMessage": message, "action": ""})
     return out
 
 
@@ -7039,7 +7047,8 @@ def _do_poll_take_parts(owner: str, pid: str, gen_id: str, index: int, variant: 
             return
         message = f"테이크 조각 {failed[0].get('no')}/{len(parts)} 이 실패했습니다: {error}"
         _fail_variant(owner, pid, gen_id, index, variant, claim, message,
-                      kind=str(failed[0].get("failureKind") or "") or _audio_kind(error))
+                      kind=str(failed[0].get("failureKind") or "") or _audio_kind(error),
+                      note={"part": failed[0], "providerMessage": error})
         return
     used = _used_parts(parts)  # 작업 169: Kling 컷으로 바뀐 조각(superseded)은 잇지 않는다
     if used and all(p.get("status") == "completed" and p.get("outputKey") for p in used):
@@ -7614,8 +7623,9 @@ def _cut_range_text(plan: dict, cut_ids) -> str:
     return str(nos[0]) if len(nos) == 1 else f"{nos[0]}…{nos[-1]}"
 
 
-def _escalate_content(owner: str, pid: str, gen_id: str, index: int, variant: str, claim: str) -> None:
-    """통째 테이크 칸의 콘텐츠 검사 거절 → 다음 단계로 같은 칸을 queued(0→1, 1→2). 마지막이면 한국어 문구로 칸 실패."""
+def _escalate_content(owner: str, pid: str, gen_id: str, index: int, variant: str, claim: str, message: str = "") -> None:
+    """통째 테이크 칸의 콘텐츠 검사 거절 → 다음 단계로 같은 칸을 queued(0→1, 1→2). 마지막이면 한국어 문구로 칸 실패.
+    작업 198: 거절된 단계마다 모델 노트 1줄(message = 공급자 원문, action = 다음 단계 — 마지막이면 _fail_variant 가 gaveUp)."""
     box: dict = {}
 
     def mutator(data: dict) -> None:
@@ -7628,7 +7638,8 @@ def _escalate_content(owner: str, pid: str, gen_id: str, index: int, variant: st
         original = _real_take_model(g) if variant == "real" else str(g.get("videoModel") or vnew_settings.VNEW_PREVIZ_EDIT_MODEL)
         fallback = _content_fallback_model(original)
         nxt = _content_next(step, fallback, variant == "real")  # 작업 163: 2단계 뒤(또는 대체 모델이 없으면 1단계 뒤) 더 센 순화, 168: 실사 4·5단계
-        box.update(step=step, next=nxt, cutIds=list(_seg_cut_ids(take)))
+        box.update(step=step, next=nxt, cutIds=list(_seg_cut_ids(take)), fallback=fallback,
+                   head=_note_head(g, index, variant))
         if not nxt:
             return
         state.update(status="queued", invocationArn="", outputKey="", error="", claim="", claimedAt="")
@@ -7647,7 +7658,11 @@ def _escalate_content(owner: str, pid: str, gen_id: str, index: int, variant: st
     if not box.get("next"):
         plan, _ = plan_mod.load_plan(owner, pid)
         _fail_variant(owner, pid, gen_id, index, variant, claim,
-                      CONTENT_FLAG_FAIL_TEXT.format(cuts=_cut_range_text(plan, box.get("cutIds"))), kind=CONTENT_FLAG_KIND)
+                      CONTENT_FLAG_FAIL_TEXT.format(cuts=_cut_range_text(plan, box.get("cutIds"))), kind=CONTENT_FLAG_KIND,
+                      note={"providerMessage": message})
+        return
+    vnew_model_notes.record(owner, pid, gen_id, {**(box.get("head") or {}), "providerMessage": message, "kind": CONTENT_FLAG_KIND,
+                                                 "action": _content_action(box["next"], box.get("fallback") or "")})
 
 
 def _escalate_content_parts(owner: str, pid: str, gen_id: str, index: int, variant: str, claim: str) -> None:
@@ -7672,8 +7687,11 @@ def _escalate_content_parts(owner: str, pid: str, gen_id: str, index: int, varia
             nxt = _content_next(step, fallback, variant == "real")  # 작업 163, 168: 실사 4·5단계
             moves.append((part, step, nxt))
             if not nxt:
-                box.update(failed=list(part.get("cutIds") or []), no=part.get("no"))
+                box.update(failed=list(part.get("cutIds") or []), no=part.get("no"), part=dict(part))
                 return
+        # 작업 198: 거절된 조각마다 노트 머리(조각 상태를 바꾸기 전)·공급자 원문·다음 단계
+        box["notes"] = [(_note_head(g, index, variant, part=part), str(part.get("error") or ""), _content_action(nxt, fallback))
+                        for part, _step, nxt in moves]
         for part, _step, nxt in moves:
             part["contentStep"] = nxt
             if nxt == 2:
@@ -7689,12 +7707,17 @@ def _escalate_content_parts(owner: str, pid: str, gen_id: str, index: int, varia
     if "failed" in box:
         log.info("vnew.gen.content_flag step=failed pid=%s take=%d part=%s", pid, index, box.get("no"))
         plan, _ = plan_mod.load_plan(owner, pid)
+        part = box.get("part") or {}
         _fail_variant(owner, pid, gen_id, index, variant, claim,
-                      CONTENT_FLAG_FAIL_TEXT.format(cuts=_cut_range_text(plan, box["failed"])), kind=CONTENT_FLAG_KIND)
+                      CONTENT_FLAG_FAIL_TEXT.format(cuts=_cut_range_text(plan, box["failed"])), kind=CONTENT_FLAG_KIND,
+                      note={"part": part, "providerMessage": str(part.get("error") or "")})
         return
     for no, step, nxt in box.get("moves") or []:
         log.info("vnew.gen.content_flag step=%s pid=%s take=%d part=%s from=%d", CONTENT_STEP_NAMES.get(nxt, "failed"), pid,
                  index, no, step)
+    for head, error, action in box.get("notes") or []:
+        vnew_model_notes.record(owner, pid, gen_id, {**head, "providerMessage": error, "kind": CONTENT_FLAG_KIND,
+                                                     "action": action})
 
 
 # ---------------------------------------------------------------- 작업 155: 조각·Seedance 대체의 장소·이음 프레임·의상 고정
@@ -8441,11 +8464,11 @@ def _do_poll_previz(owner: str, pid: str, gen_id: str, index: int, variant: str,
             kind = str(poll_result.get("failureKind") or "") or _audio_kind(message)
             if not kind and gen.get("mode") == "previz" and _prompt_size_cap(message) and not state.get("sizeRetry"):
                 # 작업 167: fal 프롬프트 크기 거절 → 더 짧은 예산으로 같은 칸을 1번 다시 낸다(두 번째 거절은 아래 그대로 실패).
-                _size_requeue(owner, pid, gen_id, index, variant, claim, _prompt_size_cap(message))
+                _size_requeue(owner, pid, gen_id, index, variant, claim, _prompt_size_cap(message), message=message)
                 return
             if not kind and gen.get("mode") == "previz-take" and _content_kind(message):
                 # 작업 153: fal 콘텐츠 검사 거절 → 순화(같은 모델) → Seedance → 한국어 문구로 실패.
-                _escalate_content(owner, pid, gen_id, index, variant, claim)
+                _escalate_content(owner, pid, gen_id, index, variant, claim, message=message)
                 return
             _fail_variant(owner, pid, gen_id, index, variant, claim, message, kind=kind)
             return
@@ -8485,14 +8508,18 @@ def _do_poll_previz(owner: str, pid: str, gen_id: str, index: int, variant: str,
         _fail_variant(owner, pid, gen_id, index, variant, claim, _msg(exc))
 
 
-def _size_requeue(owner: str, pid: str, gen_id: str, index: int, variant: str, claim: str, size_cap: int) -> None:
+def _size_requeue(owner: str, pid: str, gen_id: str, index: int, variant: str, claim: str, size_cap: int,
+                  message: str = "") -> None:
     """작업 167: 컷 단위 칸의 프롬프트 크기 거절 → state.sizeRetry={cap:N} 를 남기고 같은 칸을 queued(153 처럼 드라이버가
-    다시 선점하며 attempt 를 올린다). 제출은 sizeRetry 를 읽어 int(N × 0.85) − 태그 여유로 프롬프트를 다시 만든다. 1번만."""
+    다시 선점하며 attempt 를 올린다). 제출은 sizeRetry 를 읽어 int(N × 0.85) − 태그 여유로 프롬프트를 다시 만든다. 1번만.
+    작업 198: 모델 노트 1줄(promptSize, action retry)."""
+    box: dict = {}
 
     def mutator(data: dict) -> None:
         g = data.get("gen") or {}
         if not _claim_ok_variant(g, index, variant, claim):
             raise _Discard()
+        box["head"] = _note_head(g, index, variant)
         state = _previz_cells(g)[index][variant]
         state.update(status="queued", invocationArn="", outputKey="", error="", claim="", claimedAt="")
         state["sizeRetry"] = {"cap": int(size_cap)}
@@ -8502,6 +8529,8 @@ def _size_requeue(owner: str, pid: str, gen_id: str, index: int, variant: str, c
     except _Discard:
         return
     log.info("vnew.gen.prompt_size_retry pid=%s cell=%d variant=%s cap=%d", pid, index, variant, int(size_cap))
+    vnew_model_notes.record(owner, pid, gen_id, {**(box.get("head") or {}), "providerMessage": message, "kind": "promptSize",
+                                                 "limit": size_cap, "action": "retry"})
 
 
 # ================================================================ 작업 130·보완 1: 실사 likeness 거절 → 정면 1장 → 컷 단위 Kling
@@ -9468,6 +9497,7 @@ def _escalate_likeness(owner: str, pid: str, gen_id: str, index: int, claim: str
         box.update(step=step, next=nxt, tried=tried)
         if not nxt:
             return
+        box["head"] = _note_head(g, index, "real")  # 작업 198: 거절된 단계의 노트 머리(상태를 바꾸기 전)
         model = kling[0] if nxt == 2 else _real_take_model(g)  # 작업 156: 1단계 = 실사 테이크 모델(정면 1장)
         state.update(status="queued", invocationArn="", outputKey="", error="", claim="", claimedAt="")
         state["fallback"] = {"step": nxt, "reason": "likeness", "model": model, "tried": tried}
@@ -9479,6 +9509,11 @@ def _escalate_likeness(owner: str, pid: str, gen_id: str, index: int, claim: str
     except _Discard:
         return
     log.info("vnew.gen.real_fallback pid=%s take=%d from=%d to=%d", pid, index, box.get("step", 0), box.get("next", 0))
+    if box.get("next"):
+        # 작업 198: likeness 단계 노트(1 = 인물당 정면 1장 → dropRefs, 2 = 컷 단위 Kling)
+        action = "dropRefs" if box["next"] == 1 else vnew_model_notes.ACTION_FALLBACK + str(kling[0] if kling else "")
+        vnew_model_notes.record(owner, pid, gen_id, {**(box.get("head") or {}), "providerMessage": vpoc_fal._REJECT_LIKENESS_MSG,
+                                                     "kind": "likeness", "action": action})
     if not box.get("next"):
         message = REAL_FALLBACK_FAIL.format(steps=" → ".join(box.get("tried") or []))
         if box.get("step") == 1 and not kling:
@@ -9780,6 +9815,11 @@ def _escalate_likeness_parts(owner: str, pid: str, gen_id: str, index: int, clai
             box["fail"] = True
             box["tried"] = [REAL_PART_FALLBACK_TRIED[0]]
             return
+        # 작업 198: 거절된 조각마다 노트 머리(바꾸기 전) · 다음 단계(0b·1r·1b = 같은 참고로 다시, 1 = 정면 1장, 2 = 컷 Kling)
+        box["notes"] = [(_note_head(g, index, "real", part=part),
+                         vnew_model_notes.ACTION_FALLBACK + str(kling[0]) if step == 2 and kling
+                         else "dropRefs" if step == 1 else "retry")
+                        for part, (step, _retry), _extra, _look in moves]
         for part, (step, retry), extra, look in moves:
             part.update(likenessStep=step, likenessRetry=retry, likenessExtra=extra)
             if step == 0 or step == LIKENESS_STEP_1R:
@@ -9812,6 +9852,9 @@ def _escalate_likeness_parts(owner: str, pid: str, gen_id: str, index: int, clai
     for no, step, retry, extra in box["moves"]:
         log.info("vnew.gen.likeness_part take=%s part=%s step=%s pid=%s retry=%d extra=%d", box.get("take"), no, step, pid,
                  retry, extra)
+    for head, action in box.get("notes") or []:
+        vnew_model_notes.record(owner, pid, gen_id, {**head, "providerMessage": vpoc_fal._REJECT_LIKENESS_MSG, "kind": "likeness",
+                                                     "action": action})
 
 
 # 작업 169: 컷 단위 Kling 프롬프트의 샷 고정(Seedance SHOT 줄과 같은 166 크기·인서트·클로즈업 주인공·자기 손, 162 손 주인 글,
@@ -10555,6 +10598,7 @@ def _do_submit_real_cuts(owner: str, pid: str, gen_id: str, index: int, claim: s
     작업 131: 컷마다 프롬프트 기록 한 줄(칸 "테이크id#컷id", _log_attempt), 조회가 끝나면 그 줄의 상태(_log_kling_cut_result).
     """
     records: list[dict] = []
+    cuts: list[dict] = []
     ctx: dict = {"stage": "start"}
     _PREPARE_SEM.acquire()
     try:
@@ -10585,7 +10629,13 @@ def _do_submit_real_cuts(owner: str, pid: str, gen_id: str, index: int, claim: s
         return
     except Exception as exc:  # noqa: BLE001
         log.warning("vnew.gen.real_cut_submit_failed pid=%s take=%s stage=%s err=%s", pid, index, ctx.get("stage"), _msg(exc))
-        _fail_variant(owner, pid, gen_id, index, "real", claim, "컷 단위 Kling 으로 만들지 못했습니다: " + _msg(exc))
+        # 작업 198: 노트 = 그 컷(시작 그림 단계면 Seedream, 그 밖은 Kling)
+        still = ctx.get("stage") == "still"
+        failing = cuts[len(records)] if len(records) < len(cuts) and isinstance(cuts[len(records)], dict) else {}
+        _fail_variant(owner, pid, gen_id, index, "real", claim, "컷 단위 Kling 으로 만들지 못했습니다: " + _msg(exc),
+                      note={"cut": {"cutId": str(failing.get("cutId") or "")}, "providerMessage": _msg(exc),
+                            "stage": "still" if still else "cut",
+                            "model": vnew_settings.SEEDREAM_MODEL if still else str(ctx.get("endpoint") or "")})
         return
     finally:
         _PREPARE_SEM.release()
@@ -10846,7 +10896,8 @@ def _do_poll_real_cuts(owner: str, pid: str, gen_id: str, index: int, claim: str
             message, kind = REAL_FALLBACK_FAIL.format(steps=" → ".join(tried)), "likeness"
         else:
             message, kind = f"컷 단위 Kling 의 컷 {failed[0].get('cutId')} 이 실패했습니다: {error}", _audio_kind(error)
-        _fail_variant(owner, pid, gen_id, index, "real", claim, message, kind=kind)
+        _fail_variant(owner, pid, gen_id, index, "real", claim, message, kind=kind,
+                      note={"cut": failed[0], "providerMessage": error})
         return
     if qa_on and any(c.get("status") == "completed" and "qa" not in c for c in cuts):
         changes = _qa_real_cuts(owner, pid, gen_id, index, claim, plan, cuts)
@@ -14208,6 +14259,9 @@ def _fail_opening(owner: str, pid: str, gen_id: str, claim: str, message: str) -
         _commit(owner, pid, mutator)
     except _Discard:
         return
+    # 작업 198: 시작 장면 그림(Seedream) 실패 노트
+    vnew_model_notes.record(owner, pid, gen_id, {"variant": "real", "stage": "still", "model": vnew_settings.SEEDREAM_MODEL,
+                                                 "providerMessage": message, "action": "gaveUp"})
 
 
 def _user_facing_error(message: str) -> str:
@@ -14223,14 +14277,21 @@ def _user_facing_error(message: str) -> str:
 
 
 def _fail_variant(owner: str, pid: str, gen_id: str, index: int, variant: str, claim: str, message: str,
-                  kind: str = "") -> None:
-    """칸 하나를 failed 로 둔다. kind(vnew-live-fx C.6, 예 "audio")가 있으면 state.failureKind, 없으면 그 키를 지운다."""
+                  kind: str = "", note: dict | None = None) -> None:
+    """칸 하나를 failed 로 둔다. kind(vnew-live-fx C.6, 예 "audio")가 있으면 state.failureKind, 없으면 그 키를 지운다.
+
+    작업 198: 모든 생성 경로의 마지막 실패가 여기로 온다 — 실패를 저장한 뒤 모델 노트 1줄(action gaveUp). note = 노트 머리 덮어쓰기
+    {part | cut(그 조각·Kling 컷), providerMessage(공급자 원문 — 없으면 message), stage, model}. 노트는 상태를 바꾸지 않는다."""
+    raw = str(message or "")
     message = _user_facing_error(message)
+    note = dict(note) if isinstance(note, dict) else {}
+    box: dict = {}
 
     def mutator(data: dict) -> None:
         g = data.get("gen") or {}
         if not _claim_ok_variant(g, index, variant, claim):
             raise _Discard()
+        box["head"] = _note_head(g, index, variant, part=note.get("part"), cut=note.get("cut"))
         cells = _previz_cells(g) if _is_previz_mode(g) else (g.get("segments") or [])
         state = cells[index][variant]
         state["status"] = "failed"
@@ -14255,6 +14316,89 @@ def _fail_variant(owner: str, pid: str, gen_id: str, index: int, variant: str, c
         _commit(owner, pid, mutator)
     except _Discard:
         return
+    extra = {k: v for k, v in note.items() if k in ("stage", "model", "providerMessage") and v}
+    vnew_model_notes.record(owner, pid, gen_id, {**(box.get("head") or {}), "providerMessage": raw, "kind": kind,
+                                                 "action": "gaveUp", **extra})
+
+
+# ---------------------------------------------------------------- 작업 198: 모델 노트의 머리(대상·모델·시도)
+#
+# 노트는 model_notes.record 한 곳으로 남긴다. 생성 쪽은 실패를 정하는 공통 지점에서만 부른다: 칸의 마지막 실패(_fail_variant — 모든
+# 제출·조회·Kling 컷·조각 경로), 콘텐츠 사다리 단계(_escalate_content·_escalate_content_parts), 프롬프트 크기 다시 내기(_size_requeue),
+# likeness 단계(_escalate_likeness·_escalate_likeness_parts), 장면 옷 편집·시작 장면 그림 실패. 머리는 저장된 상태만 읽는다.
+
+CONTENT_STEP_ACTIONS = {1: "softRetry", CONTENT_STEP_STRONG: "softRetry", CONTENT_STEP_DROP_REFS: "dropRefs",
+                        CONTENT_STEP_REWRITE: "dialogueRewrite"}
+
+
+def _content_action(nxt: int, fallback: str) -> str:
+    """콘텐츠 사다리 다음 단계 → 노트 action(0 = 포기, 2 = 대체 모델)."""
+    if not nxt:
+        return "gaveUp"
+    if nxt == 2:
+        return vnew_model_notes.ACTION_FALLBACK + str(fallback or "")
+    return CONTENT_STEP_ACTIONS.get(nxt, "retry")
+
+
+def _arn_model(arn) -> str:
+    """fal 작업 id("fal/requests/<endpoint>/<요청 id>")의 endpoint. fal 이 아니면 ""."""
+    text = str(arn or "")
+    return vpoc_fal._parse_arn(text)[0] if vpoc_fal.is_fal_job(text) else ""  # noqa: SLF001
+
+
+def _endpoint_of(model) -> str:
+    text = str(model or "").strip()
+    return text[len(vpoc_settings.FAL_ID_PREFIX):] if text.startswith(vpoc_settings.FAL_ID_PREFIX) else text
+
+
+def _note_cell_model(gen: dict, state: dict, variant: str) -> str:
+    """제출 전·제출 실패라 작업 id 가 없을 때의 칸 모델(저장된 값만 — 등록표를 묻지 않는다)."""
+    anime = _endpoint_of(gen.get("videoModel") or vnew_settings.VNEW_PREVIZ_EDIT_MODEL)
+    if gen.get("mode") != "previz-take":
+        return anime
+    fallback = state.get("fallback") if isinstance(state.get("fallback"), dict) else {}
+    if variant == "real" and fallback.get("model"):
+        return _endpoint_of(fallback["model"])
+    model = anime
+    if variant == "real":
+        model = _endpoint_of((gen.get("realRun") or {}).get("endpoint") if isinstance(gen.get("realRun"), dict) else "") \
+            or _endpoint_of(vnew_settings.VNEW_REAL_TAKE_MODEL) or anime
+    if _content_step(state) >= 2 and _content_fallback_model(model):
+        return _content_fallback_model(model)
+    return model
+
+
+def _note_head(gen: dict, index: int, variant: str, *, part: dict | None = None, cut: dict | None = None) -> dict:
+    """칸(조각·Kling 컷) 하나의 노트 머리 {variant, stage, target, model, attempt}. 예외를 내지 않는다(모르면 {})."""
+    try:
+        cells = _previz_cells(gen) if _is_previz_mode(gen) else (gen.get("segments") or [])
+        cell = cells[index] if 0 <= int(index) < len(cells) and isinstance(cells[index], dict) else {}
+        state = cell.get(variant) if isinstance(cell.get(variant), dict) else {}
+        mode = str(gen.get("mode") or "")
+        target: dict = {}
+        stage = "take" if mode == "previz-take" else "previz" if mode == "previz" else "segment"
+        if mode == "previz-take":
+            target["takeId"] = str(cell.get("id") or index)
+        cut_ids = _seg_cut_ids(cell)
+        arn = str(state.get("invocationArn") or "")
+        model = ""
+        if isinstance(part, dict):
+            stage = "part"
+            target["partNo"] = part.get("no")
+            cut_ids = [str(c) for c in part.get("cutIds") or []] or cut_ids
+            arn = str(part.get("invocationArn") or "")
+            model = _endpoint_of(part.get("klingModel") or "") if part.get("kind") == "kling" else ""
+        if isinstance(cut, dict):
+            stage = "cut"
+            cut_ids = [str(cut.get("cutId") or "")] if cut.get("cutId") else cut_ids
+            arn = str(cut.get("invocationArn") or "")
+        if cut_ids:
+            target["cutIds"] = cut_ids
+        model = _arn_model(arn) or model or _note_cell_model(gen, state, variant)
+        return {"variant": variant, "stage": stage, "target": target, "model": model, "attempt": state.get("attempt")}
+    except Exception as exc:  # noqa: BLE001 — 노트는 생성을 막지 않는다.
+        log.warning("vnew.gen.model_note_head_failed index=%s err=%s", index, type(exc).__name__)
+        return {"variant": variant}
 
 
 def _audio_kind(message: str) -> str:
