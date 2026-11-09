@@ -196,6 +196,27 @@
     return error.message || "알 수 없는 오류가 발생했습니다.";
   }
 
+  /* 작업 206: 확인창이 열린 사이 금액이 바뀜(409 CostMismatch, 운영에서도 type 은 남는다) — 확인창 공통 처리.
+     isCostMismatch(err) 로 가르고, rereadPlanView(pid) 로 계획 보기를 다시 읽어(state.plan·화면 갱신) 새 금액을 확인창에
+     제자리로 넣은 뒤 costChangedText(옛 금액, 새 금액) 를 보인다. 확인창은 닫지 않는다. */
+  function isCostMismatch(err) {
+    return !!(err && err.type === "CostMismatch");
+  }
+
+  function costChangedText(oldUsd, newUsd) {
+    return "금액이 바뀌었습니다: " + castingUsdText(oldUsd) + " → " + castingUsdText(newUsd) + ". 내용을 확인한 뒤 다시 눌러 주세요.";
+  }
+
+  function rereadPlanView(pid) {
+    return api("/api/vnew/p/" + encodeURIComponent(pid) + "/plan").then(function (fresh) {
+      if (fresh && state.projectId === pid) {
+        state.plan = fresh;
+        if (state.mounted) renderPlan();
+      }
+      return fresh || {};
+    });
+  }
+
   /* ---------------------------------------------------------------- vnew-root(준비 중) */
 
   function healthRow() {
@@ -4645,20 +4666,33 @@
     var isTake = est.mode === "previz-take";
     var styles = null; // 작업 123: 통 테이크 "만들 영상" 체크 2개(genStylesBox)
     var only = opts.onlyChanged || null; // 작업 205: 바뀐 테이크만 다시 만들기(gen.onlyChanged 금액)
+    var onlyLead = null; // 작업 206: 금액이 바뀌면 테이크 목록·금액 글을 제자리에서 바꾼다
+    var takeLeadSpan = null;
+    var takeHint = null;
+    function onlyLeadText() {
+      return takeStaleNames(gen, only.takes) + "만 새로 만들고, 나머지 테이크는 이전 영상을 그대로 씁니다.";
+    }
+    function takeSecsOf(e) {
+      var secs = 0;
+      ((e || {}).takes || []).forEach(function (t) { secs += Number(t.seconds) || 0; });
+      return Math.round(secs);
+    }
+    function takeLeadText() {
+      return GEN_WEBTOON_TITLE + "로 " + takeSecsOf(est) + "초를 한 번에 만듭니다 (480p 초안).";
+    }
     if (only) {
       head.firstChild.textContent = "바뀐 테이크만 다시 만들기";
-      bodyWrap.appendChild(el("p", null, takeStaleNames(gen, only.takes) + "만 새로 만들고, 나머지 테이크는 이전 영상을 그대로 씁니다."));
+      onlyLead = el("p", "vnew-only-changed-takes", onlyLeadText());
+      bodyWrap.appendChild(onlyLead);
       bodyWrap.appendChild(
         el("p", "vnew-hint", only.real ? GEN_WEBTOON_TITLE + "와 실사를 함께 만듭니다(이전 영상과 같은 그림체)." : GEN_WEBTOON_TITLE + "만 만듭니다(이전 영상과 같은 그림체).")
       );
     } else if (isTake) {
-      var takeSecs = 0;
-      (est.takes || []).forEach(function (t) { takeSecs += Number(t.seconds) || 0; });
-      takeSecs = Math.round(takeSecs);
       var takeLead = el("p", null, "통 테이크(베타): 승인한 프리비즈 녹화를 통째로 넣어 ");
-      takeLead.appendChild(el("span", null, GEN_WEBTOON_TITLE + "로 " + takeSecs + "초를 한 번에 만듭니다 (480p 초안)."));
+      takeLeadSpan = el("span", null, takeLeadText());
+      takeLead.appendChild(takeLeadSpan);
       bodyWrap.appendChild(takeLead);
-      bodyWrap.appendChild(
+      takeHint = bodyWrap.appendChild(
         el("p", "vnew-hint", takePlanHintText("confirm", (est.takes || []).length, takeRealEnabledOf(gen, plan)))
       );
       styles = genStylesBox(est, updateCost);
@@ -4676,11 +4710,58 @@
       );
     }
     // 금액 숫자는 보이지 않는다(설계자 2026-10-20) — 문구만. 작업 123: 통 테이크는 고른 것의 합을 숫자로 보인다.
-    var cost = el("p", "vnew-gen-cost", only ? "예상 비용 " + castingUsdText(only.usd) + " (바뀐 테이크 몫만)"
-      : styles ? genStylesCostText(est, styles.real()) : "예상 비용이 듭니다.");
+    var cost = el("p", "vnew-gen-cost", costText());
     bodyWrap.appendChild(cost);
+    function costText() {
+      return only ? "예상 비용 " + castingUsdText(only.usd) + " (바뀐 테이크 몫만)"
+        : styles ? genStylesCostText(est, styles.real()) : "예상 비용이 듭니다.";
+    }
     function updateCost() {
       if (styles) cost.textContent = genStylesCostText(est, styles.real());
+    }
+    // 보낼 본문(금액 = 지금 확인창이 보이는 금액). 작업 206: 금액이 바뀌면 다시 읽은 값으로 다시 만든다.
+    function generateBody() {
+      var body = { confirmUsd: Number((gen.estimate || {}).totalUsd) || 0 };
+      if (only) {
+        body = { confirmUsd: Number(only.usd) || 0, onlyChanged: true };
+      } else if (styles) {
+        var withReal = styles.real();
+        body.styles = withReal ? ["webtoon", "real"] : ["webtoon"];
+        if (withReal) body.confirmUsd = takeUsdSum(est.totalUsd, est.realUsd);
+      }
+      return body;
+    }
+    // 작업 206: 409 CostMismatch — 계획 보기를 다시 읽어 금액·테이크 목록을 제자리에서 바꾸고 한국어로 알린다(창은 열어 둔다).
+    function applyFreshPrice(oldUsd) {
+      return rereadPlanView(state.projectId)
+        .then(function (fresh) {
+          plan = fresh || plan;
+          gen = plan.gen || {};
+          est = gen.estimate || {};
+          if (only) {
+            only = gen.onlyChanged || {};
+            if (onlyLead) onlyLead.textContent = onlyLeadText();
+            if (!only.available) {
+              okBtn.disabled = true;
+              cancelBtn.disabled = false;
+              showModalError(only.block || "바뀐 테이크가 없습니다.");
+              cost.textContent = costText();
+              return;
+            }
+          } else {
+            if (takeLeadSpan) takeLeadSpan.textContent = takeLeadText();
+            if (takeHint) takeHint.textContent = takePlanHintText("confirm", (est.takes || []).length, takeRealEnabledOf(gen, plan));
+          }
+          cost.textContent = costText();
+          okBtn.disabled = false;
+          cancelBtn.disabled = false;
+          showModalError(costChangedText(oldUsd, generateBody().confirmUsd));
+        })
+        .catch(function (err) {
+          okBtn.disabled = false;
+          cancelBtn.disabled = false;
+          showModalError("새 금액을 불러오지 못했습니다: " + errMessage(err));
+        });
     }
 
     var error = planError("");
@@ -4709,15 +4790,7 @@
     okBtn.addEventListener("click", function () {
       okBtn.disabled = true;
       cancelBtn.disabled = true;
-      var confirmUsd = Number((gen.estimate || {}).totalUsd) || 0;
-      var genBody = { confirmUsd: confirmUsd };
-      if (only) {
-        genBody = { confirmUsd: Number(only.usd) || 0, onlyChanged: true };
-      } else if (styles) {
-        var withReal = styles.real();
-        genBody.styles = withReal ? ["webtoon", "real"] : ["webtoon"];
-        if (withReal) genBody.confirmUsd = takeUsdSum(est.totalUsd, est.realUsd);
-      }
+      var genBody = generateBody();
       api("/api/vnew/p/" + encodeURIComponent(state.projectId) + "/generate", {
         method: "POST",
         body: JSON.stringify(genBody)
@@ -4729,6 +4802,7 @@
           loadPlan(false);
         })
         .catch(function (err) {
+          if (isCostMismatch(err)) return applyFreshPrice(genBody.confirmUsd);
           okBtn.disabled = false;
           cancelBtn.disabled = false;
           var isMissing = err && err.type === "CharacterRealMissing";
@@ -7238,6 +7312,13 @@
     return "프리비즈가 바뀌었습니다 — " + takeStaleNames(gen, (gen || {}).staleUnits) + "이 지금 영상과 다릅니다.";
   }
 
+  /* 작업 206: 촬영 지시서를 (다시) 만드는 중인지(서버 BRIEF_BUILDING_STATUSES 와 같다). */
+  var BRIEF_BUILDING_LABEL = "촬영 지시서 마무리 중…";
+  function briefBuilding(previz) {
+    var status = (((previz || {}).shotBrief) || {}).status;
+    return status === "running" || status === "queued" || status === "building";
+  }
+
   function renderGenStart(host, showError, staleGen) {
     var plan = state.plan || {};
     var previz = plan.previz || {};
@@ -7249,7 +7330,13 @@
       var takeNotice = el("section", "panel vnew-take-stale");
       takeNotice.appendChild(el("p", "vnew-take-stale-msg", takeStaleText(staleGen)));
       var only = staleGen.onlyChanged || {};
-      if (only.available && previz.recordedAll) {
+      if (briefBuilding(previz) && previz.recordedAll) {
+        // 작업 206: 지시서를 다시 만드는 중 — 바뀐 테이크 판정·금액이 끝나야 정해진다(서버도 409 BriefBuilding).
+        var waitBtn = el("button", "primary-button vnew-only-changed-btn is-waiting", BRIEF_BUILDING_LABEL);
+        waitBtn.type = "button";
+        waitBtn.disabled = true;
+        takeNotice.appendChild(waitBtn);
+      } else if (only.available && previz.recordedAll) {
         var onlyBtn = el("button", "primary-button vnew-only-changed-btn",
           "바뀐 테이크만 다시 만들기 (" + castingUsdText(only.usd) + ")");
         onlyBtn.type = "button";
