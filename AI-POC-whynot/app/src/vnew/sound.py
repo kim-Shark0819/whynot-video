@@ -15,6 +15,10 @@ start·end 는 estimate_spans 한 곳에서 정한다(컷 구간 → 그 안 말
 대본(plan)·revision·프리비즈 승인은 읽기만 한다(쓰지 않는다).
 외부 호출 래퍼(검사가 바꾼다): _download · _upload · _probe · _detect_speech · _render · _spawn_apply. 저장소는 edit.STORE 다
 (edit._read_json · _mutate_json · _presign_video).
+
+작업 202(인물 목소리, voices.py): 반영 작업(job)에 voices(줄마다 목소리 바꾸기 계획)가 있으면 run_apply 가 voices.build_track 으로
+원래 소리에서 그 줄 구간만 바꾼 소리 트랙(wav, 길이 그대로)을 만들고, 속마음 효과는 그 트랙 위에 건다. 새 필드는 모두 선택이다
+(job.voices·job.progress·job.message, versions[].voices) — 옛 문서·반영 기록은 그대로 읽힌다. GET 보기에는 voices(VNEW_SOUND_VOICES 켬)가 붙는다.
 """
 
 from __future__ import annotations
@@ -73,6 +77,7 @@ _STAGE_MESSAGES = {
     "wait": "소리 반영을 시작하지 못했습니다.",
     "download": "원본 영상을 받지 못했습니다.",
     "probe": "원본 영상을 읽지 못했습니다.",
+    "voice": "인물 목소리를 맞추지 못했습니다.",
     "render": "소리를 반영하지 못했습니다.",
     "upload": "결과 영상을 저장하지 못했습니다.",
 }
@@ -138,11 +143,15 @@ def _detect_speech(path: str, duration: float) -> list[tuple[float, float]]:
     return speech_from_log(result.stderr.decode("utf-8", errors="replace"), duration)
 
 
-def _render(source_path: str, output_path: str, spans: list[list[float]]) -> None:
-    """ffmpeg 한 번: 영상은 복사(-map 0:v:0 -c:v copy), 소리는 spans 안에만 THOUGHT_FILTER(경계 FADE_S)."""
+def _render(source_path: str, output_path: str, spans: list[list[float]], audio_path: str | None = None) -> None:
+    """ffmpeg 한 번: 영상은 복사(-map 0:v:0 -c:v copy), 소리는 spans 안에만 THOUGHT_FILTER(경계 FADE_S).
+
+    작업 202: audio_path(목소리를 바꾼 소리 트랙 wav)가 있으면 원본 소리 대신 그 트랙을 쓴다(효과는 그 트랙 위에)."""
     binary = stitcher.ffmpeg_path()
-    command = [binary, "-y", "-hide_banner", "-loglevel", "error", "-i", source_path,
-               "-filter_complex", thought_graph(spans), "-map", "0:v:0", "-map", "[aout]", "-c:v", "copy",
+    inputs = ["-i", source_path] + (["-i", audio_path] if audio_path else [])
+    graph = thought_graph(spans, "1:a:0" if audio_path else "0:a:0")
+    command = [binary, "-y", "-hide_banner", "-loglevel", "error", *inputs,
+               "-filter_complex", graph, "-map", "0:v:0", "-map", "[aout]", "-c:v", "copy",
                *AUDIO_CODEC_ARGS, "-movflags", "+faststart", output_path]
     result = stitcher._edit_run(command)  # noqa: SLF001
     if result.returncode != 0 or not os.path.exists(output_path) or not os.path.getsize(output_path):
@@ -192,13 +201,14 @@ def _gain_expr(spans: list[list[float]]) -> str:
     return "+".join(terms) if terms else "0"
 
 
-def thought_graph(spans) -> str:
-    """소리 필터 그래프. 원음(dry)×(1−세기) + 효과음(wet)×세기. 세기 0 인 곳은 원음 샘플 그대로다. 출력 [aout]."""
+def thought_graph(spans, source: str = "0:a:0") -> str:
+    """소리 필터 그래프. 원음(dry)×(1−세기) + 효과음(wet)×세기. 세기 0 인 곳은 원음 샘플 그대로다. 출력 [aout].
+    source: 입력 소리(기본 원본 영상의 소리, 작업 202 는 목소리를 바꾼 트랙 1:a:0)."""
     merged = merge_spans(spans or [])
     if not merged:
-        return "[0:a:0]anull[aout]"
+        return f"[{source}]anull[aout]"
     gain = _gain_expr(merged)
-    return (f"[0:a:0]asetnsamples=n={FRAME_SAMPLES}:p=0,asplit=2[sdry][swet];"
+    return (f"[{source}]asetnsamples=n={FRAME_SAMPLES}:p=0,asplit=2[sdry][swet];"
             f"[swet]{THOUGHT_FILTER},volume='{gain}':eval=frame[wet];"
             f"[sdry]volume='1-({gain})':eval=frame[dry];"
             "[dry][wet]amix=inputs=2:normalize=0:duration=first[aout]")
@@ -569,7 +579,12 @@ def _ensure_doc(owner: str, pid: str, gen_id: str, plan: dict, gen: dict, varian
 
 def _job_out(job) -> dict:
     job = job if isinstance(job, dict) else {}
-    return {"status": str(job.get("status") or "none"), "error": str(job.get("error") or ""), "at": str(job.get("at") or "")}
+    out = {"status": str(job.get("status") or "none"), "error": str(job.get("error") or ""), "at": str(job.get("at") or "")}
+    if isinstance(job.get("message"), str) and job["message"]:  # 작업 202: 목소리 맞춤 결과 한 줄(있을 때만)
+        out["message"] = job["message"]
+    if isinstance(job.get("progress"), dict):  # 작업 202: 목소리 맞춤 진행(줄 수)
+        out["progress"] = {"done": int(job["progress"].get("done") or 0), "total": int(job["progress"].get("total") or 0)}
+    return out
 
 
 def _view(doc: dict, gen_id: str, variant: str, rebuilt: bool) -> dict:
@@ -579,9 +594,12 @@ def _view(doc: dict, gen_id: str, variant: str, rebuilt: bool) -> dict:
     for item in doc.get("versions") or []:
         if not isinstance(item, dict):
             continue
-        versions.append({"n": item.get("n"), "at": str(item.get("at") or ""), "thoughtIds": list(item.get("thoughtIds") or []),
-                         "currentSource": item.get("sourceKey") == src.get("key"),
-                         "videoUrl": edit._presign_video(str(item.get("key") or ""))})  # noqa: SLF001
+        version = {"n": item.get("n"), "at": str(item.get("at") or ""), "thoughtIds": list(item.get("thoughtIds") or []),
+                   "currentSource": item.get("sourceKey") == src.get("key"),
+                   "videoUrl": edit._presign_video(str(item.get("key") or ""))}  # noqa: SLF001
+        if isinstance(item.get("voices"), dict):  # 작업 202: 목소리 맞춤 요약(있을 때만 — 옛 기록은 그대로)
+            version["voices"] = copy.deepcopy(item["voices"])
+        versions.append(version)
     return {
         "enabled": True,
         "genId": gen_id,
@@ -598,12 +616,17 @@ def _view(doc: dict, gen_id: str, variant: str, rebuilt: bool) -> dict:
 
 
 def sound_view(owner: str, pid: str, variant=None) -> dict:
-    """GET /p/<pid>/sound. 문서(없으면 만든다)·원본·반영 기록·작업 상태."""
+    """GET /p/<pid>/sound. 문서(없으면 만든다)·원본·반영 기록·작업 상태. 작업 202: VNEW_SOUND_VOICES 켬이면 voices(인물 목소리)."""
     plan, gen, gen_id = edit._load_gen(owner, pid)  # noqa: SLF001
     variant = _variant_of(variant, gen, "vnew.sound")
     reconcile_job(owner, pid, gen_id, variant)
     doc, rebuilt = _ensure_doc(owner, pid, gen_id, plan, gen, variant)
-    return _view(doc, gen_id, variant, rebuilt)
+    view = _view(doc, gen_id, variant, rebuilt)
+    from . import voices  # noqa: PLC0415 — voices 가 이 모듈을 import 한다(순환 피함)
+
+    if voices.enabled():
+        view["voices"] = voices.view(owner, pid, plan, gen_id, variant, doc)
+    return view
 
 
 # ================================================================ 저장(PUT)
@@ -676,10 +699,11 @@ def save_lines(owner: str, pid: str, payload) -> dict:
 # ================================================================ 반영(apply)
 
 
-def start_apply(owner: str, pid: str, payload) -> dict:
+def start_apply(owner: str, pid: str, payload, *, voice_job: dict | None = None) -> dict:
     """POST /p/<pid>/sound/apply. 저장된 문서의 thought 줄 구간으로 반영을 시작한다(백그라운드). 202 {started, job}.
 
     running 이면 409 SoundRunning, 원본에 소리가 없으면 400("이 영상에는 소리가 없어 바꿀 수 없습니다", kind BadAudio). 시작 때 구간·원본 키를 job 에 사본으로 남긴다.
+    작업 202: voice_job(voices.start_voice_apply 가 검사·견적을 마친 줄별 계획)이 있으면 job.voices 로 남겨 run_apply 가 목소리를 먼저 바꾼다.
     """
     where = "vnew.sound.apply"
     payload = payload if isinstance(payload, dict) else {}
@@ -704,18 +728,22 @@ def start_apply(owner: str, pid: str, payload) -> dict:
         current["job"] = {"status": "running", "error": "", "at": now, "claim": claim, "beatAt": now, "n": n,
                           "sourceKey": source["key"], "thoughtIds": [str(l.get("id")) for l in thought],
                           "spans": merge_spans([(l.get("start"), l.get("end")) for l in thought])}
+        if voice_job:
+            current["job"]["voices"] = copy.deepcopy(voice_job)
         return current
 
     saved = edit._mutate_json(doc_key(owner, pid, gen_id, variant), mutate)  # noqa: SLF001
     job = saved["job"]
-    log.info("vnew.sound.apply_start pid=%s gen=%s variant=%s n=%d thought=%d spans=%d", pid, gen_id, variant, job["n"],
-             len(job["thoughtIds"]), len(job["spans"]))
+    log.info("vnew.sound.apply_start pid=%s gen=%s variant=%s n=%d thought=%d spans=%d voices=%d", pid, gen_id, variant, job["n"],
+             len(job["thoughtIds"]), len(job["spans"]), len(((job.get("voices") or {}).get("items")) or []))
     _spawn_apply(owner, pid, gen_id, variant, claim)
     return {"started": True, "job": _job_out(job)}
 
 
-def _beat(owner: str, pid: str, gen_id: str, variant: str, claim: str, *, finish: dict | None = None) -> dict:
-    """claim 이 그대로면 하트비트를 쓰고(finish 가 있으면 끝 상태로 바꾸고) job 사본을 준다. 아니면 _ClaimLost."""
+def _beat(owner: str, pid: str, gen_id: str, variant: str, claim: str, *, finish: dict | None = None,
+          progress: dict | None = None) -> dict:
+    """claim 이 그대로면 하트비트를 쓰고(finish 가 있으면 끝 상태로 바꾸고) job 사본을 준다. 아니면 _ClaimLost.
+    작업 202: progress({done, total})를 주면 하트비트와 함께 남기고, finish.message 는 끝 상태에 한 줄로 남긴다."""
     box: dict = {}
 
     def mutate(current):
@@ -725,11 +753,15 @@ def _beat(owner: str, pid: str, gen_id: str, variant: str, claim: str, *, finish
         now = now_iso()
         if finish is None:
             job["beatAt"] = now
+            if progress is not None:
+                job["progress"] = dict(progress)
         else:
             version = finish.get("version")
             if version:
                 current["versions"] = ([v for v in current.get("versions") or [] if isinstance(v, dict)] + [version])[-VERSIONS_MAX:]
             current["job"] = {"status": finish["status"], "error": finish.get("error") or "", "at": now, "n": job.get("n")}
+            if finish.get("message"):
+                current["job"]["message"] = str(finish["message"])
         box["job"] = copy.deepcopy(job)
         return current
 
@@ -738,7 +770,7 @@ def _beat(owner: str, pid: str, gen_id: str, variant: str, claim: str, *, finish
 
 
 def run_apply(owner: str, pid: str, gen_id: str, variant: str, claim: str) -> None:
-    """반영 스레드 본체: 원본 받기 → 소리 확인 → ffmpeg 한 번 → 새 키에 올리기 → 기록. 임시 파일은 끝나면 지운다."""
+    """반영 스레드 본체: 원본 받기 → 소리 확인 → (작업 202: 목소리 맞춤) → ffmpeg 한 번 → 새 키에 올리기 → 기록. 임시 파일은 끝나면 지운다."""
     stage = "wait"
     try:
         with _APPLY_SEM:
@@ -746,6 +778,7 @@ def run_apply(owner: str, pid: str, gen_id: str, variant: str, claim: str) -> No
             source_key, n = str(job.get("sourceKey") or ""), int(job.get("n") or 0)
             if not source_key.startswith(f"users/{owner}/video/{pid}/") or n <= 0:
                 raise VpocError("vnew.sound.apply", "SourceUnreadable", "원본 영상을 읽지 못했습니다.", 409)
+            voice_summary = None
             with tempfile.TemporaryDirectory(prefix="vnew-sound-") as workdir:
                 stage = "download"
                 source_path = os.path.join(workdir, "source.mp4")
@@ -753,9 +786,18 @@ def run_apply(owner: str, pid: str, gen_id: str, variant: str, claim: str) -> No
                 stage = "probe"
                 if not (_probe(source_path) or {}).get("hasAudio"):
                     raise VpocError("vnew.sound.apply", "BadAudio", "이 영상에는 소리가 없어 바꿀 수 없습니다", 400)
+                audio_path = None
+                voice_job = job.get("voices")
+                if isinstance(voice_job, dict) and voice_job.get("items"):
+                    stage = "voice"
+                    from . import voices  # noqa: PLC0415 — voices 가 이 모듈을 import 한다(순환 피함)
+
+                    audio_path, voice_summary = voices.build_track(
+                        owner, pid, gen_id, variant, source_path, workdir, voice_job,
+                        beat=lambda progress: _beat(owner, pid, gen_id, variant, claim, progress=progress))
                 stage = "render"
                 output = os.path.join(workdir, "sound.mp4")
-                _render(source_path, output, job.get("spans") or [])
+                _render(source_path, output, job.get("spans") or [], audio_path=audio_path)
                 seconds = edit._num((_probe(output) or {}).get("duration")) or 0.0  # noqa: SLF001
                 if seconds <= 0:
                     raise stitcher.StitchError("반영한 영상 길이를 읽지 못했습니다.")
@@ -764,7 +806,11 @@ def run_apply(owner: str, pid: str, gen_id: str, variant: str, claim: str) -> No
                 key = version_key(owner, pid, gen_id, variant, n)
                 _upload(output, key)
         version = {"n": n, "key": key, "at": now_iso(), "thoughtIds": list(job.get("thoughtIds") or []), "sourceKey": source_key}
-        _beat(owner, pid, gen_id, variant, claim, finish={"status": "done", "version": version})
+        finish = {"status": "done", "version": version}
+        if voice_summary:
+            version["voices"] = voice_summary
+            finish["message"] = voice_summary.get("message") or ""
+        _beat(owner, pid, gen_id, variant, claim, finish=finish)
         log.info("vnew.sound.apply_done pid=%s gen=%s variant=%s n=%d seconds=%.3f", pid, gen_id, variant, n, seconds)
     except _ClaimLost:
         log.info("vnew.sound.apply_claim_lost pid=%s gen=%s variant=%s stage=%s", pid, gen_id, variant, stage)
