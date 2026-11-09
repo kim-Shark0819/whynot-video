@@ -2977,11 +2977,34 @@ function renderWorkingProject() {
    switchView 가 이 값의 id 로 mount 한다. 바꾸는 곳은 setCurrentProject 하나로 모은다(목록 열기 · 저장 응답 ·
    새로고침 복원 · 삭제 · 로그아웃). 콘티 · 이미지 화면은 프로젝트에서 넘어온 작업 프로젝트(위 배너와 같은 값)를 쓴다. */
 function setCurrentProject(project) {
+  // 작업 205: 같은 id 인데 이름(title)이 없는 객체로 바꾸면 아는 이름이 지워져 상단에 pid 가 보였다.
+  // 같은 id 의 이전 이름을 이어 쓰고, 그래도 이름을 모르면 프로젝트를 한 번 다시 읽어 채운다.
+  const prev = state.currentProject;
+  if (project?.id && !project.title && prev?.id === project.id && prev.title) project = { ...project, title: prev.title };
   state.currentProject = project || null;
   // 이름을 고쳐 저장했으면 작업 프로젝트 배너도 같은 이름으로 맞춘다(옛 이름이 남지 않게).
   const working = getWorkingProject();
-  if (project?.id && working?.id === project.id && working.title !== project.title) setWorkingProject(project);
+  if (project?.id && project.title && working?.id === project.id && working.title !== project.title) setWorkingProject(project);
   renderTopProject();
+  if (project?.id && !project.title && typeof refillProjectTitle === "function") refillProjectTitle(project.id);
+}
+
+/* 작업 205: 지금 프로젝트의 이름을 모르면(이름 없는 객체로만 알게 된 경우) 한 번 다시 읽어 채운다. 못 읽으면 "프로젝트" 로 남는다. */
+const refillingTitles = new Set();
+async function refillProjectTitle(projectId) {
+  if (refillingTitles.has(projectId) || !state.token) return;
+  refillingTitles.add(projectId);
+  try {
+    const payload = await api(`/api/projects/${encodeURIComponent(projectId)}`);
+    const title = payload?.item?.title;
+    if (title && state.currentProject?.id === projectId && !state.currentProject.title) {
+      setCurrentProject({ ...state.currentProject, title });
+    }
+  } catch (_error) {
+    // 상단은 "프로젝트" 로 남는다(pid 를 보이지 않는다).
+  } finally {
+    refillingTitles.delete(projectId);
+  }
 }
 
 function topProject() {
@@ -2995,7 +3018,8 @@ function renderTopProject() {
   const link = $("#topProjectName");
   if (!link) return;
   const project = state.token ? topProject() : null;
-  const name = project?.id ? String(project.title || project.id) : "";
+  // 작업 205: 이름을 아직 모르면 pid 대신 "프로젝트"(32자리 id 는 사용자에게 뜻이 없다).
+  const name = project?.id ? String(project.title || "프로젝트") : "";
   link.classList.toggle("is-hidden", !name);
   $("#topProjectSep")?.classList.toggle("is-hidden", !name);
   $("#topBreadcrumb")?.classList.toggle("has-project", Boolean(name));

@@ -4644,7 +4644,14 @@
     var bodyWrap = el("div", "vnew-modal-body");
     var isTake = est.mode === "previz-take";
     var styles = null; // 작업 123: 통 테이크 "만들 영상" 체크 2개(genStylesBox)
-    if (isTake) {
+    var only = opts.onlyChanged || null; // 작업 205: 바뀐 테이크만 다시 만들기(gen.onlyChanged 금액)
+    if (only) {
+      head.firstChild.textContent = "바뀐 테이크만 다시 만들기";
+      bodyWrap.appendChild(el("p", null, takeStaleNames(gen, only.takes) + "만 새로 만들고, 나머지 테이크는 이전 영상을 그대로 씁니다."));
+      bodyWrap.appendChild(
+        el("p", "vnew-hint", only.real ? GEN_WEBTOON_TITLE + "와 실사를 함께 만듭니다(이전 영상과 같은 그림체)." : GEN_WEBTOON_TITLE + "만 만듭니다(이전 영상과 같은 그림체).")
+      );
+    } else if (isTake) {
       var takeSecs = 0;
       (est.takes || []).forEach(function (t) { takeSecs += Number(t.seconds) || 0; });
       takeSecs = Math.round(takeSecs);
@@ -4663,13 +4670,14 @@
       bodyWrap.appendChild(el("p", "vnew-hint", "구간 " + segCount + "개를 실사·웹툰 두 벌로 만듭니다."));
     }
     // 이미 결과(done/partial)가 있거나 stale 이면 지금 결과가 '이전 영상'으로만 남는다고 알린다.
-    if (opts.hadResult) {
+    if (opts.hadResult && !only) {
       bodyWrap.appendChild(
         el("p", "vnew-hint vnew-remake-note", "지금 결과는 '이전 영상'으로만 남고 새로 만듭니다.")
       );
     }
     // 금액 숫자는 보이지 않는다(설계자 2026-10-20) — 문구만. 작업 123: 통 테이크는 고른 것의 합을 숫자로 보인다.
-    var cost = el("p", "vnew-gen-cost", styles ? genStylesCostText(est, styles.real()) : "예상 비용이 듭니다.");
+    var cost = el("p", "vnew-gen-cost", only ? "예상 비용 " + castingUsdText(only.usd) + " (바뀐 테이크 몫만)"
+      : styles ? genStylesCostText(est, styles.real()) : "예상 비용이 듭니다.");
     bodyWrap.appendChild(cost);
     function updateCost() {
       if (styles) cost.textContent = genStylesCostText(est, styles.real());
@@ -4703,7 +4711,9 @@
       cancelBtn.disabled = true;
       var confirmUsd = Number((gen.estimate || {}).totalUsd) || 0;
       var genBody = { confirmUsd: confirmUsd };
-      if (styles) {
+      if (only) {
+        genBody = { confirmUsd: Number(only.usd) || 0, onlyChanged: true };
+      } else if (styles) {
         var withReal = styles.real();
         genBody.styles = withReal ? ["webtoon", "real"] : ["webtoon"];
         if (withReal) genBody.confirmUsd = takeUsdSum(est.totalUsd, est.realUsd);
@@ -7209,13 +7219,50 @@
   /* ⑤ 시작 화면(촬영 지시서 카드 + [영상 만들기])을 그린다(설계자 2026-10-22, ⑤).
      staleGen 이 주어지면(프리비즈가 바뀐 옛 gen) 위에 안내를 붙이고, 이전 결과(최종 영상)는
      접이식 "이전 영상 보기" 로만 보인다. staleGen 이 null 이면 평범한 시작 화면. */
+  /* 작업 205: 바뀐 테이크 이름 — "테이크 1(컷 1–6)" 처럼 gen.units 순서 번호와 컷 범위. ids 순서가 아니라 테이크 순서로 잇는다. */
+  function takeStaleNames(gen, ids) {
+    var want = ids || [];
+    var names = [];
+    ((gen || {}).units || []).forEach(function (unit, i) {
+      if (want.indexOf(unit.id) < 0) return;
+      var range = "";
+      if (unit.startCutNo != null && unit.endCutNo != null) {
+        range = unit.startCutNo === unit.endCutNo ? "(컷 " + unit.startCutNo + ")" : "(컷 " + unit.startCutNo + "–" + unit.endCutNo + ")";
+      }
+      names.push("테이크 " + (i + 1) + range);
+    });
+    return names.length ? names.join(", ") : "바뀐 테이크";
+  }
+
+  function takeStaleText(gen) {
+    return "프리비즈가 바뀌었습니다 — " + takeStaleNames(gen, (gen || {}).staleUnits) + "이 지금 영상과 다릅니다.";
+  }
+
   function renderGenStart(host, showError, staleGen) {
     var plan = state.plan || {};
     var previz = plan.previz || {};
     var staleNotice = previzStaleNotice(); // 작업 200: 장면을 고친 뒤 다시 녹화해야 하는 구간
     if (staleNotice) host.appendChild(staleNotice);
 
-    if (staleGen) {
+    if (staleGen && staleGen.mode === "previz-take" && (staleGen.staleUnits || []).length) {
+      // 작업 205: 통 테이크 — 바뀐 테이크를 이름으로 알리고 [바뀐 테이크만 다시 만들기 ($x)] 를 함께 보인다.
+      var takeNotice = el("section", "panel vnew-take-stale");
+      takeNotice.appendChild(el("p", "vnew-take-stale-msg", takeStaleText(staleGen)));
+      var only = staleGen.onlyChanged || {};
+      if (only.available && previz.recordedAll) {
+        var onlyBtn = el("button", "primary-button vnew-only-changed-btn",
+          "바뀐 테이크만 다시 만들기 (" + castingUsdText(only.usd) + ")");
+        onlyBtn.type = "button";
+        onlyBtn.addEventListener("click", function () {
+          openGenerateConfirm(showError, { onlyChanged: only });
+        });
+        takeNotice.appendChild(onlyBtn);
+      } else if (only.block) {
+        takeNotice.appendChild(el("p", "vnew-hint vnew-only-changed-block", only.block));
+      }
+      host.appendChild(takeNotice);
+      host.appendChild(prevGenFold(staleGen));
+    } else if (staleGen) {
       host.appendChild(
         el(
           "p",
@@ -7247,7 +7294,7 @@
       host.appendChild(
         el("p", "vnew-hint", "프리비즈 녹화가 끝났습니다. 이 녹화를 바탕으로 실사·웹툰 영상을 만듭니다.")
       );
-      var startBtn = el("button", "primary-button", "영상 만들기");
+      var startBtn = el("button", "primary-button", staleGen && staleGen.mode === "previz-take" ? "새로 영상 만들기" : "영상 만들기");
       startBtn.type = "button";
       startBtn.addEventListener("click", function () {
         openGenerateConfirm(showError, staleGen ? { hadResult: true } : null);
