@@ -673,6 +673,8 @@ def _new_take_gen(plan: dict) -> dict:
         "resolution": str(vnew_settings.VNEW_TAKE_RESOLUTION),
         "createdAt": now_iso(),
         "previzRevision": int(previz.get("revision") or 0),
+        # 작업 205: 고친 장면 판(editRev). 컷 단위와 달리 0 이어도 늘 둔다 — 키가 없으면 205 이전 gen(녹화 키로만 판정).
+        "previzEditRev": int(previz.get("editRev") or 0),
         "briefUpdatedAt": str(brief.get("updatedAt") or ""),
         "units": units,
         "segments": [],
@@ -1507,14 +1509,38 @@ def _wants_real(styles) -> bool:
     return "real" in styles
 
 
-def start_generate(owner: str, pid: str, confirm_usd: float, styles: list | None = None) -> str:
+def start_generate(owner: str, pid: str, confirm_usd: float, styles: list | None = None, only_changed: bool = False) -> str:
     """새 genId 로 프리비즈 gen 을 만들고 백그라운드 진행을 시작한다. genId 를 돌려준다.
 
     금액이 서버 계산과 다르면 409 CostMismatch(vpoc 방식). 선행 조건 위반도 409.
     작업 123: styles 에 "real" 이 있으면(통 테이크 + VNEW_TAKE_REAL 만, 그 밖 400) 금액은 웹툰 + 실사(real_estimate) 합이고,
     gen.autoReal 에 실사 몫을 남겨 웹툰이 끝나면 드라이버가 start_real 로 실사 회차를 1번 시작한다(_maybe_auto_real).
+    작업 205: only_changed 면 이전 통 테이크 gen 의 바뀐 테이크만 만든다(_only_changed_gen). styles 는 보지 않고 이전 gen 이
+    만든 그림체(웹툰, 실사 회차가 있었으면 실사도)를 따른다. 금액은 바뀐 테이크 몫만.
     """
     plan, _ = plan_mod.load_plan(owner, pid)
+    if only_changed:
+        check_preconditions(plan, owner)
+        prev = plan.get("gen") or {}
+        new, quote = _only_changed_gen(plan, prev)
+        expected = quote["usd"]
+        if round(float(confirm_usd), 2) != expected:
+            raise VpocError(
+                "vnew.generate",
+                "CostMismatch",
+                f"금액이 서버 계산과 다릅니다. 서버 {expected} USD, 화면 {round(float(confirm_usd), 2)} USD.",
+                409,
+            )
+        if quote["real"]:
+            run = prev.get("realRun") or {}
+            new["autoReal"] = {"confirmUsd": quote["realUsd"], "audio": bool(run.get("audio")), "at": now_iso()}
+            if run.get("cast"):
+                new["autoReal"]["cast"] = [dict(item) for item in run.get("cast") or []]
+        _replace_gen(owner, pid, new, expect_gen_id=str(prev.get("genId") or ""))
+        log.info("vnew.gen.only_changed pid=%s from=%s takes=%s usd=%.2f real=%s", pid, prev.get("genId"),
+                 ",".join(quote["takes"]), quote["usd"], "on" if quote["real"] else "off")
+        _spawn_driver(owner, pid, new["genId"])
+        return new["genId"]
     want_real = _wants_real(styles)
     if want_real and not vnew_settings.VNEW_TAKE_REAL:
         raise VpocError("vnew.generate", "TakeRealDisabled", "통 테이크 실사 버전 기능이 꺼져 있습니다.", 400)
@@ -1537,8 +1563,22 @@ def start_generate(owner: str, pid: str, confirm_usd: float, styles: list | None
     if want_real:
         new["autoReal"] = {"confirmUsd": real_usd, "audio": bool(vnew_settings.VNEW_TAKE_AUDIO), "at": now_iso()}
 
+    _replace_gen(owner, pid, new)
+    _spawn_driver(owner, pid, new["genId"])
+    return new["genId"]
+
+
+def _replace_gen(owner: str, pid: str, new: dict, expect_gen_id: str | None = None) -> None:
+    """plan.gen 을 new 로 바꾼다(이전 gen 은 genHistory 요약만, 최근 3개). 진행 중이면 409 GenRunning.
+
+    작업 205: expect_gen_id 가 주어지면(바뀐 테이크만) 저장 직전 gen 이 그 gen 이 아니면 409(그새 다른 영상이 시작됐다).
+    """
+
     def mutator(data: dict) -> None:
         current = data.get("gen") or {}
+        if expect_gen_id is not None and str(current.get("genId") or "") != expect_gen_id:
+            raise VpocError("vnew.generate", "OnlyChangedUnavailable",
+                            "그사이 영상 상태가 바뀌었습니다. 화면을 새로 고친 뒤 다시 눌러 주세요.", 409)
         if current.get("status") == "running" and not _gen_stale(current):
             # 진행 중인 gen 은 교체하지 않는다. 프리비즈가 바뀐(previz-stale) 진행 중이면
             # 취소 먼저 하라고 안내한다(설계자 2026-10-22, ⑤).
@@ -1567,8 +1607,101 @@ def start_generate(owner: str, pid: str, confirm_usd: float, styles: list | None
         data["gen"] = new
 
     plan_mod.mutate_plan(owner, pid, mutator)
-    _spawn_driver(owner, pid, new["genId"])
-    return new["genId"]
+
+
+# ---------------------------------------------------------------- 작업 205: 바뀐 테이크만 다시 만들기
+#
+# POST /generate {onlyChanged:true}: 이전 통 테이크 gen(완료)에서 프리비즈가 바뀐 테이크(_take_gen_stale)만 새로 만들고,
+# 안 바뀐 테이크는 이전 gen 의 결과 칸(outputKey 참조, 파일 복사·내려받기 없음)을 그대로 쓴다. 병합은 평소대로.
+# 이전 gen 에 실사 회차가 있었으면 실사도: 안 바뀐 테이크의 실사 칸은 unit.realReused 에 두고 start_real 첫 회차가 되살린다.
+
+ONLY_CHANGED_REMAKE = " '새로 영상 만들기'를 써 주세요."
+
+
+def _only_changed_block(plan: dict, prev: dict) -> str:
+    """바뀐 테이크만 다시 만들 수 없는 이유(한국어). 할 수 있으면 ""."""
+    prev = prev if isinstance(prev, dict) else {}
+    if prev.get("mode") != "previz-take" or _gen_mode(plan) != "previz-take":
+        return "통 테이크 영상에서만 바뀐 테이크만 다시 만들 수 있습니다." + ONLY_CHANGED_REMAKE
+    if str(prev.get("videoModel") or "") != _previz_model_endpoint(plan) \
+            or str(prev.get("resolution") or "") != str(vnew_settings.VNEW_TAKE_RESOLUTION):
+        return "영상 모델이나 해상도가 이전 영상과 달라 바뀐 테이크만 다시 만들 수 없습니다." + ONLY_CHANGED_REMAKE
+    not_done = "이전 영상이 다 만들어지지 않아 바뀐 테이크만 다시 만들 수 없습니다." + ONLY_CHANGED_REMAKE
+    real_made = bool(prev.get("realRun"))
+    if prev.get("status") != "done" or (prev.get("finalWebtoon") or {}).get("status") != "done":
+        return not_done
+    if real_made and (prev.get("finalReal") or {}).get("status") != "done":
+        return not_done
+    if not _take_split_same(prev, plan):
+        return "테이크 나눔(테이크 수·컷 범위)이 이전 영상과 달라 바뀐 테이크만 다시 만들 수 없습니다." + ONLY_CHANGED_REMAKE
+    stale, ids = _take_gen_stale(prev, plan)
+    if not stale or not ids:
+        return "바뀐 테이크가 없습니다."
+    for unit in prev.get("units") or []:
+        if str(unit.get("id") or "") in ids:
+            continue
+        variants = ("webtoon", "real") if real_made else ("webtoon",)
+        for variant in variants:
+            state = unit.get(variant) or {}
+            if state.get("status") != "completed" or not state.get("outputKey"):
+                return not_done
+    return ""
+
+
+def _only_changed_gen(plan: dict, prev: dict, est: dict | None = None) -> tuple[dict, dict]:
+    """바뀐 테이크만 만드는 새 통 테이크 gen 과 금액(quote). 못 하면 409 OnlyChangedUnavailable.
+
+    quote = {available, takes(바뀐 테이크 id), webtoonUsd, realUsd, usd(합, 소수 2자리), real(실사도 만드는지), block}.
+    안 바뀐 테이크 칸은 이전 gen 칸을 복사(키 참조)하고 reusedFrom 에 이전 genId 를 둔다. 새 gen 의 원장은 제출한 칸만 계상된다.
+    """
+    import copy  # noqa: PLC0415
+
+    block = _only_changed_block(plan, prev)
+    if block:
+        raise VpocError("vnew.generate", "OnlyChangedUnavailable", block, 409)
+    stale_ids = _take_gen_stale(prev, plan)[1]
+    real_made = bool(prev.get("realRun"))
+    prev_units = {str(u.get("id") or ""): u for u in prev.get("units") or []}
+    new = _new_take_gen(plan)
+    for index, unit in enumerate(new["units"]):
+        uid = str(unit.get("id") or "")
+        if uid in stale_ids:
+            continue
+        old = copy.deepcopy(prev_units[uid])
+        reused = {**old, "real": unit["real"], "reusedFrom": str(prev.get("genId") or "")}
+        if real_made:
+            reused["realReused"] = old.get("real")
+        else:
+            reused.pop("realReused", None)
+        new["units"][index] = reused
+    new["onlyChanged"] = {"fromGenId": str(prev.get("genId") or ""), "takes": list(stale_ids)}
+    est = est if isinstance(est, dict) and est.get("mode") == "previz-take" else estimate(plan)
+    rows = {str(r.get("id") or ""): r for r in est.get("takes") or []}
+    webtoon_usd = round(sum(float((rows.get(uid) or {}).get("webtoonUsd") or 0) for uid in stale_ids), 2)
+    real_usd = real_estimate(new)["usd"] if real_made else 0.0
+    quote = {
+        "available": True,
+        "takes": list(stale_ids),
+        "webtoonUsd": webtoon_usd,
+        "realUsd": real_usd,
+        "usd": round(webtoon_usd + real_usd, 2),
+        "real": real_made,
+        "block": "",
+    }
+    return new, quote
+
+
+def only_changed_quote(plan: dict, gen: dict, est: dict | None = None) -> dict:
+    """보기의 onlyChanged(작업 205): 금액·바뀐 테이크·못 하는 이유. 보기는 실패하지 않는다."""
+    try:
+        return _only_changed_gen(plan, gen, est)[1]
+    except VpocError as exc:
+        return {"available": False, "takes": gen_stale_units(gen, plan), "usd": 0.0, "webtoonUsd": 0.0, "realUsd": 0.0,
+                "real": bool((gen or {}).get("realRun")), "block": exc.message}
+    except Exception as exc:  # noqa: BLE001
+        log.warning("vnew.gen.only_changed_quote_failed err=%s", type(exc).__name__)
+        return {"available": False, "takes": gen_stale_units(gen, plan), "usd": 0.0, "webtoonUsd": 0.0, "realUsd": 0.0,
+                "real": False, "block": "바뀐 테이크 금액을 계산하지 못했습니다." + ONLY_CHANGED_REMAKE}
 
 
 # ================================================================ 통 테이크 실사 버전(vnew-live-fx 묶음 C)
@@ -1598,6 +1731,9 @@ def real_estimate(gen: dict) -> dict:
     seconds = 0.0
     takes = 0
     for unit in gen.get("units") or []:
+        # 작업 205: 바뀐 테이크만 만든 gen 의 첫 실사 회차는 이전 실사 칸을 되살리는 테이크(realReused)를 세지 않는다.
+        if not gen.get("realRun") and isinstance(unit.get("realReused"), dict):
+            continue
         secs = float(unit.get("seconds") or 0)
         usd += _take_usd(endpoint, secs, resolution)
         seconds += secs
@@ -1737,7 +1873,8 @@ def start_real(owner: str, pid: str, confirm_usd: float, audio: bool | None = No
             g["realHistory"] = history[-REAL_HISTORY_MAX:]
         n = int(previous.get("n") or 0) + 1
         for unit in g.get("units") or []:
-            unit["real"] = _empty_real_state(audio_on)
+            reused = unit.pop("realReused", None)  # 작업 205: 첫 회차면 이전 gen 의 실사 칸(키 참조)을 그대로 쓴다.
+            unit["real"] = reused if (n == 1 and isinstance(reused, dict)) else _empty_real_state(audio_on)
         g["finalReal"] = {"status": "waiting", "key": "", "error": "", "n": n}
         g["realRun"] = {
             "n": n,
@@ -1852,7 +1989,8 @@ def _maybe_auto_real(owner: str, pid: str, gen_id: str) -> bool:
     if not _auto_real_mark(owner, pid, gen_id, "startedAt", now_iso()):
         return False
     try:
-        run = start_real(owner, pid, float(auto.get("confirmUsd") or 0), audio=bool(auto.get("audio")))
+        run = start_real(owner, pid, float(auto.get("confirmUsd") or 0), audio=bool(auto.get("audio")),
+                         cast=auto.get("cast") or None)  # 작업 205: 바뀐 테이크만 — 이전 회차의 인물 바꿈을 따른다.
     except Exception as exc:  # noqa: BLE001 — 자동 시작 실패는 화면의 [실사 버전 만들기] 로 넘긴다.
         message = exc.message if isinstance(exc, VpocError) else "실사 버전을 자동으로 시작하지 못했습니다."
         _auto_real_mark(owner, pid, gen_id, "error", str(message)[:300])
@@ -14104,6 +14242,8 @@ def gen_view(owner: str, pid: str, plan: dict) -> dict | None:
         # 프리비즈가 바뀌어 이 gen 의 계획(녹화·지시서)이 지금과 맞지 않으면 True(설계자 2026-10-22, ⑤).
         # 화면은 stale 이면 '새로 만들기'로 유도하고 이전 결과는 접이식으로만 보인다.
         "stale": _gen_previz_stale(gen, plan),
+        # 작업 205: 통 테이크 gen 의 바뀐 테이크 id(예: ["take1"]). 그 밖은 [].
+        "staleUnits": gen_stale_units(gen, plan),
         # vnew-live-fx C.2: 실사 회차(realRun)·이전 회차(최대 3)·금액·시작 가능 여부와 못 하는 이유(한국어).
         "realRun": dict(gen.get("realRun")) if isinstance(gen.get("realRun"), dict) else None,
         "realHistory": real_history_out,
@@ -14120,6 +14260,8 @@ def gen_view(owner: str, pid: str, plan: dict) -> dict | None:
         fallback_max = real_fallback_max(plan, gen)
         if fallback_max:
             view["realFallbackMax"] = fallback_max  # 작업 130 보완 1: 확인창 "최대 $X" 안내(2단계를 쓸 수 없으면 키 없음)
+        if view["stale"]:
+            view["onlyChanged"] = only_changed_quote(plan, gen, est)  # 작업 205: [바뀐 테이크만 다시 만들기] 금액·못 하는 이유
     if vnew_settings.VNEW_EDIT:
         from . import edit as vnew_edit  # noqa: PLC0415 — edit 이 generate 를 import 한다(순환 피함).
 
@@ -14156,9 +14298,12 @@ def _gen_previz_stale(gen: dict, plan: dict) -> bool:
       3) gen 에 briefUpdatedAt 이 있으면 현재 shotBrief.updatedAt 과 비교 — 다르면 stale.
       4) previzRevision 이 아예 없는 옛 gen 은 녹화 키로 본다 — 각 컷(unit)의 recordingKey 가
          현재 previz.recordings 의 그 구간 키와 하나라도 다르면 stale(혹은 지금 녹화가 비었으면 stale).
+    작업 205: 통 테이크(previz-take)도 본다 — _take_gen_stale(테이크별 녹화 키·나눔·editRev).
     """
-    if gen.get("mode") != "previz":
+    if not _is_previz_mode(gen):
         return False
+    if gen.get("mode") == "previz-take":
+        return _take_gen_stale(gen, plan)[0]
     previz = plan.get("previz") or {}
     cur_rev = int(previz.get("revision") or 0)
     cur_brief = str((previz.get("shotBrief") or {}).get("updatedAt") or "")
@@ -14187,6 +14332,66 @@ def _gen_previz_stale(gen: dict, plan: dict) -> bool:
         if stored_key and not cur_key:
             return True
     return False
+
+
+def _take_split_key(units: list[dict]) -> list[tuple]:
+    """테이크 나눔 비교용(작업 205): 테이크마다 (id, 컷 id 들, 녹화 구간 id 들). 녹화 키·길이는 넣지 않는다."""
+    return [(str(u.get("id") or ""), tuple(str(c) for c in (u.get("cutIds") or [])),
+             tuple(str(s) for s in (u.get("recSegIds") or []))) for u in units or []]
+
+
+def _take_split_same(gen: dict, plan: dict) -> bool:
+    """이 통 테이크 gen 의 테이크 나눔(개수·컷 범위·구간)이 지금 계획의 _take_units 와 같은지(작업 205)."""
+    return _take_split_key(gen.get("units") or []) == _take_split_key(_take_units(plan))
+
+
+def _take_gen_stale(gen: dict, plan: dict) -> tuple[bool, list[str]]:
+    """통 테이크 gen 이 지금 프리비즈와 맞지 않는지와 바뀐 테이크 id 목록(작업 205). (stale, staleUnits).
+
+    테이크별: 그 테이크가 쓴 구간(unit.recSegIds)의 지금 녹화 키가 unit.recKeys 와 다르거나, 녹화가 없거나,
+    고쳐서 다시 녹화해야 하면(rec.stale) 그 테이크가 바뀐 것. gen 전체: previzRevision·지시서(briefUpdatedAt)가
+    다르거나 테이크 나눔이 달라졌으면 모든 테이크. previzEditRev 는 키가 있을 때만 비교한다(205 이전 gen 은 키가 없다 →
+    editRev 로 거짓 stale 이 되지 않고 녹화 키로만 본다). editRev 만 다르고 바뀐 테이크를 못 찾으면 모든 테이크.
+    """
+    units = gen.get("units") or []
+    all_ids = [str(u.get("id") or "") for u in units]
+    previz = plan.get("previz") or {}
+    recordings = previz.get("recordings") or {}
+
+    changed: list[str] = []
+    for unit in units:
+        seg_ids = [str(s) for s in (unit.get("recSegIds") or [])]
+        keys = [str(k) for k in (unit.get("recKeys") or [])]
+        for i, seg_id in enumerate(seg_ids):
+            rec = recordings.get(seg_id) or {}
+            cur_key = str(rec.get("key") or "")
+            stored = keys[i] if i < len(keys) else ""
+            if not cur_key or (stored and stored != cur_key) or (isinstance(rec, dict) and rec.get("stale")):
+                changed.append(str(unit.get("id") or ""))
+                break
+
+    whole = False
+    if "previzRevision" in gen and int(gen.get("previzRevision") or 0) != int(previz.get("revision") or 0):
+        whole = True
+    gen_brief = str(gen.get("briefUpdatedAt") or "")
+    cur_brief = str((previz.get("shotBrief") or {}).get("updatedAt") or "")
+    if gen_brief and cur_brief and gen_brief != cur_brief:
+        whole = True
+    if not whole and not _take_split_same(gen, plan):
+        whole = True
+    if not whole and not changed and "previzEditRev" in gen \
+            and int(gen.get("previzEditRev") or 0) != int(previz.get("editRev") or 0):
+        whole = True
+    if whole:
+        return True, all_ids
+    return bool(changed), changed
+
+
+def gen_stale_units(gen: dict, plan: dict) -> list[str]:
+    """보기의 staleUnits(작업 205): 통 테이크 gen 의 바뀐 테이크 id 들. 그 밖 모드·stale 아님은 []."""
+    if not isinstance(gen, dict) or gen.get("mode") != "previz-take":
+        return []
+    return _take_gen_stale(gen, plan)[1]
 
 
 # ================================================================ 원장 · presign · 저장

@@ -6074,3 +6074,23 @@ textarea.vnew-field-input {
     max-width: 100%;
   }
 }
+
+
+/* 작업 205: ⑤ 통 테이크 gen 이 프리비즈와 달라졌을 때 — 바뀐 테이크 안내 + [바뀐 테이크만 다시 만들기] */
+.vnew-take-stale {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 12px;
+  border-left: 3px solid #d97706;
+}
+
+.vnew-take-stale-msg {
+  flex: 1 1 100%;
+  margin: 0;
+  font-weight: 600;
+}
+
+.vnew-only-changed-block {
+  margin: 0;
+}
