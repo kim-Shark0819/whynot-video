@@ -9136,6 +9136,7 @@
     soundRenderResult(ctx);
     if (!source.hasAudio) ctx.root.appendChild(el("p", "vnew-hint vnew-sound-noaudio", SOUND_NO_AUDIO));
 
+    vocMount(ctx); // 작업 203: 캐릭터 목소리(대사 목록 위, voices 가 없으면 그리지 않음)
     ctx.root.appendChild(soundTable(ctx));
 
     var actions = el("div", "vnew-sound-actions");
@@ -9147,6 +9148,7 @@
     });
     ctx.applyBtn = applyBtn;
     actions.appendChild(applyBtn);
+    vocApplyButton(ctx, actions); // 작업 203
     ctx.jobLine = el("p", "vnew-hint vnew-sound-job");
     ctx.jobLine.setAttribute("role", "status");
     actions.appendChild(ctx.jobLine);
@@ -9183,7 +9185,7 @@
     var select = el("select", "vnew-sound-version");
     select.setAttribute("aria-label", "반영한 소리 버전");
     versions.slice().reverse().forEach(function (v) {
-      var label = "v" + v.n + " · 속마음 " + (v.thoughtIds || []).length + "줄" + (v.currentSource ? "" : " · 이전 원본");
+      var label = "v" + v.n + " · 속마음 " + (v.thoughtIds || []).length + "줄" + (v.currentSource ? "" : " · 이전 원본") + vocVersionTag(v);
       var option = el("option", "", label);
       option.value = String(v.n);
       if (v.n === chosen.n) option.selected = true;
@@ -9194,6 +9196,8 @@
       soundRenderResult(ctx);
     });
     tools.appendChild(select);
+    var vocBadge = vocVersionBadge(chosen); // 작업 203
+    if (vocBadge) tools.appendChild(vocBadge);
     if (chosen.videoUrl) tools.appendChild(downloadLink(chosen.videoUrl, "반영본 내려받기"));
     box.appendChild(tools);
   }
@@ -9274,6 +9278,7 @@
       soundListen(ctx, line);
     });
     listenCell.appendChild(listen);
+    vocRowTools(ctx, line, row, listenCell); // 작업 203
     row.appendChild(listenCell);
     paint();
     return row;
@@ -9309,6 +9314,7 @@
     else if (job.status === "done") soundJobText(ctx, "반영했습니다. 위 '반영한 소리'에서 들어 보세요.", false);
     else if (job.status === "failed") soundJobText(ctx, "반영하지 못했습니다: " + (job.error || "알 수 없는 오류"), true);
     else soundJobText(ctx, "", false);
+    vocRenderJob(ctx); // 작업 203: 목소리 맞춤 진행·결과
   }
 
   /* [소리에 반영]: 구간 검사 → 바뀐 줄만 PUT → POST apply → 반영이 끝날 때까지 폴링. */
@@ -9395,6 +9401,748 @@
         });
     }, SOUND_POLL_MS);
   }
+
+  /* ================================================================ ⑥ 사운드 — 인물 목소리(작업 203)
+
+     서버 voices_routes.py(작업 202). PUT /sound/voices 는 인물 목소리(프로필)를 저장한다(mode off = 지우기, variant 를 주면 그 그림체만).
+     POST /sound/voice-preview 는 한 줄만 바꿔 들어 보고, POST /sound/voice-apply 는 기존 반영 작업(진행·버전)으로 전체를 바꾼다.
+     두 POST 는 dryRun true 면 견적만 준다. 값을 먼저 받아 확인 창에 보이고, 확인하면 그 값을 confirmUsd 로 보낸다.
+     보기(GET /sound)에 voices 가 없거나 목소리 라우트가 404 면 이 구역을 모두 숨긴다(기존 사운드 기능은 그대로).
+     글은 모두 textContent(el), 소리는 서버가 준 presigned 주소만 쓰고 자동 재생하지 않는다. */
+
+  var VOC_HINT = "한 번 정하면 다음 영상에도 같은 목소리로 맞춥니다.";
+  var VOC_NONE = "아직 정하지 않음 — 영상마다 목소리가 달라질 수 있음";
+  var VOC_SAVED = "저장된 목소리 사용 중";
+  var VOC_NO_PROFILE_TIP = "이 인물의 목소리를 위 '캐릭터 목소리'에서 먼저 정해 주세요";
+  var VOC_BADGE = "목소리 맞춤";
+  var VOC_MNOTES = "모델 에러 로그 보기";
+  var VOC_ERRORS = {
+    NoVoiceProfile: "목소리를 먼저 정해 주세요.",
+    CostMismatch: "금액이 바뀌었습니다. 다시 눌러 주세요.",
+    NoFalKey: "목소리 모델 키가 설정되지 않았습니다. 관리자에게 알려 주세요.",
+    BadVoiceRefRange: "기준 대사는 0.5초 이상이어야 합니다. 다른 대사를 골라 주세요."
+  };
+
+  function vocErr(err) {
+    var kind = err && err.type;
+    return (kind && VOC_ERRORS[kind]) || soundErrText(err);
+  }
+
+  function vocVariantTitle(variant) {
+    return variant === "real" ? "실사" : "애니";
+  }
+
+  function vocOn(ctx) {
+    return !!(ctx && ctx.voc && !ctx.voc.off);
+  }
+
+  function vocView(ctx) {
+    return ((ctx && ctx.view) || {}).voices || {};
+  }
+
+  function vocHasAudio(ctx) {
+    return !!(((ctx && ctx.view) || {}).source || {}).hasAudio;
+  }
+
+  /* 대사가 있는 인물(서버 차례 그대로). */
+  function vocSpeakers(ctx) {
+    return (vocView(ctx).speakers || []).filter(function (sp) {
+      return sp && sp.speaker && Number(sp.lines) > 0;
+    });
+  }
+
+  function vocSpeaker(ctx, name) {
+    return vocSpeakers(ctx).filter(function (sp) {
+      return sp.speaker === name;
+    })[0] || null;
+  }
+
+  /* 목소리가 정해진(이 그림체에 쓸 프로필이 있는) 인물. */
+  function vocProfiled(ctx) {
+    return vocSpeakers(ctx).filter(function (sp) {
+      return sp.usingSaved === true && !!sp.profile;
+    });
+  }
+
+  function vocLinesOf(ctx, name) {
+    return (ctx.lines || []).filter(function (line) {
+      return line && line.speaker === name;
+    });
+  }
+
+  function vocModelLabel(ctx, id) {
+    var models = vocView(ctx).models || [];
+    for (var i = 0; i < models.length; i++) {
+      if (models[i] && models[i].id === id && models[i].label) return String(models[i].label);
+    }
+    return String(id || "모델 모름");
+  }
+
+  /* 대사 id → 대본 줄(사운드 줄 id = 대본 entries[].id). */
+  function vocEntry(lineId) {
+    var entries = (((state.plan || {}).script) || {}).entries || [];
+    for (var i = 0; i < entries.length; i++) {
+      if (entries[i] && String(entries[i].id) === String(lineId)) return entries[i];
+    }
+    return null;
+  }
+
+  /* "컷 3" · "컷 3, 4"(대본 panels). 없으면 화면 줄 차례 "n번째 줄". */
+  function vocCutText(ctx, lineId) {
+    var entry = vocEntry(lineId);
+    var panels = (entry && entry.panels) || [];
+    if (panels.length) return "컷 " + panels.join(", ");
+    for (var i = 0; i < (ctx.lines || []).length; i++) {
+      if (ctx.lines[i].id === lineId) return i + 1 + "번째 줄";
+    }
+    return "지난 영상";
+  }
+
+  /* 인물 이름 → 늘 같은 색(이름 글자 해시로 색상만 바꾼다). */
+  function vocColor(name) {
+    var text = String(name || "");
+    var hash = 0;
+    for (var i = 0; i < text.length; i++) hash = (hash * 31 + text.charCodeAt(i)) % 360;
+    return "hsl(" + hash + ", 55%, 52%)";
+  }
+
+  function vocProfileText(ctx, sp) {
+    var profile = sp && sp.profile;
+    if (!profile) return VOC_NONE;
+    var text;
+    if (profile.mode === "clip") {
+      var ref = profile.ref || {};
+      var entry = vocEntry(ref.lineId);
+      var words = (entry && entry.lineKo) || "";
+      if (!words) {
+        vocLinesOf(ctx, sp.speaker).forEach(function (line) {
+          if (line.id === ref.lineId) words = line.lineKo || "";
+        });
+      }
+      text = words ? "기준 대사: \u201c" + words + "\u201d (" + vocCutText(ctx, ref.lineId) + ")" : "기준 대사: (지난 영상의 대사)";
+    } else {
+      text = "기본 목소리: " + vocModelLabel(ctx, profile.model) + " · " + (profile.preset || "");
+    }
+    if ((profile.scope || sp.scope) === "variant") text += " · " + vocVariantTitle(ctx.variant) + "만";
+    return text;
+  }
+
+  /* 금액 글: 견적 전 "$…", 모르면 서버 문구(가격 확인 불가). */
+  function vocMoney(ctx, usd, known) {
+    if (known === false || usd === null) return vocView(ctx).priceUnknownLabel || "가격 확인 불가";
+    if (typeof usd !== "number" || !isFinite(usd)) return "$…";
+    return "$" + (usd > 0 && usd < 0.01 ? usd.toFixed(3) : usd.toFixed(2));
+  }
+
+  function vocConfirmUsd(est) {
+    return est && est.priceKnown === true && typeof est.usd === "number" ? est.usd : 0;
+  }
+
+  function vocLinePrice(ctx, lineId) {
+    var est = ctx.voc.est;
+    if (!est || !est.lines) return vocMoney(ctx, undefined);
+    for (var i = 0; i < est.lines.length; i++) {
+      var item = est.lines[i] || {};
+      if (item.lineId === lineId) return vocMoney(ctx, item.usd, item.usd === null ? false : true);
+    }
+    return vocMoney(ctx, undefined);
+  }
+
+  /* soundRender 가 대사 목록 바로 앞에서 부른다: 구역을 붙이고 견적을 받는다. voices 가 없으면(꺼짐) 아무것도 그리지 않는다. */
+  function vocMount(ctx) {
+    var voices = (ctx.view || {}).voices;
+    ctx.voc = {
+      off: !(voices && typeof voices === "object" && voices.enabled !== false), section: null, est: null, estSeq: 0, rows: [],
+      split: {}, open: {}, note: null, busy: false, previewing: false, applyBtn: null, actions: null, mnBtn: null, applied: false
+    };
+    if (ctx.voc.off) return;
+    ctx.voc.section = el("section", "vnew-voc");
+    ctx.voc.section.setAttribute("aria-label", "캐릭터 목소리");
+    ctx.root.appendChild(ctx.voc.section);
+    vocPaint(ctx);
+    vocEstimate(ctx);
+  }
+
+  /* 404(목소리 꺼짐) 면 구역·줄 버튼·반영 버튼을 모두 뗀다. */
+  function vocDisable(ctx) {
+    var voc = ctx.voc;
+    if (!voc) return;
+    voc.off = true;
+    [voc.section, voc.applyBtn, voc.mnBtn].forEach(function (node) {
+      if (node && node.parentNode) node.parentNode.removeChild(node);
+    });
+    voc.rows.forEach(function (rec) {
+      [rec.wrap, rec.box].forEach(function (node) {
+        if (node && node.parentNode) node.parentNode.removeChild(node);
+      });
+    });
+    voc.rows = [];
+  }
+
+  function vocGone(ctx, err) {
+    if (err && err.status === 404) {
+      vocDisable(ctx);
+      return true;
+    }
+    return false;
+  }
+
+  /* 견적(voice-apply dryRun): 줄마다 금액 · 합계. 목소리가 정해진 인물이 없으면 받지 않는다. */
+  function vocEstimate(ctx) {
+    if (!vocOn(ctx)) return;
+    var seq = ++ctx.voc.estSeq;
+    var names = vocProfiled(ctx).map(function (sp) {
+      return sp.speaker;
+    });
+    ctx.voc.est = null;
+    if (!names.length || !vocHasAudio(ctx)) {
+      vocPaintRows(ctx);
+      vocPaintApply(ctx);
+      return;
+    }
+    api(soundPath() + "/voice-apply", {
+      method: "POST", body: JSON.stringify({ variant: ctx.variant, speakers: names, dryRun: true })
+    })
+      .then(function (result) {
+        if (!soundAlive(ctx) || !vocOn(ctx) || seq !== ctx.voc.estSeq) return;
+        ctx.voc.est = (result || {}).estimate || null;
+        vocPaintRows(ctx);
+        vocPaintApply(ctx);
+      })
+      .catch(function (err) {
+        if (!soundAlive(ctx) || !vocOn(ctx) || seq !== ctx.voc.estSeq) return;
+        if (vocGone(ctx, err)) return;
+        ctx.voc.est = null;
+        vocPaintRows(ctx);
+        vocPaintApply(ctx);
+      });
+  }
+
+  /* 구역 다시 그리기(카드만). 줄 버튼·반영 버튼은 vocPaintRows·vocPaintApply. */
+  function vocPaint(ctx) {
+    var voc = ctx.voc;
+    var section = voc.section;
+    if (!section) return;
+    clear(section);
+    section.appendChild(el("h3", "vnew-voc-title", "캐릭터 목소리"));
+    section.appendChild(el("p", "vnew-hint vnew-voc-hint", VOC_HINT));
+    var speakers = vocSpeakers(ctx);
+    if (!speakers.length) {
+      section.appendChild(el("p", "vnew-hint", "목소리를 정할 대사가 없습니다."));
+      return;
+    }
+    var cards = el("div", "vnew-voc-cards");
+    speakers.forEach(function (sp) {
+      cards.appendChild(vocCard(ctx, sp));
+    });
+    section.appendChild(cards);
+  }
+
+  function vocSplitOn(ctx, sp) {
+    if (Object.prototype.hasOwnProperty.call(ctx.voc.split, sp.speaker)) return ctx.voc.split[sp.speaker];
+    return (sp.scope || (sp.profile || {}).scope) === "variant";
+  }
+
+  function vocHasOverride(ctx, name) {
+    var entry = (vocView(ctx).profiles || {})[name] || {};
+    return !!((entry.perVariant || {})[ctx.variant]);
+  }
+
+  function vocCard(ctx, sp) {
+    var name = sp.speaker;
+    var card = el("div", "vnew-voc-card");
+    var head = el("div", "vnew-voc-head");
+    var chip = el("span", "vnew-voc-chip");
+    chip.style.backgroundColor = vocColor(name);
+    chip.setAttribute("aria-hidden", "true");
+    head.appendChild(chip);
+    head.appendChild(el("strong", "vnew-voc-name", name));
+    head.appendChild(el("span", "vnew-voc-count", sp.lines + "줄"));
+    if (sp.usingSaved === true) head.appendChild(el("span", "vnew-badge vnew-voc-saved", VOC_SAVED));
+    card.appendChild(head);
+    card.appendChild(el("p", "vnew-voc-current", vocProfileText(ctx, sp)));
+    var profile = sp.profile || {};
+    if (profile.mode === "clip" && profile.ref && profile.ref.url) {
+      var refAudio = el("audio", "vnew-voc-audio");
+      refAudio.controls = true;
+      refAudio.preload = "none";
+      refAudio.src = profile.ref.url;
+      refAudio.setAttribute("aria-label", name + " 기준 목소리");
+      card.appendChild(refAudio);
+    }
+
+    var tools = el("div", "vnew-voc-tools");
+    var clipBtn = el("button", "outline-button vnew-voc-clip", "기준 대사로 맞추기");
+    clipBtn.type = "button";
+    clipBtn.setAttribute("aria-expanded", ctx.voc.open[name] === "clip" ? "true" : "false");
+    clipBtn.addEventListener("click", function () {
+      ctx.voc.open[name] = ctx.voc.open[name] === "clip" ? "" : "clip";
+      vocPaint(ctx);
+    });
+    var presetBtn = el("button", "outline-button vnew-voc-presetbtn", "기본 목소리 고르기");
+    presetBtn.type = "button";
+    presetBtn.setAttribute("aria-expanded", ctx.voc.open[name] === "preset" ? "true" : "false");
+    presetBtn.addEventListener("click", function () {
+      ctx.voc.open[name] = ctx.voc.open[name] === "preset" ? "" : "preset";
+      vocPaint(ctx);
+    });
+    tools.appendChild(clipBtn);
+    tools.appendChild(presetBtn);
+
+    var splitLabel = el("label", "vnew-voc-split");
+    var split = el("input", "vnew-voc-split-input");
+    split.type = "checkbox";
+    split.checked = vocSplitOn(ctx, sp);
+    split.addEventListener("change", function () {
+      if (split.checked) {
+        ctx.voc.split[name] = true;
+        ctx.voc.note = { speaker: name, text: "지금부터 고르는 목소리는 " + vocVariantTitle(ctx.variant) + "에만 씁니다.", bad: false };
+        vocPaint(ctx);
+        return;
+      }
+      if (vocHasOverride(ctx, name)) {
+        var other = vocVariantTitle(ctx.variant);
+        if (!window.confirm(other + " 전용 목소리를 지우고 두 그림체가 함께 쓰는 목소리로 돌아갈까요?")) {
+          split.checked = true;
+          return;
+        }
+        ctx.voc.split[name] = false;
+        vocSave(ctx, name, { speaker: name, mode: "off", variant: ctx.variant }, "함께 쓰는 목소리로 돌아갔습니다.");
+        return;
+      }
+      ctx.voc.split[name] = false;
+      ctx.voc.note = null;
+      vocPaint(ctx);
+    });
+    splitLabel.appendChild(split);
+    splitLabel.appendChild(el("span", null, "실사/애니 따로 정하기"));
+    splitLabel.title = "켜면 지금 그림체(" + vocVariantTitle(ctx.variant) + ")에만 쓰는 목소리를 따로 정합니다";
+    tools.appendChild(splitLabel);
+    card.appendChild(tools);
+
+    if (ctx.voc.open[name] === "clip") card.appendChild(vocClipPanel(ctx, sp));
+    else if (ctx.voc.open[name] === "preset") card.appendChild(vocPresetPanel(ctx, sp));
+
+    var note = ctx.voc.note && ctx.voc.note.speaker === name ? ctx.voc.note : null;
+    var msg = el("p", "vnew-hint vnew-voc-msg" + (note && note.bad ? " is-bad" : ""), note ? note.text : "");
+    msg.setAttribute("role", "status");
+    card.appendChild(msg);
+    return card;
+  }
+
+  /* 고르는 중인 값 + 그림체 덮어쓰기 켬이면 variant. */
+  function vocBody(ctx, name, body) {
+    body.speaker = name;
+    var sp = vocSpeaker(ctx, name) || { speaker: name };
+    if (vocSplitOn(ctx, sp)) body.variant = ctx.variant;
+    return body;
+  }
+
+  function vocClipPanel(ctx, sp) {
+    var panel = el("div", "vnew-voc-panel");
+    var current = (sp.profile && sp.profile.mode === "clip" && sp.profile.ref) ? sp.profile.ref.lineId : null;
+    var list = el("div", "vnew-voc-list");
+    vocLinesOf(ctx, sp.speaker).forEach(function (line) {
+      var item = el("div", "vnew-voc-item" + (line.id === current ? " is-on" : ""));
+      item.appendChild(el("span", "vnew-voc-itemtext", vocCutText(ctx, line.id) + " · " + (line.lineKo || "")));
+      var play = el("button", "outline-button vnew-voc-play", "▶");
+      play.type = "button";
+      play.title = "이 대사 구간을 원본 영상에서 듣기";
+      play.setAttribute("aria-label", play.title);
+      play.addEventListener("click", function () {
+        soundListen(ctx, line);
+      });
+      var pick = el("button", "outline-button vnew-voc-pick", "이 목소리로 정하기");
+      pick.type = "button";
+      pick.disabled = !vocHasAudio(ctx) || ctx.voc.busy;
+      pick.addEventListener("click", function () {
+        var genId = vocView(ctx).genId;
+        var ref = { lineId: line.id, variant: ctx.variant };
+        if (genId) ref.genId = genId;
+        vocSave(ctx, sp.speaker, vocBody(ctx, sp.speaker, { mode: "clip", ref: ref }), "기준 대사로 목소리를 정했습니다.");
+      });
+      item.appendChild(play);
+      item.appendChild(pick);
+      list.appendChild(item);
+    });
+    panel.appendChild(list);
+    return panel;
+  }
+
+  function vocPresetPanel(ctx, sp) {
+    var panel = el("div", "vnew-voc-panel");
+    var choices = [];
+    (vocView(ctx).models || []).forEach(function (model) {
+      if (!model || (model.modes || []).indexOf("preset") < 0) return;
+      (model.presets || []).forEach(function (preset) {
+        choices.push({ model: model.id, preset: preset, label: (model.label || model.id) + " · " + preset });
+      });
+    });
+    var row = el("div", "vnew-voc-presetrow");
+    var select = el("select", "vnew-voc-preset");
+    select.setAttribute("aria-label", sp.speaker + " 기본 목소리");
+    var profile = sp.profile || {};
+    choices.forEach(function (choice, index) {
+      var option = el("option", "", choice.label);
+      option.value = String(index);
+      if (profile.mode === "preset" && profile.model === choice.model && profile.preset === choice.preset) option.selected = true;
+      select.appendChild(option);
+    });
+    var save = el("button", "outline-button vnew-voc-presetsave", "이 목소리로 정하기");
+    save.type = "button";
+    save.disabled = !choices.length || ctx.voc.busy;
+    save.addEventListener("click", function () {
+      var choice = choices[Number(select.value) || 0];
+      if (!choice) return;
+      vocSave(ctx, sp.speaker, vocBody(ctx, sp.speaker, { mode: "preset", model: choice.model, preset: choice.preset }),
+        "기본 목소리를 " + choice.label + "(으)로 정했습니다.");
+    });
+    row.appendChild(select);
+    row.appendChild(save);
+
+    var line = vocLinesOf(ctx, sp.speaker)[0];
+    var holder = { box: el("div", "vnew-voc-cmp"), status: null, players: null };
+    var listen = el("button", "outline-button vnew-voc-presetlisten",
+      "미리 듣기 (" + (line ? vocLinePrice(ctx, line.id) : vocMoney(ctx, undefined)) + ")");
+    listen.type = "button";
+    var usable = !!line && sp.usingSaved === true && vocHasAudio(ctx);
+    listen.disabled = !usable || ctx.voc.previewing;
+    listen.title = usable ? "저장한 목소리로 " + vocCutText(ctx, line.id) + " 대사 하나를 바꿔 들어 봅니다(유료)" : VOC_NO_PROFILE_TIP;
+    listen.addEventListener("click", function () {
+      vocPreview(ctx, line, holder);
+    });
+    row.appendChild(listen);
+    panel.appendChild(row);
+    panel.appendChild(holder.box);
+    return panel;
+  }
+
+  function vocSave(ctx, name, body, doneText) {
+    if (ctx.voc.busy) return;
+    ctx.voc.busy = true;
+    ctx.voc.note = { speaker: name, text: "목소리를 저장하는 중…", bad: false };
+    vocPaint(ctx);
+    api(soundPath() + "/voices", { method: "PUT", body: JSON.stringify(body) })
+      .then(function (result) {
+        if (!soundAlive(ctx) || !vocOn(ctx)) return;
+        ctx.voc.busy = false;
+        if (result && result.voices) ctx.view.voices = result.voices;
+        ctx.voc.open[name] = "";
+        ctx.voc.note = { speaker: name, text: doneText, bad: false };
+        vocPaint(ctx);
+        vocEstimate(ctx);
+      })
+      .catch(function (err) {
+        if (!soundAlive(ctx) || !vocOn(ctx)) return;
+        ctx.voc.busy = false;
+        if (vocGone(ctx, err)) return;
+        ctx.voc.note = { speaker: name, text: "목소리를 저장하지 못했습니다: " + vocErr(err), bad: true };
+        vocPaint(ctx);
+      });
+  }
+
+  /* 줄마다 [목소리 맞춰 미리 듣기 ($x)] — soundRow 가 ▶ 이 구간 듣기 칸에 붙인다. 견줘 듣기 칸은 처음 누를 때 줄 아래에 붙는다. */
+  function vocRowTools(ctx, line, row, cell) {
+    if (!vocOn(ctx)) return;
+    cell.classList.add("vnew-voc-cell");
+    var wrap = el("span", "vnew-voc-pwrap");
+    var btn = el("button", "outline-button vnew-voc-preview", "");
+    btn.type = "button";
+    var rec = { line: line, row: row, wrap: wrap, btn: btn, box: null, holder: null };
+    btn.addEventListener("click", function () {
+      if (!rec.holder) {
+        rec.box = el("div", "vnew-voc-cmp vnew-voc-rowcmp");
+        rec.holder = { box: rec.box, status: null, players: null };
+        row.appendChild(rec.box);
+      }
+      vocPreview(ctx, line, rec.holder);
+    });
+    wrap.appendChild(btn);
+    cell.appendChild(wrap);
+    ctx.voc.rows.push(rec);
+    vocPaintRow(ctx, rec);
+  }
+
+  function vocPaintRow(ctx, rec) {
+    var sp = vocSpeaker(ctx, rec.line.speaker);
+    var has = !!(sp && sp.usingSaved === true && sp.profile);
+    rec.btn.textContent = "목소리 맞춰 미리 듣기 (" + vocLinePrice(ctx, rec.line.id) + ")";
+    rec.btn.disabled = !has || !vocHasAudio(ctx) || ctx.voc.previewing;
+    var tip = has ? "이 줄만 맞춘 목소리로 바꿔 원래 소리와 견줘 들어 봅니다(유료)" : VOC_NO_PROFILE_TIP;
+    rec.btn.title = tip;
+    rec.wrap.title = tip; // 꺼진 버튼은 브라우저에 따라 title 이 안 보여 감싼 칸에도 둔다
+  }
+
+  function vocPaintRows(ctx) {
+    if (!vocOn(ctx)) return;
+    ctx.voc.rows.forEach(function (rec) {
+      vocPaintRow(ctx, rec);
+    });
+  }
+
+  function vocPreviewConfirmText(ctx, line, est) {
+    var item = ((est || {}).lines || [])[0] || {};
+    var seconds = typeof item.seconds === "number" ? ", " + item.seconds.toFixed(1) + "초" : "";
+    return line.speaker + "의 대사 한 줄(" + vocCutText(ctx, line.id) + seconds + ")을 맞춘 목소리로 바꿔 들어 봅니다.\n" +
+      "비용: " + vocMoney(ctx, est ? est.usd : null, est ? est.priceKnown : false) + "\n계속할까요?";
+  }
+
+  function vocHolderStatus(holder, text, bad) {
+    if (!holder.status) {
+      holder.status = el("p", "vnew-hint vnew-voc-cmpstatus");
+      holder.status.setAttribute("role", "status");
+      holder.box.appendChild(holder.status);
+    }
+    holder.status.textContent = text;
+    if (bad) holder.status.classList.add("is-bad");
+    else holder.status.classList.remove("is-bad");
+  }
+
+  /* 한 줄 들어보기: dryRun 견적 → 확인 창(금액) → 보내기 → [원래 소리]·[맞춘 소리] 두 플레이어. */
+  function vocPreview(ctx, line, holder) {
+    if (!vocOn(ctx) || ctx.voc.previewing || !line) return;
+    ctx.voc.previewing = true;
+    vocPaintRows(ctx);
+    vocHolderStatus(holder, "금액을 확인하는 중…", false);
+    var path = soundPath() + "/voice-preview";
+    function finish(text, bad) {
+      ctx.voc.previewing = false;
+      vocHolderStatus(holder, text, bad);
+      vocPaintRows(ctx);
+    }
+    api(path, { method: "POST", body: JSON.stringify({ variant: ctx.variant, lineId: line.id, speaker: line.speaker, dryRun: true }) })
+      .then(function (result) {
+        if (!soundAlive(ctx) || !vocOn(ctx)) return null;
+        var est = (result || {}).estimate || null;
+        if (!window.confirm(vocPreviewConfirmText(ctx, line, est))) {
+          finish("", false);
+          return null;
+        }
+        vocHolderStatus(holder, "목소리를 맞추는 중… (1분 안쪽)", false);
+        return api(path, {
+          method: "POST",
+          body: JSON.stringify({ variant: ctx.variant, lineId: line.id, speaker: line.speaker, confirmUsd: vocConfirmUsd(est) })
+        });
+      })
+      .then(function (result) {
+        if (!result || !soundAlive(ctx) || !vocOn(ctx)) return;
+        var preview = result.preview || {};
+        vocShowCompare(ctx, line, holder, preview);
+        var charge = result.charge || {};
+        finish("맞춘 소리를 만들었습니다" + (typeof charge.usd === "number" ? " · " + vocMoney(ctx, charge.usd, true) : "") + ".", false);
+      })
+      .catch(function (err) {
+        if (!soundAlive(ctx) || !vocOn(ctx)) return;
+        if (vocGone(ctx, err)) return;
+        finish("들어 보지 못했습니다: " + vocErr(err), true);
+      });
+  }
+
+  function vocPlayer(title, url, label) {
+    var box = el("div", "vnew-voc-pbox");
+    box.appendChild(el("span", "vnew-voc-ptitle", title));
+    var audio = el("audio", "vnew-voc-audio");
+    audio.controls = true;
+    audio.preload = "metadata";
+    audio.autoplay = false;
+    audio.setAttribute("aria-label", label);
+    if (url) audio.src = url;
+    box.appendChild(audio);
+    return box;
+  }
+
+  function vocShowCompare(ctx, line, holder, preview) {
+    if (holder.players && holder.players.parentNode) holder.players.parentNode.removeChild(holder.players);
+    var source = ((ctx.view || {}).source || {}).videoUrl || "";
+    var start = typeof preview.start === "number" ? preview.start : line.start;
+    var end = typeof preview.end === "number" ? preview.end : line.end;
+    // 원래 소리 = 원본 영상 presigned 주소 + 미디어 조각(#t=시작,끝 — 주소의 서명은 그대로, 조각은 서버로 가지 않는다)
+    var original = source ? source + "#t=" + Number(start || 0).toFixed(2) + "," + Number(end || 0).toFixed(2) : "";
+    var players = el("div", "vnew-voc-players");
+    players.appendChild(vocPlayer("원래 소리", original, line.speaker + " 원래 소리"));
+    players.appendChild(vocPlayer("맞춘 소리", preview.url || "", line.speaker + " 맞춘 소리"));
+    holder.players = players;
+    holder.box.insertBefore(players, holder.status || null);
+  }
+
+  /* [목소리 맞춰 반영 ($total)] — soundRender 가 [소리에 반영] 바로 뒤에 붙인다. */
+  function vocApplyButton(ctx, actions) {
+    if (!vocOn(ctx)) return;
+    var btn = el("button", "outline-button vnew-voc-apply", "");
+    btn.type = "button";
+    btn.addEventListener("click", function () {
+      vocApply(ctx);
+    });
+    ctx.voc.applyBtn = btn;
+    ctx.voc.actions = actions;
+    actions.appendChild(btn);
+    vocPaintApply(ctx);
+  }
+
+  function vocPaintApply(ctx) {
+    if (!vocOn(ctx) || !ctx.voc.applyBtn) return;
+    var est = ctx.voc.est;
+    var names = vocProfiled(ctx);
+    var running = (((ctx.view || {}).job) || {}).status === "running";
+    ctx.voc.applyBtn.textContent = "목소리 맞춰 반영 (" + (est ? vocMoney(ctx, est.usd, est.priceKnown) : vocMoney(ctx, undefined)) + ")";
+    ctx.voc.applyBtn.disabled = !names.length || !vocHasAudio(ctx) || ctx.busy || ctx.voc.busy || running;
+    ctx.voc.applyBtn.title = names.length
+      ? "목소리를 정한 인물의 대사를 모두 맞춘 목소리로 바꾼 새 버전을 만듭니다(유료)"
+      : "위 '캐릭터 목소리'에서 인물 목소리를 먼저 정해 주세요";
+  }
+
+  /* 확인 창 글: 바꿀 인물·줄 수(견적 줄 기준)·합계. */
+  function vocApplyConfirmText(ctx, names, est) {
+    var counts = {};
+    ((est || {}).lines || []).forEach(function (item) {
+      counts[item.speaker] = (counts[item.speaker] || 0) + 1;
+    });
+    var total = 0;
+    var rows = names.map(function (name) {
+      total += counts[name] || 0;
+      return "- " + name + ": " + (counts[name] || 0) + "줄";
+    });
+    return "목소리를 맞춰 새 버전을 만듭니다.\n" + rows.join("\n") + "\n합계 " + total + "줄 · " +
+      vocMoney(ctx, est ? est.usd : null, est ? est.priceKnown : false) +
+      "\n목소리를 바꾸지 못한 줄은 원래 소리를 그대로 둡니다. 계속할까요?";
+  }
+
+  /* 고친 구간이 있으면 먼저 저장(soundApply 와 같은 PUT). */
+  function vocSaveLines(ctx) {
+    var patch = soundPatch(ctx.lines, ctx.saved);
+    if (!patch.length) return Promise.resolve(true);
+    return api(soundPath(), { method: "PUT", body: JSON.stringify({ variant: ctx.variant, lines: patch }) }).then(function (saved) {
+      if (!soundAlive(ctx)) return false;
+      ctx.saved = soundClone((saved || {}).lines);
+      var byId = {};
+      ctx.saved.forEach(function (item) {
+        byId[item.id] = item;
+      });
+      ctx.lines.forEach(function (line) {
+        var after = byId[line.id];
+        if (after) ["voice", "start", "end", "auto"].forEach(function (key) {
+          line[key] = after[key];
+        });
+      });
+      return true;
+    });
+  }
+
+  function vocApply(ctx) {
+    if (!vocOn(ctx) || ctx.busy || ctx.voc.busy) return;
+    var names = vocProfiled(ctx).map(function (sp) {
+      return sp.speaker;
+    });
+    if (!names.length) return;
+    var view = ctx.view || {};
+    var duration = Number((view.source || {}).duration) || 0;
+    var minSeconds = Number((view.limits || {}).minLineSeconds) || 0.2;
+    for (var i = 0; i < ctx.lines.length; i++) {
+      var problem = soundRangeProblem(ctx.lines[i], duration, minSeconds);
+      if (problem) {
+        soundJobText(ctx, i + 1 + "번째 줄: " + problem, true);
+        return;
+      }
+    }
+    var path = soundPath() + "/voice-apply";
+    ctx.voc.busy = true;
+    vocPaintApply(ctx);
+    soundJobText(ctx, "금액을 확인하는 중…", false);
+    function stop(text, bad) {
+      ctx.voc.busy = false;
+      soundRenderJob(ctx);
+      if (text) soundJobText(ctx, text, bad);
+    }
+    vocSaveLines(ctx)
+      .then(function (ok) {
+        if (!ok || !soundAlive(ctx) || !vocOn(ctx)) return null;
+        return api(path, { method: "POST", body: JSON.stringify({ variant: ctx.variant, speakers: names, dryRun: true }) });
+      })
+      .then(function (result) {
+        if (!result || !soundAlive(ctx) || !vocOn(ctx)) return null;
+        var est = result.estimate || null;
+        ctx.voc.est = est;
+        vocPaintRows(ctx);
+        if (!window.confirm(vocApplyConfirmText(ctx, names, est))) {
+          stop("", false);
+          return null;
+        }
+        soundJobText(ctx, "목소리 맞춤을 시작하는 중…", false);
+        return api(path, { method: "POST", body: JSON.stringify({ variant: ctx.variant, speakers: names, confirmUsd: vocConfirmUsd(est) }) });
+      })
+      .then(function (result) {
+        if (!result || !soundAlive(ctx) || !vocOn(ctx)) return;
+        ctx.voc.busy = false;
+        ctx.voc.applied = true;
+        ctx.view.job = result.job || { status: "running" };
+        soundRenderJob(ctx);
+        soundSchedule(ctx);
+      })
+      .catch(function (err) {
+        if (!soundAlive(ctx) || !vocOn(ctx)) return;
+        if (vocGone(ctx, err)) {
+          ctx.voc.busy = false;
+          soundRenderJob(ctx);
+          return;
+        }
+        if (err && err.type === "SoundRunning") {
+          ctx.voc.busy = false;
+          ctx.view.job = { status: "running" };
+          soundRenderJob(ctx);
+          soundSchedule(ctx);
+          return;
+        }
+        if (err && err.type === "CostMismatch") vocEstimate(ctx);
+        stop("목소리를 맞추지 못했습니다: " + vocErr(err), true);
+      });
+  }
+
+  /* 가장 최근 버전의 목소리 맞춤 요약(없으면 null). */
+  function vocLastSummary(ctx) {
+    var versions = (ctx.view || {}).versions || [];
+    var last = versions[versions.length - 1];
+    return last && last.voices && typeof last.voices === "object" ? last.voices : null;
+  }
+
+  /* soundRenderJob 끝에서: 진행(n/m줄) · 끝 문구(n/m 줄 목소리 맞춤, k줄 원음 유지) · 원음 유지 줄이 있으면 [모델 에러 로그 보기]. */
+  function vocRenderJob(ctx) {
+    if (!vocOn(ctx)) return;
+    var job = (ctx.view || {}).job || {};
+    var progress = job.progress || null;
+    if (job.status === "running" && progress && progress.total > 0) {
+      soundJobText(ctx, "목소리를 맞추는 중… " + progress.done + "/" + progress.total + "줄", false);
+    } else if (job.status === "done" && job.message) {
+      soundJobText(ctx, job.message, false);
+    }
+    var summary = vocLastSummary(ctx);
+    var showLog = (job.status === "done" && !!job.message && !!summary && Number(summary.kept) > 0) ||
+      (job.status === "failed" && ctx.voc.applied);
+    if (showLog && !ctx.voc.mnBtn && ctx.voc.actions) {
+      var btn = el("button", "outline-button vnew-voc-mnotes", VOC_MNOTES);
+      btn.type = "button";
+      btn.title = "목소리를 바꾸지 못한 줄의 모델 기록을 봅니다";
+      btn.addEventListener("click", function () {
+        mnotesOpen({ pid: state.projectId, variant: ctx.variant });
+      });
+      ctx.voc.mnBtn = btn;
+      ctx.voc.actions.appendChild(btn);
+    } else if (!showLog && ctx.voc.mnBtn) {
+      if (ctx.voc.mnBtn.parentNode) ctx.voc.mnBtn.parentNode.removeChild(ctx.voc.mnBtn);
+      ctx.voc.mnBtn = null;
+    }
+    vocPaintApply(ctx);
+  }
+
+  /* 반영 버전 목록: 목소리 맞춤 버전 표시(글 · 배지). */
+  function vocVersionTag(version) {
+    return version && version.voices ? " · " + VOC_BADGE : "";
+  }
+
+  function vocVersionBadge(version) {
+    return version && version.voices ? el("span", "vnew-badge vnew-voc-badge", VOC_BADGE) : null;
+  }
+
+  /* ---------------------------------------------------------------- 작업 203 끝 */
 
   /* ================================================================ ⑦ 편집(영상 편집 타임라인, 지시서 111)
 
