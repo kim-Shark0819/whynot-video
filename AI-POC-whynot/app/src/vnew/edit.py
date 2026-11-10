@@ -63,6 +63,7 @@ from ..vpoc import store as vpoc_store
 from ..vpoc.errors import VpocError, error_gist, now_iso
 from ..vpoc.store import STORE
 
+from . import edit_audio
 from . import generate
 from . import plan as plan_mod
 from . import settings as vnew_settings
@@ -215,6 +216,28 @@ def export_key(owner: str, pid: str, gen_id: str, n: int) -> str:
     return f"{_root(owner, pid, gen_id)}/final-edit-{int(n)}.mp4"
 
 
+def export_stems_key(owner: str, pid: str, gen_id: str, n: int) -> str:
+    """작업 215a: 내보내기 n 의 스템 zip(대사만 · 배경음 · 효과음 · mix.wav). 영상 버킷."""
+    return f"{_root(owner, pid, gen_id)}/final-edit-{int(n)}-stems.zip"
+
+
+def audio_root(owner: str, pid: str) -> str:
+    """작업 215a: 내 소리(사용자가 올린 배경음 · 효과음) 폴더. gen 이 바뀌어도 남게 프로젝트 편집 폴더에 둔다."""
+    return f"users/{owner}/video/{pid}/vnew/edit-audio"
+
+
+def audio_index_key(owner: str, pid: str) -> str:
+    return f"{audio_root(owner, pid)}/index.json"
+
+
+def audio_file_key(owner: str, pid: str, asset_id: str, ext: str) -> str:
+    return f"{audio_root(owner, pid)}/{asset_id}.{ext}"
+
+
+def audio_peaks_key(owner: str, pid: str, asset_id: str) -> str:
+    return f"{audio_root(owner, pid)}/{asset_id}-peaks.json"
+
+
 def media_id(source_key: str) -> str:
     """재료 id(경로·로그에 S3 키 대신 쓴다). sha256 앞 16자."""
     return "m" + hashlib.sha256(str(source_key).encode("utf-8")).hexdigest()[:16]
@@ -301,6 +324,34 @@ def _export_audio(source_path: str, audio_out: str, **kwargs) -> dict:
 def _export_mix(layers: list[dict], output_path: str, *, samples: int) -> dict:
     """작업 181: 타임라인 소리 섞기(stitcher.edit_mix)."""
     return stitcher.edit_mix(layers, output_path, samples=samples)
+
+
+def _export_tracks(plan: dict, a1_raw: str, asset_paths: dict, workdir: str) -> dict:
+    """작업 215a: A1 + 오디오 트랙 섞기 · 스템(edit_audio.render_mix, ffmpeg 한 번)."""
+    return edit_audio.render_mix(plan, a1_raw, asset_paths, workdir)
+
+
+def _probe_audio(path: str) -> dict:
+    """작업 215a: 내 소리 파일 길이 · 소리 유무(stitcher.probe_media)."""
+    return stitcher.probe_media(path)
+
+
+def _audio_peaks_file(path: str, workdir: str) -> list[float]:
+    """작업 215a: 내 소리 파형 피크(재료 파형과 같은 stitcher.audio_peaks)."""
+    return stitcher.audio_peaks(path, workdir, per_second=PEAKS_PER_SECOND, threads=1)
+
+
+def _delete_object(key: str, *, bucket: str) -> None:
+    """작업 215a: 내 소리 지우기. 실제 저장소면 delete_object, 검사용 저장소면 delete_key(있을 때)."""
+    store = STORE
+    if isinstance(store, vpoc_store.Store):
+        target = bucket or store.main_bucket
+        region = store.video_region if target == store.video_bucket else store.main_region
+        vpoc_store.s3_client(region).delete_object(Bucket=target, Key=key)
+        return
+    remover = getattr(store, "delete_key", None)
+    if callable(remover):
+        remover(key, bucket=bucket)
 
 
 def _spawn_export(owner: str, pid: str, gen_id: str, n: int, claim: str) -> None:
@@ -1265,7 +1316,7 @@ def _check_overlaps(clips: list[dict], where: str) -> None:
                             f"45%({DISSOLVE_MAX_SHARE * shorter:.2f}초) 이하여야 합니다.", 400)
 
 
-def _doc_hash(variant: str, clips: list[dict]) -> str:
+def _doc_hash(variant: str, clips: list[dict], mix: dict | None = None) -> str:
     """내보내기 결과를 정하는 값만(그림체·원본·구간·소리·속도)의 sha256. 클립 id·이름은 넣지 않는다.
 
     속도는 1 이 아닐 때만 넣는다(지시서 115 — 속도를 안 쓴 문서·진행 중 내보내기의 해시가 115 전과 같다).
@@ -1286,8 +1337,22 @@ def _doc_hash(variant: str, clips: list[dict]) -> str:
         if _dissolve_of(c):
             item["transition"] = {"type": "dissolve", "seconds": _dissolve_of(c)}
         body.append(item)
-    text = json.dumps({"variant": variant, "clips": body}, sort_keys=True, separators=(",", ":"))
+    payload = {"variant": variant, "clips": body}
+    if isinstance(mix, dict) and edit_audio.mix_active(mix.get("tracks"), mix.get("a1")):
+        # 작업 215a: 오디오 트랙 · A1 설정이 결과를 바꿀 때만(트랙 없는 옛 문서의 해시는 그대로).
+        payload["audio"] = edit_audio.hash_body(mix.get("tracks") or [], mix.get("a1") or edit_audio.default_a1())
+    text = json.dumps(payload, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def _doc_mix(doc: dict | None) -> dict:
+    """작업 215a: 저장 문서의 오디오 설정 {tracks, a1}(저장 때 검사한 값 — 꼴만 본다). 없으면 빈 트랙 · 기본 A1."""
+    doc = doc if isinstance(doc, dict) else {}
+    try:
+        a1 = edit_audio.clean_a1(doc.get("a1"), "vnew.edit")
+    except VpocError:
+        a1 = edit_audio.default_a1()
+    return {"tracks": edit_audio.lenient_tracks(doc.get("audioTracks")), "a1": a1}
 
 
 def _valid_doc(doc: dict | None, variant: str) -> bool:
@@ -1437,7 +1502,7 @@ def _export_out(current: dict | None, doc_hash: str) -> dict:
     done = current.get("status") == "done"
     url = _presign_video(str(current.get("key") or "")) if done else ""
     download = _presign_download(str(current.get("key") or ""), current.get("n")) if done else ""
-    return {
+    out = {
         "status": current.get("status"),
         "n": current.get("n"),
         "variant": current.get("variant"),
@@ -1455,6 +1520,13 @@ def _export_out(current: dict | None, doc_hash: str) -> dict:
         "videoUrl": url,
         "downloadUrl": download,
     }
+    if current.get("stems"):  # 작업 215a: 스템을 고른 내보내기만(그 밖은 215a 전과 같은 키)
+        out["stemsRequested"] = True
+        if done and current.get("stemsKey"):
+            out["stems"] = list(current.get("stems") if isinstance(current.get("stems"), list) else [])
+            out["stemsUrl"] = _presign_attachment(str(current["stemsKey"]), f"edit-{int(current.get('n') or 0)}-stems.zip",
+                                                  "application/zip")
+    return out
 
 
 def _variant_exports(state: dict, variant: str) -> tuple[dict | None, list[dict]]:
@@ -1525,8 +1597,8 @@ def edit_view(owner: str, pid: str, variant: str | None = None) -> dict:
     state = state or {}
     latest, older = _variant_exports(state, chosen)
     clean = [c for c in out_doc["clips"] if isinstance(c, dict) and c.get("sourceKey") in allowed]
-    doc_hash = _doc_hash(chosen, [{**c, "in": _num(c.get("in")) or 0.0, "out": _num(c.get("out")) or 0.0} for c in clean]) \
-        if saved else ""
+    doc_hash = _doc_hash(chosen, [{**c, "in": _num(c.get("in")) or 0.0, "out": _num(c.get("out")) or 0.0} for c in clean],
+                         _doc_mix(out_doc)) if saved else ""
     default_mids = {m["mid"] for m in default_items}
     materials = [_material_out(m, meta.get(m["sourceKey"]), default_mids) for m in items]
     for item, out in zip(items, materials):  # 작업 149: 통 테이크 재료의 컷 목록(⑦ 재료 [컷 고르기])
@@ -1603,6 +1675,16 @@ def _validated_clips(owner: str, pid: str, variant: str, raw: list, where: str) 
     return gen, gen_id, _clean_clips(raw, allowed, durations, where)
 
 
+def _clean_mix(owner: str, pid: str, payload: dict, where: str) -> tuple[list[dict], dict]:
+    """작업 215a: 바디 audioTracks · a1 검사(edit_audio). 트랙 아이템은 이 프로젝트 내 소리(_audio_assets)만. 반환 (트랙, A1)."""
+    raw_tracks = payload.get("audioTracks")
+    a1 = edit_audio.clean_a1(payload.get("a1"), where)
+    if raw_tracks is None or raw_tracks == []:
+        return [], a1
+    assets = _audio_assets(owner, pid) if edit_audio.assets_used(raw_tracks if isinstance(raw_tracks, list) else []) else {}
+    return edit_audio.clean_tracks(raw_tracks, assets, MAX_TOTAL_S, where), a1
+
+
 def save_doc(owner: str, pid: str, payload) -> dict:
     """PUT /p/<pid>/edit. 바디 {etag | version, variant, clips, audio?}. 반환 {doc, etag, saved, totalSeconds}.
 
@@ -1629,6 +1711,8 @@ def save_doc(owner: str, pid: str, payload) -> dict:
         raise VpocError(where, "AudioTrackUnsupported", "사운드 트랙은 아직 넣을 수 없습니다(⑥ 사운드 결과가 없습니다).", 400)
     raw = _check_clip_list(payload.get("clips"), where)
     _gen, gen_id, clips = _validated_clips(owner, pid, variant, raw, where)
+    # 작업 215a: 오디오 트랙 · A1 설정. 둘 다 없으면(옛 화면) 215a 전과 같은 문서다. 아이템 소리는 이 프로젝트 내 소리만.
+    tracks, a1 = _clean_mix(owner, pid, payload, where)
     # 작업 189: 그 그림체 파일(edit-<variant>.json)에만 쓴다. 다른 그림체 문서와 edit.json 은 건드리지 않는다.
     # 기준(화면이 받은 것, _saved_docs 규칙): 파일이 있으면 그 파일, 없으면 edit.json 이 같은 그림체일 때 edit.json, 아니면 없음("" · 0).
     key = doc_key(owner, pid, gen_id, variant)
@@ -1644,6 +1728,10 @@ def save_doc(owner: str, pid: str, payload) -> dict:
     elif version != base_version:
         raise _changed(where)
     doc = {"version": base_version + 1, "variant": variant, "updatedAt": _now_ms(), "clips": clips, "audio": []}
+    if tracks:
+        doc["audioTracks"] = tracks
+    if not edit_audio.a1_is_default(a1):
+        doc["a1"] = a1
     try:
         new_etag = STORE.write_json(key, doc, etag=current_etag if exists else "", create_only=not exists)
     except VpocError as exc:
@@ -1739,6 +1827,179 @@ def media_view(owner: str, pid: str, mid: str) -> dict:
         "soundRanges": _film_ranges(data),
         "generated": generated,
     }
+
+
+# ================================================================ 작업 215a: 내 소리(사용자가 올린 배경음 · 효과음)
+#
+# 파일은 영상 버킷 audio_file_key, 목록(index.json)과 파형 피크(-peaks.json)는 메인 버킷 audio_root 아래. 프로젝트 소유자만(라우트가
+# 쓰기 권한으로 부른다). 이 파일은 어떤 AI 모델에도 보내지 않는다 — ffmpeg 로 길이 · 파형만 재고, 내보내기 섞기에만 쓴다.
+
+
+def _audio_assets(owner: str, pid: str) -> dict[str, dict]:
+    data, _ = _read_json(audio_index_key(owner, pid))
+    items = (data or {}).get("items")
+    return {k: v for k, v in items.items() if edit_audio.valid_asset_id(k) and isinstance(v, dict)} \
+        if isinstance(items, dict) else {}
+
+
+def _asset_out(entry: dict, used: set[str]) -> dict:
+    return {"assetId": entry.get("assetId"), "name": str(entry.get("name") or ""), "ext": entry.get("ext"),
+            "bytes": int(entry.get("bytes") or 0), "duration": entry.get("duration"), "createdAt": entry.get("createdAt") or "",
+            "used": entry.get("assetId") in used}
+
+
+def _assets_in_use(owner: str, pid: str) -> set[str]:
+    """지금 gen 의 저장된 편집 문서(두 그림체)가 쓰는 내 소리 id. gen 이 없으면 빈 집합."""
+    try:
+        _plan, _gen, gen_id = _load_gen(owner, pid)
+    except VpocError:
+        return set()
+    used: set[str] = set()
+    for item in _saved_docs(owner, pid, gen_id).values():
+        used |= edit_audio.assets_used((item.get("doc") or {}).get("audioTracks"))
+    return used
+
+
+def audio_assets_view(owner: str, pid: str) -> dict:
+    """GET /p/<pid>/edit/audio-assets. 내 소리 목록(새것부터, 피크 없음) · 한도."""
+    used = _assets_in_use(owner, pid)
+    items = sorted(_audio_assets(owner, pid).values(), key=lambda e: str(e.get("createdAt") or ""), reverse=True)
+    return {"assets": [_asset_out(e, used) for e in items],
+            "limits": {"maxBytes": edit_audio.MAX_ASSET_BYTES, "maxSeconds": edit_audio.MAX_ASSET_S, "maxAssets": edit_audio.MAX_ASSETS,
+                       "maxTracks": edit_audio.MAX_TRACKS, "types": sorted(edit_audio.ASSET_TYPES)}}
+
+
+def add_audio_asset(owner: str, pid: str, filename, path: str) -> dict:
+    """POST /p/<pid>/edit/audio-assets(라우트가 올린 파일을 path 에 받아 둔다). 형식 · 크기 · 길이 검사 → 피크 → 영상 버킷.
+
+    반환 {asset, assets(목록)}. 틀리면 400 · 413(edit_audio.check_upload · check_probe), 목록이 가득이면 409 TooManyAudioAssets.
+    """
+    where = "vnew.edit.audio"
+    size = os.path.getsize(path) if path and os.path.exists(path) else 0
+    with open(path, "rb") as handle:
+        head = handle.read(16)
+    ext, content_type, label = edit_audio.check_upload(filename, size, head, where)
+    if len(_audio_assets(owner, pid)) >= edit_audio.MAX_ASSETS:
+        raise VpocError(where, "TooManyAudioAssets", f"내 소리는 {edit_audio.MAX_ASSETS}개까지 둘 수 있습니다. 안 쓰는 소리를 지워 주세요.", 409)
+    started = time.monotonic()
+    with _MEDIA_SEM:
+        duration = edit_audio.check_probe(_probe_audio(path), where)
+        with tempfile.TemporaryDirectory(prefix="vnew-edit-audio-") as workdir:
+            try:
+                peaks = _audio_peaks_file(path, workdir)
+            except stitcher.StitchError as exc:
+                log.warning("vnew.edit.audio_peaks_failed pid=%s err=%s", pid, error_gist(exc, 120))
+                peaks = []
+    asset_id = "a" + secrets.token_hex(8)
+    _upload(path, audio_file_key(owner, pid, asset_id, ext), bucket=vpoc_settings.VIDEO_BUCKET, content_type=content_type)
+    STORE.write_json(audio_peaks_key(owner, pid, asset_id),
+                     {"v": 1, "assetId": asset_id, "perSecond": PEAKS_PER_SECOND, "values": [float(v) for v in peaks]})
+    entry = {"assetId": asset_id, "name": label, "ext": ext, "contentType": content_type, "bytes": size, "duration": duration,
+             "key": audio_file_key(owner, pid, asset_id, ext), "createdAt": now_iso()}
+
+    def add(data):
+        data = data if isinstance(data, dict) else {}
+        items = data.get("items") if isinstance(data.get("items"), dict) else {}
+        items[asset_id] = entry
+        return {"v": 1, "items": items}
+
+    _mutate_json(audio_index_key(owner, pid), add)
+    log.info("vnew.edit.audio_added pid=%s asset=%s ext=%s bytes=%d seconds=%.2f peaks=%d ms=%d", pid, asset_id, ext, size,
+             duration, len(peaks), int((time.monotonic() - started) * 1000))
+    return {"asset": _asset_out(entry, set()), **audio_assets_view(owner, pid)}
+
+
+def _asset_or_404(owner: str, pid: str, asset_id, where: str) -> dict:
+    entry = _audio_assets(owner, pid).get(asset_id) if edit_audio.valid_asset_id(asset_id) else None
+    if not isinstance(entry, dict):
+        raise VpocError(where, "AudioAssetNotFound", "내 소리를 찾을 수 없습니다.", 404)
+    return entry
+
+
+def audio_asset_view(owner: str, pid: str, asset_id) -> dict:
+    """GET /p/<pid>/edit/audio-assets/<aid>. 정보 · 파형 피크."""
+    entry = _asset_or_404(owner, pid, asset_id, "vnew.edit.audio")
+    data, _ = _read_json(audio_peaks_key(owner, pid, asset_id))
+    values = (data or {}).get("values") if isinstance((data or {}).get("values"), list) else []
+    return {"asset": _asset_out(entry, _assets_in_use(owner, pid)), "peaks": {"perSecond": PEAKS_PER_SECOND, "values": values}}
+
+
+def audio_asset_file(owner: str, pid: str, asset_id) -> tuple[object, str, int]:
+    """GET /p/<pid>/edit/audio-assets/<aid>/file(미리듣기 WebAudio — 같은 출처라 버킷 CORS 가 필요 없다). 반환 (바이트 또는 조각
+    반복자, Content-Type, 크기). 실제 저장소면 S3 를 1MB 조각으로 흘려 보낸다(통째로 메모리에 올리지 않는다)."""
+    entry = _asset_or_404(owner, pid, asset_id, "vnew.edit.audio")
+    key = str(entry.get("key") or "")
+    ctype = str(entry.get("contentType") or "application/octet-stream")
+    store = STORE
+    if isinstance(store, vpoc_store.Store):
+        target = vpoc_settings.VIDEO_BUCKET or store.main_bucket
+        region = store.video_region if target == store.video_bucket else store.main_region
+        body = vpoc_store.s3_client(region).get_object(Bucket=target, Key=key)["Body"]
+        return body.iter_chunks(chunk_size=1 << 20), ctype, int(entry.get("bytes") or 0)
+    data = store.get_bytes(key, bucket=vpoc_settings.VIDEO_BUCKET)
+    return data, ctype, len(data)
+
+
+def delete_audio_asset(owner: str, pid: str, asset_id) -> dict:
+    """DELETE /p/<pid>/edit/audio-assets/<aid>. 저장된 편집 문서가 쓰고 있으면 409 AudioAssetInUse(타임라인에서 먼저 빼야 한다)."""
+    where = "vnew.edit.audio"
+    entry = _asset_or_404(owner, pid, asset_id, where)
+    if asset_id in _assets_in_use(owner, pid):
+        raise VpocError(where, "AudioAssetInUse", "타임라인에서 쓰는 소리는 지울 수 없습니다. 먼저 타임라인에서 빼 주세요.", 409)
+
+    def drop(data):
+        items = (data or {}).get("items")
+        if not isinstance(items, dict) or asset_id not in items:
+            return None
+        items.pop(asset_id, None)
+        return {"v": 1, "items": items}
+
+    _mutate_json(audio_index_key(owner, pid), drop)
+    for key, bucket in ((str(entry.get("key") or ""), vpoc_settings.VIDEO_BUCKET), (audio_peaks_key(owner, pid, asset_id), "")):
+        try:
+            if key:
+                _delete_object(key, bucket=bucket)
+        except Exception as exc:  # noqa: BLE001 — 목록에서는 이미 빠졌다(다시 보이지 않는다).
+            log.warning("vnew.edit.audio_delete_failed pid=%s asset=%s err=%s", pid, asset_id, type(exc).__name__)
+    log.info("vnew.edit.audio_deleted pid=%s asset=%s", pid, asset_id)
+    return audio_assets_view(owner, pid)
+
+
+def stems_view(owner: str, pid: str, variant=None) -> dict:
+    """GET /p/<pid>/edit/stems(?variant=). 그 그림체 가장 최근 내보내기의 스템 zip {n, stems, downloadUrl}. 없으면 404 NoStems."""
+    where = "vnew.edit.stems"
+    if variant not in (None, "") and variant not in VARIANTS:
+        raise VpocError(where, "BadVariant", "그림체(variant)는 real 또는 webtoon 이어야 합니다.", 400)
+    _plan, gen, gen_id = _load_gen(owner, pid)
+    state, _ = _read_json(export_state_key(owner, pid, gen_id))
+    chosen = variant or _recent_variant(_saved_docs(owner, pid, gen_id), gen) or "webtoon"
+    latest, _older = _variant_exports(state or {}, chosen)
+    if not latest or latest.get("status") != "done" or not latest.get("stemsKey"):
+        raise VpocError(where, "NoStems", "스템이 없습니다. [스템도 함께]를 켜고 내보내 주세요.", 404)
+    return {"n": latest.get("n"), "variant": chosen, "stems": list(latest.get("stems") or []),
+            "downloadUrl": _presign_attachment(str(latest["stemsKey"]), f"edit-{int(latest.get('n') or 0)}-stems.zip",
+                                               "application/zip")}
+
+
+def _presign_attachment(key: str, filename: str, content_type: str) -> str:
+    """작업 215a: 영상 버킷 presigned 내려받기(attachment). filename 은 서버가 만든 ASCII 이름만. 검사용 저장소는 presign."""
+    if not key:
+        return ""
+    store = STORE
+    if not isinstance(store, vpoc_store.Store):
+        return _presign(key, bucket=vpoc_settings.VIDEO_BUCKET, content_type=content_type)
+    try:
+        target = vpoc_settings.VIDEO_BUCKET or store.main_bucket
+        region = store.video_region if target == store.video_bucket else store.main_region
+        return vpoc_store.s3_client(region).generate_presigned_url(
+            "get_object",
+            Params={"Bucket": target, "Key": key, "ResponseContentType": content_type,
+                    "ResponseContentDisposition": f'attachment; filename="{filename}"'},
+            ExpiresIn=URL_EXPIRES_S,
+        )
+    except Exception as exc:  # noqa: BLE001 — 보기는 실패하지 않는다.
+        log.warning("vnew.edit.presign_failed err=%s", type(exc).__name__)
+        return ""
 
 
 # ================================================================ 작업 185: 빈틈 다듬기(소리 구간 · 제안)
@@ -1921,7 +2182,7 @@ def _empty_state() -> dict:
     return {"v": 1, "n": 0, "current": None, "history": []}
 
 
-def start_export(owner: str, pid: str, etag, variant=None) -> dict:
+def start_export(owner: str, pid: str, etag, variant=None, stems=False) -> dict:
     """POST /p/<pid>/edit/export. 저장된 문서(etag 가 지금 저장본과 같아야 한다)를 내보내기 시작한다.
 
     같은 문서(_doc_hash)로 진행 중(queued·running)인 내보내기가 있으면 새로 시작하지 않고 그것을 준다(started false).
@@ -1950,7 +2211,18 @@ def start_export(owner: str, pid: str, etag, variant=None) -> dict:
     clips = _clean_clips(doc["clips"], allowed, {k: (meta.get(k) or {}).get("duration") for k in allowed}, where)
     if not clips:
         raise VpocError(where, "EmptyTimeline", "타임라인에 클립이 없습니다.", 409)
-    doc_hash = _doc_hash(variant, clips)
+    stems = stems is True
+    # 작업 215a: 오디오 트랙 · A1 설정(저장 때와 같은 검사 — 그 뒤 지운 소리면 400). 트랙 · 스템이 없으면 215a 전과 같은 상태 · 해시.
+    a1 = edit_audio.clean_a1(doc.get("a1"), where)
+    raw_tracks = doc.get("audioTracks") or []
+    assets = _audio_assets(owner, pid) if edit_audio.assets_used(raw_tracks) else {}
+    tracks = edit_audio.clean_tracks(raw_tracks, assets, MAX_TOTAL_S, where) if raw_tracks else []
+    doc_hash = _doc_hash(variant, clips, {"tracks": tracks, "a1": a1})
+    audio_snapshot = None
+    if edit_audio.mix_active(tracks, a1) or stems:
+        audio_snapshot = {"tracks": tracks, "a1": a1,
+                          "assets": {aid: {"key": assets[aid].get("key"), "ext": assets[aid].get("ext"),
+                                           "duration": assets[aid].get("duration")} for aid in edit_audio.assets_used(tracks)}}
     reconcile_export(owner, pid, gen_id)
     claim = secrets.token_hex(8)
     box: dict = {}
@@ -1959,7 +2231,7 @@ def start_export(owner: str, pid: str, etag, variant=None) -> dict:
         state = state if isinstance(state, dict) else _empty_state()
         current = state.get("current") if isinstance(state.get("current"), dict) else None
         if current and current.get("status") in _LIVE:
-            if current.get("docHash") == doc_hash:
+            if current.get("docHash") == doc_hash and (not stems or current.get("stems")):
                 box["reused"] = current
                 return None
             busy = current.get("variant")
@@ -1979,6 +2251,10 @@ def start_export(owner: str, pid: str, etag, variant=None) -> dict:
             "createdAt": now, "startedAt": "", "finishedAt": "", "attempts": 1,
             "progress": {"done": 0, "total": len(clips)}, "key": "", "bytes": 0, "hasAudio": None, "error": "",
         }
+        if audio_snapshot is not None:  # 작업 215a
+            started["audio"] = audio_snapshot
+        if stems:
+            started["stems"] = True
         box["started"] = started
         return {"v": 1, "n": n, "current": started, "history": history[-EXPORT_HISTORY_MAX:]}
 
@@ -2220,6 +2496,7 @@ _STAGE_MESSAGES = {
     "clip": "클립을 자르지 못했습니다.",
     "join": "영상을 이어 붙이지 못했습니다.",
     "upload": "결과 영상을 저장하지 못했습니다.",
+    "mix": "오디오 트랙을 섞지 못했습니다.",  # 작업 215a
 }
 
 
@@ -2395,6 +2672,39 @@ def run_export(owner: str, pid: str, gen_id: str, n: int, claim: str) -> None:
                 _export_mix(layers, audio_path, samples=fx["total"] * fx["spf"])  # 작업 181: 소리 층을 타임라인에서 섞는다
                 for layer in layers:
                     os.unlink(layer["path"])
+            stems_out: list[tuple[str, str]] = []
+            mix_doc = current.get("audio") if isinstance(current.get("audio"), dict) else None
+            if mix_doc is not None:
+                # 작업 215a: A1(위에서 만든 클립 소리) + 오디오 트랙을 섞는다 · 스템. 클립 소리가 없으면 A1 은 무음.
+                stage = "mix"
+                spf = stitcher.EDIT_AUDIO_RATE // fps
+                total_samples = (fx["total"] if fx is not None else sum(frames)) * spf
+                if not audio_path:
+                    audio_path = os.path.join(workdir, "audio.raw")
+                    stitcher._fit_pcm(audio_path, total_samples * stitcher.EDIT_AUDIO_BYTES_PER_SAMPLE)  # noqa: SLF001
+                a1 = mix_doc.get("a1") or edit_audio.default_a1()
+                spans = sound_ranges(edit_audio.pcm_peaks(audio_path, PEAKS_PER_SECOND), PEAKS_PER_SECOND) if a1.get("duck") else []
+                mix_plan = edit_audio.mix_plan(mix_doc.get("tracks") or [], a1, total_samples=total_samples, spans=spans,
+                                               stems=bool(current.get("stems")))
+                asset_paths: dict[str, str] = {}
+                for asset_id in mix_plan["inputs"]:
+                    info = (mix_doc.get("assets") or {}).get(asset_id) or {}
+                    if not str(info.get("key") or "").startswith(prefix):
+                        raise VpocError("vnew.edit.export", "AudioAssetMissing", "내 소리 파일을 찾지 못했습니다.", 409)
+                    stage = "download"
+                    asset_paths[asset_id] = fetch(str(info["key"]), f"snd-{asset_id}.{info.get('ext') or 'bin'}")
+                stage = "mix"
+                mixed = _export_tracks(mix_plan, audio_path, asset_paths, workdir)
+                if mixed["raw"] != audio_path:
+                    os.unlink(audio_path)
+                    audio_path = mixed["raw"]
+                for path in asset_paths.values():
+                    os.unlink(path)
+                stems_out = list(mixed.get("stems") or [])
+                with_audio = True
+                log.info("vnew.edit.export_tracks pid=%s gen=%s n=%d buses=%d items=%d duck=%d stems=%d", pid, gen_id, n,
+                         len(mix_plan["buses"]), sum(len(b["items"]) for b in mix_plan["buses"]), len(spans), len(stems_out))
+                stage = "join"
             output = os.path.join(workdir, "edit.mp4")
             _export_join(segments, output, audio_path=audio_path)
             for segment in segments:
@@ -2410,8 +2720,22 @@ def run_export(owner: str, pid: str, gen_id: str, n: int, claim: str) -> None:
             stage = "upload"
             key = export_key(owner, pid, gen_id, n)
             _upload(output, key, bucket=vpoc_settings.VIDEO_BUCKET, content_type="video/mp4")
+            stem_fields: dict = {}
+            if stems_out:
+                # 작업 215a: 스템 zip(압축 없이 — wav 는 거의 줄지 않는다). 파일 이름은 서버가 정한 글자만(대사만.wav · 배경음.wav …).
+                import zipfile  # noqa: PLC0415
+
+                zip_path = os.path.join(workdir, "stems.zip")
+                with zipfile.ZipFile(zip_path, "w", compression=zipfile.ZIP_STORED) as archive:
+                    for name, path in stems_out:
+                        archive.write(path, arcname=name)
+                        os.unlink(path)
+                _beat(owner, pid, gen_id, claim)
+                stems_key = export_stems_key(owner, pid, gen_id, n)
+                _upload(zip_path, stems_key, bucket=vpoc_settings.VIDEO_BUCKET, content_type="application/zip")
+                stem_fields = {"stemsKey": stems_key, "stems": [name for name, _ in stems_out]}
         _finish(owner, pid, gen_id, claim, status="done", key=key, seconds=seconds, bytes=size, hasAudio=with_audio,
-                finishedAt=now_iso(), error="")
+                finishedAt=now_iso(), error="", **stem_fields)
         log.info("vnew.edit.export_done pid=%s gen=%s n=%d clips=%d seconds=%.3f bytes=%d fps=%d size=%dx%d audio=%s "
                  "ms=%d rss_mb=%.0f", pid, gen_id, n, len(clips), seconds, size, fps, width, height, with_audio,
                  int((time.monotonic() - started) * 1000), generate._rss_mb())  # noqa: SLF001

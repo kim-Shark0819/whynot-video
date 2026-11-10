@@ -12093,6 +12093,7 @@
     if (c === "KeyS" || k === "s" || k === "S") return "split";
     if (k === "Delete" || k === "Backspace") return "delete";
     if (c === "KeyM" || k === "m" || k === "M") return "mute";
+    if (c === "KeyN" || k === "n" || k === "N") return "snap"; // 작업 215a: 붙기(Premiere N)
     if (k === "+" || k === "=" || c === "NumpadAdd") return "zoomIn";
     if (k === "-" || k === "_" || c === "NumpadSubtract") return "zoomOut";
     // 고른 클립 1프레임 다듬기(지시서 115): [ ] 는 끝, Shift 는 시작. 괄호는 한글 자판에서도 같은 글자다.
@@ -12275,6 +12276,14 @@
       fxHold: null, // 작업 182 미리보기: 바꿔 끼운 뒤에도 잠깐 더 재생하는 앞 클립(디졸브·L컷, editFxHoldStart)
       fxLead: null, // 작업 182 미리보기: 화면보다 먼저 소리를 내는 다음 클립(J컷, editFxLeadTick)
       tighten: null, // 작업 186: 빈틈 다듬기 {busy, open, rev, only, plan}(editTightenStart). 닫거나 편집이 바뀌면 null
+      mix: editMixNorm({}), // 작업 215a: 오디오 트랙 {tracks, a1}(editMixNorm)
+      mixSel: null, // 작업 215a: 고른 소리 아이템 {t, i}
+      mixKey: null, // 작업 215a: 고른 볼륨 키 {t, i, k}
+      mixSnap: true, // 작업 215a: 붙기(N)
+      mixStems: false, // 작업 215a: 내보내기에 스템 zip 도
+      mixLive: null, // 작업 215a: WebAudio 미리듣기 예약(editMixStart)
+      mixAc: null,
+      sounds: { list: [], byId: {}, peaks: {}, peakFail: {}, buffers: {}, busy: false, peakBusy: false, error: "" }, // 작업 215a: 내 소리
       retakeOn: false // GET /edit 의 retake.enabled(VNEW_EDIT_RETAKE). false 면 AI로 고치기 버튼이 없다
     };
     ctx.onKey = function (event) {
@@ -12324,6 +12333,14 @@
     ctx.tighten = null; // 작업 186: 빈틈 다듬기 제안(받는 중이면 응답을 버린다)
     editFixStop(ctx); // 지시서 116: AI로 고치기 패널 조회 타이머·영상
     editPause(ctx);
+    if (ctx.mixAc && ctx.mixAc.close) {
+      try {
+        ctx.mixAc.close(); // 작업 215a: 오디오 트랙 미리듣기
+      } catch (error) {
+        /* 이미 닫혔다 */
+      }
+    }
+    ctx.mixAc = null;
     editCancelRaf(ctx.zoomRaf);
     ctx.zoomRaf = 0;
     if (ctx.probeTimer) window.clearTimeout(ctx.probeTimer);
@@ -12413,6 +12430,9 @@
     ctx.variant = variant;
     ctx.variants = Array.isArray(view.variants) ? view.variants : [];
     ctx.clips = editCloneClips((view.doc || {}).clips);
+    ctx.mix = editMixNorm(view.doc); // 작업 215a: 오디오 트랙(옛 문서는 빈 트랙)
+    ctx.mixSel = null;
+    ctx.mixKey = null;
     ctx.etag = String(view.etag || "");
     ctx.saved = view.saved === true;
     ctx.savedVariants = { real: savedVariants.real === true, webtoon: savedVariants.webtoon === true };
@@ -12741,8 +12761,16 @@
     [d.ruler, d.vtrack, d.atrack, d.head, d.drop].forEach(function (node) {
       d.content.appendChild(node);
     });
+    d.labels = labels; // 작업 215a: 오디오 트랙 이름 줄(editMixRender)
+    d.mixLanes = el("div", "vnew-edit-mix-lanes"); // 머리 · 놓을 자리 표시는 절대 위치라 뒤에 붙여도 소리 줄 아래에 놓인다
+    d.content.appendChild(d.mixLanes);
     d.scroller.appendChild(d.content);
     tl.appendChild(d.scroller);
+    // 작업 215a: 트랙 머리(M · S · 이득 · 덕킹)와 내 소리는 타임라인 칸 아래 한 줄 전체(grid-column 1 / -1)
+    d.mixer = el("div", "vnew-edit-mixer");
+    tl.appendChild(d.mixer);
+    d.sounds = el("section", "vnew-edit-sounds");
+    tl.appendChild(d.sounds);
     root.appendChild(tl);
     d.ruler.addEventListener("pointerdown", function (event) {
       editRulerPointer(ctx, event);
@@ -12777,6 +12805,8 @@
     editSeek(ctx, ctx.t);
     editRenderPlayButton(ctx);
     editScheduleExportPoll(ctx);
+    editMixRenderSounds(ctx); // 작업 215a: 내 소리는 펼칠 때(또는 문서가 소리 트랙을 쓸 때) 불러온다
+    if (!editMixEmpty(ctx.mix)) editMixLoadSounds(ctx);
   }
 
   function editMakeVideo(ctx, slot) {
@@ -13524,6 +13554,7 @@
       ctx.clipEls.push(parts);
     });
     if (!ctx.clips.length) d.vtrack.appendChild(el("p", "vnew-edit-track-empty", "클립이 없습니다"));
+    editMixRender(ctx); // 작업 215a: 오디오 트랙 줄
     editRenderFx(ctx);
     editPlaceHead(ctx);
     editRenderTools(ctx);
@@ -13904,6 +13935,11 @@
     ctx.multi = ctx.sel >= 0 ? [ctx.sel] : []; // 작업 192: 그냥 고르기 = 그 클립 하나(Shift 범위의 기준도 이 클립)
     ctx.anchor = ctx.sel;
     if (ctx.cutPlay && ctx.cutPlay.index !== ctx.sel) ctx.cutPlay = null; // 작업 188: 다른 클립을 고르면 이 컷 재생 표시 · 멈출 자리를 지운다
+    if (ctx.mixSel) {
+      ctx.mixSel = null; // 작업 215a: 클립(또는 빈 곳)을 고르면 고른 소리 아이템은 풀린다
+      ctx.mixKey = null;
+      editMixRender(ctx);
+    }
     editSelChanged(ctx);
   }
 
@@ -14605,6 +14641,7 @@
     var after = ctx.clips[ctx.curIndex + 1];
     if (ctx.fxHold || ctx.fxLead || (after && editShiftOf(after, "audioLead"))) editFxTick(ctx, editStarts(ctx.clips)); // 작업 182
     editFollowHead(ctx);
+    editMixSync(ctx); // 작업 215a: 오디오 트랙 미리듣기(WebAudio)를 재생헤드에 맞춘다
     ctx.raf = editRaf(function () {
       editTick(ctx);
     });
@@ -14635,6 +14672,7 @@
       }
     });
     editAudioStop(ctx); // 지시서 118b: 원본 소리 요소도 함께
+    editMixStop(ctx); // 작업 215a: 오디오 트랙 미리듣기도
     if (ctx.fxHold || ctx.fxLead) editFxStop(ctx); // 작업 182: 겹쳐 재생하던 앞·다음 클립도
     editRenderPlayButton(ctx);
   }
@@ -14791,11 +14829,14 @@
     } else if (action === "split") {
       editSplitHere(ctx);
     } else if (action === "delete") {
+      if (editMixDelete(ctx)) return; // 작업 215a: 고른 소리 키 · 아이템 먼저
       var many = editSelIndexes(ctx);
       if (many.length > 1) editCommit(ctx, editRemoveMany(ctx.clips, many), { sel: -1 }); // 작업 192: 고른 컷 모두 = 실행 취소 한 단계
       else if (ctx.sel >= 0 && ctx.sel < ctx.clips.length) editCommit(ctx, editRemove(ctx.clips, ctx.sel), { sel: -1 });
     } else if (action === "mute") {
-      if (editMultiOn(ctx)) {
+      if (editMixItemRef(ctx)) {
+        editMixCommit(ctx, editMixToggle(ctx.mix, ctx.mixSel.t, "mute")); // 작업 215a: 고른 소리의 트랙 mute
+      } else if (editMultiOn(ctx)) {
         editNote(ctx, EDIT_MULTI_NOTE); // 작업 192
       } else if (ctx.sel >= 0 && ctx.sel < ctx.clips.length) {
         var next = editCloneClips(ctx.clips);
@@ -14804,6 +14845,10 @@
       }
     } else if (action === "undo" || action === "redo") {
       editUndoRedo(ctx, action === "redo");
+    } else if (action === "snap") {
+      ctx.mixSnap = ctx.mixSnap === false; // 작업 215a: 붙기 켜기 · 끄기(N)
+      editMixRenderMixer(ctx);
+      editNote(ctx, ctx.mixSnap ? "붙기 켬 (N)" : "붙기 끔 (N)");
     } else if (action === "zoomIn") {
       editSetZoom(ctx, ctx.pps * 1.25);
     } else if (action === "zoomOut") {
@@ -14861,7 +14906,9 @@
   function editCommit(ctx, clips, opts) {
     var o = opts || {};
     editHistPush(ctx.hist, o.before || editSnapshotOf(ctx.variant, ctx.clips));
+    editMixTag(ctx); // 작업 215a: 오디오 트랙도 같은 단계에(빈 mix 면 215a 전 스냅샷 그대로)
     ctx.clips = editTidyFx(clips); // 작업 182: 옮기기·삭제·자르기·늘이기 뒤 J/L 컷·디졸브 자리 규칙 정리
+    if (o.mix) ctx.mix = o.mix; // 작업 215a: 자르기(S)가 소리 아이템도 함께 나눈다
     if (o.sel !== undefined) ctx.sel = o.sel;
     if (o.sel !== undefined) ctx.multi = o.sel >= 0 ? [o.sel] : []; // 작업 192: 고른 클립을 정해 주는 변경은 한 클립으로
     editChanged(ctx);
@@ -14888,16 +14935,22 @@
   /* 작업 190: 스택은 그림체마다 따로라(ctx.hists) 되돌려도 그림체는 바뀌지 않는다. */
   function editUndoRedo(ctx, redo) {
     var current = editSnapshotOf(ctx.variant, ctx.clips);
+    if (!editMixEmpty(ctx.mix)) current.mix = editMixClone(ctx.mix); // 작업 215a: 오디오 트랙도 함께 되돌린다
     var snap = redo ? editRedo(ctx.hist, current) : editUndo(ctx.hist, current);
     if (!snap) return;
     ctx.clips = editCloneClips(snap.clips);
+    editMixRestore(ctx, snap);
     ctx.sel = -1;
     editChanged(ctx);
   }
 
   function editSplitHere(ctx) {
     var loc = editLocate(ctx.clips, ctx.t);
-    if (!loc) return;
+    var mixSplit = editMixSplitAll(ctx.mix, ctx.t); // 작업 215a: 재생헤드에 걸친 소리 아이템도 나눈다(같은 실행 취소 단계)
+    if (!loc) {
+      if (mixSplit) editMixCommit(ctx, mixSplit);
+      return;
+    }
     var max = editLimit(ctx, "maxClips", 200);
     if (ctx.clips.length >= max) {
       editNote(ctx, "클립은 " + max + "개까지 둘 수 있습니다.");
@@ -14906,10 +14959,14 @@
     var result = editSplit(ctx.clips, ctx.t, editNewId(ctx.clips), editFpsOf(ctx, loc.clip),
       editMinSource(editMinLen(ctx), editSpeedOf(loc.clip)));
     if (!result) {
+      if (mixSplit) {
+        editMixCommit(ctx, mixSplit);
+        return;
+      }
       editNote(ctx, "클립 끝에 너무 가까워 자를 수 없습니다. 재생헤드를 조금 옮겨 주세요.");
       return;
     }
-    editCommit(ctx, result.clips, { sel: result.index });
+    editCommit(ctx, result.clips, mixSplit ? { sel: result.index, mix: mixSplit } : { sel: result.index });
   }
 
   /* 고른 클립을 next 로 바꾸면 전체 길이 한도(maxTotalSeconds) 안인가. 넘으면 안내하고 false(지시서 115). */
@@ -15438,7 +15495,7 @@
     ctx.saving = true;
     ctx.saveAgain = false;
     editRenderSave(ctx);
-    api(editPath(ctx), { method: "PUT", body: JSON.stringify(editSaveBody(ctx.etag, variant, ctx.clips)) })
+    api(editPath(ctx), { method: "PUT", body: JSON.stringify(Object.assign(editSaveBody(ctx.etag, variant, ctx.clips), editMixSaveFields(ctx.mix))) })
       .then(function (res) {
         ctx.saving = false;
         ctx.saveFailed = false;
@@ -15515,6 +15572,10 @@
     editEnsureSaved(ctx)
       .then(function () {
         // 작업 190: 지금 그림체 문서를 그 그림체 etag 로(서버 작업 189)
+        if (ctx.mixStems) {
+          // 작업 215a: 스템 zip(대사만 · 배경음 · 효과음 · mix.wav)도
+          return api(editPath(ctx) + "/export", { method: "POST", body: JSON.stringify(editMixExportBody(ctx)) });
+        }
         return api(editPath(ctx) + "/export", { method: "POST", body: JSON.stringify({ etag: ctx.etag, variant: ctx.variant }) });
       })
       .then(function (res) {
@@ -15617,6 +15678,7 @@
       box.appendChild(video);
       var tools = el("div", "vnew-edit-export-tools");
       tools.appendChild(downloadLink(ex.downloadUrl || ex.videoUrl, "내려받기 (edit-" + (ex.n || 1) + ".mp4)"));
+      if (ex.stemsUrl) tools.appendChild(downloadLink(ex.stemsUrl, "스템 내려받기 (대사만 · 배경음 · 효과음 · mix.wav)")); // 작업 215a
       box.appendChild(tools);
     }
     var history = ctx.exportHistory.filter(function (h) {
@@ -15642,6 +15704,1077 @@
       box.appendChild(details);
     }
   }
+
+  /* ================================================================ 작업 215a: ⑦ 오디오 트랙(A2~A5 내 소리) 시작
+     편집 문서 audioTracks · a1(서버 edit_audio.py 와 같은 규칙). 트랙 아이템 = 사용자가 올린 소리(내 소리) 구간. 실행 취소는 몸짓마다
+     한 단계(editMixCommit — 클립 스냅샷에 mix 를 함께 둔다, 빈 mix 는 넣지 않는다). 미리듣기는 WebAudio(이득 · 페이드 · 키 · 덕킹),
+     A1 은 지금처럼 <video> 소리(트랙 이득은 volume, mute · solo 는 muted). 이 파일들은 AI 모델에 보내지 않는다. */
+  var EDIT_MIX_MAX_TRACKS = 4;
+  var EDIT_MIX_NAMES = ["A2 배경음", "A3 효과음", "A4 효과음 2", "A5 소리"];
+  var EDIT_MIX_GAIN_MIN = -60;
+  var EDIT_MIX_GAIN_MAX = 12;
+  var EDIT_MIX_DUCK_DB = 8;
+  var EDIT_MIX_ATTACK_S = 0.15;
+  var EDIT_MIX_RELEASE_S = 0.15;
+  var EDIT_MIX_MIN_S = 0.04;
+  var EDIT_MIX_SNAP_PX = 8;
+  var EDIT_MIX_LANE_PX = 44;
+  var EDIT_MIX_DRIFT_S = 0.15;
+  var EDIT_MIX_CURVE_HZ = 100;
+  var EDIT_MIX_ACCEPT = ".mp3,.wav,.m4a,.aac,.ogg,audio/mpeg,audio/wav,audio/mp4,audio/aac,audio/ogg";
+
+  function editMixDefaultA1() {
+    return { gainDb: 0, mute: false, solo: false, duck: false, duckDb: EDIT_MIX_DUCK_DB };
+  }
+
+  function editMixA1Default(a1) {
+    var d = editMixDefaultA1();
+    var a = a1 || d;
+    return Number(a.gainDb) === d.gainDb && !a.mute && !a.solo && !a.duck && Number(a.duckDb) === d.duckDb;
+  }
+
+  function editMixClamp(value, lo, hi) {
+    var v = Number(value);
+    if (!isFinite(v)) v = 0;
+    return Math.max(lo, Math.min(hi, v));
+  }
+
+  function editMixR3(value) {
+    return Math.round(Number(value) * 1000) / 1000;
+  }
+
+  function editMixCloneItem(item) {
+    var i = item || {};
+    return {
+      id: String(i.id || ""), assetId: String(i.assetId || ""), start: Number(i.start) || 0, in: Number(i.in) || 0,
+      out: Number(i.out) || 0, gainDb: Number(i.gainDb) || 0, fadeIn: Number(i.fadeIn) || 0, fadeOut: Number(i.fadeOut) || 0,
+      keys: (Array.isArray(i.keys) ? i.keys : []).map(function (k) {
+        return { t: Number(k.t) || 0, db: Number(k.db) || 0 };
+      })
+    };
+  }
+
+  /* 문서 → mix {tracks, a1}(꼴만 맞춘 사본). 옛 문서(audioTracks · a1 없음)는 빈 트랙 · 기본 A1. */
+  function editMixNorm(doc) {
+    var d = doc || {};
+    var a = d.a1 && typeof d.a1 === "object" ? d.a1 : {};
+    var a1 = editMixDefaultA1();
+    a1.gainDb = Number(a.gainDb) || 0;
+    a1.mute = a.mute === true;
+    a1.solo = a.solo === true;
+    a1.duck = a.duck === true;
+    a1.duckDb = a.duckDb === undefined || a.duckDb === null ? EDIT_MIX_DUCK_DB : Number(a.duckDb) || 0;
+    var tracks = (Array.isArray(d.audioTracks) ? d.audioTracks : []).slice(0, EDIT_MIX_MAX_TRACKS).map(function (t, index) {
+      var tr = t || {};
+      return {
+        id: String(tr.id || "a" + (index + 2)), name: String(tr.name || EDIT_MIX_NAMES[index]), mute: tr.mute === true,
+        solo: tr.solo === true, gainDb: Number(tr.gainDb) || 0,
+        items: (Array.isArray(tr.items) ? tr.items : []).map(editMixCloneItem)
+      };
+    });
+    return { tracks: tracks, a1: a1 };
+  }
+
+  function editMixClone(mix) {
+    return editMixNorm({ audioTracks: (mix || {}).tracks, a1: (mix || {}).a1 });
+  }
+
+  function editMixEmpty(mix) {
+    return !mix || (!(mix.tracks || []).length && editMixA1Default(mix.a1));
+  }
+
+  /* PUT 바디에 더할 값. 빈 mix 면 {}(215a 전과 같은 바디). */
+  function editMixSaveFields(mix) {
+    if (editMixEmpty(mix)) return {};
+    var out = { audioTracks: editMixClone(mix).tracks };
+    if (!editMixA1Default(mix.a1)) out.a1 = editMixClone(mix).a1;
+    return out;
+  }
+
+  function editMixItemLen(item) {
+    return Math.max(0, Number(item.out) - Number(item.in));
+  }
+
+  function editMixNewId(mix, prefix) {
+    var used = {};
+    (mix.tracks || []).forEach(function (t) {
+      used[t.id] = true;
+      t.items.forEach(function (i) {
+        used[i.id] = true;
+      });
+    });
+    for (var n = 1; n < 100000; n++) {
+      if (!used[prefix + n]) return prefix + n;
+    }
+    return prefix + Date.now();
+  }
+
+  function editMixAddTrack(mix) {
+    var next = editMixClone(mix);
+    var index = next.tracks.length;
+    if (index >= EDIT_MIX_MAX_TRACKS) return null;
+    var id = "a" + (index + 2);
+    if (next.tracks.some(function (t) { return t.id === id; })) id = editMixNewId(next, "tr");
+    next.tracks.push({ id: id, name: EDIT_MIX_NAMES[index], mute: false, solo: false, gainDb: 0, items: [] });
+    return next;
+  }
+
+  function editMixRemoveTrack(mix, t) {
+    var next = editMixClone(mix);
+    if (!next.tracks[t]) return null;
+    next.tracks.splice(t, 1);
+    return next;
+  }
+
+  /* 내 소리 asset 을 트랙 t 의 start(타임라인 초)에 통째로 넣는다(길이는 타임라인 한도 안으로). */
+  function editMixAddItem(mix, t, asset, start, maxTotal) {
+    var next = editMixClone(mix);
+    var track = next.tracks[t];
+    var dur = Number((asset || {}).duration) || 0;
+    if (!track || !(dur > 0)) return null;
+    var at = Math.max(0, editMixR3(start));
+    var len = Math.min(dur, (Number(maxTotal) || 300) - at);
+    if (!(len >= EDIT_MIX_MIN_S)) return null;
+    track.items.push({ id: editMixNewId(next, "s"), assetId: String(asset.assetId), start: at, in: 0, out: editMixR3(len), gainDb: 0,
+      fadeIn: 0, fadeOut: 0, keys: [] });
+    return next;
+  }
+
+  /* 끝 다듬기. edge "in": 왼쪽 끝을 타임라인 x 초로(start · in 함께), "out": 오른쪽 끝(out). 원본 0 · 길이 · 최소 길이로 묶는다. */
+  function editMixTrimItem(item, edge, x, assetDur) {
+    var it = editMixCloneItem(item);
+    var dur = Number(assetDur) > 0 ? Number(assetDur) : Number(it.out);
+    if (edge === "in") {
+      var delta = Number(x) - it.start;
+      delta = Math.max(-it.in, Math.min(it.out - it.in - EDIT_MIX_MIN_S, delta));
+      delta = Math.max(delta, -it.start);
+      it.start = editMixR3(it.start + delta);
+      it.in = editMixR3(it.in + delta);
+      it.keys = it.keys.map(function (k) { return { t: editMixR3(k.t - delta), db: k.db }; })
+        .filter(function (k) { return k.t >= 0; });
+    } else {
+      var end = Math.min(dur, Math.max(it.in + EDIT_MIX_MIN_S, it.in + (Number(x) - it.start)));
+      it.out = editMixR3(end);
+    }
+    var len = editMixItemLen(it);
+    it.keys = it.keys.filter(function (k) { return k.t <= len + 1e-6; });
+    if (it.fadeIn + it.fadeOut > len) {
+      var scale = len / (it.fadeIn + it.fadeOut);
+      it.fadeIn = editMixR3(it.fadeIn * scale);
+      it.fadeOut = editMixR3(it.fadeOut * scale);
+    }
+    return it;
+  }
+
+  function editMixSetFade(item, which, seconds) {
+    var it = editMixCloneItem(item);
+    var len = editMixItemLen(it);
+    var other = which === "in" ? it.fadeOut : it.fadeIn;
+    var v = editMixR3(editMixClamp(seconds, 0, Math.max(0, len - other)));
+    if (which === "in") it.fadeIn = v;
+    else it.fadeOut = v;
+    return it;
+  }
+
+  /* 키프레임 볼륨 꺾은선(dB, 아이템 시각): 아이템 이득 + 키(첫 키 앞 · 마지막 키 뒤는 그 값). 서버 key_points 와 같다. */
+  function editMixKeyDb(item, t) {
+    var keys = (item.keys || []).slice().sort(function (a, b) { return a.t - b.t; });
+    var g = Number(item.gainDb) || 0;
+    if (!keys.length) return g;
+    if (t <= keys[0].t) return g + keys[0].db;
+    for (var i = 1; i < keys.length; i++) {
+      if (t <= keys[i].t) {
+        var a = keys[i - 1];
+        var b = keys[i];
+        return g + (b.t <= a.t ? a.db : a.db + (b.db - a.db) * (t - a.t) / (b.t - a.t));
+      }
+    }
+    return g + keys[keys.length - 1].db;
+  }
+
+  function editMixFade(item, t) {
+    var len = editMixItemLen(item);
+    var g = 1;
+    if (item.fadeIn > 0) g = Math.min(g, Math.max(0, t / item.fadeIn));
+    if (item.fadeOut > 0) g = Math.min(g, Math.max(0, (len - t) / item.fadeOut));
+    return g;
+  }
+
+  /* 아이템 시각 t 의 선형 이득(서버 item_gain 과 같다). */
+  function editMixGainAt(item, t) {
+    return Math.pow(10, editMixKeyDb(item, t) / 20) * editMixFade(item, t);
+  }
+
+  /* Ctrl+누르기: 그 시각 지금 꺾은선 값으로 키 하나(키 db 는 아이템 이득을 뺀 값). 반환 [새 아이템, 키 번호]. */
+  function editMixKeyAdd(item, t, db) {
+    var it = editMixCloneItem(item);
+    var at = editMixR3(editMixClamp(t, 0, editMixItemLen(it)));
+    var value = db === undefined ? editMixKeyDb(it, at) - it.gainDb : Number(db);
+    it.keys.push({ t: at, db: Math.round(editMixClamp(value, EDIT_MIX_GAIN_MIN, EDIT_MIX_GAIN_MAX) * 100) / 100 });
+    it.keys.sort(function (a, b) { return a.t - b.t; });
+    for (var k = 0; k < it.keys.length; k++) if (it.keys[k].t === at) return [it, k];
+    return [it, it.keys.length - 1];
+  }
+
+  function editMixKeyMove(item, k, t, db) {
+    var it = editMixCloneItem(item);
+    if (!it.keys[k]) return it;
+    var lo = k > 0 ? it.keys[k - 1].t : 0;
+    var hi = k + 1 < it.keys.length ? it.keys[k + 1].t : editMixItemLen(it);
+    it.keys[k] = { t: editMixR3(editMixClamp(t, lo, hi)), db: Math.round(editMixClamp(db, EDIT_MIX_GAIN_MIN, EDIT_MIX_GAIN_MAX) * 100) / 100 };
+    return it;
+  }
+
+  function editMixKeyRemove(item, k) {
+    var it = editMixCloneItem(item);
+    it.keys.splice(k, 1);
+    return it;
+  }
+
+  /* 재생헤드 at 에서 모든 트랙의 걸친 아이템을 둘로(키 · 페이드는 나눠 갖는다). 바뀐 것이 없으면 null. */
+  function editMixSplitAll(mix, at) {
+    var next = editMixClone(mix);
+    var changed = false;
+    next.tracks.forEach(function (track) {
+      var out = [];
+      track.items.forEach(function (it) {
+        var cut = Number(at) - it.start;
+        var len = editMixItemLen(it);
+        if (cut < EDIT_MIX_MIN_S || cut > len - EDIT_MIX_MIN_S) {
+          out.push(it);
+          return;
+        }
+        changed = true;
+        var left = editMixCloneItem(it);
+        var right = editMixCloneItem(it);
+        left.out = editMixR3(it.in + cut);
+        left.fadeIn = Math.min(it.fadeIn, cut);
+        left.fadeOut = 0;
+        left.keys = it.keys.filter(function (k) { return k.t <= cut; });
+        right.id = editMixNewId({ tracks: [{ id: "", items: out.concat([left]).concat(track.items) }].concat(next.tracks) }, "s");
+        right.start = editMixR3(it.start + cut);
+        right.in = left.out;
+        right.fadeIn = 0;
+        right.fadeOut = Math.min(it.fadeOut, len - cut);
+        right.keys = it.keys.filter(function (k) { return k.t >= cut; }).map(function (k) {
+          return { t: editMixR3(k.t - cut), db: k.db };
+        });
+        var level = editMixKeyDb(it, cut) - it.gainDb;
+        if (it.keys.length) {
+          left.keys.push({ t: editMixR3(cut), db: Math.round(level * 100) / 100 });
+          right.keys.unshift({ t: 0, db: Math.round(level * 100) / 100 });
+        }
+        out.push(left, right);
+      });
+      track.items = out;
+    });
+    return changed ? next : null;
+  }
+
+  /* 붙기(N): 가장 가까운 점이 tol 초 안이면 그 점, 아니면 value. */
+  function editMixSnap(value, points, tol) {
+    var best = value;
+    var gap = tol;
+    (points || []).forEach(function (p) {
+      var d = Math.abs(p - value);
+      if (d <= gap) {
+        gap = d;
+        best = p;
+      }
+    });
+    return best;
+  }
+
+  /* 붙을 점: 클립 경계 · 재생헤드 · 다른 아이템 양 끝(skipId 는 뺀다). */
+  function editMixSnapPoints(clips, mix, playhead, skipId) {
+    var info = editStarts(clips || []);
+    var points = info.starts.slice();
+    points.push(info.total, Number(playhead) || 0, 0);
+    (mix.tracks || []).forEach(function (track) {
+      track.items.forEach(function (it) {
+        if (it.id === skipId) return;
+        points.push(it.start, it.start + editMixItemLen(it));
+      });
+    });
+    return points;
+  }
+
+  /* mute · solo(서버 audible 과 같다): solo 가 하나라도 있으면 solo 인 것만. */
+  function editMixAudible(mix) {
+    var tracks = mix.tracks || [];
+    var a1 = mix.a1 || editMixDefaultA1();
+    var anySolo = a1.solo || tracks.some(function (t) { return t.solo; });
+    return {
+      a1: anySolo ? !!a1.solo : !a1.mute,
+      tracks: tracks.map(function (t) { return anySolo ? !!t.solo : !t.mute; })
+    };
+  }
+
+  function editMixToggle(mix, t, key) {
+    var next = editMixClone(mix);
+    var target = t < 0 ? next.a1 : next.tracks[t];
+    if (!target) return null;
+    target[key] = !target[key];
+    return next;
+  }
+
+  /* 덕킹 꺾은선 [[초, dB]](서버 duck_points 와 같다). */
+  function editMixDuckPoints(spans, depth) {
+    var gapJoin = EDIT_MIX_ATTACK_S + EDIT_MIX_RELEASE_S;
+    var list = (spans || []).filter(function (s) { return s[1] > s[0]; }).map(function (s) { return [Number(s[0]), Number(s[1])]; })
+      .sort(function (a, b) { return a[0] - b[0]; });
+    var merged = [];
+    list.forEach(function (s) {
+      var last = merged[merged.length - 1];
+      if (last && s[0] <= last[1] + gapJoin + 1e-9) last[1] = Math.max(last[1], s[1]);
+      else merged.push(s.slice());
+    });
+    if (!(Number(depth) > 0) || !merged.length) return [];
+    var pts = [];
+    merged.forEach(function (s) {
+      var down = Math.max(0, s[0] - EDIT_MIX_ATTACK_S);
+      if (pts.length && down <= pts[pts.length - 1][0]) down = pts[pts.length - 1][0];
+      if (!pts.length || down > pts[pts.length - 1][0] || pts[pts.length - 1][1] !== 0) pts.push([down, 0]);
+      pts.push([Math.max(s[0], down), -depth], [s[1], -depth], [s[1] + EDIT_MIX_RELEASE_S, 0]);
+    });
+    return pts;
+  }
+
+  function editMixPointsAt(pts, t) {
+    if (!pts.length) return 0;
+    if (t <= pts[0][0]) return pts[0][1];
+    for (var i = 1; i < pts.length; i++) {
+      if (t <= pts[i][0]) {
+        var a = pts[i - 1];
+        var b = pts[i];
+        return b[0] <= a[0] ? a[1] : a[1] + (b[1] - a[1]) * (t - a[0]) / (b[0] - a[0]);
+      }
+    }
+    return pts[pts.length - 1][1];
+  }
+
+  /* 대사 구간(타임라인 초): 클립마다 재료 소리 구간(작업 185 soundRanges, 원본 초)을 화면 구간 안으로 옮긴다. */
+  function editMixDialogueSpans(clips, rangesOf) {
+    var info = editStarts(clips || []);
+    var out = [];
+    (clips || []).forEach(function (clip, index) {
+      if (clip.muted) return;
+      var speed = editSpeedOf(clip);
+      var shift = editSlipOf(clip) * speed;
+      (rangesOf(clip) || []).forEach(function (r) {
+        var a = Math.max(Number(clip.in), Number(r[0]) + shift);
+        var b = Math.min(Number(clip.out), Number(r[1]) + shift);
+        if (b > a) out.push([info.starts[index] + (a - Number(clip.in)) / speed, info.starts[index] + (b - Number(clip.in)) / speed]);
+      });
+    });
+    return out;
+  }
+
+  /* ---- 상태 · 실행 취소 ---- */
+
+  function editMixSnapshot(ctx) {
+    var snap = editSnapshotOf(ctx.variant, ctx.clips);
+    if (!editMixEmpty(ctx.mix)) snap.mix = editMixClone(ctx.mix);
+    return snap;
+  }
+
+  /* 클립 몸짓(editCommit)이 막 쌓은 스냅샷에 지금 mix 를 붙인다(빈 mix 면 붙이지 않는다). */
+  function editMixTag(ctx) {
+    var last = ctx.hist.undo[ctx.hist.undo.length - 1];
+    if (last && last.mix === undefined && !editMixEmpty(ctx.mix)) last.mix = editMixClone(ctx.mix);
+  }
+
+  /* 오디오 몸짓 하나 = 실행 취소 한 단계. */
+  function editMixCommit(ctx, next, sel) {
+    if (!next) return;
+    editHistPush(ctx.hist, editMixSnapshot(ctx));
+    ctx.mix = next;
+    if (sel !== undefined) ctx.mixSel = sel;
+    ctx.mixKey = null;
+    editChanged(ctx);
+  }
+
+  function editMixRestore(ctx, snap) {
+    ctx.mix = snap && snap.mix ? editMixClone(snap.mix) : editMixNorm({});
+    ctx.mixSel = null;
+    ctx.mixKey = null;
+  }
+
+  function editMixItemRef(ctx) {
+    var s = ctx.mixSel;
+    var track = s && ctx.mix.tracks[s.t];
+    var item = track && track.items[s.i];
+    return item ? { track: track, item: item, t: s.t, i: s.i } : null;
+  }
+
+  function editMixReplaceItem(ctx, t, i, item) {
+    var next = editMixClone(ctx.mix);
+    next.tracks[t].items[i] = item;
+    return next;
+  }
+
+  /* Delete: 고른 키 → 고른 아이템 순. 지웠으면 true(클립 삭제로 넘어가지 않는다). */
+  function editMixDelete(ctx) {
+    var ref = editMixItemRef(ctx);
+    if (!ref) return false;
+    if (ctx.mixKey && ctx.mixKey.t === ref.t && ctx.mixKey.i === ref.i && ref.item.keys[ctx.mixKey.k]) {
+      editMixCommit(ctx, editMixReplaceItem(ctx, ref.t, ref.i, editMixKeyRemove(ref.item, ctx.mixKey.k)));
+      return true;
+    }
+    var next = editMixClone(ctx.mix);
+    next.tracks[ref.t].items.splice(ref.i, 1);
+    editMixCommit(ctx, next, null);
+    return true;
+  }
+
+  function editMixSnapTol(ctx) {
+    return ctx.mixSnap === false ? 0 : EDIT_MIX_SNAP_PX / Math.max(1, ctx.pps || 1);
+  }
+
+  /* ---- 그리기 ---- */
+
+  function editMixRender(ctx) {
+    var d = ctx.dom;
+    if (!d.mixLanes) return;
+    clear(d.mixLanes);
+    (d.mixLabelEls || []).forEach(function (node) {
+      if (node.parentNode) node.parentNode.removeChild(node);
+    });
+    d.mixLabelEls = [];
+    var tracks = ctx.mix.tracks;
+    var aud = editMixAudible(ctx.mix);
+    if (d.labels) {
+      if (tracks.length) d.labels.classList.add("has-mix");
+      else d.labels.classList.remove("has-mix");
+    }
+    tracks.forEach(function (track, t) {
+      var label = el("span", "vnew-edit-label is-mix" + (aud.tracks[t] ? "" : " is-off"), track.name.split(" ")[0]);
+      label.title = track.name;
+      d.labels.appendChild(label);
+      d.mixLabelEls.push(label);
+      var lane = el("div", "vnew-edit-track is-mix" + (aud.tracks[t] ? "" : " is-off"));
+      lane.setAttribute("data-track", String(t));
+      track.items.forEach(function (item, i) {
+        lane.appendChild(editMixItemBox(ctx, t, i, item));
+      });
+      d.mixLanes.appendChild(lane);
+    });
+    editMixRenderMixer(ctx);
+    editMixQueuePeaks(ctx);
+  }
+
+  function editMixItemBox(ctx, t, i, item) {
+    var pps = ctx.pps || 1;
+    var len = editMixItemLen(item);
+    var sel = ctx.mixSel && ctx.mixSel.t === t && ctx.mixSel.i === i;
+    var box = el("div", "vnew-edit-mix-item" + (sel ? " is-selected" : ""));
+    box.style.left = Math.round(item.start * pps * 10) / 10 + "px";
+    box.style.width = Math.max(4, Math.round(len * pps * 10) / 10) + "px";
+    var asset = (ctx.sounds.byId || {})[item.assetId] || {};
+    box.title = (asset.name || "소리") + " — 끌어 옮기기 · Alt+끌기 복제 · Ctrl+누르기 키 · Delete 지우기";
+    var peaks = ctx.sounds.peaks[item.assetId];
+    var path = peaks ? editPeakPath({ in: item.in, out: item.out }, { perSecond: peaks.perSecond, values: peaks.values }, 0) : null;
+    if (path && typeof document.createElementNS === "function") {
+      var svg = document.createElementNS(EDIT_SVG_NS, "svg");
+      svg.setAttribute("class", "vnew-edit-wave");
+      svg.setAttribute("viewBox", "0 0 " + path.n + " 100");
+      svg.setAttribute("preserveAspectRatio", "none");
+      svg.setAttribute("aria-hidden", "true");
+      var line = document.createElementNS(EDIT_SVG_NS, "path");
+      line.setAttribute("d", path.d);
+      svg.appendChild(line);
+      box.appendChild(svg);
+    }
+    box.appendChild(el("span", "vnew-edit-mix-name", asset.name || "소리"));
+    // 고무줄(볼륨): 위 = +12dB, 아래 = −60dB. 키는 점.
+    var band = el("div", "vnew-edit-mix-band");
+    var points = [[0, editMixKeyDb(item, 0)]].concat(item.keys.map(function (k) { return [k.t, editMixKeyDb(item, k.t)]; }))
+      .concat([[len, editMixKeyDb(item, len)]]);
+    if (typeof document.createElementNS === "function") {
+      var bsvg = document.createElementNS(EDIT_SVG_NS, "svg");
+      bsvg.setAttribute("class", "vnew-edit-mix-rubber");
+      bsvg.setAttribute("viewBox", "0 0 1000 100");
+      bsvg.setAttribute("preserveAspectRatio", "none");
+      bsvg.setAttribute("aria-hidden", "true");
+      var poly = document.createElementNS(EDIT_SVG_NS, "polyline");
+      poly.setAttribute("points", points.map(function (p) {
+        return Math.round((len ? p[0] / len : 0) * 1000) + "," + Math.round(editMixDbY(p[1]) * 100);
+      }).join(" "));
+      bsvg.appendChild(poly);
+      band.appendChild(bsvg);
+    }
+    item.keys.forEach(function (k, n) {
+      var dot = el("span", "vnew-edit-mix-key" + (ctx.mixKey && ctx.mixKey.t === t && ctx.mixKey.i === i && ctx.mixKey.k === n ? " is-selected" : ""));
+      dot.style.left = Math.round(k.t * pps * 10) / 10 + "px";
+      dot.style.top = Math.round(editMixDbY(item.gainDb + k.db) * 1000) / 10 + "%";
+      dot.title = "키 " + (item.gainDb + k.db).toFixed(1) + " dB — 끌어 옮기기 · Delete 지우기";
+      dot.addEventListener("pointerdown", function (event) {
+        editMixKeyPointer(ctx, t, i, n, event);
+      });
+      band.appendChild(dot);
+    });
+    box.appendChild(band);
+    ["in", "out"].forEach(function (which) {
+      var fade = el("span", "vnew-edit-mix-fade is-" + which);
+      var secs = which === "in" ? item.fadeIn : item.fadeOut;
+      fade.style.width = Math.max(10, Math.round(secs * pps)) + "px";
+      fade.title = (which === "in" ? "페이드 인 " : "페이드 아웃 ") + secs.toFixed(2) + "초 — 끌어 바꾸기";
+      fade.addEventListener("pointerdown", function (event) {
+        editMixFadePointer(ctx, t, i, which, event);
+      });
+      box.appendChild(fade);
+      var edge = el("span", "vnew-edit-mix-edge is-" + which);
+      edge.title = which === "in" ? "시작 다듬기" : "끝 다듬기";
+      edge.addEventListener("pointerdown", function (event) {
+        editMixEdgePointer(ctx, t, i, which, event);
+      });
+      box.appendChild(edge);
+    });
+    box.addEventListener("pointerdown", function (event) {
+      editMixItemPointer(ctx, t, i, event);
+    });
+    return box;
+  }
+
+  function editMixDbY(db) {
+    return (EDIT_MIX_GAIN_MAX - editMixClamp(db, EDIT_MIX_GAIN_MIN, EDIT_MIX_GAIN_MAX)) / (EDIT_MIX_GAIN_MAX - EDIT_MIX_GAIN_MIN);
+  }
+
+  function editMixYDb(frac) {
+    return EDIT_MIX_GAIN_MAX - editMixClamp(frac, 0, 1) * (EDIT_MIX_GAIN_MAX - EDIT_MIX_GAIN_MIN);
+  }
+
+  function editMixPick(ctx, t, i) {
+    ctx.mixSel = t === null ? null : { t: t, i: i };
+    ctx.mixKey = null;
+    if (t !== null && ctx.sel >= 0) {
+      ctx.sel = -1;
+      ctx.multi = [];
+      editRenderTimeline(ctx);
+      return;
+    }
+    editMixRender(ctx);
+  }
+
+  /* ---- 끌기(편집 포인터 도우미 editTrack 을 쓴다) ---- */
+
+  function editMixItemPointer(ctx, t, i, event) {
+    if (!editPointerOk(ctx, event)) return;
+    if (event.stopPropagation) event.stopPropagation();
+    var track = ctx.mix.tracks[t];
+    var item = track && track.items[i];
+    if (!item) return;
+    if (event.ctrlKey || event.metaKey) {
+      // Ctrl+누르기: 고무줄 키 더하기(그 시각 지금 값)
+      var x = editContentX(ctx, event) / (ctx.pps || 1) - item.start;
+      var made = editMixKeyAdd(item, x);
+      editMixCommit(ctx, editMixReplaceItem(ctx, t, i, made[0]), { t: t, i: i });
+      ctx.mixKey = { t: t, i: i, k: made[1] };
+      editMixRender(ctx);
+      return;
+    }
+    var copy = !!event.altKey;
+    var before = editMixSnapshot(ctx);
+    editMixPick(ctx, t, i);
+    var box = event.currentTarget || event.target;
+    editTrack(ctx, box, event, {
+      threshold: 3,
+      move: function (dx) {
+        var at = Math.max(0, item.start + dx / (ctx.pps || 1));
+        var len = editMixItemLen(item);
+        var pts = editMixSnapPoints(ctx.clips, ctx.mix, ctx.t, copy ? "" : item.id);
+        var tol = editMixSnapTol(ctx);
+        var a = editMixSnap(at, pts, tol);
+        var b = editMixSnap(at + len, pts, tol);
+        at = Math.abs(a - at) <= Math.abs(b - at - len) ? a : b - len;
+        box.style.left = Math.round(Math.max(0, at) * (ctx.pps || 1) * 10) / 10 + "px";
+        box._mixAt = Math.max(0, editMixR3(at));
+      },
+      end: function (_dx, moved) {
+        if (!moved || box._mixAt === undefined) {
+          editMixRender(ctx);
+          return;
+        }
+        var next = editMixClone(ctx.mix);
+        var moving = editMixCloneItem(item);
+        moving.start = box._mixAt;
+        var sel;
+        if (copy) {
+          moving.id = editMixNewId(next, "s");
+          next.tracks[t].items.push(moving);
+          sel = { t: t, i: next.tracks[t].items.length - 1 };
+        } else {
+          next.tracks[t].items[i] = moving;
+          sel = { t: t, i: i };
+        }
+        editHistPush(ctx.hist, before);
+        ctx.mix = next;
+        ctx.mixSel = sel;
+        editChanged(ctx);
+      }
+    });
+  }
+
+  function editMixEdgePointer(ctx, t, i, edge, event) {
+    if (!editPointerOk(ctx, event)) return;
+    if (event.stopPropagation) event.stopPropagation();
+    var item = ctx.mix.tracks[t].items[i];
+    var dur = Number(((ctx.sounds.byId || {})[item.assetId] || {}).duration) || item.out;
+    var x0 = edge === "in" ? item.start : item.start + editMixItemLen(item);
+    var target = event.currentTarget || event.target;
+    var box = target.parentNode;
+    var draft = null;
+    editTrack(ctx, target, event, {
+      threshold: 1,
+      move: function (dx) {
+        var x = editMixSnap(x0 + dx / (ctx.pps || 1), editMixSnapPoints(ctx.clips, ctx.mix, ctx.t, item.id), editMixSnapTol(ctx));
+        draft = editMixTrimItem(item, edge, x, dur);
+        if (box && box.style) {
+          box.style.left = Math.round(draft.start * (ctx.pps || 1) * 10) / 10 + "px";
+          box.style.width = Math.max(4, Math.round(editMixItemLen(draft) * (ctx.pps || 1) * 10) / 10) + "px";
+        }
+      },
+      end: function (_dx, moved) {
+        if (moved && draft) editMixCommit(ctx, editMixReplaceItem(ctx, t, i, draft), { t: t, i: i });
+        else editMixRender(ctx);
+      }
+    });
+  }
+
+  function editMixFadePointer(ctx, t, i, which, event) {
+    if (!editPointerOk(ctx, event)) return;
+    if (event.stopPropagation) event.stopPropagation();
+    var item = ctx.mix.tracks[t].items[i];
+    var start = which === "in" ? item.fadeIn : item.fadeOut;
+    var target = event.currentTarget || event.target;
+    var draft = null;
+    editTrack(ctx, target, event, {
+      threshold: 1,
+      move: function (dx) {
+        draft = editMixSetFade(item, which, start + (which === "in" ? dx : -dx) / (ctx.pps || 1));
+        if (target.style) target.style.width = Math.max(10, Math.round((which === "in" ? draft.fadeIn : draft.fadeOut) * (ctx.pps || 1))) + "px";
+      },
+      end: function (_dx, moved) {
+        if (moved && draft) editMixCommit(ctx, editMixReplaceItem(ctx, t, i, draft), { t: t, i: i });
+        else editMixRender(ctx);
+      }
+    });
+  }
+
+  function editMixKeyPointer(ctx, t, i, k, event) {
+    if (!editPointerOk(ctx, event)) return;
+    if (event.stopPropagation) event.stopPropagation();
+    var item = ctx.mix.tracks[t].items[i];
+    var key = item.keys[k];
+    var target = event.currentTarget || event.target;
+    var band = target.parentNode;
+    var rect = band && band.getBoundingClientRect ? band.getBoundingClientRect() : { top: 0, height: 0 };
+    var height = Number(rect.height) || 1;
+    var y0 = Number(event.clientY) || 0;
+    var draft = null;
+    ctx.mixSel = { t: t, i: i };
+    ctx.mixKey = { t: t, i: i, k: k };
+    editTrack(ctx, target, event, {
+      threshold: 1,
+      move: function (dx, ev) {
+        var frac = editMixDbY(item.gainDb + key.db) + ((Number(ev.clientY) || 0) - y0) / height;
+        draft = editMixKeyMove(item, k, key.t + dx / (ctx.pps || 1), editMixYDb(frac) - item.gainDb);
+        if (target.style) {
+          target.style.left = Math.round(draft.keys[k].t * (ctx.pps || 1) * 10) / 10 + "px";
+          target.style.top = Math.round(editMixDbY(item.gainDb + draft.keys[k].db) * 1000) / 10 + "%";
+        }
+      },
+      end: function (_dx, moved) {
+        if (moved && draft) {
+          editMixCommit(ctx, editMixReplaceItem(ctx, t, i, draft), { t: t, i: i });
+          ctx.mixKey = { t: t, i: i, k: k };
+        }
+        editMixRender(ctx);
+      }
+    });
+  }
+
+  /* ---- 믹서(트랙 머리: 이름 · M · S · 이득, A1 덕킹) · 고른 아이템 ---- */
+
+  function editMixButton(text, title, on, onClick) {
+    var b = el("button", "vnew-edit-mix-btn" + (on ? " is-on" : ""), text);
+    b.type = "button";
+    b.title = title;
+    b.setAttribute("aria-pressed", on ? "true" : "false");
+    b.addEventListener("click", onClick);
+    return b;
+  }
+
+  function editMixGainInput(value, title, onLive, onDone) {
+    var input = el("input", "vnew-edit-mix-gain");
+    input.type = "range";
+    input.min = String(EDIT_MIX_GAIN_MIN);
+    input.max = String(EDIT_MIX_GAIN_MAX);
+    input.step = "0.5";
+    input.value = String(value);
+    input.title = title;
+    input.setAttribute("aria-label", title);
+    input.addEventListener("input", function () {
+      onLive(Number(input.value));
+    });
+    input.addEventListener("change", function () {
+      onDone(Number(input.value)); // 몸짓 하나(놓을 때) = 실행 취소 한 단계
+    });
+    return input;
+  }
+
+  function editMixRow(ctx, t, label, target, aud) {
+    var row = el("div", "vnew-edit-mix-row" + (aud ? "" : " is-off"));
+    row.appendChild(el("span", "vnew-edit-mix-title", label));
+    row.appendChild(editMixButton("M", label + " 소리 끄기(M)", !!target.mute, function () {
+      editMixCommit(ctx, editMixToggle(ctx.mix, t, "mute"));
+      if (t < 0) editSeek(ctx, ctx.t);
+    }));
+    row.appendChild(editMixButton("S", label + " 이 트랙만 듣기(solo)", !!target.solo, function () {
+      editMixCommit(ctx, editMixToggle(ctx.mix, t, "solo"));
+      if (t < 0) editSeek(ctx, ctx.t);
+    }));
+    var shown = el("span", "vnew-edit-mix-db", Number(target.gainDb).toFixed(1) + " dB");
+    row.appendChild(editMixGainInput(target.gainDb, label + " 트랙 이득(dB)", function (v) {
+      shown.textContent = v.toFixed(1) + " dB";
+    }, function (v) {
+      var next = editMixClone(ctx.mix);
+      (t < 0 ? next.a1 : next.tracks[t]).gainDb = v;
+      editMixCommit(ctx, next);
+    }));
+    row.appendChild(shown);
+    return row;
+  }
+
+  function editMixRenderMixer(ctx) {
+    var box = ctx.dom.mixer;
+    if (!box) return;
+    clear(box);
+    var aud = editMixAudible(ctx.mix);
+    var a1 = ctx.mix.a1;
+    var r1 = editMixRow(ctx, -1, "A1 대사", a1, aud.a1);
+    var duck = el("label", "vnew-edit-mix-duck");
+    var check = el("input");
+    check.type = "checkbox";
+    check.checked = !!a1.duck;
+    check.addEventListener("change", function () {
+      editMixCommit(ctx, editMixToggle(ctx.mix, -1, "duck"));
+    });
+    duck.appendChild(check);
+    duck.appendChild(el("span", "", "자동 덕킹"));
+    var depth = el("input", "vnew-edit-mix-duckdb");
+    depth.type = "number";
+    depth.min = "0";
+    depth.max = "40";
+    depth.step = "1";
+    depth.value = String(a1.duckDb);
+    depth.title = "대사가 나오는 동안 배경음 · 효과음을 낮출 dB(공격 · 놓기 0.15초)";
+    depth.addEventListener("change", function () {
+      var next = editMixClone(ctx.mix);
+      next.a1.duckDb = editMixClamp(depth.value, 0, 40);
+      editMixCommit(ctx, next);
+    });
+    duck.appendChild(depth);
+    duck.appendChild(el("span", "", "dB"));
+    r1.appendChild(duck);
+    box.appendChild(r1);
+    ctx.mix.tracks.forEach(function (track, t) {
+      var row = editMixRow(ctx, t, track.name, track, aud.tracks[t]);
+      row.appendChild(editMixButton("✕", track.name + " 트랙 지우기", false, function () {
+        if (track.items.length && !editConfirm(track.name + " 트랙과 소리 " + track.items.length + "개를 지울까요?")) return;
+        editMixCommit(ctx, editMixRemoveTrack(ctx.mix, t), null);
+      }));
+      box.appendChild(row);
+    });
+    var bar = el("div", "vnew-edit-mix-bar");
+    var add = editMixButton("+ 오디오 트랙", "배경음 · 효과음 트랙 더하기(4개까지)", false, function () {
+      editMixCommit(ctx, editMixAddTrack(ctx.mix));
+    });
+    add.disabled = ctx.mix.tracks.length >= EDIT_MIX_MAX_TRACKS;
+    bar.appendChild(add);
+    bar.appendChild(editMixButton("🧲 붙기", "클립 경계 · 재생헤드 · 다른 소리에 붙기 (N)", ctx.mixSnap !== false, function () {
+      editDo(ctx, "snap");
+    }));
+    bar.appendChild(editMixButton("스템도 함께", "내보낼 때 대사만 · 배경음 · 효과음 · mix.wav 를 zip 으로도(Premiere 마무리용)", !!ctx.mixStems, function () {
+      ctx.mixStems = !ctx.mixStems;
+      editMixRenderMixer(ctx);
+    }));
+    var ref = editMixItemRef(ctx);
+    if (ref) {
+      var it = ref.item;
+      var info = el("span", "vnew-edit-mix-sel", "고른 소리 " + editMixItemLen(it).toFixed(2) + "초");
+      bar.appendChild(info);
+      var gshown = el("span", "vnew-edit-mix-db", it.gainDb.toFixed(1) + " dB");
+      bar.appendChild(editMixGainInput(it.gainDb, "고른 소리 이득(dB)", function (v) {
+        gshown.textContent = v.toFixed(1) + " dB";
+      }, function (v) {
+        var item = editMixCloneItem(it);
+        item.gainDb = v;
+        editMixCommit(ctx, editMixReplaceItem(ctx, ref.t, ref.i, item), { t: ref.t, i: ref.i });
+      }));
+      bar.appendChild(gshown);
+    }
+    box.appendChild(bar);
+  }
+
+  /* POST /edit/export 바디(스템을 고른 때만 — 그 밖은 190 바디 그대로). */
+  function editMixExportBody(ctx) {
+    return { etag: ctx.etag, variant: ctx.variant, stems: true };
+  }
+
+  /* ---- 내 소리(올리기 · 목록 · 넣기 · 지우기) ---- */
+
+  function editMixSoundsPath(ctx) {
+    return editPath(ctx) + "/audio-assets";
+  }
+
+  function editMixLoadSounds(ctx) {
+    ctx.sounds.loaded = true;
+    return api(editMixSoundsPath(ctx)).then(function (res) {
+      if (!editAlive(ctx)) return;
+      editMixAbsorbSounds(ctx, res);
+    }, function (err) {
+      ctx.sounds.error = errMessage(err);
+      editMixRenderSounds(ctx);
+    });
+  }
+
+  function editMixAbsorbSounds(ctx, res) {
+    ctx.sounds.list = Array.isArray((res || {}).assets) ? res.assets : [];
+    ctx.sounds.byId = {};
+    ctx.sounds.list.forEach(function (a) {
+      ctx.sounds.byId[a.assetId] = a;
+    });
+    ctx.sounds.error = "";
+    editMixRenderSounds(ctx);
+    editMixRender(ctx);
+  }
+
+  function editMixRenderSounds(ctx) {
+    var box = ctx.dom.sounds;
+    if (!box) return;
+    clear(box);
+    var head = el("button", "vnew-edit-mix-btn vnew-edit-sounds-title", (ctx.sounds.open ? "▾ " : "▸ ") + "내 소리 (배경음 · 효과음)");
+    head.type = "button";
+    head.setAttribute("aria-expanded", ctx.sounds.open ? "true" : "false");
+    head.addEventListener("click", function () {
+      ctx.sounds.open = !ctx.sounds.open;
+      if (ctx.sounds.open && !ctx.sounds.loaded) editMixLoadSounds(ctx);
+      editMixRenderSounds(ctx);
+    });
+    box.appendChild(head);
+    if (!ctx.sounds.open) return;
+    box.appendChild(el("p", "vnew-hint", "배경음 · 효과음 파일(mp3 · wav · m4a · aac · ogg, 50MB · 10분까지)을 올려 오디오 트랙에 넣습니다. AI 로 보내지 않습니다."));
+    var file = el("input", "vnew-edit-sounds-file");
+    file.type = "file";
+    file.accept = EDIT_MIX_ACCEPT;
+    file.addEventListener("change", function () {
+      var f = file.files && file.files[0];
+      if (f) editMixUpload(ctx, f);
+    });
+    box.appendChild(file);
+    if (ctx.sounds.busy) box.appendChild(el("span", "vnew-hint", "올리는 중…"));
+    if (ctx.sounds.error) box.appendChild(el("p", "vnew-error", ctx.sounds.error));
+    var list = el("ul", "vnew-edit-sounds-list");
+    ctx.sounds.list.forEach(function (a) {
+      var row = el("li", "vnew-edit-sounds-item");
+      row.appendChild(el("span", "vnew-edit-sounds-name", a.name + " · " + editTimeText(Number(a.duration) || 0, false)));
+      row.appendChild(editMixButton("넣기", "재생헤드 자리에 넣기(고른 소리의 트랙, 없으면 첫 트랙)", false, function () {
+        editMixInsert(ctx, a);
+      }));
+      var del = editMixButton("지우기", a.used ? "타임라인에서 쓰는 소리는 지울 수 없습니다" : "내 소리에서 지우기", false, function () {
+        editMixDeleteSound(ctx, a);
+      });
+      del.disabled = a.used === true;
+      row.appendChild(del);
+      list.appendChild(row);
+    });
+    box.appendChild(list);
+  }
+
+  function editMixUpload(ctx, f) {
+    var form = new FormData();
+    form.append("file", f, f.name);
+    ctx.sounds.busy = true;
+    ctx.sounds.error = "";
+    editMixRenderSounds(ctx);
+    api(editMixSoundsPath(ctx), { method: "POST", body: form }).then(function (res) {
+      ctx.sounds.busy = false;
+      if (editAlive(ctx)) editMixAbsorbSounds(ctx, res);
+    }, function (err) {
+      ctx.sounds.busy = false;
+      ctx.sounds.error = "올리지 못했습니다: " + errMessage(err);
+      editMixRenderSounds(ctx);
+    });
+  }
+
+  function editMixInsert(ctx, asset) {
+    var next = ctx.mix.tracks.length ? editMixClone(ctx.mix) : editMixAddTrack(ctx.mix);
+    var t = ctx.mixSel && next.tracks[ctx.mixSel.t] ? ctx.mixSel.t : 0;
+    var made = editMixAddItem(next, t, asset, ctx.t, editLimit(ctx, "maxTotalSeconds", 300));
+    if (!made) {
+      editNote(ctx, "재생헤드 자리에 넣을 수 없습니다(타임라인 한도).");
+      return;
+    }
+    editMixCommit(ctx, made, { t: t, i: made.tracks[t].items.length - 1 });
+  }
+
+  function editMixDeleteSound(ctx, asset) {
+    if (!editConfirm("‘" + asset.name + "’ 소리를 지울까요?")) return;
+    api(editMixSoundsPath(ctx) + "/" + encodeURIComponent(asset.assetId), { method: "DELETE" }).then(function (res) {
+      if (editAlive(ctx)) editMixAbsorbSounds(ctx, res);
+    }, function (err) {
+      ctx.sounds.error = errMessage(err);
+      editMixRenderSounds(ctx);
+    });
+  }
+
+  /* 쓰는 소리의 파형 피크를 하나씩 받는다. */
+  function editMixQueuePeaks(ctx) {
+    if (ctx.sounds.peakBusy) return;
+    var want = null;
+    ctx.mix.tracks.forEach(function (track) {
+      track.items.forEach(function (it) {
+        if (!want && !ctx.sounds.peaks[it.assetId] && !ctx.sounds.peakFail[it.assetId]) want = it.assetId;
+      });
+    });
+    if (!want) return;
+    ctx.sounds.peakBusy = true;
+    api(editMixSoundsPath(ctx) + "/" + encodeURIComponent(want)).then(function (res) {
+      ctx.sounds.peakBusy = false;
+      ctx.sounds.peaks[want] = (res && res.peaks) || { perSecond: 20, values: [] };
+      if (res && res.asset) ctx.sounds.byId[want] = res.asset;
+      if (editAlive(ctx)) editMixRender(ctx);
+    }, function () {
+      ctx.sounds.peakBusy = false;
+      ctx.sounds.peakFail[want] = true;
+      if (editAlive(ctx)) editMixQueuePeaks(ctx);
+    });
+  }
+
+  /* ---- 미리듣기(WebAudio) ---- */
+
+  function editMixBuffer(ctx, ac, assetId) {
+    var cache = ctx.sounds.buffers;
+    if (cache[assetId]) return cache[assetId];
+    cache[assetId] = fetch(editMixSoundsPath(ctx) + "/" + encodeURIComponent(assetId) + "/file", {
+      headers: { Authorization: "Bearer " + token() }
+    }).then(function (response) {
+      if (!response.ok) throw new Error("audio " + response.status);
+      return response.arrayBuffer();
+    }).then(function (data) {
+      return new Promise(function (resolve, reject) {
+        var p = ac.decodeAudioData(data, resolve, reject);
+        if (p && p.then) p.then(resolve, reject);
+      });
+    });
+    cache[assetId].catch(function () {
+      delete cache[assetId];
+    });
+    return cache[assetId];
+  }
+
+  function editMixCurve(fn, from, dur) {
+    var n = Math.max(2, Math.min(200000, Math.ceil(dur * EDIT_MIX_CURVE_HZ) + 1));
+    var curve = new Float32Array(n);
+    for (var k = 0; k < n; k++) curve[k] = Math.max(0, fn(from + dur * k / (n - 1)));
+    return curve;
+  }
+
+  function editMixStop(ctx) {
+    var live = ctx.mixLive;
+    ctx.mixLive = null;
+    if (!live) return;
+    live.nodes.forEach(function (node) {
+      try {
+        if (node.stop) node.stop();
+        node.disconnect();
+      } catch (error) {
+        /* 이미 멈췄다 */
+      }
+    });
+  }
+
+  /* 지금 재생헤드부터 모든 들리는 트랙을 예약한다(A1 은 <video>). */
+  function editMixStart(ctx) {
+    editMixStop(ctx);
+    var aud = editMixAudible(ctx.mix);
+    var has = ctx.mix.tracks.some(function (t, n) { return aud.tracks[n] && t.items.length; });
+    var Ctor = window.AudioContext || window.webkitAudioContext;
+    if (!has || !Ctor) return;
+    var ac = ctx.mixAc || (ctx.mixAc = new Ctor());
+    if (ac.resume) ac.resume();
+    var t0 = ctx.t;
+    var when = ac.currentTime + 0.05;
+    var live = { ac: ac, nodes: [], startAt: when, startT: t0 };
+    ctx.mixLive = live;
+    var duck = ctx.mix.a1.duck && aud.a1 ? editMixDuckPoints(editMixDialogueSpans(ctx.clips, function (clip) {
+      var mid = (ctx.materials[clip.sourceKey] || {}).mid;
+      var m = ctx.media[mid];
+      return m && m.data ? m.data.soundRanges : [];
+    }), Number(ctx.mix.a1.duckDb) || 0) : [];
+    var total = editStarts(ctx.clips).total;
+    ctx.mix.tracks.forEach(function (track, n) {
+      if (!aud.tracks[n]) return;
+      var bus = ac.createGain();
+      var tg = Math.pow(10, track.gainDb / 20);
+      var rest = Math.max(0.05, total - t0);
+      if (duck.length) {
+        bus.gain.setValueCurveAtTime(editMixCurve(function (x) { return tg * Math.pow(10, editMixPointsAt(duck, x) / 20); }, t0, rest), when, rest);
+      } else {
+        bus.gain.value = tg;
+      }
+      bus.connect(ac.destination);
+      live.nodes.push(bus);
+      track.items.forEach(function (it) {
+        var len = editMixItemLen(it);
+        if (it.start + len <= t0) return;
+        editMixBuffer(ctx, ac, it.assetId).then(function (buffer) {
+          if (ctx.mixLive !== live) return;
+          var now = live.ac.currentTime;
+          var tl = live.startT + Math.max(0, now - live.startAt); // 받는 동안 흐른 시간
+          var from = Math.max(0, tl - it.start);
+          if (from >= len) return;
+          var at = live.startAt + Math.max(0, it.start - live.startT);
+          if (at < now) at = now + 0.01;
+          var src = ac.createBufferSource();
+          src.buffer = buffer;
+          var g = ac.createGain();
+          var dur = len - from;
+          g.gain.setValueCurveAtTime(editMixCurve(function (x) { return editMixGainAt(it, x); }, from, dur), at, dur);
+          src.connect(g);
+          g.connect(bus);
+          src.start(at, it.in + from, dur);
+          live.nodes.push(src, g);
+        }, function () {
+          /* 못 받은 소리는 미리듣기에서 빠진다(내보내기는 서버가 섞는다) */
+        });
+      });
+    });
+  }
+
+  /* 재생 중 매 틱: A1 이득 · mute/solo 를 <video> 에, WebAudio 가 재생헤드와 0.15초 넘게 어긋나면 다시 예약. */
+  function editMixSync(ctx) {
+    var aud = editMixAudible(ctx.mix);
+    var vol = Math.min(1, Math.pow(10, (Number(ctx.mix.a1.gainDb) || 0) / 20));
+    ctx.vids.concat(ctx.audio ? [ctx.audio] : []).forEach(function (v) {
+      try {
+        v.volume = vol;
+        if (!aud.a1) v.muted = true;
+      } catch (error) {
+        /* 무시 */
+      }
+    });
+    if (!ctx.playing) {
+      editMixStop(ctx);
+      return;
+    }
+    var live = ctx.mixLive;
+    var expect = live ? live.startT + Math.max(0, live.ac.currentTime - live.startAt) : null;
+    if (!live || Math.abs(expect - ctx.t) > EDIT_MIX_DRIFT_S) editMixStart(ctx);
+  }
+
+  /* ================================================================ 작업 215a: ⑦ 오디오 트랙 끝 */
 
   /* ---------------------------------------------------------------- ⑦ AI로 고치기(지시서 116)
 

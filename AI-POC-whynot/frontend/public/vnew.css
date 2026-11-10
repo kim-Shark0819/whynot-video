@@ -6502,3 +6502,244 @@ textarea.vnew-field-input {
 .vnew-lrd-outdated {
   color: var(--danger, #b42318);
 }
+/* ================================================================ 작업 215a: ⑦ 오디오 트랙 · 믹서 · 내 소리 */
+.vnew-edit-labels.has-mix {
+  grid-auto-rows: 44px;
+}
+
+.vnew-edit-label.is-mix {
+  border-top: 1px dashed var(--line, #e5e7eb);
+}
+
+.vnew-edit-label.is-off,
+.vnew-edit-track.is-mix.is-off {
+  opacity: 0.45;
+}
+
+.vnew-edit-mix-lanes {
+  position: relative;
+}
+
+.vnew-edit-track.is-mix {
+  position: relative;
+  height: 44px;
+  border-top: 1px dashed var(--line, #e5e7eb);
+}
+
+.vnew-edit-mix-item {
+  position: absolute;
+  top: 3px;
+  height: 38px;
+  box-sizing: border-box;
+  border-radius: 5px;
+  background: #d8efe4;
+  border: 1px solid #7cc4a0;
+  overflow: hidden;
+  cursor: grab;
+  touch-action: none;
+}
+
+.vnew-edit-mix-item.is-selected {
+  outline: 2px solid var(--accent, #cb3208);
+  outline-offset: -2px;
+  z-index: 2;
+}
+
+.vnew-edit-mix-item .vnew-edit-wave {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  fill: #3f9a6e;
+  pointer-events: none;
+}
+
+.vnew-edit-mix-name {
+  position: absolute;
+  left: 12px;
+  bottom: 1px;
+  max-width: calc(100% - 24px);
+  color: #14532d;
+  font-size: 10px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  pointer-events: none;
+}
+
+.vnew-edit-mix-band {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+}
+
+.vnew-edit-mix-rubber {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  fill: none;
+  stroke: #facc15;
+  stroke-width: 2;
+  vector-effect: non-scaling-stroke;
+}
+
+.vnew-edit-mix-key {
+  position: absolute;
+  width: 8px;
+  height: 8px;
+  margin: -4px 0 0 -4px;
+  border-radius: 50%;
+  background: #facc15;
+  border: 1px solid #854d0e;
+  pointer-events: auto;
+  cursor: move;
+  touch-action: none;
+}
+
+.vnew-edit-mix-key.is-selected {
+  background: var(--accent, #cb3208);
+}
+
+.vnew-edit-mix-fade {
+  position: absolute;
+  top: 0;
+  height: 12px;
+  background: rgba(17, 24, 39, 0.35);
+  cursor: ew-resize;
+  touch-action: none;
+}
+
+.vnew-edit-mix-fade.is-in {
+  left: 0;
+  clip-path: polygon(0 0, 100% 0, 0 100%);
+}
+
+.vnew-edit-mix-fade.is-out {
+  right: 0;
+  clip-path: polygon(0 0, 100% 0, 100% 100%);
+}
+
+.vnew-edit-mix-edge {
+  position: absolute;
+  top: 12px;
+  bottom: 0;
+  width: 6px;
+  cursor: ew-resize;
+  touch-action: none;
+}
+
+.vnew-edit-mix-edge.is-in {
+  left: 0;
+}
+
+.vnew-edit-mix-edge.is-out {
+  right: 0;
+}
+
+.vnew-edit-mixer {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+  margin: 8px 0;
+  font-size: 12px;
+}
+
+.vnew-edit-mix-row,
+.vnew-edit-mix-bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
+.vnew-edit-mix-row.is-off .vnew-edit-mix-title {
+  opacity: 0.5;
+}
+
+.vnew-edit-mix-title {
+  min-width: 84px;
+  font-weight: 600;
+}
+
+.vnew-edit-mix-btn {
+  padding: 2px 8px;
+  border: 1px solid var(--line, #e5e7eb);
+  border-radius: 4px;
+  background: var(--surface, #ffffff);
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.vnew-edit-mix-btn.is-on {
+  background: #fde68a;
+  border-color: #d97706;
+}
+
+.vnew-edit-mix-gain {
+  width: 120px;
+  max-width: 40vw;
+}
+
+.vnew-edit-mix-db {
+  min-width: 52px;
+  font-variant-numeric: tabular-nums;
+}
+
+.vnew-edit-mix-duckdb {
+  width: 48px;
+}
+
+.vnew-edit-sounds {
+  min-width: 0;
+  margin: 8px 0;
+}
+
+.vnew-edit-sounds-list {
+  margin: 6px 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.vnew-edit-sounds-item {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 0;
+  min-width: 0;
+}
+
+.vnew-edit-sounds-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.vnew-edit-mix-duck {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.vnew-edit-mix-sel {
+  color: var(--text-muted, #6b7280);
+}
+
+.vnew-edit-sounds-title {
+  margin: 0 0 4px;
+  font-size: 14px;
+}
+
+.vnew-edit-sounds-file {
+  max-width: 100%;
+}
+.vnew-edit-tl > .vnew-edit-mixer,
+.vnew-edit-tl > .vnew-edit-sounds {
+  grid-column: 1 / -1;
+  margin: 0;
+  padding: 6px 8px;
+  border-top: 1px solid var(--line, #e5e7eb);
+  user-select: text;
+}
