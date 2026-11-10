@@ -31,6 +31,7 @@ import shutil
 import subprocess
 
 from ..vpoc.errors import VpocError
+from . import edit_tools  # 작업 219: 라벨 색 이름(COLORS)
 
 log = logging.getLogger("vpoc")
 
@@ -152,7 +153,14 @@ def clean_clip_fx(clip: dict, number: int, where: str) -> dict:
             raise VpocError(where, "BadTransition",
                             f"{number}번째 클립의 블랙/화이트 전환 길이는 {'·'.join(f'{s:g}' for s in DIP_SECONDS)}초 중 하나여야 합니다.", 400)
         out["transition"] = {"type": raw["type"], "seconds": value}
-    color = _clean_color(clip.get("color"), number, where)
+    raw_color = clip.get("color")
+    if isinstance(raw_color, str):
+        # 작업 219: 예전 문서의 color 글자(라벨 색) — 라벨 이름이면 labelColor 로 옮기고, 아니면 버린다(400 을 내지 않는다).
+        # labelColor 가 따로 있으면 edit_tools.clean_extras 가 뒤에서 그 값으로 덮는다.
+        if raw_color in edit_tools.COLORS:
+            out["labelColor"] = raw_color
+        return out
+    color = _clean_color(raw_color, number, where)
     if color:
         out["color"] = color
     return out

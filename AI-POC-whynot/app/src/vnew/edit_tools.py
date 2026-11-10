@@ -4,7 +4,8 @@
 클립(edit._clean_clips 가 clean_extras 를 부른다):
   gapBefore(빈틈 초, 들어내기·범위 들어내기가 남긴다 — 클립 앞 검은 화면·무음), disabled(사용 안 함 — 자리는 그대로, 검은 화면·무음),
   reverse(역재생, 원본 구간 REVERSE_MAX_S 초 이하), keepPitch(false 만 저장 — 속도를 바꿔도 음높이를 지키지 않는다),
-  gain(dB, GAIN_MIN_DB~GAIN_MAX_DB, 0.5 단위), color(라벨 색), unlinked(소리 연결 해제 — 화면 전용, 내보내기와 무관).
+  gain(dB, GAIN_MIN_DB~GAIN_MAX_DB, 0.5 단위), labelColor(라벨 색, COLORS 중 하나 — color 는 215b 색 보정 {..}이고,
+  예전 문서의 color 글자는 edit_text.clean_clip_fx 가 labelColor 로 옮긴다), unlinked(소리 연결 해제 — 화면 전용, 내보내기와 무관).
 문서(edit.save_doc 가 clean_doc_extras 를 부른다): markers [{id, t, name, color}], tracks {v1|a1: {locked, hidden}}.
   숨긴 트랙은 내보내기에서 빠진다(apply_tracks: v1 숨김 = 화면 검게, a1 숨김 = 소리 끔). 잠금은 화면 전용.
 내보내기(edit.run_export 가 export_plan → export_prepare 를 부른다): 빈틈은 검은 클립, 사용 안 함·숨긴 화면·역재생·게인·음높이는

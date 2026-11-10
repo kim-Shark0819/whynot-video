@@ -664,7 +664,8 @@ def check_line_redo_212() -> bool:  # noqa: C901 — 한 검사 함수(다른 �
             final_bytes = store.blobs[final_key]
             snd.sound_view(OWNER, PID, "webtoon")  # 폴링: 결과 → 잇기(가짜 스레드 = 바로)
             v2 = snd.sound_view(OWNER, PID, "webtoon")
-            r1 = lr.revision_key(OWNER, PID, "g1", "webtoon", 1)
+            # 219: 판 키는 이제 고유 토큰이 붙는다(-lines-r1-xxxxxx.mp4) — 고정 키(revision_key(...,1)) 대신 판의 rev["key"] 를 본다.
+            r1 = next((x["key"] for x in lr.read_redo(OWNER, PID, "g1", "webtoon")["revisions"] if x.get("r") == 1), "")
             sp = calls["splice"][-1] if calls["splice"] else {}
             info = v2["lineRedo"]
             expect("lr-d", [sp.get("start"), sp.get("end"), sp.get("duration"), sp.get("fps"), sp.get("width"), sp.get("new_audio"),
@@ -711,8 +712,9 @@ def check_line_redo_212() -> bool:  # noqa: C901 — 한 검사 함수(다른 �
             expect("lr-e", [back1["source"]["kind"], back1["lineRedo"]["current"], "대사 고침 1" in back1["source"]["label"],
                             [v.get("outdated") for v in back1["versions"]], err_of(lambda: lr.revert(OWNER, PID, {"variant": "webtoon", "r": 9})),
                             err_of(lambda: lr.revert(OWNER, PID, {"variant": "webtoon", "r": "1"})),
-                            all(k in store.blobs for k in (final_key, lr.revision_key(OWNER, PID, "g1", "webtoon", 1),
-                                                           lr.revision_key(OWNER, PID, "g1", "webtoon", 2)))],
+                            all(k in store.blobs for k in [final_key] + [x["key"] for x in  # 219: 판 키 = rev["key"](고유 토큰)
+                                                                         lr.read_redo(OWNER, PID, "g1", "webtoon")["revisions"]
+                                                                         if x.get("r") in (1, 2)])],
                    ["redo", 1, True, [True], ["BadRevision", 404], ["BadRevision", 400], True],
                    "앞 판으로 · 없는 판 404 · 틀린 값 400 · 파일은 지우지 않음")
         except Exception as exc:  # noqa: BLE001

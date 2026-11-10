@@ -54,9 +54,11 @@ INPUT_RATE = 44100
 OUT_RATE = 48000
 MAX_SOURCE_S = 600.0
 RUN_MAX_S = 1800.0
+RESUME_MAX = 2  # 작업 219: 받은 요청의 결과를 다시 받기(다시 내지 않는다) 상한
 START_HOLD_S = 600.0  # 이보다 오래된 "starting" 은 끊긴 것으로 본다
 PRESIGN_S = 3600
 PRICE_UNKNOWN_LABEL = "가격 확인 불가"
+TIMEOUT_TEXT = "분리 모델이 시간 안에 결과를 주지 않았습니다(timeout)."
 BUTTON_TEXT = "섞인 소리 분리하기"
 _REQUEST_ID_RE = re.compile(r"[A-Za-z0-9._-]{1,128}")
 _LIVE = ("starting", "running")
@@ -120,9 +122,43 @@ def _price(endpoint: str) -> dict | None:
     return voices._price(endpoint)  # noqa: SLF001
 
 
-def _charge(key: str, *, seconds: float, usd: float, owner: str, pid: str, gen_id: str) -> None:
+def _charge(key: str, *, seconds: float, usd: float, owner: str, pid: str, gen_id: str, price_unknown: bool = False) -> None:
+    # 작업 219: price_unknown 은 원장 항목에 넣을 칸이 없어(vpoc/ledger.py 는 이 작업 범위 밖) 분리 상태(priceUnknown) · 경고 로그에 남긴다.
     vpoc_ledger.charge(key, kind="audio", model=MODEL, units=round(float(seconds), 3), usd=float(usd), user=owner,
                        project_id=pid, plan_id=gen_id)
+
+
+_LAST_PRICE: dict = {}  # 작업 219: 마지막으로 읽은 fal 단가(가격을 못 읽은 제출의 원장 추정에 쓴다)
+
+
+def _remember_price(price) -> None:
+    if isinstance(price, dict) and voices.unit_usd(price, 1.0) is not None:
+        _LAST_PRICE.clear()
+        _LAST_PRICE.update({"unitPrice": price.get("unitPrice"), "unit": price.get("unit")})
+
+
+def _charge_usd(est: dict, seconds: float) -> tuple[float, bool]:
+    """작업 219: 원장에 적을 금액과 가격 모름 여부. 견적 금액이 있으면 그것, 없으면 마지막으로 안 단가 × 길이(추정),
+    그것도 없으면 0 — 어느 쪽이든 가격 모름이면 (금액, True) 이고 상태(priceUnknown) · 경고 로그에 남긴다(조용히 0 을 적지 않는다)."""
+    if est.get("rawUsd") is not None:
+        return float(est["rawUsd"]), False
+    guess = voices.unit_usd(dict(_LAST_PRICE), float(seconds)) if _LAST_PRICE else None
+    return (round(float(guess), 6) if guess is not None else 0.0), True
+
+
+def _source_size(key: str) -> int | None:
+    """작업 219: 원본 크기(바이트). 저장소가 크기를 주지 않거나 읽지 못하면 None(검사가 바꾼다)."""
+    lister = getattr(edit.STORE, "list_keys", None)
+    if not callable(lister):
+        return None
+    try:
+        for obj in lister(key, bucket=vpoc_settings.VIDEO_BUCKET) or []:
+            if obj.get("key") == key:
+                return int(obj.get("size") or 0)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("vnew.audio_separate.size_failed src=%s err=%s", _tag(key), type(exc).__name__)
+        return None
+    return 0
 
 
 def _fal_ready() -> bool:
@@ -197,6 +233,8 @@ def estimate(seconds) -> dict:
     price = _price(MODEL)
     usd = voices.unit_usd(price, float(seconds)) if seconds else None
     known = usd is not None
+    if known:
+        _remember_price(price)  # 작업 219
     rounded = round(usd, 2) if known else None
     if not known:
         money = PRICE_UNKNOWN_LABEL
@@ -279,6 +317,7 @@ def start(owner: str, pid: str, payload) -> dict:
     if not _fal_ready():
         raise VpocError(where, "NoFalKey", "fal 키(FAL_KEY)가 설정되지 않았습니다.", 409)
     claim = secrets.token_hex(6)
+    resumed: dict = {}
 
     def hold(state):
         state = state if isinstance(state, dict) else {}
@@ -286,44 +325,105 @@ def start(owner: str, pid: str, payload) -> dict:
             START_HOLD_S if state.get("status") == "starting" else RUN_MAX_S)
         if live:
             raise VpocError(where, "SeparateRunning", "이 소리를 분리하는 중입니다. 끝난 뒤 다시 눌러 주세요.", 409)
+        if _resumable(state, key):
+            # 작업 219: 이미 받아진(돈이 나간) 요청 — 다시 내지 않고 같은 requestId 로 결과를 다시 받는다
+            resumed["requestId"] = state["requestId"]
+            return {**state, "status": "running", "claim": claim, "startedAt": now_iso(), "error": "", "finishedAt": "",
+                    "resumable": False, "resumes": int(state.get("resumes") or 0) + 1}
         keep = {k: state[k] for k in ("useVoice", "bgOnA2") if k in state}
         return {**keep, "v": 1, "status": "starting", "claim": claim, "sourceKey": key, "model": MODEL, "startedAt": now_iso(),
                 "seconds": round(seconds, 3), "usd": est["usd"], "priceKnown": est["priceKnown"], "error": ""}
 
-    _write_state(key, hold)
+    saved = _write_state(key, hold) or {}
+    if resumed:
+        log.info("vnew.audio_separate.resume pid=%s gen=%s src=%s req=%s", pid, gen_id, _tag(key), _tag(resumed["requestId"]))
+        return {"started": True, "resumed": True, "state": _state_out(saved), "estimate": est}
+    box: dict = {}
     try:
-        request_id = _submit(owner, pid, gen_id, key, seconds, est, where)
+        _submit(owner, pid, gen_id, key, seconds, est, where, claim=claim, box=box)
     except Exception as exc:  # noqa: BLE001
+        if box.get("requestId"):
+            # 작업 219: fal 은 받았다(돈이 나간다) — requestId 를 지켜 running 으로 둔다(다음 GET 이 이어 본다, 다시 내지 않는다).
+            log.warning("vnew.audio_separate.state_retry pid=%s src=%s err=%s", pid, _tag(key), type(exc).__name__)
+            try:
+                state = _finish(key, claim, box["running"]) or {}
+            except Exception:
+                log.error("vnew.audio_separate.orphan pid=%s src=%s req=%s — 상태를 쓰지 못했습니다", pid, _tag(key),
+                          _tag(box["requestId"]))
+                raise
+            log.info("vnew.audio_separate.start pid=%s gen=%s src=%s seconds=%.3f known=%s retried=1", pid, gen_id, _tag(key), seconds,
+                     est["priceKnown"])
+            return {"started": True, "state": _state_out(state), "estimate": est}
         message = exc.message if isinstance(exc, VpocError) else "소리를 분리 모델에 보내지 못했습니다."
+        _drop_input(box.get("inputKey"))  # 작업 219: 보내지 못한 임시 입력도 지운다
         _finish(key, claim, {"status": "failed", "error": message, "finishedAt": now_iso()})
         log.warning("vnew.audio_separate.submit_failed pid=%s src=%s err=%s", pid, _tag(key), getattr(exc, "kind", type(exc).__name__))
         raise
-    state = _finish(key, claim, {"status": "running", "requestId": request_id}) or {}
+    state = box.get("state") or {}
     log.info("vnew.audio_separate.start pid=%s gen=%s src=%s seconds=%.3f known=%s", pid, gen_id, _tag(key), seconds, est["priceKnown"])
     return {"started": True, "state": _state_out(state), "estimate": est}
 
 
-def _submit(owner: str, pid: str, gen_id: str, key: str, seconds: float, est: dict, where: str) -> str:
-    """소리만 뽑아(-vn 모노 wav) 영상 버킷 임시 키에 올리고 서명 주소로 제출. 받으면 원장 1건. 반환 request_id."""
+def _resumable(state: dict, key: str) -> bool:
+    """작업 219: 실패 기록이지만 fal 이 받은(돈이 나간) 요청이 남아 있고 같은 원본이면 다시 받을 수 있다(RESUME_MAX 번까지)."""
+    return (state.get("status") == "failed" and state.get("resumable") is True and state.get("sourceKey") == key
+            and bool(_REQUEST_ID_RE.fullmatch(str(state.get("requestId") or ""))) and int(state.get("resumes") or 0) < RESUME_MAX)
+
+
+def _drop_input(input_key) -> None:
+    """작업 219: 영상 버킷의 임시 입력(input-*.wav) 지우기 — 최선만."""
+    if not input_key:
+        return
+    try:
+        edit._delete_object(str(input_key), bucket=vpoc_settings.VIDEO_BUCKET)  # noqa: SLF001
+    except Exception:  # noqa: BLE001 — 임시 입력 지우기는 최선만
+        pass
+
+
+def _submit(owner: str, pid: str, gen_id: str, key: str, seconds: float, est: dict, where: str, *, claim: str = "",
+            box: dict | None = None) -> str:
+    """소리만 뽑아(-vn 모노 wav) 영상 버킷 임시 키에 올리고 서명 주소로 제출. 받으면 원장 1건. 반환 request_id.
+
+    작업 219: 받은 즉시 상태 한 번 쓰기로 {running, requestId, inputKey, 원본 크기 · 길이} (box["state"]). box 에 inputKey ·
+    requestId · running(쓸 값)을 남긴다 — 쓰기가 실패해도 start 가 requestId 를 지켜 다시 쓴다."""
+    box = box if box is not None else {}
     input_key = f"{sep_prefix(key)}/input-{secrets.token_hex(4)}.wav"
     with tempfile.TemporaryDirectory(prefix="vnew-sep-") as workdir:
         source_path, audio_path = os.path.join(workdir, "source.mp4"), os.path.join(workdir, "input.wav")
         with edit._MEDIA_SEM:  # noqa: SLF001
             edit._download(key, source_path, bucket=vpoc_settings.VIDEO_BUCKET)  # noqa: SLF001
+            source_size = os.path.getsize(source_path)
             _ffmpeg(["-i", source_path, "-map", "0:a:0", "-vn", "-ac", "1", "-ar", str(INPUT_RATE), "-c:a", "pcm_s16le",
                      "-f", "wav", audio_path], "소리를 뽑지 못했습니다")
             os.remove(source_path)
+        box["inputKey"] = input_key
         _put(input_key, audio_path)
     url = edit.STORE.presign(input_key, bucket=vpoc_settings.VIDEO_BUCKET, content_type="audio/wav", expires=PRESIGN_S)
     submitted = _fal_call("POST", f"{vpoc_settings.FAL_QUEUE_URL}/{MODEL}", {INPUT_FIELD: url}, where=where)
     request_id = str((submitted or {}).get("request_id") or "") if isinstance(submitted, dict) else ""
     if not _REQUEST_ID_RE.fullmatch(request_id):
         raise VpocError(where, "NoRequestId", "분리 모델이 요청 ID를 주지 않았습니다.", 502)
+    box["requestId"] = request_id
+    usd, unknown = _charge_usd(est, seconds)
+    running = {"status": "running", "requestId": request_id, "inputKey": input_key, "submittedAt": now_iso(),
+               "sourceSize": int(source_size), "sourceDuration": round(float(seconds), 3)}
+    if unknown:
+        running.update(priceUnknown=True, usdEstimate=round(usd, 6))
+    box["running"] = running
+    write_error: Exception | None = None
     try:
-        _charge("vnew-sep-" + request_id, seconds=seconds, usd=float(est.get("rawUsd") or 0.0), owner=owner, pid=pid, gen_id=gen_id)
+        box["state"] = _finish(key, claim, running)  # 작업 219: requestId 와 running 을 한 번에(사이에 끊겨도 고아 요청이 없다)
+    except Exception as exc:  # noqa: BLE001 — 원장은 그래도 적고, start 가 다시 쓴다
+        write_error = exc
+    if unknown:
+        log.warning("vnew.audio_separate.price_unknown pid=%s req=%s usd_estimate=%.6f from_last=%s", pid, _tag(request_id), usd,
+                    bool(_LAST_PRICE))
+    try:
+        _charge("vnew-sep-" + request_id, seconds=seconds, usd=usd, owner=owner, pid=pid, gen_id=gen_id, price_unknown=unknown)
     except Exception as exc:  # noqa: BLE001 — 원장 실패는 분리를 막지 않는다(voices 와 같다)
         log.warning("vnew.audio_separate.charge_failed pid=%s err=%s", pid, type(exc).__name__)
-    _write_state(key, lambda s: {**(s or {}), "inputKey": input_key})
+    if write_error is not None:
+        raise write_error
     return request_id
 
 
@@ -370,11 +470,15 @@ def _advance(owner: str, pid: str, gen_id: str, key: str, state: dict) -> dict:
     where = "vnew.audio_separate.poll"
     claim, request_id = str(state.get("claim") or ""), str(state.get("requestId") or "")
 
-    def fail(message: str) -> dict:
-        return _finish(key, claim, {"status": "failed", "error": message, "finishedAt": now_iso()}) or state
+    def fail(message: str, resumable: bool = False) -> dict:
+        # 작업 219: 실패해도 requestId 는 남는다(_finish 는 더하기만 한다). fal 이 끝낸(돈이 나간) 요청이면 resumable — 다음 [분리하기]가
+        # 다시 내지 않고 결과를 다시 받는다. 임시 입력은 지운다(성공 때와 같다).
+        _drop_input(state.get("inputKey"))
+        return _finish(key, claim, {"status": "failed", "error": message, "finishedAt": now_iso(), "resumable": bool(resumable)}) or state
 
     if not _REQUEST_ID_RE.fullmatch(request_id):
         return fail("분리 요청 기록이 없습니다. 다시 눌러 주세요.")
+    completed = False
     try:
         status = _fal_call("GET", vpoc_fal._status_url(MODEL, request_id), None, where=where)  # noqa: SLF001
         phase = str((status or {}).get("status") or "").upper() if isinstance(status, dict) else ""
@@ -384,11 +488,12 @@ def _advance(owner: str, pid: str, gen_id: str, key: str, state: dict) -> dict:
                     vpoc_fal.cancel(f"{vpoc_fal.ARN_PREFIX}{MODEL}/{request_id}")
                 except Exception:  # noqa: BLE001 — 취소는 최선만
                     pass
-                return fail("분리 모델이 시간 안에 결과를 주지 않았습니다(timeout).")
+                return fail(TIMEOUT_TEXT)
             return state
         if phase != "COMPLETED":
             detail = vpoc_fal._error_detail(json.dumps(status, ensure_ascii=False, default=str))  # noqa: SLF001
             return fail("소리를 분리하지 못했습니다: " + (error_gist(detail, 200) or phase))
+        completed = True
         result = _fal_call("GET", vpoc_fal._response_url(MODEL, request_id), None, where=where)  # noqa: SLF001
         voice_url, bg_urls = _result_urls(result)
         if not voice_url or not bg_urls:
@@ -413,24 +518,24 @@ def _advance(owner: str, pid: str, gen_id: str, key: str, state: dict) -> dict:
             _put(bg_key(key), bg_path)
     except Exception as exc:  # noqa: BLE001
         if isinstance(exc, VpocError) and (exc.kind in ("FalUnreachable", "HTTP429") or str(exc.kind).startswith("HTTP5")):
+            if _age_s(state.get("startedAt") or "") > RUN_MAX_S:  # 작업 219: 끝없는 5xx · 429 도 시간 상한에서 끝낸다
+                log.warning("vnew.audio_separate.poll_timeout pid=%s src=%s err=%s completed=%s", pid, _tag(key), exc.kind, completed)
+                return fail(TIMEOUT_TEXT, resumable=completed)
             return state  # 잠깐 끊김 — 다음 GET 이 다시 본다
         log.warning("vnew.audio_separate.poll_failed pid=%s src=%s err=%s", pid, _tag(key), getattr(exc, "kind", type(exc).__name__))
-        return fail(exc.message if isinstance(exc, VpocError) else "소리를 분리하지 못했습니다.")
-    try:
-        if state.get("inputKey"):
-            edit._delete_object(str(state["inputKey"]), bucket=vpoc_settings.VIDEO_BUCKET)  # noqa: SLF001
-    except Exception:  # noqa: BLE001 — 임시 입력 지우기는 최선만
-        pass
+        return fail(exc.message if isinstance(exc, VpocError) else "소리를 분리하지 못했습니다.", resumable=completed)
+    _drop_input(state.get("inputKey"))
     log.info("vnew.audio_separate.done pid=%s gen=%s src=%s stems=%d", pid, gen_id, _tag(key), len(bg_urls))
     return _finish(key, claim, {"status": "done", "voiceKey": voice_key(key), "bgKey": bg_key(key), "finishedAt": now_iso(),
-                                "error": ""}) or state
+                                "error": "", "resumable": False}) or state
 
 
 # ================================================================ ⑥ · ⑦ 에서 쓰기
 
 
-def separated_audio(owner: str, pid: str, source_key: str) -> dict | None:
-    """분리가 끝났고 [분리된 목소리 쓰기]가 켜진 원본이면 {voiceKey, bgKey(bgOnA2 끔이면 "")}, 아니면 None. 끔(플래그)이면 None."""
+def separated_audio(owner: str, pid: str, source_key: str, duration=None) -> dict | None:
+    """분리가 끝났고 [분리된 목소리 쓰기]가 켜진 원본이면 {voiceKey, bgKey(bgOnA2 끔이면 "")}, 아니면 None. 끔(플래그)이면 None.
+    작업 219: 분리 뒤 원본이 바뀌었으면(크기 · 길이 — duration 을 주면 그것도) None."""
     if not enabled() or not str(source_key or "").startswith(f"users/{owner}/video/{pid}/"):
         return None
     try:
@@ -440,7 +545,25 @@ def separated_audio(owner: str, pid: str, source_key: str) -> dict | None:
         return None
     if state.get("status") != "done" or state.get("useVoice") is not True or state.get("voiceKey") != voice_key(source_key):
         return None
+    if _source_changed(state, source_key, duration):
+        return None
     return {"voiceKey": voice_key(source_key), "bgKey": bg_key(source_key) if state.get("bgOnA2") is not False else ""}
+
+
+def _source_changed(state: dict, source_key: str, duration=None) -> bool:
+    """작업 219: 분리할 때 적어 둔 원본 크기(sourceSize) · 길이(sourceDuration)가 지금과 다르면 True(같은 키에 새 영상을 덮어썼다).
+    적어 둔 값이 없는(219 전) 기록이나 지금 값을 읽지 못한 칸은 비교하지 않는다."""
+    then_size, then_dur = state.get("sourceSize"), edit._num(state.get("sourceDuration"))  # noqa: SLF001
+    now_dur = edit._num(duration)  # noqa: SLF001
+    if then_dur and now_dur and abs(then_dur - now_dur) > 0.05:
+        log.info("vnew.audio_separate.stale src=%s why=duration then=%.3f now=%.3f", _tag(source_key), then_dur, now_dur)
+        return True
+    if isinstance(then_size, int) and not isinstance(then_size, bool) and then_size > 0:
+        now_size = _source_size(source_key)
+        if now_size is not None and now_size != then_size:
+            log.info("vnew.audio_separate.stale src=%s why=size then=%d now=%d", _tag(source_key), then_size, now_size)
+            return True
+    return False
 
 
 def sound_track(owner: str, pid: str, source_key: str, workdir: str) -> str | None:
@@ -453,27 +576,62 @@ def sound_track(owner: str, pid: str, source_key: str, workdir: str) -> str | No
     return path
 
 
-def export_sources(owner: str, pid: str, clips: list[dict], audio_from: dict, meta: dict) -> tuple[dict, list[dict]]:
+DERIVED_PREFIX = "215c:"  # 작업 219: edit_tools.export_plan 의 검은 클립(215c:black) · 파생 원본(215c:dN)
+
+
+def _derived_origin(spec: dict, clip: dict) -> tuple[str, str]:
+    """작업 219: 파생 원본(215c:dN) → (원래 원본 키, ""). 같은 시각으로 맞출 수 없으면("", 까닭) — 정방향 · 속도 1 · 음높이 그대로 · 게인 0 만 맞는다."""
+    if spec.get("reverse") or float(spec.get("a") or 0.0) != 0.0:
+        return "", "reverse"
+    if float(spec.get("varispeed") or 1.0) != 1.0 or abs(edit._speed_of(clip) - 1.0) >= 1e-9:  # noqa: SLF001
+        return "", "speed"
+    if float(spec.get("gain") or 0.0) != 0.0:
+        return "", "gain"  # 대체 소리에는 게인을 걸 수 없다
+    return str(spec.get("from") or ""), ""
+
+
+def export_sources(owner: str, pid: str, clips: list[dict], audio_from: dict, meta: dict,
+                   derived: dict | None = None) -> tuple[dict, list[dict]]:
     """⑦ 내보내기: 클립 소리 원천(원본 또는 _audio_sources 대체)에 분리 결과가 쓰이면 원천을 voice.wav 로(같은 시각 대응).
-    반환 (새 audio_from, 배경 [{index, key, offset, end}] — 속도 1 · 시각 배율 1 클립만)."""
+    반환 (새 audio_from, 배경 [{index, key, offset, end}] — 속도 1 · 시각 배율 1 클립만).
+
+    작업 219: clips · meta 는 edit_tools.export_plan 을 거친 뒤의 것(index = 그 목록의 자리). 검은 클립(빈틈 · 사용 안 함)은 건너뛴다.
+    파생 원본(derived = plan["derived"])은 원래 원본과 시각이 같을 때(정방향 · 속도 1 · 게인 0)만 원래 원본의 분리 결과를 쓰고,
+    아니면 분리된 목소리 · 배경을 넣지 않는다(파생 원본의 원래 소리 그대로 — 배경이 두 번 들리지 않게) · 로그 한 줄."""
     out = dict(audio_from)
     found: dict[str, dict | None] = {}
     bg: list[dict] = []
     for index, clip in enumerate(clips):
         key = clip["sourceKey"]
-        if clip.get("muted"):
+        if clip.get("muted") or clip.get("disabled"):
             continue
-        entry = audio_from.get(key)
-        origin = entry["sourceKey"] if entry else key
+        lookup = key
+        if str(key).startswith(DERIVED_PREFIX):
+            spec = (derived or {}).get(key)
+            if not isinstance(spec, dict):
+                continue  # 검은 클립(215c:black) — 소리 없음
+            lookup, why = _derived_origin(spec, clip)
+            if not lookup:
+                origin = (audio_from.get(spec.get("from")) or {}).get("sourceKey") or spec.get("from")
+                if origin not in found:
+                    found[origin] = edit._separated_audio(owner, pid, origin)  # noqa: SLF001
+                if found[origin]:
+                    log.info("vnew.audio_separate.export_skip pid=%s clip=%d src=%s why=%s — 분리된 목소리 · 배경을 넣지 않음",
+                             pid, index, _tag(origin), why)
+                continue
+        entry = audio_from.get(lookup)
+        origin = entry["sourceKey"] if entry else lookup
         if origin not in found:
-            found[origin] = edit._separated_audio(owner, pid, origin)  # noqa: SLF001
+            # 작업 219: 대체 소리가 아니면 지금 원본 길이를 같이 넘겨 분리 뒤 바뀐 원본을 거른다
+            found[origin] = edit._separated_audio(owner, pid, origin,  # noqa: SLF001
+                                                  None if entry else (meta.get(origin) or {}).get("duration"))
         sep = found[origin]
         if not sep:
             continue
         if entry:
             offset, scale, end = float(entry["offset"]), float(entry["scale"]), float(entry["end"])
         else:
-            end = edit._num((meta.get(key) or {}).get("duration")) or 0.0  # noqa: SLF001
+            end = edit._num((meta.get(lookup) or {}).get("duration")) or 0.0  # noqa: SLF001
             offset, scale = 0.0, 1.0
             if end <= 0:
                 continue
@@ -496,6 +654,8 @@ def export_mix_doc(mix_doc: dict | None, bg: list[dict], clips: list[dict], fram
     starts = list(fx["start"]) if fx is not None else [sum(frames[:i]) for i in range(len(frames))]
     for item in bg:
         index = item["index"]
+        if index >= len(clips) or index >= len(frames):  # 작업 219: 자리가 목록 밖이면 넣지 않는다(IndexError 대신)
+            continue
         src_in = float(item["offset"]) + float(clips[index].get("in") or 0.0)
         src_out = min(float(item["end"]), src_in + frames[index] / float(fps))
         if src_out - src_in < edit_audio.MIN_ITEM_S:
