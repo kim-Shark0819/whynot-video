@@ -224,6 +224,8 @@ _UI_DRIVER = r"""
 (async function () {
   var out = {};
   try {
+    // 작업 219b: 프리미어 묶음 칸은 EDIT_PREMIERE_UI(화면 기본 false)일 때만 만든다 — 이 검사는 켠 길을 본다(끈 길은 check_review_fixes_219b)
+    EDIT_PREMIERE_UI = true;
     var ctx = editNewCtx();
     editCtx = ctx;
     var mats = [{ mid: "m1", sourceKey: "K1", label: "테이크 1", duration: 6, fps: 24, kind: "take", group: "current", retake: { can: true } },

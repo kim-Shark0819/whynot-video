@@ -7604,15 +7604,3 @@ textarea.vnew-field-input {
   }
   /* ==== 작업 215c 끝 ==== */
 }
-
-/* 사용자 지시(11-10): xml · prproj 내보내기는 화면에서 뺀다(서버 기능은 남김) — 215b 프리미어 묶음 칸 · 215c Pr 버튼 숨김 */
-.vnew-edit-txprem,
-.vnew-e215c-tool[title^="Premiere Pro"] {
-  position: absolute !important;
-  width: 1px !important;
-  height: 1px !important;
-  overflow: hidden !important;
-  clip-path: inset(50%) !important;
-  pointer-events: none !important;
-  opacity: 0 !important;
-}

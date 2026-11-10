@@ -2029,12 +2029,12 @@ def stems_view(owner: str, pid: str, variant=None) -> dict:
                                                "application/zip")}
 
 
-def _separated_audio(owner: str, pid: str, source_key: str) -> dict | None:
+def _separated_audio(owner: str, pid: str, source_key: str, duration=None) -> dict | None:
     """작업 217: 그 원본의 섞인 소리 분리 결과 {voiceKey, bgKey}([분리된 목소리 쓰기] 켬일 때만, bgKey 는 배경을 A2 에 끔이면 "").
     없으면 None. 내보내기는 대사(A1)에 voiceKey, 배경음(A2)에 bgKey 를 쓴다(audio_separate.export_sources · export_mix_doc)."""
     from . import audio_separate  # noqa: PLC0415 — audio_separate 가 이 모듈을 import 한다(순환 피함)
 
-    return audio_separate.separated_audio(owner, pid, source_key)
+    return audio_separate.separated_audio(owner, pid, source_key, duration)
 
 
 def _presign_attachment(key: str, filename: str, content_type: str) -> str:
@@ -2588,6 +2588,43 @@ def _export_audio_from(owner: str, pid: str, gen_id: str, variant: str, clips: l
     return {k: v for k, v in found.items() if k in used}, {k for k in mutes if k in used}
 
 
+def _drop_files(paths) -> None:
+    """작업 219: 있는 파일만 지운다(내보내기 스템 · 임시 소리)."""
+    for path in paths:
+        if path and os.path.exists(path):
+            os.unlink(path)
+
+
+class _dropping:  # noqa: N801 — with 문에 쓰는 작은 도우미
+    """작업 219: with 를 나갈 때(성공 · 실패 모두) paths 에 남은 파일을 지운다. 지우기 실패는 원래 예외를 가리지 않는다."""
+
+    def __init__(self, paths: list[str]) -> None:
+        self.paths = paths
+
+    def __enter__(self) -> list[str]:
+        return self.paths
+
+    def __exit__(self, *_exc) -> bool:
+        try:
+            _drop_files(self.paths)
+        except OSError:
+            pass
+        return False
+
+
+def _export_plan_sources(owner: str, pid: str, clips: list[dict], meta: dict, audio_from: dict, fps: int, width: int,
+                         height: int) -> tuple[list[dict], dict, dict | None, dict, list[dict]]:
+    """작업 219: 215c 계획(빈틈 · 사용 안 함 → 검은 클립, 역재생 · 게인 · 음높이 · 숨긴 화면 → 파생 원본) 먼저, 그 뒤 클립 · meta 로
+    217 분리 결과(목소리 → audio_from, 배경 → 자리 index)를 고른다. 순서가 반대면 배경 자리 · audio_from 키가 어긋난다.
+    반환 (클립, meta, 215c 계획, audio_from, 분리 배경)."""
+    from . import audio_separate  # noqa: PLC0415 — audio_separate 가 edit 를 가져온다
+
+    clips, meta, tools_plan = edit_tools.export_plan(clips, meta, fps, width, height)  # 작업 215c
+    audio_from, sep_bg = audio_separate.export_sources(owner, pid, clips, audio_from, meta,
+                                                       derived=(tools_plan or {}).get("derived"))  # 작업 217
+    return clips, meta, tools_plan, audio_from, sep_bg
+
+
 def run_export(owner: str, pid: str, gen_id: str, n: int, claim: str) -> None:
     """내보내기 스레드 본체. 임시 디렉터리에서 클립마다 다시 인코딩 → 잇기 → 영상 버킷에 올린다. 끝나면 임시 파일을 지운다.
 
@@ -2622,10 +2659,10 @@ def run_export(owner: str, pid: str, gen_id: str, n: int, claim: str) -> None:
         audio_from, mutes = _export_audio_from(owner, pid, gen_id, str(current.get("variant") or ""), clips, meta)
         if mutes:  # 작업 193 fix1: 원천에 소리가 없는 result 버전 클립은 v2v 소리 대신 무음(이 실행 안에서만 — 문서는 그대로)
             clips = [dict(c, muted=True) if c["sourceKey"] in mutes else c for c in clips]
-        from . import audio_separate; audio_from, sep_bg = audio_separate.export_sources(owner, pid, clips, audio_from, meta)  # noqa: E702,PLC0415 — 작업 217
-        clips, meta, tools_plan = edit_tools.export_plan(clips, meta, fps, width, height)  # 작업 215c
+        clips, meta, tools_plan, audio_from, sep_bg = _export_plan_sources(owner, pid, clips, meta, audio_from, fps, width, height)
         frames = _clip_frames(clips, fps) if tools_plan else frames  # 작업 215c
-        alt = [_clip_audio(c, audio_from.get(c["sourceKey"])) for c in clips]  # 지시서 116 보완 10: 클립별 대체 소리 (v1 시작, 끝)
+        # 지시서 116 보완 10: 클립별 대체 소리 (v1 시작, 끝). 작업 219: audio_from 은 215c 계획 뒤 클립 키(파생 원본 포함) 기준.
+        alt = [_clip_audio(c, audio_from.get(c["sourceKey"])) for c in clips]
         with_audio = any(not c.get("muted") and ((meta.get(c["sourceKey"]) or {}).get("hasAudio") or alt[i] is not None)
                          for i, c in enumerate(clips))
         last_use: dict[str, int] = {}
@@ -2640,7 +2677,8 @@ def run_export(owner: str, pid: str, gen_id: str, n: int, claim: str) -> None:
             log.info("vnew.edit.export_fx pid=%s gen=%s n=%d dissolves=%d leads=%d tails=%d frames=%d", pid, gen_id, n,
                      sum(1 for d in fx["dissolve"] if d), sum(1 for v in fx["lead"] if v), sum(1 for v in fx["tail"] if v),
                      fx["total"])
-        with tempfile.TemporaryDirectory(prefix="vnew-edit-export-") as workdir:
+        scratch: list[str] = []  # 작업 219: 스템 wav · 무음 대사 — 성공이든 실패든 workdir 을 지우기 전에 지운다
+        with tempfile.TemporaryDirectory(prefix="vnew-edit-export-") as workdir, _dropping(scratch):
             local: dict[str, str] = {}
             segments: list[str] = []
             layers: list[dict] = []  # 작업 181: 소리 층(edit_mix)
@@ -2741,7 +2779,9 @@ def run_export(owner: str, pid: str, gen_id: str, n: int, claim: str) -> None:
                     os.unlink(layer["path"])
             stems_out: list[tuple[str, str]] = []
             dialogue_wav, bg_wavs, pkg_stems = "", [], []  # 216-fix2
+            dialogue_raw = ""  # 작업 219: A1 대사 스템이 없을 때(A1 끔 · 다른 트랙 솔로) 대사.mp3 = 무음
             mix_doc = current.get("audio") if isinstance(current.get("audio"), dict) else None
+            from . import audio_separate  # noqa: PLC0415 — audio_separate 가 edit 를 가져온다
             mix_doc = audio_separate.export_mix_doc(mix_doc, sep_bg, clips, frames, fx, fps)  # 작업 217: 분리된 배경 → A2(배경음)
             if mix_doc is not None:
                 # 작업 215a: A1(위에서 만든 클립 소리) + 오디오 트랙을 섞는다 · 스템. 클립 소리가 없으면 A1 은 무음.
@@ -2770,12 +2810,19 @@ def run_export(owner: str, pid: str, gen_id: str, n: int, claim: str) -> None:
                 for path in asset_paths.values():
                     os.unlink(path)
                 stems_all = list(mixed.get("stems") or [])
+                scratch.extend(path for _name, path in stems_all)  # 작업 219: 실패해도 남기지 않는다
                 # 216-fix2: 내려받기 zip 의 대사(대사만 스템) · 배경음(나머지 트랙 스템). 스템 zip 은 사용자가 고른 때만.
                 dialogue_wav = next((path for name, path in stems_all if name == edit_audio.DIALOGUE_STEM), "")
                 bg_wavs = [path for name, path in stems_all if name not in (edit_audio.DIALOGUE_STEM, edit_audio.MIX_STEM)]
                 stems_out = stems_all if current.get("stems") else []
                 pkg_stems = [path for _name, path in stems_all if not current.get("stems")]
-                with_audio = True
+                if not dialogue_wav:
+                    # 작업 219: 대사만 스템이 없으면(A1 끔 · 다른 트랙 솔로) 대사.mp3 는 전체 소리가 아니라 같은 길이 무음
+                    dialogue_raw = os.path.join(workdir, "dialogue-silence.raw")
+                    scratch.append(dialogue_raw)
+                    stitcher._fit_pcm(dialogue_raw, total_samples * stitcher.EDIT_AUDIO_BYTES_PER_SAMPLE)  # noqa: SLF001
+                # 작업 219: 섞은 소리에 들리는 것이 있을 때만 소리 있음 — A1 은 켜져 있고 클립 소리가 있을 때, 그 밖은 들리는 트랙
+                with_audio = (with_audio and bool(mix_plan["a1On"])) or bool(mix_plan["buses"])
                 log.info("vnew.edit.export_tracks pid=%s gen=%s n=%d buses=%d items=%d duck=%d stems=%d", pid, gen_id, n,
                          len(mix_plan["buses"]), sum(len(b["items"]) for b in mix_plan["buses"]), len(spans), len(stems_out))
                 stage = "join"
@@ -2794,10 +2841,21 @@ def run_export(owner: str, pid: str, gen_id: str, n: int, claim: str) -> None:
             zip_path = os.path.join(workdir, "package.zip")
             package = _export_package(output, audio_path, zip_path, name=_package_name(n),
                                       samples=(fx["total"] if fx is not None else sum(frames)) * (stitcher.EDIT_AUDIO_RATE // fps),
-                                      seconds=seconds, has_audio=with_audio, dialogue_wav=dialogue_wav, bg_wavs=bg_wavs)
-            for path in pkg_stems:  # 216-fix2: 스템 zip 을 고르지 않았으면 내려받기용으로만 쓴 스템을 지운다
-                if os.path.exists(path):
-                    os.unlink(path)
+                                      seconds=seconds, has_audio=with_audio, dialogue_raw=dialogue_raw, dialogue_wav=dialogue_wav,
+                                      bg_wavs=bg_wavs)
+            # 216-fix2 · 작업 219: 내려받기 zip 을 쓴 뒤 그 스템은 바로 지운다(스템 zip 을 고르지 않았으면 전부 · 무음 대사도).
+            _drop_files(pkg_stems + ([dialogue_raw] if dialogue_raw else []))
+            stems_zip = ""
+            if stems_out:
+                # 작업 215a: 스템 zip(압축 없이 — wav 는 거의 줄지 않는다). 파일 이름은 서버가 정한 글자만(대사만.wav · 배경음.wav …).
+                # 작업 219: 올리기 전에 묶어 스템 wav 를 하나씩 바로 지운다(영상 · zip 을 올리는 동안 디스크에 두지 않는다).
+                import zipfile  # noqa: PLC0415
+
+                stems_zip = os.path.join(workdir, "stems.zip")
+                with zipfile.ZipFile(stems_zip, "w", compression=zipfile.ZIP_STORED) as archive:
+                    for name, path in stems_out:
+                        archive.write(path, arcname=name)
+                        os.unlink(path)
             if audio_path:
                 os.unlink(audio_path)
             size = os.path.getsize(output)
@@ -2809,18 +2867,11 @@ def run_export(owner: str, pid: str, gen_id: str, n: int, claim: str) -> None:
             _upload(zip_path, zip_key, bucket=vpoc_settings.VIDEO_BUCKET, content_type="application/zip")
             os.unlink(zip_path)
             stem_fields: dict = {}
-            if stems_out:
-                # 작업 215a: 스템 zip(압축 없이 — wav 는 거의 줄지 않는다). 파일 이름은 서버가 정한 글자만(대사만.wav · 배경음.wav …).
-                import zipfile  # noqa: PLC0415
-
-                zip_path = os.path.join(workdir, "stems.zip")
-                with zipfile.ZipFile(zip_path, "w", compression=zipfile.ZIP_STORED) as archive:
-                    for name, path in stems_out:
-                        archive.write(path, arcname=name)
-                        os.unlink(path)
+            if stems_zip:
                 _beat(owner, pid, gen_id, claim)
                 stems_key = export_stems_key(owner, pid, gen_id, n)
-                _upload(zip_path, stems_key, bucket=vpoc_settings.VIDEO_BUCKET, content_type="application/zip")
+                _upload(stems_zip, stems_key, bucket=vpoc_settings.VIDEO_BUCKET, content_type="application/zip")
+                os.unlink(stems_zip)
                 stem_fields = {"stemsKey": stems_key, "stems": [name for name, _ in stems_out]}
         _finish(owner, pid, gen_id, claim, status="done", key=key, seconds=seconds, bytes=size, hasAudio=with_audio,
                 finishedAt=now_iso(), error="", zipKey=zip_key, zipBytes=package.get("bytes"),

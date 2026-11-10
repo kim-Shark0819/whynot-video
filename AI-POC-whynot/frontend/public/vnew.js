@@ -11398,6 +11398,9 @@
   var EDIT_MEDIA_TTL_MS = 50 * 60 * 1000; // 필름스트립 presigned(1시간)가 끝나기 전에 다시 받는다
   var EDIT_URL_RETRY_MS = 15000; // 영상 오류(서명 만료 등)로 주소를 다시 받는 최소 간격
   var EDIT_HELP_KEY = "vnew-edit-help-closed"; // 도움말 닫음(localStorage)
+  // 작업 219b: 사용자 지시(11-10) — xml · prproj 내보내기는 화면에서 뺀다(서버 기능은 남김). false 면 215b 프리미어 묶음 칸 ·
+  // 215c Pr 버튼을 만들지 않는다(Tab 으로도 닿지 않고 /edit/premiere 도 부르지 않는다).
+  var EDIT_PREMIERE_UI = false;
   var EDIT_HELP_TEXT = "재생헤드를 옮기고 ✂ 또는 S로 자르고, 클립 양 끝을 끌어 줄이거나 원본 길이까지 늘이세요. 고른 클립은 속도·길이(초)로도 바꿀 수 있습니다.";
   var EDIT_CHANGED_TEXT = "다른 곳에서 바뀌어 다시 불러왔습니다.";
   var EDIT_GONE_TEXT = "편집할 영상이 아직 없습니다. ⑤에서 영상을 먼저 만들어 주세요."; // 서버 문구가 없을 때(지시서 115)
@@ -12102,7 +12105,8 @@
     if (c === "KeyS" || k === "s" || k === "S") return "split";
     if (k === "Delete" || k === "Backspace") return "delete";
     if (c === "KeyM" || k === "m" || k === "M") return "mute";
-    if (c === "KeyN" || k === "n" || k === "N") return "snap"; // 작업 215a: 붙기(Premiere N)
+    // 작업 219b: 붙기는 Shift+N(그냥 N 은 215c 롤링 도구가 먼저 받는다 — edit215cOnKey)
+    if (c === "KeyN" || k === "n" || k === "N") return "snap";
     if (k === "+" || k === "=" || c === "NumpadAdd") return "zoomIn";
     if (k === "-" || k === "_" || c === "NumpadSubtract") return "zoomOut";
     // 고른 클립 1프레임 다듬기(지시서 115): [ ] 는 끝, Shift 는 시작. 괄호는 한글 자판에서도 같은 글자다.
@@ -12288,7 +12292,6 @@
       mix: editMixNorm({}), // 작업 215a: 오디오 트랙 {tracks, a1}(editMixNorm)
       mixSel: null, // 작업 215a: 고른 소리 아이템 {t, i}
       mixKey: null, // 작업 215a: 고른 볼륨 키 {t, i, k}
-      mixSnap: true, // 작업 215a: 붙기(N)
       mixStems: false, // 작업 215a: 내보내기에 스템 zip 도
       mixLive: null, // 작업 215a: WebAudio 미리듣기 예약(editMixStart)
       mixAc: null,
@@ -12647,6 +12650,7 @@
     ["표시", ";", "표시 구간 들어내기(빈틈 남김)"], ["표시", "'", "표시 구간 뽑아내기(뒤가 당겨짐)"],
     ["표시", { vnew: "Alt+M", premiere: "M" }, "마커 추가"], ["표시", "Shift+M / Ctrl+Shift+M", "다음 / 앞 마커로"],
     ["타임라인", "= / -", "확대 / 축소"], ["타임라인", "Alt+휠", "확대 / 축소"], ["타임라인", "\\", "시퀀스 전체 맞추기"],
+    ["타임라인", "Shift+N", "붙기(스냅) 켜기 / 끄기 — 클립 · 소리 끌기 모두"],
     ["타임라인", "?", "이 단축키 표"], ["타임라인", "Esc", "메뉴 · 창 닫기"]
   ];
   var edit215cRate = 1; // J/K/L 셔틀 배속(editSetRate 가 클립 속도에 곱한다, 평소 1)
@@ -13122,13 +13126,50 @@
     return !!(s && s.tracks.v1 && s.tracks.v1.locked);
   }
 
-  /* editDo 연결: 영상 트랙이 잠겼으면 바꾸는 단축키·버튼을 막는다. */
+  /* editDo · edit215cDo 가 한 번씩 부른다(동작 길마다 한 곳): 영상 트랙이 잠겼으면 V1 클립을 바꾸는 단축키·버튼을 막는다.
+     작업 219b: 고른 소리 아이템 지우기 · 소리 끄기는 V1 잠금과 무관하다(자르기는 editDo 가 소리 아이템만 나눈다). */
   function edit215cBlocked(ctx, action) {
     var edits = ["split", "delete", "mute", "reset", "inEarlier", "inLater", "outEarlier", "outLater", "rippleDelete", "lift",
       "liftRange", "extractRange", "toggleEnable", "pasteAttrs", "speedDialog"];
-    if (!edit215cLocked(ctx) || edits.indexOf(action) < 0) return false;
+    if (!edit215cLocked(ctx) || edits.indexOf(action) < 0 || edit215cOffV1(ctx, action)) return false;
     editNote(ctx, EDIT215C_LOCKED_NOTE);
     return true;
+  }
+
+  /* 작업 219b: editDo 의 지우기 · 소리 끄기가 V1 클립이 아니라 고른 소리 아이템을 겨누는가(고른 자막 · 타이틀은 editDo 가
+     editTxDo 로 먼저 처리하고, 들어내기 · 지우고 당기기 단축키는 edit215cOnKey 가 edit215cDeleteOther 로 먼저 돌린다). */
+  function edit215cOffV1(ctx, action) {
+    if (action !== "delete" && action !== "mute") return false;
+    return !!(ctx.mix && editMixItemRef(ctx));
+  }
+
+  /* 작업 219b: V1 이 잠긴 채 자르기(S · Ctrl+B) — 재생헤드에 걸친 소리 아이템만 나누고 클립은 그대로. */
+  function edit215cSplitLocked(ctx) {
+    var mixSplit = ctx.mix ? editMixSplitAll(ctx.mix, ctx.t) : null;
+    if (mixSplit) editMixCommit(ctx, mixSplit);
+    else editNote(ctx, EDIT215C_LOCKED_NOTE);
+  }
+
+  /* 작업 219b: Delete · Shift+Delete(들어내기 · 지우고 당기기 단축키) — 고른 자막·타이틀, 그다음 고른 소리 키·아이템을 먼저 지운다.
+     지웠으면 true(클립 들어내기 · 지우고 당기기로 넘어가지 않는다). */
+  function edit215cDeleteOther(ctx) {
+    if (!editAlive(ctx) || ctx.busy) return false;
+    if (ctx.txSel && editTxDo(ctx, "delete")) return true;
+    return !!(ctx.mix && editMixDelete(ctx));
+  }
+
+  /* 작업 219b: 붙기(스냅) 상태는 하나 — 215c 🧲 · 215a 🧲 붙기 · Shift+N 이 모두 이 값을 바꾸고 읽는다(localStorage 에 남는다). */
+  function edit215cSnapOn(ctx) {
+    return edit215cState(ctx).snap;
+  }
+
+  function edit215cSnapToggle(ctx) {
+    var s = edit215cState(ctx);
+    s.snap = !s.snap;
+    edit215cStore(EDIT215C_SNAP_KEY, s.snap ? "1" : "0");
+    edit215cPaintBar(ctx);
+    if (ctx.mix && ctx.dom) editMixRenderMixer(ctx);
+    return s.snap;
   }
 
   function edit215cSel(ctx) {
@@ -13316,8 +13357,10 @@
     if (editTypingTarget(event.target || {})) return false;
     var action = edit215cKeyAction(event.key, event.code, event.ctrlKey || event.metaKey, event.shiftKey, event.altKey, s.preset);
     if (!action) return false;
+    if (action === "speedDialog" && edit215cSel(ctx).length !== 1) return false; // 작업 219b: 클립 하나가 아니면 Ctrl+R 은 브라우저(새로 고침)
     if (event.preventDefault) event.preventDefault();
     if (event.repeat && action !== "step5Back" && action !== "step5Fwd" && action !== "prevEdit" && action !== "nextEdit") return true;
+    if ((action === "lift" || action === "rippleDelete") && edit215cDeleteOther(ctx)) return true; // 작업 219b: 고른 자막 · 소리 먼저
     edit215cDo(ctx, action);
     return true;
   }
@@ -13407,10 +13450,8 @@
       bar.appendChild(b);
     });
     bar.appendChild(el("span", "vnew-e215c-sep", ""));
-    s.snapBtn = edit215cBtn("🧲", "스냅 켜기/끄기 — 끌 때 편집점·재생헤드·마커·표시에 붙습니다", "", function () {
-      s.snap = !s.snap;
-      edit215cStore(EDIT215C_SNAP_KEY, s.snap ? "1" : "0");
-      edit215cPaintBar(ctx);
+    s.snapBtn = edit215cBtn("🧲", "스냅 켜기/끄기 — 끌 때 편집점·재생헤드·마커·표시 · 소리 아이템에 붙습니다", "Shift+N", function () {
+      edit215cSnapToggle(ctx); // 작업 219b: 215a 🧲 붙기와 같은 상태
     });
     bar.appendChild(s.snapBtn);
     bar.appendChild(edit215cBtn("🔖", "마커 목록 — 마커 추가는 " + (s.preset === "premiere" ? "M" : "Alt+M"), "Shift+M 다음 마커", function () {
@@ -13419,11 +13460,12 @@
     bar.appendChild(edit215cBtn("⌨", "단축키 보기", "?", function () {
       edit215cKeymapPanel(ctx);
     }));
-    var prBtn = edit215cBtn("Pr", "Premiere Pro 프로젝트로 내보내기(XML · EDL · 재료 zip)", "", function () {
-      edit215cPremiere(ctx);
-    });
-    prBtn.tabIndex = -1; // 사용자 지시(11-10): xml · prproj 는 화면에서 뺀다(CSS 로 감춤) — 키보드로도 닿지 않게
-    bar.appendChild(prBtn);
+    if (EDIT_PREMIERE_UI) {
+      // 작업 219b: 꺼져 있으면 Pr 버튼을 만들지 않는다(CSS 로 감추면 Tab · Enter 로 닿았다)
+      bar.appendChild(edit215cBtn("Pr", "Premiere Pro 프로젝트로 내보내기(XML · EDL · 재료 zip)", "", function () {
+        edit215cPremiere(ctx);
+      }));
+    }
     d.tl.appendChild(bar);
     var labels = d.tl.children[0];
     s.trackBtns = {};
@@ -16237,6 +16279,7 @@
   function editDo(ctx, action) {
     if (!editAlive(ctx) || ctx.busy) return;
     if (editTxDo(ctx, action)) return; // 작업 215b: 고른 자막·타이틀(지우기 · 자르기)
+    if (action === "split" && edit215cLocked(ctx)) return edit215cSplitLocked(ctx); // 작업 219b: V1 잠김 = 소리 아이템만 나눈다
     if (edit215cBlocked(ctx, action)) return; // 작업 215c: 영상 트랙 잠금
     if (action === "play") {
       if (ctx.playing) editPause(ctx);
@@ -16275,9 +16318,8 @@
     } else if (action === "undo" || action === "redo") {
       editUndoRedo(ctx, action === "redo");
     } else if (action === "snap") {
-      ctx.mixSnap = ctx.mixSnap === false; // 작업 215a: 붙기 켜기 · 끄기(N)
-      editMixRenderMixer(ctx);
-      editNote(ctx, ctx.mixSnap ? "붙기 켬 (N)" : "붙기 끔 (N)");
+      // 작업 219b: 붙기 켜기 · 끄기(Shift+N) — 215c 🧲 과 같은 상태
+      editNote(ctx, edit215cSnapToggle(ctx) ? "붙기 켬 (Shift+N)" : "붙기 끔 (Shift+N)");
     } else if (action === "zoomIn") {
       editSetZoom(ctx, ctx.pps * 1.25);
     } else if (action === "zoomOut") {
@@ -18463,10 +18505,13 @@
     if (!ctx.tx) return;
     if (!ctx.dom.txExport) ctx.dom.txExport = el("div", "vnew-edit-txexport");
     box.appendChild(ctx.dom.txExport);
-    if (!ctx.txPrem) ctx.txPrem = { box: null, state: null, busy: false, timer: 0, loaded: false, error: "" };
-    if (!ctx.dom.txPrem) ctx.dom.txPrem = el("div", "vnew-edit-txprem");
-    ctx.txPrem.box = ctx.dom.txPrem;
-    box.appendChild(ctx.dom.txPrem);
+    if (EDIT_PREMIERE_UI) {
+      // 작업 219b: 꺼져 있으면 프리미어 묶음 칸을 만들지 않는다(ctx.txPrem 이 없으니 /edit/premiere 도 부르지 않는다)
+      if (!ctx.txPrem) ctx.txPrem = { box: null, state: null, busy: false, timer: 0, loaded: false, error: "" };
+      if (!ctx.dom.txPrem) ctx.dom.txPrem = el("div", "vnew-edit-txprem");
+      ctx.txPrem.box = ctx.dom.txPrem;
+      box.appendChild(ctx.dom.txPrem);
+    }
     editTxExportPaint(ctx);
     editTxPremPaint(ctx); // 상태는 누른 뒤에만 읽는다(열 때 GET 을 더하지 않는다)
   }
@@ -19103,7 +19148,7 @@
     return changed ? next : null;
   }
 
-  /* 붙기(N): 가장 가까운 점이 tol 초 안이면 그 점, 아니면 value. */
+  /* 붙기(Shift+N): 가장 가까운 점이 tol 초 안이면 그 점, 아니면 value. */
   function editMixSnap(value, points, tol) {
     var best = value;
     var gap = tol;
@@ -19260,7 +19305,7 @@
   }
 
   function editMixSnapTol(ctx) {
-    return ctx.mixSnap === false ? 0 : EDIT_MIX_SNAP_PX / Math.max(1, ctx.pps || 1);
+    return edit215cSnapOn(ctx) ? EDIT_MIX_SNAP_PX / Math.max(1, ctx.pps || 1) : 0; // 작업 219b: 215c 와 같은 붙기 상태
   }
 
   /* ---- 그리기 ---- */
@@ -19624,7 +19669,7 @@
     });
     add.disabled = ctx.mix.tracks.length >= EDIT_MIX_MAX_TRACKS;
     bar.appendChild(add);
-    bar.appendChild(editMixButton("🧲 붙기", "클립 경계 · 재생헤드 · 다른 소리에 붙기 (N)", ctx.mixSnap !== false, function () {
+    bar.appendChild(editMixButton("🧲 붙기", "클립 경계 · 재생헤드 · 다른 소리에 붙기 (Shift+N)", edit215cSnapOn(ctx), function () {
       editDo(ctx, "snap");
     }));
     bar.appendChild(editMixButton("스템도 함께", "내보낼 때 대사만 · 배경음 · 효과음 · mix.wav 를 zip 으로도(Premiere 마무리용)", !!ctx.mixStems, function () {

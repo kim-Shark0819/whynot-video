@@ -68776,6 +68776,8 @@ def main() -> int:
     if not __import__("check_edit_text_215b").check_edit_text_215b(): fail("작업 215b: ⑦ 자막 · 타이틀 · 전환 · 색 · 대사 편집 검사 실패")
     if not __import__("check_edit_tools_215c").check_edit_tools_215c(): fail("작업 215c: ⑦ 프리미어식 도구 · 단축키 검사 실패")
     if not __import__("check_css_balance").check_css_balance(): fail("CSS 괄호 균형 검사 실패(닫히지 않은 규칙)")
+    if not __import__("check_review_fixes_219").check_review_fixes_219(): fail("작업 219: 리뷰 고침(내보내기 순서 · 대사 무음 · 분리 · 대사 다시 만들기) 검사 실패")
+    if not __import__("check_review_fixes_219b").check_review_fixes_219b(): fail("작업 219b: ⑦ 리뷰 고침(키 · 지우기 · 잠금 · 프리미어 컨트롤) 검사 실패")
     check_vnew_voice_ui_203()
     print()
     if warnings:

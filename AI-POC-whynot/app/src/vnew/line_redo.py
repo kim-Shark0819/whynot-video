@@ -15,7 +15,7 @@
   다시 만들기(그림체마다): {gen 루트}/sound/{variant}/redo.json
     {v, variant, current: r(0 = 원래 영상), revisions: [{r, key, at, baseKey, fromKey, fromR, lineId, range, pieces, retake, model, usd}],
      jobs: {lineId: {status quoted|running|splicing|done|failed, …}}}
-  다시 만든 영상(영상 버킷): {gen 루트}/final-{variant}-lines-r{r}.mp4 — 새 키에만 쓴다(원래 완성본·⑦ 내보내기·이전 판은 그대로).
+  다시 만든 영상(영상 버킷): {gen 루트}/final-{variant}-lines-r{r}-{token}.mp4 — 새 키에만 쓴다(원래 완성본·⑦ 내보내기·이전 판은 그대로).
 
 판(revision) 잇기: 실사 회차 병합본(final-real-r{n}·-fixed — 원래 병합본을 덮어쓰지 않고 새 키에 다시 이은 판을 두고 기록이 새 키를 가리킨다)과
 같은 원칙이다. 바뀐 구간 [a, b] 만 retake 버전 결과(그 소리 = 새 대사)로 바꾸고 앞·뒤는 지금 원본에서 프레임 정확히 잘라 같은 크기·fps 로
@@ -58,6 +58,7 @@ import re
 import secrets
 import tempfile
 import threading
+import time
 from datetime import datetime, timezone
 
 from .. import stitcher
@@ -98,6 +99,8 @@ SUGGEST_MAX_TOKENS = 600
 SUGGEST_CONTEXT_LINES = 3  # 앞뒤로 함께 보내는 대본 줄 수
 REVISIONS_MAX = 20
 SPLICE_STALL_S = 900
+START_WRITE_TRIES = 4  # 작업 219: 제출이 받아진 뒤 running 쓰기 재시도
+START_WRITE_WAIT_S = 0.25
 OUTDATED_TEXT = "목소리 맞춤을 다시 반영해 주세요"
 NO_AUDIO_TEXT = "새 영상에 소리가 없어 그 구간은 원래 소리를 썼습니다. 목소리 맞춤으로 새 대사 목소리를 넣어 주세요."
 TAKE_REDO_TEXT = ("대본에 반영한 대사는 ⑤ [바뀐 테이크만 다시 만들기]로 그 테이크 전체를 다시 만들 수 있습니다. "
@@ -147,8 +150,11 @@ def redo_key(owner: str, pid: str, gen_id: str, variant: str) -> str:
     return f"{edit._root(owner, pid, gen_id)}/sound/{variant}/redo.json"  # noqa: SLF001
 
 
-def revision_key(owner: str, pid: str, gen_id: str, variant: str, r: int) -> str:
-    return f"{edit._root(owner, pid, gen_id)}/final-{variant}-lines-r{int(r)}.mp4"  # noqa: SLF001
+def revision_key(owner: str, pid: str, gen_id: str, variant: str, r: int, token: str = "") -> str:
+    """새 판 키. 작업 219: 잇기 · 다시 잇기는 token(secrets.token_hex(3))을 붙여 판마다 고유하게 쓴다 — 두 파드가 같은 r 로
+    동시에 올려도 서로의 파일을 덮지 않는다(LineRedoRace 는 진 쪽만 거절). 판의 실제 키는 늘 rev["key"] 다."""
+    tail = f"-{token}" if token else ""
+    return f"{edit._root(owner, pid, gen_id)}/final-{variant}-lines-r{int(r)}{tail}.mp4"  # noqa: SLF001
 
 
 def enabled() -> bool:
@@ -788,6 +794,12 @@ def _refresh(owner: str, pid: str, gen_id: str, variant: str, redo: dict) -> dic
             if job.get("status") != "running":
                 continue
             version = retake._find_version(state, str(job.get("cellKey") or ""), job.get("n")) or {}  # noqa: SLF001
+            if not version and job.get("n") is None:  # 작업 219: 제출 응답에 번호가 없었다 → 초안으로 찾고 번호를 적는다
+                version = _submitted_version(owner, pid, gen_id, str(job.get("cellKey") or ""), str(job.get("draftId") or ""),
+                                             state=state) or {}
+                if isinstance(version.get("n"), int) and not isinstance(version.get("n"), bool):
+                    job["n"] = version["n"]
+                    changed = True
             status = str(version.get("status") or "")
             if status == "completed" and version.get("outputKey"):
                 claim = secrets.token_hex(8)
@@ -1036,6 +1048,7 @@ def quote(owner: str, pid: str, payload) -> dict:
     if not override:
         raise VpocError(where, "LineNoOverride", "먼저 [대사 고치기]로 새 대사를 저장해 주세요.", 409)
     job_now = read_redo(owner, pid, gen_id, variant)["jobs"].get(line_id) or {}
+    job_now = _adopt_submitted(owner, pid, gen_id, variant, line_id, job_now) or job_now  # 작업 219: 이미 나간 초안 → running
     if job_now.get("status") in ("running", "splicing"):
         raise VpocError(where, "LineRedoRunning", "이 대사 영상을 다시 만드는 중입니다. 끝난 뒤 다시 눌러 주세요.", 409)
     duration = edit._num(doc["source"].get("duration")) or 0.0  # noqa: SLF001
@@ -1143,6 +1156,9 @@ def start(owner: str, pid: str, payload) -> dict:
     retake.require_enabled(where)
     redo = read_redo(owner, pid, gen_id, variant)
     job = redo["jobs"].get(line_id) or {}
+    adopted = _adopt_submitted(owner, pid, gen_id, variant, line_id, job)  # 작업 219: 이미 나간 초안이면 다시 내지 않는다
+    if adopted is not None:
+        return {"job": _job_out(adopted)}
     if job.get("status") in ("running", "splicing"):
         raise VpocError(where, "LineRedoRunning", "이 대사 영상을 다시 만드는 중입니다. 끝난 뒤 다시 눌러 주세요.", 409)
     if job.get("status") != "quoted" or not job.get("draftId") or job.get("promptV") != PROMPT_V:
@@ -1156,20 +1172,81 @@ def start(owner: str, pid: str, payload) -> dict:
     rv = _submit(owner, pid, job["mid"], body)  # CostMismatch(409) · 규칙 · 키 오류는 그대로 올린다(화면이 견적을 다시 받는다)
     live = (rv or {}).get("live") or {}
     n = live.get("n")
+    cell_key = str((rv or {}).get("cellKey") or job.get("cellKey") or "")
     if not isinstance(n, int) or isinstance(n, bool):
-        raise VpocError(where, "LineRedoFailed", "다시 만들기를 시작하지 못했습니다. 다시 시도해 주세요.", 502)
+        # 작업 219: 제출은 받았다(돈이 나간다) — quoted 로 두지 않는다. retake 상태에서 이 초안의 버전을 찾고, 못 찾으면 n 없이
+        # running 으로 둔다(_refresh 가 draftId 로 번호를 찾는다).
+        found = _submitted_version(owner, pid, gen_id, cell_key, job["draftId"])
+        n = found.get("n") if found else None
+        n = n if isinstance(n, int) and not isinstance(n, bool) else None
+        log.warning("vnew.sound.lines.redo_no_n pid=%s line=%s cell=%s found=%s", pid, line_id, cell_key, n)
 
     def mutate(doc_):
         cur = doc_["jobs"].get(line_id) or {}
-        cur.update(status="running", n=n, cellKey=str((rv or {}).get("cellKey") or cur.get("cellKey") or ""), startedAt=now_iso(),
+        cur.update(status="running", n=n, cellKey=cell_key, startedAt=now_iso(),
                    at=now_iso(), error="", stage=str(live.get("status") or "queued"), claim="")
         doc_["jobs"][line_id] = cur
         return doc_
 
-    saved = _mutate_redo(owner, pid, gen_id, variant, mutate)
-    log.info("vnew.sound.lines.redo_start pid=%s gen=%s variant=%s line=%s cell=%s n=%d usd=%s", pid, gen_id, variant, line_id,
+    saved = _mutate_redo_retry(owner, pid, gen_id, variant, mutate, line_id)
+    log.info("vnew.sound.lines.redo_start pid=%s gen=%s variant=%s line=%s cell=%s n=%s usd=%s", pid, gen_id, variant, line_id,
              saved["jobs"][line_id].get("cellKey"), n, job.get("usd"))
     return {"job": _job_out(saved["jobs"][line_id])}
+
+
+def _mutate_redo_retry(owner: str, pid: str, gen_id: str, variant: str, fn, line_id: str) -> dict:
+    """작업 219: 제출이 받아진 뒤의 running 쓰기 — 실패하면 몇 번 더 쓴다(quoted 로 남으면 다시 누를 때 두 번 낸다)."""
+    last: Exception | None = None
+    for attempt in range(1, START_WRITE_TRIES + 1):
+        try:
+            return _mutate_redo(owner, pid, gen_id, variant, fn)
+        except Exception as exc:  # noqa: BLE001
+            last = exc
+            log.warning("vnew.sound.lines.redo_state_retry pid=%s line=%s attempt=%d err=%s", pid, line_id, attempt,
+                        type(exc).__name__)
+            if attempt < START_WRITE_TRIES:
+                time.sleep(START_WRITE_WAIT_S * attempt)
+    log.error("vnew.sound.lines.redo_state_lost pid=%s line=%s — 다음 견적 · 시작이 진행 중인 retake 를 이어받는다", pid, line_id)
+    raise VpocError("vnew.sound.lines.redo", "LineRedoStateFailed",
+                    "다시 만들기는 시작됐지만 상태를 저장하지 못했습니다. 잠시 뒤 새로고침해 주세요(다시 누르지 않아도 됩니다).", 503) from last
+
+
+def _submitted_version(owner: str, pid: str, gen_id: str, cell_key: str, draft_id: str, state: dict | None = None) -> dict | None:
+    """작업 219: 이 초안(draftId)으로 낸 retake 버전 중 진행 중이거나 끝난 것(실패 · 취소는 빼고 — 그건 다시 낼 수 있다). 없으면 None."""
+    if not cell_key or not draft_id:
+        return None
+    try:
+        state = state if state is not None else _retake_state(owner, pid, gen_id)
+    except Exception as exc:  # noqa: BLE001 — 못 읽으면 이어받지 않는다
+        log.warning("vnew.sound.lines.retake_state_failed pid=%s err=%s", pid, type(exc).__name__)
+        return None
+    versions = ((state.get("cells") or {}).get(cell_key) or {}).get("versions") or []
+    for version in reversed(versions):
+        if isinstance(version, dict) and version.get("draftId") == draft_id and version.get("status") not in ("failed", "cancelled"):
+            return version
+    return None
+
+
+def _adopt_submitted(owner: str, pid: str, gen_id: str, variant: str, line_id: str, job: dict) -> dict | None:
+    """작업 219: quoted 작업의 초안이 이미 retake 로 나갔으면(앞 시작이 상태를 못 썼다) 다시 내지 않고 running 으로 이어받는다."""
+    if job.get("status") != "quoted":
+        return None
+    version = _submitted_version(owner, pid, gen_id, str(job.get("cellKey") or ""), str(job.get("draftId") or ""))
+    if version is None:
+        return None
+    n = version.get("n") if isinstance(version.get("n"), int) and not isinstance(version.get("n"), bool) else None
+
+    def mutate(doc_):
+        cur = doc_["jobs"].get(line_id) or {}
+        if cur.get("status") != "quoted" or cur.get("draftId") != job.get("draftId"):
+            return None
+        cur.update(status="running", n=n, startedAt=now_iso(), at=now_iso(), error="", stage=str(version.get("status") or "queued"),
+                   claim="")
+        return doc_
+
+    saved = _mutate_redo(owner, pid, gen_id, variant, mutate)
+    log.info("vnew.sound.lines.redo_adopt pid=%s line=%s cell=%s n=%s", pid, line_id, job.get("cellKey"), n)
+    return (saved or read_redo(owner, pid, gen_id, variant))["jobs"].get(line_id)
 
 
 # ================================================================ 잇기(새 판)
@@ -1254,7 +1331,7 @@ def run_splice(owner: str, pid: str, gen_id: str, variant: str, line_id: str, cl
                 _beat(owner, pid, gen_id, variant, line_id, claim)
                 stage = "upload"
                 r = max([int(x.get("r") or 0) for x in redo["revisions"]] + [0]) + 1
-                key = revision_key(owner, pid, gen_id, variant, r)
+                key = revision_key(owner, pid, gen_id, variant, r, secrets.token_hex(3))  # 작업 219: 판마다 고유한 키(파드 경쟁)
                 _upload(out_path, key)
         new_pieces = _replace_piece(pieces, {"start": splice[0], "end": splice[1], "clipStart": float(rng["start"])}, output_key)
         from_r = int(now_source.get("r") or 0) if now_source.get("kind") == "redo" else 0
@@ -1354,7 +1431,7 @@ def rebuild_revision(owner: str, pid: str, variant: str, n: int) -> dict:
         if seconds <= 0:
             raise stitcher.StitchError("이은 영상 길이를 읽지 못했습니다.")
         r = max([int(x.get("r") or 0) for x in redo["revisions"]] + [0]) + 1
-        key = revision_key(owner, pid, gen_id, variant, r)
+        key = revision_key(owner, pid, gen_id, variant, r, secrets.token_hex(3))  # 작업 219: 판마다 고유한 키(파드 경쟁)
         _upload(out_path, key)
     new_pieces = _replace_piece(pieces, {"start": splice[0], "end": splice[1], "clipStart": float(rng["start"])}, clip_key)
 
