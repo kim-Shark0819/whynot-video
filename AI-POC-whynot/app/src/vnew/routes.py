@@ -1168,6 +1168,58 @@ def create_blueprint(deps: VnewDependencies) -> Blueprint:
     from . import voices_routes  # noqa: PLC0415 — 작업 202: 인물 목소리(voices.py)
     voices_routes.register(bp, deps, _sound_project, _fail)
 
+    # ------------------------------------------------------------ 작업 212: ⑥ 대사 고치기 · 그 대사 구간 영상 다시 만들기
+    # line_redo.py 가 맡는다(요청 때 import — 블루프린트를 만들 때 무거운 모듈을 읽지 않는다). 권한은 ⑥ 사운드 라우트와 같다(_sound_project
+    # = 쓰기 권한, 남의 프로젝트는 404). VNEW_SOUND·VNEW_LINE_REDO 가 꺼져 있으면 프로젝트를 보기 전에 404.
+    #   POST suggest(AI 로 다시 쓰기 3줄) · PUT override(고친 대사 저장 + 대본에도 반영) · POST quote(구간·금액, 영상 호출 0)
+    #   POST redo(시작, confirmUsd) · GET status(사운드 보기) · POST revert(이전 영상으로 되돌리기)
+
+    def _line_redo(pid: str, where: str, call, status: int = 200):
+        try:
+            from . import line_redo  # noqa: PLC0415
+
+            line_redo.require_enabled(where)
+            owner = _sound_project(pid)
+            result = call(line_redo, owner)
+            return (jsonify(result), status) if status != 200 else jsonify(result)
+        except Exception as exc:  # noqa: BLE001
+            return _fail(exc)
+
+    @bp.post("/p/<pid>/sound/lines/suggest")
+    @deps.require_auth
+    def sound_lines_suggest(pid: str):
+        where = "vnew.sound.lines.suggest"
+        return _line_redo(pid, where, lambda m, owner: m.suggest(owner, pid, _edit_body(where)))
+
+    @bp.put("/p/<pid>/sound/lines/override")
+    @deps.require_auth
+    def sound_lines_override(pid: str):
+        where = "vnew.sound.lines.override"
+        return _line_redo(pid, where, lambda m, owner: m.save_override(owner, pid, _edit_body(where)))
+
+    @bp.post("/p/<pid>/sound/lines/quote")
+    @deps.require_auth
+    def sound_lines_quote(pid: str):
+        where = "vnew.sound.lines.quote"
+        return _line_redo(pid, where, lambda m, owner: m.quote(owner, pid, _edit_body(where)))
+
+    @bp.post("/p/<pid>/sound/lines/redo")
+    @deps.require_auth
+    def sound_lines_redo(pid: str):
+        where = "vnew.sound.lines.redo"
+        return _line_redo(pid, where, lambda m, owner: {"ok": True, **m.start(owner, pid, _edit_body(where))}, 202)
+
+    @bp.get("/p/<pid>/sound/lines/status")
+    @deps.require_auth
+    def sound_lines_status(pid: str):
+        return _line_redo(pid, "vnew.sound.lines.status", lambda m, owner: m.status_view(owner, pid, request.args.get("variant")))
+
+    @bp.post("/p/<pid>/sound/lines/revert")
+    @deps.require_auth
+    def sound_lines_revert(pid: str):
+        where = "vnew.sound.lines.revert"
+        return _line_redo(pid, where, lambda m, owner: m.revert(owner, pid, _edit_body(where)))
+
     # ------------------------------------------------------------ 작업 198: 모델 노트(모델 에러 로그)
     # gen 하나에서 영상·그림 모델이 거절·실패한 기록(새것부터)과 모델·종류별 수. model_notes.py 가 맡는다(글만 — 그림·프롬프트·주소 없음).
     # ?gen=<genId>(없으면 지금 gen)&variant=webtoon|real|all. 다른 vnew GET 과 같은 읽기 권한. VNEW_MODEL_NOTES 가 꺼져 있으면

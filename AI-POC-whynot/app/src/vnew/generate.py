@@ -4010,9 +4010,86 @@ TAKE_RULES_COMPACT = (
     "Reproduce @Video1's composition, camera, positions, cuts and timing exactly. Replace each mannequin with its person "
     "(face and hair from the references, costume as written in ASSETS). Eyes: the on-screen speaker looks at the listener; "
     "an off-screen voice never appears on screen. Two hands per person, hair and outfit patterns as in the references; "
-    "no added people, no text. Korean dialogue and ambient sound, no music."
+    "no added people, no text."
 )
 TAKE_RULES_COMPACT_INNER = " During an inner voice-over the mouth stays closed; the line is still heard."
+# 작업 211: 영상 소리 = 인물 대사만(속마음 포함). 배경음악·스코어·앰비언트·룸톤·효과음·내레이션은 만들지 않는다(사용자가 나중에 넣는다).
+# 모든 영상 프롬프트 빌더(통 테이크 옛·vibe·실사, 컷 단위, 실사 Kling 컷, 156·168 다시 만들기, ⑦ AI로 고치기)가 이 글 하나를 쓴다.
+# 211 fix1 — 바이트 중립: 옛 소리 문장이 있던 자리(옛 통 테이크 RULES 원형 153 B · 짧은 형 44 B)는 그 바이트 이하로 바꾼다
+# (원형 146 B · 짧은 형 43 B — 줄이기 단계가 211 전과 같다). 옛 문장이 없던 자리(vibe 맨 끝 줄 · 컷 단위 DIALOGUE · Kling 꼬리 ·
+# 옛 구간 머리)는 가장 짧은 형(짧은 형). 대사가 없는 길(168 audioDropped, 말 없는 컷)은 SILENCE 형(같은 바이트 이하, 소리 켬·끔은
+# 그 길의 지금 결정 그대로).
+AUDIO_DIALOGUE_ONLY = (
+    "Audio: only the characters speaking their Korean lines (inner voice-overs as written); no music, no ambient sound, "
+    "no sound effects, no narration."
+)
+# 211 fix2: 속마음 줄이 없는 통 테이크는 "inner" 낱말이 없는 형(지시서 117 — spoken 만이면 inner 표기 없음).
+# 원형과 같은 바이트(146 B) — 줄이기 단계가 원형 · 211 전과 같다(더 짧으면 덜 줄인 글이 상한 끝에 붙는다).
+AUDIO_DIALOGUE_ONLY_SPOKEN = ("Audio: only the characters speaking their Korean lines (each line exactly as written); no music, "
+                              "no ambient sound, no sound effects, no narration.")
+AUDIO_DIALOGUE_ONLY_COMPACT = "Korean dialogue only; no music/ambient/SFX."
+AUDIO_SILENCE_ONLY = "Audio: silence only, no one speaks; no music, no ambient sound, no sound effects, no narration."
+AUDIO_SILENCE_ONLY_COMPACT = "Silence only; no voices/music/ambient/SFX."
+# 부정 구절(프롬프트 안 NEGATIVE 줄)에 더하는 말(211 fix1: 가장 짧은 형).
+AUDIO_NEGATIVE = "music, ambient noise, SFX"
+# 211 전 글(옛 칸 프롬프트를 ⑦ AI로 고치기가 다시 낼 때 이 글로 바꾼다 — dialogue_audio_rewrite).
+_OLD_AUDIO_FULL_RE = re.compile(r"[ \t]*Generate synchronized audio: characters speak the Korean lines in their voices; natural "
+                                r"ambient sound of the location; no background music, no narration\.")
+_OLD_AUDIO_COMPACT_RE = re.compile(r"[ \t]*Korean dialogue and ambient sound, no music\.")
+
+
+def audio_rule(has_lines: bool = True, *, compact: bool = False, inner: bool = True) -> str:
+    """작업 211: 영상 소리 규칙 한 문장. 대사 줄이 있으면 대사만, 없으면 침묵만. compact = 바이트 상한 프롬프트용 짧은 형.
+    211 fix2: inner=False(속마음 줄 없음)면 원형도 "inner" 낱말이 없는 형."""
+    if has_lines:
+        if compact:
+            return AUDIO_DIALOGUE_ONLY_COMPACT
+        return AUDIO_DIALOGUE_ONLY if inner else AUDIO_DIALOGUE_ONLY_SPOKEN
+    return AUDIO_SILENCE_ONLY_COMPACT if compact else AUDIO_SILENCE_ONLY
+
+
+def _take_audio_rule(has_lines: bool, *, compact: bool = False, inner: bool = True) -> str:
+    """211 fix1: 옛 통 테이크 RULES 의 옛 소리 문장 자리(원형 · 짧은 형 둘 다 옛 글 바이트 이하). 검사가 옛 글로 되돌리는 자리."""
+    return audio_rule(has_lines, compact=compact, inner=inner)
+
+
+def _with_audio(text: str, has_lines: bool) -> str:
+    """211 fix1: 옛 소리 문장이 없던 자리 — 글 뒤에 가장 짧은 규칙(짧은 형). 규칙이 빈 글이면(검사의 211 끔) 글 그대로."""
+    rule = audio_rule(has_lines, compact=True)
+    return text + (" " + rule if rule else "")
+
+
+def _vibe_audio_line(has_lines: bool) -> str:
+    """작업 211: vibe 통 테이크(159) 맨 끝 소리 규칙 줄. 211 fix1: 옛 문장이 없던 자리라 가장 짧은 형. 빈 글이면 줄이 없다."""
+    return audio_rule(has_lines, compact=True)
+
+
+def has_audio_rule(text: str) -> bool:
+    """작업 211: 프롬프트에 소리 규칙(원형·짧은 형, 대사·침묵)이 있는지."""
+    text = str(text or "")
+    return any(rule in text for rule in (AUDIO_DIALOGUE_ONLY, AUDIO_DIALOGUE_ONLY_SPOKEN, AUDIO_DIALOGUE_ONLY_COMPACT,
+                                         AUDIO_SILENCE_ONLY, AUDIO_SILENCE_ONLY_COMPACT))
+
+
+def dialogue_audio_rewrite(text: str, max_bytes: int = 0) -> str:
+    """작업 211: 211 전 소리 문장(앰비언트를 시키던 글)을 지금 규칙으로 바꾼다. 다른 글은 그대로. 옛 글이 없으면 입력 그대로.
+
+    옛 원형 → AUDIO_DIALOGUE_ONLY(max_bytes 를 넘으면 짧은 형), 옛 짧은 형 → AUDIO_DIALOGUE_ONLY_COMPACT.
+    """
+    text = str(text or "")
+    if not (_OLD_AUDIO_FULL_RE.search(text) or _OLD_AUDIO_COMPACT_RE.search(text)):
+        return text
+
+    def _swap(rule: str):
+        return lambda m: (" " if m.group(0)[:1] in (" ", "\t") else "") + rule
+
+    out = _OLD_AUDIO_COMPACT_RE.sub(_swap(AUDIO_DIALOGUE_ONLY_COMPACT), text)
+    # 211 fix2: 속마음 표기가 없는 글은 "inner" 낱말 없는 형(빌더의 audio_rule(inner=False)와 같은 글).
+    rule = AUDIO_DIALOGUE_ONLY if "inner voice" in text.lower() else AUDIO_DIALOGUE_ONLY_SPOKEN
+    full = _OLD_AUDIO_FULL_RE.sub(_swap(rule), out)
+    if max_bytes and _utf8_len(full) > int(max_bytes):
+        return _OLD_AUDIO_FULL_RE.sub(_swap(AUDIO_DIALOGUE_ONLY_COMPACT), out)
+    return full
 # ASSETS 짧은 형: 시트·사진 문장은 모든 사람에 1번(142·126 문장을 사람마다 되풀이하지 않는다).
 REAL_TAKE_SHEETS_COMPACT = ("{sheets} are AI-generated turnaround sheets of fictional characters: match face/hair/build; "
                             "clothes come from COSTUME")
@@ -4279,10 +4356,9 @@ def _take_prompt(plan: dict, take: dict, *, cast: list[dict], panel_nos: list[in
         "No text, no subtitles, no speech bubbles."
     )
     rules_head = rule_reproduce + rule_replace + rule_eyes + rule_extra
-    audio_full = (
-        " Generate synchronized audio: characters speak the Korean lines in their voices; natural "
-        "ambient sound of the location; no background music, no narration."
-    )
+    # 작업 211: 소리 = 대사만(대사 줄이 없으면 — 168 audioDropped 포함 — 침묵만). 짧은 형은 RULES 짧은 형 끝에.
+    # 211 fix1: 옛 소리 문장 자리라 옛 글 바이트 이하(_take_audio_rule). 211 fix2: 속마음 줄이 없으면 "inner" 낱말 없는 형(117).
+    audio_full = " " + _take_audio_rule(bool(take_lines), inner=take_voices in ("thought", "mixed"))
     avoid_full = REAL_TAKE_AVOID if real else (
         "AVOID: 3D CGI, plastic toy look, photorealistic skin, still-image pan or zoom, subtitles, burned-in text.")
 
@@ -4301,7 +4377,7 @@ def _take_prompt(plan: dict, take: dict, *, cast: list[dict], panel_nos: list[in
     motion_compact = MOTION_MIN + (MOTION_MIN_INNER if inner else "")
     harmony_compact = _harmony_min(plan)
     rules_compact = ("RULES: " + TEXT_RETRY_RULE + " " if no_text else "RULES: ") + TAKE_RULES_COMPACT + (
-        TAKE_RULES_COMPACT_INNER if inner else "")
+        TAKE_RULES_COMPACT_INNER if inner else "") + " " + _take_audio_rule(bool(take_lines), compact=True)
 
     # --- 줄이기 상태(작업 157: 컷 내용 = 연기·닿는 연기·포즈·대사·ON SCREEN 은 빼지 않는다). ---
     state = {
@@ -5876,6 +5952,9 @@ def _vibe_take_prompt(plan: dict, take: dict, *, real: bool, cast: list[dict], l
                     people.setdefault(token, _disp(ko))
     state = {"style": False, "background": False, "assets": False, "paragraph": False, "harmony": False, "harmonyDrop": False}
 
+    def _audio() -> str:
+        # 작업 211: 소리 = 대사만(대사 줄이 없으면 침묵만). 211 fix1: 옛 문장이 없던 자리라 늘 가장 짧은 형(157 단계에 끼지 않는다).
+        return _vibe_audio_line(any(_entry_lines(e) for e in entries))
     def _style() -> str:
         key = "live_action" if real else "webtoon"
         if state["style"]:
@@ -6295,7 +6374,7 @@ def _vibe_take_prompt(plan: dict, take: dict, *, real: bool, cast: list[dict], l
             # 작업 179 fix1: 프리비즈가 거꾸로인 샷이 있는 조각 — 위치는 프리비즈, 그 샷의 좌우는 Shot 줄.
             head_v, sep, tail_v = video.rpartition("; replace each mannequin with its person")
             video = head_v + VIBE_VIDEO_MIRROR + sep + tail_v if sep else video
-        return "\n".join(b for b in [*head, *shots, _labels(), video] if b)
+        return "\n".join(b for b in [*head, *shots, _labels(), video, _audio()] if b)
 
     def _compacted() -> tuple[str, list[str]]:
         text = _assemble()
@@ -8903,6 +8982,11 @@ def _cut_first_frame(mp4: bytes, start_sec: float) -> bytes | None:
 
 # 작업 132: 컷 단위 Kling 실사 프롬프트 끝 negative 1구절(원문). 이 구절 밖에는 그림 낱말이 없다.
 REAL_CUT_NEGATIVE = "no anime, no cartoon, no illustration, keep the same outfit and location as the start frame"
+
+
+def _real_cut_negative_line() -> str:
+    """작업 211: 컷 단위 Kling 실사 NEGATIVE 줄 = 132 구절 + 소리 부정어(AUDIO_NEGATIVE)."""
+    return "NEGATIVE: " + REAL_CUT_NEGATIVE + "; " + AUDIO_NEGATIVE + "."
 # 작업 135: 컷 시작 그림(Seedream) 고정 구절. 실사 그림체 구절은 문장 끝, 배경 문장은 공간 시트 뷰가 있을 때(Image 번호 = 그 뷰).
 # 작업 197: 시트 뷰는 장소 참고만(_location_ref). 옛 글 "Background and location must match Image N exactly (same buildings, railing,
 # street, time of day)" · "Match Image N's place (buildings, railing, light) only where Image 1 shows background".
@@ -12332,6 +12416,7 @@ def _cut_prompt(plan: dict, seg: dict, variant: str, *, cast: list[dict], has_im
     any_spoken = bool(spoken)
 
     def _dialogue_line(with_delivery: bool, limit: int = 0) -> str:
+        # 211 fix2: 소리 규칙은 DIALOGUE 줄에 붙이지 않는다(맨 끝 자기 줄 audio_line — DIALOGUE 줄 형식 그대로).
         if not any_spoken:
             return "DIALOGUE: No one speaks; keep mouths closed."
         parts = []
@@ -12349,6 +12434,10 @@ def _cut_prompt(plan: dict, seg: dict, variant: str, *, cast: list[dict], has_im
             piece += "."
             parts.append(piece)
         return "DIALOGUE: " + " ".join(parts)
+
+    # 작업 211: 소리 규칙 짧은 형(2,500B 컷 단위 — 대사만 / 말 없는 컷은 침묵만). 211 fix2: 프롬프트 맨 끝 자기 줄(줄이기가 건드리지
+    # 않는다, 예산에는 든다). 규칙이 빈 글이면(검사의 211 끔) 줄이 없다.
+    audio_line = audio_rule(any_spoken, compact=True)
 
     # CONTINUITY — @Video1 재현 + 인물 교체 + 임의 추가 금지 + 고퀄 실사/웹툰 마감(설계자 2026-10-22,
     # 뉴테이크 실전 프롬프트). 웹툰판은 live-action 대신 원작 웹툰 그림체로 마감한다.
@@ -12435,6 +12524,7 @@ def _cut_prompt(plan: dict, seg: dict, variant: str, *, cast: list[dict], has_im
             action_line, _fx_line(fx_short),
             motion_short, mood_line, setting_line,
             harmony_short + (" " + bg_harmony if bg_harmony and state.get("bg_harmony", True) else ""), dlg, _continuity(body),
+            audio_line,
         ]
         return "\n".join(b for b in blocks if b)
 
@@ -12593,7 +12683,12 @@ def _cut_prompt(plan: dict, seg: dict, variant: str, *, cast: list[dict], has_im
             return _done(_current())
     # 그래도 넘치면 전체를 바이트로 자른다(최후). CAST·CONTINUITY 가 이미 들어간 뼈대 기준.
     applied.append("byteTrim")
-    return _done(_trim_utf8(_current(), budget))
+    text = _current()
+    if audio_line and text.endswith("\n" + audio_line):
+        # 211 fix2: 소리 규칙 맨 끝 줄은 자르지 않는다(그 앞 글을 자르고 줄을 다시 붙인다).
+        rest = _trim_utf8(text[: -len(audio_line) - 1], budget - _utf8_len(audio_line) - 1)
+        return _done(rest + "\n" + audio_line)
+    return _done(_trim_utf8(text, budget))
 
 
 def _previz_timeline_text(plan: dict, seg: dict) -> str:
@@ -13661,9 +13756,9 @@ def _kling_cut_layout(plan: dict, cut: dict, kling: dict, *, action: str, said, 
         start = "" if no_start else first if state["startDuplicate"] else (
             f"{first} {REAL_CUT_START_SENTENCE}" if from_prev else f"{REAL_CUT_START_SENTENCE} {first}")
         tail = [fix.strip()] if str(fix or "").strip() else []  # 작업 133: QA 교정 문장(줄이지 않는다)
-        tail.append("No text, no subtitles, no speech bubbles.")
+        tail.append(_with_audio("No text, no subtitles, no speech bubbles.", bool(box["dialogue"])))  # 211
         if not state["negative"]:
-            tail.append("NEGATIVE: " + REAL_CUT_NEGATIVE + ".")
+            tail.append(_real_cut_negative_line())  # 작업 211: 소리 부정어도 이 줄과 함께(줄이기 마지막 단계에서 빠진다)
         rows = [REAL_REF_AI_NOTE, framing, box["action"], box["dialogue"], *[str(r) for r in kling.get("refs") or []],
                 "" if state["background"] else _fixed_head(plan, cut_location, real=True, compact=True),
                 "" if state.get("harmonyDrop") else _bg_harmony(True, short=bool(state.get("harmonyShort"))),  # 작업 197
@@ -13720,7 +13815,10 @@ def _real_cut_prompt(plan: dict, seg: dict, *, model: str = "", prompt_max: int 
         ])
 
     head = _head(False)
-    tail = "No text, no subtitles, no speech bubbles.\nNEGATIVE: " + REAL_CUT_NEGATIVE + "."
+    spoken = [ln for ln in _cut_lines(plan, cut) if not ln.get("silent") and str(ln.get("lineKo") or "").strip()]
+    # 작업 211: 꼬리(줄이지 않는다)에 소리 규칙 짧은 형, NEGATIVE 에 음악·앰비언트·효과음.
+    tail = (_with_audio("No text, no subtitles, no speech bubbles.", bool(spoken)) + "\n"
+            + _real_cut_negative_line())
     if fix:  # 작업 133: QA 교정 문장 1개(줄이기에서 빠지지 않는다)
         tail = fix.strip() + "\n" + tail
     shot = _shot_ko_en(str(cut.get("shotKo") or "")) or _shot_abbrev(plan, cut_id)
@@ -13734,7 +13832,6 @@ def _real_cut_prompt(plan: dict, seg: dict, *, model: str = "", prompt_max: int 
     touch = _face_touch(plan, cut)  # 작업 173: 얼굴에 닿는 손 낱말 → 다정한 턱 받침(없으면 그대로)
     if touch:
         action = _soften_face_touch(action, touch, touch["other"])
-    spoken = [ln for ln in _cut_lines(plan, cut) if not ln.get("silent") and str(ln.get("lineKo") or "").strip()]
     # 작업 171: 샷 고정 줄(FRAMING · COSTUME)이 있으면 SHOT · ACTION · 대사 화자도 같은 로마자 이름(따옴표 대사는 그대로).
     names_ko = sorted({str(n).strip() for n in [ch.get("name") for ch in _cut_named(cut)]
                        + [ln.get("speaker") for ln in spoken] if str(n or "").strip()}, key=len, reverse=True)
@@ -13815,6 +13912,11 @@ def _segment_prompt(plan: dict, seg: dict, *, first_segment: bool, model: str = 
             "same place, lighting, characters, positions and outfits."
         )
     head.append("Photorealistic live-action film. No text, no speech bubbles.")
+    # 작업 211: Seedance 네이티브 소리(ARK_GENERATE_AUDIO) — 대사만(말 없는 구간은 침묵만). 머리라 줄이기에서 빠지지 않는다.
+    cuts_by_id = {str(c.get("id")): c for c in conti.get("cuts") or []}
+    seg_spoken = any(not ln.get("silent") and str(ln.get("lineKo") or "").strip()
+                     for cid in _seg_cut_ids(seg) for ln in _cut_lines(plan, cuts_by_id.get(str(cid)) or {}))
+    head[-1] = _with_audio(head[-1], seg_spoken)
     if layout:
         head.append("Layout: " + layout + ".")
     head_text = "\n".join(head)

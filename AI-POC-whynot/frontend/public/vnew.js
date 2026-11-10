@@ -9631,6 +9631,7 @@
     var view = ctx.view || {};
     var source = view.source || {};
     clear(ctx.root);
+    ctx.lrd = null; // 작업 212: 줄마다 대사 고치기 기록(아래 soundTable 이 다시 채운다)
     ctx.root.appendChild(el("h2", "vnew-sec-title", "대사 소리"));
     ctx.root.appendChild(el("p", "vnew-hint vnew-sound-lead", SOUND_HINT));
 
@@ -9658,6 +9659,7 @@
     ctx.versionSig = "";
     soundRenderResult(ctx);
     if (!source.hasAudio) ctx.root.appendChild(el("p", "vnew-hint vnew-sound-noaudio", SOUND_NO_AUDIO));
+    lrdRevisionBar(ctx); // 작업 212: 대사 고친 판 · 이전 영상으로 되돌리기
 
     vocMount(ctx); // 작업 203: 캐릭터 목소리(대사 목록 위, voices 가 없으면 그리지 않음)
     ctx.root.appendChild(soundTable(ctx));
@@ -9685,7 +9687,7 @@
     if (!box) return;
     var versions = (ctx.view || {}).versions || [];
     var sig = JSON.stringify([ctx.pickN, versions.map(function (v) {
-      return [v.n, v.currentSource];
+      return [v.n, v.currentSource, !!v.outdated];
     })]);
     if (sig === ctx.versionSig) return;
     ctx.versionSig = sig;
@@ -9709,6 +9711,7 @@
     select.setAttribute("aria-label", "반영한 소리 버전");
     versions.slice().reverse().forEach(function (v) {
       var label = "v" + v.n + " · 속마음 " + (v.thoughtIds || []).length + "줄" + (v.currentSource ? "" : " · 이전 원본") + vocVersionTag(v);
+      if (v.outdated) label += " · " + (v.outdatedText || LRD_OUTDATED); // 작업 212
       var option = el("option", "", label);
       option.value = String(v.n);
       if (v.n === chosen.n) option.selected = true;
@@ -9723,6 +9726,7 @@
     if (vocBadge) tools.appendChild(vocBadge);
     if (chosen.videoUrl) tools.appendChild(downloadLink(chosen.videoUrl, "반영본 내려받기"));
     box.appendChild(tools);
+    if (chosen.outdated) box.appendChild(el("p", "vnew-hint vnew-lrd-outdated", chosen.outdatedText || LRD_OUTDATED)); // 작업 212
   }
 
   function soundTable(ctx) {
@@ -9745,7 +9749,8 @@
   function soundRow(ctx, line) {
     var row = el("div", "vnew-sound-row");
     row.appendChild(el("span", "vnew-sound-cell vnew-sound-speaker", line.speaker || "(이름 없음)"));
-    row.appendChild(el("span", "vnew-sound-cell vnew-sound-line", line.lineKo || ""));
+    var lineCell = el("span", "vnew-sound-cell vnew-sound-line", line.lineKo || "");
+    row.appendChild(lineCell);
     var voiceCell = el("span", "vnew-sound-cell vnew-sound-voice");
     var toggle = el("div", "vnew-sound-toggle");
     toggle.setAttribute("role", "group");
@@ -9802,6 +9807,7 @@
     });
     listenCell.appendChild(listen);
     vocRowTools(ctx, line, row, listenCell); // 작업 203
+    lrdRowTools(ctx, line, row, lineCell, listenCell); // 작업 212: 대사 고치기
     row.appendChild(listenCell);
     paint();
     return row;
@@ -9905,24 +9911,507 @@
   function soundSchedule(ctx) {
     if (ctx.timer) window.clearTimeout(ctx.timer);
     ctx.timer = 0;
-    if (((ctx.view || {}).job || {}).status !== "running") return;
+    var lrdWas = lrdBusy(ctx.view); // 작업 212: 대사 영상 다시 만들기 진행 중이면 같은 GET 으로 함께 본다
+    if (((ctx.view || {}).job || {}).status !== "running" && !lrdWas) return;
     ctx.timer = window.setTimeout(function () {
       ctx.timer = 0;
       if (!soundAlive(ctx)) return;
       api(soundPath() + "?variant=" + encodeURIComponent(ctx.variant))
         .then(function (view) {
           if (!soundAlive(ctx)) return;
+          if (lrdWas && lrdChanged(ctx.view, view)) {
+            lrdReload(ctx, view); // 끝났다(새 판·실패) — 원본이 바뀌었을 수 있어 화면을 새로 그린다
+            return;
+          }
           ctx.view.job = (view || {}).job || {};
           ctx.view.versions = (view || {}).versions || [];
+          if ((view || {}).lineRedo) ctx.view.lineRedo = view.lineRedo;
           if (ctx.view.job.status !== "running") ctx.pickN = null; // 끝나면 최신 버전을 보인다
           soundRenderResult(ctx);
           soundRenderJob(ctx);
+          lrdPaintRows(ctx);
           soundSchedule(ctx);
         })
         .catch(function () {
           if (soundAlive(ctx)) soundSchedule(ctx);
         });
     }, SOUND_POLL_MS);
+  }
+
+  /* ================================================================ ⑥ 사운드 — 대사 고치기 · 그 대사 영상 다시 만들기(작업 212)
+
+     서버 line_redo.py(라우트 /sound/lines/*). 줄마다 [대사 고치기] → 새 대사·말하는 사람·실제 말/속마음·말투 메모를 적고(또는
+     [AI로 다시 쓰기] 후보 3줄에서 고르고) 저장한다. 원래 대본은 [대본에도 반영]을 고를 때만 바뀐다(원래 대사는 회색으로 함께 보인다).
+     [이 대사 영상 다시 만들기]는 견적(quote, 영상 호출 0) → 확인 창(금액·모델) → 시작(redo, confirmUsd). 금액이 바뀌면(409 CostMismatch)
+     견적을 다시 받아 바뀐 금액을 보이고 창은 그대로 둔다(작업 206 costChangedText). 진행은 ⑥ 폴링(soundSchedule)이 같이 본다.
+     끝나면 새 판이 ⑥ 원본이 되고, [이전 영상으로 되돌리기]로 앞 판(원래 영상 포함)을 고를 수 있다. 글은 모두 textContent(el). */
+
+  var LRD_OUTDATED = "목소리 맞춤을 다시 반영해 주세요";
+  var LRD_ERRORS = {
+    LineNoOverride: "먼저 [대사 고치기]로 새 대사를 저장해 주세요.",
+    LineRedoRunning: "이 대사 영상을 다시 만드는 중입니다. 끝난 뒤 다시 눌러 주세요.",
+    LineRedoNoQuote: "먼저 금액을 확인해 주세요.",
+    LineRangeShort: "이 대사가 들어 있는 영상 조각이 너무 짧아 다시 만들 수 없습니다.",
+    LineNoRange: "이 대사 구간의 영상을 찾지 못했습니다. 화면을 다시 불러와 주세요.",
+    LineRedoLimit: "이 영상은 대사를 더 다시 만들 수 없습니다.",
+    BadLineText: "새 대사를 적어 주세요.",
+    BadSpeaker: "말하는 사람은 등장인물 목록에서 골라 주세요.",
+    BadDelivery: "말투 메모가 너무 깁니다.",
+    SuggestFailed: "새 대사를 만들지 못했습니다. 잠시 뒤 다시 눌러 주세요.",
+    RetakeNotTarget: "이 대사 구간의 영상은 AI로 다시 만들 수 없습니다.",
+    RetakeNoPrompt: "이 대사 구간의 영상은 프롬프트 기록이 없어 다시 만들 수 없습니다.",
+    RetakeRunning: "이 구간의 영상을 ⑦에서 다시 만드는 중입니다. 끝난 뒤 다시 눌러 주세요.",
+    RetakeNoDraft: "견적이 바뀌었습니다. 금액을 다시 확인해 주세요.",
+    FalKeyMissing: "영상 모델 키가 설정되지 않았습니다. 관리자에게 알려 주세요."
+  };
+
+  function lrdErr(err) {
+    var kind = err && err.type;
+    return (kind && (LRD_ERRORS[kind] || SOUND_ERRORS[kind])) || errMessage(err);
+  }
+
+  function lrdInfo(ctx) {
+    var info = (ctx.view || {}).lineRedo;
+    return info && info.enabled ? info : null;
+  }
+
+  function lrdBusy(view) {
+    var info = (view || {}).lineRedo;
+    return !!(info && info.busy);
+  }
+
+  /* 폴링 결과가 다시 그려야 할 만큼 바뀌었나(진행이 끝났거나 원본이 다른 판으로 바뀜). 순수 함수. */
+  function lrdChanged(before, after) {
+    var a = (before || {}).lineRedo || {};
+    var b = (after || {}).lineRedo || {};
+    return !b.busy || a.current !== b.current || ((before || {}).source || {}).label !== ((after || {}).source || {}).label;
+  }
+
+  function lrdReload(ctx, view) {
+    ctx.view = view || {};
+    ctx.saved = soundClone(ctx.view.lines);
+    ctx.lines = soundClone(ctx.view.lines);
+    ctx.pickN = null;
+    soundRender(ctx);
+    soundSchedule(ctx);
+  }
+
+  function lrdPath(tail) {
+    return soundPath() + "/lines/" + tail;
+  }
+
+  function lrdUsd(usd) {
+    return typeof usd === "number" ? castingUsdText(usd) : "가격 확인 불가";
+  }
+
+  /* 작업 상태 한 줄 {text, bad}. 순수 함수. */
+  function lrdJobText(job) {
+    if (!job || !job.status) return { text: "", bad: false };
+    var model = job.modelLabel || job.model || "";
+    var price = lrdUsd(job.usd) + (model ? " · " + model : "");
+    if (job.status === "quoted") return { text: "금액 확인됨: " + price, bad: false };
+    if (job.status === "running") return { text: "영상을 다시 만드는 중… (" + price + ")", bad: false };
+    if (job.status === "splicing") return { text: "새 대사 영상을 원본에 잇는 중… (" + price + ")", bad: false };
+    if (job.status === "done") {
+      return { text: "다시 만들었습니다 (" + price + ")." + (job.message ? " " + job.message : ""), bad: false };
+    }
+    if (job.status === "failed") return { text: "다시 만들지 못했습니다: " + (job.error || "알 수 없는 오류"), bad: true };
+    return { text: "", bad: false };
+  }
+
+  /* 편집 창 단추 상태. entry = lineRedo.lines[id](override·job), form = {text, dirty, busy}. 순수 함수. */
+  function lrdControls(entry, form) {
+    entry = entry || {};
+    form = form || {};
+    var job = entry.job || {};
+    var live = job.status === "running" || job.status === "splicing";
+    var saved = !!entry.override;
+    var text = String(form.text || "").trim();
+    var price = job.status === "quoted" ? lrdUsd(job.usd) : "금액 확인";
+    return {
+      save: { disabled: !!form.busy || live || !text },
+      suggest: { disabled: !!form.busy || live },
+      redo: { disabled: !!form.busy || live || !saved || !!form.dirty, label: "이 대사 영상 다시 만들기 (" + price + ")" },
+      take: { visible: !!(saved && entry.override.scriptApplied) },
+      hint: !saved ? "먼저 새 대사를 저장해 주세요." : form.dirty ? "바꾼 내용을 먼저 저장해 주세요." : ""
+    };
+  }
+
+  function lrdConfirmText(line, job) {
+    var range = job.range || {};
+    var span = typeof range.start === "number" ? range.start.toFixed(1) + "–" + range.end.toFixed(1) + "초" : "";
+    return (line.speaker || "이 줄") + " 대사 구간(" + span + ")만 영상을 다시 만듭니다. 그림·카메라·인물·옷·타이밍은 그대로 두고 " +
+      "입 모양·연기·목소리를 새 대사에 맞춥니다.\n모델: " + (job.modelLabel || job.model || "-") + "\n비용: " + lrdUsd(job.usd) +
+      "\n계속할까요?";
+  }
+
+  /* 대사 칸: 고친 대사가 있으면 원래 대사(회색)와 새 대사를 함께. */
+  function lrdPaintLine(cell, line, entry) {
+    clear(cell);
+    var ov = (entry || {}).override;
+    if (!ov) {
+      cell.textContent = line.lineKo || "";
+      return;
+    }
+    var original = (ov.original || {}).lineKo || line.lineKo || "";
+    if (original !== ov.textKo) cell.appendChild(el("span", "vnew-lrd-original", original));
+    var now = el("span", "vnew-lrd-new", ov.textKo || "");
+    cell.appendChild(now);
+    var tags = [];
+    if (ov.speaker && ov.speaker !== line.speaker) tags.push("말하는 사람: " + ov.speaker);
+    tags.push(ov.thought ? "속마음" : "실제 말");
+    if (ov.deliveryKo) tags.push("말투: " + ov.deliveryKo);
+    tags.push(ov.scriptApplied ? "대본에 반영됨" : "대본은 그대로");
+    cell.appendChild(el("span", "vnew-lrd-tags", tags.join(" · ")));
+  }
+
+  function lrdRowTools(ctx, line, row, lineCell, cell) {
+    var info = lrdInfo(ctx);
+    if (!info) return;
+    if (!ctx.lrd) ctx.lrd = { rows: [] };
+    var rec = { line: line, row: row, lineCell: lineCell, status: el("span", "vnew-hint vnew-lrd-status"), editor: null, form: null };
+    rec.status.setAttribute("role", "status");
+    var open = el("button", "outline-button vnew-lrd-open", "대사 고치기");
+    open.type = "button";
+    open.addEventListener("click", function () {
+      if (rec.editor) {
+        row.removeChild(rec.editor.box);
+        rec.editor = null;
+        open.textContent = "대사 고치기";
+        return;
+      }
+      rec.editor = lrdEditor(ctx, rec);
+      row.appendChild(rec.editor.box);
+      open.textContent = "닫기";
+      lrdPaintRow(ctx, rec);
+    });
+    rec.open = open;
+    cell.appendChild(open);
+    cell.appendChild(rec.status);
+    ctx.lrd.rows.push(rec);
+    lrdPaintRow(ctx, rec);
+  }
+
+  function lrdEntry(ctx, id) {
+    var info = lrdInfo(ctx);
+    return (info && info.lines && info.lines[id]) || {};
+  }
+
+  function lrdPaintRows(ctx) {
+    if (!ctx.lrd) return;
+    ctx.lrd.rows.forEach(function (rec) {
+      lrdPaintRow(ctx, rec);
+    });
+  }
+
+  function lrdPaintRow(ctx, rec) {
+    var entry = lrdEntry(ctx, rec.line.id);
+    lrdPaintLine(rec.lineCell, rec.line, entry);
+    var job = lrdJobText(entry.job);
+    rec.status.textContent = job.text;
+    if (job.bad) rec.status.classList.add("is-bad");
+    else rec.status.classList.remove("is-bad");
+    if (!rec.editor) return;
+    var ed = rec.editor;
+    var state_ = lrdControls(entry, ed.form);
+    ed.save.disabled = state_.save.disabled;
+    ed.suggest.disabled = state_.suggest.disabled;
+    ed.redo.disabled = state_.redo.disabled;
+    ed.redo.textContent = state_.redo.label;
+    ed.take.style.display = state_.take.visible ? "" : "none";
+    ed.hint.textContent = state_.hint;
+  }
+
+  function lrdNote(ed, text, bad) {
+    ed.note.textContent = text;
+    if (bad) ed.note.classList.add("is-bad");
+    else ed.note.classList.remove("is-bad");
+  }
+
+  function lrdEditor(ctx, rec) {
+    var info = lrdInfo(ctx) || {};
+    var line = rec.line;
+    var entry = lrdEntry(ctx, line.id);
+    var ov = entry.override || {};
+    var box = el("div", "vnew-lrd-editor");
+    var ed = { box: box, form: { text: ov.textKo || line.lineKo || "", dirty: false, busy: false } };
+    function touch() {
+      ed.form.text = ed.text.value;
+      ed.form.dirty = true;
+      lrdPaintRow(ctx, rec);
+    }
+    var textLabel = el("label", "vnew-lrd-field");
+    textLabel.appendChild(el("span", "vnew-lrd-label", "새 대사"));
+    ed.text = el("textarea", "vnew-lrd-text");
+    ed.text.value = ed.form.text;
+    ed.text.maxLength = (info.limits || {}).textMax || 200;
+    ed.text.addEventListener("input", touch);
+    textLabel.appendChild(ed.text);
+    box.appendChild(textLabel);
+
+    var opts = el("div", "vnew-lrd-opts");
+    var spLabel = el("label", "vnew-lrd-field");
+    spLabel.appendChild(el("span", "vnew-lrd-label", "말하는 사람"));
+    ed.speaker = el("select", "vnew-lrd-speaker");
+    var names = (info.cast || []).slice();
+    var current = ov.speaker || line.speaker || "";
+    if (current && names.indexOf(current) < 0) names.unshift(current);
+    names.forEach(function (name) {
+      var option = el("option", "", name);
+      option.value = name;
+      if (name === current) option.selected = true;
+      ed.speaker.appendChild(option);
+    });
+    ed.speaker.value = current;
+    ed.speaker.addEventListener("change", touch);
+    spLabel.appendChild(ed.speaker);
+    opts.appendChild(spLabel);
+
+    var voLabel = el("label", "vnew-lrd-field");
+    voLabel.appendChild(el("span", "vnew-lrd-label", "목소리"));
+    ed.voice = el("select", "vnew-lrd-voice");
+    SOUND_VOICES.forEach(function (pair) {
+      var option = el("option", "", pair[1]);
+      option.value = pair[0];
+      ed.voice.appendChild(option);
+    });
+    ed.voice.value = ov.lineId ? (ov.thought ? "thought" : "spoken") : (line.voice || "spoken");
+    ed.voice.addEventListener("change", touch);
+    voLabel.appendChild(ed.voice);
+    opts.appendChild(voLabel);
+
+    var dLabel = el("label", "vnew-lrd-field");
+    dLabel.appendChild(el("span", "vnew-lrd-label", "말투 메모(선택)"));
+    ed.delivery = el("input", "vnew-lrd-delivery");
+    ed.delivery.type = "text";
+    ed.delivery.placeholder = "예: 작게, 떨리는 목소리";
+    ed.delivery.value = ov.deliveryKo || "";
+    ed.delivery.maxLength = (info.limits || {}).deliveryMax || 80;
+    ed.delivery.addEventListener("input", touch);
+    dLabel.appendChild(ed.delivery);
+    opts.appendChild(dLabel);
+    box.appendChild(opts);
+
+    ed.choices = el("div", "vnew-lrd-choices");
+    box.appendChild(ed.choices);
+
+    var scriptLabel = el("label", "vnew-lrd-check");
+    ed.script = el("input", "vnew-lrd-script");
+    ed.script.type = "checkbox";
+    ed.script.checked = false;
+    scriptLabel.appendChild(ed.script);
+    scriptLabel.appendChild(el("span", "", "대본에도 반영 (다음에 만드는 테이크·촬영 지시서가 새 대사를 씁니다)"));
+    box.appendChild(scriptLabel);
+
+    var tools = el("div", "vnew-lrd-tools");
+    ed.suggest = el("button", "outline-button vnew-lrd-suggest", "AI로 다시 쓰기");
+    ed.suggest.type = "button";
+    ed.suggest.title = "장면과 인물에 맞는 새 대사 3줄을 제안합니다(텍스트 모델 1회, 아주 적은 금액)";
+    ed.suggest.addEventListener("click", function () {
+      lrdSuggest(ctx, rec);
+    });
+    ed.save = el("button", "primary-button vnew-lrd-save", "저장");
+    ed.save.type = "button";
+    ed.save.addEventListener("click", function () {
+      lrdSave(ctx, rec);
+    });
+    ed.redo = el("button", "primary-button vnew-lrd-redo", "이 대사 영상 다시 만들기 (금액 확인)");
+    ed.redo.type = "button";
+    ed.redo.addEventListener("click", function () {
+      lrdRedo(ctx, rec);
+    });
+    ed.take = el("button", "outline-button vnew-lrd-take", "테이크 전체 다시 만들기");
+    ed.take.type = "button";
+    ed.take.title = info.takeRedoText || "";
+    ed.take.addEventListener("click", function () {
+      if (!window.confirm((info.takeRedoText || "") + "\n⑤ 영상으로 갈까요?")) return;
+      state.planStep = 5;
+      renderPlan();
+    });
+    [ed.suggest, ed.save, ed.redo, ed.take].forEach(function (b) {
+      tools.appendChild(b);
+    });
+    box.appendChild(tools);
+    ed.hint = el("p", "vnew-hint vnew-lrd-hint");
+    box.appendChild(ed.hint);
+    ed.note = el("p", "vnew-hint vnew-lrd-note");
+    ed.note.setAttribute("role", "status");
+    box.appendChild(ed.note);
+    return ed;
+  }
+
+  function lrdBody(ctx, rec) {
+    var ed = rec.editor;
+    return {
+      variant: ctx.variant, lineId: rec.line.id, textKo: ed.text.value, speaker: ed.speaker.value,
+      thought: ed.voice.value === "thought", deliveryKo: ed.delivery.value, applyToScript: !!ed.script.checked
+    };
+  }
+
+  function lrdSuggest(ctx, rec) {
+    var ed = rec.editor;
+    if (!ed || ed.form.busy) return;
+    ed.form.busy = true;
+    lrdPaintRow(ctx, rec);
+    lrdNote(ed, "새 대사를 만드는 중…", false);
+    var body = { variant: ctx.variant, lineId: rec.line.id, speaker: ed.speaker.value, thought: ed.voice.value === "thought" };
+    api(lrdPath("suggest"), { method: "POST", body: JSON.stringify(body) })
+      .then(function (result) {
+        if (!soundAlive(ctx) || rec.editor !== ed) return;
+        ed.form.busy = false;
+        clear(ed.choices);
+        ((result || {}).lines || []).forEach(function (text) {
+          var pick = el("button", "outline-button vnew-lrd-choice", text);
+          pick.type = "button";
+          pick.addEventListener("click", function () {
+            ed.text.value = text;
+            ed.form.text = text;
+            ed.form.dirty = true;
+            lrdPaintRow(ctx, rec);
+          });
+          ed.choices.appendChild(pick);
+        });
+        lrdNote(ed, "하나를 고르거나 고쳐 적은 뒤 [저장]을 누르세요.", false);
+        lrdPaintRow(ctx, rec);
+      })
+      .catch(function (err) {
+        if (!soundAlive(ctx) || rec.editor !== ed) return;
+        ed.form.busy = false;
+        lrdNote(ed, lrdErr(err), true);
+        lrdPaintRow(ctx, rec);
+      });
+  }
+
+  function lrdSave(ctx, rec) {
+    var ed = rec.editor;
+    if (!ed || ed.form.busy) return;
+    ed.form.busy = true;
+    lrdPaintRow(ctx, rec);
+    lrdNote(ed, "저장하는 중…", false);
+    api(lrdPath("override"), { method: "PUT", body: JSON.stringify(lrdBody(ctx, rec)) })
+      .then(function (view) {
+        if (!soundAlive(ctx)) return;
+        lrdReload(ctx, view);
+      })
+      .catch(function (err) {
+        if (!soundAlive(ctx) || rec.editor !== ed) return;
+        ed.form.busy = false;
+        lrdNote(ed, "저장하지 못했습니다: " + lrdErr(err), true);
+        lrdPaintRow(ctx, rec);
+      });
+  }
+
+  function lrdSetJob(ctx, id, job) {
+    var info = lrdInfo(ctx);
+    if (!info) return;
+    info.lines = info.lines || {};
+    info.lines[id] = info.lines[id] || {};
+    info.lines[id].job = job;
+    if (job && (job.status === "running" || job.status === "splicing")) info.busy = true;
+  }
+
+  /* 견적 → 확인 창 → 시작. 금액이 바뀌면(CostMismatch) 견적을 다시 받아 바뀐 금액을 보이고 멈춘다(다시 누르면 새 금액으로). */
+  function lrdRedo(ctx, rec) {
+    var ed = rec.editor;
+    if (!ed || ed.form.busy) return;
+    var id = rec.line.id;
+    ed.form.busy = true;
+    lrdPaintRow(ctx, rec);
+    lrdNote(ed, "구간과 금액을 확인하는 중…", false);
+    function quote() {
+      return api(lrdPath("quote"), { method: "POST", body: JSON.stringify({ variant: ctx.variant, lineId: id }) }).then(function (r) {
+        var job = (r || {}).quote || {};
+        lrdSetJob(ctx, id, job);
+        return job;
+      });
+    }
+    quote()
+      .then(function (job) {
+        if (!soundAlive(ctx) || rec.editor !== ed) return null;
+        lrdPaintRow(ctx, rec);
+        if (!window.confirm(lrdConfirmText(rec.line, job))) {
+          ed.form.busy = false;
+          lrdNote(ed, "", false);
+          lrdPaintRow(ctx, rec);
+          return null;
+        }
+        lrdNote(ed, "다시 만들기를 시작하는 중…", false);
+        return api(lrdPath("redo"), { method: "POST", body: JSON.stringify({ variant: ctx.variant, lineId: id, confirmUsd: job.usd }) })
+          .then(function (result) {
+            if (!soundAlive(ctx)) return;
+            ed.form.busy = false;
+            lrdSetJob(ctx, id, (result || {}).job || { status: "running" });
+            lrdNote(ed, "시작했습니다. 끝나면 새 영상이 ⑥ 원본이 됩니다.", false);
+            lrdPaintRow(ctx, rec);
+            soundSchedule(ctx);
+          })
+          .catch(function (err) {
+            if (!soundAlive(ctx) || rec.editor !== ed) return null;
+            if (!isCostMismatch(err)) throw err;
+            return quote().then(function (fresh) {
+              ed.form.busy = false;
+              lrdPaintRow(ctx, rec);
+              lrdNote(ed, costChangedText(job.usd, fresh.usd), true);
+            });
+          });
+      })
+      .catch(function (err) {
+        if (!soundAlive(ctx) || rec.editor !== ed) return;
+        ed.form.busy = false;
+        lrdNote(ed, lrdErr(err), true);
+        lrdPaintRow(ctx, rec);
+      });
+  }
+
+  /* 대사 고친 판 목록 · [이전 영상으로 되돌리기]. 판이 없으면 그리지 않는다. */
+  function lrdRevisionBar(ctx) {
+    var info = lrdInfo(ctx);
+    if (!info) return;
+    if (info.error) {
+      ctx.root.appendChild(el("p", "vnew-hint is-bad", info.error));
+      return;
+    }
+    var revisions = info.revisions || [];
+    if (!revisions.length) return;
+    var bar = el("div", "vnew-lrd-revisions");
+    bar.appendChild(el("span", "vnew-lrd-label", "대사 고친 영상"));
+    var select = el("select", "vnew-lrd-revision");
+    select.setAttribute("aria-label", "되돌릴 영상");
+    var items = [{ r: 0, label: "원래 영상" }].concat(revisions.map(function (rev) {
+      return { r: rev.r, label: "대사 고침 " + rev.r + (rev.usd !== undefined && rev.usd !== null ? " · " + lrdUsd(rev.usd) : "") };
+    }));
+    items.forEach(function (item) {
+      var option = el("option", "", item.label + (item.r === (info.current || 0) ? " (지금)" : ""));
+      option.value = String(item.r);
+      if (item.r === (info.current || 0)) option.selected = true;
+      select.appendChild(option);
+    });
+    var back = el("button", "outline-button vnew-lrd-revert", "이전 영상으로 되돌리기");
+    back.type = "button";
+    var note = el("span", "vnew-hint vnew-lrd-revnote");
+    function paint() {
+      back.disabled = info.busy || Number(select.value) === (info.current || 0);
+    }
+    select.addEventListener("change", paint);
+    back.addEventListener("click", function () {
+      back.disabled = true;
+      note.textContent = "되돌리는 중…";
+      api(lrdPath("revert"), { method: "POST", body: JSON.stringify({ variant: ctx.variant, r: Number(select.value) }) })
+        .then(function (view) {
+          if (soundAlive(ctx)) lrdReload(ctx, view);
+        })
+        .catch(function (err) {
+          if (!soundAlive(ctx)) return;
+          note.textContent = "되돌리지 못했습니다: " + lrdErr(err);
+          paint();
+        });
+    });
+    bar.appendChild(select);
+    bar.appendChild(back);
+    bar.appendChild(note);
+    if (info.voiceOutdated) bar.appendChild(el("span", "vnew-hint vnew-lrd-outdated", info.outdatedText || LRD_OUTDATED));
+    paint();
+    ctx.root.appendChild(bar);
   }
 
   /* ================================================================ ⑥ 사운드 — 인물 목소리(작업 203)
