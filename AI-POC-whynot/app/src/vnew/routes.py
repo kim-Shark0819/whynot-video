@@ -1274,6 +1274,7 @@ def create_blueprint(deps: VnewDependencies) -> Blueprint:
 
     from . import voices_routes  # noqa: PLC0415 — 작업 202: 인물 목소리(voices.py)
     voices_routes.register(bp, deps, _sound_project, _fail)
+    from . import audio_separate; audio_separate.register(bp, deps, _sound_project, _fail)  # noqa: E702,PLC0415 — 작업 217: 섞인 소리 분리
 
     # ------------------------------------------------------------ 작업 212: ⑥ 대사 고치기 · 그 대사 구간 영상 다시 만들기
     # line_redo.py 가 맡는다(요청 때 import — 블루프린트를 만들 때 무거운 모듈을 읽지 않는다). 권한은 ⑥ 사운드 라우트와 같다(_sound_project
