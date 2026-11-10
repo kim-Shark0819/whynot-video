@@ -29,7 +29,8 @@
 구간(line_range): 사운드 문서의 줄 구간을 지금 원본의 조각 하나(가장 많이 겹치는 조각) 안으로 넣고, 모델 최소 길이(MIN_SEGMENT_S —
 generate.PREVIZ_MIN_CLIP_S, 그보다 짧아도 그 길이로 과금된다)로 줄 가운데를 기준으로 늘리고, 컷·조각 경계가 SNAP_S 안이면 경계에 붙인다.
 
-외부 호출 래퍼(검사가 바꾼다): _llm · _compose · _submit · _models · _retake_state · _download · _upload · _probe · _splice_file · _spawn.
+외부 호출 래퍼(검사가 바꾼다): _llm · _compose · _submit · _models · _retake_state · _download · _upload · _probe · _splice_file · _spawn
+· _scenes · _scene_changes(fix3).
 작업 212 fix2: 영상 모델 기본 = 그 구간을 다시 만들 수 있는 가장 싼 모델(default_model — Seedance 계열은 다른 모델이 없을 때만). 확인 창에서
 다른 모델을 고르면 견적을 다시 받는다. 콘텐츠 검사 거절(작업 195)로 실패한 줄은 다음 견적이 다음으로 싼 모델로 올리고(stepUp) 새 금액을 보인 뒤
 확인을 받는다(자동으로 더 비싸게 내지 않는다). 프롬프트는 retake.compose 가 모델 형식(reference · elements)마다 만든다.
@@ -37,6 +38,15 @@ generate.py · shot_brief.py 는 고치지 않는다(호출만 한다). retake.p
 프롬프트: 머리 EDIT 줄은 고정 틀(redo_edit_lines — 입·얼굴 연기·목소리만, 구도·카메라 그대로, 새 대사는 한국어로만, 영어는 (meaning: …) 뜻)
 + 소리 규칙 한 줄, EXTRA 줄은 없다. 제출 전 _finish_prompt 가 이전 프롬프트(CONTEXT) 쪽의 겹친 소리 규칙·앞선 EDIT 줄을 빼고 옛 대사를 새 대사로
 바꾼다(retake.submit 는 사용자가 확인한 프롬프트를 그대로 검사·제출한다).
+작업 212 fix3(다음 샷 삼키지 않기): 모델에는 늘린 구간을 그대로 보내고(최소 길이 = 모델·과금 한도), 잇기는 그 줄의 샷 안만 바꾼다 —
+splice = [max(구간 시작, 샷 시작), min(구간 끝, 샷 끝, 줄 끝 + TAIL_S)], 컷 경계를 넘지 않는다. 나머지 구간은 원래 프레임·소리.
+샷 경계(shot_bounds) = 조각 경계 + 콘티 컷 경계(정본 — sound 문서·편집 문서와 같은 _split_by_cuts 시각)를 장면 바뀜 검사
+(ffmpeg select='gt(scene,0.35)' · showinfo, 파드에서, ffprobe 없이 — 그 원본 구간만)가 SCENE_MATCH_S 안이면 그 시각으로 다듬는다.
+콘티 컷이 없는 조각(⑦ 내보내기·판의 새 조각)은 검사한 장면 바뀜이 경계다. 검사를 못 하면 콘티만 쓴다.
+늘릴 때는 줄의 샷 안에서 먼저 늘리고, 샷이 최소 길이보다 짧을 때만 이웃 샷(더 긴 쪽)으로 넘는다. 구간 안에 컷이 있으면 EDIT 줄들 뒤에
+HARD_CUT_LINE 한 줄(retake.compose 의 edit_lines). 소리: splice 안 = 새 영상 소리(대사만), 밖 = 원래 소리, 이음매마다 SEAM_FADE_S 크로스페이드.
+그림은 이음매를 프레임 경계에 맞춘 그냥 컷이다(20ms 는 허용 fps 60 아래에서 한 프레임보다 짧다).
+rebuild_revision(owner, pid, variant, n): 저장된 판 n 의 클립으로 새 규칙에 맞춰 다시 이은 새 판(새 키, 모델 호출 0, 라우트 없음).
 """
 
 from __future__ import annotations
@@ -72,6 +82,15 @@ log = logging.getLogger("vpoc")
 ENABLED = os.getenv("VNEW_LINE_REDO", "1").strip().lower() not in ("0", "false", "off", "no")
 MIN_SEGMENT_S = max(float(retake.RANGE_MIN_S), float(generate.PREVIZ_MIN_CLIP_S))  # 모델 최소 길이(짧아도 이 길이로 과금)
 SNAP_S = 0.35  # 컷·조각 경계가 이만큼 안이면 경계에 붙인다
+# 작업 212 fix3
+TAIL_S = 0.25  # 잇기 끝 = 줄 끝 + 이만큼(샷 끝·구간 끝을 넘지 않는다)
+SCENE_THRESHOLD = 0.35  # ffmpeg select='gt(scene,…)'
+SCENE_MATCH_S = 0.75  # 콘티 컷 경계에서 이만큼 안의 장면 바뀜이면 그 시각으로 다듬는다
+BOUND_EDGE_S = 0.08  # 조각·구간 끝에서 이만큼 안의 경계는 경계로 보지 않는다
+SEAM_FADE_S = 0.02  # 이음매 소리 크로스페이드
+HARD_CUT_LINE = "@Video1 has a hard cut at {t} s to a different shot; keep that cut and the second shot exactly as in @Video1."
+_SCENE_CACHE: dict = {}
+_SCENE_CACHE_MAX = 32
 TEXT_MAX = 200  # 새 대사 글자
 DELIVERY_MAX = 80  # 말투 메모 글자
 SUGGEST_COUNT = 3
@@ -85,7 +104,7 @@ TAKE_REDO_TEXT = ("대본에 반영한 대사는 ⑤ [바뀐 테이크만 다시
                   "촬영 지시서를 먼저 고친 뒤 금액을 보여 줍니다.")
 # 작업 212 fix1: 대사 다시 만들기 프롬프트(고정 틀 — redo_edit_lines). PROMPT_V = 견적 작업의 프롬프트 꼴. 다른 꼴(옛 견적 · 실패한 작업)은
 # 시작하지 않고 견적부터 다시 받는다(새 틀로 다시 만든다 — 저장된 옛 프롬프트를 다시 보내지 않는다).
-PROMPT_V = 2
+PROMPT_V = 3  # fix3: 잇기 구간(splice)·컷 줄이 없는 옛 견적은 견적부터 다시
 LINE_EDIT_HEAD = "EDIT: Edit @Video1 only in the mouth, face acting and voice of "
 LINE_EDIT_KEEP = "Keep framing, camera, composition, people, positions, costume, lighting and timing identical to @Video1."
 LINE_SPEAK = "Speak it in Korean exactly as written; never speak English."
@@ -181,6 +200,36 @@ def _probe(path: str) -> dict:
     return stitcher.probe_media(path)
 
 
+def _scenes(path: str, start: float, end: float) -> list[float]:
+    """작업 212 fix3: 로컬 영상 [start, end] 의 장면 바뀜 시각(원본 초). ffmpeg select='gt(scene,SCENE_THRESHOLD)' + showinfo 의
+    pts_time(입력 -ss 로 0 부터 센다) + start. ffprobe 를 쓰지 않는다. ffmpeg 가 실패하면 StitchError(부르는 쪽은 콘티만 쓴다)."""
+    start, end = max(0.0, float(start)), float(end)
+    if end - start <= 0.04:
+        return []
+    command = [stitcher.ffmpeg_path(), "-hide_banner", "-nostats", "-ss", f"{start:.3f}", "-t", f"{end - start:.3f}", "-i", path,
+               "-map", "0:v:0", "-an", "-vf", f"select='gt(scene,{SCENE_THRESHOLD})',showinfo", "-f", "null", "-"]
+    result = stitcher._edit_run(command)  # noqa: SLF001 — 편집 ffmpeg 와 같은 nice · 시간 제한
+    if result.returncode != 0:
+        raise stitcher.StitchError("장면 바뀜을 읽지 못했습니다.")
+    text = result.stderr.decode("utf-8", errors="replace")
+    return sorted({_r3(start + float(m)) for m in re.findall(r"pts_time:\s*(-?[0-9]+(?:\.[0-9]+)?)", text) if float(m) > 0})
+
+
+def _scene_changes(key: str, start: float, end: float) -> list[float]:
+    """견적 때: 원본 키를 받아 [start, end] 장면 바뀜(_scenes). 같은 원본·구간은 프로세스 안에서 한 번만 받는다."""
+    cache_key = (str(key), _r3(start), _r3(end))
+    if cache_key in _SCENE_CACHE:
+        return list(_SCENE_CACHE[cache_key])
+    with tempfile.TemporaryDirectory(prefix="vnew-line-scene-") as workdir:
+        path = os.path.join(workdir, "source.mp4")
+        _download(key, path)
+        found = _scenes(path, start, end)
+    while len(_SCENE_CACHE) >= _SCENE_CACHE_MAX:
+        _SCENE_CACHE.pop(next(iter(_SCENE_CACHE)))
+    _SCENE_CACHE[cache_key] = list(found)
+    return found
+
+
 def _spawn(target, args: tuple, name: str) -> None:
     thread = threading.Thread(target=target, args=args, daemon=True, name=name)
     with _threads_guard:
@@ -197,36 +246,87 @@ def _alive_here(claim) -> bool:
 
 
 def _splice_file(base_path: str, new_path: str, out_path: str, *, start: float, end: float, duration: float, width: int,
-                 height: int, fps: int, base_audio: bool, new_audio: bool) -> None:
-    """원본 [0, start) + 새 영상(길이 end − start) + 원본 [end, 끝]. 프레임 수는 원본 그대로(누적 시각 반올림), 크기·fps 는 원본.
-    소리: 앞·뒤는 원본, 가운데는 새 영상 소리(없으면 원본 그 구간). 48k 스테레오 PCM 을 이어 한 번 AAC(edit_join)."""
+                 height: int, fps: int, base_audio: bool, new_audio: bool, splice_start: float | None = None,
+                 splice_end: float | None = None) -> None:
+    """새 영상 = 원본 [start, end] 을 다시 만든 것(0초 = start). 작업 212 fix3: 그중 [splice_start, splice_end](없으면 구간 전체)만 쓴다 —
+    원본 [0, sa) + 새 영상 [sa − start, sb − start) + 원본 [sb, 끝]. 프레임 수·크기·fps 는 원본 그대로(누적 시각 반올림 — 이음매는 프레임 경계).
+    소리: 원본 전체 PCM 위에 sa~sb 만 새 영상 소리(없으면 원본 그대로), 이음매마다 SEAM_FADE_S 크로스페이드. 48k 스테레오 PCM → 한 번 AAC(edit_join)."""
     total = max(1, round(duration * fps))
-    fa = min(total, max(0, round(start * fps)))
-    fb = min(total, max(fa + 1, round(end * fps)))
+    flo = min(total - 1, max(0, round(float(start) * fps)))
+    fhi = min(total, max(flo + 1, round(float(end) * fps)))
+    sa = float(start if splice_start is None else splice_start)
+    sb = float(end if splice_end is None else splice_end)
+    fa = min(fhi - 1, max(flo, round(sa * fps)))
+    fb = min(fhi, max(fa + 1, round(sb * fps)))
+    per = stitcher.EDIT_AUDIO_RATE // fps  # EDIT_FPS_CHOICES 는 48000 을 나누어떨어지게 한다
     with tempfile.TemporaryDirectory(prefix="vnew-line-splice-") as workdir:
+        parts = ([(base_path, 0.0, fa)] if fa > 0 else []) + [(new_path, (fa - flo) / fps, fb - fa)] + \
+                ([(base_path, fb / fps, total - fb)] if total - fb > 0 else [])
         videos: list[str] = []
-        pcm_all = os.path.join(workdir, "audio.pcm")
-        parts = []
-        if fa > 0:
-            parts.append(dict(source_path=base_path, start_sec=0.0, frames=fa, audio_from_source=base_audio))
-        if new_audio:
-            parts.append(dict(source_path=new_path, start_sec=0.0, frames=fb - fa, audio_from_source=True))
+        for index, (source, at, frames) in enumerate(parts):
+            video = os.path.join(workdir, f"part-{index}.mp4")
+            stitcher.edit_segment(source, video, start_sec=at, frames=frames, fps=fps, width=width, height=height)
+            videos.append(video)
+        pcm = os.path.join(workdir, "audio.pcm")
+        if base_audio:
+            stitcher.edit_audio(base_path, pcm, start_sec=0.0, samples=total * per)
         else:
-            parts.append(dict(source_path=new_path, start_sec=0.0, frames=fb - fa, audio_from_source=base_audio,
-                              audio_source=base_path if base_audio else "", audio_start_sec=fa / fps if base_audio else None,
-                              audio_end_sec=fb / fps if base_audio else None))
-        if total - fb > 0:
-            parts.append(dict(source_path=base_path, start_sec=fb / fps, frames=total - fb, audio_from_source=base_audio))
-        with open(pcm_all, "wb") as joined:
-            for index, part in enumerate(parts):
-                video = os.path.join(workdir, f"part-{index}.mp4")
-                pcm = os.path.join(workdir, f"part-{index}.pcm")
-                stitcher.edit_segment(part.pop("source_path"), video, fps=fps, width=width, height=height, audio_out=pcm, **part)
-                with open(pcm, "rb") as handle:
-                    joined.write(handle.read())
-                os.unlink(pcm)
-                videos.append(video)
-        stitcher.edit_join(videos, out_path, audio_path=pcm_all)
+            stitcher._fit_pcm(pcm, total * per * stitcher.EDIT_AUDIO_BYTES_PER_SAMPLE)  # noqa: SLF001 — 무음
+        if new_audio:
+            clip = os.path.join(workdir, "clip.pcm")
+            stitcher.edit_audio(new_path, clip, start_sec=0.0, samples=(fhi - flo) * per)
+            _blend_pcm(pcm, clip, offset=flo * per, a=fa * per, b=fb * per, total=total * per,
+                       fade=round(SEAM_FADE_S * stitcher.EDIT_AUDIO_RATE))
+        stitcher.edit_join(videos, out_path, audio_path=pcm)
+
+
+def _blend_pcm(dst: str, clip: str, *, offset: int, a: int, b: int, total: int, fade: int) -> None:
+    """dst(원본 전체 PCM, 스테레오 s16le) 의 샘플 [a, b) 를 clip(타임라인 offset 부터) 으로 바꾸고 a·b 에 fade 샘플 길이의 직선
+    크로스페이드(이음매 가운데, clip 이 있는 곳 안으로 민다). 소리 바이트만 읽고 쓴다(원본 전체를 메모리에 올리지 않는다)."""
+    import array
+    import sys
+
+    bps = stitcher.EDIT_AUDIO_BYTES_PER_SAMPLE
+    clip_len = os.path.getsize(clip) // bps
+    end = min(b, offset + clip_len, total)
+
+    def read(handle, at: int, count: int) -> array.array:
+        handle.seek(at * bps)
+        data = array.array("h")
+        data.frombytes(handle.read(count * bps).ljust(count * bps, b"\0"))
+        if sys.byteorder == "big":
+            data.byteswap()
+        return data
+
+    windows = []
+    with open(dst, "r+b") as out, open(clip, "rb") as src:
+        if fade >= 2 and end - a >= fade:
+            for seam, rising in ((a, True), (end, False)):
+                w0 = min(max(seam - fade // 2, offset, 0), min(offset + clip_len, total) - fade)
+                if w0 < offset or w0 < 0:
+                    continue
+                base_w, clip_w = read(out, w0, fade), read(src, w0 - offset, fade)
+                mixed = array.array("h", bytes(len(base_w) * 2))
+                for i in range(fade):
+                    x = (i + 0.5) / fade
+                    x = x if rising else 1.0 - x
+                    for ch in (2 * i, 2 * i + 1):
+                        mixed[ch] = max(-32768, min(32767, int(round(base_w[ch] * (1.0 - x) + clip_w[ch] * x))))
+                windows.append((w0, mixed))
+        src.seek((a - offset) * bps)
+        out.seek(a * bps)
+        remaining = max(0, end - a) * bps
+        while remaining > 0:
+            block = src.read(min(remaining, 1 << 20))
+            if not block:
+                break
+            out.write(block)
+            remaining -= len(block)
+        for w0, mixed in windows:
+            if sys.byteorder == "big":
+                mixed.byteswap()
+            out.seek(w0 * bps)
+            out.write(mixed.tobytes())
 
 
 # ================================================================ 순수 함수: 구간 · 요청 글 · 프롬프트
@@ -236,16 +336,50 @@ def _r3(value: float) -> float:
     return round(float(value), 3)
 
 
-def line_range(start: float, end: float, pieces: list[dict], *, min_s: float = MIN_SEGMENT_S, snap_s: float = SNAP_S) -> dict:
-    """줄 구간(원본 초) → 다시 만들 구간. 조각 = {t0, t1, sourceKey, in0, rate, cuts?: [[t0, t1, cutId]]}.
+def shot_bounds(piece: dict, scenes=()) -> list[float]:
+    """작업 212 fix3: 조각 안의 샷 경계(정렬, 조각 시작·끝 포함). 콘티 컷 경계(정본)는 SCENE_MATCH_S 안의 장면 바뀜이 있으면 그 시각으로
+    다듬고, 콘티 컷이 없는 조각은 장면 바뀜이 경계다. 조각 끝 BOUND_EDGE_S 안은 조각 끝으로 본다."""
+    t0, t1 = float(piece["t0"]), float(piece["t1"])
 
-    1. 가장 많이 겹치는 조각(없으면 줄 가운데에 가장 가까운 조각) 안으로 자른다. 2. min_s 보다 짧으면 가운데 기준으로 늘리고 조각 안으로 민다
-    (조각이 더 짧으면 조각 전체). 3. 시작·끝 근처(snap_s 안)에 컷·조각 경계가 있으면 붙인다(길이가 min_s 아래로 줄지 않을 때만).
-    4. retake.RANGE_MIN_S 보다 짧으면 400 LineRangeShort. 반환 {start, end, piece, sourceKey, in, out, padded, snapped:[시작, 끝]}."""
+    def inside(v: float) -> bool:
+        return t0 + BOUND_EDGE_S < v < t1 - BOUND_EDGE_S
+
+    conti = sorted({float(v) for c in piece.get("cuts") or [] for v in (c[0], c[1]) if inside(float(v))})
+    found = sorted(float(s) for s in scenes or () if isinstance(s, (int, float)) and not isinstance(s, bool) and inside(float(s)))
+    if conti:
+        inner = []
+        for b in conti:
+            near = min(found, key=lambda s: abs(s - b), default=None)
+            inner.append(near if near is not None and abs(near - b) <= SCENE_MATCH_S else b)
+    else:
+        inner = found
+    return sorted({t0, t1, *(_r3(v) for v in inner)})
+
+
+def _own_shot(bounds: list[float], start: float, end: float) -> tuple[float, float]:
+    """줄의 샷 = 줄과 가장 많이 겹치는 샷(같으면 줄 가운데가 든 샷)."""
+    mid = (start + end) / 2
+    shots = list(zip(bounds, bounds[1:]))
+    return max(shots, key=lambda s: (min(end, s[1]) - max(start, s[0]), s[0] <= mid <= s[1]))
+
+
+def _splice_in(lo: float, hi: float, start: float, end: float, bounds: list[float], rate: float) -> dict:
+    """구간 [lo, hi] 안의 잇기 구간·컷. splice = [max(lo, 샷 시작), min(hi, 샷 끝, 줄 끝 + TAIL_S)] — 컷 경계를 넘지 않는다.
+    cutsAt = 보낸 영상(@Video1) 안의 컷 시각(재료 초)."""
+    s0, s1 = _own_shot(bounds, start, end)
+    sa = max(lo, s0)
+    sb = min(hi, s1, max(min(end, hi), sa) + TAIL_S)
+    if sb - sa <= 1e-6:
+        sa, sb = lo, hi
+    cuts = [b for b in bounds if lo + BOUND_EDGE_S < b < hi - BOUND_EDGE_S]
+    return {"line": [_r3(start), _r3(end)], "shot": [_r3(s0), _r3(s1)], "cuts": [_r3(c) for c in cuts],
+            "cutsAt": [_r3((c - lo) * rate) for c in cuts], "splice": [_r3(sa), _r3(sb)]}
+
+
+def _best_piece(pieces: list[dict], start: float, end: float) -> dict | None:
     usable = [p for p in pieces or [] if isinstance(p, dict) and float(p.get("t1", 0)) - float(p.get("t0", 0)) > 1e-6]
     if not usable:
-        raise VpocError("vnew.sound.lines", "LineNoRange", "이 대사 구간의 영상을 찾지 못했습니다. 화면을 다시 불러와 주세요.", 409)
-    start, end = float(start), float(end)
+        return None
     mid = (start + end) / 2
 
     def overlap(p):
@@ -254,9 +388,31 @@ def line_range(start: float, end: float, pieces: list[dict], *, min_s: float = M
     def distance(p):
         return 0.0 if float(p["t0"]) <= mid <= float(p["t1"]) else min(abs(mid - float(p["t0"])), abs(mid - float(p["t1"])))
 
-    index = max(range(len(usable)), key=lambda i: (overlap(usable[i]), -distance(usable[i])))
-    piece = usable[index]
+    return usable[max(range(len(usable)), key=lambda i: (overlap(usable[i]), -distance(usable[i])))]
+
+
+def _fit(lo: float, length: float, a: float, b: float) -> tuple[float, float]:
+    lo = min(max(lo, a), b - length)
+    return lo, lo + length
+
+
+def line_range(start: float, end: float, pieces: list[dict], *, min_s: float = MIN_SEGMENT_S, snap_s: float = SNAP_S,
+               scenes=()) -> dict:
+    """줄 구간(원본 초) → 다시 만들 구간. 조각 = {t0, t1, sourceKey, in0, rate, cuts?: [[t0, t1, cutId]]}.
+
+    1. 가장 많이 겹치는 조각(없으면 줄 가운데에 가장 가까운 조각) 안으로 자른다. 2. min_s 보다 짧으면 늘린다(fix3: 줄의 샷이 min_s 이상이면
+    그 샷 안에서 가운데 기준, 샷이 더 짧으면 샷 전체 + 더 긴 이웃 샷 쪽 — 조각 안으로 민다, 조각이 더 짧으면 조각 전체).
+    3. 시작·끝 근처(snap_s 안)에 샷 경계(shot_bounds)가 있으면 붙인다(길이가 min_s 아래로 줄지 않을 때만).
+    4. retake.RANGE_MIN_S 보다 짧으면 400 LineRangeShort. 반환 {start, end, piece, sourceKey, in, out, padded, snapped:[시작, 끝]}
+    + fix3 _splice_in(line · shot · cuts · cutsAt · splice)."""
+    if not [p for p in pieces or [] if isinstance(p, dict) and float(p.get("t1", 0)) - float(p.get("t0", 0)) > 1e-6]:
+        raise VpocError("vnew.sound.lines", "LineNoRange", "이 대사 구간의 영상을 찾지 못했습니다. 화면을 다시 불러와 주세요.", 409)
+    start, end = float(start), float(end)
+    mid = (start + end) / 2
+    piece = _best_piece(pieces, start, end)
     t0, t1 = float(piece["t0"]), float(piece["t1"])
+    bounds = shot_bounds(piece, scenes)
+    s0, s1 = _own_shot(bounds, start, end)
     lo, hi = max(start, t0), min(end, t1)
     if hi <= lo:
         lo = hi = min(max(mid, t0), t1)
@@ -265,14 +421,13 @@ def line_range(start: float, end: float, pieces: list[dict], *, min_s: float = M
         padded = True
         if t1 - t0 <= min_s:
             lo, hi = t0, t1
-        else:
-            center = (lo + hi) / 2
-            lo, hi = center - min_s / 2, center + min_s / 2
-            if lo < t0:
-                lo, hi = t0, t0 + min_s
-            if hi > t1:
-                lo, hi = t1 - min_s, t1
-    bounds = sorted({t0, t1} | {float(v) for c in piece.get("cuts") or [] for v in (c[0], c[1]) if t0 <= float(v) <= t1})
+        elif s1 - s0 >= min_s:  # fix3: 줄의 샷 안에서 먼저 늘린다
+            lo, hi = _fit((lo + hi) / 2 - min_s / 2, min_s, s0, s1)
+        else:  # 샷이 최소 길이보다 짧다 → 샷 전체 + 더 긴 이웃 샷 쪽으로(컷을 넘는다 — 프롬프트에 컷 줄)
+            i = bounds.index(s0)
+            before = s0 - bounds[i - 1] if i > 0 else 0.0
+            after = bounds[i + 2] - s1 if i + 2 < len(bounds) else 0.0
+            lo, hi = _fit(s0 if after >= before else s1 - min_s, min_s, t0, t1)
     snapped = [False, False]
     floor = min(min_s, t1 - t0)
     near = min(bounds, key=lambda b: abs(b - lo))
@@ -286,8 +441,10 @@ def line_range(start: float, end: float, pieces: list[dict], *, min_s: float = M
                         f"이 대사 구간이 들어 있는 영상 조각이 {retake.RANGE_MIN_S:g}초보다 짧아 다시 만들 수 없습니다.", 400)
     rate = float(piece.get("rate") or 1.0)
     in0 = float(piece.get("in0") or 0.0)
-    return {"start": _r3(lo), "end": _r3(hi), "piece": pieces.index(piece), "sourceKey": str(piece.get("sourceKey") or ""),
-            "in": _r3(in0 + (lo - t0) * rate), "out": _r3(in0 + (hi - t0) * rate), "padded": padded, "snapped": snapped}
+    out = {"start": _r3(lo), "end": _r3(hi), "piece": pieces.index(piece), "sourceKey": str(piece.get("sourceKey") or ""),
+           "in": _r3(in0 + (lo - t0) * rate), "out": _r3(in0 + (hi - t0) * rate), "padded": padded, "snapped": snapped}
+    out.update(_splice_in(lo, hi, start, end, bounds, rate))
+    return out
 
 
 def _prompt_text(value, limit: int) -> str:
@@ -321,12 +478,21 @@ def redo_request(override: dict) -> str:
     return request_ko[: retake.REQUEST_MAX]
 
 
-def redo_edit_lines(override: dict, change_en: str = "", max_bytes: int = 0) -> list[str]:
+def hard_cut_lines(cuts_at=()) -> list[str]:
+    """작업 212 fix3: 보낸 구간(@Video1) 안의 컷마다 한 줄(HARD_CUT_LINE, 시각은 @Video1 초 — 소수 둘째 자리까지)."""
+    out = []
+    for t in cuts_at or ():
+        if isinstance(t, (int, float)) and not isinstance(t, bool) and t > 0:
+            out.append(HARD_CUT_LINE.format(t=f"{float(t):.2f}".rstrip("0").rstrip(".")))
+    return out
+
+
+def redo_edit_lines(override: dict, change_en: str = "", max_bytes: int = 0, cuts_at=()) -> list[str]:
     """작업 212 fix1: 대사 다시 만들기 EDIT 줄(고정 틀 — ⑦ 의 "구도가 바뀌어도 끝까지 적용" 머리를 쓰지 않는다)과 소리 규칙 한 줄.
 
     EDIT = 입·얼굴 연기·목소리만 고침 · 구도·카메라·사람·자리·옷·조명·타이밍 그대로 · 새 대사는 한국어 따옴표로만(영어는 (meaning: …) 안의 뜻)
     · 영어로 말하지 않음 · 속마음이면 입 다묾 · 말투 메모(한국어 따옴표, 말하지 않음). 소리 = 작업 211 대사만 규칙(속마음이면 inner 형,
-    상한이 FULL_AUDIO_MIN_BYTES 보다 작으면 짧은 형)."""
+    상한이 FULL_AUDIO_MIN_BYTES 보다 작으면 짧은 형). fix3: cuts_at(구간 안 컷, @Video1 초)이 있으면 그 뒤에 컷 줄(hard_cut_lines)."""
     speaker = _prompt_text(override.get("speaker"), sound.MAX_SPEAKER_LEN) or "the speaker"
     text = _prompt_text(override.get("textKo"), TEXT_MAX)
     delivery = _prompt_text(override.get("deliveryKo"), DELIVERY_MAX)
@@ -339,7 +505,7 @@ def redo_edit_lines(override: dict, change_en: str = "", max_bytes: int = 0) -> 
     if delivery:
         parts.append(f"Acting note in Korean (do not speak it): '{delivery}'.")
     compact = bool(max_bytes) and int(max_bytes) < FULL_AUDIO_MIN_BYTES
-    return [" ".join(parts), generate.audio_rule(True, compact=compact, inner=thought)]
+    return [" ".join(parts), generate.audio_rule(True, compact=compact, inner=thought), *hard_cut_lines(cuts_at)]
 
 
 _AUDIO_RULES = tuple(sorted({generate.AUDIO_DIALOGUE_ONLY, generate.AUDIO_DIALOGUE_ONLY_SPOKEN, generate.AUDIO_DIALOGUE_ONLY_COMPACT,
@@ -540,9 +706,11 @@ def _pieces(owner: str, pid: str, gen_id: str, plan: dict, gen: dict, variant: s
 
 
 def _replace_piece(pieces: list[dict], rng: dict, new_key: str) -> list[dict]:
-    """판의 조각: [start, end] 를 새 결과(재료 0초부터, 속도 1)로 바꾸고 걸친 조각은 앞·뒤로 잘라 재료 초를 옮긴다."""
+    """판의 조각: [start, end] 를 새 결과(속도 1)로 바꾸고 걸친 조각은 앞·뒤로 잘라 재료 초를 옮긴다.
+    fix3: clipStart(새 결과 0초의 타임라인 시각 — 늘린 구간 시작)가 있으면 새 조각 재료 초 = start − clipStart, 없으면 0."""
     a, b = float(rng["start"]), float(rng["end"])
-    out: list[dict] = [{"t0": _r3(a), "t1": _r3(b), "sourceKey": new_key, "in0": 0.0, "rate": 1.0, "cuts": []}]
+    clip_in = max(0.0, a - float(rng["clipStart"])) if isinstance(rng.get("clipStart"), (int, float)) else 0.0
+    out: list[dict] = [{"t0": _r3(a), "t1": _r3(b), "sourceKey": new_key, "in0": _r3(clip_in), "rate": 1.0, "cuts": []}]
     for piece in pieces:
         t0, t1 = float(piece["t0"]), float(piece["t1"])
         if t1 <= a or t0 >= b:  # 바꾼 구간 밖
@@ -872,7 +1040,10 @@ def quote(owner: str, pid: str, payload) -> dict:
         raise VpocError(where, "LineRedoRunning", "이 대사 영상을 다시 만드는 중입니다. 끝난 뒤 다시 눌러 주세요.", 409)
     duration = edit._num(doc["source"].get("duration")) or 0.0  # noqa: SLF001
     pieces = _pieces(owner, pid, gen_id, plan, gen, variant, source, duration)
-    rng = line_range(float(line.get("start") or 0.0), float(line.get("end") or 0.0), pieces)
+    line_start, line_end = float(line.get("start") or 0.0), float(line.get("end") or 0.0)
+    scenes, scene_ok = _quote_scenes(source["key"], line_start, line_end, duration)
+    rng = line_range(line_start, line_end, pieces, scenes=scenes)
+    rng["scene"] = scene_ok
     mid = edit.media_id(rng["sourceKey"])
     request_ko = redo_request(override)
     extra_ko = ""  # 작업 212 fix1: 새 대사·유지·소리 규칙은 EDIT 줄들(redo_edit_lines)에 있다 — EXTRA 줄은 없다
@@ -891,7 +1062,8 @@ def quote(owner: str, pid: str, payload) -> dict:
     model = picked or default_model(rows, refused)
     if model:
         body["model"] = model
-    rv = _compose(owner, pid, mid, body, edit_lines=lambda change_en, max_bytes: redo_edit_lines(override, change_en, max_bytes))
+    rv = _compose(owner, pid, mid, body,
+                  edit_lines=lambda change_en, max_bytes: redo_edit_lines(override, change_en, max_bytes, rng["cutsAt"]))
     draft = (rv or {}).get("draft") or {}
     info = draft.get("plan") or {}
     used = str(draft.get("model") or "")
@@ -909,7 +1081,8 @@ def quote(owner: str, pid: str, payload) -> dict:
            "extraKo": extra_ko, "promptV": PROMPT_V, "mid": mid, "in": rng["in"], "out": rng["out"], "model": str(draft.get("model") or ""),
            "modelLabel": str(draft.get("modelLabel") or draft.get("model") or ""), "usd": info.get("usd"),
            "priceKnown": info.get("usd") is not None, "seconds": info.get("sentSeconds") or info.get("seconds"),
-           "range": {"start": rng["start"], "end": rng["end"], "padded": rng["padded"], "snapped": rng["snapped"]},
+           "range": {"start": rng["start"], "end": rng["end"], "padded": rng["padded"], "snapped": rng["snapped"],
+                     **{k: rng[k] for k in ("line", "shot", "cuts", "cutsAt", "splice", "scene")}},
            "sourceKey": source["key"], "baseKey": _base_key(source), "pieces": pieces, "cellKey": str((rv or {}).get("cellKey") or ""),
            "at": now_iso(), "error": "", "textKo": override.get("textKo"), "thought": bool(override.get("thought")),
            "models": choices, "refused": refused, "stepUp": step_up, "picked": bool(picked)}
@@ -921,10 +1094,45 @@ def quote(owner: str, pid: str, payload) -> dict:
         return doc_
 
     _mutate_redo(owner, pid, gen_id, variant, mutate)
-    log.info("vnew.sound.lines.quote pid=%s gen=%s variant=%s line=%s start=%.3f end=%.3f in=%.3f out=%.3f usd=%s model=%s picked=%s "
-             "refused=%d step_up=%s", pid, gen_id, variant, line_id, rng["start"], rng["end"], rng["in"], rng["out"], job["usd"],
-             job["model"], bool(picked), len(refused), bool(step_up))
+    log.info("vnew.sound.lines.quote pid=%s gen=%s variant=%s line=%s start=%.3f end=%.3f in=%.3f out=%.3f splice=%s cuts=%s scene=%s "
+             "usd=%s model=%s picked=%s refused=%d step_up=%s", pid, gen_id, variant, line_id, rng["start"], rng["end"], rng["in"],
+             rng["out"], rng["splice"], rng["cuts"], scene_ok, job["usd"], job["model"], bool(picked), len(refused), bool(step_up))
     return {"quote": _job_out(job), "prompt": prompt}
+
+
+def _quote_scenes(key: str, start: float, end: float, duration: float) -> tuple[list[float], bool]:
+    """견적 때 줄 둘레(늘릴 수 있는 만큼)의 장면 바뀜. 실패하면 ([], False) — 콘티 경계만 쓴다(잇기 때 로컬 파일로 다시 본다)."""
+    a = max(0.0, start - MIN_SEGMENT_S - SNAP_S)
+    b = end + MIN_SEGMENT_S + SNAP_S
+    b = min(b, duration) if duration > 0 else b
+    try:
+        return _scene_changes(key, a, b), True
+    except Exception as exc:  # noqa: BLE001 — 검사는 덤(콘티가 정본)
+        log.warning("vnew.sound.lines.scene_failed err=%s", error_gist(f"{type(exc).__name__}: {exc}", 200))
+        return [], False
+
+
+def _plan_splice(owner: str, pid: str, gen_id: str, variant: str, line_id: str, rng: dict, pieces: list[dict], base_path: str,
+                 duration: float) -> dict:
+    """잇기·다시 잇기 때 잇기 구간(_splice_in): 구간 [start, end] 이 든 조각 + 로컬 원본의 장면 바뀜(실패하면 콘티만).
+    줄 시각 = rng.line(없으면 사운드 문서의 그 줄, 그것도 없으면 구간 전체)."""
+    lo, hi = float(rng["start"]), float(rng["end"])
+    span = rng.get("line") if isinstance(rng.get("line"), list) and len(rng["line"]) == 2 else None
+    if span is None:
+        doc, _ = edit._read_json(sound.doc_key(owner, pid, gen_id, variant))  # noqa: SLF001
+        line = next((l for l in (doc or {}).get("lines") or [] if isinstance(l, dict) and l.get("id") == line_id), None)
+        span = [float(line.get("start") or lo), float(line.get("end") or hi)] if line else [lo, hi]
+    piece = _best_piece(pieces, lo, hi)
+    if piece is None:
+        return {"splice": [_r3(lo), _r3(hi)], "cuts": [], "scene": False}
+    try:
+        scenes, ok = _scenes(base_path, max(0.0, lo - BOUND_EDGE_S), min(duration, hi + BOUND_EDGE_S)), True
+    except Exception as exc:  # noqa: BLE001
+        log.warning("vnew.sound.lines.scene_failed err=%s", error_gist(f"{type(exc).__name__}: {exc}", 200))
+        scenes, ok = [], False
+    out = _splice_in(lo, hi, float(span[0]), float(span[1]), shot_bounds(piece, scenes), float(piece.get("rate") or 1.0))
+    out["scene"] = ok
+    return out
 
 
 def start(owner: str, pid: str, payload) -> dict:
@@ -1031,8 +1239,15 @@ def run_splice(owner: str, pid: str, gen_id: str, variant: str, line_id: str, cl
                 stage = "splice"
                 out_path = os.path.join(workdir, "spliced.mp4")
                 new_audio = bool(new_info.get("hasAudio"))
+                splice = rng.get("splice")
+                if not (isinstance(splice, list) and len(splice) == 2) or not rng.get("scene"):
+                    # fix3: 옛 견적(잇기 구간 없음)이거나 견적 때 장면 검사를 못 했으면 받은 원본으로 다시 정한다(콘티가 정본)
+                    splice = _plan_splice(owner, pid, gen_id, variant, line_id, rng, job.get("pieces") or pieces, base_path,
+                                          duration)["splice"]
+                splice = [float(splice[0]), float(splice[1])]
                 _splice_file(base_path, new_path, out_path, start=float(rng["start"]), end=float(rng["end"]), duration=duration,
-                             width=width, height=height, fps=fps, base_audio=bool(base_info.get("hasAudio")), new_audio=new_audio)
+                             width=width, height=height, fps=fps, base_audio=bool(base_info.get("hasAudio")), new_audio=new_audio,
+                             splice_start=splice[0], splice_end=splice[1])
                 seconds = float((_probe(out_path) or {}).get("duration") or 0)
                 if seconds <= 0:
                     raise stitcher.StitchError("이은 영상 길이를 읽지 못했습니다.")
@@ -1041,7 +1256,7 @@ def run_splice(owner: str, pid: str, gen_id: str, variant: str, line_id: str, cl
                 r = max([int(x.get("r") or 0) for x in redo["revisions"]] + [0]) + 1
                 key = revision_key(owner, pid, gen_id, variant, r)
                 _upload(out_path, key)
-        new_pieces = _replace_piece(pieces, rng, output_key)
+        new_pieces = _replace_piece(pieces, {"start": splice[0], "end": splice[1], "clipStart": float(rng["start"])}, output_key)
         from_r = int(now_source.get("r") or 0) if now_source.get("kind") == "redo" else 0
 
         def finish(doc, cur):
@@ -1049,7 +1264,8 @@ def run_splice(owner: str, pid: str, gen_id: str, variant: str, line_id: str, cl
                 raise VpocError("vnew.sound.lines", "LineRedoRace", "다른 작업이 먼저 새 판을 만들었습니다.", 409)
             doc["revisions"].append({"r": r, "key": key, "at": now_iso(), "baseKey": job.get("baseKey"),
                                      "fromKey": now_source["key"], "fromR": from_r, "lineId": line_id,
-                                     "range": {"start": rng.get("start"), "end": rng.get("end")}, "pieces": new_pieces,
+                                     "range": {"start": rng.get("start"), "end": rng.get("end"), "splice": splice,
+                                               "line": rng.get("line")}, "clipKey": output_key, "pieces": new_pieces,
                                      "retake": {"cellKey": cur.get("cellKey"), "n": cur.get("n")}, "model": cur.get("model"),
                                      "usd": cur.get("usd"), "seconds": round(seconds, 3)})
             doc["current"] = r
@@ -1076,6 +1292,89 @@ def run_splice(owner: str, pid: str, gen_id: str, variant: str, line_id: str, cl
             pass
         except Exception as write_exc:  # noqa: BLE001
             log.warning("vnew.sound.lines.splice_state_failed pid=%s err=%s", pid, type(write_exc).__name__)
+
+
+def _revision_clip(rev: dict) -> str:
+    """판의 retake 결과 키: clipKey(fix3) → 옛 판은 구간 [start, end] 을 그대로 덮은 조각(재료 0초부터)."""
+    if rev.get("clipKey"):
+        return str(rev["clipKey"])
+    rng = rev.get("range") or {}
+    for piece in rev.get("pieces") or []:
+        if (isinstance(piece, dict) and abs(float(piece.get("t0", -1)) - float(rng.get("start", -2))) < 1e-3
+                and abs(float(piece.get("t1", -1)) - float(rng.get("end", -2))) < 1e-3 and not float(piece.get("in0") or 0)):
+            return str(piece.get("sourceKey") or "")
+    return ""
+
+
+def rebuild_revision(owner: str, pid: str, variant: str, n: int) -> dict:
+    """작업 212 fix3 데이터 고침(라우트 없음 — 파드에서 부른다): 판 n 을 그 판의 저장된 retake 결과(clip)로 새 잇기 규칙에 맞춰 다시 이어
+    새 판(새 키 r = 최대 + 1)으로 두고 current 를 그 판으로. 같은 원본(fromKey)·같은 구간 · 줄의 샷 안(splice)만 결과로, 나머지는 원래
+    프레임·소리. 모델·유료 호출 0(usd 0, rebuiltFrom = n). 판 n · 원본 파일은 읽기만 한다(되돌리기로 판 n 에 돌아갈 수 있다).
+    반환 {r, key, fromR, range, splice, cuts, seconds, scene}."""
+    where = "vnew.sound.lines.rebuild"
+    plan, gen, gen_id = edit._load_gen(owner, pid)  # noqa: SLF001
+    variant = sound._variant_of(variant, gen, where)  # noqa: SLF001
+    redo = read_redo(owner, pid, gen_id, variant)
+    rev = next((x for x in redo["revisions"] if int(x.get("r") or 0) == int(n)), None)
+    if not rev:
+        raise VpocError(where, "BadRevision", f"판 {n} 을 찾을 수 없습니다.", 404)
+    if any(j.get("status") == "splicing" for j in redo["jobs"].values()):
+        raise VpocError(where, "LineRedoRunning", "새 대사 영상을 잇는 중입니다. 끝난 뒤 다시 실행해 주세요.", 409)
+    prefix = f"users/{owner}/video/{pid}/"
+    clip_key, from_key = _revision_clip(rev), str(rev.get("fromKey") or "")
+    if not clip_key.startswith(prefix) or not from_key.startswith(prefix):
+        raise VpocError(where, "SourceUnreadable", "판의 원본·결과 영상 키를 찾지 못했습니다.", 409)
+    from_r = int(rev.get("fromR") or 0)
+    rng = dict(rev.get("range") or {})
+    with _SPLICE_SEM, tempfile.TemporaryDirectory(prefix="vnew-line-rebuild-") as workdir:
+        base_path, new_path = os.path.join(workdir, "base.mp4"), os.path.join(workdir, "new.mp4")
+        _download(from_key, base_path)
+        _download(clip_key, new_path)
+        base_info, new_info = _probe(base_path) or {}, _probe(new_path) or {}
+        duration = float(base_info.get("duration") or 0)
+        width, height, fps = _geometry(base_info)
+        if duration <= 0 or width < 2 or height < 2 or float(new_info.get("duration") or 0) <= 0:
+            raise stitcher.StitchError("영상 길이·크기를 읽지 못했습니다.")
+        if from_r:
+            prev = next((x for x in redo["revisions"] if int(x.get("r") or 0) == from_r), {})
+            pieces = copy.deepcopy(prev.get("pieces") or [])
+        else:
+            base = sound._base_source(owner, pid, gen_id, gen, variant)  # noqa: SLF001
+            if base["key"] != from_key:
+                raise VpocError(where, "SoundChanged", "판 n 의 원본이 지금 기준 영상이 아닙니다.", 409)
+            pieces = _pieces(owner, pid, gen_id, plan, gen, variant, base, duration)
+        plan_ = _plan_splice(owner, pid, gen_id, variant, str(rev.get("lineId") or ""), rng, pieces, base_path, duration)
+        splice = [float(v) for v in plan_["splice"]]
+        out_path = os.path.join(workdir, "spliced.mp4")
+        new_audio = bool(new_info.get("hasAudio"))
+        _splice_file(base_path, new_path, out_path, start=float(rng["start"]), end=float(rng["end"]), duration=duration, width=width,
+                     height=height, fps=fps, base_audio=bool(base_info.get("hasAudio")), new_audio=new_audio,
+                     splice_start=splice[0], splice_end=splice[1])
+        seconds = float((_probe(out_path) or {}).get("duration") or 0)
+        if seconds <= 0:
+            raise stitcher.StitchError("이은 영상 길이를 읽지 못했습니다.")
+        r = max([int(x.get("r") or 0) for x in redo["revisions"]] + [0]) + 1
+        key = revision_key(owner, pid, gen_id, variant, r)
+        _upload(out_path, key)
+    new_pieces = _replace_piece(pieces, {"start": splice[0], "end": splice[1], "clipStart": float(rng["start"])}, clip_key)
+
+    def mutate(doc):
+        if any(int(x.get("r") or 0) == r for x in doc["revisions"]):
+            raise VpocError(where, "LineRedoRace", "다른 작업이 먼저 새 판을 만들었습니다.", 409)
+        doc["revisions"].append({"r": r, "key": key, "at": now_iso(), "baseKey": rev.get("baseKey"), "fromKey": from_key, "fromR": from_r,
+                                 "lineId": rev.get("lineId"), "range": {"start": rng.get("start"), "end": rng.get("end"),
+                                                                        "splice": splice, "line": plan_.get("line")},
+                                 "clipKey": clip_key, "pieces": new_pieces, "retake": copy.deepcopy(rev.get("retake")),
+                                 "model": rev.get("model"), "usd": 0.0, "rebuiltFrom": int(n), "seconds": round(seconds, 3)})
+        doc["current"] = r
+        return doc
+
+    _mutate_redo(owner, pid, gen_id, variant, mutate)
+    outdated = _mark_versions(owner, pid, gen_id, variant, key)
+    log.info("vnew.sound.lines.rebuild pid=%s gen=%s variant=%s from=%d r=%d range=%s-%s splice=%s cuts=%s seconds=%.3f outdated=%d",
+             pid, gen_id, variant, int(n), r, rng.get("start"), rng.get("end"), splice, plan_.get("cuts"), seconds, outdated)
+    return {"r": r, "key": key, "fromR": from_r, "range": [rng.get("start"), rng.get("end")], "splice": splice,
+            "cuts": plan_.get("cuts"), "seconds": round(seconds, 3), "scene": plan_.get("scene")}
 
 
 # ================================================================ 되돌리기
