@@ -6579,12 +6579,67 @@ textarea.vnew-field-input {
   border-radius: 5px;
   background: #d8efe4;
   border: 1px solid #7cc4a0;
+/* ==== 작업 215b 시작 ==== */
+/* ⑦ 자막 · V2 타이틀 줄 · 블랙/화이트 전환 손잡이 · 미리보기 층 · 도구 칸 · 글 칸 · 오른쪽 누르기 메뉴 · ⑦ 안 대사 고치기 창 · 프리미어 */
+
+.vnew-edit-labels.has-tx {
+  grid-template-rows: 26px 30px 30px 56px 40px;
+}
+
+/* 자막 · V2 줄은 끝에 붙어 있다 — 눈금자 바로 아래로(order). */
+.vnew-edit-labels.has-tx > .vnew-edit-label.is-ruler,
+.vnew-edit-content.has-tx > .vnew-edit-ruler {
+  order: -3;
+}
+
+.vnew-edit-labels.has-tx > .vnew-edit-label.is-captions,
+.vnew-edit-content.has-tx > .vnew-edit-txlane.is-captions {
+  order: -2;
+}
+
+.vnew-edit-labels.has-tx > .vnew-edit-label.is-titles,
+.vnew-edit-content.has-tx > .vnew-edit-txlane.is-titles {
+  order: -1;
+}
+
+.vnew-edit-content.has-tx {
+  display: flex;
+  flex-direction: column;
+}
+
+.vnew-edit-label.is-tx {
+  border-bottom: 1px dashed var(--line, #e5e7eb);
+}
+
+.vnew-edit-txlane {
+  position: relative;
+  height: 30px;
+  border-bottom: 1px dashed var(--line, #e5e7eb);
+}
+
+.vnew-edit-txitem {
+  position: absolute;
+  top: 3px;
+  height: 24px;
+  box-sizing: border-box;
+  padding: 0 8px;
+  border-radius: 5px;
+  background: #fde68a;
+  color: #3b2f06;
+  font-size: 12px;
+  line-height: 24px;
   overflow: hidden;
   cursor: grab;
   touch-action: none;
 }
 
 .vnew-edit-mix-item.is-selected {
+.vnew-edit-txitem.is-title {
+  background: #c7d2fe;
+  color: #1e1b4b;
+}
+
+.vnew-edit-txitem.is-selected {
   outline: 2px solid var(--accent, #cb3208);
   outline-offset: -2px;
   z-index: 2;
@@ -6608,6 +6663,10 @@ textarea.vnew-field-input {
   font-size: 10px;
   white-space: nowrap;
   overflow: hidden;
+.vnew-edit-txitem-text {
+  display: block;
+  overflow: hidden;
+  white-space: nowrap;
   text-overflow: ellipsis;
   pointer-events: none;
 }
@@ -6787,4 +6846,743 @@ textarea.vnew-field-input {
   padding: 6px 8px;
   border-top: 1px solid var(--line, #e5e7eb);
   user-select: text;
+.vnew-edit-txitem-text.is-italic {
+  font-style: italic;
+}
+
+.vnew-edit-txedge {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 6px;
+  cursor: ew-resize;
+}
+
+.vnew-edit-txedge.is-in {
+  left: 0;
+}
+
+.vnew-edit-txedge.is-out {
+  right: 0;
+}
+
+.vnew-edit-txedge:hover {
+  background: rgba(17, 24, 39, 0.25);
+}
+
+.vnew-edit-tr.is-dip-black::before {
+  background: #111827;
+}
+
+.vnew-edit-tr.is-dip-white::before {
+  border-color: #6b7280;
+  background: #ffffff;
+}
+
+.vnew-edit-txdip {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 2px;
+  padding-top: 4px;
+  border-top: 1px solid var(--line, #e5e7eb);
+}
+
+.vnew-edit-txdip-name {
+  flex: 1 1 100%;
+  padding: 0 8px;
+  color: var(--text-muted, #6b7280);
+  font-size: 12px;
+}
+
+.vnew-edit-trmenu-item.vnew-edit-txdip-item {
+  display: inline-block;
+  width: auto;
+  min-height: 28px;
+  padding: 0 8px;
+}
+
+/* 미리보기 층(재생 화면 위, 누르기는 아래 영상으로) */
+.vnew-edit-txlayer {
+  position: absolute;
+  inset: 0;
+  opacity: 0;
+  pointer-events: none;
+}
+
+.vnew-edit-txlayer.is-tint {
+  mix-blend-mode: soft-light;
+}
+
+.vnew-edit-txlayer.is-titles {
+  opacity: 1;
+}
+
+.vnew-edit-txcap {
+  position: absolute;
+  right: 5%;
+  bottom: 6%;
+  left: 5%;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+  pointer-events: none;
+  text-align: center;
+}
+
+.vnew-edit-txcap.is-top {
+  top: 6%;
+  bottom: auto;
+}
+
+.vnew-edit-txcap-line,
+.vnew-edit-txtitle {
+  font-family: "Noto Sans KR", "Pretendard Variable", Pretendard, sans-serif;
+  font-weight: 500;
+  line-height: 1.25;
+  white-space: pre-line;
+}
+
+.vnew-edit-txcap-line.is-outline,
+.vnew-edit-txtitle {
+  text-shadow: -1px -1px 0 #000, 1px -1px 0 #000, -1px 1px 0 #000, 1px 1px 0 #000, 0 0 3px #000;
+}
+
+.vnew-edit-txcap-line.is-box,
+.vnew-edit-txtitle.is-box {
+  padding: 0.1em 0.4em;
+  background: rgba(0, 0, 0, 0.62);
+  text-shadow: none;
+}
+
+.vnew-edit-txcap-line.is-italic {
+  font-style: italic;
+}
+
+.vnew-edit-txtitle {
+  position: absolute;
+  max-width: 90%;
+  text-align: center;
+}
+
+.vnew-edit-txtitle.is-pos1 { top: 5%; left: 5%; }
+.vnew-edit-txtitle.is-pos2 { top: 5%; left: 50%; transform: translateX(-50%); }
+.vnew-edit-txtitle.is-pos3 { top: 5%; right: 5%; }
+.vnew-edit-txtitle.is-pos4 { top: 50%; left: 5%; transform: translateY(-50%); }
+.vnew-edit-txtitle.is-pos5 { top: 50%; left: 50%; transform: translate(-50%, -50%); }
+.vnew-edit-txtitle.is-pos6 { top: 50%; right: 5%; transform: translateY(-50%); }
+.vnew-edit-txtitle.is-pos7 { bottom: 5%; left: 5%; }
+.vnew-edit-txtitle.is-pos8 { bottom: 5%; left: 50%; transform: translateX(-50%); }
+.vnew-edit-txtitle.is-pos9 { right: 5%; bottom: 5%; }
+
+/* 도구 칸(도구줄 한 줄 전체) */
+.vnew-edit-tx {
+  display: grid;
+  flex: 1 1 100%;
+  gap: 6px;
+  min-width: 0;
+  padding-top: 6px;
+  border-top: 1px dashed var(--line, #e5e7eb);
+}
+
+.vnew-edit-txrow {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 10px;
+  min-width: 0;
+}
+
+.vnew-edit-txrow-title {
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.vnew-edit-txfield {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 12px;
+}
+
+.vnew-edit-txfield-label {
+  color: var(--text-muted, #6b7280);
+}
+
+.vnew-edit-txbtn {
+  min-height: 30px;
+  font-size: 13px;
+}
+
+.vnew-edit-txslider {
+  width: 90px;
+}
+
+.vnew-edit-txslider-value {
+  min-width: 30px;
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+}
+
+.vnew-edit-txtfade {
+  width: 56px;
+}
+
+.vnew-edit-txgrid {
+  display: inline-grid;
+  grid-template-columns: repeat(3, 16px);
+  gap: 2px;
+}
+
+.vnew-edit-txgrid-cell {
+  width: 16px;
+  height: 11px;
+  padding: 0;
+  border: 1px solid var(--line, #c4c8cf);
+  border-radius: 2px;
+  background: var(--surface, #ffffff);
+  cursor: pointer;
+}
+
+.vnew-edit-txgrid-cell.is-on {
+  border-color: var(--accent, #cb3208);
+  background: var(--accent, #cb3208);
+}
+
+.vnew-edit-txnote {
+  margin: 0;
+  font-size: 12px;
+}
+
+/* 자막 위에 뜨는 글 칸 */
+.vnew-edit-txeditor {
+  position: fixed;
+  z-index: 61;
+  display: grid;
+  gap: 6px;
+  width: min(320px, calc(100vw - 16px));
+  box-sizing: border-box;
+  padding: 8px;
+  border: 1px solid var(--line, #e5e7eb);
+  border-radius: 10px;
+  background: var(--surface, #ffffff);
+  box-shadow: 0 8px 24px rgba(17, 24, 39, 0.18);
+}
+
+.vnew-edit-txeditor-text {
+  width: 100%;
+  box-sizing: border-box;
+  font: inherit;
+  font-size: 14px;
+  resize: vertical;
+}
+
+.vnew-edit-txeditor-check {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+}
+
+.vnew-edit-txeditor-tools {
+  display: flex;
+  justify-content: flex-end;
+  gap: 6px;
+}
+
+/* 내보내기 칸: 자막 굽기 · SRT · 프리미어 */
+.vnew-edit-txexport,
+.vnew-edit-txprem {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 12px;
+  margin-top: 8px;
+}
+
+.vnew-edit-txexport-burn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+}
+
+.vnew-edit-txexport-font,
+.vnew-edit-txprem-status {
+  margin: 0;
+  font-size: 12px;
+}
+
+.vnew-edit-txprem .vnew-edit-export-bar {
+  flex: 1 1 100%;
+}
+
+/* ⑦ 안 대사 고치기 · 영상 다시 만들기(⑥ 편집 창을 그대로 담는다) */
+.vnew-edit-txline {
+  position: fixed;
+  right: 16px;
+  bottom: 16px;
+  z-index: 58;
+  display: grid;
+  gap: 8px;
+  width: min(620px, calc(100vw - 32px));
+  max-height: 80vh;
+  box-sizing: border-box;
+  padding: 12px;
+  border: 1px solid var(--line, #e5e7eb);
+  border-radius: 12px;
+  background: var(--surface, #ffffff);
+  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.2);
+  overflow-y: auto;
+}
+
+.vnew-edit-txline-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.vnew-edit-txline-title {
+  margin: 0;
+  font-size: 15px;
+}
+
+.vnew-sound-row.vnew-edit-txline-row {
+  display: flex;
+  flex-wrap: wrap;
+  min-width: 0;
+}
+
+.vnew-edit-txline-note,
+.vnew-edit-txline-swapnote {
+  margin: 0;
+}
+
+/* 화면 고리 클래스(검사 · 스크립트가 찾는 이름, 모양은 기본) */
+.vnew-edit-txback,
+.vnew-edit-txpos,
+.vnew-edit-txpreset,
+.vnew-edit-txsize,
+.vnew-edit-txtsize,
+.vnew-edit-txfade-in,
+.vnew-edit-txfade-out {
+  max-width: 160px;
+  font: inherit;
+  font-size: 12px;
+}
+
+.vnew-edit-txcolor {
+  width: 32px;
+  height: 22px;
+  padding: 0;
+}
+
+.vnew-edit-txburn,
+.vnew-edit-txitalic,
+.vnew-edit-txtbox,
+.vnew-edit-txeditor-line {
+  margin: 0;
+}
+
+.vnew-edit-txeditor-ok,
+.vnew-edit-txeditor-cancel,
+.vnew-edit-txsrt,
+.vnew-edit-txprem-btn,
+.vnew-edit-txline-swapbtn {
+  min-height: 30px;
+  font-size: 13px;
+}
+
+.vnew-edit-txsrt-link {
+  position: absolute;
+  overflow: hidden;
+  clip-path: inset(50%);
+}
+
+.vnew-edit-txmenu {
+  max-width: min(420px, calc(100vw - 16px));
+}
+
+.vnew-edit-txline-body {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.vnew-edit-txline-swap {
+  display: grid;
+  gap: 6px;
+  /* ==== 작업 215b 끝 ==== (파일 끝이 "}\n" 이어야 하는 기존 검사 때문에 마지막 규칙 안에 둔다) */
+/* ==== 작업 215c 시작 ==== */
+/* ⑦ 프리미어식 도구: 타임라인 왼쪽 세로 도구줄 · 트랙 단추(잠금·숨김·높이) · 빈틈 · 마커 · 표시 구간 · 오른쪽 클릭 메뉴 · 작은 창. */
+.vnew-edit-tl:has(> .vnew-e215c-bar) {
+  grid-template-columns: 34px 64px minmax(0, 1fr);
+}
+
+.vnew-edit-tl:has(> .vnew-e215c-bar) > .vnew-e215c-bar {
+  grid-column: 1;
+  grid-row: 1;
+}
+
+.vnew-edit-tl:has(> .vnew-e215c-bar) > .vnew-edit-labels {
+  grid-column: 2;
+  grid-row: 1;
+  grid-template-rows: 26px var(--e215c-vh, 56px) var(--e215c-ah, 40px);
+}
+
+.vnew-edit-tl:has(> .vnew-e215c-bar) > .vnew-edit-scroll {
+  grid-column: 3;
+  grid-row: 1;
+}
+
+.vnew-edit-tl:has(> .vnew-e215c-bar) .vnew-edit-track.is-video {
+  height: var(--e215c-vh, 56px);
+}
+
+.vnew-edit-tl:has(> .vnew-e215c-bar) .vnew-edit-track.is-video .vnew-edit-clip {
+  height: calc(var(--e215c-vh, 56px) - 8px);
+}
+
+.vnew-edit-tl:has(> .vnew-e215c-bar) .vnew-edit-track.is-audio {
+  height: var(--e215c-ah, 40px);
+}
+
+.vnew-e215c-bar {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 2px;
+  padding: 4px 2px;
+  border-right: 1px solid var(--line, #e5e7eb);
+  background: var(--surface-muted, #f9fafb);
+}
+
+.vnew-e215c-tool {
+  width: 28px;
+  height: 26px;
+  padding: 0;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text, #111827);
+  font-size: 14px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.vnew-e215c-tool:hover {
+  background: #eceef1;
+}
+
+.vnew-e215c-tool.is-on {
+  border-color: var(--accent, #cb3208);
+  background: #fde8e1;
+  color: var(--accent, #cb3208);
+}
+
+.vnew-e215c-sep {
+  width: 20px;
+  height: 1px;
+  margin: 3px 0;
+  background: var(--line, #e5e7eb);
+}
+
+.vnew-e215c-tbtns {
+  display: flex;
+  gap: 1px;
+  margin-left: 3px;
+}
+
+.vnew-edit-tl:has(> .vnew-e215c-bar) .vnew-edit-label.is-video,
+.vnew-edit-tl:has(> .vnew-e215c-bar) .vnew-edit-label.is-audio {
+  flex-wrap: wrap;
+  gap: 2px;
+}
+
+.vnew-e215c-tbtn {
+  width: 18px;
+  height: 18px;
+  padding: 0;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  font-size: 10px;
+  line-height: 1;
+  opacity: 0.45;
+  cursor: pointer;
+}
+
+.vnew-e215c-tbtn[aria-pressed="true"] {
+  background: #fde8e1;
+  opacity: 1;
+}
+
+.vnew-edit-scroll.e215c-v-hidden .vnew-edit-track.is-video,
+.vnew-edit-scroll.e215c-a-hidden .vnew-edit-track.is-audio {
+  opacity: 0.35;
+}
+
+.vnew-edit-scroll.e215c-v-locked .vnew-edit-track.is-video {
+  background: repeating-linear-gradient(135deg, transparent 0 6px, rgba(0, 0, 0, 0.04) 6px 12px);
+}
+
+.vnew-edit-scroll.e215c-v-locked .vnew-edit-clip,
+.vnew-edit-scroll.e215c-v-locked .vnew-edit-edge {
+  cursor: not-allowed;
+}
+
+.vnew-edit-scroll.e215c-tool-razor .vnew-edit-clip {
+  cursor: crosshair;
+}
+
+.vnew-edit-scroll.e215c-tool-slip .vnew-edit-clip,
+.vnew-edit-scroll.e215c-tool-slide .vnew-edit-clip {
+  cursor: ew-resize;
+}
+
+.vnew-edit-scroll.e215c-tool-roll .vnew-edit-edge {
+  cursor: col-resize;
+}
+
+.vnew-e215c-gap {
+  position: absolute;
+  top: 4px;
+  bottom: 4px;
+  box-sizing: border-box;
+  border: 1px dashed #b6bcc6;
+  border-radius: 6px;
+  background: repeating-linear-gradient(135deg, transparent 0 5px, rgba(0, 0, 0, 0.05) 5px 10px);
+}
+
+.vnew-edit-clip.is-e215c-off,
+.vnew-edit-aclip.is-e215c-off {
+  opacity: 0.4;
+  filter: grayscale(1);
+}
+
+.vnew-edit-clip.is-e215c-rev .vnew-edit-clip-label {
+  font-style: italic;
+}
+
+.vnew-edit-aclip.is-e215c-unlinked {
+  outline: 1px dashed var(--accent, #cb3208);
+  outline-offset: -1px;
+  cursor: ew-resize;
+}
+
+.vnew-edit-clip.is-c-red { box-shadow: inset 0 3px 0 #e5484d; }
+.vnew-edit-clip.is-c-orange { box-shadow: inset 0 3px 0 #f76b15; }
+.vnew-edit-clip.is-c-yellow { box-shadow: inset 0 3px 0 #ffc53d; }
+.vnew-edit-clip.is-c-green { box-shadow: inset 0 3px 0 #30a46c; }
+.vnew-edit-clip.is-c-teal { box-shadow: inset 0 3px 0 #12a594; }
+.vnew-edit-clip.is-c-blue { box-shadow: inset 0 3px 0 #0090ff; }
+.vnew-edit-clip.is-c-violet { box-shadow: inset 0 3px 0 #6e56cf; }
+.vnew-edit-clip.is-c-pink { box-shadow: inset 0 3px 0 #d6409f; }
+.vnew-edit-clip.is-c-gray { box-shadow: inset 0 3px 0 #8b8d98; }
+
+.vnew-e215c-marker {
+  position: absolute;
+  top: 2px;
+  width: 9px;
+  height: 9px;
+  margin-left: -4px;
+  border-radius: 2px 2px 50% 50%;
+  background: #30a46c;
+  pointer-events: none;
+}
+
+.vnew-e215c-marker.is-c-red { background: #e5484d; }
+.vnew-e215c-marker.is-c-orange { background: #f76b15; }
+.vnew-e215c-marker.is-c-yellow { background: #ffc53d; }
+.vnew-e215c-marker.is-c-teal { background: #12a594; }
+.vnew-e215c-marker.is-c-blue { background: #0090ff; }
+.vnew-e215c-marker.is-c-violet { background: #6e56cf; }
+.vnew-e215c-marker.is-c-pink { background: #d6409f; }
+.vnew-e215c-marker.is-c-gray { background: #8b8d98; }
+
+.vnew-e215c-range {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  background: rgba(0, 144, 255, 0.18);
+  border-left: 2px solid #0090ff;
+  border-right: 2px solid #0090ff;
+  pointer-events: none;
+}
+
+.vnew-e215c-menu {
+  position: fixed;
+  z-index: 60;
+  display: flex;
+  flex-direction: column;
+  min-width: 200px;
+  padding: 4px;
+  border: 1px solid var(--line, #e5e7eb);
+  border-radius: 8px;
+  background: var(--surface, #ffffff);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.16);
+}
+
+.vnew-e215c-mitem {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 6px 10px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  font-size: 13px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.vnew-e215c-mitem:hover:not(:disabled) {
+  background: #f1f3f5;
+}
+
+.vnew-e215c-mitem:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
+.vnew-e215c-mitem.is-close {
+  color: var(--text-muted, #6b7280);
+}
+
+.vnew-e215c-mkey,
+.vnew-e215c-kbd {
+  color: var(--text-muted, #6b7280);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}
+
+.vnew-e215c-dialog {
+  position: fixed;
+  top: 12vh;
+  left: 50%;
+  z-index: 61;
+  width: min(520px, 92vw);
+  max-height: 76vh;
+  overflow-y: auto;
+  padding: 14px 16px;
+  border: 1px solid var(--line, #e5e7eb);
+  border-radius: 10px;
+  background: var(--surface, #ffffff);
+  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.2);
+  transform: translateX(-50%);
+}
+
+.vnew-e215c-dtitle {
+  margin: 0 0 10px;
+  font-size: 15px;
+}
+
+.vnew-e215c-field {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 6px 0;
+  font-size: 13px;
+}
+
+.vnew-e215c-flabel {
+  min-width: 84px;
+  color: var(--text-muted, #6b7280);
+}
+
+.vnew-e215c-dmsg {
+  min-height: 1em;
+  margin: 6px 0;
+  color: var(--danger, #b91c1c);
+  font-size: 13px;
+}
+
+.vnew-e215c-drow,
+.vnew-e215c-preset {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  justify-content: flex-end;
+}
+
+.vnew-e215c-preset {
+  justify-content: flex-start;
+  margin-bottom: 10px;
+}
+
+.vnew-e215c-pbtn {
+  padding: 4px 10px;
+  border: 1px solid var(--line, #e5e7eb);
+  border-radius: 999px;
+  background: transparent;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.vnew-e215c-pbtn.is-on {
+  border-color: var(--accent, #cb3208);
+  color: var(--accent, #cb3208);
+}
+
+.vnew-e215c-keys {
+  margin: 0;
+}
+
+.vnew-e215c-kgroup {
+  margin: 10px 0 4px;
+  font-weight: 600;
+  font-size: 13px;
+}
+
+.vnew-e215c-krow {
+  display: grid;
+  grid-template-columns: 170px minmax(0, 1fr);
+  gap: 8px;
+  margin: 0;
+  padding: 3px 0;
+  border-bottom: 1px solid #f1f3f5;
+  font-size: 13px;
+}
+
+.vnew-e215c-input {
+  min-width: 0;
+  padding: 3px 6px;
+  border: 1px solid var(--line, #e5e7eb);
+  border-radius: 6px;
+  font-size: 13px;
+}
+
+.vnew-e215c-ktext {
+  min-width: 0;
+}
+
+.vnew-e215c-mgo,
+.vnew-e215c-mdel {
+  padding: 3px 8px;
+  border: 1px solid var(--line, #e5e7eb);
+  border-radius: 6px;
+  background: transparent;
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  cursor: pointer;
+}
+
+.vnew-e215c-mrow {
+  display: grid;
+  grid-template-columns: 84px minmax(0, 1fr) 84px auto;
+  gap: 6px;
+  align-items: center;
+  margin: 4px 0;
+}
+
+@media (max-width: 768px) {
+  .vnew-edit-tl:has(> .vnew-e215c-bar) {
+    grid-template-columns: 30px 56px minmax(0, 1fr);
+  }
+
+  .vnew-e215c-tbtn {
+    width: 16px;
+  }
+  /* ==== 작업 215c 끝 ==== */
 }
