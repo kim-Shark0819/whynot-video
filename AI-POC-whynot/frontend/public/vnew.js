@@ -9678,6 +9678,7 @@
   }
 
   function soundAlive(ctx) {
+    if (ctx && ctx.inEdit) return editTxLrdAlive(ctx); // 작업 215b: ⑦ 안 대사 고치기 창
     return soundCtx === ctx && !!state.mounted && state.planStep === 6;
   }
 
@@ -10020,6 +10021,7 @@
 
   /* 반영 running 이면 SOUND_POLL_MS 뒤 GET — 작업 상태·반영 기록만 바꾼다(고치던 줄은 그대로). */
   function soundSchedule(ctx) {
+    if (ctx.inEdit) return editTxLrdPoll(ctx); // 작업 215b: ⑦ 안 대사 고치기 창
     if (ctx.timer) window.clearTimeout(ctx.timer);
     ctx.timer = 0;
     var lrdWas = lrdBusy(ctx.view); // 작업 212: 대사 영상 다시 만들기 진행 중이면 같은 GET 으로 함께 본다
@@ -10099,6 +10101,7 @@
   }
 
   function lrdReload(ctx, view) {
+    if (ctx.inEdit) return editTxLrdReload(ctx, view); // 작업 215b: ⑦ 안 대사 고치기 창
     ctx.view = view || {};
     ctx.saved = soundClone(ctx.view.lines);
     ctx.lines = soundClone(ctx.view.lines);
@@ -11494,6 +11497,8 @@
     // 작업 186: 대사 타이밍도 0 이 아닐 때만(소리 끈 클립도 받은 그대로 — 서버 _clean_slip 과 같다)
     var slip = editSlipOf(clip);
     if (slip) copy.audioSlip = slip;
+    editTxCloneFx(clip, copy); // 작업 215b: 블랙/화이트 전환 · 색 보정
+    edit215cCloneExtras(clip, copy); // 작업 215c: 빈틈·사용 안 함·역재생·게인·라벨 색(기본값이 아닐 때만)
     return copy;
   }
 
@@ -11681,6 +11686,7 @@
     var total = 0;
     var list = clips || [];
     list.forEach(function (clip, index) {
+      total += edit215cGapOf(clip); // 작업 215c: 앞 빈틈(gapBefore)
       starts.push(total);
       total += editClipLen(clip);
       if (index < list.length - 1) total -= editDissolveOf(clip);
@@ -11728,6 +11734,7 @@
     left.out = cut;
     right.in = cut;
     right.id = String(newId);
+    delete right.gapBefore; // 작업 215c: 빈틈은 앞 조각에만
     // 작업 182: 앞당김은 앞 조각(왼쪽 끝)에, 이어 감·다음 클립으로 가는 전환은 뒤 조각(오른쪽 끝)에 남는다. 새 경계는 컷.
     delete left.audioTail;
     delete left.transition;
@@ -11880,6 +11887,7 @@
 
   /* 실행 취소 스택(design §5.5): {undo, redo}. 하나 쌓으면 다시 실행 스택을 비운다. 100단계를 넘으면 오래된 것부터 버린다. */
   function editSnapshotOf(variant, clips) {
+    if (editCtx && editCtx.tx) return editTxSnapOf(editCtx, { variant: variant, clips: editCloneClips(clips) }); // 작업 215b: 자막 · 타이틀 · 페이드도
     return { variant: variant, clips: editCloneClips(clips) };
   }
 
@@ -12333,6 +12341,7 @@
     editTrClose(ctx); // 작업 182: 열린 전환 메뉴
     ctx.tighten = null; // 작업 186: 빈틈 다듬기 제안(받는 중이면 응답을 버린다)
     editFixStop(ctx); // 지시서 116: AI로 고치기 패널 조회 타이머·영상
+    editTxLeave(ctx); // 작업 215b: 메뉴 · 글 칸 · 대사 창 · 프리미어 조회
     editPause(ctx);
     if (ctx.mixAc && ctx.mixAc.close) {
       try {
@@ -12461,6 +12470,8 @@
     ctx.multi = []; // 작업 192
     ctx.anchor = -1;
     ctx.cutPlay = null; // 작업 190: 작업 188 고른 컷 재생 표시도 새 문서에서는 없다
+    editTxApply(ctx, view); // 작업 215b: 자막 · 타이틀 · 페이드(문서 → ctx.tx)
+    edit215cApplyView(ctx, view); // 작업 215c: 마커·트랙
   }
 
   /* 재료(그림체별 목록 + 원본 키별 정보). 두 그림체를 오가도 앞 그림체 재료 주소·길이를 남긴다(실행 취소로 돌아올 때). */
@@ -12587,6 +12598,1401 @@
     btn.setAttribute("aria-label", btn.title);
   }
 
+  /* ==== 작업 215c 시작 ==== */
+  /* 프리미어식 편집 도구·단축키(작업 215c). 새 값은 기본값이 아닐 때만 둔다(215c 전 문서·저장 바디 그대로):
+     클립 gapBefore(앞 빈틈 초)·disabled(사용 안 함)·reverse(역재생)·keepPitch(false 만)·gain(dB)·color(라벨)·unlinked(소리 연결 해제),
+     문서 markers [{id, t, name, color}]·tracks {v1|a1: {locked, hidden}}. 서버 규칙은 app/src/vnew/edit_tools.py 와 같다.
+     기존 함수에는 짧은 연결 줄만 넣었다(edit215c* 호출). 단축키는 두 묶음: "vnew"(⑦ 기본 — M 소리 끄기·Delete 지우고 당기기·
+     Shift+←/→ 1초를 그대로 둔다)와 "premiere"(Premiere Pro 그대로 — M 마커·Delete 들어내기·Shift+←/→ 5프레임). ? 창에서 고른다. */
+  var EDIT215C_GAP_MAX_S = 300;
+  var EDIT215C_GAIN_MIN = -24;
+  var EDIT215C_GAIN_MAX = 12;
+  var EDIT215C_REVERSE_MAX_S = 15;
+  var EDIT215C_COLORS = ["red", "orange", "yellow", "green", "teal", "blue", "violet", "pink", "gray"];
+  var EDIT215C_COLOR_NAMES = {
+    red: "빨강", orange: "주황", yellow: "노랑", green: "초록", teal: "청록", blue: "파랑", violet: "보라", pink: "분홍", gray: "회색"
+  };
+  var EDIT215C_SNAP_PX = 8;
+  var EDIT215C_PRESET_KEY = "vnew.edit.keys215c";
+  var EDIT215C_SNAP_KEY = "vnew.edit.snap215c";
+  var EDIT215C_HEIGHT_KEY = "vnew.edit.heights215c";
+  var EDIT215C_HEIGHTS = { v: [40, 56, 84], a: [28, 40, 64] };
+  var EDIT215C_LOCKED_NOTE = "영상 트랙이 잠겨 있습니다. 트랙 이름 칸의 🔒 를 눌러 풀어 주세요.";
+  var EDIT215C_TOOLS = [
+    { key: "select", icon: "↖", label: "선택 도구", keys: "V" },
+    { key: "razor", icon: "✂", label: "자르기 도구 — 클립을 누른 자리에서 자르기", keys: "C" },
+    { key: "ripple", icon: "⇤", label: "잔물결 편집 도구 — 끝을 끌면 뒤 클립이 함께 당겨지거나 밀립니다", keys: "B" },
+    { key: "roll", icon: "⇹", label: "롤링 편집 도구 — 두 클립 사이 편집점을 옮깁니다(전체 길이 그대로)", keys: "N" },
+    { key: "slip", icon: "⇆", label: "밀어넣기 도구 — 자리·길이는 그대로 두고 보이는 원본 구간을 옮깁니다", keys: "Y" },
+    { key: "slide", icon: "⇔", label: "밀기 도구 — 클립을 이웃 사이에서 옮깁니다(이웃 길이 합 그대로)", keys: "U" }
+  ];
+  /* 단축키 표(? 창). keys 가 글이면 두 묶음 같고, {vnew, premiere} 면 묶음마다 다르다. */
+  var EDIT215C_KEYMAP = [
+    ["도구", "V", "선택 도구"], ["도구", "C", "자르기 도구"], ["도구", "B", "잔물결 편집 도구"], ["도구", "N", "롤링 편집 도구"],
+    ["도구", "Y", "밀어넣기 도구"], ["도구", "U", "밀기 도구"],
+    ["재생", "Space", "재생 / 멈춤"], ["재생", "L", "앞으로 재생 — 다시 누르면 2× · 4×"],
+    ["재생", "J", "뒤로 재생(브라우저가 거꾸로 재생을 못 하면 화면을 뒤로 넘깁니다) — 다시 누르면 2× · 4×"], ["재생", "K", "멈춤"],
+    ["재생", "K+J / K+L", "K 를 누른 채로 한 프레임 뒤 / 앞"], ["재생", "← / →", "한 프레임 뒤 / 앞"],
+    ["재생", { vnew: "Alt+← / Alt+→", premiere: "Shift+← / Shift+→" }, "5프레임 뒤 / 앞"],
+    ["재생", { vnew: "Shift+← / Shift+→", premiere: "" }, "1초 뒤 / 앞"],
+    ["재생", "↑ / ↓", "앞 / 다음 편집점으로"], ["재생", "Home / End", "처음 / 끝으로"],
+    ["편집", "S / Ctrl+B", "재생헤드에서 자르기"],
+    ["편집", { vnew: "Alt+Delete", premiere: "Delete" }, "들어내기(고른 클립을 빼고 빈틈을 남김)"],
+    ["편집", { vnew: "Delete · Shift+Delete", premiere: "Shift+Delete" }, "지우고 당기기(뒤 클립이 당겨짐)"],
+    ["편집", "Shift+E", "클립 사용 / 사용 안 함"], ["편집", "Ctrl+R", "속도·지속 시간(역재생 · 음높이 유지)"],
+    ["편집", "Ctrl+Alt+C / Ctrl+Alt+V", "속성 복사 / 붙여넣기(라벨 색 · 속도 · 게인)"],
+    ["편집", { vnew: "M", premiere: "" }, "고른 클립 소리 끄기"], ["편집", "Ctrl+Z / Ctrl+Shift+Z", "실행 취소 / 다시 실행"],
+    ["편집", "[ ] / Shift+[ ]", "고른 클립 끝 / 시작 한 프레임 다듬기"],
+    ["표시", "I / O", "시작 표시 / 끝 표시"], ["표시", "X", "재생헤드 아래 클립을 표시"],
+    ["표시", ";", "표시 구간 들어내기(빈틈 남김)"], ["표시", "'", "표시 구간 뽑아내기(뒤가 당겨짐)"],
+    ["표시", { vnew: "Alt+M", premiere: "M" }, "마커 추가"], ["표시", "Shift+M / Ctrl+Shift+M", "다음 / 앞 마커로"],
+    ["타임라인", "= / -", "확대 / 축소"], ["타임라인", "Alt+휠", "확대 / 축소"], ["타임라인", "\\", "시퀀스 전체 맞추기"],
+    ["타임라인", "?", "이 단축키 표"], ["타임라인", "Esc", "메뉴 · 창 닫기"]
+  ];
+  var edit215cRate = 1; // J/K/L 셔틀 배속(editSetRate 가 클립 속도에 곱한다, 평소 1)
+
+  function edit215cGapOf(clip) {
+    var g = Number((clip || {}).gapBefore);
+    return isFinite(g) && g > 0 ? Math.min(editRound3(g), EDIT215C_GAP_MAX_S) : 0;
+  }
+
+  function edit215cGainOf(clip) {
+    var g = Number((clip || {}).gain);
+    return isFinite(g) && g >= EDIT215C_GAIN_MIN && g <= EDIT215C_GAIN_MAX ? Math.round(g * 2) / 2 : 0;
+  }
+
+  /* editCloneClip 연결: 215c 값을 기본값이 아닐 때만 사본에 옮긴다. */
+  function edit215cCloneExtras(clip, copy) {
+    var gap = edit215cGapOf(clip);
+    if (gap) copy.gapBefore = gap;
+    if (clip.disabled === true) copy.disabled = true;
+    if (clip.reverse === true) copy.reverse = true;
+    if (clip.keepPitch === false) copy.keepPitch = false;
+    var gain = edit215cGainOf(clip);
+    if (gain) copy.gain = gain;
+    if (EDIT215C_COLORS.indexOf(clip.labelColor) >= 0) copy.labelColor = clip.labelColor;
+    if (clip.unlinked === true) copy.unlinked = true;
+  }
+
+  /* 클립마다 {start, end}(타임라인 초, 빈틈·디졸브 반영 — editStarts). */
+  function edit215cLayout(clips) {
+    var info = editStarts(clips);
+    return (clips || []).map(function (clip, i) {
+      return { clip: clip, start: info.starts[i], end: info.starts[i] + editClipLen(clip) };
+    });
+  }
+
+  /* 편집점(클립 시작·끝, 0·전체 길이). 정렬, 같은 값은 하나. */
+  function edit215cEditPoints(clips) {
+    var seen = {};
+    var out = [];
+    var pts = [0, editStarts(clips).total];
+    edit215cLayout(clips).forEach(function (it) {
+      pts.push(it.start, it.end);
+    });
+    pts.forEach(function (t) {
+      var k = editRound3(t);
+      if (!seen[k]) {
+        seen[k] = true;
+        out.push(k);
+      }
+    });
+    return out.sort(function (a, b) { return a - b; });
+  }
+
+  /* 스냅: on 이면 points 중 EDIT215C_SNAP_PX 화면 px 안의 가장 가까운 점, 아니면 t 그대로. */
+  function edit215cSnapTo(t, points, pps, on) {
+    if (!on || !(pps > 0)) return t;
+    var best = t;
+    var dist = EDIT215C_SNAP_PX / pps;
+    (points || []).forEach(function (p) {
+      if (Math.abs(p - t) <= dist) {
+        dist = Math.abs(p - t);
+        best = p;
+      }
+    });
+    return best;
+  }
+
+  /* 자리(pieces [{clip, start}], 타임라인 순서)에서 빈틈을 다시 센 클립 목록. 겹치면(디졸브 말고) null. */
+  function edit215cPack(pieces) {
+    var out = [];
+    var prevEnd = 0;
+    for (var i = 0; i < pieces.length; i++) {
+      var clip = editCloneClip(pieces[i].clip);
+      delete clip.gapBefore;
+      var overlap = i > 0 ? editDissolveOf(out[i - 1]) : 0;
+      var gap = editRound3(pieces[i].start - (prevEnd - overlap));
+      if (gap < -0.0015) return null;
+      if (gap > 0.0005) clip.gapBefore = gap;
+      out.push(clip);
+      prevEnd = pieces[i].start + editClipLen(clip);
+    }
+    return out;
+  }
+
+  /* 들어내기(Lift): 고른 클립을 빼고 그 자리를 빈틈으로 남긴다(뒤 클립 자리 그대로). 뺀 클립으로 가던 전환은 지운다. */
+  function edit215cLift(clips, indexes) {
+    var drop = {};
+    (indexes || []).forEach(function (i) { drop[i] = true; });
+    var pieces = [];
+    edit215cLayout(clips).forEach(function (it, i) {
+      if (drop[i]) return;
+      var clip = it.clip;
+      if (drop[i + 1] && editDissolveOf(clip)) {
+        clip = editCloneClip(clip);
+        delete clip.transition;
+        delete clip.audioTail;
+      }
+      pieces.push({ clip: clip, start: it.start });
+    });
+    return edit215cPack(pieces);
+  }
+
+  /* 지우고 당기기(Ripple Delete): 고른 클립을 빼고 뒤를 당긴다. 뺀 클립 앞에 있던 빈틈은 남는다(Premiere 와 같다). */
+  function edit215cRippleDelete(clips, indexes) {
+    var drop = {};
+    (indexes || []).forEach(function (i) { drop[i] = true; });
+    var out = [];
+    var carry = 0;
+    (clips || []).forEach(function (clip, i) {
+      if (drop[i]) {
+        carry += edit215cGapOf(clip);
+        if (out.length && editDissolveOf(out[out.length - 1])) delete out[out.length - 1].transition;
+        return;
+      }
+      var copy = editCloneClip(clip);
+      var gap = editRound3(edit215cGapOf(clip) + carry);
+      carry = 0;
+      if (gap > 0.0005) copy.gapBefore = gap;
+      out.push(copy);
+    });
+    return out;
+  }
+
+  /* 빈틈 지우기: index 클립 앞 빈틈을 없애 뒤를 당긴다. */
+  function edit215cCloseGap(clips, index) {
+    if (!clips[index] || !edit215cGapOf(clips[index])) return null;
+    var next = clips.slice();
+    next[index] = editCloneClip(clips[index]);
+    delete next[index].gapBefore;
+    return next;
+  }
+
+  /* 표시 구간 [tin, tout] 들어내기(extract false — 빈틈 남김) · 뽑아내기(extract true — 뒤가 당겨짐). 걸친 클립은 나눈다(새 id 는 makeId()).
+     구간에 닿은 경계의 전환·J/L 은 지운다. 바뀐 것이 없으면 null. */
+  function edit215cRange(clips, tin, tout, extract, makeId, fps, minLen) {
+    var a = Math.max(0, Math.min(Number(tin), Number(tout)));
+    var b = Math.max(Number(tin), Number(tout));
+    if (!(b - a > 1e-3)) return null;
+    var cut = b - a;
+    var f = Number(fps) > 0 ? Number(fps) : EDIT_DEFAULT_FPS;
+    var min = Math.max(Number(minLen) || EDIT_MIN_CLIP_S, 1 / f) - 1e-6;
+    var lay = edit215cLayout(clips);
+    var pieces = [];
+    var changed = false;
+    lay.forEach(function (it, i) {
+      var c = it.clip;
+      var sp = editSpeedOf(c);
+      var touched = it.end > a + 1e-6 && it.start < b - 1e-6;
+      if (!touched) {
+        var keep = c;
+        var after = lay[i + 1];
+        if (after && after.end > a + 1e-6 && after.start < b - 1e-6 && (editDissolveOf(c) || editShiftOf(c, "audioTail"))) {
+          keep = editCloneClip(c);
+          delete keep.transition;
+          delete keep.audioTail;
+        }
+        pieces.push({ clip: keep, start: extract && it.start >= b - 1e-6 ? it.start - cut : it.start });
+        return;
+      }
+      changed = true;
+      if (it.start < a - 1e-6) {
+        var left = editCloneClip(c);
+        left.out = editSnap(Number(c.in) + (a - it.start) * sp, f);
+        delete left.transition;
+        delete left.audioTail;
+        if (editSourceLen(left) >= min * sp) pieces.push({ clip: left, start: it.start });
+      }
+      if (it.end > b + 1e-6) {
+        var right = editCloneClip(c);
+        right.in = editSnap(Number(c.in) + (b - it.start) * sp, f);
+        delete right.audioLead;
+        delete right.gapBefore;
+        if (it.start < a - 1e-6) right.id = String(makeId());
+        if (editSourceLen(right) >= min * sp) pieces.push({ clip: right, start: extract ? a : b });
+      }
+    });
+    if (!changed && !extract) return null;
+    if (extract) {
+      // 뽑아내기: 구간 안 빈틈도 줄인다(자리를 다시 셌으므로 pack 이 맞춘다)
+      changed = changed || lay.some(function (it) { return it.start - edit215cGapOf(it.clip) < b - 1e-6 && it.start > a + 1e-6; });
+      if (!changed) return null;
+    }
+    return edit215cPack(pieces);
+  }
+
+  /* 롤링 편집: index 와 index+1 사이 편집점을 dt(타임라인 초)만큼. 앞 클립 out·뒤 클립 in(뒤에 빈틈이 있으면 빈틈)이 함께 바뀌고
+     전체 길이는 그대로. durL 은 앞 클립 원본 길이(모르면 늘리지 않는다). 못 옮기면 null. */
+  function edit215cRoll(clips, index, dt, durL, fps, minLen) {
+    var a = clips[index];
+    var b = clips[index + 1];
+    if (!a || !b) return null;
+    var f = Number(fps) > 0 ? Number(fps) : EDIT_DEFAULT_FPS;
+    var min = Math.max(Number(minLen) || EDIT_MIN_CLIP_S, 1 / f);
+    var sa = editSpeedOf(a);
+    var sb = editSpeedOf(b);
+    var gap = edit215cGapOf(b);
+    var lo = (Number(a.in) + min * sa - Number(a.out)) / sa;
+    var hi = Number(durL) > 0 ? (Number(durL) - Number(a.out)) / sa : 0;
+    if (gap) {
+      hi = Math.min(hi, gap);
+    } else {
+      lo = Math.max(lo, -Number(b.in) / sb);
+      hi = Math.min(hi, (Number(b.out) - min * sb - Number(b.in)) / sb);
+    }
+    var d = Math.round(Number(dt) * f) / f;
+    d = Math.max(lo, Math.min(hi, d));
+    if (!isFinite(d) || lo > hi + 1e-9 || Math.abs(d) < 1e-6) return null;
+    var next = clips.slice();
+    var na = editCloneClip(a);
+    var nb = editCloneClip(b);
+    na.out = editRound3(Number(a.out) + d * sa);
+    if (gap) {
+      var g = editRound3(gap - d);
+      if (g > 0.0005) nb.gapBefore = g;
+      else delete nb.gapBefore;
+    } else {
+      nb.in = editRound3(Number(b.in) + d * sb);
+    }
+    next[index] = na;
+    next[index + 1] = nb;
+    return next;
+  }
+
+  /* 밀기(Slide): index 클립을 dt 만큼 옮긴다. 클립 in/out 그대로, 앞 이웃 out(또는 앞 빈틈)과 뒤 이웃 in(또는 뒤 빈틈)이 바뀌어
+     이웃 길이 합·전체 길이가 그대로. 뒤 이웃이 없거나 앞 이웃·빈틈이 없으면 null. durPrev 는 앞 이웃 원본 길이. */
+  function edit215cSlide(clips, index, dt, durPrev, fps, minLen) {
+    var c = clips[index];
+    var p = clips[index - 1];
+    var n = clips[index + 1];
+    if (!c || !n) return null;
+    var gapC = edit215cGapOf(c);
+    var gapN = edit215cGapOf(n);
+    if (!gapC && !p) return null;
+    var f = Number(fps) > 0 ? Number(fps) : EDIT_DEFAULT_FPS;
+    var min = Math.max(Number(minLen) || EDIT_MIN_CLIP_S, 1 / f);
+    var lo = -Infinity;
+    var hi = Infinity;
+    var sp = p ? editSpeedOf(p) : 1;
+    var sn = editSpeedOf(n);
+    if (gapC) {
+      lo = -gapC;
+    } else {
+      lo = (Number(p.in) + min * sp - Number(p.out)) / sp;
+      hi = Number(durPrev) > 0 ? (Number(durPrev) - Number(p.out)) / sp : 0;
+    }
+    if (gapN) {
+      hi = Math.min(hi, gapN);
+    } else {
+      hi = Math.min(hi, (Number(n.out) - min * sn - Number(n.in)) / sn);
+      lo = Math.max(lo, -Number(n.in) / sn);
+    }
+    var d = Math.round(Number(dt) * f) / f;
+    d = Math.max(lo, Math.min(hi, d));
+    if (!isFinite(d) || lo > hi + 1e-9 || Math.abs(d) < 1e-6) return null;
+    var next = clips.slice();
+    if (gapC) {
+      next[index] = editCloneClip(c);
+      var g1 = editRound3(gapC + d);
+      if (g1 > 0.0005) next[index].gapBefore = g1;
+      else delete next[index].gapBefore;
+    } else {
+      next[index - 1] = editCloneClip(p);
+      next[index - 1].out = editRound3(Number(p.out) + d * sp);
+    }
+    next[index + 1] = editCloneClip(n);
+    if (gapN) {
+      var g2 = editRound3(gapN - d);
+      if (g2 > 0.0005) next[index + 1].gapBefore = g2;
+      else delete next[index + 1].gapBefore;
+    } else {
+      next[index + 1].in = editRound3(Number(n.in) + d * sn);
+    }
+    return next;
+  }
+
+  /* 밀어넣기(Slip): 자리·길이 그대로, in/out 을 함께 옮긴다. 오른쪽으로 끌면(dt > 0) 앞 원본이 보인다. dur 은 원본 길이(모르면 늘리지 않는다). */
+  function edit215cSlip(clip, dt, dur, fps) {
+    var f = Number(fps) > 0 ? Number(fps) : EDIT_DEFAULT_FPS;
+    var ds = Math.round(-Number(dt) * editSpeedOf(clip) * f) / f;
+    var lo = -Number(clip.in);
+    var hi = Number(dur) > 0 ? Number(dur) - Number(clip.out) : 0;
+    ds = Math.max(lo, Math.min(hi, ds));
+    if (!isFinite(ds) || Math.abs(ds) < 1e-6) return null;
+    var next = editCloneClip(clip);
+    next.in = editRound3(Number(clip.in) + ds);
+    next.out = editRound3(Number(clip.out) + ds);
+    return next;
+  }
+
+  /* 속도·지속 시간 창 적용: 속도(EDIT_SPEEDS)·역재생·음높이 유지. 반환 {clip} 또는 {error: 한국어 문구}. */
+  function edit215cSpeedApply(clip, speed, reverse, keepPitch, minLen) {
+    var next = editSetSpeed(clip, speed, minLen);
+    if (!next) return { error: "이 속도로는 클립이 너무 짧아집니다." };
+    if (reverse && editSourceLen(clip) > EDIT215C_REVERSE_MAX_S + 1e-6) {
+      return { error: "역재생은 원본 구간 " + EDIT215C_REVERSE_MAX_S + "초 이하 클립만 됩니다(지금 " + editSourceLen(clip).toFixed(2) +
+        "초). 클립을 나누거나 줄여 주세요." };
+    }
+    if (reverse) next.reverse = true;
+    else delete next.reverse;
+    if (keepPitch === false) next.keepPitch = false;
+    else delete next.keepPitch;
+    return { clip: next };
+  }
+
+  /* 속성 복사·붙여넣기(라벨 색·속도·게인). 붙이면 속도가 너무 짧아지는 클립은 속도만 그대로. */
+  function edit215cCopyAttrs(clip) {
+    return { color: EDIT215C_COLORS.indexOf(clip.labelColor) >= 0 ? clip.labelColor : "", speed: editSpeedOf(clip), gain: edit215cGainOf(clip) };
+  }
+
+  function edit215cPasteAttrs(clip, attrs, minLen) {
+    var next = editSetSpeed(clip, attrs.speed, minLen) || editCloneClip(clip);
+    if (attrs.color) next.labelColor = attrs.color;
+    else delete next.labelColor;
+    if (attrs.gain) next.gain = attrs.gain;
+    else delete next.gain;
+    return next;
+  }
+
+  /* 순수 단축키 표(editKeyAction 앞에서 본다). "" 이면 ⑦ 기존 단축키가 처리한다. */
+  function edit215cKeyAction(key, code, mod, shift, alt, preset) {
+    var k = String(key || "");
+    var c = String(code || "");
+    var pr = preset === "premiere";
+    function is(letter) {
+      return c === "Key" + letter || k === letter || k === letter.toLowerCase();
+    }
+    if (mod) {
+      if (alt && is("C")) return "copyAttrs";
+      if (alt && is("V")) return "pasteAttrs";
+      if (!alt && !shift && is("R")) return "speedDialog";
+      if (shift && !alt && is("M")) return "prevMarker";
+      return "";
+    }
+    if (alt) {
+      if (is("M")) return "marker";
+      if (k === "ArrowLeft") return "step5Back";
+      if (k === "ArrowRight") return "step5Fwd";
+      if (k === "Delete" || k === "Backspace") return "lift";
+      return "";
+    }
+    if (k === "?" || (shift && c === "Slash")) return "keymap";
+    if (k === "Delete" || k === "Backspace") return shift ? "rippleDelete" : pr ? "lift" : "";
+    if (k === "ArrowLeft" || k === "ArrowRight") return shift && pr ? (k === "ArrowLeft" ? "step5Back" : "step5Fwd") : "";
+    if (k === "ArrowUp") return "prevEdit";
+    if (k === "ArrowDown") return "nextEdit";
+    if (c === "Backslash" || k === "\\") return "fit";
+    if (c === "Semicolon" || k === ";") return "liftRange";
+    if (c === "Quote" || k === "'") return "extractRange";
+    if (is("M")) return shift ? "nextMarker" : pr ? "marker" : "";
+    if (is("E")) return shift ? "toggleEnable" : "";
+    if (shift) return "";
+    var tools = { V: "select", C: "razor", B: "ripple", N: "roll", Y: "slip", U: "slide" };
+    for (var letter in tools) {
+      if (Object.prototype.hasOwnProperty.call(tools, letter) && is(letter)) return "tool:" + tools[letter];
+    }
+    var plain = { I: "markIn", O: "markOut", X: "markClip", J: "shuttleJ", K: "shuttleK", L: "shuttleL" };
+    for (var name in plain) {
+      if (Object.prototype.hasOwnProperty.call(plain, name) && is(name)) return plain[name];
+    }
+    return "";
+  }
+
+  function edit215cLoad(key, fallback) {
+    try {
+      var v = window.localStorage.getItem(key);
+      return v === null || v === undefined ? fallback : String(v);
+    } catch (error) {
+      return fallback;
+    }
+  }
+
+  function edit215cStore(key, value) {
+    try {
+      window.localStorage.setItem(key, String(value));
+    } catch (error) {
+      /* 저장소를 못 쓰면 이번 화면에서만 */
+    }
+  }
+
+  function edit215cState(ctx) {
+    if (!ctx.e215) {
+      var heights = edit215cLoad(EDIT215C_HEIGHT_KEY, "1,1").split(",").map(Number);
+      ctx.e215 = {
+        tool: "select", snap: edit215cLoad(EDIT215C_SNAP_KEY, "1") !== "0",
+        preset: edit215cLoad(EDIT215C_PRESET_KEY, "vnew") === "premiere" ? "premiere" : "vnew",
+        markIn: null, markOut: null, markers: [], tracks: {}, kDown: false, rev: 0, revTimer: 0, attrs: null,
+        menu: null, panel: null, toolBtns: {}, markEls: [],
+        heights: [heights[0] >= 0 && heights[0] <= 2 ? heights[0] : 1, heights[1] >= 0 && heights[1] <= 2 ? heights[1] : 1]
+      };
+    }
+    return ctx.e215;
+  }
+
+  function edit215cCleanMarkers(list) {
+    return (Array.isArray(list) ? list : []).filter(function (m) {
+      return m && typeof m.id === "string" && isFinite(Number(m.t));
+    }).map(function (m) {
+      return { id: m.id, t: editRound3(Number(m.t)), name: typeof m.name === "string" ? m.name : "",
+               color: EDIT215C_COLORS.indexOf(m.color) >= 0 ? m.color : "green" };
+    }).sort(function (a, b) { return a.t - b.t; });
+  }
+
+  function edit215cCleanTracks(raw) {
+    var out = {};
+    ["v1", "a1"].forEach(function (key) {
+      var t = raw && typeof raw === "object" ? raw[key] : null;
+      var flags = {};
+      if (t && t.locked === true) flags.locked = true;
+      if (t && t.hidden === true) flags.hidden = true;
+      if (flags.locked || flags.hidden) out[key] = flags;
+    });
+    return out;
+  }
+
+  /* editApplyView 연결: 문서의 마커·트랙을 받는다(그림체마다 따로). 표시 구간은 지운다. */
+  function edit215cApplyView(ctx, view) {
+    var s = edit215cState(ctx);
+    var doc = (view && view.doc) || {};
+    s.markers = edit215cCleanMarkers(doc.markers);
+    s.tracks = edit215cCleanTracks(doc.tracks);
+    s.markIn = null;
+    s.markOut = null;
+  }
+
+  /* editFlushSave 연결: 마커·트랙이 있을 때만 PUT 바디에 더한다. */
+  function edit215cBody(ctx, body) {
+    var s = ctx && ctx.e215;
+    if (s && s.markers.length) body.markers = edit215cCleanMarkers(s.markers);
+    if (s && Object.keys(s.tracks).length) body.tracks = edit215cCleanTracks(s.tracks);
+    return body;
+  }
+
+  function edit215cSnapExtras(ctx, snap) {
+    var s = ctx && ctx.e215;
+    if (!s || !snap || snap.e215) return;
+    snap.e215 = { markers: edit215cCleanMarkers(s.markers), tracks: edit215cCleanTracks(s.tracks) };
+  }
+
+  function edit215cRestore(ctx, snap) {
+    var s = ctx && ctx.e215;
+    if (!s || !snap || !snap.e215) return;
+    s.markers = edit215cCleanMarkers(snap.e215.markers);
+    s.tracks = edit215cCleanTracks(snap.e215.tracks);
+    edit215cPaintTracks(ctx);
+  }
+
+  /* editCommit 연결: 빈틈 바로 앞 디졸브가 빈틈의 45% 를 넘으면 컷으로(서버 check_rules), 쌓은 상태에 마커·트랙을 함께 둔다. */
+  function edit215cOnCommit(ctx) {
+    var list = ctx.clips;
+    for (var i = 0; i + 1 < list.length; i++) {
+      var gap = edit215cGapOf(list[i + 1]);
+      if (gap && editDissolveOf(list[i]) > EDIT_DISSOLVE_SHARE * gap + 1e-9) {
+        list[i] = editCloneClip(list[i]);
+        delete list[i].transition;
+      }
+    }
+    edit215cSnapExtras(ctx, ctx.hist.undo[ctx.hist.undo.length - 1]);
+  }
+
+  /* 마커·트랙만 바꾸는 변경(실행 취소 한 단계). */
+  function edit215cCommitMeta(ctx, markers, tracks) {
+    var s = edit215cState(ctx);
+    var before = editSnapshotOf(ctx.variant, ctx.clips);
+    edit215cSnapExtras(ctx, before);
+    s.markers = edit215cCleanMarkers(markers);
+    s.tracks = edit215cCleanTracks(tracks);
+    editCommit(ctx, editCloneClips(ctx.clips), { before: before });
+    edit215cPaintTracks(ctx);
+  }
+
+  function edit215cLocked(ctx) {
+    var s = ctx.e215;
+    return !!(s && s.tracks.v1 && s.tracks.v1.locked);
+  }
+
+  /* editDo 연결: 영상 트랙이 잠겼으면 바꾸는 단축키·버튼을 막는다. */
+  function edit215cBlocked(ctx, action) {
+    var edits = ["split", "delete", "mute", "reset", "inEarlier", "inLater", "outEarlier", "outLater", "rippleDelete", "lift",
+      "liftRange", "extractRange", "toggleEnable", "pasteAttrs", "speedDialog"];
+    if (!edit215cLocked(ctx) || edits.indexOf(action) < 0) return false;
+    editNote(ctx, EDIT215C_LOCKED_NOTE);
+    return true;
+  }
+
+  function edit215cSel(ctx) {
+    var many = editSelIndexes(ctx);
+    return many.length ? many : ctx.sel >= 0 && ctx.sel < ctx.clips.length ? [ctx.sel] : [];
+  }
+
+  function edit215cMakeId(ctx) {
+    var used = ctx.clips.slice();
+    return function () {
+      var id = editNewId(used);
+      used.push({ id: id });
+      return id;
+    };
+  }
+
+  function edit215cSnapPoints(ctx) {
+    var s = edit215cState(ctx);
+    var pts = edit215cEditPoints(ctx.clips).concat([ctx.t]);
+    s.markers.forEach(function (m) { pts.push(m.t); });
+    if (s.markIn !== null) pts.push(s.markIn);
+    if (s.markOut !== null) pts.push(s.markOut);
+    return pts;
+  }
+
+  /* 단축키 실행(edit215cKeyAction 결과·도구줄·메뉴). */
+  function edit215cDo(ctx, action) {
+    if (!editAlive(ctx) || ctx.busy) return;
+    var s = edit215cState(ctx);
+    if (edit215cBlocked(ctx, action)) return;
+    var fps = EDIT_DEFAULT_FPS;
+    var here = editLocate(ctx.clips, ctx.t);
+    if (here) fps = editFpsOf(ctx, here.clip);
+    var sel = edit215cSel(ctx);
+    var next;
+    if (action.indexOf("tool:") === 0) {
+      edit215cSetTool(ctx, action.slice(5));
+    } else if (action === "keymap") {
+      edit215cKeymapPanel(ctx);
+    } else if (action === "lift" || action === "rippleDelete") {
+      if (!sel.length) return editNote(ctx, "먼저 클립을 골라 주세요.");
+      next = action === "lift" ? edit215cLift(ctx.clips, sel) : edit215cRippleDelete(ctx.clips, sel);
+      if (next) editCommit(ctx, next, { sel: -1 });
+    } else if (action === "markIn" || action === "markOut") {
+      s[action] = editRound3(ctx.t);
+      edit215cRenderMarks(ctx);
+    } else if (action === "markClip") {
+      var lay = here ? edit215cLayout(ctx.clips)[here.index] : null;
+      if (!lay) return;
+      s.markIn = editRound3(lay.start);
+      s.markOut = editRound3(lay.end);
+      edit215cRenderMarks(ctx);
+    } else if (action === "liftRange" || action === "extractRange") {
+      if (s.markIn === null || s.markOut === null) return editNote(ctx, "I 로 시작, O 로 끝을 먼저 표시해 주세요(X 는 재생헤드 아래 클립).");
+      if (ctx.clips.length + 1 > editLimit(ctx, "maxClips", 200)) return editNote(ctx, "클립 수 한도 때문에 나눌 수 없습니다.");
+      next = edit215cRange(ctx.clips, s.markIn, s.markOut, action === "extractRange", edit215cMakeId(ctx), fps, editMinLen(ctx));
+      if (!next) return editNote(ctx, "표시 구간에 클립이 없습니다.");
+      if (action === "extractRange") ctx.t = Math.min(s.markIn, s.markOut);
+      s.markIn = null;
+      s.markOut = null;
+      editCommit(ctx, next, { sel: -1 });
+    } else if (action === "shuttleL" || action === "shuttleJ" || action === "shuttleK") {
+      edit215cShuttle(ctx, action);
+    } else if (action === "step5Back" || action === "step5Fwd") {
+      editStep(ctx, action === "step5Back" ? -1 : 1, 5 / fps);
+    } else if (action === "prevEdit" || action === "nextEdit") {
+      var pts = edit215cEditPoints(ctx.clips);
+      var t = ctx.t;
+      var target = action === "nextEdit"
+        ? pts.filter(function (p) { return p > t + 1e-3; })[0]
+        : pts.filter(function (p) { return p < t - 1e-3; }).pop();
+      editPause(ctx);
+      if (target !== undefined) editSeek(ctx, target);
+    } else if (action === "fit") {
+      var sc = ctx.dom.scroller;
+      editSetZoom(ctx, editFitPps(editStarts(ctx.clips).total, sc ? sc.clientWidth : 0));
+    } else if (action === "marker") {
+      var markers = s.markers.concat([{ id: "k" + editNewId(s.markers), t: editRound3(ctx.t), name: "마커 " + (s.markers.length + 1),
+                                        color: "green" }]);
+      edit215cCommitMeta(ctx, markers, s.tracks);
+      editNote(ctx, "마커를 넣었습니다. 🔖 마커 목록에서 이름·색을 바꿉니다.");
+    } else if (action === "nextMarker" || action === "prevMarker") {
+      var now = ctx.t;
+      var list = s.markers.map(function (m) { return m.t; });
+      var to = action === "nextMarker" ? list.filter(function (x) { return x > now + 1e-3; })[0]
+        : list.filter(function (x) { return x < now - 1e-3; }).pop();
+      if (to === undefined) return editNote(ctx, "그쪽에 마커가 없습니다.");
+      editPause(ctx);
+      editSeek(ctx, to);
+    } else if (action === "toggleEnable") {
+      if (!sel.length) return editNote(ctx, "먼저 클립을 골라 주세요.");
+      next = editCloneClips(ctx.clips);
+      var off = !(next[sel[0]].disabled === true);
+      sel.forEach(function (i) {
+        if (off) next[i].disabled = true;
+        else delete next[i].disabled;
+      });
+      editCommit(ctx, next, {});
+    } else if (action === "copyAttrs") {
+      if (!sel.length) return editNote(ctx, "먼저 클립을 골라 주세요.");
+      s.attrs = edit215cCopyAttrs(ctx.clips[sel[0]]);
+      editNote(ctx, "속성(라벨 색 · 속도 · 게인)을 복사했습니다.");
+    } else if (action === "pasteAttrs") {
+      if (!s.attrs || !sel.length) return editNote(ctx, s.attrs ? "먼저 클립을 골라 주세요." : "먼저 속성을 복사해 주세요(Ctrl+Alt+C).");
+      next = editCloneClips(ctx.clips);
+      sel.forEach(function (i) {
+        next[i] = edit215cPasteAttrs(next[i], s.attrs, editMinSource(editMinLen(ctx), s.attrs.speed));
+      });
+      editCommit(ctx, next, {});
+    } else if (action === "speedDialog") {
+      if (sel.length !== 1) return editNote(ctx, "클립 하나를 골라 주세요.");
+      edit215cSpeedDialog(ctx, sel[0]);
+    }
+  }
+
+  /* J/K/L 셔틀. L: 앞으로 1× → 2× → 4×. J: 뒤로(화면을 0.1초마다 넘긴다 — 브라우저 <video> 는 거꾸로 재생을 거의 못 한다) 1× → 2× → 4×.
+     K: 멈춤. K 를 누른 채 J/L = 한 프레임 뒤/앞. */
+  function edit215cShuttle(ctx, action) {
+    var s = edit215cState(ctx);
+    if (action === "shuttleK") {
+      s.kDown = true;
+      editPause(ctx);
+      return;
+    }
+    if (s.kDown) {
+      editStep(ctx, action === "shuttleL" ? 1 : -1, 0);
+      return;
+    }
+    if (action === "shuttleL") {
+      var rate = ctx.playing && !s.rev ? Math.min(4, edit215cRate * 2) : 1;
+      if (s.rev) editPause(ctx);
+      edit215cRate = rate;
+      if (!ctx.playing) editPlay(ctx);
+      else if (ctx.vids[ctx.cur] && ctx.clips[ctx.curIndex]) editSetRate(ctx.vids[ctx.cur], ctx.clips[ctx.curIndex]);
+      edit215cRate = rate; // editPlay 안의 멈춤 연결이 1 로 되돌렸어도
+      editNote(ctx, "앞으로 재생 " + rate + "×");
+      return;
+    }
+    var back = s.rev ? Math.min(4, s.rev * 2) : 1;
+    editPause(ctx);
+    s.rev = back;
+    editNote(ctx, "뒤로 재생 " + back + "×");
+    var step = function () {
+      s.revTimer = 0;
+      if (!s.rev || !editAlive(ctx)) return;
+      editSeek(ctx, ctx.t - 0.1 * s.rev);
+      if (ctx.t <= 1e-6) {
+        s.rev = 0;
+        return;
+      }
+      s.revTimer = window.setTimeout(step, 100);
+    };
+    step();
+  }
+
+  /* editPause 연결: 셔틀 배속·뒤로 재생을 끝낸다. */
+  function edit215cShuttleStop(ctx) {
+    edit215cRate = 1;
+    var s = ctx && ctx.e215;
+    if (!s) return;
+    s.rev = 0;
+    if (s.revTimer) window.clearTimeout(s.revTimer);
+    s.revTimer = 0;
+  }
+
+  function edit215cKeyUp(ctx, event) {
+    if (!editAlive(ctx)) {
+      document.removeEventListener("keyup", ctx.e215KeyUp);
+      return;
+    }
+    if (event && (event.code === "KeyK" || event.key === "k" || event.key === "K") && ctx.e215) ctx.e215.kDown = false;
+  }
+
+  /* editOnKey 연결(기존 단축키보다 먼저). 처리했으면 true. 메뉴·창이 열린 동안은 Esc 만 받고 ⑦ 단축키를 막는다. */
+  function edit215cOnKey(ctx, event) {
+    if (!event || event.defaultPrevented) return false;
+    var s = edit215cState(ctx);
+    if (s.menu || s.panel) {
+      if (event.key === "Escape") {
+        edit215cCloseAll(ctx);
+        if (event.preventDefault) event.preventDefault();
+      }
+      return true;
+    }
+    if (editTypingTarget(event.target || {})) return false;
+    var action = edit215cKeyAction(event.key, event.code, event.ctrlKey || event.metaKey, event.shiftKey, event.altKey, s.preset);
+    if (!action) return false;
+    if (event.preventDefault) event.preventDefault();
+    if (event.repeat && action !== "step5Back" && action !== "step5Fwd" && action !== "prevEdit" && action !== "nextEdit") return true;
+    edit215cDo(ctx, action);
+    return true;
+  }
+
+  function edit215cSetTool(ctx, tool) {
+    var s = edit215cState(ctx);
+    if (!EDIT215C_TOOLS.some(function (t) { return t.key === tool; })) return;
+    s.tool = tool;
+    edit215cPaintBar(ctx);
+  }
+
+  function edit215cBtn(icon, label, keys, onClick) {
+    var b = el("button", "vnew-e215c-tool", icon);
+    b.type = "button";
+    b.title = label + (keys ? " (" + keys + ")" : "");
+    b.setAttribute("aria-label", b.title);
+    b.addEventListener("click", onClick);
+    return b;
+  }
+
+  function edit215cPaintBar(ctx) {
+    var s = edit215cState(ctx);
+    EDIT215C_TOOLS.forEach(function (t) {
+      var b = s.toolBtns[t.key];
+      if (!b) return;
+      if (s.tool === t.key) b.classList.add("is-on");
+      else b.classList.remove("is-on");
+      b.setAttribute("aria-pressed", s.tool === t.key ? "true" : "false");
+    });
+    if (s.snapBtn) {
+      if (s.snap) s.snapBtn.classList.add("is-on");
+      else s.snapBtn.classList.remove("is-on");
+      s.snapBtn.setAttribute("aria-pressed", s.snap ? "true" : "false");
+    }
+    var tl = ctx.dom && ctx.dom.scroller;
+    if (tl) {
+      EDIT215C_TOOLS.forEach(function (t) { tl.classList.remove("e215c-tool-" + t.key); });
+      tl.classList.add("e215c-tool-" + s.tool);
+    }
+  }
+
+  function edit215cApplyHeights(ctx) {
+    var s = edit215cState(ctx);
+    var tl = ctx.dom && ctx.dom.tl;
+    if (!tl || !tl.style) return;
+    var v = EDIT215C_HEIGHTS.v[s.heights[0]] + "px";
+    var a = EDIT215C_HEIGHTS.a[s.heights[1]] + "px";
+    if (tl.style.setProperty) {
+      tl.style.setProperty("--e215c-vh", v);
+      tl.style.setProperty("--e215c-ah", a);
+    }
+  }
+
+  function edit215cPaintTracks(ctx) {
+    var s = edit215cState(ctx);
+    var tl = ctx.dom && ctx.dom.scroller;
+    if (!tl) return;
+    [["v1", "v"], ["a1", "a"]].forEach(function (pair) {
+      var t = s.tracks[pair[0]] || {};
+      ["locked", "hidden"].forEach(function (flag) {
+        var cls = "e215c-" + pair[1] + "-" + flag;
+        if (t[flag]) tl.classList.add(cls);
+        else tl.classList.remove(cls);
+        var btn = (s.trackBtns || {})[pair[0] + flag];
+        if (btn) btn.setAttribute("aria-pressed", t[flag] ? "true" : "false");
+      });
+    });
+  }
+
+  /* editBuild 연결: 타임라인 왼쪽 세로 도구줄 · 트랙 이름 칸 단추(잠금 · 숨김 · 높이) · 오른쪽 클릭 메뉴 · Alt+휠 확대. */
+  function edit215cBuild(ctx) {
+    var s = edit215cState(ctx);
+    var d = ctx.dom;
+    s.menu = null;
+    s.panel = null;
+    s.markEls = [];
+    if (!d.tl) return;
+    var bar = el("div", "vnew-e215c-bar");
+    bar.setAttribute("role", "toolbar");
+    bar.setAttribute("aria-label", "편집 도구");
+    s.toolBtns = {};
+    EDIT215C_TOOLS.forEach(function (t) {
+      var b = edit215cBtn(t.icon, t.label, t.keys, function () {
+        edit215cSetTool(ctx, t.key);
+      });
+      s.toolBtns[t.key] = b;
+      bar.appendChild(b);
+    });
+    bar.appendChild(el("span", "vnew-e215c-sep", ""));
+    s.snapBtn = edit215cBtn("🧲", "스냅 켜기/끄기 — 끌 때 편집점·재생헤드·마커·표시에 붙습니다", "", function () {
+      s.snap = !s.snap;
+      edit215cStore(EDIT215C_SNAP_KEY, s.snap ? "1" : "0");
+      edit215cPaintBar(ctx);
+    });
+    bar.appendChild(s.snapBtn);
+    bar.appendChild(edit215cBtn("🔖", "마커 목록 — 마커 추가는 " + (s.preset === "premiere" ? "M" : "Alt+M"), "Shift+M 다음 마커", function () {
+      edit215cMarkerPanel(ctx);
+    }));
+    bar.appendChild(edit215cBtn("⌨", "단축키 보기", "?", function () {
+      edit215cKeymapPanel(ctx);
+    }));
+    bar.appendChild(edit215cBtn("Pr", "Premiere Pro 프로젝트로 내보내기(XML · EDL · 재료 zip)", "", function () {
+      edit215cPremiere(ctx);
+    }));
+    d.tl.appendChild(bar);
+    var labels = d.tl.children[0];
+    s.trackBtns = {};
+    [["v1", 1, "영상", 0], ["a1", 2, "소리", 1]].forEach(function (row) {
+      var label = labels && labels.children ? labels.children[row[1]] : null;
+      if (!label) return;
+      var box = el("span", "vnew-e215c-tbtns");
+      [["locked", "🔒", "트랙 잠그기/풀기"], ["hidden", "👁", row[0] === "v1" ? "영상 트랙 숨기기/보이기(내보내기에서도 빠집니다)"
+        : "소리 트랙 끄기/켜기(내보내기에서도 빠집니다)"]].forEach(function (f) {
+        var b = el("button", "vnew-e215c-tbtn", f[1]);
+        b.type = "button";
+        b.title = row[2] + " " + f[2];
+        b.setAttribute("aria-label", b.title);
+        b.addEventListener("click", function () {
+          if (!editAlive(ctx) || ctx.busy) return;
+          var tracks = edit215cCleanTracks(s.tracks);
+          var t = tracks[row[0]] || {};
+          t[f[0]] = !t[f[0]];
+          tracks[row[0]] = t;
+          edit215cCommitMeta(ctx, s.markers, tracks);
+        });
+        s.trackBtns[row[0] + f[0]] = b;
+        box.appendChild(b);
+      });
+      var hb = el("button", "vnew-e215c-tbtn", "↕");
+      hb.type = "button";
+      hb.title = row[2] + " 트랙 높이(작게 · 보통 · 크게)";
+      hb.setAttribute("aria-label", hb.title);
+      hb.addEventListener("click", function () {
+        s.heights[row[3]] = (s.heights[row[3]] + 1) % 3;
+        edit215cStore(EDIT215C_HEIGHT_KEY, s.heights.join(","));
+        edit215cApplyHeights(ctx);
+      });
+      box.appendChild(hb);
+      label.appendChild(box);
+    });
+    d.vtrack.addEventListener("contextmenu", function (event) {
+      edit215cContext(ctx, event);
+    });
+    d.scroller.addEventListener("wheel", function (event) {
+      if (!event || !event.altKey || !editAlive(ctx)) return;
+      if (event.preventDefault) event.preventDefault();
+      editSetZoom(ctx, Number(event.deltaY) < 0 ? ctx.pps * 1.25 : ctx.pps / 1.25);
+    }, { passive: false });
+    if (!ctx.e215KeyUp) {
+      ctx.e215KeyUp = function (event) {
+        edit215cKeyUp(ctx, event);
+      };
+      document.addEventListener("keyup", ctx.e215KeyUp);
+    }
+    edit215cPaintBar(ctx);
+    edit215cApplyHeights(ctx);
+    edit215cPaintTracks(ctx);
+  }
+
+  /* editPaintClip 연결: 앞 빈틈만큼 띄우고(디졸브 겹침 반영), 사용 안 함·역재생·라벨 색·연결 해제·게인 표시. */
+  function edit215cPaintClip(ctx, parts, clip) {
+    var gap = edit215cGapOf(clip);
+    if (gap) {
+      var prev = parts.index > 0 ? ctx.clips[parts.index - 1] : null;
+      var overlap = prev ? editDissolveOf(prev) : 0;
+      var margin = Math.round((gap - overlap) * ctx.pps * 10) / 10 + "px";
+      parts.box.style.marginLeft = margin;
+      parts.abox.style.marginLeft = margin;
+    }
+    if (clip.disabled === true) {
+      parts.box.classList.add("is-e215c-off");
+      parts.abox.classList.add("is-e215c-off");
+      parts.box.title += " · 사용 안 함(검은 화면 · 소리 없음)";
+    }
+    if (clip.reverse === true) {
+      parts.box.classList.add("is-e215c-rev");
+      parts.name.textContent += " · ◀역재생";
+      parts.box.title += " · 역재생(미리보기는 앞으로, 내보내기는 거꾸로)";
+    }
+    if (EDIT215C_COLORS.indexOf(clip.labelColor) >= 0) parts.box.classList.add("is-c-" + clip.labelColor);
+    if (clip.unlinked === true) {
+      parts.abox.classList.add("is-e215c-unlinked");
+      parts.abox.title += " · 연결 해제(소리 상자를 끌어 대사 타이밍을 옮깁니다)";
+    }
+    var gain = edit215cGainOf(clip);
+    if (gain) parts.abox.title += " · 게인 " + (gain > 0 ? "+" : "") + gain + "dB";
+  }
+
+  /* editClipBoxes 연결: 연결 해제된 클립의 소리 상자 끌기 = 대사 타이밍(audioSlip, 기존 editApplySlip 규칙). */
+  function edit215cClipBoxes(ctx, parts) {
+    parts.abox.addEventListener("pointerdown", function (event) {
+      var clip = ctx.clips[parts.index];
+      if (!clip || clip.unlinked !== true || clip.muted === true || !editPointerOk(ctx, event) || edit215cLocked(ctx)) return;
+      if (event.stopPropagation) event.stopPropagation();
+      editSelect(ctx, parts.index);
+      var base = editSlipOf(clip);
+      editTrack(ctx, parts.abox, event, {
+        threshold: 3,
+        move: function (dx) {
+          parts.abox.style.transform = "translateX(" + Math.round(dx) + "px)";
+        },
+        end: function (dx, moved) {
+          parts.abox.style.transform = "";
+          if (moved) editApplySlip(ctx, base + dx / ctx.pps);
+        }
+      });
+    });
+  }
+
+  /* editRenderTimeline 연결: 빈틈 상자(오른쪽 클릭 → 빈틈 지우기) · 마커 · 표시 구간. */
+  function edit215cRenderMarks(ctx) {
+    var s = edit215cState(ctx);
+    var d = ctx.dom;
+    if (!d.ruler) return;
+    s.markEls.forEach(function (node) {
+      if (node.parentNode) node.parentNode.removeChild(node);
+    });
+    s.markEls = [];
+    var add = function (parent, node) {
+      parent.appendChild(node);
+      s.markEls.push(node);
+    };
+    edit215cLayout(ctx.clips).forEach(function (it, i) {
+      var gap = edit215cGapOf(it.clip);
+      if (!gap) return;
+      var box = el("div", "vnew-e215c-gap");
+      box.style.left = Math.round((it.start - gap) * ctx.pps * 10) / 10 + "px";
+      box.style.width = Math.round(gap * ctx.pps * 10) / 10 + "px";
+      box.title = "빈틈 " + gap.toFixed(2) + "초 — 오른쪽 클릭: 빈틈 지우기";
+      box.addEventListener("contextmenu", function (event) {
+        if (event.preventDefault) event.preventDefault();
+        if (event.stopPropagation) event.stopPropagation();
+        edit215cMenu(ctx, event, [{ label: "빈틈 지우기", run: function () {
+          var next = edit215cCloseGap(ctx.clips, i);
+          if (next) editCommit(ctx, next, {});
+        } }]);
+      });
+      add(d.vtrack, box);
+    });
+    s.markers.forEach(function (m) {
+      var pin = el("span", "vnew-e215c-marker is-c-" + m.color);
+      pin.style.left = Math.round(m.t * ctx.pps * 10) / 10 + "px";
+      pin.title = (m.name || "마커") + " · " + editTimeText(m.t, true);
+      add(d.ruler, pin);
+    });
+    if (s.markIn !== null || s.markOut !== null) {
+      var a = s.markIn !== null ? s.markIn : 0;
+      var b = s.markOut !== null ? s.markOut : editStarts(ctx.clips).total;
+      var band = el("span", "vnew-e215c-range");
+      band.style.left = Math.round(Math.min(a, b) * ctx.pps * 10) / 10 + "px";
+      band.style.width = Math.max(2, Math.round(Math.abs(b - a) * ctx.pps * 10) / 10) + "px";
+      band.title = "표시 구간 " + editTimeText(Math.min(a, b), true) + " ~ " + editTimeText(Math.max(a, b), true) + " (; 들어내기 · ' 뽑아내기)";
+      add(d.ruler, band);
+    }
+  }
+
+  function edit215cRepaint(ctx, indexes) {
+    indexes.forEach(function (i) {
+      if (ctx.clipEls[i] && ctx.clips[i]) editPaintClip(ctx, ctx.clipEls[i], ctx.clips[i]);
+    });
+    ctx.dom.content.style.width = Math.ceil(editStarts(ctx.clips).total * ctx.pps) + EDIT_TAIL_PX + "px";
+    editPlaceFx(ctx);
+  }
+
+  function edit215cRazorAt(ctx, t) {
+    var loc = editLocate(ctx.clips, t);
+    if (!loc) return;
+    if (ctx.clips.length >= editLimit(ctx, "maxClips", 200)) return editNote(ctx, "클립 수 한도 때문에 자를 수 없습니다.");
+    var result = editSplit(ctx.clips, t, editNewId(ctx.clips), editFpsOf(ctx, loc.clip), editMinSource(editMinLen(ctx), editSpeedOf(loc.clip)));
+    if (!result) return editNote(ctx, "클립 끝에 너무 가까워 자를 수 없습니다.");
+    editPause(ctx);
+    ctx.t = t;
+    editCommit(ctx, result.clips, { sel: result.index });
+  }
+
+  /* 끌기(밀어넣기 · 밀기 · 롤링). make(dt) 가 새 목록(못 하면 null), touched 는 다시 칠할 클립 번호. */
+  function edit215cDrag(ctx, target, event, index, touched, make) {
+    var orig = ctx.clips.slice();
+    var before = editSnapshotOf(ctx.variant, ctx.clips);
+    var s = edit215cState(ctx);
+    var points = edit215cSnapPoints(ctx);
+    var anchor = edit215cLayout(ctx.clips)[index];
+    editPause(ctx);
+    editSelect(ctx, index);
+    editTrack(ctx, target, event, {
+      threshold: 2,
+      move: function (dx) {
+        var dt = dx / ctx.pps;
+        if (anchor && s.snap) {
+          var edge = anchor.end + dt;
+          dt = edit215cSnapTo(edge, points, ctx.pps, true) - anchor.end;
+        }
+        ctx.clips = make(orig, dt) || orig.slice();
+        edit215cRepaint(ctx, touched);
+      },
+      end: function (dx, moved, cancelled) {
+        if (cancelled || !moved || ctx.clips === orig || JSON.stringify(ctx.clips) === JSON.stringify(orig)) {
+          ctx.clips = orig;
+          edit215cRepaint(ctx, touched);
+          editSeek(ctx, ctx.t);
+          return;
+        }
+        editCommit(ctx, ctx.clips.slice(), { before: before, sel: index });
+      }
+    });
+  }
+
+  /* editClipPointer 연결. 처리했으면 true(선택 도구는 기존 길 — 고르기 · 옮기기). */
+  function edit215cClipPointer(ctx, parts, event) {
+    var s = ctx.e215;
+    if (!s) return false;
+    if (edit215cLocked(ctx)) {
+      if (editPointerOk(ctx, event)) {
+        editSelect(ctx, parts.index);
+        editNote(ctx, EDIT215C_LOCKED_NOTE);
+      }
+      return true;
+    }
+    if (s.tool === "select" || s.tool === "ripple" || s.tool === "roll") return false;
+    if (!editPointerOk(ctx, event)) return true;
+    if (event.stopPropagation) event.stopPropagation();
+    if (event.preventDefault) event.preventDefault();
+    var index = parts.index;
+    if (s.tool === "razor") {
+      edit215cRazorAt(ctx, edit215cSnapTo(editContentX(ctx, event) / ctx.pps, edit215cSnapPoints(ctx), ctx.pps, s.snap));
+      return true;
+    }
+    var clip = ctx.clips[index];
+    var fps = editFpsOf(ctx, clip);
+    if (s.tool === "slip") {
+      edit215cDrag(ctx, parts.box, event, index, [index], function (list, dt) {
+        var c = edit215cSlip(list[index], dt, Number((ctx.materials[clip.sourceKey] || {}).duration) || 0, fps);
+        if (!c) return null;
+        var next = list.slice();
+        next[index] = c;
+        return next;
+      });
+    } else {
+      var prev = ctx.clips[index - 1];
+      var durPrev = prev ? Number((ctx.materials[prev.sourceKey] || {}).duration) || 0 : 0;
+      edit215cDrag(ctx, parts.box, event, index, [index - 1, index, index + 1], function (list, dt) {
+        return edit215cSlide(list, index, dt, durPrev, fps, editMinLen(ctx));
+      });
+    }
+    return true;
+  }
+
+  /* editEdgePointer 연결. 잔물결 편집은 기존 끝 끌기(뒤 클립이 함께 움직인다)와 같은 길, 롤링은 이웃과 함께, 그 밖 도구는 몸통과 같다. */
+  function edit215cEdgePointer(ctx, parts, edge, event) {
+    var s = ctx.e215;
+    if (!s) return false;
+    if (edit215cLocked(ctx)) return edit215cClipPointer(ctx, parts, event);
+    if (s.tool === "select" || s.tool === "ripple") return false;
+    if (s.tool !== "roll") return edit215cClipPointer(ctx, parts, event);
+    if (!editPointerOk(ctx, event)) return true;
+    if (event.stopPropagation) event.stopPropagation();
+    if (event.preventDefault) event.preventDefault();
+    var left = edge === "out" ? parts.index : parts.index - 1;
+    if (left < 0 || left + 1 >= ctx.clips.length) {
+      editNote(ctx, "롤링 편집은 두 클립 사이 편집점에서 합니다.");
+      return true;
+    }
+    var a = ctx.clips[left];
+    var durL = Number((ctx.materials[a.sourceKey] || {}).duration) || 0;
+    var fps = editFpsOf(ctx, a);
+    edit215cDrag(ctx, edge === "out" ? parts.outEdge : parts.inEdge, event, left, [left, left + 1], function (list, dt) {
+      return edit215cRoll(list, left, dt, durL, fps, editMinLen(ctx));
+    });
+    return true;
+  }
+
+  function edit215cCloseAll(ctx) {
+    var s = edit215cState(ctx);
+    [s.menu, s.panel].forEach(function (node) {
+      if (node && node.parentNode) node.parentNode.removeChild(node);
+    });
+    s.menu = null;
+    s.panel = null;
+  }
+
+  /* 오른쪽 클릭 메뉴(items [{label, keys, disabled, run}]). 고르면 닫고 실행한다. */
+  function edit215cMenu(ctx, event, items) {
+    edit215cCloseAll(ctx);
+    var s = edit215cState(ctx);
+    var menu = el("div", "vnew-e215c-menu");
+    menu.setAttribute("role", "menu");
+    menu.style.left = (Number(event && event.clientX) || 0) + "px";
+    menu.style.top = (Number(event && event.clientY) || 0) + "px";
+    items.forEach(function (item) {
+      var b = el("button", "vnew-e215c-mitem", item.label);
+      b.type = "button";
+      b.setAttribute("role", "menuitem");
+      if (item.keys) b.appendChild(el("span", "vnew-e215c-mkey", item.keys));
+      b.disabled = !!item.disabled;
+      b.addEventListener("click", function () {
+        edit215cCloseAll(ctx);
+        if (editAlive(ctx) && !ctx.busy) item.run();
+      });
+      menu.appendChild(b);
+    });
+    var shut = el("button", "vnew-e215c-mitem is-close", "닫기");
+    shut.type = "button";
+    shut.addEventListener("click", function () {
+      edit215cCloseAll(ctx);
+    });
+    menu.appendChild(shut);
+    ctx.root.appendChild(menu);
+    s.menu = menu;
+    return menu;
+  }
+
+  function edit215cContext(ctx, event) {
+    if (!editAlive(ctx) || ctx.busy) return;
+    var target = event && event.target;
+    var index = -1;
+    ctx.clipEls.forEach(function (parts) {
+      if (editInside(parts.box, target)) index = parts.index;
+    });
+    if (index < 0) return;
+    if (event.preventDefault) event.preventDefault();
+    if (!editIsSel(ctx, index)) editSelect(ctx, index);
+    var clip = ctx.clips[index];
+    var s = edit215cState(ctx);
+    var pr = s.preset === "premiere";
+    var items = [
+      { label: "속도/지속 시간…", keys: "Ctrl+R", run: function () { edit215cSpeedDialog(ctx, index); } },
+      { label: "오디오 게인…", run: function () { edit215cGainDialog(ctx, index); } },
+      { label: clip.unlinked === true ? "소리 연결" : "소리 연결 해제", run: function () {
+        var next = editCloneClips(ctx.clips);
+        if (clip.unlinked === true) delete next[index].unlinked;
+        else next[index].unlinked = true;
+        editCommit(ctx, next, {});
+      } },
+      { label: clip.disabled === true ? "클립 사용" : "클립 사용 안 함", keys: "Shift+E", run: function () { edit215cDo(ctx, "toggleEnable"); } },
+      { label: "속성 복사", keys: "Ctrl+Alt+C", run: function () { edit215cDo(ctx, "copyAttrs"); } },
+      { label: "속성 붙여넣기", keys: "Ctrl+Alt+V", disabled: !s.attrs, run: function () { edit215cDo(ctx, "pasteAttrs"); } },
+      { label: "라벨 색…", run: function () { edit215cColorMenu(ctx, event, index); } },
+      { label: "들어내기(빈틈 남김)", keys: pr ? "Delete" : "Alt+Delete", run: function () { edit215cDo(ctx, "lift"); } },
+      { label: "지우고 당기기", keys: "Shift+Delete", run: function () { edit215cDo(ctx, "rippleDelete"); } }
+    ];
+    if (edit215cGapOf(clip)) {
+      items.push({ label: "빈틈 지우기", run: function () { editCommit(ctx, edit215cCloseGap(ctx.clips, index), {}); } });
+    }
+    edit215cMenu(ctx, event, items);
+  }
+
+  function edit215cColorMenu(ctx, event, index) {
+    var items = [{ label: "색 없음", run: function () { edit215cSetColor(ctx, index, ""); } }];
+    EDIT215C_COLORS.forEach(function (c) {
+      items.push({ label: EDIT215C_COLOR_NAMES[c], run: function () { edit215cSetColor(ctx, index, c); } });
+    });
+    edit215cMenu(ctx, event, items);
+  }
+
+  function edit215cSetColor(ctx, index, color) {
+    var next = editCloneClips(ctx.clips);
+    edit215cSel(ctx).concat([index]).forEach(function (i) {
+      if (!next[i]) return;
+      if (color) next[i].labelColor = color;
+      else delete next[i].labelColor;
+    });
+    editCommit(ctx, next, {});
+  }
+
+  /* 작은 창(제목 · 칸들 · 확인/취소). 확인 → onOk(): 문구를 돌려주면 창에 보이고 닫지 않는다. */
+  function edit215cDialog(ctx, title, fields, onOk) {
+    edit215cCloseAll(ctx);
+    var s = edit215cState(ctx);
+    var box = el("div", "vnew-e215c-dialog");
+    box.setAttribute("role", "dialog");
+    box.setAttribute("aria-label", title);
+    box.appendChild(el("h3", "vnew-e215c-dtitle", title));
+    fields.forEach(function (f) {
+      box.appendChild(f);
+    });
+    var msg = el("p", "vnew-e215c-dmsg", "");
+    box.appendChild(msg);
+    var row = el("div", "vnew-e215c-drow");
+    var ok = el("button", "primary-button", "확인");
+    ok.type = "button";
+    ok.addEventListener("click", function () {
+      var err = onOk ? onOk() : "";
+      if (err) msg.textContent = err;
+      else edit215cCloseAll(ctx);
+    });
+    var cancel = el("button", "secondary-button", "닫기");
+    cancel.type = "button";
+    cancel.addEventListener("click", function () {
+      edit215cCloseAll(ctx);
+    });
+    if (onOk) row.appendChild(ok);
+    row.appendChild(cancel);
+    box.appendChild(row);
+    ctx.root.appendChild(box);
+    s.panel = box;
+    return box;
+  }
+
+  function edit215cField(label, input) {
+    var wrap = el("label", "vnew-e215c-field");
+    wrap.appendChild(el("span", "vnew-e215c-flabel", label));
+    wrap.appendChild(input);
+    return wrap;
+  }
+
+  function edit215cSpeedDialog(ctx, index) {
+    var clip = ctx.clips[index];
+    if (!clip) return;
+    var speed = el("select", "vnew-e215c-input");
+    EDIT_SPEEDS.forEach(function (v) {
+      var o = el("option", "", v + "×");
+      o.value = String(v);
+      speed.appendChild(o);
+    });
+    speed.value = String(editSpeedOf(clip));
+    var rev = el("input", "");
+    rev.type = "checkbox";
+    rev.checked = clip.reverse === true;
+    var pitch = el("input", "");
+    pitch.type = "checkbox";
+    pitch.checked = clip.keepPitch !== false;
+    var info = el("p", "vnew-hint", "지금 " + editClipLen(clip).toFixed(2) + "초 · 역재생은 원본 구간 " + EDIT215C_REVERSE_MAX_S + "초 이하 클립만 됩니다.");
+    edit215cDialog(ctx, "속도/지속 시간", [edit215cField("속도", speed), edit215cField("역재생", rev), edit215cField("음높이 유지", pitch), info],
+      function () {
+        var res = edit215cSpeedApply(ctx.clips[index], Number(speed.value), rev.checked === true, pitch.checked !== false,
+          editMinSource(editMinLen(ctx), Number(speed.value)));
+        if (res.error) return res.error;
+        var next = ctx.clips.slice();
+        next[index] = res.clip;
+        editCommit(ctx, next, { sel: index });
+        return "";
+      });
+  }
+
+  function edit215cGainDialog(ctx, index) {
+    var clip = ctx.clips[index];
+    if (!clip) return;
+    var input = el("input", "vnew-e215c-input");
+    input.type = "number";
+    input.min = String(EDIT215C_GAIN_MIN);
+    input.max = String(EDIT215C_GAIN_MAX);
+    input.step = "0.5";
+    input.value = String(edit215cGainOf(clip));
+    edit215cDialog(ctx, "오디오 게인(dB)", [edit215cField("게인", input)], function () {
+      var v = Number(input.value);
+      if (!isFinite(v) || v < EDIT215C_GAIN_MIN || v > EDIT215C_GAIN_MAX) {
+        return "게인은 " + EDIT215C_GAIN_MIN + "~+" + EDIT215C_GAIN_MAX + "dB 사이로 넣어 주세요.";
+      }
+      var next = editCloneClips(ctx.clips);
+      v = Math.round(v * 2) / 2;
+      if (v) next[index].gain = v;
+      else delete next[index].gain;
+      editCommit(ctx, next, {});
+      return "";
+    });
+  }
+
+  function edit215cMarkerPanel(ctx) {
+    var s = edit215cState(ctx);
+    var rows = [];
+    if (!s.markers.length) rows.push(el("p", "vnew-hint", "마커가 없습니다. 재생헤드에서 " + (s.preset === "premiere" ? "M" : "Alt+M") + " 으로 넣습니다."));
+    s.markers.forEach(function (m, i) {
+      var row = el("div", "vnew-e215c-mrow");
+      var go = el("button", "vnew-e215c-mgo", editTimeText(m.t, true));
+      go.type = "button";
+      go.title = "이 마커로 가기";
+      go.addEventListener("click", function () {
+        editPause(ctx);
+        editSeek(ctx, m.t);
+      });
+      var name = el("input", "vnew-e215c-input");
+      name.type = "text";
+      name.value = m.name;
+      name.setAttribute("aria-label", "마커 이름");
+      name.addEventListener("change", function () {
+        var list = edit215cCleanMarkers(s.markers);
+        list[i].name = String(name.value || "").slice(0, 40);
+        edit215cCommitMeta(ctx, list, s.tracks);
+      });
+      var color = el("select", "vnew-e215c-input");
+      EDIT215C_COLORS.forEach(function (c) {
+        var o = el("option", "", EDIT215C_COLOR_NAMES[c]);
+        o.value = c;
+        color.appendChild(o);
+      });
+      color.value = m.color;
+      color.setAttribute("aria-label", "마커 색");
+      color.addEventListener("change", function () {
+        var list = edit215cCleanMarkers(s.markers);
+        list[i].color = color.value;
+        edit215cCommitMeta(ctx, list, s.tracks);
+      });
+      var del = el("button", "vnew-e215c-mdel", "삭제");
+      del.type = "button";
+      del.addEventListener("click", function () {
+        var list = edit215cCleanMarkers(s.markers);
+        list.splice(i, 1);
+        edit215cCommitMeta(ctx, list, s.tracks);
+        edit215cMarkerPanel(ctx);
+      });
+      [go, name, color, del].forEach(function (n) { row.appendChild(n); });
+      rows.push(row);
+    });
+    edit215cDialog(ctx, "마커 목록", rows, null);
+  }
+
+  function edit215cKeymapPanel(ctx) {
+    var s = edit215cState(ctx);
+    var pick = el("div", "vnew-e215c-preset");
+    [["vnew", "⑦ 기본(M 소리 끄기 · Delete 지우고 당기기 · Shift+화살표 1초)"], ["premiere", "Premiere Pro 그대로"]].forEach(function (p) {
+      var b = el("button", "vnew-e215c-pbtn" + (s.preset === p[0] ? " is-on" : ""), p[1]);
+      b.type = "button";
+      b.setAttribute("aria-pressed", s.preset === p[0] ? "true" : "false");
+      b.addEventListener("click", function () {
+        s.preset = p[0];
+        edit215cStore(EDIT215C_PRESET_KEY, p[0]);
+        edit215cKeymapPanel(ctx);
+      });
+      pick.appendChild(b);
+    });
+    var list = el("dl", "vnew-e215c-keys");
+    var group = "";
+    EDIT215C_KEYMAP.forEach(function (row) {
+      var keys = typeof row[1] === "string" ? row[1] : row[1][s.preset];
+      if (!keys) return;
+      if (row[0] !== group) {
+        group = row[0];
+        list.appendChild(el("dt", "vnew-e215c-kgroup", group));
+      }
+      var item = el("dd", "vnew-e215c-krow");
+      item.appendChild(el("kbd", "vnew-e215c-kbd", keys));
+      item.appendChild(el("span", "vnew-e215c-ktext", row[2]));
+      list.appendChild(item);
+    });
+    edit215cDialog(ctx, "단축키", [pick, list], null);
+  }
+
+  /* Premiere Pro 로 내보내기(작업 215d 라우트 POST·GET /p/<pid>/edit/premiere — routes.py 연결은 합칠 때 한다).
+     저장을 먼저 끝내고 시작, 2초마다 상태를 보고 끝나면 내려받기 링크를 연다. 빈틈·사용 안 함·역재생은 215d XML 이 아직 모른다. */
+  function edit215cPremiere(ctx) {
+    if (!editAlive(ctx) || ctx.busy) return;
+    var variant = ctx.variant;
+    var path = editPath(ctx) + "/premiere";
+    var tries = 0;
+    editNote(ctx, "Premiere Pro 프로젝트를 만드는 중…");
+    var poll = function () {
+      api(path + "?variant=" + encodeURIComponent(variant)).then(function (res) {
+        if (!editAlive(ctx)) return;
+        var pr = (res && res.premiere) || {};
+        if (pr.status === "done" && pr.url) {
+          editNote(ctx, "Premiere Pro 프로젝트(zip)를 만들었습니다.");
+          try {
+            window.open(pr.url, "_blank", "noopener");
+          } catch (error) {
+            /* 팝업을 막으면 안내만 */
+          }
+        } else if (pr.status === "failed") {
+          editShowError(ctx, "Premiere Pro 로 내보내지 못했습니다: " + (pr.error || "알 수 없는 오류"));
+        } else if ((tries += 1) < 150) {
+          window.setTimeout(poll, 2000);
+        }
+      }).catch(function (err) {
+        if (editAlive(ctx)) editShowError(ctx, "Premiere Pro 내보내기 상태를 읽지 못했습니다: " + errMessage(err));
+      });
+    };
+    editEnsureSaved(ctx).then(function () {
+      return api(path, { method: "POST", body: JSON.stringify({ variant: variant }) });
+    }).then(function () {
+      if (editAlive(ctx)) poll();
+    }).catch(function (err) {
+      if (editAlive(ctx)) editShowError(ctx, "Premiere Pro 로 내보내지 못했습니다: " + errMessage(err));
+    });
+  }
+  /* ==== 작업 215c 끝 ==== */
+
   /* ---- 화면 만들기(design §5.2) ---- */
 
   function editBuild(ctx) {
@@ -12639,6 +14045,7 @@
     screen.appendChild(ctx.audio);
     d.empty = el("p", "vnew-edit-empty", "클립이 없습니다. ⟲ 처음 상태로 되돌리거나 아래 재료에서 넣어 주세요.");
     screen.appendChild(d.empty);
+    editTxScreen(ctx, screen); // 작업 215b: 자막 · 타이틀 · 색 · 전환 미리보기 층
     player.appendChild(screen);
     var transport = el("div", "vnew-edit-transport");
     transport.appendChild(editToolButton("⏮", "처음", "Home", "처음으로", function () {
@@ -12696,6 +14103,7 @@
     tools.appendChild(editDialogueBox(ctx)); // 작업 186: 고른 클립 대사 타이밍 · 이 클립 빈틈 다듬기
     tools.appendChild(editCutPlayBox(ctx)); // 작업 188: 고른 클립 이 컷 처음부터 재생 · 이 컷만 재생
     tools.appendChild(editMultiBox(ctx)); // 작업 192: 여러 컷 고름 안내 · [고른 컷 AI로 고치기]
+    tools.appendChild(editTxToolsBox(ctx)); // 작업 215b: 자막 · 타이틀 · 색 보정 · 시작/끝 페이드
     var zoomWrap = el("label", "vnew-edit-zoom");
     zoomWrap.title = "확대/축소(+ / −)";
     zoomWrap.appendChild(el("span", "vnew-edit-tool-icon", "🔍"));
@@ -12766,6 +14174,7 @@
     d.labels = labels; // 작업 215a: 오디오 트랙 이름 줄(editMixRender)
     d.mixLanes = el("div", "vnew-edit-mix-lanes"); // 머리 · 놓을 자리 표시는 절대 위치라 뒤에 붙여도 소리 줄 아래에 놓인다
     d.content.appendChild(d.mixLanes);
+    editTxTracks(ctx, labels); // 작업 215b: 자막 줄 · V2 타이틀 줄
     d.scroller.appendChild(d.content);
     tl.appendChild(d.scroller);
     // 작업 215a: 트랙 머리(M · S · 이득 · 덕킹)와 내 소리는 타임라인 칸 아래 한 줄 전체(grid-column 1 / -1)
@@ -12774,6 +14183,7 @@
     d.sounds = el("section", "vnew-edit-sounds");
     tl.appendChild(d.sounds);
     root.appendChild(tl);
+    edit215cBuild(ctx); // 작업 215c: 세로 도구줄 · 트랙 단추 · 오른쪽 클릭 메뉴
     d.ruler.addEventListener("pointerdown", function (event) {
       editRulerPointer(ctx, event);
     });
@@ -13534,6 +14944,7 @@
     editRenderPlayButton(ctx);
     editRenderMulti(ctx); // 작업 192: 여러 컷 고름 안내
     editFixRenderSel(ctx); // 지시서 116: [고른 클립 AI로 고치기] disabled·title 만(노드를 만들지 않는다)
+    editTxRenderTools(ctx); // 작업 215b
   }
 
   /* ---- 타임라인 그리기 ---- */
@@ -13558,6 +14969,8 @@
     if (!ctx.clips.length) d.vtrack.appendChild(el("p", "vnew-edit-track-empty", "클립이 없습니다"));
     editMixRender(ctx); // 작업 215a: 오디오 트랙 줄
     editRenderFx(ctx);
+    editTxRender(ctx); // 작업 215b: 자막 · 타이틀 트랙 · 오른쪽 누르기 메뉴
+    edit215cRenderMarks(ctx); // 작업 215c: 빈틈 · 마커 · 표시 구간
     editPlaceHead(ctx);
     editRenderTools(ctx);
     editQueueMedia(ctx);
@@ -13618,6 +15031,7 @@
     abox.addEventListener("dblclick", function (event) {
       editClipDblClick(ctx, parts, event);
     });
+    edit215cClipBoxes(ctx, parts); // 작업 215c: 연결 해제 소리 상자 끌기
     return parts;
   }
 
@@ -13668,6 +15082,7 @@
     abox.className = "vnew-edit-aclip" + (kind ? " " + kind : "") + (selected ? " is-selected" : "");
     var slip = clip.muted === true ? 0 : editSlipOf(clip); // 작업 186
     abox.title = lane.title + (slip ? " · 대사 타이밍 " + editSlipText(slip) : "");
+    edit215cPaintClip(ctx, parts, clip); // 작업 215c: 빈틈 자리 · 사용 안 함 · 역재생 · 라벨 색
     if (clip.muted === true) abox.appendChild(el("span", "vnew-edit-aclip-icon", "🔇"));
     if (lane.from && !path) abox.appendChild(el("span", "vnew-edit-aclip-icon", "🔊"));
     // 작업 186: 소리 구간(대사) 띠 — 파형 뒤 옅은 띠(대사 타이밍만큼 옮기고 클립 밖은 자른다). 띠 사이가 빈 소리 구간이다.
@@ -13767,6 +15182,7 @@
         "소리 이어 가기 " + tail.toFixed(2) + "초 (L컷)");
     });
     if (d.fxNote) d.fxNote.style.display = editHasFx(clips) ? "" : "none";
+    editTxPlaceFx(ctx); // 작업 215b: 블랙/화이트 전환 손잡이
   }
 
   /* 소리 줄의 앞당김(왼쪽, 앞 클립 소리 아래)·이어 감(오른쪽, 뒤 클립 소리 아래) 막대. 0 초면 숨긴다(없으면 만들지 않는다). */
@@ -13832,6 +15248,7 @@
       row.appendChild(item);
       menu.appendChild(row);
     });
+    editTxTrRows(ctx, index, menu); // 작업 215b: 블랙/화이트로 사라졌다 나타나기
     ctx.root.appendChild(menu);
     var rect = anchor && anchor.getBoundingClientRect ? anchor.getBoundingClientRect() : null;
     var vw = Number(window.innerWidth) || 0;
@@ -13912,6 +15329,7 @@
     if (!editAlive(ctx) || ctx.busy) return;
     var a = ctx.clips[index];
     var b = ctx.clips[index + 1];
+    if (!seconds && a && b && editTxDipOf(a).type) return editTxSetDip(ctx, index, "", 0); // 작업 215b: 블랙/화이트 → 컷
     if (!a || !b || editDissolveOf(a) === seconds) return;
     if (seconds && !editDissolveFits(seconds, a, b)) {
       editNote(ctx, EDIT_TR_SHORT + ".");
@@ -13930,6 +15348,7 @@
     var total = editStarts(ctx.clips).total;
     if (d.head) d.head.style.left = Math.round(ctx.t * ctx.pps * 10) / 10 + "px";
     if (d.time) d.time.textContent = editTimeText(ctx.t) + " / " + editTimeText(total);
+    editTxPreview(ctx); // 작업 215b: 자막 · 타이틀 · 색 · 전환 미리보기
   }
 
   function editSelect(ctx, index) {
@@ -14149,6 +15568,7 @@
   /* 클립 몸통: 누르면 고르기, 끌면 순서 바꾸기(놓을 자리 세로선).
      작업 190: 움직이지 않고 떼면(끌기 문턱 안 · 취소 아님) 그 컷 시작으로 재생헤드(editSeekClip). 끌기 · 취소는 옮기지 않는다. */
   function editClipPointer(ctx, parts, event) {
+    if (edit215cClipPointer(ctx, parts, event)) return; // 작업 215c: 자르기 · 밀어넣기 · 밀기 도구 · 트랙 잠금
     if (!editPointerOk(ctx, event)) return;
     if (event.stopPropagation) event.stopPropagation();
     if (event.preventDefault) event.preventDefault();
@@ -14187,6 +15607,7 @@
      줄이기와 함께 원본 처음(0)·끝(재료 길이)까지 늘이기도 된다. 속도가 있으면 원본 변화 = 끈 거리 ÷ px/초 × 속도이고,
      재료 길이를 모르면 끝은 지금 out 보다 늘리지 않는다(지시서 115). */
   function editEdgePointer(ctx, parts, edge, event) {
+    if (edit215cEdgePointer(ctx, parts, edge, event)) return; // 작업 215c: 롤링 편집 · 트랙 잠금
     if (!editPointerOk(ctx, event)) return;
     if (event.stopPropagation) event.stopPropagation();
     if (event.preventDefault) event.preventDefault();
@@ -14284,6 +15705,7 @@
      둘 다 둔다. preservesPitch(브라우저 기본 true)로 소리 높이는 그대로다(내보내기 atempo 와 같다). */
   function editSetRate(video, clip) {
     var speed = editSpeedOf(clip);
+    speed *= edit215cRate; // 작업 215c: J/K/L 셔틀 배속(평소 1)
     try {
       if (video.defaultPlaybackRate !== speed) video.defaultPlaybackRate = speed;
       if (video.playbackRate !== speed) video.playbackRate = speed;
@@ -14663,6 +16085,7 @@
 
   function editPause(ctx) {
     ctx.playing = false;
+    edit215cShuttleStop(ctx); // 작업 215c: 셔틀 배속 · 뒤로 재생 끝
     ctx.cutPlay = null; // 작업 188: 멈추면 [이 컷만] 멈출 자리 · 이 컷 재생 표시를 지운다
     editCancelRaf(ctx.raf);
     ctx.raf = 0;
@@ -14811,6 +16234,8 @@
 
   function editDo(ctx, action) {
     if (!editAlive(ctx) || ctx.busy) return;
+    if (editTxDo(ctx, action)) return; // 작업 215b: 고른 자막·타이틀(지우기 · 자르기)
+    if (edit215cBlocked(ctx, action)) return; // 작업 215c: 영상 트랙 잠금
     if (action === "play") {
       if (ctx.playing) editPause(ctx);
       else editPlay(ctx);
@@ -14888,6 +16313,7 @@
       editTightenClose(ctx, true); // 작업 186: Esc 는 빈틈 다듬기 확인 칸 닫기(다른 단축키는 그대로 — 편집하면 칸이 닫힌다)
       return;
     }
+    if (edit215cOnKey(ctx, event)) return; // 작업 215c: 프리미어식 단축키(처리하지 않은 키는 아래 기존 길)
     if (!event || event.defaultPrevented || event.altKey) return;
     var target = event.target || {};
     if (editTypingTarget(target)) return;
@@ -14911,6 +16337,8 @@
     editMixTag(ctx); // 작업 215a: 오디오 트랙도 같은 단계에(빈 mix 면 215a 전 스냅샷 그대로)
     ctx.clips = editTidyFx(clips); // 작업 182: 옮기기·삭제·자르기·늘이기 뒤 J/L 컷·디졸브 자리 규칙 정리
     if (o.mix) ctx.mix = o.mix; // 작업 215a: 자르기(S)가 소리 아이템도 함께 나눈다
+    ctx.clips = editTxTidy(ctx.clips); // 작업 215b: 블랙/화이트 전환 길이 규칙
+    edit215cOnCommit(ctx); // 작업 215c: 빈틈 앞 디졸브 정리 · 쌓은 상태에 마커·트랙
     if (o.sel !== undefined) ctx.sel = o.sel;
     if (o.sel !== undefined) ctx.multi = o.sel >= 0 ? [o.sel] : []; // 작업 192: 고른 클립을 정해 주는 변경은 한 클립으로
     editChanged(ctx);
@@ -14938,10 +16366,13 @@
   function editUndoRedo(ctx, redo) {
     var current = editSnapshotOf(ctx.variant, ctx.clips);
     if (!editMixEmpty(ctx.mix)) current.mix = editMixClone(ctx.mix); // 작업 215a: 오디오 트랙도 함께 되돌린다
+    edit215cSnapExtras(ctx, current); // 작업 215c
     var snap = redo ? editRedo(ctx.hist, current) : editUndo(ctx.hist, current);
     if (!snap) return;
     ctx.clips = editCloneClips(snap.clips);
     editMixRestore(ctx, snap);
+    editTxRestore(ctx, snap); // 작업 215b
+    edit215cRestore(ctx, snap); // 작업 215c: 마커·트랙도 되돌린다
     ctx.sel = -1;
     editChanged(ctx);
   }
@@ -15498,7 +16929,7 @@
     ctx.saving = true;
     ctx.saveAgain = false;
     editRenderSave(ctx);
-    api(editPath(ctx), { method: "PUT", body: JSON.stringify(Object.assign(editSaveBody(ctx.etag, variant, ctx.clips), editMixSaveFields(ctx.mix))) })
+    api(editPath(ctx), { method: "PUT", body: JSON.stringify(Object.assign(edit215cBody(ctx, editTxBody(ctx, editSaveBody(ctx.etag, variant, ctx.clips))), editMixSaveFields(ctx.mix))) }) // 작업 215a·215b·215c
       .then(function (res) {
         ctx.saving = false;
         ctx.saveFailed = false;
@@ -15707,7 +17138,1702 @@
         });
       box.appendChild(details);
     }
+    editTxExportTools(ctx, box); // 작업 215b: 자막 굽기 · SRT · 프리미어 내보내기
   }
+
+  /* ==== 작업 215b 시작 ==== */
+  /* ================================================================ ⑦ 자막 · 타이틀 · 전환 · 색 보정 · 프리미어 내보내기 · ⑦ 안 대사 고치기(작업 215b)
+
+     서버 edit_text.py — 문서 키 captions · titles · fadeIn · fadeOut · captionBurnIn, 클립 transition {dipBlack|dipWhite, seconds} · color.
+     POST /edit/captions/auto(⑥ 대사 줄 시간 → 지금 클립 타임라인, 작업 212 대사 고침이 대본보다 먼저) · POST /edit/captions/srt(SRT 글).
+     작업 215d POST·GET /edit/premiere(XML + EDL + 소스 zip). 작업 212 PUT /sound/lines/override(같은 말하는 사람 · 목소리 · 말투 메모).
+     상태: ctx.tx = {captions, titles, fadeIn, fadeOut, burnIn}(그림체마다 — editApplyView 가 문서에서 채운다). 실행 취소 스냅숏(editSnapshotOf)에
+     tx 도 들어가 자막·타이틀·페이드 바꾸기도 실행 취소 한 단계다. 고른 자막·타이틀 = ctx.txSel {kind, id}(Delete = 지우기, S = 재생헤드에서 자르기).
+     ⑦ 안 [대사 고치기 · 영상 다시 만들기]는 ⑥ 함수(lrdRowTools · lrdEditor · lrdSave · lrdSuggest · lrdRedo)를 그대로 쓴다 — ⑥ 쪽은
+     soundAlive · lrdReload · soundSchedule 첫 줄이 ctx.inEdit 이면 이 구역으로 넘긴다. 글은 모두 textContent(el). */
+
+  var EDIT_TX_DIPS = [0.25, 0.5, 0.75, 1, 1.5, 2]; // 서버 edit_text.DIP_SECONDS
+  var EDIT_TX_DIP_SHARE = 0.9; // 서버 DIP_MAX_SHARE(경계 앞뒤 반씩 — 한쪽 45%)
+  var EDIT_TX_EDGES = [0.25, 0.5, 1, 1.5, 2, 3]; // 서버 EDGE_FADE_SECONDS
+  var EDIT_TX_DIP_NAME = { dipBlack: "블랙", dipWhite: "화이트" };
+  var EDIT_TX_COLOR_KEYS = [["brightness", "밝기"], ["contrast", "대비"], ["saturation", "채도"], ["temperature", "색온도"], ["tint", "색조"]];
+  var EDIT_TX_MIN_S = 0.1; // 서버 MIN_ITEM_S
+  var EDIT_TX_STYLE = { size: "m", color: "#ffffff", back: "outline", pos: "bottom", italic: false };
+  var EDIT_TX_PRESETS = [
+    ["basic", "기본 (흰 글씨 · 테두리 · 아래)", { size: "m", color: "#ffffff", back: "outline", pos: "bottom" }],
+    ["box", "상자 (흰 글씨 · 검은 상자)", { size: "m", color: "#ffffff", back: "box", pos: "bottom" }],
+    ["yellow", "노랑 (노란 글씨 · 테두리)", { size: "m", color: "#ffe14d", back: "outline", pos: "bottom" }],
+    ["top", "위 (흰 글씨 · 테두리 · 위)", { size: "m", color: "#ffffff", back: "outline", pos: "top" }],
+    ["big", "크게 (큰 글씨 · 상자)", { size: "l", color: "#ffffff", back: "box", pos: "bottom" }]
+  ];
+  var EDIT_TX_SIZES = [["s", "작게"], ["m", "보통"], ["l", "크게"]];
+  var EDIT_TX_TSIZES = [["s", "작게"], ["m", "보통"], ["l", "크게"], ["xl", "아주 크게"]];
+  var EDIT_TX_CAP_RATIO = { s: 0.045, m: 0.055, l: 0.07 }; // 서버 CAPTION_SIZES(글자 높이 = 화면 높이 × 값)
+  var EDIT_TX_TITLE_RATIO = { s: 0.05, m: 0.075, l: 0.1, xl: 0.14 };
+  var EDIT_TX_SNAP_PX = 8; // 끌 때 재생헤드 · 클립 경계 · 다른 자막 끝에 붙는 거리
+  var EDIT_TX_POLL_MS = 3000;
+  var EDIT_TX_SOUND_TTL_MS = 30000;
+  var EDIT_TX_FIX_LINE = "이 대사도 고치기";
+  var EDIT_TX_LINE_MENU = "대사 고치기 · 영상 다시 만들기";
+  var EDIT_TX_PREM_LABEL = "프리미어 프로젝트로 내보내기 (XML + EDL + 소스)";
+  var EDIT_TX_PREM_404 = "서버에 프리미어 내보내기 경로(/edit/premiere)가 아직 연결되지 않았습니다.";
+  var EDIT_TX_NOTE = "자막 · 타이틀 · 색 · 블랙/화이트 전환은 미리보기에서 비슷하게만 보입니다. 내보낸 영상에서 정확히 확인하세요.";
+
+  /* ---- 순수 함수(DOM 없음) ---- */
+
+  function editTxNum(value, fallback) {
+    var n = Number(value);
+    return isFinite(n) ? n : fallback;
+  }
+
+  /* 클립의 블랙/화이트 전환 {type, seconds}(없거나 틀리면 type ""). 디졸브는 editDissolveOf 가 본다. */
+  function editTxDipOf(clip) {
+    var tr = (clip || {}).transition;
+    if (!tr || typeof tr !== "object" || !EDIT_TX_DIP_NAME[tr.type]) return { type: "", seconds: 0 };
+    var seconds = Number(tr.seconds);
+    return EDIT_TX_DIPS.indexOf(seconds) >= 0 ? { type: tr.type, seconds: seconds } : { type: "", seconds: 0 };
+  }
+
+  /* 클립 색 보정(−100~100 정수, 0 은 뺀다). 없으면 {}. */
+  function editTxColorOf(clip) {
+    var raw = (clip || {}).color;
+    var out = {};
+    if (!raw || typeof raw !== "object") return out;
+    EDIT_TX_COLOR_KEYS.forEach(function (pair) {
+      var v = Math.round(editTxNum(raw[pair[0]], 0));
+      v = Math.max(-100, Math.min(100, v));
+      if (v) out[pair[0]] = v;
+    });
+    return out;
+  }
+
+  function editTxHasColor(clip) {
+    return Object.keys(editTxColorOf(clip)).length > 0;
+  }
+
+  /* editCloneClip 이 부른다: 블랙/화이트 전환 · 색 보정을 사본에 옮긴다(없으면 아무것도 넣지 않는다 — 옛 저장 바디 그대로). */
+  function editTxCloneFx(clip, copy) {
+    var dip = editTxDipOf(clip);
+    if (dip.type) copy.transition = { type: dip.type, seconds: dip.seconds };
+    var color = editTxColorOf(clip);
+    if (Object.keys(color).length) copy.color = color;
+    return copy;
+  }
+
+  function editTxDipFits(seconds, a, b) {
+    if (!a || !b) return false;
+    return Number(seconds) <= EDIT_TX_DIP_SHARE * Math.min(editClipLen(a), editClipLen(b)) + 1e-9;
+  }
+
+  /* editCommit 이 부른다(서버 fit_dips 와 같은 규칙): 안 맞는 블랙/화이트 전환은 맞는 가장 긴 값으로, 없으면 컷. 바꿀 것이 없으면 받은 목록. */
+  function editTxTidy(clips) {
+    var list = Array.isArray(clips) ? clips : [];
+    var out = list.slice();
+    var changed = false;
+    for (var i = 0; i < list.length; i++) {
+      var dip = editTxDipOf(list[i]);
+      if (!dip.type) continue;
+      if (i === list.length - 1) {
+        out[i] = editCloneClip(list[i]);
+        delete out[i].transition;
+        changed = true;
+        continue;
+      }
+      if (editTxDipFits(dip.seconds, list[i], list[i + 1])) continue;
+      var fit = EDIT_TX_DIPS.filter(function (s) {
+        return editTxDipFits(s, list[i], list[i + 1]);
+      });
+      out[i] = editCloneClip(list[i]);
+      if (fit.length) out[i].transition = { type: dip.type, seconds: fit[fit.length - 1] };
+      else delete out[i].transition;
+      changed = true;
+    }
+    return changed ? out : list;
+  }
+
+  function editTxStyle(raw) {
+    var s = raw && typeof raw === "object" ? raw : {};
+    return {
+      size: EDIT_TX_CAP_RATIO[s.size] ? s.size : EDIT_TX_STYLE.size,
+      color: /^#[0-9a-fA-F]{6}$/.test(String(s.color || "")) ? String(s.color).toLowerCase() : EDIT_TX_STYLE.color,
+      back: s.back === "box" ? "box" : "outline",
+      pos: s.pos === "top" ? "top" : "bottom",
+      italic: s.italic === true
+    };
+  }
+
+  function editTxCap(raw) {
+    var c = raw || {};
+    var out = { id: String(c.id), start: editRound3(editTxNum(c.start, 0)), end: editRound3(editTxNum(c.end, 0)),
+      text: String(c.text || ""), style: editTxStyle(c.style) };
+    if (typeof c.lineId === "string" && c.lineId) out.lineId = c.lineId;
+    return out;
+  }
+
+  function editTxTitle(raw) {
+    var t = raw || {};
+    var pos = Number(t.pos);
+    return {
+      id: String(t.id), start: editRound3(editTxNum(t.start, 0)), end: editRound3(editTxNum(t.end, 0)), text: String(t.text || ""),
+      size: EDIT_TX_TITLE_RATIO[t.size] ? t.size : "l", pos: pos >= 1 && pos <= 9 && Math.round(pos) === pos ? pos : 5,
+      fadeIn: Math.max(0, Math.min(3, editTxNum(t.fadeIn, 0.5))), fadeOut: Math.max(0, Math.min(3, editTxNum(t.fadeOut, 0.5))),
+      box: t.box === true, color: /^#[0-9a-fA-F]{6}$/.test(String(t.color || "")) ? String(t.color).toLowerCase() : "#ffffff"
+    };
+  }
+
+  /* 문서 → 화면 상태 ctx.tx(없는 키는 빈 목록 · 0 · 굽기 켬). */
+  function editTxFromDoc(doc) {
+    var d = doc || {};
+    function ok(item) {
+      return item && typeof item === "object" && typeof item.id === "string";
+    }
+    return {
+      captions: (Array.isArray(d.captions) ? d.captions : []).filter(ok).map(editTxCap),
+      titles: (Array.isArray(d.titles) ? d.titles : []).filter(ok).map(editTxTitle),
+      fadeIn: EDIT_TX_EDGES.indexOf(Number(d.fadeIn)) >= 0 ? Number(d.fadeIn) : 0,
+      fadeOut: EDIT_TX_EDGES.indexOf(Number(d.fadeOut)) >= 0 ? Number(d.fadeOut) : 0,
+      burnIn: d.captionBurnIn !== false
+    };
+  }
+
+  function editTxCloneTx(tx) {
+    var t = tx || editTxFromDoc({});
+    return { captions: t.captions.map(editTxCap), titles: t.titles.map(editTxTitle), fadeIn: t.fadeIn, fadeOut: t.fadeOut, burnIn: t.burnIn !== false };
+  }
+
+  /* PUT /edit 바디에 더한다(있고 기본값이 아닌 키만 — 안 쓴 문서의 저장 바디는 215b 전과 같다). */
+  function editTxBody(ctx, body) {
+    var tx = (ctx || {}).tx;
+    if (!tx) return body;
+    if (tx.captions.length) body.captions = tx.captions.map(editTxCap);
+    if (tx.titles.length) body.titles = tx.titles.map(editTxTitle);
+    if (tx.fadeIn) body.fadeIn = tx.fadeIn;
+    if (tx.fadeOut) body.fadeOut = tx.fadeOut;
+    if (tx.burnIn === false) body.captionBurnIn = false;
+    return body;
+  }
+
+  function editTxNewId(prefix, lists) {
+    var used = {};
+    (lists || []).forEach(function (list) {
+      (list || []).forEach(function (item) {
+        used[item.id] = true;
+      });
+    });
+    var id = "";
+    do {
+      id = prefix + Date.now().toString(36) + Math.floor(Math.random() * 46656).toString(36);
+    } while (used[id]);
+    return id;
+  }
+
+  /* 자막·타이틀 옮기기: 길이 그대로 start 를 [0, max − 길이] 안으로. */
+  function editTxMoved(item, start, max) {
+    var len = Number(item.end) - Number(item.start);
+    var a = Math.max(0, Math.min(Math.max(0, Number(max) - len), Number(start)));
+    var copy = JSON.parse(JSON.stringify(item));
+    copy.start = editRound3(a);
+    copy.end = editRound3(a + len);
+    return copy;
+  }
+
+  /* 끝 다듬기: edge "in"|"out" 를 value 로(최소 길이 EDIT_TX_MIN_S, 0~max). */
+  function editTxTrimmed(item, edge, value, max) {
+    var copy = JSON.parse(JSON.stringify(item));
+    var v = Number(value);
+    if (!isFinite(v)) return copy;
+    if (edge === "in") copy.start = editRound3(Math.max(0, Math.min(Number(item.end) - EDIT_TX_MIN_S, v)));
+    else copy.end = editRound3(Math.min(Math.max(Number(item.start) + EDIT_TX_MIN_S, v), Math.max(Number(max), Number(item.start) + EDIT_TX_MIN_S)));
+    return copy;
+  }
+
+  /* 재생헤드 t 에서 자르기(같은 글 두 개 — 레이저 도구). 양쪽 모두 최소 길이 이상이어야 한다. 못 자르면 null. */
+  function editTxSplitAt(list, index, t, newId) {
+    var item = list[index];
+    if (!item) return null;
+    var cut = editRound3(Number(t));
+    if (cut - Number(item.start) < EDIT_TX_MIN_S - 1e-9 || Number(item.end) - cut < EDIT_TX_MIN_S - 1e-9) return null;
+    var left = JSON.parse(JSON.stringify(item));
+    var right = JSON.parse(JSON.stringify(item));
+    left.end = cut;
+    right.start = cut;
+    right.id = String(newId);
+    var next = list.slice();
+    next.splice(index, 1, left, right);
+    return next;
+  }
+
+  /* 붙기: points 중 t 와 tol 초 안에서 가장 가까운 값, 없으면 t. */
+  function editTxSnap(t, points, tol) {
+    var best = t;
+    var gap = tol;
+    (points || []).forEach(function (p) {
+      var d = Math.abs(Number(p) - t);
+      if (d <= gap) {
+        gap = d;
+        best = Number(p);
+      }
+    });
+    return best;
+  }
+
+  /* 붙을 자리: 0 · 끝 · 재생헤드 · 클립 경계 · 다른 자막/타이틀 끝(skipId 빼고). */
+  function editTxSnapPoints(clips, tx, t, skipId) {
+    var info = editStarts(clips || []);
+    var points = [0, info.total, Number(t) || 0];
+    (clips || []).forEach(function (clip, i) {
+      points.push(info.starts[i], info.starts[i] + editClipLen(clip));
+    });
+    [(tx || {}).captions || [], (tx || {}).titles || []].forEach(function (list) {
+      list.forEach(function (item) {
+        if (item.id !== skipId) points.push(Number(item.start), Number(item.end));
+      });
+    });
+    return points;
+  }
+
+  function editTxActive(list, t) {
+    return (list || []).filter(function (item) {
+      return Number(item.start) <= t + 1e-6 && t < Number(item.end) - 1e-6;
+    });
+  }
+
+  /* 미리보기 CSS filter(밝기·대비·채도 — 서버 eq 와 비슷하게). 색온도·색조는 editTxTintOf 겹침 층. */
+  function editTxCssFilter(color) {
+    var c = color || {};
+    var parts = [];
+    if (c.brightness) parts.push("brightness(" + (1 + (c.brightness / 100) * 0.4).toFixed(3) + ")");
+    if (c.contrast) parts.push("contrast(" + (1 + (c.contrast / 100) * 0.5).toFixed(3) + ")");
+    if (c.saturation) parts.push("saturate(" + (1 + c.saturation / 100).toFixed(3) + ")");
+    return parts.join(" ");
+  }
+
+  /* 색온도(따뜻 = 주황, 차가움 = 파랑) · 색조(+ 자홍, − 초록) 겹침 층 [{color, alpha}](soft-light). */
+  function editTxTintOf(color) {
+    var c = color || {};
+    var out = [];
+    if (c.temperature) out.push({ color: c.temperature > 0 ? "rgb(255,140,30)" : "rgb(40,120,255)", alpha: Math.abs(c.temperature) / 100 * 0.45 });
+    if (c.tint) out.push({ color: c.tint > 0 ? "rgb(255,40,200)" : "rgb(40,220,80)", alpha: Math.abs(c.tint) / 100 * 0.4 });
+    return out;
+  }
+
+  /* 시각 t 의 블랙/화이트 전환 · 시작/끝 페이드 덮개 {tone, alpha}(alpha 0 = 없음). */
+  function editTxFadeAt(clips, tx, t) {
+    var info = editStarts(clips || []);
+    var best = { tone: "black", alpha: 0 };
+    for (var i = 0; i + 1 < (clips || []).length; i++) {
+      var dip = editTxDipOf(clips[i]);
+      if (!dip.type) continue;
+      var half = dip.seconds / 2;
+      var gap = Math.abs(t - info.starts[i + 1]);
+      if (gap < half) {
+        var a = 1 - gap / half;
+        if (a > best.alpha) best = { tone: dip.type === "dipWhite" ? "white" : "black", alpha: a };
+      }
+    }
+    var x = tx || {};
+    if (x.fadeIn && t < x.fadeIn) best = { tone: "black", alpha: Math.max(best.alpha, 1 - t / x.fadeIn) };
+    if (x.fadeOut && t > info.total - x.fadeOut) best = { tone: "black", alpha: Math.max(best.alpha, Math.min(1, (t - (info.total - x.fadeOut)) / x.fadeOut)) };
+    return best;
+  }
+
+  function editTxTitleAlpha(title, t) {
+    var a = 1;
+    var fin = Number(title.fadeIn) || 0;
+    var fout = Number(title.fadeOut) || 0;
+    if (fin > 0) a = Math.min(a, (t - Number(title.start)) / fin);
+    if (fout > 0) a = Math.min(a, (Number(title.end) - t) / fout);
+    return Math.max(0, Math.min(1, a));
+  }
+
+  function editTxPremText(p) {
+    var e = p || {};
+    if (e.status === "queued") return "프리미어 프로젝트: 대기 중…";
+    if (e.status === "running") return "프리미어 프로젝트: 소스를 묶는 중…";
+    if (e.status === "done") return "프리미어 프로젝트 준비됨" + (e.matchesDoc === false ? " (편집이 바뀌었습니다 — 다시 내보내기)" : "");
+    if (e.status === "failed") return "프리미어 프로젝트를 만들지 못했습니다: " + (e.error || "알 수 없는 오류");
+    return "";
+  }
+
+  /* 시각 [a, b] 와 겹치는 클립 번호. */
+  function editTxClipsIn(clips, a, b) {
+    var info = editStarts(clips || []);
+    var out = [];
+    (clips || []).forEach(function (clip, i) {
+      var s = info.starts[i];
+      if (s < b - 1e-6 && s + editClipLen(clip) > a + 1e-6) out.push(i);
+    });
+    return out;
+  }
+
+  /* ---- 상태 · 실행 취소 ---- */
+
+  /* editApplyView 가 부른다. */
+  function editTxApply(ctx, view) {
+    ctx.tx = editTxFromDoc((view || {}).doc);
+    ctx.txInfo = (view || {}).textFx || {};
+    ctx.txSel = null;
+    ctx.txColorLive = null;
+    ctx.txToolsSig = "";
+    if (ctx.txPrem) {
+      if (ctx.txPrem.timer) window.clearTimeout(ctx.txPrem.timer);
+      ctx.txPrem.timer = 0;
+      ctx.txPrem.state = null; // 그림체가 바뀌면 그 그림체 묶음을 다시 읽는다
+      ctx.txPrem.loaded = false;
+      ctx.txPrem.error = "";
+    }
+  }
+
+  /* editSnapshotOf 가 부른다(지금 열린 ⑦ 의 tx 도 함께). */
+  function editTxSnapOf(ctx, snap) {
+    snap.tx = editTxCloneTx(ctx.tx);
+    return snap;
+  }
+
+  /* editUndoRedo 가 부른다. */
+  function editTxRestore(ctx, snap) {
+    if (!snap || !snap.tx) return;
+    ctx.tx = editTxCloneTx(snap.tx);
+    if (ctx.txSel && !editTxFind(ctx, ctx.txSel.kind, ctx.txSel.id)) ctx.txSel = null;
+  }
+
+  function editTxList(ctx, kind) {
+    return kind === "title" ? ctx.tx.titles : ctx.tx.captions;
+  }
+
+  function editTxFind(ctx, kind, id) {
+    var list = editTxList(ctx, kind);
+    for (var i = 0; i < list.length; i++) {
+      if (list[i].id === id) return { index: i, item: list[i] };
+    }
+    return null;
+  }
+
+  /* tx 를 고치는 한 단계(실행 취소 한 단계 · 다시 그리기 · 저장). mutate(사본)가 false 를 주면 하지 않는다. */
+  function editTxCommit(ctx, mutate) {
+    if (!editAlive(ctx) || ctx.busy || !ctx.tx) return false;
+    var before = editSnapshotOf(ctx.variant, ctx.clips);
+    var next = editTxCloneTx(ctx.tx);
+    if (mutate(next) === false) return false;
+    next.captions.sort(function (a, b) {
+      return a.start - b.start || a.end - b.end;
+    });
+    next.titles.sort(function (a, b) {
+      return a.start - b.start || a.end - b.end;
+    });
+    ctx.tx = next;
+    editCommit(ctx, editCloneClips(ctx.clips), { before: before });
+    return true;
+  }
+
+  /* editDo 가 먼저 부른다: 자막·타이틀을 골랐으면 Delete = 지우기, S = 재생헤드에서 자르기. 처리했으면 true. */
+  function editTxDo(ctx, action) {
+    var sel = ctx.txSel;
+    if (!sel || !ctx.tx || (action !== "delete" && action !== "split")) return false;
+    var found = editTxFind(ctx, sel.kind, sel.id);
+    if (!found) {
+      ctx.txSel = null;
+      return false;
+    }
+    if (action === "delete") {
+      ctx.txSel = null;
+      editTxCommit(ctx, function (tx) {
+        editTxList({ tx: tx }, sel.kind).splice(found.index, 1);
+      });
+      return true;
+    }
+    var t = ctx.t;
+    if (!(t > found.item.start && t < found.item.end)) return false; // 재생헤드가 밖이면 클립 자르기(원래 동작)
+    var lists = [ctx.tx.captions, ctx.tx.titles];
+    var newId = editTxNewId(sel.kind === "title" ? "t" : "s", lists);
+    var ok = editTxCommit(ctx, function (tx) {
+      var next = editTxSplitAt(editTxList({ tx: tx }, sel.kind), found.index, t, newId);
+      if (!next) return false;
+      if (sel.kind === "title") tx.titles = next;
+      else tx.captions = next;
+    });
+    if (!ok) editNote(ctx, "자막이 너무 짧아 자를 수 없습니다.");
+    return true;
+  }
+
+  function editTxSelect(ctx, kind, id) {
+    ctx.txSel = kind ? { kind: kind, id: id } : null;
+    (ctx.txEls || []).forEach(function (rec) {
+      var on = !!ctx.txSel && rec.kind === ctx.txSel.kind && rec.id === ctx.txSel.id;
+      rec.el.classList[on ? "add" : "remove"]("is-selected");
+    });
+    editTxRenderTools(ctx);
+  }
+
+  /* ---- 타임라인: 자막 · V2 타이틀 트랙 ---- */
+
+  /* editBuild 가 부른다: 자막 줄 · V2 타이틀 줄과 왼쪽 이름표. 끝에 붙이고(앞 요소 자리는 그대로) 눈금자 바로 아래에 보이는 것은
+     CSS order(.has-tx)가 맡는다. */
+  function editTxTracks(ctx, labels) {
+    var d = ctx.dom;
+    d.txCapLane = el("div", "vnew-edit-track vnew-edit-txlane is-captions");
+    d.txTitleLane = el("div", "vnew-edit-track vnew-edit-txlane is-titles");
+    [d.txCapLane, d.txTitleLane].forEach(function (lane) {
+      lane.addEventListener("pointerdown", function (event) {
+        if (event && event.target === lane && editAlive(ctx)) editTxSelect(ctx, null);
+      });
+      d.content.appendChild(lane);
+    });
+    var titleLabel = el("span", "vnew-edit-label is-tx is-titles", "V2");
+    titleLabel.title = "V2 타이틀(영상 위 글)";
+    labels.appendChild(el("span", "vnew-edit-label is-tx is-captions", "자막"));
+    labels.appendChild(titleLabel);
+    labels.classList.add("has-tx");
+    d.content.classList.add("has-tx");
+  }
+
+  /* editRenderTimeline 이 부른다: 자막·타이틀 상자 · 클립 오른쪽 누르기 메뉴 · 전환 손잡이 오른쪽 누르기(새로 그린 요소에만 한 번). */
+  function editTxRender(ctx) {
+    if (!ctx.tx || !ctx.dom.txCapLane) return;
+    (ctx.clipEls || []).forEach(function (parts) {
+      parts.box.addEventListener("pointerdown", function () {
+        if (ctx.txSel) editTxSelect(ctx, null);
+      });
+      parts.box.addEventListener("contextmenu", function (event) {
+        if (event && event.preventDefault) event.preventDefault();
+        if (!editAlive(ctx) || ctx.busy) return;
+        editSelect(ctx, parts.index);
+        editTxClipMenu(ctx, parts.index, event);
+      });
+    });
+    (ctx.trEls || []).forEach(function (item, i) {
+      item.btn.addEventListener("contextmenu", function (event) {
+        if (event && event.preventDefault) event.preventDefault();
+        editTrOpen(ctx, i, item.btn); // 작업 215b: 오른쪽 누르기도 전환 메뉴
+      });
+    });
+    editTxRenderItems(ctx);
+    editTxPlaceFx(ctx);
+    editTxRenderTools(ctx);
+    editTxExportPaint(ctx);
+  }
+
+  /* 자막 줄 · V2 타이틀 줄의 상자들. */
+  function editTxRenderItems(ctx) {
+    var d = ctx.dom;
+    if (!ctx.tx || !d.txCapLane) return;
+    clear(d.txCapLane);
+    clear(d.txTitleLane);
+    ctx.txEls = [];
+    ctx.tx.captions.forEach(function (cap) {
+      d.txCapLane.appendChild(editTxItemEl(ctx, "caption", cap));
+    });
+    ctx.tx.titles.forEach(function (title) {
+      d.txTitleLane.appendChild(editTxItemEl(ctx, "title", title));
+    });
+  }
+
+  function editTxPx(ctx, seconds) {
+    return Math.round(Number(seconds) * ctx.pps * 10) / 10 + "px";
+  }
+
+  function editTxItemEl(ctx, kind, item) {
+    var node = el("div", "vnew-edit-txitem is-" + kind + (ctx.txSel && ctx.txSel.kind === kind && ctx.txSel.id === item.id ? " is-selected" : ""));
+    var italic = kind === "caption" && item.style && item.style.italic;
+    node.style.left = editTxPx(ctx, item.start);
+    node.style.width = editTxPx(ctx, Math.max(0.01, item.end - item.start));
+    var label = el("span", "vnew-edit-txitem-text" + (italic ? " is-italic" : ""), String(item.text || "").replace(/\n/g, " / "));
+    node.appendChild(label);
+    node.title = (kind === "title" ? "타이틀: " : "자막: ") + item.text + " · " + editTimeText(item.start, true) + "–" + editTimeText(item.end, true) +
+      " — 끌어 옮기기 · 양 끝 끌어 다듬기 · 두 번 눌러 글 고치기 · 오른쪽 누르기 메뉴";
+    var inEdge = el("div", "vnew-edit-txedge is-in");
+    var outEdge = el("div", "vnew-edit-txedge is-out");
+    node.appendChild(inEdge);
+    node.appendChild(outEdge);
+    var rec = { kind: kind, id: item.id, el: node };
+    ctx.txEls.push(rec);
+    node.addEventListener("pointerdown", function (event) {
+      editTxPointer(ctx, kind, item.id, "move", node, event);
+    });
+    inEdge.addEventListener("pointerdown", function (event) {
+      if (event && event.stopPropagation) event.stopPropagation();
+      editTxPointer(ctx, kind, item.id, "in", node, event);
+    });
+    outEdge.addEventListener("pointerdown", function (event) {
+      if (event && event.stopPropagation) event.stopPropagation();
+      editTxPointer(ctx, kind, item.id, "out", node, event);
+    });
+    node.addEventListener("dblclick", function () {
+      editTxEditText(ctx, kind, item.id, node);
+    });
+    node.addEventListener("contextmenu", function (event) {
+      if (event && event.preventDefault) event.preventDefault();
+      editTxSelect(ctx, kind, item.id);
+      editTxItemMenu(ctx, kind, item.id, event);
+    });
+    return node;
+  }
+
+  /* 누르기 = 고르기, 끌기 = 옮기기(move) · 끝 다듬기(in/out). 재생헤드 · 클립 경계 · 다른 자막 끝에 붙는다(EDIT_TX_SNAP_PX). */
+  function editTxPointer(ctx, kind, id, mode, node, event) {
+    if (!editPointerOk(ctx, event)) return;
+    var found = editTxFind(ctx, kind, id);
+    if (!found) return;
+    editTxSelect(ctx, kind, id);
+    var item = found.item;
+    var max = editStarts(ctx.clips).total;
+    var points = editTxSnapPoints(ctx.clips, ctx.tx, ctx.t, id);
+    var tol = EDIT_TX_SNAP_PX / (ctx.pps || 100);
+    var next = item;
+    editTrack(ctx, node, event, {
+      threshold: 3,
+      move: function (dx) {
+        var shift = dx / (ctx.pps || 100);
+        if (mode === "move") {
+          var start = item.start + shift;
+          var snapA = editTxSnap(start, points, tol);
+          var snapB = editTxSnap(start + (item.end - item.start), points, tol) - (item.end - item.start);
+          start = Math.abs(snapA - start) <= Math.abs(snapB - start) ? snapA : snapB;
+          next = editTxMoved(item, start, max);
+        } else {
+          var base = mode === "in" ? item.start : item.end;
+          next = editTxTrimmed(item, mode, editTxSnap(base + shift, points, tol), max);
+        }
+        node.style.left = editTxPx(ctx, next.start);
+        node.style.width = editTxPx(ctx, Math.max(0.01, next.end - next.start));
+      },
+      end: function (dx, moved) {
+        if (!moved || (next.start === item.start && next.end === item.end)) {
+          editTxRenderItems(ctx);
+          return;
+        }
+        editTxCommit(ctx, function (tx) {
+          var list = editTxList({ tx: tx }, kind);
+          var at = editTxFind({ tx: tx }, kind, id);
+          if (!at) return false;
+          list[at.index] = kind === "title" ? editTxTitle(next) : editTxCap(next);
+        });
+      }
+    });
+  }
+
+  /* 글 고치기(자막 위에 뜨는 입력 칸). 자막이 ⑥ 대사 줄이면 [이 대사도 고치기](기본 켬) — ⑥ 대사 고침(작업 212)으로도 저장한다. */
+  function editTxEditText(ctx, kind, id, node) {
+    if (!editAlive(ctx) || ctx.busy) return;
+    var found = editTxFind(ctx, kind, id);
+    if (!found) return;
+    editTxCloseEditor(ctx);
+    var item = found.item;
+    var box = el("div", "vnew-edit-txeditor");
+    box.setAttribute("role", "dialog");
+    box.setAttribute("aria-label", kind === "title" ? "타이틀 글 고치기" : "자막 글 고치기");
+    var input = el("textarea", "vnew-edit-txeditor-text");
+    input.value = item.text;
+    input.rows = 2;
+    input.maxLength = kind === "title" ? 120 : 200;
+    box.appendChild(input);
+    var check = null;
+    if (kind === "caption" && item.lineId) {
+      var label = el("label", "vnew-edit-txeditor-check");
+      check = el("input", "vnew-edit-txeditor-line");
+      check.type = "checkbox";
+      check.checked = true;
+      label.appendChild(check);
+      label.appendChild(el("span", "", EDIT_TX_FIX_LINE));
+      label.title = "⑥ 사운드의 그 대사(작업 212 대사 고침)도 같은 글로 저장합니다 — 말하는 사람 · 목소리 · 말투 메모는 그대로";
+      box.appendChild(label);
+    }
+    var tools = el("div", "vnew-edit-txeditor-tools");
+    var ok = el("button", "primary-button vnew-edit-txeditor-ok", "확인");
+    ok.type = "button";
+    var cancel = el("button", "outline-button vnew-edit-txeditor-cancel", "취소");
+    cancel.type = "button";
+    tools.appendChild(ok);
+    tools.appendChild(cancel);
+    box.appendChild(tools);
+    function done(save) {
+      if (ctx.txEditor !== rec) return;
+      editTxCloseEditor(ctx);
+      if (save) editTxSetText(ctx, kind, id, input.value, !!(check && check.checked));
+    }
+    var rec = { el: box, done: done };
+    ok.addEventListener("click", function () {
+      done(true);
+    });
+    cancel.addEventListener("click", function () {
+      done(false);
+    });
+    input.addEventListener("keydown", function (event) {
+      if (event && event.key === "Enter" && !event.shiftKey) {
+        if (event.preventDefault) event.preventDefault();
+        done(true);
+      } else if (event && event.key === "Escape") {
+        done(false);
+      }
+    });
+    ctx.txEditor = rec;
+    ctx.root.appendChild(box);
+    var rect = node && node.getBoundingClientRect ? node.getBoundingClientRect() : null;
+    if (rect) {
+      box.style.left = Math.max(8, Math.round(Number(rect.left) || 0)) + "px";
+      box.style.top = Math.max(8, Math.round((Number(rect.bottom) || 0) + 4)) + "px";
+    }
+    if (typeof input.focus === "function") {
+      try {
+        input.focus({ preventScroll: true });
+      } catch (error) {
+        /* 초점을 줄 수 없다 */
+      }
+    }
+  }
+
+  function editTxCloseEditor(ctx) {
+    var rec = ctx.txEditor;
+    if (!rec) return;
+    ctx.txEditor = null;
+    if (rec.el.parentNode) rec.el.parentNode.removeChild(rec.el);
+  }
+
+  /* 글을 바꾼다(실행 취소 한 단계). alsoLine 이면 ⑥ 대사 고침도 저장(editTxSaveLine). */
+  function editTxSetText(ctx, kind, id, raw, alsoLine) {
+    var text = String(raw || "").replace(/\r\n?/g, "\n").split("\n").map(function (s) {
+      return s.trim();
+    }).filter(Boolean).slice(0, 3).join("\n");
+    if (!text) {
+      editNote(ctx, "글이 비어 있으면 바꾸지 않습니다. 지우려면 Delete 를 누르세요.");
+      return;
+    }
+    var found = editTxFind(ctx, kind, id);
+    if (!found) return;
+    if (found.item.text !== text) {
+      editTxCommit(ctx, function (tx) {
+        var at = editTxFind({ tx: tx }, kind, id);
+        if (!at) return false;
+        editTxList({ tx: tx }, kind)[at.index].text = text;
+      });
+    }
+    if (kind === "caption" && alsoLine && found.item.lineId) editTxSaveLine(ctx, found.item.lineId, text);
+  }
+
+  function editTxSoundView(ctx, fresh) {
+    var cache = ctx.txSound;
+    if (!fresh && cache && cache.variant === ctx.variant && Date.now() - cache.at < EDIT_TX_SOUND_TTL_MS) return Promise.resolve(cache.view);
+    return api(soundPath() + "?variant=" + encodeURIComponent(ctx.variant)).then(function (view) {
+      ctx.txSound = { variant: ctx.variant, at: Date.now(), view: view || {} };
+      return view || {};
+    });
+  }
+
+  /* 작업 212 대사 고침 바디: 새 글만 바꾸고 말하는 사람 · 목소리(속마음) · 말투 메모는 지금 고침(없으면 대본 줄) 그대로. 순수 함수. */
+  function editTxOverrideBody(view, variant, lineId, text) {
+    var line = ((view || {}).lines || []).filter(function (l) {
+      return l && l.id === lineId;
+    })[0] || {};
+    var entry = ((((view || {}).lineRedo || {}).lines) || {})[lineId] || {};
+    var ov = entry.override || null;
+    return {
+      variant: variant, lineId: lineId, textKo: text,
+      speaker: ov ? String(ov.speaker || "") : String(line.speaker || ""),
+      thought: ov ? ov.thought === true : line.voice === "thought",
+      deliveryKo: ov ? String(ov.deliveryKo || "") : ""
+    };
+  }
+
+  function editTxSaveLine(ctx, lineId, text) {
+    var variant = ctx.variant;
+    editNote(ctx, "⑥ 대사도 고치는 중…");
+    return editTxSoundView(ctx, false)
+      .then(function (view) {
+        return api(soundPath() + "/lines/override", { method: "PUT", body: JSON.stringify(editTxOverrideBody(view, variant, lineId, text)) });
+      })
+      .then(function (view) {
+        ctx.txSound = { variant: variant, at: Date.now(), view: view || {} };
+        if (editAlive(ctx)) editNote(ctx, "⑥ 대사 목록도 새 글로 고쳤습니다.");
+      })
+      .catch(function (err) {
+        if (editAlive(ctx)) editShowError(ctx, "⑥ 대사는 고치지 못했습니다: " + lrdErr(err));
+      });
+  }
+
+  /* ---- 오른쪽 누르기 메뉴 ---- */
+
+  /* 화면에 고정한 작은 메뉴(전환 메뉴와 같은 모양). items [{text, title?, disabled?, run()}]. 바깥 누르기 · Esc · 스크롤이면 닫는다. */
+  function editTxMenu(ctx, event, title, items) {
+    editTxMenuClose(ctx);
+    editTrClose(ctx);
+    var menu = el("div", "vnew-edit-trmenu vnew-edit-txmenu");
+    menu.setAttribute("role", "menu");
+    menu.appendChild(el("p", "vnew-edit-trmenu-title", title));
+    items.forEach(function (it) {
+      var row = el("span", "vnew-edit-trmenu-row");
+      var btn = el("button", "vnew-edit-trmenu-item", it.text);
+      btn.type = "button";
+      btn.setAttribute("role", "menuitem");
+      if (it.title) btn.title = it.title;
+      btn.disabled = !!it.disabled;
+      btn.addEventListener("click", function () {
+        editTxMenuClose(ctx);
+        it.run();
+      });
+      row.appendChild(btn);
+      menu.appendChild(row);
+    });
+    ctx.root.appendChild(menu);
+    var vw = Number(window.innerWidth) || 0;
+    var vh = Number(window.innerHeight) || 0;
+    var x = Number((event || {}).clientX) || 0;
+    var y = Number((event || {}).clientY) || 0;
+    var mw = Number(menu.offsetWidth) || 220;
+    var mh = Number(menu.offsetHeight) || 160;
+    menu.style.left = Math.round(vw ? Math.max(8, Math.min(vw - mw - 8, x)) : x) + "px";
+    menu.style.top = Math.round(vh ? Math.max(8, Math.min(vh - mh - 8, y)) : y) + "px";
+    var onDoc = function (ev) {
+      if (!editInside(menu, ev && ev.target)) editTxMenuClose(ctx);
+    };
+    var onKey = function (ev) {
+      if (ev && ev.key === "Escape") editTxMenuClose(ctx);
+    };
+    document.addEventListener("pointerdown", onDoc, true);
+    document.addEventListener("keydown", onKey, true);
+    ctx.txMenu = { el: menu, onDoc: onDoc, onKey: onKey };
+    return menu;
+  }
+
+  function editTxMenuClose(ctx) {
+    var m = ctx && ctx.txMenu;
+    if (!m) return;
+    ctx.txMenu = null;
+    document.removeEventListener("pointerdown", m.onDoc, true);
+    document.removeEventListener("keydown", m.onKey, true);
+    if (m.el.parentNode) m.el.parentNode.removeChild(m.el);
+  }
+
+  function editTxQuote(text) {
+    var t = String(text || "").replace(/\s+/g, " ");
+    return "“" + (t.length > 24 ? t.slice(0, 23) + "…" : t) + "”";
+  }
+
+  /* 자막 메뉴: 글 고치기 · 대사 고치기 · 영상 다시 만들기(⑥ 줄일 때) · 재생헤드에서 자르기 · 지우기. */
+  function editTxItemMenu(ctx, kind, id, event) {
+    var found = editTxFind(ctx, kind, id);
+    if (!found) return;
+    var item = found.item;
+    var items = [{ text: "글 고치기", run: function () {
+      var rec = (ctx.txEls || []).filter(function (r) {
+        return r.kind === kind && r.id === id;
+      })[0];
+      editTxEditText(ctx, kind, id, rec ? rec.el : null);
+    } }];
+    if (kind === "caption" && item.lineId) {
+      items.push({ text: EDIT_TX_LINE_MENU + " — " + editTxQuote(item.text), run: function () {
+        var ids = editTxClipsIn(ctx.clips, item.start, item.end).map(function (i) {
+          return ctx.clips[i].id;
+        });
+        editTxLineOpen(ctx, item.lineId, ids);
+      } });
+    }
+    items.push({ text: "재생헤드에서 자르기 (S)", disabled: !(ctx.t > item.start && ctx.t < item.end), run: function () {
+      editTxSelect(ctx, kind, id);
+      editTxDo(ctx, "split");
+    } });
+    items.push({ text: "지우기 (Delete)", run: function () {
+      editTxSelect(ctx, kind, id);
+      editTxDo(ctx, "delete");
+    } });
+    editTxMenu(ctx, event, kind === "title" ? "타이틀" : "자막", items);
+  }
+
+  /* 클립 메뉴: 그 클립 안 대사마다 [대사 고치기 · 영상 다시 만들기] · 색 보정 원래대로 · 같은 테이크 모두에 적용. 자막이 없으면 서버에 대사 자리를 묻는다. */
+  function editTxClipMenu(ctx, index, event) {
+    var clip = ctx.clips[index];
+    if (!clip) return;
+    var info = editStarts(ctx.clips);
+    var a = info.starts[index];
+    var b = a + editClipLen(clip);
+    function lineItems(caps) {
+      var seen = {};
+      return caps.filter(function (c) {
+        if (!c.lineId || seen[c.lineId] || !(c.start < b - 1e-6 && c.end > a + 1e-6)) return false;
+        seen[c.lineId] = true;
+        return true;
+      }).map(function (c) {
+        return { text: EDIT_TX_LINE_MENU + " — " + editTxQuote(c.text), run: function () {
+          editTxLineOpen(ctx, c.lineId, [clip.id]);
+        } };
+      });
+    }
+    function show(lines, note) {
+      var items = lines.slice();
+      if (!items.length) items.push({ text: note || "이 클립에서 찾은 대사가 없습니다", disabled: true, run: function () {} });
+      items.push({ text: "색 보정 원래대로", disabled: !editTxHasColor(clip), run: function () {
+        editTxColorReset(ctx);
+      } });
+      items.push({ text: "같은 테이크 모두에 이 색 적용", disabled: !editTxHasColor(clip), run: function () {
+        editTxColorSameTake(ctx);
+      } });
+      editTxMenu(ctx, event, "클립 " + (index + 1), items);
+    }
+    var mine = lineItems(ctx.tx.captions);
+    if (mine.length) {
+      show(mine);
+      return;
+    }
+    show([], "대사 찾는 중…");
+    api(editPath(ctx) + "/captions/auto", { method: "POST", body: JSON.stringify({ variant: ctx.variant, clips: editCloneClips(ctx.clips) }) })
+      .then(function (res) {
+        if (!editAlive(ctx) || !ctx.txMenu) return;
+        show(lineItems(((res || {}).captions || []).map(editTxCap)));
+      })
+      .catch(function (err) {
+        if (editAlive(ctx) && ctx.txMenu) show([], "대사를 찾지 못했습니다: " + errMessage(err));
+      });
+  }
+
+  /* ---- 전환: 블랙/화이트(전환 메뉴 아래 줄) · 손잡이 표시 ---- */
+
+  /* editTrOpen 이 부른다: [블랙으로 0.5초] … [화이트로 …] 줄. 지금 값은 is-on, 맞지 않는 길이는 막는다. */
+  function editTxTrRows(ctx, index, menu) {
+    var a = ctx.clips[index];
+    var b = ctx.clips[index + 1];
+    if (!a || !b) return;
+    var now = editTxDipOf(a);
+    if (now.type) {
+      Array.prototype.slice.call(menu.children || []).forEach(function (row) {
+        var first = (row.children || [])[0];
+        if (first && first.classList && !editDissolveOf(a)) {
+          first.classList.remove("is-on");
+          first.setAttribute("aria-checked", "false");
+        }
+      });
+    }
+    ["dipBlack", "dipWhite"].forEach(function (type) {
+      var row = el("div", "vnew-edit-trmenu-row vnew-edit-txdip");
+      row.appendChild(el("span", "vnew-edit-txdip-name", EDIT_TX_DIP_NAME[type] + "로 사라졌다 나타나기"));
+      EDIT_TX_DIPS.forEach(function (seconds) {
+        var fits = editTxDipFits(seconds, a, b);
+        var on = now.type === type && now.seconds === seconds;
+        var item = el("button", "vnew-edit-trmenu-item vnew-edit-txdip-item" + (on ? " is-on" : ""), seconds + "초");
+        item.type = "button";
+        item.setAttribute("role", "menuitemradio");
+        item.setAttribute("aria-checked", on ? "true" : "false");
+        item.setAttribute("aria-label", EDIT_TX_DIP_NAME[type] + " 전환 " + seconds + "초");
+        item.disabled = !fits;
+        item.title = fits ? "경계 앞 " + seconds / 2 + "초는 " + EDIT_TX_DIP_NAME[type] + "로 사라지고 뒤 " + seconds / 2 + "초는 나타납니다 — 길이는 그대로" : EDIT_TR_SHORT;
+        item.addEventListener("click", function () {
+          if (fits) editTxSetDip(ctx, index, type, seconds);
+        });
+        row.appendChild(item);
+      });
+      menu.appendChild(row);
+    });
+  }
+
+  /* index 번째 클립 → 다음 클립 전환을 블랙/화이트(type "" = 컷)로. 실행 취소 한 단계. */
+  function editTxSetDip(ctx, index, type, seconds) {
+    editTrClose(ctx);
+    if (!editAlive(ctx) || ctx.busy) return;
+    var a = ctx.clips[index];
+    var b = ctx.clips[index + 1];
+    if (!a || !b) return;
+    if (type && !editTxDipFits(seconds, a, b)) {
+      editNote(ctx, EDIT_TR_SHORT + ".");
+      return;
+    }
+    var clip = editCloneClip(a);
+    if (type) clip.transition = { type: type, seconds: seconds };
+    else delete clip.transition;
+    var next = ctx.clips.slice();
+    next[index] = clip;
+    editCommit(ctx, next, {});
+  }
+
+  /* editPlaceFx 가 부른다: 블랙/화이트 전환 손잡이 색 · 이름. */
+  function editTxPlaceFx(ctx) {
+    (ctx.trEls || []).forEach(function (item, i) {
+      var dip = editTxDipOf(ctx.clips[i]);
+      item.btn.classList.remove("is-dip-black");
+      item.btn.classList.remove("is-dip-white");
+      if (!dip.type) return;
+      item.btn.classList.add(dip.type === "dipWhite" ? "is-dip-white" : "is-dip-black");
+      var title = "클립 " + (i + 1) + " → " + (i + 2) + " 전환: " + EDIT_TX_DIP_NAME[dip.type] + " " + dip.seconds + "초 — 눌러 바꾸기";
+      if (item.btn.title !== title) {
+        item.btn.title = title;
+        item.btn.setAttribute("aria-label", title);
+      }
+    });
+  }
+
+  /* ---- 미리보기(재생 화면 위) ---- */
+
+  /* editBuild 가 부른다: 색온도·색조 층 · 블랙/화이트 덮개 · 타이틀 · 자막 층. */
+  function editTxScreen(ctx, screen) {
+    var d = ctx.dom;
+    d.txScreen = screen;
+    d.txWarm = el("div", "vnew-edit-txlayer is-tint");
+    d.txTint = el("div", "vnew-edit-txlayer is-tint");
+    d.txFade = el("div", "vnew-edit-txlayer is-fade");
+    d.txTitles = el("div", "vnew-edit-txlayer is-titles");
+    d.txCap = el("div", "vnew-edit-txcap");
+    [d.txWarm, d.txTint, d.txFade, d.txTitles, d.txCap].forEach(function (n) {
+      n.setAttribute("aria-hidden", "true");
+      screen.appendChild(n);
+    });
+  }
+
+  function editTxSetStyle(node, key, value) {
+    if (node && node.style[key] !== value) node.style[key] = value;
+  }
+
+  /* editPlaceHead 가 부른다(재생헤드가 움직일 때마다): 색 · 전환 덮개 · 자막 · 타이틀. 바뀐 값만 쓴다. */
+  function editTxPreview(ctx) {
+    var d = ctx.dom;
+    if (!d.txScreen || !ctx.tx) return;
+    var t = ctx.t;
+    var loc = editLocate(ctx.clips, t);
+    var live = ctx.txColorLive;
+    var color = loc ? (live && live.index === loc.index ? live.color : editTxColorOf(loc.clip)) : {};
+    var filter = editTxCssFilter(color);
+    (ctx.vids || []).forEach(function (video) {
+      editTxSetStyle(video, "filter", filter);
+    });
+    var tints = editTxTintOf(color);
+    [d.txWarm, d.txTint].forEach(function (layer, i) {
+      var tint = color && (i === 0 ? (color.temperature ? tints[0] : null) : (color.tint ? tints[tints.length - 1] : null));
+      editTxSetStyle(layer, "background", tint ? tint.color : "transparent");
+      editTxSetStyle(layer, "opacity", tint ? String(Math.round(tint.alpha * 1000) / 1000) : "0");
+    });
+    var fade = editTxFadeAt(ctx.clips, ctx.tx, t);
+    editTxSetStyle(d.txFade, "background", fade.tone === "white" ? "#ffffff" : "#000000");
+    editTxSetStyle(d.txFade, "opacity", String(Math.round(fade.alpha * 1000) / 1000));
+    var h = Number(d.txScreen.clientHeight) || 270;
+    var caps = editTxActive(ctx.tx.captions, t);
+    var capSig = caps.map(function (c) {
+      return c.id + "|" + c.text + "|" + JSON.stringify(c.style);
+    }).join("\n") + "|" + h;
+    if (capSig !== ctx.txCapSig) {
+      ctx.txCapSig = capSig;
+      clear(d.txCap);
+      caps.forEach(function (cap) {
+        var line = el("span", "vnew-edit-txcap-line is-" + cap.style.back + (cap.style.italic ? " is-italic" : ""), cap.text);
+        line.style.color = cap.style.color;
+        line.style.fontSize = Math.max(8, Math.round(h * EDIT_TX_CAP_RATIO[cap.style.size])) + "px";
+        d.txCap.appendChild(line);
+      });
+      d.txCap.className = "vnew-edit-txcap is-" + ((caps[0] || {}).style || {}).pos;
+    }
+    var titles = editTxActive(ctx.tx.titles, t);
+    var titleSig = titles.map(function (x) {
+      return JSON.stringify(x);
+    }).join("\n") + "|" + h;
+    if (titleSig !== ctx.txTitleSig) {
+      ctx.txTitleSig = titleSig;
+      clear(d.txTitles);
+      ctx.txTitleEls = titles.map(function (title) {
+        var node = el("span", "vnew-edit-txtitle is-pos" + title.pos + (title.box ? " is-box" : ""), title.text);
+        node.style.color = title.color;
+        node.style.fontSize = Math.max(8, Math.round(h * EDIT_TX_TITLE_RATIO[title.size])) + "px";
+        d.txTitles.appendChild(node);
+        return { el: node, title: title };
+      });
+    }
+    (ctx.txTitleEls || []).forEach(function (rec) {
+      editTxSetStyle(rec.el, "opacity", String(Math.round(editTxTitleAlpha(rec.title, t) * 1000) / 1000));
+    });
+  }
+
+  /* ---- 도구 칸(자막 · 타이틀 · 색 · 시작/끝 페이드) ---- */
+
+  function editTxSelectEl(className, options, value, onChange, label) {
+    var select = el("select", className);
+    options.forEach(function (pair) {
+      var option = el("option", "", pair[1]);
+      option.value = String(pair[0]);
+      select.appendChild(option);
+    });
+    select.value = String(value);
+    if (label) select.setAttribute("aria-label", label);
+    select.addEventListener("change", function () {
+      onChange(select.value);
+    });
+    return select;
+  }
+
+  function editTxField(text, field) {
+    var label = el("label", "vnew-edit-txfield");
+    label.appendChild(el("span", "vnew-edit-txfield-label", text));
+    label.appendChild(field);
+    return label;
+  }
+
+  /* editBuild 가 도구줄에 붙인다. 내용은 editTxRenderTools 가 고른 것에 맞춰 다시 그린다. */
+  function editTxToolsBox(ctx) {
+    var d = ctx.dom;
+    d.txBox = el("div", "vnew-edit-tx");
+    return d.txBox;
+  }
+
+  function editTxButton(className, text, title, onClick) {
+    var btn = el("button", "outline-button vnew-edit-txbtn " + className, text);
+    btn.type = "button";
+    if (title) btn.title = title;
+    btn.addEventListener("click", onClick);
+    return btn;
+  }
+
+  /* editRenderTools · editTxRender 가 부른다. 그릴 내용(고른 것 · 값)이 같으면 다시 그리지 않는다(입력 중인 칸이 끊기지 않게). */
+  function editTxRenderTools(ctx) {
+    var box = ctx.dom.txBox;
+    if (!box || !ctx.tx) return;
+    var sel = ctx.txSel ? editTxFind(ctx, ctx.txSel.kind, ctx.txSel.id) : null;
+    var clipSel = !sel && ctx.sel >= 0 && ctx.sel < ctx.clips.length && !editMultiOn(ctx) ? ctx.sel : -1;
+    var sig = JSON.stringify([ctx.txSel, sel && sel.item, clipSel, clipSel >= 0 ? editTxColorOf(ctx.clips[clipSel]) : null,
+      ctx.tx.fadeIn, ctx.tx.fadeOut, ctx.clips.length]);
+    if (sig === ctx.txToolsSig && box.firstChild) return;
+    ctx.txToolsSig = sig;
+    clear(box);
+    var row = el("div", "vnew-edit-txrow");
+    row.appendChild(editTxButton("is-auto", "자막 자동 만들기", "⑥ 사운드의 대사 시간으로 자막을 만듭니다(⑥에서 고친 대사가 먼저). 실행 취소로 되돌릴 수 있습니다", function () {
+      editTxAutoCaptions(ctx);
+    }));
+    row.appendChild(editTxButton("is-add-cap", "+ 자막", "재생헤드에 2초 자막을 넣습니다", function () {
+      editTxAdd(ctx, "caption");
+    }));
+    row.appendChild(editTxButton("is-add-title", "+ 타이틀", "재생헤드에 3초 타이틀(V2)을 넣습니다", function () {
+      editTxAdd(ctx, "title");
+    }));
+    var edges = [[0, "없음"]].concat(EDIT_TX_EDGES.map(function (s) {
+      return [s, s + "초"];
+    }));
+    row.appendChild(editTxField("처음: 검은 화면에서", editTxSelectEl("vnew-edit-txfade-in", edges, ctx.tx.fadeIn, function (v) {
+      editTxCommit(ctx, function (tx) {
+        tx.fadeIn = Number(v) || 0;
+      });
+    }, "처음 페이드")));
+    row.appendChild(editTxField("끝: 검은 화면으로", editTxSelectEl("vnew-edit-txfade-out", edges, ctx.tx.fadeOut, function (v) {
+      editTxCommit(ctx, function (tx) {
+        tx.fadeOut = Number(v) || 0;
+      });
+    }, "끝 페이드")));
+    box.appendChild(row);
+    if (sel && ctx.txSel.kind === "caption") box.appendChild(editTxCaptionTools(ctx, sel.item));
+    else if (sel && ctx.txSel.kind === "title") box.appendChild(editTxTitleTools(ctx, sel.item));
+    else if (clipSel >= 0) box.appendChild(editTxColorTools(ctx));
+    box.appendChild(el("p", "vnew-hint vnew-edit-txnote", EDIT_TX_NOTE));
+  }
+
+  function editTxCaptionTools(ctx, cap) {
+    var wrap = el("div", "vnew-edit-txrow is-caption");
+    wrap.appendChild(el("span", "vnew-edit-txrow-title", "자막 모양"));
+    function apply(patch, all) {
+      editTxCommit(ctx, function (tx) {
+        tx.captions.forEach(function (c) {
+          if (all || c.id === cap.id) Object.keys(patch).forEach(function (k) {
+            c.style[k] = patch[k];
+          });
+        });
+      });
+    }
+    wrap.appendChild(editTxField("모음", editTxSelectEl("vnew-edit-txpreset", [["", "고르기…"]].concat(EDIT_TX_PRESETS.map(function (p) {
+      return [p[0], p[1]];
+    })), "", function (v) {
+      var preset = EDIT_TX_PRESETS.filter(function (p) {
+        return p[0] === v;
+      })[0];
+      if (preset) apply(preset[2], false);
+    }, "자막 모양 모음")));
+    wrap.appendChild(editTxField("크기", editTxSelectEl("vnew-edit-txsize", EDIT_TX_SIZES, cap.style.size, function (v) {
+      apply({ size: v }, false);
+    })));
+    var color = el("input", "vnew-edit-txcolor");
+    color.type = "color";
+    color.value = cap.style.color;
+    color.addEventListener("change", function () {
+      apply({ color: String(color.value).toLowerCase() }, false);
+    });
+    wrap.appendChild(editTxField("색", color));
+    wrap.appendChild(editTxField("배경", editTxSelectEl("vnew-edit-txback", [["outline", "테두리"], ["box", "상자"]], cap.style.back, function (v) {
+      apply({ back: v }, false);
+    })));
+    wrap.appendChild(editTxField("자리", editTxSelectEl("vnew-edit-txpos", [["bottom", "아래"], ["top", "위"]], cap.style.pos, function (v) {
+      apply({ pos: v }, false);
+    })));
+    var italic = el("input", "vnew-edit-txitalic");
+    italic.type = "checkbox";
+    italic.checked = cap.style.italic === true;
+    italic.addEventListener("change", function () {
+      apply({ italic: !!italic.checked }, false);
+    });
+    wrap.appendChild(editTxField("기울임(속마음)", italic));
+    wrap.appendChild(editTxButton("is-all", "모든 자막에 이 모양", "크기 · 색 · 배경 · 자리를 모든 자막에 적용합니다(기울임은 그대로)", function () {
+      apply({ size: cap.style.size, color: cap.style.color, back: cap.style.back, pos: cap.style.pos }, true);
+    }));
+    return wrap;
+  }
+
+  function editTxTitleTools(ctx, title) {
+    var wrap = el("div", "vnew-edit-txrow is-title");
+    wrap.appendChild(el("span", "vnew-edit-txrow-title", "타이틀"));
+    function apply(patch) {
+      editTxCommit(ctx, function (tx) {
+        var at = editTxFind({ tx: tx }, "title", title.id);
+        if (!at) return false;
+        Object.keys(patch).forEach(function (k) {
+          tx.titles[at.index][k] = patch[k];
+        });
+      });
+    }
+    wrap.appendChild(editTxField("크기", editTxSelectEl("vnew-edit-txtsize", EDIT_TX_TSIZES, title.size, function (v) {
+      apply({ size: v });
+    })));
+    var grid = el("div", "vnew-edit-txgrid");
+    grid.setAttribute("role", "radiogroup");
+    grid.setAttribute("aria-label", "타이틀 자리(9칸)");
+    for (var p = 1; p <= 9; p++) {
+      (function (pos) {
+        var cell = el("button", "vnew-edit-txgrid-cell" + (pos === title.pos ? " is-on" : ""), "");
+        cell.type = "button";
+        cell.setAttribute("role", "radio");
+        cell.setAttribute("aria-checked", pos === title.pos ? "true" : "false");
+        cell.setAttribute("aria-label", "자리 " + pos);
+        cell.addEventListener("click", function () {
+          if (pos !== title.pos) apply({ pos: pos });
+        });
+        grid.appendChild(cell);
+      })(p);
+    }
+    wrap.appendChild(editTxField("자리", grid));
+    ["fadeIn", "fadeOut"].forEach(function (key) {
+      var input = el("input", "vnew-edit-txtfade");
+      input.type = "number";
+      input.min = "0";
+      input.max = "3";
+      input.step = "0.1";
+      input.value = String(title[key]);
+      input.addEventListener("change", function () {
+        var v = Math.max(0, Math.min(3, Math.round(editTxNum(input.value, 0) * 20) / 20));
+        if (v !== title[key]) apply(key === "fadeIn" ? { fadeIn: v } : { fadeOut: v });
+      });
+      wrap.appendChild(editTxField(key === "fadeIn" ? "나타나기(초)" : "사라지기(초)", input));
+    });
+    var box = el("input", "vnew-edit-txtbox");
+    box.type = "checkbox";
+    box.checked = title.box === true;
+    box.addEventListener("change", function () {
+      apply({ box: !!box.checked });
+    });
+    wrap.appendChild(editTxField("배경 상자", box));
+    var color = el("input", "vnew-edit-txcolor");
+    color.type = "color";
+    color.value = title.color;
+    color.addEventListener("change", function () {
+      apply({ color: String(color.value).toLowerCase() });
+    });
+    wrap.appendChild(editTxField("색", color));
+    return wrap;
+  }
+
+  /* 고른 클립 색 보정(Lumetri-lite): 슬라이더 5개(−100~100) · 원래대로 · 같은 테이크 모두에 적용. 끄는 동안은 미리보기만(input),
+     놓으면 실행 취소 한 단계(change). */
+  function editTxColorTools(ctx) {
+    var wrap = el("div", "vnew-edit-txrow is-color");
+    wrap.appendChild(el("span", "vnew-edit-txrow-title", "색 보정 · 클립 " + (ctx.sel + 1)));
+    var index = ctx.sel;
+    var clip = ctx.clips[index];
+    var now = editTxColorOf(clip);
+    EDIT_TX_COLOR_KEYS.forEach(function (pair) {
+      var key = pair[0];
+      var range = el("input", "vnew-edit-txslider is-" + key);
+      range.type = "range";
+      range.min = "-100";
+      range.max = "100";
+      range.step = "1";
+      range.value = String(now[key] || 0);
+      range.setAttribute("aria-label", pair[1]);
+      var value = el("span", "vnew-edit-txslider-value", String(now[key] || 0));
+      range.addEventListener("input", function () {
+        var color = editTxColorOf(clip);
+        color[key] = Math.round(Number(range.value) || 0);
+        ctx.txColorLive = { index: index, color: editTxColorOf({ color: color }) };
+        value.textContent = String(color[key]);
+        editTxPreview(ctx);
+      });
+      range.addEventListener("change", function () {
+        ctx.txColorLive = null;
+        editTxColorSet(ctx, index, key, Math.round(Number(range.value) || 0));
+      });
+      var field = editTxField(pair[1], range);
+      field.appendChild(value);
+      wrap.appendChild(field);
+    });
+    wrap.appendChild(editTxButton("is-reset", "원래대로", "이 클립 색 보정을 모두 0 으로", function () {
+      editTxColorReset(ctx);
+    }));
+    wrap.appendChild(editTxButton("is-same", "같은 테이크 모두에 적용", "같은 원본 영상을 쓰는 클립 모두에 이 색 보정을 넣습니다", function () {
+      editTxColorSameTake(ctx);
+    }));
+    return wrap;
+  }
+
+  function editTxColorSet(ctx, index, key, value) {
+    var clip = ctx.clips[index];
+    if (!clip || !editAlive(ctx) || ctx.busy) return;
+    var color = editTxColorOf(clip);
+    var v = Math.max(-100, Math.min(100, Math.round(Number(value) || 0)));
+    if ((color[key] || 0) === v) return;
+    color[key] = v;
+    var next = ctx.clips.slice();
+    next[index] = editCloneClip(clip);
+    next[index].color = editTxColorOf({ color: color });
+    if (!Object.keys(next[index].color).length) delete next[index].color;
+    editCommit(ctx, next, {});
+  }
+
+  function editTxColorReset(ctx) {
+    var clip = ctx.clips[ctx.sel];
+    if (!clip || !editTxHasColor(clip) || !editAlive(ctx) || ctx.busy) return;
+    var next = ctx.clips.slice();
+    next[ctx.sel] = editCloneClip(clip);
+    delete next[ctx.sel].color;
+    editCommit(ctx, next, {});
+  }
+
+  /* 같은 원본(sourceKey)의 클립 모두에 고른 클립 색 보정(실행 취소 한 단계). 반환 바꾼 클립 수. */
+  function editTxColorSameTake(ctx) {
+    var clip = ctx.clips[ctx.sel];
+    if (!clip || !editAlive(ctx) || ctx.busy) return 0;
+    var color = editTxColorOf(clip);
+    var count = 0;
+    var next = ctx.clips.map(function (c) {
+      if (c.sourceKey !== clip.sourceKey || c === clip) return c;
+      if (JSON.stringify(editTxColorOf(c)) === JSON.stringify(color)) return c;
+      var copy = editCloneClip(c);
+      if (Object.keys(color).length) copy.color = JSON.parse(JSON.stringify(color));
+      else delete copy.color;
+      count += 1;
+      return copy;
+    });
+    if (!count) {
+      editNote(ctx, "같은 테이크의 다른 클립이 없거나 이미 같은 색입니다.");
+      return 0;
+    }
+    editCommit(ctx, next, {});
+    editNote(ctx, "같은 테이크 클립 " + count + "개에 색 보정을 넣었습니다.");
+    return count;
+  }
+
+  /* [+ 자막] · [+ 타이틀]: 재생헤드에서 2초(타이틀 3초), 끝을 넘으면 끝에 맞춘다. */
+  function editTxAdd(ctx, kind) {
+    var total = editStarts(ctx.clips).total;
+    if (!(total > EDIT_TX_MIN_S)) return;
+    var len = kind === "title" ? 3 : 2;
+    var start = Math.max(0, Math.min(ctx.t, total - Math.min(len, total)));
+    var id = editTxNewId(kind === "title" ? "t" : "s", [ctx.tx.captions, ctx.tx.titles]);
+    var ok = editTxCommit(ctx, function (tx) {
+      if (kind === "title") tx.titles.push(editTxTitle({ id: id, start: start, end: Math.min(total, start + len), text: "타이틀" }));
+      else tx.captions.push(editTxCap({ id: id, start: start, end: Math.min(total, start + len), text: "자막", style: EDIT_TX_STYLE }));
+    });
+    if (ok) editTxSelect(ctx, kind, id);
+  }
+
+  /* [자막 자동 만들기]: 서버가 ⑥ 대사 시간으로 만든 자막을 넣는다(있던 자막이 있으면 바꿀지 묻는다 — 실행 취소 한 단계). */
+  function editTxAutoCaptions(ctx) {
+    if (!editAlive(ctx) || ctx.busy || !ctx.clips.length) return;
+    editNote(ctx, "⑥ 대사 시간으로 자막을 만드는 중…");
+    var variant = ctx.variant;
+    return api(editPath(ctx) + "/captions/auto", { method: "POST", body: JSON.stringify({ variant: variant, clips: editCloneClips(ctx.clips) }) })
+      .then(function (res) {
+        if (!editAlive(ctx) || ctx.variant !== variant) return;
+        var caps = ((res || {}).captions || []).map(editTxCap);
+        if (!caps.length) {
+          editNote(ctx, "자막으로 넣을 대사를 찾지 못했습니다. ⑥ 사운드에서 대사 시간을 확인해 주세요.");
+          return;
+        }
+        if (ctx.tx.captions.length && !editConfirm("지금 자막 " + ctx.tx.captions.length + "개를 새로 만든 자막 " + caps.length + "개로 바꿀까요? (실행 취소로 되돌릴 수 있습니다)")) return;
+        editTxCommit(ctx, function (tx) {
+          tx.captions = caps;
+        });
+        editNote(ctx, "자막 " + caps.length + "개를 만들었습니다." + ((res || {}).skipped ? " 편집에 없는 대사 " + res.skipped + "줄은 뺐습니다." : ""));
+      })
+      .catch(function (err) {
+        if (editAlive(ctx)) editShowError(ctx, "자막을 만들지 못했습니다: " + errMessage(err));
+      });
+  }
+
+  /* ---- 내보내기 칸: 자막 굽기 · SRT · 프리미어 ---- */
+
+  /* editRenderExport 가 부른다(그 칸을 다시 그릴 때마다 — 같은 요소를 다시 붙인다). 내용은 editTxExportPaint. */
+  function editTxExportTools(ctx, box) {
+    if (!ctx.tx) return;
+    if (!ctx.dom.txExport) ctx.dom.txExport = el("div", "vnew-edit-txexport");
+    box.appendChild(ctx.dom.txExport);
+    if (!ctx.txPrem) ctx.txPrem = { box: null, state: null, busy: false, timer: 0, loaded: false, error: "" };
+    if (!ctx.dom.txPrem) ctx.dom.txPrem = el("div", "vnew-edit-txprem");
+    ctx.txPrem.box = ctx.dom.txPrem;
+    box.appendChild(ctx.dom.txPrem);
+    editTxExportPaint(ctx);
+    editTxPremPaint(ctx); // 상태는 누른 뒤에만 읽는다(열 때 GET 을 더하지 않는다)
+  }
+
+  /* 자막 굽기 · 글꼴 안내 · [SRT 내려받기](자막 수 · 굽기 값이 바뀔 때마다 — editTxRender 도 부른다). */
+  function editTxExportPaint(ctx) {
+    var wrap = ctx.dom.txExport;
+    if (!wrap || !ctx.tx) return;
+    var info = (ctx.txInfo || {}).burnIn || {};
+    clear(wrap);
+    var burnLabel = el("label", "vnew-edit-txexport-burn");
+    var burn = el("input", "vnew-edit-txburn");
+    burn.type = "checkbox";
+    burn.checked = ctx.tx.burnIn !== false;
+    burn.addEventListener("change", function () {
+      editTxCommit(ctx, function (tx) {
+        tx.burnIn = !!burn.checked;
+      });
+    });
+    burnLabel.appendChild(burn);
+    burnLabel.appendChild(el("span", "", "자막을 영상에 넣기(굽기)"));
+    wrap.appendChild(burnLabel);
+    if (info.available === false) wrap.appendChild(el("p", "vnew-hint is-bad vnew-edit-txexport-font", info.reason || "이 서버에서는 자막을 영상에 넣을 수 없습니다."));
+    else if (info.font) wrap.appendChild(el("span", "vnew-hint vnew-edit-txexport-font", "글꼴: " + info.font));
+    var srt = el("button", "outline-button vnew-edit-txsrt", "SRT 내려받기");
+    srt.type = "button";
+    srt.disabled = !ctx.tx.captions.length;
+    srt.title = ctx.tx.captions.length ? "지금 자막을 SRT 파일로 내려받습니다(프리미어 · 유튜브에서 자막 트랙으로 쓸 수 있습니다)" : "자막이 없습니다";
+    srt.addEventListener("click", function () {
+      editTxSrt(ctx);
+    });
+    wrap.appendChild(srt);
+  }
+
+  function editTxSrt(ctx) {
+    var caps = ctx.tx.captions.map(editTxCap);
+    if (!caps.length) return null;
+    return api(editPath(ctx) + "/captions/srt", { method: "POST", body: JSON.stringify({ variant: ctx.variant, captions: caps }) })
+      .then(function (res) {
+        var text = String((res || {}).text || "");
+        var name = String((res || {}).fileName || "captions.srt");
+        if (typeof Blob === "function" && window.URL && window.URL.createObjectURL) {
+          var url = window.URL.createObjectURL(new Blob(["\ufeff" + text], { type: "application/x-subrip;charset=utf-8" }));
+          var a = el("a", "vnew-edit-txsrt-link", "");
+          a.href = url;
+          a.setAttribute("download", name);
+          document.body.appendChild(a);
+          if (typeof a.click === "function") a.click();
+          document.body.removeChild(a);
+          window.setTimeout(function () {
+            window.URL.revokeObjectURL(url);
+          }, 1000);
+        }
+        if (editAlive(ctx)) editNote(ctx, "SRT 를 내려받았습니다(자막 " + ((res || {}).count || caps.length) + "개).");
+        return text;
+      })
+      .catch(function (err) {
+        if (editAlive(ctx)) editShowError(ctx, "SRT 를 만들지 못했습니다: " + errMessage(err));
+      });
+  }
+
+  function editTxPremPaint(ctx) {
+    var p = ctx.txPrem;
+    if (!p || !p.box) return;
+    clear(p.box);
+    var btn = el("button", "outline-button vnew-edit-txprem-btn", EDIT_TX_PREM_LABEL);
+    btn.type = "button";
+    var live = p.state && (p.state.status === "queued" || p.state.status === "running");
+    btn.disabled = p.busy || live || !ctx.clips.length;
+    btn.title = "저장한 편집을 Premiere Pro 가 여는 XML(FCP7) · EDL · 쓴 영상 소스 zip 으로 묶습니다(유료 호출 없음)";
+    btn.addEventListener("click", function () {
+      editTxPremiere(ctx);
+    });
+    p.box.appendChild(btn);
+    var text = p.error || editTxPremText(p.state);
+    if (text) p.box.appendChild(el("p", "vnew-hint vnew-edit-txprem-status" + (p.error || (p.state || {}).status === "failed" ? " is-bad" : ""), text));
+    if (live) {
+      var bar = el("div", "vnew-edit-export-bar");
+      var fill = el("div", "vnew-edit-export-fill");
+      var pr = (p.state || {}).progress || {};
+      fill.style.width = (Number(pr.total) > 0 ? Math.round((Number(pr.done) || 0) / Number(pr.total) * 100) : 15) + "%";
+      bar.appendChild(fill);
+      p.box.appendChild(bar);
+    }
+    if (p.state && p.state.status === "done" && p.state.url) {
+      p.box.appendChild(downloadLink(p.state.url, "프리미어 프로젝트 내려받기 (" + (p.state.fileName || "premiere.zip") + ")"));
+    }
+  }
+
+  /* [프리미어 프로젝트로 내보내기]: 저장 → POST /edit/premiere(작업 215d) → 끝날 때까지 GET. 라우트가 없으면(404) 안내. */
+  function editTxPremiere(ctx) {
+    var p = ctx.txPrem;
+    if (!p || p.busy || !editAlive(ctx)) return null;
+    p.busy = true;
+    p.error = "";
+    editTxPremPaint(ctx);
+    var variant = ctx.variant;
+    return editEnsureSaved(ctx)
+      .then(function () {
+        return api(editPath(ctx) + "/premiere", { method: "POST", body: JSON.stringify({ variant: variant }) });
+      })
+      .then(function (res) {
+        p.busy = false;
+        p.state = (res || {}).premiere || { status: "queued" };
+        if (!editAlive(ctx)) return;
+        editTxPremPaint(ctx);
+        editTxPremPoll(ctx, false);
+      })
+      .catch(function (err) {
+        p.busy = false;
+        p.error = err && err.status === 404 && err.type !== "EditDisabled" ? EDIT_TX_PREM_404 : "프리미어 프로젝트를 시작하지 못했습니다: " + errMessage(err);
+        if (editAlive(ctx)) editTxPremPaint(ctx);
+      });
+  }
+
+  /* GET /edit/premiere — now 면 바로(처음 열 때 지난 결과), 아니면 진행 중일 때만 EDIT_TX_POLL_MS 뒤. 404 는 조용히 멈춘다. */
+  function editTxPremPoll(ctx, now) {
+    var p = ctx.txPrem;
+    if (!p) return;
+    if (p.timer) window.clearTimeout(p.timer);
+    p.timer = 0;
+    var live = p.state && (p.state.status === "queued" || p.state.status === "running");
+    if (!now && !live) return;
+    var variant = ctx.variant;
+    function run() {
+      p.timer = 0;
+      if (!editAlive(ctx) || ctx.variant !== variant) return;
+      api(editPath(ctx) + "/premiere?variant=" + encodeURIComponent(variant))
+        .then(function (res) {
+          if (!editAlive(ctx) || ctx.variant !== variant) return;
+          var next = (res || {}).premiere || null;
+          p.state = next && next.status !== "none" ? next : p.state;
+          editTxPremPaint(ctx);
+          editTxPremPoll(ctx, false);
+        })
+        .catch(function (err) {
+          if (!editAlive(ctx) || (err && err.status === 404)) return;
+          editTxPremPoll(ctx, false);
+        });
+    }
+    if (now) run();
+    else p.timer = window.setTimeout(run, EDIT_TX_POLL_MS);
+  }
+
+  /* ---- ⑦ 안 대사 고치기 · 영상 다시 만들기(⑥ 함수 재사용) ---- */
+
+  /* ⑥ soundAlive 첫 줄이 부른다(ctx.inEdit). */
+  function editTxLrdAlive(lctx) {
+    var ctx = lctx.edit;
+    return !!ctx && editAlive(ctx) && ctx.txLine === lctx;
+  }
+
+  /* [대사 고치기 · 영상 다시 만들기]: ⑥ 보기(GET /sound)를 받아 ⑥ 줄 도구(lrdRowTools)와 편집 창(lrdEditor)을 ⑦ 창 안에 연다. */
+  function editTxLineOpen(ctx, lineId, clipIds) {
+    if (!editAlive(ctx) || ctx.busy) return null;
+    editPause(ctx);
+    editTxLineClose(ctx);
+    var panel = el("div", "vnew-edit-txline");
+    panel.setAttribute("role", "dialog");
+    panel.setAttribute("aria-label", EDIT_TX_LINE_MENU);
+    var head = el("div", "vnew-edit-txline-head");
+    head.appendChild(el("h3", "vnew-edit-txline-title", EDIT_TX_LINE_MENU));
+    var close = el("button", "vnew-edit-help-close", "×");
+    close.type = "button";
+    close.setAttribute("aria-label", "닫기");
+    close.addEventListener("click", function () {
+      editTxLineClose(ctx);
+    });
+    head.appendChild(close);
+    panel.appendChild(head);
+    var body = el("div", "vnew-edit-txline-body");
+    panel.appendChild(body);
+    var note = el("p", "vnew-hint vnew-edit-txline-note", "⑥ 대사 정보를 불러오는 중…");
+    note.setAttribute("role", "status");
+    panel.appendChild(note);
+    var swap = el("div", "vnew-edit-txline-swap");
+    panel.appendChild(swap);
+    var lctx = { inEdit: true, edit: ctx, variant: ctx.variant, view: null, lrd: null, lineId: lineId, clipIds: (clipIds || []).slice(),
+      root: body, panel: panel, note: note, swap: swap, timer: 0, doneAt: "" };
+    ctx.txLine = lctx;
+    ctx.root.appendChild(panel);
+    return api(soundPath() + "?variant=" + encodeURIComponent(ctx.variant))
+      .then(function (view) {
+        if (!editTxLrdAlive(lctx)) return;
+        lctx.view = view || {};
+        editTxLinePaint(lctx);
+        if (lrdBusy(lctx.view)) editTxLrdPoll(lctx);
+      })
+      .catch(function (err) {
+        if (editTxLrdAlive(lctx)) note.textContent = "⑥ 대사 정보를 불러오지 못했습니다: " + soundErrText(err);
+      });
+  }
+
+  function editTxLineClose(ctx) {
+    var lctx = ctx && ctx.txLine;
+    if (!lctx) return;
+    ctx.txLine = null;
+    if (lctx.timer) window.clearTimeout(lctx.timer);
+    lctx.timer = 0;
+    if (lctx.panel.parentNode) lctx.panel.parentNode.removeChild(lctx.panel);
+  }
+
+  /* 창 안을 다시 그린다: ⑥ 줄 한 줄(lrdRowTools)을 만들고 편집 창을 바로 연다. 다시 만들기가 끝났으면 [새 영상으로 바꾸기]. */
+  function editTxLinePaint(lctx) {
+    var view = lctx.view || {};
+    clear(lctx.root);
+    lctx.lrd = null;
+    var line = (view.lines || []).filter(function (l) {
+      return l && l.id === lctx.lineId;
+    })[0];
+    if (!lrdInfo(lctx)) {
+      lctx.note.textContent = "대사 고치기 기능이 꺼져 있습니다.";
+      return;
+    }
+    if (!line) {
+      lctx.note.textContent = "⑥ 사운드에서 이 대사 줄을 찾지 못했습니다. ⑥ 을 한 번 연 뒤 다시 눌러 주세요.";
+      return;
+    }
+    lctx.note.textContent = "";
+    var row = el("div", "vnew-sound-row vnew-edit-txline-row");
+    row.appendChild(el("span", "vnew-sound-cell vnew-sound-speaker", line.speaker || "(이름 없음)"));
+    var lineCell = el("span", "vnew-sound-cell vnew-sound-line", line.lineKo || "");
+    row.appendChild(lineCell);
+    var cell = el("span", "vnew-sound-cell");
+    row.appendChild(cell);
+    lctx.root.appendChild(row);
+    lrdRowTools(lctx, line, row, lineCell, cell); // ⑥ 과 같은 줄 도구 · 편집 창(새 대사 · 말하는 사람 · 실제 말/속마음 · 말투 · AI로 다시 쓰기 · 다시 만들기)
+    var rec = lctx.lrd && lctx.lrd.rows[lctx.lrd.rows.length - 1];
+    if (rec && !rec.editor && rec.open && typeof rec.open.click === "function") rec.open.click();
+    editTxPaintSwap(lctx);
+  }
+
+  /* ⑥ lrdReload 첫 줄이 부른다(저장 · 되돌리기 뒤 새 보기): ⑦ 자막을 새 대사로 맞추고 창을 다시 그린다. */
+  function editTxLrdReload(lctx, view) {
+    var ctx = lctx.edit;
+    lctx.view = view || {};
+    ctx.txSound = { variant: lctx.variant, at: Date.now(), view: lctx.view };
+    if (editTxLrdAlive(lctx)) {
+      editTxSyncCaptions(ctx, lctx.view);
+      editTxLinePaint(lctx);
+    }
+    if (lrdBusy(lctx.view)) editTxLrdPoll(lctx);
+  }
+
+  /* 고친 대사(override)와 글이 다른 자막(lineId 같음)을 새 글 · 속마음 기울임으로(실행 취소 한 단계). 반환 바꾼 수. */
+  function editTxSyncCaptions(ctx, view) {
+    var lines = (((view || {}).lineRedo || {}).lines) || {};
+    var count = 0;
+    ctx.tx.captions.forEach(function (cap) {
+      var ov = cap.lineId && (lines[cap.lineId] || {}).override;
+      if (ov && ov.textKo && (ov.textKo !== cap.text || (ov.thought === true) !== cap.style.italic)) count += 1;
+    });
+    if (!count) return 0;
+    editTxCommit(ctx, function (tx) {
+      tx.captions.forEach(function (cap) {
+        var ov = cap.lineId && (lines[cap.lineId] || {}).override;
+        if (ov && ov.textKo) {
+          cap.text = String(ov.textKo);
+          cap.style.italic = ov.thought === true;
+        }
+      });
+    });
+    editNote(ctx, "자막 " + count + "개도 고친 대사로 바꿨습니다.");
+    return count;
+  }
+
+  /* ⑥ soundSchedule 첫 줄이 부른다: 다시 만드는 중이면 EDIT_TX_POLL_MS 마다 GET /sound, 끝나면(lrdChanged) 다시 그린다. */
+  function editTxLrdPoll(lctx) {
+    if (lctx.timer) window.clearTimeout(lctx.timer);
+    lctx.timer = 0;
+    if (!lrdBusy(lctx.view) || !editTxLrdAlive(lctx)) return;
+    lctx.timer = window.setTimeout(function () {
+      lctx.timer = 0;
+      if (!editTxLrdAlive(lctx)) return;
+      api(soundPath() + "?variant=" + encodeURIComponent(lctx.variant))
+        .then(function (view) {
+          if (!editTxLrdAlive(lctx)) return;
+          if (lrdChanged(lctx.view, view)) {
+            editTxLrdReload(lctx, view);
+            return;
+          }
+          if ((view || {}).lineRedo) lctx.view.lineRedo = view.lineRedo;
+          lrdPaintRows(lctx);
+          editTxLrdPoll(lctx);
+        })
+        .catch(function () {
+          editTxLrdPoll(lctx);
+        });
+    }, EDIT_TX_POLL_MS);
+  }
+
+  /* 다시 만들기가 끝났으면 [새 영상으로 바꾸기](클립 in/out · 편집은 그대로 — ⑦ AI로 고치기의 [바꾸기]와 같은 규칙). */
+  function editTxPaintSwap(lctx) {
+    clear(lctx.swap);
+    var job = (lrdEntry(lctx, lctx.lineId) || {}).job || {};
+    if (job.status !== "done") return;
+    var ctx = lctx.edit;
+    lctx.swap.appendChild(el("p", "vnew-hint", "대사를 고친 새 영상이 준비됐습니다. ⑦ 클립도 새 영상으로 바꿀 수 있습니다(자르기 · 속도 · 색 · 전환은 그대로)."));
+    var btn = el("button", "primary-button vnew-edit-txline-swapbtn", "새 영상으로 바꾸기");
+    btn.type = "button";
+    btn.disabled = !ctx.retakeOn;
+    if (!ctx.retakeOn) btn.title = "⑦ AI로 고치기가 꺼져 있어 새 영상을 재료로 쓸 수 없습니다";
+    btn.addEventListener("click", function () {
+      editTxSwapRedo(ctx, lctx, btn);
+    });
+    lctx.swap.appendChild(btn);
+    lctx.swapNote = el("p", "vnew-hint vnew-edit-txline-swapnote", "");
+    lctx.swapNote.style.display = "none";
+    lctx.swap.appendChild(lctx.swapNote);
+  }
+
+  /* 새 영상으로 바꾸기: 재료를 다시 받고(새 버전이 재료가 된다) 그 클립 재료의 AI로 고치기 보기에서 가장 새 완성 버전을 골라
+     ⑦ editFixSwap(지시서 116 · 작업 192 · 194 규칙 — in/out 을 새 버전 시간으로 옮기고 속도 · 소리 끔 · 색 · 전환은 그대로)으로 바꾼다. */
+  function editTxSwapRedo(ctx, lctx, button) {
+    var ids = (lctx.clipIds || []).filter(function (id) {
+      return ctx.clips.some(function (c) {
+        return c.id === id;
+      });
+    });
+    var clip = ctx.clips.filter(function (c) {
+      return c.id === ids[0];
+    })[0];
+    var fix = { mid: "", clipId: ids[0] || "", clipIds: ids, view: null, open: true, dom: { note: lctx.swapNote } };
+    if (!clip) {
+      editFixNote(fix, "바꿀 클립이 타임라인에 없습니다.");
+      return null;
+    }
+    fix.mid = String((ctx.materials[clip.sourceKey] || {}).mid || "");
+    if (button) button.disabled = true;
+    editFixNote(fix, "새 영상을 찾는 중…");
+    return api(editPath(ctx) + "?variant=" + encodeURIComponent(ctx.variant))
+      .then(function (view) {
+        if (view && Array.isArray(view.materials)) {
+          editAbsorbMaterials(ctx, view);
+          editRenderBin(ctx);
+        }
+        return api(editPath(ctx) + "/retake/" + encodeURIComponent(fix.mid));
+      })
+      .then(function (fv) {
+        if (button) button.disabled = false;
+        if (!editAlive(ctx)) return;
+        fix.view = fv || {};
+        var vers = (fix.view.versions || []).filter(function (v) {
+          return v && !v.original && v.status === "completed" && v.sourceKey && ctx.materials[v.sourceKey];
+        });
+        var ver = vers.sort(function (a, b) {
+          return (Number(b.n) || 0) - (Number(a.n) || 0);
+        })[0];
+        if (!ver) {
+          editFixNote(fix, "새 영상을 ⑦ 재료에서 찾지 못했습니다. 잠시 뒤 다시 눌러 주세요.");
+          return;
+        }
+        editFixSwap(ctx, fix, ver, button || el("button"));
+      })
+      .catch(function (err) {
+        if (button) button.disabled = false;
+        editFixNote(fix, "새 영상으로 바꾸지 못했습니다: " + errMessage(err));
+      });
+  }
+
+  /* editLeave 가 부른다. */
+  function editTxLeave(ctx) {
+    editTxMenuClose(ctx);
+    editTxCloseEditor(ctx);
+    editTxLineClose(ctx);
+    if (ctx.txPrem && ctx.txPrem.timer) window.clearTimeout(ctx.txPrem.timer);
+    if (ctx.txPrem) ctx.txPrem.timer = 0;
+  }
+  /* ==== 작업 215b 끝 ==== */
 
   /* ================================================================ 작업 215a: ⑦ 오디오 트랙(A2~A5 내 소리) 시작
      편집 문서 audioTracks · a1(서버 edit_audio.py 와 같은 규칙). 트랙 아이템 = 사용자가 올린 소리(내 소리) 구간. 실행 취소는 몸짓마다

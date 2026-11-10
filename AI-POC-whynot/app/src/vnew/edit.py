@@ -65,9 +65,11 @@ from ..vpoc.errors import VpocError, error_gist, now_iso
 from ..vpoc.store import STORE
 
 from . import edit_audio
+from . import edit_tools  # 작업 215c
 from . import generate
 from . import plan as plan_mod
 from . import settings as vnew_settings
+from . import edit_text  # 작업 215b: 자막 · 타이틀 · 블랙/화이트 전환 · 시작/끝 페이드 · 색 보정(edit_text.py)
 
 log = logging.getLogger("vpoc")
 
@@ -552,7 +554,8 @@ def _dissolve_of(clip) -> float:
 def _total(clips: list[dict]) -> float:
     """타임라인 길이 합. 작업 181: 디졸브마다 두 화면이 겹쳐 그 초만큼 짧아진다(마지막 클립의 전환은 세지 않는다)."""
     clips = [c for c in clips if isinstance(c, dict)]
-    return round(sum(_clip_seconds(c) for c in clips) - sum(_dissolve_of(c) for c in clips[:-1]), 3)
+    return round(sum(_clip_seconds(c) for c in clips) - sum(_dissolve_of(c) for c in clips[:-1])
+                 + edit_tools.gap_total(clips), 3)  # 작업 215c
 
 
 def _changed(where: str) -> VpocError:
@@ -1269,17 +1272,21 @@ def _clean_clips(raw, allowed: set[str], durations: dict[str, float | None], whe
         slip = _clean_slip(clip.get("audioSlip"), number, where)  # 작업 185: 0·null 은 저장 안 함, 소리 끈 클립도 받은 그대로
         if slip:
             item["audioSlip"] = slip
-        dissolve = _clean_transition(clip.get("transition"), number, where)
+        dissolve = 0.0 if edit_text.is_dip(clip.get("transition")) else _clean_transition(clip.get("transition"), number, where)  # 작업 215b
         if dissolve:
             item["transition"] = {"type": "dissolve", "seconds": dissolve}
+        item.update(edit_text.clean_clip_fx(clip, number, where))  # 작업 215b: 블랙/화이트 전환 · 색 보정(없으면 그대로)
         label = clip.get("label")
         if isinstance(label, str):
             label = _CONTROL_RE.sub("", label).strip()[:MAX_LABEL_LEN]
             if label:
                 item["label"] = label
         total += (end - start) / speed
+        total += edit_tools.clean_extras(clip, item, number, where, end - start)  # 작업 215c
         clips.append(item)
     _check_overlaps(clips, where)
+    edit_text.fit_dips(clips)  # 작업 215b: 짧아진 클립의 블랙/화이트 전환은 맞는 길이로
+    edit_tools.check_rules(clips, where)  # 작업 215c
     total -= sum(_dissolve_of(c) for c in clips[:-1])  # 작업 181: 한도는 디졸브로 겹친 뒤의 길이
     if total > MAX_TOTAL_S + 1e-6:
         raise VpocError(where, "TooLong", f"타임라인 전체 길이는 {MAX_TOTAL_S:.0f}초까지입니다.", 400)
@@ -1362,6 +1369,7 @@ def _doc_hash(variant: str, clips: list[dict], mix: dict | None = None) -> str:
             item["audioSlip"] = _slip_of(c)
         if _dissolve_of(c):
             item["transition"] = {"type": "dissolve", "seconds": _dissolve_of(c)}
+        edit_tools.hash_extras(c, item)  # 작업 215c
         body.append(item)
     payload = {"variant": variant, "clips": body}
     if isinstance(mix, dict) and edit_audio.mix_active(mix.get("tracks"), mix.get("a1")):
@@ -1636,8 +1644,10 @@ def edit_view(owner: str, pid: str, variant: str | None = None) -> dict:
     state = state or {}
     latest, older = _variant_exports(state, chosen)
     clean = [c for c in out_doc["clips"] if isinstance(c, dict) and c.get("sourceKey") in allowed]
+    clean = edit_tools.apply_tracks(clean, out_doc)  # 작업 215c: 트랙 숨김(내보내기에서 빼기)
     doc_hash = _doc_hash(chosen, [{**c, "in": _num(c.get("in")) or 0.0, "out": _num(c.get("out")) or 0.0} for c in clean],
                          _doc_mix(out_doc)) if saved else ""
+    doc_hash = edit_text.extend_hash(doc_hash, out_doc, clean)  # 작업 215b: 효과가 없으면 그대로
     default_mids = {m["mid"] for m in default_items}
     materials = [_material_out(m, meta.get(m["sourceKey"]), default_mids) for m in items]
     for item, out in zip(items, materials):  # 작업 149: 통 테이크 재료의 컷 목록(⑦ 재료 [컷 고르기])
@@ -1683,6 +1693,7 @@ def edit_view(owner: str, pid: str, variant: str | None = None) -> dict:
     }
     if retakes is not None:
         view["retake"] = {"enabled": True}
+    view["textFx"] = edit_text.view_info()  # 작업 215b: 자막 굽기 가능 · 글꼴 · 한도
     return view
 
 
@@ -1767,6 +1778,8 @@ def save_doc(owner: str, pid: str, payload) -> dict:
         doc["audioTracks"] = tracks
     if not edit_audio.a1_is_default(a1):
         doc["a1"] = a1
+    doc.update(edit_text.clean_doc(payload, where))  # 작업 215b: captions · titles · fadeIn · fadeOut · captionBurnIn(있을 때만)
+    doc.update(edit_tools.clean_doc_extras(payload, where))  # 작업 215c
     try:
         new_etag = STORE.write_json(key, doc, etag=current_etag if exists else "", create_only=not exists)
     except VpocError as exc:
@@ -2252,6 +2265,7 @@ def start_export(owner: str, pid: str, etag, variant=None, stems=False) -> dict:
     referenced = [c.get("sourceKey") for c in doc["clips"] if isinstance(c, dict) and c.get("sourceKey") in allowed]
     meta, _ = _ensure_meta(owner, pid, gen_id, referenced)
     clips = _clean_clips(doc["clips"], allowed, {k: (meta.get(k) or {}).get("duration") for k in allowed}, where)
+    clips = edit_tools.apply_tracks(clips, doc)  # 작업 215c
     if not clips:
         raise VpocError(where, "EmptyTimeline", "타임라인에 클립이 없습니다.", 409)
     stems = stems is True
@@ -2266,6 +2280,8 @@ def start_export(owner: str, pid: str, etag, variant=None, stems=False) -> dict:
         audio_snapshot = {"tracks": tracks, "a1": a1,
                           "assets": {aid: {"key": assets[aid].get("key"), "ext": assets[aid].get("ext"),
                                            "duration": assets[aid].get("duration")} for aid in edit_audio.assets_used(tracks)}}
+    doc_hash = edit_text.extend_hash(doc_hash, doc, clips)  # 작업 215b: 효과가 없으면 그대로
+    edit_text.check_export(doc, where)  # 작업 215b: 구울 자막·타이틀이 있는데 글꼴이 없으면 409
     reconcile_export(owner, pid, gen_id)
     claim = secrets.token_hex(8)
     box: dict = {}
@@ -2300,6 +2316,7 @@ def start_export(owner: str, pid: str, etag, variant=None, stems=False) -> dict:
             started["audio"] = audio_snapshot
         if stems:
             started["stems"] = True
+        started.update(edit_text.export_extras(doc))  # 작업 215b: textFx(자막·타이틀·시작/끝 페이드 사본, 있을 때만)
         box["started"] = started
         return {"v": 1, "n": n, "current": started, "history": history[-EXPORT_HISTORY_MAX:]}
 
@@ -2606,6 +2623,8 @@ def run_export(owner: str, pid: str, gen_id: str, n: int, claim: str) -> None:
         if mutes:  # 작업 193 fix1: 원천에 소리가 없는 result 버전 클립은 v2v 소리 대신 무음(이 실행 안에서만 — 문서는 그대로)
             clips = [dict(c, muted=True) if c["sourceKey"] in mutes else c for c in clips]
         from . import audio_separate; audio_from, sep_bg = audio_separate.export_sources(owner, pid, clips, audio_from, meta)  # noqa: E702,PLC0415 — 작업 217
+        clips, meta, tools_plan = edit_tools.export_plan(clips, meta, fps, width, height)  # 작업 215c
+        frames = _clip_frames(clips, fps) if tools_plan else frames  # 작업 215c
         alt = [_clip_audio(c, audio_from.get(c["sourceKey"])) for c in clips]  # 지시서 116 보완 10: 클립별 대체 소리 (v1 시작, 끝)
         with_audio = any(not c.get("muted") and ((meta.get(c["sourceKey"]) or {}).get("hasAudio") or alt[i] is not None)
                          for i, c in enumerate(clips))
@@ -2638,6 +2657,7 @@ def run_export(owner: str, pid: str, gen_id: str, n: int, claim: str) -> None:
                     local[key] = path
                 return path
 
+            edit_tools.export_prepare(tools_plan, local, fetch, workdir, fps=fps, width=width, height=height)  # 작업 215c
             for index, clip in enumerate(clips):
                 clip_no = index + 1
                 if time.monotonic() - attempt_started > EXPORT_MAX_S:
@@ -2761,6 +2781,7 @@ def run_export(owner: str, pid: str, gen_id: str, n: int, claim: str) -> None:
                 stage = "join"
             output = os.path.join(workdir, "edit.mp4")
             _export_join(segments, output, audio_path=audio_path)
+            edit_text.finish(current, clips, frames, fx, fps, width, height, workdir, output)  # 작업 215b: 효과 마무리 패스(없으면 그대로)
             for segment in segments:
                 os.unlink(segment)
             out_info = _probe_file(output) or {}

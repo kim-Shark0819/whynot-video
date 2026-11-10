@@ -1158,6 +1158,9 @@ def create_blueprint(deps: VnewDependencies) -> Blueprint:
             return jsonify(edit.stems_view(owner, pid, request.args.get("variant")))
         except Exception as exc:  # noqa: BLE001
             return _fail(exc)
+    # 작업 215b: ⑦ 자막 자동 만들기 · SRT(edit_text.py — POST /edit/captions/auto · /edit/captions/srt)
+    from . import edit_text  # noqa: PLC0415
+    edit_text.register_routes(bp, deps, _project_for, _fail)
 
     # ------------------------------------------------------------ ⑦ AI로 고치기(지시서 116)
     #
