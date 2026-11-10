@@ -41,6 +41,15 @@ const LENS_MAX = 144;
 const TUMBLE_RAD_PER_PX = 0.008;
 const CLICK_SLOP_PX = 4;
 const WHEEL_COMMIT_MS = 400;
+/* 작업 207: 인물 직접 끌기·방향키·휠 안내·기즈모 크기. */
+const ACTOR_TURN_DEG_PER_PX = 0.5; // 회전(E) 도구로 인물을 좌우로 끌 때
+const NUDGE_M = 0.1; // 방향키 한 번
+const NUDGE_BIG_M = 0.5; // Shift+방향키
+const NUDGE_DEG = 15; // [ / ]
+const GIZMO_SIZE = 1.5; // TransformControls 기본 1 의 1.5배
+const WHEEL_HINT_TEXT = "화면을 한 번 누르면 휠로 확대·축소할 수 있습니다";
+const WHEEL_HINT_MS = 1500;
+const WHEEL_HINT_GAP_MS = 4000; // 페이지를 굴리는 동안 안내가 깜빡이지 않게
 const CAM_ICON_COLOR = 0x4fc3f7;
 const SEL_COLOR = 0xffd54f;
 /* vendor addons(작업 201). vnew-previz.js 와 같은 three URL 을 import 하므로 THREE 인스턴스가 하나다.
@@ -1233,6 +1242,8 @@ function createController(host, options) {
     const rect = { w: canvas.clientWidth || width, h: canvas.clientHeight || height };
     const html = [];
     items.forEach((item) => {
+      // 작업 207: [이름표] 끔 = 장소·소품·빛 이름표를 숨긴다. 인물 이름표는 그대로.
+      if (!edit.labelsOn && item.type !== "actor") return;
       const anchor = item.pos || item.from;
       if (!anchor) return;
       const projected = anchor.clone().project(viewCamera());
@@ -1518,6 +1529,8 @@ function createController(host, options) {
     pinCut: null,
     dragging: false,
     helpersOn: true,
+    labelsOn: true, // 작업 207: 장소·소품·빛 이름표(인물 이름표는 늘 보인다)
+    focused: false, // 작업 207: 마지막으로 뷰포트를 누른 뒤 아직 포커스가 있다 — 이때만 휠이 확대·축소한다
     undo: [],
     redo: [],
     shadows: new Map(), // cut → 마지막으로 기록한 JSON(되돌리기 기준)
@@ -1583,6 +1596,9 @@ function createController(host, options) {
   let gizmo = null;
   if (lib && typeof lib.TransformControls === "function") {
     gizmo = new lib.TransformControls(camera, canvas);
+    // 작업 207: 화살표가 작아(약 10px) 잡기 어려웠다 — 1.5배. 기즈모는 원래 depthTest 끔·renderOrder 맨 위라 인물 위에 그려진다.
+    if (typeof gizmo.setSize === "function") gizmo.setSize(GIZMO_SIZE);
+    else gizmo.size = GIZMO_SIZE;
     const gizmoHelper = typeof gizmo.getHelper === "function" ? gizmo.getHelper() : gizmo;
     helpers.add(gizmoHelper);
     gizmo.addEventListener("dragging-changed", (event) => {
@@ -1602,6 +1618,7 @@ function createController(host, options) {
     orbit.enableDamping = false;
     orbit.screenSpacePanning = true;
     orbit.enabled = false;
+    orbit.enableZoom = false; // 작업 207: 뷰포트를 누른 뒤에만(setStageFocus)
     orbit.addEventListener("change", () => {
       if (!playing && !recording) renderAt(clockT);
     });
@@ -2150,12 +2167,29 @@ function createController(host, options) {
   }
 
   const raycaster = new THREE.Raycaster();
+  const groundPlane = new THREE.Plane(new THREE.Vector3(0, 1, 0), 0);
 
-  /* 화면 좌표(client)에서 인물·카메라 아이콘·바라보는 곳 십자를 고른다. 없으면 null. */
-  function pickAt(clientX, clientY) {
+  /* 화면 좌표(client) → 지금 보는 카메라(viewCamera)의 광선. */
+  function rayFrom(clientX, clientY) {
     const rect = canvas.getBoundingClientRect ? canvas.getBoundingClientRect() : { left: 0, top: 0, width, height };
     const ndc = new THREE.Vector2(((clientX - rect.left) / Math.max(1, rect.width)) * 2 - 1, -((clientY - rect.top) / Math.max(1, rect.height)) * 2 + 1);
     raycaster.setFromCamera(ndc, viewCamera());
+    return raycaster;
+  }
+
+  /* 작업 207: 화면 좌표 아래 수평면(높이 y, 기본 바닥 0) 점. 그 면을 못 맞히면(지평선 위) null. */
+  function groundAt(clientX, clientY, y) {
+    const p = new THREE.Vector3();
+    groundPlane.constant = -(Number(y) || 0);
+    return rayFrom(clientX, clientY).ray.intersectPlane(groundPlane, p) ? p : null;
+  }
+
+  let lastPickPoint = null; // 작업 207: pickAt 이 맞힌 3D 점(인물을 잡은 높이)
+
+  /* 화면 좌표(client)에서 인물·카메라 아이콘·바라보는 곳 십자를 고른다. 없으면 null. */
+  function pickAt(clientX, clientY) {
+    lastPickPoint = null;
+    rayFrom(clientX, clientY);
     const targets = [];
     if (current) {
       Object.keys(current.scene.actors).forEach((id) => {
@@ -2172,7 +2206,10 @@ function createController(host, options) {
     for (const hit of hits) {
       let o = hit.object;
       while (o && !(o.userData && o.userData.pick)) o = o.parent;
-      if (o) return Object.assign({}, o.userData.pick);
+      if (o) {
+        lastPickPoint = hit.point ? hit.point.clone() : null;
+        return Object.assign({}, o.userData.pick);
+      }
     }
     return null;
   }
@@ -2191,9 +2228,87 @@ function createController(host, options) {
     return hit;
   }
 
-  const drag = { on: false, x: 0, y: 0, moved: false, shift: false, id: null };
+  const drag = { on: false, x: 0, y: 0, moved: false, shift: false, id: null,
+    actor: null, cut: null, x0: 0, grab: null, facing0: 0, planeY: 0 }; // 작업 207: actor = 끌고 있는 인물 id
+
+  /* 작업 207: 뷰포트를 눌렀다 = 휠 확대·축소를 받는다. 포커스를 잃으면(blur) 휠은 페이지 스크롤로 돌려준다. */
+  function setStageFocus(on) {
+    edit.focused = !!on;
+    if (orbit) orbit.enableZoom = edit.focused;
+  }
+
+  function setCursor(value) {
+    if (canvas.style && canvas.style.cursor !== value) canvas.style.cursor = value;
+  }
+
+  /* 작업 207: 인물을 누르면 고르고, 끌면 바닥면(y=0)에서 옮긴다(회전 도구면 좌우로 방향). 잡은 자리 차이(grab)를 지켜 튀지 않게. */
+  function beginActorDrag(event) {
+    if (edit.aim) return false; // [이 인물 보기] 조준은 클릭으로
+    const hit = pickAt(event.clientX, event.clientY);
+    if (!hit || hit.type !== "actor") return false;
+    const cut = editCut();
+    const ca = cutActor(cut, hit.id);
+    if (!cut || !ca) return false;
+    if (!edit.sel || edit.sel.type !== "actor" || edit.sel.id !== hit.id) select(hit);
+    const p = Array.isArray(ca.pos) ? ca.pos : [0, 0, 0];
+    // 잡은 높이의 수평면에서 끈다(몸통을 잡아도 인물이 커서를 따라간다 — 바닥 y=0 면은 멀리 맞아 3배쯤 빨라진다).
+    // 카메라 눈높이 가까이는 면이 거의 나란해 튀므로 카메라 아래 0.3m까지만. 높이는 바뀌지 않는다(바닥 위 이동).
+    const camY = viewCamera().position.y;
+    const hitY = lastPickPoint ? lastPickPoint.y : 0;
+    drag.planeY = Math.max(0, Math.min(hitY, camY - 0.3));
+    const g = groundAt(event.clientX, event.clientY, drag.planeY);
+    drag.actor = hit.id;
+    drag.cut = cut;
+    drag.x0 = event.clientX;
+    drag.grab = g ? [(Number(p[0]) || 0) - g.x, (Number(p[2]) || 0) - g.z] : [0, 0];
+    drag.facing0 = Number(ca.facingDeg) || 0;
+    if (orbit) orbit.enabled = false; // 인물을 끄는 동안 작업 카메라는 돌지 않는다
+    return true;
+  }
+
+  function moveDraggedActor(event) {
+    const cut = drag.cut;
+    if (!cut || !cutActor(cut, drag.actor)) return;
+    pause();
+    if (edit.tool === "rotate") {
+      setActorFacing(cut, drag.actor, drag.facing0 + (event.clientX - drag.x0) * ACTOR_TURN_DEG_PER_PX);
+    } else {
+      const g = groundAt(event.clientX, event.clientY, drag.planeY);
+      if (!g) return;
+      moveActorTo(cut, drag.actor, g.x + drag.grab[0], g.z + drag.grab[1]);
+    }
+    setCursor("grabbing");
+    renderAt(clockT);
+    emit("edit", { cut, kind: "live" });
+  }
+
+  /* 끈 인물을 놓는다: 움직였으면 한 단계(commit), 아니면 클릭(고르기). */
+  function endActorDrag(event, click) {
+    const cut = drag.cut;
+    const moved = drag.moved;
+    drag.actor = null;
+    drag.cut = null;
+    if (orbit) orbit.enabled = edit.view === "work" && !edit.dragging;
+    setCursor("grab");
+    if (moved) {
+      commitEdit(cut);
+      renderAt(clockT);
+      emit("edit", { cut, kind: "commit" });
+    } else if (click) {
+      clickAt(event.clientX, event.clientY);
+    }
+  }
+
+  /* 고를 수 있는 인물 위에서는 손 모양 커서. */
+  function hoverCursor(event) {
+    if (recording || playing) return;
+    const hit = pickAt(event.clientX, event.clientY);
+    setCursor(hit && hit.type === "actor" && !edit.aim ? "grab" : "");
+  }
+
   function onPointerDown(event) {
     if (recording || (event.button !== undefined && event.button !== 0)) return;
+    setStageFocus(true);
     if (stage.focus) stage.focus({ preventScroll: true });
     if (gizmo && (gizmo.dragging || gizmo.axis)) return; // 기즈모를 잡았다
     drag.on = true;
@@ -2202,7 +2317,8 @@ function createController(host, options) {
     drag.moved = false;
     drag.shift = !!event.shiftKey;
     drag.id = event.pointerId;
-    if (edit.view === "shot" && canvas.setPointerCapture && event.pointerId !== undefined) {
+    const onActor = beginActorDrag(event);
+    if ((onActor || edit.view === "shot") && canvas.setPointerCapture && event.pointerId !== undefined) {
       try {
         canvas.setPointerCapture(event.pointerId);
       } catch (error) {
@@ -2212,11 +2328,19 @@ function createController(host, options) {
   }
 
   function onPointerMove(event) {
-    if (!drag.on || recording) return;
+    if (!drag.on) {
+      hoverCursor(event);
+      return;
+    }
+    if (recording) return;
     const dx = event.clientX - drag.x;
     const dy = event.clientY - drag.y;
     if (!drag.moved && Math.abs(dx) + Math.abs(dy) < CLICK_SLOP_PX) return;
     drag.moved = true;
+    if (drag.actor) {
+      moveDraggedActor(event);
+      return;
+    }
     if (edit.view !== "shot") return; // 작업 시점 드래그는 OrbitControls
     const cut = editCut();
     if (!cut) return;
@@ -2239,6 +2363,10 @@ function createController(host, options) {
         /* 무시 */
       }
     }
+    if (drag.actor) {
+      endActorDrag(event, true);
+      return;
+    }
     if (gizmo && gizmo.dragging) return;
     if (drag.moved) {
       if (edit.view === "shot") {
@@ -2252,8 +2380,33 @@ function createController(host, options) {
   }
 
   let wheelTimer = 0;
+  // 작업 207: 휠을 무시했을 때 뷰포트 위 짧은 안내(1.5초, 4초에 한 번).
+  const wheelHint = document.createElement("div");
+  wheelHint.className = "vnew-previz-wheel-hint";
+  wheelHint.textContent = WHEEL_HINT_TEXT;
+  wheelHint.style.display = "none";
+  stage.appendChild(wheelHint);
+  let wheelHintTimer = 0;
+  let wheelHintAt = -Infinity;
+  function showWheelHint() {
+    const now = Date.now();
+    if (wheelHintTimer || now - wheelHintAt < WHEEL_HINT_GAP_MS) return;
+    wheelHintAt = now;
+    wheelHint.style.display = "";
+    wheelHintTimer = window.setTimeout(() => {
+      wheelHintTimer = 0;
+      wheelHint.style.display = "none";
+    }, WHEEL_HINT_MS);
+  }
+
   function onWheel(event) {
-    if (edit.view !== "shot" || recording) return; // 작업 시점 휠은 OrbitControls
+    if (recording) return;
+    // 작업 207: 뷰포트를 누르기 전 휠은 페이지 스크롤이다 — preventDefault 하지 않고 샷도 고치지 않는다.
+    if (!edit.focused) {
+      showWheelHint();
+      return;
+    }
+    if (edit.view !== "shot") return; // 작업 시점 휠은 OrbitControls
     const cut = editCut();
     if (!cut) return;
     if (event.preventDefault) event.preventDefault();
@@ -2268,6 +2421,43 @@ function createController(host, options) {
       commitEdit(cut);
       emit("edit", { cut, kind: "commit" });
     }, WHEEL_COMMIT_MS);
+  }
+
+  /* 작업 207: 고른 인물을 방향키로 0.1m(Shift 0.5m) — 지금 보는 카메라의 수평 앞/오른쪽 기준. [ / ] = −15° / +15°.
+     키 한 번 = 되돌리기 한 단계. 인물을 고르지 않았으면 false(페이지 기본 동작). */
+  const NUDGE_ARROWS = { arrowup: [0, 1], arrowdown: [0, -1], arrowleft: [-1, 0], arrowright: [1, 0] };
+  function nudgeKey(event, code, key) {
+    const sel = edit.sel;
+    if (!sel || sel.type !== "actor") return false;
+    const arrow = NUDGE_ARROWS[code.toLowerCase()] || NUDGE_ARROWS[key];
+    const turn = code === "BracketLeft" || key === "[" ? -NUDGE_DEG : code === "BracketRight" || key === "]" ? NUDGE_DEG : 0;
+    if (!arrow && !turn) return false;
+    const id = sel.id;
+    applyOnce((cut) => {
+      const ca = cutActor(cut, id);
+      if (!ca) return;
+      if (turn) {
+        setActorFacing(cut, id, (Number(ca.facingDeg) || 0) + turn);
+        return;
+      }
+      const cam = viewCamera();
+      cam.updateMatrixWorld(true);
+      const fwd = new THREE.Vector3();
+      cam.getWorldDirection(fwd);
+      fwd.y = 0;
+      if (fwd.lengthSq() < 1e-8) { // 바로 내려다보는 카메라: 화면 위쪽 = 앞
+        fwd.set(0, 1, 0).applyQuaternion(cam.quaternion);
+        fwd.y = 0;
+      }
+      if (fwd.lengthSq() < 1e-8) fwd.set(0, 0, -1);
+      fwd.normalize();
+      const right = new THREE.Vector3().crossVectors(fwd, new THREE.Vector3(0, 1, 0)).normalize();
+      const step = event.shiftKey ? NUDGE_BIG_M : NUDGE_M;
+      const move = right.multiplyScalar(arrow[0] * step).addScaledVector(fwd, arrow[1] * step);
+      const p = Array.isArray(ca.pos) ? ca.pos : [0, 0, 0];
+      moveActorTo(cut, id, (Number(p[0]) || 0) + move.x, (Number(p[2]) || 0) + move.z);
+    });
+    return true;
   }
 
   function isTyping(target) {
@@ -2293,6 +2483,8 @@ function createController(host, options) {
       redo();
     } else if (mod || event.altKey) {
       done = false;
+    } else if (nudgeKey(event, code, key)) {
+      done = true;
     } else if (is("q")) {
       setTool("select");
     } else if (is("w")) {
@@ -2316,6 +2508,17 @@ function createController(host, options) {
   canvas.addEventListener("pointerup", onPointerUp);
   canvas.addEventListener("wheel", onWheel, { passive: false });
   stage.addEventListener("keydown", handleKey);
+  // 작업 207: 손가락·펜이 끊기면(pointercancel) 끌던 인물을 그 자리에 놓는다(클릭은 아님). 포커스를 잃으면 휠을 돌려준다.
+  function onPointerCancel(event) {
+    if (!drag.on) return;
+    drag.on = false;
+    if (drag.actor) endActorDrag(event, false);
+  }
+  function onStageBlur() {
+    setStageFocus(false);
+  }
+  canvas.addEventListener("pointercancel", onPointerCancel);
+  stage.addEventListener("blur", onStageBlur);
 
   function onVisibility() {
     // 탭이 숨겨지면 재생을 멈춘다(브라우저가 rAF 를 멈춰 시각이 어긋나는 것 방지).
@@ -2332,7 +2535,10 @@ function createController(host, options) {
     canvas.removeEventListener("pointerup", onPointerUp);
     canvas.removeEventListener("wheel", onWheel);
     stage.removeEventListener("keydown", handleKey);
+    canvas.removeEventListener("pointercancel", onPointerCancel);
+    stage.removeEventListener("blur", onStageBlur);
     if (wheelTimer) window.clearTimeout(wheelTimer);
+    if (wheelHintTimer) window.clearTimeout(wheelHintTimer);
     [gizmo, orbit].forEach((ctrl) => {
       try {
         if (ctrl && typeof ctrl.dispose === "function") ctrl.dispose();
@@ -2449,6 +2655,17 @@ function createController(host, options) {
     get helpersVisible() {
       return helpers.visible;
     },
+    // 작업 207: [이름표] — 장소·소품·빛 이름표 보이기/숨기기(인물 이름표는 늘 보인다).
+    setLabels(on) {
+      edit.labelsOn = !!on;
+      if (!playing && !recording) renderAt(clockT);
+    },
+    get labelsVisible() {
+      return edit.labelsOn;
+    },
+    get stageFocused() {
+      return edit.focused;
+    },
     get hasGizmo() {
       return !!gizmo;
     },
@@ -2466,7 +2683,7 @@ function createController(host, options) {
     },
     state: stateInfo,
     // 검사용(가짜 렌더러·가짜 기즈모): 내부 물체.
-    _editor: { helpers, proxy, workCamera, shotCamera: camera, stage, canvas,
+    _editor: { helpers, proxy, workCamera, shotCamera: camera, stage, canvas, overlay, wheelHint,
       get gizmo() { return gizmo; }, get orbit() { return orbit; } },
     destroy,
   };

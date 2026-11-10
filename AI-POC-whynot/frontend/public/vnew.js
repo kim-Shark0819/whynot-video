@@ -5463,16 +5463,68 @@
   var previzRecording = null; // 녹화 진행 상태 {total, done, failed:[], current, aborted}
   var previzDirty = false; // 작업 200: 편집 패널에서 고치고 아직 [저장]하지 않았다(녹화 전에 저장해야 한다)
   var PREVIZ_LEAVE_TEXT = "저장하지 않은 프리비즈 수정이 있습니다. 저장하지 않고 떠날까요?";
+  // 작업 207: 마지막으로 불러오거나 저장한 장면(scenes 배열)과 그때의 정리한 JSON. 되돌리기·같은 값 다시 입력이면 dirty 가 풀린다.
+  var previzSaved = { scenes: null, snap: null };
+  var PREVIZ_LABELS_KEY = "vnew-previz-labels"; // 작업 207: [이름표] 끔 = "0"(localStorage)
+
+  function previzLabelsOn() {
+    try {
+      return window.localStorage.getItem(PREVIZ_LABELS_KEY) !== "0";
+    } catch (error) {
+      return true;
+    }
+  }
+
+  function previzSetLabelsPref(on) {
+    try {
+      window.localStorage.setItem(PREVIZ_LABELS_KEY, on ? "1" : "0");
+    } catch (error) {
+      /* 무시 — 저장소를 못 쓰면 이번 화면에서만 */
+    }
+  }
+
+  /* 작업 207: 비교용 JSON — 키 정렬 · 숫자 소수 셋째 자리 · undefined 키 뺌(저장 형식은 그대로, 비교만). */
+  function previzNormJson(value) {
+    if (Array.isArray(value)) return "[" + value.map(previzNormJson).join(",") + "]";
+    if (value && typeof value === "object") {
+      return "{" + Object.keys(value).sort().filter(function (k) {
+        return value[k] !== undefined && typeof value[k] !== "function";
+      }).map(function (k) {
+        return JSON.stringify(k) + ":" + previzNormJson(value[k]);
+      }).join(",") + "}";
+    }
+    if (typeof value === "number") return isFinite(value) ? String(Math.round(value * 1000) / 1000) : "null";
+    return JSON.stringify(value === undefined ? null : value);
+  }
+
+  /* 고친 컷(장면 전체 timeline·인물 포함)의 정리한 JSON. */
+  function previzEditSnapshot(scenes) {
+    return previzNormJson(scenes || []);
+  }
+
+  /* 불러온 직후·저장 직후: 지금 장면을 기준으로 삼는다. */
+  function previzMarkSaved(scenes) {
+    previzSaved.scenes = scenes || null;
+    previzSaved.snap = scenes ? previzEditSnapshot(scenes) : null;
+    previzDirty = false;
+  }
+
+  /* previzDirty = 지금 장면 ≠ 기준. [저장] 아래 줄·녹화 막기·떠날 때 확인이 모두 이 값을 쓴다. */
+  function previzRefreshDirty() {
+    if (previzSaved.scenes) previzDirty = previzEditSnapshot(previzSaved.scenes) !== previzSaved.snap;
+    return previzDirty;
+  }
 
   /* 작업 201: 저장하지 않은 프리비즈 수정이 있으면 떠나기 전에 묻는다(단계 이동·창 닫기). 떠나도 되면 true. */
   function previzConfirmLeave() {
-    if (!previzDirty || !previzCtl) return true;
+    if (!previzCtl || !previzRefreshDirty()) return true;
     if (!window.confirm(PREVIZ_LEAVE_TEXT)) return false;
     previzDirty = false;
+    previzSaved.scenes = null;
     return true;
   }
   window.addEventListener("beforeunload", function (event) {
-    if (previzDirty && previzCtl) {
+    if (previzCtl && previzRefreshDirty()) {
       event.preventDefault();
       event.returnValue = PREVIZ_LEAVE_TEXT;
     }
@@ -5549,6 +5601,7 @@
 
   /* 승인 → 녹화. all 이면 모든 구간, 아니면 녹화가 없거나 stale 인 구간만(작업 200). 저장 안 한 수정이 있으면 멈춘다. */
   function previzApproveAndRecord(force, all, showError, onFail) {
+    previzRefreshDirty();
     if (previzDirty) {
       showError(PREVIZ_DIRTY_TEXT);
       if (onFail) onFail();
@@ -6173,7 +6226,7 @@
     // 타임라인(컷 경계 눈금·컷 번호·대사 말풍선)
     var flat = flattenCuts(scenes);
     if (!flat[previzCutIndex]) previzCutIndex = 0; // 다시 설계로 컷 수가 줄었으면 처음 컷
-    previzDirty = false; // 새로 그린 장면은 서버 저장본이다
+    previzMarkSaved(scenes); // 새로 그린 장면은 서버 저장본이다(작업 207: 이것이 dirty 비교 기준)
     var timeline = el("div", "vnew-previz-timeline");
     left.appendChild(timeline);
 
@@ -6355,6 +6408,19 @@
       snapWrap.appendChild(snap);
       snapWrap.appendChild(el("span", null, "눈금 맞춤 (10cm / 15°)"));
       row.appendChild(snapWrap);
+      // 작업 207: [이름표] — 장소·소품 이름표 보이기(인물 이름표는 늘 보인다). localStorage 에 기억.
+      var labelsWrap = el("label", "vnew-previz-check vnew-previz-labels");
+      labelsWrap.title = "장소·소품 이름표 보이기(인물 이름표는 늘 보입니다)";
+      var labelsBox = el("input");
+      labelsBox.type = "checkbox";
+      labelsBox.checked = previzLabelsOn();
+      labelsBox.addEventListener("change", function () {
+        previzSetLabelsPref(labelsBox.checked);
+        if (previzCtl && previzCtl.setLabels) previzCtl.setLabels(labelsBox.checked);
+      });
+      labelsWrap.appendChild(labelsBox);
+      labelsWrap.appendChild(el("span", null, "이름표"));
+      row.appendChild(labelsWrap);
       var hist = el("div", "vnew-previz-toolgroup");
       var undoBtn = toolButton(hist, "↶ 되돌리기", "Ctrl+Z", function () { previzCtl.undo(); });
       var redoBtn = toolButton(hist, "↷ 다시 하기", "Ctrl+Shift+Z", function () { previzCtl.redo(); });
@@ -6378,7 +6444,8 @@
       var info = el("span", "vnew-previz-caminfo", "");
       aimRow.appendChild(info);
       root.appendChild(aimRow);
-      root.appendChild(el("p", "vnew-hint vnew-previz-help", "Q 선택 · W 이동 · E 회전 · F 맞춰 보기 · 휠 확대 · Shift+드래그 이동 · Ctrl+Z 되돌리기"));
+      root.appendChild(el("p", "vnew-hint vnew-previz-help", "Q 선택 · W 이동 · E 회전 · F 맞춰 보기 · 휠 확대 · Shift+드래그 이동 · Ctrl+Z 되돌리기" +
+        " · 인물 끌어 옮기기 · 방향키 0.1m(Shift 0.5m) · [ ] 15°"));
 
       function sync(st) {
         if (!previzCtl || !st) return;
@@ -6446,8 +6513,9 @@
     }
 
     function markDirty() {
-      previzDirty = true;
-      if (dirtyNote) dirtyNote.style.display = "";
+      // 작업 207: 고친 뒤 기준과 다시 같아졌으면(되돌리기·같은 값) 줄을 숨긴다.
+      previzRefreshDirty();
+      if (dirtyNote) dirtyNote.style.display = previzDirty ? "" : "none";
     }
 
     function focusCutOf(cut) {
@@ -6462,6 +6530,9 @@
     /* 뷰포트 편집기 ↔ 패널: 고르면 패널이 그것으로 넘어가고, 끄는 동안 숫자가 따라 바뀌고, 놓으면(한 단계) 패널을 다시 그린다. */
     function wireEditor() {
       if (!previzCtl.onState) return;
+      // 작업 207: 컨트롤러가 장면을 만들며 채운 기본값이 "수정"으로 보이지 않게 — 아직 고치지 않았으면 기준을 다시 잡는다.
+      if (!previzDirty) previzMarkSaved(scenes);
+      if (previzCtl.setLabels) previzCtl.setLabels(previzLabelsOn());
       previzCtl.onState(function (st) {
         bar.sync(st);
         keys.sync();
@@ -6752,7 +6823,7 @@
       undo.title = label + " 값을 다음 [다시 만들기] 때 자동으로 계산합니다(지금 값은 그대로 둡니다).";
       undo.addEventListener("click", function () {
         release();
-        previzDirty = true;
+        previzRefreshDirty();
         renderCutPanel();
       });
       wrap.appendChild(undo);

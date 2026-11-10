@@ -29,6 +29,7 @@ from ..vpoc import llm as vpoc_llm
 from ..vpoc.errors import VpocError, now_iso
 
 from . import generate as gen_mod
+from . import pose_describe
 from . import previz as previz_mod
 from . import settings as vnew_settings
 
@@ -573,6 +574,12 @@ def _location_prompt(plan: dict, owner: str, name_en: str, loc: dict | None, cut
         "Write sceneEn (this location, shared across its cuts) and one brief per cut below. "
         "Use the film grammar, lens and fit given for each cut; name only the people listed as visible."
     )
+    # 작업 208: 직접 잡은 자세가 있는 장소에만 한 줄(없으면 지금 입력과 같다).
+    if any(pose_describe.cut_user_poses(plan, str(c.get("cutId") or "")) for c in cuts):
+        lines.append(
+            "People with a userPoseEn line were posed by the user: keep exactly this pose and motion in blockingEn "
+            "and actionEn, with no reinterpretation."
+        )
 
     for cut in cuts:
         cut_id = str(cut.get("cutId") or "")
@@ -636,6 +643,9 @@ def _location_prompt(plan: dict, owner: str, name_en: str, loc: dict | None, cut
                 char_notes.append(f"{nm}: {act}{(' [' + emo + ']') if emo else ''}".strip())
         if char_notes:
             lines.append("  character actions: " + "; ".join(char_notes))
+        # 작업 208: 사용자가 ④에서 직접 잡은 자세·움직임(있는 인물만).
+        for pose_name, pose_text in pose_describe.cut_user_poses(plan, cut_id):
+            lines.append(f"  userPoseEn — {pose_name}: {pose_text}")
         if conti_cut.get("situationKo"):
             lines.append(f"  situation(ko): {conti_cut.get('situationKo')}")
         if conti_cut.get("shotKo"):

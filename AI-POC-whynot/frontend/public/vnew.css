@@ -6100,3 +6100,25 @@ textarea.vnew-field-input {
   cursor: progress;
   opacity: 0.7;
 }
+
+
+/* 작업 207: 뷰포트를 누르기 전 휠 → 짧은 안내(1.5초). 녹화에는 안 나온다(캔버스 밖 HTML). */
+.vnew-previz-wheel-hint {
+  position: absolute;
+  left: 50%;
+  bottom: 14px;
+  transform: translateX(-50%);
+  padding: 6px 12px;
+  border-radius: 6px;
+  background: rgba(17, 24, 39, 0.82);
+  color: #fff;
+  font-size: 13px;
+  white-space: nowrap;
+  pointer-events: none;
+  z-index: 3;
+}
+
+/* 작업 207: [이름표] 켜고 끄기(눈금 맞춤 옆). */
+.vnew-previz-labels {
+  margin-left: 4px;
+}

@@ -13,6 +13,7 @@ Astra 가 쓴 3D 장면 JSON(브라우저 three.js 가 그려 재생·녹화)을
 from __future__ import annotations
 
 import copy
+import math
 
 # ================================================================ 상수(범위)
 
@@ -575,6 +576,73 @@ def _normalize_sit(raw_sit, facing_deg: float, prop_ids: list[str]) -> dict | No
     }
 
 
+# 작업 208: 사용자가 마네킹을 직접 잡은 자세(rig)·자세 키(keys). LLM 설계 스키마에는 넣지 않는다.
+RIG_JOINTS = (
+    "spine", "neck", "head",
+    "shoulderL", "elbowL", "wristL", "shoulderR", "elbowR", "wristR",
+    "hipL", "kneeL", "ankleL", "hipR", "kneeR", "ankleR",
+)
+RIG_ANGLE_MAX = 3.1416
+RIG_ROOT_Y_RANGE = (-1.0, 0.3)
+POSE_KEYS_MAX = 8
+
+
+def _finite(value) -> bool:
+    return isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(float(value))
+
+
+def normalize_rig(raw) -> dict | None:
+    """rig = {joint: [rx, ry, rz] 라디안, rootY: m}. 모르는 관절은 버리고 0 뿐인 관절도 뺀다. 비면 None."""
+    if not isinstance(raw, dict):
+        return None
+    out: dict = {}
+    for joint in RIG_JOINTS:
+        vec = raw.get(joint)
+        if not isinstance(vec, (list, tuple)) or len(vec) != 3 or not all(_finite(v) for v in vec):
+            continue
+        angles = [_round(_clamp(float(v), -RIG_ANGLE_MAX, RIG_ANGLE_MAX)) for v in vec]
+        if any(angles):
+            out[joint] = [a + 0.0 for a in angles]  # -0.0 → 0.0
+    root_y = raw.get("rootY")
+    if _finite(root_y):
+        value = _round(_clamp(float(root_y), *RIG_ROOT_Y_RANGE))
+        if value:
+            out["rootY"] = value
+    return out or None
+
+
+def normalize_pose_keys(raw, bounds: tuple[float, float, float, float]) -> list[dict] | None:
+    """keys = [{u, pos, facingDeg, rig}] — u 0..1(3자리), 최대 8개, u 순, 같은 u 는 마지막 것. 하나도 없으면 None."""
+    if not isinstance(raw, list):
+        return None
+    xmin, xmax, zmin, zmax = bounds
+    by_u: dict[float, dict] = {}
+    for item in raw:
+        if not isinstance(item, dict) or not _finite(item.get("u")):
+            continue
+        u = _round(_clamp(float(item["u"]), 0.0, 1.0)) + 0.0
+        pos = _vec3(item.get("pos"), (0.0, 0.0, 0.0))
+        key = {
+            "u": u,
+            "pos": [_round(_clamp(pos[0], xmin, xmax)), 0.0, _round(_clamp(pos[2], zmin, zmax))],
+            "facingDeg": _round(_num(item.get("facingDeg"), 0.0)) if _finite(item.get("facingDeg")) else 0.0,
+        }
+        rig = normalize_rig(item.get("rig"))
+        if rig is not None:
+            key["rig"] = rig
+        by_u.pop(u, None)
+        by_u[u] = key  # 같은 u 는 마지막 것.
+    if not by_u:
+        return None
+    keys = sorted(by_u.values(), key=lambda k: k["u"])
+    return keys[:POSE_KEYS_MAX]
+
+
+def is_user_actor(cut_actor) -> bool:
+    """사용자가 직접 고친 인물(작업 200 manual, 작업 208 rig·keys). 서버 계산이 옮기거나 바꾸지 않는다."""
+    return isinstance(cut_actor, dict) and bool(cut_actor.get("manual") or cut_actor.get("rig") or cut_actor.get("keys"))
+
+
 def _normalize_cut_actors(raw_actors, actor_ids: list[str], room: dict, prop_ids: list[str] | None = None) -> list[dict]:
     """컷 안 인물 상태(위치·방향·포즈). 방 밖 좌표는 방 안으로 보정.
 
@@ -635,6 +703,13 @@ def _normalize_cut_actors(raw_actors, actor_ids: list[str], room: dict, prop_ids
         # 작업 200: 사용자가 직접 고친 인물(자리·방향·자세·동작). 참일 때만 둔다(옛 출력과 같다).
         if _as_bool(item.get("manual")):
             cut_actor["manual"] = True
+        # 작업 208: 직접 잡은 자세·자세 키. 없으면 키가 없다(옛 출력과 같다).
+        rig = normalize_rig(item.get("rig"))
+        if rig is not None:
+            cut_actor["rig"] = rig
+        keys = normalize_pose_keys(item.get("keys"), (xmin, xmax, zmin, zmax))
+        if keys is not None:
+            cut_actor["keys"] = keys
         out.append(cut_actor)
     return out
 

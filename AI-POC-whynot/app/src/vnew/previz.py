@@ -1380,7 +1380,7 @@ def _actors_in_cut(scene: dict, cut: dict) -> list[dict]:
             # 앉은 엉덩이 높이(084 R1.6, previz_collision 이 채운 sit). 없으면 None(지금 값 SEAT_Y+0.05).
             "hipY": (ca.get("sit") or {}).get("hipY") if isinstance(ca.get("sit"), dict) else None,
         }
-        if ca.get("manual"):
+        if previz_schema.is_user_actor(ca):
             item["locked"] = True  # 작업 200: 직접 놓은 인물 — place_cut 이 옮기거나 숨기거나 돌리지 않는다.
         out.append(item)
     return out
@@ -1625,7 +1625,7 @@ def _apply_gestures(scenes: list[dict], groups: list[dict], grammar_by_cut: dict
                 aid = str(ca.get("id") or "")
                 nm = name_by_id.get(aid, "")
                 entry = gesture_by_name.get(nm)
-                if not entry or ca.get("manual"):
+                if not entry or previz_schema.is_user_actor(ca):
                     continue  # 작업 200: 사용자가 직접 고친 인물은 그대로 둔다.
                 gesture, target_name, pose = entry
                 target_id = id_by_name.get(target_name.strip()) if target_name and target_name != "none" else None
@@ -1661,7 +1661,7 @@ def _apply_gestures(scenes: list[dict], groups: list[dict], grammar_by_cut: dict
             for ca in cut.get("actors") or []:
                 aid = str(ca.get("id") or "")
                 nm = name_by_id.get(aid, "")
-                if nm not in speaker_names or ca.get("manual"):
+                if nm not in speaker_names or previz_schema.is_user_actor(ca):
                     continue
                 # 이미 다른 제스처가 붙었으면 두지 않는다.
                 if str(ca.get("gesture") or "none") not in ("", "none"):
@@ -1698,7 +1698,7 @@ def _mute_thought_speakers(scenes: list[dict], plan: dict | None) -> None:
                 if name and not line.get("silent"):
                     (thought if line.get("thought") else spoken).add(name)
             for ca in cut.get("actors") or []:
-                if name_by_id.get(str(ca.get("id") or ""), "") in (thought - spoken) and not ca.get("manual"):
+                if name_by_id.get(str(ca.get("id") or ""), "") in (thought - spoken) and not previz_schema.is_user_actor(ca):
                     ca["speaking"] = False
 
 
@@ -2618,7 +2618,7 @@ def refresh_poses(owner: str, pid: str) -> dict:
                 ids = {id_by_name.get(str((a or {}).get("name") or "").strip()) for a in actions if isinstance(a, dict)}
                 ids |= {id_by_name.get(n) for n in conti_names.get(str(cut.get("cutId") or ""), set())}
                 for ca in cut.get("actors") or []:
-                    if isinstance(ca, dict) and str(ca.get("id") or "") in ids and not ca.get("manual"):
+                    if isinstance(ca, dict) and str(ca.get("id") or "") in ids and not previz_schema.is_user_actor(ca):
                         for key in ("gesture", "gestureTarget", *_POSE_KEYS):
                             ca.pop(key, None)
                         changed += 1
@@ -2732,7 +2732,7 @@ def _manual_fit_extras(entry: dict, scene: dict, cut: dict, grammar: dict | None
 # ================================================================ 작업 200: 직접 고친 값 · 컷 비교 · 녹화 stale
 
 # 패널에서 사람이 고치는 인물 값. 이 값이 보던 장면과 다르면 그 인물을 manual 로 본다.
-_ACTOR_EDIT_KEYS = ("pos", "facingDeg", "pose", "gesture", "speaking")
+_ACTOR_EDIT_KEYS = ("pos", "facingDeg", "pose", "gesture", "speaking", "rig", "keys")
 # 비교에서 빼는 키: manual 표시, 보기 때 다시 잡는 앉은 모양(sit), 보기 전용 텍스처 경로.
 _SIG_SKIP = ("manual", "sit", "textureUrl", "floorTextureUrl")
 
@@ -2866,7 +2866,7 @@ def _restore_manual(scenes: list[dict], prev_scenes: list[dict]) -> int:
         prop_ids = {str(p.get("id") or "") for p in scene.get("props") or []}
         actors = cut.setdefault("actors", [])
         for pa in old[1].get("actors") or []:
-            if not (isinstance(pa, dict) and pa.get("manual") and str(pa.get("id") or "") in actor_ids):
+            if not (previz_schema.is_user_actor(pa) and str(pa.get("id") or "") in actor_ids):
                 continue
             keep = copy.deepcopy(pa)
             if str(keep.get("sitOn") or "") not in prop_ids:

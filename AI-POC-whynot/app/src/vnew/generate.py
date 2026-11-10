@@ -3544,6 +3544,43 @@ def _cut_contact(cut: dict, brief_action: str) -> dict | None:
     return None
 
 
+# 작업 208: ④에서 사용자가 직접 잡은 자세(rig·keys) 설명. 테이크·컷 프롬프트 컷 줄 끝에 붙인다(지시서가 빠뜨려도).
+USER_POSE_LABEL = "User-set pose (follow exactly):"
+USER_POSE_MAX_CHARS = 420
+USER_POSE_SHORT_CHARS = 200
+USER_POSE_MIN_CHARS = 90
+
+
+def user_pose_text(plan: dict, cut_id) -> dict | None:
+    """그 컷의 사용자 자세 {text, names}. text = "이름: 설명; 이름: 설명", names = 그 장면 인물 이름(로마자 바꾸기용). 없으면 None."""
+    from . import pose_describe  # noqa: PLC0415 — pose_describe 가 이 모듈 Touch 낱말을 읽는다(순환 피함)
+
+    try:
+        poses = pose_describe.cut_user_poses(plan, str(cut_id or ""))
+    except Exception as exc:  # noqa: BLE001 — 설명 실패로 프롬프트가 멈추지 않게(옛 동작으로 돌아간다)
+        log.warning("vnew.gen.user_pose_failed cut=%s err=%s", str(cut_id)[:40], str(exc)[:150])
+        return None
+    if not poses:
+        return None
+    names = sorted({str(a.get("name") or "") for s in ((plan or {}).get("previz") or {}).get("scenes") or []
+                    if isinstance(s, dict) for a in s.get("actors") or [] if isinstance(a, dict) and a.get("name")},
+                   key=len, reverse=True)
+    return {"text": "; ".join(f"{name}: {text}" for name, text in poses), "names": names}
+
+
+def _user_pose_piece(user_pose, limit: int, disp_name=None) -> str:
+    """컷 줄 조각 "User-set pose (follow exactly): …". 한국 이름은 disp_name(로마자), 설명만 limit 글자로 자른다."""
+    if not isinstance(user_pose, dict) or not user_pose.get("text"):
+        return ""
+    text = str(user_pose.get("text") or "")
+    if disp_name is not None:
+        for ko in user_pose.get("names") or []:
+            if ko:
+                text = text.replace(ko, disp_name(ko) or ko)
+    text = _clip_words(text, int(limit)) if limit else text
+    return f"{USER_POSE_LABEL} {text.rstrip(' .;')}" if text.strip() else ""
+
+
 def _pose_clause(pose: dict, disp_name) -> str:
     """사람 하나의 포즈 절(영어 1문장, 마침표 없음). 예: "Beomgeonu's right hand grabs Yeouijun's chin and lifts it;
     the left hand rests". 쓰는 손이 없으면 "". disp_name(한국 이름) → 프롬프트 표기(로마자)."""
@@ -3833,6 +3870,10 @@ def _take_timeline_entries(plan: dict, take: dict) -> list[dict]:
         contact = _cut_contact(cut, first_action)
         if contact:
             entries[-1]["contact"] = contact
+        # 작업 208: ④에서 사용자가 직접 잡은 자세·움직임(없으면 키 없음 — 지금 항목 모양 그대로).
+        user_pose = user_pose_text(plan, cut_id)
+        if user_pose:
+            entries[-1]["userPose"] = user_pose
         if fx_on:
             # 작업 127: 기호 대상 인물(정리된 값)과 이 컷 장소(테이크 안 장소가 바뀌는 컷에서만 배경 문장을 다시 쓴다).
             entries[-1]["fxWho"] = vnew_fx.fx_who(cut.get("fxWho"), vnew_fx.cut_names(cut))
@@ -4287,6 +4328,7 @@ def _take_prompt(plan: dict, take: dict, *, cast: list[dict], panel_nos: list[in
         "fx_short": False,         # vnew-live-fx 기호 짧은 형(컷 내용 줄이기 2단계)
         "body": RULE_BODY if fx_on else "",  # vnew-live-fx RA4.2 묘사 규칙(끔이면 없음)
         "bg_harmony": "full",      # 작업 197: 조화 문장(HARMONY 줄 끝) — full → short(줄이기 첫 단계) → none(고정 부분 맨 끝)
+        "user_pose_limit": USER_POSE_MAX_CHARS,  # 작업 208: 사용자 자세 설명 글자 상한(넘치면 이것부터 줄인다)
     }
     applied: list[str] = []
 
@@ -4575,6 +4617,10 @@ def _take_prompt(plan: dict, take: dict, *, cast: list[dict], panel_nos: list[in
                     clause = _soften_text(clause, True)  # 작업 163: 더 센 순화는 포즈 절의 애정 표현도 바꾼다
                 if clause and not (soften and _explicit_text(clause, _strong(soften))):  # 작업 153: 순화 때 노골적인 포즈 절만 뺀다
                     pieces.append(clause)
+        # 작업 208: 사용자 자세(지시서 LLM 이 빠뜨려도 들어가게). 이름은 ASSETS 로마자, 상한은 user_pose_limit.
+        user_pose = _user_pose_piece(entry.get("userPose"), state["user_pose_limit"], _fx_name)
+        if user_pose:
+            pieces.append(user_pose)
         # vnew-live-fx RA4.1: 연기 → 분위기 → 기호 → 대사 → 시선. 끔이면 moodText·fx 가 비어 아무것도 붙지 않는다.
         mood = _clip(str(entry.get("moodText") or ""), state["mood_limit"]) if state["mood_on"] else ""
         if mood:
@@ -4637,6 +4683,10 @@ def _take_prompt(plan: dict, take: dict, *, cast: list[dict], panel_nos: list[in
         "bgHarmonyDrop": ("bg_harmony", "none"),
     }
     steps: list[tuple[str, object, str, str]] = []
+    if any(e.get("userPose") for e in entries):
+        # 작업 208: 사용자 자세 설명이 붙은 테이크만 — 넘치면 그 설명부터 줄인다(다른 부분은 지금 순서 그대로).
+        steps.append(("user_pose_limit", USER_POSE_SHORT_CHARS, "userPoseShort", ""))
+        steps.append(("user_pose_limit", USER_POSE_MIN_CHARS, "userPoseMin", ""))
     for section in TAKE_COMPACT_ORDER:
         field, value = compact_steps[section]
         if section == "background":
@@ -6102,6 +6152,10 @@ def _vibe_take_prompt(plan: dict, take: dict, *, real: bool, cast: list[dict], l
             value = _txt(cut.get(field)).rstrip(" .")
             if value and not vnew_fx.HANGUL.search(value):
                 parts.append(value)
+        # 작업 208: 사용자가 ④에서 직접 잡은 자세(지시서가 빠뜨려도). 없으면 조각이 없다(지금 글 그대로).
+        pose_piece = _user_pose_piece(entry.get("userPose"), user_pose_limit[0], _disp)
+        if pose_piece:
+            parts.append(pose_piece)
         parts = [_nick(p) for p in parts]  # 작업 184: 연기 · 닿는 연기 · 포즈 · 기호 · 카메라 글의 별칭 → 표시 이름
         if real:
             parts = _real_blush_pieces(parts, _blush_who(entry) or (_disp(subject) if subject else ""), people)  # 작업 166
@@ -6134,6 +6188,7 @@ def _vibe_take_prompt(plan: dict, take: dict, *, real: bool, cast: list[dict], l
 
     # 작업 183: 인서트 소매 단서 형 — "full"(_sleeve_cue) · "short"(_sleeve_cue_short) · "none"(단계 비교용).
     sleeve_form = ["full"]
+    user_pose_limit = [USER_POSE_MAX_CHARS]  # 작업 208: 사용자 자세 설명 글자 상한(넘치면 이것부터 줄인다)
     sleeved: list[str] = []  # 단서를 붙인 컷
     # 작업 184: 클로즈업 주인공 옷 단서 형 — "full"(_garment_cue) · "short"(가장 짧은 형) · "none"(단계 비교 · 그 조각만 뺌).
     garment_form = ["full"]
@@ -6245,6 +6300,18 @@ def _vibe_take_prompt(plan: dict, take: dict, *, real: bool, cast: list[dict], l
     def _compacted() -> tuple[str, list[str]]:
         text = _assemble()
         steps: list[str] = []
+        if any(e.get("userPose") for e in entries):
+            # 작업 208: 넘치면 사용자 자세 설명부터 줄인다(샷 글을 그 상한으로 다시 만든다). 없으면 지금 단계 그대로.
+            for limit, label in ((USER_POSE_SHORT_CHARS, "userPoseShort"), (USER_POSE_MIN_CHARS, "userPoseMin")):
+                if _prompt_len(text) <= budget or user_pose_limit[0] <= limit:
+                    continue
+                user_pose_limit[0] = limit
+                tighter.clear()
+                sleeved.clear()
+                garbed.clear()
+                shots[:] = [_shot(i, e, cid) for i, (e, cid) in enumerate(zip(entries, take_cut_ids))]
+                steps.append(label)
+                text = _assemble()
         for section in VIBE_COMPACT_ORDER:
             # 작업 197 fix2: 통 테이크와 같은 구멍 — 197 짧은 형(harmony, 맨 앞)은 글자 · 바이트 둘 다 안일 때만 건너뛴다.
             if _prompt_len(text) <= budget and (section != "harmony" or _take_prompt_bytes_ok(text)):
@@ -6264,6 +6331,7 @@ def _vibe_take_prompt(plan: dict, take: dict, *, real: bool, cast: list[dict], l
         # 별칭도 그 조각만 그대로(= 183 글).
         def _rebuild(form: str, garment: str = "none", nick: bool = False) -> tuple[str, list[str]]:
             sleeve_form[0], garment_form[0], nick_on[0] = form, garment, nick
+            user_pose_limit[0] = USER_POSE_MAX_CHARS  # 작업 208: 첫 만들기와 같게
             for key in state:
                 state[key] = False  # 샷 글은 짧은 형 없이 만든다(첫 만들기와 같게)
             tighter.clear()
@@ -12339,6 +12407,8 @@ def _cut_prompt(plan: dict, seg: dict, variant: str, *, cast: list[dict], has_im
     # 작업 197: HARMONY 줄 끝 조화 문장 짧은 형(2,500B 컷 단위). fix1: 넘치면 맨 먼저 뺀다(197 전 글을 줄이기 전에).
     bg_harmony = _bg_harmony(is_real, short=True)
 
+    cut_user_pose = user_pose_text(plan, cut_id)  # 작업 208(없으면 None — 프롬프트 글자 그대로)
+
     def _setting_line(bg: str, scene_summary: str) -> str:
         parts = [p for p in (scene_summary, bg) if p]
         body = " ".join(parts).strip()
@@ -12350,6 +12420,10 @@ def _cut_prompt(plan: dict, seg: dict, variant: str, *, cast: list[dict], has_im
         shot_line = ("SHOT: " + shot) if shot else "SHOT: Match the framing, lens, camera height and angle exactly as shown in @Video1."
         blocking_line = ("BLOCKING: " + blocking) if blocking else ""
         action_line = ("ACTION: " + action) if action else ""
+        # 작업 208: 사용자가 직접 잡은 자세를 ACTION 줄 끝에(없으면 지금 줄 그대로).
+        pose_piece = _user_pose_piece(cut_user_pose, state.get("user_pose_limit", USER_POSE_MAX_CHARS))
+        if pose_piece:
+            action_line = (action_line.rstrip(" .") + ". " + pose_piece + ".") if action_line else ("ACTION: " + pose_piece + ".")
         mood_line = ("MOOD: " + mood) if mood else ""
         setting_line = _setting_line(background, scene_summary)
         dlg = _dialogue_line(with_delivery, dialogue_limit)
@@ -12383,6 +12457,7 @@ def _cut_prompt(plan: dict, seg: dict, variant: str, *, cast: list[dict], has_im
         "dialogue_limit": 0,  # 작업 147: 대사 상한(0 = 없음, byteTrim 바로 앞에서만 25)
         "apps": None,  # 작업 167: CAST 외형(None = 지금 그대로, 좁은 예산의 castAppearance 단계에서만 목록)
         "bg_harmony": True,  # 작업 197: 조화 문장(fix1: 넘치면 맨 먼저 뺀다)
+        "user_pose_limit": USER_POSE_MAX_CHARS,  # 작업 208: 사용자 자세 설명 상한(넘치면 이것부터 줄인다)
     }
 
     def _current() -> str:
@@ -12426,6 +12501,13 @@ def _cut_prompt(plan: dict, seg: dict, variant: str, *, cast: list[dict], has_im
     if _utf8_len(prompt) <= budget:
         return _done(prompt)
 
+    # ⓪-00 (작업 208) 사용자 자세 설명을 다른 줄보다 먼저 줄인다(없으면 건너뛴다 — 지금 순서 그대로).
+    if cut_user_pose:
+        for limit, label in ((USER_POSE_SHORT_CHARS, "userPoseShort"), (USER_POSE_MIN_CHARS, "userPoseMin")):
+            state["user_pose_limit"] = limit
+            applied.append(label)
+            if _utf8_len(_current()) <= budget:
+                return _done(_current())
     # ⓪-0 (작업 197 fix1) 조화 문장 — 2,500B 컷 단위에서는 197 전 글(묘사 규칙 · SETTING …)보다 먼저 뺀다(HARMONY 줄은 남는다).
     # 그래서 넘치는 컷의 나머지 줄이기는 197 전과 같다. 끔(검사)이면 문장이 없어 건너뛴다.
     if bg_harmony and state["bg_harmony"]:
