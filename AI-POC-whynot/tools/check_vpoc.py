@@ -68559,6 +68559,8 @@ def main() -> int:
     if not __import__("check_voice_202").check_voice_202(): fail("작업 202 인물 목소리 검사 실패(위 [FAIL] 참고)")
     if not __import__("check_take_stale_205").check_take_stale_205(): fail("작업 205: 통 테이크 stale · 바뀐 테이크만 · 상단 이름 검사 실패")
     if not __import__("check_brief_keep_206").check_brief_keep_206(): fail("작업 206: 지시서 바뀐 컷만 · 테이크별 stale · 금액 바뀜 검사 실패")
+    if not __import__("check_previz_easy_207").check_previz_easy_207(): fail("작업 207: 프리비즈 직접 끌기 · 휠 포커스 · 방향키 · 이름표 · dirty 검사 실패")
+    if not __import__("check_pose_rig_208").check_pose_rig_208(): fail("작업 208: 직접 잡은 자세(rig·keys) 보존 · 설명 · 프롬프트 검사 실패")
     check_vnew_voice_ui_203()
     print()
     if warnings:
