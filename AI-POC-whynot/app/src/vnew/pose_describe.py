@@ -2,7 +2,8 @@
 
 LLM 없이 결정적으로 계산한다. 정방향 운동학(FK)은 frontend/public/vnew-previz.js 마네킹과 같은 치수·축을 쓴다.
 - group: 발 위치 pos, rotation.y = facingDeg(라디안), 크기 heightM / 1.7. 정면은 로컬 +z, 인물의 왼쪽은 로컬 +x.
-- hips y 0.9(+rootY) → spine → neck(0, 0.6, 0) → head(머리 중심 0.13 위).
+- hips y = 목록 자세의 엉덩이 높이(POSTURE_RIG, 서 있으면 0.9) + rootY → spine → neck(0, 0.6, 0) → head(머리 중심 0.13 위).
+- 목록 자세(pose·posture·sit)의 관절 값을 먼저 두고 rig 에 적힌 관절만 그 값으로 덮어쓴다(JS applyRig 와 같은 순서).
 - 어깨 pivot (±0.22, 0.52, 0) → elbow (0, -0.3, 0) → 손(wrist) (0, -0.29, 0).
 - 엉덩이 pivot (±0.1, 0, 0) → knee (0, -0.46, 0) → 발목(ankle) (0, -0.44, 0).
 - 회전은 three.js Euler XYZ(행렬 Rx·Ry·Rz). spine·neck rx 가 + 면 앞으로 숙임, ry 가 + 면 인물 왼쪽으로 돈다.
@@ -28,6 +29,26 @@ WALK_MIN_M = 0.3
 TURN_MIN_DEG = 20.0
 
 _ZERO = (0.0, 0.0, 0.0)
+_HALF_PI = math.pi / 2
+_LEAN_RAD = math.radians(25.0)
+
+# 목록 자세가 rig 앞에 거는 값(엉덩이 높이 hipsY 는 마네킹 로컬 m, 관절은 Euler XYZ 라디안, tiltX 는 몸 전체 rx).
+# frontend/public/vnew-previz.js 의 Mannequin.apply()(ca.pose 스위치: hips.position.y·_bendLeg·눕기 group.rotation.x)와
+# Mannequin.applyBody()(ca.posture lean_forward/lean_back: spine.rotation.x ±LEAN_RAD) 숫자와 같아야 한다.
+# walk 의 다리 흔들기는 시각마다 바뀌어 넣지 않는다. 앉을 자리(ca.sit)는 _posture_base 가 JS 와 같이 덮어쓴다.
+POSTURE_RIG = {
+    "stand": {"hipsY": HIPS_Y},
+    "walk": {"hipsY": HIPS_Y},
+    "sit": {"hipsY": 0.5, "hipL": (-_HALF_PI, 0.0, 0.0), "hipR": (-_HALF_PI, 0.0, 0.0),
+            "kneeL": (_HALF_PI, 0.0, 0.0), "kneeR": (_HALF_PI, 0.0, 0.0)},
+    "kneel": {"hipsY": 0.55, "hipL": (-_HALF_PI, 0.0, 0.0), "hipR": (-_HALF_PI, 0.0, 0.0),
+              "kneeL": (math.pi * 0.95, 0.0, 0.0), "kneeR": (math.pi * 0.95, 0.0, 0.0)},
+    "lie": {"hipsY": 0.12, "tiltX": -_HALF_PI},
+    "lean_forward": {"spine": (_LEAN_RAD, 0.0, 0.0)},
+    "lean_back": {"spine": (-_LEAN_RAD, 0.0, 0.0)},
+}
+_POSE_NAMES = ("stand", "walk", "sit", "kneel", "lie")  # ca.pose → apply()
+_LEAN_NAMES = ("lean_forward", "lean_back")  # ca.posture → applyBody()
 
 
 # ---------------------------------------------------------------- 작은 벡터 계산
@@ -80,8 +101,12 @@ def _wrap(deg: float) -> float:
     return (float(deg) + 180.0) % 360.0 - 180.0
 
 
+def _is_num(value) -> bool:
+    return isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(float(value))
+
+
 def _num(value, default=0.0) -> float:
-    if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(float(value)):
+    if not _is_num(value):
         return float(default)
     return float(value)
 
@@ -134,21 +159,46 @@ def state_at(actor: dict, u: float) -> tuple[list[float], float, dict]:
 
 # ---------------------------------------------------------------- FK
 
-def body_points(pos, facing_deg: float, rig: dict, height_m: float = SCALE_BASE_M) -> dict:
-    """세계 좌표 관절 위치. 키: pelvis, chest, shoulderL/R, neck, head, face, chin, cheekL/R, handL/R, kneeL/R, footL/R, fwd, left."""
+def _posture_base(actor: dict | None, facing_deg: float, s: float) -> tuple[float, float, float, dict]:
+    """목록 자세의 (hipsY 로컬, 몸 yaw 도, 몸 rx, 관절 기본값). JS Mannequin.apply()·applyBody()·앉을 자리 분기와 같다."""
+    a = actor if isinstance(actor, dict) else {}
+    pose = a.get("pose") if a.get("pose") in _POSE_NAMES else "stand"
+    entry = POSTURE_RIG[pose]
+    joints = {k: v for k, v in entry.items() if k not in ("hipsY", "tiltX")}
+    hips_y, yaw, spine = entry["hipsY"], float(facing_deg), [0.0, 0.0, 0.0]
+    sit = a.get("sit")
+    if pose == "sit" and isinstance(sit, dict) and _is_num(sit.get("hipY")):
+        bend = _HALF_PI - math.radians(_num(sit.get("legPitchDeg")))
+        hips_y = _num(sit.get("hipY")) / s
+        joints.update(hipL=(-bend, 0.0, 0.0), hipR=(-bend, 0.0, 0.0), kneeL=(bend, 0.0, 0.0), kneeR=(bend, 0.0, 0.0))
+        yaw = _num(sit.get("legYawDeg"), facing_deg)
+        spine[1] = math.radians(max(-90.0, min(90.0, _wrap(facing_deg - yaw))))
+    if a.get("posture") in _LEAN_NAMES:
+        spine[0] = POSTURE_RIG[a["posture"]]["spine"][0]
+    if any(spine):
+        joints["spine"] = tuple(spine)
+    return hips_y, yaw, entry.get("tiltX", 0.0), joints
+
+
+def body_points(pos, facing_deg: float, rig: dict, height_m: float = SCALE_BASE_M, actor: dict | None = None) -> dict:
+    """세계 좌표 관절 위치. 키: pelvis, chest, shoulderL/R, neck, head, face, chin, cheekL/R, handL/R, kneeL/R, footL/R,
+    footRestL/R(rig 없이 목록 자세만의 발), fwd, left. actor 의 pose·posture·sit 이 목록 자세다(없으면 서 있음)."""
     rig = rig or {}
     s = (_num(height_m, SCALE_BASE_M) or SCALE_BASE_M) / SCALE_BASE_M
-    root = _yaw(facing_deg)
+    hips_y, yaw, tilt, base = _posture_base(actor, _num(facing_deg), s)
+    root = _mat_xyz((tilt, math.radians(yaw), 0.0))
     origin = (_num(pos[0]), 0.0, _num(pos[2]) if len(pos) > 2 else 0.0)
 
     def world(local):
         return _add(origin, _mv(root, _mul(local, s)))
 
-    def r(joint):
-        v = rig.get(joint)
+    def r(joint, use_rig=True):
+        v = rig.get(joint) if use_rig else None
+        if not (isinstance(v, (list, tuple)) and len(v) == 3):
+            v = base.get(joint)
         return _mat_xyz(v) if isinstance(v, (list, tuple)) and len(v) == 3 else _IDENT
 
-    hips = (0.0, HIPS_Y + _num(rig.get("rootY")), 0.0)
+    hips = (0.0, hips_y + _num(rig.get("rootY")), 0.0)
     spine = r("spine")
     pts: dict = {"pelvis": world(hips)}
     pts["chest"] = world(_add(hips, _mv(spine, (0.0, 0.32, 0.12))))
@@ -175,8 +225,11 @@ def body_points(pos, facing_deg: float, rig: dict, height_m: float = SCALE_BASE_
         knee_l = _add(hip_l, _mv(hip_m, (0.0, -THIGH_M, 0.0)))
         pts["knee" + side] = world(knee_l)
         pts["foot" + side] = world(_add(knee_l, _mv(_mm(hip_m, r("knee" + side)), (0.0, -SHIN_M, 0.0))))
-    pts["fwd"] = _mv(root, (0.0, 0.0, 1.0))
-    pts["left"] = _mv(root, (1.0, 0.0, 0.0))
+        rest_hip, rest_m = (sign * HIP_X, hips_y, 0.0), r("hip" + side, False)
+        rest_knee = _add(rest_hip, _mv(rest_m, (0.0, -THIGH_M, 0.0)))
+        pts["footRest" + side] = world(_add(rest_knee, _mv(_mm(rest_m, r("knee" + side, False)), (0.0, -SHIN_M, 0.0))))
+    pts["fwd"] = _mv(_yaw(yaw), (0.0, 0.0, 1.0))
+    pts["left"] = _mv(_yaw(yaw), (1.0, 0.0, 0.0))
     pts["scale"] = s
     return pts
 
@@ -200,7 +253,7 @@ def _band(y: float, p: dict) -> str:
 
 def _band_text(band: str) -> str:
     if band == "above head":
-        return "above head"
+        return "above-head height"
     return "own face height" if band == "face" else f"{band} height"
 
 
@@ -266,7 +319,7 @@ def _hand_phrase(side: str, p: dict, others: list[tuple[str, dict]]) -> str:
             return f"{label} reaching forward at {_band_text(band)}"
         return f"{label} stretched out to the side at {_band_text(band)}"
     if raised:
-        return f"{label} raised {_band_text(band) if band == 'above head' else 'to ' + _band_text(band)}"
+        return f"{label} raised {'above head' if band == 'above head' else 'to ' + _band_text(band)}"
     return f"{label} at {_band_text(band)}"
 
 
@@ -318,7 +371,7 @@ def pose_phrases(rig: dict, p: dict, others: list[tuple[str, dict]]) -> list[str
     if head:
         out.append("head " + ", ".join(head))
     for side, label in (("L", "left"), ("R", "right")):
-        if p["foot" + side][1] > 0.15 * s and min(knees) >= 0.15 * s:
+        if p["foot" + side][1] - max(0.0, p["footRest" + side][1]) > 0.15 * s and min(knees) >= 0.15 * s:
             out.append(f"{label} foot lifted")
     return out
 
@@ -330,7 +383,7 @@ def _others_at(others: list[dict], u: float, other_names: dict) -> list[tuple[st
             continue
         pos, facing, rig = state_at(o, u)
         name = str((other_names or {}).get(str(o.get("id") or "")) or o.get("name") or o.get("id") or "the other")
-        out.append((name, body_points(pos, facing, rig, _num(o.get("heightM"), SCALE_BASE_M))))
+        out.append((name, body_points(pos, facing, rig, _num(o.get("heightM"), SCALE_BASE_M), o)))
     return out
 
 
@@ -428,11 +481,11 @@ def describe_actor_motion(actor: dict, *, cut_seconds: float, others: list[dict]
     if len(keys) < 2:
         u = _num(keys[0].get("u")) if keys else 1.0
         pos, facing, rig = state_at(actor, u)
-        p = body_points(pos, facing, rig, height)
+        p = body_points(pos, facing, rig, height, actor)
         return _limit_words(pose_phrases(rig, p, _others_at(others, u, other_names)))
     beats: list[str] = []
     pos0, f0, rig0 = state_at(actor, _num(keys[0].get("u")))
-    prev_phrases = pose_phrases(rig0, body_points(pos0, f0, rig0, height), _others_at(others, _num(keys[0].get("u")), other_names))
+    prev_phrases = pose_phrases(rig0, body_points(pos0, f0, rig0, height, actor), _others_at(others, _num(keys[0].get("u")), other_names))
     if prev_phrases:
         beats.append(f"{_num(keys[0].get('u')) * seconds:.1f} s: " + ", ".join(prev_phrases))
     for ka, kb in zip(keys, keys[1:]):
@@ -440,7 +493,7 @@ def describe_actor_motion(actor: dict, *, cut_seconds: float, others: list[dict]
         pa, fa, _ = state_at(actor, ua)
         pb, fb, rb = state_at(actor, ub)
         others_a, others_b = _others_at(others, ua, other_names), _others_at(others, ub, other_names)
-        now = pose_phrases(rb, body_points(pb, fb, rb, height), others_b)
+        now = pose_phrases(rb, body_points(pb, fb, rb, height, actor), others_b)
         bits = [b for b in (_move_phrase(pa, pb, others_a, cam), _turn_phrase(fa, fb, pb, others_b, cam)) if b]
         bits += [ph for ph in now if ph not in prev_phrases]
         prev_phrases = now

@@ -17921,7 +17921,7 @@ def check_previz_collision() -> None:
             vjs = (PUBLIC / "vnew.js").read_text(encoding="utf-8")
             css = (ROOT / "frontend" / "public" / "vnew.css").read_text(encoding="utf-8")
             for needle in ("apply(pose, gesture, speaking, t, targetYaw, sit)", "this.hips.position.y = sit.hipY / scale;",
-                           "sitData.legYawDeg", "sit.legPitchDeg", "this.spine.rotation.y += sit.turn;",
+                           "sitData.legYawDeg", "sit.legPitchDeg", "this.spine.rotation.y + sit.turn",
                            "Math.max(-Math.PI / 2, Math.min(Math.PI / 2, turn))", "entry.mannequin.group.rotation.y = legYaw;",
                            "this.hips.position.y = 0.5;", "const GESTURES", "sitArg.hipY + 0.86 * heightM / 1.7 + 0.2"):
                 if needle not in js:
@@ -51230,8 +51230,8 @@ def check_vnew_previz_pose_148() -> None:
             expect("pz-b", same, [], "hands 없는 인물(제스처 16개 + 없음 · 서기/앉기)은 148 이전 렌더러와 같은 회전·위치")
             expect("pz-b", [new["g:point:stand"]["a1"]["shR"][0], new["g:cover_face:stand"]["a1"]["shL"][0],
                             new["g:None:sit"]["a1"]["hipL"], new["g:None:sit"]["a1"]["hipsY"]],
-                   [[-1.570796, 0, -0.1], [-2.513274, 0, 0.5], [[-1.570796, 0, 0], [1.570796, 0, 0]], 0.5],
-                   "스냅숏: point 오른팔·cover_face 왼팔·앉기 다리·엉덩이 높이(148 이전 코드의 상수)")
+                   [[-1.570796, 0, -0.1], [-1.607482, -0.551974, -0.2335], [[-1.570796, 0, 0], [1.570796, 0, 0]], 0.5],
+                   "스냅숏: point 오른팔·cover_face 왼팔(209a-fix1: 손이 얼굴에 닿게 IK)·앉기 다리·엉덩이 높이")
 
         # ================= (pz-c) 패널 읽기 =================
         payload = {
@@ -68561,6 +68561,7 @@ def main() -> int:
     if not __import__("check_brief_keep_206").check_brief_keep_206(): fail("작업 206: 지시서 바뀐 컷만 · 테이크별 stale · 금액 바뀜 검사 실패")
     if not __import__("check_previz_easy_207").check_previz_easy_207(): fail("작업 207: 프리비즈 직접 끌기 · 휠 포커스 · 방향키 · 이름표 · dirty 검사 실패")
     if not __import__("check_pose_rig_208").check_pose_rig_208(): fail("작업 208: 직접 잡은 자세(rig·keys) 보존 · 설명 · 프롬프트 검사 실패")
+    if not __import__("check_pose_controls_209a").check_pose_controls_209a(): fail("작업 209a: 프리비즈 포즈(관절 고리 · IK 손발 · 골반 · 채널 박스 · 좌우 반전) 검사 실패")
     check_vnew_voice_ui_203()
     print()
     if warnings:

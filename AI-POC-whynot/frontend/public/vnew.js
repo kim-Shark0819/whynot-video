@@ -5570,6 +5570,17 @@
   ];
   // 상대(gestureTarget)가 필요한 동작.
   var GESTURES_WITH_TARGET = ["hand_on_other_cheek", "both_hands_other_cheeks", "press_hand_to_other_chest", "lean_in", "turn_head_to_other"];
+  /* 작업 209a: 포즈 모드 관절 이름(vnew-previz.js RIG_JOINTS) → 패널 글. root = 골반(rig.rootY). */
+  var PREVIZ_JOINT_KO = {
+    head: "머리", neck: "목", spine: "가슴",
+    shoulderL: "왼어깨", shoulderR: "오른어깨", elbowL: "왼팔꿈치", elbowR: "오른팔꿈치", wristL: "왼손목", wristR: "오른손목",
+    hipL: "왼엉덩이", hipR: "오른엉덩이", kneeL: "왼무릎", kneeR: "오른무릎", ankleL: "왼발목", ankleR: "오른발목",
+    root: "골반"
+  };
+  // 채널 박스 칸: [글, 값 순서(x 숙이기 · y 돌리기 · z 기울이기)]
+  var PREVIZ_JOINT_AXES = [["돌리기", 1], ["숙이기", 0], ["기울이기", 2]];
+  var PREVIZ_JOINT_STEP_DEG = 5;
+  var PREVIZ_POSE_NOTE = "목록에서 고른 자세 위에 직접 바꾼 관절이 덮어씁니다";
   /* 작업 200: 카메라 범위·렌즈(previz_schema 와 같은 값). 렌즈는 풀프레임 환산 — 16:9 세로 화각 = 2·atan(10.125 / mm). */
   var PREVIZ_FOV_MIN = 8;
   var PREVIZ_FOV_MAX = 120;
@@ -6398,6 +6409,12 @@
         rotate: toolButton(tools, "회전 (E)", "인물 방향 / 카메라 좌우·위아래", function () { previzCtl.setTool("rotate"); })
       };
       toolButton(tools, "맞춰 보기 (F)", "F = 선택한 것에 맞춰 보기", function () { previzCtl.frameSelection(); });
+      // 작업 209a: [포즈 (P)] — 고른 인물 하나의 관절을 직접 잡는다(Maya 식 고리·손발 네모·골반 네모).
+      var poseBtn = toolButton(tools, "포즈 (P)", "고른 인물의 관절을 직접 잡습니다 — 고리 = 관절 돌리기 · 손·발 네모 = 끌어서 팔다리 굽히기 · 골반 네모 = 높이",
+        function () {
+          if (previzCtl.setPoseMode) previzCtl.setPoseMode(!previzCtl.poseMode);
+        });
+      poseBtn.classList.add("vnew-previz-pose-toggle");
       row.appendChild(tools);
       var snapWrap = el("label", "vnew-previz-check vnew-previz-snap");
       var snap = el("input");
@@ -6445,7 +6462,7 @@
       aimRow.appendChild(info);
       root.appendChild(aimRow);
       root.appendChild(el("p", "vnew-hint vnew-previz-help", "Q 선택 · W 이동 · E 회전 · F 맞춰 보기 · 휠 확대 · Shift+드래그 이동 · Ctrl+Z 되돌리기" +
-        " · 인물 끌어 옮기기 · 방향키 0.1m(Shift 0.5m) · [ ] 15°"));
+        " · 인물 끌어 옮기기 · 방향키 0.1m(Shift 0.5m) · [ ] 15° · P 포즈"));
 
       function sync(st) {
         if (!previzCtl || !st) return;
@@ -6458,6 +6475,8 @@
         undoBtn.disabled = !st.canUndo;
         redoBtn.disabled = !st.canRedo;
         aimBtn.classList.toggle("is-on", !!st.aim);
+        poseBtn.classList.toggle("is-on", !!st.pose);
+        poseBtn.disabled = !(st.selection && st.selection.type === "actor");
         hereBtn.disabled = st.view !== "work";
         var ci = previzCtl.cameraInfo();
         Object.keys(lensBtns).forEach(function (mm) {
@@ -6465,7 +6484,9 @@
         });
         info.textContent = st.aim
           ? "인물을 누르세요(Esc 취소)"
-          : "렌즈 " + ci.lensMm + "mm · 화각 " + ci.fov + "° · 카메라 높이 " + ci.heightM.toFixed(2) + "m";
+          : st.pose
+            ? "포즈: 고리 끌기 = 가로 돌리기 · 세로 숙이기 · Shift 기울이기 · 손발 네모 끌기(Alt 앞뒤) · 골반 네모 = 높이 · Esc 끝"
+            : "렌즈 " + ci.lensMm + "mm · 화각 " + ci.fov + "° · 카메라 높이 " + ci.heightM.toFixed(2) + "m";
       }
       return { root: root, sync: sync };
     }
@@ -6543,6 +6564,12 @@
         var card = right.querySelector(".vnew-previz-edit-card.is-selected");
         if (card && card.scrollIntoView) card.scrollIntoView({ block: "nearest" });
       });
+      // 작업 209a: 포즈 모드를 켜고 끄거나 관절을 고르면 채널 박스를 다시 그린다.
+      if (previzCtl.onPose) {
+        previzCtl.onPose(function () {
+          renderCutPanel();
+        });
+      }
       previzCtl.onEdit(function (ev) {
         markDirty();
         var moved = ev && ev.cut ? focusCutOf(ev.cut) : false;
@@ -6754,6 +6781,7 @@
         speakWrap.appendChild(speak);
         speakWrap.appendChild(el("span", null, "말하는 중(머리 끄덕임)"));
         card.appendChild(speakWrap);
+        card.appendChild(previzPoseSection(scene, cut, ca));
         card.appendChild(actorNote);
         right.appendChild(card);
       });
@@ -6766,6 +6794,7 @@
       saveBtn.type = "button";
       saveBtn.addEventListener("click", function () {
         saveBtn.disabled = true;
+        // 작업 209a: 인물이 직접 잡은 관절(cut actor 의 rig)도 이 scenes 안에 그대로 실린다(따로 고르지 않는다).
         api("/api/vnew/p/" + encodeURIComponent(state.projectId) + "/previz/scene", {
           method: "PUT",
           body: JSON.stringify({ scenes: scenes })
@@ -6811,6 +6840,106 @@
         if (manualIds[u.actor]) out.push((names[u.actor] || u.actor) + "이(가) 소품과 겹칩니다(직접 놓은 자리라 옮기지 않았습니다).");
       });
       return out;
+    }
+
+    /* 작업 209a: 포즈(채널 박스). 포즈 모드에서 관절을 골랐으면 그 관절 값(도)을 돌리기·숙이기·기울이기 칸과 ±5° 단추로,
+       골반이면 높이(cm). 아래 [포즈 초기화](rig 지우기)·[좌우 반전]과 안내 한 줄. 값은 편집기가 관절 한계 안으로 자르고,
+       칸 입력은 잠시 뒤 한 단계(applyEdit), 단추는 바로 한 단계로 기록한다. 고친 인물은 직접 고침(manual)이 된다. */
+    function previzPoseSection(scene, cut, ca) {
+      var box = el("div", "vnew-previz-pose");
+      box.appendChild(el("strong", "vnew-previz-pose-head", "포즈"));
+      var ctl = previzCtl && previzCtl.jointDeg ? previzCtl : null;
+      var joint = ctl && ctl.poseMode ? ctl.poseJoint : null;
+      function stepButton(row, text, onClick) {
+        var b = el("button", "outline-button vnew-previz-pose-step", text);
+        b.type = "button";
+        b.addEventListener("click", onClick);
+        row.appendChild(b);
+        return b;
+      }
+      function numberRow(label, value, onInput, onStep, readBack) {
+        var row = el("div", "vnew-previz-pose-row");
+        row.appendChild(el("span", "vnew-field-label vnew-previz-pose-label", label));
+        stepButton(row, "−" + PREVIZ_JOINT_STEP_DEG, function () { onStep(-PREVIZ_JOINT_STEP_DEG); });
+        var input = el("input", "vnew-field-input vnew-previz-pose-input");
+        input.type = "number";
+        input.step = "1";
+        input.value = String(value);
+        input.addEventListener("input", function () {
+          var raw = parseFloat(input.value);
+          if (!isFinite(raw)) return;
+          onInput(raw);
+          applyEdit(scene, cut);
+        });
+        input.addEventListener("change", function () {
+          input.value = String(readBack());
+        });
+        fieldRefreshers.push(function () {
+          if (document.activeElement !== input) input.value = String(readBack());
+        });
+        row.appendChild(input);
+        stepButton(row, "+" + PREVIZ_JOINT_STEP_DEG, function () { onStep(PREVIZ_JOINT_STEP_DEG); });
+        box.appendChild(row);
+      }
+      if (!ctl) {
+        box.appendChild(el("p", "vnew-hint", "뷰포트가 준비되면 관절을 직접 잡을 수 있습니다."));
+      } else if (!ctl.poseMode) {
+        box.appendChild(el("p", "vnew-hint", "[포즈 (P)]를 켜고 몸의 고리를 누르면 관절을 고릅니다."));
+      } else if (!joint) {
+        box.appendChild(el("p", "vnew-hint", "고리를 누르면 그 관절을 고릅니다. 손·발 네모는 끌어서 팔다리를 굽히고, 골반 네모는 위아래로 끕니다."));
+      } else if (joint === "root") {
+        box.appendChild(el("p", "vnew-previz-pose-joint", "관절: " + PREVIZ_JOINT_KO.root));
+        var readCm = function () { return Math.round(ctl.rootYOf(ca.id, cut) * 1000) / 10; };
+        numberRow("높이(cm)", readCm(), function (cm) {
+          ctl.setRootY(ca.id, cm / 100, false, cut);
+        }, function (delta) {
+          ctl.setRootY(ca.id, (readCm() + delta) / 100, true, cut);
+        }, readCm);
+      } else {
+        box.appendChild(el("p", "vnew-previz-pose-joint", "관절: " + (PREVIZ_JOINT_KO[joint] || joint)));
+        var readDeg = function () { return ctl.jointDeg(ca.id, joint, cut) || [0, 0, 0]; };
+        PREVIZ_JOINT_AXES.forEach(function (pair) {
+          var axis = pair[1];
+          numberRow(pair[0] + "(도)", readDeg()[axis], function (deg) {
+            var v = readDeg();
+            v[axis] = deg;
+            ctl.setJointDeg(ca.id, joint, v, false, cut);
+          }, function (delta) {
+            var v = readDeg();
+            v[axis] += delta;
+            ctl.setJointDeg(ca.id, joint, v, true, cut);
+          }, function () { return readDeg()[axis]; });
+        });
+      }
+      if (joint) {
+        var resetOne = el("button", "link-button vnew-previz-pose-reset-joint", "이 관절 초기화");
+        resetOne.type = "button";
+        resetOne.disabled = !(ca.rig && (joint === "root" ? typeof ca.rig.rootY === "number" : Array.isArray(ca.rig[joint])));
+        resetOne.addEventListener("click", function () {
+          ctl.resetJoint(ca.id, joint, cut);
+        });
+        box.appendChild(resetOne);
+      }
+      var actions = el("div", "vnew-previz-pose-actions");
+      var resetAll = el("button", "outline-button vnew-previz-pose-reset", "포즈 초기화");
+      resetAll.type = "button";
+      resetAll.title = "직접 바꾼 관절을 모두 지웁니다(목록에서 고른 자세로 돌아갑니다)";
+      resetAll.disabled = !ctl || !ca.rig;
+      resetAll.addEventListener("click", function () {
+        if (previzCtl && previzCtl.resetPose) previzCtl.resetPose(ca.id, cut);
+      });
+      actions.appendChild(resetAll);
+      var mirror = el("button", "outline-button vnew-previz-pose-mirror", "좌우 반전");
+      mirror.type = "button";
+      mirror.title = "왼쪽·오른쪽 관절을 서로 바꿉니다";
+      mirror.disabled = !ctl;
+      mirror.addEventListener("click", function () {
+        if (previzCtl && previzCtl.mirrorPose) previzCtl.mirrorPose(ca.id, cut);
+      });
+      actions.appendChild(mirror);
+      box.appendChild(actions);
+      box.appendChild(el("p", "vnew-hint vnew-previz-pose-note", PREVIZ_POSE_NOTE));
+      return box;
     }
 
     /* 직접 고친 값 표시 + [자동으로 되돌리기](표시만 뗀다 — 다음 다시 만들기 때 자동 계산). */

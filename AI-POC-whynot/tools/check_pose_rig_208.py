@@ -1,6 +1,6 @@
 """작업 208 검사 — ④ 프리비즈 직접 잡은 자세(rig)·자세 키(keys): 저장 · 보존 · 영어 설명 · 지시서/영상 프롬프트. 유료·네트워크 0.
 
-  (p-a) 정리: 각도 ±3.1416·소수 3자리 · rootY [-1.0, 0.3] · 모르는 관절·0 관절 버림 · 빈 rig 없음 ·
+  (p-a) 정리: 각도 ±3.1416·소수 3자리 · rootY [-1.0, 0.3] · 모르는 관절 버림 · 0 관절 남김 · 빈 rig 없음 ·
         keys 최대 8 · u 순 · 같은 u 는 마지막 · pos 방 안·y 0 · 맞는 키가 없으면 없음
   (p-b) 옛 데이터(rig·keys 없음) → 정리 결과 바이트 그대로 · 키 없음 · LLM 설계 스키마에 rig·keys 없음
   (p-c) 보존: place_cut(locked) · _apply_cut_result · 보정(resolve_cut) · 연기 배정 · 다시 만들기(_restore_manual) · 고침 표시
@@ -10,6 +10,7 @@
   (p-g) 지시서 입력: userPoseEn 은 자세 잡은 인물만 · 지시 한 줄 · 자세 없는 장소는 지금 글 그대로
   (p-h) 테이크·컷 프롬프트: "User-set pose (follow exactly):" 는 그 컷에만 · 설명만 줄인다
   (p-i) pvSig: rig 만 바뀐 컷만 지문이 바뀐다
+  (p-k) 목록 자세(pose sit·kneel·posture lean) 위 rig: 골반 = 자세 엉덩이 높이 + rootY · 손 높이 띠 JS 와 같음 · 0 관절 남김
   (p-j) LF 줄 끝(바꾼 파일)
 
 실행: python -X utf8 -B tools/check_pose_rig_208.py
@@ -40,6 +41,7 @@ GROUPS = {
     "p-g": "지시서 입력 userPoseEn(자세 인물만) · 지시 한 줄",
     "p-h": "테이크·컷 프롬프트 User-set pose(그 컷만) · 설명만 줄임",
     "p-i": "pvSig: rig 만 바뀐 컷만",
+    "p-k": "목록 자세 위 rig: 앉은 골반 높이 · 손 높이 · 0 관절 남김",
     "p-j": "LF 줄 끝",
 }
 ROOM = {"width": 6.0, "depth": 6.0, "height": 3.0}
@@ -117,10 +119,11 @@ def check_pose_rig_208() -> bool:
         try:
             rig = ps.normalize_rig({"spine": [0.12345, 5.0, -9.0], "elbowL": [0, 0, 0], "tail": [1, 1, 1],
                                     "head": [0.1, "x", 0], "rootY": -3.0, "neck": [-0.0, 0.2, 0.0004]})
-            expect("p-a", rig, {"spine": [0.123, 3.142, -3.142], "neck": [0.0, 0.2, 0.0], "rootY": -1.0},
-                   "각도 ±3.1416 · 3자리 · 0 관절·모르는 관절·잘못된 관절 버림 · rootY -1.0")
+            expect("p-a", rig, {"spine": [0.123, 3.142, -3.142], "elbowL": [0.0, 0.0, 0.0], "neck": [0.0, 0.2, 0.0], "rootY": -1.0},
+                   "각도 ±3.1416 · 3자리 · 0 관절 남김 · 모르는 관절·잘못된 관절 버림 · rootY -1.0")
             expect("p-a", [ps.normalize_rig({"rootY": 0.9}), ps.normalize_rig({}), ps.normalize_rig({"hipL": [0, 0, 0]}),
-                           ps.normalize_rig("x")], [{"rootY": 0.3}, None, None, None], "rootY 0.3 상한 · 빈 rig → None")
+                           ps.normalize_rig({"rootY": 0}), ps.normalize_rig("x")],
+                   [{"rootY": 0.3}, None, {"hipL": [0.0, 0.0, 0.0]}, None, None], "rootY 0.3 상한 · 빈 rig·rootY 0 뿐 → None")
             bounds = ps._room_bounds(ROOM)  # noqa: SLF001
             raw_keys = [{"u": 0.9, "pos": [9, 5, 0], "facingDeg": 10}, {"u": 0.1, "pos": [0, 0, 0], "facingDeg": 0},
                         {"u": 0.1, "pos": [1, 0, 1], "facingDeg": 45, "rig": {"head": [0.3, 0, 0]}}, {"pos": [0, 0, 0]}]
@@ -306,6 +309,38 @@ def check_pose_rig_208() -> bool:
                    [True, True], "rig 만 바뀐 컷 c2 만 pvSig 가 바뀐다")
         except Exception as exc:  # noqa: BLE001
             crash("p-i", exc)
+
+        # ================= (p-k) 목록 자세 위 rig(JS Mannequin.apply·applyBody·applyRig) =================
+        try:
+            def rnd(v):
+                return [round(x, 3) for x in v]
+
+            seated = {"id": "a1", "pos": [0.0, 0.0, 0.0], "facingDeg": 0.0, "pose": "sit",
+                      "rig": {"shoulderR": [-1.5708, 0.0, 0.0], "rootY": -0.05}}
+            pts = pd.body_points([0, 0, 0], 0.0, seated["rig"], 1.7, seated)
+            # JS: 골반 = sit hips 0.5 + rootY · 오른 어깨 (-0.22, 골반+0.52, 0) · 팔 앞으로 0.3+0.29
+            expect("p-k", [rnd(pts["pelvis"]), rnd(pts["handR"]), pd._band(pts["handR"][1], pts)],  # noqa: SLF001
+                   [[0.0, 0.45, 0.0], [-0.22, 0.97, 0.59], "shoulder"], "앉은 rig: 골반 0.5+rootY · 손 위치·높이 띠가 JS 와 같다")
+            jia_near = {"id": "a2", "pos": [0.0, 0.0, 0.75], "facingDeg": 180.0}
+            expect("p-k", [describe(seated, others=()), describe(seated, others=(jia_near,)),
+                           describe(dict(seated, pose="stand"), others=(jia_near,))],
+                   ["right hand reaching forward at shoulder height", "right hand holds 지아's hand",
+                    "right hand rests on 지아's shoulder"], "앉은 손은 서 있는 상대의 손 높이(서 있으면 어깨)")
+            seat = dict(seated, sit={"hipY": 0.6, "legPitchDeg": 0.0}, heightM=1.87)
+            expect("p-k", [round(pd.body_points([0, 0, 0], 0.0, seat["rig"], 1.87, seat)["pelvis"][1], 3),
+                           describe(dict(seated, pose="kneel"), others=())],
+                   [0.545, "right hand reaching forward at shoulder height"], "앉을 자리 hipY + rootY·키 · 무릎 자세에 '발 듦' 없음")
+            zero_leg = pd.body_points([0, 0, 0], 0.0, {"hipL": [0.0, 0.0, 0.0]}, 1.7, {"pose": "sit"})
+            zero_spine = pd.body_points([0, 0, 0], 0.0, {"spine": [0.0, 0.0, 0.0]}, 1.7, {"posture": "lean_forward"})
+            lean = pd.body_points([0, 0, 0], 0.0, {}, 1.7, {"posture": "lean_forward"})
+            expect("p-k", [round(zero_leg["kneeL"][1], 3), round(zero_leg["kneeR"][1], 3), round(zero_spine["head"][2], 3),
+                           round(lean["head"][2], 3) > 0.2],
+                   [0.04, 0.5, 0.0, True], "0 관절이 목록 자세를 덮어쓴다(앉은 왼 엉덩이 0 → 다리 곧게 · 기울기 0)")
+            kept = ps._normalize_cut_actors([{"id": "a1", "pos": [0, 0, 0], "rig": {"elbowR": [0, 0, 0], "rootY": 0}}],  # noqa: SLF001
+                                            ["a1"], ROOM)
+            expect("p-k", [kept[0].get("rig")], [{"elbowR": [0.0, 0.0, 0.0]}], "정리 뒤에도 0 관절이 남는다(rootY 0 은 뺀다)")
+        except Exception as exc:  # noqa: BLE001
+            crash("p-k", exc)
 
         # ================= (p-j) LF =================
         try:
