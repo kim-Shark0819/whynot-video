@@ -68775,6 +68775,7 @@ def main() -> int:
     if not __import__("check_audio_separate_217").check_audio_separate_217(): fail("작업 217: 섞인 소리 분리(⑥ · ⑦) 검사 실패")
     if not __import__("check_edit_text_215b").check_edit_text_215b(): fail("작업 215b: ⑦ 자막 · 타이틀 · 전환 · 색 · 대사 편집 검사 실패")
     if not __import__("check_edit_tools_215c").check_edit_tools_215c(): fail("작업 215c: ⑦ 프리미어식 도구 · 단축키 검사 실패")
+    if not __import__("check_css_balance").check_css_balance(): fail("CSS 괄호 균형 검사 실패(닫히지 않은 규칙)")
     check_vnew_voice_ui_203()
     print()
     if warnings:
