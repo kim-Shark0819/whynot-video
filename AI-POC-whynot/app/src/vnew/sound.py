@@ -830,13 +830,14 @@ def run_apply(owner: str, pid: str, gen_id: str, variant: str, claim: str) -> No
                 if not (_probe(source_path) or {}).get("hasAudio"):
                     raise VpocError("vnew.sound.apply", "BadAudio", "이 영상에는 소리가 없어 바꿀 수 없습니다", 400)
                 audio_path = None
+                from . import audio_separate; audio_path = audio_separate.sound_track(owner, pid, source_key, workdir)  # noqa: E702,PLC0415 — 작업 217
                 voice_job = job.get("voices")
                 if isinstance(voice_job, dict) and voice_job.get("items"):
                     stage = "voice"
                     from . import voices  # noqa: PLC0415 — voices 가 이 모듈을 import 한다(순환 피함)
 
                     audio_path, voice_summary = voices.build_track(
-                        owner, pid, gen_id, variant, source_path, workdir, voice_job,
+                        owner, pid, gen_id, variant, audio_path or source_path, workdir, voice_job,  # 작업 217: 분리된 목소리 위에
                         beat=lambda progress: _beat(owner, pid, gen_id, variant, claim, progress=progress))
                 stage = "render"
                 output = os.path.join(workdir, "sound.mp4")

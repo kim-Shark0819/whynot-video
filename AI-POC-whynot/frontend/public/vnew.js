@@ -9762,6 +9762,7 @@
     });
     ctx.player = player;
     sourceBox.appendChild(player);
+    if (typeof sepMountSound === "function") sepMountSound(ctx, sourceBox); // 작업 217: 섞인 소리 분리하기(잘라 낸 검사 하네스에는 없다)
     players.appendChild(sourceBox);
     ctx.resultBox = el("div", "vnew-sound-pbox");
     players.appendChild(ctx.resultBox);
@@ -15279,6 +15280,7 @@
       row.appendChild(add);
       bin.appendChild(row);
     }
+    if (typeof sepMountBin === "function") sepMountBin(ctx, bin); // 작업 217: 섞인 소리 분리하기(재료마다)
     var cuts = info.cutsOf(take || null);
     var timeCuts = editBinTimeCuts(take);
     var options = timeCuts.map(function (c) {
@@ -16777,6 +16779,267 @@
   }
 
   /* ================================================================ 작업 215a: ⑦ 오디오 트랙 끝 */
+
+  /* ==== 작업 217 시작 ==== */
+  /* 섞인 소리 분리하기(⑥ 사운드 원본 · ⑦ 재료 하나). GET /audio-separate?scope=sound|edit&variant= 가 원본마다 상태 · 견적을 준다.
+     [섞인 소리 분리하기 (AI, $x)] → 견적 다시(dryRun) → 확인창(금액) → POST(confirmUsd). 409 CostMismatch 면 보기를 다시 읽어
+     단추에 새 금액을 보이고 보내지 않는다(다시 눌러야 한다 — 작업 206). 자동으로 다시 보내지 않는다. 진행 중이면 SEP_POLL_MS 마다 GET.
+     끝나면 [분리된 목소리 쓰기](⑥ 반영 · ⑦ 내보내기 A1) · [배경을 A2에](⑦ 내보내기, 배경음 트랙) 체크 — PUT. 소리만 보낸다(서버가 뽑는다). */
+  var SEP_POLL_MS = 5000;
+  var SEP_FRESH_MS = 20000;
+  var SEP_BUTTON = "섞인 소리 분리하기";
+
+  function sepPath() {
+    return "/api/vnew/p/" + encodeURIComponent(state.projectId) + "/audio-separate";
+  }
+
+  function sepButtonText(item) {
+    var est = (item && item.estimate) || null;
+    var st = ((item && item.state) || {}).status;
+    var money = est && est.label ? est.label : "가격 확인 불가";
+    return (st === "done" ? "다시 분리하기" : SEP_BUTTON) + " (AI, " + money + ")";
+  }
+
+  function sepConfirmText(item, est) {
+    var e = est || {};
+    var secs = typeof e.seconds === "number" ? e.seconds.toFixed(1) + "초" : "";
+    return "이 소리(" + (item.label || "원본") + (secs ? " · " + secs : "") + ")를 AI(" + (e.modelLabel || "분리 모델") +
+      ")로 목소리와 배경으로 나눕니다. 영상 그림은 보내지 않고 소리만 보냅니다.\n비용: " +
+      (e.priceKnown ? e.label : "가격 확인 불가") + "\n계속할까요?";
+  }
+
+  function sepOf(ctx, scope) {
+    if (!ctx.sep || ctx.sep.variant !== ctx.variant) {
+      ctx.sep = { scope: scope, variant: ctx.variant, view: null, at: 0, busy: false, msg: "", bad: false, pick: "", timer: 0,
+                  loading: false, box: null, paint: null, alive: null };
+    }
+    return ctx.sep;
+  }
+
+  function sepItem(sep) {
+    var items = ((sep.view || {}).items) || [];
+    if (sep.scope === "sound") return items[0] || null;
+    return items.filter(function (i) { return i.sourceKey === sep.pick; })[0] || null;
+  }
+
+  function sepLoad(sep) {
+    if (sep.loading || !sep.alive()) return;
+    sep.loading = true;
+    api(sepPath() + "?scope=" + sep.scope + "&variant=" + encodeURIComponent(sep.variant || ""))
+      .then(function (view) {
+        sep.loading = false;
+        sep.view = view || {};
+        sep.at = Date.now();
+        if (!sep.alive()) return;
+        sep.paint();
+        var running = (sep.view.items || []).some(function (i) {
+          var st = (i.state || {}).status;
+          return st === "running" || st === "starting";
+        });
+        if (running && !sep.timer) {
+          sep.timer = window.setTimeout(function () {
+            sep.timer = 0;
+            sepLoad(sep);
+          }, SEP_POLL_MS);
+        }
+      })
+      .catch(function (err) {
+        sep.loading = false;
+        if (err && err.status === 404) {
+          sep.view = { items: [] }; // 기능 꺼짐 — 그리지 않는다
+          if (sep.alive()) sep.paint();
+          return;
+        }
+        sep.msg = "분리 정보를 읽지 못했습니다: " + errMessage(err);
+        sep.bad = true;
+        if (sep.alive()) sep.paint();
+      });
+  }
+
+  function sepBody(sep, item, extra) {
+    var body = { scope: sep.scope, variant: sep.variant };
+    if (sep.scope === "edit") body.sourceKey = item.sourceKey;
+    Object.keys(extra || {}).forEach(function (k) { body[k] = extra[k]; });
+    return JSON.stringify(body);
+  }
+
+  function sepSay(sep, text, bad) {
+    sep.msg = text;
+    sep.bad = !!bad;
+    if (sep.alive()) sep.paint();
+  }
+
+  function sepRun(sep, item) {
+    if (sep.busy || !item) return;
+    sep.busy = true;
+    sepSay(sep, "금액을 확인하는 중…", false);
+    api(sepPath(), { method: "POST", body: sepBody(sep, item, { dryRun: true }) })
+      .then(function (result) {
+        var est = (result || {}).estimate || {};
+        if (!sep.alive()) return null;
+        if (!window.confirm(sepConfirmText(item, est))) {
+          sep.busy = false;
+          sepSay(sep, "", false);
+          return null;
+        }
+        sepSay(sep, "소리를 보내는 중…", false);
+        return api(sepPath(), { method: "POST", body: sepBody(sep, item, { confirmUsd: est.priceKnown ? est.usd : 0 }) });
+      })
+      .then(function (result) {
+        if (!result) return;
+        sep.busy = false;
+        sepSay(sep, "분리를 시작했습니다. 1~3분쯤 걸립니다.", false);
+        sepLoad(sep);
+      })
+      .catch(function (err) {
+        sep.busy = false;
+        if (isCostMismatch(err)) {
+          sepSay(sep, "금액이 바뀌었습니다. 단추의 새 금액을 확인한 뒤 다시 눌러 주세요.", true);
+          sepLoad(sep); // 새 견적으로 단추 글을 바꾼다(보내지 않는다)
+          return;
+        }
+        sepSay(sep, "분리하지 못했습니다: " + errMessage(err), true);
+      });
+  }
+
+  function sepUse(sep, item, field, value) {
+    if (sep.busy || !item) return;
+    sep.busy = true;
+    var extra = {};
+    extra[field] = value;
+    api(sepPath(), { method: "PUT", body: sepBody(sep, item, extra) })
+      .then(function (result) {
+        sep.busy = false;
+        item.state = (result || {}).state || item.state;
+        sepSay(sep, field === "useVoice" ? (value ? "분리된 목소리를 씁니다." : "원래 소리를 씁니다.") :
+          (value ? "배경을 A2(배경음)에 놓습니다." : "배경은 넣지 않습니다."), false);
+      })
+      .catch(function (err) {
+        sep.busy = false;
+        sepSay(sep, "바꾸지 못했습니다: " + errMessage(err), true);
+      });
+  }
+
+  function sepCheck(text, checked, disabled, onChange) {
+    var label = el("label", "vnew-sep-check");
+    var box = document.createElement("input");
+    box.type = "checkbox";
+    box.checked = !!checked;
+    box.disabled = !!disabled;
+    box.addEventListener("change", function () { onChange(box.checked); });
+    label.appendChild(box);
+    label.appendChild(document.createTextNode(" " + text));
+    return label;
+  }
+
+  function sepPaintBox(sep) {
+    var box = sep.box;
+    if (!box) return;
+    clear(box);
+    var items = ((sep.view || {}).items) || [];
+    if (!sep.view) { // 처음에는 서버를 부르지 않는다 — 열면 상태 · 금액을 읽는다
+      box.hidden = false;
+      var open = el("button", "outline-button vnew-sep-open", sep.loading ? "금액을 읽는 중…" : SEP_BUTTON + " (AI, 금액 보기)");
+      open.type = "button";
+      open.disabled = sep.loading;
+      open.title = "대사와 배경이 섞인 옛 영상의 소리를 AI로 나눕니다. 누르면 상태와 금액을 먼저 보입니다";
+      open.addEventListener("click", function () {
+        sepLoad(sep);
+        sep.paint();
+      });
+      box.appendChild(open);
+      return;
+    }
+    if (!items.length) {
+      box.hidden = true;
+      return;
+    }
+    box.hidden = false;
+    var row = el("div", "vnew-sep-row");
+    row.appendChild(el("span", "vnew-sep-title", "섞인 소리"));
+    if (sep.scope === "edit") {
+      var sel = document.createElement("select");
+      sel.className = "vnew-sep-pick";
+      sel.setAttribute("aria-label", "분리할 재료");
+      items.forEach(function (i) {
+        var opt = document.createElement("option");
+        opt.value = i.sourceKey;
+        opt.textContent = (i.label || "영상") + ((i.state || {}).status === "done" ? " · 분리됨" : "");
+        sel.appendChild(opt);
+      });
+      if (!sepItem(sep)) sep.pick = items[0].sourceKey;
+      sel.value = sep.pick;
+      sel.addEventListener("change", function () {
+        sep.pick = String(sel.value || "");
+        sep.msg = "";
+        sep.paint();
+      });
+      row.appendChild(sel);
+    }
+    var item = sepItem(sep);
+    var st = ((item && item.state) || {});
+    var live = st.status === "running" || st.status === "starting";
+    var btn = el("button", "outline-button vnew-sep-run", live ? "분리하는 중…" : sepButtonText(item));
+    btn.type = "button";
+    btn.disabled = sep.busy || live || !item || item.hasAudio === false;
+    btn.title = item && item.hasAudio === false ? "이 영상에는 소리가 없습니다" :
+      "대사와 배경(환경음 · 음악)이 섞인 소리를 AI로 목소리 · 배경으로 나눕니다(누르면 금액을 먼저 보입니다)";
+    btn.addEventListener("click", function () { sepRun(sep, sepItem(sep)); });
+    row.appendChild(btn);
+    box.appendChild(row);
+    if (st.status === "done") {
+      var use = el("div", "vnew-sep-row vnew-sep-use");
+      use.appendChild(sepCheck("분리된 목소리 쓰기", st.useVoice, sep.busy, function (v) { sepUse(sep, item, "useVoice", v); }));
+      if (sep.scope === "edit") {
+        use.appendChild(sepCheck("배경을 A2(배경음)에 놓기", st.bgOnA2, sep.busy || !st.useVoice,
+          function (v) { sepUse(sep, item, "bgOnA2", v); }));
+      } else {
+        use.appendChild(el("span", "vnew-hint", "⑥ 반영 영상에는 목소리만 들어갑니다. 배경은 ⑦ A2에 놓을 수 있습니다."));
+      }
+      [["목소리", st.voiceUrl], ["배경", st.bgUrl]].forEach(function (pair) {
+        if (!pair[1]) return;
+        var audio = document.createElement("audio");
+        audio.className = "vnew-sep-audio";
+        audio.controls = true;
+        audio.preload = "none";
+        audio.src = pair[1];
+        audio.setAttribute("aria-label", pair[0] + " 듣기");
+        use.appendChild(el("span", "vnew-sep-alabel", pair[0]));
+        use.appendChild(audio);
+      });
+      box.appendChild(use);
+    }
+    var text = sep.msg || (st.status === "failed" ? "분리하지 못했습니다: " + (st.error || "") : live ? "소리를 분리하는 중입니다…" : "");
+    if (text) {
+      var line = el("p", "vnew-hint vnew-sep-status" + (sep.bad || (!sep.msg && st.status === "failed") ? " is-bad" : ""), text);
+      line.setAttribute("role", "status");
+      box.appendChild(line);
+    }
+  }
+
+  function sepMount(sep, host, alive) {
+    sep.box = el("div", "vnew-sep");
+    sep.box.hidden = true;
+    sep.alive = alive;
+    sep.paint = function () { sepPaintBox(sep); };
+    host.appendChild(sep.box);
+    sep.paint();
+    if (sep.view && Date.now() - sep.at > SEP_FRESH_MS) sepLoad(sep); // 연 적이 있을 때만 다시 읽는다
+  }
+
+  /* ⑥ 사운드: 원본 플레이어 아래. */
+  function sepMountSound(ctx, host) {
+    var sep = sepOf(ctx, "sound");
+    sepMount(sep, host, function () { return soundAlive(ctx); });
+  }
+
+  /* ⑦ 재료: 테이크 고르기 줄 아래(재료 하나씩 고른다 — 기본은 고른 테이크). */
+  function sepMountBin(ctx, host) {
+    var sep = sepOf(ctx, "edit");
+    if (!sep.pick && ctx.binTake) sep.pick = String(ctx.binTake[ctx.variant] || "");
+    sepMount(sep, host, function () { return editAlive(ctx); });
+  }
+  /* ==== 작업 217 끝 ==== */
 
   /* ---------------------------------------------------------------- ⑦ AI로 고치기(지시서 116)
 

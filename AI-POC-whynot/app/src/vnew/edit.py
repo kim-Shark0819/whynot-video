@@ -2016,6 +2016,14 @@ def stems_view(owner: str, pid: str, variant=None) -> dict:
                                                "application/zip")}
 
 
+def _separated_audio(owner: str, pid: str, source_key: str) -> dict | None:
+    """작업 217: 그 원본의 섞인 소리 분리 결과 {voiceKey, bgKey}([분리된 목소리 쓰기] 켬일 때만, bgKey 는 배경을 A2 에 끔이면 "").
+    없으면 None. 내보내기는 대사(A1)에 voiceKey, 배경음(A2)에 bgKey 를 쓴다(audio_separate.export_sources · export_mix_doc)."""
+    from . import audio_separate  # noqa: PLC0415 — audio_separate 가 이 모듈을 import 한다(순환 피함)
+
+    return audio_separate.separated_audio(owner, pid, source_key)
+
+
 def _presign_attachment(key: str, filename: str, content_type: str) -> str:
     """작업 215a: 영상 버킷 presigned 내려받기(attachment). filename 은 서버가 만든 ASCII 이름만. 검사용 저장소는 presign."""
     if not key:
@@ -2597,6 +2605,7 @@ def run_export(owner: str, pid: str, gen_id: str, n: int, claim: str) -> None:
         audio_from, mutes = _export_audio_from(owner, pid, gen_id, str(current.get("variant") or ""), clips, meta)
         if mutes:  # 작업 193 fix1: 원천에 소리가 없는 result 버전 클립은 v2v 소리 대신 무음(이 실행 안에서만 — 문서는 그대로)
             clips = [dict(c, muted=True) if c["sourceKey"] in mutes else c for c in clips]
+        from . import audio_separate; audio_from, sep_bg = audio_separate.export_sources(owner, pid, clips, audio_from, meta)  # noqa: E702,PLC0415 — 작업 217
         alt = [_clip_audio(c, audio_from.get(c["sourceKey"])) for c in clips]  # 지시서 116 보완 10: 클립별 대체 소리 (v1 시작, 끝)
         with_audio = any(not c.get("muted") and ((meta.get(c["sourceKey"]) or {}).get("hasAudio") or alt[i] is not None)
                          for i, c in enumerate(clips))
@@ -2713,6 +2722,7 @@ def run_export(owner: str, pid: str, gen_id: str, n: int, claim: str) -> None:
             stems_out: list[tuple[str, str]] = []
             dialogue_wav, bg_wavs, pkg_stems = "", [], []  # 216-fix2
             mix_doc = current.get("audio") if isinstance(current.get("audio"), dict) else None
+            mix_doc = audio_separate.export_mix_doc(mix_doc, sep_bg, clips, frames, fx, fps)  # 작업 217: 분리된 배경 → A2(배경음)
             if mix_doc is not None:
                 # 작업 215a: A1(위에서 만든 클립 소리) + 오디오 트랙을 섞는다 · 스템. 클립 소리가 없으면 A1 은 무음.
                 stage = "mix"
