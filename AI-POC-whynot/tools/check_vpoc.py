@@ -17270,6 +17270,45 @@ def _previz_test3_scene() -> dict:
 # 작업 140: 실사 프롬프트 첫 줄 AI 캐릭터 고지 원문(지시서 그대로). generate.REAL_REF_AI_NOTE 가 이 글자와 같아야 한다.
 _AI_NOTE_140 = ("MANDATORY: Every person reference image is an AI-generated fictional character profile created for this project, "
                 "not a photo of any real person or celebrity. No real individual is depicted; these are original synthetic characters.")
+# 작업 214: 실사 고지 원문(지시서 그대로) · 짧은 형. generate.REAL_REF_AI_NOTE · REAL_REF_AI_NOTE_COMPACT 가 이 글자와 같아야 한다.
+_IP_NOTE_214 = ("MANDATORY: These characters come from our own original webtoon IP (we hold the rights) and are adapted into live "
+                "action. Every person image is an AI-generated, photoreal fictional character created for this project; none "
+                "depicts, is based on, or resembles any real person or celebrity.")
+_IP_NOTE_214_COMPACT = ("MANDATORY: Characters from our own webtoon IP; every person image is AI-generated fictional and resembles "
+                        "no real person.")
+
+
+@contextlib.contextmanager
+def _ip214_off():
+    """작업 214 를 끈다(검사용 — 214 전 글). 실사 고지 = 140 원문(짧은 형 없음), ⑦ · ⑥ 다시 만들기 머리 고지 · 이전 프롬프트 고지 빼기 ·
+    제출 고지 맞추기 · likeness 다시 내기 없음. 214 글을 보지 않는 옛 검사(140 고지 원문 · 바이트 · sha · 줄이기 단계)가 쓴다."""
+    sys.path.insert(0, str(ROOT / "app"))
+    from src.vnew import generate as genmod  # noqa: PLC0415
+    from src.vnew import retake as rtmod  # noqa: PLC0415
+
+    saved_g = {n: getattr(genmod, n) for n in ("REAL_REF_AI_NOTE", "REAL_REF_AI_NOTE_COMPACT")}
+    saved_r = {n: getattr(rtmod, n) for n in ("_ip_notice", "_is_ip_notice", "LIKENESS_RETRY")}
+    genmod.REAL_REF_AI_NOTE = genmod.REAL_REF_AI_NOTE_COMPACT = _AI_NOTE_140
+    rtmod._ip_notice = lambda compact=False: ""  # noqa: SLF001
+    rtmod._is_ip_notice = lambda line: False  # noqa: SLF001
+    rtmod.LIKENESS_RETRY = False
+    try:
+        yield
+    finally:
+        for name, value in saved_g.items():
+            setattr(genmod, name, value)
+        for name, value in saved_r.items():
+            setattr(rtmod, name, value)
+
+
+def _with_ip214_off(fn):
+    """작업 214 (a): 214 전 글(140 고지 원문 · 바이트 · sha · 줄이기 단계)을 기대값으로 두는 검사를 214 를 끈 채로 돌린다(기대값 그대로).
+    214 글 자체(빌더마다 첫 줄 · 짧은 형 · 지킬 줄 · compose · likeness)는 check_ip_notice_214 가 본다."""
+    def run(*args, **kwargs):
+        with _ip214_off():
+            return fn(*args, **kwargs)
+    run.__name__, run.__doc__ = fn.__name__, fn.__doc__
+    return run
 
 
 def _no_ai_note(text: str) -> str:
@@ -17277,8 +17316,10 @@ def _no_ai_note(text: str) -> str:
     139 이전 검사(머리·sha 기대값)는 고지 다음 글자부터 그대로라 이 함수를 지난 뒤 비교한다(기대값은 바꾸지 않는다).
     고지 글자 자체는 작업 140 검사가 원문(_AI_NOTE_140)과 비교한다."""
     text = str(text or "")
-    head = _AI_NOTE_140 + "\n"
-    if not text.startswith(head):
+    # 작업 214: 고지 글이 바뀌었다(우리 웹툰 IP · AI 가상 인물, 빠듯하면 짧은 형). 나머지는 같은 글자라 옛 기대값은 그대로 —
+    # 214 원형 · 짧은 형 · 140 원문 중 맨 앞의 것을 뗀다(고지 글 자체는 check_ip_notice_214 가 본다).
+    head = next((n + "\n" for n in (_IP_NOTE_214, _IP_NOTE_214_COMPACT, _AI_NOTE_140) if text.startswith(n + "\n")), "")
+    if not head:
         return text
     # 작업 169: 제출한 Kling 컷 프롬프트는 고지 바로 다음에 샷 고정 줄(FRAMING …, COSTUME: …)이 붙는다. 그 줄들도 뗀다 — 나머지는
     # 169 전 글자 그대로라 옛 기대값(ak-a 머리 FIXED 시작 등)은 바꾸지 않는다. 고정 줄 자체는 check_vnew_part_likeness_169 가 본다.
@@ -23891,8 +23932,9 @@ def check_vnew_take_real() -> None:
             mark("lr-c")
             # (lr-d) 실사 프롬프트.
             stamps = [f"{e['start']}-{e['end']}s" for e in genmod._take_timeline_entries(env.plan(pid_a), g_a["units"][0])]  # noqa: SLF001
-            low = prompt.lower()
-            not_avoid = "\n".join(line for line in prompt.split("\n") if not line.startswith("AVOID:"))
+            # 214: 맨 앞 고지 줄("our own original webtoon IP" — 지시서 원문)은 화풍 낱말 검사에서 뺀다(그 밖은 그대로).
+            low = genmod.without_ip_notice(prompt).lower()
+            not_avoid = "\n".join(line for line in genmod.without_ip_notice(prompt).split("\n") if not line.startswith("AVOID:"))
             if not _strip_fixed(prompt).startswith(_LR_REAL_STYLE_DESIGN + "\n") or "webtoon" in low or "warm pastel" in low \
                     or "romance" in low or lines_of(prompt, "AVOID:") != _LR_REAL_AVOID_DESIGN \
                     or _LR_REAL_REPLACE_DESIGN not in lines_of(prompt, "RULES:") or genmod.REAL_TAKE_STYLE != _LR_REAL_STYLE_DESIGN:
@@ -23961,9 +24003,9 @@ def check_vnew_take_real() -> None:
                 # 작업 157 기대값 변경: 상한 = 4,000자(넘치면 overBudget — 조각 나누기), STYLE 은 styleCompact 단계면 짧은 형,
                 # 실사도 애니와 같은 TIMELINE — 모든 컷에 연기("leans forward")가 남는다(전에는 최소형이 실사 연기를 뺐다).
                 style_want = genmod.REAL_TAKE_STYLE_COMPACT if "styleCompact" in steps else _LR_REAL_STYLE_DESIGN
-                if "webtoon" in text.lower() or (genmod._prompt_len(text) > 4000) != ("overBudget" in steps) or missing \
-                        or len(stamps_r) != n_cuts or text.count("leans forward") != n_cuts \
-                        or "sparkle" in text.lower() or "FX:" in text or not _strip_fixed(text).startswith(style_want):  # noqa: SLF001
+                if "webtoon" in genmod.without_ip_notice(text).lower() or (genmod._prompt_len(text) > 4000) != ("overBudget" in steps) \
+                        or missing or len(stamps_r) != n_cuts or text.count("leans forward") != n_cuts \
+                        or "sparkle" in text.lower() or "FX:" in text or not _strip_fixed(text).startswith(style_want):  # noqa: SLF001 — 214: 고지 줄 밖
                     bad.append(f"(lr-d) 실사 {label}: {genmod._prompt_len(text)}자·빠진 타임스탬프 {missing}·webtoon/FX/배경 기호·연기")  # noqa: SLF001
                 if extra is not None and "leans forward" in text and "a bead of sweat on the temple" not in text:
                     bad.append(f"(lr-d) 실사 {label}: 연기를 남겼는데 실사 표현(땀)이 없습니다")
@@ -47008,7 +47050,8 @@ def check_vnew_fx_who_127() -> None:
                             "mood: comic beat — puzzled blink" in rest, "fluttering, tense romance" in web,
                             web.count("Overall tone:"), web.split("\n")[0] == store_head,
                             "BACKGROUND now: A night street" in rest.split(" 8-12s", 1)[-1], tl.count("BACKGROUND now:"),
-                            f"tears run down {rb}'s cheeks only; {ra} does not cry" in real, "webtoon" in real.lower(),
+                            f"tears run down {rb}'s cheeks only; {ra} does not cry" in real,
+                            "webtoon" in _no_ai_note(real).lower(),  # 214: 고지 줄("webtoon IP") 밖
                             # 작업 140: 실사 첫 줄은 AI 캐릭터 고지, 고정부는 그다음 줄
                             _no_ai_note(real).split("\n")[0] == genmod._fixed_head(plan, "A convenience store", real=True)],  # noqa: SLF001
                    [True, True, True, False, 1, True, True, 1, True, False, True],
@@ -47649,7 +47692,7 @@ def check_vnew_real_from_3d_126() -> None:
             sentence = genmod.REAL_TAKE_SHEET_SENTENCE
             # 작업 127: 켬이면 맨 앞에 고정부(FIXED:) 1줄이 붙는다 — 그 줄을 뗀 뒤 둘째 줄(ASSETS)을 본다(기대값 그대로).
             if sentence not in _strip_fixed(built_full["prompt"]).split("\n")[1] or "sheet" in sentence.lower() \
-                    or "webtoon" in built_full["prompt"].lower():
+                    or "webtoon" in genmod.without_ip_notice(built_full["prompt"]).lower():  # 214: 고지 줄(webtoon IP) 밖
                 bad.append("(r3-b) 실사 ASSETS 에 3D 모델용 사진 문장이 없거나 sheet·webtoon 낱말이 있습니다")
             web = genmod._take_payload(owner, pid, plan0, take, dict(_LR_CAPS))["prompt"]  # noqa: SLF001
             if sentence in web:
@@ -48012,6 +48055,7 @@ console.log(JSON.stringify({
            "(lk-b)첫 제출 성공 Kling 0 (lk-c)소리 거절 그대로·모든 단계 거절 문구·Kling 미등록 건너뜀 (lk-d)node --check·문구")
 
 
+@_with_ip214_off  # 작업 214 (a): 고지 글 · 바이트만 바뀌었다 — 214 전 기대값 그대로(214 는 check_ip_notice_214)
 def check_vnew_real_cut_anime_132() -> None:
     """작업 132 — 컷 단위 Kling 실사가 애니 결과·콘티를 따른다. 가짜 fal·Seedream·프레임 추출, 유료 0.
 
@@ -48094,9 +48138,10 @@ def check_vnew_real_cut_anime_132() -> None:
             for s in new_stills:
                 p = s["prompt"]
                 # 작업 135: 끝의 실사 고정 구절(REAL_STILL_LOOK, "no anime"·"no illustration")은 그림 낱말 검사에서 뺀다.
-                if "photoreal live-action" not in p.lower() or drawing.search(p.replace(genmod.REAL_STILL_LOOK, "")) \
+                if "photoreal live-action" not in p.lower() \
+                        or drawing.search(genmod.without_ip_notice(p).replace(genmod.REAL_STILL_LOOK, "")) \
                         or "mannequin" in p \
-                        or "Image 2" not in p or "Image 3" not in p or "clothing comes from Image 1" not in p:
+                        or "Image 2" not in p or "Image 3" not in p or "clothing comes from Image 1" not in p:  # 214: 고지 줄 밖
                     bad.append(f"(ak-a) 시작 그림 문장이 다릅니다: {p!r}")
             plan = env.plan("prj_ak_a")
             fixed = genmod._fixed_head(plan, "A closed principal's office", real=True)  # noqa: SLF001
@@ -48105,7 +48150,7 @@ def check_vnew_real_cut_anime_132() -> None:
                 bad.append(f"(ak-a) Kling 제출이 2번이 아닙니다: {len(bodies)}")
             for b in bodies:
                 p = str(b.get("prompt") or "")
-                outside = p.replace(genmod.REAL_CUT_NEGATIVE, "")
+                outside = genmod.without_ip_notice(p).replace(genmod.REAL_CUT_NEGATIVE, "")  # 214: 고지 줄(webtoon IP) 밖
                 rows = p.split("\n")
                 act = next((ln for ln in rows if ln.startswith("ACTION: ")), "")
                 # 작업 177: 샷 고정 줄이 있는 Kling 컷 = 새 짜임(MANDATORY → FRAMING → COSTUME(i2v) → ACTION → DIALOGUE → 사람 줄 →
@@ -48158,6 +48203,7 @@ def check_vnew_real_cut_anime_132() -> None:
            "(ak-b)애니 없음 → 프리비즈 프레임·옷·장소 문장")
 
 
+@_with_ip214_off  # 작업 214 (a): 고지 글 · 바이트만 바뀌었다 — 214 전 기대값 그대로(214 는 check_ip_notice_214)
 def check_vnew_real_cut_qa_133() -> None:
     """작업 133 — 컷 단위 Kling 실사 컷 자동 QA(애니 같은 컷과 비교, 틀리면 그 컷만 1번 다시). 가짜 LLM·fal·Seedream, 유료 0.
 
@@ -48966,6 +49012,7 @@ def check_vnew_real_cut_sheet_135() -> None:
            "(sh-b)시트 없음 지금과 같음 (sh-c)QA (2,1) 다시·(1,2)·(1,1) 첫 결과·QA Image 3 = 시트 뷰")
 
 
+@_with_ip214_off  # 작업 214 (a): 고지 글 · 바이트만 바뀌었다 — 214 전 기대값 그대로(214 는 check_ip_notice_214)
 def check_vnew_real_brief_136() -> None:
     """작업 136 — 실사 프롬프트의 촬영 지시서 문장: 그림 문장 빼기·기본 옷 구절 → 장면 옷. 외부 호출 없음, 유료 0.
 
@@ -49218,6 +49265,7 @@ _ST139_SHA_138 = {
 }
 
 
+@_with_ip214_off  # 작업 214 (a): 고지 글 · 바이트만 바뀌었다 — 214 전 기대값 그대로(214 는 check_ip_notice_214)
 def check_vnew_real_still_139() -> None:
     """작업 139 — 실사 컷 시작 그림이 애니 컷과 같은 구도(보이는 인물만·구도 고정·시작 그림 검사). 가짜 vision·Seedream·fal, 유료 0.
 
@@ -49555,7 +49603,7 @@ def check_vnew_real_ai_note_140() -> None:
     from src.vpoc.errors import VpocError  # noqa: PLC0415
 
     bad: list[str] = []
-    note = _AI_NOTE_140
+    note = _IP_NOTE_214  # 214 (b): 고지 글이 바뀌었다(지시서 원문 — 우리 웹툰 IP · AI 가상 인물). 140 원문은 _AI_NOTE_140
     head = note + "\n"
     a, b = "범건우", "여의준"
     owner = "tester"
@@ -49586,6 +49634,11 @@ def check_vnew_real_ai_note_140() -> None:
                                              source="anime", outfits={})
             for tag, text in (("take", real_take), ("take-tiny", tiny_take), ("kling", kl), ("kling-tiny", tiny_kl),
                               ("still", still)):
+                # 214 (b): 고지 = 214 원문, 아주 작은 상한(tiny)은 같은 뜻의 짧은 형(빼지 않는다)
+                if tag.endswith("-tiny"):
+                    note, head = _IP_NOTE_214_COMPACT, _IP_NOTE_214_COMPACT + "\n"
+                else:
+                    note, head = _IP_NOTE_214, _IP_NOTE_214 + "\n"
                 if not text.startswith(head) or text.count(note) != 1:
                     bad.append(f"(an-a) 실사 {tag} 프롬프트 첫 줄이 고지(전부)가 아닙니다: {text[:300]!r}")
             if genmod._utf8_len(real_take) > genmod._take_prompt_budget():  # noqa: SLF001
@@ -49667,6 +49720,7 @@ def check_vnew_real_ai_note_140() -> None:
            "(an-b)Seedance 0·1단계·Seedream·Kling 본문 첫 줄·거절 로그 step 0·1·2 note=1")
 
 
+@_with_ip214_off  # 작업 214 (a): 고지 글 · 바이트만 바뀌었다 — 214 전 기대값 그대로(214 는 check_ip_notice_214)
 def check_vnew_real_sheet_ref_142() -> None:
     """작업 142 — 실사 인물 참고 = 우리 AI 캐릭터 시트(5방향 턴어라운드) + 정면. 가짜 fal·Seedream, 유료 0.
 
@@ -52627,6 +52681,7 @@ _AN155_BASE_197 = {"webtoonPrompt": "d22c834b42460a1d", "realPrompt": "b887bdbe7
 _AN155_CREW = "black crew-neck long-sleeve top with white sleeve stripes"
 
 
+@_with_ip214_off  # 작업 214 (a): 고지 글 · 바이트만 바뀌었다 — 214 전 기대값 그대로(214 는 check_ip_notice_214)
 def check_vnew_part_continuity_155() -> None:
     """작업 155 — 152 조각·153 Seedance 대체의 장소 고정·이음 프레임·의상 고정. 가짜 fal(Wan 3.0 r2v·Seedance)·가짜 프레임, 유료 0.
 
@@ -52996,6 +53051,7 @@ def _ca154_plan(*, hands_in_timeline: bool = True) -> tuple[dict, dict]:
     return plan, take
 
 
+@_with_ip214_off  # 작업 214 (a): 고지 글 · 바이트만 바뀌었다 — 214 전 기대값 그대로(214 는 check_ip_notice_214)
 def check_vnew_contact_action_154() -> None:
     """작업 154 — 테이크 TIMELINE 이 패널의 닿는 연기(콘티 actionEn)와 148 포즈 절을 지킨다. 가짜 데이터, 유료·LLM 0.
 
@@ -53595,6 +53651,7 @@ def _tc157_plan() -> tuple[dict, dict]:
     return plan, take
 
 
+@_with_ip214_off  # 작업 214 (a): 고지 글 · 바이트만 바뀌었다 — 214 전 기대값 그대로(214 는 check_ip_notice_214)
 def check_vnew_take_conti_157() -> None:
     """작업 157 — 테이크 프롬프트가 콘티 전체(모든 컷 연기·모든 대사)를 싣고 고정 문구를 먼저 줄인다. 가짜, 유료 0.
 
@@ -53877,6 +53934,7 @@ _VB159_SHA_OFF = {"anime": "cc2c68705a662173c42c149efb09778385e947589b1637797149
                   "real": "d09e6a5e2d07105da0c6548fed79456788a921125937e627950ea7c5d66fc65e"}
 
 
+@_with_ip214_off  # 작업 214 (a): 고지 글 · 바이트만 바뀌었다 — 214 전 기대값 그대로(214 는 check_ip_notice_214)
 def check_vnew_vibe_prompt_159() -> None:
     """작업 159 — 통 테이크 프롬프트 = video-vibecode 형식(_vibe_take_prompt, VNEW_VIBE_PROMPT 기본 켬). 가짜, 유료 0.
 
@@ -58325,6 +58383,7 @@ _KP177_BASE_SHA = {
     "real:cut-12,cut-13": "453136a0440337bda5f3f7a036746c3ae1a8d92d222db629c005d4659c14ca77"}
 
 
+@_with_ip214_off  # 작업 214 (a): 고지 글 · 바이트만 바뀌었다 — 214 전 기대값 그대로(214 는 check_ip_notice_214)
 def check_vnew_kling_cut_prompt_177() -> None:
     """작업 177 — Kling 컷 프롬프트에 그 컷의 연기 · 대사, 옷 줄 하나, 머리 단서, 인서트는 프리비즈 카메라보다 가깝게. 가짜, 유료 0.
 
@@ -58801,6 +58860,7 @@ def _sr179_old_labels(genmod, text: str) -> str:
     return "\n".join(rows)
 
 
+@_with_ip214_off  # 작업 214 (a): 고지 글 · 바이트만 바뀌었다 — 214 전 기대값 그대로(214 는 check_ip_notice_214)
 def check_vnew_sheet_sides_179() -> None:
     """작업 179 — 애니 신원 참고 = 웹툰 턴어라운드 시트(패널에 없는 각도), 두 사람 샷의 화면 좌우 고정. 가짜, 유료 0.
 
@@ -60162,6 +60222,7 @@ def _is183_off(fix1: bool = False):
          genmod._real_brief_text) = saved  # noqa: SLF001
 
 
+@_with_ip214_off  # 작업 214 (a): 고지 글 · 바이트만 바뀌었다 — 214 전 기대값 그대로(214 는 check_ip_notice_214)
 def check_vnew_insert_sleeve_183() -> None:
     """작업 183 — 손만 보이는 인서트 샷에서 손 · 팔이 보이는 사람마다 look 줄 소매 단서를 손 첫 부름에 한 번. 가짜, 유료 0.
 
@@ -60501,6 +60562,7 @@ def _is184_off():
         genmod._closeup_garment_cue, genmod._nickname_map = saved  # noqa: SLF001
 
 
+@_with_ip214_off  # 작업 214 (a): 고지 글 · 바이트만 바뀌었다 — 214 전 기대값 그대로(214 는 check_ip_notice_214)
 def check_vnew_closeup_garment_184() -> None:
     """작업 184 — 클로즈업(또는 더 가까운) 샷 주인공 첫 부름에 look 줄 윗옷 단서 한 번 · 영어 샷 글 별칭 → 표시 이름. 가짜, 유료 0.
 
@@ -65711,6 +65773,7 @@ def _bg197_pair(build):
     return on, off
 
 
+@_with_ip214_off  # 작업 214 (a): 고지 글 · 바이트만 바뀌었다 — 214 전 기대값 그대로(214 는 check_ip_notice_214)
 def check_vnew_bg_reference_197() -> None:
     """작업 197 — 장소 · 배경 그림은 참고만, 배경은 영상 모델이 인물과 함께 그린다. 가짜, 유료 0.
 
@@ -68655,6 +68718,7 @@ def main() -> int:
     if not __import__("check_dialogue_audio_211").check_dialogue_audio_211(): fail("작업 211: 영상 소리 = 대사만(음악 · 앰비언트 · 효과음 없음) 프롬프트 검사 실패")
     if not __import__("check_line_redo_212").check_line_redo_212(): fail("작업 212: ⑥ 대사 고치기 · 그 대사 구간 영상 다시 만들기 검사 실패")
     if not __import__("check_previz_pose_ux_213").check_previz_pose_ux_213(): fail("작업 213: 프리비즈 포즈 쓰기(마름모 끌기 · 고리 겹침 · 화면 밀림) 검사 실패")
+    if not __import__("check_ip_notice_214").check_ip_notice_214(): fail("작업 214: 실사 영상 프롬프트 첫 줄 = 우리 웹툰 IP · AI 가상 인물 고지 검사 실패")
     check_vnew_voice_ui_203()
     print()
     if warnings:

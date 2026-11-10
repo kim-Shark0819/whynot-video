@@ -6464,6 +6464,41 @@ textarea.vnew-field-input {
   margin: 8px 0;
 }
 
+/* 작업 212 fix2: 확인 창 — 모델 고르기(가장 싼 모델 기본) · 금액 */
+.vnew-lrd-confirm {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 8px 10px;
+  border: 1px solid var(--line, #e6e1dc);
+  border-radius: 8px;
+  background: var(--surface, #fff);
+}
+
+.vnew-lrd-confirm-text,
+.vnew-lrd-stepup {
+  margin: 0;
+  font-size: 13px;
+}
+
+.vnew-lrd-stepup.is-bad {
+  color: var(--danger, #b42318);
+}
+
+.vnew-lrd-models {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.vnew-lrd-model {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+  font-size: 13px;
+  overflow-wrap: anywhere;
+}
+
 .vnew-lrd-outdated {
   color: var(--danger, #b42318);
 }

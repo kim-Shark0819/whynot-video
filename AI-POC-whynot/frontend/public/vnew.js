@@ -10151,8 +10151,87 @@
     var range = job.range || {};
     var span = typeof range.start === "number" ? range.start.toFixed(1) + "–" + range.end.toFixed(1) + "초" : "";
     return (line.speaker || "이 줄") + " 대사 구간(" + span + ")만 영상을 다시 만듭니다. 그림·카메라·인물·옷·타이밍은 그대로 두고 " +
-      "입 모양·연기·목소리를 새 대사에 맞춥니다.\n모델: " + (job.modelLabel || job.model || "-") + "\n비용: " + lrdUsd(job.usd) +
-      "\n계속할까요?";
+      "입 모양·연기·목소리를 새 대사에 맞춥니다. 모델: " + (job.modelLabel || job.model || "-") + " · 비용: " + lrdUsd(job.usd);
+  }
+
+  /* 작업 212 fix2: 확인 창의 모델 줄 [{id, text, checked}](싼 순서 그대로, 고른 줄 = job.model). 순수 함수. */
+  function lrdModelChoices(job) {
+    job = job || {};
+    return (job.models || []).map(function (m) {
+      return { id: m.id, text: (m.label || m.id) + " · " + lrdUsd(m.usd) + (m.original ? " (원래 모델)" : ""), checked: m.id === job.model };
+    });
+  }
+
+  /* 콘텐츠 검사 거절 뒤 다음으로 싼 모델로 올렸을 때의 안내(없으면 ""). 순수 함수. */
+  function lrdStepUpText(job) {
+    var up = (job || {}).stepUp;
+    if (!up) return "";
+    return (up.fromLabel || up.fromModel || "앞 모델") + " 모델이 내용 검사에서 거절해 다음으로 싼 " + (job.modelLabel || job.model || "모델") +
+      "(" + lrdUsd(job.usd) + ")로 바꿨습니다. 금액을 확인한 뒤 시작해 주세요.";
+  }
+
+  function lrdQuoteBody(ctx, id, model) {
+    var body = { variant: ctx.variant, lineId: id };
+    if (model) body.model = model;
+    return body;
+  }
+
+  /* 확인 창(편집 창 안): 설명 · 모델 고르기(라디오, 바꾸면 견적 다시) · [이 금액으로 시작] · [취소]. on = {pick(id), start(), cancel()}. */
+  function lrdConfirmPaint(ed, line, job, on, busy) {
+    if (!ed.confirm) {
+      ed.confirm = el("div", "vnew-lrd-confirm");
+      ed.box.appendChild(ed.confirm);
+    }
+    var box = ed.confirm;
+    clear(box);
+    box.appendChild(el("p", "vnew-lrd-confirm-text", lrdConfirmText(line, job)));
+    var up = lrdStepUpText(job);
+    if (up) box.appendChild(el("p", "vnew-hint is-bad vnew-lrd-stepup", up));
+    var list = el("div", "vnew-lrd-models");
+    list.setAttribute("role", "radiogroup");
+    list.setAttribute("aria-label", "영상 모델");
+    lrdModelChoices(job).forEach(function (c) {
+      var label = el("label", "vnew-lrd-model");
+      var radio = el("input", "vnew-lrd-model-radio");
+      radio.type = "radio";
+      radio.name = "vnew-lrd-model-" + line.id;
+      radio.value = c.id;
+      radio.checked = c.checked;
+      radio.disabled = !!busy;
+      radio.addEventListener("change", function () {
+        if (c.id !== job.model) on.pick(c.id);
+      });
+      label.appendChild(radio);
+      label.appendChild(el("span", "", c.text));
+      list.appendChild(label);
+    });
+    box.appendChild(list);
+    var tools = el("div", "vnew-lrd-tools");
+    var go = el("button", "primary-button vnew-lrd-go", "이 금액으로 시작 (" + lrdUsd(job.usd) + ")");
+    go.type = "button";
+    go.disabled = !!busy || typeof job.usd !== "number";
+    go.addEventListener("click", function () {
+      on.start();
+    });
+    var cancel = el("button", "outline-button vnew-lrd-cancel", "취소");
+    cancel.type = "button";
+    cancel.disabled = !!busy;
+    cancel.addEventListener("click", function () {
+      on.cancel();
+    });
+    tools.appendChild(go);
+    tools.appendChild(cancel);
+    box.appendChild(tools);
+    ed.go = go;
+    return box;
+  }
+
+  function lrdConfirmClose(ed) {
+    if (ed.confirm) {
+      ed.box.removeChild(ed.confirm);
+      ed.confirm = null;
+      ed.go = null;
+    }
   }
 
   /* 대사 칸: 고친 대사가 있으면 원래 대사(회색)와 새 대사를 함께. */
@@ -10420,57 +10499,81 @@
     if (job && (job.status === "running" || job.status === "splicing")) info.busy = true;
   }
 
-  /* 견적 → 확인 창 → 시작. 금액이 바뀌면(CostMismatch) 견적을 다시 받아 바뀐 금액을 보이고 멈춘다(다시 누르면 새 금액으로). */
+  /* 견적 → 확인 창(모델 고르기 · 금액) → 시작. 기본 모델은 서버가 고른 가장 싼 모델이다(작업 212 fix2). 다른 모델을 고르면 견적을
+     다시 받고 그 금액을 보인다. 금액이 바뀌면(CostMismatch) 같은 모델로 견적을 다시 받아 바뀐 금액을 보이고 창은 그대로 둔다. */
   function lrdRedo(ctx, rec) {
     var ed = rec.editor;
     if (!ed || ed.form.busy) return;
     var id = rec.line.id;
+    var job = null;
     ed.form.busy = true;
     lrdPaintRow(ctx, rec);
     lrdNote(ed, "구간과 금액을 확인하는 중…", false);
-    function quote() {
-      return api(lrdPath("quote"), { method: "POST", body: JSON.stringify({ variant: ctx.variant, lineId: id }) }).then(function (r) {
-        var job = (r || {}).quote || {};
-        lrdSetJob(ctx, id, job);
-        return job;
+    function alive() {
+      return soundAlive(ctx) && rec.editor === ed;
+    }
+    function quote(model) {
+      return api(lrdPath("quote"), { method: "POST", body: JSON.stringify(lrdQuoteBody(ctx, id, model)) }).then(function (r) {
+        var fresh = (r || {}).quote || {};
+        lrdSetJob(ctx, id, fresh);
+        return fresh;
       });
     }
-    quote()
-      .then(function (job) {
-        if (!soundAlive(ctx) || rec.editor !== ed) return null;
-        lrdPaintRow(ctx, rec);
-        if (!window.confirm(lrdConfirmText(rec.line, job))) {
+    function fail(err) {
+      if (!alive()) return;
+      if (job) paint(false);
+      else ed.form.busy = false;
+      lrdNote(ed, lrdErr(err), true);
+      lrdPaintRow(ctx, rec);
+    }
+    function paint(busy) {
+      lrdConfirmPaint(ed, rec.line, job, { pick: pick, start: start, cancel: cancel }, busy);
+    }
+    function show(fresh, note, bad) {
+      if (!alive()) return;
+      job = fresh;
+      paint(false);
+      lrdPaintRow(ctx, rec);
+      lrdNote(ed, note || "", !!bad);
+    }
+    function pick(model) {
+      paint(true);
+      lrdNote(ed, "고른 모델의 금액을 확인하는 중…", false);
+      quote(model).then(function (fresh) {
+        show(fresh, "");
+      }).catch(fail);
+    }
+    function cancel() {
+      lrdConfirmClose(ed);
+      ed.form.busy = false;
+      lrdNote(ed, "", false);
+      lrdPaintRow(ctx, rec);
+    }
+    function start() {
+      var shown = job;
+      paint(true);
+      lrdNote(ed, "다시 만들기를 시작하는 중…", false);
+      api(lrdPath("redo"), { method: "POST", body: JSON.stringify({ variant: ctx.variant, lineId: id, confirmUsd: shown.usd }) })
+        .then(function (result) {
+          if (!soundAlive(ctx)) return;
+          lrdConfirmClose(ed);
           ed.form.busy = false;
-          lrdNote(ed, "", false);
+          lrdSetJob(ctx, id, (result || {}).job || { status: "running" });
+          lrdNote(ed, "시작했습니다. 끝나면 새 영상이 ⑥ 원본이 됩니다.", false);
           lrdPaintRow(ctx, rec);
-          return null;
-        }
-        lrdNote(ed, "다시 만들기를 시작하는 중…", false);
-        return api(lrdPath("redo"), { method: "POST", body: JSON.stringify({ variant: ctx.variant, lineId: id, confirmUsd: job.usd }) })
-          .then(function (result) {
-            if (!soundAlive(ctx)) return;
-            ed.form.busy = false;
-            lrdSetJob(ctx, id, (result || {}).job || { status: "running" });
-            lrdNote(ed, "시작했습니다. 끝나면 새 영상이 ⑥ 원본이 됩니다.", false);
-            lrdPaintRow(ctx, rec);
-            soundSchedule(ctx);
-          })
-          .catch(function (err) {
-            if (!soundAlive(ctx) || rec.editor !== ed) return null;
-            if (!isCostMismatch(err)) throw err;
-            return quote().then(function (fresh) {
-              ed.form.busy = false;
-              lrdPaintRow(ctx, rec);
-              lrdNote(ed, costChangedText(job.usd, fresh.usd), true);
-            });
-          });
-      })
-      .catch(function (err) {
-        if (!soundAlive(ctx) || rec.editor !== ed) return;
-        ed.form.busy = false;
-        lrdNote(ed, lrdErr(err), true);
-        lrdPaintRow(ctx, rec);
-      });
+          soundSchedule(ctx);
+        })
+        .catch(function (err) {
+          if (!alive()) return null;
+          if (!isCostMismatch(err)) return fail(err);
+          return quote(shown.model).then(function (fresh) {
+            show(fresh, costChangedText(shown.usd, fresh.usd), true);
+          }).catch(fail);
+        });
+    }
+    quote("").then(function (fresh) {
+      show(fresh, "");
+    }).catch(fail);
   }
 
   /* 대사 고친 판 목록 · [이전 영상으로 되돌리기]. 판이 없으면 그리지 않는다. */

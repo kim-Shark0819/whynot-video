@@ -29,7 +29,10 @@
 구간(line_range): 사운드 문서의 줄 구간을 지금 원본의 조각 하나(가장 많이 겹치는 조각) 안으로 넣고, 모델 최소 길이(MIN_SEGMENT_S —
 generate.PREVIZ_MIN_CLIP_S, 그보다 짧아도 그 길이로 과금된다)로 줄 가운데를 기준으로 늘리고, 컷·조각 경계가 SNAP_S 안이면 경계에 붙인다.
 
-외부 호출 래퍼(검사가 바꾼다): _llm · _compose · _submit · _retake_state · _download · _upload · _probe · _splice_file · _spawn.
+외부 호출 래퍼(검사가 바꾼다): _llm · _compose · _submit · _models · _retake_state · _download · _upload · _probe · _splice_file · _spawn.
+작업 212 fix2: 영상 모델 기본 = 그 구간을 다시 만들 수 있는 가장 싼 모델(default_model — Seedance 계열은 다른 모델이 없을 때만). 확인 창에서
+다른 모델을 고르면 견적을 다시 받는다. 콘텐츠 검사 거절(작업 195)로 실패한 줄은 다음 견적이 다음으로 싼 모델로 올리고(stepUp) 새 금액을 보인 뒤
+확인을 받는다(자동으로 더 비싸게 내지 않는다). 프롬프트는 retake.compose 가 모델 형식(reference · elements)마다 만든다.
 generate.py · shot_brief.py 는 고치지 않는다(호출만 한다). retake.py 는 compose 의 edit_lines 인자만 쓴다(작업 212 fix1 — ⑦ 은 그대로).
 프롬프트: 머리 EDIT 줄은 고정 틀(redo_edit_lines — 입·얼굴 연기·목소리만, 구도·카메라 그대로, 새 대사는 한국어로만, 영어는 (meaning: …) 뜻)
 + 소리 규칙 한 줄, EXTRA 줄은 없다. 제출 전 _finish_prompt 가 이전 프롬프트(CONTEXT) 쪽의 겹친 소리 규칙·앞선 EDIT 줄을 빼고 옛 대사를 새 대사로
@@ -154,6 +157,12 @@ def _compose(owner: str, pid: str, mid: str, payload: dict, edit_lines=None) -> 
 
 def _submit(owner: str, pid: str, mid: str, payload: dict) -> dict:
     return retake.submit(owner, pid, mid, payload)
+
+
+def _models(owner: str, pid: str, mid: str, rng: dict) -> list[dict]:
+    """작업 212 fix2: 그 재료·구간의 retake 모델 줄(⑦ 보기와 같은 _choices — 구간 견적 range 포함, 영상 호출 0)."""
+    view = retake.retake_view(owner, pid, mid, clip_in=rng["in"], clip_out=rng["out"])
+    return [m for m in (view or {}).get("models") or [] if isinstance(m, dict)]
 
 
 def _retake_state(owner: str, pid: str, gen_id: str) -> dict:
@@ -378,6 +387,40 @@ def _retarget(prompt: str, old_line: str, new_line: str, max_bytes: int) -> str:
     return out if not max_bytes or len(out.encode("utf-8")) <= int(max_bytes) else prompt
 
 
+# ================================================================ 작업 212 fix2: 모델 고르기(가장 싼 모델 기본 · Seedance 는 마지막)
+
+
+def _is_seedance(model_id) -> bool:
+    return "seedance" in str(model_id or "").lower()
+
+
+def model_rows(rows: list[dict]) -> list[dict]:
+    """retake 모델 줄 → 대사 다시 만들기에 쓸 수 있는 줄(retake._v2v_row — 영상→영상 형식 · 구간 견적 됨 · 시작 그림 경로 아님).
+    반환 [{id, label, usd(구간 견적, 모르면 None), original, seedance, format}] — 싼 순서(값 모름은 뒤, 같으면 원래 모델 먼저, 그다음 목록 순서)."""
+    out = []
+    for index, row in enumerate(rows or []):
+        if not isinstance(row, dict) or not row.get("id") or not retake._v2v_row(row):  # noqa: SLF001
+            continue
+        usd = (row.get("range") or {}).get("usd")
+        usd = float(usd) if isinstance(usd, (int, float)) and not isinstance(usd, bool) else None
+        out.append({"id": str(row["id"]), "label": str(row.get("label") or row["id"]), "usd": usd, "original": bool(row.get("original")),
+                    "seedance": _is_seedance(row["id"]), "format": str(row.get("format") or ""), "_i": index})
+    out.sort(key=lambda r: (r["usd"] is None, r["usd"] if r["usd"] is not None else 0.0, not r["original"], r["_i"]))
+    for row in out:
+        row.pop("_i")
+    return out
+
+
+def default_model(rows: list[dict], refused=()) -> str:
+    """기본 모델: 가장 싼 줄(같으면 원래 모델). Seedance 계열은 다른 줄이 없을 때만. refused(콘텐츠 검사로 거절한 모델)는 빼고
+    다음으로 싼 줄로 올린다(다 거절했으면 빼지 않는다). 쓸 줄이 없으면 ""(retake.compose 기본)."""
+    usable = model_rows(rows)
+    fresh = [r for r in usable if r["id"] not in set(refused or ())] or usable
+    priced = [r for r in fresh if r["usd"] is not None] or fresh  # 값을 모르는 줄은 확인할 금액이 없어 마지막
+    pool = [r for r in priced if not r["seedance"]] or priced
+    return pool[0]["id"] if pool else ""
+
+
 # ================================================================ 문서 읽기·쓰기
 
 
@@ -525,8 +568,9 @@ def _job_out(job: dict | None) -> dict | None:
     if not isinstance(job, dict):
         return None
     out = {k: job.get(k) for k in ("status", "error", "at", "usd", "model", "modelLabel", "seconds", "range", "revision",
-                                   "message", "priceKnown", "stage")}
+                                   "message", "priceKnown", "stage", "failureKind", "stepUp")}
     out["error"] = str(out["error"] or "")
+    out["models"] = copy.deepcopy(job.get("models") or [])  # 작업 212 fix2: 확인 창의 모델 고르기(싼 순서, 금액)
     return out
 
 
@@ -814,7 +858,9 @@ def _context(owner: str, pid: str, payload: dict, where: str):
 
 def quote(owner: str, pid: str, payload) -> dict:
     """POST /p/<pid>/sound/lines/quote {variant, lineId, model?}. 구간을 정하고 retake.compose 로 초안(프롬프트·견적)을 만든다(영상 호출 0).
-    반환 {quote: 작업 보기, prompt}. 고친 대사가 없으면 409 LineNoOverride, 그 줄이 다시 만드는 중이면 409 LineRedoRunning."""
+    반환 {quote: 작업 보기, prompt}. 고친 대사가 없으면 409 LineNoOverride, 그 줄이 다시 만드는 중이면 409 LineRedoRunning.
+    작업 212 fix2: model 이 없으면 default_model(가장 싼 영상→영상 모델 · 같으면 원래 모델 · Seedance 는 다른 모델이 없을 때만 ·
+    콘텐츠 검사로 거절한 모델은 빼고 다음으로 싼 모델 — stepUp). 보기 models = 고를 수 있는 줄(싼 순서, 고른 줄 금액 = compose 견적)."""
     where = "vnew.sound.lines.quote"
     payload, line_id, plan, gen, gen_id, variant, doc, source, line = _context(owner, pid, payload, where)
     retake.require_enabled(where)
@@ -831,11 +877,32 @@ def quote(owner: str, pid: str, payload) -> dict:
     request_ko = redo_request(override)
     extra_ko = ""  # 작업 212 fix1: 새 대사·유지·소리 규칙은 EDIT 줄들(redo_edit_lines)에 있다 — EXTRA 줄은 없다
     body = {"requestKo": request_ko, "extraKo": extra_ko, "scope": "range", "in": rng["in"], "out": rng["out"]}
-    if isinstance(payload.get("model"), str) and payload["model"]:
-        body["model"] = payload["model"]
+    picked = payload.get("model") if isinstance(payload.get("model"), str) and payload["model"] else ""
+    try:
+        rows = _models(owner, pid, mid, rng)
+    except Exception as exc:  # noqa: BLE001 — 목록을 못 읽으면 compose 가 제 기본 모델로(같은 오류면 compose 가 올린다)
+        log.warning("vnew.sound.lines.models_failed pid=%s err=%s", pid, error_gist(f"{type(exc).__name__}: {exc}", 200))
+        rows = []
+    # fix2: 콘텐츠 검사로 거절한 모델(같은 새 대사일 때만 기억) — 다음 기본은 다음으로 싼 모델, 금액은 확인을 받는다(start 의 confirmUsd)
+    same_line = job_now.get("textKo") == override.get("textKo") and bool(job_now.get("thought")) == bool(override.get("thought"))
+    refused = [str(m) for m in job_now.get("refused") or [] if m] if same_line else []
+    if same_line and job_now.get("status") == "failed" and job_now.get("failureKind") == retake.CONTENT_FLAG_KIND and job_now.get("model"):
+        refused = list(dict.fromkeys(refused + [str(job_now["model"])]))
+    model = picked or default_model(rows, refused)
+    if model:
+        body["model"] = model
     rv = _compose(owner, pid, mid, body, edit_lines=lambda change_en, max_bytes: redo_edit_lines(override, change_en, max_bytes))
     draft = (rv or {}).get("draft") or {}
     info = draft.get("plan") or {}
+    used = str(draft.get("model") or "")
+    choices = [{k: v for k, v in r.items() if k != "format"} for r in model_rows(rows)]
+    for row in choices:
+        if row["id"] == used:
+            row["usd"] = info.get("usd")  # 보이는 금액 = 낼 금액(compose 견적)
+    step_up = None
+    if refused and not picked and used and used not in refused:
+        labels = {r["id"]: r["label"] for r in choices}
+        step_up = {"fromModel": refused[-1], "fromLabel": labels.get(refused[-1], refused[-1])}
     original = (override.get("original") or {}).get("lineKo") or ""
     prompt = _finish_prompt(str(draft.get("prompt") or ""), original, override.get("textKo"), int(draft.get("maxBytes") or 0))
     job = {"status": "quoted", "lineId": line_id, "draftId": str(draft.get("id") or ""), "prompt": prompt, "requestKo": request_ko,
@@ -844,7 +911,8 @@ def quote(owner: str, pid: str, payload) -> dict:
            "priceKnown": info.get("usd") is not None, "seconds": info.get("sentSeconds") or info.get("seconds"),
            "range": {"start": rng["start"], "end": rng["end"], "padded": rng["padded"], "snapped": rng["snapped"]},
            "sourceKey": source["key"], "baseKey": _base_key(source), "pieces": pieces, "cellKey": str((rv or {}).get("cellKey") or ""),
-           "at": now_iso(), "error": "", "textKo": override.get("textKo"), "thought": bool(override.get("thought"))}
+           "at": now_iso(), "error": "", "textKo": override.get("textKo"), "thought": bool(override.get("thought")),
+           "models": choices, "refused": refused, "stepUp": step_up, "picked": bool(picked)}
 
     def mutate(doc_):
         if (doc_["jobs"].get(line_id) or {}).get("status") in ("running", "splicing"):
@@ -853,8 +921,9 @@ def quote(owner: str, pid: str, payload) -> dict:
         return doc_
 
     _mutate_redo(owner, pid, gen_id, variant, mutate)
-    log.info("vnew.sound.lines.quote pid=%s gen=%s variant=%s line=%s start=%.3f end=%.3f in=%.3f out=%.3f usd=%s model=%s",
-             pid, gen_id, variant, line_id, rng["start"], rng["end"], rng["in"], rng["out"], job["usd"], job["model"])
+    log.info("vnew.sound.lines.quote pid=%s gen=%s variant=%s line=%s start=%.3f end=%.3f in=%.3f out=%.3f usd=%s model=%s picked=%s "
+             "refused=%d step_up=%s", pid, gen_id, variant, line_id, rng["start"], rng["end"], rng["in"], rng["out"], job["usd"],
+             job["model"], bool(picked), len(refused), bool(step_up))
     return {"quote": _job_out(job), "prompt": prompt}
 
 
