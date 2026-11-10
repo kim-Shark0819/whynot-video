@@ -11,6 +11,8 @@ retake·가짜 LLM·가짜 ffmpeg, 유료·네트워크 0.
   (lr-h) 라우트: 남의 프로젝트 404(6개) · 끔 404 · 소유자는 200
   (lr-i) node --check vnew.js · 화면: 열기 · 저장 · 다시 만들기 단추 상태(node 없으면 WARN)
   (lr-j) LF 줄 끝(새·고친 파일)
+  (lr-k) fix1: 대사 다시 만들기 EDIT 틀(구도·카메라 그대로 · 한국어로만 · 영어는 (meaning: …)) · 속마음 · 소리 규칙 1번 ·
+         실패한 작업 [다시 시도] = 견적부터 새 틀 · ⑦ AI로 고치기 머리 그대로
 
 실행: python -X utf8 -B tools/check_line_redo_212.py
 """
@@ -44,10 +46,11 @@ GROUPS = {
     "lr-h": "라우트 소유자 검사",
     "lr-i": "node --check · 단추 상태",
     "lr-j": "LF 줄 끝",
+    "lr-k": "fix1: 대사 틀(구도 그대로 · 한국어로만 · 뜻) · 소리 규칙 1번 · 다시 시도 = 새 견적 · ⑦ 그대로",
 }
 OWNER, PID = "tester", "prj_lr"
 PUBLIC = ROOT / "frontend" / "public"
-FILES = [ROOT / "app" / "src" / "vnew" / n for n in ("line_redo.py", "sound.py", "routes.py")] + \
+FILES = [ROOT / "app" / "src" / "vnew" / n for n in ("line_redo.py", "sound.py", "routes.py", "retake.py")] + \
         [PUBLIC / "vnew.js", PUBLIC / "vnew.css", TOOLS / "check_line_redo_212.py"]
 
 
@@ -289,31 +292,73 @@ def check_line_redo_212() -> bool:  # noqa: C901 — 한 검사 함수(다른 �
     try:
         spoken = {"speaker": "민지", "textKo": "잘 가", "thought": False, "deliveryKo": "작게, 떨리는 목소리"}
         inner = {"speaker": "준호", "textKo": "설마 그럴 리가", "thought": True, "deliveryKo": ""}
-        req_s, extra_s = lr.redo_request(spoken)
-        req_t, extra_t = lr.redo_request(inner)
-        expect("lr-b", ['"잘 가"' in req_s, "작게, 떨리는 목소리" in req_s, '"잘 가"' in extra_s, "lip-sync" in extra_s,
-                        "Keep the picture, camera, people, costume and timing identical." in extra_s,
-                        gm.AUDIO_DIALOGUE_ONLY_SPOKEN in extra_s, "Delivery (Korean note): 작게, 떨리는 목소리." in extra_s],
-               [True] * 7, "실제 말: 새 대사 · 말투 · 유지 문장 · 대사만 규칙(inner 없는 형)")
-        expect("lr-b", ["입은 다문 채" in req_t, "mouth stays closed" in extra_t, "inner voice" in extra_t, "voice-over" in extra_t,
-                        gm.AUDIO_DIALOGUE_ONLY in extra_t, '"설마 그럴 리가"' in extra_t],
-               [True] * 6, "속마음: 입 다묾 · 목소리만(voice-over) · 대사만 규칙(속마음 포함 형)")
+        req_s, req_t = lr.redo_request(spoken), lr.redo_request(inner)
+        edit_s = lr.redo_edit_lines(spoken, 'Change Minji\'s line to "Bye." softly.', 4000)
+        edit_t = lr.redo_edit_lines(inner, "", 4000)
+        expect("lr-b", ['"잘 가"' in req_s, "작게, 떨리는 목소리" in req_s, "입은 다문 채" in req_t, len(edit_s), len(edit_t),
+                        "'작게, 떨리는 목소리'" in edit_s[0], edit_s[1], edit_t[1], lr.LINE_INNER in edit_t[0],
+                        "mouth stays closed" in edit_t[0], "(meaning:" in edit_t[0]],
+               [True, True, True, 2, 2, True, gm.AUDIO_DIALOGUE_ONLY_SPOKEN, gm.AUDIO_DIALOGUE_ONLY, True, True, False],
+               "수정 사항(한국어) · EDIT 한 줄 + 소리 규칙 한 줄(실제 말 = inner 없는 형 · 속마음 = inner 형) · 말투 · 번역 없으면 뜻 없음")
         long = dict(spoken, textKo="가" * lr.TEXT_MAX, deliveryKo="나" * lr.DELIVERY_MAX)
-        _, extra_l = lr.redo_request(long)
-        expect("lr-b", [len(extra_l) <= rt.EXTRA_MAX, "가" * lr.TEXT_MAX in extra_l, gm.has_audio_rule(extra_l)], [True, True, True],
-               "긴 대사·말투: 추가 프롬프트 상한 안 · 새 대사 그대로 · 소리 규칙(짧은 형)")
+        edit_l = lr.redo_edit_lines(long, "", 1500)
+        expect("lr-b", ["가" * lr.TEXT_MAX in edit_l[0], edit_l[1]], [True, gm.AUDIO_DIALOGUE_ONLY_COMPACT],
+               "긴 대사: 새 대사 그대로 · 작은 상한이면 소리 규칙 짧은 형")
         base = ("SCENE: A quiet office at night.\nDIALOGUE: 준호 (inner voice): \"설마…\" — mouth stays closed.\n"
                 + gm.AUDIO_DIALOGUE_ONLY)
         template = "@Video1 is the shot to edit. " + gm.AUDIO_DIALOGUE_ONLY
         prompt, _meta = rt._compose_prompt(base, template, {"start": 0.5, "end": 3.5, "in": 0.5, "out": 3.5}, 6.0,  # noqa: SLF001
-                                           request_ko=req_t, extra_ko=extra_t, change_en="", max_bytes=4000, result=True)
-        final = lr._retarget(prompt, "설마…", inner["textKo"], 4000)  # noqa: SLF001
-        expect("lr-b", ['"설마 그럴 리가"' in final, "mouth stays closed" in final, gm.AUDIO_DIALOGUE_ONLY in final,
-                        "설마…" in final, any(l.startswith("EXTRA: ") and "inner voice" in l for l in final.split("\n"))],
-               [True, True, True, False, True], "retake compose 프롬프트: EXTRA 줄에 새 대사·속마음·소리 규칙 · 옛 대사 없음")
+                                           request_ko=req_t, extra_ko="", change_en="", max_bytes=4000, result=True, edit_lines=edit_t)
+        final = lr._finish_prompt(prompt, "설마…", inner["textKo"], 4000)  # noqa: SLF001
+        expect("lr-b", ['"설마 그럴 리가"' in final, "mouth stays closed" in final, lr.audio_rule_count(final), "설마…" in final,
+                        final.split("\n")[0].startswith(lr.LINE_EDIT_HEAD + "준호."), any(l.startswith("EXTRA:") for l in final.split("\n"))],
+               [True, True, 1, False, True, False], "retake compose 프롬프트: 머리 EDIT = 대사 틀 · 소리 규칙 1번 · EXTRA 없음 · 옛 대사 없음")
         expect("lr-b", lr._retarget("x 안녕 y", "안녕", "잘 가" * 50, 10), "x 안녕 y", "바이트 상한을 넘으면 초안 그대로")  # noqa: SLF001
     except Exception as exc:  # noqa: BLE001
         crash("lr-b", exc)
+
+    # ================= (lr-k) fix1: 대사 다시 만들기 프롬프트 틀 · 소리 규칙 한 번 · ⑦ 그대로 =================
+    try:
+        rng0 = {"start": 0.5, "end": 3.5, "in": 0.5, "out": 3.5}
+        en = 'Change Minji\'s line to "Bye, take care." and match lip-sync.'
+        base_k = ("SCENE: An office at night.\nDIALOGUE: 민지: \"안녕\" (lip sync).\nRULES: Keep faces. " + gm.AUDIO_DIALOGUE_ONLY_SPOKEN
+                  + "\n" + gm.AUDIO_DIALOGUE_ONLY_COMPACT)
+        tmpl_k = "@Video1 is the shot to edit. " + gm.AUDIO_DIALOGUE_ONLY_COMPACT
+
+        def build(override, base_text, change_en=en, max_bytes=4000):
+            lines = lr.redo_edit_lines(override, change_en, max_bytes)
+            p, _m = rt._compose_prompt(base_text, tmpl_k, rng0, 6.0, request_ko=lr.redo_request(override), extra_ko="",  # noqa: SLF001
+                                       change_en=change_en, max_bytes=max_bytes, result=True, edit_lines=lines)
+            return lr._finish_prompt(p, "안녕", override["textKo"], max_bytes)  # noqa: SLF001
+
+        sp = {"speaker": "민지", "textKo": "잘 가", "thought": False, "deliveryKo": ""}
+        fk = build(sp, base_k)
+        first = fk.split("\n")[0]
+        no_meaning = re.sub(r"\(meaning: [^()]*\)", "", fk)
+        expect("lr-k", ["even where it changes framing" in fk, first.startswith(lr.LINE_EDIT_HEAD + "민지. " + lr.LINE_EDIT_KEEP),
+                        'in Korean: "잘 가" (meaning: Bye, take care).' in first, "never speak English" in first, fk.count("Bye, take care"),
+                        "Bye" in no_meaning, "Korean original" in fk, lr.audio_rule_count(fk), "안녕" in fk, "Keep faces." in fk],
+               [False, True, True, True, 1, False, False, 1, False, True],
+               "실제 말: 고정 머리(구도 그대로) · 한국어 따옴표 · never speak English · 영어는 (meaning: …) 안에만 · 소리 규칙 1번 · 옛 대사 없음")
+        th = {"speaker": "민지", "textKo": "잘 가", "thought": True, "deliveryKo": "속삭이듯"}
+        ft = build(th, base_k)
+        expect("lr-k", [lr.LINE_INNER in ft, "the mouth stays closed; the Korean line is heard as an inner voice." in ft,
+                        "in Korean" in ft, lr.audio_rule_count(ft), gm.AUDIO_DIALOGUE_ONLY in ft, "'속삭이듯'" in ft],
+               [True, True, True, 1, True, True], "속마음: 입 다묾 · 속마음 목소리 · 소리 규칙 1번(inner 형) · 말투(한국어 따옴표)")
+        bare = "SCENE: An office at night.\nDIALOGUE: 민지: \"안녕\"."
+        prev = build(sp, base_k) + "\n" + gm.AUDIO_DIALOGUE_ONLY_COMPACT  # 앞선 대사 다시 만들기 결과를 다시 고칠 때의 기준
+        expect("lr-k", [lr.audio_rule_count(build(sp, bare)), lr.audio_rule_count(build(sp, prev)),
+                        sum(l.startswith("EDIT:") for l in build(sp, prev).split("\n")), lr.audio_rule_count(build(sp, base_k, en, 1500)),
+                        "(meaning:" in build(sp, base_k, "Change the line.")],
+               [1, 1, 1, 1, False], "기준에 규칙 없음 · 앞선 대사 고침 결과(EDIT·규칙 겹침) · 짧은 형 → 모두 1번 · 따옴표 없는 번역 → 뜻 없음")
+        seven = rt._compose_prompt(base_k, tmpl_k, rng0, 6.0, request_ko="표정을 밝게", extra_ko="", change_en="Make her smile.",  # noqa: SLF001
+                                   max_bytes=4000, result=True)
+        seven_none = rt._compose_prompt(base_k, tmpl_k, rng0, 6.0, request_ko="표정을 밝게", extra_ko="",  # noqa: SLF001
+                                        change_en="Make her smile.", max_bytes=4000, result=True, edit_lines=None)
+        expect("lr-k", [seven == seven_none, seven[0].startswith(rt.COMPOSE_RESULT_EDIT_HEAD), "even where it changes framing" in seven[0]],
+               [True, True, True], "⑦ AI로 고치기: edit_lines 없으면 지금 머리 그대로(구도가 바뀌어도 끝까지 적용)")
+    except Exception as exc:  # noqa: BLE001
+        crash("lr-k", exc)
 
     # ================= (lr-c ~ lr-h) 가짜 저장소 =================
     store = _Store()
@@ -321,13 +366,14 @@ def check_line_redo_212() -> bool:  # noqa: C901 — 한 검사 함수(다른 �
     retake_state: dict = {"v": 1, "cells": {}}
     llm_plan: dict = {"fail": set()}
 
-    def fake_compose(owner, pid, mid, payload):
-        calls["compose"].append({"mid": mid, **payload})
+    def fake_compose(owner, pid, mid, payload, edit_lines=None):
+        lines = edit_lines('Change the line to "Bye." and match lip-sync.', 3000) if edit_lines else ["EDIT: Edit @Video1. " + payload["requestKo"]]
+        prompt = "\n".join(lines + ["@Video1 is the current result video of this shot (not a previz): keep it as the base.",
+                                    rt.COMPOSE_CONTEXT_LINE, "CONTEXT: 민지 says \"안녕\". 준호 thinks \"설마…\"", gm.AUDIO_DIALOGUE_ONLY])
+        calls["compose"].append({"mid": mid, **payload, "prompt": prompt})
         cell = "webtoon:c1" if mid == editmod.media_id(_key("c1-webtoon-1.mp4")) else "webtoon:c2"
         return {"cellKey": cell, "draft": {"id": f"d{len(calls['compose'])}", "model": "fal:edit", "modelLabel": "Kling Edit",
-                                           "maxBytes": 3000, "plan": {"usd": 1.23, "sentSeconds": 3.0},
-                                           "prompt": "EDIT: Edit @Video1. " + payload["requestKo"] + "\nEXTRA: " + payload["extraKo"]
-                                                     + "\nCONTEXT: 민지 says \"안녕\". 준호 thinks \"설마…\""}}
+                                           "maxBytes": 3000, "plan": {"usd": 1.23, "sentSeconds": 3.0}, "prompt": prompt}}
 
     def fake_submit(owner, pid, mid, payload):
         calls["submit"].append({"mid": mid, **payload})
@@ -487,7 +533,7 @@ def check_line_redo_212() -> bool:  # noqa: C901 — 한 검사 함수(다른 �
             v3 = snd.sound_view(OWNER, PID, "webtoon")
             redo = lr.read_redo(OWNER, PID, "g1", "webtoon")
             rev2 = redo["revisions"][-1]
-            expect("lr-d", [c2["mid"] == editmod.media_id(_key("c2-webtoon-1.mp4")), "mouth stays closed" in c2["extraKo"],
+            expect("lr-d", [c2["mid"] == editmod.media_id(_key("c2-webtoon-1.mp4")), "mouth stays closed" in redo["jobs"]["e2"]["prompt"],
                             calls["splice"][-1]["base"] == store.blobs[r1][:60], calls["splice"][-1]["new_audio"], rev2["fromR"],
                             [p["sourceKey"] for p in rev2["pieces"]], v3["lineRedo"]["current"],
                             v3["lineRedo"]["lines"]["e2"]["job"]["message"] == lr.NO_AUDIO_TEXT, r1 in store.blobs],
@@ -563,6 +609,35 @@ def check_line_redo_212() -> bool:  # noqa: C901 — 한 검사 함수(다른 �
             expect("lr-h", [resp.status_code, "lineRedo" in (resp.get_json() or {})], [200, True], "소유자 GET status → 200 · lineRedo")
         except Exception as exc:  # noqa: BLE001
             crash("lr-h", exc)
+
+        # ================= (lr-k) 실패한 작업 [다시 시도] → 견적부터 다시(새 틀) =================
+        try:
+            old_prompt = ("EDIT: Edit @Video1. Apply this change fully, even where it changes framing, camera or composition: Change "
+                          "Minji's line to \"Bye.\" (Korean original: \"잘 가\").")
+
+            def stale(status):
+                def mutate(doc):
+                    job = doc["jobs"]["e1"]
+                    job.update(status=status, prompt=old_prompt, error="fal 잔액이 부족합니다.", draftId="dOld")
+                    job.pop("promptV", None)
+                    return doc
+                lr._mutate_redo(OWNER, PID, "g1", "webtoon", mutate)  # noqa: SLF001
+
+            n_submit = len(calls["submit"])
+            stale("failed")
+            failed_try = err_of(lambda: lr.start(OWNER, PID, {"variant": "webtoon", "lineId": "e1", "confirmUsd": 1.23}))
+            stale("quoted")
+            quoted_try = err_of(lambda: lr.start(OWNER, PID, {"variant": "webtoon", "lineId": "e1", "confirmUsd": 1.23}))
+            n_compose = len(calls["compose"])
+            q2 = lr.quote(OWNER, PID, {"variant": "webtoon", "lineId": "e1"})
+            lr.start(OWNER, PID, {"variant": "webtoon", "lineId": "e1", "confirmUsd": 1.23})
+            sent = calls["submit"][-1]["prompt"] if len(calls["submit"]) > n_submit else ""
+            expect("lr-k", [failed_try, quoted_try, len(calls["compose"]) - n_compose, len(calls["submit"]) - n_submit, sent == q2["prompt"],
+                            sent.startswith(lr.LINE_EDIT_HEAD), "even where" in sent, lr.audio_rule_count(sent), calls["submit"][-1]["extraKo"]],
+                   [["LineRedoNoQuote", 409], ["LineRedoNoQuote", 409], 1, 1, True, True, False, 1, ""],
+                   "실패한 작업·옛 꼴 견적은 옛 프롬프트를 다시 보내지 않음(409) → 견적이 새 틀로 다시 만들고 그 프롬프트를 제출")
+        except Exception as exc:  # noqa: BLE001
+            crash("lr-k", exc)
     finally:
         for obj, name, value in reversed(saved_attrs):
             setattr(obj, name, value)

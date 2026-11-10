@@ -68654,6 +68654,7 @@ def main() -> int:
     if not __import__("check_astra_broker_210").check_astra_broker_210(): fail("작업 210: GPT-6 Astra 키이스트 역할 · Claude 5.x 와이랩 · 나머지 와이낫 계정 검사 실패")
     if not __import__("check_dialogue_audio_211").check_dialogue_audio_211(): fail("작업 211: 영상 소리 = 대사만(음악 · 앰비언트 · 효과음 없음) 프롬프트 검사 실패")
     if not __import__("check_line_redo_212").check_line_redo_212(): fail("작업 212: ⑥ 대사 고치기 · 그 대사 구간 영상 다시 만들기 검사 실패")
+    if not __import__("check_previz_pose_ux_213").check_previz_pose_ux_213(): fail("작업 213: 프리비즈 포즈 쓰기(마름모 끌기 · 고리 겹침 · 화면 밀림) 검사 실패")
     check_vnew_voice_ui_203()
     print()
     if warnings:
