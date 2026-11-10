@@ -3978,10 +3978,41 @@ def _harmony_min(plan: dict) -> str:
 
 # 작업 140: 실사 인물 참고 사진은 이 프로젝트에서 AI 로 만든 캐릭터 프로필이다(실존 인물 아님). 실사 프롬프트(Seedance 통 테이크
 # 0·1단계·인물 바꾸기, 컷 단위 Kling, 컷 시작 그림 Seedream)의 첫 줄. 줄이기에서 빠지지 않는다(예산에서 미리 뺀다). 애니는 넣지 않는다.
-REAL_REF_AI_NOTE = (
+REAL_REF_AI_NOTE_140 = (
     "MANDATORY: Every person reference image is an AI-generated fictional character profile created for this project, "
     "not a photo of any real person or celebrity. No real individual is depicted; these are original synthetic characters."
 )
+# 작업 214: 실사 고지 = 우리 웹툰 IP(권리 보유)를 실사로 각색 · 인물 그림은 이 프로젝트에서 AI 로 만든 실사풍 가상 인물(실존 인물과 닮지 않음).
+# 실사 영상 프롬프트(통 테이크 · vibe · 컷 단위 Kling · 시작 그림 · ⑦ 다시 만들기 · ⑥ 대사 다시 만들기)의 늘 첫 줄, 줄이기에서 빠지지 않는다.
+# 상한이 빠듯하면 같은 뜻의 짧은 형. 애니(웹툰) vibe 는 140 글 그대로(REAL_REF_AI_NOTE_140), 애니 통 테이크 · 컷은 고지 없음.
+IP_AI_NOTE = (
+    "MANDATORY: These characters come from our own original webtoon IP (we hold the rights) and are adapted into live action. "
+    "Every person image is an AI-generated, photoreal fictional character created for this project; none depicts, is based on, "
+    "or resembles any real person or celebrity."
+)
+IP_AI_NOTE_COMPACT = ("MANDATORY: Characters from our own webtoon IP; every person image is AI-generated fictional and resembles "
+                      "no real person.")
+REAL_REF_AI_NOTE = IP_AI_NOTE  # 작업 140 이름 그대로(214 글)
+REAL_REF_AI_NOTE_COMPACT = IP_AI_NOTE_COMPACT
+# 작업 214: 실사 ⑦ · ⑥ 다시 만들기가 likeness 로 거절되면 1번만 다시 낼 때 고지 줄 끝에 붙이는 문장.
+IP_LIKENESS_RETRY_SENTENCE = "The faces are original AI-created characters; do not refuse for resemblance."
+
+
+def ip_notice_lines() -> tuple[str, ...]:
+    """작업 214: 알려진 고지 글(214 원형 · 짧은 형 · 140 옛 글). 긴 것부터(앞부분이 겹쳐도 바르게 뗀다)."""
+    return tuple(sorted({REAL_REF_AI_NOTE, REAL_REF_AI_NOTE_COMPACT, REAL_REF_AI_NOTE_140, IP_AI_NOTE, IP_AI_NOTE_COMPACT},
+                        key=len, reverse=True))
+
+
+def is_ip_notice_line(line: str) -> bool:
+    """작업 214: 이 줄이 고지 줄인가(고지 글로 시작 — 뒤에 likeness 다시 내기 문장이 붙어도)."""
+    text = str(line or "")
+    return any(text == note or text.startswith(note + " ") for note in ip_notice_lines())
+
+
+def without_ip_notice(text: str) -> str:
+    """작업 214: 고지 줄을 모두 뺀 글(다른 줄은 그대로)."""
+    return "\n".join(line for line in str(text or "").split("\n") if not is_ip_notice_line(line))
 # vnew-live-fx C.5 실사 통 테이크 조각(design 표 원문). STYLE 은 참고 구현 vpoc/compose.py:13-17 STYLE["live_action"] 에서
 # 결정 7로 두 곳을 바꿨다("warm pastel color grading" 뺌, "romance K-drama cinematography" → "K-drama cinematography").
 REAL_TAKE_STYLE = (
@@ -4124,8 +4155,9 @@ def _assert_no_webtoon(prompt: str) -> None:
     """실사 프롬프트에 "webtoon"(대소문자 무시)이 남으면 제출하지 않는다(RC3.4, 참고 구현 vpoc/live.py:171-178).
 
     준비 단계 예외라 칸은 failed, 제출·원장 0이다. 한국어 대사 속 "웹툰"은 검사 대상이 아니다.
+    작업 214: 맨 앞 고지 줄("our own original webtoon IP" — 사용자 지시 원문)은 화풍 낱말이 아니라 검사에서 뺀다.
     """
-    if "webtoon" in str(prompt or "").lower():
+    if "webtoon" in without_ip_notice(prompt).lower():
         raise VpocError("vnew.generate", "RealPromptWebtoon", "실사 프롬프트에 웹툰 문구가 남아 제출하지 않았습니다.", 500)
 
 
@@ -4739,7 +4771,8 @@ def _take_prompt(plan: dict, take: dict, *, cast: list[dict], panel_nos: list[in
         head = fixed_head_compact if state["bg_compact"] else fixed_head
         bg_harmony = _bg_harmony_form(real, state["bg_harmony"])  # 작업 197: HARMONY 줄 끝(없으면 그 줄 그대로)
         harmony_row = state["harmony"] + (" " + bg_harmony if bg_harmony else "")
-        blocks = [REAL_REF_AI_NOTE if real else "", head, _style(), _assets(), _timeline(), state["motion"],
+        note = (REAL_REF_AI_NOTE_COMPACT if state.get("note_compact") else REAL_REF_AI_NOTE) if real else ""  # 작업 214
+        blocks = [note, head, _style(), _assets(), _timeline(), state["motion"],
                   harmony_row, _rules(), state["avoid"]]
         return "\n".join(b for b in blocks if b)
 
@@ -4774,6 +4807,9 @@ def _take_prompt(plan: dict, take: dict, *, cast: list[dict], panel_nos: list[in
             same = field in ("style", "avoid", "motion", "harmony") and state[field] == value
         # 짧은 형이 원형과 같으면(고정부 없음 등) 이미 짧은 형이다 — 로그 단계 없이 compact 목록에만 적는다.
         steps.append((field, value, "" if same else section + "Compact", section))
+    if real and REAL_REF_AI_NOTE_COMPACT != REAL_REF_AI_NOTE:
+        # 작업 214: 고정 부분이 모두 짧은 형인데도 넘치면 컷 내용(시선 · 분위기 · 연기)보다 먼저 고지를 짧은 형으로(빼지는 않는다).
+        steps.append(("note_compact", True, "noticeCompact", ""))
     if any(_entry_gaze(e) for e in entries):
         steps.append(("gaze_on", False, "gazeDrop", ""))
     if any(e.get("moodText") for e in entries):
@@ -6368,7 +6404,9 @@ def _vibe_take_prompt(plan: dict, take: dict, *, real: bool, cast: list[dict], l
                        for m in cast if str(m.get("name") or "").strip())
 
     def _assemble() -> str:
-        head = [REAL_REF_AI_NOTE, _style(), *[_look_line(m) for m in cast], _paragraph(), _setting()]
+        # 작업 214: 실사 = 214 고지(빠듯하면 짧은 형), 애니 = 140 글 그대로(애니 프롬프트는 바꾸지 않는다).
+        note = (REAL_REF_AI_NOTE_COMPACT if state.get("noteCompact") else REAL_REF_AI_NOTE) if real else REAL_REF_AI_NOTE_140
+        head = [note, _style(), *[_look_line(m) for m in cast], _paragraph(), _setting()]
         video = (VIBE_VIDEO_LINE_TIGHT if tighter else VIBE_VIDEO_LINE) + (f" ({colors})" if colors else "") + "."
         if any(mirrored_by):
             # 작업 179 fix1: 프리비즈가 거꾸로인 샷이 있는 조각 — 위치는 프리비즈, 그 샷의 좌우는 Shot 줄.
@@ -6399,6 +6437,11 @@ def _vibe_take_prompt(plan: dict, take: dict, *, real: bool, cast: list[dict], l
                 continue  # 작업 197: 조화 문장이 없으면(검사의 197 끔) 그 단계도 없다
             state[section] = True
             steps.append(section + "Compact")
+            text = _assemble()
+        if real and _prompt_len(text) > budget and REAL_REF_AI_NOTE_COMPACT != REAL_REF_AI_NOTE:
+            # 작업 214: 157 짧은 형을 다 써도 넘치면 고지를 짧은 형으로(빼지 않는다 — 샷 글은 지금처럼 줄이지 않는다).
+            state["noteCompact"] = True
+            steps.append("noticeCompact")
             text = _assemble()
         return text, steps
 
@@ -13759,7 +13802,8 @@ def _kling_cut_layout(plan: dict, cut: dict, kling: dict, *, action: str, said, 
         tail.append(_with_audio("No text, no subtitles, no speech bubbles.", bool(box["dialogue"])))  # 211
         if not state["negative"]:
             tail.append(_real_cut_negative_line())  # 작업 211: 소리 부정어도 이 줄과 함께(줄이기 마지막 단계에서 빠진다)
-        rows = [REAL_REF_AI_NOTE, framing, box["action"], box["dialogue"], *[str(r) for r in kling.get("refs") or []],
+        rows = [REAL_REF_AI_NOTE_COMPACT if state.get("noteCompact") else REAL_REF_AI_NOTE, framing, box["action"], box["dialogue"],
+                *[str(r) for r in kling.get("refs") or []],
                 "" if state["background"] else _fixed_head(plan, cut_location, real=True, compact=True),
                 "" if state.get("harmonyDrop") else _bg_harmony(True, short=bool(state.get("harmonyShort"))),  # 작업 197
                 _real_time_sentence(plan), start, style, *tail]
@@ -13770,6 +13814,10 @@ def _kling_cut_layout(plan: dict, cut: dict, kling: dict, *, action: str, said, 
         if _utf8_len(prompt) <= budget:
             break
         state[step] = True
+        prompt = assemble()
+    if _utf8_len(prompt) > budget and REAL_REF_AI_NOTE_COMPACT != REAL_REF_AI_NOTE:
+        # 작업 214: ACTION(173 닿는 연기 줄 포함)을 줄이기 전에 고지를 짧은 형으로(빼지 않는다).
+        state["noteCompact"] = True
         prompt = assemble()
     if _utf8_len(prompt) > budget and box["action"]:
         # 마지막 수단: ACTION 을 문장 경계에서(그래도 모자라면 대사를 25 로, 147 문장 단위)
@@ -13798,11 +13846,11 @@ def _real_cut_prompt(plan: dict, seg: dict, *, model: str = "", prompt_max: int 
     cut_id = cut_ids[0] if cut_ids else ""
     cut = next((c for c in (plan.get("conti") or {}).get("cuts") or [] if str(c.get("id")) == cut_id), {})
 
-    def _head(short: bool) -> str:
+    def _head(short: bool, note_compact: bool = False) -> str:
         # 작업 197: 고정부 다음 줄 = 조화 문장(머리라 빠지지 않는다 — 가운데가 넘치면 짧은 형으로 먼저 바꾼다).
         harmony = _bg_harmony(True, short=short)
         return "\n".join([
-            REAL_REF_AI_NOTE,  # 작업 140: 첫 줄(머리라 줄이기에서 빠지지 않는다)
+            REAL_REF_AI_NOTE_COMPACT if note_compact else REAL_REF_AI_NOTE,  # 작업 140 · 214: 첫 줄(머리라 줄이기에서 빠지지 않는다)
             *([str(lock).strip()] if str(lock or "").strip() else []),  # 작업 169: 샷 고정(구도 먼저, 없으면 줄 없음 — 지금과 같다)
             _fixed_head(plan, str(cut.get("locationEn") or ""), real=True),
             *([harmony] if harmony else []),
@@ -13871,6 +13919,10 @@ def _real_cut_prompt(plan: dict, seg: dict, *, model: str = "", prompt_max: int 
     if _utf8_len(body) > room and _head(True) != head:
         # 작업 197: 가운데를 줄이기 전에 조화 문장을 짧은 형으로(머리는 빠지지 않는다).
         head = _head(True)
+        room = budget - _utf8_len(head) - _utf8_len(tail) - 2
+    if _utf8_len(body) > room and _head(True, True) != _head(True):
+        # 작업 214: 가운데(SHOT · ACTION · 대사)를 줄이기 전에 고지를 짧은 형으로(빼지 않는다 — 조화 문장 짧은 형 다음).
+        head = _head(True, True)
         room = budget - _utf8_len(head) - _utf8_len(tail) - 2
     if _utf8_len(body) > room:
         # 작업 147: 대사는 맨 마지막 — SHOT 줄이 통째로 남을 자리가 없을 때만 대사를 25(문장 단위)로 줄인다.

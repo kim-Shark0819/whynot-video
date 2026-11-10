@@ -13,6 +13,8 @@ retake·가짜 LLM·가짜 ffmpeg, 유료·네트워크 0.
   (lr-j) LF 줄 끝(새·고친 파일)
   (lr-k) fix1: 대사 다시 만들기 EDIT 틀(구도·카메라 그대로 · 한국어로만 · 영어는 (meaning: …)) · 속마음 · 소리 규칙 1번 ·
          실패한 작업 [다시 시도] = 견적부터 새 틀 · ⑦ AI로 고치기 머리 그대로
+  (lr-l) fix2: 기본 모델 = 가장 싼 영상→영상 모델(Seedance 는 다른 모델이 없을 때만 · 같으면 원래 모델) · 모델 고르면 견적 다시 ·
+         submit 에 고른 모델 · 콘텐츠 검사 거절 → 다음으로 싼 모델(stepUp, 새 금액 확인 전에는 내지 않음) · 형식별 프롬프트 · 화면 고르기
 
 실행: python -X utf8 -B tools/check_line_redo_212.py
 """
@@ -47,7 +49,20 @@ GROUPS = {
     "lr-i": "node --check · 단추 상태",
     "lr-j": "LF 줄 끝",
     "lr-k": "fix1: 대사 틀(구도 그대로 · 한국어로만 · 뜻) · 소리 규칙 1번 · 다시 시도 = 새 견적 · ⑦ 그대로",
+    "lr-l": "fix2: 가장 싼 모델 기본 · Seedance 마지막 · 고르면 다시 견적 · 고른 모델 제출 · 거절 → 확인 뒤 다음 모델",
 }
+SEED, KLING, WAN = ("bytedance/seedance-2.5/reference-to-video", "fal-ai/kling-video/o3/standard/video-to-video/edit",
+                    "alibaba/wan-3.0/reference-to-video")
+PRICES = {"fal:edit": (1.23, "Kling Edit"), SEED: (0.82, "Seedance 2.5"), KLING: (0.42, "Kling O3 Edit"), WAN: (0.20, "Wan 3.0")}
+
+
+def _row(model: str, usd, *, original: bool = False, fmt: str = "reference", ok: bool = True, path: str = "take") -> dict:
+    """retake 모델 줄(_choices 모양) — 구간 견적 range."""
+    return {"id": model, "label": PRICES.get(model, (0, model))[1], "original": original, "path": path, "format": fmt,
+            "range": {"ok": ok, "usd": usd}, "full": {"ok": False}}
+
+
+SAMPLE_ROWS = [_row(SEED, 0.82, original=True), _row(KLING, 0.42, fmt="elements", path="v2v"), _row(WAN, 0.20)]
 OWNER, PID = "tester", "prj_lr"
 PUBLIC = ROOT / "frontend" / "public"
 FILES = [ROOT / "app" / "src" / "vnew" / n for n in ("line_redo.py", "sound.py", "routes.py", "retake.py")] + \
@@ -233,6 +248,32 @@ out.changed = [lrdChanged({ lineRedo: { busy: true, current: 0 }, source: { labe
 console.log(JSON.stringify(out));
 """
 
+# 작업 212 fix2 화면: 확인 창 모델 고르기(라디오) · 고르면 pick · 시작 단추 금액 · 거절 뒤 안내 · 견적 바디
+_UI_JS_L = r"""
+var out = {};
+var job = { status: "quoted", model: "W", modelLabel: "Wan 3.0", usd: 0.2, range: { start: 0, end: 3 }, stepUp: null,
+  models: [{ id: "W", label: "Wan 3.0", usd: 0.2, original: false }, { id: "K", label: "Kling O3 Edit", usd: 0.42, original: false },
+           { id: "S", label: "Seedance 2.5", usd: 0.82, original: true }] };
+var ed = { box: new Node("div") }, picks = [], starts = 0;
+var on = { pick: function (id) { picks.push(id); }, start: function () { starts += 1; }, cancel: function () {} };
+var line = { id: "e1", speaker: "민지" };
+lrdConfirmPaint(ed, line, job, on, false);
+var radios = walk(ed.confirm, []).filter(function (n) { return n.type === "radio"; });
+out.radios = radios.map(function (r) { return [r.value, r.checked, r.name, r.parentNode.textContent]; });
+radios[1].listeners.change[0](); radios[0].listeners.change[0]();
+find(ed.confirm, "vnew-lrd-go").listeners.click[0]();
+out.picks = picks; out.starts = starts; out.go = find(ed.confirm, "vnew-lrd-go").textContent; out.stepup = !!find(ed.confirm, "vnew-lrd-stepup");
+job = Object.assign({}, job, { model: "K", modelLabel: "Kling O3 Edit", usd: 0.42, stepUp: { fromModel: "W", fromLabel: "Wan 3.0" } });
+lrdConfirmPaint(ed, line, job, on, false);
+out.up = [find(ed.confirm, "vnew-lrd-stepup").textContent, find(ed.confirm, "vnew-lrd-go").textContent, ed.box.children.length];
+lrdConfirmPaint(ed, line, job, on, true);
+out.busy = [find(ed.confirm, "vnew-lrd-go").disabled, walk(ed.confirm, []).filter(function (n) { return n.type === "radio"; })[0].disabled];
+lrdConfirmClose(ed);
+out.closed = [ed.confirm, ed.box.children.length];
+out.body = [lrdQuoteBody({ variant: "real" }, "e1", ""), lrdQuoteBody({ variant: "real" }, "e1", "K")];
+console.log(JSON.stringify(out));
+"""
+
 
 def check_line_redo_212() -> bool:  # noqa: C901 — 한 검사 함수(다른 작업 검사와 같은 모양)
     bad: dict[str, list[str]] = {g: [] for g in GROUPS}
@@ -360,6 +401,26 @@ def check_line_redo_212() -> bool:  # noqa: C901 — 한 검사 함수(다른 �
     except Exception as exc:  # noqa: BLE001
         crash("lr-k", exc)
 
+    # ================= (lr-l) fix2: 형식마다(reference @Video1 r2v · elements Kling O3 edit) 같은 EDIT 틀 · 규칙 통과 =================
+    try:
+        sp_l = {"speaker": "민지", "textKo": "잘 가", "thought": False, "deliveryKo": ""}
+        base_l = "SCENE: An office at night.\nDIALOGUE: 민지: \"안녕\"."
+        rng_l = {"start": 0.5, "end": 3.5, "in": 0.5, "out": 3.5}
+        fit = []
+        for fmt, tmpl in (("reference", "@Video1 is the shot to edit. @Image1 is 민지 (face reference). " + gm.AUDIO_DIALOGUE_ONLY),
+                          ("elements", "@Video1 is the shot to edit. @Element1 is 민지. " + gm.AUDIO_DIALOGUE_ONLY)):
+            lines_l = lr.redo_edit_lines(sp_l, 'Change the line to "Bye."', 4000)
+            p_l, meta_l = rt._compose_prompt(base_l, tmpl, rng_l, 6.0, request_ko=lr.redo_request(sp_l), extra_ko="",  # noqa: SLF001
+                                             change_en='Change the line to "Bye."', max_bytes=4000, result=True, edit_lines=lines_l)
+            f_l = lr._finish_prompt(p_l, "안녕", "잘 가", 4000)  # noqa: SLF001
+            rules_l = {"maxBytes": 4000, "real": True, "refs": meta_l["refs"], "labels": meta_l["labels"], "against": "template"}
+            fit.append([fmt in rt.V2V_FORMATS, rt._refs(" ".join(lines_l)), rt.check_prompt(f_l, base_l, rules_l),  # noqa: SLF001
+                        f_l.startswith(lr.LINE_EDIT_HEAD), lr.audio_rule_count(f_l)])
+        expect("lr-l", fit, [[True, {"@Video1"}, [], True, 1]] * 2,
+               "형식마다 retake._compose_prompt 그대로: EDIT 틀은 @Video1 만 · 형식 참고 표시 그대로(규칙 문제 0) · 소리 규칙 1번")
+    except Exception as exc:  # noqa: BLE001
+        crash("lr-l", exc)
+
     # ================= (lr-c ~ lr-h) 가짜 저장소 =================
     store = _Store()
     calls: dict[str, list] = {"compose": [], "submit": [], "splice": [], "llm": [], "charge": [], "spawn": []}
@@ -372,13 +433,16 @@ def check_line_redo_212() -> bool:  # noqa: C901 — 한 검사 함수(다른 �
                                     rt.COMPOSE_CONTEXT_LINE, "CONTEXT: 민지 says \"안녕\". 준호 thinks \"설마…\"", gm.AUDIO_DIALOGUE_ONLY])
         calls["compose"].append({"mid": mid, **payload, "prompt": prompt})
         cell = "webtoon:c1" if mid == editmod.media_id(_key("c1-webtoon-1.mp4")) else "webtoon:c2"
-        return {"cellKey": cell, "draft": {"id": f"d{len(calls['compose'])}", "model": "fal:edit", "modelLabel": "Kling Edit",
-                                           "maxBytes": 3000, "plan": {"usd": 1.23, "sentSeconds": 3.0}, "prompt": prompt}}
+        model = payload.get("model") or "fal:edit"
+        usd, label = PRICES[model]
+        return {"cellKey": cell, "draft": {"id": f"d{len(calls['compose'])}", "model": model, "modelLabel": label,
+                                           "maxBytes": 3000, "plan": {"usd": usd, "sentSeconds": 3.0}, "prompt": prompt}}
 
     def fake_submit(owner, pid, mid, payload):
         calls["submit"].append({"mid": mid, **payload})
-        if round(float(payload.get("confirmUsd") or 0), 2) != 1.23:
-            raise VpocError("vnew.retake.submit", "CostMismatch", "금액이 서버 계산과 다릅니다. 서버 1.23 USD, 화면 1.0 USD.", 409)
+        usd = PRICES[payload.get("model") or "fal:edit"][0]
+        if round(float(payload.get("confirmUsd") or 0), 2) != usd:
+            raise VpocError("vnew.retake.submit", "CostMismatch", f"금액이 서버 계산과 다릅니다. 서버 {usd} USD.", 409)
         cell = "webtoon:c1" if mid == editmod.media_id(_key("c1-webtoon-1.mp4")) else "webtoon:c2"
         return {"cellKey": cell, "live": {"n": 2, "status": "queued", "attempt": 1}}
 
@@ -432,6 +496,13 @@ def check_line_redo_212() -> bool:  # noqa: C901 — 한 검사 함수(다른 �
     setv(lr, "_splice_file", fake_splice)
     setv(lr, "_compose", fake_compose)
     setv(lr, "_submit", fake_submit)
+    models_box: dict = {"rows": [], "calls": 0}
+
+    def fake_models(owner, pid, mid, rng):
+        models_box["calls"] += 1
+        return copy.deepcopy(models_box["rows"])
+
+    setv(lr, "_models", fake_models)
     setv(lr, "_retake_state", lambda owner, pid, gen_id: copy.deepcopy(retake_state))
     setv(lr, "_spawn", fake_spawn)
     setv(lr, "_llm", fake_llm)
@@ -638,6 +709,66 @@ def check_line_redo_212() -> bool:  # noqa: C901 — 한 검사 함수(다른 �
                    "실패한 작업·옛 꼴 견적은 옛 프롬프트를 다시 보내지 않음(409) → 견적이 새 틀로 다시 만들고 그 프롬프트를 제출")
         except Exception as exc:  # noqa: BLE001
             crash("lr-k", exc)
+
+        # ================= (lr-l) fix2: 가장 싼 모델 기본 · 고르기 · 거절 → 다음 모델(확인 뒤) =================
+        try:
+            dm = lr.default_model
+            expect("lr-l", [dm(SAMPLE_ROWS), dm([_row(SEED, 0.82, original=True)]), dm([_row(SEED, 0.82, original=True), _row(WAN, 0.2, ok=False)]),
+                            dm([_row(SEED, 0.10), _row(KLING, 0.42)]), dm([_row(WAN, 0.42), _row(KLING, 0.42, original=True)]),
+                            dm([_row(WAN, 0.20, path=rt.KCUT_PATH), _row(KLING, 0.42)]), dm([_row(WAN, None), _row(KLING, 0.42)]), dm([]),
+                            dm(SAMPLE_ROWS, [WAN]), dm(SAMPLE_ROWS, [WAN, KLING]), dm(SAMPLE_ROWS, [WAN, KLING, SEED])],
+                   [WAN, SEED, SEED, KLING, KLING, KLING, KLING, "", KLING, SEED, WAN],
+                   "기본 = 가장 싼 줄(Wan $0.20) · Seedance 는 유일할 때만 · 싸도 Seedance 는 뒤 · 같으면 원래 모델 · 시작 그림·구간 못 받는 줄·값 모름 뒤 · "
+                   "거절 모델 빼고 다음으로 싼 줄")
+            def cell_of():  # 이 원본(판 r1)에서 e1 구간 재료의 칸(가짜 compose 의 cellKey)
+                return lr.read_redo(OWNER, PID, "g1", "webtoon")["jobs"]["e1"]["cellKey"]
+
+            retake_state["cells"][cell_of()] = {"versions": [{"n": 2, "status": "failed", "error": "x"}], "draft": None}
+            snd.sound_view(OWNER, PID, "webtoon")  # lr-k 에서 시작한 e1 을 끝낸다(보통 실패 — 거절 아님)
+            models_box["rows"] = copy.deepcopy(SAMPLE_ROWS)
+            q_def = lr.quote(OWNER, PID, {"variant": "webtoon", "lineId": "e1"})["quote"]
+            c_def = calls["compose"][-1]
+            q_pick = lr.quote(OWNER, PID, {"variant": "webtoon", "lineId": "e1", "model": KLING})["quote"]
+            c_pick = calls["compose"][-1]
+            expect("lr-l", [c_def.get("model"), q_def["model"], q_def["usd"], [m["id"] for m in q_def["models"]],
+                            [m["usd"] for m in q_def["models"]], q_def["stepUp"], c_pick.get("model"), q_pick["model"], q_pick["usd"],
+                            [m["usd"] for m in q_pick["models"] if m["id"] == KLING], [m["seedance"] for m in q_def["models"]]],
+                   [WAN, WAN, 0.2, [WAN, KLING, SEED], [0.2, 0.42, 0.82], None, KLING, KLING, 0.42, [0.42], [False, False, True]],
+                   "견적: compose 에 가장 싼 모델 · 모델 줄(싼 순서·금액) · 다른 모델을 고르면 그 모델로 견적 다시(새 금액)")
+            lr.start(OWNER, PID, {"variant": "webtoon", "lineId": "e1", "confirmUsd": 0.42})
+            expect("lr-l", [calls["submit"][-1]["model"], calls["submit"][-1]["draftId"]], [KLING, f"d{len(calls['compose'])}"],
+                   "고른 모델(Kling)로 시작 → submit 에 그 모델·그 초안")
+            retake_state["cells"][cell_of()] = {"versions": [{"n": 2, "status": "failed", "error": "x"}], "draft": None}
+            snd.sound_view(OWNER, PID, "webtoon")
+            lr.quote(OWNER, PID, {"variant": "webtoon", "lineId": "e1"})
+            lr.start(OWNER, PID, {"variant": "webtoon", "lineId": "e1", "confirmUsd": 0.2})
+            sent_def = calls["submit"][-1]["model"]
+            n_ok = len(calls["submit"])
+            expect("lr-l", [sent_def, calls["submit"][-1]["confirmUsd"]], [WAN, 0.2], "시작: submit 에 기본 모델(Wan) · 그 금액")
+
+            def flag(n=2):
+                retake_state["cells"][cell_of()] = {"versions": [{"n": n, "status": "failed", "error": rt.CONTENT_FLAG_TEXT,
+                                                                     "failureKind": rt.CONTENT_FLAG_KIND}], "draft": None}
+                return snd.sound_view(OWNER, PID, "webtoon")["lineRedo"]["lines"]["e1"]["job"]
+
+            failed = flag()
+            q_up = lr.quote(OWNER, PID, {"variant": "webtoon", "lineId": "e1"})["quote"]
+            after_quote = len(calls["submit"])
+            low = err_of(lambda: lr.start(OWNER, PID, {"variant": "webtoon", "lineId": "e1", "confirmUsd": 0.2}))
+            still = lr.read_redo(OWNER, PID, "g1", "webtoon")["jobs"]["e1"]["status"]
+            ok_up = lr.start(OWNER, PID, {"variant": "webtoon", "lineId": "e1", "confirmUsd": 0.42})["job"]["status"]
+            expect("lr-l", [failed["status"], failed["failureKind"], q_up["model"], q_up["usd"], q_up["stepUp"], after_quote == n_ok, low, still,
+                            ok_up, calls["submit"][-1]["model"], calls["submit"][-1]["confirmUsd"]],
+                   ["failed", rt.CONTENT_FLAG_KIND, KLING, 0.42, {"fromModel": WAN, "fromLabel": "Wan 3.0"}, True, ["CostMismatch", 409],
+                    "quoted", "running", KLING, 0.42],
+                   "거절 → 다음 견적은 다음으로 싼 Kling($0.42, stepUp) · 견적만으로는 내지 않음 · 옛 금액 확인은 409 · 새 금액 확인 뒤 Kling 제출")
+            flag()
+            q_seed = lr.quote(OWNER, PID, {"variant": "webtoon", "lineId": "e1"})["quote"]
+            expect("lr-l", [q_seed["model"], q_seed["stepUp"]["fromModel"], q_seed["usd"]], [SEED, KLING, 0.82],
+                   "다시 거절 → 남은 Seedance(유일한 줄일 때만) · 새 금액")
+            models_box["rows"] = []
+        except Exception as exc:  # noqa: BLE001
+            crash("lr-l", exc)
     finally:
         for obj, name, value in reversed(saved_attrs):
             setattr(obj, name, value)
@@ -718,7 +849,7 @@ def check_line_redo_212() -> bool:  # noqa: C901 — 한 검사 함수(다른 �
     try:
         vsrc = (PUBLIC / "vnew.js").read_text(encoding="utf-8")
         expect("lr-i", ["lrdRowTools(ctx, line, row, lineCell, listenCell)" in vsrc, "lrdRevisionBar(ctx)" in vsrc,
-                        "이전 영상으로 되돌리기" in vsrc, "테이크 전체 다시 만들기" in vsrc, "costChangedText(job.usd, fresh.usd)" in vsrc,
+                        "이전 영상으로 되돌리기" in vsrc, "테이크 전체 다시 만들기" in vsrc, "costChangedText(shown.usd, fresh.usd)" in vsrc,
                         "innerHTML" in vsrc[vsrc.index("⑥ 사운드 — 대사 고치기"):vsrc.index("⑥ 사운드 — 인물 목소리(작업 203)")]],
                [True, True, True, True, True, False], "vnew.js: 줄 도구 · 판 막대 · 되돌리기 · 테이크 안내 · 금액 바뀜 · innerHTML 없음")
         if not node:
@@ -754,6 +885,27 @@ def check_line_redo_212() -> bool:  # noqa: C901 — 한 검사 함수(다른 �
                        "견적 금액 표시 · 진행 중 단추 꺼짐 · 상태 글")
                 expect("lr-i", [o["applied"]["take"], o["applied"]["redo"], o["changed"]], ["", False, [False, True]],
                        "대본에 반영 → [테이크 전체 다시 만들기] 보임 · 폴링 다시 그리기 판정")
+            names_l = ("el", "clear", "castingUsdText", "lrdUsd", "lrdConfirmText", "lrdModelChoices", "lrdStepUpText", "lrdQuoteBody",
+                       "lrdConfirmPaint", "lrdConfirmClose")
+            js_l = "\n".join(_extract_js(vsrc, n) for n in names_l) + _UI_JS.split("var out = {};")[0] + _UI_JS_L
+            with tempfile.TemporaryDirectory(prefix="chk212l-") as tmp:
+                path = Path(tmp) / "ui_l.js"
+                path.write_text(js_l, encoding="utf-8", newline="\n")
+                proc = subprocess.run([node, str(path)], capture_output=True, text=True, encoding="utf-8", timeout=60)
+            lines = (proc.stdout or "").strip().splitlines()
+            if proc.returncode != 0 or not lines:
+                expect("lr-l", (proc.stderr or "")[-300:], "", "화면 실행(모델 고르기)")
+            else:
+                o = json.loads(lines[-1])
+                expect("lr-l", [o["radios"], o["picks"], o["starts"], o["go"], o["stepup"]],
+                       [[["W", True, "vnew-lrd-model-e1", "Wan 3.0 · $0.20"], ["K", False, "vnew-lrd-model-e1", "Kling O3 Edit · $0.42"],
+                         ["S", False, "vnew-lrd-model-e1", "Seedance 2.5 · $0.82 (원래 모델)"]], ["K"], 1, "이 금액으로 시작 ($0.20)", False],
+                       "화면: 모델 줄(라벨·금액, 기본 선택) · 다른 모델 고르면 견적 다시(pick) · 같은 모델은 그대로 · 시작 단추 금액")
+                expect("lr-l", [o["up"], o["busy"], o["closed"], o["body"]],
+                       [["Wan 3.0 모델이 내용 검사에서 거절해 다음으로 싼 Kling O3 Edit($0.42)로 바꿨습니다. 금액을 확인한 뒤 시작해 주세요.",
+                         "이 금액으로 시작 ($0.42)", 1], [True, True], [None, 0],
+                        [{"variant": "real", "lineId": "e1"}, {"variant": "real", "lineId": "e1", "model": "K"}]],
+                       "화면: 거절 뒤 다음 모델 안내 + 새 금액 확인 · 견적 중엔 고르기·시작 꺼짐 · 닫기 · 견적 바디(model)")
     except Exception as exc:  # noqa: BLE001
         crash("lr-i", exc)
 
