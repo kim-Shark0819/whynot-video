@@ -2141,6 +2141,7 @@ function createController(host, options) {
     workMoved: false, // 작업 209a fix 1: 사용자가 작업 카메라를 움직였다(orbit start · F) — 그 뒤로는 자동으로 옮기지 않는다
     pose: false, // 작업 209a: 포즈 모드(고른 인물 하나에 관절 손잡이)
     joint: null, // 작업 209a: 포즈 모드에서 고른 관절(RIG_JOINTS 하나 또는 "root" = 골반)
+    poseHover: null, // 작업 213: 커서 아래 포즈 손잡이 이름(밝게 · 이름표)
     live: null, // 작업 209b: 키 사이에서 고친 저장 전 미리보기 {cut, id, u, pose: {pos, facingDeg, rig}} — S 를 누르면 키가 된다
     keySel: null, // 작업 209b: 고른 자세 키 마름모 {id, u}(Delete = 지우기)
     ghosts: null, // 작업 209b: [잔상] null = 자동(고른 인물 키 2개 이상이면 켬), true/false = 사용자가 고름
@@ -2568,20 +2569,35 @@ function createController(host, options) {
   const POSE_ROOT_COLOR = 0xce93d8;
   const POSE_ROT_RAD_PER_PX = 0.01; // 고리 끌기 1px = 0.57°
   const POSE_PLANT_M = 0.15; // 골반을 끌 때 이 높이 아래의 발은 바닥에 붙여 둔다
-  // [관절, 고리 반지름 m(키 1.7 기준), 피벗 로컬 자리]. 고리는 뼈(로컬 y)를 감싼다.
+  /* 작업 213: 고리가 겹쳐 고르기 어렵던 것 — 선은 40% 얇게(0.008 → 0.0048), 반지름은 감싸는 팔다리 굵기 × POSE_RING_FIT,
+     고른 관절(·커서 아래)만 진하게, 나머지는 POSE_RING_DIM. 겹친 자리는 카메라에 가까운 것부터, 같은 자리를 다시 누르면 다음 것. */
+  const POSE_RING_TUBE = 0.0048;
+  const POSE_RING_FIT = 1.3;
+  const POSE_RING_DIM = 0.35;
+  const POSE_HOVER_COLOR = 0xffffff;
+  // [관절, 감싸는 팔다리 반지름 m(키 1.7 기준 마네킹 굵기), 피벗 로컬 자리]. 고리는 뼈(로컬 y)를 감싼다.
   const POSE_RINGS = [
-    ["head", 0.18, [0, RIG_DIMS.headCenterY, 0]],
-    ["neck", 0.09, [0, 0, 0]],
-    ["spine", 0.26, [0, 0.32, 0]],
-    ["shoulderL", 0.08, [0, 0, 0]],
-    ["shoulderR", 0.08, [0, 0, 0]],
-    ["elbowL", 0.065, [0, 0, 0]],
-    ["elbowR", 0.065, [0, 0, 0]],
-    ["hipL", 0.095, [0, -0.1, 0]],
-    ["hipR", 0.095, [0, -0.1, 0]],
-    ["kneeL", 0.085, [0, 0, 0]],
-    ["kneeR", 0.085, [0, 0, 0]],
+    ["head", 0.13, [0, RIG_DIMS.headCenterY, 0]],
+    ["neck", 0.07, [0, 0, 0]],
+    ["spine", 0.17, [0, 0.32, 0]],
+    ["shoulderL", 0.055, [0, 0, 0]],
+    ["shoulderR", 0.055, [0, 0, 0]],
+    ["elbowL", 0.05, [0, 0, 0]],
+    ["elbowR", 0.05, [0, 0, 0]],
+    ["hipL", 0.08, [0, -0.1, 0]],
+    ["hipR", 0.08, [0, -0.1, 0]],
+    ["kneeL", 0.07, [0, 0, 0]],
+    ["kneeR", 0.07, [0, 0, 0]],
   ];
+  // 작업 213: 관절 고르기 판·Tab 순서(몸 위 → 아래). 손·발(IK)은 손목·발목 관절을 고르고 그 네모를 밝힌다.
+  const POSE_PICK_ORDER = ["head", "neck", "spine", "shoulderL", "shoulderR", "elbowL", "elbowR", "wristL", "wristR",
+    "root", "hipL", "hipR", "kneeL", "kneeR", "ankleL", "ankleR"];
+  const POSE_IK_JOINT = { handL: "wristL", handR: "wristR", footL: "ankleL", footR: "ankleR" };
+  const POSE_NAMES_KO = {
+    head: "머리", neck: "목", spine: "가슴", shoulderL: "왼어깨", shoulderR: "오른어깨", elbowL: "왼팔꿈치", elbowR: "오른팔꿈치",
+    wristL: "왼손 (IK)", wristR: "오른손 (IK)", root: "골반", hipL: "왼엉덩이", hipR: "오른엉덩이", kneeL: "왼무릎", kneeR: "오른무릎",
+    ankleL: "왼발 (IK)", ankleR: "오른발 (IK)", handL: "왼손 (IK)", handR: "오른손 (IK)", footL: "왼발 (IK)", footR: "오른발 (IK)",
+  };
   // IK 손잡이 → [팔/다리, 쪽]
   const POSE_IK = { handL: ["arm", "L"], handR: ["arm", "R"], footL: ["leg", "L"], footR: ["leg", "R"] };
   const RING_TILT = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(1, 0, 0), Math.PI / 2);
@@ -2604,11 +2620,13 @@ function createController(host, options) {
       mesh.add(pick);
       ctl.picks.push(pick);
     };
-    POSE_RINGS.forEach(([joint, radius, offset]) => {
+    POSE_RINGS.forEach(([joint, limb, offset]) => {
       const mat = poseMaterial(POSE_FK_COLOR);
-      const mesh = new THREE.Mesh(new THREE.TorusGeometry(radius, 0.008, 6, 40), mat);
+      const radius = limb * POSE_RING_FIT;
+      const mesh = new THREE.Mesh(new THREE.TorusGeometry(radius, POSE_RING_TUBE, 6, 40), mat);
       mesh.renderOrder = 990;
-      addPick(mesh, new THREE.TorusGeometry(radius, 0.035, 6, 24), { kind: "fk", name: joint });
+      // 고르는 띠도 팔다리 굵기에 맞춘다(작은 관절은 좁게 — 이웃 고리와 덜 겹친다).
+      addPick(mesh, new THREE.TorusGeometry(radius, Math.min(0.035, Math.max(0.022, radius * 0.3)), 6, 24), { kind: "fk", name: joint });
       poseGroup.add(mesh);
       ctl.rings.push({ joint, mesh, mat, offset: new THREE.Vector3(offset[0], offset[1], offset[2]) });
     });
@@ -2666,11 +2684,15 @@ function createController(host, options) {
     const entry = poseEntry();
     const show = !!entry && edit.helpersOn && !playing && !recording;
     poseGroup.visible = show;
-    if (!show) return;
+    if (!show) {
+      showPoseTip(null);
+      return;
+    }
     const ctl = ensurePoseControls();
     const m = entry.mannequin;
     const s = m.group.scale.y || 1;
     const q = new THREE.Quaternion();
+    const hover = edit.poseHover; // 작업 213: 커서 아래 손잡이(밝게)
     m.group.updateMatrixWorld(true);
     ctl.rings.forEach((ring) => {
       const obj = m.rigObject(ring.joint);
@@ -2678,28 +2700,109 @@ function createController(host, options) {
       obj.getWorldQuaternion(q);
       ring.mesh.quaternion.copy(q).multiply(RING_TILT);
       ring.mesh.scale.setScalar(s);
-      ring.mat.color.setHex(edit.joint === ring.joint ? SEL_COLOR : POSE_FK_COLOR);
+      const on = edit.joint === ring.joint;
+      ring.mat.color.setHex(on ? SEL_COLOR : hover === ring.joint ? POSE_HOVER_COLOR : POSE_FK_COLOR);
+      ring.mat.opacity = on || hover === ring.joint ? 1 : POSE_RING_DIM; // 작업 213: 고른 고리만 진하게
     });
     m.group.getWorldQuaternion(q);
     ctl.handles.forEach((h) => {
       handleObject(m, h.name).getWorldPosition(h.mesh.position);
       h.mesh.quaternion.copy(q);
       h.mesh.scale.setScalar(s);
-      h.mat.color.setHex(drag.pose && drag.pose.name === h.name ? SEL_COLOR : POSE_IK_COLOR);
+      const on = (drag.pose && drag.pose.name === h.name) || edit.joint === POSE_IK_JOINT[h.name];
+      h.mat.color.setHex(on ? SEL_COLOR : hover === h.name ? POSE_HOVER_COLOR : POSE_IK_COLOR);
     });
     m.hips.getWorldPosition(ctl.root.mesh.position);
     ctl.root.mesh.quaternion.copy(q);
     ctl.root.mesh.scale.setScalar(s);
-    ctl.root.mat.color.setHex(edit.joint === "root" ? SEL_COLOR : POSE_ROOT_COLOR);
+    const rootOn = edit.joint === "root";
+    ctl.root.mat.color.setHex(rootOn ? SEL_COLOR : hover === "root" ? POSE_HOVER_COLOR : POSE_ROOT_COLOR);
+    ctl.root.mat.opacity = rootOn || hover === "root" ? 1 : POSE_RING_DIM;
     poseGroup.updateMatrixWorld(true);
+  }
+
+  /* 작업 213: 화면 좌표 아래 포즈 손잡이 전부 — 카메라에 가까운 순, 같은 손잡이는 한 번. [{kind, name, dist}] */
+  function posePickAll(clientX, clientY) {
+    if (!poseCtl || !poseGroup.visible || !poseEntry() || playing || recording) return [];
+    rayFrom(clientX, clientY);
+    const out = [];
+    raycaster.intersectObjects(poseCtl.picks, false).forEach((hit) => {
+      const info = hit.object.userData.pose;
+      if (!out.some((o) => o.name === info.name)) out.push(Object.assign({ dist: hit.distance }, info));
+    });
+    return out;
+  }
+
+  /* 손잡이를 눌렀을 때 고르는 관절(고리 = 그 관절 · 골반 네모 = root · 손발 네모 = 팔꿈치·무릎, 작업 209a 그대로). */
+  function poseJointOf(info) {
+    if (info.kind === "fk") return info.name;
+    if (info.kind === "root") return "root";
+    return (POSE_IK[info.name][0] === "arm" ? "elbow" : "knee") + POSE_IK[info.name][1];
+  }
+
+  // 작업 213: 마지막으로 "누르기만 한" 자리 {x, y, key, idx, joint} — 같은 자리를 다시 누르면 겹친 다음 손잡이(Maya 식).
+  let poseCycle = null;
+
+  /* 화면 좌표의 손잡이 고르기. 같은 자리 다시 누름(그 손잡이가 아직 골라져 있음)이면 cycling = true, hit = 지금 고른 것
+     (끌면 그것을 끈다), next = 누르기만 하고 떼면 고를 다음 것. 아니면 hit = next = 카메라에 가장 가까운 것. */
+  function posePickAt(clientX, clientY) {
+    const all = posePickAll(clientX, clientY);
+    if (!all.length) return null;
+    const key = all.map((o) => o.name).join(",");
+    const c = poseCycle;
+    const cycling = !!c && all.length > 1 && c.key === key && c.joint === edit.joint
+      && Math.abs(c.x - clientX) + Math.abs(c.y - clientY) < CLICK_SLOP_PX;
+    const idx = cycling ? c.idx : 0;
+    const nextIdx = cycling ? (idx + 1) % all.length : 0;
+    return { all, key, cycling, idx, nextIdx, hit: all[idx], next: all[nextIdx] };
   }
 
   /* 화면 좌표 아래 포즈 손잡이 {kind: "fk"|"ik"|"root", name}. 없으면 null. */
   function pickPose(clientX, clientY) {
-    if (!poseCtl || !poseGroup.visible || !poseEntry() || playing || recording) return null;
-    rayFrom(clientX, clientY);
-    const hits = raycaster.intersectObjects(poseCtl.picks, false);
-    return hits.length ? Object.assign({}, hits[0].object.userData.pose) : null;
+    const pk = posePickAt(clientX, clientY);
+    return pk ? { kind: pk.hit.kind, name: pk.hit.name } : null;
+  }
+
+  // 작업 213: 커서 옆 손잡이 이름표(한국어 · 겹치면 개수와 "다시 누르면 다음"). 녹화에는 안 나온다(캔버스 밖 HTML).
+  const poseTip = document.createElement("div");
+  poseTip.className = "vnew-previz-joint-tip";
+  poseTip.style.display = "none";
+  stage.appendChild(poseTip);
+
+  function showPoseTip(pk, clientX, clientY) {
+    if (!pk) {
+      if (poseTip.style.display !== "none") poseTip.style.display = "none";
+      return;
+    }
+    const n = pk.all.length;
+    poseTip.textContent = (POSE_NAMES_KO[pk.next.name] || pk.next.name)
+      + (n > 1 ? " · 겹침 " + (pk.nextIdx + 1) + "/" + n + " (다시 누르면 다음)" : "");
+    const rect = canvas.getBoundingClientRect ? canvas.getBoundingClientRect() : { left: 0, top: 0 };
+    poseTip.style.left = Math.round(clientX - rect.left + 14) + "px";
+    poseTip.style.top = Math.round(clientY - rect.top + 16) + "px";
+    poseTip.style.display = "";
+  }
+
+  /* 커서 아래 손잡이를 밝히고 이름표를 띄운다(바뀌었을 때만 다시 그린다). */
+  function setPoseHover(pk, clientX, clientY) {
+    const name = pk ? pk.next.name : null;
+    showPoseTip(pk, clientX, clientY);
+    if (name === edit.poseHover) return;
+    edit.poseHover = name;
+    if (!playing && !recording) renderAt(clockT);
+  }
+
+  /* 작업 213: 관절 고르기 판(패널) 목록 · Tab / Shift+Tab = 다음 / 앞 관절. */
+  function poseJointList() {
+    return POSE_PICK_ORDER.map((id) => ({ id, nameKo: POSE_NAMES_KO[id], ik: id.startsWith("wrist") || id.startsWith("ankle") }));
+  }
+
+  function stepPoseJoint(dir) {
+    if (!edit.pose) return false;
+    const n = POSE_PICK_ORDER.length;
+    const i = POSE_PICK_ORDER.indexOf(edit.joint);
+    const next = i < 0 ? (dir > 0 ? 0 : n - 1) : (i + (dir > 0 ? 1 : -1) + n) % n;
+    return selectJoint(POSE_PICK_ORDER[next]);
   }
 
   function poseInfo() {
@@ -2717,6 +2820,8 @@ function createController(host, options) {
     if (want === edit.pose && (want || edit.joint === null)) return edit.pose;
     edit.pose = want;
     edit.joint = null;
+    edit.poseHover = null; // 작업 213
+    poseCycle = null;
     if (!playing) renderAt(clockT);
     emitPose();
     return edit.pose;
@@ -2727,6 +2832,8 @@ function createController(host, options) {
     if (!edit.pose && edit.joint === null) return;
     edit.pose = false;
     edit.joint = null;
+    edit.poseHover = null; // 작업 213
+    poseCycle = null;
     emitPose();
   }
 
@@ -2820,8 +2927,9 @@ function createController(host, options) {
   /* 포즈 손잡이를 눌렀다: 고리 = 그 관절 고르기 + 돌리기 시작, 손·발 = IK 끌기, 골반 = rootY 끌기. */
   function beginPoseDrag(event) {
     if (edit.aim) return false;
-    const hit = pickPose(event.clientX, event.clientY);
-    if (!hit) return false;
+    const pk = posePickAt(event.clientX, event.clientY);
+    if (!pk) return false;
+    const hit = pk.hit; // 작업 213: 카메라에 가장 가까운 것(같은 자리 다시 누름이면 지금 고른 것)
     const entry = poseEntry();
     const cut = editCut();
     const id = edit.sel.id;
@@ -2830,7 +2938,7 @@ function createController(host, options) {
     const cam = viewCamera();
     cam.updateMatrixWorld(true);
     m.group.updateMatrixWorld(true);
-    const p = { kind: hit.kind, name: hit.name, cut, id, m, x0: event.clientX, y0: event.clientY, lx: event.clientX, ly: event.clientY };
+    const p = { kind: hit.kind, name: hit.name, cut, id, m, x0: event.clientX, y0: event.clientY, lx: event.clientX, ly: event.clientY, pick: pk };
     if (hit.kind === "fk") {
       selectJoint(hit.name);
       p.start = m.readJoint(hit.name);
@@ -2907,12 +3015,25 @@ function createController(host, options) {
     setCursor("");
     if (!p) return;
     if (moved) {
+      poseCycle = null;
       commitEdit(p.cut);
       renderAt(clockT);
       emit("edit", { cut: p.cut, kind: "commit" });
-    } else if (click && p.kind === "ik") {
+      return;
+    }
+    if (!click) {
+      poseCycle = null;
+      return;
+    }
+    // 작업 213: 같은 자리를 다시 누르기만 했으면 겹친 다음 손잡이(카메라에서 먼 쪽으로 돌아가며)
+    const pk = p.pick;
+    const chosen = pk && pk.cycling ? pk.next : null;
+    if (chosen) selectJoint(poseJointOf(chosen));
+    else if (p.kind === "ik") {
       selectJoint((POSE_IK[p.name][0] === "arm" ? "elbow" : "knee") + POSE_IK[p.name][1]);
     }
+    poseCycle = pk ? { x: p.x0, y: p.y0, key: pk.key, idx: chosen ? pk.nextIdx : pk.idx, joint: edit.joint } : null;
+    if (pk) setPoseHover(posePickAt(p.x0, p.y0), p.x0, p.y0);
   }
 
   /* 패널 편집(채널 박스·버튼). commit 이면 바로 한 단계, 아니면 다시 그리기만(패널이 잠시 뒤 commitEdit). */
@@ -3880,9 +4001,14 @@ function createController(host, options) {
   /* 고를 수 있는 인물 위에서는 손 모양 커서. */
   function hoverCursor(event) {
     if (recording || playing) return;
-    if (edit.pose && pickPose(event.clientX, event.clientY)) {
-      setCursor("pointer");
-      return;
+    if (edit.pose) {
+      // 작업 213: 커서 아래 고리를 밝히고 한국어 이름표를 띄운다(겹치면 다음에 고를 것).
+      const pk = posePickAt(event.clientX, event.clientY);
+      setPoseHover(pk, event.clientX, event.clientY);
+      if (pk) {
+        setCursor("pointer");
+        return;
+      }
     }
     const hit = pickAt(event.clientX, event.clientY);
     setCursor(hit && hit.type === "actor" && !edit.aim ? "grab" : "");
@@ -4083,6 +4209,8 @@ function createController(host, options) {
       redo();
     } else if (mod || event.altKey) {
       done = false;
+    } else if ((code === "Tab" || key === "tab") && edit.pose) {
+      stepPoseJoint(event.shiftKey ? -1 : 1); // 작업 213: 포즈 모드 Tab / Shift+Tab = 다음 / 앞 관절(포커스는 뷰포트에 남는다)
     } else if (nudgeKey(event, code, key)) {
       done = true;
     } else if (is("q")) {
@@ -4135,6 +4263,11 @@ function createController(host, options) {
   }
   canvas.addEventListener("pointercancel", onPointerCancel);
   stage.addEventListener("blur", onStageBlur);
+  // 작업 213: 뷰포트를 벗어나면 고리 밝힘·이름표를 거둔다.
+  function onPointerLeave() {
+    if (!drag.on) setPoseHover(null);
+  }
+  canvas.addEventListener("pointerleave", onPointerLeave);
 
   function onVisibility() {
     // 탭이 숨겨지면 재생을 멈춘다(브라우저가 rAF 를 멈춰 시각이 어긋나는 것 방지).
@@ -4152,6 +4285,7 @@ function createController(host, options) {
     canvas.removeEventListener("wheel", onWheel);
     stage.removeEventListener("keydown", handleKey);
     canvas.removeEventListener("pointercancel", onPointerCancel);
+    canvas.removeEventListener("pointerleave", onPointerLeave);
     stage.removeEventListener("blur", onStageBlur);
     if (wheelTimer) window.clearTimeout(wheelTimer);
     if (wheelHintTimer) window.clearTimeout(wheelHintTimer);
@@ -4307,6 +4441,9 @@ function createController(host, options) {
     get poseJoint() {
       return edit.joint;
     },
+    // 작업 213: 관절 고르기 판 · Tab 순서
+    poseJointList,
+    stepPoseJoint,
     jointDeg,
     setJointDeg,
     rootYOf,
@@ -4334,7 +4471,8 @@ function createController(host, options) {
     _editor: { helpers, proxy, workCamera, shotCamera: camera, stage, canvas, overlay, wheelHint,
       get gizmo() { return gizmo; }, get orbit() { return orbit; }, poseGroup, get poseControls() { return poseCtl; },
       get scene() { return current ? current.scene : null; }, ghostGroup, trailGroup, get ghosts() { return ghostPool; },
-      get live() { return edit.live; }, get undoDepth() { return edit.undo.length; } },
+      get live() { return edit.live; }, get undoDepth() { return edit.undo.length; },
+      posePickAll, poseTip, get poseHover() { return edit.poseHover; } },
     destroy,
   };
 }

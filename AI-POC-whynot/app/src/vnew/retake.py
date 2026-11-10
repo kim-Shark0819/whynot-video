@@ -3029,7 +3029,8 @@ def _result_edit_line(change_en: str, korean: str, *, swapped: bool) -> str:
 
 
 def _compose_prompt(base_prompt: str, template_prompt: str, rng: dict, cell_seconds: float, *, request_ko: str, extra_ko: str,
-                    change_en: str, max_bytes: int, result: bool = False, range_line: str = "") -> tuple[str, dict]:
+                    change_en: str, max_bytes: int, result: bool = False, range_line: str = "",
+                    edit_lines: list[str] | None = None) -> tuple[str, dict]:
     """compose 프롬프트(LLM 0). 반환 (프롬프트, {refs, labels, swapped, cut}).
 
     1. 기준 프롬프트 줄 그대로. 앞선 compose 줄은 RANGE·CONTEXT 를 빼고 EDIT 를 EARLIER EDIT(keep) 로 둔다(그 변경은 이미 반영돼 있다).
@@ -3045,14 +3046,19 @@ def _compose_prompt(base_prompt: str, template_prompt: str, rng: dict, cell_seco
     작업 193: result 면 EDIT 바로 뒤에 COMPOSE_RESULT_VIDEO_LINE(@Video1 = 지금 결과 영상), 이전 프롬프트(정의 줄을 바꾼 뒤)는 _result_context 로
     @Video1 문장·겹친 줄·문장을 뺀다. REFERENCES 조각에서도 @Video1 조각은 뺀다. meta.cleaned = 뺀 수.
     작업 194: range_line 을 주면(result, 여러 클립 조각) RANGE 줄은 늘 그 줄이다(칸 전체를 덮어도).
+    작업 212 fix1: edit_lines 를 주면(result, ⑥ 대사 다시 만들기) 머리 EDIT 줄(_result_edit_line) 대신 그 줄들(첫 줄 = EDIT, 정의 줄을 바꿨으면
+    첫 줄에 193 꼬리). 그 줄들에 소리 규칙이 있으면 211 짧은 형 줄을 더하지 않는다. 주지 않으면(⑦) 지금과 같다.
     """
+    edit_lines = [line for line in (edit_lines or []) if line]
     allowed = _refs(template_prompt)
     t_lines = _normalize_prompt(template_prompt).split("\n")
     # 작업 211: 기준 프롬프트의 211 전 소리 문장(앰비언트) → 대사만 규칙. 머리 줄(EDIT 등) 자리를 빼고 상한을 넘으면 짧은 형.
-    head_room = _bytes_of(request_ko) + _bytes_of(extra_ko) + _bytes_of(change_en) + _bytes_of(range_line) + COMPOSE_HEAD_RESERVE
+    head_room = (_bytes_of(request_ko) + _bytes_of(extra_ko) + _bytes_of(change_en) + _bytes_of(range_line) + COMPOSE_HEAD_RESERVE
+                 + sum(_bytes_of(line) for line in edit_lines))
     base_prompt = generate.dialogue_audio_rewrite(_normalize_prompt(base_prompt), max(1, int(max_bytes) - head_room) if max_bytes else 0)
     audio_line = ""
-    if generate.has_audio_rule(template_prompt) and not generate.has_audio_rule(base_prompt):
+    if generate.has_audio_rule(template_prompt) and not generate.has_audio_rule(base_prompt) \
+            and not generate.has_audio_rule("\n".join(edit_lines)):
         # 기준에 소리 규칙이 없고(211 전 vibe 프롬프트 등) 이 모델 형식 본보기에는 있으면 짧은 형 1줄(머리 — 자르지 않는다).
         silent = generate.AUDIO_SILENCE_ONLY in template_prompt or generate.AUDIO_SILENCE_ONLY_COMPACT in template_prompt
         audio_line = generate.audio_rule(not silent, compact=True)
@@ -3116,8 +3122,11 @@ def _compose_prompt(base_prompt: str, template_prompt: str, rng: dict, cell_seco
     change = f"{change_en.rstrip()} (Korean original: {korean})" if change_en else korean
     labels_base = [name for name in _labels(base_prompt) if name not in COMPOSE_LABELS]
     if result:
-        head = [_result_edit_line(change_en, korean, swapped=swapped),
-                COMPOSE_RESULT_VIDEO_LINE]  # 작업 193: @Video1 정의는 이 한 줄뿐
+        if edit_lines:  # 작업 212 fix1: ⑥ 대사 다시 만들기의 EDIT 줄들
+            head = [edit_lines[0] + (" " + COMPOSE_TAGS_NOTE_RESULT if swapped else ""), *edit_lines[1:], COMPOSE_RESULT_VIDEO_LINE]
+        else:
+            head = [_result_edit_line(change_en, korean, swapped=swapped),
+                    COMPOSE_RESULT_VIDEO_LINE]  # 작업 193: @Video1 정의는 이 한 줄뿐
         if extra_ko:
             head.append(COMPOSE_EXTRA_HEAD + _keep_refs(_quote_user(_one_line(extra_ko)), allowed))
         if range_line:  # 작업 194: 여러 클립 조각 — "@Video1 is the current timeline of cuts a–b (N clips, X.Xs)"
@@ -3172,7 +3181,7 @@ def _result_pick(pick: dict, gen: dict, target: dict) -> dict:
     return pick
 
 
-def compose(owner: str, pid: str, mid: str, payload) -> dict:
+def compose(owner: str, pid: str, mid: str, payload, *, edit_lines=None) -> dict:
     """POST /p/<pid>/edit/retake/<mid>/compose {requestKo, extraKo?, model?, in, out}(작업 191). 범위는 늘 고른 컷 구간(in·out = 재료 원본 초).
 
     순서: scope full 등(400 RetakeBadRange) → 바디(400 RetakeBadRequest) → in·out(400 RetakeBadRange) → 대상(404·409) → 기준(409 RetakeNoPrompt)
@@ -3181,6 +3190,8 @@ def compose(owner: str, pid: str, mid: str, payload) -> dict:
     영상 모델·원장(영상) 호출 0 — 제출은 기존 submit.
     작업 194: in·out 대신 segments [{sourceKey, in, out}](같은 칸 원본·버전 파일 초, 타임라인 순서, 최대 SEGMENTS_MAX)를 받으면 대상은 그 칸
     원본(v1), 길이 = 조각 합, RANGE 줄 = _segments_range_line, 초안 segments(10절).
+    작업 212 fix1: edit_lines(change_en, max_bytes) → [줄] 을 주면(⑥ line_redo — HTTP 바디로는 못 준다) 번역 뒤 그 함수가 머리 EDIT 줄들을
+    만든다(_compose_prompt edit_lines). 주지 않으면(⑦) 지금과 같다.
     """
     where = "vnew.retake.compose"
     payload = payload if isinstance(payload, dict) else {}
@@ -3236,9 +3247,13 @@ def compose(owner: str, pid: str, mid: str, payload) -> dict:
     real = target["variant"] == "real"
     change_en = "" if timed_out else _clean_change_en((box["payload"] or {}).get("changeEn"), _refs(template["prompt"]), real=real)
     max_bytes = int(pick["plan"].get("maxBytes") or 0)
+    own_edit = None
+    if edit_lines is not None:  # 작업 212 fix1: ⑥ 대사 다시 만들기 — 한 줄에 줄바꿈이 있으면 나눈다
+        own_edit = [part.strip() for item in (edit_lines(change_en, max_bytes) or []) for part in str(item or "").split("\n")
+                    if part.strip()]
     prompt, meta = _compose_prompt(base["prompt"], template["prompt"], rng, float(setup["cellSeconds"]), request_ko=request_ko,
                                    extra_ko=extra_ko, change_en=change_en, max_bytes=max_bytes, result=True,
-                                   range_line=_segments_range_line(rng, len(segments)) if segments else "")
+                                   range_line=_segments_range_line(rng, len(segments)) if segments else "", edit_lines=own_edit)
     rules = {"maxBytes": max_bytes, "real": real, "refs": meta["refs"], "labels": meta["labels"], "against": "template"}
     problems = check_prompt(prompt, base["prompt"], rules)
     stamp = now_iso()

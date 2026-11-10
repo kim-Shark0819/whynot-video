@@ -5483,6 +5483,20 @@
     }
   }
 
+  /* 작업 213: 편집 패널(스크롤 칸) 안에서만 그 카드가 보이게 굴린다. scrollIntoView 는 페이지도 굴려 왼쪽 뷰포트·키 줄이 움직였다. */
+  function previzScrollPanelTo(panel, card) {
+    if (!panel || !card || !panel.getBoundingClientRect || !card.getBoundingClientRect) return;
+    var pr = panel.getBoundingClientRect();
+    var cr = card.getBoundingClientRect();
+    var pad = 8;
+    if (cr.top < pr.top) {
+      panel.scrollTop += cr.top - pr.top - pad;
+    } else if (cr.bottom > pr.bottom) {
+      panel.scrollTop += Math.min(cr.top - pr.top - pad, cr.bottom - pr.bottom + pad);
+    }
+  }
+
+
   /* 작업 209b: [포즈 모음] 사용자 저장 포즈 — 이 브라우저의 localStorage 에 [{id, nameKo, rig}] (최대 40개).
      읽기·쓰기는 try/catch(저장소를 못 쓰면 이번 화면에서만). rig = 15개 관절 + rootY(서기 기준). */
   var PREVIZ_POSE_LIBRARY_KEY = "vnew-previz-pose-library";
@@ -5619,6 +5633,19 @@
   var PREVIZ_LENS_MIN = 6;
   var PREVIZ_LENS_MAX = 144;
   var PREVIZ_LENS_PRESETS = [18, 24, 35, 50, 85, 135];
+  /* 작업 213: 키 줄 — 마름모를 이만큼(px, vnew-previz.js CLICK_SLOP_PX 와 같다) 넘게 끌면 스크러버 끌기 · 스크러버 손잡이 반폭(px). */
+  var PREVIZ_KEY_CLICK_SLOP_PX = 4;
+  var PREVIZ_SCRUB_THUMB_INSET_PX = 8;
+  /* 작업 213: 관절 고르기 판(화면에서 마주 본 인물 — 인물의 오른쪽이 왼편). [관절, 줄, 칸, 글]. 손·발(IK) = 손목·발목. */
+  var PREVIZ_JOINT_PICKER = [
+    ["head", 1, 2, "머리"], ["neck", 2, 2, "목"],
+    ["shoulderR", 3, 1, "오른어깨"], ["spine", 3, 2, "가슴"], ["shoulderL", 3, 3, "왼어깨"],
+    ["elbowR", 4, 1, "오른팔꿈치"], ["elbowL", 4, 3, "왼팔꿈치"],
+    ["wristR", 5, 1, "오른손 (IK)"], ["root", 5, 2, "골반"], ["wristL", 5, 3, "왼손 (IK)"],
+    ["hipR", 6, 1, "오른엉덩이"], ["hipL", 6, 3, "왼엉덩이"],
+    ["kneeR", 7, 1, "오른무릎"], ["kneeL", 7, 3, "왼무릎"],
+    ["ankleR", 8, 1, "오른발 (IK)"], ["ankleL", 8, 3, "왼발 (IK)"]
+  ];
   var PREVIZ_ROLL_MAX = 45;
   var PREVIZ_CAMERA_MARGIN_M = 3;
   var PREVIZ_ACTOR_WALL_M = 0.2;
@@ -6536,8 +6563,9 @@
         info.textContent = st.aim
           ? "인물을 누르세요(Esc 취소)"
           : st.pose
-            ? "포즈: 고리 끌기 = 가로 돌리기 · 세로 숙이기 · Shift 기울이기 · 손발 네모 끌기(Alt 앞뒤) · 골반 네모 = 높이 · Esc 끝"
+            ? "포즈: 고리 끌기 = 가로 돌리기 · 세로 숙이기 · Shift 기울이기 · 손발 네모 끌기(Alt 앞뒤) · 골반 네모 = 높이 · Tab 다음 관절 · Esc 끝"
             : "렌즈 " + ci.lensMm + "mm · 화각 " + ci.fov + "° · 카메라 높이 " + ci.heightM.toFixed(2) + "m";
+        info.title = info.textContent; // 작업 213: 한 줄 칸(길면 … — 전체 글은 툴팁)
       }
       return { root: root, sync: sync };
     }
@@ -6559,11 +6587,22 @@
         if (previzCtl) previzCtl.scrubKey(parseFloat(scrub.value) || 0);
       });
       // 작업 209b: 스크러버 위 마름모 — 카메라 키(파랑, 시작·끝)와 고른 인물의 자세 키(주황). 누르면 그 키로 간다.
+      // 작업 213: 마름모는 트랙 바로 위 얇은 줄(스크러버 손잡이를 가리지 않는다). 마름모를 누른 채 움직이면 스크러버를 끈다.
       var scrubWrap = el("div", "vnew-previz-keys-track");
-      scrubWrap.appendChild(scrub);
       var diamonds = el("div", "vnew-previz-keys-diamonds");
       scrubWrap.appendChild(diamonds);
+      scrubWrap.appendChild(scrub);
       root.appendChild(scrubWrap);
+      // 작업 213: 키 줄 Home / End = 컷 시작 / 끝.
+      root.addEventListener("keydown", function (event) {
+        var k = event && event.key;
+        if ((k !== "Home" && k !== "End") || !previzCtl) return;
+        var t = event.target;
+        if (t && t !== scrub && /^(INPUT|TEXTAREA|SELECT)$/.test(String(t.tagName || "").toUpperCase())) return;
+        if (event.preventDefault) event.preventDefault();
+        previzCtl.scrubKey(k === "Home" ? 0 : 1);
+        scrub.value = k === "Home" ? "0" : "1";
+      });
       var note = el("span", "vnew-hint vnew-previz-keys-note", "");
       root.appendChild(note);
       // 작업 209b: 자세 키 줄 — [◀ 키](,) [키 찍기 (S)] [키 ▶](.) [키 지우기] · 안내(키 사이에서 고치면 S 로 저장).
@@ -6577,13 +6616,55 @@
       root.appendChild(poseRow);
       void startBtn;
       void endBtn;
+      // 작업 213: 스크러버 위 x → u(손잡이 반폭만큼 안쪽 — 마름모 줄도 같은 안쪽에서 그린다).
+      function scrubUAt(clientX) {
+        var r = scrub.getBoundingClientRect();
+        var w = Math.max(1, r.width - 2 * PREVIZ_SCRUB_THUMB_INSET_PX);
+        return Math.max(0, Math.min(1, (clientX - r.left - PREVIZ_SCRUB_THUMB_INSET_PX) / w));
+      }
+      // 작업 213: 마름모 누름 — 움직이지 않고 떼면 그 키로(onClick), CLICK_SLOP 넘게 움직이면 그 자리부터 스크러버 끌기.
+      // sync 가 끄는 동안 마름모를 다시 그리므로 움직임·뗌은 window 에서 받는다.
+      var diamondDrag = null;
+      function endDiamondDrag() {
+        diamondDrag = null;
+        window.removeEventListener("pointermove", onDiamondMove);
+        window.removeEventListener("pointerup", onDiamondUp);
+        window.removeEventListener("pointercancel", endDiamondDrag);
+      }
+      function onDiamondMove(event) {
+        var d = diamondDrag;
+        if (!d) return;
+        if (!d.moved && Math.abs(event.clientX - d.x) + Math.abs(event.clientY - d.y) < PREVIZ_KEY_CLICK_SLOP_PX) return;
+        d.moved = true;
+        if (event.preventDefault) event.preventDefault();
+        var u = scrubUAt(event.clientX);
+        scrub.value = String(u);
+        if (previzCtl) previzCtl.scrubKey(u);
+      }
+      function onDiamondUp() {
+        var d = diamondDrag;
+        endDiamondDrag();
+        if (d && !d.moved && previzCtl) d.onClick();
+      }
       function diamond(u, kind, title, onClick, selected) {
         var d = el("button", "vnew-previz-key-diamond is-" + kind + (selected ? " is-selected" : ""), "");
         d.type = "button";
-        d.title = title;
+        d.title = title + " · 누른 채 끌면 스크러버";
         d.style.left = (Math.max(0, Math.min(1, u)) * 100) + "%";
+        d.addEventListener("pointerdown", function (event) {
+          if (event.button !== undefined && event.button !== 0) return;
+          if (event.preventDefault) event.preventDefault();
+          if (event.stopPropagation) event.stopPropagation();
+          endDiamondDrag();
+          diamondDrag = { x: event.clientX, y: event.clientY, moved: false, onClick: onClick };
+          window.addEventListener("pointermove", onDiamondMove);
+          window.addEventListener("pointerup", onDiamondUp);
+          window.addEventListener("pointercancel", endDiamondDrag);
+        });
         d.addEventListener("click", function (event) {
           if (event && event.stopPropagation) event.stopPropagation();
+          // 마우스 누름은 pointerdown/up 이 다룬다. 여기는 키보드(Enter·Space, detail 0)만.
+          if (event && event.detail) return;
           if (previzCtl) onClick();
         });
         diamonds.appendChild(d);
@@ -6620,6 +6701,8 @@
               : count
                 ? "키 " + count + "/" + pk.max + " · 이 키를 고치는 중"
                 : "키가 없으면 이 컷 내내 같은 자세입니다 · 키 찍기(S)로 움직임을 만듭니다";
+        poseHint.title = poseHint.textContent; // 작업 213: 한 줄 칸(길면 … — 전체 글은 툴팁)
+        note.title = note.textContent;
       }
       return { root: root, sync: sync };
     }
@@ -6668,7 +6751,8 @@
         selected = sel;
         renderCutPanel();
         var card = right.querySelector(".vnew-previz-edit-card.is-selected");
-        if (card && card.scrollIntoView) card.scrollIntoView({ block: "nearest" });
+        // 작업 213: scrollIntoView 는 페이지까지 굴려 키 줄·스크러버가 움직였다 — 패널 안만 굴린다.
+        if (card) previzScrollPanelTo(right, card);
       });
       // 작업 209a: 포즈 모드를 켜고 끄거나 관절을 고르면 채널 박스를 다시 그린다.
       if (previzCtl.onPose) {
@@ -7002,12 +7086,13 @@
         stepButton(row, "+" + PREVIZ_JOINT_STEP_DEG, function () { onStep(PREVIZ_JOINT_STEP_DEG); });
         box.appendChild(row);
       }
+      if (ctl && ctl.poseMode && ctl.poseJointList) box.appendChild(previzJointPicker(ctl, joint));
       if (!ctl) {
         box.appendChild(el("p", "vnew-hint", "뷰포트가 준비되면 관절을 직접 잡을 수 있습니다."));
       } else if (!ctl.poseMode) {
         box.appendChild(el("p", "vnew-hint", "[포즈 (P)]를 켜고 몸의 고리를 누르면 관절을 고릅니다."));
       } else if (!joint) {
-        box.appendChild(el("p", "vnew-hint", "고리를 누르면 그 관절을 고릅니다. 손·발 네모는 끌어서 팔다리를 굽히고, 골반 네모는 위아래로 끕니다."));
+        box.appendChild(el("p", "vnew-hint", "위 판의 단추나 고리를 누르면(Tab = 다음 관절) 그 관절을 고릅니다. 손·발 네모는 끌어서 팔다리를 굽히고, 골반 네모는 위아래로 끕니다."));
       } else if (joint === "root") {
         box.appendChild(el("p", "vnew-previz-pose-joint", "관절: " + PREVIZ_JOINT_KO.root));
         var readCm = function () { return Math.round(ctl.rootYOf(ca.id, cut) * 1000) / 10; };
@@ -7062,6 +7147,31 @@
       box.appendChild(el("p", "vnew-hint vnew-previz-pose-note", PREVIZ_POSE_NOTE));
       if (ctl && ctl.posePresets) box.appendChild(previzPoseLibrary(cut, ca));
       return box;
+    }
+
+    /* 작업 213: 관절 고르기 판(Maya 아웃라이너·채널 박스 식) — 몸 모양 단추 격자. 누르면 그 관절을 고르고 뷰포트 고리가 밝아진다.
+       목록은 편집기(poseJointList) 순서와 같고 Tab / Shift+Tab 도 같은 순서로 돈다. */
+    function previzJointPicker(ctl, joint) {
+      var grid = el("div", "vnew-previz-joint-picker");
+      grid.setAttribute("role", "group");
+      grid.setAttribute("aria-label", "관절 고르기");
+      var known = {};
+      ctl.poseJointList().forEach(function (j) {
+        known[j.id] = j;
+      });
+      PREVIZ_JOINT_PICKER.forEach(function (spec) {
+        if (!known[spec[0]]) return;
+        var b = el("button", "outline-button vnew-previz-joint-btn" + (joint === spec[0] ? " is-on" : ""), spec[3]);
+        b.type = "button";
+        b.title = (known[spec[0]].nameKo || spec[3]) + " 고르기 · 뷰포트에서 Tab / Shift+Tab = 다음 / 앞 관절";
+        b.style.gridRow = String(spec[1]);
+        b.style.gridColumn = String(spec[2]);
+        b.addEventListener("click", function () {
+          if (previzCtl && previzCtl.selectJoint) previzCtl.selectJoint(spec[0]);
+        });
+        grid.appendChild(b);
+      });
+      return grid;
     }
 
     /* 작업 209b: [포즈 모음] — 기본 포즈(목록 자세·손 동작에서 만든 관절 값)와 이 브라우저에 저장한 포즈. 이름을 누르면 고른 인물

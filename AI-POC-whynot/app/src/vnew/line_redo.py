@@ -30,8 +30,10 @@
 generate.PREVIZ_MIN_CLIP_S, 그보다 짧아도 그 길이로 과금된다)로 줄 가운데를 기준으로 늘리고, 컷·조각 경계가 SNAP_S 안이면 경계에 붙인다.
 
 외부 호출 래퍼(검사가 바꾼다): _llm · _compose · _submit · _retake_state · _download · _upload · _probe · _splice_file · _spawn.
-generate.py · retake.py · shot_brief.py 는 고치지 않는다(호출만 한다). retake 초안 프롬프트의 이전 프롬프트(CONTEXT) 부분에 남은 옛 대사는
-_retarget 가 새 대사로 바꾼다(제출 전 — retake.submit 는 사용자가 확인한 프롬프트를 그대로 검사·제출한다).
+generate.py · shot_brief.py 는 고치지 않는다(호출만 한다). retake.py 는 compose 의 edit_lines 인자만 쓴다(작업 212 fix1 — ⑦ 은 그대로).
+프롬프트: 머리 EDIT 줄은 고정 틀(redo_edit_lines — 입·얼굴 연기·목소리만, 구도·카메라 그대로, 새 대사는 한국어로만, 영어는 (meaning: …) 뜻)
++ 소리 규칙 한 줄, EXTRA 줄은 없다. 제출 전 _finish_prompt 가 이전 프롬프트(CONTEXT) 쪽의 겹친 소리 규칙·앞선 EDIT 줄을 빼고 옛 대사를 새 대사로
+바꾼다(retake.submit 는 사용자가 확인한 프롬프트를 그대로 검사·제출한다).
 """
 
 from __future__ import annotations
@@ -39,6 +41,7 @@ from __future__ import annotations
 import copy
 import logging
 import os
+import re
 import secrets
 import tempfile
 import threading
@@ -77,6 +80,17 @@ OUTDATED_TEXT = "목소리 맞춤을 다시 반영해 주세요"
 NO_AUDIO_TEXT = "새 영상에 소리가 없어 그 구간은 원래 소리를 썼습니다. 목소리 맞춤으로 새 대사 목소리를 넣어 주세요."
 TAKE_REDO_TEXT = ("대본에 반영한 대사는 ⑤ [바뀐 테이크만 다시 만들기]로 그 테이크 전체를 다시 만들 수 있습니다. "
                   "촬영 지시서를 먼저 고친 뒤 금액을 보여 줍니다.")
+# 작업 212 fix1: 대사 다시 만들기 프롬프트(고정 틀 — redo_edit_lines). PROMPT_V = 견적 작업의 프롬프트 꼴. 다른 꼴(옛 견적 · 실패한 작업)은
+# 시작하지 않고 견적부터 다시 받는다(새 틀로 다시 만든다 — 저장된 옛 프롬프트를 다시 보내지 않는다).
+PROMPT_V = 2
+LINE_EDIT_HEAD = "EDIT: Edit @Video1 only in the mouth, face acting and voice of "
+LINE_EDIT_KEEP = "Keep framing, camera, composition, people, positions, costume, lighting and timing identical to @Video1."
+LINE_SPEAK = "Speak it in Korean exactly as written; never speak English."
+LINE_INNER = "Inner voice: the mouth stays closed; the Korean line is heard as an inner voice."
+FULL_AUDIO_MIN_BYTES = 2000  # 프롬프트 상한이 이보다 작으면 소리 규칙은 짧은 형
+GLOSS_MAX = 160  # 영어 뜻 글자
+_QUOTED_RE = re.compile(r"\"([^\"\n]{1,400})\"|\u201c([^\u201d\n]{1,400})\u201d")
+_HANGUL_RE = re.compile(r"[\u1100-\u11ff\u3130-\u318f\uac00-\ud7a3]")
 _SPLICE_SEM = threading.BoundedSemaphore(1)
 _threads: dict[str, threading.Thread] = {}
 _threads_guard = threading.Lock()
@@ -134,8 +148,8 @@ def _llm(*, system_text: str, blocks: list[dict], model: str) -> tuple[dict, dic
         where="vnew.sound.lines.suggest", model=model)
 
 
-def _compose(owner: str, pid: str, mid: str, payload: dict) -> dict:
-    return retake.compose(owner, pid, mid, payload)
+def _compose(owner: str, pid: str, mid: str, payload: dict, edit_lines=None) -> dict:
+    return retake.compose(owner, pid, mid, payload, edit_lines=edit_lines)
 
 
 def _submit(owner: str, pid: str, mid: str, payload: dict) -> dict:
@@ -267,31 +281,92 @@ def line_range(start: float, end: float, pieces: list[dict], *, min_s: float = M
             "in": _r3(in0 + (lo - t0) * rate), "out": _r3(in0 + (hi - t0) * rate), "padded": padded, "snapped": snapped}
 
 
-def redo_request(override: dict) -> tuple[str, str]:
-    """retake compose 에 줄 (수정 사항 한국어, 추가 프롬프트). 추가 프롬프트는 영어 고정 문장 — 그림·카메라·사람·옷·타이밍 그대로,
-    새 대사(실제 말: 그 사람이 말한다 / 속마음: 입은 다문 채 목소리만), 말투 메모, 작업 211 대사만 소리 규칙. retake.EXTRA_MAX 안."""
-    speaker = str(override.get("speaker") or "").strip() or "the speaker"
+def _prompt_text(value, limit: int) -> str:
+    """프롬프트에 넣는 사용자 글(대사·말투·뜻): 한 줄, 제어 문자·주소 제거, 꺾쇠 바꿈, 큰따옴표 → 작은따옴표(따옴표 묶음이 깨지지 않게),
+    참고 표시(@…)는 글로."""
+    text = retake._quote_user(retake._clean_user(value))  # noqa: SLF001
+    text = re.sub(r"\s+", " ", text.replace('"', "'").replace("\u201c", "'").replace("\u201d", "'"))
+    return re.sub(r"@(?=\w)", "", text).strip()[:limit]
+
+
+def _gloss(change_en: str) -> str:
+    """retake 번역 한 문장(초안과 같은 LLM 호출)에서 새 대사의 영어 뜻 = 첫 따옴표 묶음. 없거나 한글이 남으면 ""(뜻 없이 한국어만)."""
+    match = _QUOTED_RE.search(str(change_en or ""))
+    text = (match.group(1) or match.group(2) or "") if match else ""
+    if not text or _HANGUL_RE.search(text):
+        return ""
+    return _prompt_text(text.replace("(", ",").replace(")", ","), GLOSS_MAX).strip(" ,;:.")
+
+
+def redo_request(override: dict) -> str:
+    """retake compose 의 수정 사항(한국어 — ⑦ 기록·번역 입력). 번역의 첫 따옴표 묶음이 새 대사의 영어 뜻이 된다(_gloss)."""
+    speaker = str(override.get("speaker") or "").strip() or "말하는 사람"
     text = str(override.get("textKo") or "").strip()
     delivery = str(override.get("deliveryKo") or "").strip()
-    thought = bool(override.get("thought"))
-    if thought:
+    if override.get("thought"):
         request_ko = f"{speaker}의 속마음 대사를 바꾼다. 새 속마음: \"{text}\". 입은 다문 채 목소리만 들린다."
-        line_en = (f"{speaker}'s inner voice is heard saying the Korean line \"{text}\" as a voice-over; "
-                   f"{speaker}'s mouth stays closed (no lip movement).")
     else:
         request_ko = f"{speaker}의 대사를 바꾼다. 새 대사: \"{text}\". 입 모양·표정·연기·목소리를 새 대사에 맞춘다."
-        line_en = f"{speaker} now says the Korean line \"{text}\"; lip-sync, facial acting and voice match the new line."
     if delivery:
         request_ko += f" 말투: {delivery}."
-    keep = "Keep the picture, camera, people, costume and timing identical."
-    note = f" Delivery (Korean note): {delivery}." if delivery else ""
-    for rule in (generate.audio_rule(True, inner=thought), generate.audio_rule(True, compact=True)):
-        extra = f"{keep} {line_en}{note} {rule}"
-        if len(extra) <= retake.EXTRA_MAX:
-            break
-    if len(extra) > retake.EXTRA_MAX:
-        extra = f"{keep} {line_en} {generate.audio_rule(True, compact=True)}"
-    return request_ko[: retake.REQUEST_MAX], extra[: retake.EXTRA_MAX]
+    return request_ko[: retake.REQUEST_MAX]
+
+
+def redo_edit_lines(override: dict, change_en: str = "", max_bytes: int = 0) -> list[str]:
+    """작업 212 fix1: 대사 다시 만들기 EDIT 줄(고정 틀 — ⑦ 의 "구도가 바뀌어도 끝까지 적용" 머리를 쓰지 않는다)과 소리 규칙 한 줄.
+
+    EDIT = 입·얼굴 연기·목소리만 고침 · 구도·카메라·사람·자리·옷·조명·타이밍 그대로 · 새 대사는 한국어 따옴표로만(영어는 (meaning: …) 안의 뜻)
+    · 영어로 말하지 않음 · 속마음이면 입 다묾 · 말투 메모(한국어 따옴표, 말하지 않음). 소리 = 작업 211 대사만 규칙(속마음이면 inner 형,
+    상한이 FULL_AUDIO_MIN_BYTES 보다 작으면 짧은 형)."""
+    speaker = _prompt_text(override.get("speaker"), sound.MAX_SPEAKER_LEN) or "the speaker"
+    text = _prompt_text(override.get("textKo"), TEXT_MAX)
+    delivery = _prompt_text(override.get("deliveryKo"), DELIVERY_MAX)
+    thought = bool(override.get("thought"))
+    gloss = _gloss(change_en)
+    meaning = f" (meaning: {gloss})" if gloss else ""
+    parts = [f"{LINE_EDIT_HEAD}{speaker}. {LINE_EDIT_KEEP}", f"{speaker} now says, in Korean: \"{text}\"{meaning}. {LINE_SPEAK}"]
+    if thought:
+        parts.append(LINE_INNER)
+    if delivery:
+        parts.append(f"Acting note in Korean (do not speak it): '{delivery}'.")
+    compact = bool(max_bytes) and int(max_bytes) < FULL_AUDIO_MIN_BYTES
+    return [" ".join(parts), generate.audio_rule(True, compact=compact, inner=thought)]
+
+
+_AUDIO_RULES = tuple(sorted({generate.AUDIO_DIALOGUE_ONLY, generate.AUDIO_DIALOGUE_ONLY_SPOKEN, generate.AUDIO_DIALOGUE_ONLY_COMPACT,
+                             generate.AUDIO_SILENCE_ONLY, generate.AUDIO_SILENCE_ONLY_COMPACT}, key=len, reverse=True))
+
+
+def audio_rule_count(prompt: str) -> int:
+    return sum(str(prompt or "").count(rule) for rule in _AUDIO_RULES)
+
+
+def _finish_prompt(prompt: str, old_line: str, new_line: str, max_bytes: int) -> str:
+    """retake 초안 → 제출할 프롬프트. 머리(CONTEXT 줄까지)는 그대로, 이전 프롬프트(CONTEXT 뒤) 쪽만 고친다.
+    1. 앞선 대사 다시 만들기의 EDIT 줄(이 판 결과를 다시 고칠 때 이전 프롬프트에 남는다 — ⑦ 의 EDIT 는 retake 가 EARLIER EDIT 로 바꾼다)은 뺀다.
+    2. 소리 규칙은 한 번만: 머리에 있으면 뒤의 것을 지우고, 없으면 뒤의 첫 것만 둔다(지워서 빈 줄은 뺀다).
+    3. 옛 대사 → 새 대사(_retarget — 머리의 새 대사 글은 건드리지 않는다). 바이트 상한을 넘으면 3 은 하지 않는다."""
+    lines = str(prompt or "").split("\n")
+    at = lines.index(retake.COMPOSE_CONTEXT_LINE) + 1 if retake.COMPOSE_CONTEXT_LINE in lines else len(lines)
+    head, rest = lines[:at], [line for line in lines[at:] if not line.startswith("EDIT:")]
+    seen = audio_rule_count("\n".join(head)) > 0
+    kept: list[str] = []
+    for line in rest:
+        if seen:
+            stripped = line
+            for rule in _AUDIO_RULES:
+                stripped = stripped.replace(rule, "")
+            line = re.sub(r" {2,}", " ", stripped).strip() if stripped != line else line
+        elif audio_rule_count(line):
+            seen = True
+        if line.strip():
+            kept.append(line)
+    context = "\n".join(kept)
+    moved = _retarget(context, old_line, new_line, 0)
+    out = "\n".join(head + ([moved] if moved else []))
+    if max_bytes and len(out.encode("utf-8")) > int(max_bytes):
+        out = "\n".join(head + ([context] if context else []))
+    return out
 
 
 def _retarget(prompt: str, old_line: str, new_line: str, max_bytes: int) -> str:
@@ -753,17 +828,18 @@ def quote(owner: str, pid: str, payload) -> dict:
     pieces = _pieces(owner, pid, gen_id, plan, gen, variant, source, duration)
     rng = line_range(float(line.get("start") or 0.0), float(line.get("end") or 0.0), pieces)
     mid = edit.media_id(rng["sourceKey"])
-    request_ko, extra_ko = redo_request(override)
+    request_ko = redo_request(override)
+    extra_ko = ""  # 작업 212 fix1: 새 대사·유지·소리 규칙은 EDIT 줄들(redo_edit_lines)에 있다 — EXTRA 줄은 없다
     body = {"requestKo": request_ko, "extraKo": extra_ko, "scope": "range", "in": rng["in"], "out": rng["out"]}
     if isinstance(payload.get("model"), str) and payload["model"]:
         body["model"] = payload["model"]
-    rv = _compose(owner, pid, mid, body)
+    rv = _compose(owner, pid, mid, body, edit_lines=lambda change_en, max_bytes: redo_edit_lines(override, change_en, max_bytes))
     draft = (rv or {}).get("draft") or {}
     info = draft.get("plan") or {}
     original = (override.get("original") or {}).get("lineKo") or ""
-    prompt = _retarget(str(draft.get("prompt") or ""), original, override.get("textKo"), int(draft.get("maxBytes") or 0))
+    prompt = _finish_prompt(str(draft.get("prompt") or ""), original, override.get("textKo"), int(draft.get("maxBytes") or 0))
     job = {"status": "quoted", "lineId": line_id, "draftId": str(draft.get("id") or ""), "prompt": prompt, "requestKo": request_ko,
-           "extraKo": extra_ko, "mid": mid, "in": rng["in"], "out": rng["out"], "model": str(draft.get("model") or ""),
+           "extraKo": extra_ko, "promptV": PROMPT_V, "mid": mid, "in": rng["in"], "out": rng["out"], "model": str(draft.get("model") or ""),
            "modelLabel": str(draft.get("modelLabel") or draft.get("model") or ""), "usd": info.get("usd"),
            "priceKnown": info.get("usd") is not None, "seconds": info.get("sentSeconds") or info.get("seconds"),
            "range": {"start": rng["start"], "end": rng["end"], "padded": rng["padded"], "snapped": rng["snapped"]},
@@ -792,8 +868,8 @@ def start(owner: str, pid: str, payload) -> dict:
     job = redo["jobs"].get(line_id) or {}
     if job.get("status") in ("running", "splicing"):
         raise VpocError(where, "LineRedoRunning", "이 대사 영상을 다시 만드는 중입니다. 끝난 뒤 다시 눌러 주세요.", 409)
-    if job.get("status") != "quoted" or not job.get("draftId"):
-        raise VpocError(where, "LineRedoNoQuote", "먼저 금액을 확인해 주세요.", 409)
+    if job.get("status") != "quoted" or not job.get("draftId") or job.get("promptV") != PROMPT_V:
+        raise VpocError(where, "LineRedoNoQuote", "먼저 금액을 확인해 주세요.", 409)  # fix1: 옛 꼴 견적·실패한 작업은 견적부터 다시
     if job.get("sourceKey") != source["key"]:
         raise VpocError(where, "SoundChanged", "원본 영상이 바뀌었습니다. 다시 불러온 뒤 금액을 다시 확인해 주세요.", 409)
     if len([r for r in redo["revisions"] if r.get("baseKey") == _base_key(source)]) >= REVISIONS_MAX:

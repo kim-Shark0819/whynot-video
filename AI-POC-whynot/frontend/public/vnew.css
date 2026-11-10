@@ -6200,36 +6200,45 @@ textarea.vnew-field-input {
   flex: 1 1 160px;
   min-width: 120px;
   display: flex;
-  align-items: center;
+  flex-direction: column;
+  align-items: stretch;
 }
 
 .vnew-previz-keys-track .vnew-previz-keys-scrub {
   flex: 1 1 auto;
   width: 100%;
+  margin: 0;
 }
 
+/* 작업 213: 마름모는 트랙 바로 위 얇은 줄(높이 고정 · 스크러버 손잡이를 가리지 않는다). 위 칸 = 자세 키, 아래 칸 = 카메라 키.
+   좌우 8px = 스크러버 손잡이 반폭(vnew.js PREVIZ_SCRUB_THUMB_INSET_PX) — 마름모 자리와 손잡이 자리가 같다. */
 .vnew-previz-keys-diamonds {
-  position: absolute;
-  inset: 0 8px;
+  position: relative;
+  height: 23px;
+  margin: 0 8px;
   pointer-events: none;
 }
 
 .vnew-previz-key-diamond {
   position: absolute;
-  top: 50%;
-  width: 11px;
-  height: 11px;
-  margin: -16px 0 0 -5.5px;
+  top: 2px;
+  width: 10px;
+  height: 10px;
+  margin: 0 0 0 -5px;
   padding: 0;
   border: 1px solid rgba(0, 0, 0, 0.35);
   transform: rotate(45deg);
-  cursor: pointer;
+  cursor: ew-resize;
   pointer-events: auto;
+  touch-action: none;
 }
 
 .vnew-previz-key-diamond.is-camera {
   background: #4fc3f7;
-  margin-top: 6px;
+  top: 15px;
+  width: 6px;
+  height: 6px;
+  margin-left: -3px;
 }
 
 .vnew-previz-key-diamond.is-pose {
@@ -6252,6 +6261,72 @@ textarea.vnew-field-input {
 .vnew-previz-posekeys-hint {
   margin: 0;
   font-size: 12px;
+}
+
+/* 작업 213: 고르기·풀기·포즈 모드로 글이 바뀌는 칸은 한 줄 고정 높이(길면 … · 전체 글은 툴팁) — 아래 줄이 밀리지 않는다. */
+.vnew-previz-posekeys-hint,
+.vnew-previz-keys-note,
+.vnew-previz-caminfo {
+  display: block;
+  height: 18px;
+  line-height: 18px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.vnew-previz-posekeys-hint {
+  flex: 1 1 200px;
+  min-width: 0;
+}
+
+.vnew-previz-caminfo {
+  flex: 1 1 220px;
+  min-width: 0;
+  text-align: right;
+}
+
+@media (max-width: 960px) {
+  .vnew-previz-caminfo {
+    flex-basis: 100%;
+    text-align: left;
+  }
+}
+
+/* 작업 213: 포즈 모드 관절 고르기 판(몸 모양 3칸 격자) · 뷰포트 커서 옆 관절 이름표. */
+.vnew-previz-joint-picker {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 3px;
+}
+
+.vnew-previz-joint-btn {
+  min-width: 0;
+  min-height: 24px;
+  padding: 1px 4px;
+  font-size: 11px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.vnew-previz-joint-btn.is-on {
+  border-color: #e65100;
+  background: #ffd54f;
+  color: #1f2937;
+  font-weight: 700;
+}
+
+.vnew-previz-joint-tip {
+  position: absolute;
+  padding: 2px 8px;
+  border-radius: 4px;
+  background: rgba(17, 24, 39, 0.86);
+  color: #fff;
+  font-size: 12px;
+  white-space: nowrap;
+  pointer-events: none;
+  z-index: 4;
 }
 
 .vnew-previz-posekeys.is-live .vnew-previz-posekeys-hint {
