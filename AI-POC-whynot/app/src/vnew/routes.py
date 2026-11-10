@@ -1022,7 +1022,10 @@ def create_blueprint(deps: VnewDependencies) -> Blueprint:
             edit.require_enabled("vnew.edit.export")
             owner = _project_for(pid, write=True)
             payload = _edit_body("vnew.edit.export")
-            result = edit.start_export(owner, pid, payload.get("etag"), payload.get("variant"))  # 작업 189: variant 없으면 etag 로 고른다
+            if payload.get("stems") is True:  # 작업 215a: 스템(대사만 · 배경음 · 효과음 · mix.wav) zip 도
+                result = edit.start_export(owner, pid, payload.get("etag"), payload.get("variant"), stems=True)
+            else:
+                result = edit.start_export(owner, pid, payload.get("etag"), payload.get("variant"))  # 작업 189: variant 없으면 etag 로 고른다
             return jsonify({"ok": True, **result}), 202
         except Exception as exc:  # noqa: BLE001
             return _fail(exc)
@@ -1049,6 +1052,110 @@ def create_blueprint(deps: VnewDependencies) -> Blueprint:
             edit.require_enabled("vnew.edit.tighten")
             owner = _project_for(pid, write=True)
             return jsonify(edit.tighten_view(owner, pid, _edit_body("vnew.edit.tighten")))
+        except Exception as exc:  # noqa: BLE001
+            return _fail(exc)
+
+    # 작업 215a: ⑦ 내 소리(사용자가 올린 배경음 · 효과음) — 올리기 · 목록 · 파형 · 미리듣기 파일 · 지우기, 스템 내려받기.
+    # 모두 프로젝트 소유자(쓰기 권한)만. 올리기는 다른 업로드와 같은 multipart(file) 를 앱이 받아 검사한 뒤 영상 버킷에 둔다
+    # (브라우저 → S3 직접 PUT 은 버킷 CORS 가 필요해 쓰지 않는다). 이 파일은 어떤 AI 모델에도 보내지 않는다.
+    @bp.get("/p/<pid>/edit/audio-assets")
+    @deps.require_auth
+    def edit_audio_list(pid: str):
+        try:
+            from . import edit  # noqa: PLC0415
+
+            edit.require_enabled("vnew.edit.audio")
+            owner = _project_for(pid, write=True)
+            return jsonify(edit.audio_assets_view(owner, pid))
+        except Exception as exc:  # noqa: BLE001
+            return _fail(exc)
+
+    @bp.post("/p/<pid>/edit/audio-assets")
+    @deps.require_auth
+    def edit_audio_upload(pid: str):
+        import os  # noqa: PLC0415
+        import tempfile  # noqa: PLC0415
+
+        from werkzeug.exceptions import RequestEntityTooLarge  # noqa: PLC0415
+
+        try:
+            from . import edit, edit_audio  # noqa: PLC0415
+
+            edit.require_enabled("vnew.edit.audio")
+            owner = _project_for(pid, write=True)
+            too_large = VpocError("vnew.edit.audio", "AudioTooLarge",
+                                  f"소리 파일은 {edit_audio.MAX_ASSET_BYTES // (1024 * 1024)}MB 까지 올릴 수 있습니다.", 413)
+            request.max_content_length = edit_audio.MAX_ASSET_BYTES + 1024 * 1024  # multipart 머리 몫
+            try:
+                storage = request.files.get("file")
+            except RequestEntityTooLarge:
+                raise too_large from None
+            if storage is None:
+                raise VpocError("vnew.edit.audio", "NoFiles", "올릴 소리 파일이 없습니다.", 400)
+            handle, path = tempfile.mkstemp(prefix="vnew-edit-audio-up-")
+            os.close(handle)
+            try:
+                storage.save(path)
+                if os.path.getsize(path) > edit_audio.MAX_ASSET_BYTES:
+                    raise too_large
+                return jsonify(edit.add_audio_asset(owner, pid, storage.filename or "", path)), 201
+            finally:
+                try:
+                    os.unlink(path)
+                except OSError:
+                    pass
+        except Exception as exc:  # noqa: BLE001
+            return _fail(exc)
+
+    @bp.get("/p/<pid>/edit/audio-assets/<aid>")
+    @deps.require_auth
+    def edit_audio_get(pid: str, aid: str):
+        try:
+            from . import edit  # noqa: PLC0415
+
+            edit.require_enabled("vnew.edit.audio")
+            owner = _project_for(pid, write=True)
+            return jsonify(edit.audio_asset_view(owner, pid, aid))
+        except Exception as exc:  # noqa: BLE001
+            return _fail(exc)
+
+    @bp.get("/p/<pid>/edit/audio-assets/<aid>/file")
+    @deps.require_auth
+    def edit_audio_file(pid: str, aid: str):
+        try:
+            from . import edit  # noqa: PLC0415
+
+            edit.require_enabled("vnew.edit.audio")
+            owner = _project_for(pid, write=True)
+            body, ctype, size = edit.audio_asset_file(owner, pid, aid)
+            headers = {"Cache-Control": "private, max-age=3600", "X-Content-Type-Options": "nosniff"}
+            if size:
+                headers["Content-Length"] = str(size)
+            return Response(body, mimetype=ctype, headers=headers)
+        except Exception as exc:  # noqa: BLE001
+            return _fail(exc)
+
+    @bp.delete("/p/<pid>/edit/audio-assets/<aid>")
+    @deps.require_auth
+    def edit_audio_delete(pid: str, aid: str):
+        try:
+            from . import edit  # noqa: PLC0415
+
+            edit.require_enabled("vnew.edit.audio")
+            owner = _project_for(pid, write=True)
+            return jsonify(edit.delete_audio_asset(owner, pid, aid))
+        except Exception as exc:  # noqa: BLE001
+            return _fail(exc)
+
+    @bp.get("/p/<pid>/edit/stems")
+    @deps.require_auth
+    def edit_stems(pid: str):
+        try:
+            from . import edit  # noqa: PLC0415
+
+            edit.require_enabled("vnew.edit.stems")
+            owner = _project_for(pid, write=True)
+            return jsonify(edit.stems_view(owner, pid, request.args.get("variant")))
         except Exception as exc:  # noqa: BLE001
             return _fail(exc)
 
@@ -1237,4 +1344,5 @@ def create_blueprint(deps: VnewDependencies) -> Blueprint:
         except Exception as exc:  # noqa: BLE001
             return _fail(exc)
 
+    from . import edit_xml; edit_xml.register_routes(bp, deps, _project_for, _fail)  # 작업 215d: ⑦ Premiere 내보내기
     return bp

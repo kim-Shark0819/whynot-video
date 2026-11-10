@@ -68719,6 +68719,8 @@ def main() -> int:
     if not __import__("check_line_redo_212").check_line_redo_212(): fail("작업 212: ⑥ 대사 고치기 · 그 대사 구간 영상 다시 만들기 검사 실패")
     if not __import__("check_previz_pose_ux_213").check_previz_pose_ux_213(): fail("작업 213: 프리비즈 포즈 쓰기(마름모 끌기 · 고리 겹침 · 화면 밀림) 검사 실패")
     if not __import__("check_ip_notice_214").check_ip_notice_214(): fail("작업 214: 실사 영상 프롬프트 첫 줄 = 우리 웹툰 IP · AI 가상 인물 고지 검사 실패")
+    if not __import__("check_edit_audio_215a").check_edit_audio_215a(): fail("작업 215a: ⑦ 오디오 트랙(내 소리 · 키 · 덕킹 · 섞기 · 스템) 검사 실패")
+    if not __import__("check_edit_xml_215d").check_edit_xml_215d(): fail("작업 215d: ⑦ 프리미어 내보내기(XML · EDL · 묶음) 검사 실패")
     check_vnew_voice_ui_203()
     print()
     if warnings:
