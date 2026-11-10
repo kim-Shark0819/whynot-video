@@ -7,7 +7,9 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 WORKDIR /app
 
 # 작업 215b: ⑦ 자막 · 타이틀을 영상에 구울 한글 글꼴(나눔고딕). edit_text._find_font 가 /usr/share/fonts/**/Nanum*Gothic*.ttf 를 찾는다.
-RUN apt-get update \n    && apt-get install -y --no-install-recommends fonts-nanum \n    && rm -rf /var/lib/apt/lists/*
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends fonts-nanum \
+    && rm -rf /var/lib/apt/lists/*
 
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt \
