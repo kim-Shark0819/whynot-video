@@ -232,6 +232,268 @@ export function solveTwoBoneIK(target, lenA, lenB, pole, flexSign, maxBendRad) {
     endPos: endPos.toArray(),
   };
 }
+/* ================================================================ 작업 209b: 자세 키(Maya 식 S) · 잔상 · 이동 궤적 · 포즈 모음
+
+   cut actor 의 keys = [{u, pos, facingDeg, rig}] (작업 208 "Data format"): u = 컷 안 시점 0~1(3자리), 최대 8개, u 순.
+   이웃 키 사이는 smoothstep, 방향은 가까운 쪽 각으로. 첫 키 앞은 첫 키, 마지막 키 뒤는 마지막 키 그대로.
+   재생·녹화는 같은 경로(PrevizScene.update → sampleKeys)라 녹화한 마네킹 영상에도 움직임이 그대로 나온다.
+   키가 없는 옛 인물은 지금과 똑같이 그린다(sampleKeys 를 부르지 않는다). */
+export const POSE_KEYS_MAX = 8; // previz_schema.POSE_KEYS_MAX 와 같다
+const KEY_U_EPS = 0.0005; // 같은 키로 보는 u 차이(u 는 3자리로 저장)
+const STEP_BOB_MIN_M = 0.3; // 두 키 사이 발 위치가 이보다 멀면 걸음(다리 흔들기)
+const STEP_STRIDE_M = 0.6; // 한 걸음 길이
+const STEP_SWING_RAD = 0.32; // 허벅지 앞뒤 흔들기 최대
+const STEP_BOB_M = 0.025; // 골반이 걸음마다 내려가는 정도(마네킹 로컬 m)
+
+export function smoothstep01(t) {
+  const x = Math.max(0, Math.min(1, Number(t) || 0));
+  return x * x * (3 - 2 * x);
+}
+
+function roundU(u) {
+  return Math.round(Math.max(0, Math.min(1, Number(u) || 0)) * 1000) / 1000;
+}
+
+function wrapDeg(d) {
+  const r = (Number(d) || 0) * DEG;
+  return Math.atan2(Math.sin(r), Math.cos(r)) / DEG;
+}
+
+function isJointValue(v) {
+  return Array.isArray(v) && v.length === 3 && v.every((x) => isFinite(Number(x)));
+}
+
+/* rig 깊은 복사(관절 [x,y,z] · rootY). 값이 0 인 관절도 그대로 둔다(목록 자세를 덮어쓰는 뜻이 있다). */
+export function copyRig(rig) {
+  const out = {};
+  if (!rig || typeof rig !== "object") return out;
+  Object.keys(rig).forEach((k) => {
+    if (k === "rootY") {
+      if (typeof rig.rootY === "number" && isFinite(rig.rootY)) out.rootY = rig.rootY;
+    } else if (RIG_JOINTS.indexOf(k) >= 0 && isJointValue(rig[k])) {
+      out[k] = rig[k].map((x) => Number(x) || 0);
+    }
+  });
+  return out;
+}
+
+/* 쓸 수 있는 키만 u 순으로(같은 u 는 뒤의 것). 원래 물체를 그대로 담는다(편집기가 그 키를 고친다). */
+export function validKeys(keys) {
+  if (!Array.isArray(keys)) return [];
+  const list = keys.filter((k) => k && typeof k === "object" && isFinite(Number(k.u)));
+  const out = [];
+  list.slice().sort((a, b) => Number(a.u) - Number(b.u)).forEach((k) => {
+    const last = out[out.length - 1];
+    if (last && Math.abs(Number(last.u) - Number(k.u)) < KEY_U_EPS) out[out.length - 1] = k;
+    else out.push(k);
+  });
+  return out;
+}
+
+function keyXZ(k) {
+  const p = Array.isArray(k.pos) ? k.pos : [0, 0, 0];
+  return [Number(p[0]) || 0, Number(p[2]) || 0];
+}
+
+/* 시점 u 의 자세(작업 208 규칙). base = 키에 없는 관절의 값(목록 자세 — 렌더러가 그 프레임 값을 넘긴다, 없으면 다른 키 값).
+   돌려준 값 = {pos, facingDeg, rig, from, to, t(이징 뒤), lin, dist(두 키 발 위치 거리), travel(지금까지 간 거리)} | null. */
+export function sampleKeys(keys, u, base) {
+  const ks = validKeys(keys);
+  if (!ks.length) return null;
+  const x = Math.max(0, Math.min(1, Number(u) || 0));
+  let ia = 0;
+  let ib = 0;
+  let lin = 0;
+  if (x >= Number(ks[ks.length - 1].u)) {
+    ia = ks.length - 1;
+    ib = ia;
+  } else if (x > Number(ks[0].u)) {
+    for (let i = 0; i < ks.length - 1; i++) {
+      const ua = Number(ks[i].u);
+      const ub = Number(ks[i + 1].u);
+      if (x >= ua && x <= ub) {
+        ia = i;
+        ib = i + 1;
+        lin = ub > ua ? (x - ua) / (ub - ua) : 1;
+        break;
+      }
+    }
+  }
+  const a = ks[ia];
+  const b = ks[ib];
+  const t = ia === ib ? 0 : smoothstep01(lin);
+  const pa = keyXZ(a);
+  const pb = keyXZ(b);
+  const fa = Number(a.facingDeg) || 0;
+  const fb = Number(b.facingDeg) || 0;
+  const ra = a.rig && typeof a.rig === "object" ? a.rig : {};
+  const rb = b.rig && typeof b.rig === "object" ? b.rig : {};
+  const fallback = base && typeof base === "object" ? base : {};
+  const rig = {};
+  RIG_JOINTS.forEach((j) => {
+    const ha = isJointValue(ra[j]);
+    const hb = isJointValue(rb[j]);
+    if (!ha && !hb) return;
+    const va = ha ? ra[j] : isJointValue(fallback[j]) ? fallback[j] : rb[j];
+    const vb = hb ? rb[j] : isJointValue(fallback[j]) ? fallback[j] : ra[j];
+    rig[j] = clampRigJoint(j, [0, 1, 2].map((i) => lerp(Number(va[i]) || 0, Number(vb[i]) || 0, t)));
+  });
+  const hasA = typeof ra.rootY === "number" && isFinite(ra.rootY);
+  const hasB = typeof rb.rootY === "number" && isFinite(rb.rootY);
+  if (hasA || hasB) {
+    const r0 = typeof fallback.rootY === "number" && isFinite(fallback.rootY) ? fallback.rootY : 0;
+    rig.rootY = lerp(hasA ? ra.rootY : r0, hasB ? rb.rootY : r0, t);
+  }
+  const dist = Math.hypot(pb[0] - pa[0], pb[1] - pa[1]);
+  return {
+    pos: [lerp(pa[0], pb[0], t), 0, lerp(pa[1], pb[1], t)],
+    facingDeg: wrapDeg(fa + wrapDeg(fb - fa) * t),
+    rig,
+    from: ia,
+    to: ib,
+    t,
+    lin,
+    dist,
+    travel: dist * t,
+  };
+}
+
+/* 이동 궤적: 컷 처음~끝 samples 등분(samples + 1 점)의 발(골반) 자리를 바닥 위 TRAIL_Y_M 에. 편집기 전용(녹화 안 됨). */
+export const TRAIL_SAMPLES = 20;
+const TRAIL_Y_M = 0.02;
+export function trailPoints(keys, samples) {
+  const n = Math.max(1, Math.round(Number(samples) || TRAIL_SAMPLES));
+  const out = [];
+  if (!validKeys(keys).length) return out;
+  for (let i = 0; i <= n; i++) {
+    const s = sampleKeys(keys, i / n);
+    out.push([s.pos[0], TRAIL_Y_M, s.pos[2]]);
+  }
+  return out;
+}
+
+/* 키 넣기(같은 u 면 바꾼다). 새 배열(u 순)을 돌려준다. 8개가 찼고 새 u 면 full = true(그대로). */
+export function upsertKey(keys, key, max) {
+  const limit = Number(max) || POSE_KEYS_MAX;
+  const list = validKeys(keys).slice();
+  const k = Object.assign({}, key, { u: roundU(key && key.u) });
+  const i = list.findIndex((x) => Math.abs(Number(x.u) - k.u) < KEY_U_EPS);
+  if (i >= 0) {
+    list[i] = k;
+    return { keys: list, index: i, replaced: true, full: false };
+  }
+  if (list.length >= limit) return { keys: list, index: -1, replaced: false, full: true };
+  list.push(k);
+  list.sort((p, q) => Number(p.u) - Number(q.u));
+  return { keys: list, index: list.indexOf(k), replaced: false, full: false };
+}
+
+/* u 자리 키 하나를 뺀 새 배열. */
+export function removeKey(keys, u) {
+  const at = Number(u);
+  return validKeys(keys).filter((k) => Math.abs(Number(k.u) - at) >= KEY_U_EPS);
+}
+
+/* 지금 u 에서 앞(dir < 0)·뒤(dir > 0) 키의 u. 없으면 null. */
+export function keyNeighbor(keys, u, dir) {
+  const at = Number(u) || 0;
+  const us = validKeys(keys).map((k) => Number(k.u));
+  if (dir < 0) {
+    const prev = us.filter((x) => x < at - KEY_U_EPS);
+    return prev.length ? prev[prev.length - 1] : null;
+  }
+  const next = us.filter((x) => x > at + KEY_U_EPS);
+  return next.length ? next[0] : null;
+}
+
+/* 모든 키가 같은 관절을 갖게 한다(키마다 다른 관절이 있으면 서버 설명(pose_describe)과 화면이 어긋난다).
+   없는 관절은 base(그 프레임의 목록 자세 값), rootY 는 0. 제자리에서 고친다. */
+export function unifyKeyRigs(keys, base) {
+  const list = validKeys(keys);
+  const names = {};
+  let root = false;
+  list.forEach((k) => {
+    const r = k.rig && typeof k.rig === "object" ? k.rig : {};
+    RIG_JOINTS.forEach((j) => {
+      if (isJointValue(r[j])) names[j] = true;
+    });
+    if (typeof r.rootY === "number") root = true;
+  });
+  const fb = base && typeof base === "object" ? base : {};
+  list.forEach((k) => {
+    if (!k.rig || typeof k.rig !== "object" || Array.isArray(k.rig)) k.rig = {};
+    Object.keys(names).forEach((j) => {
+      if (!isJointValue(k.rig[j])) k.rig[j] = (isJointValue(fb[j]) ? fb[j] : [0, 0, 0]).map((x) => Math.round((Number(x) || 0) * 1000) / 1000);
+    });
+    if (root && typeof k.rig.rootY !== "number") k.rig.rootY = 0;
+  });
+  return list;
+}
+
+/* 포즈 모음 한 개({id, nameKo, rig, pose?})를 좌우 반전(관절 L↔R · y,z 부호 · 한계 안). 이름 끝에 "(반전)". */
+export function mirrorPreset(preset) {
+  const src = preset && typeof preset === "object" ? preset : {};
+  const rig = mirrorRig(src.rig || {});
+  Object.keys(rig).forEach((k) => {
+    if (k !== "rootY") rig[k] = clampRigJoint(k, rig[k]).map((x) => Math.round(x * 1000) / 1000);
+  });
+  return Object.assign({}, src, { rig, nameKo: (src.nameKo || "") + " (반전)", mirrored: !src.mirrored });
+}
+
+/* 기본 포즈 모음: 목록 자세(서기·앉기·앞/뒤로 기울기·무릎 꿇기·눕기)와 자주 쓰는 손 동작을 마네킹으로 한 번 그려
+   15개 관절 값(rig)을 읽는다 — 목록 자세 코드와 같은 값. rootY 는 서기(엉덩이 0.9m) 기준 차이. 상대가 필요한 동작은
+   앞 0.55m 에서 마주 보는 상대로 푼다. 팔짱·주머니는 목록에 없어 손 자리를 정해 같은 IK(_reachArm)로 푼다. */
+const POSE_PRESET_DEFS = [
+  { id: "stand", nameKo: "서기", pose: "stand" },
+  { id: "sit", nameKo: "앉기", pose: "sit" },
+  { id: "lean_forward", nameKo: "앞으로 기울기", posture: "lean_forward" },
+  { id: "lean_back", nameKo: "뒤로 기대기", posture: "lean_back" },
+  { id: "kneel", nameKo: "무릎 꿇기", pose: "kneel" },
+  { id: "lie", nameKo: "눕기", pose: "lie", keepPose: true },
+  { id: "hand_own_cheek", nameKo: "손을 자기 뺨에", hands: { right: { act: "touch", target: "own_cheek" } } },
+  { id: "hand_other_shoulder", nameKo: "상대 어깨에 손", hands: { right: { act: "rest_on", target: "other_shoulder" } }, other: true },
+  { id: "reach_other_chin", nameKo: "상대 턱을 살며시 감싸기", hands: { right: { act: "cup", target: "other_chin" } }, other: true },
+  { id: "arms_crossed", nameKo: "팔짱", reach: { L: [-0.1, 1.2, 0.17], R: [0.1, 1.17, 0.2] } },
+  { id: "hands_in_pockets", nameKo: "주머니에 손", reach: { L: [0.17, 0.86, 0.05], R: [-0.17, 0.86, 0.05] } },
+];
+let builtInPresets = null;
+
+export function buildPosePresets() {
+  if (builtInPresets) return builtInPresets;
+  const me = new Mannequin("#ffffff", 1.7);
+  const other = new Mannequin("#ffffff", 1.7);
+  other.group.position.set(0, 0, 0.55);
+  other.group.rotation.y = Math.PI;
+  const r3 = (x) => Math.round((Number(x) || 0) * 1000) / 1000;
+  builtInPresets = POSE_PRESET_DEFS.map((def) => {
+    other.apply("stand", null, false, 0, null, null);
+    other.group.updateMatrixWorld(true);
+    me.apply(def.pose || "stand", null, false, 0, def.other ? 0 : null, null);
+    me.applyBody({ posture: def.posture || "" }, 0, null);
+    if (def.hands) me.applyHands(def.hands, { other: def.other ? other : null, seated: def.pose === "sit" });
+    if (def.reach) {
+      ["L", "R"].forEach((side) => {
+        me.group.updateMatrixWorld(true);
+        const p = def.reach[side];
+        me._reachArm(side === "L" ? me.shoulderL : me.shoulderR, side === "L" ? 1 : -1, new THREE.Vector3(p[0], p[1], p[2]), RIG_IK_POLES.arm);
+      });
+    }
+    me.clampToLimits();
+    const rig = {};
+    RIG_JOINTS.forEach((j) => {
+      rig[j] = me.readJoint(j).map(r3);
+    });
+    // 눕기는 몸 전체를 눕히는 목록 자세(pose)가 함께 간다(rig 로는 몸을 눕힐 수 없다) — 엉덩이 높이는 그 자세 그대로.
+    rig.rootY = def.keepPose ? 0 : r3(me.hips.position.y - RIG_DIMS.hipsY);
+    const out = { id: def.id, nameKo: def.nameKo, rig, builtIn: true };
+    if (def.keepPose) out.pose = def.pose;
+    return out;
+  });
+  me.dispose();
+  other.dispose();
+  return builtInPresets;
+}
+
 // lean_forward / lean_back 척추 기울기(25°).
 const LEAN_RAD = 25 * Math.PI / 180;
 const DEFAULT_HAIR_COLOR = "#2b2b2b";
@@ -646,6 +908,30 @@ class Mannequin {
     });
     const rootY = Number(rig.rootY);
     if (typeof rig.rootY === "number" && isFinite(rootY)) this.pelvis.position.y = rootY;
+  }
+
+  /* 작업 209b: 지금 보이는 관절 값 전부({관절: [x,y,z]}, rootY = 골반 높이 차). 키에 없는 관절의 목록 자세 값으로 쓴다. */
+  readRig() {
+    const out = {};
+    RIG_JOINTS.forEach((joint) => {
+      out[joint] = this.readJoint(joint);
+    });
+    out.rootY = this.pelvis.position.y;
+    return out;
+  }
+
+  /* 작업 209b: 두 키 사이를 0.3m 넘게 옮겨 가면 가벼운 걸음 — 허벅지를 번갈아 앞뒤로, 앞으로 가는 다리 무릎을 조금 굽히고
+     골반을 걸음마다 살짝 내린다. phase = 간 거리 / 걸음 길이 × π, amp = 0~1(구간 처음·끝에서 0). */
+  applyStep(phase, amp) {
+    const a = Math.max(0, Math.min(1, Number(amp) || 0));
+    if (!a) return;
+    const s = Math.sin(Number(phase) || 0);
+    const swing = STEP_SWING_RAD * a * s;
+    this.hipL.pivot.rotation.x -= swing;
+    this.hipR.pivot.rotation.x += swing;
+    this.hipL.elbow.rotation.x += STEP_SWING_RAD * 1.2 * a * Math.max(0, s);
+    this.hipR.elbow.rotation.x += STEP_SWING_RAD * 1.2 * a * Math.max(0, -s);
+    this.pelvis.position.y -= STEP_BOB_M * a * Math.abs(s);
   }
 
   _applyGesture(gesture, t, targetYaw) {
@@ -1164,6 +1450,12 @@ class PrevizScene {
     const posById = {};
     cutActors.forEach((ca) => {
       if (!this.actors[ca.id]) return;
+      // 작업 209b: 자세 키(또는 편집기의 저장 전 미리보기)가 있으면 그 시점의 발 위치·방향.
+      const keyed = this._keyedState(ca, cut, frac);
+      if (keyed) {
+        posById[ca.id] = { x: keyed.pos[0], z: keyed.pos[2], keyed };
+        return;
+      }
       const base = vec3(ca.pos, 0, 0, 0);
       let x = base.x;
       let z = base.z;
@@ -1182,7 +1474,7 @@ class PrevizScene {
       const self = posById[ca.id] || { x: 0, z: 0 };
       const px = self.x;
       const pz = self.z;
-      const facing = (Number(ca.facingDeg) || 0) * Math.PI / 180;
+      const facing = (Number(self.keyed ? self.keyed.facingDeg : ca.facingDeg) || 0) * Math.PI / 180;
       entry.mannequin.group.position.set(px, 0, pz);
       // 앉을 자리(084 R1.17): 엉덩이·다리는 sit.legYawDeg, 몸통·머리는 facing 쪽(다리 방향 ±90° 안).
       // 카메라는 서버가 facingDeg 로 계산했다. sit 이 없으면 지금처럼 몸 전체가 facing.
@@ -1237,7 +1529,17 @@ class PrevizScene {
     // rig 가 없는 옛 계획은 아무것도 바뀌지 않는다.
     cutActors.forEach((ca) => {
       const entry = this.actors[ca.id];
-      if (entry && ca.rig && typeof ca.rig === "object") entry.mannequin.applyRig(ca.rig);
+      if (entry && ca.rig && typeof ca.rig === "object") {
+        // 작업 209b: 키가 있는 인물은 아래(키 자세)가 rig 를 대신한다.
+        if (!(posById[ca.id] && posById[ca.id].keyed)) entry.mannequin.applyRig(ca.rig);
+      }
+    });
+    // 작업 209b: 자세 키 — 키에 없는 관절은 이 프레임 목록 자세 값(readRig)으로 보간하고, 0.3m 넘게 옮기면 가벼운 걸음.
+    // 재생·녹화(record·renderFrames)도 이 경로라 녹화한 영상에 움직임이 나온다. 키가 없는 인물은 건너뛴다.
+    cutActors.forEach((ca) => {
+      const entry = this.actors[ca.id];
+      const keyed = posById[ca.id] && posById[ca.id].keyed;
+      if (entry && keyed) this._applyKeyed(entry.mannequin, ca, keyed, frac);
     });
     // 이 컷에 없는 인물은 숨긴다.
     Object.keys(this.actors).forEach((id) => {
@@ -1257,6 +1559,67 @@ class PrevizScene {
     } else {
       this.cameraPullback = 0;
     }
+  }
+
+  /* 작업 209b: 이 프레임 인물의 키 자세. 편집기의 저장 전 미리보기(livePose — 재생·녹화 중엔 renderAt 이 비운다)가 먼저,
+     아니면 cut actor 의 keys 를 시점 frac 에서 보간(sampleKeys). 키가 없으면 null(옛 경로 그대로). */
+  _keyedState(ca, cut, frac) {
+    const live = this.livePose;
+    if (live && live.cut === cut && live.id === ca.id && live.pose) {
+      const p = Array.isArray(live.pose.pos) ? live.pose.pos : [0, 0, 0];
+      return { pos: [Number(p[0]) || 0, 0, Number(p[2]) || 0], facingDeg: Number(live.pose.facingDeg) || 0,
+        rig: live.pose.rig || {}, live: true, from: 0, to: 0, t: 0, lin: 0, dist: 0, travel: 0 };
+    }
+    if (!Array.isArray(ca.keys) || !ca.keys.length) return null;
+    return sampleKeys(ca.keys, frac);
+  }
+
+  /* 작업 209b: 목록 자세 위에 키 자세를 얹는다(재생·녹화 공통). 키에 없는 관절은 이 프레임 목록 자세 값으로 보간. */
+  _applyKeyed(m, ca, keyed, frac) {
+    m.baseRig = m.readRig();
+    if (keyed.live) {
+      m.applyRig(keyed.rig);
+      return;
+    }
+    const s = sampleKeys(ca.keys, frac, m.baseRig);
+    if (!s) return;
+    m.applyRig(s.rig);
+    if (s.from !== s.to && s.dist > STEP_BOB_MIN_M) m.applyStep(Math.PI * s.travel / STEP_STRIDE_M, Math.sin(Math.PI * s.lin));
+  }
+
+  /* 작업 209b: 잔상 마네킹 m 을 키 하나(key)의 자세로(편집기 전용 — 녹화에는 나오지 않는다). 목록 자세 → 키 rig. */
+  poseGhost(m, cut, ca, key) {
+    const start = Number(cut.start) || 0;
+    const end = Number(cut.end) || start;
+    const t = start + (end - start) * Math.max(0, Math.min(1, Number(key.u) || 0));
+    const p = Array.isArray(key.pos) ? key.pos : [0, 0, 0];
+    const px = Number(p[0]) || 0;
+    const pz = Number(p[2]) || 0;
+    const facing = (Number(key.facingDeg) || 0) * DEG;
+    m.group.position.set(px, 0, pz);
+    m.group.rotation.y = facing;
+    let bodyYaw = facing;
+    let sitArg = null;
+    const sitData = ca.sit;
+    if ((ca.pose || "stand") === "sit" && sitData && typeof sitData.hipY === "number" && isFinite(sitData.hipY)) {
+      const legYaw = typeof sitData.legYawDeg === "number" && isFinite(sitData.legYawDeg) ? sitData.legYawDeg * DEG : facing;
+      const turn = Math.max(-Math.PI / 2, Math.min(Math.PI / 2, Math.atan2(Math.sin(facing - legYaw), Math.cos(facing - legYaw))));
+      bodyYaw = legYaw + turn;
+      m.group.rotation.y = legYaw;
+      sitArg = { hipY: sitData.hipY, legPitchDeg: Number(sitData.legPitchDeg) || 0, turn };
+    }
+    const other = ca.gestureTarget && this.actors[ca.gestureTarget] && this.actors[ca.gestureTarget].mannequin.group.visible
+      ? this.actors[ca.gestureTarget].mannequin : null;
+    const targetYaw = other ? Math.atan2(other.group.position.x - px, other.group.position.z - pz) - bodyYaw : null;
+    m.apply(ca.pose || "stand", ca.gesture || null, false, t, targetYaw, sitArg);
+    m.applyBody(ca, t, targetYaw);
+    if (ca.hands && typeof ca.hands === "object") {
+      m.group.updateMatrixWorld(true);
+      m.applyHands(ca.hands, { other, seated: (ca.pose || "stand") === "sit" || ca.posture === "sit" });
+    }
+    m.clampToLimits();
+    if (key.rig && typeof key.rig === "object") m.applyRig(key.rig);
+    m.group.updateMatrixWorld(true);
   }
 
   /* 편집 오버레이용 항목(빛·소품·인물 라벨 + 3D 위치). 녹화에는 쓰지 않는다. */
@@ -1442,6 +1805,8 @@ function createController(host, options) {
     // 작업 201: 편집기 키 스크러버가 컷을 고정했으면(재생·녹화 중이 아닐 때) 그 컷의 그 시각을 그린다.
     const pin = !recording && !playing && edit.pinCut ? edit.pinCut : null;
     if (current) {
+      // 작업 209b: 키 사이에서 고친 저장 전 미리보기(edit.live)는 편집 화면에만 — 재생·녹화는 키 그대로.
+      current.scene.livePose = !recording && !playing ? edit.live : null;
       if (pin) current.scene.update(pinTime(pin), camera, pin);
       else current.scene.update(t, camera);
     }
@@ -1776,6 +2141,10 @@ function createController(host, options) {
     workMoved: false, // 작업 209a fix 1: 사용자가 작업 카메라를 움직였다(orbit start · F) — 그 뒤로는 자동으로 옮기지 않는다
     pose: false, // 작업 209a: 포즈 모드(고른 인물 하나에 관절 손잡이)
     joint: null, // 작업 209a: 포즈 모드에서 고른 관절(RIG_JOINTS 하나 또는 "root" = 골반)
+    live: null, // 작업 209b: 키 사이에서 고친 저장 전 미리보기 {cut, id, u, pose: {pos, facingDeg, rig}} — S 를 누르면 키가 된다
+    keySel: null, // 작업 209b: 고른 자세 키 마름모 {id, u}(Delete = 지우기)
+    ghosts: null, // 작업 209b: [잔상] null = 자동(고른 인물 키 2개 이상이면 켬), true/false = 사용자가 고름
+    keyMsg: "", // 작업 209b: 키 줄 짧은 알림(8개 다 참 등)
   };
   scenesData.forEach((sd) => ((sd && sd.timeline) || []).forEach((cut) => edit.shadows.set(cut, JSON.stringify(cut))));
 
@@ -1885,6 +2254,7 @@ function createController(host, options) {
     return {
       view: edit.view, tool: edit.tool, snap: edit.snap, aim: edit.aim, selection: edit.sel ? Object.assign({}, edit.sel) : null,
       keyU: edit.keyU, canUndo: edit.undo.length > 0, canRedo: edit.redo.length > 0, pose: edit.pose, joint: edit.joint,
+      poseKeys: poseKeyInfo(),
     };
   }
 
@@ -1895,6 +2265,7 @@ function createController(host, options) {
   function unpin() {
     edit.pinCut = null;
     edit.keyU = 0;
+    edit.live = null; // 작업 209b: 시점이 바뀌면 저장 전 미리보기는 버린다(Maya 와 같다)
   }
 
   function pinTime(cut) {
@@ -1990,6 +2361,13 @@ function createController(host, options) {
     const hd = rm.depth / 2 - ACTOR_WALL_M;
     const nx = r3(Math.max(-hw, Math.min(hw, snapTo(x, step))));
     const nz = r3(Math.max(-hd, Math.min(hd, snapTo(z, step))));
+    // 작업 209b: 키가 있는 인물은 지금 키(또는 키 사이 미리보기)의 자리를 옮긴다.
+    const tgt = poseTarget(cut, id, true);
+    if (tgt !== ca) {
+      setVec(tgt, "pos", [nx, 0, nz]);
+      touchPose(cut, ca, tgt);
+      return;
+    }
     const old = Array.isArray(ca.pos) ? ca.pos : [0, 0, 0];
     const dx = nx - (Number(old[0]) || 0);
     const dz = nz - (Number(old[2]) || 0);
@@ -2004,6 +2382,12 @@ function createController(host, options) {
     if (!ca) return;
     let d = snapTo(deg, edit.snap ? SNAP_DEG : 0);
     d = Math.atan2(Math.sin(d * Math.PI / 180), Math.cos(d * Math.PI / 180)) * 180 / Math.PI;
+    const tgt = poseTarget(cut, id, true); // 작업 209b
+    if (tgt !== ca) {
+      tgt.facingDeg = Math.round(d * 10) / 10;
+      touchPose(cut, ca, tgt);
+      return;
+    }
     ca.facingDeg = Math.round(d * 10) / 10;
     // 앉은 인물은 다리 방향도 같이(패널과 같다 — 저장하면 서버가 앉은 모양을 다시 잡는다).
     if (ca.sit && typeof ca.sit === "object") ca.sit.legYawDeg = ca.facingDeg;
@@ -2092,9 +2476,10 @@ function createController(host, options) {
         const ca = cutActor(cut, sel.id);
         const entry = current && current.scene.actors[sel.id];
         if (ca && entry && entry.mannequin.group.visible) {
-          const p = Array.isArray(ca.pos) ? ca.pos : [0, 0, 0];
+          const now = poseTarget(cut, sel.id, false); // 작업 209b: 키가 있으면 지금 보이는 키 자세
+          const p = Array.isArray(now.pos) ? now.pos : [0, 0, 0];
           proxy.position.set(Number(p[0]) || 0, 0, Number(p[2]) || 0);
-          proxy.rotation.set(0, (Number(ca.facingDeg) || 0) * Math.PI / 180, 0);
+          proxy.rotation.set(0, (Number(now.facingDeg) || 0) * Math.PI / 180, 0);
           gizmo.showX = edit.tool !== "rotate";
           gizmo.showY = edit.tool === "rotate";
           gizmo.showZ = edit.tool !== "rotate";
@@ -2163,6 +2548,8 @@ function createController(host, options) {
     } else {
       selBox.visible = false;
     }
+    syncGhosts(); // 작업 209b
+    syncTrail();
     syncPose();
     syncProxy();
   }
@@ -2366,28 +2753,33 @@ function createController(host, options) {
   /* 관절 하나(라디안 3개)를 한계 안으로 잘라 cut actor 의 rig 에 쓴다. 그 인물은 직접 고침(manual).
      from = 편집을 시작한 값(끌기 시작·채널 박스의 지금 값). 한계 밖이던 축은 움직인 쪽으로만 자른다(작업 209a fix 1). */
   function writeJoint(cut, id, joint, values, from) {
-    const ca = cutActor(cut, id);
-    if (!ca || RIG_JOINTS.indexOf(joint) < 0) return null;
+    const owner = cutActor(cut, id);
+    if (!owner || RIG_JOINTS.indexOf(joint) < 0) return null;
+    // 작업 209b: 키가 있으면 지금 키(키 위) 또는 저장 전 미리보기(키 사이)에 쓴다. 키가 없으면 인물 자신(ca === owner).
+    const ca = poseTarget(cut, id, true);
     const v = clampRigJoint(joint, values, from).map(r4);
     actorRig(ca)[joint] = v;
-    ca.manual = true;
+    if (ca === owner) ca.manual = true;
+    else touchPose(cut, owner, ca);
     return v;
   }
 
   /* 지금 이 관절 값(라디안): rig 에 있으면 그 값, 없으면 보이는 값. 모르면 null. */
   function jointNow(cut, id, joint) {
-    const ca = cutActor(cut, id);
+    const ca = cutActor(cut, id) && poseTarget(cut, id, false);
     if (ca && ca.rig && Array.isArray(ca.rig[joint])) return ca.rig[joint].map((x) => Number(x) || 0);
     const entry = current && current.scene.actors[id];
     return entry && current.scene.drawnCut === cut ? entry.mannequin.readJoint(joint) : null;
   }
 
   function writeRootY(cut, id, value) {
-    const ca = cutActor(cut, id);
-    if (!ca) return null;
+    const owner = cutActor(cut, id);
+    if (!owner) return null;
+    const ca = poseTarget(cut, id, true); // 작업 209b
     const v = r4(Math.max(RIG_ROOT_Y_RANGE[0], Math.min(RIG_ROOT_Y_RANGE[1], Number(value) || 0)));
     actorRig(ca).rootY = v;
-    ca.manual = true;
+    if (ca === owner) ca.manual = true;
+    else touchPose(cut, owner, ca);
     return v;
   }
 
@@ -2454,7 +2846,7 @@ function createController(host, options) {
       p.rootY0 = m.pelvis.position.y;
       p.scale = m.group.scale.y || 1;
       p.mpp = metersPerPixel(m.hips.getWorldPosition(new THREE.Vector3()));
-      const ca = cutActor(cut, id);
+      const ca = poseTarget(cut, id, false); // 작업 209b: 키가 있으면 지금 키 자세
       p.planted = [];
       ["L", "R"].forEach((side) => {
         const at = limbOf(m, "leg", side).ankle.getWorldPosition(new THREE.Vector3());
@@ -2541,7 +2933,7 @@ function createController(host, options) {
   /* 채널 박스: 관절 값(도, [숙이기 x, 돌리기 y, 기울이기 z]). rig 에 있으면 그 값, 없으면 지금 보이는 값. */
   function jointDeg(id, joint, cutArg) {
     if (RIG_JOINTS.indexOf(joint) < 0) return null;
-    const ca = cutActor(cutArg || editCut(), id);
+    const ca = cutActor(cutArg || editCut(), id) && poseTarget(cutArg || editCut(), id, false); // 작업 209b
     const entry = current && current.scene.actors[id];
     let v = ca && ca.rig && Array.isArray(ca.rig[joint]) ? ca.rig[joint] : null;
     if (!v && entry) v = entry.mannequin.readJoint(joint);
@@ -2554,7 +2946,7 @@ function createController(host, options) {
   }
 
   function rootYOf(id, cutArg) {
-    const ca = cutActor(cutArg || editCut(), id);
+    const ca = cutActor(cutArg || editCut(), id) && poseTarget(cutArg || editCut(), id, false); // 작업 209b
     return ca && ca.rig && typeof ca.rig.rootY === "number" ? ca.rig.rootY : 0;
   }
 
@@ -2569,21 +2961,23 @@ function createController(host, options) {
   /* [이 관절 초기화]: rig 에서 그 관절을 뺀다(목록 자세 값으로 돌아간다). "root" 면 골반 높이. */
   function resetJoint(id, joint, cutArg) {
     return poseEdit(cutArg, (cut) => {
-      const ca = cutActor(cut, id);
+      const owner = cutActor(cut, id);
+      const ca = owner && poseTarget(cut, id, true); // 작업 209b: 키·미리보기 또는 인물
       if (!ca || !ca.rig || typeof ca.rig !== "object") return;
       delete ca.rig[joint === "root" ? "rootY" : joint];
       dropRigIfEmpty(ca);
-      ca.manual = true;
+      touchPose(cut, owner, ca);
     }, true);
   }
 
   /* [포즈 초기화]: rig 를 지운다(목록에서 고른 자세 그대로). */
   function resetPose(id, cutArg) {
     return poseEdit(cutArg, (cut) => {
-      const ca = cutActor(cut, id);
+      const owner = cutActor(cut, id);
+      const ca = owner && poseTarget(cut, id, true); // 작업 209b: 키·미리보기 또는 인물
       if (!ca || !ca.rig) return;
       delete ca.rig;
-      ca.manual = true;
+      touchPose(cut, owner, ca);
     }, true);
   }
 
@@ -2591,7 +2985,8 @@ function createController(host, options) {
      먼저 굳혀(목록 동작의 한쪽 팔도) 반대편으로 옮긴다. */
   function mirrorPose(id, cutArg) {
     return poseEdit(cutArg, (cut) => {
-      const ca = cutActor(cut, id);
+      const owner = cutActor(cut, id);
+      const ca = owner && poseTarget(cut, id, true); // 작업 209b: 키·미리보기 또는 인물
       if (!ca) return;
       const base = Object.assign({}, ca.rig && typeof ca.rig === "object" ? ca.rig : {});
       const entry = current && current.scene.actors[id];
@@ -2613,8 +3008,407 @@ function createController(host, options) {
       });
       ca.rig = next;
       dropRigIfEmpty(ca);
-      ca.manual = true;
+      touchPose(cut, owner, ca);
     }, true);
+  }
+
+  /* ================================================================ 작업 209b: 자세 키(Maya 식) · 잔상 · 이동 궤적 · 포즈 모음
+
+     [키 찍기](S): 고른 인물의 지금 자리·방향·rig 를 키 스크러버 자리(u)에 키로(같은 u 면 바꾼다, 최대 8개). 키가 없던 인물은
+     u=0 에도 지금 자세로 키를 하나 더 만들어 움직임의 시작을 둔다. 키 위에서 고치면 그 키가 바뀌고(한 단계), 키 사이에서 고치면
+     저장 전 미리보기(edit.live)만 — S 를 눌러야 키가 된다(안내 KEY_HINT_TEXT). 시점을 옮기면 미리보기는 버린다(Maya 와 같다).
+     , / . = 앞·뒤 키 · 마름모 누르기 = 그 키로 · [키 지우기]·Delete = 고른 키 지우기. 잔상(키 자세 반투명 마네킹)·이동 궤적(바닥 선
+     + 키 점)은 helpers 묶음 안이라 녹화에 나오지 않고, 고를 수도 없다(raycast 없음 · pickAt 대상 아님). */
+  const KEY_HINT_TEXT = "키 찍기(S)를 눌러 이 시점에 저장하세요";
+  const GHOST_MAX_OPACITY = 0.38;
+  const GHOST_MIN_OPACITY = 0.08;
+  const TRAIL_COLOR = 0xffb74d;
+  const noRaycast = () => {};
+
+  function hasKeys(ca) {
+    return !!ca && Array.isArray(ca.keys) && ca.keys.length > 0;
+  }
+
+  /* 컷 안 지금 시점 u(0~1): 키 스크러버가 그 컷을 고정했으면 그 값, 아니면 재생 시각에서. */
+  function cutU(cut) {
+    if (!cut) return 0;
+    if (edit.pinCut === cut) return edit.keyU;
+    const start = Number(cut.start) || 0;
+    const end = Number(cut.end) || start;
+    return clamp01((clockT - start) / Math.max(0.001, end - start));
+  }
+
+  function keyIndexAt(ca, u) {
+    if (!hasKeys(ca)) return -1;
+    return ca.keys.findIndex((k) => k && Math.abs(Number(k.u) - u) < KEY_U_EPS);
+  }
+
+  /* 키가 없는 인물의 시점 u 자세(걷는 인물 moveTo 는 그 시점 자리). */
+  function staticPose(ca, u) {
+    const p = Array.isArray(ca.pos) ? ca.pos : [0, 0, 0];
+    let x = Number(p[0]) || 0;
+    let z = Number(p[2]) || 0;
+    if (Array.isArray(ca.moveTo)) {
+      x = lerp(x, Number(ca.moveTo[0]) || 0, u);
+      z = lerp(z, Number(ca.moveTo[2]) || 0, u);
+    }
+    return { pos: [r3(x), 0, r3(z)], facingDeg: Number(ca.facingDeg) || 0, rig: copyRig(ca.rig) };
+  }
+
+  /* 고칠 자세 물체: 키가 없으면 인물(ca) 자신 · 키 위면 그 키 · 키 사이면 저장 전 미리보기(create 면 만든다, 아니면 보간한 사본). */
+  function poseTarget(cut, id, create) {
+    const ca = cutActor(cut, id);
+    if (!ca || !hasKeys(ca)) return ca;
+    const u = cutU(cut);
+    const i = keyIndexAt(ca, u);
+    if (i >= 0) return ca.keys[i];
+    const live = edit.live;
+    if (live && live.cut === cut && live.id === id && Math.abs(live.u - u) < KEY_U_EPS) return live.pose;
+    const entry = current && current.scene.actors[id];
+    const s = sampleKeys(ca.keys, u, entry && entry.mannequin.baseRig);
+    const pose = { pos: s.pos.map(r3), facingDeg: Math.round(s.facingDeg * 10) / 10, rig: copyRig(s.rig) };
+    if (create) {
+      edit.live = { cut, id, u, pose, changed: false };
+      if (create !== "quiet") emitState();
+    }
+    return pose;
+  }
+
+  /* 정적 자리·방향·rig 를 첫 키에 맞춘다(키를 모르는 서버 계산·옛 화면도 움직임의 시작 자리를 본다). */
+  function syncStaticFromKeys(ca) {
+    const ks = validKeys(ca.keys);
+    if (!ks.length) return;
+    const xz = keyXZ(ks[0]);
+    setVec(ca, "pos", [xz[0], 0, xz[1]]);
+    ca.facingDeg = Number(ks[0].facingDeg) || 0;
+    const rig = copyRig(ks[0].rig);
+    if (Object.keys(rig).length) ca.rig = rig;
+    else delete ca.rig;
+  }
+
+  /* 자세를 고쳤다: 인물 자신 → manual · 키 → manual + 키 관절 맞춤 + 정적 값 · 미리보기 → 데이터는 그대로(S 전까지). */
+  function touchPose(cut, ca, tgt) {
+    if (!ca) return;
+    if (tgt === ca) {
+      ca.manual = true;
+      return;
+    }
+    if (edit.live && tgt === edit.live.pose) {
+      if (!edit.live.changed) {
+        edit.live.changed = true;
+        emitState(); // 안내: 지금은 미리보기
+      }
+      return;
+    }
+    ca.manual = true;
+    const entry = current && current.scene.actors[ca.id];
+    unifyKeyRigs(ca.keys, entry && entry.mannequin.baseRig);
+    syncStaticFromKeys(ca);
+  }
+
+  function pinAt(cut, u) {
+    edit.pinCut = cut;
+    edit.keyU = clamp01(Number(u) || 0);
+    const start = Number(cut.start) || 0;
+    const end = Number(cut.end) || start;
+    clockT = Math.min(start + (end - start) * edit.keyU, Math.max(start, end - 1e-3));
+  }
+
+  function selectedActorId() {
+    return edit.sel && edit.sel.type === "actor" ? edit.sel.id : null;
+  }
+
+  function finishKeyEdit(cut) {
+    commitEdit(cut);
+    renderAt(clockT);
+    emit("edit", { cut, kind: "commit" });
+    emitState();
+  }
+
+  /* [키 찍기](S). 지금 보이는 자세(키 · 미리보기 · 보간 · 키 없는 인물)를 u 에 키로. 한 번 = 되돌리기 한 단계. */
+  function setPoseKey(idArg, cutArg) {
+    const id = idArg || selectedActorId();
+    const cut = cutArg || editCut();
+    const ca = id && cut ? cutActor(cut, id) : null;
+    if (!ca || recording) return false;
+    pause();
+    const u = roundU(cutU(cut));
+    const now = poseTarget(cut, id, false);
+    const snap = now === ca ? staticPose(ca, u)
+      : { pos: (Array.isArray(now.pos) ? now.pos : [0, 0, 0]).map(r3), facingDeg: Number(now.facingDeg) || 0, rig: copyRig(now.rig) };
+    let keys = hasKeys(ca) ? ca.keys : [];
+    if (!hasKeys(ca) && u > KEY_U_EPS) keys = upsertKey(keys, Object.assign({ u: 0 }, staticPose(ca, 0))).keys;
+    const res = upsertKey(keys, Object.assign({ u }, snap));
+    if (res.full) {
+      edit.keyMsg = "키는 한 인물에 " + POSE_KEYS_MAX + "개까지입니다";
+      emitState();
+      return false;
+    }
+    edit.keyMsg = "";
+    ca.keys = res.keys;
+    ca.manual = true;
+    const entry = current && current.scene.actors[id];
+    unifyKeyRigs(ca.keys, entry && entry.mannequin.baseRig);
+    syncStaticFromKeys(ca);
+    edit.live = null;
+    pinAt(cut, u);
+    edit.keySel = { id, u };
+    finishKeyEdit(cut);
+    return true;
+  }
+
+  /* [키 지우기] · Delete: 고른 마름모(없으면 지금 u 의 키) 하나를 지운다. 다 지우면 keys 를 뺀다(정적 자세 = 마지막 첫 키). */
+  function deletePoseKey(idArg, uArg, cutArg) {
+    const id = idArg || (edit.keySel ? edit.keySel.id : null) || selectedActorId();
+    const cut = cutArg || editCut();
+    const ca = id && cut ? cutActor(cut, id) : null;
+    if (!ca || !hasKeys(ca) || recording) return false;
+    const u = uArg !== undefined && uArg !== null ? Number(uArg)
+      : edit.keySel && edit.keySel.id === id ? edit.keySel.u : cutU(cut);
+    if (keyIndexAt(ca, u) < 0) return false;
+    const rest = removeKey(ca.keys, u);
+    if (rest.length) {
+      ca.keys = rest;
+      syncStaticFromKeys(ca);
+    } else {
+      delete ca.keys;
+    }
+    ca.manual = true;
+    edit.keySel = null;
+    edit.live = null;
+    edit.keyMsg = "";
+    finishKeyEdit(cut);
+    return true;
+  }
+
+  /* 마름모 누르기: 그 키 시점으로(스크러버를 그 컷에 고정하고 그 키를 고른다). 데이터는 바꾸지 않는다. */
+  function jumpToPoseKey(idArg, u, cutArg) {
+    const id = idArg || selectedActorId();
+    const cut = cutArg || editCut();
+    if (!id || !cut || recording) return false;
+    pause();
+    edit.live = null;
+    pinAt(cut, u);
+    edit.keySel = { id, u: roundU(u) };
+    renderAt(clockT);
+    emitState();
+    return true;
+  }
+
+  /* , / . : 앞·뒤 키로. */
+  function gotoPoseKey(dir) {
+    const id = selectedActorId();
+    const cut = editCut();
+    const ca = id && cut ? cutActor(cut, id) : null;
+    if (!hasKeys(ca)) return false;
+    const u = keyNeighbor(ca.keys, cutU(cut), dir);
+    return u === null ? false : jumpToPoseKey(id, u, cut);
+  }
+
+  function ghostsOn(ca) {
+    const n = hasKeys(ca) ? validKeys(ca.keys).length : 0;
+    return edit.ghosts === null ? n >= 2 : !!edit.ghosts && n >= 1;
+  }
+
+  function setGhosts(on) {
+    edit.ghosts = !!on;
+    if (!playing && !recording) renderAt(clockT);
+    emitState();
+  }
+
+  /* 패널·키 줄이 보는 고른 인물의 키 상태. */
+  function poseKeyInfo() {
+    const id = selectedActorId();
+    const cut = editCut();
+    const ca = id && cut ? cutActor(cut, id) : null;
+    if (!ca) return null;
+    const u = cutU(cut);
+    const keys = hasKeys(ca) ? validKeys(ca.keys).map((k) => Number(k.u)) : [];
+    const onKey = keyIndexAt(ca, u) >= 0;
+    const live = !!(edit.live && edit.live.cut === cut && edit.live.id === id && edit.live.changed);
+    return {
+      id, u: roundU(u), keys, onKey, live, max: POSE_KEYS_MAX, msg: edit.keyMsg,
+      hint: keys.length && !onKey ? KEY_HINT_TEXT : "",
+      selected: edit.keySel && edit.keySel.id === id ? edit.keySel.u : null,
+      ghosts: ghostsOn(ca), ghostsAuto: edit.ghosts === null,
+    };
+  }
+
+  // ---- 잔상(Ghost Key Frames): 고른 인물의 키 자세마다 반투명 마네킹 하나. 지금 시점에서 멀수록 옅다. ----
+  const ghostGroup = new THREE.Group();
+  ghostGroup.name = "previz-ghosts";
+  ghostGroup.visible = false;
+  helpers.add(ghostGroup); // 녹화 중엔 helpers 가 숨는다
+  const ghostPool = [];
+  let ghostSig = "";
+
+  function makeGhost(entry) {
+    const d = entry.data || {};
+    const m = new Mannequin(d.color, d.heightM, d.hairColor);
+    const mats = [m.mat, m.faceMat, m.darkMat, m.hairMat];
+    mats.forEach((mt) => {
+      mt.transparent = true;
+      mt.depthWrite = false;
+      mt.opacity = GHOST_MAX_OPACITY;
+    });
+    m.group.traverse((o) => {
+      if (o.isMesh) {
+        o.castShadow = false;
+        o.receiveShadow = false;
+        o.raycast = noRaycast; // 잔상은 고를 수 없다
+      }
+    });
+    m.group.userData.ghost = true;
+    ghostGroup.add(m.group);
+    return { m, mats, owner: entry };
+  }
+
+  function clearGhosts() {
+    ghostPool.splice(0).forEach((g) => {
+      ghostGroup.remove(g.m.group);
+      g.m.dispose();
+    });
+    ghostSig = "";
+  }
+
+  function syncGhosts() {
+    const id = selectedActorId();
+    const cut = editCut();
+    const ca = id && cut ? cutActor(cut, id) : null;
+    const entry = ca && current ? current.scene.actors[id] : null;
+    const show = !!(entry && entry.mannequin.group.visible && ghostsOn(ca) && edit.helpersOn && !recording);
+    ghostGroup.visible = show;
+    if (!show) return;
+    const u = cutU(cut);
+    const ks = validKeys(ca.keys).filter((k) => Math.abs(Number(k.u) - u) >= KEY_U_EPS);
+    if (ghostPool.length && ghostPool[0].owner !== entry) clearGhosts();
+    while (ghostPool.length < ks.length) ghostPool.push(makeGhost(entry));
+    const sig = JSON.stringify(ca) + "|" + String(cut.cutId) + "|" + cut.start + "|" + ks.map((k) => k.u).join(",");
+    ghostPool.forEach((g, i) => {
+      const k = ks[i];
+      g.m.group.visible = !!k;
+      if (!k) return;
+      if (sig !== ghostSig) current.scene.poseGhost(g.m, cut, ca, k);
+      const op = Math.max(GHOST_MIN_OPACITY, GHOST_MAX_OPACITY * (1 - Math.min(1, Math.abs(Number(k.u) - u) * 1.5)));
+      g.mats.forEach((mt) => {
+        mt.opacity = op;
+      });
+    });
+    ghostSig = sig;
+  }
+
+  // ---- 이동 궤적(Motion Trail): 바닥 위 얇은 선(골반 자리, TRAIL_SAMPLES 점) + 키 자리 작은 점. ----
+  const trailGroup = new THREE.Group();
+  trailGroup.name = "previz-motion-trail";
+  trailGroup.visible = false;
+  helpers.add(trailGroup); // 녹화 중엔 helpers 가 숨는다
+  const trailGeo = new THREE.BufferGeometry();
+  trailGeo.setAttribute("position", new THREE.Float32BufferAttribute(new Float32Array((TRAIL_SAMPLES + 1) * 3), 3));
+  const trailLine = new THREE.Line(trailGeo, new THREE.LineBasicMaterial({ color: TRAIL_COLOR, depthTest: false, transparent: true, opacity: 0.9 }));
+  trailLine.frustumCulled = false;
+  trailLine.renderOrder = 980;
+  trailLine.raycast = noRaycast;
+  trailGroup.add(trailLine);
+  const trailDotGeo = new THREE.SphereGeometry(0.045, 10, 8);
+  const trailDots = [];
+  for (let i = 0; i < POSE_KEYS_MAX; i++) {
+    const mat = new THREE.MeshBasicMaterial({ color: TRAIL_COLOR, depthTest: false, transparent: true, opacity: 0.95 });
+    const dot = new THREE.Mesh(trailDotGeo, mat);
+    dot.renderOrder = 981;
+    dot.raycast = noRaycast;
+    dot.visible = false;
+    trailGroup.add(dot);
+    trailDots.push({ dot, mat });
+  }
+
+  function syncTrail() {
+    const id = selectedActorId();
+    const cut = editCut();
+    const ca = id && cut ? cutActor(cut, id) : null;
+    const entry = ca && current ? current.scene.actors[id] : null;
+    const show = !!(entry && entry.mannequin.group.visible && hasKeys(ca) && edit.helpersOn && !recording);
+    trailGroup.visible = show;
+    if (!show) return;
+    const pts = trailPoints(ca.keys, TRAIL_SAMPLES);
+    const attr = trailGeo.getAttribute("position");
+    pts.forEach((p, i) => attr.setXYZ(i, p[0], p[1], p[2]));
+    attr.needsUpdate = true;
+    trailGeo.setDrawRange(0, pts.length);
+    const u = cutU(cut);
+    const ks = validKeys(ca.keys);
+    trailDots.forEach((d, i) => {
+      const k = ks[i];
+      d.dot.visible = !!k;
+      if (!k) return;
+      const xz = keyXZ(k);
+      d.dot.position.set(xz[0], TRAIL_Y_M, xz[1]);
+      const sel = Math.abs(Number(k.u) - u) < KEY_U_EPS;
+      d.mat.color.setHex(sel ? SEL_COLOR : TRAIL_COLOR);
+    });
+  }
+
+  // ---- 포즈 모음: 기본(목록 자세·손 동작에서 만든 rig) · 사용자 저장(vnew.js 가 localStorage 에) · 좌우 반전 붙여넣기 ----
+  function posePresets() {
+    return buildPosePresets().map((p) => Object.assign({}, p, { rig: copyRig(p.rig) }));
+  }
+
+  /* [이 포즈 저장]: 지금 보이는 15개 관절 값 + 골반 높이(서기 기준 차) — 목록 자세 몫까지 담아 어디에 붙여도 같은 모양. */
+  function capturePose(id) {
+    const entry = current && current.scene.actors[id];
+    if (!entry || !entry.mannequin.group.visible) return null;
+    const m = entry.mannequin;
+    const rig = {};
+    RIG_JOINTS.forEach((j) => {
+      rig[j] = m.readJoint(j).map((x) => Math.round(x * 1000) / 1000);
+    });
+    const rootY = m.hips.position.y + m.pelvis.position.y - RIG_DIMS.hipsY;
+    rig.rootY = Math.round(Math.max(RIG_ROOT_Y_RANGE[0], Math.min(RIG_ROOT_Y_RANGE[1], rootY)) * 1000) / 1000;
+    return { rig };
+  }
+
+  /* 포즈 모음 붙여넣기(mirrored = 좌우 반전): 인물(키가 없으면) · 지금 키 · 키 사이 미리보기의 rig 를 바꾼다. 한 단계.
+     골반 높이는 서기 기준이라 지금 목록 자세 엉덩이 높이를 빼서 rootY 로. 눕기(pose)는 목록 자세도 함께 바꾼다. */
+  function applyPosePreset(id, preset, mirrored, cutArg) {
+    if (!preset || !preset.rig || typeof preset.rig !== "object") return false;
+    const p = mirrored ? mirrorPreset(preset) : preset;
+    return poseEdit(cutArg, (cut) => {
+      const owner = cutActor(cut, id);
+      if (!owner) return;
+      const entry = current && current.scene.actors[id];
+      let listHips = entry && current.scene.drawnCut === cut ? entry.mannequin.hips.position.y : RIG_DIMS.hipsY;
+      if (p.pose && owner.pose !== p.pose) {
+        owner.pose = p.pose;
+        owner.manual = true;
+      } else if (!p.pose && owner.pose === "lie") {
+        owner.pose = "stand";
+        owner.manual = true;
+        listHips = RIG_DIMS.hipsY;
+      }
+      const ca = poseTarget(cut, id, true);
+      const rig = copyRig(p.rig);
+      Object.keys(rig).forEach((k) => {
+        if (k !== "rootY") rig[k] = clampRigJoint(k, rig[k]).map(r4);
+      });
+      const rootY = p.pose ? 0 : (Number(p.rig.rootY) || 0) + RIG_DIMS.hipsY - listHips;
+      rig.rootY = r4(Math.max(RIG_ROOT_Y_RANGE[0], Math.min(RIG_ROOT_Y_RANGE[1], rootY)));
+      ca.rig = rig;
+      touchPose(cut, owner, ca);
+    }, true);
+  }
+
+  /* 패널 방향·위치 칸이 고칠 물체(작업 209b): 키가 없으면 인물 · 키 위면 그 키 · 키 사이면 저장 전 미리보기(조용히 만든다). */
+  function poseFieldTarget(id, cutArg) {
+    const cut = cutArg || editCut();
+    return cut && cutActor(cut, id) ? poseTarget(cut, id, "quiet") : null;
+  }
+
+  /* 패널 칸이 그 물체를 고친 뒤: 키면 manual·관절 맞춤·정적 값, 미리보기면 안내만(되돌리기는 패널이 잠시 뒤 commitEdit). */
+  function poseFieldChanged(id, cutArg) {
+    const cut = cutArg || editCut();
+    const ca = cut ? cutActor(cut, id) : null;
+    if (!ca) return false;
+    touchPose(cut, ca, poseTarget(cut, id, false));
+    return true;
   }
 
   /* ---- 되돌리기: 컷 JSON 스냅숏. commitEdit 이 마지막 기록과 다르면 한 단계를 쌓는다. ---- */
@@ -2642,6 +3436,8 @@ function createController(host, options) {
 
   function stepHistory(from, to, key) {
     commitEdit(editCut());
+    edit.live = null; // 작업 209b: 되돌리면 저장 전 미리보기·고른 키는 버린다
+    edit.keySel = null;
     const step = from.pop();
     if (!step) return false;
     restoreCut(step.cut, step[key]);
@@ -2677,6 +3473,7 @@ function createController(host, options) {
     else if (sel && (sel.type === "camera" || sel.type === "target")) next = { type: sel.type };
     const prevId = edit.sel && edit.sel.type === "actor" ? edit.sel.id : null;
     edit.sel = next;
+    if (edit.keySel && !(next && next.id === edit.keySel.id)) edit.keySel = null; // 작업 209b
     // 작업 209a: 인물이 아닌 것을 고르면 포즈 모드를 끄고, 다른 인물로 바꾸면 고른 관절만 뗀다.
     let poseChanged = false;
     if (edit.pose && (!next || next.type !== "actor")) {
@@ -2811,7 +3608,8 @@ function createController(host, options) {
     return applyOnce((cut) => {
       const ca = cutActor(cut, id);
       if (!ca) return;
-      const p = Array.isArray(ca.pos) ? ca.pos : [0, 0, 0];
+      const now = poseTarget(cut, id, false); // 작업 209b
+      const p = Array.isArray(now.pos) ? now.pos : [0, 0, 0];
       writeCam(cut, null, new THREE.Vector3(Number(p[0]) || 0, headHeight(ca, actorMeta(id)), Number(p[2]) || 0));
     });
   }
@@ -2898,6 +3696,12 @@ function createController(host, options) {
     pause();
     edit.pinCut = cut;
     edit.keyU = clamp01(Number(u) || 0);
+    // 작업 209b: 시점을 옮기면 저장 전 미리보기는 버린다(Maya 와 같다). 그 자리에 자세 키가 있으면 그 키를 고른다.
+    if (edit.live && Math.abs(edit.live.u - edit.keyU) >= KEY_U_EPS) edit.live = null;
+    const selId = selectedActorId();
+    const selCa = selId ? cutActor(cut, selId) : null;
+    edit.keySel = selCa && keyIndexAt(selCa, edit.keyU) >= 0 ? { id: selId, u: roundU(edit.keyU) } : null;
+    edit.keyMsg = "";
     const start = Number(cut.start) || 0;
     const end = Number(cut.end) || start;
     clockT = Math.min(start + (end - start) * edit.keyU, Math.max(start, end - 1e-3));
@@ -3023,7 +3827,8 @@ function createController(host, options) {
     const ca = cutActor(cut, hit.id);
     if (!cut || !ca) return false;
     if (!edit.sel || edit.sel.type !== "actor" || edit.sel.id !== hit.id) select(hit);
-    const p = Array.isArray(ca.pos) ? ca.pos : [0, 0, 0];
+    const now = poseTarget(cut, hit.id, false); // 작업 209b: 키가 있으면 지금 보이는 키 자세에서 끈다
+    const p = Array.isArray(now.pos) ? now.pos : [0, 0, 0];
     // 잡은 높이의 수평면에서 끈다(몸통을 잡아도 인물이 커서를 따라간다 — 바닥 y=0 면은 멀리 맞아 3배쯤 빨라진다).
     // 카메라 눈높이 가까이는 면이 거의 나란해 튀므로 카메라 아래 0.3m까지만. 높이는 바뀌지 않는다(바닥 위 이동).
     const camY = viewCamera().position.y;
@@ -3034,7 +3839,7 @@ function createController(host, options) {
     drag.cut = cut;
     drag.x0 = event.clientX;
     drag.grab = g ? [(Number(p[0]) || 0) - g.x, (Number(p[2]) || 0) - g.z] : [0, 0];
-    drag.facing0 = Number(ca.facingDeg) || 0;
+    drag.facing0 = Number(now.facingDeg) || 0;
     if (orbit) orbit.enabled = false; // 인물을 끄는 동안 작업 카메라는 돌지 않는다
     return true;
   }
@@ -3230,8 +4035,9 @@ function createController(host, options) {
     applyOnce((cut) => {
       const ca = cutActor(cut, id);
       if (!ca) return;
+      const now = poseTarget(cut, id, false); // 작업 209b: 키가 있으면 지금 보이는 키 자세 기준
       if (turn) {
-        setActorFacing(cut, id, (Number(ca.facingDeg) || 0) + turn);
+        setActorFacing(cut, id, (Number(now.facingDeg) || 0) + turn);
         return;
       }
       const cam = viewCamera();
@@ -3248,7 +4054,7 @@ function createController(host, options) {
       const right = new THREE.Vector3().crossVectors(fwd, new THREE.Vector3(0, 1, 0)).normalize();
       const step = event.shiftKey ? NUDGE_BIG_M : NUDGE_M;
       const move = right.multiplyScalar(arrow[0] * step).addScaledVector(fwd, arrow[1] * step);
-      const p = Array.isArray(ca.pos) ? ca.pos : [0, 0, 0];
+      const p = Array.isArray(now.pos) ? now.pos : [0, 0, 0];
       moveActorTo(cut, id, (Number(p[0]) || 0) + move.x, (Number(p[2]) || 0) + move.z);
     });
     return true;
@@ -3289,6 +4095,14 @@ function createController(host, options) {
       frameSelection();
     } else if (is("p")) {
       setPoseMode(!edit.pose); // 작업 209a: 포즈 모드 켜고 끄기(인물 하나를 골랐을 때)
+    } else if (is("s") && selectedActorId()) {
+      setPoseKey(); // 작업 209b: 키 찍기(Maya S) — 고른 인물의 지금 자세를 키 스크러버 자리에
+    } else if (code === "Comma" || key === ",") {
+      gotoPoseKey(-1); // 작업 209b: 앞 키
+    } else if (code === "Period" || key === ".") {
+      gotoPoseKey(1); // 작업 209b: 뒤 키
+    } else if ((code === "Delete" || key === "delete") && edit.keySel) {
+      deletePoseKey(); // 작업 209b: 고른 마름모 지우기
     } else if (key === "escape") {
       if (edit.pose) {
         setPoseMode(false);
@@ -3503,10 +4317,24 @@ function createController(host, options) {
     onPose(cb) {
       if (typeof cb === "function") edit.listeners.pose.push(cb);
     },
+    // --- 작업 209b 자세 키 · 잔상 · 포즈 모음 API(키 줄·패널) ---
+    setPoseKey,
+    deletePoseKey,
+    jumpToPoseKey,
+    gotoPoseKey,
+    poseKeyInfo,
+    setGhosts,
+    posePresets,
+    capturePose,
+    applyPosePreset,
+    poseFieldTarget,
+    poseFieldChanged,
+    keyHintText: KEY_HINT_TEXT,
     // 검사용(가짜 렌더러·가짜 기즈모): 내부 물체.
     _editor: { helpers, proxy, workCamera, shotCamera: camera, stage, canvas, overlay, wheelHint,
       get gizmo() { return gizmo; }, get orbit() { return orbit; }, poseGroup, get poseControls() { return poseCtl; },
-      get scene() { return current ? current.scene : null; } },
+      get scene() { return current ? current.scene : null; }, ghostGroup, trailGroup, get ghosts() { return ghostPool; },
+      get live() { return edit.live; }, get undoDepth() { return edit.undo.length; } },
     destroy,
   };
 }

@@ -68562,6 +68562,8 @@ def main() -> int:
     if not __import__("check_previz_easy_207").check_previz_easy_207(): fail("작업 207: 프리비즈 직접 끌기 · 휠 포커스 · 방향키 · 이름표 · dirty 검사 실패")
     if not __import__("check_pose_rig_208").check_pose_rig_208(): fail("작업 208: 직접 잡은 자세(rig·keys) 보존 · 설명 · 프롬프트 검사 실패")
     if not __import__("check_pose_controls_209a").check_pose_controls_209a(): fail("작업 209a: 프리비즈 포즈(관절 고리 · IK 손발 · 골반 · 채널 박스 · 좌우 반전) 검사 실패")
+    if not __import__("check_pose_keys_209b").check_pose_keys_209b(): fail("작업 209b: 프리비즈 자세 키(S · 마름모 · , .) · 잔상 · 이동 궤적 · 포즈 모음 검사 실패")
+    if not __import__("check_astra_broker_210").check_astra_broker_210(): fail("작업 210: GPT-6 Astra 키이스트 역할 · Claude 5.x 와이랩 · 나머지 와이낫 계정 검사 실패")
     check_vnew_voice_ui_203()
     print()
     if warnings:
