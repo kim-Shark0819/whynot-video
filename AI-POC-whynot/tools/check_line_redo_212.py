@@ -15,6 +15,8 @@ retake·가짜 LLM·가짜 ffmpeg, 유료·네트워크 0.
          실패한 작업 [다시 시도] = 견적부터 새 틀 · ⑦ AI로 고치기 머리 그대로
   (lr-l) fix2: 기본 모델 = 가장 싼 영상→영상 모델(Seedance 는 다른 모델이 없을 때만 · 같으면 원래 모델) · 모델 고르면 견적 다시 ·
          submit 에 고른 모델 · 콘텐츠 검사 거절 → 다음으로 싼 모델(stepUp, 새 금액 확인 전에는 내지 않음) · 형식별 프롬프트 · 화면 고르기
+  (lr-m) fix3: 늘린 구간 안 컷 → 잇기는 컷에서 멈춤(뒤는 원래 프레임·소리 · 20ms 크로스페이드) · 프롬프트 컷 줄 · 줄의 샷 안에서 먼저 늘림 ·
+         장면 바뀜으로 콘티 컷 다듬기 · 샷이 최소보다 짧으면 넘음(컷 줄) · rebuild_revision(길이 그대로 · 샷 안만 · 모델 호출 0)
 
 실행: python -X utf8 -B tools/check_line_redo_212.py
 """
@@ -50,6 +52,7 @@ GROUPS = {
     "lr-j": "LF 줄 끝",
     "lr-k": "fix1: 대사 틀(구도 그대로 · 한국어로만 · 뜻) · 소리 규칙 1번 · 다시 시도 = 새 견적 · ⑦ 그대로",
     "lr-l": "fix2: 가장 싼 모델 기본 · Seedance 마지막 · 고르면 다시 견적 · 고른 모델 제출 · 거절 → 확인 뒤 다음 모델",
+    "lr-m": "fix3: 잇기는 줄의 샷 안만 · 컷 줄 · 샷 안에서 먼저 늘림 · 짧은 샷은 넘음 · rebuild_revision",
 }
 SEED, KLING, WAN = ("bytedance/seedance-2.5/reference-to-video", "fal-ai/kling-video/o3/standard/video-to-video/edit",
                     "alibaba/wan-3.0/reference-to-video")
@@ -421,6 +424,79 @@ def check_line_redo_212() -> bool:  # noqa: C901 — 한 검사 함수(다른 �
     except Exception as exc:  # noqa: BLE001
         crash("lr-l", exc)
 
+    # ================= (lr-m) fix3: 잇기는 줄의 샷 안만 · 컷 줄 · 샷 안에서 먼저 늘림 =================
+    try:
+        pick_m = lambda r: [r["start"], r["end"], r["padded"], r["cuts"], r["splice"], r["shot"]]  # noqa: E731
+        prod = [{"t0": 0.0, "t1": 10.0, "sourceKey": "k", "in0": 0.0, "rate": 1.0, "cuts": [[0.0, 5.0, "a"], [5.0, 10.0, "b"]]}]
+        expect("lr-m", [pick_m(lr.line_range(3.6, 5.17, prod, scenes=[5.2, 8.9])), pick_m(lr.line_range(3.6, 5.17, prod))],
+               [[2.2, 5.2, True, [], [2.2, 5.2], [0.0, 5.2]], [2.0, 5.0, True, [], [2.0, 5.0], [0.0, 5.0]]],
+               "prod(e3): 줄의 샷(5.2초까지) 안에서 늘림 — 2.886–5.886 처럼 컷을 넘지 않음 · 장면 바뀜(5.2)이 콘티 컷(5.0)을 다듬음 · "
+               "콘티에서 먼 장면 바뀜(8.9)은 무시 · 검사 없으면 콘티만")
+        short = [{"t0": 0.0, "t1": 10.0, "sourceKey": "k", "in0": 1.0, "rate": 1.0,
+                  "cuts": [[0.0, 4.0, "a"], [4.0, 6.0, "b"], [6.0, 10.0, "c"]]}]
+        r_s = lr.line_range(4.5, 5.9, short)
+        sp_m = {"speaker": "민지", "textKo": "잘 가", "thought": False, "deliveryKo": ""}
+        lines_m = lr.redo_edit_lines(sp_m, "", 4000, r_s["cutsAt"])
+        hard = ("@Video1 has a hard cut at 2 s to a different shot; keep that cut and the second shot exactly as in @Video1.")
+        p_m, _meta_m = rt._compose_prompt("SCENE: x.\nDIALOGUE: 민지: \"안녕\".", "@Video1 is the shot to edit. " + gm.AUDIO_DIALOGUE_ONLY,  # noqa: SLF001
+                                          {"start": 3.0, "end": 6.0, "in": 3.0, "out": 6.0}, 10.0, request_ko=lr.redo_request(sp_m),
+                                          extra_ko="", change_en="", max_bytes=4000, result=True, edit_lines=lines_m)
+        f_m = lr._finish_prompt(p_m, "안녕", "잘 가", 4000)  # noqa: SLF001
+        expect("lr-m", [pick_m(r_s), r_s["in"], r_s["cutsAt"], len(lines_m), lines_m[-1], hard in f_m, lr.audio_rule_count(f_m),
+                        len(lr.redo_edit_lines(sp_m, "", 4000))],
+               [[4.0, 7.0, True, [6.0], [4.0, 6.0], [4.0, 6.0]], 5.0, [2.0], 3, hard, True, 1, 2],
+               "샷(2초)이 최소보다 짧음 → 샷 전체 + 이웃 샷 쪽으로 넘음 · 잇기는 컷(6.0)에서 멈춤 · @Video1 초의 컷 줄(EDIT 줄들 뒤) · 컷 없으면 줄 그대로")
+        expect("lr-m", [lr._splice_in(2.886, 5.886, 3.6, 5.17, lr.shot_bounds(prod[0], [5.2]), 1.0)["splice"],  # noqa: SLF001
+                        lr._splice_in(2.886, 5.886, 3.6, 4.5, lr.shot_bounds(prod[0], [5.2]), 1.0)["splice"],  # noqa: SLF001
+                        lr._splice_in(2.886, 5.886, 3.6, 5.17, lr.shot_bounds(prod[0], [5.2]), 1.0)["cuts"]],  # noqa: SLF001
+               [[2.886, 5.2], [2.886, 4.75], [5.2]], "저장된 구간 2.886–5.886: 잇기 = 컷(5.2)까지 · 컷이 멀면 줄 끝 + 0.25초 · 구간 안 컷")
+        import array as _array  # noqa: PLC0415
+
+        rec: dict = {"seg": [], "join": None, "audio": []}
+
+        def f_seg(source, video, *, start_sec, frames, fps, width, height, **kw):
+            rec["seg"].append([Path(source).stem, round(start_sec, 4), frames])
+            Path(video).write_bytes(b"v")
+
+        def f_audio(source, out, *, start_sec, samples, **kw):
+            rec["audio"].append([Path(source).stem, samples])
+            value = 1000 if Path(source).stem == "base" else -1000
+            Path(out).write_bytes(_array.array("h", [value] * (samples * 2)).tobytes())
+
+        def f_join(videos, out, *, audio_path=""):
+            rec["join"] = _array.array("h", Path(audio_path).read_bytes())
+
+        from src import stitcher as st  # noqa: PLC0415
+
+        saved_st = {n: getattr(st, n) for n in ("edit_segment", "edit_audio", "edit_join")}
+        st.edit_segment, st.edit_audio, st.edit_join = f_seg, f_audio, f_join
+        try:
+            with tempfile.TemporaryDirectory(prefix="chk212m-") as tmp:
+                base_p, new_p = str(Path(tmp) / "base.mp4"), str(Path(tmp) / "new.mp4")
+                Path(base_p).write_bytes(b"b")
+                Path(new_p).write_bytes(b"n")
+                lr._splice_file(base_p, new_p, str(Path(tmp) / "out.mp4"), start=2.886, end=5.886, duration=10.0, width=160,  # noqa: SLF001
+                                height=120, fps=24, base_audio=True, new_audio=True, splice_start=2.886, splice_end=5.2)
+                pcm = rec["join"]
+                a_s, b_s = 69 * 2000, 125 * 2000  # 프레임 69 · 125(= 5.2초 반올림) × 48000/24
+                at = lambda i: pcm[2 * i]  # noqa: E731
+                expect("lr-m", [rec["seg"], sum(s[2] for s in rec["seg"]), rec["audio"], len(pcm) // 2,
+                                [at(a_s - 1), at(a_s + 960), at(b_s - 481), at(b_s + 480), at(479999), abs(at(a_s + 480)) < 20,
+                                 abs(at(b_s)) < 20, at(a_s + 200) > 0 > at(a_s + 700), at(b_s - 200) < 0 < at(b_s + 200)]],
+                       [[["base", 0.0, 69], ["new", 0.0, 56], ["base", 5.2083, 115]], 240, [["base", 480000], ["new", 144000]], 480000,
+                        [1000, -1000, -1000, 1000, 1000, True, True, True, True]],
+                       "잇기 파일: 원본 앞 · 새 영상(구간 시작부터 컷까지) · 컷 뒤는 원본 프레임 · 프레임 수 그대로 · 소리 = 컷 뒤 원본 · "
+                       "이음매마다 20ms 크로스페이드(구간 시작 = 새 영상 0초면 이음매 뒤로 민다)")
+                rec.update(seg=[], audio=[])
+                lr._splice_file(base_p, new_p, str(Path(tmp) / "out2.mp4"), start=2.886, end=5.886, duration=10.0, width=160,  # noqa: SLF001
+                                height=120, fps=24, base_audio=True, new_audio=False, splice_start=2.886, splice_end=5.2)
+                expect("lr-m", [rec["audio"], set(rec["join"])], [[["base", 480000]], {1000}], "새 영상에 소리가 없으면 원래 소리 그대로")
+        finally:
+            for n, fn in saved_st.items():
+                setattr(st, n, fn)
+    except Exception as exc:  # noqa: BLE001
+        crash("lr-m", exc)
+
     # ================= (lr-c ~ lr-h) 가짜 저장소 =================
     store = _Store()
     calls: dict[str, list] = {"compose": [], "submit": [], "splice": [], "llm": [], "charge": [], "spawn": []}
@@ -506,6 +582,18 @@ def check_line_redo_212() -> bool:  # noqa: C901 — 한 검사 함수(다른 �
     setv(lr, "_retake_state", lambda owner, pid, gen_id: copy.deepcopy(retake_state))
     setv(lr, "_spawn", fake_spawn)
     setv(lr, "_llm", fake_llm)
+    scene_box: dict = {"times": [], "keys": [], "files": 0}
+
+    def fake_scene_changes(key, start, end):
+        scene_box["keys"].append(key)
+        return [t for t in scene_box["times"] if start <= t <= end]
+
+    def fake_scenes(path, start, end):
+        scene_box["files"] += 1
+        return [t for t in scene_box["times"] if start <= t <= end]
+
+    setv(lr, "_scene_changes", fake_scene_changes)
+    setv(lr, "_scenes", fake_scenes)
     setv(ledger_mod, "charge_text", lambda key, **kw: calls["charge"].append(key))
     final_key = _key("final-webtoon.mp4")
     try:
@@ -769,6 +857,73 @@ def check_line_redo_212() -> bool:  # noqa: C901 — 한 검사 함수(다른 �
             models_box["rows"] = []
         except Exception as exc:  # noqa: BLE001
             crash("lr-l", exc)
+
+        # ================= (lr-m) fix3: 견적 → 잇기(구간 안 컷) · rebuild_revision =================
+        try:
+            c1_key, c2_key = _key("c1-webtoon-1.mp4"), _key("c2-webtoon-1.mp4")
+            one = [{"t0": 0.0, "t1": 4.0, "sourceKey": c1_key, "in0": 0.0, "rate": 1.0, "cuts": [[0.0, 2.0, "c1"], [2.0, 4.0, "c2"]]}]
+            real_pieces = lr._pieces  # noqa: SLF001
+            lr._pieces = lambda *a, **k: copy.deepcopy(one)  # noqa: SLF001 — 두 컷이 든 한 칸(테이크) 원본
+            try:
+                q_m = lr.quote(OWNER, PID, {"variant": "webtoon", "lineId": "e1"})
+            finally:
+                lr._pieces = real_pieces  # noqa: SLF001
+            hard_m = "@Video1 has a hard cut at 2 s to a different shot; keep that cut and the second shot exactly as in @Video1."
+            rq = q_m["quote"]["range"]
+            expect("lr-m", [rq["start"], rq["end"], rq["cuts"], rq["splice"], rq["scene"], hard_m in q_m["prompt"],
+                            hard_m in calls["compose"][-1]["prompt"], calls["compose"][-1]["in"], calls["compose"][-1]["out"]],
+                   [0.0, 3.0, [2.0], [0.0, 2.0], True, True, True, 0.0, 3.0],
+                   "견적: 짧은 샷(c1 2초) → 3초로 늘려 컷을 넘음 · 모델에는 늘린 구간 · 프롬프트에 컷 줄 · 잇기 구간은 컷까지")
+            lr.start(OWNER, PID, {"variant": "webtoon", "lineId": "e1", "confirmUsd": q_m["quote"]["usd"]})
+            out_m = _key("retake/c1-v3.mp4")
+            store.blobs[out_m] = _fake(3.0)
+            retake_state["cells"]["webtoon:c1"] = {"versions": [{"n": 2, "status": "completed", "outputKey": out_m}], "draft": None}
+            n_splice, n_compose, n_submit = len(calls["splice"]), len(calls["compose"]), len(calls["submit"])
+            snd.sound_view(OWNER, PID, "webtoon")
+            redo_m = lr.read_redo(OWNER, PID, "g1", "webtoon")
+            rev_m = redo_m["revisions"][-1]
+            sp_m = calls["splice"][-1] if len(calls["splice"]) > n_splice else {}
+            expect("lr-m", [sp_m.get("start"), sp_m.get("end"), sp_m.get("splice_start"), sp_m.get("splice_end"), sp_m.get("duration"),
+                            rev_m["range"]["splice"], [[p["t0"], p["t1"], p["sourceKey"], p["in0"]] for p in rev_m["pieces"]],
+                            rev_m["clipKey"] == out_m, redo_m["jobs"]["e1"]["status"]],
+                   [0.0, 3.0, 0.0, 2.0, 4.0, [0.0, 2.0], [[0.0, 2.0, out_m, 0.0], [2.0, 4.0, c2_key, 0.0]], True, "done"],
+                   "잇기: 새 영상은 컷(2초)까지만 · 컷 뒤(c2 자리)는 원래 조각 · 길이 그대로")
+            # 옛 규칙으로 만든 판(prod test3 r1 모양: 구간 전체를 덮음, clipKey·splice 없음) → rebuild_revision
+            out9 = _key("retake/c1-v9.mp4")
+            store.blobs[out9] = _fake(3.0)
+            old_pieces = [{"t0": 0.0, "t1": 3.0, "sourceKey": out9, "in0": 0.0, "rate": 1.0, "cuts": []},
+                          {"t0": 3.0, "t1": 4.0, "sourceKey": c2_key, "in0": 1.0, "rate": 1.0, "cuts": []}]
+
+            def add_old(doc):
+                doc["revisions"].append({"r": 9, "key": lr.revision_key(OWNER, PID, "g1", "webtoon", 9), "at": "x", "baseKey": final_key,
+                                         "fromKey": final_key, "fromR": 0, "lineId": "e1", "range": {"start": 0.0, "end": 3.0},
+                                         "pieces": copy.deepcopy(old_pieces), "retake": {"cellKey": "webtoon:c1", "n": 9},
+                                         "model": WAN, "usd": 0.2})
+                doc["current"] = 9
+                return doc
+
+            lr._mutate_redo(OWNER, PID, "g1", "webtoon", add_old)  # noqa: SLF001
+            final_before = store.blobs[final_key]
+            files_before = scene_box["files"]
+            n_splice = len(calls["splice"])
+            got_m = lr.rebuild_revision(OWNER, PID, "webtoon", 9)
+            redo_r = lr.read_redo(OWNER, PID, "g1", "webtoon")
+            new_rev = next(x for x in redo_r["revisions"] if x["r"] == got_m["r"])
+            old_rev = next(x for x in redo_r["revisions"] if x["r"] == 9)
+            sp_r = calls["splice"][-1] if len(calls["splice"]) > n_splice else {}
+            expect("lr-m", [got_m["r"], got_m["splice"], got_m["seconds"], sp_r.get("start"), sp_r.get("end"), sp_r.get("splice_start"),
+                            sp_r.get("splice_end"), sp_r.get("base", b"")[:12], sp_r.get("new", b"")[:12],
+                            [[p["t0"], p["t1"], p["sourceKey"], p["in0"]] for p in new_rev["pieces"]], new_rev["usd"], new_rev["rebuiltFrom"],
+                            redo_r["current"], old_rev["pieces"] == old_pieces, got_m["key"] in store.blobs,
+                            store.blobs[final_key] == final_before, scene_box["files"] - files_before,
+                            [len(calls["compose"]) - n_compose, len(calls["submit"]) - n_submit]],
+                   [10, [0.0, 2.0], 4.0, 0.0, 3.0, 0.0, 2.0, b"FAKE:dur=4.0", b"FAKE:dur=3.0",
+                    [[0.0, 2.0, out9, 0.0], [2.0, 4.0, c2_key, 0.0]], 0.0, 9, 10, True, True, True, 1, [0, 0]],
+                   "rebuild_revision: 저장된 클립 · 같은 원본으로 다시 잇기 · 길이 그대로 · 샷 안(0–2초)만 바꿈 · 컷 뒤 원래 · 새 판(r10) · "
+                   "옛 판·원본 그대로 · 장면 검사는 로컬 파일 · 모델 호출 0(견적·제출 0)")
+            expect("lr-m", [err_of(lambda: lr.rebuild_revision(OWNER, PID, "webtoon", 77))], [["BadRevision", 404]], "없는 판 404")
+        except Exception as exc:  # noqa: BLE001
+            crash("lr-m", exc)
     finally:
         for obj, name, value in reversed(saved_attrs):
             setattr(obj, name, value)
