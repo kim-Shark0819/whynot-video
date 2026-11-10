@@ -19,6 +19,10 @@ start·end 는 estimate_spans 한 곳에서 정한다(컷 구간 → 그 안 말
 작업 202(인물 목소리, voices.py): 반영 작업(job)에 voices(줄마다 목소리 바꾸기 계획)가 있으면 run_apply 가 voices.build_track 으로
 원래 소리에서 그 줄 구간만 바꾼 소리 트랙(wav, 길이 그대로)을 만들고, 속마음 효과는 그 트랙 위에 건다. 새 필드는 모두 선택이다
 (job.voices·job.progress·job.message, versions[].voices) — 옛 문서·반영 기록은 그대로 읽힌다. GET 보기에는 voices(VNEW_SOUND_VOICES 켬)가 붙는다.
+
+작업 212(대사 고치기, line_redo.py): 원본(_source)은 기준(_base_source — ⑦ 내보내기 → ⑤ 완성본) 위에 대사 다시 만든 판(kind redo, 기준과 시간이
+같다)이 있으면 그 판이다. 판끼리 바뀌면 줄 시간을 이어 받고, 컷 구간은 기준 종류로 잰다. versions[].outdated(있을 때만)는 판이 바뀌어 그 반영이
+지금 원본과 맞지 않음을 뜻한다(자동으로 다시 반영하지 않는다). GET 보기에는 lineRedo(VNEW_LINE_REDO 켬)가 붙는다.
 """
 
 from __future__ import annotations
@@ -297,6 +301,20 @@ def estimate_spans(lines: list[dict], cut_spans: dict | None, speech: list, dura
 
 
 def _source(owner: str, pid: str, gen_id: str, gen: dict, variant: str) -> dict:
+    """⑥ 원본. 기준(_base_source) 위에 작업 212 대사 다시 만들기의 지금 판이 있으면 그 판(kind redo — 기준과 시간이 같다)."""
+    base = _base_source(owner, pid, gen_id, gen, variant)
+    from . import line_redo  # noqa: PLC0415 — line_redo 가 이 모듈을 import 한다(순환 피함)
+
+    if not line_redo.enabled():
+        return base
+    try:
+        return line_redo.current_source(owner, pid, gen_id, variant, base)
+    except Exception as exc:  # noqa: BLE001 — 판 기록을 못 읽으면 기준 그대로(⑥ 은 계속 쓴다)
+        log.warning("vnew.sound.redo_source_failed pid=%s variant=%s err=%s", pid, variant, type(exc).__name__)
+        return base
+
+
+def _base_source(owner: str, pid: str, gen_id: str, gen: dict, variant: str) -> dict:
     """그 그림체의 가장 최근 결과. ⑦ 내보내기 done(n 최대) → ⑤ 완성본 순서. 없으면 409 NoSoundSource."""
     prefix = f"users/{owner}/video/{pid}/"
     state, _ = edit._read_json(edit.export_state_key(owner, pid, gen_id))  # noqa: SLF001
@@ -514,34 +532,45 @@ def _measure(source: dict) -> tuple[float, bool, list]:
 def _make_doc(owner: str, pid: str, gen_id: str, plan: dict, gen: dict, variant: str, source: dict,
               lines_src: list[dict], sig: str, old: dict | None) -> dict:
     export_spans = None
-    if source["kind"] == "export":  # 재료 길이 재기(_ensure_meta)는 _MEDIA_SEM 을 따로 잡는다 — 먼저 한다.
+    # 작업 212: 대사 다시 만든 판(kind redo)은 기준과 길이·컷 자리가 같다 — 컷 구간은 기준 종류로 잰다.
+    span_kind = source.get("baseKind") if source["kind"] == "redo" else source["kind"]
+    if span_kind == "export":  # 재료 길이 재기(_ensure_meta)는 _MEDIA_SEM 을 따로 잡는다 — 먼저 한다.
         try:
             export_spans = _export_cut_spans(owner, pid, gen_id, plan, gen, variant, source.get("clips") or [])
         except Exception as exc:  # noqa: BLE001 — 컷 구간을 모르면 전체를 나눈다.
             log.warning("vnew.sound.export_spans_failed pid=%s err=%s", pid, type(exc).__name__)
     duration, has_audio, speech = _measure(source)
-    spans = export_spans if source["kind"] == "export" else _final_cut_spans(plan, gen, variant, duration)
+    spans = export_spans if span_kind == "export" else _final_cut_spans(plan, gen, variant, duration)
     cut_spans = _per_cut(spans, duration)
     cuts = _line_cuts(plan, lines_src, cut_spans)
     times = estimate_spans([{"cutId": c} for c in cuts], cut_spans, speech, duration)
     old_lines = {str(l.get("id")): l for l in (old or {}).get("lines") or [] if isinstance(l, dict)}
-    same_source = isinstance((old or {}).get("source"), dict) and old["source"].get("key") == source["key"]
+    old_key = (old or {}).get("source", {}).get("key") if isinstance((old or {}).get("source"), dict) else None
+    same_source = old_key == source["key"]
+    # 작업 212: 같은 기준의 판끼리(원래 영상 ↔ 대사 다시 만든 판)는 시간이 같다 — 줄 시간을 모두 이어 받는다.
+    same_chain = bool(old_key) and not same_source and old_key in (source.get("chain") or [])
     lines = []
     for line, (start, end) in zip(lines_src, times):
         item = {"id": line["id"], "speaker": line["speaker"], "lineKo": line["lineKo"], "voice": line["voice"],
                 "auto": True, "start": start, "end": end}
         prev = old_lines.get(line["id"])
+        if prev and same_chain:
+            p_start, p_end = edit._num(prev.get("start")), edit._num(prev.get("end"))  # noqa: SLF001
+            if p_start is not None and p_end is not None and 0 <= p_start < p_end <= duration + _TIME_EPS:
+                item["start"], item["end"] = p_start, min(p_end, duration)
         if prev and prev.get("auto") is False:  # 사용자가 고친 줄: voice 는 남기고, 원본이 같으면 시간도 남긴다.
             if prev.get("voice") in VOICES:
                 item["voice"] = prev["voice"]
             p_start, p_end = edit._num(prev.get("start")), edit._num(prev.get("end"))  # noqa: SLF001
-            if same_source and p_start is not None and p_end is not None and 0 <= p_start < p_end <= duration + _TIME_EPS:
+            if (same_source or same_chain) and p_start is not None and p_end is not None and 0 <= p_start < p_end <= duration + _TIME_EPS:
                 item["start"], item["end"] = p_start, min(p_end, duration)
             item["auto"] = False
         lines.append(item)
     src = {"kind": source["kind"], "key": source["key"], "duration": duration, "hasAudio": has_audio}
-    if source["kind"] == "export":
+    if source.get("n") is not None and span_kind == "export":
         src["n"] = source["n"]
+    if source["kind"] == "redo":
+        src.update(r=source["r"], baseKind=source.get("baseKind"), baseKey=source.get("baseKey"))
     log.info("vnew.sound.built pid=%s gen=%s variant=%s kind=%s lines=%d cuts=%d speech=%d audio=%s seconds=%.3f",
              pid, gen_id, variant, source["kind"], len(lines), len(cut_spans or {}), len(speech), has_audio, duration)
     return {"v": 1, "variant": variant, "source": src, "scriptSig": sig, "lines": lines, "createdAt": now_iso(),
@@ -589,7 +618,9 @@ def _job_out(job) -> dict:
 
 def _view(doc: dict, gen_id: str, variant: str, rebuilt: bool) -> dict:
     src = doc.get("source") or {}
-    label = f"⑦ 내보내기 {src.get('n')}" if src.get("kind") == "export" else "⑤ 완성본"
+    label = f"⑦ 내보내기 {src.get('n')}" if src.get("kind") == "export" or src.get("baseKind") == "export" else "⑤ 완성본"
+    if src.get("kind") == "redo":  # 작업 212: 대사 다시 만든 판
+        label += f" · 대사 고침 {src.get('r')}"
     versions = []
     for item in doc.get("versions") or []:
         if not isinstance(item, dict):
@@ -599,6 +630,9 @@ def _view(doc: dict, gen_id: str, variant: str, rebuilt: bool) -> dict:
                    "videoUrl": edit._presign_video(str(item.get("key") or ""))}  # noqa: SLF001
         if isinstance(item.get("voices"), dict):  # 작업 202: 목소리 맞춤 요약(있을 때만 — 옛 기록은 그대로)
             version["voices"] = copy.deepcopy(item["voices"])
+        if item.get("outdated"):  # 작업 212: 대사 다시 만들기로 원본이 바뀌었다(있을 때만)
+            version["outdated"] = True
+            version["outdatedText"] = "목소리 맞춤을 다시 반영해 주세요"
         versions.append(version)
     return {
         "enabled": True,
@@ -626,6 +660,15 @@ def sound_view(owner: str, pid: str, variant=None) -> dict:
 
     if voices.enabled():
         view["voices"] = voices.view(owner, pid, plan, gen_id, variant, doc)
+    from . import line_redo  # noqa: PLC0415 — 작업 212: 대사 고치기 · 그 구간 영상 다시 만들기(켬일 때만 lineRedo)
+
+    if line_redo.enabled():
+        try:
+            view["lineRedo"] = line_redo.view(owner, pid, plan, gen_id, variant, doc)
+        except Exception as exc:  # noqa: BLE001 — 사운드 보기는 계속 보인다
+            log.warning("vnew.sound.line_redo_view_failed pid=%s err=%s", pid, error_gist(f"{type(exc).__name__}: {exc}", 200))
+            view["lineRedo"] = {"enabled": True, "error": "대사 고치기 정보를 읽지 못했습니다. 다시 불러와 주세요.", "lines": {},
+                                "revisions": [], "current": 0, "busy": False, "cast": []}
     return view
 
 

@@ -8825,8 +8825,14 @@ def check_vnew_shot_brief() -> None:
             }},
         }
         prompt_i = genmod._cut_prompt(plan_i, {"cutId": "c1"}, "real", cast=cast, has_image_ref=False)
-        if len(prompt_i.encode("utf-8")) > 2450:  # 069 v2 MOTION/HARMONY short 고정 블록으로 기본 길이 증가 — 한도(2500) 안
-            bad.append(f"(sb-i) 전제: 짧은 지시서 프롬프트가 2450바이트를 넘습니다: {len(prompt_i.encode('utf-8'))}")
+        # 211: dialogue-only audio rule — 맨 끝 소리 규칙 줄(+44 B)만 늘었다(아무것도 안 지운 것은 아래가 켬 글로 본다).
+        # 전제 바이트는 211 을 끈 글로 잰다.
+        with _ad211_off():
+            prompt_i_off = genmod._cut_prompt(plan_i, {"cutId": "c1"}, "real", cast=cast, has_image_ref=False)
+        if len(prompt_i_off.encode("utf-8")) > 2450:  # 069 v2 MOTION/HARMONY short 고정 블록으로 기본 길이 증가 — 한도(2500) 안
+            bad.append(f"(sb-i) 전제: 짧은 지시서 프롬프트가 2450바이트를 넘습니다: {len(prompt_i_off.encode('utf-8'))}")
+        if prompt_i != prompt_i_off + "\n" + genmod.AUDIO_DIALOGUE_ONLY_COMPACT:  # 211
+            bad.append("(sb-i) 211 켬 글이 끈 글 + 맨 끝 소리 규칙 줄이 아닙니다(줄이기 단계가 바뀌었습니다)")
         # 작업 127로 바뀐 기대값: MOOD 는 컷 moodEn 만이라 컷 분위기가 없는 이 입력에는 MOOD 줄이 없다(지시서 moodEn 안 씀).
         for must in ("\nACTION:", "\nSETTING:"):
             if must not in ("\n" + prompt_i):
@@ -10754,8 +10760,10 @@ def check_vnew_take_costume() -> None:
         if "mouth shapes matching the korean" not in motion_part.lower() and "lip sync" not in motion_part.lower():
             bad.append(f"(ca-d) MOTION 에 립싱크(입 모양) 지시가 없습니다: {motion_part[:160]}")
         rules_part = prompt_b.split("RULES:", 1)[1] if "RULES:" in prompt_b else ""
-        if "no background music" not in rules_part.lower():
-            bad.append("(ca-d) RULES 에 'no background music' 가 없습니다")
+        # 211: dialogue-only audio rule — RULES 의 소리 문장이 "no background music" 대신 대사만 규칙(음악 · 앰비언트 없음)
+        if not (genmod.has_audio_rule(rules_part) and "no music" in rules_part.lower()
+                and "natural ambient" not in rules_part.lower()):
+            bad.append("(ca-d) RULES 에 대사만 소리 규칙(no music · 앰비언트 없음)이 없습니다")
 
         # ---- (ca-e) 테이크 1개 → final 복사(_concat 0회), 여러 개 → concat ----
         # 1개: _do_concat 을 직접 불러 concat 호출 0회를 본다. gen 을 직접 심는다.
@@ -20463,7 +20471,9 @@ def check_vnew_fx_prompt() -> None:
     # 작업 127: 맨 앞 고정부(FIXED:)와 컷 단위 "Only … appear." 줄이 더해졌다.
     take_heads = ("FIXED:", "STYLE:", "ASSETS:", "TIMELINE", "MOTION:", "HARMONY:", "RULES:", "AVOID:")
     cut_heads = ("FIXED:", "ASSETS:", "@Video1 is", "CAST —", "Only ", "SHOT:", "BLOCKING:", "ACTION:", "FX:", "EXPRESSION:", "MOTION:",
-                 "MOOD:", "SETTING:", "HARMONY:", "DIALOGUE:", "CONTINUITY:")
+                 "MOOD:", "SETTING:", "HARMONY:", "DIALOGUE:", "CONTINUITY:",
+                 # 211: 소리 규칙은 컷 프롬프트 맨 끝 자기 줄(대사만 · 침묵만 짧은 형 그대로 — 주입 글은 이 줄이 될 수 없다)
+                 genmod.AUDIO_DIALOGUE_ONLY_COMPACT, genmod.AUDIO_SILENCE_ONLY_COMPACT)
 
     def mark(*ids: str) -> None:
         seen_ids.update(ids)
@@ -20494,7 +20504,8 @@ def check_vnew_fx_prompt() -> None:
             extra_i = {"fx": [sweat, sparkle], "fxSuggest": [sweat], "fxDrawn": [blush], "moodKo": "에이가 당황",
                        "moodEn": "에이's frozen, embarrassed smile; awkward air"}
             # 작업 197: 장소 줄 · 조화 문장 · 고정부 배경 머리가 일부러 바뀌었다 — 변경 전 sha 는 197 을 끈 글(197 줄을 뺀 나머지)로 본다.
-            with _pin_vnew(VNEW_FX=False), _bg197_off():
+            # 211: 소리 규칙(통 테이크 RULES 문장 · 컷 맨 끝 줄)만 바뀌었다 — 변경 전 sha 는 211 을 끈 글로 본다.
+            with _pin_vnew(VNEW_FX=False), _bg197_off(), _ad211_off():
                 plain_off = _fx_prompt_shas(genmod)
                 with_fx_off = _fx_prompt_shas(genmod, cut_extra=extra_i)
                 plan_i, take_i = _fx_take_fixture(2, 6, lambda _i: dict(extra_i))
@@ -20681,7 +20692,13 @@ def check_vnew_fx_prompt() -> None:
             if genmod.CUT_RULE_BODY != _FX_CUT_RULE_DESIGN or nbytes(_FX_CUT_RULE_DESIGN.strip()) > 90:
                 bad.append("(fx-j) CUT_RULE_BODY 가 design 원문이 아니거나 90B 를 넘습니다")
             cut_fx = {"fx": [blush, sweat], "moodEn": "Kim's cold glare; heavy air", "moodKo": "모드코"}
-            web, web_steps = cut_run("webtoon", cut_extra=cut_fx)
+            # 211: 소리 규칙 맨 끝 줄(+44 B)만큼 줄이기가 한 단계 더 간다(mood) — 줄이기 순서 기대값은 211 을 끈 글로 본다.
+            with _ad211_off():
+                web, web_steps = cut_run("webtoon", cut_extra=cut_fx)
+            web_on = _fx_cut_prompt(genmod, "webtoon", cut_extra=cut_fx)
+            if nbytes(web_on) > 2500 or not web_on.endswith("\n" + genmod.AUDIO_DIALOGUE_ONLY_COMPACT) \
+                    or f"\nFX: {_FX_REF_SENTENCE[blush]}; {_FX_REF_SENTENCE[sweat]}.\n" not in web_on:  # 211
+                bad.append(f"(fx-j) 211 켬 넘친 컷이 2500B 안·FX 줄·맨 끝 소리 규칙 줄이 아닙니다: {nbytes(web_on)}B")
             web_lines = web.split("\n")
             want_fx_line = f"FX: {_FX_REF_SENTENCE[blush]}; {_FX_REF_SENTENCE[sweat]}."
             fx_at = web_lines.index(want_fx_line) if want_fx_line in web_lines else -1
@@ -23720,7 +23737,8 @@ def check_vnew_take_real() -> None:
             for name, n_cuts, seconds, want_bytes, want_sha in _LR_TAKE_SHA_ON:
                 for explicit in (False, True):
                     # 작업 197: 장소 줄 · 조화 문장이 일부러 바뀌었다 — 변경 전 값은 197 을 끈 글(197 줄을 뺀 나머지)로 본다.
-                    with _bg197_off():
+                    # 211 fix1: 소리 문장도 옛 글 바이트 이하로만 바뀌었다(줄이기 단계 같음) — 211 도 끈 글로 본다.
+                    with _bg197_off(), _ad211_off():
                         text = webtoon_prompt(n_cuts, seconds, extras[name], explicit)
                     if _hashlib.sha256(text.encode("utf-8")).hexdigest() != want_sha or nbytes(text) != want_bytes:
                         bad.append(f"(lr-e) 웹툰 {name}({'variant=webtoon' if explicit else '기본'}) 프롬프트가 변경 전과 다릅니다: "
@@ -41551,7 +41569,11 @@ def check_vnew_edit_retake() -> None:
                    "컷 elements(@Element·2,500)·이미지 목록(Image N)·실사(webtoon 금지)·정리·컷 상한")
             # 규칙을 어긴 LLM 응답 → 초안 문제 목록, 그대로 제출하면 400
             mid_cut = mid_of(pid_bc, "컷 1", variant="webtoon")
-            env.llm_reply = {"resultKo": "x", "promptEn": cut_base.replace("@Element1", "him") + " " + "z" * 2600, "changesKo": []}
+            # 211: 컷 프롬프트 맨 끝은 소리 규칙 자기 줄(항목 이름 없음) — 너무 긴 꼬리는 전처럼 그 앞 항목 줄(CONTINUITY) 끝에 붙인다.
+            cut_head, _sep, cut_audio = cut_base.replace("@Element1", "him").rpartition("\n")
+            long_cut = (cut_head + " " + "z" * 2600 + "\n" + cut_audio) if cut_audio == genmod.AUDIO_DIALOGUE_ONLY_COMPACT \
+                else cut_base.replace("@Element1", "him") + " " + "z" * 2600
+            env.llm_reply = {"resultKo": "x", "promptEn": long_cut, "changesKo": []}
             d_cut = ((preview(pid_bc, mid_cut, {"requestKo": "길게"}).get_json() or {}).get("retake") or {}).get("draft") or {}
             r_cut = submit(pid_bc, mid_cut, {"prompt": d_cut.get("prompt"), "requestKo": "길게", "confirmUsd": 0.42, "draftId": d_cut.get("id")})
             # 작업 167 기대값 변경: 컷 단위 Kling 프롬프트(cut_base)가 태그 여유로 2,500B → 2,220B(태그 4개)가 되어, 2,600B 꼬리를 붙인
@@ -43080,6 +43102,11 @@ def check_vnew_edit_retake_models() -> None:
                 return text + " " + "z" * (size - len(text.encode()) - 1)
 
             # 작업 127: 켬이면 본보기 맨 앞에 고정부(FIXED)가 붙어 본보기가 2,450B 가 됐다 → 상한 안 2번째는 2,480B 로 잰다.
+            # 211: 본보기에 소리 규칙 줄(+44 B)만 늘었다 — 3b 바이트 목표는 211 을 끈 본보기로 잰다(기대값 그대로).
+            ok_kl_on, over_kl_on = ok_kl_w, over_kl  # 211: 3b 뒤 검사는 켬 본보기 그대로
+            with _ad211_off():
+                ok_kl_w = template(pid_t, kl).replace("Re-render this single shot", "Re-render this whole take")
+            over_kl = ok_kl_w + " " + "z" * 2600
             kl_2700, kl_2450 = pad_to(ok_kl_w, 2700), pad_to(ok_kl_w, 2480)  # Kling 본보기 자체가 2,450B → 상한 안 2번째는 2,480B
             kl_2700_noref = pad_to(ok_kl_w.replace("@Element2", "the woman"), 2700)
             logs.clear()
@@ -43113,6 +43140,7 @@ def check_vnew_edit_retake_models() -> None:
                     (True, 2, 2, ["n=1 from=%d to=%d problems=0 kept=True" % (len(over_kl.encode()), len(ok_kl_w.encode()))])],
                    "보완 3b: 2700B(초과·문제 1) → 씀 → 2450B → 씀(호출 3·원장 3줄 -shrink·-shrink2·로그 2줄·2번째 목표 0.75·줄일 바이트 숫자), "
                    "2번째 예외 → 2700B 결과로 done, 참고 표시 빠짐 → 버림·2번째 없음, 1번째 상한 안 → 2번째 없음")
+            ok_kl_w, over_kl = ok_kl_on, over_kl_on  # 211
             sys_real = rt._system_text_shrink({"maxBytes": 4000, "real": True}, [], [])  # noqa: SLF001
             expect("rtk-w", ["never use the word 'webtoon'" in sys_real, "reference tag exactly as written." in sys_real,
                              'dr.shrunk ? " · 길이 상한에 맞게 한 번 줄였습니다" : ""' in (PUBLIC / "vnew.js").read_text(encoding="utf-8")],
@@ -47004,6 +47032,8 @@ def check_vnew_fx_who_127() -> None:
             # 대사·연기를 빼지 않아 넘치면 fits=False(조각 나누기). 전에는 고정부를 미리 빼고 원형을 지켰다.
             tiny_head = genmod._fixed_head(plan, "A convenience store", compact="background" in (tiny_audit.get("compact") or []))  # noqa: SLF001
             tiny_ok = tiny_audit.get("fits") == (genmod._prompt_len(tiny) <= 1200)  # noqa: SLF001
+            with _ad211_off():  # 211: 맨 끝 소리 규칙 줄(+44 B)만큼 SETTING 배경 문장이 줄이기에 빠진다 — 배경 문장은 211 끈 글로 본다
+                p1_off = cut_p("c1")
             expect("fw-e", [p1.split("\n")[0] == p2.split("\n")[0] == store_head, p1.split("\n")[0] != p3.split("\n")[0],
                             p1.split("\n")[0].encode("utf-8") == web.split("\n")[0].encode("utf-8"),
                             r1.split("\n")[0] == r2.split("\n")[0] != p1.split("\n")[0],
@@ -47011,7 +47041,7 @@ def check_vnew_fx_who_127() -> None:
                             [p.count("Overall tone:") for p in (p1, p2, p3)], f"\nOnly {a} and {b} appear.\n" in p1,
                             line_of(p1, "FX:"), line_of(r1, "EXPRESSION:"), line_of(p3, "FX:"),
                             long_p.split("\n")[0] == store_head, genmod._utf8_len(long_p) <= 2500,  # noqa: SLF001
-                            tiny.split("\n")[0] == tiny_head, tiny_ok, "Shelves of snacks" in p1],
+                            tiny.split("\n")[0] == tiny_head, tiny_ok, "Shelves of snacks" in p1_off],
                    [True, True, True, True, "MOOD: comic beat — puzzled blink", f"MOOD: {b}'s quiet tears; heavy air", False, "",
                     [1, 1, 1], True,
                     f"FX: Webtoon-style tear streams run down {b}'s cheeks only; {a} does not cry.",
@@ -48004,7 +48034,8 @@ def check_vnew_real_cut_anime_132() -> None:
                   "durationValues": {"5": "5", "10": "10"}, "sendDuration": True, "aspectRatios": ["16:9"], "available": True}
     likeness_raw = "The images or videos provided may contain likenesses of real people or other private information."
     drawing = _re.compile(_LR_DRAWING_RE + r"|\bcel\b", _re.IGNORECASE)
-    negative = "NEGATIVE: " + genmod.REAL_CUT_NEGATIVE + "."
+    # 211: NEGATIVE 줄 끝에 소리 부정어(AUDIO_NEGATIVE)가 붙는다 — "NEGATIVE: <132 구절>; music, ambient noise, SFX."
+    negative = "NEGATIVE: " + genmod.REAL_CUT_NEGATIVE + "; " + genmod.AUDIO_NEGATIVE + "."
 
     def fake_frame(mp4: bytes, start: float) -> bytes:
         return b"FRAME[" + bytes(mp4)[:60] + b"]@%.1f" % float(start)
@@ -49296,7 +49327,7 @@ def check_vnew_real_still_139() -> None:
             # ================= (st-e) Kling·애니 프롬프트 =================
             # 작업 197: 고정부 BACKGROUND 머리 · 조화 문장이 일부러 바뀌었다 — 138 sha 는 197 을 끈 글로 본다(구절 위치는 켠 글도 본다).
             kl = genmod._segment_prompt(plan, {"cutIds": ["c1"]}, first_segment=True, real=True)  # noqa: SLF001
-            with _bg197_off():
+            with _bg197_off(), _ad211_off():  # 211: NEGATIVE 줄 소리 부정어만 늘었다 — 138 sha 는 211 도 끈 글로 본다
                 kl_off = genmod._segment_prompt(plan, {"cutIds": ["c1"]}, first_segment=True, real=True)  # noqa: SLF001
             if genmod.REAL_CUT_KEEP_FRAMING not in kl.split("\n")[:6] or genmod.REAL_CUT_KEEP_FRAMING not in kl_off.split("\n")[:5] \
                     or sha(_no_ai_note(_no_160(kl_off)).replace("\n" + genmod.REAL_CUT_KEEP_FRAMING, "", 1)) \
@@ -49310,7 +49341,7 @@ def check_vnew_real_still_139() -> None:
             web_take = genmod._take_prompt(_fw_plan(), take, cast=cast_take, panel_nos=[3], location_no=None)  # noqa: SLF001
             web_seg = genmod._segment_prompt(_fw_plan(), {"cutIds": ["c1"]}, first_segment=True)  # noqa: SLF001
             # 작업 197: 애니 프롬프트의 장소 · 조화 글이 일부러 바뀌었다 — 138 sha 는 197 을 끈 글(197 줄을 뺀 나머지)로 본다.
-            with _bg197_off():
+            with _bg197_off(), _ad211_off():  # 211: 소리 규칙만 바뀌었다 — 138 sha 는 211 도 끈 글로 본다
                 web_take0 = genmod._take_prompt(_fw_plan(), take, cast=cast_take, panel_nos=[3],  # noqa: SLF001
                                                 location_no=None)
                 web_seg0 = genmod._segment_prompt(_fw_plan(), {"cutIds": ["c1"]}, first_segment=True)  # noqa: SLF001
@@ -49562,7 +49593,7 @@ def check_vnew_real_ai_note_140() -> None:
             web_take = genmod._take_prompt(_fw_plan(), take, cast=cast_take, panel_nos=[3], location_no=None)  # noqa: SLF001
             web_seg = genmod._segment_prompt(_fw_plan(), {"cutIds": ["c1"]}, first_segment=True)  # noqa: SLF001
             # 작업 197: 애니 프롬프트의 장소 · 조화 글이 일부러 바뀌었다 — 138 sha 는 197 을 끈 글(197 줄을 뺀 나머지)로 본다.
-            with _bg197_off():
+            with _bg197_off(), _ad211_off():  # 211: 소리 규칙만 바뀌었다 — 138 sha 는 211 도 끈 글로 본다
                 web_take0 = genmod._take_prompt(_fw_plan(), take, cast=cast_take, panel_nos=[3],  # noqa: SLF001
                                                 location_no=None)
                 web_seg0 = genmod._segment_prompt(_fw_plan(), {"cutIds": ["c1"]}, first_segment=True)  # noqa: SLF001
@@ -49740,7 +49771,7 @@ def check_vnew_real_sheet_ref_142() -> None:
             web_take = genmod._take_prompt(_fw_plan(), take, cast=cast_take, panel_nos=[3], location_no=None)  # noqa: SLF001
             web_seg = genmod._segment_prompt(_fw_plan(), {"cutIds": ["c1"]}, first_segment=True)  # noqa: SLF001
             # 작업 197: 애니 프롬프트의 장소 · 조화 글이 일부러 바뀌었다 — 138 sha 는 197 을 끈 글(197 줄을 뺀 나머지)로 본다.
-            with _bg197_off():
+            with _bg197_off(), _ad211_off():  # 211: 소리 규칙만 바뀌었다 — 138 sha 는 211 도 끈 글로 본다
                 web_take0 = genmod._take_prompt(_fw_plan(), take, cast=cast_take, panel_nos=[3],  # noqa: SLF001
                                                 location_no=None)
                 web_seg0 = genmod._segment_prompt(_fw_plan(), {"cutIds": ["c1"]}, first_segment=True)  # noqa: SLF001
@@ -50546,7 +50577,7 @@ def check_vnew_location_real_edit_143() -> None:
                 real = genmod._take_prompt(_fw_plan(), take, cast=cast_take, panel_nos=[], location_no=3,  # noqa: SLF001
                                            variant="real")
                 # 작업 197: 장소 줄이 참고만으로 일부러 바뀌었다 — 143 · 140 글 · sha 는 197 을 끈 글(197 줄을 뺀 나머지)로 본다.
-                with _bg197_off():
+                with _bg197_off(), _ad211_off():  # 211: 소리 규칙만 바뀌었다 — 140 sha 는 211 도 끈 글로 본다
                     web0 = genmod._take_prompt(_fw_plan(), take, cast=cast_take, panel_nos=[3], location_no=4)  # noqa: SLF001
                     real0 = genmod._take_prompt(_fw_plan(), take, cast=cast_take, panel_nos=[], location_no=3,  # noqa: SLF001
                                                 variant="real")
@@ -50994,7 +51025,7 @@ def check_vnew_real_take_costume_146() -> None:
                          {"name": b, "colorName": "red", "frontNo": 2, "costume": "navy training top"}]
             web_take = genmod._take_prompt(_fw_plan(), take, cast=cast_take, panel_nos=[3], location_no=None)  # noqa: SLF001
             # 작업 197: 장소 · 조화 글이 일부러 바뀌었다 — 138 sha 는 197 을 끈 글로 본다.
-            with _bg197_off():
+            with _bg197_off(), _ad211_off():  # 211: 소리 규칙만 바뀌었다 — 138 sha 는 211 도 끈 글로 본다
                 web_take0 = genmod._take_prompt(_fw_plan(), take, cast=cast_take, panel_nos=[3],  # noqa: SLF001
                                                 location_no=None)
             if _hashlib.sha256(web_take0.encode("utf-8")).hexdigest() != _ST139_SHA_138["anime-take"]:
@@ -52717,21 +52748,24 @@ def check_vnew_part_continuity_155() -> None:
             pid_e = "prj_an_base_wan"
             env.make_plan(pid_e, [{"id": "s1", "cutIds": ["c1", "c2", "c3"], "seconds": 15}])
             planmod.mutate_plan(owner, pid_e, lambda data: data["input"].__setitem__("videoModel", wan_id))
-            _g, reqs = run(pid_e)
+            # 211: 소리 규칙만 바뀌었다 — 155 전 값(197 켬 · 끔 둘 다)은 211 을 끈 글로 본다.
+            with _ad211_off():
+                _g, reqs = run(pid_e)
             got_e = [(sha16(prompt_of(r).encode("utf-8")), sha16(b"|".join(images(r)))) for r in reqs]
             # 작업 197: 197 끔(197 줄을 뺀 나머지)으로 같은 계획을 한 번 더 — 155 전 값과 같아야 한다.
             pid_e0 = "prj_an_base_wan_bg197off"
             env.make_plan(pid_e0, [{"id": "s1", "cutIds": ["c1", "c2", "c3"], "seconds": 15}])
             planmod.mutate_plan(owner, pid_e0, lambda data: data["input"].__setitem__("videoModel", wan_id))
-            with _bg197_off():
+            with _bg197_off(), _ad211_off():
                 _g0, reqs0 = run(pid_e0)
             got_e0 = [(sha16(prompt_of(r).encode("utf-8")), sha16(b"|".join(images(r)))) for r in reqs0]
             if got_e != [(_AN155_BASE_197["webtoonPrompt"], _AN155_BASE["webtoonImages"])] \
                     or got_e0 != [(_AN155_BASE["webtoonPrompt"], _AN155_BASE["webtoonImages"])]:
                 bad.append(f"(an-e) 조각·대체 없는 웹툰 테이크 요청이 바뀌었습니다: {got_e} (197 끔 {got_e0})")
             plan_e = env.plan(pid_e)
-            built_e, built_e0 = _bg197_pair(lambda: genmod._take_payload(  # noqa: SLF001
-                owner, pid_e, plan_e, genmod._take_units(plan_e)[0], dict(_RV152_CAPS), variant="real"))  # noqa: SLF001
+            with _ad211_off():  # 211
+                built_e, built_e0 = _bg197_pair(lambda: genmod._take_payload(  # noqa: SLF001
+                    owner, pid_e, plan_e, genmod._take_units(plan_e)[0], dict(_RV152_CAPS), variant="real"))  # noqa: SLF001
             got_r = (sha16(built_e["prompt"].encode("utf-8")), sha16(b"|".join(built_e["imageUrls"])))
             got_r0 = (sha16(built_e0["prompt"].encode("utf-8")), sha16(b"|".join(built_e0["imageUrls"])))
             if got_r != (_AN155_BASE_197["realPrompt"], _AN155_BASE["realImages"]) \
@@ -53837,8 +53871,10 @@ _VB159_SPOKEN = "spoken (audio only, never written on screen)"
 # fix1: 애니 원작 패널 설명(STYLE 이 부르는 "the uploaded webtoon images", 옛 _take_prompt 와 같은 범위 표기).
 _VB159_PANELS = "{refs} are the uploaded webtoon images (art style reference only)"
 # 끔(VNEW_VIBE_PROMPT=False) 기준: 작업 159 전 _take_prompt 의 157 손 추출 통 테이크 sha(VNEW_FX 켬·4,000자, 157 검사 cast).
-_VB159_SHA_OFF = {"anime": "057902b478b7da5372d374f99a11174b725b72d0bda8498c3f1ca93ce436ccf7",
-                  "real": "df11aa7420e9ebdfdf429983c056cf08187f69ba6ba61e4129570e14f87850c9"}
+# 작업 211: RULES 소리 문장(앰비언트 → 대사만)만 바뀐 글의 sha(소리 문장을 옛 글로 되돌리면 211 전 sha 와 같다).
+# 211: dialogue-only audio rule (fix1: RULES audio sentence <= old bytes, same trimming steps)
+_VB159_SHA_OFF = {"anime": "cc2c68705a662173c42c149efb09778385e947589b1637797149195bb1561c08",
+                  "real": "d09e6a5e2d07105da0c6548fed79456788a921125937e627950ea7c5d66fc65e"}
 
 
 def check_vnew_vibe_prompt_159() -> None:
@@ -53910,6 +53946,8 @@ def check_vnew_vibe_prompt_159() -> None:
                 out.append("labels")
             elif line.startswith(_VB159_VIDEO):
                 out.append("video")
+            elif line in (genmod.AUDIO_DIALOGUE_ONLY, genmod.AUDIO_DIALOGUE_ONLY_COMPACT):  # 작업 211: 맨 끝 소리 규칙
+                out.append("audio")
             else:
                 out.append("?" + line[:40])
         return out
@@ -53938,7 +53976,7 @@ def check_vnew_vibe_prompt_159() -> None:
             # ================= (vb-a) 애니 순서·내용 =================
             text = full["webtoon"]
             lines = text.split("\n")
-            want_kinds = ["note", "style", "look", "look", "paragraph", "setting"] + ["shot"] * 6 + ["labels", "video"]
+            want_kinds = ["note", "style", "look", "look", "paragraph", "setting"] + ["shot"] * 6 + ["labels", "video", "audio"]
             labels = next((ln for ln in lines if ln.startswith("@Image1 is ")), "")
             expect("vb-a", [kinds(text), lines[1], lines[2], lines[4], lines[5].startswith(
                 "Setting (the same place in every shot): Outdoors by a low metal railing"), audits["webtoon"].get("compact")],
@@ -53950,7 +53988,7 @@ def check_vnew_vibe_prompt_159() -> None:
             # 옛 "@Image1 is X" + 맨 끝 시트 절 1번 대신. 정면(@Image2 · @Image4) · 장소 · 패널 글은 그대로.
             # 작업 180: 정면(@Image2 · @Image4) = 장면 옷 그림 없음 + look 줄에 옷 → 얼굴 · 머리만 꼬리(_FC180_FACE_ONLY),
             # fix1: 이름표 블록 끝 공통 옷 문장 1번(_FC180_SHARED).
-            expect("vb-a", [labels, lines[-1]],
+            expect("vb-a", [labels, lines[-2]],  # 작업 211: 맨 끝 줄 = 소리 규칙, @Video1 줄은 그 앞
                    [_SR179_SHEET_LABEL.format(no=1, name=rb) + f" @Image2 is {rb}{_FC180_FACE_ONLY}; "
                     + _SR179_SHEET_LABEL.format(no=3, name=ra) + f" @Image4 is {ra}{_FC180_FACE_ONLY}; "
                     + _VB159_LOCATION.format(no=5)
@@ -53995,7 +54033,7 @@ def check_vnew_vibe_prompt_159() -> None:
             expect("vb-b", [kinds(real), real.split("\n")[1], no_webtoon, "webtoon" in real.lower(),
                             f"tears run down {rb}'s cheeks only" in rs[2], f"a faint natural flush on {rb}'s cheeks only" in rs[5],
                             any(w in real for w in ("blush lines", "tear streams", "Webtoon-style", "visual symbols")),
-                            real.split("\n")[-1].startswith(_VB159_VIDEO), _VB159_LOCATION.format(no=5) in real,
+                            real.split("\n")[-2].startswith(_VB159_VIDEO), _VB159_LOCATION.format(no=5) in real,  # 211: 끝 = 소리 규칙
                             "uploaded webtoon image" in real,
                             [re.findall(r'"[^"]*"', ln) for ln in rs] == [re.findall(r'"[^"]*"', ln) for ln in shots(text)]],
                    [want_kinds, _VB159_STYLE_LIVE + ".", True, False, True, True, False, True, True, False, True],
@@ -56173,14 +56211,14 @@ def check_vnew_shot_lock_166() -> None:
 
             base_anime = build(base_plan, base_take, "anime")
             # 작업 197: 장소 이름표 · Setting 머리 · 조화 문장이 일부러 바뀌었다 — 옛 sha 는 197 을 끈 글(197 줄을 뺀 나머지)로 본다.
-            with _bg197_off():
+            with _bg197_off(), _ad211_off():  # 211: 맨 끝 소리 규칙 줄만 늘었다 — 211 도 끈 글
                 base_anime0 = build(base_plan, base_take, "anime")
             named_action = genmod._named_action  # noqa: SLF001
             genmod._named_action = lambda text, *_a: text  # noqa: SLF001 — 작업 170 이름 앞머리만 끈 값 = 166 전 값
             face_touch = genmod._face_touch  # noqa: SLF001
             genmod._face_touch = lambda *_a, **_k: None  # noqa: SLF001 — 작업 173 턱 받침도 끈 값(173 전 = 166 전 값)
             try:
-                with _bg197_off():
+                with _bg197_off(), _ad211_off():  # 211
                     base_anime_166 = build(base_plan, base_take, "anime")
             finally:
                 genmod._named_action = named_action  # noqa: SLF001
@@ -56497,8 +56535,9 @@ def check_vnew_prompt_size_167() -> None:
                  "appearance": "Short swept-back black hair, narrow half-lidded eyes"}]
         # 작업 184: 이 sha 는 184 전 글이다(클로즈업 옷 단서 · 별칭을 끈 글, 184 가 바꾸는 줄은 cl-e).
         # 작업 197: 그리고 197 을 끈 글(장소 이름표 · Setting 머리 · 조화 문장을 뺀 나머지)이다.
+        # 211: 맨 끝 소리 규칙 줄만 늘었다 — 211 도 끈 글.
         with _guard_real_llm(), _pin_vnew(VNEW_FX=True, VNEW_TAKE_PROMPT_MAX_CHARS=4000, VNEW_VIBE_PROMPT=True), _is184_off(), \
-                _bg197_off():
+                _bg197_off(), _ad211_off():
             plan_d, take_d = _tc157_plan()
             take_text = genmod._vibe_take_prompt(plan_d, take_d, real=False, cast=flat, location_no=5, quiet=True)  # noqa: SLF001
         # 작업 179: 이 cast 는 애니 시트가 있어 @Image 이름표만 179 시트 글 → 178 모양으로 되돌린 글의 sha = 옛 값.
@@ -57909,13 +57948,19 @@ def check_vnew_face_touch_173() -> None:
                     s9, s10 = shot_of(text, 2), shot_of(text, 3)
                     # 작업 183: cut-10 인서트 소매 단서 형(긴 · 짧은)은 조각 길이(173 켬 · 끔)를 따른다 → "cut-10 그대로"는 183 을 끈 글로 본다
                     # 작업 197: 조각 길이(197 글)에 따라 짧은 형 단계가 바뀌어 cut-10 줄이 달라진다 → 197 도 끈 글로 본다.
-                    with _is183_off(), _bg197_off():
+                    # 211: 맨 끝 소리 규칙 줄만큼 짧은 형 단계가 달라진다 → 211 도 끈 글로 본다.
+                    with _is183_off(), _bg197_off(), _ad211_off():
                         s10 = shot_of(take_prompt(snap, take2, *p1, real), 3)
                         s10_before = shot_of(off(lambda: take_prompt(snap, take2, *p1, real)), 3)  # noqa: B023
                     expect("ft-a", [touch_line.rstrip(".") in s9, bool(_FT173_HARD.search(s9)), f"{rb}'s neck" in s9,
                                     s10 == s10_before, "clamps around" in s10],
                            [True, False, False, True, True], f"{v} cut-09 Touch 줄 · 얼굴 쥐기 동사 없음, cut-10 손목 인서트 그대로")
-                    expect("ft-d", [audit.get("fits"), len(text) <= 4000, touch_line.rstrip(".") in text], [True, True, True],
+                    # 211: 맨 끝 소리 규칙 줄(44자)만큼 real 조각 cut-08–10 이 157 짧은 형을 다 써도 넘친다(샷 문장은 줄이지 않고
+                    # 제출 쪽 _prompt_split_parts 가 나눈다 — 159 vb-c · vb-d 설계). 크기 기대값은 211 을 끈 글로 잰다.
+                    audit_off: dict = {}
+                    with _ad211_off():
+                        text_off = take_prompt(snap, take2, *p1, real, audit_off)
+                    expect("ft-d", [audit_off.get("fits"), len(text_off) <= 4000, touch_line.rstrip(".") in text], [True, True, True],
                            f"{v} 조각 cut-08–10 4,000자 안 · Touch 줄 남음")
                     text2 = take_prompt(snap, take2, *p2, real)
                     before2 = off(lambda: take_prompt(snap, take2, *p2, real))  # noqa: B023
@@ -58012,7 +58057,8 @@ def check_vnew_face_touch_173() -> None:
                      "appearance": "Short swept-back black hair, narrow half-lidded eyes"}]
             plan_d, take_d = _tc157_plan()
             # 작업 184: 이 sha 들은 184 전 글(184 가 바꾸는 클로즈업 줄은 check_vnew_closeup_garment_184 cl-e). 작업 197: 197 도 끈 글.
-            with _is184_off(), _bg197_off():
+            # 211: 맨 끝 소리 규칙 줄만 늘었다 — 211 도 끈 글.
+            with _is184_off(), _bg197_off(), _ad211_off():
                 on = genmod._vibe_take_prompt(plan_d, take_d, real=False, cast=flat, location_no=5, quiet=True)  # noqa: SLF001
                 was = off(lambda: genmod._vibe_take_prompt(plan_d, take_d, real=False, cast=flat, location_no=5,  # noqa: SLF001
                                                            quiet=True))
@@ -58234,7 +58280,8 @@ def check_vnew_touch_kind_174() -> None:
                     f"lip; the left hand rests"] * 2, "종류 없는(173 형) · 입이 멀리 있는 턱 받침 = 173 글")
             plan_d, take_d = _tc157_plan()
             text = genmod._vibe_take_prompt(plan_d, take_d, real=False, cast=cast_for(False), location_no=5, quiet=True)  # noqa: SLF001
-            expect("tk-c", [text.split("\n")[-1].startswith(genmod.VIBE_VIDEO_LINE + " ("), tag in text],
+            # 211: dialogue-only audio rule — vibe 맨 끝 줄 = 소리 규칙, @Video1 줄은 그 앞
+            expect("tk-c", [text.split("\n")[-2].startswith(genmod.VIBE_VIDEO_LINE + " ("), tag in text],
                    [True, False], "콘티 크기 없는 157 테이크: @Video1 줄 그대로 · 꼬리표 없음")
             expect("tk-c", llm_calls, [], "LLM 호출 0")
     except Exception as exc:  # noqa: BLE001
@@ -58349,7 +58396,9 @@ def check_vnew_kling_cut_prompt_177() -> None:
                 def build(cid: str, elements: bool, *, prompt_max: int = 0, fix: str = "") -> tuple[str, dict, int]:
                     # 작업 184: cut-12 는 184 전 2,295/2,300 B 라 FRAMING 옷 단서(+45 B)가 177 줄이기 순서로 BACKGROUND 줄을 뺀다 →
                     # 177 줄 순서 · 상한 고정 글은 184 를 끈 글로 본다(184 의 Kling 줄이기는 check 184 cl-b 가 본다).
-                    with _is184_off():
+                    # 211 fix1: 211 전 2,299/2,300 B — 꼬리 소리 규칙(+44 B) · NEGATIVE 소리 부정어(+27 B)도 BACKGROUND 를 뺀다 →
+                    # 211 도 끈 글로 본다(211 의 Kling 꼬리 · 상한은 check_dialogue_audio_211 d-e).
+                    with _is184_off(), _ad211_off():
                         return build_on(cid, elements, prompt_max=prompt_max, fix=fix)
 
                 try:
@@ -58464,7 +58513,8 @@ def check_vnew_kling_cut_prompt_177() -> None:
                             # 157 짧은 형 단계가 바뀐다 → 177 전 sha · "Shot 줄만 다름"은 180 을 끈 글로 본다(180 은 check 180).
                             # 작업 184: 177 전 sha 는 184 전 글(클로즈업 옷 단서 · 별칭은 check 184)
                             # 작업 197: 장소 이름표 · Setting 머리 · 조화 문장 길이로 짧은 형 단계가 바뀐다 → 197 도 끈 글로 본다.
-                            with _fc180_off(), _is184_off(), _bg197_off():
+                            # 작업 211: vibe 맨 끝 소리 규칙 줄(+200자)로 짧은 형 단계가 바뀐다 → 211 도 끈 글로 본다(211 은 check_dialogue_audio_211).
+                            with _fc180_off(), _is184_off(), _bg197_off(), _ad211_off():
                                 text = genmod._vibe_take_prompt(snap, sub, real=v == "real", cast=cast_for(v == "real"),  # noqa: SLF001
                                                                 location_no=5, quiet=True)
                                 with _sr179_sides_off(genmod):
@@ -58859,9 +58909,10 @@ def check_vnew_sheet_sides_179() -> None:
                     t12 = part_text("take1", ["cut-01", "cut-02"], v)
                     s12 = shot_rows(t12)
                     t89 = part_text("take2", ["cut-08", "cut-09"], v)
-                    with _fc180_off(), _is184_off(), _bg197_off():
+                    with _fc180_off(), _is184_off(), _bg197_off(), _ad211_off():
                         # 작업 180: 시트 없는 cast 는 꼬리 · 공통 옷 문장으로 실사 cut-08/09 짧은 형 단계가 바뀐다 → 179 sha 는 끈 글
                         # 작업 184: 이 sha 는 184 전 글(cut-09 클로즈업 옷 단서 · 별칭은 check 184). 작업 197: 197 도 끈 글.
+                        # 211 fix1: vibe 맨 끝 소리 규칙 줄(+44 B)도 끈 글(211 은 check_dialogue_audio_211).
                         t89_179 = part_text("take2", ["cut-08", "cut-09"], v)
                     s89 = shot_rows(t89)
                     video12 = next((ln for ln in t12.split("\n") if ln.startswith("@Video1")), "")
@@ -58915,18 +58966,22 @@ def check_vnew_sheet_sides_179() -> None:
                     # 작업 180: 시트 없는 cast 는 꼬리 · 공통 옷 문장으로 cut-03/04 짧은 형 단계가 바뀐다 → 177 전 sha 는 180 을 끈 글
                     # 작업 184: 177 전 sha 는 184 전 글
                     # 작업 197: 177 전 sha 는 197 전 글(장소 이름표 · Setting 머리 · 조화 문장)
-                    with _sr179_sides_off(genmod), _fc180_off(), _is184_off(), _bg197_off():
+                    # 211 fix1: 177 전 sha 는 211 전 글(vibe 맨 끝 소리 규칙 줄 없음)
+                    with _sr179_sides_off(genmod), _fc180_off(), _is184_off(), _bg197_off(), _ad211_off():
                         got_sha[label] = _hashlib.sha256(part_text(take_id, cids.split(","), v).encode()).hexdigest()
                 expect("sr-c", got_sha, _KP177_BASE_SHA, "시트 없는 cast(이름표 옛 모양) · 좌우 끔 = 177 전 sha")
 
                 # ================= (sr-d) 인서트 · 한 사람 샷 =================
-                s34 = shot_rows(part_text("take1", ["cut-03", "cut-04"], "anime"))
-                with _sr179_sides_off(genmod):
+                # 211 fix1: vibe 맨 끝 소리 규칙 줄(+44 B)이 좌우 켬 쪽 짧은 형 단계만 옮긴다 → 두 글 다 211 을 끈 글로 견준다.
+                with _ad211_off():
+                    s34 = shot_rows(part_text("take1", ["cut-03", "cut-04"], "anime"))
+                with _sr179_sides_off(genmod), _ad211_off():
                     s34_off = shot_rows(part_text("take1", ["cut-03", "cut-04"], "anime"))
                 # 작업 183: 인서트 소매 단서는 check 183 이 본다 — 179 인서트 sha 는 183 을 끈 글(fix1 이름 · 머리글자 포함)
                 # 작업 184: 인서트 연기 글 별칭(Geonu · Uijun)도 184 가 바꾼다 → 179 인서트 sha 는 184 도 끈 글
                 # 작업 197: 인서트 sha 는 197 도 끈 글(장소 이름표 · Setting 머리 · 조화 문장)
-                with _is183_off(fix1=True), _is184_off(), _bg197_off():
+                # 211 fix1: 인서트 sha 는 211 도 끈 글(vibe 맨 끝 소리 규칙 줄 없음)
+                with _is183_off(fix1=True), _is184_off(), _bg197_off(), _ad211_off():
                     insert_sha = [_hashlib.sha256(_fc180_strip(genmod, part_text("take2", ["cut-10", "cut-11"], v)).encode())
                                   .hexdigest() for v in ("anime", "real")]
                 expect("sr-d", insert_sha + [s34[0] == s34_off[0], s34[1] == s34_off[1]],
@@ -59241,8 +59296,9 @@ def check_vnew_front_clothes_180() -> None:
                         def payload(u: dict, s: dict, cont: dict, off: bool = False) -> dict:
                             # 작업 184: 180 켬 · 끔은 조각 길이를 바꿔 184 옷 단서 형(긴 · 짧은 · 뺌)도 바꾼다 → "@Image 줄만 다름" ·
                             # 길이표는 184 를 끈 글로 잰다(184 길이표는 check 184 cl-a)
+                            # 211 fix1: vibe 맨 끝 소리 규칙 줄(+44 B)이 짧은 형 단계를 옮긴다 → 211 도 끈 글(211 은 check_dialogue_audio_211)
                             def run() -> dict:
-                                with _is184_off():
+                                with _is184_off(), _ad211_off():
                                     return genmod._vibe_take_payload("o", "p", snap, s, {"imageListMax": 9},  # noqa: SLF001
                                                                      variant="webtoon", fallback_step=0, soften=False,
                                                                      continuity=cont, no_text=False)
@@ -60600,7 +60656,8 @@ def check_vnew_closeup_garment_184() -> None:
                                                              continuity=cont, no_text=False)
                         # 작업 197: 이 표(단서 형 · 별칭 · 단계)는 184 때 글 길이 기준이다 — 197(장소 이름표 · Setting 머리 · 조화
                         # 문장)을 끈 글로 본다. 197 켠 같은 스냅숏의 fits · 조화 · 옛 명령은 check 197 bg-c 가 본다.
-                        with _bg197_off():
+                        # 211 fix1: 211(vibe 맨 끝 소리 규칙 줄 +44 B)도 끈 글로 본다(211 은 check_dialogue_audio_211).
+                        with _bg197_off(), _ad211_off():
                             if off:
                                 with _is184_off():
                                     return run()
@@ -65613,6 +65670,32 @@ def _bg197_off():
             setattr(genmod, name, value)
 
 
+@contextlib.contextmanager
+def _ad211_off():
+    """작업 211 을 끈다(검사용 — 211 전 글). 211 fix1: 모든 빌더 — 옛 통 테이크 RULES 는 옛 소리 문장(앰비언트)으로, 옛 문장이
+    없던 자리(vibe 맨 끝 줄 · 컷 DIALOGUE · Kling 꼬리 · 옛 구간 머리)는 규칙 없음, Kling NEGATIVE 는 132 구절만."""
+    sys.path.insert(0, str(ROOT / "app"))
+    from src.vnew import generate as genmod  # noqa: PLC0415
+
+    names = ("_vibe_audio_line", "audio_rule", "_take_audio_rule", "_real_cut_negative_line")
+    saved = {n: getattr(genmod, n) for n in names}
+    genmod._vibe_audio_line = lambda *_a, **_k: ""  # noqa: SLF001
+    genmod.audio_rule = lambda *_a, **_k: ""
+    genmod._take_audio_rule = lambda *_a, compact=False, **_k: (_AD211_OLD_COMPACT if compact else _AD211_OLD_FULL)  # noqa: SLF001
+    genmod._real_cut_negative_line = lambda: "NEGATIVE: " + genmod.REAL_CUT_NEGATIVE + "."  # noqa: SLF001
+    try:
+        yield
+    finally:
+        for name, value in saved.items():
+            setattr(genmod, name, value)
+
+
+# 작업 211 전 옛 통 테이크 RULES 소리 문장(_ad211_off 가 되돌린다).
+_AD211_OLD_FULL = ("Generate synchronized audio: characters speak the Korean lines in their voices; natural ambient sound of the "
+                   "location; no background music, no narration.")
+_AD211_OLD_COMPACT = "Korean dialogue and ambient sound, no music."
+
+
 def _run_bg197_off(fn) -> None:
     """작업 197 전 글을 기대값으로 두는 검사를 197 을 끈 채로 돌린다(기대값은 바꾸지 않는다)."""
     with _bg197_off():
@@ -65775,6 +65858,10 @@ def check_vnew_bg_reference_197() -> None:
                 steps_b[name] = lines_b[-1].split("steps=", 1)[1].split(",") if lines_b else ["?"]
                 return text_b
 
+            # 211 fix1: vibe 맨 끝 소리 규칙 줄(+44 B)이 vibe 실사 하드 컷 조각을 넘치게 해 조화 문장 단계를 옮긴다 → 197 빌더 표는
+            # 211 을 끈 글로 본다(211 은 check_dialogue_audio_211).
+            ad211 = contextlib.ExitStack()
+            ad211.enter_context(_ad211_off())
             built = {
                 "take webtoon": (audited("take webtoon", lambda a: take_p(6, 18, audit=a)), "@Image8", False),
                 "take real": (audited("take real", lambda a: take_p(6, 18, real=True, audit=a)),
@@ -65801,6 +65888,7 @@ def check_vnew_bg_reference_197() -> None:
                 "previz cut real": (cut_logged("previz cut real", "real"), "", True),
                 **{k: (v[0], v[1], True) for k, v in stills.items()},
             }
+            ad211.close()
             harmony_dropped = {n for n, s in steps_b.items() if "harmonyDrop" in s or "bgHarmonyDrop" in s}
             got_b, want_b = {}, {}
             for name, (text, tag, real) in built.items():
@@ -68564,6 +68652,8 @@ def main() -> int:
     if not __import__("check_pose_controls_209a").check_pose_controls_209a(): fail("작업 209a: 프리비즈 포즈(관절 고리 · IK 손발 · 골반 · 채널 박스 · 좌우 반전) 검사 실패")
     if not __import__("check_pose_keys_209b").check_pose_keys_209b(): fail("작업 209b: 프리비즈 자세 키(S · 마름모 · , .) · 잔상 · 이동 궤적 · 포즈 모음 검사 실패")
     if not __import__("check_astra_broker_210").check_astra_broker_210(): fail("작업 210: GPT-6 Astra 키이스트 역할 · Claude 5.x 와이랩 · 나머지 와이낫 계정 검사 실패")
+    if not __import__("check_dialogue_audio_211").check_dialogue_audio_211(): fail("작업 211: 영상 소리 = 대사만(음악 · 앰비언트 · 효과음 없음) 프롬프트 검사 실패")
+    if not __import__("check_line_redo_212").check_line_redo_212(): fail("작업 212: ⑥ 대사 고치기 · 그 대사 구간 영상 다시 만들기 검사 실패")
     check_vnew_voice_ui_203()
     print()
     if warnings:
