@@ -51,6 +51,7 @@ const WHEEL_HINT_TEXT = "화면을 한 번 누르면 휠로 확대·축소할 �
 const WHEEL_HINT_MS = 1500;
 const WHEEL_HINT_GAP_MS = 4000; // 페이지를 굴리는 동안 안내가 깜빡이지 않게
 const CAM_ICON_COLOR = 0x4fc3f7;
+const WORK_FRAME_PITCH_RAD = 40 * Math.PI / 180; // 작업 209a fix 1: 작업 시점 첫 화면을 내려다보는 각
 const SEL_COLOR = 0xffd54f;
 /* vendor addons(작업 201). vnew-previz.js 와 같은 three URL 을 import 하므로 THREE 인스턴스가 하나다.
    Dockerfile 이 __ASSET_VERSION__ 을 치환한다. create() 에서만 불러온다(검사의 node 실행은 이 파일만 읽는다). */
@@ -91,9 +92,146 @@ const HAND_TARGETS = [
 const HEAD_TURNS = ["toward_other", "away", "down", "up", "front"];
 const HEAD_TILTS = ["none", "left", "right"];
 const EYE_STATES = ["open", "closed", "half"];
+/* 작업 209a: 마네킹 관절 치수(마네킹 로컬 m, 키 1.7m 기준 — group 이 키/1.7 로 커진다). app/src/vnew/pose_describe.py 의
+   HIPS_Y·NECK_Y·HEAD_CENTER_Y·SHOULDER·UPPER_ARM_M·FORE_ARM_M·HIP_X·THIGH_M·SHIN_M 과 같은 값이어야 한다. 치수는 여기서만 고친다.
+   피벗: pelvis(rootY) → hips(y hipsY) → spine → neck(y neckY) → head(목과 같은 자리, 머리 중심은 headCenterY 위)
+   · 어깨(±shoulderX, shoulderY) → 팔꿈치(-upperArm) → 손목(-foreArm) · 엉덩이(±hipX, 0) → 무릎(-thigh) → 발목(-shin).
+   +x 가 인물 자신의 왼쪽(L), 정면은 +z. 뼈는 쉬는 자세에서 -y 로 뻗는다. */
+export const RIG_DIMS = Object.freeze({
+  baseHeightM: 1.7,
+  hipsY: 0.9,
+  neckY: 0.6,
+  headCenterY: 0.13,
+  shoulderX: 0.22,
+  shoulderY: 0.52,
+  upperArm: 0.3,
+  foreArm: 0.29,
+  hipX: 0.1,
+  thigh: 0.46,
+  shin: 0.44,
+});
 // 팔 길이(마네킹 로컬, 키 1.7m 기준): 어깨 → 팔꿈치 0.3, 팔꿈치 → 손끝 0.29(아래팔 캡슐 끝).
-const UPPER_ARM_M = 0.3;
-const FORE_ARM_M = 0.29;
+const UPPER_ARM_M = RIG_DIMS.upperArm;
+const FORE_ARM_M = RIG_DIMS.foreArm;
+/* 작업 208/209a: cut actor 의 rig = {관절: [rx, ry, rz] 로컬 Euler XYZ 라디안, rootY: 골반 높이 차(m, 마네킹 로컬)}.
+   previz_schema.RIG_JOINTS 와 같은 이름. 목록 자세(자세·동작·손·머리)를 먼저 적용한 뒤 rig 에 적힌 관절만 그 값으로 덮어쓴다. */
+const RIG_JOINTS = [
+  "spine", "neck", "head",
+  "shoulderL", "elbowL", "wristL", "shoulderR", "elbowR", "wristR",
+  "hipL", "kneeL", "ankleL", "hipR", "kneeR", "ankleR",
+];
+const RIG_ROOT_Y_RANGE = [-1.0, 0.3]; // previz_schema.RIG_ROOT_Y_RANGE 와 같다
+/* 관절 한계(도, [x 숙이기, y 돌리기, z 기울이기] 마다 [최소, 최대]) — 사람이 할 수 있는 범위. 한계는 이 표 하나만 쓴다.
+   무릎은 +x(정강이가 뒤로)로만, 팔꿈치는 -x(아래팔이 앞으로)로만 굽는다. 머리 돌리기 ±80°, 끄덕이기 ±60°.
+   왼쪽(L) z+ = 팔·다리를 바깥(+x)으로 벌림, 오른쪽(R)은 부호가 반대(좌우 반전이 한계 안에 그대로 남는다).
+   작업 209a fix 1 — 경첩 방향을 이 리그에서 잰 값: 뼈는 -y 로 뻗고 Rx(θ)·(0,-1,0) = (0, -cosθ, -sinθ) 이므로 팔꿈치 -x 는
+   아래팔을 위팔의 앞면(쉬는 자세 +z) 쪽으로, 무릎 +x 는 정강이를 허벅지 뒷면(-z) 쪽으로 굽힌다. 목록 동작·손·자세가 만드는
+   값은 모두 이 표 안이다(검사 q-l 이 전부 돌려 본다). 가슴: 웃기(-0.1rad) + 뒤로 기대기(-25°) = -31° 라 x 는 -35 까지,
+   앉아 몸을 돌린 자세(sit.turn ±90°, 다리는 그대로)는 이 리그에서 가슴 y 하나로 돌리므로 y 는 ±90. */
+export const RIG_LIMITS = Object.freeze({
+  spine: [[-35, 90], [-90, 90], [-40, 40]],
+  neck: [[-50, 60], [-80, 80], [-40, 40]],
+  head: [[-60, 60], [-80, 80], [-40, 40]],
+  shoulderL: [[-180, 70], [-90, 90], [-90, 180]],
+  shoulderR: [[-180, 70], [-90, 90], [-180, 90]],
+  elbowL: [[-150, 0], [-90, 90], [-10, 10]],
+  elbowR: [[-150, 0], [-90, 90], [-10, 10]],
+  wristL: [[-80, 80], [-90, 90], [-45, 45]],
+  wristR: [[-80, 80], [-90, 90], [-45, 45]],
+  hipL: [[-125, 45], [-45, 45], [-25, 80]],
+  hipR: [[-125, 45], [-45, 45], [-80, 25]],
+  kneeL: [[0, 172], [-30, 30], [-10, 10]],
+  kneeR: [[0, 172], [-30, 30], [-10, 10]],
+  ankleL: [[-45, 50], [-30, 30], [-30, 30]],
+  ankleR: [[-45, 50], [-30, 30], [-30, 30]],
+});
+const DEG = Math.PI / 180;
+/* 2관절 IK 의 pole(가운데 관절이 나갈 쪽, 부모 = 가슴·엉덩이 기준, x 는 인물 왼쪽 L 기준 — R 은 x 부호를 뒤집는다).
+   팔꿈치는 뒤·아래·조금 바깥, 무릎은 앞(조금 바깥). */
+export const RIG_IK_POLES = Object.freeze({ arm: [0.5, -0.6, -0.6], leg: [0.15, 0, 1] });
+
+/* 관절 값(라디안 3개)을 RIG_LIMITS 안으로 자른다. 숫자가 아니면 0. 모르는 관절은 ±π(서버 RIG_ANGLE_MAX).
+   from(라디안 3개, 선택) = 편집을 시작한 값. 그 값이 한계 밖이면 그 축은 from 까지 넓혀 자른다 — 첫 편집에 값이 한계로
+   튀지 않고, 한계 쪽으로는 움직이고 더 바깥으로는 못 간다(작업 209a fix 1). */
+export function clampRigJoint(joint, values, from) {
+  const lim = Object.prototype.hasOwnProperty.call(RIG_LIMITS, joint) ? RIG_LIMITS[joint] : null;
+  return [0, 1, 2].map((i) => {
+    let v = Number(values && values[i]);
+    if (!isFinite(v)) v = 0;
+    let lo = lim ? lim[i][0] * DEG : -Math.PI;
+    let hi = lim ? lim[i][1] * DEG : Math.PI;
+    const f = Number(from && from[i]);
+    if (from && isFinite(f)) {
+      lo = Math.min(lo, f);
+      hi = Math.max(hi, f);
+    }
+    return Math.max(lo, Math.min(hi, v)) || 0;
+  });
+}
+
+/* 좌우 반전: L ↔ R 관절을 바꾸고 y·z 부호를 뒤집는다(x = 인물 왼쪽 평면 거울). 가운데 관절(spine·neck·head)도 y·z 를 뒤집는다.
+   rootY 는 그대로. 두 번 하면 처음 그대로. */
+export function mirrorRig(rig) {
+  const src = rig && typeof rig === "object" ? rig : {};
+  const out = {};
+  Object.keys(src).forEach((k) => {
+    const v = src[k];
+    if (k === "rootY") {
+      out.rootY = v;
+      return;
+    }
+    if (!Array.isArray(v) || v.length !== 3) return;
+    const to = /L$/.test(k) ? k.slice(0, -1) + "R" : /R$/.test(k) ? k.slice(0, -1) + "L" : k;
+    out[to] = [Number(v[0]) || 0, -Number(v[1]) || 0, -Number(v[2]) || 0];
+  });
+  return out;
+}
+
+/* 2관절 IK(작업 209a, 해석해). 뿌리 관절(어깨·엉덩이) 부모 좌표계에서 뿌리 피벗을 원점으로 둔 목표점 target 에
+   뿌리 → 가운데(팔꿈치·무릎) → 끝(손목·발목)이 닿게 한다. 뼈는 쉬는 자세에서 -y. pole = 가운데 관절이 나갈 쪽
+   (팔꿈치는 뒤·아래, 무릎은 앞). 가운데 관절은 로컬 x 축 경첩 하나로만 굽는다: flexSign +1 = +x(무릎), -1 = -x(팔꿈치).
+   maxBendRad = 가운데 관절이 굽을 수 있는 최대 각. 닿지 않으면 목표 쪽으로 쭉 편다(굽힘 0).
+   돌려준 값 = {root: [x,y,z], mid: [x,0,0] (Euler XYZ 라디안), reached, midPos, endPos} — rig 에는 FK 값만 남긴다. */
+export function solveTwoBoneIK(target, lenA, lenB, pole, flexSign, maxBendRad) {
+  const a = Number(lenA) || 0;
+  const b = Number(lenB) || 0;
+  const sign = flexSign < 0 ? -1 : 1;
+  const maxBend = Math.max(0, Math.min(Math.PI - 0.01, Number(maxBendRad) || Math.PI - 0.01));
+  const t = new THREE.Vector3(Number(target.x) || 0, Number(target.y) || 0, Number(target.z) || 0);
+  let dist = t.length();
+  const dir = dist > 1e-9 ? t.clone().divideScalar(dist) : new THREE.Vector3(0, -1, 0);
+  const minD = Math.sqrt(Math.max(1e-12, a * a + b * b + 2 * a * b * Math.cos(maxBend)));
+  const maxD = a + b;
+  const reach = Math.max(minD, Math.min(maxD, dist));
+  // 굽힘 평면: pole 에서 dir 성분을 뺀 방향(가운데 관절이 나갈 쪽). pole 이 dir 과 나란하면 앞(+z)/위(+y)로.
+  const pv = new THREE.Vector3(Number(pole && pole.x) || 0, Number(pole && pole.y) || 0, Number(pole && pole.z) || 0);
+  let side = pv.clone().addScaledVector(dir, -pv.dot(dir));
+  if (side.lengthSq() < 1e-10) side = new THREE.Vector3(0, 0, 1).addScaledVector(dir, -dir.z);
+  if (side.lengthSq() < 1e-10) side = new THREE.Vector3(0, 1, 0).addScaledVector(dir, -dir.y);
+  side.normalize();
+  const cosA = Math.max(-1, Math.min(1, (a * a + reach * reach - b * b) / (2 * a * Math.max(1e-9, reach))));
+  const sinA = Math.sqrt(Math.max(0, 1 - cosA * cosA));
+  const midPos = dir.clone().multiplyScalar(a * cosA).addScaledVector(side, a * sinA);
+  const endPos = dir.clone().multiplyScalar(reach);
+  const u = midPos.clone().normalize(); // 위 뼈 방향
+  const v = endPos.clone().sub(midPos).normalize(); // 아래 뼈 방향
+  // 뿌리 회전: 로컬 -y → u, 로컬 z → sign·(u 에 수직인 굽힘 쪽). 경첩(로컬 x)이 굽힘 평면에 수직이 된다.
+  let zAxis = side.clone().addScaledVector(u, -side.dot(u));
+  if (zAxis.lengthSq() < 1e-10) zAxis = new THREE.Vector3(0, 0, 1).addScaledVector(u, -u.z);
+  zAxis.normalize().multiplyScalar(sign);
+  const yAxis = u.clone().negate();
+  const xAxis = new THREE.Vector3().crossVectors(yAxis, zAxis).normalize();
+  const basis = new THREE.Matrix4().makeBasis(xAxis, yAxis, zAxis);
+  const e = new THREE.Euler().setFromRotationMatrix(basis, "XYZ");
+  const bend = Math.acos(Math.max(-1, Math.min(1, u.dot(v))));
+  return {
+    root: [e.x || 0, e.y || 0, e.z || 0],
+    mid: [sign * bend || 0, 0, 0],
+    reached: dist <= maxD + 1e-6 && dist >= minD - 1e-6,
+    midPos: midPos.toArray(),
+    endPos: endPos.toArray(),
+  };
+}
 // lean_forward / lean_back 척추 기울기(25°).
 const LEAN_RAD = 25 * Math.PI / 180;
 const DEFAULT_HAIR_COLOR = "#2b2b2b";
@@ -226,10 +364,14 @@ class Mannequin {
     const scale = (Number(heightM) || 1.7) / 1.7;
     this.group.scale.setScalar(scale);
 
+    // 작업 209a: 골반(pelvis) — rig.rootY 만큼 엉덩이 아래 전체를 올리고 내린다(기본 0 = 지금 모양 그대로).
+    this.pelvis = new THREE.Group();
+    this.group.add(this.pelvis);
+
     // 엉덩이(hips): 다리·몸통이 매달리는 뿌리. 서 있을 때 y≈0.9.
     this.hips = new THREE.Group();
-    this.hips.position.y = 0.9;
-    this.group.add(this.hips);
+    this.hips.position.y = RIG_DIMS.hipsY;
+    this.pelvis.add(this.hips);
 
     // 몸통(척추) — 엉덩이에서 위로.
     this.spine = new THREE.Group();
@@ -239,14 +381,16 @@ class Mannequin {
     torso.castShadow = true;
     this.spine.add(torso);
 
-    // 목·머리 — 몸통 위.
+    // 목·머리 — 몸통 위. 작업 209a: 머리 관절(headJoint)은 목과 같은 자리 피벗, 머리 구는 그 위 headCenterY.
     this.neck = new THREE.Group();
-    this.neck.position.y = 0.6;
+    this.neck.position.y = RIG_DIMS.neckY;
     this.spine.add(this.neck);
+    this.headJoint = new THREE.Group();
+    this.neck.add(this.headJoint);
     const head = new THREE.Mesh(new THREE.SphereGeometry(0.13, 16, 12), mat);
-    head.position.y = 0.13;
+    head.position.y = RIG_DIMS.headCenterY;
     head.castShadow = true;
-    this.neck.add(head);
+    this.headJoint.add(head);
 
     // --- 얼굴 표식(정면 +z): 머리의 앞·뒤를 영상 모델이 구분하게 한다(설계자 2026-10-22) ---
     // 머리 반지름 r=0.13. 눈·코·입을 머리 앞면(+z)에 붙인다. 머리 중심(head.position)을 기준으로.
@@ -284,14 +428,14 @@ class Mannequin {
     this.head = head;
 
     // 팔(어깨 피벗 → 위팔 → 팔꿈치 → 아래팔). 좌우.
-    this.shoulderL = this._makeArm(mat, 0.22);
-    this.shoulderR = this._makeArm(mat, -0.22);
+    this.shoulderL = this._makeArm(mat, RIG_DIMS.shoulderX);
+    this.shoulderR = this._makeArm(mat, -RIG_DIMS.shoulderX);
     this.spine.add(this.shoulderL.pivot);
     this.spine.add(this.shoulderR.pivot);
 
-    // 다리(엉덩이 피벗 → 허벅지 → 무릎 → 정강이). 좌우.
-    this.hipL = this._makeLeg(mat, 0.1);
-    this.hipR = this._makeLeg(mat, -0.1);
+    // 다리(엉덩이 피벗 → 허벅지 → 무릎 → 정강이 → 발목). 좌우.
+    this.hipL = this._makeLeg(mat, RIG_DIMS.hipX);
+    this.hipR = this._makeLeg(mat, -RIG_DIMS.hipX);
     this.hips.add(this.hipL.pivot);
     this.hips.add(this.hipR.pivot);
 
@@ -302,17 +446,17 @@ class Mannequin {
 
   _makeArm(mat, xOffset) {
     const pivot = new THREE.Group();
-    pivot.position.set(xOffset, 0.52, 0);
+    pivot.position.set(xOffset, RIG_DIMS.shoulderY, 0);
     const upper = new THREE.Mesh(new THREE.CapsuleGeometry(0.055, 0.26, 4, 8), mat);
     upper.position.y = -0.15;
     pivot.add(upper);
     const elbow = new THREE.Group();
-    elbow.position.y = -0.3;
+    elbow.position.y = -RIG_DIMS.upperArm;
     pivot.add(elbow);
     const fore = new THREE.Mesh(new THREE.CapsuleGeometry(0.05, 0.24, 4, 8), mat);
     fore.position.y = -0.14;
     elbow.add(fore);
-    // 손 끝 표식(빈 Group, 보이지 않음) — IK 목표·검사가 손 위치를 읽는다(작업 148).
+    // 손 끝 표식(빈 Group, 보이지 않음) — IK 목표·검사가 손 위치를 읽는다(작업 148). 작업 209a: 손목(wrist) 피벗도 이것.
     const hand = new THREE.Group();
     hand.position.y = -FORE_ARM_M;
     elbow.add(hand);
@@ -326,12 +470,16 @@ class Mannequin {
     thigh.position.y = -0.24;
     pivot.add(thigh);
     const knee = new THREE.Group();
-    knee.position.y = -0.46;
+    knee.position.y = -RIG_DIMS.thigh;
     pivot.add(knee);
     const shin = new THREE.Mesh(new THREE.CapsuleGeometry(0.07, 0.4, 4, 8), mat);
     shin.position.y = -0.24;
     knee.add(shin);
-    return { pivot, elbow: knee };
+    // 작업 209a: 발목(ankle) 피벗(빈 Group) — 정강이 끝. 발 IK 손잡이·발 위치를 읽는다.
+    const ankle = new THREE.Group();
+    ankle.position.y = -RIG_DIMS.shin;
+    knee.add(ankle);
+    return { pivot, elbow: knee, ankle };
   }
 
   /* 포즈·제스처·발화를 매 프레임 적용한다. t 는 장면 시각(초) — 걷기·끄덕임·반복 동작 위상에 쓴다.
@@ -341,10 +489,12 @@ class Mannequin {
      hipY(m)에, 허벅지를 legPitchDeg 만큼 아래로, 정강이는 수직. turn(rad)은 다리 방향에서 몸통을 돌린 각. */
   apply(pose, gesture, speaking, t, targetYaw, sit) {
     // 기본 자세로 되돌린 뒤 포즈별로 굽힌다.
-    this.hips.position.y = 0.9;
+    this.pelvis.position.y = 0;
+    this.hips.position.y = RIG_DIMS.hipsY;
     this.hips.rotation.set(0, 0, 0);
     this.spine.rotation.set(0, 0, 0);
     this.neck.rotation.set(0, 0, 0);
+    this.headJoint.rotation.set(0, 0, 0);
     this._resetLimb(this.hipL, this.hipR, this.shoulderL, this.shoulderR);
     this.eyeMeshes.forEach((eye) => eye.scale.set(1, 1, 1));
     const seated = pose === "sit" && sit && typeof sit.hipY === "number" && isFinite(sit.hipY);
@@ -403,7 +553,8 @@ class Mannequin {
 
     if (seated && typeof sit.turn === "number" && isFinite(sit.turn)) {
       // 앉아서 몸을 돌린 자세: 다리는 그대로, 몸통·팔·머리만 facing 쪽으로(±90° 안, update 가 자른다).
-      this.spine.rotation.y += sit.turn;
+      // 기울이기(lean_in)의 상대 쪽 돌림과 합쳐도 가슴 y 한계(±90°) 안.
+      this.spine.rotation.y = Math.max(-Math.PI / 2, Math.min(Math.PI / 2, this.spine.rotation.y + sit.turn));
     }
   }
 
@@ -411,6 +562,8 @@ class Mannequin {
     [this.hipL, this.hipR, this.shoulderL, this.shoulderR].forEach((limb) => {
       limb.pivot.rotation.set(0, 0, 0);
       limb.elbow.rotation.set(0, 0, 0);
+      if (limb.hand) limb.hand.rotation.set(0, 0, 0);
+      if (limb.ankle) limb.ankle.rotation.set(0, 0, 0);
     });
     // 팔은 기본적으로 몸 옆으로 내린다.
     this.shoulderL.pivot.rotation.z = 0.1;
@@ -422,10 +575,94 @@ class Mannequin {
     leg.elbow.rotation.x = kneeX;
   }
 
+  /* 작업 209a: rig 관절 이름 → 피벗(Object3D). 모르는 이름은 null. */
+  rigObject(joint) {
+    switch (joint) {
+      case "spine": return this.spine;
+      case "neck": return this.neck;
+      case "head": return this.headJoint;
+      case "shoulderL": return this.shoulderL.pivot;
+      case "elbowL": return this.shoulderL.elbow;
+      case "wristL": return this.shoulderL.hand;
+      case "shoulderR": return this.shoulderR.pivot;
+      case "elbowR": return this.shoulderR.elbow;
+      case "wristR": return this.shoulderR.hand;
+      case "hipL": return this.hipL.pivot;
+      case "kneeL": return this.hipL.elbow;
+      case "ankleL": return this.hipL.ankle;
+      case "hipR": return this.hipR.pivot;
+      case "kneeR": return this.hipR.elbow;
+      case "ankleR": return this.hipR.ankle;
+      default: return null;
+    }
+  }
+
+  /* 지금 그려진 관절 값(로컬 Euler XYZ 라디안). 목록 자세에서 온 값이든 rig 값이든 보이는 그대로. */
+  readJoint(joint) {
+    const obj = this.rigObject(joint);
+    if (!obj) return [0, 0, 0];
+    const e = new THREE.Euler().setFromQuaternion(obj.quaternion, "XYZ");
+    return [e.x || 0, e.y || 0, e.z || 0];
+  }
+
+  /* 작업 209a fix 1: 목록 자세(동작·손·자세·머리)가 만든 관절 값을 RIG_LIMITS 안으로(applyRig 앞). 안쪽 값은 건드리지 않는다
+     (목록 동작·자세는 처음부터 한계 안 — 검사 q-l). 손 IK 의 드문 조합(자기 몸을 가리키기·옆·뒤 상대에 닿기)만 바뀐다.
+     각도는 원으로 보고 가까운 한계로 자른다(어깨 166° = -194° 는 -180° 로). 돌려준 값 = 자른 관절 수(this.clamped 에도). */
+  clampToLimits() {
+    let count = 0;
+    RIG_JOINTS.forEach((joint) => {
+      const v = this.readJoint(joint);
+      const lim = RIG_LIMITS[joint];
+      let changed = false;
+      const c = v.map((x, i) => {
+        const lo = lim[i][0] * DEG;
+        const hi = lim[i][1] * DEG;
+        if (x >= lo - 1e-9 && x <= hi + 1e-9) return x;
+        changed = true;
+        const gap = (a) => Math.abs(Math.atan2(Math.sin(x - a), Math.cos(x - a)));
+        return gap(lo) <= gap(hi) ? lo : hi;
+      });
+      if (changed) {
+        this.rigObject(joint).rotation.set(c[0], c[1], c[2], "XYZ");
+        count += 1;
+      }
+    });
+    this.clamped = count;
+    return count;
+  }
+
+  /* 작업 209a: 목록 자세(apply·applyBody·applyHands) 뒤에 부른다. rig 에 적힌 관절만 그 값으로 덮어쓰고 rootY 만큼 골반을 옮긴다.
+     rig 가 없으면 아무것도 바꾸지 않는다(옛 계획은 지금과 같은 모양). */
+  applyRig(rig) {
+    if (!rig || typeof rig !== "object") return;
+    RIG_JOINTS.forEach((joint) => {
+      const v = rig[joint];
+      if (!Array.isArray(v) || v.length !== 3) return;
+      const x = Number(v[0]);
+      const y = Number(v[1]);
+      const z = Number(v[2]);
+      if (!isFinite(x) || !isFinite(y) || !isFinite(z)) return;
+      this.rigObject(joint).rotation.set(x, y, z, "XYZ");
+    });
+    const rootY = Number(rig.rootY);
+    if (typeof rig.rootY === "number" && isFinite(rootY)) this.pelvis.position.y = rootY;
+  }
+
   _applyGesture(gesture, t, targetYaw) {
     const time = Number(t) || 0;
-    // 상대 쪽으로 돌릴 각도(로컬 yaw). 없으면 정면(0). 오른팔 뻗기를 그 각도로 흔든다.
-    const aim = typeof targetYaw === "number" ? targetYaw : 0;
+    // 상대 쪽으로 돌릴 각도(로컬 yaw, -π..π). 없으면 정면(0). 오른팔 뻗기를 그 각도로 흔든다.
+    // 작업 209a fix 1: 관절마다 RIG_LIMITS 안으로(뒤에 있는 상대 쪽으로 몸이 한 바퀴 돌지 않게).
+    const aim = typeof targetYaw === "number" && isFinite(targetYaw) ? Math.atan2(Math.sin(targetYaw), Math.cos(targetYaw)) : 0;
+    const armAim = Math.max(-Math.PI / 2, Math.min(Math.PI / 2, aim));
+    // 자기 몸에 닿는 동작(작업 209a fix 1): 손이 그 부위에 닿게 2관절 IK(팔꿈치는 -x 로만 굽는다). 행렬을 먼저 갱신한다.
+    const reachOwn = (arm, sideSign, point, pole) => {
+      this.group.updateWorldMatrix(true, true);
+      this._reachArm(arm, sideSign, point, pole);
+    };
+    const onHead = (x, y, z) => {
+      this.group.updateWorldMatrix(true, true);
+      return this.head.localToWorld(new THREE.Vector3(x, y, z));
+    };
     switch (gesture) {
       case "point":
         // 오른팔을 앞으로 뻗는다.
@@ -437,51 +674,47 @@ class Mannequin {
         this.spine.rotation.x = 0.7;
         break;
       case "hands_on_knees":
-        this.shoulderL.pivot.rotation.x = -0.9;
-        this.shoulderR.pivot.rotation.x = -0.9;
-        this.shoulderL.elbow.rotation.x = 0.6;
-        this.shoulderR.elbow.rotation.x = 0.6;
+        // 두 손을 무릎 위에(서 있으면 닿는 데까지 무릎 쪽으로 뻗는다). 팔이 거의 곧아도 팔꿈치는 바깥·뒤(편집기 pole).
+        this.group.updateWorldMatrix(true, true);
+        reachOwn(this.shoulderL, 1, this.bodyPoint("knee", "left"), RIG_IK_POLES.arm);
+        reachOwn(this.shoulderR, -1, this.bodyPoint("knee", "right"), RIG_IK_POLES.arm);
         break;
       case "cover_face":
-        // 두 팔을 얼굴 쪽으로.
-        this.shoulderL.pivot.rotation.set(-Math.PI * 0.8, 0, 0.5);
-        this.shoulderR.pivot.rotation.set(-Math.PI * 0.8, 0, -0.5);
-        this.shoulderL.elbow.rotation.x = 1.2;
-        this.shoulderR.elbow.rotation.x = 1.2;
+        // 두 손바닥으로 얼굴(왼손은 왼쪽 반, 오른손은 오른쪽 반)을 가린다.
+        reachOwn(this.shoulderL, 1, onHead(0.045, 0, 0.17));
+        reachOwn(this.shoulderR, -1, onHead(-0.045, 0, 0.17));
         break;
       case "hand_to_own_face":
-        // 오른손을 자기 뺨/입 쪽으로.
-        this.shoulderR.pivot.rotation.set(-Math.PI * 0.7, 0, -0.35);
-        this.shoulderR.elbow.rotation.x = 1.5;
+        // 오른손을 자기 오른뺨에.
+        reachOwn(this.shoulderR, -1, onHead(-0.09, -0.03, 0.1));
         break;
       case "wipe_tears": {
-        // 손등으로 눈가, 짧게 왕복(주기 ~0.7초).
-        const wob = Math.sin(time * 9) * 0.15;
-        this.shoulderR.pivot.rotation.set(-Math.PI * 0.75 + wob, 0, -0.3);
-        this.shoulderR.elbow.rotation.x = 1.7;
+        // 손등으로 오른눈 아래를 짧게 왕복(주기 ~0.7초).
+        const wob = Math.sin(time * 9) * 0.025;
+        reachOwn(this.shoulderR, -1, onHead(-0.045 + wob, -0.01, 0.17));
         break;
       }
       case "hand_on_other_cheek":
-        // 오른팔을 앞·옆(상대 쪽)으로 뻗어 상대 얼굴 높이로.
-        this.shoulderR.pivot.rotation.set(-Math.PI / 2, aim, -0.1);
-        this.shoulderR.elbow.rotation.x = 0.3;
+        // 오른팔을 앞·옆(상대 쪽)으로 뻗어 상대 얼굴 높이로(아래팔은 위로 조금 — 팔꿈치 -x).
+        this.shoulderR.pivot.rotation.set(-Math.PI / 2, armAim, -0.1);
+        this.shoulderR.elbow.rotation.x = -0.3;
         break;
       case "both_hands_other_cheeks":
         // 두 팔을 앞으로 뻗어 상대 얼굴을 감싼다.
-        this.shoulderL.pivot.rotation.set(-Math.PI / 2, aim, 0.15);
-        this.shoulderR.pivot.rotation.set(-Math.PI / 2, aim, -0.15);
-        this.shoulderL.elbow.rotation.x = 0.3;
-        this.shoulderR.elbow.rotation.x = 0.3;
+        this.shoulderL.pivot.rotation.set(-Math.PI / 2, armAim, 0.15);
+        this.shoulderR.pivot.rotation.set(-Math.PI / 2, armAim, -0.15);
+        this.shoulderL.elbow.rotation.x = -0.3;
+        this.shoulderR.elbow.rotation.x = -0.3;
         break;
       case "hand_on_chest":
         // 오른손을 자기 가슴에.
-        this.shoulderR.pivot.rotation.set(-Math.PI * 0.5, 0, -0.5);
-        this.shoulderR.elbow.rotation.x = 1.3;
+        this.group.updateWorldMatrix(true, true);
+        reachOwn(this.shoulderR, -1, this.bodyPoint("chest"));
         break;
       case "press_hand_to_other_chest":
-        // 한 손을 앞 상대 가슴 높이로 뻗는다.
-        this.shoulderR.pivot.rotation.set(-Math.PI / 2, aim, -0.1);
-        this.shoulderR.elbow.rotation.x = 0.1;
+        // 한 손을 앞 상대 가슴 높이로 뻗는다(위팔 조금 아래, 아래팔 수평).
+        this.shoulderR.pivot.rotation.set(-Math.PI / 2 + 0.1, armAim, -0.1);
+        this.shoulderR.elbow.rotation.x = -0.1;
         break;
       case "lean_in":
         // 상체를 상대 쪽으로 0.35rad 기울이고 머리 약간 숙임.
@@ -512,8 +745,8 @@ class Mannequin {
         break;
       }
       case "turn_head_to_other":
-        // 목을 상대 쪽으로 돌린다.
-        this.neck.rotation.y = aim;
+        // 목을 상대 쪽으로 돌린다(목 돌리기 한계 ±80° 안).
+        this.neck.rotation.y = Math.max(-80 * DEG, Math.min(80 * DEG, aim));
         break;
       default:
         break;
@@ -619,30 +852,19 @@ class Mannequin {
   }
 
   /* 2관절 IK(작업 148): 어깨(피벗) → 팔꿈치 → 손끝이 세계 점 targetWorld 에서 끝나게 위팔·아래팔을 돌린다. 팔꿈치는
-     아래·바깥으로 굽는다(pole). 닿지 않으면 그 방향으로 쭉 편다. 돌려준 값 = 목표까지 남은 거리(마네킹 로컬 m, 0 이면 닿음). */
-  _reachArm(arm, sideSign, targetWorld) {
+     아래·바깥으로 굽는다(pole). 닿지 않으면 그 방향으로 쭉 편다. 돌려준 값 = 목표까지 남은 거리(마네킹 로컬 m, 0 이면 닿음).
+     작업 209a fix 1: 편집기와 같은 해석해(solveTwoBoneIK) — 팔꿈치는 로컬 x 경첩 하나로 -x(앞)로만, RIG_LIMITS 굽힘 안. */
+  _reachArm(arm, sideSign, targetWorld, poleArg) {
     const parent = arm.pivot.parent;
     parent.updateMatrixWorld(true);
     const rel = parent.worldToLocal(targetWorld.clone()).sub(arm.pivot.position);
-    let dist = rel.length();
-    const minD = Math.abs(UPPER_ARM_M - FORE_ARM_M) + 0.02;
-    const maxD = UPPER_ARM_M + FORE_ARM_M - 0.001;
-    const dir = dist > 1e-6 ? rel.clone().divideScalar(dist) : new THREE.Vector3(0, -1, 0);
-    const reach = Math.min(maxD, Math.max(minD, dist));
-    let bend = new THREE.Vector3(sideSign * 0.6, -1, 0.1);
-    bend.sub(dir.clone().multiplyScalar(bend.dot(dir)));
-    if (bend.lengthSq() < 1e-8) bend = new THREE.Vector3(0, 0, 1).sub(dir.clone().multiplyScalar(dir.z));
-    bend.normalize();
-    const cosA = Math.max(-1, Math.min(1,
-      (UPPER_ARM_M * UPPER_ARM_M + reach * reach - FORE_ARM_M * FORE_ARM_M) / (2 * UPPER_ARM_M * reach)));
-    const sinA = Math.sqrt(Math.max(0, 1 - cosA * cosA));
-    const elbowAt = dir.clone().multiplyScalar(UPPER_ARM_M * cosA).add(bend.multiplyScalar(UPPER_ARM_M * sinA));
-    const handAt = dir.clone().multiplyScalar(reach);
-    const down = new THREE.Vector3(0, -1, 0);
-    arm.pivot.quaternion.setFromUnitVectors(down, elbowAt.clone().normalize());
-    const fore = handAt.sub(elbowAt).normalize().applyQuaternion(arm.pivot.quaternion.clone().invert());
-    arm.elbow.quaternion.setFromUnitVectors(down, fore);
-    return Math.max(0, dist - maxD);
+    const side = sideSign > 0 ? "L" : "R";
+    const pl = poleArg || [0.6, -1, 0.1];
+    const pole = new THREE.Vector3(sideSign * pl[0], pl[1], pl[2]);
+    const res = solveTwoBoneIK(rel, UPPER_ARM_M, FORE_ARM_M, pole, -1, -RIG_LIMITS["elbow" + side][0][0] * DEG);
+    arm.pivot.rotation.set(res.root[0], res.root[1], res.root[2]);
+    arm.elbow.rotation.set(res.mid[0], res.mid[1], res.mid[2]);
+    return Math.max(0, rel.length() - (UPPER_ARM_M + FORE_ARM_M));
   }
 
   /* 팔을 쭉 펴서 세계 점 쪽을 가리킨다(point). */
@@ -1006,6 +1228,17 @@ class PrevizScene {
         entry.mannequin.applyHands(ca.hands, { other: otherEntry ? otherEntry.mannequin : null, seated });
       });
     }
+    // 작업 209a fix 1: 목록 자세가 만든 관절 값은 RIG_LIMITS 안으로(포즈 편집을 시작해도 값이 튀지 않는다).
+    cutActors.forEach((ca) => {
+      const entry = this.actors[ca.id];
+      if (entry) entry.mannequin.clampToLimits();
+    });
+    // 작업 209a: 직접 잡은 관절(cut actor 의 rig)은 목록 자세·손·머리·동작 위에 덮어쓴다. 재생·녹화도 이 경로다.
+    // rig 가 없는 옛 계획은 아무것도 바뀌지 않는다.
+    cutActors.forEach((ca) => {
+      const entry = this.actors[ca.id];
+      if (entry && ca.rig && typeof ca.rig === "object") entry.mannequin.applyRig(ca.rig);
+    });
     // 이 컷에 없는 인물은 숨긴다.
     Object.keys(this.actors).forEach((id) => {
       this.actors[id].mannequin.group.visible = !!seen[id];
@@ -1301,6 +1534,7 @@ function createController(host, options) {
   function play() {
     if (playing || recording) return;
     unpin();
+    leavePose(); // 작업 209a: 재생 중엔 포즈 모드가 꺼진다
     if (clockT >= totalDuration) clockT = 0;
     playing = true;
     lastFrame = 0;
@@ -1348,6 +1582,7 @@ function createController(host, options) {
 
       pause();
       recording = true;
+      leavePose(); // 작업 209a
       overlay.style.display = "none";
 
       let stream;
@@ -1447,6 +1682,7 @@ function createController(host, options) {
     pause();
     var wasRecording = recording;
     recording = true;
+    leavePose(); // 작업 209a
     overlay.style.display = "none";
 
     var frames = [];
@@ -1534,8 +1770,12 @@ function createController(host, options) {
     undo: [],
     redo: [],
     shadows: new Map(), // cut → 마지막으로 기록한 JSON(되돌리기 기준)
-    listeners: { select: [], edit: [], state: [] },
+    listeners: { select: [], edit: [], state: [], pose: [] },
     workInit: false,
+    workFramed: new WeakSet(), // 작업 209a fix 1: 작업 시점 첫 화면을 이미 맞춘 컷
+    workMoved: false, // 작업 209a fix 1: 사용자가 작업 카메라를 움직였다(orbit start · F) — 그 뒤로는 자동으로 옮기지 않는다
+    pose: false, // 작업 209a: 포즈 모드(고른 인물 하나에 관절 손잡이)
+    joint: null, // 작업 209a: 포즈 모드에서 고른 관절(RIG_JOINTS 하나 또는 "root" = 골반)
   };
   scenesData.forEach((sd) => ((sd && sd.timeline) || []).forEach((cut) => edit.shadows.set(cut, JSON.stringify(cut))));
 
@@ -1622,6 +1862,9 @@ function createController(host, options) {
     orbit.addEventListener("change", () => {
       if (!playing && !recording) renderAt(clockT);
     });
+    orbit.addEventListener("start", () => {
+      edit.workMoved = true;
+    });
   }
 
   function viewCamera() {
@@ -1641,7 +1884,7 @@ function createController(host, options) {
   function stateInfo() {
     return {
       view: edit.view, tool: edit.tool, snap: edit.snap, aim: edit.aim, selection: edit.sel ? Object.assign({}, edit.sel) : null,
-      keyU: edit.keyU, canUndo: edit.undo.length > 0, canRedo: edit.redo.length > 0,
+      keyU: edit.keyU, canUndo: edit.undo.length > 0, canRedo: edit.redo.length > 0, pose: edit.pose, joint: edit.joint,
     };
   }
 
@@ -1797,6 +2040,17 @@ function createController(host, options) {
     const cut = editCut();
     const sel = edit.sel;
     if (!cut || !sel) return;
+    // 작업 209a: 포즈 모드에서 고른 관절을 회전(E) 기즈모로 돌린다 — 부모 기준 로컬 회전을 rig 에 쓴다(한계 안으로).
+    const joint = poseGizmoJoint();
+    if (joint && sel.type === "actor") {
+      const obj = poseEntry().mannequin.rigObject(joint);
+      const parentQ = obj.parent.getWorldQuaternion(new THREE.Quaternion());
+      const e = new THREE.Euler().setFromQuaternion(parentQ.invert().multiply(proxy.quaternion), "XYZ");
+      writeJoint(cut, sel.id, joint, [e.x, e.y, e.z], jointNow(cut, sel.id, joint));
+      renderAt(clockT);
+      emit("edit", { cut, kind: "live" });
+      return;
+    }
     if (sel.type === "actor") {
       if (edit.tool === "rotate") {
         const e = new THREE.Euler().setFromQuaternion(proxy.quaternion, "YXZ");
@@ -1822,7 +2076,19 @@ function createController(host, options) {
     let attach = false;
     if (cut && sel && edit.tool !== "select" && !recording) {
       proxy.rotation.set(0, 0, 0);
-      if (sel.type === "actor") {
+      const joint = poseGizmoJoint();
+      if (joint) {
+        // 작업 209a: 고른 관절 자리·방향에 회전 기즈모(세 축).
+        const obj = poseEntry().mannequin.rigObject(joint);
+        obj.getWorldPosition(proxy.position);
+        obj.getWorldQuaternion(proxy.quaternion);
+        gizmo.showX = true;
+        gizmo.showY = true;
+        gizmo.showZ = true;
+        attach = true;
+      } else if (edit.pose && edit.joint) {
+        // 포즈 모드에서 관절·골반을 골랐으면 인물 이동 기즈모는 띄우지 않는다(손잡이를 직접 끈다).
+      } else if (sel.type === "actor") {
         const ca = cutActor(cut, sel.id);
         const entry = current && current.scene.actors[sel.id];
         if (ca && entry && entry.mannequin.group.visible) {
@@ -1897,7 +2163,458 @@ function createController(host, options) {
     } else {
       selBox.visible = false;
     }
+    syncPose();
     syncProxy();
+  }
+
+  /* ================================================================ 작업 209a: 포즈 모드(Maya 식 관절 잡기)
+
+     인물 하나를 고른 뒤 [포즈](P): 그 인물에만 손잡이를 보인다 — FK 고리(머리·목·가슴·어깨·팔꿈치·엉덩이·무릎),
+     IK 네모(두 손·두 발), 골반 네모. 고리를 누르면 그 관절을 고르고(패널 채널 박스), 고리를 끌면 가로 = 돌리기(y),
+     세로 = 숙이기(x), Shift+가로 = 기울이기(z). 회전(E) 기즈모로도 돌린다(자식 관절이 따라 돈다).
+     손·발 네모를 끌면 보는 카메라를 마주 보는 면에서 움직이고(Alt+세로 = 앞뒤), 2관절 IK(solveTwoBoneIK)를 풀어
+     어깨·팔꿈치(엉덩이·무릎) FK 값으로 rig 에 쓴다 — 저장되는 것은 FK 값뿐. 골반 네모를 세로로 끌면 rootY(바닥에 닿은 발은
+     그 자리에 둔 채 무릎을 굽힌다). 모든 값은 RIG_LIMITS 안으로. 끈 것 한 번 = 되돌리기 한 단계(commitEdit), 그 인물은 manual.
+     재생·녹화 중엔 꺼진다(손잡이는 helpers 묶음 안 — 녹화에 나오지 않는다). */
+  const POSE_FK_COLOR = 0x64b5f6;
+  const POSE_IK_COLOR = 0xff8a65;
+  const POSE_ROOT_COLOR = 0xce93d8;
+  const POSE_ROT_RAD_PER_PX = 0.01; // 고리 끌기 1px = 0.57°
+  const POSE_PLANT_M = 0.15; // 골반을 끌 때 이 높이 아래의 발은 바닥에 붙여 둔다
+  // [관절, 고리 반지름 m(키 1.7 기준), 피벗 로컬 자리]. 고리는 뼈(로컬 y)를 감싼다.
+  const POSE_RINGS = [
+    ["head", 0.18, [0, RIG_DIMS.headCenterY, 0]],
+    ["neck", 0.09, [0, 0, 0]],
+    ["spine", 0.26, [0, 0.32, 0]],
+    ["shoulderL", 0.08, [0, 0, 0]],
+    ["shoulderR", 0.08, [0, 0, 0]],
+    ["elbowL", 0.065, [0, 0, 0]],
+    ["elbowR", 0.065, [0, 0, 0]],
+    ["hipL", 0.095, [0, -0.1, 0]],
+    ["hipR", 0.095, [0, -0.1, 0]],
+    ["kneeL", 0.085, [0, 0, 0]],
+    ["kneeR", 0.085, [0, 0, 0]],
+  ];
+  // IK 손잡이 → [팔/다리, 쪽]
+  const POSE_IK = { handL: ["arm", "L"], handR: ["arm", "R"], footL: ["leg", "L"], footR: ["leg", "R"] };
+  const RING_TILT = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(1, 0, 0), Math.PI / 2);
+  const poseGroup = new THREE.Group();
+  poseGroup.name = "previz-pose-controls";
+  poseGroup.visible = false;
+  helpers.add(poseGroup);
+  let poseCtl = null; // {rings, handles, root, picks} — 처음 켤 때 만든다
+
+  function poseMaterial(color) {
+    return new THREE.MeshBasicMaterial({ color, depthTest: false, depthWrite: false, transparent: true, opacity: 0.95 });
+  }
+
+  function ensurePoseControls() {
+    if (poseCtl) return poseCtl;
+    const ctl = { rings: [], handles: [], root: null, picks: [] };
+    const addPick = (mesh, geo, info) => {
+      const pick = new THREE.Mesh(geo, pickMat);
+      pick.userData.pose = info;
+      mesh.add(pick);
+      ctl.picks.push(pick);
+    };
+    POSE_RINGS.forEach(([joint, radius, offset]) => {
+      const mat = poseMaterial(POSE_FK_COLOR);
+      const mesh = new THREE.Mesh(new THREE.TorusGeometry(radius, 0.008, 6, 40), mat);
+      mesh.renderOrder = 990;
+      addPick(mesh, new THREE.TorusGeometry(radius, 0.035, 6, 24), { kind: "fk", name: joint });
+      poseGroup.add(mesh);
+      ctl.rings.push({ joint, mesh, mat, offset: new THREE.Vector3(offset[0], offset[1], offset[2]) });
+    });
+    Object.keys(POSE_IK).forEach((name) => {
+      const mat = poseMaterial(POSE_IK_COLOR);
+      const mesh = new THREE.Mesh(new THREE.BoxGeometry(0.07, 0.07, 0.07), mat);
+      mesh.renderOrder = 991;
+      addPick(mesh, new THREE.BoxGeometry(0.11, 0.11, 0.11), { kind: "ik", name });
+      poseGroup.add(mesh);
+      ctl.handles.push({ name, mesh, mat });
+    });
+    // 골반: 엉덩이 둘레 네모(얇은 막대 4개).
+    const rootMat = poseMaterial(POSE_ROOT_COLOR);
+    const root = new THREE.Group();
+    const hx = 0.24;
+    const hz = 0.17;
+    [[0, hz, 2 * hx, true], [0, -hz, 2 * hx, true], [hx, 0, 2 * hz, false], [-hx, 0, 2 * hz, false]].forEach(([x, z, len, alongX]) => {
+      const size = (t) => (alongX ? [len, t, t] : [t, t, len]);
+      const bar = new THREE.Mesh(new THREE.BoxGeometry(...size(0.012)), rootMat);
+      bar.position.set(x, 0, z);
+      bar.renderOrder = 990;
+      addPick(bar, new THREE.BoxGeometry(...size(0.05)), { kind: "root", name: "root" });
+      root.add(bar);
+    });
+    poseGroup.add(root);
+    ctl.root = { mesh: root, mat: rootMat };
+    poseCtl = ctl;
+    return ctl;
+  }
+
+  /* 포즈 모드의 인물(이 컷에 보이는 고른 인물). 아니면 null. */
+  function poseEntry() {
+    const sel = edit.sel;
+    if (!edit.pose || !sel || sel.type !== "actor" || !current) return null;
+    const entry = current.scene.actors[sel.id];
+    return entry && entry.mannequin.group.visible ? entry : null;
+  }
+
+  function poseGizmoJoint() {
+    return edit.pose && edit.tool === "rotate" && RIG_JOINTS.indexOf(edit.joint) >= 0 && poseEntry() ? edit.joint : null;
+  }
+
+  function limbOf(m, kind, side) {
+    if (kind === "arm") return side === "L" ? m.shoulderL : m.shoulderR;
+    return side === "L" ? m.hipL : m.hipR;
+  }
+
+  function handleObject(m, name) {
+    const limb = limbOf(m, POSE_IK[name][0], POSE_IK[name][1]);
+    return POSE_IK[name][0] === "arm" ? limb.hand : limb.ankle;
+  }
+
+  /* 손잡이를 지금 그린 마네킹 관절 자리로 옮긴다(renderAt → syncHelpers). */
+  function syncPose() {
+    const entry = poseEntry();
+    const show = !!entry && edit.helpersOn && !playing && !recording;
+    poseGroup.visible = show;
+    if (!show) return;
+    const ctl = ensurePoseControls();
+    const m = entry.mannequin;
+    const s = m.group.scale.y || 1;
+    const q = new THREE.Quaternion();
+    m.group.updateMatrixWorld(true);
+    ctl.rings.forEach((ring) => {
+      const obj = m.rigObject(ring.joint);
+      ring.mesh.position.copy(obj.localToWorld(ring.offset.clone()));
+      obj.getWorldQuaternion(q);
+      ring.mesh.quaternion.copy(q).multiply(RING_TILT);
+      ring.mesh.scale.setScalar(s);
+      ring.mat.color.setHex(edit.joint === ring.joint ? SEL_COLOR : POSE_FK_COLOR);
+    });
+    m.group.getWorldQuaternion(q);
+    ctl.handles.forEach((h) => {
+      handleObject(m, h.name).getWorldPosition(h.mesh.position);
+      h.mesh.quaternion.copy(q);
+      h.mesh.scale.setScalar(s);
+      h.mat.color.setHex(drag.pose && drag.pose.name === h.name ? SEL_COLOR : POSE_IK_COLOR);
+    });
+    m.hips.getWorldPosition(ctl.root.mesh.position);
+    ctl.root.mesh.quaternion.copy(q);
+    ctl.root.mesh.scale.setScalar(s);
+    ctl.root.mat.color.setHex(edit.joint === "root" ? SEL_COLOR : POSE_ROOT_COLOR);
+    poseGroup.updateMatrixWorld(true);
+  }
+
+  /* 화면 좌표 아래 포즈 손잡이 {kind: "fk"|"ik"|"root", name}. 없으면 null. */
+  function pickPose(clientX, clientY) {
+    if (!poseCtl || !poseGroup.visible || !poseEntry() || playing || recording) return null;
+    rayFrom(clientX, clientY);
+    const hits = raycaster.intersectObjects(poseCtl.picks, false);
+    return hits.length ? Object.assign({}, hits[0].object.userData.pose) : null;
+  }
+
+  function poseInfo() {
+    return { on: edit.pose, joint: edit.joint, id: edit.pose && edit.sel ? edit.sel.id : null };
+  }
+
+  function emitPose() {
+    emit("pose", poseInfo());
+    emitState();
+  }
+
+  /* [포즈](P): 인물 하나를 골랐을 때만 켠다. 재생·녹화 중엔 켜지 않는다. */
+  function setPoseMode(on) {
+    const want = !!on && !playing && !recording && !!(edit.sel && edit.sel.type === "actor");
+    if (want === edit.pose && (want || edit.joint === null)) return edit.pose;
+    edit.pose = want;
+    edit.joint = null;
+    if (!playing) renderAt(clockT);
+    emitPose();
+    return edit.pose;
+  }
+
+  /* 재생·녹화가 시작되면 포즈 모드를 끈다(그리지 않는다 — 부른 쪽이 그린다). */
+  function leavePose() {
+    if (!edit.pose && edit.joint === null) return;
+    edit.pose = false;
+    edit.joint = null;
+    emitPose();
+  }
+
+  function selectJoint(name) {
+    if (!edit.pose) return false;
+    const next = name === "root" || RIG_JOINTS.indexOf(name) >= 0 ? name : null;
+    if (next !== edit.joint) {
+      edit.joint = next;
+      if (!playing) renderAt(clockT);
+      emitPose();
+    }
+    return true;
+  }
+
+  function r4(v) {
+    return Math.round(Number(v) * 10000) / 10000 || 0;
+  }
+
+  function actorRig(ca) {
+    if (!ca.rig || typeof ca.rig !== "object" || Array.isArray(ca.rig)) ca.rig = {};
+    return ca.rig;
+  }
+
+  /* 관절 하나(라디안 3개)를 한계 안으로 잘라 cut actor 의 rig 에 쓴다. 그 인물은 직접 고침(manual).
+     from = 편집을 시작한 값(끌기 시작·채널 박스의 지금 값). 한계 밖이던 축은 움직인 쪽으로만 자른다(작업 209a fix 1). */
+  function writeJoint(cut, id, joint, values, from) {
+    const ca = cutActor(cut, id);
+    if (!ca || RIG_JOINTS.indexOf(joint) < 0) return null;
+    const v = clampRigJoint(joint, values, from).map(r4);
+    actorRig(ca)[joint] = v;
+    ca.manual = true;
+    return v;
+  }
+
+  /* 지금 이 관절 값(라디안): rig 에 있으면 그 값, 없으면 보이는 값. 모르면 null. */
+  function jointNow(cut, id, joint) {
+    const ca = cutActor(cut, id);
+    if (ca && ca.rig && Array.isArray(ca.rig[joint])) return ca.rig[joint].map((x) => Number(x) || 0);
+    const entry = current && current.scene.actors[id];
+    return entry && current.scene.drawnCut === cut ? entry.mannequin.readJoint(joint) : null;
+  }
+
+  function writeRootY(cut, id, value) {
+    const ca = cutActor(cut, id);
+    if (!ca) return null;
+    const v = r4(Math.max(RIG_ROOT_Y_RANGE[0], Math.min(RIG_ROOT_Y_RANGE[1], Number(value) || 0)));
+    actorRig(ca).rootY = v;
+    ca.manual = true;
+    return v;
+  }
+
+  /* 손·발을 세계 점 targetWorld 로: 2관절 IK 를 풀어 뿌리·가운데 관절 FK 값을 rig 에 쓴다.
+     팔꿈치는 뒤·아래(·바깥)로, 무릎은 앞으로 굽는다(pole 은 부모 = 가슴·엉덩이 기준). */
+  function solveLimb(cut, id, m, kind, side, targetWorld) {
+    const limb = limbOf(m, kind, side);
+    const parent = limb.pivot.parent;
+    parent.updateMatrixWorld(true);
+    const local = parent.worldToLocal(targetWorld.clone()).sub(limb.pivot.position);
+    const out = side === "L" ? 1 : -1;
+    const arm = kind === "arm";
+    const rootJoint = (arm ? "shoulder" : "hip") + side;
+    const midJoint = (arm ? "elbow" : "knee") + side;
+    const bendLim = RIG_LIMITS[midJoint][0];
+    const pl = RIG_IK_POLES[arm ? "arm" : "leg"];
+    const pole = new THREE.Vector3(out * pl[0], pl[1], pl[2]);
+    const res = arm
+      ? solveTwoBoneIK(local, RIG_DIMS.upperArm, RIG_DIMS.foreArm, pole, -1, -bendLim[0] * DEG)
+      : solveTwoBoneIK(local, RIG_DIMS.thigh, RIG_DIMS.shin, pole, 1, bendLim[1] * DEG);
+    writeJoint(cut, id, rootJoint, res.root);
+    writeJoint(cut, id, midJoint, res.mid);
+    return res;
+  }
+
+  function metersPerPixel(point) {
+    const cam = viewCamera();
+    const rectH = canvas.clientHeight || height;
+    const dist = Math.max(0.1, cam.position.distanceTo(point));
+    return (2 * dist * Math.tan((cam.fov * Math.PI / 180) / 2)) / Math.max(1, rectH);
+  }
+
+  function rayPlane(clientX, clientY, plane) {
+    const p = new THREE.Vector3();
+    return rayFrom(clientX, clientY).ray.intersectPlane(plane, p) ? p : null;
+  }
+
+  /* 포즈 손잡이를 눌렀다: 고리 = 그 관절 고르기 + 돌리기 시작, 손·발 = IK 끌기, 골반 = rootY 끌기. */
+  function beginPoseDrag(event) {
+    if (edit.aim) return false;
+    const hit = pickPose(event.clientX, event.clientY);
+    if (!hit) return false;
+    const entry = poseEntry();
+    const cut = editCut();
+    const id = edit.sel.id;
+    if (!entry || !cut || !cutActor(cut, id)) return false;
+    const m = entry.mannequin;
+    const cam = viewCamera();
+    cam.updateMatrixWorld(true);
+    m.group.updateMatrixWorld(true);
+    const p = { kind: hit.kind, name: hit.name, cut, id, m, x0: event.clientX, y0: event.clientY, lx: event.clientX, ly: event.clientY };
+    if (hit.kind === "fk") {
+      selectJoint(hit.name);
+      p.start = m.readJoint(hit.name);
+      // 인물이 카메라를 등지면 가로 끌기 방향을 뒤집는다(화면에서 끈 쪽으로 돈다).
+      const fwd = new THREE.Vector3(0, 0, 1).applyQuaternion(m.group.getWorldQuaternion(new THREE.Quaternion()));
+      p.face = fwd.dot(cam.position.clone().sub(m.group.getWorldPosition(new THREE.Vector3()))) >= 0 ? 1 : -1;
+    } else if (hit.kind === "ik") {
+      p.point = handleObject(m, hit.name).getWorldPosition(new THREE.Vector3());
+      p.normal = cam.getWorldDirection(new THREE.Vector3());
+      p.mpp = metersPerPixel(p.point);
+    } else {
+      selectJoint("root");
+      p.rootY0 = m.pelvis.position.y;
+      p.scale = m.group.scale.y || 1;
+      p.mpp = metersPerPixel(m.hips.getWorldPosition(new THREE.Vector3()));
+      const ca = cutActor(cut, id);
+      p.planted = [];
+      ["L", "R"].forEach((side) => {
+        const at = limbOf(m, "leg", side).ankle.getWorldPosition(new THREE.Vector3());
+        const posed = ca.rig && Array.isArray(ca.rig["hip" + side]);
+        if (at.y < POSE_PLANT_M * p.scale || posed) p.planted.push({ side, at });
+      });
+    }
+    drag.pose = p;
+    if (orbit) orbit.enabled = false;
+    return true;
+  }
+
+  function movePoseDrag(event) {
+    const p = drag.pose;
+    if (!p || !cutActor(p.cut, p.id)) return;
+    pause();
+    if (p.kind === "fk") {
+      const dx = event.clientX - p.x0;
+      const dy = event.clientY - p.y0;
+      let v = p.start.slice();
+      if (event.shiftKey) v[2] = p.start[2] - dx * POSE_ROT_RAD_PER_PX * p.face;
+      else {
+        v[0] = p.start[0] + dy * POSE_ROT_RAD_PER_PX;
+        v[1] = p.start[1] + dx * POSE_ROT_RAD_PER_PX * p.face;
+      }
+      if (edit.snap) v = v.map((x, i) => (x === p.start[i] ? x : snapTo(x, SNAP_DEG * DEG)));
+      writeJoint(p.cut, p.id, p.name, v, p.start);
+    } else if (p.kind === "ik") {
+      if (event.altKey) {
+        // Alt+세로 끌기 = 앞뒤(위로 끌면 카메라에서 멀어진다).
+        p.point.addScaledVector(p.normal, -(event.clientY - p.ly) * p.mpp);
+      } else {
+        const plane = new THREE.Plane().setFromNormalAndCoplanarPoint(p.normal, p.point);
+        const from = rayPlane(p.lx, p.ly, plane);
+        const to = rayPlane(event.clientX, event.clientY, plane);
+        if (from && to) p.point.add(to.sub(from));
+      }
+      solveLimb(p.cut, p.id, p.m, POSE_IK[p.name][0], POSE_IK[p.name][1], p.point);
+    } else {
+      const rootY = writeRootY(p.cut, p.id, p.rootY0 - (event.clientY - p.y0) * p.mpp / p.scale);
+      p.m.pelvis.position.y = rootY;
+      p.m.group.updateMatrixWorld(true);
+      p.planted.forEach((f) => solveLimb(p.cut, p.id, p.m, "leg", f.side, f.at));
+    }
+    p.lx = event.clientX;
+    p.ly = event.clientY;
+    setCursor("grabbing");
+    renderAt(clockT);
+    emit("edit", { cut: p.cut, kind: "live" });
+  }
+
+  /* 놓았다: 움직였으면 한 단계(commit). 손·발 네모를 누르기만 했으면 팔꿈치·무릎을 고른다(채널 박스). */
+  function endPoseDrag(event, click) {
+    const p = drag.pose;
+    const moved = drag.moved;
+    drag.pose = null;
+    if (orbit) orbit.enabled = edit.view === "work" && !edit.dragging;
+    setCursor("");
+    if (!p) return;
+    if (moved) {
+      commitEdit(p.cut);
+      renderAt(clockT);
+      emit("edit", { cut: p.cut, kind: "commit" });
+    } else if (click && p.kind === "ik") {
+      selectJoint((POSE_IK[p.name][0] === "arm" ? "elbow" : "knee") + POSE_IK[p.name][1]);
+    }
+  }
+
+  /* 패널 편집(채널 박스·버튼). commit 이면 바로 한 단계, 아니면 다시 그리기만(패널이 잠시 뒤 commitEdit). */
+  function poseEdit(cutArg, fn, commit) {
+    const cut = cutArg || editCut();
+    if (!cut || recording) return false;
+    fn(cut);
+    if (commit) {
+      commitEdit(cut);
+      renderAt(clockT);
+      emit("edit", { cut, kind: "commit" });
+    } else if (!playing) {
+      renderAt(clockT);
+    }
+    return true;
+  }
+
+  /* 채널 박스: 관절 값(도, [숙이기 x, 돌리기 y, 기울이기 z]). rig 에 있으면 그 값, 없으면 지금 보이는 값. */
+  function jointDeg(id, joint, cutArg) {
+    if (RIG_JOINTS.indexOf(joint) < 0) return null;
+    const ca = cutActor(cutArg || editCut(), id);
+    const entry = current && current.scene.actors[id];
+    let v = ca && ca.rig && Array.isArray(ca.rig[joint]) ? ca.rig[joint] : null;
+    if (!v && entry) v = entry.mannequin.readJoint(joint);
+    return v ? v.map((x) => Math.round((Number(x) || 0) / DEG * 10) / 10) : null;
+  }
+
+  function setJointDeg(id, joint, deg, commit, cutArg) {
+    return poseEdit(cutArg, (cut) => writeJoint(cut, id, joint, [0, 1, 2].map((i) => (Number(deg && deg[i]) || 0) * DEG),
+      jointNow(cut, id, joint)), commit);
+  }
+
+  function rootYOf(id, cutArg) {
+    const ca = cutActor(cutArg || editCut(), id);
+    return ca && ca.rig && typeof ca.rig.rootY === "number" ? ca.rig.rootY : 0;
+  }
+
+  function setRootY(id, meters, commit, cutArg) {
+    return poseEdit(cutArg, (cut) => writeRootY(cut, id, meters), commit);
+  }
+
+  function dropRigIfEmpty(ca) {
+    if (ca.rig && typeof ca.rig === "object" && !Object.keys(ca.rig).length) delete ca.rig;
+  }
+
+  /* [이 관절 초기화]: rig 에서 그 관절을 뺀다(목록 자세 값으로 돌아간다). "root" 면 골반 높이. */
+  function resetJoint(id, joint, cutArg) {
+    return poseEdit(cutArg, (cut) => {
+      const ca = cutActor(cut, id);
+      if (!ca || !ca.rig || typeof ca.rig !== "object") return;
+      delete ca.rig[joint === "root" ? "rootY" : joint];
+      dropRigIfEmpty(ca);
+      ca.manual = true;
+    }, true);
+  }
+
+  /* [포즈 초기화]: rig 를 지운다(목록에서 고른 자세 그대로). */
+  function resetPose(id, cutArg) {
+    return poseEdit(cutArg, (cut) => {
+      const ca = cutActor(cut, id);
+      if (!ca || !ca.rig) return;
+      delete ca.rig;
+      ca.manual = true;
+    }, true);
+  }
+
+  /* [좌우 반전]: 좌우 관절을 바꾸고 y·z 부호를 뒤집는다(mirrorRig). rig 에 없는 좌우 관절도 지금 보이는 값이 다르면
+     먼저 굳혀(목록 동작의 한쪽 팔도) 반대편으로 옮긴다. */
+  function mirrorPose(id, cutArg) {
+    return poseEdit(cutArg, (cut) => {
+      const ca = cutActor(cut, id);
+      if (!ca) return;
+      const base = Object.assign({}, ca.rig && typeof ca.rig === "object" ? ca.rig : {});
+      const entry = current && current.scene.actors[id];
+      if (entry && current.scene.drawnCut === cut) {
+        RIG_JOINTS.filter((j) => /L$/.test(j)).forEach((left) => {
+          const right = left.slice(0, -1) + "R";
+          const l = Array.isArray(base[left]) ? base[left] : entry.mannequin.readJoint(left);
+          const r = Array.isArray(base[right]) ? base[right] : entry.mannequin.readJoint(right);
+          const asym = Math.abs(l[0] - r[0]) + Math.abs(l[1] + r[1]) + Math.abs(l[2] + r[2]) > 0.01;
+          if (asym || Array.isArray(base[left]) || Array.isArray(base[right])) {
+            base[left] = l;
+            base[right] = r;
+          }
+        });
+      }
+      const next = mirrorRig(base);
+      Object.keys(next).forEach((k) => {
+        if (k !== "rootY") next[k] = clampRigJoint(k, next[k]).map(r4);
+      });
+      ca.rig = next;
+      dropRigIfEmpty(ca);
+      ca.manual = true;
+    }, true);
   }
 
   /* ---- 되돌리기: 컷 JSON 스냅숏. commitEdit 이 마지막 기록과 다르면 한 단계를 쌓는다. ---- */
@@ -1958,9 +2675,21 @@ function createController(host, options) {
     let next = null;
     if (sel && sel.type === "actor" && sel.id) next = { type: "actor", id: String(sel.id) };
     else if (sel && (sel.type === "camera" || sel.type === "target")) next = { type: sel.type };
+    const prevId = edit.sel && edit.sel.type === "actor" ? edit.sel.id : null;
     edit.sel = next;
+    // 작업 209a: 인물이 아닌 것을 고르면 포즈 모드를 끄고, 다른 인물로 바꾸면 고른 관절만 뗀다.
+    let poseChanged = false;
+    if (edit.pose && (!next || next.type !== "actor")) {
+      edit.pose = false;
+      edit.joint = null;
+      poseChanged = true;
+    } else if (edit.pose && next.id !== prevId && edit.joint !== null) {
+      edit.joint = null;
+      poseChanged = true;
+    }
     if (!playing) renderAt(clockT);
     emit("select", next ? Object.assign({}, next) : null);
+    if (poseChanged) emit("pose", poseInfo());
     emitState();
   }
 
@@ -1995,9 +2724,46 @@ function createController(host, options) {
     edit.workInit = true;
   }
 
+  /* 작업 209a fix 1: 작업 시점 첫 화면 — 그 컷의 인물(발 → 키)과 촬영 카메라·바라보는 곳을 모두 담는다(F 처럼 가운데를 보고
+     물러난다). 방향은 촬영 카메라 쪽에서 40° 위 — 카메라가 인물을 보는 쪽이라 건물 뒤에서 시작하지 않는다. */
+  function frameWorkView(cut) {
+    const box = new THREE.Box3();
+    ((cut && cut.actors) || []).forEach((ca) => {
+      const p = Array.isArray(ca.pos) ? ca.pos : [0, 0, 0];
+      const x = Number(p[0]) || 0;
+      const z = Number(p[2]) || 0;
+      const h = Number(actorMeta(ca.id).heightM) || 1.7;
+      box.expandByPoint(new THREE.Vector3(x - 0.3, 0, z - 0.3));
+      box.expandByPoint(new THREE.Vector3(x + 0.3, h, z + 0.3));
+    });
+    const v = poseVectors(cut);
+    box.expandByPoint(v.pos);
+    box.expandByPoint(v.target);
+    const sphere = box.getBoundingSphere(new THREE.Sphere());
+    const halfFov = Math.min(workCamera.fov, workCamera.fov * Math.min(1, workCamera.aspect || 1)) * DEG / 2;
+    const dist = Math.max(2.5, (sphere.radius * 1.1) / Math.sin(halfFov));
+    const dir = v.pos.clone().sub(v.target);
+    dir.y = 0;
+    if (dir.lengthSq() < 1e-6) dir.set(0, 0, 1);
+    dir.normalize().multiplyScalar(Math.cos(WORK_FRAME_PITCH_RAD)).setY(Math.sin(WORK_FRAME_PITCH_RAD));
+    workCamera.position.copy(sphere.center).addScaledVector(dir, dist);
+    workCamera.lookAt(sphere.center);
+    if (orbit) {
+      orbit.target.copy(sphere.center);
+      orbit.update();
+    }
+    edit.workInit = true;
+    edit.workFramed.add(cut);
+  }
+
   function setViewMode(mode) {
     edit.view = mode === "work" ? "work" : "shot";
-    if (edit.view === "work" && !edit.workInit) initWorkCamera();
+    if (edit.view === "work") {
+      // 처음 보는 컷이면 그 컷을 담는다. 사용자가 작업 카메라를 한 번 움직였으면(orbit start · F) 그 자리 그대로.
+      const cut = editCut();
+      if (cut && !edit.workMoved && !edit.workFramed.has(cut)) frameWorkView(cut);
+      else if (!edit.workInit) initWorkCamera();
+    }
     if (orbit) orbit.enabled = edit.view === "work" && !edit.dragging;
     if (!playing) renderAt(clockT);
     emitState();
@@ -2006,6 +2772,7 @@ function createController(host, options) {
   /* F: 선택한 것(없으면 방 전체)에 맞춰 작업 카메라를 옮긴다. 카메라 시점이면 작업 시점으로 바꾼 뒤. */
   function frameSelection() {
     if (edit.view !== "work") setViewMode("work");
+    edit.workMoved = true;
     const sel = edit.sel;
     const cut = editCut();
     let center = new THREE.Vector3(0, 1, 0);
@@ -2229,7 +2996,8 @@ function createController(host, options) {
   }
 
   const drag = { on: false, x: 0, y: 0, moved: false, shift: false, id: null,
-    actor: null, cut: null, x0: 0, grab: null, facing0: 0, planeY: 0 }; // 작업 207: actor = 끌고 있는 인물 id
+    actor: null, cut: null, x0: 0, grab: null, facing0: 0, planeY: 0, // 작업 207: actor = 끌고 있는 인물 id
+    pose: null, still: false }; // 작업 209a: pose = 끌고 있는 포즈 손잡이, still = 포즈 중 몸통을 눌렀다(끌어도 아무것도 안 함)
 
   /* 작업 207: 뷰포트를 눌렀다 = 휠 확대·축소를 받는다. 포커스를 잃으면(blur) 휠은 페이지 스크롤로 돌려준다. */
   function setStageFocus(on) {
@@ -2246,6 +3014,11 @@ function createController(host, options) {
     if (edit.aim) return false; // [이 인물 보기] 조준은 클릭으로
     const hit = pickAt(event.clientX, event.clientY);
     if (!hit || hit.type !== "actor") return false;
+    // 작업 209a: 포즈 중인 인물의 몸통을 끌면 아무것도 하지 않는다(손잡이를 놓친 끌기가 인물·카메라를 옮기지 않게).
+    if (edit.pose && edit.sel && edit.sel.type === "actor" && edit.sel.id === hit.id) {
+      drag.still = true;
+      return true;
+    }
     const cut = editCut();
     const ca = cutActor(cut, hit.id);
     if (!cut || !ca) return false;
@@ -2302,6 +3075,10 @@ function createController(host, options) {
   /* 고를 수 있는 인물 위에서는 손 모양 커서. */
   function hoverCursor(event) {
     if (recording || playing) return;
+    if (edit.pose && pickPose(event.clientX, event.clientY)) {
+      setCursor("pointer");
+      return;
+    }
     const hit = pickAt(event.clientX, event.clientY);
     setCursor(hit && hit.type === "actor" && !edit.aim ? "grab" : "");
   }
@@ -2317,7 +3094,10 @@ function createController(host, options) {
     drag.moved = false;
     drag.shift = !!event.shiftKey;
     drag.id = event.pointerId;
-    const onActor = beginActorDrag(event);
+    drag.pose = null;
+    drag.still = false;
+    const onPose = beginPoseDrag(event); // 작업 209a: 포즈 손잡이가 먼저
+    const onActor = onPose || beginActorDrag(event);
     if ((onActor || edit.view === "shot") && canvas.setPointerCapture && event.pointerId !== undefined) {
       try {
         canvas.setPointerCapture(event.pointerId);
@@ -2337,6 +3117,11 @@ function createController(host, options) {
     const dy = event.clientY - drag.y;
     if (!drag.moved && Math.abs(dx) + Math.abs(dy) < CLICK_SLOP_PX) return;
     drag.moved = true;
+    if (drag.pose) {
+      movePoseDrag(event);
+      return;
+    }
+    if (drag.still) return;
     if (drag.actor) {
       moveDraggedActor(event);
       return;
@@ -2362,6 +3147,15 @@ function createController(host, options) {
       } catch (error) {
         /* 무시 */
       }
+    }
+    if (drag.pose) {
+      endPoseDrag(event, true);
+      return;
+    }
+    if (drag.still) {
+      drag.still = false;
+      if (!drag.moved) clickAt(event.clientX, event.clientY);
+      return;
     }
     if (drag.actor) {
       endActorDrag(event, true);
@@ -2493,9 +3287,15 @@ function createController(host, options) {
       setTool("rotate");
     } else if (is("f")) {
       frameSelection();
+    } else if (is("p")) {
+      setPoseMode(!edit.pose); // 작업 209a: 포즈 모드 켜고 끄기(인물 하나를 골랐을 때)
     } else if (key === "escape") {
-      setAim(false);
-      select(null);
+      if (edit.pose) {
+        setPoseMode(false);
+      } else {
+        setAim(false);
+        select(null);
+      }
     } else {
       done = false;
     }
@@ -2512,6 +3312,8 @@ function createController(host, options) {
   function onPointerCancel(event) {
     if (!drag.on) return;
     drag.on = false;
+    drag.still = false;
+    if (drag.pose) endPoseDrag(event, false);
     if (drag.actor) endActorDrag(event, false);
   }
   function onStageBlur() {
@@ -2682,9 +3484,29 @@ function createController(host, options) {
       if (typeof cb === "function") edit.listeners.state.push(cb);
     },
     state: stateInfo,
+    // --- 작업 209a 포즈 모드 API(패널 채널 박스·버튼) ---
+    setPoseMode,
+    get poseMode() {
+      return edit.pose;
+    },
+    selectJoint,
+    get poseJoint() {
+      return edit.joint;
+    },
+    jointDeg,
+    setJointDeg,
+    rootYOf,
+    setRootY,
+    resetJoint,
+    resetPose,
+    mirrorPose,
+    onPose(cb) {
+      if (typeof cb === "function") edit.listeners.pose.push(cb);
+    },
     // 검사용(가짜 렌더러·가짜 기즈모): 내부 물체.
     _editor: { helpers, proxy, workCamera, shotCamera: camera, stage, canvas, overlay, wheelHint,
-      get gizmo() { return gizmo; }, get orbit() { return orbit; } },
+      get gizmo() { return gizmo; }, get orbit() { return orbit; }, poseGroup, get poseControls() { return poseCtl; },
+      get scene() { return current ? current.scene : null; } },
     destroy,
   };
 }
