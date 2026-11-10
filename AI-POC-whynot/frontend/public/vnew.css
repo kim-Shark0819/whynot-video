@@ -6579,67 +6579,12 @@ textarea.vnew-field-input {
   border-radius: 5px;
   background: #d8efe4;
   border: 1px solid #7cc4a0;
-/* ==== 작업 215b 시작 ==== */
-/* ⑦ 자막 · V2 타이틀 줄 · 블랙/화이트 전환 손잡이 · 미리보기 층 · 도구 칸 · 글 칸 · 오른쪽 누르기 메뉴 · ⑦ 안 대사 고치기 창 · 프리미어 */
-
-.vnew-edit-labels.has-tx {
-  grid-template-rows: 26px 30px 30px 56px 40px;
-}
-
-/* 자막 · V2 줄은 끝에 붙어 있다 — 눈금자 바로 아래로(order). */
-.vnew-edit-labels.has-tx > .vnew-edit-label.is-ruler,
-.vnew-edit-content.has-tx > .vnew-edit-ruler {
-  order: -3;
-}
-
-.vnew-edit-labels.has-tx > .vnew-edit-label.is-captions,
-.vnew-edit-content.has-tx > .vnew-edit-txlane.is-captions {
-  order: -2;
-}
-
-.vnew-edit-labels.has-tx > .vnew-edit-label.is-titles,
-.vnew-edit-content.has-tx > .vnew-edit-txlane.is-titles {
-  order: -1;
-}
-
-.vnew-edit-content.has-tx {
-  display: flex;
-  flex-direction: column;
-}
-
-.vnew-edit-label.is-tx {
-  border-bottom: 1px dashed var(--line, #e5e7eb);
-}
-
-.vnew-edit-txlane {
-  position: relative;
-  height: 30px;
-  border-bottom: 1px dashed var(--line, #e5e7eb);
-}
-
-.vnew-edit-txitem {
-  position: absolute;
-  top: 3px;
-  height: 24px;
-  box-sizing: border-box;
-  padding: 0 8px;
-  border-radius: 5px;
-  background: #fde68a;
-  color: #3b2f06;
-  font-size: 12px;
-  line-height: 24px;
   overflow: hidden;
   cursor: grab;
   touch-action: none;
 }
 
 .vnew-edit-mix-item.is-selected {
-.vnew-edit-txitem.is-title {
-  background: #c7d2fe;
-  color: #1e1b4b;
-}
-
-.vnew-edit-txitem.is-selected {
   outline: 2px solid var(--accent, #cb3208);
   outline-offset: -2px;
   z-index: 2;
@@ -6663,10 +6608,6 @@ textarea.vnew-field-input {
   font-size: 10px;
   white-space: nowrap;
   overflow: hidden;
-.vnew-edit-txitem-text {
-  display: block;
-  overflow: hidden;
-  white-space: nowrap;
   text-overflow: ellipsis;
   pointer-events: none;
 }
@@ -6846,6 +6787,81 @@ textarea.vnew-field-input {
   padding: 6px 8px;
   border-top: 1px solid var(--line, #e5e7eb);
   user-select: text;
+}
+
+/* ==== 작업 215b 시작 ==== */
+/* ⑦ 자막 · V2 타이틀 줄 · 블랙/화이트 전환 손잡이 · 미리보기 층 · 도구 칸 · 글 칸 · 오른쪽 누르기 메뉴 · ⑦ 안 대사 고치기 창 · 프리미어 */
+
+.vnew-edit-labels.has-tx {
+  grid-template-rows: 26px 30px 30px 56px 40px;
+}
+
+/* 자막 · V2 줄은 끝에 붙어 있다 — 눈금자 바로 아래로(order). */
+.vnew-edit-labels.has-tx > .vnew-edit-label.is-ruler,
+.vnew-edit-content.has-tx > .vnew-edit-ruler {
+  order: -3;
+}
+
+.vnew-edit-labels.has-tx > .vnew-edit-label.is-captions,
+.vnew-edit-content.has-tx > .vnew-edit-txlane.is-captions {
+  order: -2;
+}
+
+.vnew-edit-labels.has-tx > .vnew-edit-label.is-titles,
+.vnew-edit-content.has-tx > .vnew-edit-txlane.is-titles {
+  order: -1;
+}
+
+.vnew-edit-content.has-tx {
+  display: flex;
+  flex-direction: column;
+}
+
+.vnew-edit-label.is-tx {
+  border-bottom: 1px dashed var(--line, #e5e7eb);
+}
+
+.vnew-edit-txlane {
+  position: relative;
+  height: 30px;
+  border-bottom: 1px dashed var(--line, #e5e7eb);
+}
+
+.vnew-edit-txitem {
+  position: absolute;
+  top: 3px;
+  height: 24px;
+  box-sizing: border-box;
+  padding: 0 8px;
+  border-radius: 5px;
+  background: #fde68a;
+  color: #3b2f06;
+  font-size: 12px;
+  line-height: 24px;
+  overflow: hidden;
+  cursor: grab;
+  touch-action: none;
+}
+
+.vnew-edit-txitem.is-title {
+  background: #c7d2fe;
+  color: #1e1b4b;
+}
+
+.vnew-edit-txitem.is-selected {
+  outline: 2px solid var(--accent, #cb3208);
+  outline-offset: -2px;
+  z-index: 2;
+}
+
+.vnew-edit-txitem-text {
+  display: block;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  pointer-events: none;
+}
+
 .vnew-edit-txitem-text.is-italic {
   font-style: italic;
 }
@@ -7214,6 +7230,8 @@ textarea.vnew-field-input {
   display: grid;
   gap: 6px;
   /* ==== 작업 215b 끝 ==== (파일 끝이 "}\n" 이어야 하는 기존 검사 때문에 마지막 규칙 안에 둔다) */
+}
+
 /* ==== 작업 215c 시작 ==== */
 /* ⑦ 프리미어식 도구: 타임라인 왼쪽 세로 도구줄 · 트랙 단추(잠금·숨김·높이) · 빈틈 · 마커 · 표시 구간 · 오른쪽 클릭 메뉴 · 작은 창. */
 .vnew-edit-tl:has(> .vnew-e215c-bar) {
@@ -7585,4 +7603,16 @@ textarea.vnew-field-input {
     width: 16px;
   }
   /* ==== 작업 215c 끝 ==== */
+}
+
+/* 사용자 지시(11-10): xml · prproj 내보내기는 화면에서 뺀다(서버 기능은 남김) — 215b 프리미어 묶음 칸 · 215c Pr 버튼 숨김 */
+.vnew-edit-txprem,
+.vnew-e215c-tool[title^="Premiere Pro"] {
+  position: absolute !important;
+  width: 1px !important;
+  height: 1px !important;
+  overflow: hidden !important;
+  clip-path: inset(50%) !important;
+  pointer-events: none !important;
+  opacity: 0 !important;
 }

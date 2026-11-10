@@ -13419,9 +13419,11 @@
     bar.appendChild(edit215cBtn("⌨", "단축키 보기", "?", function () {
       edit215cKeymapPanel(ctx);
     }));
-    bar.appendChild(edit215cBtn("Pr", "Premiere Pro 프로젝트로 내보내기(XML · EDL · 재료 zip)", "", function () {
+    var prBtn = edit215cBtn("Pr", "Premiere Pro 프로젝트로 내보내기(XML · EDL · 재료 zip)", "", function () {
       edit215cPremiere(ctx);
-    }));
+    });
+    prBtn.tabIndex = -1; // 사용자 지시(11-10): xml · prproj 는 화면에서 뺀다(CSS 로 감춤) — 키보드로도 닿지 않게
+    bar.appendChild(prBtn);
     d.tl.appendChild(bar);
     var labels = d.tl.children[0];
     s.trackBtns = {};
