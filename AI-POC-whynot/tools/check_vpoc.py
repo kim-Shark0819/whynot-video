@@ -36143,6 +36143,7 @@ class _EdtEnv:
         self.films: list[dict] = []
         self.segments: list[dict] = []
         self.joins: list[dict] = []
+        self.packages: list[dict] = []  # 216-fix1b: 내려받기 zip(_export_package) 호출
         self.spawned: list[tuple] = []
         self.inline = False
         self.real = False
@@ -36175,7 +36176,7 @@ class _EdtEnv:
 
         self.editmod, self.genmod, self.planmod, self.stitchmod = editmod, genmod, planmod, stitchmod
         self.orig = {name: getattr(editmod, name) for name in
-                     ("_probe_file", "_film_file", "_export_segment", "_export_join", "_spawn_export")}
+                     ("_probe_file", "_film_file", "_export_segment", "_export_join", "_export_package", "_spawn_export")}
         self._threads = dict(editmod._export_threads)  # noqa: SLF001
         for module in (editmod, genmod, planmod):
             self.set(module, "STORE", self.store)
@@ -36188,6 +36189,7 @@ class _EdtEnv:
         self.set(editmod, "_film_file", self._film)
         self.set(editmod, "_export_segment", self._segment)
         self.set(editmod, "_export_join", self._join)
+        self.set(editmod, "_export_package", self._package)  # 216-fix1b
         self.set(editmod, "_spawn_export", self._spawn)
         # 지시서 111: 파드 안 내보내기 잠금 파일은 검사 임시 폴더에(시스템 임시 폴더에 남기지 않는다).
         self.lock_dir = tempfile.mkdtemp(prefix="edt-lock-")
@@ -36265,6 +36267,20 @@ class _EdtEnv:
             handle.write(b"garbage" if self.join_garbage else _edt_fake(frames / fps, audio=bool(audio_path), w=recent[-1]["width"],
                                                                          h=recent[-1]["height"], fps=fps))
         return output_path
+
+    def _package(self, video_path, audio_raw, zip_path, **kwargs):
+        # 216-fix1b: 내려받기 zip(소리 없는 mp4 · 소리 mp3 · README.txt). real 이면 실제 ffmpeg(edit_audio.export_package).
+        if self.real:
+            return self.orig["_export_package"](video_path, audio_raw, zip_path, **kwargs)
+        import zipfile  # noqa: PLC0415
+
+        names = self.editmod.edit_audio.package_names(kwargs["name"])
+        self.packages.append({"video": os.path.basename(video_path), "audioBytes": os.path.getsize(audio_raw) if audio_raw else 0,
+                              **kwargs})
+        with zipfile.ZipFile(zip_path, "w") as archive:
+            for name in names:
+                archive.writestr(name, b"FAKE")
+        return {"entries": names, "bytes": os.path.getsize(zip_path)}
 
     def _spawn(self, owner, pid, gen_id, n, claim):
         self.spawned.append((owner, pid, gen_id, n, claim))
@@ -36893,11 +36909,19 @@ def check_vnew_edit() -> None:
                    "원본은 한 번만 받고 마지막 쓰임 뒤 지움·소리 PCM 길이 = 144프레임·임시 디렉터리 정리")
             put_out = [p for p in env.store.puts if p[0] == edit.export_key(owner, "prj_edt_exp", "g1", 1)]
             ev2 = get("prj_edt_exp").get_json() or {}
+            # 216-fix1b: 내려받기는 zip(소리 없는 mp4 · 소리 mp3 · README.txt) — 재생(videoUrl)은 소리 있는 mp4 그대로.
+            put_zip = [p for p in env.store.puts if p[0] == edit.export_zip_key(owner, "prj_edt_exp", "g1", 1)]
             expect("edt-g", [put_out, ev2["export"]["status"], ev2["export"]["videoUrl"].endswith("final-edit-1.mp4?e=3600&b=edt-video-bucket&t=video/mp4"),
-                             ev2["export"]["downloadUrl"] == ev2["export"]["videoUrl"], ev2["export"]["matchesDoc"],
-                             ev2["export"]["docVersion"]],
+                             ev2["export"]["downloadUrl"].endswith("final-edit-1.zip?e=3600&b=edt-video-bucket&t=application/zip"),
+                             ev2["export"]["matchesDoc"], ev2["export"]["docVersion"]],
                    [[(edit.export_key(owner, "prj_edt_exp", "g1", 1), "edt-video-bucket", "video/mp4")], "done", True, True, False, 1],
-                   "결과는 영상 버킷 video/mp4·GET 재생·내려받기 URL·사본(1판) ≠ 지금 문서(2판)")
+                   "결과는 영상 버킷 video/mp4·GET 재생·내려받기 URL(zip)·사본(1판) ≠ 지금 문서(2판)")
+            expect("edt-g", [put_zip, ev2["export"].get("downloadName"), ev2["export"].get("files"), done.get("zipKey"),
+                             [(p["video"], p["audioBytes"], p["samples"], p["seconds"], p["has_audio"], p["name"]) for p in env.packages]],
+                   [[(edit.export_zip_key(owner, "prj_edt_exp", "g1", 1), "edt-video-bucket", "application/zip")], "edit-1.zip",
+                    ["edit-1-영상(소리없음).mp4", "edit-1-대사.mp3", "edit-1-전체 소리.mp3", "README.txt"], edit.export_zip_key(owner, "prj_edt_exp", "g1", 1),
+                    [("edit.mp4", 144 * 2000 * 4, 144 * 2000, 6.0, True, "edit-1")]],
+                   "216-fix1b: 이은 영상 하나를 나눠 zip(소리 = 잇기에 넣은 PCM 그대로 · 길이 = 144프레임)")
             env.inline = True
             r3 = post("prj_edt_exp", {"etag": s2["etag"]})
             ev3 = get("prj_edt_exp").get_json() or {}
@@ -38699,8 +38723,9 @@ _EDU_PURE_WANT = {
     "mediaOrder": [["m1", "m2", "m3"], ["m3", "m1", "m2"], ["m1", "m2", "m3"], []],
     "exportText": ["대기 중 — 앞의 내보내기가 끝나면 시작합니다.", "만드는 중 2/5", "만드는 중 0/0", "끝 — 00:06.00", "끝 — 00:06.04 · 소리 없음",
                    "실패 — 2번째 클립을 자르지 못했습니다.", "실패 — 내보내지 못했습니다.",
-                   "아직 내보낸 영상이 없습니다. [내보내기]를 누르면 지금 편집대로 mp4 하나를 만듭니다.",
-                   "아직 내보낸 영상이 없습니다. [내보내기]를 누르면 지금 편집대로 mp4 하나를 만듭니다."],
+                   # 216-fix1b: [내보내기] = zip 하나(소리 없는 영상 mp4 · 소리 mp3)
+                   "아직 내보낸 영상이 없습니다. [내보내기]를 누르면 지금 편집대로 소리 없는 영상(mp4)과 소리(mp3)를 zip 하나로 만듭니다.",
+                   "아직 내보낸 영상이 없습니다. [내보내기]를 누르면 지금 편집대로 소리 없는 영상(mp4)과 소리(mp3)를 zip 하나로 만듭니다."],
     "cssUrl": "https://s.example/a%22b%5Cc%0Ad)e?x=1&y=2",
     "newId": [True, True],
     "clone": [[{"id": "a", "sourceKey": "k", "in": 1, "out": 2, "muted": False}], []],
@@ -39086,6 +39111,17 @@ def check_vnew_edit_ui() -> None:
                              main_bucket.split("?")[0], signed[-1][0]],
                    ["", ["vnew.edit.presign_failed err=RuntimeError"], "https://s3.example/main-b/" + key, "ap-northeast-2"],
                    "서명 실패는 ''·경고 1줄(키 없음)·영상 버킷 설정이 비면 메인 버킷·메인 리전")
+            # 216-fix1b: zip 이 있는 내보내기 = 내려받기 zip(application/zip · attachment edit-4.zip), 재생은 mp4 그대로
+            zkey = key[:-len(".mp4")] + ".zip"
+            out_zip = edit._export_out({"status": "done", "key": key, "zipKey": zkey, "n": 4, "docHash": "h",  # noqa: SLF001
+                                        "files": ["edit-4-영상(소리없음).mp4", "edit-4-대사.mp3", "edit-4-전체 소리.mp3", "README.txt"]}, "h")
+            expect("edu-h", [out_zip["downloadUrl"].split("?")[0], signed[-1][2], out_zip["videoUrl"].split("?")[0], out_zip["downloadName"],
+                             out_zip["files"]],
+                   ["https://s3.example/edt-video-bucket/" + zkey,
+                    {"Bucket": "edt-video-bucket", "Key": zkey, "ResponseContentType": "application/zip",
+                     "ResponseContentDisposition": 'attachment; filename="edit-4.zip"'},
+                    "https://s3.example/edt-video-bucket/" + key, "edit-4.zip", ["edit-4-영상(소리없음).mp4", "edit-4-대사.mp3", "edit-4-전체 소리.mp3", "README.txt"]],
+                   "216-fix1b: 실제 Store 내려받기 = zip(application/zip · attachment edit-4.zip) · 재생 = mp4 · 옛 내보내기(zipKey 없음)는 위 mp4 그대로")
             env.set(edit, "STORE", env.store)
             _edt_cut_plan(env, "prj_edu_hist")
             hk = {m["label"]: m["sourceKey"] for m in (client.get("/api/vnew/p/prj_edu_hist/edit").get_json() or {})["materials"]}
@@ -39096,9 +39132,12 @@ def check_vnew_edit_ui() -> None:
                 client.post("/api/vnew/p/prj_edu_hist/edit/export", json={"etag": sh.get("etag")})
             env.inline = False
             hv = client.get("/api/vnew/p/prj_edu_hist/edit").get_json() or {}
-            expect("edu-h", [[h["n"] for h in hv["exportHistory"]], hv["exportHistory"][0]["downloadUrl"] == hv["exportHistory"][0]["videoUrl"],
-                             bool(hv["exportHistory"][0]["downloadUrl"]), hv["export"]["n"], bool(hv["export"]["downloadUrl"])],
-                   [[1], True, True, 2, True], "GET 의 지난 결과에도 downloadUrl(검사용 저장소는 재생 URL)")
+            # 216-fix1b: 지난 결과 내려받기도 zip(기록으로 밀려도 zipKey 를 남긴다)
+            expect("edu-h", [[h["n"] for h in hv["exportHistory"]],
+                             hv["exportHistory"][0]["downloadUrl"].split("?")[0].endswith("/final-edit-1.zip"),
+                             hv["exportHistory"][0].get("downloadName"), hv["exportHistory"][0]["videoUrl"].split("?")[0].endswith("/final-edit-1.mp4"),
+                             hv["export"]["n"], hv["export"]["downloadUrl"].split("?")[0].endswith("/final-edit-2.zip")],
+                   [[1], True, "edit-1.zip", True, 2, True], "GET 의 지난 결과에도 downloadUrl(zip) · 재생은 mp4")
 
             # ================= (edu-i) USER_FACING_KINDS =================
             errors_text = (APP_SRC / "vpoc" / "errors.py").read_text(encoding="utf-8")
@@ -59523,6 +59562,14 @@ _JL181_OLD_COMMANDS = [
      "-f", "s16le", "-ar", "48000", "-ac", "2", "-i", "audio.raw", "-map", "0:v:0", "-map", "1:a:0", "-c:v", "copy", "-c:a", "aac",
      "-b:a", "192k", "-movflags", "+faststart", "edit.mp4"],
 ]
+# 216-fix1b: 위 명령(영상 한 번 만들기 — 181 전 그대로) 뒤에 내려받기 zip 나누기 두 번: 이은 mp4 영상 스트림 복사(-an) · 잇기에 넣은
+# 소리 PCM 그대로 mp3(192k · 48kHz · 스테레오). 영상을 다시 인코딩하는 명령은 없다.
+_PKG216_COMMANDS = [
+    ["/fake/ffmpeg", "-y", "-hide_banner", "-loglevel", "error", "-i", "edit.mp4", "-map", "0:v:0", "-c:v", "copy", "-an",
+     "-movflags", "+faststart", "package-video.mp4"],
+    ["/fake/ffmpeg", "-y", "-hide_banner", "-loglevel", "error", "-threads", "1", "-f", "s16le", "-ar", "48000", "-ac", "2",
+     "-i", "audio.raw", "-c:a", "libmp3lame", "-b:a", "192k", "-ar", "48000", "-ac", "2", "package-audio.mp3"],
+]
 # 181 전 run_export 가 옛 문서에서 _export_segment 에 넘기던 인자(같은 문서).
 _JL181_OLD_KWARGS = [
     {"start_sec": 0.0, "frames": 72, "fps": 24, "width": 1280, "height": 720, "audio_out": "seg-000.raw",
@@ -59741,7 +59788,7 @@ def check_vnew_edit_jl_181() -> None:
                         handle.write(_edt_fake(frames_out / 24, w=1280, h=720, fps=24))
                 else:
                     for index, arg in enumerate(command):
-                        if index and command[index - 1] != "-i" and str(arg).endswith((".mp4", ".raw", ".body")):
+                        if index and command[index - 1] != "-i" and str(arg).endswith((".mp4", ".raw", ".body", ".mp3")):  # 216-fix1b: .mp3
                             with open(arg, "wb") as handle:
                                 handle.write(b"OUT")
                 return subprocess.CompletedProcess(command, 0, stdout=b"", stderr=b"")
@@ -59762,8 +59809,8 @@ def check_vnew_edit_jl_181() -> None:
                     setattr(stitchmod, name, value)
             got_cmds = [short(c) for c in commands]
             expect("jl-b", [(env.export_state(pid_old).get("current") or {}).get("status"), got_cmds, new_calls],
-                   ["done", _JL181_OLD_COMMANDS, []],
-                   "옛 문서 실제 명령(가짜 _run): edit_segment 2번 · edit_join 1번이 181 전 명령 글자 그대로")
+                   ["done", _JL181_OLD_COMMANDS + _PKG216_COMMANDS, []],  # 216-fix1b: 뒤에 zip 나누기 두 번(영상 명령은 그대로)
+                   "옛 문서 실제 명령(가짜 _run): edit_segment 2번 · edit_join 1번이 181 전 명령 글자 그대로 · 216-fix1b zip 나누기 2번")
 
             # ================= (jl-c) 순수 함수 =================
             c3 = [{"in": 0, "out": 2.0, "transition": {"type": "dissolve", "seconds": 0.5}, "audioTail": 0.5},
@@ -59861,7 +59908,9 @@ def check_vnew_edit_jl_181() -> None:
             frames_v = [c[c.index("-frames:v") + 1] for c in ce if "-frames:v" in c]
             expect("jl-e", [(env.export_state(pid_e).get("current") or {}).get("status"), len(vfs), [v.split(",")[-4:] for v in vfs],
                             frames_v, len(graphs), afs, [c for c in ce if c[0] == "MIX"],
-                            ce[-1][ce[-1].index("-i") + 1] if ce and "-i" in ce[-1] else None],
+                            # 216-fix1b: 잇기 뒤에 zip 나누기 2번(영상 스트림 복사 -an · 섞은 소리 mp3) — 잇기는 끝에서 세 번째
+                            ce[-3][ce[-3].index("-i") + 1] if len(ce) >= 3 and "-i" in ce[-3] else None,
+                            [c[-1] for c in ce[-2:]], ["-an" in ce[-2], ce[-1][ce[-1].index("-i") + 1] if ce and "-i" in ce[-1] else None]],
                    ["done", 3, [
                        ["pad=1280:720:(ow-iw)/2:(oh-ih)/2:color=black", "setsar=1", "format=yuv420p", "tpad=stop_mode=clone:stop_duration=1"],
                        ["trim=start_frame=12", "setpts=PTS-STARTPTS", "fps=24", "tpad=stop_mode=clone:stop=36"],
@@ -59870,7 +59919,8 @@ def check_vnew_edit_jl_181() -> None:
                     [("atrim=start=0.000,asetpts=PTS-STARTPTS", "2.000000", "aud-000.raw.body"),
                      ("atrim=start=0.229,asetpts=PTS-STARTPTS", "2.750000", "aud-001.raw.body"),
                      ("atrim=start=0.979,asetpts=PTS-STARTPTS", "2.000000", "aud-002.raw.body")],
-                    [["MIX", str((48 + 48 + 48 - 12) * 2000), "3"]], "edit.mp4.txt"],
+                    [["MIX", str((48 + 48 + 48 - 12) * 2000), "3"]], "edit.mp4.txt",
+                    ["package-video.mp4", "package-audio.mp3"], [True, "audio.raw"]],
                    "디졸브 · J/L 문서: 몸통 36 · 디졸브 12 · 몸통 36(앞 12장 건너뜀, 181 fix 1: 건너뛴 뒤 fps 로 프레임 레이트 되돌림 · 끝 복제) · 몸통 48, "
                    "xfade 경계 1개, 소리 창(앞당김 0.25초 = 원본 0.229, 길이 2 + 0.25 + 0.5) · 섞기 샘플 = 132프레임 × 2000 · 잇기")
             want_graph = ("[0:v:0]" + _JL181_VF.format(s="0.000") + ",trim=start_frame=36:end_frame=48,setpts=PTS-STARTPTS,fps=24[a];"
@@ -61227,7 +61277,7 @@ def check_vnew_edit_gap_slip_185() -> None:
                         handle.write(_edt_fake(96 / 24, w=1280, h=720, fps=24))
                 else:
                     for index, arg in enumerate(command):
-                        if index and command[index - 1] != "-i" and str(arg).endswith((".mp4", ".raw", ".body")):
+                        if index and command[index - 1] != "-i" and str(arg).endswith((".mp4", ".raw", ".body", ".mp3")):  # 216-fix1b: .mp3
                             with open(arg, "wb") as handle:
                                 handle.write(b"OUT")
                 return subprocess.CompletedProcess(command, 0, stdout=b"", stderr=b"")
@@ -61276,7 +61326,8 @@ def check_vnew_edit_gap_slip_185() -> None:
                                       {"sourceKey": ko["컷 2"], "in": 0.5, "out": 1.5, "muted": True}])
             expect("gs-e", [done_o.get("status"), done_o.get("docHash") == want_old_hash, got_kwargs, cmd_old, [c.get("audioSlip") for c in stored_o],
                             cmd_muted, new_calls],
-                   ["done", True, _JL181_OLD_KWARGS, _JL181_OLD_COMMANDS, [None, 0.5], _JL181_OLD_COMMANDS, []],
+                   ["done", True, _JL181_OLD_KWARGS, _JL181_OLD_COMMANDS + _PKG216_COMMANDS, [None, 0.5],  # 216-fix1b: 뒤에 zip 나누기 2번
+                    _JL181_OLD_COMMANDS + _PKG216_COMMANDS, []],
                    "옛 문서: docHash = 185 전 공식 · _export_segment 인자 · 실제 stitcher 명령이 181 전 그대로 · 소리 끈 클립에만 slip 이 있는 문서도 "
                    "같은 명령(slip 0 은 저장 안 함, 소리 끈 클립 0.5 는 그대로 저장) · 새 래퍼 호출 0")
             for name, fn in orig_new.items():

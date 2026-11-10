@@ -378,6 +378,13 @@ def check_edit_audio_215a(argv=None) -> bool:  # noqa: C901, PLR0915 — 묶음�
                    [202, "done", "", True, ["대사만.wav", "배경음.wav", "mix.wav"], ["대사만.wav", "배경음.wav", "mix.wav"], True, True,
                     ["대사만.wav", "배경음.wav", "mix.wav"], (env.joins[-1]["frames"] * 2000 * 4) if env.joins else None],
                    "내보내기: 섞은 소리로 잇기 · 스템 zip 이름 · 상태 · 보기 stemsUrl · GET /stems")
+            # 216-fix1b: 내려받기 zip 의 mp3 = 잇기에 넣은 바로 그 섞은 소리(같은 PCM 길이) · zip 세 항목 · 내려받기 URL 은 zip
+            pkg = env.packages[-1] if env.packages else {}
+            expect("ea-f", [pkg.get("audioBytes"), pkg.get("samples"), cur.get("files"),
+                            str((again.get("export") or {}).get("downloadUrl") or "").split("?")[0].endswith(".zip")],
+                   [env.joins[-1]["audioBytes"] if env.joins else None, (env.joins[-1]["frames"] * 2000) if env.joins else None,
+                    [f"edit-{cur.get('n')}-영상(소리없음).mp4", f"edit-{cur.get('n')}-대사.mp3", f"edit-{cur.get('n')}-전체 소리.mp3", "README.txt"], True],
+                   "216-fix2: zip(소리 없는 mp4 · 대사 mp3 · 전체 소리 mp3 · README; 가짜 스템이라 배경음 없음) — 전체 mp3 원천 = 섞은 PCM")
             plan_f = ea.mix_plan([_track("a2", [_item()]), _track("a3", [_item(id="x")], mute=True)], ea.default_a1(),
                                  total_samples=48000, stems=True)
             plan_s = ea.mix_plan([_track("a2", [_item()]), _track("a3", [_item(id="x")], solo=True)], ea.default_a1(),
