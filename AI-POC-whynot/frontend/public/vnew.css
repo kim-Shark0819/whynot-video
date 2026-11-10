@@ -6122,3 +6122,73 @@ textarea.vnew-field-input {
 .vnew-previz-labels {
   margin-left: 4px;
 }
+
+
+/* 작업 209a: 포즈 모드 — 도구 줄 [포즈 (P)] · 인물 카드 안 채널 박스(돌리기·숙이기·기울이기 ±5°) · 초기화·좌우 반전. */
+.vnew-previz-pose-toggle {
+  margin-left: 4px;
+}
+
+.vnew-previz-pose {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 8px 10px;
+  border: 1px dashed var(--line, #e5e7eb);
+  border-radius: 8px;
+  background: var(--surface, #ffffff);
+}
+
+.vnew-previz-pose-head {
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.vnew-previz-pose-joint {
+  margin: 0;
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.vnew-previz-pose-row {
+  display: grid;
+  grid-template-columns: 76px auto minmax(56px, 1fr) auto;
+  align-items: center;
+  gap: 4px;
+}
+
+.vnew-previz-pose-label {
+  font-size: 12px;
+}
+
+.vnew-previz-pose-input {
+  min-width: 0;
+  text-align: right;
+}
+
+.vnew-previz-pose-step {
+  padding: 2px 8px;
+  font-size: 12px;
+  min-height: 28px;
+}
+
+.vnew-previz-pose-reset-joint {
+  align-self: flex-start;
+  font-size: 12px;
+}
+
+.vnew-previz-pose-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.vnew-previz-pose-actions .outline-button {
+  padding: 4px 10px;
+  font-size: 12px;
+}
+
+.vnew-previz-pose-note {
+  margin: 0;
+  font-size: 12px;
+}

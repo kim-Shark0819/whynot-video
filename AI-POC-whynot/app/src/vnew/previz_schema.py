@@ -592,7 +592,8 @@ def _finite(value) -> bool:
 
 
 def normalize_rig(raw) -> dict | None:
-    """rig = {joint: [rx, ry, rz] 라디안, rootY: m}. 모르는 관절은 버리고 0 뿐인 관절도 뺀다. 비면 None."""
+    """rig = {joint: [rx, ry, rz] 라디안, rootY: m}. 모르는 관절은 버린다. 0 뿐인 관절은 남긴다(목록 자세를 0 으로
+    덮어쓴 값이다 — vnew-previz.js applyRig). rootY 0 은 뺀다. 비면 None."""
     if not isinstance(raw, dict):
         return None
     out: dict = {}
@@ -601,8 +602,7 @@ def normalize_rig(raw) -> dict | None:
         if not isinstance(vec, (list, tuple)) or len(vec) != 3 or not all(_finite(v) for v in vec):
             continue
         angles = [_round(_clamp(float(v), -RIG_ANGLE_MAX, RIG_ANGLE_MAX)) for v in vec]
-        if any(angles):
-            out[joint] = [a + 0.0 for a in angles]  # -0.0 → 0.0
+        out[joint] = [a + 0.0 for a in angles]  # -0.0 → 0.0
     root_y = raw.get("rootY")
     if _finite(root_y):
         value = _round(_clamp(float(root_y), *RIG_ROOT_Y_RANGE))
