@@ -5483,6 +5483,38 @@
     }
   }
 
+  /* 작업 209b: [포즈 모음] 사용자 저장 포즈 — 이 브라우저의 localStorage 에 [{id, nameKo, rig}] (최대 40개).
+     읽기·쓰기는 try/catch(저장소를 못 쓰면 이번 화면에서만). rig = 15개 관절 + rootY(서기 기준). */
+  var PREVIZ_POSE_LIBRARY_KEY = "vnew-previz-pose-library";
+  var PREVIZ_POSE_LIBRARY_MAX = 40;
+  var previzPoseLibraryMemory = null;
+
+  function previzUserPoses() {
+    if (previzPoseLibraryMemory) return previzPoseLibraryMemory.slice();
+    var list = [];
+    try {
+      var raw = JSON.parse(window.localStorage.getItem(PREVIZ_POSE_LIBRARY_KEY) || "[]");
+      if (Array.isArray(raw)) {
+        list = raw.filter(function (p) {
+          return p && typeof p === "object" && typeof p.nameKo === "string" && p.rig && typeof p.rig === "object";
+        });
+      }
+    } catch (error) {
+      list = [];
+    }
+    previzPoseLibraryMemory = list.slice(0, PREVIZ_POSE_LIBRARY_MAX);
+    return previzPoseLibraryMemory.slice();
+  }
+
+  function previzSaveUserPoses(list) {
+    previzPoseLibraryMemory = (list || []).slice(0, PREVIZ_POSE_LIBRARY_MAX);
+    try {
+      window.localStorage.setItem(PREVIZ_POSE_LIBRARY_KEY, JSON.stringify(previzPoseLibraryMemory));
+    } catch (error) {
+      /* 무시 — 저장소를 못 쓰면 이번 화면에서만 */
+    }
+  }
+
   /* 작업 207: 비교용 JSON — 키 정렬 · 숫자 소수 셋째 자리 · undefined 키 뺌(저장 형식은 그대로, 비교만). */
   function previzNormJson(value) {
     if (Array.isArray(value)) return "[" + value.map(previzNormJson).join(",") + "]";
@@ -6415,7 +6447,23 @@
           if (previzCtl.setPoseMode) previzCtl.setPoseMode(!previzCtl.poseMode);
         });
       poseBtn.classList.add("vnew-previz-pose-toggle");
+      // 작업 209b: [키 찍기 (S)] — 고른 인물의 지금 자세를 키 스크러버 자리에 키로(Maya S). [잔상] — 키 자세 반투명 마네킹.
+      var keyBtn = toolButton(tools, "키 찍기 (S)", "고른 인물의 지금 자리·방향·포즈를 이 시점에 키로 저장합니다(같은 시점이면 바꿉니다)",
+        function () {
+          if (previzCtl.setPoseKey) previzCtl.setPoseKey();
+        });
+      keyBtn.classList.add("vnew-previz-setkey");
       row.appendChild(tools);
+      var ghostWrap = el("label", "vnew-previz-check vnew-previz-ghosts");
+      ghostWrap.title = "키 자세마다 반투명한 잔상을 보입니다(녹화에는 나오지 않습니다) — 키가 2개 이상이면 저절로 켜집니다";
+      var ghostBox = el("input");
+      ghostBox.type = "checkbox";
+      ghostBox.addEventListener("change", function () {
+        if (previzCtl && previzCtl.setGhosts) previzCtl.setGhosts(ghostBox.checked);
+      });
+      ghostWrap.appendChild(ghostBox);
+      ghostWrap.appendChild(el("span", null, "잔상"));
+      row.appendChild(ghostWrap);
       var snapWrap = el("label", "vnew-previz-check vnew-previz-snap");
       var snap = el("input");
       snap.type = "checkbox";
@@ -6477,6 +6525,9 @@
         aimBtn.classList.toggle("is-on", !!st.aim);
         poseBtn.classList.toggle("is-on", !!st.pose);
         poseBtn.disabled = !(st.selection && st.selection.type === "actor");
+        keyBtn.disabled = !(st.selection && st.selection.type === "actor");
+        ghostBox.checked = !!(st.poseKeys && st.poseKeys.ghosts);
+        ghostBox.disabled = !(st.poseKeys && st.poseKeys.keys.length);
         hereBtn.disabled = st.view !== "work";
         var ci = previzCtl.cameraInfo();
         Object.keys(lensBtns).forEach(function (mm) {
@@ -6507,11 +6558,37 @@
       scrub.addEventListener("input", function () {
         if (previzCtl) previzCtl.scrubKey(parseFloat(scrub.value) || 0);
       });
-      root.appendChild(scrub);
+      // 작업 209b: 스크러버 위 마름모 — 카메라 키(파랑, 시작·끝)와 고른 인물의 자세 키(주황). 누르면 그 키로 간다.
+      var scrubWrap = el("div", "vnew-previz-keys-track");
+      scrubWrap.appendChild(scrub);
+      var diamonds = el("div", "vnew-previz-keys-diamonds");
+      scrubWrap.appendChild(diamonds);
+      root.appendChild(scrubWrap);
       var note = el("span", "vnew-hint vnew-previz-keys-note", "");
       root.appendChild(note);
+      // 작업 209b: 자세 키 줄 — [◀ 키](,) [키 찍기 (S)] [키 ▶](.) [키 지우기] · 안내(키 사이에서 고치면 S 로 저장).
+      var poseRow = el("div", "vnew-previz-posekeys");
+      poseRow.appendChild(el("strong", "vnew-previz-keys-head", "자세 키"));
+      var prevKeyBtn = toolButton(poseRow, "◀ 키 (,)", "앞 자세 키로", function () { previzCtl.gotoPoseKey(-1); });
+      var nextKeyBtn = toolButton(poseRow, "키 ▶ (.)", "뒤 자세 키로", function () { previzCtl.gotoPoseKey(1); });
+      var delKeyBtn = toolButton(poseRow, "키 지우기", "고른 마름모(지금 시점의 키)를 지웁니다 · Delete", function () { previzCtl.deletePoseKey(); });
+      var poseHint = el("span", "vnew-hint vnew-previz-posekeys-hint", "");
+      poseRow.appendChild(poseHint);
+      root.appendChild(poseRow);
       void startBtn;
       void endBtn;
+      function diamond(u, kind, title, onClick, selected) {
+        var d = el("button", "vnew-previz-key-diamond is-" + kind + (selected ? " is-selected" : ""), "");
+        d.type = "button";
+        d.title = title;
+        d.style.left = (Math.max(0, Math.min(1, u)) * 100) + "%";
+        d.addEventListener("click", function (event) {
+          if (event && event.stopPropagation) event.stopPropagation();
+          if (previzCtl) onClick();
+        });
+        diamonds.appendChild(d);
+        return d;
+      }
       function sync() {
         if (!previzCtl) return;
         var ci = previzCtl.cameraInfo();
@@ -6520,6 +6597,29 @@
         note.textContent = ci.hasEndKey
           ? (ci.editingEnd ? "끝 키를 고치는 중" : "시작 키를 고치는 중") + " · 시작 → 끝으로 부드럽게 움직입니다"
           : "끝 키가 없으면 카메라는 고정입니다";
+        clear(diamonds);
+        diamond(0, "camera", "카메라 시작 키", function () { previzCtl.scrubKey(0); }, false);
+        if (ci.hasEndKey) diamond(1, "camera", "카메라 끝 키", function () { previzCtl.scrubKey(1); }, false);
+        var pk = previzCtl.poseKeyInfo ? previzCtl.poseKeyInfo() : null;
+        (pk ? pk.keys : []).forEach(function (u) {
+          diamond(u, "pose", "자세 키 " + Math.round(u * 100) + "% — 누르면 이 키로(Delete = 지우기)", function () {
+            previzCtl.jumpToPoseKey(pk.id, u);
+          }, pk.selected !== null && Math.abs(pk.selected - u) < 0.0005);
+        });
+        var count = pk ? pk.keys.length : 0;
+        prevKeyBtn.disabled = !count;
+        nextKeyBtn.disabled = !count;
+        delKeyBtn.disabled = !(pk && (pk.onKey || pk.selected !== null));
+        poseRow.classList.toggle("is-live", !!(pk && pk.live));
+        poseHint.textContent = !pk
+          ? "인물을 고르면 자세 키를 찍을 수 있습니다"
+          : pk.msg
+            ? pk.msg
+            : pk.hint
+              ? pk.hint + (pk.live ? " (지금은 미리보기 — 시점을 옮기면 사라집니다)" : "")
+              : count
+                ? "키 " + count + "/" + pk.max + " · 이 키를 고치는 중"
+                : "키가 없으면 이 컷 내내 같은 자세입니다 · 키 찍기(S)로 움직임을 만듭니다";
       }
       return { root: root, sync: sync };
     }
@@ -6557,6 +6657,12 @@
       previzCtl.onState(function (st) {
         bar.sync(st);
         keys.sync();
+        // 작업 209b: 자세 키 있는 인물의 키 시점이 바뀌면(마름모 · , / . · 스크러버) 방향·위치 칸이 그 키를 보게 패널을 다시 그린다.
+        if (st && st.poseKeys && st.poseKeys.keys.length && previzKeyMark() !== panelKeyMark) {
+          renderCutPanel();
+          return;
+        }
+        fieldRefreshers.forEach(function (fn) { fn(); });
       });
       previzCtl.onSelect(function (sel) {
         selected = sel;
@@ -6743,6 +6849,9 @@
         }));
         card.appendChild(headRow);
         var actorNote = el("p", "vnew-hint vnew-previz-limit-note");
+        // 작업 209b: 자세 키가 있는 인물의 방향·위치 칸은 지금 키(키 위) 또는 저장 전 미리보기(키 사이)를 고친다.
+        var poseObj = previzCtl && previzCtl.poseFieldTarget ? previzCtl.poseFieldTarget(ca.id, cut) || ca : ca;
+        panelKeyMark = previzKeyMark();
         card.appendChild(selectField("자세", ca, "pose", POSE_LABELS, scene, cut, function () {
           ca.manual = true;
           delete ca.posture; // 패널에서 읽은 자세 기울기보다 고른 자세가 먼저
@@ -6761,13 +6870,18 @@
             if (other) ca.gestureTarget = other.id;
           }
         }));
-        card.appendChild(numField("방향(도)", ca, "facingDeg", -360, 360, actorNote, scene, cut, function () {
+        card.appendChild(numField("방향(도)", poseObj, "facingDeg", -360, 360, actorNote, scene, cut, function () {
+          if (poseObj !== ca) {
+            previzCtl.poseFieldChanged(ca.id, cut); // 작업 209b: 키 위 = 그 키 · 키 사이 = 미리보기
+            return;
+          }
           ca.manual = true;
           // 앉은 인물은 다리 방향(sit.legYawDeg)도 같이 돌려 미리 본다(저장하면 서버가 앉은 모양을 다시 잡는다).
           if (ca.sit && typeof ca.sit === "object") ca.sit.legYawDeg = Number(ca.facingDeg) || 0;
         }));
-        card.appendChild(vec3Field("위치 (x,z)", ca, "pos", actorBounds(room), actorNote, scene, cut, function () {
-          ca.manual = true;
+        card.appendChild(vec3Field("위치 (x,z)", poseObj, "pos", actorBounds(room), actorNote, scene, cut, function () {
+          if (poseObj !== ca) previzCtl.poseFieldChanged(ca.id, cut);
+          else ca.manual = true;
         }, [0, 2]));
         var speakWrap = el("label", "vnew-previz-check");
         var speak = el("input");
@@ -6795,6 +6909,7 @@
       saveBtn.addEventListener("click", function () {
         saveBtn.disabled = true;
         // 작업 209a: 인물이 직접 잡은 관절(cut actor 의 rig)도 이 scenes 안에 그대로 실린다(따로 고르지 않는다).
+        // 작업 209b: 자세 키(cut actor 의 keys = [{u, pos, facingDeg, rig}])도 rig 옆에 같은 scenes 로 실린다(dirty 비교도 같은 scenes).
         api("/api/vnew/p/" + encodeURIComponent(state.projectId) + "/previz/scene", {
           method: "PUT",
           body: JSON.stringify({ scenes: scenes })
@@ -6821,6 +6936,12 @@
     }
 
     var fieldRefreshers = []; // 작업 201: 기즈모를 끄는 동안 숫자 칸을 따라 바꾼다(입력 중인 칸은 그대로)
+    var panelKeyMark = ""; // 작업 209b: 패널을 그린 때의 고른 인물 자세 키 시점
+
+    function previzKeyMark() {
+      var pk = previzCtl && previzCtl.poseKeyInfo ? previzCtl.poseKeyInfo() : null;
+      return pk && pk.keys.length ? pk.id + "@" + pk.u : "";
+    }
 
     /* 작업 200: 이 컷의 경고 — 서버가 본 직접 놓은 카메라 문제 + 직접 놓은 인물이 소품과 겹침(풀지 않고 알림). */
     function cutWarnings(cut) {
@@ -6939,6 +7060,74 @@
       actions.appendChild(mirror);
       box.appendChild(actions);
       box.appendChild(el("p", "vnew-hint vnew-previz-pose-note", PREVIZ_POSE_NOTE));
+      if (ctl && ctl.posePresets) box.appendChild(previzPoseLibrary(cut, ca));
+      return box;
+    }
+
+    /* 작업 209b: [포즈 모음] — 기본 포즈(목록 자세·손 동작에서 만든 관절 값)와 이 브라우저에 저장한 포즈. 이름을 누르면 고른 인물
+       (키가 있으면 지금 키 · 키 사이면 미리보기)의 rig 로 붙이고, [반전]은 좌우 반전 붙여넣기. [이 포즈 저장] → 이름 → localStorage.
+       붙이기 한 번 = 되돌리기 한 단계(편집기 applyPosePreset). */
+    function previzPoseLibrary(cut, ca) {
+      var box = el("div", "vnew-previz-poselib");
+      box.appendChild(el("strong", "vnew-previz-pose-head", "포즈 모음"));
+      function presetRow(list, preset, onDelete) {
+        var row = el("div", "vnew-previz-poselib-row");
+        var apply = el("button", "outline-button vnew-previz-poselib-apply", preset.nameKo);
+        apply.type = "button";
+        apply.title = "이 포즈를 붙입니다";
+        apply.addEventListener("click", function () {
+          if (previzCtl && previzCtl.applyPosePreset) previzCtl.applyPosePreset(ca.id, preset, false, cut);
+        });
+        row.appendChild(apply);
+        var flip = el("button", "link-button vnew-previz-poselib-mirror", "반전");
+        flip.type = "button";
+        flip.title = "좌우 반전 붙여넣기 — 왼쪽·오른쪽을 바꿔 붙입니다";
+        flip.addEventListener("click", function () {
+          if (previzCtl && previzCtl.applyPosePreset) previzCtl.applyPosePreset(ca.id, preset, true, cut);
+        });
+        row.appendChild(flip);
+        if (onDelete) {
+          var del = el("button", "link-button vnew-previz-poselib-delete", "지우기");
+          del.type = "button";
+          del.title = "저장한 포즈를 지웁니다(이 브라우저)";
+          del.addEventListener("click", onDelete);
+          row.appendChild(del);
+        }
+        list.appendChild(row);
+      }
+      var builtIn = el("div", "vnew-previz-poselib-list");
+      previzCtl.posePresets().forEach(function (preset) {
+        presetRow(builtIn, preset, null);
+      });
+      box.appendChild(builtIn);
+      box.appendChild(el("span", "vnew-field-label", "내 포즈(이 브라우저)"));
+      var mine = el("div", "vnew-previz-poselib-list is-user");
+      var saved = previzUserPoses();
+      if (!saved.length) mine.appendChild(el("p", "vnew-hint", "저장한 포즈가 없습니다."));
+      saved.forEach(function (preset) {
+        presetRow(mine, preset, function () {
+          previzSaveUserPoses(previzUserPoses().filter(function (p) { return p.id !== preset.id; }));
+          renderCutPanel();
+        });
+      });
+      box.appendChild(mine);
+      var save = el("button", "outline-button vnew-previz-poselib-save", "이 포즈 저장");
+      save.type = "button";
+      save.title = "지금 보이는 자세를 이름을 붙여 이 브라우저에 저장합니다";
+      save.addEventListener("click", function () {
+        if (!previzCtl || !previzCtl.capturePose) return;
+        var pose = previzCtl.capturePose(ca.id);
+        if (!pose) return;
+        var name = window.prompt("포즈 이름", "");
+        name = String(name || "").trim().slice(0, 40);
+        if (!name) return;
+        var list = previzUserPoses();
+        list.unshift({ id: "u" + Date.now().toString(36), nameKo: name, rig: pose.rig });
+        previzSaveUserPoses(list);
+        renderCutPanel();
+      });
+      box.appendChild(save);
+      box.appendChild(el("p", "vnew-hint", "키가 있으면 지금 키에 붙입니다. 키 사이에서는 미리보기라 키 찍기(S)로 저장하세요."));
       return box;
     }
 
@@ -9274,7 +9463,7 @@
     var section = el("section", "panel vnew-dialogue-sec");
     section.appendChild(el("h2", "vnew-sec-title", "대사 (" + entries.length + "줄)"));
     section.appendChild(
-      el("p", "vnew-hint", "다음 업데이트에서 목소리·효과음·배경음을 넣을 수 있습니다.")
+      el("p", "vnew-hint", "영상 소리는 대사만 만듭니다. 배경음·효과음은 따로 넣어 주세요.")
     );
     if (!entries.length) {
       section.appendChild(el("p", "vnew-hint", "대사가 없습니다."));

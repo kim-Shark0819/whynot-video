@@ -33,22 +33,25 @@ from .errors import VpocError
 
 log = logging.getLogger("vpoc")
 
-_RUNTIME = {"client": None, "broker": None}
+_RUNTIME = {"client": None, "broker": None, "astra_broker": None}
 _RUNTIME_LOCK = threading.Lock()
 
 
-def _broker_client():
-    """와이랩 계정 역할을 빌린 bedrock-runtime(임시, settings.BROKER_*). 자격 증명은 자동 갱신된다."""
+def _broker_client(role_arn: str, external_id: str, region: str, session_name: str):
+    """다른 계정 역할(role_arn)을 빌린 bedrock-runtime(임시). 자격 증명은 자동 갱신된다.
+
+    와이랩(settings.BROKER_*, Claude 5.x) · 키이스트(settings.ASTRA_BROKER_*, GPT-6 Astra) 둘 다 이 함수로 만든다.
+    """
     from botocore.credentials import RefreshableCredentials  # noqa: PLC0415
     from botocore.session import get_session  # noqa: PLC0415
 
-    sts = boto3.client("sts", region_name=settings.AWS_REGION or settings.BROKER_REGION)
+    sts = boto3.client("sts", region_name=settings.AWS_REGION or region)
 
     def refresh() -> dict:
         creds = sts.assume_role(
-            RoleArn=settings.BROKER_ROLE_ARN,
-            RoleSessionName="whynot-vpoc",
-            ExternalId=settings.BROKER_EXTERNAL_ID,
+            RoleArn=role_arn,
+            RoleSessionName=session_name,
+            ExternalId=external_id,
             DurationSeconds=3600,
         )["Credentials"]
         return {
@@ -64,23 +67,66 @@ def _broker_client():
     )
     return boto3.Session(botocore_session=botocore_session).client(
         "bedrock-runtime",
-        region_name=settings.BROKER_REGION,
+        region_name=region,
         config=Config(read_timeout=settings.READ_TIMEOUT_S, connect_timeout=15, retries={"max_attempts": 0}),
     )
 
 
+def _is_astra(model: str) -> bool:
+    return any(mark in model for mark in settings.ASTRA_BROKER_MODEL_MARKERS)
+
+
+def _route(model: str) -> str:
+    """이 모델을 부를 계정: "astra_broker"(키이스트) · "broker"(와이랩) · "client"(와이낫 계정).
+
+    Astra 는 키이스트 역할이 비어 있으면 와이낫 계정으로 부른다. 와이랩으로는 넘어가지 않는다.
+    """
+    if _is_astra(model):
+        return "astra_broker" if settings.ASTRA_BROKER_ROLE_ARN else "client"
+    if settings.BROKER_ROLE_ARN and any(mark in model for mark in settings.BROKER_MODEL_MARKERS):
+        return "broker"
+    return "client"
+
+
 def _uses_broker(model: str) -> bool:
-    return bool(settings.BROKER_ROLE_ARN) and any(mark in model for mark in settings.BROKER_MODEL_MARKERS)
+    """다른 계정(와이랩 또는 키이스트) 역할을 빌려 부르는 모델이면 True."""
+    return _route(model) != "client"
+
+
+def _new_broker(route: str):
+    if route == "astra_broker":
+        account, role, ext, region, session = (
+            "keyeast",
+            settings.ASTRA_BROKER_ROLE_ARN,
+            settings.ASTRA_BROKER_EXTERNAL_ID,
+            settings.ASTRA_BROKER_REGION,
+            "whynot-vpoc-astra",
+        )
+    else:
+        account, role, ext, region, session = (
+            "ylab",
+            settings.BROKER_ROLE_ARN,
+            settings.BROKER_EXTERNAL_ID,
+            settings.BROKER_REGION,
+            "whynot-vpoc",
+        )
+    log.info("vpoc.broker.client account=%s role=%s region=%s session=%s", account, role, region, session)
+    return _broker_client(role, ext, region, session)
 
 
 def client_for(model: str):
-    """이 모델을 부를 클라이언트. 와이낫 계정에서 아직 못 쓰는 모델만 와이랩 역할로 부른다."""
-    if not _uses_broker(model):
+    """이 모델을 부를 클라이언트.
+
+    GPT-6 Astra 는 키이스트 계정 역할(settings.ASTRA_BROKER_*), 와이낫 계정에서 아직 못 쓰는 Claude 5.x 는
+    와이랩 계정 역할(settings.BROKER_*), 나머지는 와이낫 계정(runtime())으로 부른다. 역할마다 클라이언트 1개를 둔다.
+    """
+    route = _route(model)
+    if route == "client":
         return runtime()
     with _RUNTIME_LOCK:
-        if _RUNTIME["broker"] is None:
-            _RUNTIME["broker"] = _broker_client()
-        return _RUNTIME["broker"]
+        if _RUNTIME.get(route) is None:
+            _RUNTIME[route] = _new_broker(route)
+        return _RUNTIME[route]
 
 
 def runtime():
@@ -303,7 +349,7 @@ def _model_chain(primary: str) -> list[str]:
 
 # 스트리밍 권한(bedrock:InvokeModelWithResponseStream)이 없는 역할이 있다(운영 앱 역할, 2026-10-13).
 # 한 번 거부되면 이 프로세스에서는 보통 호출(converse)로 바꾼다.
-_STREAM = {"ok": True, "broker": True}
+_STREAM = {"ok": True, "broker": True, "astra_broker": True}
 
 
 # 모델마다 받지 않는 설정이 있다(2026-10-14 실측): Opus 5.5 · Fable 5.x 는 toolChoice tool/any 를,
@@ -381,15 +427,16 @@ def _converse_once(model: str, system_text: str, blocks: list[dict], tool: dict,
 
 def _stream_once(model: str, system_text: str, blocks: list[dict], tool: dict, max_tokens: int):
     """converse_stream 한 번. (도구 입력 dict 또는 None, 텍스트, usage, stopReason)."""
-    kind = "broker" if _uses_broker(model) else "ok"
-    if not _STREAM[kind]:
+    route = _route(model)
+    kind = "ok" if route == "client" else route
+    if not _STREAM.get(kind, True):
         return _converse_once(model, system_text, blocks, tool, max_tokens)
     try:
         response = client_for(model).converse_stream(**_request(model, system_text, blocks, tool, max_tokens))
     except ClientError as exc:
         if "InvokeModelWithResponseStream" not in str(exc):
             raise
-        log.warning("vpoc.call.no_stream_permission — 보통 호출로 바꾼다")
+        log.warning("vpoc.call.no_stream_permission route=%s — 보통 호출로 바꾼다", kind)
         _STREAM[kind] = False
         return _converse_once(model, system_text, blocks, tool, max_tokens)
     return _read_stream(response)

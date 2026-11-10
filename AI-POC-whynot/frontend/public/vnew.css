@@ -6192,3 +6192,111 @@ textarea.vnew-field-input {
   margin: 0;
   font-size: 12px;
 }
+
+
+/* 작업 209b: 자세 키 — 스크러버 위 마름모(카메라 키 파랑 · 자세 키 주황) · 자세 키 줄(앞·뒤 · 지우기 · 안내) · [잔상] · 포즈 모음. */
+.vnew-previz-keys-track {
+  position: relative;
+  flex: 1 1 160px;
+  min-width: 120px;
+  display: flex;
+  align-items: center;
+}
+
+.vnew-previz-keys-track .vnew-previz-keys-scrub {
+  flex: 1 1 auto;
+  width: 100%;
+}
+
+.vnew-previz-keys-diamonds {
+  position: absolute;
+  inset: 0 8px;
+  pointer-events: none;
+}
+
+.vnew-previz-key-diamond {
+  position: absolute;
+  top: 50%;
+  width: 11px;
+  height: 11px;
+  margin: -16px 0 0 -5.5px;
+  padding: 0;
+  border: 1px solid rgba(0, 0, 0, 0.35);
+  transform: rotate(45deg);
+  cursor: pointer;
+  pointer-events: auto;
+}
+
+.vnew-previz-key-diamond.is-camera {
+  background: #4fc3f7;
+  margin-top: 6px;
+}
+
+.vnew-previz-key-diamond.is-pose {
+  background: #ffb74d;
+}
+
+.vnew-previz-key-diamond.is-selected {
+  background: #ffd54f;
+  box-shadow: 0 0 0 2px #e65100;
+}
+
+.vnew-previz-posekeys {
+  flex-basis: 100%;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+}
+
+.vnew-previz-posekeys-hint {
+  margin: 0;
+  font-size: 12px;
+}
+
+.vnew-previz-posekeys.is-live .vnew-previz-posekeys-hint {
+  color: #e65100;
+  font-weight: 600;
+}
+
+.vnew-previz-setkey {
+  margin-left: 4px;
+}
+
+.vnew-previz-poselib {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding-top: 6px;
+  border-top: 1px dashed var(--line, #e5e7eb);
+}
+
+.vnew-previz-poselib-list {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.vnew-previz-poselib-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.vnew-previz-poselib-apply {
+  flex: 1 1 auto;
+  min-width: 0;
+  padding: 2px 8px;
+  font-size: 12px;
+  text-align: left;
+}
+
+.vnew-previz-poselib-mirror,
+.vnew-previz-poselib-delete {
+  font-size: 12px;
+}
+
+.vnew-previz-poselib-save {
+  align-self: flex-start;
+  font-size: 12px;
+}

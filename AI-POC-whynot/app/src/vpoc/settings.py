@@ -46,7 +46,7 @@ TEXT_REGION = os.getenv("VPOC_TEXT_REGION", AWS_REGION)
 # 2026-10-13 실측: 이 계정은 Opus 4.6 · Sonnet 4.6 · Sonnet 4.5 만 호출 가능(Opus 4.7+/5.x 는 미허용).
 # 설계자 2026-10-14: 가장 분석이 좋은 모델을 쓴다. 같은 웹툰 장면 비교(2026-10-14): Fable 5.1 ≥ Opus 5.5
 # >> GPT-6 Astra(이미지를 거의 읽지 못함). 와이낫 계정은 5.x 한도가 0이라 와이랩 계정에서 임시로 빌린다
-# (BROKER_*). 빌리기가 안 되면 아래 예비 모델(와이낫 계정)로 자동으로 넘어간다.
+# (BROKER_*, Astra 는 키이스트 ASTRA_BROKER_*). 빌리기가 안 되면 아래 예비 모델(와이낫 계정)로 자동으로 넘어간다.
 ANALYZE_MODEL = os.getenv("VPOC_ANALYZE_MODEL", "global.anthropic.claude-fable-5-1")
 # 샷마다 맡은 웹툰 장면을 보고 분위기 · 배경 · 인물별 행동 · 상황을 적는 모델(설계자 2026-10-13).
 # Opus 5.5 는 이 계정에서 약관 동의 전이라(2026-10-13) 지금은 Opus 4.6. 동의 후 이 값만 바꾼다.
@@ -59,7 +59,17 @@ BROKER_ROLE_ARN = os.getenv(
 ).strip()
 BROKER_EXTERNAL_ID = os.getenv("VPOC_BEDROCK_BROKER_EXTERNAL_ID", "whynot-vpoc-broker")
 BROKER_REGION = os.getenv("VPOC_BEDROCK_BROKER_REGION", "ap-northeast-2")
-BROKER_MODEL_MARKERS = ("claude-fable-", "claude-opus-5", "claude-sonnet-5", "gpt-6")
+BROKER_MODEL_MARKERS = ("claude-fable-", "claude-opus-5", "claude-sonnet-5")
+# 임시(사용자 지시 2026-11-10): GPT-6 Astra 는 와이랩이 아니라 키이스트 계정 역할을 빌려 부른다(Astra 만 허용).
+# 비우면 Astra 는 와이낫 계정으로 부른다(와이랩으로 넘어가지 않는다). 와이낫 계정에서 열리면
+# VPOC_BEDROCK_ASTRA_ROLE_ARN="" 로 끄고 키이스트 역할을 지운다.
+ASTRA_BROKER_ROLE_ARN = os.getenv(
+    # 임시로 키이스트 계정 역할을 빌린다(사용자 지시 2026-11-10). account-check: ignore
+    "VPOC_BEDROCK_ASTRA_ROLE_ARN", "arn:aws:iam::722500516860:role/imsi-astra-used-role"  # account-check: ignore
+).strip()
+ASTRA_BROKER_EXTERNAL_ID = os.getenv("VPOC_BEDROCK_ASTRA_EXTERNAL_ID", "whynot-astra-broker")
+ASTRA_BROKER_REGION = os.getenv("VPOC_BEDROCK_ASTRA_REGION", "ap-northeast-2")
+ASTRA_BROKER_MODEL_MARKERS = ("gpt-6",)
 # Seedance 네이티브 오디오(설계자 2026-10-14 "영상에 소리를 넣는다"). 끄려면 VPOC_ARK_GENERATE_AUDIO=false.
 ARK_GENERATE_AUDIO = _flag("VPOC_ARK_GENERATE_AUDIO", "true")
 # 키 장면(콘티) 방식(설계자 2026-10-14): 5초마다 키 장면을 그리고 Seedance 시작 · 끝 장면으로 잇는다.
