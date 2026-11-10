@@ -13,9 +13,10 @@
   edit-<variant>.json(그림체별 편집 문서, 조건부 쓰기 → 409, 작업 189 — 옛 edit.json 은 읽기만, _saved_docs) ·
   edit-export.json(내보내기 상태, 두 그림체가 함께 쓴다) · edit-media/index.json(길이·소리·크기·fps 캐시) ·
   edit-media/{mid}-strip.jpg · edit-media/{mid}-film.json(필름스트립·파형 피크, 처음 요청 때 한 번 만든다).
-  내보낸 결과는 영상 버킷 {gen 루트}/final-edit-{n}.mp4.
+  내보낸 결과는 영상 버킷 {gen 루트}/final-edit-{n}.mp4(소리 있음 — 화면 재생 · ⑥ 원본). 작업 216-fix1b: 내려받기는 같은 번호의
+  final-edit-{n}.zip(소리 없는 mp4 · 섞은 소리 mp3 · README.txt, edit_audio.export_package — 영상은 한 번만 만들어 나눈다).
 외부 호출 래퍼(검사가 가짜로 바꾼다): _download · _upload · _probe_file · _film_file · _export_segment · _export_join ·
-_spawn_export(작업 181: · _export_dissolve · _export_audio · _export_mix). 파드 안 내보내기 잠금 파일: _pod_lock_try · _pod_lock_release(지시서 111). STORE 는 vpoc.store.STORE 다
+_spawn_export(작업 181: · _export_dissolve · _export_audio · _export_mix, 작업 216-fix1b: · _export_package). 파드 안 내보내기 잠금 파일: _pod_lock_try · _pod_lock_release(지시서 111). STORE 는 vpoc.store.STORE 다
 (검사가 모듈 변수로 바꾼다).
 지시서 115: 클립 속도 speed(SPEEDS, 없으면 1 — 1 은 저장하지 않는다). 타임라인 길이 = (out − in) / speed(_clip_seconds).
 재료가 없을 때 요약에 잠김 이유(summary → reason, gen 이 없어도 gen_view 가 부른다).
@@ -216,6 +217,11 @@ def export_key(owner: str, pid: str, gen_id: str, n: int) -> str:
     return f"{_root(owner, pid, gen_id)}/final-edit-{int(n)}.mp4"
 
 
+def export_zip_key(owner: str, pid: str, gen_id: str, n: int) -> str:
+    """작업 216-fix1b: 내려받기 zip(소리 없는 mp4 · 소리 mp3 · README.txt)."""
+    return f"{_root(owner, pid, gen_id)}/final-edit-{int(n)}.zip"
+
+
 def export_stems_key(owner: str, pid: str, gen_id: str, n: int) -> str:
     """작업 215a: 내보내기 n 의 스템 zip(대사만 · 배경음 · 효과음 · mix.wav). 영상 버킷."""
     return f"{_root(owner, pid, gen_id)}/final-edit-{int(n)}-stems.zip"
@@ -309,6 +315,11 @@ def _export_segment(source_path: str, video_out: str, **kwargs) -> dict:
 def _export_join(segments: list[str], output_path: str, *, audio_path: str) -> str:
     """조각 잇기(stitcher.edit_join)."""
     return stitcher.edit_join(segments, output_path, audio_path=audio_path)
+
+
+def _export_package(video_path: str, audio_raw: str, zip_path: str, **kwargs) -> dict:
+    """작업 216-fix1b: 이은 mp4 · 잇기에 넣은 소리 → 내려받기 zip(edit_audio.export_package)."""
+    return edit_audio.export_package(video_path, audio_raw, zip_path, **kwargs)
 
 
 def _export_dissolve(a_path: str, b_path: str, video_out: str, **kwargs) -> dict:
@@ -459,6 +470,21 @@ def _download_name(n) -> str:
     """내려받기 파일 이름 edit-<n>.mp4(n 은 서버가 매긴 정수). 꼴이 틀리면 edit.mp4."""
     number = n if isinstance(n, int) and not isinstance(n, bool) else 0
     return f"edit-{number}.mp4" if number > 0 else "edit.mp4"
+
+
+def _package_name(n) -> str:
+    """작업 216-fix1b: 내려받기 zip 과 그 안 파일 이름 앞부분 edit-<n>(n 은 서버가 매긴 정수). 꼴이 틀리면 edit."""
+    return _download_name(n)[: -len(".mp4")]
+
+
+def _export_download(entry: dict) -> tuple[str, str]:
+    """작업 216-fix1b: 끝난 내보내기 하나의 (내려받기 URL, 파일 이름). zip 이 있으면 zip(edit-<n>.zip), 옛 내보내기(zipKey 없음)는
+    예전 그대로 mp4(edit-<n>.mp4)."""
+    zip_key = str(entry.get("zipKey") or "")
+    if zip_key:
+        name = _package_name(entry.get("n")) + ".zip"
+        return _presign_attachment(zip_key, name, "application/zip"), name
+    return _presign_download(str(entry.get("key") or ""), entry.get("n")), _download_name(entry.get("n"))
 
 
 def _presign_download(key: str, n) -> str:
@@ -1495,13 +1521,23 @@ def _history_item(current: dict) -> dict:
                                                "variant", "finishedAt", "error")}
 
 
+def _history_out(h: dict) -> dict:
+    """지난 결과 한 줄. 작업 216-fix1b: 내려받기는 zip 이 있으면 zip(downloadName 도), 옛 내보내기는 예전 그대로 mp4."""
+    done = h.get("status") == "done"
+    download, name = _export_download(h) if done else ("", "")
+    out = {**_history_item(h), "videoUrl": _presign_video(str(h.get("key") or "")) if done else "", "downloadUrl": download}
+    if done and h.get("zipKey"):
+        out["downloadName"] = name
+    return out
+
+
 def _export_out(current: dict | None, doc_hash: str) -> dict:
     current = current if isinstance(current, dict) else {}
     if not current:
         return {"status": "none"}
     done = current.get("status") == "done"
     url = _presign_video(str(current.get("key") or "")) if done else ""
-    download = _presign_download(str(current.get("key") or ""), current.get("n")) if done else ""
+    download, download_name = _export_download(current) if done else ("", "")
     out = {
         "status": current.get("status"),
         "n": current.get("n"),
@@ -1520,6 +1556,9 @@ def _export_out(current: dict | None, doc_hash: str) -> dict:
         "videoUrl": url,
         "downloadUrl": download,
     }
+    if current.get("zipKey"):  # 작업 216-fix1b: 내려받기 = zip(소리 없는 mp4 · 소리 mp3 · README.txt). 옛 내보내기는 키 그대로
+        out["downloadName"] = download_name
+        out["files"] = list(current.get("files") if isinstance(current.get("files"), list) else [])
     if current.get("stems"):  # 작업 215a: 스템을 고른 내보내기만(그 밖은 215a 전과 같은 키)
         out["stemsRequested"] = True
         if done and current.get("stemsKey"):
@@ -1640,11 +1679,7 @@ def edit_view(owner: str, pid: str, variant: str | None = None) -> dict:
         "materials": materials,
         "limits": {"maxClips": MAX_CLIPS, "maxTotalSeconds": MAX_TOTAL_S, "minClipSeconds": MIN_CLIP_S},
         "export": _export_out(latest, doc_hash),
-        "exportHistory": [
-            {**_history_item(h), "videoUrl": _presign_video(str(h.get("key") or "")) if h.get("status") == "done" else "",
-             "downloadUrl": _presign_download(str(h.get("key") or ""), h.get("n")) if h.get("status") == "done" else ""}
-            for h in older
-        ],
+        "exportHistory": [_history_out(h) for h in older],
     }
     if retakes is not None:
         view["retake"] = {"enabled": True}
@@ -2242,7 +2277,9 @@ def start_export(owner: str, pid: str, etag, variant=None, stems=False) -> dict:
         history = [h for h in (state.get("history") or []) if isinstance(h, dict)]
         if current:
             # 작업 189: 기록에 docHash 도 남긴다(그 그림체의 가장 최근 결과가 기록으로 밀려도 보기의 matchesDoc 이 맞게).
-            history.append({**_history_item(current), "docHash": current.get("docHash")})
+            # 작업 216-fix1b: 내려받기 zip 키도(지난 결과 내려받기 = zip). 옛 항목은 키가 없어 예전 그대로 mp4.
+            history.append({**_history_item(current), "docHash": current.get("docHash"),
+                            **({"zipKey": current["zipKey"]} if current.get("zipKey") else {})})
         n = int(state.get("n") or 0) + 1
         now = now_iso()
         started = {
@@ -2497,6 +2534,7 @@ _STAGE_MESSAGES = {
     "join": "영상을 이어 붙이지 못했습니다.",
     "upload": "결과 영상을 저장하지 못했습니다.",
     "mix": "오디오 트랙을 섞지 못했습니다.",  # 작업 215a
+    "package": "내려받기 묶음(소리 없는 영상 · 소리 mp3)을 만들지 못했습니다.",  # 작업 216-fix1b
 }
 
 
@@ -2673,6 +2711,7 @@ def run_export(owner: str, pid: str, gen_id: str, n: int, claim: str) -> None:
                 for layer in layers:
                     os.unlink(layer["path"])
             stems_out: list[tuple[str, str]] = []
+            dialogue_wav, bg_wavs, pkg_stems = "", [], []  # 216-fix2
             mix_doc = current.get("audio") if isinstance(current.get("audio"), dict) else None
             if mix_doc is not None:
                 # 작업 215a: A1(위에서 만든 클립 소리) + 오디오 트랙을 섞는다 · 스템. 클립 소리가 없으면 A1 은 무음.
@@ -2685,7 +2724,7 @@ def run_export(owner: str, pid: str, gen_id: str, n: int, claim: str) -> None:
                 a1 = mix_doc.get("a1") or edit_audio.default_a1()
                 spans = sound_ranges(edit_audio.pcm_peaks(audio_path, PEAKS_PER_SECOND), PEAKS_PER_SECOND) if a1.get("duck") else []
                 mix_plan = edit_audio.mix_plan(mix_doc.get("tracks") or [], a1, total_samples=total_samples, spans=spans,
-                                               stems=bool(current.get("stems")))
+                                               stems=True)  # 216-fix2: 대사 · 배경음 mp3 를 위해 늘 스템을 만든다(스템 zip 은 고른 때만)
                 asset_paths: dict[str, str] = {}
                 for asset_id in mix_plan["inputs"]:
                     info = (mix_doc.get("assets") or {}).get(asset_id) or {}
@@ -2700,7 +2739,12 @@ def run_export(owner: str, pid: str, gen_id: str, n: int, claim: str) -> None:
                     audio_path = mixed["raw"]
                 for path in asset_paths.values():
                     os.unlink(path)
-                stems_out = list(mixed.get("stems") or [])
+                stems_all = list(mixed.get("stems") or [])
+                # 216-fix2: 내려받기 zip 의 대사(대사만 스템) · 배경음(나머지 트랙 스템). 스템 zip 은 사용자가 고른 때만.
+                dialogue_wav = next((path for name, path in stems_all if name == edit_audio.DIALOGUE_STEM), "")
+                bg_wavs = [path for name, path in stems_all if name not in (edit_audio.DIALOGUE_STEM, edit_audio.MIX_STEM)]
+                stems_out = stems_all if current.get("stems") else []
+                pkg_stems = [path for _name, path in stems_all if not current.get("stems")]
                 with_audio = True
                 log.info("vnew.edit.export_tracks pid=%s gen=%s n=%d buses=%d items=%d duck=%d stems=%d", pid, gen_id, n,
                          len(mix_plan["buses"]), sum(len(b["items"]) for b in mix_plan["buses"]), len(spans), len(stems_out))
@@ -2709,17 +2753,30 @@ def run_export(owner: str, pid: str, gen_id: str, n: int, claim: str) -> None:
             _export_join(segments, output, audio_path=audio_path)
             for segment in segments:
                 os.unlink(segment)
-            if audio_path:
-                os.unlink(audio_path)
             out_info = _probe_file(output) or {}
             seconds = round(_num(out_info.get("duration")) or 0.0, 3)
             if seconds <= 0:
                 raise stitcher.StitchError("이어 붙인 영상 길이를 읽지 못했습니다.")
+            # 작업 216-fix1b: 내려받기 zip — 위에서 한 번 만든 영상을 나눈다(영상 스트림 복사 -an · 잇기에 넣은 소리 그대로 mp3).
+            # 소리가 없으면 영상 길이(프레임 × 프레임당 샘플)만큼 무음 mp3.
+            stage = "package"
+            zip_path = os.path.join(workdir, "package.zip")
+            package = _export_package(output, audio_path, zip_path, name=_package_name(n),
+                                      samples=(fx["total"] if fx is not None else sum(frames)) * (stitcher.EDIT_AUDIO_RATE // fps),
+                                      seconds=seconds, has_audio=with_audio, dialogue_wav=dialogue_wav, bg_wavs=bg_wavs)
+            for path in pkg_stems:  # 216-fix2: 스템 zip 을 고르지 않았으면 내려받기용으로만 쓴 스템을 지운다
+                if os.path.exists(path):
+                    os.unlink(path)
+            if audio_path:
+                os.unlink(audio_path)
             size = os.path.getsize(output)
             _beat(owner, pid, gen_id, claim)  # 올리기 전에 claim 확인
             stage = "upload"
             key = export_key(owner, pid, gen_id, n)
             _upload(output, key, bucket=vpoc_settings.VIDEO_BUCKET, content_type="video/mp4")
+            zip_key = export_zip_key(owner, pid, gen_id, n)
+            _upload(zip_path, zip_key, bucket=vpoc_settings.VIDEO_BUCKET, content_type="application/zip")
+            os.unlink(zip_path)
             stem_fields: dict = {}
             if stems_out:
                 # 작업 215a: 스템 zip(압축 없이 — wav 는 거의 줄지 않는다). 파일 이름은 서버가 정한 글자만(대사만.wav · 배경음.wav …).
@@ -2735,7 +2792,8 @@ def run_export(owner: str, pid: str, gen_id: str, n: int, claim: str) -> None:
                 _upload(zip_path, stems_key, bucket=vpoc_settings.VIDEO_BUCKET, content_type="application/zip")
                 stem_fields = {"stemsKey": stems_key, "stems": [name for name, _ in stems_out]}
         _finish(owner, pid, gen_id, claim, status="done", key=key, seconds=seconds, bytes=size, hasAudio=with_audio,
-                finishedAt=now_iso(), error="", **stem_fields)
+                finishedAt=now_iso(), error="", zipKey=zip_key, zipBytes=package.get("bytes"),
+                files=list(package.get("entries") or []), **stem_fields)
         log.info("vnew.edit.export_done pid=%s gen=%s n=%d clips=%d seconds=%.3f bytes=%d fps=%d size=%dx%d audio=%s "
                  "ms=%d rss_mb=%.0f", pid, gen_id, n, len(clips), seconds, size, fps, width, height, with_audio,
                  int((time.monotonic() - started) * 1000), generate._rss_mb())  # noqa: SLF001

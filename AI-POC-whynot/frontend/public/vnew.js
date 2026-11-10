@@ -12139,7 +12139,7 @@
     }
     if (status === "done") return "끝 — " + editTimeText(e.seconds) + (e.hasAudio === false ? " · 소리 없음" : "");
     if (status === "failed") return "실패 — " + (e.error || "내보내지 못했습니다.");
-    return "아직 내보낸 영상이 없습니다. [내보내기]를 누르면 지금 편집대로 mp4 하나를 만듭니다.";
+    return "아직 내보낸 영상이 없습니다. [내보내기]를 누르면 지금 편집대로 소리 없는 영상(mp4)과 소리(mp3)를 zip 하나로 만듭니다."; // 작업 216-fix1b
   }
 
   /* CSS url("…") 안에 넣을 주소. 따옴표·역슬래시·줄바꿈을 %로 바꿔 선언 밖으로 나가지 않게 한다. */
@@ -12608,7 +12608,8 @@
     head.appendChild(editMnotesButton(ctx)); // 작업 199: [모델 에러 로그 보기]
     d.exportBtn = el("button", "primary-button vnew-edit-export-btn", "내보내기");
     d.exportBtn.type = "button";
-    d.exportBtn.title = "지금 편집대로 mp4 하나를 만듭니다(저장이 남았으면 먼저 저장)";
+    // 작업 216-fix1b: [내보내기] 한 번 = zip 하나(소리 없는 영상 mp4 · 소리 mp3 · README.txt)
+    d.exportBtn.title = "지금 편집대로 소리 없는 영상(mp4)과 소리(mp3)를 zip 하나로 만듭니다(저장이 남았으면 먼저 저장)";
     d.exportBtn.addEventListener("click", function () {
       editExport(ctx);
     });
@@ -15677,7 +15678,8 @@
       video.setAttribute("playsinline", "");
       box.appendChild(video);
       var tools = el("div", "vnew-edit-export-tools");
-      tools.appendChild(downloadLink(ex.downloadUrl || ex.videoUrl, "내려받기 (edit-" + (ex.n || 1) + ".mp4)"));
+      // 작업 216-fix1b: 새 내보내기는 zip(downloadName — 소리 없는 mp4 · 소리 mp3 · README.txt), 옛 내보내기는 예전 그대로 mp4
+      tools.appendChild(downloadLink(ex.downloadUrl || ex.videoUrl, "내려받기 (" + (ex.downloadName || "edit-" + (ex.n || 1) + ".mp4") + ")"));
       if (ex.stemsUrl) tools.appendChild(downloadLink(ex.stemsUrl, "스템 내려받기 (대사만 · 배경음 · 효과음 · mix.wav)")); // 작업 215a
       box.appendChild(tools);
     }

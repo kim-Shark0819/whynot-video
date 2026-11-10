@@ -583,3 +583,140 @@ def render_mix(plan: dict, a1_raw: str, asset_paths: dict, workdir: str) -> dict
         if kind in paths and os.path.exists(paths[kind]):
             stems.append((name, paths[kind]))
     return {"raw": raw, "stems": stems}
+
+
+
+# ================================================================ 작업 216-fix1b: 내려받기 zip(소리 없는 영상 + 소리 mp3)
+#
+# ⑦ [내보내기] 한 번 = 영상 한 번 만들기(edit.run_export 의 잇기). 그 결과를 나눠 zip 하나로 묶는다(영상을 다시 만들지 않는다).
+#   <name>-영상(소리없음).mp4: 이은 mp4 의 영상 스트림 복사(-c:v copy -an) — 소리 스트림 0.
+#   <name>-소리.mp3: 잇기에 넣은 바로 그 소리(A1 + 오디오 트랙을 섞은 원시 PCM — mp4 의 AAC 와 같은 원천), MP3 192k · 48kHz · 스테레오.
+#     소리가 없는 편집이면 같은 길이(samples)의 무음. 길이 = 영상 프레임 수 × 프레임당 샘플이라 두 파일 길이가 같다.
+#   README.txt: 한국어 안내.
+
+PACKAGE_MP3_BITRATE = "192k"
+PACKAGE_VIDEO_SUFFIX = "-영상(소리없음).mp4"
+PACKAGE_AUDIO_SUFFIX = "-전체 소리.mp3"  # 216-fix2: 섞은 전체 소리
+PACKAGE_DIALOGUE_SUFFIX = "-대사.mp3"  # 216-fix2: 대사(A1)만
+PACKAGE_BG_SUFFIX = "-배경음.mp3"  # 216-fix2: 내 소리 트랙(A2~)만, 들리는 트랙이 없으면 넣지 않는다
+PACKAGE_README = "README.txt"
+
+
+def package_names(name: str, *, bg: bool = False) -> list[str]:
+    """zip 항목 이름(순서 그대로 zip 에 들어간다). name 은 서버가 만든 글자(edit-<n>). 216-fix2: 영상 · 대사 · (배경음) · 전체 소리 · README."""
+    out = [name + PACKAGE_VIDEO_SUFFIX, name + PACKAGE_DIALOGUE_SUFFIX]
+    if bg:
+        out.append(name + PACKAGE_BG_SUFFIX)
+    return out + [name + PACKAGE_AUDIO_SUFFIX, PACKAGE_README]
+
+
+def package_readme(name: str, *, seconds: float, has_audio: bool, bg: bool = False) -> str:
+    names = package_names(name, bg=bg)
+    video, dialogue = names[0], names[1]
+    total = max(0.0, float(seconds or 0.0))
+    length = f"{int(total // 60):02d}:{total % 60:05.2f}"
+    lines = [
+        "⑦ 편집 내보내기 결과입니다. 영상과 소리를 나눠 담았습니다.",
+        "",
+        f"  {video}",
+        "    편집한 타임라인 영상입니다. 소리 트랙이 없습니다.",
+        f"  {dialogue}",
+        "    대사(목소리)만 담은 소리입니다. ⑦ 에서 넣은 배경음 · 효과음 트랙은 들어 있지 않습니다.",
+    ]
+    if bg:
+        lines += [f"  {names[2]}", "    ⑦ 에서 넣은 배경음 · 효과음 트랙만 담은 소리입니다(대사 없음)."]
+    lines += [
+        f"  {name + PACKAGE_AUDIO_SUFFIX}",
+        "    타임라인의 최종 소리입니다. 대사와 오디오 트랙을 이득 · 페이드 · 키 · 덕킹 · 음소거/솔로 · 리미터까지 적용해 섞은 그대로입니다.",
+        "",
+        f"모든 파일은 0초에서 함께 시작하고 길이({length})가 같습니다(MP3 192kbps · 48kHz · 스테레오).",
+        "편집 프로그램에서 같은 시작점(0초)에 놓으면 그대로 맞습니다.",
+        "예전에 만든 AI 영상은 대사에 배경 소리가 섞여 있을 수 있습니다. 새로 만드는 영상은 대사만 나옵니다.",
+    ]
+    if not has_audio:
+        lines.append("이 편집에는 들리는 소리가 없어 mp3 는 같은 길이의 무음입니다.")
+    return "\n".join(lines) + "\n"
+
+
+def silent_video_command(binary: str, video_path: str, out_path: str) -> list[str]:
+    """이은 mp4 → 영상 스트림만 복사(다시 인코딩하지 않는다), 소리 스트림 없음."""
+    return [binary, "-y", "-hide_banner", "-loglevel", "error", "-i", video_path, "-map", "0:v:0", "-c:v", "copy", "-an",
+            "-movflags", "+faststart", out_path]
+
+
+def mp3_from_wavs_command(binary: str, wav_paths: list[str], out_path: str) -> list[str]:
+    """216-fix2: 스템 wav 하나 이상 → 하나로 더해(정규화 없음) MP3 192k · 48kHz · 스테레오. 피크는 약 −1dB 로 안전 제한."""
+    cmd = [binary, "-y", "-hide_banner", "-loglevel", "error", "-threads", "1"]
+    for path in wav_paths:
+        cmd += ["-i", path]
+    n = len(wav_paths)
+    head = ("".join(f"[{i}:a]" for i in range(n)) + f"amix=inputs={n}:normalize=0:duration=longest,") if n > 1 else "[0:a]"
+    cmd += ["-filter_complex", head + "alimiter=limit=0.891:level=disabled[a]", "-map", "[a]",
+            "-c:a", "libmp3lame", "-b:a", PACKAGE_MP3_BITRATE, "-ar", str(RATE), "-ac", "2", out_path]
+    return cmd
+
+
+def mp3_command(binary: str, raw_path: str, out_path: str) -> list[str]:
+    """원시 PCM(s16le 48kHz 스테레오, 잇기에 넣은 소리) → MP3 192k · 48kHz · 스테레오."""
+    return [binary, "-y", "-hide_banner", "-loglevel", "error", "-threads", "1",
+            "-f", "s16le", "-ar", str(RATE), "-ac", "2", "-i", raw_path,
+            "-c:a", "libmp3lame", "-b:a", PACKAGE_MP3_BITRATE, "-ar", str(RATE), "-ac", "2", out_path]
+
+
+def export_package(video_path: str, audio_raw: str, zip_path: str, *, name: str, samples: int, seconds: float,
+                   has_audio: bool, dialogue_raw: str = "", dialogue_wav: str = "", bg_wavs: list | None = None) -> dict:
+    """zip_path 에 내려받기 zip 을 쓴다(작업 216-fix1b · 216-fix2). 임시 파일은 zip_path 와 같은 폴더에 두고 끝나면 지운다.
+
+    전체 소리 = audio_raw(없으면 samples 길이 무음). 대사 = dialogue_wav(스템) → dialogue_raw(트랙 섞기 전 A1) → 전체 소리 순.
+    배경음 = bg_wavs(내 소리 트랙 스템들)가 있을 때만. 반환 {"entries": [이름들], "bytes": zip 크기}. ffmpeg 실패 → StitchError.
+    """
+    import shutil  # noqa: PLC0415
+    import zipfile  # noqa: PLC0415
+
+    from .. import stitcher  # noqa: PLC0415
+
+    workdir = os.path.dirname(zip_path) or "."
+    binary = stitcher.ffmpeg_path()
+    silent = os.path.join(workdir, "package-video.mp4")
+    full_mp3 = os.path.join(workdir, "package-audio.mp3")
+    dlg_mp3 = os.path.join(workdir, "package-dialogue.mp3")
+    bg_mp3 = os.path.join(workdir, "package-bg.mp3")
+    raw = audio_raw if audio_raw and os.path.exists(audio_raw) else ""
+    made_raw = ""
+    if not raw:
+        made_raw = raw = os.path.join(workdir, "package-silence.raw")
+        stitcher._fit_pcm(raw, max(1, int(samples)) * 4)  # noqa: SLF001
+    bg_list = [p for p in (bg_wavs or []) if p and os.path.exists(p)]
+    jobs = [(silent_video_command(binary, video_path, silent), silent, "소리 없는 영상"),
+            (mp3_command(binary, raw, full_mp3), full_mp3, "전체 소리 mp3")]
+    if dialogue_wav and os.path.exists(dialogue_wav):
+        jobs.append((mp3_from_wavs_command(binary, [dialogue_wav], dlg_mp3), dlg_mp3, "대사 mp3"))
+    elif dialogue_raw and os.path.exists(dialogue_raw):
+        jobs.append((mp3_command(binary, dialogue_raw, dlg_mp3), dlg_mp3, "대사 mp3"))
+    else:
+        jobs.append((None, dlg_mp3, "대사 mp3"))  # 내 소리 트랙이 없으면 대사 = 전체 소리
+    if bg_list:
+        jobs.append((mp3_from_wavs_command(binary, bg_list, bg_mp3), bg_mp3, "배경음 mp3"))
+    try:
+        for command, out, what in jobs:
+            if command is None:
+                shutil.copyfile(full_mp3, out)
+                continue
+            result = stitcher._edit_run(command)  # noqa: SLF001
+            if result.returncode != 0 or not os.path.exists(out) or not os.path.getsize(out):
+                detail = result.stderr.decode("utf-8", errors="replace")[:300]
+                raise stitcher.StitchError(f"내려받기 묶음({what})을 만들지 못했습니다: {detail}")
+    finally:
+        if made_raw and os.path.exists(made_raw):
+            os.unlink(made_raw)
+    names = package_names(name, bg=bool(bg_list))
+    files = [silent, dlg_mp3] + ([bg_mp3] if bg_list else []) + [full_mp3]
+    with zipfile.ZipFile(zip_path, "w", compression=zipfile.ZIP_STORED) as archive:
+        for path, arc in zip(files, names[:-1]):
+            archive.write(path, arcname=arc)
+        archive.writestr(names[-1], package_readme(name, seconds=seconds, has_audio=has_audio, bg=bool(bg_list)).encode("utf-8"))
+    for path in files:
+        if os.path.exists(path):
+            os.unlink(path)
+    return {"entries": names, "bytes": os.path.getsize(zip_path)}
+
