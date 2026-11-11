@@ -68904,6 +68904,7 @@ def main() -> int:
     if not __import__("check_bg_harmony_223").check_bg_harmony_223(): fail("작업 223: 배경 줄 · 샷 빛 맞춤 · 조화 문장 · 장소 뷰 화풍 검사 실패")
     if not __import__("check_line_download_224").check_line_download_224(): fail("작업 224: ⑥ 대사별 내려받기 검사 실패")
     if not __import__("check_long_json_225").check_long_json_225(): fail("작업 225: 긴 JSON 호출 출력 예산(VNEW_LONG_JSON_MAX_TOKENS) 검사 실패")
+    if not __import__("check_outdoor_location_226").check_outdoor_location_226(): fail("작업 226: 실외 장소(enclosed false) 열린 바깥 지시문 검사 실패")
     check_vnew_voice_ui_203()
     print()
     if warnings:

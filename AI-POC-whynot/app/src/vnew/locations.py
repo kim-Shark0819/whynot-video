@@ -586,15 +586,34 @@ def _place_text(loc: dict) -> str:
     return ". ".join(p.strip().rstrip(".").strip() for p in pieces if p.strip().rstrip("."))
 
 
-def _place_edit_prompt(place_text: str) -> str:
-    """웹툰 뷰 → 실사 사진 편집 문장(live.place_prompt 이식). 그림 낱말을 빼고 장소 묘사는 PLACE_TEXT_MAX 자 안."""
+def _place_edit_prompt(place_text: str, *, outdoor: bool = False) -> str:
+    """웹툰 뷰 → 실사 사진 편집 문장(live.place_prompt 이식). 그림 낱말을 빼고 장소 묘사는 PLACE_TEXT_MAX 자 안.
+    outdoor=True(작업 226)면 PLACE_EDIT_OUTDOOR(열린 바깥 문장). 기본은 그대로."""
     place = " ".join(str(place_text or "the same location").split()).rstrip(".")
     place = _PLACE_DRAW_WORDS_RE.sub("", place)
     place = re.sub(r"(?<![\w-])-\w+", "", place)  # 낱말을 뺀 뒤 남은 "-style" 같은 조각
     place = re.sub(r"\s*,(?:\s*,)+", ",", " ".join(place.split())).strip(" ,")
     place = re.sub(r"\s+([.,;])", r"\1", place)
     place = vpoc_compose._fit_text(place, PLACE_TEXT_MAX) or "the same location"  # noqa: SLF001
-    return PLACE_EDIT.format(place=place)
+    return (PLACE_EDIT_OUTDOOR if outdoor else PLACE_EDIT).format(place=place)
+
+
+def _outdoor_place_text(loc: dict) -> str:
+    """작업 226: _place_text 의 실외판 — 벽 descEn 에서 'no wall:' 같은 없는 구조 머리말을 뺀다."""
+    design = loc.get("design") or {}
+    walls = design.get("walls") if isinstance(design.get("walls"), dict) else {}
+    pieces = [str(loc.get("nameEn") or "")]
+    for side in SIDES:
+        wall = walls.get(side) if isinstance(walls.get(side), dict) else {}
+        pieces.append(re.sub(r"^open[- ]air\s*[;:,.]\s*", "", _strip_no_structure(wall.get("descEn")), flags=re.IGNORECASE))
+    return ". ".join(p.strip().rstrip(".").strip() for p in pieces if p.strip().rstrip("."))
+
+
+def _edit_prompt_for(loc: dict) -> str:
+    """실사 뷰 편집 문장(작업 143). 실내는 226 전 그대로, 실외는 열린 바깥 문장 + 낮이면 밤 낱말 지우기(작업 226)."""
+    if not _is_outdoor(loc):
+        return _place_edit_prompt(_place_text(loc))
+    return _day_guard(_place_edit_prompt(_outdoor_place_text(loc), outdoor=True), loc)
 
 def _timing(pid: str, lid: str, step: str, started: float) -> None:
     """단계 걸린 시간 로그 1줄(작업 125). 사용자 글·키는 쓰지 않는다."""
@@ -607,6 +626,13 @@ _PROGRESS_LOCK = threading.Lock()
 
 
 # ================================================================ 설계(Claude → Astra)
+
+# 작업 226: 감정 클로즈업 뒤 빗금 · 스크린톤을 '밤하늘'로 읽어 낮 장소가 밤이 됐다(prod). 사실 · 설계 system 에 이 1문장.
+_SCREENTONE_RULE = (
+    "Dark hatching, screentone, sparkle or gradient backgrounds behind a character in an emotional close-up "
+    "are mood effects, not the time of day or the place. Take time of day and sky from the wide or establishing "
+    "panels. If any panel shows a bright sky, it is daytime."
+)
 
 _DESIGN_SYSTEM = (
     "You are a set designer. You are given a few webtoon panels that all show the SAME place. "
@@ -626,7 +652,7 @@ _DESIGN_SYSTEM = (
     "hasWindow / hasDoor are booleans. widthM/depthM/heightM are rough room dimensions in metres. "
     "enclosed is true for a closed room. floorEn and ceilingEn describe the floor and ceiling surfaces "
     "with concrete materials and colour. lightEn is one English sentence about where the main light comes "
-    "from (e.g. 'main light comes from the north-wall windows, soft daylight'). propsEn lists free-standing "
+    "from (e.g. 'main light comes from the north-wall windows, soft daylight'). " + _SCREENTONE_RULE + " propsEn lists free-standing "
     "props as objects {labelEn, wall, sizeM} where wall is one of north/east/south/west/center. "
     "Ignore people and speech bubbles — describe only the room itself. "
     "Do not add stairs, mezzanines, walls or ceilings that the references do not show; distinguish "
@@ -1036,7 +1062,7 @@ _FACTS_SYSTEM = (
     "Also give wallColorEn and wallMaterialEn for every wall. Give floorEn (colour, material and pattern), "
     "ceilingEn, and a windows list [{wall, position, sizeEn, frameEn, curtainEn, outsideEn}] and a doors "
     "list [{wall, position, sizeEn, materialEn, colorEn}]. lightEn is one English sentence about the main "
-    "light (direction, colour temperature, strength). eraEn and countryEn describe the time period and "
+    "light (direction, colour temperature, strength). " + _SCREENTONE_RULE + " eraEn and countryEn describe the time period and "
     "country the room looks like. "
     "If a wall is never shown in any panel, INFER it from the walls you did see — same wall material and "
     "colour, same era, same country — and set that wall's estimated=true. Never leave a wall with no "
@@ -1352,6 +1378,125 @@ ASTRA_PROMPT_INSTRUCTION = (
 _GUARD_CLAUSES = ("CENTER BACK WALL", "LEFT WALL", "RIGHT WALL", "continuous", "No people")
 
 
+# ---------------------------------------------------------------- 작업 226: 실외(design.enclosed False)
+#
+# 글만 받는 그림 모델은 "room · wall · ceiling" 을 글자 그대로 그린다(prod: 실사 뒤 보기 = 밤 콘크리트 벽, "no wall: open
+# air" 벽 = 콘크리트 벽). 실외 장소는 같은 구조(면별 · 보증 문구 · No people · 이음새)를 열린 바깥 낱말로 쓴다. 실내 글은 그대로.
+
+OUTDOOR_OPEN_AIR = (
+    "Open-air outdoor place: no walls, no ceiling, no room, no box; the sides are open surroundings that "
+    "continue into the distance; the sky is visible."
+)
+# 실사 뷰 편집 문장(PLACE_EDIT 의 실외판). 웹툰 뷰 옆의 '경치를 그린 평평한 판'을 실제 깊이 있는 둘레로.
+PLACE_EDIT_OUTDOOR = (
+    "Turn this image into a real photograph of the same open-air outdoor place: {place}. " + OUTDOOR_OPEN_AIR + " Any "
+    "flat painted scenery at the sides becomes real surroundings with depth; every object stands in open air under "
+    "the sky. Remove all people completely; show the empty place. Keep the same layout, camera angle, light and time "
+    "of day. Real photograph taken with a camera, photorealistic, natural materials and textures, no illustration, no "
+    "anime, no drawing, no line art, no people. " + REAL_NO_BRAND_SENTENCE
+)
+_OUTDOOR_LAYOUT_MARK = "One-point perspective fixed-camera view of an open-air place"
+# 화면 면 → 실외 면 이름(CENTER BACK WALL · LEFT WALL · RIGHT WALL · FLOOR · CEILING/SKY 자리).
+OUTDOOR_FACE_LABELS = {
+    "back": "MAIN BACKGROUND (what is behind the characters)",
+    "left": "LEFT SIDE surroundings",
+    "right": "RIGHT SIDE surroundings",
+    "floor": "GROUND",
+    "ceiling": "SKY",
+}
+_OUTDOOR_CONTINUOUS_CLAUSE = (
+    "The left side, main background and right side are one continuous open-air place: the ground, horizon "
+    "line, sky and light continue across without a break."
+)
+_OUTDOOR_OPPOSITE_CLAUSE = (
+    "Same open-air place as the back view seen from the opposite side, with the camera turned around; its "
+    "left side and right side surroundings are the same surroundings as in the back view seen from their other end."
+)
+ASTRA_PROMPT_INSTRUCTION_OUTDOOR = (
+    "Write a prompt for a non-intelligent text-to-image model that draws a fixed-camera view of an open-air "
+    "outdoor place. " + OUTDOOR_OPEN_AIR + " The model gets NO reference images, only your text. Be explicit "
+    "and literal: describe each screen area separately — MAIN BACKGROUND (what is behind the characters), LEFT "
+    "SIDE surroundings, RIGHT SIDE surroundings, GROUND, SKY — and for each state every object, its exact count, "
+    "color, material, size and position, standing in open air. State where the main light comes from, its "
+    "direction and which side the shadows fall; take the time of day only from the given light. Keep the "
+    "one-point perspective layout given in the brief. Never contradict the fixed place description. No people, "
+    "no text. Do not use vague words (nice, typical, some)."
+)
+# Astra 가 실내 면 이름을 썼으면 실외 이름으로 바꾼다(라벨만).
+_OUTDOOR_RELABEL = (
+    (re.compile(r"\bCENTER BACK WALL\b(?:\s*\(main background\))?", re.IGNORECASE), "MAIN BACKGROUND"),
+    (re.compile(r"\bLEFT WALL\b", re.IGNORECASE), "LEFT SIDE"),
+    (re.compile(r"\bRIGHT WALL\b", re.IGNORECASE), "RIGHT SIDE"),
+    (re.compile(r"\bCEILING\s*/\s*SKY\b", re.IGNORECASE), "SKY"),
+    (re.compile(r"\bbox-set cutaway\b", re.IGNORECASE), "fixed-camera view"),
+)
+# "no wall: open air; …" 같은 사람이 고친 벽 글에서 '없는 구조' 머리말을 뺀다(그림 모델은 "wall" 을 그린다).
+_NO_STRUCTURE_RE = re.compile(r"\bno\s+(?:walls?|ceilings?|roofs?)\b\s*[:;,.\-–—]*\s*", re.IGNORECASE)
+# 낮 판단(lightEn). 밤 낱말이 하나라도 있으면 낮으로 보지 않는다.
+_DAY_LIGHT_RE = re.compile(r"\b(?:day\w*|sun(?:ny|light|lit|shine)?|morning|noon|midday|afternoon|(?:bright|blue|clear) sky)\b",
+                           re.IGNORECASE)
+_NIGHT_LIGHT_RE = re.compile(r"\b(?:night\w*|evenings?|dusk|twilight|sunset|sundown|moon\w*|star(?:lit|light|ry)|after dark)\b",
+                             re.IGNORECASE)
+# 낮 실외 글에서 밤 · 저녁 · 어두운 하늘 낱말을 낮 낱말로 바꾼다(순서대로).
+_NIGHT_SCRUB = tuple((re.compile(p, re.IGNORECASE), r) for p, r in (
+    (r"\b(?:(?:dark|black|deep|starry|cross-hatched)[ ,-]+)*(?:night|night-time|nighttime|evening|dusk|twilight|"
+     r"dark(?:ened)?|starry|starlit|moonlit|black)[ -](?:sky|skies)\b", "bright daytime sky"),
+    (r"\bnight[- ]?time\b", "daytime"),
+    (r"\b(?:at|by) night\b", "in daytime"),
+    (r"\bafter dark\b", "in daytime"),
+    (r"\bnights?\b", "daytime"),
+    (r"\bevenings?\b", "daytime"),
+    (r"\b(?:dusk|twilight|sunset|sundown)\b", "daytime"),
+    (r"\bmoonlight\b", "daylight"),
+    (r"\bmoonlit\b", "sunlit"),
+    (r"\bmoons?\b", "sun"),
+    (r"\bstar(?:lit|light|ry)\b", "clear"),
+    (r"\bdarkness\b", "daylight"),
+    (r"\bdark(?:er|est|ened)\b", "deeper"),
+    (r"\bdark\b", "deep"),
+))
+
+
+def _is_outdoor(loc: dict) -> bool:
+    """실외 장소 = design.enclosed 가 거짓. 설계가 없거나 enclosed 키가 없으면 실내(226 전과 같다)."""
+    design = loc.get("design")
+    if not isinstance(design, dict) or "enclosed" not in design:
+        return False
+    return not _as_bool(design.get("enclosed"))
+
+
+def _light_text(loc: dict) -> str:
+    """지시문의 'Light:' 글(사실 lightEn 먼저, 없으면 설계 lightEn)."""
+    return str((loc.get("facts") or {}).get("lightEn") or (loc.get("design") or {}).get("lightEn") or "").strip()
+
+
+def _outdoor_daytime(loc: dict) -> bool:
+    """실외이고 lightEn 이 낮(낮 낱말 있음 · 밤 낱말 없음)이면 True. 빛 글이 없으면 False(밤을 덧붙이지도 않는다)."""
+    if not _is_outdoor(loc):
+        return False
+    light = _light_text(loc)
+    return bool(_DAY_LIGHT_RE.search(light)) and not _NIGHT_LIGHT_RE.search(light)
+
+
+def _day_guard(text: str, loc: dict) -> str:
+    """낮 실외 글에서 밤 · 저녁 · 어두운 낱말을 지운다(빗금 스크린톤을 '밤하늘'로 읽은 사실 대비). 그 밖에는 그대로."""
+    if not _outdoor_daytime(loc):
+        return text
+    for pattern, repl in _NIGHT_SCRUB:
+        text = pattern.sub(repl, text)
+    return text
+
+
+def _strip_no_structure(text: str) -> str:
+    return _NO_STRUCTURE_RE.sub("", str(text or "")).strip(" ;,.")
+
+
+def _outdoor_relabel(text: str) -> str:
+    for pattern, repl in _OUTDOOR_RELABEL:
+        text = pattern.sub(repl, text)
+    return text
+
+
 def _style_clause(variant: str, loc: dict) -> str:
     """그림체 지시. real=실사, webtoon=프로젝트 원작 그림체(캐릭터 analysis.styleEn 있으면 그것).
     작업 223: 웹툰은 화풍 줄 + 인물과 같은 선 굵기 · 칠 · 팔레트 문장(VIEW_STYLE_223 — 새 그림만, 저장된 그림 · 지시문은 그대로)."""
@@ -1359,7 +1504,8 @@ def _style_clause(variant: str, loc: dict) -> str:
         return "Photoreal, natural light."
     style = str(loc.get("styleEn") or "").strip()
     if VIEW_STYLE_223:
-        return (style or WEBTOON_STYLE_DEFAULT).rstrip(" .") + ". " + VIEW_MATCH_CHARACTERS.format(palette=view_palette(loc))
+        match = VIEW_MATCH_CHARACTERS_OUTDOOR if _is_outdoor(loc) else VIEW_MATCH_CHARACTERS  # 작업 226: 실외는 벽 낱말 없이
+        return (style or WEBTOON_STYLE_DEFAULT).rstrip(" .") + ". " + match.format(palette=view_palette(loc))
     if style:
         return style + " Match this drawing style exactly."
     # 작업 125: 참고 패널을 그림 모델에 보내지 않으므로 '참고 패널 그림체' 대신 글로 적는다.
@@ -1371,6 +1517,9 @@ VIEW_STYLE_223 = True
 WEBTOON_STYLE_DEFAULT = "Korean webtoon drawing style: clean line art, flat cel shading, soft colors"
 VIEW_MATCH_CHARACTERS = ("Match this drawing style exactly: walls, floor, props and textures use the same line weight, cel "
                          "shading and palette as the webtoon characters ({palette}).")
+# 작업 226: 실외 장소판(벽 · 바닥 대신 둘레 · 땅).
+VIEW_MATCH_CHARACTERS_OUTDOOR = ("Match this drawing style exactly: surroundings, ground, props and textures use the same "
+                                 "line weight, cel shading and palette as the webtoon characters ({palette}).")
 _VIEW_PALETTE_RE = re.compile(r"[^.;,]*\b(?:palette|pastel|colou?rs?|tones?|hues?|saturat\w*|monochrome)\b[^.;,]*", re.IGNORECASE)
 
 
@@ -1386,7 +1535,7 @@ def view_palette(loc: dict) -> str:
         if color and color.lower() not in (c.lower() for c in colors):
             colors.append(color)
     if colors:
-        pieces.append(" and ".join(colors[:2]) + " walls")
+        pieces.append(" and ".join(colors[:2]) + (" surroundings" if _is_outdoor(loc) else " walls"))  # 226: 실외는 벽 낱말 없이
     return "; ".join(pieces) or "soft webtoon colors"
 
 
@@ -1411,6 +1560,15 @@ def _layout_clause(loc: dict, view: str) -> str:
         height_pct = round((max(ys) - min(ys)) / size[1] * 100)
     except Exception:  # noqa: BLE001 — 치수가 이상하면 보통 비율
         width_pct, height_pct = 45, 50
+    if _is_outdoor(loc):
+        # 작업 226: 같은 상자 비율(뒤 면 = 메인 배경 영역)을 열린 바깥 낱말로.
+        return (
+            f"{_OUTDOOR_LAYOUT_MARK}, seen straight on from a fixed camera height at eye level, looking level. "
+            f"The main background is an area centred in the image, about {width_pct}% of the image width and "
+            f"{height_pct}% of the image height; the left side and right side surroundings, the ground and the sky "
+            "fill the areas between it and the image edges and recede into the distance. "
+            "Straight vertical lines, level horizon, no tilt, no fisheye."
+        )
     return (
         f"{_LAYOUT_MARK} of a rectangular room with its front wall removed, seen straight on from outside "
         "the open front at eye height. The back wall is a flat rectangle centred in the image, about "
@@ -1428,6 +1586,8 @@ def _room_anchor(loc: dict) -> str:
     """
     design = loc.get("design") or {}
     facts = loc.get("facts") or {}
+    if _is_outdoor(loc):
+        return _outdoor_anchor(loc)
     name_en = str(loc.get("nameEn") or "").strip() or "the room"
     width = _as_float(design.get("widthM"), 4.0)
     depth = _as_float(design.get("depthM"), 4.0)
@@ -1471,6 +1631,45 @@ def _anchor_for(loc: dict) -> str:
     return str(loc.get("anchorEn") or "").strip() or _room_anchor(loc)
 
 
+def _outdoor_anchor(loc: dict) -> str:
+    """작업 226: 실외 장소의 공통 문장(_room_anchor 의 실외판). 방 · 벽 · 천장 낱말 없이 둘레 · 땅 · 하늘 · 빛 · 시대."""
+    design = loc.get("design") or {}
+    facts = loc.get("facts") or {}
+    name_en = str(loc.get("nameEn") or "").strip() or "the place"
+    width = _as_float(design.get("widthM"), 4.0)
+    depth = _as_float(design.get("depthM"), 4.0)
+    parts = [
+        f"Same open-air place in every image: {name_en}, an outdoor area about {width:g} m wide and {depth:g} m "
+        "deep, seen from a fixed camera height at eye level, with open sky overhead."
+    ]
+    surroundings: list[str] = []
+    for side in SIDES:
+        wall = (facts.get("walls") or {}).get(side) or {}
+        surface = " ".join(
+            p for p in (_strip_no_structure(wall.get("wallColorEn")), _strip_no_structure(wall.get("wallMaterialEn"))) if p
+        )
+        if surface and surface not in surroundings and surface.lower().replace("-", " ") != "open air":
+            surroundings.append(surface)
+    if surroundings:
+        parts.append("Surroundings: " + "; ".join(surroundings) + ".")
+    ground = str(facts.get("floorEn") or design.get("floorEn") or "").strip()
+    sky = _strip_no_structure(facts.get("ceilingEn") or design.get("ceilingEn"))
+    light = _light_text(loc).rstrip(" .")
+    if ground:
+        parts.append(f"Ground: {ground}.")
+    parts.append(f"Sky: {sky or 'open sky'}.")
+    windows = len(facts.get("windows") or [])
+    doors = len(facts.get("doors") or [])
+    if windows or doors:
+        parts.append(f"{windows} window(s) and {doors} door(s), always in the same places.")
+    if light:
+        parts.append(f"Light: {light}.")
+    era = " ".join(p for p in (str(facts.get("eraEn") or "").strip(), str(facts.get("countryEn") or "").strip()) if p)
+    if era:
+        parts.append(f"Era and country: {era}.")
+    return _day_guard(" ".join(parts), loc)[:ANCHOR_MAX_CHARS].rstrip()
+
+
 # ---------------------------------------------------------------- 사실 → 사람이 읽는 설명
 
 
@@ -1512,9 +1711,65 @@ def _wall_facts_text(side: str, loc: dict) -> str:
     return " ".join(lines).strip()
 
 
-def _facts_context(side: str, loc: dict) -> str:
-    """사실 전체 맥락(빛·시대·나라·바닥·천장) + 그 벽 사실. Astra·결정적 프롬프트·비교에 공통으로 쓴다."""
+def _outdoor_side_text(side: str, loc: dict) -> str:
+    """작업 226: 실외 장소의 면별 글(_wall_facts_text 의 실외판). 벽 표면이 아니라 그쪽으로 열린 경치 + 바깥에 선 물건.
+
+    사실 물건이 있으면 그것(수 · 색 · 위치), 없으면 설계 featuresEn 을 쓴다. 검증용 사실 글은 _wall_facts_text 그대로.
+    """
+    design_wall = ((loc.get("design") or {}).get("walls") or {}).get(side) or {}
+    wall = ((loc.get("facts") or {}).get("walls") or {}).get(side) or {}
+    features = _strip_no_structure(design_wall.get("featuresEn") if isinstance(design_wall, dict) else "")
+    if any(str(obj.get("kind") or "").strip() for obj in wall.get("objects") or []):
+        features = ""  # 사실 물건(수 · 색 · 위치)이 있으면 그것만 — 같은 물건을 두 번 쓰면 지시문 상한에서 뒤가 잘린다.
+    lines = [f"Open view toward the {side}" + (f": {features}." if features else ".")]
+    surface = " ".join(p for p in (_strip_no_structure(wall.get("wallColorEn")), _strip_no_structure(wall.get("wallMaterialEn"))) if p)
+    if surface and surface.lower().replace("-", " ") != "open air":  # "open air" 만 남으면 OUTDOOR_OPEN_AIR 와 겹친다
+        lines.append(f"Surroundings: {surface}.")
+    if wall.get("estimated"):
+        lines.append("(This side is not directly visible; it is inferred from the visible sides.)")
+    standing: list[str] = []
+    for obj in wall.get("objects") or []:
+        kind = str(obj.get("kind") or "").strip()
+        if not kind:
+            continue
+        count = _as_int(obj.get("count"), 1)
+        color = str(obj.get("colorEn") or "").strip()
+        material = str(obj.get("materialEn") or "").strip()
+        size = str(obj.get("sizeEn") or "").strip()
+        position = str(obj.get("position") or "center mid").strip()
+        piece = f"{count} {color} {material} {kind}".replace("  ", " ").strip()
+        detail = [p for p in (size, f"at the {position}") if p]
+        standing.append(f"{piece} ({', '.join(detail)})")
+    if standing:
+        lines.append("Standing in open air: " + "; ".join(standing) + ".")
     facts = loc.get("facts") or {}
+    for opening, label in ((facts.get("windows") or [], "window"), (facts.get("doors") or [], "door")):
+        for item in opening:
+            if str(item.get("wall") or "").strip().lower() != side:
+                continue
+            bits = [str(item.get(k) or "").strip() for k in ("sizeEn", "frameEn", "curtainEn", "outsideEn", "materialEn", "colorEn")]
+            bits = [b for b in bits if b]
+            pos = str(item.get("position") or "").strip()
+            lines.append(f"A {label} at the {pos}: {', '.join(bits)}." if bits else f"A {label} at the {pos}.")
+    return _day_guard(" ".join(lines).strip(), loc)
+
+
+def _facts_context(side: str, loc: dict, *, outdoor: bool = False) -> str:
+    """사실 전체 맥락(빛·시대·나라·바닥·천장) + 그 벽 사실. Astra·결정적 프롬프트·비교에 공통으로 쓴다.
+
+    outdoor=True(작업 226, 실외 지시문 늘리기 전용): 면별 글은 _outdoor_side_text, 천장 대신 Sky. 비교(검증)는 기본값 그대로.
+    """
+    facts = loc.get("facts") or {}
+    if outdoor:
+        sky = _strip_no_structure(facts.get("ceilingEn") or (loc.get("design") or {}).get("ceilingEn"))
+        bits = [_outdoor_side_text(side, loc)]
+        era_country = " ".join(p for p in (str(facts.get("eraEn") or "").strip(), str(facts.get("countryEn") or "").strip()) if p)
+        if era_country:
+            bits.append(f"Era/country: {era_country}.")
+        if _light_text(loc):
+            bits.append(f"Light: {_light_text(loc).rstrip(' .')}.")
+        bits.append(f"Sky: {sky or 'open sky'}.")
+        return _day_guard(" ".join(b for b in bits if b).strip(), loc)
     parts = [_wall_facts_text(side, loc)]
     era = str(facts.get("eraEn") or "").strip()
     country = str(facts.get("countryEn") or "").strip()
@@ -1563,6 +1818,7 @@ def _view_face_facts(loc: dict, view: str) -> dict[str, str]:
     각 값은 그 면에 그릴 벽의 사실(물건·재질·창문·문)을 사람이 읽는 영어 문단.
     """
     out: dict[str, str] = {}
+    outdoor = _is_outdoor(loc)
     for face in ("back", "left", "right"):
         # 그 화면 면에 해당하는 설계 벽(north/east/south/west)을 찾는다.
         side = None
@@ -1570,10 +1826,17 @@ def _view_face_facts(loc: dict, view: str) -> dict[str, str]:
             if _wall_to_face(view, s) == face:
                 side = s
                 break
+        if outdoor:  # 작업 226: 실외 = 그쪽으로 열린 경치.
+            out[face] = _outdoor_side_text(side, loc) if side else ""
+            continue
         out[face] = _wall_facts_text(side, loc) if side else ""
     facts = loc.get("facts") or {}
     out["floor"] = str(facts.get("floorEn") or "").strip()
     out["ceiling"] = str(facts.get("ceilingEn") or "").strip()
+    if outdoor:
+        out["floor"] = _day_guard(out["floor"], loc)
+        out["ceiling"] = _day_guard(
+            _strip_no_structure(facts.get("ceilingEn") or (loc.get("design") or {}).get("ceilingEn")) or "open sky", loc)
     return out
 
 
@@ -1607,6 +1870,8 @@ def _author_prompt(owner: str, pid: str, loc: dict, *, variant: str, view: str) 
         "Call emit_image_prompt once with promptEn."
     )
     system_text = ASTRA_PROMPT_INSTRUCTION
+    if _is_outdoor(loc):  # 작업 226: 실외는 같은 구조를 열린 바깥 낱말로.
+        user_text, system_text = _outdoor_author_brief(loc, variant=variant, view=view), ASTRA_PROMPT_INSTRUCTION_OUTDOOR
     for model in (PROMPT_AUTHOR_MODEL, PROMPT_AUTHOR_FALLBACK_MODEL):
         try:
             payload, usage = _author(system_text, user_text, model=model)
@@ -1620,6 +1885,77 @@ def _author_prompt(owner: str, pid: str, loc: dict, *, variant: str, view: str) 
         return _finalize_prompt(text, variant, view, loc)
     # 둘 다 실패 — 결정적 템플릿(사실을 그대로 편 것)으로 떨어진다.
     return _finalize_prompt(_view_prompt(variant, view, loc), variant, view, loc)
+
+
+def _outdoor_author_brief(loc: dict, *, variant: str, view: str) -> str:
+    """작업 226: 실외 장소의 Astra 글(_author_prompt user_text 의 실외판). 같은 순서 · 같은 면 · 열린 바깥 낱말."""
+    name_en = str(loc.get("nameEn") or "").strip() or "the place"
+    faces = _view_face_facts(loc, view)
+    labels = OUTDOOR_FACE_LABELS
+    seam = "continuous open-air place" if view == "back" else "open-air place seen from the opposite side"
+    text = (
+        f"Place: {name_en}. Write a prompt for a fixed-camera {view}-view of this open-air outdoor place. The image "
+        "model gets NO reference images, only your text.\n"
+        f"{OUTDOOR_OPEN_AIR}\n"
+        f"Fixed place description (it is placed verbatim before your prompt; never contradict it): {_anchor_for(loc)}\n"
+        f"Camera and layout: {_layout_clause(loc, view)}\n"
+        f"Drawing style: {_style_clause(variant, loc)}\n"
+        f"{labels['back']}: {faces['back']}\n"
+        f"{labels['left']}: {faces['left']}\n"
+        f"{labels['right']}: {faces['right']}\n"
+        f"{labels['floor']}: {faces['floor']}\n"
+        f"{labels['ceiling']}: {faces['ceiling']}\n"
+        f"Light and time of day (use only this): {_light_text(loc)}\n"
+        f"This is one {seam}; the ground, horizon, sky and light continue without a break.\n"
+        f"Write ONE image prompt of {PROMPT_MIN_CHARS} to {PROMPT_MAX_CHARS} characters. "
+        "Call emit_image_prompt once with promptEn."
+    )
+    return _day_guard(text, loc)
+
+
+def _finalize_outdoor(text: str, variant: str, view: str, loc: dict) -> str:
+    """작업 226: _finalize_prompt 의 실외판. 같은 보증(구도 · 그림체 · 면별 · 이음새 · block-in · No people · 글자 금지 ·
+    추가 요청 · 길이 · 실사 상표)을 열린 바깥 낱말로. 공통 문장 바로 뒤에 OUTDOOR_OPEN_AIR. 낮이면 밤 낱말을 지운다."""
+    text = _outdoor_relabel((text or "").strip())
+    anchor = _anchor_for(loc)
+    if anchor and text.startswith(anchor):
+        text = text[len(anchor):].strip()
+    text = " ".join(text.replace(OUTDOOR_OPEN_AIR, " ").split())
+    if _OUTDOOR_LAYOUT_MARK not in text:
+        text += " " + _layout_clause(loc, view)
+    style = _style_clause(variant, loc)
+    front = OUTDOOR_OPEN_AIR
+    if VIEW_STYLE_223 and variant != "real":
+        text = " ".join(text.replace(style, " ").split())
+        front += " " + style
+    elif style.split(".")[0] not in text:
+        text += " " + style
+    labels = OUTDOOR_FACE_LABELS
+    if any(labels[f].split(" (")[0] not in text for f in ("back", "left", "right")):
+        faces = _view_face_facts(loc, view)
+        text += " " + " ".join(f"{labels[f]}: {faces[f]}" for f in ("back", "left", "right", "floor", "ceiling"))
+    if view == "front":
+        if "opposite side" not in text:
+            text += " " + _OUTDOOR_OPPOSITE_CLAUSE
+    elif "continuous" not in text:
+        text += " " + _OUTDOOR_CONTINUOUS_CLAUSE
+    if "block-in" not in text:
+        text += " " + _BLOCKIN_CLAUSE
+    if "No people" not in text:
+        text += " " + _NO_PEOPLE
+    text += " " + _NO_TEXT
+    # 낮이면 밤 낱말을 지운다. 사용자 추가 요청(extraEn)은 사람이 쓴 그대로 둔다.
+    text = _with_extra(_day_guard(front + " " + text, loc), loc).strip()
+    if anchor:
+        text = anchor + " " + text
+    if len(text) < PROMPT_MIN_CHARS:
+        filler = _facts_context("north", loc, outdoor=True)
+        while len(text) < PROMPT_MIN_CHARS and filler:
+            text += " " + filler
+    brand = " " + REAL_NO_BRAND_SENTENCE if variant == "real" else ""
+    if len(text) + len(brand) > PROMPT_HARD_CAP:
+        text = text[:PROMPT_HARD_CAP - len(brand)].rstrip()
+    return text + brand
 
 
 def _photo_prompt_clause(loc: dict, variant: str, view: str) -> str:
@@ -1660,7 +1996,10 @@ def _finalize_prompt(text: str, variant: str, view: str, loc: dict) -> str:
     - 뷰 A 는 "continuous", 뷰 B 는 "opposite side" 문장을 보장한다.
     - 참고 이미지가 없으므로 사진 '이미지 번호' 지시는 넣지 않는다(사진은 사실 정리에 글로 들어가 있다).
     - PROMPT_MIN_CHARS 미만이면 사실 설명을 덧대 늘린다. PROMPT_HARD_CAP 초과면 뒤를 자른다(앞 공통 문장 보존).
+    - 작업 226: 실외(_is_outdoor)는 _finalize_outdoor(같은 보증, 열린 바깥 낱말).
     """
+    if _is_outdoor(loc):
+        return _finalize_outdoor(text, variant, view, loc)
     text = (text or "").strip()
     anchor = _anchor_for(loc)
     if anchor and text.startswith(anchor):
@@ -1713,6 +2052,16 @@ def _finalize_prompt(text: str, variant: str, view: str, loc: dict) -> str:
 
 def _view_prompt(variant: str, view: str, loc: dict) -> str:
     """결정적(Astra 없이) 뷰 프롬프트. 사실(facts)을 면별로 펴서 쓴다. _finalize_prompt 가 보증 문구를 채운다."""
+    if _is_outdoor(loc):  # 작업 226: 실외 = 열린 바깥 낱말, 같은 구조.
+        name_en = str(loc.get("nameEn") or "").strip() or "the place"
+        faces = _view_face_facts(loc, view)
+        labels = OUTDOOR_FACE_LABELS
+        seam = _OUTDOOR_CONTINUOUS_CLAUSE if view == "back" else _OUTDOOR_OPPOSITE_CLAUSE
+        return (
+            f"{_layout_clause(loc, view)} Fixed-camera {view}-view of {name_en}. {OUTDOOR_OPEN_AIR} "
+            + " ".join(f"{labels[f]}: {faces[f]}" for f in ("back", "left", "right", "floor", "ceiling"))
+            + f" {seam} {_BLOCKIN_CLAUSE} {_NO_PEOPLE}"
+        )
     name_en = str(loc.get("nameEn") or "").strip() or "the room"
     faces = _view_face_facts(loc, view)
     seam = _CONTINUOUS_CLAUSE if view == "back" else _OPPOSITE_CLAUSE
@@ -2182,7 +2531,7 @@ def _generate_views(
 
     def _draw(variant: str, view: str, base: bytes | None = None) -> tuple[bytes, str]:
         if base is not None:
-            image = _seedream_edit(_place_edit_prompt(_place_text(loc)), base, size=VIEW_SIZE)
+            image = _seedream_edit(_edit_prompt_for(loc), base, size=VIEW_SIZE)
             model = LOCATION_EDIT_MODEL
         else:
             prompt = _prompt_for(loc, variant, view)
@@ -2458,7 +2807,7 @@ def _redraw_view(
     작업 143: base(같은 쪽 웹툰 뷰)가 있으면 편집 문장(_place_edit_prompt) + 수정 지시로 Seedream edit.
     실패하면(None) 원래 그림을 그대로 둔다.
     """
-    base_prompt = _place_edit_prompt(_place_text(loc)) if base is not None else _prompt_for(loc, variant, view)
+    base_prompt = _edit_prompt_for(loc) if base is not None else _prompt_for(loc, variant, view)
     fix_text = " Corrections: " + " ".join(fixes) if fixes else ""
     prompt = (base_prompt + fix_text)[:PROMPT_HARD_CAP]
     last_error: Exception | None = None
