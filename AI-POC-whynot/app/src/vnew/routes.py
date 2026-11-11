@@ -1279,6 +1279,32 @@ def create_blueprint(deps: VnewDependencies) -> Blueprint:
     voices_routes.register(bp, deps, _sound_project, _fail)
     from . import audio_separate; audio_separate.register(bp, deps, _sound_project, _fail)  # noqa: E702,PLC0415 — 작업 217: 섞인 소리 분리
 
+    # 작업 224: 대사별 내려받기(이미 있는 소리를 자르기만 — 유료 호출 0). 권한은 ⑥ 사운드 라우트와 같다(남의 프로젝트는 404).
+    #   GET lines(줄 목록 · 구간, 읽기만) · POST lines/download {variant, n?, lineIds?}(한 줄 mp3 · 여러 줄 zip presigned 주소)
+    @bp.get("/p/<pid>/sound/lines")
+    @deps.require_auth
+    def sound_lines_list(pid: str):
+        try:
+            from . import sound  # noqa: PLC0415
+
+            sound.require_enabled("vnew.sound.lines")
+            owner = _sound_project(pid)
+            return jsonify(sound.lines_view(owner, pid, request.args))
+        except Exception as exc:  # noqa: BLE001
+            return _fail(exc)
+
+    @bp.post("/p/<pid>/sound/lines/download")
+    @deps.require_auth
+    def sound_lines_download(pid: str):
+        try:
+            from . import sound  # noqa: PLC0415
+
+            sound.require_enabled("vnew.sound.lines.download")
+            owner = _sound_project(pid)
+            return jsonify({"ok": True, **sound.download_lines(owner, pid, _edit_body("vnew.sound.lines.download"))})
+        except Exception as exc:  # noqa: BLE001
+            return _fail(exc)
+
     # ------------------------------------------------------------ 작업 212: ⑥ 대사 고치기 · 그 대사 구간 영상 다시 만들기
     # line_redo.py 가 맡는다(요청 때 import — 블루프린트를 만들 때 무거운 모듈을 읽지 않는다). 권한은 ⑥ 사운드 라우트와 같다(_sound_project
     # = 쓰기 권한, 남의 프로젝트는 404). VNEW_SOUND·VNEW_LINE_REDO 가 꺼져 있으면 프로젝트를 보기 전에 404.

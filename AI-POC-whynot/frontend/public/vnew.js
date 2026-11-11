@@ -9759,6 +9759,7 @@
     var source = view.source || {};
     clear(ctx.root);
     ctx.lrd = null; // 작업 212: 줄마다 대사 고치기 기록(아래 soundTable 이 다시 채운다)
+    ctx.sldRows = []; // 작업 224: 줄마다 내려받기 단추(아래 soundTable 이 다시 채운다)
     ctx.root.appendChild(el("h2", "vnew-sec-title", "대사 소리"));
     ctx.root.appendChild(el("p", "vnew-hint vnew-sound-lead", SOUND_HINT));
 
@@ -9823,6 +9824,11 @@
     box.appendChild(el("h3", "vnew-sound-ptitle", "반영한 소리"));
     if (!versions.length) {
       box.appendChild(el("p", "vnew-hint", "아직 반영한 소리가 없습니다. 아래에서 고친 뒤 [소리에 반영]을 누르세요."));
+      if (typeof sldZipButton === "function") { // 작업 224: 반영본이 없으면 원본 소리를 대사별로
+        var srcTools = el("div", "vnew-sound-vtools");
+        sldZipButton(ctx, srcTools);
+        box.appendChild(srcTools);
+      }
       return;
     }
     var chosen = versions.filter(function (v) {
@@ -9853,9 +9859,129 @@
     var vocBadge = vocVersionBadge(chosen); // 작업 203
     if (vocBadge) tools.appendChild(vocBadge);
     if (chosen.videoUrl) tools.appendChild(downloadLink(chosen.videoUrl, "반영본 내려받기"));
+    if (typeof sldZipButton === "function") sldZipButton(ctx, tools); // 작업 224: 대사별 내려받기(zip)
     box.appendChild(tools);
     if (chosen.outdated) box.appendChild(el("p", "vnew-hint vnew-lrd-outdated", chosen.outdatedText || LRD_OUTDATED)); // 작업 212
   }
+
+  /* ==== 작업 224 시작 ==== */
+  /* ⑥ 대사별 내려받기: 고른 반영본(없으면 원본)의 소리를 줄 구간으로 잘라 한 줄 mp3 · 모든 줄 zip. 서버가 presigned 주소를 주면 숨긴
+     <a download> 로 받는다. 소리를 반영하는 중(job running)에는 막고, 한 번에 요청 하나만 보낸다(ctx.sldBusy). */
+  var SLD_ZIP_LABEL = "대사별 내려받기 (zip)";
+  var SLD_LINE_LABEL = "이 줄 내려받기";
+  var SLD_WAIT_LABEL = "만드는 중…";
+  var SLD_RUNNING_HINT = "소리를 반영하는 중에는 내려받을 수 없습니다. 끝난 뒤 눌러 주세요.";
+  var SLD_ERRORS = {
+    NoLines: "내려받을 대사가 없습니다.",
+    LinesNoSource: "소리 원본을 찾지 못했습니다. 영상을 먼저 만들어 주세요.",
+    LinesBadLine: "고른 대사를 찾지 못했습니다. 화면을 다시 불러와 주세요.",
+    NoSoundVersion: "그 반영본을 찾지 못했습니다. 화면을 다시 불러와 주세요.",
+    TooManyLines: "대사는 한 번에 200줄까지 내려받을 수 있습니다.",
+    SourceTooLong: "원본이 15분보다 길어 대사별로 내려받을 수 없습니다.",
+    LinesFailed: "대사 소리를 자르지 못했습니다. 잠시 뒤 다시 시도해 주세요.",
+    BadAudio: "이 영상에는 소리가 없어 대사를 내려받을 수 없습니다."
+  };
+
+  function sldErrText(err) {
+    var kind = err && err.type;
+    return (kind && SLD_ERRORS[kind]) || errMessage(err);
+  }
+
+  /* 지금 고른 반영본 번호(반영한 소리 목록에서 고른 것, 기본 최신). 반영본이 없으면 0(원본). */
+  function sldChosenN(ctx) {
+    var versions = (ctx.view || {}).versions || [];
+    if (!versions.length) return 0;
+    var chosen = versions.filter(function (v) {
+      return v.n === ctx.pickN;
+    })[0] || versions[versions.length - 1];
+    return chosen.n;
+  }
+
+  function sldRunning(ctx) {
+    return (((ctx.view || {}).job || {}).status || "") === "running";
+  }
+
+  function sldZipButton(ctx, tools) {
+    var button = el("button", "outline-button vnew-sld-zip", SLD_ZIP_LABEL);
+    button.type = "button";
+    button.addEventListener("click", function () {
+      sldDownload(ctx, "zip", null);
+    });
+    var hint = el("span", "vnew-hint vnew-sld-hint", "");
+    ctx.sldZip = button;
+    ctx.sldHint = hint;
+    tools.appendChild(button);
+    tools.appendChild(hint);
+    sldPaint(ctx);
+  }
+
+  function sldRowButton(ctx, line, cell) {
+    if (ctx.inEdit) return;
+    var number = ctx.lines.indexOf(line) + 1;
+    var button = el("button", "outline-button vnew-sld-line", "↓");
+    button.type = "button";
+    button.title = SLD_LINE_LABEL;
+    button.setAttribute("aria-label", SLD_LINE_LABEL + ": " + number + "번 줄 " + (line.speaker || "(이름 없음)"));
+    button.addEventListener("click", function () {
+      sldDownload(ctx, "line:" + line.id, [line.id]);
+    });
+    if (!ctx.sldRows) ctx.sldRows = [];
+    ctx.sldRows.push({ key: "line:" + line.id, button: button });
+    cell.appendChild(button);
+    sldPaint(ctx);
+  }
+
+  /* 단추 상태: 반영 중이거나 요청 하나가 도는 중이면 모두 막는다. 도는 단추는 "만드는 중…". */
+  function sldPaint(ctx) {
+    var running = sldRunning(ctx);
+    var busy = ctx.sldBusy || "";
+    if (ctx.sldZip) {
+      ctx.sldZip.disabled = running || !!busy;
+      ctx.sldZip.textContent = busy === "zip" ? SLD_WAIT_LABEL : SLD_ZIP_LABEL;
+      ctx.sldZip.title = running ? SLD_RUNNING_HINT : "";
+    }
+    if (ctx.sldHint) {
+      ctx.sldHint.textContent = running ? SLD_RUNNING_HINT : "";
+      ctx.sldHint.hidden = !running;
+    }
+    (ctx.sldRows || []).forEach(function (rec) {
+      rec.button.disabled = running || !!busy;
+      rec.button.textContent = busy === rec.key ? SLD_WAIT_LABEL : "↓";
+    });
+  }
+
+  function sldSave(url, filename) {
+    var a = downloadLink(url, "");
+    a.setAttribute("download", filename || "");
+    a.style.display = "none";
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+  }
+
+  function sldDownload(ctx, key, lineIds) {
+    if (ctx.sldBusy || sldRunning(ctx)) return;
+    ctx.sldBusy = key;
+    sldPaint(ctx);
+    var body = { variant: ctx.variant, n: sldChosenN(ctx) };
+    if (lineIds) body.lineIds = lineIds;
+    function done() {
+      ctx.sldBusy = "";
+      sldPaint(ctx);
+    }
+    api(soundPath() + "/lines/download", { method: "POST", body: JSON.stringify(body) })
+      .then(function (res) {
+        done();
+        if (!soundAlive(ctx)) return;
+        if (res && res.url) sldSave(res.url, res.filename);
+        else soundJobText(ctx, "내려받을 주소를 받지 못했습니다. 잠시 뒤 다시 시도해 주세요.", true);
+      })
+      .catch(function (err) {
+        done();
+        if (soundAlive(ctx)) soundJobText(ctx, "대사를 내려받지 못했습니다: " + sldErrText(err), true);
+      });
+  }
+  /* ==== 작업 224 끝 ==== */
 
   function soundTable(ctx) {
     var wrap = el("div", "vnew-sound-table");
@@ -9934,6 +10060,7 @@
       soundListen(ctx, line);
     });
     listenCell.appendChild(listen);
+    if (typeof sldRowButton === "function") sldRowButton(ctx, line, listenCell); // 작업 224: 이 줄 내려받기
     vocRowTools(ctx, line, row, listenCell); // 작업 203
     lrdRowTools(ctx, line, row, lineCell, listenCell); // 작업 212: 대사 고치기
     row.appendChild(listenCell);
@@ -9972,6 +10099,7 @@
     else if (job.status === "failed") soundJobText(ctx, "반영하지 못했습니다: " + (job.error || "알 수 없는 오류"), true);
     else soundJobText(ctx, "", false);
     vocRenderJob(ctx); // 작업 203: 목소리 맞춤 진행·결과
+    if (typeof sldPaint === "function") sldPaint(ctx); // 작업 224: 반영 중이면 대사별 내려받기를 막는다
   }
 
   /* [소리에 반영]: 구간 검사 → 바뀐 줄만 PUT → POST apply → 반영이 끝날 때까지 폴링. */

@@ -68901,6 +68901,7 @@ def main() -> int:
     if not __import__("check_take_retry_221").check_take_retry_221(): fail("작업 221: 테이크별 실사 다시 뒤 진행 상태 · 회차 전체 다시 만들기 막기 검사 실패")
     if not __import__("check_anime_prompt_222").check_anime_prompt_222(): fail("작업 222: 애니 자막 금지 · 눈동자 줄 검사 실패")
     if not __import__("check_bg_harmony_223").check_bg_harmony_223(): fail("작업 223: 배경 줄 · 샷 빛 맞춤 · 조화 문장 · 장소 뷰 화풍 검사 실패")
+    if not __import__("check_line_download_224").check_line_download_224(): fail("작업 224: ⑥ 대사별 내려받기 검사 실패")
     check_vnew_voice_ui_203()
     print()
     if warnings:
